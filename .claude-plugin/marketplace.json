@@ -1,0 +1,18 @@
+{
+  "name": "mao-worktools",
+  "owner": {
+    "name": "Mao"
+  },
+  "metadata": {
+    "description": "Mao's work-related Claude Code plugins"
+  },
+  "plugins": [
+    {
+      "name": "example-plugin",
+      "source": "./plugins/example-plugin",
+      "description": "Example plugin to verify marketplace wiring",
+      "category": "utilities",
+      "keywords": ["example", "template"]
+    }
+  ]
+}
