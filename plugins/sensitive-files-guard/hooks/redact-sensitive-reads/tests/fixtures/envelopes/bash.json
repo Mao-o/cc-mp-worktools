@@ -1,0 +1,12 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/tmp/sfg-smoke",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cat .env",
+    "description": "Show environment file"
+  },
+  "permission_mode": "default"
+}

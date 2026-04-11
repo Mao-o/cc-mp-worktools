@@ -1,0 +1,48 @@
+# ローカル設定
+*.local.json
+*.local.yaml
+*.local.yml
+*.local.toml
+
+# 機密情報
+*.secret*
+
+# 環境変数
+.env
+.env.*
+.envrc
+*.envrc
+
+# 鍵・証明書
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# クレデンシャル
+credentials*.json
+service-account*.json
+.npmrc
+.pypirc
+.netrc
+
+# 除外: テンプレートファイル
+!*.example
+!*.template
+!*.sample
+!*.dist
+
+# 除外: 複合拡張子のテンプレート (credentials.example.json など)
+!*.example.*
+!*.template.*
+!*.sample.*
+!*.dist.*
+
+# 除外: 公開鍵
+!*.pub

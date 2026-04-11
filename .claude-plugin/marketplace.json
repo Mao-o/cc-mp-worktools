@@ -1,0 +1,46 @@
+{
+  "name": "mao-worktools",
+  "owner": {
+    "name": "Mao"
+  },
+  "metadata": {
+    "description": "Mao's work-related Claude Code plugins"
+  },
+  "plugins": [
+    {
+      "name": "example-plugin",
+      "source": "./plugins/example-plugin",
+      "description": "Example plugin to verify marketplace wiring",
+      "category": "utilities",
+      "keywords": ["example", "template"]
+    },
+    {
+      "name": "doc-researcher",
+      "source": "./plugins/doc-researcher",
+      "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
+      "category": "research",
+      "keywords": ["documentation", "research", "claude-docs", "ai-sdk", "firebase", "llms-txt"]
+    },
+    {
+      "name": "sensitive-files-guard",
+      "source": "./plugins/sensitive-files-guard",
+      "description": "機密ファイル (.env, *.secret, *.local.*) を守る 2 段構えの hook。Read 時の実値 redaction と Stop 時の .gitignore 未登録検出を同梱",
+      "category": "security",
+      "keywords": ["security", "hooks", "pretooluse", "stop", "dotenv", "redaction", "gitignore"]
+    },
+    {
+      "name": "session-facts",
+      "source": "./plugins/session-facts",
+      "description": "セッション開始時にリポジトリを分析したファクトバンドル (スタック/スクリプト/env キー/ドメイン型) を Markdown で注入する hook。SessionStart と SubagentStart(Explore/Plan) で発火",
+      "category": "context",
+      "keywords": ["session-start", "subagent-start", "context-injection", "repo-facts", "markdown", "hooks"]
+    },
+    {
+      "name": "external-ai-assist",
+      "source": "./plugins/external-ai-assist",
+      "description": "Codex / Cursor などの外部 AI CLI を並走・レビューに使う hook 集。Explore 時に Cursor を並走させ、ExitPlanMode 時に Codex でプランをレビュー",
+      "category": "productivity",
+      "keywords": ["hooks", "pretooluse", "posttooluse", "explore", "exitplanmode", "codex", "cursor", "external-ai", "code-review"]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "session-facts",
+  "version": "0.1.0",
+  "description": "セッション開始時にリポジトリを分析し、スタック/スクリプト/env キー/ドメイン型のファクトバンドルを Markdown で注入する hook。SessionStart と SubagentStart(Explore/Plan) で発火",
+  "author": { "name": "Mao" },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": ["session-start", "subagent-start", "context-injection", "repo-facts", "markdown", "hooks", "detectors", "collectors"]
+}

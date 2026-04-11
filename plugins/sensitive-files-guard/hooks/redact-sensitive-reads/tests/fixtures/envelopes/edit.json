@@ -1,0 +1,13 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000003",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/tmp/sfg-smoke",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/tmp/sfg-smoke/.env",
+    "old_string": "FOO=bar",
+    "new_string": "FOO=baz"
+  },
+  "permission_mode": "default"
+}

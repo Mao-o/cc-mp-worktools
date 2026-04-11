@@ -1,0 +1,12 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000004",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/tmp/sfg-smoke",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/tmp/sfg-smoke/.env",
+    "content": "FOO=bar\n"
+  },
+  "permission_mode": "default"
+}
