@@ -13,6 +13,13 @@
       "description": "Example plugin to verify marketplace wiring",
       "category": "utilities",
       "keywords": ["example", "template"]
+    },
+    {
+      "name": "doc-researcher",
+      "source": "./plugins/doc-researcher",
+      "description": "Claude/AI SDK 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
+      "category": "research",
+      "keywords": ["documentation", "research", "claude-docs", "ai-sdk", "llms-txt"]
     }
   ]
 }

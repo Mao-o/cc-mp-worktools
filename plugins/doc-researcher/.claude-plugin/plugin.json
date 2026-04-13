@@ -1,0 +1,10 @@
+{
+  "name": "doc-researcher",
+  "version": "0.1.0",
+  "description": "Progressive document loaders for Claude and AI SDK official docs via llms.txt",
+  "author": { "name": "Mao" },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": ["documentation", "research", "claude-docs", "ai-sdk", "llms-txt"]
+}

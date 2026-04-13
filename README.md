@@ -1,33 +1,38 @@
 # cc-mp-worktools
 
-Mao's public Claude Code plugins (work tools).
+Work-related Claude Code plugins.
 
 ## Install
 
 ```bash
 /plugin marketplace add Mao-o/cc-mp-worktools
-/plugin install example-plugin@mao-worktools
+/plugin install <plugin-name>@mao-worktools
 ```
 
-ローカル開発中の場合:
+Local development:
 
 ```bash
-/plugin marketplace add ~/dev/personal/cc-marketplaces/worktools
+/plugin marketplace add /path/to/this/repo
 ```
 
 ## Plugins
 
 | Plugin | Description |
 |---|---|
+| `doc-researcher` | Progressive document loaders for Claude and AI SDK official docs via llms.txt |
 | `example-plugin` | Reference / template plugin |
 
 ## Development
 
 ```bash
-./scripts/dev.sh example-plugin
+# Load a single plugin for testing (no marketplace registration needed)
+./scripts/dev.sh <plugin-name>
+
+# Validate all plugins
+claude plugin validate .
 ```
 
-詳細は [CLAUDE.md](CLAUDE.md) を参照。
+See [CLAUDE.md](CLAUDE.md) for detailed development guidelines.
 
 ## License
 
