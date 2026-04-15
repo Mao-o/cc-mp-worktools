@@ -21,10 +21,11 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | Script | `scripts/parse-claude-docs.py` |
 | Script | `scripts/parse-ai-sdk.py` |
 | Script | `scripts/parse-firebase.py` |
+| Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
 
 ## 前提条件
 
-- `python3` (3.9+)
+- `python3` (3.10+) — `parse-*.py` は PEP 604 記法 (`list[X]` / `X | None`) を使用。`scripts/_common.py` のみ `from __future__ import annotations` で 3.8+ 互換
 - ネットワーク到達性（初回取得時に外部 llms.txt をダウンロード）
 - `/tmp` 書込み権限（キャッシュ保存先）
 
@@ -66,3 +67,8 @@ python3 plugins/doc-researcher/scripts/parse-firebase.py fetch-index --limit 10
 根本的に異なるため独立したスクリプトとして管理している。特に `parse-firebase.py` は
 Firebase 側に `llms-full.txt` が存在しないため、index + per-page on-demand fetch 方式を
 採用している。バグ修正や機能改善を行う際は 3 本すべてを確認すること。
+
+共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /
+HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skeleton) は
+`scripts/_common.py` に集約済み。新しい doc source を追加する際は、source 固有の
+`split_documents` と表示層のみを書き、共通部分は `_common` から import すること。

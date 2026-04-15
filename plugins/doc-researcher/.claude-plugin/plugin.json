@@ -1,6 +1,6 @@
 {
   "name": "doc-researcher",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Progressive document loaders for Claude, AI SDK, and Firebase official docs via llms.txt",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",

@@ -15,7 +15,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.0.0"
+  version: "3.0.1"
 ---
 
 # AI SDK ドキュメント調査

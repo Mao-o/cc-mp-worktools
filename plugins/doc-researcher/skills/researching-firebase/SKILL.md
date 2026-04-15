@@ -18,7 +18,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -130,6 +130,7 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - 7000 ページを盲目的に list しない (default `--limit 100` を尊重し、必要に応じ pagination する)
 - 日本語で回答する
 - ページ取得に失敗した場合のみ WebFetch fallback を検討する
+- 調査は簡潔に完了させること
 
 ## 出力フォーマット
 

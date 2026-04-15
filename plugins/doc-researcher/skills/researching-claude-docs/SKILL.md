@@ -7,13 +7,15 @@ description: |
   Platform: Claude API、Agent SDK、Tool Use、Prompt Engineering 等の開発者向け機能。
   Triggers: "Claude Code docs", "Claude API docs", "公式ドキュメント", "researching-claude-docs",
   "Claude Code 仕様", "code.claude.com", "platform.claude.com", "Claude Platform docs"
+context: fork
+model: sonnet
 allowed-tools:
   - Read
   - Bash
   - WebFetch
 metadata:
   author: mao
-  version: "2.0.0"
+  version: "2.0.1"
 ---
 
 # Claude ドキュメント Progressive Loader
@@ -95,7 +97,31 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <file> <doc
 
 ## 制約
 
-- **全文読み込み禁止**: 必ずインデックス → セクション → コンテンツの順で絞り込むこと
+- **全文読み込み禁止**: 必ず fetch-index → sections → content の順で絞り込むこと
 - **コードフェンス保護**: スクリプトがコードブロックの途中分割を自動防止する
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Note>`, `<Frame>`, `<Expandable>`, `<Card>` 等の JSX 記法はテキストとして読む
+
+## 出力フォーマット
+
+### 調査結果
+[主な発見事項]
+
+### コード例 *(該当する場合)*
+[ドキュメントからの直接引用のみ]
+
+### 情報源
+[使用したドキュメントのタイトルとセクション]
+
+### 注意事項 *(該当する場合)*
+[制約、バージョン要件、既知の問題]
+
+## ルール
+
+- ドキュメントにない機能やオプションを捏造しない
+- コード例はドキュメントから直接引用する
+- 全文読み込みは禁止 — 必ず fetch-index → sections → content の順で絞り込む
+- `--source` フラグを明示する (code / platform のどちらを調査しているか明確にする)
+- 日本語で回答する
+- ページ取得に失敗した場合のみ WebFetch fallback を検討する
+- 調査は簡潔に完了させること
