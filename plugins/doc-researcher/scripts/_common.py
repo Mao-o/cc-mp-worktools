@@ -113,7 +113,8 @@ def _is_table_line(line: str) -> bool:
     return bool(stripped) and stripped.startswith("|") and stripped.endswith("|")
 
 
-def extract_content(body_lines, heading_path=None, *, protect_tables: bool = True) -> str:
+def extract_content(body_lines, heading_path=None, *,
+                    protect_tables: bool = True, min_level: int = 2) -> str:
     """Extract content from *body_lines*.
 
     If *heading_path* is None, return the entire body. Otherwise, find the
@@ -121,15 +122,17 @@ def extract_content(body_lines, heading_path=None, *, protect_tables: bool = Tru
     any unclosed code fence. When *protect_tables* is True, also extend to
     include a Markdown table that straddles the section boundary.
 
-    Uses ``extract_sections(min_level=1)`` internally so a heading_path
-    naming an H1 in AI SDK documents resolves correctly. Claude / Firebase
-    bodies contain no H1 in practice, so the stricter default of 2 used by
-    their ``cmd_sections`` output is unaffected.
+    *min_level* must match what the caller's ``cmd_sections`` prints — otherwise
+    the AI agent sees one heading hierarchy but searches another, which lets
+    a stray H1/H2 of the same title silently match the wrong section. AI SDK
+    passes ``min_level=1`` (its body_lines include the H1); Claude/Firebase
+    keep the default of 2 because Firebase hands the full page (H1 included)
+    to this function and must not collapse an H1 onto an identically-named H2.
     """
     if heading_path is None:
         return "".join(body_lines)
 
-    sections = extract_sections(body_lines, min_level=1)
+    sections = extract_sections(body_lines, min_level=min_level)
     target = None
     for s in sections:
         if s["heading_path"] == heading_path or s["title"] == heading_path:

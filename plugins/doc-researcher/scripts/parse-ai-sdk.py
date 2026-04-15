@@ -330,7 +330,8 @@ def cmd_content(args):
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
 
-    content = extract_content(doc["body_lines"], args.heading_path, protect_tables=False)
+    content = extract_content(doc["body_lines"], args.heading_path,
+                              protect_tables=False, min_level=1)
 
     print_metadata_header(
         fm["title"] or "(untitled)",

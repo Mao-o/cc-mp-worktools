@@ -27,6 +27,15 @@ All notable changes to this plugin will be documented here.
   invocations cannot be shadowed by an unrelated `_common.py` sitting next
   to the symlink. Verified with an adversarial test (Codex Review P2 feedback
   on PR #3)
+- Thread `min_level` through `_common.extract_content` (default 2) and have
+  `parse-ai-sdk.py` pass `min_level=1` explicitly. The previous hardcoded
+  `min_level=1` meant `cmd_sections` (H2+) and `cmd_content`'s internal
+  heading lookup (H1+) disagreed in `parse-firebase.py`, which hands the raw
+  page (H1 included) to `extract_content` — a Firebase page with an H1 and
+  an H2 sharing the same title could have `content` match the H1 and return
+  nearly the whole document instead of the intended H2 section. Claude docs
+  and Firebase `content` output is now byte-identical to 0.2.0 again (Codex
+  Review P2 feedback on PR #3 commit `e449a21`)
 
 ## [0.2.0] - 2026-04-15
 
