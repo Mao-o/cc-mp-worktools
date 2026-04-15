@@ -13,36 +13,26 @@ import argparse
 import os
 import re
 import sys
-import urllib.request
-import urllib.error
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _common import (
+    FenceTracker,
+    add_cache_dir_arg,
+    add_doc_index_arg,
+    add_heading_path_arg,
+    die,
+    die_index_out_of_range,
+    extract_content,
+    extract_sections,
+    fetch_url,
+    load_lines,
+    next_hint,
+    print_metadata_header,
+)
 
 LLMS_TXT_URL = "https://ai-sdk.dev/llms.txt"
 DEFAULT_CACHE_PATH = "/tmp/ai-sdk-llms.txt"
-
-
-# ---------------------------------------------------------------------------
-# Core parser: code-fence-aware line scanner
-# ---------------------------------------------------------------------------
-
-class FenceTracker:
-    """Tracks whether the current line is inside a fenced code block."""
-
-    def __init__(self):
-        self.in_fence = False
-        self._fence_len = 0
-
-    def update(self, line: str) -> bool:
-        """Update state for *line* and return True if inside a fence AFTER update."""
-        stripped = line.lstrip()
-        if stripped.startswith("```"):
-            backtick_count = len(stripped) - len(stripped.lstrip("`"))
-            if not self.in_fence:
-                self.in_fence = True
-                self._fence_len = backtick_count
-            elif backtick_count >= self._fence_len:
-                self.in_fence = False
-                self._fence_len = 0
-        return self.in_fence
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +82,6 @@ def split_documents(lines: list[str]) -> list[dict]:
             while i < n:
                 fence.update(lines[i])
                 if not fence.in_fence and _is_frontmatter_delimiter(lines[i]):
-                    # Peek: if this starts a new frontmatter block, stop
-                    # We detect a new frontmatter by checking if a closing --- follows
                     if _looks_like_frontmatter_start(lines, i):
                         break
                 i += 1
@@ -154,7 +142,6 @@ def parse_frontmatter(fm_lines: list[str]) -> dict:
         current_value_lines = []
 
     for line in fm_lines:
-        # Check for key: value
         m = re.match(r"^(title|description|tags)\s*:\s*(.*)", line)
         if m:
             _flush()
@@ -167,64 +154,6 @@ def parse_frontmatter(fm_lines: list[str]) -> dict:
             current_value_lines.append(line.strip())
     _flush()
     return result
-
-
-# ---------------------------------------------------------------------------
-# Section (heading) extraction
-# ---------------------------------------------------------------------------
-
-def extract_sections(body_lines: list[str]) -> list[dict]:
-    """Extract Markdown headings from *body_lines*.
-
-    Returns a list of dicts:
-        {
-            "level": int,
-            "title": str,
-            "heading_path": str,       # slash-separated ancestor path
-            "line_start": int,         # relative to body_lines
-            "line_end": int,
-            "has_code_blocks": bool,
-        }
-    """
-    fence = FenceTracker()
-    headings: list[dict] = []
-
-    for idx, line in enumerate(body_lines):
-        was_in_fence = fence.in_fence
-        fence.update(line)
-        if was_in_fence or fence.in_fence:
-            continue
-
-        m = re.match(r"^(#{1,6})\s+(.+)", line)
-        if m:
-            level = len(m.group(1))
-            title = m.group(2).strip()
-            headings.append({
-                "level": level,
-                "title": title,
-                "line_start": idx,
-                "line_end": -1,  # filled later
-                "has_code_blocks": False,
-            })
-
-    # Fill line_end and has_code_blocks
-    for i, h in enumerate(headings):
-        next_start = headings[i + 1]["line_start"] if i + 1 < len(headings) else len(body_lines)
-        h["line_end"] = next_start
-        # Check for code blocks in this section
-        section_text = "\n".join(body_lines[h["line_start"]:next_start])
-        h["has_code_blocks"] = "```" in section_text
-
-    # Build heading_path (handle level skips)
-    path_stack: list[tuple[int, str]] = []  # (level, title)
-    for h in headings:
-        # Pop stack until we find a parent with lower level
-        while path_stack and path_stack[-1][0] >= h["level"]:
-            path_stack.pop()
-        path_stack.append((h["level"], h["title"]))
-        h["heading_path"] = "/".join(t for _, t in path_stack)
-
-    return headings
 
 
 # ---------------------------------------------------------------------------
@@ -293,98 +222,17 @@ def score_document(fm: dict, heading_titles: list[str], keywords: list[str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Content extraction with code-fence protection
-# ---------------------------------------------------------------------------
-
-def extract_content(body_lines: list[str], heading_path: str | None = None) -> str:
-    """Extract content from body_lines.
-
-    If *heading_path* is None, return the entire body.
-    Otherwise, find the section matching *heading_path* and return its content,
-    extending to include any unclosed code fence.
-    """
-    if heading_path is None:
-        return "".join(body_lines)
-
-    sections = extract_sections(body_lines)
-    target = None
-    for s in sections:
-        if s["heading_path"] == heading_path or s["title"] == heading_path:
-            target = s
-            break
-
-    if target is None:
-        # Try case-insensitive partial match
-        heading_lower = heading_path.lower()
-        for s in sections:
-            if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower():
-                target = s
-                break
-
-    if target is None:
-        available = "\n".join(f"  - {s['heading_path']}" for s in sections)
-        print(f"Error: heading '{heading_path}' not found.\n\nAvailable sections:\n{available}", file=sys.stderr)
-        sys.exit(1)
-
-    # Find the end: next heading at same or higher level
-    target_level = target["level"]
-    end_line = len(body_lines)
-    found_target = False
-    for s in sections:
-        if s is target:
-            found_target = True
-            continue
-        if found_target and s["level"] <= target_level:
-            end_line = s["line_start"]
-            break
-
-    content_lines = body_lines[target["line_start"]:end_line]
-
-    # Code-fence protection: if we end inside a fence, extend to closing
-    fence = FenceTracker()
-    for line in content_lines:
-        fence.update(line)
-    if fence.in_fence:
-        # Extend until fence closes
-        i = end_line
-        while i < len(body_lines):
-            content_lines.append(body_lines[i])
-            fence.update(body_lines[i])
-            i += 1
-            if not fence.in_fence:
-                break
-
-    return "".join(content_lines)
-
-
-# ---------------------------------------------------------------------------
-# Fetch helper
+# Fetch helper (AI SDK uses a 60s timeout for the compact llms.txt index)
 # ---------------------------------------------------------------------------
 
 def fetch_llms_txt(cache_path: str) -> str:
     """Return path to cached llms.txt, fetching if necessary."""
-    if os.path.exists(cache_path):
-        return cache_path
-
-    try:
-        req = urllib.request.Request(
-            LLMS_TXT_URL,
-            headers={"User-Agent": "claude-code-ai-sdk-researcher/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = resp.read()
-        with open(cache_path, "wb") as f:
-            f.write(data)
-        return cache_path
-    except urllib.error.URLError as e:
-        print(f"Error: Failed to fetch {LLMS_TXT_URL}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def load_lines(path: str) -> list[str]:
-    """Read file and return lines (preserving newlines)."""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.readlines()
+    return fetch_url(
+        LLMS_TXT_URL,
+        cache_path,
+        user_agent="claude-code-ai-sdk-researcher/1.0",
+        timeout=60,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +287,7 @@ def cmd_fetch_index(args):
     print(f"({len(docs)} documents total)")
     print()
     print(f"Tip: use 'search' to find specific documents by keyword")
-    print(f"Next: parse-llms-txt.py sections {cache_path} <doc_index>")
+    next_hint("sections", cache_path, "<doc_index>")
 
 
 def cmd_sections(args):
@@ -449,13 +297,12 @@ def cmd_sections(args):
 
     idx = args.doc_index
     if idx < 0 or idx >= len(docs):
-        print(f"Error: doc_index {idx} out of range (0-{len(docs) - 1})", file=sys.stderr)
-        sys.exit(1)
+        die_index_out_of_range(idx, len(docs))
 
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
     title = fm["title"] or "(untitled)"
-    sections = extract_sections(doc["body_lines"])
+    sections = extract_sections(doc["body_lines"], min_level=1)
 
     print(f'Sections in [{idx}] "{title}"')
     print("=" * 60)
@@ -468,7 +315,7 @@ def cmd_sections(args):
     print()
     print(f"({len(sections)} sections)")
     print()
-    print(f"Next: parse-llms-txt.py content {args.file} {idx} \"<heading_path>\"")
+    next_hint("content", args.file, str(idx), '"<heading_path>"')
 
 
 def cmd_content(args):
@@ -478,21 +325,18 @@ def cmd_content(args):
 
     idx = args.doc_index
     if idx < 0 or idx >= len(docs):
-        print(f"Error: doc_index {idx} out of range (0-{len(docs) - 1})", file=sys.stderr)
-        sys.exit(1)
+        die_index_out_of_range(idx, len(docs))
 
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
 
-    content = extract_content(doc["body_lines"], args.heading_path)
+    content = extract_content(doc["body_lines"], args.heading_path, protect_tables=False)
 
-    # Print metadata header
-    print(f"# doc_title: {fm['title'] or '(untitled)'}")
-    if fm["tags"]:
-        print(f"# doc_tags: {', '.join(fm['tags'])}")
-    if args.heading_path:
-        print(f"# heading_path: {args.heading_path}")
-    print("---")
+    print_metadata_header(
+        fm["title"] or "(untitled)",
+        tags=fm["tags"] or None,
+        heading_path=args.heading_path,
+    )
     print(content, end="")
 
 
@@ -508,8 +352,7 @@ def cmd_search(args):
     keywords = args.query.split()
 
     if not keywords:
-        print("Error: query must not be empty", file=sys.stderr)
-        sys.exit(1)
+        die("query must not be empty")
 
     # Score all documents
     scored: list[tuple[int, int, dict]] = []  # (score, index, fm)
@@ -554,7 +397,7 @@ def cmd_search(args):
 
     print(f"({len(scored)} results, {len(docs)} documents searched)")
     print()
-    print(f"Next: parse-llms-txt.py sections {file_path} <doc_index>")
+    next_hint("sections", file_path, "<doc_index>")
 
 
 # ---------------------------------------------------------------------------
@@ -569,10 +412,7 @@ def main():
 
     # fetch-index
     p_index = sub.add_parser("fetch-index", help="Fetch and print document index")
-    p_index.add_argument(
-        "--cache-dir", default="/tmp",
-        help="Directory to cache llms.txt (default: /tmp)",
-    )
+    add_cache_dir_arg(p_index, help="Directory to cache llms.txt (default: /tmp)")
     p_index.add_argument(
         "--compact", action="store_true",
         help="Print titles only in compact format",
@@ -592,15 +432,14 @@ def main():
     # sections
     p_sections = sub.add_parser("sections", help="List sections in a document")
     p_sections.add_argument("file", help="Path to llms.txt file")
-    p_sections.add_argument("doc_index", type=int, help="Document index (from fetch-index)")
+    add_doc_index_arg(p_sections)
     p_sections.set_defaults(func=cmd_sections)
 
     # content
     p_content = sub.add_parser("content", help="Print document/section content")
     p_content.add_argument("file", help="Path to llms.txt file")
-    p_content.add_argument("doc_index", type=int, help="Document index")
-    p_content.add_argument("heading_path", nargs="?", default=None,
-                           help="Heading path (omit for full document)")
+    add_doc_index_arg(p_content, help="Document index")
+    add_heading_path_arg(p_content)
     p_content.set_defaults(func=cmd_content)
 
     args = parser.parse_args()
