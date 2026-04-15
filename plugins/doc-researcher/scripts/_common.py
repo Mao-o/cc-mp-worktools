@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Shared helpers for parse-ai-sdk.py / parse-claude-docs.py / parse-firebase.py.
 
-Imported as a sibling module from each ``parse-*.py``. The callers prepend
-the script directory to ``sys.path`` so ``from _common import ...`` resolves
-locally even when the parse script is invoked via a symlink or other
-non-standard entrypoint.
+Imported as a sibling module from each ``parse-*.py``. Callers prepend the
+real script directory (``os.path.dirname(os.path.realpath(__file__))``) to
+``sys.path`` so ``from _common import ...`` always resolves to this file
+even when the parse script is invoked via a symlink. Using ``realpath``
+(not ``abspath``) is load-bearing — otherwise a ``_common.py`` sitting next
+to the symlink would shadow the real one.
 """
 
 from __future__ import annotations

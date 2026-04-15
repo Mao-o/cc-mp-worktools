@@ -22,6 +22,11 @@ All notable changes to this plugin will be documented here.
   syntax; only `_common.py` is 3.8+-compatible via `from __future__ import annotations`);
   add `scripts/_common.py` row to Components table and a paragraph on the shared
   helper layer to the maintenance notes
+- Use `os.path.realpath(__file__)` (not `abspath`) when prepending the script
+  directory to `sys.path` in the three `parse-*.py` scripts, so symlinked
+  invocations cannot be shadowed by an unrelated `_common.py` sitting next
+  to the symlink. Verified with an adversarial test (Codex Review P2 feedback
+  on PR #3)
 
 ## [0.2.0] - 2026-04-15
 
