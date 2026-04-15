@@ -17,9 +17,9 @@
     {
       "name": "doc-researcher",
       "source": "./plugins/doc-researcher",
-      "description": "Claude/AI SDK 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
+      "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
       "category": "research",
-      "keywords": ["documentation", "research", "claude-docs", "ai-sdk", "llms-txt"]
+      "keywords": ["documentation", "research", "claude-docs", "ai-sdk", "firebase", "llms-txt"]
     }
   ]
 }

@@ -19,7 +19,7 @@ Local development:
 
 | Plugin | Description |
 |---|---|
-| `doc-researcher` | Progressive document loaders for Claude and AI SDK official docs via llms.txt |
+| `doc-researcher` | Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader) |
 | `example-plugin` | Reference / template plugin |
 
 ## Development
