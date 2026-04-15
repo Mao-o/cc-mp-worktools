@@ -6,6 +6,8 @@ All notable changes to this plugin will be documented here.
 
 - Add `researching-firebase` skill (Firebase docs progressive loader)
 - Add `parse-firebase.py` script (per-page on-demand fetch; no llms-full.txt available)
+- Use collision-resistant cache filenames (readable path + sha1 hash suffix) so
+  Firebase URLs differing only by `/` vs `_` no longer share a cache file
 - Update plugin description and keywords to include Firebase
 - Update marketplace.json entry and root README
 

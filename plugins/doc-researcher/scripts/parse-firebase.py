@@ -209,19 +209,21 @@ _URL_PREFIX = "https://firebase.google.com/"
 def _url_to_cache_filename(url: str) -> str:
     """Convert a Firebase ``.md.txt`` URL to a cache filename.
 
-    Strips the firebase.google.com host and replaces ``/`` with ``_`` so the
-    original URL structure stays legible in /tmp. Falls back to a sha1 hash
-    for unexpected URL patterns or extremely long paths. Note: the index page
+    Strips the firebase.google.com host, replaces ``/`` with ``_`` for
+    legibility, and appends a short sha1 hash suffix to guarantee uniqueness.
+    Without the hash, distinct URLs that differ only by ``/`` vs ``_``
+    (e.g. ``.../auth/user.md.txt`` vs ``.../auth_user.md.txt``) would collapse
+    to the same filename and silently share a cache file. Note: the index page
     URL is ``firebase.google.com/docs.md.txt`` (a sibling of ``/docs/...``),
     not ``/docs/index.md.txt``, so the prefix must be the host root.
     """
+    h = hashlib.sha1(url.encode()).hexdigest()[:16]
     if url.startswith(_URL_PREFIX):
         path = url[len(_URL_PREFIX):]
         if path:
-            safe = path.replace("/", "_")
-            if len(safe) <= 200:
-                return safe
-    h = hashlib.sha1(url.encode()).hexdigest()[:16]
+            base = path[:-len(".md.txt")] if path.endswith(".md.txt") else path
+            safe = base.replace("/", "_")
+            return f"{safe[:180]}-{h}.md.txt"
     return f"{h}.md.txt"
 
 
