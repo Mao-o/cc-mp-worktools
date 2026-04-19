@@ -8,13 +8,6 @@
   },
   "plugins": [
     {
-      "name": "example-plugin",
-      "source": "./plugins/example-plugin",
-      "description": "Example plugin to verify marketplace wiring",
-      "category": "utilities",
-      "keywords": ["example", "template"]
-    },
-    {
       "name": "doc-researcher",
       "source": "./plugins/doc-researcher",
       "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",

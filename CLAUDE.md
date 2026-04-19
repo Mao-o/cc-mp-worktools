@@ -31,13 +31,13 @@
 
 ```bash
 # 個別 plugin をテスト (marketplace 追加不要)
-./scripts/dev.sh example-plugin
+claude --plugin-dir ./plugins/<plugin-name>
 
 # この marketplace を一括検証
 claude plugin validate .
 
 # リリース手順
-# 1. marketplace.json 該当 plugin の version を bump
+# 1. plugin.json の version を bump
 # 2. CHANGELOG.md 更新
 # 3. git commit / tag / push
 ```

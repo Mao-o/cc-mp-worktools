@@ -20,13 +20,12 @@ Local development:
 | Plugin | Description |
 |---|---|
 | `doc-researcher` | Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader) |
-| `example-plugin` | Reference / template plugin |
 
 ## Development
 
 ```bash
 # Load a single plugin for testing (no marketplace registration needed)
-./scripts/dev.sh <plugin-name>
+claude --plugin-dir ./plugins/<plugin-name>
 
 # Validate all plugins
 claude plugin validate .
