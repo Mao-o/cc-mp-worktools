@@ -33,7 +33,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 
 リポジトリルートから:
 ```bash
-./scripts/dev.sh doc-researcher
+claude --plugin-dir ./plugins/doc-researcher
 ```
 
 スクリプト単体テスト:
