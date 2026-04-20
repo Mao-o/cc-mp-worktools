@@ -88,6 +88,7 @@ bypass を塞ぐ。非機密 operand なら未知コマンドでも allow を維
 | `cp .env /tmp/x`, `mv .env .env.old` | **deny** | 機密 path を operand に取るコピー/移動 (0.3.1) |
 | `curl file://.env`, `git show HEAD:.env`, `git cat-file -p :.env` | **deny** | URI / VCS pathspec (0.3.1) |
 | `grep --file=.env foo README.md`, `gpg --keyring=.env` | **deny** | `--opt=path` 形式の operand (0.3.1) |
+| `grep -f.env foo README.md`, `grep -I./.env` | **deny** | `-X<value>` 短形連結の operand (0.3.1) |
 | `cat .env.example`, `head README.md` | allow | テンプレ除外 / 非機密 |
 | `echo foo`, `ls -la`, `npm test`, `date`, `pwd`, `make build` | allow | 非機密 operand |
 | `grep foo README.md`, `cat README.md 2>/dev/null`, `ls \| head` | allow | 未知コマンド + 非機密 operand (0.3.1) |

@@ -409,6 +409,44 @@ class TestOptEqualsValue(BaseBash):
         self.assertIsNone(_decision(r))
 
 
+class TestAttachedShortOption(BaseBash):
+    """``-X<value>`` 短形 option に value が連結する形 (スペースも ``=`` もない) から
+    value 側の basename を拾う。``grep -f.env`` のような連結形 bypass を塞ぐ。
+
+    flag group (``-la``, ``-rf``) も同じロジックで候補化されるが、basename 不
+    一致のため allow に留まる。
+    """
+
+    def test_grep_attached_file_sensitive(self):
+        r = handle(_make_envelope("grep -f.env foo README.md", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_grep_attached_file_in_compound(self):
+        r = handle(_make_envelope(
+            "grep -f.env foo README.md && true", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_grep_multi_flag_attached_sensitive(self):
+        # -vn は flag group だが直後の .env.local が別 token なので拾える
+        r = handle(_make_envelope(
+            "grep -vn .env.local README.md", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_ls_flag_group_allow(self):
+        r = handle(_make_envelope("ls -la", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_rm_flag_group_allow(self):
+        r = handle(_make_envelope("rm -rf target", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_grep_short_non_sensitive_allow(self):
+        r = handle(_make_envelope("grep -i pattern README.md", self.tmp))
+        self.assertIsNone(_decision(r))
+
+
 class TestQuotedFdTarget(BaseBash):
     """quote された ``'&2'`` 等を fd duplication と誤認しない (Codex P2 指摘)。
 

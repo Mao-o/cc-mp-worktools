@@ -247,12 +247,16 @@ def _strip_safe_redirects(tokens: list[str]) -> list[str]:
 def _find_path_candidates(tokens: list[str]) -> list[str]:
     """第 1 トークン以降から、path 候補を抽出。
 
+    拾う形式:
     - ``--`` より後ろは無条件で path 扱い
-    - ``-`` で始まる option token でも ``--opt=value`` / ``-o=value`` 形式なら
-      RHS を path 候補として追加する (``grep --file=.env foo`` 等の bypass 対策)
-    - それ以外の ``-`` 始まりトークンは skip
+    - 非 option トークン (``-`` で始まらない) はそのまま path 候補
+    - ``--opt=value`` / ``-o=value`` の ``=`` 以降 (RHS) を候補に追加
+      (``grep --file=.env foo`` 等の bypass 対策)
+    - 短形 option に value が **連結** した形 ``-X<value>`` (``-f.env`` 等) は
+      ``tok[2:]`` を候補に追加。``-la`` ``-rf`` 等の flag group でも候補化される
+      が、basename が機密パターン一致しない限り deny にはならないため安全側
 
-    誤検出は ``ask`` or ``deny`` なので安全側。
+    誤検出は ``ask`` or ``deny`` なので保守的に拾う方針。
     """
     candidates: list[str] = []
     in_ddash = False
@@ -263,13 +267,25 @@ def _find_path_candidates(tokens: list[str]) -> list[str]:
         if in_ddash:
             candidates.append(tok)
             continue
-        if tok.startswith("-"):
-            # --opt=value / -o=value の RHS を拾う。option 値として機密 path が
-            # 渡される (--file=.env, --keyring=.env, --output=.env 等) bypass を塞ぐ。
+        if tok.startswith("--"):
+            # --opt=value (long option 連結形)
             if "=" in tok:
                 rhs = tok.split("=", 1)[1]
                 if rhs:
                     candidates.append(rhs)
+            # --opt 単独 (value 別トークン) はこの位置では候補化しない。
+            # 次トークン側が path 候補化される想定 (``--file .env`` 等)。
+            continue
+        if tok.startswith("-"):
+            # -o=value (GNU 短形で = 連結)
+            if "=" in tok:
+                rhs = tok.split("=", 1)[1]
+                if rhs:
+                    candidates.append(rhs)
+            elif len(tok) > 2:
+                # -X<value> (短形連結) or flag group (-la, -rf)。
+                # 前者なら tok[2:] が path。後者なら basename 不一致で allow のまま。
+                candidates.append(tok[2:])
             continue
         candidates.append(tok)
     return candidates
