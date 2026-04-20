@@ -87,6 +87,7 @@ bypass を塞ぐ。非機密 operand なら未知コマンドでも allow を維
 | `timeout 1 cat .env`, `nohup cat .env`, `nice cat .env`, `busybox cat .env` | **deny** | wrapper 経由 (0.3.1) |
 | `cp .env /tmp/x`, `mv .env .env.old` | **deny** | 機密 path を operand に取るコピー/移動 (0.3.1) |
 | `curl file://.env`, `git show HEAD:.env`, `git cat-file -p :.env` | **deny** | URI / VCS pathspec (0.3.1) |
+| `grep --file=.env foo README.md`, `gpg --keyring=.env` | **deny** | `--opt=path` 形式の operand (0.3.1) |
 | `cat .env.example`, `head README.md` | allow | テンプレ除外 / 非機密 |
 | `echo foo`, `ls -la`, `npm test`, `date`, `pwd`, `make build` | allow | 非機密 operand |
 | `grep foo README.md`, `cat README.md 2>/dev/null`, `ls \| head` | allow | 未知コマンド + 非機密 operand (0.3.1) |
@@ -100,7 +101,7 @@ bypass を塞ぐ。非機密 operand なら未知コマンドでも allow を維
 | `for i in 1; do cat .env; done`, `if true; then cat .env; fi` | **ask_or_deny** | シェル制御構文 (予約語で始まるセグメント) |
 | `while cat .env; do pwd; done`, `case 1 in 1) cat .env;; esac`, `coproc cat .env` | **ask_or_deny** | シェル制御構文 |
 | `time cat .env`, `! cat .env`, `eval cat .env` | **ask_or_deny** | 予約語 / 評価ラッパ |
-| `echo foo > out.txt`, `cat foo >> bar.txt` | **ask_or_deny** | /dev/null 以外へのリダイレクト |
+| `echo foo > out.txt`, `cat foo >> bar.txt`, `echo foo > '&2'` | **ask_or_deny** | /dev/null 以外へのリダイレクト / quoted fd 様トークン |
 | `/bin/cat .env`, `./cat .env`, `../bin/cat .env` | **ask_or_deny** | 絶対/相対パス実行 |
 | `FOO=1 cat .env`, `env X=1 cat .env` | **ask_or_deny** | env prefix |
 | `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | **ask_or_deny** | shell wrapper |

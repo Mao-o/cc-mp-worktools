@@ -212,8 +212,15 @@ def _is_safe_redirect_token(tok: str) -> bool:
 def _strip_safe_redirects(tokens: list[str]) -> list[str]:
     """安全リダイレクト (/dev/null 等への出力 / fd 複製) を剥がす。
 
-    - 1 トークン形式 ``2>/dev/null`` : そのまま一致で drop
-    - 2 トークン形式 ``2>`` + ``/dev/null`` : ペアで drop
+    - 1 トークン形式 ``2>/dev/null`` / ``2>&1`` / ``>&2`` : ``_SAFE_REDIRECT_RE``
+      で drop
+    - 2 トークン形式 ``2>`` + ``/dev/null`` : ペアで drop (``/dev/{null,stderr,
+      stdout}`` のみ)
+
+    ``>`` + ``&N`` の 2 トークン形式は **扱わない**。shlex で quote が剥がれた
+    後では ``echo foo > '&2'`` (quoted literal `&2`) と ``echo foo > &2``
+    (fd dup with space) を区別できないため、安全側で剥がさず後段の residual
+    metachar 判定に倒す。``>&2`` 単一トークンは ``_SAFE_REDIRECT_RE`` で別途 drop。
 
     入力リダイレクト (``<``) は hard-stop で既に弾いているので現れない前提。
     書き込み先が /dev/null 以外のリダイレクト (``> file.txt``) は残して
@@ -229,7 +236,7 @@ def _strip_safe_redirects(tokens: list[str]) -> list[str]:
             continue
         if tok in _REDIRECT_OP_TOKENS and i + 1 < n:
             nxt = tokens[i + 1]
-            if nxt in _SAFE_REDIRECT_TARGETS or nxt.startswith("&"):
+            if nxt in _SAFE_REDIRECT_TARGETS:
                 i += 2
                 continue
         out.append(tok)
@@ -238,9 +245,14 @@ def _strip_safe_redirects(tokens: list[str]) -> list[str]:
 
 
 def _find_path_candidates(tokens: list[str]) -> list[str]:
-    """第 1 トークン以降から、``-`` で始まらないトークンを path 候補として抽出。
+    """第 1 トークン以降から、path 候補を抽出。
 
-    ``--`` より後ろは無条件で path 扱い。誤検出は ``ask`` なので安全側。
+    - ``--`` より後ろは無条件で path 扱い
+    - ``-`` で始まる option token でも ``--opt=value`` / ``-o=value`` 形式なら
+      RHS を path 候補として追加する (``grep --file=.env foo`` 等の bypass 対策)
+    - それ以外の ``-`` 始まりトークンは skip
+
+    誤検出は ``ask`` or ``deny`` なので安全側。
     """
     candidates: list[str] = []
     in_ddash = False
@@ -252,6 +264,12 @@ def _find_path_candidates(tokens: list[str]) -> list[str]:
             candidates.append(tok)
             continue
         if tok.startswith("-"):
+            # --opt=value / -o=value の RHS を拾う。option 値として機密 path が
+            # 渡される (--file=.env, --keyring=.env, --output=.env 等) bypass を塞ぐ。
+            if "=" in tok:
+                rhs = tok.split("=", 1)[1]
+                if rhs:
+                    candidates.append(rhs)
             continue
         candidates.append(tok)
     return candidates

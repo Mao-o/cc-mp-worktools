@@ -371,6 +371,71 @@ class TestGlobBypass(BaseBash):
         self.assertEqual(_decision(r), "ask")
 
 
+class TestOptEqualsValue(BaseBash):
+    """``--opt=value`` / ``-o=value`` 形式の option-arg から value 側を拾う。
+
+    0.3.1 初版では ``_find_path_candidates`` が ``-`` 始まりのトークンを丸ごと
+    捨てていたため ``grep --file=.env foo README.md && true`` のような option
+    value に機密 path を埋め込む bypass があった (Codex P1 指摘)。
+    """
+
+    def test_grep_file_equals_sensitive(self):
+        r = handle(_make_envelope(
+            "grep --file=.env foo README.md && true", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_gpg_keyring_equals_sensitive(self):
+        r = handle(_make_envelope(
+            "gpg --keyring=.env --export", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_short_opt_equals_sensitive(self):
+        r = handle(_make_envelope("cmd -o=.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    # 無害な --opt=value は allow を維持
+    def test_non_sensitive_opt_value_allow(self):
+        r = handle(_make_envelope(
+            "grep --color=auto foo README.md", self.tmp,
+        ))
+        self.assertIsNone(_decision(r))
+
+    def test_curl_max_time_allow(self):
+        r = handle(_make_envelope(
+            "curl --max-time=30 https://example.com", self.tmp,
+        ))
+        self.assertIsNone(_decision(r))
+
+
+class TestQuotedFdTarget(BaseBash):
+    """quote された ``'&2'`` 等を fd duplication と誤認しない (Codex P2 指摘)。
+
+    shlex posix 後 ``>`` + ``&N`` の 2 トークン形式は ``echo foo > '&2'``
+    (literal `&2` ファイルへの書込み) と区別できない。安全側で剥がさず、
+    後段の residual metachar で ask に倒す。単一トークン ``2>&1`` ``>&2``
+    は従来どおり ``_SAFE_REDIRECT_RE`` で剥離する。
+    """
+
+    def test_quoted_amp_target_not_stripped(self):
+        r = handle(_make_envelope("echo foo > '&2'", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_unquoted_single_token_fd_dup_stripped(self):
+        r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_stderr_dup_stripped(self):
+        r = handle(_make_envelope("echo foo >&2", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_dev_null_two_token_still_stripped(self):
+        # 2 トークン形式でも /dev/null 系は引き続き剥離
+        r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
+        self.assertIsNone(_decision(r))
+
+
 class TestUriVcsPathspec(BaseBash):
     """URI / VCS pathspec / rsync ``user@host:path`` 経由の機密 path 検出。
 
