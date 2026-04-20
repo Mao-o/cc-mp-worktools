@@ -172,6 +172,47 @@ class TestFailClosedHardStop(BaseBash):
         self.assertEqual(_decision(r), "ask")
 
 
+class TestShellKeywordBypass(BaseBash):
+    """シェル制御構文を絡めた機密 path 読み出し bypass を塞ぐ。
+
+    segment split (``;`` / ``\\n``) を挟むと ``do cat .env`` のような制御構文
+    本体セグメントが未知コマンド扱いで allow される regression があった
+    (Codex P1 指摘)。first token が予約語なら fail-closed する。
+    """
+
+    def test_for_loop_body(self):
+        r = handle(_make_envelope("for i in 1; do cat .env; done", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_if_then_body(self):
+        r = handle(_make_envelope("if true; then cat .env; fi", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_while_test(self):
+        r = handle(_make_envelope("while cat .env; do pwd; done", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_until_test(self):
+        r = handle(_make_envelope("until cat .env; do true; done", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_select_body(self):
+        r = handle(_make_envelope("select x in a; do cat .env; done", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_time_prefix(self):
+        r = handle(_make_envelope("time cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_bang_negation(self):
+        r = handle(_make_envelope("! cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_eval_wrapper(self):
+        r = handle(_make_envelope("eval cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+
 class TestCompoundDeny(BaseBash):
     """複合コマンド (&&/||/;/|/\\n) のいずれかのセグメントが機密一致 → deny。"""
 

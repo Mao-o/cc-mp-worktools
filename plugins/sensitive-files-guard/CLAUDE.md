@@ -111,6 +111,7 @@ sensitive-files-guard/
 | 非機密 + 安全リダイレクト (`cat README.md 2>/dev/null`, `ls \| head`) | allow (0.3.0) |
 | `git status && git log 2>/dev/null \|\| true` 等の日常複合 | allow (0.3.0) |
 | hard-stop metachar (`$`, `` ` ``, `<`, `(`, `)`, `{`, `}`) | `ask_or_deny` (判定不能、fail-closed) |
+| シェル予約語で始まるセグメント (`if` `then` `for` `do` `time` `!` `eval` 等) | `ask_or_deny` (fail-closed, 制御構文 bypass 対策) |
 | 非安全リダイレクト (`> out.txt`, `>> log.txt`) | `ask_or_deny` (fail-closed) |
 | 絶対/相対パス実行 / env prefix / shell wrapper | `ask_or_deny` (判定不能、fail-closed) |
 | patterns.txt 読込失敗 / shlex.split 失敗 / normalize 失敗 | `ask_or_deny` (fail-closed) |
