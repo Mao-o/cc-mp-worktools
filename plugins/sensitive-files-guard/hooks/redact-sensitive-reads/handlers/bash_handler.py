@@ -114,10 +114,20 @@ def _split_command_on_operators(command: str) -> list[str]:
     """quote を尊重しつつ ``&&`` ``||`` ``;`` ``|`` ``\\n`` でセグメントに分割。
 
     クォート内の演算子は区切らない (``echo "a && b"`` は 1 セグメント)。
-    バックスラッシュエスケープは最低限 (``\\"`` / ``\\'``) のみ尊重。
+
+    ダブルクォート内のバックスラッシュエスケープは Bash 仕様どおり数える:
+    直前の連続バックスラッシュが **偶数個** なら ``"`` はエスケープ**されていない**
+    (= クォートを閉じる)、**奇数個** ならエスケープされている (= クォート内に留まる)。
+    これを直前 1 文字だけで判定すると ``echo "\\\\"; cat .env`` で閉じクォートを
+    見落とし、``;`` を分割できず後続の ``cat .env`` が未検出になる bypass が発生する。
+    シングルクォートは Bash 仕様上エスケープ不可なので ``'`` 単発で常に閉じる。
     """
     segments: list[str] = []
     buf: list[str] = []
+    # ダブルクォート内で連続したバックスラッシュの数を保持 (Bash の偶数/奇数判定)。
+    # ``"`` を見たときに偶数ならクォートを閉じ、奇数なら留まる。
+    # 任意の非バックスラッシュ文字が来たら 0 にリセット。
+    bs_run = 0
     i = 0
     in_single = False
     in_double = False
@@ -132,8 +142,13 @@ def _split_command_on_operators(command: str) -> list[str]:
             continue
         if in_double:
             buf.append(c)
-            if c == '"' and (i == 0 or command[i - 1] != "\\"):
+            if c == '"' and bs_run % 2 == 0:
                 in_double = False
+                bs_run = 0
+            elif c == "\\":
+                bs_run += 1
+            else:
+                bs_run = 0
             i += 1
             continue
         if c == "'":
@@ -143,6 +158,7 @@ def _split_command_on_operators(command: str) -> list[str]:
             continue
         if c == '"':
             in_double = True
+            bs_run = 0
             buf.append(c)
             i += 1
             continue

@@ -172,6 +172,40 @@ class TestFailClosedHardStop(BaseBash):
         self.assertEqual(_decision(r), "ask")
 
 
+class TestBackslashQuoteSplit(BaseBash):
+    """ダブルクォート内の偶数個バックスラッシュを正しく扱う (Codex P1 対応)。
+
+    Bash 仕様: ``"`` の直前の連続バックスラッシュが偶数 → 閉じクォート、
+    奇数 → エスケープされた ``"``。直前 1 文字だけで判定すると
+    ``echo "\\\\"; cat .env`` で分割を失敗し後続 ``cat .env`` を検出できない。
+    """
+
+    def test_even_backslash_two_closes_quote(self):
+        # echo "\\"; cat .env — \\ は literal \, 閉じクォートが効いて ; で分割される
+        r = handle(_make_envelope(r'echo "\\"; cat .env', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_even_backslash_four_closes_quote(self):
+        r = handle(_make_envelope(r'echo "\\\\"; cat .env', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_odd_backslash_three_keeps_quote(self):
+        # 3 個 = 奇数 → 閉じクォートがエスケープされる。splitter は 1 セグメントのまま。
+        # shlex が closing quotation 不在で落ちて ask_or_deny (fail-closed)
+        r = handle(_make_envelope(r'echo "\\\"; cat .env', self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_quoted_and_operator_with_outer_semicolon(self):
+        # クォート内の && は保存、外側 ; で分割して cat .env を検出
+        r = handle(_make_envelope(r'echo "a && b"; cat .env', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_single_quote_unchanged(self):
+        # Bash: シングルクォート内にエスケープなし。動作変更なし確認
+        r = handle(_make_envelope("echo 'a && b'; cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
 class TestShellKeywordBypass(BaseBash):
     """シェル制御構文を絡めた機密 path 読み出し bypass を塞ぐ。
 
