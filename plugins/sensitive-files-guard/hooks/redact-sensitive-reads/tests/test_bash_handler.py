@@ -246,6 +246,154 @@ class TestShellKeywordBypass(BaseBash):
         r = handle(_make_envelope("eval cat .env", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
+    def test_coproc(self):
+        r = handle(_make_envelope("coproc cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+
+class TestUnknownCommandOperand(BaseBash):
+    """未知コマンドでも operand が機密 path なら deny 固定 (Codex P1 指摘対応)。
+
+    0.3.0 時点では ``grep SECRET .env`` のような unknown command + sensitive
+    path が unknown → allow で素通りしていた。0.3.1 で unified operand scan に
+    変更し、コマンド名に関わらず非 option トークンを全て機密判定する。
+    """
+
+    def test_grep_sensitive_path(self):
+        r = handle(_make_envelope("grep SECRET .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_grep_sensitive_path_piped(self):
+        r = handle(_make_envelope("grep SECRET .env | head -n 1", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_base64_sensitive(self):
+        r = handle(_make_envelope("base64 .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_xxd_sensitive(self):
+        r = handle(_make_envelope("xxd .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_od_sensitive(self):
+        r = handle(_make_envelope("od -An -tx1 .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_hexdump_sensitive(self):
+        r = handle(_make_envelope("hexdump -C .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_git_diff_no_index_sensitive(self):
+        r = handle(_make_envelope(
+            "git diff --no-index /dev/null .env", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_cp_sensitive(self):
+        r = handle(_make_envelope("cp .env backup", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_mv_sensitive(self):
+        r = handle(_make_envelope("mv .env .env.old", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    # ergonomics: 非機密 operand は unknown command でも allow 維持
+    def test_grep_non_sensitive_allow(self):
+        r = handle(_make_envelope("grep foo README.md", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_unknown_command_no_sensitive_operand_allow(self):
+        r = handle(_make_envelope("make build", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_git_commit_message_allow(self):
+        # commit message の文字列は基本的に機密 basename と一致しない
+        r = handle(_make_envelope("git commit -m 'update docs'", self.tmp))
+        self.assertIsNone(_decision(r))
+
+
+class TestWrapperBypass(BaseBash):
+    """``_SHELL_WRAPPERS`` 未列挙の launcher / wrapper 経由の bypass を塞ぐ。
+
+    0.3.0 時点では ``timeout 1 cat .env`` ``nohup cat .env`` ``busybox cat
+    .env`` が unknown → allow で素通りしていた。0.3.1 の unified operand scan
+    は operand 側の ``.env`` を拾って deny する (コマンド名は判断しない)。
+    """
+
+    def test_timeout_cat(self):
+        r = handle(_make_envelope("timeout 1 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_nohup_cat(self):
+        r = handle(_make_envelope("nohup cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_nice_cat(self):
+        r = handle(_make_envelope("nice cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_stdbuf_cat(self):
+        r = handle(_make_envelope("stdbuf -o0 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_busybox_cat(self):
+        r = handle(_make_envelope("busybox cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
+class TestGlobBypass(BaseBash):
+    """operand に glob 文字 (``*`` ``?`` ``[``) が含まれる場合は fail-closed。
+
+    ``cat .env*`` のように shell 展開で ``.env`` に解決しうる glob を
+    literal basename 判定で見落としていた bypass (Codex P1) を塞ぐ。
+    """
+
+    def test_star_glob(self):
+        r = handle(_make_envelope("cat .env*", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_char_class_glob(self):
+        r = handle(_make_envelope("cat [.]env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_inner_char_class(self):
+        r = handle(_make_envelope("grep SECRET .e[n]v", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_question_glob(self):
+        r = handle(_make_envelope("cat .en?", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_non_sensitive_glob_also_ask(self):
+        # 非機密向けの glob も ergonomics 上は allow したいが、展開結果を静的に
+        # 判定できないため現実装は保守的に ask。ユーザーが許したい場合は明示 path に。
+        r = handle(_make_envelope("cat *.log", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+
+class TestUriVcsPathspec(BaseBash):
+    """URI / VCS pathspec / rsync ``user@host:path`` 経由の機密 path 検出。
+
+    ``git show HEAD:.env`` ``curl file://.env`` のような非 path 形式も、コロン
+    分割 + basename 判定で機密一致を検出する (Codex P1 指摘対応)。
+    """
+
+    def test_git_show_pathspec(self):
+        r = handle(_make_envelope("git show HEAD:.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_git_cat_file_pathspec(self):
+        r = handle(_make_envelope("git cat-file -p :.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_curl_file_uri(self):
+        r = handle(_make_envelope("curl file://.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_rsync_style_remote_path(self):
+        r = handle(_make_envelope("cp user@host:/etc/.env /tmp", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
 
 class TestCompoundDeny(BaseBash):
     """複合コマンド (&&/||/;/|/\\n) のいずれかのセグメントが機密一致 → deny。"""

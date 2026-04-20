@@ -101,27 +101,39 @@ sensitive-files-guard/
 | patterns.txt 読込失敗 | `ask_or_deny` + stderr 警告 |
 | サイズ 32KB 超 | keyonly_scan で streaming 鍵名抽出 |
 
-### Bash handler (0.3.0: segment split + safe redirect strip, deny 固定)
+### Bash handler (0.3.1: unified operand scan, deny 固定)
 
 | ケース | 判定 |
 |---|---|
-| 任意のセグメントで機密 path 検出 (`cat .env`, `source .env`, `cat .env && pwd`, `false \|\| cat .env` 等) | **`deny` 固定** |
+| 任意のセグメントの任意の operand が機密パターン一致 (`cat .env`, `grep SECRET .env`, `base64 .env`, `timeout cat .env`, `git show HEAD:.env`, `curl file://.env` 等) | **`deny` 固定** |
 | `.env.example` / 非機密 path | allow |
-| 未知コマンド (`echo` `npm` `git` 等) 単独 or 複合 | allow |
-| 非機密 + 安全リダイレクト (`cat README.md 2>/dev/null`, `ls \| head`) | allow (0.3.0) |
-| `git status && git log 2>/dev/null \|\| true` 等の日常複合 | allow (0.3.0) |
+| 非機密 operand のみの未知コマンド (`grep foo README.md`, `npm test`, `date` 等) | allow |
+| 非機密 + 安全リダイレクト (`cat README.md 2>/dev/null`, `ls \| head`) | allow |
+| `git status && git log 2>/dev/null \|\| true` 等の日常複合 | allow |
+| glob operand (`cat .env*`, `grep X *.log`, `cat [.]env`) | `ask_or_deny` (fail-closed, 展開後不明) |
 | hard-stop metachar (`$`, `` ` ``, `<`, `(`, `)`, `{`, `}`) | `ask_or_deny` (判定不能、fail-closed) |
-| シェル予約語で始まるセグメント (`if` `then` `for` `do` `time` `!` `eval` 等) | `ask_or_deny` (fail-closed, 制御構文 bypass 対策) |
+| シェル予約語で始まるセグメント (`if` `then` `for` `do` `coproc` `time` `!` `eval` 等) | `ask_or_deny` (fail-closed, 制御構文 bypass 対策) |
 | 非安全リダイレクト (`> out.txt`, `>> log.txt`) | `ask_or_deny` (fail-closed) |
 | 絶対/相対パス実行 / env prefix / shell wrapper | `ask_or_deny` (判定不能、fail-closed) |
 | patterns.txt 読込失敗 / shlex.split 失敗 / normalize 失敗 | `ask_or_deny` (fail-closed) |
 
 **セグメント分割**: `&&` `||` `;` `|` `\n` を quote-aware に分割。クォート内の
-演算子は保持される (`echo "a && b"` は 1 セグメント)。
+演算子は保持される (`echo "a && b"` は 1 セグメント)。ダブルクォート閉じは
+Bash 仕様どおり「直前連続バックスラッシュの偶奇」で判定する。
+
 **安全リダイレクト**: `_SAFE_REDIRECT_RE` に一致する `>/dev/null`, `2>&1`,
 `&>/dev/null`, `>/dev/stderr`, `>/dev/stdout` 等を剥がしてから判定する。
 `> file.txt` のような通常ファイルへの書き込みは剥がさず fail-closed に倒す
 (書き込み先が機密の可能性を潰すため)。
+
+**Unified operand scan (0.3.1)**: `_SAFE_READ_CMDS` ベースの allow-list を廃止。
+全てのセグメントで非 option トークンを一律 `_operand_is_sensitive` に通す。
+コロンを含む operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の
+basename も機密判定する。この方針反転により「未知コマンドは allow」を前提と
+した bypass (grep / base64 / xxd / timeout wrapper / VCS pathspec 等) を一括で
+塞いだ。コマンドが実際に file を読むかどうかは静的に判別しないため false
+positive (`echo .env`, `ls .env`, `mkdir .env`) が出るが、`patterns.local.txt` の
+`!<basename>` exclude で個別対処できる。
 
 ### Edit/Write handler (0.2.0, deny 固定)
 
@@ -248,7 +260,7 @@ note: all values and comments removed for safety.
 | 検出元 | 判定 |
 |---|---|
 | Read: 機密 + regular | `deny` + minimal info |
-| Bash: 機密 path への単純読み取り or 複合コマンドの任意セグメント (`cat .env`, `cat .env && pwd` 等) | `deny` |
+| Bash: 任意セグメントの任意 operand が機密 (`cat .env`, `grep X .env`, `timeout cat .env`, `HEAD:.env` 等) | `deny` |
 | Edit/Write/MultiEdit: 機密 path への書き込み (通常/symlink/special) | `deny` |
 
 ### 判定不能 (fail-closed、非 bypass = `ask` / bypass = `deny`)
