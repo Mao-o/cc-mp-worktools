@@ -1,0 +1,21 @@
+{
+  "name": "verify-cloud-account",
+  "version": "0.1.0",
+  "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud) のアクティブアカウントがプロジェクト想定値 (.claude/accounts.local.json) と一致するか検証する PreToolUse hook。不一致なら deny + 切替手順を提示",
+  "author": { "name": "Mao" },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "hooks",
+    "pretooluse",
+    "bash",
+    "github",
+    "firebase",
+    "aws",
+    "gcloud",
+    "account-verification",
+    "multi-account"
+  ]
+}

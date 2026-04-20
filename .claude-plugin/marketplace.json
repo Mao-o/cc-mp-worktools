@@ -34,6 +34,13 @@
       "description": "Codex / Cursor などの外部 AI CLI を並走・レビューに使う hook 集。Explore 時に Cursor を並走させ、ExitPlanMode 時に Codex でプランをレビュー",
       "category": "productivity",
       "keywords": ["hooks", "pretooluse", "posttooluse", "explore", "exitplanmode", "codex", "cursor", "external-ai", "code-review"]
+    },
+    {
+      "name": "verify-cloud-account",
+      "source": "./plugins/verify-cloud-account",
+      "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud) のアクティブアカウントがプロジェクト想定値と一致するか検証する hook。不一致なら deny + 切替手順を提示",
+      "category": "security",
+      "keywords": ["security", "hooks", "pretooluse", "bash", "github", "firebase", "aws", "gcloud", "account-verification", "multi-account"]
     }
   ]
 }
