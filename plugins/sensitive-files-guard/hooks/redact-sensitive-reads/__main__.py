@@ -14,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-# `python3 ~/.claude/hooks/redact-sensitive-reads` (ディレクトリ直呼び) に対応するため、
+# ディレクトリ直呼び (`python3 <hook-dir>`) に対応するため、
 # パッケージディレクトリ自身と hooks/ (共有 _shared 用) を sys.path に入れる
 _PKG_DIR = str(Path(__file__).resolve().parent)
 _HOOKS_DIR = str(Path(__file__).resolve().parent.parent)

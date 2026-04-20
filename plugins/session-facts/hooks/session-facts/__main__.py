@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entry point for: python3 ~/.claude/hooks/session-facts [options]"""
+"""Entry point for invoking this hook directory as a script."""
 from __future__ import annotations
 
 import sys

@@ -63,9 +63,9 @@ external-ai-assist/
 
 - **plugin 名を `external-ai-assist`** — Cursor / Codex 具体名を名前に含めない。
   将来 Gemini / Claude CLI / 任意の LLM CLI を追加しても意味が壊れないように
-- **ディレクトリは既存 `~/.claude/hooks/` 構造をそのまま** — state 管理・プロンプト
-  テンプレート・タイムアウト値など hook 固有のロジックが既に整理済みで、今回の
-  移植で共通化する価値は乏しい (2 hooks で共通化対象がほぼない)
+- **hook 間で共通化しない** — state 管理・プロンプトテンプレート・タイムアウト値
+  など hook 固有のロジックが既に各 hook 内で整理済みで、共通化する価値は乏しい
+  (2 hooks で共通化対象がほぼない)
 - **`exitplan-review-codex` を単ファイルから `<dir>/__main__.py` に** — `explore-parallel`
   と呼び出し形式を揃える (`python3 ${CLAUDE_PLUGIN_ROOT}/hooks/<name>`)。
   将来 `state.py` 等を追加する余地も残す

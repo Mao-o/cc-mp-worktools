@@ -9,6 +9,10 @@
 # Claude Code local settings (personal account config etc.)
 *.local.json
 
+# Local notes (personal context, not distributed)
+CLAUDE.local.md
+**/CLAUDE.local.md
+
 # Language runtime caches
 node_modules/
 .venv/

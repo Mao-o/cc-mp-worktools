@@ -68,8 +68,7 @@ sensitive-files-guard/
 
 ## Phase 0 実測結果 (2026-04-11)
 
-実測詳細は `~/shared-context/security/claude-code-pretooluse-hook-spec.md`
-に恒久記録。要点のみ:
+要点:
 
 - `permissionDecisionReason` は deny 時に 1KB/8KB/32KB までモデルに完全配信される
 - `systemMessage` トップレベルは **モデルに届かない** (公式 docs の誤り)。依存禁止

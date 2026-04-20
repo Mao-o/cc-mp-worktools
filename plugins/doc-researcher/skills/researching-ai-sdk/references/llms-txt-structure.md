@@ -67,5 +67,3 @@ Markdown 内に JSX 風のカスタムコンポーネントが含まれる:
 | Providers | 100+ | OpenAI, Anthropic, Google 等のプロバイダー設定 |
 
 ※ インデックス範囲は llms.txt の更新により変動する。`fetch-index` で最新を確認すること。
-
-<!-- authored-by: claude-code -->

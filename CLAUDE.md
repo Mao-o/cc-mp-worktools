@@ -13,7 +13,6 @@
 |---|---|
 | marketplace name | `mao-worktools` |
 | リポジトリ (予定) | `Mao-o/cc-mp-worktools` |
-| 親ディレクトリ | `~/dev/personal/cc-marketplaces/` (git 管理外) |
 
 ## インストール経路 (将来)
 

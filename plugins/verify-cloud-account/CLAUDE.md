@@ -226,7 +226,7 @@ claude --plugin-dir plugins/verify-cloud-account
 - **プラグイン分離** — サービスごとに CLI・出力パース・エラーメッセージが異なり、JSON 設定ファイルで汎用化しようとすると破綻する（各 CLI の出力フォーマットが標準化されていない）
 - **明示 import（動的ディスカバリ不採用）** — IDE 補完とデバッグ性を優先。追加時の 2 行コストは許容範囲
 - **1 エントリ集約（`if` 廃止）** — VS Code 拡張での `if` 誤動作事故を受けて、振り分けをスクリプト内部に一元化
-- **plugin 化 (`worktools` 配下に移設)** — `~/.claude/hooks/` 直下のローカル hook だと別マシン再現性がない。`/plugin install verify-cloud-account@mao-worktools` で配布できるように plugin 化
+- **plugin 化** — ローカル hook だと別マシン再現性がない。`/plugin install verify-cloud-account@mao-worktools` で配布できるように plugin 化
 
 ## リリース手順
 
