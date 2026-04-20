@@ -29,7 +29,7 @@
 
 ```
 sensitive-files-guard/
-├── .claude-plugin/plugin.json       # version 0.2.0
+├── .claude-plugin/plugin.json       # version 0.3.0
 ├── README.md
 ├── CLAUDE.md
 └── hooks/
@@ -101,16 +101,39 @@ sensitive-files-guard/
 | patterns.txt 読込失敗 | `ask_or_deny` + stderr 警告 |
 | サイズ 32KB 超 | keyonly_scan で streaming 鍵名抽出 |
 
-### Bash handler (0.2.0, deny 固定)
+### Bash handler (0.3.1: unified operand scan, deny 固定)
 
 | ケース | 判定 |
 |---|---|
-| `cat .env` / `source .env` 等で機密 path 検出 | **`deny` 固定** |
+| 任意のセグメントの任意の operand が機密パターン一致 (`cat .env`, `grep SECRET .env`, `base64 .env`, `timeout cat .env`, `git show HEAD:.env`, `curl file://.env` 等) | **`deny` 固定** |
 | `.env.example` / 非機密 path | allow |
-| 未知コマンド (`echo` `npm` `git` 等) | allow |
-| 変数展開 / `$()` / heredoc / リダイレクト / 複合 | `ask_or_deny` (判定不能、fail-closed) |
+| 非機密 operand のみの未知コマンド (`grep foo README.md`, `npm test`, `date` 等) | allow |
+| 非機密 + 安全リダイレクト (`cat README.md 2>/dev/null`, `ls \| head`) | allow |
+| `git status && git log 2>/dev/null \|\| true` 等の日常複合 | allow |
+| glob operand (`cat .env*`, `grep X *.log`, `cat [.]env`) | `ask_or_deny` (fail-closed, 展開後不明) |
+| hard-stop metachar (`$`, `` ` ``, `<`, `(`, `)`, `{`, `}`) | `ask_or_deny` (判定不能、fail-closed) |
+| シェル予約語で始まるセグメント (`if` `then` `for` `do` `coproc` `time` `!` `eval` 等) | `ask_or_deny` (fail-closed, 制御構文 bypass 対策) |
+| 非安全リダイレクト (`> out.txt`, `>> log.txt`) | `ask_or_deny` (fail-closed) |
 | 絶対/相対パス実行 / env prefix / shell wrapper | `ask_or_deny` (判定不能、fail-closed) |
-| patterns.txt 読込失敗 / shlex.split 失敗 | `ask_or_deny` (fail-closed) |
+| patterns.txt 読込失敗 / shlex.split 失敗 / normalize 失敗 | `ask_or_deny` (fail-closed) |
+
+**セグメント分割**: `&&` `||` `;` `|` `\n` を quote-aware に分割。クォート内の
+演算子は保持される (`echo "a && b"` は 1 セグメント)。ダブルクォート閉じは
+Bash 仕様どおり「直前連続バックスラッシュの偶奇」で判定する。
+
+**安全リダイレクト**: `_SAFE_REDIRECT_RE` に一致する `>/dev/null`, `2>&1`,
+`&>/dev/null`, `>/dev/stderr`, `>/dev/stdout` 等を剥がしてから判定する。
+`> file.txt` のような通常ファイルへの書き込みは剥がさず fail-closed に倒す
+(書き込み先が機密の可能性を潰すため)。
+
+**Unified operand scan (0.3.1)**: `_SAFE_READ_CMDS` ベースの allow-list を廃止。
+全てのセグメントで非 option トークンを一律 `_operand_is_sensitive` に通す。
+コロンを含む operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の
+basename も機密判定する。この方針反転により「未知コマンドは allow」を前提と
+した bypass (grep / base64 / xxd / timeout wrapper / VCS pathspec 等) を一括で
+塞いだ。コマンドが実際に file を読むかどうかは静的に判別しないため false
+positive (`echo .env`, `ls .env`, `mkdir .env`) が出るが、`patterns.local.txt` の
+`!<basename>` exclude で個別対処できる。
 
 ### Edit/Write handler (0.2.0, deny 固定)
 
@@ -230,14 +253,14 @@ note: all values and comments removed for safety.
 
 違反は即 PR reject。`log_error` 呼出時は第二引数に渡す文字列を**目視確認**すること。
 
-## Fail-closed / deny 動作表 (0.2.0)
+## Fail-closed / deny 動作表 (0.3.0)
 
 ### 機密検出済み (deny 固定 — 非 bypass / bypass どちらも同じ)
 
 | 検出元 | 判定 |
 |---|---|
 | Read: 機密 + regular | `deny` + minimal info |
-| Bash: 機密 path への単純読み取り (`cat .env` 等) | `deny` |
+| Bash: 任意セグメントの任意 operand が機密 (`cat .env`, `grep X .env`, `timeout cat .env`, `HEAD:.env` 等) | `deny` |
 | Edit/Write/MultiEdit: 機密 path への書き込み (通常/symlink/special) | `deny` |
 
 ### 判定不能 (fail-closed、非 bypass = `ask` / bypass = `deny`)
@@ -250,7 +273,7 @@ note: all values and comments removed for safety.
 | matcher / safepath 例外 | `ask` | `deny` |
 | redaction engine 例外 | `ask` | `deny` |
 | handler 内の未捕捉例外 | `ask` | `deny` |
-| Bash: 変数展開 / $() / heredoc / shell wrapper | `ask` | `deny` |
+| Bash: hard-stop (`$`, `` ` ``, `<`, `(`, `{`) / heredoc / shell wrapper / 非安全リダイレクト (`> file.txt`) | `ask` | `deny` |
 | Edit: 親ディレクトリが symlink / missing | `ask` | `deny` |
 | hook timeout (2s) | allow (介在不能) | 同左 |
 | Stop hook の patterns.txt OSError | **exit 0 + stderr warning + 空出力** (fail-open) | 同左 |
@@ -262,13 +285,15 @@ note: all values and comments removed for safety.
 patterns.txt が読めない場合も stderr 警告のみで通常 Stop にする。
 read 側 (fail-closed) と意図的に非対称。
 
-## 既知制限 (0.2.0 時点)
+## 既知制限 (0.3.0 時点)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス** — `< .env`, `command cat`, `env VAR=... cat`,
    `xargs -a .env`, `$VAR`, `$(...)`, heredoc, base64 decode, `/bin/cat`,
-   `bash -c`, `bash -lc`, `FOO=1 source .env`, 改行区切り複数コマンドは
-   全て **ask (fail-closed)**。allow ではない点に注意
+   `bash -c`, `bash -lc`, `FOO=1 source .env` などは全て **ask (fail-closed)**。
+   allow ではない点に注意。
+   0.3.0 で `&&` `||` `;` `|` `\n` の複合コマンドと `>/dev/null` / `2>&1` 等の
+   安全リダイレクトはセグメント分割で静的解析可能になった
 3. **親ディレクトリ差し替え race** — `O_NOFOLLOW` は最終要素のみ保護し、
    途中要素の symlink 差し替え race は対象外 (原理的に完全防御不能)
 4. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外。
