@@ -1,8 +1,13 @@
 """Bash handler (Step 5) の判定テスト。
 
-- allow: ``echo foo``, ``cat .env.example``, ``ls -la``
-- ask_or_deny (機密検出): ``cat .env``, ``source .env``, ``head -n 1 .env``
-- ask (fail-closed): shell metachars, 絶対パス, env prefix, shell wrapper, xargs 等
+0.3.0 からセグメント分割 (``&&`` ``||`` ``;`` ``|`` ``\\n``) と安全リダイレクト
+(``>/dev/null`` ``2>&1`` 等) の剥離に対応。
+
+- allow: ``echo foo``, ``cat .env.example``, ``ls -la``, ``git status && git log``,
+  ``cat README.md 2>/dev/null``
+- deny 固定 (機密検出): ``cat .env``, ``cat .env && pwd``, ``false || cat .env``
+- ask (fail-closed): hard-stop metachars (``$`` ``<`` ``(`` ``{`` 等), 絶対パス,
+  env prefix, shell wrapper, xargs 等
 """
 from __future__ import annotations
 
@@ -131,8 +136,12 @@ class TestDenyFixed(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestFailClosedMetachars(BaseBash):
-    """shell メタ文字 / 変数展開 / 複合コマンドは全て fail-closed。"""
+class TestFailClosedHardStop(BaseBash):
+    """動的評価 / 入力リダイレクト / グループ化は fail-closed (ask)。
+
+    0.3.0 以降、``&&`` ``||`` ``;`` ``|`` ``\\n`` は segment split で扱うため
+    hard-stop ではない。``$`` ``<`` ``(`` ``{`` バッククォートのみ hard-stop。
+    """
 
     def test_variable_expansion(self):
         r = handle(_make_envelope('cat "$X"', self.tmp))
@@ -154,24 +163,96 @@ class TestFailClosedMetachars(BaseBash):
         r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_pipe(self):
+    def test_subshell_group(self):
+        r = handle(_make_envelope("(cat .env)", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_brace_group(self):
+        r = handle(_make_envelope("{ cat .env; }", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+
+class TestCompoundDeny(BaseBash):
+    """複合コマンド (&&/||/;/|/\\n) のいずれかのセグメントが機密一致 → deny。"""
+
+    def test_pipe_left_sensitive(self):
         r = handle(_make_envelope("cat .env | head", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
-    def test_and(self):
+    def test_and_left_sensitive(self):
         r = handle(_make_envelope("cat .env && pwd", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
-    def test_or(self):
+    def test_or_right_sensitive(self):
         r = handle(_make_envelope("false || cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
-    def test_semicolon(self):
+    def test_semicolon_left_sensitive(self):
         r = handle(_make_envelope("cat .env; pwd", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_newline_right_sensitive(self):
+        r = handle(_make_envelope("pwd\ncat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_compound_with_redirect_sensitive(self):
+        # 右辺で安全リダイレクト剥離しても .env 参照は残る
+        r = handle(_make_envelope("pwd && cat .env 2>/dev/null", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
+class TestCompoundAllow(BaseBash):
+    """複合コマンドでも全セグメントが非機密 / 未知コマンドなら allow。"""
+
+    def test_git_status_and_log_with_null_redirect(self):
+        # 実運用で頻出する複合コマンド (このリリースの主動機)
+        cmd = (
+            "git -C /tmp/x status && "
+            "git -C /tmp/x log --oneline -5 2>/dev/null || true"
+        )
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_pipe_unknown_commands(self):
+        r = handle(_make_envelope("ls -la | head -n 5", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_semicolon_unknown_commands(self):
+        r = handle(_make_envelope("pwd; date; whoami", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_newline_unknown_commands(self):
+        r = handle(_make_envelope("pwd\ndate\nwhoami", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_cat_non_sensitive_with_stderr_discard(self):
+        r = handle(_make_envelope("cat README.md 2>/dev/null", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_cat_non_sensitive_with_all_discard(self):
+        r = handle(_make_envelope("cat README.md &>/dev/null", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_cat_non_sensitive_with_space_redirect(self):
+        # 空白区切りの > /dev/null も剥がす
+        r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_cat_non_sensitive_with_stderr_dup(self):
+        # 2>&1 (fd 複製) も剥がす
+        r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
+        self.assertIsNone(_decision(r))
+
+
+class TestRedirectToNonNullAsk(BaseBash):
+    """/dev/null 以外への ``>`` リダイレクトは剥がさず fail-closed する。"""
+
+    def test_redirect_to_file(self):
+        r = handle(_make_envelope("echo foo > out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_newline_multi(self):
-        r = handle(_make_envelope("pwd\ncat .env", self.tmp))
+    def test_append_redirect(self):
+        r = handle(_make_envelope("echo foo >> out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
 
