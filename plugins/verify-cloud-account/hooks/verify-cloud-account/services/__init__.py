@@ -9,6 +9,6 @@
      - verify(expected, project_dir) -> str | None  検証関数（None=成功, 文字列=エラー理由）
   2. 下記 import と ALL リストに追加する。
 """
-from . import aws, firebase, github, gcloud
+from . import aws, firebase, gcloud, github, kubectl
 
-ALL = [github, firebase, aws, gcloud]
+ALL = [github, firebase, aws, gcloud, kubectl]
