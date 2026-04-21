@@ -1,10 +1,10 @@
 {
   "name": "external-ai-assist",
-  "version": "0.1.0",
-  "description": "Codex / Cursor などの外部 AI CLI を並走・レビューに使う hook 集。Explore 時に Cursor を並走させ、ExitPlanMode 時に Codex でプランをレビューする",
+  "version": "0.2.0",
+  "description": "Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集。Explore の Cursor 並走、ExitPlanMode の Cursor+Codex クロスレビュー、Stop 時の Cursor 差分レビューを提供する",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",
   "repository": "https://github.com/Mao-o/cc-mp-worktools",
   "license": "MIT",
-  "keywords": ["hooks", "pretooluse", "posttooluse", "explore", "exitplanmode", "codex", "cursor", "external-ai", "code-review"]
+  "keywords": ["hooks", "pretooluse", "posttooluse", "stop", "explore", "exitplanmode", "codex", "cursor", "external-ai", "code-review", "cross-review", "diff-review"]
 }
