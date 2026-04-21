@@ -60,12 +60,16 @@ def is_clean_review(text: str) -> bool:
     return first_line.upper() == "REVIEW_CLEAN"
 
 
-def acquire_review_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
-    """ロック下で read→判定→write を原子的に行いスロットを取得する。"""
-    os.makedirs(os.path.dirname(marker_file), exist_ok=True)
+def check_can_review(marker_file: str, current_hash: str, max_reviews: int) -> bool:
+    """レビュー実行の可否を判定する (副作用なし、共有ロック下で read のみ)。
+
+    REVIEW_CLEAN や cursor.review() 失敗でクォータを消費しないよう、スロットの
+    確保は block 応答が確定した後に commit_review_slot() で行う。
+    """
     try:
+        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
         with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
             try:
                 f.seek(0)
                 content = f.read().strip()
@@ -82,17 +86,44 @@ def acquire_review_slot(marker_file: str, current_hash: str, max_reviews: int) -
                 if saved_hash == current_hash:
                     log("同一 diff でレビュー済み")
                     return False
+                return True
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError as e:
+        log(f"マーカー read 失敗: {e}")
+        return False
+
+
+def commit_review_slot(marker_file: str, current_hash: str) -> None:
+    """block 応答確定時にカウントを +1 して current_hash を書き込む。
+
+    同一 hash が既に記録されている場合は二重加算を避けてスキップする。
+    """
+    try:
+        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
+        with open(marker_file, "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read().strip()
+                lines = content.split("\n") if content else []
+                saved_hash = lines[0] if lines else ""
+                try:
+                    count = int(lines[1]) if len(lines) > 1 else 0
+                except ValueError:
+                    count = 0
+
+                if saved_hash == current_hash:
+                    return
 
                 f.seek(0)
                 f.truncate()
                 f.write(f"{current_hash}\n{count + 1}")
                 f.flush()
-                return True
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except OSError as e:
-        log(f"マーカー read/write 失敗: {e}")
-        return False
+        log(f"マーカー write 失敗: {e}")
 
 
 def _collect_untracked_diff(cwd: str) -> str:
@@ -138,15 +169,42 @@ def _collect_untracked_diff(cwd: str) -> str:
     return "\n".join(parts)
 
 
-def get_git_diff(cwd: str) -> tuple[str, str] | None:
-    """(hash_source, truncated_for_review) を返す。
-
-    hash_source: truncate 前の diff 全体 (ハッシュ計算用)
-    truncated_for_review: cursor に渡す切り詰め済み diff
-    """
+def _is_inside_worktree(cwd: str) -> bool:
     try:
-        tracked = subprocess.run(
-            ["git", "diff", "HEAD"],
+        res = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return res.returncode == 0 and res.stdout.strip() == "true"
+
+
+def _head_exists(cwd: str) -> bool:
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return res.returncode == 0
+
+
+def _get_tracked_diff(cwd: str) -> str | None:
+    """tracked/staged の diff を返す。HEAD があれば `git diff HEAD`、
+    なければ `git diff --cached` (初回コミット前 repo 用フォールバック)。
+    """
+    args = ["git", "diff", "HEAD"] if _head_exists(cwd) else ["git", "diff", "--cached"]
+    try:
+        result = subprocess.run(
+            args,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -156,11 +214,27 @@ def get_git_diff(cwd: str) -> tuple[str, str] | None:
         log(f"git diff 実行失敗: {e}")
         return None
 
-    if tracked.returncode != 0:
-        log(f"git diff が非ゼロ終了: {tracked.returncode}")
+    if result.returncode != 0:
+        log(f"git diff ({' '.join(args[1:])}) が非ゼロ終了: {result.returncode}")
         return None
 
-    tracked_diff = tracked.stdout
+    return result.stdout
+
+
+def get_git_diff(cwd: str) -> tuple[str, str] | None:
+    """(hash_source, truncated_for_review) を返す。
+
+    hash_source: truncate 前の diff 全体 (ハッシュ計算用)
+    truncated_for_review: cursor に渡す切り詰め済み diff
+    """
+    if not _is_inside_worktree(cwd):
+        log("git worktree 外のため skip")
+        return None
+
+    tracked_diff = _get_tracked_diff(cwd)
+    if tracked_diff is None:
+        return None
+
     untracked_diff = _collect_untracked_diff(cwd)
 
     full_diff = tracked_diff
@@ -230,19 +304,21 @@ def main() -> None:
     marker_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), "post-review-markers")
     marker_file = os.path.join(marker_dir, f"{session_id}.post.marker")
 
-    if not acquire_review_slot(marker_file, current_hash, max_reviews):
+    if not check_can_review(marker_file, current_hash, max_reviews):
         sys.exit(0)
 
     log(f"Cursor による実装直後レビューを実行 (diff full={len(full_diff)} chars)")
     result = cursor.review(truncated_diff)
 
     if not result:
-        log("Cursor レビュー失敗 (fail-open)")
+        log("Cursor レビュー失敗 (fail-open、スロット消費なし)")
         sys.exit(0)
 
     if is_clean_review(result):
-        log("Cursor: REVIEW_CLEAN (block しない)")
+        log("Cursor: REVIEW_CLEAN (block しない、スロット消費なし)")
         sys.exit(0)
+
+    commit_review_slot(marker_file, current_hash)
 
     reason = build_reason(result)
 

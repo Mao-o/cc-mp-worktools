@@ -63,16 +63,16 @@ def is_clean_review(text: str) -> bool:
     return first_line.upper() == "REVIEW_CLEAN"
 
 
-def acquire_review_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
-    """ロック下で read→判定→write を原子的に行いスロットを取得する。
+def check_can_review(marker_file: str, current_hash: str, max_reviews: int) -> bool:
+    """レビュー実行の可否を判定する (副作用なし、共有ロック下で read のみ)。
 
-    スロット取得時はカウントを +1 してマーカーに書き込み、True を返す。
-    上限到達 / 同一ハッシュ既レビュー / IO エラー時は False。
+    REVIEW_CLEAN や外部 CLI の失敗でクォータを消費しないよう、スロットの確保は
+    block 応答が確定した後に commit_review_slot() で行う。
     """
-    os.makedirs(os.path.dirname(marker_file), exist_ok=True)
     try:
+        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
         with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
             try:
                 f.seek(0)
                 content = f.read().strip()
@@ -89,17 +89,45 @@ def acquire_review_slot(marker_file: str, current_hash: str, max_reviews: int) -
                 if saved_hash == current_hash:
                     log("同一内容でレビュー済み")
                     return False
+                return True
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError as e:
+        log(f"マーカー read 失敗: {e}")
+        return False
+
+
+def commit_review_slot(marker_file: str, current_hash: str) -> None:
+    """block 応答確定時にカウントを +1 して current_hash を書き込む。
+
+    同一 hash が既に記録されている場合は二重加算を避けてスキップする
+    (レアな並行実行で両プロセスが block を出した際の保険)。
+    """
+    try:
+        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
+        with open(marker_file, "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read().strip()
+                lines = content.split("\n") if content else []
+                saved_hash = lines[0] if lines else ""
+                try:
+                    count = int(lines[1]) if len(lines) > 1 else 0
+                except ValueError:
+                    count = 0
+
+                if saved_hash == current_hash:
+                    return
 
                 f.seek(0)
                 f.truncate()
                 f.write(f"{current_hash}\n{count + 1}")
                 f.flush()
-                return True
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except OSError as e:
-        log(f"マーカー read/write 失敗: {e}")
-        return False
+        log(f"マーカー write 失敗: {e}")
 
 
 def run_reviewers(plan_text: str) -> dict[str, str]:
@@ -192,15 +220,17 @@ def main() -> None:
     marker_file = os.path.join(marker_dir, f"{session_id}.exitplan.marker")
     current_hash = plan_hash(plan_stripped)
 
-    if not acquire_review_slot(marker_file, current_hash, max_reviews):
+    if not check_can_review(marker_file, current_hash, max_reviews):
         sys.exit(0)
 
     log(f"レビュー実行: {', '.join(active_names)}")
     results = run_reviewers(plan_stripped)
 
     if not results:
-        log("全レビュアーが REVIEW_CLEAN または結果なし (block しない)")
+        log("全レビュアーが REVIEW_CLEAN または結果なし (block しない、スロット消費なし)")
         sys.exit(0)
+
+    commit_review_slot(marker_file, current_hash)
 
     reason = build_reason(results)
 
