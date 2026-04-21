@@ -53,23 +53,33 @@ def diff_hash(text: str) -> str:
 
 
 def is_clean_review(text: str) -> bool:
+    """REVIEW_CLEAN sentinel が単独で返されているときのみ True。
+
+    LLM が REVIEW_CLEAN + 後続指摘を混在させた出力を clean 扱いして critical feedback を
+    silently drop することを避けるため、「非空行が 1 行のみで、その行が REVIEW_CLEAN」を
+    厳密に要求する。
+    """
     stripped = text.strip()
     if not stripped:
         return True
-    first_line = stripped.split("\n", 1)[0].strip().strip("`*#").strip()
-    return first_line.upper() == "REVIEW_CLEAN"
+    non_empty_lines = [line for line in stripped.split("\n") if line.strip()]
+    if len(non_empty_lines) != 1:
+        return False
+    only_line = non_empty_lines[0].strip().strip("`*#").strip()
+    return only_line.upper() == "REVIEW_CLEAN"
 
 
-def check_can_review(marker_file: str, current_hash: str, max_reviews: int) -> bool:
-    """レビュー実行の可否を判定する (副作用なし、共有ロック下で read のみ)。
+def reserve_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
+    """ロック下で原子的にスロットを確保する。
 
-    REVIEW_CLEAN や cursor.review() 失敗でクォータを消費しないよう、スロットの
-    確保は block 応答が確定した後に commit_review_slot() で行う。
+    確保成功時は count を +1 して current_hash を書き込み True を返す。並行起動時も
+    `EXTERNAL_AI_POST_REVIEW_MAX` を超えた確保は起きない。レビュー結果が
+    REVIEW_CLEAN / cursor.review() 失敗の場合は release_slot() で枠を戻す。
     """
     try:
         os.makedirs(os.path.dirname(marker_file), exist_ok=True)
         with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
                 f.seek(0)
                 content = f.read().strip()
@@ -86,21 +96,27 @@ def check_can_review(marker_file: str, current_hash: str, max_reviews: int) -> b
                 if saved_hash == current_hash:
                     log("同一 diff でレビュー済み")
                     return False
+
+                f.seek(0)
+                f.truncate()
+                f.write(f"{current_hash}\n{count + 1}")
+                f.flush()
                 return True
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except OSError as e:
-        log(f"マーカー read 失敗: {e}")
+        log(f"マーカー read/write 失敗: {e}")
         return False
 
 
-def commit_review_slot(marker_file: str, current_hash: str) -> None:
-    """block 応答確定時にカウントを +1 して current_hash を書き込む。
+def release_slot(marker_file: str, reserved_hash: str) -> None:
+    """reserve_slot() で確保した枠を戻す (REVIEW_CLEAN / cursor.review() 失敗時)。
 
-    同一 hash が既に記録されている場合は二重加算を避けてスキップする。
+    - count を -1 (0 未満にはしない)
+    - saved_hash がまだ自分 (reserved_hash) なら空に戻す
+    - 他プロセスが追い越して saved_hash を上書きしていれば hash は触らない
     """
     try:
-        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
         with open(marker_file, "a+") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
@@ -113,21 +129,21 @@ def commit_review_slot(marker_file: str, current_hash: str) -> None:
                 except ValueError:
                     count = 0
 
-                if saved_hash == current_hash:
-                    return
+                new_count = max(0, count - 1)
+                new_hash = "" if saved_hash == reserved_hash else saved_hash
 
                 f.seek(0)
                 f.truncate()
-                f.write(f"{current_hash}\n{count + 1}")
+                f.write(f"{new_hash}\n{new_count}")
                 f.flush()
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except OSError as e:
-        log(f"マーカー write 失敗: {e}")
+        log(f"マーカー read/write 失敗: {e}")
 
 
-def _collect_untracked_diff(cwd: str) -> str:
-    """未追跡ファイルを列挙し、それぞれの diff (vs /dev/null) を連結する。"""
+def _list_untracked_files(cwd: str) -> list[str]:
+    """ls-files --others --exclude-standard で untracked ファイルのパス一覧を返す。"""
     try:
         listing = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard", "-z"],
@@ -137,12 +153,32 @@ def _collect_untracked_diff(cwd: str) -> str:
             timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return ""
+        return []
 
     if listing.returncode != 0 or not listing.stdout:
-        return ""
+        return []
 
-    files = [f for f in listing.stdout.split("\0") if f]
+    return [f for f in listing.stdout.split("\0") if f]
+
+
+def _untracked_fingerprint(cwd: str, files: list[str]) -> str:
+    """全 untracked ファイル (MAX を超える分も含む) の path:size fingerprint。
+
+    レビュー対象として truncate された 51 番目以降のファイルが編集された場合も
+    ハッシュが変化するように、diff 本文とは別に hash_source へ混ぜ込む用途。
+    """
+    parts: list[str] = []
+    for f in files:
+        try:
+            size = os.path.getsize(os.path.join(cwd, f))
+        except OSError:
+            size = -1
+        parts.append(f"{f}:{size}")
+    return "\n".join(parts)
+
+
+def _collect_untracked_diff(cwd: str, files: list[str]) -> str:
+    """先頭 MAX_UNTRACKED_FILES 件の未追跡ファイルの diff (vs /dev/null) を連結する。"""
     if not files:
         return ""
 
@@ -235,7 +271,9 @@ def get_git_diff(cwd: str) -> tuple[str, str] | None:
     if tracked_diff is None:
         return None
 
-    untracked_diff = _collect_untracked_diff(cwd)
+    untracked_files = _list_untracked_files(cwd)
+    untracked_diff = _collect_untracked_diff(cwd, untracked_files)
+    untracked_fingerprint = _untracked_fingerprint(cwd, untracked_files)
 
     full_diff = tracked_diff
     if untracked_diff:
@@ -246,6 +284,13 @@ def get_git_diff(cwd: str) -> tuple[str, str] | None:
     if not full_diff.strip():
         return None
 
+    # ハッシュ用: truncate 前の diff 全体 + 全 untracked ファイルの fingerprint。
+    # omit される 51 番目以降のファイルが変更されても fingerprint が変わるので、
+    # 同一 hash 扱いで skip されない。
+    hash_source = full_diff
+    if untracked_fingerprint:
+        hash_source += "\n---\nuntracked-fingerprint:\n" + untracked_fingerprint
+
     encoded = full_diff.encode()
     if len(encoded) > MAX_DIFF_BYTES:
         truncated = encoded[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore")
@@ -253,7 +298,7 @@ def get_git_diff(cwd: str) -> tuple[str, str] | None:
     else:
         truncated = full_diff
 
-    return full_diff, truncated
+    return hash_source, truncated
 
 
 def build_reason(cursor_output: str) -> str:
@@ -304,21 +349,21 @@ def main() -> None:
     marker_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), "post-review-markers")
     marker_file = os.path.join(marker_dir, f"{session_id}.post.marker")
 
-    if not check_can_review(marker_file, current_hash, max_reviews):
+    if not reserve_slot(marker_file, current_hash, max_reviews):
         sys.exit(0)
 
     log(f"Cursor による実装直後レビューを実行 (diff full={len(full_diff)} chars)")
     result = cursor.review(truncated_diff)
 
     if not result:
-        log("Cursor レビュー失敗 (fail-open、スロット消費なし)")
+        log("Cursor レビュー失敗 (fail-open、スロット戻す)")
+        release_slot(marker_file, current_hash)
         sys.exit(0)
 
     if is_clean_review(result):
-        log("Cursor: REVIEW_CLEAN (block しない、スロット消費なし)")
+        log("Cursor: REVIEW_CLEAN (block しない、スロット戻す)")
+        release_slot(marker_file, current_hash)
         sys.exit(0)
-
-    commit_review_slot(marker_file, current_hash)
 
     reason = build_reason(result)
 

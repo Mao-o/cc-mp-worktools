@@ -55,24 +55,33 @@ def plan_hash(text: str) -> str:
 
 
 def is_clean_review(text: str) -> bool:
-    """REVIEW_CLEAN のみの出力かどうかを判定。"""
+    """REVIEW_CLEAN sentinel が単独で返されているときのみ True。
+
+    LLM が REVIEW_CLEAN + 後続指摘を混在させた出力を clean 扱いして critical feedback を
+    silently drop することを避けるため、「非空行が 1 行のみで、その行が REVIEW_CLEAN」を
+    厳密に要求する。
+    """
     stripped = text.strip()
     if not stripped:
         return True
-    first_line = stripped.split("\n", 1)[0].strip().strip("`*#").strip()
-    return first_line.upper() == "REVIEW_CLEAN"
+    non_empty_lines = [line for line in stripped.split("\n") if line.strip()]
+    if len(non_empty_lines) != 1:
+        return False
+    only_line = non_empty_lines[0].strip().strip("`*#").strip()
+    return only_line.upper() == "REVIEW_CLEAN"
 
 
-def check_can_review(marker_file: str, current_hash: str, max_reviews: int) -> bool:
-    """レビュー実行の可否を判定する (副作用なし、共有ロック下で read のみ)。
+def reserve_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
+    """ロック下で原子的にスロットを確保する。
 
-    REVIEW_CLEAN や外部 CLI の失敗でクォータを消費しないよう、スロットの確保は
-    block 応答が確定した後に commit_review_slot() で行う。
+    確保成功時は count を +1 して current_hash を書き込み True を返す。並行起動時も
+    `EXTERNAL_AI_REVIEW_MAX` を超えた確保は起きない。レビュー結果が REVIEW_CLEAN /
+    reviewer 失敗の場合は release_slot() で枠を戻す。
     """
     try:
         os.makedirs(os.path.dirname(marker_file), exist_ok=True)
         with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
                 f.seek(0)
                 content = f.read().strip()
@@ -89,22 +98,27 @@ def check_can_review(marker_file: str, current_hash: str, max_reviews: int) -> b
                 if saved_hash == current_hash:
                     log("同一内容でレビュー済み")
                     return False
+
+                f.seek(0)
+                f.truncate()
+                f.write(f"{current_hash}\n{count + 1}")
+                f.flush()
                 return True
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except OSError as e:
-        log(f"マーカー read 失敗: {e}")
+        log(f"マーカー read/write 失敗: {e}")
         return False
 
 
-def commit_review_slot(marker_file: str, current_hash: str) -> None:
-    """block 応答確定時にカウントを +1 して current_hash を書き込む。
+def release_slot(marker_file: str, reserved_hash: str) -> None:
+    """reserve_slot() で確保した枠を戻す (REVIEW_CLEAN / reviewer 失敗時)。
 
-    同一 hash が既に記録されている場合は二重加算を避けてスキップする
-    (レアな並行実行で両プロセスが block を出した際の保険)。
+    - count を -1 (0 未満にはしない)
+    - saved_hash がまだ自分 (reserved_hash) なら空に戻す
+    - 他プロセスが追い越して saved_hash を上書きしていれば hash は触らない
     """
     try:
-        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
         with open(marker_file, "a+") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
@@ -117,17 +131,17 @@ def commit_review_slot(marker_file: str, current_hash: str) -> None:
                 except ValueError:
                     count = 0
 
-                if saved_hash == current_hash:
-                    return
+                new_count = max(0, count - 1)
+                new_hash = "" if saved_hash == reserved_hash else saved_hash
 
                 f.seek(0)
                 f.truncate()
-                f.write(f"{current_hash}\n{count + 1}")
+                f.write(f"{new_hash}\n{new_count}")
                 f.flush()
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except OSError as e:
-        log(f"マーカー write 失敗: {e}")
+        log(f"マーカー read/write 失敗: {e}")
 
 
 def run_reviewers(plan_text: str) -> dict[str, str]:
@@ -220,17 +234,16 @@ def main() -> None:
     marker_file = os.path.join(marker_dir, f"{session_id}.exitplan.marker")
     current_hash = plan_hash(plan_stripped)
 
-    if not check_can_review(marker_file, current_hash, max_reviews):
+    if not reserve_slot(marker_file, current_hash, max_reviews):
         sys.exit(0)
 
     log(f"レビュー実行: {', '.join(active_names)}")
     results = run_reviewers(plan_stripped)
 
     if not results:
-        log("全レビュアーが REVIEW_CLEAN または結果なし (block しない、スロット消費なし)")
+        log("全レビュアーが REVIEW_CLEAN または結果なし (block しない、スロット戻す)")
+        release_slot(marker_file, current_hash)
         sys.exit(0)
-
-    commit_review_slot(marker_file, current_hash)
 
     reason = build_reason(results)
 
