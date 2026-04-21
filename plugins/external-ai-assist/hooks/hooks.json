@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/exitplan-review-codex",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/exitplan-review",
             "timeout": 1560
           }
         ]
@@ -30,6 +30,17 @@
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase post",
             "timeout": 90
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review",
+            "timeout": 660
           }
         ]
       }
