@@ -72,6 +72,67 @@ class TestSplitOnOperators(unittest.TestCase):
             [r"echo a\&\&b", "echo c"],
         )
 
+    def test_subshell_with_quoted_paren(self):
+        """Codex R1 回帰: `$()` 内の quote で `)` を保護する。
+
+        `$(printf ")")` の内側の `")"` が閉じ括弧と誤認されると、paren_depth
+        が早閉じして後続の `&&` が subshell 内と誤解される。
+        """
+        self.assertEqual(
+            split_on_operators('echo $(printf ")") && gh pr list'),
+            ['echo $(printf ")")', "gh pr list"],
+        )
+
+    def test_subshell_with_single_quoted_semicolon(self):
+        self.assertEqual(
+            split_on_operators("echo $(printf ';') && gh pr list"),
+            ["echo $(printf ';')", "gh pr list"],
+        )
+
+    def test_nested_subshell(self):
+        self.assertEqual(
+            split_on_operators("echo $(echo $(date)) && gh pr list"),
+            ["echo $(echo $(date))", "gh pr list"],
+        )
+
+    def test_comment_strips_trailing(self):
+        """Codex R2 回帰: unquoted `#` 以降はコメント扱いで分割対象外。"""
+        self.assertEqual(
+            split_on_operators("gh pr list # note && aws s3 ls"),
+            ["gh pr list"],
+        )
+
+    def test_comment_with_newline(self):
+        self.assertEqual(
+            split_on_operators("gh pr list # note\naws s3 ls"),
+            ["gh pr list", "aws s3 ls"],
+        )
+
+    def test_comment_after_operator(self):
+        self.assertEqual(
+            split_on_operators("gh pr list &&# note\naws s3 ls"),
+            ["gh pr list", "aws s3 ls"],
+        )
+
+    def test_hash_inside_token_not_comment(self):
+        """`foo#bar` のトークン内 `#` はコメント開始ではない。"""
+        self.assertEqual(
+            split_on_operators("echo foo#bar && gh pr list"),
+            ["echo foo#bar", "gh pr list"],
+        )
+
+    def test_hash_inside_double_quotes_not_comment(self):
+        self.assertEqual(
+            split_on_operators('echo "a # b" && gh pr list'),
+            ['echo "a # b"', "gh pr list"],
+        )
+
+    def test_hash_inside_single_quotes_not_comment(self):
+        self.assertEqual(
+            split_on_operators("echo 'a # b' && gh pr list"),
+            ["echo 'a # b'", "gh pr list"],
+        )
+
 
 class TestStripLeadingEnv(unittest.TestCase):
     def test_single_assignment(self):

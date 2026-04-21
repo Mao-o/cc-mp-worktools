@@ -1,7 +1,8 @@
 """Bash コマンド文字列を検証対象候補セグメントに分解するユーティリティ。
 
 - split_on_operators: `&&` / `||` / `;` / `|` / `\\n` で分割。
-  quote / $() / バッククォート内は保護
+  quote / $() / バッククォート内は保護 (subshell 内の quote も追跡)。
+  bash コメント (unquoted `#` 以降行末まで) は無視
 - strip_leading_env: 先頭の `FOO=bar` 形式環境変数割当を剥がす
 - strip_transparent_wrappers: 透過的 wrapper (`sudo`, `time`, `nohup`,
   `env`, `command`, `builtin`, `exec`, `npx`, `pnpm exec`, `pnpm dlx`,
@@ -23,6 +24,10 @@ def split_on_operators(command: str) -> list[str]:
     """`&&`, `||`, `;`, `|`, `\\n` でトップレベル分割。
 
     quote ('...' / "..."), $(...), バッククォート内は分割しない。
+    subshell `$()` 内でも quote をトラッキングし、`$(printf ")")` のように
+    値が `)` を含むケースでも paren_depth を正しく保つ。
+    unquoted な `#` (行頭 / 空白 / 演算子の直後に来るもの) 以降改行までは
+    bash コメントとして無視する。
     """
     segments: list[str] = []
     buf: list[str] = []
@@ -43,12 +48,12 @@ def split_on_operators(command: str) -> list[str]:
             i += 2
             continue
 
-        if ch == "'" and not in_dq and paren_depth == 0 and not btick:
+        if ch == "'" and not in_dq and not btick:
             in_sq = not in_sq
             buf.append(ch)
             i += 1
             continue
-        if ch == '"' and not in_sq and paren_depth == 0 and not btick:
+        if ch == '"' and not in_sq and not btick:
             in_dq = not in_dq
             buf.append(ch)
             i += 1
@@ -81,6 +86,11 @@ def split_on_operators(command: str) -> list[str]:
         if btick:
             buf.append(ch)
             i += 1
+            continue
+
+        if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
             continue
 
         if ch == "&" and nxt == "&":
