@@ -1,13 +1,15 @@
-"""Bash handler (Step 5) の判定テスト。
+"""Bash handler の判定テスト (0.3.2: 誤爆ガード緩和版)。
 
-0.3.0 からセグメント分割 (``&&`` ``||`` ``;`` ``|`` ``\\n``) と安全リダイレクト
-(``>/dev/null`` ``2>&1`` 等) の剥離に対応。
-
-- allow: ``echo foo``, ``cat .env.example``, ``ls -la``, ``git status && git log``,
-  ``cat README.md 2>/dev/null``
-- deny 固定 (機密検出): ``cat .env``, ``cat .env && pwd``, ``false || cat .env``
-- ask (fail-closed): hard-stop metachars (``$`` ``<`` ``(`` ``{`` 等), 絶対パス,
-  env prefix, shell wrapper, xargs 等
+主要変更:
+- opaque wrapper / hard-stop / shell keyword / 任意 path exec / 残留 metachar /
+  shlex 失敗 → ``ask_or_allow`` (default=ask, auto/bypass=allow)
+- env prefix / ``env`` (option 無し) / ``command`` (option 無し) / ``builtin`` /
+  ``nohup`` の前置きは剥がして再判定。確定 match なら deny 固定 (全 mode)
+- glob operand → ``_glob_operand_is_sensitive`` (既定 rules への候補列挙)
+  - ``cat .env*`` ``cat .e[n]v`` ``cat .en?`` 等 → deny 固定
+  - ``cat *.log`` 等 → allow
+- ``< target`` 形式の入力リダイレクトは target 抽出して先に operand scan
+- ``patterns.txt`` 読込失敗 → 全 mode で ``make_deny`` 固定
 """
 from __future__ import annotations
 
@@ -83,17 +85,12 @@ class TestAllow(BaseBash):
         self.assertIsNone(_decision(r))
 
     def test_unknown_command_allow(self):
-        # npm, git, make 等の未知コマンドは allow (副作用なし想定)
         r = handle(_make_envelope("npm test", self.tmp))
         self.assertIsNone(_decision(r))
 
 
 class TestDenyFixed(BaseBash):
-    """機密 path への単純読み取りアクセスは ``deny`` 固定 (bypass 関係なし)。
-
-    0.2.0 で ``ask_or_deny`` → ``make_deny`` 固定に変更。実機観測で ask が
-    うっかり承認される事例があったため。
-    """
+    """機密 path への単純読み取りアクセスは全 mode で ``deny`` 固定。"""
 
     def test_cat_dotenv(self):
         r = handle(_make_envelope("cat .env", self.tmp))
@@ -101,6 +98,10 @@ class TestDenyFixed(BaseBash):
 
     def test_cat_dotenv_bypass(self):
         r = handle(_make_envelope("cat .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_cat_dotenv_auto(self):
+        r = handle(_make_envelope("cat .env", self.tmp, mode="auto"))
         self.assertEqual(_decision(r), "deny")
 
     def test_source_dotenv(self):
@@ -136,52 +137,84 @@ class TestDenyFixed(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestFailClosedHardStop(BaseBash):
-    """動的評価 / 入力リダイレクト / グループ化は fail-closed (ask)。
+class TestHardStopLenient(BaseBash):
+    """hard-stop metachar (`$`, ``(``, `{`, バッククォート) は default=ask / auto/bypass=allow。
 
-    0.3.0 以降、``&&`` ``||`` ``;`` ``|`` ``\\n`` は segment split で扱うため
-    hard-stop ではない。``$`` ``<`` ``(`` ``{`` バッククォートのみ hard-stop。
+    ``<`` だけは target 抽出が走り target 一致なら deny 固定 (TestInputRedirectDeny)。
     """
 
-    def test_variable_expansion(self):
+    def test_variable_expansion_default(self):
         r = handle(_make_envelope('cat "$X"', self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_command_substitution(self):
+    def test_variable_expansion_auto(self):
+        r = handle(_make_envelope('cat "$X"', self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_variable_expansion_bypass(self):
+        r = handle(_make_envelope('cat "$X"', self.tmp, mode="bypassPermissions"))
+        self.assertEqual(r, {})
+
+    def test_command_substitution_default(self):
         r = handle(_make_envelope("cat $(echo .env)", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_backtick(self):
+    def test_command_substitution_auto(self):
+        r = handle(_make_envelope("cat $(echo .env)", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_backtick_default(self):
         r = handle(_make_envelope("cat `echo .env`", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_redirect_in(self):
-        r = handle(_make_envelope("< .env cat", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+    def test_backtick_bypass(self):
+        r = handle(_make_envelope("cat `echo .env`", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(r, {})
 
-    def test_heredoc(self):
+    def test_heredoc_default(self):
         r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_subshell_group(self):
+    def test_heredoc_auto(self):
+        r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_subshell_group_default(self):
         r = handle(_make_envelope("(cat .env)", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_brace_group(self):
+    def test_subshell_group_auto(self):
+        # (cat .env) は ( hard-stop。target 抽出は < がないので走らず ask_or_allow。
+        # auto/bypass では allow に倒る (機密 .env が中にあっても!)
+        r = handle(_make_envelope("(cat .env)", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_brace_group_default(self):
         r = handle(_make_envelope("{ cat .env; }", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
 
-class TestBackslashQuoteSplit(BaseBash):
-    """ダブルクォート内の偶数個バックスラッシュを正しく扱う (Codex P1 対応)。
+class TestInputRedirectDeny(BaseBash):
+    """``< target`` 形式の入力リダイレクトは target 抽出して機密一致で deny 固定。"""
 
-    Bash 仕様: ``"`` の直前の連続バックスラッシュが偶数 → 閉じクォート、
-    奇数 → エスケープされた ``"``。直前 1 文字だけで判定すると
-    ``echo "\\\\"; cat .env`` で分割を失敗し後続 ``cat .env`` を検出できない。
-    """
+    def test_redirect_in_default(self):
+        # `< .env cat` (引数順序は逆) → target ".env" 抽出 → deny
+        r = handle(_make_envelope("< .env cat", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_redirect_in_auto(self):
+        r = handle(_make_envelope("< .env cat", self.tmp, mode="auto"))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_cat_lt_dotenv_bypass(self):
+        r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+
+
+class TestBackslashQuoteSplit(BaseBash):
+    """ダブルクォート内の偶数個バックスラッシュを正しく扱う (Codex P1 対応, 0.3.1)。"""
 
     def test_even_backslash_two_closes_quote(self):
-        # echo "\\"; cat .env — \\ は literal \, 閉じクォートが効いて ; で分割される
         r = handle(_make_envelope(r'echo "\\"; cat .env', self.tmp))
         self.assertEqual(_decision(r), "deny")
 
@@ -190,37 +223,41 @@ class TestBackslashQuoteSplit(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
     def test_odd_backslash_three_keeps_quote(self):
-        # 3 個 = 奇数 → 閉じクォートがエスケープされる。splitter は 1 セグメントのまま。
-        # shlex が closing quotation 不在で落ちて ask_or_deny (fail-closed)
+        # 3 個 = 奇数 → 閉じクォートがエスケープされる。shlex が落ちて ask_or_allow
         r = handle(_make_envelope(r'echo "\\\"; cat .env', self.tmp))
         self.assertEqual(_decision(r), "ask")
 
     def test_quoted_and_operator_with_outer_semicolon(self):
-        # クォート内の && は保存、外側 ; で分割して cat .env を検出
         r = handle(_make_envelope(r'echo "a && b"; cat .env', self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_single_quote_unchanged(self):
-        # Bash: シングルクォート内にエスケープなし。動作変更なし確認
         r = handle(_make_envelope("echo 'a && b'; cat .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
 
-class TestShellKeywordBypass(BaseBash):
-    """シェル制御構文を絡めた機密 path 読み出し bypass を塞ぐ。
+class TestShellKeywordLenient(BaseBash):
+    """シェル制御構文 (if/for/do/coproc 等) は default=ask / auto/bypass=allow (0.3.2)。"""
 
-    segment split (``;`` / ``\\n``) を挟むと ``do cat .env`` のような制御構文
-    本体セグメントが未知コマンド扱いで allow される regression があった
-    (Codex P1 指摘)。first token が予約語なら fail-closed する。
-    """
-
-    def test_for_loop_body(self):
+    def test_for_loop_body_default(self):
         r = handle(_make_envelope("for i in 1; do cat .env; done", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_if_then_body(self):
+    def test_for_loop_body_auto(self):
+        r = handle(_make_envelope(
+            "for i in 1; do cat .env; done", self.tmp, mode="auto",
+        ))
+        self.assertEqual(r, {})
+
+    def test_if_then_body_default(self):
         r = handle(_make_envelope("if true; then cat .env; fi", self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+    def test_if_then_body_bypass(self):
+        r = handle(_make_envelope(
+            "if true; then cat .env; fi", self.tmp, mode="bypassPermissions",
+        ))
+        self.assertEqual(r, {})
 
     def test_while_test(self):
         r = handle(_make_envelope("while cat .env; do pwd; done", self.tmp))
@@ -234,30 +271,62 @@ class TestShellKeywordBypass(BaseBash):
         r = handle(_make_envelope("select x in a; do cat .env; done", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_time_prefix(self):
-        r = handle(_make_envelope("time cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_bang_negation(self):
-        r = handle(_make_envelope("! cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_eval_wrapper(self):
-        r = handle(_make_envelope("eval cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
     def test_coproc(self):
         r = handle(_make_envelope("coproc cat .env", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
 
-class TestUnknownCommandOperand(BaseBash):
-    """未知コマンドでも operand が機密 path なら deny 固定 (Codex P1 指摘対応)。
+class TestOpaqueWrapperLenient(BaseBash):
+    """opaque wrapper (eval/python/sudo/awk/sed/time/!/exec) は default=ask / auto/bypass=allow。"""
 
-    0.3.0 時点では ``grep SECRET .env`` のような unknown command + sensitive
-    path が unknown → allow で素通りしていた。0.3.1 で unified operand scan に
-    変更し、コマンド名に関わらず非 option トークンを全て機密判定する。
-    """
+    def test_eval_default(self):
+        r = handle(_make_envelope("eval cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_eval_auto(self):
+        r = handle(_make_envelope("eval cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_eval_bypass(self):
+        r = handle(_make_envelope("eval cat .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(r, {})
+
+    def test_time_default(self):
+        # 0.3.2 で time は _SHELL_KEYWORDS から _OPAQUE_WRAPPERS に移動
+        r = handle(_make_envelope("time cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_time_auto(self):
+        r = handle(_make_envelope("time cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_bang_default(self):
+        r = handle(_make_envelope("! cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_bang_auto(self):
+        r = handle(_make_envelope("! cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_exec_default(self):
+        r = handle(_make_envelope("exec cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_exec_with_options_auto(self):
+        r = handle(_make_envelope("exec -a name cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_python_c_default(self):
+        r = handle(_make_envelope("python3 -c 'print(1)'", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_python_c_auto(self):
+        r = handle(_make_envelope("python3 -c 'print(1)'", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+
+class TestUnknownCommandOperand(BaseBash):
+    """未知コマンドでも operand が機密 path なら deny 固定 (0.3.1, 維持)。"""
 
     def test_grep_sensitive_path(self):
         r = handle(_make_envelope("grep SECRET .env", self.tmp))
@@ -297,7 +366,6 @@ class TestUnknownCommandOperand(BaseBash):
         r = handle(_make_envelope("mv .env .env.old", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    # ergonomics: 非機密 operand は unknown command でも allow 維持
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))
         self.assertIsNone(_decision(r))
@@ -307,24 +375,19 @@ class TestUnknownCommandOperand(BaseBash):
         self.assertIsNone(_decision(r))
 
     def test_git_commit_message_allow(self):
-        # commit message の文字列は基本的に機密 basename と一致しない
         r = handle(_make_envelope("git commit -m 'update docs'", self.tmp))
         self.assertIsNone(_decision(r))
 
 
 class TestWrapperBypass(BaseBash):
-    """``_SHELL_WRAPPERS`` 未列挙の launcher / wrapper 経由の bypass を塞ぐ。
-
-    0.3.0 時点では ``timeout 1 cat .env`` ``nohup cat .env`` ``busybox cat
-    .env`` が unknown → allow で素通りしていた。0.3.1 の unified operand scan
-    は operand 側の ``.env`` を拾って deny する (コマンド名は判断しない)。
-    """
+    """wrapper 経由 (timeout/nohup/nice/stdbuf/busybox) でも operand .env が機密一致で deny。"""
 
     def test_timeout_cat(self):
         r = handle(_make_envelope("timeout 1 cat .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_nohup_cat(self):
+        # nohup は 0.3.2 で transparent prefix → 剥がして cat .env で deny 確定
         r = handle(_make_envelope("nohup cat .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
@@ -341,43 +404,166 @@ class TestWrapperBypass(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestGlobBypass(BaseBash):
-    """operand に glob 文字 (``*`` ``?`` ``[``) が含まれる場合は fail-closed。
+class TestPrefixStrippingDeny(BaseBash):
+    """env prefix / env / command / builtin / nohup の前置きを剥がして確定 match で deny (0.3.2)。"""
 
-    ``cat .env*`` のように shell 展開で ``.env`` に解決しうる glob を
-    literal basename 判定で見落としていた bypass (Codex P1) を塞ぐ。
+    def test_env_prefix_cat_default(self):
+        r = handle(_make_envelope("FOO=1 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_env_prefix_cat_auto(self):
+        r = handle(_make_envelope("FOO=1 cat .env", self.tmp, mode="auto"))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_env_prefix_cat_bypass(self):
+        r = handle(_make_envelope("FOO=1 cat .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_multi_env_prefix(self):
+        r = handle(_make_envelope("FOO=1 BAR=2 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_env_command_cat(self):
+        r = handle(_make_envelope("env cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_env_command_with_assignment(self):
+        r = handle(_make_envelope("env FOO=1 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_command_wrapper_cat(self):
+        r = handle(_make_envelope("command cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_builtin_wrapper_cat(self):
+        r = handle(_make_envelope("builtin cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_nohup_chain_with_command(self):
+        r = handle(_make_envelope("nohup command cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_command_chain_with_env(self):
+        r = handle(_make_envelope("command env FOO=1 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_abs_env_with_assignment(self):
+        # /usr/bin/env FOO=1 cat .env: basename=env → 透過 → deny
+        r = handle(_make_envelope("/usr/bin/env FOO=1 cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_abs_command_wrapper(self):
+        # /bin/command cat .env: basename=command → 透過 → deny
+        r = handle(_make_envelope("/bin/command cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
+class TestPrefixStrippingOpaque(BaseBash):
+    """env / command にオプションがあると opaque (default=ask / auto/bypass=allow)。"""
+
+    def test_env_dash_i_default(self):
+        r = handle(_make_envelope("env -i cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_env_dash_i_auto(self):
+        r = handle(_make_envelope("env -i cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_env_dash_u_default(self):
+        r = handle(_make_envelope("env -u HOME cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_env_double_dash_default(self):
+        r = handle(_make_envelope("env -- cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_env_double_dash_auto(self):
+        r = handle(_make_envelope("env -- cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_command_dash_p_default(self):
+        r = handle(_make_envelope("command -p cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_command_double_dash_default(self):
+        r = handle(_make_envelope("command -- cat .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_command_double_dash_bypass(self):
+        r = handle(_make_envelope("command -- cat .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(r, {})
+
+
+class TestGlobMatch(BaseBash):
+    """operand glob (`*`/`?`/`[`) は ``_glob_operand_is_sensitive`` 経由 (0.3.2)。
+
+    既定 rules と交差すれば全 mode で deny 固定、交差しなければ allow。
     """
 
-    def test_star_glob(self):
+    def test_dotenv_star_deny(self):
         r = handle(_make_envelope("cat .env*", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
-    def test_char_class_glob(self):
-        r = handle(_make_envelope("cat [.]env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+    def test_dotenv_dot_star_deny(self):
+        r = handle(_make_envelope("cat .env.*", self.tmp))
+        self.assertEqual(_decision(r), "deny")
 
-    def test_inner_char_class(self):
-        r = handle(_make_envelope("grep SECRET .e[n]v", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+    def test_star_envrc_deny(self):
+        r = handle(_make_envelope("cat *.envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
 
-    def test_question_glob(self):
+    def test_id_rsa_star_deny(self):
+        r = handle(_make_envelope("cat id_rsa*", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_id_star_deny(self):
+        r = handle(_make_envelope("cat id_*", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_star_key_deny(self):
+        r = handle(_make_envelope("cat *.key", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_cred_star_json_deny(self):
+        r = handle(_make_envelope("cat cred*.json", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_question_glob_deny(self):
+        # `cat .en?` → 候補 `.env` が include 決着 → deny
         r = handle(_make_envelope("cat .en?", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
-    def test_non_sensitive_glob_also_ask(self):
-        # 非機密向けの glob も ergonomics 上は allow したいが、展開結果を静的に
-        # 判定できないため現実装は保守的に ask。ユーザーが許したい場合は明示 path に。
+    def test_inner_char_class_deny(self):
+        # `grep SECRET .e[n]v` → 候補 `.env` が include 決着 → deny
+        r = handle(_make_envelope("grep SECRET .e[n]v", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_char_class_deny(self):
+        # `cat [.]env` → 候補 `.env` が include 決着 → deny
+        r = handle(_make_envelope("cat [.]env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_star_log_allow(self):
+        # `*.log` は既定 rules と交差しないため allow (False positive 抑制)
         r = handle(_make_envelope("cat *.log", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertIsNone(_decision(r))
+
+    def test_dotenv_example_literal_allow(self):
+        r = handle(_make_envelope("cat .env.example", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_dotenv_example_star_allow(self):
+        # 全候補が exclude 決着 → allow
+        r = handle(_make_envelope("cat .env.example*", self.tmp))
+        self.assertIsNone(_decision(r))
+
+    def test_dotenv_sample_literal_allow(self):
+        r = handle(_make_envelope("cat .env.sample", self.tmp))
+        self.assertIsNone(_decision(r))
 
 
 class TestOptEqualsValue(BaseBash):
-    """``--opt=value`` / ``-o=value`` 形式の option-arg から value 側を拾う。
-
-    0.3.1 初版では ``_find_path_candidates`` が ``-`` 始まりのトークンを丸ごと
-    捨てていたため ``grep --file=.env foo README.md && true`` のような option
-    value に機密 path を埋め込む bypass があった (Codex P1 指摘)。
-    """
+    """``--opt=value`` / ``-o=value`` 形式の option-arg から value 側を拾う (0.3.1)。"""
 
     def test_grep_file_equals_sensitive(self):
         r = handle(_make_envelope(
@@ -395,7 +581,6 @@ class TestOptEqualsValue(BaseBash):
         r = handle(_make_envelope("cmd -o=.env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    # 無害な --opt=value は allow を維持
     def test_non_sensitive_opt_value_allow(self):
         r = handle(_make_envelope(
             "grep --color=auto foo README.md", self.tmp,
@@ -410,12 +595,7 @@ class TestOptEqualsValue(BaseBash):
 
 
 class TestAttachedShortOption(BaseBash):
-    """``-X<value>`` 短形 option に value が連結する形 (スペースも ``=`` もない) から
-    value 側の basename を拾う。``grep -f.env`` のような連結形 bypass を塞ぐ。
-
-    flag group (``-la``, ``-rf``) も同じロジックで候補化されるが、basename 不
-    一致のため allow に留まる。
-    """
+    """``-X<value>`` 短形連結の operand から basename を拾う (0.3.1)。"""
 
     def test_grep_attached_file_sensitive(self):
         r = handle(_make_envelope("grep -f.env foo README.md", self.tmp))
@@ -428,7 +608,6 @@ class TestAttachedShortOption(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
     def test_grep_multi_flag_attached_sensitive(self):
-        # -vn は flag group だが直後の .env.local が別 token なので拾える
         r = handle(_make_envelope(
             "grep -vn .env.local README.md", self.tmp,
         ))
@@ -448,17 +627,16 @@ class TestAttachedShortOption(BaseBash):
 
 
 class TestQuotedFdTarget(BaseBash):
-    """quote された ``'&2'`` 等を fd duplication と誤認しない (Codex P2 指摘)。
+    """quote された ``'&2'`` を fd duplication と誤認しない (Codex P2, 0.3.1)。"""
 
-    shlex posix 後 ``>`` + ``&N`` の 2 トークン形式は ``echo foo > '&2'``
-    (literal `&2` ファイルへの書込み) と区別できない。安全側で剥がさず、
-    後段の residual metachar で ask に倒す。単一トークン ``2>&1`` ``>&2``
-    は従来どおり ``_SAFE_REDIRECT_RE`` で剥離する。
-    """
-
-    def test_quoted_amp_target_not_stripped(self):
+    def test_quoted_amp_target_not_stripped_default(self):
         r = handle(_make_envelope("echo foo > '&2'", self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+    def test_quoted_amp_target_not_stripped_auto(self):
+        # 0.3.2: residual metachar も auto/bypass で allow に倒る
+        r = handle(_make_envelope("echo foo > '&2'", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
 
     def test_unquoted_single_token_fd_dup_stripped(self):
         r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
@@ -469,17 +647,12 @@ class TestQuotedFdTarget(BaseBash):
         self.assertIsNone(_decision(r))
 
     def test_dev_null_two_token_still_stripped(self):
-        # 2 トークン形式でも /dev/null 系は引き続き剥離
         r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
         self.assertIsNone(_decision(r))
 
 
 class TestUriVcsPathspec(BaseBash):
-    """URI / VCS pathspec / rsync ``user@host:path`` 経由の機密 path 検出。
-
-    ``git show HEAD:.env`` ``curl file://.env`` のような非 path 形式も、コロン
-    分割 + basename 判定で機密一致を検出する (Codex P1 指摘対応)。
-    """
+    """URI / VCS pathspec / rsync 経由の機密 path 検出 (0.3.1, 維持)。"""
 
     def test_git_show_pathspec(self):
         r = handle(_make_envelope("git show HEAD:.env", self.tmp))
@@ -499,7 +672,7 @@ class TestUriVcsPathspec(BaseBash):
 
 
 class TestCompoundDeny(BaseBash):
-    """複合コマンド (&&/||/;/|/\\n) のいずれかのセグメントが機密一致 → deny。"""
+    """複合コマンド (&&/||/;/|/\\n) のいずれかのセグメントが機密一致 → deny (0.3.0)。"""
 
     def test_pipe_left_sensitive(self):
         r = handle(_make_envelope("cat .env | head", self.tmp))
@@ -522,16 +695,14 @@ class TestCompoundDeny(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
     def test_compound_with_redirect_sensitive(self):
-        # 右辺で安全リダイレクト剥離しても .env 参照は残る
         r = handle(_make_envelope("pwd && cat .env 2>/dev/null", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
 
 class TestCompoundAllow(BaseBash):
-    """複合コマンドでも全セグメントが非機密 / 未知コマンドなら allow。"""
+    """複合コマンドでも全セグメントが非機密 / 未知コマンドなら allow (0.3.0)。"""
 
     def test_git_status_and_log_with_null_redirect(self):
-        # 実運用で頻出する複合コマンド (このリリースの主動機)
         cmd = (
             "git -C /tmp/x status && "
             "git -C /tmp/x log --oneline -5 2>/dev/null || true"
@@ -560,56 +731,64 @@ class TestCompoundAllow(BaseBash):
         self.assertIsNone(_decision(r))
 
     def test_cat_non_sensitive_with_space_redirect(self):
-        # 空白区切りの > /dev/null も剥がす
         r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
         self.assertIsNone(_decision(r))
 
     def test_cat_non_sensitive_with_stderr_dup(self):
-        # 2>&1 (fd 複製) も剥がす
         r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
         self.assertIsNone(_decision(r))
 
 
-class TestRedirectToNonNullAsk(BaseBash):
-    """/dev/null 以外への ``>`` リダイレクトは剥がさず fail-closed する。"""
+class TestRedirectToNonNull(BaseBash):
+    """/dev/null 以外への ``>`` リダイレクトは default=ask / auto/bypass=allow (0.3.2)。"""
 
-    def test_redirect_to_file(self):
+    def test_redirect_to_file_default(self):
         r = handle(_make_envelope("echo foo > out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_append_redirect(self):
+    def test_redirect_to_file_auto(self):
+        r = handle(_make_envelope("echo foo > out.txt", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+    def test_append_redirect_default(self):
         r = handle(_make_envelope("echo foo >> out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
 
-class TestFailClosedExec(BaseBash):
-    """絶対/相対パス実行・env prefix・shell wrapper は fail-closed。"""
+class TestArbitraryPathExec(BaseBash):
+    """basename が透過対象でない絶対/相対パス実行は opaque (default=ask / auto/bypass=allow)。"""
 
-    def test_absolute_path_exec(self):
+    def test_absolute_path_default(self):
         r = handle(_make_envelope("/bin/cat .env", self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+    def test_absolute_path_auto(self):
+        r = handle(_make_envelope("/bin/cat .env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
 
     def test_relative_path_exec(self):
         r = handle(_make_envelope("./myscript", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
+    def test_relative_path_auto(self):
+        r = handle(_make_envelope("./myscript", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
     def test_dotdot_exec(self):
         r = handle(_make_envelope("../bin/cat .env", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_env_prefix_cat(self):
-        r = handle(_make_envelope("FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
 
-    def test_env_prefix_source(self):
-        r = handle(_make_envelope("FOO=1 source .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+class TestBashShellWrapper(BaseBash):
+    """bash/sh/zsh -c 系は opaque (default=ask / auto/bypass=allow)。"""
 
-    def test_bash_c(self):
+    def test_bash_c_default(self):
         r = handle(_make_envelope('bash -c "cat .env"', self.tmp))
-        # bash -c は shell_wrapper → 先頭トークン `bash` で fail-closed
-        # (ただし `"cat .env"` 内は metachar 判定されないため、shell_wrapper 判定が効く)
         self.assertEqual(_decision(r), "ask")
+
+    def test_bash_c_auto(self):
+        r = handle(_make_envelope('bash -c "cat .env"', self.tmp, mode="auto"))
+        self.assertEqual(r, {})
 
     def test_bash_lc(self):
         r = handle(_make_envelope("bash -lc 'cat .env'", self.tmp))
@@ -619,28 +798,48 @@ class TestFailClosedExec(BaseBash):
         r = handle(_make_envelope('sh -c "cat .env"', self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_env_wrapper(self):
-        r = handle(_make_envelope("env X=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
     def test_xargs_a(self):
         r = handle(_make_envelope("xargs -a .env cat", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_command_wrapper(self):
-        r = handle(_make_envelope("command cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+    def test_xargs_a_auto(self):
+        r = handle(_make_envelope("xargs -a .env cat", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
 
     def test_sudo_wrapper(self):
         r = handle(_make_envelope("sudo cat .env", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
+    def test_sudo_wrapper_bypass(self):
+        r = handle(_make_envelope("sudo cat .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(r, {})
+
 
 class TestShlexFailure(BaseBash):
-    def test_unbalanced_quote(self):
+    def test_unbalanced_quote_default(self):
         r = handle(_make_envelope("cat '.env", self.tmp))
-        # metachar 判定で既に落ちない ($ や & は無い) → shlex.split 失敗 → ask
         self.assertEqual(_decision(r), "ask")
+
+    def test_unbalanced_quote_auto(self):
+        r = handle(_make_envelope("cat '.env", self.tmp, mode="auto"))
+        self.assertEqual(r, {})
+
+
+class TestConfirmedMatchAcrossModes(BaseBash):
+    """機密 path への確定 match は全 mode (auto/bypass を含む) で deny を維持する。"""
+
+    def test_all_modes_deny(self):
+        cmds = ("cat .env", "grep X .env", "base64 .env", "git show HEAD:.env")
+        modes = (
+            "default", "auto", "bypassPermissions", "acceptEdits", "dontAsk", "plan",
+        )
+        for cmd in cmds:
+            for mode in modes:
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{cmd} with mode={mode} should deny but got {_decision(r)!r}",
+                )
 
 
 if __name__ == "__main__":

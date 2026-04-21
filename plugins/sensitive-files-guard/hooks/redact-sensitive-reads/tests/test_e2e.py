@@ -210,6 +210,125 @@ class TestE2EReadHandler(unittest.TestCase):
         result = _run_main(envelope, ["--tool", "bash"])
         self.assertEqual(result, {})
 
+    def test_bash_auto_cat_env_denies(self):
+        """auto モードでも機密確定 match は deny (0.3.2)。"""
+        self._env_path()
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env", "description": "test"},
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+
+    def test_bash_auto_glob_dotenv_star_denies(self):
+        """auto モードでも glob 候補列挙で deny (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env*", "description": "test"},
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+
+    def test_bash_auto_star_log_allows(self):
+        """`*.log` は既定 rules と交差しないため auto/default 共に allow (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat *.log", "description": "test"},
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(result, {})
+
+    def test_bash_auto_opaque_wrapper_allows(self):
+        """auto モードでは opaque wrapper (`bash -c`) を allow に倒す (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "bash -c 'date'", "description": "test"},
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(result, {})
+
+    def test_bash_auto_env_prefix_dotenv_denies(self):
+        """env prefix を剥がした後の確定 match は auto でも deny (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "FOO=1 cat .env", "description": "test",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+
+    def test_bash_auto_abs_env_basename_denies(self):
+        """/usr/bin/env basename=env で透過 → cat .env で deny (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "/usr/bin/env FOO=1 cat .env",
+                "description": "test",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+
+    def test_bash_auto_abs_cat_basename_allows(self):
+        """basename=cat は透過対象外 → opaque → auto で allow (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "/bin/cat .env", "description": "test",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(result, {})
+
+    def test_bash_auto_input_redirect_denies(self):
+        """`< target` の target が機密 → auto でも deny (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat < .env", "description": "test"},
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+
+    def test_bash_auto_heredoc_allows(self):
+        """heredoc は target 抽出されず opaque → auto で allow (0.3.2)。"""
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "cat <<EOF\nhello\nEOF", "description": "test",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "auto",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(result, {})
+
     def test_edit_dotenv_denies(self):
         """Edit handler は既存 .env を deny 固定 (0.2.0)。"""
         (Path(self.tmp) / ".env").write_text("FOO=bar\n")

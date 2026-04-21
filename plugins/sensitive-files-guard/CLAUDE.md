@@ -100,21 +100,61 @@ sensitive-files-guard/
 | patterns.txt 読込失敗 | `ask_or_deny` + stderr 警告 |
 | サイズ 32KB 超 | keyonly_scan で streaming 鍵名抽出 |
 
-### Bash handler (0.3.1: unified operand scan, deny 固定)
+### Bash handler (0.3.2: 三態判定 + 前置き正規化 + glob 候補列挙)
 
-| ケース | 判定 |
-|---|---|
-| 任意のセグメントの任意の operand が機密パターン一致 (`cat .env`, `grep SECRET .env`, `base64 .env`, `timeout cat .env`, `git show HEAD:.env`, `curl file://.env` 等) | **`deny` 固定** |
-| `.env.example` / 非機密 path | allow |
-| 非機密 operand のみの未知コマンド (`grep foo README.md`, `npm test`, `date` 等) | allow |
-| 非機密 + 安全リダイレクト (`cat README.md 2>/dev/null`, `ls \| head`) | allow |
-| `git status && git log 2>/dev/null \|\| true` 等の日常複合 | allow |
-| glob operand (`cat .env*`, `grep X *.log`, `cat [.]env`) | `ask_or_deny` (fail-closed, 展開後不明) |
-| hard-stop metachar (`$`, `` ` ``, `<`, `(`, `)`, `{`, `}`) | `ask_or_deny` (判定不能、fail-closed) |
-| シェル予約語で始まるセグメント (`if` `then` `for` `do` `coproc` `time` `!` `eval` 等) | `ask_or_deny` (fail-closed, 制御構文 bypass 対策) |
-| 非安全リダイレクト (`> out.txt`, `>> log.txt`) | `ask_or_deny` (fail-closed) |
-| 絶対/相対パス実行 / env prefix / shell wrapper | `ask_or_deny` (判定不能、fail-closed) |
-| patterns.txt 読込失敗 / shlex.split 失敗 / normalize 失敗 | `ask_or_deny` (fail-closed) |
+```mermaid
+flowchart TD
+    A[Bash command] --> B{empty?}
+    B -- yes --> Z1[allow]
+    B -- no --> C{patterns.txt<br/>load OK?}
+    C -- no --> Z2[deny 固定<br/>policy 欠如]
+    C -- yes --> D{has hard-stop<br/>$/`/(/)/{/}/&lt;}
+    D -- yes --> E{`< target` 抽出<br/>機密一致?}
+    E -- yes --> Z3[deny 固定]
+    E -- no --> Z4[ask_or_allow<br/>default=ask<br/>auto/bypass=allow]
+    D -- no --> F[segment split<br/>&amp;&amp; / ‖ / ; / ‖ / \\n]
+    F --> G[per-segment 解析]
+    G --> H{shlex.split OK?}
+    H -- no --> Z5[ask_or_allow]
+    H -- yes --> I[strip safe redirects]
+    I --> J[normalize prefix<br/>env / command / builtin / nohup]
+    J --> K{None?<br/>opaque wrapper}
+    K -- yes --> Z6[ask_or_allow]
+    K -- no --> L{empty?}
+    L -- yes --> Z7[allow]
+    L -- no --> M{residual metachar?}
+    M -- yes --> Z8[ask_or_allow]
+    M -- no --> N{shell keyword?<br/>if/for/do/coproc 等}
+    N -- yes --> Z9[ask_or_allow]
+    N -- no --> O[operand scan]
+    O --> P{has glob?}
+    P -- yes --> Q{_glob_operand_is_sensitive}
+    Q -- True --> Z10[deny 固定]
+    Q -- False --> Z11[allow]
+    P -- no --> R{_operand_is_sensitive}
+    R -- True --> Z12[deny 固定]
+    R -- False --> Z13[allow]
+```
+
+| ケース | default | auto / bypassPermissions |
+|---|---|---|
+| 任意のセグメントの operand が機密 literal 一致 (`cat .env`, `grep SECRET .env` 等) | **deny** | **deny** |
+| 任意のセグメントの operand glob が既定 rules と交差 (`cat .env*`, `cat id_*`, `cat *.key` 等) | **deny** | **deny** |
+| `< target` の target が機密 (`cat < .env`, `< .env cat`) | **deny** | **deny** |
+| 前置き剥がし後の確定 match (`FOO=1 cat .env`, `env cat .env`, `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env`) | **deny** | **deny** |
+| URI / VCS pathspec (`git show HEAD:.env`, `curl file://.env`) | **deny** | **deny** |
+| 非機密 operand のみ (`echo foo`, `npm test`, `cat README.md`, `grep foo README.md`) | allow | allow |
+| `git status && git log 2>/dev/null \|\| true` 等の日常複合 | allow | allow |
+| 非機密 + 安全リダイレクト (`cat README.md 2>/dev/null`, `ls \| head`) | allow | allow |
+| 非交差 glob (`cat *.log`, `cat .env.example*`) | allow | allow |
+| hard-stop metachar (`$`, `` ` ``, `(`, `)`, `{`, `}`, `<<`, `<(`, `<&N`, `0<`) | ask | **allow** |
+| shell wrapper / インタプリタ (`bash -c`, `eval`, `python3 -c`, `sudo`, `awk`, `sed`, `xargs`, `time`, `!`, `exec` 等) | ask | **allow** |
+| shell keyword / 制御構文 (`if`, `for`, `while`, `do`, `coproc` 等で始まるセグメント) | ask | **allow** |
+| basename が透過対象でない abs/rel path 実行 (`/bin/cat`, `./script`, `../foo`) | ask | **allow** |
+| `env -i` / `env -u NAME` / `env --` / `command -p` / `command --` 等のオプション付き | ask | **allow** |
+| 非安全リダイレクト (`> out.txt`, `>> log.txt`, `echo foo > '&2'`) | ask | **allow** |
+| shlex.split / normalize 失敗 | ask | **allow** |
+| `patterns.txt` 読込失敗 | **deny** | **deny** |
 
 **セグメント分割**: `&&` `||` `;` `|` `\n` を quote-aware に分割。クォート内の
 演算子は保持される (`echo "a && b"` は 1 セグメント)。ダブルクォート閉じは
@@ -122,16 +162,37 @@ Bash 仕様どおり「直前連続バックスラッシュの偶奇」で判定
 
 **安全リダイレクト**: `_SAFE_REDIRECT_RE` に一致する `>/dev/null`, `2>&1`,
 `&>/dev/null`, `>/dev/stderr`, `>/dev/stdout` 等を剥がしてから判定する。
-`> file.txt` のような通常ファイルへの書き込みは剥がさず fail-closed に倒す
-(書き込み先が機密の可能性を潰すため)。
+`> file.txt` のような通常ファイルへの書き込みは剥がさず後段で `ask_or_allow`
+(default=ask / auto/bypass=allow) に倒す。
 
-**Unified operand scan (0.3.1)**: `_SAFE_READ_CMDS` ベースの allow-list を廃止。
-全てのセグメントで非 option トークンを一律 `_operand_is_sensitive` に通す。
-コロンを含む operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の
-basename も機密判定する。この方針反転により「未知コマンドは allow」を前提と
-した bypass (grep / base64 / xxd / timeout wrapper / VCS pathspec 等) を一括で
-塞いだ。コマンドが実際に file を読むかどうかは静的に判別しないため false
-positive (`echo .env`, `ls .env`, `mkdir .env`) が出るが、`patterns.local.txt` の
+**前置き正規化 (0.3.2 新設)** `_normalize_segment_prefix`:
+- 透過 prefix (剥がして再判定): `FOO=1`, `env [ASSIGNMENTS...]`, `command`,
+  `builtin`, `nohup`、および basename が上記 4 つの abs/rel path
+  (`/usr/bin/env`, `/bin/command`)
+- opaque (`None` 返却 → `ask_or_allow`): `bash`/`sh`/`zsh`/`eval`/`python`/
+  `sudo`/`awk`/`sed`/`xargs`/`time`/`!`/`exec` 等の `_OPAQUE_WRAPPERS`、
+  `env -i` 等のオプション付き、basename が透過対象でない abs/rel path
+
+**Glob 候補列挙 (0.3.2 新設)** `_glob_operand_is_sensitive`:
+- operand が `*` `?` `[` を含むときに、(a) `_literalize(operand)` の op_stem と
+  (b) 既定 rules の pt_stem で `fnmatchcase(pt_stem, operand)` が True のもの
+  を候補化し、`is_sensitive` で 1 つでも True なら **deny 固定**。
+- include/exclude の last-match-wins は既存 `is_sensitive` に委譲して整合。
+- (op_stem + pt_stem) / (pt_stem + op_stem) の連結候補は採用しない (`cat *.log`
+  が `.env.log` 候補で false-deny になるため)。
+
+**`<` 入力リダイレクト target 抽出 (0.3.2 新設)** `_extract_input_redirect_targets`:
+- regex `(?:^|[^<&0-9])<\s+(\S+)` で hard-stop 内の `< file` を抽出。
+- 抽出対象: `cat < .env`, `< .env cat`, `cat < .env && cat < .env.local` 等。
+- 除外対象 (regex で fall-through): `<<EOF` (heredoc), `<(...)` (process sub),
+  `<&N` (fd dup), `0<` (数値 fd 前置)、`cat<.env` (空白なし)。
+- target 機密一致なら `deny 固定`、抽出できないものは後段の `ask_or_allow` に倒る。
+
+**Unified operand scan (0.3.1 から維持)**: 全てのセグメントで非 option トークン
+を一律 `_operand_is_sensitive` / `_glob_operand_is_sensitive` に通す。コロンを含む
+operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の basename も判定。
+コマンドが実際に file を読むかどうかは静的に判別しないため false positive
+(`echo .env`, `ls .env`, `mkdir .env`) が出るが、`patterns.local.txt` の
 `!<basename>` exclude で個別対処できる。
 
 ### Edit/Write handler (0.2.0, deny 固定)
@@ -252,30 +313,52 @@ note: all values and comments removed for safety.
 
 違反は即 PR reject。`log_error` 呼出時は第二引数に渡す文字列を**目視確認**すること。
 
-## Fail-closed / deny 動作表 (0.3.0)
+## Fail-closed / deny 動作表 (0.3.2)
 
-### 機密検出済み (deny 固定 — 非 bypass / bypass どちらも同じ)
+`ask_or_allow` (Bash handler 用) と `ask_or_deny` (Read/Edit handler 用) の
+2 系統があり、autonomous 実行モード (auto / bypassPermissions) での挙動が異なる:
+- `ask_or_allow`: default=ask, **auto/bypass=allow** (誤爆を避ける)
+- `ask_or_deny`: 非 bypass=ask, **bypass=deny** (機密の可能性を抑える)
+
+### 機密検出済み (deny 固定 — 全 mode 同じ)
 
 | 検出元 | 判定 |
 |---|---|
 | Read: 機密 + regular | `deny` + minimal info |
-| Bash: 任意セグメントの任意 operand が機密 (`cat .env`, `grep X .env`, `timeout cat .env`, `HEAD:.env` 等) | `deny` |
+| Bash: 任意セグメントの任意 operand が機密 literal 一致 (`cat .env`, `grep X .env`, `timeout cat .env`, `HEAD:.env` 等) | `deny` |
+| Bash: operand glob が既定 rules と交差 (`cat .env*`, `cat id_*`, `cat .e[n]v` 等) | `deny` |
+| Bash: 前置き剥がし後の確定 match (`FOO=1 cat .env`, `env cat .env`, `command cat .env`, `/usr/bin/env FOO=1 cat .env` 等) | `deny` |
+| Bash: `< target` の target が機密 (`cat < .env`, `< .env cat`) | `deny` |
 | Edit/Write/MultiEdit: 機密 path への書き込み (通常/symlink/special) | `deny` |
 
-### 判定不能 (fail-closed、非 bypass = `ask` / bypass = `deny`)
+### 判定不能 (失敗ケース別)
 
-| 失敗箇所 | 非 bypass | bypass |
-|---|---|---|
-| stdin JSON parse 失敗 | `deny` (最厳) | `deny` |
-| patterns.txt 読込失敗 | `ask` + stderr | `deny` + stderr |
-| envelope に `permission_mode` キーなし | `ask` | 同左 (bypass 判定不能なので ask) |
-| matcher / safepath 例外 | `ask` | `deny` |
-| redaction engine 例外 | `ask` | `deny` |
-| handler 内の未捕捉例外 | `ask` | `deny` |
-| Bash: hard-stop (`$`, `` ` ``, `<`, `(`, `{`) / heredoc / shell wrapper / 非安全リダイレクト (`> file.txt`) | `ask` | `deny` |
-| Edit: 親ディレクトリが symlink / missing | `ask` | `deny` |
-| hook timeout (2s) | allow (介在不能) | 同左 |
-| Stop hook の patterns.txt OSError | **exit 0 + stderr warning + 空出力** (fail-open) | 同左 |
+| 失敗箇所 | default | auto | bypassPermissions |
+|---|---|---|---|
+| stdin JSON parse 失敗 | `deny` (最厳) | `deny` | `deny` |
+| Bash: `patterns.txt` 読込失敗 (0.3.2 で deny 固定化) | `deny` + stderr | `deny` + stderr | `deny` + stderr |
+| Read/Edit: `patterns.txt` 読込失敗 | `ask` + stderr | `ask` + stderr | `deny` + stderr |
+| envelope に `permission_mode` キーなし | `ask` | - | - |
+| matcher / safepath / redaction 例外 (Read/Edit) | `ask` | `ask` | `deny` |
+| `__main__` catch-all (handler 内未捕捉例外) | `ask` | `ask` | `deny` (0.3.2 では未緩和) |
+| Bash: hard-stop (`$`, `` ` ``, `(`, `{`, `<<`, `<(`) — `<` target 非機密 | `ask` | **allow** | **allow** |
+| Bash: shell wrapper (`bash -c`/`eval`/`python -c`/`sudo`/`awk` 等) | `ask` | **allow** | **allow** |
+| Bash: shell keyword (`if`/`for`/`do`/`coproc` 等) | `ask` | **allow** | **allow** |
+| Bash: basename 透過外の abs/rel path 実行 (`/bin/cat`, `./script`) | `ask` | **allow** | **allow** |
+| Bash: 残留 metachar (`> out.txt`, quoted `'&2'`) | `ask` | **allow** | **allow** |
+| Bash: `env -i` / `env --` / `command -p` / `command --` 等のオプション付き | `ask` | **allow** | **allow** |
+| Bash: shlex.split / normalize 失敗 | `ask` | **allow** | **allow** |
+| Edit: 親ディレクトリが symlink / missing | `ask` | `ask` | `deny` |
+| hook timeout (2s) | allow (介在不能) | allow | allow |
+| Stop hook の patterns.txt OSError | **exit 0 + stderr warning + 空出力** (fail-open) | 同左 | 同左 |
+
+**autonomous モードでの方針 (0.3.2)**: `--permission-mode auto` /
+`bypassPermissions` を選んだユーザーは「日常コマンドが片っ端から止まる」のを
+避けたい意図がある。確定 match (= 機密と判定済み) は全 mode で deny 固定だが、
+「機密かもしれない静的解析失敗」は autonomous で allow に倒す。これにより
+`bash -c 'date'` `if true; then echo x; fi` `/bin/cat README.md` 等の無害な
+コマンドが autonomous で素通りする。一方 `cat .env` `cat .env*` `FOO=1 cat .env`
+`cat < .env` 等の確定 match は全 mode で deny。
 
 **timeout だけ fail-open**: hook プロセス自体が応答不能だと deny/ask を返せない。
 代わりに timeout を短く (2 秒) し発生頻度を抑える。
@@ -284,33 +367,57 @@ note: all values and comments removed for safety.
 patterns.txt が読めない場合も stderr 警告のみで通常 Stop にする。
 read 側 (fail-closed) と意図的に非対称。
 
-## 既知制限 (0.3.0 時点)
+**`patterns.txt` 読込失敗 (Bash) は 0.3.2 で全 mode deny 固定化**: bash handler
+は autonomous モード対応で `ask_or_allow` を広く使うため、policy 欠如時に
+lenient で素通りすることを避けて `make_deny` で全停止する。Read/Edit 側は
+`ask_or_deny` のままで機密書込の onset 防御を維持。
+
+## 既知制限 (0.3.2 時点)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
-2. **Bash 間接アクセス** — `< .env`, `command cat`, `env VAR=... cat`,
-   `xargs -a .env`, `$VAR`, `$(...)`, heredoc, base64 decode, `/bin/cat`,
-   `bash -c`, `bash -lc`, `FOO=1 source .env` などは全て **ask (fail-closed)**。
-   allow ではない点に注意。
-   0.3.0 で `&&` `||` `;` `|` `\n` の複合コマンドと `>/dev/null` / `2>&1` 等の
-   安全リダイレクトはセグメント分割で静的解析可能になった
-3. **親ディレクトリ差し替え race** — `O_NOFOLLOW` は最終要素のみ保護し、
+2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
+   `awk`, `sed`, `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
+   などは静的解析できず、default モードでは ask、auto/bypassPermissions モードでは
+   **allow** に倒す (0.3.2 の方針変更)。
+   0.3.2 で前置き正規化が入ったため `FOO=1 cat .env`, `env cat .env`, `command cat .env`,
+   `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` は確定 match で deny に確定する。
+   `< .env` 形式も target 抽出により deny に確定する。
+3. **`<` 入力リダイレクト target 抽出の限界** — 単純 regex (`(?:^|[^<&0-9])<\s+(\S+)`)
+   による抽出のため、quote を厳密処理しない。`cat < "a file.env"` のような
+   quoted space 名は false negative (target 抽出に失敗 → opaque ask_or_allow)。
+   `cat<.env` (空白なし) も regex 仕様により拾わない (これらは後段の `ask_or_allow`
+   に倒るだけで false-deny は出ない方向の限界)。
+4. **autonomous モードでの opaque 緩和** (0.3.2) — `bash -c 'cat .env'` のような
+   shell wrapper 内に機密 path があっても auto/bypass では allow に倒る。
+   wrapper 内部の script を解析しないため検出できない。autonomous モードを選んだ
+   ユーザーが「日常コマンドを止めない」意図と平等な扱いとしての設計上のトレード
+   オフ。完全防御を求める場合は default モードで運用する。
+5. **`__main__.py` catch-all は 0.3.2 では未緩和** — bash handler 内部で未捕捉
+   例外が起きた場合、`__main__` 側の catch-all は従来通り `ask_or_deny`
+   (auto=ask / bypass=deny)。auto/bypass で `ask_or_allow` に緩和する変更は
+   0.3.3 以降に分離。
+6. **親ディレクトリ差し替え race** — `O_NOFOLLOW` は最終要素のみ保護し、
    途中要素の symlink 差し替え race は対象外 (原理的に完全防御不能)
-4. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外。
+7. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外。
    0.2.0 で fd ベース reader により「同一 hook プロセス内の再 open」race は排除済
-5. **`<DATA untrusted>` モデル解釈保証なし** — 包装 + sanitize + DATA タグ
+8. **`<DATA untrusted>` モデル解釈保証なし** — 包装 + sanitize + DATA タグ
    エスケープで多段防御するが、モデルが敵対的文脈として扱う保証は無い
-6. **Windows は fail-closed で deny exit** — SIGALRM 非対応のため hook 冒頭で
+9. **Windows は fail-closed で deny exit** — SIGALRM 非対応のため hook 冒頭で
    deny exit する (Step 0-c 実測結果確定前の暫定方針)
-7. **submodule 内 untracked は非対象** — `git ls-files --recurse-submodules` は
-   tracked のみ。untracked を submodule 内まで拾う git native オプションは無い
-8. **Git バージョン依存** — `--recurse-submodules` は git 1.7+ が必要。古い
-   環境では fallback で素の `ls-files` を使うが、submodule 検査は効かない
-9. **SIGALRM はプロセス global** — 同一プロセス内で複数スレッドから同時に
-   呼ぶと timeout が混線する (hook 1 回の実行では問題なし)
-10. **`keyonly_scan` の YAML リスト非対応** — `- name: x` 形式は拾わない
-11. **感度差 (軽微)** — 0.2.0 で Stop 側も parts 評価にしたが、両 hook が
+10. **submodule 内 untracked は非対象** — `git ls-files --recurse-submodules` は
+    tracked のみ。untracked を submodule 内まで拾う git native オプションは無い
+11. **Git バージョン依存** — `--recurse-submodules` は git 1.7+ が必要。古い
+    環境では fallback で素の `ls-files` を使うが、submodule 検査は効かない
+12. **SIGALRM はプロセス global** — 同一プロセス内で複数スレッドから同時に
+    呼ぶと timeout が混線する (hook 1 回の実行では問題なし)
+13. **`keyonly_scan` の YAML リスト非対応** — `- name: x` 形式は拾わない
+14. **感度差 (軽微)** — 0.2.0 で Stop 側も parts 評価にしたが、両 hook が
     異なる envelope / 実行タイミングを扱うため完全対称ではない
-12. **`patterns.txt` 変更の影響範囲** — 変更すると両 hook が同時に影響を受ける
+15. **`patterns.txt` 変更の影響範囲** — 変更すると両 hook が同時に影響を受ける
+16. **`_glob_candidates` の連結候補は採用しない** — 当初プランの (op_stem +
+    pt_stem) / (pt_stem + op_stem) 連結候補は `cat *.log` を `.env.log` 候補で
+    false-deny にしてしまうため不採用。代わりに「rule の pt_stem 自体が operand
+    glob と直接 fnmatch する」場合のみ候補化する
 
 ## 最低依存バージョン
 

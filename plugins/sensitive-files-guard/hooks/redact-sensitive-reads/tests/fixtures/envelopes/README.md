@@ -19,7 +19,16 @@ Phase 0 実測結果 (CLAUDE.md に恒久記録済み) を元に作成した Pre
 - `tool_name`: "Read" | "Bash" | "Edit" | "Write" | "MultiEdit" | ...
 - `tool_input`: dict
 - `cwd`: string (現在の作業ディレクトリ絶対パス)
-- `permission_mode`: "default" | "acceptEdits" | "bypassPermissions" | "plan"
+- `permission_mode`: "default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions"
+  - "default": ユーザーに都度確認
+  - "plan": plan mode (tool 実行は行われない)
+  - "acceptEdits": Edit/Write を自動承認
+  - "auto": CLI 2.1.83+ で追加。前段 classifier が tool call を審査
+  - "dontAsk": ユーザーへの ask を抑制 (現在の plugin 実装では lenient 扱いしない)
+  - "bypassPermissions": 全確認をスキップ (root 不可)
+  - 0.3.2 以降、bash handler の `ask_or_allow` は "auto" / "bypassPermissions" の 2 つの
+    み allow に倒す。Read/Edit handler の `ask_or_deny` は "bypassPermissions" のみ
+    deny に倒す。
 
 tool_input の内訳:
 - Read: `file_path`
