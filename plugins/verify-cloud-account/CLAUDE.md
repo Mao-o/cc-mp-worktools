@@ -301,13 +301,13 @@ python3 -m unittest discover tests
 ```
 
 - `test_command_parser.py`: split / env strip / wrapper strip / candidate
-  抽出の網羅的テスト (44 ケース)
+  抽出の網羅的テスト (64 ケース)
 - `test_dispatcher.py`: ルーティング / accounts ファイル入力パターン /
   service 統合 / キャッシュ相互作用 (22 ケース)
-- `test_services.py`: 各 CLI service の subprocess mock テスト (34 ケース)
+- `test_services.py`: 各 CLI service の subprocess mock テスト (33 ケース)
 - `test_cache.py`: ラウンドトリップ / mtime 無効化 / TTL / 破損検知 (9 ケース)
 
-合計 109 テスト。標準ライブラリのみ (pytest / pip install 不要)。
+合計 128 テスト。標準ライブラリのみ (pytest / pip install 不要)。
 
 ### スモーク (stdin に hook input JSON を流す)
 

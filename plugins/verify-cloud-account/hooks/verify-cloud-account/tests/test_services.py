@@ -108,6 +108,13 @@ class TestGithub(unittest.TestCase):
             err = github.verify(12345, "/p")
         self.assertIn("文字列または", err)
 
+    def test_dict_empty_object_fail_closed(self):
+        """Codex R4 回帰: 空 dict は fail-closed。"""
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_GITHUB_COM_ONLY)):
+            err = github.verify({}, "/p")
+        self.assertIsNotNone(err)
+        self.assertIn("空", err)
+
 
 class TestFirebase(unittest.TestCase):
     def test_string_match(self):

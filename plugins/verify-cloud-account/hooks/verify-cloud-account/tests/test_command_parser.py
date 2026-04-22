@@ -264,6 +264,87 @@ class TestStripTransparentWrappers(unittest.TestCase):
             "bash -c 'gh pr list'",
         )
 
+    def test_sudo_flag_with_value(self):
+        """Codex R3 回帰: `sudo -u USER` の値ありフラグをペアで剥がす。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -u deploy gh pr list"),
+            "gh pr list",
+        )
+
+    def test_sudo_bool_flag(self):
+        """bool flag (値なし) は 1 トークンで消費。`sudo -n gh` の `gh` を食わない。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -n gh pr list"),
+            "gh pr list",
+        )
+
+    def test_sudo_long_flag_equals(self):
+        """`--user=deploy` は 1 トークンで消費。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo --user=deploy gh pr list"),
+            "gh pr list",
+        )
+
+    def test_sudo_long_flag_space(self):
+        """`--user deploy` は 2 トークン消費。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo --user deploy gh pr list"),
+            "gh pr list",
+        )
+
+    def test_sudo_multiple_flags_mixed(self):
+        """値あり / 値なしが混在するケース。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -u deploy -E gh pr list"),
+            "gh pr list",
+        )
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -g app -u deploy gh pr list"),
+            "gh pr list",
+        )
+
+    def test_sudo_double_dash_separator(self):
+        """`sudo -- gh` の `--` は flag 終端として消費、以降はコマンド。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -- gh pr list"),
+            "gh pr list",
+        )
+
+    def test_sudo_unknown_flag_treated_as_bool(self):
+        """未知の `-X` は bool と仮定し単独トークンとして skip。"""
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -X gh pr list"),
+            "gh pr list",
+        )
+
+    def test_time_flag_with_value(self):
+        self.assertEqual(
+            strip_transparent_wrappers("time -o out.txt gh pr list"),
+            "gh pr list",
+        )
+
+    def test_npx_flag_with_value(self):
+        self.assertEqual(
+            strip_transparent_wrappers("npx -p some-pkg firebase deploy"),
+            "firebase deploy",
+        )
+
+    def test_exec_flag_with_value(self):
+        """`exec -a myname gh ...` の `-a` は値あり flag。"""
+        self.assertEqual(
+            strip_transparent_wrappers("exec -a myname gh pr list"),
+            "gh pr list",
+        )
+
+    def test_stacked_wrappers_with_flags(self):
+        """多段 wrapper + 各 wrapper の flag の組合せ。"""
+        self.assertEqual(
+            strip_transparent_wrappers(
+                "sudo -u deploy time -o out.txt mise exec -- firebase deploy"
+            ),
+            "firebase deploy",
+        )
+
 
 class TestExtractCandidates(unittest.TestCase):
     def test_chain_with_cd(self):

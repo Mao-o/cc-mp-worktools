@@ -6,7 +6,7 @@
 - strip_leading_env: 先頭の `FOO=bar` 形式環境変数割当を剥がす
 - strip_transparent_wrappers: 透過的 wrapper (`sudo`, `time`, `nohup`,
   `env`, `command`, `builtin`, `exec`, `npx`, `pnpm exec`, `pnpm dlx`,
-  `mise exec --`, `bun x`) を剥がす
+  `mise exec --`, `bun x`) とその直後のフラグ (`sudo -u USER` 等) を剥がす
 - extract_candidates: 上記を合成して「コマンドマッチにかける候補断片」を返す
 
 参考: liberzon/claude-hooks の smart_approve.py のアプローチをベースに独自実装。
@@ -18,6 +18,23 @@ import re
 _WRAPPERS_SINGLE = {"sudo", "time", "nohup", "command", "builtin", "exec", "npx"}
 _WRAPPERS_TWO = {("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x")}
 _WRAPPERS_THREE = {("mise", "exec", "--")}
+
+# wrapper ごとに「値を取るフラグ」(短縮 / 長形式)。ここに無い `-X` は bool として
+# 単独トークン消費、`-X=value` / `--key=value` は形式的に 1 トークンで消費。
+_WRAPPER_FLAGS_WITH_VALUE = {
+    "sudo": {
+        "-u", "-g", "-U", "-p", "-C", "-D", "-h", "-r", "-t", "-T", "-R", "-a",
+        "--user", "--group", "--other-user", "--prompt", "--close-from",
+        "--chdir", "--host", "--role", "--type", "--command-timeout",
+        "--chroot", "--auth-type",
+    },
+    "time": {"-o", "-f", "--output", "--format"},
+    "npx": {
+        "-p", "--package", "-c", "--call",
+        "--node-options", "--node-arg",
+    },
+    "exec": {"-a"},
+}
 
 
 def split_on_operators(command: str) -> list[str]:
@@ -191,6 +208,40 @@ def _drop_tokens(cmd: str, n: int) -> str:
     return remaining.lstrip()
 
 
+def _drop_wrapper_flags(cmd: str, wrapper: str) -> str:
+    """wrapper 直後のフラグ (値あり / 値なし) を剥がす。
+
+    - `--` 単独トークンは POSIX の flag 終端として消費し、それ以降は一切剥がさない
+    - `-X=value` / `--key=value` は 1 トークンで消費 (bool / 値あり問わず)
+    - `-X` / `--key` が `_WRAPPER_FLAGS_WITH_VALUE[wrapper]` に含まれていれば
+      次トークンを値として消費、そうでなければ bool と見なし単独消費
+    - 非 `-` トークンが現れた時点で終了 (= コマンド本体の始まり)
+    """
+    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+    s = cmd.lstrip()
+    while s:
+        m = re.match(r"^(\S+)", s)
+        if not m:
+            break
+        tok = m.group(1)
+        if tok == "--":
+            s = s[m.end():].lstrip()
+            break
+        if not tok.startswith("-"):
+            break
+        if "=" in tok:
+            s = s[m.end():].lstrip()
+            continue
+        if tok in flags_with_value:
+            s = s[m.end():].lstrip()
+            m2 = re.match(r"^(\S+)", s)
+            if m2:
+                s = s[m2.end():].lstrip()
+        else:
+            s = s[m.end():].lstrip()
+    return s
+
+
 def _strip_one_wrapper(cmd: str) -> str | None:
     toks = _tokens(cmd)
     if not toks:
@@ -212,7 +263,8 @@ def _strip_one_wrapper(cmd: str) -> str | None:
         return _drop_tokens(cmd, 1)
 
     if t0 in _WRAPPERS_SINGLE:
-        return _drop_tokens(cmd, 1)
+        rest = _drop_tokens(cmd, 1)
+        return _drop_wrapper_flags(rest, t0)
 
     return None
 

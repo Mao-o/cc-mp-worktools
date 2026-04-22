@@ -75,6 +75,12 @@ def verify(expected, project_dir: str) -> str | None:
         return "GitHub: アクティブアカウントを取得できません。gh auth login を実行してください。"
 
     if isinstance(expected, dict):
+        if not expected:
+            return (
+                'GitHub: accounts.local.json の "github" オブジェクトが空です。'
+                ' {"github": {"github.com": "YOUR_ACCOUNT"}} の形式で'
+                ' ホスト名とアカウントのマップを記述してください。'
+            )
         errors: list[str] = []
         for host, want in expected.items():
             if not isinstance(want, str):
