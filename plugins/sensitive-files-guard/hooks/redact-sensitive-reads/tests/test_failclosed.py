@@ -81,17 +81,22 @@ class TestAskOrAllow(unittest.TestCase):
         self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_accept_edits_returns_ask(self):
+        # acceptEdits は Edit/Write 専用モード。Bash lenient の意図が無いため
+        # 明示的に非 lenient 維持 (ask に倒る)。
         r = ask_or_allow("reason", {"permission_mode": "acceptEdits"})
         self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_dont_ask_returns_ask(self):
-        # dontAsk は現状 plugin 実装で lenient 扱いしない
+        # dontAsk は明示的な非 lenient 判断として既存方針を維持する (ask に倒る)。
         r = ask_or_allow("reason", {"permission_mode": "dontAsk"})
         self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
 
-    def test_plan_returns_ask(self):
+    def test_plan_returns_allow(self):
+        # 0.3.3: plan を LENIENT_MODES に追加。現行 CLI では plan mode で hook が
+        # 発火しない観測もあるが、発火するケース (A/B) に対して正しく allow に倒り、
+        # Case C (非発火) に対しては dead entry として無害に機能する互換層。
         r = ask_or_allow("reason", {"permission_mode": "plan"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertEqual(r, {})
 
     def test_missing_mode_returns_ask(self):
         r = ask_or_allow("reason", {})
