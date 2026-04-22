@@ -38,9 +38,9 @@
     {
       "name": "verify-cloud-account",
       "source": "./plugins/verify-cloud-account",
-      "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud) のアクティブアカウントがプロジェクト想定値と一致するか検証する hook。不一致なら deny + 切替手順を提示",
+      "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud / kubectl) のアクティブアカウントがプロジェクト想定値と一致するか検証する hook。コマンドチェーン・ラッパ対応、hostname 別 / alias / account 拡張、短期キャッシュ付き",
       "category": "security",
-      "keywords": ["security", "hooks", "pretooluse", "bash", "github", "firebase", "aws", "gcloud", "account-verification", "multi-account"]
+      "keywords": ["security", "hooks", "pretooluse", "bash", "github", "firebase", "aws", "gcloud", "kubectl", "account-verification", "multi-account"]
     }
   ]
 }

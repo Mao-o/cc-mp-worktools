@@ -12,7 +12,13 @@ SETUP_HINT = (
 )
 
 
-def verify(expected: str, project_dir: str) -> str | None:
+def verify(expected, project_dir: str) -> str | None:
+    if not isinstance(expected, str):
+        return (
+            f'AWS: accounts.local.json の "aws" は文字列で指定してください '
+            f'(現在: {type(expected).__name__})。'
+        )
+
     try:
         result = subprocess.run(
             ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"],
