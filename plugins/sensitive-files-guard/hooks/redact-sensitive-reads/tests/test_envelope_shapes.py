@@ -10,6 +10,8 @@ import unittest
 
 from _testutil import FIXTURES
 
+from core.output import LENIENT_MODES
+
 ENVELOPES_DIR = FIXTURES / "envelopes"
 
 # 共通キー (全 tool)
@@ -22,6 +24,17 @@ _TOOL_INPUT_KEYS = {
     "edit": {"file_path", "old_string", "new_string"},
     "write": {"file_path", "content"},
     "multiedit": {"file_path", "edits"},
+}
+
+# fixtures/envelopes/README.md:22 と core/output.py::LENIENT_MODES を突合する
+# 既知 permission_mode の完全列挙。CLI 2.1.x 系の実測に基づく。
+_KNOWN_PERMISSION_MODES = {
+    "default",
+    "plan",
+    "acceptEdits",
+    "auto",
+    "dontAsk",
+    "bypassPermissions",
 }
 
 
@@ -76,6 +89,35 @@ class TestEnvelopeShapes(unittest.TestCase):
         first = env["tool_input"]["edits"][0]
         self.assertIn("old_string", first)
         self.assertIn("new_string", first)
+
+
+class TestLenientModesSubset(unittest.TestCase):
+    """LENIENT_MODES と fixtures/envelopes/README.md の列挙が乖離していないか。
+
+    CLI 側が permission_mode の新しい値を追加したとき、docs と実動が乖離する前に
+    気付けるようにする。本テストが red になったら:
+      1. 実 envelope を採取して permission_mode の値を確認
+         (``hooks/_debug/capture_envelope.py`` を作成して hooks.json 経由で取る)
+      2. `core/output.py::LENIENT_MODES` と
+         `tests/fixtures/envelopes/README.md:22` の列挙を同時更新
+      3. `docs/DESIGN.md` の lenient 方針も更新
+      4. `CLAUDE.md` の CLI 再実測 Runbook に実測日を追記
+    """
+
+    def test_lenient_modes_are_subset_of_known_permission_modes(self):
+        unknown = LENIENT_MODES - _KNOWN_PERMISSION_MODES
+        self.assertFalse(
+            unknown,
+            msg=(
+                f"LENIENT_MODES has unknown values: {sorted(unknown)}. "
+                "Update fixtures/envelopes/README.md, docs/DESIGN.md, and "
+                "CLAUDE.md's CLI re-probe Runbook if CLI added a new mode."
+            ),
+        )
+
+    def test_known_modes_contains_six_canonical_entries(self):
+        # regression guard: fixtures README の列挙と対称に 6 値を固定
+        self.assertEqual(len(_KNOWN_PERMISSION_MODES), 6)
 
 
 if __name__ == "__main__":

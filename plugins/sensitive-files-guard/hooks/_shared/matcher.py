@@ -9,8 +9,6 @@ rules は ``list[tuple[str, bool]]`` 形式で、各 tuple は ``(pattern, is_ex
 評価はリスト先頭から全件走査し、**最後にマッチしたルールの符号**を採用する
 (gitignore 風 last-match-wins)。既定 patterns.txt 末尾に書いた exclude を、
 ユーザーが ``patterns.local.txt`` 側で再び include に差し戻せるようにするため。
-
-Step 3 で case-insensitive 化の opt-out (``SFG_CASE_SENSITIVE=1``) を追加予定。
 """
 from __future__ import annotations
 

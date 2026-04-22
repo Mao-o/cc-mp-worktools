@@ -26,9 +26,14 @@ Phase 0 実測結果 (CLAUDE.md に恒久記録済み) を元に作成した Pre
   - "auto": CLI 2.1.83+ で追加。前段 classifier が tool call を審査
   - "dontAsk": ユーザーへの ask を抑制 (現在の plugin 実装では lenient 扱いしない)
   - "bypassPermissions": 全確認をスキップ (root 不可)
-  - 0.3.2 以降、bash handler の `ask_or_allow` は "auto" / "bypassPermissions" の 2 つの
-    み allow に倒す。Read/Edit handler の `ask_or_deny` は "bypassPermissions" のみ
-    deny に倒す。
+  - 0.3.3 以降、bash handler の `ask_or_allow` は "auto" / "bypassPermissions" /
+    "plan" の 3 つで allow に倒す。Read/Edit handler の `ask_or_deny` は
+    "bypassPermissions" のみ deny に倒す。`acceptEdits` / `dontAsk` は明示的に
+    非 lenient を維持 (ask に倒る)。
+  - 上記 6 値は `core/output.py::LENIENT_MODES` と `tests/test_envelope_shapes.py`
+    の `_KNOWN_PERMISSION_MODES` で突合される。CLI 側が新しい mode を追加したら
+    両方を同時に更新すること (Runbook は `CLAUDE.md` の "CLI バージョンアップ時の
+    再実測手順" を参照)。
 
 tool_input の内訳:
 - Read: `file_path`
