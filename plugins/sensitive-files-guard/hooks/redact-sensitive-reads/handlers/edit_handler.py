@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from core import logging as L
 from core import output
-from core.matcher import is_sensitive
+from _shared.matcher import is_sensitive
 from core.patterns import load_patterns
 from core.safepath import classify, is_regular_directory, normalize
 from redaction.dotenv import redact_dotenv

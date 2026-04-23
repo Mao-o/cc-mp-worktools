@@ -1,5 +1,145 @@
 # Changelog
 
+## 0.3.4
+
+**shim 削除 + Bash input redirect 解析を自前 parser に刷新**。0.3.3 で予告して
+いた `core/matcher.py` shim の削除と、`<` 入力リダイレクト target 抽出を
+**有効な bash syntax を網羅**する形に再設計。挙動変更は「0.3.3 で
+`ask_or_allow` (auto/bypass allow) だったケースが機密一致時に deny に確定する」
+方向のみで、新たに allow に倒るケースは無い。
+
+### 主要な変更
+
+1. **`core/matcher.py` shim 削除** — `hooks/redact-sensitive-reads/core/matcher.py`
+   (1 行の re-export 層) を削除。`handlers/read_handler.py` / `handlers/bash_handler.py`
+   / `handlers/edit_handler.py` / `tests/test_matcher.py` の import を
+   `_shared.matcher` 直参照に書換。`check-sensitive-files/checker.py` は既に
+   `_shared.matcher` 直参照で統一されており、redact 側だけ残っていた非対称を解消。
+   `tests/test_shared_import.py` から shim 契約テスト
+   (`test_core_matcher_reexports_shared`) を削除。公開 API (hook stdin/stdout
+   envelope) 変更なし。
+2. **Bash input redirect 解析を character-level parser に刷新** — 0.3.2 の
+   regex (`(?:^|[^<&0-9])<\s+(\S+)`) は空白あり + 非 quote + fd 前置きなしの
+   形式しか拾えず、`cat<.env` / `cat 0< .env` / `cat N<target` / `cat < ".env"`
+   等が false-negative で `ask_or_allow` に倒っていた。検討した `shlex.split`
+   ベースは `<` を演算子として分割しないため B スコープ (全有効 redirect 構文)
+   を達成できず、**character-level quote-aware parser** を新設
+   (`handlers/bash/redirects.py::_scan_input_redirect_targets_chars`)。
+   - 対応: `<` / `<target` / `N<` / `N<target` / quote 付き (`< "t"`, `<'t'`)
+     / 複数 (`cmd1 && cmd2`)
+   - 除外: `<<` heredoc, `<<<` herestring, `<&N`/`<&-` fd dup, `<(...)` process sub
+     (後者は depth tracking で閉じ `)` までスキップし内部の `<` を拾わない)
+   - `<` を含むのに target が取れなかった場合は
+     `bash_classify:input_redirect_empty_extract` ログで観測可能
+3. **DESIGN.md に "Bash handler の対応文法範囲" 節を新設** — character-level
+   parser と shlex-based segment 解析の使い分け、対応/対応外の境界、観測ログ
+   tag 一覧を明文化 (Codex review 指摘 3/5 対応)。
+4. **character-level parser を word 概念ベースに強化 (Codex PR review R1-R8)**
+   — PR レビューで 8 件の指摘を受けて修正:
+   - **R1 (P2)**: `_consume_redirect_target` が closing quote で即 return して
+     いたため、``cat < ".env".example`` の suffix ``.example`` を落として
+     ``.env`` だけを抽出していた (挙動リグレッション)。POSIX sh の word 概念に
+     従い、word boundary (quote 外の whitespace / operator) まで quote / bare /
+     backslash を mix して読み続ける形に変更。
+   - **R2 (P3)**: scanner が unquoted shell comment (`# ...` ) 内の `<` を
+     拾ってしまう false-positive を塞いだ。`#` が word start 位置 (先頭 / 空白 /
+     operator 直後) にある場合のみ行末まで skip する (Bash 仕様通り)。
+     word 内部の `#` (例: ``abc#def``) や quote 内の `#` はコメント扱いしない。
+   - **R3 (P1, security)**: process sub `<(...)` の depth tracking が escape
+     された `\(` `\)` を通常括弧として数えていた。例: ``cat <(echo \\() < .env``
+     で escape された `\(` が depth を増やし続け、`)` で 0 に戻らず後続の
+     ``< .env`` を取りこぼし、auto/plan モードで `ask_or_allow` → allow に倒って
+     **機密 bypass** を許す regression。修正: depth scan 内でも quote 外
+     backslash escape を尊重し、escape された `(` `)` を depth 計算から除外する。
+   - **R4 (P2)**: double quote 内 backslash escape が任意文字を unescape
+     していたため、``cat < ".\\env"`` (literal ``.\\env``) が ``.env`` として
+     解釈されて誤って deny する false-positive があった。POSIX sh の
+     double-quote semantics に準拠し、``\\X`` は X が ``$`` ``\\`` ``"`` ``\\\\``
+     ``\\n`` のいずれかのときのみ X を取り込み、それ以外は ``\\`` も literal
+     として保持する形に修正。`_DQ_BACKSLASH_ESCAPABLE` frozenset を新設。
+   - **R5 (P1, security)**: `<(...)` ブランチ終了直後に ``at_word_start`` を
+     更新せず、続く ``#`` を誤ってシェルコメント扱いしていた。例:
+     ``cat <(echo x)#bar < .env`` では bash 上 ``<(echo x)#bar`` が 1 word なので
+     ``#`` は comment ではないが、parser は ``# < .env`` まで skip してしまい
+     後続 redirect を取りこぼし、auto/plan で ``ask_or_allow`` → allow に倒って
+     **機密 bypass** を許す regression。修正: ``<(...)`` 終了後 ``at_word_start
+     = False`` (process sub は 1 word)。``<<`` / ``<&`` 後は ``at_word_start =
+     True`` (operator なので word 開始)、target 抽出後も ``False`` を明示。
+   - **R6 (P2)**: ``[[ "$x"<.env ]]`` のような bash conditional / arithmetic
+     式内の ``<`` を redirect target として抽出して deny に倒っていた。bash で
+     は ``[[ ... ]]`` 内の ``<`` は文字列比較演算子、``(( ... ))`` 内の ``<``
+     は算術比較演算子で、いずれも redirect ではない。修正: ``[[`` (word start
+     位置のみ) を検出したら閉じ ``]]`` まで quote / escape を尊重しつつスキップ。
+     ``((`` も同様で内部 nesting に対応するため depth tracking を実装。元の
+     regex 挙動 (空白必須なので ``[[ "$x"<.env ]]`` 等は target 取れず ask) と
+     整合する形に戻した。
+   - **R7 (P1, security)**: R6 で追加した ``[[`` 検出条件が「word が ``[[`` で
+     始まる」だけで、``[[foo`` のような通常 word も予約語扱いしていた。bash の
+     ``[[`` 予約語は **直後に空白必須** が仕様。``tee [[foo < .env`` で
+     ``[[foo`` 以降が予約語ブロックと誤認され、閉じ ``]]`` を探し続けて command
+     末まで消費 → 後続の ``< .env`` を取りこぼし、auto/plan で
+     ``ask_or_allow`` → allow に倒って **機密 bypass** を許す regression。
+     修正: ``[[`` 検出条件に ``command[i + 2] in " \\t\\n"`` を追加。``((`` は
+     bash 仕様上 space optional のため変更なし。
+   - **R8 (P1, security)**: R6/R7 後も ``[[`` ``((`` を「word start で空白に
+     続けば全位置で予約語扱い」していた。bash 仕様では **command word 位置**
+     (segment 先頭 = 入力先頭 / `;` / `&` / `|` / 改行 直後) でのみ予約語。
+     引数位置 (例: ``tee [[ "$x" < .env ]]``) では通常 word なので、内部の
+     ``< .env`` は本物の input redirect として扱う必要がある。修正: parser に
+     ``at_command_start`` 状態を追加 (segment separator ``|&;\\n`` 直後で True、
+     word / quote / escape 消費で False)。``[[`` ``((`` を予約語扱いするのは
+     ``at_command_start = True`` のときのみに限定。
+
+### 挙動変更 (0.3.3 → 0.3.4)
+
+| コマンド | 0.3.3 | 0.3.4 |
+|---|---|---|
+| `cat<.env` (空白なし) | ask_or_allow | **deny** |
+| `cat<".env"` (inline quoted) | ask_or_allow | **deny** |
+| `cat 0< .env` (fd 前置き + 空白) | ask_or_allow | **deny** |
+| `cat 0<.env`, `cat N<target` (fd 前置き inline / 任意 fd) | ask_or_allow | **deny** |
+| `cat < ".env"`, `cat < '.env'` (quote + 空白) | ask_or_allow | **deny** |
+| `cat < ".env.local"`, `cat < ".env*"` (quoted glob) | ask_or_allow | **deny** |
+| `cat < "a file.env"` (rule 非 match の quoted space 名) | ask_or_allow | ask_or_allow (抽出成功、rule 非 match で維持) |
+| `cat < ".env".example` (連結 word, exclude 決着, R1 fix) | ask_or_allow | ask_or_allow (target `.env.example` で exclude 決着) |
+| `cat < ".env".local` (連結 word, R1 fix) | ask_or_allow | **deny** (target `.env.local` で rule 一致) |
+| `echo ok #cat<.env` (シェルコメント内, R2 fix) | ask_or_allow | ask_or_allow (comment skip で target 空) |
+| `cat <(echo \(\)) < .env` (process sub 内 escape paren, R3 fix) | auto/plan で **bypass** (security regression) | **deny** (depth tracking 修正で target 抽出成功) |
+| `cat < ".\env"` (literal `.\env`, R4 fix) | **誤 deny** (`.env` と誤解釈) | ask_or_allow (literal `.\env` で rule 非 match) |
+| `cat < ".env\*"` (literal `.env\*`, R4 fix) | 誤って glob 展開対象扱い | literal `.env\*` (rule 非 match) |
+| `cat <(echo x)#bar < .env` (proc sub + 連結 `#`, R5 fix) | auto/plan で **bypass** (security regression) | **deny** (`#` は word 内、target 抽出成功) |
+| `[[ "$x"<.env ]]` (条件式内の `<`, R6 fix) | **誤 deny** (`<` を redirect 扱い) | ask_or_allow (`[[ ]]` 内 skip で target なし) |
+| `(( a<5 ))` (算術内の `<`, R6 fix) | **誤 deny** (同上) | ask_or_allow (`(( ))` 内 skip で target なし) |
+| `tee [[foo < .env` (`[[foo` は通常 word, R7 fix) | auto/plan で **bypass** (security regression) | **deny** (`[[` 予約語に space 必須、target 抽出成功) |
+| `tee [[ "$x" < .env ]]` (引数位置の `[[`, R8 fix) | auto/plan で **bypass** (security regression) | **deny** (引数位置 `[[` は通常 word、target 抽出成功) |
+| `cat <<EOF`, `cat <<< '.env'`, `cat <&2`, `cat <(cat .env)` | 変更なし | 変更なし (opaque 維持) |
+| 既存 `cat < .env` / `cat < .env*` 等 | deny | deny (維持) |
+
+### 内部構造の変更
+
+- `handlers/bash/redirects.py` に `_scan_input_redirect_targets_chars` /
+  `_consume_redirect_target` を新設 (pure helper)
+- `_extract_input_redirect_targets` は `handlers/bash_handler.py` 内で
+  character-level parser を呼ぶ thin wrapper (patch seam 維持)
+- `handlers/bash/constants.py::_INPUT_REDIRECT_RE` を削除 (fallback 不要)
+- `core/matcher.py` 削除 (redact-sensitive-reads のみ、_shared は不変)
+- `_scan_input_redirects` に `input_redirect_empty_extract` 観測ログ追加
+- テスト件数: 411 → 502 件 (+92 追加, -1 削除, 2 件は挙動変更に伴う書換)。
+  内訳: inline/fd 10 + quote 6 + exclusion 7 + handle 11 + R1 concat word 6 +
+  R2 comment 7 + handle R1/R2 4 + R3 escape paren 5 + handle R3 2 +
+  R4 dq escape 6 + handle R4 1 + R5 proc-sub word boundary 3 + handle R5 2 +
+  R6 conditional/arith 8 + handle R6 2 + R7 [[ space-required 4 + handle R7 2 +
+  R8 [[ command-position 4 + handle R8 2
+- 公開 API / patch seam / LENIENT_MODES 不変
+
+### 既知の未対応 (0.3.5 以降に分離)
+
+- 例外クラス単位での `__main__` catch-all 緩和 (旧 H1。bash_handler 内で
+  raise する意味論的経路が実在しないことが判明したため設計練り直し)
+- shell wrapper (`bash -c "cat .env"` 等) 内部 script 解析
+- Windows (Step 0-c) 実測方針確定
+- Safe-search ラッパスクリプト (`scripts/safe_grep.py` / `safe_find.py`)
+
 ## 0.3.3
 
 **ブラッシュアップ + plan mode lenient 化**。0.3.2 の誤爆ガード緩和 (三態判定 +

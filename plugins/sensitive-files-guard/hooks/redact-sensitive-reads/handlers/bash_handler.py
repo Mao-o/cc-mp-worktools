@@ -54,7 +54,7 @@ import shlex
 
 from core import logging as L
 from core import output
-from core.matcher import is_sensitive
+from _shared.matcher import is_sensitive
 from core.patterns import load_patterns
 from core.safepath import normalize
 
@@ -66,7 +66,6 @@ from handlers.bash.constants import (  # noqa: F401
     _ENV_PREFIX_RE,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
-    _INPUT_REDIRECT_RE,
     _OPAQUE_WRAPPERS,
     _REDIRECT_OP_TOKENS,
     _SAFE_READ_CMDS,
@@ -85,7 +84,9 @@ from handlers.bash.operand_lexer import (  # noqa: F401
     _literalize,
 )
 from handlers.bash.redirects import (  # noqa: F401
+    _consume_redirect_target,
     _is_safe_redirect_token,
+    _scan_input_redirect_targets_chars,
     _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
@@ -223,16 +224,19 @@ def _operand_is_sensitive(
 
 
 def _extract_input_redirect_targets(command: str) -> list[str]:
-    """``< file`` 形式の file (target) を抽出。quote は保たず raw で返す。
+    """``< file`` 形式の file (target) を抽出する (0.3.4: character-level parser 委譲)。
 
-    シンプル regex のため shell quote を厳密に処理しないが、抽出に失敗しても
-    後段の ``ask_or_allow`` に倒るだけで false allow には傾かない。heredoc
-    (``<<EOF``), fd dup (``<&N``), process substitution (``<(...)``), 数値 fd
-    前置 (``0<``) は除外される。
+    0.3.2 の regex 版 (``(?:^|[^<&0-9])<\\s+(\\S+)``) を廃し、
+    ``handlers.bash.redirects._scan_input_redirect_targets_chars`` に委譲。
+    quote-aware で ``cat<target`` (空白なし) / ``cat 0< target`` (fd 前置き) /
+    ``cat < "a file"`` (quote 付き) を網羅する。除外対象 (heredoc ``<<`` /
+    herestring ``<<<`` / fd dup ``<&`` / process sub ``<(``) は parser 内で
+    明示的にスキップ。
 
-    この関数は ``test_input_redirect.py`` が直接 import するため patch seam。
+    この関数は ``test_input_redirect.py`` が直接 import するため patch seam として
+    thin wrapper で維持する (signature 不変)。
     """
-    return _INPUT_REDIRECT_RE.findall(command)
+    return _scan_input_redirect_targets_chars(command)
 
 
 def _scan_input_redirects(
@@ -242,7 +246,13 @@ def _scan_input_redirects(
 
     機密一致が見つかれば deny dict、見つからなければ ``None``。
     """
-    for raw_target in _extract_input_redirect_targets(command):
+    targets = _extract_input_redirect_targets(command)
+    if not targets and "<" in command:
+        # `<` を含むのに target が取れなかった = 全除外ケース
+        # (heredoc / herestring / fd dup / process sub / quote 異常) の可能性。
+        # 後段 ask_or_allow に倒る前に観測可能にする。
+        L.log_info("bash_classify", "input_redirect_empty_extract")
+    for raw_target in targets:
         if _has_glob(raw_target):
             if _glob_operand_is_sensitive(raw_target, rules):
                 L.log_info("bash_classify", "input_redirect_glob_match")

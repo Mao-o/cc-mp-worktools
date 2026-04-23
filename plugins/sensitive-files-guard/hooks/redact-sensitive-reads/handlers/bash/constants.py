@@ -69,10 +69,3 @@ _GLOB_CHARS = frozenset("*?[")
 
 # 環境変数プレフィクス: ``FOO=1 cmd`` 形式の第 1 トークン
 _ENV_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-# ``< target`` 形式の target 抽出。heredoc (``<<``), fd dup (``<&N``),
-# process substitution (``<(``), 数値 fd 前置 (``0<``) を除外するため、``<`` の
-# 直前文字が ``<`` ``&`` 数字 のいずれでもないことを確認する。
-# ``\s+`` を必須にすることで ``cat<.env`` のような空白無しケースは取りこぼす
-# (これらは hard-stop 後段の ``ask_or_allow`` に倒る)。
-_INPUT_REDIRECT_RE = re.compile(r"(?:^|[^<&0-9])<\s+(\S+)")

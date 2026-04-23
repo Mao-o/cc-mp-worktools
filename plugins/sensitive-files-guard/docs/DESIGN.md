@@ -72,6 +72,71 @@ deny に倒す (機密可能性があるものは ask 維持で bypass だけ de
 `ask_or_allow({"permission_mode": "plan"}, ...)` が確実に `{}` (allow) を返す
 ことのみを確認する (integration 実態は docs に注記で補う方針)。
 
+## Bash handler の対応文法範囲
+
+Bash handler の静的解析は **2 種類の parser** を使い分ける:
+
+1. **character-level quote-aware parser** (0.3.4 新設) — input redirect
+   target 抽出専用。`handlers/bash/redirects.py::_scan_input_redirect_targets_chars`。
+   shlex に依存せず、quote state と `<` 直後の 1 文字で以下を明示的に識別:
+   - `<(` → process sub、depth tracking で閉じ `)` までスキップ
+     (quote 外 backslash escape `\(` `\)` は depth 計算から除外、内部 quote も追う)。
+     `<(...)` 自体が 1 word なので終了直後は word boundary ではない (`#` を comment 扱いしない)
+   - `[[` (word start + **command word 位置** + 直後に空白必須) → 条件式、
+     閉じ `]]` まで quote / escape を尊重して skip。内部の `<` `>` は string
+     compare 演算子で redirect ではない。`[[foo` (空白なし) や `tee [[`
+     (引数位置) は通常 word (bash 仕様準拠)
+   - `((` (word start + **command word 位置**) → 算術評価、depth tracking で
+     `))` まで skip。内部の `<` `>` は数値比較演算子で redirect ではない。
+     引数位置 `tee ((` は通常 word
+   - `at_command_start` 状態は parser が tracking。segment separator
+     (`|` `&` `;` 改行) の直後で True、word/quote/escape 消費で False に遷移
+   - `<<` / `<<<` → heredoc / herestring、`<<` を消費してスキップ
+     (`<<<` は 3 つ目の `<` も追加スキップ)
+   - `<&` → fd dup、`<&` を消費してスキップ
+   - `<` 単独 → target 抽出 (`_consume_redirect_target`)。
+     POSIX sh の word 概念に従い **quote / bare / backslash が 1 word 内で
+     mix 可能** (例: `".env".example` → `.env.example`, `a"b"c` → `abc`)。
+     double-quote 内の `\X` は X が `$` `` ` `` `"` `\` 改行 のいずれかのときのみ
+     X を取り込み、それ以外は `\X` を literal として保持 (POSIX dq escape semantics)。
+   - quote 外の `#` (word start 位置のみ) → 行末までシェルコメントとして skip
+2. **shlex.split (POSIX mode)** — segment 内のコマンド名 / operand 抽出。
+   `bash_handler.py::handle` 内で `_split_command_on_operators` 後の各 segment
+   に対して実施。コマンド token 単位の解析 (prefix normalize, shell keyword
+   検出, operand scan)。
+
+### 対応 (deny/allow 確定できる)
+
+| カテゴリ | 構文 | 使用 parser |
+|---|---|---|
+| 基本 redirect | `cmd < target`, `cmd<target` | character-level |
+| fd 前置き redirect | `cmd 0< t`, `cmd N<t` | character-level |
+| quote 付き | `cmd < "t"`, `cmd<'t'` | character-level (quote 剥離) |
+| 連結 word | `cmd < ".env".example`, `cmd < a"b"c` | character-level (word boundary) |
+| シェルコメント skip | `echo ok #cat<.env` | character-level (`#` at word start) |
+| セグメント区切り | `cmd1 && cmd2`, `cmd1 \| cmd2` | `_split_command_on_operators` (0.3.0) |
+| 前置き正規化 | `FOO=1 cmd`, `env cmd`, `nohup cmd` | shlex token (0.3.2) |
+| operand scan | `cmd file1 file2`, URI/VCS | shlex token |
+
+### 対応外 (opaque `ask_or_allow` 扱い)
+
+| 構文 | 備考 |
+|---|---|
+| `<<` heredoc, `<<-` | delimiter/body は read 対象外 (body 内の `< path` は false-positive 側 deny に倒す) |
+| `<<<` herestring | literal 渡しで file read ではない |
+| `<&N`, `<&-` fd dup | 既存 fd 複製、file read ではない |
+| `<(cmd)` process sub | Bash 拡張。depth tracking でスキップ |
+| `$(cmd)`, `` `cmd` `` | 動的展開。静的解析不能 |
+| `[[ cond ]]`, `(( expr ))` | Bash 条件式 / 算術。hard_stop で opaque |
+| `bash -c "..."`, `eval`, `python -c` | wrapper。内部 script は未解析 (0.3.5 以降候補) |
+
+### 観測ログ (0.3.4 追加)
+
+`L.log_info("bash_classify", ...)` の tag:
+- `input_redirect_empty_extract` — `<` を含むのに target 抽出 0 件 (すべて除外ケース / quote 異常)
+- `input_redirect_glob_match` / `input_redirect_match` — target が rule 一致で deny
+- `opaque_prefix_lenient` / `segment_residual_metachar_lenient` / `shell_keyword_lenient:<kw>` / `shlex_fail:<err>` / `hard_stop_lenient` — 既存
+
 ## Bash handler 判定フロー
 
 0.3.2 で確定した三態判定は 0.3.3 でも挙動変更なし。詳細な mermaid フローは
@@ -174,11 +239,17 @@ deny reason のキー名ガイド:
    `env cat .env`, `command cat .env`, `nohup cat .env`,
    `/usr/bin/env FOO=1 cat .env` は確定 match で deny に確定する。`< .env` 形式も
    target 抽出により deny に確定する。
-3. **`<` 入力リダイレクト target 抽出の限界** — 単純 regex
-   (`(?:^|[^<&0-9])<\s+(\S+)`) による抽出のため、quote を厳密処理しない。
-   `cat < "a file.env"` のような quoted space 名は false negative (target 抽出に
-   失敗 → opaque ask_or_allow)。`cat<.env` (空白なし) も regex 仕様により拾わない
-   (これらは後段の `ask_or_allow` に倒るだけで false-deny は出ない方向の限界)。
+3. **`<` 入力リダイレクト target 抽出 (0.3.4 大幅拡張)** — 0.3.4 で
+   **character-level quote-aware parser** に移行 (shlex 依存なし)。
+   `cat < target` (空白あり) / `cat<target` (inline) / `cat N< target` /
+   `cat N<target` (fd 前置き) / quote 付き (`cat < "a file.env"` 等)
+   すべての有効な input redirect 構文から target を抽出する。除外対象は
+   `<<` heredoc / `<<<` herestring / `<&N`/`<&-` fd dup / `<(...)` process
+   sub で、これらは `<` 直後の 1 文字 (`<`, `&`, `(`) で明示的に識別して
+   target 抽出をスキップする。process sub は depth tracking で閉じ `)`
+   までスキップ (内部の `<` を拾わない契約)。`<` を含むのに target が
+   取れなかった場合は `bash_classify:input_redirect_empty_extract` ログ
+   で観測可能。
 4. **autonomous / planning モードでの opaque 緩和** — `bash -c 'cat .env'` の
    ような shell wrapper 内に機密 path があっても auto/bypass/plan では allow に
    倒る。wrapper 内部の script を解析しないため検出できない。autonomous モード
