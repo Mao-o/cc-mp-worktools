@@ -34,8 +34,8 @@
 3. **DESIGN.md に "Bash handler の対応文法範囲" 節を新設** — character-level
    parser と shlex-based segment 解析の使い分け、対応/対応外の境界、観測ログ
    tag 一覧を明文化 (Codex review 指摘 3/5 対応)。
-4. **character-level parser を word 概念ベースに強化 (Codex PR review R1/R2)**
-   — PR レビューで 2 件の指摘を受けて修正:
+4. **character-level parser を word 概念ベースに強化 (Codex PR review R1/R2/R3)**
+   — PR レビューで 3 件の指摘を受けて修正:
    - **R1 (P2)**: `_consume_redirect_target` が closing quote で即 return して
      いたため、``cat < ".env".example`` の suffix ``.example`` を落として
      ``.env`` だけを抽出していた (挙動リグレッション)。POSIX sh の word 概念に
@@ -45,6 +45,12 @@
      拾ってしまう false-positive を塞いだ。`#` が word start 位置 (先頭 / 空白 /
      operator 直後) にある場合のみ行末まで skip する (Bash 仕様通り)。
      word 内部の `#` (例: ``abc#def``) や quote 内の `#` はコメント扱いしない。
+   - **R3 (P1, security)**: process sub `<(...)` の depth tracking が escape
+     された `\(` `\)` を通常括弧として数えていた。例: ``cat <(echo \\() < .env``
+     で escape された `\(` が depth を増やし続け、`)` で 0 に戻らず後続の
+     ``< .env`` を取りこぼし、auto/plan モードで `ask_or_allow` → allow に倒って
+     **機密 bypass** を許す regression。修正: depth scan 内でも quote 外
+     backslash escape を尊重し、escape された `(` `)` を depth 計算から除外する。
 
 ### 挙動変更 (0.3.3 → 0.3.4)
 
@@ -60,6 +66,7 @@
 | `cat < ".env".example` (連結 word, exclude 決着, R1 fix) | ask_or_allow | ask_or_allow (target `.env.example` で exclude 決着) |
 | `cat < ".env".local` (連結 word, R1 fix) | ask_or_allow | **deny** (target `.env.local` で rule 一致) |
 | `echo ok #cat<.env` (シェルコメント内, R2 fix) | ask_or_allow | ask_or_allow (comment skip で target 空) |
+| `cat <(echo \(\)) < .env` (process sub 内 escape paren, R3 fix) | auto/plan で **bypass** (security regression) | **deny** (depth tracking 修正で target 抽出成功) |
 | `cat <<EOF`, `cat <<< '.env'`, `cat <&2`, `cat <(cat .env)` | 変更なし | 変更なし (opaque 維持) |
 | 既存 `cat < .env` / `cat < .env*` 等 | deny | deny (維持) |
 
@@ -72,9 +79,9 @@
 - `handlers/bash/constants.py::_INPUT_REDIRECT_RE` を削除 (fallback 不要)
 - `core/matcher.py` 削除 (redact-sensitive-reads のみ、_shared は不変)
 - `_scan_input_redirects` に `input_redirect_empty_extract` 観測ログ追加
-- テスト件数: 411 → 461 件 (+51 追加, -1 削除, 2 件は挙動変更に伴う書換)。
+- テスト件数: 411 → 468 件 (+58 追加, -1 削除, 2 件は挙動変更に伴う書換)。
   内訳: inline/fd 10 + quote 6 + exclusion 7 + handle 11 + R1 concat word 6 +
-  R2 comment 7 + handle R1/R2 4
+  R2 comment 7 + handle R1/R2 4 + R3 escape paren 5 + handle R3 2
 - 公開 API / patch seam / LENIENT_MODES 不変
 
 ### 既知の未対応 (0.3.5 以降に分離)

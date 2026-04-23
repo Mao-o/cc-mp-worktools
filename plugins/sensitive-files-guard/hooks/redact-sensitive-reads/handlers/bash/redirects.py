@@ -183,6 +183,10 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
         if nxt == "(":
             # process substitution <(...) — 閉じ `)` まで深さ tracking でスキップ。
             # 内部の `<` / `.env` を target として拾わない契約。
+            # quote 外の backslash escape (`\\(` / `\\)`) は **depth 計算から除外**。
+            # 除外しないと `cat <(echo \\() < .env` で escape された `(` が depth を
+            # 増やし、`)` で 0 に戻らず、後続の `< .env` を取りこぼして auto/plan で
+            # bypass を許す (R3, security regression)。
             depth = 1
             i += 2
             while i < n and depth > 0:
@@ -198,6 +202,11 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
                 if ch in ('"', "'"):
                     quote = ch
                     i += 1
+                    continue
+                # quote 外 backslash escape: 次の 1 文字を literal 扱いで skip。
+                # depth 計算に影響させない。
+                if ch == "\\" and i + 1 < n:
+                    i += 2
                     continue
                 if ch == "(":
                     depth += 1

@@ -323,6 +323,49 @@ class TestExtractInputRedirectTargetsComment(unittest.TestCase):
         )
 
 
+class TestExtractInputRedirectTargetsProcessSubEscapedParen(unittest.TestCase):
+    """0.3.4 R3 fix: process sub `<(...)` 内のエスケープ括弧を depth から除外。
+
+    Codex review 指摘: `cat <(echo \\() < .env` のような escape された `(` `)` が
+    depth tracking を狂わせ、後続の `< .env` を取りこぼす。auto/plan モードでは
+    `ask_or_allow` が allow に倒るため、機密ファイルの bypass (security
+    regression) を誘発する。quote 外 backslash escape は depth 計算から除外する。
+    """
+
+    def test_escaped_open_paren_in_proc_sub(self):
+        # process sub 内の `\(` は depth に影響しない → 後続の `< .env` を抽出
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo \\() < .env"),
+            [".env"],
+        )
+
+    def test_escaped_close_paren_in_proc_sub(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo \\)) < .env"),
+            [".env"],
+        )
+
+    def test_escaped_both_parens_in_proc_sub(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo \\(\\)) < .env"),
+            [".env"],
+        )
+
+    def test_escaped_paren_no_following_redirect(self):
+        # process sub だけで終わる場合は target なし (内部の `.env` は拾わない)
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo \\()"),
+            [],
+        )
+
+    def test_proc_sub_unaffected_when_no_escape(self):
+        # 既存の正常 process sub は影響なし (regression check)
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo x) < .env"),
+            [".env"],
+        )
+
+
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -465,6 +508,19 @@ class TestHandleCharLevelFixes(_BaseHandle):
             _make_envelope("echo ok #cat<.env", self.tmp, mode="auto")
         )
         self.assertEqual(r, {})
+
+    def test_proc_sub_escaped_paren_does_not_bypass_default(self):
+        # R3: escape された `\(` で depth tracking が壊れ、後続の `< .env` を
+        # 取りこぼすと auto モードで bypass。修正後は target 抽出成功で deny。
+        r = handle(_make_envelope("cat <(echo \\() < .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_proc_sub_escaped_paren_does_not_bypass_auto(self):
+        # auto モードでも bypass しない (機密 leak の最重要回帰)
+        r = handle(
+            _make_envelope("cat <(echo \\() < .env", self.tmp, mode="auto")
+        )
+        self.assertEqual(_decision(r), "deny")
 
 
 if __name__ == "__main__":

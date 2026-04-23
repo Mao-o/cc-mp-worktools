@@ -80,6 +80,7 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
    target 抽出専用。`handlers/bash/redirects.py::_scan_input_redirect_targets_chars`。
    shlex に依存せず、quote state と `<` 直後の 1 文字で以下を明示的に識別:
    - `<(` → process sub、depth tracking で閉じ `)` までスキップ
+     (quote 外 backslash escape `\(` `\)` は depth 計算から除外、内部 quote も追う)
    - `<<` / `<<<` → heredoc / herestring、`<<` を消費してスキップ
      (`<<<` は 3 つ目の `<` も追加スキップ)
    - `<&` → fd dup、`<&` を消費してスキップ
