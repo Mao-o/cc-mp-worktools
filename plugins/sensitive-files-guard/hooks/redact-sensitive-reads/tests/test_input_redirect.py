@@ -533,6 +533,39 @@ class TestExtractInputRedirectTargetsConditionalArith(unittest.TestCase):
             _extract_input_redirect_targets('[[\t"$x"<.env ]]'), []
         )
 
+    def test_double_bracket_at_argument_position_not_keyword(self):
+        # R8: `tee [[ ... ]]` の `[[` は引数位置 (command word ではない) なので
+        # 予約語ではない。内部の `< .env` は本物の redirect として抽出する。
+        self.assertEqual(
+            _extract_input_redirect_targets('tee [[ "$x" < .env ]]'),
+            [".env"],
+        )
+
+    def test_double_bracket_after_command_word_not_keyword(self):
+        # `echo` の引数位置の `[[` も同様
+        self.assertEqual(
+            _extract_input_redirect_targets('echo [[ "$x"<.env ]]'),
+            [".env"],
+        )
+
+    def test_double_bracket_after_segment_separator_is_keyword(self):
+        # `;` 直後 (command 位置) の `[[` は予約語 → 内部の `<` を skip
+        self.assertEqual(
+            _extract_input_redirect_targets(
+                'cat < .env; [[ "$x"<.env ]]'
+            ),
+            [".env"],  # 最初の `< .env` のみ抽出、後者の `[[` 内は skip
+        )
+
+    def test_double_bracket_after_pipe_is_keyword(self):
+        # `|` 直後 (command 位置) の `[[` も予約語
+        self.assertEqual(
+            _extract_input_redirect_targets(
+                'echo y | [[ "$x"<.env ]]'
+            ),
+            [],
+        )
+
 
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
@@ -739,6 +772,23 @@ class TestHandleCharLevelFixes(_BaseHandle):
         r = handle(
             _make_envelope(
                 "tee [[foo < .env", self.tmp, mode="auto"
+            )
+        )
+        self.assertEqual(_decision(r), "deny")
+
+    def test_double_bracket_at_argument_position_does_not_bypass_default(self):
+        # R8: `tee [[ "$x" < .env ]]` の `[[` は引数位置 → 通常 word →
+        # `< .env` 抽出 → deny。
+        r = handle(
+            _make_envelope('tee [[ "$x" < .env ]]', self.tmp)
+        )
+        self.assertEqual(_decision(r), "deny")
+
+    def test_double_bracket_at_argument_position_does_not_bypass_auto(self):
+        # auto モードでも bypass しない
+        r = handle(
+            _make_envelope(
+                'tee [[ "$x" < .env ]]', self.tmp, mode="auto"
             )
         )
         self.assertEqual(_decision(r), "deny")

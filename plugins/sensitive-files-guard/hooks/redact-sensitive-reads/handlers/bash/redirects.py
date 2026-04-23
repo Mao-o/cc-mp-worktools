@@ -152,6 +152,10 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
     quote: str | None = None
     # 直前に消費した文字が word boundary か (シェルコメントは word start 位置のみ)
     at_word_start = True
+    # 現在位置が command word 位置か (segment separator 直後 or 入力先頭)。
+    # bash の `[[` `((` 予約語は command word 位置でのみ有効。引数位置の `[[`
+    # (例: `tee [[ "$x" < .env ]]`) は通常 word として扱う必要がある (R8)。
+    at_command_start = True
 
     while i < n:
         c = command[i]
@@ -174,18 +178,21 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             while i < n and command[i] != "\n":
                 i += 1
             at_word_start = True
+            # 改行は次反復で `c != "<":` ブランチに入り at_command_start=True
             continue
 
         # `[[ ... ]]` 条件式: 内部の `<` `>` は文字列比較演算子 (redirect ではない)。
         # 閉じ `]]` まで quote / escape を尊重しつつスキップする。
-        # `[[` は word start 位置 + **直後に空白必須** で予約語扱い (R6, R7)。
-        # bash 仕様上 `[[foo` は通常 word (tee の引数等) なので skip 対象外。
-        # 空白なしで skip 対象にしてしまうと `tee [[foo < .env` で閉じ `]]` を
-        # 探し続けて command 末まで消費 → `< .env` を取りこぼし auto/plan で
-        # bypass を許す (R7, security regression)。
+        # `[[` 予約語の発火条件 (R6, R7, R8):
+        #   - word start 位置である (R6)
+        #   - 直後が空白 / 改行 (R7。bash 仕様で `[[foo` は通常 word)
+        #   - **command word 位置である** (R8。`tee [[ ...` の引数位置 `[[` は
+        #     通常 word なので skip 対象外。skip すると後続 redirect を取りこぼし
+        #     auto/plan で機密 bypass を招く)
         if (
             c == "["
             and at_word_start
+            and at_command_start
             and i + 2 < n
             and command[i + 1] == "["
             and command[i + 2] in " \t\n"
@@ -217,13 +224,15 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
                 # closing `]]` 未発見 — 残りを全消費 (fail-closed としては不問)
                 i = n
             at_word_start = False
+            at_command_start = False
             continue
 
         # `(( ... ))` 算術評価: 内部の `<` `>` は比較演算子。depth tracking で `))` まで。
-        # `((` は word start 位置でのみ算術評価開始 (R6)。
+        # `((` は word start 位置 + command word 位置で算術評価開始 (R6, R8)。
         if (
             c == "("
             and at_word_start
+            and at_command_start
             and i + 1 < n
             and command[i + 1] == "("
         ):
@@ -253,6 +262,7 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
                     depth -= 1
                 i += 1
             at_word_start = False
+            at_command_start = False
             continue
 
         # quote 開始
@@ -260,17 +270,34 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             quote = c
             i += 1
             at_word_start = False
+            at_command_start = False
             continue
 
         # quote 外の backslash escape
         if c == "\\" and i + 1 < n:
             i += 2
             at_word_start = False
+            at_command_start = False
             continue
 
         if c != "<":
-            # word boundary 判定の更新 (次反復の `#` comment 判定に使う)
-            at_word_start = c in " \t\n|&;<>()"
+            # word boundary 判定の更新 (次反復の `#` comment / `[[` `((` 判定に使う)
+            if c in "|&;\n":
+                # segment separator → 次は command word 位置
+                at_word_start = True
+                at_command_start = True
+            elif c in " \t":
+                # whitespace: word 境界、command 位置の True/False は維持
+                at_word_start = True
+            elif c in ">()":
+                # operator (output redirect / subshell): word 境界だが command
+                # 位置ではない。subshell 内の command 位置検出は scope 外 (内部の
+                # `[[ ... ]]` を予約語と認識しないが、hard_stop で fail-closed)。
+                at_word_start = True
+                at_command_start = False
+            else:
+                at_word_start = False
+                at_command_start = False
             i += 1
             continue
 
@@ -316,6 +343,7 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             # 後続の `< .env` を取りこぼし、auto/plan で bypass を招く
             # (R5, security regression)。
             at_word_start = False
+            at_command_start = False
             continue
 
         if nxt in ("<", "&"):
@@ -327,8 +355,10 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             # `<<<` (herestring) の 3 つ目の `<` も追加スキップ (body を拾わない)
             if nxt == "<" and i < n and command[i] == "<":
                 i += 1
-            # `<<` / `<&` 等は metachar 演算子。直後は新しい word の開始位置。
+            # `<<` / `<&` 等は metachar 演算子。直後は新しい word の開始位置だが
+            # redirect の delimiter / target を期待する位置で、command 位置ではない。
             at_word_start = True
+            at_command_start = False
             continue
 
         # 単独 `<` — target 抽出
@@ -344,5 +374,6 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
         # target を 1 word 消費したので word boundary ではない位置にいる。
         # 次反復で新たに word boundary 文字が来ない限り `at_word_start` は False。
         at_word_start = False
+        at_command_start = False
 
     return targets
