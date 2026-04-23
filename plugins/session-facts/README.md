@@ -69,6 +69,36 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 
 各 Collector が出すセクション粒度は `--max-*` 引数で制限可能。
 
+### cwd != repo_root のとき (monorepo / サブプロジェクト構成)
+
+呼び出し時の cwd が repo_root と異なる場合 (cwd が repo_root 配下のサブディレクトリ
+の場合)、エージェントが「リポジトリ全体」と「カレントの作業範囲」を区別できるよう、
+2 つの情報を**追加**する (既存ブロックは変更しない)。
+
+1. ヘッダーに `- cwd: <relative path> (subdirectory of repo_root)` 行
+2. `## Subtree (cwd: <relative path>, dirs only, depth=N)` ブロックを `## Structure` の直後に挿入
+
+```markdown
+## Project Facts
+- purpose: affiliate01
+- repo_root: /absolute/path/to/affiliate01
+- cwd: 8.fxdict (subdirectory of repo_root)
+
+## Structure (dirs only, depth=3)
+├── 1.退職代行/
+├── 4.Fanza/
+├── 8.fxdict/
+└── ...
+
+## Subtree (cwd: 8.fxdict, dirs only, depth=3)
+└── toEng/
+    └── 参考：FXAIラボ/
+```
+
+cwd == repo_root のときはどちらも出力されず、従来挙動と完全に一致する。
+`Service Entry Points` などの既存ブロックは引き続きリポジトリ全体スコープで生成され、
+横断的な作業のニーズも維持される。
+
 ## CLI オプション
 
 本体の `__main__.py` は以下の引数を受け付ける (hook から呼ぶときは `--format markdown

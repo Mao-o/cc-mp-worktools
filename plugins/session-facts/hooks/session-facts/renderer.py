@@ -14,6 +14,9 @@ def render_header(ctx: RepoContext) -> str:
     if purpose:
         lines.append(f"- purpose: {purpose}")
     lines.append(f"- repo_root: {ctx.root}")
+    cwd_rel = ctx.cwd_relative
+    if cwd_rel:
+        lines.append(f"- cwd: {cwd_rel} (subdirectory of repo_root)")
     if ctx.results.get("is_git_repo") is False:
         lines.append("- git_repo: false (using filesystem walk)")
 
