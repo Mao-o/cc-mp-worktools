@@ -34,8 +34,8 @@
 3. **DESIGN.md に "Bash handler の対応文法範囲" 節を新設** — character-level
    parser と shlex-based segment 解析の使い分け、対応/対応外の境界、観測ログ
    tag 一覧を明文化 (Codex review 指摘 3/5 対応)。
-4. **character-level parser を word 概念ベースに強化 (Codex PR review R1/R2/R3)**
-   — PR レビューで 3 件の指摘を受けて修正:
+4. **character-level parser を word 概念ベースに強化 (Codex PR review R1-R4)**
+   — PR レビューで 4 件の指摘を受けて修正:
    - **R1 (P2)**: `_consume_redirect_target` が closing quote で即 return して
      いたため、``cat < ".env".example`` の suffix ``.example`` を落として
      ``.env`` だけを抽出していた (挙動リグレッション)。POSIX sh の word 概念に
@@ -51,6 +51,12 @@
      ``< .env`` を取りこぼし、auto/plan モードで `ask_or_allow` → allow に倒って
      **機密 bypass** を許す regression。修正: depth scan 内でも quote 外
      backslash escape を尊重し、escape された `(` `)` を depth 計算から除外する。
+   - **R4 (P2)**: double quote 内 backslash escape が任意文字を unescape
+     していたため、``cat < ".\\env"`` (literal ``.\\env``) が ``.env`` として
+     解釈されて誤って deny する false-positive があった。POSIX sh の
+     double-quote semantics に準拠し、``\\X`` は X が ``$`` ``\\`` ``"`` ``\\\\``
+     ``\\n`` のいずれかのときのみ X を取り込み、それ以外は ``\\`` も literal
+     として保持する形に修正。`_DQ_BACKSLASH_ESCAPABLE` frozenset を新設。
 
 ### 挙動変更 (0.3.3 → 0.3.4)
 
@@ -67,6 +73,8 @@
 | `cat < ".env".local` (連結 word, R1 fix) | ask_or_allow | **deny** (target `.env.local` で rule 一致) |
 | `echo ok #cat<.env` (シェルコメント内, R2 fix) | ask_or_allow | ask_or_allow (comment skip で target 空) |
 | `cat <(echo \(\)) < .env` (process sub 内 escape paren, R3 fix) | auto/plan で **bypass** (security regression) | **deny** (depth tracking 修正で target 抽出成功) |
+| `cat < ".\env"` (literal `.\env`, R4 fix) | **誤 deny** (`.env` と誤解釈) | ask_or_allow (literal `.\env` で rule 非 match) |
+| `cat < ".env\*"` (literal `.env\*`, R4 fix) | 誤って glob 展開対象扱い | literal `.env\*` (rule 非 match) |
 | `cat <<EOF`, `cat <<< '.env'`, `cat <&2`, `cat <(cat .env)` | 変更なし | 変更なし (opaque 維持) |
 | 既存 `cat < .env` / `cat < .env*` 等 | deny | deny (維持) |
 
@@ -79,9 +87,10 @@
 - `handlers/bash/constants.py::_INPUT_REDIRECT_RE` を削除 (fallback 不要)
 - `core/matcher.py` 削除 (redact-sensitive-reads のみ、_shared は不変)
 - `_scan_input_redirects` に `input_redirect_empty_extract` 観測ログ追加
-- テスト件数: 411 → 468 件 (+58 追加, -1 削除, 2 件は挙動変更に伴う書換)。
+- テスト件数: 411 → 475 件 (+65 追加, -1 削除, 2 件は挙動変更に伴う書換)。
   内訳: inline/fd 10 + quote 6 + exclusion 7 + handle 11 + R1 concat word 6 +
-  R2 comment 7 + handle R1/R2 4 + R3 escape paren 5 + handle R3 2
+  R2 comment 7 + handle R1/R2 4 + R3 escape paren 5 + handle R3 2 +
+  R4 dq escape 6 + handle R4 1
 - 公開 API / patch seam / LENIENT_MODES 不変
 
 ### 既知の未対応 (0.3.5 以降に分離)

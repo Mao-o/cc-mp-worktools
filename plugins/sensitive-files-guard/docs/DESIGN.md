@@ -87,6 +87,8 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
    - `<` 単独 → target 抽出 (`_consume_redirect_target`)。
      POSIX sh の word 概念に従い **quote / bare / backslash が 1 word 内で
      mix 可能** (例: `".env".example` → `.env.example`, `a"b"c` → `abc`)。
+     double-quote 内の `\X` は X が `$` `` ` `` `"` `\` 改行 のいずれかのときのみ
+     X を取り込み、それ以外は `\X` を literal として保持 (POSIX dq escape semantics)。
    - quote 外の `#` (word start 位置のみ) → 行末までシェルコメントとして skip
 2. **shlex.split (POSIX mode)** — segment 内のコマンド名 / operand 抽出。
    `bash_handler.py::handle` 内で `_split_command_on_operators` 後の各 segment

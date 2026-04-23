@@ -366,6 +366,57 @@ class TestExtractInputRedirectTargetsProcessSubEscapedParen(unittest.TestCase):
         )
 
 
+class TestExtractInputRedirectTargetsDoubleQuoteEscape(unittest.TestCase):
+    """0.3.4 R4 fix: POSIX sh の double-quote escape semantics に準拠する。
+
+    Codex review 指摘: double quote 内の backslash escape が任意文字を unescape
+    していたため、``cat < ".\\env"`` が ``.env`` として解釈され誤って deny される
+    挙動があった。POSIX sh では double quote 内 ``\\X`` は X が ``$`` ``\\``
+    ``\"`` ``\\\\`` ``\\n`` のいずれかのときのみ X を取り込み、それ以外は ``\\``
+    も literal として保持する。
+    """
+
+    def test_literal_backslash_letter(self):
+        # `\e` は literal `\e`
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".\\env"'),
+            [".\\env"],
+        )
+
+    def test_literal_backslash_star(self):
+        # `\*` は literal `\*` (glob 展開対象にならない)
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env\\*"'),
+            [".env\\*"],
+        )
+
+    def test_escape_dollar_sign(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env\\$"'),
+            [".env$"],
+        )
+
+    def test_escape_backtick(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env\\`"'),
+            [".env`"],
+        )
+
+    def test_escape_double_quote(self):
+        # `\"` は escape された `"` (closing quote ではない)
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env\\""'),
+            ['.env"'],
+        )
+
+    def test_escape_backslash(self):
+        # `\\` は literal `\`
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env\\\\"'),
+            [".env\\"],
+        )
+
+
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -521,6 +572,12 @@ class TestHandleCharLevelFixes(_BaseHandle):
             _make_envelope("cat <(echo \\() < .env", self.tmp, mode="auto")
         )
         self.assertEqual(_decision(r), "deny")
+
+    def test_dq_literal_backslash_does_not_match_dotenv(self):
+        # R4: `".\env"` は literal `.\env` (rule 非 match) → ask_or_allow
+        # 修正前は `.env` と誤解釈されて deny になっていた (false-positive 回避)
+        r = handle(_make_envelope('cat < ".\\env"', self.tmp))
+        self.assertEqual(_decision(r), "ask")
 
 
 if __name__ == "__main__":

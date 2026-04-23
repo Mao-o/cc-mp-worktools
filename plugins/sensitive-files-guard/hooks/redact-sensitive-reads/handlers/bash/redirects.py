@@ -54,6 +54,12 @@ def _segment_has_residual_metachar(tokens: list[str]) -> bool:
     return False
 
 
+# POSIX sh: double-quote 内の backslash が escape として機能する文字。
+# それ以外の `\X` は backslash を literal として保持し、X も literal として続ける
+# (例: `".\env"` → ``.\env``、`".env\*"` → ``.env\*``)。
+_DQ_BACKSLASH_ESCAPABLE = frozenset({'$', '`', '"', '\\', '\n'})
+
+
 def _consume_redirect_target(command: str, start: int) -> tuple[int, str]:
     """位置 ``start`` から redirect target (1 つの Bash word) を消費する。
 
@@ -67,6 +73,8 @@ def _consume_redirect_target(command: str, start: int) -> tuple[int, str]:
     - ``a"b"c`` → ``abc``
     - ``".env"*`` → ``.env*``
     - ``a\\ file`` → ``a file`` (backslash-escaped space は word boundary ではない)
+    - ``".\\env"`` → ``.\\env`` (double-quote 内 ``\\e`` は literal ``\\e``)
+    - ``".env\\$"`` → ``.env$`` (``\\$`` は escape として ``$`` 取り込み)
 
     Returns:
         消費した文字数と target 文字列のタプル。
@@ -87,7 +95,17 @@ def _consume_redirect_target(command: str, start: int) -> tuple[int, str]:
             i += 1
             while i < n and command[i] != q:
                 if q == '"' and command[i] == "\\" and i + 1 < n:
-                    parts.append(command[i + 1])
+                    # POSIX sh: double-quote 内では `\X` は X が
+                    # `_DQ_BACKSLASH_ESCAPABLE` に含まれるときのみ escape として
+                    # X を literal で取り込み、backslash は捨てる。それ以外は
+                    # backslash も X も literal として保持。
+                    nxt2 = command[i + 1]
+                    if nxt2 in _DQ_BACKSLASH_ESCAPABLE:
+                        parts.append(nxt2)
+                        i += 2
+                        continue
+                    parts.append("\\")
+                    parts.append(nxt2)
                     i += 2
                     continue
                 parts.append(command[i])
