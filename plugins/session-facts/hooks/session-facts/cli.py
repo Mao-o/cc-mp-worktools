@@ -49,8 +49,13 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
     return ctx.root.name
 
 
-def summarize_repo(root: Path, args: argparse.Namespace, is_git: bool) -> str:
-    ctx = RepoContext(root=root, args=args)
+def summarize_repo(
+    root: Path,
+    args: argparse.Namespace,
+    is_git: bool,
+    cwd: Optional[Path] = None,
+) -> str:
+    ctx = RepoContext(root=root, args=args, cwd=cwd)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
 
@@ -105,6 +110,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     resolved = args.root.resolve()
     is_git = is_git_repo(resolved)
     root = git_root(resolved) if is_git else resolved
-    output = summarize_repo(root, args, is_git)
+    output = summarize_repo(root, args, is_git, cwd=resolved)
     print(output)
     return 0
