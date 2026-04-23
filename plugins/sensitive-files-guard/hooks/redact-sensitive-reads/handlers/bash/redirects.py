@@ -231,6 +231,12 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
                 elif ch == ")":
                     depth -= 1
                 i += 1
+            # process sub `<(...)` 自体が 1 つの bash word なので、直後の位置は
+            # word boundary ではない。`at_word_start = False` にしておかないと、
+            # `cat <(echo x)#< .env` で続く `#` をシェルコメントと誤認して
+            # 後続の `< .env` を取りこぼし、auto/plan で bypass を招く
+            # (R5, security regression)。
+            at_word_start = False
             continue
 
         if nxt in ("<", "&"):
@@ -242,6 +248,8 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             # `<<<` (herestring) の 3 つ目の `<` も追加スキップ (body を拾わない)
             if nxt == "<" and i < n and command[i] == "<":
                 i += 1
+            # `<<` / `<&` 等は metachar 演算子。直後は新しい word の開始位置。
+            at_word_start = True
             continue
 
         # 単独 `<` — target 抽出
@@ -254,5 +262,8 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
         if value:
             targets.append(value)
         i += consumed
+        # target を 1 word 消費したので word boundary ではない位置にいる。
+        # 次反復で新たに word boundary 文字が来ない限り `at_word_start` は False。
+        at_word_start = False
 
     return targets

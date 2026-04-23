@@ -417,6 +417,37 @@ class TestExtractInputRedirectTargetsDoubleQuoteEscape(unittest.TestCase):
         )
 
 
+class TestExtractInputRedirectTargetsProcessSubWordBoundary(unittest.TestCase):
+    """0.3.4 R5 fix: process sub `<(...)` 終了直後を word boundary 扱いしない。
+
+    Codex review 指摘: `<(` ブランチ終了時に ``at_word_start`` を更新せず、
+    続く `#` をシェルコメントと誤認して ``< .env`` を取りこぼす security
+    regression。``<(...)`` は bash では 1 つの word なので、直後は word
+    boundary ではなく、`#` を comment として扱わない。
+    """
+
+    def test_no_space_hash_after_proc_sub_keeps_redirect(self):
+        # `cat <(echo x)#bar < .env` の `<(echo x)#bar` は bash では 1 word。
+        # `#` は word 内部 → comment ではない → 後続の `< .env` を抽出する。
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo x)#bar < .env"),
+            [".env"],
+        )
+
+    def test_inline_hash_after_proc_sub_with_redirect(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo x)# < .env"),
+            [".env"],
+        )
+
+    def test_space_hash_after_proc_sub_is_comment(self):
+        # 空白を挟んだ `#` は comment (regression check)
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo x) #bar < .env"),
+            [],
+        )
+
+
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -578,6 +609,24 @@ class TestHandleCharLevelFixes(_BaseHandle):
         # 修正前は `.env` と誤解釈されて deny になっていた (false-positive 回避)
         r = handle(_make_envelope('cat < ".\\env"', self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+    def test_proc_sub_inline_hash_does_not_bypass_default(self):
+        # R5: `cat <(echo x)#bar < .env` の `#bar` を comment 扱いすると
+        # 後続の `< .env` を取りこぼす。bash では `#` が word 内なので
+        # comment ではなく target は抽出される → deny。
+        r = handle(
+            _make_envelope("cat <(echo x)#bar < .env", self.tmp)
+        )
+        self.assertEqual(_decision(r), "deny")
+
+    def test_proc_sub_inline_hash_does_not_bypass_auto(self):
+        # auto モードでも bypass しない (機密 leak 防止の最重要回帰)
+        r = handle(
+            _make_envelope(
+                "cat <(echo x)#bar < .env", self.tmp, mode="auto"
+            )
+        )
+        self.assertEqual(_decision(r), "deny")
 
 
 if __name__ == "__main__":
