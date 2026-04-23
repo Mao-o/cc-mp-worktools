@@ -84,7 +84,7 @@ sensitive-files-guard/
 `is_sensitive` / `load_patterns` / envelope 操作などの plugin ステート依存処理は
 すべて `bash_handler.py` 側に残す。
 
-既存テスト (0.3.4 時点 480 件) は `handlers.bash_handler.X` から
+既存テスト (0.3.4 時点 490 件) は `handlers.bash_handler.X` から
 以下を import する patch seam として依存している。`bash_handler.py` は
 `handlers.bash.*` からこれらを **再 export** して従来の import path を維持する:
 

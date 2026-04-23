@@ -448,6 +448,66 @@ class TestExtractInputRedirectTargetsProcessSubWordBoundary(unittest.TestCase):
         )
 
 
+class TestExtractInputRedirectTargetsConditionalArith(unittest.TestCase):
+    """0.3.4 R6 fix: ``[[ ... ]]`` / ``(( ... ))`` 内の ``<`` は比較演算子。
+
+    Codex review 指摘: character-level parser が ``[[ "$x"<.env ]]`` の inline
+    ``<.env`` を redirect target として抽出して deny に倒っていた。bash では
+    ``[[`` 内の ``<`` は文字列比較、``((`` 内の ``<`` は算術比較で、どちらも
+    redirect ではない。これらを閉じ ``]]`` / ``))`` までスキップして target を
+    拾わないようにする。
+    """
+
+    def test_double_bracket_inline_lt(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('[[ "$x"<.env ]]'), []
+        )
+
+    def test_double_bracket_spaced_lt(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('[[ "$x" < .env ]]'), []
+        )
+
+    def test_arith_inline_lt(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("(( a<5 ))"), []
+        )
+
+    def test_arith_nested_paren(self):
+        # `((` 内に nested `(` があっても depth tracking で正しく閉じる
+        self.assertEqual(
+            _extract_input_redirect_targets("(( (a < b) < c ))"), []
+        )
+
+    def test_double_bracket_then_real_redirect(self):
+        # `[[ ]]` の後にある本物の `< .env` は抽出する
+        self.assertEqual(
+            _extract_input_redirect_targets('[[ "$x"<y ]] && cat < .env'),
+            [".env"],
+        )
+
+    def test_real_redirect_then_double_bracket(self):
+        # 本物の `< .env` の後に `[[ ]]` がある場合も target 抽出
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < .env && [[ "$x"<y ]]'),
+            [".env"],
+        )
+
+    def test_double_bracket_with_quoted_close(self):
+        # `[[ ]]` 内 quote 中の `]]` は閉じとみなさず、その後の本物 redirect を抽出
+        self.assertEqual(
+            _extract_input_redirect_targets('[[ "a]]b" == c ]] < .env'),
+            [".env"],
+        )
+
+    def test_single_bracket_is_normal_word(self):
+        # `[` 単独 (test コマンド) は通常 word 扱い → 後続 redirect 抽出
+        self.assertEqual(
+            _extract_input_redirect_targets("[ a ] < .env"),
+            [".env"],
+        )
+
+
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -627,6 +687,19 @@ class TestHandleCharLevelFixes(_BaseHandle):
             )
         )
         self.assertEqual(_decision(r), "deny")
+
+    def test_double_bracket_compare_default_ask(self):
+        # R6: `[[ "$x"<.env ]]` の `<` は文字列比較。redirect ではないので
+        # target 抽出 0 件 → hard_stop fallback の ask_or_allow (default=ask)。
+        r = handle(_make_envelope('[[ "$x"<.env ]]', self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_double_bracket_compare_auto_allow(self):
+        # auto モードでも allow (元の regex 挙動と整合、機密 deny 暴発防止)
+        r = handle(
+            _make_envelope('[[ "$x"<.env ]]', self.tmp, mode="auto")
+        )
+        self.assertEqual(r, {})
 
 
 if __name__ == "__main__":

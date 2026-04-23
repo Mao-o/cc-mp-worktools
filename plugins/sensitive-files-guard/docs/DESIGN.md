@@ -82,6 +82,10 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
    - `<(` → process sub、depth tracking で閉じ `)` までスキップ
      (quote 外 backslash escape `\(` `\)` は depth 計算から除外、内部 quote も追う)。
      `<(...)` 自体が 1 word なので終了直後は word boundary ではない (`#` を comment 扱いしない)
+   - `[[` (word start 位置) → 条件式、閉じ `]]` まで quote / escape を尊重して
+     skip。内部の `<` `>` は string compare 演算子で redirect ではない
+   - `((` (word start 位置) → 算術評価、depth tracking で `))` まで skip。
+     内部の `<` `>` は数値比較演算子で redirect ではない
    - `<<` / `<<<` → heredoc / herestring、`<<` を消費してスキップ
      (`<<<` は 3 つ目の `<` も追加スキップ)
    - `<&` → fd dup、`<&` を消費してスキップ

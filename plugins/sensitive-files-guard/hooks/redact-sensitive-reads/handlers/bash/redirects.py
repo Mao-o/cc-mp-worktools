@@ -176,6 +176,80 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             at_word_start = True
             continue
 
+        # `[[ ... ]]` 条件式: 内部の `<` `>` は文字列比較演算子 (redirect ではない)。
+        # 閉じ `]]` まで quote / escape を尊重しつつスキップする。
+        # `[[` は word start 位置でのみ予約語扱い (R6)。
+        if (
+            c == "["
+            and at_word_start
+            and i + 1 < n
+            and command[i + 1] == "["
+        ):
+            i += 2
+            inner_quote: str | None = None
+            while i + 1 < n:
+                ch = command[i]
+                if inner_quote:
+                    if inner_quote == '"' and ch == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if ch == inner_quote:
+                        inner_quote = None
+                    i += 1
+                    continue
+                if ch in ('"', "'"):
+                    inner_quote = ch
+                    i += 1
+                    continue
+                if ch == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == "]" and command[i + 1] == "]":
+                    i += 2
+                    break
+                i += 1
+            else:
+                # closing `]]` 未発見 — 残りを全消費 (fail-closed としては不問)
+                i = n
+            at_word_start = False
+            continue
+
+        # `(( ... ))` 算術評価: 内部の `<` `>` は比較演算子。depth tracking で `))` まで。
+        # `((` は word start 位置でのみ算術評価開始 (R6)。
+        if (
+            c == "("
+            and at_word_start
+            and i + 1 < n
+            and command[i + 1] == "("
+        ):
+            depth = 1
+            i += 2
+            inner_quote = None
+            while i < n and depth > 0:
+                ch = command[i]
+                if inner_quote:
+                    if inner_quote == '"' and ch == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if ch == inner_quote:
+                        inner_quote = None
+                    i += 1
+                    continue
+                if ch in ('"', "'"):
+                    inner_quote = ch
+                    i += 1
+                    continue
+                if ch == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                i += 1
+            at_word_start = False
+            continue
+
         # quote 開始
         if c in ('"', "'"):
             quote = c
