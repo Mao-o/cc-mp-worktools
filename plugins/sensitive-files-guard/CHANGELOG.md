@@ -34,8 +34,8 @@
 3. **DESIGN.md に "Bash handler の対応文法範囲" 節を新設** — character-level
    parser と shlex-based segment 解析の使い分け、対応/対応外の境界、観測ログ
    tag 一覧を明文化 (Codex review 指摘 3/5 対応)。
-4. **character-level parser を word 概念ベースに強化 (Codex PR review R1-R6)**
-   — PR レビューで 6 件の指摘を受けて修正:
+4. **character-level parser を word 概念ベースに強化 (Codex PR review R1-R7)**
+   — PR レビューで 7 件の指摘を受けて修正:
    - **R1 (P2)**: `_consume_redirect_target` が closing quote で即 return して
      いたため、``cat < ".env".example`` の suffix ``.example`` を落として
      ``.env`` だけを抽出していた (挙動リグレッション)。POSIX sh の word 概念に
@@ -73,6 +73,14 @@
      ``((`` も同様で内部 nesting に対応するため depth tracking を実装。元の
      regex 挙動 (空白必須なので ``[[ "$x"<.env ]]`` 等は target 取れず ask) と
      整合する形に戻した。
+   - **R7 (P1, security)**: R6 で追加した ``[[`` 検出条件が「word が ``[[`` で
+     始まる」だけで、``[[foo`` のような通常 word も予約語扱いしていた。bash の
+     ``[[`` 予約語は **直後に空白必須** が仕様。``tee [[foo < .env`` で
+     ``[[foo`` 以降が予約語ブロックと誤認され、閉じ ``]]`` を探し続けて command
+     末まで消費 → 後続の ``< .env`` を取りこぼし、auto/plan で
+     ``ask_or_allow`` → allow に倒って **機密 bypass** を許す regression。
+     修正: ``[[`` 検出条件に ``command[i + 2] in " \\t\\n"`` を追加。``((`` は
+     bash 仕様上 space optional のため変更なし。
 
 ### 挙動変更 (0.3.3 → 0.3.4)
 
@@ -94,6 +102,7 @@
 | `cat <(echo x)#bar < .env` (proc sub + 連結 `#`, R5 fix) | auto/plan で **bypass** (security regression) | **deny** (`#` は word 内、target 抽出成功) |
 | `[[ "$x"<.env ]]` (条件式内の `<`, R6 fix) | **誤 deny** (`<` を redirect 扱い) | ask_or_allow (`[[ ]]` 内 skip で target なし) |
 | `(( a<5 ))` (算術内の `<`, R6 fix) | **誤 deny** (同上) | ask_or_allow (`(( ))` 内 skip で target なし) |
+| `tee [[foo < .env` (`[[foo` は通常 word, R7 fix) | auto/plan で **bypass** (security regression) | **deny** (`[[` 予約語に space 必須、target 抽出成功) |
 | `cat <<EOF`, `cat <<< '.env'`, `cat <&2`, `cat <(cat .env)` | 変更なし | 変更なし (opaque 維持) |
 | 既存 `cat < .env` / `cat < .env*` 等 | deny | deny (維持) |
 
@@ -106,11 +115,11 @@
 - `handlers/bash/constants.py::_INPUT_REDIRECT_RE` を削除 (fallback 不要)
 - `core/matcher.py` 削除 (redact-sensitive-reads のみ、_shared は不変)
 - `_scan_input_redirects` に `input_redirect_empty_extract` 観測ログ追加
-- テスト件数: 411 → 490 件 (+80 追加, -1 削除, 2 件は挙動変更に伴う書換)。
+- テスト件数: 411 → 496 件 (+86 追加, -1 削除, 2 件は挙動変更に伴う書換)。
   内訳: inline/fd 10 + quote 6 + exclusion 7 + handle 11 + R1 concat word 6 +
   R2 comment 7 + handle R1/R2 4 + R3 escape paren 5 + handle R3 2 +
   R4 dq escape 6 + handle R4 1 + R5 proc-sub word boundary 3 + handle R5 2 +
-  R6 conditional/arith 8 + handle R6 2
+  R6 conditional/arith 8 + handle R6 2 + R7 [[ space-required 4 + handle R7 2
 - 公開 API / patch seam / LENIENT_MODES 不変
 
 ### 既知の未対応 (0.3.5 以降に分離)

@@ -507,6 +507,32 @@ class TestExtractInputRedirectTargetsConditionalArith(unittest.TestCase):
             [".env"],
         )
 
+    def test_double_bracket_no_space_is_normal_word(self):
+        # R7: `[[foo` は通常 word (bash の `[[` 予約語ではない) → 後続 redirect 抽出
+        self.assertEqual(
+            _extract_input_redirect_targets("tee [[foo < .env"),
+            [".env"],
+        )
+
+    def test_double_bracket_no_space_multiword(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("tee [[bar baz < .env"),
+            [".env"],
+        )
+
+    def test_double_bracket_paired_no_space_is_word(self):
+        # `[[a]]` は通常 word (predicate ではない) → 後続 redirect 抽出
+        self.assertEqual(
+            _extract_input_redirect_targets("cmd [[a]] < .env"),
+            [".env"],
+        )
+
+    def test_double_bracket_with_tab_after_is_keyword(self):
+        # tab も word boundary 扱い → `[[` 予約語 → 内部 `<` skip
+        self.assertEqual(
+            _extract_input_redirect_targets('[[\t"$x"<.env ]]'), []
+        )
+
 
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
@@ -700,6 +726,22 @@ class TestHandleCharLevelFixes(_BaseHandle):
             _make_envelope('[[ "$x"<.env ]]', self.tmp, mode="auto")
         )
         self.assertEqual(r, {})
+
+    def test_double_bracket_no_space_does_not_bypass_default(self):
+        # R7: `tee [[foo < .env` の `[[foo` は通常 word なので `< .env` 抽出 → deny
+        r = handle(
+            _make_envelope("tee [[foo < .env", self.tmp)
+        )
+        self.assertEqual(_decision(r), "deny")
+
+    def test_double_bracket_no_space_does_not_bypass_auto(self):
+        # auto モードでも bypass しない (機密 leak 防止の最重要回帰)
+        r = handle(
+            _make_envelope(
+                "tee [[foo < .env", self.tmp, mode="auto"
+            )
+        )
+        self.assertEqual(_decision(r), "deny")
 
 
 if __name__ == "__main__":

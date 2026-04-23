@@ -178,12 +178,17 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
 
         # `[[ ... ]]` 条件式: 内部の `<` `>` は文字列比較演算子 (redirect ではない)。
         # 閉じ `]]` まで quote / escape を尊重しつつスキップする。
-        # `[[` は word start 位置でのみ予約語扱い (R6)。
+        # `[[` は word start 位置 + **直後に空白必須** で予約語扱い (R6, R7)。
+        # bash 仕様上 `[[foo` は通常 word (tee の引数等) なので skip 対象外。
+        # 空白なしで skip 対象にしてしまうと `tee [[foo < .env` で閉じ `]]` を
+        # 探し続けて command 末まで消費 → `< .env` を取りこぼし auto/plan で
+        # bypass を許す (R7, security regression)。
         if (
             c == "["
             and at_word_start
-            and i + 1 < n
+            and i + 2 < n
             and command[i + 1] == "["
+            and command[i + 2] in " \t\n"
         ):
             i += 2
             inner_quote: str | None = None
