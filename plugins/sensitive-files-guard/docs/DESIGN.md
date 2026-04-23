@@ -83,8 +83,10 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
    - `<<` / `<<<` → heredoc / herestring、`<<` を消費してスキップ
      (`<<<` は 3 つ目の `<` も追加スキップ)
    - `<&` → fd dup、`<&` を消費してスキップ
-   - `<` 単独 → target 抽出 (bare は whitespace/operator 直前まで、
-     quote 付きは quote 剥離)
+   - `<` 単独 → target 抽出 (`_consume_redirect_target`)。
+     POSIX sh の word 概念に従い **quote / bare / backslash が 1 word 内で
+     mix 可能** (例: `".env".example` → `.env.example`, `a"b"c` → `abc`)。
+   - quote 外の `#` (word start 位置のみ) → 行末までシェルコメントとして skip
 2. **shlex.split (POSIX mode)** — segment 内のコマンド名 / operand 抽出。
    `bash_handler.py::handle` 内で `_split_command_on_operators` 後の各 segment
    に対して実施。コマンド token 単位の解析 (prefix normalize, shell keyword
@@ -97,6 +99,8 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
 | 基本 redirect | `cmd < target`, `cmd<target` | character-level |
 | fd 前置き redirect | `cmd 0< t`, `cmd N<t` | character-level |
 | quote 付き | `cmd < "t"`, `cmd<'t'` | character-level (quote 剥離) |
+| 連結 word | `cmd < ".env".example`, `cmd < a"b"c` | character-level (word boundary) |
+| シェルコメント skip | `echo ok #cat<.env` | character-level (`#` at word start) |
 | セグメント区切り | `cmd1 && cmd2`, `cmd1 \| cmd2` | `_split_command_on_operators` (0.3.0) |
 | 前置き正規化 | `FOO=1 cmd`, `env cmd`, `nohup cmd` | shlex token (0.3.2) |
 | operand scan | `cmd file1 file2`, URI/VCS | shlex token |

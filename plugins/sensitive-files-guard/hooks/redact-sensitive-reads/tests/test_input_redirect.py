@@ -225,6 +225,104 @@ class TestExtractInputRedirectTargetsExclusion(unittest.TestCase):
         )
 
 
+class TestExtractInputRedirectTargetsConcatWord(unittest.TestCase):
+    """0.3.4 R1 fix: quote + bare が連結した 1 つの word を正しく抽出する。
+
+    Codex review 指摘: closing quote で即 return すると
+    ``cat < ".env".example`` の suffix ``.example`` を落として ``.env`` だけを
+    抽出してしまう。POSIX sh では quote + bare は 1 word なので、word boundary
+    まで読み続ける必要がある。
+    """
+
+    def test_quoted_prefix_bare_suffix(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env".example'),
+            [".env.example"],
+        )
+
+    def test_quoted_prefix_bare_suffix_local(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env".local'),
+            [".env.local"],
+        )
+
+    def test_inline_quoted_concat(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat<".env".local'),
+            [".env.local"],
+        )
+
+    def test_bare_quoted_bare(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < a"b"c'),
+            ["abc"],
+        )
+
+    def test_quoted_then_glob_suffix(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env"*'),
+            [".env*"],
+        )
+
+    def test_multi_quote_sections(self):
+        # single + double + bare の混合
+        self.assertEqual(
+            _extract_input_redirect_targets("cat < 'a'\"b\"c"),
+            ["abc"],
+        )
+
+
+class TestExtractInputRedirectTargetsComment(unittest.TestCase):
+    """0.3.4 R2 fix: quote 外のシェルコメント (`#` ... 改行) 内の redirect を無視。
+
+    Codex review 指摘: 新 character parser が ``echo ok #cat<.env`` のような
+    コメント内の ``<`` を target として抽出し、false-positive deny を誘発する。
+    Bash の仕様通り ``#`` が word start 位置にあれば改行まで skip する。
+    """
+
+    def test_comment_hides_inline_redirect(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("echo ok #cat<.env"), []
+        )
+
+    def test_comment_hides_spaced_redirect(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("echo ok # < .env"), []
+        )
+
+    def test_line_start_comment(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("#cat < .env"), []
+        )
+
+    def test_double_quoted_hash_not_comment(self):
+        # double quote 内の `#` はコメント開始ではない、後段の redirect は抽出
+        self.assertEqual(
+            _extract_input_redirect_targets('echo "a#b" < .env'),
+            [".env"],
+        )
+
+    def test_single_quoted_hash_not_comment(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("echo 'a#b' < .env"),
+            [".env"],
+        )
+
+    def test_inline_hash_in_word_not_comment(self):
+        # word 内部の `#` は通常文字扱い (comment ではない)
+        self.assertEqual(
+            _extract_input_redirect_targets("echo abc#def < .env"),
+            [".env"],
+        )
+
+    def test_comment_ends_at_newline_then_redirect(self):
+        # 改行で comment 終了後の redirect は抽出される
+        self.assertEqual(
+            _extract_input_redirect_targets("echo ok # <x\ncat < .env"),
+            [".env"],
+        )
+
+
 class _BaseHandle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -342,6 +440,31 @@ class TestHandleInputRedirectExpanded(_BaseHandle):
     def test_process_sub_opaque_default_ask(self):
         r = handle(_make_envelope("cat <(cat .env)", self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+
+class TestHandleCharLevelFixes(_BaseHandle):
+    """0.3.4 Codex review R1/R2 fix: handle() 経由の挙動確認。"""
+
+    def test_concat_quoted_env_example_not_deny(self):
+        # `.env.example` は exclude 決着 → rule 非 match → hard_stop ask_or_allow
+        r = handle(_make_envelope('cat < ".env".example', self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_concat_quoted_env_local_deny(self):
+        # `.env.local` は `.env.*` include → deny (target 抽出成功で rule 一致)
+        r = handle(_make_envelope('cat < ".env".local', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_comment_hides_inline_redirect_default_ask(self):
+        # `<` を含むので hard_stop 経路だが target 空 → ask_or_allow (default=ask)
+        r = handle(_make_envelope("echo ok #cat<.env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_comment_hides_inline_redirect_auto_allow(self):
+        r = handle(
+            _make_envelope("echo ok #cat<.env", self.tmp, mode="auto")
+        )
+        self.assertEqual(r, {})
 
 
 if __name__ == "__main__":

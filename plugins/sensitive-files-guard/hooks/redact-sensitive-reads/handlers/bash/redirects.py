@@ -55,11 +55,18 @@ def _segment_has_residual_metachar(tokens: list[str]) -> bool:
 
 
 def _consume_redirect_target(command: str, start: int) -> tuple[int, str]:
-    """位置 ``start`` から redirect target を 1 つ消費する。
+    """位置 ``start`` から redirect target (1 つの Bash word) を消費する。
 
-    quote で始まれば quote 剥離後の中身を返す (POSIX sh 相当の semantics)。
-    bare なら whitespace / operator boundary 直前まで読む。backslash escape は
-    double-quote と bare の双方で解釈 (``\\c`` → ``c`` を target に含める)。
+    POSIX sh の word 概念に従い、**quote セクション / bare セクション /
+    backslash escape が 1 つの word 内で mix できる** ことを許容する。
+    word boundary (quote 外の whitespace / operator) に達するまで読み続け、
+    連結された各セクションの内容 (quote 剥離済み) を結合して返す。
+
+    例:
+    - ``".env".example`` → ``.env.example`` (quote + bare の連結)
+    - ``a"b"c`` → ``abc``
+    - ``".env"*`` → ``.env*``
+    - ``a\\ file`` → ``a file`` (backslash-escaped space は word boundary ではない)
 
     Returns:
         消費した文字数と target 文字列のタプル。
@@ -68,28 +75,36 @@ def _consume_redirect_target(command: str, start: int) -> tuple[int, str]:
     i = start
     parts: list[str] = []
 
-    if i < n and command[i] in ('"', "'"):
-        q = command[i]
-        i += 1
-        while i < n and command[i] != q:
-            if q == '"' and command[i] == "\\" and i + 1 < n:
-                parts.append(command[i + 1])
-                i += 2
-                continue
-            parts.append(command[i])
-            i += 1
-        if i < n:
-            i += 1  # closing quote
-        return (i - start, "".join(parts))
+    while i < n:
+        c = command[i]
+        # word boundary (quote 外の whitespace / operator)
+        if c in " \t\n|&;<>()":
+            break
 
-    # bare: whitespace / operator まで読む
-    while i < n and command[i] not in " \t\n|&;<>()":
-        if command[i] == "\\" and i + 1 < n:
+        # 開き quote: 対応する閉じ quote までを quote 剥離して取り込む
+        if c in ('"', "'"):
+            q = c
+            i += 1
+            while i < n and command[i] != q:
+                if q == '"' and command[i] == "\\" and i + 1 < n:
+                    parts.append(command[i + 1])
+                    i += 2
+                    continue
+                parts.append(command[i])
+                i += 1
+            if i < n:
+                i += 1  # closing quote
+            continue
+
+        # quote 外 backslash escape: 次の 1 文字を literal として取り込む
+        if c == "\\" and i + 1 < n:
             parts.append(command[i + 1])
             i += 2
             continue
-        parts.append(command[i])
+
+        parts.append(c)
         i += 1
+
     return (i - start, "".join(parts))
 
 
@@ -104,6 +119,7 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
       ``<`` も明示的に追加スキップ
     - ``<&`` (fd dup, ``<&N``/``<&-``) → ``<&`` を消費
     - 単独 ``<`` → whitespace 飛ばして target を ``_consume_redirect_target`` で抽出
+    - quote 外の ``#`` (word start 位置) → 行末までシェルコメントとして skip
 
     ``0<`` / ``N<`` (fd 前置き) は ``<`` の直前の数字 prefix を意識しない設計
     (fd prefix は redirect の意味論上 target 抽出対象は ``<`` 以降のみ)。
@@ -116,6 +132,8 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
     i = 0
     n = len(command)
     quote: str | None = None
+    # 直前に消費した文字が word boundary か (シェルコメントは word start 位置のみ)
+    at_word_start = True
 
     while i < n:
         c = command[i]
@@ -128,20 +146,34 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             if c == quote:
                 quote = None
             i += 1
+            at_word_start = False
+            continue
+
+        # quote 外のシェルコメント: word start 位置の `#` 以降を改行まで skip。
+        # Bash の comment は word の先頭 (空白 / operator / 行頭) で `#` が来たときのみ。
+        # `abc#def` のような word 内部の `#` は通常文字扱い (comment ではない)。
+        if c == "#" and at_word_start:
+            while i < n and command[i] != "\n":
+                i += 1
+            at_word_start = True
             continue
 
         # quote 開始
         if c in ('"', "'"):
             quote = c
             i += 1
+            at_word_start = False
             continue
 
         # quote 外の backslash escape
         if c == "\\" and i + 1 < n:
             i += 2
+            at_word_start = False
             continue
 
         if c != "<":
+            # word boundary 判定の更新 (次反復の `#` comment 判定に使う)
+            at_word_start = c in " \t\n|&;<>()"
             i += 1
             continue
 
