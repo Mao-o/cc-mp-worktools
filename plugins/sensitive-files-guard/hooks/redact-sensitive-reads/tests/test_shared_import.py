@@ -28,11 +28,6 @@ class TestSharedImport(unittest.TestCase):
         self.assertTrue(callable(_resolve_local_patterns_path))
         self.assertTrue(callable(load_patterns))
 
-    def test_core_matcher_reexports_shared(self):
-        from _shared.matcher import is_sensitive as shared_is_sensitive
-        from core.matcher import is_sensitive as core_is_sensitive
-        self.assertIs(shared_is_sensitive, core_is_sensitive)
-
     def test_core_patterns_delegates_to_shared(self):
         from _shared.patterns import _parse_patterns_text as shared_parse
         from core.patterns import _parse_patterns_text as core_parse

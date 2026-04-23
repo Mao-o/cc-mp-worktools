@@ -1,7 +1,8 @@
-"""``< target`` 入力リダイレクトの target 抽出と handle() 経由判定 (0.3.2)。
+"""``< target`` 入力リダイレクトの target 抽出と handle() 経由判定 (0.3.4)。
 
-heredoc (``<<``), fd dup (``<&N``), process substitution (``<(...)``), 数値 fd
-前置 (``0<``) は regex で除外され、抽出後は後段の ``ask_or_allow`` に倒る。
+0.3.4 で character-level quote-aware parser に移行。空白なし / fd 前置き /
+quote 付きを網羅し、heredoc (``<<``), herestring (``<<<``), fd dup (``<&N``),
+process substitution (``<(...)``) は parser 内で明示的にスキップする。
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ def _decision(resp: dict) -> str | None:
 
 
 class TestExtractInputRedirectTargets(unittest.TestCase):
-    """regex の単体テスト。"""
+    """character-level parser の単体テスト (0.3.4)。"""
 
     def test_simple_target(self):
         self.assertEqual(
@@ -44,16 +45,18 @@ class TestExtractInputRedirectTargets(unittest.TestCase):
             [".env.local"],
         )
 
-    def test_no_space_no_match(self):
-        # `cat<.env` は空白無しなので regex は拾わない
-        self.assertEqual(_extract_input_redirect_targets("cat<.env"), [])
+    def test_no_space_inline_target(self):
+        # 0.3.4: character-level parser で `cat<target` を拾う
+        self.assertEqual(
+            _extract_input_redirect_targets("cat<.env"), [".env"]
+        )
 
     def test_heredoc_excluded(self):
         self.assertEqual(_extract_input_redirect_targets("cat << EOF"), [])
         self.assertEqual(_extract_input_redirect_targets("cat <<EOF"), [])
 
     def test_process_sub_excluded(self):
-        # `<(` の `(` は \s+ にマッチしないので抽出されない
+        # 0.3.4: `<(` を parser が明示的にスキップする
         self.assertEqual(
             _extract_input_redirect_targets("cat <(cat .env)"),
             [],
@@ -62,9 +65,11 @@ class TestExtractInputRedirectTargets(unittest.TestCase):
     def test_fd_dup_excluded(self):
         self.assertEqual(_extract_input_redirect_targets("cat <&2"), [])
 
-    def test_digit_fd_prefix_excluded(self):
-        # `0<` は数値 fd 前置 → 除外
-        self.assertEqual(_extract_input_redirect_targets("cat 0< .env"), [])
+    def test_digit_fd_prefix_extracts_target(self):
+        # 0.3.4: fd 前置き `0<`/`N<` も target 抽出対象
+        self.assertEqual(
+            _extract_input_redirect_targets("cat 0< .env"), [".env"]
+        )
 
     def test_multiple_targets(self):
         self.assertEqual(
@@ -72,6 +77,151 @@ class TestExtractInputRedirectTargets(unittest.TestCase):
                 "cat < .env && cat < .env.local"
             ),
             [".env", ".env.local"],
+        )
+
+
+class TestExtractInputRedirectTargetsInline(unittest.TestCase):
+    """0.3.4: 空白なし / fd 前置き / quote 付き inline の境界検証。"""
+
+    def test_inline_no_fd_no_space(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat<.env"), [".env"]
+        )
+
+    def test_inline_double_quoted(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat<".env"'), [".env"]
+        )
+
+    def test_inline_single_quoted(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat<'.env'"), [".env"]
+        )
+
+    def test_inline_quoted_space_name(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat<"a file.env"'),
+            ["a file.env"],
+        )
+
+    def test_fd_zero_space(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat 0< .env"), [".env"]
+        )
+
+    def test_fd_zero_inline(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat 0<.env"), [".env"]
+        )
+
+    def test_fd_nonzero_space(self):
+        # `1<` は意味論上 stdout-as-input で runtime error だが syntax は有効。
+        # 静的解析では target を拾う (fail-closed)。
+        self.assertEqual(
+            _extract_input_redirect_targets("cat 1< .env"), [".env"]
+        )
+
+    def test_fd_nonzero_inline(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat 2<.env"), [".env"]
+        )
+
+    def test_fd_multi_digit(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat 10<.env"), [".env"]
+        )
+
+    def test_mixed_fd_and_quote(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat 0<".env"'), [".env"]
+        )
+
+
+class TestExtractInputRedirectTargetsQuoteAware(unittest.TestCase):
+    """0.3.4: 空白 + quote 付きの網羅。"""
+
+    def test_double_quoted_dotenv_with_space(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env"'), [".env"]
+        )
+
+    def test_single_quoted_dotenv_with_space(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat < '.env'"), [".env"]
+        )
+
+    def test_double_quoted_space_name_with_space(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < "a file.env"'),
+            ["a file.env"],
+        )
+
+    def test_double_quoted_glob_target(self):
+        self.assertEqual(
+            _extract_input_redirect_targets('cat < ".env*"'), [".env*"]
+        )
+
+    def test_mixed_quoted_and_bare(self):
+        self.assertEqual(
+            _extract_input_redirect_targets(
+                'cat < README.md && cat<"a file.env"'
+            ),
+            ["README.md", "a file.env"],
+        )
+
+    def test_escaped_space_in_bare(self):
+        # backslash escape で space を含む bare target
+        self.assertEqual(
+            _extract_input_redirect_targets("cat < a\\ file.env"),
+            ["a file.env"],
+        )
+
+
+class TestExtractInputRedirectTargetsExclusion(unittest.TestCase):
+    """0.3.4: heredoc / herestring / fd dup / process sub の除外境界。"""
+
+    def test_herestring_excluded(self):
+        # `<<<` は herestring (literal 渡し、file read ではない)
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <<< '.env'"), []
+        )
+
+    def test_process_sub_inline_no_space(self):
+        # `<(` 直後の内部コマンドの `.env` を拾わない (depth tracking)
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(cat .env)"), []
+        )
+
+    def test_process_sub_with_space_outside(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(cat .env) README.md"),
+            [],
+        )
+
+    def test_process_sub_nested_paren(self):
+        # 内部に nested `(...)` があっても depth tracking で正しく閉じる
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo (x))"), []
+        )
+
+    def test_process_sub_followed_by_redirect(self):
+        # process sub 終了後に `<` があれば target 抽出
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <(echo x) < .env"),
+            [".env"],
+        )
+
+    def test_fd_dup_excluded(self):
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <&2"), []
+        )
+
+    def test_heredoc_body_literal(self):
+        # heredoc body 内に `< .env` が含まれても 0.3.3 と同等挙動で拾う
+        # (false-positive 側 deny に倒す。body 解析は範囲外)。
+        self.assertEqual(
+            _extract_input_redirect_targets("cat <<EOF\ncat < .env\nEOF"),
+            [".env"],
         )
 
 
@@ -142,6 +292,56 @@ class TestHandleInputRedirect(_BaseHandle):
     def test_bypass_dotenv_lt_deny(self):
         r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
         self.assertEqual(_decision(r), "deny")
+
+
+class TestHandleInputRedirectExpanded(_BaseHandle):
+    """0.3.4: 全有効 redirect 構文で deny / ask_or_allow が正しく倒れるか。"""
+
+    def test_inline_no_space_dotenv_deny(self):
+        r = handle(_make_envelope("cat<.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_inline_quoted_dotenv_deny(self):
+        r = handle(_make_envelope('cat<".env"', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_fd_zero_space_dotenv_deny(self):
+        r = handle(_make_envelope("cat 0< .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_fd_zero_inline_dotenv_deny(self):
+        r = handle(_make_envelope("cat 0<.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_fd_nonzero_dotenv_deny(self):
+        r = handle(_make_envelope("cat 1< .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_quoted_space_dotenv_deny(self):
+        r = handle(_make_envelope('cat < ".env"', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_quoted_single_dotenv_deny(self):
+        r = handle(_make_envelope("cat < '.env'", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_quoted_glob_dotenv_deny(self):
+        r = handle(_make_envelope('cat < ".env*"', self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_quoted_space_nonmatch_ask(self):
+        # basename `a file.env` は rule 非 match → ask_or_allow
+        r = handle(_make_envelope('cat < "a file.env"', self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_herestring_opaque_default_ask(self):
+        # herestring は除外 → target 空 → 後段 hard_stop ask_or_allow
+        r = handle(_make_envelope("cat <<< '.env'", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_process_sub_opaque_default_ask(self):
+        r = handle(_make_envelope("cat <(cat .env)", self.tmp))
+        self.assertEqual(_decision(r), "ask")
 
 
 if __name__ == "__main__":

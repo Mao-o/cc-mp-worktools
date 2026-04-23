@@ -32,7 +32,7 @@
 
 ```
 sensitive-files-guard/
-├── .claude-plugin/plugin.json       # version 0.3.3
+├── .claude-plugin/plugin.json       # version 0.3.4
 ├── README.md                        # 利用者向け概要
 ├── CLAUDE.md                        # 本ファイル (保守者向け)
 ├── CHANGELOG.md                     # 全バージョン統合リリースノート
@@ -54,7 +54,6 @@ sensitive-files-guard/
         ├── __main__.py              # fail-closed wrapper + Windows SIGALRM チェック
         ├── core/
         │   ├── logging.py           秘密非混入ログ (LOG_PATH=~/.claude/logs/redact-hook.log)
-        │   ├── matcher.py           _shared.matcher の互換 re-export
         │   ├── output.py            deny/ask JSON builder + ask_or_deny / ask_or_allow
         │   ├── patterns.py          _shared.patterns + Read 側の warn_callback
         │   └── safepath.py          normalize / classify / open_regular (fd) / is_regular_directory
@@ -85,7 +84,7 @@ sensitive-files-guard/
 `is_sensitive` / `load_patterns` / envelope 操作などの plugin ステート依存処理は
 すべて `bash_handler.py` 側に残す。
 
-既存テスト (409 件 + 0.3.3 新規 2 件 = 411 件) は `handlers.bash_handler.X` から
+既存テスト (0.3.4 時点 444 件) は `handlers.bash_handler.X` から
 以下を import する patch seam として依存している。`bash_handler.py` は
 `handlers.bash.*` からこれらを **再 export** して従来の import path を維持する:
 
@@ -314,7 +313,7 @@ EOF
 2. `CHANGELOG.md` にバージョンエントリを追加
 3. `claude plugin validate .` で warning 0 を確認
 4. `../../../.tools/validate-all.sh` で marketplace 全体の健全性を確認
-5. commit + tag (`v0.3.3` 等) + push
+5. commit + tag (`v0.3.4` 等) + push
 
 ## Step 0-c 実測結果 (将来更新予定)
 

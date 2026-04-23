@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.3.4
+
+**shim 削除 + Bash input redirect 解析を自前 parser に刷新**。0.3.3 で予告して
+いた `core/matcher.py` shim の削除と、`<` 入力リダイレクト target 抽出を
+**有効な bash syntax を網羅**する形に再設計。挙動変更は「0.3.3 で
+`ask_or_allow` (auto/bypass allow) だったケースが機密一致時に deny に確定する」
+方向のみで、新たに allow に倒るケースは無い。
+
+### 主要な変更
+
+1. **`core/matcher.py` shim 削除** — `hooks/redact-sensitive-reads/core/matcher.py`
+   (1 行の re-export 層) を削除。`handlers/read_handler.py` / `handlers/bash_handler.py`
+   / `handlers/edit_handler.py` / `tests/test_matcher.py` の import を
+   `_shared.matcher` 直参照に書換。`check-sensitive-files/checker.py` は既に
+   `_shared.matcher` 直参照で統一されており、redact 側だけ残っていた非対称を解消。
+   `tests/test_shared_import.py` から shim 契約テスト
+   (`test_core_matcher_reexports_shared`) を削除。公開 API (hook stdin/stdout
+   envelope) 変更なし。
+2. **Bash input redirect 解析を character-level parser に刷新** — 0.3.2 の
+   regex (`(?:^|[^<&0-9])<\s+(\S+)`) は空白あり + 非 quote + fd 前置きなしの
+   形式しか拾えず、`cat<.env` / `cat 0< .env` / `cat N<target` / `cat < ".env"`
+   等が false-negative で `ask_or_allow` に倒っていた。検討した `shlex.split`
+   ベースは `<` を演算子として分割しないため B スコープ (全有効 redirect 構文)
+   を達成できず、**character-level quote-aware parser** を新設
+   (`handlers/bash/redirects.py::_scan_input_redirect_targets_chars`)。
+   - 対応: `<` / `<target` / `N<` / `N<target` / quote 付き (`< "t"`, `<'t'`)
+     / 複数 (`cmd1 && cmd2`)
+   - 除外: `<<` heredoc, `<<<` herestring, `<&N`/`<&-` fd dup, `<(...)` process sub
+     (後者は depth tracking で閉じ `)` までスキップし内部の `<` を拾わない)
+   - `<` を含むのに target が取れなかった場合は
+     `bash_classify:input_redirect_empty_extract` ログで観測可能
+3. **DESIGN.md に "Bash handler の対応文法範囲" 節を新設** — character-level
+   parser と shlex-based segment 解析の使い分け、対応/対応外の境界、観測ログ
+   tag 一覧を明文化 (Codex review 指摘 3/5 対応)。
+
+### 挙動変更 (0.3.3 → 0.3.4)
+
+| コマンド | 0.3.3 | 0.3.4 |
+|---|---|---|
+| `cat<.env` (空白なし) | ask_or_allow | **deny** |
+| `cat<".env"` (inline quoted) | ask_or_allow | **deny** |
+| `cat 0< .env` (fd 前置き + 空白) | ask_or_allow | **deny** |
+| `cat 0<.env`, `cat N<target` (fd 前置き inline / 任意 fd) | ask_or_allow | **deny** |
+| `cat < ".env"`, `cat < '.env'` (quote + 空白) | ask_or_allow | **deny** |
+| `cat < ".env.local"`, `cat < ".env*"` (quoted glob) | ask_or_allow | **deny** |
+| `cat < "a file.env"` (rule 非 match の quoted space 名) | ask_or_allow | ask_or_allow (抽出成功、rule 非 match で維持) |
+| `cat <<EOF`, `cat <<< '.env'`, `cat <&2`, `cat <(cat .env)` | 変更なし | 変更なし (opaque 維持) |
+| 既存 `cat < .env` / `cat < .env*` 等 | deny | deny (維持) |
+
+### 内部構造の変更
+
+- `handlers/bash/redirects.py` に `_scan_input_redirect_targets_chars` /
+  `_consume_redirect_target` を新設 (pure helper)
+- `_extract_input_redirect_targets` は `handlers/bash_handler.py` 内で
+  character-level parser を呼ぶ thin wrapper (patch seam 維持)
+- `handlers/bash/constants.py::_INPUT_REDIRECT_RE` を削除 (fallback 不要)
+- `core/matcher.py` 削除 (redact-sensitive-reads のみ、_shared は不変)
+- `_scan_input_redirects` に `input_redirect_empty_extract` 観測ログ追加
+- テスト件数: 411 → 444 件 (+34 追加, -1 削除, 2 件は挙動変更に伴う書換)
+- 公開 API / patch seam / LENIENT_MODES 不変
+
+### 既知の未対応 (0.3.5 以降に分離)
+
+- 例外クラス単位での `__main__` catch-all 緩和 (旧 H1。bash_handler 内で
+  raise する意味論的経路が実在しないことが判明したため設計練り直し)
+- shell wrapper (`bash -c "cat .env"` 等) 内部 script 解析
+- Windows (Step 0-c) 実測方針確定
+- Safe-search ラッパスクリプト (`scripts/safe_grep.py` / `safe_find.py`)
+
 ## 0.3.3
 
 **ブラッシュアップ + plan mode lenient 化**。0.3.2 の誤爆ガード緩和 (三態判定 +

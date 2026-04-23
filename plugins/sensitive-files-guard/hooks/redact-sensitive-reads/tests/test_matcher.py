@@ -12,7 +12,7 @@ from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
-from core.matcher import is_sensitive
+from _shared.matcher import is_sensitive
 
 
 # 既定 patterns.txt 相当の rules (既定 → ローカルの順で last-match-wins 評価)。

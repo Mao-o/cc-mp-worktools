@@ -10,7 +10,7 @@ import os
 
 from core import logging as L
 from core import output
-from core.matcher import is_sensitive
+from _shared.matcher import is_sensitive
 from core.patterns import load_patterns
 from core.safepath import classify, normalize, open_regular
 from redaction.engine import MAX_INLINE_BYTES, redact, redact_large_file

@@ -52,6 +52,9 @@
 | `nohup command cat .env` (連鎖) |
 | `/usr/bin/env FOO=1 cat .env`, `/bin/command cat .env` |
 | `cat < .env`, `< .env cat`, `cat < .env*` (`<` target 抽出) |
+| `cat < ".env"`, `cat < '.env'`, `cat < ".env*"` (quote-aware target, 0.3.4) |
+| `cat<.env`, `cat<".env"`, `cat<'.env'` (inline target 空白なし, 0.3.4) |
+| `cat 0< .env`, `cat 1<.env`, `cat N< target` (fd 前置き redirect, 0.3.4) |
 
 ## Bash handler — 非機密 operand (全 mode で allow)
 
@@ -69,6 +72,7 @@
 |---|---|---|---|---|---|---|
 | `cat $X`, `cat "$X"`, `cat $(echo .env)` (動的展開) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
 | `cat << EOF ... EOF`, `cat <(cat .env)`, `cat <&2` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
+| `cat <<< '.env'` (herestring, literal 渡し) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
 | `(cat .env)`, `{ cat .env; }` (グループ化) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
 | `for i in 1; do cat .env; done`, `if true; then cat .env; fi` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
 | `while cat .env; do pwd; done`, `coproc cat .env` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
