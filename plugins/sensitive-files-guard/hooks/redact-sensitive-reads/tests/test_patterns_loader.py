@@ -2,6 +2,7 @@
 
 XDG_CONFIG_HOME / HOME を tmpdir に隔離し、実ホームを汚染しない。
 両モジュールが同じ fixture から同じ rules を返すことを契約テストで固定する。
+0.4.0 から 2-tier lookup (``~/.claude/`` preferred, ``$XDG_CONFIG_HOME/`` fallback)。
 """
 from __future__ import annotations
 
@@ -41,12 +42,25 @@ class BaseWithIsolatedHome(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _write_local(self, content: str) -> Path:
+    def _write_preferred(self, content: str) -> Path:
+        """新・優先パス (``~/.claude/sensitive-files-guard/``) に patterns.local.txt を書く。"""
+        d = self.home_dir / ".claude" / "sensitive-files-guard"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "patterns.local.txt"
+        p.write_text(content)
+        return p
+
+    def _write_fallback(self, content: str) -> Path:
+        """fallback パス (``$XDG_CONFIG_HOME/sensitive-files-guard/``) に patterns.local.txt を書く。"""
         d = self.xdg_dir / "sensitive-files-guard"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "patterns.local.txt"
         p.write_text(content)
         return p
+
+    def _write_local(self, content: str) -> Path:
+        """互換 alias: 既存テストとの後方互換のため preferred に書く。"""
+        return self._write_preferred(content)
 
 
 def _make_default_patterns_file(tmp: Path, lines: list[str]) -> Path:
@@ -66,12 +80,12 @@ class TestCorePatternsLoader(BaseWithIsolatedHome):
         rules = load_patterns(default_file)
         self.assertEqual(rules, [("*.pem", False), ("*.pub", True)])
 
-    def test_local_appended_when_present(self):
+    def test_preferred_appended_when_present(self):
         from core.patterns import load_patterns
         default_file = _make_default_patterns_file(
             Path(self.tmp), ["*.pem", "!*.pub"]
         )
-        self._write_local("*.pub\n!foo.pem\n")
+        self._write_preferred("*.pub\n!foo.pem\n")
         rules = load_patterns(default_file)
         self.assertEqual(
             rules,
@@ -88,7 +102,6 @@ class TestCorePatternsLoader(BaseWithIsolatedHome):
         default_file = _make_default_patterns_file(
             Path(self.tmp), ["*.pem", "!*.pub"]
         )
-        # ローカル patterns.local.txt 自体は作らず、read_text を PermissionError で mock
         original_read_text = Path.read_text
 
         def fake_read_text(self_path: Path, *args, **kwargs):
@@ -106,22 +119,79 @@ class TestCorePatternsLoader(BaseWithIsolatedHome):
         rules = _parse_patterns_text(text)
         self.assertEqual(rules, [("*.pem", False), ("*.pub", True)])
 
-    def test_resolve_local_uses_xdg(self):
+    def test_resolve_local_preferred_is_home_claude(self):
+        from core.patterns import _resolve_local_patterns_paths
+        paths = _resolve_local_patterns_paths()
+        self.assertEqual(
+            paths[0],
+            self.home_dir / ".claude" / "sensitive-files-guard" / "patterns.local.txt",
+        )
+
+    def test_resolve_local_fallback_uses_xdg(self):
+        from core.patterns import _resolve_local_patterns_paths
+        paths = _resolve_local_patterns_paths()
+        self.assertIn(
+            self.xdg_dir / "sensitive-files-guard" / "patterns.local.txt",
+            paths,
+        )
+
+    def test_resolve_local_fallback_defaults_to_home_config_when_xdg_unset(self):
+        from core.patterns import _resolve_local_patterns_paths
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            paths = _resolve_local_patterns_paths()
+        self.assertEqual(
+            paths[1],
+            self.home_dir / ".config" / "sensitive-files-guard" / "patterns.local.txt",
+        )
+
+    def test_resolve_local_path_alias_returns_preferred(self):
+        """_resolve_local_patterns_path (単数) は preferred を返す後方互換 alias。"""
         from core.patterns import _resolve_local_patterns_path
         p = _resolve_local_patterns_path()
         self.assertEqual(
-            p, self.xdg_dir / "sensitive-files-guard" / "patterns.local.txt"
+            p, self.home_dir / ".claude" / "sensitive-files-guard" / "patterns.local.txt"
         )
 
-    def test_resolve_local_falls_back_to_home_config(self):
-        from core.patterns import _resolve_local_patterns_path
-        # XDG_CONFIG_HOME を消すと ~/.config に落ちる (HOME は setUp で隔離済み)
-        with mock.patch.dict(os.environ):
-            os.environ.pop("XDG_CONFIG_HOME", None)
-            p = _resolve_local_patterns_path()
-        self.assertEqual(
-            p, self.home_dir / ".config" / "sensitive-files-guard" / "patterns.local.txt"
-        )
+
+class TestPreferredFallback2Tier(BaseWithIsolatedHome):
+    """2-tier lookup の挙動 (Phase 4 新規)。"""
+
+    def test_preferred_wins_when_both_exist(self):
+        """両方存在時は preferred (~/.claude/) のみ採用、fallback は無視。"""
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("# preferred\n*.from-preferred\n")
+        self._write_fallback("# fallback\n*.from-fallback\n")
+        rules = load_patterns(default_file)
+        patterns = [p for p, _ex in rules]
+        self.assertIn("*.from-preferred", patterns)
+        self.assertNotIn("*.from-fallback", patterns)
+
+    def test_fallback_used_when_preferred_absent(self):
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_fallback("*.from-fallback\n")
+        rules = load_patterns(default_file)
+        patterns = [p for p, _ex in rules]
+        self.assertIn("*.from-fallback", patterns)
+
+    def test_fallback_triggers_deprecation_warn(self):
+        """fallback 採用時は warn_callback("deprecated_config_dir") が呼ばれる。"""
+        from _shared.patterns import load_patterns as shared_load
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_fallback("*.from-fallback\n")
+        messages: list[str] = []
+        shared_load(default_file, warn_callback=lambda m: messages.append(m))
+        self.assertIn("deprecated_config_dir", messages)
+
+    def test_preferred_does_not_trigger_deprecation_warn(self):
+        from _shared.patterns import load_patterns as shared_load
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("*.from-preferred\n")
+        messages: list[str] = []
+        shared_load(default_file, warn_callback=lambda m: messages.append(m))
+        self.assertNotIn("deprecated_config_dir", messages)
 
 
 class TestCheckerLoaderContract(BaseWithIsolatedHome):
@@ -145,7 +215,7 @@ class TestCheckerLoaderContract(BaseWithIsolatedHome):
         default_file = _make_default_patterns_file(
             Path(self.tmp), ["*.pem", "!*.pub", "id_rsa*"]
         )
-        self._write_local("!foo.pem\n*.foo\n")
+        self._write_preferred("!foo.pem\n*.foo\n")
 
         core_rules = core_load(default_file)
         checker_rules = checker.load_patterns(default_file)

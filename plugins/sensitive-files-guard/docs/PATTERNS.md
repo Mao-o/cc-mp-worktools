@@ -55,21 +55,35 @@ service-account*.json
 !*.pub
 ```
 
-## ローカル拡張 `patterns.local.txt`
+## ローカル拡張 `patterns.local.txt` (2-tier lookup, 0.4.0 以降)
 
-ユーザー個別のパターンは plugin を fork せずに
-`$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt` (未設定時
-`~/.config/sensitive-files-guard/patterns.local.txt`) に書ける。両 hook が自動で
-合流して読み込む。
+ユーザー個別のパターンは plugin を fork せずに `patterns.local.txt` に書ける。
+両 hook が自動で合流して読み込む。
 
-### 初回作成手順
+### 配置パスの優先順位
+
+| 優先度 | パス | 備考 |
+|---|---|---|
+| 1 (推奨) | `~/.claude/sensitive-files-guard/patterns.local.txt` | 0.4.0 から新規推奨 |
+| 2 (fallback) | `$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt` | 0.3.x までのデフォルト |
+| 2 (fallback, XDG 未設定時) | `~/.config/sensitive-files-guard/patterns.local.txt` | XDG 未設定時のみ fallback |
+
+**両方存在する場合は優先側のみ採用**、fallback は無視される。fallback が採用
+されると deprecation 通知が出る (Read hook は logfile のみ、Stop hook は stderr)。
+**0.6.0 で fallback を削除予定**。
+
+`~/.claude/sensitive-files-guard/` は Claude Code の plugin cache
+(`~/.claude/plugins/cache/sensitive-files-guard/`) とは別物であることに注意
+(前者はユーザー設定、後者は plugin 実体)。
+
+### 初回作成手順 (新パス)
 
 ```bash
-# 1. 設定ディレクトリを用意 (XDG_CONFIG_HOME 未設定時は ~/.config/)
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guard"
+# 1. 設定ディレクトリを用意
+mkdir -p ~/.claude/sensitive-files-guard
 
 # 2. 用途別のパターンを追記
-cat >> "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guard/patterns.local.txt" <<'EOF'
+cat >> ~/.claude/sensitive-files-guard/patterns.local.txt <<'EOF'
 # 自作テンプレート除外
 !my-config.env
 !config.sample.yaml
@@ -88,7 +102,19 @@ EOF
 設定ファイル確認:
 
 ```bash
-cat "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guard/patterns.local.txt"
+cat ~/.claude/sensitive-files-guard/patterns.local.txt
+```
+
+### 旧パスからの移行
+
+`~/.config/sensitive-files-guard/patterns.local.txt` や
+`$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt` を使っていた場合、
+以下で新パスへ移すか、手動コピー:
+
+```bash
+mkdir -p ~/.claude/sensitive-files-guard
+mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guard/patterns.local.txt" \
+   ~/.claude/sensitive-files-guard/patterns.local.txt
 ```
 
 ## 評価方式: last-match-wins (大文字小文字無視)
@@ -210,11 +236,18 @@ exclude を重ねる運用が安全。
 - `pattern` → `(pattern, False)` (include)
 - 出現順を保持する (last-match-wins で順序が意味を持つため)
 
-### `_resolve_local_patterns_path() -> Path`
+### `_resolve_local_patterns_paths() -> list[Path]` (0.4.0+)
 
-`patterns.local.txt` のパス解決。
+`patterns.local.txt` の 2-tier パス解決。
 
-- `$XDG_CONFIG_HOME` があれば
-  `$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt`
-- 未設定なら `~/.config/sensitive-files-guard/patterns.local.txt`
-- 返り値は実在しなくてもよい (呼出側で `FileNotFoundError` を処理)
+- index 0 (preferred): `~/.claude/sensitive-files-guard/patterns.local.txt`
+- index 1 (fallback, deprecated):
+  `$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt` または
+  `~/.config/sensitive-files-guard/patterns.local.txt` (XDG 未設定時)
+
+両パスが偶然同一に解決された場合は 1 要素リスト。呼出側 (`load_patterns`)
+は preferred が存在すればそれを使い、無ければ fallback を試す。fallback
+採用時は `warn_callback("deprecated_config_dir")` を呼ぶ。
+
+旧 `_resolve_local_patterns_path()` (単数形) は後方互換 alias として残り、
+preferred のみを返す。

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.0
+
+**`patterns.local.txt` 配置パスの 2-tier lookup 導入**。0.3.x までは
+`$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt`
+(未設定時 `~/.config/sensitive-files-guard/patterns.local.txt`) のみを参照して
+いたが、Claude Code のユーザー設定と同じディレクトリツリーに集約するため
+`~/.claude/sensitive-files-guard/patterns.local.txt` を優先パスとして追加。
+
+### 主要な変更
+
+1. **`_resolve_local_patterns_path` → `_resolve_local_patterns_paths` に改名**
+   (複数形)。戻り値が `list[Path]` になり、preferred (`~/.claude/...`) と
+   fallback (`$XDG_CONFIG_HOME/...` or `~/.config/...`) の 2 要素を返す。
+   旧単数形は preferred を返す後方互換 alias として残留。
+2. **`load_patterns` が preferred → fallback の順に試行**。両方存在時は
+   preferred のみ採用 (fallback は無視)。fallback 採用時は
+   `warn_callback("deprecated_config_dir")` を呼ぶ。
+3. **呼出側の warn_callback 分岐**:
+   - Read hook (`core/patterns.py`): deprecation は `log_info` で LOG_PATH
+     のみ 1 行 (`permissionDecisionReason` に載せない — LLM 文脈のノイズ回避)
+   - Stop hook (`check-sensitive-files/checker.py`): stderr に 1 行
+     (Claude Code UI で可視化されるが LLM には載らない)
+4. **docs/PATTERNS.md / README.md / CLAUDE.md を 2-tier lookup に対応**。
+   初回作成手順を新パスへ更新、旧パスからの移行手順を追記。
+5. **テスト追加** (`test_patterns_loader.py` に 4 ケース):
+   - `~/.claude/` 優先が採用される
+   - `$XDG_CONFIG_HOME` fallback が採用される
+   - 両方存在時は `~/.claude/` 勝ち
+   - fallback 採用時は deprecation warn が発火
+
+### 方針
+
+**0.6.0 で fallback (XDG_CONFIG_HOME / ~/.config) を削除予定**。それまでに
+既存利用者は `~/.claude/sensitive-files-guard/patterns.local.txt` へ移行する
+こと。patterns.txt (plugin 同梱) 側は変更なし。
+
+### 非互換性
+
+- 新しい関数名 `_resolve_local_patterns_paths` (複数形) を internal API として
+  公開。単数形 `_resolve_local_patterns_path` は後方互換 alias として残存する
+  が、将来削除の可能性あり
+- 戻り値型変更 (`Path` → `list[Path]`) に伴い、internal API 直参照していた
+  コードは書き換えが必要 (`check-sensitive-files/checker.py` /
+  `redact-sensitive-reads/core/patterns.py` は 0.4.0 で追従済み)
+
 ## 0.3.4
 
 **shim 削除 + Bash input redirect 解析を自前 parser に刷新**。0.3.3 で予告して
