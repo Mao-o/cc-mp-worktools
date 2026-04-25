@@ -16,9 +16,9 @@ PATTERNS = [r"^firebase\b"]
 READONLY = [r"^firebase\s+use\s*$"]
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
-    "firebase use で現在のプロジェクトを確認し、以下で作成してください: "
-    'mkdir -p .claude && echo \'{"firebase":"YOUR_PROJECT_ID"}\' > .claude/accounts.local.json'
-    '\n(複数 alias 運用の場合は "firebase": {"default":"proj-dev","prod":"proj-prod"} 形式も可)'
+    "Firebase: builder で初期化してください: /verify-cloud-account:accounts-init\n"
+    "(firebase use で現在のプロジェクトを事前確認可。"
+    '複数 alias 運用は {"default":"proj-dev","prod":"proj-prod"} 形式も可)'
 )
 
 
@@ -47,6 +47,17 @@ def _from_firebaserc(project_dir: str) -> str:
     except (json.JSONDecodeError, OSError):
         return ""
     return data.get("projects", {}).get("default", "") or ""
+
+
+def get_active_account(project_dir: str) -> str | None:
+    """現在アクティブな Firebase project ID を返す。取得不可なら None。"""
+    current = _from_cli() or _from_firebaserc(project_dir)
+    return current or None
+
+
+def suggest_accounts_entry(project_dir: str) -> str | None:
+    """accounts.local.json の "firebase" キーに書く値を提案する (現状は scalar のみ)。"""
+    return get_active_account(project_dir)
 
 
 def verify(expected, project_dir: str) -> str | None:

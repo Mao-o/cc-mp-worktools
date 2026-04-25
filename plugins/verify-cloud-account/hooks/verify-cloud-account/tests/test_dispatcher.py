@@ -21,6 +21,8 @@ class BaseWithTmpProject(unittest.TestCase):
         self.project_dir.mkdir()
         self.claude_dir = self.project_dir / ".claude"
         self.claude_dir.mkdir()
+        self.new_dir = self.claude_dir / "verify-cloud-account"
+        self.new_dir.mkdir()
 
         self._cache_tmp = Path(self.tmp) / "cache_tmp"
         self._cache_tmp.mkdir()
@@ -40,7 +42,20 @@ class BaseWithTmpProject(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _write_accounts(self, data: dict):
+        """新パス (`.claude/verify-cloud-account/accounts.local.json`) に書く。"""
+        (self.new_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_deprecated_accounts(self, data: dict):
+        """旧 deprecated パス (`.claude/accounts.local.json`) に書く。"""
         (self.claude_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_legacy_accounts(self, data: dict):
+        """legacy パス (`.claude/accounts.json`) に書く。"""
+        (self.claude_dir / "accounts.json").write_text(
             json.dumps(data), encoding="utf-8"
         )
 
@@ -67,7 +82,7 @@ class TestRouting(BaseWithTmpProject):
 
 class TestAccountsFile(BaseWithTmpProject):
     def test_malformed_json_returns_deny(self):
-        (self.claude_dir / "accounts.local.json").write_text(
+        (self.new_dir / "accounts.local.json").write_text(
             "{not json", encoding="utf-8"
         )
         result = dispatch("gh pr list", str(self.project_dir))
@@ -76,7 +91,7 @@ class TestAccountsFile(BaseWithTmpProject):
         self.assertIn("JSON", out["permissionDecisionReason"])
 
     def test_non_object_returns_deny(self):
-        (self.claude_dir / "accounts.local.json").write_text(
+        (self.new_dir / "accounts.local.json").write_text(
             '["a", "b"]', encoding="utf-8"
         )
         result = dispatch("gh pr list", str(self.project_dir))
@@ -99,14 +114,74 @@ class TestAccountsFile(BaseWithTmpProject):
         self.assertIn("文字列または", out["permissionDecisionReason"])
 
     def test_legacy_accounts_json_triggers_warn(self):
-        (self.claude_dir / "accounts.json").write_text(
-            json.dumps({"github": "Mao-o"}), encoding="utf-8"
-        )
+        self._write_legacy_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None):
             result = dispatch("gh pr list", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertIn("additionalContext", out)
         self.assertIn("accounts.local.json", out["additionalContext"])
+
+
+class TestPathMigration(BaseWithTmpProject):
+    """新旧パスの 3-tier lookup / 競合検出のテスト (Phase 2)。"""
+
+    def test_new_path_only_is_used(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+
+    def test_deprecated_path_verifies_with_migration_warn(self):
+        """deprecated パスのみ → 動作するが warn で移行案内。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertIn("additionalContext", out)
+        self.assertIn(".claude/verify-cloud-account/accounts.local.json", out["additionalContext"])
+        self.assertIn("migrate", out["additionalContext"])
+
+    def test_deprecated_path_with_verify_failure_includes_migration_note(self):
+        """deprecated パスで verify 失敗時は deny reason に migration 案内付加。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value="GitHub 不一致"):
+            result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("GitHub 不一致", reason)
+        self.assertIn("migrate", reason)
+
+    def test_new_and_deprecated_both_exist_denies(self):
+        """新旧両方存在 → fail-closed で deny (D4)。"""
+        self._write_accounts({"github": "new-user"})
+        self._write_deprecated_accounts({"github": "deprecated-user"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("複数のパス", reason)
+        self.assertIn("(new)", reason)
+        self.assertIn("(deprecated)", reason)
+        self.assertIn("migrate", reason)
+
+    def test_new_and_legacy_both_exist_denies(self):
+        """新 + legacy 両方存在も deny (D4)。"""
+        self._write_accounts({"github": "A"})
+        self._write_legacy_accounts({"github": "B"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("複数のパス", out["permissionDecisionReason"])
+
+    def test_deprecated_and_legacy_both_exist_denies(self):
+        """deprecated + legacy 両方存在も deny (D4)。"""
+        self._write_deprecated_accounts({"github": "A"})
+        self._write_legacy_accounts({"github": "B"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("複数のパス", out["permissionDecisionReason"])
 
 
 class TestServiceInteractions(BaseWithTmpProject):
@@ -228,7 +303,7 @@ class TestCacheIntegration(BaseWithTmpProject):
         ) as mock_verify:
             dispatch("gh pr list", str(self.project_dir))
             # mtime を強制的に変化させる
-            accounts_path = self.claude_dir / "accounts.local.json"
+            accounts_path = self.new_dir / "accounts.local.json"
             stat = accounts_path.stat()
             os.utime(accounts_path, (stat.st_atime + 100, stat.st_mtime + 100))
             dispatch("gh pr list", str(self.project_dir))

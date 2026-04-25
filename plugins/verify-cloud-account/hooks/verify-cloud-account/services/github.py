@@ -15,16 +15,15 @@ PATTERNS = [r"^gh\b"]
 READONLY = [r"^gh\s+auth\s+(status|list)\b"]
 ACCOUNT_KEY = "github"
 SETUP_HINT = (
-    "gh auth status で現在のアカウントを確認し、以下で作成してください: "
-    'mkdir -p .claude && echo \'{"github":"YOUR_ACCOUNT"}\' > .claude/accounts.local.json'
-    '\n(Enterprise hostname 別に指定する場合は "github": {"github.com":"USER_A",'
-    ' "ghe.example.com":"USER_B"} 形式も可)'
+    "GitHub: builder で初期化してください: /verify-cloud-account:accounts-init\n"
+    "(gh auth status で現在のアカウントを事前確認可。"
+    'Enterprise 別指定は {"github.com":"USER_A","ghe.example.com":"USER_B"} 形式も可)'
 )
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
 
 
-def _parse_active_accounts(output_text: str) -> dict[str, str]:
+def parse_active_accounts(output_text: str) -> dict[str, str]:
     """gh auth status の出力から {hostname: active_account} を返す。
 
     各 `Active account: true` について、直前の `Active account: true` より後の
@@ -49,6 +48,9 @@ def _parse_active_accounts(output_text: str) -> dict[str, str]:
     return result
 
 
+_parse_active_accounts = parse_active_accounts
+
+
 def _run_gh_auth_status() -> tuple[str, str | None]:
     """gh auth status を実行し (combined_output, error) を返す。"""
     try:
@@ -65,14 +67,52 @@ def _run_gh_auth_status() -> tuple[str, str | None]:
     return result.stdout + result.stderr, None
 
 
-def verify(expected, project_dir: str) -> str | None:
+def _fetch_active_accounts() -> tuple[dict[str, str] | None, str | None]:
+    """gh auth status を実行し (active_accounts, error_reason) を返す。"""
     combined, err = _run_gh_auth_status()
     if err:
-        return err
-
-    active = _parse_active_accounts(combined)
+        return None, err
+    active = parse_active_accounts(combined)
     if not active:
-        return "GitHub: アクティブアカウントを取得できません。gh auth login を実行してください。"
+        return None, "GitHub: アクティブアカウントを取得できません。gh auth login を実行してください。"
+    return active, None
+
+
+def _cli_error_reason() -> str | None:
+    """CLI エラーまたは未ログイン時の理由を返す (正常取得時は None)。"""
+    _active, err = _fetch_active_accounts()
+    return err
+
+
+def get_active_account(project_dir: str) -> dict[str, str] | None:
+    """現在のアクティブ GitHub アカウントを {hostname: user} の dict で返す。
+
+    取得不可・未ログインの場合は None。詳細な理由は `_cli_error_reason()` で
+    取得できる。
+    """
+    active, _err = _fetch_active_accounts()
+    return active
+
+
+def suggest_accounts_entry(project_dir: str) -> str | dict | None:
+    """accounts.local.json の "github" キーに書く値を提案する。
+
+    - host が 1 つだけなら scalar (user 文字列)
+    - 複数 host なら dict[host, user]
+    - 取得不可なら None
+    """
+    active = get_active_account(project_dir)
+    if not active:
+        return None
+    if len(active) == 1:
+        return next(iter(active.values()))
+    return dict(active)
+
+
+def verify(expected, project_dir: str) -> str | None:
+    active, err = _fetch_active_accounts()
+    if err:
+        return err
 
     if isinstance(expected, dict):
         if not expected:

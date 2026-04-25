@@ -6,9 +6,14 @@ import os
 import re
 from pathlib import Path
 
-from core import cache, output
+from core import cache, output, paths
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
+
+_MIGRATE_HINT = (
+    "旧パスから統合するには builder の migrate サブコマンドを使用してください: "
+    "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py migrate --commit"
+)
 
 
 def _match_service(candidate: str):
@@ -27,19 +32,25 @@ def _is_readonly(candidate: str, service) -> bool:
     return False
 
 
-def _find_accounts_file(project_dir: str) -> tuple[Path | None, bool]:
-    """accounts.local.json (推奨) または accounts.json (旧名) を探す。
+def _find_accounts_file(
+    project_dir: str,
+) -> tuple[Path | None, str | None, list[tuple[str, Path]]]:
+    """accounts.local.json を 3-tier で探す。
 
-    Returns: (path or None, using_legacy)
+    Returns:
+        (path, kind, conflicts):
+          - path: 採用するファイルのパス。見つからない or 競合時は None
+          - kind: "new" / "deprecated" / "legacy" のいずれか (採用されたもの)
+          - conflicts: 複数存在が検出された場合は検出したすべての (kind, path) リスト
+                       (採用は保留。呼び出し側で fail-closed deny する)
     """
-    claude_dir = Path(project_dir) / ".claude"
-    local = claude_dir / "accounts.local.json"
-    legacy = claude_dir / "accounts.json"
-    if local.is_file():
-        return local, False
-    if legacy.is_file():
-        return legacy, True
-    return None, False
+    found = paths.discover_all_accounts_files(project_dir)
+    if len(found) >= 2:
+        return None, None, found
+    if len(found) == 1:
+        kind, path = found[0]
+        return path, kind, []
+    return None, None, []
 
 
 def _collect_targets(command: str) -> list[tuple]:
@@ -61,6 +72,32 @@ def _collect_targets(command: str) -> list[tuple]:
     return targets
 
 
+def _deprecation_note(kind: str) -> str:
+    """kind に応じた旧パス移行案内 (deny/warn の suffix 用) を返す。"""
+    if kind == "deprecated":
+        return (
+            ".claude/accounts.local.json は旧パスです。"
+            ".claude/verify-cloud-account/accounts.local.json への移行を推奨します。\n"
+            + _MIGRATE_HINT
+        )
+    if kind == "legacy":
+        return (
+            "accounts.json は旧名です。"
+            ".claude/verify-cloud-account/accounts.local.json に移行してください。\n"
+            + _MIGRATE_HINT
+        )
+    return ""
+
+
+def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
+    lines = ["複数のパスに accounts.local.json が存在します (曖昧さを避けるため検証を停止):"]
+    for kind, path in conflicts:
+        lines.append(f"  - {path} ({kind})")
+    lines.append("どれか 1 つに統合してください:")
+    lines.append("  " + _MIGRATE_HINT)
+    return "\n".join(lines)
+
+
 def dispatch(command: str, cwd: str) -> dict | None:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
     if not project_dir:
@@ -70,11 +107,15 @@ def dispatch(command: str, cwd: str) -> dict | None:
     if not targets:
         return None
 
-    accounts_path, using_legacy = _find_accounts_file(project_dir)
+    accounts_path, kind, conflicts = _find_accounts_file(project_dir)
+
+    if conflicts:
+        return output.deny(_format_conflicts(conflicts))
+
     if accounts_path is None:
         hints = [getattr(svc, "SETUP_HINT", "") for svc, _ in targets]
         hint_block = "\n".join(h for h in hints if h)
-        msg = ".claude/accounts.local.json が未設定です。"
+        msg = ".claude/verify-cloud-account/accounts.local.json が未設定です。"
         if hint_block:
             msg += "\n" + hint_block
         return output.deny(msg)
@@ -126,20 +167,15 @@ def dispatch(command: str, cwd: str) -> dict | None:
         else:
             cache.set_success(svc_name, project_dir, entry, accounts_mtime)
 
-    if errors:
-        suffix = ""
-        if using_legacy:
-            suffix = (
-                "\n(注意: accounts.json は旧名です。"
-                "accounts.local.json へのリネームを推奨します)"
-            )
-        return output.deny("\n\n".join(errors) + suffix)
+    note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
 
-    if using_legacy:
-        return output.warn(
-            "accounts.json は旧名です。accounts.local.json にリネームしてください"
-            "（git 管理外にするため）: "
-            "mv .claude/accounts.json .claude/accounts.local.json"
-        )
+    if errors:
+        body = "\n\n".join(errors)
+        if note:
+            body = body + "\n\n" + note
+        return output.deny(body)
+
+    if note:
+        return output.warn(note)
 
     return None

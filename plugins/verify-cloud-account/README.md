@@ -25,11 +25,32 @@ Bash コマンド実行の直前に、クラウド CLI
 claude --plugin-dir /path/to/cc-mp-worktools/plugins/verify-cloud-account
 ```
 
-## 使い方
+## 初回セットアップ
 
-### 1. プロジェクトルートに期待アカウントを書く
+accounts.local.json の作成・更新は **builder スクリプト経由の Agent Skill**
+を使う。builder は書込パスの固定・JSON フォーマットの一貫化・既存キーの
+温存を一元管理するため、動作の安定やフォーマット統一の観点から手動書込より
+一貫した結果になる:
 
-`.claude/accounts.local.json` にプロジェクト専用のアカウント名を記述する:
+```
+/verify-cloud-account:accounts-init
+```
+
+または自然言語でも発火する (例: 「accounts.local.json を作りたい」)。
+Agent Skill は Claude の description トリガから自発的にロードされ、以下を
+自動で行う:
+
+1. 各 service (github / firebase / aws / gcloud / kubectl) の現在値を CLI から取得
+2. `.claude/verify-cloud-account/accounts.local.json` に書き込む **提案**を生成
+3. 値を表示する前に AskUserQuestion で確認
+4. 承認後に `--commit` でファイル書き込み
+
+配置パスは **`.claude/verify-cloud-account/accounts.local.json`** (v0.3.0 から)。
+旧パス (`.claude/accounts.local.json` / `.claude/accounts.json`) は
+deprecation 案内付きで後方互換 — ただし新旧両方存在する場合は fail-closed で
+deny する (`/verify-cloud-account:accounts-migrate` で統合)。
+
+## accounts.local.json の形式
 
 ```json
 {
@@ -43,30 +64,37 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/verify-cloud-account
 
 必要なキーだけ書けばよい。未記載のサービスコマンドは検証対象外 (= allow)。
 
-### 2. `.gitignore` に追加する
+### `.gitignore`
 
-`accounts.local.json` はローカル専用のため、コミット対象にしない:
+プロジェクトでは `accounts.local.json` を git 管理外にする:
 
 ```gitignore
 # .gitignore
+.claude/verify-cloud-account/accounts.local.json
+# (旧パス残置している間も)
 .claude/accounts.local.json
 ```
 
-> **旧名 `accounts.json`**: 古いプロジェクトで `.claude/accounts.json` を使っていた場合、
-> hook は下位互換で検出する (検証は通しつつ warn でリネームを促す)。新規は必ず
-> `accounts.local.json` を使うこと。
+## Agent Skill
 
-### 3. 通常のコマンドを叩く
+| skill | 用途 |
+|---|---|
+| `/verify-cloud-account:accounts-init` | 新規プロジェクトで accounts.local.json を対話生成 |
+| `/verify-cloud-account:accounts-show` | 既存値と CLI 現在値の diff を表示 |
+| `/verify-cloud-account:accounts-migrate` | 旧パスから新パスへの統合 |
 
-想定値と一致しているかは hook が自動で CLI から現在値を取って照合する。
-一致していれば透過、不一致なら deny:
+各 skill は description のトリガから Claude が自発的にロードする。明示的に
+呼び出したいときは `/verify-cloud-account:<skill-name>` を使う。
 
+builder (`scripts/accounts_builder.py`) を直接呼ぶことも可能:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  init --service github --commit
 ```
-$ gh pr create
-✖ Bash hook denied:
-  GitHub アカウント不一致: 現在=some-other, 期待=Mao-o
-  — 切り替え: gh auth switch --user Mao-o
-```
+
+ただし Agent Skill の方が dry-run → AskUserQuestion 承認 → commit の確認
+フローを含むため、通常はこちらを使う。
 
 ## 対象コマンドと検証スキップ
 
@@ -157,19 +185,27 @@ deny し「proj-dev, proj-prod のいずれか」を提示する。
 
 `project` / `account` は片方だけでも可。
 
-## `accounts.local.json` が未設定のとき
+## 配置パスの 3-tier lookup (v0.3.0)
 
-対象サービスのコマンドを叩くと deny になり、セットアップ手順を提示する:
+dispatcher は以下の順に accounts.local.json を探す:
+
+1. **新**: `.claude/verify-cloud-account/accounts.local.json` (推奨)
+2. **deprecated**: `.claude/accounts.local.json` (警告付きで受け入れ)
+3. **legacy**: `.claude/accounts.json` (警告付きで受け入れ)
+
+### 旧パスからの移行
+
+旧パスのみ存在する場合は検証は通るが、以下のように deny/warn で案内が出る:
 
 ```
-.claude/accounts.local.json が未設定です。
-gh auth status で現在のアカウントを確認し、以下で作成してください:
-mkdir -p .claude && echo '{"github":"YOUR_ACCOUNT"}' > .claude/accounts.local.json
-...
+.claude/accounts.local.json は旧パスです。
+.claude/verify-cloud-account/accounts.local.json への移行を推奨します。
+旧パスから統合するには builder の migrate サブコマンドを使用してください: ...
 ```
 
-設定したくない (= 検証対象から外したい) プロジェクトでは、この plugin を
-**そのプロジェクトのみ無効化** するか、CLI の readonly コマンドのみを使う。
+**新旧両方存在する場合は fail-closed で deny** する。どちらが正本か曖昧な状態で
+検証を通すと、どの設定が効いているか不透明になる。
+`/verify-cloud-account:accounts-migrate` で統合するか、不要な方を手動削除する。
 
 ## パフォーマンス (短期キャッシュ)
 
@@ -204,7 +240,8 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
    echo '{"tool_input":{"command":"gh pr list"},"cwd":"/tmp"}' \
      | python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account
    ```
-3. `.claude/accounts.local.json` の JSON 構文エラーを確認 (破損時は deny)
+3. `.claude/verify-cloud-account/accounts.local.json` の JSON 構文エラーを確認
+   (破損時は deny)
 4. 対象 CLI (`gh` / `firebase` / `aws` / `gcloud` / `kubectl`) が PATH に
    通っているかを確認
 
