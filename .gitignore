@@ -9,6 +9,9 @@
 # Claude Code local settings (personal account config etc.)
 *.local.json
 
+# Claude Code runtime locks (ScheduleWakeup / /loop dynamic mode のセッション排他 lock)
+.claude/*.lock
+
 # Local notes (personal context, not distributed)
 CLAUDE.local.md
 **/CLAUDE.local.md

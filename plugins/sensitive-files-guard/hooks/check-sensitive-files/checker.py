@@ -16,14 +16,29 @@ from _shared.matcher import is_sensitive
 from _shared.patterns import (
     _parse_patterns_text,
     _resolve_local_patterns_path,
+    _resolve_local_patterns_paths,
 )
 from _shared.patterns import load_patterns as _shared_load_patterns
 
 
-def _warn_local_oserror(err_name: str) -> None:
-    sys.stderr.write(
-        f"[check-sensitive-files] local_patterns_unavailable: {err_name}\n"
-    )
+def _warn_local(msg: str) -> None:
+    """Stop hook 側の warn_callback — stderr に 1 行記録する。
+
+    deprecation 通知と OS エラー通知を区別してメッセージを変える。
+    """
+    if msg == "deprecated_config_dir":
+        sys.stderr.write(
+            "[check-sensitive-files] patterns.local.txt が非推奨パスにあります。"
+            "~/.claude/sensitive-files-guard/patterns.local.txt への移行を推奨します"
+            " (0.6.0 で fallback 削除予定)\n"
+        )
+    else:
+        sys.stderr.write(
+            f"[check-sensitive-files] local_patterns_unavailable: {msg}\n"
+        )
+
+
+_warn_local_oserror = _warn_local  # 後方互換 alias
 
 
 def load_patterns(patterns_file: Path) -> list[tuple[str, bool]]:
@@ -32,7 +47,7 @@ def load_patterns(patterns_file: Path) -> list[tuple[str, bool]]:
     Stop 側は hook 間の Python 依存を避けるため stderr 直書きで warn する
     (``core.logging`` を import しない)。
     """
-    return _shared_load_patterns(patterns_file, warn_callback=_warn_local_oserror)
+    return _shared_load_patterns(patterns_file, warn_callback=_warn_local)
 
 
 def _run_git(args: list[str], cwd: str) -> list[str]:

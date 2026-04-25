@@ -44,7 +44,7 @@ sensitive-files-guard/
     ├── hooks.json                   # PreToolUse(Read/Bash/Edit/Write) + Stop
     ├── _shared/                     # 両 hook 共有ロジック (0.2.0 新設)
     │   ├── matcher.py               is_sensitive (case-insensitive + last-match-wins)
-    │   └── patterns.py              _parse_patterns_text / _resolve_local_patterns_path
+    │   └── patterns.py              _parse_patterns_text / _resolve_local_patterns_paths (2-tier: 0.4.0+)
     ├── check-sensitive-files/       # Stop hook
     │   ├── __main__.py
     │   ├── checker.py               _shared 経由 + git ls-files --recurse-submodules
@@ -280,6 +280,28 @@ python3 -m unittest discover tests
 `tests/_testutil.py` が plugin 内各 hook dir を sys.path に挿入するため、
 追加の環境変数設定は不要。テスト中の `XDG_CONFIG_HOME` / `HOME` は
 `unittest.mock.patch.dict` で tmpdir に差し替えて実ホームを汚染しない。
+
+### patterns.local.txt の 2-tier lookup (0.4.0)
+
+`_shared/patterns.py::_resolve_local_patterns_paths` が 2 つのパスを返す:
+
+1. **preferred**: `~/.claude/sensitive-files-guard/patterns.local.txt`
+2. **fallback (deprecated)**: `$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt`
+   (未設定時 `~/.config/sensitive-files-guard/patterns.local.txt`)
+
+`load_patterns()` は preferred → fallback の順に `read_text()` を試し、最初に
+成功したものを採用する (preferred と fallback の両方が存在する場合は preferred
+のみ採用)。fallback 採用時は `warn_callback("deprecated_config_dir")` を呼び、
+呼出側が各自の流儀で通知する:
+
+- **Read hook (redact-sensitive-reads)**: `core.logging.log_info` で LOG_PATH
+  のみに 1 行 (`permissionDecisionReason` に載せない — LLM 文脈毎回混入ノイズ回避)
+- **Stop hook (check-sensitive-files)**: stderr に 1 行 (Claude Code UI で可視化)
+
+**0.6.0 で fallback を削除予定**。それまでに利用者には新パスへの移行を案内する
+(docs/PATTERNS.md / README.md に手順記載)。
+
+旧 `_resolve_local_patterns_path()` (単数) は preferred を返す後方互換 alias。
 
 ## 手動スモーク
 
