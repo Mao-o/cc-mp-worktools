@@ -11,8 +11,31 @@
 複数の AWS / GCP / Firebase / GitHub / Kubernetes アカウントを切り替えて
 作業する際、間違ったアカウントで `gh pr create` や `firebase deploy`
 `kubectl apply` 等を実行する事故を防ぐ。プロジェクトルートの
-`.claude/accounts.local.json` に期待アカウントを記述しておき、フック実行時に
-CLI で現在値を取得・照合する。
+`.claude/verify-cloud-account/accounts.local.json` に期待アカウントを記述しておき、
+フック実行時に CLI で現在値を取得・照合する。
+
+## 配置パス (v0.3.0 で変更)
+
+- **推奨 (new)**: `.claude/verify-cloud-account/accounts.local.json`
+- **deprecated**: `.claude/accounts.local.json` (後方互換で受け入れ + 案内)
+- **legacy**: `.claude/accounts.json` (後方互換で受け入れ + 案内)
+
+新旧パスの解決は `core/paths.py` と `core/dispatcher._find_accounts_file` が
+担当する。**複数パスに存在する場合は fail-closed で deny** する (D4)。
+
+## Claude からの accounts.local.json への触り方
+
+**Claude は Read / Write / Edit / Bash(cat|ls) で直接触らない**。
+動作の安定やフォーマット統一のため、書込パスの固定・JSON のインデント・改行・
+ソート順・既存キーの扱いを一元管理する builder (`scripts/accounts_builder.py`)
+経由で操作する。
+
+Agent Skill 3 本 (`accounts-init` / `accounts-show` / `accounts-migrate`) が
+builder を適切に呼び出す Claude 向けプロンプトを含む。各 skill は description
+トリガから Claude が自発的にロードし、明示呼び出しは
+`/verify-cloud-account:<skill-name>` で行う。
+
+詳細は [設計判断の履歴](#設計判断の履歴) の D1〜D5 参照。
 
 ## ディレクトリ構成
 
@@ -22,6 +45,10 @@ verify-cloud-account/
 │   └── plugin.json
 ├── README.md                           利用者向け概要
 ├── CLAUDE.md                           このドキュメント
+├── skills/                             Agent Skill 定義 (Claude 向けプロンプト)
+│   ├── accounts-init/SKILL.md
+│   ├── accounts-show/SKILL.md
+│   └── accounts-migrate/SKILL.md
 └── hooks/
     ├── hooks.json                      PreToolUse:Bash の単一エントリを定義
     └── verify-cloud-account/
@@ -31,7 +58,8 @@ verify-cloud-account/
         │   ├── command_parser.py       Bash コマンド分解 (split / env strip / wrapper strip)
         │   ├── cache.py                検証成功の短期キャッシュ (30 秒 TTL, mtime 無効化)
         │   ├── dispatcher.py           コマンド → サービス振り分け、検証オーケストレーション
-        │   └── output.py               deny / warn の hookSpecificOutput JSON ビルダー
+        │   ├── output.py               deny / warn の hookSpecificOutput JSON ビルダー
+        │   └── paths.py                accounts.local.json 配置パス定数 (new/deprecated/legacy) + assertion
         ├── services/
         │   ├── __init__.py             登録済みサービスの ALL リスト
         │   ├── github.py               gh CLI (hostname 別 dict 対応)
@@ -39,12 +67,17 @@ verify-cloud-account/
         │   ├── aws.py                  aws sts get-caller-identity
         │   ├── gcloud.py               gcloud config get-value project (+ account)
         │   └── kubectl.py              kubectl config current-context
+        ├── scripts/
+        │   ├── __init__.py
+        │   └── accounts_builder.py     builder。書込パス固定 + 値隠蔽 + init/show/migrate
         └── tests/                      unittest (標準ライブラリのみ)
             ├── _testutil.py            sys.path 整備 (unittest)
             ├── conftest.py             sys.path 整備 (pytest)
             ├── test_command_parser.py
             ├── test_dispatcher.py
             ├── test_services.py
+            ├── test_active_account.py  get_active_account / suggest_accounts_entry (5 services)
+            ├── test_accounts_builder.py builder の init/show/migrate + D2/D3 特化
             └── test_cache.py
 ```
 
@@ -66,7 +99,7 @@ Python 3.9+ 想定。標準ライブラリのみ使用 (外部依存なし)。
 
 ## サービスモジュールの契約
 
-`services/*.py` は以下 5 つを公開する:
+`services/*.py` は以下を公開する:
 
 | 属性 | 型 | 説明 |
 |---|---|---|
@@ -75,6 +108,9 @@ Python 3.9+ 想定。標準ライブラリのみ使用 (外部依存なし)。
 | `ACCOUNT_KEY` | `str` | `accounts.local.json` 上のキー名 |
 | `SETUP_HINT` | `str` | `accounts.local.json` 未設定時の deny メッセージに埋め込む案内文 |
 | `verify(expected, project_dir)` | `(Any, str) -> str \| None` | 検証関数。成功=`None`、失敗=エラーメッセージ文字列 |
+| `get_active_account(project_dir)` | `(str) -> str \| dict \| None` | 現在のアクティブ値を返す (取得不可なら None)。builder が呼ぶ |
+| `suggest_accounts_entry(project_dir)` | `(str) -> str \| dict \| None` | `accounts.local.json` に書く suggest 値 (scalar/dict を service 側が判断) |
+| `parse_active_accounts(text)` (github のみ) | `(str) -> dict[str,str]` | `gh auth status` 出力パーサ (純粋関数) |
 
 ### `verify()` の実装規則
 
@@ -202,8 +238,10 @@ dispatcher は `extract_candidates()` で分解後の各セグメントに対し
 
 ## accounts.local.json の仕様
 
-プロジェクトルートの `.claude/accounts.local.json` を読む。JSON オブジェクトで、
-各キーは `ACCOUNT_KEY` と一致する。
+プロジェクトルートの `.claude/verify-cloud-account/accounts.local.json` を読む
+(v0.3.0 以降の推奨パス)。JSON オブジェクトで、各キーは `ACCOUNT_KEY` と一致する。
+旧パス (`.claude/accounts.local.json` / `.claude/accounts.json`) は
+deprecation 案内付きの後方互換。
 
 ### 基本形 (str 値)
 
@@ -227,11 +265,18 @@ dispatcher は `extract_candidates()` で分解後の各セグメントに対し
 | gcloud | project のみ | `{"project": "p", "account": "a"}` 両方検証 |
 | kubectl | 単一 context | (未対応、str のみ) |
 
-### 旧名 `accounts.json` フォールバック
+### 3-tier lookup と競合検出 (v0.3.0)
 
-下位互換のため `.claude/accounts.json` も検出するが、検出時は検証は通しつつ
-warn でリネームを促す。新規プロジェクトでは必ず `accounts.local.json` を使う
-こと (`.gitignore` 対象にするため)。
+dispatcher の `_find_accounts_file` は以下の優先順位で探す:
+
+1. `.claude/verify-cloud-account/accounts.local.json` (new) — 推奨
+2. `.claude/accounts.local.json` (deprecated) — 警告付き受け入れ
+3. `.claude/accounts.json` (legacy) — 警告付き受け入れ
+
+**複数パスに存在する場合は fail-closed で deny** する (D4)。旧パスから新パスへの
+統合は `scripts/accounts_builder.py migrate --commit` で行う。
+
+新規プロジェクトでは必ず new パスを使うこと (`.gitignore` 対象にするため)。
 
 ## 読み取り専用コマンドの重要性
 
@@ -367,6 +412,68 @@ claude --plugin-dir plugins/verify-cloud-account
 - **plugin 化** — ローカル hook だと別マシン再現性がない。
   `/plugin install verify-cloud-account@mao-worktools` で配布できるように
   plugin 化
+
+### 0.3.0 の設計判断 (builder + 配置パス移行)
+
+**D1: builder を唯一の正規経路にする (責務境界)**
+
+accounts.local.json の編集は `scripts/accounts_builder.py` 経由で行う運用に
+統一する。動作の安定やフォーマット統一のため、以下を builder 側で一元管理する:
+
+- 書込先パスの固定 (D2)
+- JSON のインデント・改行・ソート順を統一
+- 既存キーの温存 (init は overwrite しない)
+- CLI 現在値との突合 (show)
+- 旧パス統合 (D5)
+- stdout の値表示制御 (D3: `--show-values`)
+
+Claude は Read / Write / Edit / Bash(cat|ls) で accounts.local.json を直接
+触らず、Agent Skill 経由で builder を呼ぶ。これにより書込パスのばらつきや
+手動編集による JSON 壊れを避ける。外部プラグインで直接操作をさらに block
+する構成とも衝突しないが、本 plugin 単体で運用しても同じ結果になる。
+
+**D2: builder の書込制約 (responsibility confinement)**
+
+builder は accounts.local.json 1 ファイル専用 writer。書込対象パスは
+`core/paths.py` の `ACCOUNTS_FILE_NEW` 定数に集約、**argv からは指定できない**。
+`accounts_file_new()` 内で basename が `accounts.local.json` であることを
+assertion する。テストで「異常な出力パス (例: `.env` や `accounts.json`) が
+拒否される」ことを検証し、将来の拡張で書込対象が広がらないことを保証する。
+
+**D3: 値表示の制御 (stdout のノイズ管理)**
+
+builder の stdout は Claude (LLM) が読む。accounts.local.json の値
+(AWS account ID, GCP project 名, GitHub user 名等) は通常の確認フローでは
+不要なノイズなので、既定で表示せず、明示フラグでのみ出す設計にする:
+
+- **既定**: キー名 + 変更種別のみ表示 (値は `(value hidden. use --show-values to reveal)`)
+- **`--show-values` 明示時のみ**: 値を含めて表示
+
+Agent Skill は次のフローを Claude に指示する:
+1. 最初は値なしで dry-run (キー名のみ)
+2. proposal を読み、必要に応じて **AskUserQuestion で「値を表示して確認しますか?」**
+3. 承認を得たら `--show-values --dry-run` で再実行し値を表示
+4. 最終承認後に `--commit`
+
+builder 自身の既定隠蔽が第一段階、Agent Skill の AskUserQuestion フローが
+第二段階。
+
+**D4: 新旧パス競合時の fail-closed**
+
+dispatcher の `_find_accounts_file` は 3-tier lookup を行うが、
+**2 つ以上のパスにファイルが存在する場合は deny + 手動解決要求** を返す。
+どれが正本か曖昧な状態で検証を通すと、どの設定が効いているか不透明になる。
+
+- 新のみ → 新を採用
+- 旧のみ → 採用 + deprecation 案内 (deny/warn suffix)
+- legacy のみ → 採用 + legacy 案内
+- **複数存在** → deny + migrate 案内
+
+**D5: builder migrate サブコマンド**
+
+旧パス → 新パスへの統合 UX を builder 側で提供。新パス優先で旧パスの追加
+キーをマージ。値衝突時は自動マージせず deny + 手動解決要求。
+`--commit` 時も旧パスは自動削除しない (安全側。手動削除に留める)。
 
 ## 既知制限 (0.2.0 時点)
 

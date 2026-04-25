@@ -16,11 +16,9 @@ READONLY = [
 ]
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
-    "gcloud config get-value project で現在のプロジェクトを確認し、"
-    "以下で作成してください: "
-    'mkdir -p .claude && echo \'{"gcloud":"YOUR_PROJECT_ID"}\' > .claude/accounts.local.json'
-    '\n(account もあわせて検証する場合は'
-    ' "gcloud": {"project":"p","account":"me@example.com"} 形式も可)'
+    "GCP: builder で初期化してください: /verify-cloud-account:accounts-init\n"
+    "(gcloud config get-value project で現在値を事前確認可。"
+    'account 併用は {"project":"p","account":"me@example.com"} 形式も可)'
 )
 
 
@@ -75,6 +73,40 @@ def _check_account(expected: str) -> str | None:
             f" — 切り替え: gcloud config set account {expected}"
         )
     return None
+
+
+def get_active_account(project_dir: str) -> dict[str, str | None] | None:
+    """{"project": ..., "account": ...} を返す。両方取得不可なら None。
+
+    片方だけ取れた場合は、取れなかった側のキーの値を None にして返す。
+    """
+    project, _ = _get("project")
+    account, _ = _get("account")
+    if project is None and account is None:
+        return None
+    return {"project": project, "account": account}
+
+
+def suggest_accounts_entry(project_dir: str) -> str | dict | None:
+    """accounts.local.json の "gcloud" キーに書く値を提案する。
+
+    - project のみ取得可 → scalar (project 文字列)
+    - account も取得可 → dict[project, account]
+    - 両方取得不可 → None
+    """
+    active = get_active_account(project_dir)
+    if not active:
+        return None
+    project = active.get("project")
+    account = active.get("account")
+    if project and not account:
+        return project
+    entry: dict[str, str] = {}
+    if project:
+        entry["project"] = project
+    if account:
+        entry["account"] = account
+    return entry or None
 
 
 def verify(expected, project_dir: str) -> str | None:

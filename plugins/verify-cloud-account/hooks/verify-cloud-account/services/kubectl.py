@@ -11,9 +11,8 @@ READONLY = [
 ]
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
-    "kubectl config current-context で現在のコンテキストを確認し、"
-    "以下で作成してください: "
-    'mkdir -p .claude && echo \'{"kubectl":"YOUR_CONTEXT"}\' > .claude/accounts.local.json'
+    "kubectl: builder で初期化してください: /verify-cloud-account:accounts-init\n"
+    "(kubectl config current-context で現在のコンテキストを事前確認可)"
 )
 
 _CONTEXT_OVERRIDE_RE = re.compile(r"(?:^|\s)--context(?:=|\s+)(\S+)")
@@ -28,12 +27,8 @@ def _context_override(command: str) -> str | None:
     return m.group(1) if m else None
 
 
-def verify(expected, project_dir: str) -> str | None:
-    if not isinstance(expected, str):
-        return (
-            f'kubectl: accounts.local.json の "{ACCOUNT_KEY}" 値は文字列で指定してください。'
-        )
-
+def _run_current_context() -> tuple[str | None, str | None]:
+    """kubectl config current-context を実行し (context, error_reason) を返す。"""
     try:
         result = subprocess.run(
             ["kubectl", "config", "current-context"],
@@ -42,12 +37,35 @@ def verify(expected, project_dir: str) -> str | None:
             timeout=10,
         )
     except FileNotFoundError:
-        return "kubectl: kubectl コマンドが見つかりません。"
+        return None, "kubectl: kubectl コマンドが見つかりません。"
     except subprocess.TimeoutExpired:
-        return "kubectl: kubectl config current-context がタイムアウトしました。"
-
+        return None, "kubectl: kubectl config current-context がタイムアウトしました。"
     current = result.stdout.strip()
-    if not current:
+    return (current or None), None
+
+
+def get_active_account(project_dir: str) -> str | None:
+    """現在のアクティブ kubectl context 名を返す。取得不可なら None。"""
+    current, _err = _run_current_context()
+    return current
+
+
+def suggest_accounts_entry(project_dir: str) -> str | None:
+    """accounts.local.json の "kubectl" キーに書く値を提案する (context 文字列)。"""
+    return get_active_account(project_dir)
+
+
+def verify(expected, project_dir: str) -> str | None:
+    if not isinstance(expected, str):
+        return (
+            f'kubectl: accounts.local.json の "{ACCOUNT_KEY}" 値は文字列で指定してください。'
+        )
+
+    current, err = _run_current_context()
+    if err:
+        return err
+
+    if current is None:
         return (
             f"kubectl: アクティブコンテキストが設定されていません。"
             f"kubectl config use-context {expected} を実行してください。"
