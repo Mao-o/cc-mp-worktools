@@ -152,6 +152,67 @@ class TestInitCommit(BaseBuilder):
         self.assertEqual(data, {"github": "existing-user"})
 
 
+class TestInitRefusesOnLegacyPaths(BaseBuilder):
+    """R2 (P1) 対応: 旧パス存在時の init refuse + migrate 誘導.
+
+    init が常に新パスに書き込むため、旧パスのみ存在する状態で実行すると
+    新パスに 2 つ目のファイルができ、dispatcher の _find_accounts_file が
+    複数パス conflict で fail-closed deny に回帰する。これを防ぐため init
+    側で旧パス存在を検出して refuse + migrate 誘導する。
+    """
+
+    def test_init_refuses_when_only_deprecated_exists(self):
+        self._deprecated_path().write_text(
+            json.dumps({"github": "old-user"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["init", "--service", "aws", "--value", "111", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+        self.assertIn("migrate", err)
+        self.assertFalse(self._new_path().exists())  # 新パスは作られない
+
+    def test_init_refuses_when_only_legacy_exists(self):
+        self._legacy_path().write_text(
+            json.dumps({"github": "older-user"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["init", "--service", "aws", "--value", "111", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("legacy", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_init_refuses_when_new_and_deprecated_both_exist(self):
+        """既に競合状態 (new + deprecated 両方) → refuse + migrate 誘導."""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "new-user"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"aws": "111"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["init", "--service", "gcloud", "--value", "p", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+
+    def test_init_succeeds_when_only_new_exists(self):
+        """regression: 新パスのみ存在時は通常動作 (旧 R2 fix の副作用なし)."""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "user-a"}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(
+            ["init", "--service", "aws", "--value", "111", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "user-a", "aws": "111"})
+
+
 class TestInitMalformedJson(BaseBuilder):
     def test_malformed_existing_json_rejected(self):
         self.new_dir.mkdir(parents=True)

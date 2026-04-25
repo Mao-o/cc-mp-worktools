@@ -116,6 +116,28 @@ def _cmd_init(
     project_dir = _project_dir()
     target = paths.accounts_file_new(project_dir)
 
+    # 旧パス (deprecated/legacy) が存在する場合、init で新パスに書くと
+    # dispatcher の _find_accounts_file が複数パス conflict で fail-closed deny に
+    # 回帰するため refuse。先に migrate --commit で統合してから init を実行させる。
+    found = paths.discover_all_accounts_files(project_dir)
+    legacy_paths = [(kind, path) for kind, path in found if kind != "new"]
+    if legacy_paths:
+        print(
+            "error: 旧パスに accounts.local.json が存在します。"
+            "init で新パスに書き込むと複数パス conflict で fail-closed deny に"
+            "回帰するため拒否します。",
+            file=stderr,
+        )
+        for kind, path in legacy_paths:
+            print(f"  - {path} ({kind})", file=stderr)
+        print(
+            "先に migrate --commit で新パスへ統合してから init を実行してください: "
+            "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/"
+            "accounts_builder.py migrate --commit",
+            file=stderr,
+        )
+        return 1
+
     try:
         existing = _load_existing(target)
     except _BuilderError as e:
