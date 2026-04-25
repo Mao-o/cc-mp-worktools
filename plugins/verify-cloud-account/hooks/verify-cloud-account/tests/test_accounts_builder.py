@@ -283,6 +283,38 @@ class TestShow(BaseBuilder):
         self.assertIn("[mismatch]", out)
         self.assertIn("Mao-o", out)  # values revealed
 
+    def test_show_match_dict_expected_str_current(self):
+        """Firebase の alias map (dict expected) + scalar current が
+        map の任意 value に一致 → [match] (Codex P2 / R1 対応)."""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"firebase": {"default": "proj-dev", "prod": "proj-prod"}}),
+            encoding="utf-8",
+        )
+        with mock.patch(
+            "services.firebase.get_active_account",
+            return_value="proj-dev",
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[match]", out)
+        self.assertNotIn("[mismatch]", out)
+
+    def test_show_mismatch_dict_expected_str_current_outside_map(self):
+        """alias map のいずれの value にも一致しない scalar current → [mismatch]."""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"firebase": {"default": "proj-dev", "prod": "proj-prod"}}),
+            encoding="utf-8",
+        )
+        with mock.patch(
+            "services.firebase.get_active_account",
+            return_value="proj-staging",
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[mismatch]", out)
+
     def test_show_denies_on_path_conflict(self):
         self.new_dir.mkdir(parents=True)
         self._new_path().write_text(
@@ -393,6 +425,60 @@ class TestMigrateScenarios(BaseBuilder):
         self.assertEqual(code, 1)
         self.assertIn("secret-A", err)
         self.assertIn("secret-B", err)
+
+
+class TestEntriesEqual(unittest.TestCase):
+    """`_entries_equal` の direct unit tests (Codex P2 / R1 対応)."""
+
+    def test_dict_expected_str_current_matches_any_value(self):
+        """Firebase の alias map (dict expected) + scalar current が
+        values の任意に一致 → True."""
+        self.assertTrue(
+            builder._entries_equal(
+                {"default": "proj-dev", "prod": "proj-prod"}, "proj-dev"
+            )
+        )
+        self.assertTrue(
+            builder._entries_equal(
+                {"default": "proj-dev", "prod": "proj-prod"}, "proj-prod"
+            )
+        )
+
+    def test_dict_expected_str_current_no_match(self):
+        self.assertFalse(
+            builder._entries_equal(
+                {"default": "proj-dev", "prod": "proj-prod"}, "proj-other"
+            )
+        )
+
+    def test_str_expected_dict_current_matches(self):
+        """対称ケース: scalar expected が dict current の value に一致 → True."""
+        self.assertTrue(
+            builder._entries_equal("Mao-o", {"github.com": "Mao-o"})
+        )
+
+    def test_dict_dict_component_wise(self):
+        """dict + dict は component-wise (期待値の全 key が current で一致)."""
+        self.assertTrue(
+            builder._entries_equal(
+                {"project": "p", "account": "a"},
+                {"project": "p", "account": "a"},
+            )
+        )
+        self.assertFalse(
+            builder._entries_equal(
+                {"project": "p", "account": "a"},
+                {"project": "p", "account": "b"},
+            )
+        )
+
+    def test_identical_values(self):
+        self.assertTrue(builder._entries_equal("a", "a"))
+        self.assertTrue(builder._entries_equal({"x": 1}, {"x": 1}))
+
+    def test_unequal_otherwise(self):
+        self.assertFalse(builder._entries_equal("a", "b"))
+        self.assertFalse(builder._entries_equal(None, "a"))
 
 
 if __name__ == "__main__":

@@ -181,6 +181,11 @@ def _entries_equal(expected: Any, current: Any) -> bool:
         return True
     if isinstance(expected, str) and isinstance(current, dict):
         return any(v == expected for v in current.values())
+    if isinstance(expected, dict) and isinstance(current, str):
+        # Firebase の alias map (例: {"default":"p1","prod":"p2"}) に対し、
+        # CLI 由来の current が scalar (アクティブ project ID) のとき、
+        # map の任意 value に一致すれば match (firebase.verify と同じ意味論)
+        return any(v == current for v in expected.values())
     if isinstance(expected, dict) and isinstance(current, dict):
         return all(current.get(k) == v for k, v in expected.items())
     return False
