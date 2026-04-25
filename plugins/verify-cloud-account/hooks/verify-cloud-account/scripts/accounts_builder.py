@@ -202,7 +202,12 @@ def _entries_equal(expected: Any, current: Any) -> bool:
     if expected == current:
         return True
     if isinstance(expected, str) and isinstance(current, dict):
-        return any(v == expected for v in current.values())
+        # services/github.py::verify と整合: scalar expected の場合は
+        # multi-host current の最初のホスト (= next(iter(active.values())))
+        # のみと比較する。show と verify (実 hook) で挙動を一致させ、
+        # multi-host で show が [match] と表示するのに hook 側で deny される
+        # 乖離を防ぐ。
+        return next(iter(current.values()), None) == expected
     if isinstance(expected, dict) and isinstance(current, str):
         # Firebase の alias map (例: {"default":"p1","prod":"p2"}) に対し、
         # CLI 由来の current が scalar (アクティブ project ID) のとき、

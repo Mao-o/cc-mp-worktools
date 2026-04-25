@@ -174,6 +174,22 @@ class TestPathMigration(BaseWithTmpProject):
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("複数のパス", out["permissionDecisionReason"])
 
+    def test_conflict_reason_includes_cleanup_hint(self):
+        """R4 (P2): conflict 時の deny reason に migrate 後の手動 rm 案内を含む.
+
+        migrate --commit は旧ファイルを残すため、cleanup 案内が無いと
+        remediation loop になる。conflict reason に旧ファイルのパスと
+        rm コマンドを明示する。"""
+        self._write_accounts({"github": "A"})
+        self._write_deprecated_accounts({"github": "B"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        reason = out["permissionDecisionReason"]
+        self.assertIn("migrate", reason)
+        self.assertIn("rm ", reason)
+        # 旧ファイルのパスが reason に明示される
+        self.assertIn(".claude/accounts.local.json", reason)
+
     def test_deprecated_and_legacy_both_exist_denies(self):
         """deprecated + legacy 両方存在も deny (D4)。"""
         self._write_deprecated_accounts({"github": "A"})

@@ -361,6 +361,21 @@ class TestShow(BaseBuilder):
         self.assertIn("[match]", out)
         self.assertNotIn("[mismatch]", out)
 
+    def test_show_mismatch_when_expected_matches_only_non_first_host(self):
+        """multi-host で expected が 2 つ目以降のホスト value にしか一致しない場合
+        は [mismatch] (R3 / P2: services/github.py::verify と整合)."""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "bob"}), encoding="utf-8"
+        )
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={"github.com": "alice", "ghe": "bob"},
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[mismatch]", out)
+
     def test_show_mismatch_dict_expected_str_current_outside_map(self):
         """alias map のいずれの value にも一致しない scalar current → [mismatch]."""
         self.new_dir.mkdir(parents=True)
@@ -513,9 +528,26 @@ class TestEntriesEqual(unittest.TestCase):
         )
 
     def test_str_expected_dict_current_matches(self):
-        """対称ケース: scalar expected が dict current の value に一致 → True."""
+        """対称ケース: scalar expected が dict current の最初のホスト value に一致 → True."""
         self.assertTrue(
             builder._entries_equal("Mao-o", {"github.com": "Mao-o"})
+        )
+
+    def test_str_expected_multi_host_dict_current_first_host_only(self):
+        """R3 (P2): multi-host current に対して、scalar expected は最初のホスト
+        (services/github.py::verify と同じ意味論) のみと比較する."""
+        # 最初のホストの value と一致 → True
+        self.assertTrue(
+            builder._entries_equal(
+                "alice", {"github.com": "alice", "ghe": "bob"}
+            )
+        )
+        # 2 つ目以降のホスト value にしか一致しない → False
+        # (verify 側でも deny されるため、show と verify の挙動を一致させる)
+        self.assertFalse(
+            builder._entries_equal(
+                "bob", {"github.com": "alice", "ghe": "bob"}
+            )
         )
 
     def test_dict_dict_component_wise(self):

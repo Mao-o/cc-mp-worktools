@@ -95,6 +95,13 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
         lines.append(f"  - {path} ({kind})")
     lines.append("どれか 1 つに統合してください:")
     lines.append("  " + _MIGRATE_HINT)
+    # migrate --commit は旧ファイルを残すため、その後の手動削除を案内しないと
+    # `len(found) >= 2` の deny が解消されず remediation loop になる (R4)。
+    legacy_paths = [path for kind, path in conflicts if kind != "new"]
+    if legacy_paths:
+        lines.append("  migrate --commit 完了後、以下の旧ファイルを手動で削除してください:")
+        for path in legacy_paths:
+            lines.append(f"    rm {path}")
     return "\n".join(lines)
 
 
