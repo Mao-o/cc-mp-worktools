@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.3.1
+
+**プロジェクト側 `.claude/verify-cloud-account/CLAUDE.md` の builder 同梱**。
+Claude (LLM) が `accounts.local.json` を直接 Read / Write / Edit しようとして
+sensitive-files-guard 等で deny された後も、同ディレクトリの CLAUDE.md を
+覗いた瞬間に「builder 経由 (Bash) が正規経路」と理解できるようにする。
+
+### 主要な変更
+
+1. **builder が CLAUDE.md を同梱** —
+   `scripts/accounts_builder.py` の `init --commit` および `migrate --commit`
+   が成功した直後に、新パスのディレクトリ
+   (`.claude/verify-cloud-account/`) に `CLAUDE.md` を配置する。
+   既に存在する場合はスキップ (ユーザー編集を尊重)。テンプレートは
+   `scripts/templates/project_claude.md`。
+2. **best-effort** — テンプレート読み込み失敗・書き込み失敗のいずれも
+   warning 1 行を出すだけで builder 自体は成功させる。CLAUDE.md は
+   dispatcher が読みに来るパスではないため、欠損しても plugin 本体の動作には
+   影響しない。
+3. **疎結合の維持** — 本変更は verify-cloud-account 内で完結する。
+   sensitive-files-guard 側の deny reason やパターンには手を入れない
+   (cc-marketplaces の plugin 設計原則)。
+
+### 設計判断
+
+- **D6**: signpost を「埋め込まれた static 文字列」ではなく
+  `scripts/templates/project_claude.md` に切り出した。テンプレートだけ更新
+  すれば文言を反映できる + diff レビューが容易。
+- **D7**: `init --commit` での CLAUDE.md 生成は `action` (add / unchanged /
+  skipped) に依存しない。既存 `accounts.local.json` だけ持っていて signpost
+  が無いユーザーが、再度 init を流せば後付けで signpost を入れられる経路を
+  担保する。
+- **D8**: dry-run では生成しない。実際にファイルが書かれる commit 時のみ
+  signpost を置く (dry-run と commit の I/O 影響境界を一致させる)。
+
+### 非互換性
+
+なし。CLAUDE.md は dispatcher の判定経路に関与しないため、既存挙動への
+影響はない。
+
+### テスト
+
+`tests/test_accounts_builder.py::TestProjectClaudeMd` を新設 (8 ケース):
+
+- init/migrate commit で CLAUDE.md が生成される
+- 既存 CLAUDE.md は上書きしない
+- dry-run では生成しない
+- action=unchanged でも signpost が後付けされる
+- template 欠損時に builder が成功する (best-effort)
+
+合計テスト件数: 204 → 212。
+
 ## 0.3.0
 
 **accounts.local.json builder + 配置パス刷新**。Claude (LLM) が

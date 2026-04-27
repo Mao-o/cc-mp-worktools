@@ -21,7 +21,7 @@ allowed-tools:
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # accounts-migrate
@@ -97,6 +97,15 @@ builder は以下の順でパスをスキャンし、統合する:
    - 新パス (`.claude/verify-cloud-account/accounts.local.json`) に統合完了
    - 旧パスは**自動削除されない** (安全側のため)
    - 不要なら手動削除する (`rm .claude/accounts.local.json` など)
+
+6. **CLAUDE.md 自動同梱の確認** — `--commit` 成功時、builder は同ディレクトリに
+   `CLAUDE.md` (Claude 向け signpost) を自動生成する (既存の場合はスキップ、
+   stdout に `created:` または `(skipped: ... already exists)` の 1 行が
+   出る)。これは将来のセッションで Claude が `accounts.local.json` を直接
+   編集しようとして deny されたとき、同ディレクトリの CLAUDE.md を見て
+   builder 経由の正規経路に辿り着けるようにするためのファイル。ユーザーに
+   「不要なら削除可、編集も可。verify-cloud-account の動作には影響しない」
+   と一言添えること。
 
 ## 注意
 

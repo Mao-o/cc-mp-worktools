@@ -39,6 +39,12 @@ _SERVICE_BY_KEY = {svc.ACCOUNT_KEY: svc for svc in SERVICES}
 
 _VALUE_HIDDEN_MARK = "(value hidden. use --show-values to reveal)"
 
+# accounts.local.json と同じディレクトリに同梱する Claude 向け案内ファイル。
+# sensitive-files-guard 等で *.local.json への直接アクセスが deny される事情と
+# builder 経由の正規経路を Claude (LLM) に signpost する。
+_PROJECT_CLAUDE_MD_FILENAME = "CLAUDE.md"
+_PROJECT_CLAUDE_MD_TEMPLATE = _HERE / "templates" / "project_claude.md"
+
 
 class _BuilderError(Exception):
     """builder 内部のビジネスエラー。exit 1 に繋げる。"""
@@ -73,6 +79,41 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
         json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _ensure_project_claude_md(project_dir: str, stdout: IO[str]) -> None:
+    """新パスと同じディレクトリに Claude 向け signpost (`CLAUDE.md`) を同梱する。
+
+    - 既に CLAUDE.md が存在する場合は何もしない (ユーザー編集を尊重)
+    - テンプレート読み込み・書き込みのいずれかが失敗しても警告を 1 行出すだけで
+      builder 自体は成功させる (best-effort)
+    - dispatcher 等が読みに来るパスではないため、ここで失敗しても plugin 本体
+      の動作に影響しない
+
+    plugin 同士の疎結合を保つための signpost: sensitive-files-guard が
+    `*.local.json` への直接アクセスを deny する事情と、builder 経由の正規経路
+    (Agent Skill / Bash) を Claude (LLM) に伝える。
+    """
+    target_dir = paths.accounts_file_new(project_dir).parent
+    md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
+    if md_path.exists():
+        print(f"(skipped: {md_path} already exists)", file=stdout)
+        return
+    try:
+        content = _PROJECT_CLAUDE_MD_TEMPLATE.read_text(encoding="utf-8")
+    except OSError as e:
+        print(
+            f"warning: project CLAUDE.md template の読み込みに失敗しました: {e}",
+            file=stdout,
+        )
+        return
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"warning: {md_path} の書き込みに失敗しました: {e}", file=stdout)
+        return
+    print(f"created: {md_path}", file=stdout)
 
 
 def _format_value_for_display(value: Any, show_values: bool) -> str:
@@ -192,6 +233,7 @@ def _cmd_init(
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
         print(f"\nwritten: {target}", file=stdout)
+        _ensure_project_claude_md(project_dir, stdout)
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
@@ -387,6 +429,7 @@ def _cmd_migrate(
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
         print(f"\nwritten: {new_path}", file=stdout)
+        _ensure_project_claude_md(project_dir, stdout)
         retained = [
             (kind, path)
             for kind, path in source_paths.items()

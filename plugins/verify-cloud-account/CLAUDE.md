@@ -69,7 +69,9 @@ verify-cloud-account/
         │   └── kubectl.py              kubectl config current-context
         ├── scripts/
         │   ├── __init__.py
-        │   └── accounts_builder.py     builder。書込パス固定 + 値隠蔽 + init/show/migrate
+        │   ├── accounts_builder.py     builder。書込パス固定 + 値隠蔽 + init/show/migrate
+        │   └── templates/
+        │       └── project_claude.md   プロジェクト側 .claude/verify-cloud-account/CLAUDE.md 用テンプレート (v0.3.1)
         └── tests/                      unittest (標準ライブラリのみ)
             ├── _testutil.py            sys.path 整備 (unittest)
             ├── conftest.py             sys.path 整備 (pytest)
@@ -77,7 +79,7 @@ verify-cloud-account/
             ├── test_dispatcher.py
             ├── test_services.py
             ├── test_active_account.py  get_active_account / suggest_accounts_entry (5 services)
-            ├── test_accounts_builder.py builder の init/show/migrate + D2/D3 特化
+            ├── test_accounts_builder.py builder の init/show/migrate + D2/D3 特化 + CLAUDE.md 同梱
             └── test_cache.py
 ```
 
@@ -474,6 +476,41 @@ dispatcher の `_find_accounts_file` は 3-tier lookup を行うが、
 旧パス → 新パスへの統合 UX を builder 側で提供。新パス優先で旧パスの追加
 キーをマージ。値衝突時は自動マージせず deny + 手動解決要求。
 `--commit` 時も旧パスは自動削除しない (安全側。手動削除に留める)。
+
+### 0.3.1 の設計判断 (CLAUDE.md 同梱)
+
+**D6: signpost をテンプレートファイルに切り出す**
+
+`scripts/templates/project_claude.md` に置き、文言更新を builder のロジック
+変更と分離する。文言レビュー (PR diff) が容易になる + 将来 builder 内部の
+構造変更時にテンプレートだけ別途更新できる。
+
+**D7: action に依存しない signpost 生成**
+
+`init --commit` での CLAUDE.md 生成は `action` (add / unchanged / skipped)
+に依存しない。既存 `accounts.local.json` だけ持っていて signpost が無い
+ユーザーが、再度 init を流せば後付けで signpost を入れられる経路を担保
+する (ユーザーが「signpost を取り戻したい」ときに使える経路を確保)。
+
+**D8: dry-run では生成しない / commit でのみ生成**
+
+dry-run と commit の I/O 影響境界を一致させる。dry-run でファイルが書かれ
+ないという既存ユーザーの期待を維持する。
+
+**D9: 疎結合の維持 (sensitive-files-guard には触らない)**
+
+`*.local.json` の deny は sensitive-files-guard の所掌。verify-cloud-account
+側で signpost を同梱して回避経路を案内する。**plugin 同士の coupling を
+避けるため**、deny reason の文言や許可パターンに verify-cloud-account 知識
+を入れない。これは cc-marketplaces 配下の plugin 設計原則。
+
+**D10: best-effort (CLAUDE.md 失敗で builder を fail させない)**
+
+CLAUDE.md は dispatcher が読みに来るパスではなく、欠損しても plugin 本体の
+動作には影響しない。テンプレート読み込みや書き込みが失敗しても warning 1 行
+を出すだけで builder 自体は成功させる。これにより hostile filesystem
+(read-only volume / quota 超過 / template ファイル削除) でも accounts
+登録自体はブロックされない。
 
 ## 既知制限 (0.2.0 時点)
 

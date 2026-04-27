@@ -503,6 +503,120 @@ class TestMigrateScenarios(BaseBuilder):
         self.assertIn("secret-B", err)
 
 
+class TestProjectClaudeMd(BaseBuilder):
+    """0.3.1 で追加した Claude 向け signpost (`CLAUDE.md`) の同梱挙動。
+
+    `init --commit` / `migrate --commit` で新パスのディレクトリに CLAUDE.md
+    を置く (既存ファイルは温存)。dry-run では生成しない。書込失敗は
+    best-effort でスキップ (builder 全体は成功させる)。
+    """
+
+    def _md_path(self) -> Path:
+        return self.new_dir / "CLAUDE.md"
+
+    # --- init ---
+
+    def test_init_commit_creates_claude_md(self):
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(self._md_path().exists())
+        content = self._md_path().read_text(encoding="utf-8")
+        # signpost として必要な情報が含まれている
+        self.assertIn("accounts-init", content)
+        self.assertIn("accounts-show", content)
+        self.assertIn("accounts-migrate", content)
+        self.assertIn("sensitive-files-guard", content)
+        self.assertIn("created:", out)
+
+    def test_init_commit_preserves_existing_claude_md(self):
+        """既存 CLAUDE.md は上書きしない (ユーザー編集尊重)。"""
+        self.new_dir.mkdir(parents=True)
+        self._md_path().write_text("# user customized\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self._md_path().read_text(encoding="utf-8"), "# user customized\n"
+        )
+        self.assertIn("skipped", out)
+
+    def test_init_dry_run_does_not_create_claude_md(self):
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--dry-run"]
+        )
+        self.assertFalse(self._md_path().exists())
+
+    def test_init_commit_when_action_unchanged_still_signposts(self):
+        """既存値と同じ (= action=unchanged) でも CLAUDE.md は同梱する。
+
+        既存 accounts.local.json は持っているが CLAUDE.md がまだ無い既存
+        ユーザー向けに、再度 init を流せば signpost を後付けできる経路を
+        担保する。
+        """
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        self.assertFalse(self._md_path().exists())
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(self._md_path().exists())
+
+    def test_init_commit_template_missing_does_not_fail(self):
+        """template が読めなくても builder 自体は成功する (best-effort)。"""
+        with mock.patch.object(
+            builder,
+            "_PROJECT_CLAUDE_MD_TEMPLATE",
+            Path(self.tmp) / "nonexistent" / "template.md",
+        ):
+            code, out, _err = self._run(
+                ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+            )
+        self.assertEqual(code, 0)
+        self.assertTrue(self._new_path().exists())  # JSON は書けている
+        self.assertFalse(self._md_path().exists())  # CLAUDE.md は書けていない
+        self.assertIn("warning", out)
+
+    # --- migrate ---
+
+    def test_migrate_commit_creates_claude_md(self):
+        self._deprecated_path().write_text(
+            json.dumps({"github": "u"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self._md_path().exists())
+        content = self._md_path().read_text(encoding="utf-8")
+        self.assertIn("accounts-migrate", content)
+        self.assertIn("created:", out)
+
+    def test_migrate_commit_preserves_existing_claude_md(self):
+        self.new_dir.mkdir(parents=True)
+        self._md_path().write_text("# existing\n", encoding="utf-8")
+        self._deprecated_path().write_text(
+            json.dumps({"github": "u"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self._md_path().read_text(encoding="utf-8"), "# existing\n"
+        )
+        self.assertIn("skipped", out)
+
+    def test_migrate_dry_run_does_not_create_claude_md(self):
+        self._deprecated_path().write_text(
+            json.dumps({"github": "u"}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(["migrate", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertFalse(self._md_path().exists())
+
+
 class TestEntriesEqual(unittest.TestCase):
     """`_entries_equal` の direct unit tests (Codex P2 / R1 対応)."""
 
