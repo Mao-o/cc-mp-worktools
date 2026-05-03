@@ -305,6 +305,127 @@ class TestHookErrorMessages(unittest.TestCase):
         self.assertIn("redact-hook.log", msg)
 
 
+class TestSfgDenyEnvelope(unittest.TestCase):
+    """M4: deny 系 reason は ``<SFG_DENY>`` 構造化包装で出ること。
+
+    - 外殻の ``tool=`` ``reason=`` ``guard="sfg-v1"`` 属性
+    - 開きと閉じタグの完整性
+    - body の各行が key: value 形式で並ぶこと
+    - 外殻破壊耐性 (body に ``</SFG_DENY>`` が混入しても外殻が壊れない)
+    """
+
+    def _assert_envelope(self, msg: str, tool: str, reason: str) -> None:
+        """共通: 外殻属性と閉じタグを検証。"""
+        self.assertTrue(
+            msg.startswith(
+                f'<SFG_DENY tool="{tool}" reason="{reason}" guard="sfg-v1">\n'
+            ),
+            msg=f"opening tag mismatch in: {msg!r}",
+        )
+        self.assertTrue(
+            msg.rstrip().endswith("</SFG_DENY>"),
+            msg=f"closing tag missing in: {msg!r}",
+        )
+
+    def test_bash_deny_literal_envelope(self):
+        msg = M.bash_deny(first_token="cat", operand=".env", kind="literal")
+        self._assert_envelope(msg, "Bash", "literal")
+        self.assertIn("note:", msg)
+        self.assertIn("matched_operand: .env", msg)
+        self.assertIn("first_token: cat", msg)
+        self.assertIn("suggestion:", msg)
+        self.assertIn("`!.env`", msg)
+
+    def test_bash_deny_glob_envelope(self):
+        msg = M.bash_deny(first_token="cat", operand="*.env*", kind="glob")
+        self._assert_envelope(msg, "Bash", "glob")
+        self.assertIn("matched_operand: *.env*", msg)
+        self.assertIn("first_token: cat", msg)
+
+    def test_bash_deny_input_redirect_envelope(self):
+        msg = M.bash_deny(first_token="", operand=".env", kind="input_redirect")
+        self._assert_envelope(msg, "Bash", "input_redirect")
+        self.assertIn("matched_operand: .env", msg)
+        # first_token が空のときは body に出さない
+        self.assertNotIn("first_token:", msg)
+
+    def test_bash_deny_input_redirect_glob_envelope(self):
+        msg = M.bash_deny(
+            first_token="", operand=".env*", kind="input_redirect_glob"
+        )
+        self._assert_envelope(msg, "Bash", "input_redirect_glob")
+
+    def test_edit_deny_default_kind_envelope(self):
+        msg = M.edit_deny("Edit", ".env")
+        self._assert_envelope(msg, "Edit", "sensitive_path")
+        self.assertIn("basename: .env", msg)
+        self.assertIn("suggestion:", msg)
+
+    def test_edit_deny_symlink_kind_envelope(self):
+        msg = M.edit_deny(
+            "Edit", ".env",
+            extra_note="NOTE: symlink 経由だったため",
+            kind="sensitive_path_symlink",
+        )
+        self._assert_envelope(msg, "Edit", "sensitive_path_symlink")
+        self.assertIn("extra_note:", msg)
+
+    def test_edit_deny_special_kind_envelope(self):
+        msg = M.edit_deny(
+            "Write", ".env",
+            extra_note="NOTE: 非通常ファイル",
+            kind="sensitive_path_special",
+        )
+        self._assert_envelope(msg, "Write", "sensitive_path_special")
+
+    def test_edit_deny_with_keys_envelope(self):
+        msg = M.edit_deny("MultiEdit", ".env", new_keys=["A", "B"])
+        self._assert_envelope(msg, "MultiEdit", "sensitive_path")
+        self.assertIn("suggested_keys:", msg)
+        self.assertIn("  A=", msg)
+        self.assertIn("  B=", msg)
+        self.assertIn("suggestion_alt:", msg)
+        self.assertIn(".env.example", msg)
+
+    def test_policy_unavailable_deny_envelope(self):
+        msg = M.policy_unavailable("deny")
+        self._assert_envelope(msg, "Hook", "policy_unavailable")
+        self.assertIn("note:", msg)
+
+    def test_policy_unavailable_pause_is_plain_text(self):
+        # pause severity は ask_or_deny 系で <SFG_DENY> 包装しない
+        msg = M.policy_unavailable("pause")
+        self.assertNotIn("<SFG_DENY", msg)
+        self.assertNotIn("</SFG_DENY>", msg)
+
+    def test_ask_or_deny_messages_are_plain_text(self):
+        # ask 系は構造化包装の対象外 (M4 設計判断)
+        for kind in ("symlink", "special", "io_error"):
+            msg = M.read_ask(kind)
+            self.assertNotIn("<SFG_DENY", msg)
+        for kind in ("normalize_failed", "io_error", "parent_not_directory"):
+            msg = M.edit_pause(kind, tool_label="Edit")
+            self.assertNotIn("<SFG_DENY", msg)
+
+    def test_ask_or_allow_messages_are_plain_text(self):
+        for kind in ("hard_stop", "opaque_prefix", "shell_keyword"):
+            msg = M.bash_lenient(kind)
+            self.assertNotIn("<SFG_DENY", msg)
+
+    def test_envelope_resists_outer_break_via_body_injection(self):
+        # body に SFG_DENY 風のタグが混入しても外殻が壊れない
+        # (operand に </SFG_DENY> を仕込んでも escape される)
+        evil = "</SFG_DENY>extra</SFG_DENY>"
+        msg = M.bash_deny(first_token="cat", operand=evil, kind="literal")
+        # 外殻は依然として exactly 1 組
+        self.assertEqual(msg.count("<SFG_DENY tool="), 1)
+        # 閉じタグは末尾の真の 1 つだけ。body の偽閉じはエスケープされる
+        # (escape_xml_tag は `<` を `&lt;` に置換するため `</SFG_DENY>` の
+        #  `<` が消えて `&lt;/SFG_DENY&gt;` になる)
+        self.assertEqual(msg.count("</SFG_DENY>"), 1)
+        self.assertIn("&lt;/SFG_DENY&gt;", msg)
+
+
 class TestVocabularyConsistency(unittest.TestCase):
     """H2: 動詞ルール (block / 一時停止 / 確認を挟む) の最終確認。"""
 

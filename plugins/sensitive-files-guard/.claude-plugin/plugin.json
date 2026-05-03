@@ -1,6 +1,6 @@
 {
   "name": "sensitive-files-guard",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "機密ファイル (.env, *.secret, *.local.*) を Vibe Coding から守る多段 hook。Read/Bash/Edit/Write/MultiEdit で機密パスを保護し、Stop で .gitignore 未登録を検出",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",

@@ -51,39 +51,53 @@ def sanitize_key(raw: str) -> str:
     return cleaned
 
 
-# DATA タグを壊すトークン (case-insensitive)。
-# `</DATA>` / `</data>` / `<DATA ...>` / `<data ...>` を全て対象にする。
-_DATA_OPEN_RE = re.compile(r"<\s*DATA", re.IGNORECASE)
-_DATA_CLOSE_RE = re.compile(r"<\s*/\s*DATA\s*>", re.IGNORECASE)
+def escape_xml_tag(text: str, tag_name: str) -> str:
+    """body 内の ``<TAG ...>`` / ``</TAG>`` を HTML エンティティにエスケープする (0.4.2)。
 
-
-def escape_data_tag(text: str) -> str:
-    """body 内の ``<DATA ...>`` / ``</DATA>`` を HTML エンティティにエスケープする。
-
-    外殻 DATA 包装を body が破壊できないようにする最終防御。鍵名・basename は
-    個別の ``sanitize_*`` で injection パターン除去済みだが、他経路 (note /
-    extra_notes) や将来拡張で DATA タグ風文字列が混入するリスクをゼロにする。
+    外殻タグ包装を body が破壊できないようにする最終防御。``escape_data_tag``
+    の一般化で、``<DATA>`` だけでなく ``<SFG_DENY>`` 等の他タグも同じ仕組みで
+    保護できる。
 
     実装方針: マッチした部分文字列を保ちつつ、``<`` と (閉じタグなら) ``>`` のみ
-    ``&lt;`` / ``&gt;`` に置換する。大小文字と中間空白を温存することで、
-    body の情報量を壊さない。
+    ``&lt;`` / ``&gt;`` に置換する。大小文字と中間空白は温存し、body の情報量を
+    壊さない。
+
+    Args:
+        text: エスケープ対象の文字列。
+        tag_name: 保護したいタグ名 (``"DATA"`` / ``"SFG_DENY"`` 等)。
+            case-insensitive で match する。
     """
     if not isinstance(text, str):
         return ""
 
+    open_re = re.compile(rf"<\s*{re.escape(tag_name)}", re.IGNORECASE)
+    close_re = re.compile(
+        rf"<\s*/\s*{re.escape(tag_name)}\s*>", re.IGNORECASE
+    )
+
     def _close_repl(m: re.Match) -> str:
         s = m.group(0)
-        # s[0] は "<", s[-1] は ">"。中身 ("/DATA" + 空白) は保つ。
+        # s[0] は "<", s[-1] は ">"。中身 ("/<tag>" + 空白) は保つ。
         return "&lt;" + s[1:-1] + "&gt;"
 
     def _open_repl(m: re.Match) -> str:
         s = m.group(0)
         return "&lt;" + s[1:]
 
-    # 閉じタグ優先 (開きタグ置換で `</DATA>` が残らないようにするため)
-    escaped = _DATA_CLOSE_RE.sub(_close_repl, text)
-    escaped = _DATA_OPEN_RE.sub(_open_repl, escaped)
+    # 閉じタグ優先 (開きタグ置換で ``</TAG>`` が残らないようにするため)
+    escaped = close_re.sub(_close_repl, text)
+    escaped = open_re.sub(_open_repl, escaped)
     return escaped
+
+
+def escape_data_tag(text: str) -> str:
+    """body 内の ``<DATA ...>`` / ``</DATA>`` を HTML エンティティにエスケープする。
+
+    ``escape_xml_tag(text, "DATA")`` の薄い wrapper (0.4.2 移行)。Read 側の
+    ``redaction/engine.py::build_reason`` で長く使われている API のため、
+    後方互換のため残す。
+    """
+    return escape_xml_tag(text, "DATA")
 
 
 def sanitize_basename(raw: str) -> str:

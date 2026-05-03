@@ -5,7 +5,12 @@ import unittest
 
 from _testutil import FIXTURES  # noqa: F401
 
-from redaction.sanitize import escape_data_tag, sanitize_basename, sanitize_key
+from redaction.sanitize import (
+    escape_data_tag,
+    escape_xml_tag,
+    sanitize_basename,
+    sanitize_key,
+)
 
 
 class TestSanitizeKey(unittest.TestCase):
@@ -75,6 +80,56 @@ class TestEscapeDataTag(unittest.TestCase):
     def test_non_string_returns_empty(self):
         self.assertEqual(escape_data_tag(None), "")  # type: ignore[arg-type]
         self.assertEqual(escape_data_tag(123), "")  # type: ignore[arg-type]
+
+
+class TestEscapeXmlTag(unittest.TestCase):
+    """0.4.2: 任意タグ名で動く一般化版。``<SFG_DENY>`` 等にも適用される。"""
+
+    def test_sfg_deny_close_tag_escaped(self):
+        self.assertEqual(
+            escape_xml_tag("</SFG_DENY>", "SFG_DENY"),
+            "&lt;/SFG_DENY&gt;",
+        )
+
+    def test_sfg_deny_open_tag_escaped(self):
+        self.assertEqual(
+            escape_xml_tag('<SFG_DENY tool="Bash">', "SFG_DENY"),
+            '&lt;SFG_DENY tool="Bash">',
+        )
+
+    def test_other_tag_unaffected(self):
+        # SFG_DENY を保護しているとき、DATA タグはそのまま
+        self.assertEqual(
+            escape_xml_tag("</DATA>", "SFG_DENY"),
+            "</DATA>",
+        )
+
+    def test_case_insensitive(self):
+        self.assertEqual(
+            escape_xml_tag("</sfg_deny>", "SFG_DENY"),
+            "&lt;/sfg_deny&gt;",
+        )
+
+    def test_special_regex_chars_in_tag_name(self):
+        # tag 名に regex メタ文字が混ざっても re.escape で扱える
+        self.assertEqual(
+            escape_xml_tag("</A.B>", "A.B"),
+            "&lt;/A.B&gt;",
+        )
+        # `<A.B>` → `<` 直後に `A.B` の literal match のみ反応
+        self.assertEqual(
+            escape_xml_tag("<AXB>", "A.B"),
+            "<AXB>",  # `.` を literal として扱うので X はマッチしない
+        )
+
+    def test_passthrough_non_match(self):
+        self.assertEqual(
+            escape_xml_tag("hello world", "SFG_DENY"),
+            "hello world",
+        )
+
+    def test_non_string_returns_empty(self):
+        self.assertEqual(escape_xml_tag(None, "SFG_DENY"), "")  # type: ignore[arg-type]
 
 
 class TestSanitizeBasename(unittest.TestCase):

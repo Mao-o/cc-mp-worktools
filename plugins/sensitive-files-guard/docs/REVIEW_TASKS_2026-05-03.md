@@ -340,7 +340,7 @@ trees = bashlex.parse("cat .env && echo done")
 
 ## 進捗
 
-### 2026-05-03: H1 / H3 / M1 完了 (リリース未実施)
+### 2026-05-03: H1 / H3 / M1 完了 (0.4.1 リリースに統合済)
 
 #### 実装
 
@@ -380,7 +380,64 @@ hooks/check-sensitive-files: Ran 27 tests in 1.873s — OK
 claude plugin validate: ✔ Validation passed
 ```
 
-### 2026-05-04: H2 / M2 / M3 完了 (リリース未実施)
+### 2026-05-04: M4 完了 + 0.4.2 リリース
+
+#### 実装
+
+- **拡張** `redaction/sanitize.py`:
+  - `escape_xml_tag(text, tag_name)` を追加 (一般化版)
+  - `escape_data_tag(text)` を `escape_xml_tag(text, "DATA")` の薄い
+    wrapper として残置 (後方互換)
+- **拡張** `core/messages.py`:
+  - `_wrap_sfg_deny(tool, reason, body_lines)` ヘルパーを新設
+  - `_SFG_GUARD = "sfg-v1"` (Read 側 `<DATA>` と統一)
+  - `EditDenyKind` 型 (`sensitive_path` / `sensitive_path_symlink` /
+    `sensitive_path_special`) を追加
+  - `bash_deny` / `edit_deny` / `policy_unavailable("deny")` を構造化包装
+    対応に書き換え
+  - `edit_deny` に `kind` キーワード引数を追加
+- **改修** `handlers/edit_handler.py`: symlink / special 経由の `make_deny`
+  呼び出しに `kind="sensitive_path_symlink"` / `kind="sensitive_path_special"`
+  を渡す
+- **CHANGELOG / plugin.json / CLAUDE.md**: 0.4.2 として bump
+
+#### M4 で確定した schema
+
+```
+<SFG_DENY tool="<Bash|Edit|Write|MultiEdit|Hook>" reason="<kind>" guard="sfg-v1">
+note: ...
+matched_operand: ...   (Bash 系のみ)
+first_token: ...       (Bash 系のみ)
+basename: ...          (Edit 系のみ)
+suggested_keys:        (edit_deny の dotenv 系)
+  KEY_NAME=
+suggestion_alt: ...    (任意)
+extra_note: ...        (任意)
+suggestion: ...        (必須)
+</SFG_DENY>
+```
+
+`reason` 値: `literal` / `glob` / `input_redirect` / `input_redirect_glob`
+/ `sensitive_path` / `sensitive_path_symlink` / `sensitive_path_special` /
+`policy_unavailable` の **8 種類**。
+
+#### テスト
+
+- **追加** `tests/test_messages.py::TestSfgDenyEnvelope` 12 件
+- **追加** `tests/test_sanitize.py::TestEscapeXmlTag` 7 件
+- 累計 **575 + 27 = 602 件 OK**
+- `claude plugin validate sensitive-files-guard` ✔
+- `bash .tools/validate-all.sh` ✔ (marketplace 全体)
+
+#### 残タスク (次リリース以降)
+
+- **M5** (入力リダイレクト形式タグ): bashlex 採否と一緒にやるのが経済的
+- **L1〜L5** (小改善): いつでも 30 分以下
+- **B** (bashlex 採否): MIT ライセンス再確認の議論セッション
+
+---
+
+### 2026-05-04: H2 / M2 / M3 完了 (0.4.1 リリース済)
 
 #### 実装
 

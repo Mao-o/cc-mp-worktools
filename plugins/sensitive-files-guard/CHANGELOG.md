@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.4.2
+
+**deny 系 reason の `<SFG_DENY>` 構造化包装**。LLM が deny の根拠を機械的に
+パースできるよう、Bash / Edit / Write / MultiEdit / Hook (policy_unavailable)
+の deny を共通の外殻タグで包む。後段 hook (review / 集計) が `reason` 値を
+grep して block 種別を再分類できるようにする schema を確定。ask 系
+(ask_or_deny / ask_or_allow) は plain text のまま (機械処理ニーズが薄いため)。
+
+### 主要な変更
+
+1. **`<SFG_DENY tool reason guard>` 構造化包装** — 全 deny reason を以下の
+   schema で包む:
+
+   ```
+   <SFG_DENY tool="<Bash|Edit|Write|MultiEdit|Hook>" reason="<kind>" guard="sfg-v1">
+   note: <人間向け説明文>
+   matched_operand: <Bash の operand>      ← Bash 系のみ
+   first_token: <Bash コマンド名>          ← Bash 系のみ
+   basename: <Edit/Write の basename>      ← Edit 系のみ
+   suggested_keys:                        ← edit_deny の dotenv 系
+     KEY_NAME=
+     ...
+   suggestion_alt: <代替案>                ← 任意
+   extra_note: <symlink / special 等>      ← 任意
+   suggestion: <patterns.local.txt 案内>   ← 必須
+   </SFG_DENY>
+   ```
+
+2. **`reason` 値を 8 種類に確定** (`SfgDenyReason`):
+   - `literal` / `glob` / `input_redirect` / `input_redirect_glob` (Bash 系)
+   - `sensitive_path` / `sensitive_path_symlink` / `sensitive_path_special`
+     (Edit 系)
+   - `policy_unavailable` (Hook 系)
+
+3. **`edit_deny` に `kind` 引数を追加**: symlink / special を `reason` 属性で
+   区別できるよう、handler 側 (`edit_handler.py`) で
+   `kind="sensitive_path_symlink"` / `kind="sensitive_path_special"` を渡す。
+   default は `kind="sensitive_path"`。
+
+4. **`escape_xml_tag(text, tag_name)` 一般化** —
+   `redaction/sanitize.py::escape_data_tag` を一般化し、任意タグ名で外殻破壊
+   防御を効かせられる形に。`escape_data_tag` は薄い wrapper として残す
+   (後方互換)。Read 側 `<DATA>` 包装と Bash/Edit 側 `<SFG_DENY>` 包装が
+   同じ防御層を共有する。
+
+5. **テスト追加** — 575 + 27 = 602 件:
+   - `tests/test_messages.py::TestSfgDenyEnvelope` 12 件 — 外殻属性、reason 値、
+     body 各行、外殻破壊耐性 (body に偽 `</SFG_DENY>` を仕込んでも 1 組のみ)、
+     ask 系が plain text のままであることの確認
+   - `tests/test_sanitize.py::TestEscapeXmlTag` 7 件 — 一般化版の挙動と
+     `escape_data_tag` の後方互換
+
+### 後段 hook 連携の例
+
+外部 review hook が deny 種別を grep する場合:
+
+```bash
+# Bash の機密 operand 検出 (literal / glob / input_redirect / input_redirect_glob)
+grep -E '^<SFG_DENY tool="Bash" reason="(literal|glob|input_redirect)' deny.log
+
+# Edit/Write の symlink 経由 deny だけ抽出
+grep '^<SFG_DENY tool="(Edit|Write|MultiEdit)" reason="sensitive_path_symlink"' deny.log
+```
+
+### 非互換性
+
+- 内部 API: `messages.bash_deny` / `messages.edit_deny` /
+  `messages.policy_unavailable("deny")` の戻り値が plain text → 構造化包装に
+  変化。reason 文字列に依存する自動 grep / 文言マッチはアップデート必要。
+- `messages.edit_deny` に `kind` キーワード引数を追加 (default あり、後方互換)。
+- ask 系 (`read_ask` / `edit_pause` / `bash_lenient` /
+  `policy_unavailable("pause")`) は plain text のままで変更なし。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-03.md` の M4 を消化。M5 (リダイレクト形式タグ) /
+L1〜L5 / B (bashlex 採否) は次リリース以降。
+
 ## 0.4.1
 
 **reason 文言の品質改善 + reason builder 集約**。`permissionDecisionReason` に

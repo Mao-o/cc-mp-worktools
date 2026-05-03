@@ -142,11 +142,13 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
             extra_note="NOTE: symlink 経由だったため実体側の位置にも注意してください。",
+            kind="sensitive_path_symlink",
         ))
     if cls == "special":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
             extra_note="NOTE: 非通常ファイル (FIFO/socket/device) への書き込みでした。",
+            kind="sensitive_path_special",
         ))
     if cls == "error":
         return output.ask_or_deny(
