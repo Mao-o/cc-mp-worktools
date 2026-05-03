@@ -20,6 +20,7 @@ from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
+from core import output
 from handlers.bash_handler import handle
 
 
@@ -66,32 +67,32 @@ class BaseBash(unittest.TestCase):
 class TestAllow(BaseBash):
     def test_echo_allowed(self):
         r = handle(_make_envelope("echo foo", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_ls_allowed(self):
         r = handle(_make_envelope("ls -la", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_env_example_allowed(self):
         # .env.example はテンプレート除外なので allow
         r = handle(_make_envelope("cat .env.example", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_regular_file_allowed(self):
         r = handle(_make_envelope("cat README.md", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_with_options_non_sensitive(self):
         r = handle(_make_envelope("head -n 5 README.md", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_empty_command(self):
         r = handle(_make_envelope("", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_unknown_command_allow(self):
         r = handle(_make_envelope("npm test", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestDenyFixed(BaseBash):
@@ -154,11 +155,11 @@ class TestHardStopLenient(BaseBash):
 
     def test_variable_expansion_auto(self):
         r = handle(_make_envelope('cat "$X"', self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_variable_expansion_bypass(self):
         r = handle(_make_envelope('cat "$X"', self.tmp, mode="bypassPermissions"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_command_substitution_default(self):
         r = handle(_make_envelope("cat $(echo .env)", self.tmp))
@@ -166,7 +167,7 @@ class TestHardStopLenient(BaseBash):
 
     def test_command_substitution_auto(self):
         r = handle(_make_envelope("cat $(echo .env)", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_backtick_default(self):
         r = handle(_make_envelope("cat `echo .env`", self.tmp))
@@ -174,7 +175,7 @@ class TestHardStopLenient(BaseBash):
 
     def test_backtick_bypass(self):
         r = handle(_make_envelope("cat `echo .env`", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_heredoc_default(self):
         r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp))
@@ -182,7 +183,7 @@ class TestHardStopLenient(BaseBash):
 
     def test_heredoc_auto(self):
         r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_subshell_group_default(self):
         r = handle(_make_envelope("(cat .env)", self.tmp))
@@ -192,7 +193,7 @@ class TestHardStopLenient(BaseBash):
         # (cat .env) は ( hard-stop。target 抽出は < がないので走らず ask_or_allow。
         # auto/bypass では allow に倒る (機密 .env が中にあっても!)
         r = handle(_make_envelope("(cat .env)", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_brace_group_default(self):
         r = handle(_make_envelope("{ cat .env; }", self.tmp))
@@ -294,7 +295,7 @@ class TestShellKeywordLenient(BaseBash):
         r = handle(_make_envelope(
             "for i in 1; do cat .env; done", self.tmp, mode="auto",
         ))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_if_then_body_default(self):
         r = handle(_make_envelope("if true; then cat .env; fi", self.tmp))
@@ -304,7 +305,7 @@ class TestShellKeywordLenient(BaseBash):
         r = handle(_make_envelope(
             "if true; then cat .env; fi", self.tmp, mode="bypassPermissions",
         ))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_while_test(self):
         r = handle(_make_envelope("while cat .env; do pwd; done", self.tmp))
@@ -332,11 +333,11 @@ class TestOpaqueWrapperLenient(BaseBash):
 
     def test_eval_auto(self):
         r = handle(_make_envelope("eval cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_eval_bypass(self):
         r = handle(_make_envelope("eval cat .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_time_default(self):
         # 0.3.2 で time は _SHELL_KEYWORDS から _OPAQUE_WRAPPERS に移動
@@ -345,7 +346,7 @@ class TestOpaqueWrapperLenient(BaseBash):
 
     def test_time_auto(self):
         r = handle(_make_envelope("time cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_bang_default(self):
         r = handle(_make_envelope("! cat .env", self.tmp))
@@ -353,7 +354,7 @@ class TestOpaqueWrapperLenient(BaseBash):
 
     def test_bang_auto(self):
         r = handle(_make_envelope("! cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_exec_default(self):
         r = handle(_make_envelope("exec cat .env", self.tmp))
@@ -361,7 +362,7 @@ class TestOpaqueWrapperLenient(BaseBash):
 
     def test_exec_with_options_auto(self):
         r = handle(_make_envelope("exec -a name cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_python_c_default(self):
         r = handle(_make_envelope("python3 -c 'print(1)'", self.tmp))
@@ -369,7 +370,7 @@ class TestOpaqueWrapperLenient(BaseBash):
 
     def test_python_c_auto(self):
         r = handle(_make_envelope("python3 -c 'print(1)'", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
 
 class TestUnknownCommandOperand(BaseBash):
@@ -415,15 +416,15 @@ class TestUnknownCommandOperand(BaseBash):
 
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_unknown_command_no_sensitive_operand_allow(self):
         r = handle(_make_envelope("make build", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_git_commit_message_allow(self):
         r = handle(_make_envelope("git commit -m 'update docs'", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestWrapperBypass(BaseBash):
@@ -514,7 +515,7 @@ class TestPrefixStrippingOpaque(BaseBash):
 
     def test_env_dash_i_auto(self):
         r = handle(_make_envelope("env -i cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_env_dash_u_default(self):
         r = handle(_make_envelope("env -u HOME cat .env", self.tmp))
@@ -526,7 +527,7 @@ class TestPrefixStrippingOpaque(BaseBash):
 
     def test_env_double_dash_auto(self):
         r = handle(_make_envelope("env -- cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_command_dash_p_default(self):
         r = handle(_make_envelope("command -p cat .env", self.tmp))
@@ -538,7 +539,7 @@ class TestPrefixStrippingOpaque(BaseBash):
 
     def test_command_double_dash_bypass(self):
         r = handle(_make_envelope("command -- cat .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
 
 class TestGlobMatch(BaseBash):
@@ -593,20 +594,20 @@ class TestGlobMatch(BaseBash):
     def test_star_log_allow(self):
         # `*.log` は既定 rules と交差しないため allow (False positive 抑制)
         r = handle(_make_envelope("cat *.log", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_dotenv_example_literal_allow(self):
         r = handle(_make_envelope("cat .env.example", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_dotenv_example_star_allow(self):
         # 全候補が exclude 決着 → allow
         r = handle(_make_envelope("cat .env.example*", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_dotenv_sample_literal_allow(self):
         r = handle(_make_envelope("cat .env.sample", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestOptEqualsValue(BaseBash):
@@ -632,13 +633,13 @@ class TestOptEqualsValue(BaseBash):
         r = handle(_make_envelope(
             "grep --color=auto foo README.md", self.tmp,
         ))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_curl_max_time_allow(self):
         r = handle(_make_envelope(
             "curl --max-time=30 https://example.com", self.tmp,
         ))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestAttachedShortOption(BaseBash):
@@ -662,15 +663,15 @@ class TestAttachedShortOption(BaseBash):
 
     def test_ls_flag_group_allow(self):
         r = handle(_make_envelope("ls -la", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_rm_flag_group_allow(self):
         r = handle(_make_envelope("rm -rf target", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_grep_short_non_sensitive_allow(self):
         r = handle(_make_envelope("grep -i pattern README.md", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestQuotedFdTarget(BaseBash):
@@ -683,19 +684,19 @@ class TestQuotedFdTarget(BaseBash):
     def test_quoted_amp_target_not_stripped_auto(self):
         # 0.3.2: residual metachar も auto/bypass で allow に倒る
         r = handle(_make_envelope("echo foo > '&2'", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_unquoted_single_token_fd_dup_stripped(self):
         r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_stderr_dup_stripped(self):
         r = handle(_make_envelope("echo foo >&2", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_dev_null_two_token_still_stripped(self):
         r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestUriVcsPathspec(BaseBash):
@@ -755,35 +756,35 @@ class TestCompoundAllow(BaseBash):
             "git -C /tmp/x log --oneline -5 2>/dev/null || true"
         )
         r = handle(_make_envelope(cmd, self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_pipe_unknown_commands(self):
         r = handle(_make_envelope("ls -la | head -n 5", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_semicolon_unknown_commands(self):
         r = handle(_make_envelope("pwd; date; whoami", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_newline_unknown_commands(self):
         r = handle(_make_envelope("pwd\ndate\nwhoami", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_non_sensitive_with_stderr_discard(self):
         r = handle(_make_envelope("cat README.md 2>/dev/null", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_non_sensitive_with_all_discard(self):
         r = handle(_make_envelope("cat README.md &>/dev/null", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_non_sensitive_with_space_redirect(self):
         r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_cat_non_sensitive_with_stderr_dup(self):
         r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestRedirectToNonNull(BaseBash):
@@ -795,7 +796,7 @@ class TestRedirectToNonNull(BaseBash):
 
     def test_redirect_to_file_auto(self):
         r = handle(_make_envelope("echo foo > out.txt", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_append_redirect_default(self):
         r = handle(_make_envelope("echo foo >> out.txt", self.tmp))
@@ -811,7 +812,7 @@ class TestArbitraryPathExec(BaseBash):
 
     def test_absolute_path_auto(self):
         r = handle(_make_envelope("/bin/cat .env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_relative_path_exec(self):
         r = handle(_make_envelope("./myscript", self.tmp))
@@ -819,7 +820,7 @@ class TestArbitraryPathExec(BaseBash):
 
     def test_relative_path_auto(self):
         r = handle(_make_envelope("./myscript", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_dotdot_exec(self):
         r = handle(_make_envelope("../bin/cat .env", self.tmp))
@@ -835,7 +836,7 @@ class TestBashShellWrapper(BaseBash):
 
     def test_bash_c_auto(self):
         r = handle(_make_envelope('bash -c "cat .env"', self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_bash_lc(self):
         r = handle(_make_envelope("bash -lc 'cat .env'", self.tmp))
@@ -851,7 +852,7 @@ class TestBashShellWrapper(BaseBash):
 
     def test_xargs_a_auto(self):
         r = handle(_make_envelope("xargs -a .env cat", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
     def test_sudo_wrapper(self):
         r = handle(_make_envelope("sudo cat .env", self.tmp))
@@ -859,7 +860,7 @@ class TestBashShellWrapper(BaseBash):
 
     def test_sudo_wrapper_bypass(self):
         r = handle(_make_envelope("sudo cat .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
 
 class TestShlexFailure(BaseBash):
@@ -869,7 +870,7 @@ class TestShlexFailure(BaseBash):
 
     def test_unbalanced_quote_auto(self):
         r = handle(_make_envelope("cat '.env", self.tmp, mode="auto"))
-        self.assertEqual(r, {})
+        self.assertTrue(output.is_allow(r))
 
 
 class TestConfirmedMatchAcrossModes(BaseBash):

@@ -14,6 +14,7 @@ from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
+from core import output
 from handlers.edit_handler import handle
 
 
@@ -114,7 +115,7 @@ class TestTemplateFileAllowed(BaseEdit):
             _make_envelope("Write", str(Path(self.tmp) / ".env.example"), self.tmp),
             tool_label="Write",
         )
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
     def test_template_existing_edit_allowed(self):
         (Path(self.tmp) / "config.template").write_text("x\n")
@@ -122,7 +123,7 @@ class TestTemplateFileAllowed(BaseEdit):
             _make_envelope("Edit", str(Path(self.tmp) / "config.template"), self.tmp),
             tool_label="Edit",
         )
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestNonSensitiveAllowed(BaseEdit):
@@ -131,7 +132,7 @@ class TestNonSensitiveAllowed(BaseEdit):
             _make_envelope("Edit", str(Path(self.tmp) / "README.md"), self.tmp),
             tool_label="Edit",
         )
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestMultiEdit(BaseEdit):
@@ -192,7 +193,7 @@ class TestEmptyOrInvalidInput(BaseEdit):
             "permission_mode": "default",
         }
         r = handle(envelope, tool_label="Edit")
-        self.assertIsNone(_decision(r))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestDotenvParseFailureLogged(BaseEdit):

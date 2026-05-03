@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.4
+
+**L5 消化**: 既存テストの allow チェックを `output.is_allow(r)` 述語に
+一括置換。Phase 0 spec が将来 `permissionDecision: "allow"` 明示出力に
+変わってもテストが壊れないようにする変更耐性向上。コードベース側の挙動
+変更なし。
+
+### 主要な変更
+
+- `tests/test_bash_handler.py`: `self.assertIsNone(_decision(r))` /
+  `self.assertEqual(r, {})` 計 55 件を `self.assertTrue(output.is_allow(r))`
+  に置換
+- `tests/test_edit_handler.py`: 同パターン 4 件を置換
+- 既存 helper `_decision(resp)` は deny / ask 検証で引き続き使うため温存
+- 置換漏れ 0、残存 0 を grep で確認
+
+### テスト結果
+
+```
+hooks/redact-sensitive-reads: Ran 607 tests in 0.129s — OK
+hooks/check-sensitive-files: Ran 27 tests in 1.9s — OK
+```
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-03.md` の L5 を消化。これで H1 / H2 / H3 /
+M1 / M2 / M3 / M4 / L1 / L2 / L3 / L4 / L5 がすべて完了。残るは
+M5 (リダイレクト形式タグ、B と合流) と B (bashlex 採否、別セッション議論)。
+
 ## 0.4.3
 
 **小改善 4 件 (L1〜L4) を消化**。logging の detail 文字種 sanitize、dotenv parse の

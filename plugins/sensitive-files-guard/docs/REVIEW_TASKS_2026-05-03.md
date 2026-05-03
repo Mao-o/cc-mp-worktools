@@ -380,6 +380,48 @@ hooks/check-sensitive-files: Ran 27 tests in 1.873s — OK
 claude plugin validate: ✔ Validation passed
 ```
 
+### 2026-05-04: L5 完了 + 0.4.4 リリース
+
+#### 実装
+
+- `tests/test_bash_handler.py` の `assertIsNone(_decision(r))` /
+  `assertEqual(r, {})` 計 55 件を `assertTrue(output.is_allow(r))` に置換
+- `tests/test_edit_handler.py` の同パターン 4 件を置換
+- 既存 helper `_decision(resp)` は deny / ask 検証で温存
+- 置換漏れ 0、残存 0 を grep で確認
+- 累計 **607 + 27 = 634 件 OK** (テスト数増減なし、置換のみ)
+
+#### 完了状況サマリ
+
+| Pri | タスク | 状態 |
+|---|---|---|
+| H | H1 (operand 名漏れ) | 0.4.1 ✓ |
+| H | H2 (語彙統一) | 0.4.1 ✓ |
+| H | H3 (basename 展開) | 0.4.1 ✓ |
+| M | M1 (reason builder 集約) | 0.4.1 ✓ |
+| M | M2 (LLM 向け文言) | 0.4.1 ✓ |
+| M | M3 (policy_unavailable 集約) | 0.4.1 ✓ |
+| M | M4 (`<SFG_DENY>` 構造化) | 0.4.2 ✓ |
+| L | L1 (logging detail sanitize) | 0.4.3 ✓ |
+| L | L2 (bare except 分類) | 0.4.3 ✓ |
+| L | L3 (TypedDict 化) | 0.4.3 ✓ |
+| L | L4 (is_allow 述語) | 0.4.3 ✓ |
+| L | L5 (テスト reason 検証) | 0.4.4 ✓ |
+| M | M5 (リダイレクト形式タグ) | B 待ち |
+| B | B (bashlex 採否) | **別セッション議論** |
+
+#### 残タスク (新セッションで)
+
+- **B (bashlex 採否)**: MIT ライセンス再確認の議論セッション。`pip show
+  bashlex` の License フィールドや GitHub 上の LICENSE を直接 fetch して MIT
+  互換性を確認。GPL 系なら除外し `tree-sitter-bash` (MIT 既知) の wheel 配布
+  状況を `pip index versions tree-sitter-bash` で確認
+- **M5 (リダイレクト形式タグ)**: bashlex なら `RedirectNode.input` を直接
+  読めるので B 確定後に実装。手書きパーサ拡張 (`_scan_input_redirect_targets_chars`
+  の戻り値を tuple 化) は B 不採用時のフォールバック
+
+---
+
 ### 2026-05-04: L1 / L2 / L3 / L4 完了 + 0.4.3 リリース
 
 #### 実装
