@@ -32,16 +32,13 @@ dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込み
 from __future__ import annotations
 
 from core import logging as L
+from core import messages as M
 from core import output
 from _shared.matcher import is_sensitive
 from core.patterns import load_patterns
 from core.safepath import classify, is_regular_directory, normalize
 from redaction.dotenv import redact_dotenv
 from redaction.engine import _detect_format
-
-# deny reason に埋め込むキー名の上限 (MAX_REASON_BYTES=3072 を圧迫しないため)。
-# 30 キー超の .env は実務でも稀で、超過分は "... (N more)" で切り詰める。
-MAX_SUGGESTED_KEYS = 30
 
 
 def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list[str]:
@@ -89,43 +86,6 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
     return [k["name"] for k in info.get("keys", [])]
 
 
-def _build_deny_reason(
-    tool_label: str,
-    basename: str,
-    new_keys: list[str],
-    extra_note: str = "",
-) -> str:
-    """deny reason を組み立てる。dotenv キーがあれば具体的な代替案を埋め込む。"""
-    header = (
-        f"{tool_label}: 機密パターン一致のファイル ({basename}) への書き込みは "
-        "block されました (値喪失や機密流出防止のため)。"
-    )
-    hint_exclude = (
-        "許可したい場合は `patterns.local.txt` に `!<basename>` を追加してください。"
-    )
-    if new_keys:
-        shown = new_keys[:MAX_SUGGESTED_KEYS]
-        remaining = len(new_keys) - len(shown)
-        lines = [
-            header,
-            "",
-            "代替案: 追加予定のキー名を `.env.example` に追記すると、"
-            "差分把握がしやすくなります (値は後で個別設定):",
-        ]
-        for k in shown:
-            lines.append(f"  {k}=")
-        if remaining > 0:
-            lines.append(f"  ... ({remaining} more)")
-        lines.append("")
-        lines.append(hint_exclude)
-        if extra_note:
-            lines.extend(["", extra_note])
-        return "\n".join(lines)
-    # 非 dotenv または key 抽出不能
-    tail = hint_exclude if not extra_note else f"{hint_exclude}\n\n{extra_note}"
-    return f"{header} {tail}"
-
-
 def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     """Edit/Write/MultiEdit 共通 dispatch。
 
@@ -145,7 +105,7 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     except (FileNotFoundError, OSError) as e:
         L.log_error("patterns_unavailable", type(e).__name__)
         return output.ask_or_deny(
-            "patterns.txt が読めないため安全側で一時停止します。",
+            M.policy_unavailable("pause", tool_label=tool_label),
             envelope,
         )
     if not rules:
@@ -156,7 +116,7 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     except (ValueError, OSError) as e:
         L.log_error("normalize_failed", type(e).__name__)
         return output.ask_or_deny(
-            "file_path の正規化に失敗しました。安全側で一時停止します。",
+            M.edit_pause("normalize_failed", tool_label=tool_label),
             envelope,
         )
 
@@ -171,8 +131,7 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     parent = path.parent
     if str(parent) not in ("", "/", ".") and not is_regular_directory(parent):
         return output.ask_or_deny(
-            f"{tool_label}: 親ディレクトリが通常ディレクトリではありません "
-            "(symlink / 特殊 / 不在)。安全側で一時停止します。",
+            M.edit_pause("parent_not_directory", tool_label=tool_label),
             envelope,
         )
 
@@ -180,21 +139,20 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     new_keys = _extract_dotenv_keys(envelope, tool_label, basename)
 
     if cls == "symlink":
-        return output.make_deny(_build_deny_reason(
+        return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
             extra_note="NOTE: symlink 経由だったため実体側の位置にも注意してください。",
         ))
     if cls == "special":
-        return output.make_deny(_build_deny_reason(
+        return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
             extra_note="NOTE: 非通常ファイル (FIFO/socket/device) への書き込みでした。",
         ))
     if cls == "error":
         return output.ask_or_deny(
-            f"{tool_label}: ファイル状態の確認に失敗しました (権限/IO)。"
-            "安全側で一時停止します。",
+            M.edit_pause("io_error", tool_label=tool_label),
             envelope,
         )
 
     # regular (既存上書き) / missing (新規作成) は deny 固定
-    return output.make_deny(_build_deny_reason(tool_label, basename, new_keys))
+    return output.make_deny(M.edit_deny(tool_label, basename, new_keys))

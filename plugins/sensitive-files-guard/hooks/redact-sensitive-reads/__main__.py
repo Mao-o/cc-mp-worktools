@@ -24,6 +24,7 @@ if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
 from core import logging as L  # noqa: E402
+from core import messages as M  # noqa: E402
 from core import output  # noqa: E402
 
 
@@ -96,10 +97,7 @@ def _is_unsupported_platform() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     if _is_unsupported_platform():
-        _emit(output.make_deny(
-            "redact-hook: 現状 UNIX (Linux/macOS) のみサポート。"
-            "Windows 等では fail-closed で deny します。README の既知制限を参照。"
-        ))
+        _emit(output.make_deny(M.unsupported_platform()))
         return 0
 
     try:
@@ -107,18 +105,14 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit:
         # argparse のエラーは exit 2。envelope を読めないので allow はできない
         # が、fail-open を避けるため deny にする
-        _emit(output.make_deny(
-            "redact-hook 起動引数エラー。管理者に連絡してください。"
-        ))
+        _emit(output.make_deny(M.hook_invocation_error()))
         return 0
 
     envelope = _read_envelope()
     if envelope is None:
         L.log_error("stdin_parse_failed")
         # envelope が読めないと bypass 判定もできない → 最厳 deny
-        _emit(output.make_deny(
-            "hook 入力 JSON の解析に失敗しました。安全側で deny します。"
-        ))
+        _emit(output.make_deny(M.stdin_parse_failed()))
         return 0
 
     try:
@@ -126,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         L.log_error("handler_exception", f"{args.tool}:{type(e).__name__}")
         response = output.ask_or_deny(
-            f"{args.tool} handler 内部エラー。安全側で一時停止します。",
+            M.handler_internal_error(args.tool, type(e).__name__),
             envelope,
         )
 

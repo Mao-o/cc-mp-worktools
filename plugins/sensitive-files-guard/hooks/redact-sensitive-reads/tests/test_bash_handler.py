@@ -37,6 +37,11 @@ def _decision(resp: dict) -> str | None:
     return hook.get("permissionDecision")
 
 
+def _reason(resp: dict) -> str:
+    hook = resp.get("hookSpecificOutput") or {}
+    return hook.get("permissionDecisionReason") or ""
+
+
 class BaseBash(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -209,6 +214,48 @@ class TestInputRedirectDeny(BaseBash):
     def test_cat_lt_dotenv_bypass(self):
         r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
         self.assertEqual(_decision(r), "deny")
+
+
+class TestDenyReasonContent(BaseBash):
+    """deny reason に operand 名 / basename 案内が **実展開で** 含まれること (H1 / H3)。
+
+    builder の単体テストは ``test_messages.py`` で行う。ここでは handler の
+    呼び出し経路で reason に正しく繋がっているか (regression 防止) を確認する。
+    """
+
+    def test_literal_match_includes_operand_and_basename(self):
+        # H1: literal の deny reason に operand `.env` が出る
+        r = handle(_make_envelope("cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("cat", reason)
+        self.assertIn(".env", reason)
+        # H3: `!.env` がコピペ可能な形で埋まる
+        self.assertIn("`!.env`", reason)
+
+    def test_literal_match_with_subdir_uses_basename(self):
+        # operand がパス込みでも `!<basename>` には basename だけが入る
+        r = handle(_make_envelope("cat sub/.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("sub/.env", reason)
+        self.assertIn("`!.env`", reason)
+
+    def test_glob_match_includes_glob_operand(self):
+        r = handle(_make_envelope("cat .env*", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn(".env*", reason)
+        self.assertIn("`!.env*`", reason)
+        self.assertIn("glob", reason)
+
+    def test_input_redirect_includes_target(self):
+        r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn(".env", reason)
+        self.assertIn("`!.env`", reason)
+        self.assertIn("リダイレクト", reason)
 
 
 class TestBackslashQuoteSplit(BaseBash):

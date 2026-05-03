@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.4.1
+
+**reason 文言の品質改善 + reason builder 集約**。`permissionDecisionReason` に
+入れる文字列を `core/messages.py` に集約し、文言の語彙ルールと basename 展開を
+1 箇所で管理する形にリファクタ。Bash deny の operand 名漏れ (literal match で
+operand 名がメッセージに含まれない) を修正。
+
+### 主要な変更
+
+1. **`core/messages.py` 新設** — reason builder を集約:
+   - `bash_deny(first_token, operand, kind)`
+     (`literal` / `glob` / `input_redirect` / `input_redirect_glob`)
+   - `edit_deny(tool_label, basename, new_keys, extra_note)`
+   - `policy_unavailable(severity, tool_label)`
+   - `read_ask(kind)` (`symlink` / `special` / `io_error` / `normalize_failed`
+     / `redaction_failed` / `open_failed`)
+   - `edit_pause(kind, tool_label)` (`normalize_failed` / `io_error` /
+     `parent_not_directory`)
+   - `bash_lenient(kind, detail)` (`hard_stop` / `opaque_prefix` /
+     `residual_metachar` / `shell_keyword` / `tokenize_failed` /
+     `normalize_failed`)
+   - `hook_invocation_error` / `stdin_parse_failed` / `unsupported_platform` /
+     `handler_internal_error` (`__main__` wrapper 用)
+
+2. **Bug fix: Bash deny reason に operand 名を含める** — literal match で
+   operand 名 (引っかかったパス) が文言に欠けていた。glob 側は出ていたが
+   literal 側だけ抜けていたため、LLM が `cat foo bar .env baz` のうちどれが
+   NG か判断できず、推奨される `!<basename>` 追加も具体化できなかった。
+
+3. **`!<basename>` を実 basename に展開** — 旧版はプレースホルダ
+   `<basename>` がベタ書きで LLM がコピペで `patterns.local.txt` に追記でき
+   なかった。実 basename (`os.path.basename` 結果) を埋め込む形に変更。
+
+4. **語彙ルールを統一**:
+   - `make_deny` 系 → 「block しました」
+   - `ask_or_deny` 系 → 「~してから再試行してください」
+   - `ask_or_allow` 系 → 「判定不能のため確認を挟みます (auto / bypass /
+     plan では通過)」
+
+5. **LLM 向け文言への書き換え**:
+   - 「続行しますか？」(Read symlink / special) → 「symlink 先が意図した
+     参照か確認してから再試行してください」
+   - 「管理者に連絡してください」(`__main__`) → 「settings.json の hooks
+     定義 (--tool 引数) を確認してください」「~/.claude/logs/redact-hook.log
+     を確認してください」
+   - 「安全側で deny します」「安全側で一時停止します」のような揺れを排除し、
+     語彙ルールに沿った末尾フレーズに集約。
+
+6. **handler 側のリファクタ** — `read_handler.py` / `bash_handler.py` /
+   `edit_handler.py` / `__main__.py` のインライン f-string reason をすべて
+   `core.messages` の builder 経由に置換。`edit_handler._build_deny_reason`
+   関数と `MAX_SUGGESTED_KEYS` 定数は撤去 (messages.py に集約)。
+
+7. **テスト追加** — 累計 528 件 → **555 件** (+27 件):
+   - `tests/test_messages.py` 40 件 — builder 単体テスト + 動詞ルールの
+     fixate (`TestVocabularyConsistency`)
+   - `tests/test_bash_handler.py::TestDenyReasonContent` 4 件 — operand 名 /
+     basename 案内が reason に含まれる regression 防止
+   - `tests/test_edit_handler.py::TestDenyReasonBasename` 3 件 — basename
+     展開の regression 防止
+
+### 非互換性
+
+- 内部 API: `edit_handler._build_deny_reason` 関数と
+  `edit_handler.MAX_SUGGESTED_KEYS` 定数を削除。`core/messages.edit_deny`
+  に集約。外部 import 利用は確認範囲では無し。
+- reason 文言が変わるが、`permissionDecision` (deny / ask) の判定は不変。
+  reason 文言に依存する自動 grep / 文言マッチはアップデート対応が必要。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-03.md` の H1 / H3 / M1 / H2 / M2 / M3 を消化。
+M4 (`<SFG_DENY>` 構造化包装) / M5 (リダイレクト形式タグ) / L1〜L5 / B
+(bashlex 採否) は次リリース以降。
+
 ## 0.4.0
 
 **`patterns.local.txt` 配置パスの 2-tier lookup 導入**。0.3.x までは

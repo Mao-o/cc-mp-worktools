@@ -53,6 +53,7 @@ from __future__ import annotations
 import shlex
 
 from core import logging as L
+from core import messages as M
 from core import output
 from _shared.matcher import is_sensitive
 from core.patterns import load_patterns
@@ -257,18 +258,22 @@ def _scan_input_redirects(
             if _glob_operand_is_sensitive(raw_target, rules):
                 L.log_info("bash_classify", "input_redirect_glob_match")
                 return output.make_deny(
-                    f"Bash 入力リダイレクト先 ({raw_target}) が機密パターンに "
-                    "一致する候補を含みます。値が LLM コンテキストに露出する可能性が "
-                    "あるため block します。"
+                    M.bash_deny(
+                        first_token="",
+                        operand=raw_target,
+                        kind="input_redirect_glob",
+                    )
                 )
             continue
         try:
             if _operand_is_sensitive(raw_target, cwd, rules):
                 L.log_info("bash_classify", "input_redirect_match")
                 return output.make_deny(
-                    f"Bash 入力リダイレクト先 ({raw_target}) が機密パターンに "
-                    "一致します。値が LLM コンテキストに露出する可能性があるため "
-                    "block します。"
+                    M.bash_deny(
+                        first_token="",
+                        operand=raw_target,
+                        kind="input_redirect",
+                    )
                 )
         except (ValueError, OSError):
             continue
@@ -292,8 +297,7 @@ def _analyze_segment(
     if normalized is None:
         L.log_info("bash_classify", "opaque_prefix_lenient")
         return output.ask_or_allow(
-            "Bash コマンドが静的解析対象外の wrapper / インタプリタ / 任意 path "
-            "実行で始まっています。",
+            M.bash_lenient("opaque_prefix"),
             envelope,
         )
     if not normalized:
@@ -302,7 +306,7 @@ def _analyze_segment(
     if _segment_has_residual_metachar(normalized):
         L.log_info("bash_classify", "segment_residual_metachar_lenient")
         return output.ask_or_allow(
-            "Bash セグメント内に解析対象外のリダイレクト / metachar が残っています。",
+            M.bash_lenient("residual_metachar"),
             envelope,
         )
 
@@ -310,7 +314,7 @@ def _analyze_segment(
     if first in _SHELL_KEYWORDS:
         L.log_info("bash_classify", f"shell_keyword_lenient:{first}")
         return output.ask_or_allow(
-            f"シェル予約語 / 制御構文 ({first}) で始まるセグメントは静的解析対象外です。",
+            M.bash_lenient("shell_keyword", detail=first),
             envelope,
         )
 
@@ -322,24 +326,18 @@ def _analyze_segment(
             if _glob_operand_is_sensitive(p, rules):
                 L.log_info("bash_classify", f"glob_match:{first}")
                 return output.make_deny(
-                    f"Bash コマンド ({first}) の operand glob ({p}) が既定の機密 "
-                    "パターンと交差します。値が LLM コンテキストに露出する可能性が "
-                    "あるため block します。許可したい場合は patterns.local.txt に "
-                    "`!<basename>` を追加してください。"
+                    M.bash_deny(first_token=first, operand=p, kind="glob")
                 )
             continue
         try:
             if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
                 L.log_info("bash_classify", f"match:{first}")
                 return output.make_deny(
-                    f"Bash コマンド ({first}) の operand に機密パターンに一致する "
-                    "ファイルが含まれています。処理内容に関わらず値が LLM コンテキスト "
-                    "に露出する可能性があるため block します。許可したい場合は "
-                    "patterns.local.txt に `!<basename>` を追加してください。"
+                    M.bash_deny(first_token=first, operand=p, kind="literal")
                 )
         except (ValueError, OSError):
             return output.ask_or_allow(
-                "Bash コマンド内のパス正規化に失敗しました。",
+                M.bash_lenient("normalize_failed"),
                 envelope,
             )
 
@@ -371,11 +369,7 @@ def handle(envelope: dict) -> dict:
         rules = load_patterns()
     except (FileNotFoundError, OSError) as e:
         L.log_error("patterns_unavailable", type(e).__name__)
-        return output.make_deny(
-            "sensitive-files-guard: ガードポリシー (patterns.txt) が読み込めない "
-            "ため全 Bash コマンドを block します。パッケージング / 設定を確認して "
-            "ください。"
-        )
+        return output.make_deny(M.policy_unavailable("deny"))
     if not rules:
         return output.make_allow()
 
@@ -388,11 +382,7 @@ def handle(envelope: dict) -> dict:
         if deny is not None:
             return deny
         L.log_info("bash_classify", "hard_stop_lenient")
-        return output.ask_or_allow(
-            "Bash コマンドに動的展開 / heredoc / process 置換 / グループ化 "
-            "($, バッククォート, $(...), <<, <(...), (), {}) が含まれています。",
-            envelope,
-        )
+        return output.ask_or_allow(M.bash_lenient("hard_stop"), envelope)
 
     # 2. segment split (&& / || / ; / | / \n, quote を尊重)
     segments = _split_command_on_operators(command)
@@ -407,7 +397,7 @@ def handle(envelope: dict) -> dict:
         except ValueError as e:
             L.log_info("bash_classify", f"shlex_fail:{type(e).__name__}")
             return output.ask_or_allow(
-                "Bash コマンドの tokenize に失敗しました。",
+                M.bash_lenient("tokenize_failed"),
                 envelope,
             )
         tokens = _strip_safe_redirects(tokens)

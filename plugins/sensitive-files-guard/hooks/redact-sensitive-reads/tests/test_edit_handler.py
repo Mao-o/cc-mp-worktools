@@ -322,5 +322,53 @@ class TestDenyReasonSuggestions(BaseEdit):
         self.assertIn("... (5 more)", reason)
 
 
+class TestDenyReasonBasename(BaseEdit):
+    """H3: deny reason の ``!<basename>`` 案内に **実 basename を展開**して
+    埋め込むこと (LLM がコピペで patterns.local.txt に追記できる形)。
+
+    既存 ``TestDenyReasonSuggestions`` は dotenv キー名抽出に focus している。
+    こちらは basename 展開という別軸の保証。
+    """
+
+    def test_dotenv_write_embeds_basename(self):
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "FOO=1\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        # H3: `!<basename>` プレースホルダではなく、実 basename が埋まる
+        self.assertIn("`!.env`", reason)
+        self.assertNotIn("`!<basename>`", reason)
+
+    def test_credentials_json_embeds_basename(self):
+        envelope = _make_envelope(
+            "Write",
+            str(Path(self.tmp) / "credentials.json"),
+            self.tmp,
+        )
+        envelope["tool_input"]["content"] = '{"k":"v"}'
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("`!credentials.json`", reason)
+
+    def test_subdir_dotenv_embeds_basename_only(self):
+        sub = Path(self.tmp) / "deep" / "nested"
+        sub.mkdir(parents=True)
+        envelope = _make_envelope(
+            "Write", str(sub / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "FOO=1\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        # フルパスは `!...` の中に入らない
+        self.assertNotIn("`!" + str(sub / ".env") + "`", reason)
+        # basename だけが入る
+        self.assertIn("`!.env`", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

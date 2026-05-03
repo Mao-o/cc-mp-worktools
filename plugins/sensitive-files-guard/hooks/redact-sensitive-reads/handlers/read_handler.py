@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 from core import logging as L
+from core import messages as M
 from core import output
 from _shared.matcher import is_sensitive
 from core.patterns import load_patterns
@@ -34,11 +35,7 @@ def handle(envelope: dict) -> dict:
         rules = load_patterns()
     except (FileNotFoundError, OSError) as e:
         L.log_error("patterns_unavailable", type(e).__name__)
-        return output.ask_or_deny(
-            "patterns.txt が読めないため安全側で一時停止します。"
-            "hook 管理者に連絡してください。",
-            envelope,
-        )
+        return output.ask_or_deny(M.policy_unavailable("pause"), envelope)
 
     if not rules:
         return output.make_allow()
@@ -47,10 +44,7 @@ def handle(envelope: dict) -> dict:
         path = normalize(raw_path, cwd)
     except (ValueError, OSError) as e:
         L.log_error("normalize_failed", type(e).__name__)
-        return output.ask_or_deny(
-            "file_path の正規化に失敗しました。安全側で一時停止します。",
-            envelope,
-        )
+        return output.ask_or_deny(M.read_ask("normalize_failed"), envelope)
 
     basename = path.name
     if not is_sensitive(path, rules):
@@ -60,34 +54,19 @@ def handle(envelope: dict) -> dict:
     L.log_info("classify", cls)
 
     if cls == "symlink":
-        return output.ask_or_deny(
-            "symlink 経由で機密パターンに一致するファイルを読もうとしています。"
-            "続行しますか？",
-            envelope,
-        )
+        return output.ask_or_deny(M.read_ask("symlink"), envelope)
     if cls == "special":
-        return output.ask_or_deny(
-            "非通常ファイル (FIFO/socket/device) が機密パターンに一致します。"
-            "続行しますか？",
-            envelope,
-        )
+        return output.ask_or_deny(M.read_ask("special"), envelope)
     if cls == "missing":
         return output.make_allow()
     if cls == "error":
-        return output.ask_or_deny(
-            "ファイル状態の確認に失敗しました (権限/IO)。安全側で一時停止します。",
-            envelope,
-        )
+        return output.ask_or_deny(M.read_ask("io_error"), envelope)
 
     try:
         fd, size = open_regular(path)
     except OSError as e:
         L.log_error("open_regular_failed", type(e).__name__)
-        return output.ask_or_deny(
-            "安全な open に失敗しました (symlink race / 非通常ファイル疑い)。"
-            "安全側で一時停止します。",
-            envelope,
-        )
+        return output.ask_or_deny(M.read_ask("open_failed"), envelope)
 
     try:
         with os.fdopen(fd, "rb") as f:
@@ -97,9 +76,6 @@ def handle(envelope: dict) -> dict:
                 reason = redact(f, basename, size)
     except Exception as e:
         L.log_error("redaction_failed", type(e).__name__)
-        return output.ask_or_deny(
-            "redaction 処理に失敗しました。安全側で一時停止します。",
-            envelope,
-        )
+        return output.ask_or_deny(M.read_ask("redaction_failed"), envelope)
 
     return output.make_deny(reason)
