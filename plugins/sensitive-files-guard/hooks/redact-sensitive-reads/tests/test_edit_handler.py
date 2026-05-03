@@ -195,6 +195,74 @@ class TestEmptyOrInvalidInput(BaseEdit):
         self.assertIsNone(_decision(r))
 
 
+class TestDotenvParseFailureLogged(BaseEdit):
+    """L2 (0.4.3): _extract_dotenv_keys が parse 例外を分類してログに残すこと。
+
+    bare except を狭めた結果、ValueError / UnicodeDecodeError / AttributeError
+    / TypeError は ``dotenv_parse_failed`` として log_info に記録される。
+    silent fallback (空リスト返す) の挙動は維持。
+    """
+
+    def test_value_error_logged(self):
+        from handlers import edit_handler
+        from core import logging as L
+
+        with mock.patch.object(
+            edit_handler, "redact_dotenv",
+            side_effect=ValueError("simulated"),
+        ):
+            with mock.patch.object(L, "log_info") as mock_log:
+                envelope = _make_envelope(
+                    "Write", str(Path(self.tmp) / ".env"), self.tmp,
+                )
+                envelope["tool_input"]["content"] = "FOO=bar\n"
+                result = edit_handler._extract_dotenv_keys(
+                    envelope, "Write", ".env",
+                )
+                self.assertEqual(result, [])
+                mock_log.assert_any_call(
+                    "dotenv_parse_failed", "ValueError",
+                )
+
+    def test_attribute_error_logged(self):
+        from handlers import edit_handler
+        from core import logging as L
+
+        with mock.patch.object(
+            edit_handler, "redact_dotenv",
+            side_effect=AttributeError("simulated"),
+        ):
+            with mock.patch.object(L, "log_info") as mock_log:
+                envelope = _make_envelope(
+                    "Write", str(Path(self.tmp) / ".env"), self.tmp,
+                )
+                envelope["tool_input"]["content"] = "FOO=bar\n"
+                result = edit_handler._extract_dotenv_keys(
+                    envelope, "Write", ".env",
+                )
+                self.assertEqual(result, [])
+                mock_log.assert_any_call(
+                    "dotenv_parse_failed", "AttributeError",
+                )
+
+    def test_unexpected_exception_propagates(self):
+        # KeyboardInterrupt / SystemExit など想定外は握りつぶさない
+        from handlers import edit_handler
+
+        with mock.patch.object(
+            edit_handler, "redact_dotenv",
+            side_effect=KeyboardInterrupt(),
+        ):
+            envelope = _make_envelope(
+                "Write", str(Path(self.tmp) / ".env"), self.tmp,
+            )
+            envelope["tool_input"]["content"] = "FOO=bar\n"
+            with self.assertRaises(KeyboardInterrupt):
+                edit_handler._extract_dotenv_keys(
+                    envelope, "Write", ".env",
+                )
+
+
 def _reason(resp: dict) -> str:
     hook = resp.get("hookSpecificOutput") or {}
     return hook.get("permissionDecisionReason", "")

@@ -81,7 +81,12 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
 
     try:
         info = redact_dotenv(text)
-    except Exception:
+    except (ValueError, UnicodeDecodeError, AttributeError, TypeError) as e:
+        # L2 (0.4.3): bare except を狭め、種別をログに残す。
+        # ValueError: dotenv parse の構文系エラー
+        # UnicodeDecodeError: bytes 風入力
+        # AttributeError / TypeError: 想定外の input 形状
+        L.log_info("dotenv_parse_failed", type(e).__name__)
         return []
     return [k["name"] for k in info.get("keys", [])]
 

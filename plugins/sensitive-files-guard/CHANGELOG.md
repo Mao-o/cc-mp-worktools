@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.4.3
+
+**小改善 4 件 (L1〜L4) を消化**。logging の detail 文字種 sanitize、dotenv parse の
+bare except 分類、HookSpecificOutput の TypedDict 化、is_allow 述語導入。
+Phase 0 spec 変更耐性とコード変更時の意図せぬ秘密漏洩リスクを下げる小規模リファクタ。
+機能変更なし。
+
+### 主要な変更
+
+1. **L1: `core/logging.py` の detail に文字種ホワイトリスト導入** —
+   `_sanitize_detail` を追加し、`log_error` / `log_info` が detail を
+   `^[A-Za-z0-9_:.\-\[\]!]{0,64}$` で filter する。違反は `_BAD` placeholder
+   に置換してログに書き出す。設計コメントで依存していた呼出側責任 (公開可
+   情報のみ渡す) の最終防御層として、コード変更時の意図せぬ秘密混入
+   (path / 値 / basename / コマンド文字列) を実行時に止める。
+
+2. **L2: `_extract_dotenv_keys` の bare except を狭める** —
+   `except Exception:` を `except (ValueError, UnicodeDecodeError,
+   AttributeError, TypeError)` に変更。失敗時は
+   `L.log_info("dotenv_parse_failed", type(e).__name__)` で種別をログに残す。
+   想定外例外 (KeyboardInterrupt / SystemExit 等) は握りつぶさず伝播。
+
+3. **L3: `HookSpecificOutput` / `HookResponse` を TypedDict 化** —
+   `core/output.py` に Phase 0 spec の shape を型定義として追加。各 builder
+   (`make_deny` / `make_ask` / `make_allow` / `ask_or_deny` / `ask_or_allow`)
+   の戻り値型注釈を `HookResponse` に更新。実行時挙動は不変。
+
+4. **L4: `is_allow(r)` 述語を導入** —
+   `make_allow()` が `{}` を返す現行仕様 + 将来 spec が
+   `permissionDecision: "allow"` 明示出力に拡張された場合の両方で True を
+   返す。テストは新述語で書くことを推奨し、既存テストヘルパー
+   (`_decision(r)`) は将来一括置換のため温存。
+
+### テスト
+
+- **新設** `tests/test_logging.py` 9 件 (L1)
+- **新設** `tests/test_output.py` 20 件 (L3 / L4)
+- **追加** `tests/test_edit_handler.py::TestDotenvParseFailureLogged` 3 件 (L2)
+- 累計 **607 件 (redact) + 27 件 (check) = 634 件 OK**
+
+### 非互換性
+
+- 内部 API: `core.output` の builder 戻り値型を `dict` → `HookResponse`
+  (TypedDict) に変更。実行時は dict のままで挙動変更なし。
+- `core.logging.log_info` / `log_error` の detail に許可外文字 (path / 値 /
+  空白 / 改行など) を渡すとログに `_BAD` として記録される。既存の呼出箇所は
+  すべてホワイトリスト内で動作することを実測で確認済み。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-03.md` の L1 / L2 / L3 / L4 を消化。残るは
+M5 (リダイレクト形式タグ) / L5 (M1 / M4 で部分対応済み、別途消化) /
+B (bashlex 採否、別セッション議論)。
+
 ## 0.4.2
 
 **deny 系 reason の `<SFG_DENY>` 構造化包装**。LLM が deny の根拠を機械的に

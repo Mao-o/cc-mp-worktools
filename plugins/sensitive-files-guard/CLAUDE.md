@@ -32,7 +32,7 @@
 
 ```
 sensitive-files-guard/
-├── .claude-plugin/plugin.json       # version 0.4.2
+├── .claude-plugin/plugin.json       # version 0.4.3
 ├── README.md                        # 利用者向け概要
 ├── CLAUDE.md                        # 本ファイル (保守者向け)
 ├── CHANGELOG.md                     # 全バージョン統合リリースノート

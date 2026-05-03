@@ -18,8 +18,16 @@ systemMessage トップレベルは届かないため使用しない。
   residual metachar、shlex/normalize 失敗で使う。default = ask、
   auto/bypass/plan = allow。acceptEdits / dontAsk は明示的に非 lenient
   (ask 維持)。機密確定は使わず ``make_deny`` 固定。
+
+## allow の判定 (L4, 0.4.3)
+
+``make_allow()`` は ``{}`` を返す現行仕様だが、将来 Phase 0 spec が
+``permissionDecision: "allow"`` 明示出力に変わっても破綻しないよう、テストは
+``is_allow(r)`` 述語で判定すること。
 """
 from __future__ import annotations
+
+from typing import Literal, TypedDict
 
 # reason のハード上限 (プランの目標: 1-2KB)。
 # Step 4 で 4KB → 3KB に縮小 (Phase 0 実測で 1KB/8KB/32KB のいずれも完全配信される
@@ -65,7 +73,29 @@ def _is_lenient_mode(envelope: dict) -> bool:
     return envelope.get("permission_mode") in LENIENT_MODES
 
 
-def make_deny(reason: str) -> dict:
+# -- L3: hookSpecificOutput の shape を TypedDict で固定 ------------------
+
+
+class HookSpecificOutput(TypedDict, total=False):
+    """Phase 0 で確定した hookSpecificOutput shape (PreToolUse)。
+
+    全フィールドが ``total=False`` なのは ``make_allow()`` が ``{}`` を返す
+    現行仕様 (= 全 key 不在) を許容するため。allow の判定は ``is_allow(r)``
+    で行う。
+    """
+
+    hookEventName: Literal["PreToolUse"]
+    permissionDecision: Literal["deny", "ask"]
+    permissionDecisionReason: str
+
+
+class HookResponse(TypedDict, total=False):
+    """hook が stdout に書く JSON 全体の shape。"""
+
+    hookSpecificOutput: HookSpecificOutput
+
+
+def make_deny(reason: str) -> HookResponse:
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -75,7 +105,7 @@ def make_deny(reason: str) -> dict:
     }
 
 
-def make_ask(reason: str) -> dict:
+def make_ask(reason: str) -> HookResponse:
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -85,12 +115,36 @@ def make_ask(reason: str) -> dict:
     }
 
 
-def make_allow() -> dict:
-    """no-op allow (明示的な allow は出さず、空オブジェクトで通す)。"""
+def make_allow() -> HookResponse:
+    """no-op allow (明示的な allow は出さず、空オブジェクトで通す)。
+
+    判定するときは ``is_allow(r)`` を使うこと。``r == {}`` で書くと将来 spec
+    変更で壊れる。
+    """
     return {}
 
 
-def ask_or_deny(reason: str, envelope: dict) -> dict:
+def is_allow(response: HookResponse | dict) -> bool:
+    """response が allow を意味するか判定する (L4, 0.4.3)。
+
+    allow のシグナル:
+    1. ``hookSpecificOutput`` フィールドが不在 (現行 ``make_allow`` の挙動)。
+    2. ``hookSpecificOutput`` が空 dict / dict 以外。
+    3. ``permissionDecision`` が ``"deny"`` でも ``"ask"`` でもない
+       (将来 spec 拡張で ``"allow"`` 明示出力に対応する場合に True を返す)。
+
+    response 自体が dict でないときは ``False`` (allow と誤判定しないため)。
+    """
+    if not isinstance(response, dict):
+        return False
+    hook = response.get("hookSpecificOutput")
+    if not isinstance(hook, dict):
+        return True
+    decision = hook.get("permissionDecision")
+    return decision not in ("deny", "ask")
+
+
+def ask_or_deny(reason: str, envelope: dict) -> HookResponse:
     """bypass モードでは ask が自動 allow されるため deny にフォールバック。
 
     Phase 0 実測で確定: bypassPermissions モード下では ask + reason は
@@ -106,7 +160,7 @@ def ask_or_deny(reason: str, envelope: dict) -> dict:
     return make_ask(reason)
 
 
-def ask_or_allow(reason: str, envelope: dict) -> dict:
+def ask_or_allow(reason: str, envelope: dict) -> HookResponse:
     """autonomous / planning 実行モード (auto / bypassPermissions / plan) では
     allow に倒す。
 

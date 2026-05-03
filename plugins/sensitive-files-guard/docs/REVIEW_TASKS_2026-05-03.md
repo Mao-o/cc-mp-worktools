@@ -380,6 +380,37 @@ hooks/check-sensitive-files: Ran 27 tests in 1.873s — OK
 claude plugin validate: ✔ Validation passed
 ```
 
+### 2026-05-04: L1 / L2 / L3 / L4 完了 + 0.4.3 リリース
+
+#### 実装
+
+- **L1**: `core/logging.py` に `_sanitize_detail` を追加し、`log_error` /
+  `log_info` の `detail` を ``^[A-Za-z0-9_:.\-\[\]!]{0,64}$`` で filter。
+  違反は `_BAD` placeholder。
+- **L2**: `handlers/edit_handler.py::_extract_dotenv_keys` の `except
+  Exception` を `(ValueError, UnicodeDecodeError, AttributeError, TypeError)`
+  に絞り、`L.log_info("dotenv_parse_failed", type(e).__name__)` を追加。
+- **L3**: `core/output.py` に `HookSpecificOutput` / `HookResponse` TypedDict
+  を追加。各 builder の戻り値型注釈を `HookResponse` に更新。
+- **L4**: `core/output.py` に `is_allow(r)` 述語を追加。`make_allow()` が
+  `{}` を返す現行 + 将来 `"allow"` 明示出力の両対応。
+
+#### テスト
+
+- **新設** `tests/test_logging.py` 9 件
+- **新設** `tests/test_output.py` 20 件
+- **追加** `tests/test_edit_handler.py::TestDotenvParseFailureLogged` 3 件
+- 累計 **607 件 (redact) + 27 件 (check) = 634 件 OK**
+
+#### 残タスク (次リリース以降)
+
+- **M5** (入力リダイレクト形式タグ): bashlex 採否と一緒にやるのが経済的
+- **L5** (テスト reason 検証): M1 / M4 で部分対応済み。残り少ないので
+  気が向いたら別途消化
+- **B** (bashlex 採否): MIT ライセンス再確認の議論セッション
+
+---
+
 ### 2026-05-04: M4 完了 + 0.4.2 リリース
 
 #### 実装
