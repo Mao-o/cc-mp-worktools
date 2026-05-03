@@ -23,7 +23,7 @@ next action」** の 2 文構造を取る。「続行しますか？」のよう
 そのままコピペで ``patterns.local.txt`` に追記できる形にする。glob operand
 (例: ``*.env*``) はそのまま basename として埋める。
 
-## ``<SFG_DENY>`` 構造化包装 (M4, 0.4.2)
+## ``<SFG_DENY>`` 構造化包装 (M4, 0.4.2 / M5, 0.5.0)
 
 deny 系 reason はすべて以下の外殻で包む。LLM が deny の根拠を機械的にパース
 できるようにし、後段 hook (review / 集計) が ``reason`` 値を grep して block
@@ -35,6 +35,7 @@ note: <人間向け説明文>
 matched_operand: <Bash の operand / Edit の basename>  ← 種別ごとに省略可
 first_token: <Bash コマンド名>                         ← 種別ごとに省略可
 basename: <Edit/Write の basename>                     ← 種別ごとに省略可
+form: <bare|fd_prefixed|no_space|quoted>              ← M5: Bash input_redirect 系のみ
 suggested_keys:                                       ← edit_deny の dotenv 系
   KEY_NAME=
   ...
@@ -63,6 +64,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
+from handlers.bash.redirects import RedirectForm
 from redaction.sanitize import escape_xml_tag
 
 # 除外行を書き足す patterns.local.txt の preferred パス (CLAUDE.md 参照)。
@@ -157,14 +159,21 @@ def bash_deny(
     first_token: str,
     operand: str,
     kind: BashDenyKind,
+    *,
+    form: RedirectForm | None = None,
 ) -> str:
-    """Bash 操作の deny reason を ``<SFG_DENY>`` 構造で構築する (M4)。
+    """Bash 操作の deny reason を ``<SFG_DENY>`` 構造で構築する (M4 + M5)。
 
     Args:
         first_token: 検出されたコマンドの第 1 トークン (例: ``cat``)。
             input redirect 系では空でもよい (caller 側の文脈による)。
         operand: 引っかかった operand。literal path / glob / redirect target。
         kind: 検出種別。reason 属性と note 文を切り替える。
+        form: M5 (0.5.0) 入力リダイレクト形式タグ。``input_redirect`` /
+            ``input_redirect_glob`` の deny で caller が ``bare`` /
+            ``fd_prefixed`` / ``no_space`` / ``quoted`` を渡すと、SFG_DENY body に
+            ``form: <値>`` 行を追加する。``literal`` / ``glob`` (operand scan)
+            では None のまま (出力されない)。
     """
     basename = _basename_of(operand)
 
@@ -202,6 +211,8 @@ def bash_deny(
         body_lines.append(f"matched_operand: {operand}")
     if first_token:
         body_lines.append(f"first_token: {first_token}")
+    if form is not None:
+        body_lines.append(f"form: {form}")
     body_lines.append(f"suggestion: {_exclude_hint(basename)}")
 
     return _wrap_sfg_deny("Bash", kind, body_lines)

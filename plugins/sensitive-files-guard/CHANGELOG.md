@@ -1,5 +1,127 @@
 # Changelog
 
+## 0.5.0
+
+**M5 (入力リダイレクト形式タグ) 実装 + B (Bash パーサ採否) の最終決定**。
+0.3.4 で導入した character-level quote-aware parser を拡張し、各 input
+redirect target に **構文形式タグ** (``bare`` / ``fd_prefixed`` / ``no_space``
+/ ``quoted``) を付与して SFG_DENY body に出力する。これにより後段 hook /
+LLM が同じ ``reason="input_redirect"`` のなかで `cat<.env` (no_space) と
+`cat 0< .env` (fd_prefixed) を機械的に区別できる。
+
+### B (bashlex 採否) の結論: 自前 IR 化を採用
+
+別セッション議論として懸案だった Bash パーサ採否を最終確定:
+
+| 候補 | 結果 | 理由 |
+|---|---|---|
+| **bashlex** (PyPI 0.18) | **採用不可** | License は **GPLv3+** で MIT 必須の worktools と非互換 |
+| **tree-sitter-bash** (PyPI 0.25.1) | **見送り** | MIT + wheel 配布完備 (cp310-cp313 全 plat) だが pip 依存追加が必要。Plugin の「pip install 不要・即使える」UX (CLAUDE.md 「標準ライブラリのみで完結」方針) を破壊する代償が大きい |
+| **自前 IR 化 (採用)** | ✓ | 0.3.4 の char-level parser をそのまま拡張し、target 抽出と同時に form 情報を返す形に。依存ゼロ維持、M5 限定の最小工数 (~150 行 + テスト 36 件) |
+
+長期的な bash 文法サポート増のコストは引き続き手書きで吸収する方針を継続。
+bashlex のライセンスが将来 MIT 互換に変わったり、tree-sitter-bash の wheel
+を vendor 同梱できる手段が固まれば再評価の余地あり。
+
+### 主要な変更
+
+1. **`RedirectForm` Literal を新設** (`handlers/bash/redirects.py`):
+
+   ```python
+   RedirectForm = Literal["bare", "fd_prefixed", "no_space", "quoted"]
+   ```
+
+   優先順位 (target 1 つにつき 1 種): ``fd_prefixed`` > ``no_space`` >
+   ``quoted`` > ``bare``。
+
+   | 例 | form |
+   |---|---|
+   | `cat < .env` | ``bare`` |
+   | `cat <.env` | ``no_space`` |
+   | `cat 0< .env` / `cat 0<.env` | ``fd_prefixed`` |
+   | `cat < ".env"` / `cat <".env"` | ``quoted`` |
+   | `cat 0< ".env"` | ``fd_prefixed`` (fd 優先) |
+   | `echo abc0<.env` | ``no_space`` (word 内部 digit は fd と区別) |
+
+2. **`_scan_input_redirect_targets_with_form` 新設** — 戻り値
+   `list[tuple[str, RedirectForm]]` で target と form を一緒に返す。本体
+   ロジックは 0.3.4 の `_scan_input_redirect_targets_chars` と同じだが、単独
+   ``<`` 検出位置で `_classify_redirect_form` ヘルパーを呼んで form を判定。
+
+3. **`_scan_input_redirect_targets_chars` を thin wrapper 化** — 戻り値型
+   `list[str]` は維持。74 件の戻り値型 assert テスト (`TestExtractInput
+   RedirectTargets*` 9 クラス) を **無改修** で後方互換維持する。新規実装は
+   form 付き版を直接呼ぶ。
+
+4. **`bash_deny` に `form` キーワード引数追加** (`core/messages.py`):
+
+   ```python
+   def bash_deny(
+       first_token: str,
+       operand: str,
+       kind: BashDenyKind,
+       *,
+       form: RedirectForm | None = None,
+   ) -> str: ...
+   ```
+
+   `input_redirect` / `input_redirect_glob` で caller が form を指定すると
+   SFG_DENY body の ``matched_operand:`` / ``first_token:`` の後、``suggestion:``
+   の前に ``form: <値>`` 行を追加。`literal` / `glob` (operand scan) は
+   default None で出力しない。
+
+5. **`bash_handler._scan_input_redirects` を form 対応に置換** — 内部実装
+   から `_scan_input_redirect_targets_with_form` を直接呼び、deny 時に form
+   を `bash_deny` に渡す。test seam の `_extract_input_redirect_targets`
+   (戻り値 `list[str]`) は不変。
+
+### `<SFG_DENY>` schema 拡張
+
+```
+<SFG_DENY tool="Bash" reason="input_redirect" guard="sfg-v1">
+note: ...
+matched_operand: .env
+form: fd_prefixed                ← M5 で追加 (input_redirect 系のみ)
+suggestion: ...
+</SFG_DENY>
+```
+
+reason 値 (8 種) は変えていない (M4 schema との互換維持)。後段 hook の
+パターンマッチを破壊せず、追加情報のみが増える形。
+
+### テスト
+
+- **新設** `tests/test_input_redirect.py::TestExtractInputRedirectTargetsWithForm`
+  — 19 件。form 4 種 + 優先順位 + word 内 digit 除外 + segment 境界 + thin
+  wrapper との組合せ
+- **新設** `tests/test_input_redirect.py::TestExtractInputRedirectTargetsCharsThinWrapper`
+  — 1 件。`_scan_input_redirect_targets_chars` の戻り値型 (`list[str]`)
+  維持の保証
+- **新設** `tests/test_bash_handler.py::TestInputRedirectFormInReason`
+  — 8 件。handle() 経由で SFG_DENY body に ``form:`` 行が出る regression
+  防止 (bare / no_space / fd_prefixed / quoted の各 form と、operand scan
+  経路では form 行が出ないことの確認)
+- **新設** `tests/test_messages.py::TestBashDenyInputRedirectForm`
+  — 8 件。builder 単体で form 引数を反映、省略時は出力しない、行位置 (form
+  行が suggestion 行より前)
+- 累計 **643 + 27 = 670 件 OK** (M5 で +36 件)
+
+### 非互換性
+
+- 内部 API: `bash_deny` に `form` キーワード引数追加 (default None で後方
+  互換)。既存 caller は無改修で動く
+- SFG_DENY body に新規行 ``form: <値>`` 追加 (input_redirect 系のみ)。
+  reason 値 / 外殻 schema は不変
+- `_scan_input_redirect_targets_chars` (`list[str]`) は thin wrapper として
+  温存。新規実装は `_scan_input_redirect_targets_with_form` を直接呼ぶこと
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-03.md` の **B (bashlex 採否)** と **M5 (リダイレ
+クト形式タグ)** を消化。これで H1 / H2 / H3 / M1 / M2 / M3 / M4 / M5 / L1
+/ L2 / L3 / L4 / L5 / B のすべてが完了。**0.5.0 で本レビューサイクルを
+完結**。
+
 ## 0.4.4
 
 **L5 消化**: 既存テストの allow チェックを `output.is_allow(r)` 述語に

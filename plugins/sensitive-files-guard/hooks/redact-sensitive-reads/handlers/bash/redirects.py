@@ -1,11 +1,19 @@
-"""Bash リダイレクト関連 regex / pure helper (0.3.3 分解, 0.3.4 拡張)。
+"""Bash リダイレクト関連 regex / pure helper (0.3.3 分解, 0.3.4 拡張, 0.5.0 form 付与)。
 
 このモジュールは副作用なし・plugin 状態非依存。token 列の並べ替え / regex match /
 character-level 解析のみ。0.3.4 で ``_scan_input_redirect_targets_chars`` /
 ``_consume_redirect_target`` を追加し、``<`` 入力リダイレクト target 抽出を
 shlex に依存しない quote-aware parser に移行した。
+
+0.5.0 で M5 (リダイレクト形式タグ) を実装し、target 抽出と同時に **form**
+(``bare`` / ``fd_prefixed`` / ``no_space`` / ``quoted``) を返す
+``_scan_input_redirect_targets_with_form`` を新設。既存 list[str] 版
+``_scan_input_redirect_targets_chars`` は form を捨てる thin wrapper として
+保持し、74 件の戻り値型 assert テストの後方互換を維持する。
 """
 from __future__ import annotations
+
+from typing import Literal
 
 from handlers.bash.constants import (
     _REDIRECT_OP_TOKENS,
@@ -13,6 +21,19 @@ from handlers.bash.constants import (
     _SAFE_REDIRECT_TARGETS,
     _SEGMENT_RESIDUAL_METACHARS,
 )
+
+
+# Bash input redirect の構文形式タグ (M5, 0.5.0)。target 1 つにつき 1 種、
+# 優先順位は ``fd_prefixed`` > ``no_space`` > ``quoted`` > ``bare``。
+# 例:
+#   ``cat < .env``      → ``bare``
+#   ``cat <.env``       → ``no_space``
+#   ``cat 0< .env``     → ``fd_prefixed``
+#   ``cat 0<.env``      → ``fd_prefixed`` (no_space より優先)
+#   ``cat < ".env"``    → ``quoted``
+#   ``cat <".env"``     → ``quoted`` (no_space より優先)
+#   ``cat 0< ".env"``   → ``fd_prefixed`` (quoted より優先)
+RedirectForm = Literal["bare", "fd_prefixed", "no_space", "quoted"]
 
 
 def _is_safe_redirect_token(tok: str) -> bool:
@@ -126,8 +147,62 @@ def _consume_redirect_target(command: str, start: int) -> tuple[int, str]:
     return (i - start, "".join(parts))
 
 
-def _scan_input_redirect_targets_chars(command: str) -> list[str]:
-    """character-level parser で input redirect target を抽出 (0.3.4)。
+def _classify_redirect_form(
+    command: str,
+    lt_pos: int,
+    has_space_before_target: bool,
+    target_starts_with_quote: bool,
+) -> RedirectForm:
+    """単独 ``<`` 検出位置から redirect の構文形式 (form) を分類する (M5, 0.5.0)。
+
+    優先順位 (target 1 つにつき 1 種):
+
+    1. ``fd_prefixed``: ``<`` の直前に digit run (0-9 連続) があり、digit run の
+       前が word boundary (空白 / operator / 行頭)。``0<`` ``2<`` ``10<`` 等。
+       word 内部の数字 (例: ``abc0<``) は fd prefix と区別する。
+    2. ``no_space``: ``<`` 直後に空白なしで target が始まる (fd 前置きなし、
+       target 冒頭が quote でもない)。``cat<.env`` 等。
+    3. ``quoted``: target word の冒頭が quote (``"`` / ``'``)。fd_prefixed 以外で
+       優先される (``cat<".env"`` も ``no_space`` ではなく ``quoted``)。
+    4. ``bare``: 上記以外 (空白あり、bare word target)。``cat < .env`` 等。
+
+    Args:
+        command: 元の command 文字列 (digit prefix 検出のため必要)
+        lt_pos: 単独 ``<`` の位置
+        has_space_before_target: ``<`` の直後に空白 (space / tab) を 1 つ以上
+            飛ばしたか
+        target_starts_with_quote: target word の最初の文字が quote か
+
+    Returns:
+        ``RedirectForm`` のいずれか 1 種。
+    """
+    # fd_prefixed 判定: `<` の直前に digit run がある + その前が word boundary
+    j = lt_pos - 1
+    digit_run = False
+    while j >= 0 and command[j].isdigit():
+        digit_run = True
+        j -= 1
+    if digit_run:
+        # digit run の前が word boundary (空白 / operator / 行頭) なら fd prefix
+        # `abc0<` のような word 内部数字は除外 (j < 0 は行頭で OK)
+        if j < 0 or command[j] in " \t\n;|&()":
+            return "fd_prefixed"
+        # それ以外 (`abc0<` 等) は fd prefix ではない → 通常判定へ
+    if target_starts_with_quote:
+        return "quoted"
+    if not has_space_before_target:
+        return "no_space"
+    return "bare"
+
+
+def _scan_input_redirect_targets_with_form(
+    command: str,
+) -> list[tuple[str, RedirectForm]]:
+    """character-level parser で input redirect target + form を抽出する (0.5.0 / M5)。
+
+    0.3.4 で導入した quote/comment/conditional/arith 対応のロジックを保持しつつ、
+    各 target に構文形式タグ (``RedirectForm``) を付与して返す。form 判定は
+    ``_classify_redirect_form`` に委譲。
 
     quote state を追いながら以下を区別する:
 
@@ -138,15 +213,14 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
     - ``<&`` (fd dup, ``<&N``/``<&-``) → ``<&`` を消費
     - 単独 ``<`` → whitespace 飛ばして target を ``_consume_redirect_target`` で抽出
     - quote 外の ``#`` (word start 位置) → 行末までシェルコメントとして skip
-
-    ``0<`` / ``N<`` (fd 前置き) は ``<`` の直前の数字 prefix を意識しない設計
-    (fd prefix は redirect の意味論上 target 抽出対象は ``<`` 以降のみ)。
+    - ``[[ ... ]]`` / ``(( ... ))`` (command word 位置のみ予約語扱い) → 内部の
+      ``<`` を比較演算子として skip
 
     Returns:
-        抽出した target のリスト (quote 剥離済み)。失敗しても例外は投げず、
-        解析できた範囲の target を返す。
+        ``(target, form)`` タプルのリスト (quote 剥離済み)。失敗しても例外は
+        投げず、解析できた範囲の target を返す。
     """
-    targets: list[str] = []
+    targets: list[tuple[str, RedirectForm]] = []
     i = 0
     n = len(command)
     quote: str | None = None
@@ -361,15 +435,26 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
             at_command_start = False
             continue
 
-        # 単独 `<` — target 抽出
+        # 単独 `<` — target 抽出 + form 判定 (M5)
+        lt_pos = i
         i += 1
+        ws_consumed = 0
         while i < n and command[i] in " \t":
             i += 1
+            ws_consumed += 1
         if i >= n:
             break
+        target_first_char = command[i]
+        target_starts_with_quote = target_first_char in ('"', "'")
         consumed, value = _consume_redirect_target(command, i)
         if value:
-            targets.append(value)
+            form = _classify_redirect_form(
+                command,
+                lt_pos,
+                has_space_before_target=(ws_consumed > 0),
+                target_starts_with_quote=target_starts_with_quote,
+            )
+            targets.append((value, form))
         i += consumed
         # target を 1 word 消費したので word boundary ではない位置にいる。
         # 次反復で新たに word boundary 文字が来ない限り `at_word_start` は False。
@@ -377,3 +462,14 @@ def _scan_input_redirect_targets_chars(command: str) -> list[str]:
         at_command_start = False
 
     return targets
+
+
+def _scan_input_redirect_targets_chars(command: str) -> list[str]:
+    """既存戻り値型 (``list[str]``) の thin wrapper (0.3.4 互換、0.5.0 で thin 化)。
+
+    M5 (0.5.0) で form 付き版 ``_scan_input_redirect_targets_with_form`` を新設
+    したため、本関数は test seam (``test_input_redirect.py`` の 74 件の戻り値型
+    assert) と既存 import path の後方互換維持のため form を捨てる thin wrapper
+    として保持する。新規実装では form 付き版を直接呼ぶこと。
+    """
+    return [target for target, _form in _scan_input_redirect_targets_with_form(command)]

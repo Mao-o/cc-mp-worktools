@@ -13,6 +13,7 @@ from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
+from handlers.bash.redirects import _scan_input_redirect_targets_with_form
 from handlers.bash_handler import _extract_input_redirect_targets, handle
 
 
@@ -792,6 +793,159 @@ class TestHandleCharLevelFixes(_BaseHandle):
             )
         )
         self.assertEqual(_decision(r), "deny")
+
+
+class TestExtractInputRedirectTargetsWithForm(unittest.TestCase):
+    """0.5.0 / M5: form 付き parser ``_scan_input_redirect_targets_with_form``。
+
+    各 target に ``RedirectForm`` (``bare`` / ``fd_prefixed`` / ``no_space``
+    / ``quoted``) が付与されること。優先順位は
+    ``fd_prefixed`` > ``no_space`` > ``quoted`` > ``bare``。
+    """
+
+    def test_bare_with_space(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat < .env"),
+            [(".env", "bare")],
+        )
+
+    def test_no_space_inline(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat<.env"),
+            [(".env", "no_space")],
+        )
+
+    def test_fd_prefixed_with_space(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat 0< .env"),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_fd_prefixed_inline(self):
+        # fd_prefixed > no_space (fd 前置きは空白なしでも優先)
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat 0<.env"),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_fd_prefixed_multi_digit(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat 10<.env"),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_fd_prefixed_nonzero(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat 2<.env"),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_fd_prefixed_at_command_start(self):
+        # 行頭の `0<` (前に空白なし) も fd_prefixed
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("0<.env"),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_quoted_double_with_space(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form('cat < ".env"'),
+            [(".env", "quoted")],
+        )
+
+    def test_quoted_single_with_space(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat < '.env'"),
+            [(".env", "quoted")],
+        )
+
+    def test_quoted_no_space(self):
+        # quoted > no_space (target 冒頭が quote なら quoted を優先)
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form('cat<".env"'),
+            [(".env", "quoted")],
+        )
+
+    def test_fd_prefixed_beats_quoted(self):
+        # fd_prefixed > quoted (fd 前置きが quote より優先)
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form('cat 0<".env"'),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_fd_prefixed_with_space_and_quote(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form('cat 0< ".env"'),
+            [(".env", "fd_prefixed")],
+        )
+
+    def test_word_internal_digit_is_not_fd_prefix(self):
+        # `abc0<` の `0` は word 内部 → fd prefix 扱いしない (no_space)。
+        # bash は abc0 を引数として、`<` を独立した redirect として扱うが、
+        # form 分類軸としては word boundary 起点でない数字は fd_prefixed と
+        # 区別する設計。
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("echo abc0<.env"),
+            [(".env", "no_space")],
+        )
+
+    def test_multiple_targets_with_different_forms(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form(
+                'cat < .env && cat<".env.local"'
+            ),
+            [(".env", "bare"), (".env.local", "quoted")],
+        )
+
+    def test_quoted_concat_word(self):
+        # `< ".env".example` は word 連結。冒頭 quote なので quoted。
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form('cat < ".env".example'),
+            [(".env.example", "quoted")],
+        )
+
+    def test_empty_command(self):
+        self.assertEqual(_scan_input_redirect_targets_with_form(""), [])
+
+    def test_no_redirect(self):
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("cat .env"), []
+        )
+
+    def test_excluded_constructs_yield_empty(self):
+        # heredoc / herestring / fd dup / process sub は除外 → 空リスト
+        for cmd in (
+            "cat << EOF",
+            "cat <<< '.env'",
+            "cat <&2",
+            "cat <(cat .env)",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(
+                    _scan_input_redirect_targets_with_form(cmd), []
+                )
+
+    def test_segment_separator_resets_command_position(self):
+        # `;` 直後の `0<` も command 位置 → fd_prefixed
+        self.assertEqual(
+            _scan_input_redirect_targets_with_form("date; 0<.env"),
+            [(".env", "fd_prefixed")],
+        )
+
+
+class TestExtractInputRedirectTargetsCharsThinWrapper(unittest.TestCase):
+    """0.5.0 / M5: ``_scan_input_redirect_targets_chars`` (thin wrapper) は
+    既存戻り値型 ``list[str]`` を維持する (74 件の戻り値型 assert テストの
+    後方互換)。
+    """
+
+    def test_thin_wrapper_returns_list_of_strings(self):
+        from handlers.bash.redirects import _scan_input_redirect_targets_chars
+        result = _scan_input_redirect_targets_chars("cat < .env && cat<'.env.local'")
+        # 戻り値の各要素は str (tuple ではない)
+        self.assertEqual(result, [".env", ".env.local"])
+        for x in result:
+            self.assertIsInstance(x, str)
 
 
 if __name__ == "__main__":

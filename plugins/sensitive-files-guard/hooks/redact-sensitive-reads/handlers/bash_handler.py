@@ -85,9 +85,11 @@ from handlers.bash.operand_lexer import (  # noqa: F401
     _literalize,
 )
 from handlers.bash.redirects import (  # noqa: F401
+    RedirectForm,
     _consume_redirect_target,
     _is_safe_redirect_token,
     _scan_input_redirect_targets_chars,
+    _scan_input_redirect_targets_with_form,
     _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
@@ -245,15 +247,18 @@ def _scan_input_redirects(
 ) -> dict | None:
     """hard-stop コマンド内の ``< target`` を抽出し、機密一致を ``make_deny`` で返す。
 
-    機密一致が見つかれば deny dict、見つからなければ ``None``。
+    機密一致が見つかれば deny dict、見つからなければ ``None``。M5 (0.5.0) で
+    form 付き parser ``_scan_input_redirect_targets_with_form`` 直呼びに変更し、
+    deny reason に form タグ (``bare`` / ``fd_prefixed`` / ``no_space`` /
+    ``quoted``) を埋め込む。
     """
-    targets = _extract_input_redirect_targets(command)
-    if not targets and "<" in command:
+    targets_with_form = _scan_input_redirect_targets_with_form(command)
+    if not targets_with_form and "<" in command:
         # `<` を含むのに target が取れなかった = 全除外ケース
         # (heredoc / herestring / fd dup / process sub / quote 異常) の可能性。
         # 後段 ask_or_allow に倒る前に観測可能にする。
         L.log_info("bash_classify", "input_redirect_empty_extract")
-    for raw_target in targets:
+    for raw_target, form in targets_with_form:
         if _has_glob(raw_target):
             if _glob_operand_is_sensitive(raw_target, rules):
                 L.log_info("bash_classify", "input_redirect_glob_match")
@@ -262,6 +267,7 @@ def _scan_input_redirects(
                         first_token="",
                         operand=raw_target,
                         kind="input_redirect_glob",
+                        form=form,
                     )
                 )
             continue
@@ -273,6 +279,7 @@ def _scan_input_redirects(
                         first_token="",
                         operand=raw_target,
                         kind="input_redirect",
+                        form=form,
                     )
                 )
         except (ValueError, OSError):

@@ -88,6 +88,87 @@ class TestBashDenyInputRedirect(unittest.TestCase):
         self.assertIn("リダイレクト", msg)
 
 
+class TestBashDenyInputRedirectForm(unittest.TestCase):
+    """0.5.0 / M5: ``bash_deny`` に ``form`` 引数を渡すと SFG_DENY body に
+    ``form: <値>`` 行が追加される。
+
+    form 値の優先順位 (fd_prefixed > no_space > quoted > bare) は parser 側
+    (``_classify_redirect_form`` / ``test_input_redirect.py``) で確認済み。
+    本クラスは builder が caller の form 引数を素直に body に反映するかだけを
+    単独で確認する (各 form 値ごと 1 ケース)。
+    """
+
+    def test_input_redirect_with_bare_form(self):
+        msg = M.bash_deny(
+            first_token="", operand=".env", kind="input_redirect", form="bare"
+        )
+        self.assertIn("form: bare", msg)
+
+    def test_input_redirect_with_fd_prefixed_form(self):
+        msg = M.bash_deny(
+            first_token="",
+            operand=".env",
+            kind="input_redirect",
+            form="fd_prefixed",
+        )
+        self.assertIn("form: fd_prefixed", msg)
+
+    def test_input_redirect_with_no_space_form(self):
+        msg = M.bash_deny(
+            first_token="",
+            operand=".env",
+            kind="input_redirect",
+            form="no_space",
+        )
+        self.assertIn("form: no_space", msg)
+
+    def test_input_redirect_with_quoted_form(self):
+        msg = M.bash_deny(
+            first_token="",
+            operand=".env",
+            kind="input_redirect",
+            form="quoted",
+        )
+        self.assertIn("form: quoted", msg)
+
+    def test_input_redirect_glob_with_form(self):
+        msg = M.bash_deny(
+            first_token="",
+            operand=".env*",
+            kind="input_redirect_glob",
+            form="bare",
+        )
+        self.assertIn("form: bare", msg)
+
+    def test_form_omitted_no_form_line(self):
+        # form 引数省略 (default None) → body に form 行を出さない
+        msg = M.bash_deny(
+            first_token="", operand=".env", kind="input_redirect"
+        )
+        self.assertNotIn("form:", msg)
+
+    def test_literal_kind_default_no_form_line(self):
+        # literal / glob kind では caller (bash_handler) は form を渡さない設計
+        msg = M.bash_deny(
+            first_token="cat", operand=".env", kind="literal"
+        )
+        self.assertNotIn("form:", msg)
+
+    def test_form_line_position_before_suggestion(self):
+        # form 行は suggestion 行より前に出る (body 行順序の保証)
+        msg = M.bash_deny(
+            first_token="",
+            operand=".env",
+            kind="input_redirect",
+            form="quoted",
+        )
+        form_pos = msg.find("form:")
+        suggestion_pos = msg.find("suggestion:")
+        self.assertGreater(form_pos, 0)
+        self.assertGreater(suggestion_pos, 0)
+        self.assertLess(form_pos, suggestion_pos)
+
+
 class TestEditDeny(unittest.TestCase):
     def test_minimal_no_keys(self):
         msg = M.edit_deny("Edit", ".env", new_keys=None)

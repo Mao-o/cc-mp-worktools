@@ -340,6 +340,64 @@ trees = bashlex.parse("cat .env && echo done")
 
 ## 進捗
 
+### 2026-05-04: B 採否確定 + M5 完了 + 0.5.0 リリース (本レビュー完結)
+
+#### B (bashlex 採否) の最終結論
+
+| 候補 | 結果 | 理由 |
+|---|---|---|
+| bashlex (PyPI 0.18) | **採用不可** | License: GPLv3+ で MIT 必須の worktools と非互換 |
+| tree-sitter-bash (PyPI 0.25.1) | 見送り | MIT + wheel 配布完備 (cp310-cp313 全 plat) だが pip 依存追加で「標準ライブラリのみ」方針を破壊 |
+| **自前 IR 化** | **採用** | 0.3.4 char-level parser を form 付与版に拡張、依存ゼロ維持 |
+
+#### M5 (入力リダイレクト形式タグ) 実装
+
+- **新規** `handlers/bash/redirects.py::RedirectForm` Literal
+  (`bare` / `fd_prefixed` / `no_space` / `quoted`)
+- **新規** `_scan_input_redirect_targets_with_form` (本体ロジック、戻り値
+  `list[tuple[str, RedirectForm]]`)
+- **新規** `_classify_redirect_form` ヘルパー (form 判定、優先順位
+  fd_prefixed > no_space > quoted > bare)
+- **改修** `_scan_input_redirect_targets_chars` を thin wrapper 化
+  (戻り値 `list[str]` を温存して 74 件の戻り値型 assert テストの後方互換維持)
+- **改修** `bash_handler._scan_input_redirects` を form 付き parser 直呼びに置換
+- **改修** `core/messages.py::bash_deny` に `form` キーワード引数追加。
+  input_redirect / input_redirect_glob で SFG_DENY body に `form: <値>` 行を
+  追加 (matched_operand と suggestion の間)
+
+#### テスト
+
+- **新設** `tests/test_input_redirect.py::TestExtractInputRedirectTargetsWithForm` 19 件
+- **新設** `tests/test_input_redirect.py::TestExtractInputRedirectTargetsCharsThinWrapper` 1 件
+- **新設** `tests/test_bash_handler.py::TestInputRedirectFormInReason` 8 件
+- **新設** `tests/test_messages.py::TestBashDenyInputRedirectForm` 8 件
+- 累計 **643 (redact) + 27 (check) = 670 件 OK** (+36 件)
+- `claude plugin validate sensitive-files-guard` ✔
+
+#### 完了状況サマリ (0.5.0 時点 / 本レビュー最終形)
+
+| Pri | タスク | 状態 |
+|---|---|---|
+| H | H1 (operand 名漏れ) | 0.4.1 ✓ |
+| H | H2 (語彙統一) | 0.4.1 ✓ |
+| H | H3 (basename 展開) | 0.4.1 ✓ |
+| M | M1 (reason builder 集約) | 0.4.1 ✓ |
+| M | M2 (LLM 向け文言) | 0.4.1 ✓ |
+| M | M3 (policy_unavailable 集約) | 0.4.1 ✓ |
+| M | M4 (`<SFG_DENY>` 構造化) | 0.4.2 ✓ |
+| L | L1 (logging detail sanitize) | 0.4.3 ✓ |
+| L | L2 (bare except 分類) | 0.4.3 ✓ |
+| L | L3 (TypedDict 化) | 0.4.3 ✓ |
+| L | L4 (is_allow 述語) | 0.4.3 ✓ |
+| L | L5 (テスト reason 検証) | 0.4.4 ✓ |
+| M | M5 (リダイレクト形式タグ) | **0.5.0 ✓** |
+| B | B (bashlex 採否) | **0.5.0 ✓ (自前 IR 化採用)** |
+
+**本レビューサイクル (REVIEW_TASKS_2026-05-03.md) は 0.5.0 で完結**。
+次のレビューは新規 review pass で別 docs に切る予定。
+
+---
+
 ### 2026-05-03: H1 / H3 / M1 完了 (0.4.1 リリースに統合済)
 
 #### 実装

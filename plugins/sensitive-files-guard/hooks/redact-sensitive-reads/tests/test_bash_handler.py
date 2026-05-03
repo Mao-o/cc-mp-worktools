@@ -259,6 +259,57 @@ class TestDenyReasonContent(BaseBash):
         self.assertIn("リダイレクト", reason)
 
 
+class TestInputRedirectFormInReason(BaseBash):
+    """0.5.0 / M5: 入力リダイレクト deny の reason に ``form:`` 行が出ること。
+
+    builder の単体テストは ``test_messages.py`` で行う。ここでは handle()
+    経由で SFG_DENY body に form タグ (bare / fd_prefixed / no_space / quoted)
+    が正しく繋がっているかを regression 防止として確認する。
+    """
+
+    def test_bare_form(self):
+        r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: bare", _reason(r))
+
+    def test_no_space_form(self):
+        r = handle(_make_envelope("cat<.env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: no_space", _reason(r))
+
+    def test_fd_prefixed_form(self):
+        r = handle(_make_envelope("cat 0< .env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: fd_prefixed", _reason(r))
+
+    def test_fd_prefixed_inline_form(self):
+        r = handle(_make_envelope("cat 0<.env", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: fd_prefixed", _reason(r))
+
+    def test_quoted_form(self):
+        r = handle(_make_envelope('cat < ".env"', self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: quoted", _reason(r))
+
+    def test_quoted_inline_form(self):
+        r = handle(_make_envelope('cat<".env"', self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: quoted", _reason(r))
+
+    def test_glob_redirect_includes_form(self):
+        # input_redirect_glob 経路でも form 行が出る (.env* は glob 経路)
+        r = handle(_make_envelope("cat < .env*", self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("form: bare", _reason(r))
+
+    def test_operand_scan_deny_has_no_form_line(self):
+        # operand scan 経由 (literal / glob) では form 不要 → body に出ない
+        r = handle(_make_envelope("cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn("form:", _reason(r))
+
+
 class TestBackslashQuoteSplit(BaseBash):
     """ダブルクォート内の偶数個バックスラッシュを正しく扱う (Codex P1 対応, 0.3.1)。"""
 
