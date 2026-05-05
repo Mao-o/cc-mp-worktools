@@ -203,7 +203,7 @@ class TestEditDeny(unittest.TestCase):
 
     def test_with_extra_note_and_keys(self):
         msg = M.edit_deny(
-            "MultiEdit",
+            "Write",
             ".env",
             new_keys=["FOO"],
             extra_note="NOTE: 特殊ファイルでした。",
@@ -285,7 +285,7 @@ class TestReadAsk(unittest.TestCase):
 
 
 class TestEditPause(unittest.TestCase):
-    """Edit/Write/MultiEdit の judgement-pause reason 文。"""
+    """Edit/Write の judgement-pause reason 文。"""
 
     def test_normalize_failed_default_label(self):
         msg = M.edit_pause("normalize_failed")
@@ -294,8 +294,8 @@ class TestEditPause(unittest.TestCase):
         self.assertIn("再試行", msg)
 
     def test_io_error_with_label(self):
-        msg = M.edit_pause("io_error", tool_label="MultiEdit")
-        self.assertTrue(msg.startswith("MultiEdit:"))
+        msg = M.edit_pause("io_error", tool_label="Write")
+        self.assertTrue(msg.startswith("Write:"))
         self.assertIn("権限", msg)
 
     def test_parent_not_directory(self):
@@ -317,7 +317,6 @@ class TestBashLenient(unittest.TestCase):
         self.assertIn(self.LENIENT_SUFFIX, msg)
         # autonomous モードで通過する旨を文中で明示
         self.assertIn("auto", msg)
-        self.assertIn("plan", msg)
         self.assertIn("bypass", msg)
 
     def test_opaque_prefix(self):
@@ -460,8 +459,8 @@ class TestSfgDenyEnvelope(unittest.TestCase):
         self._assert_envelope(msg, "Write", "sensitive_path_special")
 
     def test_edit_deny_with_keys_envelope(self):
-        msg = M.edit_deny("MultiEdit", ".env", new_keys=["A", "B"])
-        self._assert_envelope(msg, "MultiEdit", "sensitive_path")
+        msg = M.edit_deny("Write", ".env", new_keys=["A", "B"])
+        self._assert_envelope(msg, "Write", "sensitive_path")
         self.assertIn("suggested_keys:", msg)
         self.assertIn("  A=", msg)
         self.assertIn("  B=", msg)

@@ -40,7 +40,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="redact-sensitive-reads")
     parser.add_argument(
         "--tool",
-        choices=["read", "bash", "edit", "write", "multiedit"],
+        choices=["read", "bash", "edit", "write"],
         required=True,
         help="どの handler に振り分けるか",
     )
@@ -78,9 +78,6 @@ def _dispatch(tool: str, envelope: dict) -> dict:
     if tool == "write":
         from handlers import edit_handler
         return edit_handler.handle(envelope, tool_label="Write")
-    if tool == "multiedit":
-        from handlers import edit_handler
-        return edit_handler.handle(envelope, tool_label="MultiEdit")
     return output.make_allow()
 
 

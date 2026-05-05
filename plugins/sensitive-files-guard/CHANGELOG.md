@@ -1,5 +1,107 @@
 # Changelog
 
+## 0.6.0
+
+**思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 1 を消化**:
+リスクゼロの dead code / overengineering を 5 件まとめて撤去する non-breaking
+リリース。挙動変更は「想像できる将来のための前方互換層」「現行 CLI で使われない
+機能」「敵対的 race の二重防御」の 3 種に限定し、思想 1 (うっかり防御) と整合
+しないコードを縮小した。
+
+### 主要な変更
+
+1. **A5: `LENIENT_MODES` から `"plan"` を削除** — 0.3.3 で前方互換層として
+   追加していたが、Phase 0 実測 (2026-04-22) で現行 CLI では plan mode で hook が
+   発火しないことが確認され dead entry だったため撤去。CLI 仕様が変わって plan
+   mode で hook が発火するようになったら、`CLAUDE.md` の Runbook で再実測した
+   上で再追加する。`ask_or_allow({"permission_mode": "plan"})` は default と
+   同じ ask 扱いに変更。
+2. **A6: MultiEdit dead handler 撤去** — `hooks.json` から既に matcher 除外済み
+   だった MultiEdit 対応コードを `__main__.py` argparse choices /
+   `_dispatch` 分岐 / `edit_handler._extract_dotenv_keys` の edits 連結ロジック
+   から撤去。テスト 4 件削除、fixture `multiedit.json` 削除。再搭載時は README
+   の手順に従って復活。
+3. **A7: 2-tier lookup の fallback 削除** — `patterns.local.txt` の参照先を
+   `~/.claude/sensitive-files-guard/patterns.local.txt` 単一パスに縮小。
+   0.4.0〜0.5.x で fallback として参照していた
+   `$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt` /
+   `~/.config/sensitive-files-guard/patterns.local.txt` を撤去
+   (0.4.0 で deprecation 通知済みの予定通り)。`_resolve_local_patterns_paths`
+   (複数形) と `warn_callback("deprecated_config_dir")` 経路は削除。
+4. **B4: 内部 soft-timeout (SIGALRM 1s) 撤廃** — `redaction/engine.py` の
+   `_soft_timeout` / `_RedactionTimeout` / `REDACTION_SOFT_TIMEOUT` を削除。
+   dotenv parse は ReDoS の経路がほぼなく、外部 hook timeout (2s) で十分。
+   テスト `test_engine_timeout.py` 削除。
+5. **B5: `open_regular` の `fstat` 再確認撤廃** — `O_NOFOLLOW` で symlink
+   follow を防ぐ層は維持しつつ、open 後の `os.fstat` で `S_ISREG` を再確認する
+   敵対的 race 対策ロジックを撤去 (思想 1 外)。
+
+### 挙動変更 (0.5.0 → 0.6.0)
+
+| ケース | 0.5.0 | 0.6.0 |
+|---|---|---|
+| Bash opaque ケース in plan mode | allow (LENIENT_MODES) | ask (default 同等) |
+| `--tool multiedit` 起動 | argparse 受理して edit_handler 呼び出し | argparse error |
+| `~/.config/sensitive-files-guard/patterns.local.txt` のみ存在 | fallback 採用 + deprecation 通知 | 無視 (preferred 不在として扱う) |
+| 機密検出時の redaction | SIGALRM 1s で内部 timeout | 内部 timeout なし (外部 2s のみ) |
+| open_regular の race-attacked symlink swap | 通常 fstat S_ISREG 再確認で拒否 | O_NOFOLLOW のみで防御 (race window あり) |
+| その他 | 変更なし | 変更なし |
+
+### 内部構造の変更
+
+- `core/output.py::LENIENT_MODES`: `frozenset({"auto", "bypassPermissions"})`
+  に縮小 (3 → 2 値)
+- `__main__.py` argparse `choices`: `["read", "bash", "edit", "write"]`
+  (5 → 4 値)
+- `_shared/patterns.py::_resolve_local_patterns_paths` (複数形) を削除、
+  `_resolve_local_patterns_path` (単数形) のみ残置
+- `core/patterns.py` / `check-sensitive-files/checker.py` の
+  `warn_callback` から `deprecated_config_dir` 分岐を削除
+- `redaction/engine.py` から `signal` / `contextmanager` import を削除
+- `core/safepath.py::open_regular` の `S_ISREG` 再確認を削除
+  (`stat` import は `is_regular_directory` 等で引き続き使用)
+
+### テスト
+
+- 削除: `test_engine_timeout.py` (2 件), `multiedit.json` fixture, `test_envelope_shapes.py::test_multiedit_envelope`,
+  `test_edit_handler.py::TestMultiEdit` + `test_multiedit_aggregates_keys`,
+  `test_e2e.py::test_multiedit_dotenv_denies`,
+  `test_patterns_loader.py::TestPreferredFallback2Tier` 系 + 2-tier resolve 系
+- 改修: `test_output.py::test_plan_returns_ask` (旧 returns_allow から書換),
+  `test_failclosed.py::test_plan_returns_ask`,
+  `test_messages.py::TestBashLenient::test_hard_stop` (plan 文字列 assert 削除),
+  `test_checker.py::TestLocalPatternsLoader` の write 先を preferred path に
+- 累計 643 → **630 件 OK** (redact, -13 件) + 27 件 OK (check) = 657 件
+
+### ドキュメント
+
+- `docs/MATRIX.md`: 6 mode 列 → 5 mode 列 (plan 列削除)、全 footnote `[^plan]` 削除
+- `docs/DESIGN.md`: 2026-04-22 Phase 0 ログを「0.6.0 で撤去した」記述に更新、
+  LENIENT_MODES 表の plan 行を ask に修正
+- `docs/PATTERNS.md`: 「2-tier lookup, 0.4.0 以降」セクションを「0.6.0 から
+  単一パス」に書き換え、`_resolve_local_patterns_paths` 説明を単数形に縮小
+- `README.md`: パターン設定セクションを 1-tier 化、MultiEdit note を撤去手順に書換
+- `CLAUDE.local.md`: 「## 進行中のレビュー」セクション維持、2-tier lookup 説明を
+  単一パスに更新、Bash handler mermaid の `auto/bypass/plan=allow` を
+  `auto/bypass=allow` に修正、非目的記述から MultiEdit を撤去
+- `tests/fixtures/envelopes/README.md`: MultiEdit エントリと
+  `LENIENT_MODES` 説明 (3 値 → 2 値) を更新
+
+### 利用者影響
+
+- **旧パスからの移行が必要**: `~/.config/sensitive-files-guard/patterns.local.txt`
+  または `$XDG_CONFIG_HOME/sensitive-files-guard/patterns.local.txt` を使って
+  いた利用者は手動で
+  `mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guard/patterns.local.txt" ~/.claude/sensitive-files-guard/patterns.local.txt`
+  を実施する必要がある。0.4.0 で deprecation 通知した予定通りの撤去。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-06.md` の **A5 / A6 / A7 / B4 / B5** を消化。
+残るは **A1 / A2 / A3** (PR 2: `<` redirect parser / RedirectForm /
+SFG_DENY 撤去), **A4 / B2 / B3** (PR 3), **E1〜E6** (PR 4-6: 思想 2 の意図
+汲み取り強化)。
+
 ## 0.5.0
 
 **M5 (入力リダイレクト形式タグ) 実装 + B (Bash パーサ採否) の最終決定**。

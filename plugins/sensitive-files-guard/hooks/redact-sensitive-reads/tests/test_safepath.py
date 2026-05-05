@@ -70,7 +70,8 @@ class TestClassify(_BaseTmp):
 
 
 class TestOpenRegular(_BaseTmp):
-    """fd ベースの open_regular。fstat 再確認 + O_NOFOLLOW 前提。"""
+    """fd ベースの open_regular。O_NOFOLLOW でうっかり symlink を防ぐ前提
+    (0.6.0 で fstat 再確認は撤廃)。"""
 
     def test_small_file_returns_fd(self):
         p = Path(self.tmp) / "small.txt"

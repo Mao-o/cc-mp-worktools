@@ -1,4 +1,4 @@
-"""Edit / Write / MultiEdit tool 用 handler (Step 6, 0.2.0 で deny 固定化)。
+"""Edit / Write tool 用 handler (Step 6, 0.2.0 で deny 固定化)。
 
 方針: **新規 / 既存問わず** ``file_path`` が機密パターン一致なら **deny 固定**。
 判定不能 (patterns 読み取り失敗、親ディレクトリ不明等) は ``ask_or_deny``
@@ -21,8 +21,11 @@ dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込み
 する際、``tool_input`` から追加予定のキー名を抽出して reason に添える。
 ユーザーが「どのキーを ``.env.example`` に移せばよいか」を見てすぐ代替行動できる。
 
-3 tool とも ``tool_input.file_path`` を共通キーとして持つため、同じ dispatch で
-処理する。MultiEdit は ``edits`` が array で全 ``new_string`` を連結して parse する。
+両 tool (Edit / Write) とも ``tool_input.file_path`` を共通キーとして持つため、
+同じ dispatch で処理する。MultiEdit は CLI 2.1.x で非搭載のため 0.6.0 で
+対応コードを撤去 (`hooks.json` の matcher も除外済み)。再搭載時は本 docstring と
+``__main__.py`` argparse の `choices` / `_dispatch` 分岐に追加し、
+``_extract_dotenv_keys`` に edits 連結ブランチを足す。
 
 親ディレクトリ検査:
 - ``path.parent`` を ``is_regular_directory`` で検査し、symlink / special / missing
@@ -49,7 +52,6 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
 
     - ``Write``: ``tool_input.content`` を dotenv として parse
     - ``Edit``: ``tool_input.new_string`` を parse
-    - ``MultiEdit``: ``tool_input.edits[].new_string`` を全連結して parse
 
     parse 失敗時 / dotenv 非該当時 / 該当キーなしは空リストを返す (silent fallback)。
     """
@@ -65,16 +67,6 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
         raw = tool_input.get("new_string")
         if isinstance(raw, str):
             text = raw
-    elif tool_label == "MultiEdit":
-        edits = tool_input.get("edits")
-        if isinstance(edits, list):
-            parts: list[str] = []
-            for e in edits:
-                if isinstance(e, dict):
-                    ns = e.get("new_string")
-                    if isinstance(ns, str):
-                        parts.append(ns)
-            text = "\n".join(parts)
 
     if not text:
         return []
@@ -92,11 +84,11 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
 
 
 def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
-    """Edit/Write/MultiEdit 共通 dispatch。
+    """Edit/Write 共通 dispatch。
 
     Args:
         envelope: PreToolUse envelope (``tool_input.file_path`` を持つこと)
-        tool_label: reason 文言で使う tool 名 (``Edit`` / ``Write`` / ``MultiEdit``)
+        tool_label: reason 文言で使う tool 名 (``Edit`` / ``Write``)
     """
     tool_input = envelope.get("tool_input") or {}
     raw_path = tool_input.get("file_path")

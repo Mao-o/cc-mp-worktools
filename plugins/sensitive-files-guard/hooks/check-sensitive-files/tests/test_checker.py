@@ -180,11 +180,15 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
 
 
 class TestLocalPatternsLoader(BaseWithTmpRepo):
+    def _local_dir(self) -> Path:
+        """0.6.0 の preferred パス (`~/.claude/sensitive-files-guard/`)。"""
+        d = self.home_dir / ".claude" / "sensitive-files-guard"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def test_local_pattern_adds_new_rule(self):
         # ローカルに `*.foo` を足すと foo.foo が検出される
-        local_dir = self.xdg_dir / "sensitive-files-guard"
-        local_dir.mkdir(parents=True, exist_ok=True)
-        (local_dir / "patterns.local.txt").write_text("*.foo\n")
+        (self._local_dir() / "patterns.local.txt").write_text("*.foo\n")
 
         self._write("foo.foo", "x\n")
         rules = load_patterns(self.patterns_file)
@@ -194,9 +198,7 @@ class TestLocalPatternsLoader(BaseWithTmpRepo):
 
     def test_local_overrides_default_exclude(self):
         # 既定 !*.pub をローカル `*.pub` で打ち消す
-        local_dir = self.xdg_dir / "sensitive-files-guard"
-        local_dir.mkdir(parents=True, exist_ok=True)
-        (local_dir / "patterns.local.txt").write_text("*.pub\n")
+        (self._local_dir() / "patterns.local.txt").write_text("*.pub\n")
 
         self._write("id_rsa.pub", "ssh-rsa...\n")
         rules = load_patterns(self.patterns_file)
@@ -207,9 +209,7 @@ class TestLocalPatternsLoader(BaseWithTmpRepo):
     def test_local_missing_returns_defaults_only(self):
         rules_with_default = load_patterns(self.patterns_file)
         # ローカルを置いたケースと比較
-        local_dir = self.xdg_dir / "sensitive-files-guard"
-        local_dir.mkdir(parents=True, exist_ok=True)
-        (local_dir / "patterns.local.txt").write_text("*.extra\n")
+        (self._local_dir() / "patterns.local.txt").write_text("*.extra\n")
         rules_with_local = load_patterns(self.patterns_file)
         self.assertEqual(
             rules_with_local, rules_with_default + [("*.extra", False)]

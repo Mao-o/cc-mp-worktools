@@ -17,13 +17,12 @@ ENVELOPES_DIR = FIXTURES / "envelopes"
 # 共通キー (全 tool)
 _COMMON_KEYS = {"hook_event_name", "tool_name", "tool_input", "cwd", "permission_mode"}
 
-# tool_input の必須キー (tool 別)
+# tool_input の必須キー (tool 別)。MultiEdit は CLI 非搭載のため 0.6.0 で除外。
 _TOOL_INPUT_KEYS = {
     "read": {"file_path"},
     "bash": {"command"},
     "edit": {"file_path", "old_string", "new_string"},
     "write": {"file_path", "content"},
-    "multiedit": {"file_path", "edits"},
 }
 
 # fixtures/envelopes/README.md:22 と core/output.py::LENIENT_MODES を突合する
@@ -78,17 +77,6 @@ class TestEnvelopeShapes(unittest.TestCase):
         for k in _TOOL_INPUT_KEYS["write"]:
             self.assertIn(k, env["tool_input"])
 
-    def test_multiedit_envelope(self):
-        env = self._load("multiedit")
-        self._assert_common(env)
-        self.assertEqual(env["tool_name"], "MultiEdit")
-        for k in _TOOL_INPUT_KEYS["multiedit"]:
-            self.assertIn(k, env["tool_input"])
-        self.assertIsInstance(env["tool_input"]["edits"], list)
-        self.assertGreaterEqual(len(env["tool_input"]["edits"]), 1)
-        first = env["tool_input"]["edits"][0]
-        self.assertIn("old_string", first)
-        self.assertIn("new_string", first)
 
 
 class TestLenientModesSubset(unittest.TestCase):

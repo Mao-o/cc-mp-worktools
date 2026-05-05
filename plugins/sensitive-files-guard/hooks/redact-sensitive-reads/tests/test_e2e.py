@@ -376,22 +376,6 @@ class TestE2EReadHandler(unittest.TestCase):
         result = _run_main(envelope, ["--tool", "write"])
         self.assertEqual(result, {})
 
-    def test_multiedit_dotenv_denies(self):
-        (Path(self.tmp) / ".env").write_text("FOO=bar\n")
-        envelope = {
-            "tool_name": "MultiEdit",
-            "tool_input": {
-                "file_path": str(Path(self.tmp) / ".env"),
-                "edits": [{"old_string": "a", "new_string": "b"}],
-            },
-            "cwd": self.tmp,
-            "permission_mode": "default",
-        }
-        result = _run_main(envelope, ["--tool", "multiedit"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
-
     def test_invalid_stdin_json(self):
         old_stdin = sys.stdin
         old_stdout = sys.stdout

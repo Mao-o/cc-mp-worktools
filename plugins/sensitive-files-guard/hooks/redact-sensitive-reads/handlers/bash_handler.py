@@ -295,7 +295,7 @@ def _analyze_segment(
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
     機密 path 一致 → ``make_deny`` 固定。判定不能 → ``ask_or_allow``
-    (default=ask, auto/bypass/plan=allow)。それ以外 → allow。
+    (default=ask, auto/bypass=allow)。それ以外 → allow。
     """
     if not tokens:
         return output.make_allow()

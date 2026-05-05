@@ -16,26 +16,19 @@ from _shared.matcher import is_sensitive
 from _shared.patterns import (
     _parse_patterns_text,
     _resolve_local_patterns_path,
-    _resolve_local_patterns_paths,
 )
 from _shared.patterns import load_patterns as _shared_load_patterns
 
 
 def _warn_local(msg: str) -> None:
-    """Stop hook 側の warn_callback — stderr に 1 行記録する。
+    """Stop hook 側の warn_callback — patterns.local.txt の OS エラーを stderr に
+    1 行記録する。
 
-    deprecation 通知と OS エラー通知を区別してメッセージを変える。
+    0.6.0 で 2-tier lookup の fallback を削除したため、deprecation 分岐は不要。
     """
-    if msg == "deprecated_config_dir":
-        sys.stderr.write(
-            "[check-sensitive-files] patterns.local.txt が非推奨パスにあります。"
-            "~/.claude/sensitive-files-guard/patterns.local.txt への移行を推奨します"
-            " (0.6.0 で fallback 削除予定)\n"
-        )
-    else:
-        sys.stderr.write(
-            f"[check-sensitive-files] local_patterns_unavailable: {msg}\n"
-        )
+    sys.stderr.write(
+        f"[check-sensitive-files] local_patterns_unavailable: {msg}\n"
+    )
 
 
 _warn_local_oserror = _warn_local  # 後方互換 alias

@@ -1,8 +1,9 @@
-"""Edit / Write / MultiEdit handler (Step 6) のテスト。
+"""Edit / Write handler (Step 6) のテスト。
 
 新規 / 既存を問わず機密パターン一致なら ``ask_or_deny``。
 テンプレ除外 (``.env.example`` 等) は既定 patterns の ``!*.example`` で allow。
 親 dir が symlink / special / missing なら fail-closed。
+MultiEdit は CLI 非搭載のため 0.6.0 で test を撤去。
 """
 from __future__ import annotations
 
@@ -35,8 +36,6 @@ def _make_envelope(tool: str, file_path: str, cwd: str, mode: str = "default") -
         tool_input.update({"old_string": "a", "new_string": "b"})
     elif tool == "Write":
         tool_input.update({"content": "x"})
-    elif tool == "MultiEdit":
-        tool_input.update({"edits": [{"old_string": "a", "new_string": "b"}]})
     return {
         "tool_name": tool,
         "tool_input": tool_input,
@@ -133,16 +132,6 @@ class TestNonSensitiveAllowed(BaseEdit):
             tool_label="Edit",
         )
         self.assertTrue(output.is_allow(r))
-
-
-class TestMultiEdit(BaseEdit):
-    def test_multiedit_dotenv_denies(self):
-        (Path(self.tmp) / ".env").write_text("FOO=bar\n")
-        r = handle(
-            _make_envelope("MultiEdit", str(Path(self.tmp) / ".env"), self.tmp),
-            tool_label="MultiEdit",
-        )
-        self.assertEqual(_decision(r), "deny")
 
 
 class TestParentDirectoryChecks(BaseEdit):
@@ -311,23 +300,6 @@ class TestDenyReasonSuggestions(BaseEdit):
         # 値は漏れない
         self.assertNotIn("baz", reason)
         self.assertNotIn("123", reason)
-
-    def test_multiedit_aggregates_keys(self):
-        (Path(self.tmp) / ".env").write_text("A=1\n")
-        envelope = _make_envelope(
-            "MultiEdit", str(Path(self.tmp) / ".env"), self.tmp,
-        )
-        envelope["tool_input"]["edits"] = [
-            {"old_string": "A=1", "new_string": "A=2\nB=3\n"},
-            {"old_string": "B=3", "new_string": "B=4\nC=5\n"},
-        ]
-        r = handle(envelope, tool_label="MultiEdit")
-        reason = _reason(r)
-        self.assertEqual(_decision(r), "deny")
-        # 全 edits から集約される (重複は dotenv parser がそのまま残す)
-        self.assertIn("A", reason)
-        self.assertIn("B", reason)
-        self.assertIn("C", reason)
 
     def test_non_dotenv_has_no_key_suggestion(self):
         """非 dotenv 基準 (credentials.json 等) は keys 案内を埋めない。"""

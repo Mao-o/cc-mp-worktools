@@ -101,7 +101,7 @@ class TestAskOrDeny(unittest.TestCase):
 
 
 class TestAskOrAllow(unittest.TestCase):
-    """ask_or_allow: auto / bypassPermissions / plan は allow に倒す。"""
+    """ask_or_allow: auto / bypassPermissions は allow に倒す。"""
 
     def test_default_returns_ask(self):
         r = output.ask_or_allow("reason", {"permission_mode": "default"})
@@ -119,9 +119,14 @@ class TestAskOrAllow(unittest.TestCase):
         )
         self.assertTrue(output.is_allow(r))
 
-    def test_plan_returns_allow(self):
+    def test_plan_returns_ask(self):
+        # 0.6.0: plan を LENIENT_MODES から削除。現行 CLI で hook が発火しないため
+        # dead entry だったが、将来 CLI が plan で hook を発火するようになっても
+        # default と同じ ask 扱いに倒すのが安全側 (再追加は CLI 再実測後)。
         r = output.ask_or_allow("reason", {"permission_mode": "plan"})
-        self.assertTrue(output.is_allow(r))
+        self.assertEqual(
+            r["hookSpecificOutput"]["permissionDecision"], "ask",
+        )
 
     def test_acceptEdits_returns_ask(self):
         # acceptEdits は意図的に lenient しない (Bash 用ではない mode)

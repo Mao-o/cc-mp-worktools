@@ -7,11 +7,13 @@ close 責務は呼出側 (read_handler の ``with`` ブロック) が持つ。en
 close しない。
 
 出力: ``permissionDecisionReason`` に入れるプレーンテキスト (1-2KB 目標)。
+
+0.6.0 で内部 soft-timeout (SIGALRM 1s) を撤廃した。dotenv parse は ReDoS の
+経路がほぼなく、外部 hook timeout (2s) で十分なため。Windows 対応の論点は
+``__main__._is_unsupported_platform`` 側で別途判断する。
 """
 from __future__ import annotations
 
-import signal
-from contextlib import contextmanager
 from typing import IO, Optional
 
 from .dotenv import format_dotenv, redact_dotenv
@@ -24,39 +26,8 @@ from .sanitize import escape_data_tag, sanitize_basename
 DATA_GUARD = "sfg-v1"
 from .tomllike import format_toml, redact_toml
 
-# 内部 soft-timeout (秒)。catastrophic backtracking 等に対する保護。
-REDACTION_SOFT_TIMEOUT = 1
-
 # inline 読み込みの上限 (32KB + 1 byte 読んで truncate 判定)
 MAX_INLINE_BYTES = 32 * 1024
-
-
-class _RedactionTimeout(Exception):
-    pass
-
-
-@contextmanager
-def _soft_timeout(seconds: int):
-    """SIGALRM による内部 timeout。UNIX のみ。
-
-    Step 4 で Windows 対応方針が Step 0-c 実測結果に応じて確定する予定。
-    現状は UNIX 前提で、Windows (SIGALRM 非対応) では timeout なし。
-    """
-    if not hasattr(signal, "SIGALRM"):
-        # Windows など SIGALRM 非対応環境: timeout 無効化 (fall-through)
-        yield
-        return
-
-    def _handler(signum, frame):  # noqa: ARG001
-        raise _RedactionTimeout()
-
-    old = signal.signal(signal.SIGALRM, _handler)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old)
 
 
 def _detect_format(basename: str) -> str:
@@ -147,29 +118,28 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
         extras.append("note: content was truncated (>32KB); using head-only redaction.")
     text = raw.decode("utf-8", errors="replace")
 
-    with _soft_timeout(REDACTION_SOFT_TIMEOUT):
-        if fmt == "dotenv":
-            info = redact_dotenv(text)
-            body = format_dotenv(info)
-            return build_reason(basename, fmt, body, extras)
-        if fmt == "json":
-            try:
-                info = redact_jsonlike(text)
-                body = format_jsonlike(info)
-                return build_reason(basename, fmt, body, extras)
-            except (ValueError, RecursionError):
-                pass
-        if fmt == "toml":
-            try:
-                info = redact_toml(text)
-                body = format_toml(info)
-                return build_reason(basename, fmt, body, extras)
-            except Exception:
-                pass
-        # yaml / opaque / json 失敗 / toml 失敗 → opaque fallback
-        info = redact_opaque(text, fmt_hint=fmt)
-        body = format_opaque(info)
+    if fmt == "dotenv":
+        info = redact_dotenv(text)
+        body = format_dotenv(info)
         return build_reason(basename, fmt, body, extras)
+    if fmt == "json":
+        try:
+            info = redact_jsonlike(text)
+            body = format_jsonlike(info)
+            return build_reason(basename, fmt, body, extras)
+        except (ValueError, RecursionError):
+            pass
+    if fmt == "toml":
+        try:
+            info = redact_toml(text)
+            body = format_toml(info)
+            return build_reason(basename, fmt, body, extras)
+        except Exception:
+            pass
+    # yaml / opaque / json 失敗 / toml 失敗 → opaque fallback
+    info = redact_opaque(text, fmt_hint=fmt)
+    body = format_opaque(info)
+    return build_reason(basename, fmt, body, extras)
 
 
 def redact_large_file(f: IO[bytes], basename: str) -> str:
@@ -183,7 +153,6 @@ def redact_large_file(f: IO[bytes], basename: str) -> str:
         f.seek(0)
     except (OSError, AttributeError):
         pass
-    with _soft_timeout(REDACTION_SOFT_TIMEOUT):
-        keys, scanned = scan_stream(f)
-        body = format_keyonly(keys, scanned, fmt_hint=fmt)
-        return build_reason(basename, fmt, body)
+    keys, scanned = scan_stream(f)
+    body = format_keyonly(keys, scanned, fmt_hint=fmt)
+    return build_reason(basename, fmt, body)

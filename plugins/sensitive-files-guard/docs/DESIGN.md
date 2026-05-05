@@ -30,23 +30,20 @@
 
 詳細は `~/shared-context/security/claude-code-pretooluse-hook-spec.md` に恒久記録。
 
-### 2026-04-22 — plan mode での hook 発火有無 (0.3.3)
+### 2026-04-22 — plan mode での hook 発火有無 (0.3.3 → 0.6.0 で撤去)
 
 `hooks/_debug/capture_envelope.py` (一時スクリプト) で実測。
 現行 CLI (2.1.101 系) では **plan mode で PreToolUse hook が発火しない** 観測
-(= Case C)。したがって `LENIENT_MODES` に `"plan"` を加えた 0.3.3 の変更は
-**現行 CLI では dead entry** となる。
+(= Case C)。
 
-ただしこの変更には 2 つの意味がある:
+0.3.3 では「将来 CLI が plan mode でも hook を発火させるよう変わったときの
+前方互換層」として `LENIENT_MODES` に `"plan"` を加えていたが、0.6.0 で
+**「想像できる将来のための dead code は思想に反する」** という方針に基づき
+撤去した (REVIEW_TASKS_2026-05-06.md A5)。
 
-1. **前方互換**: 将来 CLI が plan mode でも hook を発火させるよう変わったとき、
-   再リリース不要で正しい挙動 (= Bash opaque ケースを allow に倒す) に収束する
-2. **意思表明**: plan mode は「tool 実行に至らない setup フェーズ」であり、
-   本来 Bash opaque ケースで止める必要がない。設計意図として `LENIENT_MODES` に
-   列挙することで「なぜ含めているか」が明文化される
-
-CLI バージョンアップ時の再実測手順は [CLAUDE.md](../CLAUDE.md) の "CLI バージョン
-アップ時の再実測手順" セクションを参照。
+CLI 仕様が変わって plan mode で hook が発火するようになったら、
+[CLAUDE.md](../CLAUDE.md) の "CLI バージョンアップ時の再実測手順" Runbook で
+再実測した上で `LENIENT_MODES` に再追加する。
 
 ## LENIENT_MODES 方針
 
@@ -57,7 +54,7 @@ ask に倒す。
 | mode | `ask_or_allow` | 理由 |
 |---|---|---|
 | `default` | ask | 明示的にユーザー介在を期待 |
-| `plan` | **allow** (0.3.3 追加) | plan 中は tool 実行に至らない / Case C の前方互換層 |
+| `plan` | ask | 0.3.3 で前方互換のため allow にしていたが 0.6.0 で撤去 (現行 CLI では hook 非発火 dead entry) |
 | `acceptEdits` | ask | Edit/Write 専用モード。Bash lenient の意図なし |
 | `auto` | allow | CLI 前段 classifier モード、autonomous 実行意図 |
 | `dontAsk` | ask | 明示的な非 lenient 判断として既存方針維持 |
@@ -65,12 +62,6 @@ ask に倒す。
 
 Read/Edit handler の `ask_or_deny` は別 frozenset で `bypassPermissions` のみ
 deny に倒す (機密可能性があるものは ask 維持で bypass だけ deny する)。
-
-### Phase 0 Case C での留意
-
-前述のとおり `"plan"` エントリは現行 CLI では dead。unit test では
-`ask_or_allow({"permission_mode": "plan"}, ...)` が確実に `{}` (allow) を返す
-ことのみを確認する (integration 実態は docs に注記で補う方針)。
 
 ## Bash handler の対応文法範囲
 
@@ -210,8 +201,7 @@ operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の bas
 
 deny reason のキー名ガイド:
 - dotenv 系 basename (`_detect_format(basename) == "dotenv"`) の時だけ
-  `tool_input` からキー名抽出 (Edit=new_string / Write=content /
-  MultiEdit=edits[].new_string 連結)
+  `tool_input` からキー名抽出 (Edit=new_string / Write=content)
 - 抽出結果を reason に箇条書きで添え、`.env.example` への移行を促す
 - 値そのものは一切 reason に含めない (キー名のみ、既存の minimal-info 原則と一致)
 
@@ -234,7 +224,7 @@ deny reason のキー名ガイド:
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
    `awk`, `sed`, `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
-   などは静的解析できず、default モードでは ask、auto/bypass/plan モードでは
+   などは静的解析できず、default モードでは ask、auto/bypass モードでは
    **allow** に倒す。0.3.2 で前置き正規化が入ったため `FOO=1 cat .env`,
    `env cat .env`, `command cat .env`, `nohup cat .env`,
    `/usr/bin/env FOO=1 cat .env` は確定 match で deny に確定する。`< .env` 形式も
@@ -250,8 +240,8 @@ deny reason のキー名ガイド:
    までスキップ (内部の `<` を拾わない契約)。`<` を含むのに target が
    取れなかった場合は `bash_classify:input_redirect_empty_extract` ログ
    で観測可能。
-4. **autonomous / planning モードでの opaque 緩和** — `bash -c 'cat .env'` の
-   ような shell wrapper 内に機密 path があっても auto/bypass/plan では allow に
+4. **autonomous モードでの opaque 緩和** — `bash -c 'cat .env'` の
+   ような shell wrapper 内に機密 path があっても auto/bypass では allow に
    倒る。wrapper 内部の script を解析しないため検出できない。autonomous モード
    を選んだユーザーが「日常コマンドを止めない」意図と平等な扱いとしての設計上の
    トレードオフ。完全防御を求める場合は default モードで運用する。

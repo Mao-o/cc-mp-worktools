@@ -16,7 +16,8 @@ Phase 0 実測結果 (CLAUDE.md に恒久記録済み) を元に作成した Pre
 
 共通:
 - `hook_event_name`: "PreToolUse"
-- `tool_name`: "Read" | "Bash" | "Edit" | "Write" | "MultiEdit" | ...
+- `tool_name`: "Read" | "Bash" | "Edit" | "Write" | ...
+  - MultiEdit は CLI 非搭載のため 0.6.0 で対応撤去 (再搭載時は README.md の手順)
 - `tool_input`: dict
 - `cwd`: string (現在の作業ディレクトリ絶対パス)
 - `permission_mode`: "default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions"
@@ -26,18 +27,20 @@ Phase 0 実測結果 (CLAUDE.md に恒久記録済み) を元に作成した Pre
   - "auto": CLI 2.1.83+ で追加。前段 classifier が tool call を審査
   - "dontAsk": ユーザーへの ask を抑制 (現在の plugin 実装では lenient 扱いしない)
   - "bypassPermissions": 全確認をスキップ (root 不可)
-  - 0.3.3 以降、bash handler の `ask_or_allow` は "auto" / "bypassPermissions" /
-    "plan" の 3 つで allow に倒す。Read/Edit handler の `ask_or_deny` は
-    "bypassPermissions" のみ deny に倒す。`acceptEdits` / `dontAsk` は明示的に
-    非 lenient を維持 (ask に倒る)。
-  - 上記 6 値は `core/output.py::LENIENT_MODES` と `tests/test_envelope_shapes.py`
-    の `_KNOWN_PERMISSION_MODES` で突合される。CLI 側が新しい mode を追加したら
-    両方を同時に更新すること (Runbook は `CLAUDE.md` の "CLI バージョンアップ時の
-    再実測手順" を参照)。
+  - 0.6.0 以降、bash handler の `ask_or_allow` は "auto" / "bypassPermissions" の
+    2 つで allow に倒す ("plan" は 0.3.3〜0.5.x で前方互換のため含めていたが、
+    Phase 0 実測で plan mode では hook が発火しない (dead entry) ことが判明し
+    撤去)。Read/Edit handler の `ask_or_deny` は "bypassPermissions" のみ deny に
+    倒す。`acceptEdits` / `dontAsk` / `plan` は明示的に非 lenient を維持
+    (ask に倒る)。
+  - 上記 6 値は `tests/test_envelope_shapes.py` の `_KNOWN_PERMISSION_MODES` で
+    CLI 側の既知 mode として固定。`core/output.py::LENIENT_MODES` はその subset
+    (auto / bypassPermissions の 2 値)。CLI が新 mode を追加したら両方を同時に
+    更新すること (Runbook は `CLAUDE.md` の "CLI バージョンアップ時の再実測手順"
+    を参照)。
 
 tool_input の内訳:
 - Read: `file_path`
 - Bash: `command`, `description`
 - Edit: `file_path`, `old_string`, `new_string`
 - Write: `file_path`, `content`
-- MultiEdit: `file_path`, `edits` (list of `{old_string, new_string}`)

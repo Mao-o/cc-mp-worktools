@@ -1,36 +1,40 @@
 # 判定結果マトリクス (MATRIX.md)
 
-全 6 permission_mode での判定結果を完全列挙する。値は 2026-04-22 時点
-(0.3.3) の挙動。設計方針は [DESIGN.md](./DESIGN.md)、コマンド例の解釈は
-[README.md](../README.md) を参照。
+全 5 permission_mode (default / acceptEdits / auto / dontAsk / bypassPermissions)
+での判定結果を完全列挙する。値は 2026-05-06 時点 (0.6.0) の挙動。設計方針は
+[DESIGN.md](./DESIGN.md)、コマンド例の解釈は [README.md](../README.md) を参照。
 
 `permission_mode` の列挙は `core/output.py::LENIENT_MODES` と
 `tests/fixtures/envelopes/README.md:22` で突合される。CLI 側が新しい mode を
 追加したら同時に更新すること (Runbook は [CLAUDE.md](../CLAUDE.md))。
+
+> 0.6.0 で `plan` 列を削除した。Phase 0 実測 (2026-04-22) で現行 CLI では
+> plan mode で hook が発火しないことが確認され、`LENIENT_MODES` から `plan`
+> dead entry を撤去したため。CLI 仕様が変わって plan で hook が発火するように
+> なったら CLAUDE.md の Runbook で再実測してから再追加する。
 
 ## 略号
 
 - **deny**: block。`permissionDecisionReason` を返して LLM に値が露出しない
 - **allow**: 素通り (hook は no-op 空オブジェクトを返す)
 - **ask**: Claude Code UI でユーザー介在を要求。reason はモデルに届かない
-- **—**: 現行 CLI では該当 mode で hook が発火しない (Case C、dead entry)
 
 ## Read handler
 
-| ケース | default | plan | acceptEdits | auto | dontAsk | bypassPermissions |
-|---|---|---|---|---|---|---|
-| パターン非該当 | allow | allow | allow | allow | allow | allow |
-| 機密 + 通常ファイル | **deny** + minimal info | **deny** | **deny** | **deny** | **deny** | **deny** |
-| 機密 + symlink | ask | ask | ask | ask | ask | **deny** |
-| 機密 + 特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | ask | **deny** |
-| 機密 + 読み取り失敗 (権限/IO) | ask | ask | ask | ask | ask | **deny** |
-| redaction engine 内部例外 | ask | ask | ask | ask | ask | **deny** |
-| patterns.txt 読込失敗 | ask + stderr | ask | ask | ask | ask | **deny** + stderr |
-| 32KB 超 | keyonly deny | keyonly | keyonly | keyonly | keyonly | keyonly |
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| パターン非該当 | allow | allow | allow | allow | allow |
+| 機密 + 通常ファイル | **deny** + minimal info | **deny** | **deny** | **deny** | **deny** |
+| 機密 + symlink | ask | ask | ask | ask | **deny** |
+| 機密 + 特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | **deny** |
+| 機密 + 読み取り失敗 (権限/IO) | ask | ask | ask | ask | **deny** |
+| redaction engine 内部例外 | ask | ask | ask | ask | **deny** |
+| patterns.txt 読込失敗 | ask + stderr | ask | ask | ask | **deny** + stderr |
+| 32KB 超 | keyonly deny | keyonly | keyonly | keyonly | keyonly |
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
-以下は全 mode で **deny 固定** (autonomous / plan を含む)。
+以下は全 mode で **deny 固定** (autonomous を含む)。
 
 | コマンド |
 |---|
@@ -68,46 +72,41 @@
 
 ## Bash handler — 静的解析不能 (三態判定)
 
-| コマンド | default | plan | acceptEdits | auto | dontAsk | bypassPermissions |
-|---|---|---|---|---|---|---|
-| `cat $X`, `cat "$X"`, `cat $(echo .env)` (動的展開) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `cat << EOF ... EOF`, `cat <(cat .env)`, `cat <&2` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `cat <<< '.env'` (herestring, literal 渡し) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `(cat .env)`, `{ cat .env; }` (グループ化) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `for i in 1; do cat .env; done`, `if true; then cat .env; fi` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `while cat .env; do pwd; done`, `coproc cat .env` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `time cat .env`, `! cat .env`, `exec cat .env`, `eval cat .env` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `echo foo > out.txt`, `cat foo >> bar.txt`, `echo foo > '&2'` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `/bin/cat .env`, `./cat`, `../bin/cat .env` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `sudo cat .env`, `xargs -a .env cat` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `python -c "..."`, `node -e "..."`, `awk '{print}' f`, `sed s/x/y f` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `env -i cat .env`, `env -u HOME cat .env`, `command -p cat .env`, `command -- cat .env` | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-| `cat '.env` (shlex 失敗) | ask | **allow**[^plan] | ask | **allow** | ask | **allow** |
-
-[^plan]: 現行 CLI (2.1.101 系) では plan mode で PreToolUse hook が発火しない
-    (Case C) 観測。`LENIENT_MODES` への `"plan"` 追加は **将来 CLI が plan mode
-    でも hook を発火させるよう変わったときに正しい挙動に収束する前方互換層**
-    として機能する。詳細は [DESIGN.md](./DESIGN.md) 参照。
+| コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| `cat $X`, `cat "$X"`, `cat $(echo .env)` (動的展開) | ask | ask | **allow** | ask | **allow** |
+| `cat << EOF ... EOF`, `cat <(cat .env)`, `cat <&2` | ask | ask | **allow** | ask | **allow** |
+| `cat <<< '.env'` (herestring, literal 渡し) | ask | ask | **allow** | ask | **allow** |
+| `(cat .env)`, `{ cat .env; }` (グループ化) | ask | ask | **allow** | ask | **allow** |
+| `for i in 1; do cat .env; done`, `if true; then cat .env; fi` | ask | ask | **allow** | ask | **allow** |
+| `while cat .env; do pwd; done`, `coproc cat .env` | ask | ask | **allow** | ask | **allow** |
+| `time cat .env`, `! cat .env`, `exec cat .env`, `eval cat .env` | ask | ask | **allow** | ask | **allow** |
+| `echo foo > out.txt`, `cat foo >> bar.txt`, `echo foo > '&2'` | ask | ask | **allow** | ask | **allow** |
+| `/bin/cat .env`, `./cat`, `../bin/cat .env` | ask | ask | **allow** | ask | **allow** |
+| `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | ask | **allow** | ask | **allow** |
+| `sudo cat .env`, `xargs -a .env cat` | ask | ask | **allow** | ask | **allow** |
+| `python -c "..."`, `node -e "..."`, `awk '{print}' f`, `sed s/x/y f` | ask | ask | **allow** | ask | **allow** |
+| `env -i cat .env`, `env -u HOME cat .env`, `command -p cat .env`, `command -- cat .env` | ask | ask | **allow** | ask | **allow** |
+| `cat '.env` (shlex 失敗) | ask | ask | **allow** | ask | **allow** |
 
 ## Bash handler — ポリシー欠如 / 内部失敗
 
-| ケース | default | plan | acceptEdits | auto | dontAsk | bypassPermissions |
-|---|---|---|---|---|---|---|
-| `patterns.txt` 読込失敗 | **deny** + stderr | **deny**[^plan] | **deny** + stderr | **deny** + stderr | **deny** + stderr | **deny** + stderr |
-| empty command / rules 空 | allow | allow | allow | allow | allow | allow |
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| `patterns.txt` 読込失敗 | **deny** + stderr | **deny** + stderr | **deny** + stderr | **deny** + stderr | **deny** + stderr |
+| empty command / rules 空 | allow | allow | allow | allow | allow |
 
 ## Edit/Write handler
 
-| ケース | default | plan | acceptEdits | auto | dontAsk | bypassPermissions |
-|---|---|---|---|---|---|---|
-| 既存 `.env` を Edit/Write | **deny** (hook 到達なし: Read 前提) | **deny** | **deny** | **deny** | **deny** | **deny** |
-| **新規** `.env` を Write (作成) | **deny** | **deny**[^plan] | **deny** | **deny** | **deny** | **deny** |
-| `.env.example` / `config.template` を Edit/Write | allow | allow | allow | allow | allow | allow |
-| path 最終要素が symlink (機密一致) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
-| path 最終要素が special (FIFO/socket/device) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
-| 親ディレクトリが symlink / 特殊 / 不在 | ask | ask | ask | ask | ask | **deny** |
-| patterns.txt / normalize / stat 失敗 | ask | ask | ask | ask | ask | **deny** |
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| 既存 `.env` を Edit/Write | **deny** (hook 到達なし: Read 前提) | **deny** | **deny** | **deny** | **deny** |
+| **新規** `.env` を Write (作成) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `.env.example` / `config.template` を Edit/Write | allow | allow | allow | allow | allow |
+| path 最終要素が symlink (機密一致) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| path 最終要素が special (FIFO/socket/device) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| 親ディレクトリが symlink / 特殊 / 不在 | ask | ask | ask | ask | **deny** |
+| patterns.txt / normalize / stat 失敗 | ask | ask | ask | ask | **deny** |
 
 ## Stop handler
 
@@ -121,9 +120,9 @@
 
 ## `__main__` catch-all (handler 内未捕捉例外)
 
-| ケース | default | plan | acceptEdits | auto | dontAsk | bypassPermissions |
-|---|---|---|---|---|---|---|
-| handler 内未捕捉例外 | ask | ask | ask | ask | ask | **deny** |
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| handler 内未捕捉例外 | ask | ask | ask | ask | **deny** |
 
 **0.3.3 時点で `__main__` catch-all は未緩和**。tool 種別だけで一律 `ask_or_allow`
 化すると fail-closed 境界が粗くなるため、0.3.4 以降で「特定の意図された例外

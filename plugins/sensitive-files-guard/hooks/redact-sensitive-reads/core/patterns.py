@@ -12,7 +12,6 @@ from pathlib import Path
 from _shared.patterns import (  # noqa: F401
     _parse_patterns_text,
     _resolve_local_patterns_path,
-    _resolve_local_patterns_paths,
 )
 from _shared.patterns import load_patterns as _shared_load_patterns
 
@@ -35,19 +34,12 @@ SHARED_PATTERNS = _resolve_shared_patterns()
 
 
 def _warn_local(msg: str) -> None:
-    """warn_callback — deprecation 通知と OS エラー通知を区別して logfile に記録する。
+    """warn_callback — patterns.local.txt の OS エラーを logfile + stderr に記録する。
 
-    deprecation は毎回の hook 実行で出てしまうため ``log_info`` (logfile のみ) で
-    静かに残す。OS エラーは ``log_error`` で stderr + logfile の両方に出す。
-    いずれも ``permissionDecisionReason`` には載せない (LLM 文脈毎回混入ノイズ回避)。
+    ``permissionDecisionReason`` には載せない (LLM 文脈毎回混入ノイズ回避)。
+    0.6.0 で 2-tier lookup の fallback を削除したため、deprecation 通知の分岐は不要。
     """
-    if msg == "deprecated_config_dir":
-        L.log_info(
-            "patterns_local_deprecated_dir",
-            "fallback $XDG_CONFIG_HOME path used; migrate to ~/.claude/sensitive-files-guard/patterns.local.txt (0.6.0 will remove fallback)",
-        )
-    else:
-        L.log_error("local_patterns_unavailable", msg)
+    L.log_error("local_patterns_unavailable", msg)
 
 
 _warn_local_oserror = _warn_local  # 後方互換 alias

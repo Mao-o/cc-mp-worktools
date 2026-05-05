@@ -91,12 +91,11 @@ class TestAskOrAllow(unittest.TestCase):
         r = ask_or_allow("reason", {"permission_mode": "dontAsk"})
         self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
 
-    def test_plan_returns_allow(self):
-        # 0.3.3: plan を LENIENT_MODES に追加。現行 CLI では plan mode で hook が
-        # 発火しない観測もあるが、発火するケース (A/B) に対して正しく allow に倒り、
-        # Case C (非発火) に対しては dead entry として無害に機能する互換層。
+    def test_plan_returns_ask(self):
+        # 0.6.0: plan を LENIENT_MODES から削除 (Phase 0 実測で現行 CLI では hook
+        # 非発火と判明したため dead entry を撤去)。default と同じ ask 扱いで安全側。
         r = ask_or_allow("reason", {"permission_mode": "plan"})
-        self.assertEqual(r, {})
+        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_missing_mode_returns_ask(self):
         r = ask_or_allow("reason", {})
