@@ -65,46 +65,15 @@ deny に倒す (機密可能性があるものは ask 維持で bypass だけ de
 
 ## Bash handler の対応文法範囲
 
-Bash handler の静的解析は **2 種類の parser** を使い分ける:
-
-1. **character-level quote-aware parser** (0.3.4 新設) — input redirect
-   target 抽出専用。`handlers/bash/redirects.py::_scan_input_redirect_targets_chars`。
-   shlex に依存せず、quote state と `<` 直後の 1 文字で以下を明示的に識別:
-   - `<(` → process sub、depth tracking で閉じ `)` までスキップ
-     (quote 外 backslash escape `\(` `\)` は depth 計算から除外、内部 quote も追う)。
-     `<(...)` 自体が 1 word なので終了直後は word boundary ではない (`#` を comment 扱いしない)
-   - `[[` (word start + **command word 位置** + 直後に空白必須) → 条件式、
-     閉じ `]]` まで quote / escape を尊重して skip。内部の `<` `>` は string
-     compare 演算子で redirect ではない。`[[foo` (空白なし) や `tee [[`
-     (引数位置) は通常 word (bash 仕様準拠)
-   - `((` (word start + **command word 位置**) → 算術評価、depth tracking で
-     `))` まで skip。内部の `<` `>` は数値比較演算子で redirect ではない。
-     引数位置 `tee ((` は通常 word
-   - `at_command_start` 状態は parser が tracking。segment separator
-     (`|` `&` `;` 改行) の直後で True、word/quote/escape 消費で False に遷移
-   - `<<` / `<<<` → heredoc / herestring、`<<` を消費してスキップ
-     (`<<<` は 3 つ目の `<` も追加スキップ)
-   - `<&` → fd dup、`<&` を消費してスキップ
-   - `<` 単独 → target 抽出 (`_consume_redirect_target`)。
-     POSIX sh の word 概念に従い **quote / bare / backslash が 1 word 内で
-     mix 可能** (例: `".env".example` → `.env.example`, `a"b"c` → `abc`)。
-     double-quote 内の `\X` は X が `$` `` ` `` `"` `\` 改行 のいずれかのときのみ
-     X を取り込み、それ以外は `\X` を literal として保持 (POSIX dq escape semantics)。
-   - quote 外の `#` (word start 位置のみ) → 行末までシェルコメントとして skip
-2. **shlex.split (POSIX mode)** — segment 内のコマンド名 / operand 抽出。
-   `bash_handler.py::handle` 内で `_split_command_on_operators` 後の各 segment
-   に対して実施。コマンド token 単位の解析 (prefix normalize, shell keyword
-   検出, operand scan)。
+Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
+`bash_handler.py::handle` 内で `_split_command_on_operators` (quote-aware セグメント
+分割) 後の各 segment を shlex.split し、コマンド token 単位で解析する
+(prefix normalize, shell keyword 検出, operand scan)。
 
 ### 対応 (deny/allow 確定できる)
 
 | カテゴリ | 構文 | 使用 parser |
 |---|---|---|
-| 基本 redirect | `cmd < target`, `cmd<target` | character-level |
-| fd 前置き redirect | `cmd 0< t`, `cmd N<t` | character-level |
-| quote 付き | `cmd < "t"`, `cmd<'t'` | character-level (quote 剥離) |
-| 連結 word | `cmd < ".env".example`, `cmd < a"b"c` | character-level (word boundary) |
-| シェルコメント skip | `echo ok #cat<.env` | character-level (`#` at word start) |
 | セグメント区切り | `cmd1 && cmd2`, `cmd1 \| cmd2` | `_split_command_on_operators` (0.3.0) |
 | 前置き正規化 | `FOO=1 cmd`, `env cmd`, `nohup cmd` | shlex token (0.3.2) |
 | operand scan | `cmd file1 file2`, URI/VCS | shlex token |
@@ -113,20 +82,22 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
 
 | 構文 | 備考 |
 |---|---|
-| `<<` heredoc, `<<-` | delimiter/body は read 対象外 (body 内の `< path` は false-positive 側 deny に倒す) |
+| `<` 入力リダイレクト全般 (`cmd < t`, `cmd<t`, `cmd 0<t`, `cmd < "t"` 等) | 0.3.4〜0.6.x で character-level parser による target 抽出 + literal/glob 一致 deny を行っていたが、escape paren depth tracking や `[[ ... ]]` 引数位置判定など敵対的バイパス対策のコード負債が思想 1 (うっかり露出予防、敵対的防御は非目的) と整合しないため 0.7.0 で撤廃。`<` を含む command は他の hard-stop と同じ ``ask_or_allow`` |
+| `<<` heredoc, `<<-` | delimiter/body は read 対象外 |
 | `<<<` herestring | literal 渡しで file read ではない |
 | `<&N`, `<&-` fd dup | 既存 fd 複製、file read ではない |
-| `<(cmd)` process sub | Bash 拡張。depth tracking でスキップ |
+| `<(cmd)` process sub | Bash 拡張、`hard_stop` 経由で opaque |
 | `$(cmd)`, `` `cmd` `` | 動的展開。静的解析不能 |
 | `[[ cond ]]`, `(( expr ))` | Bash 条件式 / 算術。hard_stop で opaque |
-| `bash -c "..."`, `eval`, `python -c` | wrapper。内部 script は未解析 (0.3.5 以降候補) |
+| `bash -c "..."`, `eval`, `python -c` | wrapper。内部 script は未解析 |
 
-### 観測ログ (0.3.4 追加)
+### 観測ログ
 
 `L.log_info("bash_classify", ...)` の tag:
-- `input_redirect_empty_extract` — `<` を含むのに target 抽出 0 件 (すべて除外ケース / quote 異常)
-- `input_redirect_glob_match` / `input_redirect_match` — target が rule 一致で deny
-- `opaque_prefix_lenient` / `segment_residual_metachar_lenient` / `shell_keyword_lenient:<kw>` / `shlex_fail:<err>` / `hard_stop_lenient` — 既存
+
+- `opaque_prefix_lenient` / `segment_residual_metachar_lenient` /
+  `shell_keyword_lenient:<kw>` / `shlex_fail:<err>` / `hard_stop_lenient` — 各 lenient 経路
+- `match:<first_token>` / `glob_match:<first_token>` — operand scan で deny 確定
 
 ## Bash handler 判定フロー
 
@@ -157,7 +128,6 @@ Bash handler の静的解析は **2 種類の parser** を使い分ける:
 - `handle` (orchestration)
 - `_normalize_segment_prefix` (patch seam)
 - `_operand_is_sensitive` / `_glob_operand_is_sensitive` (plugin ステート依存)
-- `_extract_input_redirect_targets` (patch seam)
 - `_literalize` / `_glob_candidates` (pure だが test_glob_candidates.py が直接 import)
 - `load_patterns` (test_failclosed.py の `mock.patch` 対象)
 - 各定数 (test が直接参照する可能性に備えて)
@@ -219,7 +189,7 @@ deny reason のキー名ガイド:
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
 
-## 既知制限 (0.3.3 時点)
+## 既知制限 (0.7.0 時点)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
@@ -227,29 +197,24 @@ deny reason のキー名ガイド:
    などは静的解析できず、default モードでは ask、auto/bypass モードでは
    **allow** に倒す。0.3.2 で前置き正規化が入ったため `FOO=1 cat .env`,
    `env cat .env`, `command cat .env`, `nohup cat .env`,
-   `/usr/bin/env FOO=1 cat .env` は確定 match で deny に確定する。`< .env` 形式も
-   target 抽出により deny に確定する。
-3. **`<` 入力リダイレクト target 抽出 (0.3.4 大幅拡張)** — 0.3.4 で
-   **character-level quote-aware parser** に移行 (shlex 依存なし)。
-   `cat < target` (空白あり) / `cat<target` (inline) / `cat N< target` /
-   `cat N<target` (fd 前置き) / quote 付き (`cat < "a file.env"` 等)
-   すべての有効な input redirect 構文から target を抽出する。除外対象は
-   `<<` heredoc / `<<<` herestring / `<&N`/`<&-` fd dup / `<(...)` process
-   sub で、これらは `<` 直後の 1 文字 (`<`, `&`, `(`) で明示的に識別して
-   target 抽出をスキップする。process sub は depth tracking で閉じ `)`
-   までスキップ (内部の `<` を拾わない契約)。`<` を含むのに target が
-   取れなかった場合は `bash_classify:input_redirect_empty_extract` ログ
-   で観測可能。
+   `/usr/bin/env FOO=1 cat .env` は確定 match で deny に確定する。
+3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0)** — 0.3.4〜0.6.x では
+   character-level quote-aware parser で `cat < .env` / `cat<.env` /
+   `cat 0<.env` / `cat < ".env"` などから target を抽出し literal/glob 一致で
+   deny に倒していたが、`cat <(echo \(\)) < .env` の escape paren depth
+   tracking や `[[ ... ]]` 引数位置判定など敵対的バイパス対策のコードが
+   思想 1 (うっかり露出予防が目的、敵対的防御は非目的) に反するため 0.7.0
+   で撤廃。`<` を含む command は他の hard-stop と同じ ``ask_or_allow``
+   (default で ask、autonomous で allow) に倒す。
 4. **autonomous モードでの opaque 緩和** — `bash -c 'cat .env'` の
    ような shell wrapper 内に機密 path があっても auto/bypass では allow に
    倒る。wrapper 内部の script を解析しないため検出できない。autonomous モード
    を選んだユーザーが「日常コマンドを止めない」意図と平等な扱いとしての設計上の
    トレードオフ。完全防御を求める場合は default モードで運用する。
-5. **`__main__.py` catch-all は 0.3.3 でも未緩和** — bash handler 内部で未捕捉
+5. **`__main__.py` catch-all は未緩和** — bash handler 内部で未捕捉
    例外が起きた場合、`__main__` 側の catch-all は従来通り `ask_or_deny`
    (auto=ask / bypass=deny)。tool 種別だけで一律 lenient にすると fail-closed
-   境界が粗くなるため、0.3.4 以降で「特定の意図された例外クラスのみ allow 緩和」
-   として再設計予定。
+   境界が粗くなる。
 6. **親ディレクトリ差し替え race** — `O_NOFOLLOW` は最終要素のみ保護し、
    途中要素の symlink 差し替え race は対象外 (原理的に完全防御不能)
 7. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外

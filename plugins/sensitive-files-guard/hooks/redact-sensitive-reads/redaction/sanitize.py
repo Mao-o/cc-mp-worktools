@@ -3,9 +3,10 @@
 ``<DATA untrusted="true">`` 包装だけに頼らず、鍵名そのものから命令文・制御記号・
 過度な長さを除去する。モデルが敵対的文脈を扱う保証はない前提。
 
-Step 4 で body 全文を通す ``escape_data_tag`` を追加。``</DATA>`` / ``<DATA`` /
+``escape_data_tag`` は body 全文を通すエスケープ層で、``</DATA>`` / ``<DATA`` /
 大小混じりの ``<data>`` が本文中に現れても包装が破綻しないよう HTML エンティティで
-エスケープする。
+エスケープする (0.7.0 で DATA タグ専用に縮約。SFG_DENY 構造化包装を撤廃した
+ため、``escape_xml_tag`` 経由の任意タグ対応は不要になった)。
 """
 from __future__ import annotations
 
@@ -29,6 +30,10 @@ MAX_KEY_LEN = 128
 # basename の最大長
 MAX_BASENAME_LEN = 128
 
+# DATA タグを保護するための regex (escape_data_tag 用)。case-insensitive。
+_DATA_OPEN_RE = re.compile(r"<\s*DATA", re.IGNORECASE)
+_DATA_CLOSE_RE = re.compile(r"<\s*/\s*DATA\s*>", re.IGNORECASE)
+
 
 def sanitize_key(raw: str) -> str:
     """鍵名を sanitize する。
@@ -51,53 +56,30 @@ def sanitize_key(raw: str) -> str:
     return cleaned
 
 
-def escape_xml_tag(text: str, tag_name: str) -> str:
-    """body 内の ``<TAG ...>`` / ``</TAG>`` を HTML エンティティにエスケープする (0.4.2)。
+def escape_data_tag(text: str) -> str:
+    """body 内の ``<DATA ...>`` / ``</DATA>`` を HTML エンティティにエスケープする。
 
-    外殻タグ包装を body が破壊できないようにする最終防御。``escape_data_tag``
-    の一般化で、``<DATA>`` だけでなく ``<SFG_DENY>`` 等の他タグも同じ仕組みで
-    保護できる。
-
-    実装方針: マッチした部分文字列を保ちつつ、``<`` と (閉じタグなら) ``>`` のみ
-    ``&lt;`` / ``&gt;`` に置換する。大小文字と中間空白は温存し、body の情報量を
-    壊さない。
-
-    Args:
-        text: エスケープ対象の文字列。
-        tag_name: 保護したいタグ名 (``"DATA"`` / ``"SFG_DENY"`` 等)。
-            case-insensitive で match する。
+    Read 側 ``redaction/engine.py::build_reason`` で長く使われている API。
+    ``<DATA untrusted="true">`` 外殻包装を body が破壊できないようにする最終防御層
+    として、body 内に ``<DATA>`` / ``</DATA>`` 様の文字列が混入しても包装が
+    壊れないように ``<`` (および閉じタグでは ``>``) のみエンティティ化する。
+    大小文字と中間空白は温存し、body の情報量を壊さない。
     """
     if not isinstance(text, str):
         return ""
 
-    open_re = re.compile(rf"<\s*{re.escape(tag_name)}", re.IGNORECASE)
-    close_re = re.compile(
-        rf"<\s*/\s*{re.escape(tag_name)}\s*>", re.IGNORECASE
-    )
-
     def _close_repl(m: re.Match) -> str:
         s = m.group(0)
-        # s[0] は "<", s[-1] は ">"。中身 ("/<tag>" + 空白) は保つ。
         return "&lt;" + s[1:-1] + "&gt;"
 
     def _open_repl(m: re.Match) -> str:
         s = m.group(0)
         return "&lt;" + s[1:]
 
-    # 閉じタグ優先 (開きタグ置換で ``</TAG>`` が残らないようにするため)
-    escaped = close_re.sub(_close_repl, text)
-    escaped = open_re.sub(_open_repl, escaped)
+    # 閉じタグ優先 (開きタグ置換で ``</DATA>`` が残らないようにするため)
+    escaped = _DATA_CLOSE_RE.sub(_close_repl, text)
+    escaped = _DATA_OPEN_RE.sub(_open_repl, escaped)
     return escaped
-
-
-def escape_data_tag(text: str) -> str:
-    """body 内の ``<DATA ...>`` / ``</DATA>`` を HTML エンティティにエスケープする。
-
-    ``escape_xml_tag(text, "DATA")`` の薄い wrapper (0.4.2 移行)。Read 側の
-    ``redaction/engine.py::build_reason`` で長く使われている API のため、
-    後方互換のため残す。
-    """
-    return escape_xml_tag(text, "DATA")
 
 
 def sanitize_basename(raw: str) -> str:

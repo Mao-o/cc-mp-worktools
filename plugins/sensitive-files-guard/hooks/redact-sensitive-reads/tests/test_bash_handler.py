@@ -200,21 +200,28 @@ class TestHardStopLenient(BaseBash):
         self.assertEqual(_decision(r), "ask")
 
 
-class TestInputRedirectDeny(BaseBash):
-    """``< target`` 形式の入力リダイレクトは target 抽出して機密一致で deny 固定。"""
+class TestInputRedirectAskOrAllow(BaseBash):
+    """0.7.0: ``<`` 入力リダイレクトは hard-stop と同じ ``ask_or_allow`` に格下げ。
+
+    0.3.4〜0.6.x で行っていた target 抽出 + literal/glob 一致での deny 固定は、
+    思想 1 (うっかり露出予防が目的、敵対的防御は非目的) に反するため撤廃。
+    default mode で ask、autonomous (auto / bypassPermissions) で allow に倒す。
+    """
 
     def test_redirect_in_default(self):
-        # `< .env cat` (引数順序は逆) → target ".env" 抽出 → deny
+        # `< .env cat` (引数順序は逆) → hard-stop で ask
         r = handle(_make_envelope("< .env cat", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
     def test_redirect_in_auto(self):
+        # autonomous モードでは allow (= None)
         r = handle(_make_envelope("< .env cat", self.tmp, mode="auto"))
-        self.assertEqual(_decision(r), "deny")
+        self.assertIsNone(_decision(r))
 
     def test_cat_lt_dotenv_bypass(self):
+        # bypassPermissions でも allow に倒る (hard-stop は ask_or_allow)
         r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
+        self.assertIsNone(_decision(r))
 
 
 class TestDenyReasonContent(BaseBash):
@@ -248,66 +255,6 @@ class TestDenyReasonContent(BaseBash):
         reason = _reason(r)
         self.assertIn(".env*", reason)
         self.assertIn("`!.env*`", reason)
-        self.assertIn("glob", reason)
-
-    def test_input_redirect_includes_target(self):
-        r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        reason = _reason(r)
-        self.assertIn(".env", reason)
-        self.assertIn("`!.env`", reason)
-        self.assertIn("リダイレクト", reason)
-
-
-class TestInputRedirectFormInReason(BaseBash):
-    """0.5.0 / M5: 入力リダイレクト deny の reason に ``form:`` 行が出ること。
-
-    builder の単体テストは ``test_messages.py`` で行う。ここでは handle()
-    経由で SFG_DENY body に form タグ (bare / fd_prefixed / no_space / quoted)
-    が正しく繋がっているかを regression 防止として確認する。
-    """
-
-    def test_bare_form(self):
-        r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: bare", _reason(r))
-
-    def test_no_space_form(self):
-        r = handle(_make_envelope("cat<.env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: no_space", _reason(r))
-
-    def test_fd_prefixed_form(self):
-        r = handle(_make_envelope("cat 0< .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: fd_prefixed", _reason(r))
-
-    def test_fd_prefixed_inline_form(self):
-        r = handle(_make_envelope("cat 0<.env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: fd_prefixed", _reason(r))
-
-    def test_quoted_form(self):
-        r = handle(_make_envelope('cat < ".env"', self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: quoted", _reason(r))
-
-    def test_quoted_inline_form(self):
-        r = handle(_make_envelope('cat<".env"', self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: quoted", _reason(r))
-
-    def test_glob_redirect_includes_form(self):
-        # input_redirect_glob 経路でも form 行が出る (.env* は glob 経路)
-        r = handle(_make_envelope("cat < .env*", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
-        self.assertIn("form: bare", _reason(r))
-
-    def test_operand_scan_deny_has_no_form_line(self):
-        # operand scan 経由 (literal / glob) では form 不要 → body に出ない
-        r = handle(_make_envelope("cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-        self.assertNotIn("form:", _reason(r))
 
 
 class TestBackslashQuoteSplit(BaseBash):

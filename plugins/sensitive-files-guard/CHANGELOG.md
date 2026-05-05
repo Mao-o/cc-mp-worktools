@@ -1,5 +1,155 @@
 # Changelog
 
+## 0.7.0
+
+**思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 2 を消化**:
+思想衝突の主役 3 件 (A1 / A2 / A3) を一体で撤廃し、`<` 入力リダイレクトの
+character-level parser、RedirectForm タグ、`<SFG_DENY>` 構造化包装を削除。
+deny 動作の判定境界 1 種類を `ask_or_allow` に格下げし、deny reason を plain
+text に戻す **breaking-ish** リリース。`permissionDecision` の判定ロジック自体は
+変更せず、deny reason 文字列の形式のみ変わる。
+
+### 主要な変更
+
+1. **A1: `<` 入力リダイレクト char-level parser を撤廃**
+   — 0.3.4 で導入した quote-aware parser
+   (`_scan_input_redirect_targets_chars` / `_scan_input_redirect_targets_with_form`
+   / `_consume_redirect_target` / `_classify_redirect_form` 等) と
+   `bash_handler._extract_input_redirect_targets` / `_scan_input_redirects` を
+   削除。`cat <(echo \(\)) < .env` の escape paren depth tracking、
+   `[[ ... ]]` 引数位置判定、process sub `<(...)` 内 word boundary、
+   POSIX double-quote escape semantics など R3〜R8 系の修正は **すべて敵対的
+   バイパス対策のコード負債**であり、思想 1 (うっかり露出予防が目的、敵対的防御は
+   非目的) と整合しないため撤廃。`<` を含む command は他の hard-stop と同じく
+   ``ask_or_allow`` (default で ask、autonomous で allow) に倒す。
+
+2. **A2: `RedirectForm` タグ (M5, 0.5.0) を撤廃**
+   — `bare` / `fd_prefixed` / `no_space` / `quoted` の 4 種を返す
+   `RedirectForm` Literal、`_classify_redirect_form` 関数、`bash_deny` の
+   `form` キーワード引数、SFG_DENY body の `form: <値>` 行を削除。
+   A1 と一体で input redirect 系の deny 経路自体を撤廃したため、form 情報を
+   返す価値が消滅した。
+
+3. **A3: `<SFG_DENY>` 構造化包装 (M4, 0.4.2) を plain text に戻す**
+   — `core/messages.py` から `_wrap_sfg_deny` / `_SFG_GUARD` /
+   `BashDenyKind` / `EditDenyKind` / `bash_deny(kind=...)` /
+   `bash_deny(form=...)` / `edit_deny(kind=...)` を削除。
+   `redaction/sanitize.py::escape_xml_tag` も削除し、`escape_data_tag` を
+   DATA タグ専用の直接実装に縮約。0.4.2 で「後段 hook が deny reason を
+   機械パースできる schema」として導入したが、worktools にそうした後段 hook
+   が存在せず overengineering だったため。Read 側の ``<DATA untrusted="true">``
+   包装と `escape_data_tag` は維持 (鍵名が LLM コンテキストに残るため最低限の
+   包装防御として意味あり)。
+
+### 挙動変更 (0.6.0 → 0.7.0)
+
+| ケース | 0.6.0 | 0.7.0 |
+|---|---|---|
+| `cat < .env` (literal target) | deny 固定 | ask (default) / allow (autonomous) |
+| `cat<.env` / `cat 0< .env` / `cat < ".env"` | deny 固定 | ask / allow (同上) |
+| `cat < .env*` (glob target) | deny 固定 | ask / allow (同上) |
+| `< .env cat` (引数順序逆) | deny 固定 | ask / allow (同上) |
+| `cat .env` (operand scan literal) | deny | deny (維持) |
+| `cat .env*` (operand scan glob) | deny | deny (維持) |
+| `cat $X` / `cat <(...)` 等の他 hard-stop | ask / allow | ask / allow (維持) |
+| Bash deny の reason 文字列 | `<SFG_DENY tool reason guard>...</SFG_DENY>` | plain text (note / matched_operand / first_token / suggestion を改行区切り) |
+| Edit/Write deny の reason 文字列 | `<SFG_DENY tool="..." reason="sensitive_path[_symlink/_special]">` | plain text + extra_note 行で symlink/special 文脈を表現 |
+| `policy_unavailable("deny")` の reason | `<SFG_DENY tool="Hook" reason="policy_unavailable">` | plain text (1 段落) |
+| Read 側 ``<DATA untrusted="true">`` 包装 | 維持 | 維持 (escape_data_tag も維持) |
+| ask 系 reason (read_ask / edit_pause / bash_lenient / policy_unavailable("pause")) | plain text | plain text (変更なし) |
+
+### 内部 API の変更 (caller があれば追従が必要)
+
+- `core.messages.bash_deny`: シグネチャ
+  `bash_deny(first_token, operand, kind, *, form=None)` →
+  `bash_deny(first_token, operand)` に縮小。`kind` / `form` を渡している
+  caller は引数を削除する必要あり。
+- `core.messages.edit_deny`: `kind` キーワード引数を削除。symlink / special
+  の文脈は `extra_note` のみで表現する。`edit_handler.py` 側で
+  `kind="sensitive_path_symlink"` / `kind="sensitive_path_special"` を
+  渡していた箇所を撤去済み。
+- `core.messages` から削除: `_wrap_sfg_deny`, `_SFG_GUARD`, `BashDenyKind`,
+  `EditDenyKind`。`SfgDenyReason` 概念自体を撤廃。
+- `redaction.sanitize` から削除: `escape_xml_tag`。`escape_data_tag` は
+  直接実装に縮約 (引数 `tag_name` を持たない)。
+- `handlers.bash.redirects` から削除: `RedirectForm`,
+  `_consume_redirect_target`, `_classify_redirect_form`,
+  `_scan_input_redirect_targets_with_form`,
+  `_scan_input_redirect_targets_chars`, `_DQ_BACKSLASH_ESCAPABLE`。
+  `_strip_safe_redirects` / `_segment_has_residual_metachar` /
+  `_is_safe_redirect_token` のみ残す。
+- `handlers.bash_handler` から削除: `_extract_input_redirect_targets`
+  (patch seam), `_scan_input_redirects` (内部関数)。`<` を含む command は
+  `_has_hard_stop` 経由で `ask_or_allow` に倒る。
+- 観測ログ削除: `bash_classify:input_redirect_empty_extract` /
+  `input_redirect_glob_match` / `input_redirect_match`。
+
+### テスト
+
+- 削除:
+  - `tests/test_input_redirect.py` (130 件、`_extract_input_redirect_targets`
+    / `_scan_input_redirect_targets_with_form` を直接 import していた regression
+    テスト)
+  - `tests/test_messages.py::TestSfgDenyEnvelope` (12 件)、
+    `TestBashDenyInputRedirectForm` (8 件)、
+    `TestBashDenyInputRedirect` (2 件)、
+    `TestBashDenyLiteral` / `TestBashDenyGlob` を `TestBashDeny` に統合 (4 件)
+  - `tests/test_sanitize.py::TestEscapeXmlTag` (7 件)
+  - `tests/test_bash_handler.py::TestInputRedirectFormInReason` (8 件)、
+    `TestDenyReasonContent.test_input_redirect_includes_target` (1 件)、
+    `TestDenyReasonContent.test_glob_match_includes_glob_operand` の "glob"
+    文字列 assert (kind 撤廃で文言から消える)
+- 改修:
+  - `tests/test_messages.py::TestDenyPlainText` (新規 6 件) — deny 系が plain
+    text で出ることを assert
+  - `tests/test_messages.py::TestVocabularyConsistency.test_deny_uses_block`
+    を kind 引数なしで再記述
+  - `tests/test_bash_handler.py::TestInputRedirectAskOrAllow` (3 件、旧
+    `TestInputRedirectDeny` を ask 系に書換) — `<` 入力リダイレクトが ask /
+    allow に倒ることを regression として残す
+  - `tests/test_e2e.py::test_bash_auto_input_redirect_allows` (旧 `denies`
+    を allow に書換)
+- 累計 630 → **468 件 OK** (redact, -162 件) + 27 件 OK (check) = 495 件
+
+### ドキュメント
+
+- `docs/MATRIX.md`: 「`<` target 抽出」関連 4 行を Bash deny 表から削除し、
+  「Bash 静的解析不能 (三態判定)」表に「`<` 入力リダイレクト, 0.7.0 で格下げ」
+  行を追加。
+- `docs/DESIGN.md`: 「Bash handler の対応文法範囲」セクションから
+  character-level quote-aware parser の記述を撤去 (shlex.split 一本化)。
+  既知制限 #3 を「`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0)」に書換。
+  責務境界の `_extract_input_redirect_targets` patch seam を撤去。
+- `README.md`: Bash 三態判定の説明から「`< target` の target が機密」を削除し、
+  ask_or_allow 側の例として `<` 入力リダイレクトを明示。0.7.0 格下げ note を
+  追加。`5 mode 列` に統一。
+- `CLAUDE.local.md`: 「進行中のレビュー」進捗を 0.7.0 (PR 2) 完了で更新。
+  ディレクトリ構成の plugin.json version を 0.7.0、MATRIX を 5 mode 列に。
+  patch seam テーブルから `test_input_redirect.py` 行を撤去。
+  Bash handler 判定フロー mermaid から hard-stop 内 input redirect 分岐を撤去。
+- `core/messages.py` / `redaction/sanitize.py` / `handlers/bash/redirects.py`
+  / `handlers/bash_handler.py` の docstring を 0.7.0 撤去内容に合わせて更新。
+
+### コード削減
+
+| ファイル | 行数差 |
+|---|---|
+| `handlers/bash/redirects.py` | -413 行 (475 → 62) |
+| `handlers/bash_handler.py` | -69 行 (input redirect 関連の関数 + docstring) |
+| `core/messages.py` | -108 行 (SFG_DENY 包装 + kind/form 引数 + 関連 docstring) |
+| `redaction/sanitize.py` | -19 行 (escape_xml_tag 一般化版を撤去) |
+| `handlers/edit_handler.py` | -2 行 (kind 引数渡し) |
+| 合計 | **-611 行** |
+
+(見込み 480 行を上回る撤去。R1〜R8 fix の depth tracking / [[ command-position
+判定 / process sub word boundary 等のコード負債と、SFG_DENY schema docstring
+が想定より嵩んでいたため)
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-06.md` の **A1 / A2 / A3** を消化。残るは
+**A4 / B2 / B3** (PR 3, 0.8.0)、**E1〜E6 + D1 / D2** (PR 4-6, 0.9.0〜1.0.0)。
+
 ## 0.6.0
 
 **思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 1 を消化**:

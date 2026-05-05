@@ -611,6 +611,100 @@ Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
 
+### 2026-05-06: PR 2 完了 (0.7.0 リリース) — A1 / A2 / A3
+
+思想衝突の主役 3 件を一体で消化。`<` 入力リダイレクトの character-level parser、
+RedirectForm タグ、`<SFG_DENY>` 構造化包装を撤廃し、deny reason を plain text に
+戻した。**deny 動作の判定境界は 1 種類のみ変化** (`<` 入力リダイレクト → 他の
+hard-stop と同じ ``ask_or_allow`` 扱い) で、operand scan 経路の deny は変更なし。
+
+#### 実装
+
+- **A1**: `handlers/bash/redirects.py` から `_scan_input_redirect_targets_chars`
+  / `_scan_input_redirect_targets_with_form` / `_consume_redirect_target` /
+  `_classify_redirect_form` / `_DQ_BACKSLASH_ESCAPABLE` を撤去。
+  `bash_handler` から `_extract_input_redirect_targets` (patch seam) /
+  `_scan_input_redirects` を削除し、`_has_hard_stop` 経由で `<` を含む command を
+  ``ask_or_allow`` に倒す形に変更。
+- **A2**: `handlers/bash/redirects.py::RedirectForm` Literal、
+  `core/messages.py::bash_deny(form=...)` キーワード引数、SFG_DENY body の
+  `form: <値>` 行を撤廃。
+- **A3**: `core/messages.py` から `_wrap_sfg_deny` / `_SFG_GUARD` /
+  `BashDenyKind` / `EditDenyKind` / `bash_deny(kind=...)` / `edit_deny(kind=...)`
+  を撤去し、`bash_deny` / `edit_deny` / `policy_unavailable("deny")` を plain text
+  形式に書換。`redaction/sanitize.py::escape_xml_tag` を撤去し、`escape_data_tag`
+  を DATA タグ専用の直接実装に縮約。`handlers/edit_handler.py` の symlink /
+  special caller から `kind=...` 引数渡しを削除 (extra_note のみで文脈表現)。
+
+#### テスト結果
+
+- 累計 657 → **495 件 OK** (redact 630→468 件 / check 27 件維持)
+- 削除: `tests/test_input_redirect.py` (130 件全削除)、
+  `test_messages.py::TestSfgDenyEnvelope` (12 件)、
+  `TestBashDenyInputRedirectForm` (8 件)、
+  `TestBashDenyInputRedirect` (2 件)、
+  `test_sanitize.py::TestEscapeXmlTag` (7 件)、
+  `test_bash_handler.py::TestInputRedirectFormInReason` (8 件)、
+  `TestDenyReasonContent.test_input_redirect_includes_target` (1 件)
+- 統合: `TestBashDenyLiteral` / `TestBashDenyGlob` を `TestBashDeny` (4 件) に統合
+- 新規: `test_messages.py::TestDenyPlainText` (6 件、deny 系が plain text で
+  出ることの assert)、`test_bash_handler.py::TestInputRedirectAskOrAllow`
+  (3 件、`<` 入力リダイレクトの ask/allow 動作 regression)
+- 改修: `test_messages.py::TestVocabularyConsistency.test_deny_uses_block`
+  (kind 引数なし)、`test_e2e.py::test_bash_auto_input_redirect_allows`
+  (旧 `denies` を allow に書換)
+
+#### コード削減
+
+- `handlers/bash/redirects.py`: 475 → 62 行 (-413 行)
+- `core/messages.py`: -108 行 (SFG_DENY 包装 + kind/form 引数 + 関連 docstring)
+- `handlers/bash_handler.py`: -69 行
+- `redaction/sanitize.py`: -19 行
+- `handlers/edit_handler.py`: -2 行
+- **合計: -611 行**
+
+#### ドキュメント更新
+
+- `docs/MATRIX.md`: 「`<` target 抽出」関連 4 行を Bash deny 表から削除し、
+  「Bash 静的解析不能 (三態判定)」表に「`<` 入力リダイレクト, 0.7.0 で格下げ」を追加
+- `docs/DESIGN.md`: 「Bash handler の対応文法範囲」セクションから
+  character-level quote-aware parser の記述を撤去。既知制限 #3 を「`<`
+  入力リダイレクトは ask_or_allow 扱い (0.7.0)」に書換。`_extract_input_redirect_targets`
+  patch seam を撤去
+- `README.md`: Bash 三態判定の説明から「`< target` の target が機密」を削除し、
+  ask_or_allow 側の例として `<` 入力リダイレクトを明示
+- `CLAUDE.local.md`: 「進行中のレビュー」進捗を 0.7.0 完了で更新、
+  patch seam テーブル / Bash handler mermaid を SFG_DENY / input redirect
+  撤去後に整合
+- `CHANGELOG.md`: 0.7.0 エントリ追加 (本 PR の差分まとめ)
+
+#### `claude plugin validate` 結果
+
+```
+$ claude plugin validate plugins/sensitive-files-guard
+Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
+✔ Validation passed
+```
+
+#### 完了状況サマリ (0.7.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 (`<` redirect char-level parser 撤去) | **0.7.0 ✓** |
+| P1 | A2 (RedirectForm 撤去) | **0.7.0 ✓** |
+| P1 | A3 (`<SFG_DENY>` 構造化包装撤去) | **0.7.0 ✓** |
+| P3 | A4 (prefix normalize 撤廃) | 未着手 (PR 3) |
+| P3 | B2 (`_INJECTION_PATTERNS` 縮小) | 未着手 (PR 3) |
+| P3 | B3 (glob 候補列挙を ask 格下げ) | 未着手 (PR 3) |
+| P4 | E1 (dotenv value status) | 未着手 (PR 4) |
+| P4 | E2 (placeholder 辞書) | 未着手 (PR 4) |
+| P5 | E3 (Bash コマンド別 reason) | 未着手 (PR 5) |
+| P5 | E4 (grep パターン抽出) | 未着手 (PR 5) |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
 ---
 
 ## 新規セッションでこのファイルを開いた時の手順

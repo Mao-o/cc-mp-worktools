@@ -2,8 +2,7 @@
 
 各 handler は本モジュールの builder のみを呼び、``permissionDecisionReason`` に
 入れる文字列を直接組み立てない。文言の語彙ルール、除外案内 (`!<basename>`) の
-basename 展開、そして 0.4.2 で導入した ``<SFG_DENY>`` 構造化包装をすべて 1 箇所
-に集約する。
+basename 展開を 1 箇所に集約する。
 
 ## 語彙ルール (H2)
 
@@ -23,49 +22,22 @@ next action」** の 2 文構造を取る。「続行しますか？」のよう
 そのままコピペで ``patterns.local.txt`` に追記できる形にする。glob operand
 (例: ``*.env*``) はそのまま basename として埋める。
 
-## ``<SFG_DENY>`` 構造化包装 (M4, 0.4.2 / M5, 0.5.0)
+## 出力形式 (0.7.0 で plain text 化)
 
-deny 系 reason はすべて以下の外殻で包む。LLM が deny の根拠を機械的にパース
-できるようにし、後段 hook (review / 集計) が ``reason`` 値を grep して block
-種別を再分類できるようにするための schema:
+deny 系 reason は plain text の複数行で出す。0.4.2〜0.6.x では
+``<SFG_DENY tool reason guard>`` 構造化包装で「後段 hook が機械パースできる」
+schema を提供していたが、worktools にそうした後段 hook が存在せず
+overengineering だったため 0.7.0 で撤廃。``note:`` / ``matched_operand:`` /
+``first_token:`` / ``basename:`` / ``suggested_keys:`` / ``extra_note:`` /
+``suggestion:`` の各行を改行区切りで連結した plain text を返す。
 
-```
-<SFG_DENY tool="<Bash|Edit|Write|Hook>" reason="<kind>" guard="sfg-v1">
-note: <人間向け説明文>
-matched_operand: <Bash の operand / Edit の basename>  ← 種別ごとに省略可
-first_token: <Bash コマンド名>                         ← 種別ごとに省略可
-basename: <Edit/Write の basename>                     ← 種別ごとに省略可
-form: <bare|fd_prefixed|no_space|quoted>              ← M5: Bash input_redirect 系のみ
-suggested_keys:                                       ← edit_deny の dotenv 系
-  KEY_NAME=
-  ...
-suggestion_alt: <代替案テキスト>                       ← 任意
-extra_note: <symlink / special 等の付加情報>           ← 任意
-suggestion: <patterns.local.txt 案内>                  ← deny で必ず入る
-</SFG_DENY>
-```
-
-``reason`` 値の列挙 (``SfgDenyReason``):
-
-- ``literal`` / ``glob`` / ``input_redirect`` / ``input_redirect_glob``
-  — Bash deny の検出種別 (``BashDenyKind`` と一致)
-- ``sensitive_path`` — Edit / Write の通常 deny
-- ``sensitive_path_symlink`` — Edit / Write の symlink 経由 deny
-- ``sensitive_path_special`` — Edit / Write の特殊ファイル deny
-- ``policy_unavailable`` — patterns.txt 読込失敗 (``severity="deny"``、Bash 用)
-
-ask 系 reason (``ask_or_deny`` / ``ask_or_allow``) は plain text のまま。
-構造化包装は「機械処理ニーズが強い deny だけ」に限定する設計判断 (M4)。
-
-外殻破壊耐性は ``redaction.sanitize.escape_xml_tag(body, "SFG_DENY")`` で確保。
+Read 側の ``<DATA untrusted="true">`` 包装と ``escape_data_tag`` は維持
+(鍵名が LLM コンテキストに残るため最低限の包装防御として意味あり)。
 """
 from __future__ import annotations
 
 import os
 from typing import Literal
-
-from handlers.bash.redirects import RedirectForm
-from redaction.sanitize import escape_xml_tag
 
 # 除外行を書き足す patterns.local.txt の preferred パス (CLAUDE.md 参照)。
 _LOCAL_PATTERNS_PATH = "~/.claude/sensitive-files-guard/patterns.local.txt"
@@ -114,108 +86,32 @@ def _exclude_hint(basename: str) -> str:
     )
 
 
-# Bash deny の検出種別タグ。reason の冒頭文を切り替える分類。
-BashDenyKind = Literal[
-    "literal",
-    "glob",
-    "input_redirect",
-    "input_redirect_glob",
-]
+def bash_deny(first_token: str, operand: str) -> str:
+    """Bash 操作の deny reason を plain text で構築する。
 
-# Edit / Write deny の検出種別タグ (M4 で導入)。
-EditDenyKind = Literal[
-    "sensitive_path",
-    "sensitive_path_symlink",
-    "sensitive_path_special",
-]
-
-# <SFG_DENY> guard marker (固定値で deterministic にする。Read 側 <DATA> と統一)。
-_SFG_GUARD = "sfg-v1"
-
-
-def _wrap_sfg_deny(tool: str, reason: str, body_lines: list[str]) -> str:
-    """``<SFG_DENY tool="..." reason="..." guard="sfg-v1">`` で body を包む (M4)。
-
-    body 内に ``<SFG_DENY>`` / ``</SFG_DENY>`` の文字列が混入しても外殻が
-    壊れないよう ``escape_xml_tag`` で防御する。
-
-    Args:
-        tool: ``"Bash"`` / ``"Edit"`` / ``"Write"`` / ``"Hook"`` のいずれか。
-            ``permissionDecision`` を出した hook 種別。
-        reason: ``SfgDenyReason`` のいずれか。block の根拠分類。
-        body_lines: body の各行。空文字列を渡すと空行になる。各要素は ``\\n``
-            で結合される。
-    """
-    body = "\n".join(body_lines)
-    safe_body = escape_xml_tag(body, "SFG_DENY")
-    return (
-        f'<SFG_DENY tool="{tool}" reason="{reason}" guard="{_SFG_GUARD}">\n'
-        f'{safe_body}\n'
-        f'</SFG_DENY>'
-    )
-
-
-def bash_deny(
-    first_token: str,
-    operand: str,
-    kind: BashDenyKind,
-    *,
-    form: RedirectForm | None = None,
-) -> str:
-    """Bash 操作の deny reason を ``<SFG_DENY>`` 構造で構築する (M4 + M5)。
+    operand が機密パターンに literal 一致でも glob 交差でも同じ文言で出す
+    (0.7.0 で kind 区別を撤廃)。コマンド意図に応じた切替えは将来の E3 で
+    再分化する予定。
 
     Args:
         first_token: 検出されたコマンドの第 1 トークン (例: ``cat``)。
-            input redirect 系では空でもよい (caller 側の文脈による)。
-        operand: 引っかかった operand。literal path / glob / redirect target。
-        kind: 検出種別。reason 属性と note 文を切り替える。
-        form: M5 (0.5.0) 入力リダイレクト形式タグ。``input_redirect`` /
-            ``input_redirect_glob`` の deny で caller が ``bare`` /
-            ``fd_prefixed`` / ``no_space`` / ``quoted`` を渡すと、SFG_DENY body に
-            ``form: <値>`` 行を追加する。``literal`` / ``glob`` (operand scan)
-            では None のまま (出力されない)。
+        operand: 引っかかった operand。literal path か glob 含む path。
     """
     basename = _basename_of(operand)
+    note = (
+        f"Bash コマンド ({first_token}) の operand ({operand}) が"
+        "機密パターンに一致するため block しました。"
+        "値が LLM コンテキストに露出する可能性があります。"
+    )
 
-    if kind == "literal":
-        note = (
-            f"Bash コマンド ({first_token}) の operand ({operand}) が"
-            "機密パターンに一致するため block しました。"
-            "値が LLM コンテキストに露出する可能性があります。"
-        )
-    elif kind == "glob":
-        note = (
-            f"Bash コマンド ({first_token}) の operand glob ({operand}) が"
-            "機密パターンと交差する候補を含むため block しました。"
-            "値が LLM コンテキストに露出する可能性があります。"
-        )
-    elif kind == "input_redirect":
-        note = (
-            f"Bash 入力リダイレクト先 ({operand}) が機密パターンに一致するため "
-            "block しました。値が LLM コンテキストに露出する可能性があります。"
-        )
-    elif kind == "input_redirect_glob":
-        note = (
-            f"Bash 入力リダイレクト先 ({operand}) が機密パターンに一致する"
-            "候補を含むため block しました。"
-            "値が LLM コンテキストに露出する可能性があります。"
-        )
-    else:  # pragma: no cover — kind は Literal で型保護されている
-        note = (
-            f"Bash コマンド ({first_token}) の operand ({operand}) が"
-            "機密パターンに一致するため block しました。"
-        )
-
-    body_lines: list[str] = [f"note: {note}"]
+    lines: list[str] = [f"note: {note}"]
     if operand:
-        body_lines.append(f"matched_operand: {operand}")
+        lines.append(f"matched_operand: {operand}")
     if first_token:
-        body_lines.append(f"first_token: {first_token}")
-    if form is not None:
-        body_lines.append(f"form: {form}")
-    body_lines.append(f"suggestion: {_exclude_hint(basename)}")
+        lines.append(f"first_token: {first_token}")
+    lines.append(f"suggestion: {_exclude_hint(basename)}")
 
-    return _wrap_sfg_deny("Bash", kind, body_lines)
+    return "\n".join(lines)
 
 
 def edit_deny(
@@ -224,25 +120,22 @@ def edit_deny(
     new_keys: list[str] | None = None,
     extra_note: str = "",
     *,
-    kind: EditDenyKind = "sensitive_path",
     max_suggested_keys: int = 30,
 ) -> str:
-    """Edit / Write の deny reason を ``<SFG_DENY>`` 構造で構築する (M4)。
+    """Edit / Write の deny reason を plain text で構築する。
 
     dotenv 系で書き込み予定のキー名 ``new_keys`` が渡されたときは
     ``.env.example`` への代替案を埋め込む。``extra_note`` は symlink / special
-    等の追加事情を ``extra_note:`` 行として body に挿入する。
+    等の追加事情を ``extra_note:`` 行として挿入する (0.7.0 で kind 引数を
+    廃止し、文脈は extra_note のみで表現する形に縮約)。
 
     Args:
         tool_label: ``Edit`` / ``Write`` のラベル。
-            ``<SFG_DENY tool="...">`` 属性にそのまま埋まる。
         basename: 書き込み先ファイルの basename。``basename:`` 行と除外 hint で
             ``!<basename>`` に展開される。
         new_keys: dotenv parse で抽出された新規キー名リスト (順序維持)。
             非 dotenv では空リストか None を渡す。
         extra_note: ``extra_note:`` 行に入れる補足 (symlink / special など)。
-        kind: SFG_DENY の reason 属性値。symlink / special を区別したいときに
-            caller が指定。
         max_suggested_keys: ``new_keys`` の上限 (3KB 制約のため切り詰める)。
     """
     note = (
@@ -250,27 +143,27 @@ def edit_deny(
         "block しました (値喪失や機密流出防止のため)。"
     )
 
-    body_lines: list[str] = [f"note: {note}", f"basename: {basename}"]
+    lines: list[str] = [f"note: {note}", f"basename: {basename}"]
 
     if new_keys:
         shown = new_keys[:max_suggested_keys]
         remaining = len(new_keys) - len(shown)
-        body_lines.append("suggested_keys:")
+        lines.append("suggested_keys:")
         for k in shown:
-            body_lines.append(f"  {k}=")
+            lines.append(f"  {k}=")
         if remaining > 0:
-            body_lines.append(f"  ... ({remaining} more)")
-        body_lines.append(
+            lines.append(f"  ... ({remaining} more)")
+        lines.append(
             "suggestion_alt: 追加予定のキー名を `.env.example` に追記すると、"
             "差分把握がしやすくなります (値は後で個別設定)。"
         )
 
     if extra_note:
-        body_lines.append(f"extra_note: {extra_note}")
+        lines.append(f"extra_note: {extra_note}")
 
-    body_lines.append(f"suggestion: {_exclude_hint(basename)}")
+    lines.append(f"suggestion: {_exclude_hint(basename)}")
 
-    return _wrap_sfg_deny(tool_label, kind, body_lines)
+    return "\n".join(lines)
 
 
 # -- M3: patterns.txt 読込失敗 --------------------------------------------
@@ -279,22 +172,21 @@ PolicySeverity = Literal["deny", "pause"]
 
 
 def policy_unavailable(severity: PolicySeverity, tool_label: str = "") -> str:
-    """``patterns.txt`` が読めない時の reason を返す (M3 + M4)。
+    """``patterns.txt`` が読めない時の reason を返す (M3, 0.7.0 で plain text 化)。
 
     severity:
-      - ``"deny"``: Bash handler 用 (全 mode block)。``<SFG_DENY>`` 構造化包装。
-      - ``"pause"``: Read / Edit / Write 用 (ask_or_deny で安全側)。plain text。
+      - ``"deny"``: Bash handler 用 (全 mode block)。
+      - ``"pause"``: Read / Edit / Write 用 (ask_or_deny で安全側)。
 
     tool_label が空でなければ pause 文の prefix として埋める。deny 系では
-    ``<SFG_DENY>`` の ``tool="Hook"`` 固定になるため tool_label は無視。
+    無視 (Hook 自体の問題のため)。
     """
     if severity == "deny":
-        body_lines = [
-            "note: ガードポリシー (patterns.txt) が読み込めないため "
-            "Bash コマンドを block しました。",
-            "suggestion: plugin パッケージング / 設定を確認してください。",
-        ]
-        return _wrap_sfg_deny("Hook", "policy_unavailable", body_lines)
+        return (
+            "ガードポリシー (patterns.txt) が読み込めないため "
+            "Bash コマンドを block しました。"
+            "plugin パッケージング / 設定を確認してください。"
+        )
     prefix = f"{tool_label}: " if tool_label else ""
     return (
         f"{prefix}ガードポリシー (patterns.txt) が読み込めません。"
@@ -412,8 +304,9 @@ def bash_lenient(kind: BashLenientKind, detail: str = "") -> str:
     """
     if kind == "hard_stop":
         head = (
-            "Bash コマンドに動的展開 / heredoc / process 置換 / グループ化 "
-            "($, バッククォート, $(...), <<, <(...), (), {}) が含まれています。"
+            "Bash コマンドに動的展開 / heredoc / process 置換 / 入力リダイレクト "
+            "/ グループ化 ($, バッククォート, $(...), <<, <(...), <, (), {}) が"
+            "含まれています。"
         )
     elif kind == "opaque_prefix":
         head = (

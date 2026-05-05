@@ -303,8 +303,12 @@ class TestE2EReadHandler(unittest.TestCase):
         result = _run_main(envelope, ["--tool", "bash"])
         self.assertEqual(result, {})
 
-    def test_bash_auto_input_redirect_denies(self):
-        """`< target` の target が機密 → auto でも deny (0.3.2)。"""
+    def test_bash_auto_input_redirect_allows(self):
+        """0.7.0: ``<`` を含む command は hard-stop と同じ ``ask_or_allow``。
+
+        autonomous mode (auto / bypassPermissions) では allow (= 空 dict) に倒す。
+        target 抽出 + literal/glob 一致での deny 固定は 0.7.0 で撤廃。
+        """
         envelope = {
             "tool_name": "Bash",
             "tool_input": {"command": "cat < .env", "description": "test"},
@@ -312,9 +316,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
+        self.assertEqual(result, {})
 
     def test_bash_auto_heredoc_allows(self):
         """heredoc は target 抽出されず opaque → auto で allow (0.3.2)。"""

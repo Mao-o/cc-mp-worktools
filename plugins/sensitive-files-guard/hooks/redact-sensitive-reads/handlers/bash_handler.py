@@ -1,30 +1,29 @@
-"""Bash tool 用 handler (0.3.3: 責務境界分解版)。
+"""Bash tool 用 handler (0.3.3 で責務境界分解、0.7.0 で input redirect 撤廃)。
 
-0.3.3 では 0.3.2 の誤爆ガード緩和 (三態判定 + 前置き正規化 + glob 候補列挙) の
-**挙動は維持したまま**、ファイルが肥大化していた責務を ``handlers/bash/`` 配下の
-pure helper に切り出した:
+責務境界:
 
 - ``handlers/bash/constants.py`` — compile-time 定数 (regex / frozenset)
 - ``handlers/bash/segmentation.py`` — quote-aware セグメント分割 / hard-stop 検出
 - ``handlers/bash/operand_lexer.py`` — glob 判定 / literalize / path 候補抽出
 - ``handlers/bash/redirects.py`` — 安全リダイレクト剥離 / 残留 metachar 判定
 
-このファイルに残しているのは以下 **3 つの責務** に限定:
+このファイルは以下 **3 つの責務** に限定:
+
 1. **orchestration** — envelope → command 抽出 → segment 分解 → 判定 → 出力 JSON
 2. **plugin ステート依存ロジック** — ``load_patterns`` / ``is_sensitive`` /
-   ``normalize`` を呼ぶ処理 (``_operand_is_sensitive`` / ``_glob_operand_is_sensitive``
-   / ``_scan_input_redirects`` / ``_analyze_segment``)
-3. **test seam** — テストが ``handlers.bash_handler`` 名前空間から import する
-   symbol の公開点 (``handle`` / ``_extract_input_redirect_targets`` /
-   ``_normalize_segment_prefix`` / ``_operand_is_sensitive`` /
+   ``normalize`` を呼ぶ処理 (``_operand_is_sensitive`` /
+   ``_glob_operand_is_sensitive`` / ``_analyze_segment``)
+3. **test seam** — ``handlers.bash_handler`` 名前空間から import される symbol
+   (``handle`` / ``_normalize_segment_prefix`` / ``_operand_is_sensitive`` /
    ``_glob_operand_is_sensitive`` / ``_literalize`` / ``_glob_candidates``)
 
-### 判定フロー (0.3.2 から変更なし)
+### 判定フロー
 
 1. **hard-stop** — ``$`` ``(`` ``)`` ``{`` ``}`` ``<`` バッククォート ``\\r`` を含む
-   コマンドは静的解析不能。ただし ``<`` だけは target を抽出して先に operand scan に
-   流す (``cat < .env`` を取り逃がさないため)。target 抽出に成功して機密一致なら
-   **deny 固定**。それ以外は ``ask_or_allow``。
+   コマンドは静的解析不能のため ``ask_or_allow`` (default で ask、autonomous で
+   allow)。0.3.4〜0.6.x で ``<`` のみ target を抽出して deny に倒していたが、
+   思想 1 (うっかり露出予防が目的、敵対的防御は非目的) と整合しないため 0.7.0
+   で撤廃。``<`` を含む command は他の hard-stop と同じく ``ask_or_allow``。
 2. **segment split** — ``&&`` ``||`` ``;`` ``|`` ``\\n`` を quote-aware に分割。
 3. **per-segment 解析** — 各セグメントで:
    - shlex.split → 失敗 → ``ask_or_allow``
@@ -42,11 +41,10 @@ pure helper に切り出した:
        True なら **deny 固定**、False なら allow
 4. **集約** — deny > ask > allow。
 
-### patterns.txt 読込失敗 = 全 mode deny 固定 (0.3.2 から変更なし)
+### patterns.txt 読込失敗 = 全 mode deny 固定
 
-0.3.1 までは ``ask_or_deny`` だったが、autonomous モード対応で ``ask_or_allow`` を
-広く使うことになり「policy が無いのに lenient で素通り」を避けるため ``make_deny``
-固定に変更。Read/Edit handler 側は変更なし。
+autonomous モードで ``ask_or_allow`` を広く使うため「policy が無いのに lenient
+で素通り」を避けて ``make_deny`` 固定。Read/Edit handler 側は ``ask_or_deny``。
 """
 from __future__ import annotations
 
@@ -85,11 +83,7 @@ from handlers.bash.operand_lexer import (  # noqa: F401
     _literalize,
 )
 from handlers.bash.redirects import (  # noqa: F401
-    RedirectForm,
-    _consume_redirect_target,
     _is_safe_redirect_token,
-    _scan_input_redirect_targets_chars,
-    _scan_input_redirect_targets_with_form,
     _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
@@ -226,67 +220,6 @@ def _operand_is_sensitive(
     return False
 
 
-def _extract_input_redirect_targets(command: str) -> list[str]:
-    """``< file`` 形式の file (target) を抽出する (0.3.4: character-level parser 委譲)。
-
-    0.3.2 の regex 版 (``(?:^|[^<&0-9])<\\s+(\\S+)``) を廃し、
-    ``handlers.bash.redirects._scan_input_redirect_targets_chars`` に委譲。
-    quote-aware で ``cat<target`` (空白なし) / ``cat 0< target`` (fd 前置き) /
-    ``cat < "a file"`` (quote 付き) を網羅する。除外対象 (heredoc ``<<`` /
-    herestring ``<<<`` / fd dup ``<&`` / process sub ``<(``) は parser 内で
-    明示的にスキップ。
-
-    この関数は ``test_input_redirect.py`` が直接 import するため patch seam として
-    thin wrapper で維持する (signature 不変)。
-    """
-    return _scan_input_redirect_targets_chars(command)
-
-
-def _scan_input_redirects(
-    command: str, cwd: str, rules: list[tuple[str, bool]]
-) -> dict | None:
-    """hard-stop コマンド内の ``< target`` を抽出し、機密一致を ``make_deny`` で返す。
-
-    機密一致が見つかれば deny dict、見つからなければ ``None``。M5 (0.5.0) で
-    form 付き parser ``_scan_input_redirect_targets_with_form`` 直呼びに変更し、
-    deny reason に form タグ (``bare`` / ``fd_prefixed`` / ``no_space`` /
-    ``quoted``) を埋め込む。
-    """
-    targets_with_form = _scan_input_redirect_targets_with_form(command)
-    if not targets_with_form and "<" in command:
-        # `<` を含むのに target が取れなかった = 全除外ケース
-        # (heredoc / herestring / fd dup / process sub / quote 異常) の可能性。
-        # 後段 ask_or_allow に倒る前に観測可能にする。
-        L.log_info("bash_classify", "input_redirect_empty_extract")
-    for raw_target, form in targets_with_form:
-        if _has_glob(raw_target):
-            if _glob_operand_is_sensitive(raw_target, rules):
-                L.log_info("bash_classify", "input_redirect_glob_match")
-                return output.make_deny(
-                    M.bash_deny(
-                        first_token="",
-                        operand=raw_target,
-                        kind="input_redirect_glob",
-                        form=form,
-                    )
-                )
-            continue
-        try:
-            if _operand_is_sensitive(raw_target, cwd, rules):
-                L.log_info("bash_classify", "input_redirect_match")
-                return output.make_deny(
-                    M.bash_deny(
-                        first_token="",
-                        operand=raw_target,
-                        kind="input_redirect",
-                        form=form,
-                    )
-                )
-        except (ValueError, OSError):
-            continue
-    return None
-
-
 def _analyze_segment(
     tokens: list[str],
     envelope: dict,
@@ -333,14 +266,14 @@ def _analyze_segment(
             if _glob_operand_is_sensitive(p, rules):
                 L.log_info("bash_classify", f"glob_match:{first}")
                 return output.make_deny(
-                    M.bash_deny(first_token=first, operand=p, kind="glob")
+                    M.bash_deny(first_token=first, operand=p)
                 )
             continue
         try:
             if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
                 L.log_info("bash_classify", f"match:{first}")
                 return output.make_deny(
-                    M.bash_deny(first_token=first, operand=p, kind="literal")
+                    M.bash_deny(first_token=first, operand=p)
                 )
         except (ValueError, OSError):
             return output.ask_or_allow(
@@ -380,14 +313,13 @@ def handle(envelope: dict) -> dict:
     if not rules:
         return output.make_allow()
 
-    cwd = envelope.get("cwd", "")
-
-    # 1. hard-stop: 動的評価 / 入力リダイレクト / グループ化
+    # 1. hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 全て ask_or_allow。
+    # 0.3.4〜0.6.x で行っていた ``<`` 入力リダイレクトの target 抽出は 0.7.0 で
+    # 撤廃。``cat <(echo \\(\\)) < .env`` 等の escape paren depth tracking や
+    # ``[[ ... ]]`` 引数位置判定は思想 1 (うっかり露出予防が目的、敵対的防御は
+    # 非目的) と整合しないため、``<`` を含む command は他の hard-stop と同じ
+    # ``ask_or_allow`` (default で ask、autonomous で allow) に倒す。
     if _has_hard_stop(command):
-        # ``< target`` 形式は target を抽出して先に operand scan に流す
-        deny = _scan_input_redirects(command, cwd, rules)
-        if deny is not None:
-            return deny
         L.log_info("bash_classify", "hard_stop_lenient")
         return output.ask_or_allow(M.bash_lenient("hard_stop"), envelope)
 
