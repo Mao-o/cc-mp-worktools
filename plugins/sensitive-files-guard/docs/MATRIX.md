@@ -24,13 +24,21 @@
 | ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | パターン非該当 | allow | allow | allow | allow | allow |
-| 機密 + 通常ファイル | **deny** + minimal info | **deny** | **deny** | **deny** | **deny** |
+| 機密 + 通常ファイル | **deny** + minimal info (鍵名・型・prefix・status・length) | **deny** | **deny** | **deny** | **deny** |
 | 機密 + symlink | ask | ask | ask | ask | **deny** |
 | 機密 + 特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | **deny** |
 | 機密 + 読み取り失敗 (権限/IO) | ask | ask | ask | ask | **deny** |
 | redaction engine 内部例外 | ask | ask | ask | ask | **deny** |
 | patterns.txt 読込失敗 | ask + stderr | ask | ask | ask | **deny** + stderr |
 | 32KB 超 | keyonly deny | keyonly | keyonly | keyonly | keyonly |
+
+> 0.9.0 で dotenv の minimal info を拡張: 値クラス (14 種、`url` / `email` /
+> `uuid` / `aws_access_key` / `stripe_secret` / `stripe_pk` / `github_pat` /
+> `openai_key` を追加)、識別子型 prefix (`sk_live_` / `AKIA` / `ghp_` 等)、
+> value status (`<set>` / `<empty>` / `<placeholder>` / `<short>` / `<long>` /
+> `<looks_truncated>`)、生バイト長 (`length=N`)、placeholder 一致ラベル
+> (`matched="..."`) を追加。実値そのものは引き続き出さない。詳細は
+> [DESIGN.md](./DESIGN.md#dotenv-minimal-info-の拡張-090-e1--e2)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 

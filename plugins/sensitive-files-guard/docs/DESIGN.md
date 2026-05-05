@@ -11,8 +11,12 @@
 1. **Fail-closed in doubt** — read 側の内部失敗は `ask` (bypass モード時は `deny`)
    にフォールバック。Stop 側は応答停止を招かないため fail-open (stderr warning +
    空出力)。
-2. **情報量最小化** — minimal info (鍵名・順序・型・件数) のみ返却、値は
-   bool/小整数含めて原則マスク。
+2. **値そのものは出さない、デバッグ情報は積極的に返す** (0.9.0 で拡張) —
+   minimal info の核は鍵名・順序・型・件数だが、思想 2 (block 時は意図を
+   汲んだメッセージを返す) を満たすため、値の **品質情報** (set / empty /
+   placeholder / short / long / looks_truncated) と長さ (生バイト数)、
+   識別子型の prefix (sk_live_ / AKIA / ghp_ 等) を併せて返す。実値そのもの
+   (鍵名 prefix を除く一切) は LLM の文脈に入れない原則は維持。
 3. **Secrets never in logs** — path・値・展開後情報を一切記録しない。
 4. **Latency <100ms 目標** — timeout 2 秒、文字列処理のみ、外部コマンド呼出なし。
 5. **情報注入は `permissionDecisionReason` 一択** — `systemMessage` 非依存
@@ -151,6 +155,37 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 | redaction engine 内部例外 | `ask_or_deny` (fail-closed) |
 | patterns.txt 読込失敗 | `ask_or_deny` + stderr 警告 |
 | サイズ 32KB 超 | keyonly_scan で streaming 鍵名抽出 |
+
+### dotenv minimal info の拡張 (0.9.0, E1 + E2)
+
+`redaction/dotenv.py` で生成する minimal info に以下を追加 (実値は出さない):
+
+| 項目 | 内容 | 例 |
+|---|---|---|
+| `<type=...>` | 値クラス (14 種、0.9.0 で 8 種拡張) | `<type=stripe_secret>` |
+| `prefix="..."` | 識別子型のみ、公開済み prefix を表示 (Q3 採用) | `<type=stripe_secret prefix="sk_live_">` |
+| `<set>` / `<empty>` / `<placeholder>` | 値の有無・placeholder 一致 | `<set>` |
+| `<short>` / `<long>` / `<looks_truncated>` | 型整合性・truncation ヒント (複数併記可) | `<set> <short>` |
+| `length=<N>` | 値のバイト長 (Q2 採用、bucket せず生長さ) | `length=68` |
+| `matched="..."` | placeholder 一致時の辞書 literal / pattern label | `matched="your_jwt_secret_here"` |
+
+**型推定 (0.9.0 拡張)**: `str` / `bool` / `null` / `num` / `jwt` (既存) +
+`url` / `email` / `uuid` / `aws_access_key` (AKIA / ASIA) / `stripe_secret`
+(sk_live_ / sk_test_ / rk_live_ / rk_test_) / `stripe_pk` (pk_live_ / pk_test_) /
+`github_pat` (ghp_ / gho_ / ghu_ / ghs_ / ghr_) / `openai_key` (sk-)。
+
+**prefix を返す型**: jwt (`ey`)、aws_access_key (`AKIA` / `ASIA`)、stripe_secret
+(`sk_live_` / `sk_test_` / `rk_live_` / `rk_test_`)、stripe_pk (`pk_live_` /
+`pk_test_`)、github_pat (`ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_`)、openai_key
+(`sk-`)。
+
+**short の閾値**: jwt < 30 / aws_access_key < 16 / stripe_* < 25 /
+github_pat < 30 / openai_key < 20 / url < 8 / uuid < 36 / email < 6。
+**long の閾値**: 4096 byte 超 (デバッグダンプ混入の検知)。
+
+**placeholder 判定**: `redaction/placeholders.py::looks_placeholder` が
+PLACEHOLDER_LITERALS (21 個) と PLACEHOLDER_PATTERNS (5 個 regex) で判定。
+ユーザー拡張点 (placeholders.local.txt) は **作らない** (Q1 = 簡易版で開始)。
 
 ### Bash handler (三態判定)
 

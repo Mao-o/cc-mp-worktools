@@ -6,11 +6,16 @@
 close 責務は呼出側 (read_handler の ``with`` ブロック) が持つ。engine は
 close しない。
 
-出力: ``permissionDecisionReason`` に入れるプレーンテキスト (1-2KB 目標)。
+出力: ``permissionDecisionReason`` に入れるプレーンテキスト (1-2KB 目標、
+ハード上限 3KB)。
 
 0.6.0 で内部 soft-timeout (SIGALRM 1s) を撤廃した。dotenv parse は ReDoS の
 経路がほぼなく、外部 hook timeout (2s) で十分なため。Windows 対応の論点は
 ``__main__._is_unsupported_platform`` 側で別途判断する。
+
+0.9.0 で dotenv minimal info に value status / 生長さ / 識別子型 prefix /
+placeholder hint を追加 (思想 2 = block 時は意図を汲んだメッセージを返す)。
+詳細は ``redaction/dotenv.py`` および ``redaction/placeholders.py``。
 """
 from __future__ import annotations
 

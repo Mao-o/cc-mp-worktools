@@ -1,5 +1,131 @@
 # Changelog
 
+## 0.9.0
+
+**思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 4 を消化**:
+思想 2 (block 時は意図を汲んだメッセージを返す) のコア機能を実装する **機能追加
+リリース**。dotenv の minimal info に value status / 生バイト長 / 識別子型 prefix
+/ placeholder ヒントを追加し、「機密ファイルは閲覧禁止」だけでは API 失敗の
+原因究明が止まる問題を解消する。実値そのものは引き続き出さないが、デバッグに
+必要な品質情報を積極的に返す方針 (Q1〜Q3 確定方針)。
+
+### 主要な変更
+
+1. **E2: placeholder 辞書を新設** (`redaction/placeholders.py`)
+   — `PLACEHOLDER_LITERALS` (21 個 frozenset: dummy / sample / changeme /
+   your_secret / lorem / ... ) と `PLACEHOLDER_PATTERNS` (5 個 (regex, label)
+   tuple: `your_*_here` / `<...>` / `***` / `xxx` / `test/dev/local/staging`) を
+   定義し、`looks_placeholder(value) -> tuple[bool, str | None]` で値が
+   placeholder っぽいかを判定。case-insensitive、quote 剥がし対応。戻り値の
+   ラベルは **辞書側 literal または pattern label** で、実値そのものは返さない
+   (regex 一致時に値の一部が漏れるのを防ぐ)。Q1 (簡易版で開始) 採用、ユーザー
+   拡張点 (`placeholders.local.txt` 等) は作らない。
+
+2. **E1: dotenv 型推定の prefix-aware 拡張** (`redaction/dotenv.py`)
+   — 既存の `_classify_value` (型のみ返す) を `_detect_type_and_prefix` に置換し、
+   型クラスと prefix の組を返す形に変更。
+   - 既存型: `str` / `bool` / `null` / `num` / `jwt`
+   - 追加型 (8 種): `url` / `email` / `uuid` / `aws_access_key` (AKIA / ASIA) /
+     `stripe_secret` (sk_live_ / sk_test_ / rk_live_ / rk_test_) / `stripe_pk`
+     (pk_live_ / pk_test_) / `github_pat` (ghp_ / gho_ / ghu_ / ghs_ / ghr_) /
+     `openai_key` (sk-)
+   - prefix を返す型: jwt (`ey`)、aws_access_key (`AKIA` / `ASIA`)、
+     stripe_secret / stripe_pk / github_pat / openai_key (各識別子 prefix)。
+     str / bool / null / num / url / email / uuid は prefix を返さない。
+   - Q3 (prefix 表示採用) により本番鍵 (`sk_live_`) とテスト鍵 (`sk_test_`)
+     を区別できるためローテーション判断に有用。
+
+3. **E1: value status 判定 + 生バイト長**
+   — `_classify_status(v, type_class, placeholder_label) -> (status_tags, length)`
+   を新設。status タグ (複数併記可):
+   - `<set>`: 値あり、placeholder にも empty にも該当しない
+   - `<empty>`: `KEY=` / `KEY=""` / 空白のみ (length は省略)
+   - `<placeholder>`: placeholders.py 一致 (`matched="..."` を併記)
+   - `<short>`: 型から想定される最低長を下回る (jwt<30 / aws_access_key<16 /
+     stripe_*<25 / github_pat<30 / openai_key<20 / url<8 / uuid<36 / email<6)
+   - `<long>`: 4096 byte 超 (デバッグダンプ混入のヒント)
+   - `<looks_truncated>`: 末尾が `...` / `<truncated>` / バックスラッシュ
+   - `length=<N>`: 値の生バイト長 (Q2 = bucket せず生長さ)。`<empty>` のとき
+     のみ省略。
+
+4. **E1: `format_dotenv` を新出力に書換**
+   — type/prefix/status/length/matched を組み合わせた多列フォーマット (`reason`
+   出力例は CLAUDE.local.md / README.md 参照)。note 文を「real values are not
+   in context. only key names, type, prefix, length, status tags, and
+   placeholder hints are returned.」に更新。
+
+### 挙動変更 (0.8.0 → 0.9.0)
+
+- **dotenv reason の出力形式が変更** (機能追加・互換性維持の方向):
+  - 旧: `1. DATABASE_URL  <type=str>` のみ
+  - 新: `1. DATABASE_URL  <type=url>  <set>  length=42` の多列フォーマット
+- **deny 動作の判定境界は変化なし**。Read 側 deny の発火条件・対象パターン
+  は完全に同じ。reason 文字列の情報量だけが拡張された。
+- **実値リーク**: 引き続きなし。`prefix="sk_live_"` のような識別子 prefix は
+  公開済みの type marker として返すが、値そのもの (sk_live_ の続く 24 文字以上の
+  base62 部分) は出ない。
+
+### 内部 API の変更 (caller があれば追従が必要)
+
+- `redaction.dotenv.redact_dotenv` 戻り値の `keys[]` 要素に新フィールド追加:
+  - 必須: `name`, `type`, `status` (list[str]), `length` (int)
+  - 追加 (条件付き): `prefix` (識別子型のみ)、`placeholder` (placeholder 一致時のみ)
+- `redaction.dotenv._classify_value` を撤廃し、`_detect_type_and_prefix` /
+  `_classify_status` / `_preprocess_value` の 3 関数に分割。`_classify_value`
+  を直接 import している外部 caller があれば追従が必要。
+- `redaction.placeholders` モジュール新設: `PLACEHOLDER_LITERALS` /
+  `PLACEHOLDER_PATTERNS` / `looks_placeholder` を export。
+
+### テスト
+
+- 新規:
+  - `tests/test_placeholders.py` (29 件、`looks_placeholder` 単体: literal 21
+    サンプル / regex 5 種 / 一致なし / quote 処理 / edge case)
+  - `tests/test_redaction_minimal.py::TestDotenvTypeExpansion` (15 件、url /
+    email / uuid / aws_* / stripe_* / github_* / openai / jwt / str fallback)
+  - `tests/test_redaction_minimal.py::TestDotenvPrefix` (11 件、識別子型の
+    prefix 検出と非識別子型の prefix なし確認)
+  - `tests/test_redaction_minimal.py::TestDotenvStatus` (16 件、set / empty /
+    placeholder / short / long / looks_truncated の各タグ + length 計測)
+  - `tests/test_redaction_minimal.py::TestDotenvFormatOutput` (9 件、新出力に
+    prefix / status / length / matched / no value leak が含まれること)
+- 累計 465 → **545 件 OK** (redact 438→518 件、+80 件 / check 27 件維持)
+
+### コード追加
+
+| ファイル | 行数差 |
+|---|---|
+| `redaction/placeholders.py` | +60 (新規) |
+| `redaction/dotenv.py` | +175 (E1 拡張、_classify_value 削除分を相殺) |
+| `tests/test_placeholders.py` | +153 (新規) |
+| `tests/test_redaction_minimal.py` | +290 (新規 4 クラス + 既存 inline comment 維持) |
+| 合計 | **+678 行** (機能追加 PR のため増加方向。E3〜E6 で削減を見込む) |
+
+### ドキュメント
+
+- `README.md`: Read 側 reason の例を新フォーマットに、minimal info の各
+  フィールド説明を追加、思想 2 が dotenv で実装された旨を強調。テスト件数を
+  518 (0.9.0) に更新。
+- `docs/DESIGN.md`: 設計原則 #2 を「値そのものは出さない、デバッグ情報は
+  積極的に返す」に拡張。「dotenv minimal info の拡張 (0.9.0, E1 + E2)」
+  セクションを追加 (型推定一覧 / prefix を返す型 / short 閾値 / placeholder
+  方針)。
+- `docs/MATRIX.md`: Read handler の minimal info 説明を 0.9.0 拡張内容に
+  更新 (deny 動作自体は変わらない旨を明示)。
+- `CLAUDE.local.md`: 進行中レビュー進捗を 0.9.0 (PR 4) で更新、ディレクトリ
+  構成に `redaction/placeholders.py` を追記、plugin.json version を 0.9.0、
+  `permissionDecisionReason` フォーマット例を新出力に更新、prefix を返す
+  方針補足を追加。
+- `redaction/engine.py` / `redaction/dotenv.py` の docstring を 0.9.0 拡張
+  内容に合わせて更新。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-06.md` の **E1 / E2** を消化。残るは **E3 / E4**
+(PR 5, 0.10.0 = Bash コマンド別 reason + grep パターン抽出)、**E5 / E6 +
+D1 / D2** (PR 6, 1.0.0 = json/toml/yaml status 拡張 + Edit/Write リッチ化 +
+docs / tests 整理)。
+
 ## 0.8.0
 
 **思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 3 を消化**:

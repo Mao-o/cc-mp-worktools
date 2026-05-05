@@ -813,6 +813,104 @@ Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
 
+### 2026-05-06: PR 4 完了 (0.9.0 リリース) — E1 / E2
+
+思想 2 (block 時は意図を汲んだメッセージを返す) のコア機能を実装。dotenv の
+minimal info に value status / 生バイト長 / 識別子型 prefix / placeholder ヒント
+を追加し、「機密ファイルは閲覧禁止」だけでは API 失敗の原因究明が止まる問題を
+解消した。**deny 動作の判定境界は変化なし**で、reason 文字列の情報量だけが拡張
+された機能追加リリース。
+
+#### 論点 Q1〜Q3 のユーザー確定回答
+
+- Q1: **簡易版で開始** (PLACEHOLDER_LITERALS 21 個 + 5 regex、ユーザー拡張点なし)
+- Q2: **bucket なし、生長さを返す** (`length=42` 形式)
+- Q3: **prefix も表示する** (`<type=stripe_secret prefix="sk_live_">`)
+
+ユーザー強調: 「うっかりミスによる流出を防ぎつつ開発作業を停滞させないための
+機構が最優先」→ **情報量は積極的に返す**方針。実値そのものは引き続き出さない
+が、長さ / 型 / prefix / placeholder 情報は LLM が次の作業を判断できる粒度で渡す。
+
+#### 実装
+
+- **E2**: `redaction/placeholders.py` を新設。PLACEHOLDER_LITERALS (21 個) +
+  PLACEHOLDER_PATTERNS (5 個 (regex, label) tuple) + `looks_placeholder(value)`
+  を実装。case-insensitive、quote 剥がし対応、戻り値は辞書側 literal /
+  pattern label。
+- **E1**: `redaction/dotenv.py` 大改修。
+  - `_classify_value` を `_detect_type_and_prefix` に置換、型を 14 種に拡張
+    (str / bool / null / num / jwt / url / email / uuid / aws_access_key /
+    stripe_secret / stripe_pk / github_pat / openai_key)
+  - `_classify_status` 新設、6 タグ (set/empty/placeholder/short/long/
+    looks_truncated) を複数併記可能に判定
+  - `_preprocess_value` で型判定 / status 判定 / length 計測を共通化
+  - `format_dotenv` を新出力 (type/prefix/status/length/matched 多列) に書換
+
+#### テスト結果
+
+- 累計 465 → **545 件 OK** (redact 438→518 件、+80 件 / check 27 件維持)
+- 新規:
+  - `test_placeholders.py` (29 件)
+  - `test_redaction_minimal.py::TestDotenvTypeExpansion` (15 件)
+  - `test_redaction_minimal.py::TestDotenvPrefix` (11 件)
+  - `test_redaction_minimal.py::TestDotenvStatus` (16 件)
+  - `test_redaction_minimal.py::TestDotenvFormatOutput` (9 件)
+- 既存テストはすべて維持 (format_dotenv の出力変更があっても、既存の
+  `assertEqual(info["format"], "dotenv")` / `<type=bool>` / `<type=num>` の
+  存在チェックは互換)
+
+#### コード追加
+
+| ファイル | 行数差 |
+|---|---|
+| `redaction/placeholders.py` | +60 (新規) |
+| `redaction/dotenv.py` | +175 (E1 拡張) |
+| `tests/test_placeholders.py` | +153 (新規) |
+| `tests/test_redaction_minimal.py` | +290 (新規 4 クラス) |
+| 合計 | **+678 行** (機能追加 PR のため増加方向、E3〜E6 で削減見込み) |
+
+#### ドキュメント更新
+
+- `README.md`: reason の例を新フォーマットに、minimal info 各フィールド説明、
+  思想 2 が dotenv で実装された旨を追加。テスト件数を 518 (0.9.0) に更新
+- `docs/DESIGN.md`: 設計原則 #2 を「値そのものは出さない、デバッグ情報は積極的
+  に返す」に拡張。「dotenv minimal info の拡張 (0.9.0, E1 + E2)」セクション追加
+- `docs/MATRIX.md`: Read handler の minimal info 説明を 0.9.0 拡張内容に更新
+- `CLAUDE.local.md`: 進捗を 0.9.0 (PR 4)、ディレクトリ構成に
+  `redaction/placeholders.py` 追記、plugin.json version 0.9.0、
+  permissionDecisionReason フォーマット例を新出力に
+- `CHANGELOG.md`: 0.9.0 エントリ追加 (本 PR の差分まとめ)
+- `redaction/engine.py` / `redaction/dotenv.py` の docstring を 0.9.0 拡張
+  内容に合わせて更新
+
+#### `claude plugin validate` 結果
+
+```
+$ claude plugin validate plugins/sensitive-files-guard
+Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
+Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
+⚠ Found 1 warning:
+  ❯ root: CLAUDE.local.md at the plugin root is not loaded as project context.
+✔ Validation passed with warnings
+```
+
+`CLAUDE.local.md` 配置の warning は plugin 設計上の既知事項 (PR 1〜3 と同じ)。
+
+#### 完了状況サマリ (0.9.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 / B2 / B3 | **0.8.0 ✓** |
+| P4 | E1 (dotenv value status) | **0.9.0 ✓** |
+| P4 | E2 (placeholder 辞書) | **0.9.0 ✓** |
+| P5 | E3 (Bash コマンド別 reason) | 未着手 (PR 5) |
+| P5 | E4 (grep パターン抽出) | 未着手 (PR 5) |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
 ---
 
 ## 新規セッションでこのファイルを開いた時の手順

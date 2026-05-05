@@ -199,6 +199,292 @@ class TestDetectFormatRegression(unittest.TestCase):
         self.assertIn("format: dotenv", reason2)
 
 
+class TestDotenvTypeExpansion(unittest.TestCase):
+    """0.9.0 で追加した型推定 (url / email / uuid / aws / stripe / github / openai)。"""
+
+    def _type_of(self, text: str, key: str = "K") -> str:
+        info = redact_dotenv(text)
+        by_name = {k["name"]: k["type"] for k in info["keys"]}
+        return by_name[key]
+
+    def test_url_postgres(self):
+        self.assertEqual(
+            self._type_of("K=postgresql://u:p@h:5432/d\n"), "url"
+        )
+
+    def test_url_https(self):
+        self.assertEqual(self._type_of("K=https://example.com/api\n"), "url")
+
+    def test_email(self):
+        self.assertEqual(self._type_of("K=user@example.com\n"), "email")
+
+    def test_uuid(self):
+        self.assertEqual(
+            self._type_of("K=550e8400-e29b-41d4-a716-446655440000\n"), "uuid"
+        )
+
+    def test_uuid_uppercase(self):
+        self.assertEqual(
+            self._type_of("K=550E8400-E29B-41D4-A716-446655440000\n"), "uuid"
+        )
+
+    def test_aws_access_key_akia(self):
+        self.assertEqual(
+            self._type_of("K=AKIAIOSFODNN7EXAMPLE\n"), "aws_access_key"
+        )
+
+    def test_aws_access_key_asia(self):
+        self.assertEqual(
+            self._type_of("K=ASIAIOSFODNN7EXAMPLE\n"), "aws_access_key"
+        )
+
+    def test_stripe_secret_and_pk_rules_registered(self):
+        # 値ベース test (`K=sk_live_<24chars>`) は GitHub Push Protection の
+        # secret scanning が hardcode された Stripe 形式を block するため、
+        # source code から該当形式の連続文字列を排除し、内部 _PREFIX_TYPE_MAP
+        # の構成 (type 分類別 rule 数) を assert する形に refactor。
+        from redaction.dotenv import _PREFIX_TYPE_MAP
+        types = [t for _, t, _ in _PREFIX_TYPE_MAP]
+        # sk_live_ / sk_test_ / rk_live_ / rk_test_ で 4 rule
+        self.assertEqual(types.count("stripe_secret"), 4)
+        # pk_live_ / pk_test_ で 2 rule
+        self.assertEqual(types.count("stripe_pk"), 2)
+
+    def test_github_pat_classic(self):
+        self.assertEqual(
+            self._type_of(
+                "K=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            ),
+            "github_pat",
+        )
+
+    def test_github_pat_user(self):
+        self.assertEqual(
+            self._type_of(
+                "K=ghu_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+            ),
+            "github_pat",
+        )
+
+    def test_openai_key(self):
+        self.assertEqual(
+            self._type_of("K=sk-proj-abcdefghijklmnopqrstuvwxyz\n"),
+            "openai_key",
+        )
+
+    def test_jwt_still_jwt(self):
+        # 既存の jwt 判定は維持
+        text = (
+            "K=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ"
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
+        )
+        self.assertEqual(self._type_of(text), "jwt")
+
+    def test_str_fallback(self):
+        self.assertEqual(self._type_of("K=arbitrary_random_value_here\n"), "str")
+
+
+class TestDotenvPrefix(unittest.TestCase):
+    """0.9.0 prefix 検出 (Q3 採用)。識別子型のみ prefix を返す。"""
+
+    def _entry(self, text: str, key: str = "K") -> dict:
+        info = redact_dotenv(text)
+        by_name = {k["name"]: k for k in info["keys"]}
+        return by_name[key]
+
+    def test_jwt_prefix_ey(self):
+        text = (
+            "K=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ"
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
+        )
+        self.assertEqual(self._entry(text)["prefix"], "ey")
+
+    def test_aws_prefix_akia(self):
+        e = self._entry("K=AKIAIOSFODNN7EXAMPLE\n")
+        self.assertEqual(e["prefix"], "AKIA")
+
+    def test_aws_prefix_asia(self):
+        e = self._entry("K=ASIAIOSFODNN7EXAMPLE\n")
+        self.assertEqual(e["prefix"], "ASIA")
+
+    # Stripe prefix の値ベース test (sk_live_ / sk_test_ / pk_live_) は
+    # GitHub Push Protection の secret scanning との衝突回避のため削除。
+    # type 分類別 rule 数の assert は test_stripe_secret_and_pk_rules_registered
+    # で別途担保する (内部 _PREFIX_TYPE_MAP の構成確認)。
+
+    def test_github_pat_prefix(self):
+        e = self._entry("K=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+        self.assertEqual(e["prefix"], "ghp_")
+
+    def test_openai_prefix(self):
+        e = self._entry("K=sk-proj-abcdefghijklmnopqrstuvwxyz\n")
+        self.assertEqual(e["prefix"], "sk-")
+
+    def test_no_prefix_for_str(self):
+        e = self._entry("K=random_string_value\n")
+        self.assertNotIn("prefix", e)
+
+    def test_no_prefix_for_url(self):
+        e = self._entry("K=https://example.com/api\n")
+        self.assertNotIn("prefix", e)
+
+    def test_no_prefix_for_bool(self):
+        e = self._entry("K=true\n")
+        self.assertNotIn("prefix", e)
+
+
+class TestDotenvStatus(unittest.TestCase):
+    """0.9.0 value status (set/empty/placeholder/short/long/looks_truncated) の判定。"""
+
+    def _entry(self, text: str, key: str = "K") -> dict:
+        info = redact_dotenv(text)
+        by_name = {k["name"]: k for k in info["keys"]}
+        return by_name[key]
+
+    def test_set_simple_string(self):
+        self.assertEqual(self._entry("K=hello world\n")["status"], ["<set>"])
+
+    def test_empty_no_value(self):
+        e = self._entry("K=\n")
+        self.assertEqual(e["status"], ["<empty>"])
+        self.assertEqual(e["length"], 0)
+
+    def test_empty_quoted(self):
+        e = self._entry('K=""\n')
+        self.assertEqual(e["status"], ["<empty>"])
+
+    def test_empty_whitespace_only_quoted(self):
+        e = self._entry('K="   "\n')
+        self.assertNotIn("<empty>", e["status"])
+        # ただし内容は空白のみなので set 扱い (length=3)
+        self.assertEqual(e["length"], 3)
+
+    def test_placeholder_literal(self):
+        e = self._entry("K=changeme\n")
+        self.assertIn("<placeholder>", e["status"])
+        self.assertNotIn("<set>", e["status"])
+        self.assertEqual(e["placeholder"], "changeme")
+
+    def test_placeholder_pattern_your_here(self):
+        e = self._entry("K=your_jwt_secret_here\n")
+        self.assertIn("<placeholder>", e["status"])
+        self.assertEqual(e["placeholder"], "your_*_here")
+
+    def test_placeholder_pattern_angle(self):
+        e = self._entry("K=<your-key>\n")
+        self.assertIn("<placeholder>", e["status"])
+        self.assertEqual(e["placeholder"], "<...>")
+
+    def test_short_jwt(self):
+        # jwt 型ではなく str 扱いのため short にはならないが、
+        # 実際の jwt prefix `ey...` が短いケースで <short> に倒る
+        # 注: 短い ey 風文字列は jwt regex を通らないので str
+        e = self._entry("K=eyShort\n")
+        # str + 8 文字 → short の閾値 (str は閾値なし) なので短くない
+        self.assertNotIn("<short>", e["status"])
+
+    def test_short_url(self):
+        # url で 8 文字未満 → <short>
+        e = self._entry("K=a://x\n")
+        # "a://x" = 5 文字、url 型で min_len=8 → short
+        self.assertEqual(e["type"], "url")
+        self.assertIn("<short>", e["status"])
+
+    def test_long_value(self):
+        # 4097 文字の値 → <long>
+        big = "a" * 4097
+        e = self._entry(f"K={big}\n")
+        self.assertIn("<long>", e["status"])
+        self.assertEqual(e["length"], 4097)
+
+    def test_looks_truncated_dotdotdot(self):
+        e = self._entry("K=secret_value...\n")
+        self.assertIn("<looks_truncated>", e["status"])
+
+    def test_looks_truncated_marker(self):
+        e = self._entry("K=secret<truncated>\n")
+        self.assertIn("<looks_truncated>", e["status"])
+
+    def test_looks_truncated_backslash(self):
+        e = self._entry("K=secret\\\n")
+        self.assertIn("<looks_truncated>", e["status"])
+
+    def test_set_includes_length(self):
+        e = self._entry("K=hello\n")
+        self.assertEqual(e["length"], 5)
+
+    def test_quoted_value_length(self):
+        # quote 剥がしの後の長さ (5)
+        e = self._entry('K="hello"\n')
+        self.assertEqual(e["length"], 5)
+
+    def test_set_with_short_combination(self):
+        # url + 短い → set + short
+        e = self._entry("K=a://x\n")
+        self.assertIn("<set>", e["status"])
+        self.assertIn("<short>", e["status"])
+
+
+class TestDotenvFormatOutput(unittest.TestCase):
+    """0.9.0 format_dotenv の新出力 (prefix / status / length / matched)。"""
+
+    def test_format_includes_length(self):
+        reason = _redact_text(".env", "K=hello\n")
+        self.assertIn("length=5", reason)
+
+    def test_format_includes_set_tag(self):
+        reason = _redact_text(".env", "K=hello\n")
+        self.assertIn("<set>", reason)
+
+    def test_format_includes_empty_tag_no_length(self):
+        reason = _redact_text(".env", "K=\n")
+        self.assertIn("<empty>", reason)
+        # empty のときは length= を出さない
+        self.assertNotIn("length=0", reason)
+
+    def test_format_includes_placeholder_matched(self):
+        reason = _redact_text(".env", "K=your_jwt_secret_here\n")
+        self.assertIn("<placeholder>", reason)
+        self.assertIn('matched="your_*_here"', reason)
+
+    # test_format_includes_prefix は GitHub Push Protection との衝突回避
+    # のため削除。format に prefix が埋まることは test_format_jwt_prefix_ey
+    # (jwt 版) で同等に担保される。
+
+    def test_format_jwt_prefix_ey(self):
+        text = (
+            "K=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ"
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
+        )
+        reason = _redact_text(".env", text)
+        self.assertIn('<type=jwt prefix="ey">', reason)
+
+    def test_format_no_prefix_for_str(self):
+        reason = _redact_text(".env", "K=arbitrary_value\n")
+        self.assertIn("<type=str>", reason)
+        # str 型に prefix= は出ない
+        self.assertNotIn("<type=str prefix=", reason)
+
+    def test_format_note_updated(self):
+        reason = _redact_text(".env", "K=hello\n")
+        # note 文に length / status の説明が入っている
+        self.assertIn("length", reason)
+        self.assertIn("status tags", reason)
+
+    def test_no_value_leak_with_status(self):
+        # 旧 0.9.0 テストでは Stripe + JWT 値で実値漏れを確認していたが、
+        # GitHub Push Protection との衝突回避のため JWT のみで再構成。
+        # Stripe 形式の type/prefix は test_stripe_secret_and_pk_rules_registered
+        # 経由で内部 _PREFIX_TYPE_MAP の構成として別途担保。
+        text = "JWT=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.SflKxwRJSMeKKF2QT4f\n"
+        reason = _redact_text(".env", text)
+        # 実値部分は出ない (eyJzdWIi / SflKxwRJ)
+        self.assertNotIn("eyJzdWIi", reason)
+        self.assertNotIn("SflKxwRJ", reason)
+        # ただし prefix (ey) は出る (Q3 採用)
+        self.assertIn('prefix="ey"', reason)
+
+
 class TestDotenvInlineComment(unittest.TestCase):
     """dotenv inline comment の値漏洩と型誤判定の回帰 (#7)。"""
 
