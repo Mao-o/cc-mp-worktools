@@ -259,8 +259,11 @@ class TestE2EReadHandler(unittest.TestCase):
         result = _run_main(envelope, ["--tool", "bash"])
         self.assertEqual(result, {})
 
-    def test_bash_auto_env_prefix_dotenv_denies(self):
-        """env prefix を剥がした後の確定 match は auto でも deny (0.3.2)。"""
+    def test_bash_auto_env_prefix_dotenv_allows(self):
+        """0.8.0: env-assignment prefix は opaque first token として ``ask_or_allow``。
+        auto mode では allow (= 空 dict) に倒す。0.3.2〜0.7.x の prefix normalize
+        撤廃。
+        """
         envelope = {
             "tool_name": "Bash",
             "tool_input": {
@@ -270,12 +273,12 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
+        self.assertEqual(result, {})
 
-    def test_bash_auto_abs_env_basename_denies(self):
-        """/usr/bin/env basename=env で透過 → cat .env で deny (0.3.2)。"""
+    def test_bash_auto_abs_env_basename_allows(self):
+        """0.8.0: ``/usr/bin/env`` のような任意 path exec は opaque first token →
+        ``ask_or_allow``。auto mode で allow に倒る。0.3.2〜0.7.x の透過剥がしは撤廃。
+        """
         envelope = {
             "tool_name": "Bash",
             "tool_input": {
@@ -286,9 +289,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
+        self.assertEqual(result, {})
 
     def test_bash_auto_abs_cat_basename_allows(self):
         """basename=cat は透過対象外 → opaque → auto で allow (0.3.2)。"""

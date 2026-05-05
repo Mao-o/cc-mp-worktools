@@ -705,6 +705,114 @@ Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
 
+### 2026-05-06: PR 3 完了 (0.8.0 リリース) — A4 / B2 / B3
+
+思想 1 (うっかり露出予防、敵対的防御は非目的) 仕上げの 3 件を一体で消化。
+prefix normalize / 鍵名 prompt-injection 文言除去 / 既定 rules 候補列挙を撤廃
+し、autonomous で素通りするケースを増やすことで「うっかり書かない形」
+(``FOO=1 cat .env`` / ``cat *.key`` / 鍵名 ``system:foo``) への過剰対応を取り
+払った。**deny 動作の判定境界が複数変化** (prefix 系 deny → ask_or_allow、
+非 dotenv glob deny → ask_or_allow、ただし ``cat .env`` 等 literal や ``cat .env*``
+等 dotenv glob は deny 維持)。
+
+#### 実装
+
+- **A4**: `bash_handler._normalize_segment_prefix` (60 行)、
+  `bash/operand_lexer._is_absolute_or_relative_path_exec`、
+  `bash/constants._TRANSPARENT_COMMANDS` を撤廃し、`_analyze_segment` に
+  `_is_opaque_first_token` の inline 判定を新設。第一トークンが env-assignment
+  (``FOO=1``) / `env` / `command` / `builtin` / `nohup` / opaque wrapper /
+  任意 path exec のいずれかなら `ask_or_allow("opaque_prefix")` に倒す。
+  `_OPAQUE_WRAPPERS` に `env` / `command` / `builtin` / `nohup` を統合。
+- **B2**: `redaction/sanitize._INJECTION_PATTERNS` を case-insensitive な
+  `</?\\s*DATA` 1 行に縮小。`ignore previous` / `ignore all` / `system:` /
+  `assistant:` / `</?system|</?user|</?assistant` の prompt-injection 文言を
+  鍵名・basename から `[?]` 置換するロジックを撤廃 (思想 1 外)。制御文字
+  除去 + `MAX_KEY_LEN=128` / `MAX_BASENAME_LEN=128` の長さ切り詰めは維持。
+- **B3**: `bash_handler._glob_operand_is_sensitive`、
+  `bash/operand_lexer._literalize` / `_glob_candidates` を撤廃し、
+  `_glob_operand_is_dotenv_match(operand)` (operand_lexer.py) を新設。
+  ``fnmatchcase(stem, op_glob)`` で stem ∈ `(.env, .envrc)` の literal 一致を
+  判定。`_analyze_segment` の glob 分岐は新関数で True なら deny、False なら
+  ``ask_or_allow`` に倒す形に変更。
+
+#### テスト結果
+
+- 累計 495 → **465 件 OK** (redact 468→438 件 / check 27 件維持)
+- 削除: `tests/test_prefix_normalize.py` (24 件)、
+  `tests/test_glob_candidates.py` (25 件)、
+  `tests/test_sanitize.py::TestSanitizeKey.test_injection_ignore` /
+  `test_injection_system` / `TestSanitizeBasename.test_injection`
+- 改修: `TestPrefixStrippingDeny` を `TestOpaquePrefixAskOrAllow` に書き換え
+  (12 ケース、deny → ask/allow)、`TestPrefixStrippingOpaque` を
+  `TestPrefixWithOptionsOpaque` に rename (内容維持)、`TestWrapperBypass.test_nohup_cat`
+  を `_default` / `_auto` に分割 (ask/allow)、`TestGlobMatch` を `TestGlobDotenvDeny` /
+  `TestGlobUncertainAskOrAllow` / `TestGlobLiteralExcludeAllow` に再編、
+  `tests/test_e2e.py` の `auto_env_prefix_dotenv_denies` / `auto_abs_env_basename_denies`
+  を `_allows` に書き換え
+- 新規: `tests/test_glob_dotenv.py` (18 件、`_glob_operand_is_dotenv_match`
+  単体: dotenv 一致 / 非一致 / edge case / case sensitivity)、
+  `test_sanitize.py::TestSanitizeKey.test_injection_data_tag_open` /
+  `test_prompt_text_passthrough`、`TestSanitizeBasename.test_data_tag_collision` /
+  `test_prompt_text_passthrough`
+
+#### コード削減
+
+| ファイル | 行数差 |
+|---|---|
+| `handlers/bash_handler.py` | -75 (`_normalize_segment_prefix` 60 行 + `_glob_operand_is_sensitive` 14 行 + re-export) |
+| `handlers/bash/operand_lexer.py` | -50 (削除/新設の差分、新 helper の docstring 厚め) |
+| `handlers/bash/constants.py` | -3 |
+| `redaction/sanitize.py` | -3 |
+| 合計 | **-131 行** |
+
+#### ドキュメント更新
+
+- `docs/MATRIX.md`: 5 mode 列を維持しつつ、Bash deny 表から prefix 系 / 一般
+  glob 系を ask_or_allow 表に移動。dotenv stem 一致 glob は deny 維持で整理
+- `docs/DESIGN.md`: Bash handler 対応文法範囲表に「dotenv glob 一致 / opaque
+  first token / 非 dotenv glob」を追加、既知制限 #2 / #4 を 0.8.0 に書換、
+  責務境界 test seam テーブルから旧 symbol を整理、`_glob_candidates` 歴史
+  セクションを「glob operand 判定の歴史 (0.3.2 → 0.8.0)」に書換
+- `README.md`: glob false positive note を 0.8.0 で書換、prefix normalize 撤廃
+  note を追加、テスト件数を 438 に更新
+- `CLAUDE.local.md`: 進捗を 0.8.0 (PR 3) で更新、plugin.json version 0.8.0、
+  patch seam テーブル整理、Bash handler 判定フロー mermaid を opaque first
+  token / dotenv glob match の新フローに書換
+- `CHANGELOG.md`: 0.8.0 エントリ追加 (本 PR の差分まとめ)
+
+#### `claude plugin validate` 結果
+
+```
+$ claude plugin validate plugins/sensitive-files-guard
+Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
+Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
+⚠ Found 1 warning:
+  ❯ root: CLAUDE.local.md at the plugin root is not loaded as project context.
+✔ Validation passed with warnings
+```
+
+`CLAUDE.local.md` 配置の warning は plugin 設計上の既知事項 (個人環境メモを
+公開リポジトリの plugin root に置かないようにすべき、という指針)。本 PR の
+範囲外なので残置。
+
+#### 完了状況サマリ (0.8.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 (prefix normalize 撤廃) | **0.8.0 ✓** |
+| P3 | B2 (`_INJECTION_PATTERNS` 縮小) | **0.8.0 ✓** |
+| P3 | B3 (glob 候補列挙を ask 格下げ) | **0.8.0 ✓** |
+| P4 | E1 (dotenv value status) | 未着手 (PR 4) |
+| P4 | E2 (placeholder 辞書) | 未着手 (PR 4) |
+| P5 | E3 (Bash コマンド別 reason) | 未着手 (PR 5) |
+| P5 | E4 (grep パターン抽出) | 未着手 (PR 5) |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
 ---
 
 ## 新規セッションでこのファイルを開いた時の手順

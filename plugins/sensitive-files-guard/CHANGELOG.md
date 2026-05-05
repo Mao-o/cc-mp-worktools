@@ -1,5 +1,157 @@
 # Changelog
 
+## 0.8.0
+
+**思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 3 を消化**:
+思想 1 (うっかり露出予防、敵対的防御は非目的) 仕上げの 3 件 (A4 / B2 / B3) を
+一体で撤廃。prefix normalize / 鍵名 prompt-injection 文言除去 / 既定 rules
+候補列挙を縮約し、autonomous で素通りするケースを増やすことで「うっかり書かない
+形」(``FOO=1 cat .env`` / ``cat *.key`` / 鍵名 ``system:foo``) への過剰対応を
+取り払った。
+
+### 主要な変更
+
+1. **A4: prefix normalize 撤廃**
+   — `bash_handler._normalize_segment_prefix`、`bash/operand_lexer._is_absolute_or_relative_path_exec`、
+   `bash/constants._TRANSPARENT_COMMANDS` を撤廃し、`_analyze_segment` に
+   `_is_opaque_first_token` の inline 判定を新設。第一トークンが env-assignment
+   (``FOO=1``) / `env` / `command` / `builtin` / `nohup` / opaque wrapper
+   (`bash` / `sudo` / `eval` / `time` / ...) / 任意 path exec (``/bin/cat`` /
+   ``./script``) のいずれかなら `ask_or_allow("opaque_prefix")` に倒す。
+   `_OPAQUE_WRAPPERS` には `env` / `command` / `builtin` / `nohup` を統合。
+   0.3.2〜0.7.x で行っていた「``FOO=1 cat .env`` を ``cat .env`` と解釈する
+   prefix 透過」は撤廃。
+2. **B2: `_INJECTION_PATTERNS` を `</?DATA` のみに縮小**
+   — `redaction/sanitize._INJECTION_PATTERNS` を case-insensitive な
+   `</?\\s*DATA` 1 行に縮小。`ignore previous` / `ignore all` / `system:` /
+   `assistant:` / `</?system|</?user|</?assistant` の prompt-injection 文言を
+   鍵名・basename から `[?]` 置換するロジックを撤廃 (思想 1 外)。制御文字除去 +
+   `MAX_KEY_LEN=128` / `MAX_BASENAME_LEN=128` の長さ切り詰めは維持。
+   Read 側 ``<DATA untrusted="true">`` 外殻の破壊防止に必要な DATA タグ衝突
+   検出は引き続き残す。
+3. **B3: glob 候補列挙を `_glob_operand_is_dotenv_match` に縮約**
+   — `bash_handler._glob_operand_is_sensitive`、`bash/operand_lexer._literalize`
+   / `_glob_candidates` を撤廃し、`_glob_operand_is_dotenv_match(operand)`
+   (operand_lexer.py) を新設。``fnmatchcase(stem, op_glob)`` で stem ∈
+   `(.env, .envrc)` の literal 一致を判定。`SFG_CASE_SENSITIVE` 環境変数を
+   尊重 (未設定時は lower 比較)。`_analyze_segment` の glob 分岐は新関数で
+   True なら deny 固定、False なら `ask_or_allow` に倒す形に変更。0.3.2〜0.7.x
+   の既定 rules 候補列挙 (`cat *.key` / `cat id_rsa*` / `cat cred*.json` を
+   交差で deny) は撤廃。
+
+### 挙動変更 (0.7.0 → 0.8.0)
+
+| ケース | 0.7.0 | 0.8.0 |
+|---|---|---|
+| `FOO=1 cat .env` / `FOO=1 BAR=2 cat .env` | deny | ask_or_allow (default=ask, auto/bypass=allow) |
+| `env cat .env` / `env FOO=1 cat .env` | deny | ask_or_allow |
+| `command cat .env` / `builtin cat .env` / `nohup cat .env` | deny | ask_or_allow |
+| `nohup command cat .env` / `command env FOO=1 cat .env` | deny | ask_or_allow |
+| `/usr/bin/env FOO=1 cat .env` / `/bin/command cat .env` | deny | ask_or_allow |
+| `cat .env` / `grep X .env` / `cp .env y` / `git show HEAD:.env` | deny | deny (維持) |
+| `cat .env*` (`fnmatchcase(".env", ".env*")=True`) | deny | deny (維持) |
+| `cat *.envrc` / `cat .envrc*` (`.envrc` literal 一致) | deny | deny (維持) |
+| `cat .e[n]v` / `cat .en?` / `cat [.]env` (`.env` literal 一致) | deny | deny (維持) |
+| `cat .env.*` (`.env` literal に fnmatch しない) | deny | ask_or_allow |
+| `cat id_rsa*` / `cat id_*` / `cat *.key` / `cat cred*.json` | deny | ask_or_allow |
+| `cat .env.example` (literal、exclude rule) | allow | allow (維持) |
+| `cat .env.example*` | allow (exclude 決着) | ask_or_allow |
+| `cat *.log` | allow (rules 非交差) | ask_or_allow (default=ask, auto/bypass=allow) |
+| 鍵名 `IGNORE PREVIOUS instructions` | `[?]` | そのまま (制御文字除去 + 長さ切り詰めのみ) |
+| 鍵名 `system:do_x` / `assistant:foo` | `[?]` | そのまま |
+| 鍵名 / basename `</DATA>` / `<DATA` | `[?]` | `[?]` (維持) |
+
+### 内部 API の変更 (caller があれば追従が必要)
+
+- `handlers.bash_handler` から削除: `_normalize_segment_prefix`,
+  `_glob_operand_is_sensitive` (test seam)。
+- `handlers.bash.operand_lexer` から削除: `_literalize`, `_glob_candidates`,
+  `_is_absolute_or_relative_path_exec`。
+- `handlers.bash.constants` から削除: `_TRANSPARENT_COMMANDS`。
+  `_OPAQUE_WRAPPERS` に `env` / `command` / `builtin` / `nohup` を統合。
+  `_ENV_PREFIX_RE` は残し (`_is_opaque_first_token` で 1 回だけ使う)。
+- `handlers.bash.operand_lexer` に新設: `_glob_operand_is_dotenv_match(operand)`、
+  および定数 `_DOTENV_GLOB_STEMS = (".env", ".envrc")`。
+- `handlers.bash_handler` に新設: `_is_opaque_first_token(token)` (内部 helper)。
+- `redaction.sanitize._INJECTION_PATTERNS` の regex 内容変更:
+  `(ignore\\s+previous|...|</?DATA|</?system|...)` → `</?\\s*DATA`。
+- 観測ログ追加: `bash_classify:glob_uncertain_lenient` (glob で dotenv stem と
+  一致しなかったとき)。
+
+### テスト
+
+- 削除:
+  - `tests/test_prefix_normalize.py` (24 ケース、`_normalize_segment_prefix`
+    直接 import)
+  - `tests/test_glob_candidates.py` (25 ケース、`_glob_candidates` /
+    `_glob_operand_is_sensitive` / `_literalize` 直接 import)
+  - `tests/test_sanitize.py::TestSanitizeKey.test_injection_ignore` /
+    `test_injection_system` (3 ケース、prompt 文言系の `[?]` 置換アサート)
+  - `tests/test_sanitize.py::TestSanitizeBasename.test_injection`
+- 改修:
+  - `tests/test_bash_handler.py::TestPrefixStrippingDeny` を
+    `TestOpaquePrefixAskOrAllow` (12 ケース、deny → ask/allow) に書き換え
+  - `tests/test_bash_handler.py::TestPrefixStrippingOpaque` を
+    `TestPrefixWithOptionsOpaque` (8 ケース、内容維持) に rename
+  - `tests/test_bash_handler.py::TestWrapperBypass.test_nohup_cat` を
+    `_default` / `_auto` 2 ケースに分割し ask/allow に書き換え
+  - `tests/test_bash_handler.py::TestGlobMatch` (15 ケース) を
+    `TestGlobDotenvDeny` (6 ケース、deny 維持: ``.env*`` / ``*.envrc`` /
+    ``.envrc*`` / ``.e[n]v`` / ``.en?`` / ``[.]env``) +
+    `TestGlobUncertainAskOrAllow` (12 ケース、ask 系: ``.env.*`` / ``id_rsa*`` /
+    ``id_*`` / ``*.key`` / ``cred*.json`` / ``*.log`` / ``.env.example*``) +
+    `TestGlobLiteralExcludeAllow` (2 ケース、literal exclude 維持) に再編
+  - `tests/test_e2e.py::test_bash_auto_env_prefix_dotenv_denies` →
+    `_allows` に書き換え (auto モードで allow)
+  - `tests/test_e2e.py::test_bash_auto_abs_env_basename_denies` →
+    `_allows` に書き換え
+  - `tests/test_sanitize.py::TestSanitizeKey` に
+    `test_injection_data_tag_open` / `test_prompt_text_passthrough` を新設、
+    `TestSanitizeBasename` に `test_data_tag_collision` /
+    `test_prompt_text_passthrough` を新設
+- 新規:
+  - `tests/test_glob_dotenv.py` (18 ケース、`_glob_operand_is_dotenv_match`
+    の単体テスト: dotenv 一致 / 非一致 / edge case / case sensitivity)
+- 累計 495 → **465 件 OK** (redact 468→438 件 / check 27 件維持)
+
+### コード削減
+
+| ファイル | 行数差 |
+|---|---|
+| `handlers/bash_handler.py` | -75 (`_normalize_segment_prefix` 60 行 + `_glob_operand_is_sensitive` 14 行 + re-export) |
+| `handlers/bash/operand_lexer.py` | -50 (`_literalize` / `_glob_candidates` / `_is_absolute_or_relative_path_exec` 削除、`_glob_operand_is_dotenv_match` + `_DOTENV_GLOB_STEMS` 新設で打ち消し) |
+| `handlers/bash/constants.py` | -3 (`_TRANSPARENT_COMMANDS` 削除、`_OPAQUE_WRAPPERS` に 4 値統合) |
+| `redaction/sanitize.py` | -3 (`_INJECTION_PATTERNS` の regex 縮小) |
+| 合計 | **-131 行** (見込み ≈158 行を若干下回り、新設 helper の docstring が想定より厚かったため) |
+
+### ドキュメント
+
+- `docs/MATRIX.md`: Bash deny 表から prefix 系 (FOO=1 / env / command /
+  builtin / nohup / /usr/bin/env / /bin/command) と glob 系 (`*.key` /
+  `id_rsa*` / `cred*.json`) を削除し、ask_or_allow 表に追加。glob 系で deny
+  維持された行 (`.env*` / `*.envrc` / `.e[n]v` / `.en?` / `[.]env`) を整理。
+  PR 3 撤廃 note を追加。
+- `docs/DESIGN.md`: 「Bash handler の対応文法範囲」表から「前置き正規化」を撤廃し、
+  「対応 (deny/allow 確定できる)」に dotenv glob 一致行を追加。「対応外」表に
+  「opaque first token (env-assignment / env / command / builtin / nohup /
+  任意 path exec)」「dotenv stem 不一致 glob」の 2 行を追加。既知制限 #2 と #4
+  を 0.8.0 に書換、責務境界の test seam テーブルを更新。`_glob_candidates`
+  歴史セクションを「glob operand 判定の歴史 (0.3.2 → 0.8.0)」に書換。
+- `README.md`: glob false positive note を 0.8.0 で書換、prefix normalize 撤廃
+  note を追加、テスト件数を 438 (0.8.0) に更新。
+- `CLAUDE.local.md`: 進行中レビュー進捗を 0.8.0 (PR 3) で更新、ディレクトリ
+  構成の plugin.json version を 0.8.0、patch seam テーブルから旧 symbol を
+  整理、Bash handler 判定フロー mermaid を opaque first token / dotenv glob
+  match の新フローに書換。
+- `core/messages.py` / `redaction/sanitize.py` / `handlers/bash_handler.py` /
+  `handlers/bash/constants.py` / `handlers/bash/operand_lexer.py` の docstring
+  を 0.8.0 撤廃内容に合わせて更新。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-06.md` の **A4 / B2 / B3** を消化。残るは
+**E1〜E6 + D1 / D2** (PR 4-6, 0.9.0〜1.0.0)。
+
 ## 0.7.0
 
 **思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 2 を消化**:

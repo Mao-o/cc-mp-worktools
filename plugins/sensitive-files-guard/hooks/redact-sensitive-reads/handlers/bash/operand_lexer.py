@@ -1,11 +1,12 @@
-"""operand トークンの glob 判定 / literalize / path 候補抽出 (0.3.3 分解)。
+"""operand トークンの glob 判定 / dotenv glob 判定 / path 候補抽出
+(0.3.3 分解、0.8.0 で `_literalize` / `_glob_candidates` / `_is_absolute_or_relative_path_exec` 撤廃)。
 
 このモジュールは副作用なし・plugin 状態非依存。``SFG_CASE_SENSITIVE`` 環境変数の
 参照のみ外部状態 (全テストで同じ解釈をしたいため、``is_sensitive`` 側の opt-out
 と整合させる)。
 
-``_glob_operand_is_sensitive`` / ``_operand_is_sensitive`` は ``is_sensitive`` /
-``normalize`` に依存する plugin ステート側の処理なので ``bash_handler.py`` に残す。
+``_operand_is_sensitive`` は ``is_sensitive`` / ``normalize`` に依存する plugin
+ステート側の処理なので ``bash_handler.py`` に残す。
 """
 from __future__ import annotations
 
@@ -14,14 +15,12 @@ from fnmatch import fnmatchcase
 
 from handlers.bash.constants import _GLOB_CHARS
 
-
-def _is_absolute_or_relative_path_exec(token: str) -> bool:
-    """``/bin/cat`` / ``./script`` / ``../foo`` のような path 実行か。"""
-    return (
-        token.startswith("/")
-        or token.startswith("./")
-        or token.startswith("../")
-    )
+# dotenv ファミリーで「うっかり頻出」とする literal stem (0.8.0)。
+# operand glob (例: ``.env*`` / ``*.envrc``) がこれらに ``fnmatchcase`` で
+# 一致するときだけ deny に倒す。それ以外の glob (``id_rsa*`` / ``*.key`` /
+# ``cred*.json`` / ``*.log`` 等) は ``ask_or_allow`` に格下げ (思想 1: うっかり
+# 露出予防が目的、敵対的防御は非目的)。
+_DOTENV_GLOB_STEMS = (".env", ".envrc")
 
 
 def _has_glob(token: str) -> bool:
@@ -29,64 +28,39 @@ def _has_glob(token: str) -> bool:
     return any(c in _GLOB_CHARS for c in token)
 
 
-def _literalize(pattern: str) -> str:
-    """fnmatch glob 文字 (``*`` ``?`` ``[...]``) を除去した最小 literal 表現。
+def _glob_operand_is_dotenv_match(operand: str) -> bool:
+    """operand glob が dotenv 系の literal stem (``.env`` / ``.envrc``) に一致するか。
 
-    例: ``.env*`` → ``.env``, ``*.env.*`` → ``.env.``, ``[.]env`` → ``env``,
-    ``?ecret*`` → ``ecret``, ``id_rsa*`` → ``id_rsa``。
+    判定: ``fnmatchcase(stem, op_glob)`` を ``stem ∈ _DOTENV_GLOB_STEMS`` で実施。
+
+    例:
+    - ``.env*`` → ``fnmatchcase(".env", ".env*")`` = True → deny
+    - ``.env.*`` → ``fnmatchcase(".env", ".env.*")`` = False (".env." 以降が必要)
+      → ask_or_allow に格下げ
+    - ``*.envrc`` → ``fnmatchcase(".envrc", "*.envrc")`` = True → deny
+    - ``.envrc*`` → ``fnmatchcase(".envrc", ".envrc*")`` = True → deny
+    - ``.e[n]v`` / ``.en?`` / ``[.]env`` → ``fnmatchcase(".env", op)`` = True → deny
+    - ``id_rsa*`` / ``*.key`` / ``cred*.json`` / ``*.log`` → どちらの stem にも
+      一致しない → ask_or_allow に格下げ
+    - ``.env.example*`` → ``.env`` にも ``.envrc`` にも一致しない → ask_or_allow
+
+    0.3.2〜0.7.x で行っていた既定 rules への候補列挙
+    (``_glob_candidates`` / ``_glob_operand_is_sensitive``) は思想 1 に対して
+    deny 寄り過ぎる (``cat *.json`` / ``cat *.key`` / ``cat id_rsa*`` を全 mode
+    deny する) と判断し 0.8.0 で撤廃した。dotenv stem (``.env`` / ``.envrc``)
+    のうっかり頻出ケースだけを残す形に縮約。
+
+    ``SFG_CASE_SENSITIVE=1`` 未設定時は lower 比較する (``is_sensitive`` 側の
+    opt-out と整合)。
     """
-    out: list[str] = []
-    i = 0
-    n = len(pattern)
-    while i < n:
-        c = pattern[i]
-        if c in ("*", "?"):
-            i += 1
-            continue
-        if c == "[":
-            j = pattern.find("]", i + 1)
-            if j == -1:
-                out.append(c)
-                i += 1
-            else:
-                i = j + 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
-def _glob_candidates(
-    operand: str, rules: list[tuple[str, bool]]
-) -> list[str]:
-    """operand の具体化候補を既定 rules の stem から生成する。
-
-    生成源:
-    1. operand 自身の literal stem (``_literalize(operand)``)
-    2. 各 rule の literal stem を operand の glob に fnmatch して match するもの
-       (例: op=``id_*`` に rule pt_stem=``id_rsa`` が match → 候補入り)
-
-    ``SFG_CASE_SENSITIVE`` 未設定時は lower 比較で候補生成する (``is_sensitive``
-    側の opt-out と整合)。
-
-    Note: プランの初期案には (op_stem+pt_stem) / (pt_stem+op_stem) の **連結候補**
-    を加える項目もあったが、``*.log`` に対して ``.env`` rule との連結 ``.env.log``
-    が候補化されてしまい、``is_sensitive(".env.log")`` が ``.env.*`` rule で True に
-    なる結果 ``cat *.log`` が deny されてしまう問題があった。usability 上 ``*.log``
-    は allow しておきたいので、連結候補は採用しない。``cred*.json`` ``id_*``
-    ``*.envrc`` 等の交差は (2) の rule pt_stem direct match だけで網羅できる。
-    """
+    if not operand:
+        return False
     cs = os.environ.get("SFG_CASE_SENSITIVE") == "1"
     op = operand if cs else operand.lower()
-    op_stem = _literalize(op)
-    candidates: set[str] = {op_stem} if op_stem else set()
-
-    for pattern, _ in rules:
-        pat = pattern if cs else pattern.lower()
-        pt_stem = _literalize(pat)
-        if pt_stem and fnmatchcase(pt_stem, op):
-            candidates.add(pt_stem)
-    return [c for c in candidates if c]
+    for stem in _DOTENV_GLOB_STEMS:
+        if fnmatchcase(stem, op):
+            return True
+    return False
 
 
 def _find_path_candidates(tokens: list[str]) -> list[str]:

@@ -1,12 +1,16 @@
-"""鍵名・basename・制御記号・注入パターンの sanitize + DATA タグエスケープ。
+"""鍵名・basename・制御記号・DATA タグ衝突の sanitize + DATA タグエスケープ。
 
-``<DATA untrusted="true">`` 包装だけに頼らず、鍵名そのものから命令文・制御記号・
-過度な長さを除去する。モデルが敵対的文脈を扱う保証はない前提。
+``<DATA untrusted="true">`` 包装だけに頼らず、鍵名そのものから制御記号・過度な長さ・
+DATA タグ衝突文字列を除去する。モデルが敵対的文脈を扱う保証はない前提。
 
 ``escape_data_tag`` は body 全文を通すエスケープ層で、``</DATA>`` / ``<DATA`` /
 大小混じりの ``<data>`` が本文中に現れても包装が破綻しないよう HTML エンティティで
-エスケープする (0.7.0 で DATA タグ専用に縮約。SFG_DENY 構造化包装を撤廃した
-ため、``escape_xml_tag`` 経由の任意タグ対応は不要になった)。
+エスケープする (0.7.0 で DATA タグ専用に縮約)。
+
+0.8.0 で ``_INJECTION_PATTERNS`` を ``<DATA`` 系のみに縮小した。``system:`` /
+``assistant:`` / ``ignore previous`` のような prompt 文言を鍵名・basename から
+除去するロジックは思想 1 (うっかり露出予防、敵対的防御は非目的) 外の敵対的
+シナリオなため撤廃。制御文字除去 + 長さ切り詰めは維持。
 """
 from __future__ import annotations
 
@@ -18,11 +22,11 @@ _CTRL_CHARS = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
 # 改行タブも鍵名からは除去 (値には残さないので基本不要だが防御的に)
 _NEWLINE_TAB = re.compile(r"[\r\n\t]")
 
-# 代表的なプロンプトインジェクションパターン (鍵名に混入したら警告)
-_INJECTION_PATTERNS = re.compile(
-    r"(?i)(ignore\s+previous|ignore\s+all|system\s*:|assistant\s*:|"
-    r"</?DATA|</?system|</?user|</?assistant)"
-)
+# DATA タグ衝突防止: ``<DATA`` / ``</DATA`` が鍵名・basename に混入した場合の
+# 最低限の防御。Read 側の ``<DATA untrusted="true">`` 外殻を本文側が破壊する
+# のを防ぐ。0.8.0 で prompt 文言系 (``ignore previous`` / ``system:`` /
+# ``assistant:`` / ``</?system|</?user|</?assistant``) を除去 (思想 1 外)。
+_INJECTION_PATTERNS = re.compile(r"</?\s*DATA", re.IGNORECASE)
 
 # 鍵名の最大長 (実運用でこれより長い鍵はほぼ攻撃)
 MAX_KEY_LEN = 128

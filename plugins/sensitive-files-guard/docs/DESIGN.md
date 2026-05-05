@@ -68,15 +68,15 @@ deny に倒す (機密可能性があるものは ask 維持で bypass だけ de
 Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 `bash_handler.py::handle` 内で `_split_command_on_operators` (quote-aware セグメント
 分割) 後の各 segment を shlex.split し、コマンド token 単位で解析する
-(prefix normalize, shell keyword 検出, operand scan)。
+(opaque first token 判定, shell keyword 検出, operand scan)。
 
 ### 対応 (deny/allow 確定できる)
 
 | カテゴリ | 構文 | 使用 parser |
 |---|---|---|
 | セグメント区切り | `cmd1 && cmd2`, `cmd1 \| cmd2` | `_split_command_on_operators` (0.3.0) |
-| 前置き正規化 | `FOO=1 cmd`, `env cmd`, `nohup cmd` | shlex token (0.3.2) |
-| operand scan | `cmd file1 file2`, URI/VCS | shlex token |
+| operand scan (literal) | `cmd file1 file2`, URI/VCS | shlex token (`_operand_is_sensitive`) |
+| operand scan (glob, dotenv stem 一致) | `cat .env*`, `cat *.envrc`, `cat .e[n]v` | shlex token + ``fnmatchcase`` (`_glob_operand_is_dotenv_match`, 0.8.0) |
 
 ### 対応外 (opaque `ask_or_allow` 扱い)
 
@@ -90,6 +90,8 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 | `$(cmd)`, `` `cmd` `` | 動的展開。静的解析不能 |
 | `[[ cond ]]`, `(( expr ))` | Bash 条件式 / 算術。hard_stop で opaque |
 | `bash -c "..."`, `eval`, `python -c` | wrapper。内部 script は未解析 |
+| 第一トークンが env-assignment (`FOO=1`) / `env` / `command` / `builtin` / `nohup` / 任意 path exec (`/bin/cat`, `./script`) | 0.3.2〜0.7.x で透過剥がし (`FOO=1 cat .env` を `cat .env` と解釈) で deny に倒していたが、思想 1 (うっかり露出予防、敵対的防御は非目的) に整合しないため 0.8.0 で撤廃。これらは ``ask_or_allow`` |
+| operand glob (`*` / `?` / `[` 含む) で dotenv literal stem (`.env` / `.envrc`) に fnmatch しないもの (`id_rsa*` / `*.key` / `cred*.json` / `*.log` / `.env.*` / `.env.example*` 等) | 0.3.2〜0.7.x で既定 rules 候補列挙 (`_glob_candidates` / `_glob_operand_is_sensitive`) で deny に倒していたが、`*.log` 等の日常 glob まで巻き込む False positive と思想 1 不整合のため 0.8.0 で撤廃。dotenv stem 一致のみ deny を維持 |
 
 ### 観測ログ
 
@@ -105,7 +107,7 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 [CLAUDE.md](../CLAUDE.md) 側に集約。コマンド別の deny/allow/ask 一覧は
 [MATRIX.md](./MATRIX.md) を参照。
 
-### 責務境界 (0.3.3 再設計)
+### 責務境界 (0.3.3 再設計、0.8.0 で簡素化)
 
 0.3.3 では `bash_handler.py` が 662 行に肥大化していたのを、責務境界で以下のよう
 に分割した:
@@ -115,7 +117,7 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 | `bash_handler.py` | orchestration + plugin ステート依存 + test seam | `core.*`, `handlers/bash/*` |
 | `handlers/bash/constants.py` | compile-time 定数 (regex / frozenset) | なし |
 | `handlers/bash/segmentation.py` | quote-aware セグメント分割 / hard-stop 検出 | `constants` |
-| `handlers/bash/operand_lexer.py` | glob 判定 / literalize / path 候補抽出 | `constants` |
+| `handlers/bash/operand_lexer.py` | glob 判定 / dotenv glob 一致 / path 候補抽出 | `constants` |
 | `handlers/bash/redirects.py` | 安全リダイレクト剥離 / 残留 metachar 判定 | `constants` |
 
 `handlers/bash/` 配下のモジュールは **副作用なし・plugin ステート非依存**
@@ -126,11 +128,14 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 維持する:
 
 - `handle` (orchestration)
-- `_normalize_segment_prefix` (patch seam)
-- `_operand_is_sensitive` / `_glob_operand_is_sensitive` (plugin ステート依存)
-- `_literalize` / `_glob_candidates` (pure だが test_glob_candidates.py が直接 import)
+- `_operand_is_sensitive` (plugin ステート依存)
+- `_glob_operand_is_dotenv_match` (0.8.0 新設、operand glob と dotenv stem の fnmatch)
 - `load_patterns` (test_failclosed.py の `mock.patch` 対象)
 - 各定数 (test が直接参照する可能性に備えて)
+
+> 0.7.x までの patch seam だった `_normalize_segment_prefix` (prefix 透過処理)、
+> `_literalize` / `_glob_candidates` / `_glob_operand_is_sensitive` (既定 rules
+> 候補列挙) は 0.8.0 で撤廃。`_is_absolute_or_relative_path_exec` も同時撤廃。
 
 ## 判定ロジックの詳細
 
@@ -153,11 +158,13 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 フロー図は CLAUDE.md 側にある。
 
 **unified operand scan**: 全セグメントで非 option トークンを一律
-`_operand_is_sensitive` / `_glob_operand_is_sensitive` に通す。コロンを含む
-operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の basename も判定。
-コマンドが実際に file を読むかどうかは静的に判別しないため false positive
+`_operand_is_sensitive` (literal path / URI / VCS pathspec) または
+`_glob_operand_is_dotenv_match` (glob 含み、dotenv stem 一致) に通す。コロンを
+含む operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の basename も
+判定。コマンドが実際に file を読むかどうかは静的に判別しないため false positive
 (`echo .env`, `ls .env`, `mkdir .env`) が出るが、`patterns.local.txt` の
-`!<basename>` exclude で個別対処できる。
+`!<basename>` exclude で個別対処できる。glob で dotenv stem と一致しないものは
+``ask_or_allow`` (0.8.0)。
 
 ### Edit/Write handler
 
@@ -189,15 +196,15 @@ deny reason のキー名ガイド:
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
 
-## 既知制限 (0.7.0 時点)
+## 既知制限 (0.8.0 時点)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
    `awk`, `sed`, `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
    などは静的解析できず、default モードでは ask、auto/bypass モードでは
-   **allow** に倒す。0.3.2 で前置き正規化が入ったため `FOO=1 cat .env`,
-   `env cat .env`, `command cat .env`, `nohup cat .env`,
-   `/usr/bin/env FOO=1 cat .env` は確定 match で deny に確定する。
+   **allow** に倒す。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
+   `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` も
+   ``ask_or_allow`` に格下げした (0.3.2〜0.7.x の prefix normalize は撤廃)。
 3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0)** — 0.3.4〜0.6.x では
    character-level quote-aware parser で `cat < .env` / `cat<.env` /
    `cat 0<.env` / `cat < ".env"` などから target を抽出し literal/glob 一致で
@@ -206,26 +213,35 @@ deny reason のキー名ガイド:
    思想 1 (うっかり露出予防が目的、敵対的防御は非目的) に反するため 0.7.0
    で撤廃。`<` を含む command は他の hard-stop と同じ ``ask_or_allow``
    (default で ask、autonomous で allow) に倒す。
-4. **autonomous モードでの opaque 緩和** — `bash -c 'cat .env'` の
+4. **glob operand の判定は dotenv stem 限定 (0.8.0)** — 0.3.2〜0.7.x で行っていた
+   既定 rules 候補列挙 (`_glob_candidates` / `_glob_operand_is_sensitive`) は
+   `cat *.log` `cat *.json` のような日常 glob まで「`.env` rule との連結候補」で
+   deny に巻き込む False positive があり、思想 1 と整合しないため 0.8.0 で撤廃。
+   現在は operand glob が dotenv literal stem (`.env` / `.envrc`) に
+   ``fnmatchcase`` で一致するときだけ deny 固定 (`cat .env*`, `cat *.envrc`,
+   `cat .e[n]v`, `cat .en?`, `cat [.]env`)。それ以外の glob (`id_rsa*`,
+   `*.key`, `cred*.json`, `*.log`, `.env.*`, `.env.example*` 等) は
+   ``ask_or_allow`` (default=ask, autonomous=allow)。
+5. **autonomous モードでの opaque 緩和** — `bash -c 'cat .env'` の
    ような shell wrapper 内に機密 path があっても auto/bypass では allow に
    倒る。wrapper 内部の script を解析しないため検出できない。autonomous モード
    を選んだユーザーが「日常コマンドを止めない」意図と平等な扱いとしての設計上の
    トレードオフ。完全防御を求める場合は default モードで運用する。
-5. **`__main__.py` catch-all は未緩和** — bash handler 内部で未捕捉
+6. **`__main__.py` catch-all は未緩和** — bash handler 内部で未捕捉
    例外が起きた場合、`__main__` 側の catch-all は従来通り `ask_or_deny`
    (auto=ask / bypass=deny)。tool 種別だけで一律 lenient にすると fail-closed
    境界が粗くなる。
-6. **親ディレクトリ差し替え race** — `O_NOFOLLOW` は最終要素のみ保護し、
+7. **親ディレクトリ差し替え race** — `O_NOFOLLOW` は最終要素のみ保護し、
    途中要素の symlink 差し替え race は対象外 (原理的に完全防御不能)
-7. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外
-8. **`<DATA untrusted>` モデル解釈保証なし** — 包装 + sanitize + DATA タグ
+8. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外
+9. **`<DATA untrusted>` モデル解釈保証なし** — 包装 + sanitize + DATA タグ
    エスケープで多段防御するが、モデルが敵対的文脈として扱う保証は無い
-9. **Windows は fail-closed で deny exit** — SIGALRM 非対応のため hook 冒頭で
-   deny exit する (Step 0-c 実測結果確定前の暫定方針)
-10. **submodule 内 untracked は非対象** — `git ls-files --recurse-submodules` は
+10. **Windows は fail-closed で deny exit** — SIGALRM 非対応のため hook 冒頭で
+    deny exit する (Step 0-c 実測結果確定前の暫定方針)
+11. **submodule 内 untracked は非対象** — `git ls-files --recurse-submodules` は
     tracked のみ。untracked を submodule 内まで拾う git native オプションは無い
-11. **Git バージョン依存** — `--recurse-submodules` は git 1.7+ が必要
-12. **`!` プレフィックス (Claude Code bash mode) は防御対象外** — ユーザーが
+12. **Git バージョン依存** — `--recurse-submodules` は git 1.7+ が必要
+13. **`!` プレフィックス (Claude Code bash mode) は防御対象外** — ユーザーが
     プロンプトに `! cat .env` と直接入力してシェルコマンドを実行した場合、
     公式仕様により **stdout が transcript に追加されて LLM コンテキストに流れ
     込む**。これはユーザーの明示的な意思操作なので hook の介在外
@@ -254,14 +270,21 @@ hook まで到達しなくても block される。
 副次防御が消えるため**本線の hook が唯一の防御になる**。したがって Edit/Write の
 matcher と edit_handler は dead code ではなく、**設計上の必須コンポーネント**。
 
-## `_glob_candidates` の設計判断 (0.3.2 以降維持)
+## glob operand 判定の歴史 (0.3.2 → 0.8.0)
 
-プランの初期案には (op_stem + pt_stem) / (pt_stem + op_stem) の **連結候補** を
-加える項目もあったが、`*.log` に対して `.env` rule との連結 `.env.log` が候補化
-され、`is_sensitive(".env.log")` が `.env.*` rule で True になる結果
-`cat *.log` が deny されてしまう問題があった。usability 上 `*.log` は allow して
-おきたいので、連結候補は採用しない (`cred*.json` `id_*` `*.envrc` 等の交差は
-rule pt_stem の direct match だけで網羅できる)。
+operand glob (`*` / `?` / `[`) の判定は数世代を経ている:
+
+- **0.3.2〜0.7.x**: `_glob_candidates` で operand glob と既定 rules の literal stem を
+  fnmatch 交差させて候補化し、`_glob_operand_is_sensitive` で is_sensitive 判定。
+  プランの初期案に「op_stem + pt_stem 連結候補」を加える項目もあったが、`*.log`
+  に対して `.env` rule との連結 `.env.log` が候補化されて `cat *.log` が deny に
+  巻き込まれる False positive があり、連結候補は不採用としていた。
+- **0.8.0**: `_glob_operand_is_sensitive` / `_glob_candidates` / `_literalize` を全
+  撤廃。dotenv literal stem (`.env` / `.envrc`) に operand glob が ``fnmatchcase``
+  で一致するかだけ見る `_glob_operand_is_dotenv_match` に置換。
+  `cat *.key` `cat id_rsa*` `cat cred*.json` `cat *.log` `cat .env.example*` 等は
+  すべて ``ask_or_allow`` (default=ask, autonomous=allow) に格下げ。思想 1
+  (うっかり露出予防、敵対的防御は非目的) に整合させた結果。
 
 ## Step 0-c 実測 (将来更新予定)
 

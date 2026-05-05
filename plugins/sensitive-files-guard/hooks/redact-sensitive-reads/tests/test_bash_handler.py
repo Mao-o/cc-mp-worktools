@@ -1,14 +1,15 @@
-"""Bash handler の判定テスト (0.3.2: 誤爆ガード緩和版)。
+"""Bash handler の判定テスト (0.8.0: prefix normalize / glob 候補列挙 撤廃)。
 
-主要変更:
+主要挙動:
 - opaque wrapper / hard-stop / shell keyword / 任意 path exec / 残留 metachar /
   shlex 失敗 → ``ask_or_allow`` (default=ask, auto/bypass=allow)
-- env prefix / ``env`` (option 無し) / ``command`` (option 無し) / ``builtin`` /
-  ``nohup`` の前置きは剥がして再判定。確定 match なら deny 固定 (全 mode)
-- glob operand → ``_glob_operand_is_sensitive`` (既定 rules への候補列挙)
-  - ``cat .env*`` ``cat .e[n]v`` ``cat .en?`` 等 → deny 固定
-  - ``cat *.log`` 等 → allow
-- ``< target`` 形式の入力リダイレクトは target 抽出して先に operand scan
+- env-assignment prefix (``FOO=1``) / ``env`` / ``command`` / ``builtin`` /
+  ``nohup`` / 任意 path 実行 (``/usr/bin/env``, ``/bin/cat``) は **opaque** 扱い
+  で ``ask_or_allow``。0.3.2〜0.7.x の prefix normalize は 0.8.0 で撤廃
+- glob operand → ``_glob_operand_is_dotenv_match`` で ``.env`` / ``.envrc``
+  literal に fnmatch するときだけ deny 固定。それ以外の glob は ``ask_or_allow``
+  (0.3.2〜0.7.x の既定 rules 候補列挙は 0.8.0 で撤廃)
+- ``<`` 入力リダイレクト系は hard-stop で ``ask_or_allow`` (0.7.0)
 - ``patterns.txt`` 読込失敗 → 全 mode で ``make_deny`` 固定
 """
 from __future__ import annotations
@@ -144,9 +145,9 @@ class TestDenyFixed(BaseBash):
 
 
 class TestHardStopLenient(BaseBash):
-    """hard-stop metachar (`$`, ``(``, `{`, バッククォート) は default=ask / auto/bypass=allow。
-
-    ``<`` だけは target 抽出が走り target 一致なら deny 固定 (TestInputRedirectDeny)。
+    """hard-stop metachar (`$`, ``(``, `{`, ``<``, バッククォート) は default=ask /
+    auto/bypass=allow。0.7.0 で ``<`` 入力リダイレクトの target 抽出を撤廃し、
+    全 hard-stop が ``ask_or_allow`` 一本に統合された。
     """
 
     def test_variable_expansion_default(self):
@@ -426,16 +427,25 @@ class TestUnknownCommandOperand(BaseBash):
 
 
 class TestWrapperBypass(BaseBash):
-    """wrapper 経由 (timeout/nohup/nice/stdbuf/busybox) でも operand .env が機密一致で deny。"""
+    """wrapper 経由 (timeout/nice/stdbuf/busybox) でも operand .env が機密一致で deny。
+
+    0.8.0 で ``nohup`` は ``_OPAQUE_WRAPPERS`` に統合 (透過プレフィクス撤廃) のため
+    ``ask_or_allow`` に倒れる。timeout/nice/stdbuf/busybox は通常コマンド扱いのため
+    operand scan で第二トークン以降の機密 path に一致して deny 固定 (維持)。
+    """
 
     def test_timeout_cat(self):
         r = handle(_make_envelope("timeout 1 cat .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_nohup_cat(self):
-        # nohup は 0.3.2 で transparent prefix → 剥がして cat .env で deny 確定
+    def test_nohup_cat_default(self):
+        # 0.8.0 で nohup は opaque wrapper (透過プレフィクス撤廃) → ask
         r = handle(_make_envelope("nohup cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
+
+    def test_nohup_cat_auto(self):
+        r = handle(_make_envelope("nohup cat .env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
 
     def test_nice_cat(self):
         r = handle(_make_envelope("nice cat .env", self.tmp))
@@ -450,62 +460,75 @@ class TestWrapperBypass(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestPrefixStrippingDeny(BaseBash):
-    """env prefix / env / command / builtin / nohup の前置きを剥がして確定 match で deny (0.3.2)。"""
+class TestOpaquePrefixAskOrAllow(BaseBash):
+    """0.8.0: env-assignment / env / command / builtin / nohup / 任意 path exec を含む
+    第一トークンは opaque 扱いで ``ask_or_allow`` (default=ask, auto/bypass=allow)。
+
+    0.3.2〜0.7.x で行っていた prefix normalize (``FOO=1 cat .env`` を
+    ``cat .env`` と解釈して deny) は 0.8.0 で撤廃。これらは「うっかり書く形」
+    ではないため思想 1 (うっかり露出予防、敵対的防御は非目的) と整合しない。
+    """
 
     def test_env_prefix_cat_default(self):
         r = handle(_make_envelope("FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
     def test_env_prefix_cat_auto(self):
         r = handle(_make_envelope("FOO=1 cat .env", self.tmp, mode="auto"))
-        self.assertEqual(_decision(r), "deny")
+        self.assertTrue(output.is_allow(r))
 
     def test_env_prefix_cat_bypass(self):
         r = handle(_make_envelope("FOO=1 cat .env", self.tmp, mode="bypassPermissions"))
-        self.assertEqual(_decision(r), "deny")
+        self.assertTrue(output.is_allow(r))
 
     def test_multi_env_prefix(self):
         r = handle(_make_envelope("FOO=1 BAR=2 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
-    def test_env_command_cat(self):
+    def test_env_command_cat_default(self):
         r = handle(_make_envelope("env cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
-    def test_env_command_with_assignment(self):
-        r = handle(_make_envelope("env FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+    def test_env_command_with_assignment_auto(self):
+        r = handle(_make_envelope("env FOO=1 cat .env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
 
-    def test_command_wrapper_cat(self):
+    def test_command_wrapper_cat_default(self):
         r = handle(_make_envelope("command cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
-    def test_builtin_wrapper_cat(self):
+    def test_builtin_wrapper_cat_default(self):
         r = handle(_make_envelope("builtin cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
     def test_nohup_chain_with_command(self):
         r = handle(_make_envelope("nohup command cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
-    def test_command_chain_with_env(self):
-        r = handle(_make_envelope("command env FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+    def test_command_chain_with_env_bypass(self):
+        r = handle(_make_envelope(
+            "command env FOO=1 cat .env", self.tmp, mode="bypassPermissions",
+        ))
+        self.assertTrue(output.is_allow(r))
 
-    def test_abs_env_with_assignment(self):
-        # /usr/bin/env FOO=1 cat .env: basename=env → 透過 → deny
+    def test_abs_env_with_assignment_default(self):
+        # /usr/bin/env: 任意 path exec → opaque → ask
         r = handle(_make_envelope("/usr/bin/env FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
 
-    def test_abs_command_wrapper(self):
-        # /bin/command cat .env: basename=command → 透過 → deny
-        r = handle(_make_envelope("/bin/command cat .env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+    def test_abs_command_wrapper_auto(self):
+        r = handle(_make_envelope("/bin/command cat .env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
 
 
-class TestPrefixStrippingOpaque(BaseBash):
-    """env / command にオプションがあると opaque (default=ask / auto/bypass=allow)。"""
+class TestPrefixWithOptionsOpaque(BaseBash):
+    """env / command にオプションがあるケースも opaque (default=ask / auto/bypass=allow)。
+
+    0.7.x ではオプション付きの env/command のみ opaque だったが、0.8.0 では
+    オプション有無に関わらず env/command/builtin/nohup を全て opaque にした
+    (TestOpaquePrefixAskOrAllow と統合)。本クラスは「オプション有り」の
+    regression 担保用。
+    """
 
     def test_env_dash_i_default(self):
         r = handle(_make_envelope("env -i cat .env", self.tmp))
@@ -540,67 +563,114 @@ class TestPrefixStrippingOpaque(BaseBash):
         self.assertTrue(output.is_allow(r))
 
 
-class TestGlobMatch(BaseBash):
-    """operand glob (`*`/`?`/`[`) は ``_glob_operand_is_sensitive`` 経由 (0.3.2)。
+class TestGlobDotenvDeny(BaseBash):
+    """0.8.0: operand glob が dotenv literal stem (``.env`` / ``.envrc``) に
+    fnmatch するときだけ deny 固定 (うっかり頻出ケース)。
 
-    既定 rules と交差すれば全 mode で deny 固定、交差しなければ allow。
+    判定は ``_glob_operand_is_dotenv_match`` (operand_lexer.py)。0.3.2〜0.7.x の
+    既定 rules 候補列挙 (``cat *.key`` / ``cat id_rsa*`` / ``cat cred*.json``
+    も deny する経路) は 0.8.0 で撤廃。
     """
 
     def test_dotenv_star_deny(self):
+        # fnmatchcase(".env", ".env*") = True → deny
         r = handle(_make_envelope("cat .env*", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_dotenv_dot_star_deny(self):
-        r = handle(_make_envelope("cat .env.*", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-
     def test_star_envrc_deny(self):
+        # fnmatchcase(".envrc", "*.envrc") = True → deny
         r = handle(_make_envelope("cat *.envrc", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_id_rsa_star_deny(self):
-        r = handle(_make_envelope("cat id_rsa*", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-
-    def test_id_star_deny(self):
-        r = handle(_make_envelope("cat id_*", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-
-    def test_star_key_deny(self):
-        r = handle(_make_envelope("cat *.key", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-
-    def test_cred_star_json_deny(self):
-        r = handle(_make_envelope("cat cred*.json", self.tmp))
+    def test_envrc_star_deny(self):
+        r = handle(_make_envelope("cat .envrc*", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_question_glob_deny(self):
-        # `cat .en?` → 候補 `.env` が include 決着 → deny
+        # fnmatchcase(".env", ".en?") = True → deny
         r = handle(_make_envelope("cat .en?", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_inner_char_class_deny(self):
-        # `grep SECRET .e[n]v` → 候補 `.env` が include 決着 → deny
+        # fnmatchcase(".env", ".e[n]v") = True → deny
         r = handle(_make_envelope("grep SECRET .e[n]v", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_char_class_deny(self):
-        # `cat [.]env` → 候補 `.env` が include 決着 → deny
+        # fnmatchcase(".env", "[.]env") = True → deny
         r = handle(_make_envelope("cat [.]env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_star_log_allow(self):
-        # `*.log` は既定 rules と交差しないため allow (False positive 抑制)
-        r = handle(_make_envelope("cat *.log", self.tmp))
+
+class TestGlobUncertainAskOrAllow(BaseBash):
+    """0.8.0: dotenv literal stem に fnmatch しない glob は ``ask_or_allow``
+    (default=ask, auto/bypass=allow)。0.3.2〜0.7.x で deny / allow に倒していた
+    既定 rules 交差判定は 0.8.0 で撤廃 (``id_rsa*`` / ``*.key`` / ``cred*.json``
+    / ``*.log`` / ``.env.*`` / ``.env.example*`` を ``ask_or_allow`` に格下げ)。
+    """
+
+    def test_dotenv_dot_star_default(self):
+        # fnmatchcase(".env", ".env.*") = False (".env." 以降が必要) → ask
+        r = handle(_make_envelope("cat .env.*", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_dotenv_dot_star_auto(self):
+        r = handle(_make_envelope("cat .env.*", self.tmp, mode="auto"))
         self.assertTrue(output.is_allow(r))
+
+    def test_id_rsa_star_default(self):
+        r = handle(_make_envelope("cat id_rsa*", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_id_rsa_star_auto(self):
+        r = handle(_make_envelope("cat id_rsa*", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_id_star_default(self):
+        r = handle(_make_envelope("cat id_*", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_star_key_default(self):
+        r = handle(_make_envelope("cat *.key", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_cred_star_json_default(self):
+        r = handle(_make_envelope("cat cred*.json", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_cred_star_json_bypass(self):
+        r = handle(_make_envelope(
+            "cat cred*.json", self.tmp, mode="bypassPermissions",
+        ))
+        self.assertTrue(output.is_allow(r))
+
+    def test_star_log_default(self):
+        # 0.7.x までは allow だったが 0.8.0 で ask_or_allow に統一 (rules 交差
+        # 判定撤廃の副作用)。default で ask、auto/bypass で allow に倒る。
+        r = handle(_make_envelope("cat *.log", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_star_log_auto(self):
+        r = handle(_make_envelope("cat *.log", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_dotenv_example_star_default(self):
+        # fnmatchcase(".env", ".env.example*") = False → ask
+        r = handle(_make_envelope("cat .env.example*", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_dotenv_example_star_auto(self):
+        r = handle(_make_envelope("cat .env.example*", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+
+class TestGlobLiteralExcludeAllow(BaseBash):
+    """literal (glob 文字を含まない) operand は従来通り ``_operand_is_sensitive`` で
+    判定。``.env.example`` は ``!*.example`` の last-match-wins で False → allow 維持。
+    """
 
     def test_dotenv_example_literal_allow(self):
         r = handle(_make_envelope("cat .env.example", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
-    def test_dotenv_example_star_allow(self):
-        # 全候補が exclude 決着 → allow
-        r = handle(_make_envelope("cat .env.example*", self.tmp))
         self.assertTrue(output.is_allow(r))
 
     def test_dotenv_sample_literal_allow(self):

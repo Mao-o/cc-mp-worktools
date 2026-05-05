@@ -1,21 +1,20 @@
-"""Bash tool 用 handler (0.3.3 で責務境界分解、0.7.0 で input redirect 撤廃)。
+"""Bash tool 用 handler (0.3.3 で責務境界分解、0.7.0 で input redirect 撤廃、
+0.8.0 で prefix normalize / glob 候補列挙を撤廃)。
 
 責務境界:
 
 - ``handlers/bash/constants.py`` — compile-time 定数 (regex / frozenset)
 - ``handlers/bash/segmentation.py`` — quote-aware セグメント分割 / hard-stop 検出
-- ``handlers/bash/operand_lexer.py`` — glob 判定 / literalize / path 候補抽出
+- ``handlers/bash/operand_lexer.py`` — glob 判定 / path 候補抽出 / dotenv glob 判定
 - ``handlers/bash/redirects.py`` — 安全リダイレクト剥離 / 残留 metachar 判定
 
 このファイルは以下 **3 つの責務** に限定:
 
 1. **orchestration** — envelope → command 抽出 → segment 分解 → 判定 → 出力 JSON
 2. **plugin ステート依存ロジック** — ``load_patterns`` / ``is_sensitive`` /
-   ``normalize`` を呼ぶ処理 (``_operand_is_sensitive`` /
-   ``_glob_operand_is_sensitive`` / ``_analyze_segment``)
+   ``normalize`` を呼ぶ処理 (``_operand_is_sensitive`` / ``_analyze_segment``)
 3. **test seam** — ``handlers.bash_handler`` 名前空間から import される symbol
-   (``handle`` / ``_normalize_segment_prefix`` / ``_operand_is_sensitive`` /
-   ``_glob_operand_is_sensitive`` / ``_literalize`` / ``_glob_candidates``)
+   (``handle`` / ``_operand_is_sensitive``)
 
 ### 判定フロー
 
@@ -28,15 +27,19 @@
 3. **per-segment 解析** — 各セグメントで:
    - shlex.split → 失敗 → ``ask_or_allow``
    - 安全リダイレクト剥離 (``>/dev/null`` / ``2>&1`` 等)
-   - **prefix normalize (限定版)** — env prefix (``FOO=1``) / ``env`` (option 無し
-     のみ) / ``command`` (option 無しのみ) / ``builtin`` / ``nohup``、および
-     abs/rel path で basename が上記 4 つに該当する場合のみ剥がす。それ以外
-     (opaque wrapper, 任意 path exec, ``env -i``, etc.) は ``ask_or_allow``
+   - **opaque first token 判定 (0.8.0)** — 第一トークンが env-assignment
+     (``FOO=1``) / opaque wrapper (``env`` / ``command`` / ``builtin`` /
+     ``nohup`` / ``bash`` / ``sudo`` / ``eval`` / ``time`` 等) / 絶対/相対 path
+     exec (``/bin/cat`` / ``./script``) のいずれかなら ``ask_or_allow``。
+     0.3.2 で導入していた prefix normalize (``FOO=1 cat .env`` →
+     ``cat .env`` と解釈して deny) は 0.8.0 で撤廃。
    - 残留 metachar (``>`` ``&`` 等) → ``ask_or_allow``
    - shell keyword (``if``/``for``/``do`` 等) → ``ask_or_allow``
    - operand scan: 各 path 候補について
-     - glob 含む → ``_glob_operand_is_sensitive`` (既定 rules への候補列挙) で
-       True なら **deny 固定**、False なら allow
+     - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
+       ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
+       False なら ``ask_or_allow``。0.3.2 で導入した既定 rules への候補列挙
+       (``_glob_operand_is_sensitive`` / ``_glob_candidates``) は 0.8.0 で撤廃
      - literal → ``_operand_is_sensitive`` (basename + URI/VCS pathspec 分割) で
        True なら **deny 固定**、False なら allow
 4. **集約** — deny > ask > allow。
@@ -73,14 +76,11 @@ from handlers.bash.constants import (  # noqa: F401
     _SEGMENT_RESIDUAL_METACHARS,
     _SHELL_KEYWORDS,
     _SOURCE_CMDS,
-    _TRANSPARENT_COMMANDS,
 )
 from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
-    _glob_candidates,
+    _glob_operand_is_dotenv_match,
     _has_glob,
-    _is_absolute_or_relative_path_exec,
-    _literalize,
 )
 from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
@@ -96,97 +96,27 @@ from handlers.bash.segmentation import (  # noqa: F401
 # -- 責務: test seam / plugin ステート依存ロジック ------------------------
 
 
-def _normalize_segment_prefix(tokens: list[str]) -> list[str] | None:
-    """セグメントの先頭から既知 prefix を剥がす。opaque wrapper 検出時は ``None``。
+def _is_opaque_first_token(token: str) -> bool:
+    """セグメントの第一トークンが「うっかり書く形ではない prefix 系」か。
 
-    剥がす対象 (autonomous モードでも実コマンドが ``cat .env`` 等と確定する形):
-    - ``FOO=1`` 形式の env prefix (任意個)
-    - ``env [ASSIGNMENTS...]`` (option 無しのみ)
-    - ``command`` (option 無しのみ)
-    - ``builtin``
-    - ``nohup``
-    - 上記の連鎖 (例: ``nohup command cat``)
-    - 絶対/相対パスでも basename が上記 4 つ (``env``/``command``/``builtin``/``nohup``)
-      に該当するもの (例: ``/usr/bin/env``)
+    True なら ``ask_or_allow("opaque_prefix")`` に倒す。0.3.2 で導入した
+    prefix normalize (``FOO=1 cat .env`` を ``cat .env`` と解釈して deny) は
+    0.8.0 で撤廃 (思想 1: うっかり露出予防が目的、敵対的防御は非目的)。
 
-    opaque (None) 扱い:
-    - ``bash``/``sh``/``zsh``/``eval``/``python``/``sudo``/``awk``/``sed``/``xargs``/
-      ``time``/``exec``/``!`` 等の ``_OPAQUE_WRAPPERS``
-    - ``env`` / ``command`` のオプション付き呼び出し (``env -i``, ``env -u NAME``,
-      ``env --``, ``command -p``, ``command --``)
-    - 上記以外の絶対/相対パス実行 (``/bin/cat``, ``./script``)
-
-    剥がし切って残ったトークン列を返す。空リストになることもある。
-
-    この関数は ``test_prefix_normalize.py`` が直接 import するため patch seam。
+    判定対象:
+    - ``FOO=1`` 形式の env-assignment
+    - 絶対/相対パス実行 (``/bin/cat`` / ``./script`` / ``../foo``)
+    - ``_OPAQUE_WRAPPERS`` (``env`` / ``command`` / ``builtin`` / ``nohup`` /
+      ``bash`` / ``sudo`` / ``eval`` / ``time`` / ``exec`` / ``!`` / ``python`` 等)
     """
-    result = list(tokens)
-    while result:
-        first = result[0]
-
-        # 環境変数 prefix: FOO=1
-        if _ENV_PREFIX_RE.match(first):
-            result = result[1:]
-            continue
-
-        # 絶対/相対パス: basename が透過対象 (env / command / builtin / nohup) の
-        # ときのみ剥がして basename に置換し、ループを継続。それ以外は opaque。
-        if _is_absolute_or_relative_path_exec(first):
-            basename = first.rsplit("/", 1)[-1]
-            if not basename:
-                return None
-            if basename in _TRANSPARENT_COMMANDS or basename == "env":
-                result = [basename] + result[1:]
-                continue
-            return None
-
-        # env コマンド: env [ASSIGNMENTS...] cmd args
-        # option (-i, -u NAME, --) を持つと semantics が変わるため opaque。
-        if first == "env":
-            rest = result[1:]
-            while rest and _ENV_PREFIX_RE.match(rest[0]):
-                rest = rest[1:]
-            if rest and rest[0].startswith("-"):
-                return None
-            result = rest
-            continue
-
-        # command: command [-p|-v|-V|--] cmd args → option 付きは opaque
-        if first == "command":
-            rest = result[1:]
-            if rest and rest[0].startswith("-"):
-                return None
-            result = rest
-            continue
-
-        # builtin / nohup: 先頭 1 つ剥がして継続
-        if first in _TRANSPARENT_COMMANDS:
-            result = result[1:]
-            continue
-
-        # opaque wrapper
-        if first in _OPAQUE_WRAPPERS:
-            return None
-
-        # 通常 command (これ以上は剥がさない)
-        break
-
-    return result
-
-
-def _glob_operand_is_sensitive(
-    operand: str, rules: list[tuple[str, bool]]
-) -> bool:
-    """operand (glob 含む可) の具体化候補のうち ``is_sensitive`` が True を返すものが
-    1 つでも存在するか。
-
-    include/exclude の last-match-wins は ``is_sensitive`` 側が担保する。
-    ``.env*`` は候補 ``.env`` が include 決着で True、``.env.example*`` は全候補が
-    exclude 決着 (``!*.example``) で False に倒れる。
-    """
-    for cand in _glob_candidates(operand, rules):
-        if is_sensitive(cand, rules):
-            return True
+    if not token:
+        return False
+    if _ENV_PREFIX_RE.match(token):
+        return True
+    if token.startswith(("/", "./", "../")):
+        return True
+    if token in _OPAQUE_WRAPPERS:
+        return True
     return False
 
 
@@ -233,24 +163,21 @@ def _analyze_segment(
     if not tokens:
         return output.make_allow()
 
-    normalized = _normalize_segment_prefix(tokens)
-    if normalized is None:
+    if _is_opaque_first_token(tokens[0]):
         L.log_info("bash_classify", "opaque_prefix_lenient")
         return output.ask_or_allow(
             M.bash_lenient("opaque_prefix"),
             envelope,
         )
-    if not normalized:
-        return output.make_allow()
 
-    if _segment_has_residual_metachar(normalized):
+    if _segment_has_residual_metachar(tokens):
         L.log_info("bash_classify", "segment_residual_metachar_lenient")
         return output.ask_or_allow(
             M.bash_lenient("residual_metachar"),
             envelope,
         )
 
-    first = normalized[0]
+    first = tokens[0]
     if first in _SHELL_KEYWORDS:
         L.log_info("bash_classify", f"shell_keyword_lenient:{first}")
         return output.ask_or_allow(
@@ -258,15 +185,22 @@ def _analyze_segment(
             envelope,
         )
 
-    paths = _find_path_candidates(normalized)
+    paths = _find_path_candidates(tokens)
+    pending_glob_ask: dict | None = None
     for p in paths:
         if not p:
             continue
         if _has_glob(p):
-            if _glob_operand_is_sensitive(p, rules):
+            if _glob_operand_is_dotenv_match(p):
                 L.log_info("bash_classify", f"glob_match:{first}")
                 return output.make_deny(
                     M.bash_deny(first_token=first, operand=p)
+                )
+            if pending_glob_ask is None:
+                L.log_info("bash_classify", "glob_uncertain_lenient")
+                pending_glob_ask = output.ask_or_allow(
+                    M.bash_lenient("opaque_prefix"),
+                    envelope,
                 )
             continue
         try:
@@ -281,6 +215,8 @@ def _analyze_segment(
                 envelope,
             )
 
+    if pending_glob_ask is not None:
+        return pending_glob_ask
     return output.make_allow()
 
 

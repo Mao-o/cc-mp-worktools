@@ -1,7 +1,7 @@
 # 判定結果マトリクス (MATRIX.md)
 
 全 5 permission_mode (default / acceptEdits / auto / dontAsk / bypassPermissions)
-での判定結果を完全列挙する。値は 2026-05-06 時点 (0.7.0) の挙動。設計方針は
+での判定結果を完全列挙する。値は 2026-05-06 時点 (0.8.0) の挙動。設計方針は
 [DESIGN.md](./DESIGN.md)、コマンド例の解釈は [README.md](../README.md) を参照。
 
 `permission_mode` の列挙は `core/output.py::LENIENT_MODES` と
@@ -43,18 +43,18 @@
 | `cat .env && pwd`, `false \|\| cat .env`, `cat .env; pwd`, `cat .env \| head` |
 | `cat .env 2>/dev/null` (安全リダイレクト剥離後に機密 path) |
 | `grep SECRET .env`, `base64 .env`, `xxd .env` |
-| `timeout 1 cat .env`, `busybox cat .env` |
+| `timeout 1 cat .env`, `nice cat .env`, `stdbuf -o0 cat .env`, `busybox cat .env` |
 | `cp .env /tmp/x`, `mv .env .env.old` |
 | `curl file://.env`, `git show HEAD:.env` |
 | `grep --file=.env foo`, `grep -f.env foo` |
-| `cat .env*`, `cat .env.*`, `cat *.envrc` (glob 候補列挙) |
-| `cat id_rsa*`, `cat id_*`, `cat *.key`, `cat cred*.json` |
-| `cat .e[n]v`, `cat .en?`, `cat [.]env` (char class / `?`) |
-| `FOO=1 cat .env`, `FOO=1 BAR=2 cat .env` (env prefix 剥がし) |
-| `env cat .env`, `env FOO=1 cat .env` (env コマンド剥がし) |
-| `command cat .env`, `builtin cat .env`, `nohup cat .env` |
-| `nohup command cat .env` (連鎖) |
-| `/usr/bin/env FOO=1 cat .env`, `/bin/command cat .env` |
+| `cat .env*`, `cat *.envrc`, `cat .envrc*` (operand glob が `.env` / `.envrc` 一致) |
+| `cat .e[n]v`, `cat .en?`, `cat [.]env` (`.env` literal 一致 char class / `?`) |
+
+> 0.8.0 で **prefix normalize** (`FOO=1 cat .env` を `cat .env` と解釈する処理) と
+> **既定 rules 候補列挙** (`cat *.key` / `cat id_rsa*` / `cat cred*.json` を
+> 既定 rules 交差で deny する処理) を撤廃した。これらは思想 1 (うっかり露出予防、
+> 敵対的防御は非目的) に整合しないため。撤廃された経路に該当するコマンドは
+> 「Bash handler — 静的解析不能」表へ移動。
 
 ## Bash handler — 非機密 operand (全 mode で allow)
 
@@ -63,8 +63,7 @@
 | `echo foo`, `ls -la`, `npm test`, `date`, `pwd`, `make build` |
 | `cat README.md`, `grep foo README.md`, `cat README.md 2>/dev/null` |
 | `ls \| head`, `git status && git log 2>/dev/null \|\| true` |
-| `cat .env.example`, `cat .env.example*`, `cat .env.sample` (テンプレ除外) |
-| `cat *.log` (rules と非交差) |
+| `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
 
 ## Bash handler — 静的解析不能 (三態判定)
 
@@ -79,11 +78,17 @@
 | `while cat .env; do pwd; done`, `coproc cat .env` | ask | ask | **allow** | ask | **allow** |
 | `time cat .env`, `! cat .env`, `exec cat .env`, `eval cat .env` | ask | ask | **allow** | ask | **allow** |
 | `echo foo > out.txt`, `cat foo >> bar.txt`, `echo foo > '&2'` | ask | ask | **allow** | ask | **allow** |
-| `/bin/cat .env`, `./cat`, `../bin/cat .env` | ask | ask | **allow** | ask | **allow** |
+| `/bin/cat .env`, `./cat`, `../bin/cat .env` (任意 path exec, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
+| `/usr/bin/env FOO=1 cat .env`, `/bin/command cat .env` (任意 path exec, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | ask | **allow** | ask | **allow** |
 | `sudo cat .env`, `xargs -a .env cat` | ask | ask | **allow** | ask | **allow** |
 | `python -c "..."`, `node -e "..."`, `awk '{print}' f`, `sed s/x/y f` | ask | ask | **allow** | ask | **allow** |
-| `env -i cat .env`, `env -u HOME cat .env`, `command -p cat .env`, `command -- cat .env` | ask | ask | **allow** | ask | **allow** |
+| `env cat .env`, `env FOO=1 cat .env`, `env -i cat .env`, `env -u HOME cat .env` (`env`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
+| `command cat .env`, `command -p cat .env`, `command -- cat .env` (`command`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
+| `builtin cat .env`, `nohup cat .env`, `nohup command cat .env` (`builtin` / `nohup`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
+| `FOO=1 cat .env`, `FOO=1 BAR=2 cat .env` (env-assignment prefix, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
+| `cat .env.*`, `cat .env.example*`, `cat *.log` (dotenv stem 不一致 glob, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
+| `cat id_rsa*`, `cat id_*`, `cat *.key`, `cat cred*.json` (rules 候補列挙撤廃, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `cat '.env` (shlex 失敗) | ask | ask | **allow** | ask | **allow** |
 
 ## Bash handler — ポリシー欠如 / 内部失敗

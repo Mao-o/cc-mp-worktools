@@ -32,14 +32,13 @@ _SAFE_REDIRECT_RE = re.compile(
 _REDIRECT_OP_TOKENS = frozenset({">", "1>", "2>", "&>"})
 _SAFE_REDIRECT_TARGETS = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout"})
 
-# 透過 prefix (option 無し限定): ``command`` / ``builtin`` / ``nohup`` の 3 つ。
-# ``env`` は assignments + option の扱いがあるため別ハンドル
-# (``bash_handler._normalize_segment_prefix``)。
-_TRANSPARENT_COMMANDS = frozenset({"command", "builtin", "nohup"})
-
 # opaque wrapper: 静的解析不能。``ask_or_allow`` (default=ask, auto/bypass=allow)。
 # ``time`` ``!`` ``exec`` は 0.3.2 で _SHELL_KEYWORDS から移動 (shell 文法要素 /
 # プロセス置換挙動として opaque 扱いに統一)。
+# 0.8.0 で ``env`` / ``command`` / ``builtin`` / ``nohup`` (透過 prefix だった
+# もの) もここに統合し、prefix normalize 経路を撤廃した。``FOO=1 cat .env``
+# のような env-assignment prefix は ``_ENV_PREFIX_RE`` で別途検出する (思想 1
+# = うっかり露出予防、敵対的防御は非目的)。
 _OPAQUE_WRAPPERS = frozenset({
     "bash", "sh", "zsh", "ksh", "fish", "dash",
     "eval",
@@ -50,6 +49,10 @@ _OPAQUE_WRAPPERS = frozenset({
     "exec",   # ``exec -a name cmd`` 等プロセス置換系
     "time",   # pipeline 前置 / shell keyword 的挙動
     "!",      # 否定: ``! cat .env`` で後続を実行
+    "env",    # 0.8.0: option/assignment 含む形を一律 opaque
+    "command",  # 0.8.0: option 含む形を一律 opaque
+    "builtin",  # 0.8.0
+    "nohup",    # 0.8.0
 })
 
 # シェル予約語 / 制御構文: 第 1 トークンがこれらなら ``ask_or_allow``。
@@ -67,5 +70,7 @@ _SHELL_KEYWORDS = frozenset({
 # glob 文字: operand にこれらが含まれると bash の pathname expansion 対象。
 _GLOB_CHARS = frozenset("*?[")
 
-# 環境変数プレフィクス: ``FOO=1 cmd`` 形式の第 1 トークン
+# 環境変数プレフィクス: ``FOO=1 cmd`` 形式の第 1 トークン検出用 (0.8.0 で
+# 透過剥がしを撤廃したため、この regex は「第一トークンが env-assignment 形式
+# なら opaque 扱い」の判定で 1 回だけ使う)。
 _ENV_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")

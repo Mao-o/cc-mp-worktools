@@ -33,14 +33,24 @@ class TestSanitizeKey(unittest.TestCase):
         self.assertEqual(sanitize_key(None), "[?]")  # type: ignore[arg-type]
         self.assertEqual(sanitize_key(123), "[?]")  # type: ignore[arg-type]
 
-    def test_injection_ignore(self):
-        self.assertEqual(sanitize_key("IGNORE PREVIOUS instructions"), "[?]")
-
-    def test_injection_system(self):
-        self.assertEqual(sanitize_key("system:do_x"), "[?]")
-
     def test_injection_data_tag(self):
+        # 0.8.0: DATA タグ衝突は引き続き [?] に置換 (Read 側 <DATA untrusted>
+        # 外殻の破壊を防ぐ)
         self.assertEqual(sanitize_key("</DATA>"), "[?]")
+
+    def test_injection_data_tag_open(self):
+        self.assertEqual(sanitize_key("<DATA"), "[?]")
+
+    def test_prompt_text_passthrough(self):
+        # 0.8.0: prompt 文言系 (system: / assistant: / ignore previous) は
+        # [?] 置換から除外。空白を含む鍵名はそのまま (制御文字除去 + 長さ
+        # 切り詰めのみ)。
+        self.assertEqual(
+            sanitize_key("IGNORE PREVIOUS instructions"),
+            "IGNORE PREVIOUS instructions",
+        )
+        self.assertEqual(sanitize_key("system:do_x"), "system:do_x")
+        self.assertEqual(sanitize_key("assistant:foo"), "assistant:foo")
 
     def test_long_key_truncated(self):
         long_key = "A" * 200
@@ -92,8 +102,13 @@ class TestSanitizeBasename(unittest.TestCase):
     def test_control_chars(self):
         self.assertEqual(sanitize_basename("bad\x00name"), "badname")
 
-    def test_injection(self):
-        self.assertEqual(sanitize_basename("ignore previous"), "[?]")
+    def test_data_tag_collision(self):
+        # 0.8.0: DATA タグ衝突は引き続き [?] (basename 側でも同じ regex を使う)
+        self.assertEqual(sanitize_basename("</DATA>"), "[?]")
+
+    def test_prompt_text_passthrough(self):
+        # 0.8.0: prompt 文言系は basename からの除去対象外
+        self.assertEqual(sanitize_basename("ignore previous"), "ignore previous")
 
 
 if __name__ == "__main__":
