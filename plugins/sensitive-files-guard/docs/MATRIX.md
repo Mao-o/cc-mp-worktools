@@ -39,6 +39,15 @@
 > `<looks_truncated>`)、生バイト長 (`length=N`)、placeholder 一致ラベル
 > (`matched="..."`) を追加。実値そのものは引き続き出さない。詳細は
 > [DESIGN.md](./DESIGN.md#dotenv-minimal-info-の拡張-090-e1--e2)。
+>
+> 0.10.0 で **Bash deny の reason** にも上記 minimal info を埋め込むようになった
+> (Read 同等)。`first_token` カテゴリ別 (`read_full` / `read_partial` / `search`
+> / `mutate` / `load` / `move` / `history` / `transfer` / `archive`) で意図に
+> 応じた suggestion (direnv / 1Password CLI / `git rm --cached` / `--exclude=`
+> 等) を返し、grep family では env-var 名抽出 + dotenv 照合で
+> `matched_pattern_keys: [...]` を出す。**deny 動作の判定境界は変化なし**で、
+> 下表の deny / allow / ask は 0.9.0 と完全に同じ。詳細は
+> [DESIGN.md](./DESIGN.md#bash-deny-の-category-別-reason-0100-e3--e4)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 

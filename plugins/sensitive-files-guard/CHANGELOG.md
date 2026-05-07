@@ -1,5 +1,183 @@
 # Changelog
 
+## 0.10.0
+
+**思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 5 を消化**:
+思想 2 (block 時は意図を汲んだメッセージを返す) の応用層として **E3 (Bash
+コマンド別 reason テンプレ)** と **E4 (grep パターン抽出 + 該当キー詳細)** を
+実装する **機能追加リリース**。Bash deny 時に operand path の dotenv を実 read
+して Read 同等の minimal info を reason に埋め込み、9 カテゴリ (`read_full` /
+`read_partial` / `search` / `mutate` / `load` / `move` / `history` /
+`transfer` / `archive`) ごとに「想定意図 → 提供する情報・代替案」を切替える。
+**deny 動作の判定境界は変化なし**、reason 文字列の情報量と分類だけが拡張された。
+
+### 論点 L1 / L2 のユーザー確定回答
+
+- L1: **カテゴリ別 dispatcher** を採用 (first_token → 9 category マッピング)。
+  `cat` / `less` / `more` / `bat` / `xxd` / `od` / `hexdump` / `base64` を
+  `read_full` 等にまとめる形で「同じ意図 = 同じ文言」を機械的に保証。
+- L2 (+L3 統合): Bash deny 時に operand path の dotenv を **実 read して Read
+  同等 minimal info を返す** 方針を採用。`redaction/file_render.py` を新設して
+  Read handler 同等の流れ (normalize → classify → open_regular → redact) を
+  共通化。失敗時 (file 不在 / parse 失敗 / open 失敗) は generic reason に
+  静かに降りる。
+
+### 主要な変更
+
+1. **E3: Bash deny の category 別 dispatcher を新設** (`core/messages.py`)
+   — `bash_deny(first_token, operand)` を `bash_deny(first_token, operand, *,
+   command, file_render, dotenv_info, grep_keys)` シグネチャに拡張 (旧 2 引数
+   呼び出しは互換維持)。`_BASH_DENY_CATEGORY` で first_token を 9 カテゴリ +
+   `generic` にマッピングし、`_BASH_DENY_BUILDERS` 経由で各 builder に dispatch:
+   - `read_full`: cat / less / more / bat / xxd / od / hexdump / base64 → 全体
+     閲覧の note + Read 同等 minimal info + 「Read tool を使ってください」推奨。
+   - `read_partial`: head / tail → `-n N` / `-N` / `--lines=N` を抽出して N 行
+     分の鍵 list (head なら先頭、tail なら末尾) を切り出し。
+   - `search`: grep / rg / ag / ack / egrep / fgrep → E4 で抽出した env-var 名
+     候補を `dotenv_info["keys"]` と照合して `matched_pattern_keys: [...]` /
+     `nomatch_pattern_keys: [...]` を出す。
+   - `mutate`: awk / sed → 加工は実行できないが minimal info は返し、
+     patch / diff 適用を推奨。
+   - `load`: source / `.` → direnv / dotenv-cli / 1Password CLI / pass /
+     git-secret 経由を推奨。
+   - `move`: cp / mv → 1Password CLI / pass / git-secret + .env.example 派生
+     (`cp .env.example .env.local`) を推奨。
+   - `history`: git → tracked なら漏洩済みの可能性、`git rm --cached <basename>`
+     後の rotate を推奨。VCS pathspec (`HEAD:.env`) から basename を `:` 後尾で
+     抽出 (`_basename_of` を VCS-aware に拡張)。
+   - `transfer`: curl / wget / scp / rsync → ネット越し転送は強く非推奨、
+     受信側 secrets manager (1Password CLI / Vault / SOPS) 推奨。
+   - `archive`: tar / zip / gzip → `--exclude=<basename>` / `-x <basename>`
+     の指定を推奨。
+   - `generic`: 上記以外 → 0.7.0〜0.9.0 と同等の note + minimal info (新規)。
+2. **E4: grep family の pattern 抽出を新設** (`handlers/bash/grep_extract.py`)
+   — `extract_grep_keys(tokens) -> list[str]` で `grep` / `rg` / `ag` / `ack` /
+   `egrep` / `fgrep` の token 列から env-var 名候補 (`[A-Z][A-Z0-9_]{2,}`) を
+   抽出する pure helper を新設。`-e PATTERN` / `-E PATTERN` / `-G PATTERN` /
+   `--regex=PATTERN` / `--pattern=PATTERN` / inline `-e=PATTERN` / `--regex=...`
+   形式 + positional pattern + `|` 分割 (regex.findall の境界処理) に対応。
+   `--` 以降は positional path のみ扱い pattern 抽出しない。
+3. **shared helper: `redaction/file_render.py` を新設**
+   — `render_for_bash(operand, cwd) -> tuple[str | None, dict | None]` を
+   公開。Read handler と同じ流れ (`normalize` → `classify` → `open_regular` →
+   `redact_dotenv` / `redact`) を operand path から走らせて、Bash deny 用の
+   reason 文字列 (`<DATA untrusted>` 包装込み) と dotenv の場合のみ info dict
+   を返す。失敗時 (file 不在 / symlink / 非通常 / open 失敗 / NUL byte 等) は
+   `(None, None)` を返し、Bash 側 deny は generic reason に静かに降りる。
+   `_basename_of` を VCS pathspec / リモート pathspec の `:` 後尾抽出に対応。
+4. **handlers/bash_handler.py の deny 経路に enrichment を追加**
+   — `_build_deny_response(tokens, operand, envelope)` helper を新設し、
+   glob 一致 deny / literal 一致 deny の 2 経路で `render_for_bash` 呼出と
+   `extract_grep_keys` 呼出 (grep family 限定) を共通化。`_analyze_segment`
+   内の 2 箇所で `output.make_deny(M.bash_deny(first_token, operand))` を
+   `_build_deny_response(tokens, operand, envelope)` 呼出に置換。
+5. **`_basename_of` の VCS-aware 化** (`core/messages.py`)
+   — `os.path.basename` は `:` を区切り文字として扱わないため、`HEAD:.env` /
+   `user@host:repo/.env` 等の VCS / リモート pathspec で basename が full
+   pathspec のままになっていた。`:` 後尾抽出を追加して `.env` を取り出すよう
+   修正。`!.env` 案内が正しく動くようになる。
+
+### 挙動変更 (0.9.0 → 0.10.0)
+
+| ケース | 0.9.0 | 0.10.0 |
+|---|---|---|
+| `cat .env` deny reason | generic 1 文 + matched_operand + first_token + suggestion | + 「全体閲覧」note + Read 同等 minimal info + 「Read tool を使ってください」+ exclude hint |
+| `head -n 5 .env` deny reason | generic | + 「先頭 5 行確認」note + 鍵 list の先頭 5 件 |
+| `tail -3 .env` deny reason | generic | + 「末尾 3 行確認」note + 鍵 list の末尾 3 件 (BSD `-N` 対応) |
+| `grep DATABASE_URL .env` deny reason | generic | + matched_pattern_keys: [DATABASE_URL] + 該当キーの type/status/length |
+| `grep -E 'A_KEY\|B_KEY' .env` deny reason | generic | + matched/nomatch_pattern_keys |
+| `grep MISSING .env` deny reason | generic | + nomatch_pattern_keys: [MISSING] |
+| `awk -F= '{print $1}' .env` deny reason | generic | + 「加工」note + minimal info + patch / diff 推奨 |
+| `source .env` / `. .env` deny reason | generic | + 「shell load」note + minimal info + direnv / dotenv-cli 推奨 |
+| `cp .env backup.env` deny reason | generic | + 「コピー / 移動」note + 1Password CLI / .env.example 推奨 |
+| `git show HEAD:.env` deny reason | generic | + 「commit / 差分閲覧」note + `git rm --cached .env` + rotate 推奨 |
+| `curl file://.env` deny reason | generic | + 「転送」note + Vault / SOPS 推奨 |
+| `tar czf b.tar .env` deny reason | generic | + 「アーカイブ」note + `--exclude=.env` 推奨 |
+| その他 first_token | generic | generic + minimal info (read 成功時) |
+| `cat .env` (実際の Read 動作) | deny | deny (維持) |
+| `cat *.env*` (glob deny) | deny | deny + minimal info (実 read 成功時) |
+| `cat .env.example` (exclude rule) | allow | allow (維持) |
+| basename "HEAD:.env" | "HEAD:.env" 全体 | ".env" のみ (`:` 後尾抽出) |
+
+- **deny 動作の判定境界は変化なし**。Bash 側 deny の発火条件・対象パターンは
+  完全に同じ。reason 文字列の情報量だけが拡張された。
+- **実値リーク**: 引き続きなし。新たに埋め込む minimal info は dotenv の場合
+  鍵名 / type / prefix / status / length / placeholder ヒントのみで、値そのもの
+  は出さない。jsonlike / toml / yaml / opaque も既存の format_X 同等の出力。
+- **Bash hook の file system access**: deny 時に operand path を 1 回 fd open
+  して read する経路が増える (E3 の minimal info 埋込)。Read handler と同じ
+  fd 経路 (O_NOFOLLOW + classify 済み regular のみ) を通り、`redaction/engine.py`
+  の MAX_INLINE_BYTES (32KB) 制約も維持。
+
+### 内部 API の変更 (caller があれば追従が必要)
+
+- `core.messages.bash_deny` シグネチャ拡張: 旧 `bash_deny(first_token, operand)`
+  → 新 `bash_deny(first_token, operand, *, command="", file_render="",
+  dotenv_info=None, grep_keys=None)`。**positional 2 引数呼び出しは互換維持**
+  (kwargs 追加のみ、positional 不変)。新規 caller のみ kwargs を渡す。
+- `core.messages._basename_of` の VCS-aware 化: `:` 後尾抽出を追加 (副作用は
+  `HEAD:.env` / `user@host:.env` 等で basename が変化する)。
+- `redaction.file_render` モジュール新設: `render_for_bash` を export。
+- `handlers.bash.grep_extract` モジュール新設: `extract_grep_keys` /
+  `is_grep_command` を export。
+- `handlers.bash_handler` に `_build_deny_response(tokens, operand, envelope)`
+  helper を新設 (内部、glob / literal の 2 経路で共有)。
+- 観測ログ追加なし (既存の `bash_classify:match:<first_token>` /
+  `glob_match:<first_token>` を維持)。
+
+### テスト
+
+- 新規:
+  - `tests/test_bash_reason_templates.py` (31 件、9 category × 2-3 ケース +
+    backwards compat 2 件)
+  - `tests/test_grep_extraction.py` (18 件、`is_grep_command` 2 件 +
+    `extract_grep_keys` 16 件: positional / -e / -E alternation / --regex= /
+    --pattern= / anchor / dotted / dedup / short option skip / lowercase
+    ignored / `--` separator / inline / empty)
+  - `tests/test_file_render.py` (11 件、dotenv / .envrc / abs path / json /
+    toml / yaml fallback / empty operand / missing / symlink / directory /
+    NUL byte normalize failure)
+- 累計 545 → **605 件 OK** (redact 518→578 件、+60 件 / check 27 件維持)
+- 既存テストは全件互換維持 (`bash_deny(first_token, operand)` 2 引数呼び出しの
+  挙動が generic builder で 0.9.0 とほぼ同等になるよう設計)
+
+### コード追加
+
+| ファイル | 行数差 |
+|---|---|
+| `redaction/file_render.py` | +90 (新規) |
+| `handlers/bash/grep_extract.py` | +95 (新規) |
+| `core/messages.py` | +330 (dispatcher + 9 builder + helper 群) |
+| `handlers/bash_handler.py` | +35 (`_build_deny_response` + import) |
+| `tests/test_bash_reason_templates.py` | +330 (新規) |
+| `tests/test_grep_extraction.py` | +110 (新規) |
+| `tests/test_file_render.py` | +130 (新規) |
+| 合計 | **+1120 行** (機能追加 PR のため増加方向、E5/E6 + D1/D2 で削減見込み) |
+
+### ドキュメント
+
+- `CHANGELOG.md`: 0.10.0 エントリ追加 (本 PR の差分まとめ、PR 4 と同形式)。
+- `docs/REVIEW_TASKS_2026-05-06.md`: 「## 進捗」に **2026-05-07: PR 5 完了
+  (0.10.0 リリース)** を追記。完了状況サマリ表で E3 / E4 を **0.10.0 ✓** に
+  更新。
+- `CLAUDE.local.md`: 「進行中のレビュー」進捗を 0.10.0 (PR 5) で更新、
+  ディレクトリ構成に `redaction/file_render.py` / `handlers/bash/grep_extract.py`
+  を追記、plugin.json version を 0.10.0、`permissionDecisionReason` フォーマット
+  例に Bash deny の新形式を追加。
+- `README.md`: 思想 2 が Bash 側でも実装された旨を強調、テスト件数を 578
+  (0.10.0) に更新。
+- `docs/DESIGN.md`: 「dotenv minimal info の拡張 (0.9.0)」セクションに「Bash
+  deny の category 別 reason (0.10.0, E3 + E4)」を追加。
+- `core/messages.py` / `handlers/bash_handler.py` / `redaction/file_render.py` /
+  `handlers/bash/grep_extract.py` の docstring を 0.10.0 拡張内容に合わせて
+  記述。
+
+### 関連レビュー
+
+`docs/REVIEW_TASKS_2026-05-06.md` の **E3 / E4** を消化。残るは **E5 / E6 +
+D1 / D2** (PR 6, 1.0.0 = json/toml/yaml status 拡張 + Edit/Write リッチ化 +
+docs / tests 整理) のみ。
+
 ## 0.9.0
 
 **思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 4 を消化**:

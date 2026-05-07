@@ -1,5 +1,6 @@
 """Bash tool 用 handler (0.3.3 で責務境界分解、0.7.0 で input redirect 撤廃、
-0.8.0 で prefix normalize / glob 候補列挙を撤廃)。
+0.8.0 で prefix normalize / glob 候補列挙を撤廃、0.10.0 で deny 経路に
+``render_for_bash`` + ``extract_grep_keys`` を統合)。
 
 責務境界:
 
@@ -77,6 +78,10 @@ from handlers.bash.constants import (  # noqa: F401
     _SHELL_KEYWORDS,
     _SOURCE_CMDS,
 )
+from handlers.bash.grep_extract import (  # noqa: F401
+    extract_grep_keys,
+    is_grep_command,
+)
 from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
@@ -91,6 +96,7 @@ from handlers.bash.segmentation import (  # noqa: F401
     _has_hard_stop,
     _split_command_on_operators,
 )
+from redaction.file_render import render_for_bash
 
 
 # -- 責務: test seam / plugin ステート依存ロジック ------------------------
@@ -150,6 +156,40 @@ def _operand_is_sensitive(
     return False
 
 
+def _build_deny_response(
+    tokens: list[str],
+    operand: str,
+    envelope: dict,
+) -> dict:
+    """Bash deny 確定時の hook 出力 dict を組み立てる (0.10.0 で導入)。
+
+    E3: ``render_for_bash`` で operand path の minimal info を取得して
+    ``bash_deny`` の ``file_render`` / ``dotenv_info`` 引数に渡す。
+    E4: first_token が grep family なら ``extract_grep_keys`` で env-var 名
+    候補を抽出して ``grep_keys`` に渡す。
+
+    failure (file 不在 / parse 失敗 / open 失敗) は ``render_for_bash`` 側で
+    ``(None, None)`` に潰され、``bash_deny`` は generic 相当の reason に降りる。
+    deny 動作の判定境界には影響しない。
+    """
+    first = tokens[0] if tokens else ""
+    tool_input = envelope.get("tool_input") or {}
+    command_str = tool_input.get("command") or ""
+    cwd = envelope.get("cwd", "")
+    file_render, dotenv_info = render_for_bash(operand, cwd)
+    grep_keys = extract_grep_keys(tokens) if is_grep_command(first) else None
+    return output.make_deny(
+        M.bash_deny(
+            first_token=first,
+            operand=operand,
+            command=command_str,
+            file_render=file_render or "",
+            dotenv_info=dotenv_info,
+            grep_keys=grep_keys,
+        )
+    )
+
+
 def _analyze_segment(
     tokens: list[str],
     envelope: dict,
@@ -157,7 +197,8 @@ def _analyze_segment(
 ) -> dict:
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
-    機密 path 一致 → ``make_deny`` 固定。判定不能 → ``ask_or_allow``
+    機密 path 一致 → ``make_deny`` 固定 (0.10.0 で reason に minimal info /
+    matched_pattern_keys を埋め込み)。判定不能 → ``ask_or_allow``
     (default=ask, auto/bypass=allow)。それ以外 → allow。
     """
     if not tokens:
@@ -193,9 +234,7 @@ def _analyze_segment(
         if _has_glob(p):
             if _glob_operand_is_dotenv_match(p):
                 L.log_info("bash_classify", f"glob_match:{first}")
-                return output.make_deny(
-                    M.bash_deny(first_token=first, operand=p)
-                )
+                return _build_deny_response(tokens, p, envelope)
             if pending_glob_ask is None:
                 L.log_info("bash_classify", "glob_uncertain_lenient")
                 pending_glob_ask = output.ask_or_allow(
@@ -206,9 +245,7 @@ def _analyze_segment(
         try:
             if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
                 L.log_info("bash_classify", f"match:{first}")
-                return output.make_deny(
-                    M.bash_deny(first_token=first, operand=p)
-                )
+                return _build_deny_response(tokens, p, envelope)
         except (ValueError, OSError):
             return output.ask_or_allow(
                 M.bash_lenient("normalize_failed"),

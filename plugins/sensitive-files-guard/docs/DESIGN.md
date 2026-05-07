@@ -11,12 +11,16 @@
 1. **Fail-closed in doubt** — read 側の内部失敗は `ask` (bypass モード時は `deny`)
    にフォールバック。Stop 側は応答停止を招かないため fail-open (stderr warning +
    空出力)。
-2. **値そのものは出さない、デバッグ情報は積極的に返す** (0.9.0 で拡張) —
-   minimal info の核は鍵名・順序・型・件数だが、思想 2 (block 時は意図を
-   汲んだメッセージを返す) を満たすため、値の **品質情報** (set / empty /
-   placeholder / short / long / looks_truncated) と長さ (生バイト数)、
-   識別子型の prefix (sk_live_ / AKIA / ghp_ 等) を併せて返す。実値そのもの
-   (鍵名 prefix を除く一切) は LLM の文脈に入れない原則は維持。
+2. **値そのものは出さない、デバッグ情報は積極的に返す** (0.9.0 で Read 側を
+   拡張、0.10.0 で Bash 側にも適用) — minimal info の核は鍵名・順序・型・
+   件数だが、思想 2 (block 時は意図を汲んだメッセージを返す) を満たすため、
+   値の **品質情報** (set / empty / placeholder / short / long / looks_truncated)
+   と長さ (生バイト数)、識別子型の prefix (sk_live_ / AKIA / ghp_ 等) を
+   併せて返す。0.10.0 で Bash deny でも operand path の dotenv を実 read して
+   Read 同等の minimal info を reason 内に埋め込むようにし、grep family では
+   pattern から抽出した env-var 名と dotenv parse 結果を照合した
+   `matched_pattern_keys` を出す。実値そのもの (鍵名 prefix を除く一切) は
+   LLM の文脈に入れない原則は維持。
 3. **Secrets never in logs** — path・値・展開後情報を一切記録しない。
 4. **Latency <100ms 目標** — timeout 2 秒、文字列処理のみ、外部コマンド呼出なし。
 5. **情報注入は `permissionDecisionReason` 一択** — `systemMessage` 非依存
@@ -186,6 +190,64 @@ github_pat < 30 / openai_key < 20 / url < 8 / uuid < 36 / email < 6。
 **placeholder 判定**: `redaction/placeholders.py::looks_placeholder` が
 PLACEHOLDER_LITERALS (21 個) と PLACEHOLDER_PATTERNS (5 個 regex) で判定。
 ユーザー拡張点 (placeholders.local.txt) は **作らない** (Q1 = 簡易版で開始)。
+
+### Bash deny の category 別 reason (0.10.0, E3 + E4)
+
+`core/messages.py::bash_deny` を first_token カテゴリ別 dispatch に再編し、
+コマンド意図 → 提供する情報・代替案を切り替える (思想 2 を Bash 側でも実装)。
+
+| category | first_token | 返す情報 |
+|---|---|---|
+| `read_full` | `cat` / `less` / `more` / `bat` / `xxd` / `od` / `hexdump` / `base64` | 「全体閲覧」note + Read 同等 minimal info + Read tool 推奨 |
+| `read_partial` | `head` / `tail` | 「先頭/末尾 N 行確認」note + 鍵 list の N 件 (head=先頭、tail=末尾)。`-n N` / `-N` (BSD) / `--lines=N` から N を抽出 |
+| `search` | `grep` / `rg` / `ag` / `ack` / `egrep` / `fgrep` | 「検索」note + `matched_pattern_keys: [...]` / `nomatch_pattern_keys: [...]` (E4 で抽出した env-var 名と dotenv の照合結果)。pattern 抽出 / 照合とも失敗時は全鍵 list (minimal info) に降りる |
+| `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨 |
+| `load` | `source` / `.` | 「shell load」note + minimal info + direnv (.envrc) / dotenv-cli / 1Password CLI 推奨 |
+| `move` | `cp` / `mv` | 「コピー / 移動」note + 1Password CLI / pass / git-secret + .env.example 派生推奨 |
+| `history` | `git` (subcommand `show` / `diff` / `log` で `.env` を参照したケース) | 「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。VCS pathspec の `:` 後尾から basename 抽出 |
+| `transfer` | `curl` / `wget` / `scp` / `rsync` | 「転送」note + Vault / SOPS / 1Password CLI 推奨 |
+| `archive` | `tar` / `zip` / `gzip` | 「アーカイブ」note + `--exclude=<basename>` / `-x <basename>` 推奨 |
+| `generic` | 上記以外 | 0.7.0〜0.9.0 と同等の note + minimal info (新規) |
+
+**file_render の流れ** (`redaction/file_render.py::render_for_bash`):
+
+1. `normalize(operand, cwd)` で path を解決 (失敗 → `(None, None)`)
+2. `classify(path)` で regular ファイルか確認 (非 regular → `(None, None)`、
+   `OSError` / `ValueError` で lstat 失敗 → `(None, None)` で握り潰し)
+3. `open_regular(path)` で fd と size を取得 (`O_NOFOLLOW`)
+4. format 判定 (`_detect_format`):
+   - dotenv → `redact_dotenv` で info dict を取得 → `format_dotenv` で body
+     文字列 → `build_reason` で `<DATA untrusted>` 包装 → (reason, info) を返す
+   - dotenv 以外 (json / toml / yaml / opaque / 32KB 超) → `engine.redact` /
+     `redact_large_file` で reason を取得 → (reason, None) を返す
+5. 内部例外は握り潰し `(None, None)` (Bash 側 deny は generic reason に降りる)
+
+**E4 の grep extraction** (`handlers/bash/grep_extract.py::extract_grep_keys`):
+
+- 抽出対象: env-var 形式 (`[A-Z][A-Z0-9_]{2,}`) を `re.finditer` で全 token から
+  拾う
+- `-e PATTERN` / `-E PATTERN` / `-G PATTERN` (次 token consume)、`--regex=...` /
+  `--pattern=...` / `-e=...` (RHS) に対応
+- `--` 以降は positional 扱いで pattern 抽出停止、short option (`-i` 等) は skip
+- `|` 分割は `re.finditer` の境界処理で自然に処理 (`A_KEY|B_KEY` から両方抽出)
+- 出現順 dedup された list[str] を返す
+
+**`bash_deny` シグネチャ** (positional 互換維持):
+
+```python
+def bash_deny(
+    first_token: str,
+    operand: str,
+    *,
+    command: str = "",          # head/tail の -n N 抽出に使う
+    file_render: str = "",      # render_for_bash の 1 番目の戻り値
+    dotenv_info: dict | None = None,  # render_for_bash の 2 番目の戻り値
+    grep_keys: list[str] | None = None,  # extract_grep_keys の戻り値
+) -> str: ...
+```
+
+旧 0.7.0〜0.9.0 の `bash_deny(first_token, operand)` 呼び出しは generic
+builder で 0.9.0 とほぼ同等の出力を生成するため互換維持。
 
 ### Bash handler (三態判定)
 

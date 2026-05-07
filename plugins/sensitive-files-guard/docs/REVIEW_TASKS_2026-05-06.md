@@ -911,6 +911,132 @@ Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
 
+### 2026-05-07: PR 5 完了 (0.10.0 リリース) — E3 / E4
+
+思想 2 (block 時は意図を汲んだメッセージを返す) の応用層として、Bash deny を
+**first_token カテゴリ別 dispatch** + **operand path の dotenv 実 read による
+Read 同等 minimal info 埋込** + **grep family の env-var 名 pattern 抽出 + 該当
+キー詳細表示** に拡張する **機能追加リリース**。`bash_deny` シグネチャは positional
+2 引数 (`first_token`, `operand`) は互換維持しつつ keyword 引数 4 つを追加した。
+**deny 動作の判定境界は変化なし**で、reason 文字列の情報量と分類だけが拡張された。
+
+#### 論点 L1〜L3 のユーザー確定回答
+
+- L1: **カテゴリ別 dispatcher** を採用。first_token を 9 カテゴリ + `generic` に
+  マッピング (`_BASH_DENY_CATEGORY` / `_BASH_DENY_BUILDERS`)。「同じ意図 = 同じ
+  文言」が機械的に保証され、保守負荷が低い。
+- L2 + L3 (統合): Bash deny 時に operand path の dotenv を **実 read して Read
+  同等 minimal info を返す** 方針を採用。`redaction/file_render.py` を新設して
+  Read handler 同等の流れ (normalize → classify → open_regular → redact_dotenv /
+  redact) を共通化。失敗時 (file 不在 / parse 失敗 / open 失敗 / NUL byte 等)
+  は generic reason に静かに降りる。
+
+ユーザー強調 (PR 4 から継続): 「うっかりミスによる流出を防ぎつつ開発作業を停滞
+させないための機構が最優先」→ Bash 側でも情報量は積極的に返す。実値そのものは
+引き続き出さない。
+
+#### 実装
+
+- **E3: Bash deny の category 別 dispatcher を新設** (`core/messages.py`)
+  - `bash_deny(first_token, operand, *, command="", file_render="", dotenv_info=None,
+    grep_keys=None)` シグネチャに拡張。positional 2 引数は互換維持。
+  - 9 category builder (`_bash_deny_read_full` / `_read_partial` / `_search` /
+    `_mutate` / `_load` / `_move` / `_history` / `_transfer` / `_archive` +
+    `_generic`) を実装。
+  - 共通 helper: `_common_meta_lines` / `_append_minimal_info` /
+    `_extract_head_tail_n` / `_format_dotenv_key_line` / `_suggestion_other_keys`。
+  - `_basename_of` を VCS-aware に拡張 (``HEAD:.env`` / ``user@host:.env`` で
+    ``:`` 後尾の最終要素を抽出)。
+- **E4: grep family の pattern 抽出を新設** (`handlers/bash/grep_extract.py`)
+  - `extract_grep_keys(tokens) -> list[str]` を export。
+  - 抽出ルール: env-var 形式 (``[A-Z][A-Z0-9_]{2,}``) を `re.finditer` で全 token
+    から拾う。``-e PATTERN`` / ``-E PATTERN`` / ``-G PATTERN`` / ``--regex=...`` /
+    ``--pattern=...`` 形式に対応。``--`` 以降は positional 扱いで pattern 抽出
+    停止。short option (``-i`` 等) は skip。
+  - `is_grep_command(first_token)` で grep family 判定 (``grep`` / ``rg`` /
+    ``ag`` / ``ack`` / ``egrep`` / ``fgrep``)。
+- **shared helper: `redaction/file_render.py` を新設**
+  - `render_for_bash(operand, cwd) -> tuple[str | None, dict | None]` を export。
+    Read handler と同じ流れ (normalize → classify → open_regular → redact /
+    redact_dotenv) を operand path から走らせる。
+  - 失敗 (空 operand / normalize 失敗 / non-regular / open 失敗 / redact 例外
+    / NUL byte の lstat ValueError 等) は ``(None, None)`` に倒し、Bash 側 deny
+    は generic reason に降りる。
+  - dotenv の場合は info dict も返す (E4 で `keys[]` を grep_keys と照合する用途)。
+- **handlers/bash_handler.py の deny 経路 enrichment**
+  - `_build_deny_response(tokens, operand, envelope)` を新設。glob 一致 deny /
+    literal 一致 deny の 2 経路で `render_for_bash` 呼出と `extract_grep_keys`
+    呼出 (grep family 限定) を共通化し、`bash_deny` に新 keyword 引数を渡す。
+  - `_analyze_segment` の `output.make_deny(M.bash_deny(first_token, operand))`
+    呼出 2 箇所を `_build_deny_response(tokens, operand, envelope)` に置換。
+
+#### テスト結果
+
+- 累計 545 → **605 件 OK** (redact 518→578 件、+60 件 / check 27 件維持)
+- 新規:
+  - `tests/test_bash_reason_templates.py` (31 件、9 category × 2-3 ケース +
+    backwards compat 2 件)
+  - `tests/test_grep_extraction.py` (18 件、`is_grep_command` 2 件 +
+    `extract_grep_keys` 16 件)
+  - `tests/test_file_render.py` (11 件、dotenv / .envrc / abs path / json /
+    toml / yaml fallback / empty operand / missing / symlink / directory /
+    NUL byte normalize failure)
+- 既存テストはすべて維持 (`bash_deny(first_token, operand)` の 2 引数呼び出しが
+  互換のため、`TestBashDeny` / `TestDenyPlainText` / `TestVocabularyConsistency`
+  / `test_e2e.py` 系は無改修)
+
+#### コード追加
+
+| ファイル | 行数差 |
+|---|---|
+| `redaction/file_render.py` | +90 (新規) |
+| `handlers/bash/grep_extract.py` | +95 (新規) |
+| `core/messages.py` | +330 (dispatcher + 9 builder + helper 群) |
+| `handlers/bash_handler.py` | +35 (`_build_deny_response` + import) |
+| `tests/test_bash_reason_templates.py` | +330 (新規) |
+| `tests/test_grep_extraction.py` | +110 (新規) |
+| `tests/test_file_render.py` | +130 (新規) |
+| 合計 | **+1120 行** (機能追加 PR のため増加方向、E5/E6 + D1/D2 で削減見込み) |
+
+#### ドキュメント更新
+
+- `CHANGELOG.md`: 0.10.0 エントリ追加 (本 PR の差分まとめ)。
+- `CLAUDE.local.md`: 「進行中のレビュー」進捗を 0.10.0 (PR 5) で更新、
+  ディレクトリ構成に `redaction/file_render.py` / `handlers/bash/grep_extract.py`
+  を追記、`permissionDecisionReason` フォーマット例に Bash deny の新形式を追加。
+- `README.md`: 思想 2 が Bash 側でも実装された旨を強調、テスト件数を 578
+  (0.10.0) に更新。
+- `docs/DESIGN.md`: 「dotenv minimal info の拡張 (0.9.0)」セクションに「Bash
+  deny の category 別 reason (0.10.0, E3 + E4)」を追加。
+- `core/messages.py` 等 docstring を 0.10.0 拡張に合わせて更新。
+
+#### `claude plugin validate` 結果
+
+```
+$ claude plugin validate plugins/sensitive-files-guard
+Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
+Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
+⚠ Found 1 warning:
+  ❯ root: CLAUDE.local.md at the plugin root is not loaded as project context.
+✔ Validation passed with warnings
+```
+
+`CLAUDE.local.md` 配置の warning は plugin 設計上の既知事項 (PR 1〜4 と同じ)。
+
+#### 完了状況サマリ (0.10.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 / B2 / B3 | **0.8.0 ✓** |
+| P4 | E1 / E2 | **0.9.0 ✓** |
+| P5 | E3 (Bash コマンド別 reason) | **0.10.0 ✓** |
+| P5 | E4 (grep パターン抽出) | **0.10.0 ✓** |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
 ---
 
 ## 新規セッションでこのファイルを開いた時の手順
