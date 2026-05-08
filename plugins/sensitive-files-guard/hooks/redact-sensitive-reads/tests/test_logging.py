@@ -43,7 +43,7 @@ class TestSanitizeDetail(unittest.TestCase):
     def test_path_like_detail_is_blocked(self):
         # path / 値が混入したケースは _BAD に倒される
         for bad in (
-            "/Users/mao/.env",
+            "/Users/testuser/.env",
             "./relative/.env",
             ".env",  # `.` 単体は OK だが basename レベルは長さ的にも置換不要…
         ):
@@ -52,7 +52,7 @@ class TestSanitizeDetail(unittest.TestCase):
             pass
 
         for bad in (
-            "/Users/mao/.env",
+            "/Users/testuser/.env",
             "./relative/.env",
             "DATABASE_URL=postgresql://x",
             "some value with space",
@@ -117,11 +117,11 @@ class TestLogFileSanitize(unittest.TestCase):
 
     def test_dirty_detail_replaced_with_placeholder(self):
         # path 風の detail を渡すと _BAD に置換されてログに書かれる
-        L.log_info("classify", "/Users/mao/.env/secret")
+        L.log_info("classify", "/Users/testuser/.env/secret")
         log = self._read_log()
         self.assertIn("_BAD", log)
         # 元の path 文字列はログに漏れない
-        self.assertNotIn("/Users/mao/.env/secret", log)
+        self.assertNotIn("/Users/testuser/.env/secret", log)
         self.assertNotIn("secret", log)
 
     def test_log_error_also_sanitizes(self):
@@ -133,18 +133,18 @@ class TestLogFileSanitize(unittest.TestCase):
             os.dup2(w, 2)
             os.close(w)
             try:
-                L.log_error("normalize_failed", "/Users/mao/secret/path")
+                L.log_error("normalize_failed", "/Users/testuser/secret/path")
             finally:
                 os.dup2(saved_stderr, 2)
                 os.close(saved_stderr)
                 os.close(r)
         except Exception:
             # piping が壊れても本体テストは続行
-            L.log_error("normalize_failed", "/Users/mao/secret/path")
+            L.log_error("normalize_failed", "/Users/testuser/secret/path")
 
         log = self._read_log()
         self.assertIn("_BAD", log)
-        self.assertNotIn("/Users/mao/secret/path", log)
+        self.assertNotIn("/Users/testuser/secret/path", log)
 
 
 if __name__ == "__main__":
