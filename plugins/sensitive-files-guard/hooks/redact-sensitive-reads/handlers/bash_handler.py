@@ -1,6 +1,7 @@
 """Bash tool 用 handler (0.3.3 で責務境界分解、0.7.0 で input redirect 撤廃、
 0.8.0 で prefix normalize / glob 候補列挙を撤廃、0.10.0 で deny 経路に
-``render_for_bash`` + ``extract_grep_keys`` を統合)。
+``render_for_bash`` + ``extract_grep_keys`` を統合、0.11.0 で hard-stop の
+segment 単位再評価へ移行)。
 
 責務境界:
 
@@ -19,14 +20,19 @@
 
 ### 判定フロー
 
-1. **hard-stop** — ``$`` ``(`` ``)`` ``{`` ``}`` ``<`` バッククォート ``\\r`` を含む
-   コマンドは静的解析不能のため ``ask_or_allow`` (default で ask、autonomous で
-   allow)。0.3.4〜0.6.x で ``<`` のみ target を抽出して deny に倒していたが、
-   思想 1 (うっかり露出予防が目的、敵対的防御は非目的) と整合しないため 0.7.0
-   で撤廃。``<`` を含む command は他の hard-stop と同じく ``ask_or_allow``。
-2. **segment split** — ``&&`` ``||`` ``;`` ``|`` ``\\n`` を quote-aware に分割。
-3. **per-segment 解析** — 各セグメントで:
-   - shlex.split → 失敗 → ``ask_or_allow``
+1. **segment split** — ``&&`` ``||`` ``;`` ``|`` ``\\n`` を quote-aware に分割。
+2. **per-segment 解析** — 各セグメントで:
+   - **hard-stop 再判定 (0.11.0)** — ``$`` ``(`` ``)`` ``{`` ``}`` ``<``
+     バッククォート ``\\r`` を含む segment は静的解析不能のため
+     ``ask_or_allow`` を ``pending_ask`` に格納して **continue** (他 segment の
+     deny 検出を続ける)。0.10.0 までは command 全体に hard-stop が 1 つでも
+     あると early return していたが、``cat .env | sed 's/(=)/X/'`` のような
+     複合で sed segment の ``(`` が原因で全体 ask に倒れ autonomous で素通り
+     していたため、segment 単位再評価に細粒度化。攻撃シナリオ ``cat <(echo
+     \\(\\)) < .env`` は全 segment hard-stop となるため挙動不変 (思想 1
+     整合)。0.3.4〜0.6.x で ``<`` のみ target を抽出していた経路は 0.7.0 で
+     撤廃済み。
+   - shlex.split → 失敗 → ``ask_or_allow`` を ``pending_ask`` に格納して continue
    - 安全リダイレクト剥離 (``>/dev/null`` / ``2>&1`` 等)
    - **opaque first token 判定 (0.8.0)** — 第一トークンが env-assignment
      (``FOO=1``) / opaque wrapper (``env`` / ``command`` / ``builtin`` /
@@ -43,7 +49,7 @@
        (``_glob_operand_is_sensitive`` / ``_glob_candidates``) は 0.8.0 で撤廃
      - literal → ``_operand_is_sensitive`` (basename + URI/VCS pathspec 分割) で
        True なら **deny 固定**、False なら allow
-4. **集約** — deny > ask > allow。
+3. **集約** — deny > ask > allow。``pending_ask`` は最後に畳む。
 
 ### patterns.txt 読込失敗 = 全 mode deny 固定
 
@@ -286,32 +292,41 @@ def handle(envelope: dict) -> dict:
     if not rules:
         return output.make_allow()
 
-    # 1. hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 全て ask_or_allow。
-    # 0.3.4〜0.6.x で行っていた ``<`` 入力リダイレクトの target 抽出は 0.7.0 で
-    # 撤廃。``cat <(echo \\(\\)) < .env`` 等の escape paren depth tracking や
-    # ``[[ ... ]]`` 引数位置判定は思想 1 (うっかり露出予防が目的、敵対的防御は
-    # 非目的) と整合しないため、``<`` を含む command は他の hard-stop と同じ
-    # ``ask_or_allow`` (default で ask、autonomous で allow) に倒す。
-    if _has_hard_stop(command):
-        L.log_info("bash_classify", "hard_stop_lenient")
-        return output.ask_or_allow(M.bash_lenient("hard_stop"), envelope)
-
-    # 2. segment split (&& / || / ; / | / \n, quote を尊重)
+    # 1. segment split (&& / || / ; / | / \n, quote を尊重)
+    #    0.11.0 (F1): hard-stop は segment 単位で再評価する。0.10.0 までは
+    #    command 全体に hard-stop が 1 つでもあると early return していたが、
+    #    ``cat .env | sed 's/(=)/X/'`` のような複合で sed segment の ``(`` が
+    #    原因で全体 ask に倒れ autonomous で素通りしていたため細粒度化。
+    #    攻撃シナリオ ``cat <(echo \\(\\)) < .env`` は全 segment hard-stop と
+    #    なるため挙動不変 (思想 1 整合)。
     segments = _split_command_on_operators(command)
     if not segments:
         return output.make_allow()
 
-    # 3. 各セグメントを独立に判定。deny 優先、ask は最後に畳む。
+    # 2. 各セグメントを独立に判定。deny 優先、ask は最後に畳む。
+    #    hard-stop / shlex 失敗の segment は pending_ask に格納して continue
+    #    (他 segment の deny 検出を続ける)。
     pending_ask: dict | None = None
     for seg in segments:
+        if _has_hard_stop(seg):
+            L.log_info("bash_classify", "hard_stop_lenient")
+            if pending_ask is None:
+                pending_ask = output.ask_or_allow(
+                    M.bash_lenient("hard_stop"),
+                    envelope,
+                )
+            continue
+
         try:
             tokens = shlex.split(seg, comments=False, posix=True)
         except ValueError as e:
             L.log_info("bash_classify", f"shlex_fail:{type(e).__name__}")
-            return output.ask_or_allow(
-                M.bash_lenient("tokenize_failed"),
-                envelope,
-            )
+            if pending_ask is None:
+                pending_ask = output.ask_or_allow(
+                    M.bash_lenient("tokenize_failed"),
+                    envelope,
+                )
+            continue
         tokens = _strip_safe_redirects(tokens)
 
         result = _analyze_segment(tokens, envelope, rules)

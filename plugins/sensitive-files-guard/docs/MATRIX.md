@@ -58,6 +58,8 @@
 | `cat .env`, `less .env`, `head .env`, `source .env` |
 | `head -n 1 .env`, `cat -- .env`, `tail -f .env` |
 | `cat .env && pwd`, `false \|\| cat .env`, `cat .env; pwd`, `cat .env \| head` |
+| `cat .env \| sed 's/(=)/X/'`, `cat .env \| grep '(=)'` (0.11.0: 後段 segment の hard-stop は seg 単位再評価のため seg1 の literal match で deny 短絡) |
+| `ls .env \|\| cat $X \|\| echo done`, `cat $X \| ls .env \| head` (0.11.0: hard-stop segment を含んでも他 segment で literal match があれば deny に到達) |
 | `cat .env 2>/dev/null` (安全リダイレクト剥離後に機密 path) |
 | `grep SECRET .env`, `base64 .env`, `xxd .env` |
 | `timeout 1 cat .env`, `nice cat .env`, `stdbuf -o0 cat .env`, `busybox cat .env` |
@@ -83,6 +85,14 @@
 | `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
 
 ## Bash handler — 静的解析不能 (三態判定)
+
+> **0.11.0 (F1) 注記**: 以下は command を構成する全 segment がいずれも静的
+> 解析不能 (hard-stop / shell keyword / opaque wrapper / shlex 失敗) な場合に
+> のみ ask に倒る。0.11.0 から hard-stop は **segment 単位で再評価** されるため、
+> 1 segment でも literal match があれば deny に到達する
+> (`ls .env || cat $X || echo done` 等は機密確定 match 表に分類)。
+> 攻撃シナリオ `cat <(echo \(\)) < .env` は全 segment が hard-stop となるため
+> 引き続き ask 扱い (思想 1 整合)。
 
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|

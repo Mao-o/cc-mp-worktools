@@ -445,6 +445,41 @@ regression」と呼んで多数取り込んでいる。
 
 ---
 
+## F (Fix / 細粒度化) — 思想 1 整合の細粒度化
+
+### F1. hard-stop を segment 単位で再評価
+
+- **対象**: `hooks/redact-sensitive-reads/handlers/bash_handler.py` の
+  `handle()` における全体 hard-stop early return
+- **動機**: 現行 (0.10.0 まで) は command 全体に hard-stop char (`$`,
+  バッククォート, `(`, `)`, `{`, `}`, `<`, `\r`) が 1 つでもあると
+  `ask_or_allow` で early return していたため、`cat .env | sed 's/(=)/X/'`
+  のような複合で sed segment の `(` が原因で全体 ask に倒れ、autonomous
+  (auto / bypassPermissions) で `cat .env*` 系が素通りしていた。ユーザー
+  報告の `ls ... && ... && cat .env.local 2>/dev/null | sed -E 's/(=).*/\1.../' | head -20`
+  が代表例。
+- **思想整合**: cat segment は「うっかり cat .env」 → 思想 1 (うっかり露出
+  予防が目的、敵対的防御は非目的) の射程内。攻撃シナリオ
+  `cat <(echo \(\)) < .env` は全 segment が hard-stop となるため挙動不変
+  (どの segment も `pending_ask` に格納されて ask に倒る) → 思想 1 を
+  侵害しない
+- **修正方針**: 全体 hard-stop early return を撤廃。`_split_command_on_operators`
+  で分割した各 segment ごとに `_has_hard_stop` を再判定。hard-stop / shlex
+  失敗の segment は `pending_ask` に格納して **continue** (即 return
+  しない)。これにより `cat .env | grep '(=)'` のように先頭 segment で
+  literal match すれば deny 短絡し、`cat $X | ls .env | head` のように
+  後段 segment で literal match すれば pending_ask を超えて deny に到達する
+- **回帰検査**: 既存 605 件 (redact 578 + check 27) regression 0、新規
+  `TestSegmentHardStopReevaluate` を `tests/test_bash_handler.py` に追加
+  (14 件: 核心 3 mode + seg deny short-circuit 4 + 既存挙動継続 5 +
+  境界 1 + reason 文確認 1)
+- **コード差分**: `bash_handler.py` 約 +18 / -8 行 (実質 +10 行)、
+  `bash/segmentation.py` docstring +約 7 行、テスト約 +130 行
+- **Pri**: P1 (autonomous での素通り穴を塞ぐ最大の修正)
+- **依存**: なし
+
+---
+
 ## C (Conserve 維持) — 思想ど真ん中
 
 | 項目 | 維持理由 |
@@ -505,6 +540,7 @@ regression」と呼んで多数取り込んでいる。
 | 3 | A4 + B2 + B3 | 0.8.0 | autonomous で素通りするケースが増える | 思想 1 仕上げ ≈170 行削減 |
 | 4 | E1 + E2 | 0.9.0 | 機能追加 | 思想 2 のコア (dotenv status) |
 | 5 | E3 + E4 | 0.10.0 | 機能追加 | 思想 2 の応用 (Bash コマンド別 reason) |
+| 5.5 | F1 | 0.11.0 | 細粒度化 (autonomous での素通り穴を塞ぐ) | 思想 1 整合の細粒度化 |
 | 6 | E5 + E6 + D1 + D2 | 1.0.0 | 機能追加 + ドキュメント | 思想 2 の完成形 |
 
 **1.0.0 で本レビューサイクル完結**を想定。
@@ -1033,6 +1069,89 @@ Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
 | P4 | E1 / E2 | **0.9.0 ✓** |
 | P5 | E3 (Bash コマンド別 reason) | **0.10.0 ✓** |
 | P5 | E4 (grep パターン抽出) | **0.10.0 ✓** |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
+---
+
+### 2026-05-08: PR 5.5 完了 (0.11.0 リリース) — F1
+
+思想 1 整合の細粒度化。0.10.0 までの「全体 hard-stop early return」を
+segment 単位再評価に細粒度化し、`cat .env | sed 's/(=)/X/'` のような
+複合で autonomous モードで `cat .env*` 系が素通りしていた最大の穴を塞ぐ。
+
+#### 実装
+
+- **F1**: `bash_handler.py::handle()` の全体 hard-stop early return を撤廃。
+  `_split_command_on_operators` で分割した各 segment ごとに `_has_hard_stop`
+  を再判定し、hard-stop / shlex 失敗の segment は `pending_ask` に格納して
+  continue (即 return しない)。deny 確定 segment があれば短絡
+  (`ls .env || cat $X || echo done`)、後段で literal match すれば
+  pending_ask を超えて deny (`cat $X | ls .env | head`)。
+- 攻撃シナリオ `cat <(echo \(\)) < .env` は全 segment hard-stop で挙動不変
+  (思想 1: うっかり露出予防、敵対的防御は非目的)。
+
+#### テスト結果
+
+- 累計 605 → **619 件 OK** (redact 578→592 件 / check 27 件維持)
+- 新規: `tests/test_bash_handler.py::TestSegmentHardStopReevaluate` 14 件
+  - 核心: ユーザー報告ケース 3 mode (default / auto / bypassPermissions)
+  - 短絡: `cat .env && echo $HOME` / `ls .env || cat $X || echo done` /
+    `cat .env | grep '(=)'` / `cat $X | ls .env | head`
+  - 挙動継続: `(cat .env)` / `echo "secret=$(cat .env)"` /
+    `cat <(echo \(\)) < .env` (default ask + auto allow) /
+    `cat $X || cat $Y` / `sed 's/(=)/X/' .env`
+  - reason 文確認: minimal info に `first_token: cat` / `.env.local` /
+    `DATABASE_URL` が埋まる (E3/E4 dispatch との整合)
+
+#### コード追加
+
+| ファイル | 行数差 |
+|---|---|
+| `handlers/bash_handler.py` | 約 +18 / -8 (実質 +10) |
+| `handlers/bash/segmentation.py` | 約 +7 (docstring のみ) |
+| `tests/test_bash_handler.py` | 約 +130 (新規 class) |
+| 合計 | **約 +147 行** |
+
+#### ドキュメント更新
+
+- `docs/REVIEW_TASKS_2026-05-06.md`: 実装順序表に PR 5.5 / 0.11.0 行追加、
+  `## F (Fix / 細粒度化)` セクション新設、本進捗エントリ + 完了状況サマリ
+  (0.11.0 時点) 追加。
+- `docs/DESIGN.md`: Bash handler の対応文法範囲 / 既知制限を 0.11.0
+  segment 単位再評価で更新。
+- `docs/MATRIX.md`: 機密確定 match 表に複合コマンド deny 例追加、静的解析
+  不能表で「全 segment 含む場合のみ ask」を明記。
+- `CLAUDE.local.md`: 進捗に 0.11.0 (PR 5.5, F1) 追加、Bash handler 判定
+  フロー mermaid を per-segment ループに書き換え。
+- `CHANGELOG.md`: 0.11.0 エントリ追加。
+- `.claude-plugin/plugin.json`: version `"0.10.0"` → `"0.11.0"`。
+
+#### `claude plugin validate` 結果
+
+```
+$ claude plugin validate plugins/sensitive-files-guard
+Validating plugin manifest: .../sensitive-files-guard/.claude-plugin/plugin.json
+Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
+⚠ Found 1 warning:
+  ❯ root: CLAUDE.local.md at the plugin root is not loaded as project context.
+✔ Validation passed with warnings
+```
+
+`CLAUDE.local.md` 配置の warning は plugin 設計上の既知事項 (PR 1〜5 と同じ)。
+
+#### 完了状況サマリ (0.11.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 / B2 / B3 | **0.8.0 ✓** |
+| P4 | E1 / E2 | **0.9.0 ✓** |
+| P5 | E3 (Bash コマンド別 reason) | **0.10.0 ✓** |
+| P5 | E4 (grep パターン抽出) | **0.10.0 ✓** |
+| P1 | F1 (hard-stop の segment 単位再評価) | **0.11.0 ✓** |
 | P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |

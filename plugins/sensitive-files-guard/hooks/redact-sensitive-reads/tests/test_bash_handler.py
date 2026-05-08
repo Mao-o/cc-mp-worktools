@@ -958,5 +958,128 @@ class TestConfirmedMatchAcrossModes(BaseBash):
                 )
 
 
+class TestSegmentHardStopReevaluate(BaseBash):
+    """0.11.0 (F1): hard-stop は segment 単位で再評価される。
+
+    0.10.0 までは command 全体に hard-stop char (``$``, バッククォート, ``(``,
+    ``)``, ``{``, ``}``, ``<``, ``\\r``) が 1 つでもあると ``ask_or_allow`` に
+    倒していたため、``cat .env | sed 's/(=)/X/'`` のような複合で sed segment の
+    ``(`` が原因で全体 ask になり、autonomous で素通りしていた。0.11.0 では
+    全体 early return を撤廃し、segment ごとに ``_has_hard_stop`` を再判定する。
+
+    思想 1 (うっかり露出予防、敵対的防御は非目的) との整合: 攻撃シナリオ
+    ``cat <(echo \\(\\)) < .env`` は全 segment が hard-stop となるため挙動不変。
+    """
+
+    # --- 核心: ユーザー報告ケース ---
+    def test_user_reported_compound_with_sed_redact_paren_default(self):
+        cmd = (
+            "ls src/lib/lore/enishi/ 2>/dev/null && echo '---' && "
+            "ls src/lib/lore/maturity/ 2>/dev/null && echo '---' && "
+            "cat .env.local 2>/dev/null | sed -E 's/(=).*/\\1***REDACTED***/' | head -20"
+        )
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_user_reported_compound_with_sed_redact_paren_auto(self):
+        cmd = (
+            "ls src/lib/lore/enishi/ 2>/dev/null && echo '---' && "
+            "ls src/lib/lore/maturity/ 2>/dev/null && echo '---' && "
+            "cat .env.local 2>/dev/null | sed -E 's/(=).*/\\1***REDACTED***/' | head -20"
+        )
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_user_reported_compound_with_sed_redact_paren_bypass(self):
+        cmd = (
+            "ls src/lib/lore/enishi/ 2>/dev/null && echo '---' && "
+            "ls src/lib/lore/maturity/ 2>/dev/null && echo '---' && "
+            "cat .env.local 2>/dev/null | sed -E 's/(=).*/\\1***REDACTED***/' | head -20"
+        )
+        r = handle(_make_envelope(cmd, self.tmp, mode="bypassPermissions"))
+        self.assertEqual(_decision(r), "deny")
+
+    # --- 互換性: 「seg1 で deny 確定」を hard-stop が阻まない ---
+    def test_dotenv_seg1_then_dollar_seg2_deny(self):
+        # cat .env (literal match) を seg1、echo $HOME (hard-stop) を seg2
+        # 0.10.0 では全体 hard-stop で ask、0.11.0 では seg1 で deny
+        r = handle(_make_envelope("cat .env && echo $HOME", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_pipe_grep_paren_pattern_still_deny_seg1(self):
+        # cat .env | grep '(=)' — 0.10.0: seg2 の `(` で全体 ask
+        # 0.11.0: seg1 で deny 確定 (短絡)
+        r = handle(_make_envelope("cat .env | grep '(=)'", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_or_chain_dotenv_seg1_short_circuit(self):
+        # ls .env || cat $X || echo done — 0.10.0: 全体 hard-stop で ask
+        # 0.11.0: seg1 (ls .env) literal match → deny 確定
+        r = handle(_make_envelope("ls .env || cat $X || echo done", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_hard_stop_seg1_then_deny_seg2(self):
+        # cat $X | ls .env | head — 0.10.0: 全体 hard-stop で ask
+        # 0.11.0: seg1 hard-stop pending_ask → seg2 (ls .env) で deny 確定
+        r = handle(_make_envelope("cat $X | ls .env | head", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    # --- 互換性: 既存挙動の継続 (regression 保護) ---
+    def test_subshell_group_dotenv_still_ask_default(self):
+        # (cat .env) — 1 segment 全体 hard-stop → pending_ask
+        r = handle(_make_envelope("(cat .env)", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_command_substitution_in_quoted_string_still_ask(self):
+        # echo "secret=$(cat .env)" — 1 segment 全体 hard-stop → pending_ask
+        r = handle(_make_envelope('echo "secret=$(cat .env)"', self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_attack_scenario_input_redirect_dotenv_still_ask(self):
+        # cat <(echo \(\)) < .env — 全 segment hard-stop で挙動不変
+        # (process sub `<(...)`、入力 redirect `<` がそれぞれ hard-stop)
+        r = handle(_make_envelope("cat <(echo \\(\\)) < .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_attack_scenario_input_redirect_dotenv_auto_allow(self):
+        r = handle(_make_envelope(
+            "cat <(echo \\(\\)) < .env", self.tmp, mode="auto",
+        ))
+        self.assertTrue(output.is_allow(r))
+
+    def test_all_segments_hard_stop_pending_ask(self):
+        # cat $X || cat $Y — 全 segment hard-stop → pending_ask 1 個 → ask
+        r = handle(_make_envelope("cat $X || cat $Y", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_sed_paren_with_dotenv_arg_still_ask(self):
+        # sed 's/(=)/X/' .env — 1 segment 全体 hard-stop (`(`) → pending_ask
+        # (sed は opaque wrapper だが hard-stop が先に発火)
+        r = handle(_make_envelope("sed 's/(=)/X/' .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    # --- reason 文確認 (E3 dispatch との整合) ---
+    def test_deny_reason_includes_first_token_and_minimal_info(self):
+        # tmpdir に .env.local を実体作成して、reason に minimal info が
+        # 埋まることを確認 (E3/E4 dispatch との整合)
+        env_path = os.path.join(self.tmp, ".env.local")
+        with open(env_path, "w") as f:
+            f.write(
+                "DATABASE_URL=postgresql://u:p@h/d\n"
+                "JWT_SECRET=eyJabcdefghijklmnop\n"
+            )
+        cmd = (
+            "ls . 2>/dev/null && echo '---' && "
+            "cat .env.local 2>/dev/null | "
+            "sed -E 's/(=).*/\\1***REDACTED***/' | head -20"
+        )
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("first_token: cat", reason)
+        self.assertIn(".env.local", reason)
+        self.assertIn("DATABASE_URL", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

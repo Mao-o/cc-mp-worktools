@@ -78,6 +78,16 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 分割) 後の各 segment を shlex.split し、コマンド token 単位で解析する
 (opaque first token 判定, shell keyword 検出, operand scan)。
 
+**0.11.0 (F1)**: hard-stop char (`$`, バッククォート, `(`, `)`, `{`, `}`, `<`,
+`\r`) は **segment 単位で再評価** する。0.10.0 までは command 全体に hard-stop
+が 1 つでもあると `ask_or_allow` で early return していたため、
+`cat .env | sed 's/(=)/X/'` のような複合で sed segment の `(` が原因で全体
+ask に倒れ autonomous で `cat .env*` が素通りしていた。0.11.0 では segment ごとに
+`_has_hard_stop` を再判定し、hard-stop / shlex 失敗の segment は `pending_ask`
+に格納して continue (deny 確定 segment を優先し、無ければ最後に `pending_ask` を
+畳む)。攻撃シナリオ `cat <(echo \(\)) < .env` は全 segment が hard-stop と
+なるため挙動不変 (思想 1 整合)。
+
 ### 対応 (deny/allow 確定できる)
 
 | カテゴリ | 構文 | 使用 parser |
@@ -90,7 +100,7 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 
 | 構文 | 備考 |
 |---|---|
-| `<` 入力リダイレクト全般 (`cmd < t`, `cmd<t`, `cmd 0<t`, `cmd < "t"` 等) | 0.3.4〜0.6.x で character-level parser による target 抽出 + literal/glob 一致 deny を行っていたが、escape paren depth tracking や `[[ ... ]]` 引数位置判定など敵対的バイパス対策のコード負債が思想 1 (うっかり露出予防、敵対的防御は非目的) と整合しないため 0.7.0 で撤廃。`<` を含む command は他の hard-stop と同じ ``ask_or_allow`` |
+| `<` 入力リダイレクト全般 (`cmd < t`, `cmd<t`, `cmd 0<t`, `cmd < "t"` 等) | 0.3.4〜0.6.x で character-level parser による target 抽出 + literal/glob 一致 deny を行っていたが、escape paren depth tracking や `[[ ... ]]` 引数位置判定など敵対的バイパス対策のコード負債が思想 1 (うっかり露出予防、敵対的防御は非目的) と整合しないため 0.7.0 で撤廃。`<` を含む segment は他の hard-stop と同じ ``ask_or_allow``。0.11.0 から segment 単位で再評価するため `cat $X | ls .env | head` のように後段で literal match があれば deny に到達する |
 | `<<` heredoc, `<<-` | delimiter/body は read 対象外 |
 | `<<<` herestring | literal 渡しで file read ではない |
 | `<&N`, `<&-` fd dup | 既存 fd 複製、file read ではない |
@@ -293,7 +303,7 @@ deny reason のキー名ガイド:
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
 
-## 既知制限 (0.8.0 時点)
+## 既知制限 (0.11.0 時点)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
@@ -302,14 +312,18 @@ deny reason のキー名ガイド:
    **allow** に倒す。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
    `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` も
    ``ask_or_allow`` に格下げした (0.3.2〜0.7.x の prefix normalize は撤廃)。
-3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0)** — 0.3.4〜0.6.x では
-   character-level quote-aware parser で `cat < .env` / `cat<.env` /
-   `cat 0<.env` / `cat < ".env"` などから target を抽出し literal/glob 一致で
-   deny に倒していたが、`cat <(echo \(\)) < .env` の escape paren depth
-   tracking や `[[ ... ]]` 引数位置判定など敵対的バイパス対策のコードが
-   思想 1 (うっかり露出予防が目的、敵対的防御は非目的) に反するため 0.7.0
-   で撤廃。`<` を含む command は他の hard-stop と同じ ``ask_or_allow``
-   (default で ask、autonomous で allow) に倒す。
+3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0、0.11.0 で segment 単位
+   再評価)** — 0.3.4〜0.6.x では character-level quote-aware parser で
+   `cat < .env` / `cat<.env` / `cat 0<.env` / `cat < ".env"` などから target
+   を抽出し literal/glob 一致で deny に倒していたが、`cat <(echo \(\)) < .env`
+   の escape paren depth tracking や `[[ ... ]]` 引数位置判定など敵対的バイパス
+   対策のコードが思想 1 (うっかり露出予防が目的、敵対的防御は非目的) に反する
+   ため 0.7.0 で撤廃。`<` を含む segment は他の hard-stop と同じ
+   ``ask_or_allow`` (default で ask、autonomous で allow) に倒す。0.11.0 で
+   segment 単位再評価に細粒度化したため、`<` が含まれる segment は当該 segment
+   のみ ask に倒り、他 segment が literal match すれば deny に到達する
+   (`cat $X | ls .env | head` 等)。攻撃シナリオ `cat <(echo \(\)) < .env` は
+   全 segment が hard-stop となるため挙動不変。
 4. **glob operand の判定は dotenv stem 限定 (0.8.0)** — 0.3.2〜0.7.x で行っていた
    既定 rules 候補列挙 (`_glob_candidates` / `_glob_operand_is_sensitive`) は
    `cat *.log` `cat *.json` のような日常 glob まで「`.env` rule との連結候補」で

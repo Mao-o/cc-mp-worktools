@@ -8,7 +8,14 @@ from handlers.bash.constants import _HARD_STOP_CHARS
 
 
 def _has_hard_stop(command: str) -> bool:
-    """動的評価 / 入力リダイレクト / グループ化 chars が含まれるか。"""
+    """動的評価 / 入力リダイレクト / グループ化 chars が含まれるか。
+
+    0.11.0 (F1) 以降、呼び出し側 (``bash_handler.handle``) は **segment 単位で
+    再評価** する前提。command 全体に対して呼ぶと ``cat .env | sed 's/(=)/X/'``
+    のような複合で sed segment の ``(`` が原因で全体 ask に倒れ、autonomous で
+    ``cat .env`` 系が素通りする (0.10.0 までの挙動)。``_split_command_on_operators``
+    で分割した各 segment ごとに ``_has_hard_stop`` を呼ぶこと。
+    """
     return any(c in _HARD_STOP_CHARS for c in command)
 
 
