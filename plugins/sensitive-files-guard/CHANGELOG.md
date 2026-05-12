@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.12.0
+
+**ユーザー体感の調査用ワンライナーが ask に倒れる問題を解消** する追加リリース。
+ログ実測 (約 1 日分) で `bash_classify` の ask 発火の **約 80%** が
+`segment_residual_metachar_lenient` (= `>` 出力リダイレクトや `&` background
+を含むコマンド) 起因だったため、第一トークンが「副作用なしの見る・数える系」
+allow-list (`_SAFE_READ_FIRST_TOKENS`) に該当する場合のみ、`residual metachar`
+の ask 経路を **スキップして operand scan に直行** する判定を追加。`grep foo
+README.md > /tmp/out` / `ls > listing.txt` / `cat README.md | wc -l > out` の
+ような調査ワンライナーが ask に倒れなくなる。
+
+機密 redirect target (例: `grep foo > .env`) / hard-stop (`$(...)`, backtick,
+heredoc, `<`) / opaque wrapper (`bash -c`, `awk`, `sed`, `sudo` 等) / allow-list
+外コマンド (`echo`, `awk`, `sed`, `find`) は **依然 ask / deny 維持** で、
+safety net は損なわない。
+
+### 主要な変更
+
+1. **`_SAFE_READ_FIRST_TOKENS` を新設**
+   (`handlers/bash/constants.py`) — 副作用なしの read-only first_token
+   allow-list。`ls cat head tail nl tac bat less more view wc file stat du df
+   tree grep egrep fgrep rg ag ack od xxd hexdump` の 24 個。`_OPAQUE_WRAPPERS`
+   / `_SHELL_KEYWORDS` とは **disjoint** で、awk / sed / find / xargs /
+   parallel など副作用持つ可能性のあるコマンドは入れない (理由はソースの
+   コメント参照)。
+2. **`_analyze_segment` の判定順序を再構成**
+   (`handlers/bash_handler.py`) — `first_token` が `_SAFE_READ_FIRST_TOKENS`
+   に該当 (`is_safe_read=True`) なら、`_segment_has_residual_metachar` の
+   ask 経路を **スキップ** して operand scan に直行する。opaque wrapper /
+   shell keyword は allow-list と disjoint のため挙動不変。allow-list ヒット
+   時は `bash_classify` ログに `safe_read_allowlist:<first>` を残す。
+
+### 動作変化
+
+- **allow に倒るようになるケース** (default / auto / bypass 全 mode):
+  - `grep foo README.md > /tmp/out` (出力リダイレクト含む grep ワンライナー)
+  - `ls -la > /tmp/listing.txt` / `cat README.md > /tmp/out` /
+    `head -5 README.md > /tmp/x` / `wc -l README.md > /tmp/count`
+  - `grep foo README.md >> /tmp/out` (append redirect)
+  - `grep foo README.md | wc -l > /tmp/count` (pipe + redirect)
+  - `grep foo file.txt &` (background execution)
+- **挙動不変** (deny / ask いずれかを維持):
+  - `grep SECRET .env > out.txt` / `grep foo file > .env` (機密 operand は
+    operand scan で deny 固定)
+  - `grep foo < .env` (`<` 入力リダイレクトは hard-stop → ask 維持)
+  - `grep foo $(find . -name x)` (`$()` hard-stop は ask 維持。shell 展開で
+    別コマンドの出力が grep 引数に混入する経路を塞げないため)
+  - `awk '{print}' file > out.txt` / `sed 's/foo/bar/' file > out.txt`
+    (awk / sed は opaque wrapper → ask 維持)
+  - `find . -name '*.py' > files.txt` (find は allow-list 外 → residual
+    metachar の ask 維持)
+  - `echo foo > out.txt` (echo は allow-list 外 → ask 維持)
+  - 機密 path 一致は全 mode で deny 固定 (`TestConfirmedMatchAcrossModes`
+    で網羅)
+
+### テスト追加 / 結果
+
+- 累計 619 → **640 件 OK** (redact 592 → 613 / check 27 維持)
+- 新規: `tests/test_bash_handler.py::TestSafeReadAllowlist` 21 件
+  - allow-list メンバー (ls / cat / head / tail / wc / grep / file / stat)
+    の `>` 出力リダイレクト
+  - `>>` append redirect / `&` background / pipe + redirect / default mode
+    でも allow
+  - 機密 redirect target (`> .env`) / 機密 operand (`SECRET .env`) は依然 deny
+  - hard-stop (`<`, `$()`) は allow-list でも ask 維持
+  - allow-list 外 (awk / sed / find / echo) は ask 維持
+  - 複合: `grep foo file | wc -l > count` allow、`grep ... && cat .env` deny
+
+### コード差分
+
+| ファイル | 行数差 |
+|---|---|
+| `handlers/bash/constants.py` | 約 +32 (allow-list 定義 + 詳細コメント) |
+| `handlers/bash_handler.py` | 約 +14 / -3 (実質 +11) |
+| `tests/test_bash_handler.py` | 約 +130 (新規 class) |
+| 合計 | **約 +180 行** |
+
+### ドキュメント更新
+
+- `docs/REVIEW_TASKS_2026-05-06.md`: 進捗欄に 0.12.0 行追加。本変更は
+  PR 6 (E5/E6 + D1/D2) のスコープ外で、ユーザー体感問題の修正リリース
+  として独立扱い。
+- `docs/DESIGN.md`: Bash handler の判定フローに allow-list 分岐の説明を追加。
+- `docs/MATRIX.md`: 「`>` 出力リダイレクト」「`&` background」の行を
+  allow-list 対象 first_token とそれ以外で分けて再構成。
+- `README.md`: `PreToolUse(Bash)` セクションに「副作用なし read-only allow-list
+  を 0.12.0 で導入」の段落を追加。
+- `CLAUDE.local.md`: 進捗に 0.12.0 (read-only allow-list) を追加。Bash 判定
+  フロー mermaid を allow-list 分岐込みに更新。
+
+### 思想整合
+
+- **思想 1 (うっかり露出予防、敵対的防御は非目的)**: 「うっかり調査ワンライナー」
+  を ask に倒さないことで、ユーザー判断の介在頻度を減らす。安全 net (機密
+  operand → deny 固定 / hard-stop → ask 維持) は維持。
+- **思想 2 (block 時は意図を汲んだメッセージを返す)**: deny 経路は不変
+  (E3/E4 dispatch のままなので minimal info / category 別 reason は維持)。
+- **副作用の扱い**: allow-list は「副作用なしのコマンドのみ」を対象とするが、
+  `>` リダイレクトを含む場合は副作用 (書込み) が発生する。この plugin の
+  スコープは「機密ファイルの読み出し / 書き込み事故予防」であり、非機密パス
+  への一般的な書き込み副作用は対象外として受け入れる。機密パスへの書き込み
+  (`grep foo > .env`) は operand scan で deny される。
+
 ## 0.11.0
 
 **思想ベース再評価レビュー (`docs/REVIEW_TASKS_2026-05-06.md`) PR 5.5 を消化**:

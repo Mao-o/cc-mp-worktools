@@ -478,6 +478,38 @@ regression」と呼んで多数取り込んでいる。
 - **Pri**: P1 (autonomous での素通り穴を塞ぐ最大の修正)
 - **依存**: なし
 
+### F2. read-only first_token allow-list で residual metachar の ask を allow に倒す
+
+- **対象**: `hooks/redact-sensitive-reads/handlers/bash/constants.py`
+  (`_SAFE_READ_FIRST_TOKENS` 新設)、`handlers/bash_handler.py::_analyze_segment`
+- **動機**: 0.11.0 までのログ実測で `bash_classify` の ask 発火の **約 80%**
+  が `segment_residual_metachar_lenient` 起因 (`>` 出力リダイレクトや `&`
+  background)。`grep foo README.md > /tmp/out` / `ls > listing.txt` /
+  `cat README.md | wc -l > out` のような調査ワンライナーが ask に倒れて
+  ユーザー体感 UX を阻害していた
+- **思想整合**: 「うっかり露出予防」が目的で、副作用なしの read-only コマンド
+  (`ls cat head tail wc grep ...`) が `>` で出力を保存する形は「うっかり機密
+  露出」とは異質。機密 redirect target (`grep foo > .env`) は operand scan で
+  deny 固定、hard-stop (`$()` / `<`) は引き続き ask 維持で safety net を保つ
+- **修正方針**:
+  - `_SAFE_READ_FIRST_TOKENS = frozenset({"ls","cat","head","tail","nl","tac",
+    "bat","less","more","view","wc","file","stat","du","df","tree","grep",
+    "egrep","fgrep","rg","ag","ack","od","xxd","hexdump"})` を新設
+  - 第一トークンが該当する場合のみ `_segment_has_residual_metachar` の ask
+    経路をスキップして operand scan に直行
+  - `_OPAQUE_WRAPPERS` / `_SHELL_KEYWORDS` とは disjoint なので opaque /
+    shell_keyword 経路には影響しない
+  - `awk` / `sed` / `find` / `xargs` / `echo` は副作用持つ可能性のため
+    allow-list **外**
+- **回帰検査**: 既存 619 件 (redact 592 + check 27) regression 0、新規
+  `TestSafeReadAllowlist` を `tests/test_bash_handler.py` に追加
+  (21 件: redirect allow + 機密 deny 固定 + hard-stop ask 維持 + allow-list 外
+  ask 維持 + 複合)
+- **コード差分**: `bash/constants.py` 約 +32 行、`bash_handler.py` 約 +14 / -3
+  (実質 +11 行)、テスト約 +130 行
+- **Pri**: P2 (ユーザー体感 UX の主要不満解消)
+- **依存**: なし (F1 完了後の状態に対する追加)
+
 ---
 
 ## C (Conserve 維持) — 思想ど真ん中
@@ -541,6 +573,7 @@ regression」と呼んで多数取り込んでいる。
 | 4 | E1 + E2 | 0.9.0 | 機能追加 | 思想 2 のコア (dotenv status) |
 | 5 | E3 + E4 | 0.10.0 | 機能追加 | 思想 2 の応用 (Bash コマンド別 reason) |
 | 5.5 | F1 | 0.11.0 | 細粒度化 (autonomous での素通り穴を塞ぐ) | 思想 1 整合の細粒度化 |
+| 5.6 | F2 | 0.12.0 | 副作用 redirect を allow に倒す (ユーザー体感 UX 修正) | read-only first_token allow-list 新設 |
 | 6 | E5 + E6 + D1 + D2 | 1.0.0 | 機能追加 + ドキュメント | 思想 2 の完成形 |
 
 **1.0.0 で本レビューサイクル完結**を想定。
@@ -1152,6 +1185,83 @@ Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
 | P5 | E3 (Bash コマンド別 reason) | **0.10.0 ✓** |
 | P5 | E4 (grep パターン抽出) | **0.10.0 ✓** |
 | P1 | F1 (hard-stop の segment 単位再評価) | **0.11.0 ✓** |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
+### 2026-05-13: PR 5.6 完了 (0.12.0 リリース) — F2
+
+ユーザー体感の調査用ワンライナーが ask に倒れる問題を解消する追加リリース。
+ログ実測 (約 1 日分) で `bash_classify` の ask 発火の **約 80%** が
+`segment_residual_metachar_lenient` 起因だったため、副作用なしの read-only
+コマンドが第一トークンの segment に限り、`residual_metachar` の ask 経路を
+スキップして operand scan に直行する判定を追加。
+
+#### 実装
+
+- **F2**: `handlers/bash/constants.py` に `_SAFE_READ_FIRST_TOKENS` を新設
+  (`ls cat head tail nl tac bat less more view wc file stat du df tree grep
+  egrep fgrep rg ag ack od xxd hexdump` の 24 個)。`handlers/bash_handler.py::
+  _analyze_segment` で第一トークンが該当する場合のみ `_segment_has_residual_metachar`
+  の ask 経路をスキップ。allow-list ヒット時は `bash_classify` ログに
+  `safe_read_allowlist:<first>` を残す。
+- `awk` / `sed` / `find` / `xargs` / `echo` は副作用持つ可能性のため allow-list **外**
+  (`-i` / `-delete` / `-exec` / script 内 redirect の静的判別が複雑なため)。
+- 機密 redirect target (`grep foo > .env`) は operand scan で deny 固定、
+  hard-stop (`$(...)` / `<` / heredoc) は引き続き ask 維持。
+
+#### テスト結果
+
+- 累計 619 → **640 件 OK** (redact 592→613 件 / check 27 件維持)
+- 新規: `tests/test_bash_handler.py::TestSafeReadAllowlist` 21 件
+  - allow: `grep foo > /tmp/out` / `ls > listing` / `cat > /tmp/x` /
+    `head -5 > /tmp/x` / `wc -l > /tmp/count` / `file > /tmp/x` /
+    `stat > /tmp/x` / `grep ... >> /tmp/out` / pipe + redirect / `&` background
+  - deny: 機密 redirect target (`grep foo > .env`) / 機密 operand
+    (`grep SECRET .env > out.txt`)
+  - ask 維持: `grep foo < .env` / `grep foo $(find . -name x)`
+  - allow-list 外 ask 維持: `awk '{print}' > out` / `sed s/x/y > out` /
+    `find . -name '*.py' > files.txt` / `echo foo > out.txt`
+  - 複合: `grep foo | wc -l > count` allow、`grep ... && cat .env` deny
+
+#### コード追加
+
+| ファイル | 行数差 |
+|---|---|
+| `handlers/bash/constants.py` | 約 +32 (allow-list 定義 + 詳細コメント) |
+| `handlers/bash_handler.py` | 約 +14 / -3 (実質 +11) |
+| `tests/test_bash_handler.py` | 約 +130 (新規 class) |
+| 合計 | **約 +180 行** |
+
+#### ドキュメント更新
+
+- `docs/REVIEW_TASKS_2026-05-06.md`: 実装順序表に PR 5.6 / 0.12.0 行追加、
+  `## F` に F2 タスク定義、本進捗エントリ + 完了状況サマリ (0.12.0 時点) 追加。
+- `docs/DESIGN.md`: Bash handler の対応文法範囲に read-only allow-list 説明追加。
+- `docs/MATRIX.md`: 「Bash handler — read-only first_token allow-list」表を新設、
+  既存「静的解析不能」表から `cat foo >> bar.txt` のような cat redirect 例を
+  allow 側に移動。
+- `README.md`: `PreToolUse(Bash)` セクションに 0.12.0 allow-list の段落を追加。
+- `CHANGELOG.md`: 0.12.0 エントリ追加。
+- `.claude-plugin/plugin.json`: version `"0.11.0"` → `"0.12.0"`。
+
+#### `claude plugin validate` 結果
+
+(PR 1〜5.5 と同じく `CLAUDE.local.md` warning は plugin 設計上の既知事項。
+本リリース時に再実行する。)
+
+#### 完了状況サマリ (0.12.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 / B2 / B3 | **0.8.0 ✓** |
+| P4 | E1 / E2 | **0.9.0 ✓** |
+| P5 | E3 (Bash コマンド別 reason) | **0.10.0 ✓** |
+| P5 | E4 (grep パターン抽出) | **0.10.0 ✓** |
+| P1 | F1 (hard-stop の segment 単位再評価) | **0.11.0 ✓** |
+| P2 | F2 (read-only first_token allow-list) | **0.12.0 ✓** |
 | P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |

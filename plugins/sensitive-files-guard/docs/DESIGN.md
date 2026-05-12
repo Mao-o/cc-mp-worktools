@@ -78,6 +78,30 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 分割) 後の各 segment を shlex.split し、コマンド token 単位で解析する
 (opaque first token 判定, shell keyword 検出, operand scan)。
 
+### read-only first_token allow-list (0.12.0)
+
+`_SAFE_READ_FIRST_TOKENS` (副作用なしの read-only コマンド: `ls cat head tail
+nl tac bat less more view wc file stat du df tree grep egrep fgrep rg ag ack
+od xxd hexdump`) を `handlers/bash/constants.py` に定義。第一トークンがこの
+セットに該当する segment は、`_segment_has_residual_metachar` の ask 経路を
+**スキップ** して operand scan に直行する。
+
+導入背景: 0.11.0 までの実測ログで `bash_classify` の ask 発火の **約 80%** が
+`segment_residual_metachar_lenient` (= `>` 出力リダイレクトや `&` background
+を含むコマンド) 起因だった。`grep foo README.md > /tmp/out` のような調査用
+ワンライナーが ask に倒れて UX を阻害していたため、副作用なしの read-only
+コマンドに限り redirect / background を許容する。
+
+安全 net:
+- 機密 redirect target (`grep foo > .env`) は operand scan で `.env` を捕まえて
+  deny 固定。
+- hard-stop (`$(...)` / backtick / heredoc / `<`) は依然 `ask_or_allow` (= 静的
+  解析不能、shell 展開で別コマンド出力が混入する経路を塞げないため)。
+- `_OPAQUE_WRAPPERS` (`awk`, `sed`, `bash -c`, `eval`, `sudo` 等) / `_SHELL_KEYWORDS`
+  (`if`, `for` 等) は allow-list と disjoint なので、これらの ask 経路は不変。
+- `find` は `-delete` / `-exec` で副作用持ちうるため allow-list **外**。
+- `echo` は stdout 出力で「見る・数える」とは異なるため allow-list **外**。
+
 **0.11.0 (F1)**: hard-stop char (`$`, バッククォート, `(`, `)`, `{`, `}`, `<`,
 `\r`) は **segment 単位で再評価** する。0.10.0 までは command 全体に hard-stop
 が 1 つでもあると `ask_or_allow` で early return していたため、

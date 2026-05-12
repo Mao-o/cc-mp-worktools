@@ -1081,5 +1081,136 @@ class TestSegmentHardStopReevaluate(BaseBash):
         self.assertIn("DATABASE_URL", reason)
 
 
+class TestSafeReadAllowlist(BaseBash):
+    """0.12.0: ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの read-only allow-list) に
+    該当する first_token は ``_segment_has_residual_metachar`` の ask 経路を
+    スキップして operand scan に直行する。
+
+    `grep foo > /tmp/out` `ls > listing.txt` のような調査用ワンライナーを
+    ask に倒さないため (ログ実測で ask 発火の 約 80% が residual_metachar 起因)。
+    機密 redirect target / hard-stop / opaque wrapper / allow-list 外の
+    first_token は依然 ask / deny を維持する。
+    """
+
+    def test_grep_with_output_redirect_allow(self):
+        # 0.11.x: residual `>` で ask、0.12.0: grep allow-list で allow
+        r = handle(_make_envelope("grep foo README.md > /tmp/out", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_grep_with_append_redirect_allow(self):
+        r = handle(_make_envelope("grep foo README.md >> /tmp/out", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_ls_with_output_redirect_allow(self):
+        r = handle(_make_envelope("ls -la > /tmp/listing.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_cat_with_output_redirect_allow(self):
+        r = handle(_make_envelope("cat README.md > /tmp/out", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_head_with_output_redirect_allow(self):
+        r = handle(_make_envelope("head -n 5 README.md > /tmp/x", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_wc_with_output_redirect_allow(self):
+        r = handle(_make_envelope("wc -l README.md > /tmp/count", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_grep_redirect_to_sensitive_still_deny(self):
+        # `>` 先が機密パスでも operand scan で deny される (safety net)
+        r = handle(_make_envelope("grep foo file.txt > .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_grep_sensitive_operand_still_deny(self):
+        # allow-list 対象でも operand が機密なら依然 deny 固定
+        r = handle(_make_envelope("grep SECRET .env > out.txt", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_grep_input_redirect_kept_ask(self):
+        # `<` 入力リダイレクトは hard-stop で ask 維持 (allow-list でも)
+        r = handle(_make_envelope("grep foo < .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_grep_command_substitution_kept_ask(self):
+        # `$()` hard-stop は allow-list でも ask 維持 (shell 展開漏洩リスク)
+        r = handle(_make_envelope("grep foo $(find . -name x)", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_awk_not_in_allowlist_still_ask(self):
+        # awk は副作用持つ可能性 (`print > "/p"`, `-i`) のため allow-list 外。
+        # opaque wrapper として ask 維持。
+        r = handle(_make_envelope("awk '{print}' README.md > out.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_sed_not_in_allowlist_still_ask(self):
+        # sed は `-i` で in-place 書換できるため allow-list 外。
+        r = handle(_make_envelope("sed 's/foo/bar/' README.md > out.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_find_not_in_allowlist_still_ask(self):
+        # find は `-delete` / `-exec` で副作用持ちうるため allow-list 外。
+        # `>` を含むので residual metachar の ask に倒れる。
+        r = handle(_make_envelope("find . -name '*.py' > files.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_echo_not_in_allowlist_still_ask(self):
+        # echo は stdout 出力のみで「見る・数える」とは異なる。allow-list 外。
+        r = handle(_make_envelope("echo foo > out.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_grep_pipe_pure_read_allow(self):
+        # pipe (`|`) は segment 分割なので各 segment は metachar 無し。
+        # 両 segment が allow-list、operand 非機密 → allow。
+        r = handle(_make_envelope("grep foo file.txt | head -n 5", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_grep_redirect_default_mode_allow(self):
+        # default mode でも allow (autonomous でなくても許可される)
+        r = handle(_make_envelope(
+            "grep foo README.md > /tmp/out", self.tmp, mode="default",
+        ))
+        self.assertTrue(output.is_allow(r))
+
+    def test_grep_background_ampersand_allow(self):
+        # `&` background は residual metachar `&` を含む。allow-list で skip。
+        r = handle(_make_envelope("grep foo file.txt &", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_all_safe_read_tokens_with_redirect_allow(self):
+        # 主要 allow-list メンバーが redirect 含みで allow になることを確認
+        cmds = [
+            "ls -la > /tmp/x",
+            "cat README.md > /tmp/x",
+            "head -5 README.md > /tmp/x",
+            "tail -5 README.md > /tmp/x",
+            "wc -l README.md > /tmp/x",
+            "grep foo README.md > /tmp/x",
+            "file README.md > /tmp/x",
+            "stat README.md > /tmp/x",
+        ]
+        for cmd in cmds:
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+            )
+
+    def test_safe_read_with_compound_pipe_grep_to_wc_allow(self):
+        # `grep foo file | wc -l > /tmp/count` のような調査ワンライナー
+        r = handle(_make_envelope(
+            "grep foo README.md | wc -l > /tmp/count", self.tmp,
+        ))
+        self.assertTrue(output.is_allow(r))
+
+    def test_safe_read_with_sensitive_in_compound_still_deny(self):
+        # 複合で 1 segment が機密一致なら依然 deny 確定 (allow-list は他 segment
+        # の ask を allow に倒すだけで、deny 判定は変えない)
+        r = handle(_make_envelope(
+            "grep foo README.md > /tmp/out && cat .env", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -78,6 +78,7 @@ from handlers.bash.constants import (  # noqa: F401
     _OPAQUE_WRAPPERS,
     _REDIRECT_OP_TOKENS,
     _SAFE_READ_CMDS,
+    _SAFE_READ_FIRST_TOKENS,
     _SAFE_REDIRECT_RE,
     _SAFE_REDIRECT_TARGETS,
     _SEGMENT_RESIDUAL_METACHARS,
@@ -206,31 +207,44 @@ def _analyze_segment(
     機密 path 一致 → ``make_deny`` 固定 (0.10.0 で reason に minimal info /
     matched_pattern_keys を埋め込み)。判定不能 → ``ask_or_allow``
     (default=ask, auto/bypass=allow)。それ以外 → allow。
+
+    0.12.0: ``first_token`` が ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの見る・
+    数える系 allow-list) に該当する場合、``_segment_has_residual_metachar`` の
+    ask 経路を **スキップ** して operand scan に直行する。`grep foo > /tmp/x` /
+    `ls > listing.txt` 等の調査用ワンライナーを ask に倒さないため。機密 path
+    redirect (例: ``grep foo > .env``) は operand scan で deny 固定なので
+    safety net が残る。``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` とは disjoint
+    のため、これらの ask 経路は allow-list ヒットでは自動的に通らない。
     """
     if not tokens:
         return output.make_allow()
 
-    if _is_opaque_first_token(tokens[0]):
+    first = tokens[0]
+    is_safe_read = first in _SAFE_READ_FIRST_TOKENS
+
+    if _is_opaque_first_token(first):
         L.log_info("bash_classify", "opaque_prefix_lenient")
         return output.ask_or_allow(
             M.bash_lenient("opaque_prefix"),
             envelope,
         )
 
-    if _segment_has_residual_metachar(tokens):
+    if not is_safe_read and _segment_has_residual_metachar(tokens):
         L.log_info("bash_classify", "segment_residual_metachar_lenient")
         return output.ask_or_allow(
             M.bash_lenient("residual_metachar"),
             envelope,
         )
 
-    first = tokens[0]
     if first in _SHELL_KEYWORDS:
         L.log_info("bash_classify", f"shell_keyword_lenient:{first}")
         return output.ask_or_allow(
             M.bash_lenient("shell_keyword", detail=first),
             envelope,
         )
+
+    if is_safe_read:
+        L.log_info("bash_classify", f"safe_read_allowlist:{first}")
 
     paths = _find_path_candidates(tokens)
     pending_glob_ask: dict | None = None

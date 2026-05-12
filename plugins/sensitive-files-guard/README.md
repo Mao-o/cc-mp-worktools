@@ -108,9 +108,22 @@ length, status tags, and placeholder hints are returned.
   `acceptEdits` / `dontAsk` では `ask` (ユーザー介在)、`auto` /
   `bypassPermissions` では `allow` (autonomous 実行で日常コマンドが止まるのを
   避ける)
-- **allow**: 全 operand が非機密
+- **allow**: 全 operand が非機密、または first_token が read-only allow-list
+  (`_SAFE_READ_FIRST_TOKENS`、0.12.0 で導入)
 
 詳細なコマンド別挙動は [docs/MATRIX.md](./docs/MATRIX.md) 参照。
+
+> **0.12.0 で read-only first_token allow-list を導入**: ログ実測で
+> `bash_classify` の ask 発火の **約 80%** が `>` 出力リダイレクトや `&`
+> background を含むコマンド (`segment_residual_metachar_lenient`) 起因だった
+> ため、第一トークンが副作用なしの見る・数える系 (`ls cat head tail nl tac bat
+> less more view wc file stat du df tree grep egrep fgrep rg ag ack od xxd
+> hexdump`) なら residual metachar の ask 経路を **スキップして operand scan
+> に直行** する判定を追加。`grep foo README.md > /tmp/out` / `ls > listing` /
+> `cat README.md | wc -l > count` のような調査用ワンライナーが allow に倒る。
+> 機密 redirect target (`grep foo > .env`) は operand scan で deny 固定、
+> hard-stop (`$()` / `<`) は ask 維持で safety net を保つ。`awk` / `sed` /
+> `find` / `echo` は副作用持ちうるため allow-list **外**。
 
 > **0.10.0 で Bash deny reason を category 別 dispatch に再編**: 思想 2
 > (block 時は意図を汲んだメッセージを返す) を Bash 側でも実装。first_token を

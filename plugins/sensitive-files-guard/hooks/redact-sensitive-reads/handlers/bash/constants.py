@@ -16,6 +16,40 @@ _SAFE_READ_CMDS = frozenset({
 })
 _SOURCE_CMDS = frozenset({"source", "."})
 
+# 0.12.0: read-only first_token allow-list。
+# 「副作用なしの見る・数える系」だけを集める。これらが segment の first_token に
+# 出現したときは ``_segment_has_residual_metachar`` (= ``>`` ``&`` 等の剥がし残り)
+# / ``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` による ask 経路を **スキップして
+# operand scan に直行** する (ask_or_allow ではなく operand scan 結果のみで決定)。
+#
+# 思想 1 (うっかり露出予防が目的、敵対的防御は非目的) を維持しつつ、ユーザーが
+# 日常的に使う調査用ワンライナー (``grep foo > /tmp/out``, ``ls > listing.txt``,
+# ``grep foo file | wc -l`` 等) を ask に倒さないための allow-list。
+# operand 機密一致は依然 **deny 固定** (例: ``grep foo > .env`` は ``.env`` が
+# operand に拾われて deny)。hard-stop (``$(...)`` / backtick / heredoc / ``<``)
+# は依然 ``ask_or_allow`` (segment 全体が静的解析不能なため)。
+#
+# 入れないコマンド (副作用持つ可能性):
+# - ``awk``: ``print > "/p"`` で redirect、``-f`` で任意 script 実行
+# - ``sed``: ``-i`` で in-place 書換
+# - ``find``: ``-delete`` / ``-exec`` で副作用
+# - ``xargs`` / ``parallel``: 任意コマンド実行 (opaque wrapper 経路維持)
+# - ``cut`` / ``sort`` / ``uniq`` / ``tr``: read-only だが副作用判別 (`tee` のような書込み
+#   経路) が ambiguous なため一旦保留
+#
+# 注意: ``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` とは **disjoint** (両方に含まれる
+# ことはない)。``_SAFE_READ_FIRST_TOKENS`` ヒットなら opaque / keyword 判定は不要
+# (短絡)。
+_SAFE_READ_FIRST_TOKENS = frozenset({
+    "ls",
+    "cat", "head", "tail", "nl", "tac",
+    "bat", "less", "more", "view",
+    "wc",
+    "file", "stat", "du", "df", "tree",
+    "grep", "egrep", "fgrep", "rg", "ag", "ack",
+    "od", "xxd", "hexdump",
+})
+
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
 _HARD_STOP_CHARS = frozenset("$`(){}<\r")

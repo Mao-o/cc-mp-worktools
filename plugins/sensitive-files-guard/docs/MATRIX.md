@@ -1,7 +1,7 @@
 # 判定結果マトリクス (MATRIX.md)
 
 全 5 permission_mode (default / acceptEdits / auto / dontAsk / bypassPermissions)
-での判定結果を完全列挙する。値は 2026-05-06 時点 (0.8.0) の挙動。設計方針は
+での判定結果を完全列挙する。値は 2026-05-13 時点 (0.12.0) の挙動。設計方針は
 [DESIGN.md](./DESIGN.md)、コマンド例の解釈は [README.md](../README.md) を参照。
 
 `permission_mode` の列挙は `core/output.py::LENIENT_MODES` と
@@ -84,6 +84,31 @@
 | `ls \| head`, `git status && git log 2>/dev/null \|\| true` |
 | `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
 
+## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
+
+`first_token` が `_SAFE_READ_FIRST_TOKENS` (`ls cat head tail nl tac bat less
+more view wc file stat du df tree grep egrep fgrep rg ag ack od xxd hexdump`)
+に該当する segment は、`_segment_has_residual_metachar` の ask 経路を **スキップ
+して operand scan に直行** する。`>`/`>>` 出力リダイレクトや `&` background を
+含んでも allow に倒る (非機密 operand のとき)。
+
+| コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| `grep foo README.md > /tmp/out`, `grep foo file >> /tmp/out` (出力 redirect) | allow | allow | allow | allow | allow |
+| `ls -la > /tmp/listing.txt`, `cat README.md > /tmp/out`, `head -5 README.md > /tmp/x` | allow | allow | allow | allow | allow |
+| `wc -l README.md > /tmp/count`, `file README.md > /tmp/x`, `stat README.md > /tmp/x` | allow | allow | allow | allow | allow |
+| `grep foo README.md \| wc -l > /tmp/count` (pipe + redirect、全 segment が allow-list) | allow | allow | allow | allow | allow |
+| `grep foo file.txt &` (background) | allow | allow | allow | allow | allow |
+| `grep foo > .env` (機密 redirect target、operand scan で deny 固定) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `grep SECRET .env > out.txt` (機密 operand、operand scan で deny 固定) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `grep foo < .env` (`<` hard-stop、allow-list でも ask 維持) | ask | ask | **allow** | ask | **allow** |
+| `grep foo $(find . -name x)` (`$()` hard-stop、allow-list でも ask 維持) | ask | ask | **allow** | ask | **allow** |
+
+allow-list **外** の first_token (`awk`, `sed`, `find`, `xargs`, `parallel`,
+`echo`, `bash`, `eval`, `sudo` 等) は依然「Bash handler — 静的解析不能」表に
+従う。`awk '{print}' f > out`, `sed s/x/y f > out`, `find . > files.txt`,
+`echo foo > out.txt` などはすべて ask 維持。
+
 ## Bash handler — 静的解析不能 (三態判定)
 
 > **0.11.0 (F1) 注記**: 以下は command を構成する全 segment がいずれも静的
@@ -104,7 +129,8 @@
 | `for i in 1; do cat .env; done`, `if true; then cat .env; fi` | ask | ask | **allow** | ask | **allow** |
 | `while cat .env; do pwd; done`, `coproc cat .env` | ask | ask | **allow** | ask | **allow** |
 | `time cat .env`, `! cat .env`, `exec cat .env`, `eval cat .env` | ask | ask | **allow** | ask | **allow** |
-| `echo foo > out.txt`, `cat foo >> bar.txt`, `echo foo > '&2'` | ask | ask | **allow** | ask | **allow** |
+| `echo foo > out.txt`, `echo foo > '&2'` (allow-list 外 first_token + redirect) | ask | ask | **allow** | ask | **allow** |
+| `find . -name '*.py' > files.txt` (allow-list 外 + redirect、副作用判定が複雑なため未組込) | ask | ask | **allow** | ask | **allow** |
 | `/bin/cat .env`, `./cat`, `../bin/cat .env` (任意 path exec, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `/usr/bin/env FOO=1 cat .env`, `/bin/command cat .env` (任意 path exec, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | ask | **allow** | ask | **allow** |
