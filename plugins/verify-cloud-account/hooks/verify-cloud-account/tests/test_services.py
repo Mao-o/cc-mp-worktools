@@ -166,6 +166,24 @@ class TestFirebase(unittest.TestCase):
         self.assertIn("proj-dev", err)
         self.assertIn("proj-prod", err)
 
+    def test_verify_ignores_multiline_help_uses_firebaserc(self):
+        """firebase use ヘルプメッセージ時、.firebaserc の値で verify が通る (回帰防止)。"""
+        help_message = (
+            "No project is currently active for this directory.\n"
+            "\n"
+            "Run firebase use --add to define a new project alias "
+            "for the current folder.\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".firebaserc").write_text(
+                json.dumps({"projects": {"default": "my-project"}}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout=help_message)
+            ):
+                self.assertIsNone(firebase.verify("my-project", d))
+
 
 class TestAws(unittest.TestCase):
     def test_match(self):

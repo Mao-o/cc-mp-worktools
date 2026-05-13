@@ -35,7 +35,16 @@ def _from_cli() -> str:
     out = result.stdout.strip()
     if not out:
         return ""
-    return out.splitlines()[-1].split()[-1] if out.split() else ""
+    # firebase use はアクティブ project があれば project ID を 1 行で出力。
+    # アクティブ project がなければ複数行のヘルプを出すので、単一行・単一トークン
+    # 以外は project ID とみなさない (ヘルプ末尾の "folder." 等の誤検出を防ぐ)。
+    lines = out.splitlines()
+    if len(lines) != 1:
+        return ""
+    tokens = lines[0].split()
+    if len(tokens) != 1:
+        return ""
+    return tokens[0]
 
 
 def _from_firebaserc(project_dir: str) -> str:
@@ -51,7 +60,10 @@ def _from_firebaserc(project_dir: str) -> str:
 
 def get_active_account(project_dir: str) -> str | None:
     """現在アクティブな Firebase project ID を返す。取得不可なら None。"""
-    current = _from_cli() or _from_firebaserc(project_dir)
+    # .firebaserc を優先 (JSON で構造化された Firebase CLI 標準ファイル)。
+    # firebase use の出力は version 依存 + active project の有無で構造が変動する
+    # ため、fallback として最後に評価する。
+    current = _from_firebaserc(project_dir) or _from_cli()
     return current or None
 
 
@@ -61,7 +73,7 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
 
 
 def verify(expected, project_dir: str) -> str | None:
-    current = _from_cli() or _from_firebaserc(project_dir)
+    current = _from_firebaserc(project_dir) or _from_cli()
     if not current:
         hint = expected if isinstance(expected, str) else "YOUR_PROJECT"
         return (

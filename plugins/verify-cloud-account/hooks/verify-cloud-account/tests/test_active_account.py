@@ -98,6 +98,35 @@ class TestFirebaseActiveAccount(unittest.TestCase):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-proj\n")):
             self.assertEqual(firebase.suggest_accounts_entry("/p"), "my-proj")
 
+    def test_get_active_ignores_multiline_help(self):
+        """firebase use のヘルプメッセージ複数行末尾 "folder." を project ID と誤認しない。"""
+        help_message = (
+            "No project is currently active for this directory.\n"
+            "\n"
+            "Run firebase use --add to define a new project alias "
+            "for the current folder.\n"
+        )
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=help_message)):
+            self.assertIsNone(firebase.get_active_account("/nonexistent"))
+
+    def test_firebaserc_preferred_over_broken_cli(self):
+        """firebase use がヘルプメッセージを出しても .firebaserc があれば正しい値を返す。"""
+        help_message = (
+            "No project is currently active for this directory.\n"
+            "\n"
+            "Run firebase use --add to define a new project alias "
+            "for the current folder.\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".firebaserc").write_text(
+                json.dumps({"projects": {"default": "my-proj"}}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout=help_message)
+            ):
+                self.assertEqual(firebase.get_active_account(d), "my-proj")
+
 
 class TestAwsActiveAccount(unittest.TestCase):
     def test_get_active(self):

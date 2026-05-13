@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.2
+
+**Bug fix**: Firebase の `firebase use` 出力パース修正
+(`services/firebase.py`)。アクティブ project が無い状態で `firebase use`
+が出力する複数行ヘルプメッセージの末尾トークン (例: "folder.") を
+project ID として誤取得し、`.firebaserc` が正しく配置されていても
+全 firebase コマンドが「Firebase プロジェクト不一致: 現在=folder.」で
+block される回帰を修正。
+
+### 主要な変更
+
+1. **`_from_cli()` 堅牢化** — 単一行・単一トークンのみを project ID と
+   みなす。複数行 (ヘルプメッセージ) や空白を含む行は空文字を返す。
+2. **`_from_firebaserc()` 優先** — `get_active_account()` および `verify()`
+   の評価順序を `_from_firebaserc() or _from_cli()` に逆転。`.firebaserc`
+   が JSON で構造化された Firebase CLI 標準設定ファイルであり、CLI 出力
+   フォーマットの version 依存性を回避するため。
+
+### 非互換性
+
+なし。`.firebaserc` 配置プロジェクトは bug 解消、未配置プロジェクトは
+従来どおり `_from_cli()` にフォールバック (堅牢化により誤値ではなく
+`None` を返すように改善)。
+
+### テスト
+
+- `tests/test_active_account.py::TestFirebaseActiveAccount` に 2 ケース追加
+  (ヘルプメッセージ単独 / ヘルプメッセージ + `.firebaserc` 優先)
+- `tests/test_services.py::TestFirebase` に 1 ケース追加 (`verify()` 経由の
+  回帰防止)
+
+合計テスト件数: 212 → 215。
+
 ## 0.3.1
 
 **プロジェクト側 `.claude/verify-cloud-account/CLAUDE.md` の builder 同梱**。
