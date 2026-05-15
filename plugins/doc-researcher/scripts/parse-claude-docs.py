@@ -304,12 +304,12 @@ def cmd_fetch_index(args):
     print(f"  (llms-full.txt will be fetched automatically on first use)")
 
 
-def _resolve_source_from_path(file_path: str) -> dict | None:
-    """Guess source profile from the cache file path."""
+def _resolve_source_from_path(file_path: str) -> tuple[str, dict] | None:
+    """Guess ``(source_key, profile)`` from the cache file path."""
     basename = os.path.basename(file_path)
     for key, src in SOURCES.items():
         if src["full_cache"] in basename:
-            return src
+            return key, src
     return None
 
 
@@ -318,11 +318,23 @@ def _load_full_txt(file_arg: str | None, source_key: str, cache_dir: str,
     """Load llms-full.txt, auto-fetching when missing or stale.
 
     *file_arg* is the explicit ``--file`` path; when ``None`` it is derived
-    from *source_key* under *cache_dir*.
+    from *source_key* under *cache_dir*. When *file_arg* matches a known
+    cache filename but ``--source`` points at a different dataset, the call
+    fails before any fetch so we never silently populate a platform-named
+    file with code docs (or vice-versa).
     """
     src = SOURCES[source_key]
     if file_arg is None:
         file_arg = _cache_path(cache_dir, src["full_cache"])
+    else:
+        inferred = _resolve_source_from_path(file_arg)
+        if inferred is not None and inferred[0] != source_key:
+            inferred_key = inferred[0]
+            die(
+                f"--file '{file_arg}' looks like a '{inferred_key}' cache but "
+                f"--source is '{source_key}'. Pass --source {inferred_key} "
+                f"or drop --file to let --source pick the path."
+            )
     file_arg = fetch_url(src["full_url"], file_arg, user_agent=USER_AGENT,
                          max_age=max_age)
     return file_arg, load_lines(file_arg)

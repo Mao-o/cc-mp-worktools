@@ -32,6 +32,10 @@ All notable changes to this plugin will be documented here.
   はヒントを短く保つため省略
 - `fetch-index` の `Next:` ヒントを v3 形式 (`sections <doc_index>`) に統一
   (旧 file positional 表記が残っていた点を修正)
+- `--file` と `--source` の不整合検出: ユーザーが `--file /tmp/claude-platform-llms-full.txt`
+  を渡したのに `--source` がデフォルト `code` だった場合などに、silent
+  cross-population (platform 名のファイルに code docs を書き込む等) を防ぐため
+  fetch 前に fail-fast。未知の `--file` (推測不能なパス) は従来通り通す
 
 ### `_common.py` 共有ヘルパー強化
 
