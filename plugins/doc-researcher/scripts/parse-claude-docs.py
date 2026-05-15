@@ -66,6 +66,18 @@ DEFAULT_SOURCE = "code"
 
 USER_AGENT = "claude-docs-researcher/1.0"
 
+
+def _source_hint_args(args) -> tuple:
+    """Return ``('--source', '<src>')`` when not the default; else ``()``.
+
+    Used to propagate the active ``--source`` into ``next_hint`` so a follow-up
+    command stays on the same documentation set instead of silently falling
+    back to ``DEFAULT_SOURCE``.
+    """
+    if getattr(args, "source", DEFAULT_SOURCE) == DEFAULT_SOURCE:
+        return ()
+    return ("--source", args.source)
+
 # Pages whose body text reliably overwhelms keyword searches (release notes,
 # changelogs) get pushed below higher-signal pages in search results.
 DEPRIORITIZE_PAGE_PATTERNS = ("changelog", "release-notes", "release notes")
@@ -288,7 +300,7 @@ def cmd_fetch_index(args):
 
     print(f"({len(entries)} pages total, {displayed} entries shown — {grouped_count} pages grouped)")
     print()
-    next_hint("sections", full_cache, "<doc_index>")
+    next_hint("sections", "<doc_index>", *_source_hint_args(args))
     print(f"  (llms-full.txt will be fetched automatically on first use)")
 
 
@@ -383,7 +395,7 @@ def cmd_sections(args):
     print()
     print(f"({len(sections)} sections)")
     print()
-    next_hint("content", str(idx), '"<heading_path>"')
+    next_hint("content", str(idx), '"<heading_path>"', *_source_hint_args(args))
 
 
 def cmd_content(args):
@@ -441,7 +453,7 @@ def cmd_search_index(args):
     print()
     print("Note: llms.txt and llms-full.txt may use different doc_index numbering.")
     print("      Prefer 'search' (URL-joined) for a stable doc_idx into content/sections.")
-    next_hint("search", '"<query>"')
+    next_hint("search", '"<query>"', *_source_hint_args(args))
 
 
 def cmd_search_content(args):
@@ -509,7 +521,7 @@ def cmd_search_content(args):
     else:
         print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
     print()
-    next_hint("content", "<doc_index>", '"<heading_path>"')
+    next_hint("content", "<doc_index>", '"<heading_path>"', *_source_hint_args(args))
 
 
 def cmd_search(args):
@@ -616,7 +628,7 @@ def cmd_search(args):
 
     print(f"({len(results)} pages, ranked via URL-joined index)")
     print()
-    next_hint("content", "<doc_index>", '"<heading_path>"')
+    next_hint("content", "<doc_index>", '"<heading_path>"', *_source_hint_args(args))
 
 
 # ---------------------------------------------------------------------------

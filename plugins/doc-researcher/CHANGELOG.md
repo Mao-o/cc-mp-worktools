@@ -27,6 +27,11 @@ All notable changes to this plugin will be documented here.
     `content https://code.claude.com/docs/en/hooks "..."`
 - SKILL.md を全面書き直し: 推奨フローを 2 段階 (`search` → `content`) に簡略化、
   `page_ref` の 3 形式・slug 曖昧時の対処・v2 → v3 移行例を追記
+- `next_hint` が `--source` を伝搬: `--source platform` で実行した時の follow-up
+  ヒントが silently `code` (デフォルト) に落ちる事故を防止。デフォルトソース時
+  はヒントを短く保つため省略
+- `fetch-index` の `Next:` ヒントを v3 形式 (`sections <doc_index>`) に統一
+  (旧 file positional 表記が残っていた点を修正)
 
 ### `_common.py` 共有ヘルパー強化
 
