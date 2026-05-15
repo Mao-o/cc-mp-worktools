@@ -503,12 +503,12 @@ def cmd_search_content(args):
         total_hits += hits["total_matches"]
         collected.append((idx, doc, hits))
 
-    if not args.include_changelog_priority:
-        collected.sort(key=lambda t: (
-            1 if _is_low_priority(t[1]["title"]) else 0,
-            -t[2]["total_matches"],
-            t[0],
-        ))
+    collected.sort(key=lambda t: (
+        (0 if args.include_changelog_priority else
+         1 if _is_low_priority(t[1]["title"]) else 0),
+        -t[2]["total_matches"],
+        t[0],
+    ))
 
     docs_matched = len(collected)
     printed = collected[: args.limit]

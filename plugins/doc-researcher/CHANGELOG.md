@@ -36,6 +36,11 @@ All notable changes to this plugin will be documented here.
   を渡したのに `--source` がデフォルト `code` だった場合などに、silent
   cross-population (platform 名のファイルに code docs を書き込む等) を防ぐため
   fetch 前に fail-fast。未知の `--file` (推測不能なパス) は従来通り通す
+- `--include-changelog-priority` の挙動を `cmd_search` と `cmd_search_content`
+  で揃える: フラグが ON のときペナルティ項だけを 0 にし、relevance ソート
+  (`total_matches` 降順) は維持。以前は `search-content` 側でソート全体を
+  skip していたため `--limit` が元の文書順で切られ、高 hit ページが落ちる
+  リグレッションがあった
 
 ### `_common.py` 共有ヘルパー強化
 
