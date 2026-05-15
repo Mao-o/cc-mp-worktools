@@ -2,6 +2,67 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.5.0] - 2026-05-14
+
+### `researching-claude-docs` skill 3.0.0 (UX 改善 + 一部破壊的)
+
+- **NEW** `search` subcommand: `llms.txt` のタイトル/説明ランキングと
+  `llms-full.txt` の本文検索を **URL で join** して 1 コマンドで返す統合検索。
+  返ってくる `doc_idx` は `content` / `sections` にそのまま渡せる
+  (`search-index` / `search-content` 間の doc_idx 乖離問題を根本解決)
+- **NEW** `--max-age` flag for `search` / `search-content` / `search-index` /
+  `sections` / `content` / `fetch-index`: 既定では `/tmp/` キャッシュは無期限
+  再利用、`--max-age N` (秒) を指定すれば期限切れで自動再 fetch
+- **NEW** `--max-snippet-chars` flag for `search` / `search-content`:
+  スニペット文字数上限 (既定 500 文字、`0` で無制限)
+- **NEW** Changelog / Release notes ページの自動 deprioritize (`search` /
+  `search-content`)。`--include-changelog-priority` で旧挙動に戻せる
+- **BREAKING** `sections` / `content` / `search-content` の引数を再設計:
+  - `file` positional 引数を廃止 → `--file` flag 化
+  - `sections` / `content` の `doc_index` positional を `page_ref` に拡張、
+    整数 / URL slug / 完全 URL を runtime で自動判別
+  - `search-content` の `--doc-index` を `--page-ref` に改名 (slug/URL も受付)
+  - 旧 `sections /tmp/claude-code-llms-full.txt 5` 形式は argparse error
+  - 移行例: `sections 5` / `content hooks "Hook events/PreToolUse"` /
+    `content https://code.claude.com/docs/en/hooks "..."`
+- SKILL.md を全面書き直し: 推奨フローを 2 段階 (`search` → `content`) に簡略化、
+  `page_ref` の 3 形式・slug 曖昧時の対処・v2 → v3 移行例を追記
+- `next_hint` が `--source` を伝搬: `--source platform` で実行した時の follow-up
+  ヒントが silently `code` (デフォルト) に落ちる事故を防止。デフォルトソース時
+  はヒントを短く保つため省略
+- `fetch-index` の `Next:` ヒントを v3 形式 (`sections <doc_index>`) に統一
+  (旧 file positional 表記が残っていた点を修正)
+- `--file` と `--source` の不整合検出: ユーザーが `--file /tmp/claude-platform-llms-full.txt`
+  を渡したのに `--source` がデフォルト `code` だった場合などに、silent
+  cross-population (platform 名のファイルに code docs を書き込む等) を防ぐため
+  fetch 前に fail-fast。未知の `--file` (推測不能なパス) は従来通り通す
+- `--include-changelog-priority` の挙動を `cmd_search` と `cmd_search_content`
+  で揃える: フラグが ON のときペナルティ項だけを 0 にし、relevance ソート
+  (`total_matches` 降順) は維持。以前は `search-content` 側でソート全体を
+  skip していたため `--limit` が元の文書順で切られ、高 hit ページが落ちる
+  リグレッションがあった
+- `--file` 指定時のセマンティクスを **read-only** に変更: 既存 user ファイル
+  を `--max-age` で silently 上書きする regression を排除。`--file` ありの時
+  は (1) 既知 cache 名と `--source` の不整合を fetch 前に die (前出修正)、
+  (2) ファイル不在も fetch せず die (`--file` を外して auto-fetch せよと案内)、
+  (3) `--max-age` は無視。fetch-and-cache サイクルは `--file` を渡さない時
+  にだけ走る。`--file` で渡したローカルスナップショットは絶対に上書きされない
+
+### `_common.py` 共有ヘルパー強化
+
+- `fetch_url` に `max_age` kwarg を追加 (既存呼び出しは backward compatible)
+- `search_content_in_body` に `max_snippet_chars` kwarg を追加 (既存呼び出しは
+  backward compatible)
+- `normalize_doc_url` / `build_url_to_full_index` を追加 (`.md` suffix /
+  trailing slash / query / fragment を剥がした正規化 URL で
+  llms.txt ↔ llms-full.txt の 1:1 join を担保)
+
+### 検証
+
+- Claude Code llms.txt と llms-full.txt の **131 entries が 100% URL join**
+  することを実機確認 (`.md` suffix strip で一致)
+- `search "test"` は join 警告無しで動作
+
 ## [0.4.0] - 2026-04-15
 
 - Add `search-index` subcommand to all three parse scripts. Replaces the

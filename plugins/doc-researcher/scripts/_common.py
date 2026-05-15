@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -212,18 +213,60 @@ def parse_llms_index(lines):
 
 
 # ---------------------------------------------------------------------------
+# Core: URL normalization (llms.txt ↔ llms-full.txt join)
+# ---------------------------------------------------------------------------
+
+def normalize_doc_url(url: str) -> str:
+    """Strip ``.md`` suffix, query, fragment, trailing slash for stable URL matching.
+
+    ``llms.txt`` entries can include ``.md`` suffix (e.g.
+    ``https://code.claude.com/docs/en/hooks.md``) while ``llms-full.txt``'s
+    ``Source:`` line drops it. Normalising both sides lets us join entries
+    1:1 across the two indexes without losing precision.
+    """
+    if not url:
+        return ""
+    u = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if u.endswith(".md"):
+        u = u[:-3]
+    return u
+
+
+def build_url_to_full_index(docs) -> dict:
+    """Map normalised ``source_url`` → index in *docs* (from ``split_documents``).
+
+    Docs lacking a ``source_url`` are skipped silently.
+    """
+    out: dict = {}
+    for i, d in enumerate(docs):
+        nu = normalize_doc_url(d.get("source_url", ""))
+        if nu:
+            out[nu] = i
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Core: HTTP fetch + file IO
 # ---------------------------------------------------------------------------
 
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
-              timeout: int = 120, create_parent: bool = True) -> str:
+              timeout: int = 120, create_parent: bool = True,
+              max_age: int | None = None) -> str:
     """Return path to cached file, fetching from *url* if it doesn't exist yet.
+
+    When *max_age* is given (seconds), re-fetches if the existing cache is
+    older than that. ``max_age=None`` (default) keeps the original behaviour
+    of using the cache indefinitely once it exists.
 
     On transport failure, prints ``Error: ...`` to stderr and exits 1
     (mirrors the pre-refactor per-script helpers).
     """
     if os.path.exists(cache_path):
-        return cache_path
+        if max_age is None:
+            return cache_path
+        age = time.time() - os.path.getmtime(cache_path)
+        if age < max_age:
+            return cache_path
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
@@ -334,7 +377,8 @@ def search_index_entries(entries, query: str, *, limit: int = 15, get_extras=Non
 def search_content_in_body(body_lines, query: str, *,
                            context_lines: int = 2,
                            max_matches_per_doc: int = 5,
-                           min_level: int = 2):
+                           min_level: int = 2,
+                           max_snippet_chars: int | None = None):
     """Search *body_lines* for *query* keywords (section-level AND, case-insensitive).
 
     A section is considered a match only when **all** query keywords appear
@@ -423,10 +467,15 @@ def search_content_in_body(body_lines, query: str, *,
         if truncated:
             snippet_lines.append(f"  ... ({truncated} more hits in this section)")
 
+        snippet = "\n".join(snippet_lines)
+        if max_snippet_chars and len(snippet) > max_snippet_chars:
+            cut = len(snippet) - max_snippet_chars
+            snippet = snippet[:max_snippet_chars] + f"\n  ... ({cut} chars truncated)"
+
         results.append({
             "heading_path": heading_path,
             "line_offset": hit_line_numbers[0],
-            "snippet": "\n".join(snippet_lines),
+            "snippet": snippet,
             "matched_keywords": sorted(all_matched),
             "hit_count": len(hits),
         })
