@@ -315,28 +315,40 @@ def _resolve_source_from_path(file_path: str) -> tuple[str, dict] | None:
 
 def _load_full_txt(file_arg: str | None, source_key: str, cache_dir: str,
                    *, max_age: int | None = None) -> tuple[str, list[str]]:
-    """Load llms-full.txt, auto-fetching when missing or stale.
+    """Load llms-full.txt.
 
-    *file_arg* is the explicit ``--file`` path; when ``None`` it is derived
-    from *source_key* under *cache_dir*. When *file_arg* matches a known
-    cache filename but ``--source`` points at a different dataset, the call
-    fails before any fetch so we never silently populate a platform-named
-    file with code docs (or vice-versa).
+    Two distinct modes:
+
+    * **No ``--file``** (``file_arg is None``): derive the cache path from
+      *source_key* under *cache_dir* and auto-fetch (honouring *max_age*).
+      This is the fetch-and-cache lifecycle.
+
+    * **Explicit ``--file``**: read-only. The file must already exist and
+      the caller is responsible for keeping it up to date — we never
+      overwrite a user-supplied path. *max_age* is intentionally ignored
+      in this mode to avoid clobbering local snapshots. If the path looks
+      like a known cache for a different source we fail early.
     """
     src = SOURCES[source_key]
     if file_arg is None:
-        file_arg = _cache_path(cache_dir, src["full_cache"])
-    else:
-        inferred = _resolve_source_from_path(file_arg)
-        if inferred is not None and inferred[0] != source_key:
-            inferred_key = inferred[0]
-            die(
-                f"--file '{file_arg}' looks like a '{inferred_key}' cache but "
-                f"--source is '{source_key}'. Pass --source {inferred_key} "
-                f"or drop --file to let --source pick the path."
-            )
-    file_arg = fetch_url(src["full_url"], file_arg, user_agent=USER_AGENT,
-                         max_age=max_age)
+        cache_path = _cache_path(cache_dir, src["full_cache"])
+        cache_path = fetch_url(src["full_url"], cache_path,
+                               user_agent=USER_AGENT, max_age=max_age)
+        return cache_path, load_lines(cache_path)
+
+    inferred = _resolve_source_from_path(file_arg)
+    if inferred is not None and inferred[0] != source_key:
+        inferred_key = inferred[0]
+        die(
+            f"--file '{file_arg}' looks like a '{inferred_key}' cache but "
+            f"--source is '{source_key}'. Pass --source {inferred_key} "
+            f"or drop --file to let --source pick the path."
+        )
+    if not os.path.exists(file_arg):
+        die(
+            f"--file '{file_arg}' does not exist. Drop --file to auto-fetch "
+            f"to the source cache, or download the snapshot manually first."
+        )
     return file_arg, load_lines(file_arg)
 
 

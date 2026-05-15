@@ -41,6 +41,12 @@ All notable changes to this plugin will be documented here.
   (`total_matches` 降順) は維持。以前は `search-content` 側でソート全体を
   skip していたため `--limit` が元の文書順で切られ、高 hit ページが落ちる
   リグレッションがあった
+- `--file` 指定時のセマンティクスを **read-only** に変更: 既存 user ファイル
+  を `--max-age` で silently 上書きする regression を排除。`--file` ありの時
+  は (1) 既知 cache 名と `--source` の不整合を fetch 前に die (前出修正)、
+  (2) ファイル不在も fetch せず die (`--file` を外して auto-fetch せよと案内)、
+  (3) `--max-age` は無視。fetch-and-cache サイクルは `--file` を渡さない時
+  にだけ走る。`--file` で渡したローカルスナップショットは絶対に上書きされない
 
 ### `_common.py` 共有ヘルパー強化
 
