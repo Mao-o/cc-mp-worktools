@@ -2,6 +2,47 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.5.0] - 2026-05-14
+
+### `researching-claude-docs` skill 3.0.0 (UX 改善 + 一部破壊的)
+
+- **NEW** `search` subcommand: `llms.txt` のタイトル/説明ランキングと
+  `llms-full.txt` の本文検索を **URL で join** して 1 コマンドで返す統合検索。
+  返ってくる `doc_idx` は `content` / `sections` にそのまま渡せる
+  (`search-index` / `search-content` 間の doc_idx 乖離問題を根本解決)
+- **NEW** `--max-age` flag for `search` / `search-content` / `search-index` /
+  `sections` / `content` / `fetch-index`: 既定では `/tmp/` キャッシュは無期限
+  再利用、`--max-age N` (秒) を指定すれば期限切れで自動再 fetch
+- **NEW** `--max-snippet-chars` flag for `search` / `search-content`:
+  スニペット文字数上限 (既定 500 文字、`0` で無制限)
+- **NEW** Changelog / Release notes ページの自動 deprioritize (`search` /
+  `search-content`)。`--include-changelog-priority` で旧挙動に戻せる
+- **BREAKING** `sections` / `content` / `search-content` の引数を再設計:
+  - `file` positional 引数を廃止 → `--file` flag 化
+  - `sections` / `content` の `doc_index` positional を `page_ref` に拡張、
+    整数 / URL slug / 完全 URL を runtime で自動判別
+  - `search-content` の `--doc-index` を `--page-ref` に改名 (slug/URL も受付)
+  - 旧 `sections /tmp/claude-code-llms-full.txt 5` 形式は argparse error
+  - 移行例: `sections 5` / `content hooks "Hook events/PreToolUse"` /
+    `content https://code.claude.com/docs/en/hooks "..."`
+- SKILL.md を全面書き直し: 推奨フローを 2 段階 (`search` → `content`) に簡略化、
+  `page_ref` の 3 形式・slug 曖昧時の対処・v2 → v3 移行例を追記
+
+### `_common.py` 共有ヘルパー強化
+
+- `fetch_url` に `max_age` kwarg を追加 (既存呼び出しは backward compatible)
+- `search_content_in_body` に `max_snippet_chars` kwarg を追加 (既存呼び出しは
+  backward compatible)
+- `normalize_doc_url` / `build_url_to_full_index` を追加 (`.md` suffix /
+  trailing slash / query / fragment を剥がした正規化 URL で
+  llms.txt ↔ llms-full.txt の 1:1 join を担保)
+
+### 検証
+
+- Claude Code llms.txt と llms-full.txt の **131 entries が 100% URL join**
+  することを実機確認 (`.md` suffix strip で一致)
+- `search "test"` は join 警告無しで動作
+
 ## [0.4.0] - 2026-04-15
 
 - Add `search-index` subcommand to all three parse scripts. Replaces the

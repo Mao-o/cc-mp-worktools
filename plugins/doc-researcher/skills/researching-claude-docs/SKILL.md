@@ -1,12 +1,11 @@
 ---
 name: researching-claude-docs
 description: |
-  Claude 公式ドキュメント（Claude Code + Claude Developer Platform）を段階的に読み込み、
-  必要な部分だけを取得するスキル。--source フラグで対象を切り替える。
-  Claude Code: Hooks、Skills、Settings、MCP、サブエージェント等の Claude Code 機能。
-  Platform: Claude API、Agent SDK、Tool Use、Prompt Engineering 等の開発者向け機能。
-  Triggers: "Claude Code docs", "Claude API docs", "公式ドキュメント", "researching-claude-docs",
-  "Claude Code 仕様", "code.claude.com", "platform.claude.com", "Claude Platform docs"
+  Claude Code (code.claude.com) / Claude Developer Platform (platform.claude.com)
+  公式ドキュメントから hook schema、subagent frontmatter、plugin manifest、
+  slash command 仕様等を verbatim で返す。Claude Code / Anthropic API の仕様確認
+  には WebFetch ではなくこのスキルを使う（要約モデル経由ではないため field の抜け
+  落とし・幻覚が起きない）。
 context: fork
 model: sonnet
 allowed-tools:
@@ -15,7 +14,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "2.1.0"
+  version: "3.0.0"
 ---
 
 # Claude ドキュメント Progressive Loader
@@ -29,77 +28,80 @@ Claude Code (`code.claude.com`) および Claude Developer Platform (`platform.c
 | Claude Code | `code` (デフォルト) | code.claude.com/docs | ~64p / 1.4MB |
 | Claude Developer Platform | `platform` | platform.claude.com/docs | ~617p / 23.8MB |
 
-## 調査フロー
-
-2 つの入口から選ぶ。ページが 1 つに特定できそうなら **search-index**、
-本文の具体的なキーワードで絞り込みたいなら **search-content** を使う。
+## 推奨フロー (2 ステップ)
 
 ```
-  search-index (llms.txt, title/desc)       ← 軽量: ページを絞り込む
-        ↓                                         ↓
-  [ページ特定できた？]                 [複数ページ横断で本文検索したい]
-     yes ↓                                       ↓
-  sections (llms-full.txt)            search-content (llms-full.txt)
-        ↓                                         ↓
-  content (heading_path 指定)        content (heading_path 指定)
+  search "<キーワード>"                ← Phase 1: ページ候補 + 本文ヒット
+        ↓
+  content <doc_idx> "<heading_path>"   ← Phase 2: 該当セクション取得
 ```
 
-### Step 1a: 軽量インデックスでページを絞り込む
+`search` は `llms.txt` (タイトル/説明スコア) と `llms-full.txt` (本文 AND 検索) を
+**URL で join** して 1 コマンドにまとめたサブコマンド。返ってくる `doc_idx` は
+`content` / `sections` にそのまま渡せる。
+
+### Step 1: 統合検索でページと本文を一度に絞り込む
 
 ```bash
 # Claude Code（デフォルト）
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-index "<キーワード>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワード>"
 
 # Claude Developer Platform
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-index "<キーワード>" --source platform
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワード>" --source platform
 ```
 
-`llms.txt` のタイトル + description をスコアリング。件数が多い Platform では必須の入口。
+`<キーワード>` は 2〜3 語のスペース区切り（例: `"PostCompact input compact_summary"`）。
+出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。
+Changelog / Release notes は自動で deprioritize されるので、本物の解説ページが上に来る。
 
-### Step 1b: 本文キーワードで横断検索（トピック横断の時）
-
-```bash
-# 全ページ横断
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-content /tmp/claude-code-llms-full.txt "<キーワード>"
-
-# 特定ページ内のみ
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-content /tmp/claude-code-llms-full.txt "<キーワード>" --doc-index <idx>
-```
-
-セクション単位で AND 検索。ヒット箇所の heading_path と前後スニペットを返す。
-`<キーワード>` は 2〜3 語のスペース区切り（例: `"hook matcher VSCode"`）。
-`llms-full.txt` が未取得なら自動で fetch される（パスからソース推定）。
-
-Platform を検索する場合:
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-content /tmp/claude-platform-llms-full.txt "<キーワード>"
-```
-
-### Step 2: セクション一覧を取得
+### Step 2: 該当セクションの本文を取得
 
 ```bash
-# Claude Code
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" sections /tmp/claude-code-llms-full.txt <doc_index>
-
-# Claude Developer Platform
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" sections /tmp/claude-platform-llms-full.txt <doc_index>
-```
-
-### Step 3: 必要なセクションの本文を取得
-
-```bash
-# 特定セクションを取得（heading_path または見出しテキストで指定）
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <file> <doc_index> "<heading_path>"
+# search が返した doc_idx をそのまま使う
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "<heading_path>"
 
 # ページ全体を取得（heading_path 省略）
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <file> <doc_index>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 ```
 
-### Step 4: 複数ページが必要なら Step 2-3 を繰り返す
+`page_ref` (第 1 引数) は **整数 / URL slug / 完全 URL** のいずれも受け付ける:
 
-### フォールバック: 全ページ一覧を確認
+```bash
+# 整数 doc_idx
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content 53 "Hook events/PreToolUse"
 
-search-index / search-content で見つからない場合のみ使用する。
+# URL slug (末尾パス成分)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content agent-sdk/hooks
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content settings
+
+# 完全 URL
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content \
+  https://code.claude.com/docs/en/hooks "Hook events/PreToolUse"
+```
+
+slug が複数ページに一致する場合 (例: `hooks` は `docs/en/hooks` と `docs/en/agent-sdk/hooks`
+の両方にマッチ) は曖昧エラーになるので、より長い slug (`agent-sdk/hooks`) か完全 URL を渡す。
+
+### サブフロー: 特定ページに絞った本文検索
+
+ページが既に分かっていて、その中だけを検索したい場合は `search-content` を使う:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-content \
+  "<キーワード>" --page-ref hooks
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search-content \
+  "<キーワード>" --page-ref 53
+```
+
+### サブフロー: ページ単独のセクション一覧
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" sections <page_ref>
+```
+
+### フォールバック: 全ページ一覧
+
+`search` で見つからない時のみ:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" fetch-index
@@ -112,45 +114,70 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" fetch-index --sourc
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search-index` | `[--source {code,platform}] <query> [--limit N]` | 軽量 llms.txt からキーワード検索してページをランキング |
-| `search-content` | `<file> <query> [--doc-index N] [--limit N] [--context N] [--max-hits N]` | llms-full.txt 本文を横断キーワード検索、heading_path + スニペットを返す |
-| `fetch-index` | `[--source {code,platform}] [--cache-dir DIR]` | 軽量 llms.txt を取得してページ一覧を表示 |
-| `sections` | `<file> <doc_index>` | 指定ページの見出し一覧を表示 |
-| `content` | `<file> <doc_index> [heading_path]` | セクション本文を表示 |
+| `search` | `<query> [--source {code,platform}] [--index-limit N] [--max-hits N] [--context N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | **推奨**: llms.txt ランキング + llms-full.txt 本文を URL で join、1 コマンドで候補ページ + 本文ヒットを返す |
+| `content` | `<page_ref> [heading_path] [--file F] [--source S] [--max-age S]` | セクション本文を表示。`page_ref` は int / slug / URL |
+| `sections` | `<page_ref> [--file F] [--source S] [--max-age S]` | 指定ページの見出し一覧を表示 |
+| `search-content` | `<query> [--page-ref R] [--file F] [--source S] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | llms-full.txt 本文のみキーワード検索。`--page-ref` で 1 ページに絞れる |
+| `search-index` | `<query> [--source S] [--limit N] [--max-age S]` | llms.txt のタイトル/説明だけをスコアリング (本文ヒット無し) |
+| `fetch-index` | `[--source S] [--max-age S]` | 軽量 llms.txt を取得してページ一覧を表示 |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`
 
-### heading_path の指定方法
+### `page_ref` の指定方法
+
+`sections` / `content` の第 1 引数、`search-content --page-ref` で受け付ける形式:
+
+| 形式 | 例 | 解決方法 |
+|------|---|----------|
+| 整数 | `53` | `llms-full.txt` 内の doc_idx として直接利用 |
+| URL slug | `hooks`, `agent-sdk/hooks` | `source_url` の末尾パス成分と一致するページを検索 |
+| 完全 URL | `https://code.claude.com/docs/en/hooks` | `source_url` を正規化して厳密一致 |
+
+slug が複数ページに一致する場合は曖昧エラーで候補リストが表示される。
+より長い slug か完全 URL を渡して曖昧性を解消する。
+
+### `heading_path` の指定方法
 
 - 見出しテキストそのまま: `"Configuration"`
 - スラッシュ区切りの階層パス: `"Hook events/PreToolUse/PreToolUse input"`
 - 部分一致（大文字小文字無視）で検索される
 
-### doc_index の乖離に注意
+### `--max-age` (キャッシュ TTL)
 
-`llms.txt` (search-index が返す) と `llms-full.txt` (sections/content が使う) では
-ページ順序が異なる場合がある。**search-index の doc_index をそのまま sections に渡すと別ページが返ることがある**。
+`/tmp/` 配下のキャッシュは既定では無期限に再利用される。新しい docs を取り直したい時:
 
-安全な chain は以下の 2 通り:
-1. **search-index で URL を確認** → `fetch-index` でタイトル一致するページを手動で特定
-2. **search-content を起点にする** → 返された doc_index は `llms-full.txt` ベースなので sections/content にそのまま渡せる
+```bash
+# 24 時間より古ければ再 fetch
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<query>" --max-age 86400
 
-`search-content` を推奨する理由はこの一貫性のため。
+# 強制再 fetch (キャッシュ削除)
+rm /tmp/claude-code-llms*.txt
+```
 
-### キャッシュ（2段階 × 2ソース）
+### `--max-snippet-chars`
+
+スニペットが長くなりすぎる時は文字数制限で打ち切れる (既定 500 文字)。`0` で無制限。
+
+### `search` と `search-content` の使い分け
+
+- `search`: **最初に使うべきデフォルト**。ページ候補 + 本文ヒットを 1 回で取れる
+- `search-content`: 既に対象ページが分かっていて、その中だけを検索したい時 (`--page-ref` で 1 ページに絞る)
+- `search-index`: タイトル/説明だけで十分な軽量検索 (本文を見ない)
+
+### キャッシュ（2 段階 × 2 ソース）
 
 | ソース | インデックス | 全文 |
 |--------|-------------|------|
 | Claude Code | `/tmp/claude-code-llms.txt` | `/tmp/claude-code-llms-full.txt` |
 | Platform | `/tmp/claude-platform-llms.txt` | `/tmp/claude-platform-llms-full.txt` |
 
-- 最新版が必要な場合: `rm /tmp/claude-code-llms*.txt` または `rm /tmp/claude-platform-llms*.txt` してから再実行
+ファイルが存在しない場合は自動で fetch される。
 
 ---
 
 ## 制約
 
-- **全文読み込み禁止**: search-index/search-content → sections → content の順で絞り込むこと
+- **全文読み込み禁止**: search → content の順で絞り込むこと
 - **コードフェンス保護**: スクリプトがコードブロックの途中分割を自動防止する
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Note>`, `<Frame>`, `<Expandable>`, `<Card>` 等の JSX 記法はテキストとして読む
@@ -160,11 +187,32 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" fetch-index --sourc
 以下は本スキルのコマンドで代替できるため使わないこと:
 
 - ❌ `grep -n <keyword> /tmp/claude-code-llms*.txt`、`grep /tmp/claude-platform-llms*.txt`
-  → ✅ `search-index` または `search-content` を使う
+  → ✅ `search` を使う
 - ❌ `Read /tmp/claude-*-llms-full.txt (lines X-Y)` の直接行指定読み
-  → ✅ `search-content` で heading_path を取得してから `content` で取り出す
+  → ✅ `search` で heading_path を取得してから `content` で取り出す
 - ❌ `fetch-index` の出力を Bash の grep/awk で再フィルタ
   → ✅ `search-index` でスコアリング済みの候補を得る
+
+## v2 → v3 の移行
+
+旧 (v2 までの形式) は破壊的に変わったので注意:
+
+```bash
+# v2 (動かない)
+sections /tmp/claude-code-llms-full.txt 5
+content /tmp/claude-code-llms-full.txt 5 "Heading"
+search-content /tmp/claude-code-llms-full.txt "query"
+
+# v3 (新)
+sections 5
+content 5 "Heading"
+search-content "query"
+# 旧来のファイル指定を残したいなら --file flag を明示
+sections 5 --file /tmp/claude-code-llms-full.txt
+```
+
+`doc_index` positional は廃止され、`page_ref` (int / slug / URL を自動判別) に統一された。
+整数を渡せばこれまで通り `doc_idx` として動く。
 
 ## 出力フォーマット
 
@@ -184,7 +232,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" fetch-index --sourc
 
 - ドキュメントにない機能やオプションを捏造しない
 - コード例はドキュメントから直接引用する
-- 全文読み込みは禁止 — 必ず search-index/search-content → sections → content の順で絞り込む
+- 全文読み込みは禁止 — 必ず search → content の順で絞り込む
 - `--source` フラグを明示する (code / platform のどちらを調査しているか明確にする)
 - 日本語で回答する
 - ページ取得に失敗した場合のみ WebFetch fallback を検討する
