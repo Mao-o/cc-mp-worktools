@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.2.0 (2026-05-16) — PR 2: decision-keeper
+
+Phase 2 of the agent-org plugin. ADR (Architecture Decision Record) を構造化
+形式で蓄積する `decision-keeper` subagent と、必要なディレクトリを冪等に
+初期化する `/org-init` command を追加。
+
+### Added
+
+- `decision-keeper` subagent (`memory: project`, `model: sonnet`,
+  `tools: Read,Write,Edit,Grep,Glob`): 設計判断を ADR YAML として
+  `.claude/agent-memory/decision-keeper/MEMORY.md` に immutable に追記。
+  `status: superseded_by:<id>` 更新のみ既存 ADR への許容操作
+- `recording-decision` skill: decision-keeper を Task ツール経由で
+  invoke する手順を提供 (`agent-org:decision-keeper` scoped name)
+- `consulting-memory` skill: 別 subagent の `MEMORY.md` / learnings を
+  Read で取り込む横断参照スキル。memory scope (project/user/local) ごとの
+  パス規約を提供
+- `/org-init` slash command: agent-org plugin が使うディレクトリ群
+  (`.claude/agent-memory/{各 agent}/`, `.claude/episodes/`,
+  `.claude/agent-org/approvals/`, `~/.claude/agent-memory/{各 agent}/`,
+  `~/.claude/agent-org/state/<proj-hash>/{detections,fixes,learnings}/`)
+  を冪等に作成
+
+### Notes
+
+- `<proj-hash>` は cwd を canonicalize して sha256 した先頭 8 桁。複数
+  プロジェクトを跨いでも cross-session state が混じらない識別子
+- decision-keeper は scope `project` で repo 内に蓄積、main session で
+  foreground 動作するため worktree 隔離の影響を受けない
+- Phase 4 で使う `~/.claude/agent-memory/regression-{watcher,fixer}/` も
+  `/org-init` 時に先行作成 (Phase 4 で個別に作成しなくて済む)
+- subagent memory の plugin scoped name (`agent-org:decision-keeper`) で
+  どの memory dir が解決されるかは Phase 2 着手以降の実機検証で確認予定
+
 ## 0.1.0 (2026-05-13) — PR 1: plugin skeleton + context-compressor
 
 Phase 1 of the agent-org plugin. AI organizational engineering toolkit の

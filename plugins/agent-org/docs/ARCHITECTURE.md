@@ -103,11 +103,75 @@ Phase 2 以降で `.claude/agent-memory/decision-keeper/`,
 `.claude/agent-org/approvals/`, `~/.claude/agent-org/state/<proj-hash>/` が
 追加される (Phase 1 では作らない)。
 
-## Phase 1 で意図的に未実装の領域
+## Phase 2 のコンポーネント関係
 
-- 構造化決定ログ (`decision-keeper` subagent + `recording-decision` skill)
-- レビュー権限ゲート (`architect-reviewer` + `running-review` + Stop/TaskCompleted hooks)
-- regression 監視/修復 (`regression-watcher` + `regression-fixer` + `/start-watcher`
-  / `/fix-regression` commands + post-commit-trigger hook)
+ADR (Architecture Decision Record) を構造化形式で蓄積する経路:
 
-詳細は親プラン Phase 2-4 を参照。
+```mermaid
+graph TB
+    subgraph Session2 ["メインセッション"]
+        MA2["Main Agent"]
+        DK["decision-keeper<br>(memory: project)<br>model: sonnet"]
+    end
+
+    subgraph Repo2 [".claude/ (repo 内)"]
+        ADR[".claude/agent-memory/<br>decision-keeper/MEMORY.md"]
+        EPA[".claude/episodes/<br>adr-archive-*.yaml"]
+    end
+
+    MA2 -->|recording-decision skill 起動| DK
+    DK -->|ADR YAML 追記| ADR
+    DK -.curate 200 行超過時.-> EPA
+    DK -.consult.-> ADR
+    MA2 -.consulting-memory skill.-> ADR
+```
+
+## consulting-memory による横断参照
+
+```mermaid
+graph LR
+    XA["任意の subagent<br>または main session"] -->|consulting-memory skill| RT["Read tool"]
+    RT --> DKM[".claude/agent-memory/<br>decision-keeper/MEMORY.md"]
+    RT --> CCM[".claude/agent-memory/<br>context-compressor/MEMORY.md"]
+    RT --> EP3[".claude/episodes/*.yaml"]
+    RT --> URW["~/.claude/agent-memory/<br>regression-watcher/MEMORY.md<br>(Phase 4)"]
+    RT --> ULM["~/.claude/agent-org/state/<br>&lt;proj-hash&gt;/learnings/*.md<br>(Phase 4)"]
+```
+
+## /org-init で作成されるディレクトリ
+
+| パス | 用途 | scope |
+|---|---|---|
+| `.claude/agent-memory/decision-keeper/` | ADR 蓄積 | project |
+| `.claude/agent-memory/architect-reviewer/` | (Phase 3 で使用) | project |
+| `.claude/agent-memory/context-compressor/` | 圧縮戦略学習 | project |
+| `.claude/episodes/` | episode YAML + ADR archive | (repo) |
+| `.claude/agent-org/approvals/` | (Phase 3 で使用) | (repo) |
+| `~/.claude/agent-memory/regression-watcher/` | (Phase 4 で使用) | user |
+| `~/.claude/agent-memory/regression-fixer/` | (Phase 4 で使用) | user |
+| `~/.claude/agent-org/state/<proj-hash>/detections/` | (Phase 4 で使用) | (home, project-scoped) |
+| `~/.claude/agent-org/state/<proj-hash>/fixes/` | (Phase 4 で使用) | (home, project-scoped) |
+| `~/.claude/agent-org/state/<proj-hash>/learnings/` | per-agent learnings | (home, project-scoped) |
+
+`<proj-hash>` の生成: cwd を canonicalize して sha256、先頭 8 桁。
+複数プロジェクトを跨いでも state が混じらない識別子。
+
+## Phase 2 のファイルパス規約
+
+| 用途 | パス | 書く側 | 読む側 |
+|---|---|---|---|
+| ADR | `.claude/agent-memory/decision-keeper/MEMORY.md` | decision-keeper | consulting-memory skill 経由で他 subagent / main session |
+| Archived ADR | `.claude/episodes/adr-archive-<date>.yaml` | decision-keeper (curate 時) | consulting-memory skill |
+
+decision-keeper は ADR を immutable に追記する。`status: superseded_by:<id>`
+更新のみ既存 ADR への許容操作。
+
+## Phase 2 で意図的に未実装の領域
+
+- 真 RO `architect-reviewer` subagent + `running-review` skill (Phase 3)
+- Stop / TaskCompleted hooks による quality gate (Phase 3)
+- `regression-watcher` / `regression-fixer` + `/start-watcher` /
+  `/fix-regression` commands (Phase 4)
+- post-commit-trigger hook (Phase 4)
+
+詳細は親プラン Phase 3-4 を参照。
