@@ -97,6 +97,12 @@ Phase 3 がリリースされるまでは不要。
 
 ## 注意事項
 
+- subagent 起動時、Claude Code フレームワークが自動的に **scoped name dir**
+  (`.claude/agent-memory/agent-org-<name>/`、`:` を `-` に置換した命名) を空で
+  作成する。本 command は **plain name dir** のみ mkdir するため、scoped name dir
+  は subagent 初回起動時に並存する (実機検証 ADR-002 参照)。subagent の書込先は
+  plain name dir、auto-inject 対象は scoped name dir という不整合があるため、
+  `agents/*.md` / `skills/*/SKILL.md` の指示に従って明示 Read 経路で運用する
 - 実行は project root (`.claude/` の親) で行う想定。それ以外のディレクトリで
   実行すると意図しない場所に `.claude/` が作られる
 - `~/.claude/agent-memory/` 配下は全プロジェクト共通の領域 (worktree 隔離の

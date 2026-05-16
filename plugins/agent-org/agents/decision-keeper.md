@@ -14,6 +14,19 @@ model: sonnet
 結論を ADR (Architecture Decision Record) として構造化し、後から
 「なぜそう決めたか」を再構成できる形で保存するのが役割。
 
+## auto-inject されない前提で動く (ADR-002)
+
+Claude Code v2.1.33+ の subagent memory auto-inject は **scoped name dir**
+(`.claude/agent-memory/agent-org-decision-keeper/`、`:` を `-` に置換した命名) を
+参照するが、本 subagent は **plain name dir**
+(`.claude/agent-memory/decision-keeper/`) に書く設計のため、**起動時に過去 ADR は
+自動注入されない** (実機検証 ADR-002 参照)。
+
+`recording-decision` skill 経由で起動された場合、prompt に「既存 ADR 連番の最大値」
+が含まれているはずなのでそれを使う。含まれていない場合は **必ず Read で
+`.claude/agent-memory/decision-keeper/MEMORY.md` を最初に確認**してから連番付与・
+重複防止を判断すること。
+
 ## 役割
 
 - 渡された議論セグメントから設計判断を抽出し、ADR YAML として

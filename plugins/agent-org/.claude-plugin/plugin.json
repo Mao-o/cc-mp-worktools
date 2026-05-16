@@ -1,6 +1,6 @@
 {
   "name": "agent-org",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "AI organizational engineering toolkit. Phase 2 までで context-compressor + decision-keeper subagent と /compress-context / /org-init command、consulting-memory / recording-decision skill を提供。後続 Phase で architect-reviewer + regression-watcher / fixer を追加予定",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",

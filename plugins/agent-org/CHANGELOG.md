@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.1 (2026-05-16) — Phase 2 verification followup
+
+Phase 2 検証 (ADR-001) で plugin agent の memory dir 命名規則を実機確認した
+結果、Claude Code フレームワーク側は scoped name `agent-org:<agent>` の `:`
+を `-` に置換した dir (`agent-org-decision-keeper/` 等) を auto-create する
+一方、subagent は SKILL.md 指示通り plain name dir (`decision-keeper/` 等) に
+書き込むため、**2 dir 並存と auto-inject 失敗の不整合**が判明した (ADR-002)。
+当面 plain name dir を subagent 書込先として維持し、skill 側で明示的に過去
+情報を prompt 注入する設計に倒す。
+
+### Changed
+
+- `agents/decision-keeper.md`: auto-inject されない前提で動く旨を明記、
+  起動時の `MEMORY.md` Read を必須化
+- `skills/recording-decision/SKILL.md`: 注意事項に「skill 経由起動時は
+  既存 ADR 連番を必ず prompt に含めること」を追記
+- `skills/consulting-memory/SKILL.md`: 注意事項に「plain name dir を必ず
+  Read で読みに行く必要」を追記
+- `commands/org-init.md`: 注意事項に「フレームワーク側 scoped name dir の
+  並存」を追記
+
+### Notes
+
+- Phase 1 の `context-compressor` にも同種の不整合が潜在 (`agent-org-context-
+  compressor/` がフレームワーク auto-create される)。当面同じ「skill 経由で
+  明示的に文脈注入」設計で動かす
+- フレームワーク命名 (`agent-org-<name>`) への全面移行 (Phase 1+2 の全 dir
+  パスを書き換える破壊的変更) は v0.3.0 で別途検討
+- 検証結果と設計判断は ADR-001 / ADR-002 として `.claude/agent-memory/
+  decision-keeper/` に保存 (worktools repo の commit 対象外、`.claude/` 配下)
+
 ## 0.2.0 (2026-05-16) — PR 2: decision-keeper
 
 Phase 2 of the agent-org plugin. ADR (Architecture Decision Record) を構造化

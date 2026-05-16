@@ -33,11 +33,18 @@ agent ごとに isolation されているため、横断参照には明示的な
 
 2. **memory scope に応じてパスを計算する**
 
+   ここで使う `<agent-name>` は **plain name** (`decision-keeper`,
+   `context-compressor` 等の subagent file 名)。Claude Code フレームワーク側の
+   auto-inject 経路では scoped name の `:` を `-` に置換した命名
+   (`agent-org-decision-keeper/` 等) が使われるが、agent-org plugin の各 subagent
+   は plain name dir に書く設計のため、consulting-memory は **必ず plain name dir
+   を Read で読みに行く** (ADR-002 参照)。
+
    | scope | パス |
    |---|---|
-   | `project` | `.claude/agent-memory/<agent-name>/MEMORY.md` |
-   | `user` | `~/.claude/agent-memory/<agent-name>/MEMORY.md` |
-   | `local` | `.claude/agent-memory-local/<agent-name>/MEMORY.md` |
+   | `project` | `.claude/agent-memory/<plain-agent-name>/MEMORY.md` |
+   | `user` | `~/.claude/agent-memory/<plain-agent-name>/MEMORY.md` |
+   | `local` | `.claude/agent-memory-local/<plain-agent-name>/MEMORY.md` |
 
    agent-org plugin の各 subagent の scope:
 
@@ -95,6 +102,11 @@ agent ごとに isolation されているため、横断参照には明示的な
 
 ## 注意事項
 
+- **agent-org plugin の subagent は plain name dir** (上記の表) に書く設計のため、
+  consulting-memory で必ず plain name dir を Read で読みに行く。Claude Code
+  フレームワーク側の auto-inject は scoped name dir (`agent-org-<name>/`、`:` を
+  `-` に置換した命名) を参照するが、agent-org plugin ではここは空のままになる
+  (実機検証 ADR-002 参照)
 - `MEMORY.md` の先頭 **200 行または 25 KB (先に達した方)** は subagent 起動時に
   **auto-inject** される (Claude Code v2.1.33+ の仕様)。明示的に Read する必要が
   あるのは以下のケース:

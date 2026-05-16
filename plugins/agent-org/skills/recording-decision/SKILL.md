@@ -102,6 +102,11 @@ tags のヒント: [agent-org, hooks, postcompact]
 
 ## 注意事項
 
+- **auto-inject は scoped name dir (`.claude/agent-memory/agent-org-decision-keeper/`)
+  を見るため**、subagent は過去 ADR を auto-inject 経由では読めない (実機検証
+  ADR-002 参照)。skill 経由で起動するときは必ず「既存 ADR 連番の最大値」を Read で
+  取得して prompt に含めること。直接 Task invoke する場合も呼び出し側で過去情報を
+  渡す責任がある
 - decision-keeper subagent は **`agent-org:decision-keeper`** (scoped name) で起動
 - ADR の重複登録を避けるため、subagent 側でも `MEMORY.md` を Read して既存 id を
   確認する規律が組み込まれている
