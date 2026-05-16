@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.3.0 (2026-05-17) — scoped name dir adoption (BREAKING)
+
+**Breaking change**: 全 plugin subagent の memory dir 命名を **scoped name**
+(`agent-org-<agent-name>/`、`:` を `-` に置換した命名) に統一。Claude Code
+v2.1.33+ の subagent memory auto-inject 機能を活用する設計に倒した
+(ADR-003 参照)。
+
+### Background
+
+2026-05-17 の PoC で v0.2.1 (ADR-002) の前提が覆った。`claude --plugin-dir
+./plugins/agent-org --agent agent-org:decision-keeper -p ...` で plugin
+subagent を main session として起動した場合、scoped name dir
+(`.claude/agent-memory/agent-org-decision-keeper/`) に置いた MEMORY.md
+先頭 200 行/25 KB がシステムプロンプトに **正常に auto-inject される**ことを
+確認 (subagent システムプロンプトに `Persistent Agent Memory:
+...agent-org-<name>/` のパスが明示注入される)。
+
+ADR-002 の検証ミスの原因は `--plugin-dir` フラグなしで subagent invocation を
+試していたこと。plugin が解決失敗し、デフォルト Claude (main session agent)
+として fallback 起動するため、subagent memory 機能が発火しない罠があった。
+
+### Changed (Breaking)
+
+- 全 subagent の memory dir 解決先を scoped name dir に統一:
+  - `decision-keeper`: `.claude/agent-memory/agent-org-decision-keeper/`
+  - `context-compressor`: `.claude/agent-memory/agent-org-context-compressor/`
+  - `architect-reviewer` (Phase 3 で使用): `.claude/agent-memory/agent-org-architect-reviewer/`
+  - `regression-watcher` (Phase 4 で使用): `~/.claude/agent-memory/agent-org-regression-watcher/`
+  - `regression-fixer` (Phase 4 で使用): `~/.claude/agent-memory/agent-org-regression-fixer/`
+- `agents/decision-keeper.md`: auto-inject 前提に書き直し。
+  - 明示 Read 指示を削除、auto-inject される MEMORY.md の `next_adr_sequence`
+    から連番を取得する規律に変更
+  - MEMORY.md は ADR index + 連番カウンタのみ、本文は個別
+    `ADR-<id>-<slug>.yml` ファイルに分離 (auto-inject 範囲を圧縮)
+- `agents/context-compressor.md`: auto-inject 前提に書き直し。memory path を
+  scoped name dir に統一
+- `skills/recording-decision/SKILL.md`: 明示注入指示
+  (「既存 ADR 連番を Read で取得して prompt に含める」) を削除。subagent が
+  auto-inject 経由で連番を取得する設計に統一
+- `skills/consulting-memory/SKILL.md`: path 規約表を scoped name に統一、
+  plain name 言及を削除
+- `skills/compressing-context/SKILL.md`: subagent_type を
+  `agent-org:context-compressor` (scoped name) に明示
+- `commands/org-init.md`: mkdir 対象を scoped name dir に統一、v0.2.x からの
+  データ移行手順を追記
+- `docs/ARCHITECTURE.md`: Phase 1/2 の全 path 規約表・mermaid 図を scoped name に更新
+
+### Migration from 0.2.x
+
+`/org-init` を再実行すると新しい scoped dir が作成される。旧 plain dir に
+蓄積した MEMORY.md / ADR ファイルは自動移行されないため、`commands/org-init.md`
+の「v0.3.0 移行時の注意」セクションに記載の `mv` コマンドで移行すること:
+
+```bash
+mv .claude/agent-memory/decision-keeper/* \
+   .claude/agent-memory/agent-org-decision-keeper/ 2>/dev/null || true
+mv .claude/agent-memory/context-compressor/* \
+   .claude/agent-memory/agent-org-context-compressor/ 2>/dev/null || true
+rmdir .claude/agent-memory/decision-keeper 2>/dev/null || true
+rmdir .claude/agent-memory/context-compressor 2>/dev/null || true
+```
+
+### Notes
+
+- 0.2.1 (ADR-002) で採用した「明示注入設計」は ADR-003 で supersede
+- Phase 番号体系を更新: Phase 2.5 (v0.3.0) として scoped name dir 統一を
+  挿入。Phase 3 (v0.4.0) authority/review、Phase 4 (v0.5.0) regression、
+  v1.0.0 で全機能揃った時点で bump
+- PoC 詳細とその後の判断は ADR-003 (`.claude/agent-memory/
+  agent-org-decision-keeper/ADR-003-scoped-name-dir-adoption.yml`) 参照
+
 ## 0.2.1 (2026-05-16) — Phase 2 verification followup
 
 Phase 2 検証 (ADR-001) で plugin agent の memory dir 命名規則を実機確認した

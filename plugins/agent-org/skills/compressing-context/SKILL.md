@@ -32,13 +32,15 @@ description: |
      特定のトピック等、ユーザー指定または自然な区切り）
 
 2. **`context-compressor` subagent を Task ツールで invoke する**
-   - `subagent_type: "context-compressor"` を指定 (plugin scoped name は
-     `agent-org:context-compressor`)
+   - `subagent_type: "agent-org:context-compressor"` を指定 (plugin scoped name)
    - prompt には以下を渡す:
      - 圧縮対象セグメントの概要 (主題・期間・主な議論点)
      - 出力先 (`.claude/episodes/<id>.yaml`)
      - `trigger: manual`、`source.type: manual_compress`、`source.trigger: user_request` を指定
-   - context-compressor は独立コンテキストで動作し、結果を返す
+   - context-compressor は独立コンテキストで動作し、過去の圧縮戦略は
+     auto-inject される MEMORY.md
+     (`.claude/agent-memory/agent-org-context-compressor/MEMORY.md`) から
+     参照する
 
 3. **結果を受けてメインセッションを継続**
    - context-compressor が返した episode の id / topic / 保存先パスを
@@ -77,7 +79,9 @@ episode:
 
 ## 注意事項
 
-- subagent は **`agent-org:context-compressor`** (plugin scoped name) で起動する
+- subagent は **`agent-org:context-compressor`** (plugin scoped name) で起動する。
+  Claude Code は scoped name の `:` を `-` に置換して memory dir
+  (`.claude/agent-memory/agent-org-context-compressor/`) を解決する
 - 値や秘密の文字列を含む議論を圧縮する場合、context-compressor は値そのものを
   記録しないように指示されているが、メインセッション側でも投げる prompt に
   注意する

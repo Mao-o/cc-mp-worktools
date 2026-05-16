@@ -3,8 +3,8 @@ name: recording-decision
 description: |
   設計判断・ADR (Architecture Decision Record) を構造化形式で記録するスキル。
   decision-keeper subagent を Task ツール経由で起動し、直近の議論から
-  ADR を抽出して `.claude/agent-memory/decision-keeper/MEMORY.md` に
-  追記する。
+  ADR を抽出して `.claude/agent-memory/agent-org-decision-keeper/MEMORY.md`
+  + 個別 ADR yml に追記する。
   Use when: 設計判断を確定した、トレードオフを伴う選択をした、
   後で「なぜそう決めたか」を参照可能にしたい時。
   Triggers: ADR 記録, 設計判断記録, decision-keeper, recording-decision,
@@ -37,12 +37,7 @@ description: |
    - ADR 対象の議論範囲を決める (今 turn の決定 / 直近 10 turn の設計議論 等)
    - 複数の決定が混ざっている場合は ADR を分けて起動する
 
-2. **既存 ADR の最大連番を確認する**
-   - `.claude/agent-memory/decision-keeper/MEMORY.md` を Read して既存の最大連番を
-     確認する (subagent prompt に渡して連番付与をスムーズにするため)
-   - ファイルが存在しない場合は連番は 0 として渡す (subagent が ADR-001 を作る)
-
-3. **`decision-keeper` subagent を Task ツールで invoke する**
+2. **`decision-keeper` subagent を Task ツールで invoke する**
    - `subagent_type: "agent-org:decision-keeper"` を指定 (plugin scoped name)
    - prompt には以下を渡す:
      - **主題** (1 行)
@@ -52,10 +47,11 @@ description: |
      - **consequences** (positive / negative / neutral)
      - **deciders** (例: `[Mao, Claude Opus 4.7]`)
      - **date** (今日の日付)
-     - **既存 ADR 連番の最大値** (Read で確認した値)
      - tags / retrieval_keys のヒント (subagent が最終決定する)
+   - **既存 ADR 連番は subagent 側で auto-inject される MEMORY.md から取得する**
+     ため、skill 側で渡す必要はない (ADR-003 で採用した scoped name dir 設計)
 
-4. **結果を受けてメインセッションを継続**
+3. **結果を受けてメインセッションを継続**
    - decision-keeper が返した ADR id / status / 保存先パスをメインセッションに通知
    - 旧 ADR の `status: superseded_by:<新 id>` 更新がかかった場合はその旧 id も通知
 
@@ -96,20 +92,18 @@ retrieval_keys のヒント:
   - "agent-org context-compressor 設計"
 
 tags のヒント: [agent-org, hooks, postcompact]
-
-既存 ADR 連番の最大値: 0 (新規)
 ```
 
 ## 注意事項
 
-- **auto-inject は scoped name dir (`.claude/agent-memory/agent-org-decision-keeper/`)
-  を見るため**、subagent は過去 ADR を auto-inject 経由では読めない (実機検証
-  ADR-002 参照)。skill 経由で起動するときは必ず「既存 ADR 連番の最大値」を Read で
-  取得して prompt に含めること。直接 Task invoke する場合も呼び出し側で過去情報を
-  渡す責任がある
-- decision-keeper subagent は **`agent-org:decision-keeper`** (scoped name) で起動
-- ADR の重複登録を避けるため、subagent 側でも `MEMORY.md` を Read して既存 id を
-  確認する規律が組み込まれている
+- decision-keeper subagent は **`agent-org:decision-keeper`** (scoped name) で
+  起動する。Claude Code は scoped name の `:` を `-` に置換して memory dir
+  (`.claude/agent-memory/agent-org-decision-keeper/`) を解決する
+- subagent は **auto-inject された MEMORY.md** から既存 ADR 連番カウンタを
+  取得できるため、skill 側で「既存 ADR 連番の最大値」を Read で渡す必要は
+  ない (ADR-003 で旧設計を supersede)
+- ADR の重複登録を避けるため、subagent 側で auto-inject された MEMORY.md
+  index を確認する規律が組み込まれている
 - 値や秘密を含む議論を ADR 化する場合、prompt に投げる前にメインセッション側で
   実値を placeholder に置換する
 - 1 ターンに ADR を複数記録するときは、ADR ごとに別 Task invoke する

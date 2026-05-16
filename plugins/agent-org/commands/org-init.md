@@ -1,5 +1,5 @@
 ---
-description: agent-org plugin が使う state ディレクトリ群を初期化する (.claude/agent-memory/, .claude/episodes/, .claude/agent-org/approvals/, ~/.claude/agent-org/state/<proj-hash>/)
+description: agent-org plugin が使う state ディレクトリ群を初期化する (.claude/agent-memory/agent-org-<agent>/, .claude/episodes/, .claude/agent-org/approvals/, ~/.claude/agent-org/state/<proj-hash>/)
 ---
 
 # /org-init
@@ -10,19 +10,24 @@ agent-org plugin が使う以下のディレクトリを冪等に作成する。
 
 repo 内 (`memory: project` 系):
 
-- `.claude/agent-memory/decision-keeper/`
-- `.claude/agent-memory/architect-reviewer/`
-- `.claude/agent-memory/context-compressor/`
+- `.claude/agent-memory/agent-org-decision-keeper/`
+- `.claude/agent-memory/agent-org-architect-reviewer/`
+- `.claude/agent-memory/agent-org-context-compressor/`
 - `.claude/episodes/`
 - `.claude/agent-org/approvals/`
 
 home 配下 (`memory: user` 系 + cross-session 共有 state):
 
-- `~/.claude/agent-memory/regression-watcher/`
-- `~/.claude/agent-memory/regression-fixer/`
+- `~/.claude/agent-memory/agent-org-regression-watcher/`
+- `~/.claude/agent-memory/agent-org-regression-fixer/`
 - `~/.claude/agent-org/state/<proj-hash>/detections/`
 - `~/.claude/agent-org/state/<proj-hash>/fixes/`
 - `~/.claude/agent-org/state/<proj-hash>/learnings/`
+
+すべての agent memory dir は **scoped name** (`agent-org-<agent-name>/` 形式) で
+作成する。Claude Code v2.1.33+ は plugin scoped name (`agent-org:<agent>`) の
+`:` を `-` に置換した dir を memory として解決するため、scoped name dir に
+書けば auto-inject (200 行/25KB) が動作する (ADR-003 採用判断、v0.3.0)。
 
 `<proj-hash>` は **cwd を canonicalize して sha256 した先頭 8 桁**。複数プロジェクトを
 跨いでも cross-session state が混じらないようにするための識別子。
@@ -47,13 +52,13 @@ echo "cwd:       $(pwd -P)"
 
 ```bash
 mkdir -p \
-  .claude/agent-memory/decision-keeper \
-  .claude/agent-memory/architect-reviewer \
-  .claude/agent-memory/context-compressor \
+  .claude/agent-memory/agent-org-decision-keeper \
+  .claude/agent-memory/agent-org-architect-reviewer \
+  .claude/agent-memory/agent-org-context-compressor \
   .claude/episodes \
   .claude/agent-org/approvals \
-  ~/.claude/agent-memory/regression-watcher \
-  ~/.claude/agent-memory/regression-fixer \
+  ~/.claude/agent-memory/agent-org-regression-watcher \
+  ~/.claude/agent-memory/agent-org-regression-fixer \
   ~/.claude/agent-org/state/"$PROJ_HASH"/detections \
   ~/.claude/agent-org/state/"$PROJ_HASH"/fixes \
   ~/.claude/agent-org/state/"$PROJ_HASH"/learnings
@@ -95,14 +100,30 @@ Phase 3 がリリースされるまでは不要。
 - 既に MEMORY.md / approval ファイル等が書かれていても影響しない (新しく作る
   ものは空のディレクトリのみ)
 
+## v0.3.0 移行時の注意
+
+v0.2.x で plain name dir (`.claude/agent-memory/<agent-name>/`) を使っていた
+プロジェクトは、v0.3.0 で scoped name dir (`agent-org-<agent-name>/`) に
+切り替わる。`/org-init` は新しい scoped dir を作るが、旧 plain dir に蓄積
+された MEMORY.md / ADR ファイルは自動的には移行されない。手動で:
+
+```bash
+mv .claude/agent-memory/decision-keeper/* \
+   .claude/agent-memory/agent-org-decision-keeper/ 2>/dev/null || true
+mv .claude/agent-memory/context-compressor/* \
+   .claude/agent-memory/agent-org-context-compressor/ 2>/dev/null || true
+mv .claude/agent-memory/architect-reviewer/* \
+   .claude/agent-memory/agent-org-architect-reviewer/ 2>/dev/null || true
+
+rmdir .claude/agent-memory/decision-keeper 2>/dev/null || true
+rmdir .claude/agent-memory/context-compressor 2>/dev/null || true
+rmdir .claude/agent-memory/architect-reviewer 2>/dev/null || true
+```
+
+しておくこと。
+
 ## 注意事項
 
-- subagent 起動時、Claude Code フレームワークが自動的に **scoped name dir**
-  (`.claude/agent-memory/agent-org-<name>/`、`:` を `-` に置換した命名) を空で
-  作成する。本 command は **plain name dir** のみ mkdir するため、scoped name dir
-  は subagent 初回起動時に並存する (実機検証 ADR-002 参照)。subagent の書込先は
-  plain name dir、auto-inject 対象は scoped name dir という不整合があるため、
-  `agents/*.md` / `skills/*/SKILL.md` の指示に従って明示 Read 経路で運用する
 - 実行は project root (`.claude/` の親) で行う想定。それ以外のディレクトリで
   実行すると意図しない場所に `.claude/` が作られる
 - `~/.claude/agent-memory/` 配下は全プロジェクト共通の領域 (worktree 隔離の

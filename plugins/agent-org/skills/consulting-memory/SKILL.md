@@ -31,43 +31,46 @@ agent ごとに isolation されているため、横断参照には明示的な
    - 例: `decision-keeper`, `architect-reviewer`, `context-compressor`,
      `regression-watcher`, `regression-fixer`
 
-2. **memory scope に応じてパスを計算する**
+2. **memory scope に応じて scoped name dir のパスを計算する**
 
-   ここで使う `<agent-name>` は **plain name** (`decision-keeper`,
-   `context-compressor` 等の subagent file 名)。Claude Code フレームワーク側の
-   auto-inject 経路では scoped name の `:` を `-` に置換した命名
-   (`agent-org-decision-keeper/` 等) が使われるが、agent-org plugin の各 subagent
-   は plain name dir に書く設計のため、consulting-memory は **必ず plain name dir
-   を Read で読みに行く** (ADR-002 参照)。
+   Claude Code は plugin subagent の memory dir を **scoped name** で解決する
+   (`<plugin-name>:<agent-name>` の `:` を `-` に置換した命名)。
+   agent-org plugin の場合、すべて `agent-org-<agent-name>/` 形式になる
+   (ADR-003 採用判断、v0.3.0)。
 
    | scope | パス |
    |---|---|
-   | `project` | `.claude/agent-memory/<plain-agent-name>/MEMORY.md` |
-   | `user` | `~/.claude/agent-memory/<plain-agent-name>/MEMORY.md` |
-   | `local` | `.claude/agent-memory-local/<plain-agent-name>/MEMORY.md` |
+   | `project` | `.claude/agent-memory/agent-org-<agent-name>/MEMORY.md` |
+   | `user` | `~/.claude/agent-memory/agent-org-<agent-name>/MEMORY.md` |
+   | `local` | `.claude/agent-memory-local/agent-org-<agent-name>/MEMORY.md` |
 
    agent-org plugin の各 subagent の scope:
 
    | agent | scope | パス |
    |---|---|---|
-   | `decision-keeper` | `project` | `.claude/agent-memory/decision-keeper/MEMORY.md` |
-   | `architect-reviewer` | `project` | `.claude/agent-memory/architect-reviewer/MEMORY.md` |
-   | `context-compressor` | `project` | `.claude/agent-memory/context-compressor/MEMORY.md` |
-   | `regression-watcher` | `user` | `~/.claude/agent-memory/regression-watcher/MEMORY.md` |
-   | `regression-fixer` | `user` | `~/.claude/agent-memory/regression-fixer/MEMORY.md` |
+   | `decision-keeper` | `project` | `.claude/agent-memory/agent-org-decision-keeper/MEMORY.md` |
+   | `architect-reviewer` | `project` | `.claude/agent-memory/agent-org-architect-reviewer/MEMORY.md` |
+   | `context-compressor` | `project` | `.claude/agent-memory/agent-org-context-compressor/MEMORY.md` |
+   | `regression-watcher` | `user` | `~/.claude/agent-memory/agent-org-regression-watcher/MEMORY.md` |
+   | `regression-fixer` | `user` | `~/.claude/agent-memory/agent-org-regression-fixer/MEMORY.md` |
 
 3. **Read tool で `MEMORY.md` を読む**
    - ファイルが存在しない場合は subagent がまだ起動されていない / 何も
      書いていない状態。空として扱う
 
-4. **project 固有 learnings がある場合は併読する**
+4. **decision-keeper の場合は個別 ADR yml も併読する**
+   - MEMORY.md の index で関連 ADR を特定したら、本文を
+     `.claude/agent-memory/agent-org-decision-keeper/ADR-<id>-<slug>.yml`
+     で Read する
+
+5. **project 固有 learnings がある場合は併読する**
    - パス: `~/.claude/agent-org/state/<proj-hash>/learnings/<agent-name>.md`
    - `<proj-hash>` は `/org-init` 時に計算した値 (cwd を canonicalize して
      sha256 した先頭 8 桁)
    - `memory: user` の subagent が project 固有学習を MEMORY.md から分離して
      書く場所 (cross-project 混入対策)
 
-5. **関連 episode を Grep で検索する**
+6. **関連 episode を Grep で検索する**
    - パス: `.claude/episodes/*.yaml`
    - 検索キーワードは MEMORY.md 内の `retrieval_keys` をヒントに選ぶ
    - ADR archive (`adr-archive-*.yaml`) もここに含まれる
@@ -77,42 +80,43 @@ agent ごとに isolation されているため、横断参照には明示的な
 ### architect-reviewer から decision-keeper の ADR を参照したい
 
 ```
-1. Read .claude/agent-memory/decision-keeper/MEMORY.md
-2. 関連 ADR の retrieval_keys を確認して grep で広げる
-3. 関連 episode を .claude/episodes/ で Grep
-4. 必要なら archived ADR (.claude/episodes/adr-archive-*.yaml) を Read
+1. Read .claude/agent-memory/agent-org-decision-keeper/MEMORY.md
+2. index で関連 ADR を特定
+3. Read .claude/agent-memory/agent-org-decision-keeper/ADR-<id>-<slug>.yml
+4. 関連 episode を .claude/episodes/ で Grep
+5. 必要なら archived ADR (.claude/episodes/adr-archive-*.yaml) を Read
 ```
 
 ### regression-fixer から過去の同種 fix を参照したい
 
 ```
-1. Read ~/.claude/agent-memory/regression-fixer/MEMORY.md
-2. ~/.claude/agent-org/state/<proj-hash>/learnings/regression-fixer.md を Read
-3. ~/.claude/agent-org/state/<proj-hash>/fixes/*.json を Glob して直近 fix の
-   PR URL を取得
+1. Read ~/.claude/agent-memory/agent-org-regression-fixer/MEMORY.md
+2. Read ~/.claude/agent-org/state/<proj-hash>/learnings/regression-fixer.md
+3. Glob で ~/.claude/agent-org/state/<proj-hash>/fixes/*.json を取得、
+   直近 fix の PR URL を取り出す
 ```
 
 ### メインセッションから過去 ADR を確認したい
 
 ```
-1. Read .claude/agent-memory/decision-keeper/MEMORY.md (現役 ADR)
-2. retrieval_keys から該当を絞る
+1. Read .claude/agent-memory/agent-org-decision-keeper/MEMORY.md (index)
+2. 関連 ADR を ADR-<id>-<slug>.yml で Read
 3. Grep で .claude/episodes/adr-archive-*.yaml も検索 (archived ADR)
 ```
 
 ## 注意事項
 
-- **agent-org plugin の subagent は plain name dir** (上記の表) に書く設計のため、
-  consulting-memory で必ず plain name dir を Read で読みに行く。Claude Code
-  フレームワーク側の auto-inject は scoped name dir (`agent-org-<name>/`、`:` を
-  `-` に置換した命名) を参照するが、agent-org plugin ではここは空のままになる
-  (実機検証 ADR-002 参照)
+- **agent-org plugin の subagent は全て scoped name dir** (`agent-org-<name>/`)
+  に書く設計 (ADR-003 で採用、v0.3.0 から)。Claude Code v2.1.33+ の
+  auto-inject はこの scoped name dir の MEMORY.md を参照するため、
+  consulting-memory も同じ dir を Read する
 - `MEMORY.md` の先頭 **200 行または 25 KB (先に達した方)** は subagent 起動時に
   **auto-inject** される (Claude Code v2.1.33+ の仕様)。明示的に Read する必要が
   あるのは以下のケース:
   1. **別の subagent の memory** (自分の memory ではない)
   2. **200 行 / 25 KB を超えた範囲**
-  3. **MEMORY.md 以外のファイル** (learnings.md, episode YAML, ADR archive 等)
+  3. **MEMORY.md 以外のファイル** (個別 ADR yml, learnings.md, episode YAML,
+     ADR archive 等)
 - 大量に Read すると context を消費するため、retrieval_keys で範囲を絞る
 - decision-keeper の ADR を参照する場合、`status: superseded_by:<id>` で
   置き換えられた古い ADR を誤って引用しないよう、必ず `status` を確認する
