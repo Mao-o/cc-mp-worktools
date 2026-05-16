@@ -1,0 +1,19 @@
+{
+  "name": "agent-org",
+  "version": "0.1.0",
+  "description": "AI organizational engineering toolkit. Phase 1: PostCompact hook で compact_summary を .claude/episodes/<id>.yaml に転写、/compress-context skill で手動 episode 化。後続 Phase で decision-keeper / architect-reviewer / regression-watcher / regression-fixer を追加予定",
+  "author": { "name": "Mao" },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "subagents",
+    "context-compression",
+    "episodes",
+    "postcompact",
+    "hooks",
+    "organizational-engineering",
+    "memory"
+  ]
+}

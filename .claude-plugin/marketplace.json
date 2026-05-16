@@ -12,35 +12,95 @@
       "source": "./plugins/doc-researcher",
       "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
       "category": "research",
-      "keywords": ["documentation", "research", "claude-docs", "ai-sdk", "firebase", "llms-txt"]
+      "keywords": [
+        "documentation",
+        "research",
+        "claude-docs",
+        "ai-sdk",
+        "firebase",
+        "llms-txt"
+      ]
     },
     {
       "name": "sensitive-files-guard",
       "source": "./plugins/sensitive-files-guard",
       "description": "機密ファイル (.env, *.secret, *.local.*) を守る 2 段構えの hook。Read 時の実値 redaction と Stop 時の .gitignore 未登録検出を同梱",
       "category": "security",
-      "keywords": ["security", "hooks", "pretooluse", "stop", "dotenv", "redaction", "gitignore"]
+      "keywords": [
+        "security",
+        "hooks",
+        "pretooluse",
+        "stop",
+        "dotenv",
+        "redaction",
+        "gitignore"
+      ]
     },
     {
       "name": "session-facts",
       "source": "./plugins/session-facts",
       "description": "セッション開始時にリポジトリを分析したファクトバンドル (スタック/スクリプト/env キー/ドメイン型) を Markdown で注入する hook。SessionStart と SubagentStart(Explore/Plan) で発火",
       "category": "context",
-      "keywords": ["session-start", "subagent-start", "context-injection", "repo-facts", "markdown", "hooks"]
+      "keywords": [
+        "session-start",
+        "subagent-start",
+        "context-injection",
+        "repo-facts",
+        "markdown",
+        "hooks"
+      ]
     },
     {
       "name": "external-ai-assist",
       "source": "./plugins/external-ai-assist",
       "description": "Codex / Cursor などの外部 AI CLI を並走・レビューに使う hook 集。Explore 時に Cursor を並走させ、ExitPlanMode 時に Codex でプランをレビュー",
       "category": "productivity",
-      "keywords": ["hooks", "pretooluse", "posttooluse", "explore", "exitplanmode", "codex", "cursor", "external-ai", "code-review"]
+      "keywords": [
+        "hooks",
+        "pretooluse",
+        "posttooluse",
+        "explore",
+        "exitplanmode",
+        "codex",
+        "cursor",
+        "external-ai",
+        "code-review"
+      ]
     },
     {
       "name": "verify-cloud-account",
       "source": "./plugins/verify-cloud-account",
       "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud / kubectl) のアクティブアカウントがプロジェクト想定値と一致するか検証する hook。コマンドチェーン・ラッパ対応、hostname 別 / alias / account 拡張、短期キャッシュ付き",
       "category": "security",
-      "keywords": ["security", "hooks", "pretooluse", "bash", "github", "firebase", "aws", "gcloud", "kubectl", "account-verification", "multi-account"]
+      "keywords": [
+        "security",
+        "hooks",
+        "pretooluse",
+        "bash",
+        "github",
+        "firebase",
+        "aws",
+        "gcloud",
+        "kubectl",
+        "account-verification",
+        "multi-account"
+      ]
+    },
+    {
+      "name": "agent-org",
+      "source": "./plugins/agent-org",
+      "description": "AI organizational engineering toolkit. Phase 1 は PostCompact hook で compact_summary を .claude/episodes/<id>.yaml に転写、context-compressor subagent (memory: project, model: haiku) で手動 episode 化を担当",
+      "category": "agents",
+      "keywords": [
+        "agents",
+        "subagents",
+        "context-compression",
+        "episodes",
+        "postcompact",
+        "hooks",
+        "organizational-engineering",
+        "memory"
+      ]
     }
   ]
 }
