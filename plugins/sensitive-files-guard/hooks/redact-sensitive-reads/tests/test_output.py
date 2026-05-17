@@ -101,7 +101,7 @@ class TestAskOrDeny(unittest.TestCase):
 
 
 class TestAskOrAllow(unittest.TestCase):
-    """ask_or_allow: auto / bypassPermissions は allow に倒す。"""
+    """ask_or_allow: auto / bypassPermissions / plan は allow に倒す。"""
 
     def test_default_returns_ask(self):
         r = output.ask_or_allow("reason", {"permission_mode": "default"})
@@ -119,14 +119,13 @@ class TestAskOrAllow(unittest.TestCase):
         )
         self.assertTrue(output.is_allow(r))
 
-    def test_plan_returns_ask(self):
-        # 0.6.0: plan を LENIENT_MODES から削除。現行 CLI で hook が発火しないため
-        # dead entry だったが、将来 CLI が plan で hook を発火するようになっても
-        # default と同じ ask 扱いに倒すのが安全側 (再追加は CLI 再実測後)。
+    def test_plan_returns_allow(self):
+        # 0.13.0: plan を LENIENT_MODES に再追加。ユーザー実機 (2026-05-18) で
+        # 現行 CLI が plan mode 中も Bash PreToolUse hook を発火することを確認した。
+        # plan mode は副作用が plan 承認まで保留される dry-run 的な状態のため
+        # autonomous (auto / bypass) と同じく allow に倒す。
         r = output.ask_or_allow("reason", {"permission_mode": "plan"})
-        self.assertEqual(
-            r["hookSpecificOutput"]["permissionDecision"], "ask",
-        )
+        self.assertTrue(output.is_allow(r))
 
     def test_acceptEdits_returns_ask(self):
         # acceptEdits は意図的に lenient しない (Bash 用ではない mode)

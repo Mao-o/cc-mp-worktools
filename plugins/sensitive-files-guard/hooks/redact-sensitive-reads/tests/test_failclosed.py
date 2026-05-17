@@ -66,7 +66,7 @@ class TestAskOrDeny(unittest.TestCase):
 
 
 class TestAskOrAllow(unittest.TestCase):
-    """``ask_or_allow``: auto/bypass = allow / それ以外 = ask (Bash handler 用、0.3.2 追加)。"""
+    """``ask_or_allow``: auto/bypass/plan = allow / それ以外 = ask (Bash handler 用、0.3.2 追加、plan は 0.13.0 で復活)。"""
 
     def test_auto_returns_allow(self):
         r = ask_or_allow("reason", {"permission_mode": "auto"})
@@ -91,11 +91,12 @@ class TestAskOrAllow(unittest.TestCase):
         r = ask_or_allow("reason", {"permission_mode": "dontAsk"})
         self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
 
-    def test_plan_returns_ask(self):
-        # 0.6.0: plan を LENIENT_MODES から削除 (Phase 0 実測で現行 CLI では hook
-        # 非発火と判明したため dead entry を撤去)。default と同じ ask 扱いで安全側。
+    def test_plan_returns_allow(self):
+        # 0.13.0: plan を LENIENT_MODES に再追加 (ユーザー実機 2026-05-18 で plan
+        # mode 中の Bash PreToolUse hook 発火を確認)。plan mode は副作用が plan
+        # 承認まで保留される dry-run 状態のため autonomous と同等に lenient 扱い。
         r = ask_or_allow("reason", {"permission_mode": "plan"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertEqual(r, {})
 
     def test_missing_mode_returns_ask(self):
         r = ask_or_allow("reason", {})

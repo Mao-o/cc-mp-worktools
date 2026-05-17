@@ -1,17 +1,27 @@
 # 判定結果マトリクス (MATRIX.md)
 
-全 5 permission_mode (default / acceptEdits / auto / dontAsk / bypassPermissions)
-での判定結果を完全列挙する。値は 2026-05-13 時点 (0.12.0) の挙動。設計方針は
-[DESIGN.md](./DESIGN.md)、コマンド例の解釈は [README.md](../README.md) を参照。
+全 6 permission_mode (default / plan / acceptEdits / auto / dontAsk /
+bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 時点 (0.13.0)
+の挙動。設計方針は [DESIGN.md](./DESIGN.md)、コマンド例の解釈は
+[README.md](../README.md) を参照。
+
+> 表は紙幅の都合で従来通り 5 列 (default / acceptEdits / auto / dontAsk /
+> bypassPermissions) のみ列挙する。**`plan` 列は `auto` 列と同じ判定** (Bash
+> 静的解析不能ケースは allow、機密 path 確定 match は deny、Read/Edit の判定
+> 不能ケースは ask) として読むこと。`acceptEdits` / `dontAsk` のような ask 維持
+> 系とは挙動が異なるため、`auto` 列を参照する。
 
 `permission_mode` の列挙は `core/output.py::LENIENT_MODES` と
 `tests/fixtures/envelopes/README.md:22` で突合される。CLI 側が新しい mode を
 追加したら同時に更新すること (Runbook は [CLAUDE.md](../CLAUDE.md))。
 
-> 0.6.0 で `plan` 列を削除した。Phase 0 実測 (2026-04-22) で現行 CLI では
-> plan mode で hook が発火しないことが確認され、`LENIENT_MODES` から `plan`
-> dead entry を撤去したため。CLI 仕様が変わって plan で hook が発火するように
-> なったら CLAUDE.md の Runbook で再実測してから再追加する。
+> 0.13.0 (2026-05-18) で `plan` 列を `auto` と同等の lenient 扱いに戻した。
+> 0.6.0 で「現行 CLI では hook 非発火」と判断して dead entry を撤去していたが、
+> ユーザー実機で plan mode 中の Bash PreToolUse hook 発火を確認したため再追加
+> (詳細は [DESIGN.md](./DESIGN.md) の 2026-05-18 エントリ)。plan mode は副作用
+> が plan 承認まで保留されるため、Bash 静的解析不能ケースの `ask_or_allow` は
+> autonomous と同じく allow に倒す。機密 path 確定 match (`make_deny`) と
+> Read/Edit 用 `ask_or_deny` は plan でも安全側 (deny / ask) を維持する。
 
 ## 略号
 
