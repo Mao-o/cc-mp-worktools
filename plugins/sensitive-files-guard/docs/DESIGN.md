@@ -41,7 +41,7 @@
 ### 2026-04-22 — plan mode での hook 発火有無 (0.3.3 → 0.6.0 で撤去)
 
 `hooks/_debug/capture_envelope.py` (一時スクリプト) で実測。
-現行 CLI (2.1.101 系) では **plan mode で PreToolUse hook が発火しない** 観測
+当時の CLI (2.1.101 系) では **plan mode で PreToolUse hook が発火しない** 観測
 (= Case C)。
 
 0.3.3 では「将来 CLI が plan mode でも hook を発火させるよう変わったときの
@@ -49,9 +49,19 @@
 **「想像できる将来のための dead code は思想に反する」** という方針に基づき
 撤去した (REVIEW_TASKS_2026-05-06.md A5)。
 
-CLI 仕様が変わって plan mode で hook が発火するようになったら、
-[CLAUDE.md](../CLAUDE.md) の "CLI バージョンアップ時の再実測手順" Runbook で
-再実測した上で `LENIENT_MODES` に再追加する。
+### 2026-05-18 — plan mode で Bash hook が発火する観測 (0.13.0 で再追加)
+
+ユーザー実機で plan mode 中に `grep ... | head -50` のような調査ワンライナーが
+sensitive-files-guard の `ask_or_allow` を経由して ask に倒れ、確認ダイアログが
+出る現象を確認。2026-04-22 時点の "Case C: 非発火" 観測と乖離している。
+CLI バージョンアップ (2.1.101 → 2.1.x 系) のどこかで plan mode 中も Bash
+PreToolUse hook を発火する仕様変更が入ったものとみなす。
+
+0.13.0 で `LENIENT_MODES` に `"plan"` を再追加し、`ask_or_allow` (Bash 静的解析
+不能ケース) の plan 挙動を allow に倒す。plan mode は副作用が plan 承認まで
+保留される dry-run 的な状態のため、autonomous (auto / bypass) と同等の lenient
+扱いで操作性を優先する。機密 path 確定 match (`make_deny`) と Read/Edit handler
+の `ask_or_deny` は plan mode でも引き続き安全側 (deny / ask) を維持。
 
 ## LENIENT_MODES 方針
 
@@ -62,7 +72,7 @@ ask に倒す。
 | mode | `ask_or_allow` | 理由 |
 |---|---|---|
 | `default` | ask | 明示的にユーザー介在を期待 |
-| `plan` | ask | 0.3.3 で前方互換のため allow にしていたが 0.6.0 で撤去 (現行 CLI では hook 非発火 dead entry) |
+| `plan` | allow | plan 承認まで副作用が保留される dry-run 状態のため (0.13.0 で auto と同等の lenient 扱いに復活) |
 | `acceptEdits` | ask | Edit/Write 専用モード。Bash lenient の意図なし |
 | `auto` | allow | CLI 前段 classifier モード、autonomous 実行意図 |
 | `dontAsk` | ask | 明示的な非 lenient 判断として既存方針維持 |

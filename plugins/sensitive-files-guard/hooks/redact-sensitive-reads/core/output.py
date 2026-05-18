@@ -41,16 +41,20 @@ TRUNCATE_MARKER = "\n...[truncated]"
 # permission_mode で allow に倒す。
 #   - "auto": CLI 2.1.83+ の前段 classifier モード
 #   - "bypassPermissions": 全確認スキップモード
+#   - "plan": Plan mode (副作用は plan 承認まで保留、Bash も dry-run 相当)
 # それ以外 ("default" / "acceptEdits" / "dontAsk") は ask に倒す。
 # "acceptEdits" は Edit/Write 専用モードで Bash lenient の意図なし、"dontAsk" は
 # 明示的な非 lenient 判断として既存方針を維持する。
 #
 # 0.3.3 で前方互換のため "plan" を含めていたが、Phase 0 実測 (2026-04-22) で
-# 現行 CLI (2.1.101 系) では plan mode で PreToolUse hook が発火しないことが
-# 確認され、0.6.0 で dead entry を撤去した。CLI 仕様が将来 plan mode で hook を
-# 発火する形に変わったら、CLAUDE.local.md の Runbook で再実測してから "plan" を
-# 再追加する。
-LENIENT_MODES = frozenset({"auto", "bypassPermissions"})
+# 当時の CLI (2.1.101 系) では plan mode で PreToolUse hook が発火しないことが
+# 確認され、0.6.0 で dead entry として撤去していた。0.13.0 (2026-05-18) で
+# ユーザー実機で plan mode 中の Bash hook 発火を確認し、再度 LENIENT_MODES に
+# 追加。plan mode は副作用が plan 承認まで保留される dry-run 的な状態のため、
+# Bash 静的解析不能ケース (opaque wrapper 等) の ``ask_or_allow`` では allow に
+# 倒して操作性を優先する。機密 path 確定 match (``make_deny``) と Read/Edit の
+# ``ask_or_deny`` は plan mode でも安全側 (deny / ask) を維持する。
+LENIENT_MODES = frozenset({"auto", "bypassPermissions", "plan"})
 
 
 def _truncate(reason: str, limit: int = MAX_REASON_BYTES) -> str:
@@ -161,14 +165,17 @@ def ask_or_deny(reason: str, envelope: dict) -> HookResponse:
 
 
 def ask_or_allow(reason: str, envelope: dict) -> HookResponse:
-    """autonomous 実行モード (auto / bypassPermissions) では allow に倒す。
+    """autonomous / plan モードでは allow に倒す。
 
     Bash handler の静的解析不能ケース (opaque wrapper、hard-stop metachar、shell
     keyword、abs/rel path exec、residual metachar、shlex/normalize 失敗) 用。
 
-    autonomous 実行を選んでいるユーザーは「日常コマンドが片っ端から止まる」のを
-    避けたい意図がある。これらは「機密かもしれない」だけで「機密と確定した」
-    わけではないため、確定 match (``make_deny``) より弱い保護に倒す。
+    autonomous 実行 (``auto`` / ``bypassPermissions``) を選んでいるユーザーは
+    「日常コマンドが片っ端から止まる」のを避けたい意図がある。plan mode は
+    副作用が plan 承認まで保留される dry-run 的な状態で、ここで止めても plan
+    記述自体が遮られて操作性だけが落ちるため、同じく allow に倒す (0.13.0)。
+    いずれのケースも「機密かもしれない」止まりで「機密と確定した」わけでは
+    ないため、確定 match (``make_deny``) より弱い保護に倒す。
 
     ``acceptEdits`` / ``dontAsk`` は意図的に lenient 扱いしない (明示的に ask 維持)。
 

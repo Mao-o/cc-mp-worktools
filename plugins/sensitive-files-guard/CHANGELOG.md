@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.13.0
+
+**plan mode の Bash 静的解析不能ケースを `auto` と同等の allow 扱いに戻す
+ホットフィックス**。ユーザー実機 (2026-05-18) で plan mode 中に
+`grep ... | head -50` のような調査ワンライナーが `ask_or_allow` 経由で ask に
+倒れ、確認ダイアログが出る現象を確認。0.6.0 で「現行 CLI では hook 非発火」と
+判定して dead entry として撤去していた `LENIENT_MODES` の `"plan"` を再追加し、
+plan mode 中の煩雑な確認ダイアログを抑止する。
+
+plan mode は副作用が plan 承認まで保留される dry-run 的な状態のため、
+autonomous (`auto` / `bypassPermissions`) と同等の lenient 扱いで操作性を優先
+する。**機密 path 確定 match (`make_deny`) と Read/Edit handler の
+`ask_or_deny` は plan でも引き続き安全側 (deny / ask) を維持** — `cat .env`
+等の確定 match は plan mode でも block されるし、Read で機密ファイルの
+symlink/special/parent-dir fail を踏んだケースも ask は維持される。
+
+### 主要な変更
+
+1. **`core/output.py::LENIENT_MODES` に `"plan"` を再追加** —
+   `{"auto", "bypassPermissions"}` → `{"auto", "bypassPermissions", "plan"}`。
+   コメントに 2026-04-22 → 2026-05-18 の観測差分と再追加の根拠を明記。
+2. **`ask_or_allow` の docstring 更新** — plan を lenient 扱いする理由
+   (dry-run 状態で副作用なし) を追加。
+3. **テスト更新** — `tests/test_output.py` と `tests/test_failclosed.py` の
+   `test_plan_returns_ask` を `test_plan_returns_allow` に書き換え。
+4. **docs 更新** —
+   - `docs/DESIGN.md` に 2026-05-18 Phase 0 観測差分エントリを追加、
+     `LENIENT_MODES 方針` 表の `plan` 行を `ask` → `allow` に変更
+   - `docs/MATRIX.md` 冒頭の説明を更新 (plan 列は `auto` 列と同じ判定として
+     読む旨を注記)
+   - `CLAUDE.local.md` の Phase 0 実測ログに 2026-05-18 行を追加 (専用
+     envelope 採取は未実施として残課題化)
+
+### 動作変化
+
+- **plan mode で allow に倒るようになるケース**:
+  - opaque wrapper (`bash -c '...'`, `awk '...'`, `sed '...'`, `sudo ...`)
+  - hard-stop metachar (`$(...)`, バッククォート, `(...)`, `<` 入力リダイレクト等)
+  - shlex.split 失敗 (`cat '.env` のような unbalanced quote)
+  - residual metachar の ask 経路に乗っていたコマンド
+  - `_SAFE_READ_FIRST_TOKENS` 経路と組み合わさるケース
+- **plan mode でも挙動不変** (deny / ask いずれかを維持):
+  - `cat .env` / `grep X .env` / `base64 .env` 等の機密 path 確定 match
+    (`make_deny` で全 mode deny 固定、`TestConfirmedMatchAcrossModes` で網羅)
+  - Read tool が機密ファイルの symlink/special/parent-dir fail を踏んだ場合
+    (`ask_or_deny` は plan mode を lenient 扱いしないため引き続き ask)
+  - Edit / Write の機密 path への書込
+
+### テスト結果
+
+`python3 -m unittest discover tests` で全件 pass を確認 (回帰なし)。
+plan ケースは ask → allow の期待値変更のみで、他の挙動は不変。
+
+### 残課題
+
+専用の envelope 実測スクリプト (`hooks/_debug/capture_envelope.py`) を使って
+plan mode 中の `permission_mode` 値と発火条件を改めて記録すること。
+ユーザー体感ベースで再追加した形のため、CLI のバージョン情報も併記したい。
+
 ## 0.12.0
 
 **ユーザー体感の調査用ワンライナーが ask に倒れる問題を解消** する追加リリース。
