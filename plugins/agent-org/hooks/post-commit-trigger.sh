@@ -79,26 +79,49 @@ fi
 
 canonical_cwd="$(cd "$cwd" 2>/dev/null && pwd -P)" || canonical_cwd="$cwd"
 
-# proj-hash: cwd を sha256 して先頭 8 桁
+# command が `git -C <path>` を含む場合、その path を target dir として扱う。
+# 別 repo への commit を hook input の cwd に誤って記録するのを防ぐ (P2)。
+# resolve できない / 同一 path なら cwd フォールバック。
+target_canon="$canonical_cwd"
+git_c_path=""
+if printf '%s' "$command_str" | grep -qE '(^|[[:space:];|&])git[[:space:]]+-C[[:space:]]+[^[:space:]]+'; then
+  git_c_path="$(printf '%s' "$command_str" \
+    | grep -oE '(^|[[:space:];|&])git[[:space:]]+-C[[:space:]]+[^[:space:]]+' \
+    | head -1 \
+    | sed -E 's/.*git[[:space:]]+-C[[:space:]]+//')"
+fi
+if [ -n "$git_c_path" ]; then
+  case "$git_c_path" in
+    /*) target_resolve="$git_c_path" ;;
+    *)  target_resolve="${canonical_cwd}/${git_c_path}" ;;
+  esac
+  resolved="$(cd "$target_resolve" 2>/dev/null && pwd -P 2>/dev/null)" || resolved=""
+  if [ -n "$resolved" ]; then
+    target_canon="$resolved"
+  fi
+fi
+
+# proj-hash: target_canon を sha256 して先頭 8 桁
+# (git -C で別 repo を指定された場合、その別 repo の proj-hash になる)
 proj_hash=""
 if command -v python3 >/dev/null 2>&1; then
   proj_hash="$(python3 -c '
 import hashlib, sys
 print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])
-' "$canonical_cwd" 2>/dev/null || echo "")"
+' "$target_canon" 2>/dev/null || echo "")"
 elif command -v shasum >/dev/null 2>&1; then
-  proj_hash="$(printf '%s' "$canonical_cwd" | shasum -a 256 | cut -c1-8)"
+  proj_hash="$(printf '%s' "$target_canon" | shasum -a 256 | cut -c1-8)"
 elif command -v sha256sum >/dev/null 2>&1; then
-  proj_hash="$(printf '%s' "$canonical_cwd" | sha256sum | cut -c1-8)"
+  proj_hash="$(printf '%s' "$target_canon" | sha256sum | cut -c1-8)"
 fi
 
 if [ -z "$proj_hash" ]; then
   exit 0
 fi
 
-# HEAD の sha / branch を取得 (commit 成功直後なので新 sha を指す)
-head_sha="$(cd "$canonical_cwd" && git rev-parse HEAD 2>/dev/null || echo "unknown")"
-branch="$(cd "$canonical_cwd" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
+# HEAD の sha / branch を target_canon (= git -C で指定された path or cwd) から取得
+head_sha="$(cd "$target_canon" && git rev-parse HEAD 2>/dev/null || echo "unknown")"
+branch="$(cd "$target_canon" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
 
 state_dir="${HOME}/.claude/agent-org/state/${proj_hash}"
 mkdir -p "$state_dir"
@@ -113,7 +136,8 @@ jq -n \
   --arg sha "$head_sha" \
   --arg branch "$branch" \
   --arg ts "$ts" \
-  --arg cwd "$canonical_cwd" \
+  --arg cwd "$target_canon" \
+  --arg hook_cwd "$canonical_cwd" \
   --arg ph "$proj_hash" \
   --arg cmd "$cmd_excerpt" \
   '{
@@ -122,6 +146,7 @@ jq -n \
     branch: $branch,
     committed_at: $ts,
     cwd: $cwd,
+    hook_cwd: $hook_cwd,
     project_hash: $ph,
     triggered_by: "PostToolUse:Bash",
     command_excerpt: $cmd

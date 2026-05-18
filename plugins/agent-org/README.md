@@ -29,7 +29,7 @@ subagent memory / agent teams / `/goal` / agent view で実装するプラグイ
 | `running-review` skill | `architect-reviewer` を 3-5 perspective で並列 spawn する手順 (agent teams default、Task tool sequential fallback) |
 | `/run-review` command | skill 起動 + verdict 集約 + `.claude/agent-org/approvals/<task-id>.json` 書込を一括処理 |
 | Stop hook (`stop-quality-gate.sh`) | `.claude/agent-org/quality-gates.json` 設定がある場合、required gate が failing なら session 停止を block |
-| TaskCompleted hook (`task-completed-gate.sh`) | task の `metadata.review_required=true` なら approval JSON の `approval_status` を検査、`rejected` で task 完了を block |
+| TaskCompleted hook (`task-completed-gate.sh`) | task 完了時に `.claude/agent-org/approvals/<task_id>.json` が存在しかつ `approval_status=rejected` なら block。approval JSON 不在は通常 task として pass (opt-in) |
 
 ## Phase 4 (v0.5.0) で追加された機能
 
@@ -162,13 +162,23 @@ TaskCompleted gate で参照される。
 `required: true` の gate が failing なら停止が block される。`required: false`
 は warn のみ。設定ファイルが無ければ gate 制約は適用されない。
 
-### Review-required task gate (Phase 3)
+### Approval gate on task completion (Phase 3, opt-in)
 
-TaskCreate / TaskUpdate で `metadata.review_required=true` を付けると、その
-task の完了 (TaskCompleted) 時に `.claude/agent-org/approvals/<task-id>.json`
-が **approved または conditional** になっているか自動検査される。`rejected`
-または approval JSON 不在なら task 完了が block され、`/run-review <task-id>`
-で再レビューを促される。
+TaskCompleted hook は **matcher 非対応・全件発火** (公式 hooks docs)。task
+payload は全 field が top-level フラット (`task_id` / `task_subject` /
+`task_description` / `teammate_name` / `team_name`) で `review_required` の
+ような nested 設定 field は存在しない。
+
+このため gate は **approval JSON opt-in 方式**:
+
+- `.claude/agent-org/approvals/<task_id>.json` が **不在** → pass (通常 task、
+  review 不要)
+- `approval_status=approved` / `conditional` → pass
+- `approval_status=rejected` → block (exit 2)
+
+つまり `/run-review <task-id>` を実行した task だけが gate 対象になり、未実行
+の task は通常通り完了できる。「approval を必須にしたい」場合は単に
+`/run-review` を回せばよく、明示的な `review_required` 設定は不要。
 
 ### Background regression watch (Phase 4)
 

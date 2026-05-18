@@ -2,30 +2,40 @@
 # task-completed-gate.sh
 #
 # TaskCompleted hook for agent-org plugin.
-# matcher 非対応・全件発火のため hook 内部で task.metadata.review_required を
-# 見て review-required task のみ approval JSON 検査を行う。
 #
-# 入力 JSON (stdin):
-#   - session_id, transcript_path, cwd, hook_event_name (common fields)
-#   - task object / metadata.review_required (推測)
+# 公式 schema (https://code.claude.com/docs/en/hooks.md, TaskCompleted hook):
+#   入力 JSON は全 field が top-level フラット。`task` / `metadata` key は
+#   存在しない。task 関連 field:
+#     - task_id          (string)
+#     - task_subject     (string)
+#     - task_description (string, optional)
+#     - teammate_name    (string, optional)
+#     - team_name        (string, optional)
+#   common:
+#     - session_id / transcript_path / cwd / permission_mode / hook_event_name
+#
+# 公式 schema に `review_required` のような field は存在しないため、
+# **approval JSON opt-in** で gate 判定する設計に倒す:
+#   - .claude/agent-org/approvals/<task_id>.json が **不在** なら pass
+#     (= 通常 task、review 不要)
+#   - approval_status=approved / conditional なら pass
+#   - approval_status=rejected なら exit 2 で block
+#   - approval_status が不明な値 / 読み込み不能なら fail-open (exit 0)
 #
 # 動作:
-#   1. jq 不在で fail-open (gate skip、exit 0)
-#   2. task.metadata.review_required (or top-level metadata.review_required) が
-#      true でなければ exit 0 (review-required でない普通の task)
-#   3. task_id を取得 (task.id / task.task_id / id / task_id を順に試す)
-#   4. .claude/agent-org/approvals/<task-id>.json が存在しない → exit 2 (block)
-#   5. approval_status を読む:
-#      - approved / conditional → exit 0 (pass)
-#      - rejected → exit 2 (block)
-#      - unknown → fail-open (exit 0)
+#   - jq 不在で fail-open
+#   - task_id 不在 (公式 schema 違反) で fail-open
+#   - approval JSON 不在で pass (opt-in 設計)
+#   - approval_status=rejected の時のみ exit 2 (block)
+#
+# TaskCompleted は matcher 非対応・全件発火なので、すべての task 完了で
+# この hook が呼ばれる。だからこそ approval JSON 不在を「制約なし」と扱う。
 #
 # 依存: jq
 
 set -euo pipefail
 
-# fail-open: hook が壊れても task 完了を妨げない
-# ただし明示的に exit 2 を返した場合はブロック
+# fail-open: hook が壊れても task 完了を妨げない (ただし明示的 exit 2 は通す)
 trap 'exit 0' ERR
 
 INPUT="$(cat)"
@@ -35,53 +45,25 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-# task_id を複数候補から取得
-task_id="$(printf '%s' "$INPUT" | jq -r '
-  .task.id // .task.task_id // .task.taskId // .id // .task_id // .taskId // empty
-' 2>/dev/null || true)"
-
-# review_required を複数候補から取得
-review_required="$(printf '%s' "$INPUT" | jq -r '
-  .task.metadata.review_required
-  // .task.metadata.reviewRequired
-  // .metadata.review_required
-  // .metadata.reviewRequired
-  // false
-' 2>/dev/null || echo "false")"
+# task_id は **top-level フラット** で渡る (公式 schema)
+task_id="$(printf '%s' "$INPUT" | jq -r '.task_id // empty' 2>/dev/null || true)"
 
 cwd="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)"
 if [ -z "$cwd" ]; then
   cwd="$(pwd)"
 fi
 
-# review_required が true 以外ならゲート skip
-if [ "$review_required" != "true" ]; then
-  exit 0
-fi
-
-# review_required=true だが task_id が取れない → 警告して fail-open
+# task_id が取れない (公式 schema 違反 / 古い payload 形式) なら fail-open
 if [ -z "$task_id" ]; then
-  echo "[agent-org:task-completed-gate] warning: review_required=true but task id not found in input; skipping gate (fail-open)" >&2
   exit 0
 fi
 
 approval_file="${cwd}/.claude/agent-org/approvals/${task_id}.json"
 
+# approval JSON 不在 → 通常 task として pass (opt-in 設計)
+# /run-review <task-id> を実行していない task は gate されない
 if [ ! -f "$approval_file" ]; then
-  cat >&2 <<EOF
-[agent-org:task-completed-gate] BLOCK: approval が存在しません
-
-  task_id:       ${task_id}
-  expected file: ${approval_file}
-
-このタスクは review_required=true としてマークされています。完了前に
-レビューを実行してください:
-
-  /run-review ${task_id}
-
-approval JSON が生成されたら task を再度完了できます。
-EOF
-  exit 2
+  exit 0
 fi
 
 approval_status="$(jq -r '.approval_status // "unknown"' "$approval_file" 2>/dev/null || echo "unknown")"

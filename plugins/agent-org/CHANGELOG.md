@@ -154,6 +154,47 @@ name dir 採用判断が `user` scope にも適用できる。
   並列 spawn
 - `--bg` 内での `gh auth status` 有効性 (preflight で緩和済)
 
+### Codex review 対応 (R1, 2026-05-19, 同 PR 内)
+
+PR #16 への `@codex review` で 2 件の指摘を受領 (P1 / P2) し、同 PR 内で修正:
+
+- **P1 (`task-completed-gate.sh`)**: 公式 TaskCompleted hook schema を
+  doc-researcher で verbatim 再確認 (`code.claude.com/docs/en/hooks.md`
+  Hook events/TaskCompleted)。input JSON は **全 field が top-level フラット**
+  (`task_id` / `task_subject` / `task_description` / `teammate_name` /
+  `team_name`) で、`task` / `metadata` / `review_required` のような nested
+  設定 field は schema 上**存在しない**。既存の `.task.metadata.review_required`
+  / `.metadata.review_required` を見る実装は常に false に解決され gate が
+  完全 no-op だった。**設計を approval JSON opt-in に変更**: top-level
+  `task_id` を取って `.claude/agent-org/approvals/<task_id>.json` を探し、
+  - 不在 → pass (gate skip、通常 task)
+  - `approval_status=approved` / `conditional` → pass
+  - `approval_status=rejected` → exit 2 で block
+  という規則。「review を必須にしたい」場合は単に `/run-review <task_id>` を
+  回すだけで opt-in できる。README / ARCHITECTURE / `commands/run-review.md`
+  の関連説明も更新
+- **P2 (`post-commit-trigger.sh`)**: `git -C <path> commit` を検出した際に
+  HEAD/branch を hook input cwd から読んでいたため、別 repo の commit が
+  current project の `last-commit.json` を誤って上書きする可能性があった。
+  command から `git -C <path>` の path を grep + sed で抽出し、target dir
+  として canonicalize (relative path は cwd 基準で resolve、resolve 失敗時
+  は cwd にフォールバック)。target dir をベースに proj-hash 計算と
+  `git rev-parse` を実行し、別 repo の commit は別 proj-hash の
+  `last-commit.json` に書き分ける。last-commit.json schema に
+  `hook_cwd` field を追加 (cwd と hook input cwd の関係を保存)
+
+### R1 検証
+
+- task-completed-gate.sh 単体テスト 7 ケース (Case A: task_id 不在 →
+  fail-open, B: approval 不在 → pass, C: approved → pass, D: rejected →
+  block, E: conditional → pass with warn, F: 古い payload 形式
+  (`.task.id` のみ) → fail-open, G: teammate_name 含む正規 payload → pass)
+  すべて期待通り
+- post-commit-trigger.sh 単体テスト 5 ケース (Case A: cwd 内通常 commit,
+  B: `git -C OTHER_REPO commit` → OTHER に書き cwd には触らない,
+  C: `git -C ./sub commit` (relative) → SUB に書く, D: chained 検出維持
+  (regression なし), E: 存在しない path → cwd フォールバック) すべて期待通り
+
 ## 0.4.0 (2026-05-18) — PR 3: authority / review + quality gates
 
 Phase 3 of the agent-org plugin. 真 RO `architect-reviewer` subagent と、

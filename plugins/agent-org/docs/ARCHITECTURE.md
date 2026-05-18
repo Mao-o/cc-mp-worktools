@@ -250,14 +250,26 @@ graph TB
 
 ### B. TaskCompleted gate (`task-completed-gate.sh`)
 
+公式 hooks docs により TaskCompleted hook input は **全 field が top-level
+フラット** (`task_id` / `task_subject` / `task_description` /
+`teammate_name` / `team_name`)。`task` key も `metadata` key も無く、
+`review_required` のような任意設定 field も schema に存在しない。
+
+このため gate は **approval JSON opt-in** で動かす:
+
 1. メインセッションで `TaskCompleted` が発火 (matcher 非対応・全件発火)
-2. hook が input JSON から `task.metadata.review_required` を確認
-3. true でなければ exit 0 (gate skip)
-4. true なら `.claude/agent-org/approvals/<task-id>.json` を検査:
-   - 存在しない → exit 2 (block)、ユーザーに `/run-review <task-id>` を促す
-   - `approval_status=approved` → exit 0
-   - `approval_status=conditional` → exit 0 (warn のみ)
-   - `approval_status=rejected` → exit 2 (block)
+2. hook が input JSON から **top-level `task_id`** を取得
+3. `task_id` 不在 (schema 違反) → exit 0 (fail-open)
+4. `.claude/agent-org/approvals/<task_id>.json` が存在しない → exit 0
+   (通常 task、review 不要、gate なし)
+5. 存在する場合は `approval_status` を検査:
+   - `approved` → exit 0
+   - `conditional` → exit 0 (warn のみ)
+   - `rejected` → exit 2 (block)
+   - 不明値 → exit 0 (fail-open)
+
+→ `/run-review <task-id>` を実行した task のみが gate 対象。それ以外は
+通常通り完了する設計。
 
 ### C. Stop quality gate (`stop-quality-gate.sh`)
 
@@ -440,12 +452,22 @@ graph TB
 1. main session で `git commit ...` を Bash tool 経由で実行
 2. `PostToolUse` が発火 (matcher: Bash)
 3. `post-commit-trigger.sh` が:
-   - `tool_input.command` に `git commit` を含むか確認
+   - `tool_input.command` に `git commit` を含むか確認 (chained `;` / `&&` /
+     パイプ越しも検出、`tr ';|&' '\n'` で行分割してから regex 検査)
    - `tool_response.exit_code == 0` を確認
-   - cwd を canonicalize + sha256 で proj-hash 計算
-   - `git rev-parse HEAD` で新 sha 取得
+   - command が `git -C <path>` を含めば `<path>` を target dir として
+     extract (relative path は cwd 基準で resolve)、resolve できなければ
+     cwd フォールバック
+   - target dir を canonicalize (`cd && pwd -P`) + sha256 で proj-hash 計算
+   - target dir で `git rev-parse HEAD` / `--abbrev-ref HEAD` を取得
    - `~/.claude/agent-org/state/<proj-hash>/last-commit.json` を JSON 書込
+     (`cwd` = target dir、`hook_cwd` = hook input の cwd を別 field で保持)
 4. watcher の次 `/loop` iteration がこの last-commit.json を読んで起点にする
+
+`git -C <other-repo> commit` のケース: target dir = `<other-repo>` の
+proj-hash で書くため、cwd 側の `last-commit.json` には**触らない**。watcher
+は cwd ベースで proj-hash を計算するため、別 repo の commit が watcher の
+baselining を汚染しない。
 
 ### C. background fixer 起動 (`/fix-regression`)
 
@@ -498,12 +520,17 @@ jq -r '.pr_url' ~/.claude/agent-org/state/<proj-hash>/fixes/<latest>.json | xarg
   "commit_sha": "<HEAD の sha>",
   "branch": "<branch name>",
   "committed_at": "<ISO-8601 UTC>",
-  "cwd": "<canonicalize 済 path>",
-  "project_hash": "<proj-hash>",
+  "cwd": "<canonicalize 済 target dir (= git -C <path> or hook input cwd)>",
+  "hook_cwd": "<hook input の cwd (canonicalize 済)>",
+  "project_hash": "<proj-hash, target dir の sha256[:8]>",
   "triggered_by": "PostToolUse:Bash",
   "command_excerpt": "<command の先頭 200 文字>"
 }
 ```
+
+`cwd` と `hook_cwd` が異なる場合は `git -C <path>` で別 repo に commit した
+ケース (target = path、hook_cwd = main session の cwd)。同じなら通常の
+cwd commit。
 
 ## detection YAML schema
 
