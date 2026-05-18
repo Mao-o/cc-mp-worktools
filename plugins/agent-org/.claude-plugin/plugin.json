@@ -1,7 +1,7 @@
 {
   "name": "agent-org",
-  "version": "0.3.0",
-  "description": "AI organizational engineering toolkit. Phase 2.5 までで context-compressor + decision-keeper subagent と /compress-context / /org-init command、consulting-memory / recording-decision skill を提供 (scoped name dir で auto-inject 対応)。後続 Phase で architect-reviewer + regression-watcher / fixer を追加予定",
+  "version": "0.5.0",
+  "description": "AI organizational engineering toolkit. Phase 4 までで context-compressor / decision-keeper / architect-reviewer / regression-watcher / regression-fixer subagent、/compress-context / /org-init / /run-review / /start-watcher / /fix-regression command、consulting-memory / recording-decision / running-review skill、PostCompact / Stop / TaskCompleted / PostToolUse(Bash) hooks を提供。worktree 隔離下では fixer が git remote 経由 (push + gh pr) で main に統合する設計。v1.0.0 で機能セット凍結予定",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",
   "repository": "https://github.com/Mao-o/cc-mp-worktools",
@@ -14,6 +14,13 @@
     "postcompact",
     "hooks",
     "organizational-engineering",
-    "memory"
+    "memory",
+    "review",
+    "approval",
+    "quality-gates",
+    "regression",
+    "background-agents",
+    "loop",
+    "goal"
   ]
 }
