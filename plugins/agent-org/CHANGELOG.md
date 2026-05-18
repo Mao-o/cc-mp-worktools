@@ -1,5 +1,218 @@
 # Changelog
 
+## 0.5.0 (2026-05-18) — PR 4: regression watcher + /goal fixer
+
+Phase 4 of the agent-org plugin. background session (`--bg`) で常駐する
+監視エージェント `regression-watcher` (`/loop` 駆動) と自律修復エージェント
+`regression-fixer` (`/goal` 駆動)、それぞれの起動 command、commit を契機に
+last-commit.json を更新する PostToolUse(Bash) hook を追加した。
+
+`v0.5.0` をもって親プランの全コンポーネントが揃った。後続は実機運用フィードバック
+を反映する細部調整を経て `v1.0.0` で機能セット凍結予定。
+
+### Added
+
+- `regression-watcher` subagent (`memory: user`, `model: haiku`,
+  `tools: Read,Bash,Grep,Glob`): bg + `/loop` で常駐し、定期 smoke check
+  (テスト / ビルド / lint) で regression を検出。検出結果を
+  `~/.claude/agent-org/state/<proj-hash>/detections/<ts>.yaml` に書き出す。
+  自分では修正しない (fixer に委譲)
+- `regression-fixer` subagent (`memory: user`, `model: sonnet`,
+  `tools: Read,Write,Edit,Bash,Grep,Glob`): bg + `/goal` で自律修復ループを
+  回し、condition 達成まで修正を継続。完了時は git push + `gh pr create` /
+  PR 更新 + `~/.claude/agent-org/state/<proj-hash>/fixes/<ts>.json` 書込が
+  **必須手順**
+- `commands/start-watcher.md` (`/start-watcher [interval]`): foreground
+  preflight (gh auth / git remote / claude CLI / python3) を実行後、
+  `claude --agent agent-org:regression-watcher --bg "/loop <interval> smoke
+  check"` を発射。preflight 失敗時は `--bg` を起動せずセットアップ手順を
+  案内
+- `commands/fix-regression.md` (`/fix-regression <target> [condition] [--turn-cap N]`):
+  foreground preflight (gh auth / git remote / 作業ツリー clean / branch
+  衝突チェック / gh repo view 疎通) を実行後、`claude --agent
+  agent-org:regression-fixer --bg '/goal <condition> or stop after N turns'`
+  を発射。warnings は表示するが起動可能、errors では `--bg` 起動を中止
+- `hooks/post-commit-trigger.sh` (PostToolUse Bash matcher): `tool_input.command`
+  に `git commit` を含み `exit_code=0` の場合に、cwd を canonicalize+sha256 して
+  proj-hash を計算し `~/.claude/agent-org/state/<proj-hash>/last-commit.json`
+  を更新。watcher が次 `/loop` iteration で新規 commit 以降の変更を起点に
+  smoke check できるようにする。fail-open + jq/python3/shasum/sha256sum
+  fallback chain で堅牢化
+- `hooks/hooks.json`: 既存 PostCompact + Stop + TaskCompleted に
+  PostToolUse(Bash matcher) を追加
+
+### Worktree 隔離と統合経路
+
+`claude --bg` で起動された session は working directory 配下への書込が
+`.claude/worktrees/<id>/` に**自動隔離**される (公式 docs `agent-view`)。
+この影響を回避するため:
+
+- watcher / fixer の **memory は `user` scope** (`~/.claude/agent-memory/`)
+  に置き、worktree 隔離の対象外にする
+- watcher の **detection state** は `~/.claude/agent-org/state/<proj-hash>/`
+  (working dir 外) に置く
+- fixer の **修正成果統合は git remote 経由** (`git push` + `gh pr create`/
+  update)。worktree 隔離はローカル書込のみに影響し、git remote 操作は
+  影響を受けない
+- fixer は完了時に PR URL を `~/.claude/agent-org/state/<proj-hash>/fixes/
+  <ts>.json` に記録し、main session が `gh pr view <URL>` で内容確認できる
+
+### cross-project 混入対策
+
+`memory: user` の subagent (watcher / fixer) は全プロジェクト共通の memory
+領域を使うため、`MEMORY.md` を `## Project: <proj-hash>` セクションで
+分離する規律を subagent prompt に明記。重いプロジェクト固有学習は
+`~/.claude/agent-org/state/<proj-hash>/learnings/<agent-name>.md` に分離可能。
+
+### /goal 暴走ガード
+
+公式 docs に `/goal` の数値 hard cap は存在しない。実装は condition 末尾に
+**必ず `or stop after N turns`** 句を含めることで bound する設計。
+`/fix-regression` command は target 規模に応じた default turn-cap
+(25 / 50 / 80) を持ち、`--turn-cap N` で明示上書き可。上限 100 を超えない。
+
+### Schemas
+
+- last-commit.json (`~/.claude/agent-org/state/<proj-hash>/last-commit.json`)
+  の schema_version=1 を導入 (`commit_sha` / `branch` / `committed_at` /
+  `cwd` / `project_hash` / `triggered_by` / `command_excerpt`)
+- detection YAML (`~/.claude/agent-org/state/<proj-hash>/detections/<id>.yaml`)
+  の schema を確定 (詳細は `agents/regression-watcher.md`)
+- fix state JSON (`~/.claude/agent-org/state/<proj-hash>/fixes/<id>.json`)
+  の schema_version=1 を導入 (`fix_id` / `branch` / `pr_url` / `commits` /
+  `goal_status` / `turns_used` / `summary` 等)
+
+### Notes
+
+- Phase 4 で追加した hook (PostToolUse Bash) は fail-open ベース
+  (jq/python3 不在 / 入力 parse 失敗 / hash 計算手段不在で exit 0)
+- `--agent` には必ず **scoped name** (`agent-org:regression-watcher` /
+  `agent-org:regression-fixer`) を渡す。plain name だと plugin agent が
+  解決されず default session に fallback する罠あり (ADR-002→003 で実証済)
+- `--bg` 起動 session は permission prompt を出せず auto-deny されるため、
+  起動前の foreground preflight が必須
+- ADR 化推奨項目:
+  - 「fixer 成果統合は git remote 経由」設計の根拠
+  - `memory: user` cross-project 混入対策 (project セクション分離)
+  - `<proj-hash>` 生成元を `$CLAUDE_PROJECT_DIR` ではなく hook input cwd
+    (canonicalize 後) から取る方針
+  - **ADR-004 (候補)**: `memory: user` scope の plugin subagent も `memory:
+    project` (ADR-003) と同じく scoped name dir
+    (`<plugin>-<agent>/`) に解決される (2026-05-18 PoC で実証、下記
+    Verification 参照)
+
+### Verification (実機検証 2026-05-18)
+
+実装後の hook 単体テスト + subagent PoC で以下を確認・修正した。
+
+**Hook 単体テスト**:
+
+- `post-commit-trigger.sh`: 模擬入力で 8 ケース検査 (基本 commit / chained `;` /
+  chained `&&` / `git -C path commit` / 非 git command / failed commit /
+  非 Bash tool / echo 内の偽 git commit)
+- `task-completed-gate.sh`: 5 ケース検査 (review_required=false / approval 不在
+  / approved / rejected / conditional)
+- `stop-quality-gate.sh`: 7 ケース検査 (config 無し / 再入ガード / failing
+  required / failing non-required / passing / approvals_clean reject /
+  approvals_clean clean)
+
+**実装後に発見・修正したバグ 3 件**:
+
+1. `stop-quality-gate.sh`: `jq -r '.required // true'` が boolean `false` を
+   null と同等に扱う仕様で `false || true = true` に化けて required 扱い化。
+   `if has("required") then .required else true end` に修正して boolean
+   `false` を真の false として保持
+2. `stop-quality-gate.sh`: `wc -l` 出力末尾の改行を `tr -d ' '` が除去せず
+   `"0\n" != "0"` で false-positive BLOCK 発生。`tr -d '[:space:]'` +
+   empty チェックに修正
+3. `post-commit-trigger.sh`: regex separator `[[:space:];&|\`]` が
+   `"; git commit"` のような separator + space + git のパターンを捕捉
+   できず chained command で false-negative。`tr ';|&' '\n'` で chained
+   command を行に分割してから検査する形に整理
+
+**Plugin subagent memory PoC** (plan 残不確実性 #1 完全解消):
+
+`claude --plugin-dir ./plugins/agent-org --agent agent-org:regression-watcher
+-p "..."` で起動した subagent の system prompt の Persistent Agent Memory
+パスを実機確認:
+
+```
+/Users/mao/.claude/agent-memory/agent-org-regression-watcher/
+```
+
+`memory: user` scope でも plugin scoped name (`<plugin>-<agent>/`) で
+解決されることが確定 (`memory: project` は Phase 1 PoC で既に同様確認済)。
+旧 plain name dir (`regression-watcher/`) は使われない。ADR-003 の scoped
+name dir 採用判断が `user` scope にも適用できる。
+
+**未検証 (実運用時に PoC 予定)**:
+
+- `claude --bg --agent agent-org:<name> "/loop ..."` の supervisor process
+  立ち上げ + iteration 動作
+- `claude --bg --agent agent-org:regression-fixer "/goal ..."` の評価ループ
+- `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` での running-review teammate
+  並列 spawn
+- `--bg` 内での `gh auth status` 有効性 (preflight で緩和済)
+
+## 0.4.0 (2026-05-18) — PR 3: authority / review + quality gates
+
+Phase 3 of the agent-org plugin. 真 RO `architect-reviewer` subagent と、
+複数視点で並列レビューを実行する `running-review` skill、verdict 集約
++ approval JSON 書込を担う `/run-review` command、TaskCompleted hook での
+review-required ゲート、Stop hook での quality-gates.json ベースのゲートを
+追加した。
+
+### Added
+
+- `architect-reviewer` subagent (`memory: project`, `model: sonnet`,
+  `tools: Read,Glob,Grep` の **真 RO**): 渡された PR / 設計 / 実装を
+  multi-perspective でレビューし、verdict YAML を会話に返す。ファイル書込
+  は呼び出し側 command が責任を持つ設計 (監査面で reviewer の権限を最小化)
+- `running-review` skill: `architect-reviewer` を 3-5 perspective で並列
+  spawn する手順を提供。default は agent teams 経路
+  (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`)、未設定環境では Task tool で
+  sequential invoke する fallback も明記
+- `/run-review <task-id> [perspectives]` slash command: `running-review`
+  skill 起動 + verdict 集約 + `.claude/agent-org/approvals/<task-id>.json`
+  への書込まで一括処理。`aggregate_overall` / `min_confidence` /
+  `concerns_summary` を集計し `approval_status` (`approved` / `conditional` /
+  `rejected`) を決定
+- `hooks/task-completed-gate.sh` (TaskCompleted hook): matcher 非対応・全件
+  発火のため hook 内部で `task.metadata.review_required` を確認し、true なら
+  approval JSON の `approval_status` を検査。`approved` / `conditional` で
+  pass、`rejected` または approval JSON 不在で exit 2 (block)
+- `hooks/stop-quality-gate.sh` (Stop hook): `.claude/agent-org/quality-gates.json`
+  が存在する場合に各 gate を実行。`kind: command` (任意 shell)、
+  `kind: approvals_clean` (approvals dir の rejected を検査) をサポート。
+  `required: true` の failing で exit 2、`required: false` は warn のみ。
+  `stop_hook_active=true` で即座に抜けて無限ループ回避
+- `hooks/hooks.json`: 既存 PostCompact に Stop / TaskCompleted 登録を追加
+
+### Schemas
+
+- approval JSON (`.claude/agent-org/approvals/<task-id>.json`) の schema_version=1
+  を導入 (`schema_version` / `task_id` / `target` / `aggregate_overall` /
+  `approval_status` / `concerns_summary` / `verdicts[]` 等)。詳細は
+  `commands/run-review.md` 参照
+- quality-gates.json (`.claude/agent-org/quality-gates.json`) の schema を
+  導入 (`gates[]` + `kind` + `required`)。詳細は `hooks/stop-quality-gate.sh`
+  ヘッダコメント参照
+
+### Notes
+
+- Phase 3 で追加した hook は全て fail-open ベース (jq 不在 / 入力 parse 失敗
+  / config 不在で exit 0)。明示的に `exit 2` を返すのは「gate が確実に
+  failing と判明した」ケースのみ
+- agent teams は experimental 機能。reviewer spawn の安定性は本番運用で要検証
+- reviewer は `tools: [Read, Glob, Grep]` で固定、write 系 tool 無し
+  (plugin subagent では `permissionMode` 指定不可のため tools allowlist で
+  代替している)
+- ADR 化推奨項目:
+  - 真 RO reviewer + 呼び出し側 command による write 分離設計の根拠
+    (Codex #2 修正の背景)
+  - approval JSON schema v1 の確定
+  - quality-gates.json schema v1 の確定
+
 ## 0.3.0 (2026-05-17) — scoped name dir adoption (BREAKING)
 
 **Breaking change**: 全 plugin subagent の memory dir 命名を **scoped name**
