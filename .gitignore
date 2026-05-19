@@ -9,8 +9,9 @@
 # Claude Code local settings (personal account config etc.)
 *.local.json
 
-# Claude Code runtime locks (ScheduleWakeup / /loop dynamic mode のセッション排他 lock)
-.claude/*.lock
+# Claude Code project-local state (agent-memory / ADR / locks / hooks 等)
+# worktools は plugin 配布 repo のため、開発者の private な project state は含めない
+.claude/
 
 # Local notes (personal context, not distributed)
 CLAUDE.local.md
