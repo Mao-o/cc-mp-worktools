@@ -1,5 +1,5 @@
 ---
-description: regression-watcher subagent を `--bg` + `/loop` で起動して定期 smoke check を開始する。foreground preflight (gh auth + git remote) を実行してから claude --agent agent-org:regression-watcher --bg を発射
+description: regression-watcher subagent を `--bg` + `/loop` で起動して定期 smoke check を開始する。foreground preflight (bd CLI / bd doctor / gh auth / git remote / claude CLI) を実行してから claude --agent agent-org:regression-watcher --bg を発射。v0.6.0 から beads が hard dependency
 ---
 
 # /start-watcher
@@ -32,31 +32,42 @@ description: regression-watcher subagent を `--bg` + `/loop` で起動して定
 
 ```bash
 #!/usr/bin/env bash
-# /start-watcher preflight
+# /start-watcher preflight (v0.6.0: bd hard dependency)
 set -u
 
 errors=()
 
-# 1. gh CLI が install 済みか + auth 済みか
+# 1. bd CLI install 確認 (v0.6.0: hard dependency)
+if ! command -v bd >/dev/null 2>&1; then
+  errors+=("bd CLI が見つかりません (Mac: 'brew install beads')")
+fi
+
+# 1b. jq install 確認 (watcher は bd list --json | jq で false-positive guard、
+#     bd create の戻り解析にも依存する)
+if ! command -v jq >/dev/null 2>&1; then
+  errors+=("jq が見つかりません (Mac: 'brew install jq')")
+fi
+
+# 2. gh CLI が install 済みか + auth 済みか
 if ! command -v gh >/dev/null 2>&1; then
   errors+=("gh CLI が見つかりません。インストール: https://cli.github.com/")
 else
   if ! gh auth status >/dev/null 2>&1; then
-    errors+=("gh CLI が未認証です。`gh auth login` を実行してください")
+    errors+=("gh CLI が未認証です。'gh auth login' を実行してください")
   fi
 fi
 
-# 2. git remote origin が設定されているか
+# 3. git remote origin が設定されているか
 if ! git remote get-url origin >/dev/null 2>&1; then
-  errors+=("git remote 'origin' が未設定です。`git remote add origin <url>` で設定してください")
+  errors+=("git remote 'origin' が未設定です。'git remote add origin <url>' で設定してください")
 fi
 
-# 3. claude CLI が利用可能か
+# 4. claude CLI が利用可能か
 if ! command -v claude >/dev/null 2>&1; then
   errors+=("claude CLI が見つかりません (--bg 起動に必須)")
 fi
 
-# 4. proj-hash を計算 (state dir の確認用)
+# 5. proj-hash を計算 (bd dir 確認 + state dir 共通)
 proj_hash="$(python3 -c "
 import hashlib, os
 cwd = os.path.realpath(os.getcwd())
@@ -67,9 +78,22 @@ if [ -z "$proj_hash" ]; then
   errors+=("python3 で proj-hash 計算に失敗 (python3 が必要)")
 fi
 
-# 5. state dir 準備 (冪等)
-mkdir -p ~/.claude/agent-org/state/"$proj_hash"/detections \
-         ~/.claude/agent-memory/agent-org-regression-watcher 2>/dev/null || true
+# 6. ~/.beads/<proj-hash>/.beads/ 初期化済み確認 (bd hard dependency)
+BEADS_PARENT="$HOME/.beads/$proj_hash"
+BEADS_DIR="$BEADS_PARENT/.beads"
+if [ -n "$proj_hash" ] && [ ! -d "$BEADS_DIR" ]; then
+  errors+=("$BEADS_DIR が未初期化。project root で '/org-init' を実行してください")
+fi
+
+# 7. bd doctor (DB の健全性確認、preflight 段階で異常検出)
+if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
+  if ! BEADS_DIR="$BEADS_DIR" bd doctor >/dev/null 2>&1; then
+    errors+=("bd doctor が失敗。'BEADS_DIR=$BEADS_DIR bd doctor' を foreground で実行して診断")
+  fi
+fi
+
+# 8. memory dir 準備 (冪等。state dir は v0.6.0 から bd に移行したため不要)
+mkdir -p ~/.claude/agent-memory/agent-org-regression-watcher 2>/dev/null || true
 
 # 結果出力
 if [ ${#errors[@]} -gt 0 ]; then
@@ -78,7 +102,7 @@ if [ ${#errors[@]} -gt 0 ]; then
   exit 1
 fi
 
-echo "preflight OK: proj-hash=$proj_hash, gh authed, claude CLI present"
+echo "preflight OK: proj-hash=$proj_hash, bd=$BEADS_DIR, gh authed, claude CLI present"
 exit 0
 ```
 
@@ -113,14 +137,17 @@ claude agents
 # (claude agents から session id を取得して attach)
 ```
 
-各 iteration で watcher が `~/.claude/agent-org/state/<proj-hash>/
-detections/*.yaml` を書く。検出があれば main session で:
+各 iteration で watcher が `bd create -t detection` で bd issue を作成する
+(v0.6.0 から旧 YAML 形式は廃止)。検出があれば main session で:
 
 ```bash
-ls -la ~/.claude/agent-org/state/<proj-hash>/detections/
+PROJ_HASH=<preflight で表示された値>
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t detection --status open --json | jq
+# または
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd ready -t detection
 ```
 
-を見て確認できる (`<proj-hash>` は preflight で出力されたもの)。
+で確認できる。
 
 ## preflight 失敗時のユーザー案内テンプレ
 
@@ -129,6 +156,10 @@ preflight bash script が `exit 1` で終わった場合、表示された error
 
 | 失敗内容 | 対処 |
 |---|---|
+| `bd CLI が見つかりません` | Mac: `brew install beads`、他は <https://github.com/steveyegge/beads> 参照 |
+| `jq が見つかりません` | Mac: `brew install jq` |
+| `~/.beads/<proj-hash>/.beads が未初期化` | project root で `/org-init` を実行 |
+| `bd doctor が失敗` | `BEADS_DIR=~/.beads/<proj-hash>/.beads bd doctor` を foreground で実行して診断 |
 | `gh CLI が見つかりません` | <https://cli.github.com/> から install (Mac: `brew install gh`) |
 | `gh CLI が未認証です` | `gh auth login` をユーザー自身が foreground で実行 (`! gh auth login` を案内) |
 | `git remote 'origin' が未設定です` | `git remote add origin <git URL>` (PR 機能を将来使うために必要、現 watcher 用途では fixer 起動時にも preflight があるためここで止めている) |

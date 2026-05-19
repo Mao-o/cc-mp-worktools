@@ -1,5 +1,5 @@
 ---
-description: regression-fixer subagent を `--bg` + `/goal` で起動し、condition 達成まで自律修正ループを回す。foreground preflight (gh auth / git remote / branch 衝突) 必須。failure 時は --bg を起動せずセットアップ手順を案内
+description: regression-fixer subagent を `--bg` + `/goal` で起動し、condition 達成まで自律修正ループを回す。foreground preflight (bd CLI / .beads / gh auth / git remote / branch 衝突) 必須。target 未指定時は bd ready から最優先 detection を自動選択。v0.6.0 から beads が hard dependency
 ---
 
 # /fix-regression
@@ -12,13 +12,13 @@ description: regression-fixer subagent を `--bg` + `/goal` で起動し、condi
 ## 引数
 
 ```text
-/fix-regression <target> [condition] [--turn-cap N]
+/fix-regression [target] [condition] [--turn-cap N]
 ```
 
 | 引数 | 説明 |
 |---|---|
-| `<target>` (必須) | 修正対象。`PR#42` / `detection:detection-2026-05-18T03Z` / `task:fix-auth-2026` / 自由記述 |
-| `condition` (任意) | `/goal` の達成条件。省略時は target から自動推定 (e.g. PR なら「CI green + reviewer comments resolved」) |
+| `[target]` (任意) | 修正対象。`PR#42` / `detection:<bd-issue-id>` (例: `detection:proj-abc123`) / `task:fix-auth-2026` / 自由記述。**未指定時は `bd ready -t detection --json` から priority 最高 (= 0 が先頭) の detection を自動選択** |
+| `condition` (任意) | `/goal` の達成条件。省略時は target から自動推定 (e.g. PR なら「CI green + reviewer comments resolved」、detection なら「bd issue が closed」) |
 | `--turn-cap N` (任意) | turn 上限。省略時は規模に応じて 25 (small) / 50 (medium) / 80 (large) のいずれかを採用 |
 
 ## 実行内容
@@ -40,66 +40,48 @@ description: regression-fixer subagent を `--bg` + `/goal` で起動し、condi
 
 ```bash
 #!/usr/bin/env bash
-# /fix-regression preflight
+# /fix-regression preflight (v0.6.0: bd hard dependency)
 set -u
 
 errors=()
 warnings=()
 
-# 1. gh CLI install + auth
+# 1. bd CLI install 確認
+if ! command -v bd >/dev/null 2>&1; then
+  errors+=("bd CLI が見つかりません (Mac: 'brew install beads')")
+fi
+
+# 1b. jq install 確認 (bd ready --json | jq 等で必須。preflight 自身も
+#     bd ready の解析に jq を使うため、未導入だと「no work」と誤判定する)
+if ! command -v jq >/dev/null 2>&1; then
+  errors+=("jq が見つかりません (Mac: 'brew install jq')")
+fi
+
+# 2. gh CLI install + auth
 if ! command -v gh >/dev/null 2>&1; then
   errors+=("gh CLI が見つかりません (https://cli.github.com/)")
 else
   if ! gh auth status >/dev/null 2>&1; then
-    errors+=("gh CLI が未認証です。`gh auth login` を実行してください")
+    errors+=("gh CLI が未認証です。'gh auth login' を実行してください")
   fi
 fi
 
-# 2. git remote origin の存在
+# 3. git remote origin の存在
 if ! git remote get-url origin >/dev/null 2>&1; then
   errors+=("git remote 'origin' が未設定です。fixer は push + gh pr で main に戻すため必須")
 fi
 
-# 3. claude CLI が利用可能か
+# 4. claude CLI が利用可能か
 if ! command -v claude >/dev/null 2>&1; then
   errors+=("claude CLI が見つかりません (--bg 起動に必須)")
 fi
 
-# 4. 作業ツリーがクリーンか
+# 5. 作業ツリーがクリーンか
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   warnings+=("作業ツリーに未 commit の変更があります。fixer の修正と混ざる可能性")
 fi
 
-# 5. branch 衝突チェック (target が PR# の場合)
-target="${1:-}"
-case "$target" in
-  PR#*|pr#*|pr:*|PR:*)
-    pr_num="${target##*[#:]}"
-    pr_branch="$(gh pr view "$pr_num" --json headRefName -q .headRefName 2>/dev/null || true)"
-    if [ -n "$pr_branch" ]; then
-      # 既存 PR branch に fixer が追加 push する想定 (衝突 OK)
-      echo "info: PR #$pr_num は branch '$pr_branch' に push されます"
-    else
-      warnings+=("gh pr view $pr_num が失敗。PR が存在しないか権限不足")
-    fi
-    ;;
-  detection:*|task:*)
-    # 新規 branch を fixer が作成する想定
-    suggested="fix/${target//[^a-zA-Z0-9-]/-}"
-    if git ls-remote --heads origin "$suggested" 2>/dev/null | grep -q .; then
-      warnings+=("提案 branch '$suggested' が既に origin に存在 (衝突回避が必要)")
-    fi
-    ;;
-esac
-
-# 6. gh repo view (リポジトリ疎通)
-if command -v gh >/dev/null 2>&1; then
-  if ! gh repo view >/dev/null 2>&1; then
-    warnings+=("gh repo view が失敗。origin に gh アクセス権が無い可能性")
-  fi
-fi
-
-# 7. proj-hash 計算
+# 6. proj-hash 計算
 proj_hash="$(python3 -c "
 import hashlib, os
 cwd = os.path.realpath(os.getcwd())
@@ -110,9 +92,73 @@ if [ -z "$proj_hash" ]; then
   errors+=("python3 で proj-hash 計算に失敗")
 fi
 
-# 8. state dir 準備 (冪等)
-mkdir -p ~/.claude/agent-org/state/"$proj_hash"/fixes \
-         ~/.claude/agent-memory/agent-org-regression-fixer 2>/dev/null || true
+# 7. ~/.beads/<proj-hash>/.beads/ 初期化済み確認
+BEADS_DIR="$HOME/.beads/$proj_hash/.beads"
+if [ -n "$proj_hash" ] && [ ! -d "$BEADS_DIR" ]; then
+  errors+=("$BEADS_DIR が未初期化。project root で '/org-init' を実行してください")
+fi
+
+# 8. bd doctor (DB の健全性確認)
+if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
+  if ! BEADS_DIR="$BEADS_DIR" bd doctor >/dev/null 2>&1; then
+    errors+=("bd doctor が失敗。'BEADS_DIR=$BEADS_DIR bd doctor' を foreground で実行して診断")
+  fi
+fi
+
+# 9. target 別の事前チェック
+target="${1:-}"
+case "$target" in
+  "")
+    # target 未指定: bd ready から自動選択可能か確認
+    if [ -d "$BEADS_DIR" ]; then
+      ready_count="$(BEADS_DIR=$BEADS_DIR bd ready -t detection --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+      if [ "$ready_count" = "0" ]; then
+        warnings+=("bd ready -t detection に open issue がありません (no work to do)")
+      else
+        echo "info: bd ready -t detection に $ready_count 件の open issue があります (fixer が priority 最高を自動選択)"
+      fi
+    fi
+    ;;
+  PR#*|pr#*|pr:*|PR:*)
+    pr_num="${target##*[#:]}"
+    pr_branch="$(gh pr view "$pr_num" --json headRefName -q .headRefName 2>/dev/null || true)"
+    if [ -n "$pr_branch" ]; then
+      echo "info: PR #$pr_num は branch '$pr_branch' に push されます"
+    else
+      warnings+=("gh pr view $pr_num が失敗。PR が存在しないか権限不足")
+    fi
+    ;;
+  detection:*)
+    # detection:<bd-issue-id> 形式、bd で issue 存在確認
+    bd_id="${target#detection:}"
+    if [ -d "$BEADS_DIR" ] && [ -n "$bd_id" ]; then
+      if ! BEADS_DIR="$BEADS_DIR" bd show "$bd_id" >/dev/null 2>&1; then
+        errors+=("detection issue '$bd_id' が bd に見つかりません ('bd list -t detection' で確認)")
+      fi
+    fi
+    # 新規 branch 衝突チェック
+    suggested="fix/${target//[^a-zA-Z0-9-]/-}"
+    if git ls-remote --heads origin "$suggested" 2>/dev/null | grep -q .; then
+      warnings+=("提案 branch '$suggested' が既に origin に存在 (衝突回避が必要)")
+    fi
+    ;;
+  task:*)
+    suggested="fix/${target//[^a-zA-Z0-9-]/-}"
+    if git ls-remote --heads origin "$suggested" 2>/dev/null | grep -q .; then
+      warnings+=("提案 branch '$suggested' が既に origin に存在 (衝突回避が必要)")
+    fi
+    ;;
+esac
+
+# 10. gh repo view (リポジトリ疎通)
+if command -v gh >/dev/null 2>&1; then
+  if ! gh repo view >/dev/null 2>&1; then
+    warnings+=("gh repo view が失敗。origin に gh アクセス権が無い可能性")
+  fi
+fi
+
+# 11. memory dir 準備 (冪等)
+mkdir -p ~/.claude/agent-memory/agent-org-regression-fixer 2>/dev/null || true
 
 # 結果出力
 if [ ${#warnings[@]} -gt 0 ]; then
@@ -126,7 +172,7 @@ if [ ${#errors[@]} -gt 0 ]; then
   exit 1
 fi
 
-echo "preflight OK: proj-hash=$proj_hash"
+echo "preflight OK: proj-hash=$proj_hash, bd=$BEADS_DIR"
 exit 0
 ```
 
@@ -145,10 +191,16 @@ warnings は表示するが起動を妨げない。errors は表示して `--bg`
 /goal CI is green on PR#<n> and gh pr checks <n> shows all required checks PASS and gh pr view <n> shows mergeable=MERGEABLE, or stop after <N> turns
 ```
 
-**detection-id を直す**:
+**detection:<bd-issue-id> を直す**:
 
 ```
-/goal The failing test reported in detection <detection-id> passes locally with the same bash command, ~/.claude/agent-org/state/<proj-hash>/fixes/<fix-id>.json is written with goal_status=achieved, or stop after <N> turns
+/goal The failing test reported in bd detection issue <bd-issue-id> passes locally with the same bash command; the corresponding fix issue is created via `bd create -t fix` and `bd dep add <bd-issue-id> <fix-id>` (detection blocked-by fix); both issues are closed with `bd close` after PR is merged; or stop after <N> turns
+```
+
+**target 未指定 (bd ready から自動選択)**:
+
+```
+/goal Pick the highest-priority open issue from `bd ready -t detection --json`, claim it with `bd update --claim`, create a corresponding fix issue with `bd create -t fix`, fix the underlying problem, push to origin with a PR, then close both issues with `bd close`; or stop after <N> turns
 ```
 
 **task を直す**:
@@ -192,24 +244,39 @@ claude --agent agent-org:regression-fixer --bg "/goal ${condition}"
 # 起動中の background session 一覧
 claude agents
 
-# fixer が書き出した state file (完了時に出る)
-ls -la ~/.claude/agent-org/state/<proj-hash>/fixes/
+# fixer が作成した fix issue を bd 上で確認 (完了時に description が確定)
+PROJ_HASH=<preflight で表示された値>
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix --status open --json | jq
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix --status closed --json | jq
+# 個別確認
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd show <fix-id>
 
 # PR の状況確認
 gh pr view <PR#>
 gh pr checks <PR#>
 ```
 
-`fixes/<fix-id>.json` の `goal_status` を見る:
+`bd show <fix-id>` の description に格納された `goal_status` を見る:
 
 - `achieved`: 修正完了、`pr_url` で内容確認
 - `turn_limit`: turn cap で停止、未完了。`gh pr view` で進捗確認 + 再投入
 - `error`: secret / 仕様判断 / 大規模変更等で中断。`notes` を確認
 
+error 終了した fix は `outcome:error` label が付くため、まとめて確認するには:
+
+```bash
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix -l outcome:error --json | jq
+```
+
 ## preflight 失敗時のユーザー案内テンプレ
 
 | 失敗内容 | 対処 |
 |---|---|
+| `bd CLI が見つかりません` | Mac: `brew install beads`、他は <https://github.com/steveyegge/beads> 参照 |
+| `jq が見つかりません` | Mac: `brew install jq` |
+| `~/.beads/<proj-hash>/.beads が未初期化` | project root で `/org-init` を実行 |
+| `bd doctor が失敗` | `BEADS_DIR=~/.beads/<proj-hash>/.beads bd doctor` を foreground で実行して診断 |
+| `detection issue '<id>' が bd に見つかりません` | `bd list -t detection` で実在 ID を確認、または `bd ready -t detection` で別 target を選択 |
 | `gh CLI が見つかりません` | <https://cli.github.com/> から install (`brew install gh`) |
 | `gh CLI が未認証です` | `! gh auth login` (foreground で実行) |
 | `git remote 'origin' が未設定です` | `git remote add origin <url>` |

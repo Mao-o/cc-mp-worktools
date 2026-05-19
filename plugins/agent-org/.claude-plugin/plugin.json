@@ -21,6 +21,8 @@
     "regression",
     "background-agents",
     "loop",
-    "goal"
+    "goal",
+    "beads",
+    "graph-issue-tracker"
   ]
 }
