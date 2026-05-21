@@ -190,7 +190,7 @@ subagent (特に `--bg` の watcher/fixer) は上記を実行しない。
 | 症状 | 確認 |
 |---|---|
 | `Error: no beads database found` | `BEADS_DIR` が `.beads/` を直接指しているか (親 dir 指してないか) |
-| `invalid issue type: detection` / `approval` / `task` | `bd config set custom.types "detection,fix,approval,episode,task"` を実行したか (`/org-init` 内に含まれる)。verify は `bd types` 出力に列挙されることで確認。v0.6.x の deprecated key `types.custom` は warning を吐き `bd types` 出力にも反映されないため、`custom.types` namespace に再設定する |
+| `invalid issue type: detection` / `approval` / `task` | `bd config set types.custom "detection,fix,approval,episode,task"` を実行したか (`/org-init` 内に含まれる)。bd 1.0.4 は `Warning: "types.custom" is not a recognized config key` を吐くが **設定は effective**、`bd types` 出力に反映される (v0.7.1 hotfix で実機確認、v0.7.0 で試した `custom.types` は逆に無視される)。verify は `bd types | grep -E "^  (detection\|fix\|approval\|episode\|task)$"` で done 判定 |
 | `cannot close X: blocked by open issues [Y]` | dep が正常動作している。先に Y を close する (順序: fix → detection) |
 | `Warning: beads.role not configured` | `cd ~/.beads/<proj-hash> && git config beads.role maintainer` (`/org-init` 内に含まれる) |
 | `bd q` で description を渡せない | `bd q` は title のみ。description 必須なら `bd create -d "..."` を使う |

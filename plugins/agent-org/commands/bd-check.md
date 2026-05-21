@@ -98,9 +98,9 @@ fi
 echo ""
 
 # --- 5. custom type 登録 (`bd types` 出力 grep で verify) ---
-# v0.7.0 から `custom.types` namespace を使う (旧 `types.custom` は deprecated)。
-# 確認は `bd types` 出力に列挙されることで行う (bd config get では deprecated
-# key でも値を返すため不確実)。
+# v0.7.0 で verify を `bd types` grep ベースに変更 (v0.7.1 hotfix: 登録 key は
+# `types.custom` に revert、warning は false alarm、設定は effective)。
+# 確認は `bd types` 出力に列挙されることで行う (実際に登録されたか直接見る)。
 echo "[5] bd custom types (detection / fix / approval / episode / task)"
 if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
   types_out="$(BEADS_DIR=$BEADS_DIR bd types 2>/dev/null || echo "")"
@@ -111,7 +111,7 @@ if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
   if [ ${#missing[@]} -eq 0 ]; then
     pass "bd types: detection, fix, approval, episode, task all registered"
   else
-    fail "bd types missing: ${missing[*]}. Run: BEADS_DIR=$BEADS_DIR bd config set custom.types 'detection,fix,approval,episode,task'"
+    fail "bd types missing: ${missing[*]}. Run: BEADS_DIR=$BEADS_DIR bd config set types.custom 'detection,fix,approval,episode,task' (warning は false alarm)"
   fi
 else
   warn "custom type check skipped"
@@ -215,22 +215,22 @@ bd DB が破損している可能性。よくある原因:
 
 ### custom types が未登録で FAIL になる
 
-`/org-init` 実行時に `bd config set custom.types` がスキップされた可能性
-(古いバージョンで初期化したケース)。または v0.6.x で deprecated key
-`types.custom` を使って登録したため `bd types` に反映されていない可能性。
+`/org-init` 実行時に `bd config set types.custom` がスキップされた可能性。
 手動で:
 
 ```bash
 PROJ_HASH=<your-proj-hash>
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd config set custom.types \
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd config set types.custom \
   "detection,fix,approval,episode,task"
 
 # verify
 BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd types | grep -E "^  (detection|fix|approval|episode|task)$"
 ```
 
-v0.6.x で `types.custom` に設定した値は harmless に残るが効果なし。
-`custom.types` に再設定すれば `bd types` 出力に反映される。
+bd 1.0.4 は `Warning: "types.custom" is not a recognized config key` を吐くが
+**設定は実際に effective** で `bd types` 出力に反映される (v0.7.1 hotfix で
+実機確認)。warning は false alarm として無視してよい。v0.7.0 で試した
+`custom.types` は逆に無視されることを実機検証で確認済 (CHANGELOG 0.7.1 参照)。
 
 ## 注意事項
 

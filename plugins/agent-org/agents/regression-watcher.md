@@ -176,8 +176,9 @@ EOF
 - description body は v0.5.x の YAML 形式を踏襲 (`/migrate-from-beads` での
   rollback 互換性のため)
 - bd standard type に `detection` は無く、`/org-init` で
-  `bd config set custom.types "detection,fix,approval,episode,task"` を実行済の前提
-  (v0.7.0 で `task` を追加。`types.custom` は deprecated key)
+  `bd config set types.custom "detection,fix,approval,episode,task"` を実行済の前提
+  (v0.7.0 で `task` を追加 / 5 types、v0.7.1 で `types.custom` に revert。
+  bd 1.0.4 は warning を吐くが effective)
 - 取得した bd issue ID (例: `<prefix>-<hash>`) は会話出力に必ず surface
   (fixer / main session の追跡用)
 

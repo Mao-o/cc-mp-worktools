@@ -32,9 +32,11 @@ beads database (v0.6.0 から hard dependency):
 
 - `~/.beads/<proj-hash>/` (working dir 外、bg-fixer が worktree 隔離下でも書ける場所)
 - `~/.beads/<proj-hash>/.beads/` (bd init が生成、`BEADS_DIR` で指す path)
-- `bd config set custom.types "detection,fix,approval,episode,task"`
-  (v0.7.0 で `task` を追加。v0.6.x の `types.custom` は deprecated key で、
-  bd 1.0.4 では warning を吐き `bd types` 出力に反映されない。正解は `custom.types`)
+- `bd config set types.custom "detection,fix,approval,episode,task"`
+  (v0.7.0 で `task` を追加 / 5 types)。bd 1.0.4 は `Warning: "types.custom" is
+  not a recognized config key` を吐くが **設定は effective** で `bd types`
+  出力にも反映される (v0.7.1 hotfix で実機確認、v0.7.0 で試した
+  `custom.types` は逆に無視されることを実測で確認)
 - `git config beads.role maintainer` (warning 抑制)
 
 すべての agent memory dir は **scoped name** (`agent-org-<agent-name>/` 形式) で
@@ -118,20 +120,24 @@ fi
 # git config beads.role maintainer (warning 抑制、bd 1.0.4 で要求される設定)
 (cd "$BEADS_PARENT" && git config beads.role maintainer 2>/dev/null || true)
 
-# custom type 登録 (v0.7.0: `task` を追加、5 types に)
+# custom type 登録 (v0.7.0: `task` を追加、5 types に / v0.7.1: hotfix for U13 PoC 誤り)
 #
-# v0.6.x まで使っていた `types.custom` は bd 1.0.4 で deprecated。
-# 正解は `custom.types` namespace。U13 PoC で以下を確認済:
-#   - `bd config set types.custom ...` は warning + exit=0 で値を保存するが
-#     `bd types` 出力には反映されない (registration 効果なし)
-#   - `bd config set custom.types ...` は warning なしで `bd types` 出力に列挙
+# bd 1.0.4 実機検証で確定:
+#   - `bd config set types.custom ...` は warning を吐くが設定は effective
+#     (`bd types` 出力に反映される)。bd の `bd types` ヘルプ自体が
+#     `Configure with: bd config set types.custom "..."` を指示
+#   - `bd config set custom.types ...` は warning なしだが `bd types` に
+#     反映されない (`No custom types configured` のまま) — 無視される
+#   - U13 PoC で逆と判定していたが、それは検証手順の誤り
 #
-# verify は `bd config get` ではなく `bd types` 出力の grep で行う
-# (deprecated key でも config get は値を返すため不確実)
-BEADS_DIR="$BEADS_DIR" bd config set custom.types "detection,fix,approval,episode,task"
+# warning (`Warning: "types.custom" is not a recognized config key`) は
+# false alarm として無視。verify は `bd types` 出力 grep で行う (これは
+# 実装が config namespace ではなく "実際に登録されたか" を直接見る正しい
+# 方法、v0.7.0 で導入した改善はそのまま維持)
+BEADS_DIR="$BEADS_DIR" bd config set types.custom "detection,fix,approval,episode,task" 2>&1
 config_exit=$?
 if [ "$config_exit" -ne 0 ]; then
-  echo "FATAL: bd config set custom.types failed (exit=$config_exit)"
+  echo "FATAL: bd config set types.custom failed (exit=$config_exit)"
   exit 1
 fi
 
@@ -145,7 +151,7 @@ if [ ${#missing[@]} -eq 0 ]; then
 else
   echo "FATAL: bd types missing: ${missing[*]}"
   echo "       expected to contain: detection, fix, approval, episode, task"
-  echo "       Run: BEADS_DIR=\"$BEADS_DIR\" bd config set custom.types 'detection,fix,approval,episode,task'"
+  echo "       Run: BEADS_DIR=\"$BEADS_DIR\" bd config set types.custom 'detection,fix,approval,episode,task'"
   exit 1
 fi
 
@@ -215,7 +221,7 @@ BEADS_DIR=~/.beads/"$PROJ_HASH"/.beads bd types 2>&1 | head -20
 - `<proj-hash>` は cwd が同じなら毎回同じ値になるため、同じ project では
   常に同じ state dir / beads db を指す
 - 既に MEMORY.md / approval ファイル等が書かれていても影響しない
-- `bd init` 済みなら skip。`bd config set custom.types` は再実行で同じ値を set (idempotent)
+- `bd init` 済みなら skip。`bd config set types.custom` は再実行で同じ値を set (idempotent)
 - `.gitignore` は marker 行で重複検知 (`grep -q "agent-org plugin (v0.6.0+)"`)
 
 ## v0.5.x からのアップグレード時の注意

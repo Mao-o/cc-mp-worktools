@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.7.1 (2026-05-22) — Hotfix: G2 規律を `types.custom` に revert
+
+v0.7.0 で `bd config set types.custom` を `custom.types` に変更したが、
+bd 1.0.4 実機検証で **U13 PoC 結論が誤り** と判明:
+
+- 実機: `bd config set types.custom ...` は warning 表示するが `bd types` 出力に **反映される** (effective)
+- 実機: `bd config set custom.types ...` は warning なしだが `bd types` に **反映されない** (`No custom types configured`)
+- bd 1.0.4 の `bd types` ヘルプ自体が `Configure with: bd config set types.custom "..."` と指示
+
+つまり v0.7.0 の修正は新規 install ユーザーで `/org-init` を実行すると
+`bd types` に custom types が登録されず、`bd create -t detection` が
+"invalid issue type" で reject される **致命的 regression**。
+
+### Reverted
+
+- `commands/org-init.md`: `bd config set custom.types` → `bd config set types.custom`。
+  warning は false alarm として comment 追加。verify は v0.7.0 で導入した
+  `bd types | grep -E "^  (detection|fix|approval|episode|task)$"` ベースを
+  **維持** (これは正しい改善)。task type 追加 (5 types) も維持
+- `commands/bd-check.md`: 同様 revert。手動修復コマンドの `custom.types` も
+  `types.custom` に戻す
+- `skills/using-beads/SKILL.md`: trouble shoot 表の `custom.types` を `types.custom` に
+- `agents/regression-watcher.md`: `custom.types` を `types.custom` に
+
+### 注意
+
+`Warning: "types.custom" is not a recognized config key. Use 'custom.*' for
+user-defined keys.` は bd 1.0.4 で表示されるが、設定は実際に保存され
+`bd types` 出力に反映される。bd 内部の `bd types` ヘルプと `bd config --help`
+の namespace 列挙が **inconsistent** な状態 (bd 側の課題)。実用上は warning
+を許容して `types.custom` を使う方が確実。将来 bd が `custom.*` namespace に
+完全移行したら再修正する。
+
+### Verification (bd 1.0.4 Homebrew で実機確認)
+
+```bash
+TEST_PARENT=/tmp/bd-verify
+mkdir -p "$TEST_PARENT" && cd "$TEST_PARENT"
+bd init --skip-agents --non-interactive --prefix "test"
+BEADS_DIR=$TEST_PARENT/.beads bd config set types.custom "detection,fix,approval,episode,task"
+# → Warning は出るが Set types.custom = ... と表示
+BEADS_DIR=$TEST_PARENT/.beads bd types
+# → "Configured custom types:" セクションに detection,fix,approval,episode,task が列挙
+```
+
 ## 0.7.0 (2026-05-22) — Phase 6: approval → bd issue 化
 
 Phase 6 of the agent-org plugin. `/run-review` が書いていた
@@ -136,7 +181,7 @@ immediate error で abort する fail-closed 設計に倒した。
 | # | 規律 | 経緯 |
 |---|---|---|
 | G1 | `BEADS_DIR` は `.beads/` を直接指す (親 dir は NG) | U8 (2026-05-20) |
-| G2 | `bd config set types.custom` は exit=0 でも verify、未登録なら fatal exit 1 (v0.7.0 で `custom.types` に変更) | R1 P2-1 |
+| G2 | `bd config set types.custom` は exit=0 でも verify、未登録なら fatal exit 1 (v0.7.0 で `custom.types` に変更したが、v0.7.1 で revert: U13 PoC 結論が誤り、bd 1.0.4 実機では `types.custom` が effective、`custom.types` は無視される) | R1 P2-1 |
 | G3 | description body は変数代入経由で渡す (`bd update -d "$(...)"` 直書きは禁止) | R1 P1-3 |
 | G4 | migration script で skip 時も map 更新 (idempotent 再実行で fix 側 dep 解決破壊防止) | R1 P1-2 |
 | G5 | preflight に `jq` install 確認必須 | R1 P2-2 |
