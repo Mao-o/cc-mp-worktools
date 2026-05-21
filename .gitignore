@@ -28,3 +28,10 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# beads (bd CLI) auto-export
+# worktools は agent-org plugin の配布 repo であって client ではないため、
+# 親 cc-marketplaces ハーネス等が bd-export を発火して `.beads/` が作られても
+# commit しない。agent-org plugin を使う repo 側 (client) では別途 .gitignore
+# 設定する (Phase 5 設計では `<repo>/.beads/issues.jsonl` のみ commit する規約)。
+.beads/
