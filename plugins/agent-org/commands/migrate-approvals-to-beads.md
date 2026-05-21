@@ -80,7 +80,10 @@ for f in "$APPROVALS_DIR"/*.json; do
   legacy_id="$(basename "$f" .json)"
 
   # 既に migrate 済か確認 (idempotent)
-  existing_id="$(bd list -l "legacy-id:$legacy_id" -t approval --json 2>/dev/null \
+  # --status all を必ず付ける: bd list のデフォルトは --status open のため、
+  # priority=2 (approved) で migration 後 close された approval を検出できず、
+  # 再 migrate で重複 issue が作られる (v0.7.2 hotfix で修正)
+  existing_id="$(bd list -l "legacy-id:$legacy_id" -t approval --status all --json 2>/dev/null \
     | jq -r '.[0].id // empty')"
   if [ -n "$existing_id" ]; then
     echo "skip: $legacy_id already migrated to $existing_id"

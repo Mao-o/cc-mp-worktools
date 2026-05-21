@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.2 (2026-05-22) — Hotfix: /migrate-approvals-to-beads idempotency
+
+Phase 6 検証で発見した bug の修正。`migrate-approvals-to-beads` の
+idempotency check が `bd list -l "legacy-id:..." -t approval --json` で
+`--status` を未指定だったため、`bd` デフォルトの `--status open` で
+動作し、priority=2 (approved) で migration 後に close された approval を
+検出できなかった。再 migrate で **重複 issue** が作られる。
+
+### Fixed
+
+- `commands/migrate-approvals-to-beads.md`: idempotency check に
+  `--status all` を追加。`bd list -l "legacy-id:$legacy_id" -t approval
+  --status all --json` で open / closed 両方を検出するように
+
+### Verification (bd 1.0.4 Homebrew で実機確認)
+
+```bash
+bd list -l "legacy-id:PR-100" -t approval --json
+# → (none)  ← bug: closed approval が見えない
+bd list -l "legacy-id:PR-100" -t approval --status all --json
+# → p6test-aq8  ← fix: closed approval も検出
+```
+
+実機検証では PR-100 (approve→priority=2→close) と PR-99 (reject→priority=0→open)
+の 2 個を migrate、再実行時 PR-100 を空文字判定して重複作成する挙動を確認、
+修正で両方 skip するようになる。
+
+### Phase 6 検証サマリ (本 hotfix の動機)
+
+| 検証 | 結果 |
+|---|---|
+| approval workflow (bd 直接、find-or-create/rejected/close/supersedes) | ✅ 全 9 ステップ |
+| task-completed-gate.sh | ✅ 4 ケース (rejected→block / close→pass / opt-in / fail-open) |
+| stop-quality-gate.sh | ✅ 5 ケース (rejected→block / close→pass / config 不在 / stop_hook_active) |
+| migrate-approvals-to-beads | ⚠️ 機能動作、idempotency に bug 発見 → 本 hotfix で修正 |
+
 ## 0.7.1 (2026-05-22) — Hotfix: G2 規律を `types.custom` に revert
 
 v0.7.0 で `bd config set types.custom` を `custom.types` に変更したが、
