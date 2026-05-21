@@ -92,7 +92,8 @@ fi
 |---|---|
 | `detection` | YAML schema (`observation:` / `evidence:` / `reproducible:` / `suggested_fix_perspective:` 等) |
 | `fix` | JSON schema (`schema_version` / `fix_id` / `goal_status` / `commits` / `pr_url` 等) |
-| `approval` (Phase 6) | JSON schema (Phase 6 で確定) |
+| `approval` (Phase 6, v0.7.0) | YAML schema (集約 verdict、`schema_version` / `task_id` / `target` / `aggregate_overall` / `verdicts[]` / `concerns_summary`)。status は label + priority で encode (詳細: `commands/run-review.md`) |
+| `task` (Phase 6, v0.7.0) | 任意 (title `task: <id>` + label `task:<id>` で識別、description は人間可読の補足) |
 | `episode` (Phase 8) | YAML schema (Phase 8 で確定) |
 
 理由: `/migrate-from-beads` で v0.5.x 形式に書き戻せる互換性を維持する。bd の
@@ -125,6 +126,8 @@ bd create "..." -t detection -p 1 -d "..."
 | migration | `-l "legacy-id:<old-yaml-or-json-filename>"` |
 | 結果 | `-l "outcome:error"` / `:no-op` (`outcome:achieved` は付けない、`bd status=closed` で十分) |
 | 共通 | 全 agent-org 由来 issue に `-l "agent-org"` を必ず付ける |
+| approval (Phase 6) | `-l "approval"` (type 識別用 marker) / `-l "task:<id>"` (task 紐付け、必須) / `-l "aggregate:<approve\|approve_with_conditions\|request_changes\|reject>"` / `-l "perspective:<persp>"` (per reviewer、複数付与可) |
+| task (Phase 6) | `-l "task:<id>"` (human-readable id、approval 検索の primary key) |
 
 priority マッピング:
 
@@ -187,7 +190,7 @@ subagent (特に `--bg` の watcher/fixer) は上記を実行しない。
 | 症状 | 確認 |
 |---|---|
 | `Error: no beads database found` | `BEADS_DIR` が `.beads/` を直接指しているか (親 dir 指してないか) |
-| `invalid issue type: detection` | `bd config set types.custom "detection,fix,approval,episode"` を実行したか (`/org-init` 内に含まれる) |
+| `invalid issue type: detection` / `approval` / `task` | `bd config set custom.types "detection,fix,approval,episode,task"` を実行したか (`/org-init` 内に含まれる)。verify は `bd types` 出力に列挙されることで確認。v0.6.x の deprecated key `types.custom` は warning を吐き `bd types` 出力にも反映されないため、`custom.types` namespace に再設定する |
 | `cannot close X: blocked by open issues [Y]` | dep が正常動作している。先に Y を close する (順序: fix → detection) |
 | `Warning: beads.role not configured` | `cd ~/.beads/<proj-hash> && git config beads.role maintainer` (`/org-init` 内に含まれる) |
 | `bd q` で description を渡せない | `bd q` は title のみ。description 必須なら `bd create -d "..."` を使う |

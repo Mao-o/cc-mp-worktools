@@ -119,6 +119,9 @@ memory に蓄積していく。
 Phase 2 で `.claude/agent-memory/agent-org-decision-keeper/` (個別 ADR yml 含む) が
 追加される。Phase 3 で `.claude/agent-org/approvals/`、Phase 4 で
 `~/.claude/agent-org/state/<proj-hash>/` が追加される。
+Phase 5 (v0.6.0) で beads database (`~/.beads/<proj-hash>/`) が hard dependency に。
+Phase 6 (v0.7.0) で approval が bd 上 (type=approval、`.claude/agent-org/approvals/`
+は廃止 / 互換のため retain) に統合された。
 
 ## Phase 2 のコンポーネント関係
 
@@ -167,7 +170,7 @@ graph LR
 | `.claude/agent-memory/agent-org-architect-reviewer/` | (Phase 3 で使用) | project |
 | `.claude/agent-memory/agent-org-context-compressor/` | 圧縮戦略学習 | project |
 | `.claude/episodes/` | episode YAML + ADR archive | (repo) |
-| `.claude/agent-org/approvals/` | (Phase 3 で使用) | (repo) |
+| `.claude/agent-org/approvals/` | (Phase 3〜v0.6.x で approval JSON 保存、v0.7.0 から bd 化、互換のため retain。`/migrate-approvals-to-beads` 実行後は `.claude/agent-org/approvals.legacy/` に mv される) | (repo) |
 | `~/.claude/agent-memory/agent-org-regression-watcher/` | (Phase 4 で使用) | user |
 | `~/.claude/agent-memory/agent-org-regression-fixer/` | (Phase 4 で使用) | user |
 | `~/.claude/agent-org/state/<proj-hash>/detections/` | (Phase 4 で使用) | (home, project-scoped) |
@@ -207,9 +210,14 @@ graph TB
         AR3["architect-reviewer<br>perspective: performance"]
     end
 
+    subgraph BD3 ["~/.beads/&lt;proj-hash&gt;/.beads/ (bd, v0.7.0+)"]
+        BTASK["task issue<br>type=task, label task:&lt;id&gt;"]
+        BAP["approval issue<br>type=approval,<br>priority 0/1/2/3,<br>label task:&lt;id&gt; / aggregate:&lt;v&gt; / perspective:&lt;p&gt;,<br>description: 集約 verdict YAML"]
+    end
+
     subgraph Repo3 [".claude/agent-org/ (repo 内)"]
-        AP[".claude/agent-org/<br>approvals/&lt;task-id&gt;.json"]
         QG[".claude/agent-org/<br>quality-gates.json"]
+        APL["approvals.legacy/<br>(v0.6.x JSON、migration 後の互換用)"]
     end
 
     subgraph Hooks3 ["plugins/agent-org/hooks/"]
@@ -218,6 +226,7 @@ graph TB
     end
 
     MA3 -->|invoke| CMD
+    CMD -->|find-or-create task| BTASK
     CMD -->|start| SK
     SK -->|spawn 3-5 teammates| AR1
     SK -->|spawn| AR2
@@ -226,27 +235,39 @@ graph TB
     AR2 -->|verdict YAML| SK
     AR3 -->|verdict YAML| SK
     SK -->|aggregated verdicts| CMD
-    CMD -->|approval JSON 書込| AP
+    CMD -->|bd create -t approval| BAP
+    BAP -.bd dep add blocks.-> BTASK
 
     QG -.read.-> SH
+    SH -.bd list -t approval --priority 0.-> BAP
     SH -.exit 2 で stop block.-> MA3
-    AP -.read.-> TH
+    BAP -.bd list -l task:&lt;id&gt; --priority 0.-> TH
     TH -.exit 2 で task block.-> MA3
 ```
 
 ## Phase 3 のデータフロー
 
-### A. multi-perspective review (`/run-review`)
+### A. multi-perspective review (`/run-review`、v0.7.0 で bd 化)
 
 1. ユーザーが `/run-review PR-42 security,api-design,testability` を実行
-2. `/run-review` command が `running-review` skill を起動
-3. skill が `agent-org:architect-reviewer` を 3-5 perspective で
+2. `/run-review` command が `task:<task_id>` ラベル付き task issue を bd で
+   find-or-create (`bd list -l "task:${task_id}" -t task` で検索、不在なら
+   `bd create -t task -p 2 -l "task:${task_id}" -l "agent-org"`)
+3. command が `running-review` skill を起動
+4. skill が `agent-org:architect-reviewer` を 3-5 perspective で
    spawn (agent teams default、Task tool sequential fallback)
-4. 各 reviewer が真 RO で対象を Read し、verdict YAML を会話に返す
-5. skill が verdict を集約サマリとして command に返す
-6. command が aggregate_overall / approval_status を計算し
-   `.claude/agent-org/approvals/<task-id>.json` に書き出し
-7. ユーザーに結果通知 (status / concern 件数 / 保存先パス)
+5. 各 reviewer が真 RO で対象を Read し、verdict YAML を会話に返す
+6. skill が verdict を集約サマリとして command に返す
+7. command が aggregate_overall → priority マッピング (reject/request_changes=0、
+   approve_with_conditions=1、approve=2、informational=3) を計算し、
+   `bd create -t approval -p <prio> -l "approval" -l "task:<task_id>"
+   -l "agent-org" -l "aggregate:<v>" -l "perspective:<p>"` で approval issue
+   を作成。description body に集約 verdict YAML を埋込
+8. `bd dep add <task> <approval>` で approval が task を blocks
+9. priority=2 (approved) なら approval を close (blocker 解除)
+10. reviewer 学習 (`learnings_to_persist`) を `bd remember "review-heuristic: ..."`
+    で永続化 (best-effort)
+11. ユーザーに結果通知 (status / concern 件数 / approval bd id / task bd id)
 
 ### B. TaskCompleted gate (`task-completed-gate.sh`)
 
@@ -255,18 +276,18 @@ graph TB
 `teammate_name` / `team_name`)。`task` key も `metadata` key も無く、
 `review_required` のような任意設定 field も schema に存在しない。
 
-このため gate は **approval JSON opt-in** で動かす:
+このため gate は **bd approval opt-in** で動かす (v0.7.0):
 
 1. メインセッションで `TaskCompleted` が発火 (matcher 非対応・全件発火)
 2. hook が input JSON から **top-level `task_id`** を取得
 3. `task_id` 不在 (schema 違反) → exit 0 (fail-open)
-4. `.claude/agent-org/approvals/<task_id>.json` が存在しない → exit 0
-   (通常 task、review 不要、gate なし)
-5. 存在する場合は `approval_status` を検査:
-   - `approved` → exit 0
-   - `conditional` → exit 0 (warn のみ)
-   - `rejected` → exit 2 (block)
-   - 不明値 → exit 0 (fail-open)
+4. bd CLI / `BEADS_DIR` 不在 → exit 0 (fail-open)
+5. bd で `task:<task_id>` ラベル付き approval (open) を検索:
+   `bd list -l "task:${task_id}" -t approval --status open --json
+    | jq '[.[] | select(.priority==0)] | length'`
+6. 件数が **0** → exit 0 (通常 task、review 不要 / 全 approved or closed)
+7. **>0** (priority=0=rejected が open) → exit 2 (block)
+8. priority=1 (conditional) が残っている場合は warn (block しない)
 
 → `/run-review <task-id>` を実行した task のみが gate 対象。それ以外は
 通常通り完了する設計。
@@ -278,8 +299,11 @@ graph TB
 3. `.claude/agent-org/quality-gates.json` 無ければ exit 0
 4. ある場合、各 gate を順次実行:
    - `kind: command`: shell command を eval、exit code 0 でパス
-   - `kind: approvals_clean`: approvals dir に `approval_status=rejected`
-     が無ければパス
+   - `kind: approvals_clean` (v0.7.0): bd 上の rejected approval
+     (type=approval, priority=0, open) が 0 件ならパス。
+     `bd list -t approval --status open --json
+     | jq '[.[] | select(.priority==0)] | length'` で件数取得。
+     bd CLI / `BEADS_DIR` 不在で fail-open (pass)
 5. `required: true` の failing は collect、`required: false` は warn のみ
 6. failing があれば exit 2 (block)、無ければ exit 0
 
@@ -287,53 +311,77 @@ graph TB
 
 | 用途 | パス | 書く側 | 読む側 |
 |---|---|---|---|
-| approval JSON | `.claude/agent-org/approvals/<task-id>.json` | `/run-review` command | task-completed-gate.sh / stop-quality-gate.sh (approvals_clean) / main session |
+| approval bd issue (v0.7.0+) | `~/.beads/<proj-hash>/.beads/` 上の `type=approval` issue (label `task:<task_id>` + priority 0/1/2/3 + `aggregate:<v>` + `perspective:<p>` + description body に集約 verdict YAML) | `/run-review` command (`bd create -t approval`) | task-completed-gate.sh / stop-quality-gate.sh (approvals_clean) / main session (`bd list -l "task:<id>"`) |
+| task bd issue (v0.7.0+) | `~/.beads/<proj-hash>/.beads/` 上の `type=task` issue (label `task:<task_id>`、approval/fix の親) | `/run-review` find-or-create | approval/fix dep の起点 |
+| approval JSON (v0.6.x 互換) | `.claude/agent-org/approvals/<task-id>.json` (v0.7.0 で廃止、`/migrate-approvals-to-beads` で bd 化、旧 JSON は `approvals.legacy/` に mv) | (v0.6.x) `/run-review` command | (v0.6.x) hooks |
 | quality-gates 設定 | `.claude/agent-org/quality-gates.json` | ユーザー (手書き) | stop-quality-gate.sh |
 | architect-reviewer memory | `.claude/agent-memory/agent-org-architect-reviewer/MEMORY.md` | architect-reviewer (curate 計画は会話出力、書込は command 側) | architect-reviewer 次回起動時 (auto-inject) |
 
-## approval JSON schema (v1)
+## approval bd issue schema (v0.7.0)
 
-```json
-{
-  "schema_version": "1",
-  "task_id": "PR-42",
-  "target": { "type": "pr|commit_range|design_doc|implementation", "ref": "PR#42" },
-  "reviewed_at": "<ISO-8601 UTC>",
-  "reviewer": "agent-org/run-review",
-  "perspectives_reviewed": ["security", "api-design", "performance"],
-  "missing_perspectives": [],
-  "aggregate_overall": "approve|approve_with_conditions|request_changes|reject",
-  "approval_status": "approved|conditional|rejected",
-  "min_confidence": "high|medium|low",
-  "concerns_summary": {
-    "critical": 0, "major": 1, "minor": 3, "nit": 2
-  },
-  "verdicts": [
-    {
-      "perspective": "security",
-      "reviewer": "architect-reviewer",
-      "overall": "approve",
-      "confidence": "high",
-      "concerns": [
-        { "id": "C1", "severity": "minor", "summary": "...", "detail": "...", "suggestion": "..." }
-      ],
-      "strengths": ["..."],
-      "questions": ["..."],
-      "references": [],
-      "retrieval_keys": ["..."]
-    }
-  ]
-}
+v0.7.0 で approval は bd issue (type=approval) として管理。priority + label
+で status を encode、description body に集約 verdict YAML を埋込。
+
+### issue structure
+
+| 項目 | 表現 |
+|---|---|
+| type | `approval` |
+| priority | `0`=rejected (request_changes/reject) / `1`=conditional (approve_with_conditions) / `2`=approved (approve) / `3`=informational |
+| 必須 label | `approval` (type marker) / `task:<task_id>` (検索 primary key) / `agent-org` / `aggregate:<approve\|approve_with_conditions\|request_changes\|reject>` |
+| 追加 label | `perspective:<persp>` (per reviewer、複数付与可) / `legacy-id:<basename>` (migration 由来の場合) |
+| description body | 集約 verdict YAML (下記 schema) |
+| dep | `bd dep add <task> <approval>` で approval が task を blocks。再 review 時は `bd dep add <new> <old> --type supersedes` |
+| status | open=未解決 (priority=0/1 が gate 対象) / closed=解決 (approved or supersedes 後) |
+
+### description body の verdict YAML schema
+
+```yaml
+schema_version: "1"
+task_id: PR-42
+target:
+  type: pr | commit_range | design_doc | implementation
+  ref: PR#42
+reviewed_at: <ISO-8601 UTC>
+reviewer: agent-org/run-review
+perspectives_reviewed: [security, api-design, performance]
+missing_perspectives: []
+aggregate_overall: approve | approve_with_conditions | request_changes | reject
+min_confidence: high | medium | low
+concerns_summary:
+  critical: 0
+  major: 1
+  minor: 3
+  nit: 2
+verdicts:
+  - perspective: security
+    reviewer: architect-reviewer
+    overall: approve
+    confidence: high
+    concerns:
+      - id: C1
+        severity: minor
+        summary: "..."
+        detail: "..."
+        suggestion: "..."
+    strengths: ["..."]
+    questions: ["..."]
+    references: []
+    retrieval_keys: ["..."]
 ```
 
-aggregate_overall → approval_status 対応:
+### aggregate_overall → priority + label 対応
 
-| aggregate_overall | approval_status |
-|---|---|
-| `approve` | `approved` |
-| `approve_with_conditions` | `conditional` |
-| `request_changes` | `rejected` |
-| `reject` | `rejected` |
+| aggregate_overall | priority | label (aggregate:) | gate 判定 |
+|---|---|---|---|
+| `approve` | 2 | `aggregate:approve` | pass (closed) |
+| `approve_with_conditions` | 1 | `aggregate:approve_with_conditions` | pass + warn |
+| `request_changes` | 0 | `aggregate:request_changes` | block (exit 2) |
+| `reject` | 0 | `aggregate:reject` | block (exit 2) |
+
+v0.6.x までの JSON schema (`approval_status: approved|conditional|rejected`)
+から migration する場合は `/migrate-approvals-to-beads` を実行。旧 field
+`approval_status` は priority に逆引き mapping される。
 
 ## quality-gates.json schema (v1)
 
@@ -361,8 +409,11 @@ aggregate_overall → approval_status 対応:
 `kind`:
 
 - `"command"` (default): shell command を `eval` し exit code 0 でパス
-- `"approvals_clean"`: `.claude/agent-org/approvals/*.json` のうち
-  `approval_status="rejected"` を持つものが 0 件ならパス
+- `"approvals_clean"` (v0.7.0): bd 上の rejected approval (type=approval,
+  priority=0, open) が 0 件ならパス。`bd list -t approval --status open
+  --json | jq '[.[] | select(.priority==0)] | length'` で件数取得。
+  v0.6.x までは `.claude/agent-org/approvals/*.json` の
+  `approval_status="rejected"` を見ていたが、v0.7.0 から bd query ベース
 
 `required: false` の gate は failing でも block しない (warn のみ)。
 

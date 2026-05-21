@@ -1,37 +1,36 @@
 #!/usr/bin/env bash
 # task-completed-gate.sh
 #
-# TaskCompleted hook for agent-org plugin.
+# TaskCompleted hook for agent-org plugin (v0.7.0+).
 #
 # 公式 schema (https://code.claude.com/docs/en/hooks.md, TaskCompleted hook):
-#   入力 JSON は全 field が top-level フラット。`task` / `metadata` key は
-#   存在しない。task 関連 field:
+#   入力 JSON は全 field が top-level フラット。task 関連 field:
 #     - task_id          (string)
 #     - task_subject     (string)
 #     - task_description (string, optional)
-#     - teammate_name    (string, optional)
-#     - team_name        (string, optional)
 #   common:
 #     - session_id / transcript_path / cwd / permission_mode / hook_event_name
 #
-# 公式 schema に `review_required` のような field は存在しないため、
-# **approval JSON opt-in** で gate 判定する設計に倒す:
-#   - .claude/agent-org/approvals/<task_id>.json が **不在** なら pass
-#     (= 通常 task、review 不要)
-#   - approval_status=approved / conditional なら pass
-#   - approval_status=rejected なら exit 2 で block
-#   - approval_status が不明な値 / 読み込み不能なら fail-open (exit 0)
+# v0.7.0 から approval は bd issue (type=approval) として管理。
+# label `task:<task_id>` で approval を紐付け、priority=0 を rejected として
+# 検出する:
+#
+#   bd list -l "task:${task_id}" -t approval --status open --json \
+#     | jq '[.[] | select(.priority==0)] | length'
+#
+# opt-in 設計 (v0.6.0 と同じ): task に approval 1 件も無ければ通常 task 扱いで pass。
+# /run-review を回した task のみ gate される。
 #
 # 動作:
-#   - jq 不在で fail-open
+#   - bd CLI / jq 不在で fail-open
 #   - task_id 不在 (公式 schema 違反) で fail-open
-#   - approval JSON 不在で pass (opt-in 設計)
-#   - approval_status=rejected の時のみ exit 2 (block)
+#   - BEADS_DIR 解決不能で fail-open
+#   - approval 0 件 → pass (opt-in)
+#   - rejected (priority=0 かつ open) > 0 → exit 2 で block
+#   - rejected == 0 だが conditional (priority=1) が残存 → pass + warn
+#   - all approved (closed or priority>=2 open) → pass
 #
-# TaskCompleted は matcher 非対応・全件発火なので、すべての task 完了で
-# この hook が呼ばれる。だからこそ approval JSON 不在を「制約なし」と扱う。
-#
-# 依存: jq
+# 依存: bd CLI, jq, python3
 
 set -euo pipefail
 
@@ -40,62 +39,63 @@ trap 'exit 0' ERR
 
 INPUT="$(cat)"
 
-# jq が無ければ gate skip (fail-open)
-if ! command -v jq >/dev/null 2>&1; then
-  exit 0
-fi
+# 必須コマンド不在で fail-open
+command -v jq >/dev/null 2>&1 || exit 0
+command -v bd >/dev/null 2>&1 || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
 
-# task_id は **top-level フラット** で渡る (公式 schema)
+# task_id は top-level フラット (公式 schema)
 task_id="$(printf '%s' "$INPUT" | jq -r '.task_id // empty' 2>/dev/null || true)"
-
 cwd="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)"
-if [ -z "$cwd" ]; then
-  cwd="$(pwd)"
-fi
 
-# task_id が取れない (公式 schema 違反 / 古い payload 形式) なら fail-open
-if [ -z "$task_id" ]; then
-  exit 0
-fi
+[ -z "$cwd" ] && cwd="$(pwd)"
+[ -z "$task_id" ] && exit 0
 
-approval_file="${cwd}/.claude/agent-org/approvals/${task_id}.json"
+# BEADS_DIR を cwd ベースで解決
+proj_hash="$(python3 -c "
+import hashlib, os, sys
+try:
+    print(hashlib.sha256(os.path.realpath('$cwd').encode()).hexdigest()[:8])
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || true)"
+[ -z "$proj_hash" ] && exit 0
 
-# approval JSON 不在 → 通常 task として pass (opt-in 設計)
-# /run-review <task-id> を実行していない task は gate されない
-if [ ! -f "$approval_file" ]; then
-  exit 0
-fi
+beads_dir="$HOME/.beads/$proj_hash/.beads"
+[ -d "$beads_dir" ] || exit 0
 
-approval_status="$(jq -r '.approval_status // "unknown"' "$approval_file" 2>/dev/null || echo "unknown")"
+# rejected approval (priority=0 かつ open) の件数を取得
+rejected_count="$(BEADS_DIR="$beads_dir" bd list -l "task:${task_id}" -t approval --status open --json 2>/dev/null \
+  | jq '[.[] | select(.priority==0)] | length' 2>/dev/null || echo 0)"
+[ -z "$rejected_count" ] && rejected_count=0
 
-case "$approval_status" in
-  approved)
-    exit 0
-    ;;
-  conditional)
-    echo "[agent-org:task-completed-gate] PASS (conditional): ${task_id} — concerns が残存しています。jq '.concerns_summary' ${approval_file} を確認してください" >&2
-    exit 0
-    ;;
-  rejected)
-    cat >&2 <<EOF
-[agent-org:task-completed-gate] BLOCK: approval が rejected
+if [ "$rejected_count" -gt 0 ]; then
+  cat >&2 <<EOF
+[agent-org:task-completed-gate] BLOCK: rejected approval が ${rejected_count} 件残存
 
-  task_id:       ${task_id}
-  approval file: ${approval_file}
-  approval_status: rejected
+  task_id:    ${task_id}
+  BEADS_DIR:  ${beads_dir}
 
-reviewer が request_changes / reject を出しています。concern を解消してから
-下記で再レビューを実行し、approved または conditional になるまで完了できません:
+reviewer が request_changes / reject (priority=0) を出しています。
+concern を解消してから下記で再レビューを実行し、approved または conditional に
+なるまで完了できません:
 
   /run-review ${task_id}
 
-approval JSON の concerns_summary を確認するには:
-  jq '.concerns_summary' "${approval_file}"
+詳細を確認するには:
+  BEADS_DIR="${beads_dir}" bd list -l "task:${task_id}" -t approval --status open
+  BEADS_DIR="${beads_dir}" bd show <approval-id>
 EOF
-    exit 2
-    ;;
-  *)
-    echo "[agent-org:task-completed-gate] warning: unknown approval_status='${approval_status}' in ${approval_file}; allowing complete (fail-open)" >&2
-    exit 0
-    ;;
-esac
+  exit 2
+fi
+
+# conditional (priority=1) が残っているなら warn
+conditional_count="$(BEADS_DIR="$beads_dir" bd list -l "task:${task_id}" -t approval --status open --json 2>/dev/null \
+  | jq '[.[] | select(.priority==1)] | length' 2>/dev/null || echo 0)"
+[ -z "$conditional_count" ] && conditional_count=0
+
+if [ "$conditional_count" -gt 0 ]; then
+  echo "[agent-org:task-completed-gate] PASS (conditional): ${task_id} — ${conditional_count} 件の conditional approval が残存。BEADS_DIR=${beads_dir} bd list -l \"task:${task_id}\" -t approval --status open で確認" >&2
+fi
+
+exit 0

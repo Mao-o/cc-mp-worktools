@@ -15,7 +15,10 @@ repo 内 (`memory: project` 系):
 - `.claude/agent-memory/agent-org-architect-reviewer/`
 - `.claude/agent-memory/agent-org-context-compressor/`
 - `.claude/episodes/`
-- `.claude/agent-org/approvals/`
+- `.claude/agent-org/approvals/` (v0.6.x までの approval JSON 互換用。
+  v0.7.0 以降は `/run-review` が bd approval issue に書込むため新規には
+  作られない。`/migrate-approvals-to-beads` で旧 JSON を bd に変換後は
+  空 / `.claude/agent-org/approvals.legacy/` に mv される)
 - `.gitignore` に beads 関連 entry を追記 (idempotent)
 
 home 配下 (`memory: user` 系 + cross-session 共有 state):
@@ -29,7 +32,9 @@ beads database (v0.6.0 から hard dependency):
 
 - `~/.beads/<proj-hash>/` (working dir 外、bg-fixer が worktree 隔離下でも書ける場所)
 - `~/.beads/<proj-hash>/.beads/` (bd init が生成、`BEADS_DIR` で指す path)
-- `bd config set types.custom "detection,fix,approval,episode"`
+- `bd config set custom.types "detection,fix,approval,episode,task"`
+  (v0.7.0 で `task` を追加。v0.6.x の `types.custom` は deprecated key で、
+  bd 1.0.4 では warning を吐き `bd types` 出力に反映されない。正解は `custom.types`)
 - `git config beads.role maintainer` (warning 抑制)
 
 すべての agent memory dir は **scoped name** (`agent-org-<agent-name>/` 形式) で
@@ -113,29 +118,36 @@ fi
 # git config beads.role maintainer (warning 抑制、bd 1.0.4 で要求される設定)
 (cd "$BEADS_PARENT" && git config beads.role maintainer 2>/dev/null || true)
 
-# custom type 登録 (`bd create -t detection` 等のために必須、bd 1.0.4 で未登録だと reject)
-# bd 1.0.4 は "not a recognized config key" warning を stderr に出すが exit=0
-# で値は set される。それでも実際に登録されたかを get で verify する。
-# 登録されないまま続行すると `/start-watcher` 後の `bd create -t detection`
-# が実行時に reject されるため、ここで fail-fast する。
-BEADS_DIR="$BEADS_DIR" bd config set types.custom "detection,fix,approval,episode"
+# custom type 登録 (v0.7.0: `task` を追加、5 types に)
+#
+# v0.6.x まで使っていた `types.custom` は bd 1.0.4 で deprecated。
+# 正解は `custom.types` namespace。U13 PoC で以下を確認済:
+#   - `bd config set types.custom ...` は warning + exit=0 で値を保存するが
+#     `bd types` 出力には反映されない (registration 効果なし)
+#   - `bd config set custom.types ...` は warning なしで `bd types` 出力に列挙
+#
+# verify は `bd config get` ではなく `bd types` 出力の grep で行う
+# (deprecated key でも config get は値を返すため不確実)
+BEADS_DIR="$BEADS_DIR" bd config set custom.types "detection,fix,approval,episode,task"
 config_exit=$?
 if [ "$config_exit" -ne 0 ]; then
-  echo "FATAL: bd config set types.custom failed (exit=$config_exit)"
+  echo "FATAL: bd config set custom.types failed (exit=$config_exit)"
   exit 1
 fi
 
-verified="$(BEADS_DIR="$BEADS_DIR" bd config get types.custom 2>/dev/null || echo "")"
-case "$verified" in
-  *detection*fix*approval*episode*)
-    echo "verified: types.custom=$verified"
-    ;;
-  *)
-    echo "FATAL: types.custom not properly set (got: '$verified')"
-    echo "       expected to contain: detection, fix, approval, episode"
-    exit 1
-    ;;
-esac
+types_out="$(BEADS_DIR="$BEADS_DIR" bd types 2>/dev/null || echo "")"
+missing=()
+for t in detection fix approval episode task; do
+  echo "$types_out" | grep -qE "^  ${t}$" || missing+=("$t")
+done
+if [ ${#missing[@]} -eq 0 ]; then
+  echo "verified: bd types includes detection, fix, approval, episode, task"
+else
+  echo "FATAL: bd types missing: ${missing[*]}"
+  echo "       expected to contain: detection, fix, approval, episode, task"
+  echo "       Run: BEADS_DIR=\"$BEADS_DIR\" bd config set custom.types 'detection,fix,approval,episode,task'"
+  exit 1
+fi
 
 echo "BEADS_DIR=$BEADS_DIR"
 BEADS_DIR="$BEADS_DIR" bd doctor 2>&1 | head -5
@@ -181,7 +193,7 @@ ls -la ~/.claude/agent-org/state/"$PROJ_HASH"/ 2>&1
 
 echo "=== beads ==="
 ls -la ~/.beads/"$PROJ_HASH"/ 2>&1
-BEADS_DIR=~/.beads/"$PROJ_HASH"/.beads bd config get types.custom 2>&1
+BEADS_DIR=~/.beads/"$PROJ_HASH"/.beads bd types 2>&1 | head -20
 ```
 
 ### 7. 環境変数の設定方法を案内する
@@ -203,7 +215,7 @@ BEADS_DIR=~/.beads/"$PROJ_HASH"/.beads bd config get types.custom 2>&1
 - `<proj-hash>` は cwd が同じなら毎回同じ値になるため、同じ project では
   常に同じ state dir / beads db を指す
 - 既に MEMORY.md / approval ファイル等が書かれていても影響しない
-- `bd init` 済みなら skip。`bd config set types.custom` は再実行で同じ値を set (idempotent)
+- `bd init` 済みなら skip。`bd config set custom.types` は再実行で同じ値を set (idempotent)
 - `.gitignore` は marker 行で重複検知 (`grep -q "agent-org plugin (v0.6.0+)"`)
 
 ## v0.5.x からのアップグレード時の注意

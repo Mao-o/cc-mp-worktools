@@ -97,15 +97,21 @@ else
 fi
 echo ""
 
-# --- 5. custom type 登録 ---
-echo "[5] bd custom types (detection / fix / approval / episode)"
+# --- 5. custom type 登録 (`bd types` 出力 grep で verify) ---
+# v0.7.0 から `custom.types` namespace を使う (旧 `types.custom` は deprecated)。
+# 確認は `bd types` 出力に列挙されることで行う (bd config get では deprecated
+# key でも値を返すため不確実)。
+echo "[5] bd custom types (detection / fix / approval / episode / task)"
 if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
-  custom_types="$(BEADS_DIR=$BEADS_DIR bd config get types.custom 2>/dev/null || echo "")"
-  if echo "$custom_types" | grep -q "detection" \
-     && echo "$custom_types" | grep -q "fix"; then
-    pass "types.custom = $custom_types"
+  types_out="$(BEADS_DIR=$BEADS_DIR bd types 2>/dev/null || echo "")"
+  missing=()
+  for t in detection fix approval episode task; do
+    echo "$types_out" | grep -qE "^  ${t}$" || missing+=("$t")
+  done
+  if [ ${#missing[@]} -eq 0 ]; then
+    pass "bd types: detection, fix, approval, episode, task all registered"
   else
-    fail "types.custom missing 'detection' or 'fix'. Run: BEADS_DIR=$BEADS_DIR bd config set types.custom 'detection,fix,approval,episode'"
+    fail "bd types missing: ${missing[*]}. Run: BEADS_DIR=$BEADS_DIR bd config set custom.types 'detection,fix,approval,episode,task'"
   fi
 else
   warn "custom type check skipped"
@@ -207,16 +213,24 @@ bd DB が破損している可能性。よくある原因:
 対処: 退避 (`mv ~/.beads/<proj-hash> ~/.beads/<proj-hash>.bak`) してから
 `/org-init` を再実行、必要なら `bd import` で .bak から復旧。
 
-### `types.custom` が未登録で FAIL になる
+### custom types が未登録で FAIL になる
 
-`/org-init` 実行時に `bd config set types.custom` がスキップされた可能性
-(古いバージョンで初期化したケース)。手動で:
+`/org-init` 実行時に `bd config set custom.types` がスキップされた可能性
+(古いバージョンで初期化したケース)。または v0.6.x で deprecated key
+`types.custom` を使って登録したため `bd types` に反映されていない可能性。
+手動で:
 
 ```bash
 PROJ_HASH=<your-proj-hash>
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd config set types.custom \
-  "detection,fix,approval,episode"
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd config set custom.types \
+  "detection,fix,approval,episode,task"
+
+# verify
+BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd types | grep -E "^  (detection|fix|approval|episode|task)$"
 ```
+
+v0.6.x で `types.custom` に設定した値は harmless に残るが効果なし。
+`custom.types` に再設定すれば `bd types` 出力に反映される。
 
 ## 注意事項
 

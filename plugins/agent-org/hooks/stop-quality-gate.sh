@@ -29,7 +29,7 @@
 #       },
 #       {
 #         "id": "no-pending-rejections",
-#         "description": "All approvals must be approved or conditional",
+#         "description": "All bd approval issues must not be rejected",
 #         "kind": "approvals_clean",
 #         "required": true
 #       }
@@ -38,8 +38,10 @@
 #
 # kind:
 #   - "command" (default): command を eval、exit code 0 ならパス
-#   - "approvals_clean": .claude/agent-org/approvals/*.json に
-#     approval_status=rejected が無ければパス
+#   - "approvals_clean": v0.7.0 から bd issue ベース。
+#     `bd list -t approval --status open --json` のうち priority=0
+#     (rejected) が 0 件ならパス。bd CLI / BEADS_DIR が無ければ fail-open
+#     (pass)
 #
 # 動作:
 #   1. jq 不在 / config 不在で fail-open (exit 0)
@@ -48,7 +50,7 @@
 #   4. required=false の failing は warn のみ
 #   5. failing があれば exit 2 (block)、無ければ exit 0
 #
-# 依存: jq
+# 依存: jq, (kind=approvals_clean 利用時) bd CLI + python3
 
 set -euo pipefail
 
@@ -116,19 +118,28 @@ while [ "$i" -lt "$gate_count" ]; do
       fi
       ;;
     approvals_clean)
-      approvals_dir="${cwd}/.claude/agent-org/approvals"
+      # v0.7.0: bd issue ベース (type=approval, priority=0 → rejected)
       rejected_count=0
-      if [ -d "$approvals_dir" ]; then
-        # wc -l の出力は先頭に space + 改行を含む環境がある (macOS の wc 等)。
-        # [:space:] で全空白除去しないと "0\n" の文字列比較で誤判定する
-        rejected_count="$(grep -l '"approval_status"[[:space:]]*:[[:space:]]*"rejected"' "$approvals_dir"/*.json 2>/dev/null | wc -l | tr -d '[:space:]')"
-        if [ -z "$rejected_count" ]; then
-          rejected_count=0
+      if command -v bd >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        proj_hash="$(python3 -c "
+import hashlib, os, sys
+try:
+    print(hashlib.sha256(os.path.realpath('$cwd').encode()).hexdigest()[:8])
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || true)"
+        if [ -n "$proj_hash" ]; then
+          beads_dir="$HOME/.beads/$proj_hash/.beads"
+          if [ -d "$beads_dir" ]; then
+            rejected_count="$(BEADS_DIR="$beads_dir" bd list -t approval --status open --json 2>/dev/null \
+              | jq '[.[] | select(.priority==0)] | length' 2>/dev/null || echo 0)"
+            [ -z "$rejected_count" ] && rejected_count=0
+          fi
         fi
       fi
       if [ "$rejected_count" != "0" ]; then
         result="fail"
-        detail="${rejected_count} approval(s) in rejected state (${approvals_dir}/*.json)"
+        detail="${rejected_count} rejected approval(s) in bd (priority=0, open). Inspect: BEADS_DIR=\$HOME/.beads/\$proj_hash/.beads bd list -t approval --status open"
       fi
       ;;
     *)

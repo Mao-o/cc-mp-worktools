@@ -20,7 +20,9 @@ verdict (judgement) を YAML 形式で会話に返すのが役割。
 
 - レビューが副作用を持たない (誤って repo を変更しない)
 - approval 書込は呼び出し側 command (`/run-review` 等) が verdict YAML を
-  parse して `.claude/agent-org/approvals/<task-id>.json` に書く責務
+  parse して **bd approval issue** (`bd create -t approval`) として記録する責務
+  (v0.7.0 から bd 一本化、旧 `.claude/agent-org/approvals/<task-id>.json` は
+  廃止。詳細は `commands/run-review.md`)
 - reviewer の権限が最小化され、監査面で扱いやすい
 
 あなた自身は decision-keeper の ADR や architect-reviewer 自身の MEMORY.md
@@ -154,8 +156,8 @@ MEMORY.md には以下のような知見を蓄積する想定:
   response shape を最初に見る」のような自分のレビュー手順
 - **既知の良い実装**: 過去にレビューで approve した参照実装の path
 
-ただし、書込 tool が無いため、MEMORY.md への curate は呼び出し側 command が
-別途行う設計とする。あなたは **会話出力に「次に MEMORY.md に書きたい curate
+ただし、書込 tool が無いため、MEMORY.md / bd remember への curate は呼び出し側
+command が別途行う設計とする。あなたは **会話出力に「次に永続化したい curate
 内容」を任意で添える**ことができる (`learnings_to_persist` セクション):
 
 ```yaml
@@ -165,8 +167,9 @@ learnings_to_persist:
     retrieval_keys: ["test integration mock-only Phase 2"]
 ```
 
-呼び出し側 command がこれを parse して MEMORY.md curate を行うかどうかは
-command の判断 (Phase 3 では `/run-review` が curate を行う未実装、後続で追加可)。
+v0.7.0 から `/run-review` 側で `learnings_to_persist` を回収し、各行を
+`bd remember "review-heuristic: <summary> [keys: <k1>,<k2>]"` で永続化する設計
+(bd 1.0.4+ の learning store)。MEMORY.md への curate は副次的経路として残る。
 
 ## 注意事項
 

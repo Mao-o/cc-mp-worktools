@@ -1,5 +1,149 @@
 # Changelog
 
+## 0.7.0 (2026-05-22) — Phase 6: approval → bd issue 化
+
+Phase 6 of the agent-org plugin. `/run-review` が書いていた
+`.claude/agent-org/approvals/<task-id>.json` を廃止し、beads issue (type=approval)
+に一本化した。task-completed-gate / stop-quality-gate も bd label-based query で
+動くように書き換え。再 review は `bd dep add --type supersedes` で履歴を残す。
+
+### Changed (approval workflow → beads)
+
+- `commands/run-review.md`: step 4 を `bd create -t approval` 化。
+  必須 label セットは `approval` / `task:<task_id>` / `agent-org` /
+  `aggregate:<approve|approve_with_conditions|request_changes|reject>` /
+  `perspective:<persp>` (per reviewer)。priority で status を encode
+  (`0`=rejected / `1`=conditional / `2`=approved / `3`=informational)。
+  description body には reviewer 別 verdict YAML をそのまま埋込
+- `hooks/task-completed-gate.sh`: 102 行 → ~40 行に縮小。
+  `bd list -l "task:${task_id}" -t approval --status open --json | jq '[.[]|select(.priority==0)]|length'`
+  で rejected approval を検出し、>0 なら exit 2 で block。
+  approval JSON 不在 → opt-in 設計の踏襲 (task に approval 1 件も無ければ pass)
+- `hooks/stop-quality-gate.sh`: `kind: approvals_clean` を同様の bd query に
+  置換。`.claude/agent-org/approvals/*.json` 検査は廃止
+- `agents/architect-reviewer.md`: 真 RO 規律内の「approval 書込先」を
+  bd approval issue に更新 (構造変更なし、説明文のみ)
+- `skills/running-review/SKILL.md`: verdict 集約後の永続化指示を
+  bd approval issue 作成経路に更新
+
+### Added
+
+- `commands/migrate-approvals-to-beads.md` (新規): 既存
+  `.claude/agent-org/approvals/*.json` を bd issue (type=approval) に変換する
+  one-shot migration。task issue find-or-create + approval issue 作成 +
+  `bd dep add <task> <approval>` + 旧 JSON を `.claude/agent-org/approvals.legacy/`
+  に mv (Phase 9 で物理削除)。idempotent (label `legacy-id:<basename>` で重複検出)、
+  `--dry-run` 対応、yq+jq+bd preflight。/migrate-to-beads と同じ規律 (G1-G8) 遵守
+
+### task issue 規約 (Phase 6.1.0 で確定)
+
+- `task_id` (`PR-42` / `design-auth-rewrite` 等の人間可読 ID) は
+  `bd list -l "task:${task_id}" -t task --json | jq -r '.[0].id // empty'` で find、
+  見つからなければ `bd create -t task -l "task:${task_id}" -l "agent-org" -p 2 "task: <id>"`
+  で生成
+- 生成タイミングは `/run-review <task-id>` 実行時に find-or-create のみ。
+  TaskCreate hook 自動連携は v1.1.0 検討事項
+- task と Phase 5 detection/fix の関係: 「task」は人間 / レビューワークフロー単位、
+  「detection/fix」は regression-watcher が自動生成する技術的単位。Phase 6 では
+  両者は別 issue type として併存
+
+### Fixed (G2 規律: deprecated config key)
+
+PoC 検証 (U13、bd 1.0.4) で `bd config set types.custom` が deprecated warning
+を吐き、`bd types` 出力にも反映されないことが判明。正解は
+`bd config set custom.types`。本 PR で以下を一括修正:
+
+- `commands/org-init.md`: `bd config set types.custom ...` →
+  `bd config set custom.types ...`。verify ロジックも `bd types | grep -E
+  "^  (detection|fix|approval|episode|task)$"` で done 判定 (bd config get では
+  deprecated key でも値を返すため不確実)
+- `commands/migrate-to-beads.md`: trouble shoot 内記述を `custom.types` に置換
+- `commands/bd-check.md`: section 5 (custom type 登録) の check ロジックを
+  `bd types` 出力 grep ベースに変更
+- `skills/using-beads/SKILL.md`: trouble shoot 表内記述を `custom.types` に置換
+
+bd 1.0.4 では `-t approval` / `-t task` は custom types 未登録でも create
+できるが、登録すると `bd types` 出力で可視化される + 将来の validation 強化
+に備える。
+
+### Migration from 0.6.0
+
+- 既存 `.claude/agent-org/approvals/*.json` がある場合は `/migrate-approvals-to-beads`
+  を実行して bd issue に変換。旧 JSON は `.claude/agent-org/approvals.legacy/`
+  に mv される (rollback 用に保持、Phase 9 で物理削除)
+- `bd config set custom.types ...` を再実行する (`/org-init` 再実行でも OK、
+  idempotent)。既存 `types.custom` 設定は harmless に残るが効果なし
+
+### 参考 PoC (U13、bd 1.0.4)
+
+`~/.beads-poc-phase6/` で以下を実機検証してから着手:
+
+| # | 検証項目 | 結果 | Phase 6 への影響 |
+|---|---|---|---|
+| V1 | `bd gate create --type=human --blocks <task>` | 動く | gate には verdict YAML / perspective を載せられないため不採用、approval issue 方式を維持 |
+| V2 | `bd merge-slot create / acquire / release` | 動く (1 rig=1 slot) | Phase 6 では不要 (1 task=1 approval)、Phase 8/v2 で利用検討 |
+| sup | `bd dep add <new> <old> --type supersedes` | 動く (bd 1.0.4 で公式列挙) | label fallback (`supersedes:<id>`) は採用せず `--type supersedes` で書く |
+
+## 0.6.0 (2026-05-20) — Phase 5: beads (detection/fix) hard dependency
+
+Phase 5 of the agent-org plugin. detection / fix の単一情報源を旧
+`~/.claude/agent-org/state/<proj-hash>/{detections,fixes}/` (YAML/JSON) から
+**beads (Steve Yegge 製 git-backed graph issue tracker)** に切替。bd CLI が
+hard dependency になり、未 install / `.beads/` 未初期化なら subagent は
+immediate error で abort する fail-closed 設計に倒した。
+
+### Added
+
+- `skills/using-beads/SKILL.md` (新規): bd CLI 利用規律集約。`BEADS_DIR` の
+  指し方、`bd prime` 必須、query は `--json` + `jq`、`bd update --claim` atomic、
+  description body は v0.5.x 互換 YAML/JSON、Bash 直接 invoke、label / priority
+  規約、close 順序 (fix → detection) 等
+- `commands/bd-check.md` (新規): bd CLI install / `bd doctor` / `~/.beads/<proj-hash>/`
+  存在 / custom type 登録 / AGENTS.md 配置を PASS/FAIL/WARN 表示する diagnostic
+- `commands/migrate-to-beads.md` (新規): v0.5.x の `detections/*.yaml` /
+  `fixes/*.json` を bd issue に変換する one-shot migration。idempotent
+  (`legacy-id:<basename>` label で重複検出)、`--dry-run` 対応、yq+jq+bd preflight、
+  fix close 後に detection close する dep ガード遵守
+- `commands/migrate-from-beads.md` (新規): rollback。bd issue を旧 YAML/JSON
+  形式に書き戻す。pin from v0.7.x → v0.5.x 用、idempotent、foreground 専用
+- `hooks/bd-export.sh` (新規、Stop hook): bd の open/closed issue を
+  `<repo>/.beads/issues.jsonl` に export する git audit trail 補償。opt-in
+  workflow (`.beads/issues.jsonl` のみ git 管理対象、`embeddeddolt/` /
+  `dolt/` は gitignore)
+
+### Changed
+
+- `commands/org-init.md`: `~/.beads/<proj-hash>/.beads/` の `bd init`
+  (`--skip-agents --non-interactive --prefix=<proj-hash>`) を追加。
+  `bd config set types.custom "detection,fix,approval,episode"` で custom type
+  登録 + verify (idempotent)。v0.5.x の `detections/` / `fixes/` ディレクトリは
+  作成しない (bd に移行)。`.gitignore` に `agent-org plugin (v0.6.0+)` marker +
+  beads 関連 3 行を idempotent 追記
+- `agents/regression-watcher.md`: detection 出力先を YAML ファイルから
+  `bd create -t detection` に変更。`BEADS_DIR` export 必須、`bd prime` 起動冒頭
+- `agents/regression-fixer.md`: fix 入力を `bd ready -t detection`、
+  `bd update --claim` で atomic 取得。完了時 `bd create -t fix` +
+  `bd dep add <detection> <fix>` + `bd close <fix>` (achieved 時のみ
+  detection も close、order: fix → detection)
+- `commands/start-watcher.md` / `commands/fix-regression.md`: preflight に
+  bd CLI / `BEADS_DIR` 健全性チェックを追加 (`/bd-check` 相当の subset)
+- `hooks/hooks.json`: 既存 hooks に Stop hook (bd-export.sh) を追加
+- `hooks/post-commit-trigger.sh`: `git -C <target>` で確実に worktree を指す
+  ように修正 (R1 P1/P2)、TaskCompleted gate schema 修正と合わせて bug fix
+
+### 規律 (R1 self-review で確定、Phase 6+ でも維持)
+
+| # | 規律 | 経緯 |
+|---|---|---|
+| G1 | `BEADS_DIR` は `.beads/` を直接指す (親 dir は NG) | U8 (2026-05-20) |
+| G2 | `bd config set types.custom` は exit=0 でも verify、未登録なら fatal exit 1 (v0.7.0 で `custom.types` に変更) | R1 P2-1 |
+| G3 | description body は変数代入経由で渡す (`bd update -d "$(...)"` 直書きは禁止) | R1 P1-3 |
+| G4 | migration script で skip 時も map 更新 (idempotent 再実行で fix 側 dep 解決破壊防止) | R1 P1-2 |
+| G5 | preflight に `jq` install 確認必須 | R1 P2-2 |
+| G6 | bd は Bash 直接 invoke、plugin slash command 経由禁止 (`--bg` で未解決) | D2 |
+| G7 | hard dependency 違反は abort、runtime fallback で旧形式書き戻し禁止 (split-brain 防止) | D2 |
+| G8 | `hooks.json` で同一 event 複数 hook は `hooks: [...]` 配列内に並べる | Phase 5 |
+
 ## 0.5.0 (2026-05-18) — PR 4: regression watcher + /goal fixer
 
 Phase 4 of the agent-org plugin. background session (`--bg`) で常駐する
