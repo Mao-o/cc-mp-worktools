@@ -192,9 +192,10 @@ echo "BEADS_DIR (auto-resolved by bd from $MAIN_REPO): $BEADS_DIR"
 
 ### 5. stealth mode が設定した `.git/info/exclude` を確認する
 
-v0.8.0 で `bd init --stealth` を使うため、`.gitignore` 編集は不要 (bd 自身が
-`.git/info/exclude` に `.beads/` 等を追加する個人 git exclude)。本手順は
-verify のみ:
+v0.8.0 で `bd init --stealth` を使うため、ユーザーが手動で `.gitignore` を
+編集する必要はない (bd 自身が `.git/info/exclude` に `.beads/` 等を追加し、
+generic な dolt-related ignore `.dolt/` `*.db` `.beads-credential-key` は
+`.gitignore` に自動追記する)。本手順は verify のみ:
 
 ```bash
 # git common-dir/info/exclude に書かれる (main repo の .git/info/exclude を直接参照)

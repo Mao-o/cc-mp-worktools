@@ -194,7 +194,10 @@ fi
 ### 6. stealth mode `.git/info/exclude` 確認
 
 `bd init --stealth` が `.git/info/exclude` に `.beads/` を自動追加するため、
-追加の `.gitignore` 編集は不要 (v0.8.0 ADR-007 amendment)。verify:
+`.beads/` 配下のデータ (issue / dolt db) は git に commit されない。
+ユーザーが手動で `.gitignore` を編集する必要もない (bd init が generic な
+dolt ignore `.dolt/` `*.db` `.beads-credential-key` を `.gitignore` に
+自動追記する)。verify:
 
 ```bash
 GIT_EXCLUDE="$REPO_ROOT/.git/info/exclude"

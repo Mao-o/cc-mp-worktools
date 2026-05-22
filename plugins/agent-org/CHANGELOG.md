@@ -5,7 +5,9 @@
 ADR-007 (2026-05-22) 採用に伴う **breaking change**。bd の物理配置を
 `~/.beads/<proj-hash>/.beads/` から **`<repo>/.beads/`** に変更し、
 `bd init --stealth --skip-agents` で個人 git exclude (`.git/info/exclude`)
-を活用する形に統合。`BEADS_DIR` 明示指定を不要化し、`.gitignore` 編集も廃止。
+を活用する形に統合。`BEADS_DIR` 明示指定を不要化し、ユーザー手動での
+`.gitignore` 編集も不要化 (bd init --stealth が必要な dolt-related ignore を
+自動追記する)。
 
 ### Why (ADR-007 + amendment)
 
@@ -22,8 +24,11 @@ audit trail / git history 統合) が完全に動作する。
 加えてユーザー (Mao) の指摘で bd 1.0.4 の `--stealth` mode の存在が共有され、
 ADR-007 amendment で `bd init --stealth --skip-agents` を default に採用。
 `.git/info/exclude` (個人専用 git exclude、git で track されない) に `.beads/`
-を自動追加するため、`<repo>/.gitignore` を一切編集しない。"personal use without
-affecting repo collaborators" (bd 公式) に完全一致する設計。
+を自動追加するため、`.beads/` 配下のデータ (issue / dolt db) は確実に commit
+されない。ユーザーが手動で `.gitignore` を編集する必要もない (bd init が
+generic な dolt-related ignore を自動追記する)。"personal use without affecting
+repo collaborators" (bd 公式) の本旨は **`.beads/` 配下データが流出しない** 点で
+あり、bd 利用の事実そのものは `.gitignore` 差分から collaborators に見える。
 
 ### Breaking changes
 
@@ -37,10 +42,13 @@ affecting repo collaborators" (bd 公式) に完全一致する設計。
 - **`BEADS_DIR` export 規律の廃止**: 全 subagent / hook / skill / command で
   `cd <repo> && bd <subcmd>` パターンに統一。`BEADS_DIR` 明示指定は optional
   (bd 自動 resolve に委ねる)
-- **`<repo>/.gitignore` 編集の廃止**: v0.6.0+ で追加していた `agent-org plugin
-  (v0.6.0+)` セクション (`!.beads/issues.jsonl` `.beads/embeddeddolt/` `.beads/dolt/`)
-  は v0.8.0 で書かない。bd init --stealth が `.git/info/exclude` に
-  `.beads/` を追加する個人 git exclude で代替
+- **`<repo>/.gitignore` の plugin 固有セクション廃止**: v0.6.0+ で追加していた
+  `agent-org plugin (v0.6.0+)` セクション (`!.beads/issues.jsonl`
+  `.beads/embeddeddolt/` `.beads/dolt/`) は v0.8.0 で書かない。bd init --stealth
+  が `.git/info/exclude` に `.beads/` を追加する個人 git exclude を活用する。
+  なお bd init --stealth は副次的に `.gitignore` に generic な dolt ignore
+  (`.dolt/` `*.db` `.beads-credential-key`) を自動追記する (bd 1.0.4 仕様、
+  agent-org plugin は touch しない)
 
 ### Changed
 

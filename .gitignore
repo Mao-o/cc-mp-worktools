@@ -35,3 +35,8 @@ __pycache__/
 # commit しない。agent-org plugin を使う repo 側 (client) では別途 .gitignore
 # 設定する (Phase 5 設計では `<repo>/.beads/issues.jsonl` のみ commit する規約)。
 .beads/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
