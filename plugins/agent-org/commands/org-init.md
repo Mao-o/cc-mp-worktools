@@ -1,11 +1,18 @@
 ---
-description: agent-org plugin が使う state ディレクトリ群を初期化する (.claude/agent-memory/agent-org-<agent>/, .claude/episodes/, .claude/agent-org/approvals/, ~/.beads/<proj-hash>/, .gitignore 更新)。v0.6.0 から beads (`bd init`) が hard dependency
+description: agent-org plugin が使う state ディレクトリ群を初期化する (.claude/agent-memory/agent-org-<agent>/, .claude/episodes/, .claue/agent-org/approvals/, <repo>/.beads/, .gitignore 更新)。v0.6.0 から beads (`bd init`) が hard dependency、v0.8.0 から bd は `<repo>/.beads/` に repo-local 配置 (ADR-007)
 ---
 
 # /org-init
 
-agent-org plugin が使うディレクトリと **beads database** (`~/.beads/<proj-hash>/`)
+agent-org plugin が使うディレクトリと **beads database** (`<repo>/.beads/`)
 を冪等に初期化する。
+
+## v0.8.0 で path 規約が変更されました (BREAKING)
+
+v0.7.x までは bd を `~/.beads/<proj-hash>/.beads/` に配置していたが、ADR-007
+(2026-05-22) で **`<repo>/.beads/`** に変更された (D 案採用、bd の
+git worktree-aware 設計を活用)。`~/.beads/<proj-hash>/` を持つ既存
+プロジェクトは `/migrate-beads-to-repo-local` で新 path に移行する。
 
 ## 作成対象
 
@@ -28,24 +35,27 @@ home 配下 (`memory: user` 系 + cross-session 共有 state):
 - `~/.claude/agent-org/state/<proj-hash>/learnings/`
 - `~/.claude/agent-org/state/<proj-hash>/last-commit.json` の格納先 (空ファイルは作らない、post-commit-trigger.sh が必要に応じて書く)
 
-beads database (v0.6.0 から hard dependency):
+beads database (v0.6.0 から hard dependency、v0.8.0 から `<repo>/.beads/` に repo-local):
 
-- `~/.beads/<proj-hash>/` (working dir 外、bg-fixer が worktree 隔離下でも書ける場所)
-- `~/.beads/<proj-hash>/.beads/` (bd init が生成、`BEADS_DIR` で指す path)
+- `<repo>/.beads/` (`bd init` が `<repo>/.beads/embeddeddolt/` を生成)
 - `bd config set types.custom "detection,fix,approval,episode,task"`
   (v0.7.0 で `task` を追加 / 5 types)。bd 1.0.4 は `Warning: "types.custom" is
   not a recognized config key` を吐くが **設定は effective** で `bd types`
   出力にも反映される (v0.7.1 hotfix で実機確認、v0.7.0 で試した
   `custom.types` は逆に無視されることを実測で確認)
-- `git config beads.role maintainer` (warning 抑制)
+- `git config beads.role maintainer` (warning 抑制、`<repo>/.git/config` に書く)
 
 すべての agent memory dir は **scoped name** (`agent-org-<agent-name>/` 形式) で
 作成する。Claude Code v2.1.33+ は plugin scoped name (`agent-org:<agent>`) の
 `:` を `-` に置換した dir を memory として解決するため、scoped name dir に
 書けば auto-inject (200 行/25KB) が動作する (ADR-003 採用判断、v0.3.0)。
 
-`<proj-hash>` は **cwd を canonicalize して sha256 した先頭 8 桁**。複数プロジェクトを
-跨いでも cross-session state が混じらないようにするための識別子。
+`<proj-hash>` は **cwd を canonicalize して sha256 した先頭 8 桁**。v0.8.0 から
+bd path には不要だが、以下の用途で算出ロジックは保持する:
+
+- `~/.claude/agent-org/state/<proj-hash>/learnings/` (memory dir 分離)
+- bd の `--prefix <proj-hash>` (issue ID prefix、ADR-007 で継続)
+- 旧 path 検出 (`/migrate-beads-to-repo-local`)
 
 ## 引数
 
@@ -61,7 +71,7 @@ beads database (v0.6.0 から hard dependency):
 
 以下の Bash コマンドを実行してください。
 
-### 1. 前提チェック (bd CLI 必須)
+### 1. 前提チェック (bd CLI 必須、`<repo>` 内であること)
 
 ```bash
 command -v bd >/dev/null 2>&1 || {
@@ -69,6 +79,20 @@ command -v bd >/dev/null 2>&1 || {
   exit 1
 }
 echo "bd version: $(bd version 2>&1 | head -1)"
+
+# git repo であることを確認 (v0.8.0 から <repo>/.beads/ 配置のため必須)
+# worktree 内で実行された場合は git common-dir 経由で main repo を解決
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+if [ -z "$REPO_ROOT" ]; then
+  echo "FATAL: not in a git repository. v0.8.0 から bd は <repo>/.beads/ に配置されるため git repo 内での実行が必須"
+  exit 1
+fi
+MAIN_REPO="$(cd "$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)")" 2>/dev/null && pwd -P)"
+[ -n "$MAIN_REPO" ] || MAIN_REPO="$REPO_ROOT"
+echo "repo root: $REPO_ROOT"
+if [ "$REPO_ROOT" != "$MAIN_REPO" ]; then
+  echo "main repo: $MAIN_REPO (worktree detected — bd は main repo に init される)"
+fi
 ```
 
 ### 2. `<proj-hash>` を計算する
@@ -100,25 +124,30 @@ mkdir -p \
 v0.6.0 から `detections/` / `fixes/` ディレクトリは **作成しない** (bd に移行済)。
 `learnings/` と `last-commit.json` 格納先は Phase 5 では維持。
 
-### 4. beads database を初期化する (v0.6.0 hard dependency)
+### 4. beads database を初期化する (v0.6.0 hard dependency、v0.8.0 から `<main_repo>/.beads/` + stealth)
 
 ```bash
-BEADS_PARENT="$HOME/.beads/$PROJ_HASH"
-BEADS_DIR="$BEADS_PARENT/.beads"
+# v0.8.0: bd は main repo (worktree でない方) に init する。
+# worktree 内で /org-init を実行しても MAIN_REPO で bd init される
+# (bd の git worktree-aware 設計により、worktree からも同じ DB にアクセス可能)
+BEADS_DIR="$MAIN_REPO/.beads"
 
 if [ -d "$BEADS_DIR" ]; then
   echo "skip: beads db already initialized at $BEADS_DIR"
 else
-  mkdir -p "$BEADS_PARENT"
-  (cd "$BEADS_PARENT" && bd init --skip-agents --non-interactive --prefix "$PROJ_HASH")
-  # `--skip-agents`: bd が AGENTS.md / CLAUDE.md / .claude/settings.json を
-  #                  自動生成するのを抑制。agent-org plugin 側で独自管理する
-  # `--non-interactive`: prompt なし
-  # `--prefix $PROJ_HASH`: bd issue ID prefix
+  # v0.8.0: main repo ルートで bd init --stealth する (ADR-007 D 案 + stealth amendment)
+  # - `--stealth`: bd が自動で `.git/info/exclude` に `.beads/` 等を追加。
+  #                個人専用 git exclude (collaborators の git に影響しない)
+  # - `--skip-agents`: bd が AGENTS.md / CLAUDE.md / .claude/settings.json を
+  #                    自動生成するのを抑制。agent-org plugin 側で独自管理する
+  # - `--non-interactive`: prompt なし
+  # - `--prefix $PROJ_HASH`: bd issue ID prefix (cross-project hash 衝突防止)
+  (cd "$MAIN_REPO" && bd init --stealth --skip-agents --non-interactive --prefix "$PROJ_HASH")
 fi
 
 # git config beads.role maintainer (warning 抑制、bd 1.0.4 で要求される設定)
-(cd "$BEADS_PARENT" && git config beads.role maintainer 2>/dev/null || true)
+# v0.8.0: <main_repo>/.git/config に書く (bd が main repo の git を共有するため)
+(cd "$MAIN_REPO" && git config beads.role maintainer 2>/dev/null || true)
 
 # custom type 登録 (v0.7.0: `task` を追加、5 types に / v0.7.1: hotfix for U13 PoC 誤り)
 #
@@ -134,14 +163,16 @@ fi
 # false alarm として無視。verify は `bd types` 出力 grep で行う (これは
 # 実装が config namespace ではなく "実際に登録されたか" を直接見る正しい
 # 方法、v0.7.0 で導入した改善はそのまま維持)
-BEADS_DIR="$BEADS_DIR" bd config set types.custom "detection,fix,approval,episode,task" 2>&1
+#
+# v0.8.0: BEADS_DIR の export なしで cd <repo> から bd 自動 resolve (ADR-007)
+(cd "$MAIN_REPO" && bd config set types.custom "detection,fix,approval,episode,task" 2>&1)
 config_exit=$?
 if [ "$config_exit" -ne 0 ]; then
   echo "FATAL: bd config set types.custom failed (exit=$config_exit)"
   exit 1
 fi
 
-types_out="$(BEADS_DIR="$BEADS_DIR" bd types 2>/dev/null || echo "")"
+types_out="$(cd "$MAIN_REPO" && bd types 2>/dev/null || echo "")"
 missing=()
 for t in detection fix approval episode task; do
   echo "$types_out" | grep -qE "^  ${t}$" || missing+=("$t")
@@ -151,39 +182,41 @@ if [ ${#missing[@]} -eq 0 ]; then
 else
   echo "FATAL: bd types missing: ${missing[*]}"
   echo "       expected to contain: detection, fix, approval, episode, task"
-  echo "       Run: BEADS_DIR=\"$BEADS_DIR\" bd config set types.custom 'detection,fix,approval,episode,task'"
+  echo "       Run: (cd $MAIN_REPO && bd config set types.custom 'detection,fix,approval,episode,task')"
   exit 1
 fi
 
-echo "BEADS_DIR=$BEADS_DIR"
-BEADS_DIR="$BEADS_DIR" bd doctor 2>&1 | head -5
+echo "BEADS_DIR (auto-resolved by bd from $MAIN_REPO): $BEADS_DIR"
+(cd "$MAIN_REPO" && bd doctor 2>&1 | head -5)
 ```
 
-### 5. `.gitignore` を更新する (idempotent、bd 関連 3 行 + agent-org marker)
+### 5. stealth mode が設定した `.git/info/exclude` を確認する
+
+v0.8.0 で `bd init --stealth` を使うため、`.gitignore` 編集は不要 (bd 自身が
+`.git/info/exclude` に `.beads/` 等を追加する個人 git exclude)。本手順は
+verify のみ:
 
 ```bash
-GITIGNORE="$(git rev-parse --show-toplevel 2>/dev/null)/.gitignore"
-if [ -z "$GITIGNORE" ] || [ ! -f "$(git rev-parse --show-toplevel 2>/dev/null)/.git/HEAD" ]; then
-  echo "warn: not in a git repo, skip .gitignore update"
+# git common-dir/info/exclude に書かれる (main repo の .git/info/exclude を直接参照)
+GIT_EXCLUDE="$(git -C "$MAIN_REPO" rev-parse --git-common-dir)/info/exclude"
+if [ -f "$GIT_EXCLUDE" ] && grep -q "^\.beads/" "$GIT_EXCLUDE" 2>/dev/null; then
+  echo "verified: $GIT_EXCLUDE excludes .beads/ (stealth mode)"
 else
-  if ! grep -q "agent-org plugin (v0.6.0+)" "$GITIGNORE" 2>/dev/null; then
-    {
-      echo ""
-      echo "# agent-org plugin (v0.6.0+)"
-      echo "!.beads/issues.jsonl"
-      echo ".beads/embeddeddolt/"
-      echo ".beads/dolt/"
-    } >> "$GITIGNORE"
-    echo "updated: $GITIGNORE (agent-org marker added)"
-  else
-    echo "skip: agent-org marker already in $GITIGNORE"
-  fi
+  echo "warn: $GIT_EXCLUDE does not exclude .beads/ - re-run /org-init or bd init --setup-exclude"
 fi
 ```
 
-`<repo>/.beads/issues.jsonl` のみを git 管理対象として残す (Stop hook の
-`bd-export.sh` がここに export する、git audit trail 補償の opt-in workflow)。
-`embeddeddolt/` / `dolt/` は bd の内部 DB なので git 視界外に置く。
+`.git/info/exclude` は **git で track されない個人 git exclude**。同じ repo を
+clone した他の collaborator には影響しない (= stealth)。
+
+`.gitignore` は bd init 自身が `.dolt/` `*.db` `.beads-credential-key` を追加
+する場合があるが (bd 1.0.4+ default 挙動)、agent-org plugin はこれ以上 `.gitignore`
+を編集しない (Phase 9 で stealth 採用時のクリーンアップを ADR-007 amendment に
+記載)。
+
+audit trail (git track された `issues.jsonl`) を希望する場合は、ユーザーが
+`git add -f .beads/issues.jsonl` で **明示的に force add** する。
+default は personal use 想定で audit trail なし。
 
 ### 6. 作成結果を表示する
 
@@ -197,9 +230,9 @@ echo "=== home 配下 ==="
 ls -la ~/.claude/agent-memory/ 2>&1
 ls -la ~/.claude/agent-org/state/"$PROJ_HASH"/ 2>&1
 
-echo "=== beads ==="
-ls -la ~/.beads/"$PROJ_HASH"/ 2>&1
-BEADS_DIR=~/.beads/"$PROJ_HASH"/.beads bd types 2>&1 | head -20
+echo "=== beads (<main_repo>/.beads/) ==="
+ls -la "$MAIN_REPO/.beads/" 2>&1
+(cd "$MAIN_REPO" && bd types 2>&1 | head -20)
 ```
 
 ### 7. 環境変数の設定方法を案内する
@@ -218,11 +251,28 @@ BEADS_DIR=~/.beads/"$PROJ_HASH"/.beads bd types 2>&1 | head -20
 ## 冪等性について
 
 - `mkdir -p` は既存ディレクトリでもエラーにならない。再実行しても安全
-- `<proj-hash>` は cwd が同じなら毎回同じ値になるため、同じ project では
-  常に同じ state dir / beads db を指す
+- `<proj-hash>` は cwd が同じなら毎回同じ値になる
 - 既に MEMORY.md / approval ファイル等が書かれていても影響しない
-- `bd init` 済みなら skip。`bd config set types.custom` は再実行で同じ値を set (idempotent)
-- `.gitignore` は marker 行で重複検知 (`grep -q "agent-org plugin (v0.6.0+)"`)
+- `bd init` 済み (`<repo>/.beads/` 存在) なら skip。`bd config set types.custom` は再実行で同じ値を set (idempotent)
+- `.git/info/exclude` は bd init が idempotent に追記する (重複行は作らない)
+
+## v0.7.x からのアップグレード時の注意 (v0.8.0)
+
+v0.7.x で `~/.beads/<proj-hash>/.beads/` に bd を持っていたプロジェクトは、
+`/org-init` を再実行すると `<repo>/.beads/` に新規 bd db が初期化される
+(旧 path はそのまま残る = 2 つの bd db が並存する状態)。これを解消するには:
+
+```bash
+# 旧 path → 新 path に migration (bd export → init → bd import)
+/migrate-beads-to-repo-local
+```
+
+`/migrate-beads-to-repo-local` は idempotent、`--dry-run` 対応、foreground 専用。
+詳細は `commands/migrate-beads-to-repo-local.md` 参照。
+
+旧 path (`~/.beads/<proj-hash>/`) は migration 完了時に削除される
+(v0.8.0 では rollback path を残さない、breaking cut)。rollback したい場合は
+事前に `/migrate-from-beads` で旧 YAML/JSON 形式に書き戻すこと。
 
 ## v0.5.x からのアップグレード時の注意
 
@@ -259,16 +309,19 @@ rmdir .claude/agent-memory/architect-reviewer 2>/dev/null || true
 
 ## 注意事項
 
-- 実行は project root (`.claude/` の親) で行う想定。それ以外のディレクトリで
-  実行すると意図しない場所に `.claude/` が作られる、`<proj-hash>` も別値に
-  なるため beads db が repo と紐付かない
+- 実行は **git repo root** (`.git/` の親、`.claude/` の親) で行うこと。
+  v0.8.0 から `<repo>/.beads/` に bd db が配置されるため、それ以外の dir で
+  実行すると bd が違う場所に init される
 - `~/.claude/agent-memory/` 配下は全プロジェクト共通の領域 (worktree 隔離の
   対象外)。`--bg` 起動 subagent はここに memory を書く
 - `~/.claude/agent-org/state/<proj-hash>/` は project ごとに分離されるため、
-  別プロジェクトの detection / fix と混ざらない
-- `~/.beads/<proj-hash>/` も同様に project ごとに分離 (cwd 移動で別 db を見る)
-- `bd init` は内部で git repo 化 + 初回 commit を行う。`~/.beads/<proj-hash>/.git/`
-  が作られるが、これは bd の内部実装で agent-org とは独立
+  別プロジェクトの learnings と混ざらない
+- `<repo>/.beads/` は **bd の git worktree-aware 設計** で main repo と worktree
+  間で同じ DB が共有される (ADR-007 evidence 参照)
+- `bd init` は repo の既存 `.git/` を使うため、独立 git repo を作らない
+  (`.beads/embeddeddolt/` のみ生成)
+- bd の `<repo>/.beads/` から `.git/` への直接書込は無い。`bd export` で
+  `<repo>/.beads/issues.jsonl` に書き、ユーザーが `git add` する opt-in workflow
 
 ## 関連
 
@@ -284,4 +337,5 @@ rmdir .claude/agent-memory/architect-reviewer 2>/dev/null || true
 - Phase 5 (v0.6.0): `skills/using-beads/`, `commands/bd-check.md`,
   `commands/migrate-to-beads.md`, `commands/migrate-from-beads.md`,
   `hooks/bd-export.sh`
+- v0.8.0 (ADR-007): `commands/migrate-beads-to-repo-local.md`
 - beads 公式: <https://github.com/steveyegge/beads>

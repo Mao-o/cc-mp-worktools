@@ -1,5 +1,158 @@
 # Changelog
 
+## 0.8.0 (2026-05-22) — BREAKING: bd path 規約変更 (`<repo>/.beads/`) + stealth mode
+
+ADR-007 (2026-05-22) 採用に伴う **breaking change**。bd の物理配置を
+`~/.beads/<proj-hash>/.beads/` から **`<repo>/.beads/`** に変更し、
+`bd init --stealth --skip-agents` で個人 git exclude (`.git/info/exclude`)
+を活用する形に統合。`BEADS_DIR` 明示指定を不要化し、`.gitignore` 編集も廃止。
+
+### Why (ADR-007 + amendment)
+
+v0.6.0 (ADR-006) で D 案 (`<repo>/.beads/` repo-local) を否決し C 案
+(`~/.beads/<proj-hash>/`) を採用したが、否決根拠だった「`--bg` セッションの
+worktree 隔離下での split-brain」推論が 2026-05-22 実機 PoC (`/tmp/bd-wt-poc-*/`)
+で覆った。bd は **git worktree-aware** に設計されており、`--bg` 隔離下でも
+main repo の `.beads/` を共有する。さらに ADR-006 の C 案では bd 1.0.4 の
+`bd init` reject 問題 (`cannot initialize bd inside a .beads directory`) が
+発生していた (bd_092a232e-z69)。本 release で D 案に切り替えることで両問題が
+原生的に解消し、bd の中核価値 (branch 切替で issue 状態分岐 / commit-level
+audit trail / git history 統合) が完全に動作する。
+
+加えてユーザー (Mao) の指摘で bd 1.0.4 の `--stealth` mode の存在が共有され、
+ADR-007 amendment で `bd init --stealth --skip-agents` を default に採用。
+`.git/info/exclude` (個人専用 git exclude、git で track されない) に `.beads/`
+を自動追加するため、`<repo>/.gitignore` を一切編集しない。"personal use without
+affecting repo collaborators" (bd 公式) に完全一致する設計。
+
+### Breaking changes
+
+- **bd 物理配置の変更**: `~/.beads/<proj-hash>/.beads/` → `<repo>/.beads/`
+  - 既存 v0.6.0/v0.7.x ユーザーは `/migrate-beads-to-repo-local` で新 path に
+    移行する必要がある。bd export → init --stealth → bd import 経路で
+    issue ID / labels / deps / priority / memories を完全保持
+  - 旧 path は migration tool で **削除される** (v0.8.0 は breaking cut、
+    rollback したい場合は `/migrate-from-beads` で旧 YAML/JSON に書き戻して
+    `claude plugin update agent-org -v 0.5.0` で pin)
+- **`BEADS_DIR` export 規律の廃止**: 全 subagent / hook / skill / command で
+  `cd <repo> && bd <subcmd>` パターンに統一。`BEADS_DIR` 明示指定は optional
+  (bd 自動 resolve に委ねる)
+- **`<repo>/.gitignore` 編集の廃止**: v0.6.0+ で追加していた `agent-org plugin
+  (v0.6.0+)` セクション (`!.beads/issues.jsonl` `.beads/embeddeddolt/` `.beads/dolt/`)
+  は v0.8.0 で書かない。bd init --stealth が `.git/info/exclude` に
+  `.beads/` を追加する個人 git exclude で代替
+
+### Changed
+
+- `commands/org-init.md`: 手順 4 を `(cd "$REPO_ROOT" && bd init --stealth
+  --skip-agents --non-interactive --prefix "$PROJ_HASH")` に書き換え。
+  手順 5 (`.gitignore` 編集) を `.git/info/exclude` verify に置換。
+  ADR-007 amendment への参照を追加
+- `skills/using-beads/SKILL.md`: Rule 1 を「v0.8.0: bd は `<repo>/.beads/` から
+  自動 resolve、`BEADS_DIR` 明示指定は optional」に書き換え。トラブルシュート
+  表に「旧 `~/.beads/<proj-hash>/.beads/` 残存時の `/migrate-beads-to-repo-local`
+  案内」を追加
+- `commands/bd-check.md`: section 3 (beads database directory) を `<repo>/.beads/`
+  検査に変更。section 3b で旧 path 残存検出 + migration 案内追加。section 8 を
+  `.git/info/exclude` の `.beads/` 行検出に変更 (stealth mode active 確認)。
+  全 bd invoke を `(cd $REPO_ROOT && bd ...)` パターンに統一
+- `commands/migrate-to-beads.md` / `migrate-from-beads.md` /
+  `migrate-approvals-to-beads.md`: `BEADS_DIR=~/.beads/<proj-hash>/.beads`
+  export を `<repo>/.beads/` ベースに変更、bd invoke を cd パターンに統一
+- `commands/run-review.md` / `start-watcher.md` / `fix-regression.md`:
+  preflight bd dir check + 起動後の確認 command を `<repo>/.beads/` ベースに、
+  bd invoke を cd パターンに統一。preflight 失敗時の案内テンプレも更新
+- `agents/regression-watcher.md` / `regression-fixer.md`: 起動時 preflight の
+  `BEADS_DIR` export を削除、`REPO_ROOT="$(git rev-parse --show-toplevel)"` +
+  `<repo>/.beads/` 存在チェックに置換。`bd prime` 含む全 bd invoke を
+  `(cd "$REPO_ROOT" && bd ...)` パターンに統一
+- `agents/architect-reviewer.md`: 真 RO 規律内の「approval 書込先」description
+  に v0.8.0 path note を追加 (構造変更なし、説明文のみ)
+- `hooks/bd-export.sh`: proj-hash 計算ロジックを削除、`<repo>/.beads/` を
+  source/output として直接利用 (cd `$repo_root` で bd 自動 resolve)
+- `hooks/task-completed-gate.sh`: BEADS_DIR 解決ロジックを
+  `git rev-parse --show-toplevel` ベースに置換、proj-hash 計算は削除。
+  bd invoke を cd パターンに統一
+- `hooks/stop-quality-gate.sh`: `approvals_clean` kind を `<repo>/.beads/`
+  ベースに同様変更
+- `docs/ARCHITECTURE.md`: Phase 5/6 path 記述、subgraph label、ファイルパス
+  規約表を v0.8.0 + ADR-007 reference に更新
+
+### Added
+
+- `commands/migrate-beads-to-repo-local.md` (新規): v0.7.x で蓄積された
+  `~/.beads/<proj-hash>/.beads/` を `<repo>/.beads/` に移行する one-shot
+  migration。`bd export` (旧 path) → `bd init --stealth` (新 path = `<repo>/`)
+  → `bd import` 経路で issue ID / labels / deps / priority / memories
+  を完全保持 (bd 1.0.4 round-trip サポート)。idempotent、`--dry-run` /
+  `--keep-old` (旧 path 保持 opt-in) 対応、foreground 専用。
+  default は migration 完了時に旧 path を `rm -rf` する (breaking cut)
+- ADR-007 yml の `amendments:` セクション (immutability 保持、本文不変)
+  に stealth mode 採用を記録
+
+### Migration from 0.7.x
+
+```text
+# 1. /org-init を再実行 (新 <repo>/.beads/ が初期化される)
+/org-init
+
+# 2. 旧 path から新 path へ migration (issue 完全保持)
+/migrate-beads-to-repo-local
+# (default で旧 ~/.beads/<proj-hash>/ は削除される。
+#  rollback したいなら事前に /migrate-from-beads で v0.5.x YAML/JSON 保存)
+```
+
+`.gitignore` に v0.6.0+ / v0.7.x の `# agent-org plugin (v0.6.0+)` セクションが
+残っている場合、`/bd-check` が WARN で残存通知する。手動で削除する。
+
+### Worktree-aware preflight 修正 (2026-05-22 検証で発見)
+
+`--bg` セッションは `.claude/worktrees/<id>/` に worktree 隔離されるため、
+worktree 内で `git rev-parse --show-toplevel` を呼ぶと **worktree path** が
+返り、`[ -d $REPO_ROOT/.beads ]` チェックで false になり「FATAL: not
+initialized」で abort する bug が判明。bd 自身は worktree-aware で動作する
+ため bd invoke 自体は worktree から main repo `.beads/` に到達するが、
+plugin preflight ロジック側が盲点だった。
+
+修正: 全 preflight + hooks で git common-dir 経由の main_repo 解決を採用:
+
+```bash
+MAIN_REPO="$(cd "$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)")" 2>/dev/null && pwd -P)"
+[ -n "$MAIN_REPO" ] || MAIN_REPO="$REPO_ROOT"
+# 以降は MAIN_REPO/.beads/ ベースで判定
+```
+
+修正対象 (本 entry の "### Changed" に統合済):
+
+- preflight 4 files: `agents/regression-watcher.md` / `regression-fixer.md`,
+  `commands/start-watcher.md` / `fix-regression.md`
+- hooks 3 files: `hooks/bd-export.sh` / `task-completed-gate.sh` /
+  `stop-quality-gate.sh`
+- aux 2 files: `commands/bd-check.md` (section 3 で worktree 検出表示),
+  `commands/org-init.md` (bd init を MAIN_REPO で実行)
+
+bd-export.sh の output (`issues.jsonl`) も MAIN_REPO 側に書込むよう修正
+(worktree 内 Stop でも main repo の audit snapshot が更新される)。
+
+### Verification (2026-05-22 実機 PoC)
+
+| 検証 | 結果 |
+|---|---|
+| `/tmp/bd-wt-poc-*/` git worktree-aware (bd は main repo `.beads/` を共有) | ✓ split-brain なし |
+| `/tmp/bd-stealth-poc-*/` `bd init --stealth` (`.git/info/exclude` 追加) | ✓ `.gitignore` 不要 |
+| bd export → bd init --stealth → bd import round-trip | ✓ issue 完全保持 (1.0.4 公式サポート) |
+| `/tmp/bd-v080-bg-poc-*/` `--bg` 隔離模擬 (git worktree) からの bd 共有 | ✓ worktree → main repo `.beads/` 共有確認 |
+| `/tmp/bd-v080-wt-recheck-*/` worktree-aware preflight + hook ロジック | ✓ preflight 通過 + bd export → main_repo に出力 |
+| ADR-006 否決根拠の再評価 | ✓ split-brain 推論が PoC で覆る |
+| bd 1.0.4 init reject 問題 (bd_092a232e-z69) | ✓ D 案で自然解消 |
+
+### 関連 ADR
+
+- ADR-005 (paired-with): SoT 採用判断 (不変)
+- ADR-006 (superseded): C 案 (`~/.beads/<proj-hash>/`) 配置 → 物理配置のみ訂正、
+  本文は immutable な歴史記録として保持
+- ADR-007 (本リリース): D 案 (`<repo>/.beads/`) 配置 + stealth mode amendment
+
 ## 0.7.2 (2026-05-22) — Hotfix: /migrate-approvals-to-beads idempotency
 
 Phase 6 検証で発見した bug の修正。`migrate-approvals-to-beads` の

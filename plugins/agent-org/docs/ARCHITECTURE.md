@@ -119,9 +119,11 @@ memory に蓄積していく。
 Phase 2 で `.claude/agent-memory/agent-org-decision-keeper/` (個別 ADR yml 含む) が
 追加される。Phase 3 で `.claude/agent-org/approvals/`、Phase 4 で
 `~/.claude/agent-org/state/<proj-hash>/` が追加される。
-Phase 5 (v0.6.0) で beads database (`~/.beads/<proj-hash>/`) が hard dependency に。
+Phase 5 (v0.6.0) で beads database が hard dependency に。
 Phase 6 (v0.7.0) で approval が bd 上 (type=approval、`.claude/agent-org/approvals/`
 は廃止 / 互換のため retain) に統合された。
+v0.8.0 (ADR-007) で bd の物理配置を `~/.beads/<proj-hash>/` から
+`<repo>/.beads/` に変更 (repo-local、bd の git worktree-aware 設計を活用)。
 
 ## Phase 2 のコンポーネント関係
 
@@ -210,7 +212,7 @@ graph TB
         AR3["architect-reviewer<br>perspective: performance"]
     end
 
-    subgraph BD3 ["~/.beads/&lt;proj-hash&gt;/.beads/ (bd, v0.7.0+)"]
+    subgraph BD3 ["&lt;repo&gt;/.beads/ (bd, v0.8.0+, ADR-007)"]
         BTASK["task issue<br>type=task, label task:&lt;id&gt;"]
         BAP["approval issue<br>type=approval,<br>priority 0/1/2/3,<br>label task:&lt;id&gt; / aggregate:&lt;v&gt; / perspective:&lt;p&gt;,<br>description: 集約 verdict YAML"]
     end
@@ -281,7 +283,7 @@ graph TB
 1. メインセッションで `TaskCompleted` が発火 (matcher 非対応・全件発火)
 2. hook が input JSON から **top-level `task_id`** を取得
 3. `task_id` 不在 (schema 違反) → exit 0 (fail-open)
-4. bd CLI / `BEADS_DIR` 不在 → exit 0 (fail-open)
+4. bd CLI / `<repo>/.beads/` 不在 → exit 0 (fail-open)
 5. bd で `task:<task_id>` ラベル付き approval (open) を検索:
    `bd list -l "task:${task_id}" -t approval --status open --json
     | jq '[.[] | select(.priority==0)] | length'`
@@ -303,7 +305,7 @@ graph TB
      (type=approval, priority=0, open) が 0 件ならパス。
      `bd list -t approval --status open --json
      | jq '[.[] | select(.priority==0)] | length'` で件数取得。
-     bd CLI / `BEADS_DIR` 不在で fail-open (pass)
+     bd CLI / `<repo>/.beads/` 不在で fail-open (pass)
 5. `required: true` の failing は collect、`required: false` は warn のみ
 6. failing があれば exit 2 (block)、無ければ exit 0
 
@@ -311,8 +313,8 @@ graph TB
 
 | 用途 | パス | 書く側 | 読む側 |
 |---|---|---|---|
-| approval bd issue (v0.7.0+) | `~/.beads/<proj-hash>/.beads/` 上の `type=approval` issue (label `task:<task_id>` + priority 0/1/2/3 + `aggregate:<v>` + `perspective:<p>` + description body に集約 verdict YAML) | `/run-review` command (`bd create -t approval`) | task-completed-gate.sh / stop-quality-gate.sh (approvals_clean) / main session (`bd list -l "task:<id>"`) |
-| task bd issue (v0.7.0+) | `~/.beads/<proj-hash>/.beads/` 上の `type=task` issue (label `task:<task_id>`、approval/fix の親) | `/run-review` find-or-create | approval/fix dep の起点 |
+| approval bd issue (v0.7.0+) | `<repo>/.beads/` 上の `type=approval` issue (label `task:<task_id>` + priority 0/1/2/3 + `aggregate:<v>` + `perspective:<p>` + description body に集約 verdict YAML)。v0.8.0 (ADR-007) で repo-local | `/run-review` command (`bd create -t approval`) | task-completed-gate.sh / stop-quality-gate.sh (approvals_clean) / main session (`(cd <repo> && bd list -l "task:<id>")`) |
+| task bd issue (v0.7.0+) | `<repo>/.beads/` 上の `type=task` issue (label `task:<task_id>`、approval/fix の親)。v0.8.0 (ADR-007) で repo-local | `/run-review` find-or-create | approval/fix dep の起点 |
 | approval JSON (v0.6.x 互換) | `.claude/agent-org/approvals/<task-id>.json` (v0.7.0 で廃止、`/migrate-approvals-to-beads` で bd 化、旧 JSON は `approvals.legacy/` に mv) | (v0.6.x) `/run-review` command | (v0.6.x) hooks |
 | quality-gates 設定 | `.claude/agent-org/quality-gates.json` | ユーザー (手書き) | stop-quality-gate.sh |
 | architect-reviewer memory | `.claude/agent-memory/agent-org-architect-reviewer/MEMORY.md` | architect-reviewer (curate 計画は会話出力、書込は command 側) | architect-reviewer 次回起動時 (auto-inject) |

@@ -1,5 +1,5 @@
 ---
-description: regression-watcher subagent を `--bg` + `/loop` で起動して定期 smoke check を開始する。foreground preflight (bd CLI / bd doctor / gh auth / git remote / claude CLI) を実行してから claude --agent agent-org:regression-watcher --bg を発射。v0.6.0 から beads が hard dependency
+description: regression-watcher subagent を `--bg` + `/loop` で起動して定期 smoke check を開始する。foreground preflight (bd CLI / bd doctor / gh auth / git remote / claude CLI) を実行してから claude --agent agent-org:regression-watcher --bg を発射。v0.6.0 から beads が hard dependency、v0.8.0 から `<repo>/.beads/` に repo-local (ADR-007、git worktree-aware)
 ---
 
 # /start-watcher
@@ -32,7 +32,7 @@ description: regression-watcher subagent を `--bg` + `/loop` で起動して定
 
 ```bash
 #!/usr/bin/env bash
-# /start-watcher preflight (v0.6.0: bd hard dependency)
+# /start-watcher preflight (v0.6.0: bd hard dependency, v0.8.0: bd repo-local at <repo>/.beads/)
 set -u
 
 errors=()
@@ -67,7 +67,7 @@ if ! command -v claude >/dev/null 2>&1; then
   errors+=("claude CLI が見つかりません (--bg 起動に必須)")
 fi
 
-# 5. proj-hash を計算 (bd dir 確認 + state dir 共通)
+# 5. proj-hash を計算 (MEMORY.md project section + label prefix 用、v0.8.0 から bd path には不要)
 proj_hash="$(python3 -c "
 import hashlib, os
 cwd = os.path.realpath(os.getcwd())
@@ -78,17 +78,32 @@ if [ -z "$proj_hash" ]; then
   errors+=("python3 で proj-hash 計算に失敗 (python3 が必要)")
 fi
 
-# 6. ~/.beads/<proj-hash>/.beads/ 初期化済み確認 (bd hard dependency)
-BEADS_PARENT="$HOME/.beads/$proj_hash"
-BEADS_DIR="$BEADS_PARENT/.beads"
-if [ -n "$proj_hash" ] && [ ! -d "$BEADS_DIR" ]; then
-  errors+=("$BEADS_DIR が未初期化。project root で '/org-init' を実行してください")
+# 6. <main_repo>/.beads/ 初期化済み確認 (v0.8.0 ADR-007: repo-local 配置)
+#    worktree 内で実行された場合に備えて git common-dir 経由で main repo を解決
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+if [ -z "$REPO_ROOT" ]; then
+  errors+=("not in a git repository。v0.8.0 から bd は <repo>/.beads/ に配置されるため git repo 内での実行が必須")
+  MAIN_REPO=""
+  BEADS_DIR=""
+else
+  MAIN_REPO="$(cd "$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)")" 2>/dev/null && pwd -P)"
+  [ -n "$MAIN_REPO" ] || MAIN_REPO="$REPO_ROOT"
+  BEADS_DIR="$MAIN_REPO/.beads"
+  if [ ! -d "$BEADS_DIR" ]; then
+    errors+=("$BEADS_DIR が未初期化。main repo root ($MAIN_REPO) で '/org-init' を実行してください")
+  fi
+fi
+
+# 6b. legacy path 検出 (v0.7.x 残骸警告)
+if [ -n "$proj_hash" ] && [ -d "$HOME/.beads/$proj_hash/.beads" ]; then
+  echo "info: ~/.beads/$proj_hash/.beads (v0.7.x legacy path) が残存しています。'/migrate-beads-to-repo-local' で <repo>/.beads/ に統合可能" >&2
 fi
 
 # 7. bd doctor (DB の健全性確認、preflight 段階で異常検出)
+#    v0.8.0: cd で bd 自動 resolve (worktree でも main repo .beads/ にアクセス)
 if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
-  if ! BEADS_DIR="$BEADS_DIR" bd doctor >/dev/null 2>&1; then
-    errors+=("bd doctor が失敗。'BEADS_DIR=$BEADS_DIR bd doctor' を foreground で実行して診断")
+  if ! (cd "$REPO_ROOT" && bd doctor >/dev/null 2>&1); then
+    errors+=("bd doctor が失敗。'(cd $REPO_ROOT && bd doctor)' を foreground で実行して診断")
   fi
 fi
 
@@ -141,10 +156,11 @@ claude agents
 (v0.6.0 から旧 YAML 形式は廃止)。検出があれば main session で:
 
 ```bash
-PROJ_HASH=<preflight で表示された値>
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t detection --status open --json | jq
+# v0.8.0: cd <repo> で bd 自動 resolve
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+(cd "$REPO_ROOT" && bd list -t detection --status open --json) | jq
 # または
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd ready -t detection
+(cd "$REPO_ROOT" && bd ready -t detection)
 ```
 
 で確認できる。
@@ -158,8 +174,9 @@ preflight bash script が `exit 1` で終わった場合、表示された error
 |---|---|
 | `bd CLI が見つかりません` | Mac: `brew install beads`、他は <https://github.com/steveyegge/beads> 参照 |
 | `jq が見つかりません` | Mac: `brew install jq` |
-| `~/.beads/<proj-hash>/.beads が未初期化` | project root で `/org-init` を実行 |
-| `bd doctor が失敗` | `BEADS_DIR=~/.beads/<proj-hash>/.beads bd doctor` を foreground で実行して診断 |
+| `<repo>/.beads が未初期化` | project root で `/org-init` を実行 (v0.8.0: ADR-007、repo-local 配置) |
+| `bd doctor が失敗` | `(cd <repo> && bd doctor)` を foreground で実行して診断 |
+| `not in a git repository` | v0.8.0 から bd は `<repo>/.beads/` 配置のため git repo 内での起動が必須。`git init` 後に再実行 |
 | `gh CLI が見つかりません` | <https://cli.github.com/> から install (Mac: `brew install gh`) |
 | `gh CLI が未認証です` | `gh auth login` をユーザー自身が foreground で実行 (`! gh auth login` を案内) |
 | `git remote 'origin' が未設定です` | `git remote add origin <git URL>` (PR 機能を将来使うために必要、現 watcher 用途では fixer 起動時にも preflight があるためここで止めている) |

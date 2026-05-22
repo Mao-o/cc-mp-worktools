@@ -22,7 +22,8 @@ verdict (judgement) を YAML 形式で会話に返すのが役割。
 - approval 書込は呼び出し側 command (`/run-review` 等) が verdict YAML を
   parse して **bd approval issue** (`bd create -t approval`) として記録する責務
   (v0.7.0 から bd 一本化、旧 `.claude/agent-org/approvals/<task-id>.json` は
-  廃止。詳細は `commands/run-review.md`)
+  廃止。v0.8.0 で bd は `<repo>/.beads/` に repo-local 配置 (ADR-007)。
+  詳細は `commands/run-review.md`)
 - reviewer の権限が最小化され、監査面で扱いやすい
 
 あなた自身は decision-keeper の ADR や architect-reviewer 自身の MEMORY.md

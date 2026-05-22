@@ -2,13 +2,15 @@
 name: using-beads
 description: |
   beads (bd CLI、Steve Yegge 製 git-backed graph issue tracker) を agent-org
-  plugin 内で扱う際の規律を提供する。`BEADS_DIR` の指し方、`bd prime` 必須、
-  query は `--json` + `jq`、`bd update --claim` atomic、description body は
-  v0.5.x 互換 YAML/JSON、Bash 直接 invoke (plugin slash command 経由禁止) 等の
-  ルールを参照する。
+  plugin 内で扱う際の規律を提供する。v0.8.0 から bd は `<repo>/.beads/` に
+  repo-local 配置 (ADR-007、git worktree-aware)、`BEADS_DIR` の明示指定は不要
+  (bd 自動 resolve、ただし `--bg` 等で cwd が不確実なら明示指定可)。
+  `bd prime` 必須、query は `--json` + `jq`、`bd update --claim` atomic、
+  description body は v0.5.x 互換 YAML/JSON、Bash 直接 invoke (plugin slash
+  command 経由禁止) 等のルールを参照する。
   Use when: agent-org の subagent (regression-watcher / regression-fixer /
   decision-keeper / architect-reviewer) で bd CLI を呼ぶ時、または手動で
-  `~/.beads/<proj-hash>/.beads/` を操作する時。
+  `<repo>/.beads/` を操作する時。
   Triggers: using-beads, bd CLI 規律, beads operations, bd create, bd list,
   bd update --claim, bd ready, bd dep add, bd prime, BEADS_DIR
 ---
@@ -16,38 +18,58 @@ description: |
 # Using Beads Skill
 
 agent-org plugin v0.6.0+ は **beads (`bd` CLI)** を detection / fix の単一情報源
-として使う。本 skill は subagent / main session が `bd` を呼ぶ際の規律を
-集約する (各 subagent 個別の prompt で全部書くと重複するため共通化)。
+として使う。v0.8.0 (ADR-007) で bd の物理配置を `<repo>/.beads/` に変更した。
+本 skill は subagent / main session が `bd` を呼ぶ際の規律を集約する (各
+subagent 個別の prompt で全部書くと重複するため共通化)。
 
 ## 起動条件
 
 - regression-watcher / regression-fixer 等の subagent が `bd create` /
   `bd list` / `bd update` を呼ぶ前
 - main session が `bd ready` / `bd show` で issue 状態を確認する時
-- migration script (`/migrate-to-beads`, `/migrate-from-beads`) を実装 / 修正する時
+- migration script (`/migrate-to-beads`, `/migrate-from-beads`,
+  `/migrate-beads-to-repo-local`) を実装 / 修正する時
 - 並列 fixer の atomic claim を実装する時
 
 ## 基本ルール
 
-### 1. `BEADS_DIR` は `.beads/` を直接指す
+### 1. v0.8.0: bd は `<repo>/.beads/` から自動 resolve される (BEADS_DIR 明示指定は optional)
 
 ```bash
-PROJ_HASH=$(python3 -c "
-import hashlib, os
-cwd = os.path.realpath(os.getcwd())
-print(hashlib.sha256(cwd.encode()).hexdigest()[:8])
-")
-export BEADS_DIR="$HOME/.beads/$PROJ_HASH/.beads"
+# v0.8.0 以降: cd <repo> または repo 内であれば bd が自動 resolve
+cd "$(git rev-parse --show-toplevel)"
+bd list -t detection --json
 ```
 
-- `~/.beads/<proj-hash>` (親 dir) を指すと `Error: no beads database found`
-  (2026-05-20 U8 検証済)
-- 全 `bd` 呼出の前に `export BEADS_DIR=...` するか、`BEADS_DIR=... bd <subcmd>`
-  形式で 1 行ずつ指定
+- bd は git worktree-aware に設計されており、repo root (`.beads/` の親) で
+  invoke すれば自動的に `<repo>/.beads/` を見つける
+- `--bg` セッションの worktree 隔離下でも、bd は main repo の `.beads/` を
+  共有する (ADR-007 evidence)
+- `cd` が現実的でない場合 (script で path が変動する等) のみ明示指定:
+  `BEADS_DIR="$(git rev-parse --show-toplevel)/.beads" bd <subcmd>`
+
+#### v0.7.x までとの互換ノート
+
+- v0.7.x: `BEADS_DIR=~/.beads/<proj-hash>/.beads` を全 invoke で明示指定する規律
+- v0.8.0: 明示指定不要 (bd 自動 resolve)。旧 path (`~/.beads/<proj-hash>/`) を
+  持つプロジェクトは `/migrate-beads-to-repo-local` で新 path に移行する
+
+#### BEADS_DIR を明示指定する場合の落とし穴 (v0.7.x の知見、v0.8.0 でも有効)
+
+`BEADS_DIR` を明示する場合、**親 dir ではなく `.beads/` 自体**を指す必要がある:
+
+```bash
+# OK
+BEADS_DIR="$(git rev-parse --show-toplevel)/.beads" bd list
+
+# NG (Error: no beads database found)
+BEADS_DIR="$(git rev-parse --show-toplevel)" bd list
+```
 
 ### 2. subagent 起動冒頭で `bd prime` を実行する
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
 bd prime 2>&1 | head -50
 ```
 
@@ -70,6 +92,8 @@ bd ready -t detection | grep ...
 
 - `bd list` / `bd show` / `bd ready` / `bd create` 全て `--json` flag 対応
 - 改行のある field (description 等) は `jq -r .description` で raw string 取得
+- `bd --json` の出力は **stderr に warning が混入することがある** ため、
+  python3 / jq parse 時は `2>/dev/null` で stderr を抑制
 
 ### 4. `bd update --claim` で atomic claim、conflict は retry
 
@@ -111,8 +135,8 @@ bd create "..." -t detection -p 1 -d "..."
 ```
 
 - 本 skill / 各 subagent prompt 内では **Bash 経由のみ**
-- `/bd-check` / `/migrate-to-beads` / `/migrate-from-beads` は **main session
-  限定** (foreground)
+- `/bd-check` / `/migrate-to-beads` / `/migrate-from-beads` /
+  `/migrate-beads-to-repo-local` は **main session 限定** (foreground)
 
 ### 7. label / priority の規約
 
@@ -151,6 +175,8 @@ bd dep add <child> <parent>
 - semantic: child は parent が close されるまで close 不可 + ready から除外
 - `bd link <child> <parent>` は `bd dep add` の alias (`--type blocks` がデフォルト)
 - `bd dep relate <id1> <id2>` で bidirectional な関連 (loose link)、Phase 6/7 で使う
+- bd 1.0.4+ は `--type supersedes` 公式サポート (再 review 等で旧 approval を
+  履歴管理する用途、`commands/run-review.md` 参照)
 
 ### 9. close 順序の規律
 
@@ -169,9 +195,10 @@ bd close $DETECTION_ID
 以下は **main session の foreground 承認後のみ**:
 
 - `bd close --force` (dep ガード bypass、データ整合性を壊す)
-- `~/.beads/<proj-hash>/` の rm -rf
+- `<repo>/.beads/` の rm -rf
 - `bd config set` (rollback できる設定変更も含む)
-- `/migrate-to-beads` / `/migrate-from-beads` (大量の write)
+- `/migrate-to-beads` / `/migrate-from-beads` / `/migrate-beads-to-repo-local`
+  (大量の write、または旧 path 削除)
 
 subagent (特に `--bg` の watcher/fixer) は上記を実行しない。
 
@@ -180,8 +207,8 @@ subagent (特に `--bg` の watcher/fixer) は上記を実行しない。
 - `bd` invoke が exit≠0 のとき: stderr を会話に surface してから `goal_status:
   error` で session を畳む。runtime fallback (旧 YAML/JSON 書込) は禁止
   (split-brain 防止)
-- `BEADS_DIR=... bd doctor` が FAIL: 何もせず main session に通知。DB 破損の
-  可能性があるため自動修復は試みない
+- `bd doctor` が FAIL: 何もせず main session に通知。DB 破損の可能性があるため
+  自動修復は試みない
 - `bd update --claim` の conflict: retry 上限 3 回、それを超えたら別 issue
   を選ぶか session を畳む
 
@@ -189,16 +216,19 @@ subagent (特に `--bg` の watcher/fixer) は上記を実行しない。
 
 | 症状 | 確認 |
 |---|---|
-| `Error: no beads database found` | `BEADS_DIR` が `.beads/` を直接指しているか (親 dir 指してないか) |
-| `invalid issue type: detection` / `approval` / `task` | `bd config set types.custom "detection,fix,approval,episode,task"` を実行したか (`/org-init` 内に含まれる)。bd 1.0.4 は `Warning: "types.custom" is not a recognized config key` を吐くが **設定は effective**、`bd types` 出力に反映される (v0.7.1 hotfix で実機確認、v0.7.0 で試した `custom.types` は逆に無視される)。verify は `bd types | grep -E "^  (detection\|fix\|approval\|episode\|task)$"` で done 判定 |
+| `Error: no beads database found` | cwd が repo 外か、`<repo>/.beads/` が未初期化 (`/org-init` を実行)。BEADS_DIR を明示指定している場合は `.beads/` 自体を指しているか (親 dir 指してないか) |
+| `invalid issue type: detection` / `approval` / `task` | `cd <repo> && bd config set types.custom "detection,fix,approval,episode,task"` を実行したか (`/org-init` 内に含まれる)。bd 1.0.4 は `Warning: "types.custom" is not a recognized config key` を吐くが **設定は effective**、`bd types` 出力に反映される (v0.7.1 hotfix で実機確認、v0.7.0 で試した `custom.types` は逆に無視される)。verify は `bd types \| grep -E "^  (detection\|fix\|approval\|episode\|task)$"` で done 判定 |
 | `cannot close X: blocked by open issues [Y]` | dep が正常動作している。先に Y を close する (順序: fix → detection) |
-| `Warning: beads.role not configured` | `cd ~/.beads/<proj-hash> && git config beads.role maintainer` (`/org-init` 内に含まれる) |
+| `Warning: beads.role not configured` | `cd <repo> && git config beads.role maintainer` (`/org-init` 内に含まれる) |
 | `bd q` で description を渡せない | `bd q` は title のみ。description 必須なら `bd create -d "..."` を使う |
+| 旧 `~/.beads/<proj-hash>/.beads/` が残っている | v0.7.x からの移行が未完了。`/migrate-beads-to-repo-local` で新 path に統合 |
 
 ## 関連
 
 - 公式 (Steve Yegge beads): <https://github.com/steveyegge/beads>
 - 初期化: `commands/org-init.md`
 - diagnose: `commands/bd-check.md`
-- migration: `commands/migrate-to-beads.md`, `commands/migrate-from-beads.md`
+- migration: `commands/migrate-to-beads.md`, `commands/migrate-from-beads.md`,
+  `commands/migrate-beads-to-repo-local.md`
 - 利用 subagent: `agents/regression-watcher.md`, `agents/regression-fixer.md`
+- 設計判断: ADR-007 (`<repo>/.beads/` repo-local 配置採用)

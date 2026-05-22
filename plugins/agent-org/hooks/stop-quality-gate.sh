@@ -38,9 +38,9 @@
 #
 # kind:
 #   - "command" (default): command を eval、exit code 0 ならパス
-#   - "approvals_clean": v0.7.0 から bd issue ベース。
-#     `bd list -t approval --status open --json` のうち priority=0
-#     (rejected) が 0 件ならパス。bd CLI / BEADS_DIR が無ければ fail-open
+#   - "approvals_clean": v0.7.0 から bd issue ベース、v0.8.0 から <repo>/.beads/ (ADR-007)。
+#     `(cd <repo> && bd list -t approval --status open --json)` のうち priority=0
+#     (rejected) が 0 件ならパス。bd CLI / <repo>/.beads/ が無ければ fail-open
 #     (pass)
 #
 # 動作:
@@ -50,7 +50,7 @@
 #   4. required=false の failing は warn のみ
 #   5. failing があれば exit 2 (block)、無ければ exit 0
 #
-# 依存: jq, (kind=approvals_clean 利用時) bd CLI + python3
+# 依存: jq, (kind=approvals_clean 利用時) bd CLI + git
 
 set -euo pipefail
 
@@ -119,19 +119,17 @@ while [ "$i" -lt "$gate_count" ]; do
       ;;
     approvals_clean)
       # v0.7.0: bd issue ベース (type=approval, priority=0 → rejected)
+      # v0.8.0: <repo>/.beads/ から bd 自動 resolve (ADR-007)
+      # --bg 隔離下では cwd が worktree path なので、git common-dir 経由で
+      # main_repo を解決 (bd は worktree-aware で main repo .beads/ を共有)
       rejected_count=0
-      if command -v bd >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-        proj_hash="$(python3 -c "
-import hashlib, os, sys
-try:
-    print(hashlib.sha256(os.path.realpath('$cwd').encode()).hexdigest()[:8])
-except Exception:
-    sys.exit(1)
-" 2>/dev/null || true)"
-        if [ -n "$proj_hash" ]; then
-          beads_dir="$HOME/.beads/$proj_hash/.beads"
-          if [ -d "$beads_dir" ]; then
-            rejected_count="$(BEADS_DIR="$beads_dir" bd list -t approval --status open --json 2>/dev/null \
+      if command -v bd >/dev/null 2>&1; then
+        repo_root="$(cd "$cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "")"
+        if [ -n "$repo_root" ]; then
+          main_repo="$(cd "$cwd" 2>/dev/null && cd "$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)")" 2>/dev/null && pwd -P)"
+          [ -n "$main_repo" ] || main_repo="$repo_root"
+          if [ -d "$main_repo/.beads" ]; then
+            rejected_count="$(cd "$repo_root" && bd list -t approval --status open --json 2>/dev/null \
               | jq '[.[] | select(.priority==0)] | length' 2>/dev/null || echo 0)"
             [ -z "$rejected_count" ] && rejected_count=0
           fi
@@ -139,7 +137,7 @@ except Exception:
       fi
       if [ "$rejected_count" != "0" ]; then
         result="fail"
-        detail="${rejected_count} rejected approval(s) in bd (priority=0, open). Inspect: BEADS_DIR=\$HOME/.beads/\$proj_hash/.beads bd list -t approval --status open"
+        detail="${rejected_count} rejected approval(s) in bd (priority=0, open). Inspect: (cd ${main_repo:-$repo_root} && bd list -t approval --status open)"
       fi
       ;;
     *)

@@ -1,14 +1,15 @@
 ---
-description: v0.5.x で蓄積された `~/.claude/agent-org/state/<proj-hash>/{detections,fixes}/` を beads issue に変換する one-shot migration。foreground 専用、idempotent、旧ファイルは削除せず残す
+description: v0.5.x で蓄積された `~/.claude/agent-org/state/<proj-hash>/{detections,fixes}/` を beads issue に変換する one-shot migration。foreground 専用、idempotent、旧ファイルは削除せず残す。v0.8.0 (ADR-007) で bd は `<repo>/.beads/` に repo-local
 ---
 
 # /migrate-to-beads
 
 v0.5.x までの `detections/*.yaml` (regression-watcher 出力) と `fixes/*.json`
-(regression-fixer 出力) を **beads issue** (`~/.beads/<proj-hash>/.beads/`) に
+(regression-fixer 出力) を **beads issue** (`<repo>/.beads/`) に
 変換する one-shot migration。
 
-v0.6.0 で beads が hard dependency になるため、既存 state を持つプロジェクトは
+v0.6.0 で beads が hard dependency になり、v0.8.0 で bd の物理配置が
+`<repo>/.beads/` (repo-local) に変わった。既存 state を持つプロジェクトは
 このコマンドで bd に取り込む必要がある。foreground 専用 (一度に大量の `bd
 create` を発火するため、background では auto-deny される)。
 
@@ -25,7 +26,7 @@ create` を発火するため、background では auto-deny される)。
 ## 前提条件
 
 - `bd` CLI が install 済 (`brew install beads` / Mac)
-- `~/.beads/<proj-hash>/.beads/` が初期化済 (未なら `/org-init` を先に実行)
+- `<repo>/.beads/` が初期化済 (未なら `/org-init` を先に実行)
 - `yq` (YAML parser、Mac: `brew install yq`) — detection YAML パースに必要
 - `jq` — fix JSON パースに必要
 
@@ -48,8 +49,11 @@ cwd = os.path.realpath(os.getcwd())
 print(hashlib.sha256(cwd.encode()).hexdigest()[:8])
 ")
 
-BEADS_PARENT="$HOME/.beads/$PROJ_HASH"
-export BEADS_DIR="$BEADS_PARENT/.beads"
+# v0.8.0: bd は <repo>/.beads/ に配置、cd <repo> で bd 自動 resolve
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+[ -n "$REPO_ROOT" ] || { echo "FATAL: not in a git repo"; exit 1; }
+
+BEADS_DIR="$REPO_ROOT/.beads"
 STATE_DIR="$HOME/.claude/agent-org/state/$PROJ_HASH"
 
 [ -d "$BEADS_DIR" ] || { echo "FATAL: $BEADS_DIR not initialized. Run /org-init first"; exit 1; }
@@ -58,6 +62,10 @@ STATE_DIR="$HOME/.claude/agent-org/state/$PROJ_HASH"
 
 DRY_RUN="${1:-}"
 [ "$DRY_RUN" = "--dry-run" ] && echo "[DRY RUN] no bd writes will be performed"
+
+# 以降の bd invoke はすべて (cd "$REPO_ROOT" && bd ...) パターンで動作
+# (bd の git worktree-aware 自動 resolve に委ねる、ADR-007)
+cd "$REPO_ROOT"
 ```
 
 ### 2. detection YAML → bd issue (type=detection)
@@ -227,7 +235,7 @@ fi
 ```bash
 echo ""
 echo "=== migration summary ==="
-echo "BEADS_DIR=$BEADS_DIR"
+echo "BEADS_DIR (auto-resolved): $BEADS_DIR"
 detection_count="$(bd list -t detection -l agent-org --json 2>/dev/null | jq 'length')"
 fix_count="$(bd list -t fix -l agent-org --json 2>/dev/null | jq 'length')"
 echo "detection issues (with agent-org label): $detection_count"
@@ -263,6 +271,7 @@ echo "確認後に旧ファイルを物理削除したい場合は Phase 9 の /
 
 - 初期化: `commands/org-init.md`
 - rollback: `commands/migrate-from-beads.md`
+- bd path 移行 (v0.7.x→v0.8.0): `commands/migrate-beads-to-repo-local.md`
 - diagnose: `commands/bd-check.md`
 - bd 規律: `skills/using-beads/SKILL.md`
 - beads 公式: <https://github.com/steveyegge/beads>

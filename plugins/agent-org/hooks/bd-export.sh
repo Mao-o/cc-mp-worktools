@@ -3,9 +3,11 @@
 #
 # Stop hook for agent-org plugin (v0.6.0+).
 # beads (bd CLI) の DB を <repo>/.beads/issues.jsonl にスナップショット export
-# する。D1 (`.beads/` を `~/.beads/<proj-hash>/` に配置) のトレードオフ補償
-# として、ユーザーが選択的に `git add .beads/issues.jsonl` できるよう audit
-# trail を repo 内に置く opt-in workflow。
+# する。git audit trail 補償として、ユーザーが選択的に `git add .beads/issues.jsonl`
+# できるよう repo 内に置く opt-in workflow。
+#
+# v0.8.0 (ADR-007) から bd 自体が <repo>/.beads/ に repo-local 配置のため、
+# export source と output は同じ親 dir (<repo>/.beads/) に並ぶ。
 #
 # 動作原則: fail-open
 #   - bd 未 install / jq 未 install / DB 未初期化 / export 失敗
@@ -27,7 +29,7 @@
 #   - 無ければ fallback として `bd list --json | jq -c '.[]'` で同等形式に変換
 #   - どちらも失敗したら warn + exit 0
 #
-# 依存: bd, jq, python3 (or shasum/sha256sum), date
+# 依存: bd, jq, date
 
 set -uo pipefail
 trap 'exit 0' ERR
@@ -65,54 +67,36 @@ fi
 
 canonical_cwd="$(cd "$cwd" 2>/dev/null && pwd -P)" || canonical_cwd="$cwd"
 
-# proj-hash 計算
-proj_hash=""
-if command -v python3 >/dev/null 2>&1; then
-  proj_hash="$(python3 -c '
-import hashlib, sys
-print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])
-' "$canonical_cwd" 2>/dev/null || echo "")"
-elif command -v shasum >/dev/null 2>&1; then
-  proj_hash="$(printf '%s' "$canonical_cwd" | shasum -a 256 | cut -c1-8)"
-elif command -v sha256sum >/dev/null 2>&1; then
-  proj_hash="$(printf '%s' "$canonical_cwd" | sha256sum | cut -c1-8)"
-fi
-
-if [ -z "$proj_hash" ]; then
-  warn "failed to compute proj-hash; skip"
+# repo root 確認 (git repo であること、v0.8.0 から bd は <repo>/.beads/ に配置)
+# worktree 内で起動された場合 (--bg `.claude/worktrees/<id>/`) は
+# git rev-parse --show-toplevel が worktree path を返す。bd は worktree-aware
+# で main repo `.beads/` を共有するため、git common-dir 経由で main repo を解決。
+repo_root="$(cd "$canonical_cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "")"
+if [ -z "$repo_root" ]; then
+  # silent skip: git repo 外での Stop は audit trail 対象外
   exit 0
 fi
+main_repo="$(cd "$canonical_cwd" 2>/dev/null && cd "$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)")" 2>/dev/null && pwd -P)"
+[ -n "$main_repo" ] || main_repo="$repo_root"
 
-# BEADS_DIR が存在しなければ skip (未 /org-init プロジェクト)
-BEADS_DIR="${HOME}/.beads/${proj_hash}/.beads"
+# BEADS_DIR (= <main_repo>/.beads/) が存在しなければ skip (未 /org-init プロジェクト)
+BEADS_DIR="${main_repo}/.beads"
 if [ ! -d "$BEADS_DIR" ]; then
   # silent skip: 多数のプロジェクトで /org-init していない状態を想定
   exit 0
 fi
 
-# repo root 確認 (git repo であること)
-repo_root="$(cd "$canonical_cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "")"
-if [ -z "$repo_root" ]; then
-  warn "not a git repo (cwd=$canonical_cwd); skip"
-  exit 0
-fi
-
-# <repo>/.beads/ を作成 (.gitignore で embeddeddolt/ と dolt/ は ignore、
-# issues.jsonl のみ git 管理されるよう /org-init が設定済の前提)
-mkdir -p "${repo_root}/.beads" 2>/dev/null || {
-  warn "cannot mkdir ${repo_root}/.beads; skip"
-  exit 0
-}
-
-out="${repo_root}/.beads/issues.jsonl"
+# output も main_repo の .beads/ に書く (worktree 内で stop しても main repo に export)
+out="${BEADS_DIR}/issues.jsonl"
 tmp="${out}.tmp.$$"
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")"
 
 # bd export を試す。help にあれば使う。
+# v0.8.0: cd "$repo_root" で bd 自動 resolve (worktree でも main repo .beads/ にアクセス)
 exported=0
-if BEADS_DIR="$BEADS_DIR" bd export --help >/dev/null 2>&1; then
-  if BEADS_DIR="$BEADS_DIR" bd export >"$tmp" 2>/dev/null; then
+if (cd "$repo_root" && bd export --help >/dev/null 2>&1); then
+  if (cd "$repo_root" && bd export >"$tmp" 2>/dev/null); then
     mv "$tmp" "$out"
     exported=1
   else
@@ -123,7 +107,7 @@ fi
 
 # Fallback: bd list --json でスナップショット作成 (1 行 1 issue 形式)
 if [ "$exported" = "0" ]; then
-  if BEADS_DIR="$BEADS_DIR" bd list --json 2>/dev/null \
+  if (cd "$repo_root" && bd list --json 2>/dev/null) \
       | jq -c '.[]' >"$tmp" 2>/dev/null; then
     if [ -s "$tmp" ]; then
       mv "$tmp" "$out"
@@ -142,11 +126,12 @@ fi
 
 # 末尾に export metadata 行を追加すると jsonl の互換性を壊すため、別ファイルに
 # 書く: <repo>/.beads/issues.jsonl.meta
-meta="${repo_root}/.beads/issues.jsonl.meta"
+meta="${BEADS_DIR}/issues.jsonl.meta"
 issue_count="$(wc -l <"$out" 2>/dev/null | tr -d '[:space:]' || echo "0")"
 {
   echo "exported_at: $ts"
-  echo "proj_hash: $proj_hash"
+  echo "main_repo: $main_repo"
+  echo "invoked_from: $repo_root"
   echo "issue_count: $issue_count"
   echo "source: ${exported_method:-bd_export}"
 } > "$meta" 2>/dev/null || true

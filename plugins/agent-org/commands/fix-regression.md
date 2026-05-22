@@ -1,5 +1,5 @@
 ---
-description: regression-fixer subagent を `--bg` + `/goal` で起動し、condition 達成まで自律修正ループを回す。foreground preflight (bd CLI / .beads / gh auth / git remote / branch 衝突) 必須。target 未指定時は bd ready から最優先 detection を自動選択。v0.6.0 から beads が hard dependency
+description: regression-fixer subagent を `--bg` + `/goal` で起動し、condition 達成まで自律修正ループを回す。foreground preflight (bd CLI / .beads / gh auth / git remote / branch 衝突) 必須。target 未指定時は bd ready から最優先 detection を自動選択。v0.6.0 から beads が hard dependency、v0.8.0 から `<repo>/.beads/` に repo-local (ADR-007、git worktree-aware)
 ---
 
 # /fix-regression
@@ -40,7 +40,7 @@ description: regression-fixer subagent を `--bg` + `/goal` で起動し、condi
 
 ```bash
 #!/usr/bin/env bash
-# /fix-regression preflight (v0.6.0: bd hard dependency)
+# /fix-regression preflight (v0.6.0: bd hard dependency, v0.8.0: bd repo-local at <repo>/.beads/)
 set -u
 
 errors=()
@@ -81,7 +81,7 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   warnings+=("作業ツリーに未 commit の変更があります。fixer の修正と混ざる可能性")
 fi
 
-# 6. proj-hash 計算
+# 6. proj-hash 計算 (MEMORY.md project section + label prefix 用、v0.8.0 から bd path には不要)
 proj_hash="$(python3 -c "
 import hashlib, os
 cwd = os.path.realpath(os.getcwd())
@@ -92,16 +92,32 @@ if [ -z "$proj_hash" ]; then
   errors+=("python3 で proj-hash 計算に失敗")
 fi
 
-# 7. ~/.beads/<proj-hash>/.beads/ 初期化済み確認
-BEADS_DIR="$HOME/.beads/$proj_hash/.beads"
-if [ -n "$proj_hash" ] && [ ! -d "$BEADS_DIR" ]; then
-  errors+=("$BEADS_DIR が未初期化。project root で '/org-init' を実行してください")
+# 7. <main_repo>/.beads/ 初期化済み確認 (v0.8.0 ADR-007: repo-local 配置)
+#    worktree 内で実行された場合に備えて git common-dir 経由で main repo を解決
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+if [ -z "$REPO_ROOT" ]; then
+  errors+=("not in a git repository。v0.8.0 から bd は <repo>/.beads/ に配置されるため git repo 内での実行が必須")
+  MAIN_REPO=""
+  BEADS_DIR=""
+else
+  MAIN_REPO="$(cd "$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)")" 2>/dev/null && pwd -P)"
+  [ -n "$MAIN_REPO" ] || MAIN_REPO="$REPO_ROOT"
+  BEADS_DIR="$MAIN_REPO/.beads"
+  if [ ! -d "$BEADS_DIR" ]; then
+    errors+=("$BEADS_DIR が未初期化。main repo root ($MAIN_REPO) で '/org-init' を実行してください")
+  fi
+fi
+
+# 7b. legacy path 検出 (v0.7.x 残骸警告)
+if [ -n "$proj_hash" ] && [ -d "$HOME/.beads/$proj_hash/.beads" ]; then
+  echo "info: ~/.beads/$proj_hash/.beads (v0.7.x legacy path) が残存しています。'/migrate-beads-to-repo-local' で <repo>/.beads/ に統合可能"
 fi
 
 # 8. bd doctor (DB の健全性確認)
+#    v0.8.0: cd で bd 自動 resolve (worktree でも main repo .beads/ にアクセス)
 if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
-  if ! BEADS_DIR="$BEADS_DIR" bd doctor >/dev/null 2>&1; then
-    errors+=("bd doctor が失敗。'BEADS_DIR=$BEADS_DIR bd doctor' を foreground で実行して診断")
+  if ! (cd "$REPO_ROOT" && bd doctor >/dev/null 2>&1); then
+    errors+=("bd doctor が失敗。'(cd $REPO_ROOT && bd doctor)' を foreground で実行して診断")
   fi
 fi
 
@@ -111,7 +127,7 @@ case "$target" in
   "")
     # target 未指定: bd ready から自動選択可能か確認
     if [ -d "$BEADS_DIR" ]; then
-      ready_count="$(BEADS_DIR=$BEADS_DIR bd ready -t detection --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+      ready_count="$(cd "$REPO_ROOT" && bd ready -t detection --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
       if [ "$ready_count" = "0" ]; then
         warnings+=("bd ready -t detection に open issue がありません (no work to do)")
       else
@@ -132,8 +148,8 @@ case "$target" in
     # detection:<bd-issue-id> 形式、bd で issue 存在確認
     bd_id="${target#detection:}"
     if [ -d "$BEADS_DIR" ] && [ -n "$bd_id" ]; then
-      if ! BEADS_DIR="$BEADS_DIR" bd show "$bd_id" >/dev/null 2>&1; then
-        errors+=("detection issue '$bd_id' が bd に見つかりません ('bd list -t detection' で確認)")
+      if ! (cd "$REPO_ROOT" && bd show "$bd_id" >/dev/null 2>&1); then
+        errors+=("detection issue '$bd_id' が bd に見つかりません ('(cd $REPO_ROOT && bd list -t detection)' で確認)")
       fi
     fi
     # 新規 branch 衝突チェック
@@ -245,11 +261,12 @@ claude --agent agent-org:regression-fixer --bg "/goal ${condition}"
 claude agents
 
 # fixer が作成した fix issue を bd 上で確認 (完了時に description が確定)
-PROJ_HASH=<preflight で表示された値>
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix --status open --json | jq
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix --status closed --json | jq
+# v0.8.0: cd <repo> で bd 自動 resolve
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+(cd "$REPO_ROOT" && bd list -t fix --status open --json) | jq
+(cd "$REPO_ROOT" && bd list -t fix --status closed --json) | jq
 # 個別確認
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd show <fix-id>
+(cd "$REPO_ROOT" && bd show <fix-id>)
 
 # PR の状況確認
 gh pr view <PR#>
@@ -265,7 +282,7 @@ gh pr checks <PR#>
 error 終了した fix は `outcome:error` label が付くため、まとめて確認するには:
 
 ```bash
-BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix -l outcome:error --json | jq
+(cd "$REPO_ROOT" && bd list -t fix -l outcome:error --json) | jq
 ```
 
 ## preflight 失敗時のユーザー案内テンプレ
@@ -274,9 +291,10 @@ BEADS_DIR=~/.beads/$PROJ_HASH/.beads bd list -t fix -l outcome:error --json | jq
 |---|---|
 | `bd CLI が見つかりません` | Mac: `brew install beads`、他は <https://github.com/steveyegge/beads> 参照 |
 | `jq が見つかりません` | Mac: `brew install jq` |
-| `~/.beads/<proj-hash>/.beads が未初期化` | project root で `/org-init` を実行 |
-| `bd doctor が失敗` | `BEADS_DIR=~/.beads/<proj-hash>/.beads bd doctor` を foreground で実行して診断 |
-| `detection issue '<id>' が bd に見つかりません` | `bd list -t detection` で実在 ID を確認、または `bd ready -t detection` で別 target を選択 |
+| `<repo>/.beads が未初期化` | project root で `/org-init` を実行 (v0.8.0: ADR-007、repo-local 配置) |
+| `bd doctor が失敗` | `(cd <repo> && bd doctor)` を foreground で実行して診断 |
+| `not in a git repository` | v0.8.0 から bd は `<repo>/.beads/` 配置のため git repo 内での起動が必須 |
+| `detection issue '<id>' が bd に見つかりません` | `(cd <repo> && bd list -t detection)` で実在 ID を確認、または `bd ready -t detection` で別 target を選択 |
 | `gh CLI が見つかりません` | <https://cli.github.com/> から install (`brew install gh`) |
 | `gh CLI が未認証です` | `! gh auth login` (foreground で実行) |
 | `git remote 'origin' が未設定です` | `git remote add origin <url>` |
