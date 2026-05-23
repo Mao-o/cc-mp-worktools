@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.1 (2026-05-23) — Bugfix: bd-check の bd doctor 判定 + bd-export の source field
+
+v0.8.0 release 後のドッグフーディング (worktools 自体への v0.8.0 適用) で
+発覚した副次的 bug 2 件を修正する patch release。機能変更なし。
+
+### Fixed
+
+- **`commands/bd-check.md` [4] bd doctor**: bd 1.0.4 embedded mode (現 default)
+  は `bd doctor` 未サポートで「Note: 'bd doctor' is not yet supported in
+  embedded mode」を **exit 0** で返すため、従来の `[ "$doctor_exit" = "0" ]`
+  判定が「PASS: bd doctor reports DB healthy」と**誤判定**していた。output に
+  "not yet supported" を含む場合は WARN 扱い (skip DB health check) に変更。
+  server mode (`bd init --server`) のみ PASS/FAIL 判定が有効
+- **`hooks/bd-export.sh` source field**: meta 出力
+  `source: ${exported_method:-bd_export}` で `exported_method` 変数が script
+  内で一度も set されておらず、bd export 経路でも fallback 経路でも常に
+  "bd_export" と記録されて診断時の誤情報源となっていた。各分岐で
+  `exported_method="bd_export"` / `"bd_list_fallback"` /
+  `"bd_list_fallback_empty"` を set するよう修正
+
+### Verification
+
+- `claude plugin validate plugins/agent-org` warning 0 通過
+- 修正後 worktools 自体で `/bd-check` 再実行: `[4] bd doctor` が WARN
+  ("not supported in embedded mode") に正しく変わる
+- bd-export hook 再発火: meta `source` field が "bd_export" になることを実機確認
+
 ## 0.8.0 (2026-05-22) — BREAKING: bd path 規約変更 (`<repo>/.beads/`) + stealth mode
 
 ADR-007 (2026-05-22) 採用に伴う **breaking change**。bd の物理配置を

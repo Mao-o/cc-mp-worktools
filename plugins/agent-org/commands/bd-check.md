@@ -112,11 +112,18 @@ fi
 echo ""
 
 # --- 4. bd doctor (DB 健全性) ---
+# bd 1.0.4 embedded mode (現 default) は `bd doctor` 未サポートで、
+# "Note: 'bd doctor' is not yet supported in embedded mode" を exit 0 で返す。
+# このケースを PASS と誤判定しないよう、output に "not yet supported" が
+# 含まれる場合は WARN として扱う (v0.8.1 bugfix)。
 echo "[4] bd doctor"
 if command -v bd >/dev/null 2>&1 && [ -d "$BEADS_DIR" ]; then
   doctor_out="$(cd "$REPO_ROOT" && bd doctor 2>&1)"
   doctor_exit=$?
-  if [ "$doctor_exit" = "0" ]; then
+  if echo "$doctor_out" | grep -q "not yet supported"; then
+    warn "bd doctor not supported in embedded mode (bd 1.0.4); DB health check skipped"
+    echo "$doctor_out" | head -3 | sed 's/^/    /'
+  elif [ "$doctor_exit" = "0" ]; then
     pass "bd doctor reports DB healthy"
     echo "$doctor_out" | head -3 | sed 's/^/    /'
   else

@@ -94,11 +94,15 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")"
 
 # bd export を試す。help にあれば使う。
 # v0.8.0: cd "$repo_root" で bd 自動 resolve (worktree でも main repo .beads/ にアクセス)
+# v0.8.1: exported_method 変数を分岐ごとに set し、meta の source field が
+#         実際の経路を正確に伝えるよう修正
 exported=0
+exported_method=""
 if (cd "$repo_root" && bd export --help >/dev/null 2>&1); then
   if (cd "$repo_root" && bd export >"$tmp" 2>/dev/null); then
     mv "$tmp" "$out"
     exported=1
+    exported_method="bd_export"
   else
     warn "bd export failed; will try fallback"
     rm -f "$tmp"
@@ -112,10 +116,12 @@ if [ "$exported" = "0" ]; then
     if [ -s "$tmp" ]; then
       mv "$tmp" "$out"
       exported=1
+      exported_method="bd_list_fallback"
     else
       # 空でも 0 byte の jsonl を残しておく (snapshot されたこと自体は記録)
       mv "$tmp" "$out"
       exported=1
+      exported_method="bd_list_fallback_empty"
     fi
   else
     warn "bd list fallback failed; skip"
