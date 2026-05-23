@@ -154,7 +154,13 @@ def _resolve_page_ref(entries: list[dict], page_ref: str) -> int:
         die_index_out_of_range(idx, len(entries))
 
     if page_ref.startswith("http://") or page_ref.startswith("https://"):
-        target = normalize_doc_url(page_ref)
+        # Use _entry_url_for_match on both sides so a URL copied verbatim from
+        # search-index output (which retains ``.md.txt``) still matches a
+        # human-facing page URL stored in the index. Without this, the two
+        # paths are asymmetric: only the entry side strips ``.md.txt``, so
+        # ``content --page-ref https://.../vector-search.md.txt`` would fail
+        # even though that page exists. (Codex Review P2 feedback on PR #17.)
+        target = _entry_url_for_match(page_ref)
         for i, entry in enumerate(entries):
             if _entry_url_for_match(entry.get("url", "")) == target:
                 return i

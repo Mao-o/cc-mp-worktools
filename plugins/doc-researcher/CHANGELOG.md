@@ -79,6 +79,15 @@ claude-docs は 0.5.0 で既に新 API を実装済み。本 release で他 2 sc
   正常に取得できる (cache hit 時 ~1 秒)
 - `parse-claude-docs.py search "hook" --index-limit 2` の既存挙動は維持 (regression なし)
 
+### Fix
+
+- `parse-firebase.py` の `_resolve_page_ref` で `page_ref` に完全 URL (e.g.
+  `search-index` 出力の `URL:` 行をそのままコピペした `.md.txt` 付き URL)
+  を渡したときに `No page found for URL` で fail するバグを修正。ユーザー
+  入力側にも `_entry_url_for_match()` を適用して両側で `.md.txt` を剥がして
+  から比較するようにした。SKILL.md / README で「完全 URL 受付」と謳って
+  いるのと挙動を一致させる (Codex Review P2 feedback on PR #17)
+
 ### 設計判断記録 (subagent fork 維持)
 
 3 SKILL の `context: fork + model: sonnet` 構成は **維持** する設計判断を明文化
