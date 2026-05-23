@@ -195,7 +195,10 @@ def _extract_h1_h2_titles(body_lines: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _default_cache_path(cache_dir: str) -> str:
-    return os.path.join(cache_dir.rstrip("/"), DEFAULT_CACHE_FILENAME)
+    # Avoid rstrip("/"): cache_dir="/" would become "" and os.path.join("", ...)
+    # returns a relative path. os.path.join already handles trailing slashes
+    # in cache_dir correctly. (Codex Review P3 feedback on PR #17.)
+    return os.path.join(cache_dir, DEFAULT_CACHE_FILENAME)
 
 
 def fetch_llms_txt(cache_path: str) -> str:

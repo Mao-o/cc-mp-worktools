@@ -87,6 +87,11 @@ claude-docs は 0.5.0 で既に新 API を実装済み。本 release で他 2 sc
   入力側にも `_entry_url_for_match()` を適用して両側で `.md.txt` を剥がして
   から比較するようにした。SKILL.md / README で「完全 URL 受付」と謳って
   いるのと挙動を一致させる (Codex Review P2 feedback on PR #17)
+- `parse-ai-sdk.py` の `_default_cache_path` / `parse-firebase.py` の
+  `_index_cache_path` / `_pages_cache_dir` で `cache_dir.rstrip("/")` が
+  `cache_dir="/"` を空文字列にしてしまい、`os.path.join("", filename)` が
+  相対パスを返すバグを修正。`os.path.join` は trailing slash を自動処理する
+  ため rstrip は元々不要 (Codex Review P3 feedback on PR #17)
 
 ### 設計判断記録 (subagent fork 維持)
 

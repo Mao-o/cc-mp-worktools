@@ -87,11 +87,14 @@ def _url_to_cache_filename(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _index_cache_path(cache_dir: str) -> str:
-    return os.path.join(cache_dir.rstrip("/"), INDEX_CACHE_NAME)
+    # Avoid rstrip("/"): cache_dir="/" would become "" and os.path.join("", ...)
+    # returns a relative path. os.path.join already handles trailing slashes
+    # in cache_dir correctly. (Codex Review P3 feedback on PR #17.)
+    return os.path.join(cache_dir, INDEX_CACHE_NAME)
 
 
 def _pages_cache_dir(cache_dir: str) -> str:
-    return os.path.join(cache_dir.rstrip("/"), PAGES_CACHE_SUBDIR)
+    return os.path.join(cache_dir, PAGES_CACHE_SUBDIR)
 
 
 def _load_index(cache_dir: str) -> list[dict]:
