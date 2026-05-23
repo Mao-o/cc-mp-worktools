@@ -44,12 +44,17 @@ description: |
   安定性が未検証
 - **Agent Teams は worktree 非隔離** (公式 `code.claude.com/docs/en/agents`:
   "Agent teams don't isolate teammates in worktrees, so partition the work
-  so each teammate owns a different set of files")。teammate が write すると
-  同一 checkout で**ファイル上書き競合**が発生する。本 skill は
-  architect-reviewer の真 RO 規律 (`tools: Read,Glob,Grep`) で原理的に回避
-  している。**reviewer 以外の用途 (並列 write) に Agent Teams を流用しては
-  いけない**。並列 write が必要な場合は複数の `claude --bg` セッションを
-  独立起動すること (各セッションが `.claude/worktrees/<id>/` に自動隔離される)
+  so each teammate owns a different set of files")。さらに 2026-05-23 実機
+  PoC (ADR-008、Claude Code 2.1.150 環境) で Agent tool の
+  `isolation:"worktree"` parameter も agent definition frontmatter の
+  `isolation: worktree` も teammate spawn では **silent ignore** されること
+  を確定。teammate は main lead と同じ working directory で起動し、teammate
+  が write すると同一 checkout で**ファイル上書き競合**が発生する。本 skill
+  は architect-reviewer の真 RO 規律 (`tools: Read,Glob,Grep`) で原理的に
+  回避している。**reviewer 以外の用途 (並列 write) に Agent Teams を流用
+  してはいけない** (isolation parameter / frontmatter で救済不可、ADR-008 確定)。
+  並列 write が必要な場合は複数の `claude --bg` セッションを独立起動すること
+  (各セッションが `.claude/worktrees/<id>/` に自動隔離される)
 - 環境変数が無い場合は **fallback: Task tool で sequential に invoke** する
   手順 (本 SKILL の「fallback 手順」セクション参照)
 

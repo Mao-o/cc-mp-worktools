@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.8.3 (2026-05-23) — Docs: ADR-008 で v0.8.2 Notes 未解明事項を解消
+
+v0.8.2 (2026-05-23) で「Agent Teams × worktree isolation の挙動は公式未記述
+(実機検証必要)」と保留した 2 点 (Agent tool の `team_name` + `isolation:"worktree"`
+同時指定挙動、frontmatter `isolation: worktree` が teammate 実行時に適用されるか)
+を実機 PoC で検証し、両方とも **silent ignore** であることを確定。docs 3 files
+に ADR-008 への reference を追加する patch release。実装変更なし。
+
+### Verified (ADR-008、`.claude/agent-memory/agent-org-decision-keeper/ADR-008-*.yml`)
+
+実機検証環境: Claude Code 2.1.150, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
+worktree 内 `.claude/agents/poc-*.md` disposable test agent を 2 種類 (frontmatter
+isolation あり / なし) + `general-purpose` を Agent tool で 4 通り spawn:
+
+- **(a) Agent tool の `team_name` + `isolation:"worktree"` 同時指定は silent ignore**:
+  teammate は main lead と同じ working directory (`.claude/worktrees/agent-org-next/`)
+  で起動。新規 temp worktree (`.claude/worktrees/<new_id>/`) は作られない。
+  Agent tool schema 上 `isolation:"worktree"` は受理されるが effect なし
+- **(b) frontmatter `isolation: worktree` も teammate spawn では silent ignore**:
+  公式 `docs/en/agent-teams` の "Use subagent definitions for teammates"
+  セクションは `skills` と `mcpServers` のみ teammate 非適用と明示するが、
+  **isolation も同様の挙動** (Note なき silent ignore) であることを実機確認
+- **teammate のファイル書込先 = main lead と同じ worktree (共有 checkout)**:
+  4 teammate 全員が main lead の worktree path に直接書込成功、main session
+  から `ls` で観察可能。docs/en/agent-teams "Avoid file conflicts"
+  (`Two teammates editing the same file leads to overwrites`) の前提と整合
+
+→ v0.8.2 の Notes セクション (`Agent tool の team_name + isolation:"worktree"
+同時指定挙動、frontmatter isolation: worktree が teammate 実行時に適用されるかは
+公式未記述 (実機検証必要)`) はこの v0.8.3 で **解消**。架空ではなく観測事実として
+ADR-008 に固定済。
+
+### Changed (docs only)
+
+- `agents/architect-reviewer.md`: 真 RO 規律セクションの「Agent Teams 経由で
+  並列 spawn される際の write 競合回避」note を強化。Agent tool isolation
+  parameter / frontmatter isolation の両方が silent ignore であることを明示し
+  ADR-008 reference を追加
+- `skills/running-review/SKILL.md`: 「前提」セクションに ADR-008 で確定した
+  事実を追記 (Agent tool isolation / frontmatter isolation の silent ignore)。
+  「reviewer 以外の用途で Agent Teams を流用してはいけない」根拠を強化
+- `docs/ARCHITECTURE.md`: Phase 3 multi-perspective review データフロー step 4
+  note に ADR-008 reference 追加。Agent Teams 非隔離が公式仕様 + ADR-008 実機
+  確定の両方で裏付けられている旨を明示
+
+### Verification
+
+- `claude plugin validate plugins/agent-org` warning 0 通過
+- ADR-008 yml は `.claude/agent-memory/agent-org-decision-keeper/` (project-local、
+  worktools の `.claude/` 全体 gitignore 配下) に保存、plugin 配布物には含まれない
+  (ADR-007 と同方針: 設計判断 audit trail は project-local memory で完結)
+- bd issue bd_092a232e-7fj (本 PoC の task issue、labels: agent-org/v0.8.x/poc) を close
+
+### 関連 ADR
+
+- ADR-007 (paired-with): bd repo-local 配置 + stealth-mode amendment。本 ADR-008
+  と同じく公式 docs 未記述の実装挙動を PoC で確定する pattern。今後も Claude
+  Code の experimental / 未記述機能を agent-org が依存する場合は同 pattern
+  (PoC → ADR) で記録する
+- ADR-008 (本リリースで起草): Agent Teams × worktree isolation の公式未記述項を
+  Claude Code 2.1.150 環境で実機検証。retrieval_keys に「Agent Teams worktree
+  isolation silent ignore」「v0.9 team-shared mode 設計前提」等
+
 ## 0.8.2 (2026-05-23) — Docs: Agent Teams × worktree 仕様反映 + Bugfix: v0.7.2 regression 復元
 
 v0.8.1 release 後のフォローアップ調査で、Agent Teams の worktree 隔離仕様

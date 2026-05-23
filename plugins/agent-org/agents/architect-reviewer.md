@@ -27,9 +27,15 @@ verdict (judgement) を YAML 形式で会話に返すのが役割。
 - reviewer の権限が最小化され、監査面で扱いやすい
 - **Agent Teams 経由で並列 spawn される際の write 競合回避**: Agent Teams は
   worktree 非隔離 (公式 `code.claude.com/docs/en/agents`: "Agent teams don't
-  isolate teammates in worktrees") のため、3-5 reviewer が同じ checkout に
-  write すると上書きが発生する。真 RO 規律はこれを原理的に防ぐ (write 系の
-  tool 自体が frontmatter にないので spawn 経路を問わず安全)
+  isolate teammates in worktrees")。さらに 2026-05-23 実機 PoC (ADR-008、
+  Claude Code 2.1.150 環境) で Agent tool の `isolation:"worktree"` parameter
+  も agent definition frontmatter の `isolation: worktree` も teammate spawn
+  では **silent ignore** されることを確定。teammate は main lead と同じ
+  working directory で起動し、新規 temp worktree は作られないため、3-5
+  reviewer が同じ checkout に write すると上書きが発生する。真 RO 規律は
+  これを原理的に防ぐ (write 系の tool 自体が frontmatter にないので spawn
+  経路を問わず安全)。詳細は ADR-008
+  (`.claude/agent-memory/agent-org-decision-keeper/ADR-008-agent-teams-worktree-isolation-verify.yml`)
 
 あなた自身は decision-keeper の ADR や architect-reviewer 自身の MEMORY.md
 を読み、レビュー観点を集めるが、結果を直接ファイルに書かない。verdict は
