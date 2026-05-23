@@ -16,7 +16,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.1.0"
+  version: "3.2.0"
 ---
 
 # AI SDK ドキュメント調査
@@ -26,55 +26,52 @@ ai-sdk.dev/llms.txt を唯一の権威ある情報源として段階的に調査
 
 ## 調査フロー
 
+推奨の 2 段階フロー: `search` で候補 + 本文 hits を 1 コマンドで取得 → `content` で必要セクション本文を読む。
+
 ```
-  search-index (title/desc/tags)        ← 軽量: ドキュメントを絞り込む
+  search (top N 候補 + 本文 hits 一括)       ← 推奨入口
         ↓
-  [ドキュメント特定できた？]
-     yes ↓       no → search-content (本文横断) ← 本文キーワードで追加絞り込み
-  sections                ↓
-        ↓           該当セクションを取得
-  content (heading_path 指定)
+  content <doc_idx> "<heading_path>"        ← 該当セクションの本文
+        ↑ (補助)
+  sections <doc_idx>                        ← 見出し一覧を確認したいとき
+        ↑ (深掘り)
+  search-content --page-ref <doc_idx>       ← 特定 doc 内だけ本文検索
 ```
 
-### Step 1a: キーワードでドキュメントを絞り込む（推奨の入り口）
+### Step 1: キーワードで候補ドキュメント + 本文 hits を取得（推奨入口）
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search-index /tmp/ai-sdk-llms.txt "<キーワード>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search "<キーワード>"
 ```
 
 スペース区切りで複数キーワード（AND）。未取得なら自動でネットワークから取得する。
-title / description / tags / 見出しを対象にスコアリングする。
+title / description / tags / 見出しでスコアリングして上位 5 件（`--top-n N` で変更可）を選び、
+各候補ドキュメントの body を keyword 検索して heading_path + スニペットを返す。
+結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
 
-### Step 1b: 本文キーワードで横断検索（search-index で絞りきれないとき）
-
-```bash
-# 全ドキュメント横断
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search-content /tmp/ai-sdk-llms.txt "<キーワード>"
-
-# 特定ドキュメント内のみ
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search-content /tmp/ai-sdk-llms.txt "<キーワード>" --doc-index <idx>
-```
-
-セクション単位で AND 検索し、ヒット箇所の heading_path と前後数行のスニペットを返す。
-そのまま Step 3 の `content` コマンドに heading_path を渡せる。
-
-### Step 2: セクション一覧を取得
+### Step 2: 必要なセクションの本文を取得
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" sections /tmp/ai-sdk-llms.txt <doc_index>
-```
-
-### Step 3: 必要なセクションの本文を取得
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content /tmp/ai-sdk-llms.txt <doc_index> "<heading_path>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<heading_path>"
 ```
 
 `heading_path` を省略するとドキュメント全体を取得。
 
+### 補助: セクション一覧を確認したいとき
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" sections <page_ref>
+```
+
+### 補助: 特定ドキュメント内だけ本文検索したいとき
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search-content "<キーワード>" --page-ref <ref>
+```
+
 ### フォールバック: 全ドキュメント一覧を確認
 
-search-index / search-content で見つからない場合のみ使用する。
+`search` で見つからない場合のみ使用する。
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
@@ -82,18 +79,29 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 
 ---
 
+## page_ref の指定方法
+
+3 形式を受け付ける (claude-docs / firebase と統一):
+
+- **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
+- **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
+
+AI SDK の llms.txt は URL を持たないため、URL / slug 形式は受け付けない (整数 index を使うこと)。
+
 ## コマンドリファレンス
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search-index` | `<file> <query> [--limit N] [--show-sections]` | title/description/tags/見出しでドキュメントを絞り込む（推奨入口） |
-| `search-content` | `<file> <query> [--doc-index N] [--limit N] [--context N] [--max-hits N]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
+| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits |
+| `search-index` | `<query> [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
+| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
 | `fetch-index` | `[--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
-| `sections` | `<file> <doc_index>` | 指定ドキュメントの見出し一覧を表示 |
-| `content` | `<file> <doc_index> [heading_path]` | セクション本文を表示 |
-| `search` | (alias of `search-index`) | 後方互換用エイリアス |
+| `sections` | `<page_ref> [--file F] [--cache-dir DIR]` | 指定ドキュメントの見出し一覧を表示 |
+| `content` | `<page_ref> [heading_path] [--file F] [--cache-dir DIR]` | セクション本文を表示 |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`
+
+すべてのサブコマンドで `--file <path>` 省略時は `--cache-dir`/`ai-sdk-llms.txt` を auto-fetch / 再利用する。
 
 ### heading_path の指定方法
 
@@ -104,14 +112,38 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 ### キャッシュ
 
 - `/tmp/ai-sdk-llms.txt` にキャッシュされる（セッション内で再利用）
-- `search-index` / `search-content` はファイル未存在時に自動取得する
+- 全サブコマンドがファイル未存在時に自動取得する
 - 最新版が必要な場合: `rm /tmp/ai-sdk-llms.txt` してから再実行
+
+---
+
+## v3.2.0 (0.7.0) の破壊変更
+
+3 script で API を統一するため、以下が破壊的に変わった:
+
+- `<file>` positional 引数を全廃止 → `--file` flag 化 (省略時は cache を auto-fetch)
+- `search-content` の `--doc-index` → `--page-ref` (int / title substring 受付)
+- `sections <file> <doc_index>` → `sections <page_ref>`
+- `content <file> <doc_index> "<heading_path>"` → `content <page_ref> "<heading_path>"`
+- `search` を `search-index` の alias から **統合 search** に置き換え (top N 候補 + 本文 hits)
+
+### 旧 → 新 置換例
+
+| v3.1.0 (旧) | v3.2.0 (新) |
+|------------|------------|
+| `search-index /tmp/ai-sdk-llms.txt "useChat"` | `search-index "useChat"` |
+| `search-content /tmp/ai-sdk-llms.txt "X" --doc-index 42` | `search-content "X" --page-ref 42` |
+| `sections /tmp/ai-sdk-llms.txt 42` | `sections 42` |
+| `content /tmp/ai-sdk-llms.txt 42 "Step 1"` | `content 42 "Step 1"` |
+| `search /tmp/ai-sdk-llms.txt "X"` (旧 alias) | `search "X"` (統合検索に置き換え) |
+
+argparse error が出たら旧形式の可能性が高い。`--help` で新仕様を確認すること。
 
 ---
 
 ## 制約
 
-- **全文読み込み禁止**: search-index → sections → content、または search-content → content の順で絞り込むこと
+- **全文読み込み禁止**: `search` → `content`、または `search-index` → `sections` → `content` の順で絞り込むこと
 - **コードフェンス保護**: スクリプトがコードブロックの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Snippet>`, `<Note>` 等の JSX 記法はテキストとして読む
 
@@ -120,11 +152,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 以下は本スキルのコマンドで代替できるため使わないこと:
 
 - ❌ `grep -n <keyword> /tmp/ai-sdk-llms.txt`
-  → ✅ `search-index` / `search-content` を使う
+  → ✅ `search` / `search-index` / `search-content` を使う
 - ❌ `cat /tmp/ai-sdk-llms.txt | head` や `Read /tmp/ai-sdk-llms.txt (lines X-Y)` の直接読み
   → ✅ `sections` で見出しを特定してから `content` で取り出す
 - ❌ `fetch-index` の出力を Bash で grep して絞り込む
-  → ✅ `search-index` でスコアリング済みの候補を得る
+  → ✅ `search` でスコアリング済みの候補 + 本文 hits を得る
 
 ## 出力フォーマット
 
@@ -144,9 +176,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 
 - ドキュメントにない機能やオプションを捏造しない
 - コード例はドキュメントから直接引用する
-- 全文読み込みは禁止 — 必ず search-index/search-content → sections → content の順で絞り込む
+- 全文読み込みは禁止 — 必ず `search` → `content`、または `search-index` → `sections` → `content` の順で絞り込む
 - 日本語で回答する
-- `/tmp/ai-sdk-llms.txt` が存在しない場合は search-* が自動取得する。それでも失敗する場合は WebFetch で取得する
+- `/tmp/ai-sdk-llms.txt` が存在しない場合は各サブコマンドが自動取得する。それでも失敗する場合は WebFetch で取得する
 - 調査は簡潔に完了させること
 
 ## リファレンス

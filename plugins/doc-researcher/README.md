@@ -7,9 +7,12 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 
 | スキル | 対象 | 推奨エントリポイント |
 |--------|------|---------------------|
-| `researching-claude-docs` | Claude Code / Claude Developer Platform | `search-index` でページを絞込み → `search-content` で本文横断 |
-| `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search-index` でドキュメントを絞込み → `search-content` で本文横断 |
-| `researching-firebase` | Firebase (firebase.google.com) | `search-index` (必須の入口) → `search-content --pages` で候補ページの本文検索 |
+| `researching-claude-docs` | Claude Code / Claude Developer Platform | `search` (URL-join 統合検索) → `content <page_ref> "<heading_path>"` |
+| `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>"` |
+| `researching-firebase` | Firebase (firebase.google.com) | `search` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>"` |
+
+3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
+サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
 
 ## Components
 
@@ -40,15 +43,20 @@ claude --plugin-dir ./plugins/doc-researcher
 ```bash
 # python3 <script> の形式で呼び出す（直接実行 ./script.py は非対応）
 
-# search-index (軽量 llms.txt ベース)
+# search (推奨入口: 候補絞り込み + 本文 hits を 1 コマンド)
+python3 plugins/doc-researcher/scripts/parse-claude-docs.py search "hook matcher"
+python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search "streamText onFinish"
+python3 plugins/doc-researcher/scripts/parse-firebase.py search "Firestore query limit"
+
+# search-index (候補だけ取得したいとき; 軽量 llms.txt ベース)
 python3 plugins/doc-researcher/scripts/parse-claude-docs.py search-index "hook matcher"
-python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search-index /tmp/ai-sdk-llms.txt "streamText onFinish"
+python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search-index "streamText onFinish"
 python3 plugins/doc-researcher/scripts/parse-firebase.py search-index "Firestore query limit"
 
-# search-content (本文横断キーワード検索)
-python3 plugins/doc-researcher/scripts/parse-claude-docs.py search-content /tmp/claude-code-llms-full.txt "matcher PreToolUse"
-python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search-content /tmp/ai-sdk-llms.txt "useChat onFinish"
-python3 plugins/doc-researcher/scripts/parse-firebase.py search-content "orderBy limit" --pages 2972
+# search-content (特定ページ内だけ本文検索)
+python3 plugins/doc-researcher/scripts/parse-claude-docs.py search-content "matcher PreToolUse" --page-ref hooks
+python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search-content "useChat onFinish" --page-ref 153
+python3 plugins/doc-researcher/scripts/parse-firebase.py search-content "orderBy limit" --page-ref 2972
 
 # fetch-index (フォールバック)
 python3 plugins/doc-researcher/scripts/parse-claude-docs.py fetch-index
@@ -77,8 +85,14 @@ python3 plugins/doc-researcher/scripts/parse-firebase.py fetch-index --limit 10
 `parse-claude-docs.py`、`parse-ai-sdk.py`、`parse-firebase.py` はドキュメント分割方式が
 根本的に異なるため独立したスクリプトとして管理している。特に `parse-firebase.py` は
 Firebase 側に `llms-full.txt` が存在しないため、index + per-page on-demand fetch 方式を
-採用している。そのため Firebase の `search-content` は `--pages` で候補ページを明示指定する
-設計になっている。バグ修正や機能改善を行う際は 3 本すべてを確認すること。
+採用している。そのため Firebase の `search` は top N 件 (default 5) を順次 fetch する
+ヒューリスティクスを持つ。`search-content` の `--page-ref` は単数指定 (省略時は全ページ
+横断、ただし重いので明示指定推奨)。バグ修正や機能改善を行う際は 3 本すべてを確認すること。
+
+3 script で API を 0.7.0 で揃えた: `search` / `search-index` / `search-content` /
+`sections` / `content` / `fetch-index` の 6 サブコマンドが共通、`<page_ref>` は
+int / URL slug / 完全 URL を受け付ける (ai-sdk のみ URL がないため int / title 部分一致)、
+`--file` flag は省略時に cache を auto-fetch する。
 
 共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /
 HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skeleton /
