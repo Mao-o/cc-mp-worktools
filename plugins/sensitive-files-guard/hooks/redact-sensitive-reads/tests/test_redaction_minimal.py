@@ -123,6 +123,178 @@ class TestOpaqueYaml(unittest.TestCase):
         self.assertIn("features", reason)
 
 
+class TestJsonStatus(unittest.TestCase):
+    """0.14.0 (E5) で json の str scalar 値に status / length / placeholder を付与。"""
+
+    def test_str_set(self):
+        reason = _redact_text("config.json", '{"k": "hello"}')
+        self.assertIn("<type=str>", reason)
+        self.assertIn("<set>", reason)
+        self.assertIn("length=5", reason)
+
+    def test_str_empty(self):
+        reason = _redact_text("config.json", '{"k": ""}')
+        self.assertIn("<empty>", reason)
+        self.assertNotIn("length=0", reason)
+
+    def test_str_placeholder_literal(self):
+        reason = _redact_text("config.json", '{"k": "changeme"}')
+        self.assertIn("<placeholder>", reason)
+        self.assertIn('matched="changeme"', reason)
+
+    def test_str_placeholder_pattern(self):
+        reason = _redact_text("config.json", '{"k": "your_token_here"}')
+        self.assertIn("<placeholder>", reason)
+        self.assertIn('matched="your_*_here"', reason)
+
+    def test_str_long(self):
+        big = "a" * 4097
+        reason = _redact_text("config.json", '{"k": "' + big + '"}')
+        self.assertIn("<long>", reason)
+        self.assertIn("length=4097", reason)
+
+    def test_str_looks_truncated(self):
+        reason = _redact_text("config.json", '{"k": "secret_value..."}')
+        self.assertIn("<looks_truncated>", reason)
+
+    def test_bool_num_null_no_status(self):
+        # bool / num / null には status / length を出さない
+        reason = _redact_text(
+            "config.json", '{"a": true, "b": 42, "c": null}'
+        )
+        self.assertIn("<type=bool>", reason)
+        self.assertIn("<type=num>", reason)
+        self.assertIn("<type=null>", reason)
+        self.assertNotIn("length=", reason)
+        # bool/num/null 行に <set> が紛れていない (構造側に値はない)
+        for line in reason.splitlines():
+            if "<type=bool>" in line or "<type=num>" in line or "<type=null>" in line:
+                self.assertNotIn("<set>", line, f"unexpected status on non-str line: {line}")
+
+    def test_nested_str_status(self):
+        reason = _redact_text(
+            "config.json", '{"outer": {"inner": "hello"}}'
+        )
+        self.assertIn("inner", reason)
+        self.assertIn("<set>", reason)
+        self.assertIn("length=5", reason)
+
+    def test_value_not_leaked_in_status(self):
+        # placeholder regex 一致時に値そのものは出ない (label のみ)
+        reason = _redact_text(
+            "config.json", '{"k": "your_super_long_secret_here"}'
+        )
+        self.assertNotIn("super_long_secret", reason)
+        self.assertIn('matched="your_*_here"', reason)
+
+
+class TestTomlStatus(unittest.TestCase):
+    """0.14.0 (E5) で toml の str 値にも status / length / placeholder を付与。"""
+
+    def test_str_set(self):
+        reason = _redact_text("secrets.toml", 'k = "hello"\n')
+        self.assertIn("format: toml", reason)
+        self.assertIn("<set>", reason)
+        self.assertIn("length=5", reason)
+
+    def test_str_placeholder(self):
+        reason = _redact_text("secrets.toml", 'k = "changeme"\n')
+        self.assertIn("<placeholder>", reason)
+        self.assertIn('matched="changeme"', reason)
+
+    def test_str_empty(self):
+        reason = _redact_text("secrets.toml", 'k = ""\n')
+        self.assertIn("<empty>", reason)
+
+
+class TestYamlExtraction(unittest.TestCase):
+    """0.14.0 (E5) で yaml は top-level key 抽出 + nested 件数のみカウント。"""
+
+    def test_top_level_keys_in_order(self):
+        text = "database:\n  host: localhost\nfeatures:\n  flag: true\n"
+        reason = _redact_text("secrets.yaml", text)
+        self.assertIn("format: yaml", reason)
+        self.assertIn("database", reason)
+        self.assertIn("features", reason)
+        # 順序: database が先
+        self.assertLess(reason.index("database"), reason.index("features"))
+
+    def test_nested_count(self):
+        text = (
+            "database:\n"
+            "  host: localhost\n"
+            "  port: 5432\n"
+            "  password: super-secret\n"
+            "features:\n"
+            "  dark_mode: true\n"
+        )
+        reason = _redact_text("secrets.yaml", text)
+        # nested entries 件数 (host/port/password/dark_mode = 4)
+        self.assertIn("nested entries: 4", reason)
+
+    def test_nested_keys_not_exposed(self):
+        # nested の key 名 (host/port/password) は表に出ない
+        text = (
+            "database:\n"
+            "  host: localhost\n"
+            "  password: super-secret\n"
+        )
+        reason = _redact_text("secrets.yaml", text)
+        # top-level "database" は出る
+        self.assertIn("database", reason)
+        # nested の "host" / "password" は top-level keys には出ない
+        # (count としてはカウントされる、行表示はされない)
+        keys_section_lines = []
+        in_keys = False
+        for line in reason.splitlines():
+            if line.startswith("top-level keys"):
+                in_keys = True
+                continue
+            if in_keys:
+                if line.startswith(("nested entries", "note:", "</DATA>")):
+                    break
+                keys_section_lines.append(line)
+        joined = "\n".join(keys_section_lines)
+        self.assertNotIn("host", joined)
+        self.assertNotIn("password", joined)
+
+    def test_no_value_leak(self):
+        text = (
+            "database:\n"
+            "  host: localhost\n"
+            "  password: super-secret\n"
+        )
+        reason = _redact_text("secrets.yaml", text)
+        _assert_no_leak(self, reason, "yaml extraction reason")
+
+    def test_comments_skipped(self):
+        text = "# top comment\ndatabase:\n  # nested comment\n  host: localhost\n"
+        reason = _redact_text("secrets.yaml", text)
+        self.assertNotIn("top comment", reason)
+        self.assertNotIn("nested comment", reason)
+
+    def test_empty_yaml(self):
+        reason = _redact_text("secrets.yaml", "")
+        self.assertIn("format: yaml", reason)
+        self.assertIn("(no top-level keys matched)", reason)
+
+    def test_list_form_ignored(self):
+        # `- item:` 形式の list は top-level / nested どちらにも数えない
+        text = "items:\n  - first: 1\n  - second: 2\n"
+        reason = _redact_text("secrets.yaml", text)
+        self.assertIn("items", reason)
+        # nested 行を含むがマッチしない (先頭が `- ` なので `_YAML_NESTED_KEY_RE` 不一致)
+        # ただし `first` 行は `^\s+([A-Za-z_]...)` にはマッチしないため count されない
+        self.assertNotIn("first", reason)
+
+    def test_max_top_keys_cap(self):
+        # 多数 top-level key で 500 件 cap が効くこと (健全性確認)
+        lines = [f"key{i}:" for i in range(10)]
+        reason = _redact_text("secrets.yaml", "\n".join(lines) + "\n")
+        self.assertIn("key0", reason)
+        self.assertIn("key9", reason)
+
+
 class TestKeyonlyScan(unittest.TestCase):
     def test_dotenv_like(self):
         text = "FOO=x\nBAR=y\nBAZ: z\n"

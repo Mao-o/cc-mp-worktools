@@ -32,5 +32,4 @@ def redact_toml(text: str) -> dict:
 
 def format_toml(info: dict) -> str:
     from .jsonlike import format_jsonlike
-    base = format_jsonlike(info)
-    return base.replace("format: json", "format: toml")
+    return format_jsonlike(info)
