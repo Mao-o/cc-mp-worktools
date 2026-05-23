@@ -2,6 +2,126 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.7.0] - 2026-05-23
+
+### 3 script API 統一 (BREAKING)
+
+claude-docs v3 (0.5.0) で実装した `search` 統合 + `--page-ref` + `--file` flag 化を
+ai-sdk / firebase にも展開し、3 script で以下の 6 サブコマンドを共通化:
+
+- `fetch-index` — 軽量 index 一覧
+- `search-index` — title/description でランキング (候補だけ取得)
+- `search-content` — 本文横断キーワード検索 (`--page-ref` で 1 ページに絞れる)
+- `search` — 統合検索 (`search-index` + 本文 hits を 1 コマンドで返す、推奨入口)
+- `sections` — 指定ページの見出し一覧
+- `content` — ページ全体 / セクション本文
+
+`<page_ref>` は 3 形式を受け付ける (ai-sdk は URL を持たないため int / title 部分一致のみ):
+
+- 整数 index
+- URL slug (last path component)
+- 完全 URL
+
+### `researching-ai-sdk` skill 3.2.0 (BREAKING)
+
+- `<file>` positional 引数を全廃止 → `--file` flag 化 (省略時は cache を auto-fetch)
+- `search-content` の `--doc-index` → `--page-ref` (int / title 部分一致)
+- `sections <file> <doc_index>` → `sections <page_ref>`
+- `content <file> <doc_index> "<heading_path>"` → `content <page_ref> "<heading_path>"`
+- 旧 `search` (= `search-index` alias) を廃止し、**統合 search** に置き換え。
+  top N (`--top-n`, default 5) 候補をスコアリングし、各 body を keyword 検索して
+  heading_path + スニペットを返す
+- SKILL.md を 2 段階フロー (`search` → `content`) に書き直し、v3.1.0 → v3.2.0 migration 例を追記
+
+旧 → 新 置換例:
+
+| v3.1.0 (旧) | v3.2.0 (新) |
+|------------|------------|
+| `search-index /tmp/ai-sdk-llms.txt "X"` | `search-index "X"` |
+| `search-content /tmp/ai-sdk-llms.txt "X" --doc-index 42` | `search-content "X" --page-ref 42` |
+| `sections /tmp/ai-sdk-llms.txt 42` | `sections 42` |
+| `content /tmp/ai-sdk-llms.txt 42 "X"` | `content 42 "X"` |
+| `search /tmp/ai-sdk-llms.txt "X"` (旧 alias) | `search "X"` (統合検索) |
+
+### `researching-firebase` skill 2.0.0 (BREAKING)
+
+- `sections <doc_index>` → `sections <page_ref>` (int / URL slug / 完全 URL)
+- `content <doc_index>` → `content <page_ref>`
+- `search-content --pages <idx,idx,...>` (REQUIRED 複数) → `--page-ref <ref>` (optional 単数)
+- 新規 `search` 統合 (top N on-demand fetch + 本文 hits)。Firebase は llms-full.txt が
+  ないため top N ページを順次 HTTP fetch するヒューリスティクス (初回のみ重い、cache hit 後は高速)
+- 旧 `--pages` 廃止 → 複数ページ横断したいときは `search` 経由を使う
+- SKILL.md を 2 段階フロー (`search` → `content`) に書き直し、v1.1.0 → v2.0.0 migration 例を追記
+
+旧 → 新 置換例:
+
+| v1.1.0 (旧) | v2.0.0 (新) |
+|------------|------------|
+| `search-content "X" --pages 42` | `search-content "X" --page-ref 42` |
+| `search-content "X" --pages 42,43,44` | `search "X" --top-n 3` (search 経由が推奨) |
+| (新規可能) | `sections vector-search` (URL slug で直接アクセス) |
+
+### `researching-claude-docs` skill (変更なし)
+
+claude-docs は 0.5.0 で既に新 API を実装済み。本 release で他 2 script が claude-docs と
+揃ったため、3 script 共通の使い方が一貫した。
+
+### scripts/_common.py
+
+- 変更なし (既存の `score_entry` / `search_index_entries` / `search_content_in_body` /
+  `normalize_doc_url` / `build_url_to_full_index` 等を ai-sdk / firebase の新規 `cmd_search`
+  / `_resolve_page_ref` から再利用)
+
+### 検証
+
+- 3 script の `--help` および各サブコマンド の `--help` が argparse error なし
+- `parse-ai-sdk.py search "streamText onFinish" --top-n 2` で top 2 候補 + 本文 hits が
+  正常に取得できる (cache hit 時 ~1 秒)
+- `parse-claude-docs.py search "hook" --index-limit 2` の既存挙動は維持 (regression なし)
+
+### Fix
+
+- `parse-firebase.py` の `_resolve_page_ref` で `page_ref` に完全 URL (e.g.
+  `search-index` 出力の `URL:` 行をそのままコピペした `.md.txt` 付き URL)
+  を渡したときに `No page found for URL` で fail するバグを修正。ユーザー
+  入力側にも `_entry_url_for_match()` を適用して両側で `.md.txt` を剥がして
+  から比較するようにした。SKILL.md / README で「完全 URL 受付」と謳って
+  いるのと挙動を一致させる (Codex Review P2 feedback on PR #17)
+- `parse-ai-sdk.py` の `_default_cache_path` / `parse-firebase.py` の
+  `_index_cache_path` / `_pages_cache_dir` で `cache_dir.rstrip("/")` が
+  `cache_dir="/"` を空文字列にしてしまい、`os.path.join("", filename)` が
+  相対パスを返すバグを修正。`os.path.join` は trailing slash を自動処理する
+  ため rstrip は元々不要 (Codex Review P3 feedback on PR #17)
+
+### 設計判断記録 (subagent fork 維持)
+
+3 SKILL の `context: fork + model: sonnet` 構成は **維持** する設計判断を明文化
+(README.md の「設計判断」セクション参照)。spawn オーバーヘッドより context rot
+回避と正確性を優先するため、軽量化方向 (fork 外し / 親 model 継承 / 軽量モード追加)
+は採用しない。「軽い質問でも WebFetch に流れる」課題への対応は description 充実
+(0.6.0) + doc-first rules (`~/.claude/rules/`) + `search` 統合 (本 release) の
+3 系統で行う。
+
+## [0.6.0] - 2026-05-23
+
+### 3 SKILL description の統一: Triggers / Use proactively / WebFetch 優位文
+
+- `researching-claude-docs` の frontmatter `description` に
+  `Use proactively when ...` / `Use when implementing or debugging ... such as ...` /
+  `Triggers: ...` 行を追加 (ai-sdk / firebase と同じパターンに揃える)。Triggers は
+  "Claude Code", "hook schema", "subagent", "plugin manifest", "slash command",
+  "settings.json", "permission", "MCP", "Anthropic API", "code.claude.com",
+  "platform.claude.com", "Claude Code ドキュメント", "researching-claude-docs"
+  の 13 個。これまで Triggers 列挙がなく ai-sdk / firebase と非対称だった状態を
+  解消し、LLM 側の skill 候補マッチ率を底上げする
+- 3 SKILL すべての `description` に「WebFetch ではなくこのスキルを使う（要約
+  モデル経由ではないため field の抜け落とし・幻覚が起きない）」の優位文を
+  統一文型で揃える。claude-docs に既存だったこの文型を ai-sdk / firebase の
+  description にも追加し、3 スキル共通のパターンで LLM が「verbatim 取得が
+  欲しい」「field 抜け落ちを避けたい」場面を引っかけられるようにする
+- SKILL 本体 (markdown) / parse スクリプト I/F / キャッシュ動作の変更なし。
+  description のみの非破壊変更
+
 ## [0.5.0] - 2026-05-14
 
 ### `researching-claude-docs` skill 3.0.0 (UX 改善 + 一部破壊的)

@@ -7,10 +7,18 @@ and provides subcommands for progressive (layered) access:
   fetch-index     — Fetch (if uncached) and print document index
   search-index    — Rank documents by keyword (title/description/tags/headings)
   search-content  — Keyword search across document bodies with snippets
+  search          — Smart search: rank docs by index, drill into top N bodies
   sections        — List sections (headings) within a specific document
   content         — Print content of a specific document or section
 
-``search`` is kept as an alias for ``search-index`` for backwards compatibility.
+Page references (``<page_ref>``) accept two forms:
+
+  - integer index   (e.g. ``42``)
+  - title substring (e.g. ``streamtext``)
+
+AI SDK's ``llms.txt`` is a single bundled file (no separate llms-full.txt),
+so passing ``--file`` is optional — if omitted, the cached copy under
+``--cache-dir`` is auto-fetched / re-used.
 """
 
 import argparse
@@ -23,7 +31,6 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from _common import (
     FenceTracker,
     add_cache_dir_arg,
-    add_doc_index_arg,
     add_heading_path_arg,
     die,
     die_index_out_of_range,
@@ -38,7 +45,9 @@ from _common import (
 )
 
 LLMS_TXT_URL = "https://ai-sdk.dev/llms.txt"
-DEFAULT_CACHE_PATH = "/tmp/ai-sdk-llms.txt"
+DEFAULT_CACHE_FILENAME = "ai-sdk-llms.txt"
+
+USER_AGENT = "claude-code-ai-sdk-researcher/1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -182,17 +191,91 @@ def _extract_h1_h2_titles(body_lines: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Fetch helper (AI SDK uses a 60s timeout for the compact llms.txt index)
+# Fetch + load helpers
 # ---------------------------------------------------------------------------
+
+def _default_cache_path(cache_dir: str) -> str:
+    # Avoid rstrip("/"): cache_dir="/" would become "" and os.path.join("", ...)
+    # returns a relative path. os.path.join already handles trailing slashes
+    # in cache_dir correctly. (Codex Review P3 feedback on PR #17.)
+    return os.path.join(cache_dir, DEFAULT_CACHE_FILENAME)
+
 
 def fetch_llms_txt(cache_path: str) -> str:
     """Return path to cached llms.txt, fetching if necessary."""
     return fetch_url(
         LLMS_TXT_URL,
         cache_path,
-        user_agent="claude-code-ai-sdk-researcher/1.0",
+        user_agent=USER_AGENT,
         timeout=60,
     )
+
+
+def _load_docs(file_arg: str | None, cache_dir: str) -> tuple[str, list[dict]]:
+    """Load and split documents from llms.txt.
+
+    Two distinct modes:
+
+    * **No ``--file``** (``file_arg is None``): derive the cache path from
+      *cache_dir* and auto-fetch. This is the fetch-and-cache lifecycle.
+
+    * **Explicit ``--file``**: read-only. The file must already exist —
+      we never overwrite a user-supplied path. This lets users pin to a
+      local snapshot for reproducible runs.
+    """
+    if file_arg is None:
+        cache_path = _default_cache_path(cache_dir)
+        cache_path = fetch_llms_txt(cache_path)
+        return cache_path, split_documents(load_lines(cache_path))
+
+    if not os.path.exists(file_arg):
+        die(
+            f"--file '{file_arg}' does not exist. Drop --file to auto-fetch "
+            f"to the cache, or download the snapshot manually first."
+        )
+    return file_arg, split_documents(load_lines(file_arg))
+
+
+# ---------------------------------------------------------------------------
+# Page reference resolution (int / title substring)
+# ---------------------------------------------------------------------------
+
+def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
+    """Resolve a page reference to a doc index.
+
+    Tries, in order:
+      1. integer index into *docs*
+      2. title substring (case-insensitive); unique match wins
+
+    AI SDK's llms.txt has no Source/URL line in document bodies, so URL /
+    slug matching is not supported here (use the integer index from
+    ``search-index`` / ``search`` instead).
+    """
+    if page_ref is None or page_ref == "":
+        die("page_ref required: integer index or title substring")
+
+    try:
+        idx = int(page_ref)
+    except ValueError:
+        pass
+    else:
+        if 0 <= idx < len(docs):
+            return idx
+        die_index_out_of_range(idx, len(docs))
+
+    needle = page_ref.lower()
+    candidates: list[tuple[int, str]] = []
+    for i, doc in enumerate(docs):
+        fm = parse_frontmatter(doc["frontmatter_lines"])
+        title = (fm.get("title") or "").strip()
+        if needle in title.lower():
+            candidates.append((i, title))
+    if len(candidates) == 1:
+        return candidates[0][0]
+    if len(candidates) > 1:
+        detail = "\n  ".join(f"[{i}] {t}" for i, t in candidates)
+        die(f"Ambiguous title substring '{page_ref}'. Matches:\n  {detail}")
+    die(f"No document found for: {page_ref}")
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +284,7 @@ def fetch_llms_txt(cache_path: str) -> str:
 
 def cmd_fetch_index(args):
     """Fetch (if needed) and print document index."""
-    cache_path = args.cache_dir.rstrip("/") + "/ai-sdk-llms.txt"
+    cache_path = _default_cache_path(args.cache_dir)
     path = fetch_llms_txt(cache_path)
     lines = load_lines(path)
     docs = split_documents(lines)
@@ -246,18 +329,14 @@ def cmd_fetch_index(args):
     print()
     print(f"({len(docs)} documents total)")
     print()
-    print(f"Tip: use 'search-index' to rank documents by keyword, 'search-content' for body matches")
-    next_hint("sections", cache_path, "<doc_index>")
+    print("Tip: use 'search' to rank docs + drill into bodies in one call")
+    next_hint("sections", "<page_ref>")
 
 
 def cmd_sections(args):
     """List sections within a specific document."""
-    lines = load_lines(args.file)
-    docs = split_documents(lines)
-
-    idx = args.doc_index
-    if idx < 0 or idx >= len(docs):
-        die_index_out_of_range(idx, len(docs))
+    file_path, docs = _load_docs(args.file, args.cache_dir)
+    idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
@@ -265,6 +344,7 @@ def cmd_sections(args):
     sections = extract_sections(doc["body_lines"], min_level=1)
 
     print(f'Sections in [{idx}] "{title}"')
+    print(f"  (file: {file_path})")
     print("=" * 60)
 
     for s in sections:
@@ -275,17 +355,13 @@ def cmd_sections(args):
     print()
     print(f"({len(sections)} sections)")
     print()
-    next_hint("content", args.file, str(idx), '"<heading_path>"')
+    next_hint("content", str(idx), '"<heading_path>"')
 
 
 def cmd_content(args):
     """Print content of a specific document or section."""
-    lines = load_lines(args.file)
-    docs = split_documents(lines)
-
-    idx = args.doc_index
-    if idx < 0 or idx >= len(docs):
-        die_index_out_of_range(idx, len(docs))
+    _, docs = _load_docs(args.file, args.cache_dir)
+    idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
@@ -303,12 +379,7 @@ def cmd_content(args):
 
 def cmd_search_index(args):
     """Rank documents by keyword match (title, description, tags, headings)."""
-    file_path = args.file
-    if not os.path.exists(file_path):
-        file_path = fetch_llms_txt(file_path)
-
-    lines = load_lines(file_path)
-    docs = split_documents(lines)
+    file_path, docs = _load_docs(args.file, args.cache_dir)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -337,7 +408,7 @@ def cmd_search_index(args):
     if not scored:
         print("No matching documents found.")
         print()
-        print("Tip: try broader keywords, 'search-content' for body matches, or 'fetch-index --compact' to browse")
+        print("Tip: try broader keywords, 'search' for body matches, or 'fetch-index --compact' to browse")
     else:
         for score, idx, _entry in scored:
             fm = fms[idx]
@@ -359,26 +430,20 @@ def cmd_search_index(args):
 
     print(f"({len(scored)} results, {len(docs)} documents searched)")
     print()
-    next_hint("sections", file_path, "<doc_index>")
+    next_hint("search", '"<query>"')
 
 
 def cmd_search_content(args):
     """Keyword search across document bodies (returns heading_path + snippets)."""
-    file_path = args.file
-    if not os.path.exists(file_path):
-        file_path = fetch_llms_txt(file_path)
-
-    lines = load_lines(file_path)
-    docs = split_documents(lines)
+    file_path, docs = _load_docs(args.file, args.cache_dir)
 
     if not args.query.strip():
         die("query must not be empty")
 
-    target_docs = range(len(docs))
-    if args.doc_index is not None:
-        if args.doc_index < 0 or args.doc_index >= len(docs):
-            die_index_out_of_range(args.doc_index, len(docs))
-        target_docs = [args.doc_index]
+    if args.page_ref is not None:
+        target_docs = [_resolve_page_ref(docs, args.page_ref)]
+    else:
+        target_docs = list(range(len(docs)))
 
     print(f'Search-content results for "{args.query}" (file: {file_path})')
     print("=" * 60)
@@ -429,12 +494,112 @@ def cmd_search_content(args):
     else:
         print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
     print()
-    next_hint("content", file_path, "<doc_index>", '"<heading_path>"')
+    next_hint("content", "<page_ref>", '"<heading_path>"')
+
+
+def cmd_search(args):
+    """Smart search: rank docs via title/desc/tags + drill into top N bodies.
+
+    Phase 1: search-index for top *--top-n* documents.
+    Phase 2: search each candidate body with section-level AND keyword match.
+    Phase 3: rank by (body hit count desc, index score desc, doc_idx asc).
+
+    Unlike Claude docs (which joins llms.txt + llms-full.txt by URL), AI SDK
+    bundles both into one llms.txt file so no URL join is needed — index and
+    body refer to the same doc by position.
+    """
+    file_path, docs = _load_docs(args.file, args.cache_dir)
+
+    if not args.query.strip():
+        die("query must not be empty")
+
+    # Pre-compute frontmatter + headings for ranking
+    fms: list[dict] = []
+    doc_headings: dict[int, list[str]] = {}
+    for i, doc in enumerate(docs):
+        fm = parse_frontmatter(doc["frontmatter_lines"])
+        fms.append(fm)
+        doc_headings[i] = _extract_h1_h2_titles(doc["body_lines"])
+
+    entries = [{"title": fm["title"] or "", "description": fm["description"] or ""} for fm in fms]
+
+    def _extras(_entry, idx):
+        return {"tags": fms[idx]["tags"], "headings": doc_headings[idx]}
+
+    scored = search_index_entries(entries, args.query, limit=args.top_n, get_extras=_extras)
+
+    print(f'Search results for "{args.query}" (file: {file_path})')
+    print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
+    print("=" * 60)
+    print()
+
+    if not scored:
+        print("No matching documents found.")
+        print()
+        print("Tip: try broader keywords or 'fetch-index --compact' to browse")
+        return
+
+    results = []
+    for score, idx, _entry in scored:
+        doc = docs[idx]
+        fm = fms[idx]
+        body_hits = search_content_in_body(
+            doc["body_lines"], args.query,
+            context_lines=args.context,
+            max_matches_per_doc=args.max_hits,
+            min_level=1,
+            max_snippet_chars=args.max_snippet_chars,
+        )
+        results.append({
+            "doc_idx": idx,
+            "title": fm["title"] or "(untitled)",
+            "tags": fm["tags"],
+            "index_score": score,
+            "body_hits": body_hits,
+        })
+
+    results.sort(key=lambda r: (
+        -r["body_hits"]["total_matches"],
+        -r["index_score"],
+        r["doc_idx"],
+    ))
+
+    for r in results:
+        hits = r["body_hits"]
+        shown = len(hits["results"])
+        print(f"[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
+        if r["tags"]:
+            print(f"    tags: {', '.join(r['tags'])}")
+        if hits["total_matches"]:
+            print(f"    ({hits['total_matches']} body hits, showing {shown})")
+            for s in hits["results"]:
+                print(f"    Section: {s['heading_path']}  (x{s['hit_count']})")
+                for snippet_line in s["snippet"].splitlines():
+                    print(f"      {snippet_line}")
+                print()
+        else:
+            print(f"    (no body hits — index match only)")
+        print()
+
+    print(f"({len(results)} documents, ranked via index → body)")
+    print()
+    next_hint("content", "<page_ref>", '"<heading_path>"')
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def _add_file_arg(parser) -> None:
+    parser.add_argument(
+        "--file", default=None,
+        help="Path to a local llms.txt snapshot (default: auto-fetch under --cache-dir)",
+    )
+
+
+def _add_page_ref_arg(parser, *, help: str) -> None:
+    parser.add_argument("page_ref", help=help)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -451,14 +616,14 @@ def main():
     )
     p_index.set_defaults(func=cmd_fetch_index)
 
-    # search-index (alias: search)
+    # search-index
     p_search_idx = sub.add_parser(
         "search-index",
-        aliases=["search"],
         help="Rank documents by keyword (title/description/tags/headings)",
     )
-    p_search_idx.add_argument("file", help="Path to llms.txt file (auto-fetched if missing)")
     p_search_idx.add_argument("query", help="Space-separated keywords (AND search)")
+    _add_file_arg(p_search_idx)
+    add_cache_dir_arg(p_search_idx)
     p_search_idx.add_argument("--limit", type=int, default=15,
                               help="Max results to show (default: 15)")
     p_search_idx.add_argument("--show-sections", action="store_true",
@@ -470,10 +635,13 @@ def main():
         "search-content",
         help="Keyword search across document bodies with snippets",
     )
-    p_search_body.add_argument("file", help="Path to llms.txt file (auto-fetched if missing)")
     p_search_body.add_argument("query", help="Space-separated keywords (AND search)")
-    p_search_body.add_argument("--doc-index", type=int, default=None,
-                               help="Restrict search to a single document (default: all)")
+    p_search_body.add_argument(
+        "--page-ref", default=None,
+        help="Restrict search to a single document (int / title substring)",
+    )
+    _add_file_arg(p_search_body)
+    add_cache_dir_arg(p_search_body)
     p_search_body.add_argument("--limit", type=int, default=10,
                                help="Max documents to display (default: 10)")
     p_search_body.add_argument("--context", type=int, default=2,
@@ -484,16 +652,46 @@ def main():
 
     # sections
     p_sections = sub.add_parser("sections", help="List sections in a document")
-    p_sections.add_argument("file", help="Path to llms.txt file")
-    add_doc_index_arg(p_sections)
+    _add_page_ref_arg(
+        p_sections,
+        help="Page reference: integer index or title substring",
+    )
+    _add_file_arg(p_sections)
+    add_cache_dir_arg(p_sections)
     p_sections.set_defaults(func=cmd_sections)
 
     # content
     p_content = sub.add_parser("content", help="Print document/section content")
-    p_content.add_argument("file", help="Path to llms.txt file")
-    add_doc_index_arg(p_content, help="Document index")
+    _add_page_ref_arg(
+        p_content,
+        help="Page reference: integer index or title substring",
+    )
     add_heading_path_arg(p_content)
+    _add_file_arg(p_content)
+    add_cache_dir_arg(p_content)
     p_content.set_defaults(func=cmd_content)
+
+    # search (smart: index rank + body drill-in)
+    p_search = sub.add_parser(
+        "search",
+        help="Smart search: ranks documents and drills into top N bodies",
+    )
+    p_search.add_argument("query", help="Space-separated keywords (AND search)")
+    _add_file_arg(p_search)
+    add_cache_dir_arg(p_search)
+    p_search.add_argument(
+        "--top-n", type=int, default=5,
+        help="Number of top candidate documents to drill into (default: 5)",
+    )
+    p_search.add_argument("--max-hits", type=int, default=3,
+                          help="Max body hits per document (default: 3)")
+    p_search.add_argument("--context", type=int, default=2,
+                          help="Context lines around each hit (default: 2)")
+    p_search.add_argument(
+        "--max-snippet-chars", type=int, default=500,
+        help="Truncate each snippet to N chars (0 = no limit, default: 500)",
+    )
+    p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
     args.func(args)
