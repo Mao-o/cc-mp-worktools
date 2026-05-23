@@ -34,23 +34,53 @@ def _is_readonly(candidate: str, service) -> bool:
 
 def _find_accounts_file(
     project_dir: str,
-) -> tuple[Path | None, str | None, list[tuple[str, Path]]]:
-    """accounts.local.json を 3-tier で探す。
+) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None]:
+    """accounts.local.json を 3-tier + 親ディレクトリ遡及で探す。
+
+    cwd 階層から始めて 1 階層ずつ親へ遡り、最初に accounts.local.json が
+    見つかった階層を採用する。同一階層に複数 tier が同居する場合は
+    fail-closed (D4) のため `conflicts` を返す。worktree から親 repo の
+    `.claude/verify-cloud-account/accounts.local.json` を継承する運用を
+    透過的にサポートし、worktree 内に同名ファイルを複製する必要を無くす。
 
     Returns:
-        (path, kind, conflicts):
+        (path, kind, conflicts, resolved_dir):
           - path: 採用するファイルのパス。見つからない or 競合時は None
           - kind: "new" / "deprecated" / "legacy" のいずれか (採用されたもの)
-          - conflicts: 複数存在が検出された場合は検出したすべての (kind, path) リスト
+          - conflicts: 同一階層に複数 tier が存在した場合の検出リスト
                        (採用は保留。呼び出し側で fail-closed deny する)
+          - resolved_dir: 採用 (または競合検出) した階層の絶対パス。
+                          親遡及で worktree 外を採用した場合は project_dir の
+                          祖先を指す。何も見つからなければ None
     """
-    found = paths.discover_all_accounts_files(project_dir)
+    found, resolved_dir = paths.discover_accounts_files_with_ancestors(project_dir)
     if len(found) >= 2:
-        return None, None, found
+        return None, None, found, resolved_dir
     if len(found) == 1:
         kind, path = found[0]
-        return path, kind, []
-    return None, None, []
+        return path, kind, [], resolved_dir
+    return None, None, [], None
+
+
+def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
+    """親ディレクトリの accounts.local.json を採用した場合の 1 行注釈。
+
+    deny / warn のメッセージに前置きとして埋め込み、worktree 利用者が
+    「どこから読まれているか」を把握できるようにする。
+    cwd 階層で見つかった場合や、まったく見つからなかった場合は空文字を返す。
+    """
+    if resolved_dir is None:
+        return ""
+    try:
+        project = Path(project_dir).resolve()
+    except OSError:
+        return ""
+    if resolved_dir == project:
+        return ""
+    return (
+        f"accounts.local.json は親ディレクトリ {resolved_dir} から継承して "
+        "います (worktree 内に同名ファイルは不要)。"
+    )
 
 
 def _collect_targets(command: str) -> list[tuple]:
@@ -114,10 +144,14 @@ def dispatch(command: str, cwd: str) -> dict | None:
     if not targets:
         return None
 
-    accounts_path, kind, conflicts = _find_accounts_file(project_dir)
+    accounts_path, kind, conflicts, resolved_dir = _find_accounts_file(project_dir)
+    ancestor_note = _ancestor_note(project_dir, resolved_dir)
 
     if conflicts:
-        return output.deny(_format_conflicts(conflicts))
+        body = _format_conflicts(conflicts)
+        if ancestor_note:
+            body = ancestor_note + "\n\n" + body
+        return output.deny(body)
 
     if accounts_path is None:
         hints = [getattr(svc, "SETUP_HINT", "") for svc, _ in targets]
@@ -178,11 +212,19 @@ def dispatch(command: str, cwd: str) -> dict | None:
 
     if errors:
         body = "\n\n".join(errors)
+        if ancestor_note:
+            body = ancestor_note + "\n\n" + body
         if note:
             body = body + "\n\n" + note
         return output.deny(body)
 
+    # warn は deprecation note が出るときのみ発火させる。verify 成功時は
+    # ancestor_note 単独では warn を出さず silent (worktree で親採用は
+    # 通常運用なので毎回通知するとノイズになる)。
     if note:
-        return output.warn(note)
+        body = note
+        if ancestor_note:
+            body = ancestor_note + "\n\n" + body
+        return output.warn(body)
 
     return None

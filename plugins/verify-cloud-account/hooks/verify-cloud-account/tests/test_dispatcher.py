@@ -302,6 +302,172 @@ class TestServiceInteractions(BaseWithTmpProject):
         mock_verify.assert_called_once()
 
 
+class TestAncestorLookup(unittest.TestCase):
+    """親ディレクトリ遡及による accounts.local.json 発見 (worktree 対応)。
+
+    レイアウトイメージ:
+        tmp/parent_repo/                                ← 親 repo (本体)
+        tmp/parent_repo/.claude/verify-cloud-account/accounts.local.json
+        tmp/parent_repo/worktree-branch/                ← cwd (worktree)
+        tmp/parent_repo/worktree-branch/.claude/...     ← (任意で配置)
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+        # 親 repo
+        self.parent_dir = Path(self.tmp) / "parent_repo"
+        self.parent_dir.mkdir()
+        self.parent_claude = self.parent_dir / ".claude"
+        self.parent_claude.mkdir()
+        self.parent_new_dir = self.parent_claude / "verify-cloud-account"
+        self.parent_new_dir.mkdir()
+
+        # worktree (cwd)
+        self.worktree_dir = self.parent_dir / "worktree-branch"
+        self.worktree_dir.mkdir()
+
+        self._cache_tmp = Path(self.tmp) / "cache_tmp"
+        self._cache_tmp.mkdir()
+
+        self._env_patcher = mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_PROJECT_DIR": str(self.worktree_dir),
+                "TMPDIR": str(self._cache_tmp),
+            },
+        )
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+
+    def _write_parent_new(self, data: dict):
+        (self.parent_new_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_parent_deprecated(self, data: dict):
+        (self.parent_claude / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_worktree_new(self, data: dict):
+        wt_dir = self.worktree_dir / ".claude" / "verify-cloud-account"
+        wt_dir.mkdir(parents=True, exist_ok=True)
+        (wt_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_ancestor_new_path_verifies_silently(self):
+        """worktree に accounts なし → 親の新パスを採用し verify 成功 → silent。"""
+        self._write_parent_new({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        self.assertIsNone(result)
+        v.assert_called_once()
+
+    def test_ancestor_new_path_verify_failure_includes_ancestor_note(self):
+        """親採用で verify 失敗時、deny reason に親の絶対パスが含まれる。"""
+        self._write_parent_new({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="GitHub 不一致"
+        ):
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("GitHub 不一致", reason)
+        # 親遡及採用の注釈 (親 repo の絶対パス) が含まれる
+        self.assertIn(str(self.parent_dir), reason)
+        self.assertIn("親ディレクトリ", reason)
+
+    def test_worktree_takes_priority_over_ancestor(self):
+        """worktree 自身に accounts があれば親は見ない (cwd 優先)。"""
+        self._write_parent_new({"github": "parent-user"})
+        self._write_worktree_new({"github": "worktree-user"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        self.assertIsNone(result)
+        # worktree 側の値で verify されたことを確認
+        self.assertEqual(v.call_args[0][0], "worktree-user")
+
+    def test_ancestor_conflict_returns_deny_with_ancestor_note(self):
+        """親階層に複数 tier 同居 → fail-closed deny に親階層注釈付き。"""
+        self._write_parent_new({"github": "A"})
+        self._write_parent_deprecated({"github": "B"})
+        result = dispatch("gh pr list", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("複数のパス", reason)
+        self.assertIn(str(self.parent_dir), reason)
+        self.assertIn("親ディレクトリ", reason)
+
+    def test_no_ancestor_returns_unconfigured_deny(self):
+        """親含め一切無い → 通常の「未設定」deny (親注釈なし)。"""
+        result = dispatch("gh pr list", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("未設定", reason)
+        # 親階層情報は無い
+        self.assertNotIn("親ディレクトリ", reason)
+
+    def test_ancestor_deprecated_path_warns_with_both_notes(self):
+        """親に deprecated パスがある場合、warn に migration note + 親注釈。"""
+        self._write_parent_deprecated({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertIn("additionalContext", out)
+        ctx = out["additionalContext"]
+        # deprecation note と親階層注釈が両方含まれる
+        self.assertIn("migrate", ctx)
+        self.assertIn("親ディレクトリ", ctx)
+        self.assertIn(str(self.parent_dir), ctx)
+
+
+class TestAncestorDepthLimit(unittest.TestCase):
+    """親遡及の max_levels 制限を paths.py 側で検証する単体テスト。"""
+
+    def test_depth_limit_stops_search(self):
+        import shutil
+        import tempfile
+        from core import paths as paths_mod
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+
+        # /tmp/.../a/b/c/d/e/f/g/h/i/j/k/cwd と深くネストして
+        # ルート ("/tmp/.../a") に accounts.local.json を置く
+        deep = Path(tmp)
+        levels = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10", "L11", "cwd"]
+        for lv in levels:
+            deep = deep / lv
+            deep.mkdir()
+        anchor = Path(tmp) / "L0"
+        (anchor / ".claude" / "verify-cloud-account").mkdir(parents=True)
+        (anchor / ".claude" / "verify-cloud-account" / "accounts.local.json").write_text(
+            "{}", encoding="utf-8"
+        )
+
+        # 制限内 (cwd から 13 階層上は anchor → max_levels=13 で見える)
+        found, resolved = paths_mod.discover_accounts_files_with_ancestors(
+            str(deep), max_levels=14
+        )
+        self.assertEqual(len(found), 1)
+        self.assertEqual(resolved, anchor.resolve())
+
+        # 制限外 (max_levels=5 だと anchor まで届かない)
+        found, resolved = paths_mod.discover_accounts_files_with_ancestors(
+            str(deep), max_levels=5
+        )
+        self.assertEqual(found, [])
+        self.assertIsNone(resolved)
+
+
 class TestCacheIntegration(BaseWithTmpProject):
     def test_second_call_hits_cache(self):
         self._write_accounts({"github": "Mao-o"})

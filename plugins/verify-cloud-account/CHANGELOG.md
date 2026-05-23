@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.4.0
+
+**Feature**: 親ディレクトリ遡及による `accounts.local.json` 発見。
+git worktree 配下で作業しているとき、worktree 内に `accounts.local.json`
+を複製しなくても親 repo (本体 checkout) の設定を自動で継承して検証する。
+
+### 主要な変更
+
+1. **`core/paths.py` に `discover_accounts_files_with_ancestors()` を追加** —
+   `project_dir` から始めて 1 階層ずつ親へ遡り、最初に accounts.local.json が
+   見つかった階層を採用する。`max_levels` (既定 10) で安全側の上限を持つ。
+2. **`core/dispatcher._find_accounts_file` を親遡及対応に拡張** — 返値に
+   `resolved_dir` を追加し、親階層採用時は deny / warn メッセージに
+   `accounts.local.json は親ディレクトリ <絶対パス> から継承しています
+   (worktree 内に同名ファイルは不要)。` の 1 行注釈を前置きする。
+3. **採用優先度** — cwd 階層に何か 1 つでもあればそこを採用 (親階層は見ない)。
+   親採用は cwd に何も無いときのフォールバック経路。
+4. **3-tier 競合 (D4) 維持** — 同一階層に new/deprecated/legacy が同居する
+   場合は従来どおり fail-closed deny。親遡及対象は「最初に見つかった階層」
+   のみで、複数階層を横断した競合検出はしない (worktree 親採用は曖昧では
+   ないため)。
+
+### 非互換性
+
+なし。cwd に accounts.local.json がある既存プロジェクトの挙動は完全に同じ。
+worktree から親 repo の accounts.local.json が継承される挙動は追加機能。
+
+### テスト
+
+- `tests/test_dispatcher.py::TestAncestorLookup` に 6 ケース追加
+  (親採用成功 / 失敗 deny + 親注釈 / cwd 優先 / 親階層 D4 競合 /
+   親含め未設定 / 親 deprecated パス warn)
+- `tests/test_dispatcher.py::TestAncestorDepthLimit` に 1 ケース追加
+  (`max_levels` 上限テスト)
+
+合計テスト件数: 215 → 222。
+
+### 想定ユースケース
+
+```
+/repo/main-checkout/.claude/verify-cloud-account/accounts.local.json
+/repo/main-checkout/.worktrees/feature-x/   ← cwd (worktree)
+```
+
+worktree (`/repo/main-checkout/.worktrees/feature-x/`) で `gh pr create` を
+叩いても、親 repo の `accounts.local.json` が継承されて検証が走る。
+
 ## 0.3.2
 
 **Bug fix**: Firebase の `firebase use` 出力パース修正

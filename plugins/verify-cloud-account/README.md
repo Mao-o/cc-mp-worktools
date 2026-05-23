@@ -214,6 +214,31 @@ dispatcher は以下の順に accounts.local.json を探す:
 検証を通すと、どの設定が効いているか不透明になる。
 `/verify-cloud-account:accounts-migrate` で統合するか、不要な方を手動削除する。
 
+## 親ディレクトリ遡及 (v0.4.0)
+
+cwd 階層に accounts.local.json が無い場合、**親ディレクトリを 1 階層ずつ
+遡って探す**。git worktree から作業しているとき、worktree 内に
+accounts.local.json を複製しなくても親 repo (本体 checkout) の設定を
+自動継承する。
+
+```
+/repo/main-checkout/.claude/verify-cloud-account/accounts.local.json
+/repo/main-checkout/.worktrees/feature-x/   ← cwd (worktree)
+```
+
+worktree (`/repo/main-checkout/.worktrees/feature-x/`) で `gh pr create` を
+叩いても、親 repo の accounts.local.json が継承されて検証が走る。
+worktree 内に同名ファイルを置く必要は無い。
+
+**仕様**:
+
+- 探索順は cwd → cwd.parent → ... と 1 階層ずつ上る。最初に見つかった階層を採用
+- cwd 階層に何かあれば親は見ない (cwd 優先)
+- 同一階層に複数 tier が同居する場合は従来どおり fail-closed deny (D4)
+- 安全側上限として `max_levels=10` (`core/paths.py`)
+- 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
+  <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
+
 ## パフォーマンス (短期キャッシュ)
 
 PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && gh pr comment`
