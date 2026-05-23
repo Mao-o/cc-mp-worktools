@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.8.4 (2026-05-24) — Hotfix: /migrate-to-beads idempotency (--status all、v0.7.2 と同パターン)
+
+v0.7.2 (commit 7ef562d) で `commands/migrate-approvals-to-beads.md` に施した
+idempotency check 修正 (`bd list ... --status all`) と同じパターンを
+`commands/migrate-to-beads.md` (detection/fix の one-shot migration、v0.6.0 で
+新規導入) には適用していなかった取りこぼしを修正する。
+
+v0.8.3 release 直後の regression spot-check (v0.7.x → v0.8.x の意図的修正消失
+audit、6 pattern grep + diff ベース) で発見。実害は限定的 (detection/fix
+migration は v0.5.x → v0.6.0 の one-shot かつ再実行頻度が低い) が、`--dry-run`
+確認時や何らかの理由で再実行した場合に **close 済 detection/fix が見落とされ
+重複 issue を作る theoretical risk** が残っていた。
+
+### Fixed
+
+- `commands/migrate-to-beads.md`:
+  - **line 93 (detection の idempotency check)**:
+    `bd list -l "legacy-id:$legacy_id" --json`
+    → `bd list -l "legacy-id:$legacy_id" --status all --json`
+  - **line 156 (fix の idempotency check)**:
+    `bd list -l "legacy-id:$legacy_fix_id" --json`
+    → `bd list -l "legacy-id:$legacy_fix_id" --status all --json`
+
+  bd のデフォルト `--status open` では close 済 detection (fix 完了で close
+  されたもの) / close 済 fix (achieved or turn_limit で close されたもの) を
+  検出できず、再 migrate で重複 issue が作られる bug を修正。v0.7.2 で
+  migrate-approvals に施した修正と同じ規律。
+
+### Notes
+
+- `-t detection` / `-t fix` の明示指定 (`bd list -l "legacy-id:..." -t detection`)
+  は本 hotfix では追加しない。`legacy-id:` label の命名空間が他 type と
+  被るリスクは低く、v0.7.2 で migrate-approvals に施した修正と scope を揃える
+  ため。将来 v1.0 凍結前に hygiene として追加検討
+- regression spot-check で確認した他 5 pattern (`bd list -t approval --status`
+  指定、`custom.types` / `types.custom`、`agent-org/approvals/` 参照、G6
+  規律 bd Bash 直接 invoke、G3 規律 description body 変数代入経由) は問題なし
+
+### Verification
+
+- `claude plugin validate plugins/agent-org` warning 0 通過
+- bd 1.0.4 実機検証はオプション (修正パターンは v0.7.2 で確認済の挙動と同一)
+
+### 関連
+
+- v0.7.2 (commit 7ef562d): migrate-approvals-to-beads.md に同パターンの修正、
+  本 hotfix で migrate-to-beads.md にも揃える形 (v0.8.0 large refactor で
+  v0.7.2 の規律自体は migrate-approvals に保持されたが、同パターンが
+  migrate-to-beads にも必要であることを v0.7.2 当時に気づけていなかった)
+- v0.8.3 spot-check (2026-05-24): 本 regression を発見した audit セッション。
+  Claude Code 2.1.150 環境で 6 pattern を `grep -rn` + `git show <commit>`
+  ベース監査
+
 ## 0.8.3 (2026-05-23) — Docs: ADR-008 で v0.8.2 Notes 未解明事項を解消
 
 v0.8.2 (2026-05-23) で「Agent Teams × worktree isolation の挙動は公式未記述

@@ -90,7 +90,10 @@ if [ -d "$STATE_DIR/detections" ]; then
     legacy_id="$(basename "$f" .yaml)"
 
     # 既に migrate 済か確認 (idempotent)
-    existing_id="$(bd list -l "legacy-id:$legacy_id" --json 2>/dev/null \
+    # --status all を必ず付ける: bd list のデフォルトは --status open のため、
+    # close 済 detection (fix 完了で close されたもの) を検出できず、再 migrate で
+    # 重複 issue が作られる (v0.7.2 で migrate-approvals に施したのと同じ規律、v0.8.4 で揃える)
+    existing_id="$(bd list -l "legacy-id:$legacy_id" --status all --json 2>/dev/null \
       | jq -r '.[0].id // empty')"
     if [ -n "$existing_id" ]; then
       echo "skip: $legacy_id already migrated to $existing_id"
@@ -153,7 +156,10 @@ if [ -d "$STATE_DIR/fixes" ]; then
     legacy_fix_id="$(basename "$f" .json)"
 
     # 既に migrate 済か確認
-    existing_id="$(bd list -l "legacy-id:$legacy_fix_id" --json 2>/dev/null \
+    # --status all を必ず付ける: bd list のデフォルトは --status open のため、
+    # close 済 fix (achieved / turn_limit で close されたもの) を検出できず、再 migrate で
+    # 重複 issue が作られる (v0.7.2 で migrate-approvals に施したのと同じ規律、v0.8.4 で揃える)
+    existing_id="$(bd list -l "legacy-id:$legacy_fix_id" --status all --json 2>/dev/null \
       | jq -r '.[0].id // empty')"
     if [ -n "$existing_id" ]; then
       echo "skip: $legacy_fix_id already migrated to $existing_id"
