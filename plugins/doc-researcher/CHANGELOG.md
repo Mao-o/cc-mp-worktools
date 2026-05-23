@@ -2,6 +2,26 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.6.0] - 2026-05-23
+
+### 3 SKILL description の統一: Triggers / Use proactively / WebFetch 優位文
+
+- `researching-claude-docs` の frontmatter `description` に
+  `Use proactively when ...` / `Use when implementing or debugging ... such as ...` /
+  `Triggers: ...` 行を追加 (ai-sdk / firebase と同じパターンに揃える)。Triggers は
+  "Claude Code", "hook schema", "subagent", "plugin manifest", "slash command",
+  "settings.json", "permission", "MCP", "Anthropic API", "code.claude.com",
+  "platform.claude.com", "Claude Code ドキュメント", "researching-claude-docs"
+  の 13 個。これまで Triggers 列挙がなく ai-sdk / firebase と非対称だった状態を
+  解消し、LLM 側の skill 候補マッチ率を底上げする
+- 3 SKILL すべての `description` に「WebFetch ではなくこのスキルを使う（要約
+  モデル経由ではないため field の抜け落とし・幻覚が起きない）」の優位文を
+  統一文型で揃える。claude-docs に既存だったこの文型を ai-sdk / firebase の
+  description にも追加し、3 スキル共通のパターンで LLM が「verbatim 取得が
+  欲しい」「field 抜け落ちを避けたい」場面を引っかけられるようにする
+- SKILL 本体 (markdown) / parse スクリプト I/F / キャッシュ動作の変更なし。
+  description のみの非破壊変更
+
 ## [0.5.0] - 2026-05-14
 
 ### `researching-claude-docs` skill 3.0.0 (UX 改善 + 一部破壊的)
