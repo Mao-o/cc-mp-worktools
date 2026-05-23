@@ -80,6 +80,35 @@ python3 plugins/doc-researcher/scripts/parse-firebase.py fetch-index --limit 10
 - コードフェンス保護: コードブロックの途中分割を自動防止
 - テーブル保護 (claude-docs / firebase): Markdown テーブルの途中分割を自動防止
 
+## 設計判断: subagent fork + Sonnet は維持する
+
+3 SKILL とも `context: fork` + `model: sonnet` で起動する。これは spawn
+オーバーヘッドと引き換えに以下を保証する設計判断:
+
+- **context rot 防止**: llms.txt / llms-full.txt は数 MB あり、親 context に流すと
+  数回の調査でメインセッションが肥大化 → 後続作業の精度が劣化する (context rot)。
+  fork で隔離することで親には「調査結果の要約」だけが返る
+- **正確性の優先**: 親 (例: Opus 4.7) の作業と SKILL の調査を分離し、要約モデルが
+  混在しない決定論的な出力を得る (`researching-claude-docs` description で
+  「verbatim 取得・幻覚回避」と明示している通り)
+- **コスト分離**: Sonnet で動かすことで Opus 親セッションのトークン消費に乗らない
+
+**軽量化方向 (fork 外し / 親 model 継承 / 軽量モード追加) は採用しない。**
+spawn オーバーヘッドは受け入れ、低品質回答や context rot を避ける方を優先する。
+
+「軽い質問でも WebFetch に流れる」課題への対応策は次の 3 系統で、いずれも
+fork + Sonnet 構成を崩さない:
+
+1. **description の充実** (`Use proactively` / `Triggers:` を 3 SKILL で揃える、0.6.0)
+2. **`~/.claude/rules/` の `*-doc-first.md` rule** で「自身の知識より先に
+   `researching-*` を呼ぶ」を明示 (ai-sdk / claude-docs / firebase)
+3. **`search` 統合サブコマンドの提供** (0.7.0) で 1 コマンド完結の調査体験
+
+WebFetch との比較メモ: WebFetch は要約モデル経由のため field 抜け落ち・幻覚の
+リスクがあり、Anthropic API / Firebase / AI SDK のような schema を厳密に扱う
+ドメインでは fork + Sonnet + 決定論的 grep の方が信頼できる。spawn 数秒 vs
+要約幻覚で半日 debug を比較すれば、前者の方が安い。
+
 ## 保守メモ
 
 `parse-claude-docs.py`、`parse-ai-sdk.py`、`parse-firebase.py` はドキュメント分割方式が

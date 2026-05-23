@@ -79,6 +79,15 @@ claude-docs は 0.5.0 で既に新 API を実装済み。本 release で他 2 sc
   正常に取得できる (cache hit 時 ~1 秒)
 - `parse-claude-docs.py search "hook" --index-limit 2` の既存挙動は維持 (regression なし)
 
+### 設計判断記録 (subagent fork 維持)
+
+3 SKILL の `context: fork + model: sonnet` 構成は **維持** する設計判断を明文化
+(README.md の「設計判断」セクション参照)。spawn オーバーヘッドより context rot
+回避と正確性を優先するため、軽量化方向 (fork 外し / 親 model 継承 / 軽量モード追加)
+は採用しない。「軽い質問でも WebFetch に流れる」課題への対応は description 充実
+(0.6.0) + doc-first rules (`~/.claude/rules/`) + `search` 統合 (本 release) の
+3 系統で行う。
+
 ## [0.6.0] - 2026-05-23
 
 ### 3 SKILL description の統一: Triggers / Use proactively / WebFetch 優位文
