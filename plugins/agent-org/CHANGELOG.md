@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.8.2 (2026-05-23) — Docs: Agent Teams × worktree 仕様反映 + Bugfix: v0.7.2 regression 復元
+
+v0.8.1 release 後のフォローアップ調査で、Agent Teams の worktree 隔離仕様
+(公式: **隔離されない**) を確認し、agent-org への影響を docs 反映する patch。
+加えて v0.8.0 large refactor で意図せず regression していた
+`migrate-approvals-to-beads.md` の v0.7.2 修正 (`--status all` 追加) を復元する
+bugfix を同梱。
+
+### Documented
+
+- **公式仕様の確認**: Agent Teams は teammate を worktree 隔離しない (公式
+  `code.claude.com/docs/en/agents` "Choose an approach" / `docs/en/agent-teams`
+  "Best practices/Avoid file conflicts" 明記)。teammate 同士が同じ main
+  checkout を共有し、ファイル編集競合は task claim の file lock を超えると
+  上書き発生
+- **agent-org への影響評価**: 現行設計が偶然に公式仕様と整合
+  - **architect-reviewer (Agent Teams 利用)**: 真 RO (`tools: Read,Glob,Grep`)
+    で write しないため、複数 reviewer 並列 spawn でも競合発生せず
+  - **regression-fixer (Agent Teams 不使用)**: `--bg` 単独経路で自動 worktree
+    隔離、並列拡張は将来も複数 `--bg` セッションを採用すべき
+  - **その他 (context-compressor / decision-keeper / regression-watcher)**:
+    単独 spawn、影響なし
+
+### Changed (docs only)
+
+- `README.md`: Phase 3 components 表と「依存」セクションに「Agent Teams は
+  worktree 非隔離 → reviewer は真 RO 必須」note 追加
+- `docs/ARCHITECTURE.md`: Phase 3 multi-perspective review データフロー
+  step 4 に「Agent Teams worktree 非隔離は真 RO 規律の前提」note 追加
+- `skills/running-review/SKILL.md`: 「前提」セクションに公式仕様引用 +
+  「reviewer 以外の並列 write に Agent Teams を流用してはいけない (複数
+  `--bg` を採用すべき)」追加
+- `agents/regression-fixer.md`: 並列 fixer 拡張時の経路選択 note 追加
+  (Agent Teams 不適合、複数 `--bg` 経路が正解)
+- `agents/architect-reviewer.md`: 真 RO 規律の根拠リストに「Agent Teams
+  経由で並列 spawn される際の write 競合回避」を明示
+
+### Bugfix (regression from v0.8.0)
+
+- **`commands/migrate-approvals-to-beads.md` の `--status all` 復元**:
+  v0.7.2 (7ef562d) で追加した `bd list -t approval -l agent-org --status all`
+  / `bd list -l "legacy-id:<id>" -t approval --status all` (idempotency 担保
+  のため approved/closed approval も含めて under-count を防ぐ修正) が、
+  v0.8.0 (414d7d2) の large refactor (path 規約変更で 19 files 編集) で
+  意図せず削除された regression を復元。CHANGELOG 0.7.2 entry 参照
+
+### Notes
+
+- Agent tool の `team_name` + `isolation: "worktree"` 同時指定挙動、
+  frontmatter `isolation: worktree` が teammate 実行時に適用されるかは
+  **公式未記述** (実機検証必要)。ただし agent-org の reviewer は真 RO ゆえ
+  実利益ゼロのため検証動機は低い
+
 ## 0.8.1 (2026-05-23) — Bugfix: bd-check の bd doctor 判定 + bd-export の source field
 
 v0.8.0 release 後のドッグフーディング (worktools 自体への v0.8.0 適用) で

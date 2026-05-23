@@ -25,6 +25,11 @@ verdict (judgement) を YAML 形式で会話に返すのが役割。
   廃止。v0.8.0 で bd は `<repo>/.beads/` に repo-local 配置 (ADR-007)。
   詳細は `commands/run-review.md`)
 - reviewer の権限が最小化され、監査面で扱いやすい
+- **Agent Teams 経由で並列 spawn される際の write 競合回避**: Agent Teams は
+  worktree 非隔離 (公式 `code.claude.com/docs/en/agents`: "Agent teams don't
+  isolate teammates in worktrees") のため、3-5 reviewer が同じ checkout に
+  write すると上書きが発生する。真 RO 規律はこれを原理的に防ぐ (write 系の
+  tool 自体が frontmatter にないので spawn 経路を問わず安全)
 
 あなた自身は decision-keeper の ADR や architect-reviewer 自身の MEMORY.md
 を読み、レビュー観点を集めるが、結果を直接ファイルに書かない。verdict は

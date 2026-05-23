@@ -26,7 +26,7 @@ subagent memory / agent teams / `/goal` / agent view で実装するプラグイ
 | コンポーネント | 役割 |
 |---|---|
 | `architect-reviewer` subagent | 真 RO (`tools: Read,Glob,Grep`) の review 専門家。verdict YAML を会話に返すのみで approval 書込は呼び出し側 command が担当 (`memory: project`, `model: sonnet`) |
-| `running-review` skill | `architect-reviewer` を 3-5 perspective で並列 spawn する手順 (agent teams default、Task tool sequential fallback) |
+| `running-review` skill | `architect-reviewer` を 3-5 perspective で並列 spawn する手順 (agent teams default、Task tool sequential fallback)。**Agent Teams は worktree 非隔離** (公式) ゆえ architect-reviewer の真 RO 規律 (`tools: Read,Glob,Grep`) が write 競合回避の必要条件 |
 | `/run-review` command | skill 起動 + verdict 集約 + bd approval issue 作成 (v0.7.0 から `bd create -t approval` + label/priority + dep。v0.6.x までは `.claude/agent-org/approvals/<task-id>.json` JSON 書込) |
 | Stop hook (`stop-quality-gate.sh`) | `.claude/agent-org/quality-gates.json` 設定がある場合、required gate が failing なら session 停止を block。`kind: approvals_clean` は v0.7.0 から bd 経由で rejected approval (priority=0、open) を検出 |
 | TaskCompleted hook (`task-completed-gate.sh`) | task 完了時に bd 上の `task:<task_id>` ラベル付き approval (priority=0、open) があれば block。approval 0 件は通常 task として pass (opt-in) |
@@ -327,7 +327,12 @@ migration は `/migrate-approvals-to-beads` を実行。詳細は `commands/run-
 - Claude Code v2.1.33 以上 (subagent `memory` frontmatter)
 - Phase 3 の `running-review` skill を agent teams 経路で使う場合は
   Claude Code v2.1.32 以上 + `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
-  (未設定なら Task tool sequential 経路に fallback)
+  (未設定なら Task tool sequential 経路に fallback)。**Agent Teams は
+  worktree 非隔離** (公式 `code.claude.com/docs/en/agents`) のため teammate
+  が write するとファイル競合が発生する。reviewer を真 RO 設計にしておく
+  ことで原理的に回避している。並列 write が必要な用途 (複数 fixer の
+  並列実行など) は Agent Teams ではなく複数の `claude --bg` セッションを
+  使うこと (各セッションが自動 worktree 隔離される)
 - Phase 4 (`/start-watcher` / `/fix-regression`) を使う場合は Claude Code
   **v2.1.139 以上** (agent view / `--bg` / `/goal`)
 - Phase 4 では `gh` CLI (認証済み) と `git remote origin` 設定が必須

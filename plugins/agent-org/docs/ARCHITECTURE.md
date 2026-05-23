@@ -257,7 +257,9 @@ graph TB
    `bd create -t task -p 2 -l "task:${task_id}" -l "agent-org"`)
 3. command が `running-review` skill を起動
 4. skill が `agent-org:architect-reviewer` を 3-5 perspective で
-   spawn (agent teams default、Task tool sequential fallback)
+   spawn (agent teams default、Task tool sequential fallback)。
+   **Agent Teams は worktree 非隔離** (公式) のため reviewer の真 RO 規律
+   (`tools: Read,Glob,Grep`) が write 競合回避の必要条件
 5. 各 reviewer が真 RO で対象を Read し、verdict YAML を会話に返す
 6. skill が verdict を集約サマリとして command に返す
 7. command が aggregate_overall → priority マッピング (reject/request_changes=0、

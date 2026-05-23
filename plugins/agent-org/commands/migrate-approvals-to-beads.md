@@ -199,7 +199,8 @@ fi
 echo ""
 echo "=== migration summary ==="
 echo "BEADS_DIR (auto-resolved by bd from $REPO_ROOT): $BEADS_DIR"
-approval_count="$(bd list -t approval -l agent-org --json 2>/dev/null | jq 'length')"
+# --status all: approved (prio=2) は migrate 時に close されるため、open のみだと under-count
+approval_count="$(bd list -t approval -l agent-org --status all --json 2>/dev/null | jq 'length')"
 task_count="$(bd list -t task -l agent-org --json 2>/dev/null | jq 'length')"
 echo "approval issues (with agent-org label): $approval_count"
 echo "task issues (with agent-org label):     $task_count"
@@ -212,7 +213,7 @@ echo "問題があれば手動で $LEGACY_DIR/<id>.json → $APPROVALS_DIR/ に�
 
 ## idempotency
 
-- `bd list -l "legacy-id:<id>" -t approval` で既存 migrate 済 approval を検出 → skip
+- `bd list -l "legacy-id:<id>" -t approval --status all` で既存 migrate 済 approval を検出 → skip
 - 同じ legacy JSON を 2 度 migrate しても重複 issue は作られない
 - `--dry-run` は何も書かず mv もしない
 - 旧 JSON の mv 後に再実行した場合: `APPROVALS_DIR` が空 / 存在しないので即 exit 0

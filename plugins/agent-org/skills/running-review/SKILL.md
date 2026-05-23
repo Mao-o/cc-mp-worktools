@@ -42,6 +42,14 @@ description: |
   が設定されていること
 - agent teams 機能は experimental。spawn / mailbox の挙動は本番運用での
   安定性が未検証
+- **Agent Teams は worktree 非隔離** (公式 `code.claude.com/docs/en/agents`:
+  "Agent teams don't isolate teammates in worktrees, so partition the work
+  so each teammate owns a different set of files")。teammate が write すると
+  同一 checkout で**ファイル上書き競合**が発生する。本 skill は
+  architect-reviewer の真 RO 規律 (`tools: Read,Glob,Grep`) で原理的に回避
+  している。**reviewer 以外の用途 (並列 write) に Agent Teams を流用しては
+  いけない**。並列 write が必要な場合は複数の `claude --bg` セッションを
+  独立起動すること (各セッションが `.claude/worktrees/<id>/` に自動隔離される)
 - 環境変数が無い場合は **fallback: Task tool で sequential に invoke** する
   手順 (本 SKILL の「fallback 手順」セクション参照)
 

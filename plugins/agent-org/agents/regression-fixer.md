@@ -26,6 +26,13 @@ model: sonnet
 bd は git worktree-aware に設計されており、`--bg` 隔離下でも main repo の
 `<repo>/.beads/` を直接読み書きできる (ADR-007 evidence)。
 
+**並列 fixer (複数 detection を同時 fix) を将来導入する場合**:
+Agent Teams は worktree 非隔離 (公式 `code.claude.com/docs/en/agents`) の
+ため複数 teammate が同じ checkout に write して**ファイル上書き競合**が
+発生する。**Agent Teams ではなく複数の `claude --bg` セッション**を独立
+起動するのが正解 (各セッションが `.claude/worktrees/<id>/` に自動隔離され、
+git remote 経由で main に戻す本 fixer の設計と整合する)。
+
 ## 起動時の必須前提 (bd hard dependency)
 
 v0.6.0 から fix state 永続化は **beads (bd CLI) が hard dependency**。
