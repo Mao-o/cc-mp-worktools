@@ -336,6 +336,47 @@ branch との衝突を確認する。衝突したら別名 (`-2` suffix 等) に
   に判断を委ねる)
 - environment 変数値そのものを bd issue に記録しない
 
+## learnings_to_persist の curate 規律 (Phase 7+、v0.10.0)
+
+修正完了直前に「次の fixer session 以降で再利用可能な学び」を**会話出力 YAML
+として返す**。`/fix-regression` (handler) がこれを回収し、各行を
+`bd remember "fix-pattern: <summary>" --key fix-pattern-<slug>` で永続化する
+(`bd remember` は bd 1.0.4+ の learning store、ADR-010 で 4 subagent に
+展開された経路の 1 つ)。
+
+```yaml
+learnings_to_persist:
+  - kind: bug-class
+    summary: "JSONL parse は EOF 直前の改行欠落で fail する → fallback parser を仕込む"
+    retrieval_keys: ["JSONL parse EOF fallback"]
+    suggested_key: fix-pattern-jsonl-parse-eof
+  - kind: commit-style
+    summary: "このプロジェクトは Fixes: <issue> ではなく Closes #<n> 形式"
+    retrieval_keys: ["commit-style closes fixes-keyword"]
+    suggested_key: fix-pattern-commit-style-closes
+```
+
+- **kind**: `bug-class` (バグ種類) / `fix-approach` (修正アプローチ) /
+  `commit-style` (コミット規約) / `test-strategy` (テスト戦略) 等
+- **summary**: 1 行で再利用可能な学びを述べる (cross-cycle で活きる粒度。
+  この session の commit log の単なる要約ではなく、次の similar bug で
+  最初に試したい手順を書く)
+- **retrieval_keys**: 将来 `bd memories <keyword>` で検索する想定の語
+- **suggested_key**: handler 側が `bd remember --key` で使う slug (kebab-case、
+  英数字 + ハイフンのみ、prefix は **`fix-pattern-`** に統一)。同 key 再 remember
+  で update in place
+
+ondemand 投入が原則 (1 cycle で max 1-3 件、無理に量産しない)。本 fixer は
+書込権限を持つが、`bd remember` の直接 invoke は **handler (`/fix-regression`)
+の責務**として分離する。fixer 自身は会話出力に `learnings_to_persist:` セクション
+を添えるだけ (architect-reviewer / decision-keeper と同じ分業 pattern)。
+
+無効化された learning は `bd forget <key>` で明示削除可能 (handler / main
+session で実行)。`bd prime` の default 挙動で learning は次セッションに
+auto-inject されるため、改めて Read する必要はない (詳細は `using-beads`
+skill 参照)。横断 retrieval は `consulting-memory` skill 経由
+(`bd memories fix-pattern` で list、`bd recall <key>` で個別 fetch)。
+
 ## 一時停止条件 (`goal_status: error` で fix を close、detection は open のまま)
 
 以下のいずれかが該当したら **修正を中断**し、以下を実行して終了する:

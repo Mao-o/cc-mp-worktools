@@ -73,9 +73,21 @@ cd "$(git rev-parse --show-toplevel)"
 bd prime 2>&1 | head -50
 ```
 
-- `bd prime` は「open issue 一覧 + 直近活動」をテキスト出力する公式手段。subagent の作業文脈に
-  bd 状態をロードするための起動手順
+- `bd prime` は「open issue 一覧 + 直近活動 + **cross-session learning (bd
+  memories)**」をテキスト出力する公式手段。subagent の作業文脈に bd 状態を
+  ロードするための起動手順
+- **Phase 7+ (v0.10.0、ADR-010)**: bd 1.0.4 から `bd prime` は memory を
+  **default で auto-inject** する (`bd remember --help` 公式: "Memories are
+  injected at prime time (bd prime) so you have them in every session without
+  manual loading")。これにより 4 subagent
+  (`architect-reviewer` / `regression-fixer` / `regression-watcher` /
+  `decision-keeper`) が書いた cross-session learning
+  (`review-heuristic-*` / `fix-pattern-*` / `watch-heuristic-*` /
+  `false-positive-*` / `decision-meta-*`) は `bd prime` 1 回で context に
+  到達する — **追加 hook / Bash 呼出は不要**
+- memory だけ inject したい場合 (hook context 用) は `bd prime --memories-only`
 - 出力を `head -50` で切るのは、bd activity が長大な場合のコンテキスト保護
+  (memory 件数が増えた場合は学習量に応じて bump 検討)
 - `bd setup claude` を実行済の repo なら SessionStart hook で自動 inject される
   可能性があるが、agent-org plugin は `--skip-agents` で bd init するため
   **subagent prompt 内で明示 invoke** する規律
@@ -178,7 +190,59 @@ bd dep add <child> <parent>
 - bd 1.0.4+ は `--type supersedes` 公式サポート (再 review 等で旧 approval を
   履歴管理する用途、`commands/run-review.md` 参照)
 
-### 9. close 順序の規律
+### 9. learning store の使い方 (Phase 7+、v0.10.0、ADR-010)
+
+bd 1.0.4 から `bd remember` / `bd recall` / `bd memories` / `bd forget` の
+4 コマンドで cross-session learning store を提供する。agent-org plugin
+v0.10.0 (Phase 7+) でこれを 4 subagent に展開した。
+
+| 用途 | コマンド | 規律 |
+|---|---|---|
+| 書込 | `bd remember "<prefix>: <summary>" --key <prefix>-<slug>` | 同 key 再 invoke で **update in place**。失敗時は `\|\| true` で iteration を継続 (curate は best-effort) |
+| 単発 fetch | `bd recall <key>` | 検索ではなく **key 指定の単発取得**。ondemand のみ (起動冒頭は `bd prime` で auto-inject されるため不要) |
+| list / 検索 | `bd memories [keyword]` | 引数なし = 全 list、prefix で絞込 (例: `bd memories fix-pattern`)、phrase 検索 (`bd memories "race flag"`) |
+| 明示削除 | `bd forget <key>` | retention 無期限 (bd default) のため陳腐化 learning は forget で除去。実害が出るまで急がない |
+
+```bash
+# 書込 (subagent / handler 側)
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+(cd "$REPO_ROOT" && bd remember "fix-pattern: JSONL parse fallback で EOF 改行欠落を救済" \
+  --key fix-pattern-jsonl-parse-eof 2>/dev/null) || true
+
+# main session / consulting-memory から検索
+(cd "$REPO_ROOT" && bd memories fix-pattern)
+(cd "$REPO_ROOT" && bd recall fix-pattern-jsonl-parse-eof)
+
+# 陳腐化したら明示削除
+(cd "$REPO_ROOT" && bd forget fix-pattern-jsonl-parse-eof)
+```
+
+#### key 命名規約 (subagent prefix で書き手を識別)
+
+| subagent | key prefix | 書き方 |
+|---|---|---|
+| `architect-reviewer` | `review-heuristic-<slug>` | verdict YAML の `learnings_to_persist:`、`/run-review` が `bd remember` |
+| `regression-fixer` | `fix-pattern-<slug>` | 完了 report の `learnings_to_persist:`、`/fix-regression` が `bd remember` |
+| `regression-watcher` | `watch-heuristic-<slug>` / `false-positive-<slug>` | subagent prompt 内 Bash で **直接** `bd remember` (`--bg` 常駐性質、handler 不在) |
+| `decision-keeper` | `decision-meta-<slug>` | 会話出力 `learnings_to_persist:`、`recording-decision` skill が `bd remember` |
+
+`<slug>` は kebab-case、英数字 + ハイフンのみ。`bd memories <prefix>` で絞込
+検索する想定の規約 (機械検証は無し、subagent / skill / handler が convention
+で守る)。詳細は `consulting-memory` skill の「key 命名規約」table 参照。
+
+#### `--global` (`beads_global` 共通 store) は使わない (ADR-010)
+
+bd の `bd remember --global` で全 project 共通 memory store に書けるが、
+agent-org plugin v0.10.0 では **使わない**。理由:
+
+- ADR-007 (`<repo>/.beads/` repo-local 配置) と整合
+- cross-project leak 回避 (project 固有 fix-pattern が他 repo に漏れない)
+- worktree-aware 動作の維持 (`--bg` 隔離下でも main repo `.beads/` を共有)
+- YAGNI: 全 project 共通学習の実需要が現状ない
+
+将来 ADR-011 等で `--global` 利用を再検討する余地はある。
+
+### 10. close 順序の規律
 
 ```bash
 # fix を先に close、その後 detection を close

@@ -183,6 +183,57 @@ retrieval_keys:
 - 引用が必要なら placeholder で表現する (`DB_URL=postgres://...` 等)
 - 議論セグメントに値が含まれていても、ADR には書かない
 
+## learnings_to_persist の curate 規律 (Phase 7+、v0.10.0)
+
+ADR 起草直後 (個別 ADR yml + MEMORY.md index 更新後) に「ADR 自体ではなく
+**ADR のメタ知見**」を会話出力 YAML として返す。`recording-decision` skill
+(handler) がこれを回収し、各行を
+`bd remember "decision-meta: <summary>" --key decision-meta-<slug>` で永続化
+する (`bd remember` は bd 1.0.4+ の learning store、ADR-010 で 4 subagent に
+展開された経路の 1 つ)。
+
+メタ知見の例:
+
+- ADR-002 → ADR-003 のような **supersede パターン**: どんな判断が短期で
+  覆りやすいか
+- **意思決定の型**: 「公式 docs の Warning vs CLI 実装」が衝突したとき
+  どちらに倒すか / 「PoC で覆る推論」をどう見抜くか
+- ADR yml schema の運用知見: `retrieval_keys` の選定 heuristic、
+  `Active ADRs` index の curate ルール
+
+```yaml
+learnings_to_persist:
+  - kind: supersede-pattern
+    summary: "公式 docs の Warning が CLI 実装と矛盾する場合、CLI 側に倒す ADR は半年以内に supersede される傾向"
+    retrieval_keys: ["docs vs CLI implementation supersede pattern"]
+    suggested_key: decision-meta-docs-vs-cli-pattern
+  - kind: meta
+    summary: "retrieval_keys は『3 ヶ月後にこの問題に戻ったとき何を打つか』を起点に選ぶと grep 成功率が高い"
+    retrieval_keys: ["ADR retrieval_keys design heuristic"]
+    suggested_key: decision-meta-retrieval-keys-heuristic
+```
+
+- **kind**: `supersede-pattern` (supersede されやすい型) / `meta` (運用知見) /
+  `decision-type` (意思決定パターン)
+- **summary**: 1 行で再利用可能なメタ学習を述べる (ADR 本文 summary の重複ではなく、
+  「ADR たちを束ねたときに見える型」を書く)
+- **retrieval_keys**: 将来 `bd memories <keyword>` で検索する想定の語
+- **suggested_key**: handler 側が `bd remember --key` で使う slug (kebab-case、
+  英数字 + ハイフンのみ、prefix は **`decision-meta-`** に統一)。同 key 再
+  remember で update in place
+
+ondemand 投入が原則 (1 ADR cycle で max 1-2 件)。ADR 本文の summary 文を
+そのまま copy しない (ADR 自体は yml に保存済、メタ知見は別軸で蓄積する)。
+
+`bd remember` の直接 invoke は **handler (`recording-decision` skill) の責務**。
+decision-keeper 自身は会話出力に `learnings_to_persist:` セクションを添える
+だけ (architect-reviewer / regression-fixer と同じ分業 pattern)。
+
+無効化された learning は `bd forget <key>` で明示削除可能。`bd prime` の
+default 挙動で learning は次セッションに auto-inject される (詳細は
+`using-beads` skill 参照)。横断 retrieval は `consulting-memory` skill 経由
+(`bd memories decision-meta` で list、`bd recall <key>` で個別 fetch)。
+
 ## 注意事項
 
 - 同じ判断を 2 度書かない (auto-inject された MEMORY.md の索引で重複確認、

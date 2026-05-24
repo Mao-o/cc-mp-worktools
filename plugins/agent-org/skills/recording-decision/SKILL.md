@@ -55,6 +55,34 @@ description: |
    - decision-keeper が返した ADR id / status / 保存先パスをメインセッションに通知
    - 旧 ADR の `status: superseded_by:<新 id>` 更新がかかった場合はその旧 id も通知
 
+4. **learnings_to_persist を `bd remember` で永続化する** (Phase 7+、v0.10.0)
+   - decision-keeper は ADR 起草直後に「ADR 自体ではなく **ADR のメタ知見**」を
+     会話出力 YAML として返す (詳細は `agents/decision-keeper.md` の
+     `learnings_to_persist の curate 規律` section)
+   - skill 側がこれを回収し、各行を `bd remember "decision-meta: <summary>"
+     --key decision-meta-<slug>` で永続化する (ADR-010、`/run-review` /
+     `/fix-regression` と同 pattern):
+
+   ```bash
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+   # decision-keeper 会話出力の learnings_to_persist から各行を抽出して書込
+   (cd "$REPO_ROOT" && bd remember "decision-meta: 公式 docs Warning が CLI 実装と矛盾する場合 CLI 側に倒す ADR は半年以内に supersede される傾向" \
+     --key decision-meta-docs-vs-cli-pattern 2>/dev/null) || true
+   (cd "$REPO_ROOT" && bd remember "decision-meta: retrieval_keys は『3 ヶ月後にこの問題に戻ったとき何を打つか』を起点に選ぶと grep 成功率が高い" \
+     --key decision-meta-retrieval-keys-heuristic 2>/dev/null) || true
+   ```
+
+   - **key prefix は `decision-meta-` 固定** (ADR-010 規約)。同 key 再 invoke
+     で update in place
+   - **失敗許容**: `bd remember` 未サポート / 一時 error でも ADR 保存自体は
+     完了させる (`|| true`、curate は best-effort)
+   - **横断 retrieval**: `bd memories decision-meta` で list、`bd recall <key>`
+     で個別 fetch (詳細は `consulting-memory` skill)
+   - **無効化**: `bd forget <key>` で明示削除
+   - **auto-inject**: `bd prime` default で memory は次セッションに inject される
+     (`using-beads` skill 参照)
+
 ## 入力プロンプト例
 
 ```

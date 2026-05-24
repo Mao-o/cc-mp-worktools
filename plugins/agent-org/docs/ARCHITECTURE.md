@@ -716,3 +716,144 @@ dir に統一した。
 明示注入設計 (skill 側で「既存 ADR 連番を Read で取得して prompt に含める」)
 は v0.3.0 で廃止。subagent 自身が auto-inject 経由で MEMORY.md を読む構造に
 統一された。
+
+## Phase 7+ のコンポーネント関係 (v0.10.0、ADR-010)
+
+cross-session 学習機構を 4 subagent に展開する。`bd remember` / `bd recall` /
+`bd memories` / `bd forget` (bd 1.0.4+ の learning store) を `<repo>/.beads/`
+配下の memory table に書込、`bd prime` の default 挙動で次セッションに
+auto-inject する設計 (ADR-010)。Phase 6 (v0.7.0) で architect-reviewer +
+`/run-review` で prototype 化していた経路を 4 subagent に拡張。
+
+```mermaid
+graph TB
+    subgraph Subagents7 ["4 subagent (learnings_to_persist:)"]
+        AR7["architect-reviewer<br>review-heuristic-*"]
+        RF7["regression-fixer<br>fix-pattern-*"]
+        RW7["regression-watcher<br>watch-heuristic-* /<br>false-positive-*"]
+        DK7["decision-keeper<br>decision-meta-*"]
+    end
+
+    subgraph Handlers7 ["handler (bd remember invoke)"]
+        H1["/run-review<br>step 7 (既存 v0.7.0)"]
+        H2["/fix-regression<br>完了 report 回収"]
+        H3["regression-watcher prompt<br>Bash 直接 invoke<br>(--bg 常駐、handler 不在)"]
+        H4["recording-decision skill<br>step 4"]
+    end
+
+    subgraph BdLearning ["&lt;repo&gt;/.beads/ memory table (ADR-007)"]
+        MEM["bd memory store<br>(全 prefix を一元保持)"]
+    end
+
+    subgraph Retrieval ["retrieval (consulting-memory skill で一点化)"]
+        PRIME["bd prime<br>(default で memory auto-inject)"]
+        MEMORIES["bd memories &lt;prefix&gt;<br>(list / 検索)"]
+        RECALL["bd recall &lt;key&gt;<br>(単発 fetch)"]
+    end
+
+    AR7 -->|learnings YAML 会話出力| H1
+    RF7 -->|learnings YAML 会話出力| H2
+    RW7 -->|self Bash invoke| H3
+    DK7 -->|learnings YAML 会話出力| H4
+
+    H1 -->|bd remember| MEM
+    H2 -->|bd remember| MEM
+    H3 -->|bd remember| MEM
+    H4 -->|bd remember| MEM
+
+    MEM -.auto-inject 起動冒頭.-> PRIME
+    MEM -.ondemand list.-> MEMORIES
+    MEM -.ondemand fetch.-> RECALL
+
+    PRIME -.context inject.-> AR7
+    PRIME -.context inject.-> RF7
+    PRIME -.context inject.-> RW7
+    PRIME -.context inject.-> DK7
+```
+
+## Phase 7+ の key 命名規約
+
+prefix で書き手 subagent を識別する規約。機械検証なし、subagent prompt + skill
++ handler が convention で守る。`bd memories <prefix>` で絞込検索する想定。
+
+| subagent | key prefix | 例 | 経路 |
+|---|---|---|---|
+| `architect-reviewer` | `review-heuristic-` | `review-heuristic-mock-only-tests` | handler 経由 (`/run-review` step 7、v0.7.0 既存) |
+| `regression-fixer` | `fix-pattern-` | `fix-pattern-jsonl-parse-eof` | handler 経由 (`/fix-regression` 完了 report 回収) |
+| `regression-watcher` | `watch-heuristic-` / `false-positive-` | `watch-heuristic-go-test-short-flag` / `false-positive-clock-skew-flaky` | subagent prompt 内 Bash 直接 invoke (`--bg` 常駐性質、handler 不在) |
+| `decision-keeper` | `decision-meta-` | `decision-meta-supersede-pattern` | handler 経由 (`recording-decision` skill step 4) |
+
+`<slug>` は kebab-case、英数字 + ハイフンのみ。同 key 再 `bd remember` で
+update in place (bd 1.0.4 仕様)。
+
+## Phase 7+ のデータフロー
+
+### A. 4 subagent が learning を返す → handler が bd remember
+
+1. subagent が動作 (review / fix / watch / decision の各 cycle)
+2. cycle 末尾で **`learnings_to_persist:` YAML** を会話出力に添える (各 prefix
+   に従って `kind` / `summary` / `retrieval_keys` / `suggested_key` を書く)
+3. handler (`/run-review` / `/fix-regression` / `recording-decision` skill)
+   が会話出力から `learnings_to_persist` を回収
+4. 各行を `bd remember "<prefix>: <summary>" --key <prefix>-<slug>` で永続化
+   (失敗時は `|| true` で best-effort)
+5. handler は本来の責務 (approval issue 作成 / fix close 確認 / ADR 保存)
+   を完了
+
+**watcher だけ例外**: `--bg` 常駐性質で handler が launch 後に介入できない
+ため、subagent prompt 内 Bash で **直接 `bd remember` を invoke する**
+(ADR-010 で明示的に分業の例外として確定)。
+
+### B. 次セッションで auto-inject
+
+1. 4 subagent のいずれかを次回起動 (foreground / `--bg` 問わず)
+2. 起動冒頭で `bd prime` を実行 (`using-beads` skill の規律)
+3. `bd prime` の default 挙動で memory が context に **auto-inject** される
+   (bd 1.0.4: "Memories are injected at prime time")
+4. subagent は **追加の `bd recall` 呼出をせずに** 過去 learning にアクセス可能
+
+→ Phase 7+ retrieval は **追加 hook / Bash 呼出ゼロ**で達成。bd 1.0.4 の
+`bd prime` default 挙動を活用する設計。
+
+### C. 横断 retrieval (consulting-memory skill 経由)
+
+明示 retrieval が必要なケース (別 prefix の learning を検索したい、`bd prime`
+inject 範囲を超えた古い learning を見たい、main session から特定 key を深掘
+りしたい等) は `consulting-memory` skill の手順 7 で実施:
+
+```bash
+# prefix で絞込 list
+(cd "$REPO_ROOT" && bd memories fix-pattern)
+
+# 個別 key fetch
+(cd "$REPO_ROOT" && bd recall fix-pattern-jsonl-parse-eof)
+```
+
+詳細は `skills/consulting-memory/SKILL.md` の「key 命名規約」table、
+および `skills/using-beads/SKILL.md` の「### 9. learning store の使い方」。
+
+## Phase 7+ のファイルパス規約
+
+| 用途 | パス | 書く側 | 読む側 |
+|---|---|---|---|
+| bd memory store | `<repo>/.beads/` 配下の memory table (bd 1.0.4 default) | 4 subagent + 各 handler が `bd remember` | `bd prime` (auto-inject) / `bd memories` / `bd recall` |
+
+ADR-007 (`<repo>/.beads/` repo-local 配置) と整合。`--global`
+(`beads_global` 共通 store) は使わない (cross-project leak 回避、worktree-
+aware 動作の維持、YAGNI)。詳細は `skills/using-beads/SKILL.md` の
+「`--global` (`beads_global` 共通 store) は使わない (ADR-010)」section 参照。
+
+## Phase 7+ で意図的に未実装の領域
+
+- **lint script (key 命名規約の機械検証)**: `bd memories` 出力を grep して
+  prefix 違反 (例: `fix-pattern-` が無いはずの decision-keeper key) を検出する
+  script。v0.10.x incremental enhancement で検討
+- **auto-prune / TTL**: 古い learning が `bd memories` 検索結果を埋める
+  実害が発生したら ADR-011 等で再検討。現状は `bd forget <key>` の手動削除
+- **`--global` (cross-project shared store)**: project 横断学習の実需要が
+  発生したら新規 ADR で導入検討。本 release は YAGNI で project-local 一本化
+- **lint で missing learning を検出**: 「fixer が完了したのに
+  `learnings_to_persist:` が空」のような curate 漏れ検出。subagent 自身の
+  判断 (ondemand 投入) を尊重し、機械強制は行わない
+
+これらは v0.10.x 系で運用フィードバック反映と並行して検討。

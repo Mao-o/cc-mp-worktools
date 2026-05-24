@@ -1,5 +1,151 @@
 # Changelog
 
+## 0.10.0 (2026-05-24) — Phase 7+: cross-session 学習機構を 4 subagent に展開 (ADR-010)
+
+agent-org plugin Phase 7+。v0.7.0 で `architect-reviewer` 1 経路のみ動いていた
+`bd remember` cross-session learning store を **4 subagent 全部に展開**
+(`regression-fixer` / `regression-watcher` / `decision-keeper` / 既存の
+`architect-reviewer`)。retrieval 経路は `consulting-memory` skill 拡張で
+一点化し、起動冒頭は `bd prime` の default 挙動 (memory auto-inject) で
+**追加 hook / Bash 呼出ゼロ**で実現。
+
+v0.9.0 は並列セッション ADR-009 (`team-shared mode 保留判断`) で「観測待ち枠」
+として予約されているため **skip して v0.10.0** で release (ADR-009
+`alternatives_considered` で明示的に列挙された経路)。
+
+### Why (ADR-010)
+
+Phase 6 (v0.7.0) で architect-reviewer の `learnings_to_persist` 経路が
+prototype として動いていたが、Phase 7+ 設計セッション (2026-05-24) で 3 つの
+空白が見えた:
+
+1. **書き手の偏り**: `bd remember` の活用は architect-reviewer 1 経路のみ
+   (`grep -rn "bd remember" plugins/agent-org/` で 5 件、全て `/run-review` 経由)
+2. **Retrieval 経路ゼロ**: `bd recall` は agent-org 内で grep 0 件ヒット
+3. **subagent memory との使い分け未整理**: MEMORY.md (agent siloed) と
+   `bd remember` (project-local global store) の役割境界が ADR にない
+
+bd 1.0.4 の `bd prime` が memory を default で auto-inject することが判明し、
+追加 hook を必要とせずに retrieval を達成できる設計が確定。詳細は
+`.claude/agent-memory/agent-org-decision-keeper/ADR-010-cross-session-learnings-via-bd-remember.yml`。
+
+### Added
+
+- **4 subagent の `learnings_to_persist:` 規律 (3 新規 + 1 既存維持)**:
+  - `agents/regression-fixer.md`: 完了 report YAML の任意セクションとして
+    `learnings_to_persist:` を会話出力に添える規律。key prefix
+    `fix-pattern-<slug>`、`bd remember` は handler (`/fix-regression`) の責務
+  - `agents/regression-watcher.md`: iteration 末尾で **Bash 経由で直接
+    `bd remember` invoke** する規律 (`--bg` 常駐性質で handler 不在のため
+    subagent 自身が書込)。key prefix `watch-heuristic-<slug>` /
+    `false-positive-<slug>`。`persisted_key` も会話出力 YAML に添えてログ可視化
+  - `agents/decision-keeper.md`: ADR 起草直後に「ADR のメタ知見」を会話出力
+    YAML として返す規律。key prefix `decision-meta-<slug>`、`bd remember` は
+    handler (`recording-decision` skill) の責務
+  - `agents/architect-reviewer.md`: v0.7.0 規律をそのまま踏襲 (本 release で
+    変更なし)
+
+- **4 経路統合 retrieval (consulting-memory skill 拡張)**:
+  - `skills/consulting-memory/SKILL.md`: 既存 6 step 手順
+    (MEMORY.md / 個別 ADR yml / project learnings / episode) に **step 7
+    「bd 上の cross-session learning を取り込む」** を追加。
+    `bd memories <prefix>` / `bd recall <key>` の使い方を明記。
+    key 命名規約 table (4 subagent × prefix) を含む
+
+- **using-beads skill の Phase 7+ 拡張**:
+  - `skills/using-beads/SKILL.md`: 既存 `bd prime` section に **memory
+    auto-inject の旨を追記** (bd 1.0.4 default 挙動の活用)。新 section
+    **「### 9. learning store の使い方」** を追加し `bd remember` /
+    `bd recall` / `bd memories` / `bd forget` の規律と key 命名規約 table
+    を集約。`--global` (`beads_global` 共通 store) を使わない理由を明文化
+
+- **書込 handler の bd remember step (3 経路新規 + 1 既存維持)**:
+  - `commands/fix-regression.md`: 「完了 report の learnings_to_persist
+    回収」section 追加。main session が `gh pr view` 確認時に
+    `learnings_to_persist` を会話 YAML から取出して
+    `bd remember "fix-pattern: ..." --key fix-pattern-<slug>` する手順
+  - `skills/recording-decision/SKILL.md`: 手順 4 として
+    `bd remember "decision-meta: ..." --key decision-meta-<slug>` の永続化
+    step を追加。`/run-review` / `/fix-regression` と同 pattern
+  - `agents/regression-watcher.md`: subagent prompt 内 Bash で直接 invoke する
+    経路 (上記 watcher prompt 改修と一体)
+  - `commands/run-review.md`: v0.7.0 既存 step 7 を踏襲 (本 release で変更なし)
+
+- **docs**:
+  - `docs/ARCHITECTURE.md`: 末尾に **Phase 7+ section** を追加。4 subagent
+    + 4 handler + bd memory store + retrieval (prime / memories / recall) の
+    Mermaid flowchart、key 命名規約 table、データフロー (A 書込 / B
+    auto-inject / C 横断 retrieval)、ファイルパス規約、未実装領域
+
+### Changed
+
+- `.claude-plugin/plugin.json`: version `0.8.4` → **`0.10.0`** (v0.9.0 skip、
+  ADR-009 予約尊重)。description に Phase 7+ 履歴を追記
+
+### Design notes
+
+- **保存先は全て project-local** (`<repo>/.beads/`、ADR-007 整合)。
+  `--global` (`beads_global` 共通 store) は使わない (cross-project leak 回避、
+  worktree-aware 動作の維持、YAGNI)
+- **retention は無期限** (bd default、ADR-010)。`bd forget <key>` で明示削除
+  のみ。auto-prune / TTL は v0.10.x 内では導入しない (実害なき YAGNI、
+  発生したら ADR-011 で再検討)
+- **key 命名規約は機械検証なし** (convention 依存)。subagent prompt / skill
+  が規律を守る前提。lint script の追加は v0.10.x incremental enhancement
+  で検討
+- **書込分業の例外**: watcher は `--bg` 常駐で handler が launch 後に介入
+  できないため、`subagent prompt 内 Bash 直接 invoke` の例外設計。他 3
+  subagent (reviewer / fixer / decision-keeper) は handler 経由
+- **bd 1.0.4 実機事実**: `bd remember --help` 出力に "Memories are injected
+  at prime time (bd prime) so you have them in every session without manual
+  loading" を確認。これにより起動冒頭の retrieval は追加 Bash 呼出なしで達成
+
+### Migration from 0.8.x
+
+破壊的変更なし。`bd remember` 経路を持たなかった 3 subagent (fixer / watcher /
+decision-keeper) は本 release から `learnings_to_persist:` を返すようになるが、
+handler が無ければ単に会話出力に YAML が追加されるだけで悪影響なし。
+watcher は subagent prompt 内 Bash で直接 invoke するため、新規 learning
+書込が増える。
+
+旧 detection / fix / approval / ADR データは bd 上に保持されたまま、
+memory store は別 table のため衝突しない。`bd memories` で空 list が返れば
+未書込 (v0.7.0 release 後に reviewer が動いていれば `review-heuristic-*` が
+数件入っているはず)。
+
+### Verification
+
+- `claude plugin validate plugins/agent-org` warning 0 通過
+- 11 ファイル改修 (subagent 3 + skill 2 + command/skill handler 3 + docs 3)
+- smoke test (実機 bd CLI、v0.10.0 release 後に別途実施): 1 subagent
+  (decision-keeper 想定) で `learnings_to_persist` → `bd remember` →
+  `bd memories` → `bd recall` サイクル成功確認
+
+### Skip した v0.9.0
+
+並列セッション (worktree `agent-org-v090`) で同日 (2026-05-24) に **ADR-009**
+(`v0.9.0 team-shared mode 保留判断`) が記録された。`--share` flag (全 project
+共通 store の opt-in 切替) を v0.9.0 として観測待ち枠に予約。本 release は
+ADR-009 `alternatives_considered` で明示された「v0.9.0 を skip して v0.10.0」
+を採用。
+
+両 ADR は **paired-with** として並存:
+
+- ADR-009 = team-shared mode 保留 (v0.9.0 番号予約、独立した機能)
+- ADR-010 = cross-session 学習機構を 4 subagent に展開 (v0.10.0)
+
+team-shared mode が将来採用されても ADR-010 は影響を受けない (project-local
+store は share-mode でも有効)。
+
+### 関連 ADR
+
+- ADR-007 (paired-with): `<repo>/.beads/` repo-local 配置 (2026-05-22)。
+  本 release の保存先方針と整合
+- ADR-009 (paired-with): v0.9.0 team-shared mode 保留判断 (2026-05-24)。
+  本 release で alternative `v0.9.0 skip` を採用
+- ADR-010 (本リリース): cross-session 学習機構を 4 subagent に展開
+  (2026-05-24)
+
 ## 0.8.4 (2026-05-24) — Hotfix: /migrate-to-beads idempotency (--status all、v0.7.2 と同パターン)
 
 v0.7.2 (commit 7ef562d) で `commands/migrate-approvals-to-beads.md` に施した
