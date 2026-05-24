@@ -75,6 +75,53 @@ agent ごとに isolation されているため、横断参照には明示的な
    - 検索キーワードは MEMORY.md 内の `retrieval_keys` をヒントに選ぶ
    - ADR archive (`adr-archive-*.yaml`) もここに含まれる
 
+7. **bd 上の cross-session learning を取り込む** (Phase 7+, v0.10.0)
+   - v0.10.0 (ADR-010) から 4 subagent (`architect-reviewer` /
+     `regression-fixer` / `regression-watcher` / `decision-keeper`) は
+     `learnings_to_persist:` を会話出力 YAML として返し、各 handler が
+     `bd remember "<prefix>: <summary>" --key <prefix>-<slug>` で永続化する
+   - `bd prime` の default 挙動により、subagent 起動冒頭で memory が
+     **auto-inject される**。同セッション内で明示 retrieval する必要は
+     原則ない (詳細は `using-beads` skill の `bd prime` section 参照)
+   - **明示 retrieval が必要なケース**:
+     - **別の prefix の learning** を検索したい時 (例: fixer 内で過去
+       reviewer が残した `review-heuristic-*` を参照したい)
+     - **bd prime の inject 範囲を超えた古い learning** を取りに行きたい時
+     - **main session** から特定 key を深掘りしたい時
+
+   ```bash
+   # 全 memory を list (key と summary のみ)
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+   (cd "$REPO_ROOT" && bd memories)
+
+   # prefix で絞り込み (例: review-heuristic-*)
+   (cd "$REPO_ROOT" && bd memories review-heuristic)
+
+   # phrase 検索 (空白区切りの語を含む memory)
+   (cd "$REPO_ROOT" && bd memories "JSONL parse fallback")
+
+   # 個別 key をフル取得
+   (cd "$REPO_ROOT" && bd recall fix-pattern-jsonl-parse-eof)
+   ```
+
+   - **`bd memories <keyword>`**: list / 検索。summary だけ返るので overview に最適
+   - **`bd recall <key>`**: 単発 fetch。検索結果の中から特定 key の本文を読みたい時のみ
+   - **無期限保持** (bd default、ADR-010)、`bd forget <key>` で明示削除
+
+### key 命名規約 (ADR-010、Phase 7+ で 4 subagent 全部に展開済)
+
+prefix で書き手 subagent を判別できる規約。`bd memories <prefix>` で絞込検索する想定。
+
+| subagent | key prefix | 例 | 書き方 |
+|---|---|---|---|
+| `architect-reviewer` | `review-heuristic-` | `review-heuristic-mock-only-tests` | verdict YAML の `learnings_to_persist`、`/run-review` が `bd remember` する |
+| `regression-fixer` | `fix-pattern-` | `fix-pattern-jsonl-parse-eof` | 完了 report の `learnings_to_persist`、`/fix-regression` が `bd remember` する |
+| `regression-watcher` | `watch-heuristic-` / `false-positive-` | `watch-heuristic-go-test-short-flag` | subagent prompt 内で **Bash 直接** `bd remember`、handler 経由しない (`--bg` 常駐性質) |
+| `decision-keeper` | `decision-meta-` | `decision-meta-supersede-pattern` | 会話出力の `learnings_to_persist`、`recording-decision` skill が `bd remember` する |
+
+`<slug>` は kebab-case、英数字 + ハイフンのみ。同 key 再 `bd remember` で update
+in place (bd 1.0.4 仕様)。
+
 ## 典型ケース
 
 ### architect-reviewer から decision-keeper の ADR を参照したい

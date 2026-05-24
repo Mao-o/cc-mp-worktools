@@ -245,6 +245,63 @@ interval 例:
 - stack trace に秘密が含まれている場合は `***REDACTED***` に置換
 - 環境変数値そのものを記録しない (変数名のみ)
 
+## learnings_to_persist の curate + bd remember 直接 invoke (Phase 7+、v0.10.0)
+
+各 iteration の最後 (smoke check 完了直前) に「次の cycle で再利用可能な
+検出 heuristic / false positive 判定根拠」を **Bash 経由で直接 `bd remember`
+する**。watcher は `--bg` で常駐する性質上、handler (`/start-watcher`) は
+launch 後に介入できないため、reviewer / fixer / decision-keeper と異なり
+**subagent prompt 内で `bd remember` を直接 invoke する設計** (ADR-010 で
+確定、Phase 7+ で 4 subagent に展開された経路の 1 つ)。
+
+```bash
+# iteration 末尾で実行する learning 書込 (会話出力 YAML だけでなく
+# bd 永続化まで watcher 自身が担う)
+# v0.8.0: cd <repo> で bd 自動 resolve (worktree でも main repo .beads/ にアクセス)
+(cd "$REPO_ROOT" && bd remember "watch-heuristic: <summary>" \
+  --key "watch-heuristic-<slug>" 2>/dev/null) || true
+# false positive 判定が新たに固まった場合:
+(cd "$REPO_ROOT" && bd remember "false-positive: <summary>" \
+  --key "false-positive-<slug>" 2>/dev/null) || true
+```
+
+- **prefix 規約**:
+  - `watch-heuristic-<slug>`: smoke command の選び方 / 検出すべきパターン /
+    優先度判定の根拠
+  - `false-positive-<slug>`: 環境依存 / flaky / network/clock skew 等で
+    再現性が低い失敗の skip 判定根拠
+- **`<slug>`**: kebab-case、英数字 + ハイフンのみ。同 key 再 remember で
+  update in place
+- **失敗許容**: `bd remember` exit≠0 でも iteration は完了させる (`|| true`)。
+  smoke check 本体の成功/失敗より learning curate は二次的
+- **ondemand**: 1 iteration で max 1-2 件。無理に量産しない (`bd memories`
+  の検索結果を埋める原因になる)
+- **無効化**: `bd forget <key>` で明示削除 (handler / main session で実行)
+
+`bd prime` の default 挙動で learning は次 iteration に auto-inject される
+ため、改めて Read する必要はない (`using-beads` skill 参照)。横断 retrieval
+は `consulting-memory` skill 経由 (`bd memories watch-heuristic` で list、
+`bd recall <key>` で個別 fetch)。
+
+iteration 中に **`learnings_to_persist:` を会話出力にも添える**と
+`/start-watcher` 起動ログや main session の振り返りに役立つ:
+
+```yaml
+learnings_to_persist:
+  - kind: heuristic
+    summary: "Phase 5 は go test ./... が長時間化、smoke は -short flag を優先"
+    retrieval_keys: ["Phase 5 go test short flag smoke"]
+    persisted_key: watch-heuristic-go-test-short-flag
+  - kind: false-positive
+    summary: "test_clock_skew_check は CI runner clock 依存で flaky、skip 推奨"
+    retrieval_keys: ["clock skew test flaky skip false positive"]
+    persisted_key: false-positive-clock-skew-flaky
+```
+
+`persisted_key` は **実際に `bd remember --key` で書込済の key** を記録する
+(reviewer / fixer の `suggested_key` と異なり、watcher は自分で書くため命名を
+変える)。
+
 ## 注意事項
 
 - **修正しない**。Write / Edit tool は frontmatter で除外済み。Bash 経由で
