@@ -25,6 +25,10 @@ metadata:
 
 Claude Code (`code.claude.com`) および Claude Developer Platform (`platform.claude.com`) の公式ドキュメントを段階的に読み込むスキル。
 
+## v3 互換性
+
+v3 で `search` が推奨入口に統一された。旧フローの `search-index` → `search-content` → `content` は引き続き動作するが非推奨。`search` 1 コマンドで llms.txt ランキング + llms-full.txt 本文 hits を取得できる。
+
 ## ソース一覧
 
 | ソース | `--source` | ドキュメント | 規模 |
@@ -155,6 +159,23 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Note>`, `<Frame>`, `<Expandable>`, `<Card>` 等の JSX 記法はテキストとして読む
 
+## 失敗時の対処
+
+| パターン | 症状 | 対処 |
+|----------|------|------|
+| ネットワーク失敗 | fetch timeout / connection error | `--max-age 0` で cache 無視して再試行 |
+| キャッシュ破損 | パースエラー / 不正なインデックス | `/tmp/` 配下の `claude-*-llms*.txt` を削除して再実行 |
+| 結果ゼロ | `No results found` | キーワードを変えて再試行。`--source` を切り替えて code/platform 両方を確認 |
+| スクリプトエラー | Python traceback | 下記 WebFetch フォールバックへ |
+
+### WebFetch フォールバック
+
+スクリプトで解決できない場合のみ使用する:
+
+1. `search` をキーワードを変えて 2-3 回試す
+2. それでも失敗 → `code.claude.com/docs/en/<slug>` または `platform.claude.com/docs/en/<slug>` を WebFetch で直接取得
+3. WebFetch は要約モデル経由のため field の抜け落ちリスクあり — 取得内容を鵜呑みにしない
+
 ## 出力フォーマット
 
 ### 調査結果
@@ -176,5 +197,5 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 - 全文読み込みは禁止 — 必ず search → content の順で絞り込む
 - `--source` フラグを明示する (code / platform のどちらを調査しているか明確にする)
 - 日本語で回答する
-- ページ取得に失敗した場合のみ WebFetch fallback を検討する
+- スクリプト失敗時は「失敗時の対処」に従う。WebFetch は最終手段
 - 調査は簡潔に完了させること

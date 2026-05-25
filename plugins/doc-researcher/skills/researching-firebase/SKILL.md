@@ -10,7 +10,10 @@ description: |
   Cloud Functions, FCM, Cloud Storage for Firebase, App Check, or Firebase AI.
   Triggers: "Firebase", "Firestore", "Firebase Auth", "Firebase ドキュメント",
   "firebase.google.com", "FCM", "Cloud Functions for Firebase", "Firebase AI",
-  "Vertex AI in Firebase", "researching-firebase"
+  "Vertex AI in Firebase", "Cloud Storage for Firebase", "Cloud Storage",
+  "Realtime Database", "Firebase Hosting", "App Check", "Remote Config",
+  "Crashlytics", "Dynamic Links", "A/B Testing", "Performance Monitoring",
+  "Test Lab", "researching-firebase"
 context: fork
 model: sonnet
 allowed-tools:
@@ -27,6 +30,10 @@ metadata:
 Firebase 公式ドキュメント (`firebase.google.com/docs`) を段階的に読み込むスキル。
 他の researching-* スキルと異なり、**llms-full.txt が存在しない**ため、個別の `.md.txt`
 ページを on-demand で fetch する設計になっている。
+
+## v2 互換性
+
+v2 で `search` が推奨入口に統一された。旧フローの `search-index` → `sections` → `content` は引き続き動作するが非推奨。`search` 1 コマンドで候補ページ + 本文 hits を取得できる。
 
 ## 規模
 
@@ -146,6 +153,23 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - **on-demand fetch**: ページキャッシュは初回のみネットワークから取得 (sections / content / search-content / search 実行時)
 - **search-content の全ページ横断は重い**: `--page-ref` 省略すると 7000 ページ近い HTTP fetch を発火する (初回のみ)。明示指定を推奨
 
+## 失敗時の対処
+
+| パターン | 症状 | 対処 |
+|----------|------|------|
+| ネットワーク失敗 | fetch timeout / connection error | `--max-age 0` で cache 無視して再試行 |
+| キャッシュ破損 | パースエラー / 不正なインデックス | `/tmp/firebase-llms.txt` と `/tmp/firebase-docs/` を削除して再実行 |
+| 結果ゼロ | `No results found` | キーワードを変えて再試行。`fetch-index` で一覧確認 |
+| スクリプトエラー | Python traceback | 下記 WebFetch フォールバックへ |
+
+### WebFetch フォールバック
+
+スクリプトで解決できない場合のみ使用する:
+
+1. `search` をキーワードを変えて 2-3 回試す
+2. それでも失敗 → `https://firebase.google.com/docs/<product>` を WebFetch で直接取得
+3. WebFetch は要約モデル経由のため field の抜け落ちリスクあり — 取得内容を鵜呑みにしない
+
 ## ルール
 
 - ドキュメントにない機能やオプションを捏造しない
@@ -153,7 +177,7 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - 全文読み込みは禁止 — 必ず `search` → `content`、または `search-index` → `sections`/`search-content` → `content` の順で絞り込む
 - 7000 ページを盲目的に list しない (`search` を必ず入口にする)
 - 日本語で回答する
-- ページ取得に失敗した場合のみ WebFetch fallback を検討する
+- スクリプト失敗時は「失敗時の対処」に従う。WebFetch は最終手段
 - 調査は簡潔に完了させること
 
 ## 出力フォーマット
