@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 
 def run(cmd: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -21,6 +21,13 @@ def git_root(start: Path) -> Path:
     if cp.returncode == 0 and cp.stdout.strip():
         return Path(cp.stdout.strip())
     return start.resolve()
+
+
+def git_root_or_none(start: Path) -> "Optional[Path]":
+    cp = run(["git", "rev-parse", "--show-toplevel"], start)
+    if cp.returncode == 0 and cp.stdout.strip():
+        return Path(cp.stdout.strip())
+    return None
 
 
 def is_git_repo(root: Path) -> bool:

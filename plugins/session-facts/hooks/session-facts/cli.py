@@ -13,9 +13,9 @@ from core.constants import (
     DEFAULT_TREE_DEPTH,
     SKIP_DIRS,
 )
-from core.context import RepoContext
+from core.context import AnalysisConfig, RepoContext
 from core.fs import read_text, walk_files
-from core.git import git_ls_files, git_root, is_git_repo
+from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
 from core.util import collapse_space
 from registry import discover_custom_plugins, discover_plugins
@@ -41,7 +41,7 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
                 line = line.lstrip("#").strip()
                 if line:
                     continue
-            if line.startswith(("```", "---", "***")):
+            if line.startswith(("```", "---", "***", "![", "[!", ">")):
                 continue
             if len(line) < 12:
                 continue
@@ -51,11 +51,11 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
 
 def summarize_repo(
     root: Path,
-    args: argparse.Namespace,
+    config: AnalysisConfig,
     is_git: bool,
     cwd: Optional[Path] = None,
 ) -> str:
-    ctx = RepoContext(root=root, args=args, cwd=cwd)
+    ctx = RepoContext(root=root, args=config, cwd=cwd)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
 
@@ -107,9 +107,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    config = AnalysisConfig(
+        tree_depth=args.tree_depth,
+        max_tree_lines=args.max_tree_lines,
+        max_service_entries=args.max_service_entries,
+        max_script_entries=args.max_script_entries,
+        max_env_keys=args.max_env_keys,
+        max_notes=args.max_notes,
+        max_major_deps=args.max_major_deps,
+        include_domain_types=args.include_domain_types,
+        max_domain_types=args.max_domain_types,
+    )
     resolved = args.root.resolve()
-    is_git = is_git_repo(resolved)
-    root = git_root(resolved) if is_git else resolved
-    output = summarize_repo(root, args, is_git, cwd=resolved)
+    root = git_root_or_none(resolved)
+    is_git = root is not None
+    if root is None:
+        root = resolved
+    output = summarize_repo(root, config, is_git, cwd=resolved)
     print(output)
     return 0

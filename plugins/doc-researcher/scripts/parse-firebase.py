@@ -353,9 +353,11 @@ def cmd_search_content(args):
         shown = len(hits["results"])
         print(f"[{idx}] {entry['title']}")
         print(f"    URL: {entry['url']}")
-        print(f"    ({hits['total_matches']} hits in this page, showing {shown})")
+        mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
+        print(f"    ({hits['total_matches']} hits in this page, showing {shown}){mode_note}")
         for r in hits["results"]:
-            print(f"    Section: {r['heading_path']}  (x{r['hit_count']})")
+            kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
+            print(f"    Section: {r['heading_path']}  (x{r['hit_count']}){kw_info}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
             print()
@@ -433,9 +435,11 @@ def cmd_search(args):
         print(f"[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
         print(f"    URL: {r['url']}")
         if hits["total_matches"]:
-            print(f"    ({hits['total_matches']} body hits, showing {shown})")
+            mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
+            print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
             for s in hits["results"]:
-                print(f"    Section: {s['heading_path']}  (x{s['hit_count']})")
+                kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
+                print(f"    Section: {s['heading_path']}  (x{s['hit_count']}){kw_info}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
                 print()

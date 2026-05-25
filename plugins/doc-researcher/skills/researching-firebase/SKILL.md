@@ -136,43 +136,6 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 reference ページの多くは H2 のみのフラット構造、guide ページは H2/H3 の階層を持つ。
 
-### キャッシュ
-
-| 種別 | パス |
-|------|------|
-| index | `/tmp/firebase-llms.txt` |
-| 各ページ | `/tmp/firebase-docs/<docs-path>-<hash>.md.txt` |
-
-例: `firebase.google.com/docs/reference/js/ai.imagenmodelparams.md.txt`
-→ `/tmp/firebase-docs/docs_reference_js_ai.imagenmodelparams-<sha1>.md.txt`
-
-最新版が必要な場合は該当ファイルを `rm` してから再実行する。
-
----
-
-## v2.0.0 (0.7.0) の破壊変更
-
-3 script で API を統一するため、以下が破壊的に変わった:
-
-- `sections <doc_index>` → `sections <page_ref>` (int / URL slug / 完全 URL 受付)
-- `content <doc_index>` → `content <page_ref>`
-- `search-content --pages <idx,idx,...>` (REQUIRED 複数) → `--page-ref <ref>` (optional 単数)
-- 新規 `search` 統合サブコマンド (top N on-demand fetch + 本文 hits)
-- 旧 `--pages` 廃止
-
-### 旧 → 新 置換例
-
-| v1.1.0 (旧) | v2.0.0 (新) |
-|------------|------------|
-| `sections 42` | `sections 42` (int は同じ) |
-| `content 42 "Properties"` | `content 42 "Properties"` (int は同じ) |
-| `search-content "X" --pages 42` | `search-content "X" --page-ref 42` |
-| `search-content "X" --pages 42,43,44` | `search "X" --top-n 3` (search 経由が推奨) |
-| `sections vector-search` (新規可能) | URL slug で直接アクセス |
-
-`--pages` を渡すと argparse error。`--page-ref` (単数) に置き換えること。
-複数ページ横断したいときは `search` 経由 (top N 自動 fetch) を使う。
-
 ---
 
 ## 制約
@@ -182,17 +145,6 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **on-demand fetch**: ページキャッシュは初回のみネットワークから取得 (sections / content / search-content / search 実行時)
 - **search-content の全ページ横断は重い**: `--page-ref` 省略すると 7000 ページ近い HTTP fetch を発火する (初回のみ)。明示指定を推奨
-
-## 禁止事項（効率の悪いフォールバックを避ける）
-
-以下は本スキルのコマンドで代替できるため使わないこと:
-
-- ❌ `grep -n <keyword> /tmp/firebase-llms.txt`
-  → ✅ `search` / `search-index` を使う
-- ❌ `fetch-index --limit 0 | grep ...` で全件 list を grep
-  → ✅ `search` でスコアリング済みの候補 + 本文 hits を得る
-- ❌ `Read /tmp/firebase-docs/<file>.md.txt (lines X-Y)` の直接行指定読み
-  → ✅ `search` で heading_path を取得してから `content` で取り出す
 
 ## ルール
 

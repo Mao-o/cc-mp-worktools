@@ -35,8 +35,10 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
         if note not in notes and len(notes) < max_items:
             notes.append(note)
 
-    has_features = any("/features/" in f"/{p.lower()}" for p in tracked_files)
-    has_components = any("/components/" in f"/{p.lower()}" for p in tracked_files)
+    lowered = [f"/{p.lower()}" for p in tracked_files]
+
+    has_features = any("/features/" in lp for lp in lowered)
+    has_components = any("/components/" in lp for lp in lowered)
     if has_features and has_components:
         add("features/ and components/ both exist; feature modules and shared UI appear separated")
 
@@ -55,11 +57,11 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
         add(f"scripts include seed/sync/migrate/emulator workflows: {', '.join(sorted(seedish)[:4])}")
 
     context_paths = [
-        p
-        for p in tracked_files
-        if "/contexts/" in f"/{p.lower()}"
-        or p.lower().endswith("context.ts")
-        or p.lower().endswith("context.tsx")
+        tracked_files[i]
+        for i, lp in enumerate(lowered)
+        if "/contexts/" in lp
+        or lp.endswith("context.ts")
+        or lp.endswith("context.tsx")
     ]
     if context_paths:
         authish = [p for p in context_paths if "auth" in p.lower()]
@@ -67,17 +69,17 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
             add("context layer appears auth-focused")
 
     firebase_paths = [
-        p
-        for p in tracked_files
-        if "/firebase/" in f"/{p.lower()}" or "firebase" in Path(p).name.lower()
+        tracked_files[i]
+        for i, lp in enumerate(lowered)
+        if "/firebase/" in lp or "firebase" in lp.rsplit("/", 1)[-1]
     ]
     if len(firebase_paths) >= 3:
         add("firebase-related integration surface appears substantial")
 
     api_paths = [
-        p
-        for p in tracked_files
-        if "/api/" in f"/{p.lower()}" or "api" in Path(p).name.lower()
+        tracked_files[i]
+        for i, lp in enumerate(lowered)
+        if "/api/" in lp or "api" in lp.rsplit("/", 1)[-1]
     ]
     if len(api_paths) >= 5:
         add("api-related files are concentrated; inspect API layer early for behavior changes")
