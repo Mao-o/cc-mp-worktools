@@ -33,9 +33,9 @@ class CwdSubtreeCollector:
         if not cwd_files:
             return None
 
-        depth = ctx.args.tree_depth
+        depth = ctx.config.tree_depth
         dir_tree = build_dir_tree(cwd_files, depth)
-        tree_lines = truncate_lines(render_tree(dir_tree), ctx.args.max_tree_lines)
+        tree_lines = truncate_lines(render_tree(dir_tree), ctx.config.max_tree_lines)
         if not tree_lines:
             return None
 

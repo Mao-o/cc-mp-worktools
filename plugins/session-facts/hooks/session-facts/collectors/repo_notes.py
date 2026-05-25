@@ -16,7 +16,7 @@ class RepoNotesCollector:
         return len(ctx.tracked_files) > 0
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_notes
+        max_items = ctx.config.max_notes
         notes = _collect_repo_specific_notes(ctx, max_items)
         if not notes:
             return None

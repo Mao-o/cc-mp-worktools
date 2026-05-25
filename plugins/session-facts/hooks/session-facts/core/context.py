@@ -55,15 +55,15 @@ class AnalysisConfig:
 @dataclass
 class RepoContext:
     root: Path
-    args: AnalysisConfig
+    config: AnalysisConfig
     cwd: Optional[Path] = None
     tracked_files: List[str] = field(default_factory=list)
     stack: List[str] = field(default_factory=list)
     results: ResultsDict = field(default_factory=dict)
 
-    _pkg_json: Optional[dict] = field(default=None, repr=False)
-    _all_deps: Optional[Dict[str, str]] = field(default=None, repr=False)
-    _pyproject_toml: Optional[str] = field(default=None, repr=False)
+    _pkg_json: Optional[dict] = field(default=None, init=False, repr=False)
+    _all_deps: Optional[Dict[str, str]] = field(default=None, init=False, repr=False)
+    _pyproject_toml: Optional[str] = field(default=None, init=False, repr=False)
 
     @property
     def cwd_relative(self) -> Optional[str]:

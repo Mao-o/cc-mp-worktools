@@ -15,9 +15,9 @@ class StructureCollector:
         return len(ctx.tracked_files) > 0
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        depth = ctx.args.tree_depth
+        depth = ctx.config.tree_depth
         dir_tree = build_dir_tree(ctx.tracked_files, depth)
-        tree_lines = truncate_lines(render_tree(dir_tree), ctx.args.max_tree_lines)
+        tree_lines = truncate_lines(render_tree(dir_tree), ctx.config.max_tree_lines)
         if not tree_lines:
             return None
         lines = [f"## Structure (dirs only, depth={depth})"]
