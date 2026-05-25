@@ -1,15 +1,36 @@
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .constants import (
+    DEFAULT_MAX_ENV_KEYS,
+    DEFAULT_MAX_NOTES,
+    DEFAULT_MAX_SCRIPT_ENTRIES,
+    DEFAULT_MAX_SERVICE_ENTRIES,
+    DEFAULT_MAX_TREE_LINES,
+    DEFAULT_TREE_DEPTH,
+)
+
+
+@dataclass
+class AnalysisConfig:
+    tree_depth: int = DEFAULT_TREE_DEPTH
+    max_tree_lines: int = DEFAULT_MAX_TREE_LINES
+    max_service_entries: int = DEFAULT_MAX_SERVICE_ENTRIES
+    max_script_entries: int = DEFAULT_MAX_SCRIPT_ENTRIES
+    max_env_keys: int = DEFAULT_MAX_ENV_KEYS
+    max_notes: int = DEFAULT_MAX_NOTES
+    max_major_deps: int = 8
+    include_domain_types: bool = False
+    max_domain_types: int = 10
 
 
 @dataclass
 class RepoContext:
     root: Path
-    args: argparse.Namespace
+    args: AnalysisConfig
     cwd: Optional[Path] = None
     tracked_files: List[str] = field(default_factory=list)
     stack: List[str] = field(default_factory=list)
@@ -17,6 +38,7 @@ class RepoContext:
 
     _pkg_json: Optional[dict] = field(default=None, repr=False)
     _all_deps: Optional[Dict[str, str]] = field(default=None, repr=False)
+    _pyproject_toml: Optional[str] = field(default=None, repr=False)
 
     @property
     def cwd_relative(self) -> Optional[str]:
@@ -48,3 +70,11 @@ class RepoContext:
                 if isinstance(d, dict):
                     self._all_deps.update(d)
         return self._all_deps
+
+    @property
+    def pyproject_toml(self) -> str:
+        if self._pyproject_toml is None:
+            from .fs import read_text
+            path = self.root / "pyproject.toml"
+            self._pyproject_toml = read_text(path) if path.exists() else ""
+        return self._pyproject_toml

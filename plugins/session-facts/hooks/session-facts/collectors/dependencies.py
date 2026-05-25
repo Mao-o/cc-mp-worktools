@@ -40,7 +40,7 @@ def _collect_major_dependencies(ctx: RepoContext, max_items: int) -> List[str]:
                 results.append(f"{name}@{normalize_version(str(version))}")
                 seen.add(name)
 
-    pyproject = read_text(root / "pyproject.toml") if (root / "pyproject.toml").exists() else ""
+    pyproject = ctx.pyproject_toml
     for name in sorted(IMPORTANT_DEPENDENCIES):
         if len(results) >= max_items:
             break
