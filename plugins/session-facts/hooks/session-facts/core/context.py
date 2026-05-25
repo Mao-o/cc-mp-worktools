@@ -2,16 +2,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
+
+try:
+    from typing import TypedDict
+except ImportError:
+    from typing_extensions import TypedDict
 
 from .constants import (
+    DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
+    DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
     DEFAULT_TREE_DEPTH,
 )
+
+
+class TestSnapshot(TypedDict, total=False):
+    code_files: int
+    test_files: int
+    test_to_code_ratio: float
+    unit_tests: int
+    integration_tests: int
+    e2e_tests: int
+    test_dirs: List[str]
+
+
+class ResultsDict(TypedDict, total=False):
+    is_git_repo: bool
+    purpose: str
+    package_manager: str
+    major_dependencies: List[str]
+    test_snapshot: TestSnapshot
 
 
 @dataclass
@@ -22,9 +47,9 @@ class AnalysisConfig:
     max_script_entries: int = DEFAULT_MAX_SCRIPT_ENTRIES
     max_env_keys: int = DEFAULT_MAX_ENV_KEYS
     max_notes: int = DEFAULT_MAX_NOTES
-    max_major_deps: int = 8
+    max_major_deps: int = DEFAULT_MAX_MAJOR_DEPS
     include_domain_types: bool = False
-    max_domain_types: int = 10
+    max_domain_types: int = DEFAULT_MAX_DOMAIN_TYPES
 
 
 @dataclass
@@ -34,7 +59,7 @@ class RepoContext:
     cwd: Optional[Path] = None
     tracked_files: List[str] = field(default_factory=list)
     stack: List[str] = field(default_factory=list)
-    results: Dict[str, Any] = field(default_factory=dict)
+    results: ResultsDict = field(default_factory=dict)
 
     _pkg_json: Optional[dict] = field(default=None, repr=False)
     _all_deps: Optional[Dict[str, str]] = field(default=None, repr=False)

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import List, Optional, Set
 
 from core.constants import CODE_EXTENSIONS, TEST_PATH_MARKERS
-from core.context import RepoContext
+from core.context import RepoContext, TestSnapshot
 from core.util import is_code_file, is_test_path
 
 
@@ -34,7 +34,7 @@ class TestsCollector:
         return "\n".join(lines) if len(lines) > 1 else None
 
 
-def _collect_test_snapshot(tracked_files: List[str]) -> Dict[str, Any]:
+def _collect_test_snapshot(tracked_files: List[str]) -> TestSnapshot:
     code_files = 0
     test_files = 0
     unit = 0
@@ -64,7 +64,7 @@ def _collect_test_snapshot(tracked_files: List[str]) -> Dict[str, Any]:
         elif is_code_file(path_str):
             code_files += 1
 
-    snapshot: Dict[str, Any] = {}
+    snapshot: TestSnapshot = {}
     if code_files:
         snapshot["code_files"] = code_files
     if test_files:

@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from core.constants import (
+    DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
+    DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
@@ -99,9 +101,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--max-script-entries", type=int, default=DEFAULT_MAX_SCRIPT_ENTRIES)
     parser.add_argument("--max-env-keys", type=int, default=DEFAULT_MAX_ENV_KEYS)
     parser.add_argument("--max-notes", type=int, default=DEFAULT_MAX_NOTES)
-    parser.add_argument("--max-major-deps", type=int, default=8)
+    parser.add_argument("--max-major-deps", type=int, default=DEFAULT_MAX_MAJOR_DEPS)
     parser.add_argument("--include-domain-types", action="store_true")
-    parser.add_argument("--max-domain-types", type=int, default=10)
+    parser.add_argument("--max-domain-types", type=int, default=DEFAULT_MAX_DOMAIN_TYPES)
     return parser.parse_args(argv)
 
 
