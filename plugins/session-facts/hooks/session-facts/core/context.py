@@ -10,6 +10,7 @@ except ImportError:
     from typing_extensions import TypedDict
 
 from .constants import (
+    DEFAULT_MAX_CONFIG_HINTS,
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
     DEFAULT_MAX_MAJOR_DEPS,
@@ -50,6 +51,7 @@ class AnalysisConfig:
     max_major_deps: int = DEFAULT_MAX_MAJOR_DEPS
     include_domain_types: bool = False
     max_domain_types: int = DEFAULT_MAX_DOMAIN_TYPES
+    max_config_hints: int = DEFAULT_MAX_CONFIG_HINTS
 
 
 @dataclass

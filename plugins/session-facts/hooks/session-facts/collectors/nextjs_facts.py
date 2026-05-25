@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-from core.constants import DEFAULT_MAX_CONFIG_HINTS, NEXT_CONFIG_CANDIDATES
+from core.constants import NEXT_CONFIG_CANDIDATES
 from core.context import RepoContext
 from core.fs import read_text
 from core.util import normalize_version
@@ -52,7 +52,7 @@ class NextjsFactsCollector:
                 hints.append("custom images config")
             if re.search(r'\bexperimental\s*:', config_text):
                 hints.append("experimental config present")
-        for hint in hints[:DEFAULT_MAX_CONFIG_HINTS]:
+        for hint in hints[:ctx.config.max_config_hints]:
             lines.append(f"- config_hint: {hint}")
 
         return "\n".join(lines) if len(lines) > 1 else None
