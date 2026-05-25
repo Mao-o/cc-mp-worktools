@@ -57,7 +57,7 @@ def summarize_repo(
     is_git: bool,
     cwd: Optional[Path] = None,
 ) -> str:
-    ctx = RepoContext(root=root, args=config, cwd=cwd)
+    ctx = RepoContext(root=root, config=config, cwd=cwd)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
 

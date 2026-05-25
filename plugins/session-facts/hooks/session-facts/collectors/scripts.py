@@ -18,7 +18,7 @@ class ScriptsCollector:
         return isinstance(scripts, dict) and len(scripts) > 0
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_script_entries
+        max_items = ctx.config.max_script_entries
         scripts = _collect_scripts(ctx, max_items)
         if not scripts:
             return None
@@ -37,7 +37,7 @@ class LikelyCommandsCollector:
         return True
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_script_entries
+        max_items = ctx.config.max_script_entries
         commands = _likely_commands(ctx, max_items)
         if not commands:
             return None

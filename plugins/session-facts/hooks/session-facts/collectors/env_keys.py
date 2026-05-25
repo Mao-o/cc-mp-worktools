@@ -17,7 +17,7 @@ class EnvKeysCollector:
         return True
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_env_keys
+        max_items = ctx.config.max_env_keys
         keys = _collect_env_keys(ctx.root, max_items)
         if not keys:
             return None

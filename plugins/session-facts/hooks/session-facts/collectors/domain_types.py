@@ -15,10 +15,10 @@ class DomainTypesCollector:
     priority = 80
 
     def should_run(self, ctx: RepoContext) -> bool:
-        return ctx.args.include_domain_types
+        return ctx.config.include_domain_types
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_domain_types
+        max_items = ctx.config.max_domain_types
         types = _maybe_collect_domain_types(ctx, max_items)
         if not types:
             return None

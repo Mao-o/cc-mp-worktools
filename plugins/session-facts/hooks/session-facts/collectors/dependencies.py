@@ -18,7 +18,7 @@ class DependenciesCollector:
         return True
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_major_deps
+        max_items = ctx.config.max_major_deps
         deps = _collect_major_dependencies(ctx, max_items)
         ctx.results["major_dependencies"] = deps
         # This collector contributes to the header, not its own section

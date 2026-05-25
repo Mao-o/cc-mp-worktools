@@ -16,7 +16,7 @@ class ServicesCollector:
         return len(ctx.tracked_files) > 0
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        max_items = ctx.args.max_service_entries
+        max_items = ctx.config.max_service_entries
         entries = _collect_service_entries(ctx.tracked_files, max_items)
         if not entries:
             return None
