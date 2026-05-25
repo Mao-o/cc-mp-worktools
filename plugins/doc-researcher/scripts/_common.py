@@ -374,80 +374,22 @@ def search_index_entries(entries, query: str, *, limit: int = 15, get_extras=Non
     return scored[:limit]
 
 
-def search_content_in_body(body_lines, query: str, *,
-                           context_lines: int = 2,
-                           max_matches_per_doc: int = 5,
-                           min_level: int = 2,
-                           max_snippet_chars: int | None = None):
-    """Search *body_lines* for *query* keywords (section-level AND, case-insensitive).
-
-    A section is considered a match only when **all** query keywords appear
-    somewhere within it. Matches within the same section are grouped into one
-    snippet so the Agent sees the full context rather than scattered hits.
-
-    Hit lines are prefixed with ``→``, surrounding context lines with two
-    spaces. If a section contains more than ~20 lines of hits, the snippet
-    truncates to the first few hits to keep output manageable.
-
-    *min_level* must match what ``extract_sections`` uses elsewhere in the
-    caller (1 for AI SDK frontmatter-delimited docs, 2 for Claude/Firebase).
-
-    Returns a dict:
-        {
-            "total_matches": int,              # total lines that matched in ANY section
-                                               # that contains all keywords (pre-truncation)
-            "results": [
-                {
-                    "heading_path": str,       # enclosing section, or "(top)" if before first heading
-                    "line_offset": int,        # first hit line in body_lines (0-based)
-                    "snippet": str,
-                    "matched_keywords": list[str],
-                    "hit_count": int,          # number of hit lines within this section
-                },
-                ...
-            ],
-        }
-    """
-    keywords = [k.lower() for k in query.split() if k]
-    if not keywords:
-        return {"total_matches": 0, "results": []}
-
-    sections = extract_sections(body_lines, min_level=min_level)
-
-    # Map each line to its enclosing section index (None = before first heading)
-    line_to_section_idx: list = [None] * len(body_lines)
-    for si, s in enumerate(sections):
-        for i in range(s["line_start"], s["line_end"]):
-            if 0 <= i < len(body_lines):
-                line_to_section_idx[i] = si
-
-    # Collect hits bucketed by section
-    section_hits: dict = {}
-    for i, line in enumerate(body_lines):
-        line_lower = line.lower()
-        matched = [kw for kw in keywords if kw in line_lower]
-        if not matched:
-            continue
-        si = line_to_section_idx[i]
-        section_hits.setdefault(si, []).append((i, matched))
-
+def _build_section_results(section_hits, sections, body_lines, keywords,
+                           min_coverage, context_lines, max_snippet_chars):
+    """Build result list from sections matching >= *min_coverage* keywords."""
     results = []
-    total_matches = 0
-
+    total = 0
     for si, hits in section_hits.items():
         all_matched = set()
         for _, m in hits:
             all_matched.update(m)
-
-        # Section-level AND: require every keyword to appear in this section
-        if len(all_matched) < len(keywords):
+        if len(all_matched) < min_coverage:
             continue
 
-        total_matches += len(hits)
+        total += len(hits)
         heading_path = sections[si]["heading_path"] if si is not None else "(top)"
         hit_line_numbers = [h[0] for h in hits]
 
-        # Keep the snippet manageable: if too many hits, show first 3 plus trailing marker
         MAX_SNIPPET_HITS = 3
         if len(hit_line_numbers) > MAX_SNIPPET_HITS:
             visible_hits = hit_line_numbers[:MAX_SNIPPET_HITS]
@@ -479,14 +421,67 @@ def search_content_in_body(body_lines, query: str, *,
             "matched_keywords": sorted(all_matched),
             "hit_count": len(hits),
         })
+    return results, total
 
-    # Rank by hit density, then by earliest appearance
-    results.sort(key=lambda r: (-r["hit_count"], r["line_offset"]))
+
+def search_content_in_body(body_lines, query: str, *,
+                           context_lines: int = 2,
+                           max_matches_per_doc: int = 5,
+                           min_level: int = 2,
+                           max_snippet_chars: int | None = None):
+    """Search *body_lines* for *query* keywords (soft-AND, case-insensitive).
+
+    First tries strict AND (all keywords in same section). If no results and
+    len(keywords) > 1, relaxes to partial match (>= ceil(N/2) keywords).
+    The ``match_mode`` field indicates which strategy produced results.
+
+    Returns a dict with ``total_matches``, ``results``, and ``match_mode``
+    (``"and"`` | ``"partial"`` | ``"none"``).
+    """
+    keywords = [k.lower() for k in query.split() if k]
+    if not keywords:
+        return {"total_matches": 0, "results": [], "match_mode": "none"}
+
+    sections = extract_sections(body_lines, min_level=min_level)
+
+    line_to_section_idx: list = [None] * len(body_lines)
+    for si, s in enumerate(sections):
+        for i in range(s["line_start"], s["line_end"]):
+            if 0 <= i < len(body_lines):
+                line_to_section_idx[i] = si
+
+    section_hits: dict = {}
+    for i, line in enumerate(body_lines):
+        line_lower = line.lower()
+        matched = [kw for kw in keywords if kw in line_lower]
+        if not matched:
+            continue
+        si = line_to_section_idx[i]
+        section_hits.setdefault(si, []).append((i, matched))
+
+    build_args = (section_hits, sections, body_lines, keywords)
+    build_kw = dict(context_lines=context_lines, max_snippet_chars=max_snippet_chars)
+
+    # Strict AND
+    results, total_matches = _build_section_results(*build_args, len(keywords), **build_kw)
+    match_mode = "and"
+
+    # Soft-AND fallback: relax to >= ceil(N/2) keywords
+    if not results and len(keywords) > 1:
+        min_kw = max(1, (len(keywords) + 1) // 2)
+        results, total_matches = _build_section_results(*build_args, min_kw, **build_kw)
+        match_mode = "partial"
+
+    if not results:
+        match_mode = "none"
+
+    # Rank: keyword coverage desc, hit density desc, position asc
+    results.sort(key=lambda r: (-len(r["matched_keywords"]), -r["hit_count"], r["line_offset"]))
 
     if max_matches_per_doc > 0:
         results = results[:max_matches_per_doc]
 
-    return {"total_matches": total_matches, "results": results}
+    return {"total_matches": total_matches, "results": results, "match_mode": match_mode}
 
 
 # ---------------------------------------------------------------------------

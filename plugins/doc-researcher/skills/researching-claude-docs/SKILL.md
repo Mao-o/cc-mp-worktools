@@ -146,37 +146,6 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 - スラッシュ区切りの階層パス: `"Hook events/PreToolUse/PreToolUse input"`
 - 部分一致（大文字小文字無視）で検索される
 
-### `--max-age` (キャッシュ TTL)
-
-`/tmp/` 配下のキャッシュは既定では無期限に再利用される。新しい docs を取り直したい時:
-
-```bash
-# 24 時間より古ければ再 fetch
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<query>" --max-age 86400
-
-# 強制再 fetch (キャッシュ削除)
-rm /tmp/claude-code-llms*.txt
-```
-
-### `--max-snippet-chars`
-
-スニペットが長くなりすぎる時は文字数制限で打ち切れる (既定 500 文字)。`0` で無制限。
-
-### `search` と `search-content` の使い分け
-
-- `search`: **最初に使うべきデフォルト**。ページ候補 + 本文ヒットを 1 回で取れる
-- `search-content`: 既に対象ページが分かっていて、その中だけを検索したい時 (`--page-ref` で 1 ページに絞る)
-- `search-index`: タイトル/説明だけで十分な軽量検索 (本文を見ない)
-
-### キャッシュ（2 段階 × 2 ソース）
-
-| ソース | インデックス | 全文 |
-|--------|-------------|------|
-| Claude Code | `/tmp/claude-code-llms.txt` | `/tmp/claude-code-llms-full.txt` |
-| Platform | `/tmp/claude-platform-llms.txt` | `/tmp/claude-platform-llms-full.txt` |
-
-ファイルが存在しない場合は自動で fetch される。
-
 ---
 
 ## 制約
@@ -185,38 +154,6 @@ rm /tmp/claude-code-llms*.txt
 - **コードフェンス保護**: スクリプトがコードブロックの途中分割を自動防止する
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Note>`, `<Frame>`, `<Expandable>`, `<Card>` 等の JSX 記法はテキストとして読む
-
-## 禁止事項（効率の悪いフォールバックを避ける）
-
-以下は本スキルのコマンドで代替できるため使わないこと:
-
-- ❌ `grep -n <keyword> /tmp/claude-code-llms*.txt`、`grep /tmp/claude-platform-llms*.txt`
-  → ✅ `search` を使う
-- ❌ `Read /tmp/claude-*-llms-full.txt (lines X-Y)` の直接行指定読み
-  → ✅ `search` で heading_path を取得してから `content` で取り出す
-- ❌ `fetch-index` の出力を Bash の grep/awk で再フィルタ
-  → ✅ `search-index` でスコアリング済みの候補を得る
-
-## v2 → v3 の移行
-
-旧 (v2 までの形式) は破壊的に変わったので注意:
-
-```bash
-# v2 (動かない)
-sections /tmp/claude-code-llms-full.txt 5
-content /tmp/claude-code-llms-full.txt 5 "Heading"
-search-content /tmp/claude-code-llms-full.txt "query"
-
-# v3 (新)
-sections 5
-content 5 "Heading"
-search-content "query"
-# 旧来のファイル指定を残したいなら --file flag を明示
-sections 5 --file /tmp/claude-code-llms-full.txt
-```
-
-`doc_index` positional は廃止され、`page_ref` (int / slug / URL を自動判別) に統一された。
-整数を渡せばこれまで通り `doc_idx` として動く。
 
 ## 出力フォーマット
 
