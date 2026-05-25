@@ -41,7 +41,9 @@ def discover_custom_plugins(custom_dir: Path) -> List:
         module = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(module)
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f"[session-facts] WARNING: failed to load {py_file.name}: {e}", file=sys.stderr)
             continue
         if hasattr(module, "register"):
             result = module.register()

@@ -15,7 +15,7 @@ from core.constants import (
 )
 from core.context import RepoContext
 from core.fs import read_text, walk_files
-from core.git import git_ls_files, git_root, is_git_repo
+from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
 from core.util import collapse_space
 from registry import discover_custom_plugins, discover_plugins
@@ -41,7 +41,7 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
                 line = line.lstrip("#").strip()
                 if line:
                     continue
-            if line.startswith(("```", "---", "***")):
+            if line.startswith(("```", "---", "***", "![", "[!", ">")):
                 continue
             if len(line) < 12:
                 continue
@@ -108,8 +108,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     resolved = args.root.resolve()
-    is_git = is_git_repo(resolved)
-    root = git_root(resolved) if is_git else resolved
+    root = git_root_or_none(resolved)
+    is_git = root is not None
+    if root is None:
+        root = resolved
     output = summarize_repo(root, args, is_git, cwd=resolved)
     print(output)
     return 0
