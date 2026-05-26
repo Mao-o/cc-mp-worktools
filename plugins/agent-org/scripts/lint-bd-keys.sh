@@ -47,8 +47,19 @@ if [[ ! -d "$MAIN_REPO/.beads" ]]; then
   exit 2
 fi
 
-if ! keys_raw="$(cd "$REPO_ROOT" && bd memories 2>&1)"; then
+if ! keys_json="$(cd "$REPO_ROOT" && bd memories --json 2>&1)"; then
   echo "ERROR: bd memories 実行失敗:" >&2
+  echo "$keys_json" >&2
+  exit 2
+fi
+
+if [[ -z "$keys_json" ]] || [[ "$keys_json" == "{}" ]] || [[ "$keys_json" == "null" ]]; then
+  echo "OK: bd memories が空です (key なし)"
+  exit 0
+fi
+
+if ! keys_raw="$(echo "$keys_json" | jq -r 'keys[]' 2>&1)"; then
+  echo "ERROR: bd memories --json の parse に失敗:" >&2
   echo "$keys_raw" >&2
   exit 2
 fi
