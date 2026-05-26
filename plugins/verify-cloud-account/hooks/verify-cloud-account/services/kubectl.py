@@ -11,9 +11,8 @@ READONLY = [
 ]
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
-    "kubectl: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    '(最小例: {"kubectl": "my-context-name"}。'
-    "kubectl config current-context で現在値を確認可)"
+    'kubectl 最小例: {"kubectl": "my-context-name"}。'
+    "kubectl config current-context で現在値を確認可"
 )
 
 _CONTEXT_OVERRIDE_RE = re.compile(r"(?:^|\s)--context(?:=|\s+)(\S+)")
@@ -40,7 +39,7 @@ def _run_current_context() -> tuple[str | None, str | None]:
     except FileNotFoundError:
         return None, "kubectl: kubectl コマンドが見つかりません。"
     except subprocess.TimeoutExpired:
-        return None, "kubectl: kubectl config current-context がタイムアウトしました。"
+        return None, "kubectl: kubectl config current-context がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     current = result.stdout.strip()
     return (current or None), None
 

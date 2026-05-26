@@ -277,7 +277,10 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 4. 対象 CLI (`gh` / `firebase` / `aws` / `gcloud` / `kubectl`) が PATH に
    通っているかを確認
 
-詳細なトラブルシュートと設計背景は [CLAUDE.md](./CLAUDE.md) を参照。
+hook の出力を確認するには `claude --verbose` でセッションを起動する
+(hook の stdout/stderr がターミナルに表示される)。
+
+詳細な設計背景は CLAUDE.local.md (開発者向け、リポジトリ未同梱) を参照。
 
 ## テスト実行
 

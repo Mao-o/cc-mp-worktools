@@ -81,6 +81,29 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
+def _ensure_gitignore_entry(project_dir: str, stdout: IO[str]) -> None:
+    """accounts.local.json を .gitignore に追加する (best-effort)。
+
+    既に該当エントリがあればスキップ。.gitignore が存在しなければ作成しない
+    (プロジェクトに .gitignore が無い環境で勝手に作ると意図しない副作用になる)。
+    """
+    gitignore = Path(project_dir) / ".gitignore"
+    entry = ".claude/verify-cloud-account/accounts.local.json"
+    if not gitignore.exists():
+        return
+    try:
+        content = gitignore.read_text(encoding="utf-8")
+        if entry in content:
+            return
+        if not content.endswith("\n"):
+            content += "\n"
+        content += f"{entry}\n"
+        gitignore.write_text(content, encoding="utf-8")
+        print(f"updated: {gitignore} ({entry} を追加)", file=stdout)
+    except OSError as e:
+        print(f"warning: .gitignore の更新に失敗しました: {e}", file=stdout)
+
+
 def _ensure_project_claude_md(project_dir: str, stdout: IO[str]) -> None:
     """新パスと同じディレクトリに Claude 向け signpost (`CLAUDE.md`) を同梱する。
 
@@ -234,6 +257,7 @@ def _cmd_init(
             return 1
         print(f"\nwritten: {target}", file=stdout)
         _ensure_project_claude_md(project_dir, stdout)
+        _ensure_gitignore_entry(project_dir, stdout)
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
@@ -430,6 +454,7 @@ def _cmd_migrate(
             return 1
         print(f"\nwritten: {new_path}", file=stdout)
         _ensure_project_claude_md(project_dir, stdout)
+        _ensure_gitignore_entry(project_dir, stdout)
         retained = [
             (kind, path)
             for kind, path in source_paths.items()

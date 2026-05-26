@@ -7,9 +7,8 @@ PATTERNS = [r"^aws\b"]
 READONLY = [r"^aws\s+sts\s+get-caller-identity\b"]
 ACCOUNT_KEY = "aws"
 SETUP_HINT = (
-    "AWS: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    '(最小例: {"aws": "123456789012"}。'
-    "aws sts get-caller-identity --query Account で現在値を確認可)"
+    'AWS 最小例: {"aws": "123456789012"}。'
+    "aws sts get-caller-identity --query Account で現在値を確認可"
 )
 
 
@@ -25,7 +24,7 @@ def _run_sts_get_caller_identity() -> tuple[str | None, str | None]:
     except FileNotFoundError:
         return None, "AWS: aws コマンドが見つかりません。"
     except subprocess.TimeoutExpired:
-        return None, "AWS: aws sts get-caller-identity がタイムアウトしました。"
+        return None, "AWS: aws sts get-caller-identity がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     current = result.stdout.strip()
     if not current:
         stderr_hint = result.stderr.strip().splitlines()[0] if result.stderr.strip() else ""

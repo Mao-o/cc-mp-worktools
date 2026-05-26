@@ -186,10 +186,11 @@ def dispatch(command: str, cwd: str) -> dict | None:
         hint_block = "\n".join(h for h in hints if h)
         msg = (
             ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
-            "(使用するサービスのみ記述すれば OK。未記載のサービスは検証対象外)"
+            "(使用するサービスのみ記述すれば OK。未記載のサービスは検証対象外)\n"
+            "初期化: /verify-cloud-account:accounts-init"
         )
         if hint_block:
-            msg += "\n" + hint_block
+            msg += "\n\n" + hint_block
         return output.deny(msg)
 
     try:

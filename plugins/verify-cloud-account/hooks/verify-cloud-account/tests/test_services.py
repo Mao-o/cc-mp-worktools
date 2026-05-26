@@ -138,8 +138,16 @@ class TestFirebase(unittest.TestCase):
 
     def test_no_current_project(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="")):
-            err = firebase.verify("my-project", "/p")
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify("my-project", "/p")
         self.assertIn("取得できません", err)
+
+    def test_cli_not_installed(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="")):
+            with mock.patch("shutil.which", return_value=None):
+                err = firebase.verify("my-project", "/p")
+        self.assertIn("firebase コマンドが見つかりません", err)
+        self.assertIn("npm install", err)
 
     def test_dict_default_alias_match(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
