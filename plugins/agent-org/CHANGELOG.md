@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.12.0 (2026-05-27) — v1.0.0 準備: command 削除 + ドキュメント整理
+## 1.0.0 (2026-05-27) — 会話だけで全機能が動く
 
 ユーザーは Claude との会話だけで agent-org の全機能を使える状態に到達。
 明示的な `/command` は init / diagnostic / migration のみ。

@@ -1,6 +1,6 @@
 {
   "name": "agent-org",
-  "version": "0.12.0",
+  "version": "1.0.0",
   "description": "Claude Code の subagent 群を組織化する plugin。会話するだけで episode 圧縮・設計判断記録 (ADR)・多視点レビュー・regression 監視/修正が動く。5 subagent + 7 skill (auto-trigger) + 6 hook。beads (bd CLI) で detection/fix/approval/learning を管理",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",
