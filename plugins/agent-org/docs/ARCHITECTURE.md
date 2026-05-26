@@ -857,3 +857,31 @@ aware 動作の維持、YAGNI)。詳細は `skills/using-beads/SKILL.md` の
   判断 (ondemand 投入) を尊重し、機械強制は行わない
 
 これらは v0.10.x 系で運用フィードバック反映と並行して検討。
+
+## v0.11.0: v2 skill 統合 (command → skill 移行)
+
+v0.11.0 で workflow command を skill に統合し、ユーザーが明示的なコマンド
+指定なしで Claude が文脈から自動起動する設計に移行。
+
+### 移行マッピング
+
+| 旧 command | 新 skill | 状態 |
+|---|---|---|
+| `/run-review` | `running-review` | v0.10.1 (V9) で移行済み |
+| `/fix-regression` | `fixing-regression` | v0.11.0 で移行 |
+| `/start-watcher` | `starting-watcher` | v0.11.0 で移行 |
+| `/compress-context` | `compressing-context` | v0.11.0 で deprecated 化 (skill は既存) |
+
+### command として残すもの (auto-trigger 不要)
+
+| command | 理由 |
+|---|---|
+| `/org-init` | 初期化は明示実行 |
+| `/bd-check` | diagnostic は明示実行 |
+| `/migrate-*` (4 種) | one-shot migration は明示実行 |
+
+### 設計原則
+
+- skill に persist ロジックを統合し、呼び出し経路に関わらず同一挙動を保証
+- deprecated command は thin wrapper として残し v2.0.0 で削除
+- skill の `Triggers:` で auto-trigger 条件を宣言 (Claude が文脈から判断)
