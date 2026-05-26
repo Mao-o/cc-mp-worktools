@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (2026-05-27) — 会話だけで全機能が動く
+## 0.12.0 (2026-05-27) — v1.0.0 準備: command 削除 + ドキュメント整理
 
 ユーザーは Claude との会話だけで agent-org の全機能を使える状態に到達。
 明示的な `/command` は init / diagnostic / migration のみ。
@@ -27,7 +27,7 @@
 - README.md: Phase 番号の積み上げ構造からユースケース起点に全面リライト
 - ARCHITECTURE.md: Phase 段階的追記 (887行) から統合アーキテクチャ (278行) にリライト
 - plugin.json: description を 2 行の簡潔な説明に置換
-- `.claude-plugin/plugin.json`: version `0.11.0` → **`1.0.0`**
+- `.claude-plugin/plugin.json`: version `0.11.0` → **`0.12.0`**
 
 ### Migration from 0.11.x
 
@@ -35,10 +35,9 @@
 スクリプトや手順書で参照している場合は、対応する skill 名に読み替える。
 会話で使っていた場合は変更不要 (skill が auto-trigger する)。
 
-### v1.x 以降の方針
+### v1.0.0 への残タスク
 
-feature freeze。以下は実害発生時に v1.x minor で追加:
-- テレメトリ / auto-prune / `--global` / missing learning lint
+T5 (auto-trigger 実機検証) 完了後に v1.0.0 bump。
 
 ## 0.11.0 (2026-05-26) — skill 統合: workflow command → skill 移行
 
