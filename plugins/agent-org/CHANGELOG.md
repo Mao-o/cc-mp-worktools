@@ -1,6 +1,46 @@
 # Changelog
 
-## 0.11.0 (2026-05-26) — v2 skill 統合: workflow command → skill 移行
+## 1.0.0 (2026-05-27) — 会話だけで全機能が動く
+
+ユーザーは Claude との会話だけで agent-org の全機能を使える状態に到達。
+明示的な `/command` は init / diagnostic / migration のみ。
+
+### BREAKING CHANGES
+
+- **`/run-review` command 削除** → `running-review` skill を使用
+- **`/fix-regression` command 削除** → `fixing-regression` skill を使用
+- **`/start-watcher` command 削除** → `starting-watcher` skill を使用
+- **`/compress-context` command 削除** → `compressing-context` skill を使用
+
+いずれも会話で自然に依頼するだけで auto-trigger される。例:
+- 「PR#42 を security, api-design の観点でレビューして」→ running-review
+- 「テストが落ちているので修正して」→ fixing-regression
+- 「regression を監視して」→ starting-watcher
+- 「直近の議論を episode に圧縮して」→ compressing-context
+
+### Added
+
+- `scripts/lint-bd-keys.sh`: bd memory key の命名規約 lint
+
+### Changed
+
+- README.md: Phase 番号の積み上げ構造からユースケース起点に全面リライト
+- ARCHITECTURE.md: Phase 段階的追記 (887行) から統合アーキテクチャ (278行) にリライト
+- plugin.json: description を 2 行の簡潔な説明に置換
+- `.claude-plugin/plugin.json`: version `0.11.0` → **`1.0.0`**
+
+### Migration from 0.11.x
+
+`/run-review` `/fix-regression` `/start-watcher` `/compress-context` を
+スクリプトや手順書で参照している場合は、対応する skill 名に読み替える。
+会話で使っていた場合は変更不要 (skill が auto-trigger する)。
+
+### v1.x 以降の方針
+
+feature freeze。以下は実害発生時に v1.x minor で追加:
+- テレメトリ / auto-prune / `--global` / missing learning lint
+
+## 0.11.0 (2026-05-26) — skill 統合: workflow command → skill 移行
 
 v2 アーキテクチャ方針に基づき、workflow command のロジックを skill に統合。
 ユーザーが明示的な `/command` を打たなくても Claude が会話文脈から自動起動
