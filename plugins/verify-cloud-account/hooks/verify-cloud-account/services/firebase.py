@@ -9,6 +9,7 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,10 +17,9 @@ PATTERNS = [r"^firebase\b"]
 READONLY = [r"^firebase\s+use\s*$"]
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
-    "Firebase: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    '(最小例: {"firebase": "my-project-id"}。'
+    'Firebase 最小例: {"firebase": "my-project-id"}。'
     "firebase use で現在値を確認可。"
-    '複数 alias: {"firebase": {"default":"proj-dev","prod":"proj-prod"}})'
+    '複数 alias: {"firebase": {"default":"proj-dev","prod":"proj-prod"}}'
 )
 
 
@@ -31,7 +31,9 @@ def _from_cli() -> str:
             text=True,
             timeout=10,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        return ""
+    except subprocess.TimeoutExpired:
         return ""
     out = result.stdout.strip()
     if not out:
@@ -76,6 +78,11 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
 def verify(expected, project_dir: str) -> str | None:
     current = _from_firebaserc(project_dir) or _from_cli()
     if not current:
+        if shutil.which("firebase") is None:
+            return (
+                "Firebase: firebase コマンドが見つかりません。"
+                "npm install -g firebase-tools でインストールしてください。"
+            )
         hint = expected if isinstance(expected, str) else "YOUR_PROJECT"
         return (
             f"Firebase: 現在のプロジェクトを取得できません。"

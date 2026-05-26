@@ -617,6 +617,101 @@ class TestProjectClaudeMd(BaseBuilder):
         self.assertFalse(self._md_path().exists())
 
 
+class TestGitignore(BaseBuilder):
+    """.gitignore 自動エントリ追加の挙動。
+
+    init --commit / migrate --commit で .gitignore に
+    accounts.local.json のエントリを追加する (best-effort)。
+    .gitignore が存在しない場合は作成しない。
+    """
+
+    def _gitignore(self) -> Path:
+        return self.project_dir / ".gitignore"
+
+    def test_init_commit_adds_gitignore_entry(self):
+        self._gitignore().write_text("node_modules/\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        self.assertIn(".claude/verify-cloud-account/accounts.local.json", content)
+        self.assertIn("node_modules/", content)
+        self.assertIn("updated:", out)
+
+    def test_init_commit_skips_if_entry_already_present(self):
+        self._gitignore().write_text(
+            ".claude/verify-cloud-account/accounts.local.json\n",
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        self.assertEqual(
+            content.count(".claude/verify-cloud-account/accounts.local.json"), 1
+        )
+        self.assertNotIn("updated:", out)
+
+    def test_comment_line_does_not_count_as_present(self):
+        self._gitignore().write_text(
+            "# .claude/verify-cloud-account/accounts.local.json\n",
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        active = [l for l in content.splitlines()
+                  if l.strip() == ".claude/verify-cloud-account/accounts.local.json"]
+        self.assertEqual(len(active), 1)
+        self.assertIn("updated:", out)
+
+    def test_negation_line_does_not_count_as_present(self):
+        self._gitignore().write_text(
+            "!.claude/verify-cloud-account/accounts.local.json\n",
+            encoding="utf-8",
+        )
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        self.assertIn("!", content)
+        active = [l for l in content.splitlines()
+                  if l.strip() == ".claude/verify-cloud-account/accounts.local.json"]
+        self.assertEqual(len(active), 1)
+
+    def test_init_commit_no_gitignore_does_not_create(self):
+        self.assertFalse(self._gitignore().exists())
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(self._gitignore().exists())
+
+    def test_dry_run_does_not_modify_gitignore(self):
+        self._gitignore().write_text("node_modules/\n", encoding="utf-8")
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        self.assertNotIn("accounts.local.json", content)
+
+    def test_migrate_commit_adds_gitignore_entry(self):
+        self._gitignore().write_text("*.log\n", encoding="utf-8")
+        self._deprecated_path().write_text(
+            json.dumps({"github": "u"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        self.assertIn(".claude/verify-cloud-account/accounts.local.json", content)
+
+
 class TestEntriesEqual(unittest.TestCase):
     """`_entries_equal` の direct unit tests (Codex P2 / R1 対応)."""
 

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.1
+
+**UX 改善 (P3)**: UX 監査の残 P3 フィードバック 9 件を反映。
+
+### 改善内容
+
+1. **Firebase CLI 未インストール検出** (`services/firebase.py`) —
+   `shutil.which` で CLI の存在を確認し、未インストール時は
+   `npm install -g firebase-tools` を案内 (従来は「プロジェクト取得
+   できません」と未設定と区別できなかった)
+2. **タイムアウト時の再試行案内** (4 service files) — 全サービスの
+   timeout エラーに「再試行するか、ネットワーク接続を確認してください」
+   を追加
+3. **.gitignore 自動エントリ追加** (`scripts/accounts_builder.py`) —
+   `init --commit` / `migrate --commit` 時に `.gitignore` へ
+   accounts.local.json のエントリを best-effort で追加。
+   `.gitignore` 未存在時は作成しない
+4. **GCP 複数エラーの表示階層** (`services/gcloud.py`) — dict 形式で
+   project + account の両方がエラーの場合、ヘッダ付きインデントリストで
+   表示
+5. **SETUP_HINT 重複出力の解消** (5 service files + `core/dispatcher.py`)
+   — 共通の init コマンド参照を dispatcher に集約し、SETUP_HINT は
+   サービス固有の最小 JSON 例のみに簡素化
+6. **README の CLAUDE.md 断リンク修正** (`README.md`) — 存在しない
+   `CLAUDE.md` へのリンクを修正
+7. **README に `--verbose` デバッグヒント追加** (`README.md`) —
+   hook 出力を確認する方法として `claude --verbose` を案内
+8. **plugin.json description 短縮** — 冗長な機能列挙を 1 文に集約
+9. **output.py warn hookEventName** — 確認済み、変更不要
+
+### スキップした P3
+
+- **deny-first 設計 (SessionStart 早期通知)** — 新規 hook 追加を伴う
+  設計変更のため今回はスキップ
+
+### テスト
+
+- Firebase CLI 未インストール検出テスト 1 件追加 (`test_services.py`)
+- .gitignore 自動エントリテスト 5 件追加 (`test_accounts_builder.py`)
+
+合計テスト件数: 222 → 228。
+
 ## 0.5.0
 
 **UX 改善**: architect-reviewer 4 視点 UX 監査の P2/P3 フィードバックを反映。

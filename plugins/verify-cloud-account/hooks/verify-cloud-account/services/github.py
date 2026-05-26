@@ -15,10 +15,9 @@ PATTERNS = [r"^gh\b"]
 READONLY = [r"^gh\s+auth\s+(status|list)\b"]
 ACCOUNT_KEY = "github"
 SETUP_HINT = (
-    "GitHub: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    '(最小例: {"github": "YOUR_USERNAME"}。'
+    'GitHub 最小例: {"github": "YOUR_USERNAME"}。'
     "gh auth status で現在値を確認可。"
-    'GHE 別指定: {"github": {"github.com":"USER","ghe.corp.com":"USER"}})'
+    'GHE 別指定: {"github": {"github.com":"USER","ghe.corp.com":"USER"}}'
 )
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
@@ -64,7 +63,7 @@ def _run_gh_auth_status() -> tuple[str, str | None]:
     except FileNotFoundError:
         return "", "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。"
     except subprocess.TimeoutExpired:
-        return "", "GitHub: gh auth status がタイムアウトしました。"
+        return "", "GitHub: gh auth status がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     return result.stdout + result.stderr, None
 
 
@@ -160,7 +159,7 @@ def verify(expected, project_dir: str) -> str | None:
     if current != expected:
         msg = (
             f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: gh auth switch --user {expected}"
+            f" — 切り替え: gh auth switch --hostname {host} --user {expected}"
         )
         if len(active) > 1:
             msg += (

@@ -16,10 +16,9 @@ READONLY = [
 ]
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
-    "GCP: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    '(最小例: {"gcloud": "my-project-id"}。'
+    'GCP 最小例: {"gcloud": "my-project-id"}。'
     "gcloud config get-value project で現在値を確認可。"
-    'account 併用: {"gcloud": {"project":"p","account":"me@example.com"}})'
+    'account 併用: {"gcloud": {"project":"p","account":"me@example.com"}}'
 )
 
 
@@ -35,7 +34,7 @@ def _get(key: str) -> tuple[str | None, str | None]:
     except FileNotFoundError:
         return None, "GCP: gcloud コマンドが見つかりません。"
     except subprocess.TimeoutExpired:
-        return None, f"GCP: gcloud config get-value {key} がタイムアウトしました。"
+        return None, f"GCP: gcloud config get-value {key} がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     value = result.stdout.strip()
     if not value or value == "(unset)":
         return None, None
@@ -140,7 +139,11 @@ def verify(expected, project_dir: str) -> str | None:
                 err = _check_account(account_want)
                 if err:
                     errors.append(err)
-        return "\n".join(errors) if errors else None
+        if not errors:
+            return None
+        if len(errors) == 1:
+            return errors[0]
+        return "GCP 検証エラー (複数):\n" + "\n".join(f"  - {e}" for e in errors)
 
     if not isinstance(expected, str):
         return (
