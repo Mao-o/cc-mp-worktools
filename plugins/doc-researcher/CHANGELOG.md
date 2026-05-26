@@ -7,7 +7,7 @@ All notable changes to this plugin will be documented here.
 ### SessionStart hook 追加 (5dk.7)
 
 - doc-researcher plugin 有効時に SessionStart で「WebFetch より doc-researcher スキルを優先」リマインドを注入
-- `additionalContext` JSON 形式で 1 行のみ (トークン最小化)
+- 生 stdout 形式で 1 行のみ (SessionStart では plain stdout が Claude に届く — 公式推奨。トークン最小化)
 - plugin hook のため doc-researcher 未インストール環境では発火しない
 
 ### キャッシュ TTL 既定値統一 (5dk.9)
