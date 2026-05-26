@@ -64,7 +64,8 @@ total=0
 
 while IFS= read -r key; do
   [[ -z "$key" ]] && continue
-  key="$(echo "$key" | xargs)"
+  key="${key#"${key%%[![:space:]]*}"}"
+  key="${key%"${key##*[![:space:]]}"}"
   [[ -z "$key" ]] && continue
 
   total=$((total + 1))

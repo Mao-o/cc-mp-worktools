@@ -31,7 +31,7 @@ auto-trigger の安定度は skill によって異なる (T5 検証結果):
   明記、trigger キーワード拡充 (T5)
 - README.md: skill table に auto-trigger 安定度列追加、不安定 skill に
   スラッシュコマンド案内追加
-- `.claude-plugin/plugin.json`: version `0.11.0` → **`0.12.0`**
+- `.claude-plugin/plugin.json`: version `0.11.0` → **`1.0.0`**
 
 ### Migration from 0.11.x
 
