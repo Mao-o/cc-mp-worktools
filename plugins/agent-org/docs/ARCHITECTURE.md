@@ -845,9 +845,9 @@ aware 動作の維持、YAGNI)。詳細は `skills/using-beads/SKILL.md` の
 
 ## Phase 7+ で意図的に未実装の領域
 
-- **lint script (key 命名規約の機械検証)**: `bd memories` 出力を grep して
-  prefix 違反 (例: `fix-pattern-` が無いはずの decision-keeper key) を検出する
-  script。v0.10.x incremental enhancement で検討
+- ~~lint script (key 命名規約の機械検証)~~: **v0.11.0 で実装済み**
+  (`scripts/lint-bd-keys.sh`)。`bd memories` 出力の prefix 違反と
+  slug の非 kebab-case を検出する
 - **auto-prune / TTL**: 古い learning が `bd memories` 検索結果を埋める
   実害が発生したら ADR-011 等で再検討。現状は `bd forget <key>` の手動削除
 - **`--global` (cross-project shared store)**: project 横断学習の実需要が

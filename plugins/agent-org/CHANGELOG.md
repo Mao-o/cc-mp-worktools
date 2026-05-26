@@ -20,6 +20,10 @@ v2 アーキテクチャ方針に基づき、workflow command のロジックを
   (Triggers: regression 監視, smoke check, 定期チェック 等)
 - `docs/ARCHITECTURE.md`: v0.11.0 skill 統合セクション追加
   (移行マッピング / command 残留基準 / 設計原則)
+- **`scripts/lint-bd-keys.sh`**: bd memory key の命名規約 lint。
+  `bd memories` 出力の prefix 違反 (ADR-010 の 5 prefix) と slug の
+  非 kebab-case を検出。`--fix-suggestions` で修正案を表示。
+  exit 0=OK / 1=違反あり / 2=前提条件エラー
 
 ### Deprecated
 
