@@ -163,6 +163,7 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 
 | パターン | 症状 | 対処 |
 |----------|------|------|
+| キャッシュ期限切れ | 7 日超のキャッシュ | 自動 re-fetch (既定 `--max-age 604800`) |
 | ネットワーク失敗 | fetch timeout / connection error | `--max-age 0` で cache 無視して再試行 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `/tmp/` 配下の `claude-*-llms*.txt` を削除して再実行 |
 | 結果ゼロ | `No results found` | キーワードを変えて再試行。`--source` を切り替えて code/platform 両方を確認 |

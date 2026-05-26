@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '{\"hookSpecificOutput\":{\"additionalContext\":\"doc-researcher active: Claude Code (researching-claude-docs) / AI SDK (researching-ai-sdk) / Firebase (researching-firebase) の仕様確認は WebFetch ではなく doc-researcher スキルを優先\"}}'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

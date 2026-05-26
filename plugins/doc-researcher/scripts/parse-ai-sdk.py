@@ -32,6 +32,7 @@ from _common import (
     FenceTracker,
     add_cache_dir_arg,
     add_heading_path_arg,
+    add_max_age_arg,
     die,
     die_index_out_of_range,
     extract_content,
@@ -201,17 +202,19 @@ def _default_cache_path(cache_dir: str) -> str:
     return os.path.join(cache_dir, DEFAULT_CACHE_FILENAME)
 
 
-def fetch_llms_txt(cache_path: str) -> str:
+def fetch_llms_txt(cache_path: str, *, max_age: int | None = None) -> str:
     """Return path to cached llms.txt, fetching if necessary."""
     return fetch_url(
         LLMS_TXT_URL,
         cache_path,
         user_agent=USER_AGENT,
         timeout=60,
+        max_age=max_age,
     )
 
 
-def _load_docs(file_arg: str | None, cache_dir: str) -> tuple[str, list[dict]]:
+def _load_docs(file_arg: str | None, cache_dir: str,
+               *, max_age: int | None = None) -> tuple[str, list[dict]]:
     """Load and split documents from llms.txt.
 
     Two distinct modes:
@@ -225,7 +228,7 @@ def _load_docs(file_arg: str | None, cache_dir: str) -> tuple[str, list[dict]]:
     """
     if file_arg is None:
         cache_path = _default_cache_path(cache_dir)
-        cache_path = fetch_llms_txt(cache_path)
+        cache_path = fetch_llms_txt(cache_path, max_age=max_age)
         return cache_path, split_documents(load_lines(cache_path))
 
     if not os.path.exists(file_arg):
@@ -285,7 +288,7 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
 def cmd_fetch_index(args):
     """Fetch (if needed) and print document index."""
     cache_path = _default_cache_path(args.cache_dir)
-    path = fetch_llms_txt(cache_path)
+    path = fetch_llms_txt(cache_path, max_age=args.max_age)
     lines = load_lines(path)
     docs = split_documents(lines)
 
@@ -335,7 +338,7 @@ def cmd_fetch_index(args):
 
 def cmd_sections(args):
     """List sections within a specific document."""
-    file_path, docs = _load_docs(args.file, args.cache_dir)
+    file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
@@ -360,7 +363,7 @@ def cmd_sections(args):
 
 def cmd_content(args):
     """Print content of a specific document or section."""
-    _, docs = _load_docs(args.file, args.cache_dir)
+    _, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
@@ -379,7 +382,7 @@ def cmd_content(args):
 
 def cmd_search_index(args):
     """Rank documents by keyword match (title, description, tags, headings)."""
-    file_path, docs = _load_docs(args.file, args.cache_dir)
+    file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -435,7 +438,7 @@ def cmd_search_index(args):
 
 def cmd_search_content(args):
     """Keyword search across document bodies (returns heading_path + snippets)."""
-    file_path, docs = _load_docs(args.file, args.cache_dir)
+    file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -510,7 +513,7 @@ def cmd_search(args):
     bundles both into one llms.txt file so no URL join is needed — index and
     body refer to the same doc by position.
     """
-    file_path, docs = _load_docs(args.file, args.cache_dir)
+    file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -614,6 +617,7 @@ def main():
     # fetch-index
     p_index = sub.add_parser("fetch-index", help="Fetch and print document index")
     add_cache_dir_arg(p_index, help="Directory to cache llms.txt (default: /tmp)")
+    add_max_age_arg(p_index)
     p_index.add_argument(
         "--compact", action="store_true",
         help="Print titles only in compact format",
@@ -628,6 +632,7 @@ def main():
     p_search_idx.add_argument("query", help="Space-separated keywords (AND search)")
     _add_file_arg(p_search_idx)
     add_cache_dir_arg(p_search_idx)
+    add_max_age_arg(p_search_idx)
     p_search_idx.add_argument("--limit", type=int, default=15,
                               help="Max results to show (default: 15)")
     p_search_idx.add_argument("--show-sections", action="store_true",
@@ -646,6 +651,7 @@ def main():
     )
     _add_file_arg(p_search_body)
     add_cache_dir_arg(p_search_body)
+    add_max_age_arg(p_search_body)
     p_search_body.add_argument("--limit", type=int, default=10,
                                help="Max documents to display (default: 10)")
     p_search_body.add_argument("--context", type=int, default=2,
@@ -662,6 +668,7 @@ def main():
     )
     _add_file_arg(p_sections)
     add_cache_dir_arg(p_sections)
+    add_max_age_arg(p_sections)
     p_sections.set_defaults(func=cmd_sections)
 
     # content
@@ -673,6 +680,7 @@ def main():
     add_heading_path_arg(p_content)
     _add_file_arg(p_content)
     add_cache_dir_arg(p_content)
+    add_max_age_arg(p_content)
     p_content.set_defaults(func=cmd_content)
 
     # search (smart: index rank + body drill-in)
@@ -683,6 +691,7 @@ def main():
     p_search.add_argument("query", help="Space-separated keywords (AND search)")
     _add_file_arg(p_search)
     add_cache_dir_arg(p_search)
+    add_max_age_arg(p_search)
     p_search.add_argument(
         "--top-n", type=int, default=5,
         help="Number of top candidate documents to drill into (default: 5)",

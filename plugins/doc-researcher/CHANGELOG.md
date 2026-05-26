@@ -2,6 +2,23 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.8.0] - 2026-05-26
+
+### SessionStart hook 追加 (5dk.7)
+
+- doc-researcher plugin 有効時に SessionStart で「WebFetch より doc-researcher スキルを優先」リマインドを注入
+- `additionalContext` JSON 形式で 1 行のみ (トークン最小化)
+- plugin hook のため doc-researcher 未インストール環境では発火しない
+
+### キャッシュ TTL 既定値統一 (5dk.9)
+
+- 3 スクリプト全てに `--max-age` を統一実装 (既定: 604800 秒 = 7 日)
+- `_common.py` に `DEFAULT_MAX_AGE_SECONDS` 定数 + `add_max_age_arg()` ヘルパー追加
+- `parse-ai-sdk.py` / `parse-firebase.py` に `--max-age` CLI 引数を新規追加
+- `parse-claude-docs.py` のローカル `_add_max_age_arg` を共通版に統一
+- 強制 re-fetch: `--max-age 0`
+- 3 SKILL.md に「キャッシュ期限切れ」行を追加
+
 ## [0.7.0] - 2026-05-23
 
 ### 3 script API 統一 (BREAKING)
