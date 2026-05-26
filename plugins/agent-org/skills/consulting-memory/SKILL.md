@@ -1,14 +1,15 @@
 ---
 name: consulting-memory
 description: |
-  他の subagent が蓄積した `MEMORY.md` (および project 固有 learnings) を
-  読みに行くスキル。Claude Code の subagent memory は agent 間で
-  isolation されているため、横断参照したい場合は Read tool で対象
-  MEMORY.md を明示的に取り込む必要がある。
-  Use when: 別 subagent の蓄積知識 (例: decision-keeper の ADR、
-  architect-reviewer の verdict 履歴) を現在のコンテキストに取り込みたい。
-  Triggers: consulting-memory, 他 agent の memory 参照, MEMORY.md 横断参照,
-  他 subagent の決定参照, agent memory 共有, ADR を読む
+  agent-org subagent の蓄積知識（ADR・verdict・episode）を参照するスキル。
+  subagent memory は agent 間で isolation されているため、scoped name dir
+  規約を知る本スキル経由でないと正確なパスが解決できない。
+  ADR の確認・過去の判断の参照には直接ファイル検索ではなくこのスキルを使うこと。
+  Use proactively when: ADR を確認したい、過去の判断を振り返りたい、
+  subagent の記憶を参照したい時。
+  Triggers: consulting-memory, ADR を確認, ADR を読む, 過去の判断,
+  判断履歴, 前の決定, subagent の memory, MEMORY.md 横断参照,
+  他 agent の memory 参照, agent memory 共有
 ---
 
 # Consulting Memory Skill

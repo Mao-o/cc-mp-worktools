@@ -1,15 +1,15 @@
 ---
 name: fixing-regression
 description: |
-  regression-fixer subagent を `--bg` + `/goal` で起動し、condition 達成まで
-  自律修正ループを回すスキル。foreground preflight から `--bg` 起動、完了後の
-  learnings 永続化まで skill 内で完結する (v0.11.0, v2 skill 統合)。
-  bd 未設定環境では persist を best-effort skip。
-  Use proactively when: CI failure / test failure / regression が検出された時、
-  ユーザーが「テストが落ちている」「CI が赤い」「修正して」と言った時。
-  Triggers: fixing-regression, /fix-regression, regression fix,
-  テスト失敗, CI 失敗, regression 修正, fix regression, fix CI,
-  テストが落ちている, CI が赤い, 壊れている
+  regression-fixer subagent を `--bg` + `/goal` で自律修正ループを回すスキル。
+  テスト失敗・CI 失敗・regression のいずれかが会話に出たら、手動でテストを
+  実行したり直接修正を試みたりせず、まずこのスキルを invoke すること
+  （preflight → bg agent 起動 → git push + PR 作成まで自律完走する）。
+  Use proactively when: テストが落ちている、CI が赤い、regression が
+  検出された時。
+  Triggers: fixing-regression, /fix-regression, テストが落ちている,
+  テスト失敗, CI 失敗, CI が赤い, regression, 修正して,
+  fix regression, fix CI, 壊れている, テストを直して
 ---
 
 # Fixing Regression Skill

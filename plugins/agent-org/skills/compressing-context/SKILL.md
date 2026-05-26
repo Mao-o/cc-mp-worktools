@@ -4,11 +4,10 @@ description: |
   直近の会話セグメントを構造化 episode YAML に圧縮して
   `.claude/episodes/<id>.yaml` に保存する。context-compressor subagent を
   Task ツール経由で起動する。
-  Use when: コンテキストが膨らんできて compact したいが構造化して残したい /
-  長い議論の節目を episode 化したい / 単発の調査結果を再利用可能な形で
-  蓄積したい。
+  Use proactively when: コンテキストが膨らんできて構造化して残したい /
+  長い議論の節目を episode 化したい / 調査結果を再利用可能な形で蓄積したい。
   Triggers: コンテキスト圧縮, episode に保存, /compress-context,
-  context-compressor, compressing-context
+  context-compressor, compressing-context, 会話を圧縮, episode 化
 ---
 
 # Compressing Context Skill

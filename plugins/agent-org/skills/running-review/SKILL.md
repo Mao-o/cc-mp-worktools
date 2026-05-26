@@ -1,17 +1,15 @@
 ---
 name: running-review
 description: |
-  architect-reviewer subagent を複数視点 (3-5 名) で並列に起動し、
-  PR / 設計 / 実装に対する多角的レビューを実行するスキル。
-  agent teams 機能 (experimental, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
-  で teammate を spawn する手順を提供する。verdict 集約から
-  bd approval issue 作成・dep 連携・learnings 永続化まで skill 内で
-  完結する (v0.10.1, V9)。bd 未設定環境では persist を best-effort skip。
-  Use when: PR / 設計を multi-perspective でレビューしたい、
-  approval workflow に乗せて quality gate を効かせたい時。
-  Triggers: running-review, /run-review, multi-perspective review,
-  並列レビュー, agent teams レビュー, architect-reviewer 起動,
-  reviewer spawn, 多視点レビュー
+  architect-reviewer subagent を 3-5 視点で並列起動し、多角的レビューを
+  実行するスキル。agent teams で複数 reviewer を spawn し、verdict 集約
+  から bd approval issue 作成まで一貫実行する。単独レビュー（code-review
+  skill）とは異なり、security / performance / maintainability 等の
+  専門視点を独立並列で得られる。複数視点のレビューにはこのスキルを使うこと。
+  Use proactively when: 多角的にレビューしたい、複数の観点で検証したい時。
+  Triggers: running-review, /run-review, 多視点レビュー, 並列レビュー,
+  多角的にレビュー, 複数視点でレビュー, 複数の観点でレビュー,
+  architect-reviewer 起動, agent teams レビュー, reviewer spawn
 ---
 
 # Running Review Skill

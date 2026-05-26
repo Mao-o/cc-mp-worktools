@@ -46,8 +46,9 @@ grep -l "auth" .claude/episodes/*.yaml
 トレードオフを伴う設計判断を確定した時:
 
 > 「この決定を ADR として記録して」
+> `/recording-decision`  ← 確実に起動したい場合
 
-`recording-decision` skill が auto-trigger し、decision-keeper subagent が
+`recording-decision` skill が起動し、decision-keeper subagent が
 `.claude/agent-memory/agent-org-decision-keeper/MEMORY.md` に ADR を追記する。
 ADR は immutable。方針変更時は新 ADR を追記し旧 ADR を supersede する。
 
@@ -91,8 +92,9 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 > 「テストが落ちているので修正して」
 > 「PR#42 の CI を green にして」
+> `/fixing-regression`  ← 確実に起動したい場合
 
-`fixing-regression` skill が auto-trigger し、preflight 後に
+`fixing-regression` skill が起動し、preflight 後に
 `regression-fixer` subagent を `--bg` + `/goal` で起動する。修正完了時に
 git push + PR 作成まで自律的に行う。
 
@@ -134,17 +136,20 @@ brew install beads  # Mac
 
 ## コンポーネント一覧
 
-### Skill (auto-trigger、会話から自動起動)
+### Skill (会話から自動起動 / `/skill名` でも起動可)
 
-| skill | 用途 |
-|---|---|
-| `compressing-context` | 会話を episode YAML に圧縮 |
-| `recording-decision` | 設計判断を ADR として記録 |
-| `consulting-memory` | 他 subagent の memory / bd learning を横断参照 |
-| `running-review` | 3-5 視点の並列レビュー + bd approval |
-| `fixing-regression` | regression-fixer を `--bg` + `/goal` で起動 |
-| `starting-watcher` | regression-watcher を `--bg` + `/loop` で起動 |
-| `using-beads` | bd CLI の操作規律 (reference skill) |
+| skill | 用途 | auto-trigger |
+|---|---|:---:|
+| `compressing-context` | 会話を episode YAML に圧縮 | 安定 |
+| `consulting-memory` | 他 subagent の memory / bd learning を横断参照 | 安定 |
+| `starting-watcher` | regression-watcher を `--bg` + `/loop` で起動 | 安定 |
+| `running-review` | 3-5 視点の並列レビュー + bd approval | 安定 |
+| `recording-decision` | 設計判断を ADR として記録 | `/recording-decision` 推奨 |
+| `fixing-regression` | regression-fixer を `--bg` + `/goal` で起動 | `/fixing-regression` 推奨 |
+| `using-beads` | bd CLI の操作規律 (reference skill) | — |
+
+auto-trigger が「推奨」のスキルは、Claude が自前ツール (Bash, Read 等) で
+直接対処しようとする場合がある。確実に起動したい場合はスラッシュコマンドを使う。
 
 ### Subagent
 

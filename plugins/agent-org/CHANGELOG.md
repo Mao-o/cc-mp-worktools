@@ -12,11 +12,11 @@
 - **`/start-watcher` command 削除** → `starting-watcher` skill を使用
 - **`/compress-context` command 削除** → `compressing-context` skill を使用
 
-いずれも会話で自然に依頼するだけで auto-trigger される。例:
-- 「PR#42 を security, api-design の観点でレビューして」→ running-review
-- 「テストが落ちているので修正して」→ fixing-regression
-- 「regression を監視して」→ starting-watcher
-- 「直近の議論を episode に圧縮して」→ compressing-context
+auto-trigger の安定度は skill によって異なる (T5 検証結果):
+- **安定**: compressing-context, consulting-memory, starting-watcher, running-review
+- **スラッシュコマンド推奨**: fixing-regression (`/fixing-regression`),
+  recording-decision (`/recording-decision`)
+  — Claude が Bash/Read で直接対処しようとする場合がある
 
 ### Added
 
@@ -27,17 +27,18 @@
 - README.md: Phase 番号の積み上げ構造からユースケース起点に全面リライト
 - ARCHITECTURE.md: Phase 段階的追記 (887行) から統合アーキテクチャ (278行) にリライト
 - plugin.json: description を 2 行の簡潔な説明に置換
+- 5 skill の description 強化: "Use proactively when:" 統一、固有価値の
+  明記、trigger キーワード拡充 (T5)
+- README.md: skill table に auto-trigger 安定度列追加、不安定 skill に
+  スラッシュコマンド案内追加
 - `.claude-plugin/plugin.json`: version `0.11.0` → **`0.12.0`**
 
 ### Migration from 0.11.x
 
 `/run-review` `/fix-regression` `/start-watcher` `/compress-context` を
 スクリプトや手順書で参照している場合は、対応する skill 名に読み替える。
-会話で使っていた場合は変更不要 (skill が auto-trigger する)。
-
-### v1.0.0 への残タスク
-
-T5 (auto-trigger 実機検証) 完了後に v1.0.0 bump。
+会話で使っていた場合は変更不要 (安定 skill は auto-trigger する)。
+不安定 skill はスラッシュコマンド (`/fixing-regression` 等) で確実に起動可。
 
 ## 0.11.0 (2026-05-26) — skill 統合: workflow command → skill 移行
 
