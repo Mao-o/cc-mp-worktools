@@ -47,7 +47,11 @@ if [[ ! -d "$MAIN_REPO/.beads" ]]; then
   exit 2
 fi
 
-keys_raw="$(cd "$REPO_ROOT" && bd memories 2>/dev/null || true)"
+if ! keys_raw="$(cd "$REPO_ROOT" && bd memories 2>&1)"; then
+  echo "ERROR: bd memories 実行失敗:" >&2
+  echo "$keys_raw" >&2
+  exit 2
+fi
 
 if [[ -z "$keys_raw" ]]; then
   echo "OK: bd memories が空です (key なし)"
