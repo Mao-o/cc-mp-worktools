@@ -159,7 +159,7 @@ def verify(expected, project_dir: str) -> str | None:
     if current != expected:
         msg = (
             f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: gh auth switch --user {expected}"
+            f" — 切り替え: gh auth switch --hostname {host} --user {expected}"
         )
         if len(active) > 1:
             msg += (
