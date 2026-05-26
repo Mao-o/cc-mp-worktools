@@ -654,6 +654,36 @@ class TestGitignore(BaseBuilder):
         )
         self.assertNotIn("updated:", out)
 
+    def test_comment_line_does_not_count_as_present(self):
+        self._gitignore().write_text(
+            "# .claude/verify-cloud-account/accounts.local.json\n",
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        active = [l for l in content.splitlines()
+                  if l.strip() == ".claude/verify-cloud-account/accounts.local.json"]
+        self.assertEqual(len(active), 1)
+        self.assertIn("updated:", out)
+
+    def test_negation_line_does_not_count_as_present(self):
+        self._gitignore().write_text(
+            "!.claude/verify-cloud-account/accounts.local.json\n",
+            encoding="utf-8",
+        )
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        content = self._gitignore().read_text(encoding="utf-8")
+        self.assertIn("!", content)
+        active = [l for l in content.splitlines()
+                  if l.strip() == ".claude/verify-cloud-account/accounts.local.json"]
+        self.assertEqual(len(active), 1)
+
     def test_init_commit_no_gitignore_does_not_create(self):
         self.assertFalse(self._gitignore().exists())
         code, _out, _err = self._run(

@@ -93,7 +93,7 @@ def _ensure_gitignore_entry(project_dir: str, stdout: IO[str]) -> None:
         return
     try:
         content = gitignore.read_text(encoding="utf-8")
-        if entry in content:
+        if any(line.strip() == entry for line in content.splitlines()):
             return
         if not content.endswith("\n"):
             content += "\n"
