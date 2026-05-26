@@ -1,5 +1,103 @@
 # Changelog
 
+## 1.0.0 (2026-05-27) — 会話だけで全機能が動く
+
+ユーザーは Claude との会話だけで agent-org の全機能を使える状態に到達。
+明示的な `/command` は init / diagnostic / migration のみ。
+
+### BREAKING CHANGES
+
+- **`/run-review` command 削除** → `running-review` skill を使用
+- **`/fix-regression` command 削除** → `fixing-regression` skill を使用
+- **`/start-watcher` command 削除** → `starting-watcher` skill を使用
+- **`/compress-context` command 削除** → `compressing-context` skill を使用
+
+auto-trigger の安定度は skill によって異なる (T5 検証結果):
+- **安定**: compressing-context, consulting-memory, starting-watcher, running-review
+- **スラッシュコマンド推奨**: fixing-regression (`/fixing-regression`),
+  recording-decision (`/recording-decision`)
+  — Claude が Bash/Read で直接対処しようとする場合がある
+
+### Added
+
+- `scripts/lint-bd-keys.sh`: bd memory key の命名規約 lint
+
+### Changed
+
+- README.md: Phase 番号の積み上げ構造からユースケース起点に全面リライト
+- ARCHITECTURE.md: Phase 段階的追記 (887行) から統合アーキテクチャ (278行) にリライト
+- plugin.json: description を 2 行の簡潔な説明に置換
+- 5 skill の description 強化: "Use proactively when:" 統一、固有価値の
+  明記、trigger キーワード拡充 (T5)
+- README.md: skill table に auto-trigger 安定度列追加、不安定 skill に
+  スラッシュコマンド案内追加
+- `.claude-plugin/plugin.json`: version `0.11.0` → **`1.0.0`**
+
+### Migration from 0.11.x
+
+`/run-review` `/fix-regression` `/start-watcher` `/compress-context` を
+スクリプトや手順書で参照している場合は、対応する skill 名に読み替える。
+会話で使っていた場合は変更不要 (安定 skill は auto-trigger する)。
+不安定 skill はスラッシュコマンド (`/fixing-regression` 等) で確実に起動可。
+
+## 0.11.0 (2026-05-26) — skill 統合: workflow command → skill 移行
+
+v2 アーキテクチャ方針に基づき、workflow command のロジックを skill に統合。
+ユーザーが明示的な `/command` を打たなくても Claude が会話文脈から自動起動
+できる設計に移行。V9 (v0.10.1) で `running-review` skill に統合済みの
+`/run-review` と同パターンを `/fix-regression` / `/start-watcher` /
+`/compress-context` に適用。
+
+### Added
+
+- **`fixing-regression` skill** (`skills/fixing-regression/SKILL.md`):
+  regression-fixer の foreground preflight → `--bg` + `/goal` 起動 →
+  完了後 learnings 永続化まで skill 内で完結。auto-trigger 対応
+  (Triggers: regression 修正, CI 失敗, テスト失敗 等)
+- **`starting-watcher` skill** (`skills/starting-watcher/SKILL.md`):
+  regression-watcher の foreground preflight → `--bg` + `/loop` 起動を
+  skill 内で完結。auto-trigger 対応
+  (Triggers: regression 監視, smoke check, 定期チェック 等)
+- `docs/ARCHITECTURE.md`: v0.11.0 skill 統合セクション追加
+  (移行マッピング / command 残留基準 / 設計原則)
+- **`scripts/lint-bd-keys.sh`**: bd memory key の命名規約 lint。
+  `bd memories` 出力の prefix 違反 (ADR-010 の 5 prefix) と slug の
+  非 kebab-case を検出。`--fix-suggestions` で修正案を表示。
+  exit 0=OK / 1=違反あり / 2=前提条件エラー
+
+### Deprecated
+
+- **`/fix-regression` command**: `fixing-regression` skill の thin wrapper に
+  変更。引数パースと skill 起動のみ。v2.0.0 で削除予定
+- **`/start-watcher` command**: `starting-watcher` skill の thin wrapper に
+  変更。同上
+- **`/compress-context` command**: `compressing-context` skill の thin wrapper
+  (元々 thin wrapper だったため description 更新のみ)。v2.0.0 で削除予定
+
+### Changed
+
+- `.claude-plugin/plugin.json`: version `0.10.0` → **`0.11.0`**
+
+### Design notes
+
+- **V9 パターンの踏襲**: running-review skill (v0.10.1) で確立した「skill に
+  persist 統合 → command は deprecated thin wrapper」パターンを 3 command に
+  横展開
+- **command 残留基準**: auto-trigger が不適切なもの (init / diagnostic /
+  migration) は command として残す。workflow 系は全て skill に移行
+- **auto-trigger の仕組み**: skill の `description` 内 `Triggers:` で宣言。
+  Claude が会話文脈のキーワードから自動起動を判断する (Claude Code の
+  skill auto-invocation 機能)
+- **breaking change なし**: deprecated command は thin wrapper として残すため、
+  `/fix-regression` `/start-watcher` `/compress-context` は引き続き動作する
+
+### Migration from 0.10.x
+
+変更不要。deprecated command は v2.0.0 まで thin wrapper として動作する。
+skill 経由の auto-trigger が追加されるため、ユーザーが「テストが落ちている」
+等と発言すると Claude が自動で `fixing-regression` skill を起動するように
+なる。
+
 ## 0.10.0 (2026-05-24) — Phase 7+: cross-session 学習機構を 4 subagent に展開 (ADR-010)
 
 agent-org plugin Phase 7+。v0.7.0 で `architect-reviewer` 1 経路のみ動いていた

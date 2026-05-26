@@ -1,14 +1,15 @@
 ---
 name: recording-decision
 description: |
-  設計判断・ADR (Architecture Decision Record) を構造化形式で記録するスキル。
-  decision-keeper subagent を Task ツール経由で起動し、直近の議論から
-  ADR を抽出して `.claude/agent-memory/agent-org-decision-keeper/MEMORY.md`
-  + 個別 ADR yml に追記する。
-  Use when: 設計判断を確定した、トレードオフを伴う選択をした、
-  後で「なぜそう決めたか」を参照可能にしたい時。
-  Triggers: ADR 記録, 設計判断記録, decision-keeper, recording-decision,
-  ADR を残す, 決定の記録, 方針確定の保存, architecture decision record
+  設計判断を ADR (Architecture Decision Record) として構造化記録するスキル。
+  ADR の作成を依頼されたら、調査や事前確認なしに直接このスキルを invoke する
+  こと — decision-keeper subagent が既存 ADR 確認・YAML 作成・MEMORY.md 索引
+  追記を一貫して行う。
+  Use proactively when: 設計判断を記録したい、ADR を作成したい、
+  トレードオフを伴う決定を残したい時。
+  Triggers: recording-decision, ADR 記録, ADR を作成, ADR を残す,
+  設計判断記録, 決定の記録, この判断を記録, 方針確定の保存,
+  architecture decision record, decision-keeper
 ---
 
 # Recording Decision Skill

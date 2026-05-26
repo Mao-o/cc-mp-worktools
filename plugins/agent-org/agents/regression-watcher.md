@@ -319,7 +319,7 @@ learnings_to_persist:
 
 - 修正者: `agents/regression-fixer.md` (`/fix-regression` 経由)
 - last-commit 提供元: `hooks/post-commit-trigger.sh` (PostToolUse Bash hook)
-- 起動 command: `commands/start-watcher.md`
+- 起動 skill: `skills/starting-watcher/SKILL.md`
 - bd 規律: `skills/using-beads/SKILL.md`
 - 横断参照: `skills/consulting-memory/SKILL.md`
 - 設計判断: ADR-007 (`<repo>/.beads/` repo-local 配置)

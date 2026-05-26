@@ -417,7 +417,7 @@ fix を確認し、人間判断ルートに戻す。
 ## 関連
 
 - 検出元: `agents/regression-watcher.md` (bd 上の detection issue を読む)
-- 起動 command: `commands/fix-regression.md` (foreground preflight 必須)
+- 起動 skill: `skills/fixing-regression/SKILL.md` (foreground preflight 必須)
 - bd 規律: `skills/using-beads/SKILL.md`
 - 横断参照: `skills/consulting-memory/SKILL.md`
 - 設計判断: ADR-007 (`<repo>/.beads/` repo-local 配置、git worktree-aware)

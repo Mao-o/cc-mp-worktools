@@ -301,8 +301,8 @@ bd 1.0.4 は `Warning: "types.custom" is not a recognized config key` を吐く�
 ## 関連
 
 - 初期化: `commands/org-init.md`
-- watcher 起動 preflight: `commands/start-watcher.md`
-- fixer 起動 preflight: `commands/fix-regression.md`
+- watcher 起動: `skills/starting-watcher/SKILL.md`
+- fixer 起動: `skills/fixing-regression/SKILL.md`
 - migration: `commands/migrate-to-beads.md`, `commands/migrate-from-beads.md`,
   `commands/migrate-beads-to-repo-local.md` (v0.7.x→v0.8.0 path 移行)
 - 設計判断: ADR-007 (`<repo>/.beads/` repo-local 配置採用)
