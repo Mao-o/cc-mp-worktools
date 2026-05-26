@@ -12,7 +12,8 @@ READONLY = [
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
     "kubectl: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    "(kubectl config current-context で現在のコンテキストを事前確認可)"
+    '(最小例: {"kubectl": "my-context-name"}。'
+    "kubectl config current-context で現在値を確認可)"
 )
 
 _CONTEXT_OVERRIDE_RE = re.compile(r"(?:^|\s)--context(?:=|\s+)(\S+)")

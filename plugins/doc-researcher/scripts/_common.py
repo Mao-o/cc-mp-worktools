@@ -552,11 +552,22 @@ def next_hint(subcommand: str, *args: str) -> None:
 # argparse skeleton helpers
 # ---------------------------------------------------------------------------
 
+DEFAULT_MAX_AGE_SECONDS = 604800  # 7 days
+
+
 def add_cache_dir_arg(parser, *, default: str = "/tmp", help=None) -> None:
     """Add ``--cache-dir`` to *parser*."""
     if help is None:
         help = f"Directory to cache files (default: {default})"
     parser.add_argument("--cache-dir", default=default, help=help)
+
+
+def add_max_age_arg(parser) -> None:
+    """Add ``--max-age`` to *parser* with a 7-day default."""
+    parser.add_argument(
+        "--max-age", type=int, default=DEFAULT_MAX_AGE_SECONDS,
+        help=f"Re-fetch cache if older than N seconds (default: {DEFAULT_MAX_AGE_SECONDS} = 7 days, 0 = always re-fetch)",
+    )
 
 
 def add_doc_index_arg(parser, *, help: str = "Document index (from fetch-index)") -> None:

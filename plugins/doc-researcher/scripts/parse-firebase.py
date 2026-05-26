@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
+    add_max_age_arg,
     die,
     die_index_out_of_range,
     extract_content,
@@ -97,20 +98,21 @@ def _pages_cache_dir(cache_dir: str) -> str:
     return os.path.join(cache_dir, PAGES_CACHE_SUBDIR)
 
 
-def _load_index(cache_dir: str) -> list[dict]:
+def _load_index(cache_dir: str, *, max_age: int | None = None) -> list[dict]:
     """Fetch (if needed) the llms.txt index and return parsed entries."""
-    idx_path = fetch_url(LLMS_TXT_URL, _index_cache_path(cache_dir), user_agent=USER_AGENT)
+    idx_path = fetch_url(LLMS_TXT_URL, _index_cache_path(cache_dir),
+                         user_agent=USER_AGENT, max_age=max_age)
     entries = parse_llms_index(load_lines(idx_path))
     if not entries:
         die(f"no entries parsed from {idx_path}. Format may have changed.")
     return entries
 
 
-def _fetch_page(url: str, cache_dir: str) -> str:
+def _fetch_page(url: str, cache_dir: str, *, max_age: int | None = None) -> str:
     """Fetch an individual page ``.md.txt`` on demand and return its cache path."""
     filename = _url_to_cache_filename(url)
     page_path = os.path.join(_pages_cache_dir(cache_dir), filename)
-    return fetch_url(url, page_path, user_agent=USER_AGENT)
+    return fetch_url(url, page_path, user_agent=USER_AGENT, max_age=max_age)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +190,7 @@ def _resolve_page_ref(entries: list[dict], page_ref: str) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_fetch_index(args):
-    entries = _load_index(args.cache_dir)
+    entries = _load_index(args.cache_dir, max_age=args.max_age)
     total = len(entries)
 
     offset = max(0, args.offset)
@@ -218,11 +220,11 @@ def cmd_fetch_index(args):
 
 
 def cmd_sections(args):
-    entries = _load_index(args.cache_dir)
+    entries = _load_index(args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(entries, args.page_ref)
 
     entry = entries[idx]
-    page_path = _fetch_page(entry["url"], args.cache_dir)
+    page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
     lines = load_lines(page_path)
     sections = extract_sections(lines)
 
@@ -243,11 +245,11 @@ def cmd_sections(args):
 
 
 def cmd_content(args):
-    entries = _load_index(args.cache_dir)
+    entries = _load_index(args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(entries, args.page_ref)
 
     entry = entries[idx]
-    page_path = _fetch_page(entry["url"], args.cache_dir)
+    page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
     lines = load_lines(page_path)
 
     content = extract_content(lines, args.heading_path)
@@ -262,7 +264,7 @@ def cmd_content(args):
 
 def cmd_search_index(args):
     """Rank pages by keyword against llms.txt title/description."""
-    entries = _load_index(args.cache_dir)
+    entries = _load_index(args.cache_dir, max_age=args.max_age)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -303,7 +305,7 @@ def cmd_search_content(args):
     every page is expensive). When omitted, searches across the entire index
     (warns if N is large).
     """
-    entries = _load_index(args.cache_dir)
+    entries = _load_index(args.cache_dir, max_age=args.max_age)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -330,7 +332,7 @@ def cmd_search_content(args):
 
     for idx in target_indexes:
         entry = entries[idx]
-        page_path = _fetch_page(entry["url"], args.cache_dir)
+        page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
         lines = load_lines(page_path)
 
         hits = search_content_in_body(
@@ -385,7 +387,7 @@ def cmd_search(args):
     (Firebase has no llms-full.txt; each page is a separate HTTP fetch).
     Cache hits keep repeat runs cheap.
     """
-    entries = _load_index(args.cache_dir)
+    entries = _load_index(args.cache_dir, max_age=args.max_age)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -406,7 +408,7 @@ def cmd_search(args):
 
     results = []
     for score, idx, entry in scored_entries:
-        page_path = _fetch_page(entry["url"], args.cache_dir)
+        page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
         lines = load_lines(page_path)
         body_hits = search_content_in_body(
             lines, args.query,
@@ -468,6 +470,7 @@ def main():
 
     p_index = sub.add_parser("fetch-index", help="Fetch and print page index")
     add_cache_dir_arg(p_index, default=DEFAULT_CACHE_DIR)
+    add_max_age_arg(p_index)
     p_index.add_argument(
         "--limit", type=int, default=100,
         help="Max entries to show (default: 100, use 0 for all)",
@@ -484,6 +487,7 @@ def main():
         help="Page reference: integer index, URL slug (e.g. 'vector-search'), or full URL",
     )
     add_cache_dir_arg(p_sections, default=DEFAULT_CACHE_DIR)
+    add_max_age_arg(p_sections)
     p_sections.set_defaults(func=cmd_sections)
 
     p_content = sub.add_parser("content", help="Print page/section content")
@@ -493,6 +497,7 @@ def main():
     )
     add_heading_path_arg(p_content, help="Heading path (omit for full page)")
     add_cache_dir_arg(p_content, default=DEFAULT_CACHE_DIR)
+    add_max_age_arg(p_content)
     p_content.set_defaults(func=cmd_content)
 
     # search-index
@@ -501,6 +506,7 @@ def main():
         help="Rank pages by keyword (from llms.txt title/description)",
     )
     add_cache_dir_arg(p_search_idx, default=DEFAULT_CACHE_DIR)
+    add_max_age_arg(p_search_idx)
     p_search_idx.add_argument("query", help="Space-separated keywords (AND search)")
     p_search_idx.add_argument("--limit", type=int, default=15,
                               help="Max results to show (default: 15)")
@@ -512,6 +518,7 @@ def main():
         help="Keyword search across one page or all pages (lazy fetch)",
     )
     add_cache_dir_arg(p_search_body, default=DEFAULT_CACHE_DIR)
+    add_max_age_arg(p_search_body)
     p_search_body.add_argument("query", help="Space-separated keywords (AND search)")
     p_search_body.add_argument(
         "--page-ref", default=None,
@@ -533,6 +540,7 @@ def main():
     )
     p_search.add_argument("query", help="Space-separated keywords (AND search)")
     add_cache_dir_arg(p_search, default=DEFAULT_CACHE_DIR)
+    add_max_age_arg(p_search)
     p_search.add_argument(
         "--top-n", type=int, default=5,
         help="Number of top candidate pages to fetch and search (default: 5)",

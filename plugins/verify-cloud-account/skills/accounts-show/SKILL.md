@@ -11,7 +11,9 @@ description: |
   (D4) で検証が止まった後に状況を確認したい場合。
   Triggers: "accounts.local.json を確認", "想定アカウント 現在値",
   "accounts 確認", "accounts-show", "cloud account 検証 状態",
-  "accounts.local.json diff", "/verify-cloud-account:accounts-show"
+  "accounts.local.json diff", "/verify-cloud-account:accounts-show",
+  "show cloud account status", "check accounts config",
+  "verify-cloud-account diff", "compare active accounts"
 allowed-tools:
   - Bash
   - AskUserQuestion

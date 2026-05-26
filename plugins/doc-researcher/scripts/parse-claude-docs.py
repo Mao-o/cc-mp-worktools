@@ -26,6 +26,7 @@ from _common import (
     FenceTracker,
     add_cache_dir_arg,
     add_heading_path_arg,
+    add_max_age_arg,
     build_url_to_full_index,
     die,
     die_index_out_of_range,
@@ -670,13 +671,6 @@ def _add_source_arg(parser) -> None:
     )
 
 
-def _add_max_age_arg(parser) -> None:
-    parser.add_argument(
-        "--max-age", type=int, default=None,
-        help="Re-fetch cache if older than N seconds (default: never expire)",
-    )
-
-
 def _add_file_arg(parser) -> None:
     parser.add_argument(
         "--file", default=None,
@@ -694,7 +688,7 @@ def main():
     p_index = sub.add_parser("fetch-index", help="Fetch and print page index")
     _add_source_arg(p_index)
     add_cache_dir_arg(p_index)
-    _add_max_age_arg(p_index)
+    add_max_age_arg(p_index)
     p_index.set_defaults(func=cmd_fetch_index)
 
     # sections
@@ -707,7 +701,7 @@ def main():
     _add_file_arg(p_sections)
     _add_source_arg(p_sections)
     add_cache_dir_arg(p_sections)
-    _add_max_age_arg(p_sections)
+    add_max_age_arg(p_sections)
     p_sections.set_defaults(func=cmd_sections)
 
     # content
@@ -720,7 +714,7 @@ def main():
     _add_file_arg(p_content)
     _add_source_arg(p_content)
     add_cache_dir_arg(p_content)
-    _add_max_age_arg(p_content)
+    add_max_age_arg(p_content)
     p_content.set_defaults(func=cmd_content)
 
     # search-index
@@ -730,7 +724,7 @@ def main():
     )
     _add_source_arg(p_search_idx)
     add_cache_dir_arg(p_search_idx)
-    _add_max_age_arg(p_search_idx)
+    add_max_age_arg(p_search_idx)
     p_search_idx.add_argument("query", help="Space-separated keywords (AND search)")
     p_search_idx.add_argument("--limit", type=int, default=15,
                               help="Max results to show (default: 15)")
@@ -749,7 +743,7 @@ def main():
     _add_file_arg(p_search_body)
     _add_source_arg(p_search_body)
     add_cache_dir_arg(p_search_body)
-    _add_max_age_arg(p_search_body)
+    add_max_age_arg(p_search_body)
     p_search_body.add_argument("--limit", type=int, default=10,
                                help="Max pages to display (default: 10)")
     p_search_body.add_argument("--context", type=int, default=2,
@@ -775,7 +769,7 @@ def main():
     p_search.add_argument("query", help="Space-separated keywords (AND search)")
     _add_source_arg(p_search)
     add_cache_dir_arg(p_search)
-    _add_max_age_arg(p_search)
+    add_max_age_arg(p_search)
     p_search.add_argument("--index-limit", type=int, default=5,
                           help="Max candidate pages from index (default: 5)")
     p_search.add_argument("--max-hits", type=int, default=3,

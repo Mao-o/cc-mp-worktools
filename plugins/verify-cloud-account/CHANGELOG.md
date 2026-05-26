@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.0
+
+**UX 改善**: architect-reviewer 4 視点 UX 監査の P2/P3 フィードバックを反映。
+deny/warn メッセージの具体性向上、SETUP_HINT の最小 JSON 例追加、
+deprecation warn の alert fatigue 対策。
+
+### P2 (8 件)
+
+1. **AWS deny メッセージ改善** (`services/aws.py`) — stderr 先頭行を表示、
+   切り替え手順を `AWS_PROFILE` / `aws sso login` / `aws configure` の
+   3 パターンで具体化
+2. **Firebase deny メッセージ改善** (`services/firebase.py`) — alias → project
+   逆引き一覧を表示し `firebase use <alias>` の具体例を案内
+3. **Deprecation warn 1 日 1 回制限** (`core/dispatcher.py`) — tmpdir に
+   flag ファイルを置き同一プロジェクトへの warn を 86400 秒に制限。
+   deny 内の note は制限しない
+4. **GitHub str 形式の照合改善** (`services/github.py`) — 複数 host ログイン時
+   に `github.com` を優先照合、deny にホスト名を表示、dict 形式への移行案内
+5. **SETUP_HINT に最小 JSON 例追加** (5 service files) — 全サービスの
+   SETUP_HINT に `{"<key>": "<value>"}` の最小例を追加
+6. **skipped ケースの解決手順具体化** (`skills/accounts-init/SKILL.md`) —
+   `accounts-show` での比較 → 該当キー削除 → 再実行のステップを案内
+7. **marketplace.json category** — 既に設定済みのため変更不要
+8. **Skill triggers に英語フレーズ追加** (3 SKILL.md files) — 英語環境での
+   自動ロード率を向上
+
+### P3 (1 件)
+
+- **未設定 deny メッセージ改善** (`core/dispatcher.py`) — 「全サービス不要
+  なら記述不要」の 1 行を追加し、accounts.local.json が部分記述で OK と明示
+
+### 非互換性
+
+なし。メッセージ文言の改善のみで判定ロジックの変更はない。
+
+### テスト
+
+既存 222 テスト全 green (テストケースの追加なし)。
+
 ## 0.4.0
 
 **Feature**: 親ディレクトリ遡及による `accounts.local.json` 発見。
