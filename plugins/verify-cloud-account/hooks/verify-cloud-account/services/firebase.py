@@ -17,8 +17,9 @@ READONLY = [r"^firebase\s+use\s*$"]
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
     "Firebase: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    "(firebase use で現在のプロジェクトを事前確認可。"
-    '複数 alias 運用は {"default":"proj-dev","prod":"proj-prod"} 形式も可)'
+    '(最小例: {"firebase": "my-project-id"}。'
+    "firebase use で現在値を確認可。"
+    '複数 alias: {"firebase": {"default":"proj-dev","prod":"proj-prod"}})'
 )
 
 
@@ -91,10 +92,16 @@ def verify(expected, project_dir: str) -> str | None:
         if current in valid:
             return None
         expected_display = ", ".join(sorted(set(valid)))
+        alias_list = [
+            f"  firebase use {k}  # → {v}"
+            for k, v in expected.items()
+            if isinstance(v, str) and v
+        ]
+        alias_hint = "\n".join(alias_list)
         return (
             f"Firebase プロジェクト不一致: 現在={current}, "
-            f"期待={expected_display} のいずれか"
-            f" — 切り替え: firebase use <alias>"
+            f"期待={expected_display} のいずれか\n"
+            f"切り替え:\n{alias_hint}"
         )
 
     if not isinstance(expected, str):

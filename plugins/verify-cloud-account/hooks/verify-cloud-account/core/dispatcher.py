@@ -1,9 +1,12 @@
 """コマンド → サービス振り分けと検証オーケストレーション。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import tempfile
+import time
 from pathlib import Path
 
 from core import cache, output, paths
@@ -119,6 +122,31 @@ def _deprecation_note(kind: str) -> str:
     return ""
 
 
+_DEPRECATION_WARN_TTL = 86400  # 1 日
+
+
+def _should_emit_deprecation_warn(project_dir: str) -> bool:
+    """deprecation warn を出すべきか判定する (1 日 1 回に制限)。
+
+    alert fatigue を避けるため、同一プロジェクトへの deprecation warn は
+    1 日に 1 回のみ発火する。deny メッセージ内の note は制限しない
+    (deny は実行阻止のため常に表示すべき)。
+    """
+    key = hashlib.sha256(f"deprecation-warn:{project_dir}".encode()).hexdigest()[:16]
+    flag_dir = Path(tempfile.gettempdir()) / "cc-mp-verify-cloud-account"
+    flag_path = flag_dir / f"deprecation-{key}.flag"
+    try:
+        if flag_path.exists():
+            mtime = flag_path.stat().st_mtime
+            if time.time() - mtime < _DEPRECATION_WARN_TTL:
+                return False
+        flag_dir.mkdir(parents=True, exist_ok=True)
+        flag_path.write_text("")
+    except OSError:
+        pass
+    return True
+
+
 def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     lines = ["複数のパスに accounts.local.json が存在します (曖昧さを避けるため検証を停止):"]
     for kind, path in conflicts:
@@ -156,7 +184,10 @@ def dispatch(command: str, cwd: str) -> dict | None:
     if accounts_path is None:
         hints = [getattr(svc, "SETUP_HINT", "") for svc, _ in targets]
         hint_block = "\n".join(h for h in hints if h)
-        msg = ".claude/verify-cloud-account/accounts.local.json が未設定です。"
+        msg = (
+            ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
+            "(使用するサービスのみ記述すれば OK。未記載のサービスは検証対象外)"
+        )
         if hint_block:
             msg += "\n" + hint_block
         return output.deny(msg)
@@ -221,7 +252,9 @@ def dispatch(command: str, cwd: str) -> dict | None:
     # warn は deprecation note が出るときのみ発火させる。verify 成功時は
     # ancestor_note 単独では warn を出さず silent (worktree で親採用は
     # 通常運用なので毎回通知するとノイズになる)。
-    if note:
+    # alert fatigue 防止: warn (verify 成功時) は 1 日 1 回に制限する。
+    # deny 内の note は常に表示 (実行阻止メッセージの一部のため)。
+    if note and _should_emit_deprecation_warn(project_dir):
         body = note
         if ancestor_note:
             body = ancestor_note + "\n\n" + body

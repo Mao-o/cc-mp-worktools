@@ -13,7 +13,9 @@ description: |
   を起こしたい場合。
   Triggers: "accounts.local.json を作りたい", "verify-cloud-account を設定",
   "accounts-init", "アカウント設定 初期化", "想定アカウント 追加",
-  "cloud account 検証 初期設定", "/verify-cloud-account:accounts-init"
+  "cloud account 検証 初期設定", "/verify-cloud-account:accounts-init",
+  "create accounts.local.json", "set up verify-cloud-account",
+  "initialize cloud account config", "add expected account"
 allowed-tools:
   - Bash
   - AskUserQuestion
@@ -78,9 +80,10 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
    - **unchanged** のとき: 既にコミット済み。ユーザーに「変更は不要」と
      伝えて終了。
    - **skipped** のとき: 既存値と異なる値が提案された。init は overwrite
-     しない。ユーザーに「既存値を変えたい場合は一度手動で
-     accounts.local.json をクリアするか、将来の switch サブコマンドを使う」
-     と伝えて終了。
+     しない。ユーザーに以下を案内して終了:
+     1. `/verify-cloud-account:accounts-show` で現在の設定値と CLI 値を比較
+     2. 変更が必要なら accounts.local.json の該当キーを削除してから
+        再度 accounts-init を実行 (builder が新しい値で再登録する)
 
 4. ユーザー選択に応じて:
    - 「値を表示」→ `--show-values --dry-run` で再実行:

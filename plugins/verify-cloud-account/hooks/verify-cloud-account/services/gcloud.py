@@ -17,8 +17,9 @@ READONLY = [
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
     "GCP: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    "(gcloud config get-value project で現在値を事前確認可。"
-    'account 併用は {"project":"p","account":"me@example.com"} 形式も可)'
+    '(最小例: {"gcloud": "my-project-id"}。'
+    "gcloud config get-value project で現在値を確認可。"
+    'account 併用: {"gcloud": {"project":"p","account":"me@example.com"}})'
 )
 
 

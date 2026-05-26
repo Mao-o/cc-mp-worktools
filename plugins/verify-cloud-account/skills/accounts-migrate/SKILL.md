@@ -15,7 +15,9 @@ description: |
   案内を受け取った場合。
   Triggers: "accounts.local.json 統合", "accounts-migrate",
   "複数のパスに accounts.local.json", "旧パス 移行", "fail-closed deny 統合",
-  "verify-cloud-account 3-tier lookup", "/verify-cloud-account:accounts-migrate"
+  "verify-cloud-account 3-tier lookup", "/verify-cloud-account:accounts-migrate",
+  "migrate accounts.local.json", "merge old accounts path",
+  "multiple accounts.local.json paths", "consolidate account config"
 allowed-tools:
   - Bash
   - AskUserQuestion

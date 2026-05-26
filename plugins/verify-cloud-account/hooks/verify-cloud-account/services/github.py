@@ -16,8 +16,9 @@ READONLY = [r"^gh\s+auth\s+(status|list)\b"]
 ACCOUNT_KEY = "github"
 SETUP_HINT = (
     "GitHub: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    "(gh auth status で現在のアカウントを事前確認可。"
-    'Enterprise 別指定は {"github.com":"USER_A","ghe.example.com":"USER_B"} 形式も可)'
+    '(最小例: {"github": "YOUR_USERNAME"}。'
+    "gh auth status で現在値を確認可。"
+    'GHE 別指定: {"github": {"github.com":"USER","ghe.corp.com":"USER"}})'
 )
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
@@ -148,14 +149,25 @@ def verify(expected, project_dir: str) -> str | None:
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
         )
 
-    current = next(iter(active.values()), None)
-    if current is None:
-        return "GitHub: アクティブアカウントを取得できません。gh auth login を実行してください。"
+    # str 形式では github.com を優先照合。複数 host がある場合に
+    # GHE のアカウントで誤 deny しないようにする。
+    if "github.com" in active:
+        host = "github.com"
+    else:
+        host = next(iter(active))
+    current = active[host]
 
     if current != expected:
-        return (
-            f"GitHub アカウント不一致: 現在={current}, 期待={expected}"
+        msg = (
+            f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={expected}"
             f" — 切り替え: gh auth switch --user {expected}"
         )
+        if len(active) > 1:
+            msg += (
+                "\n(複数ホストにログイン中。ホスト別に検証するには "
+                'accounts.local.json を dict 形式に変更してください: '
+                '{"github": {"github.com": "USER"}})'
+            )
+        return msg
 
     return None

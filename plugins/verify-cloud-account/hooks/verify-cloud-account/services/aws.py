@@ -8,7 +8,8 @@ READONLY = [r"^aws\s+sts\s+get-caller-identity\b"]
 ACCOUNT_KEY = "aws"
 SETUP_HINT = (
     "AWS: builder で初期化してください: /verify-cloud-account:accounts-init\n"
-    "(aws sts get-caller-identity で現在のアカウントを事前確認可)"
+    '(最小例: {"aws": "123456789012"}。'
+    "aws sts get-caller-identity --query Account で現在値を確認可)"
 )
 
 
@@ -27,7 +28,15 @@ def _run_sts_get_caller_identity() -> tuple[str | None, str | None]:
         return None, "AWS: aws sts get-caller-identity がタイムアウトしました。"
     current = result.stdout.strip()
     if not current:
-        return None, "AWS: 認証情報を取得できません。aws configure または aws sso login を実行してください。"
+        stderr_hint = result.stderr.strip().splitlines()[0] if result.stderr.strip() else ""
+        detail = f" ({stderr_hint})" if stderr_hint else ""
+        return None, (
+            f"AWS: 認証情報を取得できません{detail}。\n"
+            "切り替え手順 (環境に応じて選択):\n"
+            "  export AWS_PROFILE=<profile>   # プロファイル切り替え\n"
+            "  aws sso login                  # SSO 再ログイン\n"
+            "  aws configure                  # 認証情報の再設定"
+        )
     return current, None
 
 
@@ -55,8 +64,10 @@ def verify(expected, project_dir: str) -> str | None:
 
     if current != expected:
         return (
-            f"AWS アカウント不一致: 現在={current}, 期待={expected}"
-            f" — AWS_PROFILE を確認してください。"
+            f"AWS アカウント不一致: 現在={current}, 期待={expected}\n"
+            "切り替え手順 (環境に応じて選択):\n"
+            "  export AWS_PROFILE=<profile>   # 対象アカウントのプロファイルに切り替え\n"
+            "  aws sso login --profile <profile>  # SSO プロファイルで再認証"
         )
 
     return None
