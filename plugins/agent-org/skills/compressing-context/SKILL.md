@@ -92,4 +92,4 @@ episode:
 
 - subagent 定義: `agents/context-compressor.md`
 - 自動圧縮経路: `hooks/postcompact-episode.sh` (PostCompact hook 経由)
-- 上位 command: `commands/compress-context.md` (`/compress-context` slash command)
+- episode 検索: `.claude/episodes/*.yaml` を grep

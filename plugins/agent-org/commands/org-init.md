@@ -326,14 +326,14 @@ rmdir .claude/agent-memory/architect-reviewer 2>/dev/null || true
 
 ## 関連
 
-- Phase 1: `commands/compress-context.md`, `agents/context-compressor.md`,
+- episode: `skills/compressing-context/`, `agents/context-compressor.md`,
   `hooks/postcompact-episode.sh`
-- Phase 2: `agents/decision-keeper.md`, `skills/recording-decision/`,
+- ADR: `agents/decision-keeper.md`, `skills/recording-decision/`,
   `skills/consulting-memory/`
-- Phase 3: `agents/architect-reviewer.md`, `commands/run-review.md`,
-  `skills/running-review/`, Stop/TaskCompleted hooks
-- Phase 4: `agents/regression-watcher.md`, `agents/regression-fixer.md`,
-  `commands/start-watcher.md`, `commands/fix-regression.md`,
+- review: `agents/architect-reviewer.md`, `skills/running-review/`,
+  Stop/TaskCompleted hooks
+- regression: `agents/regression-watcher.md`, `agents/regression-fixer.md`,
+  `skills/starting-watcher/`, `skills/fixing-regression/`,
   `hooks/post-commit-trigger.sh`
 - Phase 5 (v0.6.0): `skills/using-beads/`, `commands/bd-check.md`,
   `commands/migrate-to-beads.md`, `commands/migrate-from-beads.md`,

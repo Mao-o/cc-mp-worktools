@@ -23,7 +23,7 @@ verdict (judgement) を YAML 形式で会話に返すのが役割。
   parse して **bd approval issue** (`bd create -t approval`) として記録する責務
   (v0.7.0 から bd 一本化、旧 `.claude/agent-org/approvals/<task-id>.json` は
   廃止。v0.8.0 で bd は `<repo>/.beads/` に repo-local 配置 (ADR-007)。
-  詳細は `commands/run-review.md`)
+  詳細は `skills/running-review/SKILL.md`)
 - reviewer の権限が最小化され、監査面で扱いやすい
 - **Agent Teams 経由で並列 spawn される際の write 競合回避**: Agent Teams は
   worktree 非隔離 (公式 `code.claude.com/docs/en/agents`: "Agent teams don't

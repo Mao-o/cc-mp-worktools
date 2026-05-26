@@ -128,7 +128,7 @@ fi
 |---|---|
 | `detection` | YAML schema (`observation:` / `evidence:` / `reproducible:` / `suggested_fix_perspective:` 等) |
 | `fix` | JSON schema (`schema_version` / `fix_id` / `goal_status` / `commits` / `pr_url` 等) |
-| `approval` (Phase 6, v0.7.0) | YAML schema (集約 verdict、`schema_version` / `task_id` / `target` / `aggregate_overall` / `verdicts[]` / `concerns_summary`)。status は label + priority で encode (詳細: `commands/run-review.md`) |
+| `approval` (Phase 6, v0.7.0) | YAML schema (集約 verdict、`schema_version` / `task_id` / `target` / `aggregate_overall` / `verdicts[]` / `concerns_summary`)。status は label + priority で encode (詳細: `skills/running-review/SKILL.md`) |
 | `task` (Phase 6, v0.7.0) | 任意 (title `task: <id>` + label `task:<id>` で識別、description は人間可読の補足) |
 | `episode` (Phase 8) | YAML schema (Phase 8 で確定) |
 
@@ -188,7 +188,7 @@ bd dep add <child> <parent>
 - `bd link <child> <parent>` は `bd dep add` の alias (`--type blocks` がデフォルト)
 - `bd dep relate <id1> <id2>` で bidirectional な関連 (loose link)、Phase 6/7 で使う
 - bd 1.0.4+ は `--type supersedes` 公式サポート (再 review 等で旧 approval を
-  履歴管理する用途、`commands/run-review.md` 参照)
+  履歴管理する用途、`skills/running-review/SKILL.md` 参照)
 
 ### 9. learning store の使い方 (Phase 7+、v0.10.0、ADR-010)
 

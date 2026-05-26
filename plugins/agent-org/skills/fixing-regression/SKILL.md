@@ -297,5 +297,5 @@ bd 未設定環境では persist skip し、fix 結果の通知のみ返す。
 
 - subagent: `agents/regression-fixer.md`
 - 検出元: `agents/regression-watcher.md` + `skills/starting-watcher/SKILL.md`
-- command (deprecated wrapper): `commands/fix-regression.md`
+- subagent 定義: `agents/regression-fixer.md`
 - 横断参照: `skills/consulting-memory/SKILL.md`
