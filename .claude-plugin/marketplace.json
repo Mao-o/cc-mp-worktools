@@ -85,22 +85,6 @@
         "account-verification",
         "multi-account"
       ]
-    },
-    {
-      "name": "agent-org",
-      "source": "./plugins/agent-org",
-      "description": "AI organizational engineering toolkit. Phase 1 は PostCompact hook で compact_summary を .claude/episodes/<id>.yaml に転写、context-compressor subagent (memory: project, model: haiku) で手動 episode 化を担当",
-      "category": "agents",
-      "keywords": [
-        "agents",
-        "subagents",
-        "context-compression",
-        "episodes",
-        "postcompact",
-        "hooks",
-        "organizational-engineering",
-        "memory"
-      ]
     }
   ]
 }
