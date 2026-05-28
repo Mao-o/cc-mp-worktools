@@ -19,23 +19,36 @@ from core.context import AnalysisConfig, RepoContext
 from core.fs import read_text, walk_files
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
-from core.util import collapse_space
+from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
 from renderer import render_header
+
+
+def _iter_readme_body_lines(text: str):
+    """Yield README body lines, skipping YAML frontmatter at the top."""
+    lines = text.splitlines()
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                start = idx + 1
+                break
+    for raw in lines[start:]:
+        yield raw
 
 
 def _infer_purpose(ctx: RepoContext) -> Optional[str]:
     pkg = ctx.package_json
     description = pkg.get("description")
     if isinstance(description, str) and description.strip():
-        return collapse_space(description.strip())
+        return truncate_purpose(description)
 
     for readme_name in ("README.md", "README", "readme.md"):
         path = ctx.root / readme_name
         if not path.exists():
             continue
         text = read_text(path, limit=20_000)
-        for raw in text.splitlines():
+        for raw in _iter_readme_body_lines(text):
             line = raw.strip()
             if not line:
                 continue
@@ -43,11 +56,11 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
                 line = line.lstrip("#").strip()
                 if line:
                     continue
-            if line.startswith(("```", "---", "***", "![", "[!", ">")):
+            if line.startswith(("```", "---", "***", "![", "[!", ">", "|", "<")):
                 continue
             if len(line) < 12:
                 continue
-            return collapse_space(line)
+            return truncate_purpose(line)
     return ctx.root.name
 
 

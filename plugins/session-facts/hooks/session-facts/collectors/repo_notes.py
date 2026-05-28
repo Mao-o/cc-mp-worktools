@@ -73,8 +73,24 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
         for i, lp in enumerate(lowered)
         if "/firebase/" in lp or "firebase" in lp.rsplit("/", 1)[-1]
     ]
-    if len(firebase_paths) >= 3:
-        add("firebase-related integration surface appears substantial")
+    has_firebase_config = (root / "firebase.json").exists() or (root / ".firebaserc").exists()
+    deps = ctx.all_deps
+    firebase_in_deps = (
+        "firebase" in deps
+        or "firebase-admin" in deps
+        or "firebase-functions" in deps
+        or any(name.startswith("@firebase/") for name in deps)
+    )
+    pyproject_lower = ctx.pyproject_toml.lower()
+    firebase_in_pyproject = "firebase-admin" in pyproject_lower or "firebase_admin" in pyproject_lower
+    firebase_real = has_firebase_config or firebase_in_deps or firebase_in_pyproject
+    fb_count = len(firebase_paths)
+    if firebase_real and fb_count >= 6:
+        add("firebase integration appears substantial")
+    elif firebase_real and fb_count >= 3:
+        add("firebase integration appears moderate")
+    elif firebase_real and fb_count >= 1:
+        add("firebase integration appears minimal")
 
     api_paths = [
         tracked_files[i]

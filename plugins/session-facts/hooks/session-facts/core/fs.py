@@ -27,12 +27,20 @@ def safe_iterdir(path: Path) -> List[Path]:
         return []
 
 
-def walk_files(root: Path, skip_dirs: Iterable[str], limit: int = 5000) -> List[str]:
+def walk_files(
+    root: Path,
+    skip_dirs: Iterable[str],
+    limit: int = 5000,
+    respect_subgit: bool = True,
+) -> List[str]:
     skip = set(skip_dirs)
     results: List[str] = []
     root_str = str(root)
     for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+        if respect_subgit and dirpath != root_str and ".git" in dirnames:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
         for name in filenames:
             if name.startswith("."):
                 continue
