@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from core.context import RepoContext
-from core.tree import build_dir_tree, render_tree, truncate_lines
+from core.tree import select_tree_lines
 
 
 class CwdSubtreeCollector:
@@ -33,9 +33,14 @@ class CwdSubtreeCollector:
         if not cwd_files:
             return None
 
-        depth = ctx.config.tree_depth
-        dir_tree = build_dir_tree(cwd_files, depth)
-        tree_lines = truncate_lines(render_tree(dir_tree), ctx.config.max_tree_lines)
+        cfg = ctx.config
+        tree_lines, depth = select_tree_lines(
+            cwd_files,
+            cfg.max_tree_lines,
+            min_depth=cfg.min_tree_depth,
+            max_depth=cfg.max_tree_depth,
+            fixed_depth=cfg.tree_depth,
+        )
         if not tree_lines:
             return None
 

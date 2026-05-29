@@ -5,7 +5,7 @@ from typing import List, Optional, Set
 
 from core.constants import CODE_EXTENSIONS, TEST_PATH_MARKERS
 from core.context import RepoContext, TestSnapshot
-from core.util import is_code_file, is_test_path
+from core.util import aggregate_paths, filter_to_cwd, is_code_file, is_test_path
 
 
 class TestsCollector:
@@ -17,21 +17,36 @@ class TestsCollector:
         return len(ctx.tracked_files) > 0
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
-        snapshot = _collect_test_snapshot(ctx.tracked_files)
-        ctx.results["test_snapshot"] = snapshot
-        if not snapshot:
-            return None
-        lines = [self.section_title]
-        ordered_keys = [
-            "code_files", "test_files", "test_to_code_ratio",
-            "unit_tests", "integration_tests", "e2e_tests",
-        ]
-        for key in ordered_keys:
-            if key in snapshot:
-                lines.append(f"- {key}: {snapshot[key]}")
-        for test_dir in snapshot.get("test_dirs", []):
-            lines.append(f"- test_dir: {test_dir}")
-        return "\n".join(lines) if len(lines) > 1 else None
+        repo_snapshot = _collect_test_snapshot(ctx.tracked_files)
+        ctx.results["test_snapshot"] = repo_snapshot
+
+        cwd_rel = ctx.cwd_relative
+        if not cwd_rel:
+            return _render_snapshot(self.section_title, repo_snapshot)
+
+        cwd_files = filter_to_cwd(ctx.tracked_files, cwd_rel)
+        cwd_snapshot = _collect_test_snapshot(cwd_files)
+        if not cwd_snapshot:
+            return _render_snapshot(self.section_title, repo_snapshot)
+        return _render_snapshot(
+            f"## Test Snapshot (cwd: {cwd_rel})", cwd_snapshot
+        )
+
+
+def _render_snapshot(title: str, snapshot: TestSnapshot) -> Optional[str]:
+    if not snapshot:
+        return None
+    lines = [title]
+    ordered_keys = [
+        "code_files", "test_files", "test_to_code_ratio",
+        "unit_tests", "integration_tests", "e2e_tests",
+    ]
+    for key in ordered_keys:
+        if key in snapshot:
+            lines.append(f"- {key}: {snapshot[key]}")
+    for test_dir in aggregate_paths(snapshot.get("test_dirs", [])):
+        lines.append(f"- test_dir: {test_dir}")
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def _collect_test_snapshot(tracked_files: List[str]) -> TestSnapshot:
@@ -78,7 +93,10 @@ def _collect_test_snapshot(tracked_files: List[str]) -> TestSnapshot:
     if e2e:
         snapshot["e2e_tests"] = e2e
     if test_dirs:
-        snapshot["test_dirs"] = sorted(test_dirs)[:10]
+        # Keep the raw set generous; aggregate_paths() collapses siblings to a
+        # glob pattern at render time, so truncating here would only risk
+        # dropping a whole directory shape before it can be folded.
+        snapshot["test_dirs"] = sorted(test_dirs)[:50]
     return snapshot
 
 

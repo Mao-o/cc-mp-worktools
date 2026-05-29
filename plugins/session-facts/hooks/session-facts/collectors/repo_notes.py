@@ -73,15 +73,35 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
         for i, lp in enumerate(lowered)
         if "/firebase/" in lp or "firebase" in lp.rsplit("/", 1)[-1]
     ]
-    if len(firebase_paths) >= 3:
-        add("firebase-related integration surface appears substantial")
+    has_firebase_config = (root / "firebase.json").exists() or (root / ".firebaserc").exists()
+    deps = ctx.all_deps
+    firebase_in_deps = (
+        "firebase" in deps
+        or "firebase-admin" in deps
+        or "firebase-functions" in deps
+        or any(name.startswith("@firebase/") for name in deps)
+    )
+    pyproject_lower = ctx.pyproject_toml.lower()
+    firebase_in_pyproject = "firebase-admin" in pyproject_lower or "firebase_admin" in pyproject_lower
+    firebase_real = has_firebase_config or firebase_in_deps or firebase_in_pyproject
+    fb_count = len(firebase_paths)
+    if firebase_real and fb_count >= 6:
+        add("firebase integration appears substantial")
+    elif firebase_real and fb_count >= 3:
+        add("firebase integration appears moderate")
+    elif firebase_real and fb_count >= 1:
+        add("firebase integration appears minimal")
 
     api_paths = [
         tracked_files[i]
         for i, lp in enumerate(lowered)
         if "/api/" in lp or "api" in lp.rsplit("/", 1)[-1]
     ]
-    if len(api_paths) >= 5:
+    # Raised from >= 5 to >= 20: at the old threshold this note fired on almost
+    # every repo, so it carried no signal. A note that shows up everywhere is
+    # noise (see sessionstart-injection rule). 20+ api files is genuinely
+    # api-heavy and worth flagging.
+    if len(api_paths) >= 20:
         add("api-related files are concentrated; inspect API layer early for behavior changes")
 
     snapshot = ctx.results.get("test_snapshot", {})

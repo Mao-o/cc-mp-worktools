@@ -48,26 +48,49 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 
 ```markdown
 ## Project Facts
-- purpose: cc-marketplaces
+- purpose: a monorepo of web apps and shared packages
 - repo_root: /absolute/path/to/repo
-- git_repo: false (using filesystem walk)
+- stack: typescript, next, python
+- major_dependencies: next@15.1, react@19.0, firebase@11.0
+- branch: feat/login (ahead 3, behind 1 vs origin/main)
+- recent_commits:
+  - a1b2c3d feat(auth): add login flow (8 hours ago)
+  - d4e5f6g fix(api): handle empty payload (1 day ago)
 
-## Structure (dirs only, depth=3)
-├── private/
-│   └── plugins/
-└── worktools/
-    └── plugins/
+## Structure (dirs only, depth=4)
+├── apps/web/src/
+└── packages/
+    ├── core/
+    └── ui/
 
 ## Service Entry Points
-- private/plugins/ai-game/skills/.../route.ts
+- apps/web/src/api/users/route.ts
 
 ## Test Snapshot
 - code_files: 38
 - test_files: 8
 - test_to_code_ratio: 0.21
+- test_dir: packages/*/tests
 ```
 
 各 Collector が出すセクション粒度は `--max-*` 引数で制限可能。
+
+### ツリー描画の挙動
+
+- **深さは行数に応じて自動調整** (depth 1〜5)。`--max-tree-lines` を超えない範囲で
+  最も深い depth を採用し、薄い repo では深く、巨大 repo では浅く出る。採用 depth は
+  見出しの `depth=N` に反映される
+- **子が 1 つだけの中間ディレクトリは `a/b/c/` に圧縮** して 1 行にまとめる
+- **進行情報** (`branch` / `recent_commits`) は git repo のとき自動付与。デフォルト
+  ブランチ (main/master) で upstream と差分が無いときは `branch` 行を省略する
+
+### 検出できるスタック / 依存
+
+- **JS/TS**: package.json (deps / scripts / package manager)
+- **Python**: pyproject.toml / **requirements*.txt / Pipfile / setup.cfg** の主要依存
+- **Flutter/Dart**: pubspec.yaml (`stack: flutter, dart` + firebase_core / riverpod 等)
+- **Go**: go.mod
+- **タスクランナー**: Makefile の conventional target (`make test` 等) を Likely Commands へ
 
 ### cwd != repo_root のとき (monorepo / サブプロジェクト構成)
 
@@ -78,21 +101,24 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 1. ヘッダーに `- cwd: <relative path> (subdirectory of repo_root)` 行
 2. `## Subtree (cwd: <relative path>, dirs only, depth=N)` ブロックを `## Structure` の直後に挿入
 
+subtree モードでは repo 全体の `## Structure` は **top-level ディレクトリ名のみ
+(depth=1)** に圧縮され、詳細は cwd 配下の `## Subtree` 側に寄せる (横断作業の地図と
+しての最小限を保ちつつトークンを節約)。
+
 ```markdown
 ## Project Facts
-- purpose: affiliate01
-- repo_root: /absolute/path/to/affiliate01
-- cwd: 8.fxdict (subdirectory of repo_root)
+- purpose: my-monorepo
+- repo_root: /absolute/path/to/my-monorepo
+- cwd: packages/core (subdirectory of repo_root)
 
-## Structure (dirs only, depth=3)
-├── 1.退職代行/
-├── 4.Fanza/
-├── 8.fxdict/
-└── ...
+## Structure (dirs only, depth=1)
+├── apps/
+├── packages/
+└── services/
 
-## Subtree (cwd: 8.fxdict, dirs only, depth=3)
-└── toEng/
-    └── 参考：FXAIラボ/
+## Subtree (cwd: packages/core, dirs only, depth=4)
+└── src/
+    └── domain/
 ```
 
 cwd == repo_root のときはどちらも出力されず、従来挙動と完全に一致する。
@@ -108,8 +134,10 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 |---|---|---|
 | `--root` | `Path.cwd()` | 解析対象のリポジトリ内パス (git root 自動解決) |
 | `--format` | `markdown` | `markdown` / `json` / `human` |
-| `--tree-depth` | 3 | ディレクトリツリーの深さ |
-| `--max-tree-lines` | (定数) | ツリーの最大行数 |
+| `--tree-depth` | (auto) | 固定深さを強制する override。未指定なら動的に自動選択 |
+| `--min-tree-depth` | 1 | 動的選択の下限 |
+| `--max-tree-depth` | 5 | 動的選択の上限 |
+| `--max-tree-lines` | (定数) | ツリーの最大行数 (この行数を超えない最深 depth を採用) |
 | `--max-service-entries` | (定数) | Service entry 最大数 |
 | `--max-script-entries` | (定数) | scripts セクション最大数 |
 | `--max-env-keys` | (定数) | env キー最大数 |

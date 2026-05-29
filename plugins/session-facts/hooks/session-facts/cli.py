@@ -12,30 +12,44 @@ from core.constants import (
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
-    DEFAULT_TREE_DEPTH,
+    MAX_TREE_DEPTH,
+    MIN_TREE_DEPTH,
     SKIP_DIRS,
 )
 from core.context import AnalysisConfig, RepoContext
 from core.fs import read_text, walk_files
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
-from core.util import collapse_space
+from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
 from renderer import render_header
+
+
+def _iter_readme_body_lines(text: str):
+    """Yield README body lines, skipping YAML frontmatter at the top."""
+    lines = text.splitlines()
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                start = idx + 1
+                break
+    for raw in lines[start:]:
+        yield raw
 
 
 def _infer_purpose(ctx: RepoContext) -> Optional[str]:
     pkg = ctx.package_json
     description = pkg.get("description")
     if isinstance(description, str) and description.strip():
-        return collapse_space(description.strip())
+        return truncate_purpose(description)
 
     for readme_name in ("README.md", "README", "readme.md"):
         path = ctx.root / readme_name
         if not path.exists():
             continue
         text = read_text(path, limit=20_000)
-        for raw in text.splitlines():
+        for raw in _iter_readme_body_lines(text):
             line = raw.strip()
             if not line:
                 continue
@@ -43,11 +57,11 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
                 line = line.lstrip("#").strip()
                 if line:
                     continue
-            if line.startswith(("```", "---", "***", "![", "[!", ">")):
+            if line.startswith(("```", "---", "***", "![", "[!", ">", "|", "<")):
                 continue
             if len(line) < 12:
                 continue
-            return collapse_space(line)
+            return truncate_purpose(line)
     return ctx.root.name
 
 
@@ -95,7 +109,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Path inside the git repository")
     parser.add_argument("--format", choices=("markdown", "json", "human"), default="markdown")
-    parser.add_argument("--tree-depth", type=int, default=DEFAULT_TREE_DEPTH)
+    parser.add_argument(
+        "--tree-depth",
+        type=int,
+        default=None,
+        help="Force a fixed tree depth. Omit to auto-select depth dynamically.",
+    )
+    parser.add_argument("--min-tree-depth", type=int, default=MIN_TREE_DEPTH)
+    parser.add_argument("--max-tree-depth", type=int, default=MAX_TREE_DEPTH)
     parser.add_argument("--max-tree-lines", type=int, default=DEFAULT_MAX_TREE_LINES)
     parser.add_argument("--max-service-entries", type=int, default=DEFAULT_MAX_SERVICE_ENTRIES)
     parser.add_argument("--max-script-entries", type=int, default=DEFAULT_MAX_SCRIPT_ENTRIES)
@@ -111,6 +132,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     config = AnalysisConfig(
         tree_depth=args.tree_depth,
+        min_tree_depth=args.min_tree_depth,
+        max_tree_depth=args.max_tree_depth,
         max_tree_lines=args.max_tree_lines,
         max_service_entries=args.max_service_entries,
         max_script_entries=args.max_script_entries,
