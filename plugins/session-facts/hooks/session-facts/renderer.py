@@ -30,4 +30,38 @@ def render_header(ctx: RepoContext) -> str:
     if major_deps:
         lines.append(f"- major_dependencies: {', '.join(major_deps)}")
 
+    lines.extend(_render_git_progress(ctx))
+
     return "\n".join(lines)
+
+
+def _render_git_progress(ctx: RepoContext) -> List[str]:
+    git = ctx.results.get("git_progress") or {}
+    lines: List[str] = []
+
+    branch = git.get("branch")
+    ahead = git.get("ahead", 0)
+    behind = git.get("behind", 0)
+    if branch:
+        # On the default branch with nothing diverged there is no delta worth
+        # reporting, so the branch line is omitted entirely.
+        is_default = branch in ("main", "master")
+        if not (is_default and not ahead and not behind):
+            line = f"- branch: {branch}"
+            upstream = git.get("upstream")
+            if upstream and (ahead or behind):
+                parts = []
+                if ahead:
+                    parts.append(f"ahead {ahead}")
+                if behind:
+                    parts.append(f"behind {behind}")
+                line += f" ({', '.join(parts)} vs {upstream})"
+            lines.append(line)
+
+    commits = git.get("recent_commits") or []
+    if commits:
+        lines.append("- recent_commits:")
+        for commit in commits:
+            lines.append(f"  - {commit}")
+
+    return lines

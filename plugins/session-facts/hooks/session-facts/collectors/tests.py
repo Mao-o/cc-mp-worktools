@@ -5,7 +5,7 @@ from typing import List, Optional, Set
 
 from core.constants import CODE_EXTENSIONS, TEST_PATH_MARKERS
 from core.context import RepoContext, TestSnapshot
-from core.util import filter_to_cwd, is_code_file, is_test_path
+from core.util import aggregate_paths, filter_to_cwd, is_code_file, is_test_path
 
 
 class TestsCollector:
@@ -44,7 +44,7 @@ def _render_snapshot(title: str, snapshot: TestSnapshot) -> Optional[str]:
     for key in ordered_keys:
         if key in snapshot:
             lines.append(f"- {key}: {snapshot[key]}")
-    for test_dir in snapshot.get("test_dirs", []):
+    for test_dir in aggregate_paths(snapshot.get("test_dirs", [])):
         lines.append(f"- test_dir: {test_dir}")
     return "\n".join(lines) if len(lines) > 1 else None
 
@@ -93,7 +93,10 @@ def _collect_test_snapshot(tracked_files: List[str]) -> TestSnapshot:
     if e2e:
         snapshot["e2e_tests"] = e2e
     if test_dirs:
-        snapshot["test_dirs"] = sorted(test_dirs)[:10]
+        # Keep the raw set generous; aggregate_paths() collapses siblings to a
+        # glob pattern at render time, so truncating here would only risk
+        # dropping a whole directory shape before it can be folded.
+        snapshot["test_dirs"] = sorted(test_dirs)[:50]
     return snapshot
 
 

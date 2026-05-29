@@ -15,13 +15,15 @@ core/
   constants.py  — 定数・デフォルト値
   pm.py         — パッケージマネージャ検出
   fs.py         — ファイル I/O ユーティリティ
-  git.py        — Git コマンドラッパー
-  tree.py       — ディレクトリツリー構築・描画
-  util.py       — テキスト正規化・パス判定
+  git.py        — Git コマンドラッパー（branch / ahead-behind / recent commits 含む）
+  tree.py       — ディレクトリツリー構築・描画（dynamic depth + chain 圧縮）
+  makefile.py   — Makefile target 抽出
+  util.py       — テキスト正規化・パス判定・パス集約（aggregate_paths）
 
 detectors/      — スタック検出プラグイン
 collectors/     — セクション収集プラグイン
 custom/         — ユーザー拡張プラグイン（.gitkeep）
+tests/          — unittest（python3 -m unittest discover tests）
 ```
 
 ## 実行フロー
@@ -96,8 +98,10 @@ Collector も同様の考え方で、dependencies=5 → structure=10 → ... →
 | `constants.py` | 全体で共有する定数・デフォルト値 | ロジックを含む関数 |
 | `pm.py` | パッケージマネージャ検出ロジック | PM 以外の検出 |
 | `fs.py` | ファイル読み書きの安全ラッパー | パス判定ロジック |
-| `git.py` | Git コマンド実行 | Git 結果の解釈 |
-| `util.py` | 汎用ヘルパー（テキスト処理、パス判定） | 特定ドメインのロジック |
+| `git.py` | Git コマンド実行（branch / ahead-behind / log） | Git 結果の解釈 |
+| `tree.py` | ツリー構築・描画・dynamic depth 選択 | 収集ロジック |
+| `makefile.py` | Makefile target 抽出 | scoring（scripts.py 側） |
+| `util.py` | 汎用ヘルパー（テキスト処理、パス判定、パス集約） | 特定ドメインのロジック |
 
 新しい共有ロジックが必要な場合は `core/` に専用モジュールを作る。`cli.py` にベタ書きしない。
 

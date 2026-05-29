@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import List, Sequence
 
 from core.constants import CODE_EXTENSIONS, MAX_PURPOSE_CHARS, TEST_PATH_MARKERS
 
@@ -78,3 +79,41 @@ def filter_to_cwd(tracked_files, cwd_relative):
         return list(tracked_files)
     prefix = cwd_relative + "/"
     return [p for p in tracked_files if p.startswith(prefix)]
+
+
+def aggregate_paths(paths: Sequence[str]) -> List[str]:
+    """Collapse sibling directory paths to a glob-style pattern.
+
+    Paths that share the same number of segments are folded together by
+    replacing positions whose segment value differs across the group with
+    ``*``. For example::
+
+        plugins/sensitive-files-guard/hooks/check-sensitive-files/tests
+        plugins/sensitive-files-guard/hooks/redact-sensitive-reads/tests
+        plugins/verify-cloud-account/hooks/verify-cloud-account/tests
+
+    collapses to a single ``plugins/*/hooks/*/tests`` line. A single path (or a
+    length-group with a single member) is returned verbatim — no abstraction is
+    applied when there is nothing to aggregate.
+    """
+    unique = sorted(dict.fromkeys(paths))
+    if len(unique) <= 1:
+        return unique
+
+    groups: dict = {}
+    for path in unique:
+        segs = path.split("/")
+        groups.setdefault(len(segs), []).append(segs)
+
+    out: List[str] = []
+    for length in sorted(groups):
+        group = groups[length]
+        if len(group) == 1:
+            out.append("/".join(group[0]))
+            continue
+        pattern = []
+        for i in range(length):
+            values = {segs[i] for segs in group}
+            pattern.append(next(iter(values)) if len(values) == 1 else "*")
+        out.append("/".join(pattern))
+    return out

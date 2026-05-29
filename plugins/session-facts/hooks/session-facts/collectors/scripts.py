@@ -3,8 +3,10 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
-from core.constants import SCRIPT_PRIORITY_PATTERNS
+from core.constants import MAKE_TARGET_PRIORITY_PATTERNS, SCRIPT_PRIORITY_PATTERNS
 from core.context import RepoContext
+from core.fs import read_text
+from core.makefile import extract_targets
 from core.util import collapse_space
 
 
@@ -67,6 +69,34 @@ def _detect_package_manager(ctx: RepoContext) -> Optional[str]:
     return ctx.results.get("package_manager")
 
 
+def _make_commands(ctx: RepoContext, max_items: int) -> List[str]:
+    """Surface conventional Makefile targets as ``make <target>`` commands.
+
+    Targets are scored by MAKE_TARGET_PRIORITY_PATTERNS; targets matching no
+    pattern are dropped so internal helper targets do not crowd the output.
+    Falls back to a bare ``make`` when no Makefile is readable or none of its
+    targets are conventional entry points.
+    """
+    text = ""
+    for name in ("Makefile", "makefile", "GNUmakefile"):
+        path = ctx.root / name
+        if path.exists():
+            text = read_text(path)
+            break
+    if not text:
+        return ["make"]
+
+    scored: List[Tuple[int, str]] = []
+    for target in extract_targets(text):
+        for idx, pattern in enumerate(MAKE_TARGET_PRIORITY_PATTERNS):
+            if re.search(pattern, target):
+                scored.append((idx, target))
+                break
+    scored.sort(key=lambda item: (item[0], item[1]))
+    commands = [f"make {target}" for _idx, target in scored[:max_items]]
+    return commands or ["make"]
+
+
 def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     scripts = _collect_scripts(ctx, max_items=50)
     pm = _detect_package_manager(ctx)
@@ -102,9 +132,15 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     elif pm == "composer":
         commands.append("composer install")
 
+    # Flutter/Dart toolchain
+    if "flutter" in stack:
+        commands.extend(["flutter pub get", "flutter run", "flutter test"])
+    elif "dart" in stack:
+        commands.extend(["dart pub get", "dart test"])
+
     # Stack-based additions (task runners, tools)
     if "makefile" in stack:
-        commands.append("make")
+        commands.extend(_make_commands(ctx, max_items))
     if "justfile" in stack:
         commands.append("just")
     if "taskfile" in stack:

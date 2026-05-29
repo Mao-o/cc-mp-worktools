@@ -97,7 +97,11 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
         for i, lp in enumerate(lowered)
         if "/api/" in lp or "api" in lp.rsplit("/", 1)[-1]
     ]
-    if len(api_paths) >= 5:
+    # Raised from >= 5 to >= 20: at the old threshold this note fired on almost
+    # every repo, so it carried no signal. A note that shows up everywhere is
+    # noise (see sessionstart-injection rule). 20+ api files is genuinely
+    # api-heavy and worth flagging.
+    if len(api_paths) >= 20:
         add("api-related files are concentrated; inspect API layer early for behavior changes")
 
     snapshot = ctx.results.get("test_snapshot", {})

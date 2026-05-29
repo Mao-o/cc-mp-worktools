@@ -12,7 +12,8 @@ from core.constants import (
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
-    DEFAULT_TREE_DEPTH,
+    MAX_TREE_DEPTH,
+    MIN_TREE_DEPTH,
     SKIP_DIRS,
 )
 from core.context import AnalysisConfig, RepoContext
@@ -108,7 +109,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Path inside the git repository")
     parser.add_argument("--format", choices=("markdown", "json", "human"), default="markdown")
-    parser.add_argument("--tree-depth", type=int, default=DEFAULT_TREE_DEPTH)
+    parser.add_argument(
+        "--tree-depth",
+        type=int,
+        default=None,
+        help="Force a fixed tree depth. Omit to auto-select depth dynamically.",
+    )
+    parser.add_argument("--min-tree-depth", type=int, default=MIN_TREE_DEPTH)
+    parser.add_argument("--max-tree-depth", type=int, default=MAX_TREE_DEPTH)
     parser.add_argument("--max-tree-lines", type=int, default=DEFAULT_MAX_TREE_LINES)
     parser.add_argument("--max-service-entries", type=int, default=DEFAULT_MAX_SERVICE_ENTRIES)
     parser.add_argument("--max-script-entries", type=int, default=DEFAULT_MAX_SCRIPT_ENTRIES)
@@ -124,6 +132,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     config = AnalysisConfig(
         tree_depth=args.tree_depth,
+        min_tree_depth=args.min_tree_depth,
+        max_tree_depth=args.max_tree_depth,
         max_tree_lines=args.max_tree_lines,
         max_service_entries=args.max_service_entries,
         max_script_entries=args.max_script_entries,

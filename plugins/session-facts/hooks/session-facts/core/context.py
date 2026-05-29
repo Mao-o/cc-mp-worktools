@@ -18,7 +18,8 @@ from .constants import (
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
-    DEFAULT_TREE_DEPTH,
+    MAX_TREE_DEPTH,
+    MIN_TREE_DEPTH,
 )
 
 
@@ -42,7 +43,11 @@ class ResultsDict(TypedDict, total=False):
 
 @dataclass
 class AnalysisConfig:
-    tree_depth: int = DEFAULT_TREE_DEPTH
+    # tree_depth is an optional fixed-depth override; None enables the
+    # dynamic-depth search bounded by [min_tree_depth, max_tree_depth].
+    tree_depth: Optional[int] = None
+    min_tree_depth: int = MIN_TREE_DEPTH
+    max_tree_depth: int = MAX_TREE_DEPTH
     max_tree_lines: int = DEFAULT_MAX_TREE_LINES
     max_service_entries: int = DEFAULT_MAX_SERVICE_ENTRIES
     max_script_entries: int = DEFAULT_MAX_SCRIPT_ENTRIES

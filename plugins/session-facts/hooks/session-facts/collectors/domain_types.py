@@ -28,37 +28,75 @@ class DomainTypesCollector:
         return "\n".join(lines)
 
 
+# Path segments that tend to hold domain concepts. Broadened beyond the
+# original domain/model/entity/types set so repos that keep their types under
+# repositories/ services/ schemas/ dto/ are no longer a dead spot (#10).
+_DOMAIN_PATH_TOKENS = (
+    "/domain/", "/domains/", "/model/", "/models/",
+    "/entity/", "/entities/", "/types/",
+    "/repositories/", "/repository/", "/services/", "/service/",
+    "/schemas/", "/schema/", "/dto/", "/dtos/",
+)
+
+# Exact type names that are structural plumbing, not domain concepts.
+_STOP_NAMES = {
+    "Props", "State", "Config", "Options", "Params", "Request", "Response",
+    "Input", "Output", "Schema", "Dto", "Meta", "Result", "Context",
+    "Builder", "Factory", "Handler", "Manager", "Validator",
+}
+
+# Names ending in these suffixes are infrastructure (UserService, CaseRepository)
+# rather than the domain object itself; surfaced from the broadened service/
+# repository dirs they would be noise.
+_INFRA_SUFFIXES = (
+    "Repository", "Service", "Controller", "Handler", "Manager", "Factory",
+    "Builder", "Validator", "Middleware", "Serializer", "Mapper", "Module",
+    "Provider", "Resolver", "Interceptor",
+)
+
+_TYPE_PATTERN = re.compile(
+    r'\b(?:export\s+)?(?:interface|type|class|enum)\s+([A-Z][A-Za-z0-9_]*)\b'
+)
+
+# A domain type section only earns its place when several concepts show up.
+_MIN_DOMAIN_TYPES = 5
+
+
+def _is_infra_name(name: str) -> bool:
+    return any(name != suffix and name.endswith(suffix) for suffix in _INFRA_SUFFIXES)
+
+
 def _maybe_collect_domain_types(ctx: RepoContext, max_items: int) -> List[Dict[str, str]]:
     candidate_paths = [
         p
         for p in ctx.tracked_files
         if Path(p).suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs"}
-        and any(
-            token in f"/{p.lower()}"
-            for token in ("/domain/", "/domains/", "/model/", "/models/", "/entity/", "/entities/", "/types/")
-        )
+        and any(token in f"/{p.lower()}" for token in _DOMAIN_PATH_TOKENS)
         and not is_test_path(p)
     ]
-    if len(candidate_paths) < 3:
+    if not candidate_paths:
         return []
 
-    stop_names = {
-        "Props", "State", "Config", "Options", "Params", "Request", "Response",
-        "Input", "Output", "Schema", "Dto", "Meta", "Result", "Context",
-    }
-    pattern = re.compile(r'\b(?:export\s+)?(?:interface|type|class|enum)\s+([A-Z][A-Za-z0-9_]*)\b')
     items: List[Dict[str, str]] = []
     seen: Set[str] = set()
     for rel in candidate_paths:
-        text = read_text(ctx.root / rel, limit=20_000)
-        for match in pattern.finditer(text):
+        # Scan only the first 200 lines: type declarations live near the top,
+        # and this bounds work on large files.
+        text = "\n".join(read_text(ctx.root / rel, limit=40_000).splitlines()[:200])
+        for match in _TYPE_PATTERN.finditer(text):
             name = match.group(1)
-            if name in stop_names or name in seen:
+            if name in _STOP_NAMES or name in seen or _is_infra_name(name):
                 continue
             items.append({"name": name, "path": rel})
             seen.add(name)
             if len(items) >= max_items:
-                return items
+                break
+        if len(items) >= max_items:
+            break
+
+    # Require a meaningful cluster of concepts to avoid false positives.
+    if len(items) < _MIN_DOMAIN_TYPES:
+        return []
     return items
 
 
