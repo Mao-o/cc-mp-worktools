@@ -29,9 +29,11 @@
 ### P2: 言語サポート拡張
 
 6. **Flutter/Dart 対応** (`detectors/flutter.py` 新規, `core/constants.py`,
-   `collectors/dependencies.py`, `collectors/scripts.py`) — pubspec.yaml 検出で
-   `stack: flutter, dart`、`.dart` を CODE_EXTENSIONS に追加 (Service Entry Points /
-   Test Snapshot に反映)、pubspec の主要依存 (firebase_core / riverpod / dio 等) を
+   `collectors/dependencies.py`, `collectors/scripts.py`) — tracked な
+   pubspec.yaml 検出 (monorepo の `apps/<name>/pubspec.yaml` 等、repo root 直下
+   以外も対象) で `stack: flutter, dart`、`.dart` を CODE_EXTENSIONS に追加
+   (Service Entry Points / Test Snapshot に反映)、pubspec の主要依存
+   (firebase_core / riverpod / dio 等) を
    major_dependencies に、`flutter pub get` / `flutter run` / `flutter test` を
    Likely Commands に追加。
 7. **Python requirements/Pipfile/setup.cfg の依存取得** (`collectors/dependencies.py`) —
