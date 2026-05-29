@@ -77,6 +77,10 @@ def _maybe_collect_domain_types(ctx: RepoContext, max_items: int) -> List[Dict[s
     if not candidate_paths:
         return []
 
+    # Collect enough to both fill the requested cap and evaluate the cluster
+    # gate: when --max-domain-types is below the gate we still need
+    # _MIN_DOMAIN_TYPES candidates to decide whether a real cluster exists.
+    collect_target = max(max_items, _MIN_DOMAIN_TYPES)
     items: List[Dict[str, str]] = []
     seen: Set[str] = set()
     for rel in candidate_paths:
@@ -89,15 +93,17 @@ def _maybe_collect_domain_types(ctx: RepoContext, max_items: int) -> List[Dict[s
                 continue
             items.append({"name": name, "path": rel})
             seen.add(name)
-            if len(items) >= max_items:
+            if len(items) >= collect_target:
                 break
-        if len(items) >= max_items:
+        if len(items) >= collect_target:
             break
 
-    # Require a meaningful cluster of concepts to avoid false positives.
+    # Require a meaningful cluster of concepts to avoid false positives. The
+    # gate uses the pre-truncation count, so a low --max-domain-types cap still
+    # surfaces types when the repo genuinely has a cluster.
     if len(items) < _MIN_DOMAIN_TYPES:
         return []
-    return items
+    return items[:max_items]
 
 
 def register():

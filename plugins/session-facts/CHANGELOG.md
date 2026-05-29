@@ -55,7 +55,9 @@
     対象パスに `/repositories/` `/services/` `/schemas/` `/dto/` 等を追加、
     走査をファイル先頭 200 行に限定、stop_names 拡張 + infra suffix
     (`*Repository` / `*Service` 等) 除外、「unique 型名 5 個以上」を表示条件に
-    追加してノイズを抑制。
+    追加してノイズを抑制。クラスタ判定は打ち切り前の件数で行うため、
+    `--max-domain-types` を 5 未満にしても (リポジトリが実際に 5 型以上持つなら)
+    型が表示される。
 
 ### その他
 
