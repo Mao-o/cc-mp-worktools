@@ -3,7 +3,7 @@ name: researching-firebase
 description: |
   Firebase 公式ドキュメント調査スキル。firebase.google.com/docs/llms.txt を段階的に読み込み、
   Firestore, Authentication, Cloud Functions, Hosting, FCM, Vertex AI in Firebase などの
-  各プロダクトの API 仕様・設定方法・コード例を調査する。独立コンテキストで実行されメインセッションを消費しない。
+  各プロダクトの API 仕様・設定方法・コード例を調査する。Skill ツールで起動し、メインの会話コンテキストを消費しない。
   Firebase の仕様確認には WebFetch ではなくこのスキルを使う（要約モデル経由ではないため field の抜け落とし・幻覚が起きない）。
   Use proactively when implementing Firebase features or needing Firebase documentation.
   Use when implementing or debugging Firebase features such as Firestore queries, Auth flows,

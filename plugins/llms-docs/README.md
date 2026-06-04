@@ -1,4 +1,4 @@
-# doc-researcher
+# llms-docs
 
 Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公式ドキュメントを `llms.txt` 経由で段階的に調査するスキル集。
 全文読み込みを避け、**キーワード検索 → セクション特定 → コンテンツ取得**の順で必要な部分だけを取得する。
@@ -36,7 +36,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 
 リポジトリルートから:
 ```bash
-claude --plugin-dir ./plugins/doc-researcher
+claude --plugin-dir ./plugins/llms-docs
 ```
 
 スクリプト単体テスト:
@@ -44,23 +44,23 @@ claude --plugin-dir ./plugins/doc-researcher
 # python3 <script> の形式で呼び出す（直接実行 ./script.py は非対応）
 
 # search (推奨入口: 候補絞り込み + 本文 hits を 1 コマンド)
-python3 plugins/doc-researcher/scripts/parse-claude-docs.py search "hook matcher"
-python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search "streamText onFinish"
-python3 plugins/doc-researcher/scripts/parse-firebase.py search "Firestore query limit"
+python3 plugins/llms-docs/scripts/parse-claude-docs.py search "hook matcher"
+python3 plugins/llms-docs/scripts/parse-ai-sdk.py search "streamText onFinish"
+python3 plugins/llms-docs/scripts/parse-firebase.py search "Firestore query limit"
 
 # search-index (候補だけ取得したいとき; 軽量 llms.txt ベース)
-python3 plugins/doc-researcher/scripts/parse-claude-docs.py search-index "hook matcher"
-python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search-index "streamText onFinish"
-python3 plugins/doc-researcher/scripts/parse-firebase.py search-index "Firestore query limit"
+python3 plugins/llms-docs/scripts/parse-claude-docs.py search-index "hook matcher"
+python3 plugins/llms-docs/scripts/parse-ai-sdk.py search-index "streamText onFinish"
+python3 plugins/llms-docs/scripts/parse-firebase.py search-index "Firestore query limit"
 
 # search-content (特定ページ内だけ本文検索)
-python3 plugins/doc-researcher/scripts/parse-claude-docs.py search-content "matcher PreToolUse" --page-ref hooks
-python3 plugins/doc-researcher/scripts/parse-ai-sdk.py search-content "useChat onFinish" --page-ref 153
-python3 plugins/doc-researcher/scripts/parse-firebase.py search-content "orderBy limit" --page-ref 2972
+python3 plugins/llms-docs/scripts/parse-claude-docs.py search-content "matcher PreToolUse" --page-ref hooks
+python3 plugins/llms-docs/scripts/parse-ai-sdk.py search-content "useChat onFinish" --page-ref 153
+python3 plugins/llms-docs/scripts/parse-firebase.py search-content "orderBy limit" --page-ref 2972
 
 # fetch-index (フォールバック)
-python3 plugins/doc-researcher/scripts/parse-claude-docs.py fetch-index
-python3 plugins/doc-researcher/scripts/parse-firebase.py fetch-index --limit 10
+python3 plugins/llms-docs/scripts/parse-claude-docs.py fetch-index
+python3 plugins/llms-docs/scripts/parse-firebase.py fetch-index --limit 10
 ```
 
 ## キャッシュ

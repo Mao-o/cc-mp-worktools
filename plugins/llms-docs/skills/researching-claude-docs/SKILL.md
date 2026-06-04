@@ -3,7 +3,7 @@ name: researching-claude-docs
 description: |
   Claude Code (code.claude.com) / Claude Developer Platform (platform.claude.com)
   公式ドキュメントから hook schema、subagent frontmatter、plugin manifest、
-  slash command 仕様等を verbatim で返す。独立コンテキストで実行されメインセッションを消費しない。
+  slash command 仕様等を verbatim で返す。Skill ツールで起動し、メインの会話コンテキストを消費しない。
   Claude Code / Anthropic API の仕様確認には WebFetch ではなくこのスキルを使う（要約モデル経由ではないため field の抜け落とし・幻覚が起きない）。
   Use proactively when implementing or debugging Claude Code features or needing Claude Code / Anthropic API documentation.
   Use when implementing or debugging Claude Code features such as hooks, subagents, plugin manifest, slash commands, MCP servers, settings.json, permissions, or any code.claude.com / platform.claude.com API.

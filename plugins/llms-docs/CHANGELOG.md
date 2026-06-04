@@ -2,6 +2,37 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.9.0] - 2026-06-05
+
+### plugin rename: `doc-researcher` → `llms-docs` (BREAKING)
+
+`context: fork` の skill が `<plugin>:<skill>` 完全修飾名 + description の
+「独立コンテキストで実行され」表現により、**Skill ツールではなく Agent ツールの
+`subagent_type` として誤呼び出し**される問題を解消した
+(`Agent type 'doc-researcher:researching-claude-docs' not found`)。
+
+- plugin 名 `doc-researcher` → `llms-docs` に変更。"doc-research**er**" の `-er`
+  語尾が agent (researcher) を連想させていたのを除去
+- ディレクトリ `plugins/doc-researcher/` → `plugins/llms-docs/` (`git mv`)
+- skill 名 (`researching-claude-docs` / `researching-ai-sdk` /
+  `researching-firebase`) は**動名詞命名のため維持** (Anthropic skill 命名推奨に従う。
+  外部 rule の table 追従も不要)
+- 3 SKILL.md の description「独立コンテキストで実行されメインセッションを消費しない」
+  → 「Skill ツールで起動し、メインの会話コンテキストを消費しない」に変更
+  (subagent 連想を排し、Skill ツール起動を明示)
+- `marketplace.json` の entry name / source、SessionStart hook メッセージを追従
+- `scripts/` は `${CLAUDE_PLUGIN_ROOT}` 経由参照のため動作影響なし
+- `context: fork` + `model: sonnet` の設計 (subagent fork + Sonnet) は維持
+
+#### 移行 (利用者向け)
+
+旧名でインストール済みの場合は再インストールが必要:
+
+```
+/plugin uninstall doc-researcher@mao-worktools
+/plugin install llms-docs@mao-worktools
+```
+
 ## [0.8.0] - 2026-05-26
 
 ### SessionStart hook 追加 (5dk.7)

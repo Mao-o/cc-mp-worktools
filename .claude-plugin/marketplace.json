@@ -8,8 +8,8 @@
   },
   "plugins": [
     {
-      "name": "doc-researcher",
-      "source": "./plugins/doc-researcher",
+      "name": "llms-docs",
+      "source": "./plugins/llms-docs",
       "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
       "category": "research",
       "keywords": [
