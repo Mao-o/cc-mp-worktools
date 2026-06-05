@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.11.1] - 2026-06-06
+
+### researching-claude-docs: paths あり skill 向け description ガイドラインに準拠
+
+`paths` 指定がある skill では where (path 条件) が paths field に外出しできる
+ため、`description` のトークンを「**何をする** (action) + **task 文脈での
+トリガー語** (when)」に再配分するのが推奨。これに合わせて frontmatter を
+ブラッシュアップ。
+
+- `description` を**動詞先頭**に変更:
+  `Fetch verbatim sections from Claude Code (code.claude.com) and Claude
+   Developer Platform (platform.claude.com) 公式 docs — ...`
+  (旧: 名詞列「Claude Code … 公式ドキュメントから … 取得する」)
+- `when_to_use` の action verb を強化:
+  旧 `implementing or debugging` → 新 `implementing, debugging,
+  configuring, or reviewing`。`Skills/AgentSkill` を 1 トークンに統合
+- Triggers から description で既出 / ユーザー prompt に出にくい host 系を削除:
+  `"Claude Code ドキュメント"`, `"code.claude.com"`, `"platform.claude.com"`
+- 合算 char 数: 774 → 673 chars (1,536 cap headroom 863)
+
+SKILL.md metadata version: `3.2.0` → `3.3.0` (Skill 自発 invoke 判定材料が
+変わるため minor bump)
+
 ## [0.11.0] - 2026-06-05
 
 ### researching-claude-docs: 3 つの機能追加

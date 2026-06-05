@@ -1,6 +1,6 @@
 {
   "name": "llms-docs",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Progressive document loaders for Claude, AI SDK, and Firebase official docs via llms.txt",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",

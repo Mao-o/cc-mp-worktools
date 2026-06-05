@@ -1,20 +1,18 @@
 ---
 name: researching-claude-docs
 description: |
-  Claude Code (code.claude.com) / Claude Developer Platform (platform.claude.com)
-  公式ドキュメントから hook schema、subagent frontmatter、plugin manifest、
-  Skill 仕様、slash command 仕様等を verbatim で取得する。llms.txt /
-  llms-full.txt を段階的に grep するため、WebFetch の要約モデル経由のような
-  field 欠落・幻覚が起きない。
+  Fetch verbatim sections from Claude Code (code.claude.com) and Claude
+  Developer Platform (platform.claude.com) 公式 docs — llms.txt /
+  llms-full.txt を段階的に grep し、WebFetch の要約モデル経由のような
+  field 欠落・幻覚を回避する。
 when_to_use: |
-  Use proactively before answering Claude Code / Anthropic API の仕様質問。
-  Use when implementing or debugging hooks, subagents, plugin manifest,
-  slash commands, MCP servers, settings.json, permissions, Skills, or any
-  code.claude.com / platform.claude.com API.
+  Use when implementing, debugging, configuring, or reviewing Claude Code
+  features (hooks, subagents, plugin manifest, slash commands, MCP servers,
+  settings.json, permissions, Skills/AgentSkill) or Anthropic API specs.
+  Use proactively before answering spec questions about the above.
   Triggers: "Claude Code", "AgentSkill", "Skill", "hook schema", "subagent",
   "plugin manifest", "slash command", "settings.json", "permission", "MCP",
-  "Anthropic API", "Claude Code ドキュメント", "code.claude.com",
-  "platform.claude.com", "researching-claude-docs"
+  "Anthropic API", "researching-claude-docs"
 context: fork
 model: sonnet
 allowed-tools:
@@ -32,7 +30,7 @@ paths:
   - "**/hooks.json"
 metadata:
   author: mao
-  version: "3.2.0"
+  version: "3.3.0"
 ---
 
 # Claude ドキュメント Progressive Loader
