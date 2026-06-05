@@ -478,10 +478,20 @@ def search_content_in_body(body_lines, query: str, *,
     # Rank: keyword coverage desc, hit density desc, position asc
     results.sort(key=lambda r: (-len(r["matched_keywords"]), -r["hit_count"], r["line_offset"]))
 
-    if max_matches_per_doc > 0:
+    overflow_sections: list = []
+    if max_matches_per_doc > 0 and len(results) > max_matches_per_doc:
+        overflow_sections = [
+            {"heading_path": r["heading_path"], "hit_count": r["hit_count"]}
+            for r in results[max_matches_per_doc:]
+        ]
         results = results[:max_matches_per_doc]
 
-    return {"total_matches": total_matches, "results": results, "match_mode": match_mode}
+    return {
+        "total_matches": total_matches,
+        "results": results,
+        "match_mode": match_mode,
+        "overflow_sections": overflow_sections,
+    }
 
 
 # ---------------------------------------------------------------------------

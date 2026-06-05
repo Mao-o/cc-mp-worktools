@@ -423,6 +423,143 @@ def cmd_sections(args):
     next_hint("content", str(idx), '"<heading_path>"', *_source_hint_args(args))
 
 
+_DOC_LINK_RE = re.compile(r'\((https?://[^\s)]+|/[^\s)]+)\)')
+
+
+def _build_path_to_idx(docs: list[dict]) -> dict:
+    """Map URL path (no host) → doc idx, with ``/docs/en/...`` ↔ ``/en/...`` aliasing.
+
+    docs.* often link to siblings with relative paths like ``/en/skills`` or
+    ``/docs/en/skills`` — both forms point at the same page. We index every
+    page under both forms so either style of in-body link can be resolved.
+    """
+    out: dict = {}
+    for i, d in enumerate(docs):
+        url = normalize_doc_url(d.get("source_url", ""))
+        if not url:
+            continue
+        m = re.match(r"https?://[^/]+(/.*)$", url)
+        if not m:
+            continue
+        path = m.group(1)
+        out[path] = i
+        if path.startswith("/docs/"):
+            out[path[len("/docs"):]] = i
+        elif path.startswith("/en/"):
+            out["/docs" + path] = i
+    return out
+
+
+def _resolve_link_to_idx(raw_url: str, url_to_idx: dict, path_to_idx: dict) -> int | None:
+    """Return the doc idx a markdown link points to, or None if not a known doc."""
+    url = raw_url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if url.endswith(".md"):
+        url = url[:-3]
+    if not url:
+        return None
+    if url.startswith(("http://", "https://")):
+        return url_to_idx.get(url)
+    if url.startswith("/"):
+        return path_to_idx.get(url)
+    return None
+
+
+def _annotate_doc_links(content: str, url_to_idx: dict, path_to_idx: dict,
+                         self_idx: int) -> str:
+    """Insert ``→ [doc_idx N]`` after Markdown links that point to a known doc.
+
+    Skips code fences and Markdown table rows so we don't break formatting.
+    Links to the current page (``self_idx``) and to URLs not in our maps
+    are left untouched.
+    """
+    if not url_to_idx and not path_to_idx:
+        return content
+    lines = content.split("\n")
+    fence = FenceTracker()
+    out: list[str] = []
+    for line in lines:
+        was_in_fence = fence.in_fence
+        fence.update(line)
+        if was_in_fence or fence.in_fence:
+            out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            out.append(line)
+            continue
+
+        def _repl(m: re.Match) -> str:
+            idx = _resolve_link_to_idx(m.group(1), url_to_idx, path_to_idx)
+            if idx is None or idx == self_idx:
+                return m.group(0)
+            return f"{m.group(0)} → [doc_idx {idx}]"
+
+        out.append(_DOC_LINK_RE.sub(_repl, line))
+    return "\n".join(out)
+
+
+def _print_subsection_hints(doc: dict, idx: int, heading_path: str | None,
+                             source_args: tuple) -> None:
+    """Print direct child sections of *heading_path* (or top-level if None)
+    as a hint block after the content. Lets the caller drill down further
+    without re-running ``sections``.
+    """
+    sections = extract_sections(doc["body_lines"])
+    if not sections:
+        return
+
+    if heading_path is None:
+        target_level = 2
+        children = [s for s in sections if s["level"] == target_level]
+        label = "Top-level sections"
+    else:
+        target = None
+        hp_lower = heading_path.lower()
+        for s in sections:
+            if s["heading_path"] == heading_path or s["title"] == heading_path:
+                target = s
+                break
+        if target is None:
+            for s in sections:
+                if hp_lower in s["heading_path"].lower() or hp_lower in s["title"].lower():
+                    target = s
+                    break
+        if target is None:
+            return
+        target_idx = sections.index(target)
+        # Block extent = up to the next section at same or higher (smaller-number)
+        # level. ``target.line_end`` only spans until the immediate next heading,
+        # which would stop at the first child and miss the rest of the block.
+        block_end = len(doc["body_lines"])
+        for s in sections[target_idx + 1:]:
+            if s["level"] <= target["level"]:
+                block_end = s["line_start"]
+                break
+        child_level = target["level"] + 1
+        children = [
+            s for s in sections[target_idx + 1:]
+            if s["line_start"] < block_end and s["level"] == child_level
+        ]
+        label = f"Subsections of '{target['heading_path']}'"
+
+    if not children:
+        return
+
+    print()
+    print(f"--- {label} ({len(children)}) ---")
+    for s in children:
+        code_marker = " [code]" if s["has_code_blocks"] else ""
+        print(f"  - {s['heading_path']}{code_marker}")
+    print()
+    src_suffix = ""
+    if source_args:
+        src_suffix = " " + " ".join(source_args)
+    print(
+        f"Next: parse-claude-docs.py content {idx} "
+        f'"<heading_path from above>"{src_suffix}'
+    )
+
+
 def cmd_content(args):
     """Print content of a specific page or section."""
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
@@ -433,12 +570,22 @@ def cmd_content(args):
     doc = docs[idx]
     content = extract_content(doc["body_lines"], args.heading_path)
 
+    if not args.no_link_annotations:
+        url_to_idx = build_url_to_full_index(docs)
+        path_to_idx = _build_path_to_idx(docs)
+        content = _annotate_doc_links(content, url_to_idx, path_to_idx, self_idx=idx)
+
     print_metadata_header(
         doc["title"],
         source=doc["source_url"] or None,
         heading_path=args.heading_path,
     )
     print(content, end="")
+
+    if not args.no_subsection_hints:
+        _print_subsection_hints(
+            doc, idx, args.heading_path, _source_hint_args(args)
+        )
 
 
 def cmd_search_index(args):
@@ -539,6 +686,12 @@ def cmd_search_content(args):
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
             print()
+        overflow = hits.get("overflow_sections", [])
+        if overflow:
+            print(f"    Other sections with hits (not shown):")
+            for s in overflow:
+                print(f"      - {s['heading_path']}  (x{s['hit_count']})")
+            print()
         print()
 
     if total_hits == 0:
@@ -551,16 +704,14 @@ def cmd_search_content(args):
     next_hint("content", "<doc_index>", '"<heading_path>"', *_source_hint_args(args))
 
 
-def cmd_search(args):
-    """Smart search: rank pages via llms.txt and drill into bodies via llms-full.txt.
+def _search_one_source(args, source_key: str) -> list[dict]:
+    """Run the smart-search pipeline against a single source.
 
-    Pages are joined across the two indexes by their normalised ``source_url``
-    so the doc_idx returned here is always valid for ``content`` / ``sections``.
+    Returns a list of result dicts ready for display, with the source key
+    attached. The output formatting is left to ``cmd_search`` so the multi-
+    source mode can group results consistently.
     """
-    src = _get_source(args)
-
-    if not args.query.strip():
-        die("query must not be empty")
+    src = SOURCES[source_key]
 
     # Phase 1: rank pages from llms.txt
     index_cache = _cache_path(args.cache_dir, src["index_cache"])
@@ -586,22 +737,10 @@ def cmd_search(args):
         if join_rate < 0.8:
             print(
                 f"WARNING: URL join rate is {join_rate:.0%} "
-                f"({joinable}/{len(entries)}). Some index entries cannot be "
-                f"joined to full text.",
+                f"({joinable}/{len(entries)}) for {src['label']}. "
+                f"Some index entries cannot be joined to full text.",
                 file=sys.stderr,
             )
-
-    print(f'Search results for "{args.query}" ({src["label"]})')
-    print(f"  (index: {index_path})")
-    print(f"  (full:  {full_path})")
-    print("=" * 60)
-    print()
-
-    if not scored_entries:
-        print("No matching pages found.")
-        print()
-        print("Tip: try broader keywords")
-        return
 
     # Phase 3: drill into bodies of candidate pages
     results = []
@@ -619,6 +758,8 @@ def cmd_search(args):
             max_snippet_chars=args.max_snippet_chars,
         )
         results.append({
+            "source_key": source_key,
+            "source_label": src["label"],
             "doc_idx": full_idx,
             "title": entry["title"],
             "url": entry["url"],
@@ -636,11 +777,17 @@ def cmd_search(args):
             r["doc_idx"],
         )
     results.sort(key=_sort_key)
+    return results
 
+
+def _print_search_results(results: list[dict], *, label_source: bool) -> None:
+    """Render search results. When *label_source* is True, prefix each entry
+    with ``[<source_key>]`` so multi-source output can be disambiguated."""
     for r in results:
         hits = r["body_hits"]
         shown = len(hits["results"])
-        print(f"[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
+        src_tag = f"[{r['source_key']}] " if label_source else ""
+        print(f"{src_tag}[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
         print(f"    URL: {r['url']}")
         if hits["total_matches"]:
             mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
@@ -651,13 +798,70 @@ def cmd_search(args):
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
                 print()
+            overflow = hits.get("overflow_sections", [])
+            if overflow:
+                print(f"    Other sections with hits (not shown):")
+                for s in overflow:
+                    print(f"      - {s['heading_path']}  (x{s['hit_count']})")
+                print()
         else:
             print(f"    (no body hits — index match only)")
         print()
 
-    print(f"({len(results)} pages, ranked via URL-joined index)")
+
+def cmd_search(args):
+    """Smart search: rank pages via llms.txt and drill into bodies via llms-full.txt.
+
+    Pages are joined across the two indexes by their normalised ``source_url``
+    so the doc_idx returned here is always valid for ``content`` / ``sections``.
+    With ``--source both``, ``code`` and ``platform`` are searched sequentially
+    and results are grouped under per-source headers. The ``doc_idx`` is only
+    unique within a source, so follow-up ``content``/``sections`` calls need an
+    explicit ``--source`` matching the bracket label in the output.
+    """
+    if not args.query.strip():
+        die("query must not be empty")
+
+    if args.source == "both":
+        source_keys = ["code", "platform"]
+    else:
+        source_keys = [args.source]
+
+    sources_label = " + ".join(SOURCES[k]["label"] for k in source_keys)
+    print(f'Search results for "{args.query}" ({sources_label})')
+    print("=" * 60)
     print()
-    next_hint("content", "<doc_index>", '"<heading_path>"', *_source_hint_args(args))
+
+    any_results = False
+    for src_key in source_keys:
+        results = _search_one_source(args, src_key)
+        if len(source_keys) > 1:
+            print(f"--- {SOURCES[src_key]['label']} (--source {src_key}) ---")
+            print()
+        if not results:
+            print(f"  (no matching pages in {SOURCES[src_key]['label']})")
+            print()
+            continue
+        any_results = True
+        _print_search_results(results, label_source=(len(source_keys) > 1))
+        print(f"({len(results)} pages from {SOURCES[src_key]['label']})")
+        print()
+
+    if not any_results:
+        print("No matching pages found.")
+        print()
+        print("Tip: try broader keywords or switch --source")
+        return
+
+    if len(source_keys) > 1:
+        print("Note: doc_idx is unique within a source. For follow-up commands, "
+              "pass the matching --source <code|platform> explicitly.")
+        print()
+        next_hint("content", "<doc_index>", '"<heading_path>"',
+                  "--source", "<code|platform>")
+    else:
+        next_hint("content", "<doc_index>", '"<heading_path>"',
+                  *_source_hint_args(args))
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +919,14 @@ def main():
     _add_source_arg(p_content)
     add_cache_dir_arg(p_content)
     add_max_age_arg(p_content)
+    p_content.add_argument(
+        "--no-subsection-hints", action="store_true",
+        help="Suppress the subsection hint block printed after content",
+    )
+    p_content.add_argument(
+        "--no-link-annotations", action="store_true",
+        help="Suppress '→ [doc_idx N]' annotations on in-body links to known docs",
+    )
     p_content.set_defaults(func=cmd_content)
 
     # search-index
@@ -767,7 +979,12 @@ def main():
              "(URL-joined so doc_idx is reliable for content/sections)",
     )
     p_search.add_argument("query", help="Space-separated keywords (AND search)")
-    _add_source_arg(p_search)
+    # search supports --source both (other commands operate on a single source)
+    p_search.add_argument(
+        "--source", choices=list(SOURCES.keys()) + ["both"], default=DEFAULT_SOURCE,
+        help=f"Documentation source (default: {DEFAULT_SOURCE}; 'both' "
+             f"queries code + platform in sequence)",
+    )
     add_cache_dir_arg(p_search)
     add_max_age_arg(p_search)
     p_search.add_argument("--index-limit", type=int, default=5,

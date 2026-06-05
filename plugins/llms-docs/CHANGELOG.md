@@ -2,6 +2,111 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.11.0] - 2026-06-05
+
+### researching-claude-docs: 3 つの機能追加
+
+#### `paths:` auto-activation (SKILL.md frontmatter)
+
+`SKILL.md` / plugin manifest / agent / command / hook / settings / MCP 設定
+ファイル等を編集する直前に skill が自動でロードされる。Claude が WebFetch で
+取りに行く事故を最小コストで減らす。
+
+```yaml
+paths:
+  - "**/SKILL.md"
+  - "**/.claude-plugin/**"
+  - "**/.claude/agents/**.md"
+  - "**/.claude/commands/**.md"
+  - "**/.claude/hooks/**"
+  - "**/.claude/settings*.json"
+  - "**/.mcp.json"
+  - "**/hooks.json"
+```
+
+#### `search --source both` 並列検索
+
+`code` (Claude Code) と `platform` (Claude Developer Platform) を 1 コマンドで
+横断検索する。Skill / hook / MCP のように両ソースに解説が散らばる topic で
+切替コストが消える。
+
+- 結果に `[code]` / `[platform]` プレフィックスを付けて区別
+- `doc_idx` は **source 内ユニーク**なため follow-up 呼び出しに
+  `--source <code|platform>` を明示するよう Note と Next hint で誘導
+- `_search_one_source(args, source_key)` と `_print_search_results(results,
+  label_source)` に分割してテスト・拡張容易性を確保
+
+#### `content` 本文中の docs リンクに `→ [doc_idx N]` を付与
+
+本文内の Markdown link (`[Text](/en/...)` / `[Text](/docs/en/...)` /
+`[Text](https://code.claude.com/...)`) のうち**同 source 内の既知ページ**を
+指すものに、自動でアノテーションが付く。follow-up の page 切替が 1 ステップ
+減る。
+
+- 絶対 URL と相対 path (`/en/...` ↔ `/docs/en/...` の alias 解決) の両方に対応
+- self-link (現在ページへの link) は除外
+- コードフェンス内 / Markdown テーブル行はスキップ (formatting 保護)
+- `--no-link-annotations` で抑制可
+
+#### SKILL.md metadata version
+
+`3.1.0` → `3.2.0`
+
+## [0.10.0] - 2026-06-05
+
+### researching-claude-docs: 使用感ベースの改善
+
+実際に AgentSkill 仕様を調査する過程で観察した摩擦点を 4 つ改善した。
+
+#### `content` 出力にサブセクション hint を追加 (parse-claude-docs.py)
+
+`content <doc_idx> "<heading_path>"` の本文末尾に、そのセクション直下の子
+`heading_path` を一覧表示する。これまでは深掘り時に `sections` を再呼び出し
+する必要があり 1 ステップ多かった。
+
+- `heading_path` 指定時 → 直接の子 (level + 1) を表示
+- `heading_path` 省略時 → トップレベル (L2) セクションを表示
+- 出力例:
+
+  ```
+  --- Subsections of 'Configure skills/Frontmatter reference' (2) ---
+    - Configure skills/Frontmatter reference/How a skill gets its command name
+    - Configure skills/Frontmatter reference/Available string substitutions [code]
+
+  Next: parse-claude-docs.py content 83 "<heading_path from above>"
+  ```
+
+- `--no-subsection-hints` で抑制可
+- target.line_end は次の見出し開始でしかないため、target と同レベル以下の
+  次セクションまでをブロック終端として再計算する
+
+#### `search` / `search-content` の overflow セクション表示
+
+`(60 body hits, showing 3)` 表示時、`--max-hits` (既定 3) で切り捨てた残り
+セクションを `Other sections with hits (not shown):` として heading_path と
+ヒット数を一覧表示する。`_common.py` の `search_content_in_body` 戻り値に
+`overflow_sections` フィールドを追加 (既存呼び出し元は無視するだけなので
+非破壊)。
+
+#### SKILL.md frontmatter の再構成
+
+公式 Skills ベストプラクティス (key use case first / 1,536 char cap) に
+合わせて `description` と `when_to_use` を分離。
+
+- `description`: 「公式ドキュメントから verbatim 取得 / WebFetch 回避」を
+  冒頭に置き、Triggers/Use when を分離して説明性を上げた
+- `when_to_use`: Triggers キーワード列 + Use when を集約。`"AgentSkill"`,
+  `"Skill"` を Triggers に追加 (今回の調査で頻出キーワードだった)
+- skill metadata version: `3.0.0` → `3.1.0`
+
+#### SKILL.md 本文の重複削減
+
+- `v3 互換性` セクションを削除 (時間依存表記の回避: `~/.claude/rules/claude/skills/principles.md`)
+- 「推奨フロー」と「コマンドリファレンス」で重複していた `page_ref` /
+  `heading_path` の説明を「リファレンス」セクションに集約
+- 「サブフロー」をテーブル化して縦方向に圧縮
+- サブセクション hint 仕様を `Step 2` 内に文書化
+
 ## [0.9.0] - 2026-06-05
 
 ### plugin rename: `doc-researcher` → `llms-docs` (BREAKING)
