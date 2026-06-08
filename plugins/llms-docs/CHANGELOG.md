@@ -2,6 +2,61 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.12.0] - 2026-06-08
+
+### researching-claude-docs: 使用感ベース改善 (AgentSkill 仕様調査の実体験から)
+
+skill 自身を使って AgentSkill の最新仕様 (frontmatter フィールド一覧 /
+ロード段階 / `context: fork` 挙動 / `paths:` 条件 / `hooks:` / Skill vs
+Subagent) を verbatim 取得した実体験から、以下 3 点を改善。
+
+#### 1. SKILL.md 冒頭に Quick Start を追加
+
+9 セクション・183 行に対して「最初に何をすればいいか」が掴みづらかった。
+冒頭に 2 コマンドのみの最小ブロックを置き、迷ったらここから始められるよう
+にした。`--source both` / `--source platform` の指針も 1 行で示す。
+
+```bash
+# 1. キーワードで候補ページと本文ヒットを 1 コマンドで取得
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワード>"
+# 2. 返ってきた [doc_idx] と heading_path を使って本文取得
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "<heading_path>"
+```
+
+#### 2. 最新 frontmatter フィールド名を Triggers に追加
+
+`disable-model-invocation` / `user-invocable` / `argument-hint` / `effort` /
+`arguments` / `context: fork` / `paths` / `SubagentStop` / `$ARGUMENTS` /
+`$CLAUDE_SKILL_DIR` / `output style` を `Triggers:` に追加。新しいフィールド
+名で質問されても description マッチで auto-invoke されるようにした。
+
+合算 char 数: 689 → 約 980 chars (1,536 cap headroom 556)
+
+#### 3. `paths:` glob に `**/.claude/skills/**` を追加
+
+skill の `references/` や `scripts/` を編集する際にも自動 trigger されるよう
+拡張。既存の `**/SKILL.md` は SKILL.md ファイル本体しかカバーしていなかった
+ため、skill ディレクトリ全体作業時のロード抜けを補う。
+
+#### 4. when_to_use の action verb 拡張
+
+旧 `implementing, debugging, configuring, or reviewing`
+新 `implementing, debugging, configuring, reviewing, or **designing**`
++ `especially before editing SKILL.md / agent / hook files` の Use-before
+ガイダンスを追記。「Skill 自身を設計・編集している最中こそ skill が必要」
+という観点を明示。
+
+#### 5. 出力フォーマット強制度を緩和
+
+「### 調査結果 / ### コード例 / ### 情報源 / ### 注意事項」の固定 4 セクション
+を必須から「参考スケルトン」に変更。複数フィールドの仕様調査では表組み、
+複数引用の比較では blockquote の方が読みやすい体験から、最低限満たすべき
+要素 (発見事項 / 引用元 / コード例 / 注意事項) のみ示して、構成は柔軟に
+できるようにした。
+
+SKILL.md metadata version: `3.3.0` → `3.4.0` (Skill 自発 invoke 判定材料が
+変わるため minor bump)
+
 ## [0.11.1] - 2026-06-06
 
 ### researching-claude-docs: paths あり skill 向け description ガイドラインに準拠

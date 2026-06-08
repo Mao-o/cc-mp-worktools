@@ -6,13 +6,17 @@ description: |
   llms-full.txt を段階的に grep し、WebFetch の要約モデル経由のような
   field 欠落・幻覚を回避する。
 when_to_use: |
-  Use when implementing, debugging, configuring, or reviewing Claude Code
-  features (hooks, subagents, plugin manifest, slash commands, MCP servers,
-  settings.json, permissions, Skills/AgentSkill) or Anthropic API specs.
-  Use proactively before answering spec questions about the above.
+  Use when implementing, debugging, configuring, reviewing, or **designing**
+  Claude Code features (hooks, subagents, plugin manifest, slash commands,
+  MCP servers, settings.json, permissions, Skills/AgentSkill, output styles)
+  or Anthropic API specs. Use proactively before answering spec questions
+  about the above — especially before editing SKILL.md / agent / hook files.
   Triggers: "Claude Code", "AgentSkill", "Skill", "hook schema", "subagent",
   "plugin manifest", "slash command", "settings.json", "permission", "MCP",
-  "Anthropic API", "researching-claude-docs"
+  "Anthropic API", "researching-claude-docs",
+  "disable-model-invocation", "user-invocable", "argument-hint", "effort",
+  "arguments", "context: fork", "paths", "SubagentStop", "$ARGUMENTS",
+  "$CLAUDE_SKILL_DIR", "output style"
 context: fork
 model: sonnet
 allowed-tools:
@@ -25,17 +29,29 @@ paths:
   - "**/.claude/agents/**.md"
   - "**/.claude/commands/**.md"
   - "**/.claude/hooks/**"
+  - "**/.claude/skills/**"
   - "**/.claude/settings*.json"
   - "**/.mcp.json"
   - "**/hooks.json"
 metadata:
   author: mao
-  version: "3.3.0"
+  version: "3.4.0"
 ---
 
 # Claude ドキュメント Progressive Loader
 
 Claude Code (`code.claude.com`) および Claude Developer Platform (`platform.claude.com`) の公式ドキュメントを段階的に読み込むスキル。
+
+## Quick Start
+
+```bash
+# 1. キーワードで候補ページと本文ヒットを 1 コマンドで取得
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワード>"
+# 2. 返ってきた [doc_idx] と heading_path を使って本文取得
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "<heading_path>"
+```
+
+迷ったら `search` から始める。両 source 横断は `--source both`、Anthropic API は `--source platform`。詳細は下記「推奨フロー」以降。
 
 ## ソース
 
@@ -157,19 +173,23 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 2. それでも失敗 → `code.claude.com/docs/en/<slug>` または `platform.claude.com/docs/en/<slug>` を WebFetch で直接取得
 3. WebFetch は要約モデル経由のため field の抜け落ちリスクあり — 取得内容を鵜呑みにしない
 
-## 出力フォーマット
+## 出力フォーマット (参考)
 
+調査の性質に応じて柔軟に構成してよい。固定セクションは強制しない — 複数フィールドの仕様調査では表組み、複数引用の比較では blockquote が読みやすい。最低限満たすべき要素:
+
+- **発見事項**: 何が分かったか (見出し名は任意)
+- **引用元**: 使用したドキュメントの URL またはタイトル + セクション (verbatim 引用は必ず出典を併記)
+- **コード例**: ドキュメントから直接引用したもののみ (該当する場合)
+- **注意事項**: 制約・バージョン要件・既知の罠 (該当する場合)
+
+参考スケルトン (固定ではない):
+
+```
 ### 調査結果
-[主な発見事項]
-
 ### コード例 *(該当する場合)*
-[ドキュメントからの直接引用のみ]
-
 ### 情報源
-[使用したドキュメントのタイトルとセクション]
-
 ### 注意事項 *(該当する場合)*
-[制約、バージョン要件、既知の問題]
+```
 
 ## ルール
 
