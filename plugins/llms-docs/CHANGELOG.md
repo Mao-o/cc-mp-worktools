@@ -2,6 +2,74 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.13.0] - 2026-06-08
+
+### researching-ai-sdk / researching-firebase: 使用感ベース改善の横展開
+
+0.12.0 で `researching-claude-docs` に入れた改善パターンを ai-sdk /
+firebase にも適用。3 SKILL の構造を揃え、初見ユーザーが同じ感覚で扱える
+ようにした。
+
+#### researching-ai-sdk: 3.2.0 → 3.3.0
+
+- **Quick Start を冒頭に追加**: 2 コマンドのみの最小ブロック
+- **`when_to_use` を独立フィールド化** + verb 拡張:
+  `implementing, debugging, configuring, reviewing, or designing`
+  + `especially before editing code that imports from ai / @ai-sdk/*`
+- **Triggers に最新 API 名を追加**:
+  `streamObject` / `generateObject` / `useObject` / `tool` / `tools` /
+  `embed` / `embedMany` / `convertToModelMessages` / `provider`
+- **出力フォーマット強制度を緩和** (claude-docs と同じ書き換え)
+- `paths:` は追加しない (AI SDK は特徴的ファイル名がなく誤発火リスクが
+  高いため、description ベースの auto-invoke に任せる)
+
+#### researching-firebase: 2.0.0 → 2.1.0
+
+- **Quick Start を冒頭に追加**: 2 コマンドのみの最小ブロック
+- **`when_to_use` を独立フィールド化** + verb 拡張:
+  `implementing, debugging, configuring, reviewing, or designing`
+  + `especially before editing firebase.json / .firebaserc / *.rules /
+  *.indexes.json`
+- **Triggers に最新プロダクト名を追加**:
+  `AI Logic` / `Genkit` / `App Hosting` / `Data Connect` /
+  `security rules` / `firestore.rules` / `storage.rules`
+- **`paths:` を新規追加** (Firebase 固有ファイル名で auto-trigger):
+  `**/firebase.json` / `**/.firebaserc` / `**/firestore.rules` /
+  `**/firestore.indexes.json` / `**/storage.rules` /
+  `**/database.rules.json` / `**/remoteconfig.template.json` /
+  `**/apphosting.yaml`
+- **出力フォーマット強制度を緩和** (claude-docs と同じ書き換え)
+
+#### 統一の効果
+
+3 SKILL とも以下の構造で揃った:
+
+```
+---
+description: |
+  ... (各 source 固有の説明)
+when_to_use: |
+  Use when implementing, debugging, configuring, reviewing, or designing ...
+  Use proactively before answering spec questions ...
+  Triggers: ...
+context: fork
+model: sonnet
+allowed-tools: [Read, Bash, WebFetch]
+paths: [...]  # claude-docs / firebase のみ
+metadata: { author, version }
+---
+
+# Title
+
+## Quick Start
+(2 コマンドの最小ブロック)
+
+(以降は source 固有の詳細)
+
+## 出力フォーマット (参考)
+(緩和された最低限要素のみ)
+```
+
 ## [0.12.0] - 2026-06-08
 
 ### researching-claude-docs: 使用感ベース改善 (AgentSkill 仕様調査の実体験から)

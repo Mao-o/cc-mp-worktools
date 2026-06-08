@@ -5,24 +5,38 @@ description: |
   Firestore, Authentication, Cloud Functions, Hosting, FCM, Vertex AI in Firebase などの
   各プロダクトの API 仕様・設定方法・コード例を調査する。Skill ツールで起動し、メインの会話コンテキストを消費しない。
   Firebase の仕様確認には WebFetch ではなくこのスキルを使う（要約モデル経由ではないため field の抜け落とし・幻覚が起きない）。
-  Use proactively when implementing Firebase features or needing Firebase documentation.
-  Use when implementing or debugging Firebase features such as Firestore queries, Auth flows,
-  Cloud Functions, FCM, Cloud Storage for Firebase, App Check, or Firebase AI.
+when_to_use: |
+  Use when implementing, debugging, configuring, reviewing, or **designing**
+  Firebase features (Firestore, Auth, Cloud Functions, FCM, Storage, App
+  Check, Firebase AI / AI Logic / Genkit, App Hosting, Data Connect ほか).
+  Use proactively before answering spec questions about Firebase —
+  especially before editing firebase.json / .firebaserc / *.rules /
+  *.indexes.json.
   Triggers: "Firebase", "Firestore", "Firebase Auth", "Firebase ドキュメント",
   "firebase.google.com", "FCM", "Cloud Functions for Firebase", "Firebase AI",
-  "Vertex AI in Firebase", "Cloud Storage for Firebase", "Cloud Storage",
-  "Realtime Database", "Firebase Hosting", "App Check", "Remote Config",
-  "Crashlytics", "Dynamic Links", "A/B Testing", "Performance Monitoring",
-  "Test Lab", "researching-firebase"
+  "AI Logic", "Genkit", "Vertex AI in Firebase", "Cloud Storage for Firebase",
+  "Cloud Storage", "Realtime Database", "Firebase Hosting", "App Hosting",
+  "App Check", "Remote Config", "Crashlytics", "Dynamic Links", "A/B Testing",
+  "Performance Monitoring", "Test Lab", "Data Connect", "security rules",
+  "firestore.rules", "storage.rules", "researching-firebase"
 context: fork
 model: sonnet
 allowed-tools:
   - Read
   - Bash
   - WebFetch
+paths:
+  - "**/firebase.json"
+  - "**/.firebaserc"
+  - "**/firestore.rules"
+  - "**/firestore.indexes.json"
+  - "**/storage.rules"
+  - "**/database.rules.json"
+  - "**/remoteconfig.template.json"
+  - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -30,6 +44,17 @@ metadata:
 Firebase 公式ドキュメント (`firebase.google.com/docs`) を段階的に読み込むスキル。
 他の researching-* スキルと異なり、**llms-full.txt が存在しない**ため、個別の `.md.txt`
 ページを on-demand で fetch する設計になっている。
+
+## Quick Start
+
+```bash
+# 1. キーワードで候補ページ + 本文 hits を取得 (初回は top N を on-demand fetch)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search "<キーワード>"
+# 2. 返ってきた [doc_idx] と heading_path を使って本文取得
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <doc_idx> "<heading_path>"
+```
+
+迷ったら `search` から始める。詳細は下記「調査フロー」以降。
 
 ## v2 互換性
 
@@ -181,16 +206,20 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - スクリプト失敗時は「失敗時の対処」に従う。WebFetch は最終手段
 - 調査は簡潔に完了させること
 
-## 出力フォーマット
+## 出力フォーマット (参考)
 
+調査の性質に応じて柔軟に構成してよい。固定セクションは強制しない — 複数プロダクト/API の比較では表組み、複数引用の比較では blockquote が読みやすい。最低限満たすべき要素:
+
+- **発見事項**: 何が分かったか (見出し名は任意)
+- **引用元**: 使用したドキュメントの URL またはタイトル + セクション (verbatim 引用は必ず出典を併記)
+- **コード例**: ドキュメントから直接引用したもののみ (該当する場合)
+- **注意事項**: 制約・バージョン要件・既知の罠 (該当する場合)
+
+参考スケルトン (固定ではない):
+
+```
 ### 調査結果
-[主な発見事項]
-
 ### コード例 *(該当する場合)*
-[ドキュメントからの直接引用のみ]
-
 ### 情報源
-[使用したドキュメントのタイトルとセクション]
-
 ### 注意事項 *(該当する場合)*
-[制約、バージョン要件、既知の問題]
+```
