@@ -1,9 +1,15 @@
-# ai-sdk.dev/llms.txt の構造
+# ai-sdk.dev/llms-full.txt の構造
 
 ## 概要
 
-`https://ai-sdk.dev/llms.txt` は AI SDK の公式ドキュメントを LLM 向けに集約した単一テキストファイル。
-約 42,000 行 / 1.4MB / 139 ドキュメントで構成される（2026-03-16 時点）。
+`https://ai-sdk.dev/llms-full.txt` は AI SDK の公式ドキュメントを LLM 向けに集約した単一テキストファイル。
+約 150,000 行 / 5MB / 530 ドキュメントで構成される（2026-06-08 時点）。
+
+上流の `llms.txt` は ~2KB / 46 行のインデックスファイルに分離されており、本体は `llms-full.txt` に
+収録される構成へ変更された。`parse-ai-sdk.py` は `llms-full.txt` を直接 fetch する。
+
+ファイル先頭には `---` で始まらない contributing guide (TypeScript コード) ブロックが存在するが、
+`split_documents` は最初の `---` までを無視するため、ドキュメント分割には影響しない。
 
 ## 物理構造
 
@@ -66,4 +72,4 @@ Markdown 内に JSX 風のカスタムコンポーネントが含まれる:
 | API Reference | 30-100 | generateText, streamText, useChat 等のAPI詳細 |
 | Providers | 100+ | OpenAI, Anthropic, Google 等のプロバイダー設定 |
 
-※ インデックス範囲は llms.txt の更新により変動する。`fetch-index` で最新を確認すること。
+※ インデックス範囲は llms-full.txt の更新により変動する。`fetch-index` で最新を確認すること。

@@ -69,7 +69,7 @@ python3 plugins/llms-docs/scripts/parse-firebase.py fetch-index --limit 10
 |--------|-------------------|
 | claude-docs (Code) | `/tmp/claude-code-llms.txt`, `/tmp/claude-code-llms-full.txt` |
 | claude-docs (Platform) | `/tmp/claude-platform-llms.txt`, `/tmp/claude-platform-llms-full.txt` |
-| ai-sdk | `/tmp/ai-sdk-llms.txt` |
+| ai-sdk | `/tmp/ai-sdk-llms-full.txt` |
 | firebase | `/tmp/firebase-llms.txt` (index), `/tmp/firebase-docs/` (per-page) |
 
 最新版が必要な場合は該当ファイルを `rm` してから再実行する。

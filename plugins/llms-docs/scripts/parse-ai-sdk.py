@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Progressive loader for ai-sdk.dev/llms.txt.
+"""Progressive loader for ai-sdk.dev/llms-full.txt.
 
-Parses the concatenated frontmatter-delimited Markdown documents in llms.txt
-and provides subcommands for progressive (layered) access:
+Parses the concatenated frontmatter-delimited Markdown documents in
+``llms-full.txt`` (the bundled full-documentation snapshot referenced from
+``llms.txt``) and provides subcommands for progressive (layered) access:
 
   fetch-index     — Fetch (if uncached) and print document index
   search-index    — Rank documents by keyword (title/description/tags/headings)
@@ -16,8 +17,13 @@ Page references (``<page_ref>``) accept two forms:
   - integer index   (e.g. ``42``)
   - title substring (e.g. ``streamtext``)
 
-AI SDK's ``llms.txt`` is a single bundled file (no separate llms-full.txt),
-so passing ``--file`` is optional — if omitted, the cached copy under
+Upstream layout (as of 2026-06): ``llms.txt`` is a ~2 KB index that points
+to ``llms-full.txt`` (~5 MB, ~530 frontmatter-delimited docs). This loader
+targets ``llms-full.txt`` directly. Leading non-frontmatter content (a small
+contributing-guide block before the first ``---``) is skipped by
+``split_documents`` and does not appear as a document.
+
+Passing ``--file`` is optional — if omitted, the cached copy under
 ``--cache-dir`` is auto-fetched / re-used.
 """
 
@@ -45,8 +51,8 @@ from _common import (
     search_index_entries,
 )
 
-LLMS_TXT_URL = "https://ai-sdk.dev/llms.txt"
-DEFAULT_CACHE_FILENAME = "ai-sdk-llms.txt"
+LLMS_TXT_URL = "https://ai-sdk.dev/llms-full.txt"
+DEFAULT_CACHE_FILENAME = "ai-sdk-llms-full.txt"
 
 USER_AGENT = "claude-code-ai-sdk-researcher/1.0"
 
@@ -203,19 +209,19 @@ def _default_cache_path(cache_dir: str) -> str:
 
 
 def fetch_llms_txt(cache_path: str, *, max_age: int | None = None) -> str:
-    """Return path to cached llms.txt, fetching if necessary."""
+    """Return path to cached llms-full.txt, fetching if necessary."""
     return fetch_url(
         LLMS_TXT_URL,
         cache_path,
         user_agent=USER_AGENT,
-        timeout=60,
+        timeout=120,
         max_age=max_age,
     )
 
 
 def _load_docs(file_arg: str | None, cache_dir: str,
                *, max_age: int | None = None) -> tuple[str, list[dict]]:
-    """Load and split documents from llms.txt.
+    """Load and split documents from llms-full.txt.
 
     Two distinct modes:
 
@@ -250,8 +256,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
       1. integer index into *docs*
       2. title substring (case-insensitive); unique match wins
 
-    AI SDK's llms.txt has no Source/URL line in document bodies, so URL /
-    slug matching is not supported here (use the integer index from
+    AI SDK's llms-full.txt has no Source/URL line in document bodies, so
+    URL / slug matching is not supported here (use the integer index from
     ``search-index`` / ``search`` instead).
     """
     if page_ref is None or page_ref == "":
@@ -292,7 +298,7 @@ def cmd_fetch_index(args):
     lines = load_lines(path)
     docs = split_documents(lines)
 
-    print(f"AI SDK llms.txt Document Index (file: {cache_path})")
+    print(f"AI SDK llms-full.txt Document Index (file: {cache_path})")
     print("=" * 60)
     print()
 
@@ -509,9 +515,9 @@ def cmd_search(args):
     Phase 2: search each candidate body with section-level AND keyword match.
     Phase 3: rank by (body hit count desc, index score desc, doc_idx asc).
 
-    Unlike Claude docs (which joins llms.txt + llms-full.txt by URL), AI SDK
-    bundles both into one llms.txt file so no URL join is needed — index and
-    body refer to the same doc by position.
+    AI SDK's ``llms-full.txt`` is one concatenated file (~530 docs),
+    so no URL join is needed — index and body refer to the same doc by
+    position.
     """
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
 
@@ -610,7 +616,7 @@ def _add_page_ref_arg(parser, *, help: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Progressive loader for ai-sdk.dev/llms.txt",
+        description="Progressive loader for ai-sdk.dev/llms-full.txt",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

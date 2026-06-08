@@ -2,6 +2,48 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.14.0] - 2026-06-08
+
+### researching-ai-sdk: ai-sdk.dev 上流構造変更に追従 (bd_092a232e-n9i)
+
+ai-sdk.dev/llms.txt が ~2KB / 46 行のインデックス + 検索 API 案内 + llms-full.txt
+リンクに分離され、本体は `llms-full.txt` (~5MB / 530 doc) に移動した。
+旧構造 (1 ファイルに全 doc 連結) を前提にしていた `parse-ai-sdk.py` では
+`search "streamText"` 等の基本 API 検索がゼロ件になっていたのを修正。
+
+#### 変更内容
+
+- `LLMS_TXT_URL` を `https://ai-sdk.dev/llms.txt` → `https://ai-sdk.dev/llms-full.txt`
+  に切替
+- `DEFAULT_CACHE_FILENAME` を `ai-sdk-llms.txt` → `ai-sdk-llms-full.txt` に変更
+  (旧 cache との混在を避ける)
+- fetch timeout を 60s → 120s (5MB ファイルのため余裕を確保)
+- docstring / argparse description / 各種コメントを `llms-full.txt` 起点の
+  説明に更新
+- `llms-full.txt` 先頭は frontmatter ではなく contributing guide
+  (TypeScript コード) で始まるが、`split_documents` は最初の `---` まで
+  無視するため挙動影響なし
+- SKILL.md / references/llms-txt-structure.md / README.md の cache filename
+  と doc 数記述を更新
+
+#### CLI I/O 仕様
+
+既存サブコマンド (search / search-index / search-content / sections /
+content / fetch-index) の I/O 仕様は維持。利用側のコマンド書き換えは不要。
+
+#### 検証
+
+- `search "streamText"` で複数 doc が hit (28 body hits in top doc)
+- `search "useChat"` / `search "generateText"` も正常 hit
+- `search "stream object"` (space 区切り) で structured data ガイドが top
+- `fetch-index --compact` で 530 documents
+- `sections 22` / `content 22 "<heading_path>"` で本文取得確認
+
+#### SKILL.md metadata version
+
+`3.3.0` → `3.3.1` (script 仕様変更に伴うキャッシュ filename 変更を反映。
+skill 起動条件・トリガー語は不変なので patch bump)
+
 ## [0.13.0] - 2026-06-08
 
 ### researching-ai-sdk / researching-firebase: 使用感ベース改善の横展開
