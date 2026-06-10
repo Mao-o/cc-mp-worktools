@@ -36,6 +36,10 @@ class TestsCollector:
 def _render_snapshot(title: str, snapshot: TestSnapshot) -> Optional[str]:
     if not snapshot:
         return None
+    if "test_files" not in snapshot:
+        # Code without tests: a bare code_files count under a "Test Snapshot"
+        # heading misleads; saying so directly is the actionable fact.
+        return f"{title}\n- tests: none detected"
     lines = [title]
     ordered_keys = [
         "code_files", "test_files", "test_to_code_ratio",

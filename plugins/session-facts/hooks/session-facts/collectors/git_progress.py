@@ -13,6 +13,10 @@ class GitProgressCollector:
     rule rates as high value: which branch, how far it has diverged from its
     upstream, and the most recent commits. All git calls fail silently (no
     upstream, detached HEAD, non-git tree) so the header degrades gracefully.
+
+    recent_commits is config-gated (include_recent_commits): on SessionStart
+    the harness already injects the same commits via gitStatus, so hooks.json
+    passes --no-recent-commits there and keeps them for subagents only.
     """
 
     name = "git_progress"
@@ -35,9 +39,10 @@ class GitProgressCollector:
                 if upstream:
                     info["upstream"] = upstream
 
-        commits = recent_commits(ctx.root, n=3)
-        if commits:
-            info["recent_commits"] = commits
+        if ctx.config.include_recent_commits:
+            commits = recent_commits(ctx.root, n=3)
+            if commits:
+                info["recent_commits"] = commits
 
         if info:
             ctx.results["git_progress"] = info

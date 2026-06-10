@@ -99,6 +99,22 @@ class TestsCollectorAggregationTest(unittest.TestCase):
             test_dir_lines = [ln for ln in out.splitlines() if ln.startswith("- test_dir:")]
             self.assertEqual(test_dir_lines, ["- test_dir: plugins/*/hooks/*/tests"])
 
+    def test_code_without_tests_says_none_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = ["src/impl.py", "src/other.py"]
+            ctx = _ctx(root, tracked)
+            out = TestsCollector().collect(ctx)
+            self.assertEqual(out, "## Test Snapshot\n- tests: none detected")
+
+    def test_no_code_files_emits_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = ["docs/readme.md"]
+            ctx = _ctx(root, tracked)
+            out = TestsCollector().collect(ctx)
+            self.assertIsNone(out)
+
     def test_single_test_dir_is_not_abstracted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

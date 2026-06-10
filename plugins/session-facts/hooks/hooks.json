@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types --no-recent-commits",
             "timeout": 15
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types --emit subagent-json",
             "timeout": 15
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types --emit subagent-json",
             "timeout": 15
           }
         ]
