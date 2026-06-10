@@ -9,6 +9,7 @@ accounts.local.json の "github" は 2 形式を受け付ける:
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 
 PATTERNS = [r"^gh\b"]
@@ -170,3 +171,53 @@ def verify(expected, project_dir: str) -> str | None:
         return msg
 
     return None
+
+
+_SWITCH_RE = re.compile(r"^gh\s+auth\s+switch\b")
+
+
+def _parse_switch_args(candidate: str) -> tuple[str | None, str | None]:
+    """gh auth switch 候補から (--hostname, --user) の値を取り出す。"""
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        tokens = candidate.split()
+    hostname = None
+    user = None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("--hostname", "-h") and i + 1 < len(tokens):
+            hostname = tokens[i + 1]
+            i += 2
+            continue
+        if tok in ("--user", "-u") and i + 1 < len(tokens):
+            user = tokens[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--hostname="):
+            hostname = tok.split("=", 1)[1]
+        elif tok.startswith("--user="):
+            user = tok.split("=", 1)[1]
+        i += 1
+    return hostname, user
+
+
+def is_self_remediation(candidate: str, expected) -> bool:
+    """deny reason が案内する「期待アカウントへの切替」なら True。
+
+    `gh auth switch --user <expected>` のみ許可 (dict 期待値は --hostname も
+    照合、省略時は github.com)。--user 無し (インタラクティブ選択) や期待値
+    以外への切替は False で通常検証に落とす。
+    """
+    if not _SWITCH_RE.search(candidate):
+        return False
+    hostname, user = _parse_switch_args(candidate)
+    if not user:
+        return False
+    if isinstance(expected, str):
+        return user == expected
+    if isinstance(expected, dict):
+        want = expected.get(hostname or "github.com")
+        return isinstance(want, str) and user == want
+    return False

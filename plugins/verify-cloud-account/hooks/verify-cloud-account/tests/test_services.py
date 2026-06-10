@@ -293,5 +293,117 @@ class TestKubectl(unittest.TestCase):
         self.assertIn("kubectl コマンドが見つかりません", err)
 
 
+class TestGithubSelfRemediation(unittest.TestCase):
+    def test_switch_to_expected_str(self):
+        self.assertTrue(github.is_self_remediation(
+            "gh auth switch --hostname github.com --user Mao-o", "Mao-o"))
+
+    def test_switch_short_flags(self):
+        self.assertTrue(github.is_self_remediation(
+            "gh auth switch -h github.com -u Mao-o", "Mao-o"))
+
+    def test_switch_equals_form(self):
+        self.assertTrue(github.is_self_remediation(
+            "gh auth switch --user=Mao-o", "Mao-o"))
+
+    def test_switch_to_other_user(self):
+        self.assertFalse(github.is_self_remediation(
+            "gh auth switch --user someone", "Mao-o"))
+
+    def test_switch_without_user_is_not_remediation(self):
+        self.assertFalse(github.is_self_remediation("gh auth switch", "Mao-o"))
+
+    def test_non_switch_command(self):
+        self.assertFalse(github.is_self_remediation("gh pr create", "Mao-o"))
+
+    def test_dict_expected_matches_host(self):
+        expected = {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+        self.assertTrue(github.is_self_remediation(
+            "gh auth switch --hostname ghe.example.com --user mao-corp", expected))
+
+    def test_dict_expected_defaults_to_github_com(self):
+        self.assertTrue(github.is_self_remediation(
+            "gh auth switch --user Mao-o", {"github.com": "Mao-o"}))
+
+    def test_dict_expected_wrong_host_user_pair(self):
+        expected = {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+        self.assertFalse(github.is_self_remediation(
+            "gh auth switch --hostname ghe.example.com --user Mao-o", expected))
+
+
+class TestGcloudSelfRemediation(unittest.TestCase):
+    def test_set_project_to_expected_str(self):
+        self.assertTrue(gcloud.is_self_remediation(
+            "gcloud config set project my-proj", "my-proj"))
+
+    def test_set_project_to_other(self):
+        self.assertFalse(gcloud.is_self_remediation(
+            "gcloud config set project other", "my-proj"))
+
+    def test_set_account_with_str_expected_is_not_remediation(self):
+        # str 期待値は project のみ検証対象 (verify と同じ解釈)
+        self.assertFalse(gcloud.is_self_remediation(
+            "gcloud config set account me@example.com", "my-proj"))
+
+    def test_dict_expected_project_and_account(self):
+        expected = {"project": "my-proj", "account": "me@example.com"}
+        self.assertTrue(gcloud.is_self_remediation(
+            "gcloud config set project my-proj", expected))
+        self.assertTrue(gcloud.is_self_remediation(
+            "gcloud config set account me@example.com", expected))
+        self.assertFalse(gcloud.is_self_remediation(
+            "gcloud config set account other@example.com", expected))
+
+    def test_extra_flags_fall_through(self):
+        self.assertFalse(gcloud.is_self_remediation(
+            "gcloud config set project my-proj --quiet", "my-proj"))
+
+    def test_other_gcloud_command(self):
+        self.assertFalse(gcloud.is_self_remediation(
+            "gcloud run deploy", "my-proj"))
+
+
+class TestFirebaseSelfRemediation(unittest.TestCase):
+    def test_use_expected_str(self):
+        self.assertTrue(firebase.is_self_remediation("firebase use my-proj", "my-proj"))
+
+    def test_use_other_project(self):
+        self.assertFalse(firebase.is_self_remediation("firebase use other", "my-proj"))
+
+    def test_dict_alias_and_project_id_both_accepted(self):
+        expected = {"default": "proj-dev", "prod": "proj-prod"}
+        self.assertTrue(firebase.is_self_remediation("firebase use prod", expected))
+        self.assertTrue(firebase.is_self_remediation("firebase use proj-dev", expected))
+        self.assertFalse(firebase.is_self_remediation("firebase use staging", expected))
+
+    def test_use_with_extra_args_falls_through(self):
+        self.assertFalse(firebase.is_self_remediation(
+            "firebase use my-proj --add", "my-proj"))
+
+    def test_deploy_is_not_remediation(self):
+        self.assertFalse(firebase.is_self_remediation("firebase deploy", "my-proj"))
+
+
+class TestKubectlSelfRemediation(unittest.TestCase):
+    def test_use_context_expected(self):
+        self.assertTrue(kubectl.is_self_remediation(
+            "kubectl config use-context staging", "staging"))
+
+    def test_use_context_other(self):
+        self.assertFalse(kubectl.is_self_remediation(
+            "kubectl config use-context prod", "staging"))
+
+    def test_apply_is_not_remediation(self):
+        self.assertFalse(kubectl.is_self_remediation(
+            "kubectl apply -f x.yaml", "staging"))
+
+
+class TestAwsHasNoSelfRemediation(unittest.TestCase):
+    def test_aws_module_does_not_define_hook(self):
+        # AWS は期待値 (Account ID) と切替手段 (profile / SSO) の照合が hook から
+        # 不能のため意図的に未実装。dispatcher は getattr fallback で通常検証に落とす
+        self.assertFalse(hasattr(aws, "is_self_remediation"))
+
+
 if __name__ == "__main__":
     unittest.main()

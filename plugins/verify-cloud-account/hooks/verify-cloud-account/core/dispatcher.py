@@ -89,20 +89,39 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
 def _collect_targets(command: str) -> list[tuple]:
     """コマンドを分解し、検証対象 (non-readonly) のサービス候補リストを返す。
 
-    同一サービスが複数セグメントで出現しても最初のみ残す
-    (アクティブアカウントは 1 つなので検証は 1 回で十分)。
+    同一サービスの候補セグメントは (svc, [cand, ...]) に集約する。verify は
+    サービスごとに 1 回で十分 (アクティブアカウントは 1 つ) だが、
+    self-remediation 判定は全セグメントを見る必要があるため全候補を保持する。
     """
     targets: list[tuple] = []
-    seen: set = set()
+    index: dict = {}
     for cand in extract_candidates(command):
         svc = _match_service(cand)
         if svc is None or _is_readonly(cand, svc):
             continue
-        if svc in seen:
-            continue
-        seen.add(svc)
-        targets.append((svc, cand))
+        if svc not in index:
+            index[svc] = []
+            targets.append((svc, index[svc]))
+        index[svc].append(cand)
     return targets
+
+
+def _all_self_remediation(cands: list, service, entry) -> bool:
+    """全候補セグメントが「期待値へ向かう切替コマンド」なら True。
+
+    deny reason が案内する remediation コマンド (例: gh auth switch --user
+    <expected>) 自体が PATTERNS にマッチして deny される self-remediation
+    loop を防ぐ。期待値以外への切替はここで True にならず通常検証に落ちる。
+    切替 + write の合せ技 (`gh auth switch -u X && gh pr create`) も write
+    側のセグメントが残るため通常検証される。判定中の例外は安全側 (通常検証)。
+    """
+    fn = getattr(service, "is_self_remediation", None)
+    if fn is None:
+        return False
+    try:
+        return all(fn(c, entry) for c in cands)
+    except Exception:
+        return False
 
 
 def _deprecation_note(kind: str) -> str:
@@ -214,7 +233,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         accounts_mtime = 0.0
 
     errors: list[str] = []
-    for svc, _cand in targets:
+    for svc, cands in targets:
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
             errors.append(
@@ -228,6 +247,9 @@ def dispatch(command: str, cwd: str) -> dict | None:
                 f'{accounts_path} の "{svc.ACCOUNT_KEY}" 値は文字列または '
                 f'オブジェクトであるべきです (現在: {type(entry).__name__})。'
             )
+            continue
+
+        if _all_self_remediation(cands, svc, entry):
             continue
 
         svc_name = svc.__name__.rsplit(".", 1)[-1]

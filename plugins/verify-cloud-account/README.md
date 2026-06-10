@@ -141,6 +141,22 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 同一コマンドチェーン内で readonly と非 readonly が混在する場合
 (例: `gh auth status && gh pr list`) は非 readonly セグメントについて検証が走る。
 
+### 期待値へ向かう切替コマンドは許可 (self-remediation)
+
+deny メッセージが案内する「期待値への切替コマンド」自体が `^gh\b` 等にマッチして
+deny される remediation loop を防ぐため、**accounts.local.json の期待値へ向かう
+切替コマンドだけは検証なしで許可**する:
+
+- `gh auth switch --user <期待アカウント>` (dict 形式は `--hostname` も照合、省略時 github.com)
+- `gcloud config set project <期待値>` / `gcloud config set account <期待値>`
+- `firebase use <期待 alias または project ID>`
+- `kubectl config use-context <期待コンテキスト>`
+
+期待値**以外**への切替は従来どおり通常検証に落ち、切替後の write 操作も次回 hook で
+再検証されるため fail-closed は維持される。AWS は切替が `export AWS_PROFILE=...`
+(シェル組込のため hook 対象外) で、期待値 (Account ID) と profile 名の照合も hook
+からは不能なため、この特例の対象外。
+
 ## 拡張フォーマット (object 形式)
 
 ### GitHub Enterprise / 複数 hostname

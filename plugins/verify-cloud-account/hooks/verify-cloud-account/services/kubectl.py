@@ -78,3 +78,14 @@ def verify(expected, project_dir: str) -> str | None:
         )
 
     return None
+
+
+_USE_CONTEXT_RE = re.compile(r"^kubectl\s+config\s+use-context\s+(\S+)\s*$")
+
+
+def is_self_remediation(candidate: str, expected) -> bool:
+    """deny reason が案内する「期待コンテキストへの use-context」なら True。"""
+    m = _USE_CONTEXT_RE.match(candidate)
+    if not m:
+        return False
+    return isinstance(expected, str) and m.group(1) == expected
