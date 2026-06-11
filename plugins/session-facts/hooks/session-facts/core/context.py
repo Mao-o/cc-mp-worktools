@@ -57,6 +57,9 @@ class AnalysisConfig:
     include_domain_types: bool = False
     max_domain_types: int = DEFAULT_MAX_DOMAIN_TYPES
     max_config_hints: int = DEFAULT_MAX_CONFIG_HINTS
+    # SessionStart passes False: the harness already injects recent commits
+    # there (gitStatus), while subagents receive no git context at all.
+    include_recent_commits: bool = True
 
 
 @dataclass

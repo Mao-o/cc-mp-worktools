@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -62,7 +63,9 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
             if len(line) < 12:
                 continue
             return truncate_purpose(line)
-    return ctx.root.name
+    # A bare directory name restates repo_root and trains readers to skip the
+    # field, so omit purpose entirely rather than fall back to it.
+    return None
 
 
 def summarize_repo(
@@ -75,7 +78,9 @@ def summarize_repo(
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
 
-    ctx.results["purpose"] = _infer_purpose(ctx)
+    purpose = _infer_purpose(ctx)
+    if purpose:
+        ctx.results["purpose"] = purpose
     ctx.results["package_manager"] = detect_package_manager(ctx)
 
     # Phase 1: Run stack detectors
@@ -125,6 +130,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--max-major-deps", type=int, default=DEFAULT_MAX_MAJOR_DEPS)
     parser.add_argument("--include-domain-types", action="store_true")
     parser.add_argument("--max-domain-types", type=int, default=DEFAULT_MAX_DOMAIN_TYPES)
+    parser.add_argument(
+        "--no-recent-commits",
+        action="store_true",
+        help=(
+            "Skip the recent_commits header lines. Use on SessionStart, where "
+            "the harness already injects the same commits via gitStatus."
+        ),
+    )
+    parser.add_argument(
+        "--emit",
+        choices=("stdout", "subagent-json"),
+        default="stdout",
+        help=(
+            "Output envelope. Plain stdout only reaches the model on "
+            "SessionStart; SubagentStart requires the hookSpecificOutput "
+            "JSON envelope ('subagent-json')."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -142,6 +165,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_major_deps=args.max_major_deps,
         include_domain_types=args.include_domain_types,
         max_domain_types=args.max_domain_types,
+        include_recent_commits=not args.no_recent_commits,
     )
     resolved = args.root.resolve()
     root = git_root_or_none(resolved)
@@ -149,5 +173,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if root is None:
         root = resolved
     output = summarize_repo(root, config, is_git, cwd=resolved)
-    print(output)
+    if args.emit == "subagent-json":
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SubagentStart",
+                "additionalContext": output,
+            }
+        }, ensure_ascii=False))
+    else:
+        print(output)
     return 0

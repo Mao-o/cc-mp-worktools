@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.0
+
+**harness 注入との棲み分け + SubagentStart 注入修復 (v0.5)**。実セッションでの
+出力評価フィードバック (実行者視点) を受け、harness が無条件注入する情報との
+重複排除と、機能していなかった SubagentStart 注入の修復を行った。
+
+1. **SubagentStart 注入修復** (`cli.py`, `hooks/hooks.json`) — SubagentStart では
+   plain stdout がモデルに届かない (公式仕様: plain stdout の自動注入は
+   SessionStart のみの特権。SubagentStart は `hookSpecificOutput.additionalContext`
+   JSON が必須)。`--emit subagent-json` を追加し、hooks.json の SubagentStart
+   (Explore/Plan) 側を JSON 包装に切替。従来登録は dead config だった
+   (Explore subagent 自身にコンテキストを報告させる実測で確認)。
+2. **recent_commits の SessionStart 抑制** (`core/context.py`,
+   `collectors/git_progress.py`, `cli.py`, `hooks/hooks.json`) — main セッション
+   には harness が gitStatus (直近 5 commit) を常時注入しており、recent_commits
+   (3 件) はその完全サブセットだった。`--no-recent-commits` を SessionStart 側に
+   のみ付与。subagent には harness の git 情報が一切注入されない (実測) ため、
+   SubagentStart 側では維持する。
+3. **purpose の dirname fallback 廃止** (`cli.py`) — fallback chain
+   (package.json description → README 先頭行 → ディレクトリ名) の最終段は
+   repo_root の再掲で情報量ゼロのため、field ごと省略する。
+4. **Test Snapshot の「テスト無し」明示** (`collectors/tests.py`) —
+   test_files=0 のとき code_files 単独表示 (ミスリード) をやめ、
+   `- tests: none detected` の 1 行に置換。
+
+テスト 90 件 (新規 9 件: `test_cli.py` 新設、git_progress / collectors に追加)。
+
 ## 0.4.0
 
 **出力品質改善 (v0.4 ロードマップ P1〜P3、計 10 件)**。SessionStart injection の

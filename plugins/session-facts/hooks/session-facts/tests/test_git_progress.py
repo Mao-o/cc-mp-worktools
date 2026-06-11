@@ -67,6 +67,19 @@ class GitHelpersTest(unittest.TestCase):
             self.assertEqual(info["branch"], "main")
             self.assertEqual(len(info["recent_commits"]), 2)
 
+    def test_collector_skips_recent_commits_when_config_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            ctx = RepoContext(
+                root=root,
+                config=AnalysisConfig(include_recent_commits=False),
+            )
+            ctx.results["is_git_repo"] = True
+            GitProgressCollector().collect(ctx)
+            info = ctx.results.get("git_progress")
+            self.assertIsNotNone(info)  # branch info is still collected
+            self.assertNotIn("recent_commits", info)
+
     def test_collector_skipped_for_non_git(self):
         ctx = RepoContext(root=Path("/tmp"), config=AnalysisConfig())
         ctx.results["is_git_repo"] = False
