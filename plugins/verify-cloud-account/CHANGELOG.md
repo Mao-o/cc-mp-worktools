@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0
+
+**self-remediation loop の解消**: deny reason が案内する切替コマンド (例:
+`gh auth switch --hostname github.com --user <期待>`) 自体が自サービスの
+PATTERNS にマッチして deny され、案内に従えない問題を解消した。
+gh / gcloud / firebase / kubectl の 4 サービスで同型の loop を確認し一括対応。
+
+### 変更内容
+
+1. **期待値へ向かう切替コマンドの許可** (`core/dispatcher.py` + 4 service files) —
+   各サービスに `is_self_remediation(candidate, expected)` を追加し、dispatcher は
+   候補セグメントが全て期待値へ向かう切替のとき検証をスキップして許可する:
+   - github: `gh auth switch --user <期待>` (`-u` / `--user=` / dict 期待値の
+     `--hostname` 照合に対応、hostname 省略時は github.com)
+   - gcloud: `gcloud config set project|account <期待値>`
+   - firebase: `firebase use <期待 alias | project ID>`
+   - kubectl: `kubectl config use-context <期待値>`
+2. **安全性の維持**:
+   - 期待値以外への切替・`--user` 無し (インタラクティブ) は通常検証に落ちる
+   - 切替 + write の合せ技 (`gh auth switch -u X && gh pr create`) は write 側が
+     通常検証される (切替前の現在値で照合)
+   - remediation skip は成功キャッシュを書かないため、直後の write は再検証される
+   - 期待値が未設定のサービスは従来どおり設定誘導の deny
+   - aws は期待値 (Account ID) と切替手段 (profile / SSO) の照合が不能のため対象外
+     (主経路 `export AWS_PROFILE` はシェル組込で元々 hook 対象外)
+3. **`_collect_targets` の集約形式変更** (`core/dispatcher.py`) — 同一サービスの
+   候補セグメントを `(svc, [cand, ...])` に集約 (verify は従来どおりサービスごと 1 回)
+
+テスト 261 件 (新規 31 件: services 24 + dispatcher 7)。
+
 ## 0.5.1
 
 **UX 改善 (P3)**: UX 監査の残 P3 フィードバック 9 件を反映。

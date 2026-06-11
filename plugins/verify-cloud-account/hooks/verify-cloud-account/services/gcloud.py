@@ -7,6 +7,7 @@ accounts.local.json の "gcloud" は 2 形式を受け付ける:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 
 PATTERNS = [r"^gcloud\b"]
@@ -152,3 +153,25 @@ def verify(expected, project_dir: str) -> str | None:
         )
 
     return _check_project(expected)
+
+
+_CONFIG_SET_RE = re.compile(r"^gcloud\s+config\s+set\s+(project|account)\s+(\S+)\s*$")
+
+
+def is_self_remediation(candidate: str, expected) -> bool:
+    """deny reason が案内する「期待値への gcloud config set」なら True。
+
+    str 期待値は project のみ照合 (verify と同じ解釈)。dict 期待値は set 対象
+    キー (project / account) の期待値と照合する。余分なフラグ付きは保守的に
+    False で通常検証に落とす。
+    """
+    m = _CONFIG_SET_RE.match(candidate)
+    if not m:
+        return False
+    key, value = m.group(1), m.group(2)
+    if isinstance(expected, str):
+        return key == "project" and value == expected
+    if isinstance(expected, dict):
+        want = expected.get(key)
+        return isinstance(want, str) and value == want
+    return False

@@ -9,6 +9,7 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -124,3 +125,27 @@ def verify(expected, project_dir: str) -> str | None:
         )
 
     return None
+
+
+_USE_RE = re.compile(r"^firebase\s+use\s+(\S+)\s*$")
+
+
+def is_self_remediation(candidate: str, expected) -> bool:
+    """deny reason が案内する「期待プロジェクト / alias への firebase use」なら True。
+
+    dict 期待値は alias 名 (キー) と project ID (値) の両方を受け付ける
+    (deny メッセージが `firebase use <alias>` を案内するため)。
+    """
+    m = _USE_RE.match(candidate)
+    if not m:
+        return False
+    target = m.group(1)
+    if isinstance(expected, str):
+        return target == expected
+    if isinstance(expected, dict):
+        for alias, project in expected.items():
+            if not (isinstance(project, str) and project):
+                continue
+            if target in (alias, project):
+                return True
+    return False

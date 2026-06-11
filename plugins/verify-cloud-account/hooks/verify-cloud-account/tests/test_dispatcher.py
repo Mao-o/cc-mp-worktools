@@ -302,6 +302,80 @@ class TestServiceInteractions(BaseWithTmpProject):
         mock_verify.assert_called_once()
 
 
+class TestSelfRemediationFlow(BaseWithTmpProject):
+    """deny が案内する切替コマンド (self-remediation) は検証なしで許可される。"""
+
+    def test_switch_to_expected_account_allowed_without_verify(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify") as mock_verify:
+            result = dispatch(
+                "gh auth switch --hostname github.com --user Mao-o",
+                str(self.project_dir),
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+    def test_switch_to_other_account_verifies_normally(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="不一致"
+        ) as mock_verify:
+            result = dispatch(
+                "gh auth switch --user someone-else", str(self.project_dir)
+            )
+        self.assertIsNotNone(result)
+        mock_verify.assert_called_once()
+
+    def test_switch_combined_with_write_verifies_normally(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="不一致"
+        ) as mock_verify:
+            result = dispatch(
+                "gh auth switch --user Mao-o && gh pr create",
+                str(self.project_dir),
+            )
+        self.assertIsNotNone(result)
+        mock_verify.assert_called_once()
+
+    def test_readonly_plus_remediation_allowed(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify") as mock_verify:
+            result = dispatch(
+                "gh auth status && gh auth switch -u Mao-o",
+                str(self.project_dir),
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+    def test_remediation_skip_does_not_write_success_cache(self):
+        """remediation skip は成功 cache を作らない (直後の write は再検証される)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify") as mock_verify:
+            dispatch("gh auth switch -u Mao-o", str(self.project_dir))
+            mock_verify.return_value = "不一致"
+            result = dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNotNone(result)
+        mock_verify.assert_called_once()
+
+    def test_missing_key_still_denies_for_remediation_command(self):
+        """期待値が未設定なら切替コマンドも従来どおり設定誘導の deny。"""
+        self._write_accounts({"gcloud": "my-proj"})
+        result = dispatch(
+            "gh auth switch --user Mao-o", str(self.project_dir)
+        )
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn('"github" キーがありません', out["permissionDecisionReason"])
+
+    def test_firebase_use_alias_allowed(self):
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        with mock.patch("services.firebase.verify") as mock_verify:
+            result = dispatch("firebase use prod", str(self.project_dir))
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+
 class TestAncestorLookup(unittest.TestCase):
     """親ディレクトリ遡及による accounts.local.json 発見 (worktree 対応)。
 
