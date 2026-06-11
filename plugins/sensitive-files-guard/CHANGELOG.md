@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.14.0
+
+**離脱分析 (churn analysis) に基づく false positive 解消リリース**。本 plugin は
+2026-05-21 にユーザー自身の `enabledPlugins` で無効化されていた (離脱済み)。
+transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 / クレデンシャルの
+内容露出防止) を維持したまま、離脱を引き起こした誤 block 経路を撤去する。
+
+### 離脱分析の要点 (2026-05-12〜05-21, transcript 全件スキャン)
+
+- **実 deny 15 件のうち、実際に機密値を含むファイルへの操作は 0 件**。全件が
+  `*.local.json` パターン起因の false positive (`settings.local.json` =
+  Claude Code 本体の個人設定 ×11、`accounts.local.json` = verify-cloud-account
+  plugin の期待アカウント設定 ×4)
+- うち 5 件は `find -name X` / `ls -la X` / `git check-ignore X` のような
+  **内容を出力しない所在・属性確認** で、deny する予防効果が元々ない
+- 離脱 2 日前 (05-19) に deny 8 件が集中 (settings.local.json の Read / Write /
+  grep / ls / find が全滅し、設定ファイルの読み書き作業が完全に停止)。
+  2 日後の 05-21 に plugin 無効化 (~/.claude の git log で確認)
+- 2026-05-12〜13 には agent team セッションで本 plugin の block が多段
+  エスカレーション (「Eng 取次依頼: Hook ガード解除」) を 2 回発生させ、
+  人間の介入待ちで作業が日単位で停滞していた
+- 逃げ道として用意していた `patterns.local.txt` (`!<basename>` 除外) は
+  **一度も使われないまま離脱** — 「設定の手間 > plugin を切る手間」が成立して
+  おり、escape hatch は離脱抑止として機能しなかった
+- true positive (機密露出の実防止) は transcript 上 0 件。benefit 0 / cost 15
+  denies + 2 escalations で、離脱は合理的判断だった
+
+### 主要な変更
+
+1. **G1: `*.local.json` / `*.local.yaml` / `*.local.yml` / `*.local.toml` を
+   既定 patterns.txt から撤去** — Claude Code エコシステムでは「local = git に
+   入れない個人設定 (非機密)」の命名 (`settings.local.json` /
+   `accounts.local.json` / `CLAUDE.local.md`) が支配的で、`.env` のような
+   「機密値の貯蔵ファイル」とは性質が異なる。機密値を `*.local.json` に置く
+   運用なら `patterns.local.txt` への追記で復活できる (last-match-wins、
+   docs/PATTERNS.md に復活レシピ)。`*.secret*` / dotenv 系 / 鍵・証明書 /
+   クレデンシャル系は維持。
+2. **G2: metadata-only first_token allow-list を新設**
+   (`handlers/bash/constants.py::_METADATA_ONLY_FIRST_TOKENS` /
+   `_GIT_METADATA_SUBCOMMANDS`、`bash_handler.py::_is_metadata_only`) —
+   「operand の内容を stdout に出さない」コマンド (`ls` / `find` / `tree` /
+   `stat` / `file` / `du` / `df` / `test` / `wc` / `basename` / `dirname` /
+   `realpath` / `readlink` / `echo` / `printf`、git は `check-ignore` /
+   `ls-files` / `status` の subcommand 直書き形のみ) は、機密 operand でも
+   operand scan をスキップして **allow** に倒す。値が LLM コンテキストに
+   載らない操作は思想 1 (うっかり**露出**予防) の射程外。判定は residual
+   metachar / hard-stop / opaque の **後段** に置くため、`echo KEY=val > .env`
+   (書込み形) や `find -exec cat {} +` (`{}` hard-stop) は従来通り
+   ask_or_allow に倒れて緩まない。
+3. **G3: 除外 hint に承認文言を追加** (`core/messages.py::_exclude_hint`) —
+   「恒久的に許可したい場合は、**ユーザーの承認を得た上で** patterns.local.txt
+   に `!<basename>` を追加してください。承認なしに自分で追加しないこと。」
+   autonomous 実行の Claude が deny を見て自力で除外を書き足す self-bypass を
+   抑止しつつ、escape hatch の存在は引き続き案内する。
+
+### 動作変化
+
+- **allow に変わるケース**:
+  - `*.local.json` / `*.local.yaml` / `*.local.yml` / `*.local.toml` への
+    Read / Edit / Write / Bash 全経路 (G1)。Stop hook の検出対象からも外れる
+  - `ls -la .env` / `find . -name .env` / `find . -name '.env*'` /
+    `stat .env` / `wc -l .env` / `file .env` / `du .env` / `tree .env` /
+    `test -f .env` / `echo .env` / `realpath .env` / `readlink .env` /
+    `basename .env` / `git check-ignore .env` / `git ls-files .env` (G2、
+    全 mode で allow)
+- **挙動不変 (deny / ask 維持)**:
+  - `cat .env` / `head .env` / `grep KEY .env` / `od -c .env` 等の内容出力系
+    (全 mode deny 固定)
+  - `cp .env X` / `mv .env X` (複製・移動)、`git show HEAD:.env` /
+    `git diff .env` / `git add .env`
+  - `git -C /repo check-ignore .env` (global option 前置形は保守的に対象外)
+  - `echo KEY=val > .env` (residual metachar 先行で ask)、
+    `find . -name .env -exec cat {} +` (hard-stop 先行で ask)
+  - Read / Edit / Write の `.env` 系・鍵・クレデンシャル deny、minimal info
+    (0.9.0 E1/E2)、Bash deny の category 別 reason (0.10.0 E3/E4)
+
+### テスト
+
+- 累計 640 → **673 件 OK** (redact 613→646 / check 27 維持)
+- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 20 件 (機密 operand
+  での metadata-only allow ×12、内容出力系 / cp / git show / global option
+  前置 / 書込み形 / -exec / 複合の deny・ask 維持 ×8)
+- 改修: `tests/test_matcher.py` の DEFAULT_RULES から `*.local.*` 4 行を撤去、
+  `test_local_suffix` → `test_local_config_not_sensitive` (patterns.local.txt
+  での復活経路 assert 込み)、`TestSegmentHardStopReevaluate` の deny 確定
+  segment を `ls .env` → `head .env` に変更 (0.11.0 の検証意図を維持)
+
+### ドキュメント
+
+- `README.md`: 冒頭の対象パターンから `*.local.*` を外し 0.14.0 撤去 note を
+  追加、Bash セクションに metadata-only allow-list の段落を追加、False
+  positive 注意書きを 0.14.0 後の実態に書換、テスト件数 646 に更新
+- `docs/PATTERNS.md`: 既定パターン一覧から `*.local.*` を撤去 + 復活レシピを
+  追記
+- `docs/MATRIX.md`: 「metadata-only first_token (0.14.0 新設)」表を追加、
+  0.11.0 例示の `ls .env` を `head .env` に差替
+- `.claude-plugin/plugin.json`: description から `*.local.*` を撤去し、思想
+  一行「うっかり露出の予防が目的で、敵対的バイパス対策ではない」を追加
+  (名前 `*-guard` はモデルへの遵守圧として維持し、人間向けの期待値調整は
+  description / README が担う分業)
+- marketplace.json (`mao-worktools` 側): entry description の `*.local.*` /
+  「2 段構え」表記を 0.14.0 の実態 (多段 + 思想一行) に同期
+
+### 残課題 (本リリースのスコープ外)
+
+- ~~autonomous モードで `echo KEY=val > .env` / heredoc (`cat > .env <<EOF`) が
+  ask_or_allow → allow に倒れる書込み経路を受容するか要検討~~ →
+  **ユーザー確認 (2026-06-12) で「受容」に確定**。本 plugin の主目的は悪意の
+  ないうっかり露出の予防であり、セキュリティを担保する plugin ではない。
+  redirect / heredoc で機密 path に書き込む形はうっかりの範疇を超えるため
+  対象外として通す (docs/DESIGN.md 既知制限 #14 に記載)
+- 0.13.0 残課題 (plan mode の envelope 実測) は未消化のまま継続
+
 ## 0.13.0
 
 **plan mode の Bash 静的解析不能ケースを `auto` と同等の allow 扱いに戻す

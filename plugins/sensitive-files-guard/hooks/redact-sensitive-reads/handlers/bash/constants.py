@@ -50,6 +50,46 @@ _SAFE_READ_FIRST_TOKENS = frozenset({
     "od", "xxd", "hexdump",
 })
 
+# 0.14.0: metadata-only first_token allow-list (離脱分析 G2)。
+# 「operand の **内容** を stdout に出さない」コマンド群。機密 path が operand に
+# 居ても、出力されるのはファイル名・属性・件数・パス文字列だけで値は LLM
+# コンテキストに載らないため、operand scan を **スキップして allow** に倒す。
+#
+# 2026-05 の離脱分析 (transcript 実測) で、実 deny 15 件のうち
+# ``find -name X`` / ``ls -la X`` / ``git check-ignore X`` のような所在・属性
+# 確認が 1/3 を占めた。これらは思想 1 (うっかり **露出** 予防) の射程外 —
+# 値がコンテキストに載らない操作を止めても予防効果がなく、ユーザー離脱
+# (plugin 無効化) だけが起きる。
+#
+# 含めないもの:
+# - ``cat`` / ``head`` / ``tail`` / ``grep`` / ``od`` 等: 内容を出力する (deny 維持)
+# - ``cp`` / ``mv``: 内容は出ないが別 path への複製で漏洩面が広がる (deny 維持)
+# - ``md5`` / ``shasum`` 等: 値の fingerprint が出る (保守的に対象外)
+#
+# ``echo`` / ``printf`` は引数文字列をそのまま出すだけでファイルを開かない
+# (``echo .env`` は ".env" という 4 文字を出力するだけ)。``echo KEY=val > .env``
+# のような書込み形は ``>`` が residual metachar として **この判定より先に**
+# ask_or_allow へ倒れるため (echo / printf は ``_SAFE_READ_FIRST_TOKENS`` 外)、
+# metadata-only 扱いにしても書込み経路は緩まない。
+# 判定順序: opaque → residual metachar (非 safe_read のみ) → shell keyword
+# → metadata-only → operand scan。
+_METADATA_ONLY_FIRST_TOKENS = frozenset({
+    # ファイル一覧 / 存在・属性確認 (出力は名前・サイズ・時刻・型のみ)
+    "ls", "find", "tree", "stat", "file", "du", "df", "test",
+    # 計数のみ (内容そのものは出ない)
+    "wc",
+    # パス文字列の操作 / 解決 (出力は path 文字列のみ)
+    "basename", "dirname", "realpath", "readlink",
+    # 引数をそのまま表示 (ファイルを開かない)
+    "echo", "printf",
+})
+
+# git の metadata-only subcommand (``git <sub>`` 直書き形のみ認識)。
+# ``git -C dir check-ignore`` のような global option 前置形は対象外 (従来通り
+# operand scan → deny。保守側に倒す)。``show`` / ``diff`` / ``log`` /
+# ``cat-file`` 等の内容出力系は history カテゴリの deny を維持。
+_GIT_METADATA_SUBCOMMANDS = frozenset({"check-ignore", "ls-files", "status"})
+
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
 _HARD_STOP_CHARS = frozenset("$`(){}<\r")

@@ -1013,15 +1013,17 @@ class TestSegmentHardStopReevaluate(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
     def test_or_chain_dotenv_seg1_short_circuit(self):
-        # ls .env || cat $X || echo done — 0.10.0: 全体 hard-stop で ask
-        # 0.11.0: seg1 (ls .env) literal match → deny 確定
-        r = handle(_make_envelope("ls .env || cat $X || echo done", self.tmp))
+        # head .env || cat $X || echo done — 0.10.0: 全体 hard-stop で ask
+        # 0.11.0: seg1 (head .env) literal match → deny 確定
+        # (0.14.0 で `ls .env` は metadata-only allow になったため、内容出力系の
+        #  head で segment 短絡を検証する)
+        r = handle(_make_envelope("head .env || cat $X || echo done", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_hard_stop_seg1_then_deny_seg2(self):
-        # cat $X | ls .env | head — 0.10.0: 全体 hard-stop で ask
-        # 0.11.0: seg1 hard-stop pending_ask → seg2 (ls .env) で deny 確定
-        r = handle(_make_envelope("cat $X | ls .env | head", self.tmp))
+        # cat $X | head .env | wc -l — 0.10.0: 全体 hard-stop で ask
+        # 0.11.0: seg1 hard-stop pending_ask → seg2 (head .env) で deny 確定
+        r = handle(_make_envelope("cat $X | head .env | wc -l", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     # --- 互換性: 既存挙動の継続 (regression 保護) ---
@@ -1210,6 +1212,132 @@ class TestSafeReadAllowlist(BaseBash):
             "grep foo README.md > /tmp/out && cat .env", self.tmp,
         ))
         self.assertEqual(_decision(r), "deny")
+
+
+class TestMetadataOnlyAllow(BaseBash):
+    """0.14.0 (G2): metadata-only first_token は機密 operand でも allow。
+
+    ``ls -la .env`` / ``find . -name .env`` / ``git check-ignore .env`` 等の
+    所在・属性確認は operand の **内容** を stdout に出さないため、値が LLM
+    コンテキストに載らない。deny しても露出予防効果がなくユーザー離脱だけが
+    起きる (2026-05 離脱分析: 実 deny 15 件中、内容露出につながるものは 0 件)。
+    """
+
+    # --- 機密 operand でも allow (全 mode 共通、default で確認) ---
+    def test_ls_dotenv_allow(self):
+        r = handle(_make_envelope("ls -la .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_find_name_dotenv_allow(self):
+        r = handle(_make_envelope("find . -name .env -type f", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_find_name_dotenv_glob_allow(self):
+        # glob operand も metadata-only ならスキップ (.env* は通常 deny 固定)
+        r = handle(_make_envelope("find . -name '.env*'", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_stat_dotenv_allow(self):
+        r = handle(_make_envelope("stat .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_wc_dotenv_allow(self):
+        r = handle(_make_envelope("wc -l .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_file_du_dotenv_allow(self):
+        for cmd in ("file .env", "du -h .env", "tree .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+            )
+
+    def test_test_dash_f_dotenv_allow(self):
+        r = handle(_make_envelope("test -f .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_echo_dotenv_literal_allow(self):
+        # echo はファイルを開かない (".env" という文字列を出力するだけ)
+        r = handle(_make_envelope("echo .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_realpath_readlink_dotenv_allow(self):
+        for cmd in ("realpath .env", "readlink -f .env", "basename /app/.env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+            )
+
+    def test_git_check_ignore_dotenv_allow(self):
+        r = handle(_make_envelope("git check-ignore -v .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_git_ls_files_dotenv_allow(self):
+        r = handle(_make_envelope("git ls-files --error-unmatch .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_ls_dotenv_with_redirect_allow(self):
+        # ls は _SAFE_READ_FIRST_TOKENS でもあるため residual metachar を skip し、
+        # metadata-only で allow (出力はファイル名一覧のみ)
+        r = handle(_make_envelope("ls -la .env > /tmp/x", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    # --- 内容出力系 / 書込み形 / 保守的境界は従来挙動を維持 ---
+    def test_cat_head_grep_dotenv_still_deny(self):
+        for cmd in ("cat .env", "head -5 .env", "grep KEY .env", "od -c .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_git_show_diff_add_dotenv_still_deny(self):
+        # 内容出力系 subcommand と index 追加は deny 維持
+        for cmd in ("git show HEAD:.env", "git diff .env", "git add .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_git_global_option_prefix_conservative_deny(self):
+        # `git -C dir check-ignore` の global option 前置形は保守的に対象外
+        r = handle(_make_envelope("git -C /repo check-ignore .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_echo_redirect_to_dotenv_still_ask(self):
+        # echo は _SAFE_READ_FIRST_TOKENS 外なので residual metachar (`>`) が
+        # metadata-only 判定より先に効き、書込み形は従来通り ask (default)
+        r = handle(_make_envelope("echo KEY=val > .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_find_exec_cat_dotenv_still_ask(self):
+        # -exec の `{}` は hard-stop → segment 単位で ask 維持
+        r = handle(_make_envelope(
+            "find . -name .env -exec cat {} +", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_find_redirect_still_ask(self):
+        # find は _SAFE_READ_FIRST_TOKENS 外なので `>` 含みは residual ask 維持
+        r = handle(_make_envelope("find . -name .env > /tmp/x", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+
+    def test_metadata_then_sensitive_segment_still_deny(self):
+        # 複合: metadata segment の allow は他 segment の deny を変えない
+        r = handle(_make_envelope("ls -la .env && cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_cp_mv_dotenv_still_deny(self):
+        # cp / mv は内容を出さないが複製で漏洩面が広がるため deny 維持 (move category)
+        for cmd in ("cp .env /tmp/backup.env", "mv .env /tmp/.env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
 
 
 if __name__ == "__main__":

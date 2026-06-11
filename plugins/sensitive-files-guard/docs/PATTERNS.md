@@ -9,12 +9,6 @@
 fnmatch 書式、`!` プレフィクスは除外。
 
 ```
-# ローカル設定
-*.local.json
-*.local.yaml
-*.local.yml
-*.local.toml
-
 # 機密情報
 *.secret*
 
@@ -54,6 +48,22 @@ service-account*.json
 !*.dist.*
 !*.pub
 ```
+
+> **0.14.0 で `*.local.json` / `*.local.yaml` / `*.local.yml` / `*.local.toml`
+> を既定から撤去**。Claude Code エコシステムでは `settings.local.json`
+> (Claude Code 本体の個人設定) や `accounts.local.json` 等、「local = git に
+> 入れない個人設定 (非機密)」の命名が支配的で、離脱分析 (2026-05) で実 deny の
+> 100% がこのパターン起因・防いだ機密露出は 0 件だった。機密値を
+> `*.local.json` に置く運用 (例: .NET の `appsettings.local.json` に接続文字列)
+> なら、`patterns.local.txt` に以下を追記して復活できる:
+>
+> ```
+> # *.local.* を機密扱いに戻す (last-match-wins で既定の後に評価される)
+> *.local.json
+> *.local.yaml
+> *.local.yml
+> *.local.toml
+> ```
 
 ## ローカル拡張 `patterns.local.txt` (0.6.0 から単一パス)
 

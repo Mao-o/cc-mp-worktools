@@ -1,8 +1,9 @@
-# ローカル設定
-*.local.json
-*.local.yaml
-*.local.yml
-*.local.toml
+# NOTE: 0.14.0 で `*.local.json` / `*.local.yaml` / `*.local.yml` / `*.local.toml`
+# を既定から撤去した。Claude Code エコシステムでは `settings.local.json` /
+# `accounts.local.json` 等「local = git に入れない個人設定 (非機密)」の命名が
+# 支配的で、離脱分析 (2026-05) で実 deny の 100% がこのパターン起因・防いだ
+# 機密露出は 0 件だったため。機密値を `*.local.json` に置く運用なら
+# patterns.local.txt に同パターンを追記して復活できる (docs/PATTERNS.md 参照)。
 
 # 機密情報
 *.secret*

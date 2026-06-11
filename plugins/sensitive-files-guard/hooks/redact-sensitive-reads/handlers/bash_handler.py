@@ -42,6 +42,11 @@ segment 単位再評価へ移行)。
      ``cat .env`` と解釈して deny) は 0.8.0 で撤廃。
    - 残留 metachar (``>`` ``&`` 等) → ``ask_or_allow``
    - shell keyword (``if``/``for``/``do`` 等) → ``ask_or_allow``
+   - **metadata-only 判定 (0.14.0)** — 第一トークンが「operand の内容を出力
+     しない」コマンド (``ls`` / ``find`` / ``stat`` / ``echo`` 等、git は
+     ``check-ignore`` / ``ls-files`` / ``status`` subcommand 直書き形) なら
+     operand scan をスキップして **allow** (値が LLM コンテキストに載らない
+     操作は思想 1 の射程外)
    - operand scan: 各 path 候補について
      - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
        ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
@@ -73,8 +78,10 @@ from core.safepath import normalize
 # 再提示する。定義本体はサブモジュール側に置き、このモジュールは views のみ。
 from handlers.bash.constants import (  # noqa: F401
     _ENV_PREFIX_RE,
+    _GIT_METADATA_SUBCOMMANDS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
+    _METADATA_ONLY_FIRST_TOKENS,
     _OPAQUE_WRAPPERS,
     _REDIRECT_OP_TOKENS,
     _SAFE_READ_CMDS,
@@ -129,6 +136,30 @@ def _is_opaque_first_token(token: str) -> bool:
     if token.startswith(("/", "./", "../")):
         return True
     if token in _OPAQUE_WRAPPERS:
+        return True
+    return False
+
+
+def _is_metadata_only(tokens: list[str]) -> bool:
+    """セグメントが「operand の内容を出力しない」metadata-only コマンドか (0.14.0)。
+
+    True なら operand scan をスキップして allow に倒す。``ls -la .env`` /
+    ``find . -name .env`` / ``git check-ignore .env`` のような所在・属性確認は
+    値を LLM コンテキストに載せないため、思想 1 (うっかり **露出** 予防) の
+    射程外。deny しても予防効果がなくユーザー離脱だけが起きる (2026-05 離脱分析)。
+
+    git は ``git <sub>`` 直書きの metadata subcommand
+    (``_GIT_METADATA_SUBCOMMANDS``) のみ認識。global option 前置
+    (``git -C dir check-ignore``) は保守的に対象外。
+    """
+    first = tokens[0]
+    if first in _METADATA_ONLY_FIRST_TOKENS:
+        return True
+    if (
+        first == "git"
+        and len(tokens) >= 2
+        and tokens[1] in _GIT_METADATA_SUBCOMMANDS
+    ):
         return True
     return False
 
@@ -242,6 +273,15 @@ def _analyze_segment(
             M.bash_lenient("shell_keyword", detail=first),
             envelope,
         )
+
+    # 0.14.0 (G2): metadata-only コマンドは operand の内容を出力しないため、
+    # 機密 operand でも allow に倒す (operand scan 自体をスキップ)。
+    # residual metachar 判定の **後** に置くことで、`echo KEY=val > .env` /
+    # `find ... > /tmp/x` のような書込み形は従来通り ask_or_allow に倒れる
+    # (echo / printf / find は _SAFE_READ_FIRST_TOKENS 外なので residual 先行)。
+    if _is_metadata_only(tokens):
+        L.log_info("bash_classify", f"metadata_only_allow:{first}")
+        return output.make_allow()
 
     if is_safe_read:
         L.log_info("bash_classify", f"safe_read_allowlist:{first}")
