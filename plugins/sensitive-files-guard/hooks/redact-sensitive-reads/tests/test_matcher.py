@@ -16,11 +16,9 @@ from _shared.matcher import is_sensitive
 
 
 # 既定 patterns.txt 相当の rules (既定 → ローカルの順で last-match-wins 評価)。
+# 0.14.0: `*.local.json` 等のローカル設定系 4 パターンを既定から撤去 (離脱分析
+# G1。settings.local.json / accounts.local.json 等の個人設定を誤 block するため)。
 DEFAULT_RULES: list[tuple[str, bool]] = [
-    ("*.local.json", False),
-    ("*.local.yaml", False),
-    ("*.local.yml", False),
-    ("*.local.toml", False),
     ("*.secret*", False),
     (".env", False),
     (".env.*", False),
@@ -61,7 +59,8 @@ class TestMatcherDotenv(unittest.TestCase):
 
     def test_exclude_wins_on_template(self):
         self.assertFalse(is_sensitive(".env.example", DEFAULT_RULES))
-        self.assertFalse(is_sensitive("config.local.json.template", DEFAULT_RULES))
+        # include (credentials*.json) より後ろの exclude (*.example.*) が勝つ
+        self.assertFalse(is_sensitive("credentials.example.json", DEFAULT_RULES))
 
 
 class TestMatcherBasic(unittest.TestCase):
@@ -74,9 +73,17 @@ class TestMatcherBasic(unittest.TestCase):
         self.assertTrue(is_sensitive("app.secret", DEFAULT_RULES))
         self.assertTrue(is_sensitive("app.secrets.yaml", DEFAULT_RULES))
 
-    def test_local_suffix(self):
-        self.assertTrue(is_sensitive("accounts.local.json", DEFAULT_RULES))
+    def test_local_config_not_sensitive(self):
+        # 0.14.0 (G1): `*.local.json` 等は既定パターンから撤去。
+        # settings.local.json (Claude Code 設定) / accounts.local.json
+        # (verify-cloud-account 設定) 等の個人設定が誤 block されていたため。
+        self.assertFalse(is_sensitive("accounts.local.json", DEFAULT_RULES))
+        self.assertFalse(is_sensitive("settings.local.json", DEFAULT_RULES))
+        self.assertFalse(is_sensitive("config.local.yaml", DEFAULT_RULES))
         self.assertFalse(is_sensitive("accounts.json", DEFAULT_RULES))
+        # patterns.local.txt で復活させる経路は維持 (last-match-wins)
+        rules = DEFAULT_RULES + [("*.local.json", False)]
+        self.assertTrue(is_sensitive("accounts.local.json", rules))
 
     def test_parts_match_parent_dir(self):
         # 親ディレクトリ名が機密パターンの場合 (symlink race 等の偽装対策)

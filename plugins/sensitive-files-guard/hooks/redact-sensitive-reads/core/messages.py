@@ -94,13 +94,15 @@ def _exclude_hint(basename: str) -> str:
     """
     if not basename:
         return (
-            f"許可したい場合は `{_LOCAL_PATTERNS_PATH}` に除外行 "
-            "(`!<basename>`) を追加してください。"
+            f"恒久的に許可したい場合は、ユーザーの承認を得た上で "
+            f"`{_LOCAL_PATTERNS_PATH}` に除外行 "
+            "(`!<basename>`) を追加してください。承認なしに自分で追加しないこと。"
         )
     safe = _sanitize_for_inline(basename)
     return (
-        f"許可したい場合は `{_LOCAL_PATTERNS_PATH}` に "
-        f"`!{safe}` を追加してください。"
+        f"恒久的に許可したい場合は、ユーザーの承認を得た上で "
+        f"`{_LOCAL_PATTERNS_PATH}` に "
+        f"`!{safe}` を追加してください。承認なしに自分で追加しないこと。"
     )
 
 

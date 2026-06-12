@@ -1266,6 +1266,73 @@ Validating plugin: .../sensitive-files-guard/CLAUDE.local.md
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
 
+### 2026-06-11: 離脱対応 (0.14.0 リリース) — G1 / G2 / G3
+
+本レビューサイクル (PR 6 = E5/E6 + D1/D2) のスコープ外で、**離脱分析に基づく
+false positive 解消リリース**として独立実施。0.12.0 / 0.13.0 と同系統の
+「ユーザー体感修正」枠。
+
+#### 背景 (離脱の事実)
+
+- **2026-05-21 にユーザー自身が `~/.claude/settings.json` の enabledPlugins で
+  本 plugin を無効化** (`~/.claude` git log commit f1d6b0b で確認)。worktools
+  の他 4 plugin は有効のまま = 本 plugin 単独の離脱
+- transcript 全件スキャン (2026-05-12〜05-21) で実 deny 15 件を特定。**100% が
+  `*.local.json` パターン起因の false positive** (settings.local.json ×11 /
+  accounts.local.json ×4)、true positive 0 件
+- 離脱 2 日前 (05-19) に deny 8 件が集中、agent team セッションでは block 起因の
+  人間エスカレーションが 2 回発生
+- `patterns.local.txt` の escape hatch は一度も使われずに離脱
+
+#### 実装 (G タスク)
+
+- **G1**: `*.local.json` / `*.local.yaml` / `*.local.yml` / `*.local.toml` を
+  既定 patterns.txt から撤去 (patterns.local.txt での復活レシピを
+  docs/PATTERNS.md に記載)
+- **G2**: `_METADATA_ONLY_FIRST_TOKENS` (ls / find / tree / stat / file / du /
+  df / test / wc / basename / dirname / realpath / readlink / echo / printf) +
+  `_GIT_METADATA_SUBCOMMANDS` (check-ignore / ls-files / status) を新設。
+  内容を stdout に出さないコマンドは機密 operand でも operand scan をスキップ
+  して allow
+- **G3**: `_exclude_hint` に「ユーザーの承認を得た上で」「承認なしに自分で
+  追加しないこと」を明記 (autonomous Claude の self-bypass 抑止)
+
+#### テスト結果
+
+- 累計 640 → **673 件 OK** (redact 613→646 / check 27 維持)
+- 新規: `TestMetadataOnlyAllow` 20 件。改修: `test_matcher.py` DEFAULT_RULES /
+  `test_local_config_not_sensitive`、`TestSegmentHardStopReevaluate` の
+  `ls .env` → `head .env` 差替 (0.11.0 の検証意図維持)
+
+#### 完了状況サマリ (0.14.0 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 / B2 / B3 | **0.8.0 ✓** |
+| P4 | E1 / E2 | **0.9.0 ✓** |
+| P5 | E3 / E4 | **0.10.0 ✓** |
+| P1 | F1 (hard-stop の segment 単位再評価) | **0.11.0 ✓** |
+| P2 | F2 (read-only first_token allow-list) | **0.12.0 ✓** |
+| — | plan mode LENIENT 差し戻し (HOTFIX) | **0.13.0 ✓** |
+| P1 | G1 / G2 / G3 (離脱分析対応) | **0.14.0 ✓** |
+| P6 | E5 (json/toml/yaml status) | 未着手 (PR 6) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6) |
+| P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6) |
+
+#### v1.0.0 (PR 6) での追加検討事項 (2026-06-12 追記)
+
+- **plugin rename の最終判断**: 思想 (「うっかり予防のついでに少し守れれば
+  十分」) に対して `sensitive-files-guard` が過剰名称かをユーザーと議論した
+  結果、**名前は維持** (guard は保証語ではなく役割語。deny reason を読む
+  モデルへの遵守圧として強めの名前が機能する)、**人間向けの期待値調整は
+  description / README が担う**で決着 (0.14.0 で description に思想一行を
+  追加済み)。ただし**もし rename するなら breaking change を許容できる
+  v1.0.0 のタイミング**とユーザーが言及。PR 6 着手時に rename 要否を最終
+  確認すること (候補: `sensitive-files-guardrail`。波及先: enabledPlugins
+  キー / marketplace entry / 設定 dir `~/.claude/sensitive-files-guard/`)
+
 ---
 
 ## 新規セッションでこのファイルを開いた時の手順

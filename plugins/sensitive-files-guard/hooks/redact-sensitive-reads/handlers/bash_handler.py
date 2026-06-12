@@ -42,6 +42,14 @@ segment 単位再評価へ移行)。
      ``cat .env`` と解釈して deny) は 0.8.0 で撤廃。
    - 残留 metachar (``>`` ``&`` 等) → ``ask_or_allow``
    - shell keyword (``if``/``for``/``do`` 等) → ``ask_or_allow``
+   - **metadata-only 判定 (0.14.0)** — 第一トークンが「operand の内容を出力
+     しない」コマンド (``ls`` / ``stat`` / ``echo`` 等、git は ``check-ignore``
+     / ``ls-files`` subcommand 直書き形) なら operand scan をスキップして
+     **allow** (値が LLM コンテキストに載らない操作は思想 1 の射程外)。
+     ``find`` は ``-exec`` / ``-delete`` 等の内容出力・副作用アクションが無い
+     場合のみ、``file`` / ``wc`` / ``du`` / ``tree`` はファイル名リスト読込
+     オプション (``-f`` / ``--files0-from`` 等) が無い場合のみ metadata-only。
+     ``git status`` は ``-v`` が staged diff を出すため対象外
    - operand scan: 各 path 候補について
      - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
        ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
@@ -73,8 +81,14 @@ from core.safepath import normalize
 # 再提示する。定義本体はサブモジュール側に置き、このモジュールは views のみ。
 from handlers.bash.constants import (  # noqa: F401
     _ENV_PREFIX_RE,
+    _FIND_DANGEROUS_ACTIONS,
+    _GIT_LS_FILES_OBJECT_OPTS,
+    _GIT_LS_FILES_SHORT_FLAGS,
+    _GIT_METADATA_SUBCOMMANDS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
+    _METADATA_CONTENT_READING_OPTS,
+    _METADATA_ONLY_FIRST_TOKENS,
     _OPAQUE_WRAPPERS,
     _REDIRECT_OP_TOKENS,
     _SAFE_READ_CMDS,
@@ -96,6 +110,7 @@ from handlers.bash.operand_lexer import (  # noqa: F401
 )
 from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
+    _redirect_write_targets,
     _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
@@ -131,6 +146,136 @@ def _is_opaque_first_token(token: str) -> bool:
     if token in _OPAQUE_WRAPPERS:
         return True
     return False
+
+
+def _reads_file_content(first: str, tokens: list[str]) -> bool:
+    """metadata-only コマンドが operand ファイルの **中身** を名前リストとして
+    読み、出力 / エラーに echo するオプションを持つか (0.14.0, Codex P2 第2弾)。
+
+    ``file -f .env`` / ``wc --files0-from=.env`` / ``du --files0-from=.env`` /
+    ``tree --fromfile .env`` は operand の中身を別パスのリストとして読み込み、
+    その名前 (= .env の各行) を stdout / エラーに echo するため metadata-only
+    ではない。``_METADATA_CONTENT_READING_OPTS`` で first_token ごとに危険
+    オプションを定義し、分離形 (``-f .env``) / 値結合形 (``--files0-from=.env``
+    / ``-f.env``) いずれも検出する。
+    """
+    opts = _METADATA_CONTENT_READING_OPTS.get(first)
+    if not opts:
+        return False
+    for tok in tokens[1:]:
+        for opt in opts:
+            if tok == opt or tok.startswith(opt + "="):
+                return True
+            # 短縮形の値結合 (``file -f.env``)
+            if (
+                len(opt) == 2
+                and opt[0] == "-"
+                and opt[1] != "-"
+                and len(tok) > 2
+                and tok.startswith(opt)
+            ):
+                return True
+    return False
+
+
+def _git_ls_files_exposes_object(args: list[str]) -> bool:
+    """git ls-files が blob object name (= 内容の指紋) を出力するオプションを
+    持つか (0.14.0, Codex P2 第3弾)。
+
+    ``-s`` / ``--stage`` は staged blob の object hash を、``--format`` は
+    ``%(objectname)`` 等で hash を出力できる。``md5`` / ``shasum`` を metadata
+    allowlist 外にしているのと同じく fingerprint 露出を防ぐ。短縮フラグの束ね
+    (``-sz`` 等、値を取らない flag のみ) も検出する。plain ``git ls-files .env``
+    (名前のみ) は False を返し allow 維持。
+    """
+    for tok in args:
+        if tok in _GIT_LS_FILES_OBJECT_OPTS or tok.startswith("--format="):
+            return True
+        # 短縮フラグ束ね: 単一 '-' + 値を取らない flag 文字列に 's' を含む
+        # (例: ``-sz`` / ``-zs``)。``-x``/``-X`` は値を取るため SHORT_FLAGS 外で、
+        # ``-x s.env`` のような値を誤検出しない。
+        if (
+            len(tok) > 1
+            and tok[0] == "-"
+            and not tok.startswith("--")
+            and "s" in tok[1:]
+            and all(c in _GIT_LS_FILES_SHORT_FLAGS for c in tok[1:])
+        ):
+            return True
+    return False
+
+
+def _is_metadata_only(tokens: list[str]) -> bool:
+    """セグメントが「operand の内容を出力しない」metadata-only コマンドか (0.14.0)。
+
+    True なら operand scan をスキップして allow に倒す。``ls -la .env`` /
+    ``find . -name .env`` / ``git check-ignore .env`` のような所在・属性確認は
+    値を LLM コンテキストに載せないため、思想 1 (うっかり **露出** 予防) の
+    射程外。deny しても予防効果がなくユーザー離脱だけが起きる (2026-05 離脱分析)。
+
+    ``find`` は条件付き: ``-exec`` / ``-delete`` / ``-fprint`` 等の内容出力・
+    副作用アクション (``_FIND_DANGEROUS_ACTIONS``) を含む場合は metadata-only
+    から除外する。``find . -name .env -exec cat .env ';'`` は ``cat`` を実行して
+    .env の内容を stdout に出すため (Codex P1, 2026-06-12)。``{}`` を使う
+    ``find ... -exec cat {} +`` 形は ``handle()`` の hard-stop で先に ask に
+    倒れるが、literal path を使う ``;`` 形 (``{}`` 無し) はここに到達する。
+
+    ``file`` / ``wc`` / ``du`` / ``tree`` は ``-f`` / ``--files0-from`` /
+    ``--fromfile`` 等で operand の **中身** をファイル名リストとして読み echo
+    するため、``_reads_file_content`` でそれらのオプションを検出したら除外する
+    (Codex P2 第2弾)。
+
+    git は ``git <sub>`` 直書きの metadata subcommand
+    (``_GIT_METADATA_SUBCOMMANDS`` = ``check-ignore`` / ``ls-files``) のみ認識。
+    ``ls-files`` は plain な path listing のみ metadata-only。``-s`` /
+    ``--stage`` / ``--format`` は blob object name (= 内容の安定した指紋) を
+    出せるため除外する (Codex P2 第3弾)。
+    ``status`` は ``-v`` / ``--verbose`` が staged diff (機密の旧値/新値) を
+    出力するため allowlist から除外した (Codex P1 第2弾)。裸の ``git status``
+    は operand に機密 path が無いため operand scan で allow に倒れる。global
+    option 前置 (``git -C dir check-ignore``) は保守的に対象外。
+    """
+    first = tokens[0]
+    if first == "find":
+        return not any(t in _FIND_DANGEROUS_ACTIONS for t in tokens[1:])
+    if first in _METADATA_ONLY_FIRST_TOKENS:
+        return not _reads_file_content(first, tokens)
+    if (
+        first == "git"
+        and len(tokens) >= 2
+        and tokens[1] in _GIT_METADATA_SUBCOMMANDS
+    ):
+        if tokens[1] == "ls-files" and _git_ls_files_exposes_object(tokens[2:]):
+            return False
+        return True
+    return False
+
+
+def _sensitive_redirect_target(
+    tokens: list[str],
+    cwd: str,
+    rules: list[tuple[str, bool]],
+) -> str | None:
+    """機密 path への **書き込みリダイレクト** target を返す (無ければ None) (0.14.0, P2)。
+
+    ``ls > .env`` は ``ls`` が metadata-only でも ``>`` が .env を truncate する
+    破壊的書込み。metadata-only は operand の **内容露出** 懸念だけを抑制する
+    ものなので、redirect target の機密書込みはこの関数で別途検出して
+    metadata-only shortcut の代わりに deny を返す根拠にする。
+
+    ``_redirect_write_targets`` が抽出した各 target を ``_operand_is_sensitive``
+    で判定し、最初に機密一致した target を返す。fused 形 (``>.env``) では
+    operand scan が ``>.env`` を 1 トークンとして拾えないため、ここで直接
+    target を取り出して deny する必要がある。normalize 失敗 target は安全側で
+    そのまま返す (deny 経路へ)。
+    """
+    for target in _redirect_write_targets(tokens):
+        try:
+            if _operand_is_sensitive(target, cwd, rules):
+                return target
+        except (ValueError, OSError):
+            return target
+    return None
 
 
 def _operand_is_sensitive(
@@ -215,6 +360,12 @@ def _analyze_segment(
     redirect (例: ``grep foo > .env``) は operand scan で deny 固定なので
     safety net が残る。``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` とは disjoint
     のため、これらの ask 経路は allow-list ヒットでは自動的に通らない。
+
+    0.14.0: metadata-only shortcut は ``_has_sensitive_redirect_target`` で
+    gate する。safe_read かつ metadata-only (``ls`` / ``stat`` / ``wc`` 等) は
+    residual metachar 判定を skip するため、``ls > .env`` のような機密 path への
+    redirect 書込みが shortcut で allow に倒れる穴があった。redirect target が
+    機密のときは shortcut せず operand scan → deny に倒す (Codex P2)。
     """
     if not tokens:
         return output.make_allow()
@@ -242,6 +393,30 @@ def _analyze_segment(
             M.bash_lenient("shell_keyword", detail=first),
             envelope,
         )
+
+    # 0.14.0 (G2): metadata-only コマンドは operand の内容を出力しないため、
+    # 機密 operand でも allow に倒す (operand scan 自体をスキップ)。
+    # residual metachar 判定の **後** に置くことで、`echo KEY=val > .env` /
+    # `find ... > /tmp/x` のような書込み形は従来通り ask_or_allow に倒れる
+    # (echo / printf / find は _SAFE_READ_FIRST_TOKENS 外なので residual 先行)。
+    #
+    # ただし metadata-only ∩ safe_read (ls / stat / wc / file / du / df / tree)
+    # は residual metachar 判定を skip するため、機密 path への redirect 書込み
+    # (``ls > .env`` で .env を truncate) がここに到達する。metadata-only は
+    # operand の **内容露出** 懸念だけを抑制するもので破壊的書込みは別懸念のため、
+    # 機密 redirect target があれば metadata allow ではなく deny を返す
+    # (Codex P2, 2026-06-12)。fused 形 ``>.env`` は operand scan が拾えないため
+    # ここで直接 deny する。`ls -la .env > /tmp/x` のように read operand が
+    # 機密でも書込み先が非機密なら allow 維持。
+    if _is_metadata_only(tokens):
+        redirect_target = _sensitive_redirect_target(
+            tokens, envelope.get("cwd", ""), rules
+        )
+        if redirect_target is not None:
+            L.log_info("bash_classify", f"metadata_redirect_deny:{first}")
+            return _build_deny_response(tokens, redirect_target, envelope)
+        L.log_info("bash_classify", f"metadata_only_allow:{first}")
+        return output.make_allow()
 
     if is_safe_read:
         L.log_info("bash_classify", f"safe_read_allowlist:{first}")
@@ -323,6 +498,30 @@ def handle(envelope: dict) -> dict:
     pending_ask: dict | None = None
     for seg in segments:
         if _has_hard_stop(seg):
+            # ``--format='%(objectname)'`` は括弧で hard-stop になるが、
+            # git ls-files の fingerprint 出力形は既知なので deny を優先する。
+            try:
+                tokens = _strip_safe_redirects(
+                    shlex.split(seg, comments=False, posix=True)
+                )
+            except ValueError:
+                tokens = []
+            if (
+                len(tokens) >= 2
+                and tokens[0] == "git"
+                and tokens[1] == "ls-files"
+                and _git_ls_files_exposes_object(tokens[2:])
+            ):
+                for p in _find_path_candidates(tokens):
+                    try:
+                        if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
+                            L.log_info("bash_classify", "git_ls_files_object_deny")
+                            return _build_deny_response(tokens, p, envelope)
+                    except (ValueError, OSError):
+                        return output.ask_or_allow(
+                            M.bash_lenient("normalize_failed"),
+                            envelope,
+                        )
             L.log_info("bash_classify", "hard_stop_lenient")
             if pending_ask is None:
                 pending_ask = output.ask_or_allow(
