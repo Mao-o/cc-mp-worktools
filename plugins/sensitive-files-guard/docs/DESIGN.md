@@ -160,6 +160,15 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   `_is_metadata_only` の `_FIND_DANGEROUS_ACTIONS` 判定で捕捉する (Codex P1,
   2026-06-12)。`-print` / `-printf` / `-ls` (stdout への metadata 出力) は安全
   なので metadata-only 維持。
+- **`file` / `wc` / `du` / `tree` の「ファイル名リスト読込」オプション**
+  (`file -f` / `--files-from`、`wc`/`du` の `--files0-from`、`tree --fromfile`
+  = `_METADATA_CONTENT_READING_OPTS`) を含む形も metadata-only から除外して
+  deny。これらは operand ファイルの **中身** を別パスのリストとして読み、その
+  名前 (= 中身) を stdout / エラーに echo するため。`file -f .env` は .env の
+  各行を `<行>: cannot open` でエラー出力し実値を漏らす (Codex P2 第2弾,
+  2026-06-12)。`file .env` / `wc -l .env` (通常形、型判定・行数のみ) は安全で
+  metadata-only 維持。分離形 (`-f .env`) / 値結合形 (`--files0-from=.env` /
+  `-f.env`) 両対応。
 - `git -C dir check-ignore` のような global option 前置形は保守的に対象外
   (従来通り operand scan → deny)。
 - **機密 path への redirect 書込み** (`ls > .env` で .env を truncate) は

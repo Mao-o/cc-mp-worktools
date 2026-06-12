@@ -68,6 +68,15 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
    の機密書込み deny と整合。read operand のみ機密で書込み先が非機密な
    `ls -la .env > /tmp/x` は allow 維持。`>|` clobber は `|` が segment 分割で
    割れるため未対応 (obscure・思想 1 射程外、既知制限 #15)。
+   **ファイル名リスト読込オプションは deny** (Codex P2 第2弾対応): `file -f` /
+   `--files-from`、`wc`/`du` の `--files0-from`、`tree --fromfile`
+   (`_METADATA_CONTENT_READING_OPTS`) は operand の **中身** を別パスのリストと
+   して読み、その名前 (= .env の各行) を stdout / エラーに echo するため、
+   `_reads_file_content` で検出して metadata-only から除外し deny。`file -f .env`
+   は実測で `DATABASE_URL=...: cannot open` のように全行を echo する。通常形
+   (`file .env` / `wc -l .env` / `du -sh .env` / `tree .env`) は内容を出さない
+   ため allow 維持。分離形 (`-f .env`) / 値結合形 (`--files0-from=.env` /
+   `-f.env`) 両対応。
 3. **G3: 除外 hint に承認文言を追加** (`core/messages.py::_exclude_hint`) —
    「恒久的に許可したい場合は、**ユーザーの承認を得た上で** patterns.local.txt
    に `!<basename>` を追加してください。承認なしに自分で追加しないこと。」
@@ -97,11 +106,13 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
 
 ### テスト
 
-- 累計 640 → **688 件 OK** (redact 661 / check 27 維持)
-- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 25 件 (機密 operand
+- 累計 640 → **693 件 OK** (redact 666 / check 27 維持)
+- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 30 件 (機密 operand
   での metadata-only allow ×13、内容出力系 / cp / git show / global option
   前置 / 書込み形 / find dangerous action (`-exec` literal / `-execdir` /
-  `-delete` / `-fprintf`) / 複合の deny・ask 維持 + `-printf` allow 維持 ×12)
+  `-delete` / `-fprintf`) / 複合の deny・ask 維持 + `-printf` allow 維持 ×12 +
+  content-reading オプション (`file -f` / `--files-from` / `wc`/`du`
+  `--files0-from` / `tree --fromfile`) deny + 通常形 allow ×5)
 - 新規: `tests/test_bash_handler.py::TestMetadataRedirectTarget` 10 件 (Codex P2:
   `ls > .env` / fused `>.env` / `>>` / `1>` / `&>` の機密 redirect 書込み deny
   ×7、`>|` clobber 既知限界 allow ×1、書込み先非機密 / read operand のみ機密の

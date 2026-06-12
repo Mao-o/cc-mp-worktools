@@ -102,6 +102,26 @@ _FIND_DANGEROUS_ACTIONS = frozenset({
     "-fprint", "-fprint0", "-fprintf", "-fls",
 })
 
+# metadata-only コマンドのうち「operand ファイルの **中身** を別パスのリストと
+# して読み、その名前 (= 中身) を stdout / stderr に echo する」オプション
+# (0.14.0, Codex P2 第2弾)。これらを含むコマンドは metadata-only から除外して
+# operand scan → deny に倒す。find の ``-exec`` と同じ「オプションで内容露出に
+# 化ける」クラス。
+# - ``file -f FILE`` / ``--files-from FILE``: namefile の各行をファイル名扱いし、
+#   ``<行>: cannot open`` 等のエラーに行内容を echo する
+# - ``wc --files0-from=F`` / ``du --files0-from=F``: NUL 区切り名を F から読む。
+#   dotenv は NUL 区切りでないため全内容を 1 名前として読みエラーに echo
+# - ``tree --fromfile``: ディレクトリ一覧をファイルから読み tree 表示で echo
+# 値結合形 (``--files0-from=.env`` / ``-f.env``) と分離形 (``-f .env``) 両対応。
+# 除外後は operand scan が値を拾って deny する (``_find_path_candidates`` が
+# ``--opt=val`` / ``-Xval`` / 分離 operand いずれも候補化するため)。
+_METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
+    "file": frozenset({"-f", "--files-from"}),
+    "wc": frozenset({"--files0-from"}),
+    "du": frozenset({"--files0-from"}),
+    "tree": frozenset({"--fromfile"}),
+}
+
 # git の metadata-only subcommand (``git <sub>`` 直書き形のみ認識)。
 # ``git -C dir check-ignore`` のような global option 前置形は対象外 (従来通り
 # operand scan → deny。保守側に倒す)。``show`` / ``diff`` / ``log`` /

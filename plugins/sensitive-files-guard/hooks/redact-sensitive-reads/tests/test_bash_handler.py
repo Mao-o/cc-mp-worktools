@@ -1357,6 +1357,51 @@ class TestMetadataOnlyAllow(BaseBash):
         ))
         self.assertTrue(output.is_allow(r))
 
+    # --- content-reading オプション (Codex P2 第2弾): operand の中身を名前
+    #     リストとして読み echo するため metadata-only から除外して deny ---
+    def test_file_files_from_dotenv_deny(self):
+        # file -f .env は .env の各行をファイル名扱いし `<行>: cannot open` で
+        # 内容を echo する。分離形 / 値結合形 / 長形すべて deny。
+        for cmd in (
+            "file -f .env",
+            "file -f.env",
+            "file --files-from .env",
+            "file --files-from=.env",
+        ):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_wc_files0_from_dotenv_deny(self):
+        # wc --files0-from=.env は .env を NUL 区切り名として読み、非 NUL の
+        # dotenv は全内容を 1 名前としてエラーに echo する。
+        for cmd in ("wc --files0-from=.env", "wc --files0-from .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_du_files0_from_dotenv_deny(self):
+        r = handle(_make_envelope("du --files0-from=.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_tree_fromfile_dotenv_deny(self):
+        r = handle(_make_envelope("tree --fromfile .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_metadata_plain_operand_still_allow(self):
+        # content-reading オプション **無し** の通常形は metadata-only 維持 → allow。
+        # file .env (型判定) / wc -l .env (行数) / du .env (サイズ) / tree .env。
+        for cmd in ("file .env", "wc -l .env", "du -sh .env", "tree .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+            )
+
     def test_find_redirect_still_ask(self):
         # find は _SAFE_READ_FIRST_TOKENS 外なので `>` 含みは residual ask 維持
         r = handle(_make_envelope("find . -name .env > /tmp/x", self.tmp))

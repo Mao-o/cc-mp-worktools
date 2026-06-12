@@ -83,6 +83,7 @@ from handlers.bash.constants import (  # noqa: F401
     _GIT_METADATA_SUBCOMMANDS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
+    _METADATA_CONTENT_READING_OPTS,
     _METADATA_ONLY_FIRST_TOKENS,
     _OPAQUE_WRAPPERS,
     _REDIRECT_OP_TOKENS,
@@ -143,6 +144,36 @@ def _is_opaque_first_token(token: str) -> bool:
     return False
 
 
+def _reads_file_content(first: str, tokens: list[str]) -> bool:
+    """metadata-only コマンドが operand ファイルの **中身** を名前リストとして
+    読み、出力 / エラーに echo するオプションを持つか (0.14.0, Codex P2 第2弾)。
+
+    ``file -f .env`` / ``wc --files0-from=.env`` / ``du --files0-from=.env`` /
+    ``tree --fromfile .env`` は operand の中身を別パスのリストとして読み込み、
+    その名前 (= .env の各行) を stdout / エラーに echo するため metadata-only
+    ではない。``_METADATA_CONTENT_READING_OPTS`` で first_token ごとに危険
+    オプションを定義し、分離形 (``-f .env``) / 値結合形 (``--files0-from=.env``
+    / ``-f.env``) いずれも検出する。
+    """
+    opts = _METADATA_CONTENT_READING_OPTS.get(first)
+    if not opts:
+        return False
+    for tok in tokens[1:]:
+        for opt in opts:
+            if tok == opt or tok.startswith(opt + "="):
+                return True
+            # 短縮形の値結合 (``file -f.env``)
+            if (
+                len(opt) == 2
+                and opt[0] == "-"
+                and opt[1] != "-"
+                and len(tok) > 2
+                and tok.startswith(opt)
+            ):
+                return True
+    return False
+
+
 def _is_metadata_only(tokens: list[str]) -> bool:
     """セグメントが「operand の内容を出力しない」metadata-only コマンドか (0.14.0)。
 
@@ -158,6 +189,11 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     ``find ... -exec cat {} +`` 形は ``handle()`` の hard-stop で先に ask に
     倒れるが、literal path を使う ``;`` 形 (``{}`` 無し) はここに到達する。
 
+    ``file`` / ``wc`` / ``du`` / ``tree`` は ``-f`` / ``--files0-from`` /
+    ``--fromfile`` 等で operand の **中身** をファイル名リストとして読み echo
+    するため、``_reads_file_content`` でそれらのオプションを検出したら除外する
+    (Codex P2 第2弾)。
+
     git は ``git <sub>`` 直書きの metadata subcommand
     (``_GIT_METADATA_SUBCOMMANDS``) のみ認識。global option 前置
     (``git -C dir check-ignore``) は保守的に対象外。
@@ -166,7 +202,7 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     if first == "find":
         return not any(t in _FIND_DANGEROUS_ACTIONS for t in tokens[1:])
     if first in _METADATA_ONLY_FIRST_TOKENS:
-        return True
+        return not _reads_file_content(first, tokens)
     if (
         first == "git"
         and len(tokens) >= 2
