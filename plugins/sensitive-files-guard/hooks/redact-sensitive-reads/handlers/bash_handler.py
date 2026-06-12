@@ -43,10 +43,11 @@ segment 単位再評価へ移行)。
    - 残留 metachar (``>`` ``&`` 等) → ``ask_or_allow``
    - shell keyword (``if``/``for``/``do`` 等) → ``ask_or_allow``
    - **metadata-only 判定 (0.14.0)** — 第一トークンが「operand の内容を出力
-     しない」コマンド (``ls`` / ``find`` / ``stat`` / ``echo`` 等、git は
-     ``check-ignore`` / ``ls-files`` / ``status`` subcommand 直書き形) なら
-     operand scan をスキップして **allow** (値が LLM コンテキストに載らない
-     操作は思想 1 の射程外)
+     しない」コマンド (``ls`` / ``stat`` / ``echo`` 等、git は ``check-ignore``
+     / ``ls-files`` / ``status`` subcommand 直書き形) なら operand scan を
+     スキップして **allow** (値が LLM コンテキストに載らない操作は思想 1 の
+     射程外)。``find`` は ``-exec`` / ``-delete`` 等の内容出力・副作用
+     アクションが無い場合のみ metadata-only
    - operand scan: 各 path 候補について
      - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
        ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
@@ -78,6 +79,7 @@ from core.safepath import normalize
 # 再提示する。定義本体はサブモジュール側に置き、このモジュールは views のみ。
 from handlers.bash.constants import (  # noqa: F401
     _ENV_PREFIX_RE,
+    _FIND_DANGEROUS_ACTIONS,
     _GIT_METADATA_SUBCOMMANDS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
@@ -148,11 +150,20 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     値を LLM コンテキストに載せないため、思想 1 (うっかり **露出** 予防) の
     射程外。deny しても予防効果がなくユーザー離脱だけが起きる (2026-05 離脱分析)。
 
+    ``find`` は条件付き: ``-exec`` / ``-delete`` / ``-fprint`` 等の内容出力・
+    副作用アクション (``_FIND_DANGEROUS_ACTIONS``) を含む場合は metadata-only
+    から除外する。``find . -name .env -exec cat .env ';'`` は ``cat`` を実行して
+    .env の内容を stdout に出すため (Codex P1, 2026-06-12)。``{}`` を使う
+    ``find ... -exec cat {} +`` 形は ``handle()`` の hard-stop で先に ask に
+    倒れるが、literal path を使う ``;`` 形 (``{}`` 無し) はここに到達する。
+
     git は ``git <sub>`` 直書きの metadata subcommand
     (``_GIT_METADATA_SUBCOMMANDS``) のみ認識。global option 前置
     (``git -C dir check-ignore``) は保守的に対象外。
     """
     first = tokens[0]
+    if first == "find":
+        return not any(t in _FIND_DANGEROUS_ACTIONS for t in tokens[1:])
     if first in _METADATA_ONLY_FIRST_TOKENS:
         return True
     if (

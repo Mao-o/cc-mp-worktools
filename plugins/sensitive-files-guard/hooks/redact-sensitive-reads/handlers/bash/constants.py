@@ -65,6 +65,8 @@ _SAFE_READ_FIRST_TOKENS = frozenset({
 # - ``cat`` / ``head`` / ``tail`` / ``grep`` / ``od`` 等: 内容を出力する (deny 維持)
 # - ``cp`` / ``mv``: 内容は出ないが別 path への複製で漏洩面が広がる (deny 維持)
 # - ``md5`` / ``shasum`` 等: 値の fingerprint が出る (保守的に対象外)
+# - ``find``: 単体集合には **入れない**。``-exec cat`` 等で内容を出力できるため
+#   条件付き判定 (``_is_metadata_only`` で ``_FIND_DANGEROUS_ACTIONS`` を検査)。
 #
 # ``echo`` / ``printf`` は引数文字列をそのまま出すだけでファイルを開かない
 # (``echo .env`` は ".env" という 4 文字を出力するだけ)。``echo KEY=val > .env``
@@ -75,13 +77,29 @@ _SAFE_READ_FIRST_TOKENS = frozenset({
 # → metadata-only → operand scan。
 _METADATA_ONLY_FIRST_TOKENS = frozenset({
     # ファイル一覧 / 存在・属性確認 (出力は名前・サイズ・時刻・型のみ)
-    "ls", "find", "tree", "stat", "file", "du", "df", "test",
+    "ls", "tree", "stat", "file", "du", "df", "test",
     # 計数のみ (内容そのものは出ない)
     "wc",
     # パス文字列の操作 / 解決 (出力は path 文字列のみ)
     "basename", "dirname", "realpath", "readlink",
     # 引数をそのまま表示 (ファイルを開かない)
     "echo", "printf",
+})
+
+# find のうち「内容出力・副作用」を伴うアクション (0.14.0, Codex P1 対応)。
+# これらを **1 つでも含む** find は metadata-only から除外し、operand scan に
+# 倒す (機密 operand があれば deny)。``find . -name .env -exec cat .env ';'`` は
+# ``;`` がクォートされ segment 分割も hard-stop も回避して単一 segment で
+# ここに到達するが、``cat`` を実行して .env の内容を stdout に出すため危険。
+# - ``-exec`` / ``-execdir`` / ``-ok`` / ``-okdir``: 任意コマンド実行 (cat で露出)
+# - ``-delete``: 破壊的
+# - ``-fprint`` / ``-fprint0`` / ``-fprintf`` / ``-fls``: ファイル書込み (副作用)
+# stdout への metadata 出力 (``-print`` / ``-print0`` / ``-printf`` / ``-ls``、
+# find の ``%`` 書式はパス・サイズ・時刻のみで内容を含まない) は安全なので除外しない。
+_FIND_DANGEROUS_ACTIONS = frozenset({
+    "-exec", "-execdir", "-ok", "-okdir",
+    "-delete",
+    "-fprint", "-fprint0", "-fprintf", "-fls",
 })
 
 # git の metadata-only subcommand (``git <sub>`` 直書き形のみ認識)。

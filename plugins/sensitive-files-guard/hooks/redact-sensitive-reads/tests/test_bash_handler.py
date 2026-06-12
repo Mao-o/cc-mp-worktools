@@ -1320,6 +1320,43 @@ class TestMetadataOnlyAllow(BaseBash):
         ))
         self.assertEqual(_decision(r), "ask")
 
+    def test_find_exec_cat_literal_dotenv_deny(self):
+        # Codex P1 (2026-06-12): `{}` を使わず literal `.env` を渡し、`;` を
+        # クォートして segment 分割・hard-stop を回避すると _is_metadata_only
+        # に単一 segment で到達する。find は -exec を含むため metadata-only から
+        # 外れ、operand scan で `.env` を捕まえて deny。`cat .env` の内容露出を防ぐ。
+        r = handle(_make_envelope(
+            "find . -name .env -exec cat .env ';'", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_find_execdir_literal_dotenv_deny(self):
+        r = handle(_make_envelope(
+            "find . -name .env -execdir cat .env ';'", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_find_delete_dotenv_deny(self):
+        # -delete も内容出力こそ無いが副作用 (破壊的) なので metadata-only 除外。
+        # operand scan で `.env` を捕まえて deny。
+        r = handle(_make_envelope("find . -name .env -delete", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_find_fprintf_dotenv_deny(self):
+        # -fprintf はファイル書込みの副作用 → metadata-only 除外 → operand scan deny
+        r = handle(_make_envelope(
+            "find . -name .env -fprintf /tmp/out '%p'", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_find_printf_dotenv_allow(self):
+        # -printf は stdout への metadata 出力 (パス・サイズ等、内容は含まない)
+        # なので metadata-only 維持 → allow。-fprintf (書込み) との区別を固定。
+        r = handle(_make_envelope(
+            "find . -name .env -printf '%p\\n'", self.tmp,
+        ))
+        self.assertTrue(output.is_allow(r))
+
     def test_find_redirect_still_ask(self):
         # find は _SAFE_READ_FIRST_TOKENS 外なので `>` 含みは residual ask 維持
         r = handle(_make_envelope("find . -name .env > /tmp/x", self.tmp))

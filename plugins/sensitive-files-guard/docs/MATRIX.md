@@ -121,22 +121,30 @@ allow-list **外** の first_token (`awk`, `sed`, `find`, `xargs`, `parallel`,
 
 ## Bash handler — metadata-only first_token (0.14.0 新設, 全 mode で allow)
 
-`first_token` が `_METADATA_ONLY_FIRST_TOKENS` (`ls find tree stat file du df
-test wc basename dirname realpath readlink echo printf`) に該当する segment、
-または `git check-ignore` / `git ls-files` / `git status` (subcommand 直書き形)
-は、**operand の内容を stdout に出さない** ため operand scan をスキップして
-allow に倒す。機密 path が operand に居ても、出力はファイル名・属性・件数・
-パス文字列のみで値は LLM コンテキストに載らない (思想 1 の射程外)。
+`first_token` が `_METADATA_ONLY_FIRST_TOKENS` (`ls tree stat file du df test wc
+basename dirname realpath readlink echo printf`) に該当する segment、または
+`git check-ignore` / `git ls-files` / `git status` (subcommand 直書き形) は、
+**operand の内容を stdout に出さない** ため operand scan をスキップして allow に
+倒す。機密 path が operand に居ても、出力はファイル名・属性・件数・パス文字列
+のみで値は LLM コンテキストに載らない (思想 1 の射程外)。
+
+`find` は **条件付き**: `-exec` / `-execdir` / `-ok` / `-okdir` / `-delete` /
+`-fprint*` / `-fls` (`_FIND_DANGEROUS_ACTIONS`) を含まない場合のみ metadata-only。
+`find -exec cat .env ';'` のように `cat` を実行して内容を出力する形は対象外で
+deny に倒る (Codex P1, 0.14.0)。
 
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | `ls -la .env`, `stat .env`, `file .env`, `du -h .env`, `tree .env` | allow | allow | allow | allow | allow |
-| `find . -name .env`, `find . -name '.env*'` (glob でも内容は出ない) | allow | allow | allow | allow | allow |
+| `find . -name .env`, `find . -name '.env*'` (アクション無し → 内容は出ない) | allow | allow | allow | allow | allow |
+| `find . -name .env -printf '%p'` (`-printf` は stdout への metadata 出力) | allow | allow | allow | allow | allow |
 | `wc -l .env` (計数のみ), `test -f .env` (存在確認) | allow | allow | allow | allow | allow |
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
 | `git check-ignore -v .env`, `git ls-files .env`, `git status` | allow | allow | allow | allow | allow |
 | `ls -la .env > /tmp/x` (ls は safe-read 兼任で residual skip → metadata allow) | allow | allow | allow | allow | allow |
+| `find . -name .env -exec cat .env ';'` (`-exec` で内容露出可) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `find . -name .env -delete` (`-delete` 副作用), `find ... -fprintf` (書込み) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `cat .env`, `head .env`, `grep KEY .env`, `od -c .env` (内容出力系は対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `cp .env /tmp/x`, `mv .env /tmp/x` (複製で漏洩面が広がるため対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |

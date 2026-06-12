@@ -39,16 +39,24 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
    クレデンシャル系は維持。
 2. **G2: metadata-only first_token allow-list を新設**
    (`handlers/bash/constants.py::_METADATA_ONLY_FIRST_TOKENS` /
-   `_GIT_METADATA_SUBCOMMANDS`、`bash_handler.py::_is_metadata_only`) —
-   「operand の内容を stdout に出さない」コマンド (`ls` / `find` / `tree` /
-   `stat` / `file` / `du` / `df` / `test` / `wc` / `basename` / `dirname` /
-   `realpath` / `readlink` / `echo` / `printf`、git は `check-ignore` /
-   `ls-files` / `status` の subcommand 直書き形のみ) は、機密 operand でも
-   operand scan をスキップして **allow** に倒す。値が LLM コンテキストに
-   載らない操作は思想 1 (うっかり**露出**予防) の射程外。判定は residual
-   metachar / hard-stop / opaque の **後段** に置くため、`echo KEY=val > .env`
-   (書込み形) や `find -exec cat {} +` (`{}` hard-stop) は従来通り
-   ask_or_allow に倒れて緩まない。
+   `_FIND_DANGEROUS_ACTIONS` / `_GIT_METADATA_SUBCOMMANDS`、
+   `bash_handler.py::_is_metadata_only`) —
+   「operand の内容を stdout に出さない」コマンド (`ls` / `tree` / `stat` /
+   `file` / `du` / `df` / `test` / `wc` / `basename` / `dirname` / `realpath` /
+   `readlink` / `echo` / `printf`、git は `check-ignore` / `ls-files` /
+   `status` の subcommand 直書き形のみ) は、機密 operand でも operand scan を
+   スキップして **allow** に倒す。値が LLM コンテキストに載らない操作は思想 1
+   (うっかり**露出**予防) の射程外。判定は residual metachar / hard-stop /
+   opaque の **後段** に置くため、`echo KEY=val > .env` (書込み形) や
+   `find -exec cat {} +` (`{}` hard-stop) は従来通り ask_or_allow に倒れて
+   緩まない。
+   **`find` は条件付き** (Codex P1 対応): 単体集合には含めず、`-exec` /
+   `-execdir` / `-ok` / `-okdir` / `-delete` / `-fprint*` / `-fls`
+   (`_FIND_DANGEROUS_ACTIONS`) を含まない場合のみ metadata-only。
+   `find . -name .env -exec cat .env ';'` のように `{}` を使わず literal path
+   + クォート `;` で hard-stop を回避する形は `cat` を実行して内容を出力する
+   ため、operand scan → deny に倒す。`find -name .env` (純所在確認) /
+   `-printf` (stdout への metadata 出力) は allow 維持。
 3. **G3: 除外 hint に承認文言を追加** (`core/messages.py::_exclude_hint`) —
    「恒久的に許可したい場合は、**ユーザーの承認を得た上で** patterns.local.txt
    に `!<basename>` を追加してください。承認なしに自分で追加しないこと。」
@@ -78,10 +86,11 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
 
 ### テスト
 
-- 累計 640 → **673 件 OK** (redact 613→646 / check 27 維持)
-- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 20 件 (機密 operand
-  での metadata-only allow ×12、内容出力系 / cp / git show / global option
-  前置 / 書込み形 / -exec / 複合の deny・ask 維持 ×8)
+- 累計 640 → **678 件 OK** (redact 613→651 / check 27 維持)
+- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 25 件 (機密 operand
+  での metadata-only allow ×13、内容出力系 / cp / git show / global option
+  前置 / 書込み形 / find dangerous action (`-exec` literal / `-execdir` /
+  `-delete` / `-fprintf`) / 複合の deny・ask 維持 + `-printf` allow 維持 ×12)
 - 改修: `tests/test_matcher.py` の DEFAULT_RULES から `*.local.*` 4 行を撤去、
   `test_local_suffix` → `test_local_config_not_sensitive` (patterns.local.txt
   での復活経路 assert 込み)、`TestSegmentHardStopReevaluate` の deny 確定
