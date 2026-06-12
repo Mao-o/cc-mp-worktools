@@ -57,6 +57,17 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
    + クォート `;` で hard-stop を回避する形は `cat` を実行して内容を出力する
    ため、operand scan → deny に倒す。`find -name .env` (純所在確認) /
    `-printf` (stdout への metadata 出力) は allow 維持。
+   **機密 path への redirect 書込みは deny** (Codex P2 対応): metadata-only ∩
+   safe_read コマンド (`ls` / `stat` / `wc` / `file` / `du` / `df` / `tree`) は
+   residual metachar 判定を skip するため、`ls > .env` のように機密 path へ
+   redirect して .env を truncate する破壊的書込みが shortcut で allow に
+   倒れていた。`handlers/bash/redirects.py::_redirect_write_targets` +
+   `bash_handler.py::_sensitive_redirect_target` で書込み target を抽出し、
+   機密なら metadata allow ではなく **deny** を返す (`>` / `>>` / `n>` / `&>`
+   の spaced / fused 形に対応)。内容露出ではなく破壊的書込みの懸念で、Edit/Write
+   の機密書込み deny と整合。read operand のみ機密で書込み先が非機密な
+   `ls -la .env > /tmp/x` は allow 維持。`>|` clobber は `|` が segment 分割で
+   割れるため未対応 (obscure・思想 1 射程外、既知制限 #15)。
 3. **G3: 除外 hint に承認文言を追加** (`core/messages.py::_exclude_hint`) —
    「恒久的に許可したい場合は、**ユーザーの承認を得た上で** patterns.local.txt
    に `!<basename>` を追加してください。承認なしに自分で追加しないこと。」
@@ -86,11 +97,15 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
 
 ### テスト
 
-- 累計 640 → **678 件 OK** (redact 613→651 / check 27 維持)
+- 累計 640 → **688 件 OK** (redact 661 / check 27 維持)
 - 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 25 件 (機密 operand
   での metadata-only allow ×13、内容出力系 / cp / git show / global option
   前置 / 書込み形 / find dangerous action (`-exec` literal / `-execdir` /
   `-delete` / `-fprintf`) / 複合の deny・ask 維持 + `-printf` allow 維持 ×12)
+- 新規: `tests/test_bash_handler.py::TestMetadataRedirectTarget` 10 件 (Codex P2:
+  `ls > .env` / fused `>.env` / `>>` / `1>` / `&>` の機密 redirect 書込み deny
+  ×7、`>|` clobber 既知限界 allow ×1、書込み先非機密 / read operand のみ機密の
+  allow 維持 ×2)
 - 改修: `tests/test_matcher.py` の DEFAULT_RULES から `*.local.*` 4 行を撤去、
   `test_local_suffix` → `test_local_config_not_sensitive` (patterns.local.txt
   での復活経路 assert 込み)、`TestSegmentHardStopReevaluate` の deny 確定

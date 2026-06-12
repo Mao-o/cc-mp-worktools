@@ -15,12 +15,20 @@ character-level quote-aware parser (``_scan_input_redirect_targets_with_form`` /
 """
 from __future__ import annotations
 
+import re
+
 from handlers.bash.constants import (
     _REDIRECT_OP_TOKENS,
     _SAFE_REDIRECT_RE,
     _SAFE_REDIRECT_TARGETS,
     _SEGMENT_RESIDUAL_METACHARS,
 )
+
+# 書き込みリダイレクト演算子 (任意 fd 番号 / ``&`` + ``>`` / ``>>`` / ``>|``)。
+# target が fused (``>.env``) でも別トークン (``> .env``) でも拾えるよう、前半を
+# 演算子として切り出して残りを target にする。``<`` 入力リダイレクトと fd 複製
+# (``>&1``) は対象外 (前者は hard-stop、後者は target が ``&N`` になり除外)。
+_WRITE_REDIRECT_RE = re.compile(r"^(?:[0-9]+|&)?>>?\|?(?P<target>.*)$")
 
 
 def _is_safe_redirect_token(tok: str) -> bool:
@@ -60,3 +68,33 @@ def _segment_has_residual_metachar(tokens: list[str]) -> bool:
         if any(c in _SEGMENT_RESIDUAL_METACHARS for c in t):
             return True
     return False
+
+
+def _redirect_write_targets(tokens: list[str]) -> list[str]:
+    """書き込みリダイレクト (``>`` / ``>>`` / ``n>`` / ``&>`` / ``>|``) の target
+    path 一覧を返す (0.14.0, Codex P2 対応)。
+
+    ``_strip_safe_redirects`` 後の token 列を前提 (/dev/null 等の安全 target は
+    除去済み)。fused 形 (``>.env``) は同トークンから、bare 形 (``> .env``) は次
+    トークンから target を取り出す。fd 複製 (``>&1``) は target が ``&1`` になる
+    ため除外、入力リダイレクト (``<``) は対象外 (hard-stop 側で処理)。
+
+    用途: metadata-only コマンド (``ls`` / ``stat`` 等) が機密 path へ redirect
+    して書き込む (``ls > .env`` で .env を truncate する) ケースを、operand の
+    内容露出とは別の「破壊的書込み」懸念として検出するため。
+    """
+    targets: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        m = _WRITE_REDIRECT_RE.match(tokens[i])
+        if m:
+            target = m.group("target")
+            if target:
+                if not target.startswith("&"):  # ``>&1`` 等の fd 複製を除外
+                    targets.append(target)
+            elif i + 1 < n:
+                targets.append(tokens[i + 1])
+                i += 1
+        i += 1
+    return targets

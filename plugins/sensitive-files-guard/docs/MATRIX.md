@@ -142,9 +142,21 @@ deny に倒る (Codex P1, 0.14.0)。
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
 | `git check-ignore -v .env`, `git ls-files .env`, `git status` | allow | allow | allow | allow | allow |
-| `ls -la .env > /tmp/x` (ls は safe-read 兼任で residual skip → metadata allow) | allow | allow | allow | allow | allow |
+| `ls -la .env > /tmp/x` (read operand 機密でも書込み先が非機密 → metadata allow) | allow | allow | allow | allow | allow |
 | `find . -name .env -exec cat .env ';'` (`-exec` で内容露出可) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `find . -name .env -delete` (`-delete` 副作用), `find ... -fprintf` (書込み) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `tree >\| .env` (`>\|` clobber は `\|` が segment 分割で割れる既知限界、思想 1 射程外) | allow | allow | allow | allow | allow |
+
+> **metadata-only ∩ safe_read の redirect 書込み (Codex P2, 0.14.0)**: `ls` /
+> `stat` / `wc` / `file` / `du` / `df` / `tree` は metadata-only かつ safe_read の
+> ため residual metachar 判定を skip する。`ls > .env` のように機密 path へ
+> redirect 書込みする形は内容露出こそ無いが `.env` を truncate する破壊的書込み
+> なので、`_sensitive_redirect_target` で検出して **deny** に倒す (Edit/Write の
+> 機密書込み deny と整合)。`>.env` / `>>.env` の fused 形も対応。`>\|` clobber
+> override は `\|` が segment 分割で pipe として割れるため未対応 (obscure・思想 1
+> 射程外)。read operand のみ機密で書込み先が非機密な `ls -la .env > /tmp/x` は
+> allow 維持 (内容も破壊もしない)。
 | `cat .env`, `head .env`, `grep KEY .env`, `od -c .env` (内容出力系は対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `cp .env /tmp/x`, `mv .env /tmp/x` (複製で漏洩面が広がるため対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |

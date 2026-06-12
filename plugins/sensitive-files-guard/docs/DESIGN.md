@@ -162,6 +162,13 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   なので metadata-only 維持。
 - `git -C dir check-ignore` のような global option 前置形は保守的に対象外
   (従来通り operand scan → deny)。
+- **機密 path への redirect 書込み** (`ls > .env` で .env を truncate) は
+  metadata-only ∩ safe_read コマンドだと residual metachar 判定を skip して
+  shortcut allow に倒れる穴があった (0.14.0 の regression)。`_sensitive_redirect_target`
+  で書込み target を抽出し機密なら deny に倒す (Codex P2)。`>` / `>>` / `n>` /
+  `&>` の spaced / fused 形に対応。内容露出ではなく破壊的書込みの懸念であり、
+  Edit/Write の機密書込み deny と整合させる。`ls -la .env > /tmp/x` (read operand
+  のみ機密、書込み先非機密) は allow 維持。
 
 ### 対応 (deny/allow 確定できる)
 
@@ -438,7 +445,15 @@ deny reason のキー名ガイド:
     主目的は悪意のないうっかり露出の予防であり、セキュリティを担保する
     plugin ではない。redirect / heredoc で機密 path に書き込む形はうっかりの
     範疇を超えるため対象外として通す (「うっかり予防のついでに少し守れれば
-    十分」の思想)
+    十分」の思想)。ただし **metadata-only ∩ safe_read コマンド**
+    (`ls` / `stat` / `wc` 等) の `ls > .env` 形だけは 0.14.0 で metadata-only
+    shortcut を入れた結果 regression したため、`_sensitive_redirect_target` で
+    deny を復活させている (Codex P2)
+15. **`>|` clobber override redirect は未対応** — `tree >| .env` の `>|` は
+    `|` が segment 分割で pipe として割られ `tree >` と `.env` に分離するため、
+    機密 redirect target を検出できず allow に倒る。`>|` を意図的に書くのは
+    `noclobber` を理解した上級者で「うっかり」ではない (思想 1 射程外) ため
+    既知限界とする。`>` / `>>` / `n>` / `&>` の通常 redirect は検出する
 
 ## Edit/Write hook の発火経路 (2026-04-18 実機観測)
 

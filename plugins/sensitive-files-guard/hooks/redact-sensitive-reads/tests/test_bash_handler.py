@@ -1377,5 +1377,88 @@ class TestMetadataOnlyAllow(BaseBash):
             )
 
 
+class TestMetadataRedirectTarget(BaseBash):
+    """0.14.0 (Codex P2): metadata-only ∩ safe_read コマンドの機密 redirect 書込み。
+
+    ``ls`` / ``stat`` / ``wc`` 等は metadata-only かつ safe_read のため residual
+    metachar 判定を skip する。その結果 ``ls > .env`` のような機密 path への
+    redirect 書込み (``>`` が .env を truncate) が metadata-only shortcut で
+    allow に倒れる穴があった。metadata-only は operand の **内容露出** 懸念だけを
+    抑制するもので、破壊的書込みは別懸念として operand scan → deny に倒す。
+
+    一方 ``ls -la .env > /tmp/x`` のように read operand が機密でも **書込み先が
+    非機密** なら shortcut を維持して allow (内容露出も破壊もしないため)。
+    """
+
+    def test_ls_redirect_to_dotenv_deny_all_modes(self):
+        # ls > .env は .env を truncate する破壊的書込み。全 mode で deny 固定。
+        modes = ("default", "auto", "bypassPermissions", "acceptEdits", "dontAsk", "plan")
+        for mode in modes:
+            r = handle(_make_envelope("ls > .env", self.tmp, mode=mode))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"ls > .env with mode={mode} should deny but got {_decision(r)!r}",
+            )
+
+    def test_ls_fused_redirect_to_dotenv_deny(self):
+        # fused 形 `>.env` (空白なし)。operand scan は `>.env` を 1 トークンとして
+        # 拾えないため、_sensitive_redirect_target が直接 deny する経路を検証。
+        r = handle(_make_envelope("ls >.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_ls_append_redirect_to_dotenv_deny(self):
+        # append 形 `>> .env` (spaced) / `>>.env` (fused) 両方
+        for cmd in ("ls >> .env", "ls >>.env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_wc_redirect_to_dotenv_deny(self):
+        r = handle(_make_envelope("wc -l README.md > .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_stat_fd_redirect_to_dotenv_deny(self):
+        # fd 番号付き `1> .env`
+        r = handle(_make_envelope("stat README.md 1> .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_ls_stderr_combined_redirect_to_dotenv_deny(self):
+        # `&>` (stdout+stderr) も spaced / fused 両方 deny
+        for cmd in ("ls &> .env", "ls &>.env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_clobber_override_redirect_out_of_scope(self):
+        # `>|` (clobber override) は `|` が segment 分割で pipe として割られ
+        # `tree >` と `.env` に分離するため検出できない。`>|` を意図的に書くのは
+        # noclobber を知る上級者で「うっかり」ではない (思想 1 の射程外) ため、
+        # 既知限界として allow を許容する。realistic な `>` / `>>` / `&>` /
+        # `n>` は上の各テストでカバー済み。
+        r = handle(_make_envelope("tree >| .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_ls_redirect_to_nonsensitive_allow(self):
+        # 書込み先が非機密なら従来通り allow (0.12.0 の調査ワンライナー意図を維持)
+        r = handle(_make_envelope("ls -la > /tmp/listing.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_ls_metadata_dotenv_redirect_nonsensitive_allow(self):
+        # read operand が機密 (.env の metadata) でも書込み先が非機密なら allow。
+        # ls は内容を出さない (metadata のみ) ので .env の値は露出しない。
+        r = handle(_make_envelope("ls -la .env > /tmp/x", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_grep_redirect_to_dotenv_still_deny(self):
+        # grep は safe_read だが metadata-only ではない (内容出力系)。
+        # 従来通り operand scan で .env を捕まえて deny (regression なし確認)。
+        r = handle(_make_envelope("grep foo README.md > .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
 if __name__ == "__main__":
     unittest.main()

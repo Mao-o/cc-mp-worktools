@@ -105,6 +105,7 @@ from handlers.bash.operand_lexer import (  # noqa: F401
 )
 from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
+    _redirect_write_targets,
     _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
@@ -173,6 +174,33 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     ):
         return True
     return False
+
+
+def _sensitive_redirect_target(
+    tokens: list[str],
+    cwd: str,
+    rules: list[tuple[str, bool]],
+) -> str | None:
+    """機密 path への **書き込みリダイレクト** target を返す (無ければ None) (0.14.0, P2)。
+
+    ``ls > .env`` は ``ls`` が metadata-only でも ``>`` が .env を truncate する
+    破壊的書込み。metadata-only は operand の **内容露出** 懸念だけを抑制する
+    ものなので、redirect target の機密書込みはこの関数で別途検出して
+    metadata-only shortcut の代わりに deny を返す根拠にする。
+
+    ``_redirect_write_targets`` が抽出した各 target を ``_operand_is_sensitive``
+    で判定し、最初に機密一致した target を返す。fused 形 (``>.env``) では
+    operand scan が ``>.env`` を 1 トークンとして拾えないため、ここで直接
+    target を取り出して deny する必要がある。normalize 失敗 target は安全側で
+    そのまま返す (deny 経路へ)。
+    """
+    for target in _redirect_write_targets(tokens):
+        try:
+            if _operand_is_sensitive(target, cwd, rules):
+                return target
+        except (ValueError, OSError):
+            return target
+    return None
 
 
 def _operand_is_sensitive(
@@ -257,6 +285,12 @@ def _analyze_segment(
     redirect (例: ``grep foo > .env``) は operand scan で deny 固定なので
     safety net が残る。``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` とは disjoint
     のため、これらの ask 経路は allow-list ヒットでは自動的に通らない。
+
+    0.14.0: metadata-only shortcut は ``_has_sensitive_redirect_target`` で
+    gate する。safe_read かつ metadata-only (``ls`` / ``stat`` / ``wc`` 等) は
+    residual metachar 判定を skip するため、``ls > .env`` のような機密 path への
+    redirect 書込みが shortcut で allow に倒れる穴があった。redirect target が
+    機密のときは shortcut せず operand scan → deny に倒す (Codex P2)。
     """
     if not tokens:
         return output.make_allow()
@@ -290,7 +324,22 @@ def _analyze_segment(
     # residual metachar 判定の **後** に置くことで、`echo KEY=val > .env` /
     # `find ... > /tmp/x` のような書込み形は従来通り ask_or_allow に倒れる
     # (echo / printf / find は _SAFE_READ_FIRST_TOKENS 外なので residual 先行)。
+    #
+    # ただし metadata-only ∩ safe_read (ls / stat / wc / file / du / df / tree)
+    # は residual metachar 判定を skip するため、機密 path への redirect 書込み
+    # (``ls > .env`` で .env を truncate) がここに到達する。metadata-only は
+    # operand の **内容露出** 懸念だけを抑制するもので破壊的書込みは別懸念のため、
+    # 機密 redirect target があれば metadata allow ではなく deny を返す
+    # (Codex P2, 2026-06-12)。fused 形 ``>.env`` は operand scan が拾えないため
+    # ここで直接 deny する。`ls -la .env > /tmp/x` のように read operand が
+    # 機密でも書込み先が非機密なら allow 維持。
     if _is_metadata_only(tokens):
+        redirect_target = _sensitive_redirect_target(
+            tokens, envelope.get("cwd", ""), rules
+        )
+        if redirect_target is not None:
+            L.log_info("bash_classify", f"metadata_redirect_deny:{first}")
+            return _build_deny_response(tokens, redirect_target, envelope)
         L.log_info("bash_classify", f"metadata_only_allow:{first}")
         return output.make_allow()
 
