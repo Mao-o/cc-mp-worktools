@@ -1274,9 +1274,37 @@ class TestMetadataOnlyAllow(BaseBash):
         r = handle(_make_envelope("git check-ignore -v .env", self.tmp))
         self.assertTrue(output.is_allow(r))
 
+    def test_git_ls_files_plain_dotenv_allow(self):
+        # plain ls-files は名前一覧のみで、blob object name を出さないため allow。
+        r = handle(_make_envelope("git ls-files .env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
     def test_git_ls_files_dotenv_allow(self):
+        # --error-unmatch も名前/存在確認だけで object hash を出さないため allow。
         r = handle(_make_envelope("git ls-files --error-unmatch .env", self.tmp))
         self.assertTrue(output.is_allow(r))
+
+    def test_git_ls_files_stage_dotenv_deny(self):
+        # -s は staged blob の object name (= 内容の指紋) を出すため deny。
+        r = handle(_make_envelope("git ls-files -s .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_git_ls_files_long_stage_dotenv_deny(self):
+        # --stage も -s と同じく blob object name を出すため deny。
+        r = handle(_make_envelope("git ls-files --stage .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_git_ls_files_format_objectname_dotenv_deny(self):
+        # --format は %(objectname) で内容の指紋を出せるため deny。
+        r = handle(
+            _make_envelope("git ls-files --format='%(objectname)' .env", self.tmp)
+        )
+        self.assertEqual(_decision(r), "deny")
+
+    def test_git_ls_files_short_bundle_stage_dotenv_deny(self):
+        # -sz のような短縮束ねでも s を含めば object name を出すため deny。
+        r = handle(_make_envelope("git ls-files -sz .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
 
     def test_git_status_bare_allow(self):
         # 裸の git status は operand に機密 path が無いため operand scan で allow。

@@ -141,6 +141,11 @@ deny に倒る (Codex P1, 0.14.0)。
 を含む場合は除外して deny。`file -f .env` は `.env` の各行を
 `<行>: cannot open` でエラー出力するため実値が漏れる (Codex P2 第2弾, 0.14.0)。
 
+`git ls-files` も **条件付き**: plain な `git ls-files .env` / `--error-unmatch`
+は名前一覧のみなので allow 維持。`-s` / `--stage` / `--format` は blob object
+name (= 内容の安定した指紋) を出せるため metadata-only から除外して deny
+(Codex P2 第3弾, 0.14.0)。
+
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | `ls -la .env`, `stat .env`, `file .env`, `du -h .env`, `tree .env` | allow | allow | allow | allow | allow |
@@ -149,7 +154,7 @@ deny に倒る (Codex P1, 0.14.0)。
 | `wc -l .env` (計数のみ), `test -f .env` (存在確認) | allow | allow | allow | allow | allow |
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
-| `git check-ignore -v .env`, `git ls-files .env`, `git status` (裸) | allow | allow | allow | allow | allow |
+| `git check-ignore -v .env`, `git ls-files .env`, `git ls-files --error-unmatch .env`, `git status` (裸) | allow | allow | allow | allow | allow |
 | `git status -v -- .env`, `git status --verbose .env` (staged diff で旧/新値 echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls -la .env > /tmp/x` (read operand 機密でも書込み先が非機密 → metadata allow) | allow | allow | allow | allow | allow |
 | `find . -name .env -exec cat .env ';'` (`-exec` で内容露出可) | **deny** | **deny** | **deny** | **deny** | **deny** |
@@ -157,6 +162,7 @@ deny に倒る (Codex P1, 0.14.0)。
 | `file -f .env`, `file --files-from=.env` (各行を名前扱いしエラーに echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `wc --files0-from=.env`, `du --files0-from=.env`, `tree --fromfile .env` | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `file .env`, `wc -l .env`, `du -sh .env`, `tree .env` (通常形、内容は出ない) | allow | allow | allow | allow | allow |
+| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files -sz .env` (blob object name = 内容の指紋) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `tree >\| .env` (`>\|` clobber は `\|` が segment 分割で割れる既知限界、思想 1 射程外) | allow | allow | allow | allow | allow |
 

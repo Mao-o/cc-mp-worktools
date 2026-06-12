@@ -83,9 +83,11 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
    `-SECRET=oldval` / `+SECRET=NEWLEAK` が echo されることを確認)。option-gate
    するより allowlist から外す方が単純で穴も無いため `_GIT_METADATA_SUBCOMMANDS`
    を `check-ignore` / `ls-files` の 2 つに縮小。`check-ignore` (gitignore ルール
-   表示) / `ls-files` (名前のみ) は内容を出さずオプションに関わらず安全なので
-   維持。裸の `git status` は機密 operand が無いため operand scan で allow に
-   倒れ常用ケースは無影響、`git status [-v] -- .env` 等 operand 明示形のみ deny。
+   表示) / plain な `ls-files` (名前のみ) は内容を出さないため維持。`git
+   ls-files -s` / `--stage` / `--format` は blob object name (= 内容の安定した
+   指紋) を出せるため metadata-only から除外 (Codex P2 第3弾)。裸の
+   `git status` は機密 operand が無いため operand scan で allow に倒れ常用
+   ケースは無影響、`git status [-v] -- .env` 等 operand 明示形のみ deny。
 3. **G3: 除外 hint に承認文言を追加** (`core/messages.py::_exclude_hint`) —
    「恒久的に許可したい場合は、**ユーザーの承認を得た上で** patterns.local.txt
    に `!<basename>` を追加してください。承認なしに自分で追加しないこと。」
@@ -115,14 +117,15 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
 
 ### テスト
 
-- 累計 640 → **696 件 OK** (redact 669 / check 27 維持)
-- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 33 件 (機密 operand
+- 累計 640 → **701 件 OK** (redact 674 / check 27 維持)
+- 新規: `tests/test_bash_handler.py::TestMetadataOnlyAllow` 38 件 (機密 operand
   での metadata-only allow ×13、内容出力系 / cp / git show / global option
   前置 / 書込み形 / find dangerous action (`-exec` literal / `-execdir` /
   `-delete` / `-fprintf`) / 複合の deny・ask 維持 + `-printf` allow 維持 ×12 +
   content-reading オプション (`file -f` / `--files-from` / `wc`/`du`
   `--files0-from` / `tree --fromfile`) deny + 通常形 allow ×5 + git status
-  verbose deny / 裸 status allow / operand 明示 deny ×3)
+  verbose deny / 裸 status allow / operand 明示 deny ×3 + git ls-files object-name
+  出力 deny ×4 / plain allow ×1)
 - 新規: `tests/test_bash_handler.py::TestMetadataRedirectTarget` 10 件 (Codex P2:
   `ls > .env` / fused `>.env` / `>>` / `1>` / `&>` の機密 redirect 書込み deny
   ×7、`>|` clobber 既知限界 allow ×1、書込み先非機密 / read operand のみ機密の

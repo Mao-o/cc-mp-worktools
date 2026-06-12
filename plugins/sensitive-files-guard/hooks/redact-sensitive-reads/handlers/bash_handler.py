@@ -44,10 +44,12 @@ segment 単位再評価へ移行)。
    - shell keyword (``if``/``for``/``do`` 等) → ``ask_or_allow``
    - **metadata-only 判定 (0.14.0)** — 第一トークンが「operand の内容を出力
      しない」コマンド (``ls`` / ``stat`` / ``echo`` 等、git は ``check-ignore``
-     / ``ls-files`` / ``status`` subcommand 直書き形) なら operand scan を
-     スキップして **allow** (値が LLM コンテキストに載らない操作は思想 1 の
-     射程外)。``find`` は ``-exec`` / ``-delete`` 等の内容出力・副作用
-     アクションが無い場合のみ metadata-only
+     / ``ls-files`` subcommand 直書き形) なら operand scan をスキップして
+     **allow** (値が LLM コンテキストに載らない操作は思想 1 の射程外)。
+     ``find`` は ``-exec`` / ``-delete`` 等の内容出力・副作用アクションが無い
+     場合のみ、``file`` / ``wc`` / ``du`` / ``tree`` はファイル名リスト読込
+     オプション (``-f`` / ``--files0-from`` 等) が無い場合のみ metadata-only。
+     ``git status`` は ``-v`` が staged diff を出すため対象外
    - operand scan: 各 path 候補について
      - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
        ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
@@ -80,6 +82,8 @@ from core.safepath import normalize
 from handlers.bash.constants import (  # noqa: F401
     _ENV_PREFIX_RE,
     _FIND_DANGEROUS_ACTIONS,
+    _GIT_LS_FILES_OBJECT_OPTS,
+    _GIT_LS_FILES_SHORT_FLAGS,
     _GIT_METADATA_SUBCOMMANDS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
@@ -174,6 +178,33 @@ def _reads_file_content(first: str, tokens: list[str]) -> bool:
     return False
 
 
+def _git_ls_files_exposes_object(args: list[str]) -> bool:
+    """git ls-files が blob object name (= 内容の指紋) を出力するオプションを
+    持つか (0.14.0, Codex P2 第3弾)。
+
+    ``-s`` / ``--stage`` は staged blob の object hash を、``--format`` は
+    ``%(objectname)`` 等で hash を出力できる。``md5`` / ``shasum`` を metadata
+    allowlist 外にしているのと同じく fingerprint 露出を防ぐ。短縮フラグの束ね
+    (``-sz`` 等、値を取らない flag のみ) も検出する。plain ``git ls-files .env``
+    (名前のみ) は False を返し allow 維持。
+    """
+    for tok in args:
+        if tok in _GIT_LS_FILES_OBJECT_OPTS or tok.startswith("--format="):
+            return True
+        # 短縮フラグ束ね: 単一 '-' + 値を取らない flag 文字列に 's' を含む
+        # (例: ``-sz`` / ``-zs``)。``-x``/``-X`` は値を取るため SHORT_FLAGS 外で、
+        # ``-x s.env`` のような値を誤検出しない。
+        if (
+            len(tok) > 1
+            and tok[0] == "-"
+            and not tok.startswith("--")
+            and "s" in tok[1:]
+            and all(c in _GIT_LS_FILES_SHORT_FLAGS for c in tok[1:])
+        ):
+            return True
+    return False
+
+
 def _is_metadata_only(tokens: list[str]) -> bool:
     """セグメントが「operand の内容を出力しない」metadata-only コマンドか (0.14.0)。
 
@@ -196,6 +227,9 @@ def _is_metadata_only(tokens: list[str]) -> bool:
 
     git は ``git <sub>`` 直書きの metadata subcommand
     (``_GIT_METADATA_SUBCOMMANDS`` = ``check-ignore`` / ``ls-files``) のみ認識。
+    ``ls-files`` は plain な path listing のみ metadata-only。``-s`` /
+    ``--stage`` / ``--format`` は blob object name (= 内容の安定した指紋) を
+    出せるため除外する (Codex P2 第3弾)。
     ``status`` は ``-v`` / ``--verbose`` が staged diff (機密の旧値/新値) を
     出力するため allowlist から除外した (Codex P1 第2弾)。裸の ``git status``
     は operand に機密 path が無いため operand scan で allow に倒れる。global
@@ -211,6 +245,8 @@ def _is_metadata_only(tokens: list[str]) -> bool:
         and len(tokens) >= 2
         and tokens[1] in _GIT_METADATA_SUBCOMMANDS
     ):
+        if tokens[1] == "ls-files" and _git_ls_files_exposes_object(tokens[2:]):
+            return False
         return True
     return False
 
@@ -462,6 +498,30 @@ def handle(envelope: dict) -> dict:
     pending_ask: dict | None = None
     for seg in segments:
         if _has_hard_stop(seg):
+            # ``--format='%(objectname)'`` は括弧で hard-stop になるが、
+            # git ls-files の fingerprint 出力形は既知なので deny を優先する。
+            try:
+                tokens = _strip_safe_redirects(
+                    shlex.split(seg, comments=False, posix=True)
+                )
+            except ValueError:
+                tokens = []
+            if (
+                len(tokens) >= 2
+                and tokens[0] == "git"
+                and tokens[1] == "ls-files"
+                and _git_ls_files_exposes_object(tokens[2:])
+            ):
+                for p in _find_path_candidates(tokens):
+                    try:
+                        if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
+                            L.log_info("bash_classify", "git_ls_files_object_deny")
+                            return _build_deny_response(tokens, p, envelope)
+                    except (ValueError, OSError):
+                        return output.ask_or_allow(
+                            M.bash_lenient("normalize_failed"),
+                            envelope,
+                        )
             L.log_info("bash_classify", "hard_stop_lenient")
             if pending_ask is None:
                 pending_ask = output.ask_or_allow(

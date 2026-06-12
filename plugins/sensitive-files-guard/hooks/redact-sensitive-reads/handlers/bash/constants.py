@@ -130,13 +130,26 @@ _METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
 # ``status`` は **含めない** (0.14.0, Codex P1 第2弾)。``git status -v`` /
 # ``--verbose`` が staged 変更の diff (= 機密の旧値/新値) を出力するため、
 # ``git status -v -- .env`` で .env の実値が漏れる。``check-ignore -v`` は
-# gitignore ルール (source:line:pattern + path) を、``ls-files`` は名前のみを
-# 出すため内容露出は無く、オプションに関わらず安全なので維持する。``status``
-# は option-gate するより allowlist から外す方が単純で穴も無い。**裸の
-# ``git status`` は operand に機密 path が無いため operand scan で allow に
-# 倒れる** (常用ケースは無影響)。``git status -- .env`` 等 operand 明示形のみ
-# deny (pre-0.14.0 と同じ挙動)。
+# gitignore ルール (source:line:pattern + path) を出すだけでオプションに関わらず
+# 内容露出は無いので維持。``ls-files`` は plain 形 (名前のみ) は安全だが
+# ``-s`` / ``--stage`` / ``--format`` が blob object name を出すため条件付き
+# (``_is_metadata_only`` で ``_git_ls_files_exposes_object`` を検査、後述)。
+# ``status`` は ``-v`` という頻出オプションが diff を出し plain 形の価値も低い
+# (operand scan で裸 ``git status`` は allow) ため option-gate より allowlist
+# 除外が単純。``git status -- .env`` 等 operand 明示形のみ deny。
 _GIT_METADATA_SUBCOMMANDS = frozenset({"check-ignore", "ls-files"})
+
+# git ls-files のうち blob object name (= 内容の指紋) を出力するオプション
+# (0.14.0, Codex P2 第3弾)。これらを含む ``git ls-files`` は metadata-only から
+# 除外して operand scan → deny。``md5`` / ``shasum`` を allowlist 外にしている
+# のと同じ「fingerprint は出さない」方針との整合。
+# - ``-s`` / ``--stage``: mode + objectname(blob hash) + stage を出力
+# - ``--format`` (任意書式): ``%(objectname)`` 等で hash を埋め込めるため一律除外
+# plain ``git ls-files .env`` (名前のみ) は allow 維持 (Codex 明示要望、思想 1)。
+_GIT_LS_FILES_OBJECT_OPTS = frozenset({"-s", "--stage", "--format"})
+# git ls-files の「値を取らない」短縮フラグ (``-sz`` 等の束ね検出用)。
+# ``-x`` / ``-X`` は値を取るため除外 (``-x s.env`` を誤検出しないため)。
+_GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。

@@ -174,10 +174,14 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
 - **`git status` は allowlist から除外** — `-v` / `--verbose` が staged 変更の
   diff (機密の旧値/新値) を出力するため (`git status -v -- .env` で実値が漏れる)。
   option-gate するより allowlist から外す方が単純で穴も無い。`check-ignore`
-  (gitignore ルール表示) / `ls-files` (名前のみ) は内容を出さずオプションに
-  関わらず安全なので維持。**裸の `git status` は機密 operand が無いため
+  (gitignore ルール表示) / plain な `ls-files` (名前のみ) は内容を出さないため
+  維持。**裸の `git status` は機密 operand が無いため
   operand scan で allow に倒れる** (常用ケース無影響)、`git status [-v] -- .env`
   等 operand 明示形は deny (Codex P1 第2弾, 2026-06-12)。
+- **`git ls-files` は object-name 出力オプション付き形を除外** — plain な
+  `git ls-files .env` / `--error-unmatch` は名前一覧のみなので metadata-only
+  維持。`-s` / `--stage` / `--format` は blob object name (= 内容の安定した
+  指紋) を出せるため operand scan → deny に倒す (Codex P2 第3弾, 2026-06-12)。
 - **機密 path への redirect 書込み** (`ls > .env` で .env を truncate) は
   metadata-only ∩ safe_read コマンドだと residual metachar 判定を skip して
   shortcut allow に倒れる穴があった (0.14.0 の regression)。`_sensitive_redirect_target`
