@@ -1278,6 +1278,36 @@ class TestMetadataOnlyAllow(BaseBash):
         r = handle(_make_envelope("git ls-files --error-unmatch .env", self.tmp))
         self.assertTrue(output.is_allow(r))
 
+    def test_git_status_bare_allow(self):
+        # 裸の git status は operand に機密 path が無いため operand scan で allow。
+        # (git status は allowlist から外したが、常用ケースは無影響を固定)
+        for cmd in ("git status", "git status -s", "git status -sb"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+            )
+
+    def test_git_status_verbose_dotenv_deny(self):
+        # Codex P1 第2弾: git status -v / --verbose は staged diff (機密の旧値/
+        # 新値) を出力する。operand 明示形は operand scan で .env を捕まえて deny。
+        for cmd in (
+            "git status -v -- .env",
+            "git status --verbose -- .env",
+            "git status -v .env",
+        ):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+            )
+
+    def test_git_status_dotenv_operand_deny(self):
+        # status を allowlist から外したため `git status -- .env` (非 verbose) も
+        # operand scan で deny (pre-0.14.0 と同じ、安全側)。
+        r = handle(_make_envelope("git status -- .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
     def test_ls_dotenv_with_redirect_allow(self):
         # ls は _SAFE_READ_FIRST_TOKENS でもあるため residual metachar を skip し、
         # metadata-only で allow (出力はファイル名一覧のみ)

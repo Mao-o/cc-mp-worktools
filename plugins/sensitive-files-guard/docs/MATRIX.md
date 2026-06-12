@@ -123,10 +123,12 @@ allow-list **外** の first_token (`awk`, `sed`, `find`, `xargs`, `parallel`,
 
 `first_token` が `_METADATA_ONLY_FIRST_TOKENS` (`ls tree stat file du df test wc
 basename dirname realpath readlink echo printf`) に該当する segment、または
-`git check-ignore` / `git ls-files` / `git status` (subcommand 直書き形) は、
-**operand の内容を stdout に出さない** ため operand scan をスキップして allow に
-倒す。機密 path が operand に居ても、出力はファイル名・属性・件数・パス文字列
-のみで値は LLM コンテキストに載らない (思想 1 の射程外)。
+`git check-ignore` / `git ls-files` (subcommand 直書き形) は、**operand の内容を
+stdout に出さない** ため operand scan をスキップして allow に倒す。機密 path が
+operand に居ても、出力はファイル名・属性・件数・パス文字列のみで値は LLM
+コンテキストに載らない (思想 1 の射程外)。`git status` は `-v` / `--verbose` が
+staged diff (機密の旧値/新値) を出すため allowlist から **除外** (裸の
+`git status` は機密 operand が無いため operand scan で allow に倒れる)。
 
 `find` は **条件付き**: `-exec` / `-execdir` / `-ok` / `-okdir` / `-delete` /
 `-fprint*` / `-fls` (`_FIND_DANGEROUS_ACTIONS`) を含まない場合のみ metadata-only。
@@ -147,7 +149,8 @@ deny に倒る (Codex P1, 0.14.0)。
 | `wc -l .env` (計数のみ), `test -f .env` (存在確認) | allow | allow | allow | allow | allow |
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
-| `git check-ignore -v .env`, `git ls-files .env`, `git status` | allow | allow | allow | allow | allow |
+| `git check-ignore -v .env`, `git ls-files .env`, `git status` (裸) | allow | allow | allow | allow | allow |
+| `git status -v -- .env`, `git status --verbose .env` (staged diff で旧/新値 echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls -la .env > /tmp/x` (read operand 機密でも書込み先が非機密 → metadata allow) | allow | allow | allow | allow | allow |
 | `find . -name .env -exec cat .env ';'` (`-exec` で内容露出可) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `find . -name .env -delete` (`-delete` 副作用), `find ... -fprintf` (書込み) | **deny** | **deny** | **deny** | **deny** | **deny** |

@@ -195,8 +195,11 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     (Codex P2 第2弾)。
 
     git は ``git <sub>`` 直書きの metadata subcommand
-    (``_GIT_METADATA_SUBCOMMANDS``) のみ認識。global option 前置
-    (``git -C dir check-ignore``) は保守的に対象外。
+    (``_GIT_METADATA_SUBCOMMANDS`` = ``check-ignore`` / ``ls-files``) のみ認識。
+    ``status`` は ``-v`` / ``--verbose`` が staged diff (機密の旧値/新値) を
+    出力するため allowlist から除外した (Codex P1 第2弾)。裸の ``git status``
+    は operand に機密 path が無いため operand scan で allow に倒れる。global
+    option 前置 (``git -C dir check-ignore``) は保守的に対象外。
     """
     first = tokens[0]
     if first == "find":

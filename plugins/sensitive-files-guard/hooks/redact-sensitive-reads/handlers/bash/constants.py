@@ -126,7 +126,17 @@ _METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
 # ``git -C dir check-ignore`` のような global option 前置形は対象外 (従来通り
 # operand scan → deny。保守側に倒す)。``show`` / ``diff`` / ``log`` /
 # ``cat-file`` 等の内容出力系は history カテゴリの deny を維持。
-_GIT_METADATA_SUBCOMMANDS = frozenset({"check-ignore", "ls-files", "status"})
+#
+# ``status`` は **含めない** (0.14.0, Codex P1 第2弾)。``git status -v`` /
+# ``--verbose`` が staged 変更の diff (= 機密の旧値/新値) を出力するため、
+# ``git status -v -- .env`` で .env の実値が漏れる。``check-ignore -v`` は
+# gitignore ルール (source:line:pattern + path) を、``ls-files`` は名前のみを
+# 出すため内容露出は無く、オプションに関わらず安全なので維持する。``status``
+# は option-gate するより allowlist から外す方が単純で穴も無い。**裸の
+# ``git status`` は operand に機密 path が無いため operand scan で allow に
+# 倒れる** (常用ケースは無影響)。``git status -- .env`` 等 operand 明示形のみ
+# deny (pre-0.14.0 と同じ挙動)。
+_GIT_METADATA_SUBCOMMANDS = frozenset({"check-ignore", "ls-files"})
 
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
