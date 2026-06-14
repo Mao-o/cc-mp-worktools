@@ -498,30 +498,6 @@ def handle(envelope: dict) -> dict:
     pending_ask: dict | None = None
     for seg in segments:
         if _has_hard_stop(seg):
-            # ``--format='%(objectname)'`` は括弧で hard-stop になるが、
-            # git ls-files の fingerprint 出力形は既知なので deny を優先する。
-            try:
-                tokens = _strip_safe_redirects(
-                    shlex.split(seg, comments=False, posix=True)
-                )
-            except ValueError:
-                tokens = []
-            if (
-                len(tokens) >= 2
-                and tokens[0] == "git"
-                and tokens[1] == "ls-files"
-                and _git_ls_files_exposes_object(tokens[2:])
-            ):
-                for p in _find_path_candidates(tokens):
-                    try:
-                        if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
-                            L.log_info("bash_classify", "git_ls_files_object_deny")
-                            return _build_deny_response(tokens, p, envelope)
-                    except (ValueError, OSError):
-                        return output.ask_or_allow(
-                            M.bash_lenient("normalize_failed"),
-                            envelope,
-                        )
             L.log_info("bash_classify", "hard_stop_lenient")
             if pending_ask is None:
                 pending_ask = output.ask_or_allow(

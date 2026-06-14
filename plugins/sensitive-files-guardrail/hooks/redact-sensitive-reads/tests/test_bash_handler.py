@@ -1294,12 +1294,21 @@ class TestMetadataOnlyAllow(BaseBash):
         r = handle(_make_envelope("git ls-files --stage .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_git_ls_files_format_objectname_dotenv_deny(self):
-        # --format は %(objectname) で内容の指紋を出せるため deny。
-        r = handle(
-            _make_envelope("git ls-files --format='%(objectname)' .env", self.tmp)
-        )
-        self.assertEqual(_decision(r), "deny")
+    def test_git_ls_files_format_objectname_hard_stop_ask_or_allow(self):
+        # ``--format='%(objectname)'`` は ``(``/``)`` を含むため segment hard-stop
+        # に該当し ``ask_or_allow`` に降格する (1.0.0: hard-stop 特例撤去)。
+        # default では ask、auto/bypass/plan の autonomous では allow に倒れる。
+        # ハーネス委譲方針 ([[sfg-lenient-policy]]) に従い、静的解析不能 segment は
+        # plugin 側で deny 強制せず Claude Code ハーネスの別軸監視に委ねる。
+        cmd = "git ls-files --format='%(objectname)' .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        for mode in ("auto", "bypassPermissions", "plan"):
+            r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{mode!r} should allow but got {_decision(r)!r}",
+            )
 
     def test_git_ls_files_short_bundle_stage_dotenv_deny(self):
         # -sz のような短縮束ねでも s を含めば object name を出すため deny。
