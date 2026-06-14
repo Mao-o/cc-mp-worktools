@@ -1,5 +1,86 @@
 # Changelog
 
+## Unreleased (PR 6, 1.0.0 予定)
+
+**PR 6 進行中** (REVIEW_TASKS_2026-05-06.md の最終 PR、1.0.0 に向けて E5 / E6 /
+D1 / D2 を順次取り込む)。本セクションは E5 (json/toml/yaml status 拡張) の
+変更を記録し、E6 (Edit/Write リッチ化) / D1 / D2 (docs / tests 整理) は同
+セクションへ追記後にまとめて 1.0.0 として cut する。plugin 名前
+`sensitive-files-guardrail` は維持 (0.14.0 で結論済み: guard は役割語であり
+deny reason を読むモデルへの遵守圧として機能する、人間向け期待値調整は
+description / README の分業で担う)。rename 自体は内部呼称の `sensitive-files-guard`
+→ `sensitive-files-guardrail` 統一として 0.14.0 リリース直後の commit 52113a1 で
+完了済み。
+
+### E5: JSON / TOML / YAML にも value status を拡張 (commit 3189d907)
+
+dotenv 0.9.0 (E1) で導入した value status / length / placeholder hint を、
+json / toml の str scalar 値、および yaml の top-level key 抽出に横展開する
+(REVIEW_TASKS_2026-05-06.md L408-425)。「鍵があるが値が `<placeholder>` のまま」
+「文字列が異様に長い (デバッグダンプ混入)」「設定値が `<empty>`」などを reason
+から判定できるようにし、思想 2 (block 時は意図を汲んだメッセージを返す) を全
+format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆方向 (status
+拡張) に倒した経緯は REVIEW_TASKS の L275-278 参照。
+
+1. **`redaction/jsonlike.py`**: 文字列 scalar 値に status タグ + length を付与
+   (`_classify_str_status`)。
+   - 付与する status: `<set>` / `<empty>` / `<placeholder>` / `<long>` /
+     `<looks_truncated>` (dotenv と同等のタグセット。`<long>` は 4096 byte 超)
+   - placeholder 一致時は `matched="..."` で辞書 literal / pattern label を併記
+     (値そのものは出さない、`redaction/placeholders.py` 共有)
+   - bool / num / null / array / object には status を**出さない** (構造側は
+     値を持たないため意味がない)
+   - `<short>` は型クラス前提のため json では非対象 (dotenv は jwt / url 等の
+     型別最低長を持つが、json には型ヒントが無いため判定不能)
+   - 再帰ネストでも適用 (`{"outer": {"inner": "..."}}` で inner にも付与)
+2. **`redaction/tomllike.py`**: `format_toml` を `format_jsonlike(info)` 直流用に
+   簡素化。`_walk` を jsonlike から共有経由で同じ str scalar status が自動的に
+   付与される。
+3. **`redaction/opaque.py`**: yaml format 専用の簡易 top-level key 抽出器を
+   新設 (`_redact_yaml`)。
+   - `^([A-Za-z_][A-Za-z0-9_\-]*)\s*:` で top-level key を順序維持で収集
+     (`_YAML_MAX_TOP_KEYS=500` で cap)
+   - `^\s+([A-Za-z_]...)` で nested 件数のみカウント (key 名は出さない)
+   - 完全パースはしない (思想 1: うっかり露出予防の射程外、anchor / alias /
+     flow style / multi-document などは対象外)
+   - list 形式 (`- item:`) と comment 行 (`#`) はスキップ
+
+### 動作変化
+
+- `Read` / `Bash` deny 時の json / toml / yaml ファイル minimal info が拡張:
+  - 例: `config.json` の `{"k": "changeme"}` → `k  <type=str>  <placeholder>  matched="changeme"  length=8`
+  - 例: `secrets.yaml` で `top-level keys (in order):` + `nested entries: N (not parsed)`
+- **判定境界は変化なし** (deny / allow / ask の区分は 0.14.0 と同じ)。reason に
+  乗る情報量だけが拡張された。値そのものは引き続き一切出さない。
+
+### テスト
+
+- 累計 **701 件維持** (redact 674 / check 27)。E5 のテスト群は 0.14.0 リリース
+  以前 (commit 3189d907, 2026-05-24) で既に取り込まれており件数表記に変化なし
+- 新規 (E5 由来): `TestJsonStatus` ×9 (str status / length / placeholder literal +
+  pattern / long / looks_truncated / bool・num・null に status 出さない /
+  ネスト str / 値漏れ)、`TestTomlStatus` ×3 (toml str scalar の status /
+  placeholder / empty)、`TestYamlExtraction` ×8 (top-level keys 順序 /
+  nested count / nested key 不露出 / 値漏れ / コメントスキップ / 空 yaml /
+  list 形式 / cap)
+
+### ドキュメント
+
+- `README.md`: dotenv 例 (L66-82) に続けて json / yaml の minimal info 出力例を
+  追加、「実値は一切含まれない」説明に json/yaml 横断 status を反映
+- `docs/DESIGN.md`: 「dotenv minimal info の拡張 (0.9.0, E1+E2)」サブセクションに
+  続けて「json/toml/yaml の status 拡張 (Unreleased, E5)」サブセクションを新設
+- `docs/MATRIX.md`: Read handler 表脚注に E5 で format 横断 status が出る旨を追加
+- `docs/REVIEW_TASKS_2026-05-06.md`: 進捗表で P6 E5 を「Unreleased ✓」に更新、
+  plugin rename 検討事項に「rename 完了 (commit 52113a1)」を追記
+
+### 残課題 (本セクション、続編で追記予定)
+
+- E6 (Edit/Write の意図汲み取りメッセージ拡張)
+- D1 (docs 整理) / D2 (tests 整理、合計 +1120 行を E5/E6/D1/D2 で約 ±0 に戻す目標)
+- 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
+  `## 1.0.0` として cut
+
 ## 0.14.0
 
 **離脱分析 (churn analysis) に基づく false positive 解消リリース**。本 plugin は

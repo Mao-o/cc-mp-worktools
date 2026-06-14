@@ -101,6 +101,54 @@ length, status tags, and placeholder hints are returned.
 > 当然 401」「DATABASE_URL が `<short> length=4` → DSN 文字列が壊れている」
 > のように次の作業に直接つなげられる。
 
+> **Unreleased (PR 6, E5)** で同等の status タグ
+> (`<set>` / `<empty>` / `<placeholder>` / `<long>` / `<looks_truncated>`)
+> + `length` + `matched="..."` を **JSON / TOML の str scalar 値**、および
+> **YAML の top-level 抽出** にも横展開する。`<short>` は型クラス (jwt / url 等)
+> 前提のため dotenv 限定。bool / num / null / 構造 (array / object) には status
+> を出さない (値を持たないため意味がない)。
+
+返却される JSON / TOML の reason 例 (Unreleased):
+
+```
+<DATA untrusted="true" source="redact-hook" guard="guardrail-v1">
+NOTE: sanitized data from a sensitive file. Real values are NOT in context.
+file: config.json
+format: json
+entries: 3
+<object, 3 children>
+  api_key  <type=str>  <placeholder>  matched="changeme"  length=8
+  retries  <type=num>
+  endpoint  <type=str>  <set>  length=24
+note: string scalar values are summarized to status tags and length only.
+ array/object counts shown; non-string values removed.
+</DATA>
+```
+
+TOML も同じフォーマットで返る (`format: toml`、内部実装は `_walk` を JSON と
+共有)。
+
+返却される YAML の reason 例 (Unreleased):
+
+```
+<DATA untrusted="true" source="redact-hook" guard="guardrail-v1">
+NOTE: sanitized data from a sensitive file. Real values are NOT in context.
+file: secrets.yaml
+format: yaml
+entries: 2 (top-level)
+top-level keys (in order):
+  1. database
+  2. features
+nested entries: 4 (not parsed)
+note: nested structure not parsed. only top-level key names returned.
+</DATA>
+```
+
+> YAML は完全パースしない (anchor / alias / flow style / multi-document は
+> 対象外)。top-level の鍵名と nested 件数だけで「設定の規模感」と「主要
+> セクション」を伝える設計 (思想 1 = うっかり露出予防の射程、完全な情報遮断
+> ではない)。`<nested>` で 1 件カウントするのみで nested の key 名は出さない。
+
 ### `PreToolUse(Bash)` — redact-sensitive-reads
 
 **三態判定** (deny / ask_or_allow / allow) で静的解析する:

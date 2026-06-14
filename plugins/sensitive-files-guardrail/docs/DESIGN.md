@@ -369,6 +369,71 @@ github_pat < 30 / openai_key < 20 / url < 8 / uuid < 36 / email < 6。
 PLACEHOLDER_LITERALS (21 個) と PLACEHOLDER_PATTERNS (5 個 regex) で判定。
 ユーザー拡張点 (placeholders.local.txt) は **作らない** (Q1 = 簡易版で開始)。
 
+### json/toml/yaml の status 拡張 (Unreleased, E5)
+
+dotenv (E1+E2) で導入した value status / length / placeholder hint を、
+`redaction/jsonlike.py` / `redaction/tomllike.py` / `redaction/opaque.py` に
+横展開する (REVIEW_TASKS_2026-05-06.md L408-425、commit 3189d907 で実装)。
+B1 (「json/toml/yaml を opaque 統一」) を撤回して逆方向 (status 拡張) に倒した
+経緯は同ファイル L275-278 を参照。
+
+#### JSON / TOML — str scalar 値への status 付与
+
+`redaction/jsonlike.py::_classify_str_status` で文字列 scalar 値に status タグと
+length を付与する:
+
+| status | 条件 |
+|---|---|
+| `<empty>` | 空文字列 `""` (length=0、length 列は表示しない) |
+| `<placeholder>` | `placeholders.py::looks_placeholder` 一致 (`matched="..."` 併記) |
+| `<set>` | 上記以外で値あり |
+| `<long>` | 4096 byte 超 (dotenv と同じ閾値、ダンプ混入の検知) |
+| `<looks_truncated>` | 末尾が `...` / `<truncated>` / バックスラッシュ |
+
+- bool / num / null / array / object には **status を出さない** (構造側は値を
+  持たないため意味がない、行内に `<set>` 等が紛れない実装)
+- **`<short>` は対象外**: dotenv は jwt / url 等の型別最低長 (`_MIN_LENGTH_BY_TYPE`) を
+  持つが、json / toml にはそれに相当する型ヒントが無いため判定不能。「判定の根拠を
+  失わせる項目は出さない」原則
+- 再帰ネストでも適用 (`{"outer": {"inner": "..."}}` で inner にも付与、`_walk`
+  の object 分岐内 `sub_type == "str"` で status 計算)
+- **TOML は jsonlike の `_walk` を共有**経由で同じ status が自動付与される
+  (`redaction/tomllike.py::format_toml` は `format_jsonlike(info)` 直流用)。
+  toml の独自フォーマット維持コストはゼロ
+
+#### YAML — 簡易 top-level key 抽出
+
+`redaction/opaque.py::_redact_yaml` で簡易 top-level key 抽出を行う:
+
+- `^([A-Za-z_][A-Za-z0-9_\-]*)\s*:` 行 → top-level key を順序維持で収集
+  (`_YAML_MAX_TOP_KEYS=500` で cap、健全性確保)
+- `^\s+([A-Za-z_]...)` 行 → nested 件数のみカウント (key 名は出さない、
+  `nested entries: N (not parsed)` として件数表示)
+- list 形式 (`- item:`) と comment 行 (`#`) はスキップ
+- **完全パースしない** (思想 1 = うっかり露出予防の射程、anchor / alias /
+  flow style / multi-document などは対象外)
+- 構造を追わない分、yaml 内のネスト値が `<placeholder>` か否かは判定できない。
+  「主要セクション (database / features 等) は何か」「設定の規模感 (nested N
+  件あり)」を伝える設計に留める
+- 既存の opaque (yaml 以外の未知形式) は従来通り `keyonly_scan` の streaming
+  抽出経由で fallback
+
+#### dotenv との status タグ整合表
+
+| status | dotenv | json/toml str | yaml |
+|---|---|---|---|
+| `<set>` | ✓ | ✓ | (top-level key 名のみ) |
+| `<empty>` | ✓ | ✓ | — |
+| `<placeholder>` (+ `matched`) | ✓ | ✓ | — |
+| `<short>` | ✓ (型クラス前提) | ✗ (型ヒント無し) | — |
+| `<long>` | ✓ | ✓ | — |
+| `<looks_truncated>` | ✓ | ✓ | — |
+| `length=N` | ✓ | ✓ | — |
+| `prefix="..."` | ✓ (識別子型) | ✗ | — |
+
+dotenv と json/toml の差分は `<short>` / `prefix` の 2 項目のみ (型クラス前提)。
+yaml は構造未パースのため status 系は全て出さず、key 名と件数のみ。
+
 ### Bash deny の category 別 reason (0.10.0, E3 + E4)
 
 `core/messages.py::bash_deny` を first_token カテゴリ別 dispatch に再編し、
