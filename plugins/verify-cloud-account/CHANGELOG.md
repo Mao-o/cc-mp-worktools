@@ -195,7 +195,7 @@ block される回帰を修正。
 
 **プロジェクト側 `.claude/verify-cloud-account/CLAUDE.md` の builder 同梱**。
 Claude (LLM) が `accounts.local.json` を直接 Read / Write / Edit しようとして
-sensitive-files-guard 等で deny された後も、同ディレクトリの CLAUDE.md を
+sensitive-files-guardrail 等で deny された後も、同ディレクトリの CLAUDE.md を
 覗いた瞬間に「builder 経由 (Bash) が正規経路」と理解できるようにする。
 
 ### 主要な変更
@@ -211,7 +211,7 @@ sensitive-files-guard 等で deny された後も、同ディレクトリの CLA
    dispatcher が読みに来るパスではないため、欠損しても plugin 本体の動作には
    影響しない。
 3. **疎結合の維持** — 本変更は verify-cloud-account 内で完結する。
-   sensitive-files-guard 側の deny reason やパターンには手を入れない
+   sensitive-files-guardrail 側の deny reason やパターンには手を入れない
    (cc-marketplaces の plugin 設計原則)。
 
 ### 設計判断

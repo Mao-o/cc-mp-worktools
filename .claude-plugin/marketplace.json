@@ -22,8 +22,8 @@
       ]
     },
     {
-      "name": "sensitive-files-guard",
-      "source": "./plugins/sensitive-files-guard",
+      "name": "sensitive-files-guardrail",
+      "source": "./plugins/sensitive-files-guardrail",
       "description": "機密ファイル (.env, *.secret, 秘密鍵, クレデンシャル) のうっかり露出を予防する多段 hook。Read/Bash 時の実値 redaction と Stop 時の .gitignore 未登録検出を同梱。敵対的バイパス対策ではない",
       "category": "security",
       "keywords": [

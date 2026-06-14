@@ -52,7 +52,7 @@ deny する (`/verify-cloud-account:accounts-migrate` で統合)。
 
 builder の `init --commit` / `migrate --commit` は同ディレクトリに
 `CLAUDE.md` (Claude 向け signpost) も自動生成する (v0.3.1 から)。
-sensitive-files-guard 等で `accounts.local.json` への直接アクセスが deny
+sensitive-files-guardrail 等で `accounts.local.json` への直接アクセスが deny
 された Claude (LLM) が、同ディレクトリの CLAUDE.md を覗くだけで builder
 経由の正規経路に辿り着けるようにするための案内ファイル。既存 CLAUDE.md
 は上書きされず、削除しても plugin 本体の動作には影響しない。

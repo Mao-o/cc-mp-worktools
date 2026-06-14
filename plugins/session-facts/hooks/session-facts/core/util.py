@@ -88,8 +88,8 @@ def aggregate_paths(paths: Sequence[str]) -> List[str]:
     replacing positions whose segment value differs across the group with
     ``*``. For example::
 
-        plugins/sensitive-files-guard/hooks/check-sensitive-files/tests
-        plugins/sensitive-files-guard/hooks/redact-sensitive-reads/tests
+        plugins/sensitive-files-guardrail/hooks/check-sensitive-files/tests
+        plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads/tests
         plugins/verify-cloud-account/hooks/verify-cloud-account/tests
 
     collapses to a single ``plugins/*/hooks/*/tests`` line. A single path (or a

@@ -1,7 +1,7 @@
 # verify-cloud-account / accounts.local.json (Claude 向け案内)
 
 このディレクトリ配下の `accounts.local.json` は **`*.local.json` パターン**に
-マッチするため、`sensitive-files-guard` 等のセキュリティ系フックで Claude
+マッチするため、`sensitive-files-guardrail` 等のセキュリティ系フックで Claude
 からの `Read` / `Write` / `Edit` および `cat` 経由の参照が deny される設計
 です (機密ファイル流出防止のため意図的)。Claude (LLM) は **直接編集できま
 せん**。
@@ -37,7 +37,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 - `Read` / `Edit` / `Write` で `accounts.local.json` を直接操作する
 - `cat .claude/verify-cloud-account/accounts.local.json` を実行する
-  (`sensitive-files-guard` が Bash operand を deny する)
+  (`sensitive-files-guardrail` が Bash operand を deny する)
 - `.claude/accounts.local.json` (旧パス) と
   `.claude/verify-cloud-account/accounts.local.json` (新パス) の **両方** を
   作る (verify-cloud-account dispatcher が複数パス検出時に fail-closed で

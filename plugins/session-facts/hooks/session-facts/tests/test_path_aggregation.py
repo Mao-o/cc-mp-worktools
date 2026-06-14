@@ -20,8 +20,8 @@ class AggregatePathsTest(unittest.TestCase):
 
     def test_session_facts_three_test_dirs_collapse(self):
         paths = [
-            "plugins/sensitive-files-guard/hooks/check-sensitive-files/tests",
-            "plugins/sensitive-files-guard/hooks/redact-sensitive-reads/tests",
+            "plugins/sensitive-files-guardrail/hooks/check-sensitive-files/tests",
+            "plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads/tests",
             "plugins/verify-cloud-account/hooks/verify-cloud-account/tests",
         ]
         self.assertEqual(aggregate_paths(paths), ["plugins/*/hooks/*/tests"])

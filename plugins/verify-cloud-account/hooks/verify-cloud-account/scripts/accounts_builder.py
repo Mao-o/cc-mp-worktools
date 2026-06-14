@@ -40,7 +40,7 @@ _SERVICE_BY_KEY = {svc.ACCOUNT_KEY: svc for svc in SERVICES}
 _VALUE_HIDDEN_MARK = "(value hidden. use --show-values to reveal)"
 
 # accounts.local.json と同じディレクトリに同梱する Claude 向け案内ファイル。
-# sensitive-files-guard 等で *.local.json への直接アクセスが deny される事情と
+# sensitive-files-guardrail 等で *.local.json への直接アクセスが deny される事情と
 # builder 経由の正規経路を Claude (LLM) に signpost する。
 _PROJECT_CLAUDE_MD_FILENAME = "CLAUDE.md"
 _PROJECT_CLAUDE_MD_TEMPLATE = _HERE / "templates" / "project_claude.md"
@@ -113,7 +113,7 @@ def _ensure_project_claude_md(project_dir: str, stdout: IO[str]) -> None:
     - dispatcher 等が読みに来るパスではないため、ここで失敗しても plugin 本体
       の動作に影響しない
 
-    plugin 同士の疎結合を保つための signpost: sensitive-files-guard が
+    plugin 同士の疎結合を保つための signpost: sensitive-files-guardrail が
     `*.local.json` への直接アクセスを deny する事情と、builder 経由の正規経路
     (Agent Skill / Bash) を Claude (LLM) に伝える。
     """

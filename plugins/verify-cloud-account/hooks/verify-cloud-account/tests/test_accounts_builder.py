@@ -527,7 +527,7 @@ class TestProjectClaudeMd(BaseBuilder):
         self.assertIn("accounts-init", content)
         self.assertIn("accounts-show", content)
         self.assertIn("accounts-migrate", content)
-        self.assertIn("sensitive-files-guard", content)
+        self.assertIn("sensitive-files-guardrail", content)
         self.assertIn("created:", out)
 
     def test_init_commit_preserves_existing_claude_md(self):

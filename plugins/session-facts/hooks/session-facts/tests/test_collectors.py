@@ -87,8 +87,8 @@ class TestsCollectorAggregationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             tracked = [
-                "plugins/sensitive-files-guard/hooks/check-sensitive-files/tests/test_a.py",
-                "plugins/sensitive-files-guard/hooks/redact-sensitive-reads/tests/test_b.py",
+                "plugins/sensitive-files-guardrail/hooks/check-sensitive-files/tests/test_a.py",
+                "plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads/tests/test_b.py",
                 "plugins/verify-cloud-account/hooks/verify-cloud-account/tests/test_c.py",
                 "plugins/a/src/impl.py",
                 "plugins/b/src/impl.py",
