@@ -63,6 +63,68 @@ PreToolUse hook を発火する仕様変更が入ったものとみなす。
 扱いで操作性を優先する。機密 path 確定 match (`make_deny`) と Read/Edit handler
 の `ask_or_deny` は plan mode でも引き続き安全側 (deny / ask) を維持。
 
+## ハーネス委譲方針 (defense-in-depth の一層)
+
+本 plugin は **defense-in-depth の一層** であり、「最後の砦」を担う設計ではない。
+**静的解析が困難な Bash ケースは plugin 側で deny / ask を強制せず、Claude Code
+ハーネス側の別軸監視に委ねる**。「判断困難 → ユーザーに必ず判断させる」を強制
+すると false positive が日常コマンドを止めて UX を阻害し、最終的にユーザーが
+plugin を無効化する (= 防御がゼロになる) という事故が実際に起きている (2026-05-21
+離脱、`CHANGELOG.md` 0.14.0 の離脱分析参照)。
+
+### 判断困難ケースは ask_or_allow → autonomous で allow
+
+「判断困難」とは以下のような **静的解析不能** な segment:
+
+- `_has_hard_stop` 該当 (`$` / バッククォート / `(` / `)` / `{` / `}` / `<` / `\r`)
+- `_is_opaque_first_token` 該当 (env-assignment / 任意 path exec / opaque wrapper)
+- `_SHELL_KEYWORDS` (`if` / `for` / `do` 等)
+- `_segment_has_residual_metachar` (非 `_SAFE_READ_FIRST_TOKENS` での `>` / `&` 等)
+- `shlex.split` 失敗 / `normalize` 失敗
+- glob operand が dotenv stem に一致しないケース
+
+これらは `ask_or_allow` に倒し、`LENIENT_MODES` (`auto` / `bypassPermissions` /
+`plan`) の autonomous モードでは `allow` に降格する。default / acceptEdits /
+dontAsk では `ask` 維持。**autonomous モードでは Claude Code ハーネス自体が別軸
+で Bash コマンドを監視している前提に立ち、plugin が二重に止めない**。
+
+### plugin 側で deny 固定が許される境界
+
+`make_deny` 固定は以下のいずれにも該当する **確信ケース** のみに限る:
+
+- **機密 operand 確定**: literal path / VCS pathspec / URI のいずれかで
+  `_operand_is_sensitive` が True、あるいは glob operand が
+  `_glob_operand_is_dotenv_match` で dotenv stem に一致
+- **内容出力 / 破壊操作**: `cat` / `head` / `grep` / `git show` 系の内容出力、
+  `cp` / `mv` の複製、Edit/Write tool の新規作成、`ls > .env` 等の機密 path
+  への redirect 書込み
+
+「内容を出さない」コマンド (`_METADATA_ONLY_FIRST_TOKENS` + `_GIT_METADATA_SUBCOMMANDS`
+の `check-ignore` / `ls-files`) は機密 operand でも `allow` に倒す
+(0.14.0 G2)。**「判断困難だから deny 強制」の特例は作らない**。
+
+### 撤去した「判断困難 → deny 強制」特例
+
+過去にこの方針と矛盾する特例を入れた結果、思想ドリフトが観測された:
+
+| 特例 | 撤去版 | 撤去理由 |
+|---|---|---|
+| `<` 入力リダイレクトの character-level parser | 0.7.0 (A1) | `cat <(echo \(\)) < .env` の escape paren depth tracking など敵対的バイパス対策が思想 1 に反する |
+| FOO=1 / env / sudo 等の prefix normalize | 0.8.0 (A4) | 「`FOO=1 cat .env` を `cat .env` に書き戻す」は敵対的解釈で思想 1 に反する |
+| 既定 rules 候補列挙 (glob × literal stem の連結候補化) | 0.8.0 (B3) | `*.log` が `.env.log` 連結で巻き込まれる false positive |
+| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 1.0.0 | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 |
+
+外部レビュー (Codex 等) が判断困難ケースの deny 強制を要求してきた場合も、
+本方針を根拠に「ask_or_allow で十分、それ以上の deny 強制はハーネス委譲する」と
+返す。
+
+### 例外: `patterns.txt` 読込失敗
+
+`load_patterns()` が `FileNotFoundError` / `OSError` で失敗したときは
+**全 mode で `make_deny` 固定** (autonomous でも allow しない)。これは「policy
+が無いのに lenient で素通り」を避けるため。`ask_or_allow` 系列は「policy はある
+が静的解析が届かない」ケース専用。
+
 ## LENIENT_MODES 方針
 
 `core/output.py::ask_or_allow` は bash handler の静的解析不能ケースで使う三態
@@ -180,8 +242,12 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   等 operand 明示形は deny (Codex P1 第2弾, 2026-06-12)。
 - **`git ls-files` は object-name 出力オプション付き形を除外** — plain な
   `git ls-files .env` / `--error-unmatch` は名前一覧のみなので metadata-only
-  維持。`-s` / `--stage` / `--format` は blob object name (= 内容の安定した
-  指紋) を出せるため operand scan → deny に倒す (Codex P2 第3弾, 2026-06-12)。
+  維持。`-s` / `--stage` / `-sz` 等は blob object name (= 内容の安定した指紋)
+  を出せるため operand scan → deny に倒す (Codex P2 第3弾, 2026-06-12)。
+  `--format=%(...)` の quote 内に `(` を含む形は segment hard-stop に該当し、
+  1.0.0 のハーネス委譲方針整理で **ask_or_allow に降格** (autonomous で allow)。
+  pathspec 無し形 (`git ls-files -s` 単体、機密 path operand 無し) も
+  operand scan が allow に倒す (内容露出には機密 path commit が前提のため)。
 - **機密 path への redirect 書込み** (`ls > .env` で .env を truncate) は
   metadata-only ∩ safe_read コマンドだと residual metachar 判定を skip して
   shortcut allow に倒れる穴があった (0.14.0 の regression)。`_sensitive_redirect_target`
