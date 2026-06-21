@@ -8,6 +8,8 @@ PATTERNS = [r"^kubectl\b"]
 READONLY = [
     r"^kubectl\s+config\s+(current-context|get-contexts|view|get-clusters|get-users)\b",
     r"^kubectl\s+cluster-info\b",
+    # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
+    r"^kubectl\s+(--version|--help|version|help)\b",
 ]
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
@@ -27,14 +29,19 @@ def _context_override(command: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _run_current_context() -> tuple[str | None, str | None]:
-    """kubectl config current-context を実行し (context, error_reason) を返す。"""
+def _run_current_context(env=None) -> tuple[str | None, str | None]:
+    """kubectl config current-context を実行し (context, error_reason) を返す。
+
+    env: コマンド行頭のインライン環境変数をマージした完全 env (`KUBECONFIG` 等)。
+    None なら hook プロセスの環境を継承する。
+    """
     try:
         result = subprocess.run(
             ["kubectl", "config", "current-context"],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
     except FileNotFoundError:
         return None, "kubectl: kubectl コマンドが見つかりません。"
@@ -55,13 +62,13 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
-def verify(expected, project_dir: str) -> str | None:
+def verify(expected, project_dir: str, env=None) -> str | None:
     if not isinstance(expected, str):
         return (
             f'kubectl: accounts.local.json の "{ACCOUNT_KEY}" 値は文字列で指定してください。'
         )
 
-    current, err = _run_current_context()
+    current, err = _run_current_context(env)
     if err:
         return err
 

@@ -7,13 +7,17 @@
 - strip_transparent_wrappers: 透過的 wrapper (`sudo`, `time`, `nohup`,
   `env`, `command`, `builtin`, `exec`, `npx`, `pnpm exec`, `pnpm dlx`,
   `mise exec --`, `bun x`) とその直後のフラグ (`sudo -u USER` 等) を剥がす
-- extract_candidates: 上記を合成して「コマンドマッチにかける候補断片」を返す
+- extract_candidates: 上記を合成して「コマンドマッチにかける候補断片」と、
+  その断片の先頭に書かれていたインライン環境変数 (`AWS_PROFILE=prod` 等) の
+  dict を返す。検証 subprocess に同じ env を渡してコマンド実行時と同条件で
+  アカウント検証するため (剥がすだけで使わない非対称を解消)
 
 参考: liberzon/claude-hooks の smart_approve.py のアプローチをベースに独自実装。
 """
 from __future__ import annotations
 
 import re
+import shlex
 
 _WRAPPERS_SINGLE = {"sudo", "time", "nohup", "command", "builtin", "exec", "npx"}
 _WRAPPERS_TWO = {("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x")}
@@ -175,23 +179,53 @@ def _scan_value_end(cmd: str, start: int) -> int | None:
     return i
 
 
-def strip_leading_env(cmd: str) -> str:
-    """先頭の `KEY=VALUE` 形式の環境変数割当を順次剥がす。
+def _unquote_env_value(raw: str) -> str | None:
+    """env 代入値の shell quote を除去する。
 
-    値に $() / バッククォートが含まれると剥がすと意味が変わり得るので保守的に停止。
-    `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化を避ける)。
+    `prod` → `prod`, `"a b"` → `a b`, `a"b"c` → `abc`, `""` → ``。
+    quote 除去後に未展開の変数参照 (`$VAR`) が残る値は静的に解決できないため
+    None を返す (= 収集しない)。`_scan_value_end` が `$(` / backtick で既に
+    stop しているので、ここで弾くのは `$VAR` 形式のみ。
     """
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return None
+    value = "".join(parts) if parts else ""
+    if "$" in value:
+        return None
+    return value
+
+
+def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
+    """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
+
+    剥がし条件は従来の strip_leading_env と同一:
+    - 値に $() / バッククォートが含まれると保守的に停止
+    - `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化回避)
+    収集 env には静的に解決できた値のみ入る (`$VAR` を含む値はキーごと除外)。
+    """
+    collected: dict[str, str] = {}
     while True:
         m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", cmd)
         if not m:
-            return cmd
+            return cmd, collected
         end = _scan_value_end(cmd, m.end())
         if end is None:
-            return cmd
+            return cmd, collected
         rest = cmd[end:]
         if not rest or rest[0] not in " \t":
-            return cmd
+            return cmd, collected
+        key = m.group(1)
+        value = _unquote_env_value(cmd[m.end():end])
+        if value is not None:
+            collected.setdefault(key, value)
         cmd = rest.lstrip()
+
+
+def strip_leading_env(cmd: str) -> str:
+    """先頭の `KEY=VALUE` 形式の環境変数割当を順次剥がす (収集 env は捨てる)。"""
+    return _parse_leading_env(cmd)[0]
 
 
 def _tokens(cmd: str) -> list[str]:
@@ -269,30 +303,54 @@ def _strip_one_wrapper(cmd: str) -> str | None:
     return None
 
 
-def strip_transparent_wrappers(cmd: str, max_iter: int = 6) -> str:
-    """後続コマンドの挙動を変えない wrapper と先頭の env 割当を剥がす。
+def _normalize_segment(cmd: str, max_iter: int = 6) -> tuple[str, dict[str, str]]:
+    """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。
 
-    多段 (sudo time mise exec -- foo) に対応するため最大 max_iter 回繰り返す。
+    多段 (`FOO=bar sudo time mise exec -- foo`) に対応するため最大 max_iter
+    回繰り返し、各段で現れた先頭 env を収集する。同名キーは外側 (先に出現)
+    を優先する (`setdefault`)。
     """
+    collected: dict[str, str] = {}
     for _ in range(max_iter):
-        cmd = strip_leading_env(cmd)
+        cmd, env = _parse_leading_env(cmd)
+        for k, v in env.items():
+            collected.setdefault(k, v)
         stripped = _strip_one_wrapper(cmd)
         if stripped is None:
             break
         cmd = stripped
-    return strip_leading_env(cmd)
+    cmd, env = _parse_leading_env(cmd)
+    for k, v in env.items():
+        collected.setdefault(k, v)
+    return cmd, collected
 
 
-def extract_candidates(command: str) -> list[str]:
-    """検証対象候補の断片リストを返す。
+def strip_transparent_wrappers(cmd: str, max_iter: int = 6) -> str:
+    """後続コマンドの挙動を変えない wrapper と先頭の env 割当を剥がす。
 
-    - `cd /tmp && FOO=bar gh pr create` → [`cd /tmp`, `gh pr create`]
-    - `sudo time mise exec -- firebase deploy` → [`firebase deploy`]
-    - `gh auth status && gh pr list` → [`gh auth status`, `gh pr list`]
+    多段 (sudo time mise exec -- foo) に対応するため最大 max_iter 回繰り返す。
+    収集した env は捨てる (env も必要なら _normalize_segment を使う)。
     """
-    out: list[str] = []
+    return _normalize_segment(cmd, max_iter)[0]
+
+
+def extract_candidates(command: str) -> list[tuple[str, dict[str, str]]]:
+    """検証対象候補の断片と、その断片のインライン env の dict を返す。
+
+    - `cd /tmp && FOO=bar gh pr create`
+        → [(`cd /tmp`, {}), (`gh pr create`, {"FOO": "bar"})]
+    - `AWS_PROFILE=prod aws s3 ls`
+        → [(`aws s3 ls`, {"AWS_PROFILE": "prod"})]
+    - `sudo time mise exec -- firebase deploy` → [(`firebase deploy`, {})]
+    - `gh auth status && gh pr list`
+        → [(`gh auth status`, {}), (`gh pr list`, {})]
+
+    env は検証 subprocess に渡され、コマンド実行時と同条件でアカウント検証する
+    (インライン `AWS_PROFILE` 等を剥がすだけで検証に使わない非対称を解消)。
+    """
+    out: list[tuple[str, dict[str, str]]] = []
     for seg in split_on_operators(command):
-        normalized = strip_transparent_wrappers(seg)
+        normalized, env = _normalize_segment(seg)
         if normalized:
-            out.append(normalized)
+            out.append((normalized, env))
     return out

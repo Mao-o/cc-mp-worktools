@@ -65,6 +65,24 @@ class TestCache(unittest.TestCase):
         files[0].write_text("not json", encoding="utf-8")
         self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
 
+    def test_different_inline_env_miss(self):
+        # profile が異なれば別キー → profile A の成功が profile B で誤 allow されない
+        cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
+        self.assertFalse(
+            cache.get_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "b"})
+        )
+
+    def test_same_inline_env_hit(self):
+        cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
+        self.assertTrue(
+            cache.get_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
+        )
+
+    def test_env_vs_no_env_miss(self):
+        # env 付き成功キーと env 無しキーは分離される (後方互換のデフォルト None)
+        cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
+        self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

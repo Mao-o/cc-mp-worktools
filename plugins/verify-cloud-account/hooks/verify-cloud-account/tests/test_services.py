@@ -405,5 +405,63 @@ class TestAwsHasNoSelfRemediation(unittest.TestCase):
         self.assertFalse(hasattr(aws, "is_self_remediation"))
 
 
+class TestEnvPropagation(unittest.TestCase):
+    """verify(env=...) が subprocess.run に env を渡すことを確認する (要望1)。
+
+    インライン `AWS_PROFILE` 等が検証 subprocess に届かず永久 deny するバグの
+    回帰防止。env 未指定時は env=None (= 親環境継承) であることも確認する。
+    """
+
+    def test_aws_passes_env(self):
+        custom = {"AWS_PROFILE": "prod"}
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="123456789012")
+        ) as m:
+            self.assertIsNone(aws.verify("123456789012", "/p", env=custom))
+        self.assertEqual(m.call_args.kwargs.get("env"), custom)
+
+    def test_aws_default_env_is_none(self):
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="123456789012")
+        ) as m:
+            aws.verify("123456789012", "/p")
+        self.assertIsNone(m.call_args.kwargs.get("env"))
+
+    def test_gcloud_passes_env(self):
+        custom = {"CLOUDSDK_ACTIVE_CONFIG_NAME": "work"}
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="my-proj")
+        ) as m:
+            self.assertIsNone(gcloud.verify("my-proj", "/p", env=custom))
+        self.assertEqual(m.call_args.kwargs.get("env"), custom)
+
+    def test_firebase_passes_env(self):
+        custom = {"FOO": "bar"}
+        # .firebaserc を読まないよう実在しない project_dir を渡し _from_cli 経路へ
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="my-proj")
+        ) as m:
+            self.assertIsNone(
+                firebase.verify("my-proj", "/no/such/dir/xyz", env=custom)
+            )
+        self.assertEqual(m.call_args.kwargs.get("env"), custom)
+
+    def test_github_passes_env(self):
+        custom = {"GH_HOST": "github.com"}
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout=GH_GITHUB_COM_ONLY)
+        ) as m:
+            self.assertIsNone(github.verify("Mao-o", "/p", env=custom))
+        self.assertEqual(m.call_args.kwargs.get("env"), custom)
+
+    def test_kubectl_passes_env(self):
+        custom = {"KUBECONFIG": "/tmp/kubeconfig"}
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="prod-ctx")
+        ) as m:
+            self.assertIsNone(kubectl.verify("prod-ctx", "/p", env=custom))
+        self.assertEqual(m.call_args.kwargs.get("env"), custom)
+
+
 if __name__ == "__main__":
     unittest.main()

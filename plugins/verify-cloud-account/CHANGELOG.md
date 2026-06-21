@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.7.0
+
+**インライン環境変数の検証 subprocess への伝播 + 診断性改善**: コマンド行頭の
+インライン env (`AWS_PROFILE=prod aws ...`) が検証 subprocess に渡されず、SSO
+ログイン済みでも永久に deny される問題を解消した。あわせて deny の出所明示・
+情報系コマンドの誤検証防止・診断性向上を同梱。
+
+### 変更内容
+
+1. **インライン env の検証 subprocess への伝播** (`core/command_parser.py` +
+   `core/dispatcher.py` + 5 service files + `core/cache.py`) — 従来
+   `extract_candidates` は先頭 `KEY=VALUE` を剥がして捨てていたが、剥がした env
+   を保持して検証 subprocess に渡すようにした。`AWS_PROFILE=prod aws ...` の
+   インライン profile 運用で、ログイン済みでも default profile で検証が失敗し
+   永久 deny する問題 (剥がすが使わない非対称) を解消:
+   - `extract_candidates` が `(候補断片, inline_env dict)` を返す
+   - dispatcher が `{**os.environ, **inline_env}` をマージして `verify(env=)` に渡す
+     (マージは dispatcher に一元化し、service → core 依存を作らない)
+   - 各 service の `verify(expected, project_dir, env=None)` → 内部 `_run_*(env)` →
+     `subprocess.run(env=)`。env=None は従来どおり親環境継承 (後方互換)
+   - cache キーに inline_env を含め、profile A の成功が profile B で誤 allow されない
+   - 値に未展開の `$VAR` を含む env は静的解決不能のため伝播しない (剥がしはする)
+2. **deny メッセージの出所明示** (`core/output.py`) — 全 deny の先頭に
+   `[verify-cloud-account] ... (CLI 本体のエラーではありません)` タグを付け、
+   AWS CLI 等のナマエラー (`Unable to locate credentials` 等) と誤認され CLI
+   レベルの切り分けに時間を浪費するのを防ぐ
+3. **情報系コマンドの検証スキップ** (5 service files) — `aws --version` /
+   `gcloud help` 等のバージョン・ヘルプ表示コマンドを READONLY に追加。
+   `command aws --version` 等の診断コマンドが誤って検証対象になり deny される
+   問題を解消 (5 サービス共通の穴を一括対応)
+4. **検出セグメントの併記** (`core/dispatcher.py`) — verify 失敗の deny に
+   `(検出コマンド: ...)` を付け、複合コマンドのどのセグメントが検証を起動した
+   かを明示して診断性を改善
+5. **direnv / CLAUDE_ENV_FILE の制限を明文化** (README + CLAUDE.local.md) —
+   公式仕様 (hooks.md) で `CLAUDE_ENV_FILE` は PreToolUse hook に渡らない
+   (SessionStart / Setup / CwdChanged / FileChanged のみ) ため、`.envrc` /
+   direnv 経由の env は検証 subprocess に届かない。これは harness 仕様起因で
+   plugin では根本解決できないため、回避策 (インライン env / settings.json env /
+   起動時 env) を明記する方針とした
+
+テスト 280 件 (新規 19 件: env 抽出 6 + service env 伝播 6 + cache 分離 3 +
+dispatch 統合 4)。
+
 ## 0.6.0
 
 **self-remediation loop の解消**: deny reason が案内する切替コマンド (例:

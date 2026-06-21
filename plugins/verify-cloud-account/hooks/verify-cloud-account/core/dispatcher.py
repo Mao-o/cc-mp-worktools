@@ -89,21 +89,31 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
 def _collect_targets(command: str) -> list[tuple]:
     """コマンドを分解し、検証対象 (non-readonly) のサービス候補リストを返す。
 
-    同一サービスの候補セグメントは (svc, [cand, ...]) に集約する。verify は
-    サービスごとに 1 回で十分 (アクティブアカウントは 1 つ) だが、
-    self-remediation 判定は全セグメントを見る必要があるため全候補を保持する。
+    返り値は (svc, [cand, ...], inline_env) のリスト。同一サービスの候補
+    セグメントは 1 エントリに集約する。verify はサービスごとに 1 回で十分
+    (アクティブアカウントは 1 つ) だが、self-remediation 判定は全セグメントを
+    見る必要があるため全候補を保持する。
+
+    inline_env はコマンド行頭のインライン環境変数 (`AWS_PROFILE=prod aws ...`
+    の `{"AWS_PROFILE": "prod"}`)。検証 subprocess に渡してコマンド実行時と
+    同条件で検証する。同一サービスに複数候補があるときは最初に現れた non-empty
+    な env を採用する (大半は単一セグメント or 同一 profile)。
     """
-    targets: list[tuple] = []
-    index: dict = {}
-    for cand in extract_candidates(command):
+    order: list = []
+    cand_map: dict = {}
+    env_map: dict = {}
+    for cand, inline_env in extract_candidates(command):
         svc = _match_service(cand)
         if svc is None or _is_readonly(cand, svc):
             continue
-        if svc not in index:
-            index[svc] = []
-            targets.append((svc, index[svc]))
-        index[svc].append(cand)
-    return targets
+        if svc not in cand_map:
+            cand_map[svc] = []
+            env_map[svc] = {}
+            order.append(svc)
+        cand_map[svc].append(cand)
+        if inline_env and not env_map[svc]:
+            env_map[svc] = inline_env
+    return [(svc, cand_map[svc], env_map[svc]) for svc in order]
 
 
 def _all_self_remediation(cands: list, service, entry) -> bool:
@@ -201,7 +211,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         return output.deny(body)
 
     if accounts_path is None:
-        hints = [getattr(svc, "SETUP_HINT", "") for svc, _ in targets]
+        hints = [getattr(svc, "SETUP_HINT", "") for svc, *_ in targets]
         hint_block = "\n".join(h for h in hints if h)
         msg = (
             ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
@@ -233,7 +243,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         accounts_mtime = 0.0
 
     errors: list[str] = []
-    for svc, cands in targets:
+    for svc, cands, inline_env in targets:
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
             errors.append(
@@ -253,14 +263,18 @@ def dispatch(command: str, cwd: str) -> dict | None:
             continue
 
         svc_name = svc.__name__.rsplit(".", 1)[-1]
-        if cache.get_success(svc_name, project_dir, entry, accounts_mtime):
+        if cache.get_success(svc_name, project_dir, entry, accounts_mtime, inline_env):
             continue
 
-        err = svc.verify(entry, project_dir)
+        # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
+        # inline_env が空なら env=None (= 親環境継承) のままにする。空 dict を
+        # subprocess.run(env={}) に渡すと環境変数が一切無い状態になり危険なため。
+        proc_env = {**os.environ, **inline_env} if inline_env else None
+        err = svc.verify(entry, project_dir, env=proc_env)
         if err:
             errors.append(err)
         else:
-            cache.set_success(svc_name, project_dir, entry, accounts_mtime)
+            cache.set_success(svc_name, project_dir, entry, accounts_mtime, inline_env)
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
 

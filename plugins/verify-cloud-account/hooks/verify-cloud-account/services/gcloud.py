@@ -14,6 +14,8 @@ PATTERNS = [r"^gcloud\b"]
 READONLY = [
     r"^gcloud\s+auth\s+list\b",
     r"^gcloud\s+config\s+get-value\s+(project|account)\b",
+    # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
+    r"^gcloud\s+(--version|--help|version|help)\b",
 ]
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
@@ -23,14 +25,20 @@ SETUP_HINT = (
 )
 
 
-def _get(key: str) -> tuple[str | None, str | None]:
-    """`gcloud config get-value <key>` を実行し (value, error) を返す。"""
+def _get(key: str, env=None) -> tuple[str | None, str | None]:
+    """`gcloud config get-value <key>` を実行し (value, error) を返す。
+
+    env: コマンド行頭のインライン環境変数をマージした完全 env
+    (`CLOUDSDK_CORE_PROJECT` / `CLOUDSDK_ACTIVE_CONFIG_NAME` 等)。
+    None なら hook プロセスの環境を継承する。
+    """
     try:
         result = subprocess.run(
             ["gcloud", "config", "get-value", key],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
     except FileNotFoundError:
         return None, "GCP: gcloud コマンドが見つかりません。"
@@ -42,8 +50,8 @@ def _get(key: str) -> tuple[str | None, str | None]:
     return value, None
 
 
-def _check_project(expected: str) -> str | None:
-    current, err = _get("project")
+def _check_project(expected: str, env=None) -> str | None:
+    current, err = _get("project", env)
     if err:
         return err
     if current is None:
@@ -59,8 +67,8 @@ def _check_project(expected: str) -> str | None:
     return None
 
 
-def _check_account(expected: str) -> str | None:
-    current, err = _get("account")
+def _check_account(expected: str, env=None) -> str | None:
+    current, err = _get("account", env)
     if err:
         return err
     if current is None:
@@ -110,7 +118,7 @@ def suggest_accounts_entry(project_dir: str) -> str | dict | None:
     return entry or None
 
 
-def verify(expected, project_dir: str) -> str | None:
+def verify(expected, project_dir: str, env=None) -> str | None:
     if isinstance(expected, dict):
         project_want = expected.get("project")
         account_want = expected.get("account")
@@ -127,7 +135,7 @@ def verify(expected, project_dir: str) -> str | None:
                     f"(現在: {type(project_want).__name__})。"
                 )
             else:
-                err = _check_project(project_want)
+                err = _check_project(project_want, env)
                 if err:
                     errors.append(err)
         if account_want:
@@ -137,7 +145,7 @@ def verify(expected, project_dir: str) -> str | None:
                     f"(現在: {type(account_want).__name__})。"
                 )
             else:
-                err = _check_account(account_want)
+                err = _check_account(account_want, env)
                 if err:
                     errors.append(err)
         if not errors:
@@ -152,7 +160,7 @@ def verify(expected, project_dir: str) -> str | None:
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
         )
 
-    return _check_project(expected)
+    return _check_project(expected, env)
 
 
 _CONFIG_SET_RE = re.compile(r"^gcloud\s+config\s+set\s+(project|account)\s+(\S+)\s*$")

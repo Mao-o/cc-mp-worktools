@@ -4,7 +4,12 @@ from __future__ import annotations
 import subprocess
 
 PATTERNS = [r"^aws\b"]
-READONLY = [r"^aws\s+sts\s+get-caller-identity\b"]
+READONLY = [
+    r"^aws\s+sts\s+get-caller-identity\b",
+    # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。診断で打つ
+    # `command aws --version` 等が誤って検証対象になり deny されるのを防ぐ。
+    r"^aws\s+(--version|--help|version|help)\b",
+]
 ACCOUNT_KEY = "aws"
 SETUP_HINT = (
     'AWS 最小例: {"aws": "123456789012"}。'
@@ -12,14 +17,19 @@ SETUP_HINT = (
 )
 
 
-def _run_sts_get_caller_identity() -> tuple[str | None, str | None]:
-    """aws sts get-caller-identity を実行し (account_id, error_reason) を返す。"""
+def _run_sts_get_caller_identity(env=None) -> tuple[str | None, str | None]:
+    """aws sts get-caller-identity を実行し (account_id, error_reason) を返す。
+
+    env: コマンド行頭のインライン環境変数をマージした完全 env (`AWS_PROFILE` 等)。
+    None なら hook プロセスの環境を継承する (builder からの呼び出し等)。
+    """
     try:
         result = subprocess.run(
             ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"],
             capture_output=True,
             text=True,
             timeout=15,
+            env=env,
         )
     except FileNotFoundError:
         return None, "AWS: aws コマンドが見つかりません。"
@@ -50,14 +60,14 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
-def verify(expected, project_dir: str) -> str | None:
+def verify(expected, project_dir: str, env=None) -> str | None:
     if not isinstance(expected, str):
         return (
             f'AWS: accounts.local.json の "aws" は文字列で指定してください '
             f'(現在: {type(expected).__name__})。'
         )
 
-    current, err = _run_sts_get_caller_identity()
+    current, err = _run_sts_get_caller_identity(env)
     if err:
         return err
 

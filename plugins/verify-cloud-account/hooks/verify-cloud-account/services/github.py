@@ -13,7 +13,11 @@ import shlex
 import subprocess
 
 PATTERNS = [r"^gh\b"]
-READONLY = [r"^gh\s+auth\s+(status|list)\b"]
+READONLY = [
+    r"^gh\s+auth\s+(status|list)\b",
+    # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
+    r"^gh\s+(--version|--help|version|help)\b",
+]
 ACCOUNT_KEY = "github"
 SETUP_HINT = (
     'GitHub 最小例: {"github": "YOUR_USERNAME"}。'
@@ -52,14 +56,19 @@ def parse_active_accounts(output_text: str) -> dict[str, str]:
 _parse_active_accounts = parse_active_accounts
 
 
-def _run_gh_auth_status() -> tuple[str, str | None]:
-    """gh auth status を実行し (combined_output, error) を返す。"""
+def _run_gh_auth_status(env=None) -> tuple[str, str | None]:
+    """gh auth status を実行し (combined_output, error) を返す。
+
+    env: コマンド行頭のインライン環境変数をマージした完全 env (`GH_HOST` 等)。
+    None なら hook プロセスの環境を継承する。
+    """
     try:
         result = subprocess.run(
             ["gh", "auth", "status"],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
     except FileNotFoundError:
         return "", "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。"
@@ -68,9 +77,9 @@ def _run_gh_auth_status() -> tuple[str, str | None]:
     return result.stdout + result.stderr, None
 
 
-def _fetch_active_accounts() -> tuple[dict[str, str] | None, str | None]:
+def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]:
     """gh auth status を実行し (active_accounts, error_reason) を返す。"""
-    combined, err = _run_gh_auth_status()
+    combined, err = _run_gh_auth_status(env)
     if err:
         return None, err
     active = parse_active_accounts(combined)
@@ -110,8 +119,8 @@ def suggest_accounts_entry(project_dir: str) -> str | dict | None:
     return dict(active)
 
 
-def verify(expected, project_dir: str) -> str | None:
-    active, err = _fetch_active_accounts()
+def verify(expected, project_dir: str, env=None) -> str | None:
+    active, err = _fetch_active_accounts(env)
     if err:
         return err
 

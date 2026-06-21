@@ -347,45 +347,88 @@ class TestStripTransparentWrappers(unittest.TestCase):
 
 
 class TestExtractCandidates(unittest.TestCase):
+    """extract_candidates は (候補断片, inline_env dict) のリストを返す。"""
+
     def test_chain_with_cd(self):
         self.assertEqual(
             extract_candidates("cd /tmp && gh pr create"),
-            ["cd /tmp", "gh pr create"],
+            [("cd /tmp", {}), ("gh pr create", {})],
         )
 
-    def test_env_prefix_stripped(self):
+    def test_env_prefix_collected(self):
+        # 先頭 KEY=VALUE は候補から剥がしつつ inline env として収集する
         self.assertEqual(
             extract_candidates("FOO=bar gh pr create"),
-            ["gh pr create"],
+            [("gh pr create", {"FOO": "bar"})],
         )
 
     def test_sudo_stripped(self):
         self.assertEqual(
             extract_candidates("sudo gh pr create"),
-            ["gh pr create"],
+            [("gh pr create", {})],
         )
 
     def test_readonly_and_mutating_both_surfaced(self):
         self.assertEqual(
             extract_candidates("gh auth status && gh pr list"),
-            ["gh auth status", "gh pr list"],
+            [("gh auth status", {}), ("gh pr list", {})],
         )
 
     def test_nested_wrappers(self):
         self.assertEqual(
             extract_candidates("sudo time mise exec -- firebase deploy"),
-            ["firebase deploy"],
+            [("firebase deploy", {})],
         )
 
     def test_quoted_command_not_decomposed(self):
         self.assertEqual(
             extract_candidates('echo "gh auth status"'),
-            ['echo "gh auth status"'],
+            [('echo "gh auth status"', {})],
         )
 
     def test_empty_command(self):
         self.assertEqual(extract_candidates(""), [])
         self.assertEqual(extract_candidates("   "), [])
+
+    # --- inline env 収集 (検証 subprocess への伝播用) ---
+
+    def test_aws_profile_collected(self):
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod aws s3 ls"),
+            [("aws s3 ls", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_quoted_env_value_unquoted(self):
+        self.assertEqual(
+            extract_candidates('AWS_PROFILE="my prof" aws s3 ls'),
+            [("aws s3 ls", {"AWS_PROFILE": "my prof"})],
+        )
+
+    def test_multiple_env_collected(self):
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod AWS_REGION=us-east-1 aws s3 ls"),
+            [("aws s3 ls", {"AWS_PROFILE": "prod", "AWS_REGION": "us-east-1"})],
+        )
+
+    def test_env_with_variable_ref_not_collected(self):
+        # 未展開の $VAR は静的に解決できないため env に入れない (剥がしはする)
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=$HOME aws s3 ls"),
+            [("aws s3 ls", {})],
+        )
+
+    def test_env_after_wrapper_collected(self):
+        self.assertEqual(
+            extract_candidates("FOO=bar sudo gh pr list"),
+            [("gh pr list", {"FOO": "bar"})],
+        )
+
+    def test_env_collected_per_segment(self):
+        # チェーンの各セグメントで env は独立して収集される
+        self.assertEqual(
+            extract_candidates("cd /tmp && AWS_PROFILE=prod aws s3 ls"),
+            [("cd /tmp", {}), ("aws s3 ls", {"AWS_PROFILE": "prod"})],
+        )
 
 
 if __name__ == "__main__":

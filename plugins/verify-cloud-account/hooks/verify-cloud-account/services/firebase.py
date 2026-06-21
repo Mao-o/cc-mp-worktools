@@ -15,7 +15,11 @@ import subprocess
 from pathlib import Path
 
 PATTERNS = [r"^firebase\b"]
-READONLY = [r"^firebase\s+use\s*$"]
+READONLY = [
+    r"^firebase\s+use\s*$",
+    # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
+    r"^firebase\s+(--version|--help|version|help)\b",
+]
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
@@ -24,13 +28,14 @@ SETUP_HINT = (
 )
 
 
-def _from_cli() -> str:
+def _from_cli(env=None) -> str:
     try:
         result = subprocess.run(
             ["firebase", "use"],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
     except FileNotFoundError:
         return ""
@@ -76,8 +81,8 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
-def verify(expected, project_dir: str) -> str | None:
-    current = _from_firebaserc(project_dir) or _from_cli()
+def verify(expected, project_dir: str, env=None) -> str | None:
+    current = _from_firebaserc(project_dir) or _from_cli(env)
     if not current:
         if shutil.which("firebase") is None:
             return (

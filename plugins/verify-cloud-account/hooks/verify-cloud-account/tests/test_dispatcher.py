@@ -575,5 +575,97 @@ class TestCacheIntegration(BaseWithTmpProject):
         self.assertEqual(mock_verify.call_count, 2)
 
 
+class TestInlineEnvPropagation(BaseWithTmpProject):
+    """インライン env がマージされ verify(env=...) に伝播することの統合テスト (要望1)。"""
+
+    def test_inline_env_merged_into_verify(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            result = dispatch("AWS_PROFILE=prod aws s3 ls", str(self.project_dir))
+        self.assertIsNone(result)
+        env = mock_verify.call_args.kwargs.get("env")
+        self.assertIsNotNone(env)
+        self.assertEqual(env.get("AWS_PROFILE"), "prod")
+        # hook プロセスの env もマージされている (PATH 等が温存される)
+        self.assertIn("PATH", env)
+
+    def test_no_inline_env_passes_none(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch("aws s3 ls", str(self.project_dir))
+        # インライン env 無し → env=None (親環境継承)
+        self.assertIsNone(mock_verify.call_args.kwargs.get("env"))
+
+    def test_different_profile_bypasses_cache(self):
+        """profile が異なれば cache hit せず再検証される (誤 allow 防止)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
+            dispatch("AWS_PROFILE=b aws s3 ls", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_same_profile_uses_cache(self):
+        """同一 profile の連続実行は cache hit で verify 1 回。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
+            dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+
+class TestInfoCommandsReadonly(BaseWithTmpProject):
+    """情報系コマンド (version / help) は検証対象外 (要望4)。"""
+
+    def test_command_aws_version_skipped(self):
+        self._write_accounts({"aws": "123456789012"})
+        # `command` wrapper 剥がし後 `aws --version` → READONLY → 検証スキップ
+        self.assertIsNone(dispatch("command aws --version", str(self.project_dir)))
+
+    def test_aws_help_skipped(self):
+        self._write_accounts({"aws": "123456789012"})
+        self.assertIsNone(dispatch("aws help", str(self.project_dir)))
+
+    def test_gcloud_version_skipped(self):
+        self._write_accounts({"gcloud": "p"})
+        self.assertIsNone(dispatch("gcloud version", str(self.project_dir)))
+
+    def test_gh_version_skipped(self):
+        self._write_accounts({"github": "Mao-o"})
+        self.assertIsNone(dispatch("gh --version", str(self.project_dir)))
+
+    def test_kubectl_version_skipped(self):
+        self._write_accounts({"kubectl": "ctx"})
+        self.assertIsNone(dispatch("kubectl version", str(self.project_dir)))
+
+    def test_firebase_version_skipped(self):
+        self._write_accounts({"firebase": "proj"})
+        self.assertIsNone(dispatch("firebase --version", str(self.project_dir)))
+
+
+class TestDenyProvenance(BaseWithTmpProject):
+    """deny に出所タグ (要望3) と検出セグメント (要望5) が含まれる。"""
+
+    def test_deny_has_source_tag(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value="GitHub 不一致"):
+            result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("[verify-cloud-account]", reason)
+        self.assertIn("CLI 本体のエラーではありません", reason)
+
+    def test_deny_has_detected_segment(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value="GitHub 不一致"):
+            result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("検出コマンド: gh pr create", reason)
+
+    def test_unconfigured_deny_also_tagged(self):
+        # accounts 未設定 deny にも出所タグが付く (検出セグメントは verify 前なので無し)
+        result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("[verify-cloud-account]", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

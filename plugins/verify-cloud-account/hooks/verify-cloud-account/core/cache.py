@@ -41,9 +41,14 @@ def _cache_path(key: str) -> Path | None:
     return base / f"{key}.json"
 
 
-def _cache_key(service_name: str, project_dir: str, expected) -> str:
+def _cache_key(service_name: str, project_dir: str, expected, inline_env=None) -> str:
     material = json.dumps(
-        {"svc": service_name, "pd": project_dir, "exp": expected},
+        {
+            "svc": service_name,
+            "pd": project_dir,
+            "exp": expected,
+            "env": inline_env or {},
+        },
         sort_keys=True,
         default=str,
     )
@@ -51,10 +56,19 @@ def _cache_key(service_name: str, project_dir: str, expected) -> str:
 
 
 def get_success(
-    service_name: str, project_dir: str, expected, accounts_mtime: float
+    service_name: str,
+    project_dir: str,
+    expected,
+    accounts_mtime: float,
+    inline_env=None,
 ) -> bool:
-    """検証成功が短期キャッシュにあれば True を返す。"""
-    path = _cache_path(_cache_key(service_name, project_dir, expected))
+    """検証成功が短期キャッシュにあれば True を返す。
+
+    inline_env (コマンド行頭の `AWS_PROFILE=...` 等) が異なれば検証結果も
+    変わりうるためキーに含める。env 差で別エントリになり、profile A の成功が
+    profile B で誤って allow されることを防ぐ。
+    """
+    path = _cache_path(_cache_key(service_name, project_dir, expected, inline_env))
     if path is None or not path.is_file():
         return False
     try:
@@ -70,10 +84,14 @@ def get_success(
 
 
 def set_success(
-    service_name: str, project_dir: str, expected, accounts_mtime: float
+    service_name: str,
+    project_dir: str,
+    expected,
+    accounts_mtime: float,
+    inline_env=None,
 ) -> None:
     """検証成功をキャッシュする。書き込み失敗は無視 (キャッシュはベストエフォート)。"""
-    path = _cache_path(_cache_key(service_name, project_dir, expected))
+    path = _cache_path(_cache_key(service_name, project_dir, expected, inline_env))
     if path is None:
         return
     data = {
