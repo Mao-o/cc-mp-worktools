@@ -437,6 +437,14 @@ class TestExtractCandidates(unittest.TestCase):
             [("aws s3 ls", {"AWS_PROFILE": "prod"})],
         )
 
+    def test_inner_env_after_wrapper_overrides_outer(self):
+        # `env NAME=VALUE` は内側の値を実行環境へ適用する → 検証も内側 (other) で
+        # 行う必要があるため、wrapper を跨いでも内側が外側を上書きする
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=expected env AWS_PROFILE=other aws s3 ls"),
+            [("aws s3 ls", {"AWS_PROFILE": "other"})],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

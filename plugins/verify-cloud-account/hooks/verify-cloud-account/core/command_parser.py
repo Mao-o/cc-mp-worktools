@@ -311,21 +311,21 @@ def _normalize_segment(cmd: str, max_iter: int = 6) -> tuple[str, dict[str, str]
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。
 
     多段 (`FOO=bar sudo time mise exec -- foo`) に対応するため最大 max_iter
-    回繰り返し、各段で現れた先頭 env を収集する。同名キーは外側 (先に出現)
-    を優先する (`setdefault`)。
+    回繰り返し、各段で現れた先頭 env を収集する。同名キーは内側 (後に出現 =
+    コマンド本体に近い) を優先する。`AWS_PROFILE=expected env AWS_PROFILE=other
+    aws ...` は `env` が内側の `other` を実行環境へ適用するため、検証も `other`
+    で行う必要がある (外側優先だと実行時と異なる profile で検証が通ってしまう)。
     """
     collected: dict[str, str] = {}
     for _ in range(max_iter):
         cmd, env = _parse_leading_env(cmd)
-        for k, v in env.items():
-            collected.setdefault(k, v)
+        collected.update(env)  # 内側 (後段) が外側を上書きする
         stripped = _strip_one_wrapper(cmd)
         if stripped is None:
             break
         cmd = stripped
     cmd, env = _parse_leading_env(cmd)
-    for k, v in env.items():
-        collected.setdefault(k, v)
+    collected.update(env)
     return cmd, collected
 
 
