@@ -31,6 +31,21 @@ def _warn_local(msg: str) -> None:
     )
 
 
+def _warn_migrate(token: str) -> None:
+    """Stop hook 側の migrate_warn_callback — rename 前の旧 patterns.local.txt を
+    fallback 読み込みしたことを stderr に 1 行記録し、移行を促す。
+
+    新パス ``~/.claude/sensitive-files-guardrail/patterns.local.txt`` へ ``mv``
+    するよう案内する (token はパスを含まない固定文字列)。
+    """
+    sys.stderr.write(
+        f"[check-sensitive-files] {token}: "
+        "rename 前の ~/.claude/sensitive-files-guard/patterns.local.txt を "
+        "fallback で読込中。"
+        "~/.claude/sensitive-files-guardrail/patterns.local.txt へ移動してください\n"
+    )
+
+
 _warn_local_oserror = _warn_local  # 後方互換 alias
 
 
@@ -40,7 +55,11 @@ def load_patterns(patterns_file: Path) -> list[tuple[str, bool]]:
     Stop 側は hook 間の Python 依存を避けるため stderr 直書きで warn する
     (``core.logging`` を import しない)。
     """
-    return _shared_load_patterns(patterns_file, warn_callback=_warn_local)
+    return _shared_load_patterns(
+        patterns_file,
+        warn_callback=_warn_local,
+        migrate_warn_callback=_warn_migrate,
+    )
 
 
 def _run_git(args: list[str], cwd: str) -> list[str]:
