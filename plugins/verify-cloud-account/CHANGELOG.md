@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.7.1
+
+**sudo の env scrub を考慮した pre-sudo インライン env の非伝播 (セキュリティ修正)**:
+`AWS_PROFILE=prod sudo aws s3 rm s3://x` のように透過 wrapper (`sudo`) の**前**に
+インライン env を置くと、検証 subprocess には pre-sudo の `AWS_PROFILE=prod` が
+伝播する一方、実際の `sudo aws ...` は `-E`/`--preserve-env` 無しでは継承環境を
+scrub するため root のデフォルト環境 (prod 無し) で実行されていた。結果として
+「検証は prod / 実行は別アカウント」の非対称が生じ、未承認 profile で mutating
+コマンドが通る false-allow バイパスになりうる問題 (0.7.0 の D11 で混入) を修正した。
+
+### 変更内容
+
+1. **pre-sudo インライン env の scrub 補正** (`core/command_parser.py`) —
+   `_normalize_segment` が `sudo` を剥がす直前に preserve-env 指定の有無を判定し、
+   `-E` / `--preserve-env` / `--preserve-env=LIST` のいずれも無い場合は、それまでに
+   収集した pre-sudo env を破棄する。sudo が継承環境を scrub する実挙動に検証側を
+   合わせ、検証≠実行の非対称を解消する。env を捨てると検証はデフォルト環境で走り
+   deny されうるが、これは安全方向 (false-allow → 安全側 deny)。
+   - preserve-env 判定は新ヘルパ `_sudo_preserves_env()` が担当。`sudo` 直後の
+     flag 領域 (`--` 単独トークンまたは非 `-` トークンが来るまで) に preserve-env
+     フラグが現れるかを `_drop_wrapper_flags` と同じ flag 消費規則で走査する。
+     `--preserve-env=LIST` はリスト内容や sudoers の env_keep/env_reset まで静的に
+     不可知のため、preserve 指定があれば保守的に伝播を許す (保持しすぎ方向は誤 deny
+     を増やすだけで安全側)。
+   - **対象は sudo のみ**。`time` / `nohup` / `command` / `exec` / `env` 等の他
+     wrapper は env を scrub しないため pre-wrapper env 伝播 (D11) を従来どおり維持。
+   - **post-sudo の command-line env** (`sudo FOO=bar cmd` の `FOO=bar`) は sudo
+     自身が target へ渡すため伝播を維持する (pre-sudo env とは別物として扱う)。
+   - c731faf の inner-wins (内側 env 優先) 挙動は非 scrub wrapper で不変。
+2. **回帰テスト追加** (`tests/test_command_parser.py`) — `TestSudoEnvScrub` クラス
+   12 件を追加 (pre-sudo scrub / `-E`・`--preserve-env`・`--preserve-env=LIST` での
+   保持 / 非 sudo wrapper での D11 維持 / 多段 sudo 経由での drop / post-sudo
+   command-line env の伝播 / `sudo --` 終端 / inner-wins 維持)。あわせて従来
+   `FOO=bar sudo gh ...` がバグ挙動 (pre-sudo env 伝播) を固定化していた
+   `test_env_after_wrapper_collected` を、D11 本来の意図 (非 scrub wrapper の
+   pre-wrapper env 収集) を表す `test_env_before_nonscrub_wrapper_collected`
+   (`time` wrapper) に置き換えた。
+
+テスト 305 件 (新規 12 件、既存 1 件を正しい期待値に修正)。
+
 ## 0.7.0
 
 **インライン環境変数の検証 subprocess への伝播 + 診断性改善**: コマンド行頭の

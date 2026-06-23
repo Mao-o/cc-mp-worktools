@@ -307,6 +307,56 @@ def _strip_one_wrapper(cmd: str) -> str | None:
     return None
 
 
+# sudo が `-E` 無しに継承環境を scrub しないことを示す preserve-env フラグ群。
+# `_WRAPPER_FLAGS_WITH_VALUE["sudo"]` には含まれない (値を取らない bool 扱いの
+# `-E` / `--preserve-env`、および `--preserve-env=LIST` の = 形式)。
+_SUDO_PRESERVE_ENV_FLAGS = {"-E", "--preserve-env"}
+
+
+def _sudo_preserves_env(cmd_after_sudo: str) -> bool:
+    """`sudo` 直後のフラグ列に preserve-env 指定があるかを判定する。
+
+    `sudo` は `-E` / `--preserve-env` / `--preserve-env=LIST` が無いと継承環境を
+    scrub する。これらが**コマンド本体に到達する前** (= flag 領域内) に現れた場合
+    のみ True を返す。`--` 単独トークン (POSIX flag 終端) または非 `-` トークン
+    (コマンド本体の開始) が現れた時点で flag 領域は終わる。
+
+    `--preserve-env=LIST` は指定リストのみ保持する形式だが、リスト解析や sudoers の
+    env_keep/env_reset まで静的には不可知なので、preserve 指定があれば「pre-sudo
+    env を伝播してよい」と保守的に判断する (= scrub による誤 allow を防ぐのが目的で、
+    保持しすぎ方向は誤 deny を増やさない安全側)。
+    """
+    s = cmd_after_sudo.lstrip()
+    while s:
+        m = re.match(r"^(\S+)", s)
+        if not m:
+            break
+        tok = m.group(1)
+        if tok == "--":
+            return False
+        if not tok.startswith("-"):
+            return False
+        if tok in _SUDO_PRESERVE_ENV_FLAGS:
+            return True
+        # `--preserve-env=AWS_PROFILE` のような = 形式。
+        if tok.startswith("--preserve-env="):
+            return True
+        # 値を取るフラグ (`-u deploy` 等) は次トークンが値なのでまとめて skip。
+        # そうしないと値トークン (例: `-u -E`... は通常無いが) を誤って flag と
+        # 解釈しうる。`_drop_wrapper_flags` と同じ消費規則に合わせる。
+        if "=" in tok:
+            s = s[m.end():].lstrip()
+            continue
+        if tok in _WRAPPER_FLAGS_WITH_VALUE.get("sudo", set()):
+            s = s[m.end():].lstrip()
+            m2 = re.match(r"^(\S+)", s)
+            if m2:
+                s = s[m2.end():].lstrip()
+            continue
+        s = s[m.end():].lstrip()
+    return False
+
+
 def _normalize_segment(cmd: str, max_iter: int = 6) -> tuple[str, dict[str, str]]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。
 
@@ -315,11 +365,32 @@ def _normalize_segment(cmd: str, max_iter: int = 6) -> tuple[str, dict[str, str]
     コマンド本体に近い) を優先する。`AWS_PROFILE=expected env AWS_PROFILE=other
     aws ...` は `env` が内側の `other` を実行環境へ適用するため、検証も `other`
     で行う必要がある (外側優先だと実行時と異なる profile で検証が通ってしまう)。
+
+    **sudo の env scrub 補正 (D16)**: `AWS_PROFILE=prod sudo aws ...` のように
+    `sudo` の**前**に置かれたインライン env (pre-sudo env) は、`sudo` が
+    `-E` / `--preserve-env` / `--preserve-env=LIST` 無しに継承環境を scrub する
+    ため、実行時の `sudo aws ...` には伝播しない。これを検証 subprocess に渡すと
+    「検証は prod / 実行は別アカウント」の非対称が生じ、未承認 profile で mutating
+    コマンドが通る false-allow になる。そのため preserve-env 指定の無い `sudo` を
+    跨いだ時点で、それまでに収集した pre-sudo env を破棄する。env を捨てると検証は
+    デフォルト環境で走り deny されうるが、それは安全方向 (false-allow → 安全側
+    deny)。`sudo` 直後の command-line env (`sudo FOO=bar cmd` の post-sudo env) は
+    sudo 自身が target へ渡すため破棄せず伝播を維持する。env scrub は `sudo` 固有
+    の挙動で、`time` / `nohup` / `command` / `exec` / `env` 等の他 wrapper は
+    pre-wrapper env を素通しするため従来どおり伝播する。
     """
     collected: dict[str, str] = {}
     for _ in range(max_iter):
         cmd, env = _parse_leading_env(cmd)
         collected.update(env)  # 内側 (後段) が外側を上書きする
+        # sudo を剥がす直前の判定: preserve-env 指定が無ければ、ここまでに集めた
+        # pre-sudo env を sudo が scrub するので破棄する。剥がし自体は
+        # _strip_one_wrapper に委ねる (sudo の flag 消費規則と一致させる)。
+        toks = _tokens(cmd)
+        if toks and toks[0] == "sudo":
+            rest_after_sudo = _drop_tokens(cmd, 1)
+            if not _sudo_preserves_env(rest_after_sudo):
+                collected.clear()
         stripped = _strip_one_wrapper(cmd)
         if stripped is None:
             break

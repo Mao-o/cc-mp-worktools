@@ -417,9 +417,11 @@ class TestExtractCandidates(unittest.TestCase):
             [("aws s3 ls", {})],
         )
 
-    def test_env_after_wrapper_collected(self):
+    def test_env_before_nonscrub_wrapper_collected(self):
+        # D11: env scrub しない wrapper (time/nohup/...) の前に置かれた pre-wrapper
+        # env は実行時にも有効なので収集する。sudo は別扱い (TestSudoEnvScrub 参照)。
         self.assertEqual(
-            extract_candidates("FOO=bar sudo gh pr list"),
+            extract_candidates("FOO=bar time gh pr list"),
             [("gh pr list", {"FOO": "bar"})],
         )
 
@@ -443,6 +445,109 @@ class TestExtractCandidates(unittest.TestCase):
         self.assertEqual(
             extract_candidates("AWS_PROFILE=expected env AWS_PROFILE=other aws s3 ls"),
             [("aws s3 ls", {"AWS_PROFILE": "other"})],
+        )
+
+
+class TestSudoEnvScrub(unittest.TestCase):
+    """D16 回帰: sudo の env scrub を考慮し pre-sudo env を伝播しない。
+
+    `AWS_PROFILE=prod sudo aws ...` のように sudo の**前**にインライン env を
+    置くと、sudo は `-E`/`--preserve-env` 無しに継承環境を scrub するため、
+    実行時の `sudo aws ...` に AWS_PROFILE は届かない。これを検証 subprocess に
+    渡すと「検証 prod / 実行 別アカウント」の false-allow バイパスになる。
+    preserve-env 指定の無い sudo を跨いだ pre-sudo env は drop する。
+    """
+
+    def test_pre_sudo_env_scrubbed_without_preserve(self):
+        # 中心ケース: pre-sudo env は scrub される → inline_env に含まれない
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {})],
+        )
+
+    def test_pre_sudo_env_preserved_with_short_E(self):
+        # `sudo -E` は継承環境を保持する → pre-sudo env を伝播してよい
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo -E aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_pre_sudo_env_preserved_with_long_preserve_env(self):
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo --preserve-env aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_pre_sudo_env_preserved_with_preserve_env_list(self):
+        # `--preserve-env=LIST` 形式。リスト内容や sudoers までは静的に追えないが、
+        # preserve 指定があれば保守的に伝播を許す (保持しすぎは安全側 = 誤 deny)。
+        self.assertEqual(
+            extract_candidates(
+                "AWS_PROFILE=prod sudo --preserve-env=AWS_PROFILE aws s3 rm s3://x"
+            ),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_pre_sudo_env_preserved_with_preserve_env_among_other_flags(self):
+        # 値ありフラグ (`-u deploy`) と preserve-env が混在しても検出する
+        self.assertEqual(
+            extract_candidates(
+                "AWS_PROFILE=prod sudo -u deploy -E aws s3 rm s3://x"
+            ),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_pre_sudo_env_scrubbed_with_value_flag_only(self):
+        # preserve-env 無し (値ありフラグだけ) なら scrub される
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo -u deploy aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {})],
+        )
+
+    def test_pre_sudo_env_preserved_with_time_wrapper(self):
+        # 非 sudo wrapper (time) は env を scrub しない → D11 を回帰させない
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod time aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_pre_sudo_env_preserved_with_nohup_wrapper(self):
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod nohup aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_pre_sudo_env_scrubbed_in_multistage_via_sudo(self):
+        # 多段 (`... sudo time aws ...`): sudo を経由するので pre-sudo env は drop
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo time aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {})],
+        )
+
+    def test_env_between_sudo_and_command_survives(self):
+        # `sudo FOO=bar cmd` の post-sudo command-line env は sudo 自身が target へ
+        # 渡すため伝播を維持する (pre-sudo env とは別物)
+        self.assertEqual(
+            extract_candidates("sudo AWS_PROFILE=prod aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_inner_env_after_sudo_preserve_overrides_outer(self):
+        # inner-wins が sudo 跨ぎでも壊れないこと (preserve-env 指定時)。
+        # outer (expected) は -E で保持され、post-sudo の other が上書きする。
+        self.assertEqual(
+            extract_candidates(
+                "AWS_PROFILE=expected sudo -E AWS_PROFILE=other aws s3 ls"
+            ),
+            [("aws s3 ls", {"AWS_PROFILE": "other"})],
+        )
+
+    def test_double_dash_before_preserve_env_is_command(self):
+        # `sudo -- -E aws` の `--` 以降はコマンド本体。`-E` は flag ではないので
+        # preserve とは見なさない → pre-sudo env は scrub される。
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo -- aws s3 rm s3://x"),
+            [("aws s3 rm s3://x", {})],
         )
 
 
