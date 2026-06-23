@@ -16,6 +16,13 @@ jobs:
         with:
           node-version: '22'
 
+      # 各 plugin の unittest が tomllib (Python 3.11+) を使うため 3.11 以上を指定。
+      # 3.12 を選択 (ubuntu-latest に同梱され安定。標準ライブラリのみで pip install 不要)。
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
@@ -30,3 +37,40 @@ jobs:
             echo "== Validating $dir =="
             claude plugin validate "$dir"
           done
+
+      # 各 plugin の unit test を実行し、test regression を CI で検出する。
+      # plugins/*/hooks/*/tests を動的列挙し、その parent (= パッケージ root) を
+      # cwd にして `python3 -m unittest discover tests` を走らせる
+      # (import が package-root 相対のため cwd を合わせる必要がある)。
+      # いずれかのスイートが失敗したら fail=1 を立て、最後に exit して job を fail させる
+      # (set -e で即中断せず全スイートを走らせ、失敗ログを漏れなく出すため)。
+      - name: Run plugin unit tests
+        run: |
+          set -e
+          # silent な取りこぼし防止: 検出したテストディレクトリ件数を先に数えて echo する
+          count=0
+          while IFS= read -r tdir; do
+            count=$((count + 1))
+          done < <(find plugins -type d -name tests | sort)
+          echo "検出したテストディレクトリ件数: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: テストディレクトリが見つかりません (plugins/*/hooks/*/tests)" >&2
+            exit 1
+          fi
+
+          fail=0
+          while IFS= read -r tdir; do
+            pkg_root=$(dirname "$tdir")
+            echo ""
+            echo "== Running unit tests in $pkg_root =="
+            if ! ( cd "$pkg_root" && python3 -m unittest discover tests ); then
+              echo "FAILED: $pkg_root" >&2
+              fail=1
+            fi
+          done < <(find plugins -type d -name tests | sort)
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::1 つ以上の plugin unit test スイートが失敗しました" >&2
+            exit 1
+          fi
+          echo "全 unit test スイートが green でした"
