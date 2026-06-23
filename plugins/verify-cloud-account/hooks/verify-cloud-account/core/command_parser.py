@@ -204,6 +204,7 @@ def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
     - 値に $() / バッククォートが含まれると保守的に停止
     - `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化回避)
     収集 env には静的に解決できた値のみ入る (`$VAR` を含む値はキーごと除外)。
+    同一キーが複数回代入された場合は shell semantics に合わせ最右 (最後) を採用する。
     """
     collected: dict[str, str] = {}
     while True:
@@ -219,7 +220,10 @@ def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
         key = m.group(1)
         value = _unquote_env_value(cmd[m.end():end])
         if value is not None:
-            collected.setdefault(key, value)
+            # 同一キーの重複代入は shell と同じく最右 (最後) の値が勝つ。
+            # `AWS_PROFILE=dev AWS_PROFILE=prod aws ...` は prod で実行されるため、
+            # setdefault (最初優先) だと実行時と異なる profile で検証が通りうる。
+            collected[key] = value
         cmd = rest.lstrip()
 
 

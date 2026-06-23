@@ -612,6 +612,35 @@ class TestInlineEnvPropagation(BaseWithTmpProject):
             dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
         self.assertEqual(mock_verify.call_count, 1)
 
+    def test_compound_distinct_profiles_each_verified(self):
+        """単一 dispatch の複合コマンドでも profile が異なれば各々検証する (P1 誤 allow 防止)。
+
+        `AWS_PROFILE=prod aws ... && AWS_PROFILE=dev aws ...` で prod だけ検証し
+        dev を無検証 allow する穴 (service 単位集約) を塞いだことの回帰テスト。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch(
+                "AWS_PROFILE=prod aws s3 cp a b && AWS_PROFILE=dev aws s3 rm c",
+                str(self.project_dir),
+            )
+        self.assertEqual(mock_verify.call_count, 2)
+        seen = {
+            (call.kwargs.get("env") or {}).get("AWS_PROFILE")
+            for call in mock_verify.call_args_list
+        }
+        self.assertEqual(seen, {"prod", "dev"})
+
+    def test_compound_same_profile_verified_once(self):
+        """複合コマンドでも同一 profile なら (service, env) に集約され verify は 1 回。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch(
+                "AWS_PROFILE=prod aws s3 cp a b && AWS_PROFILE=prod aws s3 rm c",
+                str(self.project_dir),
+            )
+        self.assertEqual(mock_verify.call_count, 1)
+
 
 class TestInfoCommandsReadonly(BaseWithTmpProject):
     """情報系コマンド (version / help) は検証対象外 (要望4)。"""

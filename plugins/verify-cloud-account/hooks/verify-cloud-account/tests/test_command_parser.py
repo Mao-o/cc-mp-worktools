@@ -430,6 +430,13 @@ class TestExtractCandidates(unittest.TestCase):
             [("cd /tmp", {}), ("aws s3 ls", {"AWS_PROFILE": "prod"})],
         )
 
+    def test_duplicate_env_key_last_wins(self):
+        # 同一キーの重複代入は shell semantics に合わせ最右 (最後) が勝つ
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=dev AWS_PROFILE=prod aws s3 ls"),
+            [("aws s3 ls", {"AWS_PROFILE": "prod"})],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

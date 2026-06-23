@@ -87,33 +87,36 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
 
 
 def _collect_targets(command: str) -> list[tuple]:
-    """コマンドを分解し、検証対象 (non-readonly) のサービス候補リストを返す。
+    """コマンドを分解し、検証対象 (non-readonly) の (svc, cands, inline_env) リストを返す。
 
-    返り値は (svc, [cand, ...], inline_env) のリスト。同一サービスの候補
-    セグメントは 1 エントリに集約する。verify はサービスごとに 1 回で十分
-    (アクティブアカウントは 1 つ) だが、self-remediation 判定は全セグメントを
-    見る必要があるため全候補を保持する。
+    同一サービスでも **インライン env が異なるセグメントは別エントリ**にする。
+    `AWS_PROFILE=prod aws ... && AWS_PROFILE=dev aws ...` のような複合コマンドで
+    後段 (dev) を検証せず誤 allow するのを防ぐため、(service, inline_env) の組
+    ごとに 1 エントリへ集約する。同一 (service, env) のセグメントは 1 エントリに
+    まとめる (アクティブアカウントは 1 つなので verify は組ごとに 1 回で十分)。
 
-    inline_env はコマンド行頭のインライン環境変数 (`AWS_PROFILE=prod aws ...`
-    の `{"AWS_PROFILE": "prod"}`)。検証 subprocess に渡してコマンド実行時と
-    同条件で検証する。同一サービスに複数候補があるときは最初に現れた non-empty
-    な env を採用する (大半は単一セグメント or 同一 profile)。
+    cands はその (service, env) 組に属する全候補。self-remediation 判定が全
+    セグメントを見る必要があることと、deny reason に検出コマンドを併記する (D14)
+    ことの両方で使う。inline_env はコマンド行頭のインライン環境変数
+    (`AWS_PROFILE=prod aws ...` の `{"AWS_PROFILE": "prod"}`) で、検証 subprocess
+    に渡しコマンド実行時と同条件で検証する。
     """
     order: list = []
     cand_map: dict = {}
-    env_map: dict = {}
     for cand, inline_env in extract_candidates(command):
         svc = _match_service(cand)
         if svc is None or _is_readonly(cand, svc):
             continue
-        if svc not in cand_map:
-            cand_map[svc] = []
-            env_map[svc] = {}
-            order.append(svc)
-        cand_map[svc].append(cand)
-        if inline_env and not env_map[svc]:
-            env_map[svc] = inline_env
-    return [(svc, cand_map[svc], env_map[svc]) for svc in order]
+        key = (svc, tuple(sorted(inline_env.items())))
+        if key not in cand_map:
+            cand_map[key] = []
+            order.append(key)
+        cand_map[key].append(cand)
+    targets: list = []
+    for key in order:
+        svc, env_items = key
+        targets.append((svc, cand_map[key], dict(env_items)))
+    return targets
 
 
 def _all_self_remediation(cands: list, service, entry) -> bool:
@@ -272,14 +275,19 @@ def dispatch(command: str, cwd: str) -> dict | None:
         proc_env = {**os.environ, **inline_env} if inline_env else None
         err = svc.verify(entry, project_dir, env=proc_env)
         if err:
-            errors.append(err)
+            # D14: どのセグメントが検証を起動したかを deny reason に併記し、
+            # 複合コマンドで原因コマンドを一目で特定できるようにする。
+            errors.append(f"{err}\n(検出コマンド: {', '.join(cands)})")
         else:
             cache.set_success(svc_name, project_dir, entry, accounts_mtime, inline_env)
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
 
     if errors:
-        body = "\n\n".join(errors)
+        # 同一サービスが複数 env で検証対象になると env 非依存のエラー
+        # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
+        # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
+        body = "\n\n".join(dict.fromkeys(errors))
         if ancestor_note:
             body = ancestor_note + "\n\n" + body
         if note:
