@@ -1,6 +1,6 @@
 {
   "name": "verify-cloud-account",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud / kubectl) のアクティブアカウントをプロジェクト想定値と照合し、不一致なら deny する PreToolUse hook。Agent Skill 3 本 (init / show / migrate) 同梱",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",

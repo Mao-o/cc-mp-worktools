@@ -5,6 +5,7 @@ import unittest
 
 import _testutil  # noqa: F401
 
+from core import command_parser  # noqa: E402
 from core.command_parser import (  # noqa: E402
     extract_candidates,
     split_on_operators,
@@ -548,6 +549,155 @@ class TestSudoEnvScrub(unittest.TestCase):
         self.assertEqual(
             extract_candidates("AWS_PROFILE=prod sudo -- aws s3 rm s3://x"),
             [("aws s3 rm s3://x", {})],
+        )
+
+
+class TestWrapperEnvClassificationGuard(unittest.TestCase):
+    """D16 guard: 全透過 wrapper が env 伝播クラスに分類されていることを強制する。
+
+    `_WRAPPERS_SINGLE` / `_WRAPPERS_TWO` / `_WRAPPERS_THREE` に wrapper を追加
+    したのに `_WRAPPER_ENV_CLASS` に分類を足し忘れると、その wrapper の env 挙動
+    (継承 env を素通すか / scrub・reset するか) が未検証のまま伝播経路に入り、
+    過去 (D11 round1-3 / 8zr) と同じ「検証 env ≠ 実行 env」の whack-a-mole を
+    再発させる。このテストが両者の同期を機械的に保証する。
+
+    新しい wrapper を追加するときは:
+      1. `_WRAPPERS_*` に追加
+      2. `_WRAPPER_ENV_CLASS` に "passthrough" / "conditional_scrub" を追加
+      3. conditional_scrub なら scrub 補正ロジック + 回帰テストを追加
+      4. CLAUDE.local.md の D16 表とチェックリストを更新
+    """
+
+    def _all_wrapper_keys(self):
+        keys = set(command_parser._WRAPPERS_SINGLE)
+        keys |= set(command_parser._WRAPPERS_TWO)
+        keys |= set(command_parser._WRAPPERS_THREE)
+        return keys
+
+    def test_every_wrapper_is_classified(self):
+        # `env` は意図的に _WRAPPERS_* に入れず _strip_one_wrapper で特別扱い
+        # するため、分類対象は _WRAPPERS_* のみ。
+        unclassified = self._all_wrapper_keys() - set(
+            command_parser._WRAPPER_ENV_CLASS
+        )
+        self.assertEqual(
+            unclassified,
+            set(),
+            "未分類の透過 wrapper があります。_WRAPPER_ENV_CLASS に "
+            "'passthrough' / 'conditional_scrub' を追加し、CLAUDE.local.md の "
+            f"D16 表を更新してください: {sorted(map(str, unclassified))}",
+        )
+
+    def test_no_stale_classification_entries(self):
+        # 逆方向: _WRAPPER_ENV_CLASS に _WRAPPERS_* から消えた wrapper が
+        # 残っていないか (分類だけ残り実装が消えた死にエントリの検出)。
+        stale = set(command_parser._WRAPPER_ENV_CLASS) - self._all_wrapper_keys()
+        self.assertEqual(
+            stale,
+            set(),
+            f"_WRAPPER_ENV_CLASS に実装の無い分類が残っています: "
+            f"{sorted(map(str, stale))}",
+        )
+
+    def test_classification_values_are_known(self):
+        known = {"passthrough", "conditional_scrub"}
+        unknown = set(command_parser._WRAPPER_ENV_CLASS.values()) - known
+        self.assertEqual(
+            unknown, set(), f"未知の分類値: {sorted(unknown)}"
+        )
+
+    def test_only_sudo_is_conditional_scrub(self):
+        # 現状 scrub するのは sudo のみ。新しい conditional_scrub wrapper を
+        # 足すときは scrub 補正ロジックと回帰テストの追加を忘れないよう、
+        # ここを更新する時点で気づけるようにする (= 番兵)。
+        scrub = {
+            w
+            for w, cls in command_parser._WRAPPER_ENV_CLASS.items()
+            if cls == "conditional_scrub"
+        }
+        self.assertEqual(scrub, {"sudo"})
+
+
+class TestWrapperEnvPropagationContract(unittest.TestCase):
+    """D16 contract: wrapper ごとの env 伝播/非伝播を 1 つの表で固定化する。
+
+    各 wrapper について「pre-wrapper のインライン env が inline_env に乗るか」を
+    実 `extract_candidates` 出力で表明する。passthrough wrapper は乗る、
+    sudo (preserve 無し) は乗らない、env のリセット系 (-i / -u / --) は wrapper
+    として剥がされず opaque のまま (= 検証スキップ) であることを 1 箇所で保証し、
+    将来のリファクタや wrapper 追加が分類を崩したら即座に落ちるようにする。
+    """
+
+    # (コマンド, 期待 normalized, 期待 inline_env)。
+    # AWS_PROFILE を pre-wrapper env として置き、伝播されるかを見る。
+    PASSTHROUGH_CASES = [
+        ("AWS_PROFILE=prod time aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod nohup aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod command aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod exec aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod npx aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        (
+            "AWS_PROFILE=prod pnpm exec aws s3 ls",
+            "aws s3 ls",
+            {"AWS_PROFILE": "prod"},
+        ),
+        (
+            "AWS_PROFILE=prod pnpm dlx aws s3 ls",
+            "aws s3 ls",
+            {"AWS_PROFILE": "prod"},
+        ),
+        (
+            "AWS_PROFILE=prod mise exec -- aws s3 ls",
+            "aws s3 ls",
+            {"AWS_PROFILE": "prod"},
+        ),
+        ("AWS_PROFILE=prod bun x aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+    ]
+
+    def test_passthrough_wrappers_propagate_pre_wrapper_env(self):
+        for command, normalized, env in self.PASSTHROUGH_CASES:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    extract_candidates(command),
+                    [(normalized, env)],
+                )
+
+    def test_sudo_without_preserve_does_not_propagate(self):
+        # conditional_scrub: preserve 指定が無ければ pre-sudo env は乗らない。
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo aws s3 ls"),
+            [("aws s3 ls", {})],
+        )
+
+    def test_sudo_with_preserve_propagates(self):
+        self.assertEqual(
+            extract_candidates("AWS_PROFILE=prod sudo -E aws s3 ls"),
+            [("aws s3 ls", {"AWS_PROFILE": "prod"})],
+        )
+
+    def test_env_reset_forms_stay_opaque(self):
+        # `env -i` / `env -u` / `env --` は wrapper として剥がさない (opaque)。
+        # 剥がさない = セグメントがそのまま残り service に match せず検証スキップ。
+        # これにより「実行は縮小環境 / 検証は親環境」の非対称を作らない (安全側)。
+        for command in (
+            "env -i AWS_PROFILE=prod aws s3 ls",
+            "env -u AWS_PROFILE aws s3 ls",
+            "env -- aws s3 ls",
+        ):
+            with self.subTest(command=command):
+                cands = extract_candidates(command)
+                # normalized セグメントは元コマンドのまま (剥がされていない)、
+                # かつ env は収集されない。
+                self.assertEqual(len(cands), 1)
+                normalized, inline_env = cands[0]
+                self.assertTrue(normalized.startswith("env -"))
+                self.assertEqual(inline_env, {})
+
+    def test_env_plain_form_propagates(self):
+        # オプション無し `env` は剥がして、その command-line env を収集する。
+        self.assertEqual(
+            extract_candidates("env AWS_PROFILE=prod aws s3 ls"),
+            [("aws s3 ls", {"AWS_PROFILE": "prod"})],
         )
 
 

@@ -116,6 +116,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
   `env [KEY=val...]` (ただし `env -i` / `env --` など option 付きは不透明扱い)
 - **ランタイム / パッケージマネージャ**: `npx` / `pnpm exec` / `pnpm dlx` /
   `mise exec --` / `bun x`
+- 行頭インライン env の伝播は wrapper の実行時 env 挙動に従う
+  (`sudo` は preserve 無しだと env を scrub。詳細は
+  [`docs/wrapper-env-audit.md`](docs/wrapper-env-audit.md))
 - 上記は多段ネストにも対応 (例: `sudo time mise exec -- firebase deploy` →
   `firebase deploy` として検証)
 
@@ -184,6 +187,25 @@ AWS_PROFILE=prod aws s3 ls
   profile B で誤って allow されることはない
 - 値に未展開の変数参照 (`AWS_PROFILE=$SOMEVAR`) を含む場合は静的に解決できない
   ため検証 env には渡さない (コマンドからは剥がす)
+
+### 透過 wrapper を跨ぐときの env 伝播
+
+行頭 env が**透過 wrapper の前**に置かれた場合、その wrapper が実行時に env を
+素通すかどうかで伝播可否が変わる:
+
+- `time` / `nohup` / `command` / `exec` / `npx` / `pnpm exec` / `mise exec --` /
+  `bun x` などは env を素通すため、`AWS_PROFILE=prod time aws ...` の `AWS_PROFILE`
+  は検証にも反映される
+- **`sudo` (preserve 無し) は継承 env を scrub する**ため、
+  `AWS_PROFILE=prod sudo aws ...` の `AWS_PROFILE` は実行時の `sudo aws ...` には
+  届かない。検証側もこれに合わせ pre-sudo env を伝播せず、検証はデフォルト env で
+  走る (= 「検証は prod / 実行は別アカウント」の誤 allow を防ぐ)。`sudo -E` /
+  `--preserve-env` を付けた場合は env が保持されるので検証にも反映される
+- `env -i` / `env -u` / `env --` は環境をリセット/縮小するため透過剥がしの対象外
+  (そのセグメントは検証スキップ)
+
+wrapper ごとの env 挙動の完全な分類と将来 wrapper 追加時の方針は
+[`docs/wrapper-env-audit.md`](docs/wrapper-env-audit.md) を参照。
 
 ### direnv / CLAUDE_ENV_FILE 経由の env は届かない
 

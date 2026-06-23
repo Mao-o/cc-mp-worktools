@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.7.2
+
+**D11 インライン env 伝播の透過 wrapper 挙動を監査・体系化 (ドキュメント + 回帰テスト)**:
+v0.7.0 (D11) で導入した「行頭インライン env を検証 subprocess に伝播する」設計が、
+PR #33 の Codex レビュー 3 round + 8zr で連続して env 関連 edge case
+(複合コマンド bypass / 透過 wrapper 跨ぎの override 漏れ / sudo の env scrub 未考慮)
+を生んだことを受け、**透過 wrapper × env 挙動を全数監査し、再発防止の guard を
+入れた**。コード挙動の変更は無し (8zr の sudo 修正で現リストは健全と判定)、
+分類の固定化と将来 wrapper 追加時のガードのみ追加。
+
+### 変更内容
+
+1. **wrapper env 伝播クラスの分類宣言** (`core/command_parser.py`) —
+   `_WRAPPER_ENV_CLASS` を追加し、全透過 wrapper を `"passthrough"` (継承 env を
+   素通す → pre-wrapper env を伝播してよい) / `"conditional_scrub"` (フラグ依存で
+   scrub する → 無条件には伝播しない、現状 `sudo` のみ) に分類した。これは
+   parser の振る舞いそのものではなく**分類の宣言**で、実際の剥がし/収集は従来の
+   `_strip_one_wrapper` / `_normalize_segment` / `_sudo_preserves_env` が行う。
+   `env` は `_strip_one_wrapper` で特別扱い (オプション無しのみ剥がし、`env -i` /
+   `env -u` / `env --` は opaque) するため意図的に分類対象外。
+2. **分類 guard の回帰テスト** (`tests/test_command_parser.py`) —
+   `TestWrapperEnvClassificationGuard` (4 件) が「`_WRAPPERS_SINGLE/TWO/THREE` の
+   全要素が `_WRAPPER_ENV_CLASS` に分類済み」「死にエントリが無い」「分類値が既知」
+   「conditional_scrub は sudo のみ」を assert する。将来 wrapper を `_WRAPPERS_*`
+   に足したのに分類を忘れると即座に落ちるため、env 挙動の検討漏れによる
+   whack-a-mole 再発を機械的に防ぐ。
+3. **wrapper env 伝播の contract テスト** (`tests/test_command_parser.py`) —
+   `TestWrapperEnvPropagationContract` (5 件) が passthrough wrapper の pre-wrapper
+   env 伝播 / sudo の scrub・preserve / `env -i`・`-u`・`--` の opaque 維持 /
+   オプション無し `env` の収集を 1 つの表で固定化する。
+4. **監査ドキュメント追加** (`docs/wrapper-env-audit.md`) — wrapper × env 挙動の
+   完全な表 (実機 probe 根拠付き)、伝播可否の方針、誤 deny 回避ポリシーとの整合、
+   **将来 wrapper (`ssh` / `docker run -e` / `kubectl exec` 等) 追加時のチェック
+   リスト**を記録。`ssh` / `docker` / `kubectl exec` のように別実行コンテキストへ
+   移送する wrapper は「ローカル行頭 env が届かない」ため透過 wrapper に足さない
+   (検証スキップ = 誤 deny 回避ポリシーと整合) という原則を明文化。
+5. **README 追記** (`README.md`) — インライン env 伝播の節に「透過 wrapper を
+   跨ぐときの env 伝播」サブセクションを追加し、`sudo` の env scrub 挙動を利用者
+   向けに説明 + 監査ドキュメントへのリンクを張った。
+
+### 監査結論
+
+8zr の `sudo` scrub 補正により**現行 wrapper リストの env 挙動はすべて正しく分類・
+処理されている**。`sudo` が唯一の env scrub wrapper、`env -i`/`-u`/`--` が唯一の
+env reset 形式で、どちらも対応済み。残る passthrough wrapper は実機で env 素通しを
+確認した。過剰な再設計 (全 wrapper allow-list 化等) は誤 deny を増やすため不採用とし、
+分類 guard で将来の再発を防ぐ方針とした。コードの検証ロジックは無変更。
+
+テスト 314 件 (新規 9 件: classification guard 4 + propagation contract 5)。
+
 ## 0.7.1
 
 **sudo の env scrub を考慮した pre-sudo インライン env の非伝播 (セキュリティ修正)**:
