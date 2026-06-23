@@ -42,6 +42,18 @@ def _warn_local(msg: str) -> None:
     L.log_error("local_patterns_unavailable", msg)
 
 
+def _warn_migrate(token: str) -> None:
+    """migrate_warn_callback — rename 前の旧 patterns.local.txt を fallback 読み込み
+    したことを logfile + stderr に記録し、移行を促す。
+
+    token (``legacy_patterns_local_in_use``) はパスを含まない固定文字列で、
+    ``core.logging`` の detail 文字種ホワイトリストを通る。具体パス案内は
+    ``permissionDecisionReason`` には載せず (LLM 文脈ノイズ回避)、ログ category /
+    detail のみで通知する。
+    """
+    L.log_error("local_patterns_legacy_path", token)
+
+
 _warn_local_oserror = _warn_local  # 後方互換 alias
 
 
@@ -52,6 +64,11 @@ def load_patterns(
 
     Read 側は ``core.logging`` 経由で stderr + logfile に warning を出す。
     ローカル非存在は黙殺。既定 patterns.txt の読み取り失敗は例外として再送出。
+    rename 前の旧 patterns.local.txt を fallback 読込した場合は移行 warning を出す。
     """
     path = patterns_file or SHARED_PATTERNS
-    return _shared_load_patterns(path, warn_callback=_warn_local)
+    return _shared_load_patterns(
+        path,
+        warn_callback=_warn_local,
+        migrate_warn_callback=_warn_migrate,
+    )

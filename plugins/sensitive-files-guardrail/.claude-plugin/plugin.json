@@ -1,6 +1,6 @@
 {
   "name": "sensitive-files-guardrail",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "機密ファイル (.env, *.secret, 秘密鍵, クレデンシャル) を Vibe Coding から守る多段 hook。Read/Bash/Edit/Write で機密パスを保護し、Stop で .gitignore 未登録を検出。うっかり露出の予防が目的で、敵対的バイパス対策ではない",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",
