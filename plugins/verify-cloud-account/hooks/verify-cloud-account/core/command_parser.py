@@ -23,6 +23,54 @@ _WRAPPERS_SINGLE = {"sudo", "time", "nohup", "command", "builtin", "exec", "npx"
 _WRAPPERS_TWO = {("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x")}
 _WRAPPERS_THREE = {("mise", "exec", "--")}
 
+# --- 透過 wrapper の env 伝播クラス分類 (D16) ---
+#
+# 各透過 wrapper を「pre-wrapper のインライン env が後続コマンドの実行環境に
+# **実際に届くか**」で分類する。届くもの (passthrough) は剥がして env を収集・
+# 伝播してよい。届かないもの (conditional_scrub) は誤った env を検証に渡すと
+# 「検証 env ≠ 実行 env」の非対称 (= 未承認 profile での false-allow) になるため、
+# 個別の補正ロジックが要る。
+#
+# この dict は **コードの振る舞いそのものではなく分類の宣言**。実際の剥がし/
+# 収集は `_strip_one_wrapper` / `_normalize_segment` / `_sudo_preserves_env`
+# が行う。dict の役割は (1) 将来 wrapper を `_WRAPPERS_*` に追加する人へ
+# 「env 挙動を必ず分類せよ」と促す checklist、(2) テストが
+# 「`_WRAPPERS_*` の全要素がこの dict のキーに存在する」ことを assert して
+# 未分類 wrapper の混入を検出する guard、の 2 つ。分類の根拠と将来 wrapper
+# 追加時のチェックリストは CLAUDE.local.md の D16 ノート参照。
+#
+# クラス:
+#   "passthrough" — 継承 env を素通しする。pre-wrapper env を収集・伝播してよい
+#                   (time / nohup / command / exec / npx / pnpm exec /
+#                    mise exec -- / bun x)。`command` は外部 CLI を起動する場合も
+#                    env を素通すので passthrough。`builtin` は外部 CLI 自体を
+#                    起動しない (= service が match しない) ため env 伝播の有無は
+#                    無害だが、分類上は素通し側に置く。
+#   "conditional_scrub" — 既定では継承 env を scrub するが、フラグ次第で保持する。
+#                    pre-wrapper env を無条件には伝播できない。現状 `sudo` のみ
+#                    (`-E` / `--preserve-env[=LIST]` があれば保持、無ければ scrub)。
+#                    `_sudo_preserves_env` が判定し、scrub 時は pre-sudo env を破棄する。
+#
+# **`env` は意図的にここに含めない**。`env` は `_strip_one_wrapper` で特別扱い
+# され、オプション無し (`env FOO=bar cmd`) のときだけ剥がす。`env -i` (環境リセット)
+# / `env -u NAME` (個別 unset) / `env --` は剥がさず opaque のまま残す
+# (= セグメントが service に match せず検証もスキップ = 安全側)。env のリセット系を
+# wrapper として剥がしてしまうと「実行は空/縮小環境 / 検証は親環境」の非対称に
+# なるため、剥がさないことが正しい。詳細は D16 ノートの「env の扱い」節参照。
+_WRAPPER_ENV_CLASS = {
+    "sudo": "conditional_scrub",
+    "time": "passthrough",
+    "nohup": "passthrough",
+    "command": "passthrough",
+    "builtin": "passthrough",
+    "exec": "passthrough",
+    "npx": "passthrough",
+    ("pnpm", "exec"): "passthrough",
+    ("pnpm", "dlx"): "passthrough",
+    ("bun", "x"): "passthrough",
+    ("mise", "exec", "--"): "passthrough",
+}
+
 # wrapper ごとに「値を取るフラグ」(短縮 / 長形式)。ここに無い `-X` は bool として
 # 単独トークン消費、`-X=value` / `--key=value` は形式的に 1 トークンで消費。
 _WRAPPER_FLAGS_WITH_VALUE = {
