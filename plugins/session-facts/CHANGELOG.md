@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.6.0
+
+**実行コンテキスト (runtime/venv) の可視化 + 依存収集のハイブリッド化 (v0.6)**。
+実セッションで「kaggle は入っているか」を調べた際、`.venv` 内に kaggle が
+インストールされていたにもかかわらず Project Facts に venv/依存/runtime の情報が
+無く、エージェントがグローバル基準で「未インストール」と誤検出した。出力に
+実行コンテキストと主要依存を載せ、グローバル基準での誤判定を防ぐ。
+
+> **制約**: session-facts は `.venv`/`venv` 内部 (インストール済みパッケージ) を
+> git ls-files でも walk_files でも見られない (SKIP_DIRS)。よって依存検出は
+> `requirements.txt` / `pyproject.toml` 等の**宣言**経由のみ。venv は「存在」を
+> `pyvenv.cfg` で確認し、エージェントに確認を促す形で伝える。
+
+1. **runtime/venv 検出** (`core/runtime.py` 新規, `collectors/runtime_env.py` 新規,
+   `detectors/mise.py`, `renderer.py`, `core/context.py`) — mise/asdf のツール
+   バージョン (`.mise.toml` / 旧 `mise.toml` / `.config/mise/config.toml` /
+   `.tool-versions`)、`.python-version`、`.venv`/`venv` の存在 (`pyvenv.cfg`
+   ガードで `venv/` という名のソースディレクトリ誤検出を防止) を検出し、header に
+   1 行追加:
+   `- runtime: mise (python 3.12); venv .venv present (python 3.12.3); run tools via .venv/bin/`。
+   mise detector は共有 `has_mise()` 経由に変更し、従来拾えなかったドット無し
+   `mise.toml` と `.config/mise/` を認識するようになった (返り値 `["mise"]` は不変)。
+2. **major_dependencies のハイブリッド化** (`collectors/dependencies.py`) —
+   従来の allow-list (IMPORTANT_DEPENDENCIES) マッチのみだと kaggle 等の宣言依存が
+   出なかった。allow-list マッチを最優先 (tier 0) に並べ、枠 (`--max-major-deps`,
+   既定 8) が余れば `requirements`/`pyproject` の直接宣言 runtime 依存で埋め (tier 1)、
+   dev 依存 (pytest 等) は後置 (tier 2) する方式に変更。枠埋めは **Python のみ**に
+   スコープ (JS package.json / pubspec / go.mod は uncurated なため allow-list 据置)。
+   cap は tier 安定ソート**後**に適用し、source 順で遅く現れる allow-list マッチが
+   切られないようにした。あわせて pyproject を tomllib 不使用の table-scoped パーサ
+   (`[project] dependencies` / `[project.optional-dependencies]` / poetry 各テーブル /
+   Pipfile グループ) で正確化。副次的に、旧「どこでもマッチ」正規表現が poetry の
+   dev グループ依存を runtime と誤表示していた潜在バグも解消した。
+3. **Likely Commands の runtime 補正** (`collectors/scripts.py`) — venv があれば
+   `.venv/bin/python -m pytest`、mise-python なら `mise exec -- python -m pytest` を
+   出す (venv 優先)。`uv run` / `poetry run` は自前 env 管理のため不変。pyproject も
+   lockfile も無い bare-python (.py 比率検出) でも、runner が確定するときだけ pytest
+   行を補う。
+
+テスト 138 件 (新規 48 件: `test_runtime.py` / `test_scripts.py` 新設、
+`test_dependencies.py` にハイブリッド/parser テスト追加)。
+
+### 見送り
+
+- **tomllib fast-path** (Python ≥ 3.11 の構造的パース) — house style の正規表現
+  一本を優先し、バージョン間差異リスクを回避。将来の選択肢。
+- **setup.cfg `[options.extras_require]` の dev 取り込み** — dev 後置の主目的は
+  他ソースで達成済みのため YAGNI。
+
 ## 0.5.0
 
 **harness 注入との棲み分け + SubagentStart 注入修復 (v0.5)**。実セッションでの

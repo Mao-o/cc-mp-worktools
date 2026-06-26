@@ -7,6 +7,7 @@ from core.constants import MAKE_TARGET_PRIORITY_PATTERNS, SCRIPT_PRIORITY_PATTER
 from core.context import RepoContext
 from core.fs import read_text
 from core.makefile import extract_targets
+from core.runtime import runner_prefix
 from core.util import collapse_space
 
 
@@ -69,6 +70,16 @@ def _detect_package_manager(ctx: RepoContext) -> Optional[str]:
     return ctx.results.get("package_manager")
 
 
+def _runner_prefix(ctx: RepoContext) -> Optional[str]:
+    """Local-tool command prefix from the detected runtime, or None.
+
+    venv wins (``.venv/bin/``); otherwise a mise-managed Python yields
+    ``mise exec -- ``. uv/poetry manage their own environments and are left
+    untouched by callers.
+    """
+    return runner_prefix(ctx.results.get("runtime") or {})
+
+
 def _make_commands(ctx: RepoContext, max_items: int) -> List[str]:
     """Surface conventional Makefile targets as ``make <target>`` commands.
 
@@ -120,7 +131,8 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     elif pm == "poetry":
         commands.append("poetry run pytest")
     elif pm == "python":
-        commands.append("python -m pytest")
+        prefix = _runner_prefix(ctx)
+        commands.append(f"{prefix}python -m pytest" if prefix else "python -m pytest")
     elif pm == "gradle":
         commands.extend(["./gradlew build", "./gradlew test"])
     elif pm == "maven":
@@ -131,6 +143,14 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
         commands.extend(["cargo test", "cargo build"])
     elif pm == "composer":
         commands.append("composer install")
+
+    # Bare-Python repos (.py-heavy, no PM lockfile/pyproject) get no pytest line
+    # from the chain above. Only surface one when a concrete runner (venv/mise)
+    # is known, so we never suggest a global ``python`` the repo may not use.
+    if pm is None and "python" in stack:
+        prefix = _runner_prefix(ctx)
+        if prefix:
+            commands.append(f"{prefix}python -m pytest")
 
     # Flutter/Dart toolchain
     if "flutter" in stack:

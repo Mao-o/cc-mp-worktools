@@ -10,7 +10,12 @@ import _testutil  # noqa: F401  (sys.path 整備)
 
 from collectors.dependencies import (
     _collect_major_dependencies,
+    _is_dev_requirements,
+    parse_pep621_deps,
+    parse_pep621_optional_deps,
     parse_pipfile,
+    parse_pipfile_grouped,
+    parse_poetry_deps,
     parse_pubspec_deps,
     parse_requirements,
     parse_setup_cfg_requires,
@@ -142,7 +147,10 @@ class CollectMajorDependenciesTest(unittest.TestCase):
     def test_pyproject_wins_over_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = self._ctx(tmp, {
-                "pyproject.toml": 'flask = "2.0.0"\n',
+                # A bare `flask = "2.0.0"` is not under [project]/[tool.poetry],
+                # so the table-scoped parser correctly ignores it; declare it
+                # the realistic PEP 621 way instead.
+                "pyproject.toml": '[project]\ndependencies = ["flask==2.0.0"]\n',
                 "requirements.txt": "flask==3.0.0\n",
             })
             deps = _collect_major_dependencies(ctx, max_items=8)
@@ -164,19 +172,206 @@ class CollectMajorDependenciesTest(unittest.TestCase):
             self.assertIn("firebase_core@2.24", deps)
             self.assertIn("flutter_riverpod@2.4", deps)
 
-    def test_unmatched_deps_excluded(self):
+    def test_runtime_deps_surface_after_allowlist(self):
+        # Hybrid behaviour (v0.6): a non-allow-list runtime dep is no longer
+        # dropped — it surfaces as tier-1, after allow-list (tier-0) matches.
         with tempfile.TemporaryDirectory() as tmp:
             ctx = self._ctx(tmp, {
                 "requirements.txt": "some-internal-pkg==1.0\nflask==3.0\n",
             })
             deps = _collect_major_dependencies(ctx, max_items=8)
             self.assertIn("flask@3.0", deps)
-            self.assertFalse(any("internal" in d for d in deps))
+            self.assertIn("some-internal-pkg@1.0", deps)
+            # allow-list (flask) sorts before the non-allow runtime dep.
+            self.assertLess(deps.index("flask@3.0"), deps.index("some-internal-pkg@1.0"))
+
+    def test_hybrid_order_allowlist_then_runtime_then_dev(self):
+        # Regression for the original miss: a non-allow-list dep (kaggle)
+        # declared in requirements must appear, ordered after allow-list
+        # (fastapi) and before dev tooling (pytest).
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'dependencies = ["fastapi==0.110.0", "kaggle==1.6.0"]\n'
+                    "[project.optional-dependencies]\n"
+                    'dev = ["pytest==8.0.0"]\n'
+                ),
+            })
+            deps = _collect_major_dependencies(ctx, max_items=8)
+            self.assertIn("fastapi@0.110", deps)
+            self.assertIn("kaggle@1.6", deps)
+            self.assertIn("pytest@8.0", deps)
+            self.assertLess(deps.index("fastapi@0.110"), deps.index("kaggle@1.6"))
+            self.assertLess(deps.index("kaggle@1.6"), deps.index("pytest@8.0"))
+
+    def test_tier0_not_dropped_when_collected_late(self):
+        # A late allow-list match (Go go.mod) survives the cap even when many
+        # earlier tier-1 Python deps would otherwise fill all slots.
+        with tempfile.TemporaryDirectory() as tmp:
+            reqs = "\n".join(f"pkg-{i}==1.0" for i in range(10))
+            ctx = self._ctx(tmp, {
+                "requirements.txt": reqs + "\n",
+                "go.mod": "require (\n\tgithub.com/gin-gonic/gin v1.9.1\n)\n",
+            })
+            deps = _collect_major_dependencies(ctx, max_items=3)
+            # gin (allow-list, tier-0) leads despite being collected last.
+            self.assertEqual(deps[0], "gin@1.9")
+            self.assertEqual(len(deps), 3)
 
     def test_no_python_files_no_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = self._ctx(tmp, {"src/index.ts": "export {}\n"})
             self.assertEqual(_collect_major_dependencies(ctx, max_items=8), [])
+
+
+class ParsePep621Test(unittest.TestCase):
+    def test_multiline_extras_marker_comment(self):
+        text = """\
+[project]
+name = "demo"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]==0.27.0",  # asgi server
+    "httpx; python_version >= '3.9'",
+    'kaggle==1.6.0',
+]
+[tool.other]
+dependencies = ["should-not-be-seen"]
+"""
+        result = dict(parse_pep621_deps(text))
+        self.assertEqual(result["fastapi"], "0.110")
+        self.assertEqual(result["uvicorn"], "0.27.0")  # extras stripped
+        self.assertEqual(result["httpx"], "")  # env marker -> no version
+        self.assertEqual(result["kaggle"], "1.6.0")
+        # the array under [tool.other] is a different table -> excluded
+        self.assertNotIn("should-not-be-seen", result)
+
+    def test_inline_array(self):
+        text = '[project]\ndependencies = ["flask==2.0.0", "redis"]\n'
+        result = dict(parse_pep621_deps(text))
+        self.assertEqual(result["flask"], "2.0.0")
+        self.assertEqual(result["redis"], "")
+
+    def test_dynamic_dependencies_returns_empty(self):
+        text = '[project]\nname = "x"\ndynamic = ["dependencies"]\n'
+        self.assertEqual(parse_pep621_deps(text), [])
+
+    def test_no_project_table_returns_empty(self):
+        self.assertEqual(parse_pep621_deps('[tool.poetry]\nname = "x"\n'), [])
+
+    def test_optional_dependencies_flattened(self):
+        text = """\
+[project]
+dependencies = ["flask"]
+[project.optional-dependencies]
+dev = [
+    "pytest==8.0.0",
+    "ruff",
+]
+docs = ["mkdocs"]
+"""
+        opt = dict(parse_pep621_optional_deps(text))
+        self.assertEqual(opt["pytest"], "8.0.0")
+        self.assertIn("ruff", opt)
+        self.assertIn("mkdocs", opt)
+        # the [project] dependencies array must not leak into optional parsing
+        self.assertNotIn("flask", opt)
+
+
+class ParsePoetryTest(unittest.TestCase):
+    def test_runtime_dev_group_and_python_excluded(self):
+        text = """\
+[tool.poetry]
+name = "demo"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+flask = "2.0.0"
+requests = {version = "^2.28", optional = true}
+
+[tool.poetry.dev-dependencies]
+black = "^23.0"
+
+[tool.poetry.group.test.dependencies]
+pytest = "^8.0"
+"""
+        runtime, dev = parse_poetry_deps(text)
+        runtime_d = dict(runtime)
+        dev_d = dict(dev)
+        self.assertEqual(runtime_d["flask"], "2.0.0")
+        self.assertEqual(runtime_d["requests"], "^2.28")  # inline table version
+        self.assertNotIn("python", runtime_d)  # python pin excluded
+        # legacy dev-dependencies and modern group.* both land in dev
+        self.assertIn("black", dev_d)
+        self.assertIn("pytest", dev_d)
+        # dev-group deps are NOT reported as runtime (the old latent bug)
+        self.assertNotIn("pytest", runtime_d)
+        self.assertNotIn("black", runtime_d)
+
+    def test_no_poetry_tables_returns_empty(self):
+        runtime, dev = parse_poetry_deps('[project]\nname = "x"\n')
+        self.assertEqual(runtime, [])
+        self.assertEqual(dev, [])
+
+
+class ParsePipfileGroupedTest(unittest.TestCase):
+    def test_groups_separated(self):
+        text = """\
+[packages]
+flask = "*"
+celery = ">=5.0"
+
+[dev-packages]
+pytest = "*"
+"""
+        grouped = parse_pipfile_grouped(text)
+        pkg_names = {n for n, _ in grouped["packages"]}
+        dev_names = {n for n, _ in grouped["dev-packages"]}
+        self.assertEqual(pkg_names, {"flask", "celery"})
+        self.assertEqual(dev_names, {"pytest"})
+
+    def test_parse_pipfile_flattens_grouped(self):
+        text = "[packages]\nflask = \"*\"\n[dev-packages]\npytest = \"*\"\n"
+        names = {n for n, _ in parse_pipfile(text)}
+        self.assertEqual(names, {"flask", "pytest"})
+
+
+class IsDevRequirementsTest(unittest.TestCase):
+    def test_plain_requirements_is_runtime(self):
+        self.assertFalse(_is_dev_requirements("requirements.txt"))
+        self.assertFalse(_is_dev_requirements("api/requirements.txt"))
+
+    def test_dev_and_test_variants(self):
+        self.assertTrue(_is_dev_requirements("requirements-dev.txt"))
+        self.assertTrue(_is_dev_requirements("dev-requirements.txt"))
+        self.assertTrue(_is_dev_requirements("requirements-test.txt"))
+        self.assertTrue(_is_dev_requirements("requirements/dev.txt"))
+
+
+class HybridDevTieringTest(unittest.TestCase):
+    def _ctx(self, tmp, files):
+        root = Path(tmp)
+        for rel, content in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        ctx = RepoContext(root=root, config=AnalysisConfig())
+        ctx.tracked_files = list(files.keys())
+        return ctx
+
+    def test_dev_requirements_file_tiers_after_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "requirements.txt": "kaggle==1.6.0\n",
+                "requirements-dev.txt": "some-linter==1.0\n",
+            })
+            deps = _collect_major_dependencies(ctx, max_items=8)
+            self.assertIn("kaggle@1.6", deps)
+            self.assertIn("some-linter@1.0", deps)
+            # runtime requirement sorts before the dev-requirements entry
+            self.assertLess(deps.index("kaggle@1.6"), deps.index("some-linter@1.0"))
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List
 
 from core.context import RepoContext
+from core.runtime import runner_prefix
 
 
 def render_header(ctx: RepoContext) -> str:
@@ -26,6 +27,8 @@ def render_header(ctx: RepoContext) -> str:
     if ctx.stack:
         lines.append(f"- stack: {', '.join(ctx.stack)}")
 
+    lines.extend(_render_runtime(ctx))
+
     major_deps = ctx.results.get("major_dependencies")
     if major_deps:
         lines.append(f"- major_dependencies: {', '.join(major_deps)}")
@@ -33,6 +36,49 @@ def render_header(ctx: RepoContext) -> str:
     lines.extend(_render_git_progress(ctx))
 
     return "\n".join(lines)
+
+
+def _render_runtime(ctx: RepoContext) -> List[str]:
+    """Render the single ``- runtime:`` header line, or nothing.
+
+    Composes up to four ``; ``-joined segments: the version manager + its pinned
+    tools, a ``.python-version`` pin (only when no manager already names python),
+    a virtualenv presence note, and a "run tools via <prefix>" hint that mirrors
+    the prefix used in Likely Commands.
+    """
+    info = ctx.results.get("runtime") or {}
+    if not info:
+        return []
+
+    parts: List[str] = []
+
+    manager = info.get("manager")
+    tools = info.get("tools") or {}
+    if manager and tools:
+        tool_str = ", ".join(f"{name} {ver}" for name, ver in tools.items())
+        parts.append(f"{manager} ({tool_str})")
+    elif manager:
+        parts.append(str(manager))
+
+    python_version = info.get("python_version")
+    if python_version and "python" not in tools:
+        parts.append(f"python {python_version} (.python-version)")
+
+    venv = info.get("venv")
+    if venv:
+        venv_python = info.get("venv_python")
+        if venv_python:
+            parts.append(f"venv {venv} present (python {venv_python})")
+        else:
+            parts.append(f"venv {venv} present")
+
+    prefix = runner_prefix(info)
+    if prefix:
+        parts.append(f"run tools via {prefix.rstrip()}")
+
+    if not parts:
+        return []
+    return [f"- runtime: {'; '.join(parts)}"]
 
 
 def _render_git_progress(ctx: RepoContext) -> List[str]:

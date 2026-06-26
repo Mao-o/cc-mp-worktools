@@ -33,11 +33,20 @@ class TestSnapshot(TypedDict, total=False):
     test_dirs: List[str]
 
 
+class RuntimeInfo(TypedDict, total=False):
+    manager: str  # "mise" | "asdf"
+    tools: Dict[str, str]  # {tool: version}
+    python_version: str  # from .python-version
+    venv: str  # virtualenv directory name (".venv" / "venv")
+    venv_python: str  # interpreter version from pyvenv.cfg
+
+
 class ResultsDict(TypedDict, total=False):
     is_git_repo: bool
     purpose: str
     package_manager: str
     major_dependencies: List[str]
+    runtime: RuntimeInfo
     test_snapshot: TestSnapshot
 
 
