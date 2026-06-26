@@ -1,0 +1,20 @@
+{
+  "name": "mao-worktools",
+  "interface": {
+    "displayName": "Mao Worktools"
+  },
+  "plugins": [
+    {
+      "name": "session-facts",
+      "source": {
+        "source": "local",
+        "path": "./plugins/session-facts"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

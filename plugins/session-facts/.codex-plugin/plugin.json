@@ -1,0 +1,37 @@
+{
+  "name": "session-facts",
+  "version": "0.6.0",
+  "description": "リポジトリを分析し、スタック/スクリプト/env キー/ドメイン型などのコンパクトなファクトバンドルを生成する Codex plugin。",
+  "author": {
+    "name": "Mao"
+  },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": [
+    "session-start",
+    "context-injection",
+    "repo-facts",
+    "markdown",
+    "codex",
+    "repository-analysis"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "Session Facts",
+    "shortDescription": "リポジトリの要点を Markdown で生成します。",
+    "longDescription": "session-facts は既存リポジトリを解析し、スタック、依存、スクリプト、env キー、テスト状況、ディレクトリ構造、ドメイン型などをコンパクトな Project Facts として Codex に渡しやすい Markdown にまとめます。",
+    "developerName": "Mao",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Analyze"
+    ],
+    "defaultPrompt": [
+      "この repo の session facts を出して",
+      "Project Facts を更新して確認して",
+      "今の作業ディレクトリを session-facts で要約して"
+    ]
+  }
+}

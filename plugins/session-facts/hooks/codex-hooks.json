@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types",
+            "statusMessage": "Loading session-facts",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

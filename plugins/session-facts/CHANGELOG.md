@@ -42,6 +42,35 @@
 テスト 138 件 (新規 48 件: `test_runtime.py` / `test_scripts.py` 新設、
 `test_dependencies.py` にハイブリッド/parser テスト追加)。
 
+### Codex plugin 兼用対応 (hook + skill)
+
+session-facts を **Codex plugin としても**配布できるよう、エージェント非依存の
+コア (`hooks/session-facts/`) を無改造のまま、Codex 用の配線レイヤを追加した。
+Codex の hooks framework は Claude Code とほぼ同型 (`SessionStart` +
+`hookSpecificOutput.additionalContext`、plain stdout も additionalContext として
+受理) のため、コアの再利用が成立する。
+
+- **`.codex-plugin/plugin.json`** — Codex plugin manifest。`skills` / `hooks` /
+  `interface` フィールドを持つ (`hooks: "./hooks/codex-hooks.json"`)。
+- **`hooks/codex-hooks.json`** (新規) — `SessionStart` (matcher `startup|resume`)
+  で `${PLUGIN_ROOT}/hooks/session-facts` を実行し自動注入 (Claude の SessionStart
+  自動注入と同等)。Claude の `hooks/hooks.json` とは別ファイルで干渉しない。
+  Claude 側の `--no-recent-commits` は付けない (Codex が git 情報を自動注入するか
+  未確認のため、subagent と同じく recent_commits を残す保守側に倒す)。
+- **`skills/session-facts/SKILL.md`** — オンデマンド再生成用の skill (構成変更後の
+  手動更新)。自動注入は hook が担うため両者は補完関係。
+- **`.agents/plugins/marketplace.json`** — ローカル marketplace 登録
+  (`codex plugin marketplace add <repo>` 用)。
+
+実機 `codex-cli 0.142.2` で検証済み (隔離 `CODEX_HOME`): `plugin add` で
+`installed, enabled 0.6.0`、manifest/marketplace/hook を error なく受理。version は
+plugin.json から解決。
+
+> **保留**: `SubagentStart` hook は Codex の subagent matcher 値が未確認のため
+> 見送り (誤 matcher での silent 失敗 / 全 subagent への過剰注入を避ける)。
+> SessionStart 自動注入で主要価値はカバー。`--emit subagent-json` モードは
+> Codex SubagentStart にも流用可能 (将来対応)。
+
 ### 見送り
 
 - **tomllib fast-path** (Python ≥ 3.11 の構造的パース) — house style の正規表現
