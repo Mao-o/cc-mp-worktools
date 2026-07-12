@@ -20,6 +20,7 @@ Local development:
 | Plugin | Description |
 |---|---|
 | `llms-docs` | Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader) |
+| `file-split-advisor` | Write/Edit 後に行数 tier + 責務混在シグナルを組み合わせて分割検討メモを返す非 block hook |
 
 ## Development
 

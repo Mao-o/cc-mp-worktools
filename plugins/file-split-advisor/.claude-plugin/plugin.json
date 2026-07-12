@@ -1,0 +1,10 @@
+{
+  "name": "file-split-advisor",
+  "version": "0.1.0",
+  "description": "Write/Edit 後に行数 tier と責務混在シグナル (import 多様性・命名の抽象度・定義数・制御フロー密度) を組み合わせて分割検討メモを additionalContext で返す非 block hook。言語/役割 (テスト/宣言的コード) で閾値を調整する",
+  "author": { "name": "Mao" },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": ["posttooluse", "code-quality", "static-analysis", "refactoring", "hooks"]
+}
