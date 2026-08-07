@@ -146,3 +146,11 @@ DEFAULT_MAX_NOTES = 8
 DEFAULT_MAX_MAJOR_DEPS = 8
 DEFAULT_MAX_DOMAIN_TYPES = 10
 DEFAULT_MAX_CONFIG_HINTS = 8
+DEFAULT_MAX_HUB_FILES = 8
+
+# hub_files collector (core/imports.py + collectors/hub_files.py): scanning
+# every candidate file's body is real work, so cap the candidate count to
+# bound worst-case cost on very large repos, and require multiple distinct
+# referrers before a file is surfaced as noise-free signal.
+HUB_FILES_MAX_SCAN = 3000
+HUB_FILES_MIN_REFS = 2

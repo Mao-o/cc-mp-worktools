@@ -13,6 +13,7 @@ from .constants import (
     DEFAULT_MAX_CONFIG_HINTS,
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
+    DEFAULT_MAX_HUB_FILES,
     DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
     DEFAULT_MAX_SCRIPT_ENTRIES,
@@ -66,6 +67,8 @@ class AnalysisConfig:
     include_domain_types: bool = False
     max_domain_types: int = DEFAULT_MAX_DOMAIN_TYPES
     max_config_hints: int = DEFAULT_MAX_CONFIG_HINTS
+    include_hub_files: bool = False
+    max_hub_files: int = DEFAULT_MAX_HUB_FILES
     # SessionStart passes False: the harness already injects recent commits
     # there (gitStatus), while subagents receive no git context at all.
     include_recent_commits: bool = True
@@ -76,6 +79,12 @@ class RepoContext:
     root: Path
     config: AnalysisConfig
     cwd: Optional[Path] = None
+    # The literal path this run was invoked with (sys.argv[0]), so the
+    # injected output can name a copy-pasteable follow-up command (e.g.
+    # `<invoked_as> --help`) without the reader needing to resolve
+    # ${CLAUDE_PLUGIN_ROOT} itself. None when summarize_repo() is called as a
+    # library (e.g. from tests).
+    invoked_as: Optional[str] = None
     tracked_files: List[str] = field(default_factory=list)
     stack: List[str] = field(default_factory=list)
     results: ResultsDict = field(default_factory=dict)

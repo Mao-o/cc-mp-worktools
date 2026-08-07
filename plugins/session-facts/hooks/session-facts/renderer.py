@@ -34,8 +34,27 @@ def render_header(ctx: RepoContext) -> str:
         lines.append(f"- major_dependencies: {', '.join(major_deps)}")
 
     lines.extend(_render_git_progress(ctx))
+    lines.append(_render_more_hint(ctx))
 
     return "\n".join(lines)
+
+
+def _render_more_hint(ctx: RepoContext) -> str:
+    """Point at --help for the full opt-in option list.
+
+    --help (argparse, free) is the single source of truth for what flags
+    exist; duplicating flag names here or in SKILL.md's description would
+    drift as options are added. When invoked_as is available (real hook
+    runs), the hint is a copy-pasteable command — the injected text has no
+    other way to name a runnable path, since ${CLAUDE_PLUGIN_ROOT} is
+    resolved by the hook, not present in what gets injected.
+    """
+    if ctx.invoked_as:
+        return (
+            f"- more: this is the default view; run `{ctx.invoked_as} --help` "
+            "for additional opt-in analyses"
+        )
+    return "- more: this is the default view; the session-facts skill has additional opt-in analyses (see --help)"
 
 
 def _render_runtime(ctx: RepoContext) -> List[str]:

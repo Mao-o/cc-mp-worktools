@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
 from core.constants import (
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
+    DEFAULT_MAX_HUB_FILES,
     DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
     DEFAULT_MAX_SCRIPT_ENTRIES,
@@ -73,8 +75,9 @@ def summarize_repo(
     config: AnalysisConfig,
     is_git: bool,
     cwd: Optional[Path] = None,
+    invoked_as: Optional[str] = None,
 ) -> str:
-    ctx = RepoContext(root=root, config=config, cwd=cwd)
+    ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
 
@@ -113,23 +116,77 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Generate a compact session-start facts bundle for coding agents."
     )
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Path inside the git repository")
-    parser.add_argument("--format", choices=("markdown", "json", "human"), default="markdown")
+    parser.add_argument(
+        "--format",
+        choices=("markdown", "json", "human"),
+        default="markdown",
+        help="Output format. 'markdown' is what hooks inject into agent context.",
+    )
     parser.add_argument(
         "--tree-depth",
         type=int,
         default=None,
         help="Force a fixed tree depth. Omit to auto-select depth dynamically.",
     )
-    parser.add_argument("--min-tree-depth", type=int, default=MIN_TREE_DEPTH)
-    parser.add_argument("--max-tree-depth", type=int, default=MAX_TREE_DEPTH)
-    parser.add_argument("--max-tree-lines", type=int, default=DEFAULT_MAX_TREE_LINES)
-    parser.add_argument("--max-service-entries", type=int, default=DEFAULT_MAX_SERVICE_ENTRIES)
-    parser.add_argument("--max-script-entries", type=int, default=DEFAULT_MAX_SCRIPT_ENTRIES)
-    parser.add_argument("--max-env-keys", type=int, default=DEFAULT_MAX_ENV_KEYS)
-    parser.add_argument("--max-notes", type=int, default=DEFAULT_MAX_NOTES)
-    parser.add_argument("--max-major-deps", type=int, default=DEFAULT_MAX_MAJOR_DEPS)
-    parser.add_argument("--include-domain-types", action="store_true")
-    parser.add_argument("--max-domain-types", type=int, default=DEFAULT_MAX_DOMAIN_TYPES)
+    parser.add_argument(
+        "--min-tree-depth", type=int, default=MIN_TREE_DEPTH,
+        help="Lower bound for dynamic tree depth selection.",
+    )
+    parser.add_argument(
+        "--max-tree-depth", type=int, default=MAX_TREE_DEPTH,
+        help="Upper bound for dynamic tree depth selection.",
+    )
+    parser.add_argument(
+        "--max-tree-lines", type=int, default=DEFAULT_MAX_TREE_LINES,
+        help="Max lines for the directory tree; the deepest depth that fits wins.",
+    )
+    parser.add_argument(
+        "--max-service-entries", type=int, default=DEFAULT_MAX_SERVICE_ENTRIES,
+        help="Max entries in the Service Entry Points section.",
+    )
+    parser.add_argument(
+        "--max-script-entries", type=int, default=DEFAULT_MAX_SCRIPT_ENTRIES,
+        help="Max entries in the Likely Commands / scripts section.",
+    )
+    parser.add_argument(
+        "--max-env-keys", type=int, default=DEFAULT_MAX_ENV_KEYS,
+        help="Max env var keys listed from .env.example-style files.",
+    )
+    parser.add_argument(
+        "--max-notes", type=int, default=DEFAULT_MAX_NOTES,
+        help="Max entries in the Repo-Specific Notes section.",
+    )
+    parser.add_argument(
+        "--max-major-deps", type=int, default=DEFAULT_MAX_MAJOR_DEPS,
+        help="Max entries in the major_dependencies header line.",
+    )
+    parser.add_argument(
+        "--include-domain-types",
+        action="store_true",
+        help=(
+            "Enable the Domain Types section (interface/type/class/enum names "
+            "under domain-ish paths, e.g. Case/Order/User — not Props/Config "
+            "plumbing). Opt-in: scans file bodies, unlike the rest of "
+            "session-facts. Requires a genuine cluster (>=5 types) to show."
+        ),
+    )
+    parser.add_argument(
+        "--max-domain-types", type=int, default=DEFAULT_MAX_DOMAIN_TYPES,
+        help="Max entries in the Domain Types section.",
+    )
+    parser.add_argument(
+        "--include-hub-files",
+        action="store_true",
+        help=(
+            "Enable the Hub Files section (files most referenced by other "
+            "tracked files via a lightweight import scan). Opt-in: scans "
+            "every candidate file's body, unlike the rest of session-facts."
+        ),
+    )
+    parser.add_argument(
+        "--max-hub-files", type=int, default=DEFAULT_MAX_HUB_FILES,
+        help="Max entries in the Hub Files section.",
+    )
     parser.add_argument(
         "--no-recent-commits",
         action="store_true",
@@ -165,6 +222,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_major_deps=args.max_major_deps,
         include_domain_types=args.include_domain_types,
         max_domain_types=args.max_domain_types,
+        include_hub_files=args.include_hub_files,
+        max_hub_files=args.max_hub_files,
         include_recent_commits=not args.no_recent_commits,
     )
     resolved = args.root.resolve()
@@ -172,7 +231,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     is_git = root is not None
     if root is None:
         root = resolved
-    output = summarize_repo(root, config, is_git, cwd=resolved)
+    # sys.argv[0] is the literal path the hook invoked (e.g. the
+    # ${CLAUDE_PLUGIN_ROOT}-resolved directory), which the injected output
+    # would otherwise have no way to name for a follow-up --help call.
+    output = summarize_repo(root, config, is_git, cwd=resolved, invoked_as=sys.argv[0])
     if args.emit == "subagent-json":
         print(json.dumps({
             "hookSpecificOutput": {
