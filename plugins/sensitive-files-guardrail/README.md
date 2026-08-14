@@ -291,6 +291,12 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
 
+> **プロジェクトスコープの rule (Unreleased)**: 同じファイル内に
+> `[project:/abs/path/to/project]` セクションを書くと、そのプロジェクトで
+> Claude Code が動いているときだけ適用される rule を追加できる (グローバル
+> 1 ファイルという方針は維持)。詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の
+> 「プロジェクトスコープの rule」節を参照。
+
 詳細な設定例・false positive 対策・`_detect_format` との同期は
 [docs/PATTERNS.md](./docs/PATTERNS.md) 参照。
 

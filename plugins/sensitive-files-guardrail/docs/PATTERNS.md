@@ -107,6 +107,48 @@ EOF
 cat ~/.claude/sensitive-files-guardrail/patterns.local.txt
 ```
 
+### プロジェクトスコープの rule (`[project:<path>]` セクション、Unreleased)
+
+`patterns.local.txt` はユーザー単位の単一ファイルのままだが、ファイル内に
+`[project:<絶対パス>]` セクションを書くと、その rule は該当プロジェクトで
+Claude Code が動いているときだけ適用される。ヘッダーより前 (またはヘッダーが
+一度も出ない) の行は従来通り**全プロジェクト共通**。
+
+```bash
+cat >> ~/.claude/sensitive-files-guardrail/patterns.local.txt <<'EOF'
+# 全プロジェクト共通 (ヘッダーなし)
+!ca-bundle.pem
+
+[project:/Users/mao/dev/hirokiriko/Asset-Manager]
+# Asset-Manager セッションで承認 (2026-08-01) — pnpm 設定のみでトークン非含有
+!.npmrc
+
+[project:/Users/mao/dev/other-repo]
+!some-other-basename
+EOF
+```
+
+**プロジェクト識別**: `$CLAUDE_PROJECT_DIR` 環境変数 (設定済みならそれ) →
+未設定なら hook 発火時の `cwd` から `.git` が見つかる階層まで遡って解決する
+(サブディレクトリで hook が発火しても monorepo のプロジェクト直下を見失わない)。
+`$HOME` 自体はプロジェクトとして扱わない。`[project:...]` のパスはこの解決結果
+と**文字列完全一致**する必要がある (末尾スラッシュは正規化されるが、シンボリック
+リンク解決や相対パスの `~` 展開はしない — 絶対パスをそのまま書く)。
+
+**評価順序**: 共通行 → 一致した `[project:...]` セクションの行、の順で
+**ファイル中の出現順のまま**評価する (last-match-wins は出現順で決まるため、
+セクション単位で並べ替えたりしない)。上記の例のように共通行を先・
+`[project:...]` を後に書けば、プロジェクト側の rule が既定 + 共通ローカルより
+強くなる (= プロジェクトで個別に許可・再禁止できる)。
+
+**なぜ single file のままか**: セッションごとに承認した除外パターンが
+「このプロジェクトだけの話のつもりが、実は `~/.claude/` 配下のグローバル
+1 ファイルなので他の全プロジェクトにも無条件適用されていた」という実運用上の
+気付きに基づく。プロジェクト直下に別ファイルを置く方式 (`$CLAUDE_PROJECT_DIR
+/.claude/sensitive-files-guardrail/patterns.local.txt` 等) も検討したが、
+N プロジェクト = N ファイルに設定が分散して「自分が何を許可しているか」の
+一覧性が落ちるため、既存の単一ファイルにセクションを足す形を採用した。
+
 ### 旧パスからの移行 (0.5.x → 0.6.0)
 
 0.4.0〜0.5.x で fallback として参照していた
@@ -122,8 +164,9 @@ mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guardrail/patterns.local.t
 
 ## 評価方式: last-match-wins (大文字小文字無視)
 
-rules は `既定 → ローカル` の順で連結し、**最後にマッチしたルール**の
-include/exclude で判定する (gitignore 風)。どれにもマッチしなければ非機密。
+rules は `既定 → ローカル (共通行 → 一致した [project:...] 行)` の順で連結し、
+**最後にマッチしたルール**の include/exclude で判定する (gitignore 風)。
+どれにもマッチしなければ非機密。
 0.2.0 以降 **既定で case-insensitive** (`.ENV` や `ID_RSA` も検出)。
 
 これにより:
@@ -250,3 +293,23 @@ exclude を重ねる運用が安全。
 
 0.4.0〜0.5.x で存在した複数形 ``_resolve_local_patterns_paths`` (preferred +
 fallback の 2-tier) は 0.6.0 で撤去した。
+
+### `_resolve_project_key(cwd) -> str | None` (Unreleased)
+
+`[project:<key>]` セクションと突き合わせる識別子を解決する。
+
+1. `$CLAUDE_PROJECT_DIR` 環境変数があればそれを正規化して返す (優先)
+2. 無ければ `cwd` から `.git` が見つかる階層まで遡る (`$HOME` / filesystem root
+   に達したら諦めて `None`)
+3. `cwd` が空文字列なら `None`
+
+subprocess (`git rev-parse` 等) は呼ばない。
+
+### `_parse_local_patterns_text(text, project_key) -> list[tuple[str, bool]]` (Unreleased)
+
+`patterns.local.txt` 専用のパーサ。`_parse_patterns_text` と違い
+`[project:<path>]` セクションヘッダーを解釈する。ヘッダーより前の行は常に出力に
+含め (共通行)、ヘッダー以降は `project_key` と一致する場合だけそのセクションの
+行を出力に含める。**出現順を保持したまま**返す (グループ単位で並べ替えない)。
+`project_key` が `None` ならどのセクションにも一致せず、共通行のみを返す —
+ヘッダーを含まない既存ファイルは `_parse_patterns_text` と完全に同じ結果になる。

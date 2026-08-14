@@ -87,6 +87,63 @@ format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆�
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut
 
+## 0.15.0
+
+**patterns.local.txt にプロジェクトスコープ設定を追加** (PR6/1.0.0 ロードマップ
+E5/E6/D1/D2 とは無関係の別件、ユーザー要望起点)。実運用で「あるプロジェクトの
+セッションで承認した除外パターンが `~/.claude/sensitive-files-guardrail/
+patterns.local.txt` 経由で無関係な他プロジェクトにも無条件適用される」ことが
+判明し追加した。
+
+`~/.claude/sensitive-files-guardrail/patterns.local.txt` は単一ファイルのまま、
+`[project:<絶対パス>]` セクションでプロジェクト別の rule を書けるようにした
+(グローバル1ファイルという既存方針は維持しつつ、ファイル内で path 対応する形)。
+
+- **`hooks/_shared/patterns.py`**: `_resolve_project_key(cwd)` を新設。
+  `$CLAUDE_PROJECT_DIR` 環境変数 (hook 起動時に Claude Code が spawn プロセスへ
+  注入する安定した project root。Bash の `cd` 等で hook input の `cwd` が
+  セッション中に変わっても影響を受けない) を優先し、未設定なら `cwd` から
+  `.git` が見つかる階層 (または `$HOME` / filesystem root) まで純 pathlib で
+  遡る (`git rev-parse` 等の subprocess は呼ばない — PreToolUse の <100ms 目標
+  を維持するため)。`_parse_local_patterns_text(text, project_key)` を新設し、
+  セクションヘッダーの無い行 (先頭〜最初のヘッダーまで) は従来通り全プロジェクト
+  共通、`[project:<key>]` セクションのうち `project_key` と一致するものだけを
+  共通行と合わせてファイル中の**出現順のまま**返す (last-match-wins は出現順
+  で決まるため、グループ単位で並べ替えない。既存の `_parse_patterns_text` は
+  変更せず、既定 `patterns.txt` はセクション非対応のまま)。`load_patterns()` /
+  `_load_legacy_local()` に `cwd` 引数を追加 (既定 `""` — 省略時は従来通り共通
+  行のみで完全後方互換)。
+- **`hooks/check-sensitive-files/checker.py` / `__main__.py`**: `load_patterns`
+  に `cwd` を追加し、hook input の `cwd` を forward。
+- **`hooks/redact-sensitive-reads/core/patterns.py`**: 同様に `cwd` を追加。
+- **`hooks/redact-sensitive-reads/handlers/{read,edit,bash}_handler.py`**:
+  各 handler が既に保持している envelope 由来の `cwd` を `load_patterns(cwd=cwd)`
+  に渡すよう変更 (bash_handler は `handle()` 冒頭で新たに `cwd` を抽出)。
+
+### 動作変化
+
+- **後方互換**: `[project:...]` ヘッダーを含まない既存 `patterns.local.txt` は
+  一字一句変えずに従来通り動作する (`cwd` 未指定の呼出しも同様)。
+- **新規**: `patterns.local.txt` に `[project:/abs/path]` セクションを書くと、
+  そのパス (またはその配下、`.git` まで遡って一致判定) で Claude Code
+  セッションが動いているときだけ、そのセクションの rule が既定 + 共通ローカル
+  行に連結される。
+
+> **注意 (旧バージョンとの config 互換性)**: `[project:...]` 構文は本
+> `0.15.0` 以降のパーサでのみ解釈される。`0.14.1` 以前のコードは未知の行を
+> そのまま fnmatch の include パターンとして扱うため、角括弧が fnmatch の
+> 文字クラス構文と衝突し**意図しない広範囲 block を引き起こす**
+> (実機事故で確認済み)。`~/.claude/sensitive-files-guardrail/patterns.local.txt`
+> に `[project:...]` を書くのは、plugin が実際に `0.15.0` 以降へ更新されたこと
+> (`/plugin` 経由のキャッシュ更新) を確認した後にすること。
+
+### テスト
+
+- `hooks/redact-sensitive-reads/tests/test_patterns_loader.py` に
+  `TestResolveProjectKey` (5 件) / `TestParseLocalPatternsText` (6 件) /
+  `TestProjectScopedLoadPatterns` (5 件) を追加。既存 700 件 (旧 684 件) は
+  無改修で green、`check-sensitive-files` 側 27 件も green。
+
 ## 0.14.1
 
 **rename 由来の data-loss regression hotfix**。plugin の内部呼称統一

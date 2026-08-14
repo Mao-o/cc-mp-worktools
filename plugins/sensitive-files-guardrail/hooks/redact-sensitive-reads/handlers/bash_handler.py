@@ -469,12 +469,13 @@ def handle(envelope: dict) -> dict:
     """
     tool_input = envelope.get("tool_input") or {}
     command = tool_input.get("command")
+    cwd = envelope.get("cwd", "")
 
     if not isinstance(command, str) or not command.strip():
         return output.make_allow()
 
     try:
-        rules = load_patterns()
+        rules = load_patterns(cwd=cwd)
     except (FileNotFoundError, OSError) as e:
         L.log_error("patterns_unavailable", type(e).__name__)
         return output.make_deny(M.policy_unavailable("deny"))

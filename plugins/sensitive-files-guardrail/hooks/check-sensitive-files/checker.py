@@ -49,16 +49,18 @@ def _warn_migrate(token: str) -> None:
 _warn_local_oserror = _warn_local  # 後方互換 alias
 
 
-def load_patterns(patterns_file: Path) -> list[tuple[str, bool]]:
+def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
     """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
 
     Stop 側は hook 間の Python 依存を避けるため stderr 直書きで warn する
-    (``core.logging`` を import しない)。
+    (``core.logging`` を import しない)。``cwd`` は ``[project:<path>]``
+    セクションの一致判定に使う (``_shared.patterns.load_patterns`` 参照)。
     """
     return _shared_load_patterns(
         patterns_file,
         warn_callback=_warn_local,
         migrate_warn_callback=_warn_migrate,
+        cwd=cwd,
     )
 
 

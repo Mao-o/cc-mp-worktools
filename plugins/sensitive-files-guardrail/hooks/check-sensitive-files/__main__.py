@@ -41,7 +41,7 @@ def main() -> int:
 
     patterns_file = Path(__file__).resolve().parent / "patterns.txt"
     try:
-        rules = load_patterns(patterns_file)
+        rules = load_patterns(patterns_file, cwd=cwd)
     except OSError as e:
         sys.stderr.write(
             f"[check-sensitive-files] patterns_unavailable: {type(e).__name__}\n"

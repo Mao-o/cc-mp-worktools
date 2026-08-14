@@ -32,7 +32,7 @@ def handle(envelope: dict) -> dict:
         return output.make_allow()
 
     try:
-        rules = load_patterns()
+        rules = load_patterns(cwd=cwd)
     except (FileNotFoundError, OSError) as e:
         L.log_error("patterns_unavailable", type(e).__name__)
         return output.ask_or_deny(M.policy_unavailable("pause"), envelope)

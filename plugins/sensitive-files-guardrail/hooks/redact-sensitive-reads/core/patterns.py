@@ -59,16 +59,20 @@ _warn_local_oserror = _warn_local  # 後方互換 alias
 
 def load_patterns(
     patterns_file: Path | None = None,
+    cwd: str = "",
 ) -> list[tuple[str, bool]]:
     """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
 
     Read 側は ``core.logging`` 経由で stderr + logfile に warning を出す。
     ローカル非存在は黙殺。既定 patterns.txt の読み取り失敗は例外として再送出。
     rename 前の旧 patterns.local.txt を fallback 読込した場合は移行 warning を出す。
+    ``cwd`` は ``[project:<path>]`` セクションの一致判定に使う
+    (``_shared.patterns.load_patterns`` 参照)。
     """
     path = patterns_file or SHARED_PATTERNS
     return _shared_load_patterns(
         path,
         warn_callback=_warn_local,
         migrate_warn_callback=_warn_migrate,
+        cwd=cwd,
     )

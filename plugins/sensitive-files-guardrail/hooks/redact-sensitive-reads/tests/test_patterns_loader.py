@@ -281,6 +281,194 @@ class TestSharedLegacyFallback(BaseWithIsolatedHome):
         self.assertEqual(migrate_calls, [])
 
 
+class TestResolveProjectKey(BaseWithIsolatedHome):
+    """_resolve_project_key の解決順位 (CLAUDE_PROJECT_DIR → cwd 遡上) を検証。"""
+
+    def setUp(self):
+        super().setUp()
+        self._project_env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self._project_env_patcher.start()
+        self.addCleanup(self._project_env_patcher.stop)
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+
+    def test_env_var_wins_and_is_normalized(self):
+        from _shared.patterns import _resolve_project_key
+        os.environ["CLAUDE_PROJECT_DIR"] = str(Path(self.tmp) / "proj") + "/"
+        self.assertEqual(
+            _resolve_project_key("/somewhere/else"),
+            os.path.normpath(str(Path(self.tmp) / "proj") + "/"),
+        )
+
+    def test_walks_up_to_git_dir(self):
+        from _shared.patterns import _resolve_project_key
+        proj = Path(self.tmp) / "proj"
+        sub = proj / "packages" / "api"
+        sub.mkdir(parents=True)
+        (proj / ".git").mkdir()
+        self.assertEqual(_resolve_project_key(str(sub)), str(proj))
+
+    def test_no_git_dir_found_returns_none(self):
+        from _shared.patterns import _resolve_project_key
+        lone = Path(self.tmp) / "lonely"
+        lone.mkdir()
+        self.assertIsNone(_resolve_project_key(str(lone)))
+
+    def test_home_itself_is_not_a_project(self):
+        from _shared.patterns import _resolve_project_key
+        (self.home_dir / ".git").mkdir()
+        self.assertIsNone(_resolve_project_key(str(self.home_dir)))
+
+    def test_empty_cwd_returns_none(self):
+        from _shared.patterns import _resolve_project_key
+        self.assertIsNone(_resolve_project_key(""))
+
+
+class TestParseLocalPatternsText(unittest.TestCase):
+    """``[project:...]`` セクション対応パーサの契約テスト (HOME 非依存)。"""
+
+    def test_no_sections_matches_legacy_parser(self):
+        from _shared.patterns import _parse_local_patterns_text, _parse_patterns_text
+        text = "# comment\n*.pem\n!*.pub\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, None),
+            _parse_patterns_text(text),
+        )
+
+    def test_project_key_none_skips_all_sections(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "!common.pem\n[project:/x]\n!only-x.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, None),
+            [("common.pem", True)],
+        )
+
+    def test_matching_section_included_in_file_order(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = (
+            "!common.pem\n[project:/x]\n!only-x.pem\n[project:/y]\n!only-y.pem\n"
+        )
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/x"),
+            [("common.pem", True), ("only-x.pem", True)],
+        )
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/y"),
+            [("common.pem", True), ("only-y.pem", True)],
+        )
+
+    def test_section_before_common_lines_preserves_file_order(self):
+        """セクションを共通行より前に書けば、出現順どおりセクション側が先に
+        評価される (last-match-wins は出現順で決まる、という既存契約を維持)。"""
+        from _shared.patterns import _parse_local_patterns_text
+        text = "[project:/x]\n*.pem\n\n!*.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/x"),
+            [("*.pem", False), ("*.pem", True)],
+        )
+        # ヘッダー登場前の共通行が無いので、セクション不一致なら空。
+        self.assertEqual(_parse_local_patterns_text(text, None), [])
+
+    def test_header_path_normalized_trailing_slash(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "[project:/x/y/]\n!foo.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/x/y"),
+            [("foo.pem", True)],
+        )
+
+    def test_unmatched_section_ignored(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "!common.pem\n[project:/other]\n!ignored.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/x"),
+            [("common.pem", True)],
+        )
+
+
+class TestProjectScopedLoadPatterns(BaseWithIsolatedHome):
+    """load_patterns の ``cwd`` 引数によるプロジェクトセクション適用を検証。"""
+
+    def setUp(self):
+        super().setUp()
+        self._project_env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self._project_env_patcher.start()
+        self.addCleanup(self._project_env_patcher.stop)
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+
+    def test_project_section_applied_via_cwd(self):
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        proj = Path(self.tmp) / "proj"
+        proj.mkdir()
+        (proj / ".git").mkdir()
+        self._write_preferred(f"!global-exclude.pem\n[project:{proj}]\n!.npmrc\n")
+
+        rules = load_patterns(default_file, cwd=str(proj))
+        self.assertEqual(
+            rules,
+            [
+                ("*.pem", False),
+                ("global-exclude.pem", True),
+                (".npmrc", True),
+            ],
+        )
+
+    def test_project_section_not_applied_for_other_cwd(self):
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        proj = Path(self.tmp) / "proj"
+        proj.mkdir()
+        (proj / ".git").mkdir()
+        other = Path(self.tmp) / "other"
+        other.mkdir()
+        (other / ".git").mkdir()
+        self._write_preferred(f"[project:{proj}]\n!.npmrc\n")
+
+        rules = load_patterns(default_file, cwd=str(other))
+        self.assertEqual(rules, [("*.pem", False)])
+
+    def test_project_section_via_subdirectory_cwd(self):
+        """monorepo 等でサブディレクトリが cwd でも project root の .git まで遡る。"""
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        proj = Path(self.tmp) / "proj"
+        sub = proj / "packages" / "api"
+        sub.mkdir(parents=True)
+        (proj / ".git").mkdir()
+        self._write_preferred(f"[project:{proj}]\n!.npmrc\n")
+
+        rules = load_patterns(default_file, cwd=str(sub))
+        self.assertEqual(rules, [("*.pem", False), (".npmrc", True)])
+
+    def test_no_cwd_behaves_as_before(self):
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("!global.pem\n")
+
+        rules = load_patterns(default_file)
+        self.assertEqual(rules, [("*.pem", False), ("global.pem", True)])
+
+    def test_checker_and_core_agree_with_project_section(self):
+        from core.patterns import load_patterns as core_load
+        checker_dir = (
+            Path(__file__).resolve().parent.parent.parent / "check-sensitive-files"
+        )
+        if str(checker_dir) not in sys.path:
+            sys.path.insert(0, str(checker_dir))
+        import checker as _checker
+        importlib.reload(_checker)
+
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        proj = Path(self.tmp) / "proj"
+        proj.mkdir()
+        (proj / ".git").mkdir()
+        self._write_preferred(f"[project:{proj}]\n!.npmrc\n")
+
+        core_rules = core_load(default_file, cwd=str(proj))
+        checker_rules = _checker.load_patterns(default_file, cwd=str(proj))
+        self.assertEqual(core_rules, checker_rules)
+
+
 class TestCheckerLoaderContract(BaseWithIsolatedHome):
     """check-sensitive-files/checker.py::load_patterns が core と同じ rules を返すこと。"""
 
