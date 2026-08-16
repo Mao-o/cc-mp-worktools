@@ -1,0 +1,344 @@
+"""Stop hook のターンスコープ化に対する受け入れ基準テスト (end-to-end)。
+
+実際の git repo と隔離 TMPDIR を使い、cursor.review() だけをモックする。
+各テストは README / 改修依頼の受け入れ基準 1 項目に対応する。
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import unittest
+from unittest import mock
+
+import _testutil
+from _testutil import HookTestCase
+
+SESSION_A = "sess-aaaa"
+SESSION_B = "sess-bbbb"
+
+
+class TestNoEditsNoReview(HookTestCase):
+    """編集 0 件のターンで Stop が走っても cursor が起動しない。"""
+
+    def test_clean_turn_skips_review(self):
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_dirty_worktree_but_no_session_edit_skips_review(self):
+        # 作業ツリーは汚れているが、このセッションは一行も編集していない
+        _testutil.write(self.repo, "seed.txt", "alpha\nCHANGED\ngamma\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+
+class TestSessionIsolation(HookTestCase):
+    """セッション A の編集がセッション B のレビュー対象に入らない。"""
+
+    def test_only_own_edits_are_reviewed(self):
+        self.edit(SESSION_A, "a.txt", "from A\n")
+        self.edit(SESSION_B, "b.txt", "from B\n")
+
+        self.stop(SESSION_B, "REVIEW_CLEAN")
+        self.assertReviewed("b.txt")
+        self.assertNotIn("a.txt", self.review_calls[0])
+
+    def test_session_with_no_edits_skips_while_other_has_edits(self):
+        self.edit(SESSION_A, "a.txt", "from A\n")
+        self.stop(SESSION_B, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+
+class TestReviewedPathsAreNotRepeated(HookTestCase):
+    """REVIEW_CLEAN の後、同じファイルが次ターンで再レビューされない。"""
+
+    def test_clean_then_idle_turn(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_touched_again_without_content_change(self):
+        """同じ内容で書き直しただけなら (diff hash 不変) 再レビューしない。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_real_change_is_reviewed_again(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+
+    def test_block_result_also_marks_reviewed(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        output = self.stop(SESSION_A, "1. **直接影響** — 何か壊れる")
+        self.assertIn('"decision": "block"', output.replace('"decision":"block"', '"decision": "block"'))
+        self.assertReviewed("a.txt")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+
+class TestCursorFailureRestoresPaths(HookTestCase):
+    """cursor 失敗の後、同じファイルが次ターンで再レビューされる。"""
+
+    def test_failure_then_retry(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, None)  # cursor.review() が None = 失敗
+        self.assertReviewed("a.txt")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+
+    def test_failure_keeps_path_pending(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, None)
+        self.assertIn(
+            os.path.join(self.repo, "a.txt"),
+            self.pending(SESSION_A),
+            "cursor 失敗時はパスが pending に戻っていること",
+        )
+
+
+class TestInFlightRecovery(HookTestCase):
+    """Stop が in-flight 遷移後に kill されても TTL 経過後に再レビューされる。"""
+
+    def _state_file(self, session_id: str) -> str:
+        return os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{session_id}.json"
+        )
+
+    def test_expired_in_flight_is_reclaimed(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+
+        # Stop が claim した直後に kill された状況を作る
+        claim = self.state.claim_pending(SESSION_A)
+        self.assertIsNotNone(claim)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+        # TTL 未満なら回収されない (走行中のレビューを横取りしない)
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+        # claim 時刻を TTL 超過まで巻き戻す
+        path = self._state_file(SESSION_A)
+        with open(path) as f:
+            data = json.load(f)
+        for entry in data["in_flight"].values():
+            entry["at"] = time.time() - self.state.IN_FLIGHT_TTL_SEC - 60
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+
+    def test_ttl_exceeds_cursor_timeout(self):
+        """TTL <= cursor の timeout だと走行中の in-flight を横取りする (正しさの制約)。"""
+        self.assertGreater(self.state.IN_FLIGHT_TTL_SEC, self.cursor.TIMEOUT_SEC)
+
+
+class TestBashAttribution(HookTestCase):
+    """sed -i など Bash 経由でファイルを変更したターンでもレビューが走る。"""
+
+    def test_sed_on_already_dirty_file(self):
+        """**すでに HEAD から変更済み**のファイルを同一サイズで書き換えるケース。
+
+        この条件では `git status --porcelain` の行が前後とも ` M seed.txt` のまま
+        変わらないため、行集合の比較では検出できない。size も不変なので、
+        mtime_ns まで見て初めて拾える。
+        """
+        seed = os.path.join(self.repo, "seed.txt")
+        with open(seed, "w") as f:
+            f.write("alpha\nbeta\nGAMMA\n")  # hook 外で dirty にしておく
+
+        def mutate():
+            # 実 hook のプロセス起動間隔 (~50ms) を模す。粗い時刻粒度の FS でも
+            # mtime が確実に進むようにするための待ち。
+            time.sleep(0.02)
+            with open(seed, "w") as f:
+                f.write("alpha\nBETA\nGAMMA\n")  # 同一バイト数
+
+        self.bash(SESSION_A, "tu_sed", mutate)
+
+        self.assertIn(seed, self.pending(SESSION_A))
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("seed.txt")
+
+    def test_bash_created_file(self):
+        def mutate():
+            _testutil.write(self.repo, "generated.txt", "made by bash\n")
+
+        self.bash(SESSION_A, "tu_gen", mutate)
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("generated.txt")
+
+    def test_bash_without_changes_does_not_trigger_review(self):
+        self.bash(SESSION_A, "tu_noop", lambda: None)
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_bash_tracking_can_be_disabled(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_BASH_TRACKING"] = "0"
+
+        def mutate():
+            _testutil.write(self.repo, "generated.txt", "made by bash\n")
+
+        self.bash(SESSION_A, "tu_gen", mutate)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+
+class TestOverflowCarryOver(HookTestCase):
+    """1 回のレビュー上限を超えたパスを黙って捨てず、次ターンでレビューする。"""
+
+    def test_leftover_paths_are_reviewed_next_turn(self):
+        self.entry.MAX_REVIEW_PATHS = 2
+        for i in range(5):
+            self.edit(SESSION_A, f"f{i}.txt", f"content {i}\n")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        first = self.review_calls[0]
+        reviewed_first = {f"f{i}.txt" for i in range(5) if f"f{i}.txt" in first}
+        self.assertEqual(len(reviewed_first), 2)
+
+        seen = set(reviewed_first)
+        for _ in range(3):
+            self.stop(SESSION_A, "REVIEW_CLEAN")
+            if not self.review_calls:
+                break
+            seen |= {f"f{i}.txt" for i in range(5) if f"f{i}.txt" in self.review_calls[0]}
+
+        self.assertEqual(
+            seen,
+            {f"f{i}.txt" for i in range(5)},
+            "上限超過分が捨てられず、後続ターンで全てレビューされること",
+        )
+
+
+class TestCursorSerialization(HookTestCase):
+    """2 セッションが同時に編集したターンで cursor agent が同時に 2 つ起動しない。"""
+
+    def test_second_session_skips_while_lock_held(self):
+        self.edit(SESSION_A, "a.txt", "from A\n")
+        self.edit(SESSION_B, "b.txt", "from B\n")
+
+        with self.state.cursor_lock(self.repo) as acquired:
+            self.assertTrue(acquired)
+            self.stop(SESSION_B, "REVIEW_CLEAN")
+            self.assertNotReviewed()
+
+        # ロックを保持している間に pending が消費されていないこと
+        self.assertIn(os.path.join(self.repo, "b.txt"), self.pending(SESSION_B))
+
+        self.stop(SESSION_B, "REVIEW_CLEAN")
+        self.assertReviewed("b.txt")
+
+    def test_lock_is_per_worktree(self):
+        other = _testutil.init_repo(os.path.join(self._tmp.name, "other"))
+        with self.state.cursor_lock(self.repo) as first:
+            self.assertTrue(first)
+            with self.state.cursor_lock(other) as second:
+                self.assertTrue(second, "別作業ツリーは互いにブロックしない")
+
+
+class TestUntrackedOnly(HookTestCase):
+    """未追跡ファイルのみを新規作成したケースでもレビューが走る。"""
+
+    def test_new_file_only(self):
+        self.edit(SESSION_A, "brand_new.txt", "hello\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("brand_new.txt", "hello")
+
+
+class TestOutsideWorktree(HookTestCase):
+    """作業ツリー外の絶対パスは対象から除外される。"""
+
+    def test_outside_path_alone_skips_review(self):
+        outside = os.path.join(self._tmp.name, "outside.txt")
+        with open(outside, "w") as f:
+            f.write("not in repo\n")
+        self.run_hook(
+            "post-tool",
+            {
+                "session_id": SESSION_A,
+                "cwd": self.repo,
+                "tool_name": "Write",
+                "tool_use_id": "tu_outside",
+                "tool_input": {"file_path": outside},
+            },
+        )
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_outside_path_is_dropped_not_restored(self):
+        outside = os.path.join(self._tmp.name, "outside.txt")
+        with open(outside, "w") as f:
+            f.write("not in repo\n")
+        self.run_hook(
+            "post-tool",
+            {
+                "session_id": SESSION_A,
+                "cwd": self.repo,
+                "tool_name": "Write",
+                "tool_use_id": "tu_outside",
+                "tool_input": {"file_path": outside},
+            },
+        )
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.txt")
+        self.assertNotIn("outside.txt", self.review_calls[0])
+        self.assertEqual(self.pending(SESSION_A), [], "ツリー外パスが残り続けないこと")
+
+
+class TestGuards(HookTestCase):
+    """再帰防止・無効化スイッチ。"""
+
+    def test_stop_hook_active_skips(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        with mock.patch.object(self.cursor, "review") as review:
+            self.run_hook(
+                "stop",
+                {"session_id": SESSION_A, "cwd": self.repo, "stop_hook_active": True},
+            )
+            review.assert_not_called()
+        self.assertIn(
+            os.path.join(self.repo, "a.txt"),
+            self.pending(SESSION_A),
+            "再帰防止でスキップしても pending は温存されること",
+        )
+
+    def test_disable_switch(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_legacy_max_zero_still_disables(self):
+        """v0.2.0 で `MAX=0` を無効化スイッチとして使っていた環境の互換。"""
+        del os.environ["EXTERNAL_AI_POST_REVIEW"]
+        os.environ["EXTERNAL_AI_POST_REVIEW_MAX"] = "0"
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+    def test_legacy_max_two_no_longer_caps_reviews(self):
+        """回数予算は撤廃済み — 3 ターン目以降も黙って止まらない。"""
+        del os.environ["EXTERNAL_AI_POST_REVIEW"]
+        os.environ["EXTERNAL_AI_POST_REVIEW_MAX"] = "2"
+        for i in range(4):
+            self.edit(SESSION_A, "a.txt", f"v{i}\n")
+            self.stop(SESSION_A, "REVIEW_CLEAN")
+            self.assertReviewed("a.txt")
+
+
+if __name__ == "__main__":
+    unittest.main()

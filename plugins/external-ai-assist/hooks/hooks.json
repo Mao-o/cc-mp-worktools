@@ -20,6 +20,16 @@
             "timeout": 1560
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase pre-tool",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -32,6 +42,16 @@
             "timeout": 90
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase post-tool",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -39,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase stop",
             "timeout": 660
           }
         ]

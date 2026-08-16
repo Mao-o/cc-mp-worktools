@@ -1,0 +1,168 @@
+"""gitscan.py のパス正規化・status スナップショット・パス単位 diff のテスト。"""
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+
+import _testutil
+from _testutil import git, init_repo, write
+
+import gitscan
+
+
+class GitScanTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = init_repo(os.path.join(self._tmp.name, "repo"))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+
+class TestWorktreeRoot(GitScanTestCase):
+    def test_returns_realpath(self):
+        root = gitscan.worktree_root(self.repo)
+        self.assertEqual(root, os.path.realpath(self.repo))
+
+    def test_symlinked_cwd_resolves(self):
+        """macOS の /tmp -> /private/tmp のように cwd が symlink 経由でも解決すること。"""
+        link = os.path.join(self._tmp.name, "link")
+        os.symlink(self.repo, link)
+        self.assertEqual(gitscan.worktree_root(link), os.path.realpath(self.repo))
+
+    def test_outside_repo_returns_none(self):
+        outside = os.path.join(self._tmp.name, "plain")
+        os.makedirs(outside)
+        self.assertIsNone(gitscan.worktree_root(outside))
+
+
+class TestToRelative(GitScanTestCase):
+    def test_inside_path(self):
+        target = os.path.join(self.repo, "pkg", "mod.py")
+        self.assertEqual(gitscan.to_relative(self.repo, target), "pkg/mod.py")
+
+    def test_symlinked_input_path(self):
+        link = os.path.join(self._tmp.name, "link")
+        os.symlink(self.repo, link)
+        self.assertEqual(gitscan.to_relative(self.repo, f"{link}/a.py"), "a.py")
+
+    def test_outside_path_is_none(self):
+        outside = os.path.join(self._tmp.name, "outside.txt")
+        self.assertIsNone(gitscan.to_relative(self.repo, outside))
+
+    def test_sibling_prefix_is_not_inside(self):
+        """`/repo` と `/repo-other` を素の startswith で誤判定しないこと。"""
+        sibling = self.repo + "-other/x.py"
+        self.assertIsNone(gitscan.to_relative(self.repo, sibling))
+
+    def test_root_itself_is_none(self):
+        self.assertIsNone(gitscan.to_relative(self.repo, self.repo))
+
+    def test_empty_path(self):
+        self.assertIsNone(gitscan.to_relative(self.repo, ""))
+
+
+class TestStatusSnapshot(GitScanTestCase):
+    def test_untracked_files_are_listed_individually(self):
+        """`-uall` を使わないと新規ディレクトリが `dir/` に畳まれて個別に拾えない。"""
+        write(self.repo, "newdir/deep/file.txt", "x\n")
+        snapshot = gitscan.status_snapshot(self.repo)
+        self.assertIn("newdir/deep/file.txt", snapshot)
+
+    def test_modified_file_records_size_and_mtime(self):
+        write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
+        snapshot = gitscan.status_snapshot(self.repo)
+        code, size, mtime = snapshot["seed.txt"]
+        self.assertIn("M", code)
+        self.assertEqual(size, os.path.getsize(os.path.join(self.repo, "seed.txt")))
+        self.assertGreater(mtime, 0)
+
+    def test_clean_repo_is_empty(self):
+        self.assertEqual(gitscan.status_snapshot(self.repo), {})
+
+    def test_rename_entry_does_not_shift_parsing(self):
+        """rename エントリは元パスが余分なトークンとして続く — 読み飛ばし忘れると崩れる。
+
+        読み飛ばさないと元パス `seed.txt` 自体がエントリとして解釈され、
+        `code="se" / path="d.txt"` のような実在しないパスが混入する。
+        """
+        git(self.repo, "mv", "seed.txt", "renamed.txt")
+        write(self.repo, "other.txt", "o\n")
+        snapshot = gitscan.status_snapshot(self.repo)
+        self.assertEqual(
+            set(snapshot),
+            {"renamed.txt", "other.txt"},
+            "rename の元パストークンからゴミエントリが生えていないこと",
+        )
+
+
+class TestChangedBetween(GitScanTestCase):
+    def test_detects_new_modified_and_vanished(self):
+        pre = {"a.txt": ["??", 3, 100], "b.txt": [" M", 5, 200]}
+        post = {"a.txt": ["??", 3, 100], "b.txt": [" M", 5, 999], "c.txt": ["??", 1, 1]}
+        self.assertEqual(gitscan.changed_between(pre, post), ["b.txt", "c.txt"])
+
+    def test_detects_removal_from_status(self):
+        pre = {"a.txt": [" M", 3, 100]}
+        self.assertEqual(gitscan.changed_between(pre, {}), ["a.txt"])
+
+    def test_identical_snapshots(self):
+        snap = {"a.txt": [" M", 3, 100]}
+        self.assertEqual(gitscan.changed_between(snap, dict(snap)), [])
+
+    def test_same_status_code_but_new_mtime(self):
+        """すでに dirty なファイルの上書き — status 行は不変で mtime だけ動く。"""
+        pre = {"seed.txt": [" M", 18, 111]}
+        post = {"seed.txt": [" M", 18, 222]}
+        self.assertEqual(gitscan.changed_between(pre, post), ["seed.txt"])
+
+
+class TestPathDiff(GitScanTestCase):
+    def test_tracked_modification(self):
+        write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
+        diff = gitscan.path_diff(self.repo, "seed.txt", untracked=False, has_head=True)
+        self.assertIn("-beta", diff)
+        self.assertIn("+BETA", diff)
+
+    def test_untracked_file(self):
+        write(self.repo, "fresh.txt", "brand new\n")
+        diff = gitscan.path_diff(self.repo, "fresh.txt", untracked=True, has_head=True)
+        self.assertIn("+brand new", diff)
+
+    def test_unchanged_tracked_file_is_empty(self):
+        diff = gitscan.path_diff(self.repo, "seed.txt", untracked=False, has_head=True)
+        self.assertEqual(diff, "")
+
+    def test_repo_without_head_uses_staged_diff(self):
+        fresh = os.path.join(self._tmp.name, "fresh-repo")
+        os.makedirs(fresh)
+        git(fresh, "init", "-q")
+        git(fresh, "config", "user.email", "t@example.com")
+        git(fresh, "config", "user.name", "t")
+        write(fresh, "first.txt", "hello\n")
+        git(fresh, "add", "-A")
+
+        self.assertFalse(gitscan.head_exists(fresh))
+        diff = gitscan.path_diff(fresh, "first.txt", untracked=False, has_head=False)
+        self.assertIn("+hello", diff)
+
+
+class TestUntrackedAmong(GitScanTestCase):
+    def test_separates_tracked_and_untracked(self):
+        write(self.repo, "seed.txt", "changed\n")
+        write(self.repo, "fresh.txt", "new\n")
+        result = gitscan.untracked_among(self.repo, ["seed.txt", "fresh.txt"])
+        self.assertEqual(result, {"fresh.txt"})
+
+    def test_gitignored_file_is_not_untracked(self):
+        write(self.repo, ".gitignore", "ignored.txt\n")
+        write(self.repo, "ignored.txt", "secret\n")
+        self.assertEqual(gitscan.untracked_among(self.repo, ["ignored.txt"]), set())
+
+    def test_empty_input(self):
+        self.assertEqual(gitscan.untracked_among(self.repo, []), set())
+
+
+if __name__ == "__main__":
+    unittest.main()

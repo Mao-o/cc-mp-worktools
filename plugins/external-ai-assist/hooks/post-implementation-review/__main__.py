@@ -1,51 +1,77 @@
 #!/usr/bin/env python3
-"""Stop hook: 実装直後の差分を Cursor でレビューし、指摘があれば Claude に差し戻す。
+"""実装直後の差分を Cursor でレビューし、指摘があれば Claude に差し戻す hook 群。
 
-差分の取得は `git diff HEAD` (tracked) + `git ls-files --others` (untracked) の
-合成で、新規追加ファイル中心の変更でも取りこぼさない。
+**レビュー対象は「前回 Stop がレビュー対象として消費した時点以降に、このセッションが
+変更したファイル」だけ**。作業ツリー全体の `git diff HEAD` は使わない。同一ディレクトリで
+複数セッションが動くと、一行も編集していないセッションが隣のセッションの編集を
+5〜10 分かけてレビューしてしまうため。
 
-マーカーの read→判定→write は fcntl.flock で排他ロックし、同一セッション並行起動時の
-カウント破綻を防ぐ。ハッシュは truncate 前の diff 全体で計算し、後半だけ変更された場合も
-再レビューが走るようにしている。
+3 つの phase を 1 エントリポイントで捌く (hooks.json から `--phase` で振り分け):
 
-発火条件:
-- stop_hook_active が false (再帰防止)
-- git diff (tracked + untracked) に内容がある
-- 同一 diff を既にレビュー済みでない
-- レビュー回数が MAX 未満
-- Cursor がインストール済み
+| phase | hook | 役割 |
+|---|---|---|
+| `pre-tool` | PreToolUse(Bash) | Bash 実行前の `git status` スナップショットを保存 |
+| `post-tool` | PostToolUse(Write/Edit/NotebookEdit, Bash) | 変更パスを pending に積む |
+| `stop` | Stop | pending を claim してレビュー、結果を配信 |
+
+Bash にも張るのは、`sed -i` / フォーマッタ / スクリプト生成による変更を
+Write/Edit だけ見ていると取りこぼすため。実行前後の `git status` を突き合わせれば
+Bash 経由の変更も「どのセッションがやったか」付きで拾える。
+
+ターン境界を UserPromptSubmit ではなく「前回 Stop の消費時点」で定義する理由、
+in-flight 予約と TTL 回収の設計は state.py の docstring を参照。
 
 exit 0 (JSON なし): Stop を妨げない
 exit 0 + {"decision": "block", "reason": ...}: Claude にレビュー結果を返し追加対応を促す
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
-import subprocess
 import sys
+import time
 
 import cursor
+import gitscan
+import state
+import stategc
 
-DEFAULT_MAX_REVIEWS = 2
 MAX_DIFF_BYTES = 40000
-MAX_UNTRACKED_FILES = 50
+
+# 1 回のレビューで diff を取るパス数の上限。溢れた分は捨てずに pending へ戻し、
+# 次の Stop でレビューする (silent truncation にしない)。
+MAX_REVIEW_PATHS = 60
+
+# パス単位 diff 収集の時間予算。Stop の hook timeout 660s のうち cursor が最大 600s を
+# 使うため、git に回せるのは約 60s。他の git 呼び出し (rev-parse 2 + ls-files 10 +
+# rev-parse 2) を引いた残りに収まるよう決めている。
+COLLECT_BUDGET_SEC = 30
+
+_EDIT_TOOLS = ("Write", "Edit", "NotebookEdit")
 
 
 def log(msg: str) -> None:
     print(f"[post-implementation-review] {msg}", file=sys.stderr)
 
 
-def get_max_reviews() -> int:
-    raw = os.environ.get("EXTERNAL_AI_POST_REVIEW_MAX", "").strip()
-    if not raw:
-        return DEFAULT_MAX_REVIEWS
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return DEFAULT_MAX_REVIEWS
+def review_enabled() -> bool:
+    """`EXTERNAL_AI_POST_REVIEW=0` で無効化。
+
+    v0.2.0 の `EXTERNAL_AI_POST_REVIEW_MAX` はレビュー回数の予算だったが、ターン
+    スコープ化で意味を失ったため撤廃した。ただし `=0` を「hook の無効化スイッチ」
+    として使っている既存環境があるので、その用法だけは互換のため生かしている
+    (0 以外の数値は無視 = 回数制限は掛からない)。
+    """
+    raw = os.environ.get("EXTERNAL_AI_POST_REVIEW", "").strip().lower()
+    if raw:
+        return raw not in ("0", "false", "off", "no")
+    return os.environ.get("EXTERNAL_AI_POST_REVIEW_MAX", "").strip() != "0"
+
+
+def bash_tracking_enabled() -> bool:
+    raw = os.environ.get("EXTERNAL_AI_POST_REVIEW_BASH_TRACKING", "").strip().lower()
+    return raw not in ("0", "false", "off", "no")
 
 
 def diff_hash(text: str) -> str:
@@ -69,238 +95,6 @@ def is_clean_review(text: str) -> bool:
     return only_line.upper() == "REVIEW_CLEAN"
 
 
-def reserve_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
-    """ロック下で原子的にスロットを確保する。
-
-    確保成功時は count を +1 して current_hash を書き込み True を返す。並行起動時も
-    `EXTERNAL_AI_POST_REVIEW_MAX` を超えた確保は起きない。レビュー結果が
-    REVIEW_CLEAN / cursor.review() 失敗の場合は release_slot() で枠を戻す。
-    """
-    try:
-        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
-        with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                content = f.read().strip()
-                lines = content.split("\n") if content else []
-                saved_hash = lines[0] if lines else ""
-                try:
-                    count = int(lines[1]) if len(lines) > 1 else 0
-                except ValueError:
-                    count = 0
-
-                if count >= max_reviews:
-                    log(f"レビュー回数上限 ({max_reviews}) に達した")
-                    return False
-                if saved_hash == current_hash:
-                    log("同一 diff でレビュー済み")
-                    return False
-
-                f.seek(0)
-                f.truncate()
-                f.write(f"{current_hash}\n{count + 1}")
-                f.flush()
-                return True
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except OSError as e:
-        log(f"マーカー read/write 失敗: {e}")
-        return False
-
-
-def release_slot(marker_file: str, reserved_hash: str) -> None:
-    """reserve_slot() で確保した枠を戻す (REVIEW_CLEAN / cursor.review() 失敗時)。
-
-    - count を -1 (0 未満にはしない)
-    - saved_hash がまだ自分 (reserved_hash) なら空に戻す
-    - 他プロセスが追い越して saved_hash を上書きしていれば hash は触らない
-    """
-    try:
-        with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                content = f.read().strip()
-                lines = content.split("\n") if content else []
-                saved_hash = lines[0] if lines else ""
-                try:
-                    count = int(lines[1]) if len(lines) > 1 else 0
-                except ValueError:
-                    count = 0
-
-                new_count = max(0, count - 1)
-                new_hash = "" if saved_hash == reserved_hash else saved_hash
-
-                f.seek(0)
-                f.truncate()
-                f.write(f"{new_hash}\n{new_count}")
-                f.flush()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except OSError as e:
-        log(f"マーカー read/write 失敗: {e}")
-
-
-def _list_untracked_files(cwd: str) -> list[str]:
-    """ls-files --others --exclude-standard で untracked ファイルのパス一覧を返す。"""
-    try:
-        listing = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return []
-
-    if listing.returncode != 0 or not listing.stdout:
-        return []
-
-    return [f for f in listing.stdout.split("\0") if f]
-
-
-def _untracked_fingerprint(cwd: str, files: list[str]) -> str:
-    """全 untracked ファイル (MAX を超える分も含む) の path:size fingerprint。
-
-    レビュー対象として truncate された 51 番目以降のファイルが編集された場合も
-    ハッシュが変化するように、diff 本文とは別に hash_source へ混ぜ込む用途。
-    """
-    parts: list[str] = []
-    for f in files:
-        try:
-            size = os.path.getsize(os.path.join(cwd, f))
-        except OSError:
-            size = -1
-        parts.append(f"{f}:{size}")
-    return "\n".join(parts)
-
-
-def _collect_untracked_diff(cwd: str, files: list[str]) -> str:
-    """先頭 MAX_UNTRACKED_FILES 件の未追跡ファイルの diff (vs /dev/null) を連結する。"""
-    if not files:
-        return ""
-
-    parts: list[str] = []
-    for f in files[:MAX_UNTRACKED_FILES]:
-        try:
-            res = subprocess.run(
-                ["git", "diff", "--no-index", "--", "/dev/null", f],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            continue
-        # git diff --no-index は差分がある場合に exit 1 を返す。stdout を採用する
-        if res.stdout:
-            parts.append(res.stdout)
-
-    if len(files) > MAX_UNTRACKED_FILES:
-        omitted = len(files) - MAX_UNTRACKED_FILES
-        parts.append(f"\n... ({omitted} more untracked files omitted from review)\n")
-
-    return "\n".join(parts)
-
-
-def _is_inside_worktree(cwd: str) -> bool:
-    try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-    return res.returncode == 0 and res.stdout.strip() == "true"
-
-
-def _head_exists(cwd: str) -> bool:
-    try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-    return res.returncode == 0
-
-
-def _get_tracked_diff(cwd: str) -> str | None:
-    """tracked/staged の diff を返す。HEAD があれば `git diff HEAD`、
-    なければ `git diff --cached` (初回コミット前 repo 用フォールバック)。
-    """
-    args = ["git", "diff", "HEAD"] if _head_exists(cwd) else ["git", "diff", "--cached"]
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        log(f"git diff 実行失敗: {e}")
-        return None
-
-    if result.returncode != 0:
-        log(f"git diff ({' '.join(args[1:])}) が非ゼロ終了: {result.returncode}")
-        return None
-
-    return result.stdout
-
-
-def get_git_diff(cwd: str) -> tuple[str, str] | None:
-    """(hash_source, truncated_for_review) を返す。
-
-    hash_source: truncate 前の diff 全体 (ハッシュ計算用)
-    truncated_for_review: cursor に渡す切り詰め済み diff
-    """
-    if not _is_inside_worktree(cwd):
-        log("git worktree 外のため skip")
-        return None
-
-    tracked_diff = _get_tracked_diff(cwd)
-    if tracked_diff is None:
-        return None
-
-    untracked_files = _list_untracked_files(cwd)
-    untracked_diff = _collect_untracked_diff(cwd, untracked_files)
-    untracked_fingerprint = _untracked_fingerprint(cwd, untracked_files)
-
-    full_diff = tracked_diff
-    if untracked_diff:
-        if full_diff and not full_diff.endswith("\n"):
-            full_diff += "\n"
-        full_diff += untracked_diff
-
-    if not full_diff.strip():
-        return None
-
-    # ハッシュ用: truncate 前の diff 全体 + 全 untracked ファイルの fingerprint。
-    # omit される 51 番目以降のファイルが変更されても fingerprint が変わるので、
-    # 同一 hash 扱いで skip されない。
-    hash_source = full_diff
-    if untracked_fingerprint:
-        hash_source += "\n---\nuntracked-fingerprint:\n" + untracked_fingerprint
-
-    encoded = full_diff.encode()
-    if len(encoded) > MAX_DIFF_BYTES:
-        truncated = encoded[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore")
-        truncated += "\n\n... (diff truncated for review)\n"
-    else:
-        truncated = full_diff
-
-    return hash_source, truncated
-
-
 def build_reason(cursor_output: str) -> str:
     return (
         "## 実装直後レビュー結果 (Cursor, 差分レビュー)\n\n"
@@ -311,74 +105,256 @@ def build_reason(cursor_output: str) -> str:
     )
 
 
-def main() -> None:
+# --------------------------------------------------------------------------
+# PreToolUse(Bash) / PostToolUse
+# --------------------------------------------------------------------------
+
+
+def handle_pre_tool(payload: dict) -> None:
+    if payload.get("tool_name") != "Bash" or not bash_tracking_enabled():
+        return
+    session_id = payload.get("session_id") or ""
+    tool_use_id = payload.get("tool_use_id") or ""
+    if not session_id or not tool_use_id:
+        return
+    root = gitscan.worktree_root(payload.get("cwd") or os.getcwd())
+    if not root:
+        return
+    state.save_bash_snapshot(session_id, tool_use_id, gitscan.status_snapshot(root))
+
+
+def handle_post_tool(payload: dict) -> None:
+    session_id = payload.get("session_id") or ""
+    if not session_id:
+        return
+    tool_name = payload.get("tool_name") or ""
+    cwd = payload.get("cwd") or os.getcwd()
+
+    if tool_name in _EDIT_TOOLS:
+        paths = _edited_paths(payload.get("tool_input") or {}, cwd)
+        if paths:
+            state.record_pending(session_id, paths)
+        return
+
+    if tool_name == "Bash":
+        _record_bash_changes(payload, session_id, cwd)
+
+
+def _edited_paths(tool_input: dict, cwd: str) -> list[str]:
+    """編集系ツールの入力から対象パスを取り出す。
+
+    Write / Edit は `file_path` に絶対パスが安定して入る (CLI 2.1.233 実測)。
+    NotebookEdit は現環境に非搭載だが、搭載環境で `notebook_path` を使う可能性が
+    あるため両方見る。MultiEdit は現環境に存在しないので matcher からも外している。
+    """
+    raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if not isinstance(raw, str) or not raw:
+        return []
+    return [raw if os.path.isabs(raw) else os.path.join(cwd, raw)]
+
+
+def _record_bash_changes(payload: dict, session_id: str, cwd: str) -> None:
+    """Bash 実行前後の status スナップショット差分を pending に積む。"""
+    if not bash_tracking_enabled():
+        return
+    tool_use_id = payload.get("tool_use_id") or ""
+    if not tool_use_id:
+        return
+    pre = state.pop_bash_snapshot(session_id, tool_use_id)
+    if pre is None:
+        return  # PreToolUse が動かなかった (git 外・timeout) → 属性付けを諦める
+    root = gitscan.worktree_root(cwd)
+    if not root:
+        return
+    changed = gitscan.changed_between(pre, gitscan.status_snapshot(root))
+    if changed:
+        state.record_pending(session_id, [os.path.join(root, rel) for rel in changed])
+
+
+# --------------------------------------------------------------------------
+# Stop
+# --------------------------------------------------------------------------
+
+
+def handle_stop(payload: dict) -> None:
+    if payload.get("stop_hook_active"):
+        log("stop_hook_active=True によりスキップ (再帰防止)")
+        return
+
+    session_id = payload.get("session_id") or ""
+    if not session_id:
+        log("session_id が空")
+        return
+
+    stategc.gc_stale()
+
+    if not review_enabled():
+        log("EXTERNAL_AI_POST_REVIEW=0 によりレビュー無効化")
+        return
+    if not cursor.is_available():
+        log("cursor 未インストール")
+        return
+
+    cwd = payload.get("cwd") or os.getcwd()
+    root = gitscan.worktree_root(cwd)
+    if not root:
+        log("git worktree 外のため skip")
+        return
+
+    # cursor lock を先に取る。取れなければ claim もしないので pending は温存される。
+    # state lock は claim_pending() の内側で完結し、cursor 実行中は保持しない。
+    with state.cursor_lock(root) as acquired:
+        if not acquired:
+            log("同一作業ツリーで別セッションがレビュー中のため skip (pending は温存)")
+            return
+        _review_claim(payload, session_id, root)
+
+
+def _review_claim(payload: dict, session_id: str, root: str) -> None:
+    claim = state.claim_pending(session_id)
+    if claim is None:
+        log("このセッションが変更したファイルが無いため skip")
+        return
+    claim_id, claimed = claim
+
+    rels, overflow = _resolve_paths(root, claimed)
+    if overflow:
+        # 溢れた分は捨てずに pending へ戻す (次の Stop でレビューされる)
+        log(f"{len(overflow)} パスを次回に繰り越し (1 回あたり {MAX_REVIEW_PATHS} 件上限)")
+        state.record_pending(session_id, overflow)
+
+    sections, submitted, hashes, deferred = _collect_diffs(
+        root, rels, state.reviewed_hashes(session_id)
+    )
+    if deferred:
+        state.record_pending(session_id, deferred)
+    if not sections:
+        log("レビュー対象の差分が無い (空 diff / 前回と同一) ため skip")
+        state.complete_claim(session_id, claim_id, {})
+        return
+
+    diff_text = _truncate("\n".join(sections))
+    log(f"Cursor によるレビューを実行 ({len(submitted)} ファイル, {len(diff_text)} chars)")
+    result = cursor.review(diff_text)
+
+    if not result:
+        log("Cursor レビュー失敗 (fail-open、pending に戻す)")
+        state.restore_claim(session_id, claim_id, submitted)
+        return
+
+    if is_clean_review(result):
+        log("Cursor: REVIEW_CLEAN (block しない、レビュー済みとして確定)")
+        state.complete_claim(session_id, claim_id, hashes)
+        return
+
+    reason = build_reason(result)
+    state.complete_claim(session_id, claim_id, hashes)
+    _save_review_copy(session_id, reason)
+    json.dump({"decision": "block", "reason": reason}, sys.stdout, ensure_ascii=False)
+
+
+def _resolve_paths(root: str, claimed: list[str]) -> tuple[list[str], list[str]]:
+    """claim したパスを作業ツリー相対に正規化し、上限超過分を絶対パスで切り出す。
+
+    作業ツリー外の絶対パスはここで落ちる (復元もしない — 残すと毎 Stop 走査され続ける)。
+    """
+    rels: list[str] = []
+    for path in claimed:
+        rel = gitscan.to_relative(root, path)
+        if rel and rel not in rels:
+            rels.append(rel)
+    rels.sort()
+    overflow = [os.path.join(root, r) for r in rels[MAX_REVIEW_PATHS:]]
+    return rels[:MAX_REVIEW_PATHS], overflow
+
+
+def _collect_diffs(
+    root: str, rels: list[str], reviewed: dict[str, str]
+) -> tuple[list[str], list[str], dict[str, str], list[str]]:
+    """パスごとに diff を取り、(sections, submitted_abs, hashes, deferred_abs) を返す。
+
+    前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
+    済み) も載せない。どちらも submitted に入らないので、cursor 失敗時にも復元されず
+    そのまま消える。
+
+    COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred として返す。
+    Stop 全体の hook timeout (660s) のうち cursor が最大 600s を使うため、git に
+    使える時間は約 60s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
+    頭を押さえる。deferred は捨てずに pending へ戻す。
+    """
+    untracked = gitscan.untracked_among(root, rels)
+    has_head = gitscan.head_exists(root)
+
+    sections: list[str] = []
+    submitted: list[str] = []
+    hashes: dict[str, str] = {}
+    deadline = time.monotonic() + COLLECT_BUDGET_SEC
+
+    for index, rel in enumerate(rels):
+        if time.monotonic() > deadline:
+            deferred = [os.path.join(root, r) for r in rels[index:]]
+            log(f"git diff の時間予算超過。{len(deferred)} パスを次回に繰り越し")
+            return sections, submitted, hashes, deferred
+
+        text = gitscan.path_diff(root, rel, rel in untracked, has_head)
+        if not text.strip():
+            continue
+        abs_path = os.path.join(root, rel)
+        digest = diff_hash(text)
+        if reviewed.get(abs_path) == digest:
+            continue
+        sections.append(text)
+        submitted.append(abs_path)
+        hashes[abs_path] = digest
+    return sections, submitted, hashes, []
+
+
+def _truncate(diff_text: str) -> str:
+    encoded = diff_text.encode()
+    if len(encoded) <= MAX_DIFF_BYTES:
+        return diff_text
+    truncated = encoded[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore")
+    return truncated + "\n\n... (diff truncated for review)\n"
+
+
+def _save_review_copy(session_id: str, reason: str) -> None:
+    path = state.review_copy_path(session_id)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(reason)
+        log(f"レビュー完了 → {path}")
+    except OSError:
+        log("参照コピーの保存に失敗")
+
+
+# --------------------------------------------------------------------------
+
+
+def parse_phase(argv: list[str]) -> str:
+    if "--phase" in argv:
+        idx = argv.index("--phase")
+        if idx + 1 < len(argv):
+            return argv[idx + 1]
+    return "stop"
+
+
+def main(argv: list[str] | None = None) -> None:
+    phase = parse_phase(argv if argv is not None else sys.argv[1:])
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError) as e:
         log(f"stdin JSON パース失敗: {e}")
-        sys.exit(0)
+        return
+    if not isinstance(payload, dict):
+        return
 
-    if payload.get("stop_hook_active"):
-        log("stop_hook_active=True によりスキップ (再帰防止)")
-        sys.exit(0)
-
-    session_id = payload.get("session_id", "")
-    if not session_id:
-        log("session_id が空")
-        sys.exit(0)
-
-    cwd = payload.get("cwd") or os.getcwd()
-
-    max_reviews = get_max_reviews()
-    if max_reviews <= 0:
-        log("EXTERNAL_AI_POST_REVIEW_MAX=0 によりレビュー無効化")
-        sys.exit(0)
-
-    if not cursor.is_available():
-        log("cursor 未インストール")
-        sys.exit(0)
-
-    diff_info = get_git_diff(cwd)
-    if not diff_info:
-        log("git diff (tracked + untracked) が空または取得失敗")
-        sys.exit(0)
-    full_diff, truncated_diff = diff_info
-
-    current_hash = diff_hash(full_diff)
-
-    marker_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), "post-review-markers")
-    marker_file = os.path.join(marker_dir, f"{session_id}.post.marker")
-
-    if not reserve_slot(marker_file, current_hash, max_reviews):
-        sys.exit(0)
-
-    log(f"Cursor による実装直後レビューを実行 (diff full={len(full_diff)} chars)")
-    result = cursor.review(truncated_diff)
-
-    if not result:
-        log("Cursor レビュー失敗 (fail-open、スロット戻す)")
-        release_slot(marker_file, current_hash)
-        sys.exit(0)
-
-    if is_clean_review(result):
-        log("Cursor: REVIEW_CLEAN (block しない、スロット戻す)")
-        release_slot(marker_file, current_hash)
-        sys.exit(0)
-
-    reason = build_reason(result)
-
-    review_file = os.path.join(
-        os.environ.get("TMPDIR", "/tmp"),
-        f"post-review-{session_id[:8]}.txt",
-    )
-    try:
-        with open(review_file, "w") as f:
-            f.write(reason)
-        log(f"レビュー完了 → {review_file}")
-    except OSError:
-        log("参照コピーの保存に失敗")
-
-    json.dump({"decision": "block", "reason": reason}, sys.stdout, ensure_ascii=False)
+    if phase == "pre-tool":
+        handle_pre_tool(payload)
+    elif phase == "post-tool":
+        handle_post_tool(payload)
+    else:
+        handle_stop(payload)
 
 
 if __name__ == "__main__":
@@ -386,5 +362,5 @@ if __name__ == "__main__":
         main()
     except SystemExit:
         pass
-    except Exception as e:
+    except Exception as e:  # hook が例外で Claude Code を止めないよう fail-open
         print(f"[post-implementation-review] fatal: {e}", file=sys.stderr)

@@ -8,7 +8,7 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 |---|---|---|
 | `explore-parallel` | `PreToolUse(Agent)` + `PostToolUse(Agent)` | `Explore` サブエージェント起動時に Cursor Agent を並走させ、完了時に `additionalContext` として親 Claude に注入 |
 | `exitplan-review` | `PreToolUse(ExitPlanMode)` | プラン承認前に **Cursor (既存コードベース整合) + Codex (要件・アーキ) を並列クロスレビュー** し、指摘を `decision: block` で Claude に差し戻す |
-| `post-implementation-review` | `Stop` | 実装完了時に `git diff HEAD` の差分を Cursor でレビューし、影響範囲・リグレッションリスク等を `decision: block` で Claude に返す |
+| `post-implementation-review` | `PreToolUse(Bash)` + `PostToolUse(Write/Edit/NotebookEdit/Bash)` + `Stop` | **そのターンにこのセッションが編集したファイルだけ**を Cursor でレビューし、影響範囲・リグレッションリスク等を `decision: block` で Claude に返す |
 
 ## インストール
 
@@ -48,16 +48,35 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 - レビュー結果は `$TMPDIR/plan-review-<session_id>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
 
-### post-implementation-review (差分レビュー)
+### post-implementation-review (ターンスコープ差分レビュー)
 
 Claude の作業が一段落した時点 (Stop) で Cursor に差分レビューを依頼し、影響範囲・リグレッション・不足テストを指摘させる。
 
-- `git diff HEAD` が空なら skip (そもそも変更なし)
+**レビュー対象は「前回 Stop がレビュー対象として消費した時点以降に、このセッションが変更したファイル」だけ**。
+作業ツリー全体の `git diff HEAD` は使わない。同一ディレクトリで複数セッションが動くと、一行も編集して
+いないセッションが隣のセッションの編集を 5〜10 分かけてレビューしてしまうため。
+
+変更パスの収集経路は 2 つ:
+
+| 経路 | hook | 拾えるもの |
+|---|---|---|
+| 編集ツール | `PostToolUse(Write/Edit/NotebookEdit)` | `tool_input.file_path` (サブエージェント経由の編集も親セッションに帰属) |
+| Bash | `PreToolUse(Bash)` + `PostToolUse(Bash)` | `sed -i` / フォーマッタ / スクリプト生成。実行前後の `git status` を突き合わせて検出 (Bash 1 回あたり約 70 ms) |
+
+動作:
+
+- **編集 0 件のターンは cursor を起動しない** (即 exit 0)
 - `stop_hook_active` が true なら skip (再帰防止の公式パターン)
-- 同一 diff でレビュー済みなら skip
-- **セッション × diff 単位で最大 N 回ブロック** (既定 2 回、`EXTERNAL_AI_POST_REVIEW_MAX` で変更可)
+- 前回レビュー時と diff が 1 バイトも変わっていないパスは載せない
+- 作業ツリー外の絶対パスは対象外
+- 差分は**パスごとに HEAD 基準**で取得 (レビュアーにファイル全体の変更文脈を渡すため。
+  判断根拠は `hooks/post-implementation-review/gitscan.py` の docstring)
+- 同一作業ツリーで `cursor agent` が同時に 2 つ起動しないよう flock で直列化
+- レビュー結果を配信できた時だけ消費を確定し、cursor 失敗時は次ターンに持ち越す
+- 1 ターンあたり 60 パスまで。超過分は捨てずに次ターンへ繰り越す
 - 差分は 40 KB まで、超過分は truncate
-- レビュー結果は `$TMPDIR/post-review-<session_id>.txt` にも保存
+- レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id>.txt` にも保存
+- 状態ファイルは 48 時間で GC (旧 `$TMPDIR/post-review-markers/` の残骸も掃除する)
 
 プロンプトは `hooks/post-implementation-review/prompts/post-implementation-cursor.md` に外部化され、出力は 5 項目 (直接影響 / 間接影響 / 未検証ケース / 追加テスト / マージ前確認) に固定。
 
@@ -74,12 +93,14 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 | 変数 | 既定値 | 意味 |
 |---|---|---|
 | `EXTERNAL_AI_REVIEW_MAX` | `2` | `exitplan-review` のセッション × プラン単位の最大ブロック回数。`0` で hook 自体を無効化 |
-| `EXTERNAL_AI_POST_REVIEW_MAX` | `2` | `post-implementation-review` のセッション × diff 単位の最大ブロック回数。`0` で hook 自体を無効化 |
+| `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` の有効/無効。`0` / `false` / `off` で無効化 |
+| `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING` | `1` | Bash 経由の変更検出。`0` にすると Bash 前後の `git status` を打たなくなる (巨大 repo での軽量化用。`sed -i` 等の変更は拾えなくなる) |
+| `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する |
 
-どちらも一時的に無効化したい場合は `0` を設定するのが手軽:
+一時的に無効化したい場合は `0` を設定するのが手軽:
 
 ```bash
-EXTERNAL_AI_REVIEW_MAX=0 EXTERNAL_AI_POST_REVIEW_MAX=0 claude
+EXTERNAL_AI_REVIEW_MAX=0 EXTERNAL_AI_POST_REVIEW=0 claude
 ```
 
 ## ファイル構成
@@ -90,7 +111,7 @@ external-ai-assist/
 ├── README.md                               ← このファイル
 ├── CLAUDE.md                               ← 保守・拡張者向けガイド
 └── hooks/
-    ├── hooks.json                          ← 4 hook を定義
+    ├── hooks.json                          ← 6 hook を定義
     ├── explore-parallel/
     │   ├── __main__.py
     │   ├── cursor.py
@@ -104,10 +125,14 @@ external-ai-assist/
     │       ├── planning-cursor.md
     │       └── planning-codex.md
     └── post-implementation-review/
-        ├── __main__.py                     ← Stop hook + git diff + マーカー
+        ├── __main__.py                     ← 3 phase (pre-tool / post-tool / stop) の振り分け
+        ├── state.py                        ← pending/in-flight 状態機械 + flock
+        ├── stategc.py                      ← $TMPDIR の TTL GC
+        ├── gitscan.py                      ← パス正規化 + status スナップショット + パス単位 diff
         ├── cursor.py                       ← 差分レビュー
-        └── prompts/
-            └── post-implementation-cursor.md
+        ├── prompts/
+        │   └── post-implementation-cursor.md
+        └── tests/                          ← 受け入れ基準の unittest スイート
 ```
 
 ## 拡張ポイント
