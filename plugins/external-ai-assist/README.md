@@ -61,7 +61,7 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 | 経路 | hook | 拾えるもの |
 |---|---|---|
 | 編集ツール | `PostToolUse(Write/Edit/NotebookEdit)` | `tool_input.file_path` (サブエージェント経由の編集も親セッションに帰属) |
-| Bash | `PreToolUse(Bash)` + `PostToolUse(Bash)` | `sed -i` / フォーマッタ / スクリプト生成。実行前後の `git status` を突き合わせて検出 |
+| Bash | `PreToolUse(Bash)` + `PostToolUse(Bash)` | `sed -i` / フォーマッタ / スクリプト生成。実行前後の `git status` を突き合わせて検出 (Bash 1 回あたり約 70 ms) |
 
 動作:
 

@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 
 import cursor
 import gitscan
@@ -41,6 +42,11 @@ MAX_DIFF_BYTES = 40000
 # 1 回のレビューで diff を取るパス数の上限。溢れた分は捨てずに pending へ戻し、
 # 次の Stop でレビューする (silent truncation にしない)。
 MAX_REVIEW_PATHS = 60
+
+# パス単位 diff 収集の時間予算。Stop の hook timeout 660s のうち cursor が最大 600s を
+# 使うため、git に回せるのは約 60s。他の git 呼び出し (rev-parse 2 + ls-files 10 +
+# rev-parse 2) を引いた残りに収まるよう決めている。
+COLLECT_BUDGET_SEC = 30
 
 _EDIT_TOOLS = ("Write", "Edit", "NotebookEdit")
 
@@ -217,9 +223,11 @@ def _review_claim(payload: dict, session_id: str, root: str) -> None:
         log(f"{len(overflow)} パスを次回に繰り越し (1 回あたり {MAX_REVIEW_PATHS} 件上限)")
         state.record_pending(session_id, overflow)
 
-    sections, submitted, hashes = _collect_diffs(
+    sections, submitted, hashes, deferred = _collect_diffs(
         root, rels, state.reviewed_hashes(session_id)
     )
+    if deferred:
+        state.record_pending(session_id, deferred)
     if not sections:
         log("レビュー対象の差分が無い (空 diff / 前回と同一) ため skip")
         state.complete_claim(session_id, claim_id, {})
@@ -262,12 +270,17 @@ def _resolve_paths(root: str, claimed: list[str]) -> tuple[list[str], list[str]]
 
 def _collect_diffs(
     root: str, rels: list[str], reviewed: dict[str, str]
-) -> tuple[list[str], list[str], dict[str, str]]:
-    """パスごとに diff を取り、(sections, submitted_abs, hashes) を返す。
+) -> tuple[list[str], list[str], dict[str, str], list[str]]:
+    """パスごとに diff を取り、(sections, submitted_abs, hashes, deferred_abs) を返す。
 
     前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
     済み) も載せない。どちらも submitted に入らないので、cursor 失敗時にも復元されず
     そのまま消える。
+
+    COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred として返す。
+    Stop 全体の hook timeout (660s) のうち cursor が最大 600s を使うため、git に
+    使える時間は約 60s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
+    頭を押さえる。deferred は捨てずに pending へ戻す。
     """
     untracked = gitscan.untracked_among(root, rels)
     has_head = gitscan.head_exists(root)
@@ -275,7 +288,14 @@ def _collect_diffs(
     sections: list[str] = []
     submitted: list[str] = []
     hashes: dict[str, str] = {}
-    for rel in rels:
+    deadline = time.monotonic() + COLLECT_BUDGET_SEC
+
+    for index, rel in enumerate(rels):
+        if time.monotonic() > deadline:
+            deferred = [os.path.join(root, r) for r in rels[index:]]
+            log(f"git diff の時間予算超過。{len(deferred)} パスを次回に繰り越し")
+            return sections, submitted, hashes, deferred
+
         text = gitscan.path_diff(root, rel, rel in untracked, has_head)
         if not text.strip():
             continue
@@ -286,7 +306,7 @@ def _collect_diffs(
         sections.append(text)
         submitted.append(abs_path)
         hashes[abs_path] = digest
-    return sections, submitted, hashes
+    return sections, submitted, hashes, []
 
 
 def _truncate(diff_text: str) -> str:

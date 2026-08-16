@@ -53,7 +53,7 @@ class TestResolvePaths(ReviewSetTestCase):
 class TestCollectDiffs(ReviewSetTestCase):
     def test_skips_paths_with_identical_hash(self):
         write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
-        sections, submitted, hashes = self.entry._collect_diffs(
+        sections, submitted, hashes, _ = self.entry._collect_diffs(
             self.repo, ["seed.txt"], {}
         )
         self.assertEqual(len(sections), 1)
@@ -64,9 +64,9 @@ class TestCollectDiffs(ReviewSetTestCase):
 
     def test_changed_content_reappears(self):
         write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
-        _, _, hashes = self.entry._collect_diffs(self.repo, ["seed.txt"], {})
+        _, _, hashes, _ = self.entry._collect_diffs(self.repo, ["seed.txt"], {})
         write(self.repo, "seed.txt", "alpha\nBETA\nGAMMA\n")
-        sections, submitted, _ = self.entry._collect_diffs(
+        sections, submitted, _, _ = self.entry._collect_diffs(
             self.repo, ["seed.txt"], hashes
         )
         self.assertEqual(len(sections), 1)
@@ -74,7 +74,7 @@ class TestCollectDiffs(ReviewSetTestCase):
 
     def test_empty_diff_is_not_submitted(self):
         """commit 済み / revert 済みのパスはレビューにも復元対象にも入れない。"""
-        sections, submitted, hashes = self.entry._collect_diffs(
+        sections, submitted, hashes, _ = self.entry._collect_diffs(
             self.repo, ["seed.txt"], {}
         )
         self.assertEqual(sections, [])
@@ -84,13 +84,97 @@ class TestCollectDiffs(ReviewSetTestCase):
     def test_untracked_and_tracked_are_both_collected(self):
         write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
         write(self.repo, "fresh.txt", "new file\n")
-        sections, submitted, _ = self.entry._collect_diffs(
+        sections, submitted, _, _ = self.entry._collect_diffs(
             self.repo, ["fresh.txt", "seed.txt"], {}
         )
         joined = "\n".join(sections)
         self.assertIn("fresh.txt", joined)
         self.assertIn("seed.txt", joined)
         self.assertEqual(len(submitted), 2)
+
+
+class TestCollectBudget(ReviewSetTestCase):
+    """時間予算を超えたら打ち切り、未処理パスを deferred として返す。"""
+
+    def test_budget_exhausted_defers_remaining(self):
+        for i in range(4):
+            write(self.repo, f"f{i}.txt", f"new {i}\n")
+        rels = [f"f{i}.txt" for i in range(4)]
+
+        self.entry.COLLECT_BUDGET_SEC = -1  # 1 パス目の判定で即打ち切り
+        sections, submitted, hashes, deferred = self.entry._collect_diffs(
+            self.repo, rels, {}
+        )
+        self.assertEqual(sections, [])
+        self.assertEqual(submitted, [])
+        self.assertEqual(
+            sorted(os.path.basename(p) for p in deferred),
+            rels,
+            "打ち切ったパスは捨てずに deferred として返すこと",
+        )
+
+    def test_no_deferral_within_budget(self):
+        write(self.repo, "f.txt", "new\n")
+        sections, submitted, _, deferred = self.entry._collect_diffs(
+            self.repo, ["f.txt"], {}
+        )
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(deferred, [])
+
+
+class TestTimeoutBudgets(ReviewSetTestCase):
+    """内部 git timeout は hooks.json の hook timeout に収まっていること。
+
+    超えるとハーネスの kill が先に来て、自前の fail-open 経路に到達しない。
+    """
+
+    def _hook_timeouts(self) -> dict[str, int]:
+        import json as _json
+        import pathlib
+
+        hooks = _json.loads(
+            (pathlib.Path(__file__).resolve().parents[2] / "hooks.json").read_text()
+        )
+        found = {}
+        for entries in hooks["hooks"].values():
+            for entry in entries:
+                for h in entry["hooks"]:
+                    cmd = h.get("command", "")
+                    if "post-implementation-review" not in cmd:
+                        continue
+                    phase = cmd.rsplit("--phase ", 1)[-1].strip()
+                    found[phase] = h["timeout"]
+        return found
+
+    def test_pre_and_post_tool_fit_in_hook_budget(self):
+        import gitscan
+
+        timeouts = self._hook_timeouts()
+        worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        for phase in ("pre-tool", "post-tool"):
+            self.assertIn(phase, timeouts)
+            self.assertLess(
+                worst,
+                timeouts[phase],
+                f"{phase} の内部 git timeout 合計 {worst}s が hook timeout に収まっていない",
+            )
+
+    def test_stop_git_budget_fits_beside_cursor(self):
+        import cursor
+        import gitscan
+
+        timeouts = self._hook_timeouts()
+        git_worst = (
+            gitscan.REV_PARSE_TIMEOUT_SEC * 2
+            + gitscan.LS_FILES_TIMEOUT_SEC
+            + self.entry.COLLECT_BUDGET_SEC
+            + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
+        )
+        self.assertLess(
+            cursor.TIMEOUT_SEC + git_worst,
+            timeouts["stop"],
+            "cursor + git の最悪ケースが Stop の hook timeout を超えている",
+        )
 
 
 class TestTruncate(ReviewSetTestCase):

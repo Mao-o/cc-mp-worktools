@@ -57,8 +57,21 @@ post-implementation-review/
 変更も**どのセッションがやったか付きで**拾える。公式
 `claude-plugins-official/security-guidance` も `PostToolUse` に `Bash` matcher を使う先例がある。
 
-コストは Bash 呼び出しごとに `git status` 2 回。巨大 repo で重い場合は
-`EXTERNAL_AI_POST_REVIEW_BASH_TRACKING=0` で切れる (その場合 `sed -i` 等は拾えなくなる)。
+コストは Bash 呼び出しごとに hook プロセス 2 回 (`git status` 各 1 回)。実測
+(macOS / CLI 2.1.233):
+
+| 対象 | `git status -uall` | hook プロセス全体 |
+|---|---|---|
+| `~/.claude` (54 tracked / 実ファイル 6255) | 9.1 ms | 約 35 ms |
+| `worktools` | 10.1 ms | 約 36 ms |
+
+`-uall` でも ignore されたディレクトリは git が subtree ごと skip するため、
+実ファイル数ではなく「ignore されていない木の大きさ」で決まる。**Bash 1 回あたり
+約 70 ms** で、既定 ON のままで問題ない水準。支配項は git ではなく Python の
+インタプリタ起動 (`python3 -c pass` だけで 8.7 ms)。
+
+極端に大きい作業ツリーで重い場合は `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING=0` で
+切れる (その場合 `sed -i` 等の Bash 経由の変更は拾えなくなる)。
 
 **pre/post のスナップショット比較は行の集合ではなくタプル比較**であること。
 すでに HEAD から変更済みのファイルを `sed -i` で書き換えると porcelain の行は

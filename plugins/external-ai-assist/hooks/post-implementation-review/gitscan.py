@@ -30,12 +30,21 @@ from __future__ import annotations
 import os
 import subprocess
 
-GIT_TIMEOUT_SEC = 30
-STATUS_TIMEOUT_SEC = 15
+# 内部 timeout は hooks.json の hook timeout に**収まる**ように決める。超えると
+# ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
+#
+#   pre-tool / post-tool (hook 10s): rev-parse 2 + status 5 = 最悪 7s
+#   stop (hook 660s, うち cursor 600s → git に使えるのは約 60s):
+#     rev-parse 2 + ls-files 10 + rev-parse 2 + パス単位 diff (COLLECT_BUDGET_SEC 30) = 44s
+REV_PARSE_TIMEOUT_SEC = 2
+STATUS_TIMEOUT_SEC = 5
+LS_FILES_TIMEOUT_SEC = 10
+PATH_DIFF_TIMEOUT_SEC = 5
+
 MAX_SNAPSHOT_ENTRIES = 5000
 
 
-def _git(root: str, args: list[str], timeout: int = GIT_TIMEOUT_SEC):
+def _git(root: str, args: list[str], timeout: int = PATH_DIFF_TIMEOUT_SEC):
     try:
         return subprocess.run(
             ["git", *args],
@@ -65,7 +74,7 @@ def worktree_root(cwd: str) -> str | None:
     """
     if not cwd:
         return None
-    res = _git(cwd, ["rev-parse", "--show-toplevel"], timeout=10)
+    res = _git(cwd, ["rev-parse", "--show-toplevel"], timeout=REV_PARSE_TIMEOUT_SEC)
     if res is None or res.returncode != 0:
         return None
     top = _decode(res.stdout).strip()
@@ -73,7 +82,7 @@ def worktree_root(cwd: str) -> str | None:
 
 
 def head_exists(root: str) -> bool:
-    res = _git(root, ["rev-parse", "--verify", "HEAD"], timeout=10)
+    res = _git(root, ["rev-parse", "--verify", "HEAD"], timeout=REV_PARSE_TIMEOUT_SEC)
     return res is not None and res.returncode == 0
 
 
@@ -177,7 +186,11 @@ def untracked_among(root: str, rels: list[str]) -> set[str]:
     """与えたパスのうち untracked (かつ ignore されていない) ものを返す。"""
     if not rels:
         return set()
-    res = _git(root, ["ls-files", "--others", "--exclude-standard", "-z", "--", *rels])
+    res = _git(
+        root,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--", *rels],
+        timeout=LS_FILES_TIMEOUT_SEC,
+    )
     if res is None or res.returncode != 0:
         return set()
     return {p for p in _decode(res.stdout).split("\0") if p}
