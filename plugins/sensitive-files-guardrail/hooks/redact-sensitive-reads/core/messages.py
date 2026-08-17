@@ -216,29 +216,61 @@ _MINIMAL_INFO_UNAVAILABLE_DEFAULT = (
 )
 
 
+# project root 基準で再解決したときのラベルと注記 (0.16.0)。
+# ``cwd`` 基準では見つからなかったので、**別ディレクトリの同名ファイル**を
+# 読んでいる可能性がある。候補である旨と確定手段を必ず添える。
+_PROJECT_ROOT_LABEL = (
+    "minimal info (Read 同等 / cwd では解決できず project root 基準で"
+    "解決した候補):"
+)
+_PROJECT_ROOT_CAVEAT = (
+    "suggestion: 上記は $CLAUDE_PROJECT_DIR (project root) 基準で解決した"
+    "ファイルの情報です。同一コマンド内の先行 `cd` 等で実際の対象が別"
+    "ディレクトリの同名ファイルである可能性があります。確実に対象を特定したい"
+    "場合は Read tool に **絶対パス** を渡してください。"
+)
+
+
 def _append_minimal_info(
     lines: list[str],
     file_render: str,
-    unavailable_kind: str = "",
+    render_status: str = "",
 ) -> None:
     """``minimal info (Read 同等):`` ラベルと file_render の中身を追加する。
 
     ``file_render`` は ``redaction.file_render.render_for_bash`` が返す
-    ``<DATA untrusted>`` 包装込みの文字列。
+    ``<DATA untrusted>`` 包装込みの文字列。``render_status`` は同関数の 3 番目の
+    戻り値をそのまま渡す。
 
-    空のときは **黙って省略せず** ``minimal info: unavailable (<理由>)`` と
-    kind 別の next action を出す (silent degradation 対策)。``unavailable_kind``
-    は ``render_for_bash`` の 3 番目の戻り値をそのまま渡す。
+    - 成功 (``render_status == ""``): 従来どおりのラベル + 中身
+    - project root 再解決 (``"project_root"``): 候補である旨のラベル + 注記
+    - 失敗 (それ以外): **黙って省略せず** ``minimal info: unavailable (<理由>)``
+      と kind 別 next action を出す (silent degradation 対策)
     """
     if file_render:
-        lines.append("minimal info (Read 同等):")
-        lines.append(file_render)
+        if render_status == "project_root":
+            lines.append(_PROJECT_ROOT_LABEL)
+            lines.append(file_render)
+            lines.append(_PROJECT_ROOT_CAVEAT)
+        else:
+            lines.append("minimal info (Read 同等):")
+            lines.append(file_render)
         return
     label, action = _MINIMAL_INFO_UNAVAILABLE.get(
-        unavailable_kind, _MINIMAL_INFO_UNAVAILABLE_DEFAULT
+        render_status, _MINIMAL_INFO_UNAVAILABLE_DEFAULT
     )
     lines.append(f"minimal info: unavailable ({label})")
     lines.append(f"suggestion: {action}")
+
+
+def _append_project_root_caveat(lines: list[str], render_status: str) -> None:
+    """``dotenv_info`` を直接展開する経路 (read_partial / search) 用の注記。
+
+    それらは ``_append_minimal_info`` を通らずに鍵行を出すため、project root
+    再解決だった場合の候補注記をここで別途付ける。
+    """
+    if render_status == "project_root":
+        lines.append(_PROJECT_ROOT_CAVEAT)
 
 
 # head / tail の ``-n N`` / ``-N`` / ``--lines=N`` を抽出するための regex 一覧
@@ -326,7 +358,7 @@ def _bash_deny_read_full(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``cat`` / ``less`` / ``more`` / ``bat`` / ``xxd`` / ``od`` / ``hexdump``
     / ``base64`` 等、ファイル全体を閲覧する意図の deny reason。"""
@@ -342,7 +374,7 @@ def _bash_deny_read_full(
     # ときだけ** 出す (`_append_minimal_info` の unavailable 分岐が担当)。
     # info を出せているのに Read を勧めるのは、同じ情報を取り直させるだけの
     # 往復の無駄になるため。
-    _append_minimal_info(lines, file_render, render_failure)
+    _append_minimal_info(lines, file_render, render_status)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -355,7 +387,7 @@ def _bash_deny_read_partial(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``head`` / ``tail`` の deny reason。``-n N`` の値で鍵 list を絞る。"""
     basename = _basename_of(operand)
@@ -382,8 +414,9 @@ def _bash_deny_read_partial(
             "note: real values are not in context. only key names, type, prefix,"
             " length, status tags, and placeholder hints are returned."
         )
+        _append_project_root_caveat(lines, render_status)
     else:
-        _append_minimal_info(lines, file_render, render_failure)
+        _append_minimal_info(lines, file_render, render_status)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -396,7 +429,7 @@ def _bash_deny_search(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``grep`` / ``rg`` / ``ag`` / ``ack`` / ``egrep`` / ``fgrep`` の deny reason。
 
@@ -436,9 +469,12 @@ def _bash_deny_search(
     # 返しただけ) は実情報ゼロなので、``used_pattern_keys`` が True でも
     # file_render が空なら unavailable を明示する。
     if not file_render:
-        _append_minimal_info(lines, "", render_failure)
+        _append_minimal_info(lines, "", render_status)
     elif not used_pattern_keys:
-        _append_minimal_info(lines, file_render)
+        _append_minimal_info(lines, file_render, render_status)
+    else:
+        # matched_pattern_keys 経路は minimal info を出さないので注記だけ付ける。
+        _append_project_root_caveat(lines, render_status)
 
     other = _suggestion_other_keys(dotenv_info)
     if other:
@@ -455,7 +491,7 @@ def _bash_deny_mutate(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``awk`` / ``sed`` の deny reason。加工は実行できないが minimal info は返す。"""
     basename = _basename_of(operand)
@@ -466,7 +502,7 @@ def _bash_deny_mutate(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render, render_failure)
+    _append_minimal_info(lines, file_render, render_status)
     # 0.16.0: 「上記 minimal info を確認してください」は info を出せたときのみ。
     # 空のときに書くと存在しない情報を指す dangling reference になる。
     refer_info = (
@@ -491,7 +527,7 @@ def _bash_deny_load(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。"""
     basename = _basename_of(operand)
@@ -502,7 +538,7 @@ def _bash_deny_load(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render, render_failure)
+    _append_minimal_info(lines, file_render, render_status)
     lines.append(
         "suggestion: 環境変数として読み込みたいなら direnv (`.envrc`) や"
         " dotenv-cli の利用を推奨します。"
@@ -520,7 +556,7 @@ def _bash_deny_move(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。"""
     basename = _basename_of(operand)
@@ -549,7 +585,7 @@ def _bash_deny_history(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``git`` の deny reason (``git show HEAD:.env`` / ``git diff .env`` /
     ``git log -p .env`` 等)。tracked なら漏洩済みの可能性を提示。"""
@@ -579,7 +615,7 @@ def _bash_deny_transfer(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``curl`` / ``wget`` / ``scp`` / ``rsync`` の deny reason。"""
     basename = _basename_of(operand)
@@ -607,7 +643,7 @@ def _bash_deny_archive(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """``tar`` / ``zip`` / ``gzip`` の deny reason。--exclude を推奨。"""
     basename = _basename_of(operand)
@@ -636,7 +672,7 @@ def _bash_deny_generic(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
-    render_failure: str,
+    render_status: str,
 ) -> str:
     """既知 category 外の deny reason (0.7.0〜0.9.0 の generic 相当に minimal info を追加)。"""
     basename = _basename_of(operand)
@@ -647,7 +683,7 @@ def _bash_deny_generic(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render, render_failure)
+    _append_minimal_info(lines, file_render, render_status)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -676,14 +712,14 @@ def bash_deny(
     file_render: str = "",
     dotenv_info: dict | None = None,
     grep_keys: list[str] | None = None,
-    render_failure: str = "",
+    render_status: str = "",
 ) -> str:
     """Bash 操作の deny reason を plain text で構築する (0.10.0 で category dispatch)。
 
     first_token のカテゴリで builder を切替え、コマンド意図に合った文言と
     Read 同等 minimal info / matched_pattern_keys を埋め込む。新規 keyword
     引数 ``command`` / ``file_render`` / ``dotenv_info`` / ``grep_keys`` /
-    ``render_failure`` を渡さない呼び出しでも動作する (旧 0.7.0〜0.9.0 互換、
+    ``render_status`` を渡さない呼び出しでも動作する (旧 0.7.0〜0.9.0 互換、
     generic 相当の出力)。
 
     Args:
@@ -698,7 +734,7 @@ def bash_deny(
             head/tail 切り出しに使用。
         grep_keys: ``extract_grep_keys`` で抽出した env-var 名候補リスト。
             grep 系以外では None。
-        render_failure: ``render_for_bash`` の 3 番目の戻り値 (失敗 kind)。
+        render_status: ``render_for_bash`` の 3 番目の戻り値 (失敗 kind)。
             ``file_render`` が空のとき ``minimal info: unavailable (<理由>)``
             の理由ラベルと next action の選択に使う。成功時は空文字。
     """
@@ -711,7 +747,7 @@ def bash_deny(
         file_render=file_render,
         dotenv_info=dotenv_info,
         grep_keys=grep_keys,
-        render_failure=render_failure,
+        render_status=render_status,
     )
 
 

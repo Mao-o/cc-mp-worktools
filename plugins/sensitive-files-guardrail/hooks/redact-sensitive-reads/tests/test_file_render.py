@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
@@ -96,6 +98,14 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
 
 
 class TestRenderForBashFailures(unittest.TestCase):
+    def setUp(self):
+        # project root fallback (0.16.0) が発火すると結果が変わるため、
+        # 素の失敗経路を見るテストでは明示的に環境変数を落としておく。
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        self.addCleanup(patcher.stop)
+
     def test_empty_operand(self):
         reason, info, kind = render_for_bash("", "/tmp")
         self.assertIsNone(reason)
@@ -176,6 +186,80 @@ class TestRenderForBashFailures(unittest.TestCase):
             with self.subTest(kind=k):
                 self.assertEqual(_sanitize_detail(f"render_failed:{k}"),
                                  f"render_failed:{k}")
+
+
+class TestProjectRootFallback(unittest.TestCase):
+    """相対 operand が cwd で missing のとき project root 基準で 1 回再解決する。
+
+    先行 ``cd`` で ``cwd`` がずれるケース (2026-08-17 実観測) の救済経路。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = Path(self.tmp) / "proj"
+        (self.root / "poc").mkdir(parents=True)
+        (self.root / "poc" / ".env.local").write_text(
+            "ANTHROPIC_API_KEY=sk-aaaaaaaaaaaa\nDEBUG=true\n", encoding="utf-8"
+        )
+        self.other = Path(self.tmp) / "other"
+        self.other.mkdir()
+
+    def _with_project_dir(self, value):
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(value)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_resolves_from_project_root_and_flags_candidate(self):
+        self._with_project_dir(self.root)
+        reason, info, status = render_for_bash("poc/.env.local", str(self.other))
+        self.assertEqual(status, "project_root")
+        self.assertIsNotNone(reason)
+        self.assertIn("ANTHROPIC_API_KEY", reason)
+        self.assertIsNotNone(info)
+
+    def test_no_fallback_when_project_root_equals_cwd(self):
+        self._with_project_dir(self.other)
+        reason, info, status = render_for_bash("poc/.env.local", str(self.other))
+        self.assertIsNone(reason)
+        self.assertEqual(status, "unresolved")
+
+    def test_no_fallback_for_absolute_operand(self):
+        """絶対 path は基準を変えても同じなので再解決しない。"""
+        self._with_project_dir(self.root)
+        missing = str(self.other / ".env")
+        reason, info, status = render_for_bash(missing, str(self.other))
+        self.assertIsNone(reason)
+        self.assertEqual(status, "unresolved")
+
+    def test_no_fallback_when_cwd_hit_is_not_missing(self):
+        """cwd 側にファイルが実在するなら (symlink でも) 別基準を試さない。"""
+        self._with_project_dir(self.root)
+        (self.other / "poc").mkdir()
+        link = self.other / "poc" / ".env.local"
+        link.symlink_to(self.root / "poc" / ".env.local")
+        reason, info, status = render_for_bash("poc/.env.local", str(self.other))
+        self.assertIsNone(reason)
+        self.assertEqual(status, "not_regular")
+
+    def test_falls_back_to_unresolved_when_project_root_also_misses(self):
+        self._with_project_dir(self.root)
+        reason, info, status = render_for_bash("nope/.env", str(self.other))
+        self.assertIsNone(reason)
+        self.assertEqual(status, "unresolved")
+
+    def test_git_dir_used_when_env_unset(self):
+        """$CLAUDE_PROJECT_DIR 未設定でも .git 上方探索で救える。"""
+        (self.root / ".git").mkdir()
+        sub = self.root / "sub"
+        sub.mkdir()
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        self.addCleanup(patcher.stop)
+        reason, info, status = render_for_bash("poc/.env.local", str(sub))
+        self.assertEqual(status, "project_root")
+        self.assertIn("ANTHROPIC_API_KEY", reason)
 
 
 if __name__ == "__main__":

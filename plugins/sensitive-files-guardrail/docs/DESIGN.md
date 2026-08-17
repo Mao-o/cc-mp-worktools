@@ -441,7 +441,7 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 
 | category | first_token | 返す情報 |
 |---|---|---|
-| `read_full` | `cat` / `less` / `more` / `bat` / `xxd` / `od` / `hexdump` / `base64` | 「全体閲覧」note + Read 同等 minimal info + Read tool 推奨 |
+| `read_full` | `cat` / `less` / `more` / `bat` / `xxd` / `od` / `hexdump` / `base64` | 「全体閲覧」note + Read 同等 minimal info。Read tool 推奨は **minimal info を出せなかったときのみ** (0.16.0 で条件反転) |
 | `read_partial` | `head` / `tail` | 「先頭/末尾 N 行確認」note + 鍵 list の N 件 (head=先頭、tail=末尾)。`-n N` / `-N` (BSD) / `--lines=N` から N を抽出 |
 | `search` | `grep` / `rg` / `ag` / `ack` / `egrep` / `fgrep` | 「検索」note + `matched_pattern_keys: [...]` / `nomatch_pattern_keys: [...]` (E4 で抽出した env-var 名と dotenv の照合結果)。pattern 抽出 / 照合とも失敗時は全鍵 list (minimal info) に降りる |
 | `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨 |
@@ -452,18 +452,46 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 | `archive` | `tar` / `zip` / `gzip` | 「アーカイブ」note + `--exclude=<basename>` / `-x <basename>` 推奨 |
 | `generic` | 上記以外 | 0.7.0〜0.9.0 と同等の note + minimal info (新規) |
 
-**file_render の流れ** (`redaction/file_render.py::render_for_bash`):
+**file_render の流れ** (`redaction/file_render.py::render_for_bash`、0.16.0 で
+3-tuple `(reason, info, status)` 化):
 
-1. `normalize(operand, cwd)` で path を解決 (失敗 → `(None, None)`)
-2. `classify(path)` で regular ファイルか確認 (非 regular → `(None, None)`、
-   `OSError` / `ValueError` で lstat 失敗 → `(None, None)` で握り潰し)
-3. `open_regular(path)` で fd と size を取得 (`O_NOFOLLOW`)
+1. `normalize(operand, cwd)` で path を解決 (失敗 → status `normalize_failed`)
+2. `classify(path)` で regular ファイルか確認
+   (`missing` → `unresolved` / `symlink` `special` → `not_regular` /
+   `error` および lstat 例外 → `stat_failed`)
+3. `open_regular(path)` で fd と size を取得 (`O_NOFOLLOW`、失敗 → `open_failed`)
 4. format 判定 (`_detect_format`):
    - dotenv → `redact_dotenv` で info dict を取得 → `format_dotenv` で body
-     文字列 → `build_reason` で `<DATA untrusted>` 包装 → (reason, info) を返す
+     文字列 → `build_reason` で `<DATA untrusted>` 包装 → (reason, info, "") を返す
    - dotenv 以外 (json / toml / yaml / opaque / 32KB 超) → `engine.redact` /
-     `redact_large_file` で reason を取得 → (reason, None) を返す
-5. 内部例外は握り潰し `(None, None)` (Bash 側 deny は generic reason に降りる)
+     `redact_large_file` で reason を取得 → (reason, None, "") を返す
+5. 内部例外は握り潰し status `redact_failed`
+
+**status の使われ方** (0.16.0):
+
+- 失敗 status は `core.messages._append_minimal_info` が
+  `minimal info: unavailable (<理由>)` + kind 別 next action に変換する。
+  0.15.0 までは minimal info セクションを **黙って省略** していたため、
+  情報も next action も無い deny reason になり、モデルが Read へ切り替えず
+  別コマンドで迂回する原因になっていた (2026-08-17 実観測)
+- `handlers/bash_handler.py` が `bash_render_failed` / `bash_render_project_root`
+  でログに残す (kind は固定 slug のみ、path / basename / 値は含めない)
+
+**project root フォールバック** (0.16.0):
+
+相対 operand が `cwd` 基準で `missing` になったときだけ、
+`_shared.patterns._resolve_project_key` (`$CLAUDE_PROJECT_DIR` 優先 → `.git`
+上方探索) が返す project root を基準に **1 回だけ** 再解決する。hook は
+コマンド実行 **前** に走るため、同一コマンド内の先行 `cd` は `cwd` に反映
+されず、`cd <repo> && grep KEY sub/.env` のような形で minimal info が丸ごと
+落ちていた。
+
+- `missing` 以外の失敗では再解決しない (`cwd` 基準でファイルが実在する以上、
+  別基準を試すのは別ファイルを読むことになる)
+- 絶対 operand も再解決しない (基準を変えても同じ path)
+- 再解決で得た情報は **別ディレクトリの同名ファイルの可能性**があるため
+  status を `project_root` にし、reason 側でラベル (「project root 基準で
+  解決した候補」) と「確実に特定するなら Read tool に絶対パス」の注記を付ける
 
 **E4 の grep extraction** (`handlers/bash/grep_extract.py::extract_grep_keys`):
 
@@ -486,6 +514,7 @@ def bash_deny(
     file_render: str = "",      # render_for_bash の 1 番目の戻り値
     dotenv_info: dict | None = None,  # render_for_bash の 2 番目の戻り値
     grep_keys: list[str] | None = None,  # extract_grep_keys の戻り値
+    render_status: str = "",    # render_for_bash の 3 番目の戻り値 (0.16.0)
 ) -> str: ...
 ```
 

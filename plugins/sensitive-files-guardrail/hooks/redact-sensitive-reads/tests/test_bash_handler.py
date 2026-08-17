@@ -94,6 +94,20 @@ class TestRenderFailureLogging(BaseBash):
         categories = [c[0] for c in calls]
         self.assertNotIn("bash_render_failed", categories)
 
+    def test_logs_project_root_fallback_instead_of_failure(self):
+        """project root 再解決で救えたときは failure ではなく成功側を記録する。"""
+        root = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(root, "poc"))
+        with open(os.path.join(root, "poc", ".env"), "w") as f:
+            f.write("KEY=value\n")
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}):
+            calls = self._captured("cat poc/.env", other)
+        categories = [c[0] for c in calls]
+        self.assertIn("bash_render_project_root", categories)
+        self.assertNotIn("bash_render_failed", categories)
+
     def test_logged_detail_survives_sanitizer(self):
         """ログ detail が ``_BAD`` に落とされないこと (kind は安全な slug)。"""
         from core.logging import _sanitize_detail

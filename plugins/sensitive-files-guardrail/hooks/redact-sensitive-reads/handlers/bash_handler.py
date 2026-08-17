@@ -331,12 +331,16 @@ def _build_deny_response(
     tool_input = envelope.get("tool_input") or {}
     command_str = tool_input.get("command") or ""
     cwd = envelope.get("cwd", "")
-    file_render, dotenv_info, render_failure = render_for_bash(operand, cwd)
-    if render_failure:
+    file_render, dotenv_info, render_status = render_for_bash(operand, cwd)
+    if render_status == "project_root":
+        # cwd では解決できず project root 基準で救えたケース。fallback の
+        # 有効性を測るために成功側も記録する。
+        L.log_info("bash_render_project_root", "resolved")
+    elif render_status:
         # minimal info を出せなかった原因の分布を計測するためのログ。
-        # render_failure は file_render.py が返す固定 slug で、path / basename /
+        # render_status は file_render.py が返す固定 slug で、path / basename /
         # 値は一切含まない (ログ規則: CLAUDE.md「ログ規則」節)。
-        L.log_info("bash_render_failed", render_failure)
+        L.log_info("bash_render_failed", render_status)
     grep_keys = extract_grep_keys(tokens) if is_grep_command(first) else None
     return output.make_deny(
         M.bash_deny(
@@ -346,7 +350,7 @@ def _build_deny_response(
             file_render=file_render or "",
             dotenv_info=dotenv_info,
             grep_keys=grep_keys,
-            render_failure=render_failure,
+            render_status=render_status,
         )
     )
 

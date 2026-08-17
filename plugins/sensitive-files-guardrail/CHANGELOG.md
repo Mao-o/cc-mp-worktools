@@ -87,6 +87,91 @@ format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆�
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut
 
+## 0.16.0
+
+**Bash deny reason の silent degradation を解消** (PR6/1.0.0 ロードマップ
+E5/E6/D1/D2 とは無関係の別件、ユーザー実観測起点)。0.14.1 / 0.15.0 と同じく
+1.0.0 を待たない先行リリース。
+
+### 背景 (2026-08-17 実観測)
+
+`cd <repo>` に続けて `grep -o '^[A-Z0-9_]*' poc/.env.local` を実行したところ、
+deny reason が `note:` / `matched_operand:` / `first_token:` / 除外 hint の
+4 行だけになり、**minimal info が丸ごと消えていた**。0.10.0 (E3/E4) の設計では
+`search` カテゴリは Read 同等の鍵情報を返すはずだが、`render_for_bash` が
+operand を解決できず `(None, None)` を返し、`_append_minimal_info` が黙って
+省略していた。
+
+情報も next action も無い deny reason を受け取ったモデルは、Read への切替では
+なく **別コマンドでの迂回** に倒れる (実際にそうなった)。「Read を使え」と促す
+だけの設計は往復が 1 回増えるだけで得られる情報は同じ (Read の redaction が
+同じ minimal info を返す) ため、**情報を出し切れるなら出し切り、出せないときは
+不在を明示して Read へ誘導する**方針を採る。
+
+### 1. minimal info の不在を明示 (P1)
+
+- **`redaction/file_render.py`**: `render_for_bash` を 3-tuple
+  `(reason, info, status)` 化。全失敗を `(None, None)` に潰していたのをやめ、
+  解決経路 / 失敗理由を slug で返す。
+  - `""` 成功 / `project_root` 成功 (下記 3.) / `no_operand` /
+    `normalize_failed` / `stat_failed` / `unresolved` (cwd から解決不能) /
+    `not_regular` (symlink・特殊) / `open_failed` / `redact_failed`
+  - slug は `core.logging` の detail 文字種ホワイトリストを通る短い固定値のみ
+    (path / basename / 値は含めない。テストで sanitizer 通過を保証)
+- **`core/messages.py`**: `_append_minimal_info` が `file_render` 空のとき
+  `minimal info: unavailable (<理由>)` + kind 別 next action を出す。
+  read 意図カテゴリ (`read_full` / `read_partial` / `search` / `mutate` /
+  `load` / `generic`) 全部に適用。`move` / `history` / `transfer` / `archive`
+  は元々 minimal info を出さないので変化なし。
+- **`read_full` の Read 誘導を条件反転**: 「Read tool を使ってください」は
+  **minimal info を出せなかったときだけ** 出す。出せているのに Read を勧めるのは
+  同じ情報を取り直させるだけの往復の無駄。
+- **`mutate` の dangling reference 修正**: 「鍵名・型・状態は上記 minimal info を
+  確認してください」が info 不在時に存在しない情報を指していた。
+- **`search` の pattern_keys エコー**: dotenv parse できず grep pattern を
+  返しただけの状態も実情報ゼロなので unavailable を明示する。
+
+### 2. 失敗 kind をログ (P2)
+
+- **`handlers/bash_handler.py`**: `bash_render_failed` で失敗 kind を、
+  `bash_render_project_root` で fallback 成功を `log_info` する。
+  0.15.0 までは全失敗が `except Exception` で潰れ、minimal info 欠落の原因分布を
+  計測できなかった。
+
+### 3. project root フォールバック (P3)
+
+hook はコマンド実行 **前** に走るため、同一コマンド内の先行 `cd` は hook が
+受け取る `cwd` に反映されない。相対 operand が `cwd` 基準で `missing` のとき
+だけ、`_shared.patterns._resolve_project_key` (`$CLAUDE_PROJECT_DIR` 優先 →
+`.git` 上方探索。0.15.0 で導入済み) が返す project root を基準に **1 回だけ**
+再解決する。
+
+- `missing` 以外の失敗では再解決しない (`cwd` 基準でファイルが実在する以上、
+  別基準を試すのは別ファイルを読むことになる)
+- 絶対 operand も再解決しない (基準を変えても同じ path)
+- 再解決した情報は **別ディレクトリの同名ファイルの可能性**があるため、
+  ラベルを「minimal info (Read 同等 / cwd では解決できず project root 基準で
+  解決した候補):」に変え、「確実に特定するなら Read tool に絶対パス」の注記を
+  必ず添える。誤った鍵名で動かれると情報ゼロより悪いため
+- `read_partial` / `search` の `dotenv_info` 直接展開経路にも同じ注記を付ける
+
+### 動作変化
+
+- deny reason に `minimal info: unavailable (<理由>)` + next action 行が
+  増える (従来は無音)
+- project root 経由で解決できたケースは従来 0 行だった minimal info が復活する
+  (候補ラベル付き)
+- **判定境界は変化なし** (deny / allow / ask の区分は 0.15.0 と同じ)。
+  reason の情報量とログのみ変化。値そのものは引き続き一切出さない
+- テスト 700 → 726 件
+
+### 既知の未対応 (別 issue)
+
+`awk` / `sed` は `_OPAQUE_WRAPPERS` に入っているため operand scan より先に
+`ask_or_allow` に倒れ、`mutate` deny カテゴリは bash_handler 経由では到達
+しない。あわせて autonomous モードでは `sed -n 1,5p .env` のような素直な閲覧形が
+素通りする。0.16.0 では扱わず、方針決定を伴う別課題として切り出した。
+
 ## 0.15.0
 
 **patterns.local.txt にプロジェクトスコープ設定を追加** (PR6/1.0.0 ロードマップ

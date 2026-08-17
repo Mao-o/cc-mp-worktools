@@ -399,7 +399,7 @@ class TestMinimalInfoUnavailable(unittest.TestCase):
                     first_token=token, operand="poc/.env.local",
                     command=f"{token} poc/.env.local",
                     file_render="",
-                    render_failure="unresolved",
+                    render_status="unresolved",
                 )
                 self.assertIn("minimal info: unavailable", msg)
                 self.assertIn("hook の cwd から解決できなかった", msg)
@@ -409,13 +409,13 @@ class TestMinimalInfoUnavailable(unittest.TestCase):
 
     def test_unknown_kind_falls_back_to_generic_action(self):
         msg = M.bash_deny(first_token="cat", operand=".env",
-                          file_render="", render_failure="brand_new_kind")
+                          file_render="", render_status="brand_new_kind")
         self.assertIn("minimal info: unavailable (理由不明)", msg)
         self.assertIn("Read tool", msg)
 
     def test_kind_selects_matching_next_action(self):
         msg = M.bash_deny(first_token="cat", operand=".env",
-                          file_render="", render_failure="not_regular")
+                          file_render="", render_status="not_regular")
         self.assertIn("symlink", msg)
         # unresolved 用の cwd 文言は出さない
         self.assertNotIn("hook の cwd から解決できなかった", msg)
@@ -432,7 +432,7 @@ class TestMinimalInfoUnavailable(unittest.TestCase):
         """``上記 minimal info を確認`` は info があるときだけ書く。"""
         absent = M.bash_deny(first_token="sed", operand=".env",
                              command="sed s/X/Y/ .env",
-                             file_render="", render_failure="unresolved")
+                             file_render="", render_status="unresolved")
         self.assertNotIn("上記 minimal info", absent)
         self.assertIn("patch / diff", absent)
 
@@ -447,7 +447,7 @@ class TestMinimalInfoUnavailable(unittest.TestCase):
             first_token="grep", operand=".env",
             command="grep DATABASE_URL .env",
             grep_keys=["DATABASE_URL"],
-            file_render="", render_failure="unresolved",
+            file_render="", render_status="unresolved",
         )
         self.assertIn("pattern_keys: [DATABASE_URL]", msg)
         self.assertIn("minimal info: unavailable", msg)
@@ -458,8 +458,68 @@ class TestMinimalInfoUnavailable(unittest.TestCase):
                                ("curl", ".env"), ("tar", ".env")]:
             with self.subTest(first_token=token):
                 msg = M.bash_deny(first_token=token, operand=operand,
-                                  file_render="", render_failure="unresolved")
+                                  file_render="", render_status="unresolved")
                 self.assertNotIn("minimal info", msg)
+
+
+# ---- project root 再解決の候補ラベル (0.16.0, P3) -----------------------
+
+
+class TestProjectRootCandidate(unittest.TestCase):
+    """``render_status="project_root"`` のときは「候補」と明示する。
+
+    ``cwd`` では解決できず project root 基準で救った情報は、別ディレクトリの
+    同名ファイルかもしれない。誤った鍵名で動かれると情報ゼロより悪いので、
+    ラベルと注記で必ず候補である旨を伝える。
+    """
+
+    CAVEAT_MARK = "project root) 基準で解決した"
+
+    def test_read_full_labels_candidate_and_adds_caveat(self):
+        msg = M.bash_deny(first_token="cat", operand="poc/.env.local",
+                          file_render=_DUMMY_FILE_RENDER,
+                          render_status="project_root")
+        self.assertIn("project root 基準で解決した候補", msg)
+        self.assertIn(self.CAVEAT_MARK, msg)
+        self.assertIn("絶対パス", msg)
+        self.assertIn("DATABASE_URL", msg)
+
+    def test_plain_success_has_no_caveat(self):
+        msg = M.bash_deny(first_token="cat", operand=".env",
+                          file_render=_DUMMY_FILE_RENDER)
+        self.assertIn("minimal info (Read 同等):", msg)
+        self.assertNotIn(self.CAVEAT_MARK, msg)
+
+    def test_read_partial_dotenv_branch_gets_caveat(self):
+        msg = M.bash_deny(first_token="head", operand="poc/.env.local",
+                          command="head -n 2 poc/.env.local",
+                          dotenv_info=_dummy_dotenv_info(num_keys=3),
+                          file_render=_DUMMY_FILE_RENDER,
+                          render_status="project_root")
+        self.assertIn("keys (先頭 2, 全 3 件):", msg)
+        self.assertIn(self.CAVEAT_MARK, msg)
+
+    def test_search_matched_keys_branch_gets_caveat(self):
+        info = {
+            "format": "dotenv", "entries": 1,
+            "keys": [{"name": "DATABASE_URL", "type": "url",
+                      "status": ["<set>"], "length": 42}],
+        }
+        msg = M.bash_deny(first_token="grep", operand="poc/.env.local",
+                          command="grep DATABASE_URL poc/.env.local",
+                          dotenv_info=info, grep_keys=["DATABASE_URL"],
+                          file_render=_DUMMY_FILE_RENDER,
+                          render_status="project_root")
+        self.assertIn("matched_pattern_keys: [DATABASE_URL]", msg)
+        self.assertIn(self.CAVEAT_MARK, msg)
+
+    def test_search_full_list_branch_gets_caveat(self):
+        msg = M.bash_deny(first_token="grep", operand="poc/.env.local",
+                          command="grep -i poc/.env.local",
+                          grep_keys=[], file_render=_DUMMY_FILE_RENDER,
+                          render_status="project_root")
+        self.assertIn("project root 基準で解決した候補", msg)
+        self.assertIn(self.CAVEAT_MARK, msg)
 
 
 # ---- backwards compatibility (positional 2 args) -----------------------
