@@ -5,7 +5,7 @@
 - dotenv ファイルから ``<DATA>`` 包装込みの reason 文字列と info dict 両方を返す
 - 非 dotenv (json / toml / yaml / opaque) からは reason のみ返し info は None
 - 失敗ケース (file 不在 / symlink / 空 operand / 非通常ファイル) では
-  ``(None, None)`` を返す
+  ``(None, None, <failure_kind>)`` を返す (0.16.0 で kind を追加)
 
 ことを確認する。
 """
@@ -31,7 +31,7 @@ class TestRenderForBashDotenv(unittest.TestCase):
                 "EMPTY_KEY=\n",
                 encoding="utf-8",
             )
-            reason, info = render_for_bash(".env", tmp)
+            reason, info, kind = render_for_bash(".env", tmp)
         self.assertIsNotNone(reason)
         self.assertIn('<DATA untrusted="true"', reason)
         self.assertIn("file: .env", reason)
@@ -49,7 +49,7 @@ class TestRenderForBashDotenv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".envrc"
             path.write_text("export FOO=bar\nexport BAZ=qux\n", encoding="utf-8")
-            reason, info = render_for_bash(".envrc", tmp)
+            reason, info, kind = render_for_bash(".envrc", tmp)
         self.assertIsNotNone(reason)
         self.assertIsNotNone(info)
         self.assertEqual(info["format"], "dotenv")
@@ -60,7 +60,7 @@ class TestRenderForBashDotenv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"
             path.write_text("KEY=value\n", encoding="utf-8")
-            reason, info = render_for_bash(str(path), cwd="/")
+            reason, info, kind = render_for_bash(str(path), cwd="/")
         self.assertIsNotNone(reason)
         self.assertIsNotNone(info)
         self.assertEqual(info["entries"], 1)
@@ -71,7 +71,7 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "credentials.json"
             path.write_text('{"client_id": "abc", "secret": "xyz"}', encoding="utf-8")
-            reason, info = render_for_bash("credentials.json", tmp)
+            reason, info, kind = render_for_bash("credentials.json", tmp)
         self.assertIsNotNone(reason)
         self.assertIn('<DATA untrusted="true"', reason)
         self.assertIn("client_id", reason)
@@ -82,7 +82,7 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text('foo = "bar"\nbaz = 42\n', encoding="utf-8")
-            reason, info = render_for_bash("config.toml", tmp)
+            reason, info, kind = render_for_bash("config.toml", tmp)
         self.assertIsNotNone(reason)
         self.assertIsNone(info)
 
@@ -90,22 +90,40 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "secrets.yaml"
             path.write_text("foo: bar\nbaz: qux\n", encoding="utf-8")
-            reason, info = render_for_bash("secrets.yaml", tmp)
+            reason, info, kind = render_for_bash("secrets.yaml", tmp)
         self.assertIsNotNone(reason)
         self.assertIsNone(info)
 
 
 class TestRenderForBashFailures(unittest.TestCase):
     def test_empty_operand(self):
-        reason, info = render_for_bash("", "/tmp")
+        reason, info, kind = render_for_bash("", "/tmp")
         self.assertIsNone(reason)
         self.assertIsNone(info)
+        self.assertEqual(kind, "no_operand")
 
     def test_missing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            reason, info = render_for_bash(".env", tmp)
+            reason, info, kind = render_for_bash(".env", tmp)
         self.assertIsNone(reason)
         self.assertIsNone(info)
+        self.assertEqual(kind, "unresolved")
+
+    def test_relative_operand_unresolvable_from_cwd(self):
+        """先行 `cd` で cwd がずれたケース (2026-08-17 実観測の再現)。
+
+        ファイル自体は存在するが hook の cwd からは見えないため
+        ``unresolved`` になる。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "proj" / "poc"
+            proj.mkdir(parents=True)
+            (proj / ".env.local").write_text("KEY=value\n", encoding="utf-8")
+            other = Path(tmp) / "other"
+            other.mkdir()
+            reason, info, kind = render_for_bash("poc/.env.local", str(other))
+        self.assertIsNone(reason)
+        self.assertEqual(kind, "unresolved")
 
     def test_symlink_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,23 +131,51 @@ class TestRenderForBashFailures(unittest.TestCase):
             target.write_text("KEY=value\n", encoding="utf-8")
             link = Path(tmp) / ".env"
             link.symlink_to(target)
-            reason, info = render_for_bash(".env", tmp)
+            reason, info, kind = render_for_bash(".env", tmp)
         # classify が "symlink" になり、render はスキップされる
         self.assertIsNone(reason)
         self.assertIsNone(info)
+        self.assertEqual(kind, "not_regular")
 
     def test_directory_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "envdir").mkdir()
-            reason, info = render_for_bash("envdir", tmp)
+            reason, info, kind = render_for_bash("envdir", tmp)
         self.assertIsNone(reason)
         self.assertIsNone(info)
+        self.assertEqual(kind, "not_regular")
 
     def test_normalize_failure_does_not_raise(self):
-        # NUL byte を含むパス → ValueError → (None, None)
-        reason, info = render_for_bash("\x00.env", "/tmp")
+        # NUL byte を含むパス → ValueError / stat 例外 → (None, None, kind)
+        reason, info, kind = render_for_bash("\x00.env", "/tmp")
         self.assertIsNone(reason)
         self.assertIsNone(info)
+        self.assertIn(kind, {"normalize_failed", "stat_failed"})
+
+    def test_success_kind_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".env").write_text("KEY=value\n", encoding="utf-8")
+            reason, info, kind = render_for_bash(".env", tmp)
+        self.assertIsNotNone(reason)
+        self.assertEqual(kind, "")
+
+    def test_failure_kinds_are_log_detail_safe(self):
+        """全 kind が core.logging の detail ホワイトリストを通ること。
+
+        kind は ``bash_handler`` からログに渡るため、path / 値が混ざる形
+        (``_BAD`` 置換される形) になっていないことを保証する。
+        """
+        from core.logging import _sanitize_detail
+        from redaction.file_render import _CLASSIFY_FAILURE_KIND
+
+        kinds = set(_CLASSIFY_FAILURE_KIND.values()) | {
+            "no_operand", "normalize_failed", "stat_failed",
+            "open_failed", "redact_failed",
+        }
+        for k in kinds:
+            with self.subTest(kind=k):
+                self.assertEqual(_sanitize_detail(f"render_failed:{k}"),
+                                 f"render_failed:{k}")
 
 
 if __name__ == "__main__":

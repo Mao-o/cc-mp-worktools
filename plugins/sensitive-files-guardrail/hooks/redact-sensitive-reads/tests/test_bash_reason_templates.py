@@ -378,6 +378,90 @@ class TestGenericFallback(unittest.TestCase):
         self.assertIn("minimal info (Read 同等):", msg)
 
 
+# ---- minimal info unavailable (0.16.0, P1) ------------------------------
+
+
+class TestMinimalInfoUnavailable(unittest.TestCase):
+    """``file_render`` が空のとき、黙って省略せず不在 + next action を出す。
+
+    0.15.0 までは minimal info セクションごと消えており、情報も次アクションも
+    無い deny reason になっていた (モデルが Read へ切り替えず別コマンドで
+    迂回する原因、2026-08-17 実観測)。
+    """
+
+    #: minimal info を出そうとする read 意図カテゴリの代表 first_token。
+    READ_INTENT_TOKENS = ["cat", "head", "grep", "awk", "source", "myunknowntool"]
+
+    def test_all_read_intent_categories_state_unavailability(self):
+        for token in self.READ_INTENT_TOKENS:
+            with self.subTest(first_token=token):
+                msg = M.bash_deny(
+                    first_token=token, operand="poc/.env.local",
+                    command=f"{token} poc/.env.local",
+                    file_render="",
+                    render_failure="unresolved",
+                )
+                self.assertIn("minimal info: unavailable", msg)
+                self.assertIn("hook の cwd から解決できなかった", msg)
+                # next action として Read + 絶対パスを提示する
+                self.assertIn("Read tool", msg)
+                self.assertIn("絶対パス", msg)
+
+    def test_unknown_kind_falls_back_to_generic_action(self):
+        msg = M.bash_deny(first_token="cat", operand=".env",
+                          file_render="", render_failure="brand_new_kind")
+        self.assertIn("minimal info: unavailable (理由不明)", msg)
+        self.assertIn("Read tool", msg)
+
+    def test_kind_selects_matching_next_action(self):
+        msg = M.bash_deny(first_token="cat", operand=".env",
+                          file_render="", render_failure="not_regular")
+        self.assertIn("symlink", msg)
+        # unresolved 用の cwd 文言は出さない
+        self.assertNotIn("hook の cwd から解決できなかった", msg)
+
+    def test_read_suggestion_suppressed_when_info_present(self):
+        """info を出せたときに Read 誘導を出すのは往復の無駄なので抑止する。"""
+        msg = M.bash_deny(first_token="cat", operand=".env",
+                          file_render=_DUMMY_FILE_RENDER)
+        self.assertIn("minimal info (Read 同等):", msg)
+        self.assertNotIn("unavailable", msg)
+        self.assertNotIn("Read tool", msg)
+
+    def test_mutate_drops_dangling_reference_when_info_absent(self):
+        """``上記 minimal info を確認`` は info があるときだけ書く。"""
+        absent = M.bash_deny(first_token="sed", operand=".env",
+                             command="sed s/X/Y/ .env",
+                             file_render="", render_failure="unresolved")
+        self.assertNotIn("上記 minimal info", absent)
+        self.assertIn("patch / diff", absent)
+
+        present = M.bash_deny(first_token="sed", operand=".env",
+                              command="sed s/X/Y/ .env",
+                              file_render=_DUMMY_FILE_RENDER)
+        self.assertIn("上記 minimal info", present)
+
+    def test_search_pattern_keys_echo_still_reports_unavailable(self):
+        """dotenv parse できず pattern をエコーしただけの状態も「情報なし」。"""
+        msg = M.bash_deny(
+            first_token="grep", operand=".env",
+            command="grep DATABASE_URL .env",
+            grep_keys=["DATABASE_URL"],
+            file_render="", render_failure="unresolved",
+        )
+        self.assertIn("pattern_keys: [DATABASE_URL]", msg)
+        self.assertIn("minimal info: unavailable", msg)
+
+    def test_non_read_intent_categories_stay_silent(self):
+        """転送 / 複製 / アーカイブ / git は元々 info を出さないので変化なし。"""
+        for token, operand in [("cp", ".env"), ("git", "HEAD:.env"),
+                               ("curl", ".env"), ("tar", ".env")]:
+            with self.subTest(first_token=token):
+                msg = M.bash_deny(first_token=token, operand=operand,
+                                  file_render="", render_failure="unresolved")
+                self.assertNotIn("minimal info", msg)
+
+
 # ---- backwards compatibility (positional 2 args) -----------------------
 
 

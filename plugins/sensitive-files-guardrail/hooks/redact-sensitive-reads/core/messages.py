@@ -168,15 +168,77 @@ def _common_meta_lines(first_token: str, operand: str) -> list[str]:
     return lines
 
 
-def _append_minimal_info(lines: list[str], file_render: str) -> None:
+# ``render_for_bash`` が minimal info を作れなかった理由 (kind) →
+# (reason 行に載せるラベル, LLM が次に取れる action)。
+#
+# 0.15.0 以前は ``file_render`` が空のとき minimal info セクションを **黙って
+# 省略** していた。情報も next action も無い deny reason を受け取ったモデルは、
+# Read への切替ではなく **別コマンドでの迂回** に倒れる (2026-08-17 実観測)。
+# 不在は必ず明示し、kind ごとの next action を添える。
+_MINIMAL_INFO_UNAVAILABLE: dict[str, tuple[str, str]] = {
+    "unresolved": (
+        "operand path が hook の cwd から解決できなかった",
+        "Read tool に **絶対パス** を渡してください (同じ minimal info が"
+        "返ります)。同一コマンド内の先行 `cd` は hook 側の cwd に反映されない"
+        "ため、相対パスのままでは解決できません。",
+    ),
+    "not_regular": (
+        "通常ファイルではない (symlink / 特殊ファイル)",
+        "symlink 先が意図した参照かを確認したうえで、Read tool に実体の"
+        "絶対パスを渡してください。",
+    ),
+    "stat_failed": (
+        "ファイル状態の確認に失敗した (権限 / IO)",
+        "ファイルの存在と権限を確認してください。",
+    ),
+    "open_failed": (
+        "安全な open に失敗した (権限 / symlink 検知)",
+        "ファイルの存在と権限を確認してください。",
+    ),
+    "redact_failed": (
+        "内容の解析に失敗した (想定外の形式)",
+        "鍵名一覧は取得できません。ファイル形式をユーザーに確認してください。",
+    ),
+    "normalize_failed": (
+        "operand path の正規化に失敗した",
+        "パス文字列の異常 (NUL バイト等) を確認してください。",
+    ),
+    "no_operand": (
+        "operand path を特定できなかった",
+        "Read tool に **絶対パス** を渡してください。",
+    ),
+}
+
+# 未知 kind / kind 未指定のときの汎用フォールバック。
+_MINIMAL_INFO_UNAVAILABLE_DEFAULT = (
+    "理由不明",
+    "Read tool に **絶対パス** を渡すと同じ minimal info が得られます。",
+)
+
+
+def _append_minimal_info(
+    lines: list[str],
+    file_render: str,
+    unavailable_kind: str = "",
+) -> None:
     """``minimal info (Read 同等):`` ラベルと file_render の中身を追加する。
 
     ``file_render`` は ``redaction.file_render.render_for_bash`` が返す
-    ``<DATA untrusted>`` 包装込みの文字列。空ならラベルごと省略。
+    ``<DATA untrusted>`` 包装込みの文字列。
+
+    空のときは **黙って省略せず** ``minimal info: unavailable (<理由>)`` と
+    kind 別の next action を出す (silent degradation 対策)。``unavailable_kind``
+    は ``render_for_bash`` の 3 番目の戻り値をそのまま渡す。
     """
     if file_render:
         lines.append("minimal info (Read 同等):")
         lines.append(file_render)
+        return
+    label, action = _MINIMAL_INFO_UNAVAILABLE.get(
+        unavailable_kind, _MINIMAL_INFO_UNAVAILABLE_DEFAULT
+    )
+    lines.append(f"minimal info: unavailable ({label})")
+    lines.append(f"suggestion: {action}")
 
 
 # head / tail の ``-n N`` / ``-N`` / ``--lines=N`` を抽出するための regex 一覧
@@ -264,6 +326,7 @@ def _bash_deny_read_full(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``cat`` / ``less`` / ``more`` / ``bat`` / ``xxd`` / ``od`` / ``hexdump``
     / ``base64`` 等、ファイル全体を閲覧する意図の deny reason。"""
@@ -275,11 +338,11 @@ def _bash_deny_read_full(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render)
-    lines.append(
-        "suggestion: 値そのものではなく構造のみを把握したいなら、"
-        "Read tool を使ってください (本 hook が同様の minimal info を返します)。"
-    )
+    # 0.16.0: 「Read tool を使ってください」は **minimal info を出せなかった
+    # ときだけ** 出す (`_append_minimal_info` の unavailable 分岐が担当)。
+    # info を出せているのに Read を勧めるのは、同じ情報を取り直させるだけの
+    # 往復の無駄になるため。
+    _append_minimal_info(lines, file_render, render_failure)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -292,6 +355,7 @@ def _bash_deny_read_partial(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``head`` / ``tail`` の deny reason。``-n N`` の値で鍵 list を絞る。"""
     basename = _basename_of(operand)
@@ -319,7 +383,7 @@ def _bash_deny_read_partial(
             " length, status tags, and placeholder hints are returned."
         )
     else:
-        _append_minimal_info(lines, file_render)
+        _append_minimal_info(lines, file_render, render_failure)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -332,6 +396,7 @@ def _bash_deny_search(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``grep`` / ``rg`` / ``ag`` / ``ack`` / ``egrep`` / ``fgrep`` の deny reason。
 
@@ -367,7 +432,12 @@ def _bash_deny_search(
             used_pattern_keys = True
             lines.append(f"pattern_keys: [{', '.join(grep_keys)}]")
 
-    if not used_pattern_keys:
+    # 0.16.0: ``pattern_keys:`` のエコー (dotenv parse なしで grep pattern を
+    # 返しただけ) は実情報ゼロなので、``used_pattern_keys`` が True でも
+    # file_render が空なら unavailable を明示する。
+    if not file_render:
+        _append_minimal_info(lines, "", render_failure)
+    elif not used_pattern_keys:
         _append_minimal_info(lines, file_render)
 
     other = _suggestion_other_keys(dotenv_info)
@@ -385,6 +455,7 @@ def _bash_deny_mutate(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``awk`` / ``sed`` の deny reason。加工は実行できないが minimal info は返す。"""
     basename = _basename_of(operand)
@@ -395,10 +466,16 @@ def _bash_deny_mutate(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render)
+    _append_minimal_info(lines, file_render, render_failure)
+    # 0.16.0: 「上記 minimal info を確認してください」は info を出せたときのみ。
+    # 空のときに書くと存在しない情報を指す dangling reference になる。
+    refer_info = (
+        "鍵名・型・状態は上記 minimal info を確認してください。"
+        if file_render
+        else ""
+    )
     lines.append(
-        "suggestion: 加工は実行できません。鍵名・型・状態は上記 minimal info を"
-        "確認してください。"
+        f"suggestion: 加工は実行できません。{refer_info}"
         " 値の置換が目的なら、対象ファイルを直接編集する代わりに別ファイルへの"
         " patch / diff 適用を検討してください。"
     )
@@ -414,6 +491,7 @@ def _bash_deny_load(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。"""
     basename = _basename_of(operand)
@@ -424,7 +502,7 @@ def _bash_deny_load(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render)
+    _append_minimal_info(lines, file_render, render_failure)
     lines.append(
         "suggestion: 環境変数として読み込みたいなら direnv (`.envrc`) や"
         " dotenv-cli の利用を推奨します。"
@@ -442,6 +520,7 @@ def _bash_deny_move(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。"""
     basename = _basename_of(operand)
@@ -470,6 +549,7 @@ def _bash_deny_history(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``git`` の deny reason (``git show HEAD:.env`` / ``git diff .env`` /
     ``git log -p .env`` 等)。tracked なら漏洩済みの可能性を提示。"""
@@ -499,6 +579,7 @@ def _bash_deny_transfer(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``curl`` / ``wget`` / ``scp`` / ``rsync`` の deny reason。"""
     basename = _basename_of(operand)
@@ -526,6 +607,7 @@ def _bash_deny_archive(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """``tar`` / ``zip`` / ``gzip`` の deny reason。--exclude を推奨。"""
     basename = _basename_of(operand)
@@ -554,6 +636,7 @@ def _bash_deny_generic(
     file_render: str,
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
+    render_failure: str,
 ) -> str:
     """既知 category 外の deny reason (0.7.0〜0.9.0 の generic 相当に minimal info を追加)。"""
     basename = _basename_of(operand)
@@ -564,7 +647,7 @@ def _bash_deny_generic(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render)
+    _append_minimal_info(lines, file_render, render_failure)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -593,13 +676,15 @@ def bash_deny(
     file_render: str = "",
     dotenv_info: dict | None = None,
     grep_keys: list[str] | None = None,
+    render_failure: str = "",
 ) -> str:
     """Bash 操作の deny reason を plain text で構築する (0.10.0 で category dispatch)。
 
     first_token のカテゴリで builder を切替え、コマンド意図に合った文言と
     Read 同等 minimal info / matched_pattern_keys を埋め込む。新規 keyword
-    引数 ``command`` / ``file_render`` / ``dotenv_info`` / ``grep_keys`` を
-    渡さない呼び出しでも動作する (旧 0.7.0〜0.9.0 互換、generic 相当の出力)。
+    引数 ``command`` / ``file_render`` / ``dotenv_info`` / ``grep_keys`` /
+    ``render_failure`` を渡さない呼び出しでも動作する (旧 0.7.0〜0.9.0 互換、
+    generic 相当の出力)。
 
     Args:
         first_token: 検出されたコマンドの第 1 トークン (例: ``cat``)。
@@ -613,6 +698,9 @@ def bash_deny(
             head/tail 切り出しに使用。
         grep_keys: ``extract_grep_keys`` で抽出した env-var 名候補リスト。
             grep 系以外では None。
+        render_failure: ``render_for_bash`` の 3 番目の戻り値 (失敗 kind)。
+            ``file_render`` が空のとき ``minimal info: unavailable (<理由>)``
+            の理由ラベルと next action の選択に使う。成功時は空文字。
     """
     category = _category_for_first_token(first_token)
     builder = _BASH_DENY_BUILDERS[category]
@@ -623,6 +711,7 @@ def bash_deny(
         file_render=file_render,
         dotenv_info=dotenv_info,
         grep_keys=grep_keys,
+        render_failure=render_failure,
     )
 
 
