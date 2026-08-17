@@ -320,15 +320,31 @@ def _build_deny_response(
     E4: first_token が grep family なら ``extract_grep_keys`` で env-var 名
     候補を抽出して ``grep_keys`` に渡す。
 
-    failure (file 不在 / parse 失敗 / open 失敗) は ``render_for_bash`` 側で
-    ``(None, None)`` に潰され、``bash_deny`` は generic 相当の reason に降りる。
-    deny 動作の判定境界には影響しない。
+    0.16.0: failure (file 不在 / parse 失敗 / open 失敗) 時、``render_for_bash``
+    は失敗 kind を 3 番目の戻り値で返す。これを ``bash_deny`` に渡すことで
+    reason に ``minimal info: unavailable (<理由>)`` + kind 別 next action が
+    載る。0.15.0 までは minimal info セクションが **黙って省略** され、情報も
+    next action も無い deny reason になっていた (モデルが Read へ切り替えず
+    別コマンドで迂回する原因)。deny 動作の判定境界には影響しない。
     """
     first = tokens[0] if tokens else ""
     tool_input = envelope.get("tool_input") or {}
     command_str = tool_input.get("command") or ""
     cwd = envelope.get("cwd", "")
-    file_render, dotenv_info = render_for_bash(operand, cwd)
+    # resolved_base (project root の basename) は reason にだけ載せる。
+    # ログ規則で basename は禁止のため L.log_info には絶対に渡さないこと。
+    file_render, dotenv_info, render_status, resolved_base = render_for_bash(
+        operand, cwd
+    )
+    if render_status == "project_root":
+        # cwd では解決できず project root 基準で救えたケース。fallback の
+        # 有効性を測るために成功側も記録する。
+        L.log_info("bash_render_project_root", "resolved")
+    elif render_status:
+        # minimal info を出せなかった原因の分布を計測するためのログ。
+        # render_status は file_render.py が返す固定 slug で、path / basename /
+        # 値は一切含まない (ログ規則: CLAUDE.md「ログ規則」節)。
+        L.log_info("bash_render_failed", render_status)
     grep_keys = extract_grep_keys(tokens) if is_grep_command(first) else None
     return output.make_deny(
         M.bash_deny(
@@ -338,6 +354,8 @@ def _build_deny_response(
             file_render=file_render or "",
             dotenv_info=dotenv_info,
             grep_keys=grep_keys,
+            render_status=render_status,
+            resolved_base=resolved_base,
         )
     )
 

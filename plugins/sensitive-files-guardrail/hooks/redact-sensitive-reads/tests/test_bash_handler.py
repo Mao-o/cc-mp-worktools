@@ -65,6 +65,76 @@ class BaseBash(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+class TestRenderFailureLogging(BaseBash):
+    """minimal info を作れなかった原因を ``bash_render_failed`` でログする。
+
+    0.15.0 までは全失敗が ``(None, None)`` に潰れてログにも残らず、
+    「なぜ minimal info が出なかったか」を後から計測できなかった。
+    """
+
+    def _captured(self, cmd: str, cwd: str) -> list[tuple]:
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope(cmd, cwd))
+        return [c.args for c in spy.call_args_list]
+
+    def test_logs_unresolved_when_operand_missing(self):
+        # `.env` は cwd に存在しない → basename 一致で deny、render は unresolved
+        calls = self._captured("cat .env", self.tmp)
+        self.assertIn(("bash_render_failed", "unresolved"), calls)
+
+    def test_no_render_log_on_success(self):
+        with open(os.path.join(self.tmp, ".env"), "w") as f:
+            f.write("KEY=value\n")
+        calls = self._captured("cat .env", self.tmp)
+        categories = [c[0] for c in calls]
+        self.assertNotIn("bash_render_failed", categories)
+
+    def test_no_render_log_when_not_denied(self):
+        calls = self._captured("cat README.md", self.tmp)
+        categories = [c[0] for c in calls]
+        self.assertNotIn("bash_render_failed", categories)
+
+    def test_logs_project_root_fallback_instead_of_failure(self):
+        """project root 再解決で救えたときは failure ではなく成功側を記録する。"""
+        root = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(root, "poc"))
+        with open(os.path.join(root, "poc", ".env"), "w") as f:
+            f.write("KEY=value\n")
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}):
+            calls = self._captured("cat poc/.env", other)
+        categories = [c[0] for c in calls]
+        self.assertIn("bash_render_project_root", categories)
+        self.assertNotIn("bash_render_failed", categories)
+
+    def test_resolved_base_appears_in_reason_but_never_in_log(self):
+        """basename は reason にだけ載せる (ログ規則: basename はログ禁止)。"""
+        root = os.path.join(self.tmp, "myrepo")
+        os.makedirs(os.path.join(root, "poc"))
+        with open(os.path.join(root, "poc", ".env"), "w") as f:
+            f.write("KEY=value\n")
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}):
+            with mock.patch("handlers.bash_handler.L.log_info") as spy:
+                resp = handle(_make_envelope("cat poc/.env", other))
+        self.assertIn("resolved_base: myrepo/", _reason(resp))
+        for call in spy.call_args_list:
+            for arg in call.args:
+                self.assertNotIn("myrepo", arg)
+
+    def test_logged_detail_survives_sanitizer(self):
+        """ログ detail が ``_BAD`` に落とされないこと (kind は安全な slug)。"""
+        from core.logging import _sanitize_detail
+
+        calls = self._captured("cat .env", self.tmp)
+        details = [c[1] for c in calls if c[0] == "bash_render_failed"]
+        self.assertTrue(details)
+        for d in details:
+            self.assertEqual(_sanitize_detail(d), d)
+
+
 class TestAllow(BaseBash):
     def test_echo_allowed(self):
         r = handle(_make_envelope("echo foo", self.tmp))
