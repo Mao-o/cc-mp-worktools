@@ -231,10 +231,25 @@ _PROJECT_ROOT_CAVEAT = (
 )
 
 
+def _resolved_base_line(resolved_base: str) -> str | None:
+    """``resolved_base:`` 行を返す (空なら None)。
+
+    「候補です」と書くだけでは、読み手は **実際に取り違えたのか** を確認でき
+    ない。解決基準にした project root の basename を 1 要素だけ出して、自分が
+    意図したディレクトリ名と突き合わせられるようにする。絶対 path は出さない
+    (``matched_operand`` が相対 path を出す現行方針の範囲に収める)。
+    """
+    if not resolved_base:
+        return None
+    safe = _sanitize_for_inline(resolved_base)
+    return f"resolved_base: {safe}/ ($CLAUDE_PROJECT_DIR の basename)"
+
+
 def _append_minimal_info(
     lines: list[str],
     file_render: str,
     render_status: str = "",
+    resolved_base: str = "",
 ) -> None:
     """``minimal info (Read 同等):`` ラベルと file_render の中身を追加する。
 
@@ -250,6 +265,9 @@ def _append_minimal_info(
     if file_render:
         if render_status == "project_root":
             lines.append(_PROJECT_ROOT_LABEL)
+            base_line = _resolved_base_line(resolved_base)
+            if base_line:
+                lines.append(base_line)
             lines.append(file_render)
             lines.append(_PROJECT_ROOT_CAVEAT)
         else:
@@ -263,14 +281,22 @@ def _append_minimal_info(
     lines.append(f"suggestion: {action}")
 
 
-def _append_project_root_caveat(lines: list[str], render_status: str) -> None:
+def _append_project_root_caveat(
+    lines: list[str],
+    render_status: str,
+    resolved_base: str = "",
+) -> None:
     """``dotenv_info`` を直接展開する経路 (read_partial / search) 用の注記。
 
     それらは ``_append_minimal_info`` を通らずに鍵行を出すため、project root
-    再解決だった場合の候補注記をここで別途付ける。
+    再解決だった場合の判別行 + 候補注記をここで別途付ける。
     """
-    if render_status == "project_root":
-        lines.append(_PROJECT_ROOT_CAVEAT)
+    if render_status != "project_root":
+        return
+    base_line = _resolved_base_line(resolved_base)
+    if base_line:
+        lines.append(base_line)
+    lines.append(_PROJECT_ROOT_CAVEAT)
 
 
 # head / tail の ``-n N`` / ``-N`` / ``--lines=N`` を抽出するための regex 一覧
@@ -359,6 +385,7 @@ def _bash_deny_read_full(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``cat`` / ``less`` / ``more`` / ``bat`` / ``xxd`` / ``od`` / ``hexdump``
     / ``base64`` 等、ファイル全体を閲覧する意図の deny reason。"""
@@ -374,7 +401,7 @@ def _bash_deny_read_full(
     # ときだけ** 出す (`_append_minimal_info` の unavailable 分岐が担当)。
     # info を出せているのに Read を勧めるのは、同じ情報を取り直させるだけの
     # 往復の無駄になるため。
-    _append_minimal_info(lines, file_render, render_status)
+    _append_minimal_info(lines, file_render, render_status, resolved_base)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -388,6 +415,7 @@ def _bash_deny_read_partial(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``head`` / ``tail`` の deny reason。``-n N`` の値で鍵 list を絞る。"""
     basename = _basename_of(operand)
@@ -414,9 +442,9 @@ def _bash_deny_read_partial(
             "note: real values are not in context. only key names, type, prefix,"
             " length, status tags, and placeholder hints are returned."
         )
-        _append_project_root_caveat(lines, render_status)
+        _append_project_root_caveat(lines, render_status, resolved_base)
     else:
-        _append_minimal_info(lines, file_render, render_status)
+        _append_minimal_info(lines, file_render, render_status, resolved_base)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -430,6 +458,7 @@ def _bash_deny_search(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``grep`` / ``rg`` / ``ag`` / ``ack`` / ``egrep`` / ``fgrep`` の deny reason。
 
@@ -469,12 +498,12 @@ def _bash_deny_search(
     # 返しただけ) は実情報ゼロなので、``used_pattern_keys`` が True でも
     # file_render が空なら unavailable を明示する。
     if not file_render:
-        _append_minimal_info(lines, "", render_status)
+        _append_minimal_info(lines, "", render_status, resolved_base)
     elif not used_pattern_keys:
-        _append_minimal_info(lines, file_render, render_status)
+        _append_minimal_info(lines, file_render, render_status, resolved_base)
     else:
         # matched_pattern_keys 経路は minimal info を出さないので注記だけ付ける。
-        _append_project_root_caveat(lines, render_status)
+        _append_project_root_caveat(lines, render_status, resolved_base)
 
     other = _suggestion_other_keys(dotenv_info)
     if other:
@@ -492,6 +521,7 @@ def _bash_deny_mutate(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``awk`` / ``sed`` の deny reason。加工は実行できないが minimal info は返す。"""
     basename = _basename_of(operand)
@@ -502,7 +532,7 @@ def _bash_deny_mutate(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render, render_status)
+    _append_minimal_info(lines, file_render, render_status, resolved_base)
     # 0.16.0: 「上記 minimal info を確認してください」は info を出せたときのみ。
     # 空のときに書くと存在しない情報を指す dangling reference になる。
     refer_info = (
@@ -528,6 +558,7 @@ def _bash_deny_load(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。"""
     basename = _basename_of(operand)
@@ -538,7 +569,7 @@ def _bash_deny_load(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render, render_status)
+    _append_minimal_info(lines, file_render, render_status, resolved_base)
     lines.append(
         "suggestion: 環境変数として読み込みたいなら direnv (`.envrc`) や"
         " dotenv-cli の利用を推奨します。"
@@ -557,6 +588,7 @@ def _bash_deny_move(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。"""
     basename = _basename_of(operand)
@@ -586,6 +618,7 @@ def _bash_deny_history(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``git`` の deny reason (``git show HEAD:.env`` / ``git diff .env`` /
     ``git log -p .env`` 等)。tracked なら漏洩済みの可能性を提示。"""
@@ -616,6 +649,7 @@ def _bash_deny_transfer(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``curl`` / ``wget`` / ``scp`` / ``rsync`` の deny reason。"""
     basename = _basename_of(operand)
@@ -644,6 +678,7 @@ def _bash_deny_archive(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """``tar`` / ``zip`` / ``gzip`` の deny reason。--exclude を推奨。"""
     basename = _basename_of(operand)
@@ -673,6 +708,7 @@ def _bash_deny_generic(
     dotenv_info: dict | None,
     grep_keys: list[str] | None,
     render_status: str,
+    resolved_base: str,
 ) -> str:
     """既知 category 外の deny reason (0.7.0〜0.9.0 の generic 相当に minimal info を追加)。"""
     basename = _basename_of(operand)
@@ -683,7 +719,7 @@ def _bash_deny_generic(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
-    _append_minimal_info(lines, file_render, render_status)
+    _append_minimal_info(lines, file_render, render_status, resolved_base)
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 
@@ -713,6 +749,7 @@ def bash_deny(
     dotenv_info: dict | None = None,
     grep_keys: list[str] | None = None,
     render_status: str = "",
+    resolved_base: str = "",
 ) -> str:
     """Bash 操作の deny reason を plain text で構築する (0.10.0 で category dispatch)。
 
@@ -748,6 +785,7 @@ def bash_deny(
         dotenv_info=dotenv_info,
         grep_keys=grep_keys,
         render_status=render_status,
+        resolved_base=resolved_base,
     )
 
 

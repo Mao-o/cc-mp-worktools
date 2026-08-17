@@ -110,8 +110,8 @@ operand を解決できず `(None, None)` を返し、`_append_minimal_info` が
 
 ### 1. minimal info の不在を明示 (P1)
 
-- **`redaction/file_render.py`**: `render_for_bash` を 3-tuple
-  `(reason, info, status)` 化。全失敗を `(None, None)` に潰していたのをやめ、
+- **`redaction/file_render.py`**: `render_for_bash` を 4-tuple
+  `(reason, info, status, resolved_base)` 化。全失敗を `(None, None)` に潰していたのをやめ、
   解決経路 / 失敗理由を slug で返す。
   - `""` 成功 / `project_root` 成功 (下記 3.) / `no_operand` /
     `normalize_failed` / `stat_failed` / `unresolved` (cwd から解決不能) /
@@ -128,6 +128,9 @@ operand を解決できず `(None, None)` を返し、`_append_minimal_info` が
   同じ情報を取り直させるだけの往復の無駄。
 - **`mutate` の dangling reference 修正**: 「鍵名・型・状態は上記 minimal info を
   確認してください」が info 不在時に存在しない情報を指していた。
+  ただし `awk` / `sed` は `_OPAQUE_WRAPPERS` で先に `ask_or_allow` に倒れるため、
+  **この修正は現状 production 経路では観測されない** (単体テストのみが通る)。
+  到達不能そのものは別 issue (下記「既知の未対応」)。
 - **`search` の pattern_keys エコー**: dotenv parse できず grep pattern を
   返しただけの状態も実情報ゼロなので unavailable を明示する。
 

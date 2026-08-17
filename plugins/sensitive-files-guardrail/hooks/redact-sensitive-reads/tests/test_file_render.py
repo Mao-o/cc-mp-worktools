@@ -33,7 +33,7 @@ class TestRenderForBashDotenv(unittest.TestCase):
                 "EMPTY_KEY=\n",
                 encoding="utf-8",
             )
-            reason, info, kind = render_for_bash(".env", tmp)
+            reason, info, kind, base = render_for_bash(".env", tmp)
         self.assertIsNotNone(reason)
         self.assertIn('<DATA untrusted="true"', reason)
         self.assertIn("file: .env", reason)
@@ -51,7 +51,7 @@ class TestRenderForBashDotenv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".envrc"
             path.write_text("export FOO=bar\nexport BAZ=qux\n", encoding="utf-8")
-            reason, info, kind = render_for_bash(".envrc", tmp)
+            reason, info, kind, base = render_for_bash(".envrc", tmp)
         self.assertIsNotNone(reason)
         self.assertIsNotNone(info)
         self.assertEqual(info["format"], "dotenv")
@@ -62,7 +62,7 @@ class TestRenderForBashDotenv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"
             path.write_text("KEY=value\n", encoding="utf-8")
-            reason, info, kind = render_for_bash(str(path), cwd="/")
+            reason, info, kind, base = render_for_bash(str(path), cwd="/")
         self.assertIsNotNone(reason)
         self.assertIsNotNone(info)
         self.assertEqual(info["entries"], 1)
@@ -73,7 +73,7 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "credentials.json"
             path.write_text('{"client_id": "abc", "secret": "xyz"}', encoding="utf-8")
-            reason, info, kind = render_for_bash("credentials.json", tmp)
+            reason, info, kind, base = render_for_bash("credentials.json", tmp)
         self.assertIsNotNone(reason)
         self.assertIn('<DATA untrusted="true"', reason)
         self.assertIn("client_id", reason)
@@ -84,7 +84,7 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text('foo = "bar"\nbaz = 42\n', encoding="utf-8")
-            reason, info, kind = render_for_bash("config.toml", tmp)
+            reason, info, kind, base = render_for_bash("config.toml", tmp)
         self.assertIsNotNone(reason)
         self.assertIsNone(info)
 
@@ -92,7 +92,7 @@ class TestRenderForBashOtherFormats(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "secrets.yaml"
             path.write_text("foo: bar\nbaz: qux\n", encoding="utf-8")
-            reason, info, kind = render_for_bash("secrets.yaml", tmp)
+            reason, info, kind, base = render_for_bash("secrets.yaml", tmp)
         self.assertIsNotNone(reason)
         self.assertIsNone(info)
 
@@ -107,14 +107,14 @@ class TestRenderForBashFailures(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_empty_operand(self):
-        reason, info, kind = render_for_bash("", "/tmp")
+        reason, info, kind, base = render_for_bash("", "/tmp")
         self.assertIsNone(reason)
         self.assertIsNone(info)
         self.assertEqual(kind, "no_operand")
 
     def test_missing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            reason, info, kind = render_for_bash(".env", tmp)
+            reason, info, kind, base = render_for_bash(".env", tmp)
         self.assertIsNone(reason)
         self.assertIsNone(info)
         self.assertEqual(kind, "unresolved")
@@ -131,7 +131,7 @@ class TestRenderForBashFailures(unittest.TestCase):
             (proj / ".env.local").write_text("KEY=value\n", encoding="utf-8")
             other = Path(tmp) / "other"
             other.mkdir()
-            reason, info, kind = render_for_bash("poc/.env.local", str(other))
+            reason, info, kind, base = render_for_bash("poc/.env.local", str(other))
         self.assertIsNone(reason)
         self.assertEqual(kind, "unresolved")
 
@@ -141,7 +141,7 @@ class TestRenderForBashFailures(unittest.TestCase):
             target.write_text("KEY=value\n", encoding="utf-8")
             link = Path(tmp) / ".env"
             link.symlink_to(target)
-            reason, info, kind = render_for_bash(".env", tmp)
+            reason, info, kind, base = render_for_bash(".env", tmp)
         # classify が "symlink" になり、render はスキップされる
         self.assertIsNone(reason)
         self.assertIsNone(info)
@@ -150,14 +150,14 @@ class TestRenderForBashFailures(unittest.TestCase):
     def test_directory_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "envdir").mkdir()
-            reason, info, kind = render_for_bash("envdir", tmp)
+            reason, info, kind, base = render_for_bash("envdir", tmp)
         self.assertIsNone(reason)
         self.assertIsNone(info)
         self.assertEqual(kind, "not_regular")
 
     def test_normalize_failure_does_not_raise(self):
         # NUL byte を含むパス → ValueError / stat 例外 → (None, None, kind)
-        reason, info, kind = render_for_bash("\x00.env", "/tmp")
+        reason, info, kind, base = render_for_bash("\x00.env", "/tmp")
         self.assertIsNone(reason)
         self.assertIsNone(info)
         self.assertIn(kind, {"normalize_failed", "stat_failed"})
@@ -165,7 +165,7 @@ class TestRenderForBashFailures(unittest.TestCase):
     def test_success_kind_is_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ".env").write_text("KEY=value\n", encoding="utf-8")
-            reason, info, kind = render_for_bash(".env", tmp)
+            reason, info, kind, base = render_for_bash(".env", tmp)
         self.assertIsNotNone(reason)
         self.assertEqual(kind, "")
 
@@ -212,15 +212,54 @@ class TestProjectRootFallback(unittest.TestCase):
 
     def test_resolves_from_project_root_and_flags_candidate(self):
         self._with_project_dir(self.root)
-        reason, info, status = render_for_bash("poc/.env.local", str(self.other))
+        reason, info, status, base = render_for_bash("poc/.env.local", str(self.other))
         self.assertEqual(status, "project_root")
         self.assertIsNotNone(reason)
         self.assertIn("ANTHROPIC_API_KEY", reason)
         self.assertIsNotNone(info)
+        # 判別材料として project root の basename を 1 要素だけ返す
+        self.assertEqual(base, "proj")
+
+    def test_resolved_base_identifies_which_of_two_candidates_was_read(self):
+        """同じ相対 path の機密ファイルが 2 つあるとき、どちらを読んだか判る。
+
+        「候補です」とだけ書いても、読み手は **実際に取り違えたのか** を確認
+        できない。resolved_base があれば意図したディレクトリ名と突き合わせて
+        判定できる。
+        """
+        # project root 側 (hook が実際に読む方)
+        repo_a = Path(self.tmp) / "repo_a"
+        (repo_a / "poc").mkdir(parents=True)
+        (repo_a / "poc" / ".env.local").write_text(
+            "KEY_FROM_REPO_A=x\n", encoding="utf-8"
+        )
+        # モデルが `cd` して意図していた方 (hook からは見えない)
+        repo_b = Path(self.tmp) / "repo_b"
+        (repo_b / "poc").mkdir(parents=True)
+        (repo_b / "poc" / ".env.local").write_text(
+            "KEY_FROM_REPO_B=y\n", encoding="utf-8"
+        )
+        self._with_project_dir(repo_a)
+        reason, info, status, base = render_for_bash(
+            "poc/.env.local", str(self.other)
+        )
+        self.assertEqual(status, "project_root")
+        # 読んだのは repo_a 側。basename でそれが判別できること
+        self.assertIn("KEY_FROM_REPO_A", reason)
+        self.assertNotIn("KEY_FROM_REPO_B", reason)
+        self.assertEqual(base, "repo_a")
+
+    def test_resolved_base_is_single_component_not_full_path(self):
+        """絶対 path を漏らさない (matched_operand と同水準に収める)。"""
+        self._with_project_dir(self.root)
+        _, _, status, base = render_for_bash("poc/.env.local", str(self.other))
+        self.assertEqual(status, "project_root")
+        self.assertNotIn("/", base)
+        self.assertNotIn(self.tmp, base)
 
     def test_no_fallback_when_project_root_equals_cwd(self):
         self._with_project_dir(self.other)
-        reason, info, status = render_for_bash("poc/.env.local", str(self.other))
+        reason, info, status, base = render_for_bash("poc/.env.local", str(self.other))
         self.assertIsNone(reason)
         self.assertEqual(status, "unresolved")
 
@@ -228,7 +267,7 @@ class TestProjectRootFallback(unittest.TestCase):
         """絶対 path は基準を変えても同じなので再解決しない。"""
         self._with_project_dir(self.root)
         missing = str(self.other / ".env")
-        reason, info, status = render_for_bash(missing, str(self.other))
+        reason, info, status, base = render_for_bash(missing, str(self.other))
         self.assertIsNone(reason)
         self.assertEqual(status, "unresolved")
 
@@ -238,13 +277,13 @@ class TestProjectRootFallback(unittest.TestCase):
         (self.other / "poc").mkdir()
         link = self.other / "poc" / ".env.local"
         link.symlink_to(self.root / "poc" / ".env.local")
-        reason, info, status = render_for_bash("poc/.env.local", str(self.other))
+        reason, info, status, base = render_for_bash("poc/.env.local", str(self.other))
         self.assertIsNone(reason)
         self.assertEqual(status, "not_regular")
 
     def test_falls_back_to_unresolved_when_project_root_also_misses(self):
         self._with_project_dir(self.root)
-        reason, info, status = render_for_bash("nope/.env", str(self.other))
+        reason, info, status, base = render_for_bash("nope/.env", str(self.other))
         self.assertIsNone(reason)
         self.assertEqual(status, "unresolved")
 
@@ -257,7 +296,7 @@ class TestProjectRootFallback(unittest.TestCase):
         patcher.start()
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
         self.addCleanup(patcher.stop)
-        reason, info, status = render_for_bash("poc/.env.local", str(sub))
+        reason, info, status, base = render_for_bash("poc/.env.local", str(sub))
         self.assertEqual(status, "project_root")
         self.assertIn("ANTHROPIC_API_KEY", reason)
 

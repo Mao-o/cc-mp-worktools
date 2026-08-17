@@ -453,7 +453,7 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 | `generic` | 上記以外 | 0.7.0〜0.9.0 と同等の note + minimal info (新規) |
 
 **file_render の流れ** (`redaction/file_render.py::render_for_bash`、0.16.0 で
-3-tuple `(reason, info, status)` 化):
+4-tuple `(reason, info, status, resolved_base)` 化):
 
 1. `normalize(operand, cwd)` で path を解決 (失敗 → status `normalize_failed`)
 2. `classify(path)` で regular ファイルか確認
@@ -462,9 +462,9 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 3. `open_regular(path)` で fd と size を取得 (`O_NOFOLLOW`、失敗 → `open_failed`)
 4. format 判定 (`_detect_format`):
    - dotenv → `redact_dotenv` で info dict を取得 → `format_dotenv` で body
-     文字列 → `build_reason` で `<DATA untrusted>` 包装 → (reason, info, "") を返す
+     文字列 → `build_reason` で `<DATA untrusted>` 包装 → (reason, info, "", "") を返す
    - dotenv 以外 (json / toml / yaml / opaque / 32KB 超) → `engine.redact` /
-     `redact_large_file` で reason を取得 → (reason, None, "") を返す
+     `redact_large_file` で reason を取得 → (reason, None, "", "") を返す
 5. 内部例外は握り潰し status `redact_failed`
 
 **status の使われ方** (0.16.0):
@@ -492,6 +492,11 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 - 再解決で得た情報は **別ディレクトリの同名ファイルの可能性**があるため
   status を `project_root` にし、reason 側でラベル (「project root 基準で
   解決した候補」) と「確実に特定するなら Read tool に絶対パス」の注記を付ける
+- あわせて 4 番目の戻り値 `resolved_base` (project root の basename **1 要素**)
+  を `resolved_base: <name>/` 行として出す。ラベルだけでは「候補かもしれない」
+  としか言えず、読み手が **実際に取り違えたのか** を確認できないため。
+  絶対 path は出さない (`matched_operand` が相対 path を出す現行方針の範囲)。
+  `resolved_base` は **ログには渡さない** (ログ規則で basename は禁止)
 
 **E4 の grep extraction** (`handlers/bash/grep_extract.py::extract_grep_keys`):
 
@@ -515,6 +520,7 @@ def bash_deny(
     dotenv_info: dict | None = None,  # render_for_bash の 2 番目の戻り値
     grep_keys: list[str] | None = None,  # extract_grep_keys の戻り値
     render_status: str = "",    # render_for_bash の 3 番目の戻り値 (0.16.0)
+    resolved_base: str = "",    # render_for_bash の 4 番目の戻り値 (0.16.0)
 ) -> str: ...
 ```
 

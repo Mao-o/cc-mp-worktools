@@ -478,11 +478,22 @@ class TestProjectRootCandidate(unittest.TestCase):
     def test_read_full_labels_candidate_and_adds_caveat(self):
         msg = M.bash_deny(first_token="cat", operand="poc/.env.local",
                           file_render=_DUMMY_FILE_RENDER,
-                          render_status="project_root")
+                          render_status="project_root",
+                          resolved_base="myrepo")
         self.assertIn("project root 基準で解決した候補", msg)
+        self.assertIn("resolved_base: myrepo/", msg)
         self.assertIn(self.CAVEAT_MARK, msg)
         self.assertIn("絶対パス", msg)
         self.assertIn("DATABASE_URL", msg)
+
+    def test_resolved_base_line_omitted_when_unknown(self):
+        """basename が取れなくても (root が `/` 等) 他の出力は壊れない。"""
+        msg = M.bash_deny(first_token="cat", operand=".env",
+                          file_render=_DUMMY_FILE_RENDER,
+                          render_status="project_root", resolved_base="")
+        self.assertIn("project root 基準で解決した候補", msg)
+        self.assertNotIn("resolved_base:", msg)
+        self.assertIn(self.CAVEAT_MARK, msg)
 
     def test_plain_success_has_no_caveat(self):
         msg = M.bash_deny(first_token="cat", operand=".env",
@@ -495,8 +506,10 @@ class TestProjectRootCandidate(unittest.TestCase):
                           command="head -n 2 poc/.env.local",
                           dotenv_info=_dummy_dotenv_info(num_keys=3),
                           file_render=_DUMMY_FILE_RENDER,
-                          render_status="project_root")
+                          render_status="project_root",
+                          resolved_base="myrepo")
         self.assertIn("keys (先頭 2, 全 3 件):", msg)
+        self.assertIn("resolved_base: myrepo/", msg)
         self.assertIn(self.CAVEAT_MARK, msg)
 
     def test_search_matched_keys_branch_gets_caveat(self):
@@ -509,8 +522,10 @@ class TestProjectRootCandidate(unittest.TestCase):
                           command="grep DATABASE_URL poc/.env.local",
                           dotenv_info=info, grep_keys=["DATABASE_URL"],
                           file_render=_DUMMY_FILE_RENDER,
-                          render_status="project_root")
+                          render_status="project_root",
+                          resolved_base="myrepo")
         self.assertIn("matched_pattern_keys: [DATABASE_URL]", msg)
+        self.assertIn("resolved_base: myrepo/", msg)
         self.assertIn(self.CAVEAT_MARK, msg)
 
     def test_search_full_list_branch_gets_caveat(self):

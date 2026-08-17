@@ -331,7 +331,11 @@ def _build_deny_response(
     tool_input = envelope.get("tool_input") or {}
     command_str = tool_input.get("command") or ""
     cwd = envelope.get("cwd", "")
-    file_render, dotenv_info, render_status = render_for_bash(operand, cwd)
+    # resolved_base (project root の basename) は reason にだけ載せる。
+    # ログ規則で basename は禁止のため L.log_info には絶対に渡さないこと。
+    file_render, dotenv_info, render_status, resolved_base = render_for_bash(
+        operand, cwd
+    )
     if render_status == "project_root":
         # cwd では解決できず project root 基準で救えたケース。fallback の
         # 有効性を測るために成功側も記録する。
@@ -351,6 +355,7 @@ def _build_deny_response(
             dotenv_info=dotenv_info,
             grep_keys=grep_keys,
             render_status=render_status,
+            resolved_base=resolved_base,
         )
     )
 

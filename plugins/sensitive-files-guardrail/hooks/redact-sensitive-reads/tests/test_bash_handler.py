@@ -108,6 +108,22 @@ class TestRenderFailureLogging(BaseBash):
         self.assertIn("bash_render_project_root", categories)
         self.assertNotIn("bash_render_failed", categories)
 
+    def test_resolved_base_appears_in_reason_but_never_in_log(self):
+        """basename は reason にだけ載せる (ログ規則: basename はログ禁止)。"""
+        root = os.path.join(self.tmp, "myrepo")
+        os.makedirs(os.path.join(root, "poc"))
+        with open(os.path.join(root, "poc", ".env"), "w") as f:
+            f.write("KEY=value\n")
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}):
+            with mock.patch("handlers.bash_handler.L.log_info") as spy:
+                resp = handle(_make_envelope("cat poc/.env", other))
+        self.assertIn("resolved_base: myrepo/", _reason(resp))
+        for call in spy.call_args_list:
+            for arg in call.args:
+                self.assertNotIn("myrepo", arg)
+
     def test_logged_detail_survives_sanitizer(self):
         """ログ detail が ``_BAD`` に落とされないこと (kind は安全な slug)。"""
         from core.logging import _sanitize_detail

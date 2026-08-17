@@ -53,7 +53,10 @@ status は ``core.logging`` の detail 文字種ホワイトリストを通る�
 
 再解決で得た情報は **別ディレクトリの同名ファイルである可能性**があるので、
 ``status`` を ``"project_root"`` にして呼出側に候補である旨を明示させる
-(``core.messages`` がラベルと注記を付ける)。
+(``core.messages`` がラベルと注記を付ける)。あわせて 4 番目の戻り値
+``resolved_base`` で project root の basename を返し、「どのディレクトリ配下を
+読んだのか」を reason から判別できるようにする — ラベルだけでは「候補かも
+しれない」としか言えず、実際に取り違えたのかを読み手が確認できないため。
 
 deny 動作の判定境界には影響しない。reason 文字列の情報量だけが拡張される。
 """
@@ -93,7 +96,7 @@ _CLASSIFY_FAILURE_KIND: dict[str, str] = {
 def render_for_bash(
     operand: str,
     cwd: str,
-) -> tuple[str | None, dict | None, str]:
+) -> tuple[str | None, dict | None, str, str]:
     """operand path を Bash deny 用に minimal info 化する。
 
     Args:
@@ -101,54 +104,64 @@ def render_for_bash(
         cwd: ``envelope["cwd"]``。``operand`` が相対パスのとき結合する。
 
     Returns:
-        (reason_text, dotenv_info, status):
+        (reason_text, dotenv_info, status, resolved_base):
         - ``reason_text``: ``build_reason`` 込みの ``<DATA>`` 包装文字列。
           失敗時 ``None``。
         - ``dotenv_info``: dotenv format のときのみ ``redact_dotenv`` の戻り値
           dict (``keys`` / ``entries`` / ``format``)。それ以外 ``None``。
         - ``status``: 解決経路 / 失敗理由の slug (モジュール docstring の表)。
           ``cwd`` 基準で解決できたときは空文字。
+        - ``resolved_base``: ``status == "project_root"`` のときだけ、解決基準に
+          した project root の **basename 1 要素**。それ以外は空文字。
+          reason に載せてどのディレクトリ配下を読んだか判別可能にするためのもので、
+          **ログには渡さない** (ログ規則: basename は NG)。
     """
     if not operand:
-        return (None, None, "no_operand")
+        return (None, None, "no_operand", "")
     try:
         path = normalize(operand, cwd)
     except (ValueError, OSError):
-        return (None, None, "normalize_failed")
+        return (None, None, "normalize_failed", "")
     reason, info, status = _render_path(path)
     if status != "unresolved" or os.path.isabs(operand):
         # 成功、または missing 以外の失敗 (= cwd 基準でファイルは実在する)。
         # 絶対 operand は基準を変えても同じ path になるので再解決しない。
-        return (reason, info, status)
+        return (reason, info, status, "")
     return _render_from_project_root(operand, cwd)
 
 
 def _render_from_project_root(
     operand: str,
     cwd: str,
-) -> tuple[str | None, dict | None, str]:
+) -> tuple[str | None, dict | None, str, str]:
     """相対 operand を project root 基準で 1 回だけ再解決する (0.16.0)。
 
     先行 ``cd`` で ``cwd`` がずれているケースを救う。成功したら status を
     ``"project_root"`` にして「別ディレクトリの同名ファイルかもしれない候補」
-    であることを呼出側に伝える。再解決も失敗したら元の ``"unresolved"`` を
-    返す (呼出側の文言・ログは変わらない)。
+    であることを呼出側に伝え、判別材料として project root の basename
+    (1 要素だけ) を返す。再解決も失敗したら元の ``"unresolved"`` を返す
+    (呼出側の文言・ログは変わらない)。
+
+    basename だけを返すのは、``matched_operand`` が既に相対 path (ディレクトリ
+    要素を含みうる) を出しているのに対し、絶対 path 全体は出さないという既存
+    方針 (顧客名・環境名リーク対策) を崩さないため。モデルは自分が意図した
+    ディレクトリ名と突き合わせるだけで、取り違えかどうかを判定できる。
     """
     root = _resolve_project_key(cwd)
     if not root:
-        return (None, None, "unresolved")
+        return (None, None, "unresolved", "")
     if os.path.normpath(root) == os.path.normpath(cwd or "."):
         # 基準が同じなら再試行しても同じ結果。
-        return (None, None, "unresolved")
+        return (None, None, "unresolved", "")
     try:
         alt = normalize(operand, root)
     except (ValueError, OSError):
-        return (None, None, "unresolved")
+        return (None, None, "unresolved", "")
     reason, info, status = _render_path(alt)
     if reason is None:
         # 再解決先でも読めなかった。原因は元の cwd 基準の結果に揃える。
-        return (None, None, "unresolved")
-    return (reason, info, "project_root")
+        return (None, None, "unresolved", "")
+    return (reason, info, "project_root", os.path.basename(os.path.normpath(root)))
 
 
 def _render_path(path: Path) -> tuple[str | None, dict | None, str]:
