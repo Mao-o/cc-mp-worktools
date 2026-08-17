@@ -78,6 +78,11 @@ post-implementation-review/
 ` M seed.txt` のまま変わらず、行集合の差分では検出できない。
 `(status_code, size, mtime_ns)` まで見て初めて拾える (`gitscan.status_snapshot`)。
 
+**入れ子の git リポジトリは `-uall` でも `dir/` のまま返る** (`.claude/worktrees/<name>/`
+を作った場合など)。中身は別リポジトリの変更なので、末尾 `/` のエントリは snapshot から
+捨てる。`_resolve_paths` 側でもディレクトリを弾いており、旧版が state に書いた
+エントリを掴まない。
+
 ## 状態機械: in-flight 予約付き drain-at-Stop
 
 ```
@@ -171,6 +176,9 @@ $TMPDIR/post-implementation-review/
 ```
 
 Stop のたびに `stategc.gc_stale()` が mtime 48 時間超のファイルを削除する。
+ただし `bashsnap/` だけは **1 時間**の別 TTL を当てる — スナップショットは対応する
+PostToolUse が pop するまでしか意味を持たず、Bash が実行されなかった場合
+(permission 拒否 / 別 hook の block / 中断) は PostToolUse が来ずに孤児になるため。
 v0.2.0 以前が残した `$TMPDIR/post-review-markers/` と `$TMPDIR/post-review-*.txt` も
 同じ TTL で掃除する (旧版が並行稼働していても書き込み直後のファイルは消さない)。
 

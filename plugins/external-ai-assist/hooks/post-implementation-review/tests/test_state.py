@@ -214,6 +214,34 @@ class TestGc(StateTestCase):
         self.assertFalse(os.path.exists(legacy_txt))
         self.assertTrue(os.path.exists(fresh_legacy), "稼働中の旧版マーカーは消さない")
 
+    def test_orphaned_bash_snapshots_expire_early(self):
+        """Bash が実行されず PostToolUse が来なかった snapshot を長く抱えない。
+
+        permission 拒否 / 別 hook の block / 中断で PreToolUse だけが走ると孤児になる。
+        """
+        orphan = self._touch(
+            os.path.join(state.state_root(), "bashsnap", "sess__tu_old.json"),
+            state.BASH_SNAPSHOT_TTL_SEC + 60,
+        )
+        fresh = self._touch(
+            os.path.join(state.state_root(), "bashsnap", "sess__tu_live.json"), 0
+        )
+        # 同じ古さでも state ファイルは残る (TTL が別)
+        state_file = self._touch(
+            os.path.join(state.state_root(), "state", "sess.json"),
+            state.BASH_SNAPSHOT_TTL_SEC + 60,
+        )
+
+        stategc.gc_stale()
+        self.assertFalse(os.path.exists(orphan))
+        self.assertTrue(os.path.exists(fresh), "実行中の snapshot を消してはいけない")
+        self.assertTrue(
+            os.path.exists(state_file), "state に bashsnap の短い TTL を適用しないこと"
+        )
+
+    def test_snapshot_ttl_is_shorter_than_state_ttl(self):
+        self.assertLess(state.BASH_SNAPSHOT_TTL_SEC, state.STATE_TTL_SEC)
+
     def test_gc_on_missing_root_is_noop(self):
         self.assertEqual(stategc.gc_stale(), 0)
 

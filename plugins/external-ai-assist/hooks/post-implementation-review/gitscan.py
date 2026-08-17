@@ -119,6 +119,10 @@ def status_snapshot(root: str) -> dict[str, list]:
 
     `--untracked-files=all` を使うのは、新規ディレクトリが `dir/` に畳まれると
     個別ファイルを pending に積めないため。
+
+    ただし `-uall` でも**入れ子の git リポジトリは展開されず `dir/` のまま**返る
+    (別の worktree を `.claude/worktrees/` 配下に作った場合など)。中身は別リポジトリの
+    変更なのでレビュー対象にしてはならず、末尾 `/` のエントリは捨てる。
     """
     res = _git(
         root,
@@ -130,6 +134,8 @@ def status_snapshot(root: str) -> dict[str, list]:
 
     snapshot: dict[str, list] = {}
     for code, rel in _parse_porcelain_z(_decode(res.stdout)):
+        if rel.endswith("/"):
+            continue
         try:
             st = os.stat(os.path.join(root, rel))
             snapshot[rel] = [code, st.st_size, st.st_mtime_ns]

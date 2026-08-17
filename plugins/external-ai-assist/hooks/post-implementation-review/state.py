@@ -55,6 +55,13 @@ IN_FLIGHT_TTL_SEC = cursor.TIMEOUT_SEC + 300
 # 稼働中セッションのファイルが消えることはない。
 STATE_TTL_SEC = 48 * 3600
 
+# Bash スナップショットの GC TTL。state より大幅に短くする。
+# スナップショットは「対応する PostToolUse が pop するまで」しか意味を持たないが、
+# Bash が実行されなかった場合 (permission 拒否 / 別 hook の block / 中断) は
+# PostToolUse が来ず孤児になる。長い TTL で抱えても得が無いうえ、大きな repo では
+# 1 件あたり最大 MAX_SNAPSHOT_ENTRIES 件のエントリを持つため嵩む。
+BASH_SNAPSHOT_TTL_SEC = 3600
+
 MAX_PENDING_PATHS = 200
 MAX_REVIEWED_ENTRIES = 500
 
