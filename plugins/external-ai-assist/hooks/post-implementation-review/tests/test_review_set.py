@@ -28,6 +28,16 @@ class TestResolvePaths(ReviewSetTestCase):
         self.assertEqual(rels, ["a.py"])
         self.assertEqual(overflow, [])
 
+    def test_drops_directories(self):
+        """v0.3.0 が state に書いた入れ子 repo のディレクトリを掴まないこと。"""
+        nested = os.path.join(self.repo, ".claude", "worktrees", "inner")
+        os.makedirs(nested)
+        rels, overflow = self.entry._resolve_paths(
+            self.repo, [nested, nested + "/", os.path.join(self.repo, "a.py")]
+        )
+        self.assertEqual(rels, ["a.py"])
+        self.assertEqual(overflow, [])
+
     def test_dedupes_equivalent_paths(self):
         link = os.path.join(self._tmp.name, "link")
         os.symlink(self.repo, link)

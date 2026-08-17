@@ -81,6 +81,43 @@ class TestStatusSnapshot(GitScanTestCase):
     def test_clean_repo_is_empty(self):
         self.assertEqual(gitscan.status_snapshot(self.repo), {})
 
+    def test_nested_git_repo_is_skipped(self):
+        """入れ子の git リポジトリは `-uall` でも `dir/` のまま返る。
+
+        本番で `.claude/worktrees/<name>/` が pending に混入したケースの回帰テスト。
+        中身は別リポジトリの変更なのでレビュー対象にしてはならない。
+        """
+        inner = os.path.join(self.repo, ".claude", "worktrees", "inner")
+        os.makedirs(inner)
+        git(inner, "init", "-q")
+        write(inner, "file.txt", "belongs to another repo\n")
+
+        raw = gitscan._git(
+            self.repo, ["status", "--porcelain", "-z", "--untracked-files=all"]
+        )
+        entries = [rel for _code, rel in gitscan._parse_porcelain_z(
+            gitscan._decode(raw.stdout)
+        )]
+        self.assertIn(
+            ".claude/worktrees/inner/", entries, "git が dir/ を返す前提が崩れている"
+        )
+
+        snapshot = gitscan.status_snapshot(self.repo)
+        self.assertEqual(
+            snapshot, {}, "入れ子 repo のディレクトリを snapshot に入れてはいけない"
+        )
+
+    def test_nested_repo_does_not_hide_sibling_files(self):
+        """入れ子 repo を除外しても、同階層の通常ファイルは拾うこと。"""
+        inner = os.path.join(self.repo, "vendor", "inner")
+        os.makedirs(inner)
+        git(inner, "init", "-q")
+        write(self.repo, "vendor/notes.md", "mine\n")
+
+        snapshot = gitscan.status_snapshot(self.repo)
+        self.assertIn("vendor/notes.md", snapshot)
+        self.assertNotIn("vendor/inner/", snapshot)
+
     def test_rename_entry_does_not_shift_parsing(self):
         """rename エントリは元パスが余分なトークンとして続く — 読み飛ばし忘れると崩れる。
 

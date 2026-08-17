@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import time
 
-from state import STATE_TTL_SEC, _tmp_root, state_root
+from state import BASH_SNAPSHOT_TTL_SEC, STATE_TTL_SEC, _tmp_root, state_root
 
 # 旧実装 (v0.2.0 以前) が残した一時ファイル。
 _LEGACY_MARKER_DIR = "post-review-markers"
@@ -26,9 +26,9 @@ def gc_stale(now: float | None = None) -> int:
     """
     now = time.time() if now is None else now
     removed = 0
-    for path in _gc_candidates():
+    for path, ttl in _gc_candidates():
         try:
-            if now - os.path.getmtime(path) > STATE_TTL_SEC:
+            if now - os.path.getmtime(path) > ttl:
                 os.unlink(path)
                 removed += 1
         except OSError:
@@ -37,15 +37,22 @@ def gc_stale(now: float | None = None) -> int:
     return removed
 
 
-def _gc_candidates() -> list[str]:
-    paths: list[str] = []
-    for base, _dirs, files in os.walk(state_root()):
-        paths.extend(os.path.join(base, name) for name in files)
+def _gc_candidates() -> list[tuple[str, int]]:
+    """(パス, 適用する TTL) の一覧。bashsnap だけ短い TTL を当てる。"""
+    paths: list[tuple[str, int]] = []
+    root = state_root()
+    bashsnap_dir = os.path.join(root, "bashsnap")
+    for base, _dirs, files in os.walk(root):
+        ttl = BASH_SNAPSHOT_TTL_SEC if base == bashsnap_dir else STATE_TTL_SEC
+        paths.extend((os.path.join(base, name), ttl) for name in files)
 
     legacy_dir = os.path.join(_tmp_root(), _LEGACY_MARKER_DIR)
     if os.path.isdir(legacy_dir):
         try:
-            paths.extend(os.path.join(legacy_dir, n) for n in os.listdir(legacy_dir))
+            paths.extend(
+                (os.path.join(legacy_dir, n), STATE_TTL_SEC)
+                for n in os.listdir(legacy_dir)
+            )
         except OSError:
             pass
 
@@ -53,7 +60,7 @@ def _gc_candidates() -> list[str]:
     try:
         for name in os.listdir(tmp):
             if name.startswith(_LEGACY_REVIEW_PREFIX) and name.endswith(".txt"):
-                paths.append(os.path.join(tmp, name))
+                paths.append((os.path.join(tmp, name), STATE_TTL_SEC))
     except OSError:
         pass
     return paths

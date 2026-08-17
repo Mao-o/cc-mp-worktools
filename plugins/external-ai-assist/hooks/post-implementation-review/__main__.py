@@ -257,12 +257,17 @@ def _resolve_paths(root: str, claimed: list[str]) -> tuple[list[str], list[str]]
     """claim したパスを作業ツリー相対に正規化し、上限超過分を絶対パスで切り出す。
 
     作業ツリー外の絶対パスはここで落ちる (復元もしない — 残すと毎 Stop 走査され続ける)。
+    ディレクトリも落とす: 入れ子の git リポジトリは `git status -uall` でも `dir/` の
+    まま出てくるため、v0.3.0 が書いた state に残っている可能性がある。
     """
     rels: list[str] = []
     for path in claimed:
         rel = gitscan.to_relative(root, path)
-        if rel and rel not in rels:
-            rels.append(rel)
+        if not rel or rel in rels:
+            continue
+        if os.path.isdir(os.path.join(root, rel)):
+            continue
+        rels.append(rel)
     rels.sort()
     overflow = [os.path.join(root, r) for r in rels[MAX_REVIEW_PATHS:]]
     return rels[:MAX_REVIEW_PATHS], overflow
