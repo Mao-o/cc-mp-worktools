@@ -248,8 +248,8 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `python -c "..."`, `node -e "..."` | ask | ask | **allow** | ask | **allow** |
 | `echo "$(cat .env)"` (ダブルクォート内は展開されるため hard-stop 維持) | ask | ask | **allow** | ask | **allow** |
 | `cat \'$(cat .env)\'` (クォート外の `\'` は quote を開かないので `$(` が hard-stop) | ask | ask | **allow** | ask | **allow** |
-| `awk '{print}<CR>' .env` (`\r` はクォート内でも hard-stop) | ask | ask | **allow** | ask | **allow** |
-| `awk '{print} .env` (未終端クォート → shlex 失敗) | ask | ask | **allow** | ask | **allow** |
+| シングルクォート内に **生の CR バイト** を含む形 (例: `awk '{print}` + CR + `' .env`)。`\r` はクォート内でも hard-stop | ask | ask | **allow** | ask | **allow** |
+| `awk '{print} .env` (未終端クォート。0.18.0 では hard-stop を抜けた先の shlex 失敗で ask に倒れる = 到達経路が新しい) | ask | ask | **allow** | ask | **allow** |
 | `env cat .env`, `env FOO=1 cat .env`, `env -i cat .env`, `env -u HOME cat .env` (`env`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `command cat .env`, `command -p cat .env`, `command -- cat .env` (`command`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `builtin cat .env`, `nohup cat .env`, `nohup command cat .env` (`builtin` / `nohup`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
