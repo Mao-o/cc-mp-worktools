@@ -87,6 +87,76 @@ format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆�
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut
 
+## 0.17.0
+
+**`awk` / `sed` を `_OPAQUE_WRAPPERS` から除外** (bd_092a232e-5pn)。
+0.10.0 以降で **初めて判定境界 (deny / allow / ask) が変わるリリース**。
+
+### 背景
+
+0.16.0 の E2E 検証中に、`mutate` deny カテゴリ (`awk` / `sed`) が
+`bash_handler` から **到達不能** であることが判明した。`_is_opaque_first_token`
+が operand scan より先に発火して `ask_or_allow` を返すため。結果として:
+
+- `docs/MATRIX.md` / `docs/DESIGN.md` は mutate を deny として説明しているのに
+  実装では発火しない (コードとドキュメントの食い違い)
+- autonomous (auto / bypass / plan) では `sed -n 1,5p .env` のような**素直な
+  閲覧形が素通り**し、`.env` の中身が LLM コンテキストに載る
+
+後者は `docs/DESIGN.md` の「plugin 側で deny 固定が許される境界」
+(**機密 operand 確定 × 内容出力 / 破壊操作**) にそのまま該当する。つまり
+「方針では deny すべきものが opaque 分類の過剰適用で allow になっていた」状態。
+
+### 判断
+
+`_OPAQUE_WRAPPERS` に入れる基準は「**operand が静的に file path と判らない**」
+こと。`bash -c "..."` / `eval` / `python -c` の引数はコマンド文字列であって
+path ではないため opaque が妥当だが、awk / sed は script 引数の後ろの positional
+が素直に file operand なので基準に当てはまらない。よって除外する。
+
+副作用 (`sed -i` の in-place 書換 / `awk 'print > "f"'` の redirect) への慎重さは
+**`_SAFE_READ_FIRST_TOKENS` に入れない**ことで維持する。`sed s/x/y/ f > out` は
+residual metachar 経由で従来どおり `ask_or_allow` に倒れる。
+
+### 動作変化 (in-process 実測)
+
+| コマンド | 0.16.0 (default/auto) | 0.17.0 |
+|---|---|---|
+| `sed -n 1,5p .env` | ask / **allow** | **deny / deny** |
+| `sed -n '1,5p' .env` | ask / **allow** | **deny / deny** |
+| `sed 's/foo/bar/' .env` | ask / **allow** | **deny / deny** |
+| `sed -i 's/foo/bar/' .env` | ask / **allow** | **deny / deny** |
+| `awk /API/ .env` | ask / **allow** | **deny / deny** |
+| `awk -f script.awk .env` | ask / **allow** | **deny / deny** |
+| `sed -n p notes.txt` (非機密) | **ask** / allow | **allow / allow** |
+| `awk '{print}' .env` | ask / allow | ask / allow (不変) |
+| `sed s/x/y/ notes.txt > out` | ask / allow | ask / allow (不変) |
+
+非機密 operand の `sed` / `awk` が ask → allow に緩むのは副次効果で、0.12.0 /
+0.14.0 の false positive 削減と同じ方向。
+
+あわせて 0.16.0 で修正した `mutate` builder (info 不在時の dangling reference)
+が **実際に production 経路で効くようになった**。
+
+### 既知の残り穴
+
+`awk '{print}' .env` は `{` `}` `$` が `_HARD_STOP_CHARS` に該当し、opaque 判定
+より **前** の hard-stop で ask に倒れるため deny にならない (awk の最頻形)。
+閉じるには `_has_hard_stop` をシングルクォート内無視の quote-aware にする必要が
+あるが、全 segment 判定の入口を触るためリグレッション影響が大きい。別課題として
+切り出し、現状は `TestAwkSedOperandScan.test_brace_form_remains_hard_stop` で
+挙動を固定してリグレッション検知に使う。
+
+### テスト
+
+`TestAwkSedOperandScan` を新設 (735 件、+5)。機密 operand 6 形 × 4 mode の
+deny 固定、mutate カテゴリ到達、非機密の allow 化、副作用形の ask 維持、
+brace 形の現状固定をカバー。
+
+> 変更前は awk / sed の opaque 挙動を守るテストが **1 件も無かった** ため、
+> 730 件は全 green のまま境界が変わった。穴がテストで守られていなかったこと自体が
+> 「意図した設計ではなく過剰適用だった」ことの傍証。
+
 ## 0.16.0
 
 **Bash deny reason の silent degradation を解消** (PR6/1.0.0 ロードマップ

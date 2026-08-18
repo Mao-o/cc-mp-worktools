@@ -68,6 +68,16 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > `matched_pattern_keys: [...]` を出す。**deny 動作の判定境界は変化なし**で、
 > 下表の deny / allow / ask は 0.9.0 と完全に同じ。詳細は
 > [DESIGN.md](./DESIGN.md#bash-deny-の-category-別-reason-0100-e3--e4)。
+>
+> **0.17.0 で判定境界が変化** (0.10.0 以降で初): `awk` / `sed` を
+> `_OPAQUE_WRAPPERS` から外し operand scan に到達させた。opaque の基準は
+> 「operand が静的に file path と判らない」ことで、script 引数の後ろが素直に
+> file operand である awk / sed は当てはまらないため。
+> `sed -n 1,5p .env` / `sed -i s/x/y/ .env` / `awk /re/ .env` / `awk -f s.awk .env`
+> は **全 mode で deny 固定** になり、非機密 operand の `sed -n p notes.txt` は
+> ask → **allow** に緩む。`sed ... > out` 等の副作用形は
+> `_SAFE_READ_FIRST_TOKENS` 外のまま ask 維持。`awk '{...}'` は hard-stop が
+> 先に発火するため従来どおり (下表参照)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
@@ -82,6 +92,7 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 | `head .env \|\| cat $X \|\| echo done`, `cat $X \| head .env \| wc -l` (0.11.0: hard-stop segment を含んでも他 segment で literal match があれば deny に到達) |
 | `cat .env 2>/dev/null` (安全リダイレクト剥離後に機密 path) |
 | `grep SECRET .env`, `base64 .env`, `xxd .env` |
+| `sed -n 1,5p .env`, `sed 's/f/b/' .env`, `sed -i 's/f/b/' .env`, `awk /re/ .env`, `awk -f s.awk .env` (0.17.0: awk / sed を `_OPAQUE_WRAPPERS` から除外。`awk '{...}'` は hard-stop のため対象外) |
 | `timeout 1 cat .env`, `nice cat .env`, `stdbuf -o0 cat .env`, `busybox cat .env` |
 | `cp .env /tmp/x`, `mv .env .env.old` |
 | `curl file://.env`, `git show HEAD:.env` |
@@ -103,6 +114,7 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 | `cat README.md`, `grep foo README.md`, `cat README.md 2>/dev/null` |
 | `ls \| head`, `git status && git log 2>/dev/null \|\| true` |
 | `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
+| `sed -n p notes.txt`, `awk /x/ notes.txt` (0.17.0: opaque 除外の副次効果で ask → allow。false positive 減) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
 
@@ -219,7 +231,8 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `/usr/bin/env FOO=1 cat .env`, `/bin/command cat .env` (任意 path exec, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | ask | **allow** | ask | **allow** |
 | `sudo cat .env`, `xargs -a .env cat` | ask | ask | **allow** | ask | **allow** |
-| `python -c "..."`, `node -e "..."`, `awk '{print}' f`, `sed s/x/y f` | ask | ask | **allow** | ask | **allow** |
+| `python -c "..."`, `node -e "..."` | ask | ask | **allow** | ask | **allow** |
+| `awk '{print}' .env` (`{` `}` `$` が hard-stop、0.17.0 以降もここ) | ask | ask | **allow** | ask | **allow** |
 | `env cat .env`, `env FOO=1 cat .env`, `env -i cat .env`, `env -u HOME cat .env` (`env`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `command cat .env`, `command -p cat .env`, `command -- cat .env` (`command`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `builtin cat .env`, `nohup cat .env`, `nohup command cat .env` (`builtin` / `nohup`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |

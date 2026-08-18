@@ -393,8 +393,76 @@ class TestShellKeywordLenient(BaseBash):
         self.assertEqual(_decision(r), "ask")
 
 
+class TestAwkSedOperandScan(BaseBash):
+    """0.17.0: awk / sed は opaque を外れ operand scan に到達する。
+
+    背景 (bd_092a232e-5pn): opaque のままだと ``sed -n 1,5p .env`` が autonomous
+    で素通りし、DESIGN.md の確信 deny 条件 (機密 operand 確定 × 内容出力) と
+    実装が食い違っていた。opaque の基準は「operand が静的に file path と判らない」
+    ことであり、script 引数の後ろが素直に file operand である awk / sed は
+    当てはまらない。
+    """
+
+    #: 機密 operand を素直に取る形。全 mode で deny 固定になること。
+    SENSITIVE_FORMS = [
+        "sed -n 1,5p .env",
+        "sed -n '1,5p' .env",
+        "sed 's/foo/bar/' .env",
+        "sed -i 's/foo/bar/' .env",   # in-place 書換 = 破壊操作
+        "awk /API/ .env",
+        "awk -f script.awk .env",
+    ]
+
+    def test_sensitive_operand_denied_in_every_mode(self):
+        for cmd in self.SENSITIVE_FORMS:
+            for mode in ("default", "auto", "bypassPermissions", "plan"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_deny_reason_uses_mutate_category(self):
+        """0.16.0 で修正した mutate builder が実際に到達すること。"""
+        with open(os.path.join(self.tmp, ".env"), "w") as f:
+            f.write("API_KEY=secret\n")
+        r = handle(_make_envelope("sed 's/foo/bar/' .env", self.tmp))
+        reason = _reason(r)
+        self.assertIn("加工", reason)
+        self.assertIn("first_token: sed", reason)
+        self.assertIn("patch / diff", reason)
+
+    def test_non_sensitive_operand_now_allowed(self):
+        """副次効果: 非機密ファイルへの sed は ask から allow に緩む。"""
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        r = handle(_make_envelope("sed -n p notes.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_side_effect_form_still_asks(self):
+        """``> out`` を伴う形は _SAFE_READ_FIRST_TOKENS 外なので ask 維持。"""
+        for cmd in ("sed s/x/y/ notes.txt > out.txt",
+                    "awk /x/ notes.txt > out.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+
+    def test_brace_form_remains_hard_stop(self):
+        """既知の残り穴: ``awk '{...}'`` は hard-stop が先に発火して ask のまま。
+
+        閉じるには hard-stop を quote-aware にする必要があり別課題。
+        意図的な現状を固定してリグレッション検知に使う。
+        """
+        r = handle(_make_envelope("awk '{print}' .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("awk '{print}' .env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+
 class TestOpaqueWrapperLenient(BaseBash):
-    """opaque wrapper (eval/python/sudo/awk/sed/time/!/exec) は default=ask / auto/bypass=allow。"""
+    """opaque wrapper (eval/python/sudo/time/!/exec) は default=ask / auto/bypass=allow。
+
+    0.17.0 で ``awk`` / ``sed`` は opaque から外れた (operand が静的に file path と
+    判るため)。挙動は ``TestAwkSedOperandScan`` を参照。
+    """
 
     def test_eval_default(self):
         r = handle(_make_envelope("eval cat .env", self.tmp))

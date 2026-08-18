@@ -174,11 +174,27 @@ _SAFE_REDIRECT_TARGETS = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout"})
 # もの) もここに統合し、prefix normalize 経路を撤廃した。``FOO=1 cat .env``
 # のような env-assignment prefix は ``_ENV_PREFIX_RE`` で別途検出する (思想 1
 # = うっかり露出予防、敵対的防御は非目的)。
+#
+# 0.17.0: ``awk`` / ``sed`` を **除外** した。ここに入れる基準は「**operand が
+# 静的に file path と判らない**」こと (``bash -c "..."`` / ``eval`` /
+# ``python -c`` の引数はコマンド文字列であって path ではない)。awk / sed は
+# script 引数の後ろの positional が素直に file operand なので、この基準に
+# 当てはまらない。opaque のままだと ``sed -n 1,5p .env`` が autonomous で素通り
+# し、DESIGN.md が定める確信 deny 条件 (機密 operand 確定 × 内容出力) と実装が
+# 食い違っていた (bd_092a232e-5pn)。
+#
+# 副作用 (``sed -i`` の in-place / ``awk 'print > "f"'`` の redirect) への慎重さは
+# ``_SAFE_READ_FIRST_TOKENS`` に **入れない**ことで維持する — ``sed s/x/y/ f > out``
+# は residual metachar 経由で従来どおり ask_or_allow に倒れる。
+#
+# 残る穴: ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が ``_HARD_STOP_CHARS`` に
+# 該当し、opaque 判定より **前** の hard-stop で ask に倒れるため deny にならない。
+# hard-stop を quote-aware にすれば閉じるが、全 segment 判定の入口を触る変更に
+# なるため別課題として切り出した。
 _OPAQUE_WRAPPERS = frozenset({
     "bash", "sh", "zsh", "ksh", "fish", "dash",
     "eval",
     "python", "python3", "node", "ruby", "perl",
-    "awk", "sed",
     "xargs", "parallel",
     "sudo", "doas",
     "exec",   # ``exec -a name cmd`` 等プロセス置換系
