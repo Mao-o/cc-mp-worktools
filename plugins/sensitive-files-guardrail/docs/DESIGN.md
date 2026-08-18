@@ -169,7 +169,8 @@ od xxd hexdump`) を `handlers/bash/constants.py` に定義。第一トークン
   deny 固定。
 - hard-stop (`$(...)` / backtick / heredoc / `<`) は依然 `ask_or_allow` (= 静的
   解析不能、shell 展開で別コマンド出力が混入する経路を塞げないため)。
-- `_OPAQUE_WRAPPERS` (`awk`, `sed`, `bash -c`, `eval`, `sudo` 等) / `_SHELL_KEYWORDS`
+- `_OPAQUE_WRAPPERS` (`bash -c`, `eval`, `python -c`, `sudo` 等。0.17.0 で `awk` /
+  `sed` は除外) / `_SHELL_KEYWORDS`
   (`if`, `for` 等) は allow-list と disjoint なので、これらの ask 経路は不変。
 - `find` は `-delete` / `-exec` で副作用持ちうるため allow-list **外**。
 - `echo` は stdout 出力で「見る・数える」とは異なるため allow-list **外**。
@@ -444,7 +445,7 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 | `read_full` | `cat` / `less` / `more` / `bat` / `xxd` / `od` / `hexdump` / `base64` | 「全体閲覧」note + Read 同等 minimal info。Read tool 推奨は **minimal info を出せなかったときのみ** (0.16.0 で条件反転) |
 | `read_partial` | `head` / `tail` | 「先頭/末尾 N 行確認」note + 鍵 list の N 件 (head=先頭、tail=末尾)。`-n N` / `-N` (BSD) / `--lines=N` から N を抽出 |
 | `search` | `grep` / `rg` / `ag` / `ack` / `egrep` / `fgrep` | 「検索」note + `matched_pattern_keys: [...]` / `nomatch_pattern_keys: [...]` (E4 で抽出した env-var 名と dotenv の照合結果)。pattern 抽出 / 照合とも失敗時は全鍵 list (minimal info) に降りる |
-| `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨 |
+| `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨。**0.17.0 で到達可能になった** (それ以前は `_OPAQUE_WRAPPERS` 判定が先行して handler からは到達しない dead branch だった) |
 | `load` | `source` / `.` | 「shell load」note + minimal info + direnv (.envrc) / dotenv-cli / 1Password CLI 推奨 |
 | `move` | `cp` / `mv` | 「コピー / 移動」note + 1Password CLI / pass / git-secret + .env.example 派生推奨 |
 | `history` | `git` (subcommand `show` / `diff` / `log` で `.env` を参照したケース) | 「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。VCS pathspec の `:` 後尾から basename 抽出 |
