@@ -87,6 +87,86 @@ format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆�
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut
 
+## 0.18.0
+
+**`_has_hard_stop` を quote-aware 化** (bd_092a232e-y5y)。0.17.0 が残した
+「`awk '{print}' .env` が hard-stop で ask に倒れる」穴を塞ぐ。0.17.0 に続いて
+判定境界 (deny / allow / ask) が変わるリリース。
+
+### 背景
+
+0.17.0 で `awk` / `sed` を `_OPAQUE_WRAPPERS` から外して operand scan に到達
+させたが、awk の **最頻形** である `awk '{print}' .env` は `{` `}` `$` が
+`_HARD_STOP_CHARS` に該当し、opaque 判定より **前** の hard-stop で
+`ask_or_allow` に倒れていた。autonomous では allow = `.env` の中身が素通りする。
+
+Bash はシングルクォート内を一切展開しないため、そこに現れる hard-stop char は
+静的解析を妨げない。`_has_hard_stop` を「シングルクォート内を無視する」
+quote-aware 判定にすれば、特例を足さずに本来の operand scan に到達する。
+
+### 判断 — 緩める側と緩めない側の非対称
+
+`_has_hard_stop` は **全 segment 判定の入口**で、ここが desync すると guard が
+そのまま落ちる (`_split_command_on_operators` の desync は segment 境界がずれる
+だけなのと対照的)。よって「シングルクォート内と見なす範囲」は Bash より広く
+ならないようにし、以下は意図的に strict のまま残した:
+
+- **ダブルクォート内は hard-stop 維持** — `echo "$(cat .env)"` は展開される
+- **クォート外のバックスラッシュは quote を開かない** — `\'` は literal `'` で
+  あってシングルクォート開始ではない (Bash 仕様)。ここを取り違えると
+  `cat \'$(cat .env)\'` で guard が落ちる。一方 `\$` `\(` 自体は hard-stop と
+  して数え続けるため、攻撃シナリオ `cat <(echo \(\)) < .env` は挙動不変
+- **`\r` はクォート状態を問わず hard-stop** — CR は展開ではなく端末表示偽装の
+  guard なので「展開されない = 安全」の理屈が当てはまらない
+
+### 動作変化 (in-process 実測 / 差分スキャンで全既存テストコマンドを突合)
+
+| コマンド | 0.17.0 (default/auto) | 0.18.0 |
+|---|---|---|
+| `awk '{print}' .env` | ask / **allow** | **deny / deny** |
+| `awk '{print $1}' .env` | ask / **allow** | **deny / deny** |
+| `sed 's/(=)/X/' .env` | ask / **allow** | **deny / deny** |
+| `git ls-files --format='%(objectname)' .env` | ask / **allow** | **deny / deny** |
+| `grep '(=)' notes.txt` (非機密) | **ask** / allow | **allow / allow** |
+| `awk '{print $1}' notes.txt` (非機密) | **ask** / allow | **allow / allow** |
+| `echo "$(cat .env)"` | ask / allow | ask / allow (不変) |
+| `cat <(echo \(\)) < .env` | ask / allow | ask / allow (不変) |
+| `cat \'$(cat .env)\'` | ask / allow | ask / allow (不変) |
+| `bash -c 'cat .env'` | ask / allow | ask / allow (不変、opaque が先) |
+
+`git ls-files --format='%(objectname)' .env` が deny になるのは
+**ハーネス委譲方針 ([[sfg-lenient-policy]]) の反転ではない**。`--format` は
+以前から `_GIT_LS_FILES_OBJECT_OPTS` に登録済みで、`-s` / `--stage` と同じ
+「blob object name = 内容の指紋を出す」deny 対象だった。1.0.0 で ask に降格
+していたのは *segment が静的解析不能だったから* であり、quote-aware 化で
+`(` `)` がクォート内の literal と判った時点でその前提が消える。特例を足したの
+ではなく、既存の deny 経路が開通しただけ。
+
+非機密 operand が ask → allow に緩むのは 0.16.0 (`sed -n p notes.txt`) と同じ
+方向の副次効果 (false positive 削減)。
+
+### テスト
+
+745 件 (+10、うち 3 件は既存テストの改名 + 期待値更新)。
+
+- 新設 `TestQuoteAwareHardStop` (10 件): (1) awk brace 形の deny を default /
+  auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
+  `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
+  `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
+  opaque wrapper の判定順を固定
+- 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
+  `test_brace_form_denies_after_quote_aware_hard_stop`、
+  `test_sed_paren_with_dotenv_arg_still_ask` →
+  `test_sed_paren_with_dotenv_arg_now_deny`、
+  `test_git_ls_files_format_objectname_hard_stop_ask_or_allow` →
+  `test_git_ls_files_format_objectname_dotenv_deny` (deny は mode 非依存なので
+  4 mode すべて deny を assert)
+
+> 影響範囲は実装前に **テスト実行を計装した差分スキャン** で確定させた
+> (既存テストが `handle()` に渡す 330 コマンド × mode を quote-aware 版と
+> 突合)。decision が変わったのは上記 3 コマンドのみで、いずれも ask → deny の
+> 締め方向。緩む方向の変化はコーパス上ゼロだった。
+
 ## 0.17.0
 
 **`awk` / `sed` を `_OPAQUE_WRAPPERS` から除外** (bd_092a232e-5pn)。
@@ -146,6 +226,9 @@ residual metachar 経由で従来どおり `ask_or_allow` に倒れる。
 あるが、全 segment 判定の入口を触るためリグレッション影響が大きい。別課題として
 切り出し、現状は `TestAwkSedOperandScan.test_brace_form_remains_hard_stop` で
 挙動を固定してリグレッション検知に使う。
+
+> この穴は 0.18.0 (bd_092a232e-y5y) で塞いだ。上記テストは
+> `test_brace_form_denies_after_quote_aware_hard_stop` に改名済み。
 
 ### テスト
 

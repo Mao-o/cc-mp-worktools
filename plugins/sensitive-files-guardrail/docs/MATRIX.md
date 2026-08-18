@@ -77,7 +77,19 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > は **全 mode で deny 固定** になり、非機密 operand の `sed -n p notes.txt` は
 > ask → **allow** に緩む。`sed ... > out` 等の副作用形は
 > `_SAFE_READ_FIRST_TOKENS` 外のまま ask 維持。`awk '{...}'` は hard-stop が
-> 先に発火するため従来どおり (下表参照)。
+> 先に発火するため 0.17.0 時点では対象外だった。
+>
+> **0.18.0 で判定境界が変化**: `_has_hard_stop` を **quote-aware** にし、
+> シングルクォート内の hard-stop char (`$` `` ` `` `(` `)` `{` `}` `<`) を
+> 無視する。Bash はシングルクォート内を展開しないため静的解析を妨げない。
+> これで 0.17.0 の残り穴だった `awk '{print}' .env` / `sed 's/(=)/X/' .env` が
+> operand scan に到達し **全 mode で deny** になる。`git ls-files
+> --format='%(objectname)' .env` も本来の `_GIT_LS_FILES_OBJECT_OPTS` 経路
+> (`-s` / `--stage` と同じ deny) に到達する。緩めない側: ダブルクォート内
+> (`echo "$(cat .env)"` は展開されるため ask 維持)、クォート外のバックスラッシュ
+> エスケープ (`\'` はクォートを開かない)、`\r` (端末表示偽装 guard なので
+> クォート内でも hard-stop)。副次効果として非機密 operand の
+> `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt` は ask → **allow** に緩む。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
@@ -92,7 +104,8 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 | `head .env \|\| cat $X \|\| echo done`, `cat $X \| head .env \| wc -l` (0.11.0: hard-stop segment を含んでも他 segment で literal match があれば deny に到達) |
 | `cat .env 2>/dev/null` (安全リダイレクト剥離後に機密 path) |
 | `grep SECRET .env`, `base64 .env`, `xxd .env` |
-| `sed -n 1,5p .env`, `sed 's/f/b/' .env`, `sed -i 's/f/b/' .env`, `awk /re/ .env`, `awk -f s.awk .env` (0.17.0: awk / sed を `_OPAQUE_WRAPPERS` から除外。`awk '{...}'` は hard-stop のため対象外) |
+| `sed -n 1,5p .env`, `sed 's/f/b/' .env`, `sed -i 's/f/b/' .env`, `awk /re/ .env`, `awk -f s.awk .env` (0.17.0: awk / sed を `_OPAQUE_WRAPPERS` から除外) |
+| `awk '{print}' .env`, `awk '{print $1}' .env`, `sed 's/(=)/X/' .env` (0.18.0: hard-stop が quote-aware になりシングルクォート内 `{` `}` `$` `(` `)` を無視。0.17.0 の残り穴が閉じた) |
 | `timeout 1 cat .env`, `nice cat .env`, `stdbuf -o0 cat .env`, `busybox cat .env` |
 | `cp .env /tmp/x`, `mv .env .env.old` |
 | `curl file://.env`, `git show HEAD:.env` |
@@ -115,6 +128,7 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 | `ls \| head`, `git status && git log 2>/dev/null \|\| true` |
 | `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
 | `sed -n p notes.txt`, `awk /x/ notes.txt` (0.17.0: opaque 除外の副次効果で ask → allow。false positive 減) |
+| `grep '(=)' notes.txt`, `awk '{print $1}' notes.txt`, `echo '$(cat .env)'` (0.18.0: hard-stop quote-aware 化の副次効果で ask → allow。シングルクォート内は展開されない) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
 
@@ -184,7 +198,7 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `file -f .env`, `file --files-from=.env` (各行を名前扱いしエラーに echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `wc --files0-from=.env`, `du --files0-from=.env`, `tree --fromfile .env` | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `file .env`, `wc -l .env`, `du -sh .env`, `tree .env` (通常形、内容は出ない) | allow | allow | allow | allow | allow |
-| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files -sz .env` (blob object name = 内容の指紋) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files -sz .env` (blob object name = 内容の指紋。`--format` 形は 0.17.0 まで `(` の hard-stop で ask に降格していたが 0.18.0 の quote-aware 化で表どおり deny に到達) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `tree >\| .env` (`>\|` clobber は `\|` が segment 分割で割れる既知限界、思想 1 射程外) | allow | allow | allow | allow | allow |
 
@@ -232,7 +246,10 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | ask | **allow** | ask | **allow** |
 | `sudo cat .env`, `xargs -a .env cat` | ask | ask | **allow** | ask | **allow** |
 | `python -c "..."`, `node -e "..."` | ask | ask | **allow** | ask | **allow** |
-| `awk '{print}' .env` (`{` `}` `$` が hard-stop、0.17.0 以降もここ) | ask | ask | **allow** | ask | **allow** |
+| `echo "$(cat .env)"` (ダブルクォート内は展開されるため hard-stop 維持) | ask | ask | **allow** | ask | **allow** |
+| `cat \'$(cat .env)\'` (クォート外の `\'` は quote を開かないので `$(` が hard-stop) | ask | ask | **allow** | ask | **allow** |
+| `awk '{print}<CR>' .env` (`\r` はクォート内でも hard-stop) | ask | ask | **allow** | ask | **allow** |
+| `awk '{print} .env` (未終端クォート → shlex 失敗) | ask | ask | **allow** | ask | **allow** |
 | `env cat .env`, `env FOO=1 cat .env`, `env -i cat .env`, `env -u HOME cat .env` (`env`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `command cat .env`, `command -p cat .env`, `command -- cat .env` (`command`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `builtin cat .env`, `nohup cat .env`, `nohup command cat .env` (`builtin` / `nohup`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |

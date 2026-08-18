@@ -10,6 +10,8 @@
   literal に fnmatch するときだけ deny 固定。それ以外の glob は ``ask_or_allow``
   (0.3.2〜0.7.x の既定 rules 候補列挙は 0.8.0 で撤廃)
 - ``<`` 入力リダイレクト系は hard-stop で ``ask_or_allow`` (0.7.0)
+- hard-stop 判定は quote-aware。シングルクォート内の該当 char は無視する
+  (0.18.0, ``TestQuoteAwareHardStop``)。ダブルクォート内と ``\\r`` は維持
 - ``patterns.txt`` 読込失敗 → 全 mode で ``make_deny`` 固定
 """
 from __future__ import annotations
@@ -218,6 +220,9 @@ class TestHardStopLenient(BaseBash):
     """hard-stop metachar (`$`, ``(``, `{`, ``<``, バッククォート) は default=ask /
     auto/bypass=allow。0.7.0 で ``<`` 入力リダイレクトの target 抽出を撤廃し、
     全 hard-stop が ``ask_or_allow`` 一本に統合された。
+
+    ここで扱うのは **クォート外 / ダブルクォート内** の hard-stop。0.18.0 以降
+    シングルクォート内は展開されないものとして除外される (``TestQuoteAwareHardStop``)。
     """
 
     def test_variable_expansion_default(self):
@@ -445,16 +450,19 @@ class TestAwkSedOperandScan(BaseBash):
                 r = handle(_make_envelope(cmd, self.tmp))
                 self.assertEqual(_decision(r), "ask")
 
-    def test_brace_form_remains_hard_stop(self):
-        """既知の残り穴: ``awk '{...}'`` は hard-stop が先に発火して ask のまま。
+    def test_brace_form_denies_after_quote_aware_hard_stop(self):
+        """0.18.0: ``awk '{...}' .env`` は quote-aware 化で operand scan に到達。
 
-        閉じるには hard-stop を quote-aware にする必要があり別課題。
-        意図的な現状を固定してリグレッション検知に使う。
+        0.17.0 までは ``{`` ``}`` ``$`` が hard-stop に該当し opaque 判定より前に
+        ask へ倒れていた (awk 最頻形の穴)。シングルクォート内は展開されないため
+        hard-stop から除外され、機密 operand 確定 × 内容出力で deny になる。
         """
-        r = handle(_make_envelope("awk '{print}' .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-        r = handle(_make_envelope("awk '{print}' .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
+        for mode in ("default", "auto", "bypassPermissions"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(
+                    "awk '{print}' .env", self.tmp, mode=mode,
+                ))
+                self.assertEqual(_decision(r), "deny")
 
 
 class TestOpaqueWrapperLenient(BaseBash):
@@ -1107,6 +1115,10 @@ class TestSegmentHardStopReevaluate(BaseBash):
 
     思想 1 (うっかり露出予防、敵対的防御は非目的) との整合: 攻撃シナリオ
     ``cat <(echo \\(\\)) < .env`` は全 segment が hard-stop となるため挙動不変。
+
+    0.18.0: hard-stop 判定自体が quote-aware になったため、``sed 's/(=)/X/' .env``
+    のようにクォート内にのみ hard-stop char がある segment は operand scan に
+    到達して deny になる (``TestQuoteAwareHardStop`` 参照)。
     """
 
     # --- 核心: ユーザー報告ケース ---
@@ -1192,11 +1204,12 @@ class TestSegmentHardStopReevaluate(BaseBash):
         r = handle(_make_envelope("cat $X || cat $Y", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_sed_paren_with_dotenv_arg_still_ask(self):
-        # sed 's/(=)/X/' .env — 1 segment 全体 hard-stop (`(`) → pending_ask
-        # (sed は opaque wrapper だが hard-stop が先に発火)
+    def test_sed_paren_with_dotenv_arg_now_deny(self):
+        # sed 's/(=)/X/' .env — 0.17.0 までは `(` の hard-stop が先に発火して ask。
+        # 0.18.0 の quote-aware 化でシングルクォート内の `(` `)` が除外され、
+        # 0.17.0 で opaque を外した sed の operand scan が `.env` を捕まえて deny。
         r = handle(_make_envelope("sed 's/(=)/X/' .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
     # --- reason 文確認 (E3 dispatch との整合) ---
     def test_deny_reason_includes_first_token_and_minimal_info(self):
@@ -1219,6 +1232,114 @@ class TestSegmentHardStopReevaluate(BaseBash):
         self.assertIn("first_token: cat", reason)
         self.assertIn(".env.local", reason)
         self.assertIn("DATABASE_URL", reason)
+
+
+class TestQuoteAwareHardStop(BaseBash):
+    """0.18.0: ``_has_hard_stop`` はシングルクォート内の hard-stop char を無視する。
+
+    Bash はシングルクォート内を一切展開しないため、``awk '{print}' .env`` の
+    ``{`` ``}`` ``$`` は静的解析を妨げない。0.17.0 で awk / sed を opaque から
+    外した際に残っていた「最頻形が hard-stop で ask に倒れる」穴を塞ぐ。
+
+    緩めない側 (意図的な非対称、guard を落とさないため):
+
+    - ダブルクォート内は展開されるので hard-stop 維持
+    - クォート外のバックスラッシュは quote を開かないが、``\\$`` ``\\(`` 自体は
+      hard-stop として数え続ける (既存の攻撃シナリオを挙動不変に保つ)
+    - ``\\r`` はクォート状態を問わず hard-stop (端末表示偽装 guard)
+    """
+
+    # --- (1) 本命: シングルクォート内 hard-stop の解除 → deny 到達 ---
+    def test_awk_brace_script_dotenv_deny_both_modes(self):
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(
+                    "awk '{print}' .env", self.tmp, mode=mode,
+                ))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_awk_brace_script_with_dollar_field_dotenv_deny_both_modes(self):
+        # `$1` の `$` もシングルクォート内なので展開されない。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(
+                    "awk '{print $1}' .env", self.tmp, mode=mode,
+                ))
+                self.assertEqual(_decision(r), "deny")
+
+    # --- (2) ダブルクォート内は展開されるので hard-stop 維持 ---
+    def test_double_quoted_command_substitution_keeps_hard_stop(self):
+        cmd = 'echo "$(cat .env)"'
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_single_quoted_command_substitution_is_literal(self):
+        # `echo '$(cat .env)'` は literal 文字列を表示するだけなので解除して良い。
+        cmd = "echo '$(cat .env)'"
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertTrue(output.is_allow(r))
+
+    # --- (3) 攻撃シナリオは挙動不変 (思想 1: 既存の安全性を下げない) ---
+    def test_attack_scenario_process_sub_and_redirect_unchanged(self):
+        cmd = "cat <(echo \\(\\)) < .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_backslash_escaped_quote_does_not_open_single_quote(self):
+        # `\'` は literal `'` であってシングルクォート開始ではない。ここを
+        # 取り違えると `$(cat .env)` が「クォート内」と誤認され guard が落ちる。
+        cmd = "cat \\'$(cat .env)\\'"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_cr_inside_single_quote_still_hard_stop(self):
+        # CR は展開 guard ではなく端末表示偽装 guard なのでクォート内でも維持。
+        cmd = "awk '{print}\r' .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_unterminated_single_quote_falls_back_to_tokenize_failed(self):
+        # hard-stop を抜けても shlex.split が ValueError → ask_or_allow。
+        cmd = "awk '{print} .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    # --- 緩む側の副次効果を明示的に固定 (0.16.0 の非機密 sed と同じ方向) ---
+    def test_non_sensitive_operand_with_quoted_metachar_now_allow(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("grep '(=)' notes.txt", "awk '{print $1}' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    # --- opaque wrapper は quote 解除後も opaque のまま (判定順の確認) ---
+    def test_opaque_wrapper_with_quoted_script_still_ask(self):
+        for cmd in ("bash -c 'cat .env'",
+                    "python3 -c 'print(open(\".env\").read())'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
 
 
 class TestSafeReadAllowlist(BaseBash):
@@ -1432,20 +1553,19 @@ class TestMetadataOnlyAllow(BaseBash):
         r = handle(_make_envelope("git ls-files --stage .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_git_ls_files_format_objectname_hard_stop_ask_or_allow(self):
-        # ``--format='%(objectname)'`` は ``(``/``)`` を含むため segment hard-stop
-        # に該当し ``ask_or_allow`` に降格する (1.0.0: hard-stop 特例撤去)。
-        # default では ask、auto/bypass/plan の autonomous では allow に倒れる。
-        # ハーネス委譲方針 ([[sfg-lenient-policy]]) に従い、静的解析不能 segment は
-        # plugin 側で deny 強制せず Claude Code ハーネスの別軸監視に委ねる。
+    def test_git_ls_files_format_objectname_dotenv_deny(self):
+        # ``--format='%(objectname)'`` は blob object name (= 内容の指紋) を出す
+        # ため ``_GIT_LS_FILES_OBJECT_OPTS`` に登録済みで、本来 ``-s`` / ``--stage``
+        # と同じ deny 経路に乗る。0.17.0 までは ``(``/``)`` の hard-stop が先に
+        # 発火して ask_or_allow に降格していた (ハーネス委譲扱い) が、0.18.0 の
+        # quote-aware 化で segment が静的解析可能になり本来の operand scan に到達。
+        # deny は mode 非依存なので全 mode で deny。
         cmd = "git ls-files --format='%(objectname)' .env"
-        r = handle(_make_envelope(cmd, self.tmp))
-        self.assertEqual(_decision(r), "ask")
-        for mode in ("auto", "bypassPermissions", "plan"):
+        for mode in ("default", "auto", "bypassPermissions", "plan"):
             r = handle(_make_envelope(cmd, self.tmp, mode=mode))
-            self.assertTrue(
-                output.is_allow(r),
-                msg=f"{mode!r} should allow but got {_decision(r)!r}",
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{mode!r} should deny but got {_decision(r)!r}",
             )
 
     def test_git_ls_files_short_bundle_stage_dotenv_deny(self):

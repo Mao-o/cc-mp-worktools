@@ -22,8 +22,9 @@ segment 単位再評価へ移行)。
 
 1. **segment split** — ``&&`` ``||`` ``;`` ``|`` ``\\n`` を quote-aware に分割。
 2. **per-segment 解析** — 各セグメントで:
-   - **hard-stop 再判定 (0.11.0)** — ``$`` ``(`` ``)`` ``{`` ``}`` ``<``
-     バッククォート ``\\r`` を含む segment は静的解析不能のため
+   - **hard-stop 再判定 (0.11.0 / 0.18.0 quote-aware)** — ``$`` ``(`` ``)``
+     ``{`` ``}`` ``<`` バッククォート ``\\r`` を **クォート外またはダブル
+     クォート内に** 含む segment は静的解析不能のため
      ``ask_or_allow`` を ``pending_ask`` に格納して **continue** (他 segment の
      deny 検出を続ける)。0.10.0 までは command 全体に hard-stop が 1 つでも
      あると early return していたが、``cat .env | sed 's/(=)/X/'`` のような
@@ -31,7 +32,9 @@ segment 単位再評価へ移行)。
      していたため、segment 単位再評価に細粒度化。攻撃シナリオ ``cat <(echo
      \\(\\)) < .env`` は全 segment hard-stop となるため挙動不変 (思想 1
      整合)。0.3.4〜0.6.x で ``<`` のみ target を抽出していた経路は 0.7.0 で
-     撤廃済み。
+     撤廃済み。0.18.0 でシングルクォート内の hard-stop char を無視するように
+     し、``awk '{print}' .env`` / ``sed 's/(=)/X/' .env`` が operand scan に
+     到達するようになった (詳細は ``handlers/bash/segmentation.py``)。
    - shlex.split → 失敗 → ``ask_or_allow`` を ``pending_ask`` に格納して continue
    - 安全リダイレクト剥離 (``>/dev/null`` / ``2>&1`` 等)
    - **opaque first token 判定 (0.8.0)** — 第一トークンが env-assignment
@@ -507,6 +510,8 @@ def handle(envelope: dict) -> dict:
     #    原因で全体 ask に倒れ autonomous で素通りしていたため細粒度化。
     #    攻撃シナリオ ``cat <(echo \\(\\)) < .env`` は全 segment hard-stop と
     #    なるため挙動不変 (思想 1 整合)。
+    #    0.18.0: ``_has_hard_stop`` が quote-aware になり、シングルクォート内の
+    #    hard-stop char (``awk '{print}'`` の ``{`` ``}`` ``$``) は無視される。
     segments = _split_command_on_operators(command)
     if not segments:
         return output.make_allow()

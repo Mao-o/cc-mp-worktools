@@ -153,6 +153,8 @@ _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
+# 0.18.0: 判定 (``_has_hard_stop``) は quote-aware になり、**シングルクォート内**
+# の該当 char は展開されないため無視する (``\r`` のみクォート内でも hard-stop)。
 _HARD_STOP_CHARS = frozenset("$`(){}<\r")
 
 # セグメント内に剥がしきれずに残ると ``ask_or_allow`` する metachar セット。
@@ -187,10 +189,10 @@ _SAFE_REDIRECT_TARGETS = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout"})
 # ``_SAFE_READ_FIRST_TOKENS`` に **入れない**ことで維持する — ``sed s/x/y/ f > out``
 # は residual metachar 経由で従来どおり ask_or_allow に倒れる。
 #
-# 残る穴: ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が ``_HARD_STOP_CHARS`` に
-# 該当し、opaque 判定より **前** の hard-stop で ask に倒れるため deny にならない。
-# hard-stop を quote-aware にすれば閉じるが、全 segment 判定の入口を触る変更に
-# なるため別課題として切り出した。
+# 0.18.0 (bd_092a232e-y5y): ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が
+# ``_HARD_STOP_CHARS`` に該当し opaque 判定より **前** の hard-stop で ask に
+# 倒れていた (awk 最頻形の穴)。``_has_hard_stop`` を quote-aware
+# (シングルクォート内を無視) にして operand scan に到達させ、この穴を塞いだ。
 _OPAQUE_WRAPPERS = frozenset({
     "bash", "sh", "zsh", "ksh", "fish", "dash",
     "eval",

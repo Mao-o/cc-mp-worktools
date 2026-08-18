@@ -112,7 +112,7 @@ dontAsk では `ask` 維持。**autonomous モードでは Claude Code ハーネ
 | `<` 入力リダイレクトの character-level parser | 0.7.0 (A1) | `cat <(echo \(\)) < .env` の escape paren depth tracking など敵対的バイパス対策が思想 1 に反する |
 | FOO=1 / env / sudo 等の prefix normalize | 0.8.0 (A4) | 「`FOO=1 cat .env` を `cat .env` に書き戻す」は敵対的解釈で思想 1 に反する |
 | 既定 rules 候補列挙 (glob × literal stem の連結候補化) | 0.8.0 (B3) | `*.log` が `.env.log` 連結で巻き込まれる false positive |
-| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 1.0.0 | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 |
+| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 1.0.0 | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 (0.18.0 で `_has_hard_stop` が quote-aware になり、この形は **特例なしで** 通常の operand scan に到達して deny する) |
 
 外部レビュー (Codex 等) が判断困難ケースの deny 強制を要求してきた場合も、
 本方針を根拠に「ask_or_allow で十分、それ以上の deny 強制はハーネス委譲する」と
@@ -185,6 +185,25 @@ ask に倒れ autonomous で `cat .env*` が素通りしていた。0.11.0 で�
 畳む)。攻撃シナリオ `cat <(echo \(\)) < .env` は全 segment が hard-stop と
 なるため挙動不変 (思想 1 整合)。
 
+**0.18.0 (bd_092a232e-y5y)**: `_has_hard_stop` を **quote-aware** にした。Bash は
+シングルクォート内を一切展開しないため、そこに現れる hard-stop char は静的解析を
+妨げない。これで 0.17.0 の残り穴 (`awk '{print}' .env` が `{` `}` `$` により
+opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形が operand scan に
+到達する。`git ls-files --format='%(objectname)' .env` も本来の
+`_GIT_LS_FILES_OBJECT_OPTS` 経路 (= `-s` / `--stage` と同じ deny) に到達する。
+
+緩めない側は意図的に非対称にしてある (guard を落とさないため):
+
+- **ダブルクォート内は hard-stop 維持** — `echo "$(cat .env)"` は展開される
+- **クォート外のバックスラッシュは quote を開かない** — `\'` は literal `'`
+  であってシングルクォート開始ではない (Bash 仕様)。取り違えると
+  `cat \'$(cat .env)\'` で guard が落ちる。一方 `\$` `\(` 自体は hard-stop として
+  数え続けるため `cat <(echo \(\)) < .env` は挙動不変
+- **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
+
+副次効果として非機密 operand の `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt`
+は ask → allow に緩む (0.16.0 の `sed -n p notes.txt` と同じ方向、false positive 減)。
+
 ### metadata-only first_token allow-list (0.14.0)
 
 `_METADATA_ONLY_FIRST_TOKENS` (`ls tree stat file du df test wc basename
@@ -245,8 +264,10 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   `git ls-files .env` / `--error-unmatch` は名前一覧のみなので metadata-only
   維持。`-s` / `--stage` / `-sz` 等は blob object name (= 内容の安定した指紋)
   を出せるため operand scan → deny に倒す (Codex P2 第3弾, 2026-06-12)。
-  `--format=%(...)` の quote 内に `(` を含む形は segment hard-stop に該当し、
-  1.0.0 のハーネス委譲方針整理で **ask_or_allow に降格** (autonomous で allow)。
+  `--format=%(...)` の quote 内に `(` を含む形は 0.17.0 まで segment hard-stop に
+  該当し ask_or_allow に降格していた (1.0.0 のハーネス委譲方針整理)。0.18.0 の
+  quote-aware 化で segment が静的解析可能になり、**特例を足すことなく** `-s` /
+  `--stage` と同じ deny 経路に到達する。
   pathspec 無し形 (`git ls-files -s` 単体、機密 path operand 無し) も
   operand scan が allow に倒す (内容露出には機密 path commit が前提のため)。
 - **機密 path への redirect 書込み** (`ls > .env` で .env を truncate) は
@@ -576,9 +597,10 @@ deny reason のキー名ガイド:
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
-   `awk`, `sed`, `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
+   `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
    などは静的解析できず、default モードでは ask、auto/bypass モードでは
-   **allow** に倒す。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
+   **allow** に倒す (`awk` / `sed` は 0.17.0 で opaque を外れ、0.18.0 の
+   hard-stop quote-aware 化で `awk '{...}' .env` 形も operand scan に到達する)。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
    `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` も
    ``ask_or_allow`` に格下げした (0.3.2〜0.7.x の prefix normalize は撤廃)。
 3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0、0.11.0 で segment 単位
