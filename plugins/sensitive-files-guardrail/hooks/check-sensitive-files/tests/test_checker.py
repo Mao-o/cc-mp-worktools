@@ -19,6 +19,7 @@ from checker import (  # noqa: E402
     find_sensitive_files,
     is_git_repo,
     load_patterns,
+    repo_context,
 )
 
 
@@ -86,6 +87,29 @@ class TestIsGitRepo(BaseWithTmpRepo):
 
     def test_false_outside_repo(self):
         self.assertFalse(is_git_repo(self.tmp))
+
+
+class TestRepoContext(BaseWithTmpRepo):
+    """``repo_context`` (0.19.0): toplevel と cwd prefix を 1 回の rev-parse で得る。"""
+
+    def test_root_has_empty_prefix(self):
+        ctx = repo_context(str(self.repo))
+        self.assertIsNotNone(ctx)
+        toplevel, prefix = ctx
+        self.assertEqual(Path(toplevel).resolve(), self.repo.resolve())
+        self.assertEqual(prefix, "")
+
+    def test_subdirectory_prefix_has_trailing_slash(self):
+        sub = self.repo / "sub" / "deep"
+        sub.mkdir(parents=True)
+        ctx = repo_context(str(sub))
+        self.assertIsNotNone(ctx)
+        toplevel, prefix = ctx
+        self.assertEqual(Path(toplevel).resolve(), self.repo.resolve())
+        self.assertEqual(prefix, "sub/deep/")
+
+    def test_non_git_dir_is_none(self):
+        self.assertIsNone(repo_context(self.tmp))
 
 
 class TestFindSensitiveFiles(BaseWithTmpRepo):

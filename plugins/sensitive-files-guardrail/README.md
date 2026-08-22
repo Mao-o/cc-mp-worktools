@@ -296,8 +296,9 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 `.env` / committed 証明書で毎ターン block が出続けるのを止めるため)。新しい機密
 ファイルが増えたとき、または untracked → tracked のように状態が変わったときだけ
 再 block する。報告済み集合は
-`~/.claude/sensitive-files-guardrail/stop-ack/<session_id>` に cwd + path の
-sha256 digest で記録し (平文 path は残さない。別 repo に `cd` すれば再 block)、
+`~/.claude/sensitive-files-guardrail/stop-ack/<session_id>` に repo root + root
+相対 path の sha256 digest で記録し (平文 path は残さない。別 repo に `cd` すれば
+再 block、同じ repo 内のサブディレクトリ移動では再 block しない)、
 最後の block から 7 日で自動 GC。hook input に `session_id` が無ければ従来通り
 毎回 block する。state の読み書きに失敗したときは stderr に
 `stop_ack_unavailable` を出して従来通り block する。
@@ -328,9 +329,11 @@ sha256 digest で記録し (平文 path は残さない。別 repo に `cd` す�
 > このセクション配下への追記を既定として案内する (全プロジェクト共通の行は
 > 明示的な選択)。案内中の `$CLAUDE_PROJECT_DIR` は **展開されない** プレース
 > ホルダで、書くときはプロジェクト root の絶対パスを literal に書く。空ヘッダー
-> (`[project:]`) や `$` を含むヘッダーはどのプロジェクトにも一致せず無視される
-> が、黙らず `local_patterns_header_invalid` を stderr (Read/Bash 側は
-> `~/.claude/logs/redact-hook.log` にも) に出す。
+> (`[project:]`) や未展開の変数参照 (`$CLAUDE_PROJECT_DIR` / 先頭が `$NAME` 形)
+> のヘッダーはどのプロジェクトにも一致せず無視されるが、黙らず
+> `local_patterns_header_invalid` を stderr (Read/Bash 側は
+> `~/.claude/logs/redact-hook.log` にも) に出す。`/work/project$prod` のように
+> `$` を途中に含むだけの literal パスは正当なヘッダーとして扱う。
 
 詳細な設定例・false positive 対策・`_detect_format` との同期は
 [docs/PATTERNS.md](./docs/PATTERNS.md) 参照。

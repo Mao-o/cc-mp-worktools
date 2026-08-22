@@ -419,6 +419,51 @@ class TestBadProjectHeaderWarn(BaseWithIsolatedHome):
         )
         self.assertEqual(rules, [])
 
+    def test_literal_dollar_in_path_is_a_valid_header(self):
+        # `/work/project$prod` のような `$` 入り literal パスは正当なヘッダー
+        # (Codex R2 P2-1: 当初は placeholder 扱いでセクションが黙って落ちていた)
+        from _shared.patterns import _parse_local_patterns_text
+        calls: list[str] = []
+        text = "[project:/work/project$prod]\n!x.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/work/project$prod", calls.append),
+            [("x.pem", True)],
+        )
+        self.assertEqual(calls, [])
+        # 別プロジェクトでは不一致 (通常のセクション挙動) で警告も出ない
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/work/other", calls.append), []
+        )
+        self.assertEqual(calls, [])
+
+    def test_placeholder_syntax_forms_are_detected(self):
+        from _shared.patterns import (
+            PROJECT_HEADER_WARN_PLACEHOLDER,
+            _parse_local_patterns_text,
+        )
+        for header in (
+            "$CLAUDE_PROJECT_DIR",
+            "${CLAUDE_PROJECT_DIR}",
+            "$CLAUDE_PROJECT_DIR/sub",
+            "/prefix/$CLAUDE_PROJECT_DIR",
+            "$HOME/work",
+            "${PWD}",
+            "$PWD",
+        ):
+            calls: list[str] = []
+            rules = _parse_local_patterns_text(
+                f"[project:{header}]\n!x.pem\n", "/work/p", calls.append
+            )
+            self.assertEqual(rules, [], msg=header)
+            self.assertEqual(
+                calls, [PROJECT_HEADER_WARN_PLACEHOLDER], msg=header
+            )
+
+    def test_dollar_mid_path_forms_are_not_placeholders(self):
+        from _shared.patterns import _bad_header_token
+        for header in ("/work/project$prod", "/srv/app$1", "/x/$", "/a$b/c"):
+            self.assertIsNone(_bad_header_token(header), msg=header)
+
     def test_tokens_are_log_safe(self):
         from core.logging import _sanitize_detail
         from _shared.patterns import (

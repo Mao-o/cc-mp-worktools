@@ -108,9 +108,11 @@ session / 承認状態を一切持たなかった。block reason は AskUserQues
   (status, path) 集合を `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
   に記録する。`patterns.local.txt` と同じ `Path.home()` 基準 (plugin cache 更新で
   消えない、テストは `HOME` 差し替えで隔離)。内容は 1 行 1
-  `sha256("<cwd>\t<status>\t<path>")` で平文 path は残さない (`cwd` を scope に
-  含めるのは同一 session 内で別 repo に `cd` したとき同じ相対 path を報告済みと
-  誤認しないため)。`session_id` は
+  `sha256("<repo root>\t<status>\t<root 相対 path>")` で平文 path は残さない
+  (repo root を scope に含めるのは同一 session 内で別 repo に `cd` したとき同じ
+  相対 path を報告済みと誤認しないため。path は `git rev-parse --show-prefix` を
+  前置して root 相対に正規化し、サブディレクトリへの `cd` で同じ物理ファイルが
+  別 digest にならないようにする — Codex R2 P2-2、後述)。`session_id` は
   `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$` のみ受理。読取 / 書込失敗は「状態なし」=
   従来通り block。TTL 7 日で best-effort GC
 - **`__main__.py`**: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。
@@ -216,7 +218,8 @@ PR 前に fresh context の L2 に diff を敵対的レビューさせた (in-pr
   `[project:]` に展開され、quoted heredoc / Write だと literal に残る。どちらも
   「どのプロジェクトにも一致しない」として黙って捨てられ、除外が効かず block が
   続く (本 batch の目的に逆行)。対応: (a) `_shared.patterns._parse_local_patterns_text`
-  に `header_warn_callback` を追加し、空ヘッダー / `$` 含みヘッダーを固定トークン
+  に `header_warn_callback` を追加し、空ヘッダー / 未展開の変数参照ヘッダー
+  (Codex R2 で構文を限定、後述) を固定トークン
   (`project_header_empty` / `project_header_unexpanded_placeholder`) で種別ごとに
   1 回警告する (read 側は `local_patterns_header_invalid` として logfile + stderr、
   Stop 側は stderr)。判定は変えない (そのセクションは非 active のまま)。(b) 案内
@@ -261,6 +264,33 @@ fail-closed 規則にした (省略形の展開は自前実装しない)。`--ca
 保守 deny ×2、既知 long option ×6 と短縮 flag 束ね ×4 の allow 維持に置き換え
 (計 5 メソッド、+4)。MATRIX / DESIGN / README を同期。
 
+### review 対応 (3) — Codex R2 P2 ×2: `$` 入り literal パスの header / サブディレクトリ cwd の digest
+
+- **P2-1 `[project:/work/project$prod]` が placeholder 扱いで無効化**: review 対応
+  (L2) で入れた「`$` を含むヘッダーは未展開 placeholder」判定が、`$` を含む正当な
+  project root のセクションまで黙って落とし、その repo では project スコープの
+  include / exclude (保護側も) が消えうる。判定を変数参照の構文 — 先頭が `$NAME`
+  / `${NAME}` (`$HOME/work` / `${PWD}`)、または `$CLAUDE_PROJECT_DIR` /
+  `${CLAUDE_PROJECT_DIR}` を含む — に限定し、`$` を途中に含むだけの literal パス
+  は通常どおり `project_key` と比較する (`_PLACEHOLDER_HEAD_RE` /
+  `_RECIPE_PLACEHOLDER_RE`)
+- **P2-2 root とサブディレクトリで digest が変わり `cd` 後に再 block**:
+  `git ls-files` は cwd 相対で出力するため、scope = cwd のままでは
+  `root + sub/.env` と `root/sub + .env` が別 digest になり once-only が効かな
+  かった。`checker.repo_context` (`git rev-parse --show-toplevel --show-prefix`
+  1 回、`is_git_repo` の呼出を置き換えるので git 呼出回数は不変) で repo root と
+  cwd prefix を得て、digest を `sha256("<repo root>\t<status>\t<prefix><path>")`
+  に正規化した。block reason の表示は従来通り cwd 相対 (`git rm --cached <path>`
+  を cwd でそのまま実行できる)。スキャン範囲は従来どおり cwd の subtree で、sub で
+  先に block した後 root に戻ると root 直下の未報告ファイルだけが新規として再
+  block する
+
+テスト: `$` 入り literal ヘッダーの一致 / 不一致と警告なし、placeholder 構文 7 形の
+検出、`$` 途中形 4 件の非 placeholder (test_patterns_loader +3)、prefix 正規化の
+digest 同値 (test_stop_ack +1)、`repo_context` の root / sub / 非 git
+(test_checker +3)、root ↔ sub の once-only 共有・表示の cwd 相対維持・root 直下の
+新規検出・`$` 入り repo パスの Stop 沈黙 (test_main +4)。
+
 L2 が問題なしと確認した観点: `git rm --cached` の `-r` / `-f` / `-n` / `-q` /
 `--sparse` / `--ignore-unmatch` / `-rf` 束ね / 後置 `--cached` / glob は allow で
 内容出力なし (出力は `rm '<path>'`)、`--pathspec-from-file` の leak は実 git で
@@ -273,7 +303,7 @@ tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追�
 
 ### テスト
 
-redact **805 件** (+43、0.18.0 review 対応後の 762 件基準)、check **67 件** (+40)。
+redact **808 件** (+46、0.18.0 review 対応後の 762 件基準)、check **75 件** (+48)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option

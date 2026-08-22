@@ -150,7 +150,10 @@ unquoted の `echo "[project:$CLAUDE_PROJECT_DIR]" >> patterns.local.txt` は
 そのセクションは無視されるが、黙らず `local_patterns_header_invalid:
 project_header_empty` / `project_header_unexpanded_placeholder` を stderr
 (Read / Bash 側は `~/.claude/logs/redact-hook.log` にも) に出す。
-`pwd` で得たプロジェクト root の絶対パスを literal に書くこと。
+`pwd` で得たプロジェクト root の絶対パスを literal に書くこと。判定は変数参照の
+構文 (先頭が `$NAME` / `${NAME}`、または `$CLAUDE_PROJECT_DIR` を含む) に限定して
+おり、`/work/project$prod` のように `$` を途中に含む literal パスは正当なヘッダー
+として通常どおり比較される。
 
 **評価順序**: 共通行 → 一致した `[project:...]` セクションの行、の順で
 **ファイル中の出現順のまま**評価する (last-match-wins は出現順で決まるため、

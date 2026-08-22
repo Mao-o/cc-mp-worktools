@@ -101,6 +101,30 @@ def is_git_repo(cwd: str) -> bool:
     return bool(result) and result[0] == "true"
 
 
+def repo_context(cwd: str) -> tuple[str, str] | None:
+    """cwd が git 作業ツリー内なら ``(toplevel, prefix)`` を返す (0.19.0)。
+
+    - ``toplevel``: repo root の絶対パス (``git rev-parse --show-toplevel``)
+    - ``prefix``: cwd の repo root からの相対パス (``--show-prefix``、末尾 ``/``。
+      root なら空文字列)
+
+    1 回の ``git rev-parse`` で両方を得る (``is_git_repo`` の呼出を置き換えるので
+    Stop hook の git 呼出回数は増えない)。作業ツリー外 / 失敗は None。
+    stop-ack の digest を「repo root + root 相対 path」で作るために使う —
+    ``git ls-files`` は cwd 相対で出力するため、root とサブディレクトリで同じ
+    物理ファイルが別 digest にならないよう prefix を前置する (Codex R2 P2-2)。
+    表示 (block reason) は従来通り cwd 相対のまま (``git rm --cached <path>`` を
+    cwd でそのまま実行できる)。
+    """
+    lines = _run_git(["rev-parse", "--show-toplevel", "--show-prefix"], cwd)
+    if not lines:
+        return None
+    toplevel = lines[0]
+    # root では --show-prefix が空行を出し _run_git が落とすため 1 行しか無い
+    prefix = lines[1] if len(lines) >= 2 else ""
+    return toplevel, prefix
+
+
 def _ls_tracked(cwd: str) -> list[str]:
     """tracked ファイル一覧を取得する (submodule 内の tracked を含む)。
 

@@ -291,6 +291,69 @@ class TestMainSessionAck(BaseMainTest):
         # 元の repo に戻っても報告済みのまま (集合は union で保持)
         self.assertEqual(_run_main(env)[1], "")
 
+    def _track_in_sub(self) -> Path:
+        sub = self.repo / "sub"
+        sub.mkdir()
+        (sub / ".env").write_text("KEY=v\n")
+        _git(["add", "sub/.env"], str(self.repo))
+        _git(["commit", "-m", "add sub env"], str(self.repo))
+        return sub
+
+    def test_subdirectory_cwd_shares_ack_with_root(self):
+        # root と sub で同じ物理ファイルは同じ digest (Codex R2 P2-2):
+        # root で block → sub に cd しても再 block しない (逆方向も同じ)
+        sub = self._track_in_sub()
+        root_env = {"cwd": str(self.repo), "session_id": "sess-sub"}
+        sub_env = {"cwd": str(sub), "session_id": "sess-sub"}
+        self.assertTrue(self._blocked(_run_main(root_env)[1]))
+        self.assertEqual(_run_main(sub_env)[1], "")
+        root_env2 = {"cwd": str(self.repo), "session_id": "sess-sub2"}
+        sub_env2 = {"cwd": str(sub), "session_id": "sess-sub2"}
+        self.assertTrue(self._blocked(_run_main(sub_env2)[1]))
+        self.assertEqual(_run_main(root_env2)[1], "")
+
+    def test_subdirectory_reason_keeps_cwd_relative_paths(self):
+        # 表示は従来通り cwd 相対 (`git rm --cached <path>` を cwd で実行できる)
+        sub = self._track_in_sub()
+        out = _run_main({"cwd": str(sub), "session_id": "sess-disp"})[1]
+        reason = json.loads(out)["reason"]
+        self.assertIn("  - .env", reason)
+        self.assertNotIn("sub/.env", reason)
+
+    def test_root_file_found_after_moving_from_sub_reblocks(self):
+        # sub で block した集合に root 直下の .env は含まれない → root に戻ると
+        # 新規として再 block (サブディレクトリのスキャンは従来通り subtree のみ)
+        sub = self._track_in_sub()
+        (self.repo / ".env").write_text("KEY=v\n")
+        _git(["add", ".env"], str(self.repo))
+        _git(["commit", "-m", "add root env"], str(self.repo))
+        self.assertTrue(
+            self._blocked(_run_main({"cwd": str(sub), "session_id": "sess-up"})[1])
+        )
+        out = _run_main({"cwd": str(self.repo), "session_id": "sess-up"})[1]
+        self.assertTrue(self._blocked(out))
+        self.assertIn("sub/.env", json.loads(out)["reason"])
+
+    def test_literal_dollar_project_header_applies(self):
+        # `$` を含む repo パスの [project:] セクションは正当 (Codex R2 P2-1)。
+        # placeholder 扱いで黙って落ちると、その repo の除外が効かず block が続く
+        repo = Path(self.tmp) / "proj$prod"
+        repo.mkdir()
+        _init_repo(str(repo))
+        (repo / ".env").write_text("KEY=v\n")
+        _git(["add", ".env"], str(repo))
+        _git(["commit", "-m", "add env"], str(repo))
+        d = self.home_dir / ".claude" / "sensitive-files-guardrail"
+        d.mkdir(parents=True)
+        (d / "patterns.local.txt").write_text(f"[project:{repo}]\n!.env\n")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            _, out, err = _run_main(
+                {"cwd": str(repo), "session_id": "sess-dollar"}
+            )
+        self.assertEqual(out, "")
+        self.assertNotIn("local_patterns_header_invalid", err)
+
     def test_different_session_blocks_again(self):
         self._track(".env")
         out_a = _run_main({"cwd": str(self.repo), "session_id": "s-a"})[1]

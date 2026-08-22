@@ -13,11 +13,14 @@ committed CA 証明書 / direnv の ``.envrc`` など「tracked が正」な rep
 - 置き場: ``~/.claude/sensitive-files-guardrail/stop-ack/<session_id>``。
   ``patterns.local.txt`` と同じ ``Path.home()`` 基準 (plugin cache の更新で
   消えず、テストは ``HOME`` 差し替えで隔離できる)。
-- 内容: 1 行 1 エントリの sha256 hex digest (``"<cwd>\\t<status>\\t<path>"`` の
-  digest)。path を平文で HOME 側に残さないため (ログ規則と同じ方針)。``cwd`` を
-  含めるのは、同一 session 内で別 repo に ``cd`` したとき同じ相対 path
-  (``tracked\\t.env``) を報告済みと誤認しないため (Stop のスキャン自体が
-  ``git ls-files`` の cwd 相対なので、scope も cwd に揃える)。
+- 内容: 1 行 1 エントリの sha256 hex digest
+  (``"<repo root>\\t<status>\\t<root 相対 path>"`` の digest)。path を平文で HOME
+  側に残さないため (ログ規則と同じ方針)。repo root を scope に含めるのは、同一
+  session 内で別 repo に ``cd`` したとき同じ相対 path (``tracked\\t.env``) を
+  報告済みと誤認しないため。path は ``git rev-parse --show-prefix`` (cwd の root
+  からの相対) を前置して root 相対に正規化する — ``git ls-files`` は cwd 相対で
+  出力するため、root とサブディレクトリで同じ物理ファイルが別 digest になり
+  ``cd`` 後に once-only が効かなくなるのを防ぐ (Codex R2 P2-2)。
 - 失敗 (読取 / 書込 / mkdir 不能 / 壊れた内容) は全て「状態なし」扱い
   (= 従来通り block)。state 機構の不具合で block が **消える** 方向には倒さない。
 - 古い session ファイルは書込み時に best-effort で GC する (最後の block から
@@ -73,19 +76,27 @@ def sanitize_session_id(raw: object) -> str | None:
     return raw
 
 
-def digest_entries(entries: Iterable[dict], scope: str = "") -> set[str]:
+def digest_entries(
+    entries: Iterable[dict], scope: str = "", prefix: str = ""
+) -> set[str]:
     """``find_sensitive_files`` の戻り値を
-    ``{sha256("<scope>\\t<status>\\t<path>")}`` に畳む。
+    ``{sha256("<scope>\\t<status>\\t<prefix><path>")}`` に畳む。
 
     path を平文で HOME 側に残さないため digest 化する。status を含めるのは
     untracked → tracked (``git rm --cached`` が必要になる) のような変化を
-    「新しい事象」として再 block するため。``scope`` (呼出側は正規化した cwd)
-    を含めるのは、同一 session 内で別 repo に ``cd`` したとき同じ相対 path を
-    報告済みと誤認しないため。
+    「新しい事象」として再 block するため。``scope`` (呼出側は repo root) を
+    含めるのは、同一 session 内で別 repo に ``cd`` したとき同じ相対 path を
+    報告済みと誤認しないため。``prefix`` (cwd の repo root からの相対パス、
+    ``git rev-parse --show-prefix``) を path に前置するのは、``git ls-files`` が
+    cwd 相対で出力するため root とサブディレクトリで同じ物理ファイルが別 digest
+    にならないようにするため (Codex R2 P2-2)。
     """
     digests: set[str] = set()
     for entry in entries:
-        key = f"{scope}\t{entry.get('status', '')}\t{entry.get('path', '')}"
+        key = (
+            f"{scope}\t{entry.get('status', '')}\t"
+            f"{prefix}{entry.get('path', '')}"
+        )
         digests.add(hashlib.sha256(key.encode("utf-8")).hexdigest())
     return digests
 

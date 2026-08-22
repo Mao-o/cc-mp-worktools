@@ -659,10 +659,18 @@ deny reason のキー名ガイド:
 - 状態: `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
   (`hooks/check-sensitive-files/stop_ack.py`)。`patterns.local.txt` と同じ
   `Path.home()` 基準で、plugin cache の更新で消えず、テストは `HOME` 差し替えで
-  隔離する。内容は 1 行 1 `sha256("<cwd>\t<status>\t<path>")` で、平文 path は
-  HOME に残さない (ログ規則と同じ方針)。`cwd` を scope に含めるのは、同一 session
-  内で別 repo に `cd` したとき同じ相対 path (`tracked\t.env`) を報告済みと誤認
-  しないため (Stop のスキャン自体が `git ls-files` の cwd 相対)
+  隔離する。内容は 1 行 1 `sha256("<repo root>\t<status>\t<root 相対 path>")` で、
+  平文 path は HOME に残さない (ログ規則と同じ方針)。repo root を scope に含める
+  のは、同一 session 内で別 repo に `cd` したとき同じ相対 path (`tracked\t.env`)
+  を報告済みと誤認しないため。path は `git rev-parse --show-prefix` (cwd の root
+  からの相対) を前置して root 相対に正規化する — `git ls-files` は cwd 相対で
+  出力するため、root とサブディレクトリで同じ物理ファイルが別 digest になり
+  `cd` 後に once-only が効かなくなるのを防ぐ (Codex R2 P2-2)。block reason の
+  表示は従来通り cwd 相対 (`git rm --cached <path>` を cwd でそのまま実行できる)。
+  toplevel / prefix は `checker.repo_context` (`rev-parse --show-toplevel
+  --show-prefix` 1 回) で得て `is_git_repo` の呼出を置き換えるので git 呼出回数は
+  不変。スキャン範囲は従来どおり cwd の subtree (sub で block した後 root に戻る
+  と、root 直下の未報告ファイルだけが新規として再 block する)
 - 判定: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。増えていれば
   block し、`報告済み ∪ 現在` を保存する。hash 1 本ではなく集合を持つのは
   「1 件対応して残りが減った」ときに再 block しないため。status を digest に
@@ -687,7 +695,11 @@ deny reason のキー名ガイド:
   `header_warn_callback` が固定トークン (`project_header_empty` /
   `project_header_unexpanded_placeholder`) で警告する (read 側は
   `local_patterns_header_invalid` として logfile + stderr、Stop 側は stderr)。
-  判定は変えない (そのセクションは非 active のまま)
+  判定は変えない (そのセクションは非 active のまま)。placeholder 判定は未展開の
+  変数参照構文 (先頭が `$NAME` / `${NAME}`、または `$CLAUDE_PROJECT_DIR` を含む)
+  に限定し、`/work/project$prod` のような `$` 入り literal パスは正当なヘッダー
+  として比較する (Codex R2 P2-1。当初の「`$` を含めば placeholder」はその repo の
+  project スコープの include / exclude を黙って無効化していた)
 
 ## 既知制限 (0.14.0 時点)
 

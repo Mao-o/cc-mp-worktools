@@ -71,6 +71,23 @@ class TestDigestEntries(BaseStopAck):
     def test_empty(self):
         self.assertEqual(stop_ack.digest_entries([]), set())
 
+    def test_prefix_normalizes_subdirectory_cwd(self):
+        # root (prefix "") で見た `sub/.env` と sub (prefix "sub/") で見た `.env`
+        # は同じ物理ファイル → 同じ digest (Codex R2 P2-2)
+        at_root = stop_ack.digest_entries(
+            [{"path": "sub/.env", "status": "tracked"}], scope="/r", prefix=""
+        )
+        at_sub = stop_ack.digest_entries(
+            [{"path": ".env", "status": "tracked"}], scope="/r", prefix="sub/"
+        )
+        self.assertEqual(at_root, at_sub)
+        self.assertNotEqual(
+            at_sub,
+            stop_ack.digest_entries(
+                [{"path": ".env", "status": "tracked"}], scope="/r", prefix=""
+            ),
+        )
+
     def test_scope_sensitive(self):
         # 同一 session で別 repo に cd しても同じ相対 path を報告済み扱いしない
         entry = [{"path": ".env", "status": "tracked"}]

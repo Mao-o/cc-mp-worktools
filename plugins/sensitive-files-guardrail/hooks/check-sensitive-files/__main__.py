@@ -42,7 +42,7 @@ from _shared.patterns import (  # noqa: E402
     PROJECT_SECTION_PLACEHOLDER_NOTE,
     exclude_recipe_lines,
 )
-from checker import find_sensitive_files, is_git_repo, load_patterns  # noqa: E402
+from checker import find_sensitive_files, load_patterns, repo_context  # noqa: E402
 from stop_ack import (  # noqa: E402
     digest_entries,
     load_acked,
@@ -131,8 +131,13 @@ def main() -> int:
         return 0
 
     cwd = hook_input.get("cwd", "")
-    if not cwd or not is_git_repo(cwd):
+    if not cwd:
         return 0
+    # repo root と cwd prefix を 1 回の rev-parse で得る (作業ツリー外なら None)
+    ctx = repo_context(cwd)
+    if ctx is None:
+        return 0
+    toplevel, prefix = ctx
 
     patterns_file = Path(__file__).resolve().parent / "patterns.txt"
     try:
@@ -153,7 +158,8 @@ def main() -> int:
     # 0.19.0: session 単位の once-only。報告済み集合に新規が無ければ黙る。
     # session_id が無い / 不正なら state を使わず従来通り毎回 block する。
     session_id = sanitize_session_id(hook_input.get("session_id"))
-    digests = digest_entries(sensitive, scope=os.path.normpath(cwd))
+    # digest は repo root + root 相対 path (表示は cwd 相対のまま、Codex R2 P2-2)
+    digests = digest_entries(sensitive, scope=toplevel, prefix=prefix)
     acked: set[str] = set()
     if session_id is not None:
         acked = load_acked(session_id, warn=_warn_stop_ack)
