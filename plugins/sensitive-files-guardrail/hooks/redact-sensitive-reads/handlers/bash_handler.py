@@ -22,8 +22,9 @@ segment 単位再評価へ移行)。
 
 1. **segment split** — ``&&`` ``||`` ``;`` ``|`` ``\\n`` を quote-aware に分割。
 2. **per-segment 解析** — 各セグメントで:
-   - **hard-stop 再判定 (0.11.0)** — ``$`` ``(`` ``)`` ``{`` ``}`` ``<``
-     バッククォート ``\\r`` を含む segment は静的解析不能のため
+   - **hard-stop 再判定 (0.11.0 / 0.18.0 quote-aware)** — ``$`` ``(`` ``)``
+     ``{`` ``}`` ``<`` バッククォート ``\\r`` を **クォート外またはダブル
+     クォート内に** 含む segment は静的解析不能のため
      ``ask_or_allow`` を ``pending_ask`` に格納して **continue** (他 segment の
      deny 検出を続ける)。0.10.0 までは command 全体に hard-stop が 1 つでも
      あると early return していたが、``cat .env | sed 's/(=)/X/'`` のような
@@ -31,7 +32,9 @@ segment 単位再評価へ移行)。
      していたため、segment 単位再評価に細粒度化。攻撃シナリオ ``cat <(echo
      \\(\\)) < .env`` は全 segment hard-stop となるため挙動不変 (思想 1
      整合)。0.3.4〜0.6.x で ``<`` のみ target を抽出していた経路は 0.7.0 で
-     撤廃済み。
+     撤廃済み。0.18.0 でシングルクォート内の hard-stop char を無視するように
+     し、``awk '{print}' .env`` / ``sed 's/(=)/X/' .env`` が operand scan に
+     到達するようになった (詳細は ``handlers/bash/segmentation.py``)。
    - shlex.split → 失敗 → ``ask_or_allow`` を ``pending_ask`` に格納して continue
    - 安全リダイレクト剥離 (``>/dev/null`` / ``2>&1`` 等)
    - **opaque first token 判定 (0.8.0)** — 第一トークンが env-assignment
@@ -49,7 +52,13 @@ segment 単位再評価へ移行)。
      ``find`` は ``-exec`` / ``-delete`` 等の内容出力・副作用アクションが無い
      場合のみ、``file`` / ``wc`` / ``du`` / ``tree`` はファイル名リスト読込
      オプション (``-f`` / ``--files0-from`` 等) が無い場合のみ metadata-only。
-     ``git status`` は ``-v`` が staged diff を出すため対象外
+     ``git status`` は ``-v`` が staged diff を出すため対象外。
+     **0.19.0**: ``chmod`` / ``chown`` / ``chgrp`` / ``touch`` (属性操作、内容を
+     読む option 無し) と ``git rm --cached`` (index からの除去のみ。``--cached``
+     完全一致 + 既知の安全な option 以外が無いとき。未知・省略形の ``--xxx``
+     が 1 つでもあれば fail-closed で通常経路) も metadata-only。両 hook
+     の reason が推奨する次善策を自分で deny していた自己矛盾の解消
+     (bd_092a232e-snw.3)。plain ``git rm`` (作業ツリー削除) は deny 維持
    - operand scan: 各 path 候補について
      - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
        ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
@@ -85,6 +94,9 @@ from handlers.bash.constants import (  # noqa: F401
     _GIT_LS_FILES_OBJECT_OPTS,
     _GIT_LS_FILES_SHORT_FLAGS,
     _GIT_METADATA_SUBCOMMANDS,
+    _GIT_RM_INDEX_ONLY_FLAG,
+    _GIT_RM_KNOWN_LONG_OPTS,
+    _GIT_RM_SAFE_SHORT_FLAGS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
     _METADATA_CONTENT_READING_OPTS,
@@ -103,6 +115,11 @@ from handlers.bash.grep_extract import (  # noqa: F401
     extract_grep_keys,
     is_grep_command,
 )
+from handlers.bash.interpreters import (  # noqa: F401
+    _inline_shell_delegation,
+    _program_dynamic_construct,
+    _quoted_hard_stop_reason,
+)
 from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
@@ -116,6 +133,7 @@ from handlers.bash.redirects import (  # noqa: F401
 )
 from handlers.bash.segmentation import (  # noqa: F401
     _has_hard_stop,
+    _has_quoted_hard_stop,
     _split_command_on_operators,
 )
 from redaction.file_render import render_for_bash
@@ -205,6 +223,46 @@ def _git_ls_files_exposes_object(args: list[str]) -> bool:
     return False
 
 
+def _git_rm_is_index_only(args: list[str]) -> bool:
+    """``git rm`` が index からの除去のみ (``--cached``) で、作業ツリーの実ファイルを
+    消さず内容も出力しないか (0.19.0, bd_092a232e-snw.3)。
+
+    **fail-closed** (Codex review P1): git は long option の **一意な接頭辞** を
+    受理する (``--no-cach`` = ``--no-cached`` は後勝ちで作業ツリーも削除、
+    ``--pathspec-from-fil`` = ``--pathspec-from-file`` は operand の中身を pathspec
+    として読み ``fatal: pathspec '<行>'`` に echo) ため、危険な option を
+    exact-token で deny-list しても省略形がすり抜ける。省略形の展開を自前実装
+    せず、**既知の安全な option (完全一致) 以外が 1 つでもあれば index-only と
+    見なさない** (→ 通常の operand scan → 機密 operand なら deny)。
+
+    - ``--cached`` は完全一致のみ。``--`` 以降は pathspec なので flag として
+      数えない (``git rm .env -- --cached`` は ``.env`` を作業ツリーから消すため
+      deny に残す。逆に ``git rm --cached .env -- --no-cached`` は index-only)。
+    - 既知 long option: ``_GIT_RM_KNOWN_LONG_OPTS`` (``--force`` / ``--dry-run`` /
+      ``--quiet`` / ``--ignore-unmatch`` / ``--sparse``)。``--no-cached`` /
+      ``--pathspec-from-file[=<f>]`` / ``--pathspec-file-nul`` / それらの省略形 /
+      ``--cached`` の省略形 (``--cache``) は未知として index-only から外れる。
+    - 既知 short flag: ``_GIT_RM_SAFE_SHORT_FLAGS`` (``f`` / ``n`` / ``r`` / ``q``、
+      束ね ``-rf`` 可)。それ以外の文字を含む短縮形 (``-h`` / ``-x``) も未知扱い。
+    """
+    has_cached = False
+    for tok in args:
+        if tok == "--":
+            break
+        if tok == _GIT_RM_INDEX_ONLY_FLAG:
+            has_cached = True
+            continue
+        if tok.startswith("--"):
+            if tok not in _GIT_RM_KNOWN_LONG_OPTS:
+                return False
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            if not all(c in _GIT_RM_SAFE_SHORT_FLAGS for c in tok[1:]):
+                return False
+            continue
+    return has_cached
+
+
 def _is_metadata_only(tokens: list[str]) -> bool:
     """セグメントが「operand の内容を出力しない」metadata-only コマンドか (0.14.0)。
 
@@ -234,20 +292,27 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     出力するため allowlist から除外した (Codex P1 第2弾)。裸の ``git status``
     は operand に機密 path が無いため operand scan で allow に倒れる。global
     option 前置 (``git -C dir check-ignore``) は保守的に対象外。
+
+    0.19.0 (bd_092a232e-snw.3): ``git rm`` は ``--cached`` 付きのみ metadata-only
+    (``_git_rm_is_index_only``)。index からの除去だけで実ファイルは残り内容も
+    出ない。両 hook の reason が「tracked なら ``git rm --cached`` で untrack」と
+    案内しているのに自分で deny していた自己矛盾を解消する。``chmod`` /
+    ``chown`` / ``chgrp`` / ``touch`` は ``_METADATA_ONLY_FIRST_TOKENS`` 側に追加
+    (内容を読む option が存在しない)。
     """
     first = tokens[0]
     if first == "find":
         return not any(t in _FIND_DANGEROUS_ACTIONS for t in tokens[1:])
     if first in _METADATA_ONLY_FIRST_TOKENS:
         return not _reads_file_content(first, tokens)
-    if (
-        first == "git"
-        and len(tokens) >= 2
-        and tokens[1] in _GIT_METADATA_SUBCOMMANDS
-    ):
-        if tokens[1] == "ls-files" and _git_ls_files_exposes_object(tokens[2:]):
-            return False
-        return True
+    if first == "git" and len(tokens) >= 2:
+        sub = tokens[1]
+        if sub in _GIT_METADATA_SUBCOMMANDS:
+            if sub == "ls-files" and _git_ls_files_exposes_object(tokens[2:]):
+                return False
+            return True
+        if sub == "rm":
+            return _git_rm_is_index_only(tokens[2:])
     return False
 
 
@@ -507,6 +572,8 @@ def handle(envelope: dict) -> dict:
     #    原因で全体 ask に倒れ autonomous で素通りしていたため細粒度化。
     #    攻撃シナリオ ``cat <(echo \\(\\)) < .env`` は全 segment hard-stop と
     #    なるため挙動不変 (思想 1 整合)。
+    #    0.18.0: ``_has_hard_stop`` が quote-aware になり、シングルクォート内の
+    #    hard-stop char (``awk '{print}'`` の ``{`` ``}`` ``$``) は無視される。
     segments = _split_command_on_operators(command)
     if not segments:
         return output.make_allow()
@@ -542,6 +609,33 @@ def handle(envelope: dict) -> dict:
 
         if decision == "deny":
             return result
+        if decision != "ask":
+            # 0.18.0 review: シングルクォート緩和で hard-stop を抜けた awk / sed の
+            # プログラム文字列にコマンド実行 / ファイル入出力があれば hard-stop
+            # 相当に戻す。機密 operand の deny (上) を優先し、その後で判定する。
+            dyn = _program_dynamic_construct(tokens) or _inline_shell_delegation(tokens)
+            if dyn is not None:
+                L.log_info("bash_classify", f"program_dynamic:{dyn}")
+                result = output.ask_or_allow(
+                    M.bash_lenient("program_dynamic", dyn),
+                    envelope,
+                )
+                decision = "ask"
+            elif _has_quoted_hard_stop(seg):
+                # 0.18.0 review R5/R6: シングルクォート内の hard-stop char は
+                # first token が inert allow-list (引数を shell / インタプリタに
+                # 渡さないコマンド) にあるときだけ無視できる。allow-list 外
+                # (``docker`` / ``make`` / ``less '+!…'`` …) や、inert でも別の
+                # インタプリタへ委譲する形 (``find -exec sh -c '…'`` /
+                # ``git -c core.pager='…'``) は 0.17.0 と同じ hard-stop (ask)。
+                reason = _quoted_hard_stop_reason(tokens)
+                if reason is not None:
+                    L.log_info("bash_classify", f"hard_stop_quoted:{reason}")
+                    result = output.ask_or_allow(
+                        M.bash_lenient("hard_stop"),
+                        envelope,
+                    )
+                    decision = "ask"
         if decision == "ask" and pending_ask is None:
             pending_ask = result
 

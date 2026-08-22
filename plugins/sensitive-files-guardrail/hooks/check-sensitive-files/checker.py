@@ -46,6 +46,19 @@ def _warn_migrate(token: str) -> None:
     )
 
 
+def _warn_header(token: str) -> None:
+    """Stop hook 側の header_warn_callback — patterns.local.txt の ``[project:]``
+    ヘッダーが空 / 未展開 placeholder のとき stderr に 1 行記録する (0.19.0)。
+
+    そのセクションは黙って捨てられる (除外が効かず block が続く) ため、原因を
+    可視化する。token はパスを含まない固定文字列。
+    """
+    sys.stderr.write(
+        f"[check-sensitive-files] local_patterns_header_invalid: {token} "
+        "([project:...] ヘッダーはプロジェクト root の絶対パスを literal に書く)\n"
+    )
+
+
 _warn_local_oserror = _warn_local  # 後方互換 alias
 
 
@@ -61,6 +74,7 @@ def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
         warn_callback=_warn_local,
         migrate_warn_callback=_warn_migrate,
         cwd=cwd,
+        header_warn_callback=_warn_header,
     )
 
 
@@ -85,6 +99,30 @@ def is_git_repo(cwd: str) -> bool:
     """cwd が git リポジトリ内かどうか"""
     result = _run_git(["rev-parse", "--is-inside-work-tree"], cwd)
     return bool(result) and result[0] == "true"
+
+
+def repo_context(cwd: str) -> tuple[str, str] | None:
+    """cwd が git 作業ツリー内なら ``(toplevel, prefix)`` を返す (0.19.0)。
+
+    - ``toplevel``: repo root の絶対パス (``git rev-parse --show-toplevel``)
+    - ``prefix``: cwd の repo root からの相対パス (``--show-prefix``、末尾 ``/``。
+      root なら空文字列)
+
+    1 回の ``git rev-parse`` で両方を得る (``is_git_repo`` の呼出を置き換えるので
+    Stop hook の git 呼出回数は増えない)。作業ツリー外 / 失敗は None。
+    stop-ack の digest を「repo root + root 相対 path」で作るために使う —
+    ``git ls-files`` は cwd 相対で出力するため、root とサブディレクトリで同じ
+    物理ファイルが別 digest にならないよう prefix を前置する (Codex R2 P2-2)。
+    表示 (block reason) は従来通り cwd 相対のまま (``git rm --cached <path>`` を
+    cwd でそのまま実行できる)。
+    """
+    lines = _run_git(["rev-parse", "--show-toplevel", "--show-prefix"], cwd)
+    if not lines:
+        return None
+    toplevel = lines[0]
+    # root では --show-prefix が空行を出し _run_git が落とすため 1 行しか無い
+    prefix = lines[1] if len(lines) >= 2 else ""
+    return toplevel, prefix
 
 
 def _ls_tracked(cwd: str) -> list[str]:

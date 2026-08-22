@@ -11,10 +11,16 @@
 """
 from __future__ import annotations
 
+import os
 import unittest
+from pathlib import Path
 
 from _testutil import FIXTURES  # noqa: F401
 
+from _shared.patterns import (
+    PROJECT_SECTION_HEADER_HINT,
+    exclude_recipe_lines,
+)
 from core import messages as M
 
 
@@ -27,6 +33,52 @@ class TestExcludeHintBasename(unittest.TestCase):
         self.assertIn("patterns.local.txt", out)
         self.assertNotIn("<basename>", out)
 
+    def test_exclude_hint_guides_project_section_by_default(self):
+        """0.19.0 (bd_092a232e-snw.23): 既定で [project:] セクション配下への追記を
+        案内し、ヘッダー無し (全プロジェクト共通) は明示的な選択にする。
+        絶対パスは reason に出さない (環境変数名で示す)。"""
+        out = M._exclude_hint(".env")
+        self.assertIn("`[project:$CLAUDE_PROJECT_DIR]`", out)
+        self.assertIn("全プロジェクト共通", out)
+        self.assertIn("ヘッダー無し", out)
+        self.assertIn("承認なしに", out)
+        self.assertNotIn(str(Path.home()), out)
+        self.assertNotIn(os.getcwd(), out)
+
+    def test_exclude_hint_without_basename_also_guides_project_section(self):
+        out = M._exclude_hint("")
+        self.assertIn("`[project:$CLAUDE_PROJECT_DIR]`", out)
+        self.assertIn("<basename>", out)
+
+    def test_exclude_hint_shares_header_with_shared_recipe(self):
+        # Stop hook の block reason と同じ定数 (_shared.patterns) を使う
+        out = M._exclude_hint(".env")
+        self.assertIn(PROJECT_SECTION_HEADER_HINT, out)
+        self.assertEqual(
+            exclude_recipe_lines([".env", ".env", "", "ca.pem"]),
+            [PROJECT_SECTION_HEADER_HINT, "!.env", "!ca.pem"],
+        )
+
+    def test_exclude_recipe_lines_caps_long_lists(self):
+        lines = exclude_recipe_lines([f"k{i}.pem" for i in range(25)], limit=20)
+        self.assertEqual(len(lines), 22)
+        self.assertEqual(lines[1], "!k0.pem")
+        self.assertEqual(lines[-1], "... (5 more)")
+
+    def test_exclude_recipe_lines_is_linear_for_large_inputs(self):
+        # 重複除去が list membership の二次計算だと 5 万件で Stop の 15s timeout
+        # を超えうる (Codex R5 P2-2)。10 万件 (5 万 unique × 2) で 1 秒未満
+        import time
+
+        names = [f"k{i}.pem" for i in range(50_000)] * 2
+        started = time.perf_counter()
+        lines = exclude_recipe_lines(names, limit=20)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(len(lines), 22)
+        self.assertEqual(lines[1], "!k0.pem")
+        self.assertEqual(lines[-1], "... (49980 more)")
+        self.assertLess(elapsed, 1.0)
+
     def test_exclude_hint_without_basename(self):
         out = M._exclude_hint("")
         # basename が無いケースは plain プレースホルダを出す
@@ -37,6 +89,50 @@ class TestExcludeHintBasename(unittest.TestCase):
         out = M._exclude_hint(".env`evil")
         self.assertNotIn(".env`evil", out)
         self.assertIn(".envevil", out)
+
+
+class TestGitSubcommandOf(unittest.TestCase):
+    """``_git_subcommand_of`` (0.19.0): history builder の subcommand 推定。"""
+
+    def test_simple(self):
+        self.assertEqual(
+            M._git_subcommand_of("git show HEAD:.env", "HEAD:.env"), "show"
+        )
+
+    def test_skips_global_options(self):
+        self.assertEqual(
+            M._git_subcommand_of(
+                "git -C /repo -c k=v --git-dir=/x --no-pager diff .env", ".env"
+            ),
+            "diff",
+        )
+
+    def test_prefers_window_containing_operand(self):
+        self.assertEqual(
+            M._git_subcommand_of("git log && git add .env", ".env"), "add"
+        )
+
+    def test_falls_back_to_first_git_without_operand_match(self):
+        self.assertEqual(
+            M._git_subcommand_of("git log && git status", ".env"), "log"
+        )
+
+    def test_opt_equals_value_operand_matches_window(self):
+        # ``--pathspec-from-file=.env`` 由来の operand でも後段の git を選ぶ
+        self.assertEqual(
+            M._git_subcommand_of(
+                "git log && git rm --cached --pathspec-from-file=.env", ".env"
+            ),
+            "rm",
+        )
+
+    def test_empty_command(self):
+        self.assertEqual(M._git_subcommand_of("", ".env"), "")
+
+    def test_unparseable_command_does_not_raise(self):
+        # shlex 失敗 → 空白 split fallback。operate set に入らないので閲覧文面
+        sub = M._git_subcommand_of("git 'unterminated .env", ".env")
+        self.assertNotIn(sub, M._GIT_OPERATE_SUBCOMMANDS)
 
 
 class TestBashDeny(unittest.TestCase):
@@ -348,7 +444,8 @@ class TestDenyPlainText(unittest.TestCase):
         for kind in ("normalize_failed", "io_error", "parent_not_directory"):
             msg = M.edit_pause(kind, tool_label="Edit")
             self.assertNotIn("<GUARDRAIL_DENY", msg)
-        for kind in ("hard_stop", "opaque_prefix", "shell_keyword"):
+        for kind in ("hard_stop", "opaque_prefix", "shell_keyword",
+                     "program_dynamic"):
             msg = M.bash_lenient(kind)
             self.assertNotIn("<GUARDRAIL_DENY", msg)
 
@@ -385,7 +482,7 @@ class TestVocabularyConsistency(unittest.TestCase):
     def test_ask_or_allow_uses_pause_phrase(self):
         for kind in (
             "hard_stop", "opaque_prefix", "residual_metachar",
-            "tokenize_failed", "normalize_failed",
+            "tokenize_failed", "normalize_failed", "program_dynamic",
         ):
             msg = M.bash_lenient(kind)
             self.assertIn(

@@ -84,6 +84,15 @@ _METADATA_ONLY_FIRST_TOKENS = frozenset({
     "basename", "dirname", "realpath", "readlink",
     # 引数をそのまま表示 (ファイルを開かない)
     "echo", "printf",
+    # 0.19.0 (bd_092a232e-snw.3): 属性 / タイムスタンプ操作。出力は無し、または
+    # ``-v`` / ``-c`` での変更前後の mode / owner のみで内容は出ない。
+    # ``--reference=RFILE`` / ``touch -r RFILE`` は RFILE の mode / owner /
+    # timestamp (= metadata) を読むだけで、内容を読む option は存在しない。
+    # 両 hook の deny / block reason が次善策として提示する ``chmod 600 .env``
+    # / ``touch .env`` を自分で deny していた自己矛盾を解消する。書込み形
+    # (``chmod 600 x > .env``) は safe_read 外なので residual metachar が先に
+    # 効き従来通り ask_or_allow (echo と同じ)。
+    "chmod", "chown", "chgrp", "touch",
 })
 
 # find のうち「内容出力・副作用」を伴うアクション (0.14.0, Codex P1 対応)。
@@ -137,6 +146,8 @@ _METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
 # ``status`` は ``-v`` という頻出オプションが diff を出し plain 形の価値も低い
 # (operand scan で裸 ``git status`` は allow) ため option-gate より allowlist
 # 除外が単純。``git status -- .env`` 等 operand 明示形のみ deny。
+# ``rm`` はこの集合には **入れない**。``--cached`` 付きのみ metadata-only と
+# する条件付き判定 (``_GIT_RM_INDEX_ONLY_FLAG``、0.19.0)。
 _GIT_METADATA_SUBCOMMANDS = frozenset({"check-ignore", "ls-files"})
 
 # git ls-files のうち blob object name (= 内容の指紋) を出力するオプション
@@ -151,8 +162,39 @@ _GIT_LS_FILES_OBJECT_OPTS = frozenset({"-s", "--stage", "--format"})
 # ``-x`` / ``-X`` は値を取るため除外 (``-x s.env`` を誤検出しないため)。
 _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 
+# git rm の「index からの除去のみ」flag (0.19.0, bd_092a232e-snw.3)。
+# ``git rm --cached <path>`` は作業ツリーの実ファイルを消さず内容も出力しない
+# (出力は ``rm '<path>'`` の path 文字列のみ) ため metadata-only。両 hook の
+# reason が「tracked なら ``git rm --cached`` で untrack」と案内しているのに
+# 自分で deny していた自己矛盾を解消する。``--cached`` 無しの plain ``git rm``
+# は作業ツリー削除 (破壊操作) のため operand scan → deny 維持。**完全一致のみ**
+# 認識 (git 自身は ``--cache`` / ``--cac`` の一意接頭辞も受理するが、省略形の
+# 展開は自前実装しない — 保守側に倒れるだけ)。``--`` 以降は pathspec なので
+# flag として数えない (``git rm .env -- --cached`` は deny)。
+_GIT_RM_INDEX_ONLY_FLAG = "--cached"
+# ``--cached`` と共存しても index-only のままで内容も出さない **既知の** long
+# option (完全一致)。fail-closed 規則 (Codex review P1): git は long option の
+# **一意な接頭辞** を受理する (``--no-cach`` = ``--no-cached`` で後勝ちにより
+# 作業ツリーも削除、``--pathspec-from-fil`` = ``--pathspec-from-file`` で operand
+# の中身を pathspec として読み ``fatal: pathspec '<行>'`` に echo) ため、危険な
+# option を exact-token で deny-list しても省略形がすり抜ける。よって逆に
+# 「ここに無い ``--xxx`` が 1 つでもあれば index-only と見なさない」(→ 通常の
+# operand scan → 機密 operand なら deny) とする。``--no-*`` 否定形 /
+# ``--pathspec-from-file[=<f>]`` / ``--pathspec-file-nul`` / それらの省略形 /
+# ``--cached`` の省略形はすべて未知扱い。``-r`` (long form 無し) は
+# ``_GIT_RM_SAFE_SHORT_FLAGS`` 側。
+_GIT_RM_KNOWN_LONG_OPTS = frozenset({
+    "--force", "--dry-run", "--quiet", "--ignore-unmatch", "--sparse",
+})
+# ``--cached`` と共存しても安全な短縮 flag (束ね ``-rf`` 可)。short option は
+# 1 文字なので接頭辞問題は無いが、未知の文字 (``-h`` / ``-x`` 等) を含む束ねは
+# 同じく index-only と見なさない (fail-closed)。git rm の短縮 flag は値を取らない。
+_GIT_RM_SAFE_SHORT_FLAGS = frozenset("fnrq")
+
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
+# 0.18.0: 判定 (``_has_hard_stop``) は quote-aware になり、**シングルクォート内**
+# の該当 char は展開されないため無視する (``\r`` のみクォート内でも hard-stop)。
 _HARD_STOP_CHARS = frozenset("$`(){}<\r")
 
 # セグメント内に剥がしきれずに残ると ``ask_or_allow`` する metachar セット。
@@ -187,10 +229,10 @@ _SAFE_REDIRECT_TARGETS = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout"})
 # ``_SAFE_READ_FIRST_TOKENS`` に **入れない**ことで維持する — ``sed s/x/y/ f > out``
 # は residual metachar 経由で従来どおり ask_or_allow に倒れる。
 #
-# 残る穴: ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が ``_HARD_STOP_CHARS`` に
-# 該当し、opaque 判定より **前** の hard-stop で ask に倒れるため deny にならない。
-# hard-stop を quote-aware にすれば閉じるが、全 segment 判定の入口を触る変更に
-# なるため別課題として切り出した。
+# 0.18.0 (bd_092a232e-y5y): ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が
+# ``_HARD_STOP_CHARS`` に該当し opaque 判定より **前** の hard-stop で ask に
+# 倒れていた (awk 最頻形の穴)。``_has_hard_stop`` を quote-aware
+# (シングルクォート内を無視) にして operand scan に到達させ、この穴を塞いだ。
 _OPAQUE_WRAPPERS = frozenset({
     "bash", "sh", "zsh", "ksh", "fish", "dash",
     "eval",

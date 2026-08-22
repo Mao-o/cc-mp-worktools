@@ -385,6 +385,147 @@ class TestParseLocalPatternsText(unittest.TestCase):
         )
 
 
+class TestBadProjectHeaderWarn(BaseWithIsolatedHome):
+    """0.19.0 (L2 review): ``[project:]`` ヘッダーが空 / 未展開 placeholder のとき
+    黙って捨てず固定トークンで警告する。除外案内が ``$CLAUDE_PROJECT_DIR`` を
+    変数名で示すため、unquoted echo (空に展開) / literal 書込のどちらでも silent
+    no-op になるのを可視化する。判定 (非 active) は変えない。"""
+
+    def test_parse_warns_once_per_token_and_keeps_section_inactive(self):
+        from _shared.patterns import (
+            PROJECT_HEADER_WARN_EMPTY,
+            PROJECT_HEADER_WARN_PLACEHOLDER,
+            _parse_local_patterns_text,
+        )
+        text = (
+            "!common.pem\n"
+            "[project:]\n!empty.pem\n"
+            "[project:$CLAUDE_PROJECT_DIR]\n!placeholder.pem\n"
+            "[project:$CLAUDE_PROJECT_DIR]\n!again.pem\n"
+            "[project:/work/p]\n!real.pem\n"
+        )
+        calls: list[str] = []
+        rules = _parse_local_patterns_text(text, "/work/p", calls.append)
+        self.assertEqual(rules, [("common.pem", True), ("real.pem", True)])
+        self.assertEqual(
+            calls, [PROJECT_HEADER_WARN_EMPTY, PROJECT_HEADER_WARN_PLACEHOLDER]
+        )
+
+    def test_parse_without_callback_is_silent_and_inactive(self):
+        from _shared.patterns import _parse_local_patterns_text
+        rules = _parse_local_patterns_text(
+            "[project:]\n!x.pem\n[project:$CLAUDE_PROJECT_DIR]\n!y.pem\n",
+            "/work/p",
+        )
+        self.assertEqual(rules, [])
+
+    def test_literal_dollar_in_path_is_a_valid_header(self):
+        # `/work/project$prod` のような `$` 入り literal パスは正当なヘッダー
+        # (Codex R2 P2-1: 当初は placeholder 扱いでセクションが黙って落ちていた)
+        from _shared.patterns import _parse_local_patterns_text
+        calls: list[str] = []
+        text = "[project:/work/project$prod]\n!x.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/work/project$prod", calls.append),
+            [("x.pem", True)],
+        )
+        self.assertEqual(calls, [])
+        # 別プロジェクトでは不一致 (通常のセクション挙動) で警告も出ない
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/work/other", calls.append), []
+        )
+        self.assertEqual(calls, [])
+
+    def test_placeholder_syntax_forms_are_detected(self):
+        from _shared.patterns import (
+            PROJECT_HEADER_WARN_PLACEHOLDER,
+            _parse_local_patterns_text,
+        )
+        for header in (
+            "$CLAUDE_PROJECT_DIR",
+            "${CLAUDE_PROJECT_DIR}",
+            "$CLAUDE_PROJECT_DIR/sub",
+            "${CLAUDE_PROJECT_DIR}/sub",
+            "$HOME/work",
+            "${PWD}",
+            "$PWD",
+        ):
+            calls: list[str] = []
+            rules = _parse_local_patterns_text(
+                f"[project:{header}]\n!x.pem\n", "/work/p", calls.append
+            )
+            self.assertEqual(rules, [], msg=header)
+            self.assertEqual(
+                calls, [PROJECT_HEADER_WARN_PLACEHOLDER], msg=header
+            )
+
+    def test_dollar_mid_path_forms_are_not_placeholders(self):
+        from _shared.patterns import _bad_header_token
+        for header in (
+            "/work/project$prod",
+            "/srv/app$1",
+            "/x/$",
+            "/a$b/c",
+            # 予約語を部分文字列として含むだけの literal パス (Codex R4 P2-2)
+            "/work/repo$CLAUDE_PROJECT_DIR-prod",
+            "/work/${CLAUDE_PROJECT_DIR}-archive",
+            "/prefix/$CLAUDE_PROJECT_DIR",
+            "$CLAUDE_PROJECT_DIR-prod",
+        ):
+            self.assertIsNone(_bad_header_token(header), msg=header)
+
+    def test_reserved_word_substring_paths_are_valid_headers(self):
+        # `/work/repo$CLAUDE_PROJECT_DIR-prod` のような正当なパスの section が
+        # project_key と比較される (Codex R4 P2-2: 当初は任意位置の予約語で無効化)
+        from _shared.patterns import _parse_local_patterns_text
+        for header in (
+            "/work/repo$CLAUDE_PROJECT_DIR-prod",
+            "/work/${CLAUDE_PROJECT_DIR}-archive",
+        ):
+            calls: list[str] = []
+            text = f"[project:{header}]\n!x.pem\n"
+            self.assertEqual(
+                _parse_local_patterns_text(text, header, calls.append),
+                [("x.pem", True)],
+                msg=header,
+            )
+            self.assertEqual(
+                _parse_local_patterns_text(text, "/work/other", calls.append),
+                [],
+                msg=header,
+            )
+            self.assertEqual(calls, [], msg=header)
+
+    def test_tokens_are_log_safe(self):
+        from core.logging import _sanitize_detail
+        from _shared.patterns import (
+            PROJECT_HEADER_WARN_EMPTY,
+            PROJECT_HEADER_WARN_PLACEHOLDER,
+        )
+        for token in (PROJECT_HEADER_WARN_EMPTY, PROJECT_HEADER_WARN_PLACEHOLDER):
+            self.assertEqual(_sanitize_detail(token), token)
+
+    def test_core_loader_logs_header_invalid(self):
+        from core import patterns as P
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("[project:$CLAUDE_PROJECT_DIR]\n!x.pem\n")
+        with mock.patch("core.patterns.L.log_error") as spy:
+            rules = P.load_patterns(default_file, cwd=self.tmp)
+        self.assertEqual(rules, [("*.pem", False)])
+        spy.assert_called_once_with(
+            "local_patterns_header_invalid",
+            "project_header_unexpanded_placeholder",
+        )
+
+    def test_core_loader_no_log_for_valid_header(self):
+        from core import patterns as P
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("[project:/work/p]\n!x.pem\n")
+        with mock.patch("core.patterns.L.log_error") as spy:
+            P.load_patterns(default_file, cwd=self.tmp)
+        spy.assert_not_called()
+
+
 class TestProjectScopedLoadPatterns(BaseWithIsolatedHome):
     """load_patterns の ``cwd`` 引数によるプロジェクトセクション適用を検証。"""
 

@@ -10,6 +10,8 @@
   literal に fnmatch するときだけ deny 固定。それ以外の glob は ``ask_or_allow``
   (0.3.2〜0.7.x の既定 rules 候補列挙は 0.8.0 で撤廃)
 - ``<`` 入力リダイレクト系は hard-stop で ``ask_or_allow`` (0.7.0)
+- hard-stop 判定は quote-aware。シングルクォート内の該当 char は無視する
+  (0.18.0, ``TestQuoteAwareHardStop``)。ダブルクォート内と ``\\r`` は維持
 - ``patterns.txt`` 読込失敗 → 全 mode で ``make_deny`` 固定
 """
 from __future__ import annotations
@@ -22,6 +24,7 @@ from unittest import mock
 from _testutil import FIXTURES  # noqa: F401
 
 from core import output
+from handlers.bash.segmentation import _split_command_on_operators
 from handlers.bash_handler import handle
 
 
@@ -218,6 +221,9 @@ class TestHardStopLenient(BaseBash):
     """hard-stop metachar (`$`, ``(``, `{`, ``<``, バッククォート) は default=ask /
     auto/bypass=allow。0.7.0 で ``<`` 入力リダイレクトの target 抽出を撤廃し、
     全 hard-stop が ``ask_or_allow`` 一本に統合された。
+
+    ここで扱うのは **クォート外 / ダブルクォート内** の hard-stop。0.18.0 以降
+    シングルクォート内は展開されないものとして除外される (``TestQuoteAwareHardStop``)。
     """
 
     def test_variable_expansion_default(self):
@@ -445,16 +451,19 @@ class TestAwkSedOperandScan(BaseBash):
                 r = handle(_make_envelope(cmd, self.tmp))
                 self.assertEqual(_decision(r), "ask")
 
-    def test_brace_form_remains_hard_stop(self):
-        """既知の残り穴: ``awk '{...}'`` は hard-stop が先に発火して ask のまま。
+    def test_brace_form_denies_after_quote_aware_hard_stop(self):
+        """0.18.0: ``awk '{...}' .env`` は quote-aware 化で operand scan に到達。
 
-        閉じるには hard-stop を quote-aware にする必要があり別課題。
-        意図的な現状を固定してリグレッション検知に使う。
+        0.17.0 までは ``{`` ``}`` ``$`` が hard-stop に該当し opaque 判定より前に
+        ask へ倒れていた (awk 最頻形の穴)。シングルクォート内は展開されないため
+        hard-stop から除外され、機密 operand 確定 × 内容出力で deny になる。
         """
-        r = handle(_make_envelope("awk '{print}' .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-        r = handle(_make_envelope("awk '{print}' .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
+        for mode in ("default", "auto", "bypassPermissions"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(
+                    "awk '{print}' .env", self.tmp, mode=mode,
+                ))
+                self.assertEqual(_decision(r), "deny")
 
 
 class TestOpaqueWrapperLenient(BaseBash):
@@ -1107,6 +1116,10 @@ class TestSegmentHardStopReevaluate(BaseBash):
 
     思想 1 (うっかり露出予防、敵対的防御は非目的) との整合: 攻撃シナリオ
     ``cat <(echo \\(\\)) < .env`` は全 segment が hard-stop となるため挙動不変。
+
+    0.18.0: hard-stop 判定自体が quote-aware になったため、``sed 's/(=)/X/' .env``
+    のようにクォート内にのみ hard-stop char がある segment は operand scan に
+    到達して deny になる (``TestQuoteAwareHardStop`` 参照)。
     """
 
     # --- 核心: ユーザー報告ケース ---
@@ -1192,11 +1205,12 @@ class TestSegmentHardStopReevaluate(BaseBash):
         r = handle(_make_envelope("cat $X || cat $Y", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_sed_paren_with_dotenv_arg_still_ask(self):
-        # sed 's/(=)/X/' .env — 1 segment 全体 hard-stop (`(`) → pending_ask
-        # (sed は opaque wrapper だが hard-stop が先に発火)
+    def test_sed_paren_with_dotenv_arg_now_deny(self):
+        # sed 's/(=)/X/' .env — 0.17.0 までは `(` の hard-stop が先に発火して ask。
+        # 0.18.0 の quote-aware 化でシングルクォート内の `(` `)` が除外され、
+        # 0.17.0 で opaque を外した sed の operand scan が `.env` を捕まえて deny。
         r = handle(_make_envelope("sed 's/(=)/X/' .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+        self.assertEqual(_decision(r), "deny")
 
     # --- reason 文確認 (E3 dispatch との整合) ---
     def test_deny_reason_includes_first_token_and_minimal_info(self):
@@ -1219,6 +1233,620 @@ class TestSegmentHardStopReevaluate(BaseBash):
         self.assertIn("first_token: cat", reason)
         self.assertIn(".env.local", reason)
         self.assertIn("DATABASE_URL", reason)
+
+
+class TestQuoteAwareHardStop(BaseBash):
+    """0.18.0: ``_has_hard_stop`` はシングルクォート内の hard-stop char を無視する。
+
+    Bash はシングルクォート内を一切展開しないため、``awk '{print}' .env`` の
+    ``{`` ``}`` ``$`` は静的解析を妨げない。0.17.0 で awk / sed を opaque から
+    外した際に残っていた「最頻形が hard-stop で ask に倒れる」穴を塞ぐ。
+
+    緩めない側 (意図的な非対称、guard を落とさないため):
+
+    - ダブルクォート内は展開されるので hard-stop 維持
+    - クォート外のバックスラッシュは quote を開かないが、``\\$`` ``\\(`` 自体は
+      hard-stop として数え続ける (既存の攻撃シナリオを挙動不変に保つ)
+    - ``\\r`` はクォート状態を問わず hard-stop (端末表示偽装 guard)
+    """
+
+    # --- (1) 本命: シングルクォート内 hard-stop の解除 → deny 到達 ---
+    def test_awk_brace_script_dotenv_deny_both_modes(self):
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(
+                    "awk '{print}' .env", self.tmp, mode=mode,
+                ))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_awk_brace_script_with_dollar_field_dotenv_deny_both_modes(self):
+        # `$1` の `$` もシングルクォート内なので展開されない。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(
+                    "awk '{print $1}' .env", self.tmp, mode=mode,
+                ))
+                self.assertEqual(_decision(r), "deny")
+
+    # --- (2) ダブルクォート内は展開されるので hard-stop 維持 ---
+    def test_double_quoted_command_substitution_keeps_hard_stop(self):
+        cmd = 'echo "$(cat .env)"'
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_single_quoted_command_substitution_is_literal(self):
+        # `echo '$(cat .env)'` は literal 文字列を表示するだけなので解除して良い。
+        cmd = "echo '$(cat .env)'"
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertTrue(output.is_allow(r))
+
+    # --- (3) 攻撃シナリオは挙動不変 (思想 1: 既存の安全性を下げない) ---
+    def test_attack_scenario_process_sub_and_redirect_unchanged(self):
+        cmd = "cat <(echo \\(\\)) < .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_backslash_escaped_quote_does_not_open_single_quote(self):
+        # `\'` は literal `'` であってシングルクォート開始ではない。ここを
+        # 取り違えると `$(cat .env)` が「クォート内」と誤認され guard が落ちる。
+        cmd = "cat \\'$(cat .env)\\'"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_cr_inside_single_quote_still_hard_stop(self):
+        # CR は展開 guard ではなく端末表示偽装 guard なのでクォート内でも維持。
+        cmd = "awk '{print}\r' .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_unterminated_single_quote_falls_back_to_tokenize_failed(self):
+        # hard-stop を抜けても shlex.split が ValueError → ask_or_allow。
+        cmd = "awk '{print} .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    # --- 緩む側の副次効果を明示的に固定 (0.16.0 の非機密 sed と同じ方向) ---
+    def test_non_sensitive_operand_with_quoted_metachar_now_allow(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("grep '(=)' notes.txt", "awk '{print $1}' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    # --- opaque wrapper は quote 解除後も opaque のまま (判定順の確認) ---
+    def test_opaque_wrapper_with_quoted_script_still_ask(self):
+        for cmd in ("bash -c 'cat .env'",
+                    "python3 -c 'print(open(\".env\").read())'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    # --- (4) splitter と hard-stop の字句状態同期 (PR #38 Codex P1) ---
+    def test_escaped_quote_before_operator_splits_and_denies_both_modes(self):
+        # `\'` はクォート外では literal `'`。splitter がこれを quote 開始と
+        # 誤認すると後続 `;` が区切られず 1 segment に潰れ、hard-stop 側は
+        # `'{'` をクォート内と見て False → 先頭 token `echo` の metadata-only
+        # 経路で `.env` read が素通りする。両 scanner の字句状態を揃えて deny。
+        cmd = "echo \\' ; cat .env ; echo '{'"
+        self.assertEqual(
+            _split_command_on_operators(cmd),
+            ["echo \\'", "cat .env", "echo '{'"],
+        )
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_escaped_operator_chars_do_not_split(self):
+        # `\;` `\|` `\&` は literal (find -exec \; 等の慣用)。区切らない。
+        for cmd in ("echo \\; cat .env", "echo a \\| b", "echo a \\&\\& b"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), [cmd])
+
+    def test_backslash_newline_is_line_continuation(self):
+        # `\<newline>` は行継続 (Bash 仕様) なので区切らず両文字を落とす。
+        # 旧実装は `cat \` / `.env` の 2 segment に割れて shlex 失敗 → ask だった。
+        cmd = "cat \\\n.env"
+        self.assertEqual(_split_command_on_operators(cmd), ["cat .env"])
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_trailing_backslash_is_kept(self):
+        self.assertEqual(_split_command_on_operators("echo \\"), ["echo \\"])
+
+    # --- (5) Bash コメントは quote 状態を変えない (PR #38 Codex R2 P1) ---
+    def test_comment_with_quote_does_not_swallow_following_lines(self):
+        # `#` 以降の `'` を quote 開始と誤認すると、次行の `cat .env` がクォート
+        # 内扱いになり 1 segment に潰れ、`{` も無視されて echo の metadata-only
+        # 経路で素通りする (default mode で ask → allow に緩む regression)。
+        cmd = "echo ok # ' {\ncat .env\necho ok # '"
+        self.assertEqual(
+            _split_command_on_operators(cmd), ["echo ok", "cat .env", "echo ok"],
+        )
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_hash_inside_word_or_quote_or_escaped_is_not_comment(self):
+        # 単語途中 / クォート内 / エスケープ済みの `#` はコメントではない
+        # (検出範囲は Bash より狭く保つ: 実コマンドをコメント扱いしない)。
+        cases = {
+            "echo a#b ; cat .env": ["echo a#b", "cat .env"],
+            "echo '#' ; cat .env": ["echo '#'", "cat .env"],
+            "echo \\# ; cat .env": ["echo \\#", "cat .env"],
+            "FOO=#bar ; cat .env": ["FOO=#bar", "cat .env"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_comment_after_operator_or_at_start_is_comment(self):
+        cases = {
+            "#!/bin/bash\ncat .env": ["cat .env"],
+            "echo a && # c\ncat .env": ["echo a", "cat .env"],
+            "echo a; # c\ncat .env": ["echo a", "cat .env"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_comment_content_is_ignored_for_hard_stop(self):
+        # コメント内の `{` `$(` は Bash に解釈されないので ask に倒さない。
+        cmd = "echo hi # see {config} $(x)"
+        self.assertEqual(_split_command_on_operators(cmd), ["echo hi"])
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertTrue(output.is_allow(r))
+        # 機密 operand 側は「コメントの `{` で ask に逃げていた」のが deny に締まる。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode, sensitive=True):
+                r = handle(_make_envelope("cat .env # {", self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_cr_inside_comment_still_hard_stop(self):
+        # CR はコメント内でも表示偽装 guard (コメントごと segment に残して到達)。
+        cmd = "echo ok # hidden\rcat .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    # --- (6) 行継続は単語状態を変えない (PR #38 Codex R3 P1-a) ---
+    def test_line_continuation_before_hash_is_not_comment(self):
+        # Bash は `\<newline>` を先に取り除くので `safe#joined` は 1 単語。
+        # 直前文字 (改行) で判定すると `#joined; cat .env` をコメントとして
+        # 落とし、echo 単独 segment になって全 mode で allow してしまう。
+        cmd = "echo safe\\\n#joined; cat .env"
+        self.assertEqual(
+            _split_command_on_operators(cmd), ["echo safe#joined", "cat .env"],
+        )
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_line_continuation_after_space_keeps_word_start(self):
+        # 空白の後の行継続なら次の `#` は依然として単語先頭 = コメント。
+        cmd = "echo a \\\n# c\ncat .env"
+        self.assertEqual(_split_command_on_operators(cmd), ["echo a", "cat .env"])
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_hash_after_closing_quote_is_not_comment(self):
+        # `'a'#b` は 1 単語 `a#b` (クォートを閉じても単語は続く)。
+        cmd = "echo 'a'#b ; cat .env"
+        self.assertEqual(_split_command_on_operators(cmd), ["echo 'a'#b", "cat .env"])
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    # --- (7) awk / sed のプログラム内動的構文は hard-stop 相当 (R3 P1-b) ---
+    def test_awk_system_in_single_quotes_stays_ask(self):
+        # シングルクォートは Bash の展開を止めるだけで awk には解釈される。
+        # `{` `(` の hard-stop を抜けた後も ask_or_allow に戻す (0.17.0 と同じ)。
+        for cmd in ('awk \'BEGIN { system("cat .env") }\'',
+                    'awk \'BEGIN { while (("cat .env" | getline l) > 0) print l }\'',
+                    "awk '{ print | \"sh\" }' notes.txt",
+                    "awk '{ print > \"/tmp/out\" }' notes.txt",
+                    "awk -f prog.awk notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_awk_dynamic_with_dotenv_operand_still_deny(self):
+        # 機密 operand 確定の deny が動的構文の ask より優先。
+        cmd = 'awk \'BEGIN { system("x") } {print}\' .env'
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_awk_plain_program_still_allow_and_deny(self):
+        # 動的構文の無い最頻形は 0.18.0 の本来の挙動のまま。
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        r = handle(_make_envelope("awk '{print $1}' notes.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("awk '{print}' .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_sed_exec_read_write_commands_stay_ask(self):
+        for cmd in ("sed 's/x/y/e' notes.txt",
+                    "sed -n 'r .env' notes.txt",
+                    "sed '1r .env' notes.txt",
+                    "sed -e 's/a/b/' -e 'w out.txt' notes.txt",
+                    "sed '$e' notes.txt",
+                    "sed -f script.sed notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_sed_plain_scripts_unchanged(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("sed -n p notes.txt", "sed 's/(=)/X/' notes.txt",
+                    "sed -n '1,5p' notes.txt", "sed 's/the end/x/g' notes.txt",
+                    # 区切り文字の直後 / 置換文字列 / 正規表現アドレス / ラベル
+                    # に e r w が現れてもコマンド位置ではない (R4: regex 近似では
+                    # ask に倒れていた形を parser で allow に保つ)
+                    "sed 's/foo/replacement/' notes.txt",
+                    # (`s|a|e|` は `|` が token 内残留 metachar として 0.18.0
+                    # 以前から ask — parser とは無関係なので `,` 区切りで固定)
+                    "sed 's,a,e,' notes.txt", "sed -n '/^e/p' notes.txt",
+                    "sed ':retry; s/x/y/; t retry' notes.txt",
+                    "sed 'y/abc/xyz/' notes.txt", "sed '$!d' notes.txt",
+                    "sed -ne 'p' notes.txt", "sed -nes/x/y/p notes.txt",
+                    "sed '1a\\\nr text' notes.txt", "sed '2i\\\nwelcome' notes.txt",
+                    "sed -e 's/x/y/' data.r"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+        r = handle(_make_envelope("sed 's/(=)/X/' .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_sed_attached_arguments_and_attached_e_script(self):
+        # R4 P1: 密着引数 (`r.env` / `2r/etc/hostname`) と、`-e` 密着スクリプトが
+        # `e` で終わる形 (`-e's/(x)/cat .env/e'`) を regex 近似が取りこぼしていた。
+        for cmd in ("sed '{\nr.env\n}' notes.txt",
+                    "sed '2r/etc/hostname' notes.txt",
+                    "sed -E -e's/(x)/cat .env/e' notes.txt",
+                    "sed -es/x/y/e notes.txt",
+                    "sed 's/x/word/w out' notes.txt",
+                    "sed '/re/w out.txt' notes.txt",
+                    "sed 's/x/y/ge' notes.txt",
+                    "sed -n '$!{w out\n}' notes.txt",
+                    "sed 'R.env' notes.txt",
+                    "sed 'W /tmp/out' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    # --- (9) sed オプション引数の読み飛ばし (R5 P1-b) ---
+    def test_sed_option_values_are_not_mistaken_for_script(self):
+        # `-l 80` の `80` を positional script と誤認すると、本当のスクリプト
+        # `e cat ${X:-.env}` が検査されず allow になる。
+        for cmd in ("sed -l 80 'e cat ${X:-.env}' notes.txt",
+                    "sed -l80 'e x' notes.txt",
+                    "sed --line-length=80 'e x' notes.txt",
+                    "sed --line-length 80 'e x' notes.txt",
+                    "sed -i '' 's/x/y/e' notes.txt",
+                    "sed -- 'e x' notes.txt",
+                    "sed -nf script.sed notes.txt",
+                    "sed -n --file=script.sed notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("sed -n -l 80 p notes.txt", "sed -i.bak 's/x/y/' notes.txt",
+                    "sed -ln p notes.txt", "sed -s -n p notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    # --- (10) クォート文字列を別インタプリタに委譲する形 (R5 P1-a) ---
+    def test_quoted_hard_stop_delegated_to_interpreter_stays_ask(self):
+        # `find -exec sh -c '...'` / `ssh host '...'` ではシングルクォート内の
+        # `$` `{` が nested インタプリタにとって生きている。0.17.0 と同じ ask。
+        for cmd in ("find . -maxdepth 0 -exec sh -c 'cat ${X:-.env}' ';'",
+                    "find . -name '*.py' -exec grep -l 'foo(' '{}' ';'",
+                    "ssh host 'cat ${X:-.env}'",
+                    "watch 'cat ${X:-.env}'",
+                    "timeout 5 bash -c 'cat $(x)'",
+                    "find . -execdir awk 'BEGIN{system(\"x\")}' ';'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_quoted_hard_stop_without_delegation_stays_relaxed(self):
+        # 委譲先の無い segment は 0.18.0 の緩和のまま (クォート内は literal)。
+        # クォート内 hard-stop が無い segment には委譲判定そのものを適用しない。
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("grep -E 'a(b)' notes.txt", "echo '$HOME'",
+                    "find . -name '{x}' -print", "grep -r python3 notes.txt",
+                    "echo sh", "find . -name '*.py' -print"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    def test_delegation_with_dotenv_operand_still_deny(self):
+        # 機密 operand 確定の deny は委譲判定より優先。
+        r = handle(_make_envelope("cat .env | ssh host 'cat ${X}'", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    # --- (11) 緩和は inert な first token に限定 (R6 P1) ---
+    def test_git_inline_config_with_quoted_hard_stop_stays_ask(self):
+        # `git -c alias.x='!…'` は Git が `!` 以降を shell で実行する。`-c` /
+        # `--config-env` の値 (pager / sshCommand) も shell に渡りうる。
+        for cmd in ("git -c alias.x='!cat ${X:-.env}' x",
+                    "git -c core.pager='cat ${X:-.env}' log",
+                    "git -calias.x='!cat ${X:-.env}' x",
+                    "git -C . -c core.sshCommand='x ${X}' fetch"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_git_shell_alias_is_ask_even_without_hard_stop(self):
+        # alias 本文の `.env` は operand scan に見えないので、クォート内
+        # hard-stop の有無に関係なく常に ask に倒す。
+        cmd = "git -c alias.x='!cat .env' x"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_git_without_inline_config_keeps_relaxation(self):
+        # `-c` の無い git は inert 扱い (0.18.0 の headline である
+        # `git ls-files --format='%(objectname)' .env` の deny 到達を保つ)。
+        r = handle(_make_envelope("git log --format='%h %(trailers)'", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope(
+            "git ls-files --format='%(objectname)' .env", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+        # サブコマンド以降の `-c` は global option ではない (`git commit -c`)
+        r = handle(_make_envelope("git commit -c HEAD -m '{x}'", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_non_inert_first_token_with_quoted_hard_stop_stays_ask(self):
+        # inert allow-list 外の first token はクォート内 hard-stop で 0.17.0 と
+        # 同じ ask (未知のコマンドが shell に渡すかは判らないので fail-closed)。
+        for cmd in ("docker run img 'cat ${X:-.env}'",
+                    "make 'X=$(cat .env)'",
+                    "less '+!cat ${X:-.env}' notes.txt",
+                    "tar --to-command='cat ${X}' -xf a.tar",
+                    "npm run 'x $(y)'",
+                    "somecmd '{a}'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    # --- (12) 行継続をまたいで合成される演算子 (R7 P1) ---
+    def test_operators_formed_across_line_continuation(self):
+        # Bash は `\<newline>` を除去してから演算子を読むので `&\<nl>&` は `&&`。
+        # 継続除去前に `&&` を見ると 1 segment に潰れ、ls の metadata-only 経路で
+        # `cat .env` が素通りする。実測 (bash 5): コメント末尾の `\` は継続に
+        # ならず次行は実行される / シングルクォート内は literal / ダブル
+        # クォート内は除去 / `\\` + 改行はエスケープ済み backslash + 区切り。
+        cases = {
+            "ls &\\\n& cat .env": ["ls", "cat .env"],
+            "echo p |\\\n| cat .env": ["echo p", "cat .env"],
+            "echo a # c \\\ncat .env": ["echo a", "cat .env"],
+            "echo 'x\\\ny' ; cat .env": ["echo 'x\\\ny'", "cat .env"],
+            'echo "x\\\ny" && cat .env': ['echo "xy"', "cat .env"],
+            "echo a \\\\\ncat .env": ["echo a \\\\", "cat .env"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+                for mode in ("default", "auto"):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_inert_first_token_with_quoted_hard_stop_stays_relaxed(self):
+        with open(os.path.join(self.tmp, "f.json"), "w") as f:
+            f.write("{}\n")
+        for cmd in ("jq '{a: .b}' f.json",
+                    "cut -d'$' -f1 f.json", "tr '{}' '()'",
+                    "cp 'a{1}' b", "sort -t'$' f.json", "echo '$HOME'",
+                    "printf '%s\\n' '{x}'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    # --- (13) R8: curl の URL glob / sed 省略 long option / git サブコマンド callback ---
+    def test_curl_is_not_inert_because_of_url_globbing(self):
+        # curl 自身が `{a,b}` `[1-3]` を glob 展開するので `{}` は hard-stop のまま。
+        for cmd in ("curl -s 'file:///tmp/project/.en{v,x}'",
+                    "curl -d '{\"a\":1}' http://x"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_sed_abbreviated_long_options(self):
+        # GNU sed は一意な prefix 省略を受理する (`--expr` = `--expression`)。
+        for cmd in ("sed --expr='e cat ${X:-.env}' notes.txt",
+                    "sed --expr 'e x' notes.txt",
+                    "sed --line-len 80 'e x' notes.txt",
+                    "sed --sep 'e x' notes.txt",
+                    "sed --unknown-opt 'e x' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("sed --quiet p notes.txt", "sed --regexp-ext 's/(a)/b/' notes.txt",
+                    "sed --line-length=80 p notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    def test_git_non_inert_subcommands_stay_ask(self):
+        # サブコマンド側にも shell を起動する option がある (`rebase --exec` /
+        # `bisect run` / `submodule foreach` / `grep -O` / `--upload-pack`)。
+        # 未知のサブコマンドは設定済み alias かもしれないので同じく ask。
+        for cmd in ("git rebase --exec='cat ${X:-.env}' HEAD~1",
+                    "git rebase -x 'cat ${X:-.env}' HEAD~1",
+                    "git bisect run sh -c 'cat ${X:-.env}'",
+                    "git submodule foreach 'cat ${X:-.env}'",
+                    "git grep -O'cat ${X:-.env}' pat",
+                    "git fetch --upload-pack='cat ${X:-.env}' origin",
+                    "git myalias '${X:-.env}'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+        # inert なサブコマンドは緩和のまま
+        for cmd in ("git commit -m '{x}'", "git log --format='%(trailers)'",
+                    "git status --porcelain '{a}'", "git stash push -m '$(x)'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    def test_inert_commands_with_program_options_stay_ask(self):
+        for cmd in ("rg --pre 'cat' '{x}' .", "sort --compress-program='x' '{a}'",
+                    "ag --pager 'cat ${X:-.env}' pattern .",
+                    "ag --pager='cat ${X:-.env}' pattern ."):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        # option 無しの ag / rg は緩和のまま
+        for cmd in ("ag 'foo(' notes.txt", "rg 'a{2}' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    # --- (14) R9: 単独 & の区切り / git config key の大文字小文字 ---
+    def test_single_ampersand_splits_async_list(self):
+        # `&` は非同期リストの区切り。`2>&1` / `&>` の `&` は区切らない。
+        cases = {
+            "ls '{' & cat .env": ["ls '{'", "cat .env"],
+            "echo a &cat .env": ["echo a", "cat .env"],
+            "echo '&' ; cat .env": ["echo '&'", "cat .env"],
+            "cat notes.txt 2>&1": ["cat notes.txt 2>&1"],
+            "echo x &> /dev/null": ["echo x &> /dev/null"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+        for cmd in ("ls '{' & cat .env", "echo a &cat .env"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_git_alias_key_is_case_insensitive(self):
+        for cmd in ("git -c Alias.x='!cat .env' x", "git -cALIAS.x='!cat .env' x"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
 
 
 class TestSafeReadAllowlist(BaseBash):
@@ -1432,20 +2060,19 @@ class TestMetadataOnlyAllow(BaseBash):
         r = handle(_make_envelope("git ls-files --stage .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_git_ls_files_format_objectname_hard_stop_ask_or_allow(self):
-        # ``--format='%(objectname)'`` は ``(``/``)`` を含むため segment hard-stop
-        # に該当し ``ask_or_allow`` に降格する (1.0.0: hard-stop 特例撤去)。
-        # default では ask、auto/bypass/plan の autonomous では allow に倒れる。
-        # ハーネス委譲方針 ([[sfg-lenient-policy]]) に従い、静的解析不能 segment は
-        # plugin 側で deny 強制せず Claude Code ハーネスの別軸監視に委ねる。
+    def test_git_ls_files_format_objectname_dotenv_deny(self):
+        # ``--format='%(objectname)'`` は blob object name (= 内容の指紋) を出す
+        # ため ``_GIT_LS_FILES_OBJECT_OPTS`` に登録済みで、本来 ``-s`` / ``--stage``
+        # と同じ deny 経路に乗る。0.17.0 までは ``(``/``)`` の hard-stop が先に
+        # 発火して ask_or_allow に降格していた (ハーネス委譲扱い) が、0.18.0 の
+        # quote-aware 化で segment が静的解析可能になり本来の operand scan に到達。
+        # deny は mode 非依存なので全 mode で deny。
         cmd = "git ls-files --format='%(objectname)' .env"
-        r = handle(_make_envelope(cmd, self.tmp))
-        self.assertEqual(_decision(r), "ask")
-        for mode in ("auto", "bypassPermissions", "plan"):
+        for mode in ("default", "auto", "bypassPermissions", "plan"):
             r = handle(_make_envelope(cmd, self.tmp, mode=mode))
-            self.assertTrue(
-                output.is_allow(r),
-                msg=f"{mode!r} should allow but got {_decision(r)!r}",
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{mode!r} should deny but got {_decision(r)!r}",
             )
 
     def test_git_ls_files_short_bundle_stage_dotenv_deny(self):
@@ -1708,6 +2335,171 @@ class TestMetadataRedirectTarget(BaseBash):
         # 従来通り operand scan で .env を捕まえて deny (regression なし確認)。
         r = handle(_make_envelope("grep foo README.md > .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
+
+
+class TestRecommendedRemedyAllow(BaseBash):
+    """0.19.0 (bd_092a232e-snw.3): 両 hook の reason が推奨する次善策を自分で deny
+    していた自己矛盾の解消。
+
+    ``git rm --cached`` (index からの除去のみ) と ``chmod`` / ``chown`` / ``chgrp``
+    / ``touch`` (属性操作、内容を読む option 無し) は内容を出力せず実ファイルも
+    消さないため metadata-only として allow。plain ``git rm`` (作業ツリー削除) と
+    ``--pathspec-from-file`` (operand の中身を pathspec として読み echo) は deny
+    維持。書込み形 (``chmod 600 x > .env``) は echo と同じく residual metachar
+    経由の ask_or_allow のまま (緩めない)。
+    """
+
+    _MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+
+    def _assert_allow_all_modes(self, cmd: str) -> None:
+        for mode in self._MODES:
+            r = handle(_make_envelope(cmd, self.tmp, mode))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} [{mode}] should allow but got {_decision(r)!r}",
+            )
+
+    def _assert_deny_all_modes(self, cmd: str) -> None:
+        for mode in self._MODES:
+            r = handle(_make_envelope(cmd, self.tmp, mode))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} [{mode}] should deny but got {_decision(r)!r}",
+            )
+
+    # --- git rm --cached: index からの除去のみ → allow ---
+    def test_git_rm_cached_dotenv_allow_all_modes(self):
+        self._assert_allow_all_modes("git rm --cached .env")
+
+    def test_git_rm_cached_variants_allow(self):
+        for cmd in (
+            "git rm --cached -- .env",
+            "git rm -r --cached config/.env",
+            "git rm --cached -f .env",
+            "git rm -n --cached .env",
+            "git rm --cached -q --ignore-unmatch .env .env.local",
+            "git rm --cached .env && git commit -m 'untrack'",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    # --- plain git rm: 作業ツリー削除 = 破壊操作 → deny 維持 ---
+    def test_git_rm_plain_dotenv_deny(self):
+        for cmd in ("git rm .env", "git rm -f .env", "git rm -r config/.env"):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_cached_after_double_dash_is_pathspec_deny(self):
+        # ``--`` 以降は pathspec。``--cached`` という名前のファイル指定であって
+        # flag ではないため .env は作業ツリーから消える → deny 維持
+        self._assert_deny_all_modes("git rm .env -- --cached")
+
+    def test_git_rm_cached_pathspec_from_file_dotenv_deny(self):
+        # operand の中身を pathspec として読み不一致行を echo (file -f と同クラス)
+        for cmd in (
+            "git rm --cached --pathspec-from-file=.env",
+            "git rm --cached --pathspec-from-file .env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_global_option_prefix_conservative_deny(self):
+        # check-ignore / ls-files と同じく global option 前置形は保守的に対象外
+        self._assert_deny_all_modes("git -C /repo rm --cached .env")
+
+    def test_git_rm_unknown_or_abbreviated_long_option_fails_closed(self):
+        # git は long option の一意な接頭辞を受理する (`--no-cach` = `--no-cached`
+        # は後勝ちで作業ツリーも削除、`--pathspec-from-fil` は中身を pathspec
+        # として読み echo)。exact-token の deny-list では省略形がすり抜けるため、
+        # 既知の安全な option 以外が 1 つでもあれば index-only と見なさず通常経路
+        # (operand scan → deny) に倒す (Codex review P1、fail-closed)
+        for cmd in (
+            "git rm --cached --no-cached .env",
+            "git rm --no-cached --cached .env",
+            "git rm --cached --no-cach .env",
+            "git rm --cached --no-c .env",
+            "git rm --cached --pathspec-from-fil=.env",
+            "git rm --cached --pathspec-from-fil .env",
+            "git rm --cached --pathspec-file-nul --pathspec-from-file=.env",
+            "git rm --cached --unknown-option .env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_abbreviated_cached_is_conservative_deny(self):
+        # `--cache` / `--cac` は git 的には `--cached` だが、省略形の展開は
+        # 自前実装しない (保守側 = deny に倒れるだけで露出は無い)
+        for cmd in ("git rm --cache .env", "git rm --cac .env"):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_known_long_options_with_cached_allow(self):
+        for cmd in (
+            "git rm --cached --force .env",
+            "git rm --cached --dry-run .env",
+            "git rm --cached --quiet --ignore-unmatch .env",
+            "git rm --cached --sparse .env",
+            "git rm --force --cached -- .env",
+            "git rm --cached .env -- --no-cached",  # `--` 以降は pathspec
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_git_rm_known_short_flag_bundles_with_cached_allow(self):
+        for cmd in (
+            "git rm -rf --cached config/.env",
+            "git rm --cached -fq .env",
+            "git rm -n --cached .env",
+            "git rm -rfnq --cached config/.env",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_git_rm_unknown_short_flag_fails_closed(self):
+        for cmd in (
+            "git rm --cached -h .env",
+            "git rm --cached -x .env",
+            "git rm --cached -rx config/.env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    # --- chmod / chown / chgrp / touch: 属性操作 → allow ---
+    def test_chmod_chown_chgrp_touch_dotenv_allow(self):
+        for cmd in (
+            "chmod 600 .env",
+            "chmod -v 600 .env",
+            "chmod --reference=.env other",
+            "chown user .env",
+            "chown -R user:group .env",
+            "chgrp staff .env",
+            "touch .env",
+            "touch -r .env other",
+            "touch -t 202601010000 .env",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_chmod_touch_redirect_to_dotenv_still_ask(self):
+        # safe_read 外なので residual metachar (`>`) が先に効き、書込み形は
+        # echo と同じく ask_or_allow (default=ask / auto=allow) のまま緩めない
+        for cmd in ("chmod 600 x > .env", "touch x > .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(_decision(r), "ask", msg=cmd)
+            r = handle(_make_envelope(cmd, self.tmp, "auto"))
+            self.assertTrue(output.is_allow(r), msg=cmd)
+
+    # --- deny reason の意図文 (history builder の subcommand 分割) ---
+    def test_git_rm_plain_reason_recommends_cached_form(self):
+        r = handle(_make_envelope("git rm .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("`git rm --cached .env`", reason)
+        self.assertIn("操作", reason)
+        self.assertNotIn("閲覧", reason)
+
+    def test_git_add_reason_is_operate_not_view(self):
+        r = handle(_make_envelope("git add .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("commit 対象", reason)
+        self.assertNotIn("閲覧", reason)
+
+    def test_git_show_reason_keeps_view_wording(self):
+        r = handle(_make_envelope("git show HEAD:.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("閲覧", _reason(r))
 
 
 if __name__ == "__main__":

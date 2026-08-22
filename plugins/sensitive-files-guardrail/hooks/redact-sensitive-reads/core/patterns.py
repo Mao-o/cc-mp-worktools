@@ -54,6 +54,18 @@ def _warn_migrate(token: str) -> None:
     L.log_error("local_patterns_legacy_path", token)
 
 
+def _warn_header(token: str) -> None:
+    """header_warn_callback — patterns.local.txt の ``[project:]`` ヘッダーが空 /
+    未展開 placeholder (``$CLAUDE_PROJECT_DIR`` を literal に書いた) のときに
+    logfile + stderr に記録する (0.19.0)。
+
+    そのセクションはどのプロジェクトにも一致せず黙って捨てられる (= 除外が効かず
+    block が続く) ため原因として可視化する。token は ``_shared.patterns`` の固定
+    文字列で ``core.logging`` の detail ホワイトリストを通る。
+    """
+    L.log_error("local_patterns_header_invalid", token)
+
+
 _warn_local_oserror = _warn_local  # 後方互換 alias
 
 
@@ -75,4 +87,5 @@ def load_patterns(
         warn_callback=_warn_local,
         migrate_warn_callback=_warn_migrate,
         cwd=cwd,
+        header_warn_callback=_warn_header,
     )

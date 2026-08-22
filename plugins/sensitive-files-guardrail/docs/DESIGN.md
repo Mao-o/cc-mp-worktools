@@ -112,7 +112,7 @@ dontAsk では `ask` 維持。**autonomous モードでは Claude Code ハーネ
 | `<` 入力リダイレクトの character-level parser | 0.7.0 (A1) | `cat <(echo \(\)) < .env` の escape paren depth tracking など敵対的バイパス対策が思想 1 に反する |
 | FOO=1 / env / sudo 等の prefix normalize | 0.8.0 (A4) | 「`FOO=1 cat .env` を `cat .env` に書き戻す」は敵対的解釈で思想 1 に反する |
 | 既定 rules 候補列挙 (glob × literal stem の連結候補化) | 0.8.0 (B3) | `*.log` が `.env.log` 連結で巻き込まれる false positive |
-| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 1.0.0 | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 |
+| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 1.0.0 | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 (0.18.0 で `_has_hard_stop` が quote-aware になり、この形は **特例なしで** 通常の operand scan に到達して deny する) |
 
 外部レビュー (Codex 等) が判断困難ケースの deny 強制を要求してきた場合も、
 本方針を根拠に「ask_or_allow で十分、それ以上の deny 強制はハーネス委譲する」と
@@ -185,6 +185,111 @@ ask に倒れ autonomous で `cat .env*` が素通りしていた。0.11.0 で�
 畳む)。攻撃シナリオ `cat <(echo \(\)) < .env` は全 segment が hard-stop と
 なるため挙動不変 (思想 1 整合)。
 
+**0.18.0 (bd_092a232e-y5y)**: `_has_hard_stop` を **quote-aware** にした。Bash は
+シングルクォート内を一切展開しないため、そこに現れる hard-stop char は静的解析を
+妨げない。これで 0.17.0 の残り穴 (`awk '{print}' .env` が `{` `}` `$` により
+opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形が operand scan に
+到達する。`git ls-files --format='%(objectname)' .env` も本来の
+`_GIT_LS_FILES_OBJECT_OPTS` 経路 (= `-s` / `--stage` と同じ deny) に到達する。
+
+緩めない側は意図的に非対称にしてある (guard を落とさないため):
+
+- **ダブルクォート内は hard-stop 維持** — `echo "$(cat .env)"` は展開される
+- **クォート外のバックスラッシュは quote を開かない** — `\'` は literal `'`
+  であってシングルクォート開始ではない (Bash 仕様)。取り違えると
+  `cat \'$(cat .env)\'` で guard が落ちる。一方 `\$` `\(` 自体は hard-stop として
+  数え続けるため `cat <(echo \(\)) < .env` は挙動不変
+- **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
+
+**splitter と hard-stop は 1 つの lexer (`_lex`) を共有する** (PR #38 review R7
+で統一)。`_lex` が行継続 `\<newline>` を除去し (クォート外とダブルクォート内。
+シングルクォート内とコメント内は literal)、各文字に quote / escape / comment の
+字句状態を付けた列を作る。分割 (`&&` `||` `;` `|` 改行、および単独 `&` =
+非同期リスト。`2>&1` `&>` の `&` は除く) と hard-stop 判定はその列だけを見る
+ので、`ls &\` ⏎ `& cat .env` のように継続をまたいで合成される演算子も正しく
+区切れる。字句規則を直すときは `_lex` だけを直す。以下は統一前に個別に
+見つかった desync の記録。
+
+**splitter と hard-stop の字句状態は完全に同期させる** (PR #38 review で判明)。
+`_split_command_on_operators` がクォート外の `\'` を quote 開始と誤認すると、
+`echo \' ; cat .env ; echo '{'` が 1 segment に潰れ、`_has_hard_stop` は
+`'{'` をクォート内と見て False を返すため、先頭 token `echo` の metadata-only
+経路で `.env` read が素通りする。「分割側の desync は segment 境界がずれるだけ」
+ではなく、**どちらの desync でも guard は落ちる**。よって splitter にも同じ
+クォート外エスケープ規則 (`\'` は quote を開かない / `\;` は区切らない /
+`\<newline>` は行継続) を入れ、両 scanner を同じ字句状態で走らせる。
+
+**Bash コメントも両 scanner で認識する** (同 review R2)。`#` 〜 行末は Bash に
+解釈されないが、コメント内の `'` で quote 状態を反転させると
+`echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` が 1 segment に潰れ、同じ経路で
+`.env` read が素通りする。クォート外・単語先頭 (直前が空白 / `;` / `|` / `&` /
+文字列先頭) の `#` から行末までをコメントとして両 scanner が読み飛ばす
+(splitter は segment から落とし、改行は区切りとして残す)。検出範囲は Bash より
+狭く保つ — コメントでないものをコメント扱いすると実コマンドを落とし guard が
+落ちるが、逆は ask に倒れるだけ。`\r` 入りコメントだけは丸ごと残して表示偽装
+guard に到達させる。「単語先頭」は直前の生文字ではなく **字句状態**
+(`word_start`) で判定する — Bash は `\<newline>` (行継続) を先に取り除くので、
+`echo safe\` ⏎ `#joined; cat .env` は `safe#joined` の 1 単語でコメントではない
+(同 review R3)。
+
+**シングルクォートは Bash には不活性でも、呼び出されるプログラムには解釈される**
+(同 review R3)。`awk 'BEGIN { system("cat .env") }'` は hard-stop を抜けた後、
+operand scan でも `.env` がプログラム文字列の内側にあるため見えない。
+`handlers/bash/interpreters.py` (`_program_dynamic_construct`) が awk の
+`system(` / `getline` / `|` / `>` / `-f progfile`、sed の `e` (command /
+`s///e`) / `r` `R` / `w` `W` / `-f script` を検出し、**operand scan の後** で
+`ask_or_allow` (`bash_lenient("program_dynamic")`) に戻す。sed は regex 近似
+ではなくスクリプトを先頭から走査する小さな parser (`_sed_script_dynamic`) で
+コマンド位置を求める (アドレス / `s` `y` の区切り本文 / `a` `i` `c` テキスト /
+ラベル / コメントを読み飛ばす)。regex 近似は密着引数 `r.env` と `-e` 密着
+スクリプトが `e` で終わる形を取りこぼした (review R4)。sed のオプション引数
+(`-l N` 等) は値を読み飛ばし、GNU / BSD で引数の有無が異なる `-l` / `-i` の
+裸形は次の token を候補に入れつつ positional とは数えない (review R5)。
+
+**シングルクォート内 hard-stop の緩和は inert な first token に限定する**
+(review R5 → R6)。シングルクォートは Bash の展開を止めるだけで、`find -exec
+sh -c 'cat ${X:-.env}' ';'` / `ssh host '…'` / `git -c alias.x='!cat ${X}' x` の
+ように引数を別のシェル / インタプリタに渡すコマンドでは `$` `{` が生きている。
+「委譲するコマンド」の有限 allowlist (R5) では git の shell alias 等を追い切れ
+なかったので、**緩和する側** を有限 allowlist にした (`_QUOTE_RELAX_FIRST_TOKENS`:
+safe-read から pager 系を除いたもの + metadata-only + awk / sed + `git` `find`
+`sort` `cut` `tr` `jq` `cp` `rm` … 引数文字列を shell に渡さず、自分でも glob
+展開しないと判っているコマンド。`curl` は URL の `{a,b}` を自分で展開するので
+含めない (review R8))。git はさらにサブコマンドで絞る (`_GIT_INERT_SUBCOMMANDS`:
+`rebase --exec` / `bisect run` / `submodule foreach` / `grep -O` /
+`--upload-pack` のように shell コマンドを受け取る option を持つサブコマンドと
+未知のサブコマンド (= 設定済み alias かもしれない) は委譲扱い)。inert でも
+外部プログラムを受け取る option (`rg --pre` / `ag --pager` / `sort
+--compress-program`) は委譲扱い (`_DELEGATING_OPTIONS`)。sed の long option は GNU の一意 prefix 省略
+(`--expr`) を解決してから引数の有無を判定する。
+
+**スコープ (0.18.0 review で確定)**: この plugin の目的は **エージェントが
+うっかり書くコマンド** による露出の予防であり、悪意を持った抜き取りの防止では
+ない (思想 1)。quote-aware 化で保つべきは「splitter / hard-stop が普通のコマンドを
+正しく区切る」こと (`# don't` のようなコメント内の `'`、`find -exec sh -c '…'`、
+単独 `&`、行継続) で、これは本リリースで対応した。一方「exec option を持つ
+コマンドの列挙」(`ag --pager` / `git rebase --exec` / `curl` の URL glob /
+sed の密着引数 …) は inert allowlist が本質的に不完全である以上終わらないため、
+本リリース以降は **follow-up に集約し、個別対応しない**。未知のコマンドは
+0.17.0 と同じ ask (fail-closed) に倒れており、autonomous では allow なので、
+列挙漏れがあっても「うっかり露出」の観点では 0.17.0 から後退しない。`_has_quoted_hard_stop` (hard-stop が False の segment に
+シングルクォート内の hard-stop char が残っているか) が真のとき
+`_quoted_hard_stop_reason` を適用し、allowlist 外の first token (`docker` /
+`make` / `less '+!…'` / 未知) は 0.17.0 と同じ hard-stop (ask) に倒す
+(fail-closed)。inert でも委譲する形 — find の `-exec` 系、first token 以外の
+`_OPAQUE_WRAPPERS` / awk / sed、git の global option `-c` / `--config-env` — は
+ask に戻す。`git -c alias.<name>=!…` は alias 本文が operand scan に見えない
+ので、クォート状態に関係なく常に ask (`_inline_shell_delegation`)。クォート内
+hard-stop が無い普通のコマンド (`grep -r python3 …`) には適用しないので、
+0.17.0 → 0.18.0 で緩んだ範囲の一部を戻すだけで後退はない。機密 operand 確定の
+deny が先なので `awk '{print}' .env` は deny のまま。`>` (比較) や `||` の
+false positive は ask で済ませる (0.17.0 まで `$` `{` で ask だった形)。
+他のインタプリタ (`python -c` / `perl -e` / `bash -c`) は `_OPAQUE_WRAPPERS`
+が先に ask に倒す。
+
+副次効果として非機密 operand の `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt`
+は ask → allow に緩む (0.16.0 の `sed -n p notes.txt` と同じ方向、false positive 減)。
+
 ### metadata-only first_token allow-list (0.14.0)
 
 `_METADATA_ONLY_FIRST_TOKENS` (`ls tree stat file du df test wc basename
@@ -245,8 +350,10 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   `git ls-files .env` / `--error-unmatch` は名前一覧のみなので metadata-only
   維持。`-s` / `--stage` / `-sz` 等は blob object name (= 内容の安定した指紋)
   を出せるため operand scan → deny に倒す (Codex P2 第3弾, 2026-06-12)。
-  `--format=%(...)` の quote 内に `(` を含む形は segment hard-stop に該当し、
-  1.0.0 のハーネス委譲方針整理で **ask_or_allow に降格** (autonomous で allow)。
+  `--format=%(...)` の quote 内に `(` を含む形は 0.17.0 まで segment hard-stop に
+  該当し ask_or_allow に降格していた (1.0.0 のハーネス委譲方針整理)。0.18.0 の
+  quote-aware 化で segment が静的解析可能になり、**特例を足すことなく** `-s` /
+  `--stage` と同じ deny 経路に到達する。
   pathspec 無し形 (`git ls-files -s` 単体、機密 path operand 無し) も
   operand scan が allow に倒す (内容露出には機密 path commit が前提のため)。
 - **機密 path への redirect 書込み** (`ls > .env` で .env を truncate) は
@@ -256,6 +363,26 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   `&>` の spaced / fused 形に対応。内容露出ではなく破壊的書込みの懸念であり、
   Edit/Write の機密書込み deny と整合させる。`ls -la .env > /tmp/x` (read operand
   のみ機密、書込み先非機密) は allow 維持。
+- **0.19.0: 次善策コマンドの追加** (bd_092a232e-snw.3) — `chmod` / `chown` /
+  `chgrp` / `touch` を `_METADATA_ONLY_FIRST_TOKENS` に、`git rm --cached` を
+  条件付き (`_git_rm_is_index_only`: `--cached` が `--` より前に exact match、
+  `--pathspec-from-file` 無し) で追加。両 hook の reason が「tracked なら
+  `git rm --cached` で untrack」「`chmod 600 .env`」と案内しながら Bash hook 自身
+  がそれらを deny する自己矛盾があった。いずれも内容を出力せず実ファイルも
+  消さないため、確信 deny の条件 (機密 operand 確定 × 内容出力 / 破壊) に該当
+  しない。plain `git rm` (作業ツリー削除) と `--pathspec-from-file` (operand の
+  中身を pathspec として読み不一致行を echo、`file -f` と同クラス) は deny 維持。
+  書込み形 (`chmod 600 x > .env`) は safe_read 外のため residual metachar で
+  従来通り ask_or_allow (echo と同じ、緩めない)。`git rm --cached -r` は index
+  除去の範囲が広がるだけで内容出力も削除も無く allow、`touch -r` /
+  `chmod --reference` は timestamp / mode を読むだけで allow。git は long option
+  の **一意な接頭辞** を受理する (`--no-cach` = `--no-cached` で後勝ちにより
+  作業ツリーも削除、`--pathspec-from-fil` = `--pathspec-from-file`) ため、危険な
+  option を exact-token で deny-list しても省略形がすり抜ける (Codex review P1)。
+  省略形の展開を自前実装せず、**既知の安全な option (`_GIT_RM_KNOWN_LONG_OPTS`
+  完全一致 / `_GIT_RM_SAFE_SHORT_FLAGS` の束ね) 以外が 1 つでもあれば index-only
+  と見なさない** fail-closed 規則にした。`--cached` 自体の省略形 (`--cache`) も
+  展開せず保守側 (通常経路 → deny) に倒れるだけで露出は無い。
 
 ### 対応 (deny/allow 確定できる)
 
@@ -448,7 +575,7 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 | `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨。**0.17.0 で到達可能になった** (それ以前は `_OPAQUE_WRAPPERS` 判定が先行して handler からは到達しない dead branch だった) |
 | `load` | `source` / `.` | 「shell load」note + minimal info + direnv (.envrc) / dotenv-cli / 1Password CLI 推奨 |
 | `move` | `cp` / `mv` | 「コピー / 移動」note + 1Password CLI / pass / git-secret + .env.example 派生推奨 |
-| `history` | `git` (subcommand `show` / `diff` / `log` で `.env` を参照したケース) | 「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。VCS pathspec の `:` 後尾から basename 抽出 |
+| `history` | `git` (全 subcommand) | **0.19.0 で subcommand 別**: 閲覧系 (`show` / `diff` / `log` / `cat-file` 等) は「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。操作系 (`add` / `rm` / `mv` / `restore` / `checkout` / `reset` / `stash` / `clean` / `update-index` / `apply` / `commit` = `_GIT_OPERATE_SUBCOMMANDS`) は「index / 作業ツリーへの操作」note + subcommand 別の代替案 (`rm` は allow される `--cached` 形を案内し、deny された理由は断定しない)。subcommand は `command` 全体から `_git_subcommand_of` で推定 (複合コマンドは operand を含む `git` window を優先、`-C` / `-c` / `--git-dir` 等の global option は読み飛ばし。`bash_deny` の signature は変えない)。VCS pathspec の `:` 後尾から basename 抽出 |
 | `transfer` | `curl` / `wget` / `scp` / `rsync` | 「転送」note + Vault / SOPS / 1Password CLI 推奨 |
 | `archive` | `tar` / `zip` / `gzip` | 「アーカイブ」note + `--exclude=<basename>` / `-x <basename>` 推奨 |
 | `generic` | 上記以外 | 0.7.0〜0.9.0 と同等の note + minimal info (新規) |
@@ -570,15 +697,77 @@ deny reason のキー名ガイド:
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
+| 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` 無し / 不正なら従来通り block) |
+| 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知、報告済み集合を更新) |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
+
+#### session 単位の once-only (0.19.0, bd_092a232e-snw.2)
+
+0.18.0 までの Stop hook は `stop_hook_active` しか見ず「報告済みか」の状態を
+持たなかったため、「意図的に管理対象とする」と承認された tracked ファイル
+(Next.js 慣例の `.env` commit / committed CA 証明書 `*.pem` / direnv の `.envrc`)
+で **毎ターン同じ block** が出続け、0.14.0 離脱と同型の体験になっていた。
+
+- 状態: `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
+  (`hooks/check-sensitive-files/stop_ack.py`)。`patterns.local.txt` と同じ
+  `Path.home()` 基準で、plugin cache の更新で消えず、テストは `HOME` 差し替えで
+  隔離する。内容は 1 行 1 `sha256("<status>\t<絶対パス>")` で、平文 path は HOME
+  に残さない (ログ規則と同じ方針)。鍵は `realpath(<repo root>)/<prefix><path>`
+  (root だけを物理パスに正規化し、entry は lexical なまま。`prefix` =
+  `git rev-parse --show-prefix`、cwd の root からの相対) — `git ls-files` は cwd
+  相対で出力するため、(1) 別 repo の同じ相対 path (`tracked\t.env`) を報告済みと
+  誤認しない、(2) root とサブディレクトリで同じ物理ファイルが別 digest にならない
+  (Codex R2 P2-2)、(3) superproject から `--recurse-submodules` で拾った `sub/.env`
+  と submodule 内 cwd (toplevel が submodule root に変わる) で拾った `.env` が同じ
+  digest になる (Codex R4 P2-1)、(4) 別 repo の `.env` symlink が同じ共有ファイル
+  を指しても digest は別のまま (entry を dereference すると 1 つ目の ack で 2 つ目
+  の repo の通知が消える、Codex R5 P2-1)、を同時に満たす。block reason の表示は
+  従来通り cwd 相対 (`git rm --cached <path>` を cwd でそのまま実行できる)。
+  toplevel / prefix は `checker.repo_context` (`rev-parse --show-toplevel
+  --show-prefix` 1 回) で得て `is_git_repo` の呼出を置き換えるので git 呼出回数は
+  不変。スキャン範囲は従来どおり cwd の subtree (sub で block した後 root に戻る
+  と、root 直下の未報告ファイルだけが新規として再 block する)
+- 判定: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。増えていれば
+  block し、`報告済み ∪ 現在` を保存する。hash 1 本ではなく集合を持つのは
+  「1 件対応して残りが減った」ときに再 block しないため。status を digest に
+  含めるので untracked → tracked (`git rm --cached` が必要になる) は新しい事象
+  として再 block する
+- `session_id` は `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$` のみ受理 (path traversal /
+  dotfile 防止)。欠落・不正は state を使わず従来通り毎回 block
+- 失敗 (読取 / 書込 / mkdir 不能 / 壊れた行) は全て「状態なし」= block 側に倒す。
+  state 機構の不具合で block が **消える** 方向には倒さない
+- 書込み時に「最後の block から 7 日」を過ぎた session ファイルを best-effort
+  GC する (state の mtime は block 時のみ更新)。削除するのは内容が digest 行だけ
+  の「自分が書いた形」のファイルのみ (`_looks_like_state_file`、L2 review)
+- state の読取 / 書込失敗は `warn` callback 経由で stderr に
+  `stop_ack_unavailable: load:<Exc>` / `save:<Exc>` を 1 行出す (不在 = 初回は
+  出さない)。判定は従来通り block
+- block reason には恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` + `!<basename>`
+  行、`_shared.patterns.exclude_recipe_lines`) と「このセッションでは同じ集合を
+  再 block しない」注記を載せる。絶対パスは出さない (ヘッダーは環境変数名で示し、
+  書き込む側が実パスに置き換える)。`$CLAUDE_PROJECT_DIR` は Bash tool の環境で
+  未設定なので unquoted echo だと空に展開され、quoted heredoc / Write だと literal
+  に残る — どちらも一致しないため、`_parse_local_patterns_text` の
+  `header_warn_callback` が固定トークン (`project_header_empty` /
+  `project_header_unexpanded_placeholder`) で警告する (read 側は
+  `local_patterns_header_invalid` として logfile + stderr、Stop 側は stderr)。
+  判定は変えない (そのセクションは非 active のまま)。placeholder 判定は未展開の
+  変数参照の standalone 形 (ヘッダー値が `$NAME` / `${NAME}` そのもの、または
+  それで始まり直後が `/`。`$CLAUDE_PROJECT_DIR` もこの形のみ) に限定し、
+  `/work/project$prod` のような `$` 入り literal パスや
+  `/work/repo$CLAUDE_PROJECT_DIR-prod` のように予約語を部分文字列として含むパス
+  は正当なヘッダーとして比較する (Codex R2 P2-1 / R4 P2-2。当初の「`$` を含めば
+  placeholder」はその repo の project スコープの include / exclude を黙って無効化
+  していた)
 
 ## 既知制限 (0.14.0 時点)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
-   `awk`, `sed`, `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
+   `xargs`, heredoc, process substitution, `/bin/cat`, `./script`
    などは静的解析できず、default モードでは ask、auto/bypass モードでは
-   **allow** に倒す。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
+   **allow** に倒す (`awk` / `sed` は 0.17.0 で opaque を外れ、0.18.0 の
+   hard-stop quote-aware 化で `awk '{...}' .env` 形も operand scan に到達する)。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
    `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` も
    ``ask_or_allow`` に格下げした (0.3.2〜0.7.x の prefix normalize は撤廃)。
 3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0、0.11.0 で segment 単位

@@ -77,7 +77,60 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > は **全 mode で deny 固定** になり、非機密 operand の `sed -n p notes.txt` は
 > ask → **allow** に緩む。`sed ... > out` 等の副作用形は
 > `_SAFE_READ_FIRST_TOKENS` 外のまま ask 維持。`awk '{...}'` は hard-stop が
-> 先に発火するため従来どおり (下表参照)。
+> 先に発火するため 0.17.0 時点では対象外だった。
+>
+> **0.18.0 で判定境界が変化**: `_has_hard_stop` を **quote-aware** にし、
+> シングルクォート内の hard-stop char (`$` `` ` `` `(` `)` `{` `}` `<`) を
+> 無視する。Bash はシングルクォート内を展開しないため静的解析を妨げない。
+> これで 0.17.0 の残り穴だった `awk '{print}' .env` / `sed 's/(=)/X/' .env` が
+> operand scan に到達し **全 mode で deny** になる。`git ls-files
+> --format='%(objectname)' .env` も本来の `_GIT_LS_FILES_OBJECT_OPTS` 経路
+> (`-s` / `--stage` と同じ deny) に到達する。緩めない側: ダブルクォート内
+> (`echo "$(cat .env)"` は展開されるため ask 維持)、クォート外のバックスラッシュ
+> エスケープ (`\'` はクォートを開かない)、`\r` (端末表示偽装 guard なので
+> クォート内でも hard-stop)。副次効果として非機密 operand の
+> `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt` は ask → **allow** に緩む。
+>
+> 同じクォート外エスケープ規則を `_split_command_on_operators` にも適用する
+> (両 scanner の字句状態同期)。`echo \' ; cat .env ; echo '{'` は 3 segment に
+> 割れて `cat .env` が **全 mode で deny** (同期前は 1 segment に潰れ allow)。
+> `\<newline>` は行継続として結合するため `cat \<newline>.env` も deny。
+> Bash コメント (クォート外・単語先頭の `#` 〜 行末) も両 scanner が認識する:
+> `echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` は 3 segment に割れて `cat .env`
+> が **全 mode で deny** (認識前はコメント内の `'` で 1 segment に潰れ default
+> でも allow)。コメント内の `{` `$(` は ask に倒さない (`echo hi # {x}` は
+> allow、`cat .env # {` は deny)。行継続 `\<newline>` は単語状態を変えないので
+> `echo safe\` ⏎ `#joined; cat .env` の `#joined` はコメントではなく
+> `cat .env` が **全 mode で deny**。継続をまたいで合成される演算子
+> (`ls &\` ⏎ `& cat .env` = `ls && cat .env`) も正しく区切る (両 scanner が
+> 1 つの lexer を共有)。コメント末尾の `\` は行継続にならず次行は実行される。
+> 単独の `&` (非同期リスト、`ls '{' & cat .env`) も区切る (`2>&1` / `&>` の
+> `&` は除く)。
+>
+> awk / sed のプログラム文字列内の動的構文 (awk: `system(` `getline` `|` `>`
+> `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で
+> `ask_or_allow` に戻す (`awk 'BEGIN { system("cat .env") }'` は default で
+> ask、autonomous で allow = 0.17.0 と同じ)。機密 operand 付き
+> (`awk 'BEGIN{system("x")}' .env`) は deny が優先。sed は走査 parser で
+> コマンド位置を求めるため、密着引数 (`r.env` / `2r/etc/hostname`) や `-e`
+> 密着の `s///e` も ask、置換文字列・正規表現・ラベル内の `e` `r` `w`
+> (`s/foo/replacement/` / `/^e/p` / `:retry`) は allow のまま。オプション引数
+> (`sed -l 80 'e …'`) は値を読み飛ばしてスクリプトを検査する。
+>
+> シングルクォート内 hard-stop char の緩和は first token が inert allow-list
+> (`_QUOTE_RELAX_FIRST_TOKENS`: safe-read (pager 系除く) / metadata-only / awk /
+> sed / `git` `find` `sort` `cut` `tr` `jq` `curl` `cp` `rm` …) にあるときだけ。
+> allow-list 外 (`docker run img 'cat ${X:-.env}'` / `make 'X=$(…)'` / `less
+> '+!…' f` / 未知のコマンド) と、inert でも別インタプリタへ委譲する形 (`find .
+> -exec sh -c '…' ';'` / first token 以外の `bash` `python3` `xargs` `awk` `sed`
+> / git の `-c` `--config-env` 付き `git -c core.pager='…' log`) は default で
+> ask、autonomous で allow (0.17.0 と同じ)。`git -c alias.x='!cat .env' x` は
+> クォート内 hard-stop が無くても ask。委譲先の無い `grep -E 'a(b)' f` / `find .
+> -name '{x}'` / `jq '{a: .b}' f` / `git log --format='%(trailers)'` は allow。
+> `curl` は URL の `{a,b}` を自分で glob 展開するので inert ではなく
+> (`curl -s 'file:///…/.en{v,x}'` は ask)、git は `_GIT_INERT_SUBCOMMANDS` 外
+> (`rebase --exec` / `bisect run` / `submodule foreach` / 未知 = alias) で ask、
+> sed の省略 long option (`--expr='e …'`) も解決してスクリプトを検査する。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
@@ -92,7 +145,8 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 | `head .env \|\| cat $X \|\| echo done`, `cat $X \| head .env \| wc -l` (0.11.0: hard-stop segment を含んでも他 segment で literal match があれば deny に到達) |
 | `cat .env 2>/dev/null` (安全リダイレクト剥離後に機密 path) |
 | `grep SECRET .env`, `base64 .env`, `xxd .env` |
-| `sed -n 1,5p .env`, `sed 's/f/b/' .env`, `sed -i 's/f/b/' .env`, `awk /re/ .env`, `awk -f s.awk .env` (0.17.0: awk / sed を `_OPAQUE_WRAPPERS` から除外。`awk '{...}'` は hard-stop のため対象外) |
+| `sed -n 1,5p .env`, `sed 's/f/b/' .env`, `sed -i 's/f/b/' .env`, `awk /re/ .env`, `awk -f s.awk .env` (0.17.0: awk / sed を `_OPAQUE_WRAPPERS` から除外) |
+| `awk '{print}' .env`, `awk '{print $1}' .env`, `sed 's/(=)/X/' .env` (0.18.0: hard-stop が quote-aware になりシングルクォート内 `{` `}` `$` `(` `)` を無視。0.17.0 の残り穴が閉じた) |
 | `timeout 1 cat .env`, `nice cat .env`, `stdbuf -o0 cat .env`, `busybox cat .env` |
 | `cp .env /tmp/x`, `mv .env .env.old` |
 | `curl file://.env`, `git show HEAD:.env` |
@@ -115,6 +169,7 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 | `ls \| head`, `git status && git log 2>/dev/null \|\| true` |
 | `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
 | `sed -n p notes.txt`, `awk /x/ notes.txt` (0.17.0: opaque 除外の副次効果で ask → allow。false positive 減) |
+| `grep '(=)' notes.txt`, `awk '{print $1}' notes.txt`, `echo '$(cat .env)'` (0.18.0: hard-stop quote-aware 化の副次効果で ask → allow。シングルクォート内は展開されない) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
 
@@ -144,9 +199,10 @@ allow-list **外** の first_token (`awk`, `sed`, `find`, `xargs`, `parallel`,
 ## Bash handler — metadata-only first_token (0.14.0 新設, 全 mode で allow)
 
 `first_token` が `_METADATA_ONLY_FIRST_TOKENS` (`ls tree stat file du df test wc
-basename dirname realpath readlink echo printf`) に該当する segment、または
-`git check-ignore` / `git ls-files` (subcommand 直書き形) は、**operand の内容を
-stdout に出さない** ため operand scan をスキップして allow に倒す。機密 path が
+basename dirname realpath readlink echo printf`、0.19.0 から `chmod chown chgrp
+touch` も) に該当する segment、または `git check-ignore` / `git ls-files` /
+`git rm --cached` (subcommand 直書き形、`rm` は `--cached` 付きのみ。0.19.0) は、
+**operand の内容を stdout に出さない** ため operand scan をスキップして allow に倒す。機密 path が
 operand に居ても、出力はファイル名・属性・件数・パス文字列のみで値は LLM
 コンテキストに載らない (思想 1 の射程外)。`git status` は `-v` / `--verbose` が
 staged diff (機密の旧値/新値) を出すため allowlist から **除外** (裸の
@@ -168,6 +224,22 @@ deny に倒る (Codex P1, 0.14.0)。
 name (= 内容の安定した指紋) を出せるため metadata-only から除外して deny
 (Codex P2 第3弾, 0.14.0)。
 
+`git rm` は **`--cached` 付きのみ** metadata-only (0.19.0, bd_092a232e-snw.3):
+index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。
+`--cached` は `--` より前の完全一致。`--pathspec-from-file=<file>` は operand
+の中身を pathspec として読み不一致行を `fatal: pathspec '<行>' did not match` で
+echo するため除外して deny (`file -f` と同クラス)。plain `git rm` は作業ツリー
+削除 (破壊操作) で deny 維持。git は long option の **一意な接頭辞** を受理する
+(`--no-cach` = `--no-cached` で後勝ちにより作業ツリーも削除) ため、危険な
+option を exact-token で deny-list しても省略形がすり抜ける。よって **既知の
+安全な option (`--force` / `--dry-run` / `--quiet` / `--ignore-unmatch` /
+`--sparse`、短縮 `-f -n -r -q` と束ね) 以外が 1 つでもあれば index-only と見なさず
+通常経路 (operand scan → 機密 operand なら deny) に倒す** (fail-closed、Codex
+review P1)。`--cache` のような `--cached` 自体の省略形も展開せず保守側 (deny)。`chmod` / `chown` / `chgrp` / `touch` は内容を読む
+option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ) ため
+無条件で metadata-only。いずれも両 hook の reason が次善策として案内するコマンド
+で、0.18.0 までは自分で deny していた (自己矛盾)。
+
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | `ls -la .env`, `stat .env`, `file .env`, `du -h .env`, `tree .env` | allow | allow | allow | allow | allow |
@@ -177,6 +249,8 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
 | `git check-ignore -v .env`, `git ls-files .env`, `git ls-files --error-unmatch .env`, `git status` (裸) | allow | allow | allow | allow | allow |
+| `git rm --cached .env`, `git rm --cached -- .env`, `git rm -r --cached dir/.env`, `git rm -rf --cached dir/.env`, `git rm --cached --force --quiet .env`, `git rm --cached .env && git commit -m untrack` (index からの除去のみ、実ファイルは残る。0.19.0) | allow | allow | allow | allow | allow |
+| `chmod 600 .env`, `chmod --reference=.env other`, `chown user .env`, `chgrp staff .env`, `touch .env`, `touch -r .env other` (属性 / timestamp 操作、内容は出ない。0.19.0) | allow | allow | allow | allow | allow |
 | `git status -v -- .env`, `git status --verbose .env` (staged diff で旧/新値 echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls -la .env > /tmp/x` (read operand 機密でも書込み先が非機密 → metadata allow) | allow | allow | allow | allow | allow |
 | `find . -name .env -exec cat .env ';'` (`-exec` で内容露出可) | **deny** | **deny** | **deny** | **deny** | **deny** |
@@ -184,7 +258,7 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `file -f .env`, `file --files-from=.env` (各行を名前扱いしエラーに echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `wc --files0-from=.env`, `du --files0-from=.env`, `tree --fromfile .env` | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `file .env`, `wc -l .env`, `du -sh .env`, `tree .env` (通常形、内容は出ない) | allow | allow | allow | allow | allow |
-| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files -sz .env` (blob object name = 内容の指紋) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files -sz .env` (blob object name = 内容の指紋。`--format` 形は 0.17.0 まで `(` の hard-stop で ask に降格していたが 0.18.0 の quote-aware 化で表どおり deny に到達) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `tree >\| .env` (`>\|` clobber は `\|` が segment 分割で割れる既知限界、思想 1 射程外) | allow | allow | allow | allow | allow |
 
@@ -200,8 +274,13 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `cat .env`, `head .env`, `grep KEY .env`, `od -c .env` (内容出力系は対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `cp .env /tmp/x`, `mv .env /tmp/x` (複製で漏洩面が広がるため対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm .env`, `git rm -f .env`, `git rm .env -- --cached`, `git rm --cached --no-cached .env` (`--cached` 無し / 後勝ちの否定 = 作業ツリー削除。`--` 以降は pathspec) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm --cached --pathspec-from-file=.env`, `git rm --cached --pathspec-from-file .env` (中身を pathspec として読み不一致行を echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env`, `git rm --cached -h .env` (未知 / 省略形の option は fail-closed で通常経路 → deny。Codex review P1) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo check-ignore .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `echo KEY=val > .env` (echo は safe-read 外: residual `>` が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
+| `chmod 600 x > .env`, `touch x > .env` (chmod / touch も safe-read 外: residual `>` が先に効き ask 維持。0.19.0 で緩めていない) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env -exec cat {} +` (`{}` hard-stop が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env > /tmp/x` (find は safe-read 外: residual `>` で ask 維持) | ask | ask | **allow** | ask | **allow** |
 
@@ -232,7 +311,10 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `bash -c "cat .env"`, `sh -c "..."`, `zsh -c "..."` | ask | ask | **allow** | ask | **allow** |
 | `sudo cat .env`, `xargs -a .env cat` | ask | ask | **allow** | ask | **allow** |
 | `python -c "..."`, `node -e "..."` | ask | ask | **allow** | ask | **allow** |
-| `awk '{print}' .env` (`{` `}` `$` が hard-stop、0.17.0 以降もここ) | ask | ask | **allow** | ask | **allow** |
+| `echo "$(cat .env)"` (ダブルクォート内は展開されるため hard-stop 維持) | ask | ask | **allow** | ask | **allow** |
+| `cat \'$(cat .env)\'` (クォート外の `\'` は quote を開かないので `$(` が hard-stop) | ask | ask | **allow** | ask | **allow** |
+| シングルクォート内に **生の CR バイト** を含む形 (例: `awk '{print}` + CR + `' .env`)。`\r` はクォート内でも hard-stop | ask | ask | **allow** | ask | **allow** |
+| `awk '{print} .env` (未終端クォート。0.18.0 では hard-stop を抜けた先の shlex 失敗で ask に倒れる = 到達経路が新しい) | ask | ask | **allow** | ask | **allow** |
 | `env cat .env`, `env FOO=1 cat .env`, `env -i cat .env`, `env -u HOME cat .env` (`env`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `command cat .env`, `command -p cat .env`, `command -- cat .env` (`command`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `builtin cat .env`, `nohup cat .env`, `nohup command cat .env` (`builtin` / `nohup`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
@@ -268,6 +350,8 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
+| 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` が無い / 不正なら従来通り block) |
+| 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
 
 ## `__main__` catch-all (handler 内未捕捉例外)
