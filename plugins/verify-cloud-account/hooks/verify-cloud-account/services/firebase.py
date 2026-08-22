@@ -35,14 +35,24 @@ import subprocess
 from pathlib import Path
 
 PATTERNS = [r"^firebase\b"]
+# `npx firebase-tools ...` は wrapper 剥がし後 `firebase-tools ...` になり PATTERNS
+# (`^firebase\b`) に一致する。READONLY / STATE_CHANGING / self-remediation も同じ形を
+# 受け付けないと、`npx firebase-tools login` が検証され `use prod` の切替が cache される。
 READONLY = [
-    r"^firebase\s+use\s*$",
+    r"^firebase(?:-tools)?\s+use\s*$",
     # 認証操作 (login / login:ci / login:add / login:use / logout) は project を
     # 変更しない。未ログインだと `firebase use` が requireAuth で失敗して現在値を
     # CLI から取れず、login 自体が deny されるデッドロックになるため素通しする。
-    r"^firebase\s+(login|logout)(:\S+)?\b",
+    r"^firebase(?:-tools)?\s+(login|logout)(:\S+)?\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
-    r"^firebase\s+(--version|--help|version|help)\b",
+    r"^firebase(?:-tools)?\s+(--version|--help|version|help)\b",
+]
+# アクティブ project (configstore の activeProjects) や認証状態を変えうるコマンド。
+# dispatcher が検出すると firebase の成功 cache を破棄する。引数なしの `firebase use`
+# は表示のみ (READONLY) で対象外。`use --clear` / `--add` / `--unalias` は含む。
+STATE_CHANGING = [
+    r"^firebase(?:-tools)?\s+use\s+\S",
+    r"^firebase(?:-tools)?\s+(login|logout)\b",
 ]
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
@@ -240,7 +250,30 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
+def _alias_lines(expected: dict) -> str:
+    """dict 期待値の切替案内 (`firebase use <alias>  # → <project>`)。各行は self-remediation で通る。"""
+    return "\n".join(
+        f"  firebase use {k}  # → {v}"
+        for k, v in expected.items()
+        if isinstance(v, str) and v
+    )
+
+
 def verify(expected, project_dir: str, env=None) -> str | None:
+    # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
+    if isinstance(expected, dict):
+        valid = [v for v in expected.values() if isinstance(v, str) and v]
+        if not valid:
+            return (
+                'Firebase: accounts.local.json の "firebase" オブジェクトに'
+                " 有効な (文字列値の) project ID が見つかりません。"
+            )
+    elif not isinstance(expected, str):
+        return (
+            f'Firebase: accounts.local.json の "firebase" は文字列または '
+            f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
+        )
+
     current, err = _resolve(project_dir, env)
     if err:
         return err
@@ -250,38 +283,26 @@ def verify(expected, project_dir: str, env=None) -> str | None:
                 "Firebase: firebase コマンドが見つかりません。"
                 "npm install -g firebase-tools でインストールしてください。"
             )
-        hint = expected if isinstance(expected, str) else "YOUR_PROJECT"
+        if isinstance(expected, dict):
+            # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
+            # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
+            return (
+                "Firebase: 現在のプロジェクトを取得できません。firebase login の後、"
+                f"以下のいずれかで切り替えてください:\n{_alias_lines(expected)}"
+            )
         return (
             f"Firebase: 現在のプロジェクトを取得できません。"
-            f"firebase login && firebase use {hint} を実行してください。"
+            f"firebase login && firebase use {expected} を実行してください。"
         )
 
     if isinstance(expected, dict):
-        valid = [v for v in expected.values() if isinstance(v, str) and v]
-        if not valid:
-            return (
-                'Firebase: accounts.local.json の "firebase" オブジェクトに'
-                " 有効な (文字列値の) project ID が見つかりません。"
-            )
         if current in valid:
             return None
         expected_display = ", ".join(sorted(set(valid)))
-        alias_list = [
-            f"  firebase use {k}  # → {v}"
-            for k, v in expected.items()
-            if isinstance(v, str) and v
-        ]
-        alias_hint = "\n".join(alias_list)
         return (
             f"Firebase プロジェクト不一致: 現在={current}, "
             f"期待={expected_display} のいずれか\n"
-            f"切り替え:\n{alias_hint}"
-        )
-
-    if not isinstance(expected, str):
-        return (
-            f'Firebase: accounts.local.json の "firebase" は文字列または '
-            f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
+            f"切り替え:\n{_alias_lines(expected)}"
         )
 
     if current != expected:
@@ -293,7 +314,7 @@ def verify(expected, project_dir: str, env=None) -> str | None:
     return None
 
 
-_USE_RE = re.compile(r"^firebase\s+use\s+(\S+)\s*$")
+_USE_RE = re.compile(r"^firebase(?:-tools)?\s+use\s+(\S+)\s*$")
 
 
 def is_self_remediation(candidate: str, expected) -> bool:

@@ -11,6 +11,21 @@ READONLY = [
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^kubectl\s+(--version|--help|version|help)\b",
 ]
+# current-context (kubeconfig) を変えうるコマンド。dispatcher が検出すると kubectl の
+# 成功 cache を破棄する。`set-context --current --namespace=x` のように context 名を
+# 変えない操作も含むが、過剰な破棄は再検証 1 回のコストで済む。
+STATE_CHANGING = [
+    r"^kubectl\s+config\s+(use-context|use|set-context|set-cluster|set-credentials"
+    r"|set|unset|delete-context|delete-cluster|delete-user|rename-context)\b",
+    # 別 CLI / plugin 経由で kubeconfig の current-context を書き換える形。PATTERNS
+    # (`^kubectl`) には一致しないが、dispatcher は全 service の STATE_CHANGING を
+    # 全候補に当てるため、これらの直後の kubectl write も再検証される。
+    r"^kubectl\s+ctx\b",
+    r"^kubectx\b",
+    r"^gcloud\s+container\s+clusters\s+get-credentials\b",
+    r"^aws\s+eks\s+update-kubeconfig\b",
+    r"^az\s+aks\s+get-credentials\b",
+]
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
     'kubectl 最小例: {"kubectl": "my-context-name"}。'

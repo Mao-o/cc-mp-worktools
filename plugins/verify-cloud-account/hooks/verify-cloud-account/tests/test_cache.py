@@ -83,6 +83,43 @@ class TestCache(unittest.TestCase):
         cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
         self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
 
+    # --- invalidate (bd_092a232e-629.3: 切替コマンド検出時の service 単位破棄) ---
+
+    def test_invalidate_removes_only_that_service(self):
+        cache.set_success("github", "/p", "exp", 1.0)
+        cache.set_success("aws", "/p", "exp", 1.0)
+        self.assertEqual(cache.invalidate("github"), 1)
+        self.assertFalse(cache.get_success("github", "/p", "exp", 1.0))
+        self.assertTrue(cache.get_success("aws", "/p", "exp", 1.0))
+
+    def test_invalidate_covers_all_projects_expected_and_envs(self):
+        # アカウント状態はマシン全体で共有されるため、project_dir / 期待値 / inline env
+        # が異なる entry もまとめて破棄する
+        cache.set_success("github", "/p1", "expA", 1.0)
+        cache.set_success("github", "/p2", "expB", 2.0)
+        cache.set_success("github", "/p1", "expA", 1.0, {"GH_HOST": "ghe.example.com"})
+        self.assertEqual(cache.invalidate("github"), 3)
+        self.assertFalse(cache.get_success("github", "/p1", "expA", 1.0))
+        self.assertFalse(cache.get_success("github", "/p2", "expB", 2.0))
+        self.assertFalse(
+            cache.get_success("github", "/p1", "expA", 1.0, {"GH_HOST": "ghe.example.com"})
+        )
+
+    def test_invalidate_without_entries_is_noop(self):
+        self.assertEqual(cache.invalidate("github"), 0)
+        # service 名がファイル名に使えない文字を含んでも例外にならない
+        cache.set_success("weird/svc name", "/p", "exp", 1.0)
+        self.assertTrue(cache.get_success("weird/svc name", "/p", "exp", 1.0))
+        self.assertEqual(cache.invalidate("weird/svc name"), 1)
+        self.assertFalse(cache.get_success("weird/svc name", "/p", "exp", 1.0))
+
+    def test_invalidate_does_not_match_service_name_prefix(self):
+        # "gh" の破棄が "ghx" の entry を巻き込まない (prefix は "<svc>-" で区切る)
+        cache.set_success("gh", "/p", "exp", 1.0)
+        cache.set_success("ghx", "/p", "exp", 1.0)
+        self.assertEqual(cache.invalidate("gh"), 1)
+        self.assertTrue(cache.get_success("ghx", "/p", "exp", 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

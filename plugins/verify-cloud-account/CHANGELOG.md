@@ -1,5 +1,135 @@
 # Changelog
 
+## 0.8.0
+
+**remediation loop の解消 (ログイン系の素通し / AWS 切替案内の修正) と、切替
+コマンドでの成功 cache 即時無効化** (bd_092a232e-629.2 / 629.3 / 629.6)。
+verify-cloud-account は「記載済み service の不一致 × 書込系コマンド」だけを deny
+し、それ以外は lenient に倒す方針に沿って、deny 文面が案内するコマンド自体が deny
+される 3 つの経路を塞いだ。
+
+### 変更内容
+
+1. **認証取得系コマンドを検証スキップ (READONLY) に** (629.2) — `aws sso login` /
+   `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
+   login` / `logout` / `refresh` / `setup-git`、`gcloud auth login` /
+   `application-default login` / `revoke` / `set-quota-project` /
+   `activate-service-account` / `revoke` (firebase の `login` / `logout` は 0.7.3 で
+   対応済み。`npx firebase-tools login` の形も同じ扱いに揃えた)。いずれもクラウド
+   資源を変更せず、ローカルの認証状態・profile 設定を作るだけ。従来は `^aws\b` 等に
+   一致して検証され、SSO token 期限切れ等で `aws sts get-caller-identity` が失敗すると
+   deny 文面が案内する `aws sso login --profile <profile>` 自体が deny され、Claude
+   内で回復できなかった。`--with-token` / `--web` / `--key-file` 等のオプション付きも
+   資源に触らないため同じ扱い。accounts.local.json 未設定のプロジェクトでも deny
+   しない。認証情報を出力する `aws configure export-credentials` /
+   `gcloud auth application-default print-access-token` は `gh auth token` と同じく
+   検証対象のまま。
+2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (629.2) —
+   `tests/test_dispatcher.py::TestRemediationGuidanceContract` が各 service の verify
+   を mock せず subprocess だけ差し替えて実際の deny 文面 (不一致 / 未ログイン / 未設定
+   / SETUP_HINT) を生成し、案内コマンドを抽出して dispatcher に通す。案内コマンドは
+   readonly または self-remediation として検証なしで allow されるか、AWS の
+   `AWS_PROFILE=<profile> aws ...` はその env で検証されることを assert する。
+   今後 deny 文面に allow 経路の無いコマンドを書くと機械的に落ちる。
+3. **アカウント状態を変えうるコマンドで成功 cache を即時無効化** (629.3) — 各 service
+   に `STATE_CHANGING` パターンを追加し、dispatcher が `gh auth switch` / `login` /
+   `logout` / `refresh`、引数ありの `firebase use ...` / `firebase login*` / `logout`、
+   `aws sso login` / `aws login` / `aws configure ...`、`gcloud config set` / `unset` /
+   `configurations activate` / `create` / `gcloud auth login` /
+   `activate-service-account` / `revoke` / `application-default` / `gcloud init`、
+   `kubectl config use-context` / `set-*` / `unset` / `delete-*` / `rename-context`
+   を検出すると、PreToolUse 時点で `cache.invalidate(service)` により当該 service の
+   entry を project / 期待値 / inline env を問わず全て破棄する (CLI のアカウント状態
+   はマシン全体で共有されるため service 単位)。readonly 扱いのログイン系や
+   self-remediation (期待値への切替) も無条件に破棄する (切替が失敗して状態が
+   変わらなかった場合に古い成功が残らないように)。あわせて**切替コマンドを含む
+   コマンドでは、その service の検証成功を cache しない** — 検証は実行前の状態に
+   対して行われるため、これを cache すると直後の write が切替後の状態を検証せずに
+   通る。判定は service 単位で、readonly の `gh auth login && gh pr create` や
+   inline env が異なる `gh auth switch --user other && GH_HOST=... gh pr create` の
+   write 側も cache しない。STATE_CHANGING は service の PATTERNS に一致しない候補
+   にも当てるため、`gcloud container clusters get-credentials` /
+   `aws eks update-kubeconfig` / `az aks get-credentials` / `kubectx` / `kubectl ctx`
+   のように別 CLI / plugin が kubeconfig を書き換える形でも kubectl の cache を
+   破棄する。表示系の `aws configure list` / `list-profiles` / `get` /
+   `export-credentials` は状態を変えないため対象外。従来は `gh pr list`
+   (検証成功・cache) → `gh auth switch --user other` → `gh pr create` が 30 秒以内
+   なら cache hit で別アカウントの write が通っていた (0.7.3 の README 注記を解消)。
+   cache ファイル名を `<service>-<sha256>.json` に変更 (service 単位の glob 削除の
+   ため。旧形式のファイルは読まれず TTL 後に無害なゴミとして残るのみ)。
+4. **AWS deny 文面の切替案内を Claude Code で効く形に** (629.6) — 従来は
+   `export AWS_PROFILE=<profile>` を第一に案内していたが、Claude Code の Bash は
+   呼出ごとに env を持ち越さず、hook は Claude 本体の env を継承するため、`export`
+   しても次の `aws ...` は同じ理由で deny され続けた。案内を
+   `AWS_PROFILE=<profile> aws ...` (行頭インライン。この形のみ検証に反映) →
+   `aws sso login --profile <profile>` (1. で readonly 化) → 認証情報なしのときは
+   `aws configure` の順に改め、`export` は「次の呼出に持ち越されず検証にも反映され
+   ない (ターミナル側で設定して claude を起動し直す場合のみ有効)」の注記に変更した。
+   さらに `~/.aws/config` (`$AWS_CONFIG_FILE` / `~` 展開対応) を走査し、期待 Account
+   ID を `sso_account_id` (IAM Identity Center) または `role_arn`
+   (`arn:aws:iam::<id>:role/...`) に持つ profile (`[default]` 含む) があれば
+   `<profile>` を具体名にし、複数あれば一覧を添える。見つからなければ `<profile>`
+   のまま `aws configure list-profiles` (readonly) で確認するよう案内する。config の
+   profile 名以外の内容 (sso_start_url 等) は読んでも文面に出さない。
+5. **Firebase の dict 期待値 + 現在値未解決のときの案内** — 従来は
+   `firebase login && firebase use YOUR_PROJECT` (placeholder) を案内していたが、
+   `firebase use YOUR_PROJECT` を文字どおり実行すると self-remediation に乗らず同じ
+   deny を繰り返す。不一致時と同じ alias ごとの `firebase use <alias>  # → <project>`
+   一覧を案内するようにした (contract テストで dict + 未解決ケースを固定)。あわせて
+   期待値の形の検証 (空 dict / 非文字列) を CLI 呼出より前に移した。
+6. **`npx firebase-tools ...` 形の整合** — wrapper 剥がし後の `firebase-tools ...` は
+   PATTERNS (`^firebase\b`) に一致する一方、READONLY / self-remediation は
+   `^firebase\s+` だったため `npx firebase-tools login` が検証され (未ログインなら
+   deny)、`npx firebase-tools use prod` の切替も通常 write として cache されていた。
+   READONLY / STATE_CHANGING / self-remediation を `^firebase(?:-tools)?\s+` に揃えた。
+7. **AWS config 走査の堅牢化** — HOME 未設定で `Path.home()` が `RuntimeError` を投げる
+   環境でも例外を漏らさない (漏れると hook が異常終了して無音 fail-open)。
+   `AWS_CONFIG_FILE=~user/...` も展開する。
+8. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
+   再検証されない」注記と `export AWS_PROFILE` の記述を実装に合わせて更新、cache 節に
+   「切替・ログイン系コマンドでの即時無効化」の表を追加、既知の制限に「期待値以外への
+   切替 + write を同一コマンドで実行すると実行前の状態で検証される」を追記。
+
+### 非互換性
+
+- 切替・ログイン系コマンドの直後は必ず再検証が走る (cache hit しない)。切替コマンド
+  自身も (期待値以外への `gh auth switch` 等は) cache を使わず毎回検証する。
+- cache ファイル名の形式変更。`$TMPDIR/cc-mp-verify-cloud-account/` の旧形式
+  (`<sha256>.json`) は参照されなくなる。
+
+### 対象外 (別項で扱う)
+
+- 期待値以外への切替と write を同一コマンドで実行する形
+  (`gh auth switch --user other && gh pr create`)。hook は実行前の状態でしか検証
+  できないため、README の既知の制限に記載した。
+- 読み取り専用サブコマンド (`gh pr list` 等) の不一致時 allow + 警告 (629.5)、
+  `--profile` / `--project` flag の解析 (629.4)。
+
+### テスト
+
+- `tests/test_cache.py` に 4 件 (`invalidate` の service 単位破棄 / 他 service 非影響
+  / project・期待値・env 横断 / prefix 衝突なし)
+- `tests/test_dispatcher.py::TestAccountSwitchInvalidation` 13 件 (切替 → write の
+  再検証、切替自身を cache しない、readonly ログインと self-remediation の無効化、
+  全 service の切替表、readonly 切替 + write の複合や inline env 違いの別 target でも
+  cache しない、別 CLI 経由の kubeconfig 書換、`npx firebase-tools` 形、他 service
+  非影響、`firebase use prod && firebase deploy`、表示系 readonly は cache 維持、
+  未設定時の無効化)
+- `tests/test_dispatcher.py::TestLoginCommandsReadonly` 3 件 (ログイン系 27 コマンドが
+  検証なしで allow / 未設定でも allow / 類似 write・認証情報出力は従来どおり deny)
+- `tests/test_dispatcher.py::TestRemediationGuidanceContract` 14 件 (上記 2.)
+- `tests/test_services.py` に `TestAws` 5 件 (案内の順序と `export` 不在 / config から
+  の profile 解決 / 認証情報なし / HOME 不能時に例外を漏らさない) +
+  `TestAwsProfileScan` 8 件 + `TestFirebase` 3 件 (dict 未解決の alias 案内 / 不正な
+  形で CLI を叩かない / `firebase-tools use` の self-remediation) +
+  `TestAuthCommandPatterns` 3 件 (READONLY / STATE_CHANGING のパターン表)
+- 新規 53 件のうち 41 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
+  実行) で fail することを確認済み。残り 12 件は 0.7.3 でも成り立つ契約の固定
+  (既存 self-remediation / readonly が案内コマンドを通すこと、表示系 readonly が
+  cache を保つこと、他 service の cache に影響しないこと、類似 write の deny)
+
+テスト 352 → 405 件。
+
 ## 0.7.3
 
 **Firebase の現在値解決順を firebase-tools 本体に合わせる (P0 bug fix,

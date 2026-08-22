@@ -35,6 +35,18 @@ def _is_readonly(candidate: str, service) -> bool:
     return False
 
 
+def _is_state_changing(candidate: str, service) -> bool:
+    """候補セグメントが service のアカウント状態を変えうる (切替 / ログイン系) なら True。"""
+    for pattern in getattr(service, "STATE_CHANGING", []):
+        if re.search(pattern, candidate):
+            return True
+    return False
+
+
+def _service_name(service) -> str:
+    return service.__name__.rsplit(".", 1)[-1]
+
+
 def _find_accounts_file(
     project_dir: str,
 ) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None]:
@@ -86,8 +98,14 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
     )
 
 
-def _collect_targets(command: str) -> list[tuple]:
-    """コマンドを分解し、検証対象 (non-readonly) の (svc, cands, inline_env) リストを返す。
+def _analyze_command(command: str) -> tuple[list[tuple], list]:
+    """コマンドを分解し (targets, switching) を返す。
+
+    targets は検証対象 (non-readonly) の (svc, cands, inline_env) リスト。
+    switching はアカウント状態を変えうるセグメント (STATE_CHANGING) を含む service の
+    リスト (重複なし、出現順)。readonly 扱いのセグメント (`gh auth login` /
+    `aws sso login` 等) も switching には含める — 検証はしないが、実行後に
+    アカウントが変わるため成功 cache を破棄する必要があるため。
 
     同一サービスでも **インライン env が異なるセグメントは別エントリ**にする。
     `AWS_PROFILE=prod aws ... && AWS_PROFILE=dev aws ...` のような複合コマンドで
@@ -103,7 +121,15 @@ def _collect_targets(command: str) -> list[tuple]:
     """
     order: list = []
     cand_map: dict = {}
+    switching: list = []
     for cand, inline_env in extract_candidates(command):
+        # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
+        # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
+        # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
+        # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
+        for other in SERVICES:
+            if other not in switching and _is_state_changing(cand, other):
+                switching.append(other)
         svc = _match_service(cand)
         if svc is None or _is_readonly(cand, svc):
             continue
@@ -116,7 +142,7 @@ def _collect_targets(command: str) -> list[tuple]:
     for key in order:
         svc, env_items = key
         targets.append((svc, cand_map[key], dict(env_items)))
-    return targets
+    return targets, switching
 
 
 def _all_self_remediation(cands: list, service, entry) -> bool:
@@ -200,7 +226,14 @@ def dispatch(command: str, cwd: str) -> dict | None:
     if not project_dir:
         return None
 
-    targets = _collect_targets(command)
+    targets, switching = _analyze_command(command)
+    # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
+    # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
+    # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
+    # 必ず再検証される。self-remediation (期待値への切替) や readonly 扱いの
+    # login も、実行に失敗して状態が変わらない可能性があるため無条件に破棄する。
+    for svc in switching:
+        cache.invalidate(_service_name(svc))
     if not targets:
         return None
 
@@ -265,8 +298,16 @@ def dispatch(command: str, cwd: str) -> dict | None:
         if _all_self_remediation(cands, svc, entry):
             continue
 
-        svc_name = svc.__name__.rsplit(".", 1)[-1]
-        if cache.get_success(svc_name, project_dir, entry, accounts_mtime, inline_env):
+        svc_name = _service_name(svc)
+        # 切替を含むコマンドでは、その service の target は cache を読まず (上で破棄
+        # 済みだが防御的に) 実行前の状態を新たに検証し、成功しても cache に残さない
+        # (実行後に状態が変わる)。判定は service 単位 — readonly の `gh auth login`
+        # は cands に入らず、inline env が違う切替セグメントは別 target になるため、
+        # cands だけを見ると `gh auth login && gh pr create` の成功が cache される。
+        switching_here = svc in switching
+        if not switching_here and cache.get_success(
+            svc_name, project_dir, entry, accounts_mtime, inline_env
+        ):
             continue
 
         # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
@@ -278,7 +319,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
             errors.append(f"{err}\n(検出コマンド: {', '.join(cands)})")
-        else:
+        elif not switching_here:
             cache.set_success(svc_name, project_dir, entry, accounts_mtime, inline_env)
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""

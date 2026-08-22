@@ -14,8 +14,26 @@ PATTERNS = [r"^gcloud\b"]
 READONLY = [
     r"^gcloud\s+auth\s+list\b",
     r"^gcloud\s+config\s+get-value\s+(project|account)\b",
+    # 認証取得系 (login / application-default ... / activate-service-account / revoke)
+    # は GCP 資源を変更せず、ローカルの認証状態を作るだけ。未ログインで
+    # `gcloud config get-value` が取れないとき deny 文面から回復できる経路を残す。
+    # 直後の write は (STATE_CHANGING で成功 cache も破棄されるため) 再検証される。
+    # `application-default` は login / revoke / set-quota-project のみ (ADC の
+    # print-access-token は gcloud auth print-access-token と同じく検証対象のまま)。
+    r"^gcloud\s+auth\s+(login|application-default\s+(login|revoke|set-quota-project)"
+    r"|activate-service-account|revoke)\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gcloud\s+(--version|--help|version|help)\b",
+]
+# アクティブ project / account を変えうるコマンド。dispatcher が検出すると gcloud の
+# 成功 cache を破棄する。`configurations create` は既定で作成した configuration を
+# activate する。`init` は対話的に account / project を設定し直す。
+STATE_CHANGING = [
+    r"^gcloud\s+config\s+(set|unset)\b",
+    r"^gcloud\s+config\s+configurations\s+(activate|create)\b",
+    r"^gcloud\s+auth\s+(login|activate-service-account|revoke"
+    r"|application-default\s+(login|revoke))\b",
+    r"^gcloud\s+init\b",
 ]
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (

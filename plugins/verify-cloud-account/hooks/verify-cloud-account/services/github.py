@@ -15,9 +15,19 @@ import subprocess
 PATTERNS = [r"^gh\b"]
 READONLY = [
     r"^gh\s+auth\s+(status|list)\b",
+    # 認証取得系 (login / logout / refresh / setup-git) はリポジトリ等の資源を変更せず、
+    # ローカルの認証状態を作るだけ。未ログイン・別アカウントのとき deny 文面が案内する
+    # `gh auth login [--hostname <host>]` 自体が deny される remediation loop を防ぐ。
+    # `--with-token` / `--web` 等のオプションも資源には触らない。直後の write は
+    # (STATE_CHANGING で成功 cache も破棄されるため) 次回 hook で再検証される。
+    r"^gh\s+auth\s+(login|logout|refresh|setup-git)\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
 ]
+# アクティブアカウント (hosts.yml) を変えうるコマンド。dispatcher が検出すると
+# github の成功 cache を破棄する。`switch` は期待値向きなら self-remediation で
+# 検証なし、期待値以外なら通常検証 (実行前の状態) だが、どちらも cache は残さない。
+STATE_CHANGING = [r"^gh\s+auth\s+(switch|login|logout|refresh)\b"]
 ACCOUNT_KEY = "github"
 SETUP_HINT = (
     'GitHub 最小例: {"github": "YOUR_USERNAME"}。'

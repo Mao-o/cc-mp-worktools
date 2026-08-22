@@ -9,19 +9,28 @@
 - TTL (既定 30 秒) を過ぎた
 - accounts.local.json の mtime が変わった
 - キャッシュファイルが存在しない or JSON 破損
+- アカウント状態を変えうるコマンド (`gh auth switch` / `gcloud config set` /
+  `firebase use <x>` / `kubectl config use-context` / `aws sso login` 等) を
+  dispatcher が検出した時点で、その service の entry を全て破棄する
+  (`invalidate(service_name)`)。CLI のアカウント状態はマシン全体で共有される
+  (hosts.yml / gcloud 設定 / configstore / kubeconfig / SSO token cache) ため、
+  project_dir や inline env で絞らず service 単位で破棄する
 
-保存先: $TMPDIR/cc-mp-verify-cloud-account/<sha256>.json
+保存先: $TMPDIR/cc-mp-verify-cloud-account/<service>-<sha256>.json
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
 
 _CACHE_TTL_SEC = 30
+
+_SERVICE_TAG_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def _cache_dir() -> Path | None:
@@ -41,6 +50,14 @@ def _cache_path(key: str) -> Path | None:
     return base / f"{key}.json"
 
 
+def _service_tag(service_name: str) -> str:
+    """ファイル名の prefix に使う service 名 (英数字・`_`・`-` 以外は `_` に置換)。
+
+    `invalidate()` が service 単位で glob できるよう、key の先頭に置く。
+    """
+    return _SERVICE_TAG_RE.sub("_", service_name) or "_"
+
+
 def _cache_key(service_name: str, project_dir: str, expected, inline_env=None) -> str:
     material = json.dumps(
         {
@@ -52,7 +69,8 @@ def _cache_key(service_name: str, project_dir: str, expected, inline_env=None) -
         sort_keys=True,
         default=str,
     )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"{_service_tag(service_name)}-{digest}"
 
 
 def get_success(
@@ -103,3 +121,26 @@ def set_success(
         path.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass
+
+
+def invalidate(service_name: str) -> int:
+    """service の成功 cache を project_dir / expected / inline env を問わず全て破棄する。
+
+    アカウント状態を変えうるコマンドの PreToolUse 時点で dispatcher が呼ぶ。
+    破棄した entry 数を返す (削除失敗・cache dir 不在は 0 扱いで例外にしない)。
+    """
+    base = _cache_dir()
+    if base is None:
+        return 0
+    removed = 0
+    try:
+        entries = list(base.glob(f"{_service_tag(service_name)}-*.json"))
+    except OSError:
+        return 0
+    for path in entries:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
