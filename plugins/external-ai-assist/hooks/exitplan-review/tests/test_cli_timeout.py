@@ -85,11 +85,14 @@ class FakeCliTestCase(HookTestCase):
         raise AssertionError("孫の pid が書かれなかった")
 
     def assertDead(self, pid: int) -> None:
+        """消えるか zombie になれば死亡扱い (PID 1 が reap しない環境では zombie が残る)。"""
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
+                return
+            if subproc.pid_is_zombie(pid):
                 return
             time.sleep(0.05)
         self.fail(f"孫プロセス {pid} が取り残されている")

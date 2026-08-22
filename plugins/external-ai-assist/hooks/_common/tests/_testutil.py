@@ -86,7 +86,13 @@ def read_pid(pid_file: str, timeout: float = 3.0) -> int:
 
 
 def wait_until_dead(pid: int, timeout: float = 3.0) -> bool:
-    """pid が消える (zombie の回収含む) まで待つ。timeout 内に消えれば True。"""
+    """pid が消えるか zombie になるまで待つ。timeout 内にそうなれば True。
+
+    PID 1 が孤児を reap しない環境 (Linux コンテナ等) では死んだ孫が zombie のまま残り
+    `os.kill(pid, 0)` が成功し続けるので、zombie も「死んだ」扱いにする。
+    """
+    from _common import subproc
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -95,6 +101,8 @@ def wait_until_dead(pid: int, timeout: float = 3.0) -> bool:
             return True
         except PermissionError:
             return False
+        if subproc.pid_is_zombie(pid):
+            return True
         time.sleep(0.05)
     return False
 

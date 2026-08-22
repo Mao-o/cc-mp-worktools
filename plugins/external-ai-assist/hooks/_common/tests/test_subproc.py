@@ -9,6 +9,7 @@ kill するため、stdout を継承した孫 (`sleep`) が取り残される。
 `getpgid(zombie)` が ESRCH になる経路の回帰テスト。
 """
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -170,6 +171,118 @@ class TestTimeoutKillsProcessGroup(SubprocTestCase):
             subproc.kill_process_group(proc, grace_sec=GRACE, own_group=True)
         self.assertEqual(sent, [])
         send_signal.assert_not_called()
+
+
+class TestZombieOnlyGroup(SubprocTestCase):
+    """PID 1 が孤児を reap しない環境では、グループに zombie だけが残り `killpg(pgid, 0)` が
+    成功し続ける (Codex R2 P2)。生死判定 (`_group_state`) を mock して、zombie-only なら
+    待たずに settle / live が残れば SIGKILL 昇格 / 判定不能なら SIGKILL 後は短い上限で
+    打ち切る、を固定する。"""
+
+    def _exited_leader(self) -> subprocess.Popen:
+        cli = write_script(self.dir, "quick", "exit 0\n")
+        return subprocess.Popen(
+            [cli], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+
+    def _kill_with_state(self, proc, grace: float, state_fn) -> tuple[float, list[int]]:
+        sent: list[int] = []
+
+        def fake_killpg(pgid, sig):
+            if sig != 0:
+                sent.append(sig)
+
+        with mock.patch.object(subproc, "_group_state", side_effect=state_fn), mock.patch.object(
+            os, "killpg", side_effect=fake_killpg
+        ):
+            started = time.monotonic()
+            subproc.kill_process_group(proc, grace_sec=grace, own_group=True)
+            return time.monotonic() - started, sent
+
+    def test_zombie_only_group_settles_without_waiting(self):
+        proc = self._exited_leader()
+        elapsed, sent = self._kill_with_state(proc, 2.0, lambda pgid: "zombie-only")
+        self.assertLess(elapsed, 1.0, "zombie だけのグループで猶予を待っている")
+        self.assertEqual(sent, [signal.SIGTERM], "止めるものが無いのに SIGKILL へ昇格している")
+        self.assertIsNotNone(proc.returncode)
+
+    def test_live_member_escalates_to_sigkill(self):
+        proc = self._exited_leader()
+        sent_so_far: list[int] = []
+
+        def state(pgid):
+            return "empty" if signal.SIGKILL in sent_so_far else "live"
+
+        def fake_killpg(pgid, sig):
+            if sig != 0:
+                sent_so_far.append(sig)
+
+        with mock.patch.object(subproc, "_group_state", side_effect=state), mock.patch.object(
+            os, "killpg", side_effect=fake_killpg
+        ):
+            started = time.monotonic()
+            subproc.kill_process_group(proc, grace_sec=0.5, own_group=True)
+            elapsed = time.monotonic() - started
+        self.assertEqual(sent_so_far, [signal.SIGTERM, signal.SIGKILL])
+        self.assertGreaterEqual(elapsed, 0.5, "live が残るなら TERM 段は猶予を待つこと")
+        self.assertLess(elapsed, 1.5)
+
+    def test_unknown_liveness_is_cut_short_after_sigkill(self):
+        proc = self._exited_leader()
+        elapsed, sent = self._kill_with_state(proc, 1.0, lambda pgid: "unknown")
+        self.assertEqual(sent, [signal.SIGTERM, signal.SIGKILL])
+        self.assertGreaterEqual(elapsed, 1.0, "判定不能なら TERM 段は猶予を待つこと")
+        self.assertLess(
+            elapsed,
+            1.0 + subproc.KILL_SETTLE_UNKNOWN_SEC + 0.5,
+            "SIGKILL 後は KILL_SETTLE_UNKNOWN_SEC で打ち切ること",
+        )
+
+    def test_group_state_classification(self):
+        with mock.patch.object(os, "killpg", side_effect=ProcessLookupError):
+            self.assertEqual(subproc._group_state(12345), "empty")
+        with mock.patch.object(os, "killpg", return_value=None):
+            with mock.patch.object(subproc, "_live_members_via_proc", return_value=True):
+                self.assertEqual(subproc._group_state(12345), "live")
+            with mock.patch.object(subproc, "_live_members_via_proc", return_value=False):
+                self.assertEqual(subproc._group_state(12345), "zombie-only")
+            with mock.patch.object(subproc, "_live_members_via_proc", return_value=None):
+                with mock.patch.object(subproc, "_live_members_via_ps", return_value=False):
+                    self.assertEqual(subproc._group_state(12345), "zombie-only")
+                with mock.patch.object(subproc, "_live_members_via_ps", return_value=None):
+                    self.assertEqual(subproc._group_state(12345), "unknown")
+        with mock.patch.object(os, "killpg", side_effect=PermissionError), mock.patch.object(
+            subproc, "_live_members_via_proc", return_value=True
+        ):
+            self.assertEqual(subproc._group_state(12345), "live", "EPERM はメンバー有りとして扱う")
+
+    def test_parse_proc_stat_handles_spaces_and_parens_in_comm(self):
+        self.assertEqual(
+            subproc.parse_proc_stat("123 (my (odd) cmd) Z 1 456 456 0 -1 4194560 0\n"),
+            ("Z", 456),
+        )
+        self.assertEqual(subproc.parse_proc_stat("7 (bash) S 1 7 7 34816"), ("S", 7))
+
+    def test_live_members_probe_on_this_machine(self):
+        """実機の probe (Linux: /proc、それ以外: ps) が生きているグループを live と判定する。"""
+        cli, pid_file = self._hanging()
+        proc = subprocess.Popen(
+            [cli], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        self._grandchildren.append(read_pid(pid_file))
+        try:
+            live = subproc._live_members_via_proc(proc.pid)
+            if live is None:
+                live = subproc._live_members_via_ps(proc.pid)
+            if live is None:
+                self.skipTest("/proc も ps も使えない環境")
+            self.assertTrue(live)
+            self.assertEqual(subproc._group_state(proc.pid), "live")
+        finally:
+            subproc.kill_process_group(proc, grace_sec=GRACE, own_group=True)
+        self.assertIn(subproc._group_state(proc.pid), ("empty", "zombie-only"))
 
 
 class TestNormalExitCleanup(SubprocTestCase):
