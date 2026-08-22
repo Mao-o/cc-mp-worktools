@@ -36,6 +36,7 @@ post-implementation-review/
 ├── state.py            pending/in-flight 状態機械 + state lock / cursor lock
 ├── stategc.py          $TMPDIR の TTL GC (旧 post-review-markers も掃除)
 ├── gitscan.py          パス正規化 + git status スナップショット + パス単位 diff
+├── exclusion.py        外部に送らないファイルの判定 (既定 glob / 追加 glob / CODE_ONLY)
 ├── cursor.py           cursor agent 呼び出し (TIMEOUT_SEC = 600。起動は hooks/_common/subproc.py)
 ├── prompts/
 │   └── post-implementation-cursor.md
@@ -112,6 +113,45 @@ kill された時: in-flight が残る -> TTL 超過を後続 Stop が pending �
 
 REVIEW_CLEAN でパスを戻すと、毎ターン同じファイルを再レビューする元のバグを作り直す。
 逆に失敗時に hash を記録すると、未レビューの変更が「レビュー済み」扱いで永久に skip される。
+
+パス単位では、cursor に渡す前に次の振り分けがある (0.5.0):
+
+| パスの扱い | pending | reviewed hash | 通知 |
+|---|---|---|---|
+| 作業ツリー外 / ディレクトリ | 戻さない | 記録しない | なし |
+| **除外** (exclusion.py に当たる) | 戻さない (恒久) | 記録しない | ファイル名 + 理由 |
+| 上限 (`MAX_REVIEW_PATHS`) / 時間予算 (`COLLECT_BUDGET_SEC`) の繰り越し | **戻す** | 記録しない | ファイル名 |
+| 合計予算 (`MAX_DIFF_BYTES`) に収まらない | **戻す** | 記録しない | ファイル名 |
+| 1 ファイル上限 (`MAX_FILE_DIFF_BYTES`) 超過 → 先頭のみ送信 | 戻さない | **記録する** (全文の hash) | ファイル名 + バイト数 |
+
+## 外部に送らないファイルと予算 (0.5.0)
+
+**除外** は `_resolve_paths` で、作業ツリー外パスと同じ位置で落とす。`MAX_REVIEW_PATHS` の
+手前なので枠を食わず、overflow として pending に戻ることもない。規則 (既定 glob /
+`EXTERNAL_AI_POST_REVIEW_EXCLUDE` / `EXTERNAL_AI_POST_REVIEW_CODE_ONLY`) は `exclusion.py` の
+docstring と README を参照。判定にはリンク名 (claim された絶対パスの root 相対) と実体
+(realpath) の両方を渡す。
+
+**予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
+切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。
+収まらないファイルは送らず pending に戻す (hash なし)。1 ファイルが `MAX_FILE_DIFF_BYTES` を
+超える場合だけ先頭を `(truncated)` 付きで送り、その時だけ hash (全文で計算) を記録する。
+
+**順序は claim 順** (`_resolve_paths` はソートしない)。繰り越したパスは claim 順 (予算超過 →
+時間切れ → `MAX_REVIEW_PATHS` の overflow) で 1 回の `record_pending` により空の pending に最初に
+積まれるので次ターンの先頭に来る。`MAX_FILE_DIFF_BYTES <= MAX_DIFF_BYTES` により先頭のファイルは
+必ず収まるため、繰り越しが永久に続くことはない
+(`tests/test_stop_flow.py::TestByteBudgetFlow::test_deferred_file_is_not_starved_by_new_edits`)。
+`MAX_PENDING_PATHS` の上限超過は末尾 (新しい編集) から落とし、先頭の繰り越し分を守る。
+
+**git にはパスを literal pathspec で渡す** (`gitscan._git` の `--literal-pathspecs`)。既定では
+`app/[id]/page.tsx` が `app/i/page.tsx` にもマッチし、claim していない別セッションのファイルの
+diff が混入する (旧 state の `[.]env` が tracked の `.env` を拾う経路も同じ)。`git diff` には
+`--no-color` も付ける (`color.ui=always` で ANSI が混ざると hash と予算が狂う)。
+
+除外・繰り越し・切り詰めはファイル名と理由を `systemMessage` (block 時は `decision` と同居)
+と stderr に出す。内容は出さない。`systemMessage` は公式 docs の全イベント共通フィールドで
+Stop でも discard されないが、対話 UI 以外での表示は未確認なので stderr を併用している。
 
 ### TTL は cursor の timeout を超える必要がある
 
@@ -222,6 +262,9 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 作業ツリー外の絶対パスが除外される | `TestOutsideWorktree` |
 | 上限超過パスを黙って捨てない | `TestOverflowCarryOver` |
 | コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いしない | `TestFencedCleanSentinel` (判定規則の網羅は `hooks/_common/tests/test_sentinel.py`) |
+| 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
+| glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
+| 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると

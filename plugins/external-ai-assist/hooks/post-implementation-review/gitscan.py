@@ -23,7 +23,8 @@ turn 7 で同じファイルを編集すると turn 1 の hunk が turn 7 でも
 
 結果として「同じ変更の再レビュー」は起きず、レビュアーは常にファイル全体の
 変更文脈を受け取る。(a) が優位になるのは巨大ファイルを何十ターンも編集し続ける
-ケースだが、そこは MAX_DIFF_BYTES の truncate で頭打ちになる。
+ケースだが、そこは 1 ファイルあたりの上限 (`__main__.MAX_FILE_DIFF_BYTES`) の切り詰めで
+頭打ちになる (切り詰めた場合も hash は全文で記録するので、変わらない限り再掲しない)。
 """
 from __future__ import annotations
 
@@ -45,9 +46,16 @@ MAX_SNAPSHOT_ENTRIES = 5000
 
 
 def _git(root: str, args: list[str], timeout: int = PATH_DIFF_TIMEOUT_SEC):
+    """git を起動する。パスは常に **literal pathspec** として渡す。
+
+    既定の pathspec は `*` `?` `[...]` を glob として解釈する。`app/[id]/page.tsx` のような
+    名前 (Next.js の動的ルート) を pathspec に渡すと `app/i/page.tsx` にもマッチし、
+    claim していない (除外判定も通っていない) 別セッションのファイルの diff が混入する。
+    旧 state に残った `[.]env` のようなエントリが tracked の `.env` を拾う経路も同じ。
+    """
     try:
         return subprocess.run(
-            ["git", *args],
+            ["git", "--literal-pathspecs", *args],
             cwd=root,
             capture_output=True,
             timeout=timeout,
@@ -203,16 +211,20 @@ def untracked_among(root: str, rels: list[str]) -> set[str]:
 
 
 def path_diff(root: str, rel: str, untracked: bool, has_head: bool) -> str:
-    """1 パス分の diff テキストを返す。差分なし / 取得失敗なら空文字。"""
+    """1 パス分の diff テキストを返す。差分なし / 取得失敗なら空文字。
+
+    `--no-color` は必須: `color.ui=always` / `color.diff=always` の環境では ANSI が混ざり、
+    レビュアーに渡す本文が汚れるうえ hash もバイト予算も狂う。
+    """
     if untracked:
         # untracked は HEAD 側に対応物が無いので /dev/null と比較する。
         # --no-index は差分ありで exit 1 を返すため returncode は見ない。
-        res = _git(root, ["diff", "--no-index", "--", os.devnull, rel])
+        res = _git(root, ["diff", "--no-color", "--no-index", "--", os.devnull, rel])
         return _decode(res.stdout) if res is not None else ""
 
     # 初回コミット前の repo には HEAD が無いので staged 差分で代替する
     base = "HEAD" if has_head else "--cached"
-    res = _git(root, ["diff", base, "--", rel])
+    res = _git(root, ["diff", "--no-color", base, "--", rel])
     if res is None or res.returncode != 0:
         return ""
     return _decode(res.stdout)

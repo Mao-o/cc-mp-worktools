@@ -20,8 +20,10 @@ Bash 経由の変更も「どのセッションがやったか」付きで拾え
 
 ターン境界を UserPromptSubmit ではなく「前回 Stop の消費時点」で定義する理由、
 in-flight 予約と TTL 回収の設計は state.py の docstring を参照。
+外部に送らないファイルの判定 (既定除外 glob / 追加 glob / CODE_ONLY) は exclusion.py。
 
 exit 0 (JSON なし): Stop を妨げない
+exit 0 + {"systemMessage": ...}: 除外・繰り越し・切り詰めの通知のみ (Stop を妨げない)
 exit 0 + {"decision": "block", "reason": ...}: Claude にレビュー結果を返し追加対応を促す
 """
 from __future__ import annotations
@@ -41,11 +43,22 @@ if _HOOKS_DIR not in sys.path:
 from _common import hooklog, sentinel  # noqa: E402
 
 import cursor  # noqa: E402
+import exclusion  # noqa: E402
 import gitscan  # noqa: E402
 import state  # noqa: E402
 import stategc  # noqa: E402
 
+# 1 回のレビューで cursor に渡す diff 合計の上限。ファイル (セクション) 単位で積み上げ、
+# 収まらないファイルは **送らずに pending へ戻す** (hash も記録しない)。結合後に末尾を切る
+# 方式だと、切り落とされたファイルが「レビュー済み」扱いになり以後再掲されなかった (0.4.1 まで)。
 MAX_DIFF_BYTES = 40000
+
+# 1 ファイルの diff 上限。これを超えるファイルは先頭だけを `(truncated)` 付きで送り、
+# **この場合だけ** hash を記録する (先頭は見ているので、変わらない限り再掲しない)。
+# MAX_DIFF_BYTES 以下でなければならない (先頭のファイルが必ず収まる = 永久繰り越しが無い)。
+# 合計の 80% にしているのは、切り詰めは「その diff の末尾を二度と見ない」恒久的な損失で、
+# 繰り越しは「次ターンまで待つ」だけの遅延なので、1 ファイルはなるべく丸ごと送るため。
+MAX_FILE_DIFF_BYTES = 32000
 
 # 1 回のレビューで diff を取るパス数の上限。溢れた分は捨てずに pending へ戻し、
 # 次の Stop でレビューする (silent truncation にしない)。
@@ -56,6 +69,9 @@ MAX_REVIEW_PATHS = 60
 # (rev-parse 2 + ls-files 10 + rev-parse 2) を引いた残りに収まるよう決めている
 # (式は tests/test_review_set.py::TestTimeoutBudgets で固定)。
 COLLECT_BUDGET_SEC = 30
+
+# systemMessage / stderr に列挙するファイル名の上限 (それ以上は件数だけ)
+MAX_LISTED_NAMES = 10
 
 _EDIT_TOOLS = ("Write", "Edit", "NotebookEdit")
 
@@ -201,82 +217,205 @@ def handle_stop(payload: dict) -> None:
         if not acquired:
             log("同一作業ツリーで別セッションがレビュー中のため skip (pending は温存)")
             return
-        _review_claim(payload, session_id, root)
+        output = _review_claim(payload, session_id, root)
+
+    if output:
+        json.dump(output, sys.stdout, ensure_ascii=False)
 
 
-def _review_claim(payload: dict, session_id: str, root: str) -> None:
+def _review_claim(payload: dict, session_id: str, root: str) -> dict:
+    """claim → 除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
+
+    利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
+    `decision` / `reason` と同居させる。公式 docs の共通フィールドで Stop でも有効)。
+    systemMessage が表示されない環境でも stderr に同じ内容を残し、除外そのものは通知の
+    配信に依存しない。
+    """
     claim = state.claim_pending(session_id)
     if claim is None:
         log("このセッションが変更したファイルが無いため skip")
-        return
+        return {}
     claim_id, claimed = claim
+    notices: list[str] = []
 
-    rels, overflow = _resolve_paths(root, claimed)
+    rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
+    if excluded:
+        # 除外は恒久: pending にも reviewed にも残さない。ファイル名は出すが内容は出さない
+        notices.append(
+            f"{len(excluded)} ファイルを外部 AI レビューから除外 (内容は送信していません): "
+            + _list_names(f"{name} ({reason})" for name, reason in excluded)
+        )
     if overflow:
-        # 溢れた分は捨てずに pending へ戻す (次の Stop でレビューされる)
-        log(f"{len(overflow)} パスを次回に繰り越し (1 回あたり {MAX_REVIEW_PATHS} 件上限)")
-        state.record_pending(session_id, overflow)
+        notices.append(
+            f"{len(overflow)} ファイルは 1 回あたり {MAX_REVIEW_PATHS} 件の上限により"
+            "次ターンに繰り越し: " + _list_names(_rel_names(root, overflow))
+        )
 
-    sections, submitted, hashes, deferred = _collect_diffs(
-        root, rels, state.reviewed_hashes(session_id)
-    )
-    if deferred:
-        state.record_pending(session_id, deferred)
-    if not sections:
-        log("レビュー対象の差分が無い (空 diff / 前回と同一) ため skip")
+    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
+    # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
+    # 積む: 予算超過 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順
+    carried = batch.deferred + overflow
+    if carried:
+        state.record_pending(session_id, carried)
+    if batch.deferred_time:
+        notices.append(
+            f"{len(batch.deferred_time)} ファイルは git diff の時間予算超過により"
+            "次ターンに繰り越し: " + _list_names(_rel_names(root, batch.deferred_time))
+        )
+    if batch.deferred_size:
+        notices.append(
+            f"{len(batch.deferred_size)} ファイルは diff 合計 {MAX_DIFF_BYTES // 1000} KB の"
+            "予算に収まらないため次ターンに繰り越し (レビュー済みにはしません): "
+            + _list_names(_rel_names(root, batch.deferred_size))
+        )
+    if batch.truncated:
+        notices.append(
+            f"{len(batch.truncated)} ファイルは diff が {MAX_FILE_DIFF_BYTES // 1000} KB を"
+            "超えるため先頭のみ送信 (truncated): "
+            + _list_names(f"{rel} ({size} bytes)" for rel, size in batch.truncated)
+        )
+    for notice in notices:
+        log(notice)
+
+    if not batch.sections:
+        log("レビュー対象の差分が無い (空 diff / 前回と同一 / 除外のみ) ため skip")
         state.complete_claim(session_id, claim_id, {})
-        return
+        return _with_notices({}, notices)
 
-    diff_text = _truncate("\n".join(sections))
-    log(f"Cursor によるレビューを実行 ({len(submitted)} ファイル, {len(diff_text)} chars)")
+    diff_text = "\n".join(batch.sections)
+    log(f"Cursor によるレビューを実行 ({len(batch.submitted)} ファイル, {len(diff_text)} chars)")
     result = cursor.review(diff_text)
 
     if not result:
         log("Cursor レビュー失敗 (fail-open、pending に戻す)")
-        state.restore_claim(session_id, claim_id, submitted)
-        return
+        state.restore_claim(session_id, claim_id, batch.submitted)
+        return _with_notices({}, notices)
 
     if is_clean_review(result):
         log("Cursor: REVIEW_CLEAN (block しない、レビュー済みとして確定)")
-        state.complete_claim(session_id, claim_id, hashes)
-        return
+        state.complete_claim(session_id, claim_id, batch.hashes)
+        return _with_notices({}, notices)
 
     reason = build_reason(result)
-    state.complete_claim(session_id, claim_id, hashes)
+    state.complete_claim(session_id, claim_id, batch.hashes)
     _save_review_copy(session_id, reason)
-    json.dump({"decision": "block", "reason": reason}, sys.stdout, ensure_ascii=False)
+    return _with_notices({"decision": "block", "reason": reason}, notices)
 
 
-def _resolve_paths(root: str, claimed: list[str]) -> tuple[list[str], list[str]]:
-    """claim したパスを作業ツリー相対に正規化し、上限超過分を絶対パスで切り出す。
+def _with_notices(output: dict, notices: list[str]) -> dict:
+    if notices:
+        output["systemMessage"] = "[post-implementation-review] " + "\n".join(notices)
+    return output
+
+
+def _list_names(names) -> str:
+    items = list(names)
+    shown = ", ".join(items[:MAX_LISTED_NAMES])
+    if len(items) > MAX_LISTED_NAMES:
+        shown += f", 他 {len(items) - MAX_LISTED_NAMES} 件"
+    return shown
+
+
+def _rel_names(root: str, abs_paths: list[str]) -> list[str]:
+    return [gitscan.to_relative(root, p) or p for p in abs_paths]
+
+
+def _resolve_paths(
+    root: str, claimed: list[str], policy: exclusion.Policy
+) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """claim したパスを作業ツリー相対に正規化し、(rels, overflow_abs, excluded) を返す。
 
     作業ツリー外の絶対パスはここで落ちる (復元もしない — 残すと毎 Stop 走査され続ける)。
     ディレクトリも落とす: 入れ子の git リポジトリは `git status -uall` でも `dir/` の
     まま出てくるため、v0.3.0 が書いた state に残っている可能性がある。
+
+    除外 (exclusion.Policy) もここで当てる。除外されたパスは作業ツリー外と同じく
+    **復元しない・hash も記録しない** (恒久除外)。上限 (MAX_REVIEW_PATHS) の手前で除外する
+    ので、除外ファイルが枠を食ったり overflow として pending に戻ったりしない。
+    判定にはリンク名 (claim された絶対パスを root 相対にしたもの) と実体 (realpath) の
+    両方を渡す — symlink のどちらの名前が機密に見えても外部に送らない。
+
+    順序は claim 順 (= pending に積まれた順) を保つ。前回 Stop が繰り越した (pending に
+    戻した) パスは次ターンの先頭に来るので、予算超過で繰り越されたファイルが新しい編集に
+    毎回追い越されて永久に残ることがない。
     """
-    rels: list[str] = []
+    root_prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
+    # 実体 (realpath 相対) ごとに判定候補を集める。同じ実体が別名 (symlink) で複数回 claim
+    # されていても、どの名前が機密に見えるかを全部見てから判定する
+    candidates: dict[str, list[str]] = {}
     for path in claimed:
         rel = gitscan.to_relative(root, path)
-        if not rel or rel in rels:
+        if not rel or os.path.isdir(os.path.join(root, rel)):
             continue
-        if os.path.isdir(os.path.join(root, rel)):
+        names = candidates.setdefault(rel, [rel])
+        link_rel = _link_relative(root_prefix, path)
+        if link_rel and link_rel not in names:
+            names.append(link_rel)
+
+    rels: list[str] = []
+    excluded: list[tuple[str, str]] = []
+    for rel, names in candidates.items():
+        hit = policy.explain(names)
+        if hit is not None:
+            excluded.append(hit)  # (当たった名前, 理由)
             continue
         rels.append(rel)
-    rels.sort()
     overflow = [os.path.join(root, r) for r in rels[MAX_REVIEW_PATHS:]]
-    return rels[:MAX_REVIEW_PATHS], overflow
+    return rels[:MAX_REVIEW_PATHS], overflow, excluded
 
 
-def _collect_diffs(
-    root: str, rels: list[str], reviewed: dict[str, str]
-) -> tuple[list[str], list[str], dict[str, str], list[str]]:
-    """パスごとに diff を取り、(sections, submitted_abs, hashes, deferred_abs) を返す。
+def _link_relative(root_prefix: str, path: str) -> str | None:
+    """claim された名前そのもの (symlink ならリンク名) を作業ツリー相対にする。
+
+    親ディレクトリだけ realpath で実体化し、最後の要素は解決しない。claim 側が
+    `/tmp/...` (→ `/private/tmp/...`) や symlink された親ディレクトリ経由の表記でも
+    root の下に落ちるので、リンク名による除外判定が黙って効かなくなることがない。
+    """
+    parent = os.path.realpath(os.path.dirname(path))
+    link = os.path.join(parent, os.path.basename(path))
+    if not link.startswith(root_prefix):
+        return None
+    return link[len(root_prefix) :] or None
+
+
+class ReviewBatch:
+    """`_collect_diffs` の結果。submitted / hashes は cursor に渡すファイルだけ。
+
+    dataclass にしていないのは、テストが `__main__.py` を `sys.modules` 未登録のまま
+    `exec_module` で読むため (`from __future__ import annotations` 下の dataclass は
+    モジュール名前空間の解決で落ちる)。
+    """
+
+    def __init__(self) -> None:
+        self.sections: list[str] = []
+        self.submitted: list[str] = []  # 絶対パス
+        self.hashes: dict[str, str] = {}
+        self.deferred_time: list[str] = []  # 時間予算で未処理 (絶対パス)
+        self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
+        self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
+
+    @property
+    def deferred(self) -> list[str]:
+        """pending へ戻す絶対パス (未レビュー)。claim 順 = バイト予算 (途中) → 時間切れ (末尾)。"""
+        return self.deferred_size + self.deferred_time
+
+
+def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> ReviewBatch:
+    """パスごとに diff を取り、予算に収まるものだけを ReviewBatch に積む。
 
     前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
     済み) も載せない。どちらも submitted に入らないので、cursor 失敗時にも復元されず
     そのまま消える。
 
-    COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred として返す。
+    **予算はファイル単位で当てる**:
+
+    - 1 ファイルが MAX_FILE_DIFF_BYTES を超える → 先頭だけを `(truncated)` 付きで送り、
+      hash は全文で記録する (変わらない限り再掲しない。変われば切り詰めた形で再掲)
+    - 積み上げ合計が MAX_DIFF_BYTES を超えるファイル → 送らず deferred_size へ
+      (hash を記録しないので次ターンにそのまま再掲される)。後続の小さいファイルは
+      予算が残っていれば送る (first-fit)
+
+    COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred_time として返す。
     Stop 全体の hook timeout (690s) のうち cursor が最大 600s + kill 猶予 15s を使うため、
     git に使える時間は約 75s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
     頭を押さえる。deferred は捨てずに pending へ戻す。
@@ -284,36 +423,64 @@ def _collect_diffs(
     untracked = gitscan.untracked_among(root, rels)
     has_head = gitscan.head_exists(root)
 
-    sections: list[str] = []
-    submitted: list[str] = []
-    hashes: dict[str, str] = {}
+    batch = ReviewBatch()
+    used = 0
     deadline = time.monotonic() + COLLECT_BUDGET_SEC
 
     for index, rel in enumerate(rels):
         if time.monotonic() > deadline:
-            deferred = [os.path.join(root, r) for r in rels[index:]]
-            log(f"git diff の時間予算超過。{len(deferred)} パスを次回に繰り越し")
-            return sections, submitted, hashes, deferred
+            batch.deferred_time = [os.path.join(root, r) for r in rels[index:]]
+            break
 
         text = gitscan.path_diff(root, rel, rel in untracked, has_head)
         if not text.strip():
             continue
         abs_path = os.path.join(root, rel)
-        digest = diff_hash(text)
+        digest = diff_hash(text)  # hash は切り詰め前の全文で取る
         if reviewed.get(abs_path) == digest:
             continue
-        sections.append(text)
-        submitted.append(abs_path)
-        hashes[abs_path] = digest
-    return sections, submitted, hashes, []
+
+        full_size = len(text.encode())
+        if full_size > MAX_FILE_DIFF_BYTES:
+            text = _truncate_section(text, MAX_FILE_DIFF_BYTES)
+        size = len(text.encode())
+        separator = 1 if batch.sections else 0  # "\n".join の区切り分
+        if used + separator + size > MAX_DIFF_BYTES:
+            batch.deferred_size.append(abs_path)
+            continue
+
+        batch.sections.append(text)
+        batch.submitted.append(abs_path)
+        batch.hashes[abs_path] = digest
+        used += separator + size
+        if full_size > MAX_FILE_DIFF_BYTES:
+            batch.truncated.append((rel, full_size))
+    return batch
 
 
-def _truncate(diff_text: str) -> str:
-    encoded = diff_text.encode()
-    if len(encoded) <= MAX_DIFF_BYTES:
-        return diff_text
-    truncated = encoded[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore")
-    return truncated + "\n\n... (diff truncated for review)\n"
+_TRUNCATED_MARKER = (
+    "\n... (truncated for review: only the first part of this file's diff is shown; "
+    "{full} bytes in total)\n"
+)
+
+
+def _truncate_section(text: str, limit: int) -> str:
+    """1 ファイル分の diff を marker 込みで limit バイト以下に切り詰める。
+
+    行の途中で切ると diff の hunk が壊れて読みにくいので、可能なら最後の改行で切る
+    (ただし半分未満まで戻るほど長い行なら byte 境界で切る)。UTF-8 の途中で切れた
+    バイトは捨てる。
+    """
+    encoded = text.encode()
+    if len(encoded) <= limit:
+        return text
+    marker = _TRUNCATED_MARKER.format(full=len(encoded))
+    budget = max(limit - len(marker.encode()), 0)
+    cut = encoded[:budget]
+    newline = cut.rfind(b"\n")
+    if newline >= budget // 2:
+        cut = cut[:newline]
+    return cut.decode("utf-8", errors="ignore") + marker
 
 
 def _save_review_copy(session_id: str, reason: str) -> None:

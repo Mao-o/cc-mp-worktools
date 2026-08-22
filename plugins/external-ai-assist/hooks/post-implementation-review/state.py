@@ -134,6 +134,10 @@ def record_pending(session_id: str, paths: list[str]) -> int:
 
     作業ツリー内かどうかの判定はここでは行わない。git を叩かずに済ませて
     PostToolUse を軽く保ち、除外は claim 時 (Stop) にまとめて行う。
+
+    順序 (dict の挿入順) がレビュー順になる。上限超過は **末尾 (新しい方) から** 落とす:
+    先頭は前回 Stop が繰り越した (pending に戻した) パスで、ここを落とすと予算超過で
+    繰り越されたファイルが大量編集のターンで黙って消える。
     """
     if not paths:
         return 0
@@ -143,9 +147,8 @@ def record_pending(session_id: str, paths: list[str]) -> int:
             now = time.time()
             for p in paths:
                 pending.setdefault(p, now)
-            if len(pending) > MAX_PENDING_PATHS:
-                for stale in list(pending)[: len(pending) - MAX_PENDING_PATHS]:
-                    del pending[stale]
+            for newest in list(pending)[MAX_PENDING_PATHS:]:
+                del pending[newest]
             return len(pending)
     except OSError:
         return 0

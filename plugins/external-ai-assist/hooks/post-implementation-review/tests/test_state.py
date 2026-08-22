@@ -54,7 +54,16 @@ class TestPending(StateTestCase):
     def test_pending_is_capped(self):
         state.record_pending(SESSION, [f"/repo/f{i}.py" for i in range(300)])
         _, paths = state.claim_pending(SESSION)
+        self.assertEqual(paths, [f"/repo/f{i}.py" for i in range(state.MAX_PENDING_PATHS)])
+
+    def test_cap_drops_newest_not_carried_over(self):
+        """先頭 (前回 Stop の繰り越し分) を守り、末尾 (新しい編集) から落とす。"""
+        state.record_pending(SESSION, ["/repo/carried.py"])
+        state.record_pending(SESSION, [f"/repo/new{i}.py" for i in range(state.MAX_PENDING_PATHS + 50)])
+        _, paths = state.claim_pending(SESSION)
+        self.assertEqual(paths[0], "/repo/carried.py")
         self.assertEqual(len(paths), state.MAX_PENDING_PATHS)
+        self.assertNotIn(f"/repo/new{state.MAX_PENDING_PATHS + 49}.py", paths)
 
     def test_sessions_do_not_share_pending(self):
         state.record_pending("sess-a", ["/repo/a.py"])
