@@ -184,6 +184,13 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
 
+### review 対応 (10) — `ag --pager` (PR #38 Codex R10 P1)
+
+`ag --pager COMMAND` は出力を pager コマンド (shell で解釈される) に渡すため、
+`ag --pager 'cat ${X:-.env}' pattern .` のクォート内 `$` `{` が生きている。
+`_DELEGATING_OPTIONS` に `ag: --pager` を追加 (option 無しの `ag 'foo(' f` は
+緩和のまま)。
+
 ### review 対応 (9) — 単独 `&` の区切り / git config key の大文字小文字 (PR #38 Codex R9 P1 ×2)
 
 - **単独の `&` (非同期リスト) を segment 区切りにした。** `ls '{' & cat .env` は
@@ -405,7 +412,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   `log --format` / `status` / `stash push` は allow、`rg --pre` / `sort
   --compress-program` は ask、(14) review 対応 9: `ls '{' & cat .env` /
   `echo a &cat .env` は 2 segment に割れて deny、`2>&1` / `&>` は区切らない、
-  `git -c Alias.x='!…'` / `-cALIAS.x=…` は ask
+  `git -c Alias.x='!…'` / `-cALIAS.x=…` は ask、(15) review 対応 10:
+  `ag --pager 'cat ${X:-.env}'` / `--pager=…` は ask、`ag 'foo(' f` /
+  `rg 'a{2}' f` は allow
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、

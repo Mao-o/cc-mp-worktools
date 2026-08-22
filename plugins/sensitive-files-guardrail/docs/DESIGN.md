@@ -259,8 +259,8 @@ safe-read から pager 系を除いたもの + metadata-only + awk / sed + `git`
 `rebase --exec` / `bisect run` / `submodule foreach` / `grep -O` /
 `--upload-pack` のように shell コマンドを受け取る option を持つサブコマンドと
 未知のサブコマンド (= 設定済み alias かもしれない) は委譲扱い)。inert でも
-外部プログラムを受け取る option (`rg --pre` / `sort --compress-program`) は
-委譲扱い (`_DELEGATING_OPTIONS`)。sed の long option は GNU の一意 prefix 省略
+外部プログラムを受け取る option (`rg --pre` / `ag --pager` / `sort
+--compress-program`) は委譲扱い (`_DELEGATING_OPTIONS`)。sed の long option は GNU の一意 prefix 省略
 (`--expr`) を解決してから引数の有無を判定する。`_has_quoted_hard_stop` (hard-stop が False の segment に
 シングルクォート内の hard-stop char が残っているか) が真のとき
 `_quoted_hard_stop_reason` を適用し、allowlist 外の first token (`docker` /

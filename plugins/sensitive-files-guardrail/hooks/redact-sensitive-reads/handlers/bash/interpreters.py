@@ -86,6 +86,7 @@ _QUOTE_RELAX_FIRST_TOKENS = (
 # shell コマンドを受け取る (値にクォート内 hard-stop があれば委譲とみなす)。
 _DELEGATING_OPTIONS: dict[str, tuple[str, ...]] = {
     "rg": ("--pre",),                    # preprocessor command
+    "ag": ("--pager",),                  # pager command (review R10)
     "sort": ("--compress-program",),     # 圧縮プログラム
 }
 

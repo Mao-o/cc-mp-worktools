@@ -1801,10 +1801,25 @@ class TestQuoteAwareHardStop(BaseBash):
                 )
 
     def test_inert_commands_with_program_options_stay_ask(self):
-        for cmd in ("rg --pre 'cat' '{x}' .", "sort --compress-program='x' '{a}'"):
+        for cmd in ("rg --pre 'cat' '{x}' .", "sort --compress-program='x' '{a}'",
+                    "ag --pager 'cat ${X:-.env}' pattern .",
+                    "ag --pager='cat ${X:-.env}' pattern ."):
             with self.subTest(cmd=cmd):
                 r = handle(_make_envelope(cmd, self.tmp))
-                self.assertEqual(_decision(r), "ask")
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        # option 無しの ag / rg は緩和のまま
+        for cmd in ("ag 'foo(' notes.txt", "rg 'a{2}' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
 
     # --- (14) R9: 単独 & の区切り / git config key の大文字小文字 ---
     def test_single_ampersand_splits_async_list(self):
