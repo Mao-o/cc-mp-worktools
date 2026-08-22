@@ -37,12 +37,22 @@ _resolve_local_patterns_path:
   last-match-wins は出現順で決まるため、``[project:...]`` セクションを共通行より
   後ろに置けばプロジェクト側が勝ち、前に置けば共通側が勝つ — 既存の
   「書いた順が強さ」という契約をセクション導入後も変えないため。
+
+除外案内のレシピ (0.19.0):
+- 両 hook の deny / block reason が案内する「恒久除外」は ``exclude_recipe_lines``
+  が組み立てる ``[project:$CLAUDE_PROJECT_DIR]`` ヘッダー + ``!<basename>`` 行。
+  ヘッダー無し (全プロジェクト共通) への追記は明示的な選択にし、既定では
+  プロジェクト限定に誘導する (0.18.0 まではヘッダー無し行だけを案内していた
+  ため、上記「他プロジェクトにも無条件適用」側に既定で誘導していた)。
+- reason に絶対パスを出さない方針のため、ヘッダーは環境変数名のまま示し、
+  書き込む側 (ユーザー / LLM) が実際の絶対パスへ置き換える。ヘッダー自体は
+  ``_parse_local_patterns_text`` で展開されない (文字列完全一致)。
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 _PREFERRED_SUBPATH = Path(".claude") / "sensitive-files-guardrail" / "patterns.local.txt"
 # rename 前 (sensitive-files-guard) の旧配置。新パスが無いときのみ fallback で読む。
@@ -54,6 +64,39 @@ LEGACY_LOCAL_PATTERNS_WARN = "legacy_patterns_local_in_use"
 
 _PROJECT_SECTION_PREFIX = "[project:"
 _PROJECT_SECTION_SUFFIX = "]"
+
+# 除外案内 (read 側 deny reason / Stop 側 block reason) で見せる表示用パス
+# (0.19.0)。実体の解決は ``_resolve_local_patterns_path`` (``Path.home()`` 基準)
+# で、表示は ``~`` 表記のまま固定する (reason に絶対パスを出さない)。
+LOCAL_PATTERNS_DISPLAY_PATH = "~/.claude/sensitive-files-guardrail/patterns.local.txt"
+# 除外案内で勧めるセクションヘッダーの雛形。実パスではなく環境変数名で示す。
+# ``_parse_local_patterns_text`` はヘッダーを展開しない (文字列完全一致) ので、
+# 書き込む側が ``$CLAUDE_PROJECT_DIR`` を実際の絶対パスに置き換える前提。
+PROJECT_SECTION_HEADER_HINT = "[project:$CLAUDE_PROJECT_DIR]"
+# ヘッダー雛形に添える注記 (両 hook で同じ文言)。
+PROJECT_SECTION_PLACEHOLDER_NOTE = (
+    "$CLAUDE_PROJECT_DIR はこのプロジェクトの絶対パスに置き換える。"
+    "全プロジェクト共通にしたい場合のみヘッダー無しの行に書く"
+)
+
+
+def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]:
+    """``patterns.local.txt`` に追記する恒久除外レシピ (行リスト) を返す。
+
+    ``[project:$CLAUDE_PROJECT_DIR]`` ヘッダー + ``!<basename>`` 行。重複は出現順を
+    保って除去し、空 basename は捨てる。``limit`` 件を超えた分は ``... (N more)``
+    に畳む (Stop の block reason が肥大しないため)。両 hook が同じレシピを提示
+    するためにここ (patterns.local.txt 形式の所有者) に置く。
+    """
+    seen: list[str] = []
+    for name in basenames:
+        if name and name not in seen:
+            seen.append(name)
+    lines = [PROJECT_SECTION_HEADER_HINT]
+    lines.extend(f"!{name}" for name in seen[:limit])
+    if len(seen) > limit:
+        lines.append(f"... ({len(seen) - limit} more)")
+    return lines
 
 
 def _resolve_local_patterns_path() -> Path:

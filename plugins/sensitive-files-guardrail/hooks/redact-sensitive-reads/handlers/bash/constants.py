@@ -84,6 +84,15 @@ _METADATA_ONLY_FIRST_TOKENS = frozenset({
     "basename", "dirname", "realpath", "readlink",
     # 引数をそのまま表示 (ファイルを開かない)
     "echo", "printf",
+    # 0.19.0 (bd_092a232e-snw.3): 属性 / タイムスタンプ操作。出力は無し、または
+    # ``-v`` / ``-c`` での変更前後の mode / owner のみで内容は出ない。
+    # ``--reference=RFILE`` / ``touch -r RFILE`` は RFILE の mode / owner /
+    # timestamp (= metadata) を読むだけで、内容を読む option は存在しない。
+    # 両 hook の deny / block reason が次善策として提示する ``chmod 600 .env``
+    # / ``touch .env`` を自分で deny していた自己矛盾を解消する。書込み形
+    # (``chmod 600 x > .env``) は safe_read 外なので residual metachar が先に
+    # 効き従来通り ask_or_allow (echo と同じ)。
+    "chmod", "chown", "chgrp", "touch",
 })
 
 # find のうち「内容出力・副作用」を伴うアクション (0.14.0, Codex P1 対応)。
@@ -137,6 +146,8 @@ _METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
 # ``status`` は ``-v`` という頻出オプションが diff を出し plain 形の価値も低い
 # (operand scan で裸 ``git status`` は allow) ため option-gate より allowlist
 # 除外が単純。``git status -- .env`` 等 operand 明示形のみ deny。
+# ``rm`` はこの集合には **入れない**。``--cached`` 付きのみ metadata-only と
+# する条件付き判定 (``_GIT_RM_INDEX_ONLY_FLAG``、0.19.0)。
 _GIT_METADATA_SUBCOMMANDS = frozenset({"check-ignore", "ls-files"})
 
 # git ls-files のうち blob object name (= 内容の指紋) を出力するオプション
@@ -150,6 +161,23 @@ _GIT_LS_FILES_OBJECT_OPTS = frozenset({"-s", "--stage", "--format"})
 # git ls-files の「値を取らない」短縮フラグ (``-sz`` 等の束ね検出用)。
 # ``-x`` / ``-X`` は値を取るため除外 (``-x s.env`` を誤検出しないため)。
 _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
+
+# git rm の「index からの除去のみ」flag (0.19.0, bd_092a232e-snw.3)。
+# ``git rm --cached <path>`` は作業ツリーの実ファイルを消さず内容も出力しない
+# (出力は ``rm '<path>'`` の path 文字列のみ) ため metadata-only。両 hook の
+# reason が「tracked なら ``git rm --cached`` で untrack」と案内しているのに
+# 自分で deny していた自己矛盾を解消する。``--cached`` 無しの plain ``git rm``
+# は作業ツリー削除 (破壊操作) のため operand scan → deny 維持。exact match
+# のみ認識 (``--cached=...`` 形は git に存在しない)。``--`` 以降は pathspec
+# なので flag として数えない (``git rm .env -- --cached`` は deny)。``-r`` は
+# index 除去の範囲が広がるだけで内容出力も実ファイル削除も無いため許容。
+_GIT_RM_INDEX_ONLY_FLAG = "--cached"
+# git rm のうち operand ファイルの **中身** を pathspec リストとして読み、
+# 不一致行を ``fatal: pathspec '<行>' did not match any files`` で echo する
+# option。``file -f`` (``_METADATA_CONTENT_READING_OPTS``) と同じ「option で
+# 内容露出に化ける」クラスとして metadata-only から除外する (operand scan が
+# ``--pathspec-from-file=.env`` の値 / 分離形の ``.env`` を拾って deny)。
+_GIT_RM_CONTENT_READING_OPTS = frozenset({"--pathspec-from-file"})
 
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。

@@ -87,6 +87,147 @@ format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆�
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut
 
+## 0.19.0
+
+**Stop hook の session 単位 once-only 化 + 両 hook が推奨する次善策コマンドの allow
++ 除外 hint の `[project:]` 誘導** (bd_092a232e-snw.2 / snw.3 / snw.23)。2026-08-22
+の plugin 精査で「離脱率低減」に分類された 3 件をまとめて取り込む。判定境界は
+**緩む方向のみ** 変わる (allow の追加)。deny 固定の境界 (機密 operand 確定 ×
+内容出力 / 破壊) と ask_or_allow の auto 緩和は不変。
+
+### 1. Stop hook が tracked 機密一致を毎ターン再 block し承認を記憶できない (snw.2)
+
+`hooks/check-sensitive-files/__main__.py` は `stop_hook_active` しか見ず、
+session / 承認状態を一切持たなかった。block reason は AskUserQuestion で
+「意図的に管理対象とする」を選ばせるが、選んでも次ターンの Stop で同じ file set が
+再 block される (永続化経路なし)。Next.js 慣例の `.env` commit / committed CA
+証明書 `*.pem` / direnv の `.envrc` など「tracked が正」な repo では毎ターン block
+が確定し、0.14.0 離脱と同型の体験になっていた。
+
+- **`hooks/check-sensitive-files/stop_ack.py`** (新規): session 単位の報告済み
+  (status, path) 集合を `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
+  に記録する。`patterns.local.txt` と同じ `Path.home()` 基準 (plugin cache 更新で
+  消えない、テストは `HOME` 差し替えで隔離)。内容は 1 行 1
+  `sha256("<cwd>\t<status>\t<path>")` で平文 path は残さない (`cwd` を scope に
+  含めるのは同一 session 内で別 repo に `cd` したとき同じ相対 path を報告済みと
+  誤認しないため)。`session_id` は
+  `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$` のみ受理。読取 / 書込失敗は「状態なし」=
+  従来通り block。TTL 7 日で best-effort GC
+- **`__main__.py`**: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。
+  新しいファイルが増えた / untracked → tracked に変わったときだけ再 block し、
+  `報告済み ∪ 現在` を保存 (hash 1 本ではなく集合を持つのは「1 件対応して残りが
+  減った」ときに再 block しないため)。`session_id` 欠落 / 不正時は従来通り毎回
+  block。`stop_hook_active` ゲートは従来通り最初に効く
+- block reason に恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` + `!<basename>`
+  行、下記 3.) と「このセッションでは同じ集合を再 block しない」注記を追加。
+  tracked の対応文に「index から外すだけで実ファイルは残る」を補足。絶対パスは
+  出さない
+
+### 2. 自身が推奨する `git rm --cached` / `chmod` / `touch` を deny する自己矛盾 (snw.3)
+
+in-process 実測 (default / auto 共通): `git rm --cached .env` → deny、reason は
+history カテゴリの「commit / 差分を閲覧しようとした」(意図誤り)。一方 Stop hook と
+`core/messages.py::_bash_deny_history` はまさにこのコマンドを対応手順として提示
+しており、LLM が指示どおり実行すると block される。`chmod 600 .env` / `touch .env`
+も generic deny で「値が LLM コンテキストに露出する可能性」と事実に反する理由を
+返していた (両者とも内容を出力しない)。
+
+- **`handlers/bash/constants.py`**: `_METADATA_ONLY_FIRST_TOKENS` に `chmod` /
+  `chown` / `chgrp` / `touch` を追加 (内容を読む option が存在しない。
+  `--reference=RFILE` / `touch -r RFILE` は mode / owner / timestamp のみ)。
+  `_GIT_RM_INDEX_ONLY_FLAG = "--cached"` / `_GIT_RM_CONTENT_READING_OPTS =
+  {"--pathspec-from-file"}` を新設
+- **`handlers/bash_handler.py`**: `_is_metadata_only` の git 分岐に `rm` を条件付きで
+  追加 (`_git_rm_is_index_only`)。`--cached` が `--` より前に exact match し、
+  `--pathspec-from-file` が無ければ metadata-only (index からの除去のみ、出力は
+  `rm '<path>'` の path 文字列、実ファイルは残る)
+- **`core/messages.py`**: `_bash_deny_history` を subcommand 別に分割。閲覧系
+  (`show` / `diff` / `log` / `cat-file` 等) は従来文面、操作系
+  (`_GIT_OPERATE_SUBCOMMANDS` = `add` / `rm` / `mv` / `restore` / `checkout` /
+  `reset` / `stash` / `clean` / `update-index` / `apply` / `commit`) は「index /
+  作業ツリーへの操作」note + subcommand 別の代替案 (`rm` は allow される
+  `--cached` 形を案内し、deny された理由は断定しない — global option 前置 /
+  `--pathspec-from-file` / `--cached` 無しのいずれでも文面が破綻しない)。
+  subcommand は `command` 全体から `_git_subcommand_of` で推定 (複合コマンドは
+  operand を含む `git` window を優先、`-C` / `-c` / `--git-dir` 等の global
+  option は読み飛ばし)。`bash_deny` の signature は変えない (`read_partial` の
+  `-n N` 抽出と同じトレードオフ)
+
+#### 動作変化 (in-process 実測、default / auto)
+
+| コマンド | 0.18.0 | 0.19.0 |
+|---|---|---|
+| `git rm --cached .env` | deny / deny | **allow / allow** |
+| `git rm --cached -- .env`, `git rm -r --cached dir/.env`, `git rm --cached -f .env` | deny / deny | **allow / allow** |
+| `git rm --cached .env && git commit -m untrack` | deny / deny | **allow / allow** |
+| `chmod 600 .env`, `chmod --reference=.env other`, `chown user .env`, `chgrp staff .env` | deny / deny | **allow / allow** |
+| `touch .env`, `touch -r .env other`, `touch -t 202601010000 .env` | deny / deny | **allow / allow** |
+| `git rm .env`, `git rm -f .env` (作業ツリー削除) | deny / deny | deny / deny (不変) |
+| `git rm .env -- --cached` (`--` 以降は pathspec) | deny / deny | deny / deny (不変) |
+| `git rm --cached --pathspec-from-file=.env` (中身を pathspec として読み echo) | deny / deny | deny / deny (不変) |
+| `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | deny / deny | deny / deny (不変) |
+| `chmod 600 x > .env`, `touch x > .env` (書込み形は residual metachar が先) | ask / allow | ask / allow (不変) |
+| `git show HEAD:.env`, `git diff .env`, `git add .env` | deny / deny | deny / deny (不変。`add` は reason が「操作」文面に) |
+
+option-leak として検討した候補: `git rm --cached -r` は index 除去の範囲が広がる
+だけで内容出力も実ファイル削除も無い (allow)。`touch -r` / `chmod --reference` は
+timestamp / mode を読むだけ (allow)。`--pathspec-from-file` のみ内容露出経路
+として除外 (deny)。
+
+### 3. 除外 hint が global `!<basename>` のみ案内し `[project:]` を勧めない (snw.23)
+
+`core/messages.py::_exclude_hint` は全 deny reason で patterns.local.txt に
+`!<basename>` を追記する案内のみだった。0.15.0 が「あるプロジェクトで承認した除外が
+他プロジェクトにも無条件適用される」事故を防ぐために `[project:]` セクションを
+導入したのに、LLM / ユーザーが最初に目にする hint がその存在を示さず、既定で
+global 汚染側に誘導していた。
+
+- **`hooks/_shared/patterns.py`**: 表示用定数 `LOCAL_PATTERNS_DISPLAY_PATH` /
+  `PROJECT_SECTION_HEADER_HINT` (`[project:$CLAUDE_PROJECT_DIR]`) /
+  `PROJECT_SECTION_PLACEHOLDER_NOTE` と `exclude_recipe_lines(basenames)` を追加。
+  両 hook が同じレシピを提示する (patterns.local.txt 形式の所有者に置く)
+- **`core/messages.py::_exclude_hint`**: 「`[project:$CLAUDE_PROJECT_DIR]`
+  セクション配下に `!<basename>` を追加 ($CLAUDE_PROJECT_DIR は実際の絶対パスに
+  置き換える。全プロジェクト共通にしたい場合のみヘッダー無しの行)」に変更。
+  絶対パスを reason に出さない方針を保つため変数名で案内する。hint は約 170 byte
+  → 約 450 byte に伸びるが 3KB 上限は `core/output.py::_truncate` が保証
+  (大きい dotenv で末尾の suggestion 行が切れる問題は別件 snw.5 の予算付き
+  レンダリングで扱う)
+- Stop hook の block reason にも同じレシピを載せる (上記 1.)
+
+### テスト
+
+redact **777 件** (+32)、check **60 件** (+33)。
+
+- redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
+  5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option
+  前置の deny 維持、`chmod` / `chown` / `chgrp` / `touch` allow、書込み形の ask
+  維持、reason 意図文)、`TestHistory` +8 (subcommand 別文面、複合コマンド、global
+  option skip、command 無し互換)、`TestGitSubcommandOf` ×6、
+  `TestExcludeHintBasename` +4 (`[project:]` 誘導、絶対パス不在、`_shared` レシピ
+  共有、20 件 cap)、`TestE2ERecommendedRemediesPassBashHook` ×3 (**両 hook の
+  reason から backtick コマンドを機械抽出して Bash hook に通す自己整合テスト** —
+  文面と allow 境界の乖離を再発時に検知する)
+- check: `TestMainSessionAck` ×13 (同一 session 2 回目は黙る / 新規ファイルで再
+  block → 3 回目は黙る / untracked → tracked で再 block / 1 件対応済みで残りが
+  減っても再 block しない / session_id 欠落・不正で従来通り / 別 session は再
+  block / 同一 session で別 repo に cd すると再 block (cwd scope) / state dir
+  書込不能でも block / reason のレシピと注記 / 絶対パス不在 / state に平文 path
+  無し / stop_hook_active 優先)、`test_stop_ack.py` ×20 (sanitize / digest /
+  scope / load・save / GC)
+
+### ドキュメント
+
+- `README.md`: Bash 節に 0.19.0 の次善策 allow 追加を追記、False positive 節の除外
+  案内を `[project:]` 配下に変更、Stop 節に session 単位 once-only とレシピを追記
+- `docs/MATRIX.md`: metadata-only 表に `git rm --cached` / `chmod` / `chown` /
+  `chgrp` / `touch` の allow 行と plain `git rm` / `--pathspec-from-file` / 書込み
+  形の行を追加、Stop handler 表に once-only 行を追加
+- `docs/DESIGN.md`: metadata-only 節に 0.19.0 の追加理由、history カテゴリ行を
+  subcommand 別に更新、Stop handler に「session 単位の once-only」小節を新設
+- `docs/PATTERNS.md`: `[project:]` 節に reason からの誘導と `$CLAUDE_PROJECT_DIR`
+  プレースホルダの扱いを追記、例示パスをダミー (`/path/to/project-a`) に置換
+
 ## 0.18.0
 
 **`_has_hard_stop` を quote-aware 化** (bd_092a232e-y5y)。0.17.0 が残した

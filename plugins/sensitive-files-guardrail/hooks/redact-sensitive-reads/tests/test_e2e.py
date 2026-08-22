@@ -9,15 +9,25 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
 _ENTRY_PATH = Path(__file__).resolve().parent.parent / "__main__.py"
+# Stop hook (check-sensitive-files) のエントリ。両 hook の reason が推奨する
+# コマンドの整合を取るテストで実行する。
+_STOP_ENTRY_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "check-sensitive-files"
+    / "__main__.py"
+)
 _spec = importlib.util.spec_from_file_location("redact_entry", _ENTRY_PATH)
 assert _spec is not None and _spec.loader is not None
 entry = importlib.util.module_from_spec(_spec)
@@ -395,6 +405,147 @@ class TestE2EReadHandler(unittest.TestCase):
         self.assertEqual(
             result["hookSpecificOutput"]["permissionDecision"], "deny"
         )
+
+
+# ---- 両 hook の推奨コマンドが Bash hook を通過する (0.19.0, snw.3) ------------
+
+_REMEDY_CMD_WORDS = frozenset({"git", "chmod", "chown", "chgrp", "touch"})
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+
+def _remedy_commands(text: str) -> list[str]:
+    """reason 文中の backtick スニペットのうちコマンド形 (``git`` / ``chmod`` /
+    ``chown`` / ``chgrp`` / ``touch`` で始まるもの) を抽出する。Stop hook の
+    ``<path>`` プレースホルダは ``.env`` に置換する。"""
+    cmds: list[str] = []
+    for snippet in _BACKTICK_RE.findall(text):
+        words = snippet.split()
+        if words and words[0] in _REMEDY_CMD_WORDS:
+            cmds.append(snippet.replace("<path>", ".env"))
+    return cmds
+
+
+def _load_stop_entry():
+    spec = importlib.util.spec_from_file_location(
+        "check_entry_for_e2e", _STOP_ENTRY_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _git(args: list[str], cwd: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
+    """両 hook の reason が推奨する次善策コマンドが Bash hook を通過することを
+    固定する (0.19.0, bd_092a232e-snw.3)。
+
+    0.18.0 までは Stop hook と ``_bash_deny_history`` が ``git rm --cached <path>``
+    を案内しながら Bash hook 自身がそれを deny していた (自己矛盾)。reason から
+    backtick コマンドを機械抽出して Bash hook に通すことで、文面と allow 境界の
+    乖離を再発時に検知する。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        home = Path(self.tmp) / "home"
+        home.mkdir()
+        # patterns.local.txt / stop-ack state を実 HOME から隔離
+        self._env = mock.patch.dict(
+            os.environ,
+            {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg")},
+        )
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        self.repo = Path(self.tmp) / "repo"
+        self.repo.mkdir()
+        (self.repo / ".env").write_text("KEY=value\n")
+
+    def _bash(self, cmd: str, mode: str = "default") -> dict:
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": cmd, "description": "test"},
+            "cwd": str(self.repo),
+            "permission_mode": mode,
+        }
+        return _run_main(envelope, ["--tool", "bash"])
+
+    def _assert_passes(self, cmd: str, origin: str) -> None:
+        for mode in ("default", "auto"):
+            result = self._bash(cmd, mode)
+            self.assertEqual(
+                result, {},
+                msg=f"{origin}: {cmd!r} [{mode}] -> {result}",
+            )
+
+    def test_documented_remedies_pass(self):
+        # README / docs が次善策として挙げる形
+        for cmd in (
+            "git rm --cached .env",
+            "chmod 600 .env",
+            "touch .env",
+            "chown user .env",
+        ):
+            self._assert_passes(cmd, origin="docs")
+
+    def test_bash_history_deny_reasons_recommend_only_passing_commands(self):
+        for cmd in (
+            "git show HEAD:.env",
+            "git add .env",
+            "git rm .env",
+            "git mv .env old.env",
+            "git restore .env",
+        ):
+            result = self._bash(cmd)
+            self.assertEqual(
+                result["hookSpecificOutput"]["permissionDecision"], "deny",
+                msg=cmd,
+            )
+            reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+            recommended = _remedy_commands(reason)
+            self.assertIn(
+                "git rm --cached .env", recommended,
+                msg=f"{cmd!r}: no untrack remedy in reason:\n{reason}",
+            )
+            for rec in recommended:
+                self._assert_passes(rec, origin=f"bash reason of {cmd!r}")
+
+    def test_stop_hook_block_reason_recommends_only_passing_commands(self):
+        _git(["init", "--initial-branch=main"], str(self.repo))
+        _git(["config", "user.name", "test"], str(self.repo))
+        _git(["config", "user.email", "test@example.com"], str(self.repo))
+        _git(["config", "commit.gpgsign", "false"], str(self.repo))
+        _git(["add", ".env"], str(self.repo))
+        _git(["commit", "-m", "add env"], str(self.repo))
+
+        stop = _load_stop_entry()
+        old_stdin, old_stdout = sys.stdin, sys.stdout
+        try:
+            sys.stdin = io.StringIO(json.dumps(
+                {"cwd": str(self.repo), "session_id": "e2e-session"}
+            ))
+            sys.stdout = io.StringIO()
+            rc = stop.main()
+            out = sys.stdout.getvalue()
+        finally:
+            sys.stdin, sys.stdout = old_stdin, old_stdout
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+
+        recommended = _remedy_commands(reason)
+        self.assertIn("git rm --cached .env", recommended)
+        for rec in recommended:
+            self._assert_passes(rec, origin="stop reason")
+        # 恒久除外レシピは read 側 hint と同じヘッダー
+        self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
+        self.assertIn("!.env", reason)
+        self.assertNotIn(str(self.repo), reason)
 
 
 if __name__ == "__main__":

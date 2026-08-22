@@ -22,6 +22,12 @@ next action」** の 2 文構造を取る。「続行しますか？」のよう
 そのままコピペで ``patterns.local.txt`` に追記できる形にする。glob operand
 (例: ``*.env*``) はそのまま basename として埋める。
 
+0.19.0 (bd_092a232e-snw.23) から hint は ``[project:$CLAUDE_PROJECT_DIR]``
+セクション配下への追記を **既定** として案内する (``_shared.patterns`` の
+レシピ定数と共通、Stop hook の block reason も同じ)。ヘッダー無し行
+(全プロジェクト共通) は明示的な選択にする。reason に絶対パスを出さない方針の
+ため、ヘッダーは環境変数名のまま示し書き込む側が実パスに置き換える。
+
 ## 出力形式 (0.7.0 で plain text 化、0.10.0 で category 別 dispatch)
 
 deny 系 reason は plain text の複数行で出す。0.4.2〜0.6.x では
@@ -48,10 +54,18 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from typing import Callable, Literal
 
-# 除外行を書き足す patterns.local.txt の preferred パス (CLAUDE.md 参照)。
-_LOCAL_PATTERNS_PATH = "~/.claude/sensitive-files-guardrail/patterns.local.txt"
+from _shared.patterns import (
+    LOCAL_PATTERNS_DISPLAY_PATH,
+    PROJECT_SECTION_HEADER_HINT,
+    PROJECT_SECTION_PLACEHOLDER_NOTE,
+)
+
+# 除外行を書き足す patterns.local.txt の preferred パス (表示用。実体の解決は
+# ``_shared.patterns._resolve_local_patterns_path``、0.19.0 で _shared と共有)。
+_LOCAL_PATTERNS_PATH = LOCAL_PATTERNS_DISPLAY_PATH
 
 
 def _basename_of(operand: str) -> str:
@@ -91,18 +105,24 @@ def _exclude_hint(basename: str) -> str:
     """``patterns.local.txt`` への除外行追加案内を返す。
 
     basename が空なら一般化された hint。空でなければ ``!<basename>`` を埋め込む。
+
+    0.19.0 (bd_092a232e-snw.23): ``[project:$CLAUDE_PROJECT_DIR]`` セクション配下
+    への追記を既定として案内する。0.18.0 まではヘッダー無し行 (= 全プロジェクト
+    共通) だけを案内していたため、あるプロジェクトで承認した除外が他プロジェクト
+    にも無条件で効く側 (0.15.0 が ``[project:]`` セクションで防ごうとした事故) に
+    既定で誘導していた。絶対パスは reason に出さない方針のため、ヘッダーは
+    ``$CLAUDE_PROJECT_DIR`` の変数名で示し、書き込む側が実パスに置き換える。
     """
-    if not basename:
-        return (
-            f"恒久的に許可したい場合は、ユーザーの承認を得た上で "
-            f"`{_LOCAL_PATTERNS_PATH}` に除外行 "
-            "(`!<basename>`) を追加してください。承認なしに自分で追加しないこと。"
-        )
-    safe = _sanitize_for_inline(basename)
+    if basename:
+        entry = f"`!{_sanitize_for_inline(basename)}`"
+    else:
+        entry = "除外行 (`!<basename>`)"
     return (
-        f"恒久的に許可したい場合は、ユーザーの承認を得た上で "
-        f"`{_LOCAL_PATTERNS_PATH}` に "
-        f"`!{safe}` を追加してください。承認なしに自分で追加しないこと。"
+        "恒久的に許可したい場合は、ユーザーの承認を得た上で "
+        f"`{_LOCAL_PATTERNS_PATH}` の `{PROJECT_SECTION_HEADER_HINT}` "
+        f"セクション配下に {entry} を追加してください "
+        f"({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
+        "承認なしに自分で追加しないこと。"
     )
 
 
@@ -139,7 +159,8 @@ _BASH_DENY_CATEGORY: dict[str, str] = {
     # move: コピー / 移動。secrets manager 推奨。
     "cp": "move",
     "mv": "move",
-    # history: git の commit / 差分閲覧。``git rm --cached`` + rotate を推奨。
+    # history: git 経由の参照 / 操作。0.19.0 で subcommand 別に文面を分ける
+    # (show / diff / log = 閲覧、add / mv / rm / restore = 操作)。
     "git": "history",
     # transfer: ネット越し転送。強く非推奨。
     "curl": "transfer",
@@ -609,6 +630,100 @@ def _bash_deny_move(
     return "\n".join(lines)
 
 
+# git の global option のうち値を **別トークン** で取るもの (subcommand 抽出時に
+# 値を読み飛ばす)。``--git-dir=<path>`` のような ``=`` 結合形は ``-`` 始まりとして
+# 単独で skip される。
+_GIT_GLOBAL_VALUE_OPTS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+})
+
+# git subcommand のうち「閲覧」ではなく index / 作業ツリーへの **操作** (0.19.0,
+# bd_092a232e-snw.3)。これ以外 (show / diff / log / cat-file / blame / grep 等)
+# は従来通り「commit / 差分の閲覧」文面。0.18.0 までは全 subcommand が閲覧文面
+# だったため ``git rm .env`` / ``git add .env`` が「閲覧しようとした」と誤った
+# 意図を返していた。
+_GIT_OPERATE_SUBCOMMANDS = frozenset({
+    "add", "rm", "mv", "restore", "checkout", "reset", "stash", "clean",
+    "update-index", "apply", "commit",
+})
+
+
+def _git_subcommand_of(command: str, operand: str = "") -> str:
+    """command 文字列から deny 対象の ``git`` subcommand を推定する (0.19.0)。
+
+    複合コマンド (``cd app && git add .env``) でも動くよう、``git`` トークン
+    ごとに後続 window (次の ``git`` トークンまで) を見て operand を含むものを
+    優先し、無ければ最初の ``git`` を採る。global option (``-C dir`` /
+    ``-c k=v`` / ``--git-dir=...``) は読み飛ばす。``bash_deny`` の signature を
+    変えずに済ませるため ``command`` 全体から推定する (``read_partial`` の
+    ``-n N`` 抽出と同じトレードオフ)。解決できなければ空文字列。
+    """
+    if not command:
+        return ""
+    try:
+        tokens = shlex.split(command, comments=False, posix=True)
+    except ValueError:
+        tokens = command.split()
+    first_sub = ""
+    i = 0
+    n = len(tokens)
+    while i < n:
+        if tokens[i] != "git":
+            i += 1
+            continue
+        j = i + 1
+        sub = ""
+        while j < n:
+            tok = tokens[j]
+            if tok in _GIT_GLOBAL_VALUE_OPTS:
+                j += 2
+                continue
+            if tok.startswith("-"):
+                j += 1
+                continue
+            sub = tok
+            break
+        k = j + 1
+        while k < n and tokens[k] != "git":
+            k += 1
+        if operand and operand in tokens[j:k]:
+            return sub
+        if not first_sub:
+            first_sub = sub
+        i = max(k, i + 1)
+    return first_sub
+
+
+def _git_operate_suggestion(sub: str, safe_basename: str) -> str:
+    """操作系 subcommand ごとの代替案 (``suggestion:`` 行の本文)。"""
+    if sub == "rm":
+        return (
+            f"`git rm --cached {safe_basename}` (subcommand 直書き・"
+            "`--pathspec-from-file` 無し) は index からの除去のみで allow されます。"
+            " 作業ツリーからも削除する `--cached` 無しの形は値を失う破壊操作、"
+            " `--pathspec-from-file` は operand の中身を pathspec として読み echo"
+            " するため block します。untrack 後は値を rotate してください。"
+        )
+    if sub in ("add", "commit", "update-index", "mv"):
+        prefix = (
+            "`git mv` で別名にしても履歴と index に値が残ります。"
+            if sub == "mv"
+            else ""
+        )
+        return (
+            f"{prefix}機密ファイルを commit 対象に含めないでください。"
+            f" `.gitignore` に {safe_basename} を追加し、既に tracked なら"
+            f" `git rm --cached {safe_basename}` で untrack した上で値を"
+            " rotate してください。"
+        )
+    return (
+        f"作業ツリーの {safe_basename} を上書き / 削除する可能性がある操作です。"
+        " 現在の値が失われてよいかユーザーに確認してください"
+        " (バックアップが必要なら secrets manager 側へ)。tracked なら"
+        f" `git rm --cached {safe_basename}` で untrack してから扱ってください。"
+    )
+
+
 def _bash_deny_history(
     *,
     first_token: str,
@@ -620,22 +735,42 @@ def _bash_deny_history(
     render_status: str,
     resolved_base: str,
 ) -> str:
-    """``git`` の deny reason (``git show HEAD:.env`` / ``git diff .env`` /
-    ``git log -p .env`` 等)。tracked なら漏洩済みの可能性を提示。"""
+    """``git`` の deny reason。subcommand で文面を分ける (0.19.0)。
+
+    - 閲覧 (``git show HEAD:.env`` / ``git diff .env`` / ``git log -p .env`` 等):
+      tracked なら漏洩済みの可能性を提示し ``git rm --cached`` + rotate を推奨。
+    - 操作 (``git add`` / ``git rm`` / ``git mv`` / ``git restore`` 等、
+      ``_GIT_OPERATE_SUBCOMMANDS``): 「閲覧」ではなく index / 作業ツリーへの
+      操作として説明し、allow される ``git rm --cached`` 形を案内する。
+    """
     basename = _basename_of(operand)
     safe_basename = _sanitize_for_inline(basename) or basename
-    note = (
-        f"git 経由で機密ファイル ({operand}) の commit / 差分を"
-        "閲覧しようとしたため block しました。"
-    )
-    lines: list[str] = [f"note: {note}"]
-    lines.extend(_common_meta_lines(first_token, operand))
-    lines.append(
-        f"suggestion: この {safe_basename} が tracked になっているなら、"
-        "過去 commit に値が残っており既に漏洩済みの可能性があります。"
-        f" `git rm --cached {safe_basename}` で untrack 後に値を rotate してください。"
-        " untracked なら別パスから誤って参照していないか確認してください。"
-    )
+    sub = _git_subcommand_of(command, operand)
+    lines: list[str] = []
+    if sub in _GIT_OPERATE_SUBCOMMANDS:
+        note = (
+            f"git {sub} で機密ファイル ({operand}) を index / 作業ツリーに"
+            "対して操作しようとしたため block しました。"
+        )
+        lines.append(f"note: {note}")
+        lines.extend(_common_meta_lines(first_token, operand))
+        lines.append(
+            f"suggestion: {_git_operate_suggestion(sub, safe_basename)}"
+        )
+    else:
+        note = (
+            f"git 経由で機密ファイル ({operand}) の commit / 差分を"
+            "閲覧しようとしたため block しました。"
+        )
+        lines.append(f"note: {note}")
+        lines.extend(_common_meta_lines(first_token, operand))
+        lines.append(
+            f"suggestion: この {safe_basename} が tracked になっているなら、"
+            "過去 commit に値が残っており既に漏洩済みの可能性があります。"
+            f" `git rm --cached {safe_basename}` で untrack 後に値を rotate"
+            " してください (この形は allow されます)。"
+            " untracked なら別パスから誤って参照していないか確認してください。"
+        )
     lines.append(f"suggestion: {_exclude_hint(basename)}")
     return "\n".join(lines)
 

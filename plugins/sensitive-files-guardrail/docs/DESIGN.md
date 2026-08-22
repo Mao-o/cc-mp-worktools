@@ -286,6 +286,19 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   `&>` の spaced / fused 形に対応。内容露出ではなく破壊的書込みの懸念であり、
   Edit/Write の機密書込み deny と整合させる。`ls -la .env > /tmp/x` (read operand
   のみ機密、書込み先非機密) は allow 維持。
+- **0.19.0: 次善策コマンドの追加** (bd_092a232e-snw.3) — `chmod` / `chown` /
+  `chgrp` / `touch` を `_METADATA_ONLY_FIRST_TOKENS` に、`git rm --cached` を
+  条件付き (`_git_rm_is_index_only`: `--cached` が `--` より前に exact match、
+  `--pathspec-from-file` 無し) で追加。両 hook の reason が「tracked なら
+  `git rm --cached` で untrack」「`chmod 600 .env`」と案内しながら Bash hook 自身
+  がそれらを deny する自己矛盾があった。いずれも内容を出力せず実ファイルも
+  消さないため、確信 deny の条件 (機密 operand 確定 × 内容出力 / 破壊) に該当
+  しない。plain `git rm` (作業ツリー削除) と `--pathspec-from-file` (operand の
+  中身を pathspec として読み不一致行を echo、`file -f` と同クラス) は deny 維持。
+  書込み形 (`chmod 600 x > .env`) は safe_read 外のため residual metachar で
+  従来通り ask_or_allow (echo と同じ、緩めない)。`git rm --cached -r` は index
+  除去の範囲が広がるだけで内容出力も削除も無く allow、`touch -r` /
+  `chmod --reference` は timestamp / mode を読むだけで allow。
 
 ### 対応 (deny/allow 確定できる)
 
@@ -478,7 +491,7 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 | `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨。**0.17.0 で到達可能になった** (それ以前は `_OPAQUE_WRAPPERS` 判定が先行して handler からは到達しない dead branch だった) |
 | `load` | `source` / `.` | 「shell load」note + minimal info + direnv (.envrc) / dotenv-cli / 1Password CLI 推奨 |
 | `move` | `cp` / `mv` | 「コピー / 移動」note + 1Password CLI / pass / git-secret + .env.example 派生推奨 |
-| `history` | `git` (subcommand `show` / `diff` / `log` で `.env` を参照したケース) | 「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。VCS pathspec の `:` 後尾から basename 抽出 |
+| `history` | `git` (全 subcommand) | **0.19.0 で subcommand 別**: 閲覧系 (`show` / `diff` / `log` / `cat-file` 等) は「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。操作系 (`add` / `rm` / `mv` / `restore` / `checkout` / `reset` / `stash` / `clean` / `update-index` / `apply` / `commit` = `_GIT_OPERATE_SUBCOMMANDS`) は「index / 作業ツリーへの操作」note + subcommand 別の代替案 (`rm` は allow される `--cached` 形を案内し、deny された理由は断定しない)。subcommand は `command` 全体から `_git_subcommand_of` で推定 (複合コマンドは operand を含む `git` window を優先、`-C` / `-c` / `--git-dir` 等の global option は読み飛ばし。`bash_deny` の signature は変えない)。VCS pathspec の `:` 後尾から basename 抽出 |
 | `transfer` | `curl` / `wget` / `scp` / `rsync` | 「転送」note + Vault / SOPS / 1Password CLI 推奨 |
 | `archive` | `tar` / `zip` / `gzip` | 「アーカイブ」note + `--exclude=<basename>` / `-x <basename>` 推奨 |
 | `generic` | 上記以外 | 0.7.0〜0.9.0 と同等の note + minimal info (新規) |
@@ -600,7 +613,38 @@ deny reason のキー名ガイド:
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
+| 同一 session で報告済みの (status, path) 集合 ⊆ 現在の集合 (0.19.0) | exit 0 (`session_id` 無し / 不正なら従来通り block) |
+| 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知、報告済み集合を更新) |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
+
+#### session 単位の once-only (0.19.0, bd_092a232e-snw.2)
+
+0.18.0 までの Stop hook は `stop_hook_active` しか見ず「報告済みか」の状態を
+持たなかったため、「意図的に管理対象とする」と承認された tracked ファイル
+(Next.js 慣例の `.env` commit / committed CA 証明書 `*.pem` / direnv の `.envrc`)
+で **毎ターン同じ block** が出続け、0.14.0 離脱と同型の体験になっていた。
+
+- 状態: `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
+  (`hooks/check-sensitive-files/stop_ack.py`)。`patterns.local.txt` と同じ
+  `Path.home()` 基準で、plugin cache の更新で消えず、テストは `HOME` 差し替えで
+  隔離する。内容は 1 行 1 `sha256("<cwd>\t<status>\t<path>")` で、平文 path は
+  HOME に残さない (ログ規則と同じ方針)。`cwd` を scope に含めるのは、同一 session
+  内で別 repo に `cd` したとき同じ相対 path (`tracked\t.env`) を報告済みと誤認
+  しないため (Stop のスキャン自体が `git ls-files` の cwd 相対)
+- 判定: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。増えていれば
+  block し、`報告済み ∪ 現在` を保存する。hash 1 本ではなく集合を持つのは
+  「1 件対応して残りが減った」ときに再 block しないため。status を digest に
+  含めるので untracked → tracked (`git rm --cached` が必要になる) は新しい事象
+  として再 block する
+- `session_id` は `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$` のみ受理 (path traversal /
+  dotfile 防止)。欠落・不正は state を使わず従来通り毎回 block
+- 失敗 (読取 / 書込 / mkdir 不能 / 壊れた行) は全て「状態なし」= block 側に倒す。
+  state 機構の不具合で block が **消える** 方向には倒さない
+- 書込み時に TTL 7 日で古い session ファイルを best-effort GC する
+- block reason には恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` + `!<basename>`
+  行、`_shared.patterns.exclude_recipe_lines`) と「このセッションでは同じ集合を
+  再 block しない」注記を載せる。絶対パスは出さない (ヘッダーは環境変数名で示し、
+  書き込む側が実パスに置き換える)
 
 ## 既知制限 (0.14.0 時点)
 

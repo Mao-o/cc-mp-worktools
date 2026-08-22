@@ -52,7 +52,12 @@ segment 単位再評価へ移行)。
      ``find`` は ``-exec`` / ``-delete`` 等の内容出力・副作用アクションが無い
      場合のみ、``file`` / ``wc`` / ``du`` / ``tree`` はファイル名リスト読込
      オプション (``-f`` / ``--files0-from`` 等) が無い場合のみ metadata-only。
-     ``git status`` は ``-v`` が staged diff を出すため対象外
+     ``git status`` は ``-v`` が staged diff を出すため対象外。
+     **0.19.0**: ``chmod`` / ``chown`` / ``chgrp`` / ``touch`` (属性操作、内容を
+     読む option 無し) と ``git rm --cached`` (index からの除去のみ、``--`` より
+     前の exact match、``--pathspec-from-file`` 無し) も metadata-only。両 hook
+     の reason が推奨する次善策を自分で deny していた自己矛盾の解消
+     (bd_092a232e-snw.3)。plain ``git rm`` (作業ツリー削除) は deny 維持
    - operand scan: 各 path 候補について
      - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
        ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
@@ -88,6 +93,8 @@ from handlers.bash.constants import (  # noqa: F401
     _GIT_LS_FILES_OBJECT_OPTS,
     _GIT_LS_FILES_SHORT_FLAGS,
     _GIT_METADATA_SUBCOMMANDS,
+    _GIT_RM_CONTENT_READING_OPTS,
+    _GIT_RM_INDEX_ONLY_FLAG,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
     _METADATA_CONTENT_READING_OPTS,
@@ -208,6 +215,33 @@ def _git_ls_files_exposes_object(args: list[str]) -> bool:
     return False
 
 
+def _git_rm_is_index_only(args: list[str]) -> bool:
+    """``git rm`` が index からの除去のみ (``--cached``) で、作業ツリーの実ファイルを
+    消さず内容も出力しないか (0.19.0, bd_092a232e-snw.3)。
+
+    - ``--cached`` は exact match のみ (``--cached=...`` 形は git に存在しない)。
+      ``--`` 以降は pathspec なので flag として数えない (``git rm .env -- --cached``
+      は ``.env`` を作業ツリーから消すため deny に残す)。
+    - ``--pathspec-from-file=<file>`` / ``--pathspec-from-file <file>`` は operand
+      ファイルの **中身** を pathspec として読み、不一致行を
+      ``fatal: pathspec '<行>' did not match`` で echo するため ``file -f`` と同じ
+      内容露出クラスとして除外する (operand scan → deny)。
+    - ``-r`` / ``-f`` / ``-n`` / ``-q`` / ``--ignore-unmatch`` / ``--sparse`` は
+      いずれも内容を出さず、``--cached`` 付きなら実ファイルも消さない。
+    """
+    has_cached = False
+    for tok in args:
+        if tok == "--":
+            break
+        if tok == _GIT_RM_INDEX_ONLY_FLAG:
+            has_cached = True
+            continue
+        for opt in _GIT_RM_CONTENT_READING_OPTS:
+            if tok == opt or tok.startswith(opt + "="):
+                return False
+    return has_cached
+
+
 def _is_metadata_only(tokens: list[str]) -> bool:
     """セグメントが「operand の内容を出力しない」metadata-only コマンドか (0.14.0)。
 
@@ -237,20 +271,27 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     出力するため allowlist から除外した (Codex P1 第2弾)。裸の ``git status``
     は operand に機密 path が無いため operand scan で allow に倒れる。global
     option 前置 (``git -C dir check-ignore``) は保守的に対象外。
+
+    0.19.0 (bd_092a232e-snw.3): ``git rm`` は ``--cached`` 付きのみ metadata-only
+    (``_git_rm_is_index_only``)。index からの除去だけで実ファイルは残り内容も
+    出ない。両 hook の reason が「tracked なら ``git rm --cached`` で untrack」と
+    案内しているのに自分で deny していた自己矛盾を解消する。``chmod`` /
+    ``chown`` / ``chgrp`` / ``touch`` は ``_METADATA_ONLY_FIRST_TOKENS`` 側に追加
+    (内容を読む option が存在しない)。
     """
     first = tokens[0]
     if first == "find":
         return not any(t in _FIND_DANGEROUS_ACTIONS for t in tokens[1:])
     if first in _METADATA_ONLY_FIRST_TOKENS:
         return not _reads_file_content(first, tokens)
-    if (
-        first == "git"
-        and len(tokens) >= 2
-        and tokens[1] in _GIT_METADATA_SUBCOMMANDS
-    ):
-        if tokens[1] == "ls-files" and _git_ls_files_exposes_object(tokens[2:]):
-            return False
-        return True
+    if first == "git" and len(tokens) >= 2:
+        sub = tokens[1]
+        if sub in _GIT_METADATA_SUBCOMMANDS:
+            if sub == "ls-files" and _git_ls_files_exposes_object(tokens[2:]):
+                return False
+            return True
+        if sub == "rm":
+            return _git_rm_is_index_only(tokens[2:])
     return False
 
 

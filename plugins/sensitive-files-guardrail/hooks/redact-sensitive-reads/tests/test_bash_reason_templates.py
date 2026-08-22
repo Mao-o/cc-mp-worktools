@@ -326,6 +326,69 @@ class TestHistory(unittest.TestCase):
                           command="git diff .env")
         self.assertIn("git rm --cached", msg)
 
+    # --- 0.19.0 (bd_092a232e-snw.3): subcommand 別の意図文 ---
+    def test_git_rm_plain_uses_operate_wording(self):
+        """plain ``git rm`` は「閲覧」ではなく「操作」。allow される ``--cached``
+        形を案内し、deny された理由を断定しない (global option 前置 /
+        pathspec-from-file / ``--cached`` 無しのいずれでも文面が破綻しない)。"""
+        msg = M.bash_deny(first_token="git", operand=".env",
+                          command="git rm .env")
+        self.assertIn("git rm で", msg)
+        self.assertIn("操作", msg)
+        self.assertNotIn("閲覧", msg)
+        self.assertIn("`git rm --cached .env`", msg)
+        self.assertIn("破壊", msg)
+        self.assertIn("--pathspec-from-file", msg)
+        self.assertIn("`!.env`", msg)
+
+    def test_git_add_uses_operate_wording(self):
+        msg = M.bash_deny(first_token="git", operand=".env",
+                          command="git add .env")
+        self.assertIn("git add で", msg)
+        self.assertIn("commit 対象", msg)
+        self.assertIn(".gitignore", msg)
+        self.assertIn("`git rm --cached .env`", msg)
+        self.assertNotIn("閲覧", msg)
+
+    def test_git_mv_mentions_rename_keeps_history(self):
+        msg = M.bash_deny(first_token="git", operand=".env",
+                          command="git mv .env config/.env")
+        self.assertIn("git mv で", msg)
+        self.assertIn("別名", msg)
+        self.assertNotIn("閲覧", msg)
+
+    def test_git_restore_checkout_stash_use_overwrite_wording(self):
+        for cmd in ("git restore .env", "git checkout -- .env",
+                    "git stash push .env"):
+            msg = M.bash_deny(first_token="git", operand=".env", command=cmd)
+            self.assertIn("上書き", msg, msg=cmd)
+            self.assertIn("`git rm --cached .env`", msg, msg=cmd)
+            self.assertNotIn("閲覧", msg, msg=cmd)
+
+    def test_git_log_keeps_view_wording(self):
+        msg = M.bash_deny(first_token="git", operand=".env",
+                          command="git log -p .env")
+        self.assertIn("閲覧", msg)
+        self.assertIn("`git rm --cached .env`", msg)
+
+    def test_compound_command_picks_git_segment_with_operand(self):
+        msg = M.bash_deny(first_token="git", operand=".env",
+                          command="git log && cd app && git add .env")
+        self.assertIn("git add で", msg)
+
+    def test_git_global_options_are_skipped(self):
+        msg = M.bash_deny(
+            first_token="git", operand=".env",
+            command="git -C /repo -c core.quotePath=false rm .env",
+        )
+        self.assertIn("git rm で", msg)
+
+    def test_empty_command_falls_back_to_view_wording(self):
+        # command を渡さない旧呼び出し (0.7.0〜0.9.0 互換) でも壊れない
+        msg = M.bash_deny(first_token="git", operand=".env")
+        self.assertIn("閲覧", msg)
+        self.assertIn("git rm --cached", msg)
+
 
 # ---- transfer -----------------------------------------------------------
 
