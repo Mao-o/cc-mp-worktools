@@ -1,14 +1,18 @@
 """Codex によるプランレビュー (要件・アーキ観点)。
 
-<stdin> にプラン本文、プロンプトは prompts/planning-codex.md を読み込む。
+プロンプト (prompts/planning-codex.md) を引数、プラン本文を stdin で渡す。
+
+起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
+`_common` は `__main__.py` (テストでは `tests/_testutil.py`) が sys.path に載せる。
 """
 from __future__ import annotations
 
-import shutil
-import subprocess
 from pathlib import Path
 
+from _common import subproc
+
 NAME = "codex"
+BINARY = "codex"
 TIMEOUT_SEC = 1500
 MAX_OUTPUT_BYTES = 16000
 
@@ -16,7 +20,7 @@ _PROMPT_FILE = Path(__file__).parent / "prompts" / "planning-codex.md"
 
 
 def is_available() -> bool:
-    return shutil.which("codex") is not None
+    return subproc.cli_available(BINARY)
 
 
 def review(plan_text: str) -> str | None:
@@ -26,24 +30,9 @@ def review(plan_text: str) -> str | None:
     except OSError:
         return None
 
-    try:
-        result = subprocess.run(
-            ["codex", "exec", "-s", "read-only", "--ephemeral", prompt],
-            input=plan_text,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    except (FileNotFoundError, OSError):
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    output = result.stdout.strip()
-    if not output:
-        return None
-
-    return output[:MAX_OUTPUT_BYTES]
+    return subproc.run_for_output(
+        [BINARY, "exec", "-s", "read-only", "--ephemeral", prompt],
+        timeout_sec=TIMEOUT_SEC,
+        input_text=plan_text,
+        max_output_chars=MAX_OUTPUT_BYTES,
+    )

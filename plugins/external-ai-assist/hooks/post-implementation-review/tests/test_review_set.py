@@ -172,6 +172,7 @@ class TestTimeoutBudgets(ReviewSetTestCase):
     def test_stop_git_budget_fits_beside_cursor(self):
         import cursor
         import gitscan
+        from _common import subproc
 
         timeouts = self._hook_timeouts()
         git_worst = (
@@ -180,10 +181,13 @@ class TestTimeoutBudgets(ReviewSetTestCase):
             + self.entry.COLLECT_BUDGET_SEC
             + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
         )
+        # cursor の timeout 後に process group を止める経路 (SIGTERM 待ち / SIGKILL 待ち /
+        # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない
+        cursor_worst = cursor.TIMEOUT_SEC + 3 * subproc.KILL_GRACE_SEC
         self.assertLess(
-            cursor.TIMEOUT_SEC + git_worst,
+            cursor_worst + git_worst,
             timeouts["stop"],
-            "cursor + git の最悪ケースが Stop の hook timeout を超えている",
+            "cursor (kill 猶予込み) + git の最悪ケースが Stop の hook timeout を超えている",
         )
 
 
@@ -202,14 +206,26 @@ class TestTruncate(ReviewSetTestCase):
 
 
 class TestIsCleanReview(ReviewSetTestCase):
+    """判定規則の網羅は hooks/_common/tests/test_sentinel.py。ここは hook 側の配線確認。"""
+
     def test_bare_sentinel(self):
         self.assertTrue(self.entry.is_clean_review("REVIEW_CLEAN"))
         self.assertTrue(self.entry.is_clean_review("  `REVIEW_CLEAN`  "))
         self.assertTrue(self.entry.is_clean_review(""))
 
+    def test_fenced_sentinel_with_preamble_is_clean(self):
+        """zh5.1: 2026-08-20 の実出力相当 (前置き 1 文 + フェンス付き sentinel)。"""
+        self.assertTrue(self.entry.is_clean_review("```\nREVIEW_CLEAN\n```"))
+        self.assertTrue(
+            self.entry.is_clean_review("critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n")
+        )
+
     def test_sentinel_with_trailing_findings_is_not_clean(self):
         self.assertFalse(
             self.entry.is_clean_review("REVIEW_CLEAN\n\n1. **直接影響** — 実は壊れる")
+        )
+        self.assertFalse(
+            self.entry.is_clean_review("critical 指摘はないが、`retry()` は無限ループする\nREVIEW_CLEAN")
         )
 
     def test_findings_only(self):

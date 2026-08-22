@@ -32,10 +32,18 @@ import os
 import sys
 import time
 
-import cursor
-import gitscan
-import state
-import stategc
+# hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
+# (plugin root 内の相対配置なので ${CLAUDE_PLUGIN_ROOT} が cache コピーでも壊れない)。
+_HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+
+from _common import hooklog, sentinel  # noqa: E402
+
+import cursor  # noqa: E402
+import gitscan  # noqa: E402
+import state  # noqa: E402
+import stategc  # noqa: E402
 
 MAX_DIFF_BYTES = 40000
 
@@ -43,16 +51,19 @@ MAX_DIFF_BYTES = 40000
 # 次の Stop でレビューする (silent truncation にしない)。
 MAX_REVIEW_PATHS = 60
 
-# パス単位 diff 収集の時間予算。Stop の hook timeout 660s のうち cursor が最大 600s を
-# 使うため、git に回せるのは約 60s。他の git 呼び出し (rev-parse 2 + ls-files 10 +
-# rev-parse 2) を引いた残りに収まるよう決めている。
+# パス単位 diff 収集の時間予算。Stop の hook timeout 690s のうち cursor が最大 600s +
+# kill 猶予 15s (3 × KILL_GRACE_SEC) を使うため、git に回せるのは約 75s。他の git 呼び出し
+# (rev-parse 2 + ls-files 10 + rev-parse 2) を引いた残りに収まるよう決めている
+# (式は tests/test_review_set.py::TestTimeoutBudgets で固定)。
 COLLECT_BUDGET_SEC = 30
 
 _EDIT_TOOLS = ("Write", "Edit", "NotebookEdit")
 
 
-def log(msg: str) -> None:
-    print(f"[post-implementation-review] {msg}", file=sys.stderr)
+log = hooklog.make_logger("post-implementation-review")
+
+# フェンス / 装飾 / 「指摘なし」の前置き 1 文を許容する判定 (規則は _common/sentinel.py)
+is_clean_review = sentinel.is_clean_review
 
 
 def review_enabled() -> bool:
@@ -76,23 +87,6 @@ def bash_tracking_enabled() -> bool:
 
 def diff_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
-
-
-def is_clean_review(text: str) -> bool:
-    """REVIEW_CLEAN sentinel が単独で返されているときのみ True。
-
-    LLM が REVIEW_CLEAN + 後続指摘を混在させた出力を clean 扱いして critical feedback を
-    silently drop することを避けるため、「非空行が 1 行のみで、その行が REVIEW_CLEAN」を
-    厳密に要求する。
-    """
-    stripped = text.strip()
-    if not stripped:
-        return True
-    non_empty_lines = [line for line in stripped.split("\n") if line.strip()]
-    if len(non_empty_lines) != 1:
-        return False
-    only_line = non_empty_lines[0].strip().strip("`*#").strip()
-    return only_line.upper() == "REVIEW_CLEAN"
 
 
 def build_reason(cursor_output: str) -> str:
@@ -283,8 +277,8 @@ def _collect_diffs(
     そのまま消える。
 
     COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred として返す。
-    Stop 全体の hook timeout (660s) のうち cursor が最大 600s を使うため、git に
-    使える時間は約 60s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
+    Stop 全体の hook timeout (690s) のうち cursor が最大 600s + kill 猶予 15s を使うため、
+    git に使える時間は約 75s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
     頭を押さえる。deferred は捨てずに pending へ戻す。
     """
     untracked = gitscan.untracked_among(root, rels)
@@ -368,4 +362,4 @@ if __name__ == "__main__":
     except SystemExit:
         pass
     except Exception as e:  # hook が例外で Claude Code を止めないよう fail-open
-        print(f"[post-implementation-review] fatal: {e}", file=sys.stderr)
+        log(f"fatal: {e}")

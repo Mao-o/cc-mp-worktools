@@ -26,8 +26,10 @@ UPS リセットを TTL ベースに置き換えている (hooks/diffstate.py �
 
 ## ロックは 2 種類あり、決してネストしたまま cursor を回さない
 
-- **state lock**: 状態ファイルの read-modify-write のみ。常に短時間で解放する
+- **state lock**: 状態ファイルの read-modify-write のみ (`_common.flock.locked_file`)。
+  常に短時間で解放する
 - **cursor lock**: cwd をキーに `cursor agent` を直列化する。review() 実行中ずっと保持
+  (非ブロッキング + fail-open 分岐が固有なので `_common` に寄せていない)
 
 Stop の取得順は cursor lock -> state lock -> (state 解放) -> review。state lock を
 握ったまま review すると、全セッションの PostToolUse が最大 600 秒ブロックされる。
@@ -42,6 +44,8 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
+
+from _common import flock
 
 import cursor
 
@@ -115,24 +119,14 @@ def _locked_state(session_id: str):
 
     yield された dict をそのまま書き戻すため、呼び出し側は dict を直接編集してよい。
     """
-    path = _state_path(session_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a+") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    with flock.locked_file(_state_path(session_id)) as f:
+        content = flock.read_all(f)
         try:
-            f.seek(0)
-            content = f.read()
-            try:
-                state = _normalize(json.loads(content) if content.strip() else None)
-            except (json.JSONDecodeError, ValueError):
-                state = _empty_state()
-            yield state
-            f.seek(0)
-            f.truncate()
-            json.dump(state, f, ensure_ascii=False)
-            f.flush()
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            state = _normalize(json.loads(content) if content.strip() else None)
+        except (json.JSONDecodeError, ValueError):
+            state = _empty_state()
+        yield state
+        flock.rewrite(f, json.dumps(state, ensure_ascii=False))
 
 
 def record_pending(session_id: str, paths: list[str]) -> int:

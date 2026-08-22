@@ -19,7 +19,7 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 
 ## 前提
 
-- **Python 3.9+** (標準ライブラリのみ使用)
+- **Python 3.11+** (標準ライブラリのみ使用)
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う
 - `codex` CLI: `exitplan-review` の要件・アーキ観点担当
 
@@ -47,6 +47,9 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 - プラン内容の SHA-256 ハッシュ (先頭 2000 文字の正規化版) で同一性判定
 - レビュー結果は `$TMPDIR/plan-review-<session_id>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
+- 「指摘なし」は `REVIEW_CLEAN` sentinel で判定する。コードフェンス・装飾行・「指摘なし」を
+  述べる短い前置き 1 文は許容し、sentinel + 指摘本文は block する
+  (判定規則は `hooks/_common/sentinel.py`。両 hook 共通)
 
 ### post-implementation-review (ターンスコープ差分レビュー)
 
@@ -86,7 +89,14 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 2. **fail-open** — CLI 未インストール / タイムアウト / 応答空 の各ケースで Claude Code の動作を止めない
 3. **観点の分離** — タイミングごとに担当観点を変え、プロンプトを外部ファイルに分離して保守性を確保
 4. **クロスレビュー時は並列実行** — Cursor と Codex を `ThreadPoolExecutor` で並行起動。片方だけ取れても block 成立
-5. **YAGNI** — 共通化は 2 つ目のパターンが見えたタイミングで行う (現状 hook 間の共通ヘルパーなし)
+5. **共通化は同型が出揃ってから** — hook 間で同型だった処理 (sentinel 判定 / 外部 CLI 起動 /
+   flock / ログ) は `hooks/_common/` に集約し、各 hook は `__main__.py` 冒頭で `hooks/` を
+   `sys.path` に載せて参照する (plugin root 内の相対配置なので cache コピーでも壊れない)。
+   hook 固有の状態機械は共通化しない
+6. **外部 CLI は独自 process group で起動** — timeout 時は `os.killpg` でグループごと停止
+   (SIGTERM → 猶予 → SIGKILL) し、同じグループに居る孫プロセス (stdout を継承した
+   helper 等) を取り残さない。killpg は reap 前の子にだけ送る (pid 再利用の誤送信防止)。
+   kill 猶予は hooks.json の hook timeout に織り込んである (各 tests が式で固定)
 
 ## 環境変数
 
@@ -95,7 +105,7 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 | `EXTERNAL_AI_REVIEW_MAX` | `2` | `exitplan-review` のセッション × プラン単位の最大ブロック回数。`0` で hook 自体を無効化 |
 | `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` の有効/無効。`0` / `false` / `off` で無効化 |
 | `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING` | `1` | Bash 経由の変更検出。`0` にすると Bash 前後の `git status` を打たなくなる (巨大 repo での軽量化用。`sed -i` 等の変更は拾えなくなる) |
-| `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する |
+| `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
 
 一時的に無効化したい場合は `0` を設定するのが手軽:
 
@@ -109,9 +119,16 @@ EXTERNAL_AI_REVIEW_MAX=0 EXTERNAL_AI_POST_REVIEW=0 claude
 external-ai-assist/
 ├── .claude-plugin/plugin.json
 ├── README.md                               ← このファイル
-├── CLAUDE.md                               ← 保守・拡張者向けガイド
+├── CHANGELOG.md                            ← 版ごとの変更履歴・設計判断
 └── hooks/
     ├── hooks.json                          ← 6 hook を定義
+    ├── _common/                            ← hook 間の共通ヘルパー (sys.path 経由で参照)
+    │   ├── sentinel.py                     ← REVIEW_CLEAN 判定
+    │   ├── subproc.py                      ← 外部 CLI 起動 (process group + timeout)
+    │   ├── cursorcli.py                    ← cursor agent の存在確認 / review 用 argv
+    │   ├── flock.py                        ← flock 付き read-modify-write
+    │   ├── hooklog.py                      ← stderr ログ
+    │   └── tests/
     ├── explore-parallel/
     │   ├── __main__.py
     │   ├── cursor.py
@@ -121,9 +138,10 @@ external-ai-assist/
     │   ├── __main__.py                     ← 並列実行 + マーカー管理
     │   ├── cursor.py                       ← コードベース整合観点
     │   ├── codex.py                        ← 要件・アーキ観点
-    │   └── prompts/
-    │       ├── planning-cursor.md
-    │       └── planning-codex.md
+    │   ├── prompts/
+    │   │   ├── planning-cursor.md
+    │   │   └── planning-codex.md
+    │   └── tests/                          ← block / 非 block 判定と偽 CLI の unittest
     └── post-implementation-review/
         ├── __main__.py                     ← 3 phase (pre-tool / post-tool / stop) の振り分け
         ├── state.py                        ← pending/in-flight 状態機械 + flock
@@ -134,6 +152,10 @@ external-ai-assist/
         │   └── post-implementation-cursor.md
         └── tests/                          ← 受け入れ基準の unittest スイート
 ```
+
+テストは各 `tests/` の親ディレクトリで `python3 -m unittest discover tests` を回す
+(cursor / codex は起動しない。モックか PATH 先頭の偽 CLI で検証する)。hook ごとに同名の
+モジュール (`cursor` / `state`) を持つため、plugin root からの pytest 一括実行には対応しない。
 
 ## 拡張ポイント
 

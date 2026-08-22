@@ -10,8 +10,9 @@ from pathlib import Path
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _PKG_DIR = _TESTS_DIR.parent
+_HOOKS_DIR = _PKG_DIR.parent  # hooks/_common の解決用
 # tests/ 自身も通す: `__init__.py` があるため pytest は `tests.test_x` として import し、
 # unittest discover と違って tests/ が sys.path に載らない (`import _testutil` が解決不能になる)。
-for path in (_PKG_DIR, _TESTS_DIR):
+for path in (_HOOKS_DIR, _PKG_DIR, _TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))

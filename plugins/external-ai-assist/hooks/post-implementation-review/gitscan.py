@@ -34,7 +34,7 @@ import subprocess
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
 #   pre-tool / post-tool (hook 10s): rev-parse 2 + status 5 = 最悪 7s
-#   stop (hook 660s, うち cursor 600s → git に使えるのは約 60s):
+#   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
 #     rev-parse 2 + ls-files 10 + rev-parse 2 + パス単位 diff (COLLECT_BUDGET_SEC 30) = 44s
 REV_PARSE_TIMEOUT_SEC = 2
 STATUS_TIMEOUT_SEC = 5

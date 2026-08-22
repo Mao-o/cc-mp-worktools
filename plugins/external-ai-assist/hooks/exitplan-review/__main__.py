@@ -8,7 +8,7 @@
 両方のレビュアーを並列実行し、critical な指摘があった場合のみ Claude に block を返す。
 全レビュアーが REVIEW_CLEAN を返した場合、または全失敗の場合は fail-open (exit 0)。
 
-マーカーの read→判定→write は fcntl.flock で排他ロック。
+マーカーの read→判定→write は flock で排他ロック (`_common.flock`)。
 同一セッション並行起動時のカウント破綻を防ぐ。
 
 exit 0 (JSON なし): ブロックしない (clean / レビュー済み / 両方失敗 / エラー)
@@ -16,15 +16,22 @@ exit 0 + JSON stdout: decision:block で差し戻し
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import codex
-import cursor
+# hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
+# (plugin root 内の相対配置なので ${CLAUDE_PLUGIN_ROOT} が cache コピーでも壊れない)。
+_HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+
+from _common import flock, hooklog, sentinel  # noqa: E402
+
+import codex  # noqa: E402
+import cursor  # noqa: E402
 
 REVIEWERS = [cursor, codex]
 
@@ -34,9 +41,10 @@ _HEADERS = {
     "codex": "## Codex レビュー (要件・アーキ観点)",
 }
 
+log = hooklog.make_logger("exitplan-review")
 
-def log(msg: str) -> None:
-    print(f"[exitplan-review] {msg}", file=sys.stderr)
+# フェンス / 装飾 / 「指摘なし」の前置き 1 文を許容する判定 (規則は _common/sentinel.py)
+is_clean_review = sentinel.is_clean_review
 
 
 def get_max_reviews() -> int:
@@ -54,21 +62,21 @@ def plan_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
-def is_clean_review(text: str) -> bool:
-    """REVIEW_CLEAN sentinel が単独で返されているときのみ True。
+def _read_marker(f) -> tuple[str, int]:
+    """マーカー本文 (1 行目 hash / 2 行目 count) を読む。壊れていれば空扱い。
 
-    LLM が REVIEW_CLEAN + 後続指摘を混在させた出力を clean 扱いして critical feedback を
-    silently drop することを避けるため、「非空行が 1 行のみで、その行が REVIEW_CLEAN」を
-    厳密に要求する。
+    release_slot() が hash を空にすると本文は `"\\n<count>"` になる。0.3.1 までは全体を
+    strip() してから分割していたため、この形を `["<count>"]` と誤読して hash=<count> /
+    count=0 になり、枠を 1 つ戻しただけで上限カウントがリセットされていた。行単位で
+    読んで 1 行目 (空) を hash として扱う。
     """
-    stripped = text.strip()
-    if not stripped:
-        return True
-    non_empty_lines = [line for line in stripped.split("\n") if line.strip()]
-    if len(non_empty_lines) != 1:
-        return False
-    only_line = non_empty_lines[0].strip().strip("`*#").strip()
-    return only_line.upper() == "REVIEW_CLEAN"
+    lines = [line.strip() for line in flock.read_all(f).split("\n")]
+    saved_hash = lines[0] if lines else ""
+    try:
+        count = int(lines[1]) if len(lines) > 1 and lines[1] else 0
+    except ValueError:
+        count = 0
+    return saved_hash, count
 
 
 def reserve_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
@@ -79,33 +87,16 @@ def reserve_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
     reviewer 失敗の場合は release_slot() で枠を戻す。
     """
     try:
-        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
-        with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                content = f.read().strip()
-                lines = content.split("\n") if content else []
-                saved_hash = lines[0] if lines else ""
-                try:
-                    count = int(lines[1]) if len(lines) > 1 else 0
-                except ValueError:
-                    count = 0
-
-                if count >= max_reviews:
-                    log(f"レビュー回数上限 ({max_reviews}) に達した")
-                    return False
-                if saved_hash == current_hash:
-                    log("同一内容でレビュー済み")
-                    return False
-
-                f.seek(0)
-                f.truncate()
-                f.write(f"{current_hash}\n{count + 1}")
-                f.flush()
-                return True
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with flock.locked_file(marker_file) as f:
+            saved_hash, count = _read_marker(f)
+            if count >= max_reviews:
+                log(f"レビュー回数上限 ({max_reviews}) に達した")
+                return False
+            if saved_hash == current_hash:
+                log("同一内容でレビュー済み")
+                return False
+            flock.rewrite(f, f"{current_hash}\n{count + 1}")
+            return True
     except OSError as e:
         log(f"マーカー read/write 失敗: {e}")
         return False
@@ -119,60 +110,42 @@ def release_slot(marker_file: str, reserved_hash: str) -> None:
     - 他プロセスが追い越して saved_hash を上書きしていれば hash は触らない
     """
     try:
-        with open(marker_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                content = f.read().strip()
-                lines = content.split("\n") if content else []
-                saved_hash = lines[0] if lines else ""
-                try:
-                    count = int(lines[1]) if len(lines) > 1 else 0
-                except ValueError:
-                    count = 0
-
-                new_count = max(0, count - 1)
-                new_hash = "" if saved_hash == reserved_hash else saved_hash
-
-                f.seek(0)
-                f.truncate()
-                f.write(f"{new_hash}\n{new_count}")
-                f.flush()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with flock.locked_file(marker_file) as f:
+            saved_hash, count = _read_marker(f)
+            new_hash = "" if saved_hash == reserved_hash else saved_hash
+            flock.rewrite(f, f"{new_hash}\n{max(0, count - 1)}")
     except OSError as e:
         log(f"マーカー read/write 失敗: {e}")
 
 
 def run_reviewers(plan_text: str) -> dict[str, str]:
-    """利用可能なレビュアーを並列実行し、clean でない結果のみ {name: output} で返す。"""
+    """利用可能なレビュアーを並列実行し、clean でない結果のみ {name: output} で返す。
+
+    全体 timeout は置かない。各レビュアーは自前の TIMEOUT_SEC で必ず返り、かつ
+    `ThreadPoolExecutor` の with 終端は全 future の完了を待つため、`as_completed` に
+    timeout を渡しても実質効かない (0.3.1 までの overall_timeout は dead logic だった)。
+    """
     active = [r for r in REVIEWERS if r.is_available()]
     if not active:
         return {}
 
-    overall_timeout = max(r.TIMEOUT_SEC for r in active) + 60
     results: dict[str, str] = {}
-
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
         future_map = {pool.submit(r.review, plan_text): r for r in active}
-        try:
-            for future in as_completed(future_map, timeout=overall_timeout):
-                reviewer = future_map[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    log(f"{reviewer.NAME} 失敗: {e}")
-                    continue
-                if not result:
-                    log(f"{reviewer.NAME}: 結果なし")
-                    continue
-                if is_clean_review(result):
-                    log(f"{reviewer.NAME}: REVIEW_CLEAN")
-                    continue
-                results[reviewer.NAME] = result
-        except Exception as e:
-            log(f"並列実行エラー: {e}")
-
+        for future in as_completed(future_map):
+            reviewer = future_map[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                log(f"{reviewer.NAME} 失敗: {e}")
+                continue
+            if not result:
+                log(f"{reviewer.NAME}: 結果なし")
+                continue
+            if is_clean_review(result):
+                log(f"{reviewer.NAME}: REVIEW_CLEAN")
+                continue
+            results[reviewer.NAME] = result
     return results
 
 
@@ -267,4 +240,4 @@ if __name__ == "__main__":
     except SystemExit:
         pass
     except Exception as e:
-        print(f"[exitplan-review] fatal: {e}", file=sys.stderr)
+        log(f"fatal: {e}")

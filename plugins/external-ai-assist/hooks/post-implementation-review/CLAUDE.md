@@ -36,7 +36,7 @@ post-implementation-review/
 ├── state.py            pending/in-flight 状態機械 + state lock / cursor lock
 ├── stategc.py          $TMPDIR の TTL GC (旧 post-review-markers も掃除)
 ├── gitscan.py          パス正規化 + git status スナップショット + パス単位 diff
-├── cursor.py           cursor agent 呼び出し (TIMEOUT_SEC = 600)
+├── cursor.py           cursor agent 呼び出し (TIMEOUT_SEC = 600。起動は hooks/_common/subproc.py)
 ├── prompts/
 │   └── post-implementation-cursor.md
 └── tests/              受け入れ基準の unittest スイート
@@ -221,6 +221,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 未追跡ファイルのみの新規作成でもレビューが走る | `TestUntrackedOnly` |
 | 作業ツリー外の絶対パスが除外される | `TestOutsideWorktree` |
 | 上限超過パスを黙って捨てない | `TestOverflowCarryOver` |
+| コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いしない | `TestFencedCleanSentinel` (判定規則の網羅は `hooks/_common/tests/test_sentinel.py`) |
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると

@@ -2,6 +2,7 @@
 
 CI は `python3 -m unittest discover tests` をパッケージ root で回すため、
 import は post-implementation-review/ 直下を sys.path に載せて解決する。
+`hooks/_common` の解決用に hooks/ も載せる (本番は `__main__.py` が同じ挿入を行う)。
 """
 from __future__ import annotations
 
@@ -17,8 +18,10 @@ from pathlib import Path
 from unittest import mock
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
-if str(_PKG_DIR) not in sys.path:
-    sys.path.insert(0, str(_PKG_DIR))
+_HOOKS_DIR = _PKG_DIR.parent
+for _p in (_HOOKS_DIR, _PKG_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
 
