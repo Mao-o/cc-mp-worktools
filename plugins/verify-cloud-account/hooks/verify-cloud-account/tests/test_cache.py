@@ -120,12 +120,19 @@ class TestCache(unittest.TestCase):
         self.assertEqual(cache.invalidate("gh"), 1)
         self.assertTrue(cache.get_success("ghx", "/p", "exp", 1.0))
 
-    # --- epoch / tombstone (PR #43 Codex R2 P1-2: 並行 hook との競合) ---
+    # --- epoch / in-flight 窓 (PR #43 Codex R2 P1-2: 並行 hook との競合) ---
 
     def _base(self) -> Path:
         return Path(self.tmp) / "cc-mp-verify-cloud-account"
 
+    def _no_in_flight_window(self):
+        """in-flight 窓を 0 にして epoch だけの挙動を観察する。"""
+        p = mock.patch.object(cache, "IN_FLIGHT_SEC", 0)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_invalidate_bumps_epoch_and_stale_epoch_result_is_not_published(self):
+        self._no_in_flight_window()
         e0 = cache.current_epoch("github")
         cache.set_success("github", "/p", "exp", 1.0)
         self.assertEqual(cache.invalidate("github"), 1)
@@ -134,9 +141,31 @@ class TestCache(unittest.TestCase):
         # 無効化前 (旧 epoch) に開始した検証の成功は書かれない
         self.assertFalse(cache.set_success("github", "/p", "exp", 1.0, epoch=e0))
         self.assertFalse(cache.get_success("github", "/p", "exp", 1.0))
-        # 現在の epoch で開始した検証は書ける
+        # 現在の epoch で開始した検証は書ける (窓の外)
         self.assertTrue(cache.set_success("github", "/p", "exp", 1.0, epoch=e1))
         self.assertTrue(cache.get_success("github", "/p", "exp", 1.0))
+
+    def test_set_success_refused_within_in_flight_window(self):
+        """無効化直後 (切替の実行中とみなす窓内) は現在の epoch でも成功を書かない。"""
+        cache.invalidate("github")
+        e1 = cache.current_epoch("github")
+        self.assertFalse(cache.set_success("github", "/p", "exp", 1.0, epoch=e1))
+        self.assertFalse(cache.set_success("github", "/p", "exp", 1.0))
+        self.assertFalse(cache.get_success("github", "/p", "exp", 1.0))
+        self.assertEqual(list(self._base().glob("github-*.json")), [])
+
+    def test_set_success_allowed_after_in_flight_window(self):
+        cache.invalidate("github")
+        e1 = cache.current_epoch("github")
+        self.assertFalse(cache.set_success("github", "/p", "exp", 1.0, epoch=e1))
+        self._no_in_flight_window()  # 窓が過ぎた
+        self.assertTrue(cache.set_success("github", "/p", "exp", 1.0, epoch=e1))
+        self.assertTrue(cache.get_success("github", "/p", "exp", 1.0))
+
+    def test_in_flight_window_is_per_service(self):
+        cache.invalidate("github")
+        self.assertTrue(cache.set_success("aws", "/p", "exp", 1.0))
+        self.assertTrue(cache.get_success("aws", "/p", "exp", 1.0))
 
     def test_entry_with_old_epoch_is_ignored_even_if_file_survives(self):
         """削除と競合して残った (or 削除後に書かれた) 旧 epoch の entry も無視される (tombstone)。"""
@@ -157,6 +186,7 @@ class TestCache(unittest.TestCase):
         self.assertGreater(cache.current_epoch("github"), e1)
 
     def test_set_success_without_epoch_uses_current(self):
+        self._no_in_flight_window()
         cache.invalidate("github")
         self.assertTrue(cache.set_success("github", "/p", "exp", 1.0))
         self.assertTrue(cache.get_success("github", "/p", "exp", 1.0))

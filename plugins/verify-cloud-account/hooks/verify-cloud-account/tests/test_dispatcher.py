@@ -1320,7 +1320,7 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
 
 class TestConcurrentInvalidationRace(BaseWithTmpProject):
     """PR #43 Codex R2 P1-2: 同じ service の Bash hook が並行したとき、切替前の状態を
-    検証した結果が切替後に公開されない (epoch / tombstone + PostToolUse の無効化)。"""
+    検証した結果が切替後に公開されない (epoch + in-flight 窓)。"""
 
     def test_verify_started_before_invalidate_is_not_published(self):
         """hook B (`gh pr list`) の verify 中に hook A (`gh auth switch`) の PreToolUse が
@@ -1336,47 +1336,35 @@ class TestConcurrentInvalidationRace(BaseWithTmpProject):
                 cache.invalidate("github")  # B の検証中に A の無効化が走った
             return None
 
-        with mock.patch("services.github.verify", side_effect=verify_then_concurrent_switch) as v:
+        with mock.patch.object(cache, "IN_FLIGHT_SEC", 0), \
+             mock.patch("services.github.verify", side_effect=verify_then_concurrent_switch) as v:
             self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B
             self.assertIsNone(dispatch("gh pr create", str(self.project_dir)))  # 切替後の write
         self.assertEqual(v.call_count, 2)
 
-    def test_verify_started_after_pre_invalidate_is_voided_by_post_invalidate(self):
-        """A: `gh auth switch --user other` の PreToolUse (epoch 進む) → B: `gh pr list` が
-        切替実行前の旧状態を検証して entry を書く → A の PostToolUse (invalidate_after)
-        が epoch を進める → 次の write は B の entry を使わず再検証する。"""
-        from core.dispatcher import invalidate_after
-
+    def test_verify_started_after_invalidate_within_window_is_not_published(self):
+        """A: `gh auth switch --user other` の PreToolUse (無効化) → A の切替が完了する前に
+        B: `gh pr list` が旧状態を検証して成功 → in-flight 窓内なので entry は書かれず、
+        次の write は再検証される。"""
         self._write_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None) as v:
             self.assertIsNone(dispatch("gh auth switch --user other", str(self.project_dir)))
-            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B (窓内)
             self.assertEqual(v.call_count, 2)
-            self.assertEqual(invalidate_after("gh auth switch --user other"), ["github"])
             dispatch("gh pr create", str(self.project_dir))
         self.assertEqual(v.call_count, 3)
 
-    def test_invalidate_after_ignores_non_switch_commands(self):
-        from core.dispatcher import invalidate_after
+    def test_cache_resumes_after_in_flight_window(self):
+        """窓を過ぎれば通常どおり成功が cache される (窓内の再検証は一時的なコスト)。"""
+        from core import cache
 
         self._write_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None) as v:
-            dispatch("gh pr list", str(self.project_dir))
-            self.assertEqual(invalidate_after("gh pr view 1 && aws s3 ls"), [])
-            dispatch("gh pr create", str(self.project_dir))
-        self.assertEqual(v.call_count, 1)
-
-    def test_invalidate_after_covers_readonly_login_and_cross_cli(self):
-        from core.dispatcher import invalidate_after
-
-        self.assertEqual(invalidate_after("gh auth login --skip-ssh-key"), ["github"])
-        self.assertEqual(
-            invalidate_after("aws --profile prod eks update-kubeconfig --name c"), ["kubectl"]
-        )
-        self.assertEqual(
-            invalidate_after("gcloud config set project x && kubectl config use-context y"),
-            ["gcloud", "kubectl"],
-        )
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            with mock.patch.object(cache, "IN_FLIGHT_SEC", 0):  # 60 秒経過した状況
+                dispatch("gh pr list", str(self.project_dir))
+                dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
 
 
 class TestLeadingGlobalOptions(BaseWithTmpProject):

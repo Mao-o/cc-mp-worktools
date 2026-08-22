@@ -63,17 +63,19 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    なら cache hit で別アカウントの write が通っていた (0.7.3 の README 注記を解消)。
    cache ファイル名を `<service>-<sha256>.json` に変更 (service 単位の glob 削除の
    ため。旧形式のファイルは読まれず TTL 後に無害なゴミとして残るのみ)。
-   **並行する hook との競合 (epoch / tombstone + PostToolUse)**: 無効化が entry の
-   削除だけだと、切替 hook と並行して走った同 service の hook が旧状態を検証して
-   新しい entry を書き、切替後に TTL 残り分だけ通る。`invalidate()` は service ごとの
-   epoch (`<service>.epoch`、`max(現在 + 1, time_ns)` で単調増加) を先に進めてから
-   削除し、entry には verify 開始時点の epoch を記録する。読む側は epoch が現在と
-   違えば無視、書く側は開始時と現在の epoch が違えば書かない (`set_success(...,
-   epoch=)`)。加えて `PostToolUse:Bash` hook を登録し (`hooks/hooks.json`)、切替
-   コマンドの**実行後**にも `invalidate_after()` で epoch を進める — 切替の実行前に
-   開始した検証 (PreToolUse の無効化より後に開始したものを含む) の結果は全て無効に
-   なる。PostToolUse では検証も CLI 呼出も出力もしない。cache / epoch の書き込みは
-   tmp + `os.replace` の atomic write。
+   **並行する hook との競合 (epoch + in-flight 窓)**: 無効化が entry の削除だけだと、
+   切替 hook と並行して走った同 service の hook が旧状態を検証して新しい entry を
+   書き、切替後に TTL 残り分だけ通る。`invalidate()` は service ごとの epoch
+   (`<service>.epoch`、`max(現在 + 1, time_ns)` で単調増加) と切替検出時刻
+   (tombstone) を先に書いてから削除し、entry には verify 開始時点の epoch を記録する。
+   読む側は epoch が現在と違えば無視、書く側は開始時と現在の epoch が違えば書かず
+   (`set_success(..., epoch=)`)、さらに tombstone から 60 秒 (`IN_FLIGHT_SEC`、定数)
+   以内は切替の実行中とみなして書かない。PreToolUse は実行前にしか走らず切替の
+   完了時刻が分からないため、この窓で「無効化後・切替完了前に開始した並行検証」の
+   結果が公開されるのを防ぐ (残る穴は 60 秒超の対話 login 中の並行検証のみ。README
+   既知の制限)。PostToolUse hook で実行後に無効化する案は、全 Bash 呼出に Python
+   プロセスが恒久的に乗ることと plugin 再読込の非互換を避けるため採用しない。
+   cache / epoch の書き込みは tmp + `os.replace` の atomic write。
 4. **AWS deny 文面の切替案内を Claude Code で効く形に** (629.6) — 従来は
    `export AWS_PROFILE=<profile>` を第一に案内していたが、Claude Code の Bash は
    呼出ごとに env を持ち越さず、hook は Claude 本体の env を継承するため、`export`
@@ -127,9 +129,8 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   自身も (期待値以外への `gh auth switch` 等は) cache を使わず毎回検証する。
 - cache ファイル名の形式変更。`$TMPDIR/cc-mp-verify-cloud-account/` の旧形式
   (`<sha256>.json`) は参照されなくなる。
-- `hooks/hooks.json` に `PostToolUse:Bash` が追加される (Bash ごとに Python プロセスが
-  1 回増える。切替コマンド以外では分解のみで即終了)。plugin の再読込
-  (`/reload-plugins`) が必要。
+- 切替・ログイン系コマンドの検出から 60 秒間 (`IN_FLIGHT_SEC`) は当該 service の成功
+  cache を書かない (毎回再検証)。
 - 素の `gh auth login` (`--skip-ssh-key` / `--with-token` / `--git-protocol https` 無し)
   は 0.8.0 でも従来どおり検証対象 (readonly にしたのは上記 3 形のみ)。
 
@@ -165,21 +166,22 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   `tests/test_dispatcher.py::TestLeadingGlobalOptions` 7 件 (global option 先行形の
   readonly 判定 / 切替での cache 無効化 (Codex P1 の再現) / 別 CLI 経由 kubeconfig /
   self-remediation / deny 文面は元の形 / 未知 option は通常検証 / `--version` 維持)
-- `tests/test_cache.py` に epoch 7 件 (無効化で epoch が進み旧 epoch の結果は書かれない /
-  削除と競合して残った entry の無視 / epoch ファイル消失後の単調性 / 後方互換 / 破損
-  epoch / service 別 / tmp 残骸なし) +
-  `tests/test_dispatcher.py::TestConcurrentInvalidationRace` 4 件 (検証中に無効化が
-  走った結果は公開されない / 無効化後・切替実行前に開始した検証は PostToolUse で無効 /
-  非切替コマンドは何もしない / readonly login・別 CLI 経由も対象) +
-  `tests/test_main.py` 新設 4 件 (stdin → stdout E2E: PostToolUse は epoch を進めて無出力
-  / 検証も deny もしない / event 名欠落は PreToolUse 扱い / 非対象コマンドは無出力)
-- 新規 86 件のうち 57 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
+- `tests/test_cache.py` に epoch / in-flight 窓 10 件 (無効化で epoch が進み旧 epoch の
+  結果は書かれない / 窓内は現在の epoch でも書かない / 窓を過ぎれば書ける / 窓は
+  service 別 / 削除と競合して残った entry の無視 / epoch ファイル消失後の単調性 /
+  後方互換 / 破損 epoch / service 別 epoch / tmp 残骸なし) +
+  `tests/test_dispatcher.py::TestConcurrentInvalidationRace` 3 件 (検証中に無効化が
+  走った結果は公開されない / 無効化後・切替完了前に開始した検証は窓内で公開されない /
+  窓を過ぎれば cache が再開) +
+  `tests/test_main.py` 新設 4 件 (stdin → stdout E2E: 未設定 write の deny JSON /
+  readonly login は無出力で epoch を進める / 非対象コマンドと不正 JSON は無出力)
+- 新規 88 件のうち 58 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
   実行、レビュー対応分は各修正前の実装) で fail することを確認済み。残りは旧実装でも
   成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを通すこと、
   表示系 readonly が cache を保つこと、他 service の cache に影響しないこと、類似 write
   の deny、検出コマンドの表示、未知 option の保守的扱い、tmp 残骸なし)
 
-テスト 352 → 438 件。
+テスト 352 → 440 件。
 
 ## 0.7.3
 

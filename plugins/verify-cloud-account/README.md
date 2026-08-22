@@ -16,8 +16,7 @@ Bash コマンド実行の直前に、クラウド CLI
 /plugin install verify-cloud-account@mao-worktools
 ```
 
-有効化すると `PreToolUse:Bash` hook (検証) と `PostToolUse:Bash` hook (切替コマンド
-実行後の成功 cache 無効化のみ。検証も出力もしない) が自動登録される。
+有効化すると `PreToolUse:Bash` hook が自動登録される。
 `settings.json` を手で編集する必要はない。
 
 開発時はローカルパスを直接ロードする方が速い:
@@ -410,14 +409,14 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 --skip-ssh-key && gh pr create`、inline env が異なる `gh auth switch --user other &&
 GH_HOST=... gh pr create`)、その service の検証成功は cache しない (判定は service 単位)。
 
-**並行する hook との競合 (epoch / tombstone)**: 無効化は entry の削除だけでなく
-service ごとの epoch (`<service>.epoch`、単調増加) を進める。entry には verify 開始
-時点の epoch を記録し、読む側は epoch が現在と違えば無視、書く側は開始時と現在の
-epoch が違えば書かない。さらに `PostToolUse:Bash` hook が切替コマンドの**実行後**にも
-epoch を進めるため、切替 hook と並行して走った別 hook が旧状態を検証した結果
-(切替の実行前に開始した検証) は切替後に使われない。PostToolUse は検証も出力も
-しない (コマンドの分解と epoch ファイルの更新のみ)。コマンドが失敗して PostToolUse
-が走らなかった場合は状態も変わっていないため影響しない。
+**並行する hook との競合 (epoch + in-flight 窓)**: 無効化は entry の削除だけでなく
+service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を検出した時刻
+(tombstone) を記録する。entry には verify 開始時点の epoch を記録し、読む側は epoch が
+現在と違えば無視、書く側は開始時と現在の epoch が違えば書かない (無効化**前**に開始
+した並行検証の結果を公開しない)。さらに tombstone から 60 秒 (`IN_FLIGHT_SEC`、定数)
+は「切替の実行中」とみなして成功 cache を書かない (無効化**後**・切替完了**前**に
+開始した並行検証の結果を公開しない)。hook は実行前にしか走らず切替コマンドの完了
+時刻が分からないため時間で区切る。代償は切替後 60 秒間の毎回再検証。
 
 従来 (〜0.7.3) は `gh pr list` (検証成功・cache 書込) → `gh auth switch --user other`
 → `gh pr create` が 30 秒以内なら cache hit で別アカウントの write が通っていた。
@@ -436,6 +435,11 @@ epoch を進めるため、切替 hook と並行して走った別 hook が旧�
   (`gh auth switch --user other && gh pr create`) は、実行前の状態で検証されるため
   切替後の write は検証されない (hook は実行前にしか動かない)。別々のコマンドで
   実行すれば切替で cache が破棄され、write は次回 hook で再検証される
+- **60 秒 (`IN_FLIGHT_SEC`) を超える対話 login** (`gh auth login --web` /
+  `aws sso login` 等のブラウザ認証) の最中に、同一 service の並行検証 (並列 Bash
+  呼出) があった場合、その検証が login 前の状態で成功すると entry が書かれ、login
+  完了後も最大 30 秒 (TTL) 有効になりうる。PostToolUse hook で実行後に無効化すれば
+  閉じるが、全 Bash 呼出に Python プロセスが恒久的に乗るため採用していない
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない
@@ -446,7 +450,6 @@ epoch を進めるため、切替 hook と並行して走った別 hook が旧�
 ## 発火しなかったとき
 
 1. `cat ${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json` でフックが登録されているか確認
-   (`PreToolUse` と `PostToolUse` の両方に `Bash` matcher がある)
 2. `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account` を stdin 付きで
    手動実行し、対象コマンドで deny JSON が出るかスモーク:
    ```bash

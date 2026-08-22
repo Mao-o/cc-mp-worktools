@@ -249,21 +249,6 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     return "\n".join(lines)
 
 
-def invalidate_after(command: str) -> list[str]:
-    """PostToolUse: アカウント状態を変えうるコマンドの**実行後**にもう一度 epoch を進める。
-
-    PreToolUse の無効化だけだと、切替コマンドの実行前 (hook 終了〜コマンド完了の間)
-    に走った別 hook の検証 (旧状態) が新しい entry として残り、切替後に TTL 残り分
-    だけ通ってしまう。実行後に epoch を進めることで、実行完了前に開始した検証の
-    entry を全て無効にする。検証も CLI 呼出も出力もしない。破棄した service 名を返す。
-    """
-    _targets, switching = _analyze_command(command)
-    names = [_service_name(svc) for svc in switching]
-    for name in names:
-        cache.invalidate(name)
-    return names
-
-
 def dispatch(command: str, cwd: str) -> dict | None:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
     if not project_dir:
@@ -273,8 +258,9 @@ def dispatch(command: str, cwd: str) -> dict | None:
     # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
     # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
     # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
-    # 必ず再検証される。self-remediation (期待値への切替) や readonly 扱いの
-    # login も、実行に失敗して状態が変わらない可能性があるため無条件に破棄する。
+    # 必ず再検証される (切替の実行中に並行した検証が成功を書く窓は cache 側の
+    # epoch + in-flight 窓で塞ぐ)。self-remediation (期待値への切替) や readonly
+    # 扱いの login も、実行に失敗して状態が変わらない可能性があるため無条件に破棄する。
     for svc in switching:
         cache.invalidate(_service_name(svc))
     if not targets:
