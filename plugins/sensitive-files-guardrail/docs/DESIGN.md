@@ -229,7 +229,11 @@ operand scan でも `.env` がプログラム文字列の内側にあるため�
 `handlers/bash/interpreters.py` (`_program_dynamic_construct`) が awk の
 `system(` / `getline` / `|` / `>` / `-f progfile`、sed の `e` (command /
 `s///e`) / `r` `R` / `w` `W` / `-f script` を検出し、**operand scan の後** で
-`ask_or_allow` (`bash_lenient("program_dynamic")`) に戻す。機密 operand 確定の
+`ask_or_allow` (`bash_lenient("program_dynamic")`) に戻す。sed は regex 近似
+ではなくスクリプトを先頭から走査する小さな parser (`_sed_script_dynamic`) で
+コマンド位置を求める (アドレス / `s` `y` の区切り本文 / `a` `i` `c` テキスト /
+ラベル / コメントを読み飛ばす)。regex 近似は密着引数 `r.env` と `-e` 密着
+スクリプトが `e` で終わる形を取りこぼした (review R4)。機密 operand 確定の
 deny が先なので `awk '{print}' .env` は deny のまま。`>` (比較) や `||` の
 false positive は ask で済ませる (0.17.0 まで `$` `{` で ask だった形)。
 他のインタプリタ (`python -c` / `perl -e` / `bash -c`) は `_OPAQUE_WRAPPERS`

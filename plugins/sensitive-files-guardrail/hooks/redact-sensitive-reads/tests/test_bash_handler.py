@@ -1526,7 +1526,19 @@ class TestQuoteAwareHardStop(BaseBash):
         with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
             f.write("hello\n")
         for cmd in ("sed -n p notes.txt", "sed 's/(=)/X/' notes.txt",
-                    "sed -n '1,5p' notes.txt", "sed 's/the end/x/g' notes.txt"):
+                    "sed -n '1,5p' notes.txt", "sed 's/the end/x/g' notes.txt",
+                    # 区切り文字の直後 / 置換文字列 / 正規表現アドレス / ラベル
+                    # に e r w が現れてもコマンド位置ではない (R4: regex 近似では
+                    # ask に倒れていた形を parser で allow に保つ)
+                    "sed 's/foo/replacement/' notes.txt",
+                    # (`s|a|e|` は `|` が token 内残留 metachar として 0.18.0
+                    # 以前から ask — parser とは無関係なので `,` 区切りで固定)
+                    "sed 's,a,e,' notes.txt", "sed -n '/^e/p' notes.txt",
+                    "sed ':retry; s/x/y/; t retry' notes.txt",
+                    "sed 'y/abc/xyz/' notes.txt", "sed '$!d' notes.txt",
+                    "sed -ne 'p' notes.txt", "sed -nes/x/y/p notes.txt",
+                    "sed '1a\\\nr text' notes.txt", "sed '2i\\\nwelcome' notes.txt",
+                    "sed -e 's/x/y/' data.r"):
             with self.subTest(cmd=cmd):
                 r = handle(_make_envelope(cmd, self.tmp))
                 self.assertTrue(
@@ -1535,6 +1547,28 @@ class TestQuoteAwareHardStop(BaseBash):
                 )
         r = handle(_make_envelope("sed 's/(=)/X/' .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
+
+    def test_sed_attached_arguments_and_attached_e_script(self):
+        # R4 P1: 密着引数 (`r.env` / `2r/etc/hostname`) と、`-e` 密着スクリプトが
+        # `e` で終わる形 (`-e's/(x)/cat .env/e'`) を regex 近似が取りこぼしていた。
+        for cmd in ("sed '{\nr.env\n}' notes.txt",
+                    "sed '2r/etc/hostname' notes.txt",
+                    "sed -E -e's/(x)/cat .env/e' notes.txt",
+                    "sed -es/x/y/e notes.txt",
+                    "sed 's/x/word/w out' notes.txt",
+                    "sed '/re/w out.txt' notes.txt",
+                    "sed 's/x/y/ge' notes.txt",
+                    "sed -n '$!{w out\n}' notes.txt",
+                    "sed 'R.env' notes.txt",
+                    "sed 'W /tmp/out' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
 
 
 class TestSafeReadAllowlist(BaseBash):

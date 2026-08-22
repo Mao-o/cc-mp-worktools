@@ -107,7 +107,10 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で
 > `ask_or_allow` に戻す (`awk 'BEGIN { system("cat .env") }'` は default で
 > ask、autonomous で allow = 0.17.0 と同じ)。機密 operand 付き
-> (`awk 'BEGIN{system("x")}' .env`) は deny が優先。
+> (`awk 'BEGIN{system("x")}' .env`) は deny が優先。sed は走査 parser で
+> コマンド位置を求めるため、密着引数 (`r.env` / `2r/etc/hostname`) や `-e`
+> 密着の `s///e` も ask、置換文字列・正規表現・ラベル内の `e` `r` `w`
+> (`s/foo/replacement/` / `/^e/p` / `:retry`) は allow のまま。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 

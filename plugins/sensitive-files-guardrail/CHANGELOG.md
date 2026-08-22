@@ -171,6 +171,27 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
 
+### review 対応 (4) — sed スクリプトの判定を regex 近似から走査 parser に (PR #38 Codex R4 P1 ×2)
+
+review 対応 (3) の sed 判定は「コマンド文字の後ろが空白か終端」「`-e` 密着
+スクリプトより短縮オプション束を先に見る」という regex 近似で、GNU sed の
+密着引数 (`sed '{` ⏎ `r.env` ⏎ `}'` / `2r/etc/hostname`) と、`-e` 密着
+スクリプトが `e` で終わる形 (`sed -E -e's/(x)/cat .env/e'` は束 `-ne` と誤認
+して次の引数をスクリプト扱い) を取りこぼし、どちらも default mode で allow
+していた (0.17.0 は `{` `(` の hard-stop で ask)。
+
+regex をやめ、**スクリプトを先頭から走査する小さな parser**
+(`_sed_script_dynamic`) に置き換えた。アドレス (`N` `$` `/re/` `\cREc` `,` `~`
+`+` `!`)、`s` / `y` の区切り文字で囲まれた本文、`a` `i` `c` のテキスト (行末
+`\` の継続込み)、ラベル (`:` `b` `t` `T`)、コメントを読み飛ばし、コマンド位置の
+`e` / `r` `R` / `w` `W` と `s` の `e` / `w` flag だけを動的と判定する。未知の
+コマンド文字は 1 文字進めるだけ (false positive 側に倒れても ask)。これで
+置換文字列や正規表現に `e` `r` `w` が現れる `s/foo/replacement/` / `s,a,e,` /
+`/^e/p` / `:retry` が (regex 近似では ask だったのを) allow に保ったまま、
+密着形を ask に倒せる。スクリプト候補の抽出 (`_sed_scripts`) は `-eSCRIPT`
+密着形を束判定より先に見るよう直し、短縮オプション束は過剰包含 (`e` 以降と
+次の引数の両方を候補に) に倒した — 候補を増やしても ask 側にしか動かない。
+
 ### review 対応 (2) — Bash コメントを両 scanner で認識 (PR #38 Codex R2 P1)
 
 `#` 以降 (行末まで) は Bash に解釈されないが、両 scanner はコメント内の `'` で
@@ -221,9 +242,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-762 件 (+27、うち 3 件は既存テストの改名 + 期待値更新)。
+763 件 (+28、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (27 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (28 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -237,7 +258,10 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   コメントでない / 空白 + 行継続の後はコメント / `'a'#b` はコメントでない、
   (7) review 対応 3b: awk `system(` `getline` `| "cmd"` `> "f"` `-f` と sed
   `s///e` `r` `1r` `-e 'w f'` `$e` `-f` は ask (auto は allow) / 機密 operand
-  付きは deny 優先 / 動的構文の無い awk・sed は挙動不変
+  付きは deny 優先 / 動的構文の無い awk・sed は挙動不変、(8) review 対応 4:
+  密着引数 (`r.env` `2r/etc/hostname` `R.env`) / `-e` 密着 `s///e` / `s///w` /
+  `s///ge` / `{w out}` は ask、`s/foo/replacement/` `s,a,e,` `/^e/p` `:retry`
+  `y///` `$!d` `-ne p` `-nes/x/y/p` `a\` テキスト / `data.r` operand は allow
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、
