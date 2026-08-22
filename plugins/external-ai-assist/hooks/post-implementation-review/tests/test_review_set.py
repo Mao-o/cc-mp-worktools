@@ -159,6 +159,59 @@ class TestResolvePathsExclusion(ReviewSetTestCase):
         self.assertEqual(rels, [])
         self.assertEqual([name for name, _ in excluded], ["credentials.json"])
 
+    def _symlinked_credentials_dir(self) -> None:
+        """`credentials/` → `ordinary/` の symlink ディレクトリと tracked 風の実体を用意する。"""
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        write(self.repo, "ordinary/data.json", '{"token": "sk-live-DO-NOT-SEND"}\n')
+        os.symlink(os.path.join(self.repo, "ordinary"), os.path.join(self.repo, "credentials"))
+
+    def test_symlinked_directory_component_is_judged_lexically(self):
+        """Codex P1: symlink ディレクトリ経由の claim は途中の名前 (credentials) で除外する。"""
+        self._symlinked_credentials_dir()
+        rels, _, excluded = self.resolve(
+            [os.path.join(self.repo, "credentials", "data.json")], exclusion.load_policy({})
+        )
+        self.assertEqual(rels, [], "realpath は ordinary/data.json だが lexical 名で除外される")
+        self.assertEqual(excluded, [("credentials/data.json", '既定除外: 語 "credentials"')])
+
+    def test_symlinked_directory_via_root_alias_is_judged_lexically(self):
+        """root の別名 (symlink された親) + 途中の symlink ディレクトリの組み合わせでも除外する。"""
+        self._symlinked_credentials_dir()
+        alias = os.path.join(self._tmp.name, "alias")
+        os.symlink(self.repo, alias)
+        rels, _, excluded = self.resolve(
+            [os.path.join(alias, "credentials", "data.json")], exclusion.load_policy({})
+        )
+        self.assertEqual(rels, [])
+        self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
+
+    def test_real_path_of_symlinked_directory_is_still_reviewed(self):
+        """実体の名前 (ordinary/data.json) で claim された分は除外しない (git にはこの名前で渡す)。"""
+        self._symlinked_credentials_dir()
+        rels, _, excluded = self.resolve(
+            [os.path.join(self.repo, "ordinary", "data.json")], exclusion.load_policy({})
+        )
+        self.assertEqual(rels, ["ordinary/data.json"])
+        self.assertEqual(excluded, [])
+
+    def test_lexical_relative_keeps_components_below_root(self):
+        entry = self.entry
+        root = os.path.realpath(self.repo)
+        self.assertEqual(
+            entry._lexical_relative(root, os.path.join(self.repo, "a", "b", "c.py")), "a/b/c.py"
+        )
+        self.assertEqual(
+            entry._lexical_relative(root, os.path.join(self.repo, "a", "..", "x.py")), "x.py"
+        )
+        self.assertIsNone(entry._lexical_relative(root, self.repo))
+        self.assertIsNone(entry._lexical_relative(root, os.path.join(self._tmp.name, "out.py")))
+        # root 配下に root 自身へ戻る symlink があっても、浅い側で切るので途中の名前が残る
+        os.symlink(self.repo, os.path.join(self.repo, "self"))
+        self.assertEqual(
+            entry._lexical_relative(root, os.path.join(self.repo, "self", "secret.txt")),
+            "self/secret.txt",
+        )
+
     def test_link_name_is_judged_through_symlinked_root(self):
         """claim 側が symlink 経由の root 表記 (macOS の /tmp → /private/tmp 等) でもリンク名を見る。"""
         os.makedirs(os.path.join(self.repo, "vault"))

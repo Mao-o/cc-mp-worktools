@@ -129,8 +129,10 @@ REVIEW_CLEAN でパスを戻すと、毎ターン同じファイルを再レビ�
 **除外** は `_resolve_paths` で、作業ツリー外パスと同じ位置で落とす。`MAX_REVIEW_PATHS` の
 手前なので枠を食わず、overflow として pending に戻ることもない。規則 (既定 glob /
 `EXTERNAL_AI_POST_REVIEW_EXCLUDE` / `EXTERNAL_AI_POST_REVIEW_CODE_ONLY`) は `exclusion.py` の
-docstring と README を参照。判定にはリンク名 (claim された絶対パスの root 相対) と実体
-(realpath) の両方を渡す。
+docstring と README を参照。判定には実体 (realpath 相対。git に渡すのもこれ) と lexical なパス
+(root だけ realpath で同定し、配下の symlink 構成要素名を保持: `_lexical_relative`) の両方を
+渡し、どちらかが当たれば除外する。`credentials/` → `ordinary/` の symlink ディレクトリ経由でも
+機密名のリンクでも、root の別名 (`/tmp` → `/private/tmp`) 経由でも落ちない。
 
 **予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
 切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。

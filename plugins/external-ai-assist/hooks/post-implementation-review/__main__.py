@@ -332,14 +332,16 @@ def _resolve_paths(
     除外 (exclusion.Policy) もここで当てる。除外されたパスは作業ツリー外と同じく
     **復元しない・hash も記録しない** (恒久除外)。上限 (MAX_REVIEW_PATHS) の手前で除外する
     ので、除外ファイルが枠を食ったり overflow として pending に戻ったりしない。
-    判定にはリンク名 (claim された絶対パスを root 相対にしたもの) と実体 (realpath) の
-    両方を渡す — symlink のどちらの名前が機密に見えても外部に送らない。
+    判定には実体 (realpath 相対。git に渡すのもこれ) と **lexical なパス** (root だけ
+    realpath で同定し、配下の symlink 構成要素名はそのまま残したもの) の両方を渡す —
+    `credentials/` → `ordinary/` のような symlink ディレクトリ経由の claim や機密名の
+    リンクを、どちらの名前が機密に見えても外部に送らない (安全側に倒す)。
 
     順序は claim 順 (= pending に積まれた順) を保つ。前回 Stop が繰り越した (pending に
     戻した) パスは次ターンの先頭に来るので、予算超過で繰り越されたファイルが新しい編集に
     毎回追い越されて永久に残ることがない。
     """
-    root_prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
+    root_real = os.path.realpath(root).rstrip(os.sep) or os.sep
     # 実体 (realpath 相対) ごとに判定候補を集める。同じ実体が別名 (symlink) で複数回 claim
     # されていても、どの名前が機密に見えるかを全部見てから判定する
     candidates: dict[str, list[str]] = {}
@@ -348,9 +350,9 @@ def _resolve_paths(
         if not rel or os.path.isdir(os.path.join(root, rel)):
             continue
         names = candidates.setdefault(rel, [rel])
-        link_rel = _link_relative(root_prefix, path)
-        if link_rel and link_rel not in names:
-            names.append(link_rel)
+        lexical = _lexical_relative(root_real, path)
+        if lexical and lexical not in names:
+            names.append(lexical)
 
     rels: list[str] = []
     excluded: list[tuple[str, str]] = []
@@ -364,18 +366,23 @@ def _resolve_paths(
     return rels[:MAX_REVIEW_PATHS], overflow, excluded
 
 
-def _link_relative(root_prefix: str, path: str) -> str | None:
-    """claim された名前そのもの (symlink ならリンク名) を作業ツリー相対にする。
+def _lexical_relative(root_real: str, path: str) -> str | None:
+    """claim されたパスを、root 配下の symlink を解決せずに (lexical に) root 相対へ変換する。
 
-    親ディレクトリだけ realpath で実体化し、最後の要素は解決しない。claim 側が
-    `/tmp/...` (→ `/private/tmp/...`) や symlink された親ディレクトリ経由の表記でも
-    root の下に落ちるので、リンク名による除外判定が黙って効かなくなることがない。
+    `to_relative` (全体を realpath) だと `credentials/` → `ordinary/` のような symlink
+    ディレクトリ経由の claim が `ordinary/data.json` になり、除外判定から `credentials` が
+    消える (Codex PR レビュー P1)。親ディレクトリだけ realpath する方式も同じ穴があった。
+    ここでは **root の別名** (`/tmp` → `/private/tmp`、symlink された親ディレクトリ) だけを
+    realpath で同定し、その下の構成要素は名前のまま残す。祖先を浅い方から試して最初に root と
+    一致したところで切るので、root 配下に root 自身へ戻る symlink があっても途中の名前は残る。
+    root の別名が見つからなければ None (作業ツリー外)。
     """
-    parent = os.path.realpath(os.path.dirname(path))
-    link = os.path.join(parent, os.path.basename(path))
-    if not link.startswith(root_prefix):
-        return None
-    return link[len(root_prefix) :] or None
+    parts = os.path.normpath(path).split(os.sep)
+    for cut in range(1, len(parts)):
+        prefix = os.sep.join(parts[:cut]) or os.sep
+        if os.path.realpath(prefix) == root_real:
+            return os.sep.join(parts[cut:]) or None
+    return None
 
 
 class ReviewBatch:

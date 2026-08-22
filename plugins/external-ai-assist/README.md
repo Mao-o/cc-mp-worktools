@@ -122,7 +122,8 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
    JSON / YAML / TOML / XML / HTML / CSS と拡張子無し (Makefile 等) はコード扱いで送る
 
 glob は **basename と作業ツリー相対パスの両方**に、**大文字小文字を区別せず**当てる。`*` は `/` にも
-マッチするので `docs/*` は深い階層も拾う。symlink はリンク名と実体のどちらかが当たれば除外。
+マッチするので `docs/*` は深い階層も拾う。symlink は編集時のパス (途中のディレクトリ名やリンク名を
+そのまま残した lexical なパス) と実体 (realpath) のどちらかが当たれば除外。
 git へのパス渡しは literal pathspec (`app/[id]/page.tsx` のような名前を glob として解釈させず、
 claim していないファイルの差分が混入しない)。
 

@@ -424,6 +424,25 @@ class TestExclusion(HookTestCase):
         self.assertNotReviewed()
         self.assertEqual(self.pending(SESSION_A), [])
 
+    def test_edit_through_symlinked_credentials_directory_is_excluded(self):
+        """Codex P1: `credentials/` → `ordinary/` の symlink 経由で編集しても外部に送らない。"""
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        _testutil.write(self.repo, "ordinary/data.json", '{"k": 1}\n')
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "data")
+        os.symlink(os.path.join(self.repo, "ordinary"), os.path.join(self.repo, "credentials"))
+
+        self.edit(SESSION_A, "credentials/data.json", '{"k": "sk-live-DO-NOT-SEND"}\n')
+        self.edit(SESSION_A, "a.py", "v1\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("sk-live", self.review_calls[0])
+        self.assertNotIn("data.json", self.review_calls[0])
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn('credentials/data.json (既定除外: 語 "credentials")', message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
     def test_stale_state_from_older_version_is_drained(self):
         """0.4.1 以前が pending に積んだ機密パスも、次の Stop で落ちて残り続けない。"""
         self.state.record_pending(SESSION_A, [os.path.join(self.repo, ".env")])

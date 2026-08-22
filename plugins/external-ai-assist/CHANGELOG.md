@@ -32,9 +32,14 @@ gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、
      アーカイブの拡張子を外す (一覧は README)。JSON / YAML / TOML / XML / HTML / CSS と
      拡張子無しのファイルはコード扱いで残す
 - glob は basename と作業ツリー相対パスの両方に、大文字小文字を区別せず当てる。`fnmatch` の
-  `*` は `/` にもマッチするので `docs/*` は深い階層も拾う。symlink はリンク名 (親ディレクトリ
-  だけ realpath で実体化し、最後の要素は解決しない) と実体 (realpath) の両方で判定し、同じ実体が
-  別名で複数回 claim されていても全部の名前を見てから判定する。通知には当たった名前を出す
+  `*` は `/` にもマッチするので `docs/*` は深い階層も拾う。symlink は **lexical なパス**
+  (作業ツリー root だけ realpath で同定し、配下の symlink 構成要素名はそのまま残す) と実体
+  (realpath。git に渡すのもこれ) の両方で判定し、どちらかが当たれば除外する。同じ実体が
+  別名で複数回 claim されていても全部の名前を見てから判定する。通知には当たった名前を出す。
+  lexical 判定は Codex PR レビュー P1 の反映: `credentials/` → `ordinary/` のような symlink
+  ディレクトリ経由の claim は realpath でも親だけの realpath でも `ordinary/data.json` になり、
+  `credentials` が判定から消えていた。root の別名 (`/tmp` → `/private/tmp`、symlink された
+  親ディレクトリ) は引き続き realpath で吸収する
 - **判断**: 既定は「名前からして機密」なものに限定した。`*token*` / `*password*` は
   tokenizer / password_validator などのコードを巻き込むため入れず、`id_*` も
   `id_generator.py` を拾うので SSH 鍵の実名 (`id_rsa*` 等) に限定。チケット案の `*secret*` /
@@ -96,7 +101,7 @@ stderr にも残している。
 
 ### テスト
 
-累計 **243 件** (+57、post-implementation-review 102 → 159)。テストは git のグローバル /
+累計 **248 件** (+62、post-implementation-review 102 → 164)。テストは git のグローバル /
 システム設定を読まず (`GIT_CONFIG_GLOBAL=/dev/null` `GIT_CONFIG_NOSYSTEM=1`)、除外の環境変数を
 中立値に固定して実行する (開発者 shell の `CODE_ONLY=1` や `color.ui=always` で揺れない)。
 
@@ -106,10 +111,11 @@ stderr にも残している。
   複数候補 / 追加 glob の加算と正規化 (`./` `/` `dir/` 空要素 `!`) / 異常パターンで例外なし /
   `*` の階層またぎ / 既定の無効化 / `!glob` が既定・追加 glob・CODE_ONLY に優先 /
   CODE_ONLY の拡張子 20 種と残す 14 種 / 真偽値
-- `tests/test_stop_flow.py::TestExclusion` (11 件): 機密のみで cursor 不起動 + pending に
+- `tests/test_stop_flow.py::TestExclusion` (12 件): 機密のみで cursor 不起動 + pending に
   残らない + systemMessage に内容が出ない / 機密 + コードでコードだけ送り次ターンに再掲しない /
   block 時の `decision` と `systemMessage` の同居 / 除外なしなら出力なし / 追加 glob /
-  CODE_ONLY / Bash 経由で作った `.env` / 機密名の symlink / 旧 state の機密パス / 枠を食わない /
+  CODE_ONLY / Bash 経由で作った `.env` / 機密名の symlink / symlink ディレクトリ
+  (`credentials/` → `ordinary/`) 経由の編集 / 旧 state の機密パス / 枠を食わない /
   `!glob` で credentials ディレクトリ配下のコードを送る
 - `tests/test_stop_flow.py::TestLiteralPathspecFlow` (2 件): `app/[id]/page.tsx` の編集に別
   セッションの `app/i/page.tsx` が混入しない / 旧 state の `[.]env` で tracked `.env` が漏れない
@@ -118,7 +124,8 @@ stderr にも残している。
   overflow の繰り越し順 / 単一 50 KB が切り詰め付きで送られ hash 記録 (末尾だけ変えても再掲) /
   cursor 失敗で両方 pending
 - `tests/test_review_set.py`: `_resolve_paths` の claim 順維持・除外・symlink 両名 (実体が先に
-  claim されても / alias root 経由でも)・枠非消費、`_collect_diffs` の `ReviewBatch` 化、
+  claim されても / alias root 経由でも / symlink ディレクトリ経由でも lexical 名で除外、実体名の
+  claim は送る、`_lexical_relative` の構成要素保持)・枠非消費、`_collect_diffs` の `ReviewBatch` 化、
   `TestByteBudget` (first-fit / 切り詰め / 上限の制約)、`_truncate_section` (上限内 / 行の
   途中に落ちる limit での行境界 / 1 行 / multibyte)
 - `tests/test_gitscan.py`: literal pathspec (tracked / untracked の `[...]` 名、glob 風エントリが
