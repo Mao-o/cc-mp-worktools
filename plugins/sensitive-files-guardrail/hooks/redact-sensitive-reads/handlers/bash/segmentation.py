@@ -179,7 +179,10 @@ def _split_command_on_operators(command: str) -> list[str]:
     ``_lex`` が付けた字句状態だけを見る: クォート内・エスケープ済みの演算子は
     区切らない (``echo "a && b"`` / ``echo \\; x`` は 1 セグメント)。行継続は
     ``_lex`` が除去済みなので、継続をまたいで合成される ``&&`` / ``||``
-    (``ls &\\<nl>& cat .env``) も正しく区切る (review R7)。
+    (``ls &\\<nl>& cat .env``) も正しく区切る (review R7)。単独の ``&``
+    (非同期リスト) も区切る (review R9: ``ls '{' & cat .env`` が 1 segment に
+    潰れ ``ls`` の metadata-only 経路で素通りしていた)。``2>&1`` ``&>`` の
+    ``&`` はリダイレクトの一部なので区切らない。
 
     Bash コメントは segment から落とす (Bash が解釈しない文字列を shlex に
     渡さない)。改行は区切りとして残す。``\\r`` 入りのコメントだけは丸ごと
@@ -216,6 +219,16 @@ def _split_command_on_operators(command: str) -> list[str]:
                 buf = []
                 i += 1
                 continue
+            # 単独の & (非同期リスト区切り、review R9)。``2>&1`` / ``>&`` / ``<&``
+            # (fd 複製) と ``&>`` (両出力リダイレクト) の & は演算子ではない。
+            if c == "&":
+                prev = lx[i - 1][0] if i > 0 and lx[i - 1][1] == _ST_PLAIN else ""
+                nxt = lx[i + 1][0] if i + 1 < n and lx[i + 1][1] == _ST_PLAIN else ""
+                if prev not in ("<", ">") and nxt != ">":
+                    segments.append("".join(buf))
+                    buf = []
+                    i += 1
+                    continue
         buf.append(c)
         i += 1
     if buf:

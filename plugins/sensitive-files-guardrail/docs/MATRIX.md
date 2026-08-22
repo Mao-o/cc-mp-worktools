@@ -104,6 +104,8 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > `cat .env` が **全 mode で deny**。継続をまたいで合成される演算子
 > (`ls &\` ⏎ `& cat .env` = `ls && cat .env`) も正しく区切る (両 scanner が
 > 1 つの lexer を共有)。コメント末尾の `\` は行継続にならず次行は実行される。
+> 単独の `&` (非同期リスト、`ls '{' & cat .env`) も区切る (`2>&1` / `&>` の
+> `&` は除く)。
 >
 > awk / sed のプログラム文字列内の動的構文 (awk: `system(` `getline` `|` `>`
 > `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で

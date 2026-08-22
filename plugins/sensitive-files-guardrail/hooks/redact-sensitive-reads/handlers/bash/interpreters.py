@@ -438,7 +438,9 @@ def _git_global_options(tokens: list[str]) -> tuple[bool, bool, str | None]:
             else:
                 val = t[2:]
                 i += 1
-            if val.startswith("alias.") and "=!" in val:
+            # Git の section / 変数名は大文字小文字非依存 (``Alias.x`` も alias)
+            key = val.split("=", 1)[0].lower()
+            if key.startswith("alias.") and "=!" in val:
                 shell_alias = True
             continue
         if t.startswith("--config-env"):

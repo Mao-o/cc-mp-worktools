@@ -149,6 +149,8 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `jq '{a: .b}' f.json` / `cut -d'$' …` / `cp 'a{1}' b` (inert、review 対応 6) | **ask** / allow | **allow / allow** |
 | `curl -s 'file:///…/.en{v,x}'` / `curl -d '{"a":1}' …` (curl は glob 展開するので inert でない、review 対応 8) | ask / allow | ask / allow (不変) |
 | `sed --expr='e cat ${X:-.env}' f` / `git rebase --exec='cat ${X:-.env}' HEAD~1` / `git myalias '${X}'` (review 対応 8) | ask / allow | ask / allow (不変) |
+| `ls '{' & cat .env` / `echo a &cat .env` (review 対応 9) | ask / **allow** | **deny / deny** |
+| `git -c Alias.x='!cat .env' x` (review 対応 9) | **allow** / allow | **ask** / allow |
 | `ls &\` ⏎ `& cat .env` / `echo p \|\` ⏎ `\| cat .env` (review 対応 7) | ask / **allow** | **deny / deny** |
 | `echo a # c \` ⏎ `cat .env` (review 対応 7) | ask / **allow** | **deny / deny** |
 
@@ -181,6 +183,16 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 `--expression=` / `-ne` 束 / 最初の非オプション引数だけを見る (ファイル
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
+
+### review 対応 (9) — 単独 `&` の区切り / git config key の大文字小文字 (PR #38 Codex R9 P1 ×2)
+
+- **単独の `&` (非同期リスト) を segment 区切りにした。** `ls '{' & cat .env` は
+  quote-aware 化で `{` が hard-stop でなくなった結果 1 segment に潰れ、`ls` の
+  metadata-only 経路で `cat .env` が全 mode で素通りしていた (0.17.0 は hard-stop
+  で ask)。`2>&1` / `>&` / `<&` (fd 複製) と `&>` (両出力リダイレクト) の `&` は
+  リダイレクトの一部なので区切らない (前後の plain 文字で判定)。
+- **git の config key は大文字小文字非依存** (`-c Alias.x='!…'` も shell alias)。
+  key を小文字化してから `alias.` を判定する。
 
 ### review 対応 (8) — curl の URL glob / sed の省略 long option / git サブコマンドの callback (PR #38 Codex R8 P1 ×3)
 
@@ -349,9 +361,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-777 件 (+42、うち 3 件は既存テストの改名 + 期待値更新)。
+779 件 (+44、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (42 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (44 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -391,7 +403,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   は allow、git `rebase --exec` / `-x` / `bisect run` / `submodule foreach` /
   `grep -O` / `fetch --upload-pack` / 未知サブコマンドは ask で `commit -m` /
   `log --format` / `status` / `stash push` は allow、`rg --pre` / `sort
-  --compress-program` は ask
+  --compress-program` は ask、(14) review 対応 9: `ls '{' & cat .env` /
+  `echo a &cat .env` は 2 segment に割れて deny、`2>&1` / `&>` は区切らない、
+  `git -c Alias.x='!…'` / `-cALIAS.x=…` は ask
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、

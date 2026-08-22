@@ -1806,6 +1806,33 @@ class TestQuoteAwareHardStop(BaseBash):
                 r = handle(_make_envelope(cmd, self.tmp))
                 self.assertEqual(_decision(r), "ask")
 
+    # --- (14) R9: 単独 & の区切り / git config key の大文字小文字 ---
+    def test_single_ampersand_splits_async_list(self):
+        # `&` は非同期リストの区切り。`2>&1` / `&>` の `&` は区切らない。
+        cases = {
+            "ls '{' & cat .env": ["ls '{'", "cat .env"],
+            "echo a &cat .env": ["echo a", "cat .env"],
+            "echo '&' ; cat .env": ["echo '&'", "cat .env"],
+            "cat notes.txt 2>&1": ["cat notes.txt 2>&1"],
+            "echo x &> /dev/null": ["echo x &> /dev/null"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+        for cmd in ("ls '{' & cat .env", "echo a &cat .env"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_git_alias_key_is_case_insensitive(self):
+        for cmd in ("git -c Alias.x='!cat .env' x", "git -cALIAS.x='!cat .env' x"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
 
 class TestSafeReadAllowlist(BaseBash):
     """0.12.0: ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの read-only allow-list) に
