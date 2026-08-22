@@ -327,7 +327,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
-| 同一 session で報告済みの (status, path) 集合 ⊆ 現在の集合 (0.19.0) | exit 0 (`session_id` が無い / 不正なら従来通り block) |
+| 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` が無い / 不正なら従来通り block) |
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
 
