@@ -125,10 +125,22 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 | サービス | マッチ対象 | 期待値の取得 |
 |---|---|---|
 | GitHub | `gh ...` | `gh auth status` のアクティブアカウント |
-| Firebase | `firebase ...` | `firebase use` → fallback `.firebaserc` |
+| Firebase | `firebase ...` | `firebase use` (非 TTY) の解決済み project ID → CLI から取れない時のみローカル設定 (configstore / `.firebaserc`) |
 | AWS | `aws ...` | `aws sts get-caller-identity --query Account` |
 | GCP | `gcloud ...` | `gcloud config get-value project` (+ optional `account`) |
 | Kubernetes | `kubectl ...` | `kubectl config current-context` |
+
+Firebase の現在値は firebase-tools 本体と同じ順で解決する (v0.7.3)。
+`firebase use <alias|project>` の切替先は CLI の configstore
+(`~/.config/configstore/firebase-tools.json` の `activeProjects`) にだけ保存され
+`.firebaserc` には反映されないため、まず `firebase use` (非 TTY では解決済みの
+project ID を 1 行出力) を読む。CLI から取れないとき (hook の PATH に無い /
+非ゼロ終了 / 出力が空 / 複数行) は CLI と同じローカル設定から同じ規則で解決する:
+configstore の切替先を `.firebaserc` の alias で解決 → 無ければ `.firebaserc` の
+alias が 1 つならその値 → `default`。`npx firebase ...` のように hook 側に
+`firebase` が無い構成でも、configstore 経由で切替を見落とさない。
+`firebase use` が timeout したときは fallback せず「firebase use がタイムアウト
+しました」で deny する (fail-closed)。
 
 ### 検証をスキップする readonly コマンド
 

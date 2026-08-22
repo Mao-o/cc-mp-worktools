@@ -6,6 +6,7 @@ builder が書込に使う suggestion を scalar/dict の形状で適切に返�
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -77,6 +78,14 @@ class TestGithubActiveAccount(unittest.TestCase):
 
 
 class TestFirebaseActiveAccount(unittest.TestCase):
+    def setUp(self):
+        # configstore を実環境から読まないよう XDG_CONFIG_HOME を一時ディレクトリへ。
+        self._xdg = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._xdg, ignore_errors=True))
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self._xdg})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_get_active_from_cli(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-proj\n")):
             self.assertEqual(firebase.get_active_account("/p"), "my-proj")
@@ -109,8 +118,8 @@ class TestFirebaseActiveAccount(unittest.TestCase):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout=help_message)):
             self.assertIsNone(firebase.get_active_account("/nonexistent"))
 
-    def test_firebaserc_preferred_over_broken_cli(self):
-        """firebase use がヘルプメッセージを出しても .firebaserc があれば正しい値を返す。"""
+    def test_firebaserc_fallback_when_cli_prints_help(self):
+        """firebase use がヘルプメッセージ (解決不能) を出したら .firebaserc に fallback する。"""
         help_message = (
             "No project is currently active for this directory.\n"
             "\n"
@@ -126,6 +135,48 @@ class TestFirebaseActiveAccount(unittest.TestCase):
                 "subprocess.run", return_value=_fake_run(stdout=help_message)
             ):
                 self.assertEqual(firebase.get_active_account(d), "my-proj")
+
+    def test_cli_wins_over_firebaserc(self):
+        """`firebase use` の出力 (切替後の値) を .firebaserc の default より優先する
+        (bd_092a232e-629.1)。"""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".firebaserc").write_text(
+                json.dumps({"projects": {"default": "proj-dev", "prod": "proj-prod"}}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
+            ):
+                self.assertEqual(firebase.get_active_account(d), "proj-prod")
+
+    def test_get_active_none_on_cli_timeout(self):
+        """timeout は .firebaserc に fallback せず None (verify と同じ fail-closed)。"""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".firebaserc").write_text(
+                json.dumps({"projects": {"default": "my-proj"}}), encoding="utf-8"
+            )
+            with mock.patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="firebase use", timeout=10),
+            ):
+                self.assertIsNone(firebase.get_active_account(d))
+
+    def test_cli_missing_uses_configstore_switch(self):
+        """CLI 不在でも configstore の `firebase use` 切替先を .firebaserc の alias で
+        解決して返す (builder の show / init も verify と同じ現在値を見る)。"""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".firebaserc").write_text(
+                json.dumps({"projects": {"default": "proj-dev", "prod": "proj-prod"}}),
+                encoding="utf-8",
+            )
+            store = Path(self._xdg) / "configstore" / "firebase-tools.json"
+            store.parent.mkdir(parents=True)
+            store.write_text(
+                json.dumps({"activeProjects": {os.path.abspath(d): "prod"}}),
+                encoding="utf-8",
+            )
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertEqual(firebase.get_active_account(d), "proj-prod")
 
 
 class TestAwsActiveAccount(unittest.TestCase):

@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.7.3
+
+**Firebase の現在値解決順を firebase-tools 本体に合わせる (P0 bug fix,
+`services/firebase.py`)**: v0.3.2 以降は `.firebaserc` の `default` を
+`firebase use` の出力より優先していたが、firebase-tools (`lib/command.js` の
+applyRC) は `--project` → configstore の activeProjects (`firebase use
+<alias|project>` で更新) → `.firebaserc` の順で解決し、`firebase use X` は
+configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時のみ)。
+このため 2 つの誤判定が起きていた:
+
+- **false-allow**: 期待値が `.firebaserc` の default (例 `proj-dev`) のとき、
+  `firebase use prod` で切り替えていても default で照合され `firebase deploy` が
+  prod に通っていた
+- **永久 deny**: 期待値 `proj-prod`・default `proj-dev` では `firebase use proj-prod`
+  を実行しても「現在=proj-dev」と判定され続けていた
+
+### 変更内容
+
+1. **解決順の反転** — `firebase use` (非 TTY では解決済み project ID を 1 行出力)
+   を最優先し、CLI から取れないとき (hook の PATH に無い / 非ゼロ終了 / 出力が空 /
+   複数行ヘルプ) だけローカル設定に fallback する。`get_active_account()`
+   (builder の `accounts-show` / `accounts-init` が使用) も同じ順。
+2. **fallback も applyRC と同じ規則・同じ情報源にする** — `.firebaserc` だけを
+   読むと `firebase use <alias>` の切替 (configstore にしか無い) を見落として
+   default で照合してしまうため、configstore
+   (`$XDG_CONFIG_HOME` または `~/.config` 配下の `configstore/firebase-tools.json`
+   の `activeProjects`、project_dir から親方向に探索) の切替先を `.firebaserc` の
+   alias で解決 → 無ければ alias が 1 つならその値 → `default` の順にした。
+   `npx firebase ...` / `pnpm exec firebase ...` のように hook 側に `firebase` が
+   無い構成でも切替を見落とさない。configstore は `activeProjects` 以外を読まず、
+   内容をメッセージに出さない。`.firebaserc` / configstore が不正な形 (list /
+   非 UTF-8 等) でも例外にせず未解決扱い (従来は top-level が list だと
+   AttributeError で hook が異常終了 = fail-open)。
+3. **timeout の専用メッセージ** — `firebase use` が 10 秒でタイムアウトしたときは
+   `.firebaserc` に fallback せず「Firebase: firebase use がタイムアウトしました。
+   再試行するか、ネットワーク接続を確認してください。」で deny する (他 service
+   の timeout 文言と同形)。従来は timeout が「firebase login && firebase use ...」
+   の誤案内になっていた。fallback しないのは、`.firebaserc` が configstore の
+   切替を知らないため timeout 経路だけ false-allow が残るのを防ぐため (fail-closed)。
+4. **README** — 期待値取得の表と解説を実装に合わせて更新。
+
+### 非互換性
+
+- `firebase use <alias>` で default 以外に切り替えているプロジェクトでは、期待値が
+  default の project ID のままだと deny に変わる (本来の意図どおり)。`.firebaserc`
+  の default で運用しているプロジェクトは挙動不変。
+- `.firebaserc` があっても毎回 `firebase use` (認証チェックを含む) が走るように
+  なった (30 秒の成功 cache は従来どおり)。オフライン等で 10 秒を超えると
+  timeout deny になる。
+
+### 対象外 (別項で扱う)
+
+- 切替コマンド直後 30 秒以内の成功 cache による false-allow (`firebase use prod &&
+  firebase deploy` や、切替を allow した直後の deploy が cache hit で検証されない)。
+  全 service 共通の cache 無効化として別途対応する。
+- `--project` / `-P` flag による実行時 override。
+
+### テスト
+
+- `tests/test_services.py::TestFirebase` に 19 件追加 (CLI 優先 / false-allow と
+  永久 deny の解消 / timeout 専用メッセージ / 空出力・非ゼロ終了・単一 alias の
+  fallback / configstore の切替先参照 (CLI 不在・非ゼロ終了・親ディレクトリ・
+  実体パス・env の `XDG_CONFIG_HOME`・破損時) / 不正な `.firebaserc`)
+- `tests/test_active_account.py::TestFirebaseActiveAccount` に 3 件追加 (CLI 優先 /
+  timeout は None / configstore 参照)、1 件を fallback 意味論の名前に変更
+- `tests/test_dispatcher.py::TestFirebaseResolutionOrderE2E` 3 件追加
+  (`firebase.verify` を mock せず subprocess だけ差し替えた end-to-end、npx 構成含む)
+- 新規 25 件のうち 21 件は旧実装で fail することを確認済み (残り 4 件は fallback
+  条件の仕様固定)
+
+テスト 314 → 339 件。
+
 ## 0.7.2
 
 **D11 インライン env 伝播の透過 wrapper 挙動を監査・体系化 (ドキュメント + 回帰テスト)**:
