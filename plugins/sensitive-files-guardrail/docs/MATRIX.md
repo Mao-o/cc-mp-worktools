@@ -199,9 +199,10 @@ allow-list **外** の first_token (`awk`, `sed`, `find`, `xargs`, `parallel`,
 ## Bash handler — metadata-only first_token (0.14.0 新設, 全 mode で allow)
 
 `first_token` が `_METADATA_ONLY_FIRST_TOKENS` (`ls tree stat file du df test wc
-basename dirname realpath readlink echo printf`) に該当する segment、または
-`git check-ignore` / `git ls-files` (subcommand 直書き形) は、**operand の内容を
-stdout に出さない** ため operand scan をスキップして allow に倒す。機密 path が
+basename dirname realpath readlink echo printf`、0.19.0 から `chmod chown chgrp
+touch` も) に該当する segment、または `git check-ignore` / `git ls-files` /
+`git rm --cached` (subcommand 直書き形、`rm` は `--cached` 付きのみ。0.19.0) は、
+**operand の内容を stdout に出さない** ため operand scan をスキップして allow に倒す。機密 path が
 operand に居ても、出力はファイル名・属性・件数・パス文字列のみで値は LLM
 コンテキストに載らない (思想 1 の射程外)。`git status` は `-v` / `--verbose` が
 staged diff (機密の旧値/新値) を出すため allowlist から **除外** (裸の
@@ -223,6 +224,22 @@ deny に倒る (Codex P1, 0.14.0)。
 name (= 内容の安定した指紋) を出せるため metadata-only から除外して deny
 (Codex P2 第3弾, 0.14.0)。
 
+`git rm` は **`--cached` 付きのみ** metadata-only (0.19.0, bd_092a232e-snw.3):
+index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。
+`--cached` は `--` より前の完全一致。`--pathspec-from-file=<file>` は operand
+の中身を pathspec として読み不一致行を `fatal: pathspec '<行>' did not match` で
+echo するため除外して deny (`file -f` と同クラス)。plain `git rm` は作業ツリー
+削除 (破壊操作) で deny 維持。git は long option の **一意な接頭辞** を受理する
+(`--no-cach` = `--no-cached` で後勝ちにより作業ツリーも削除) ため、危険な
+option を exact-token で deny-list しても省略形がすり抜ける。よって **既知の
+安全な option (`--force` / `--dry-run` / `--quiet` / `--ignore-unmatch` /
+`--sparse`、短縮 `-f -n -r -q` と束ね) 以外が 1 つでもあれば index-only と見なさず
+通常経路 (operand scan → 機密 operand なら deny) に倒す** (fail-closed、Codex
+review P1)。`--cache` のような `--cached` 自体の省略形も展開せず保守側 (deny)。`chmod` / `chown` / `chgrp` / `touch` は内容を読む
+option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ) ため
+無条件で metadata-only。いずれも両 hook の reason が次善策として案内するコマンド
+で、0.18.0 までは自分で deny していた (自己矛盾)。
+
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | `ls -la .env`, `stat .env`, `file .env`, `du -h .env`, `tree .env` | allow | allow | allow | allow | allow |
@@ -232,6 +249,8 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
 | `git check-ignore -v .env`, `git ls-files .env`, `git ls-files --error-unmatch .env`, `git status` (裸) | allow | allow | allow | allow | allow |
+| `git rm --cached .env`, `git rm --cached -- .env`, `git rm -r --cached dir/.env`, `git rm -rf --cached dir/.env`, `git rm --cached --force --quiet .env`, `git rm --cached .env && git commit -m untrack` (index からの除去のみ、実ファイルは残る。0.19.0) | allow | allow | allow | allow | allow |
+| `chmod 600 .env`, `chmod --reference=.env other`, `chown user .env`, `chgrp staff .env`, `touch .env`, `touch -r .env other` (属性 / timestamp 操作、内容は出ない。0.19.0) | allow | allow | allow | allow | allow |
 | `git status -v -- .env`, `git status --verbose .env` (staged diff で旧/新値 echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls -la .env > /tmp/x` (read operand 機密でも書込み先が非機密 → metadata allow) | allow | allow | allow | allow | allow |
 | `find . -name .env -exec cat .env ';'` (`-exec` で内容露出可) | **deny** | **deny** | **deny** | **deny** | **deny** |
@@ -255,8 +274,13 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | `cat .env`, `head .env`, `grep KEY .env`, `od -c .env` (内容出力系は対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `cp .env /tmp/x`, `mv .env /tmp/x` (複製で漏洩面が広がるため対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm .env`, `git rm -f .env`, `git rm .env -- --cached`, `git rm --cached --no-cached .env` (`--cached` 無し / 後勝ちの否定 = 作業ツリー削除。`--` 以降は pathspec) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm --cached --pathspec-from-file=.env`, `git rm --cached --pathspec-from-file .env` (中身を pathspec として読み不一致行を echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env`, `git rm --cached -h .env` (未知 / 省略形の option は fail-closed で通常経路 → deny。Codex review P1) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo check-ignore .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `echo KEY=val > .env` (echo は safe-read 外: residual `>` が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
+| `chmod 600 x > .env`, `touch x > .env` (chmod / touch も safe-read 外: residual `>` が先に効き ask 維持。0.19.0 で緩めていない) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env -exec cat {} +` (`{}` hard-stop が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env > /tmp/x` (find は safe-read 外: residual `>` で ask 維持) | ask | ask | **allow** | ask | **allow** |
 
@@ -326,6 +350,8 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
+| 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` が無い / 不正なら従来通り block) |
+| 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
 
 ## `__main__` catch-all (handler 内未捕捉例外)

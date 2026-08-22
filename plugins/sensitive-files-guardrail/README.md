@@ -226,12 +226,28 @@ note: nested structure not parsed. only top-level key names returned.
 > の ask 経路が先に効くため緩まない。metadata-only ∩ safe_read コマンドの
 > `ls > .env` 系 redirect 書込みも deny (破壊的書込み)。
 
+> **0.19.0 で次善策コマンドを metadata-only に追加** (bd_092a232e-snw.3): 両 hook
+> の reason が「tracked なら `git rm --cached <path>` で untrack」「`chmod 600 .env`」
+> と案内しながら Bash hook 自身がそれらを deny する自己矛盾があった。
+> `git rm --cached` (`--cached` 完全一致。`--no-cached` / `--pathspec-from-file` や
+> その省略形を含む「既知の安全な option 以外」が 1 つでもあれば fail-closed で
+> 通常経路) は index からの除去のみで実ファイルは残り内容も出ないため allow。`chmod` /
+> `chown` / `chgrp` / `touch` は内容を読む option が存在しない (`--reference` /
+> `-r` は mode / owner / timestamp のみ) ため allow。plain `git rm` (作業ツリー
+> 削除 = 破壊操作) と `git rm --cached --pathspec-from-file=<file>` (中身を pathspec
+> として読み不一致行を echo) は deny 維持、`chmod 600 x > .env` の書込み形は echo
+> と同じく residual metachar の ask_or_allow のまま。あわせて `git` の deny reason
+> を subcommand 別 (show / diff / log = 閲覧、add / rm / mv / restore = 操作) に
+> 分け、`git rm .env` が「閲覧しようとした」と返していた誤った意図文を解消した。
+
 **False positive の注意**: unified operand scan は「コマンドが実際に file の
 内容を出力するか」までは判別しないため、`cat` / `grep` 等の内容出力系コマンド
 では、operand が機密パターンに literal 一致すれば実際の用途を問わず deny される
 (0.14.0 で `echo .env` / `ls .env` 等の metadata-only 系は allow に解消済み)。
-恒久的に許可したい場合は `patterns.local.txt` に `!<basename>` を追加する
-([docs/PATTERNS.md](./docs/PATTERNS.md))。
+恒久的に許可したい場合は `patterns.local.txt` の
+`[project:<プロジェクトの絶対パス>]` セクション配下に `!<basename>` を追加する
+(全プロジェクト共通にしたい場合のみヘッダー無しの行。0.19.0 から deny reason の
+hint もこの形を案内する。[docs/PATTERNS.md](./docs/PATTERNS.md))。
 
 > **0.8.0 で glob 候補列挙を撤廃**: 0.3.2〜0.7.x では `cat *.json` を既定 rules の
 > `credentials*.json` と交差させて deny に倒していたが、思想 1 (うっかり露出予防、
@@ -264,18 +280,33 @@ dotenv 系 (`.env` / `.env.*` / `*.envrc`) を Edit/Write で block した際は
 パターンに一致するファイルを検出して `decision: block` で Claude に再確認を促す。
 
 - **tracked**: `.gitignore` 済みでも block される (`git rm --cached` が必要な
-  ため)。対応は「`.gitignore` に追加 + `git rm --cached <path>`」
+  ため)。対応は「`.gitignore` に追加 + `git rm --cached <path>`」 (0.19.0 から
+  この `git rm --cached` は Bash hook を通過する)
 - **untracked**: `.gitignore` 済みのものは `git ls-files --others --exclude-standard`
   により既に除外済み。対応は「`.gitignore` に追加 or 意図的に管理対象化」
 - **submodule**: 0.2.0 以降、`git ls-files --recurse-submodules` で submodule 内の
   **tracked** も検査対象。submodule 内の **untracked** は現状範囲外
 
 block reason には tracked / untracked を別セクションで列挙し、それぞれ対応手順
-を添える。
+と恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` セクション + `!<basename>` 行。
+`$CLAUDE_PROJECT_DIR` は実際の絶対パスに置き換える) を添える (0.19.0)。
 
-**注意**: 2 回目以降の `Stop` は `stop_hook_active=true` で素通りする (無限ループ
-防止)。**block が見えたら必ず対応する**。無視して次のターンに進むと、以降は
-チェックが効かなくなる。
+**session 単位の once-only (0.19.0)**: 同一セッションで同じファイル集合を報告済み
+なら、以降の `Stop` は block しない (「意図的に管理対象とする」と承認した tracked
+`.env` / committed 証明書で毎ターン block が出続けるのを止めるため)。新しい機密
+ファイルが増えたとき、または untracked → tracked のように状態が変わったときだけ
+再 block する。報告済み集合は
+`~/.claude/sensitive-files-guardrail/stop-ack/<session_id>` に「repo root を
+realpath で正規化した絶対パス + status」の sha256 digest で記録し (平文 path は
+残さない。entry 自体の symlink は dereference しない。別 repo に `cd` すれば
+再 block、同じ repo 内のサブディレクトリや submodule への移動では再 block
+しない)、最後の block から 7 日で自動 GC。hook input に `session_id` が無ければ従来通り
+毎回 block する。state の読み書きに失敗したときは stderr に
+`stop_ack_unavailable` を出して従来通り block する。
+
+**注意**: 同一ターン内の 2 回目以降の `Stop` は `stop_hook_active=true` で素通り
+する (無限ループ防止)。**block が見えたら必ず対応する**。無視して次のターンに
+進むと、同じ集合については以降チェックが出ない。
 
 ## パターン設定
 
@@ -295,7 +326,17 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 > `[project:/abs/path/to/project]` セクションを書くと、そのプロジェクトで
 > Claude Code が動いているときだけ適用される rule を追加できる (グローバル
 > 1 ファイルという方針は維持)。詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の
-> 「プロジェクトスコープの rule」節を参照。
+> 「プロジェクトスコープの rule」節を参照。0.19.0 から両 hook の除外案内は
+> このセクション配下への追記を既定として案内する (全プロジェクト共通の行は
+> 明示的な選択)。案内中の `$CLAUDE_PROJECT_DIR` は **展開されない** プレース
+> ホルダで、書くときはプロジェクト root の絶対パスを literal に書く。空ヘッダー
+> (`[project:]`) や未展開の変数参照 (ヘッダー値が `$CLAUDE_PROJECT_DIR` /
+> `$NAME` / `${NAME}` そのもの、またはそれで始まり直後が `/` の standalone 形)
+> のヘッダーはどのプロジェクトにも一致せず無視されるが、黙らず
+> `local_patterns_header_invalid` を stderr (Read/Bash 側は
+> `~/.claude/logs/redact-hook.log` にも) に出す。`/work/project$prod` や
+> `/work/repo$CLAUDE_PROJECT_DIR-prod` のように `$` や予約語を途中に含むだけの
+> literal パスは正当なヘッダーとして扱う。
 
 詳細な設定例・false positive 対策・`_detect_format` との同期は
 [docs/PATTERNS.md](./docs/PATTERNS.md) 参照。

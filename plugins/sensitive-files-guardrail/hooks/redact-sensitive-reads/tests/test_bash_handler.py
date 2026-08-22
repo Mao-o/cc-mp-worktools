@@ -2337,5 +2337,170 @@ class TestMetadataRedirectTarget(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
+class TestRecommendedRemedyAllow(BaseBash):
+    """0.19.0 (bd_092a232e-snw.3): 両 hook の reason が推奨する次善策を自分で deny
+    していた自己矛盾の解消。
+
+    ``git rm --cached`` (index からの除去のみ) と ``chmod`` / ``chown`` / ``chgrp``
+    / ``touch`` (属性操作、内容を読む option 無し) は内容を出力せず実ファイルも
+    消さないため metadata-only として allow。plain ``git rm`` (作業ツリー削除) と
+    ``--pathspec-from-file`` (operand の中身を pathspec として読み echo) は deny
+    維持。書込み形 (``chmod 600 x > .env``) は echo と同じく residual metachar
+    経由の ask_or_allow のまま (緩めない)。
+    """
+
+    _MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+
+    def _assert_allow_all_modes(self, cmd: str) -> None:
+        for mode in self._MODES:
+            r = handle(_make_envelope(cmd, self.tmp, mode))
+            self.assertTrue(
+                output.is_allow(r),
+                msg=f"{cmd!r} [{mode}] should allow but got {_decision(r)!r}",
+            )
+
+    def _assert_deny_all_modes(self, cmd: str) -> None:
+        for mode in self._MODES:
+            r = handle(_make_envelope(cmd, self.tmp, mode))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"{cmd!r} [{mode}] should deny but got {_decision(r)!r}",
+            )
+
+    # --- git rm --cached: index からの除去のみ → allow ---
+    def test_git_rm_cached_dotenv_allow_all_modes(self):
+        self._assert_allow_all_modes("git rm --cached .env")
+
+    def test_git_rm_cached_variants_allow(self):
+        for cmd in (
+            "git rm --cached -- .env",
+            "git rm -r --cached config/.env",
+            "git rm --cached -f .env",
+            "git rm -n --cached .env",
+            "git rm --cached -q --ignore-unmatch .env .env.local",
+            "git rm --cached .env && git commit -m 'untrack'",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    # --- plain git rm: 作業ツリー削除 = 破壊操作 → deny 維持 ---
+    def test_git_rm_plain_dotenv_deny(self):
+        for cmd in ("git rm .env", "git rm -f .env", "git rm -r config/.env"):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_cached_after_double_dash_is_pathspec_deny(self):
+        # ``--`` 以降は pathspec。``--cached`` という名前のファイル指定であって
+        # flag ではないため .env は作業ツリーから消える → deny 維持
+        self._assert_deny_all_modes("git rm .env -- --cached")
+
+    def test_git_rm_cached_pathspec_from_file_dotenv_deny(self):
+        # operand の中身を pathspec として読み不一致行を echo (file -f と同クラス)
+        for cmd in (
+            "git rm --cached --pathspec-from-file=.env",
+            "git rm --cached --pathspec-from-file .env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_global_option_prefix_conservative_deny(self):
+        # check-ignore / ls-files と同じく global option 前置形は保守的に対象外
+        self._assert_deny_all_modes("git -C /repo rm --cached .env")
+
+    def test_git_rm_unknown_or_abbreviated_long_option_fails_closed(self):
+        # git は long option の一意な接頭辞を受理する (`--no-cach` = `--no-cached`
+        # は後勝ちで作業ツリーも削除、`--pathspec-from-fil` は中身を pathspec
+        # として読み echo)。exact-token の deny-list では省略形がすり抜けるため、
+        # 既知の安全な option 以外が 1 つでもあれば index-only と見なさず通常経路
+        # (operand scan → deny) に倒す (Codex review P1、fail-closed)
+        for cmd in (
+            "git rm --cached --no-cached .env",
+            "git rm --no-cached --cached .env",
+            "git rm --cached --no-cach .env",
+            "git rm --cached --no-c .env",
+            "git rm --cached --pathspec-from-fil=.env",
+            "git rm --cached --pathspec-from-fil .env",
+            "git rm --cached --pathspec-file-nul --pathspec-from-file=.env",
+            "git rm --cached --unknown-option .env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_abbreviated_cached_is_conservative_deny(self):
+        # `--cache` / `--cac` は git 的には `--cached` だが、省略形の展開は
+        # 自前実装しない (保守側 = deny に倒れるだけで露出は無い)
+        for cmd in ("git rm --cache .env", "git rm --cac .env"):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_known_long_options_with_cached_allow(self):
+        for cmd in (
+            "git rm --cached --force .env",
+            "git rm --cached --dry-run .env",
+            "git rm --cached --quiet --ignore-unmatch .env",
+            "git rm --cached --sparse .env",
+            "git rm --force --cached -- .env",
+            "git rm --cached .env -- --no-cached",  # `--` 以降は pathspec
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_git_rm_known_short_flag_bundles_with_cached_allow(self):
+        for cmd in (
+            "git rm -rf --cached config/.env",
+            "git rm --cached -fq .env",
+            "git rm -n --cached .env",
+            "git rm -rfnq --cached config/.env",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_git_rm_unknown_short_flag_fails_closed(self):
+        for cmd in (
+            "git rm --cached -h .env",
+            "git rm --cached -x .env",
+            "git rm --cached -rx config/.env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    # --- chmod / chown / chgrp / touch: 属性操作 → allow ---
+    def test_chmod_chown_chgrp_touch_dotenv_allow(self):
+        for cmd in (
+            "chmod 600 .env",
+            "chmod -v 600 .env",
+            "chmod --reference=.env other",
+            "chown user .env",
+            "chown -R user:group .env",
+            "chgrp staff .env",
+            "touch .env",
+            "touch -r .env other",
+            "touch -t 202601010000 .env",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_chmod_touch_redirect_to_dotenv_still_ask(self):
+        # safe_read 外なので residual metachar (`>`) が先に効き、書込み形は
+        # echo と同じく ask_or_allow (default=ask / auto=allow) のまま緩めない
+        for cmd in ("chmod 600 x > .env", "touch x > .env"):
+            r = handle(_make_envelope(cmd, self.tmp))
+            self.assertEqual(_decision(r), "ask", msg=cmd)
+            r = handle(_make_envelope(cmd, self.tmp, "auto"))
+            self.assertTrue(output.is_allow(r), msg=cmd)
+
+    # --- deny reason の意図文 (history builder の subcommand 分割) ---
+    def test_git_rm_plain_reason_recommends_cached_form(self):
+        r = handle(_make_envelope("git rm .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("`git rm --cached .env`", reason)
+        self.assertIn("操作", reason)
+        self.assertNotIn("閲覧", reason)
+
+    def test_git_add_reason_is_operate_not_view(self):
+        r = handle(_make_envelope("git add .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertIn("commit 対象", reason)
+        self.assertNotIn("閲覧", reason)
+
+    def test_git_show_reason_keeps_view_wording(self):
+        r = handle(_make_envelope("git show HEAD:.env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("閲覧", _reason(r))
+
+
 if __name__ == "__main__":
     unittest.main()

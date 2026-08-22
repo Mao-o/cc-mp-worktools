@@ -119,11 +119,11 @@ cat >> ~/.claude/sensitive-files-guardrail/patterns.local.txt <<'EOF'
 # 全プロジェクト共通 (ヘッダーなし)
 !ca-bundle.pem
 
-[project:/Users/mao/dev/hirokiriko/Asset-Manager]
-# Asset-Manager セッションで承認 (2026-08-01) — pnpm 設定のみでトークン非含有
+[project:/path/to/project-a]
+# project-a のセッションで承認 — pnpm 設定のみでトークン非含有
 !.npmrc
 
-[project:/Users/mao/dev/other-repo]
+[project:/path/to/project-b]
 !some-other-basename
 EOF
 ```
@@ -134,6 +134,27 @@ EOF
 `$HOME` 自体はプロジェクトとして扱わない。`[project:...]` のパスはこの解決結果
 と**文字列完全一致**する必要がある (末尾スラッシュは正規化されるが、シンボリック
 リンク解決や相対パスの `~` 展開はしない — 絶対パスをそのまま書く)。
+
+**reason からの誘導 (0.19.0)**: Read / Bash / Edit / Write の deny reason と Stop の
+block reason は、除外の恒久化として `[project:$CLAUDE_PROJECT_DIR]` ヘッダー +
+`!<basename>` 行のレシピを案内する (ヘッダー無し行 = 全プロジェクト共通は明示的な
+選択)。`$CLAUDE_PROJECT_DIR` は **プレースホルダ** で、書くときはそのプロジェクトの
+絶対パスに置き換える (hook はヘッダーを展開しない。reason に絶対パスを出さない
+方針のため変数名で示している)。Stop の block reason は検出した全ファイルの
+`!<basename>` 行をまとめて出す (20 件で畳む)。
+
+**書き損じの警告**: Bash tool の環境では `CLAUDE_PROJECT_DIR` が未設定なので、
+unquoted の `echo "[project:$CLAUDE_PROJECT_DIR]" >> patterns.local.txt` は
+`[project:]` に、quoted heredoc や Write tool は literal の
+`[project:$CLAUDE_PROJECT_DIR]` になる。どちらもどのプロジェクトにも一致せず
+そのセクションは無視されるが、黙らず `local_patterns_header_invalid:
+project_header_empty` / `project_header_unexpanded_placeholder` を stderr
+(Read / Bash 側は `~/.claude/logs/redact-hook.log` にも) に出す。
+`pwd` で得たプロジェクト root の絶対パスを literal に書くこと。判定は変数参照の
+standalone 形 (ヘッダー値が `$NAME` / `${NAME}` そのもの、またはそれで始まり直後が
+`/`。`$CLAUDE_PROJECT_DIR` もこの形のみ) に限定しており、`/work/project$prod` や
+`/work/repo$CLAUDE_PROJECT_DIR-prod` のように `$` や予約語を途中に含む literal
+パスは正当なヘッダーとして通常どおり比較される。
 
 **評価順序**: 共通行 → 一致した `[project:...]` セクションの行、の順で
 **ファイル中の出現順のまま**評価する (last-match-wins は出現順で決まるため、
