@@ -130,6 +130,26 @@ class TestLoadSave(BaseStopAck):
         stop_ack.save_acked("s6", {"b" * 64})
         self.assertEqual(stop_ack.load_acked("s6"), {"b" * 64})
 
+    def test_load_missing_does_not_warn(self):
+        calls: list[str] = []
+        self.assertEqual(stop_ack.load_acked("nope", warn=calls.append), set())
+        self.assertEqual(calls, [])
+
+    def test_load_failure_reports_via_warn(self):
+        self._state_dir().parent.mkdir(parents=True)
+        self._state_dir().write_text("not a dir\n")
+        calls: list[str] = []
+        self.assertEqual(stop_ack.load_acked("s8", warn=calls.append), set())
+        self.assertEqual(calls, ["load:NotADirectoryError"])
+
+    def test_save_failure_reports_via_warn(self):
+        self._state_dir().parent.mkdir(parents=True)
+        self._state_dir().write_text("not a dir\n")
+        calls: list[str] = []
+        stop_ack.save_acked("s9", {"a" * 64}, warn=calls.append)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("save:"), calls)
+
 
 class TestGc(BaseStopAck):
     def _touch(self, name: str, age_seconds: float) -> Path:
@@ -173,6 +193,21 @@ class TestGc(BaseStopAck):
 
     def test_gc_missing_dir_is_silent(self):
         stop_ack._gc_stale(self._state_dir() / "missing", keep="x")
+
+    def test_gc_skips_files_that_are_not_state_shaped(self):
+        # 同じ dir に誰かが置いたメモ (digest 行ではない) は TTL 超過でも消さない
+        # (L2 review)。digest 行だけの古い state は消す
+        self._state_dir().mkdir(parents=True)
+        stamp = time.time() - 8 * _DAY
+        foreign = self._state_dir() / "README-do-not-delete"
+        foreign.write_text("keep me\n")
+        os.utime(foreign, (stamp, stamp))
+        stale_state = self._state_dir() / "old-session"
+        stale_state.write_text("f" * 64 + "\n")
+        os.utime(stale_state, (stamp, stamp))
+        stop_ack._gc_stale(self._state_dir(), keep="cur")
+        self.assertTrue(foreign.exists())
+        self.assertFalse(stale_state.exists())
 
 
 if __name__ == "__main__":

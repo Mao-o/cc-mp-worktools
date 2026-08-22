@@ -46,6 +46,19 @@ def _warn_migrate(token: str) -> None:
     )
 
 
+def _warn_header(token: str) -> None:
+    """Stop hook 側の header_warn_callback — patterns.local.txt の ``[project:]``
+    ヘッダーが空 / 未展開 placeholder のとき stderr に 1 行記録する (0.19.0)。
+
+    そのセクションは黙って捨てられる (除外が効かず block が続く) ため、原因を
+    可視化する。token はパスを含まない固定文字列。
+    """
+    sys.stderr.write(
+        f"[check-sensitive-files] local_patterns_header_invalid: {token} "
+        "([project:...] ヘッダーはプロジェクト root の絶対パスを literal に書く)\n"
+    )
+
+
 _warn_local_oserror = _warn_local  # 後方互換 alias
 
 
@@ -61,6 +74,7 @@ def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
         warn_callback=_warn_local,
         migrate_warn_callback=_warn_migrate,
         cwd=cwd,
+        header_warn_callback=_warn_header,
     )
 
 

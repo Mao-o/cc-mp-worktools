@@ -172,6 +172,10 @@ _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 # なので flag として数えない (``git rm .env -- --cached`` は deny)。``-r`` は
 # index 除去の範囲が広がるだけで内容出力も実ファイル削除も無いため許容。
 _GIT_RM_INDEX_ONLY_FLAG = "--cached"
+# parse-options の否定形。``git rm --cached --no-cached .env`` は後勝ちで
+# index-only が取り消され作業ツリーも削除される (実 git 2.50 で確認、L2 review)。
+# うっかり書く形ではないが 1 行で塞げるため、出現順で評価して deny に戻す。
+_GIT_RM_INDEX_ONLY_NEGATION = "--no-cached"
 # git rm のうち operand ファイルの **中身** を pathspec リストとして読み、
 # 不一致行を ``fatal: pathspec '<行>' did not match any files`` で echo する
 # option。``file -f`` (``_METADATA_CONTENT_READING_OPTS``) と同じ「option で

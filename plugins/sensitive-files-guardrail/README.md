@@ -297,7 +297,9 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 再 block する。報告済み集合は
 `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>` に cwd + path の
 sha256 digest で記録し (平文 path は残さない。別 repo に `cd` すれば再 block)、
-7 日で自動 GC。hook input に `session_id` が無ければ従来通り毎回 block する。
+最後の block から 7 日で自動 GC。hook input に `session_id` が無ければ従来通り
+毎回 block する。state の読み書きに失敗したときは stderr に
+`stop_ack_unavailable` を出して従来通り block する。
 
 **注意**: 同一ターン内の 2 回目以降の `Stop` は `stop_hook_active=true` で素通り
 する (無限ループ防止)。**block が見えたら必ず対応する**。無視して次のターンに
@@ -323,7 +325,11 @@ sha256 digest で記録し (平文 path は残さない。別 repo に `cd` す�
 > 1 ファイルという方針は維持)。詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の
 > 「プロジェクトスコープの rule」節を参照。0.19.0 から両 hook の除外案内は
 > このセクション配下への追記を既定として案内する (全プロジェクト共通の行は
-> 明示的な選択)。
+> 明示的な選択)。案内中の `$CLAUDE_PROJECT_DIR` は **展開されない** プレース
+> ホルダで、書くときはプロジェクト root の絶対パスを literal に書く。空ヘッダー
+> (`[project:]`) や `$` を含むヘッダーはどのプロジェクトにも一致せず無視される
+> が、黙らず `local_patterns_header_invalid` を stderr (Read/Bash 側は
+> `~/.claude/logs/redact-hook.log` にも) に出す。
 
 詳細な設定例・false positive 対策・`_detect_format` との同期は
 [docs/PATTERNS.md](./docs/PATTERNS.md) 参照。

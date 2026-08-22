@@ -103,6 +103,15 @@ class TestGitSubcommandOf(unittest.TestCase):
             M._git_subcommand_of("git log && git status", ".env"), "log"
         )
 
+    def test_opt_equals_value_operand_matches_window(self):
+        # ``--pathspec-from-file=.env`` 由来の operand でも後段の git を選ぶ
+        self.assertEqual(
+            M._git_subcommand_of(
+                "git log && git rm --cached --pathspec-from-file=.env", ".env"
+            ),
+            "rm",
+        )
+
     def test_empty_command(self):
         self.assertEqual(M._git_subcommand_of("", ".env"), "")
 

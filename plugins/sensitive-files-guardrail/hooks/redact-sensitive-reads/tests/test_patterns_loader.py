@@ -385,6 +385,70 @@ class TestParseLocalPatternsText(unittest.TestCase):
         )
 
 
+class TestBadProjectHeaderWarn(BaseWithIsolatedHome):
+    """0.19.0 (L2 review): ``[project:]`` ヘッダーが空 / 未展開 placeholder のとき
+    黙って捨てず固定トークンで警告する。除外案内が ``$CLAUDE_PROJECT_DIR`` を
+    変数名で示すため、unquoted echo (空に展開) / literal 書込のどちらでも silent
+    no-op になるのを可視化する。判定 (非 active) は変えない。"""
+
+    def test_parse_warns_once_per_token_and_keeps_section_inactive(self):
+        from _shared.patterns import (
+            PROJECT_HEADER_WARN_EMPTY,
+            PROJECT_HEADER_WARN_PLACEHOLDER,
+            _parse_local_patterns_text,
+        )
+        text = (
+            "!common.pem\n"
+            "[project:]\n!empty.pem\n"
+            "[project:$CLAUDE_PROJECT_DIR]\n!placeholder.pem\n"
+            "[project:$CLAUDE_PROJECT_DIR]\n!again.pem\n"
+            "[project:/work/p]\n!real.pem\n"
+        )
+        calls: list[str] = []
+        rules = _parse_local_patterns_text(text, "/work/p", calls.append)
+        self.assertEqual(rules, [("common.pem", True), ("real.pem", True)])
+        self.assertEqual(
+            calls, [PROJECT_HEADER_WARN_EMPTY, PROJECT_HEADER_WARN_PLACEHOLDER]
+        )
+
+    def test_parse_without_callback_is_silent_and_inactive(self):
+        from _shared.patterns import _parse_local_patterns_text
+        rules = _parse_local_patterns_text(
+            "[project:]\n!x.pem\n[project:$CLAUDE_PROJECT_DIR]\n!y.pem\n",
+            "/work/p",
+        )
+        self.assertEqual(rules, [])
+
+    def test_tokens_are_log_safe(self):
+        from core.logging import _sanitize_detail
+        from _shared.patterns import (
+            PROJECT_HEADER_WARN_EMPTY,
+            PROJECT_HEADER_WARN_PLACEHOLDER,
+        )
+        for token in (PROJECT_HEADER_WARN_EMPTY, PROJECT_HEADER_WARN_PLACEHOLDER):
+            self.assertEqual(_sanitize_detail(token), token)
+
+    def test_core_loader_logs_header_invalid(self):
+        from core import patterns as P
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("[project:$CLAUDE_PROJECT_DIR]\n!x.pem\n")
+        with mock.patch("core.patterns.L.log_error") as spy:
+            rules = P.load_patterns(default_file, cwd=self.tmp)
+        self.assertEqual(rules, [("*.pem", False)])
+        spy.assert_called_once_with(
+            "local_patterns_header_invalid",
+            "project_header_unexpanded_placeholder",
+        )
+
+    def test_core_loader_no_log_for_valid_header(self):
+        from core import patterns as P
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("[project:/work/p]\n!x.pem\n")
+        with mock.patch("core.patterns.L.log_error") as spy:
+            P.load_patterns(default_file, cwd=self.tmp)
+        spy.assert_not_called()
+
+
 class TestProjectScopedLoadPatterns(BaseWithIsolatedHome):
     """load_patterns の ``cwd`` 引数によるプロジェクトセクション適用を検証。"""
 

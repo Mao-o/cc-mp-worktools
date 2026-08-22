@@ -95,6 +95,7 @@ from handlers.bash.constants import (  # noqa: F401
     _GIT_METADATA_SUBCOMMANDS,
     _GIT_RM_CONTENT_READING_OPTS,
     _GIT_RM_INDEX_ONLY_FLAG,
+    _GIT_RM_INDEX_ONLY_NEGATION,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
     _METADATA_CONTENT_READING_OPTS,
@@ -228,6 +229,8 @@ def _git_rm_is_index_only(args: list[str]) -> bool:
       内容露出クラスとして除外する (operand scan → deny)。
     - ``-r`` / ``-f`` / ``-n`` / ``-q`` / ``--ignore-unmatch`` / ``--sparse`` は
       いずれも内容を出さず、``--cached`` 付きなら実ファイルも消さない。
+    - ``--no-cached`` (parse-options の否定形) は後勝ちで index-only を取り消し
+      作業ツリーも削除するため、出現順で評価して deny に戻す (L2 review)。
     """
     has_cached = False
     for tok in args:
@@ -235,6 +238,9 @@ def _git_rm_is_index_only(args: list[str]) -> bool:
             break
         if tok == _GIT_RM_INDEX_ONLY_FLAG:
             has_cached = True
+            continue
+        if tok == _GIT_RM_INDEX_ONLY_NEGATION:
+            has_cached = False
             continue
         for opt in _GIT_RM_CONTENT_READING_OPTS:
             if tok == opt or tok.startswith(opt + "="):

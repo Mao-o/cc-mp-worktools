@@ -298,7 +298,9 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   書込み形 (`chmod 600 x > .env`) は safe_read 外のため residual metachar で
   従来通り ask_or_allow (echo と同じ、緩めない)。`git rm --cached -r` は index
   除去の範囲が広がるだけで内容出力も削除も無く allow、`touch -r` /
-  `chmod --reference` は timestamp / mode を読むだけで allow。
+  `chmod --reference` は timestamp / mode を読むだけで allow。`--no-cached`
+  (parse-options の否定形) は後勝ちで index-only を取り消し作業ツリーも削除する
+  ため、出現順で評価して deny に戻す (L2 review)。
 
 ### 対応 (deny/allow 確定できる)
 
@@ -640,11 +642,22 @@ deny reason のキー名ガイド:
   dotfile 防止)。欠落・不正は state を使わず従来通り毎回 block
 - 失敗 (読取 / 書込 / mkdir 不能 / 壊れた行) は全て「状態なし」= block 側に倒す。
   state 機構の不具合で block が **消える** 方向には倒さない
-- 書込み時に TTL 7 日で古い session ファイルを best-effort GC する
+- 書込み時に「最後の block から 7 日」を過ぎた session ファイルを best-effort
+  GC する (state の mtime は block 時のみ更新)。削除するのは内容が digest 行だけ
+  の「自分が書いた形」のファイルのみ (`_looks_like_state_file`、L2 review)
+- state の読取 / 書込失敗は `warn` callback 経由で stderr に
+  `stop_ack_unavailable: load:<Exc>` / `save:<Exc>` を 1 行出す (不在 = 初回は
+  出さない)。判定は従来通り block
 - block reason には恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` + `!<basename>`
   行、`_shared.patterns.exclude_recipe_lines`) と「このセッションでは同じ集合を
   再 block しない」注記を載せる。絶対パスは出さない (ヘッダーは環境変数名で示し、
-  書き込む側が実パスに置き換える)
+  書き込む側が実パスに置き換える)。`$CLAUDE_PROJECT_DIR` は Bash tool の環境で
+  未設定なので unquoted echo だと空に展開され、quoted heredoc / Write だと literal
+  に残る — どちらも一致しないため、`_parse_local_patterns_text` の
+  `header_warn_callback` が固定トークン (`project_header_empty` /
+  `project_header_unexpanded_placeholder`) で警告する (read 側は
+  `local_patterns_header_invalid` として logfile + stderr、Stop 側は stderr)。
+  判定は変えない (そのセクションは非 active のまま)
 
 ## 既知制限 (0.14.0 時点)
 

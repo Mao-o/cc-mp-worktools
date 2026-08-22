@@ -51,6 +51,15 @@ from stop_ack import (  # noqa: E402
 )
 
 
+def _warn_stop_ack(detail: str) -> None:
+    """stop_ack の state 読書き失敗を stderr に 1 行記録する (0.19.0)。
+
+    判定は「状態なし」= 従来通り block に倒れるので hook の結果は変わらない。
+    detail は ``load:<ExcName>`` / ``save:<ExcName>`` の固定形 (パスを含まない)。
+    """
+    sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
+
+
 def _build_reason(
     tracked: list[str],
     untracked: list[str],
@@ -147,7 +156,7 @@ def main() -> int:
     digests = digest_entries(sensitive, scope=os.path.normpath(cwd))
     acked: set[str] = set()
     if session_id is not None:
-        acked = load_acked(session_id)
+        acked = load_acked(session_id, warn=_warn_stop_ack)
         if digests <= acked:
             return 0
 
@@ -158,7 +167,7 @@ def main() -> int:
     )
 
     if session_id is not None:
-        save_acked(session_id, acked | digests)
+        save_acked(session_id, acked | digests, warn=_warn_stop_ack)
 
     output = {"decision": "block", "reason": reason}
     print(json.dumps(output, ensure_ascii=False))

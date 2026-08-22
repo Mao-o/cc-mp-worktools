@@ -143,6 +143,15 @@ block reason は、除外の恒久化として `[project:$CLAUDE_PROJECT_DIR]` �
 方針のため変数名で示している)。Stop の block reason は検出した全ファイルの
 `!<basename>` 行をまとめて出す (20 件で畳む)。
 
+**書き損じの警告**: Bash tool の環境では `CLAUDE_PROJECT_DIR` が未設定なので、
+unquoted の `echo "[project:$CLAUDE_PROJECT_DIR]" >> patterns.local.txt` は
+`[project:]` に、quoted heredoc や Write tool は literal の
+`[project:$CLAUDE_PROJECT_DIR]` になる。どちらもどのプロジェクトにも一致せず
+そのセクションは無視されるが、黙らず `local_patterns_header_invalid:
+project_header_empty` / `project_header_unexpanded_placeholder` を stderr
+(Read / Bash 側は `~/.claude/logs/redact-hook.log` にも) に出す。
+`pwd` で得たプロジェクト root の絶対パスを literal に書くこと。
+
 **評価順序**: 共通行 → 一致した `[project:...]` セクションの行、の順で
 **ファイル中の出現順のまま**評価する (last-match-wins は出現順で決まるため、
 セクション単位で並べ替えたりしない)。上記の例のように共通行を先・

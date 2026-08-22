@@ -337,6 +337,43 @@ class TestMainSessionAck(BaseMainTest):
         for line in content.splitlines():
             self.assertRegex(line, r"^[0-9a-f]{64}$")
 
+    def test_state_failure_is_reported_on_stderr(self):
+        self._track(".env")
+        parent = self.home_dir / ".claude" / "sensitive-files-guardrail"
+        parent.mkdir(parents=True)
+        (parent / "stop-ack").write_text("not a dir\n")
+        _, out, err = _run_main({"cwd": str(self.repo), "session_id": "sess-9"})
+        self.assertTrue(self._blocked(out))
+        self.assertIn("stop_ack_unavailable", err)
+
+    def test_unexpanded_project_header_in_local_patterns_warns(self):
+        # 案内の `$CLAUDE_PROJECT_DIR` を literal に残すと除外は効かない (block
+        # 維持) が、黙らず stderr で原因を出す (L2 review)
+        self._track(".env")
+        d = self.home_dir / ".claude" / "sensitive-files-guardrail"
+        d.mkdir(parents=True)
+        (d / "patterns.local.txt").write_text(
+            "[project:$CLAUDE_PROJECT_DIR]\n!.env\n"
+        )
+        _, out, err = _run_main({"cwd": str(self.repo), "session_id": "sess-10"})
+        self.assertTrue(self._blocked(out))
+        self.assertIn("local_patterns_header_invalid", err)
+        self.assertIn("project_header_unexpanded_placeholder", err)
+
+    def test_correct_project_header_silences_stop(self):
+        # 実パスで書けば除外が効いて報告されない (レシピの成功経路)
+        self._track(".env")
+        d = self.home_dir / ".claude" / "sensitive-files-guardrail"
+        d.mkdir(parents=True)
+        (d / "patterns.local.txt").write_text(f"[project:{self.repo}]\n!.env\n")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            _, out, err = _run_main(
+                {"cwd": str(self.repo), "session_id": "sess-11"}
+            )
+        self.assertEqual(out, "")
+        self.assertNotIn("local_patterns_header_invalid", err)
+
     def test_stop_hook_active_still_wins(self):
         self._track(".env")
         env = {

@@ -189,15 +189,62 @@ global 汚染側に誘導していた。
 - **`core/messages.py::_exclude_hint`**: 「`[project:$CLAUDE_PROJECT_DIR]`
   セクション配下に `!<basename>` を追加 ($CLAUDE_PROJECT_DIR は実際の絶対パスに
   置き換える。全プロジェクト共通にしたい場合のみヘッダー無しの行)」に変更。
-  絶対パスを reason に出さない方針を保つため変数名で案内する。hint は約 170 byte
-  → 約 450 byte に伸びるが 3KB 上限は `core/output.py::_truncate` が保証
+  絶対パスを reason に出さない方針を保つため変数名で案内する。hint は約 220 byte
+  → 約 515 byte に伸びるが 3KB 上限は `core/output.py::_truncate` が保証
   (大きい dotenv で末尾の suggestion 行が切れる問題は別件 snw.5 の予算付き
   レンダリングで扱う)
 - Stop hook の block reason にも同じレシピを載せる (上記 1.)
 
+### review 対応 — L2 敵対的レビュー (option-leak / stop-ack / byte 上限)
+
+PR 前に fresh context の L2 に diff を敵対的レビューさせた (in-process probe 約 65
+形 + 実 git 10 形 + Stop hook 8 シナリオ + mutation 5 種)。P1 なし。指摘と対応:
+
+- **P2 `git rm --cached --no-cached .env` が allow** — parse-options の否定形は
+  後勝ちで index-only が取り消され作業ツリーも削除される (実 git 2.50 で確認)。
+  うっかり書く形ではないが 1 行で塞げるため `_git_rm_is_index_only` を出現順で
+  評価し `--no-cached` で deny に戻す (`_GIT_RM_INDEX_ONLY_NEGATION`)。逆順の
+  `git rm --no-cached --cached .env` は index-only のまま allow
+- **P2 `[project:$CLAUDE_PROJECT_DIR]` 誘導が silent no-op になりうる** — Bash
+  tool の環境では `CLAUDE_PROJECT_DIR` が未設定で、unquoted echo だと
+  `[project:]` に展開され、quoted heredoc / Write だと literal に残る。どちらも
+  「どのプロジェクトにも一致しない」として黙って捨てられ、除外が効かず block が
+  続く (本 batch の目的に逆行)。対応: (a) `_shared.patterns._parse_local_patterns_text`
+  に `header_warn_callback` を追加し、空ヘッダー / `$` 含みヘッダーを固定トークン
+  (`project_header_empty` / `project_header_unexpanded_placeholder`) で種別ごとに
+  1 回警告する (read 側は `local_patterns_header_invalid` として logfile + stderr、
+  Stop 側は stderr)。判定は変えない (そのセクションは非 active のまま)。(b) 案内
+  文を「$CLAUDE_PROJECT_DIR は展開されないので、プロジェクト root の絶対パスを
+  literal に書く (例: [project:/abs/path/to/repo])」に変更
+- **P3 GC が TTL 超過の全 regular file を消す** — 内容が digest 行だけ
+  (`_looks_like_state_file`、64KB 以下) のファイルのみ削除するよう限定。同じ dir
+  に置かれた他のファイルは触らない
+- **P3 `_git_subcommand_of` が `--opt=val` 由来の operand で最初の `git` に
+  fallback** — window 一致に `tok.endswith("=" + operand)` を追加 (文面のみ、
+  deny 判定は不変)
+- **P3 state 読書き失敗が無音** — `load_acked` / `save_acked` に `warn` callback
+  を追加し、Stop hook が `stop_ack_unavailable: load:<Exc>` / `save:<Exc>` を
+  stderr に 1 行出す (不在 = 通常の初回は出さない)
+- **P3 hint のサイズ表記** — 0.18.0 の hint は実測 223 byte (当初の「約 170」は
+  誤り)。read_full で raw reason が 3KB を超える閾値は 20 文字 key で約 41 → 37
+  key に前倒し (先に切れるのは末尾の hint 行で minimal info は残る)。search /
+  read_partial は dotenv サイズ非依存で影響なし
+- **P3 GC の TTL 表記** — state の mtime は block 時のみ更新されるため「最後の
+  block から 7 日」が正確 (README / DESIGN を修正)
+
+L2 が問題なしと確認した観点: `git rm --cached` の `-r` / `-f` / `-n` / `-q` /
+`--sparse` / `--ignore-unmatch` / `-rf` 束ね / 後置 `--cached` / glob は allow で
+内容出力なし (出力は `rm '<path>'`)、`--pathspec-from-file` の leak は実 git で
+`fatal: pathspec '<行>'` を確認して deny 維持、chmod / chown / chgrp / touch の
+GNU / BSD option (`-E`、`+a`、`--reference=`、`-r`、`--from=`、`-h`、`-d`、`-t`)
+に内容を読む / 出す経路なし、`git rm --cached .env && cat .env` 等の複合は後段で
+deny、stop-ack の再 block 条件 (新規 / status 変化 / 別 repo / 1 件解消で沈黙)、
+tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追加テストが落ちる
+ことを確認。
+
 ### テスト
 
-redact **777 件** (+32)、check **60 件** (+33)。
+redact **788 件** (+39)、check **67 件** (+40)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option
@@ -207,14 +254,19 @@ redact **777 件** (+32)、check **60 件** (+33)。
   `TestExcludeHintBasename` +4 (`[project:]` 誘導、絶対パス不在、`_shared` レシピ
   共有、20 件 cap)、`TestE2ERecommendedRemediesPassBashHook` ×3 (**両 hook の
   reason から backtick コマンドを機械抽出して Bash hook に通す自己整合テスト** —
-  文面と allow 境界の乖離を再発時に検知する)
+  文面と allow 境界の乖離を再発時に検知する)、review 対応で
+  `TestBadProjectHeaderWarn` ×5 (空 / 未展開ヘッダーの警告トークン、log-safe、
+  read 側 `local_patterns_header_invalid`)、`--no-cached` 後勝ち、`--opt=val`
+  operand の subcommand 推定 (計 +7)
 - check: `TestMainSessionAck` ×13 (同一 session 2 回目は黙る / 新規ファイルで再
   block → 3 回目は黙る / untracked → tracked で再 block / 1 件対応済みで残りが
   減っても再 block しない / session_id 欠落・不正で従来通り / 別 session は再
   block / 同一 session で別 repo に cd すると再 block (cwd scope) / state dir
   書込不能でも block / reason のレシピと注記 / 絶対パス不在 / state に平文 path
   無し / stop_hook_active 優先)、`test_stop_ack.py` ×20 (sanitize / digest /
-  scope / load・save / GC)
+  scope / load・save / GC)、review 対応で state 失敗の stderr 可視化 /
+  未展開ヘッダーの stderr 警告 / 実パスヘッダーで沈黙する成功経路 (test_main
+  +3)、`warn` callback ×3 + GC の内容判定 (test_stop_ack +4)
 
 ### ドキュメント
 

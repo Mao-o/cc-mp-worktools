@@ -1936,6 +1936,12 @@ class TestRecommendedRemedyAllow(BaseBash):
         # check-ignore / ls-files と同じく global option 前置形は保守的に対象外
         self._assert_deny_all_modes("git -C /repo rm --cached .env")
 
+    def test_git_rm_no_cached_negation_is_last_wins(self):
+        # parse-options の否定形は後勝ち: `--cached --no-cached` は作業ツリーも
+        # 削除する (実 git 2.50 で確認、L2 review) → deny。逆順は index-only のまま
+        self._assert_deny_all_modes("git rm --cached --no-cached .env")
+        self._assert_allow_all_modes("git rm --no-cached --cached .env")
+
     # --- chmod / chown / chgrp / touch: 属性操作 → allow ---
     def test_chmod_chown_chgrp_touch_dotenv_allow(self):
         for cmd in (

@@ -686,7 +686,11 @@ def _git_subcommand_of(command: str, operand: str = "") -> str:
         k = j + 1
         while k < n and tokens[k] != "git":
             k += 1
-        if operand and operand in tokens[j:k]:
+        if operand and any(
+            tok == operand or tok.endswith("=" + operand) for tok in tokens[j:k]
+        ):
+            # ``--pathspec-from-file=.env`` のような値結合形の operand も window
+            # 一致に含める (deny 判定は別経路で確定済み、ここは文面のみ)。
             return sub
         if not first_sub:
             first_sub = sub

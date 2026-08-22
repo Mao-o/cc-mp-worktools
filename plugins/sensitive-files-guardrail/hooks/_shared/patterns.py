@@ -73,11 +73,21 @@ LOCAL_PATTERNS_DISPLAY_PATH = "~/.claude/sensitive-files-guardrail/patterns.loca
 # ``_parse_local_patterns_text`` はヘッダーを展開しない (文字列完全一致) ので、
 # 書き込む側が ``$CLAUDE_PROJECT_DIR`` を実際の絶対パスに置き換える前提。
 PROJECT_SECTION_HEADER_HINT = "[project:$CLAUDE_PROJECT_DIR]"
-# ヘッダー雛形に添える注記 (両 hook で同じ文言)。
+# ヘッダー雛形に添える注記 (両 hook で同じ文言)。Bash tool の環境では
+# ``CLAUDE_PROJECT_DIR`` が未設定なので unquoted echo だと空に展開され、quoted
+# heredoc / Write tool だと literal に残る。どちらも「どのプロジェクトにも一致
+# しない」ため黙って捨てられる (= 除外が効かない) ので、展開に頼らず絶対パスを
+# literal に書くよう明示する (L2 review)。
 PROJECT_SECTION_PLACEHOLDER_NOTE = (
-    "$CLAUDE_PROJECT_DIR はこのプロジェクトの絶対パスに置き換える。"
+    "$CLAUDE_PROJECT_DIR は展開されないので、プロジェクト root の絶対パスを"
+    " literal に書く (例: [project:/abs/path/to/repo])。"
     "全プロジェクト共通にしたい場合のみヘッダー無しの行に書く"
 )
+
+# ``[project:]`` ヘッダーが書き損じのときに ``header_warn_callback`` へ渡す固定
+# トークン (パスを含めない — core.logging の detail ホワイトリスト適合)。
+PROJECT_HEADER_WARN_EMPTY = "project_header_empty"
+PROJECT_HEADER_WARN_PLACEHOLDER = "project_header_unexpanded_placeholder"
 
 
 def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]:
@@ -179,8 +189,26 @@ def _parse_patterns_text(text: str) -> list[tuple[str, bool]]:
     return rules
 
 
+def _bad_header_token(header_key: str) -> Optional[str]:
+    """``[project:<key>]`` の key が「書き損じ」かを判定し、警告トークンを返す。
+
+    - 空 (``[project:]``): Bash の unquoted echo で ``$CLAUDE_PROJECT_DIR`` が空に
+      展開された典型
+    - ``$`` を含む (``[project:$CLAUDE_PROJECT_DIR]``): 変数名を literal に書いた
+      典型 (hook はヘッダーを展開しない)
+    正常なら None。
+    """
+    if not header_key:
+        return PROJECT_HEADER_WARN_EMPTY
+    if "$" in header_key:
+        return PROJECT_HEADER_WARN_PLACEHOLDER
+    return None
+
+
 def _parse_local_patterns_text(
-    text: str, project_key: Optional[str]
+    text: str,
+    project_key: Optional[str],
+    header_warn_callback: Optional[Callable[[str], None]] = None,
 ) -> list[tuple[str, bool]]:
     """patterns.local.txt を ``[project:<path>]`` セクション対応でパースする。
 
@@ -193,9 +221,18 @@ def _parse_local_patterns_text(
     ``project_key`` が None (プロジェクト未解決) の場合はどのセクションにも
     一致せず、共通行のみが返る (既存ファイル・非 git ディレクトリでの挙動は
     セクション導入前と完全に同一)。
+
+    ``header_warn_callback`` (0.19.0): ヘッダーが空 (``[project:]``) または
+    ``$`` を含む (``[project:$CLAUDE_PROJECT_DIR]`` を literal に書いた) 場合に
+    固定トークン (``PROJECT_HEADER_WARN_EMPTY`` / ``PROJECT_HEADER_WARN_PLACEHOLDER``)
+    で種別ごとに 1 回呼ぶ。両 hook の除外案内が ``$CLAUDE_PROJECT_DIR`` を変数名
+    で示すため、Bash の unquoted echo で空に展開される / quoted heredoc や Write
+    で literal に残る、のどちらでも **黙って捨てられる** (どのプロジェクトにも
+    一致しない) のを可視化する。判定自体は変えない (そのセクションは非 active)。
     """
     rules: list[tuple[str, bool]] = []
     active = True  # 現在のセクションが出力対象か (共通行は常に active)
+    warned: set[str] = set()
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -206,6 +243,13 @@ def _parse_local_patterns_text(
             header_key = stripped[
                 len(_PROJECT_SECTION_PREFIX) : -len(_PROJECT_SECTION_SUFFIX)
             ].strip()
+            bad = _bad_header_token(header_key)
+            if bad is not None:
+                if header_warn_callback is not None and bad not in warned:
+                    warned.add(bad)
+                    header_warn_callback(bad)
+                active = False
+                continue
             active = project_key is not None and (
                 os.path.normpath(header_key) == project_key
             )
@@ -224,6 +268,7 @@ def load_patterns(
     warn_callback: Optional[Callable[[str], None]] = None,
     migrate_warn_callback: Optional[Callable[[str], None]] = None,
     cwd: str = "",
+    header_warn_callback: Optional[Callable[[str], None]] = None,
 ) -> list[tuple[str, bool]]:
     """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
 
@@ -247,6 +292,9 @@ def load_patterns(
     セクションのうち一致するものだけを共通行と合わせて読み込む
     (``_parse_local_patterns_text`` 参照)。空文字列 (既定) なら共通行のみ。
 
+    ``header_warn_callback`` (0.19.0、任意): ``[project:]`` ヘッダーが空 / 未展開
+    placeholder のときに固定トークンで呼ぶ (``_parse_local_patterns_text`` 参照)。
+
     Raises:
         FileNotFoundError: 既定 patterns.txt が存在しない
         OSError: 既定 patterns.txt の読み取りに失敗した
@@ -260,14 +308,17 @@ def load_patterns(
     except FileNotFoundError:
         # 新パスが無い → rename 前の旧パスを fallback で試す。
         return _load_legacy_local(
-            rules, warn_callback, migrate_warn_callback, project_key
+            rules, warn_callback, migrate_warn_callback, project_key,
+            header_warn_callback,
         )
     except OSError as e:
         if warn_callback is not None:
             warn_callback(type(e).__name__)
         return rules
 
-    rules.extend(_parse_local_patterns_text(local_text, project_key))
+    rules.extend(
+        _parse_local_patterns_text(local_text, project_key, header_warn_callback)
+    )
     return rules
 
 
@@ -276,6 +327,7 @@ def _load_legacy_local(
     warn_callback: Optional[Callable[[str], None]],
     migrate_warn_callback: Optional[Callable[[str], None]],
     project_key: Optional[str] = None,
+    header_warn_callback: Optional[Callable[[str], None]] = None,
 ) -> list[tuple[str, bool]]:
     """新パス不在時に rename 前の旧 patterns.local.txt を fallback 読み込みする。
 
@@ -294,7 +346,9 @@ def _load_legacy_local(
             warn_callback(type(e).__name__)
         return rules
 
-    rules.extend(_parse_local_patterns_text(legacy_text, project_key))
+    rules.extend(
+        _parse_local_patterns_text(legacy_text, project_key, header_warn_callback)
+    )
     if migrate_warn_callback is not None:
         migrate_warn_callback(LEGACY_LOCAL_PATTERNS_WARN)
     return rules
