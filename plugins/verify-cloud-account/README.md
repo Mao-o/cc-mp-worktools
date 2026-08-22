@@ -121,6 +121,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
   [`docs/wrapper-env-audit.md`](docs/wrapper-env-audit.md))
 - 上記は多段ネストにも対応 (例: `sudo time mise exec -- firebase deploy` →
   `firebase deploy` として検証)
+- **CLI 名直後の global option** (v0.8.0): `aws --profile prod sso login` /
+  `gcloud --project X config set ...` / `kubectl --context X config use-context ...` /
+  `firebase -P X use ...` のようにサブコマンドの前に置かれた global option は、
+  剥がした形 (`aws sso login`) でも readonly / 切替 (cache 無効化) /
+  self-remediation を判定する (deny 文面の検出コマンドには元の形を表示)。各 service
+  が値を取る option / 取らない option を宣言し (`GLOBAL_OPTIONS_WITH_VALUE` /
+  `GLOBAL_FLAGS`)、未知の option が先頭にある場合は剥がさず通常検証する。
+  `--profile` / `--project` / `--context` の値を検証に反映するのは別項
+  (flag override 対応) の範囲
 
 | サービス | マッチ対象 | 期待値の取得 |
 |---|---|---|

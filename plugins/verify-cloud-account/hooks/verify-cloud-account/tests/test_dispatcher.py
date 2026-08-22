@@ -1307,6 +1307,131 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
                 self._assert_guidance_is_allowed(reason, run)
 
 
+class TestLeadingGlobalOptions(BaseWithTmpProject):
+    """PR #43 Codex P1: `aws --profile prod sso login` のように CLI 名直後に global
+    option が置かれた形 (`aws [global options] <command> <subcommand>`) でも、
+    剥がした形で readonly / 切替 (cache 無効化) / self-remediation を判定する。"""
+
+    _ACCOUNTS = {
+        "github": "Mao-o",
+        "aws": "123456789012",
+        "gcloud": "my-proj",
+        "firebase": "proj-dev",
+        "kubectl": "ctx",
+    }
+
+    def test_login_with_leading_options_is_readonly(self):
+        self._write_accounts(self._ACCOUNTS)
+        rows = [
+            ("aws", "aws --profile prod sso login"),
+            ("aws", "aws --profile=prod sso login"),
+            ("aws", "aws --region us-east-1 --profile prod configure sso"),
+            ("aws", "aws --debug --no-verify-ssl --output json sso logout"),
+            ("aws", "aws --profile default configure sso"),
+            ("aws", "aws --profile prod login"),
+            ("gcloud", "gcloud --account me@example.com auth login"),
+            ("gcloud", "gcloud --configuration work --quiet auth activate-service-account --key-file=k.json"),
+            ("gcloud", "gcloud --project x config get-value project"),
+            ("kubectl", "kubectl --context foo -n ns config current-context"),
+            ("kubectl", "kubectl --kubeconfig k.yaml config view"),
+            ("firebase", "firebase -P prod login"),
+            ("firebase", "firebase --debug use"),
+            ("firebase", "npx firebase-tools --project prod login:ci"),
+        ]
+        for key, cmd in rows:
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+    def test_switch_with_leading_options_invalidates_cache(self):
+        """P1 の再現: `aws s3 cp` (検証成功・cache) → `aws --profile default configure sso`
+        → `aws s3 cp` が cache hit せず再検証される。"""
+        rows = [
+            ("aws", "aws s3 cp a b", "aws --profile default configure sso"),
+            ("aws", "aws s3 cp a b", "aws --profile prod sso login"),
+            ("aws", "aws s3 cp a b", "aws --region us-east-1 --profile=prod sso login"),
+            ("gcloud", "gcloud run deploy", "gcloud --project x config set project other"),
+            ("gcloud", "gcloud run deploy", "gcloud --quiet auth login"),
+            ("kubectl", "kubectl apply -f x.yaml", "kubectl --context foo config use-context other"),
+            ("firebase", "firebase deploy", "firebase --project prod use other"),
+            ("firebase", "firebase deploy", "firebase -P prod login"),
+        ]
+        for key, write, switch in rows:
+            with self.subTest(switch=switch):
+                self._write_accounts({key: self._ACCOUNTS[key]})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    dispatch(write, str(self.project_dir))
+                    self.assertEqual(v.call_count, 1)
+                    self.assertIsNone(dispatch(switch, str(self.project_dir)))
+                    after_switch = v.call_count
+                    dispatch(write, str(self.project_dir))
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_cross_cli_kubeconfig_switch_with_leading_options(self):
+        from core import cache
+
+        self._write_accounts({"kubectl": "ctx", "aws": "123456789012", "gcloud": "my-proj"})
+        for switch in (
+            "aws --profile prod eks update-kubeconfig --name c",
+            "gcloud --project x container clusters get-credentials c --region r",
+        ):
+            with self.subTest(switch=switch):
+                cache.invalidate("kubectl")
+                with mock.patch("services.kubectl.verify", return_value=None) as v, \
+                     mock.patch("services.aws.verify", return_value=None), \
+                     mock.patch("services.gcloud.verify", return_value=None):
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                    dispatch(switch, str(self.project_dir))
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                self.assertEqual(v.call_count, 2)
+
+    def test_self_remediation_with_leading_options(self):
+        self._write_accounts(self._ACCOUNTS)
+        for key, cmd in (
+            ("gcloud", "gcloud --quiet config set project my-proj"),
+            ("kubectl", "kubectl --kubeconfig k.yaml config use-context ctx"),
+            ("firebase", "firebase --debug use proj-dev"),
+        ):
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+    def test_deny_reason_shows_original_candidate(self):
+        """剥がした形は判定にだけ使い、deny 文面の検出コマンドは元の形 (option 付き)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch(
+            "services.aws.verify", return_value="AWS アカウント不一致: 現在=x, 期待=y"
+        ):
+            result = dispatch("aws --profile other s3 rm s3://x", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("検出コマンド: aws --profile other s3 rm s3://x", reason)
+
+    def test_unknown_leading_option_is_verified_conservatively(self):
+        """未知の option が先頭にあれば剥がさず通常検証 (readonly に乗らない)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value="不一致") as v:
+            result = dispatch("aws --totally-unknown-option sso login", str(self.project_dir))
+        self.assertIsNotNone(result)
+        v.assert_called_once()
+
+    def test_version_and_help_remain_readonly(self):
+        """`aws --version` は剥がすと `aws` になるため元の形でも判定する。"""
+        self._write_accounts(self._ACCOUNTS)
+        for key, cmd in (
+            ("aws", "aws --version"),
+            ("gcloud", "gcloud --help"),
+            ("github", "gh --version"),
+            ("kubectl", "kubectl --help"),
+            ("firebase", "firebase --version"),
+        ):
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+
 class TestDenyProvenance(BaseWithTmpProject):
     """deny に出所タグ (要望3) と検出セグメント (要望5) が含まれる。"""
 

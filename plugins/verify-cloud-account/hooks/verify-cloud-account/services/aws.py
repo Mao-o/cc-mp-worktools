@@ -29,6 +29,17 @@ STATE_CHANGING = [
     r"^aws\s+(sso\s+(login|logout)|login|logout"
     r"|configure(?!\s+(list|list-profiles|get|export-credentials)\b))\b",
 ]
+# CLI 名直後に置ける global option (`aws --profile prod sso login`)。dispatcher が
+# 剥がした形 (`aws sso login`) でも READONLY / STATE_CHANGING を判定する
+# (core/cli_options.py)。`--profile` の値は将来の flag 照合 (629.4) で使う。
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({
+    "--profile", "--region", "--output", "--query", "--endpoint-url", "--color",
+    "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--cli-binary-format",
+})
+GLOBAL_FLAGS = frozenset({
+    "--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request", "--no-cli-pager",
+    "--cli-auto-prompt", "--no-cli-auto-prompt",
+})
 ACCOUNT_KEY = "aws"
 SETUP_HINT = (
     'AWS 最小例: {"aws": "123456789012"}。'

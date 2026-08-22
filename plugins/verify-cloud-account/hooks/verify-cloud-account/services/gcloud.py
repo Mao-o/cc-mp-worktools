@@ -35,6 +35,18 @@ STATE_CHANGING = [
     r"|application-default\s+(login|revoke))\b",
     r"^gcloud\s+init\b",
 ]
+# CLI 名直後に置ける global flag (`gcloud --project x config set ...`)。dispatcher が
+# 剥がした形でも READONLY / STATE_CHANGING / self-remediation を判定する
+# (core/cli_options.py)。`--project` / `--account` / `--configuration` の値は将来の
+# flag 照合 (629.4) で使う。
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({
+    "--account", "--billing-project", "--configuration", "--flags-file", "--flatten",
+    "--format", "--project", "--verbosity", "--access-token-file",
+    "--impersonate-service-account", "--trace-token", "--universe-domain",
+})
+GLOBAL_FLAGS = frozenset({
+    "--quiet", "-q", "--log-http", "--user-output-enabled", "--no-user-output-enabled",
+})
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
     'GCP 最小例: {"gcloud": "my-project-id"}。'

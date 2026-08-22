@@ -26,6 +26,21 @@ STATE_CHANGING = [
     r"^aws\s+eks\s+update-kubeconfig\b",
     r"^az\s+aks\s+get-credentials\b",
 ]
+# CLI 名直後に置ける global option (`kubectl --context x config use-context ...`)。
+# dispatcher が剥がした形でも READONLY / STATE_CHANGING / self-remediation を判定する
+# (core/cli_options.py)。`--context` / `--kubeconfig` の値は将来の flag 照合 (629.4)
+# で使う (`_context_override` は現状未配線)。
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({
+    "--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server",
+    "-s", "--token", "--as", "--as-group", "--as-uid", "--cache-dir",
+    "--certificate-authority", "--client-certificate", "--client-key", "--password",
+    "--username", "--request-timeout", "--tls-server-name", "--profile",
+    "--profile-output", "--log-flush-frequency", "-v", "--v", "--vmodule",
+})
+GLOBAL_FLAGS = frozenset({
+    "--insecure-skip-tls-verify", "--match-server-version", "--warnings-as-errors",
+    "--disable-compression",
+})
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
     'kubectl 最小例: {"kubectl": "my-context-name"}。'

@@ -8,6 +8,11 @@
                                     アカウントで動くか) を変えうるコマンド。
                                     dispatcher が検出すると成功 cache を破棄し、
                                     そのコマンド自身の検証成功も cache しない
+     - GLOBAL_OPTIONS_WITH_VALUE / GLOBAL_FLAGS: frozenset[str]
+                                    (任意) CLI 名直後に置ける global option
+                                    (`aws --profile prod sso login`)。dispatcher が
+                                    剥がした形でも READONLY / STATE_CHANGING /
+                                    self-remediation を判定する (core/cli_options.py)
      - ACCOUNT_KEY: str             accounts.local.json 上のキー名
      - SETUP_HINT: str              accounts.local.json 未設定時の案内文
      - verify(expected, project_dir) -> str | None  検証関数 (None=成功, 文字列=エラー理由)

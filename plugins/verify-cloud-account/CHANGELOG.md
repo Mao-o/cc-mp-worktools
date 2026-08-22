@@ -85,10 +85,24 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
 7. **AWS config 走査の堅牢化** — HOME 未設定で `Path.home()` が `RuntimeError` を投げる
    環境でも例外を漏らさない (漏れると hook が異常終了して無音 fail-open)。
    `AWS_CONFIG_FILE=~user/...` も展開する。
-8. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
+8. **CLI 名直後の global option を剥がして判定** (PR #43 Codex P1) — AWS CLI は
+   `aws [global options] <command> <subcommand>` を受理し `--profile` は global
+   option のため、`aws --profile default configure sso` / `aws --profile prod sso login`
+   が READONLY / STATE_CHANGING の anchored pattern に一致せず、default profile の
+   成功 cache が 30 秒残って別アカウントの write が通り、login 形も readonly に
+   乗らなかった。`core/cli_options.py` の `strip_leading_options` が各 service の
+   宣言 (`GLOBAL_OPTIONS_WITH_VALUE` / `GLOBAL_FLAGS`: aws / gcloud / kubectl /
+   firebase。gh は root に `--help` / `--version` 以外の global option が無い) に
+   従って先頭の option を剥がし、元の形と剥がした形の両方で READONLY /
+   STATE_CHANGING を、剥がした形で self-remediation を判定する。剥がした option の
+   値は将来の flag 照合 (629.4) 用に返し、deny 文面の検出コマンドには元の形を表示
+   する。未知の option が先頭にあれば剥がさず通常検証 (保守的)。`--help` /
+   `--version` は宣言しない (剥がすと `aws --version` が readonly から外れるため)。
+9. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
    再検証されない」注記と `export AWS_PROFILE` の記述を実装に合わせて更新、cache 節に
-   「切替・ログイン系コマンドでの即時無効化」の表を追加、既知の制限に「期待値以外への
-   切替 + write を同一コマンドで実行すると実行前の状態で検証される」を追記。
+   「切替・ログイン系コマンドでの即時無効化」の表を追加、解析対象に「CLI 名直後の
+   global option」を追記、既知の制限に「期待値以外への切替 + write を同一コマンドで
+   実行すると実行前の状態で検証される」を追記。
 
 ### 非互換性
 
@@ -123,12 +137,19 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   `TestAwsProfileScan` 8 件 + `TestFirebase` 3 件 (dict 未解決の alias 案内 / 不正な
   形で CLI を叩かない / `firebase-tools use` の self-remediation) +
   `TestAuthCommandPatterns` 3 件 (READONLY / STATE_CHANGING のパターン表)
-- 新規 53 件のうち 41 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
-  実行) で fail することを確認済み。残り 12 件は 0.7.3 でも成り立つ契約の固定
-  (既存 self-remediation / readonly が案内コマンドを通すこと、表示系 readonly が
-  cache を保つこと、他 service の cache に影響しないこと、類似 write の deny)
+- `tests/test_cli_options.py` 新設 11 件 (global option 剥がしの形: `--opt value` /
+  `--opt=value` / flag / 短縮形 / `--` 終端 / 未知 option・値欠落・quote 不正は無変更 /
+  quote 保持 / `--help` `--version` は剥がさない) +
+  `tests/test_dispatcher.py::TestLeadingGlobalOptions` 7 件 (global option 先行形の
+  readonly 判定 / 切替での cache 無効化 (Codex P1 の再現) / 別 CLI 経由 kubeconfig /
+  self-remediation / deny 文面は元の形 / 未知 option は通常検証 / `--version` 維持)
+- 新規 71 件のうち 45 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
+  実行、global option 分は修正前の dispatcher / services) で fail することを確認済み。
+  残りは旧実装でも成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを
+  通すこと、表示系 readonly が cache を保つこと、他 service の cache に影響しないこと、
+  類似 write の deny、検出コマンドの表示、未知 option の保守的扱い)
 
-テスト 352 → 405 件。
+テスト 352 → 423 件。
 
 ## 0.7.3
 

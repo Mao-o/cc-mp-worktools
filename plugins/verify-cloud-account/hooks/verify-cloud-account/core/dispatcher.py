@@ -9,7 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import cache, output, paths
+from core import cache, cli_options, output, paths
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -28,19 +28,42 @@ def _match_service(candidate: str):
     return None
 
 
-def _is_readonly(candidate: str, service) -> bool:
-    for pattern in getattr(service, "READONLY", []):
-        if re.search(pattern, candidate):
-            return True
-    return False
+def _normalize_candidate(candidate: str, service) -> tuple[str, dict]:
+    """CLI 名直後の global option (`aws --profile prod sso login`) を剥がした形を返す。
+
+    service が GLOBAL_OPTIONS_WITH_VALUE / GLOBAL_FLAGS を宣言していなければ無変更。
+    剥がした option は 2 要素目 (将来の flag 照合用。現状 dispatcher は使わない)。
+    """
+    with_value = getattr(service, "GLOBAL_OPTIONS_WITH_VALUE", frozenset())
+    flags = getattr(service, "GLOBAL_FLAGS", frozenset())
+    if not with_value and not flags:
+        return candidate, {}
+    return cli_options.strip_leading_options(candidate, with_value, flags)
 
 
-def _is_state_changing(candidate: str, service) -> bool:
+def _candidate_forms(candidate: str, service) -> tuple[str, ...]:
+    """判定に使う候補の形 (元の形 + global option を剥がした形、同じなら 1 つ)。
+
+    両方に当てるのは、`aws --version` のように剥がすと CLI 名だけになる形を元の
+    pattern (`^aws\\s+--version`) で拾い続けるため。
+    """
+    if service is None:
+        return (candidate,)
+    normalized, _opts = _normalize_candidate(candidate, service)
+    return (candidate, normalized) if normalized != candidate else (candidate,)
+
+
+def _matches_any(forms: tuple[str, ...], patterns) -> bool:
+    return any(re.search(p, form) for p in patterns for form in forms)
+
+
+def _is_readonly(forms: tuple[str, ...], service) -> bool:
+    return _matches_any(forms, getattr(service, "READONLY", []))
+
+
+def _is_state_changing(forms: tuple[str, ...], service) -> bool:
     """候補セグメントが service のアカウント状態を変えうる (切替 / ログイン系) なら True。"""
-    for pattern in getattr(service, "STATE_CHANGING", []):
-        if re.search(pattern, candidate):
-            return True
-    return False
+    return _matches_any(forms, getattr(service, "STATE_CHANGING", []))
 
 
 def _service_name(service) -> str:
@@ -101,7 +124,9 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
 def _analyze_command(command: str) -> tuple[list[tuple], list]:
     """コマンドを分解し (targets, switching) を返す。
 
-    targets は検証対象 (non-readonly) の (svc, cands, inline_env) リスト。
+    targets は検証対象 (non-readonly) の (svc, cands, inline_env) リスト。cands の
+    各要素は (元の候補, global option を剥がした候補) の組で、前者は deny 文面の
+    検出コマンド表示、後者は self-remediation 判定に使う。
     switching はアカウント状態を変えうるセグメント (STATE_CHANGING) を含む service の
     リスト (重複なし、出現順)。readonly 扱いのセグメント (`gh auth login` /
     `aws sso login` 等) も switching には含める — 検証はしないが、実行後に
@@ -123,21 +148,24 @@ def _analyze_command(command: str) -> tuple[list[tuple], list]:
     cand_map: dict = {}
     switching: list = []
     for cand, inline_env in extract_candidates(command):
+        svc = _match_service(cand)
+        # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
+        # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
+        forms = _candidate_forms(cand, svc)
         # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
         # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
         # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
         # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
         for other in SERVICES:
-            if other not in switching and _is_state_changing(cand, other):
+            if other not in switching and _is_state_changing(forms, other):
                 switching.append(other)
-        svc = _match_service(cand)
-        if svc is None or _is_readonly(cand, svc):
+        if svc is None or _is_readonly(forms, svc):
             continue
         key = (svc, tuple(sorted(inline_env.items())))
         if key not in cand_map:
             cand_map[key] = []
             order.append(key)
-        cand_map[key].append(cand)
+        cand_map[key].append((cand, forms[-1]))
     targets: list = []
     for key in order:
         svc, env_items = key
@@ -295,7 +323,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
             )
             continue
 
-        if _all_self_remediation(cands, svc, entry):
+        if _all_self_remediation([norm for _orig, norm in cands], svc, entry):
             continue
 
         svc_name = _service_name(svc)
@@ -318,7 +346,9 @@ def dispatch(command: str, cwd: str) -> dict | None:
         if err:
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
-            errors.append(f"{err}\n(検出コマンド: {', '.join(cands)})")
+            errors.append(
+                f"{err}\n(検出コマンド: {', '.join(orig for orig, _norm in cands)})"
+            )
         elif not switching_here:
             cache.set_success(svc_name, project_dir, entry, accounts_mtime, inline_env)
 

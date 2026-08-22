@@ -54,6 +54,13 @@ STATE_CHANGING = [
     r"^firebase(?:-tools)?\s+use\s+\S",
     r"^firebase(?:-tools)?\s+(login|logout)\b",
 ]
+# CLI 名直後に置ける global option (`firebase -P prod use ...`)。dispatcher が剥がした
+# 形でも READONLY / STATE_CHANGING / self-remediation を判定する (core/cli_options.py)。
+# `--project` / `-P` の値は将来の flag 照合 (629.4) で使う。
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({
+    "--project", "-P", "--account", "--config", "-c", "--token",
+})
+GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interactive"})
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
