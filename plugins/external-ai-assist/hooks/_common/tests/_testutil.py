@@ -37,24 +37,30 @@ def hanging_cli(
     *,
     ignore_term: bool = False,
     grandchild_ignores_term: bool = False,
+    grandchild_detached_from_pipe: bool = False,
     leader_exits: bool = False,
     pid_file: str | None = None,
     partial_output: str = "partial\n",
 ) -> str:
-    """stdout に 1 行書いた後、孫 (`sleep 30`) に stdout を継承させる偽 CLI。
+    """stdout に 1 行書いた後、孫 (`sleep 30`) を起動する偽 CLI。既定では孫が stdout を継承する。
 
     - `pid_file`: 孫の pid を書く (停止確認用)
     - `ignore_term`: 親子とも SIGTERM を無視する (孫にも継承されるので SIGKILL 段の検証)
     - `grandchild_ignores_term`: 孫だけ SIGTERM を無視する (親は TERM で死んで zombie になり、
       SIGKILL 段でリーダーが zombie のままグループに届くかの検証)
+    - `grandchild_detached_from_pipe`: 孫は SIGTERM を無視し、かつ stdout / stderr を
+      /dev/null に向ける (pipe を握らないので親が死ぬと EOF が来る。「EOF = 停止」と
+      見なすとこの孫が残る。Codex P2 の回帰テスト用)
     - `leader_exits`: 親は孫を起動して即 exit する (cursor-agent 本体が落ちて helper だけが
-      pipe を握るケース。リーダーが最初から zombie)
+      残るケース。リーダーが最初から zombie)
     """
     lines = []
     if ignore_term:
         lines.append("trap '' TERM")
     lines.append(f"printf '%s' {shlex.quote(partial_output)}")
-    if grandchild_ignores_term:
+    if grandchild_detached_from_pipe:
+        lines.append("( trap '' TERM; exec sleep 30 ) >/dev/null 2>&1 &")
+    elif grandchild_ignores_term:
         lines.append("( trap '' TERM; exec sleep 30 ) &")
     else:
         lines.append("sleep 30 &")

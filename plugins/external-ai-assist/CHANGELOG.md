@@ -85,13 +85,21 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
 - 新ヘルパー自身は kill 後に `communicate()` で読み捨てるため、SIGTERM を無視する孫が
   いても無期限待ちにならないよう 2 段 (TERM → 猶予 → KILL) にし、それでも EOF が来ない
   (グループを抜けた孫が pipe を握る) 場合は read 端を閉じて直接の子だけ回収する
-- `run_captured` が起動した子 (pgid == pid を保証) には **reap 前の間は無条件に
-  `killpg(pid)`** を送る。未 reap の pid は再利用されないので誤送信は起きず、リーダーが
-  既に zombie (cursor-agent 本体が落ちて helper だけが pipe を握るケース) でもグループに
-  届く。`getpgid` でリーダー確認してから送る案は、macOS が zombie に ESRCH を返して
+- `run_captured` が起動した子 (pgid == pid を保証) には `killpg(pid)` でグループ全体に送る。
+  リーダーが未 reap の間は pid が再利用されないので常に安全で、リーダーが既に zombie
+  (cursor-agent 本体が落ちて helper だけが pipe を握るケース) でもグループに届く。
+  `getpgid` でリーダー確認してから送る案は、macOS が zombie に ESRCH を返して
   `send_signal` → 内部 `poll()` が reap → signal 不達 → 孫が残る経路になるため不採用
-  (L2 レビューで実測)。外部で作った Popen に対してだけ `getpgid` でリーダーかを判定し、
-  リーダーでなければ直接の子のみに送る。hook 自身の process group に signal が飛ぶ経路は無い
+  (L2 レビューで実測)。reap 済みの場合はグループにメンバーが残っている限り pgid 番号が
+  再割当てされないことを利用し、`killpg(pgid, 0)` で存在確認してから送る (空なら送らない)。
+  外部で作った Popen に対してだけ `getpgid` でリーダーかを判定し、リーダーでなければ直接の
+  子のみに送る。hook 自身の process group に signal が飛ぶ経路は無い
+- 「止まった」の判定は pipe の EOF ではなく **process group が空になったこと** で行う
+  (Codex PR レビュー P2)。リーダーが死んで EOF が来ても、SIGTERM を無視して出力を
+  /dev/null に向けたメンバー (`trap '' TERM; sleep >/dev/null &`) は残りうるため、猶予内に
+  グループが空にならなければ SIGKILL を送る。全員が TERM で死ぬ通常ケースは probe で空を
+  検知して即座に返る。CLI が正常終了した後も同じ probe で残存メンバーを確認し、居れば
+  同じ手順で止める (結果は捨てない)
 - kill 猶予 (最悪 3 × 5s) を hook timeout に織り込むため、hooks.json の Stop timeout を
   660 → **690** に変更 (cursor 600 + 猶予 15 + git 49 = 664 が 660 を超えていた)。
   Stop / ExitPlanMode の予算式をテストで固定
@@ -117,8 +125,8 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
 
 ### テスト
 
-累計 **166 件** (post-implementation-review 98 → 101、exitplan-review 26 新設、
-`_common` 39 新設)。全て cursor / codex を起動せず、モックか PATH 先頭の偽 CLI
+累計 **171 件** (post-implementation-review 98 → 101、exitplan-review 26 新設、
+`_common` 44 新設)。全て cursor / codex を起動せず、モックか PATH 先頭の偽 CLI
 (bash script) で検証する。
 
 - `_common/tests/test_sentinel.py`: 素の sentinel / フェンス・装飾 / フェンスや罫線だけの
@@ -126,9 +134,11 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
   sentinel + 指摘 / 文中埋め込み
 - `_common/tests/test_subproc.py`: 孫が stdout を握る timeout で猶予込みの上限内に返り
   孫が死ぬ / 親子とも SIGTERM 無視 → SIGKILL / リーダーが先に exit (zombie) / リーダーは
-  TERM で死に孫だけ TERM 無視 / stdin 入力あり / hook 自身の process group に届かない /
-  リーダーでない子には killpg しない / reap 済みには送らない / 出力契約 (非 0・空・
-  非 UTF-8・コマンド不在)
+  TERM で死に孫だけ TERM 無視 / pipe を握らず TERM を無視するメンバーが猶予後に SIGKILL
+  される (リーダーが TERM で死ぬ型・リーダーも TERM 無視の型) / 全員 TERM で死ぬ通常ケースは
+  猶予を待たない / 正常終了後に残った background メンバーを止める (残存なしなら遅延しない) /
+  stdin 入力あり / hook 自身の process group に届かない / リーダーでない子には killpg
+  しない / reap 済みでグループも空なら送らない / 出力契約 (非 0・空・非 UTF-8・コマンド不在)
 - `_common/tests/test_flock.py`: RMW の往復 / truncate / 例外後の解放 / 8 スレッド直列化
 - `_common/tests/test_bootstrap.py`: plugin root をコピーして 6 経路の hook を起動し
   import エラーが無い / `hooks/` 直下に `.py` や import 可能な名前のディレクトリが無い

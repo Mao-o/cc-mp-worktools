@@ -86,6 +86,31 @@ class TestTimeoutKillsProcessGroup(SubprocTestCase):
         self.assertLess(elapsed, TIMEOUT + 3 * GRACE + 2.0)
         self.assertTrue(wait_until_dead(grandchild), "SIGKILL 段で zombie リーダーのグループに届いていない")
 
+    def test_member_without_pipe_when_leader_dies_on_term(self):
+        """Codex P2: pipe を握らず TERM を無視するメンバーは、EOF が来ても猶予後に SIGKILL される。
+
+        リーダーは SIGTERM で死ぬので pipe は TERM 直後に EOF になる。「drain 完了 = 停止」と
+        見なすと `sleep >/dev/null` が残る。グループが空になるまで待って SIGKILL すること。
+        """
+        cli, pid_file = self._hanging(grandchild_detached_from_pipe=True)
+        elapsed, grandchild = self._run_until_timeout(cli, pid_file)
+        self.assertLess(elapsed, TIMEOUT + 3 * GRACE + 2.0)
+        self.assertTrue(wait_until_dead(grandchild), "pipe を握らない TERM 無視メンバーが取り残されている")
+
+    def test_member_without_pipe_when_leader_ignores_term_too(self):
+        """同上の SIGKILL 段: リーダーも TERM を無視して pipe を握り続ける型。"""
+        cli, pid_file = self._hanging(ignore_term=True, grandchild_detached_from_pipe=True)
+        elapsed, grandchild = self._run_until_timeout(cli, pid_file)
+        self.assertLess(elapsed, TIMEOUT + 3 * GRACE + 2.0)
+        self.assertTrue(wait_until_dead(grandchild), "SIGKILL 段で pipe を握らないメンバーが取り残されている")
+
+    def test_group_that_exits_on_term_returns_without_waiting_full_grace(self):
+        """全員 TERM で死ぬ通常ケースでは猶予いっぱい待たない (probe で空を検知して即 return)。"""
+        cli, pid_file = self._hanging()
+        elapsed, grandchild = self._run_until_timeout(cli, pid_file)
+        self.assertLess(elapsed, TIMEOUT + GRACE, "グループが空になった後も猶予を待っている")
+        self.assertTrue(wait_until_dead(grandchild))
+
     def test_timeout_with_stdin_input(self):
         """codex 経路 (input_text あり) でも同じく timeout 直後に返る。"""
         cli, pid_file = self._hanging()
@@ -123,18 +148,54 @@ class TestTimeoutKillsProcessGroup(SubprocTestCase):
         # 孫はこちらの process group に居るので意図的に殺さない (teardown で後始末)
         os.kill(grandchild, 0)
 
-    def test_reaped_process_is_never_signalled(self):
-        """reap 済み (returncode 設定済み) の proc には signal を送らない (pid 再利用の誤送信防止)。"""
+    def test_reaped_process_with_empty_group_is_never_signalled(self):
+        """reap 済みでグループも空の proc には signal を送らない (pid 再利用の誤送信防止)。
+
+        存在確認 (`killpg(pgid, 0)`) 以外の killpg / send_signal が呼ばれないこと。
+        """
         cli = write_script(self.dir, "quick", "exit 0\n")
         proc = subprocess.Popen([cli], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 start_new_session=True)
         proc.wait(timeout=5)
-        with mock.patch.object(os, "killpg") as killpg, mock.patch.object(
+        sent: list[int] = []
+
+        def fake_killpg(pgid, sig):
+            if sig == 0:
+                raise ProcessLookupError  # グループは消えている
+            sent.append(sig)
+
+        with mock.patch.object(os, "killpg", side_effect=fake_killpg), mock.patch.object(
             subprocess.Popen, "send_signal"
         ) as send_signal:
             subproc.kill_process_group(proc, grace_sec=GRACE, own_group=True)
-        killpg.assert_not_called()
+        self.assertEqual(sent, [])
         send_signal.assert_not_called()
+
+
+class TestNormalExitCleanup(SubprocTestCase):
+    """正常終了した CLI が残した background メンバーも止める (timeout していなくても)。"""
+
+    def test_detached_member_left_after_normal_exit_is_killed(self):
+        cli, pid_file = self._hanging(leader_exits=True, grandchild_detached_from_pipe=True)
+        started = time.monotonic()
+        result = subproc.run_captured([cli], timeout_sec=5)
+        elapsed = time.monotonic() - started
+        grandchild = read_pid(pid_file)
+        self._grandchildren.append(grandchild)
+
+        self.assertIsNotNone(result, "正常終了の結果は返すこと (掃除は結果を捨てない)")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "partial\n")
+        self.assertLess(elapsed, 3 * GRACE + 2.0)
+        self.assertTrue(wait_until_dead(grandchild), "正常終了後に残った TERM 無視メンバーが止まっていない")
+
+    def test_normal_exit_without_leftovers_is_not_delayed(self):
+        cli = write_script(self.dir, "ok", "printf 'hello'\n")
+        started = time.monotonic()
+        result = subproc.run_captured([cli], timeout_sec=5)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.stdout, "hello")
+        self.assertLess(elapsed, GRACE, "残存メンバーが無いのに猶予を待っている")
 
 
 class TestRunCapturedContract(SubprocTestCase):
