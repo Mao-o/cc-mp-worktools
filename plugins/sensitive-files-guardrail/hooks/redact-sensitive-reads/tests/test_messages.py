@@ -430,7 +430,8 @@ class TestDenyPlainText(unittest.TestCase):
         for kind in ("normalize_failed", "io_error", "parent_not_directory"):
             msg = M.edit_pause(kind, tool_label="Edit")
             self.assertNotIn("<GUARDRAIL_DENY", msg)
-        for kind in ("hard_stop", "opaque_prefix", "shell_keyword"):
+        for kind in ("hard_stop", "opaque_prefix", "shell_keyword",
+                     "program_dynamic"):
             msg = M.bash_lenient(kind)
             self.assertNotIn("<GUARDRAIL_DENY", msg)
 
@@ -467,7 +468,7 @@ class TestVocabularyConsistency(unittest.TestCase):
     def test_ask_or_allow_uses_pause_phrase(self):
         for kind in (
             "hard_stop", "opaque_prefix", "residual_metachar",
-            "tokenize_failed", "normalize_failed",
+            "tokenize_failed", "normalize_failed", "program_dynamic",
         ):
             msg = M.bash_lenient(kind)
             self.assertIn(

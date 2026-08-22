@@ -210,6 +210,31 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
 クォート外エスケープ規則 (`\'` は quote を開かない / `\;` は区切らない /
 `\<newline>` は行継続) を入れ、両 scanner を同じ字句状態で走らせる。
 
+**Bash コメントも両 scanner で認識する** (同 review R2)。`#` 〜 行末は Bash に
+解釈されないが、コメント内の `'` で quote 状態を反転させると
+`echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` が 1 segment に潰れ、同じ経路で
+`.env` read が素通りする。クォート外・単語先頭 (直前が空白 / `;` / `|` / `&` /
+文字列先頭) の `#` から行末までをコメントとして両 scanner が読み飛ばす
+(splitter は segment から落とし、改行は区切りとして残す)。検出範囲は Bash より
+狭く保つ — コメントでないものをコメント扱いすると実コマンドを落とし guard が
+落ちるが、逆は ask に倒れるだけ。`\r` 入りコメントだけは丸ごと残して表示偽装
+guard に到達させる。「単語先頭」は直前の生文字ではなく **字句状態**
+(`word_start`) で判定する — Bash は `\<newline>` (行継続) を先に取り除くので、
+`echo safe\` ⏎ `#joined; cat .env` は `safe#joined` の 1 単語でコメントではない
+(同 review R3)。
+
+**シングルクォートは Bash には不活性でも、呼び出されるプログラムには解釈される**
+(同 review R3)。`awk 'BEGIN { system("cat .env") }'` は hard-stop を抜けた後、
+operand scan でも `.env` がプログラム文字列の内側にあるため見えない。
+`handlers/bash/interpreters.py` (`_program_dynamic_construct`) が awk の
+`system(` / `getline` / `|` / `>` / `-f progfile`、sed の `e` (command /
+`s///e`) / `r` `R` / `w` `W` / `-f script` を検出し、**operand scan の後** で
+`ask_or_allow` (`bash_lenient("program_dynamic")`) に戻す。機密 operand 確定の
+deny が先なので `awk '{print}' .env` は deny のまま。`>` (比較) や `||` の
+false positive は ask で済ませる (0.17.0 まで `$` `{` で ask だった形)。
+他のインタプリタ (`python -c` / `perl -e` / `bash -c`) は `_OPAQUE_WRAPPERS`
+が先に ask に倒す。
+
 副次効果として非機密 operand の `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt`
 は ask → allow に緩む (0.16.0 の `sed -n p notes.txt` と同じ方向、false positive 減)。
 

@@ -95,6 +95,19 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > (両 scanner の字句状態同期)。`echo \' ; cat .env ; echo '{'` は 3 segment に
 > 割れて `cat .env` が **全 mode で deny** (同期前は 1 segment に潰れ allow)。
 > `\<newline>` は行継続として結合するため `cat \<newline>.env` も deny。
+> Bash コメント (クォート外・単語先頭の `#` 〜 行末) も両 scanner が認識する:
+> `echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` は 3 segment に割れて `cat .env`
+> が **全 mode で deny** (認識前はコメント内の `'` で 1 segment に潰れ default
+> でも allow)。コメント内の `{` `$(` は ask に倒さない (`echo hi # {x}` は
+> allow、`cat .env # {` は deny)。行継続 `\<newline>` は単語状態を変えないので
+> `echo safe\` ⏎ `#joined; cat .env` の `#joined` はコメントではなく
+> `cat .env` が **全 mode で deny**。
+>
+> awk / sed のプログラム文字列内の動的構文 (awk: `system(` `getline` `|` `>`
+> `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で
+> `ask_or_allow` に戻す (`awk 'BEGIN { system("cat .env") }'` は default で
+> ask、autonomous で allow = 0.17.0 と同じ)。機密 operand 付き
+> (`awk 'BEGIN{system("x")}' .env`) は deny が優先。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
