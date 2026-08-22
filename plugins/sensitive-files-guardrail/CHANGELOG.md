@@ -107,8 +107,7 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 ### 判断 — 緩める側と緩めない側の非対称
 
 `_has_hard_stop` は **全 segment 判定の入口**で、ここが desync すると guard が
-そのまま落ちる (`_split_command_on_operators` の desync は segment 境界がずれる
-だけなのと対照的)。よって「シングルクォート内と見なす範囲」は Bash より広く
+そのまま落ちる。よって「シングルクォート内と見なす範囲」は Bash より広く
 ならないようにし、以下は意図的に strict のまま残した:
 
 - **ダブルクォート内は hard-stop 維持** — `echo "$(cat .env)"` は展開される
@@ -133,6 +132,25 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `cat <(echo \(\)) < .env` | ask / allow | ask / allow (不変) |
 | `cat \'$(cat .env)\'` | ask / allow | ask / allow (不変) |
 | `bash -c 'cat .env'` | ask / allow | ask / allow (不変、opaque が先) |
+| `echo \' ; cat .env ; echo '{'` (review 対応) | ask / **allow** | **deny / deny** |
+| `cat \<newline>.env` (review 対応) | ask / **allow** | **deny / deny** |
+
+### review 対応 — splitter の字句状態を hard-stop と同期 (PR #38 Codex P1)
+
+当初は「`_split_command_on_operators` の desync は segment 境界がずれるだけ」と
+整理していたが、これは誤りだった。splitter がクォート外の `\'` を quote 開始と
+誤認すると `echo \' ; cat .env ; echo '{'` が 1 segment に潰れ、quote-aware に
+なった `_has_hard_stop` は `'{'` をクォート内と見て False を返す。結果、先頭
+token `echo` の metadata-only 経路で `.env` read が **全 mode で allow** される
+(quote-aware 化 **前** は `{` が hard-stop で ask/allow だったので、0.18.0 の
+変更が開けた穴)。**どちらの scanner の desync でも guard は落ちる**。
+
+splitter にも同じクォート外エスケープ規則を入れた: `\'` は quote を開かない /
+`\;` `\|` `\&` は区切らない (`find -exec \;` 等の慣用) / `\<newline>` は行継続
+として両文字を落とす (Bash 仕様)。副次効果として `cat \<newline>.env` は
+「`cat \` + `.env` に割れて shlex 失敗 → ask」から `cat .env` として deny に、
+`echo \"a && b\" && cat .env` も `\"` が quote を開かなくなり `cat .env` segment
+が deny に締まる (いずれも ask → deny 方向のみ)。
 
 `git ls-files --format='%(objectname)' .env` が deny になるのは
 **ハーネス委譲方針 ([[sfg-lenient-policy]]) の反転ではない**。`--format` は
@@ -147,13 +165,15 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 
 ### テスト
 
-745 件 (+10、うち 3 件は既存テストの改名 + 期待値更新)。
+749 件 (+14、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (10 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (14 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
-  opaque wrapper の判定順を固定
+  opaque wrapper の判定順を固定、(4) review 対応: splitter と hard-stop の
+  字句状態同期 (`echo \' ; cat .env ; echo '{'` の 3 分割 + 両 mode deny /
+  `\;` `\|` `\&&` を区切らない / `\<newline>` 行継続の deny / 末尾 `\` 保持)
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、
   `test_sed_paren_with_dotenv_arg_still_ask` →

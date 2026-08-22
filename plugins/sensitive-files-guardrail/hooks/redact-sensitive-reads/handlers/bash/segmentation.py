@@ -32,8 +32,11 @@ def _has_hard_stop(command: str) -> bool:
     - **``\\r`` はクォート状態を問わず hard-stop**。CR は展開ではなく端末表示
       偽装の guard なので「展開されない = 安全」の理屈が当てはまらない
 
-    ``_split_command_on_operators`` と字句状態の持ち方を揃えてあるが、こちらは
-    desync すると guard が落ちる (分割側は segment 境界がずれるだけ) ため、
+    ``_split_command_on_operators`` と字句状態の持ち方を **完全に揃える**。
+    どちらが desync しても guard は落ちる: 分割側が ``\\'`` を quote 開始と
+    誤認すると ``echo \\' ; cat .env ; echo '{'`` が 1 segment に潰れ、
+    こちらは ``'{'`` をクォート内と見て False を返すため、先頭 token ``echo``
+    の metadata-only 経路で ``.env`` read が素通りする (0.18.0 review で修正)。
     「シングルクォート内と見なす範囲」は Bash より広くならないようにする。
     """
     in_single = False
@@ -99,6 +102,10 @@ def _split_command_on_operators(command: str) -> list[str]:
     直前の連続バックスラッシュが **偶数個** なら ``"`` はエスケープ**されていない**
     (= クォートを閉じる)、**奇数個** ならエスケープされている (= クォート内に留まる)。
     シングルクォートは Bash 仕様上エスケープ不可なので ``'`` 単発で常に閉じる。
+
+    クォート外のバックスラッシュは次の 1 文字を literal 化する (``\\'`` は quote を
+    開かない / ``\\;`` は区切らない / ``\\<newline>`` は行継続)。
+    ``_has_hard_stop`` と同じ字句状態を保つこと (desync すると guard が落ちる)。
     """
     segments: list[str] = []
     buf: list[str] = []
@@ -125,6 +132,21 @@ def _split_command_on_operators(command: str) -> list[str]:
             else:
                 bs_run = 0
             i += 1
+            continue
+        # --- クォート外 ---
+        if c == "\\":
+            # 次の 1 文字を literal 化する (quote も開かず演算子にもならない)。
+            # ``_has_hard_stop`` と同じ字句状態。ここが desync すると
+            # ``echo \\' ; cat .env ; echo '{'`` が 1 segment に潰れ、hard-stop
+            # 側は ``'{'`` をクォート内と見て False を返し、先頭 token ``echo``
+            # の metadata-only 経路で ``.env`` read が素通りする (0.18.0 review)。
+            # ``\\<newline>`` は行継続なので両方落とす (Bash 仕様)。
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt != "\n":
+                buf.append(c)
+                if nxt:
+                    buf.append(nxt)
+            i += 2
             continue
         if c == "'":
             in_single = True

@@ -201,6 +201,15 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
   数え続けるため `cat <(echo \(\)) < .env` は挙動不変
 - **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
 
+**splitter と hard-stop の字句状態は完全に同期させる** (PR #38 review で判明)。
+`_split_command_on_operators` がクォート外の `\'` を quote 開始と誤認すると、
+`echo \' ; cat .env ; echo '{'` が 1 segment に潰れ、`_has_hard_stop` は
+`'{'` をクォート内と見て False を返すため、先頭 token `echo` の metadata-only
+経路で `.env` read が素通りする。「分割側の desync は segment 境界がずれるだけ」
+ではなく、**どちらの desync でも guard は落ちる**。よって splitter にも同じ
+クォート外エスケープ規則 (`\'` は quote を開かない / `\;` は区切らない /
+`\<newline>` は行継続) を入れ、両 scanner を同じ字句状態で走らせる。
+
 副次効果として非機密 operand の `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt`
 は ask → allow に緩む (0.16.0 の `sed -n p notes.txt` と同じ方向、false positive 減)。
 

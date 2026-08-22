@@ -24,6 +24,7 @@ from unittest import mock
 from _testutil import FIXTURES  # noqa: F401
 
 from core import output
+from handlers.bash.segmentation import _split_command_on_operators
 from handlers.bash_handler import handle
 
 
@@ -1340,6 +1341,44 @@ class TestQuoteAwareHardStop(BaseBash):
                 self.assertEqual(_decision(r), "ask")
                 r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
                 self.assertTrue(output.is_allow(r))
+
+    # --- (4) splitter と hard-stop の字句状態同期 (PR #38 Codex P1) ---
+    def test_escaped_quote_before_operator_splits_and_denies_both_modes(self):
+        # `\'` はクォート外では literal `'`。splitter がこれを quote 開始と
+        # 誤認すると後続 `;` が区切られず 1 segment に潰れ、hard-stop 側は
+        # `'{'` をクォート内と見て False → 先頭 token `echo` の metadata-only
+        # 経路で `.env` read が素通りする。両 scanner の字句状態を揃えて deny。
+        cmd = "echo \\' ; cat .env ; echo '{'"
+        self.assertEqual(
+            _split_command_on_operators(cmd),
+            ["echo \\'", "cat .env", "echo '{'"],
+        )
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_escaped_operator_chars_do_not_split(self):
+        # `\;` `\|` `\&` は literal (find -exec \; 等の慣用)。区切らない。
+        for cmd in ("echo \\; cat .env", "echo a \\| b", "echo a \\&\\& b"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), [cmd])
+
+    def test_backslash_newline_is_line_continuation(self):
+        # `\<newline>` は行継続 (Bash 仕様) なので区切らず両文字を落とす。
+        # 旧実装は `cat \` / `.env` の 2 segment に割れて shlex 失敗 → ask だった。
+        cmd = "cat \\\n.env"
+        self.assertEqual(_split_command_on_operators(cmd), ["cat .env"])
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_trailing_backslash_is_kept(self):
+        self.assertEqual(_split_command_on_operators("echo \\"), ["echo \\"])
 
 
 class TestSafeReadAllowlist(BaseBash):

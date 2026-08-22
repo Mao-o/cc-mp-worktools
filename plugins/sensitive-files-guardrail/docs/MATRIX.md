@@ -90,6 +90,11 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > エスケープ (`\'` はクォートを開かない)、`\r` (端末表示偽装 guard なので
 > クォート内でも hard-stop)。副次効果として非機密 operand の
 > `grep '(=)' notes.txt` / `awk '{print $1}' notes.txt` は ask → **allow** に緩む。
+>
+> 同じクォート外エスケープ規則を `_split_command_on_operators` にも適用する
+> (両 scanner の字句状態同期)。`echo \' ; cat .env ; echo '{'` は 3 segment に
+> 割れて `cat .env` が **全 mode で deny** (同期前は 1 segment に潰れ allow)。
+> `\<newline>` は行継続として結合するため `cat \<newline>.env` も deny。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
