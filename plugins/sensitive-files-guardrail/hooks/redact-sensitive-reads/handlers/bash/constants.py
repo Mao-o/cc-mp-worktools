@@ -167,21 +167,29 @@ _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 # (出力は ``rm '<path>'`` の path 文字列のみ) ため metadata-only。両 hook の
 # reason が「tracked なら ``git rm --cached`` で untrack」と案内しているのに
 # 自分で deny していた自己矛盾を解消する。``--cached`` 無しの plain ``git rm``
-# は作業ツリー削除 (破壊操作) のため operand scan → deny 維持。exact match
-# のみ認識 (``--cached=...`` 形は git に存在しない)。``--`` 以降は pathspec
-# なので flag として数えない (``git rm .env -- --cached`` は deny)。``-r`` は
-# index 除去の範囲が広がるだけで内容出力も実ファイル削除も無いため許容。
+# は作業ツリー削除 (破壊操作) のため operand scan → deny 維持。**完全一致のみ**
+# 認識 (git 自身は ``--cache`` / ``--cac`` の一意接頭辞も受理するが、省略形の
+# 展開は自前実装しない — 保守側に倒れるだけ)。``--`` 以降は pathspec なので
+# flag として数えない (``git rm .env -- --cached`` は deny)。
 _GIT_RM_INDEX_ONLY_FLAG = "--cached"
-# parse-options の否定形。``git rm --cached --no-cached .env`` は後勝ちで
-# index-only が取り消され作業ツリーも削除される (実 git 2.50 で確認、L2 review)。
-# うっかり書く形ではないが 1 行で塞げるため、出現順で評価して deny に戻す。
-_GIT_RM_INDEX_ONLY_NEGATION = "--no-cached"
-# git rm のうち operand ファイルの **中身** を pathspec リストとして読み、
-# 不一致行を ``fatal: pathspec '<行>' did not match any files`` で echo する
-# option。``file -f`` (``_METADATA_CONTENT_READING_OPTS``) と同じ「option で
-# 内容露出に化ける」クラスとして metadata-only から除外する (operand scan が
-# ``--pathspec-from-file=.env`` の値 / 分離形の ``.env`` を拾って deny)。
-_GIT_RM_CONTENT_READING_OPTS = frozenset({"--pathspec-from-file"})
+# ``--cached`` と共存しても index-only のままで内容も出さない **既知の** long
+# option (完全一致)。fail-closed 規則 (Codex review P1): git は long option の
+# **一意な接頭辞** を受理する (``--no-cach`` = ``--no-cached`` で後勝ちにより
+# 作業ツリーも削除、``--pathspec-from-fil`` = ``--pathspec-from-file`` で operand
+# の中身を pathspec として読み ``fatal: pathspec '<行>'`` に echo) ため、危険な
+# option を exact-token で deny-list しても省略形がすり抜ける。よって逆に
+# 「ここに無い ``--xxx`` が 1 つでもあれば index-only と見なさない」(→ 通常の
+# operand scan → 機密 operand なら deny) とする。``--no-*`` 否定形 /
+# ``--pathspec-from-file[=<f>]`` / ``--pathspec-file-nul`` / それらの省略形 /
+# ``--cached`` の省略形はすべて未知扱い。``-r`` (long form 無し) は
+# ``_GIT_RM_SAFE_SHORT_FLAGS`` 側。
+_GIT_RM_KNOWN_LONG_OPTS = frozenset({
+    "--force", "--dry-run", "--quiet", "--ignore-unmatch", "--sparse",
+})
+# ``--cached`` と共存しても安全な短縮 flag (束ね ``-rf`` 可)。short option は
+# 1 文字なので接頭辞問題は無いが、未知の文字 (``-h`` / ``-x`` 等) を含む束ねは
+# 同じく index-only と見なさない (fail-closed)。git rm の短縮 flag は値を取らない。
+_GIT_RM_SAFE_SHORT_FLAGS = frozenset("fnrq")
 
 # hard-stop: 動的評価 / 入力リダイレクト / グループ化 — 静的に結果を決められない。
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。

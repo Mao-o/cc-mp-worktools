@@ -54,8 +54,9 @@ segment 単位再評価へ移行)。
      オプション (``-f`` / ``--files0-from`` 等) が無い場合のみ metadata-only。
      ``git status`` は ``-v`` が staged diff を出すため対象外。
      **0.19.0**: ``chmod`` / ``chown`` / ``chgrp`` / ``touch`` (属性操作、内容を
-     読む option 無し) と ``git rm --cached`` (index からの除去のみ、``--`` より
-     前の exact match、``--pathspec-from-file`` 無し) も metadata-only。両 hook
+     読む option 無し) と ``git rm --cached`` (index からの除去のみ。``--cached``
+     完全一致 + 既知の安全な option 以外が無いとき。未知・省略形の ``--xxx``
+     が 1 つでもあれば fail-closed で通常経路) も metadata-only。両 hook
      の reason が推奨する次善策を自分で deny していた自己矛盾の解消
      (bd_092a232e-snw.3)。plain ``git rm`` (作業ツリー削除) は deny 維持
    - operand scan: 各 path 候補について
@@ -93,9 +94,9 @@ from handlers.bash.constants import (  # noqa: F401
     _GIT_LS_FILES_OBJECT_OPTS,
     _GIT_LS_FILES_SHORT_FLAGS,
     _GIT_METADATA_SUBCOMMANDS,
-    _GIT_RM_CONTENT_READING_OPTS,
     _GIT_RM_INDEX_ONLY_FLAG,
-    _GIT_RM_INDEX_ONLY_NEGATION,
+    _GIT_RM_KNOWN_LONG_OPTS,
+    _GIT_RM_SAFE_SHORT_FLAGS,
     _GLOB_CHARS,
     _HARD_STOP_CHARS,
     _METADATA_CONTENT_READING_OPTS,
@@ -221,17 +222,23 @@ def _git_rm_is_index_only(args: list[str]) -> bool:
     """``git rm`` が index からの除去のみ (``--cached``) で、作業ツリーの実ファイルを
     消さず内容も出力しないか (0.19.0, bd_092a232e-snw.3)。
 
-    - ``--cached`` は exact match のみ (``--cached=...`` 形は git に存在しない)。
-      ``--`` 以降は pathspec なので flag として数えない (``git rm .env -- --cached``
-      は ``.env`` を作業ツリーから消すため deny に残す)。
-    - ``--pathspec-from-file=<file>`` / ``--pathspec-from-file <file>`` は operand
-      ファイルの **中身** を pathspec として読み、不一致行を
-      ``fatal: pathspec '<行>' did not match`` で echo するため ``file -f`` と同じ
-      内容露出クラスとして除外する (operand scan → deny)。
-    - ``-r`` / ``-f`` / ``-n`` / ``-q`` / ``--ignore-unmatch`` / ``--sparse`` は
-      いずれも内容を出さず、``--cached`` 付きなら実ファイルも消さない。
-    - ``--no-cached`` (parse-options の否定形) は後勝ちで index-only を取り消し
-      作業ツリーも削除するため、出現順で評価して deny に戻す (L2 review)。
+    **fail-closed** (Codex review P1): git は long option の **一意な接頭辞** を
+    受理する (``--no-cach`` = ``--no-cached`` は後勝ちで作業ツリーも削除、
+    ``--pathspec-from-fil`` = ``--pathspec-from-file`` は operand の中身を pathspec
+    として読み ``fatal: pathspec '<行>'`` に echo) ため、危険な option を
+    exact-token で deny-list しても省略形がすり抜ける。省略形の展開を自前実装
+    せず、**既知の安全な option (完全一致) 以外が 1 つでもあれば index-only と
+    見なさない** (→ 通常の operand scan → 機密 operand なら deny)。
+
+    - ``--cached`` は完全一致のみ。``--`` 以降は pathspec なので flag として
+      数えない (``git rm .env -- --cached`` は ``.env`` を作業ツリーから消すため
+      deny に残す。逆に ``git rm --cached .env -- --no-cached`` は index-only)。
+    - 既知 long option: ``_GIT_RM_KNOWN_LONG_OPTS`` (``--force`` / ``--dry-run`` /
+      ``--quiet`` / ``--ignore-unmatch`` / ``--sparse``)。``--no-cached`` /
+      ``--pathspec-from-file[=<f>]`` / ``--pathspec-file-nul`` / それらの省略形 /
+      ``--cached`` の省略形 (``--cache``) は未知として index-only から外れる。
+    - 既知 short flag: ``_GIT_RM_SAFE_SHORT_FLAGS`` (``f`` / ``n`` / ``r`` / ``q``、
+      束ね ``-rf`` 可)。それ以外の文字を含む短縮形 (``-h`` / ``-x``) も未知扱い。
     """
     has_cached = False
     for tok in args:
@@ -240,12 +247,14 @@ def _git_rm_is_index_only(args: list[str]) -> bool:
         if tok == _GIT_RM_INDEX_ONLY_FLAG:
             has_cached = True
             continue
-        if tok == _GIT_RM_INDEX_ONLY_NEGATION:
-            has_cached = False
-            continue
-        for opt in _GIT_RM_CONTENT_READING_OPTS:
-            if tok == opt or tok.startswith(opt + "="):
+        if tok.startswith("--"):
+            if tok not in _GIT_RM_KNOWN_LONG_OPTS:
                 return False
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            if not all(c in _GIT_RM_SAFE_SHORT_FLAGS for c in tok[1:]):
+                return False
+            continue
     return has_cached
 
 

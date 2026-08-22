@@ -2092,11 +2092,57 @@ class TestRecommendedRemedyAllow(BaseBash):
         # check-ignore / ls-files と同じく global option 前置形は保守的に対象外
         self._assert_deny_all_modes("git -C /repo rm --cached .env")
 
-    def test_git_rm_no_cached_negation_is_last_wins(self):
-        # parse-options の否定形は後勝ち: `--cached --no-cached` は作業ツリーも
-        # 削除する (実 git 2.50 で確認、L2 review) → deny。逆順は index-only のまま
-        self._assert_deny_all_modes("git rm --cached --no-cached .env")
-        self._assert_allow_all_modes("git rm --no-cached --cached .env")
+    def test_git_rm_unknown_or_abbreviated_long_option_fails_closed(self):
+        # git は long option の一意な接頭辞を受理する (`--no-cach` = `--no-cached`
+        # は後勝ちで作業ツリーも削除、`--pathspec-from-fil` は中身を pathspec
+        # として読み echo)。exact-token の deny-list では省略形がすり抜けるため、
+        # 既知の安全な option 以外が 1 つでもあれば index-only と見なさず通常経路
+        # (operand scan → deny) に倒す (Codex review P1、fail-closed)
+        for cmd in (
+            "git rm --cached --no-cached .env",
+            "git rm --no-cached --cached .env",
+            "git rm --cached --no-cach .env",
+            "git rm --cached --no-c .env",
+            "git rm --cached --pathspec-from-fil=.env",
+            "git rm --cached --pathspec-from-fil .env",
+            "git rm --cached --pathspec-file-nul --pathspec-from-file=.env",
+            "git rm --cached --unknown-option .env",
+        ):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_abbreviated_cached_is_conservative_deny(self):
+        # `--cache` / `--cac` は git 的には `--cached` だが、省略形の展開は
+        # 自前実装しない (保守側 = deny に倒れるだけで露出は無い)
+        for cmd in ("git rm --cache .env", "git rm --cac .env"):
+            self._assert_deny_all_modes(cmd)
+
+    def test_git_rm_known_long_options_with_cached_allow(self):
+        for cmd in (
+            "git rm --cached --force .env",
+            "git rm --cached --dry-run .env",
+            "git rm --cached --quiet --ignore-unmatch .env",
+            "git rm --cached --sparse .env",
+            "git rm --force --cached -- .env",
+            "git rm --cached .env -- --no-cached",  # `--` 以降は pathspec
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_git_rm_known_short_flag_bundles_with_cached_allow(self):
+        for cmd in (
+            "git rm -rf --cached config/.env",
+            "git rm --cached -fq .env",
+            "git rm -n --cached .env",
+            "git rm -rfnq --cached config/.env",
+        ):
+            self._assert_allow_all_modes(cmd)
+
+    def test_git_rm_unknown_short_flag_fails_closed(self):
+        for cmd in (
+            "git rm --cached -h .env",
+            "git rm --cached -x .env",
+            "git rm --cached -rx config/.env",
+        ):
+            self._assert_deny_all_modes(cmd)
 
     # --- chmod / chown / chgrp / touch: 属性操作 → allow ---
     def test_chmod_chown_chgrp_touch_dotenv_allow(self):

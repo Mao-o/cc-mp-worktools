@@ -323,9 +323,14 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   書込み形 (`chmod 600 x > .env`) は safe_read 外のため residual metachar で
   従来通り ask_or_allow (echo と同じ、緩めない)。`git rm --cached -r` は index
   除去の範囲が広がるだけで内容出力も削除も無く allow、`touch -r` /
-  `chmod --reference` は timestamp / mode を読むだけで allow。`--no-cached`
-  (parse-options の否定形) は後勝ちで index-only を取り消し作業ツリーも削除する
-  ため、出現順で評価して deny に戻す (L2 review)。
+  `chmod --reference` は timestamp / mode を読むだけで allow。git は long option
+  の **一意な接頭辞** を受理する (`--no-cach` = `--no-cached` で後勝ちにより
+  作業ツリーも削除、`--pathspec-from-fil` = `--pathspec-from-file`) ため、危険な
+  option を exact-token で deny-list しても省略形がすり抜ける (Codex review P1)。
+  省略形の展開を自前実装せず、**既知の安全な option (`_GIT_RM_KNOWN_LONG_OPTS`
+  完全一致 / `_GIT_RM_SAFE_SHORT_FLAGS` の束ね) 以外が 1 つでもあれば index-only
+  と見なさない** fail-closed 規則にした。`--cached` 自体の省略形 (`--cache`) も
+  展開せず保守側 (通常経路 → deny) に倒れるだけで露出は無い。
 
 ### 対応 (deny/allow 確定できる)
 

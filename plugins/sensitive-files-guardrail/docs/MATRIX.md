@@ -203,10 +203,16 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 
 `git rm` は **`--cached` 付きのみ** metadata-only (0.19.0, bd_092a232e-snw.3):
 index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。
-`--cached` は `--` より前の exact match。`--pathspec-from-file=<file>` は operand
+`--cached` は `--` より前の完全一致。`--pathspec-from-file=<file>` は operand
 の中身を pathspec として読み不一致行を `fatal: pathspec '<行>' did not match` で
 echo するため除外して deny (`file -f` と同クラス)。plain `git rm` は作業ツリー
-削除 (破壊操作) で deny 維持。`chmod` / `chown` / `chgrp` / `touch` は内容を読む
+削除 (破壊操作) で deny 維持。git は long option の **一意な接頭辞** を受理する
+(`--no-cach` = `--no-cached` で後勝ちにより作業ツリーも削除) ため、危険な
+option を exact-token で deny-list しても省略形がすり抜ける。よって **既知の
+安全な option (`--force` / `--dry-run` / `--quiet` / `--ignore-unmatch` /
+`--sparse`、短縮 `-f -n -r -q` と束ね) 以外が 1 つでもあれば index-only と見なさず
+通常経路 (operand scan → 機密 operand なら deny) に倒す** (fail-closed、Codex
+review P1)。`--cache` のような `--cached` 自体の省略形も展開せず保守側 (deny)。`chmod` / `chown` / `chgrp` / `touch` は内容を読む
 option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ) ため
 無条件で metadata-only。いずれも両 hook の reason が次善策として案内するコマンド
 で、0.18.0 までは自分で deny していた (自己矛盾)。
@@ -220,7 +226,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `echo .env`, `printf '%s' .env` (引数文字列の表示のみ) | allow | allow | allow | allow | allow |
 | `realpath .env`, `readlink -f .env`, `basename /app/.env` | allow | allow | allow | allow | allow |
 | `git check-ignore -v .env`, `git ls-files .env`, `git ls-files --error-unmatch .env`, `git status` (裸) | allow | allow | allow | allow | allow |
-| `git rm --cached .env`, `git rm --cached -- .env`, `git rm -r --cached dir/.env`, `git rm --cached -f .env`, `git rm --cached .env && git commit -m untrack` (index からの除去のみ、実ファイルは残る。0.19.0) | allow | allow | allow | allow | allow |
+| `git rm --cached .env`, `git rm --cached -- .env`, `git rm -r --cached dir/.env`, `git rm -rf --cached dir/.env`, `git rm --cached --force --quiet .env`, `git rm --cached .env && git commit -m untrack` (index からの除去のみ、実ファイルは残る。0.19.0) | allow | allow | allow | allow | allow |
 | `chmod 600 .env`, `chmod --reference=.env other`, `chown user .env`, `chgrp staff .env`, `touch .env`, `touch -r .env other` (属性 / timestamp 操作、内容は出ない。0.19.0) | allow | allow | allow | allow | allow |
 | `git status -v -- .env`, `git status --verbose .env` (staged diff で旧/新値 echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls -la .env > /tmp/x` (read operand 機密でも書込み先が非機密 → metadata allow) | allow | allow | allow | allow | allow |
@@ -247,6 +253,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git rm .env`, `git rm -f .env`, `git rm .env -- --cached`, `git rm --cached --no-cached .env` (`--cached` 無し / 後勝ちの否定 = 作業ツリー削除。`--` 以降は pathspec) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git rm --cached --pathspec-from-file=.env`, `git rm --cached --pathspec-from-file .env` (中身を pathspec として読み不一致行を echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env`, `git rm --cached -h .env` (未知 / 省略形の option は fail-closed で通常経路 → deny。Codex review P1) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo check-ignore .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `echo KEY=val > .env` (echo は safe-read 外: residual `>` が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |

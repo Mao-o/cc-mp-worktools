@@ -135,12 +135,16 @@ history カテゴリの「commit / 差分を閲覧しようとした」(意図�
 - **`handlers/bash/constants.py`**: `_METADATA_ONLY_FIRST_TOKENS` に `chmod` /
   `chown` / `chgrp` / `touch` を追加 (内容を読む option が存在しない。
   `--reference=RFILE` / `touch -r RFILE` は mode / owner / timestamp のみ)。
-  `_GIT_RM_INDEX_ONLY_FLAG = "--cached"` / `_GIT_RM_CONTENT_READING_OPTS =
-  {"--pathspec-from-file"}` を新設
+  `_GIT_RM_INDEX_ONLY_FLAG = "--cached"` / `_GIT_RM_KNOWN_LONG_OPTS` /
+  `_GIT_RM_SAFE_SHORT_FLAGS` を新設
 - **`handlers/bash_handler.py`**: `_is_metadata_only` の git 分岐に `rm` を条件付きで
-  追加 (`_git_rm_is_index_only`)。`--cached` が `--` より前に exact match し、
-  `--pathspec-from-file` が無ければ metadata-only (index からの除去のみ、出力は
-  `rm '<path>'` の path 文字列、実ファイルは残る)
+  追加 (`_git_rm_is_index_only`)。`--cached` が `--` より前に完全一致し、既知の
+  安全な option (`--force` / `--dry-run` / `--quiet` / `--ignore-unmatch` /
+  `--sparse`、短縮 `-f -n -r -q` と束ね) 以外が無ければ metadata-only (index から
+  の除去のみ、出力は `rm '<path>'` の path 文字列、実ファイルは残る)。未知・省略形
+  の `--xxx` (`--no-cached` / `--no-cach` / `--pathspec-from-file[=..]` /
+  `--pathspec-from-fil` / `--pathspec-file-nul`) や未知の短縮 flag が 1 つでもあれば
+  fail-closed で通常経路 → 機密 operand なら deny (Codex review P1、後述)
 - **`core/messages.py`**: `_bash_deny_history` を subcommand 別に分割。閲覧系
   (`show` / `diff` / `log` / `cat-file` 等) は従来文面、操作系
   (`_GIT_OPERATE_SUBCOMMANDS` = `add` / `rm` / `mv` / `restore` / `checkout` /
@@ -165,6 +169,7 @@ history カテゴリの「commit / 差分を閲覧しようとした」(意図�
 | `git rm .env`, `git rm -f .env` (作業ツリー削除) | deny / deny | deny / deny (不変) |
 | `git rm .env -- --cached` (`--` 以降は pathspec) | deny / deny | deny / deny (不変) |
 | `git rm --cached --pathspec-from-file=.env` (中身を pathspec として読み echo) | deny / deny | deny / deny (不変) |
+| `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env` (未知 / 省略形の option は fail-closed) | deny / deny | deny / deny (不変) |
 | `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | deny / deny | deny / deny (不変) |
 | `chmod 600 x > .env`, `touch x > .env` (書込み形は residual metachar が先) | ask / allow | ask / allow (不変) |
 | `git show HEAD:.env`, `git diff .env`, `git add .env` | deny / deny | deny / deny (不変。`add` は reason が「操作」文面に) |
@@ -203,8 +208,9 @@ PR 前に fresh context の L2 に diff を敵対的レビューさせた (in-pr
 - **P2 `git rm --cached --no-cached .env` が allow** — parse-options の否定形は
   後勝ちで index-only が取り消され作業ツリーも削除される (実 git 2.50 で確認)。
   うっかり書く形ではないが 1 行で塞げるため `_git_rm_is_index_only` を出現順で
-  評価し `--no-cached` で deny に戻す (`_GIT_RM_INDEX_ONLY_NEGATION`)。逆順の
-  `git rm --no-cached --cached .env` は index-only のまま allow
+  評価し `--no-cached` で deny に戻した (当初)。→ Codex review R1 で「省略形
+  `--no-cach` がすり抜ける」と指摘され、下記の fail-closed 規則に一般化
+  (`--no-cached` はその順序に関わらず未知 option として deny)
 - **P2 `[project:$CLAUDE_PROJECT_DIR]` 誘導が silent no-op になりうる** — Bash
   tool の環境では `CLAUDE_PROJECT_DIR` が未設定で、unquoted echo だと
   `[project:]` に展開され、quoted heredoc / Write だと literal に残る。どちらも
@@ -232,6 +238,29 @@ PR 前に fresh context の L2 に diff を敵対的レビューさせた (in-pr
 - **P3 GC の TTL 表記** — state の mtime は block 時のみ更新されるため「最後の
   block から 7 日」が正確 (README / DESIGN を修正)
 
+### review 対応 (2) — Codex R1 P1: long option の省略形を fail-closed で扱う
+
+git は long option の **一意な接頭辞** を受理する (`git rm -h` の
+`--[no-]cached`)。`git rm --cached --no-cach .env` は index と作業ツリーの両方から
+削除するが、exact-token の `--no-cached` 判定は `--no-cach` を見落として
+index-only と判定し、metadata-only 経路で機密 operand を scan せず allow していた。
+`--pathspec-from-file` の省略形 (`--pathspec-from-fil`) も内容読取チェックを
+すり抜けていた。
+
+危険な option を列挙する deny-list は省略形に対して原理的に不完全なので、逆に
+**既知の安全な option (`_GIT_RM_KNOWN_LONG_OPTS` = `--force` / `--dry-run` /
+`--quiet` / `--ignore-unmatch` / `--sparse` の完全一致、`_GIT_RM_SAFE_SHORT_FLAGS`
+= `-f -n -r -q` の束ね) 以外が 1 つでもあれば index-only と見なさない**
+fail-closed 規則にした (省略形の展開は自前実装しない)。`--cached` 自体も完全一致
+のみで、`--cache` / `--cac` は通常経路 → deny に倒れる (保守側、露出は無い)。
+`--` 以降は pathspec として flag に数えない規則は維持
+(`git rm --cached .env -- --no-cached` は index-only のまま)。
+
+テスト: `TestRecommendedRemedyAllow` の `--no-cached` 後勝ちテストを、省略形 /
+未知 long option ×8 と未知短縮 flag ×3 の fail-closed deny、`--cached` 省略形の
+保守 deny ×2、既知 long option ×6 と短縮 flag 束ね ×4 の allow 維持に置き換え
+(計 5 メソッド、+4)。MATRIX / DESIGN / README を同期。
+
 L2 が問題なしと確認した観点: `git rm --cached` の `-r` / `-f` / `-n` / `-q` /
 `--sparse` / `--ignore-unmatch` / `-rf` 束ね / 後置 `--cached` / glob は allow で
 内容出力なし (出力は `rm '<path>'`)、`--pathspec-from-file` の leak は実 git で
@@ -244,7 +273,7 @@ tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追�
 
 ### テスト
 
-redact **801 件** (+39、0.18.0 review 対応後の 762 件基準)、check **67 件** (+40)。
+redact **805 件** (+43、0.18.0 review 対応後の 762 件基準)、check **67 件** (+40)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option

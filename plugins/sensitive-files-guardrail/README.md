@@ -229,8 +229,9 @@ note: nested structure not parsed. only top-level key names returned.
 > **0.19.0 で次善策コマンドを metadata-only に追加** (bd_092a232e-snw.3): 両 hook
 > の reason が「tracked なら `git rm --cached <path>` で untrack」「`chmod 600 .env`」
 > と案内しながら Bash hook 自身がそれらを deny する自己矛盾があった。
-> `git rm --cached` (`--cached` は `--` より前の exact match、`--pathspec-from-file`
-> 無し) は index からの除去のみで実ファイルは残り内容も出ないため allow。`chmod` /
+> `git rm --cached` (`--cached` 完全一致。`--no-cached` / `--pathspec-from-file` や
+> その省略形を含む「既知の安全な option 以外」が 1 つでもあれば fail-closed で
+> 通常経路) は index からの除去のみで実ファイルは残り内容も出ないため allow。`chmod` /
 > `chown` / `chgrp` / `touch` は内容を読む option が存在しない (`--reference` /
 > `-r` は mode / owner / timestamp のみ) ため allow。plain `git rm` (作業ツリー
 > 削除 = 破壊操作) と `git rm --cached --pathspec-from-file=<file>` (中身を pathspec
