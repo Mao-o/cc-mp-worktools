@@ -321,6 +321,339 @@ class TestOutsideWorktree(HookTestCase):
         self.assertEqual(self.pending(SESSION_A), [], "ツリー外パスが残り続けないこと")
 
 
+def _parse_output(output: str) -> dict:
+    return json.loads(output) if output else {}
+
+
+class TestExclusion(HookTestCase):
+    """zh5.9: 機密・非コードファイルの差分を外部 AI に送らない。除外は恒久で通知を出す。"""
+
+    SECRET = "API_KEY=sk-live-DO-NOT-SEND\n"
+
+    def test_secret_file_alone_is_not_reviewed_and_not_kept(self):
+        self.edit(SESSION_A, ".env", self.SECRET)
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        self.assertEqual(self.pending(SESSION_A), [], "除外は恒久 (pending に戻さない)")
+        parsed = _parse_output(output)
+        self.assertNotIn("decision", parsed)
+        self.assertIn("1 ファイルを外部 AI レビューから除外", parsed["systemMessage"])
+        self.assertIn(".env (既定除外: .env)", parsed["systemMessage"])
+        self.assertNotIn("sk-live", parsed["systemMessage"], "内容は通知にも出さない")
+        self.assertIn("除外", self.last_stderr)
+
+    def test_secret_is_dropped_while_code_is_reviewed(self):
+        self.edit(SESSION_A, "certs/server.pem", "-----BEGIN PRIVATE KEY-----\nXYZ\n")
+        self.edit(SESSION_A, "a.py", "print('hi')\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        diff = self.review_calls[0]
+        self.assertNotIn("server.pem", diff)
+        self.assertNotIn("PRIVATE KEY", diff)
+        self.assertIn("certs/server.pem (既定除外: *.pem)", _parse_output(output)["systemMessage"])
+
+        # 次ターンでも再掲されない (reviewed にも pending にも無い)
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_block_output_carries_both_decision_and_notice(self):
+        self.edit(SESSION_A, ".env", self.SECRET)
+        self.edit(SESSION_A, "a.py", "v1\n")
+        parsed = _parse_output(self.stop(SESSION_A, "1. **直接影響** — 何か壊れる"))
+        self.assertEqual(parsed["decision"], "block")
+        self.assertIn("直接影響", parsed["reason"])
+        self.assertIn(".env", parsed["systemMessage"])
+
+    def test_no_notice_when_nothing_is_excluded(self):
+        self.edit(SESSION_A, "a.py", "v1\n")
+        self.assertEqual(self.stop(SESSION_A, "REVIEW_CLEAN"), "")
+
+    def test_env_glob_excludes_documents(self):
+        os.environ[self.entry.exclusion.ENV_EXCLUDE] = "docs/, *.csv"
+        self.edit(SESSION_A, "docs/meeting-notes.txt", "customer said ...\n")
+        self.edit(SESSION_A, "data/rows.csv", "a,b\n")
+        self.edit(SESSION_A, "a.py", "v1\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("customer said", self.review_calls[0])
+        self.assertNotIn("rows.csv", self.review_calls[0])
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn("2 ファイルを外部 AI レビューから除外", message)
+        self.assertIn("docs/meeting-notes.txt (EXTERNAL_AI_POST_REVIEW_EXCLUDE: docs/*)", message)
+
+    def test_code_only_drops_markdown(self):
+        os.environ[self.entry.exclusion.ENV_CODE_ONLY] = "1"
+        self.edit(SESSION_A, "notes.md", "# private notes\n")
+        self.edit(SESSION_A, "a.py", "v1\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("private notes", self.review_calls[0])
+        self.assertIn("notes.md (CODE_ONLY: .md)", _parse_output(output)["systemMessage"])
+
+    def test_bash_created_secret_is_excluded_too(self):
+        def mutate():
+            _testutil.write(self.repo, ".env", self.SECRET)
+            _testutil.write(self.repo, "generated.py", "x = 1\n")
+
+        self.bash(SESSION_A, "tu_gen", mutate)
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("generated.py")
+        self.assertNotIn("sk-live", self.review_calls[0])
+
+    def test_symlink_named_like_a_secret_is_excluded(self):
+        os.makedirs(os.path.join(self.repo, "vault"))
+        _testutil.write(self.repo, "vault/c.json", '{"token": "abc"}\n')
+        link = os.path.join(self.repo, "credentials.json")
+        os.symlink(os.path.join(self.repo, "vault", "c.json"), link)
+        self.run_hook(
+            "post-tool",
+            {
+                "session_id": SESSION_A,
+                "cwd": self.repo,
+                "tool_name": "Write",
+                "tool_use_id": "tu_link",
+                "tool_input": {"file_path": link},
+            },
+        )
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_edit_through_symlinked_credentials_directory_is_excluded(self):
+        """Codex P1: `credentials/` → `ordinary/` の symlink 経由で編集しても外部に送らない。"""
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        _testutil.write(self.repo, "ordinary/data.json", '{"k": 1}\n')
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "data")
+        os.symlink(os.path.join(self.repo, "ordinary"), os.path.join(self.repo, "credentials"))
+
+        self.edit(SESSION_A, "credentials/data.json", '{"k": "sk-live-DO-NOT-SEND"}\n')
+        self.edit(SESSION_A, "a.py", "v1\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("sk-live", self.review_calls[0])
+        self.assertNotIn("data.json", self.review_calls[0])
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn('credentials/data.json (既定除外: 語 "credentials")', message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def _tracked_ordinary_with_credentials_link(self, track_link: bool) -> str:
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        target = _testutil.write(self.repo, "ordinary/data.json", '{"k": 1}\n')
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "data")
+        os.symlink(os.path.join(self.repo, "ordinary"), os.path.join(self.repo, "credentials"))
+        if track_link:
+            _testutil.git(self.repo, "add", "-A")
+            _testutil.git(self.repo, "commit", "-qm", "link")
+        return target
+
+    def _assert_bash_edit_via_real_path_is_excluded(self, track_link: bool) -> None:
+        """Codex R2 P1: `sed -i credentials/data.json` の変更は `git status` では実体名
+        `ordinary/data.json` でしか現れない。別名 `credentials/data.json` を生成して除外する。"""
+        target = self._tracked_ordinary_with_credentials_link(track_link)
+
+        def mutate():
+            with open(target, "w") as f:
+                f.write('{"k": "sk-live-DO-NOT-SEND"}\n')
+
+        self.bash(SESSION_A, "tu_sed", mutate)
+        self.assertEqual(self.pending(SESSION_A), [target], "claim には実体名しか入らない前提")
+        self.edit(SESSION_A, "a.py", "v1\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("sk-live", self.review_calls[0])
+        self.assertNotIn("data.json", self.review_calls[0])
+        self.assertIn(
+            'credentials/data.json (既定除外: 語 "credentials")',
+            _parse_output(output)["systemMessage"],
+        )
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_bash_edit_via_real_path_is_excluded_by_tracked_symlink_alias(self):
+        self._assert_bash_edit_via_real_path_is_excluded(track_link=True)
+
+    def test_bash_edit_via_real_path_is_excluded_by_untracked_symlink_alias(self):
+        self._assert_bash_edit_via_real_path_is_excluded(track_link=False)
+
+    def test_bash_edit_without_any_symlink_is_reviewed_as_before(self):
+        """symlink が無い repo では別名生成が何も変えない (挙動不変)。"""
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        target = _testutil.write(self.repo, "ordinary/data.json", '{"k": 1}\n')
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "data")
+
+        def mutate():
+            with open(target, "w") as f:
+                f.write('{"k": 2}\n')
+
+        self.bash(SESSION_A, "tu_sed", mutate)
+        self.assertEqual(self.stop(SESSION_A, "REVIEW_CLEAN"), "", "通知なし = 出力なし")
+        self.assertReviewed("ordinary/data.json", '"k": 2')
+
+    def test_stale_state_from_older_version_is_drained(self):
+        """0.4.1 以前が pending に積んだ機密パスも、次の Stop で落ちて残り続けない。"""
+        self.state.record_pending(SESSION_A, [os.path.join(self.repo, ".env")])
+        _testutil.write(self.repo, ".env", self.SECRET)
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_excluded_paths_do_not_consume_review_slots(self):
+        self.entry.MAX_REVIEW_PATHS = 2
+        self.edit(SESSION_A, ".env", self.SECRET)
+        self.edit(SESSION_A, "id_rsa", "key\n")
+        self.edit(SESSION_A, "a.py", "v1\n")
+        self.edit(SESSION_A, "b.py", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "b.py")
+        self.assertEqual(self.pending(SESSION_A), [], "除外分が枠を食って overflow していない")
+
+    def test_negation_sends_code_under_a_credentials_directory(self):
+        os.environ[self.entry.exclusion.ENV_EXCLUDE] = "!credentials-service/*"
+        self.edit(SESSION_A, "credentials-service/main.go", "package main\n")
+        self.edit(SESSION_A, "credentials.json", '{"k": "sk-live-DO-NOT-SEND"}\n')
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("credentials-service/main.go")
+        self.assertNotIn("sk-live", self.review_calls[0])
+
+
+class TestLiteralPathspecFlow(HookTestCase):
+    """L2 P1: glob に見えるファイル名で別セッションの編集が混入しない / 旧 state の glob 風
+    エントリで機密が漏れない。"""
+
+    def test_glob_named_file_does_not_pull_in_other_sessions_edit(self):
+        _testutil.write(self.repo, "app/[id]/page.tsx", "dynamic\n")
+        _testutil.write(self.repo, "app/i/page.tsx", "static\n")
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "routes")
+
+        self.edit(SESSION_A, "app/[id]/page.tsx", "dynamic v2\n")
+        self.edit(SESSION_B, "app/i/page.tsx", "OTHER_SESSION_EDIT\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("app/[id]/page.tsx", "dynamic v2")
+        self.assertNotIn("OTHER_SESSION_EDIT", self.review_calls[0])
+        self.assertNotIn("app/i/page.tsx", self.review_calls[0])
+
+    def test_glob_looking_stale_entry_does_not_leak_tracked_secret(self):
+        _testutil.write(self.repo, ".env", "A=1\n")
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "env")
+        _testutil.write(self.repo, ".env", "A=sk-live-LEAK\n")  # このセッションの編集ではない
+        self.state.record_pending(SESSION_A, [os.path.join(self.repo, "[.]env")])
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        self.assertEqual(self.pending(SESSION_A), [])
+
+
+class TestByteBudgetFlow(HookTestCase):
+    """zh5.8: 予算に収まらないファイルは pending に戻り hash 未記録、巨大単一ファイルは truncated。"""
+
+    def _content(self, kib: int, seed: str = "x") -> str:
+        return _testutil.content_kib(kib, seed)
+
+    def test_second_30kb_file_is_reviewed_next_turn(self):
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "b.py", self._content(30, "y"))
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("b.py", self.review_calls[0])
+        self.assertLessEqual(len(self.review_calls[0].encode()), self.entry.MAX_DIFF_BYTES)
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "b.py")])
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn("予算に収まらないため次ターンに繰り越し", message)
+        self.assertIn("b.py", message)
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("b.py")
+        self.assertNotIn("a.py", self.review_calls[0], "a.py は hash 記録済みで再掲されない")
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_deferred_file_is_not_starved_by_new_edits(self):
+        """繰り越したファイルは次ターンの先頭に来る (新しい編集に追い越され続けない)。"""
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "z.py", self._content(30, "y"))
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+
+        # 次ターンでアルファベット順で先に来る大きな編集を足しても z.py が先
+        self.edit(SESSION_A, "b.py", self._content(30, "w"))
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("z.py")
+        self.assertNotIn("b.py", self.review_calls[0])
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "b.py")])
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("b.py")
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_single_50kb_file_is_truncated_and_marked_reviewed(self):
+        self.edit(SESSION_A, "huge.py", self._content(50))
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("huge.py")
+        diff = self.review_calls[0]
+        self.assertLessEqual(len(diff.encode()), self.entry.MAX_FILE_DIFF_BYTES)
+        self.assertIn("(truncated for review", diff)
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn("先頭のみ送信 (truncated)", message)
+        self.assertIn("huge.py", message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+        # 切り詰め時は hash を記録する: 変わらなければ再掲しない
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+
+        # 末尾だけ変えても (hash は全文で取る) 再掲される
+        self.edit(SESSION_A, "huge.py", self._content(50) + "tail\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("huge.py")
+
+    def test_carry_over_keeps_claim_order_across_overflow_and_budget(self):
+        """予算超過 (rels の途中) が上限超過 (rels の外) より先に pending へ戻る。"""
+        self.entry.MAX_REVIEW_PATHS = 2
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "b.py", self._content(30, "y"))
+        self.edit(SESSION_A, "c.py", self._content(30, "w"))  # 上限超過で overflow
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+        self.assertEqual(
+            [os.path.basename(p) for p in self.pending(SESSION_A)], ["b.py", "c.py"]
+        )
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("b.py")
+        self.assertNotIn("c.py", self.review_calls[0])
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("c.py")
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_cursor_failure_keeps_deferred_and_submitted_pending(self):
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "b.py", self._content(30, "y"))
+        self.stop(SESSION_A, None)  # cursor 失敗
+        self.assertEqual(
+            sorted(os.path.basename(p) for p in self.pending(SESSION_A)),
+            ["a.py", "b.py"],
+            "送ったものも繰り越したものも pending に残る",
+        )
+        state_path = os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{SESSION_A}.json"
+        )
+        with open(state_path) as f:
+            self.assertEqual(json.load(f)["reviewed"], {}, "失敗時は hash を記録しない")
+
+
 class TestGuards(HookTestCase):
     """再帰防止・無効化スイッチ。"""
 

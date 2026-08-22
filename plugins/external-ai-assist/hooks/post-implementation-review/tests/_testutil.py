@@ -25,6 +25,17 @@ for _p in (_HOOKS_DIR, _PKG_DIR):
 
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
 
+# 開発者の ~/.gitconfig (color.ui=always / diff.external / diff.noprefix 等) でテストが
+# 揺れないよう、git にグローバル/システム設定を読ませない
+HERMETIC_GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+# 開発者 shell の除外設定 (CODE_ONLY=1 等) で `.txt` を使う既存テストが落ちないよう pin する
+NEUTRAL_EXCLUSION_ENV = {
+    "EXTERNAL_AI_POST_REVIEW_CODE_ONLY": "0",
+    "EXTERNAL_AI_POST_REVIEW_EXCLUDE": "",
+    "EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS": "1",
+}
+
 
 def load_entry():
     """`__main__.py` を `__main__` 以外の名前で読み込む (main() の自動実行を避ける)。"""
@@ -61,6 +72,15 @@ def write(repo: str, rel: str, content: str) -> str:
     return full
 
 
+def content_kib(kib: int, seed: str = "x") -> str:
+    """kib KiB ちょうどのテキスト (1 行 64 バイト、行ごとに連番)。予算テストのサイズ制御用。
+
+    新規ファイルの diff は本文 + 行ごとの `+` + ヘッダ約 110 バイトになる。
+    """
+    head = (seed * 58)[:58]
+    return "".join(f"{head}{i:05d}\n" for i in range(kib * 16))
+
+
 class HookTestCase(unittest.TestCase):
     """TMPDIR を隔離し、git repo と entry module を用意する基底クラス。
 
@@ -78,6 +98,8 @@ class HookTestCase(unittest.TestCase):
                 "TMPDIR": self.tmpdir,
                 "EXTERNAL_AI_POST_REVIEW": "1",
                 "EXTERNAL_AI_POST_REVIEW_BASH_TRACKING": "1",
+                **NEUTRAL_EXCLUSION_ENV,
+                **HERMETIC_GIT_ENV,
             },
         )
         self._env.start()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import _testutil
 from _testutil import git, init_repo, write
@@ -14,10 +15,132 @@ import gitscan
 class GitScanTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self._env = mock.patch.dict(os.environ, _testutil.HERMETIC_GIT_ENV)
+        self._env.start()
         self.repo = init_repo(os.path.join(self._tmp.name, "repo"))
 
     def tearDown(self) -> None:
+        self._env.stop()
         self._tmp.cleanup()
+
+
+class TestLiteralPathspec(GitScanTestCase):
+    """pathspec を glob として解釈させない (L2 P1: claim していないファイルの diff が混入する)。"""
+
+    def test_bracket_name_does_not_match_sibling(self):
+        write(self.repo, "app/[id]/page.tsx", "dynamic\n")
+        write(self.repo, "app/i/page.tsx", "static\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "routes")
+        write(self.repo, "app/[id]/page.tsx", "dynamic v2\n")
+        write(self.repo, "app/i/page.tsx", "OTHER_SESSION_EDIT\n")
+
+        diff = gitscan.path_diff(self.repo, "app/[id]/page.tsx", untracked=False, has_head=True)
+        self.assertIn("dynamic v2", diff)
+        self.assertNotIn("OTHER_SESSION_EDIT", diff)
+        self.assertNotIn("app/i/page.tsx", diff)
+
+    def test_bracket_named_untracked_file(self):
+        write(self.repo, "app/[slug]/page.tsx", "new\n")
+        write(self.repo, "app/s/page.tsx", "other\n")
+        self.assertEqual(
+            gitscan.untracked_among(self.repo, ["app/[slug]/page.tsx"]),
+            {"app/[slug]/page.tsx"},
+        )
+        diff = gitscan.path_diff(self.repo, "app/[slug]/page.tsx", untracked=True, has_head=True)
+        self.assertIn("+new", diff)
+        self.assertNotIn("other", diff)
+
+    def test_glob_looking_entry_matches_nothing(self):
+        """旧 state の `[.]env` / `?env` / `*` が tracked の `.env` を拾わない。"""
+        write(self.repo, ".env", "A=1\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "env")
+        write(self.repo, ".env", "A=sk-live-LEAK\n")
+        write(self.repo, "fresh.txt", "x\n")
+        for rel in ("[.]env", "?env", "*", "src/*"):
+            with self.subTest(rel=rel):
+                self.assertEqual(
+                    gitscan.path_diff(self.repo, rel, untracked=False, has_head=True), ""
+                )
+                self.assertEqual(
+                    gitscan.path_diff(self.repo, rel, untracked=True, has_head=True), ""
+                )
+        self.assertEqual(gitscan.untracked_among(self.repo, ["*", "[f]resh.txt"]), set())
+
+
+class TestSymlinkMap(GitScanTestCase):
+    """repo 内 symlink の列挙 (tracked は index、untracked は scandir)。"""
+
+    def _link(self, rel: str, target_rel: str) -> None:
+        full = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        os.symlink(os.path.join(self.repo, target_rel), full)
+
+    def test_repo_without_symlinks_is_empty(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self.assertEqual(gitscan.symlink_map(self.repo), {})
+
+    def test_tracked_symlink_dir_is_listed(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self._link("credentials", "ordinary")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "link")
+        self.assertEqual(gitscan.symlink_map(self.repo), {"credentials": "ordinary"})
+
+    def test_untracked_symlink_dir_is_listed(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self._link("credentials", "ordinary")
+        self.assertEqual(gitscan.symlink_map(self.repo), {"credentials": "ordinary"})
+
+    def test_file_symlink_and_nested_symlink(self):
+        write(self.repo, "vault/c.json", "{}\n")
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self._link("credentials.json", "vault/c.json")
+        self._link("config/secrets", "ordinary")
+        self.assertEqual(
+            gitscan.symlink_map(self.repo),
+            {"credentials.json": "vault/c.json", "config/secrets": "ordinary"},
+        )
+
+    def test_symlink_to_outside_is_ignored(self):
+        outside = os.path.join(self._tmp.name, "outside")
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(self.repo, "credentials"))
+        self.assertEqual(gitscan.symlink_map(self.repo), {})
+
+    def test_tracked_symlink_beyond_scan_depth_is_still_found(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        deep = "a/b/c/d/credentials"
+        self._link(deep, "ordinary")
+        self.assertEqual(gitscan.symlink_map(self.repo), {}, "untracked は深さ上限で見ない")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "deep link")
+        self.assertEqual(gitscan.symlink_map(self.repo), {deep: "ordinary"})
+
+    def test_caps_limit_the_scan(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        for i in range(6):
+            self._link(f"link{i}", "ordinary")
+        with mock.patch.object(gitscan, "MAX_SYMLINKS", 2):
+            self.assertEqual(len(gitscan.symlink_map(self.repo)), 2)
+        with mock.patch.object(gitscan, "SYMLINK_SCAN_BUDGET", 1):
+            self.assertLessEqual(len(gitscan.symlink_map(self.repo)), 1)
+
+
+class TestNoColor(GitScanTestCase):
+    def test_diff_ignores_color_config(self):
+        """`color.ui=always` でも ANSI を混ぜない (hash とバイト予算が狂う)。"""
+        git(self.repo, "config", "color.ui", "always")
+        git(self.repo, "config", "color.diff", "always")
+        write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
+        write(self.repo, "fresh.txt", "x\n")
+        tracked = gitscan.path_diff(self.repo, "seed.txt", untracked=False, has_head=True)
+        untracked = gitscan.path_diff(self.repo, "fresh.txt", untracked=True, has_head=True)
+        self.assertIn("+BETA", tracked)
+        self.assertNotIn("\x1b[", tracked)
+        self.assertIn("+x", untracked)
+        self.assertNotIn("\x1b[", untracked)
 
 
 class TestWorktreeRoot(GitScanTestCase):

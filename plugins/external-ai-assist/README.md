@@ -82,12 +82,65 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
   判断根拠は `hooks/post-implementation-review/gitscan.py` の docstring)
 - 同一作業ツリーで `cursor agent` が同時に 2 つ起動しないよう flock で直列化
 - レビュー結果を配信できた時だけ消費を確定し、cursor 失敗時は次ターンに持ち越す
+- **機密ファイル・非コードファイルは外部に送らない** (後述の除外規則。除外は恒久で、
+  次ターンにも再掲しない)
 - 1 ターンあたり 60 パスまで。超過分は捨てずに次ターンへ繰り越す
-- 差分は 40 KB まで、超過分は truncate
+- 差分は **ファイル単位で** 合計 40 KB の予算に積む。収まらないファイルは送らずに次ターンへ
+  繰り越す (レビュー済みにはしない。繰り越し分は次ターンの先頭に来る)。1 ファイルが 32 KB を
+  超える場合だけ先頭を `(truncated)` 付きで送り、そのファイルはレビュー済みとして扱う
+  (超えた分の hunk は、そのファイルの差分が変わるまでレビューされない)
+- 除外・繰り越し・切り詰めが起きたターンは、対象ファイル名と理由を `systemMessage` と
+  stderr に出す (ファイルの内容は出さない)
 - レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id>.txt` にも保存
 - 状態ファイルは 48 時間で GC (旧 `$TMPDIR/post-review-markers/` の残骸も掃除する)
 
 プロンプトは `hooks/post-implementation-review/prompts/post-implementation-cursor.md` に外部化され、出力は 5 項目 (直接影響 / 間接影響 / 未検証ケース / 追加テスト / マージ前確認) に固定。
+
+#### 外部に送らないファイル (除外規則)
+
+差分を Cursor に渡す前に、パスごとに次の順で判定し、どれかに当たれば**そのファイルの差分は
+送らない** (判定は `hooks/post-implementation-review/exclusion.py`。他 plugin には依存しない):
+
+0. **`EXTERNAL_AI_POST_REVIEW_EXCLUDE` の `!glob`** に当たるファイルは**必ず送る** (以下より優先。
+   既定除外にコードが巻き込まれた時の逃げ道。例: `!credentials-service/*`)
+1. **既定除外** — 名前からして機密なもの (`EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS=0` で無効化):
+   - glob: `.env` `.env.*` `*.env` `.envrc` / `*.pem` `*.key` `*.p12` `*.pfx` `*.p8` `*.jks`
+     `*.keystore` `*.ppk` `*.gpg` `*.pgp` `*.asc` `*.kdbx` / `id_rsa*` `id_dsa*` `id_ecdsa*`
+     `id_ed25519*` / `*service-account*.json` `*service_account*.json` `kubeconfig*` `*.ovpn` /
+     `.htpasswd` `*.htpasswd` `.netrc` `_netrc` `.npmrc` `.pypirc` `.pgpass` `.git-credentials` /
+     `*.tfstate` `*.tfstate.*` `*.tfvars` `*.tfvars.*`
+   - 語: パス (ディレクトリ名を含む) に `secret` / `secrets` / `credential` / `credentials` を
+     **単語として** (前後が英数字以外) 含む。`client_secret.json` `config/secrets/db.yaml`
+     `aws_credentials` は当たり、`secretary.py` `secretsanta.ts` は当たらない
+2. **`EXTERNAL_AI_POST_REVIEW_EXCLUDE`** — カンマ区切りで追加する glob
+   (例: `docs/, *.csv, notes/*.md`。`dir/` は `dir/*`、先頭の `./` `/` は無視。brace 展開
+   `*.{py,js}` は非対応。`docs` とだけ書くと `docs` という名前のファイルにしか当たらない)
+3. **`EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1`** — コード以外を外す。対象は拡張子で判定:
+   文書 (`.md .markdown .rst .txt .text .adoc .asciidoc .org .tex .rtf .pdf .doc .docx .odt .xls .xlsx .ods .ppt .pptx .odp`)、
+   データ (`.csv .tsv .jsonl .ndjson .log .parquet .avro .sqlite .sqlite3 .db`)、
+   メール等 (`.eml .msg .mbox .ics .vcf`)、画像・音声・動画、アーカイブ。
+   JSON / YAML / TOML / XML / HTML / CSS と拡張子無し (Makefile 等) はコード扱いで送る
+
+glob は **basename と作業ツリー相対パスの両方**に、**大文字小文字を区別せず**当てる。`*` は `/` にも
+マッチするので `docs/*` は深い階層も拾う。symlink は編集時のパス (途中のディレクトリ名やリンク名を
+そのまま残した lexical なパス)、実体 (realpath)、および作業ツリー内の symlink から作った別名
+(`credentials/` → `ordinary/` なら `ordinary/data.json` に `credentials/data.json`) のどれかが
+当たれば除外。別名は Bash 経由の変更 (`sed -i` 等。`git status` が実体名しか返さない) のために
+必要で、tracked の symlink は全て、untracked の symlink は作業ツリー直下から 3 階層まで
+(走査 5000 エントリ / 500 件で打ち切り) を見る。
+git へのパス渡しは literal pathspec (`app/[id]/page.tsx` のような名前を glob として解釈させず、
+claim していないファイルの差分が混入しない)。
+
+除外されたファイルは pending にも reviewed にも残さない (恒久除外)。該当ターンの末尾に
+`[post-implementation-review] 2 ファイルを外部 AI レビューから除外 (内容は送信していません): .env (既定除外: .env), docs/meeting-notes.txt (CODE_ONLY: .txt)`
+のような通知が出る (`systemMessage`。同じ内容を stderr にも書く)。
+
+```bash
+# 議事録と CSV も送らない
+EXTERNAL_AI_POST_REVIEW_EXCLUDE="docs/, *.csv" claude
+# コードだけ送る
+EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
+```
 
 ## 設計原則
 
@@ -115,6 +168,9 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 | `EXTERNAL_AI_REVIEW_MAX` | `2` | `exitplan-review` のセッション × プラン単位の最大ブロック回数。`0` で hook 自体を無効化 |
 | `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` の有効/無効。`0` / `false` / `off` で無効化 |
 | `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING` | `1` | Bash 経由の変更検出。`0` にすると Bash 前後の `git status` を打たなくなる (巨大 repo での軽量化用。`sed -i` 等の変更は拾えなくなる) |
+| `EXTERNAL_AI_POST_REVIEW_EXCLUDE` | — | `post-implementation-review` で外部に送らないファイルをカンマ区切り glob で追加 (例: `docs/, *.csv`)。既定除外に加算される。`!glob` は逆に「必ず送る」 (例: `!credentials-service/*`) |
+| `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
+| `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` | `0` | `1` でコード以外 (`.md` / `.txt` / `.csv` / `.pdf` / 画像等。一覧は上の除外規則) を外部に送らない |
 | `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
 
 一時的に無効化したい場合は `0` を設定するのが手軽:
@@ -158,6 +214,7 @@ external-ai-assist/
         ├── state.py                        ← pending/in-flight 状態機械 + flock
         ├── stategc.py                      ← $TMPDIR の TTL GC
         ├── gitscan.py                      ← パス正規化 + status スナップショット + パス単位 diff
+        ├── exclusion.py                    ← 外部に送らないファイルの判定 (既定 glob / 追加 glob / CODE_ONLY)
         ├── cursor.py                       ← 差分レビュー
         ├── prompts/
         │   └── post-implementation-cursor.md

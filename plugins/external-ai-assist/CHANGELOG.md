@@ -5,6 +5,148 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.5.0
+
+**post-implementation-review: 機密・非コードファイルを外部に送らない除外機構 + diff 予算を
+ファイル単位に変更 (切り落としたファイルをレビュー済みにしない)** (2026-08 精査バックログ
+zh5.9 / zh5.8)。送信内容が変わるので minor bump。
+
+### 1. 外部に送らないファイルの除外 (zh5.9)
+
+0.4.1 までは編集パス全件の HEAD 基準 diff (untracked は全文) を Cursor に渡し、除外は
+gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、議事録や顧客メールの
+`.txt` も外部 AI に送られていた。
+
+- 新設 `hooks/post-implementation-review/exclusion.py`。判定は次の順で、先に当たったものが勝つ:
+  0. **`EXTERNAL_AI_POST_REVIEW_EXCLUDE` の `!glob`** (否定) に当たれば必ず送る
+  1. **既定除外** — glob: `.env` `.env.*` `*.env` `.envrc` / `*.pem` `*.key` `*.p12` `*.pfx`
+     `*.p8` `*.jks` `*.keystore` `*.ppk` `*.gpg` `*.pgp` `*.asc` `*.kdbx` / `id_rsa*` `id_dsa*`
+     `id_ecdsa*` `id_ed25519*` / `*service-account*.json` `*service_account*.json` `kubeconfig*`
+     `*.ovpn` / `.htpasswd` `*.htpasswd` `.netrc` `_netrc` `.npmrc` `.pypirc` `.pgpass`
+     `.git-credentials` / `*.tfstate` `*.tfstate.*` `*.tfvars` `*.tfvars.*`。
+     語: `secret` `secrets` `credential` `credentials` をパス (ディレクトリ名含む) に**単語として**
+     含む (`EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS=0` で無効化可)
+  2. **`EXTERNAL_AI_POST_REVIEW_EXCLUDE`** — カンマ区切りの追加 glob (`dir/` は `dir/*`、先頭の
+     `./` `/` は無視、brace 展開は非対応)
+  3. **`EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1`** — 文書 / データ / メール / 画像・音声・動画 /
+     アーカイブの拡張子を外す (一覧は README)。JSON / YAML / TOML / XML / HTML / CSS と
+     拡張子無しのファイルはコード扱いで残す
+- glob は basename と作業ツリー相対パスの両方に、大文字小文字を区別せず当てる。`fnmatch` の
+  `*` は `/` にもマッチするので `docs/*` は深い階層も拾う。symlink は **lexical なパス**
+  (作業ツリー root だけ realpath で同定し、配下の symlink 構成要素名はそのまま残す) と実体
+  (realpath。git に渡すのもこれ) の両方で判定し、どちらかが当たれば除外する。同じ実体が
+  別名で複数回 claim されていても全部の名前を見てから判定する。通知には当たった名前を出す。
+  lexical 判定は Codex PR レビュー R1 P1 の反映: `credentials/` → `ordinary/` のような symlink
+  ディレクトリ経由の claim は realpath でも親だけの realpath でも `ordinary/data.json` になり、
+  `credentials` が判定から消えていた。root の別名 (`/tmp` → `/private/tmp`、symlink された
+  親ディレクトリ) は引き続き realpath で吸収する
+- **symlink 経由の別名も生成して判定する** (Codex PR レビュー R2 P1): Bash 経由の変更は
+  pre/post の `git status` 比較で拾うため実体名 (`ordinary/data.json`) しか claim に入らず、
+  `sed -i credentials/data.json` の差分が lexical 判定をすり抜けていた。`gitscan.symlink_map`
+  が作業ツリー内の symlink (tracked は index の mode 120000、untracked は root から 3 階層までの
+  scandir、5000 エントリ / 500 件で打ち切り) を列挙し、`exclusion.expand_aliases` が実体パスが
+  symlink の target 配下なら `link + 残り` の別名 (chained も、1 ファイル 32 件まで) を作る。
+  実体・lexical・別名のどれかが当たれば除外。Bash コマンド文字列の operand から別名を拾う方式は
+  解析が脆いので採らない。symlink が無い repo では候補が増えず挙動は不変。git の symlink 一覧
+  (ls-files 10s) を Stop の git 予算式に追加 (59s、cursor 615s と合わせて 690s 以内)
+- **判断**: 既定は「名前からして機密」なものに限定した。`*token*` / `*password*` は
+  tokenizer / password_validator などのコードを巻き込むため入れず、`id_*` も
+  `id_generator.py` を拾うので SSH 鍵の実名 (`id_rsa*` 等) に限定。チケット案の `*secret*` /
+  `*credential*` glob は `secretary.py` / `secretsanta.ts` / `nosecret` まで拾う (L2 レビュー)
+  ため、英数字以外で区切られた単語としてだけ当てる方式に変えた。それでも
+  `credentials-service/main.go` のようにディレクトリ名が当たると配下のコードが丸ごと永久に
+  未レビューになるので、`!glob` で個別に戻せるようにした (既定の無効化スイッチは全既定を
+  失うので逃げ道としては粗い)
+- **除外は恒久**: `_resolve_paths` で作業ツリー外パスと同じく claim から落とし、pending にも
+  reviewed にも残さない。`MAX_REVIEW_PATHS` の手前で落とすので枠を食わず、overflow として
+  pending に戻ることもない。0.4.1 以前が state に積んだ機密パスも次の Stop で落ちる
+- 除外したターンは `systemMessage` (Stop でも有効な公式の共通フィールド。block 時は
+  `decision` / `reason` と同居) と stderr に件数・ファイル名・理由 (当たったパターン) を出す。
+  内容は出さない。他 plugin (sensitive-files-guardrail 等) には依存しない
+
+### 2. diff 予算をファイル単位に変更 (zh5.8)
+
+結合テキストを `MAX_DIFF_BYTES=40000` で末尾から切る方式だったため、切り落とされた
+ファイルの hash も `complete_claim` で記録され、Cursor が一度も見ていないファイルが
+「レビュー済み」になって内容が変わるまで再掲されなかった。
+
+- `_collect_diffs` がファイル (セクション) 単位で予算に積む。収まらないファイルは**送らずに
+  pending へ戻し、hash を記録しない** (次ターンにそのまま再掲)。後続の小さいファイルは
+  予算が残っていれば送る (first-fit)
+- 1 ファイルが `MAX_FILE_DIFF_BYTES=32000` を超える場合だけ先頭を行境界で切り
+  `(truncated for review: ...)` を明示して送り、**この場合のみ** hash (全文で計算) を記録する。
+  32 KB (合計の 80%) にしたのは、切り詰めは「その diff の末尾を二度と見ない」恒久的な損失で
+  繰り越しは次ターンまでの遅延に過ぎないため、1 ファイルはなるべく丸ごと送る側に倒した
+  (チケット例示の 16 KB だと 30 KB の diff が半分しか見えない)
+- `_resolve_paths` がパスをソートせず **claim 順 (= pending に積まれた順)** を保つよう変更。
+  繰り越したパスは次ターンの pending 先頭に来るので、予算超過で繰り越されたファイルが
+  新しい編集に毎回追い越されて永久に残らない (`MAX_FILE_DIFF_BYTES <= MAX_DIFF_BYTES` で
+  先頭のファイルは必ず収まる)。繰り越しは claim 順 (予算超過 → 時間切れ → `MAX_REVIEW_PATHS`
+  の overflow) で 1 回の `record_pending` に積み、`MAX_PENDING_PATHS` の上限超過は末尾 (新しい
+  編集) から落とす (従来は先頭 = 繰り越し分から落としていた)
+- 繰り越し・切り詰めも除外と同じく `systemMessage` / stderr で通知 (対象ファイル名のみ)
+- README の「差分は 40 KB まで、超過分は truncate」を実装に合わせて書き換え。0.4.1 以前が
+  「見ていないのに reviewed」として記録した hash は state に残る (pending に居残っていた分だけの
+  狭い影響なので state の `v` は据え置き。該当ファイルは次に差分が変わった時点で再掲される)
+
+### 3. git pathspec の literal 化と `--no-color` (L2 レビューで発見、0.2.0 からの潜在バグ)
+
+- `gitscan._git` が渡すパスを git が **glob として解釈**していた (`*` `?` `[...]`)。
+  `app/[id]/page.tsx` (Next.js の動的ルート) をこのセッションが編集すると `app/i/page.tsx` にも
+  マッチし、別セッションが編集した (claim も除外判定も通っていない) ファイルの diff が同じ
+  section に混入して cursor に送られていた。旧 state に残った `[.]env` のようなエントリが
+  tracked の `.env` を拾う経路も同じ。除外機構の保証を成立させるため
+  `git --literal-pathspecs` で全コマンドを起動する
+- `git diff` に `--no-color` を付けた。`color.ui=always` / `color.diff=always` の環境では ANSI が
+  本文に混ざり、レビュアーに渡す diff が汚れるうえ hash とバイト予算が狂っていた
+
+### 4. docs
+
+README (動作サマリ / 除外規則の節 / 環境変数表 / ファイル構成)、
+`hooks/post-implementation-review/CLAUDE.md` (構成 / 復元表 / 除外と予算の節 / テスト表)。
+`systemMessage` の表示は公式 docs (全イベント共通フィールド、Stop で discard されない)
+に基づく。対話 UI 以外 (Agent SDK / `stream-json`) での表示は未確認のため、同じ内容を
+stderr にも残している。
+
+### テスト
+
+累計 **265 件** (+79、post-implementation-review 102 → 181)。テストは git のグローバル /
+システム設定を読まず (`GIT_CONFIG_GLOBAL=/dev/null` `GIT_CONFIG_NOSYSTEM=1`)、除外の環境変数を
+中立値に固定して実行する (開発者 shell の `CODE_ONLY=1` や `color.ui=always` で揺れない)。
+
+- `tests/test_exclusion.py` (新設 27 件): 既定 glob・語 34 種の除外 / コード 17 種の非除外
+  (`id_generator.py` `tokenizer.py` `password_validator.py` `secretary.py` `secretsanta.ts`
+  等) / 語境界 / 大文字小文字 / サブディレクトリ・ディレクトリ名 / 理由表記と当たった名前 /
+  複数候補 / 追加 glob の加算と正規化 (`./` `/` `dir/` 空要素 `!`) / 異常パターンで例外なし /
+  `*` の階層またぎ / 既定の無効化 / `!glob` が既定・追加 glob・CODE_ONLY に優先 /
+  CODE_ONLY の拡張子 20 種と残す 14 種 / 真偽値 / `expand_aliases` (ディレクトリ・ファイル
+  symlink の別名、構成要素単位の前方一致、chained、上限で打ち切り・終了、別名が除外に届く)
+- `tests/test_stop_flow.py::TestExclusion` (15 件): 機密のみで cursor 不起動 + pending に
+  残らない + systemMessage に内容が出ない / 機密 + コードでコードだけ送り次ターンに再掲しない /
+  block 時の `decision` と `systemMessage` の同居 / 除外なしなら出力なし / 追加 glob /
+  CODE_ONLY / Bash 経由で作った `.env` / 機密名の symlink / symlink ディレクトリ
+  (`credentials/` → `ordinary/`) 経由の編集 / Bash 経由で `git status` が実体名しか返さない
+  変更を tracked・untracked の symlink 別名で除外 / symlink の無い repo では Bash 経由の変更を
+  従来どおり送る / 旧 state の機密パス / 枠を食わない / `!glob` で credentials ディレクトリ
+  配下のコードを送る
+- `tests/test_stop_flow.py::TestLiteralPathspecFlow` (2 件): `app/[id]/page.tsx` の編集に別
+  セッションの `app/i/page.tsx` が混入しない / 旧 state の `[.]env` で tracked `.env` が漏れない
+- `tests/test_stop_flow.py::TestByteBudgetFlow` (5 件): 30 KB × 2 で 2 件目が pending に
+  戻り hash 未記録、次ターンでレビュー / 繰り越しが新しい編集に追い越されない / 予算超過と
+  overflow の繰り越し順 / 単一 50 KB が切り詰め付きで送られ hash 記録 (末尾だけ変えても再掲) /
+  cursor 失敗で両方 pending
+- `tests/test_review_set.py`: `_resolve_paths` の claim 順維持・除外・symlink 両名 (実体が先に
+  claim されても / alias root 経由でも / symlink ディレクトリ経由でも lexical 名で除外、実体名
+  だけの claim も symlink 別名で除外、symlink が無ければ送る、`_lexical_relative` の構成要素
+  保持)・枠非消費、Stop の git 予算式に symlink 一覧を追加、`_collect_diffs` の `ReviewBatch` 化、
+  `TestByteBudget` (first-fit / 切り詰め / 上限の制約)、`_truncate_section` (上限内 / 行の
+  途中に落ちる limit での行境界 / 1 行 / multibyte)
+- `tests/test_gitscan.py`: literal pathspec (tracked / untracked の `[...]` 名、glob 風エントリが
+  何にも当たらない) / `color.ui=always` でも ANSI が混ざらない / `symlink_map` (symlink 無し /
+  tracked / untracked / ファイル symlink と階層下 / ツリー外は除外 / 深さ上限と tracked の例外 /
+  件数・走査上限)
+- `tests/test_state.py`: pending 上限は末尾から落とし繰り越し分を守る
+
 ## 0.4.1
 
 **explore-parallel の cursor agent を読み取り専用 (`--mode plan`) で起動する** (2026-08 精査
