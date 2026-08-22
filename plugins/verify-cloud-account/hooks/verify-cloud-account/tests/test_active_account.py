@@ -179,6 +179,29 @@ class TestFirebaseActiveAccount(unittest.TestCase):
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
                 self.assertEqual(firebase.get_active_account(d), "proj-prod")
 
+    def test_get_active_runs_cli_in_project_dir(self):
+        """builder (accounts-init / show) を project_dir の外から起動しても、
+        `firebase use` は project_dir (firebase.json が無ければそのまま) を cwd に
+        して実行し、プロセスの cwd の project を報告しない (Codex R2 P2)。"""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="my-proj\n")
+            ) as m:
+                self.assertEqual(firebase.get_active_account(d), "my-proj")
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(d))
+
+    def test_get_active_runs_cli_in_project_root_with_firebase_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            sub = repo / "packages" / "functions"
+            sub.mkdir(parents=True)
+            (repo / "firebase.json").write_text("{}", encoding="utf-8")
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="my-proj\n")
+            ) as m:
+                self.assertEqual(firebase.suggest_accounts_entry(str(sub)), "my-proj")
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(repo))
+
 
 class TestAwsActiveAccount(unittest.TestCase):
     def test_get_active(self):

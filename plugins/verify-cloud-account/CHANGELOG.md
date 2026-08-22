@@ -56,6 +56,13 @@ configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時�
    従来は例外が漏れて hook が非ゼロ終了し、PreToolUse の無音 fail-open になっていた。
 6. **README** — 期待値取得の表と解説、readonly 一覧、切替後の再検証に関する注記
    (成功 cache 内は再検証されない) を実装に合わせて更新。
+7. **`firebase use` の cwd を project root に固定** — 従来は hook / builder
+   プロセスの cwd を継承していたため、builder (`accounts-init` / `accounts-show`)
+   を project_dir の外から起動すると CLI 優先化によって無関係なディレクトリの
+   project を報告・書込しうる。`firebase.json` を親方向に探した project root
+   (無ければ project_dir) を cwd にし、ローカル設定 fallback と解決の起点を揃えた。
+   project_dir が存在しない場合は cwd 指定の `OSError` を CLI 不可として扱い、
+   従来どおり fallback する。
 
 ### 非互換性
 
@@ -75,22 +82,24 @@ configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時�
 
 ### テスト
 
-- `tests/test_services.py::TestFirebase` に 22 件追加 (CLI 優先 / false-allow と
+- `tests/test_services.py::TestFirebase` に 25 件追加 (CLI 優先 / false-allow と
   永久 deny の解消 / timeout 専用メッセージ / 空出力・非ゼロ終了・実行不可
   (PermissionError)・単一 alias の fallback / configstore の切替先参照 (CLI 不在・
   非ゼロ終了・親ディレクトリ・実体パス・env の `XDG_CONFIG_HOME`・破損時) /
-  `firebase.json` を起点にした project root 解決 / 不正な `.firebaserc`)
+  `firebase.json` を起点にした project root 解決 / `firebase use` の cwd 固定と
+  project_dir 不在時の扱い / 不正な `.firebaserc`)
 - `tests/test_services.py::TestCliExecErrors` 新設 4 件 (gh / aws / gcloud / kubectl
   の `OSError` が deny 文字列になり例外が漏れない)
-- `tests/test_active_account.py::TestFirebaseActiveAccount` に 3 件追加 (CLI 優先 /
-  timeout は None / configstore 参照)、1 件を fallback 意味論の名前に変更
+- `tests/test_active_account.py::TestFirebaseActiveAccount` に 5 件追加 (CLI 優先 /
+  timeout は None / configstore 参照 / builder 経路の cwd 固定)、1 件を fallback
+  意味論の名前に変更
 - `tests/test_dispatcher.py::TestFirebaseResolutionOrderE2E` 4 件追加
   (`firebase.verify` を mock せず subprocess だけ差し替えた end-to-end。npx 構成、
   未ログイン + configstore 切替済みでの `firebase login` allow / `deploy` deny を含む)
-- 新規 33 件のうち 28 件は旧実装 (main) で fail することを確認済み (残り 5 件は
+- 新規 38 件のうち 33 件は旧実装 (main) で fail することを確認済み (残り 5 件は
   fallback 条件の仕様固定)
 
-テスト 314 → 347 件。
+テスト 314 → 352 件。
 
 ## 0.7.2
 

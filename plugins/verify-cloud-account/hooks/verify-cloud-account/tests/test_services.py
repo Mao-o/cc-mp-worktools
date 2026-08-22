@@ -437,6 +437,48 @@ class TestFirebase(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("現在=proj-prod", err)
 
+    # --- firebase use の cwd (Codex R2 P2: builder を project_dir の外から起動) ---
+
+    def test_cli_runs_in_project_root_not_process_cwd(self):
+        """`firebase use` は firebase.json を親方向に探した project root を cwd にして
+        実行する。hook / builder プロセスの cwd を継承すると、builder を project_dir の
+        外から起動したとき無関係なディレクトリの project を報告しうる。"""
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            sub = repo / "packages" / "functions"
+            sub.mkdir(parents=True)
+            (repo / "firebase.json").write_text("{}", encoding="utf-8")
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
+            ) as m:
+                self.assertIsNone(firebase.verify("proj-prod", str(sub)))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(repo))
+
+    def test_cli_cwd_is_project_dir_without_firebase_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj\n")
+            ) as m:
+                self.assertIsNone(firebase.verify("proj", d))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(d))
+
+    def test_cli_cwd_missing_project_dir_is_treated_as_cli_unavailable(self):
+        """project_dir が存在しないと subprocess.run(cwd=...) が OSError を投げる。
+        その経路も CLI 不可として扱い例外を漏らさない (ローカル設定も無ければ
+        「取得できません」)。"""
+
+        def _run(*_args, **kwargs):
+            cwd = kwargs.get("cwd", ".")
+            if not os.path.isdir(cwd):
+                raise NotADirectoryError(20, "Not a directory", cwd)
+            return _fake_run(stdout="proj\n")
+
+        with mock.patch("subprocess.run", side_effect=_run):
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify("proj", "/no/such/dir/xyz")
+        self.assertIsInstance(err, str)
+        self.assertIn("取得できません", err)
+
     def test_firebaserc_single_non_default_alias(self):
         """.firebaserc の alias が 1 つだけなら default 以外の名前でもその値
         (firebase-tools applyRC と同じ規則)。"""

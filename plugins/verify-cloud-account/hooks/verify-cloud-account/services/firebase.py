@@ -12,6 +12,8 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
    `firebase use <alias|project>` の切替先は configstore (activeProjects) にしか
    保存されず、`.firebaserc` は `--add` / `--alias` 時しか更新されない。
    つまり切替後の現在値を知っているのは CLI と configstore だけ。
+   CLI の cwd は `firebase.json` を親方向に探した project root (無ければ
+   project_dir) に固定し、プロセスの cwd を継承しない (2. の起点と同じ)。
 2. CLI から取れないとき (PATH に無い / 実行不可 / 非ゼロ終了 / 出力が空 / 複数行
    ヘルプ) は、CLI と同じローカル設定ファイルから同じ規則で解決する:
    `firebase.json` を親方向に探した project root (無ければ project_dir) を起点に、
@@ -54,7 +56,7 @@ TIMEOUT_REASON = (
 )
 
 
-def _from_cli(env=None) -> tuple[str, str | None]:
+def _from_cli(project_dir: str, env=None) -> tuple[str, str | None]:
     """`firebase use` (非 TTY) を実行し (project_id, error) を返す。
 
     非 TTY の `firebase use` はアクティブ project があれば解決済み project ID を
@@ -63,6 +65,12 @@ def _from_cli(env=None) -> tuple[str, str | None]:
     (CLI 未検出 / 実行不可 (権限・形式不正等の OSError) / 非ゼロ終了 / 空 /
     複数行ヘルプ) は "" を返す (呼び出し側がローカル設定に fallback する)。
     timeout だけは error に専用メッセージを入れて返す (fallback しない)。
+
+    cwd は `_project_root(project_dir)` (firebase.json のある root、無ければ
+    project_dir) に固定し、ローカル設定 fallback と解決の起点を揃える。hook /
+    builder プロセスの cwd を継承すると、builder を project_dir の外から起動した
+    ときに無関係なディレクトリの project を報告・書込しうる。project_dir が
+    存在しなければ cwd 指定で OSError になり、CLI 不可として扱う。
     """
     try:
         result = subprocess.run(
@@ -71,11 +79,12 @@ def _from_cli(env=None) -> tuple[str, str | None]:
             text=True,
             timeout=10,
             env=env,
+            cwd=_project_root(project_dir),
         )
     except subprocess.TimeoutExpired:
         return "", TIMEOUT_REASON
     except OSError:
-        # FileNotFoundError / PermissionError / "Exec format error" 等。
+        # FileNotFoundError / PermissionError / "Exec format error" / cwd 不在等。
         # 例外を漏らすと hook が異常終了して無音 fail-open になる。
         return "", None
     if result.returncode != 0:
@@ -212,7 +221,7 @@ def _resolve(project_dir: str, env=None) -> tuple[str, str | None]:
     解決順は `firebase use` → ローカル設定 (モジュール docstring 参照)。
     error は CLI timeout のときだけ非 None で、その場合 current は "" (fallback しない)。
     """
-    current, err = _from_cli(env)
+    current, err = _from_cli(project_dir, env)
     if err:
         return "", err
     if current:
