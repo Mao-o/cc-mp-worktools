@@ -6,6 +6,26 @@ from __future__ import annotations
 
 from handlers.bash.constants import _HARD_STOP_CHARS
 
+# Bash コメント ``#`` は「単語の先頭」でのみ開始する。直前がこれらの文字 (または
+# 文字列先頭) のときだけコメントと見なす。``(`` ``)`` ``{`` ``}`` も Bash 上は
+# 単語境界だが hard-stop で先に ask に倒れるため含めない (検出範囲は Bash より
+# **狭く** 保つ: コメントでないものをコメント扱いすると実コマンドを落とし guard が
+# 落ちる。逆は ask に倒れるだけ)。
+_COMMENT_PRECEDERS = frozenset(" \t\n;|&")
+
+
+def _is_comment_start(command: str, i: int) -> bool:
+    """``command[i]`` が Bash コメントの開始 ``#`` か (クォート外で呼ぶこと)。"""
+    if command[i] != "#":
+        return False
+    return i == 0 or command[i - 1] in _COMMENT_PRECEDERS
+
+
+def _skip_comment(command: str, i: int) -> int:
+    """コメント開始位置 ``i`` から改行 (exclusive) までを読み飛ばした位置を返す。"""
+    j = command.find("\n", i)
+    return len(command) if j < 0 else j
+
 
 def _has_hard_stop(command: str) -> bool:
     """動的評価 / 入力リダイレクト / グループ化 chars が含まれるか (quote-aware)。
@@ -31,6 +51,11 @@ def _has_hard_stop(command: str) -> bool:
       の挙動不変を担保する非対称)
     - **``\\r`` はクォート状態を問わず hard-stop**。CR は展開ではなく端末表示
       偽装の guard なので「展開されない = 安全」の理屈が当てはまらない
+    - **Bash コメント (``#`` 〜 行末) はクォート状態を変えない** (0.18.0 review)。
+      ``echo ok # ' {`` の ``'`` を quote 開始と誤認すると、続く行の ``cat .env``
+      がクォート内扱いになり hard-stop が解除されてしまう。コメント内の文字は
+      hard-stop 判定から除外するが、``\\r`` だけはコメント内でも hard-stop
+      (表示偽装 guard はコメントでも成立する)
 
     ``_split_command_on_operators`` と字句状態の持ち方を **完全に揃える**。
     どちらが desync しても guard は落ちる: 分割側が ``\\'`` を quote 開始と
@@ -78,6 +103,14 @@ def _has_hard_stop(command: str) -> bool:
                 return True
             i += 2
             continue
+        if _is_comment_start(command, i):
+            # コメントは Bash に解釈されない = quote 状態も hard-stop も変えない。
+            # ただし CR は表示偽装 guard なのでコメント内でも hard-stop。
+            j = _skip_comment(command, i)
+            if "\r" in command[i:j]:
+                return True
+            i = j
+            continue
         if c == "'":
             in_single = True
             i += 1
@@ -105,6 +138,10 @@ def _split_command_on_operators(command: str) -> list[str]:
 
     クォート外のバックスラッシュは次の 1 文字を literal 化する (``\\'`` は quote を
     開かない / ``\\;`` は区切らない / ``\\<newline>`` は行継続)。
+    Bash コメント (クォート外・単語先頭の ``#`` 〜 行末) は segment から落とす
+    (Bash が解釈しない文字列を shlex に渡さない)。改行は区切りとして残す。
+    ``\\r`` 入りのコメントだけは丸ごと segment に残し、``_has_hard_stop`` の
+    表示偽装 guard に到達させる。
     ``_has_hard_stop`` と同じ字句状態を保つこと (desync すると guard が落ちる)。
     """
     segments: list[str] = []
@@ -147,6 +184,14 @@ def _split_command_on_operators(command: str) -> list[str]:
                 if nxt:
                     buf.append(nxt)
             i += 2
+            continue
+        if _is_comment_start(command, i):
+            j = _skip_comment(command, i)
+            if "\r" in command[i:j]:
+                # CR 入りコメントは落とさず丸ごと残し (末尾 strip で CR が消えない
+                # ように)、``_has_hard_stop`` の表示偽装 guard に到達させる。
+                buf.append(command[i:j])
+            i = j
             continue
         if c == "'":
             in_single = True

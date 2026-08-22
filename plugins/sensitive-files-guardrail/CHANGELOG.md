@@ -134,6 +134,29 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `bash -c 'cat .env'` | ask / allow | ask / allow (不変、opaque が先) |
 | `echo \' ; cat .env ; echo '{'` (review 対応) | ask / **allow** | **deny / deny** |
 | `cat \<newline>.env` (review 対応) | ask / **allow** | **deny / deny** |
+| `echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` (review 対応 2) | ask / **allow** | **deny / deny** |
+| `cat .env # {` (review 対応 2) | ask / **allow** | **deny / deny** |
+| `echo hi # see {config}` (非機密、review 対応 2) | **ask** / allow | **allow / allow** |
+
+### review 対応 (2) — Bash コメントを両 scanner で認識 (PR #38 Codex R2 P1)
+
+`#` 以降 (行末まで) は Bash に解釈されないが、両 scanner はコメント内の `'` で
+quote 状態を反転させていた。`echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` は
+Bash では 3 コマンドだが、splitter は 2 行目以降を「シングルクォート内」と見て
+1 segment に潰し、quote-aware になった hard-stop も `{` を無視するため、先頭
+token `echo` の metadata-only 経路で `.env` read が default mode でも allow
+された (0.17.0 は `{` が hard-stop で ask に倒れていた = 0.18.0 が開けた穴)。
+
+両 scanner に「クォート外・単語先頭 (直前が空白 / `;` / `|` / `&` / 文字列先頭)
+の `#` から行末まではコメント」を入れた。splitter はコメントを segment から
+落とし (Bash が解釈しない文字列を shlex に渡さない)、改行は区切りとして残す。
+検出範囲は Bash より**狭く**保つ: `(` `)` の直後は hard-stop が先に ask に倒す
+ため含めない。コメントでないものをコメント扱いすると実コマンドを落とし guard が
+落ちるが、逆は ask に倒れるだけで済む。`\r` 入りコメントだけは丸ごと残し、
+表示偽装 guard (`\r` hard-stop) に到達させる。
+
+副次効果: コメント内の `{` `$(` で ask に倒れていた非機密コマンド
+(`echo hi # see {config}`) が allow に緩み、`cat .env # {` は ask → deny に締まる。
 
 ### review 対応 — splitter の字句状態を hard-stop と同期 (PR #38 Codex P1)
 
@@ -165,15 +188,19 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-749 件 (+14、うち 3 件は既存テストの改名 + 期待値更新)。
+754 件 (+19、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (14 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (19 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
   opaque wrapper の判定順を固定、(4) review 対応: splitter と hard-stop の
   字句状態同期 (`echo \' ; cat .env ; echo '{'` の 3 分割 + 両 mode deny /
-  `\;` `\|` `\&&` を区切らない / `\<newline>` 行継続の deny / 末尾 `\` 保持)
+  `\;` `\|` `\&&` を区切らない / `\<newline>` 行継続の deny / 末尾 `\` 保持)、
+  (5) review 対応 2: Bash コメント認識 (コメント内 `'` で後続行を飲み込まない /
+  単語途中・クォート内・エスケープ済み `#` はコメントでない / 演算子直後・
+  先頭 `#` はコメント / コメント内 `{` `$(` は ask に倒さない / CR 入り
+  コメントは hard-stop 維持)
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、
   `test_sed_paren_with_dotenv_arg_still_ask` →

@@ -95,6 +95,11 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > (両 scanner の字句状態同期)。`echo \' ; cat .env ; echo '{'` は 3 segment に
 > 割れて `cat .env` が **全 mode で deny** (同期前は 1 segment に潰れ allow)。
 > `\<newline>` は行継続として結合するため `cat \<newline>.env` も deny。
+> Bash コメント (クォート外・単語先頭の `#` 〜 行末) も両 scanner が認識する:
+> `echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` は 3 segment に割れて `cat .env`
+> が **全 mode で deny** (認識前はコメント内の `'` で 1 segment に潰れ default
+> でも allow)。コメント内の `{` `$(` は ask に倒さない (`echo hi # {x}` は
+> allow、`cat .env # {` は deny)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
