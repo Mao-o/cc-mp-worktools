@@ -12,7 +12,13 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
 
 1. **認証取得系コマンドを検証スキップ (READONLY) に** (629.2) — `aws sso login` /
    `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
-   login` / `logout` / `refresh` / `setup-git`、`gcloud auth login` /
+   logout` / `refresh` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きない
+   形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https` (`-p https`) 付き)
+   のみ (SSH git protocol を選ぶ login は既存の SSH 公開鍵を GitHub アカウントに
+   アップロードしうる = 期待外アカウントへのリモート write。それ以外の login は通常
+   検証し、deny 文面は `gh auth login --skip-ssh-key` / `--hostname <host>
+   --skip-ssh-key` を案内する。aws / gcloud / firebase のログイン系に同種の副作用は
+   無い)、`gcloud auth login` /
    `application-default login` / `revoke` / `set-quota-project` /
    `activate-service-account` / `revoke` (firebase の `login` / `logout` は 0.7.3 で
    対応済み。`npx firebase-tools login` の形も同じ扱いに揃えた)。いずれもクラウド
@@ -57,6 +63,17 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    なら cache hit で別アカウントの write が通っていた (0.7.3 の README 注記を解消)。
    cache ファイル名を `<service>-<sha256>.json` に変更 (service 単位の glob 削除の
    ため。旧形式のファイルは読まれず TTL 後に無害なゴミとして残るのみ)。
+   **並行する hook との競合 (epoch / tombstone + PostToolUse)**: 無効化が entry の
+   削除だけだと、切替 hook と並行して走った同 service の hook が旧状態を検証して
+   新しい entry を書き、切替後に TTL 残り分だけ通る。`invalidate()` は service ごとの
+   epoch (`<service>.epoch`、`max(現在 + 1, time_ns)` で単調増加) を先に進めてから
+   削除し、entry には verify 開始時点の epoch を記録する。読む側は epoch が現在と
+   違えば無視、書く側は開始時と現在の epoch が違えば書かない (`set_success(...,
+   epoch=)`)。加えて `PostToolUse:Bash` hook を登録し (`hooks/hooks.json`)、切替
+   コマンドの**実行後**にも `invalidate_after()` で epoch を進める — 切替の実行前に
+   開始した検証 (PreToolUse の無効化より後に開始したものを含む) の結果は全て無効に
+   なる。PostToolUse では検証も CLI 呼出も出力もしない。cache / epoch の書き込みは
+   tmp + `os.replace` の atomic write。
 4. **AWS deny 文面の切替案内を Claude Code で効く形に** (629.6) — 従来は
    `export AWS_PROFILE=<profile>` を第一に案内していたが、Claude Code の Bash は
    呼出ごとに env を持ち越さず、hook は Claude 本体の env を継承するため、`export`
@@ -110,6 +127,11 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   自身も (期待値以外への `gh auth switch` 等は) cache を使わず毎回検証する。
 - cache ファイル名の形式変更。`$TMPDIR/cc-mp-verify-cloud-account/` の旧形式
   (`<sha256>.json`) は参照されなくなる。
+- `hooks/hooks.json` に `PostToolUse:Bash` が追加される (Bash ごとに Python プロセスが
+  1 回増える。切替コマンド以外では分解のみで即終了)。plugin の再読込
+  (`/reload-plugins`) が必要。
+- 素の `gh auth login` (`--skip-ssh-key` / `--with-token` / `--git-protocol https` 無し)
+  は 0.8.0 でも従来どおり検証対象 (readonly にしたのは上記 3 形のみ)。
 
 ### 対象外 (別項で扱う)
 
@@ -143,13 +165,21 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   `tests/test_dispatcher.py::TestLeadingGlobalOptions` 7 件 (global option 先行形の
   readonly 判定 / 切替での cache 無効化 (Codex P1 の再現) / 別 CLI 経由 kubeconfig /
   self-remediation / deny 文面は元の形 / 未知 option は通常検証 / `--version` 維持)
-- 新規 71 件のうち 45 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
-  実行、global option 分は修正前の dispatcher / services) で fail することを確認済み。
-  残りは旧実装でも成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを
-  通すこと、表示系 readonly が cache を保つこと、他 service の cache に影響しないこと、
-  類似 write の deny、検出コマンドの表示、未知 option の保守的扱い)
+- `tests/test_cache.py` に epoch 7 件 (無効化で epoch が進み旧 epoch の結果は書かれない /
+  削除と競合して残った entry の無視 / epoch ファイル消失後の単調性 / 後方互換 / 破損
+  epoch / service 別 / tmp 残骸なし) +
+  `tests/test_dispatcher.py::TestConcurrentInvalidationRace` 4 件 (検証中に無効化が
+  走った結果は公開されない / 無効化後・切替実行前に開始した検証は PostToolUse で無効 /
+  非切替コマンドは何もしない / readonly login・別 CLI 経由も対象) +
+  `tests/test_main.py` 新設 4 件 (stdin → stdout E2E: PostToolUse は epoch を進めて無出力
+  / 検証も deny もしない / event 名欠落は PreToolUse 扱い / 非対象コマンドは無出力)
+- 新規 86 件のうち 57 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
+  実行、レビュー対応分は各修正前の実装) で fail することを確認済み。残りは旧実装でも
+  成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを通すこと、
+  表示系 readonly が cache を保つこと、他 service の cache に影響しないこと、類似 write
+  の deny、検出コマンドの表示、未知 option の保守的扱い、tmp 残骸なし)
 
-テスト 352 → 423 件。
+テスト 352 → 438 件。
 
 ## 0.7.3
 

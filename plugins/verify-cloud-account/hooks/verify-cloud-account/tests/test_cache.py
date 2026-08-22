@@ -120,6 +120,65 @@ class TestCache(unittest.TestCase):
         self.assertEqual(cache.invalidate("gh"), 1)
         self.assertTrue(cache.get_success("ghx", "/p", "exp", 1.0))
 
+    # --- epoch / tombstone (PR #43 Codex R2 P1-2: 並行 hook との競合) ---
+
+    def _base(self) -> Path:
+        return Path(self.tmp) / "cc-mp-verify-cloud-account"
+
+    def test_invalidate_bumps_epoch_and_stale_epoch_result_is_not_published(self):
+        e0 = cache.current_epoch("github")
+        cache.set_success("github", "/p", "exp", 1.0)
+        self.assertEqual(cache.invalidate("github"), 1)
+        e1 = cache.current_epoch("github")
+        self.assertGreater(e1, e0)
+        # 無効化前 (旧 epoch) に開始した検証の成功は書かれない
+        self.assertFalse(cache.set_success("github", "/p", "exp", 1.0, epoch=e0))
+        self.assertFalse(cache.get_success("github", "/p", "exp", 1.0))
+        # 現在の epoch で開始した検証は書ける
+        self.assertTrue(cache.set_success("github", "/p", "exp", 1.0, epoch=e1))
+        self.assertTrue(cache.get_success("github", "/p", "exp", 1.0))
+
+    def test_entry_with_old_epoch_is_ignored_even_if_file_survives(self):
+        """削除と競合して残った (or 削除後に書かれた) 旧 epoch の entry も無視される (tombstone)。"""
+        cache.set_success("github", "/p", "exp", 1.0)
+        entry = next(self._base().glob("github-*.json"))
+        saved = entry.read_text(encoding="utf-8")
+        cache.invalidate("github")
+        entry.write_text(saved, encoding="utf-8")
+        self.assertTrue(entry.is_file())
+        self.assertFalse(cache.get_success("github", "/p", "exp", 1.0))
+
+    def test_epoch_is_monotonic_even_if_epoch_file_is_removed(self):
+        cache.invalidate("github")
+        e1 = cache.current_epoch("github")
+        (self._base() / "github.epoch").unlink()
+        self.assertEqual(cache.current_epoch("github"), 0)
+        cache.invalidate("github")
+        self.assertGreater(cache.current_epoch("github"), e1)
+
+    def test_set_success_without_epoch_uses_current(self):
+        cache.invalidate("github")
+        self.assertTrue(cache.set_success("github", "/p", "exp", 1.0))
+        self.assertTrue(cache.get_success("github", "/p", "exp", 1.0))
+
+    def test_corrupt_epoch_file_is_zero_and_recovers(self):
+        self._base().mkdir(exist_ok=True)
+        (self._base() / "github.epoch").write_text("not json", encoding="utf-8")
+        self.assertEqual(cache.current_epoch("github"), 0)
+        cache.invalidate("github")
+        self.assertGreater(cache.current_epoch("github"), 0)
+
+    def test_epoch_is_per_service(self):
+        cache.set_success("aws", "/p", "exp", 1.0)
+        cache.invalidate("github")
+        self.assertEqual(cache.current_epoch("aws"), 0)
+        self.assertTrue(cache.get_success("aws", "/p", "exp", 1.0))
+
+    def test_writes_leave_no_tmp_files(self):
+        cache.set_success("github", "/p", "exp", 1.0)
+        cache.invalidate("github")
+        self.assertEqual([p.name for p in self._base().glob("*.tmp")], [])
+
 
 if __name__ == "__main__":
     unittest.main()

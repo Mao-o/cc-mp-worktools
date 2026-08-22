@@ -15,12 +15,20 @@ import subprocess
 PATTERNS = [r"^gh\b"]
 READONLY = [
     r"^gh\s+auth\s+(status|list)\b",
-    # 認証取得系 (login / logout / refresh / setup-git) はリポジトリ等の資源を変更せず、
+    # 認証取得系 (logout / refresh / setup-git) はリポジトリ等の資源を変更せず、
     # ローカルの認証状態を作るだけ。未ログイン・別アカウントのとき deny 文面が案内する
-    # `gh auth login [--hostname <host>]` 自体が deny される remediation loop を防ぐ。
-    # `--with-token` / `--web` 等のオプションも資源には触らない。直後の write は
+    # login 自体が deny される remediation loop を防ぐ。直後の write は
     # (STATE_CHANGING で成功 cache も破棄されるため) 次回 hook で再検証される。
-    r"^gh\s+auth\s+(login|logout|refresh|setup-git)\b",
+    r"^gh\s+auth\s+(logout|refresh|setup-git)\b",
+    # `gh auth login` は SSH git protocol を選ぶと既存の SSH 公開鍵を GitHub アカウントに
+    # **アップロード**しうる (gh 2.96 `gh auth login --help`: SSH 選択時に鍵を検出して
+    # アップロード、`--skip-ssh-key` で抑止)。期待外アカウントへの SSH login はリモート
+    # write になるため、鍵操作が起きない形だけを readonly にする:
+    #   `--skip-ssh-key` / `--with-token` (stdin の token を保存するだけ) /
+    #   `--git-protocol https` (`-p https`、`=` 区切りも可)
+    # それ以外の login (対話 / `--web` / `--git-protocol ssh`) は通常検証 — 不一致なら
+    # deny し、deny 文面で `--skip-ssh-key` 付きの形を案内する。
+    r"^gh\s+auth\s+login\b(?=.*\s(?:--skip-ssh-key|--with-token|(?:--git-protocol|-p)(?:=|\s+)https)\b)",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
 ]
@@ -97,7 +105,12 @@ def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]
         return None, err
     active = parse_active_accounts(combined)
     if not active:
-        return None, "GitHub: アクティブアカウントを取得できません。gh auth login を実行してください。"
+        return None, (
+            "GitHub: アクティブアカウントを取得できません。"
+            "gh auth login --skip-ssh-key を実行してください "
+            "(--skip-ssh-key / --with-token / --git-protocol https 付きの login は"
+            "検証なしで実行できます)。"
+        )
     return active, None
 
 
@@ -156,7 +169,7 @@ def verify(expected, project_dir: str, env=None) -> str | None:
             if current is None:
                 errors.append(
                     f"GitHub [{host}]: このホストにログインしていません — "
-                    f"gh auth login --hostname {host} を実行してください。"
+                    f"gh auth login --hostname {host} --skip-ssh-key を実行してください。"
                 )
             elif current != want:
                 errors.append(

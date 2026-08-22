@@ -41,8 +41,10 @@ PATTERNS = [r"^firebase\b"]
 READONLY = [
     r"^firebase(?:-tools)?\s+use\s*$",
     # 認証操作 (login / login:ci / login:add / login:use / logout) は project を
-    # 変更しない。未ログインだと `firebase use` が requireAuth で失敗して現在値を
-    # CLI から取れず、login 自体が deny されるデッドロックになるため素通しする。
+    # 変更しない (OAuth token の取得・ローカル保存のみ。gh の SSH 鍵アップロードの
+    # ようなリモート write は無い)。未ログインだと `firebase use` が requireAuth で
+    # 失敗して現在値を CLI から取れず、login 自体が deny されるデッドロックになるため
+    # 素通しする。
     r"^firebase(?:-tools)?\s+(login|logout)(:\S+)?\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^firebase(?:-tools)?\s+(--version|--help|version|help)\b",

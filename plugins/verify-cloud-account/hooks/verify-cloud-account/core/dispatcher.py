@@ -249,6 +249,21 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     return "\n".join(lines)
 
 
+def invalidate_after(command: str) -> list[str]:
+    """PostToolUse: アカウント状態を変えうるコマンドの**実行後**にもう一度 epoch を進める。
+
+    PreToolUse の無効化だけだと、切替コマンドの実行前 (hook 終了〜コマンド完了の間)
+    に走った別 hook の検証 (旧状態) が新しい entry として残り、切替後に TTL 残り分
+    だけ通ってしまう。実行後に epoch を進めることで、実行完了前に開始した検証の
+    entry を全て無効にする。検証も CLI 呼出も出力もしない。破棄した service 名を返す。
+    """
+    _targets, switching = _analyze_command(command)
+    names = [_service_name(svc) for svc in switching]
+    for name in names:
+        cache.invalidate(name)
+    return names
+
+
 def dispatch(command: str, cwd: str) -> dict | None:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
     if not project_dir:
@@ -327,6 +342,10 @@ def dispatch(command: str, cwd: str) -> dict | None:
             continue
 
         svc_name = _service_name(svc)
+        # verify 開始時点の epoch。開始後に (並行する hook の) 切替検出で epoch が進んだ
+        # 場合、この検証は旧状態を見ている可能性があるため結果を cache に公開しない
+        # (cache.set_success が epoch を照合する)。
+        epoch = cache.current_epoch(svc_name)
         # 切替を含むコマンドでは、その service の target は cache を読まず (上で破棄
         # 済みだが防御的に) 実行前の状態を新たに検証し、成功しても cache に残さない
         # (実行後に状態が変わる)。判定は service 単位 — readonly の `gh auth login`
@@ -350,7 +369,9 @@ def dispatch(command: str, cwd: str) -> dict | None:
                 f"{err}\n(検出コマンド: {', '.join(orig for orig, _norm in cands)})"
             )
         elif not switching_here:
-            cache.set_success(svc_name, project_dir, entry, accounts_mtime, inline_env)
+            cache.set_success(
+                svc_name, project_dir, entry, accounts_mtime, inline_env, epoch=epoch
+            )
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
 

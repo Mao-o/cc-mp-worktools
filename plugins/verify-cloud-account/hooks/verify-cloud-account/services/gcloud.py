@@ -15,7 +15,10 @@ READONLY = [
     r"^gcloud\s+auth\s+list\b",
     r"^gcloud\s+config\s+get-value\s+(project|account)\b",
     # 認証取得系 (login / application-default ... / activate-service-account / revoke)
-    # は GCP 資源を変更せず、ローカルの認証状態を作るだけ。未ログインで
+    # は GCP 資源を変更せず、ローカルの認証状態を作るだけ (`auth login` はブラウザ認可
+    # + credential のローカル保存、`activate-service-account` は鍵ファイルの読込、
+    # `revoke` は token 失効のみ。gh の SSH 鍵アップロードのようなリモート write は
+    # 無い)。未ログインで
     # `gcloud config get-value` が取れないとき deny 文面から回復できる経路を残す。
     # 直後の write は (STATE_CHANGING で成功 cache も破棄されるため) 再検証される。
     # `application-default` は login / revoke / set-quota-project のみ (ADC の

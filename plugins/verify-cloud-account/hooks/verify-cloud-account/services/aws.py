@@ -10,7 +10,9 @@ PATTERNS = [r"^aws\b"]
 READONLY = [
     r"^aws\s+sts\s+get-caller-identity\b",
     # 認証取得系 (`aws sso login|logout` / `aws login|logout` / `aws configure ...`) は
-    # クラウド資源を変更せず、ローカルの認証状態・profile 設定を作るだけ。
+    # クラウド資源を変更せず、ローカルの認証状態・profile 設定を作るだけ
+    # (`sso login` は SSO token の取得、`aws login` はブラウザ sign-in、`configure` は
+    # ~/.aws 配下の編集のみ。gh の SSH 鍵アップロードのようなリモート write は無い)。
     # 未ログインだと sts が失敗して deny され、deny 文面が案内する `aws sso login`
     # 自体が deny される remediation loop になるため素通しする。直後の write は
     # (STATE_CHANGING で成功 cache も破棄されるため) 次回 hook で再検証される。

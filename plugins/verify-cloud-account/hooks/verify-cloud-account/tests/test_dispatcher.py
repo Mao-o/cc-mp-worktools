@@ -794,11 +794,11 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
         self.assertEqual(v.call_count, 2)
 
     def test_readonly_login_invalidates_cache(self):
-        """`gh auth login` は検証しない (readonly) が、成功 cache は破棄する。"""
+        """`gh auth login --skip-ssh-key` は検証しない (readonly) が、成功 cache は破棄する。"""
         self._write_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None) as v:
             dispatch("gh pr list", str(self.project_dir))
-            self.assertIsNone(dispatch("gh auth login", str(self.project_dir)))
+            self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
             self.assertEqual(v.call_count, 1)
             dispatch("gh pr create", str(self.project_dir))
         self.assertEqual(v.call_count, 2)
@@ -972,7 +972,7 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
 
         cache.set_success("github", str(self.project_dir), "Mao-o", 1.0)
         # readonly の login は未設定でも allow (deny しない) かつ cache 破棄
-        self.assertIsNone(dispatch("gh auth login", str(self.project_dir)))
+        self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
         self.assertFalse(cache.get_success("github", str(self.project_dir), "Mao-o", 1.0))
 
 
@@ -1000,10 +1000,12 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
         "aws configure sso-session",
         "aws configure list-profiles",
         "aws configure set region us-east-1 --profile prod",
-        "gh auth login",
-        "gh auth login --hostname ghe.example.com",
+        "gh auth login --skip-ssh-key",
+        "gh auth login --hostname ghe.example.com --skip-ssh-key",
         "gh auth login --with-token < token.txt",
-        "gh auth login --web --git-protocol ssh",
+        "gh auth login --git-protocol https",
+        "gh auth login -p https --web",
+        "gh auth login --git-protocol=https --hostname ghe.example.com",
         "gh auth logout --hostname github.com",
         "gh auth refresh -s repo",
         "gh auth setup-git",
@@ -1055,6 +1057,12 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
             "aws configure export-credentials --profile prod",
             "gh repo create foo",
             "gh auth token",
+            # SSH 鍵のアップロードが起きうる login 形は readonly にしない (Codex R2 P1-1)
+            "gh auth login",
+            "gh auth login --web",
+            "gh auth login --hostname ghe.example.com",
+            "gh auth login --git-protocol ssh",
+            "gh auth login -p ssh --skip-ssh-keys",
             "gcloud config set project other",
             "gcloud auth application-default print-access-token",
             "firebase use other",
@@ -1173,14 +1181,17 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         )
         reason = self._deny_reason("gh pr create", run)
         cmds = self._assert_guidance_is_allowed(reason, run)
-        self.assertIn("gh auth login --hostname ghe.example.com", cmds)
+        self.assertIn("gh auth login --hostname ghe.example.com --skip-ssh-key", cmds)
 
     def test_github_no_active_account(self):
+        """未ログイン時の案内は SSH 鍵アップロードが起きない `--skip-ssh-key` 付きの形
+        (素の `gh auth login` は readonly ではないので案内すると loop になる)。"""
         self._write_accounts({"github": "Mao-o"})
         run = self._const("", "You are not logged into any GitHub hosts.\n", 1)
         reason = self._deny_reason("gh pr create", run)
         cmds = self._assert_guidance_is_allowed(reason, run)
-        self.assertIn("gh auth login", cmds)
+        self.assertIn("gh auth login --skip-ssh-key", cmds)
+        self.assertNotIn("gh auth login", cmds)
 
     # --- Firebase ---
 
@@ -1305,6 +1316,67 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
                 reason = self._deny_reason(write, run)
                 self.assertIn("未設定", reason)
                 self._assert_guidance_is_allowed(reason, run)
+
+
+class TestConcurrentInvalidationRace(BaseWithTmpProject):
+    """PR #43 Codex R2 P1-2: 同じ service の Bash hook が並行したとき、切替前の状態を
+    検証した結果が切替後に公開されない (epoch / tombstone + PostToolUse の無効化)。"""
+
+    def test_verify_started_before_invalidate_is_not_published(self):
+        """hook B (`gh pr list`) の verify 中に hook A (`gh auth switch`) の PreToolUse が
+        cache を無効化 → B の成功は (開始時 epoch が古いので) 書かれない。"""
+        from core import cache
+
+        self._write_accounts({"github": "Mao-o"})
+        calls = []
+
+        def verify_then_concurrent_switch(*_a, **_k):
+            calls.append(1)
+            if len(calls) == 1:
+                cache.invalidate("github")  # B の検証中に A の無効化が走った
+            return None
+
+        with mock.patch("services.github.verify", side_effect=verify_then_concurrent_switch) as v:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B
+            self.assertIsNone(dispatch("gh pr create", str(self.project_dir)))  # 切替後の write
+        self.assertEqual(v.call_count, 2)
+
+    def test_verify_started_after_pre_invalidate_is_voided_by_post_invalidate(self):
+        """A: `gh auth switch --user other` の PreToolUse (epoch 進む) → B: `gh pr list` が
+        切替実行前の旧状態を検証して entry を書く → A の PostToolUse (invalidate_after)
+        が epoch を進める → 次の write は B の entry を使わず再検証する。"""
+        from core.dispatcher import invalidate_after
+
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(dispatch("gh auth switch --user other", str(self.project_dir)))
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+            self.assertEqual(v.call_count, 2)
+            self.assertEqual(invalidate_after("gh auth switch --user other"), ["github"])
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+
+    def test_invalidate_after_ignores_non_switch_commands(self):
+        from core.dispatcher import invalidate_after
+
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            self.assertEqual(invalidate_after("gh pr view 1 && aws s3 ls"), [])
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 1)
+
+    def test_invalidate_after_covers_readonly_login_and_cross_cli(self):
+        from core.dispatcher import invalidate_after
+
+        self.assertEqual(invalidate_after("gh auth login --skip-ssh-key"), ["github"])
+        self.assertEqual(
+            invalidate_after("aws --profile prod eks update-kubeconfig --name c"), ["kubectl"]
+        )
+        self.assertEqual(
+            invalidate_after("gcloud config set project x && kubectl config use-context y"),
+            ["gcloud", "kubectl"],
+        )
 
 
 class TestLeadingGlobalOptions(BaseWithTmpProject):

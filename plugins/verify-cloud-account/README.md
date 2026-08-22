@@ -16,7 +16,8 @@ Bash コマンド実行の直前に、クラウド CLI
 /plugin install verify-cloud-account@mao-worktools
 ```
 
-有効化すると `PreToolUse:Bash` hook が自動登録される。
+有効化すると `PreToolUse:Bash` hook (検証) と `PostToolUse:Bash` hook (切替コマンド
+実行後の成功 cache 無効化のみ。検証も出力もしない) が自動登録される。
 `settings.json` を手で編集する必要はない。
 
 開発時はローカルパスを直接ロードする方が速い:
@@ -164,7 +165,11 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
   サブコマンド含む) — project を変更しない認証操作。未ログインだと `firebase use`
   が認証必須で失敗して現在値を取れず、`firebase login` 自体が deny されるデッド
   ロックになるのを防ぐ (v0.7.3)
-- **認証取得系** (v0.8.0): `gh auth login` / `logout` / `refresh` / `setup-git`、
+- **認証取得系** (v0.8.0): `gh auth logout` / `refresh` / `setup-git`、
+  `gh auth login` は **SSH 鍵のアップロードが起きない形のみ** (`--skip-ssh-key` /
+  `--with-token` / `--git-protocol https` (`-p https`) 付き。SSH git protocol を選ぶ
+  login は既存の SSH 公開鍵を GitHub アカウントにアップロードしうるため、それ以外の
+  `gh auth login` は通常検証し、deny 文面では `--skip-ssh-key` 付きの形を案内する)、
   `aws sso login` / `aws sso logout` / `aws login` / `aws logout` /
   `aws configure ...` (認証情報を出力する `configure export-credentials` は除く)、
   `gcloud auth login` / `gcloud auth application-default login` / `revoke` /
@@ -379,8 +384,10 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 (〜1-3s) を走らせるとストレスになる。そのため **検証成功を 30 秒キャッシュ** する。
 
 - 保存先: `$TMPDIR/cc-mp-verify-cloud-account/<service>-<sha256>.json`
+  (epoch は同じディレクトリの `<service>.epoch`)
 - 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損 /
-  **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記)
+  **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) / entry の epoch が
+  現在と異なる
 - **失敗 (deny) 状態はキャッシュしない** — 切り替え後は即座に再検証が走る
 
 ### 切替・ログイン系コマンドでの即時無効化 (v0.8.0)
@@ -400,8 +407,17 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 | Kubernetes | `kubectl config use-context` / `set-context` / `set-cluster` / `set-credentials` / `set` / `unset` / `delete-*` / `rename-context`、および別 CLI / plugin 経由の kubeconfig 書換 `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` / `az aks get-credentials` / `kubectx` / `kubectl ctx` |
 
 切替セグメントが同じコマンド内の write と別セグメントでも (readonly の `gh auth login
-&& gh pr create`、inline env が異なる `gh auth switch --user other && GH_HOST=... gh pr
-create`)、その service の検証成功は cache しない (判定は service 単位)。
+--skip-ssh-key && gh pr create`、inline env が異なる `gh auth switch --user other &&
+GH_HOST=... gh pr create`)、その service の検証成功は cache しない (判定は service 単位)。
+
+**並行する hook との競合 (epoch / tombstone)**: 無効化は entry の削除だけでなく
+service ごとの epoch (`<service>.epoch`、単調増加) を進める。entry には verify 開始
+時点の epoch を記録し、読む側は epoch が現在と違えば無視、書く側は開始時と現在の
+epoch が違えば書かない。さらに `PostToolUse:Bash` hook が切替コマンドの**実行後**にも
+epoch を進めるため、切替 hook と並行して走った別 hook が旧状態を検証した結果
+(切替の実行前に開始した検証) は切替後に使われない。PostToolUse は検証も出力も
+しない (コマンドの分解と epoch ファイルの更新のみ)。コマンドが失敗して PostToolUse
+が走らなかった場合は状態も変わっていないため影響しない。
 
 従来 (〜0.7.3) は `gh pr list` (検証成功・cache 書込) → `gh auth switch --user other`
 → `gh pr create` が 30 秒以内なら cache hit で別アカウントの write が通っていた。
@@ -430,6 +446,7 @@ create`)、その service の検証成功は cache しない (判定は service 
 ## 発火しなかったとき
 
 1. `cat ${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json` でフックが登録されているか確認
+   (`PreToolUse` と `PostToolUse` の両方に `Bash` matcher がある)
 2. `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account` を stdin 付きで
    手動実行し、対象コマンドで deny JSON が出るかスモーク:
    ```bash
