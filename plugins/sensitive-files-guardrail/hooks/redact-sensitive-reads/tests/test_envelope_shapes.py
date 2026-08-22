@@ -25,7 +25,8 @@ _TOOL_INPUT_KEYS = {
     "write": {"file_path", "content"},
 }
 
-# fixtures/envelopes/README.md:22 と core/output.py::LENIENT_MODES を突合する
+# fixtures/envelopes/README.md の permission_mode 項と core/output.py::LENIENT_MODES
+# を突合する
 # 既知 permission_mode の完全列挙。CLI 2.1.x 系の実測に基づく。
 _KNOWN_PERMISSION_MODES = {
     "default",
@@ -87,9 +88,9 @@ class TestLenientModesSubset(unittest.TestCase):
       1. 実 envelope を採取して permission_mode の値を確認
          (``hooks/_debug/capture_envelope.py`` を作成して hooks.json 経由で取る)
       2. `core/output.py::LENIENT_MODES` と
-         `tests/fixtures/envelopes/README.md:22` の列挙を同時更新
+         `tests/fixtures/envelopes/README.md` (`permission_mode` 項) の列挙を同時更新
       3. `docs/DESIGN.md` の lenient 方針も更新
-      4. `CLAUDE.md` の CLI 再実測 Runbook に実測日を追記
+      4. `docs/MAINTAINING.md` の CLI 再実測 Runbook に実測日を追記
     """
 
     def test_lenient_modes_are_subset_of_known_permission_modes(self):
@@ -99,7 +100,7 @@ class TestLenientModesSubset(unittest.TestCase):
             msg=(
                 f"LENIENT_MODES has unknown values: {sorted(unknown)}. "
                 "Update fixtures/envelopes/README.md, docs/DESIGN.md, and "
-                "CLAUDE.md's CLI re-probe Runbook if CLI added a new mode."
+                "docs/MAINTAINING.md's CLI re-probe Runbook if CLI added a new mode."
             ),
         )
 

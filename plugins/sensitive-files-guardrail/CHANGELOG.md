@@ -2,90 +2,128 @@
 
 ## Unreleased (PR 6, 1.0.0 予定)
 
-**PR 6 進行中** (REVIEW_TASKS_2026-05-06.md の最終 PR、1.0.0 に向けて E5 / E6 /
-D1 / D2 を順次取り込む)。本セクションは E5 (json/toml/yaml status 拡張) の
-変更を記録し、E6 (Edit/Write リッチ化) / D1 / D2 (docs / tests 整理) は同
-セクションへ追記後にまとめて 1.0.0 として cut する。plugin 名前
-`sensitive-files-guardrail` は維持 (0.14.0 で結論済み: guard は役割語であり
-deny reason を読むモデルへの遵守圧として機能する、人間向け期待値調整は
-description / README の分業で担う)。rename 自体は内部呼称の `sensitive-files-guard`
-→ `sensitive-files-guardrail` 統一として 0.14.0 リリース直後の commit 52113a1 で
-完了済み。
+PR 6 (REVIEW_TASKS_2026-05-06.md の最終 PR) の **未着手分** のみを列挙する。
+E5 (json/toml/yaml の value status 拡張) は **0.14.0 で出荷済み** (commit 3189d907 は
+tag `v0.14.0` に含まれる) で、0.19.1 まで本節に置かれていた記述は `## 0.14.0` の
+「補遺」へ移した。plugin 名 `sensitive-files-guardrail` は維持 (0.14.0 で結論済み。
+内部呼称の統一 rename は commit 52113a1 で完了)。
 
-> **注記 (versioning)**: 上記 rename の副作用で旧 `patterns.local.txt` が黙って
-> 失われる data-loss regression が見つかったため、1.0.0 を待たず先に `0.14.1`
-> patch として hotfix を出した (下記 `## 0.14.1` 参照)。本 Unreleased の
-> E5/E6/D1/D2 とは独立しており、`0.14.1` の fix 内容は 1.0.0 にもそのまま内包
-> される。1.0.0 cut 時にこの注記は削除してよい。
+- **E6** (Edit/Write の意図汲み取りメッセージ拡張) — 未着手 (bd_092a232e-snw.9)
+- **D1** (docs 整理) — 未着手。0.19.1 時点の再見積り (docs は計画時の 2 倍超に
+  膨張、REVIEW_TASKS の plugin 外退避と CHANGELOG の archive 化に分割) は
+  `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照 (bd_092a232e-snw.10)。
+  公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
+- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.19.1 時点の実測 (redact 827 /
+  check 79) と乖離しており、「同型ケースの subTest 化で重複を畳む」に再定義して
+  から着手する (bd_092a232e-snw.13)
+- 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
+  `## 1.0.0` として cut する
 
-### E5: JSON / TOML / YAML にも value status を拡張 (commit 3189d907)
+## 0.19.1
 
-dotenv 0.9.0 (E1) で導入した value status / length / placeholder hint を、
-json / toml の str scalar 値、および yaml の top-level key 抽出に横展開する
-(REVIEW_TASKS_2026-05-06.md L408-425)。「鍵があるが値が `<placeholder>` のまま」
-「文字列が異様に長い (デバッグダンプ混入)」「設定値が `<empty>`」などを reason
-から判定できるようにし、思想 2 (block 時は意図を汲んだメッセージを返す) を全
-format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆方向 (status
-拡張) に倒した経緯は REVIEW_TASKS の L275-278 参照。
+**docs 整合のみ** (bd_092a232e-snw.7 / snw.8 / snw.10 / snw.20 / snw.25)。コードの
+変更は無く、判定境界 (deny / allow / ask) とテスト件数 (redact 827 / check 79) も
+0.19.0 から変わらない。2026-08-22 の plugin 精査で見つかった「出荷済みの機能を
+Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在しない CLAUDE.md への
+リンク」「撤去済み仕様を現行として記述」「個人パスの混入」を解消する。
 
-1. **`redaction/jsonlike.py`**: 文字列 scalar 値に status タグ + length を付与
-   (`_classify_str_status`)。
-   - 付与する status: `<set>` / `<empty>` / `<placeholder>` / `<long>` /
-     `<looks_truncated>` (dotenv と同等のタグセット。`<long>` は 4096 byte 超)
-   - placeholder 一致時は `matched="..."` で辞書 literal / pattern label を併記
-     (値そのものは出さない、`redaction/placeholders.py` 共有)
-   - bool / num / null / array / object には status を**出さない** (構造側は
-     値を持たないため意味がない)
-   - `<short>` は型クラス前提のため json では非対象 (dotenv は jwt / url 等の
-     型別最低長を持つが、json には型ヒントが無いため判定不能)
-   - 再帰ネストでも適用 (`{"outer": {"inner": "..."}}` で inner にも付与)
-2. **`redaction/tomllike.py`**: `format_toml` を `format_jsonlike(info)` 直流用に
-   簡素化。`_walk` を jsonlike から共有経由で同じ str scalar status が自動的に
-   付与される。
-3. **`redaction/opaque.py`**: yaml format 専用の簡易 top-level key 抽出器を
-   新設 (`_redact_yaml`)。
-   - `^([A-Za-z_][A-Za-z0-9_\-]*)\s*:` で top-level key を順序維持で収集
-     (`_YAML_MAX_TOP_KEYS=500` で cap)
-   - `^\s+([A-Za-z_]...)` で nested 件数のみカウント (key 名は出さない)
-   - 完全パースはしない (思想 1: うっかり露出予防の射程外、anchor / alias /
-     flow style / multi-document などは対象外)
-   - list 形式 (`- item:`) と comment 行 (`#`) はスキップ
+### 1. 出荷済み E5 / `[project:]` の「Unreleased」表記を実バージョンに (snw.7)
 
-### 動作変化
+- `git tag --contains 3189d907` → `v0.14.0`。E5 (json/toml/yaml の value status)
+  は 0.14.0 に同梱済みだったが、CHANGELOG 先頭の `## Unreleased (PR 6)` が E5 を
+  未出荷として記述し、README / DESIGN / MATRIX も「Unreleased (PR 6, E5)」と
+  表記していた。E5 の記述を `## 0.14.0` の「補遺」に移し、`## Unreleased` は E6 /
+  D1 / D2 の未着手分のみに縮約。各 docs の表記を **0.14.0 (E5)** に置換
+  (`docs/DESIGN.md` の見出しが変わったため `docs/MATRIX.md` のアンカーも更新)
+- 0.15.0 で出荷した `[project:]` セクションを README / PATTERNS /
+  `hooks/_shared/patterns.py` の docstring が「Unreleased」と表記していたのを
+  **0.15.0** に置換
+- README のテスト件数を実測 (redact 827 / check 79) に更新。0.19.0 節の
+  「redact 810 件」は PR #41 の review 途中の値で、main への merge 時点 (commit
+  77b8cb6) では既に 827 件だった
+- `docs/MATRIX.md` 冒頭の「値は 2026-05-18 時点 (0.13.0) の挙動」を 0.19.0 時点に更新
+- `hooks/redact-sensitive-reads/tests/fixtures/envelopes/README.md` の
+  `LENIENT_MODES` 説明 (「auto / bypassPermissions の 2 値」) を 0.13.0 以降の
+  3 値 (plan を含む) に更新
+- L2 review 対応: `docs/MATRIX.md` / `test_envelope_shapes.py` にあった
+  `tests/fixtures/envelopes/README.md:22` という行番号参照 (同 README の冒頭注記が
+  2 行になり対象行が L24 にずれた) を行番号非依存の表現に変更。0.19.0 節の
+  「810 件」と 0.14.1 節冒頭の「1.0.0 への E5 取り込み」に当時の値 / 認識である旨の
+  注記を追加。`docs/DESIGN.md` の「既知制限 (0.14.0 時点)」見出しを、項目が
+  0.18.0 まで更新されている実態に合わせて訂正
 
-- `Read` / `Bash` deny 時の json / toml / yaml ファイル minimal info が拡張:
-  - 例: `config.json` の `{"k": "changeme"}` → `k  <type=str>  <placeholder>  matched="changeme"  length=8`
-  - 例: `secrets.yaml` で `top-level keys (in order):` + `nested entries: N (not parsed)`
-- **判定境界は変化なし** (deny / allow / ask の区分は 0.14.0 と同じ)。reason に
-  乗る情報量だけが拡張された。値そのものは引き続き一切出さない。
+### 2. `git ls-files` hard-stop 特例の撤去 (commit 584afd1) を出荷版に記録 (snw.8)
+
+- commit 584afd1 (2026-06-15) は `handle()` 内の git ls-files hard-stop 特例を撤去し、
+  `git ls-files --format='%(objectname)' .env` を **deny → ask_or_allow** に降格
+  したが、CHANGELOG に記載が無かった。git で確認すると 584afd1 と 6b56a81
+  (ハーネス委譲方針の明文化) は 0.14.1 の bump commit (9aaf56f) の祖先であり、
+  **出荷版は 0.14.1** (チケットが想定した 0.15.0 ではない)。`## 0.14.1` に
+  「判定境界の変化」と「同梱 commit の記録」を追記した
+- `docs/DESIGN.md` の撤去特例表で「撤去版 1.0.0」としていた行を 0.14.1 (commit
+  584afd1) に訂正。metadata-only 節の「1.0.0 のハーネス委譲方針整理」も同様
+- 0.17.0 節と `docs/MATRIX.md` の「0.10.0 以降で初めて判定境界が変わる」を訂正
+  (0.14.0 の metadata-only allow、0.14.1 の上記降格が先行していた。なお同じ形は
+  0.18.0 の quote-aware 化で特例なしに deny に戻っている)
+
+### 3. 公開の保守者ガイド `docs/MAINTAINING.md` を新設し 6 箇所のリンク切れを解消 (snw.10)
+
+- README / DESIGN (4 箇所) / MATRIX が参照していた `CLAUDE.md` は repo に存在せず
+  (gitignore 済みの `CLAUDE.local.md` のみ)、clone したユーザーにはテスト /
+  リリース手順 / CLI 再実測 Runbook が届いていなかった。個人パス・私的メモを
+  含まない公開用の保守者ガイドを `docs/MAINTAINING.md` として新設 (目的と非目的 /
+  ディレクトリ構成 / Bash handler 判定フロー (0.19.0 の実装に合わせて描き直した
+  mermaid) / ログ規則 / テスト実行 / validate / 手動スモーク / CLI 再実測 Runbook /
+  拡張ポイント / リリース手順 / Step 0-c / 依存関係)
+- ファイル名を `CLAUDE.md` にしなかったのは、plugin root の `CLAUDE.md` は plugin
+  として配布されても project context にロードされず、CLI 2.1.240 の `claude plugin
+  validate` が warning (`CLAUDE.md at the plugin root is not loaded as project
+  context. To ship context with your plugin, use a skill instead`) を出すため
+  (warning ゼロ運用)。参照元 (README / DESIGN ×4 / MATRIX、および
+  `tests/fixtures/envelopes/README.md` / `test_envelope_shapes.py` の docstring /
+  `bash_handler.py` のコメント) は `docs/MAINTAINING.md` の実在する見出し
+  (「CLI バージョンアップ時の再実測手順 (Runbook)」「ログ規則」「Step 0-c 実測結果」
+  「Bash handler 判定フロー」) のアンカーに揃えた。コメント / docstring の参照先
+  更新のみで挙動の変更は無い
+- `docs/DESIGN.md` の Phase 0 節にあった保守者の手元メモへの `~/` パス参照は
+  公開 docs から外し、要点転記済みである旨に置換
+- D1 (docs 集約 / REVIEW_TASKS 退避) の本体は本リリースでは行わず、再見積りの
+  結果を `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節に記録した
+
+### 4. `docs/PATTERNS.md` の glob 節を 0.8.0 の仕様に書き直し (snw.20)
+
+- 「Bash の glob false positive 対策」節が 0.3.2 の候補列挙 (`cat *.json` を
+  deny) を現行仕様として記述していた。0.8.0 で撤廃済みで実測は ask_or_allow。
+  現行仕様 (dotenv stem 一致の glob のみ deny、他の glob は ask_or_allow、
+  `!<basename>` 除外は glob operand には効かない) に書き直した
+- 「実装詳細」の `_parse_patterns_text` の所在を `core/patterns.py` /
+  `checker.py` への論理コピーから、実体の `hooks/_shared/patterns.py` に訂正
+- 実在の個人パスは 0.19.0 で既にダミー (`/path/to/project-a`) に置換済み。
+  `docs/REVIEW_TASKS_2026-05-06.md` 末尾に残っていた個人環境のメモリパスも除去し、
+  `grep -rn '/Users/' README.md docs/` が手順の記述以外にヒットしないことを確認した
+
+### 5. ハーネス委譲方針 (commit 6b56a81) を CHANGELOG / REVIEW_TASKS / README に反映 (snw.25)
+
+- `docs/DESIGN.md` の「ハーネス委譲方針 (defense-in-depth の一層)」節 (2026-06-15
+  追加) は CHANGELOG と REVIEW_TASKS の進捗表に未反映だった。`## 0.14.1` に
+  1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
+  (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
+
+### リリース手順への追加
+
+`docs/MAINTAINING.md` の「リリース手順」に docs 整合チェックを追加した:
+
+- `grep -rn Unreleased README.md docs/ hooks/ --exclude='REVIEW_TASKS_*.md'` が
+  手順の記述以外にヒットしないこと (CHANGELOG の `## Unreleased` 節だけが唯一の
+  「未出荷」記述。REVIEW_TASKS は日付付き作業ログなので当時の表記を残す)
+- `grep -rn '/Users/' README.md docs/` が手順の記述以外にヒットしないこと
+  (個人パス混入の検知)
+- 見出しを変えたら参照元のアンカーを同時に更新する
 
 ### テスト
 
-- 累計 **701 件維持** (redact 674 / check 27)。E5 のテスト群は 0.14.0 リリース
-  以前 (commit 3189d907, 2026-05-24) で既に取り込まれており件数表記に変化なし
-- 新規 (E5 由来): `TestJsonStatus` ×9 (str status / length / placeholder literal +
-  pattern / long / looks_truncated / bool・num・null に status 出さない /
-  ネスト str / 値漏れ)、`TestTomlStatus` ×3 (toml str scalar の status /
-  placeholder / empty)、`TestYamlExtraction` ×8 (top-level keys 順序 /
-  nested count / nested key 不露出 / 値漏れ / コメントスキップ / 空 yaml /
-  list 形式 / cap)
-
-### ドキュメント
-
-- `README.md`: dotenv 例 (L66-82) に続けて json / yaml の minimal info 出力例を
-  追加、「実値は一切含まれない」説明に json/yaml 横断 status を反映
-- `docs/DESIGN.md`: 「dotenv minimal info の拡張 (0.9.0, E1+E2)」サブセクションに
-  続けて「json/toml/yaml の status 拡張 (Unreleased, E5)」サブセクションを新設
-- `docs/MATRIX.md`: Read handler 表脚注に E5 で format 横断 status が出る旨を追加
-- `docs/REVIEW_TASKS_2026-05-06.md`: 進捗表で P6 E5 を「Unreleased ✓」に更新、
-  plugin rename 検討事項に「rename 完了 (commit 52113a1)」を追記
-
-### 残課題 (本セクション、続編で追記予定)
-
-- E6 (Edit/Write の意図汲み取りメッセージ拡張)
-- D1 (docs 整理) / D2 (tests 整理、合計 +1120 行を E5/E6/D1/D2 で約 ±0 に戻す目標)
-- 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
-  `## 1.0.0` として cut
+- redact **827 件** / check **79 件**、全 green (コード無変更、件数不変)。
+  `claude plugin validate` passed (warning 0)
 
 ## 0.19.0
 
@@ -345,6 +383,9 @@ tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追�
 ### テスト
 
 redact **810 件** (+48、0.18.0 review 対応後の 762 件基準)、check **79 件** (+52)。
+
+> 810 件は PR #41 の review 途中の値。その後の review 対応 (R2〜R5) を含めた
+> main への merge 時点 (commit 77b8cb6) では **827 件** (0.19.1 節参照、0.19.1 で追記)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option
@@ -738,7 +779,11 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 ## 0.17.0
 
 **`awk` / `sed` を `_OPAQUE_WRAPPERS` から除外** (bd_092a232e-5pn)。
-0.10.0 以降で **初めて判定境界 (deny / allow / ask) が変わるリリース**。
+判定境界 (deny / allow / ask) が変わるリリース (機密 operand は deny に、非機密
+operand は allow に)。直近で境界が動いたのは 0.14.0 (metadata-only の allow 追加)
+と 0.14.1 (`git ls-files --format` の hard-stop 形を deny → ask_or_allow に降格。
+CHANGELOG には 0.19.1 で追記) で、「0.10.0 以降で初めて」と書いていた旧記述は
+0.19.1 で訂正した。
 
 ### 背景
 
@@ -966,6 +1011,9 @@ commit 52113a1) で custom `patterns.local.txt` の参照ディレクトリが
 を待たず早期に出すべき data-loss につき `0.14.1` patch として cut する
 (1.0.0 への E5/E6/D1/D2 取り込みとは独立。本 fix は 1.0.0 にも内包される)。
 
+> 上記は 0.14.1 当時の認識。E5 のコードは 0.14.0 に同梱済みで、本節末尾の
+> 「同梱 commit の記録」(0.19.1 で追記) を参照。
+
 ### 旧 patterns.local.txt の fallback 読み込み + 移行警告
 
 - **`hooks/_shared/patterns.py`**: `load_patterns()` に rename 前の旧パス
@@ -1004,6 +1052,16 @@ commit 52113a1) で custom `patterns.local.txt` の参照ディレクトリが
 - 旧パスが使われている間は移行警告が出る (新パスへ `mv` すれば警告は消える)。
 - 新パスのみ / 両パス存在 / 両方不在のケースは従来と同一挙動 (判定境界・
   last-match-wins 順序とも変化なし)。
+- **判定境界の変化 (0.19.1 で追記、当時の CHANGELOG に未記載)**: 同梱された commit
+  584afd1 (2026-06-15) が `handle()` 内の git ls-files hard-stop 特例
+  (`--format='%(objectname)'` のように `(` を含み segment hard-stop に該当しても
+  deny を優先する経路) を撤去した。`git ls-files --format='%(objectname)' .env` は
+  **deny → ask_or_allow** (default / acceptEdits / dontAsk で ask、auto /
+  bypassPermissions / plan で allow) に降格。pathspec 無し形や `-s` / `--stage`
+  形は通常経路で従来どおり deny。根拠は同日の commit 6b56a81 で `docs/DESIGN.md`
+  に明文化した「ハーネス委譲方針 (defense-in-depth の一層)」(判断困難 → deny 強制の
+  特例は作らない)。この形は 0.18.0 の `_has_hard_stop` quote-aware 化で特例なしに
+  operand scan へ到達し、deny に戻っている。
 
 ### テスト
 
@@ -1016,6 +1074,18 @@ commit 52113a1) で custom `patterns.local.txt` の参照ディレクトリが
   旧パス fallback stderr 警告 / 新パス優先の 2 ケース。
 - HOME を tmpdir に隔離する既存 `BaseWithIsolatedHome` を流用し実ホームを汚染
   しない。
+
+### 同梱 commit の記録 (0.19.1 で追記)
+
+0.14.1 の bump commit (9aaf56f) は 0.14.0 以降の以下の commit を含む。いずれも
+当時の CHANGELOG に記載が無かった:
+
+- `584afd1` refactor: git ls-files hard-stop 特例の撤去 (上記「判定境界の変化」)
+- `6b56a81` docs: `docs/DESIGN.md` に「ハーネス委譲方針 (defense-in-depth の一層)」
+  節を新設 (ask_or_allow の範囲 / deny 固定の境界 / 撤去した特例の表 /
+  `patterns.txt` 読込失敗の例外)
+- `7dfce44` docs: E5 (json/toml/yaml の value status、コードは 0.14.0 同梱) の
+  README / DESIGN / MATRIX / REVIEW_TASKS 反映
 
 ## 0.14.0
 
@@ -1177,6 +1247,77 @@ transcript 実測で離脱原因を特定し、ガードの中核 (`.env` / 鍵 
   redirect / heredoc で機密 path に書き込む形はうっかりの範疇を超えるため
   対象外として通す (docs/DESIGN.md 既知制限 #14 に記載)
 - 0.13.0 残課題 (plan mode の envelope 実測) は未消化のまま継続
+
+### 補遺 (0.19.1 で移設): E5 — JSON / TOML / YAML にも value status を拡張
+
+> 以下は 0.19.1 まで `## Unreleased (PR 6)` に置かれていた記述。commit 3189d907
+> (2026-05-24) は tag `v0.14.0` に含まれ **0.14.0 で出荷済み** のため、ここへ移した。
+> docs (README / DESIGN / MATRIX / REVIEW_TASKS) への反映は commit 7dfce44
+> (2026-06-15) で 0.14.1 に同梱。
+
+#### E5: JSON / TOML / YAML にも value status を拡張 (commit 3189d907)
+
+dotenv 0.9.0 (E1) で導入した value status / length / placeholder hint を、
+json / toml の str scalar 値、および yaml の top-level key 抽出に横展開する
+(REVIEW_TASKS_2026-05-06.md L408-425)。「鍵があるが値が `<placeholder>` のまま」
+「文字列が異様に長い (デバッグダンプ混入)」「設定値が `<empty>`」などを reason
+から判定できるようにし、思想 2 (block 時は意図を汲んだメッセージを返す) を全
+format で揃える。B1 (json/toml/yaml を opaque 統一) を撤回して逆方向 (status
+拡張) に倒した経緯は REVIEW_TASKS の L275-278 参照。
+
+1. **`redaction/jsonlike.py`**: 文字列 scalar 値に status タグ + length を付与
+   (`_classify_str_status`)。
+   - 付与する status: `<set>` / `<empty>` / `<placeholder>` / `<long>` /
+     `<looks_truncated>` (dotenv と同等のタグセット。`<long>` は 4096 byte 超)
+   - placeholder 一致時は `matched="..."` で辞書 literal / pattern label を併記
+     (値そのものは出さない、`redaction/placeholders.py` 共有)
+   - bool / num / null / array / object には status を**出さない** (構造側は
+     値を持たないため意味がない)
+   - `<short>` は型クラス前提のため json では非対象 (dotenv は jwt / url 等の
+     型別最低長を持つが、json には型ヒントが無いため判定不能)
+   - 再帰ネストでも適用 (`{"outer": {"inner": "..."}}` で inner にも付与)
+2. **`redaction/tomllike.py`**: `format_toml` を `format_jsonlike(info)` 直流用に
+   簡素化。`_walk` を jsonlike から共有経由で同じ str scalar status が自動的に
+   付与される。
+3. **`redaction/opaque.py`**: yaml format 専用の簡易 top-level key 抽出器を
+   新設 (`_redact_yaml`)。
+   - `^([A-Za-z_][A-Za-z0-9_\-]*)\s*:` で top-level key を順序維持で収集
+     (`_YAML_MAX_TOP_KEYS=500` で cap)
+   - `^\s+([A-Za-z_]...)` で nested 件数のみカウント (key 名は出さない)
+   - 完全パースはしない (思想 1: うっかり露出予防の射程外、anchor / alias /
+     flow style / multi-document などは対象外)
+   - list 形式 (`- item:`) と comment 行 (`#`) はスキップ
+
+#### 動作変化
+
+- `Read` / `Bash` deny 時の json / toml / yaml ファイル minimal info が拡張:
+  - 例: `config.json` の `{"k": "changeme"}` → `k  <type=str>  <placeholder>  matched="changeme"  length=8`
+  - 例: `secrets.yaml` で `top-level keys (in order):` + `nested entries: N (not parsed)`
+- **判定境界は変化なし** (deny / allow / ask の区分は 0.14.0 と同じ)。reason に
+  乗る情報量だけが拡張された。値そのものは引き続き一切出さない。
+
+#### テスト
+
+- 累計 **701 件維持** (redact 674 / check 27)。E5 のテスト群は 0.14.0 リリース
+  以前 (commit 3189d907, 2026-05-24) で既に取り込まれており件数表記に変化なし
+- 新規 (E5 由来): `TestJsonStatus` ×9 (str status / length / placeholder literal +
+  pattern / long / looks_truncated / bool・num・null に status 出さない /
+  ネスト str / 値漏れ)、`TestTomlStatus` ×3 (toml str scalar の status /
+  placeholder / empty)、`TestYamlExtraction` ×8 (top-level keys 順序 /
+  nested count / nested key 不露出 / 値漏れ / コメントスキップ / 空 yaml /
+  list 形式 / cap)
+
+#### ドキュメント
+
+- `README.md`: dotenv 例 (L66-82) に続けて json / yaml の minimal info 出力例を
+  追加、「実値は一切含まれない」説明に json/yaml 横断 status を反映
+- `docs/DESIGN.md`: 「dotenv minimal info の拡張 (0.9.0, E1+E2)」サブセクションに
+  続けて「json/toml/yaml の status 拡張 (0.14.0, E5)」サブセクションを新設
+  (0.19.1 まで見出しは「Unreleased, E5」表記だった)
+- `docs/MATRIX.md`: Read handler 表脚注に E5 で format 横断 status が出る旨を追加
+- `docs/REVIEW_TASKS_2026-05-06.md`: 進捗表で P6 E5 を「Unreleased ✓」に更新
+  (0.19.1 で「0.14.0 ✓」に訂正)、
+  plugin rename 検討事項に「rename 完了 (commit 52113a1)」を追記
 
 ## 0.13.0
 

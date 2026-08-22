@@ -21,12 +21,13 @@ Claude Code セッション経由で漏れる事故を、1 プラグインで予
 ## 関連ドキュメント
 
 - **[docs/DESIGN.md](./docs/DESIGN.md)** — 設計原則、Phase 0 実測結果、既知制限、
-  責務境界、`LENIENT_MODES` 方針
+  責務境界、`LENIENT_MODES` 方針。判断困難な Bash を deny 強制しない根拠は
+  [ハーネス委譲方針 (defense-in-depth の一層)](./docs/DESIGN.md#ハーネス委譲方針-defense-in-depth-の一層)
 - **[docs/MATRIX.md](./docs/MATRIX.md)** — 判定結果の完全マトリクス (5 mode 列)
 - **[docs/PATTERNS.md](./docs/PATTERNS.md)** — `patterns.txt` / `patterns.local.txt`
   の仕様と設定例
-- **[CLAUDE.md](./CLAUDE.md)** — 保守者向け実務ガイド (テスト、リリース、CLI
-  再実測 Runbook)
+- **[docs/MAINTAINING.md](./docs/MAINTAINING.md)** — 保守者向け実務ガイド (テスト、
+  validate、リリース手順、CLI 再実測 Runbook、ログ規則)
 - **[CHANGELOG.md](./CHANGELOG.md)** — 全バージョンのリリースノート
 
 ## インストール
@@ -101,14 +102,14 @@ length, status tags, and placeholder hints are returned.
 > 当然 401」「DATABASE_URL が `<short> length=4` → DSN 文字列が壊れている」
 > のように次の作業に直接つなげられる。
 
-> **Unreleased (PR 6, E5)** で同等の status タグ
+> **0.14.0 (E5)** で同等の status タグ
 > (`<set>` / `<empty>` / `<placeholder>` / `<long>` / `<looks_truncated>`)
 > + `length` + `matched="..."` を **JSON / TOML の str scalar 値**、および
-> **YAML の top-level 抽出** にも横展開する。`<short>` は型クラス (jwt / url 等)
+> **YAML の top-level 抽出** にも横展開済み。`<short>` は型クラス (jwt / url 等)
 > 前提のため dotenv 限定。bool / num / null / 構造 (array / object) には status
 > を出さない (値を持たないため意味がない)。
 
-返却される JSON / TOML の reason 例 (Unreleased):
+返却される JSON / TOML の reason 例 (0.14.0, E5):
 
 ```
 <DATA untrusted="true" source="redact-hook" guard="guardrail-v1">
@@ -128,7 +129,7 @@ note: string scalar values are summarized to status tags and length only.
 TOML も同じフォーマットで返る (`format: toml`、内部実装は `_walk` を JSON と
 共有)。
 
-返却される YAML の reason 例 (Unreleased):
+返却される YAML の reason 例 (0.14.0, E5):
 
 ```
 <DATA untrusted="true" source="redact-hook" guard="guardrail-v1">
@@ -322,7 +323,7 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
 
-> **プロジェクトスコープの rule (Unreleased)**: 同じファイル内に
+> **プロジェクトスコープの rule (0.15.0)**: 同じファイル内に
 > `[project:/abs/path/to/project]` セクションを書くと、そのプロジェクトで
 > Claude Code が動いているときだけ適用される rule を追加できる (グローバル
 > 1 ファイルという方針は維持)。詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の
@@ -379,14 +380,17 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 ## テスト
 
 ```bash
-# redact-sensitive-reads (674 tests, 0.14.0)
+# redact-sensitive-reads (827 tests, 0.19.1 時点)
 cd hooks/redact-sensitive-reads
 python3 -m unittest discover tests
 
-# check-sensitive-files (27 tests)
+# check-sensitive-files (79 tests, 0.19.1 時点)
 cd hooks/check-sensitive-files
 python3 -m unittest discover tests
 ```
+
+validate / リリース手順 / CLI 再実測 Runbook などの保守者向け手順は
+[docs/MAINTAINING.md](./docs/MAINTAINING.md) にまとめてある。
 
 ## ログ
 
