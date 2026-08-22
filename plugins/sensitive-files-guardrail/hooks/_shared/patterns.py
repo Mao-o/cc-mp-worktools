@@ -95,18 +95,22 @@ def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]
     """``patterns.local.txt`` に追記する恒久除外レシピ (行リスト) を返す。
 
     ``[project:$CLAUDE_PROJECT_DIR]`` ヘッダー + ``!<basename>`` 行。重複は出現順を
-    保って除去し、空 basename は捨てる。``limit`` 件を超えた分は ``... (N more)``
-    に畳む (Stop の block reason が肥大しないため)。両 hook が同じレシピを提示
-    するためにここ (patterns.local.txt 形式の所有者) に置く。
+    保って除去し (順序付き list と set を並行して持ち線形 — list membership だと
+    二次計算で数万件の repo で Stop の 15s timeout を超えうる、Codex R5 P2-2)、
+    空 basename は捨てる。``limit`` 件を超えた分は ``... (N more)`` に畳む (Stop の
+    block reason が肥大しないため)。両 hook が同じレシピを提示するためにここ
+    (patterns.local.txt 形式の所有者) に置く。
     """
-    seen: list[str] = []
+    seen: set[str] = set()
+    ordered: list[str] = []
     for name in basenames:
         if name and name not in seen:
-            seen.append(name)
+            seen.add(name)
+            ordered.append(name)
     lines = [PROJECT_SECTION_HEADER_HINT]
-    lines.extend(f"!{name}" for name in seen[:limit])
-    if len(seen) > limit:
-        lines.append(f"... ({len(seen) - limit} more)")
+    lines.extend(f"!{name}" for name in ordered[:limit])
+    if len(ordered) > limit:
+        lines.append(f"... ({len(ordered) - limit} more)")
     return lines
 
 

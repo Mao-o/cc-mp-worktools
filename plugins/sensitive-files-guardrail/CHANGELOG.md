@@ -108,10 +108,12 @@ session / 承認状態を一切持たなかった。block reason は AskUserQues
   (status, path) 集合を `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
   に記録する。`patterns.local.txt` と同じ `Path.home()` 基準 (plugin cache 更新で
   消えない、テストは `HOME` 差し替えで隔離)。内容は 1 行 1
-  `sha256("<status>\t<物理絶対パス>")` で平文 path は残さない (鍵は
-  `realpath(<repo root>/<prefix>/<path>)`。別 repo の同じ相対 path を報告済みと
-  誤認せず、サブディレクトリや submodule への `cd` で同じ物理ファイルが別 digest
-  にならない — Codex R2 P2-2 / R4 P2-1、後述)。`session_id` は
+  `sha256("<status>\t<絶対パス>")` で平文 path は残さない (鍵は
+  `realpath(<repo root>)/<prefix><path>` — root のみ物理パスに正規化し entry は
+  lexical。別 repo の同じ相対 path を報告済みと誤認せず、サブディレクトリや
+  submodule への `cd` で同じ物理ファイルが別 digest にならず、別 repo の symlink
+  が同じ共有ファイルを指しても別 digest のまま — Codex R2 P2-2 / R4 P2-1 / R5
+  P2-1、後述)。`session_id` は
   `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$` のみ受理。読取 / 書込失敗は「状態なし」=
   従来通り block。TTL 7 日で best-effort GC
 - **`__main__.py`**: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。
@@ -299,7 +301,8 @@ digest 同値 (test_stop_ack +1)、`repo_context` の root / sub / 非 git
   なり、同じ物理ファイルが別 digest だった。鍵を「repo root + root 相対 path」から
   **`os.path.realpath(root/prefix/path)` の物理絶対パス + status** に変更
   (`stop_ack._physical_path`)。symlink 経由の cwd も同じ物理パスに畳まれる。
-  表示は従来どおり cwd 相対
+  表示は従来どおり cwd 相対 (R5 で entry 側の dereference をやめ root のみ
+  realpath に、後述)
 - **P2-2 `_RECIPE_PLACEHOLDER_RE` が任意位置の `$CLAUDE_PROJECT_DIR` を探す**:
   `/work/repo$CLAUDE_PROJECT_DIR-prod` / `/work/${CLAUDE_PROJECT_DIR}-archive` の
   ような予約語を部分文字列として含む正当なパスの section まで無効化していた。
@@ -313,6 +316,22 @@ digest 同値 (test_stop_ack +1)、`repo_context` の root / sub / 非 git
 +1、環境非対応なら skip)、予約語を部分文字列に含むパスの section 一致と警告なし
 (test_patterns_loader +1、検出形 / 非検出形のリストも更新)。
 
+### review 対応 (5) — Codex R5 P2 ×2: symlink entry の digest / recipe 重複除去の計算量
+
+- **P2-1 entry まで `realpath` すると別 repo の symlink が同じ鍵に潰れる**: 別
+  repo の `.env` symlink が同じ共有ファイルを指す場合、1 つ目を ack した後に 2 つ
+  目の repo の Stop 通知が抑止されていた。`_physical_path` を **root だけ
+  `realpath` で正規化し、`prefix + path` は lexical (`normpath`) のまま結合**
+  する形に変更 (entry は dereference しない)。submodule ケース (R4) は root の
+  正規化で引き続き同一 digest (実 submodule のテストで確認)
+- **P2-2 `exclude_recipe_lines` の重複除去が list membership の二次計算**: 数万
+  ファイルの repo で Stop の 15s timeout を超えうる。順序付き list と並行して
+  set を持ち線形にした (表示は先頭 20 件 + `... (N more)` のまま)
+
+テスト: 別 repo の symlink entry が別 digest / 同一 repo 内の symlink と実体も別
+digest (test_stop_ack +1)、10 万件 (5 万 unique × 2) の recipe 生成が 1 秒未満
+(test_messages +1)。
+
 L2 が問題なしと確認した観点: `git rm --cached` の `-r` / `-f` / `-n` / `-q` /
 `--sparse` / `--ignore-unmatch` / `-rf` 束ね / 後置 `--cached` / glob は allow で
 内容出力なし (出力は `rm '<path>'`)、`--pathspec-from-file` の leak は実 git で
@@ -325,7 +344,7 @@ tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追�
 
 ### テスト
 
-redact **809 件** (+47、0.18.0 review 対応後の 762 件基準)、check **78 件** (+51)。
+redact **810 件** (+48、0.18.0 review 対応後の 762 件基準)、check **79 件** (+52)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option

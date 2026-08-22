@@ -296,10 +296,11 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 `.env` / committed 証明書で毎ターン block が出続けるのを止めるため)。新しい機密
 ファイルが増えたとき、または untracked → tracked のように状態が変わったときだけ
 再 block する。報告済み集合は
-`~/.claude/sensitive-files-guardrail/stop-ack/<session_id>` に物理絶対パス
-(realpath) + status の sha256 digest で記録し (平文 path は残さない。別 repo に
-`cd` すれば再 block、同じ repo 内のサブディレクトリや submodule への移動では
-再 block しない)、最後の block から 7 日で自動 GC。hook input に `session_id` が無ければ従来通り
+`~/.claude/sensitive-files-guardrail/stop-ack/<session_id>` に「repo root を
+realpath で正規化した絶対パス + status」の sha256 digest で記録し (平文 path は
+残さない。entry 自体の symlink は dereference しない。別 repo に `cd` すれば
+再 block、同じ repo 内のサブディレクトリや submodule への移動では再 block
+しない)、最後の block から 7 日で自動 GC。hook input に `session_id` が無ければ従来通り
 毎回 block する。state の読み書きに失敗したときは stderr に
 `stop_ack_unavailable` を出して従来通り block する。
 

@@ -659,16 +659,18 @@ deny reason のキー名ガイド:
 - 状態: `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
   (`hooks/check-sensitive-files/stop_ack.py`)。`patterns.local.txt` と同じ
   `Path.home()` 基準で、plugin cache の更新で消えず、テストは `HOME` 差し替えで
-  隔離する。内容は 1 行 1 `sha256("<status>\t<物理絶対パス>")` で、平文 path は
-  HOME に残さない (ログ規則と同じ方針)。鍵は `realpath(<repo root>/<prefix>/<path>)`
-  (`prefix` = `git rev-parse --show-prefix`、cwd の root からの相対) の物理パス —
-  `git ls-files` は cwd 相対で出力するため、(1) 別 repo の同じ相対 path
-  (`tracked\t.env`) を報告済みと誤認しない、(2) root とサブディレクトリで同じ
-  物理ファイルが別 digest にならない (Codex R2 P2-2)、(3) superproject から
-  `--recurse-submodules` で拾った `sub/.env` と submodule 内 cwd (toplevel が
-  submodule root に変わる) で拾った `.env` が同じ digest になる (Codex R4 P2-1)、
-  を同時に満たす。block reason の表示は従来通り cwd 相対 (`git rm --cached <path>`
-  を cwd でそのまま実行できる)。
+  隔離する。内容は 1 行 1 `sha256("<status>\t<絶対パス>")` で、平文 path は HOME
+  に残さない (ログ規則と同じ方針)。鍵は `realpath(<repo root>)/<prefix><path>`
+  (root だけを物理パスに正規化し、entry は lexical なまま。`prefix` =
+  `git rev-parse --show-prefix`、cwd の root からの相対) — `git ls-files` は cwd
+  相対で出力するため、(1) 別 repo の同じ相対 path (`tracked\t.env`) を報告済みと
+  誤認しない、(2) root とサブディレクトリで同じ物理ファイルが別 digest にならない
+  (Codex R2 P2-2)、(3) superproject から `--recurse-submodules` で拾った `sub/.env`
+  と submodule 内 cwd (toplevel が submodule root に変わる) で拾った `.env` が同じ
+  digest になる (Codex R4 P2-1)、(4) 別 repo の `.env` symlink が同じ共有ファイル
+  を指しても digest は別のまま (entry を dereference すると 1 つ目の ack で 2 つ目
+  の repo の通知が消える、Codex R5 P2-1)、を同時に満たす。block reason の表示は
+  従来通り cwd 相対 (`git rm --cached <path>` を cwd でそのまま実行できる)。
   toplevel / prefix は `checker.repo_context` (`rev-parse --show-toplevel
   --show-prefix` 1 回) で得て `is_git_repo` の呼出を置き換えるので git 呼出回数は
   不変。スキャン範囲は従来どおり cwd の subtree (sub で block した後 root に戻る

@@ -114,6 +114,35 @@ class TestDigestEntries(BaseStopAck):
             stop_ack.digest_entries(entry, scope=str(link)),
         )
 
+    def test_symlinked_entries_in_different_repos_stay_distinct(self):
+        # 別 repo の `.env` symlink が同じ共有ファイルを指しても entry は
+        # dereference しない (Codex R5 P2-1): 1 つ目の ack で 2 つ目の repo の
+        # 通知を抑止しない
+        shared = Path(self.tmp) / "shared.env"
+        shared.write_text("KEY=v\n")
+        repo_a = Path(self.tmp) / "a"
+        repo_b = Path(self.tmp) / "b"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        (repo_a / ".env").symlink_to(shared)
+        (repo_b / ".env").symlink_to(shared)
+        entry = [{"path": ".env", "status": "tracked"}]
+        self.assertNotEqual(
+            stop_ack.digest_entries(entry, scope=str(repo_a)),
+            stop_ack.digest_entries(entry, scope=str(repo_b)),
+        )
+        # 同一 repo 内でも symlink entry と実体は別 digest (lexical 鍵)
+        (repo_a / "real.env").write_text("KEY=v\n")
+        (repo_a / "link.env").symlink_to(repo_a / "real.env")
+        self.assertNotEqual(
+            stop_ack.digest_entries(
+                [{"path": "link.env", "status": "tracked"}], scope=str(repo_a)
+            ),
+            stop_ack.digest_entries(
+                [{"path": "real.env", "status": "tracked"}], scope=str(repo_a)
+            ),
+        )
+
     def test_scope_sensitive(self):
         # 同一 session で別 repo に cd しても同じ相対 path を報告済み扱いしない
         entry = [{"path": ".env", "status": "tracked"}]

@@ -65,6 +65,20 @@ class TestExcludeHintBasename(unittest.TestCase):
         self.assertEqual(lines[1], "!k0.pem")
         self.assertEqual(lines[-1], "... (5 more)")
 
+    def test_exclude_recipe_lines_is_linear_for_large_inputs(self):
+        # 重複除去が list membership の二次計算だと 5 万件で Stop の 15s timeout
+        # を超えうる (Codex R5 P2-2)。10 万件 (5 万 unique × 2) で 1 秒未満
+        import time
+
+        names = [f"k{i}.pem" for i in range(50_000)] * 2
+        started = time.perf_counter()
+        lines = exclude_recipe_lines(names, limit=20)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(len(lines), 22)
+        self.assertEqual(lines[1], "!k0.pem")
+        self.assertEqual(lines[-1], "... (49980 more)")
+        self.assertLess(elapsed, 1.0)
+
     def test_exclude_hint_without_basename(self):
         out = M._exclude_hint("")
         # basename が無いケースは plain プレースホルダを出す
