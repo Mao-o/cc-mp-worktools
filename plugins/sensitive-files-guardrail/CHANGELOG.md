@@ -147,6 +147,8 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `git -c alias.x='!cat .env' x` (review 対応 6) | **allow** / allow | **ask** / allow |
 | `docker run img 'cat ${X:-.env}'` / `make 'X=$(…)'` / `less '+!…' f` (allow-list 外、review 対応 6) | ask / allow | ask / allow (不変) |
 | `jq '{a: .b}' f.json` / `curl -d '{"a":1}' …` / `cut -d'$' …` (inert、review 対応 6) | **ask** / allow | **allow / allow** |
+| `ls &\` ⏎ `& cat .env` / `echo p \|\` ⏎ `\| cat .env` (review 対応 7) | ask / **allow** | **deny / deny** |
+| `echo a # c \` ⏎ `cat .env` (review 対応 7) | ask / **allow** | **deny / deny** |
 
 ### review 対応 (3) — 行継続と単語状態 / awk・sed プログラム内の動的構文 (PR #38 Codex R3 P1 ×2)
 
@@ -177,6 +179,23 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 `--expression=` / `-ne` 束 / 最初の非オプション引数だけを見る (ファイル
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
+
+### review 対応 (7) — 行継続をまたいで合成される演算子 / 両 scanner を 1 つの lexer に統一 (PR #38 Codex R7 P1)
+
+Bash は `\<newline>` を **除去してから** 演算子を読むので `ls &\` ⏎ `& cat .env`
+は `ls && cat .env`。review 対応 (3) の状態機械は継続除去より先に `&&` を
+見ていたため 1 segment に潰れ、`ls` の metadata-only 経路で `cat .env` が全
+mode で素通りしていた。同じ字句規則を 3 箇所 (splitter / hard-stop / 単語
+状態) に書いていたのが desync の温床だったので、**両 scanner が共有する 1 つの
+lexer** (`_lex`) に統一した: 行継続を除去し、各文字に quote (`'` / `"`) /
+escape / comment の字句状態を付けた列を作り、分割と hard-stop 判定はその列
+だけを見る。字句規則を直すときは `_lex` だけを直す。
+
+Bash 5 で実測した規則: `\<newline>` はクォート外とダブルクォート内で除去され、
+単語状態も演算子も除去後の隣接文字で決まる (`&\` ⏎ `&` → `&&`、`|\` ⏎ `|` →
+`||`、`safe\` ⏎ `#joined` → 1 単語) / バックスラッシュ自体がエスケープされて
+いれば (`\\` + 改行) 行継続ではなく区切り / シングルクォート内は literal /
+**コメント末尾の `\` は行継続にならず次行は実行される**。
 
 ### review 対応 (6) — 緩和を inert な first token に限定 (PR #38 Codex R6 P1)
 
@@ -305,9 +324,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-772 件 (+37、うち 3 件は既存テストの改名 + 期待値更新)。
+773 件 (+38、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (37 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (38 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -338,7 +357,10 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   '{x}'`) は allow で `ls-files --format='%(objectname)' .env` は deny、
   allow-list 外 (`docker` / `make` / `less '+!…'` / `tar --to-command=` / `npm
   run` / 未知) はクォート内 hard-stop で ask、inert (`jq` / `curl` / `cut` /
-  `tr` / `cp` / `sort` / `echo` / `printf`) は allow
+  `tr` / `cp` / `sort` / `echo` / `printf`) は allow、(12) review 対応 7:
+  `&\` ⏎ `&` / `|\` ⏎ `|` の合成演算子、コメント末尾 `\`、シングル /
+  ダブルクォート内の継続、`\\` + 改行の 6 形が正しく分割され `cat .env` が
+  両 mode で deny
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、

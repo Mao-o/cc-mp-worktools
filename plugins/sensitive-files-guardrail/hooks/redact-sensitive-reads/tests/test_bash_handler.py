@@ -1697,6 +1697,31 @@ class TestQuoteAwareHardStop(BaseBash):
                 r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
                 self.assertTrue(output.is_allow(r))
 
+    # --- (12) 行継続をまたいで合成される演算子 (R7 P1) ---
+    def test_operators_formed_across_line_continuation(self):
+        # Bash は `\<newline>` を除去してから演算子を読むので `&\<nl>&` は `&&`。
+        # 継続除去前に `&&` を見ると 1 segment に潰れ、ls の metadata-only 経路で
+        # `cat .env` が素通りする。実測 (bash 5): コメント末尾の `\` は継続に
+        # ならず次行は実行される / シングルクォート内は literal / ダブル
+        # クォート内は除去 / `\\` + 改行はエスケープ済み backslash + 区切り。
+        cases = {
+            "ls &\\\n& cat .env": ["ls", "cat .env"],
+            "echo p |\\\n| cat .env": ["echo p", "cat .env"],
+            "echo a # c \\\ncat .env": ["echo a", "cat .env"],
+            "echo 'x\\\ny' ; cat .env": ["echo 'x\\\ny'", "cat .env"],
+            'echo "x\\\ny" && cat .env': ['echo "xy"', "cat .env"],
+            "echo a \\\\\ncat .env": ["echo a \\\\", "cat .env"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+                for mode in ("default", "auto"):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
     def test_inert_first_token_with_quoted_hard_stop_stays_relaxed(self):
         with open(os.path.join(self.tmp, "f.json"), "w") as f:
             f.write("{}\n")

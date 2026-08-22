@@ -101,7 +101,9 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > でも allow)。コメント内の `{` `$(` は ask に倒さない (`echo hi # {x}` は
 > allow、`cat .env # {` は deny)。行継続 `\<newline>` は単語状態を変えないので
 > `echo safe\` ⏎ `#joined; cat .env` の `#joined` はコメントではなく
-> `cat .env` が **全 mode で deny**。
+> `cat .env` が **全 mode で deny**。継続をまたいで合成される演算子
+> (`ls &\` ⏎ `& cat .env` = `ls && cat .env`) も正しく区切る (両 scanner が
+> 1 つの lexer を共有)。コメント末尾の `\` は行継続にならず次行は実行される。
 >
 > awk / sed のプログラム文字列内の動的構文 (awk: `system(` `getline` `|` `>`
 > `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で

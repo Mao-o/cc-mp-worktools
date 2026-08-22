@@ -201,6 +201,14 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
   数え続けるため `cat <(echo \(\)) < .env` は挙動不変
 - **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
 
+**splitter と hard-stop は 1 つの lexer (`_lex`) を共有する** (PR #38 review R7
+で統一)。`_lex` が行継続 `\<newline>` を除去し (クォート外とダブルクォート内。
+シングルクォート内とコメント内は literal)、各文字に quote / escape / comment の
+字句状態を付けた列を作る。分割 (`&&` `||` `;` `|` 改行) と hard-stop 判定は
+その列だけを見るので、`ls &\` ⏎ `& cat .env` のように継続をまたいで合成される
+演算子も正しく区切れる。字句規則を直すときは `_lex` だけを直す。以下は
+統一前に個別に見つかった desync の記録。
+
 **splitter と hard-stop の字句状態は完全に同期させる** (PR #38 review で判明)。
 `_split_command_on_operators` がクォート外の `\'` を quote 開始と誤認すると、
 `echo \' ; cat .env ; echo '{'` が 1 segment に潰れ、`_has_hard_stop` は
