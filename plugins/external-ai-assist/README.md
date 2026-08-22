@@ -123,7 +123,11 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 
 glob は **basename と作業ツリー相対パスの両方**に、**大文字小文字を区別せず**当てる。`*` は `/` にも
 マッチするので `docs/*` は深い階層も拾う。symlink は編集時のパス (途中のディレクトリ名やリンク名を
-そのまま残した lexical なパス) と実体 (realpath) のどちらかが当たれば除外。
+そのまま残した lexical なパス)、実体 (realpath)、および作業ツリー内の symlink から作った別名
+(`credentials/` → `ordinary/` なら `ordinary/data.json` に `credentials/data.json`) のどれかが
+当たれば除外。別名は Bash 経由の変更 (`sed -i` 等。`git status` が実体名しか返さない) のために
+必要で、tracked の symlink は全て、untracked の symlink は作業ツリー直下から 3 階層まで
+(走査 5000 エントリ / 500 件で打ち切り) を見る。
 git へのパス渡しは literal pathspec (`app/[id]/page.tsx` のような名前を glob として解釈させず、
 claim していないファイルの差分が混入しない)。
 

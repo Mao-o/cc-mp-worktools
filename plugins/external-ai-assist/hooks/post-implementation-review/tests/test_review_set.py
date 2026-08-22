@@ -185,9 +185,19 @@ class TestResolvePathsExclusion(ReviewSetTestCase):
         self.assertEqual(rels, [])
         self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
 
-    def test_real_path_of_symlinked_directory_is_still_reviewed(self):
-        """実体の名前 (ordinary/data.json) で claim された分は除外しない (git にはこの名前で渡す)。"""
+    def test_real_path_claim_is_excluded_via_symlink_alias(self):
+        """Codex R2 P1: 実体名 (ordinary/data.json) だけで claim されても (Bash 経由の変更)、
+        repo 内の symlink `credentials/` → `ordinary/` から別名を作って除外する。"""
         self._symlinked_credentials_dir()
+        rels, _, excluded = self.resolve(
+            [os.path.join(self.repo, "ordinary", "data.json")], exclusion.load_policy({})
+        )
+        self.assertEqual(rels, [])
+        self.assertEqual(excluded, [("credentials/data.json", '既定除外: 語 "credentials"')])
+
+    def test_real_path_claim_without_symlink_is_reviewed(self):
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        write(self.repo, "ordinary/data.json", '{"k": 1}\n')
         rels, _, excluded = self.resolve(
             [os.path.join(self.repo, "ordinary", "data.json")], exclusion.load_policy({})
         )
@@ -419,7 +429,8 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         timeouts = self._hook_timeouts()
         git_worst = (
             gitscan.REV_PARSE_TIMEOUT_SEC * 2
-            + gitscan.LS_FILES_TIMEOUT_SEC
+            + gitscan.LS_FILES_TIMEOUT_SEC  # symlink 一覧 (symlink_map)
+            + gitscan.LS_FILES_TIMEOUT_SEC  # untracked 判定 (untracked_among)
             + self.entry.COLLECT_BUDGET_SEC
             + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
         )

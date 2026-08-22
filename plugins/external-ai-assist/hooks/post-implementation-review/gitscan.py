@@ -36,13 +36,21 @@ import subprocess
 #
 #   pre-tool / post-tool (hook 10s): rev-parse 2 + status 5 = 最悪 7s
 #   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
-#     rev-parse 2 + ls-files 10 + rev-parse 2 + パス単位 diff (COLLECT_BUDGET_SEC 30) = 44s
+#     rev-parse 2 + ls-files (symlink 一覧) 10 + ls-files (untracked) 10 + rev-parse 2
+#     + パス単位 diff (COLLECT_BUDGET_SEC 30 + 最後の 1 パス 5) = 59s
 REV_PARSE_TIMEOUT_SEC = 2
 STATUS_TIMEOUT_SEC = 5
 LS_FILES_TIMEOUT_SEC = 10
 PATH_DIFF_TIMEOUT_SEC = 5
 
 MAX_SNAPSHOT_ENTRIES = 5000
+
+# repo 内 symlink の収集 (symlink_map)。untracked の symlink は root から scandir で探すが、
+# node_modules のような巨木で止まらないよう BFS のエントリ数と深さに上限を置く
+# (浅い階層から見るので、root 直下の `credentials/` のような別名は必ず拾う)。
+SYMLINK_SCAN_DEPTH = 3
+SYMLINK_SCAN_BUDGET = 5000
+MAX_SYMLINKS = 500
 
 
 def _git(root: str, args: list[str], timeout: int = PATH_DIFF_TIMEOUT_SEC):
@@ -110,6 +118,72 @@ def to_relative(root: str, path: str) -> str | None:
     if not real.startswith(prefix):
         return None
     return real[len(prefix) :]
+
+
+# --------------------------------------------------------------------------
+# repo 内 symlink の一覧 (除外判定の別名生成用)
+# --------------------------------------------------------------------------
+
+
+def symlink_map(root: str) -> dict[str, str]:
+    """作業ツリー内の symlink を {link_rel: target_rel} で返す (target は realpath の root 相対)。
+
+    Bash 経由の変更は pre/post の `git status` 比較で拾うが、status は実体パス
+    (`ordinary/data.json`) しか返さない。`credentials/` → `ordinary/` の symlink 経由で
+    `sed -i credentials/data.json` しても別名は claim に現れないため、ここで symlink を列挙し
+    `exclusion.expand_aliases` で別名を作って除外判定に当てる (Codex PR レビュー R2 P1)。
+
+    - tracked: index の mode 120000 (`git ls-files -s`)。深さの制限なし
+    - untracked (+ tracked の取りこぼし): root から `SYMLINK_SCAN_DEPTH` 階層までを BFS で
+      scandir (`.git` は見ない)。エントリ数 `SYMLINK_SCAN_BUDGET`、件数 `MAX_SYMLINKS` で打ち切る
+
+    ツリー外を指す symlink は含めない (その先のファイルは作業ツリー外として落ちる)。
+    git が失敗 / timeout しても scandir 側の結果は返す (fail-open。取りこぼしは除外の見逃しに
+    なるが、Stop を止めるより優先)。
+    """
+    links: dict[str, str] = {}
+    res = _git(root, ["ls-files", "-s", "-z"], timeout=LS_FILES_TIMEOUT_SEC)
+    if res is not None and res.returncode == 0:
+        for entry in _decode(res.stdout).split("\0"):
+            if not entry.startswith("120000 "):
+                continue
+            _meta, _tab, rel = entry.partition("\t")  # "<mode> <sha> <stage>\t<path>"
+            if rel:
+                _add_link(root, links, rel)
+            if len(links) >= MAX_SYMLINKS:
+                return links
+
+    queue: list[tuple[str, int]] = [("", 0)]
+    scanned = 0
+    while queue and scanned < SYMLINK_SCAN_BUDGET and len(links) < MAX_SYMLINKS:
+        rel_dir, depth = queue.pop(0)
+        try:
+            with os.scandir(os.path.join(root, rel_dir) if rel_dir else root) as it:
+                for entry in it:
+                    scanned += 1
+                    if scanned > SYMLINK_SCAN_BUDGET or len(links) >= MAX_SYMLINKS:
+                        break
+                    rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+                    try:
+                        if entry.is_symlink():
+                            _add_link(root, links, rel)
+                        elif (
+                            entry.name != ".git"
+                            and depth + 1 < SYMLINK_SCAN_DEPTH
+                            and entry.is_dir(follow_symlinks=False)
+                        ):
+                            queue.append((rel, depth + 1))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return links
+
+
+def _add_link(root: str, links: dict[str, str], rel: str) -> None:
+    target = to_relative(root, os.path.join(root, rel))
+    if target and target != rel:
+        links[rel] = target
 
 
 # --------------------------------------------------------------------------

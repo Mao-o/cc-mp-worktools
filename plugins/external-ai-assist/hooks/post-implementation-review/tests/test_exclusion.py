@@ -202,6 +202,53 @@ class TestNegation(unittest.TestCase):
         self.assertIsNone(policy.explain(("vault/c.json", "credentials.json")))
 
 
+class TestAliases(unittest.TestCase):
+    """`expand_aliases`: 実体パスを repo 内 symlink 経由の別名に展開する (Codex R2 P1)。"""
+
+    def test_directory_symlink_alias(self):
+        self.assertEqual(
+            exclusion.expand_aliases("ordinary/data.json", {"credentials": "ordinary"}),
+            ["credentials/data.json"],
+        )
+
+    def test_file_symlink_alias(self):
+        self.assertEqual(
+            exclusion.expand_aliases("vault/c.json", {"credentials.json": "vault/c.json"}),
+            ["credentials.json"],
+        )
+
+    def test_prefix_must_be_a_whole_component(self):
+        self.assertEqual(
+            exclusion.expand_aliases("ordinary2/x.py", {"credentials": "ordinary"}), []
+        )
+        self.assertEqual(exclusion.expand_aliases("src/app.py", {"credentials": "ordinary"}), [])
+        self.assertEqual(exclusion.expand_aliases("src/app.py", {}), [])
+
+    def test_chained_aliases(self):
+        aliases = exclusion.expand_aliases(
+            "deep/data.json", {"credentials": "ordinary", "ordinary/inner": "deep"}
+        )
+        self.assertEqual(
+            set(aliases), {"ordinary/inner/data.json", "credentials/inner/data.json"}
+        )
+
+    def test_limit_caps_expansion_and_terminates(self):
+        many = {f"link{i}": "ordinary" for i in range(100)}
+        aliases = exclusion.expand_aliases("ordinary/data.json", many)
+        self.assertEqual(len(aliases), exclusion.MAX_ALIASES_PER_PATH)
+        self.assertEqual(exclusion.expand_aliases("ordinary/data.json", many, limit=3),
+                         ["link0/data.json", "link1/data.json", "link2/data.json"])
+
+    def test_alias_reaches_exclusion(self):
+        policy = exclusion.load_policy({})
+        names = ["ordinary/data.json", *exclusion.expand_aliases(
+            "ordinary/data.json", {"credentials": "ordinary"}
+        )]
+        self.assertEqual(
+            policy.explain(names), ("credentials/data.json", '既定除外: 語 "credentials"')
+        )
+
+
 class TestCodeOnly(unittest.TestCase):
     def test_off_by_default(self):
         self.assertFalse(DEFAULTS.code_only)

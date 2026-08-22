@@ -443,6 +443,61 @@ class TestExclusion(HookTestCase):
         self.assertIn('credentials/data.json (既定除外: 語 "credentials")', message)
         self.assertEqual(self.pending(SESSION_A), [])
 
+    def _tracked_ordinary_with_credentials_link(self, track_link: bool) -> str:
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        target = _testutil.write(self.repo, "ordinary/data.json", '{"k": 1}\n')
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "data")
+        os.symlink(os.path.join(self.repo, "ordinary"), os.path.join(self.repo, "credentials"))
+        if track_link:
+            _testutil.git(self.repo, "add", "-A")
+            _testutil.git(self.repo, "commit", "-qm", "link")
+        return target
+
+    def _assert_bash_edit_via_real_path_is_excluded(self, track_link: bool) -> None:
+        """Codex R2 P1: `sed -i credentials/data.json` の変更は `git status` では実体名
+        `ordinary/data.json` でしか現れない。別名 `credentials/data.json` を生成して除外する。"""
+        target = self._tracked_ordinary_with_credentials_link(track_link)
+
+        def mutate():
+            with open(target, "w") as f:
+                f.write('{"k": "sk-live-DO-NOT-SEND"}\n')
+
+        self.bash(SESSION_A, "tu_sed", mutate)
+        self.assertEqual(self.pending(SESSION_A), [target], "claim には実体名しか入らない前提")
+        self.edit(SESSION_A, "a.py", "v1\n")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("sk-live", self.review_calls[0])
+        self.assertNotIn("data.json", self.review_calls[0])
+        self.assertIn(
+            'credentials/data.json (既定除外: 語 "credentials")',
+            _parse_output(output)["systemMessage"],
+        )
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_bash_edit_via_real_path_is_excluded_by_tracked_symlink_alias(self):
+        self._assert_bash_edit_via_real_path_is_excluded(track_link=True)
+
+    def test_bash_edit_via_real_path_is_excluded_by_untracked_symlink_alias(self):
+        self._assert_bash_edit_via_real_path_is_excluded(track_link=False)
+
+    def test_bash_edit_without_any_symlink_is_reviewed_as_before(self):
+        """symlink が無い repo では別名生成が何も変えない (挙動不変)。"""
+        os.makedirs(os.path.join(self.repo, "ordinary"))
+        target = _testutil.write(self.repo, "ordinary/data.json", '{"k": 1}\n')
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "data")
+
+        def mutate():
+            with open(target, "w") as f:
+                f.write('{"k": 2}\n')
+
+        self.bash(SESSION_A, "tu_sed", mutate)
+        self.assertEqual(self.stop(SESSION_A, "REVIEW_CLEAN"), "", "通知なし = 出力なし")
+        self.assertReviewed("ordinary/data.json", '"k": 2')
+
     def test_stale_state_from_older_version_is_drained(self):
         """0.4.1 以前が pending に積んだ機密パスも、次の Stop で落ちて残り続けない。"""
         self.state.record_pending(SESSION_A, [os.path.join(self.repo, ".env")])

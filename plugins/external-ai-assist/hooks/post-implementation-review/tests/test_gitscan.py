@@ -69,6 +69,65 @@ class TestLiteralPathspec(GitScanTestCase):
         self.assertEqual(gitscan.untracked_among(self.repo, ["*", "[f]resh.txt"]), set())
 
 
+class TestSymlinkMap(GitScanTestCase):
+    """repo 内 symlink の列挙 (tracked は index、untracked は scandir)。"""
+
+    def _link(self, rel: str, target_rel: str) -> None:
+        full = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        os.symlink(os.path.join(self.repo, target_rel), full)
+
+    def test_repo_without_symlinks_is_empty(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self.assertEqual(gitscan.symlink_map(self.repo), {})
+
+    def test_tracked_symlink_dir_is_listed(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self._link("credentials", "ordinary")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "link")
+        self.assertEqual(gitscan.symlink_map(self.repo), {"credentials": "ordinary"})
+
+    def test_untracked_symlink_dir_is_listed(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self._link("credentials", "ordinary")
+        self.assertEqual(gitscan.symlink_map(self.repo), {"credentials": "ordinary"})
+
+    def test_file_symlink_and_nested_symlink(self):
+        write(self.repo, "vault/c.json", "{}\n")
+        write(self.repo, "ordinary/data.json", "{}\n")
+        self._link("credentials.json", "vault/c.json")
+        self._link("config/secrets", "ordinary")
+        self.assertEqual(
+            gitscan.symlink_map(self.repo),
+            {"credentials.json": "vault/c.json", "config/secrets": "ordinary"},
+        )
+
+    def test_symlink_to_outside_is_ignored(self):
+        outside = os.path.join(self._tmp.name, "outside")
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(self.repo, "credentials"))
+        self.assertEqual(gitscan.symlink_map(self.repo), {})
+
+    def test_tracked_symlink_beyond_scan_depth_is_still_found(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        deep = "a/b/c/d/credentials"
+        self._link(deep, "ordinary")
+        self.assertEqual(gitscan.symlink_map(self.repo), {}, "untracked は深さ上限で見ない")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "deep link")
+        self.assertEqual(gitscan.symlink_map(self.repo), {deep: "ordinary"})
+
+    def test_caps_limit_the_scan(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        for i in range(6):
+            self._link(f"link{i}", "ordinary")
+        with mock.patch.object(gitscan, "MAX_SYMLINKS", 2):
+            self.assertEqual(len(gitscan.symlink_map(self.repo)), 2)
+        with mock.patch.object(gitscan, "SYMLINK_SCAN_BUDGET", 1):
+            self.assertLessEqual(len(gitscan.symlink_map(self.repo)), 1)
+
+
 class TestNoColor(GitScanTestCase):
     def test_diff_ignores_color_config(self):
         """`color.ui=always` でも ANSI を混ぜない (hash とバイト予算が狂う)。"""

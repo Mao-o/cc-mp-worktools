@@ -118,6 +118,39 @@ NON_CODE_SUFFIXES: frozenset[str] = frozenset(
 _TRUTHY = ("1", "true", "on", "yes")
 _FALSY = ("0", "false", "off", "no")
 
+# 1 ファイルあたりの別名展開の上限 (symlink が大量にある repo で膨らませない)
+MAX_ALIASES_PER_PATH = 32
+
+
+def expand_aliases(
+    rel: str, symlinks: Mapping[str, str], limit: int = MAX_ALIASES_PER_PATH
+) -> list[str]:
+    """実体パス rel を、repo 内 symlink 経由で到達できる別名に展開する (rel 自身は含めない)。
+
+    `symlinks` は {link_rel: target_rel} (`gitscan.symlink_map`)。target が rel 自身か
+    rel の祖先なら `link + 残り` が別名。別名からさらに別名を作る (`credentials/` → `ordinary/`
+    と `ordinary/inner` → `deep/` の組み合わせで `deep/x` → `credentials/inner/x`) が、
+    limit 件で打ち切る。Bash 経由の変更は `git status` が実体名しか返さないため、この別名が
+    無いと `sed -i credentials/data.json` の差分が除外判定をすり抜ける。
+    """
+    names = [rel]
+    index = 0
+    while index < len(names) and len(names) <= limit:
+        current = names[index]
+        index += 1
+        for link, target in symlinks.items():
+            if current == target:
+                alias = link
+            elif current.startswith(target + "/"):
+                alias = link + current[len(target):]
+            else:
+                continue
+            if alias not in names:
+                names.append(alias)
+                if len(names) > limit:
+                    break
+    return names[1 : limit + 1]
+
 _WORD_PATTERNS: dict[str, re.Pattern[str]] = {
     word: re.compile(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])")
     for word in DEFAULT_EXCLUDE_WORDS

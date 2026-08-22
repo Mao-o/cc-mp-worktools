@@ -332,16 +332,19 @@ def _resolve_paths(
     除外 (exclusion.Policy) もここで当てる。除外されたパスは作業ツリー外と同じく
     **復元しない・hash も記録しない** (恒久除外)。上限 (MAX_REVIEW_PATHS) の手前で除外する
     ので、除外ファイルが枠を食ったり overflow として pending に戻ったりしない。
-    判定には実体 (realpath 相対。git に渡すのもこれ) と **lexical なパス** (root だけ
-    realpath で同定し、配下の symlink 構成要素名はそのまま残したもの) の両方を渡す —
+    判定には実体 (realpath 相対。git に渡すのもこれ)、**lexical なパス** (root だけ
+    realpath で同定し、配下の symlink 構成要素名はそのまま残したもの)、**別名** (repo 内の
+    symlink を列挙し、実体がその target 配下なら `link + 残り` を生成) のすべてを渡す —
     `credentials/` → `ordinary/` のような symlink ディレクトリ経由の claim や機密名の
-    リンクを、どちらの名前が機密に見えても外部に送らない (安全側に倒す)。
+    リンクを、どの名前が機密に見えても外部に送らない (安全側に倒す)。別名が要るのは
+    Bash 経由の変更: `git status` は実体名しか返さないので lexical 名が claim に現れない。
 
     順序は claim 順 (= pending に積まれた順) を保つ。前回 Stop が繰り越した (pending に
     戻した) パスは次ターンの先頭に来るので、予算超過で繰り越されたファイルが新しい編集に
     毎回追い越されて永久に残ることがない。
     """
     root_real = os.path.realpath(root).rstrip(os.sep) or os.sep
+    symlinks = gitscan.symlink_map(root)
     # 実体 (realpath 相対) ごとに判定候補を集める。同じ実体が別名 (symlink) で複数回 claim
     # されていても、どの名前が機密に見えるかを全部見てから判定する
     candidates: dict[str, list[str]] = {}
@@ -351,8 +354,9 @@ def _resolve_paths(
             continue
         names = candidates.setdefault(rel, [rel])
         lexical = _lexical_relative(root_real, path)
-        if lexical and lexical not in names:
-            names.append(lexical)
+        for name in [lexical, *exclusion.expand_aliases(rel, symlinks)]:
+            if name and name not in names:
+                names.append(name)
 
     rels: list[str] = []
     excluded: list[tuple[str, str]] = []

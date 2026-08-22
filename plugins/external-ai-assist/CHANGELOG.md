@@ -36,10 +36,19 @@ gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、
   (作業ツリー root だけ realpath で同定し、配下の symlink 構成要素名はそのまま残す) と実体
   (realpath。git に渡すのもこれ) の両方で判定し、どちらかが当たれば除外する。同じ実体が
   別名で複数回 claim されていても全部の名前を見てから判定する。通知には当たった名前を出す。
-  lexical 判定は Codex PR レビュー P1 の反映: `credentials/` → `ordinary/` のような symlink
+  lexical 判定は Codex PR レビュー R1 P1 の反映: `credentials/` → `ordinary/` のような symlink
   ディレクトリ経由の claim は realpath でも親だけの realpath でも `ordinary/data.json` になり、
   `credentials` が判定から消えていた。root の別名 (`/tmp` → `/private/tmp`、symlink された
   親ディレクトリ) は引き続き realpath で吸収する
+- **symlink 経由の別名も生成して判定する** (Codex PR レビュー R2 P1): Bash 経由の変更は
+  pre/post の `git status` 比較で拾うため実体名 (`ordinary/data.json`) しか claim に入らず、
+  `sed -i credentials/data.json` の差分が lexical 判定をすり抜けていた。`gitscan.symlink_map`
+  が作業ツリー内の symlink (tracked は index の mode 120000、untracked は root から 3 階層までの
+  scandir、5000 エントリ / 500 件で打ち切り) を列挙し、`exclusion.expand_aliases` が実体パスが
+  symlink の target 配下なら `link + 残り` の別名 (chained も、1 ファイル 32 件まで) を作る。
+  実体・lexical・別名のどれかが当たれば除外。Bash コマンド文字列の operand から別名を拾う方式は
+  解析が脆いので採らない。symlink が無い repo では候補が増えず挙動は不変。git の symlink 一覧
+  (ls-files 10s) を Stop の git 予算式に追加 (59s、cursor 615s と合わせて 690s 以内)
 - **判断**: 既定は「名前からして機密」なものに限定した。`*token*` / `*password*` は
   tokenizer / password_validator などのコードを巻き込むため入れず、`id_*` も
   `id_generator.py` を拾うので SSH 鍵の実名 (`id_rsa*` 等) に限定。チケット案の `*secret*` /
@@ -101,22 +110,25 @@ stderr にも残している。
 
 ### テスト
 
-累計 **248 件** (+62、post-implementation-review 102 → 164)。テストは git のグローバル /
+累計 **265 件** (+79、post-implementation-review 102 → 181)。テストは git のグローバル /
 システム設定を読まず (`GIT_CONFIG_GLOBAL=/dev/null` `GIT_CONFIG_NOSYSTEM=1`)、除外の環境変数を
 中立値に固定して実行する (開発者 shell の `CODE_ONLY=1` や `color.ui=always` で揺れない)。
 
-- `tests/test_exclusion.py` (新設 21 件): 既定 glob・語 34 種の除外 / コード 17 種の非除外
+- `tests/test_exclusion.py` (新設 27 件): 既定 glob・語 34 種の除外 / コード 17 種の非除外
   (`id_generator.py` `tokenizer.py` `password_validator.py` `secretary.py` `secretsanta.ts`
   等) / 語境界 / 大文字小文字 / サブディレクトリ・ディレクトリ名 / 理由表記と当たった名前 /
   複数候補 / 追加 glob の加算と正規化 (`./` `/` `dir/` 空要素 `!`) / 異常パターンで例外なし /
   `*` の階層またぎ / 既定の無効化 / `!glob` が既定・追加 glob・CODE_ONLY に優先 /
-  CODE_ONLY の拡張子 20 種と残す 14 種 / 真偽値
-- `tests/test_stop_flow.py::TestExclusion` (12 件): 機密のみで cursor 不起動 + pending に
+  CODE_ONLY の拡張子 20 種と残す 14 種 / 真偽値 / `expand_aliases` (ディレクトリ・ファイル
+  symlink の別名、構成要素単位の前方一致、chained、上限で打ち切り・終了、別名が除外に届く)
+- `tests/test_stop_flow.py::TestExclusion` (15 件): 機密のみで cursor 不起動 + pending に
   残らない + systemMessage に内容が出ない / 機密 + コードでコードだけ送り次ターンに再掲しない /
   block 時の `decision` と `systemMessage` の同居 / 除外なしなら出力なし / 追加 glob /
   CODE_ONLY / Bash 経由で作った `.env` / 機密名の symlink / symlink ディレクトリ
-  (`credentials/` → `ordinary/`) 経由の編集 / 旧 state の機密パス / 枠を食わない /
-  `!glob` で credentials ディレクトリ配下のコードを送る
+  (`credentials/` → `ordinary/`) 経由の編集 / Bash 経由で `git status` が実体名しか返さない
+  変更を tracked・untracked の symlink 別名で除外 / symlink の無い repo では Bash 経由の変更を
+  従来どおり送る / 旧 state の機密パス / 枠を食わない / `!glob` で credentials ディレクトリ
+  配下のコードを送る
 - `tests/test_stop_flow.py::TestLiteralPathspecFlow` (2 件): `app/[id]/page.tsx` の編集に別
   セッションの `app/i/page.tsx` が混入しない / 旧 state の `[.]env` で tracked `.env` が漏れない
 - `tests/test_stop_flow.py::TestByteBudgetFlow` (5 件): 30 KB × 2 で 2 件目が pending に
@@ -124,12 +136,15 @@ stderr にも残している。
   overflow の繰り越し順 / 単一 50 KB が切り詰め付きで送られ hash 記録 (末尾だけ変えても再掲) /
   cursor 失敗で両方 pending
 - `tests/test_review_set.py`: `_resolve_paths` の claim 順維持・除外・symlink 両名 (実体が先に
-  claim されても / alias root 経由でも / symlink ディレクトリ経由でも lexical 名で除外、実体名の
-  claim は送る、`_lexical_relative` の構成要素保持)・枠非消費、`_collect_diffs` の `ReviewBatch` 化、
+  claim されても / alias root 経由でも / symlink ディレクトリ経由でも lexical 名で除外、実体名
+  だけの claim も symlink 別名で除外、symlink が無ければ送る、`_lexical_relative` の構成要素
+  保持)・枠非消費、Stop の git 予算式に symlink 一覧を追加、`_collect_diffs` の `ReviewBatch` 化、
   `TestByteBudget` (first-fit / 切り詰め / 上限の制約)、`_truncate_section` (上限内 / 行の
   途中に落ちる limit での行境界 / 1 行 / multibyte)
 - `tests/test_gitscan.py`: literal pathspec (tracked / untracked の `[...]` 名、glob 風エントリが
-  何にも当たらない) / `color.ui=always` でも ANSI が混ざらない
+  何にも当たらない) / `color.ui=always` でも ANSI が混ざらない / `symlink_map` (symlink 無し /
+  tracked / untracked / ファイル symlink と階層下 / ツリー外は除外 / 深さ上限と tracked の例外 /
+  件数・走査上限)
 - `tests/test_state.py`: pending 上限は末尾から落とし繰り越し分を守る
 
 ## 0.4.1
