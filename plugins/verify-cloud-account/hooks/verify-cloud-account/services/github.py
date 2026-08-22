@@ -23,12 +23,8 @@ READONLY = [
     # `gh auth login` は SSH git protocol を選ぶと既存の SSH 公開鍵を GitHub アカウントに
     # **アップロード**しうる (gh 2.96 `gh auth login --help`: SSH 選択時に鍵を検出して
     # アップロード、`--skip-ssh-key` で抑止)。期待外アカウントへの SSH login はリモート
-    # write になるため、鍵操作が起きない形だけを readonly にする:
-    #   `--skip-ssh-key` / `--with-token` (stdin の token を保存するだけ) /
-    #   `--git-protocol https` (`-p https`、`=` 区切りも可)
-    # それ以外の login (対話 / `--web` / `--git-protocol ssh`) は通常検証 — 不一致なら
-    # deny し、deny 文面で `--skip-ssh-key` 付きの形を案内する。
-    r"^gh\s+auth\s+login\b(?=.*\s(?:--skip-ssh-key|--with-token|(?:--git-protocol|-p)(?:=|\s+)https)\b)",
+    # write になるため、鍵操作が起きない形だけを readonly にする (regex ではなく
+    # `is_readonly()` で flag の実効 boolean を解釈する。下記 `_login_is_keyless`)。
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
 ]
@@ -206,6 +202,71 @@ def verify(expected, project_dir: str, env=None) -> str | None:
         return msg
 
     return None
+
+
+_LOGIN_RE = re.compile(r"^gh\s+auth\s+login\b")
+_TRUE_VALUES = frozenset({"true", "1", "yes"})
+
+
+def _bool_flag_value(value: str) -> bool:
+    """`--flag=<value>` の実効 boolean。true/1/yes (大文字小文字非依存) のみ True。
+
+    false/0/no は False、それ以外 (gh がエラーにする値) も保守的に False。
+    """
+    return value.strip().lower() in _TRUE_VALUES
+
+
+def _login_is_keyless(candidate: str) -> bool:
+    """`gh auth login` が SSH 鍵のアップロードを伴わない形なら True。
+
+    flag 文字列の有無ではなく**実効 boolean を解釈**する (gh は `--flag=false` を無効と
+    扱い、SSH 鍵アップロード経路に入る):
+    - `--skip-ssh-key` / `--with-token`: 裸または `=true|1|yes` のときだけ有効、
+      `=false|0|no` は無効
+    - `--git-protocol <v>` / `--git-protocol=<v>` / `-p <v>` / `-p=<v>` / `-p<v>`:
+      値が `https` のときだけ有効 (`ssh` は無効)
+    同じ flag の繰り返しは後勝ち (cobra と同じ)。`--` 以降は引数として見ない。
+    有効な flag が 1 つでもあれば鍵操作は起きない (`--with-token` は token を stdin
+    から保存するだけ、`--skip-ssh-key` は鍵ステップを抑止、https では鍵ステップ無し)。
+    """
+    if not _LOGIN_RE.search(candidate):
+        return False
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        tokens = candidate.split()
+    skip_ssh_key = False
+    with_token = False
+    protocol = ""
+    i = 3  # `gh auth login` の後ろから
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if tok == "--":
+            break
+        name, eq, value = tok.partition("=")
+        if name in ("--skip-ssh-key", "--with-token"):
+            effective = _bool_flag_value(value) if eq else True
+            if name == "--skip-ssh-key":
+                skip_ssh_key = effective
+            else:
+                with_token = effective
+        elif name in ("--git-protocol", "-p"):
+            if eq:
+                protocol = value.strip().lower()
+            elif i < len(tokens):
+                protocol = tokens[i].strip().lower()
+                i += 1
+            else:
+                protocol = ""
+        elif tok.startswith("-p") and not tok.startswith("--") and len(tok) > 2:
+            protocol = tok[2:].strip().lower()
+    return skip_ssh_key or with_token or protocol == "https"
+
+
+def is_readonly(candidate: str) -> bool:
+    """正規表現 (READONLY) で表せない readonly 判定: 鍵操作を伴わない `gh auth login`。"""
+    return _login_is_keyless(candidate)
 
 
 _SWITCH_RE = re.compile(r"^gh\s+auth\s+switch\b")

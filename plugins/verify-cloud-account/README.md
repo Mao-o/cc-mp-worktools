@@ -166,9 +166,11 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
   ロックになるのを防ぐ (v0.7.3)
 - **認証取得系** (v0.8.0): `gh auth logout` / `refresh` / `setup-git`、
   `gh auth login` は **SSH 鍵のアップロードが起きない形のみ** (`--skip-ssh-key` /
-  `--with-token` / `--git-protocol https` (`-p https`) 付き。SSH git protocol を選ぶ
-  login は既存の SSH 公開鍵を GitHub アカウントにアップロードしうるため、それ以外の
-  `gh auth login` は通常検証し、deny 文面では `--skip-ssh-key` 付きの形を案内する)、
+  `--with-token` / `--git-protocol https` (`-p https`) 付き。flag 文字列の有無ではなく
+  実効 boolean を解釈し、`--skip-ssh-key=false` / `--with-token=0` のような明示 false や
+  `--git-protocol ssh` は無効、繰り返しは後勝ち。SSH git protocol を選ぶ login は既存の
+  SSH 公開鍵を GitHub アカウントにアップロードしうるため、それ以外の `gh auth login`
+  は通常検証し、deny 文面では `--skip-ssh-key` 付きの形を案内する)、
   `aws sso login` / `aws sso logout` / `aws login` / `aws logout` /
   `aws configure ...` (認証情報を出力する `configure export-credentials` は除く)、
   `gcloud auth login` / `gcloud auth application-default login` / `revoke` /

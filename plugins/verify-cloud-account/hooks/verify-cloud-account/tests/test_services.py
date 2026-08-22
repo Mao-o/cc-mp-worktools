@@ -733,6 +733,14 @@ class TestAuthCommandPatterns(unittest.TestCase):
     def _matches(patterns, cmd: str) -> bool:
         return any(re.search(p, cmd) for p in patterns)
 
+    @classmethod
+    def _readonly(cls, svc, cmd: str) -> bool:
+        """dispatcher と同じ: READONLY regex または service の is_readonly()。"""
+        if cls._matches(svc.READONLY, cmd):
+            return True
+        fn = getattr(svc, "is_readonly", None)
+        return bool(fn and fn(cmd))
+
     def test_state_changing_positives(self):
         rows = [
             (github, "gh auth switch --user x"),
@@ -840,6 +848,10 @@ class TestAuthCommandPatterns(unittest.TestCase):
             (github, "gh auth login --git-protocol ssh", False),
             (github, "gh auth login -p ssh", False),
             (github, "gh auth login --skip-ssh-keys", False),
+            # 明示 false は無効 (Codex R3 P1: 実効 boolean を解釈する)
+            (github, "gh auth login --git-protocol ssh --skip-ssh-key=false", False),
+            (github, "gh auth login --with-token=false", False),
+            (github, "gh auth login --skip-ssh-key=true", True),
             (github, "gh auth logout", True),
             (github, "gh auth refresh -s repo", True),
             (github, "gh auth setup-git", True),
@@ -864,7 +876,64 @@ class TestAuthCommandPatterns(unittest.TestCase):
         ]
         for svc, cmd, expected in rows:
             with self.subTest(cmd=cmd):
-                self.assertEqual(self._matches(svc.READONLY, cmd), expected)
+                self.assertEqual(self._readonly(svc, cmd), expected)
+
+
+class TestGithubLoginKeyless(unittest.TestCase):
+    """github.is_readonly: `gh auth login` が SSH 鍵のアップロードを伴わない形か
+    (flag 文字列の有無ではなく実効 boolean を解釈する。Codex R3 P1)。"""
+
+    def test_effective_true_forms_are_keyless(self):
+        for cmd in (
+            "gh auth login --skip-ssh-key",
+            "gh auth login --skip-ssh-key=true",
+            "gh auth login --skip-ssh-key=TRUE",
+            "gh auth login --skip-ssh-key=1",
+            "gh auth login --skip-ssh-key=yes",
+            "gh auth login --with-token",
+            "gh auth login --with-token=true < token.txt",
+            "gh auth login --with-token=1",
+            "gh auth login --git-protocol https",
+            "gh auth login --git-protocol=https",
+            "gh auth login --git-protocol=HTTPS",
+            "gh auth login -p https",
+            "gh auth login -p=https",
+            "gh auth login -phttps",
+            "gh auth login --git-protocol ssh --skip-ssh-key",
+            "gh auth login --git-protocol ssh --with-token=yes",
+            "gh auth login --git-protocol ssh --git-protocol https",  # 後勝ち
+            "gh auth login --hostname ghe.example.com --web --git-protocol https",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(github.is_readonly(cmd))
+
+    def test_explicit_false_and_ssh_forms_are_not_keyless(self):
+        for cmd in (
+            "gh auth login",
+            "gh auth login --web",
+            "gh auth login --git-protocol ssh",
+            "gh auth login --git-protocol ssh --skip-ssh-key=false",
+            "gh auth login --skip-ssh-key=0",
+            "gh auth login --skip-ssh-key=no",
+            "gh auth login --skip-ssh-key=NO",
+            "gh auth login --skip-ssh-key=maybe",  # gh がエラーにする値は保守的に無効
+            "gh auth login --with-token=false",
+            "gh auth login --with-token=0 < token.txt",
+            "gh auth login -p ssh",
+            "gh auth login -pssh",
+            "gh auth login --git-protocol https --git-protocol ssh",  # 後勝ち
+            "gh auth login --git-protocol",  # 値なし
+            "gh auth login -- --skip-ssh-key",  # `--` 以降は flag ではない
+            "gh auth login --skip-ssh-keys",
+            "gh auth status",
+            "gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_readonly(cmd))
+
+    def test_unbalanced_quote_falls_back_to_split(self):
+        self.assertTrue(github.is_readonly('gh auth login --skip-ssh-key "x'))
+        self.assertFalse(github.is_readonly('gh auth login --skip-ssh-key=false "x'))
 
 
 class TestGcloud(unittest.TestCase):

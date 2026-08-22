@@ -4,6 +4,9 @@
   1. services/<name>.py を作成し、以下を定義する:
      - PATTERNS: list[str]          コマンドマッチ用の正規表現
      - READONLY: list[str]          検証をスキップする読み取り専用コマンド
+     - is_readonly(candidate) -> bool
+                                    (任意) 正規表現で表せない readonly 判定
+                                    (github: flag の実効 boolean を見る login 形)
      - STATE_CHANGING: list[str]    (任意) アカウント状態 (次のコマンドがどの
                                     アカウントで動くか) を変えうるコマンド。
                                     dispatcher が検出すると成功 cache を破棄し、

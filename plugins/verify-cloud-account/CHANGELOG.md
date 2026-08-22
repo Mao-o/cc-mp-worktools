@@ -14,7 +14,11 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
    logout` / `refresh` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きない
    形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https` (`-p https`) 付き)
-   のみ (SSH git protocol を選ぶ login は既存の SSH 公開鍵を GitHub アカウントに
+   のみ。判定は regex ではなく `github.is_readonly()` が token 列を走査して flag の
+   **実効 boolean** を解釈する (`--skip-ssh-key=false` / `--with-token=0` のような明示
+   false は無効、`=true|1|yes` と裸形は有効、`--git-protocol` は値が `https` のときだけ、
+   繰り返しは後勝ち。gh は `--flag=false` を無効として扱い鍵アップロード経路に入る
+   ため) (SSH git protocol を選ぶ login は既存の SSH 公開鍵を GitHub アカウントに
    アップロードしうる = 期待外アカウントへのリモート write。それ以外の login は通常
    検証し、deny 文面は `gh auth login --skip-ssh-key` / `--hostname <host>
    --skip-ssh-key` を案内する。aws / gcloud / firebase のログイン系に同種の副作用は
@@ -175,13 +179,14 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   窓を過ぎれば cache が再開) +
   `tests/test_main.py` 新設 4 件 (stdin → stdout E2E: 未設定 write の deny JSON /
   readonly login は無出力で epoch を進める / 非対象コマンドと不正 JSON は無出力)
-- 新規 88 件のうち 58 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
+- `tests/test_services.py::TestGithubLoginKeyless` 3 件 (login flag の実効 boolean: 有効 18 形 / 無効 18 形 / quote 不正時の fallback)
+- 新規 91 件のうち 60 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
   実行、レビュー対応分は各修正前の実装) で fail することを確認済み。残りは旧実装でも
   成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを通すこと、
   表示系 readonly が cache を保つこと、他 service の cache に影響しないこと、類似 write
   の deny、検出コマンドの表示、未知 option の保守的扱い、tmp 残骸なし)
 
-テスト 352 → 440 件。
+テスト 352 → 443 件。
 
 ## 0.7.3
 

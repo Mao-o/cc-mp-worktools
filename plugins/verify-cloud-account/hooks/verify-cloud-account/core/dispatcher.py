@@ -58,7 +58,18 @@ def _matches_any(forms: tuple[str, ...], patterns) -> bool:
 
 
 def _is_readonly(forms: tuple[str, ...], service) -> bool:
-    return _matches_any(forms, getattr(service, "READONLY", []))
+    """READONLY (regex) か、service の `is_readonly(candidate)` (regex で表せない判定、
+    例: 鍵操作を伴わない `gh auth login` 形) のどちらかに当たれば True。
+    判定中の例外は安全側 (通常検証)。"""
+    if _matches_any(forms, getattr(service, "READONLY", [])):
+        return True
+    fn = getattr(service, "is_readonly", None)
+    if fn is None:
+        return False
+    try:
+        return any(fn(form) for form in forms)
+    except Exception:
+        return False
 
 
 def _is_state_changing(forms: tuple[str, ...], service) -> bool:
