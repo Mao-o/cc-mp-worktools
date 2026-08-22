@@ -1,4 +1,5 @@
-"""awk / sed のプログラム文字列に含まれる「動的構文」の検出 (0.18.0 review)。
+"""awk / sed のプログラム文字列に含まれる「動的構文」と、シングルクォート引数を
+別のインタプリタに委譲する形の検出 (0.18.0 review)。
 
 0.18.0 で ``_has_hard_stop`` がシングルクォート内を無視するようになり、
 ``awk 'BEGIN { system("cat .env") }'`` のようにプログラム文字列の内側でコマンド
@@ -7,10 +8,19 @@
 内側にあるため検出できない (token としては path ではない)。
 
 シングルクォートは **Bash の展開** を止めるだけで、呼び出されるプログラムに
-とっては不活性ではない。awk / sed (0.17.0 で opaque から外した 2 つ) について、
-プログラム文字列が「コマンド実行 / operand 以外のファイル入出力」を含む場合は
-hard-stop 相当 (``ask_or_allow``) に戻す。他のインタプリタ (``python -c`` /
-``perl -e`` / ``bash -c`` 等) は ``_OPAQUE_WRAPPERS`` で ask に倒れている。
+とっては不活性ではない。本モジュールは 2 つの経路で hard-stop 相当
+(``ask_or_allow``) に戻す:
+
+1. awk / sed (0.17.0 で opaque から外した 2 つ) のプログラム文字列が「コマンド
+   実行 / operand 以外のファイル入出力」を含む (``_program_dynamic_construct``)
+2. segment が **シングルクォート内に hard-stop char を含み**、かつ first token
+   以外に (または first token として) シェル / インタプリタ / 委譲コマンド
+   (``find -exec sh -c '...'`` / ``ssh host '...'`` / ``watch '...'``) が現れる
+   (``_delegated_interpreter``)。クォート内の ``$`` ``{`` はその nested
+   インタプリタにとって生きている
+
+他のインタプリタが first token の形 (``python -c`` / ``perl -e`` / ``bash -c``)
+は ``_OPAQUE_WRAPPERS`` で ask に倒れている。
 
 判定は operand scan の **後** に行う (機密 operand 確定の deny を優先し、
 ``awk '{print}' .env`` の deny を ask に後退させない)。awk は比較演算子 ``>`` や
@@ -24,12 +34,17 @@ sed は regex 近似ではなく **スクリプトを先頭から走査する小
 文字で囲まれた本文、``a`` ``i`` ``c`` のテキスト、ラベル、コメントを読み飛ばし、
 コマンド文字が ``e`` / ``r`` / ``R`` / ``w`` / ``W`` (および ``s`` の ``e`` / ``w``
 flag) なら動的と判定する。未知のコマンド文字は 1 文字進めるだけ (false
-positive 側に倒れても ask で済む)。完全な文法解析は **しない** (思想 1:
-うっかり露出予防の射程。敵対的バイパス対策は非目的)。
+positive 側に倒れても ask で済む)。オプションの引数 (``-l N`` 等) は値を
+読み飛ばす (review R5: ``-l 80`` の ``80`` を positional script と誤認した)。
+GNU / BSD で引数の有無が異なるオプション (``-l`` / ``-i``) は **過剰包含**
+(次の token を候補に入れつつ positional とは数えない) に倒す。完全な文法解析は
+**しない** (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
 """
 from __future__ import annotations
 
 import re
+
+from handlers.bash.constants import _OPAQUE_WRAPPERS
 
 _AWK_FIRST_TOKENS = frozenset({"awk", "gawk", "mawk", "nawk"})
 _SED_FIRST_TOKENS = frozenset({"sed", "gsed"})
@@ -44,59 +59,120 @@ _SED_DYNAMIC_CMDS = frozenset("erRwW")
 # ``s`` の flag: これらを読み飛ばした先に e / w があれば動的 (順不同に対応)。
 _SED_S_PLAIN_FLAGS = frozenset("gpIiMm0123456789")
 
+# 引数 (シングルクォート文字列) を別のシェル / インタプリタに渡す、first token
+# としては opaque 扱いされないコマンド。``ssh host 'cmd'`` はリモートシェル、
+# ``watch 'cmd'`` / ``script -c`` / ``su -c`` は sh -c、``osascript -e`` は
+# ``do shell script``、``docker`` / ``kubectl`` はコンテナ内シェルに渡しうる。
+_SHELL_DELEGATORS = frozenset({
+    "ssh", "su", "watch", "script", "expect", "osascript",
+    "tmux", "screen", "chroot", "nsenter", "docker", "podman", "kubectl",
+    "at", "batch", "crontab", "make", "npm", "npx", "yarn", "pnpm", "bun",
+})
+# find の実行アクション: 後続 token をコマンドとして実行する。
+_FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# first token 以外に現れたら「委譲」と見なす token (basename 比較)。
+_DELEGATING_TOKENS = (
+    _OPAQUE_WRAPPERS | _AWK_FIRST_TOKENS | _SED_FIRST_TOKENS
+    | _SHELL_DELEGATORS | _FIND_EXEC_ACTIONS
+)
+
 
 def _is_script_file_opt(t: str) -> bool:
-    """``-f FILE`` / ``-fFILE`` / ``--file[=FILE]`` (プログラム本体を検査できない)。"""
+    """awk の ``-f FILE`` / ``-fFILE`` / ``--file[=FILE]`` (プログラム本体を検査できない)。"""
     return t == "-f" or t.startswith("--file") or (
         t.startswith("-f") and not t.startswith("--")
     )
 
 
-def _sed_scripts(rest: list[str]) -> list[str]:
-    """sed の引数列からスクリプト文字列の **候補** を取り出す。
+def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
+    """sed の引数列からスクリプト文字列の **候補** と ``-f`` の有無を取り出す。
 
     ``-e SCRIPT`` / ``-eSCRIPT`` / ``--expression[=SCRIPT]`` / ``-ne SCRIPT`` の
-    ような ``e`` を含む短縮オプション束、いずれも無ければ最初の非オプション引数。
-    短縮オプション束は **過剰包含** に倒す (``-nes/x/y/`` は ``e`` 以降を
-    スクリプト、``e`` で終われば次の引数もスクリプト候補): 候補を増やしても
-    ask 側にしか倒れない。``-eSCRIPT`` 密着形は束より **先** に判定する
-    (review R4: ``-e's/(x)/cat .env/e'`` は ``e`` で終わるため束と誤認していた)。
-    ファイル operand は含めない。
+    ような短縮オプション束、いずれも無ければ最初の非オプション引数 (``--`` 以降
+    は全て非オプション)。``-eSCRIPT`` 密着形は束の ``e`` として先に判定する
+    (review R4)。値を取るオプション (``-l N`` / ``--line-length N``) は値を
+    スクリプトと誤認しないよう読み飛ばす (review R5) が、GNU / BSD で引数の
+    有無が異なる ``-l`` / ``-i`` / ``-I`` の裸形は **過剰包含** に倒す: 次の
+    token を候補に入れつつ positional とは数えない (候補を増やしても ask 側に
+    しか倒れない)。ファイル operand は含めない。
+
+    Returns:
+        ``(候補スクリプト列, -f / --file が指定されたか)``
     """
     scripts: list[str] = []
-    expect = False
-    saw_e = False
+    script_file = False
+    expect_script = False
+    expect_file = False
+    ambiguous_next = False
     positional_taken = False
+    opts_done = False
     for t in rest:
-        if expect:
+        if expect_script:
             scripts.append(t)
-            expect = False
+            expect_script = False
             continue
-        if t in ("-e", "--expression"):
-            expect = True
-            saw_e = True
-        elif t.startswith("--expression="):
-            scripts.append(t.split("=", 1)[1])
-            saw_e = True
-        elif t.startswith("-e") and not t.startswith("--"):
-            # ``-eSCRIPT`` 密着形 (束判定より先)
-            scripts.append(t[2:])
-            saw_e = True
-        elif t.startswith("-") and not t.startswith("--") and "e" in t[1:]:
-            # ``-ne`` ``-Ee`` (次の引数がスクリプト) / ``-nes/x/y/`` (e 以降)。
-            # 過剰包含: 両方を候補にする
-            saw_e = True
-            after = t[1:].split("e", 1)[1]
-            if after:
-                scripts.append(after)
-            else:
-                expect = True
-        elif t.startswith("-") and len(t) > 1:
+        if expect_file:
+            script_file = True
+            expect_file = False
             continue
-        elif not saw_e and not positional_taken:
+        if ambiguous_next:
             scripts.append(t)
-            positional_taken = True
-    return scripts
+            ambiguous_next = False
+            continue
+        if opts_done or not t.startswith("-") or t == "-":
+            if not positional_taken:
+                scripts.append(t)
+                positional_taken = True
+            continue
+        if t == "--":
+            opts_done = True
+            continue
+        if t.startswith("--"):
+            name, eq, val = t[2:].partition("=")
+            if name == "expression":
+                if eq:
+                    scripts.append(val)
+                else:
+                    expect_script = True
+            elif name == "file":
+                if eq:
+                    script_file = True
+                else:
+                    expect_file = True
+            elif name == "line-length" and not eq:
+                ambiguous_next = True
+            continue
+        # 短縮オプション束
+        letters = t[1:]
+        k = 0
+        while k < len(letters):
+            ch = letters[k]
+            attached = letters[k + 1:]
+            if ch == "e":
+                if attached:
+                    scripts.append(attached)
+                else:
+                    expect_script = True
+                break
+            if ch == "f":
+                if not attached:
+                    expect_file = True
+                script_file = True
+                break
+            if ch == "l":
+                if attached and attached.isdigit():
+                    break  # GNU ``-l80``
+                if not attached:
+                    ambiguous_next = True  # GNU ``-l 80`` / BSD ``-l`` (引数なし)
+                    break
+                k += 1  # BSD ``-ln`` = -l -n
+                continue
+            if ch in "iI":
+                if not attached:
+                    ambiguous_next = True  # BSD ``-i ext`` / GNU ``-i`` (引数なし)
+                break  # 密着 suffix (GNU ``-i.bak``) は残りを消費
+            k += 1
+    return scripts, script_file
 
 
 def _sed_script_dynamic(script: str) -> str | None:
@@ -228,11 +304,37 @@ def _program_dynamic_construct(tokens: list[str]) -> str | None:
             return "awk_dynamic"
         return None
     if first in _SED_FIRST_TOKENS:
-        if any(_is_script_file_opt(t) for t in rest):
+        scripts, script_file = _sed_scripts(rest)
+        if script_file:
             return "sed_script_file"
-        for script in _sed_scripts(rest):
+        for script in scripts:
             found = _sed_script_dynamic(script)
             if found is not None:
                 return found
         return None
+    return None
+
+
+def _delegated_interpreter(tokens: list[str]) -> str | None:
+    """segment が引数を別のシェル / インタプリタに委譲する形なら、その token を返す。
+
+    呼び出し側は「segment のシングルクォート内に hard-stop char がある」ときだけ
+    呼ぶこと (``segmentation._has_quoted_hard_stop``)。その条件下では 0.17.0 まで
+    hard-stop で ask だったので、ここで ask に戻しても後退にはならない。
+    逆にクォート内 hard-stop が無い segment には適用しない (``grep -r python3 .``
+    のような普通のコマンドを ask に倒さないため)。
+
+    Returns:
+        ``"delegate:<token>"`` (例 ``delegate:sh`` / ``delegate:-exec`` /
+        ``delegate:ssh``)、該当しなければ ``None``。
+    """
+    if not tokens:
+        return None
+    first = tokens[0].rsplit("/", 1)[-1]
+    if first in _SHELL_DELEGATORS:
+        return f"delegate:{first}"
+    for t in tokens[1:]:
+        base = t.rsplit("/", 1)[-1]
+        if base in _DELEGATING_TOKENS:
+            return f"delegate:{base}"
     return None

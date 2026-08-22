@@ -141,6 +141,21 @@ def _has_hard_stop(command: str) -> bool:
     return False
 
 
+def _has_quoted_hard_stop(segment: str) -> bool:
+    """``_has_hard_stop`` が False の segment に、シングルクォート内の hard-stop
+    char が残っているか (= 0.18.0 の quote-aware 化で緩んだ segment か)。
+
+    前提: ``_has_hard_stop(segment)`` が False であること。その条件下では、
+    ダブルクォート内・クォート外 (エスケープ込み) の hard-stop char は既に True
+    を返しているので、残る hard-stop char はシングルクォート内のものだけ
+    (コメントは splitter が落としている)。呼び出し側はこれが True のときだけ
+    ``interpreters._delegated_interpreter`` を適用し、クォート文字列を別の
+    インタプリタに渡す形 (``find -exec sh -c '...'``) を ask に戻す
+    (0.18.0 review R5)。
+    """
+    return any(c in _HARD_STOP_CHARS for c in segment)
+
+
 def _split_command_on_operators(command: str) -> list[str]:
     """quote を尊重しつつ ``&&`` ``||`` ``;`` ``|`` ``\\n`` でセグメントに分割。
 

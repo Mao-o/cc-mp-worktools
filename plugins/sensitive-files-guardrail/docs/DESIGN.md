@@ -233,7 +233,20 @@ operand scan でも `.env` がプログラム文字列の内側にあるため�
 ではなくスクリプトを先頭から走査する小さな parser (`_sed_script_dynamic`) で
 コマンド位置を求める (アドレス / `s` `y` の区切り本文 / `a` `i` `c` テキスト /
 ラベル / コメントを読み飛ばす)。regex 近似は密着引数 `r.env` と `-e` 密着
-スクリプトが `e` で終わる形を取りこぼした (review R4)。機密 operand 確定の
+スクリプトが `e` で終わる形を取りこぼした (review R4)。sed のオプション引数
+(`-l N` 等) は値を読み飛ばし、GNU / BSD で引数の有無が異なる `-l` / `-i` の
+裸形は次の token を候補に入れつつ positional とは数えない (review R5)。
+
+**クォート文字列を別のシェル / インタプリタに委譲する形** (`find -exec sh -c
+'cat ${X:-.env}' ';'` / `ssh host '…'` / `watch '…'`) では、シングルクォート内の
+`$` `{` が nested インタプリタにとって生きている (review R5)。`_has_quoted_hard_stop`
+(hard-stop が False の segment にシングルクォート内の hard-stop char が残って
+いるか) が真のときだけ `_delegated_interpreter` を適用し、first token が委譲
+コマンド (`ssh` / `su` / `watch` / `docker` / `kubectl` / `npm` …) か、first token
+以外に `_OPAQUE_WRAPPERS` / awk / sed / find の `-exec` 系が現れる segment を
+hard-stop (ask) に戻す。クォート内 hard-stop が無い普通のコマンド (`grep -r
+python3 …`) には適用しないので、0.17.0 → 0.18.0 で緩んだ範囲の一部を戻すだけで
+後退はない。機密 operand 確定の
 deny が先なので `awk '{print}' .env` は deny のまま。`>` (比較) や `||` の
 false positive は ask で済ませる (0.17.0 まで `$` `{` で ask だった形)。
 他のインタプリタ (`python -c` / `perl -e` / `bash -c`) は `_OPAQUE_WRAPPERS`

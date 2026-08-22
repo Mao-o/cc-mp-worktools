@@ -106,7 +106,10 @@ from handlers.bash.grep_extract import (  # noqa: F401
     extract_grep_keys,
     is_grep_command,
 )
-from handlers.bash.interpreters import _program_dynamic_construct
+from handlers.bash.interpreters import (  # noqa: F401
+    _delegated_interpreter,
+    _program_dynamic_construct,
+)
 from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
@@ -120,6 +123,7 @@ from handlers.bash.redirects import (  # noqa: F401
 )
 from handlers.bash.segmentation import (  # noqa: F401
     _has_hard_stop,
+    _has_quoted_hard_stop,
     _split_command_on_operators,
 )
 from redaction.file_render import render_for_bash
@@ -560,6 +564,19 @@ def handle(envelope: dict) -> dict:
                     envelope,
                 )
                 decision = "ask"
+            elif _has_quoted_hard_stop(seg):
+                # 0.18.0 review R5: シングルクォート内の hard-stop char を別の
+                # シェル / インタプリタに渡す形 (``find -exec sh -c '...'`` /
+                # ``ssh host '...'``) は、そのインタプリタにとって ``$`` ``{`` が
+                # 生きているので 0.17.0 と同じ hard-stop (ask) に戻す。
+                delegate = _delegated_interpreter(tokens)
+                if delegate is not None:
+                    L.log_info("bash_classify", f"hard_stop_delegated:{delegate}")
+                    result = output.ask_or_allow(
+                        M.bash_lenient("hard_stop"),
+                        envelope,
+                    )
+                    decision = "ask"
         if decision == "ask" and pending_ask is None:
             pending_ask = result
 

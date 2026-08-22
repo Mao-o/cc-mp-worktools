@@ -110,7 +110,14 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > (`awk 'BEGIN{system("x")}' .env`) は deny が優先。sed は走査 parser で
 > コマンド位置を求めるため、密着引数 (`r.env` / `2r/etc/hostname`) や `-e`
 > 密着の `s///e` も ask、置換文字列・正規表現・ラベル内の `e` `r` `w`
-> (`s/foo/replacement/` / `/^e/p` / `:retry`) は allow のまま。
+> (`s/foo/replacement/` / `/^e/p` / `:retry`) は allow のまま。オプション引数
+> (`sed -l 80 'e …'`) は値を読み飛ばしてスクリプトを検査する。
+>
+> シングルクォート内に hard-stop char があり、かつそれを別のシェル /
+> インタプリタに渡す形 (`find . -exec sh -c 'cat ${X:-.env}' ';'` / `ssh host
+> '…'` / `watch '…'` / first token 以外の `bash` `python3` `xargs` `awk` `sed`
+> / find の `-exec` 系) は default で ask、autonomous で allow (0.17.0 と同じ)。
+> 委譲先の無い `grep -E 'a(b)' f` / `find . -name '{x}'` は allow のまま。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 

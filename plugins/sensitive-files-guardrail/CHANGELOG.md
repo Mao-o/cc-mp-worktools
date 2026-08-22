@@ -140,6 +140,9 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `echo safe\` ⏎ `#joined; cat .env` (review 対応 3) | ask / **allow** | **deny / deny** |
 | `awk 'BEGIN { system("cat .env") }'` (review 対応 3) | ask / allow | ask / allow (不変) |
 | `awk '{ print \| "sh" }' notes.txt` / `sed 's/x/y/e' f` / `sed 'r .env' f` (review 対応 3) | ask / allow | ask / allow (不変) |
+| `find . -exec sh -c 'cat ${X:-.env}' ';'` / `ssh host 'cat ${X:-.env}'` (review 対応 5) | ask / allow | ask / allow (不変) |
+| `sed -l 80 'e cat ${X:-.env}' notes.txt` (review 対応 5) | ask / allow | ask / allow (不変) |
+| `find . -name '{x}' -print` (非機密・委譲なし、review 対応 5) | **ask** / allow | **allow / allow** |
 
 ### review 対応 (3) — 行継続と単語状態 / awk・sed プログラム内の動的構文 (PR #38 Codex R3 P1 ×2)
 
@@ -170,6 +173,34 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 `--expression=` / `-ne` 束 / 最初の非オプション引数だけを見る (ファイル
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
+
+### review 対応 (5) — クォート文字列の別インタプリタへの委譲 / sed オプション引数 (PR #38 Codex R5 P1 ×2)
+
+**(a) クォート内 hard-stop を別のシェル / インタプリタに渡す形は ask に戻す。**
+`find . -exec sh -c 'cat ${X:-.env}' ';'` はシングルクォート内の `$` `{` が
+nested な `sh` にとって生きているが、quote-aware 化で hard-stop を抜け、
+`cat ${X:-.env}` は 1 token として機密 path 規則に一致しないため全 mode で
+allow になっていた (0.17.0 は hard-stop で ask)。`_has_quoted_hard_stop` (hard-stop
+が False の segment にシングルクォート内の hard-stop char が残っているか) が
+真のときだけ `_delegated_interpreter` を適用し、first token が委譲コマンド
+(`ssh` / `su` / `watch` / `script` / `expect` / `osascript` / `tmux` / `screen` /
+`chroot` / `nsenter` / `docker` / `podman` / `kubectl` / `at` / `batch` /
+`crontab` / `make` / `npm` / `npx` / `yarn` / `pnpm` / `bun`) か、first token
+以外に `_OPAQUE_WRAPPERS` (`sh` `bash` `python3` `xargs` `sudo` …) / awk / sed /
+find の `-exec` `-execdir` `-ok` `-okdir` が現れる segment を `bash_lenient("hard_stop")`
+の `ask_or_allow` に戻す。クォート内 hard-stop が無い segment には適用しない
+ので `grep -r python3 notes.txt` / `echo sh` は allow のまま、委譲先の無い
+`grep -E 'a(b)' notes.txt` / `find . -name '{x}' -print` も 0.18.0 の緩和のまま。
+機密 operand 確定の deny は委譲判定より優先。
+
+**(b) sed のオプション引数を読み飛ばす。** `sed -l 80 'e cat ${X:-.env}' notes.txt`
+は `-l` を読み飛ばした後の `80` を positional script と誤認し、本当のスクリプト
+`e …` が検査されず全 mode で allow になっていた。`_sed_scripts` をオプション
+parser に書き直し、`-l N` / `-lN` / `--line-length[=]N` の値、`-i` の密着
+suffix、`--` 以降の positional を正しく扱う。GNU / BSD で引数の有無が異なる
+`-l` / `-i` / `-I` の裸形は過剰包含 (次の token を候補に入れつつ positional とは
+数えない) に倒す — BSD 形 `sed -i '' 's/x/y/e' f` も ask になる。短縮束の `f`
+(`-nf script.sed`) と `--file[=]` は script file として ask。
 
 ### review 対応 (4) — sed スクリプトの判定を regex 近似から走査 parser に (PR #38 Codex R4 P1 ×2)
 
@@ -242,9 +273,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-763 件 (+28、うち 3 件は既存テストの改名 + 期待値更新)。
+767 件 (+32、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (28 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (32 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -261,7 +292,14 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   付きは deny 優先 / 動的構文の無い awk・sed は挙動不変、(8) review 対応 4:
   密着引数 (`r.env` `2r/etc/hostname` `R.env`) / `-e` 密着 `s///e` / `s///w` /
   `s///ge` / `{w out}` は ask、`s/foo/replacement/` `s,a,e,` `/^e/p` `:retry`
-  `y///` `$!d` `-ne p` `-nes/x/y/p` `a\` テキスト / `data.r` operand は allow
+  `y///` `$!d` `-ne p` `-nes/x/y/p` `a\` テキスト / `data.r` operand は allow、
+  (9) review 対応 5b: `-l 80` `-l80` `--line-length[=]80` の値を script と
+  誤認しない / BSD `-i ''` / `--` / `-nf` `--file=` は ask、`-n -l 80 p` `-i.bak`
+  `-ln p` は allow、(10) review 対応 5a: `find -exec sh -c '…'` / `-exec grep
+  'foo(' '{}'` / `ssh host '…'` / `watch '…'` / `timeout 5 bash -c '…'` /
+  `-execdir awk '…'` は ask (auto は allow)、委譲先の無い `grep -E 'a(b)'` /
+  `find . -name '{x}'` と クォート内 hard-stop の無い `grep -r python3` /
+  `echo sh` は allow、機密 operand 付きは deny 優先
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、
