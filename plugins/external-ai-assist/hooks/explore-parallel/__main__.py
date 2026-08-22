@@ -10,12 +10,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-import cursor
+# hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
+# (plugin root 内の相対配置なので ${CLAUDE_PLUGIN_ROOT} が cache コピーでも壊れない)。
+_HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+
+from _common import hooklog  # noqa: E402
+
+import cursor  # noqa: E402
 
 # 新しいアナライザを追加するときは import と ANALYZERS に追記する
 ANALYZERS = [cursor]
+
+log = hooklog.make_logger("explore-parallel")
 
 
 def _main() -> None:
@@ -46,7 +57,7 @@ def _main() -> None:
             try:
                 analyzer.pre(tool_use_id, prompt)
             except Exception as e:
-                print(f"[{analyzer.NAME}] pre failed: {e}", file=sys.stderr)
+                log(f"{analyzer.NAME}: pre failed: {e}")
 
     elif args.phase == "post":
         sections = []
@@ -56,7 +67,7 @@ def _main() -> None:
             try:
                 result = analyzer.post(tool_use_id)
             except Exception as e:
-                print(f"[{analyzer.NAME}] post failed: {e}", file=sys.stderr)
+                log(f"{analyzer.NAME}: post failed: {e}")
                 continue
             if result:
                 sections.append(result)
@@ -78,4 +89,4 @@ if __name__ == "__main__":
         pass
     except Exception as e:
         # hook は絶対に失敗させない
-        print(f"[explore-parallel] fatal: {e}", file=sys.stderr)
+        log(f"fatal: {e}")

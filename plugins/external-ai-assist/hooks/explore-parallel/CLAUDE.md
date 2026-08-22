@@ -28,7 +28,9 @@ explore-parallel/
 - **pre フェーズ**: `__main__.py` が stdin から hook input を読み取り、`subagent_type == "Explore"` をチェック。`ANALYZERS` に登録されたアナライザのうち `is_available()` が True のものを順に `pre(tool_use_id, prompt)` で起動する。`cursor.pre()` は cursor agent をバックグラウンド起動し、PID と結果ファイルを `/tmp/explore-parallel/` に記録
 - **post フェーズ**: `__main__.py` が同じく hook input を受け取り、各アナライザの `post(tool_use_id)` を呼ぶ。`cursor.post()` は PID を見て最大 `TIMEOUT_SEC` 秒待機、結果ファイルを読み取って整形済み文字列を返す。`__main__.py` は複数アナライザの結果を `\n\n` で結合し、1 つの `additionalContext` JSON にまとめて stdout に出力
 
-Python 3.9+ 想定。標準ライブラリのみ使用（外部依存なし）。
+Python 3.11+ 想定。標準ライブラリのみ使用 (外部依存なし)。ログと cursor の存在確認は
+`hooks/_common/` (`hooklog` / `cursorcli`) を使う。`_common` は `__main__.py` が `hooks/` を
+sys.path に載せて解決する (plugin root 内の相対配置なので cache コピーでも壊れない)。
 
 ## アナライザの追加
 

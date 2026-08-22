@@ -1,0 +1,101 @@
+"""_common テスト共通のパス設定と偽 CLI 生成。
+
+`python3 -m unittest discover tests` を `hooks/_common/` で回すため、`hooks/` を
+sys.path に載せて `from _common import ...` を解決する (本番は各 hook の `__main__.py`
+が同じ挿入を行う)。
+"""
+import os
+import shlex
+import sys
+import time
+from pathlib import Path
+
+_COMMON_DIR = Path(__file__).resolve().parent.parent
+_HOOKS_DIR = _COMMON_DIR.parent
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
+
+PLUGIN_ROOT = _HOOKS_DIR.parent
+
+# 2026-08-20 の Stop hook 実出力相当 (zh5.1): 前置き 1 文 + フェンス付き sentinel
+FENCED_CLEAN_WITH_PREAMBLE = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
+FENCED_CLEAN = "```\nREVIEW_CLEAN\n```"
+
+
+def write_script(directory: str, name: str, body: str) -> str:
+    """bash script を実行可能ファイルとして書き、そのパスを返す。"""
+    path = os.path.join(directory, name)
+    with open(path, "w") as f:
+        f.write("#!/bin/bash\n" + body)
+    os.chmod(path, 0o755)
+    return path
+
+
+def hanging_cli(
+    directory: str,
+    name: str = "fake-cli",
+    *,
+    ignore_term: bool = False,
+    grandchild_ignores_term: bool = False,
+    leader_exits: bool = False,
+    pid_file: str | None = None,
+    partial_output: str = "partial\n",
+) -> str:
+    """stdout に 1 行書いた後、孫 (`sleep 30`) に stdout を継承させる偽 CLI。
+
+    - `pid_file`: 孫の pid を書く (停止確認用)
+    - `ignore_term`: 親子とも SIGTERM を無視する (孫にも継承されるので SIGKILL 段の検証)
+    - `grandchild_ignores_term`: 孫だけ SIGTERM を無視する (親は TERM で死んで zombie になり、
+      SIGKILL 段でリーダーが zombie のままグループに届くかの検証)
+    - `leader_exits`: 親は孫を起動して即 exit する (cursor-agent 本体が落ちて helper だけが
+      pipe を握るケース。リーダーが最初から zombie)
+    """
+    lines = []
+    if ignore_term:
+        lines.append("trap '' TERM")
+    lines.append(f"printf '%s' {shlex.quote(partial_output)}")
+    if grandchild_ignores_term:
+        lines.append("( trap '' TERM; exec sleep 30 ) &")
+    else:
+        lines.append("sleep 30 &")
+    if pid_file:
+        lines.append(f"echo $! > {shlex.quote(pid_file)}")
+    lines.append("exit 0" if leader_exits else "wait")
+    return write_script(directory, name, "\n".join(lines) + "\n")
+
+
+def read_pid(pid_file: str, timeout: float = 3.0) -> int:
+    """偽 CLI が書いた孫 pid を読む (書かれるまで少し待つ)。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(pid_file) as f:
+                text = f.read().strip()
+            if text:
+                return int(text)
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.02)
+    raise AssertionError(f"pid file が書かれなかった: {pid_file}")
+
+
+def wait_until_dead(pid: int, timeout: float = 3.0) -> bool:
+    """pid が消える (zombie の回収含む) まで待つ。timeout 内に消えれば True。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return False
+
+
+def ensure_killed(pid: int) -> None:
+    """テスト後始末: 生き残った孫を SIGKILL する。"""
+    try:
+        os.kill(pid, 9)
+    except (ProcessLookupError, PermissionError):
+        pass

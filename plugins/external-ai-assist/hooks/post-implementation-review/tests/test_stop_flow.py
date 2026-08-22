@@ -87,6 +87,28 @@ class TestReviewedPathsAreNotRepeated(HookTestCase):
         self.assertNotReviewed()
 
 
+class TestFencedCleanSentinel(HookTestCase):
+    """zh5.1: コードフェンス付き REVIEW_CLEAN (+ 前置き 1 文) を指摘扱いして Stop を block しない。"""
+
+    REAL_WORLD_CLEAN = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
+
+    def test_fenced_clean_does_not_block_and_marks_reviewed(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        output = self.stop(SESSION_A, self.REAL_WORLD_CLEAN)
+        self.assertEqual(output, "", "clean なのに block している")
+        self.assertReviewed("a.txt")
+
+        # レビュー済みとして確定し、次ターンで同じ差分を再レビューしない
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_sentinel_followed_by_findings_still_blocks(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        output = self.stop(SESSION_A, "```\nREVIEW_CLEAN\n```\n\n1. **直接影響** — 実は壊れる")
+        self.assertIn('"decision": "block"', output.replace('"decision":"block"', '"decision": "block"'))
+
+
 class TestCursorFailureRestoresPaths(HookTestCase):
     """cursor 失敗の後、同じファイルが次ターンで再レビューされる。"""
 

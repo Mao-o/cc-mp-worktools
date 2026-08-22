@@ -6,18 +6,20 @@ post フェーズで結果を取得して additionalContext 用文字列とし�
 from __future__ import annotations
 
 import os
-import shutil
 import signal
 import subprocess
-import sys
 import time
+
+from _common import cursorcli, hooklog
 
 from state import cleanup, paths
 
-NAME = "cursor"
+NAME = cursorcli.NAME
 TIMEOUT_SEC = 60
 POLL_INTERVAL_SEC = 3
 MAX_OUTPUT_BYTES = 8000
+
+log = hooklog.make_logger(f"explore-parallel/{NAME}")
 
 _PROMPT_TEMPLATE = (
     "以下のタスクについて、cursor のセマンティック検索(意味ベースのコード検索)を活かした"
@@ -39,7 +41,7 @@ _CONTEXT_HEADER = (
 
 
 def is_available() -> bool:
-    return shutil.which("cursor") is not None
+    return cursorcli.is_available()
 
 
 def pre(tool_use_id: str, prompt: str) -> None:
@@ -50,7 +52,7 @@ def pre(tool_use_id: str, prompt: str) -> None:
 
     with open(result_file, "wb") as rf, open(os.devnull, "wb") as devnull:
         proc = subprocess.Popen(
-            ["cursor", "agent", "--trust", "-p", full_prompt],
+            [cursorcli.BINARY, "agent", "--trust", "-p", full_prompt],
             stdout=rf,
             stderr=devnull,
             stdin=devnull,
@@ -79,10 +81,7 @@ def post(tool_use_id: str) -> str | None:
             if _is_running(pid):
                 try:
                     os.kill(pid, signal.SIGTERM)
-                    print(
-                        f"[{NAME}] timeout ({TIMEOUT_SEC}s) — killed",
-                        file=sys.stderr,
-                    )
+                    log(f"timeout ({TIMEOUT_SEC}s) — killed")
                 except ProcessLookupError:
                     pass
 
