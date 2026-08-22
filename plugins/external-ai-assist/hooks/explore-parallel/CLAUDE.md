@@ -19,13 +19,14 @@ pre フェーズで並走起動 → Explore 本体と同時に調査進行 → p
 explore-parallel/
 ├── CLAUDE.md           このドキュメント
 ├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す
-├── state.py            tool_use_id ベースの一時ファイルパス管理 (/tmp/explore-parallel/)
-└── cursor.py           cursor agent の pre(起動) / post(待機+結果取得)
+├── state.py            tool_use_id ベースの一時ファイルパス管理 ($TMPDIR/explore-parallel/)
+├── cursor.py           cursor agent の pre(読み取り専用で起動) / post(待機+結果取得)
+└── tests/              起動引数 (--mode plan) と結果注入の unittest (偽 cursor)
 ```
 
 **実行フロー**:
 
-- **pre フェーズ**: `__main__.py` が stdin から hook input を読み取り、`subagent_type == "Explore"` をチェック。`ANALYZERS` に登録されたアナライザのうち `is_available()` が True のものを順に `pre(tool_use_id, prompt)` で起動する。`cursor.pre()` は cursor agent をバックグラウンド起動し、PID と結果ファイルを `/tmp/explore-parallel/` に記録
+- **pre フェーズ**: `__main__.py` が stdin から hook input を読み取り、`subagent_type == "Explore"` をチェック。`ANALYZERS` に登録されたアナライザのうち `is_available()` が True のものを順に `pre(tool_use_id, prompt)` で起動する。`cursor.pre()` は cursor agent を**読み取り専用** (`--mode plan`。argv は review 系 2 hook と共通の `_common/cursorcli.readonly_argv`) でバックグラウンド起動し、PID と結果ファイルを `$TMPDIR/explore-parallel/` (TMPDIR 未設定なら `/tmp`) に記録
 - **post フェーズ**: `__main__.py` が同じく hook input を受け取り、各アナライザの `post(tool_use_id)` を呼ぶ。`cursor.post()` は PID を見て最大 `TIMEOUT_SEC` 秒待機、結果ファイルを読み取って整形済み文字列を返す。`__main__.py` は複数アナライザの結果を `\n\n` で結合し、1 つの `additionalContext` JSON にまとめて stdout に出力
 
 Python 3.11+ 想定。標準ライブラリのみ使用 (外部依存なし)。ログと cursor の存在確認は
@@ -103,7 +104,18 @@ pre と post は**同じ `tool_use_id`** で呼ばれることが前提。これ
 
 ## テスト
 
-標準入力に hook input JSON を流し込む:
+```bash
+cd hooks/explore-parallel
+python3 -m unittest discover tests     # 偽 cursor (PATH 先頭の bash script) で argv と注入を固定
+```
+
+`tests/test_cursor_launch.py` は TMPDIR を隔離し、pre が
+`cursor agent --trust --print --mode plan <prompt>` で起動すること (書込可能な `-p` 単独に
+戻らないこと) と、post が結果を `additionalContext` に注入して pid / 結果ファイルを掃除する
+ことを検証する。cursor 本体は起動しない。
+
+手動で確認するときは標準入力に hook input JSON を流し込む (**必ず `TMPDIR` を一時ディレクトリに
+差し替えること** — 本番の結果ファイルと混ざる):
 
 ```bash
 # plugin dir からの相対パスで実行 (dev 時)
@@ -134,3 +146,4 @@ echo '{"tool_input":{"subagent_type":"Explore"},"tool_use_id":"test-001"}' \
 - **プラグイン契約なし（YAGNI）** — 現状 cursor 1 つだけなので抽象化しない。2 つ目（Gemini）追加時に共通パターンが見えたら段階的に抽象化する
 - **`state.py` 分離** — 一時ファイル管理を共通化。2 つ目のアナライザ追加時にパス命名の衝突を回避しつつ、state ロジックの重複を防ぐ
 - **例外の完全捕捉** — `__main__.py` の最外周で全例外を捕捉し exit 0 する。hook の失敗が Claude Code 本体の動作に影響しないようにする
+- **読み取り専用起動 (0.4.1)** — 0.4.0 までは `cursor agent --trust -p` で起動しており、cursor-agent の help では `-p` 単独は「Has access to all tools, including write and shell」。調査の裏で作業ツリーを書き換えうる agent が走っていたため `--mode plan` (read-only/planning) を付け、argv を review 系 2 hook と `_common/cursorcli.readonly_argv` で共有する。`--sandbox enabled` は cursor-agent 側の既定値と `--mode plan` との組み合わせを確認できていないため付けていない (必要なら別 issue)

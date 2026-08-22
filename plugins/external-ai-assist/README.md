@@ -20,8 +20,11 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 ## 前提
 
 - **Python 3.11+** (標準ライブラリのみ使用)
-- `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う
-- `codex` CLI: `exitplan-review` の要件・アーキ観点担当
+- `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
+  3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
+  (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
+  基づく。実機で書込が抑止されることは本 plugin 側では検証していない)
+- `codex` CLI: `exitplan-review` の要件・アーキ観点担当 (`codex exec -s read-only --ephemeral`)
 
 **どちらの CLI も未インストールでも Claude Code 本体の動作には影響しない** (fail-open)。
 片方だけインストールされていれば、その片方の観点だけでレビューが成立する。
@@ -31,6 +34,9 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 ### explore-parallel
 
 `Explore` サブエージェントの視野を Cursor Agent で広げる。詳細は `hooks/explore-parallel/CLAUDE.md`。
+
+Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 から。それ以前は書込可能な
+`-p` 単独で起動していた)。
 
 ### exitplan-review (クロスレビュー)
 
@@ -97,6 +103,10 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
    (SIGTERM → 猶予 → SIGKILL) し、同じグループに居る孫プロセス (stdout を継承した
    helper 等) を取り残さない。killpg は reap 前の子にだけ送る (pid 再利用の誤送信防止)。
    kill 猶予は hooks.json の hook timeout に織り込んである (各 tests が式で固定)
+7. **外部 AI は読み取り専用で起動する** — cursor は `--mode plan`、codex は
+   `exec -s read-only --ephemeral`。調査 (explore-parallel) もレビューも外部 AI に作業ツリーを
+   書き換えさせない。cursor の起動 argv は `hooks/_common/cursorcli.readonly_argv` に一本化し、
+   3 hook それぞれの偽 CLI テストが `--mode plan` を固定する
 
 ## 環境変数
 
@@ -125,15 +135,16 @@ external-ai-assist/
     ├── _common/                            ← hook 間の共通ヘルパー (sys.path 経由で参照)
     │   ├── sentinel.py                     ← REVIEW_CLEAN 判定
     │   ├── subproc.py                      ← 外部 CLI 起動 (process group + timeout)
-    │   ├── cursorcli.py                    ← cursor agent の存在確認 / review 用 argv
+    │   ├── cursorcli.py                    ← cursor agent の存在確認 / 読み取り専用 (--mode plan) 起動 argv (3 hook 共通)
     │   ├── flock.py                        ← flock 付き read-modify-write
     │   ├── hooklog.py                      ← stderr ログ
     │   └── tests/
     ├── explore-parallel/
     │   ├── __main__.py
-    │   ├── cursor.py
+    │   ├── cursor.py                       ← 読み取り専用でバックグラウンド起動 + 待機
     │   ├── state.py
-    │   └── CLAUDE.md
+    │   ├── CLAUDE.md
+    │   └── tests/                          ← 起動引数 (--mode plan) と注入の unittest
     ├── exitplan-review/
     │   ├── __main__.py                     ← 並列実行 + マーカー管理
     │   ├── cursor.py                       ← コードベース整合観点
