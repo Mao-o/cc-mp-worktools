@@ -125,6 +125,10 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > ask、autonomous で allow (0.17.0 と同じ)。`git -c alias.x='!cat .env' x` は
 > クォート内 hard-stop が無くても ask。委譲先の無い `grep -E 'a(b)' f` / `find .
 > -name '{x}'` / `jq '{a: .b}' f` / `git log --format='%(trailers)'` は allow。
+> `curl` は URL の `{a,b}` を自分で glob 展開するので inert ではなく
+> (`curl -s 'file:///…/.en{v,x}'` は ask)、git は `_GIT_INERT_SUBCOMMANDS` 外
+> (`rebase --exec` / `bisect run` / `submodule foreach` / 未知 = alias) で ask、
+> sed の省略 long option (`--expr='e …'`) も解決してスクリプトを検査する。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 

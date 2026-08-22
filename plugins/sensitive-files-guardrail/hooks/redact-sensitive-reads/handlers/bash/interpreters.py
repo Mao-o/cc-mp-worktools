@@ -59,10 +59,15 @@ _SED_FIRST_TOKENS = frozenset({"sed", "gsed"})
 # (``git -c alias.x='!…' x``) 等を追い切れない。緩和する側を有限 allowlist に
 # すれば、未知のコマンドは 0.17.0 と同じ ask に倒れる = fail-closed)。
 # pager 系 (``less '+!cmd'`` / ``view '+!cmd'``) は引数から shell を起動しうるので
-# safe-read allow-list にあっても緩和しない。``git`` は ``-c`` / ``--config-env``
-# の値が shell に渡りうる (pager / sshCommand / alias) ため別途 guard する。
-# ``find`` は ``-exec`` 系を ``_delegated_interpreter`` が guard する。
-_PAGER_LIKE = frozenset({"less", "more", "view", "bat"})
+# safe-read allow-list にあっても緩和しない (``ack`` は ``--pager`` を shell 経由で
+# 起動する)。``curl`` は URL の ``{a,b}`` ``[1-3]`` を **curl 自身が glob 展開**
+# する (``file:///…/.en{v,x}`` で機密ファイルが読める) ので inert ではない
+# (review R8)。``git`` は ``-c`` / ``--config-env`` の値が shell に渡りうる上、
+# サブコマンドにも shell を起動する option (``rebase --exec`` / ``bisect run`` /
+# ``submodule foreach`` / ``grep -O`` / ``--upload-pack``) があるため、
+# ``_GIT_INERT_SUBCOMMANDS`` にあるサブコマンドだけ緩和する。``find`` は
+# ``-exec`` 系、``rg`` は ``--pre``、``sort`` は ``--compress-program`` を guard。
+_PAGER_LIKE = frozenset({"less", "more", "view", "bat", "ack"})
 _QUOTE_RELAX_FIRST_TOKENS = (
     (_SAFE_READ_FIRST_TOKENS - _PAGER_LIKE)
     | _METADATA_ONLY_FIRST_TOKENS
@@ -71,11 +76,33 @@ _QUOTE_RELAX_FIRST_TOKENS = (
     | frozenset({
         "git", "find",
         "sort", "uniq", "cut", "tr", "paste", "column", "diff", "comm", "cmp",
-        "jq", "curl", "date", "seq", "expr", "true", "false", "sleep",
+        "jq", "date", "seq", "expr", "true", "false", "sleep",
         "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown", "ln",
         "md5sum", "sha1sum", "sha256sum", "shasum", "base64", "gzip", "gunzip",
     })
 )
+
+# inert な first token でも、この prefix で始まる option は外部プログラム /
+# shell コマンドを受け取る (値にクォート内 hard-stop があれば委譲とみなす)。
+_DELEGATING_OPTIONS: dict[str, tuple[str, ...]] = {
+    "rg": ("--pre",),                    # preprocessor command
+    "sort": ("--compress-program",),     # 圧縮プログラム
+}
+
+# git: 緩和してよいサブコマンド (shell コマンドを受け取る option を持たない)。
+# ここに無いサブコマンド (``rebase --exec`` / ``bisect run`` / ``filter-branch`` /
+# ``submodule foreach`` / ``difftool`` / ``mergetool`` / ``hook`` / ``grep -O`` /
+# ``fetch`` ``clone`` ``push`` の ``--upload-pack`` ``--receive-pack`` …) と
+# **未知のサブコマンド (= 設定済み alias かもしれない)** は委譲扱い。
+_GIT_INERT_SUBCOMMANDS = frozenset({
+    "ls-files", "check-ignore", "status", "log", "show", "diff", "rev-parse",
+    "rev-list", "branch", "tag", "describe", "cat-file", "blame", "shortlog",
+    "name-rev", "for-each-ref", "ls-tree", "symbolic-ref", "reflog", "stash",
+    "worktree", "add", "commit", "checkout", "switch", "restore", "reset",
+    "merge", "cherry-pick", "revert", "rm", "mv", "init", "apply",
+    "format-patch", "count-objects", "fsck", "gc", "var", "version",
+    "remote", "config",
+})
 
 # awk: ``system()`` / ``getline`` (ファイル・コマンドからの読込) / pipe
 # (``print | "cmd"``・``"cmd" | getline``) / 出力リダイレクト (``print > "f"``)。
@@ -106,10 +133,28 @@ _DELEGATING_TOKENS = (
 
 
 def _is_script_file_opt(t: str) -> bool:
-    """awk の ``-f FILE`` / ``-fFILE`` / ``--file[=FILE]`` (プログラム本体を検査できない)。"""
-    return t == "-f" or t.startswith("--file") or (
-        t.startswith("-f") and not t.startswith("--")
-    )
+    """awk の ``-f FILE`` / ``-fFILE`` / ``--file[=FILE]`` / gawk ``-E`` / ``--exec``
+    (プログラム本体を検査できない)。"""
+    if t in ("-f", "-E") or t.startswith("--file") or t.startswith("--exec"):
+        return True
+    return (t.startswith("-f") or t.startswith("-E")) and not t.startswith("--")
+
+
+# GNU sed の long option。一意な prefix 省略を受理する (``--expr`` = ``--expression``)
+# ので、省略形を解決してから引数の有無を判定する (review R8)。
+_SED_LONG_OPTS = (
+    "expression", "file", "line-length", "in-place", "quiet", "silent",
+    "regexp-extended", "separate", "unbuffered", "null-data", "zero-terminated",
+    "posix", "debug", "sandbox", "follow-symlinks", "binary", "help", "version",
+)
+
+
+def _resolve_sed_long_opt(name: str) -> str | None:
+    """``--NAME`` を GNU sed の一意な prefix 規則で正規名に解決する (不明 / 曖昧は None)。"""
+    if name in _SED_LONG_OPTS:
+        return name
+    cands = [o for o in _SED_LONG_OPTS if o.startswith(name)]
+    return cands[0] if len(cands) == 1 else None
 
 
 def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
@@ -157,17 +202,22 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
             continue
         if t.startswith("--"):
             name, eq, val = t[2:].partition("=")
-            if name == "expression":
+            full = _resolve_sed_long_opt(name)
+            if full == "expression":
                 if eq:
                     scripts.append(val)
                 else:
                     expect_script = True
-            elif name == "file":
+            elif full == "file":
                 if eq:
                     script_file = True
                 else:
                     expect_file = True
-            elif name == "line-length" and not eq:
+            elif full == "line-length" and not eq:
+                ambiguous_next = True
+            elif full is None and not eq:
+                # 不明 / 曖昧な long option: 値を取るかもしれないので次の token を
+                # 候補に入れつつ positional とは数えない (過剰包含)
                 ambiguous_next = True
             continue
         # 短縮オプション束
@@ -363,9 +413,10 @@ def _delegated_interpreter(tokens: list[str]) -> str | None:
     return None
 
 
-def _git_global_options(tokens: list[str]) -> tuple[bool, bool]:
+def _git_global_options(tokens: list[str]) -> tuple[bool, bool, str | None]:
     """git のサブコマンド前の global option を走査し、
-    ``(shell alias をインラインで定義しているか, -c / --config-env があるか)`` を返す。
+    ``(shell alias をインラインで定義しているか, -c / --config-env があるか,
+    サブコマンド)`` を返す。
 
     ``git -c alias.x='!cmd' x`` は Git が ``!`` 以降を shell で実行する形。
     ``-c core.pager=… `` / ``-c core.sshCommand=…`` / ``-c credential.helper=…``
@@ -375,6 +426,7 @@ def _git_global_options(tokens: list[str]) -> tuple[bool, bool]:
     args = tokens[1:]
     shell_alias = False
     has_config = False
+    subcommand: str | None = None
     i = 0
     while i < len(args):
         t = args[i]
@@ -399,8 +451,9 @@ def _git_global_options(tokens: list[str]) -> tuple[bool, bool]:
         if t.startswith("-"):
             i += 1
             continue
-        break  # サブコマンド
-    return shell_alias, has_config
+        subcommand = t
+        break
+    return shell_alias, has_config, subcommand
 
 
 def _inline_shell_delegation(tokens: list[str]) -> str | None:
@@ -413,7 +466,7 @@ def _inline_shell_delegation(tokens: list[str]) -> str | None:
         return None
     first = tokens[0].rsplit("/", 1)[-1]
     if first == "git":
-        shell_alias, _ = _git_global_options(tokens)
+        shell_alias, _, _ = _git_global_options(tokens)
         if shell_alias:
             return "git-shell-alias"
     return None
@@ -431,6 +484,8 @@ def _quoted_hard_stop_reason(tokens: list[str]) -> str | None:
     Returns:
         ``"not_inert:<first>"`` (first token が inert allow-list 外) /
         ``"delegate:git -c"`` (git の ``-c`` / ``--config-env`` 付き) /
+        ``"delegate:git <sub>"`` (inert でない / 未知の git サブコマンド) /
+        ``"delegate:<first> <option>"`` (外部プログラムを受け取る option) /
         ``"delegate:<token>"`` (first token 以外への委譲)、緩和してよければ ``None``。
     """
     if not tokens:
@@ -439,7 +494,12 @@ def _quoted_hard_stop_reason(tokens: list[str]) -> str | None:
     if first not in _QUOTE_RELAX_FIRST_TOKENS:
         return f"not_inert:{first}"
     if first == "git":
-        _, has_config = _git_global_options(tokens)
+        _, has_config, sub = _git_global_options(tokens)
         if has_config:
             return "delegate:git -c"
+        if sub is None or sub not in _GIT_INERT_SUBCOMMANDS:
+            return f"delegate:git {sub or '?'}"
+    for prefix in _DELEGATING_OPTIONS.get(first, ()):
+        if any(t.startswith(prefix) for t in tokens[1:]):
+            return f"delegate:{first} {prefix}"
     return _delegated_interpreter(tokens)

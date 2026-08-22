@@ -252,8 +252,15 @@ sh -c 'cat ${X:-.env}' ';'` / `ssh host '…'` / `git -c alias.x='!cat ${X}' x` 
 「委譲するコマンド」の有限 allowlist (R5) では git の shell alias 等を追い切れ
 なかったので、**緩和する側** を有限 allowlist にした (`_QUOTE_RELAX_FIRST_TOKENS`:
 safe-read から pager 系を除いたもの + metadata-only + awk / sed + `git` `find`
-`sort` `cut` `tr` `jq` `curl` `cp` `rm` … 引数文字列を shell に渡さないと判って
-いるコマンド)。`_has_quoted_hard_stop` (hard-stop が False の segment に
+`sort` `cut` `tr` `jq` `cp` `rm` … 引数文字列を shell に渡さず、自分でも glob
+展開しないと判っているコマンド。`curl` は URL の `{a,b}` を自分で展開するので
+含めない (review R8))。git はさらにサブコマンドで絞る (`_GIT_INERT_SUBCOMMANDS`:
+`rebase --exec` / `bisect run` / `submodule foreach` / `grep -O` /
+`--upload-pack` のように shell コマンドを受け取る option を持つサブコマンドと
+未知のサブコマンド (= 設定済み alias かもしれない) は委譲扱い)。inert でも
+外部プログラムを受け取る option (`rg --pre` / `sort --compress-program`) は
+委譲扱い (`_DELEGATING_OPTIONS`)。sed の long option は GNU の一意 prefix 省略
+(`--expr`) を解決してから引数の有無を判定する。`_has_quoted_hard_stop` (hard-stop が False の segment に
 シングルクォート内の hard-stop char が残っているか) が真のとき
 `_quoted_hard_stop_reason` を適用し、allowlist 外の first token (`docker` /
 `make` / `less '+!…'` / 未知) は 0.17.0 と同じ hard-stop (ask) に倒す

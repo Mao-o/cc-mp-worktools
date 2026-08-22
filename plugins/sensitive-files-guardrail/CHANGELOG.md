@@ -146,7 +146,9 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `git -c alias.x='!cat ${X:-.env}' x` / `git -c core.pager='…' log` (review 対応 6) | ask / allow | ask / allow (不変) |
 | `git -c alias.x='!cat .env' x` (review 対応 6) | **allow** / allow | **ask** / allow |
 | `docker run img 'cat ${X:-.env}'` / `make 'X=$(…)'` / `less '+!…' f` (allow-list 外、review 対応 6) | ask / allow | ask / allow (不変) |
-| `jq '{a: .b}' f.json` / `curl -d '{"a":1}' …` / `cut -d'$' …` (inert、review 対応 6) | **ask** / allow | **allow / allow** |
+| `jq '{a: .b}' f.json` / `cut -d'$' …` / `cp 'a{1}' b` (inert、review 対応 6) | **ask** / allow | **allow / allow** |
+| `curl -s 'file:///…/.en{v,x}'` / `curl -d '{"a":1}' …` (curl は glob 展開するので inert でない、review 対応 8) | ask / allow | ask / allow (不変) |
+| `sed --expr='e cat ${X:-.env}' f` / `git rebase --exec='cat ${X:-.env}' HEAD~1` / `git myalias '${X}'` (review 対応 8) | ask / allow | ask / allow (不変) |
 | `ls &\` ⏎ `& cat .env` / `echo p \|\` ⏎ `\| cat .env` (review 対応 7) | ask / **allow** | **deny / deny** |
 | `echo a # c \` ⏎ `cat .env` (review 対応 7) | ask / **allow** | **deny / deny** |
 
@@ -179,6 +181,29 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 `--expression=` / `-ne` 束 / 最初の非オプション引数だけを見る (ファイル
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
+
+### review 対応 (8) — curl の URL glob / sed の省略 long option / git サブコマンドの callback (PR #38 Codex R8 P1 ×3)
+
+- **curl を inert から外した。** curl は URL の `{a,b}` `[1-3]` を **自分で glob
+  展開** するので、`curl -s 'file:///…/.en{v,x}'` のシングルクォート内 `{}` は
+  Bash にとっては literal でも curl にとっては展開対象 (機密ファイルが読める)。
+  `ack` も `--pager` を shell 経由で起動するので pager 系として外した。
+- **sed の long option は一意な prefix 省略を解決してから判定する。** GNU sed は
+  `--expr` = `--expression` を受理するため、完全一致だけ見ると
+  `sed --expr='e …'` のスクリプトが候補から漏れる。`_resolve_sed_long_opt` で
+  正規名に解決し、不明 / 曖昧な long option は「値を取るかもしれない」として
+  次の token を候補に入れつつ positional とは数えない (過剰包含)。gawk の
+  `-E` / `--exec` (program file) も `-f` と同じ扱いに。
+- **git はサブコマンドも見る。** `-c` が無くても `rebase --exec` / `-x` /
+  `bisect run` / `filter-branch` / `submodule foreach` / `grep -O` / `fetch`
+  `clone` `push` の `--upload-pack` `--receive-pack` は shell コマンドを受け取る。
+  `_GIT_INERT_SUBCOMMANDS` (`ls-files` `check-ignore` `status` `log` `show`
+  `diff` `rev-parse` `branch` `tag` `commit` `add` `checkout` `stash` `remote`
+  `config` …、shell コマンドを受け取る option を持たないもの) にあるサブコマンド
+  だけ緩和し、それ以外と **未知のサブコマンド (= 設定済み alias かもしれない)**
+  はクォート内 hard-stop で ask。
+- inert なコマンドでも外部プログラムを受け取る option (`rg --pre` / `sort
+  --compress-program`) が付いていれば委譲扱い (`_DELEGATING_OPTIONS`)。
 
 ### review 対応 (7) — 行継続をまたいで合成される演算子 / 両 scanner を 1 つの lexer に統一 (PR #38 Codex R7 P1)
 
@@ -324,9 +349,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-773 件 (+38、うち 3 件は既存テストの改名 + 期待値更新)。
+777 件 (+42、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (38 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (42 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -360,7 +385,13 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   `tr` / `cp` / `sort` / `echo` / `printf`) は allow、(12) review 対応 7:
   `&\` ⏎ `&` / `|\` ⏎ `|` の合成演算子、コメント末尾 `\`、シングル /
   ダブルクォート内の継続、`\\` + 改行の 6 形が正しく分割され `cat .env` が
-  両 mode で deny
+  両 mode で deny、(13) review 対応 8: curl の `file:///…/.en{v,x}` と
+  `-d '{…}'` は ask、sed `--expr=` / `--expr` / `--line-len 80` / `--sep` /
+  不明 long option は ask で `--quiet` / `--regexp-ext` / `--line-length=80`
+  は allow、git `rebase --exec` / `-x` / `bisect run` / `submodule foreach` /
+  `grep -O` / `fetch --upload-pack` / 未知サブコマンドは ask で `commit -m` /
+  `log --format` / `status` / `stash push` は allow、`rg --pre` / `sort
+  --compress-program` は ask
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、

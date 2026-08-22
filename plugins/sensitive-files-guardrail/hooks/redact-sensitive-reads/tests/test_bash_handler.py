@@ -1725,7 +1725,7 @@ class TestQuoteAwareHardStop(BaseBash):
     def test_inert_first_token_with_quoted_hard_stop_stays_relaxed(self):
         with open(os.path.join(self.tmp, "f.json"), "w") as f:
             f.write("{}\n")
-        for cmd in ("jq '{a: .b}' f.json", "curl -d '{\"a\":1}' http://x",
+        for cmd in ("jq '{a: .b}' f.json",
                     "cut -d'$' -f1 f.json", "tr '{}' '()'",
                     "cp 'a{1}' b", "sort -t'$' f.json", "echo '$HOME'",
                     "printf '%s\\n' '{x}'"):
@@ -1735,6 +1735,76 @@ class TestQuoteAwareHardStop(BaseBash):
                     output.is_allow(r),
                     msg=f"{cmd!r} should allow but got {_decision(r)!r}",
                 )
+
+    # --- (13) R8: curl の URL glob / sed 省略 long option / git サブコマンド callback ---
+    def test_curl_is_not_inert_because_of_url_globbing(self):
+        # curl 自身が `{a,b}` `[1-3]` を glob 展開するので `{}` は hard-stop のまま。
+        for cmd in ("curl -s 'file:///tmp/project/.en{v,x}'",
+                    "curl -d '{\"a\":1}' http://x"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_sed_abbreviated_long_options(self):
+        # GNU sed は一意な prefix 省略を受理する (`--expr` = `--expression`)。
+        for cmd in ("sed --expr='e cat ${X:-.env}' notes.txt",
+                    "sed --expr 'e x' notes.txt",
+                    "sed --line-len 80 'e x' notes.txt",
+                    "sed --sep 'e x' notes.txt",
+                    "sed --unknown-opt 'e x' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("sed --quiet p notes.txt", "sed --regexp-ext 's/(a)/b/' notes.txt",
+                    "sed --line-length=80 p notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    def test_git_non_inert_subcommands_stay_ask(self):
+        # サブコマンド側にも shell を起動する option がある (`rebase --exec` /
+        # `bisect run` / `submodule foreach` / `grep -O` / `--upload-pack`)。
+        # 未知のサブコマンドは設定済み alias かもしれないので同じく ask。
+        for cmd in ("git rebase --exec='cat ${X:-.env}' HEAD~1",
+                    "git rebase -x 'cat ${X:-.env}' HEAD~1",
+                    "git bisect run sh -c 'cat ${X:-.env}'",
+                    "git submodule foreach 'cat ${X:-.env}'",
+                    "git grep -O'cat ${X:-.env}' pat",
+                    "git fetch --upload-pack='cat ${X:-.env}' origin",
+                    "git myalias '${X:-.env}'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+        # inert なサブコマンドは緩和のまま
+        for cmd in ("git commit -m '{x}'", "git log --format='%(trailers)'",
+                    "git status --porcelain '{a}'", "git stash push -m '$(x)'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+
+    def test_inert_commands_with_program_options_stay_ask(self):
+        for cmd in ("rg --pre 'cat' '{x}' .", "sort --compress-program='x' '{a}'"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
 
 
 class TestSafeReadAllowlist(BaseBash):
