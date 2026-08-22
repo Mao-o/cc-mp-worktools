@@ -1446,6 +1446,96 @@ class TestQuoteAwareHardStop(BaseBash):
         r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
         self.assertTrue(output.is_allow(r))
 
+    # --- (6) 行継続は単語状態を変えない (PR #38 Codex R3 P1-a) ---
+    def test_line_continuation_before_hash_is_not_comment(self):
+        # Bash は `\<newline>` を先に取り除くので `safe#joined` は 1 単語。
+        # 直前文字 (改行) で判定すると `#joined; cat .env` をコメントとして
+        # 落とし、echo 単独 segment になって全 mode で allow してしまう。
+        cmd = "echo safe\\\n#joined; cat .env"
+        self.assertEqual(
+            _split_command_on_operators(cmd), ["echo safe#joined", "cat .env"],
+        )
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{mode!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_line_continuation_after_space_keeps_word_start(self):
+        # 空白の後の行継続なら次の `#` は依然として単語先頭 = コメント。
+        cmd = "echo a \\\n# c\ncat .env"
+        self.assertEqual(_split_command_on_operators(cmd), ["echo a", "cat .env"])
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_hash_after_closing_quote_is_not_comment(self):
+        # `'a'#b` は 1 単語 `a#b` (クォートを閉じても単語は続く)。
+        cmd = "echo 'a'#b ; cat .env"
+        self.assertEqual(_split_command_on_operators(cmd), ["echo 'a'#b", "cat .env"])
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    # --- (7) awk / sed のプログラム内動的構文は hard-stop 相当 (R3 P1-b) ---
+    def test_awk_system_in_single_quotes_stays_ask(self):
+        # シングルクォートは Bash の展開を止めるだけで awk には解釈される。
+        # `{` `(` の hard-stop を抜けた後も ask_or_allow に戻す (0.17.0 と同じ)。
+        for cmd in ('awk \'BEGIN { system("cat .env") }\'',
+                    'awk \'BEGIN { while (("cat .env" | getline l) > 0) print l }\'',
+                    "awk '{ print | \"sh\" }' notes.txt",
+                    "awk '{ print > \"/tmp/out\" }' notes.txt",
+                    "awk -f prog.awk notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_awk_dynamic_with_dotenv_operand_still_deny(self):
+        # 機密 operand 確定の deny が動的構文の ask より優先。
+        cmd = 'awk \'BEGIN { system("x") } {print}\' .env'
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_awk_plain_program_still_allow_and_deny(self):
+        # 動的構文の無い最頻形は 0.18.0 の本来の挙動のまま。
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        r = handle(_make_envelope("awk '{print $1}' notes.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("awk '{print}' .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_sed_exec_read_write_commands_stay_ask(self):
+        for cmd in ("sed 's/x/y/e' notes.txt",
+                    "sed -n 'r .env' notes.txt",
+                    "sed '1r .env' notes.txt",
+                    "sed -e 's/a/b/' -e 'w out.txt' notes.txt",
+                    "sed '$e' notes.txt",
+                    "sed -f script.sed notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_sed_plain_scripts_unchanged(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("sed -n p notes.txt", "sed 's/(=)/X/' notes.txt",
+                    "sed -n '1,5p' notes.txt", "sed 's/the end/x/g' notes.txt"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} should allow but got {_decision(r)!r}",
+                )
+        r = handle(_make_envelope("sed 's/(=)/X/' .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
 
 class TestSafeReadAllowlist(BaseBash):
     """0.12.0: ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの read-only allow-list) に

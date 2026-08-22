@@ -106,6 +106,7 @@ from handlers.bash.grep_extract import (  # noqa: F401
     extract_grep_keys,
     is_grep_command,
 )
+from handlers.bash.interpreters import _program_dynamic_construct
 from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
@@ -547,6 +548,18 @@ def handle(envelope: dict) -> dict:
 
         if decision == "deny":
             return result
+        if decision != "ask":
+            # 0.18.0 review: シングルクォート緩和で hard-stop を抜けた awk / sed の
+            # プログラム文字列にコマンド実行 / ファイル入出力があれば hard-stop
+            # 相当に戻す。機密 operand の deny (上) を優先し、その後で判定する。
+            dyn = _program_dynamic_construct(tokens)
+            if dyn is not None:
+                L.log_info("bash_classify", f"program_dynamic:{dyn}")
+                result = output.ask_or_allow(
+                    M.bash_lenient("program_dynamic", dyn),
+                    envelope,
+                )
+                decision = "ask"
         if decision == "ask" and pending_ask is None:
             pending_ask = result
 

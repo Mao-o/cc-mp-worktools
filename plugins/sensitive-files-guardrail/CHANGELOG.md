@@ -137,6 +137,39 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `echo ok # ' {` ⏎ `cat .env` ⏎ `echo ok # '` (review 対応 2) | ask / **allow** | **deny / deny** |
 | `cat .env # {` (review 対応 2) | ask / **allow** | **deny / deny** |
 | `echo hi # see {config}` (非機密、review 対応 2) | **ask** / allow | **allow / allow** |
+| `echo safe\` ⏎ `#joined; cat .env` (review 対応 3) | ask / **allow** | **deny / deny** |
+| `awk 'BEGIN { system("cat .env") }'` (review 対応 3) | ask / allow | ask / allow (不変) |
+| `awk '{ print \| "sh" }' notes.txt` / `sed 's/x/y/e' f` / `sed 'r .env' f` (review 対応 3) | ask / allow | ask / allow (不変) |
+
+### review 対応 (3) — 行継続と単語状態 / awk・sed プログラム内の動的構文 (PR #38 Codex R3 P1 ×2)
+
+**(a) 行継続は単語状態を変えない。** Bash は `\<newline>` を **先に** 取り除いて
+から `#` がコメントかを決めるため、`echo safe\` ⏎ `#joined; cat .env` は
+`safe#joined` の 1 単語 (コメントではない) で `cat .env` が実行される。review
+対応 (2) の実装は「直前の生文字が単語区切りか」で判定していたので、生の改行を
+見て `#joined; cat .env` をコメントとして落とし、`echo` 単独 segment になって
+全 mode で allow していた。両 scanner を「直前文字」ではなく **単語先頭か
+どうかの字句状態** (`word_start`) で判定する形に書き直し、行継続はその状態を
+変えないようにした (`_COMMENT_PRECEDERS` / `_is_comment_start` は廃止し
+`_WORD_BREAKS` + 状態機械に統一)。空白の後の行継続 (`echo a \` ⏎ `# c`) は
+依然コメント、`'a'#b` はクォートを閉じても単語が続くのでコメントではない。
+
+**(b) シングルクォートは Bash には不活性でも、呼び出されるプログラムには
+解釈される。** `awk 'BEGIN { system("cat .env") }'` は `{` `(` がクォート内に
+なったことで hard-stop を抜け、operand scan は `.env` がプログラム文字列の
+内側にあるため path として見えず、default mode で allow になっていた (0.17.0
+は hard-stop で ask)。新設 `handlers/bash/interpreters.py` の
+`_program_dynamic_construct` が、awk (`awk` / `gawk` / `mawk` / `nawk`) の
+プログラムに `system(` / `getline` / `|` / `>`、`-f progfile` が、sed
+(`sed` / `gsed`) のスクリプトに `e` (command / `s///e` flag) / `r` `R` (ファイル
+読込) / `w` `W` (ファイル書出)、`-f script` があれば `ask_or_allow`
+(`bash_lenient("program_dynamic", <種別>)`) に戻す。判定は **operand scan の後**
+なので `awk '{print}' .env` の deny は後退しない (`awk 'BEGIN{system("x")}' .env`
+も deny)。比較演算子 `>` や `||` も一致して ask になるが、0.17.0 まで `$` `{`
+で ask だった形であり後退ではない。sed のスクリプトは `-e` / `-eSCRIPT` /
+`--expression=` / `-ne` 束 / 最初の非オプション引数だけを見る (ファイル
+operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
+(思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
 
 ### review 対応 (2) — Bash コメントを両 scanner で認識 (PR #38 Codex R2 P1)
 
@@ -188,9 +221,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-754 件 (+19、うち 3 件は既存テストの改名 + 期待値更新)。
+762 件 (+27、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (19 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (27 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -200,7 +233,12 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   (5) review 対応 2: Bash コメント認識 (コメント内 `'` で後続行を飲み込まない /
   単語途中・クォート内・エスケープ済み `#` はコメントでない / 演算子直後・
   先頭 `#` はコメント / コメント内 `{` `$(` は ask に倒さない / CR 入り
-  コメントは hard-stop 維持)
+  コメントは hard-stop 維持)、(6) review 対応 3a: 行継続直後の `#` は
+  コメントでない / 空白 + 行継続の後はコメント / `'a'#b` はコメントでない、
+  (7) review 対応 3b: awk `system(` `getline` `| "cmd"` `> "f"` `-f` と sed
+  `s///e` `r` `1r` `-e 'w f'` `$e` `-f` は ask (auto は allow) / 機密 operand
+  付きは deny 優先 / 動的構文の無い awk・sed は挙動不変
+- `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、
   `test_sed_paren_with_dotenv_arg_still_ask` →

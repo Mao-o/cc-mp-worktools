@@ -960,6 +960,7 @@ BashLenientKind = Literal[
     "shell_keyword",
     "tokenize_failed",
     "normalize_failed",
+    "program_dynamic",
 ]
 
 # autonomous モードに関する固定 suffix。permission_mode が auto / bypass の
@@ -1003,6 +1004,13 @@ def bash_lenient(kind: BashLenientKind, detail: str = "") -> str:
         head = "Bash コマンドの tokenize に失敗しました。"
     elif kind == "normalize_failed":
         head = "Bash コマンド内のパス正規化に失敗しました。"
+    elif kind == "program_dynamic":
+        what = detail or "?"
+        head = (
+            f"awk / sed のプログラム文字列にコマンド実行 / ファイル入出力の構文 "
+            f"({what}) が含まれています。シングルクォートは Bash の展開を止める"
+            "だけで、呼び出されるプログラムには解釈されます。"
+        )
     else:  # pragma: no cover — kind は Literal で型保護
         head = "Bash コマンドの静的解析に失敗しました。"
     return f"{head} {_BASH_LENIENT_SUFFIX}"
