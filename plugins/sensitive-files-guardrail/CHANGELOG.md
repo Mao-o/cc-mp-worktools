@@ -244,7 +244,7 @@ tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追�
 
 ### テスト
 
-redact **788 件** (+39)、check **67 件** (+40)。
+redact **801 件** (+39、0.18.0 review 対応後の 762 件基準)、check **67 件** (+40)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option
