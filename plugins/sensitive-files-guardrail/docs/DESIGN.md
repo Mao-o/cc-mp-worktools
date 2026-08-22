@@ -237,16 +237,24 @@ operand scan でも `.env` がプログラム文字列の内側にあるため�
 (`-l N` 等) は値を読み飛ばし、GNU / BSD で引数の有無が異なる `-l` / `-i` の
 裸形は次の token を候補に入れつつ positional とは数えない (review R5)。
 
-**クォート文字列を別のシェル / インタプリタに委譲する形** (`find -exec sh -c
-'cat ${X:-.env}' ';'` / `ssh host '…'` / `watch '…'`) では、シングルクォート内の
-`$` `{` が nested インタプリタにとって生きている (review R5)。`_has_quoted_hard_stop`
-(hard-stop が False の segment にシングルクォート内の hard-stop char が残って
-いるか) が真のときだけ `_delegated_interpreter` を適用し、first token が委譲
-コマンド (`ssh` / `su` / `watch` / `docker` / `kubectl` / `npm` …) か、first token
-以外に `_OPAQUE_WRAPPERS` / awk / sed / find の `-exec` 系が現れる segment を
-hard-stop (ask) に戻す。クォート内 hard-stop が無い普通のコマンド (`grep -r
-python3 …`) には適用しないので、0.17.0 → 0.18.0 で緩んだ範囲の一部を戻すだけで
-後退はない。機密 operand 確定の
+**シングルクォート内 hard-stop の緩和は inert な first token に限定する**
+(review R5 → R6)。シングルクォートは Bash の展開を止めるだけで、`find -exec
+sh -c 'cat ${X:-.env}' ';'` / `ssh host '…'` / `git -c alias.x='!cat ${X}' x` の
+ように引数を別のシェル / インタプリタに渡すコマンドでは `$` `{` が生きている。
+「委譲するコマンド」の有限 allowlist (R5) では git の shell alias 等を追い切れ
+なかったので、**緩和する側** を有限 allowlist にした (`_QUOTE_RELAX_FIRST_TOKENS`:
+safe-read から pager 系を除いたもの + metadata-only + awk / sed + `git` `find`
+`sort` `cut` `tr` `jq` `curl` `cp` `rm` … 引数文字列を shell に渡さないと判って
+いるコマンド)。`_has_quoted_hard_stop` (hard-stop が False の segment に
+シングルクォート内の hard-stop char が残っているか) が真のとき
+`_quoted_hard_stop_reason` を適用し、allowlist 外の first token (`docker` /
+`make` / `less '+!…'` / 未知) は 0.17.0 と同じ hard-stop (ask) に倒す
+(fail-closed)。inert でも委譲する形 — find の `-exec` 系、first token 以外の
+`_OPAQUE_WRAPPERS` / awk / sed、git の global option `-c` / `--config-env` — は
+ask に戻す。`git -c alias.<name>=!…` は alias 本文が operand scan に見えない
+ので、クォート状態に関係なく常に ask (`_inline_shell_delegation`)。クォート内
+hard-stop が無い普通のコマンド (`grep -r python3 …`) には適用しないので、
+0.17.0 → 0.18.0 で緩んだ範囲の一部を戻すだけで後退はない。機密 operand 確定の
 deny が先なので `awk '{print}' .env` は deny のまま。`>` (比較) や `||` の
 false positive は ask で済ませる (0.17.0 まで `$` `{` で ask だった形)。
 他のインタプリタ (`python -c` / `perl -e` / `bash -c`) は `_OPAQUE_WRAPPERS`

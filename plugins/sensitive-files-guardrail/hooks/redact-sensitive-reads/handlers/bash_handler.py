@@ -107,8 +107,9 @@ from handlers.bash.grep_extract import (  # noqa: F401
     is_grep_command,
 )
 from handlers.bash.interpreters import (  # noqa: F401
-    _delegated_interpreter,
+    _inline_shell_delegation,
     _program_dynamic_construct,
+    _quoted_hard_stop_reason,
 )
 from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
@@ -556,7 +557,7 @@ def handle(envelope: dict) -> dict:
             # 0.18.0 review: シングルクォート緩和で hard-stop を抜けた awk / sed の
             # プログラム文字列にコマンド実行 / ファイル入出力があれば hard-stop
             # 相当に戻す。機密 operand の deny (上) を優先し、その後で判定する。
-            dyn = _program_dynamic_construct(tokens)
+            dyn = _program_dynamic_construct(tokens) or _inline_shell_delegation(tokens)
             if dyn is not None:
                 L.log_info("bash_classify", f"program_dynamic:{dyn}")
                 result = output.ask_or_allow(
@@ -565,13 +566,15 @@ def handle(envelope: dict) -> dict:
                 )
                 decision = "ask"
             elif _has_quoted_hard_stop(seg):
-                # 0.18.0 review R5: シングルクォート内の hard-stop char を別の
-                # シェル / インタプリタに渡す形 (``find -exec sh -c '...'`` /
-                # ``ssh host '...'``) は、そのインタプリタにとって ``$`` ``{`` が
-                # 生きているので 0.17.0 と同じ hard-stop (ask) に戻す。
-                delegate = _delegated_interpreter(tokens)
-                if delegate is not None:
-                    L.log_info("bash_classify", f"hard_stop_delegated:{delegate}")
+                # 0.18.0 review R5/R6: シングルクォート内の hard-stop char は
+                # first token が inert allow-list (引数を shell / インタプリタに
+                # 渡さないコマンド) にあるときだけ無視できる。allow-list 外
+                # (``docker`` / ``make`` / ``less '+!…'`` …) や、inert でも別の
+                # インタプリタへ委譲する形 (``find -exec sh -c '…'`` /
+                # ``git -c core.pager='…'``) は 0.17.0 と同じ hard-stop (ask)。
+                reason = _quoted_hard_stop_reason(tokens)
+                if reason is not None:
+                    L.log_info("bash_classify", f"hard_stop_quoted:{reason}")
                     result = output.ask_or_allow(
                         M.bash_lenient("hard_stop"),
                         envelope,

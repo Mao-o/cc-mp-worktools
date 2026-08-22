@@ -113,11 +113,16 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > (`s/foo/replacement/` / `/^e/p` / `:retry`) は allow のまま。オプション引数
 > (`sed -l 80 'e …'`) は値を読み飛ばしてスクリプトを検査する。
 >
-> シングルクォート内に hard-stop char があり、かつそれを別のシェル /
-> インタプリタに渡す形 (`find . -exec sh -c 'cat ${X:-.env}' ';'` / `ssh host
-> '…'` / `watch '…'` / first token 以外の `bash` `python3` `xargs` `awk` `sed`
-> / find の `-exec` 系) は default で ask、autonomous で allow (0.17.0 と同じ)。
-> 委譲先の無い `grep -E 'a(b)' f` / `find . -name '{x}'` は allow のまま。
+> シングルクォート内 hard-stop char の緩和は first token が inert allow-list
+> (`_QUOTE_RELAX_FIRST_TOKENS`: safe-read (pager 系除く) / metadata-only / awk /
+> sed / `git` `find` `sort` `cut` `tr` `jq` `curl` `cp` `rm` …) にあるときだけ。
+> allow-list 外 (`docker run img 'cat ${X:-.env}'` / `make 'X=$(…)'` / `less
+> '+!…' f` / 未知のコマンド) と、inert でも別インタプリタへ委譲する形 (`find .
+> -exec sh -c '…' ';'` / first token 以外の `bash` `python3` `xargs` `awk` `sed`
+> / git の `-c` `--config-env` 付き `git -c core.pager='…' log`) は default で
+> ask、autonomous で allow (0.17.0 と同じ)。`git -c alias.x='!cat .env' x` は
+> クォート内 hard-stop が無くても ask。委譲先の無い `grep -E 'a(b)' f` / `find .
+> -name '{x}'` / `jq '{a: .b}' f` / `git log --format='%(trailers)'` は allow。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 

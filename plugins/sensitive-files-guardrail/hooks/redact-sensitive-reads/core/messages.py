@@ -1007,9 +1007,10 @@ def bash_lenient(kind: BashLenientKind, detail: str = "") -> str:
     elif kind == "program_dynamic":
         what = detail or "?"
         head = (
-            f"awk / sed のプログラム文字列にコマンド実行 / ファイル入出力の構文 "
-            f"({what}) が含まれています。シングルクォートは Bash の展開を止める"
-            "だけで、呼び出されるプログラムには解釈されます。"
+            f"プログラム / 設定文字列にコマンド実行 / ファイル入出力の構文 "
+            f"({what}) が含まれています (awk・sed のプログラム、git の shell alias "
+            "等)。シングルクォートは Bash の展開を止めるだけで、呼び出される"
+            "プログラムには解釈されます。"
         )
     else:  # pragma: no cover — kind は Literal で型保護
         head = "Bash コマンドの静的解析に失敗しました。"

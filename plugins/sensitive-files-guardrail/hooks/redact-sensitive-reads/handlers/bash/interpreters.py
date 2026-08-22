@@ -44,10 +44,38 @@ from __future__ import annotations
 
 import re
 
-from handlers.bash.constants import _OPAQUE_WRAPPERS
+from handlers.bash.constants import (
+    _METADATA_ONLY_FIRST_TOKENS,
+    _OPAQUE_WRAPPERS,
+    _SAFE_READ_FIRST_TOKENS,
+)
 
 _AWK_FIRST_TOKENS = frozenset({"awk", "gawk", "mawk", "nawk"})
 _SED_FIRST_TOKENS = frozenset({"sed", "gsed"})
+
+# 引数文字列をシェル / インタプリタに渡さないコマンド (「inert」)。シングル
+# クォート内 hard-stop char の緩和 (0.18.0) は **この first token にだけ** 適用する
+# (review R6: 「委譲コマンド」の有限 allowlist では git の shell alias
+# (``git -c alias.x='!…' x``) 等を追い切れない。緩和する側を有限 allowlist に
+# すれば、未知のコマンドは 0.17.0 と同じ ask に倒れる = fail-closed)。
+# pager 系 (``less '+!cmd'`` / ``view '+!cmd'``) は引数から shell を起動しうるので
+# safe-read allow-list にあっても緩和しない。``git`` は ``-c`` / ``--config-env``
+# の値が shell に渡りうる (pager / sshCommand / alias) ため別途 guard する。
+# ``find`` は ``-exec`` 系を ``_delegated_interpreter`` が guard する。
+_PAGER_LIKE = frozenset({"less", "more", "view", "bat"})
+_QUOTE_RELAX_FIRST_TOKENS = (
+    (_SAFE_READ_FIRST_TOKENS - _PAGER_LIKE)
+    | _METADATA_ONLY_FIRST_TOKENS
+    | _AWK_FIRST_TOKENS
+    | _SED_FIRST_TOKENS
+    | frozenset({
+        "git", "find",
+        "sort", "uniq", "cut", "tr", "paste", "column", "diff", "comm", "cmp",
+        "jq", "curl", "date", "seq", "expr", "true", "false", "sleep",
+        "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown", "ln",
+        "md5sum", "sha1sum", "sha256sum", "shasum", "base64", "gzip", "gunzip",
+    })
+)
 
 # awk: ``system()`` / ``getline`` (ファイル・コマンドからの読込) / pipe
 # (``print | "cmd"``・``"cmd" | getline``) / 出力リダイレクト (``print > "f"``)。
@@ -318,23 +346,100 @@ def _program_dynamic_construct(tokens: list[str]) -> str | None:
 def _delegated_interpreter(tokens: list[str]) -> str | None:
     """segment が引数を別のシェル / インタプリタに委譲する形なら、その token を返す。
 
-    呼び出し側は「segment のシングルクォート内に hard-stop char がある」ときだけ
-    呼ぶこと (``segmentation._has_quoted_hard_stop``)。その条件下では 0.17.0 まで
-    hard-stop で ask だったので、ここで ask に戻しても後退にはならない。
-    逆にクォート内 hard-stop が無い segment には適用しない (``grep -r python3 .``
-    のような普通のコマンドを ask に倒さないため)。
+    first token 以外に ``_DELEGATING_TOKENS`` (``sh`` / ``bash`` / ``python3`` /
+    ``xargs`` / awk / sed / find の ``-exec`` 系 …) が現れる形
+    (``find . -exec sh -c '…' ';'``)。first token 自体が委譲コマンドの場合は
+    ``_QUOTE_RELAX_FIRST_TOKENS`` に無いので ``_quoted_hard_stop_reason`` が先に
+    ``not_inert`` を返す。
 
     Returns:
-        ``"delegate:<token>"`` (例 ``delegate:sh`` / ``delegate:-exec`` /
-        ``delegate:ssh``)、該当しなければ ``None``。
+        ``"delegate:<token>"`` (例 ``delegate:sh`` / ``delegate:-exec``)、
+        該当しなければ ``None``。
     """
-    if not tokens:
-        return None
-    first = tokens[0].rsplit("/", 1)[-1]
-    if first in _SHELL_DELEGATORS:
-        return f"delegate:{first}"
     for t in tokens[1:]:
         base = t.rsplit("/", 1)[-1]
         if base in _DELEGATING_TOKENS:
             return f"delegate:{base}"
     return None
+
+
+def _git_global_options(tokens: list[str]) -> tuple[bool, bool]:
+    """git のサブコマンド前の global option を走査し、
+    ``(shell alias をインラインで定義しているか, -c / --config-env があるか)`` を返す。
+
+    ``git -c alias.x='!cmd' x`` は Git が ``!`` 以降を shell で実行する形。
+    ``-c core.pager=… `` / ``-c core.sshCommand=…`` / ``-c credential.helper=…``
+    も値が shell に渡りうる。サブコマンド以降の ``-c`` は別物 (``git commit -c``)
+    なので見ない。
+    """
+    args = tokens[1:]
+    shell_alias = False
+    has_config = False
+    i = 0
+    while i < len(args):
+        t = args[i]
+        if t == "-c" or (t.startswith("-c") and not t.startswith("--")):
+            has_config = True
+            if t == "-c":
+                val = args[i + 1] if i + 1 < len(args) else ""
+                i += 2
+            else:
+                val = t[2:]
+                i += 1
+            if val.startswith("alias.") and "=!" in val:
+                shell_alias = True
+            continue
+        if t.startswith("--config-env"):
+            has_config = True
+            i += 1 if "=" in t else 2
+            continue
+        if t in ("-C", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        break  # サブコマンド
+    return shell_alias, has_config
+
+
+def _inline_shell_delegation(tokens: list[str]) -> str | None:
+    """クォート状態に関係なく常に ask に倒す「インラインの shell 委譲」。
+
+    現状は ``git -c alias.<name>=!…`` のみ (値が ``!`` で始まる alias は shell
+    コマンド)。``.env`` が alias 本文の中にあると operand scan でも見えない。
+    """
+    if not tokens:
+        return None
+    first = tokens[0].rsplit("/", 1)[-1]
+    if first == "git":
+        shell_alias, _ = _git_global_options(tokens)
+        if shell_alias:
+            return "git-shell-alias"
+    return None
+
+
+def _quoted_hard_stop_reason(tokens: list[str]) -> str | None:
+    """シングルクォート内に hard-stop char が残る segment に対し、0.18.0 の緩和を
+    **適用してはいけない** 理由を返す (``None`` なら緩和してよい)。
+
+    呼び出し側は ``segmentation._has_quoted_hard_stop`` が真のときだけ呼ぶこと。
+    その条件下では 0.17.0 まで hard-stop で ask だったので、ここで ask に戻しても
+    後退にはならない。逆にクォート内 hard-stop が無い segment には適用しない
+    (``grep -r python3 .`` のような普通のコマンドを ask に倒さないため)。
+
+    Returns:
+        ``"not_inert:<first>"`` (first token が inert allow-list 外) /
+        ``"delegate:git -c"`` (git の ``-c`` / ``--config-env`` 付き) /
+        ``"delegate:<token>"`` (first token 以外への委譲)、緩和してよければ ``None``。
+    """
+    if not tokens:
+        return None
+    first = tokens[0].rsplit("/", 1)[-1]
+    if first not in _QUOTE_RELAX_FIRST_TOKENS:
+        return f"not_inert:{first}"
+    if first == "git":
+        _, has_config = _git_global_options(tokens)
+        if has_config:
+            return "delegate:git -c"
+    return _delegated_interpreter(tokens)

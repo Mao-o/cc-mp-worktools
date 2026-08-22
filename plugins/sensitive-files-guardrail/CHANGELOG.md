@@ -143,6 +143,10 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 | `find . -exec sh -c 'cat ${X:-.env}' ';'` / `ssh host 'cat ${X:-.env}'` (review 対応 5) | ask / allow | ask / allow (不変) |
 | `sed -l 80 'e cat ${X:-.env}' notes.txt` (review 対応 5) | ask / allow | ask / allow (不変) |
 | `find . -name '{x}' -print` (非機密・委譲なし、review 対応 5) | **ask** / allow | **allow / allow** |
+| `git -c alias.x='!cat ${X:-.env}' x` / `git -c core.pager='…' log` (review 対応 6) | ask / allow | ask / allow (不変) |
+| `git -c alias.x='!cat .env' x` (review 対応 6) | **allow** / allow | **ask** / allow |
+| `docker run img 'cat ${X:-.env}'` / `make 'X=$(…)'` / `less '+!…' f` (allow-list 外、review 対応 6) | ask / allow | ask / allow (不変) |
+| `jq '{a: .b}' f.json` / `curl -d '{"a":1}' …` / `cut -d'$' …` (inert、review 対応 6) | **ask** / allow | **allow / allow** |
 
 ### review 対応 (3) — 行継続と単語状態 / awk・sed プログラム内の動的構文 (PR #38 Codex R3 P1 ×2)
 
@@ -173,6 +177,34 @@ quote-aware 判定にすれば、特例を足さずに本来の operand scan に
 `--expression=` / `-ne` 束 / 最初の非オプション引数だけを見る (ファイル
 operand `data.r` 等を誤検出しない)。完全な awk / sed 文法解析はしない
 (思想 1: うっかり露出予防の射程。敵対的バイパス対策は非目的)。
+
+### review 対応 (6) — 緩和を inert な first token に限定 (PR #38 Codex R6 P1)
+
+review 対応 (5) の「委譲コマンドの有限 allowlist」は、git の shell alias
+(`git -c alias.x='!cat ${X:-.env}' x` — Git は `!` 以降を shell で実行する) の
+ように allowlist に無い委譲経路を追い切れない。設計を反転し、**緩和する側を
+有限 allowlist にした**: シングルクォート内 hard-stop char の無視は、first
+token が「引数文字列を shell / インタプリタに渡さない」と判っているコマンド
+(`_QUOTE_RELAX_FIRST_TOKENS` = `_SAFE_READ_FIRST_TOKENS` から pager 系
+(`less` `more` `view` `bat`、`+!cmd` で shell を起動しうる) を除いたもの +
+`_METADATA_ONLY_FIRST_TOKENS` + awk / sed + `git` `find` `sort` `uniq` `cut` `tr`
+`paste` `column` `diff` `comm` `cmp` `jq` `curl` `date` `seq` `expr` `true`
+`false` `sleep` `cp` `mv` `rm` `mkdir` `rmdir` `touch` `chmod` `chown` `ln`
+`md5sum` `sha1sum` `sha256sum` `shasum` `base64` `gzip` `gunzip`) のときだけ
+適用する。allowlist 外 (`docker` / `make` / `npm` / `tar --to-command=` /
+`less '+!…'` / 未知のコマンド) はクォート内 hard-stop で 0.17.0 と同じ ask
+(fail-closed: 未知のコマンドが shell に渡すかどうかは判らない)。
+
+inert なコマンドでも別のインタプリタへ委譲する形は引き続き ask: find の
+`-exec` 系 / first token 以外の `sh` `bash` `python3` `xargs` … (review 対応 5)、
+および git の global option `-c` / `--config-env` 付き (`core.pager` /
+`core.sshCommand` / `credential.helper` の値は shell に渡りうる)。`-c` の無い
+git は inert のままなので `git ls-files --format='%(objectname)' .env` の deny
+到達 (本リリースの主目的) は保たれ、`git log --format='%(trailers)'` は allow。
+サブコマンド以降の `-c` (`git commit -c HEAD`) は global option ではない。
+`git -c alias.<name>=!…` は alias 本文の `.env` が operand scan に見えないので、
+クォート内 hard-stop の有無に関係なく常に ask (`bash_lenient("program_dynamic",
+"git-shell-alias")`)。
 
 ### review 対応 (5) — クォート文字列の別インタプリタへの委譲 / sed オプション引数 (PR #38 Codex R5 P1 ×2)
 
@@ -273,9 +305,9 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
 
 ### テスト
 
-767 件 (+32、うち 3 件は既存テストの改名 + 期待値更新)。
+772 件 (+37、うち 3 件は既存テストの改名 + 期待値更新)。
 
-- 新設 `TestQuoteAwareHardStop` (32 件): (1) awk brace 形の deny を default /
+- 新設 `TestQuoteAwareHardStop` (37 件): (1) awk brace 形の deny を default /
   auto 両方で、(2) ダブルクォート内 `$()` の ask 維持、(3) 攻撃シナリオ
   `cat <(echo \(\)) < .env` の挙動不変、加えて `\'` エスケープ・クォート内
   `\r`・未終端クォート (shlex 失敗経路)・非機密 operand の allow 化・
@@ -299,7 +331,14 @@ splitter にも同じクォート外エスケープ規則を入れた: `\'` は 
   'foo(' '{}'` / `ssh host '…'` / `watch '…'` / `timeout 5 bash -c '…'` /
   `-execdir awk '…'` は ask (auto は allow)、委譲先の無い `grep -E 'a(b)'` /
   `find . -name '{x}'` と クォート内 hard-stop の無い `grep -r python3` /
-  `echo sh` は allow、機密 operand 付きは deny 優先
+  `echo sh` は allow、機密 operand 付きは deny 優先、(11) review 対応 6:
+  `git -c alias.x='!…'` / `-c core.pager='…'` / `-calias.x=…` / `-C . -c
+  core.sshCommand='…'` は ask、`git -c alias.x='!cat .env' x` は hard-stop 無し
+  でも ask、`-c` 無し git (`log --format='%(trailers)'` / `commit -c HEAD -m
+  '{x}'`) は allow で `ls-files --format='%(objectname)' .env` は deny、
+  allow-list 外 (`docker` / `make` / `less '+!…'` / `tar --to-command=` / `npm
+  run` / 未知) はクォート内 hard-stop で ask、inert (`jq` / `curl` / `cut` /
+  `tr` / `cp` / `sort` / `echo` / `printf`) は allow
 - `test_messages.py`: `bash_lenient` の kind 列挙に `program_dynamic` を追加
 - 改名 + 期待値更新: `test_brace_form_remains_hard_stop` →
   `test_brace_form_denies_after_quote_aware_hard_stop`、
