@@ -261,7 +261,18 @@ safe-read から pager 系を除いたもの + metadata-only + awk / sed + `git`
 未知のサブコマンド (= 設定済み alias かもしれない) は委譲扱い)。inert でも
 外部プログラムを受け取る option (`rg --pre` / `ag --pager` / `sort
 --compress-program`) は委譲扱い (`_DELEGATING_OPTIONS`)。sed の long option は GNU の一意 prefix 省略
-(`--expr`) を解決してから引数の有無を判定する。`_has_quoted_hard_stop` (hard-stop が False の segment に
+(`--expr`) を解決してから引数の有無を判定する。
+
+**スコープ (0.18.0 review で確定)**: この plugin の目的は **エージェントが
+うっかり書くコマンド** による露出の予防であり、悪意を持った抜き取りの防止では
+ない (思想 1)。quote-aware 化で保つべきは「splitter / hard-stop が普通のコマンドを
+正しく区切る」こと (`# don't` のようなコメント内の `'`、`find -exec sh -c '…'`、
+単独 `&`、行継続) で、これは本リリースで対応した。一方「exec option を持つ
+コマンドの列挙」(`ag --pager` / `git rebase --exec` / `curl` の URL glob /
+sed の密着引数 …) は inert allowlist が本質的に不完全である以上終わらないため、
+本リリース以降は **follow-up に集約し、個別対応しない**。未知のコマンドは
+0.17.0 と同じ ask (fail-closed) に倒れており、autonomous では allow なので、
+列挙漏れがあっても「うっかり露出」の観点では 0.17.0 から後退しない。`_has_quoted_hard_stop` (hard-stop が False の segment に
 シングルクォート内の hard-stop char が残っているか) が真のとき
 `_quoted_hard_stop_reason` を適用し、allowlist 外の first token (`docker` /
 `make` / `less '+!…'` / 未知) は 0.17.0 と同じ hard-stop (ask) に倒す
