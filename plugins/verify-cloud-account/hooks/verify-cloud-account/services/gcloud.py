@@ -42,6 +42,9 @@ def _get(key: str, env=None) -> tuple[str | None, str | None]:
         )
     except FileNotFoundError:
         return None, "GCP: gcloud コマンドが見つかりません。"
+    except OSError as e:
+        # 実行権限なし / 形式不正等。例外を漏らすと hook が異常終了して無音 fail-open になる。
+        return None, f"GCP: gcloud コマンドを実行できません ({e})。"
     except subprocess.TimeoutExpired:
         return None, f"GCP: gcloud config get-value {key} がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     value = result.stdout.strip()

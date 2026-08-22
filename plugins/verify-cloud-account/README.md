@@ -125,10 +125,25 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 | サービス | マッチ対象 | 期待値の取得 |
 |---|---|---|
 | GitHub | `gh ...` | `gh auth status` のアクティブアカウント |
-| Firebase | `firebase ...` | `firebase use` → fallback `.firebaserc` |
+| Firebase | `firebase ...` | `firebase use` (非 TTY) の解決済み project ID → CLI から取れない時のみローカル設定 (configstore / `.firebaserc`) |
 | AWS | `aws ...` | `aws sts get-caller-identity --query Account` |
 | GCP | `gcloud ...` | `gcloud config get-value project` (+ optional `account`) |
 | Kubernetes | `kubectl ...` | `kubectl config current-context` |
+
+Firebase の現在値は firebase-tools 本体と同じ順で解決する (v0.7.3)。
+`firebase use <alias|project>` の切替先は CLI の configstore
+(`~/.config/configstore/firebase-tools.json` の `activeProjects`) にだけ保存され
+`.firebaserc` には反映されないため、まず `firebase use` (非 TTY では解決済みの
+project ID を 1 行出力) を読む。その cwd は `firebase.json` を親方向に探した
+project root (無ければ project dir) に固定し、hook / builder プロセスの cwd は
+継承しない (builder を project の外から起動しても無関係な project を報告しない)。
+CLI から取れないとき (hook の PATH に無い / 実行不可 / 非ゼロ終了 / 出力が空 /
+複数行) は CLI と同じローカル設定から同じ規則で解決する (起点は同じ project root):
+configstore の切替先を `.firebaserc` の alias で解決 → 無ければ `.firebaserc` の
+alias が 1 つならその値 → `default`。`npx firebase ...` のように hook 側に
+`firebase` が無い構成でも、configstore 経由で切替を見落とさない。
+`firebase use` が timeout したときは fallback せず「firebase use がタイムアウト
+しました」で deny する (fail-closed)。
 
 ### 検証をスキップする readonly コマンド
 
@@ -136,6 +151,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 - `gh auth status` / `gh auth list`
 - `firebase use` (引数なし)
+- `firebase login` / `firebase logout` (`login:ci` / `login:add` / `login:use` 等の
+  サブコマンド含む) — project を変更しない認証操作。未ログインだと `firebase use`
+  が認証必須で失敗して現在値を取れず、`firebase login` 自体が deny されるデッド
+  ロックになるのを防ぐ (v0.7.3)
 - `aws sts get-caller-identity`
 - `gcloud auth list` / `gcloud config get-value project` / `... account`
 - `kubectl config current-context` / `... get-contexts` / `... view` /
@@ -161,7 +180,8 @@ deny される remediation loop を防ぐため、**accounts.local.json の期�
 - `kubectl config use-context <期待コンテキスト>`
 
 期待値**以外**への切替は従来どおり通常検証に落ち、切替後の write 操作も次回 hook で
-再検証されるため fail-closed は維持される。AWS は切替が `export AWS_PROFILE=...`
+再検証されるため fail-closed は維持される (ただし直前の成功 cache (30 秒) が有効な
+間は再検証されない。切替コマンドでの cache 無効化は別途対応予定)。AWS は切替が `export AWS_PROFILE=...`
 (シェル組込のため hook 対象外) で、期待値 (Account ID) と profile 名の照合も hook
 からは不能なため、この特例の対象外。
 

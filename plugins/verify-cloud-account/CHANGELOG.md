@@ -1,5 +1,106 @@
 # Changelog
 
+## 0.7.3
+
+**Firebase の現在値解決順を firebase-tools 本体に合わせる (P0 bug fix,
+`services/firebase.py`)**: v0.3.2 以降は `.firebaserc` の `default` を
+`firebase use` の出力より優先していたが、firebase-tools (`lib/command.js` の
+applyRC) は `--project` → configstore の activeProjects (`firebase use
+<alias|project>` で更新) → `.firebaserc` の順で解決し、`firebase use X` は
+configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時のみ)。
+このため 2 つの誤判定が起きていた:
+
+- **false-allow**: 期待値が `.firebaserc` の default (例 `proj-dev`) のとき、
+  `firebase use prod` で切り替えていても default で照合され `firebase deploy` が
+  prod に通っていた
+- **永久 deny**: 期待値 `proj-prod`・default `proj-dev` では `firebase use proj-prod`
+  を実行しても「現在=proj-dev」と判定され続けていた
+
+### 変更内容
+
+1. **解決順の反転** — `firebase use` (非 TTY では解決済み project ID を 1 行出力)
+   を最優先し、CLI から取れないとき (hook の PATH に無い / 非ゼロ終了 / 出力が空 /
+   複数行ヘルプ) だけローカル設定に fallback する。`get_active_account()`
+   (builder の `accounts-show` / `accounts-init` が使用) も同じ順。
+2. **fallback も applyRC と同じ規則・同じ情報源にする** — `.firebaserc` だけを
+   読むと `firebase use <alias>` の切替 (configstore にしか無い) を見落として
+   default で照合してしまうため、configstore
+   (`$XDG_CONFIG_HOME` または `~/.config` 配下の `configstore/firebase-tools.json`
+   の `activeProjects`、project_dir から親方向に探索) の切替先を `.firebaserc` の
+   alias で解決 → 無ければ alias が 1 つならその値 → `default` の順にした。
+   `npx firebase ...` / `pnpm exec firebase ...` のように hook 側に `firebase` が
+   無い構成でも切替を見落とさない。configstore は JSON として読むが
+   `activeProjects` 以外は使わず、内容をメッセージに出さない。
+   探索の起点は firebase-tools の `detectProjectRoot` と同じく `firebase.json` を
+   親方向に探した project root (無ければ cwd) で、monorepo の子ディレクトリで
+   Claude を起動しても親の `.firebaserc` で alias を解決できる。
+   `.firebaserc` / configstore が不正な形 (list /
+   非 UTF-8 等) でも例外にせず未解決扱い (従来は top-level が list だと
+   AttributeError で hook が異常終了 = fail-open)。
+3. **timeout の専用メッセージ** — `firebase use` が 10 秒でタイムアウトしたときは
+   `.firebaserc` に fallback せず「Firebase: firebase use がタイムアウトしました。
+   再試行するか、ネットワーク接続を確認してください。」で deny する (他 service
+   の timeout 文言と同形)。従来は timeout が「firebase login && firebase use ...」
+   の誤案内になっていた。fallback しないのは、`.firebaserc` が configstore の
+   切替を知らないため timeout 経路だけ false-allow が残るのを防ぐため (fail-closed)。
+4. **`firebase login` / `logout` を検証スキップ (READONLY) に** — CLI 優先化に伴う
+   regression 防止。未ログイン (`firebase use` が requireAuth で非ゼロ終了) かつ
+   configstore が期待外に切替済みだと、`firebase login` 自体が fallback の
+   configstore 値で deny され、案内される `firebase use <期待>` も認証必須で失敗する
+   デッドロックになるため。`login:ci` / `login:add` / `login:use` / `logout` を含む
+   (project を変更しない認証操作。直後の write は次回 hook で再検証される)。
+5. **CLI が PATH にあるが実行できないときに hook が異常終了しない** —
+   `subprocess.run` が投げる FileNotFoundError 以外の `OSError` (実行権限なし /
+   形式不正等) を firebase は「CLI 不可 → ローカル設定 fallback」に乗せ、他 4 service
+   (gh / aws / gcloud / kubectl) は「コマンドを実行できません」の deny にした。
+   従来は例外が漏れて hook が非ゼロ終了し、PreToolUse の無音 fail-open になっていた。
+6. **README** — 期待値取得の表と解説、readonly 一覧、切替後の再検証に関する注記
+   (成功 cache 内は再検証されない) を実装に合わせて更新。
+7. **`firebase use` の cwd を project root に固定** — 従来は hook / builder
+   プロセスの cwd を継承していたため、builder (`accounts-init` / `accounts-show`)
+   を project_dir の外から起動すると CLI 優先化によって無関係なディレクトリの
+   project を報告・書込しうる。`firebase.json` を親方向に探した project root
+   (無ければ project_dir) を cwd にし、ローカル設定 fallback と解決の起点を揃えた。
+   project_dir が存在しない場合は cwd 指定の `OSError` を CLI 不可として扱い、
+   従来どおり fallback する。
+
+### 非互換性
+
+- `firebase use <alias>` で default 以外に切り替えているプロジェクトでは、期待値が
+  default の project ID のままだと deny に変わる (本来の意図どおり)。`.firebaserc`
+  の default で運用しているプロジェクトは挙動不変。
+- `.firebaserc` があっても毎回 `firebase use` (認証チェックを含む) が走るように
+  なった (30 秒の成功 cache は従来どおり)。オフライン等で 10 秒を超えると
+  timeout deny になる。
+
+### 対象外 (別項で扱う)
+
+- 切替コマンド直後 30 秒以内の成功 cache による false-allow (`firebase use prod &&
+  firebase deploy` や、切替を allow した直後の deploy が cache hit で検証されない)。
+  全 service 共通の cache 無効化として別途対応する。
+- `--project` / `-P` flag による実行時 override。
+
+### テスト
+
+- `tests/test_services.py::TestFirebase` に 25 件追加 (CLI 優先 / false-allow と
+  永久 deny の解消 / timeout 専用メッセージ / 空出力・非ゼロ終了・実行不可
+  (PermissionError)・単一 alias の fallback / configstore の切替先参照 (CLI 不在・
+  非ゼロ終了・親ディレクトリ・実体パス・env の `XDG_CONFIG_HOME`・破損時) /
+  `firebase.json` を起点にした project root 解決 / `firebase use` の cwd 固定と
+  project_dir 不在時の扱い / 不正な `.firebaserc`)
+- `tests/test_services.py::TestCliExecErrors` 新設 4 件 (gh / aws / gcloud / kubectl
+  の `OSError` が deny 文字列になり例外が漏れない)
+- `tests/test_active_account.py::TestFirebaseActiveAccount` に 5 件追加 (CLI 優先 /
+  timeout は None / configstore 参照 / builder 経路の cwd 固定)、1 件を fallback
+  意味論の名前に変更
+- `tests/test_dispatcher.py::TestFirebaseResolutionOrderE2E` 4 件追加
+  (`firebase.verify` を mock せず subprocess だけ差し替えた end-to-end。npx 構成、
+  未ログイン + configstore 切替済みでの `firebase login` allow / `deploy` deny を含む)
+- 新規 38 件のうち 33 件は旧実装 (main) で fail することを確認済み (残り 5 件は
+  fallback 条件の仕様固定)
+
+テスト 314 → 352 件。
+
 ## 0.7.2
 
 **D11 インライン env 伝播の透過 wrapper 挙動を監査・体系化 (ドキュメント + 回帰テスト)**:

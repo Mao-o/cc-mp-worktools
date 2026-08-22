@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -117,6 +119,23 @@ class TestGithub(unittest.TestCase):
 
 
 class TestFirebase(unittest.TestCase):
+    def setUp(self):
+        # firebase-tools の configstore を実環境 (~/.config) から読まないよう
+        # XDG_CONFIG_HOME を空の一時ディレクトリに向ける (テストの hermeticity)。
+        self._xdg = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self._xdg, ignore_errors=True))
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self._xdg})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_configstore(self, active_projects: dict) -> None:
+        """firebase-tools の configstore (`firebase use` の切替先) を模擬する。"""
+        path = Path(self._xdg) / "configstore" / "firebase-tools.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"activeProjects": active_projects}), encoding="utf-8"
+        )
+
     def test_string_match(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-project\n")):
             self.assertIsNone(firebase.verify("my-project", "/p"))
@@ -191,6 +210,312 @@ class TestFirebase(unittest.TestCase):
                 "subprocess.run", return_value=_fake_run(stdout=help_message)
             ):
                 self.assertIsNone(firebase.verify("my-project", d))
+
+    # --- 解決順 (bd_092a232e-629.1): firebase use → CLI 不可時のみ .firebaserc ---
+
+    @staticmethod
+    def _write_firebaserc(d: str, projects: dict) -> None:
+        (Path(d) / ".firebaserc").write_text(
+            json.dumps({"projects": projects}), encoding="utf-8"
+        )
+
+    _TIMEOUT = subprocess.TimeoutExpired(cmd="firebase use", timeout=10)
+
+    def test_cli_switch_wins_over_firebaserc_default(self):
+        """`firebase use prod` で切替済み (CLI=proj-prod) なら .firebaserc の
+        default=proj-dev より CLI を優先し、scalar 期待 proj-prod に一致 → allow。
+        旧実装 (.firebaserc 優先) では永久 deny になっていた。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
+            ):
+                self.assertIsNone(firebase.verify("proj-prod", d))
+
+    def test_default_expected_but_cli_switched_denies(self):
+        """期待が default の project のまま `firebase use prod` されていれば deny
+        (旧実装では .firebaserc の default で照合して allow = false-allow)。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
+            ):
+                err = firebase.verify("proj-dev", d)
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+        self.assertIn("期待=proj-dev", err)
+
+    def test_dict_default_only_expected_but_cli_switched_denies(self):
+        """dict 期待値 {"default": "proj-dev"} でも CLI の切替先 (proj-prod) で照合し deny。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
+            ):
+                err = firebase.verify({"default": "proj-dev"}, d)
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+
+    def test_cli_timeout_denies_with_dedicated_message(self):
+        """CLI timeout は .firebaserc が期待値に一致していても fallback せず
+        専用メッセージで deny (fail-closed)。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "my-project"})
+            with mock.patch("subprocess.run", side_effect=self._TIMEOUT):
+                err = firebase.verify("my-project", d)
+        self.assertIsNotNone(err)
+        self.assertIn("firebase use がタイムアウトしました", err)
+        self.assertNotIn("firebase login", err)
+
+    def test_cli_timeout_without_firebaserc_same_message(self):
+        """.firebaserc が無くても timeout は「firebase login && firebase use」の
+        誤案内ではなく timeout 専用メッセージになる。"""
+        with mock.patch("subprocess.run", side_effect=self._TIMEOUT):
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify("my-project", "/p")
+        self.assertIn("タイムアウト", err)
+        self.assertNotIn("firebase login", err)
+
+    def test_cli_empty_output_falls_back_to_firebaserc(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "my-project"})
+            with mock.patch("subprocess.run", return_value=_fake_run(stdout="")):
+                self.assertIsNone(firebase.verify("my-project", d))
+
+    def test_cli_nonzero_exit_falls_back_to_firebaserc(self):
+        """非 TTY の `firebase use` は active project が無いと stderr に
+        "No active project" を出して非ゼロ終了 → .firebaserc に fallback。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "my-project"})
+            with mock.patch(
+                "subprocess.run",
+                return_value=_fake_run(
+                    stdout="", stderr="Error: No active project\n", returncode=1
+                ),
+            ):
+                self.assertIsNone(firebase.verify("my-project", d))
+
+    def test_cli_nonzero_exit_ignores_stdout(self):
+        """非ゼロ終了時は stdout が単一トークンでも採用しない。ローカル設定も無ければ
+        「取得できません」(旧実装は終了コードを見ず "other" を採用して allow)。"""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch(
+                "subprocess.run",
+                return_value=_fake_run(stdout="other\n", returncode=1),
+            ):
+                with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                    err = firebase.verify("other", d)
+        self.assertIsNotNone(err)
+        self.assertIn("取得できません", err)
+
+    # --- CLI 不可時の configstore (firebase use の切替先) 参照 ---
+
+    def test_cli_missing_uses_configstore_switch_over_firebaserc_default(self):
+        """hook の PATH に firebase が無い (npx 等) 環境でも、configstore に
+        `firebase use prod` の切替が残っていれば .firebaserc の default ではなく
+        切替先で照合して deny する (false-allow 防止)。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            self._write_configstore({os.path.abspath(d): "prod"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                err = firebase.verify("proj-dev", d)
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+
+    def test_cli_missing_configstore_switch_matches_expected(self):
+        """同じ状況で期待が切替先 (proj-prod) なら allow (永久 deny 防止)。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            self._write_configstore({os.path.abspath(d): "prod"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(firebase.verify("proj-prod", d))
+
+    def test_cli_nonzero_uses_configstore_project_id(self):
+        """CLI が非ゼロ終了 (認証失敗等) でも configstore の値 (alias に無い
+        project ID) をそのまま現在値にする。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev"})
+            self._write_configstore({os.path.abspath(d): "proj-prod"})
+            with mock.patch(
+                "subprocess.run",
+                return_value=_fake_run(stdout="", stderr="Error: auth\n", returncode=1),
+            ):
+                err = firebase.verify("proj-dev", d)
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+
+    def test_configstore_lookup_walks_up_to_ancestor(self):
+        """configstore のキーが project_dir の親 (firebase-tools と同じ親方向探索)。"""
+        with tempfile.TemporaryDirectory() as d:
+            sub = Path(d) / "apps" / "web"
+            sub.mkdir(parents=True)
+            self._write_firebaserc(str(sub), {"default": "proj-dev", "prod": "proj-prod"})
+            self._write_configstore({os.path.abspath(d): "prod"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(firebase.verify("proj-prod", str(sub)))
+
+    def test_configstore_lookup_matches_realpath_key(self):
+        """configstore のキーが実体パス (symlink 解決済み) でも一致する。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            self._write_configstore({os.path.realpath(d): "prod"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(firebase.verify("proj-prod", d))
+
+    def test_configstore_path_honours_env_argument(self):
+        """verify(env=...) の XDG_CONFIG_HOME を configstore の場所に使う
+        (行頭インライン env と CLI の解釈を揃える)。"""
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as xdg:
+            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
+            path = Path(xdg) / "configstore" / "firebase-tools.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps({"activeProjects": {os.path.abspath(d): "prod"}}),
+                encoding="utf-8",
+            )
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                err = firebase.verify("proj-dev", d, env={"XDG_CONFIG_HOME": xdg})
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+
+    def test_configstore_unreadable_falls_back_to_firebaserc(self):
+        """configstore が壊れている / 形が違う場合は例外にせず .firebaserc の規則へ。"""
+        for payload in ("{not json", '{"activeProjects": ["x"]}', "[]"):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as d:
+                self._write_firebaserc(d, {"default": "proj-dev"})
+                path = Path(self._xdg) / "configstore" / "firebase-tools.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload, encoding="utf-8")
+                with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                    self.assertIsNone(firebase.verify("proj-dev", d))
+
+    def test_firebaserc_undecodable_bytes_does_not_crash(self):
+        """UTF-8 として読めない .firebaserc も例外にせず未解決扱い。"""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".firebaserc").write_bytes(b"\xff\xfe\x00")
+            with mock.patch("subprocess.run", return_value=_fake_run(stdout="")):
+                with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                    err = firebase.verify("proj", d)
+        self.assertIn("取得できません", err)
+
+    def test_cli_permission_error_falls_back_to_local(self):
+        """firebase が PATH にあるが実行できない (PermissionError 等 FileNotFoundError
+        以外の OSError) ときも例外にせず CLI 不可としてローカル設定に fallback する。
+        例外が漏れると hook が異常終了し PreToolUse は無音 fail-open になる。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "my-project"})
+            with mock.patch(
+                "subprocess.run",
+                side_effect=PermissionError(13, "Permission denied", "firebase"),
+            ):
+                self.assertIsNone(firebase.verify("my-project", d))
+
+    def test_cli_permission_error_without_local_config_denies(self):
+        with mock.patch(
+            "subprocess.run",
+            side_effect=PermissionError(13, "Permission denied", "firebase"),
+        ):
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify("my-project", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("取得できません", err)
+
+    def test_local_lookup_starts_from_project_root_with_firebase_json(self):
+        """firebase-tools と同じく firebase.json のあるディレクトリを起点に .firebaserc
+        と configstore を探す。monorepo の子ディレクトリ (CLAUDE_PROJECT_DIR) で起動
+        しても親の alias を解決でき、「現在=prod, 期待=proj-prod」の誤 deny にならない。"""
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            sub = repo / "packages" / "functions"
+            sub.mkdir(parents=True)
+            (repo / "firebase.json").write_text("{}", encoding="utf-8")
+            self._write_firebaserc(str(repo), {"default": "proj-dev", "prod": "proj-prod"})
+            self._write_configstore({os.path.abspath(repo): "prod"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(firebase.verify("proj-prod", str(sub)))
+                err = firebase.verify("proj-dev", str(sub))
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+
+    # --- firebase use の cwd (Codex R2 P2: builder を project_dir の外から起動) ---
+
+    def test_cli_runs_in_project_root_not_process_cwd(self):
+        """`firebase use` は firebase.json を親方向に探した project root を cwd にして
+        実行する。hook / builder プロセスの cwd を継承すると、builder を project_dir の
+        外から起動したとき無関係なディレクトリの project を報告しうる。"""
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            sub = repo / "packages" / "functions"
+            sub.mkdir(parents=True)
+            (repo / "firebase.json").write_text("{}", encoding="utf-8")
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
+            ) as m:
+                self.assertIsNone(firebase.verify("proj-prod", str(sub)))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(repo))
+
+    def test_cli_cwd_is_project_dir_without_firebase_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch(
+                "subprocess.run", return_value=_fake_run(stdout="proj\n")
+            ) as m:
+                self.assertIsNone(firebase.verify("proj", d))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(d))
+
+    def test_cli_cwd_missing_project_dir_is_treated_as_cli_unavailable(self):
+        """project_dir が存在しないと subprocess.run(cwd=...) が OSError を投げる。
+        その経路も CLI 不可として扱い例外を漏らさない (ローカル設定も無ければ
+        「取得できません」)。"""
+
+        def _run(*_args, **kwargs):
+            cwd = kwargs.get("cwd", ".")
+            if not os.path.isdir(cwd):
+                raise NotADirectoryError(20, "Not a directory", cwd)
+            return _fake_run(stdout="proj\n")
+
+        with mock.patch("subprocess.run", side_effect=_run):
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify("proj", "/no/such/dir/xyz")
+        self.assertIsInstance(err, str)
+        self.assertIn("取得できません", err)
+
+    def test_firebaserc_single_non_default_alias(self):
+        """.firebaserc の alias が 1 つだけなら default 以外の名前でもその値
+        (firebase-tools applyRC と同じ規則)。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"staging": "proj-stg"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(firebase.verify("proj-stg", d))
+
+    def test_firebaserc_multiple_aliases_without_default_unresolved(self):
+        """alias が複数で default が無い .firebaserc は解決不能 → 取得できません。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"staging": "proj-stg", "prod": "proj-prod"})
+            with mock.patch("subprocess.run", return_value=_fake_run(stdout="")):
+                with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                    err = firebase.verify("proj-stg", d)
+        self.assertIn("取得できません", err)
+
+    def test_firebaserc_malformed_shape_does_not_crash(self):
+        """projects が dict でない / top-level が list / 値が非文字列でも
+        例外にならず未解決扱い。"""
+        payloads = (
+            '{"projects": ["proj"]}',
+            '["proj"]',
+            '{"projects": {"default": 1}}',
+        )
+        with tempfile.TemporaryDirectory() as d:
+            for payload in payloads:
+                with self.subTest(payload=payload):
+                    (Path(d) / ".firebaserc").write_text(payload, encoding="utf-8")
+                    with mock.patch(
+                        "subprocess.run", return_value=_fake_run(stdout="")
+                    ):
+                        with mock.patch(
+                            "shutil.which", return_value="/usr/local/bin/firebase"
+                        ):
+                            err = firebase.verify("proj", d)
+                    self.assertIn("取得できません", err)
 
 
 class TestAws(unittest.TestCase):
@@ -405,6 +730,38 @@ class TestAwsHasNoSelfRemediation(unittest.TestCase):
         self.assertFalse(hasattr(aws, "is_self_remediation"))
 
 
+class TestCliExecErrors(unittest.TestCase):
+    """CLI が PATH にあるが実行できない (PermissionError 等 FileNotFoundError 以外の
+    OSError) とき、各 service が例外を漏らさず deny 文字列を返す。例外が漏れると
+    hook が異常終了し、PreToolUse は無音 fail-open になる。"""
+
+    _ERR = PermissionError(13, "Permission denied", "cli")
+
+    def test_aws(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = aws.verify("123456789012", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+    def test_gcloud(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = gcloud.verify("my-proj", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+    def test_github(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = github.verify("Mao-o", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+    def test_kubectl(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = kubectl.verify("prod-ctx", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+
 class TestEnvPropagation(unittest.TestCase):
     """verify(env=...) が subprocess.run に env を渡すことを確認する (要望1)。
 
@@ -437,7 +794,7 @@ class TestEnvPropagation(unittest.TestCase):
 
     def test_firebase_passes_env(self):
         custom = {"FOO": "bar"}
-        # .firebaserc を読まないよう実在しない project_dir を渡し _from_cli 経路へ
+        # CLI 優先なので .firebaserc の有無は無関係 (実在しない project_dir でよい)
         with mock.patch(
             "subprocess.run", return_value=_fake_run(stdout="my-proj")
         ) as m:

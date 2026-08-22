@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import _testutil  # noqa: F401
@@ -300,6 +301,94 @@ class TestServiceInteractions(BaseWithTmpProject):
             )
         self.assertIsNone(result)
         mock_verify.assert_called_once()
+
+
+class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
+    """bd_092a232e-629.1: firebase.verify を mock せず subprocess だけ差し替え、
+    `.firebaserc` の default と `firebase use` の切替先が食い違うときの決定を
+    dispatcher 経由で固定する。"""
+
+    def setUp(self):
+        super().setUp()
+        # configstore を実環境から読まないよう XDG_CONFIG_HOME を tmp 配下へ。
+        self._xdg = Path(self.tmp) / "xdg"
+        self._xdg.mkdir()
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self._xdg)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_firebaserc(self):
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"default": "proj-dev", "prod": "proj-prod"}}),
+            encoding="utf-8",
+        )
+
+    def _write_configstore(self, alias_or_project: str):
+        store = self._xdg / "configstore" / "firebase-tools.json"
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(
+            json.dumps(
+                {"activeProjects": {os.path.abspath(self.project_dir): alias_or_project}}
+            ),
+            encoding="utf-8",
+        )
+
+    def _run_with_cli_output(self, stdout: str):
+        fake = SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+        with mock.patch("subprocess.run", return_value=fake):
+            return dispatch("firebase deploy", str(self.project_dir))
+
+    def test_npx_without_global_cli_denies_switched_project(self):
+        """`npx firebase deploy` で hook の PATH に firebase が無くても、configstore の
+        `firebase use prod` 切替を読んで .firebaserc の default (期待値) では allow しない。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        self._write_configstore("prod")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            result = dispatch("npx firebase deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+    def test_switched_project_denies_despite_firebaserc_default(self):
+        """期待=default (proj-dev) のまま `firebase use prod` 済みなら deploy を deny
+        (旧実装は .firebaserc の default で照合し allow = false-allow)。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        result = self._run_with_cli_output("proj-prod\n")
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+    def test_switched_project_allows_when_it_matches_expected(self):
+        """期待=proj-prod で `firebase use prod` 済みなら allow
+        (旧実装は .firebaserc の default=proj-dev で照合し永久 deny)。"""
+        self._write_accounts({"firebase": "proj-prod"})
+        self._write_firebaserc()
+        self.assertIsNone(self._run_with_cli_output("proj-prod\n"))
+
+    def test_firebase_login_allowed_when_cli_auth_fails_and_configstore_switched(self):
+        """未ログイン (`firebase use` が requireAuth で非ゼロ終了) + configstore が期待外
+        に切替済みでも、`firebase login` 系は検証せず allow する。login が deny されると
+        案内される `firebase use <期待>` も認証必須で失敗し、Claude 内で回復不能になる。
+        同じ状態の `firebase deploy` は configstore の切替先で deny される。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        self._write_configstore("prod")
+        fake = SimpleNamespace(stdout="", stderr="Error: not logged in\n", returncode=1)
+        for cmd in ("firebase login", "firebase login:ci --no-localhost", "firebase logout"):
+            with self.subTest(cmd=cmd):
+                with mock.patch("subprocess.run", return_value=fake) as run:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                run.assert_not_called()
+        with mock.patch("subprocess.run", return_value=fake):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
 
 
 class TestSelfRemediationFlow(BaseWithTmpProject):
