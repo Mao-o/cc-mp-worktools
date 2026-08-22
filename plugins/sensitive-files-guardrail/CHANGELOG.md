@@ -108,11 +108,10 @@ session / 承認状態を一切持たなかった。block reason は AskUserQues
   (status, path) 集合を `~/.claude/sensitive-files-guardrail/stop-ack/<session_id>`
   に記録する。`patterns.local.txt` と同じ `Path.home()` 基準 (plugin cache 更新で
   消えない、テストは `HOME` 差し替えで隔離)。内容は 1 行 1
-  `sha256("<repo root>\t<status>\t<root 相対 path>")` で平文 path は残さない
-  (repo root を scope に含めるのは同一 session 内で別 repo に `cd` したとき同じ
-  相対 path を報告済みと誤認しないため。path は `git rev-parse --show-prefix` を
-  前置して root 相対に正規化し、サブディレクトリへの `cd` で同じ物理ファイルが
-  別 digest にならないようにする — Codex R2 P2-2、後述)。`session_id` は
+  `sha256("<status>\t<物理絶対パス>")` で平文 path は残さない (鍵は
+  `realpath(<repo root>/<prefix>/<path>)`。別 repo の同じ相対 path を報告済みと
+  誤認せず、サブディレクトリや submodule への `cd` で同じ物理ファイルが別 digest
+  にならない — Codex R2 P2-2 / R4 P2-1、後述)。`session_id` は
   `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$` のみ受理。読取 / 書込失敗は「状態なし」=
   従来通り block。TTL 7 日で best-effort GC
 - **`__main__.py`**: 現在の digest 集合が報告済み集合の **部分集合** なら exit 0。
@@ -272,15 +271,16 @@ fail-closed 規則にした (省略形の展開は自前実装しない)。`--ca
   include / exclude (保護側も) が消えうる。判定を変数参照の構文 — 先頭が `$NAME`
   / `${NAME}` (`$HOME/work` / `${PWD}`)、または `$CLAUDE_PROJECT_DIR` /
   `${CLAUDE_PROJECT_DIR}` を含む — に限定し、`$` を途中に含むだけの literal パス
-  は通常どおり `project_key` と比較する (`_PLACEHOLDER_HEAD_RE` /
-  `_RECIPE_PLACEHOLDER_RE`)
+  は通常どおり `project_key` と比較する (R4 で「含む」判定も撤去し standalone 形
+  のみに、後述)
 - **P2-2 root とサブディレクトリで digest が変わり `cd` 後に再 block**:
   `git ls-files` は cwd 相対で出力するため、scope = cwd のままでは
   `root + sub/.env` と `root/sub + .env` が別 digest になり once-only が効かな
   かった。`checker.repo_context` (`git rev-parse --show-toplevel --show-prefix`
   1 回、`is_git_repo` の呼出を置き換えるので git 呼出回数は不変) で repo root と
   cwd prefix を得て、digest を `sha256("<repo root>\t<status>\t<prefix><path>")`
-  に正規化した。block reason の表示は従来通り cwd 相対 (`git rm --cached <path>`
+  に正規化した (R4 で物理絶対パス `realpath(root/prefix/path)` に変更、後述)。
+  block reason の表示は従来通り cwd 相対 (`git rm --cached <path>`
   を cwd でそのまま実行できる)。スキャン範囲は従来どおり cwd の subtree で、sub で
   先に block した後 root に戻ると root 直下の未報告ファイルだけが新規として再
   block する
@@ -290,6 +290,28 @@ fail-closed 規則にした (省略形の展開は自前実装しない)。`--ca
 digest 同値 (test_stop_ack +1)、`repo_context` の root / sub / 非 git
 (test_checker +3)、root ↔ sub の once-only 共有・表示の cwd 相対維持・root 直下の
 新規検出・`$` 入り repo パスの Stop 沈黙 (test_main +4)。
+
+### review 対応 (4) — Codex R4 P2 ×2: submodule の digest / 予約語を部分文字列に含むパス
+
+- **P2-1 initialized submodule 内の tracked 機密ファイルが `cd` 後に再 block**:
+  superproject からは `--recurse-submodules` で `<super-root>\ttracked\tsub/.env`、
+  `cd sub` 後は toplevel が submodule root に変わり `<sub-root>\ttracked\t.env` と
+  なり、同じ物理ファイルが別 digest だった。鍵を「repo root + root 相対 path」から
+  **`os.path.realpath(root/prefix/path)` の物理絶対パス + status** に変更
+  (`stop_ack._physical_path`)。symlink 経由の cwd も同じ物理パスに畳まれる。
+  表示は従来どおり cwd 相対
+- **P2-2 `_RECIPE_PLACEHOLDER_RE` が任意位置の `$CLAUDE_PROJECT_DIR` を探す**:
+  `/work/repo$CLAUDE_PROJECT_DIR-prod` / `/work/${CLAUDE_PROJECT_DIR}-archive` の
+  ような予約語を部分文字列として含む正当なパスの section まで無効化していた。
+  判定を standalone 形 (ヘッダー値全体が `$NAME` / `${NAME}`、またはそれで始まり
+  直後が `/` か終端 = `_PLACEHOLDER_HEAD_RE`) のみに限定し
+  `_RECIPE_PLACEHOLDER_RE` を削除。未展開の `$CLAUDE_PROJECT_DIR` /
+  `${CLAUDE_PROJECT_DIR}` (standalone) は引き続き無効化 + 警告
+
+テスト: submodule / symlink root の digest 同値 (test_stop_ack +2)、実 submodule
+(`git submodule add`) で superproject ↔ submodule cwd の once-only 共有 (test_main
++1、環境非対応なら skip)、予約語を部分文字列に含むパスの section 一致と警告なし
+(test_patterns_loader +1、検出形 / 非検出形のリストも更新)。
 
 L2 が問題なしと確認した観点: `git rm --cached` の `-r` / `-f` / `-n` / `-q` /
 `--sparse` / `--ignore-unmatch` / `-rf` 束ね / 後置 `--cached` / glob は allow で
@@ -303,7 +325,7 @@ tests diff に期待値の緩和 (deny → allow) なし、mutation 5 種で追�
 
 ### テスト
 
-redact **808 件** (+46、0.18.0 review 対応後の 762 件基準)、check **75 件** (+48)。
+redact **809 件** (+47、0.18.0 review 対応後の 762 件基準)、check **78 件** (+51)。
 
 - redact: `TestRecommendedRemedyAllow` (bash_handler、11 件: `git rm --cached` 各形 ×
   5 mode allow、plain `git rm` / `--` 後置 / `--pathspec-from-file` / global option

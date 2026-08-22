@@ -13,14 +13,15 @@ committed CA 証明書 / direnv の ``.envrc`` など「tracked が正」な rep
 - 置き場: ``~/.claude/sensitive-files-guardrail/stop-ack/<session_id>``。
   ``patterns.local.txt`` と同じ ``Path.home()`` 基準 (plugin cache の更新で
   消えず、テストは ``HOME`` 差し替えで隔離できる)。
-- 内容: 1 行 1 エントリの sha256 hex digest
-  (``"<repo root>\\t<status>\\t<root 相対 path>"`` の digest)。path を平文で HOME
-  側に残さないため (ログ規則と同じ方針)。repo root を scope に含めるのは、同一
-  session 内で別 repo に ``cd`` したとき同じ相対 path (``tracked\\t.env``) を
-  報告済みと誤認しないため。path は ``git rev-parse --show-prefix`` (cwd の root
-  からの相対) を前置して root 相対に正規化する — ``git ls-files`` は cwd 相対で
-  出力するため、root とサブディレクトリで同じ物理ファイルが別 digest になり
-  ``cd`` 後に once-only が効かなくなるのを防ぐ (Codex R2 P2-2)。
+- 内容: 1 行 1 エントリの sha256 hex digest (``"<status>\\t<物理絶対パス>"`` の
+  digest)。path を平文で HOME 側に残さないため (ログ規則と同じ方針)。鍵を
+  ``os.path.realpath(<repo root>/<prefix>/<path>)`` の物理パスにするのは、
+  ``git ls-files`` が cwd 相対で出力するため (1) 別 repo の同じ相対 path を報告済み
+  と誤認しない、(2) root とサブディレクトリ (``git rev-parse --show-prefix`` を
+  前置) で同じ物理ファイルが別 digest にならない (Codex R2 P2-2)、(3) superproject
+  から ``--recurse-submodules`` で拾った ``sub/.env`` と submodule 内 cwd (toplevel
+  が submodule root に変わる) で拾った ``.env`` が同じ digest になる (Codex R4
+  P2-1)、の 3 つを同時に満たすため。
 - 失敗 (読取 / 書込 / mkdir 不能 / 壊れた内容) は全て「状態なし」扱い
   (= 従来通り block)。state 機構の不具合で block が **消える** 方向には倒さない。
 - 古い session ファイルは書込み時に best-effort で GC する (最後の block から
@@ -76,27 +77,39 @@ def sanitize_session_id(raw: object) -> str | None:
     return raw
 
 
+def _physical_path(scope: str, prefix: str, path: str) -> str:
+    """digest 鍵に使う物理パス。
+
+    ``scope`` (repo root) があれば ``scope/prefix/path`` を ``os.path.realpath``
+    で正規化した絶対パス (symlink / ``..`` を畳む)。無ければ (単体テスト等)
+    ``prefix + path`` を normpath するだけで、プロセスの cwd には依存しない。
+    """
+    joined = os.path.join(prefix, path) if prefix else path
+    if not scope:
+        return os.path.normpath(joined)
+    return os.path.realpath(os.path.join(scope, joined))
+
+
 def digest_entries(
     entries: Iterable[dict], scope: str = "", prefix: str = ""
 ) -> set[str]:
     """``find_sensitive_files`` の戻り値を
-    ``{sha256("<scope>\\t<status>\\t<prefix><path>")}`` に畳む。
+    ``{sha256("<status>\\t<物理絶対パス>")}`` に畳む。
 
     path を平文で HOME 側に残さないため digest 化する。status を含めるのは
     untracked → tracked (``git rm --cached`` が必要になる) のような変化を
-    「新しい事象」として再 block するため。``scope`` (呼出側は repo root) を
-    含めるのは、同一 session 内で別 repo に ``cd`` したとき同じ相対 path を
-    報告済みと誤認しないため。``prefix`` (cwd の repo root からの相対パス、
-    ``git rev-parse --show-prefix``) を path に前置するのは、``git ls-files`` が
-    cwd 相対で出力するため root とサブディレクトリで同じ物理ファイルが別 digest
-    にならないようにするため (Codex R2 P2-2)。
+    「新しい事象」として再 block するため。鍵は ``realpath(scope/prefix/path)``
+    (``scope`` = repo root、``prefix`` = cwd の root からの相対 =
+    ``git rev-parse --show-prefix``) の物理パス。``git ls-files`` は cwd 相対で
+    出力するため、(1) 別 repo の同じ相対 path、(2) root とサブディレクトリ
+    (Codex R2 P2-2)、(3) superproject から ``--recurse-submodules`` で見た
+    ``sub/.env`` と submodule 内 cwd (toplevel が submodule root) で見た ``.env``
+    (Codex R4 P2-1) が、いずれも同じ物理ファイルなら同じ digest になる。
     """
     digests: set[str] = set()
     for entry in entries:
-        key = (
-            f"{scope}\t{entry.get('status', '')}\t"
-            f"{prefix}{entry.get('path', '')}"
-        )
+        physical = _physical_path(scope, prefix, str(entry.get("path", "")))
+        key = f"{entry.get('status', '')}\t{physical}"
         digests.add(hashlib.sha256(key.encode("utf-8")).hexdigest())
     return digests
 

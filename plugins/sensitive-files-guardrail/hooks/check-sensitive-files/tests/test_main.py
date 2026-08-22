@@ -334,6 +334,48 @@ class TestMainSessionAck(BaseMainTest):
         self.assertTrue(self._blocked(out))
         self.assertIn("sub/.env", json.loads(out)["reason"])
 
+    def test_submodule_cwd_shares_ack_with_superproject(self):
+        # superproject から --recurse-submodules で拾う `submod/.env` と、submodule
+        # 内 cwd (toplevel = submodule root) で拾う `.env` は同じ物理ファイル →
+        # 同じ digest で再 block しない (Codex R4 P2-1)
+        (self.repo / "README.md").write_text("# super\n")
+        _git(["add", "README.md"], str(self.repo))
+        _git(["commit", "-m", "init"], str(self.repo))
+        subrepo = Path(self.tmp) / "subrepo"
+        subrepo.mkdir()
+        _init_repo(str(subrepo))
+        (subrepo / ".env").write_text("SUB_SECRET=v\n")
+        _git(["add", ".env"], str(subrepo))
+        _git(["commit", "-m", "add env"], str(subrepo))
+        try:
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{subrepo}", "submod",
+                ],
+                cwd=str(self.repo),
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            self.skipTest("git submodule add unsupported in this env")
+        _git(["commit", "-m", "add submod"], str(self.repo))
+        submod = self.repo / "submod"
+
+        super_env = {"cwd": str(self.repo), "session_id": "sess-submod"}
+        sub_env = {"cwd": str(submod), "session_id": "sess-submod"}
+        out = _run_main(super_env)[1]
+        self.assertTrue(self._blocked(out))
+        self.assertIn("submod/.env", json.loads(out)["reason"])
+        self.assertEqual(_run_main(sub_env)[1], "")
+        # 逆方向: submodule 内で先に block → superproject では同じ集合なので黙る
+        super_env2 = {"cwd": str(self.repo), "session_id": "sess-submod2"}
+        sub_env2 = {"cwd": str(submod), "session_id": "sess-submod2"}
+        out = _run_main(sub_env2)[1]
+        self.assertTrue(self._blocked(out))
+        self.assertIn("  - .env", json.loads(out)["reason"])
+        self.assertEqual(_run_main(super_env2)[1], "")
+
     def test_literal_dollar_project_header_applies(self):
         # `$` を含む repo パスの [project:] セクションは正当 (Codex R2 P2-1)。
         # placeholder 扱いで黙って落ちると、その repo の除外が効かず block が続く

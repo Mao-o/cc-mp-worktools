@@ -445,7 +445,7 @@ class TestBadProjectHeaderWarn(BaseWithIsolatedHome):
             "$CLAUDE_PROJECT_DIR",
             "${CLAUDE_PROJECT_DIR}",
             "$CLAUDE_PROJECT_DIR/sub",
-            "/prefix/$CLAUDE_PROJECT_DIR",
+            "${CLAUDE_PROJECT_DIR}/sub",
             "$HOME/work",
             "${PWD}",
             "$PWD",
@@ -461,8 +461,40 @@ class TestBadProjectHeaderWarn(BaseWithIsolatedHome):
 
     def test_dollar_mid_path_forms_are_not_placeholders(self):
         from _shared.patterns import _bad_header_token
-        for header in ("/work/project$prod", "/srv/app$1", "/x/$", "/a$b/c"):
+        for header in (
+            "/work/project$prod",
+            "/srv/app$1",
+            "/x/$",
+            "/a$b/c",
+            # 予約語を部分文字列として含むだけの literal パス (Codex R4 P2-2)
+            "/work/repo$CLAUDE_PROJECT_DIR-prod",
+            "/work/${CLAUDE_PROJECT_DIR}-archive",
+            "/prefix/$CLAUDE_PROJECT_DIR",
+            "$CLAUDE_PROJECT_DIR-prod",
+        ):
             self.assertIsNone(_bad_header_token(header), msg=header)
+
+    def test_reserved_word_substring_paths_are_valid_headers(self):
+        # `/work/repo$CLAUDE_PROJECT_DIR-prod` のような正当なパスの section が
+        # project_key と比較される (Codex R4 P2-2: 当初は任意位置の予約語で無効化)
+        from _shared.patterns import _parse_local_patterns_text
+        for header in (
+            "/work/repo$CLAUDE_PROJECT_DIR-prod",
+            "/work/${CLAUDE_PROJECT_DIR}-archive",
+        ):
+            calls: list[str] = []
+            text = f"[project:{header}]\n!x.pem\n"
+            self.assertEqual(
+                _parse_local_patterns_text(text, header, calls.append),
+                [("x.pem", True)],
+                msg=header,
+            )
+            self.assertEqual(
+                _parse_local_patterns_text(text, "/work/other", calls.append),
+                [],
+                msg=header,
+            )
+            self.assertEqual(calls, [], msg=header)
 
     def test_tokens_are_log_safe(self):
         from core.logging import _sanitize_detail

@@ -88,6 +88,32 @@ class TestDigestEntries(BaseStopAck):
             ),
         )
 
+    def test_submodule_cwd_matches_superproject_view(self):
+        # superproject から --recurse-submodules で拾った `sub/.env` と submodule
+        # 内 cwd (toplevel = submodule root) で拾った `.env` は同じ物理ファイル
+        # → 同じ digest (Codex R4 P2-1)
+        root = self.tmp
+        from_super = stop_ack.digest_entries(
+            [{"path": "sub/.env", "status": "tracked"}], scope=root, prefix=""
+        )
+        from_sub = stop_ack.digest_entries(
+            [{"path": ".env", "status": "tracked"}],
+            scope=os.path.join(root, "sub"),
+            prefix="",
+        )
+        self.assertEqual(from_super, from_sub)
+
+    def test_symlinked_root_resolves_to_physical_path(self):
+        real = Path(self.tmp) / "real"
+        real.mkdir()
+        link = Path(self.tmp) / "link"
+        link.symlink_to(real)
+        entry = [{"path": ".env", "status": "tracked"}]
+        self.assertEqual(
+            stop_ack.digest_entries(entry, scope=str(real)),
+            stop_ack.digest_entries(entry, scope=str(link)),
+        )
+
     def test_scope_sensitive(self):
         # 同一 session で別 repo に cd しても同じ相対 path を報告済み扱いしない
         entry = [{"path": ".env", "status": "tracked"}]

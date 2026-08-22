@@ -190,19 +190,19 @@ def _parse_patterns_text(text: str) -> list[tuple[str, bool]]:
     return rules
 
 
-# ``[project:...]`` ヘッダーを「未展開の変数参照」と見なす構文 (Codex R2 P2-1)。
-# - 先頭が ``$NAME`` / ``${NAME}`` (そのまま、または ``/...`` が続く): ``$HOME/x``
-#   / ``${PWD}`` のようにシェル変数でパスを書こうとした形
-# - ``$CLAUDE_PROJECT_DIR`` / ``${CLAUDE_PROJECT_DIR}`` を **どこかに** 含む:
-#   両 hook の案内をそのまま写した形
-# ``/work/project$prod`` のように ``$`` を途中に含むだけの literal パスは正当な
-# ヘッダーとして扱う (当初の「``$`` を含めば placeholder」はこれを無効化し、その
-# repo の project スコープの include / exclude が黙って落ちていた)。
+# ``[project:...]`` ヘッダーを「未展開の変数参照」と見なす構文 (Codex R2 P2-1 /
+# R4 P2-2): **standalone 形のみ** — ヘッダー値全体が ``$NAME`` / ``${NAME}``
+# そのもの、またはそれで始まり直後が ``/`` (``$CLAUDE_PROJECT_DIR`` /
+# ``${CLAUDE_PROJECT_DIR}/sub`` / ``$HOME/x`` / ``${PWD}``)。両 hook の案内を
+# そのまま写した形とシェル変数でパスを書こうとした形を拾う。
+# ``/work/project$prod`` のように ``$`` を途中に含むだけの literal パスや、
+# ``/work/repo$CLAUDE_PROJECT_DIR-prod`` / ``/work/${CLAUDE_PROJECT_DIR}-archive``
+# のように予約語を **部分文字列** として含む literal パスは正当なヘッダーとして
+# 扱う (当初の「``$`` を含めば placeholder」/ 「``$CLAUDE_PROJECT_DIR`` を含めば
+# placeholder」はこれらを無効化し、その repo の project スコープの include /
+# exclude が黙って落ちていた)。
 _PLACEHOLDER_HEAD_RE = re.compile(
     r"^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)(?:/|$)"
-)
-_RECIPE_PLACEHOLDER_RE = re.compile(
-    r"\$(?:\{CLAUDE_PROJECT_DIR\}|CLAUDE_PROJECT_DIR(?![A-Za-z0-9_]))"
 )
 
 
@@ -211,17 +211,17 @@ def _bad_header_token(header_key: str) -> Optional[str]:
 
     - 空 (``[project:]``): Bash の unquoted echo で ``$CLAUDE_PROJECT_DIR`` が空に
       展開された典型
-    - 未展開の変数参照 (``[project:$CLAUDE_PROJECT_DIR]`` /
-      ``${CLAUDE_PROJECT_DIR}`` / ``$HOME/work`` のように先頭が ``$NAME`` 形):
-      変数名を literal に書いた典型 (hook はヘッダーを展開しない)
-    ``$`` を途中に含むだけの literal パス (``/work/project$prod``) は正常 (None)
-    で、通常どおり ``project_key`` と比較される。
+    - 未展開の変数参照の standalone 形 (``[project:$CLAUDE_PROJECT_DIR]`` /
+      ``${CLAUDE_PROJECT_DIR}`` / ``$HOME/work`` のように値全体が ``$NAME`` 形、
+      またはそれで始まり直後が ``/``): 変数名を literal に書いた典型 (hook は
+      ヘッダーを展開しない)
+    ``$`` や予約語を途中に含むだけの literal パス (``/work/project$prod`` /
+    ``/work/repo$CLAUDE_PROJECT_DIR-prod``) は正常 (None) で、通常どおり
+    ``project_key`` と比較される。
     """
     if not header_key:
         return PROJECT_HEADER_WARN_EMPTY
-    if _PLACEHOLDER_HEAD_RE.match(header_key) or _RECIPE_PLACEHOLDER_RE.search(
-        header_key
-    ):
+    if _PLACEHOLDER_HEAD_RE.match(header_key):
         return PROJECT_HEADER_WARN_PLACEHOLDER
     return None
 
