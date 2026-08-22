@@ -1,6 +1,6 @@
 """Cursor によるプランレビュー (既存コードベース整合観点、primary)。
 
-プラン本文はプロンプト末尾に埋め込んで cursor agent の --print で渡す。
+プラン本文はプロンプト末尾に埋め込んで cursor agent の --print (読み取り専用 `--mode plan`) で渡す。
 Cursor はセマンティック検索でコードベース全体を参照しながらレビューする。
 
 起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
@@ -32,7 +32,7 @@ def review(plan_text: str) -> str | None:
 
     full_prompt = f"{template}\n\n---\n\n## レビュー対象プラン\n\n{plan_text}"
     return subproc.run_for_output(
-        cursorcli.review_argv(full_prompt),
+        cursorcli.readonly_argv(full_prompt),
         timeout_sec=TIMEOUT_SEC,
         max_output_chars=MAX_OUTPUT_BYTES,
     )

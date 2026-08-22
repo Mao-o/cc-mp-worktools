@@ -5,6 +5,45 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.4.1
+
+**explore-parallel の cursor agent を読み取り専用 (`--mode plan`) で起動する** (2026-08 精査
+バックログ zh5.2)。挙動変更はこの 1 点のみ。
+
+1. **explore-parallel が書込可能モードで cursor を起動していた** — `cursor agent --trust -p`
+   で起動しており `--mode plan` が無かった。cursor-agent (2026.08.11) の help では `-p/--print`
+   単独は「Has access to all tools, including write and shell」、`--mode plan` が
+   「read-only/planning (no edits)」。読み取り専用の Explore の裏で、作業ツリーを書き換えうる
+   agent が走る状態だった (exitplan-review / post-implementation-review は 0.2.0 から
+   `--mode plan` 付きで、この 2 hook の挙動は変わらない)
+2. **起動 argv を 3 hook で統一** — `hooks/_common/cursorcli.review_argv` を `readonly_argv` に
+   改名し、explore-parallel もこれを使う。3 hook とも
+   `cursor agent --trust --print --mode plan <prompt>` で起動する (待機方式は hook ごとに従来
+   どおり: explore-parallel はバックグラウンド Popen + 結果ファイル、review 系は
+   `subproc.run_for_output`)
+3. `--sandbox enabled` は付けていない — cursor-agent 側の既定値と `--mode plan` との組み合わせを
+   本環境で確認できていない (実機起動なしで判断)。必要になれば別 issue
+4. docs: README (前提 / explore-parallel 動作サマリ / 設計原則 7「外部 AI は読み取り専用で
+   起動する」/ ファイル構成)、`hooks/explore-parallel/CLAUDE.md` (テスト節・設計判断の履歴)
+
+### テスト
+
+累計 **186 件** (+9: explore-parallel 5 新設 / `_common` 3 / post-implementation-review 1)。
+全て cursor / codex を起動せず、PATH 先頭の偽 CLI (bash script) で検証する。
+
+- `explore-parallel/tests/test_cursor_launch.py` (新設。TMPDIR 隔離 + 偽 cursor。
+  `state.BASE_DIR` が import 時に決まるため `cursor` / `state` をテストごとに読み直す):
+  pre が `--mode plan` 付きで起動し Explore の prompt を最後の 1 引数で渡す / argv が
+  `cursorcli.readonly_argv` と完全一致 / Explore 以外では起動しない / post が結果を
+  `additionalContext` に注入し pid・結果ファイルを掃除する / post の待機上限 + poll 1 刻みが
+  hooks.json の PostToolUse(Agent) timeout に収まる (他 hook と同じ予算テスト)
+- `_common/tests/test_cursorcli.py`: `readonly_argv` の argv 契約 (`--print --mode plan`、
+  フラグに見える本文も 1 引数のまま末尾)
+- `post-implementation-review/tests/test_cursor_argv.py`: `review()` の argv
+  (`--print --mode plan`) と diff の埋め込み (従来は `review()` を mock しており未検証だった)
+- exitplan-review は既存 `test_cursor_runs_print_mode_read_only_with_plan_in_prompt` が
+  同じ契約を固定済み
+
 ## 0.4.0
 
 **コードフェンス付き REVIEW_CLEAN の誤 block 修正 + hook 共通ヘルパー `hooks/_common/`

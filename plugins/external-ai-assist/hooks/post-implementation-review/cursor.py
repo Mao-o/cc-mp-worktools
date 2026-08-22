@@ -1,6 +1,6 @@
 """Cursor による実装直後の差分レビュー。
 
-git diff 本文をプロンプト末尾に埋め込んで cursor agent の --print で渡す。
+git diff 本文をプロンプト末尾に埋め込んで cursor agent の --print (読み取り専用 `--mode plan`) で渡す。
 Cursor がコードベース全体を参照しながら影響範囲・リグレッションリスクを評価する。
 
 起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
@@ -34,7 +34,7 @@ def review(diff_text: str) -> str | None:
         f"{template}\n\n---\n\n## レビュー対象 git diff\n\n```diff\n{diff_text}\n```"
     )
     return subproc.run_for_output(
-        cursorcli.review_argv(full_prompt),
+        cursorcli.readonly_argv(full_prompt),
         timeout_sec=TIMEOUT_SEC,
         max_output_chars=MAX_OUTPUT_BYTES,
     )

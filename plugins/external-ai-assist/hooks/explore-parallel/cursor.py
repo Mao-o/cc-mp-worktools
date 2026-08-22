@@ -1,7 +1,8 @@
 """Cursor Agent 並走アナライザ。
 
-Explore の prompt を受け取って cursor agent をバックグラウンド起動し、
-post フェーズで結果を取得して additionalContext 用文字列として返す。
+Explore の prompt を受け取って cursor agent を読み取り専用 (`--mode plan`) でバックグラウンド
+起動し、post フェーズで結果を取得して additionalContext 用文字列として返す。起動 argv は
+review 系 2 hook と同じ `_common.cursorcli.readonly_argv` (調査用途で作業ツリーを書き換えない)。
 """
 from __future__ import annotations
 
@@ -45,14 +46,14 @@ def is_available() -> bool:
 
 
 def pre(tool_use_id: str, prompt: str) -> None:
-    """cursor agent をバックグラウンド起動し、PID を記録する。"""
+    """cursor agent を読み取り専用でバックグラウンド起動し、PID を記録する。"""
     result_file, pid_file = paths(NAME, tool_use_id)
 
     full_prompt = _PROMPT_TEMPLATE.format(prompt=prompt)
 
     with open(result_file, "wb") as rf, open(os.devnull, "wb") as devnull:
         proc = subprocess.Popen(
-            [cursorcli.BINARY, "agent", "--trust", "-p", full_prompt],
+            cursorcli.readonly_argv(full_prompt),
             stdout=rf,
             stderr=devnull,
             stdin=devnull,
