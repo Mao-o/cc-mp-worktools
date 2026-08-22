@@ -369,6 +369,27 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         self._write_firebaserc()
         self.assertIsNone(self._run_with_cli_output("proj-prod\n"))
 
+    def test_firebase_login_allowed_when_cli_auth_fails_and_configstore_switched(self):
+        """未ログイン (`firebase use` が requireAuth で非ゼロ終了) + configstore が期待外
+        に切替済みでも、`firebase login` 系は検証せず allow する。login が deny されると
+        案内される `firebase use <期待>` も認証必須で失敗し、Claude 内で回復不能になる。
+        同じ状態の `firebase deploy` は configstore の切替先で deny される。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        self._write_configstore("prod")
+        fake = SimpleNamespace(stdout="", stderr="Error: not logged in\n", returncode=1)
+        for cmd in ("firebase login", "firebase login:ci --no-localhost", "firebase logout"):
+            with self.subTest(cmd=cmd):
+                with mock.patch("subprocess.run", return_value=fake) as run:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                run.assert_not_called()
+        with mock.patch("subprocess.run", return_value=fake):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
 
 class TestSelfRemediationFlow(BaseWithTmpProject):
     """deny が案内する切替コマンド (self-remediation) は検証なしで許可される。"""

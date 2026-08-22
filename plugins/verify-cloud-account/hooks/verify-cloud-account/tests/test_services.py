@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -122,7 +123,7 @@ class TestFirebase(unittest.TestCase):
         # firebase-tools の configstore を実環境 (~/.config) から読まないよう
         # XDG_CONFIG_HOME を空の一時ディレクトリに向ける (テストの hermeticity)。
         self._xdg = tempfile.mkdtemp()
-        self.addCleanup(lambda: __import__("shutil").rmtree(self._xdg, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self._xdg, ignore_errors=True))
         patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self._xdg})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -397,6 +398,45 @@ class TestFirebase(unittest.TestCase):
                     err = firebase.verify("proj", d)
         self.assertIn("取得できません", err)
 
+    def test_cli_permission_error_falls_back_to_local(self):
+        """firebase が PATH にあるが実行できない (PermissionError 等 FileNotFoundError
+        以外の OSError) ときも例外にせず CLI 不可としてローカル設定に fallback する。
+        例外が漏れると hook が異常終了し PreToolUse は無音 fail-open になる。"""
+        with tempfile.TemporaryDirectory() as d:
+            self._write_firebaserc(d, {"default": "my-project"})
+            with mock.patch(
+                "subprocess.run",
+                side_effect=PermissionError(13, "Permission denied", "firebase"),
+            ):
+                self.assertIsNone(firebase.verify("my-project", d))
+
+    def test_cli_permission_error_without_local_config_denies(self):
+        with mock.patch(
+            "subprocess.run",
+            side_effect=PermissionError(13, "Permission denied", "firebase"),
+        ):
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify("my-project", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("取得できません", err)
+
+    def test_local_lookup_starts_from_project_root_with_firebase_json(self):
+        """firebase-tools と同じく firebase.json のあるディレクトリを起点に .firebaserc
+        と configstore を探す。monorepo の子ディレクトリ (CLAUDE_PROJECT_DIR) で起動
+        しても親の alias を解決でき、「現在=prod, 期待=proj-prod」の誤 deny にならない。"""
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            sub = repo / "packages" / "functions"
+            sub.mkdir(parents=True)
+            (repo / "firebase.json").write_text("{}", encoding="utf-8")
+            self._write_firebaserc(str(repo), {"default": "proj-dev", "prod": "proj-prod"})
+            self._write_configstore({os.path.abspath(repo): "prod"})
+            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(firebase.verify("proj-prod", str(sub)))
+                err = firebase.verify("proj-dev", str(sub))
+        self.assertIsNotNone(err)
+        self.assertIn("現在=proj-prod", err)
+
     def test_firebaserc_single_non_default_alias(self):
         """.firebaserc の alias が 1 つだけなら default 以外の名前でもその値
         (firebase-tools applyRC と同じ規則)。"""
@@ -646,6 +686,38 @@ class TestAwsHasNoSelfRemediation(unittest.TestCase):
         # AWS は期待値 (Account ID) と切替手段 (profile / SSO) の照合が hook から
         # 不能のため意図的に未実装。dispatcher は getattr fallback で通常検証に落とす
         self.assertFalse(hasattr(aws, "is_self_remediation"))
+
+
+class TestCliExecErrors(unittest.TestCase):
+    """CLI が PATH にあるが実行できない (PermissionError 等 FileNotFoundError 以外の
+    OSError) とき、各 service が例外を漏らさず deny 文字列を返す。例外が漏れると
+    hook が異常終了し、PreToolUse は無音 fail-open になる。"""
+
+    _ERR = PermissionError(13, "Permission denied", "cli")
+
+    def test_aws(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = aws.verify("123456789012", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+    def test_gcloud(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = gcloud.verify("my-proj", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+    def test_github(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = github.verify("Mao-o", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
+
+    def test_kubectl(self):
+        with mock.patch("subprocess.run", side_effect=self._ERR):
+            err = kubectl.verify("prod-ctx", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("実行できません", err)
 
 
 class TestEnvPropagation(unittest.TestCase):

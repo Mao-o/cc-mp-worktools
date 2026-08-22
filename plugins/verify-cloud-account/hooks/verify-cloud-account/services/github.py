@@ -72,6 +72,9 @@ def _run_gh_auth_status(env=None) -> tuple[str, str | None]:
         )
     except FileNotFoundError:
         return "", "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。"
+    except OSError as e:
+        # 実行権限なし / 形式不正等。例外を漏らすと hook が異常終了して無音 fail-open になる。
+        return "", f"GitHub: gh コマンドを実行できません ({e})。"
     except subprocess.TimeoutExpired:
         return "", "GitHub: gh auth status がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     return result.stdout + result.stderr, None

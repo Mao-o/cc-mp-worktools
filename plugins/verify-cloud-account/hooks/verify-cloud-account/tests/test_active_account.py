@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -81,7 +82,7 @@ class TestFirebaseActiveAccount(unittest.TestCase):
     def setUp(self):
         # configstore を実環境から読まないよう XDG_CONFIG_HOME を一時ディレクトリへ。
         self._xdg = tempfile.mkdtemp()
-        self.addCleanup(lambda: __import__("shutil").rmtree(self._xdg, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self._xdg, ignore_errors=True))
         patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self._xdg})
         patcher.start()
         self.addCleanup(patcher.stop)

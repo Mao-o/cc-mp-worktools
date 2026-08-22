@@ -45,6 +45,9 @@ def _run_current_context(env=None) -> tuple[str | None, str | None]:
         )
     except FileNotFoundError:
         return None, "kubectl: kubectl コマンドが見つかりません。"
+    except OSError as e:
+        # 実行権限なし / 形式不正等。例外を漏らすと hook が異常終了して無音 fail-open になる。
+        return None, f"kubectl: kubectl コマンドを実行できません ({e})。"
     except subprocess.TimeoutExpired:
         return None, "kubectl: kubectl config current-context がタイムアウトしました。再試行するか、ネットワーク接続を確認してください。"
     current = result.stdout.strip()

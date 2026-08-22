@@ -29,8 +29,12 @@ configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時�
    の `activeProjects`、project_dir から親方向に探索) の切替先を `.firebaserc` の
    alias で解決 → 無ければ alias が 1 つならその値 → `default` の順にした。
    `npx firebase ...` / `pnpm exec firebase ...` のように hook 側に `firebase` が
-   無い構成でも切替を見落とさない。configstore は `activeProjects` 以外を読まず、
-   内容をメッセージに出さない。`.firebaserc` / configstore が不正な形 (list /
+   無い構成でも切替を見落とさない。configstore は JSON として読むが
+   `activeProjects` 以外は使わず、内容をメッセージに出さない。
+   探索の起点は firebase-tools の `detectProjectRoot` と同じく `firebase.json` を
+   親方向に探した project root (無ければ cwd) で、monorepo の子ディレクトリで
+   Claude を起動しても親の `.firebaserc` で alias を解決できる。
+   `.firebaserc` / configstore が不正な形 (list /
    非 UTF-8 等) でも例外にせず未解決扱い (従来は top-level が list だと
    AttributeError で hook が異常終了 = fail-open)。
 3. **timeout の専用メッセージ** — `firebase use` が 10 秒でタイムアウトしたときは
@@ -39,7 +43,19 @@ configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時�
    の timeout 文言と同形)。従来は timeout が「firebase login && firebase use ...」
    の誤案内になっていた。fallback しないのは、`.firebaserc` が configstore の
    切替を知らないため timeout 経路だけ false-allow が残るのを防ぐため (fail-closed)。
-4. **README** — 期待値取得の表と解説を実装に合わせて更新。
+4. **`firebase login` / `logout` を検証スキップ (READONLY) に** — CLI 優先化に伴う
+   regression 防止。未ログイン (`firebase use` が requireAuth で非ゼロ終了) かつ
+   configstore が期待外に切替済みだと、`firebase login` 自体が fallback の
+   configstore 値で deny され、案内される `firebase use <期待>` も認証必須で失敗する
+   デッドロックになるため。`login:ci` / `login:add` / `login:use` / `logout` を含む
+   (project を変更しない認証操作。直後の write は次回 hook で再検証される)。
+5. **CLI が PATH にあるが実行できないときに hook が異常終了しない** —
+   `subprocess.run` が投げる FileNotFoundError 以外の `OSError` (実行権限なし /
+   形式不正等) を firebase は「CLI 不可 → ローカル設定 fallback」に乗せ、他 4 service
+   (gh / aws / gcloud / kubectl) は「コマンドを実行できません」の deny にした。
+   従来は例外が漏れて hook が非ゼロ終了し、PreToolUse の無音 fail-open になっていた。
+6. **README** — 期待値取得の表と解説、readonly 一覧、切替後の再検証に関する注記
+   (成功 cache 内は再検証されない) を実装に合わせて更新。
 
 ### 非互換性
 
@@ -59,18 +75,22 @@ configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時�
 
 ### テスト
 
-- `tests/test_services.py::TestFirebase` に 19 件追加 (CLI 優先 / false-allow と
-  永久 deny の解消 / timeout 専用メッセージ / 空出力・非ゼロ終了・単一 alias の
-  fallback / configstore の切替先参照 (CLI 不在・非ゼロ終了・親ディレクトリ・
-  実体パス・env の `XDG_CONFIG_HOME`・破損時) / 不正な `.firebaserc`)
+- `tests/test_services.py::TestFirebase` に 22 件追加 (CLI 優先 / false-allow と
+  永久 deny の解消 / timeout 専用メッセージ / 空出力・非ゼロ終了・実行不可
+  (PermissionError)・単一 alias の fallback / configstore の切替先参照 (CLI 不在・
+  非ゼロ終了・親ディレクトリ・実体パス・env の `XDG_CONFIG_HOME`・破損時) /
+  `firebase.json` を起点にした project root 解決 / 不正な `.firebaserc`)
+- `tests/test_services.py::TestCliExecErrors` 新設 4 件 (gh / aws / gcloud / kubectl
+  の `OSError` が deny 文字列になり例外が漏れない)
 - `tests/test_active_account.py::TestFirebaseActiveAccount` に 3 件追加 (CLI 優先 /
   timeout は None / configstore 参照)、1 件を fallback 意味論の名前に変更
-- `tests/test_dispatcher.py::TestFirebaseResolutionOrderE2E` 3 件追加
-  (`firebase.verify` を mock せず subprocess だけ差し替えた end-to-end、npx 構成含む)
-- 新規 25 件のうち 21 件は旧実装で fail することを確認済み (残り 4 件は fallback
-  条件の仕様固定)
+- `tests/test_dispatcher.py::TestFirebaseResolutionOrderE2E` 4 件追加
+  (`firebase.verify` を mock せず subprocess だけ差し替えた end-to-end。npx 構成、
+  未ログイン + configstore 切替済みでの `firebase login` allow / `deploy` deny を含む)
+- 新規 33 件のうち 28 件は旧実装 (main) で fail することを確認済み (残り 5 件は
+  fallback 条件の仕様固定)
 
-テスト 314 → 339 件。
+テスト 314 → 347 件。
 
 ## 0.7.2
 
