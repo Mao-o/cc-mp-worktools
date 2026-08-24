@@ -855,6 +855,10 @@ class TestAuthCommandPatterns(unittest.TestCase):
             (github, "gh auth login --git-protocol ssh --skip-ssh-key=false", False),
             (github, "gh auth login --with-token=false", False),
             (github, "gh auth login --skip-ssh-key=true", True),
+            # scope 要求はアカウント側の OAuth grant を拡張する (Codex R4 P1 の
+            # 論拠を login にも適用)。鍵操作抑止 flag が付いていても readonly でない
+            (github, "gh auth login --skip-ssh-key --scopes admin:org", False),
+            (github, "gh auth login -s admin:org --skip-ssh-key", False),
             (github, "gh auth logout", True),
             (github, "gh auth setup-git", True),
             # `gh auth refresh` は保存済み認証情報の権限をアカウント側で拡張・修正
@@ -888,8 +892,38 @@ class TestAuthCommandPatterns(unittest.TestCase):
 
 
 class TestGithubLoginKeyless(unittest.TestCase):
-    """github.is_readonly: `gh auth login` が SSH 鍵のアップロードを伴わない形か
-    (flag 文字列の有無ではなく実効 boolean を解釈する。Codex R3 P1)。"""
+    """github.is_readonly: `gh auth login` がリモートに何も書かない形か。
+
+    (a) SSH 鍵のアップロードを伴わないか (flag 文字列の有無ではなく実効 boolean を
+    解釈する。Codex R3 P1)、かつ (b) `-s` / `--scopes` で OAuth grant scope を
+    要求していないか (Codex R4 P1 の論拠を login にも適用)。
+    """
+
+    def test_scopes_disqualifies_even_with_keyless_flags(self):
+        """`--scopes` / `-s` は値を取る flag なので `=false` で無効化できない。
+        鍵操作を抑止する flag が付いていても readonly にはしない
+        (`gh auth login --skip-ssh-key --scopes admin:org` はアカウント側の
+        OAuth grant を拡張する)。"""
+        for cmd in (
+            "gh auth login --skip-ssh-key --scopes admin:org",
+            "gh auth login --scopes admin:org --skip-ssh-key",
+            "gh auth login --scopes=admin:org --skip-ssh-key",
+            "gh auth login -s admin:org --skip-ssh-key",
+            "gh auth login -s=admin:org --with-token",
+            "gh auth login -sadmin:org --with-token",
+            "gh auth login -p https -s admin:org",
+            "gh auth login --git-protocol https --scopes repo,admin:org",
+            "gh auth login --with-token -s repo",
+            # 値 token を消費するので、後続を flag と誤解して readonly に転ばない
+            "gh auth login -s --skip-ssh-key",
+            "gh auth login -s repo --git-protocol https",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_readonly(cmd))
+
+    def test_scopes_after_double_dash_is_not_a_flag(self):
+        """`--` 以降は引数なので scope 要求とはみなさない (既存の `--` 規則に整合)。"""
+        self.assertTrue(github.is_readonly("gh auth login --skip-ssh-key -- --scopes x"))
 
     def test_effective_true_forms_are_keyless(self):
         for cmd in (

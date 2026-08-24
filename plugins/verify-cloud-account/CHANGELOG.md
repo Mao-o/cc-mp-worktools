@@ -12,8 +12,9 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
 
 1. **認証取得系コマンドを検証スキップ (READONLY) に** (629.2) — `aws sso login` /
    `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
-   logout` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きない
-   形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https` (`-p https`) 付き)
+   logout` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きず、かつ
+   scope 要求も無い形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https`
+   (`-p https`) 付き、かつ `-s` / `--scopes` 無し)
    のみ。判定は regex ではなく `github.is_readonly()` が token 列を走査して flag の
    **実効 boolean** を解釈する (`--skip-ssh-key=false` / `--with-token=0` のような明示
    false は無効、`=true|1|yes` と裸形は有効、`--git-protocol` は値が `https` のときだけ、
@@ -45,9 +46,19 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    READONLY から外れるので accounts.local.json 未設定なら他の write と同様に deny
    される (deny 文面は `refresh` を案内しないので remediation loop にはならない)。
    一方 `STATE_CHANGING` には残すため、実行後の成功 cache は従来どおり破棄される。
-   `gh auth logout` はローカル `hosts.yml` のエントリ削除、`gh auth setup-git` は
-   ローカル git config の credential.helper 設定で、いずれもアカウント側の OAuth
-   grant には触れないため READONLY のまま。
+   **同じ論拠を `gh auth login` にも適用**し、`-s` / `--scopes` が付いた login も
+   readonly から外した (gh 2.98 `gh-auth-login.1`: `-s, --scopes <strings>
+   Additional authentication scopes to request`)。`gh auth login --skip-ssh-key
+   --scopes admin:org` は SSH 鍵操作こそ起きないが、`refresh --scopes` と同じく
+   アカウント側の OAuth grant を拡張する。`--scopes` は値を取る flag なので
+   `=false` では無効化できず、付いていれば無条件に readonly から外す
+   (`_login_is_keyless` が分離形 `-s <v>` / `=` 形 / 連結形 `-s<v>` を解釈し、
+   分離形は値 token も消費する)。deny 文面が案内するのは `--skip-ssh-key` /
+   `--hostname <host> --skip-ssh-key` の形だけなので remediation contract は壊れない。
+   `gh auth logout` (`-h/--hostname` / `-u/--user`) はローカル `hosts.yml` のエントリ
+   削除、`gh auth setup-git` (`-f/--force` / `-h/--hostname`) はローカル git config の
+   credential.helper 設定で、取りうるオプションを含めていずれもアカウント側の OAuth
+   grant には触れないため READONLY のまま (gh 2.98 の各 man page で確認)。
 2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (629.2) —
    `tests/test_dispatcher.py::TestRemediationGuidanceContract` が各 service の verify
    を mock せず subprocess だけ差し替えて実際の deny 文面 (不一致 / 未ログイン / 未設定
@@ -151,6 +162,8 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   cache を書かない (毎回再検証)。
 - 素の `gh auth login` (`--skip-ssh-key` / `--with-token` / `--git-protocol https` 無し)
   は 0.8.0 でも従来どおり検証対象 (readonly にしたのは上記 3 形のみ)。
+- `-s` / `--scopes` 付きの `gh auth login` も検証対象 (`--skip-ssh-key` 等が付いていても
+  readonly にならない)。scope 要求はアカウント側の OAuth grant を拡張するため。
 - `gh auth refresh` も 0.8.0 で readonly にはしない (従来どおり検証対象)。
   accounts.local.json 未設定 / 期待アカウント以外がアクティブなら deny される。
   `STATE_CHANGING` には含めるので成功 cache の即時破棄は従来どおり働く。
@@ -197,7 +210,10 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   窓を過ぎれば cache が再開) +
   `tests/test_main.py` 新設 4 件 (stdin → stdout E2E: 未設定 write の deny JSON /
   readonly login は無出力で epoch を進める / 非対象コマンドと不正 JSON は無出力)
-- `tests/test_services.py::TestGithubLoginKeyless` 3 件 (login flag の実効 boolean: 有効 18 形 / 無効 18 形 / quote 不正時の fallback)
+- `tests/test_services.py::TestGithubLoginKeyless` 5 件 (login flag の実効 boolean:
+  有効 18 形 / 無効 18 形 / quote 不正時の fallback / `-s` `--scopes` 付きは
+  鍵操作抑止 flag があっても readonly にしない 11 形 / `--` 以降の `--scopes` は
+  引数扱い)
 - 新規 91 件のうち 60 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
   実行、レビュー対応分は各修正前の実装) で fail することを確認済み。残りは旧実装でも
   成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを通すこと、

@@ -36,11 +36,16 @@ READONLY = [
     # ならない。直後の write は (STATE_CHANGING で成功 cache も破棄されるため)
     # 次回 hook で再検証される。
     r"^gh\s+auth\s+(logout|setup-git)\b",
-    # `gh auth login` は SSH git protocol を選ぶと既存の SSH 公開鍵を GitHub アカウントに
-    # **アップロード**しうる (gh 2.96 `gh auth login --help`: SSH 選択時に鍵を検出して
-    # アップロード、`--skip-ssh-key` で抑止)。期待外アカウントへの SSH login はリモート
-    # write になるため、鍵操作が起きない形だけを readonly にする (regex ではなく
-    # `is_readonly()` で flag の実効 boolean を解釈する。下記 `_login_is_keyless`)。
+    # `gh auth login` がリモートに書きうる経路は 2 つあり、両方が塞がれた形だけを
+    # readonly にする (regex では表せないので `is_readonly()` = 下記
+    # `_login_is_keyless` が token 列を解釈する):
+    # (a) SSH git protocol を選ぶと既存の SSH 公開鍵を GitHub アカウントに
+    #     **アップロード**しうる (gh 2.96 `gh auth login --help`: SSH 選択時に鍵を
+    #     検出してアップロード、`--skip-ssh-key` で抑止)。flag の実効 boolean を解釈する
+    # (b) `-s` / `--scopes` はアカウント側の OAuth grant を拡張する
+    #     (gh 2.98 `gh-auth-login.1`: `-s, --scopes <strings>  Additional
+    #     authentication scopes to request`)。`refresh` を外したのと同じ理由で、
+    #     付いていれば readonly にしない (値を取る flag なので `=false` で無効化不可)
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
 ]
@@ -235,17 +240,26 @@ def _bool_flag_value(value: str) -> bool:
 
 
 def _login_is_keyless(candidate: str) -> bool:
-    """`gh auth login` が SSH 鍵のアップロードを伴わない形なら True。
+    """`gh auth login` がリモートに何も書かない形なら True。
 
-    flag 文字列の有無ではなく**実効 boolean を解釈**する (gh は `--flag=false` を無効と
-    扱い、SSH 鍵アップロード経路に入る):
+    2 つの条件を両方満たす必要がある。
+
+    (a) **SSH 鍵のアップロードが起きない** — flag 文字列の有無ではなく実効 boolean を
+    解釈する (gh は `--flag=false` を無効と扱い、SSH 鍵アップロード経路に入る):
     - `--skip-ssh-key` / `--with-token`: 裸または `=true|1|yes` のときだけ有効、
       `=false|0|no` は無効
     - `--git-protocol <v>` / `--git-protocol=<v>` / `-p <v>` / `-p=<v>` / `-p<v>`:
       値が `https` のときだけ有効 (`ssh` は無効)
-    同じ flag の繰り返しは後勝ち (cobra と同じ)。`--` 以降は引数として見ない。
     有効な flag が 1 つでもあれば鍵操作は起きない (`--with-token` は token を stdin
     から保存するだけ、`--skip-ssh-key` は鍵ステップを抑止、https では鍵ステップ無し)。
+
+    (b) **OAuth grant scope を要求していない** — `-s` / `--scopes` は
+    `gh auth refresh --scopes` と同じくアカウント側の grant を拡張する
+    (gh 2.98 `gh-auth-login.1`: `-s, --scopes <strings>  Additional authentication
+    scopes to request`)。値を取る flag なので `=false` では無効化できず、
+    付いていれば無条件に readonly から外す (Codex R4 の論拠を login にも適用)。
+
+    同じ flag の繰り返しは後勝ち (cobra と同じ)。`--` 以降は引数として見ない。
     """
     if not _LOGIN_RE.search(candidate):
         return False
@@ -256,6 +270,7 @@ def _login_is_keyless(candidate: str) -> bool:
     skip_ssh_key = False
     with_token = False
     protocol = ""
+    scopes_requested = False
     i = 3  # `gh auth login` の後ろから
     while i < len(tokens):
         tok = tokens[i]
@@ -277,8 +292,20 @@ def _login_is_keyless(candidate: str) -> bool:
                 i += 1
             else:
                 protocol = ""
+        elif name in ("--scopes", "-s"):
+            # 値を取る flag なので `=false` で無効化できない。付いていれば無条件に
+            # readonly から外す。分離形 (`-s admin:org`) は値 token も消費して
+            # 後続の誤解釈を防ぐ。
+            scopes_requested = True
+            if not eq and i < len(tokens):
+                i += 1
         elif tok.startswith("-p") and not tok.startswith("--") and len(tok) > 2:
             protocol = tok[2:].strip().lower()
+        elif tok.startswith("-s") and not tok.startswith("--") and len(tok) > 2:
+            # 連結形 (`-sadmin:org`)
+            scopes_requested = True
+    if scopes_requested:
+        return False
     return skip_ssh_key or with_token or protocol == "https"
 
 

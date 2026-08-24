@@ -169,12 +169,16 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
   credential.helper 設定で、どちらもアカウント側には何も書かない。**`gh auth refresh` は
   含まない** — 保存済み認証情報の権限を拡張・修正するコマンドで
   `--scopes admin:org` のようにアカウント側の OAuth grant を変更しうるため通常検証する)、
-  `gh auth login` は **SSH 鍵のアップロードが起きない形のみ** (`--skip-ssh-key` /
-  `--with-token` / `--git-protocol https` (`-p https`) 付き。flag 文字列の有無ではなく
-  実効 boolean を解釈し、`--skip-ssh-key=false` / `--with-token=0` のような明示 false や
-  `--git-protocol ssh` は無効、繰り返しは後勝ち。SSH git protocol を選ぶ login は既存の
-  SSH 公開鍵を GitHub アカウントにアップロードしうるため、それ以外の `gh auth login`
-  は通常検証し、deny 文面では `--skip-ssh-key` 付きの形を案内する)、
+  `gh auth login` は **リモートに何も書かない形のみ** — (a) SSH 鍵のアップロードが
+  起きない (`--skip-ssh-key` / `--with-token` / `--git-protocol https` (`-p https`)
+  付き。flag 文字列の有無ではなく実効 boolean を解釈し、`--skip-ssh-key=false` /
+  `--with-token=0` のような明示 false や `--git-protocol ssh` は無効、繰り返しは後勝ち。
+  SSH git protocol を選ぶ login は既存の SSH 公開鍵を GitHub アカウントに
+  アップロードしうる) かつ (b) **`-s` / `--scopes` で OAuth grant scope を要求して
+  いない** (`gh auth login --skip-ssh-key --scopes admin:org` は鍵操作こそ起きないが
+  アカウント側の grant を拡張するため通常検証。値を取る flag なので `=false` では
+  無効化できず、付いていれば無条件に検証対象)。それ以外の `gh auth login` は
+  通常検証し、deny 文面では `--skip-ssh-key` 付きの形を案内する、
   `aws sso login` / `aws sso logout` / `aws login` / `aws logout` /
   `aws configure ...` (認証情報を出力する `configure export-credentials` は除く)、
   `gcloud auth login` / `gcloud auth application-default login` / `revoke` /

@@ -1071,6 +1071,11 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
             "gh auth login --git-protocol ssh --skip-ssh-key=false",
             "gh auth login --with-token=false < token.txt",
             "gh auth login -p https --git-protocol ssh",
+            # scope 要求はアカウント側の OAuth grant を拡張するので、鍵操作抑止
+            # flag が付いた login でも検証対象 (Codex R4 P1 の論拠を login にも適用)
+            "gh auth login --skip-ssh-key --scopes admin:org",
+            "gh auth login -s admin:org --skip-ssh-key",
+            "gh auth login -p https -s repo",
             # `gh auth refresh` はアカウント側の OAuth grant scope を変えうる
             # (Codex R4 P1)。裸形・scope 指定のどちらも検証対象。
             "gh auth refresh",
