@@ -379,14 +379,15 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 
 ## テスト
 
+plugin root から実行する (`cd` はサブシェルに閉じ込める — 裸の `cd` を続けて貼ると
+2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
+
 ```bash
 # redact-sensitive-reads (827 tests, 0.19.1 時点)
-cd hooks/redact-sensitive-reads
-python3 -m unittest discover tests
+(cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
 # check-sensitive-files (79 tests, 0.19.1 時点)
-cd hooks/check-sensitive-files
-python3 -m unittest discover tests
+(cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
 validate / リリース手順 / CLI 再実測 Runbook などの保守者向け手順は

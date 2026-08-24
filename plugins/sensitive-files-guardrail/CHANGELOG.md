@@ -109,10 +109,11 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. `docs/MAINTAINING.md` の記述を実態に合わせて訂正 (PR #45 Codex review P2 ×3)
+### 6. 保守者ガイド / README の記述を実態に合わせて訂正 (PR #45 Codex review P2 ×3)
 
-新設した保守者ガイドに、repo の実態と食い違う記述が 3 箇所あった。いずれも
-「ガイドを信じた保守者が損をする」ものなので docs のみで訂正した。
+新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
+いずれも「ガイドを信じた保守者が損をする」ものなので docs のみで訂正した
+(コード変更なし)。1 件目は `README.md` にも同じ形で残っていたため併せて修正した。
 
 - **テスト実行手順の `cd` 連鎖が壊れていた**: plugin root から 2 ブロックを続けて
   貼ると、1 つ目の裸 `cd` でシェルが `hooks/redact-sensitive-reads` に残り、
@@ -121,7 +122,14 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   サブシェル `(cd ... && python3 -m unittest discover tests)` 形式に変更し、
   `find hooks -type d -name tests` を回す一括実行例も追加した。書き直した
   ブロックを逐語コピーで実行し、827 / 79 とも green・実行後も cwd が plugin root
-  のままであることを実測確認済み
+  のままであることを実測確認済み。**`README.md` の「テスト」節も同一の裸 `cd`
+  連鎖だった**ので同じ形に揃えた (指摘は MAINTAINING.md 宛だったが、より読まれる
+  README に同じ壊れた手順を残さないため)。あわせて「CI も同じコマンドを Python
+  3.11+ で実行する」の記述を実際の workflow に合わせて具体化した (CI は Python を
+  **3.12 に固定**し、`plugins/*/hooks/*/tests` の親を列挙して同じくサブシェルで
+  `cd` し、失敗スイートを集計して job を fail させる)。ガイド側の一括実行例も、
+  ループの終了ステータスが最後の suite のものになる取りこぼしを避けるため
+  `fail` 集計付きに変更した
 - **CLI 再実測 Runbook の突合手順が嘘だった**: 「`TestLenientModesSubset` が red に
   なれば CLI が新 mode を追加したサイン」は誤り。同テストが検査するのは
   `LENIENT_MODES - _KNOWN_PERMISSION_MODES` という **リポジトリ内の静的定数どうしの

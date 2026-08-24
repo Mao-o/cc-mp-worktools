@@ -172,12 +172,15 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
-両 suite を一括で回すなら (現状 `tests/` は上記 2 つだけ):
+両 suite を一括で回すなら (現状 `tests/` は上記 2 つだけ)。ループの終了ステータスは
+**最後の suite のもの**になるため、途中の red を取りこぼさないよう明示的に集計する:
 
 ```bash
+fail=0
 for d in $(find hooks -type d -name tests); do
-  (cd "$(dirname "$d")" && python3 -m unittest discover tests)
+  (cd "$(dirname "$d")" && python3 -m unittest discover tests) || fail=1
 done
+[ "$fail" -eq 0 ] && echo "ALL GREEN" || echo "SOME SUITE FAILED"
 ```
 
 - `tests/_testutil.py` が hook dir と `hooks/` を `sys.path` に挿入するため環境
@@ -196,8 +199,11 @@ done
   それ以外のテストは実 `~/.claude/logs/redact-hook.log` に書きうる
   (「ログ規則」節の既知課題と同じ根。新しいテストでログ書込を伴う経路を叩くなら
   `LOG_PATH` 自体を patch すること)
-- marketplace の CI (`.github/workflows/validate.yml`) も同じコマンドを Python
-  3.11+ で実行する。3.11 未満では `tomllib` 不在で TOML 系テストが fail する
+- marketplace の CI (`.github/workflows/validate.yml`) も同じ
+  `python3 -m unittest discover tests` を、同じくサブシェルで `cd` する形で
+  `plugins/*/hooks/*/tests` の親を列挙して実行する (CI 側は失敗したスイートを
+  集計して job を fail させる)。Python は 3.12 に固定。要件は **3.11+** で、
+  3.11 未満では `tomllib` 不在で TOML 系テストが fail する
 - テストを追加するときは既存の書式 (mode 5 列の envelope fixture、`_make_envelope`
   / `_decision` ヘルパ) に合わせ、判定境界を変える変更は MATRIX.md の行と対にする
 
