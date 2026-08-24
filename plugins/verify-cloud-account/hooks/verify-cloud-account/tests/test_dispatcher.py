@@ -1487,30 +1487,34 @@ class TestLeadingGlobalOptions(BaseWithTmpProject):
             ("firebase", "firebase deploy", "firebase -P prod login"),
         ]
         for key, write, switch in rows:
-            with self.subTest(switch=switch):
+            # cache dir を row ごとに作り直す (共有すると前 row の tombstone で
+            # warm-up が publish できず vacuous になる)。
+            with self.subTest(switch=switch), self.isolated_cache():
                 self._write_accounts({key: self._ACCOUNTS[key]})
                 with mock.patch(f"services.{key}.verify", return_value=None) as v:
                     dispatch(write, str(self.project_dir))
                     self.assertEqual(v.call_count, 1)
+                    self.assert_cache_published(write, v)
                     self.assertIsNone(dispatch(switch, str(self.project_dir)))
                     after_switch = v.call_count
                     dispatch(write, str(self.project_dir))
                 self.assertEqual(v.call_count, after_switch + 1)
 
     def test_cross_cli_kubeconfig_switch_with_leading_options(self):
-        from core import cache
-
         self._write_accounts({"kubectl": "ctx", "aws": "123456789012", "gcloud": "my-proj"})
         for switch in (
             "aws --profile prod eks update-kubeconfig --name c",
             "gcloud --project x container clusters get-credentials c --region r",
         ):
-            with self.subTest(switch=switch):
-                cache.invalidate("kubectl")
+            # `cache.invalidate("kubectl")` で前 subTest の cache を消していたが、
+            # invalidate は tombstone も立てるため warm-up が publish できず vacuous
+            # だった。cache dir ごと作り直す。
+            with self.subTest(switch=switch), self.isolated_cache():
                 with mock.patch("services.kubectl.verify", return_value=None) as v, \
                      mock.patch("services.aws.verify", return_value=None), \
                      mock.patch("services.gcloud.verify", return_value=None):
                     dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                    self.assert_cache_published("kubectl apply -f x.yaml", v)
                     dispatch(switch, str(self.project_dir))
                     dispatch("kubectl apply -f x.yaml", str(self.project_dir))
                 self.assertEqual(v.call_count, 2)
