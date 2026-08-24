@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -213,13 +213,45 @@ Codex round 3 で、その「唯一の検出手段」が**原理的に機能し�
   可否は envelope 実値の probe が要る (収録は判定境界の変更) ため
   **`bd_092a232e-snw.28`** で対応する
 
+Codex round 4 で、**この 0.19.1 自身が直した snw.7 を、リリース手順が構造的に
+再生産する**ことが判明した:
+
+- **[R4] リリース手順に CHANGELOG の cut step が無かった**: 旧手順は step 2 で
+  `## Unreleased` 直下に節を追加した後、検証 (旧 3・4) と commit (旧 5) に直行し、
+  **その節を出荷 version の見出しへ確定させる step も、`## Unreleased` に残った
+  項目を突合する step も無かった**。「出荷したら実バージョンに置換する」という
+  受け身の注記が旧 step 3 の grep 説明に紛れているだけで、merge 前に実行すべき
+  アクションが手順上どこにも無い。snw.7 (出荷済みの E5 が `## Unreleased (PR 6)`
+  表記のまま残っていた) はまさにこの欠落で起きたので、放置すれば次のリリースで
+  同じチケットが再発する。
+
+  **step 3 として明示的な cut step を新設**した (旧 3〜5 は 4〜6 に繰り下げ)。
+  中身は「step 2 の節を step 1 で bump した version と同じ `## X.Y.Z` にする」
+  + **「`## Unreleased` を読み直し、今回出荷した項目をすべて `## X.Y.Z` へ移す」**。
+  後者が再発防止の本体で、機械判定できないため目視と明記した。あわせて
+  「bump したのに節を作っていない」だけを捕まえる機械チェック
+  (`plugin.json` の version と `^## <version>$` の突合) を併記し、**これは
+  「出荷済み項目が Unreleased に残っている」ケースを検出しない**ことも明記した
+  (snw.7 のときも `## 0.14.0` 節自体は存在していた)。
+
+  grep との順序整合: 旧 step 3 (現 4) の
+  `grep -rn Unreleased README.md docs/ hooks/` は **`CHANGELOG.md` を対象に
+  含めない** (次サイクル用の `## Unreleased` が常設されるため、含めると恒久的に
+  ヒットして決して満たせない条件になる)。よって cut の前後どちらで実行しても
+  期待値は同じ = 「本節の記述以外ヒットなし」であることを docs に明記した。
+  受け身の注記は cut step へのポインタに置き換え、記述が 2 箇所に散らないようにした
+
 ### リリース手順への追加
 
-`docs/MAINTAINING.md` の「リリース手順」に docs 整合チェックを追加した:
+`docs/MAINTAINING.md` の「リリース手順」に CHANGELOG cut step (上記 R4) と
+docs 整合チェックを追加した:
 
+- **CHANGELOG の cut** (step 3): 節見出しを bump 後の version に確定させ、
+  `## Unreleased` に残った出荷済み項目を移す。snw.7 の再発防止の本体
 - `grep -rn Unreleased README.md docs/ hooks/ --exclude='REVIEW_TASKS_*.md'` が
-  手順の記述以外にヒットしないこと (CHANGELOG の `## Unreleased` 節だけが唯一の
-  「未出荷」記述。REVIEW_TASKS は日付付き作業ログなので当時の表記を残す)
+  手順の記述以外にヒットしないこと (README / docs / hooks が機能を「Unreleased」と
+  書いていないことの確認。CHANGELOG は対象外で step 3 が扱う。REVIEW_TASKS は
+  日付付き作業ログなので当時の表記を残す)
 - `grep -rn '/Users/' README.md docs/` が手順の記述以外にヒットしないこと
   (個人パス混入の検知)
 - 見出しを変えたら参照元のアンカーを同時に更新する

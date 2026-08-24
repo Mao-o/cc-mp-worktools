@@ -458,22 +458,48 @@ lenient 収録の可否は、envelope 実値を probe しないと確定でき�
 1. `.claude-plugin/plugin.json` の `version` を semver で bump (挙動変更・機能
    追加 = minor、修正・docs のみ = patch)。marketplace.json 側には書かない。
    version は pin として働くため bump を忘れると既存ユーザーに配布されない
-2. `CHANGELOG.md` の `## Unreleased` 直下に節を追加。**判定境界 (deny / allow /
-   ask) の変化有無** と **両 suite の件数** を必ず書く
-3. docs 整合チェック (0.19.1 で追加):
+2. `CHANGELOG.md` に今回のリリース節を追加。見出しは step 1 で bump した version と
+   同じ `## X.Y.Z` にし、`## Unreleased` の**直下**に置く (`## Unreleased` の
+   中身として書かない)。**判定境界 (deny / allow / ask) の変化有無** と
+   **両 suite の件数** を必ず書く
+3. **CHANGELOG の cut (`## Unreleased` との突合)。** この step を飛ばすと出荷済みの
+   内容が `## Unreleased` に残ったまま公開され、0.19.1 が直した snw.7 (出荷済みの
+   E5 が「Unreleased (PR 6)」表記のまま残っていた) と同じ状態を再生産する:
+   - **`## Unreleased` 節を読み直し、今回出荷した項目をすべて step 2 の
+     `## X.Y.Z` 節へ移す。** `## Unreleased` に残してよいのは「このリリースでは
+     出荷していない」項目だけ。snw.7 は roadmap 項目が実装されたのに移されなかった
+     ことで起きたので、**この突合が再発防止の本体**。機械判定できないので目視で行う
+   - 移し終えたら、`## Unreleased` に残った各項目について「今回の実装・テスト・
+     `## X.Y.Z` 節のいずれにも現れない」ことを確認する
+   - 機械チェック (cut 忘れの検出):
+
+     ```bash
+     v=$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+     grep -q "^## ${v}\$" CHANGELOG.md && echo "OK: ## ${v} あり" || echo "NG: cut 忘れ"
+     ```
+
+     これが捕まえるのは「bump したのに節を作っていない」場合**だけ**で、上の突合
+     (出荷済み項目が `## Unreleased` に残っている) は**検出しない**。snw.7 のときも
+     `## 0.14.0` 節自体は存在していた
+4. docs 整合チェック (0.19.1 で追加):
    - `grep -rn Unreleased README.md docs/ hooks/ --exclude='REVIEW_TASKS_*.md'` が
-     本節の記述以外にヒットしないこと (CHANGELOG の `## Unreleased` 節だけが唯一の
-     「未出荷」記述。出荷したら実バージョンに置換する。REVIEW_TASKS は日付付きの
-     作業ログなので当時の表記を残す)
+     本節の記述以外にヒットしないこと (README / docs / hooks が機能を「Unreleased」と
+     書いていないことの確認。出荷済みなら実バージョン表記に直す。CHANGELOG 側の
+     `## Unreleased` は step 3 で扱う。REVIEW_TASKS は日付付きの作業ログなので
+     当時の表記を残す)
+     - **この grep は `CHANGELOG.md` を対象に含めない。** CHANGELOG には次サイクル用の
+       `## Unreleased` が常設されるため、含めると恒久的にヒットして決して満たせない
+       条件になる。対象外なので **step 3 の cut の前後どちらで実行しても期待値は同じ**
+       (= 本節の記述以外ヒットなし)
    - `grep -rn '/Users/' README.md docs/` が本節の記述以外にヒットしないこと
      (個人パス混入の検知。例示は `/path/to/project` 等のダミー)
    - 見出しを変えたら参照元 (`grep -rn '#' README.md docs/` で該当アンカー) を
      同時に更新する
-4. 両 suite green + `claude plugin validate .` warning 0。スクリプトに組み込むときは
+5. 両 suite green + `claude plugin validate .` warning 0。スクリプトに組み込むときは
    「テスト実行」節の一括実行ブロックをそのまま使い、**`echo $?` が 0 であること**を
    条件にする (`ALL GREEN` / `SOME SUITE FAILED` のサマリ文字列の目視や、終了
    ステータスを見ない `&&` チェーンだけに頼らない)
-5. commit (`feat|fix|docs(sensitive-files-guardrail): … (vX.Y.Z)`) → push →
+6. commit (`feat|fix|docs(sensitive-files-guardrail): … (vX.Y.Z)`) → push →
    PR → Codex review → merge。tag は必要に応じて付ける
 
 ## Step 0-c 実測結果 (将来更新予定)
