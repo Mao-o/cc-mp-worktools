@@ -185,7 +185,12 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   全 service の切替表、readonly 切替 + write の複合や inline env 違いの別 target でも
   cache しない、別 CLI 経由の kubeconfig 書換、`npx firebase-tools` 形、他 service
   非影響、`firebase use prod && firebase deploy`、表示系 readonly は cache 維持、
-  未設定時の無効化)
+  未設定時の無効化)。**回帰ガードの実効性修正**: subTest 間で cache dir を共有していた
+  ため前 row の tombstone (in-flight 窓) が warm-up の cache publish を抑止し、
+  切替表 17 行のうち 12 行と別 CLI kubeconfig 5 行 / `npx firebase-tools` 形が
+  STATE_CHANGING を壊しても green のままだった (vacuous)。row ごとに cache dir を
+  作り直し、warm-up が cache を publish したことを直接 assert するようにして
+  全行が bite することを mutation で確認した
 - `tests/test_dispatcher.py::TestLoginCommandsReadonly` 3 件 (ログイン系 30 コマンドが
   検証なしで allow / 未設定でも allow / 類似 write・認証情報出力・`gh auth refresh`
   (裸形 / `-s repo` / `--scopes admin:org` / `--remove-scopes repo`) は従来どおり deny)

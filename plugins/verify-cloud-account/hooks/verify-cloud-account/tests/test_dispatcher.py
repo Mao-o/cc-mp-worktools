@@ -1,6 +1,7 @@
 """dispatcher のフロー全体テスト。各 service の verify() は mock で差し替える。"""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ class BaseWithTmpProject(unittest.TestCase):
 
         self._cache_tmp = Path(self.tmp) / "cache_tmp"
         self._cache_tmp.mkdir()
+        self._cache_seq = 0
 
         self._env_patcher = mock.patch.dict(
             os.environ,
@@ -43,6 +45,42 @@ class BaseWithTmpProject(unittest.TestCase):
     def _cleanup(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @contextlib.contextmanager
+    def isolated_cache(self):
+        """まっさらな cache dir でブロックを実行する (subTest 間の状態持ち越し防止)。
+
+        cache dir には service ごとの tombstone (`<service>.epoch` の `at_ns`) が残り、
+        `invalidate()` から `cache.IN_FLIGHT_SEC` (60 秒) の間は成功 cache の publish が
+        抑止される。1 つの test method 内で複数シナリオを回すと、前のシナリオの切替
+        コマンドが立てた tombstone によって **2 件目以降の warm-up が cache を publish
+        できない**。すると最後の write が再検証される理由が「切替で無効化されたから」
+        ではなく「そもそも cache が無いから」になり、無効化機構 (STATE_CHANGING) を
+        壊してもテストが green のままになる (vacuous)。
+
+        本番の挙動には影響しない — 変えるのは `TMPDIR` (どのディレクトリに cache を
+        置くか) だけで、`IN_FLIGHT_SEC` も時刻も production コードも触らない。
+        `TMPDIR` は元々 setUp がテスト用に差し替えている値。
+        """
+        self._cache_seq += 1
+        d = Path(self.tmp) / f"cache_tmp_{self._cache_seq}"
+        d.mkdir()
+        with mock.patch.dict(os.environ, {"TMPDIR": str(d)}):
+            yield d
+
+    def assert_cache_published(self, command, verify_mock, expected_calls=1):
+        """warm-up が成功 cache を **publish した** ことを直接確認する。
+
+        同じコマンドをもう一度通して verify が呼ばれない (cache hit する) ことを見る。
+        publish の有無を推測せず観測することで、後続の再検証が無効化機構によるもの
+        だと言い切れるようにする。
+        """
+        self.assertIsNone(dispatch(command, str(self.project_dir)))
+        self.assertEqual(
+            verify_mock.call_count,
+            expected_calls,
+            f"warm-up が成功 cache を publish していない (cache hit しなかった): {command}",
+        )
 
     def _write_accounts(self, data: dict):
         """新パス (`.claude/verify-cloud-account/accounts.local.json`) に書く。"""
@@ -798,6 +836,7 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
         self._write_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None) as v:
             dispatch("gh pr list", str(self.project_dir))
+            self.assert_cache_published("gh pr list", v)
             self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
             self.assertEqual(v.call_count, 1)
             dispatch("gh pr create", str(self.project_dir))
@@ -809,6 +848,7 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
         self._write_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None) as v:
             dispatch("gh pr list", str(self.project_dir))
+            self.assert_cache_published("gh pr list", v)
             self.assertIsNone(dispatch("gh auth switch -u Mao-o", str(self.project_dir)))
             self.assertEqual(v.call_count, 1)
             dispatch("gh pr create", str(self.project_dir))
@@ -837,11 +877,16 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
             ("aws", "123456789012", "aws s3 cp a b", "aws login", "aws s3 cp a b"),
         ]
         for key, expected, warm, switch, write in rows:
-            with self.subTest(switch=switch):
+            # cache dir を row ごとに作り直す。共有すると前 row の tombstone で
+            # warm-up が cache を publish できず、この test が vacuous になる。
+            with self.subTest(switch=switch), self.isolated_cache():
                 self._write_accounts({key: expected})
                 with mock.patch(f"services.{key}.verify", return_value=None) as v:
                     self.assertIsNone(dispatch(warm, str(self.project_dir)))
                     self.assertEqual(v.call_count, 1)
+                    # 「切替で無効化された」と言えるためには、まず cache がある状態を
+                    # 作れていなければならない。publish を推測せず観測する。
+                    self.assert_cache_published(warm, v)
                     self.assertIsNone(dispatch(switch, str(self.project_dir)))
                     after_switch = v.call_count
                     self.assertIsNone(dispatch(write, str(self.project_dir)))
@@ -886,8 +931,6 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
     def test_cross_cli_kubeconfig_switch_invalidates_kubectl_cache(self):
         """L2 P2: 別 CLI / plugin が kubeconfig の current-context を書き換える形
         (PATTERNS に一致しない候補を含む) でも kubectl の cache を破棄する。"""
-        from core import cache
-
         self._write_accounts({"kubectl": "ctx", "gcloud": "my-proj", "aws": "123456789012"})
         for switch in (
             "gcloud container clusters get-credentials c --region r",
@@ -896,13 +939,16 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
             "kubectx other",
             "kubectl ctx other",
         ):
-            with self.subTest(switch=switch):
-                cache.invalidate("kubectl")  # 前の subTest の write が残した cache を消す
+            # cache dir ごと作り直す。以前は `cache.invalidate("kubectl")` で前 subTest の
+            # cache を消していたが、invalidate は tombstone も立てるため直後の warm-up が
+            # cache を publish できず、この test 全体が vacuous になっていた。
+            with self.subTest(switch=switch), self.isolated_cache():
                 with mock.patch("services.kubectl.verify", return_value=None) as v, \
                      mock.patch("services.gcloud.verify", return_value=None), \
                      mock.patch("services.aws.verify", return_value=None):
                     dispatch("kubectl apply -f x.yaml", str(self.project_dir))
                     self.assertEqual(v.call_count, 1)
+                    self.assert_cache_published("kubectl apply -f x.yaml", v)
                     dispatch(switch, str(self.project_dir))
                     # `kubectl ctx other` は kubectl の write として自身も検証される
                     # (cache はしない)。他は kubectl の target にならない
@@ -919,8 +965,12 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
                 with self.subTest(cmd=cmd):
                     self.assertIsNone(dispatch(cmd, str(self.project_dir)))
             v.assert_not_called()
-        with mock.patch("services.firebase.verify", return_value=None) as v:
+        # 上の subTest ループの `login` / `use prod` が tombstone を立てているので、
+        # cache dir を作り直さないと warm-up が publish できず vacuous になる。
+        with self.isolated_cache(), \
+                mock.patch("services.firebase.verify", return_value=None) as v:
             dispatch("npx firebase-tools deploy", str(self.project_dir))
+            self.assert_cache_published("npx firebase-tools deploy", v)
             self.assertIsNone(dispatch("npx firebase-tools use other", str(self.project_dir)))
             dispatch("npx firebase-tools deploy", str(self.project_dir))
         self.assertEqual(v.call_count, 3)
