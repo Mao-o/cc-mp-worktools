@@ -172,16 +172,28 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
-両 suite を一括で回すなら (現状 `tests/` は上記 2 つだけ)。ループの終了ステータスは
-**最後の suite のもの**になるため、途中の red を取りこぼさないよう明示的に集計する:
+両 suite を一括で回すなら (現状 `tests/` は上記 2 つだけ)。失敗を握り潰す経路が
+2 つあるので注意する — `for` ループの終了ステータスは**最後の suite のもの**に
+なり、締めの `[ … ] && echo … || echo …` の終了ステータスは**`echo` の成功**に
+なる。集計した `fail` で明示的に exit し、ブロック全体の終了ステータスに失敗を
+伝播させること:
 
 ```bash
-fail=0
-for d in $(find hooks -type d -name tests); do
-  (cd "$(dirname "$d")" && python3 -m unittest discover tests) || fail=1
-done
-[ "$fail" -eq 0 ] && echo "ALL GREEN" || echo "SOME SUITE FAILED"
+(
+  fail=0
+  for d in $(find hooks -type d -name tests); do
+    (cd "$(dirname "$d")" && python3 -m unittest discover tests) || fail=1
+  done
+  [ "$fail" -eq 0 ] && echo "ALL GREEN" || echo "SOME SUITE FAILED"
+  exit "$fail"
+)
 ```
+
+全体を `( … )` で囲むのは、**対話シェルに逐語コピーしても `exit` がサブシェルで
+止まりシェルごと落ちない**一方、スクリプトに埋め込めばサブシェルの終了ステータスが
+そのままブロックの結果になり `set -e` にも乗るため (どちらの使い方でも直後の
+`echo $?` で 0 / 非 0 を確認できる)。リリースチェックリストや CI から呼ぶときも
+この形のまま使う。
 
 - `tests/_testutil.py` が hook dir と `hooks/` を `sys.path` に挿入するため環境
   変数の設定は不要。ただし `_testutil.py` がするのは `sys.path` の操作**だけ**で、
@@ -237,8 +249,22 @@ stdin `< /dev/null` を付ける (`acceptEdits` は subagent 承認待ちでハ�
 ## CLI バージョンアップ時の再実測手順 (Runbook)
 
 `core/output.py::LENIENT_MODES` と `tests/fixtures/envelopes/README.md` の
-列挙は Claude Code CLI の `permission_mode` 値に依存する。CLI のメジャー
-アップデートのたびに以下を走らせて乖離が無いか確認する。
+列挙は Claude Code CLI の `permission_mode` 値に依存する。
+
+**発火条件: CLI を upgrade したら毎回 (major / minor / patch を問わない)。**
+加えて、リリースノートが permission mode に言及したときは version 差の大小に
+関わらず実施する。major 限定にしてはいけない理由は、**同一バージョンライン内の
+patch で mode が増えた実例がある**ため — `auto` は **CLI 2.1.83** で追加された
+(「依存関係」節に記録がある)。major 契機だけにすると、この種の追加を次の major
+まで無期限に取りこぼす。
+
+**この Runbook が唯一の検出手段である。**
+`tests/test_envelope_shapes.py::TestLenientModesSubset` は repo 内の静的な定数
+どうしの包含関係しか見ず、実際に捕捉した envelope を参照しない。CLI が新しい
+`permission_mode` を返し始めても suite は green のままなので、**テストが green で
+あることは「CLI 側が変わっていないこと」の証拠にならない** (step 4 参照)。
+
+以下を走らせて乖離が無いか確認する。
 
 ### 1. envelope 採取用の一時 probe スクリプトを作成
 
@@ -364,7 +390,10 @@ step 3 で採取した `/tmp/envelope-bash-*.json` の `permission_mode` の値�
      (個人パス混入の検知。例示は `/path/to/project` 等のダミー)
    - 見出しを変えたら参照元 (`grep -rn '#' README.md docs/` で該当アンカー) を
      同時に更新する
-4. 両 suite green + `claude plugin validate .` warning 0
+4. 両 suite green + `claude plugin validate .` warning 0。スクリプトに組み込むときは
+   「テスト実行」節の一括実行ブロックをそのまま使い、**`echo $?` が 0 であること**を
+   条件にする (`ALL GREEN` / `SOME SUITE FAILED` のサマリ文字列の目視や、終了
+   ステータスを見ない `&&` チェーンだけに頼らない)
 5. commit (`feat|fix|docs(sensitive-files-guardrail): … (vX.Y.Z)`) → push →
    PR → Codex review → merge。tag は必要に応じて付ける
 
