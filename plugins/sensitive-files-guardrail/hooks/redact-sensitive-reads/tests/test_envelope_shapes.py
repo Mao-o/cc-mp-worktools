@@ -81,16 +81,30 @@ class TestEnvelopeShapes(unittest.TestCase):
 
 
 class TestLenientModesSubset(unittest.TestCase):
-    """LENIENT_MODES と fixtures/envelopes/README.md の列挙が乖離していないか。
+    """``LENIENT_MODES`` が ``_KNOWN_PERMISSION_MODES`` の subset である回帰ガード。
 
-    CLI 側が permission_mode の新しい値を追加したとき、docs と実動が乖離する前に
-    気付けるようにする。本テストが red になったら:
-      1. 実 envelope を採取して permission_mode の値を確認
-         (``hooks/_debug/capture_envelope.py`` を作成して hooks.json 経由で取る)
-      2. `core/output.py::LENIENT_MODES` と
-         `tests/fixtures/envelopes/README.md` (`permission_mode` 項) の列挙を同時更新
-      3. `docs/DESIGN.md` の lenient 方針も更新
-      4. `docs/MAINTAINING.md` の CLI 再実測 Runbook に実測日を追記
+    **本テストは CLI の permission_mode 追加を検出しない。** 見ているのは
+    ``LENIENT_MODES - _KNOWN_PERMISSION_MODES`` という、リポジトリ内の静的な定数
+    どうしの包含関係だけで、実際に捕捉した envelope は一切参照しない。したがって
+    CLI が新しい ``permission_mode`` を返し始めても green のままで、シグナルには
+    ならない。CLI 側の変化を知るには、``docs/MAINTAINING.md`` の
+    「CLI バージョンアップ時の再実測手順 (Runbook)」に従って probe で採取した値を
+    ``_KNOWN_PERMISSION_MODES`` と**人手で**突合すること。
+
+    実際に検出できるのは repo 内の自己矛盾 2 種:
+      - ``test_lenient_modes_are_subset_of_known_permission_modes``:
+        既知 mode の列挙を更新しないまま ``LENIENT_MODES`` に未登録の値を足した
+        とき red
+      - ``test_known_modes_contains_six_canonical_entries``:
+        ``_KNOWN_PERMISSION_MODES`` の件数を変えたとき red。新 mode を登録した
+        **後**に鳴る「更新漏れ検知」であって、CLI 変化の検知ではない
+
+    どちらかが red になったら次を同時に更新する:
+      1. ``core/output.py::LENIENT_MODES`` と本ファイルの
+         ``_KNOWN_PERMISSION_MODES`` (件数 assert とテスト名にも件数が入る)
+      2. ``tests/fixtures/envelopes/README.md`` (``permission_mode`` 項) の列挙
+      3. ``docs/DESIGN.md`` の lenient 方針
+      4. ``docs/MAINTAINING.md`` の CLI 再実測 Runbook に実測日と CLI version を追記
     """
 
     def test_lenient_modes_are_subset_of_known_permission_modes(self):

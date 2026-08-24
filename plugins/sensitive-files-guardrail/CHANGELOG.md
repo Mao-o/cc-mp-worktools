@@ -109,11 +109,13 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README の記述を実態に合わせて訂正 (PR #45 Codex review P2 ×3)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2 ×3)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
-いずれも「ガイドを信じた保守者が損をする」ものなので docs のみで訂正した
-(コード変更なし)。1 件目は `README.md` にも同じ形で残っていたため併せて修正した。
+いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
+(assert・テストロジックを含め**挙動の変更は一切無い**)。同じ誤りの複製が
+1 件目は `README.md` に、2 件目は `test_envelope_shapes.py` の docstring に
+残っていたため、それぞれ併せて修正した。
 
 - **テスト実行手順の `cd` 連鎖が壊れていた**: plugin root から 2 ブロックを続けて
   貼ると、1 つ目の裸 `cd` でシェルが `hooks/redact-sensitive-reads` に残り、
@@ -138,7 +140,13 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   step 4 を「probe 値を `_KNOWN_PERMISSION_MODES` (現行 6 値) と人手で直接突合する」
   に書き換え、`test_known_modes_contains_six_canonical_entries` は列挙を追加した
   **後**に red になる「更新漏れ検知」であって CLI 変化の検知ではない旨と、
-  期待件数の更新手順を明記した
+  期待件数の更新手順を明記した。**同一の虚偽記述が
+  `tests/test_envelope_shapes.py::TestLenientModesSubset` の docstring
+  (「CLI 側が permission_mode の新しい値を追加したとき…気付けるようにする」) にも
+  残っていた**ため、実際の検出範囲 (repo 内の自己矛盾 2 種) と、CLI 変化を知るには
+  MAINTAINING.md の probe Runbook に従う必要がある旨に書き換え、docs 側と相互参照
+  させた。docstring のみの変更で assert・テストロジックは不変
+  (docstring を除去した AST が変更前と完全一致することを機械的に確認済み)
 - **テストの HOME 隔離の保証が嘘だった**: 「`HOME` / `XDG_CONFIG_HOME` は tmpdir に
   差し替えて実ホームを汚染しない」は事実と異なる。共有の `tests/_testutil.py` は
   `sys.path` を操作するだけで env を触らず、隔離は個々のテストクラスが
@@ -163,7 +171,9 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
 
 ### テスト
 
-- redact **827 件** / check **79 件**、全 green (コード無変更、件数不変)。
+- redact **827 件** / check **79 件**、全 green (挙動の変更なし、件数不変。
+  唯一の `.py` 差分は `test_envelope_shapes.py` の docstring で、除去した AST は
+  変更前と完全一致)。
   `claude plugin validate` passed (warning 0)
 
 ## 0.19.0
