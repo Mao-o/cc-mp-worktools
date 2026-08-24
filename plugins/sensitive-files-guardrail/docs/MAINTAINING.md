@@ -262,11 +262,33 @@ patch で mode が増えた実例がある**ため — `auto` は **CLI 2.1.83**
 `tests/test_envelope_shapes.py::TestLenientModesSubset` は repo 内の静的な定数
 どうしの包含関係しか見ず、実際に捕捉した envelope を参照しない。CLI が新しい
 `permission_mode` を返し始めても suite は green のままなので、**テストが green で
-あることは「CLI 側が変わっていないこと」の証拠にならない** (step 4 参照)。
+あることは「CLI 側が変わっていないこと」の証拠にならない** (step 5 参照)。
 
 以下を走らせて乖離が無いか確認する。
 
-### 1. envelope 採取用の一時 probe スクリプトを作成
+### 1. CLI が受け付ける permission mode を列挙する
+
+**この step を先頭に置くのが要点。** probe 対象を既知 6 値の固定列挙にすると、
+CLI が追加した mode は一度も選択されず、採取した envelope にも現れないため、
+step 5 の突合が**原理的に**新 mode を検出できない (手順が循環する)。
+probe 対象は**その CLI 自身に聞いて**決める。
+
+```bash
+claude --version
+claude --help | grep -A5 -- "--permission-mode"
+```
+
+`--permission-mode` の `choices:` に並ぶ値が、その CLI が**起動時に受け付ける**
+mode の全量。以降の step ではこの列挙結果を probe 対象にする
+(このガイドに書かれた固定列挙をコピーしないこと — 書いた時点の値でしかない)。
+
+補助手段として、リリースノート / 公式 docs の permission mode 節も確認する。
+`--help` の choices と envelope に出る値は**一致しない**点に注意 — 例えば
+`default` は「`--permission-mode` を指定しなかったとき」の値なので choices には
+現れないが、envelope の `permission_mode` には出る。したがって choices は
+「起動で選べる集合」であって「envelope に出うる集合」の全量ではない。
+
+### 2. envelope 採取用の一時 probe スクリプトを作成
 
 `hooks/_debug/capture_envelope.py` として配置する (実測後に削除する。
 `hooks/_debug/` は commit しない):
@@ -292,7 +314,7 @@ with out.open("w") as f:
 sys.stdout.write("{}")
 ```
 
-### 2. hooks.json の matcher を差し替え
+### 3. hooks.json の matcher を差し替え
 
 本番 hook を壊さないよう別コピーで作業するか、git で戻せる状態にしてから
 `Bash` matcher の command を probe に向ける:
@@ -310,14 +332,27 @@ sys.stdout.write("{}")
 }
 ```
 
-### 3. 各 permission_mode で 1 回ずつ Bash tool を呼ぶ
+### 4. step 1 で列挙した mode を 1 つ残らず probe する
 
-`claude --plugin-dir .` で起動し、`default` / `auto` / `plan` / `acceptEdits` /
-`dontAsk` / `bypassPermissions` のそれぞれで `date` を実行する
-(`--permission-mode <mode>` で起動するか、セッション内でモードを切り替える)。
-`/tmp/envelope-bash-*.json` の `permission_mode` の値を確認する。
+`claude --plugin-dir .` で起動し、**step 1 の `choices:` に出た値すべて**について
+`--permission-mode <mode>` で起動 (またはセッション内で切替) して `date` を 1 回ずつ
+実行する。**加えて `--permission-mode` を付けない既定起動でも 1 回**実行する
+(choices に現れない `default` を踏むため)。
 
-### 4. probe 値を `_KNOWN_PERMISSION_MODES` と直接突合する
+ここで回すのは step 1 の列挙であって、このガイドや `_KNOWN_PERMISSION_MODES` の
+固定列挙ではない。**既知列挙を起点にすると新 mode が probe されず、step 5 で
+検出できない**（これが R3 で指摘された循環そのもの）。
+
+採取した envelope から実測値の集合を作る:
+
+```bash
+grep -h '"permission_mode"' /tmp/envelope-bash-*.json | sort -u
+```
+
+この集合 (= 実際に envelope へ出た値) と step 1 の choices の両方が、step 5 の
+突合対象になる。
+
+### 5. `_KNOWN_PERMISSION_MODES` と**双方向**に突合する
 
 **テストは CLI の新 mode を自動検出しない。突合は人手で行う。**
 `tests/test_envelope_shapes.py::TestLenientModesSubset` が検査しているのは
@@ -325,26 +360,69 @@ sys.stdout.write("{}")
 定数どうしの包含関係**だけで、採取した envelope は一切参照しない。CLI が新しい
 `permission_mode` を返し始めても suite は green のままで、シグナルにはならない。
 
-step 3 で採取した `/tmp/envelope-bash-*.json` の `permission_mode` の値を、
-`tests/test_envelope_shapes.py` の `_KNOWN_PERMISSION_MODES` (現在は `default` /
-`plan` / `acceptEdits` / `auto` / `dontAsk` / `bypassPermissions` の 6 値) と
-突き合わせる。列挙に無い値が出ていたら:
+step 1 の CLI 列挙と step 4 の envelope 実測値を、`tests/test_envelope_shapes.py`
+の `_KNOWN_PERMISSION_MODES` と**両方向**で突き合わせる。差分の向きで意味と対応が
+異なるので、片方向だけ見て終わらせないこと:
+
+| 差分の向き | 意味 | 対応 |
+|---|---|---|
+| CLI 列挙 / 実測値に**あって**定数に**無い** | mode が**追加**された | 下の更新手順を実施 |
+| 定数に**あって** CLI 列挙に**無い** | launch choice ではないだけかもしれない (`default` が該当) | **単純削除しない**。step 4 の envelope 実測値に出るなら定数は維持が正しい。実測値にも出ないことを確認できて初めて削除を検討する |
+
+「追加」側を確認したときの更新手順:
 
 1. 実測で確認した新 mode を `_KNOWN_PERMISSION_MODES` に追加
 2. `TestLenientModesSubset::test_known_modes_contains_six_canonical_entries` の
    期待件数を新しい件数に更新する (テスト名にも件数が入っているので rename も)。
-   この assert が red になるのは step 1 を入れた**後**であって、CLI 変化の検知
-   ではない。列挙を増やしたのに関連 docs を直し忘れる事故を止めるための
+   この assert が red になるのは**上の 1. で列挙を増やした後**であって、CLI 変化の
+   検知ではない。列挙を増やしたのに関連 docs を直し忘れる事故を止めるための
    「更新漏れ検知」と理解する
 3. autonomous として扱ってよいなら `LENIENT_MODES` にも追加 (Bash の静的解析
-   不能ケースで allow に倒したいかを判断)
+   不能ケースで allow に倒したいかを判断)。**これは判定境界の変更**にあたるので、
+   envelope 実値で挙動を確認してから決める
 4. `tests/fixtures/envelopes/README.md` の列挙を更新
 5. `docs/DESIGN.md` (LENIENT_MODES 方針) と `docs/MATRIX.md` の mode 列を更新
 6. 下の実測ログに実測日と CLI version を追記
 
-### 5. debug 差し戻し
+### 6. debug 差し戻し
 
 `hooks.json` を元に戻し、`hooks/_debug/` を削除する。
+
+### Worked example: `manual` の取りこぼし (CLI 2.1.241, 2026-08-24 実測)
+
+この手順が何を捕まえるのかの実例。**旧手順 (既知 6 値を固定 probe) では発見でき
+なかったドリフトが、step 1 を足しただけで即座に露見した。**
+
+step 1 を実行した結果:
+
+```
+$ claude --version
+2.1.241 (Claude Code)
+
+$ claude --help | grep -A3 permission-mode
+  --permission-mode <mode>   Permission mode to use for the session
+                             (choices: "acceptEdits", "auto",
+                              "bypassPermissions", "manual",
+                              "dontAsk", "plan")
+```
+
+step 5 の双方向突合にかけると:
+
+| 差分の向き | 値 | 判定 |
+|---|---|---|
+| CLI 列挙にあって定数に無い | **`manual`** | **追加**。`_KNOWN_PERMISSION_MODES` が stale |
+| 定数にあって CLI 列挙に無い | `default` | 上表の下段どおり **削除しない**。`--permission-mode` で選べないだけで envelope には出る値 |
+
+旧手順は「`default` / `auto` / `plan` / `acceptEdits` / `dontAsk` /
+`bypassPermissions` のそれぞれで `date` を実行する」と固定列挙していたため、
+`manual` を一度も選択せず、採取した envelope にも現れず、突合の分岐にも到達しな
+かった。**「唯一の検出手段」を名乗りながら実際には検出できていなかった**という
+のが R3 指摘の中身で、これがその実物。
+
+**現状 (0.19.1 時点): `manual` は未追随。** 本リリースは docs 整合のみのため
+`_KNOWN_PERMISSION_MODES` / `LENIENT_MODES` は変更していない。`manual` の登録と
+lenient 収録の可否は、envelope 実値を probe しないと確定できず (収録は判定境界の
+変更にあたる)、別チケット **`bd_092a232e-snw.28`** で対応する。
 
 ### Phase 0 実測ログ
 
@@ -353,6 +431,7 @@ step 3 で採取した `/tmp/envelope-bash-*.json` の `permission_mode` の値�
 | 2026-04-11 | 2.1.101 | `permissionDecisionReason` / `systemMessage` / `ask` reason の配信経路 | deny 時の reason はモデルに完全配信、`systemMessage` はモデルに届かない、`ask` reason はユーザー UI のみ。要点は `docs/DESIGN.md` の Phase 0 節 |
 | 2026-04-22 | 2.1.101 系 | plan mode での Bash hook 発火有無 | **非発火** (Case C)。`LENIENT_MODES` の `"plan"` は dead entry と判断し 0.6.0 で撤去 |
 | 2026-05-18 | 2.1.x (envelope 未採取) | plan mode での Bash hook 発火有無 (実機の体感) | **発火** を確認 (調査ワンライナーが ask に倒れた)。0.13.0 で `"plan"` を再追加。専用 envelope での再実測は未実施 |
+| 2026-08-24 | 2.1.241 | step 1 (`claude --help` の `--permission-mode` choices 列挙) のみ実施 | choices は `acceptEdits` / `auto` / `bypassPermissions` / **`manual`** / `dontAsk` / `plan`。**`manual` が `_KNOWN_PERMISSION_MODES` に無い**ことを検出 (上の Worked example)。`default` は choices に無いが envelope 側に出るため維持。envelope 採取 (step 2〜4) と定数更新は未実施 — `bd_092a232e-snw.28` |
 
 ## 拡張ポイント
 

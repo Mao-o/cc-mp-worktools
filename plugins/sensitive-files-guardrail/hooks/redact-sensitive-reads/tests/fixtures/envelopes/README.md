@@ -40,6 +40,10 @@ Phase 0 実測結果 (要点は `docs/DESIGN.md` の Phase 0 節と `docs/MAINTA
     (auto / bypassPermissions / plan の 3 値)。CLI が新 mode を追加したら両方を同時に
     更新すること (Runbook は `docs/MAINTAINING.md` の "CLI バージョンアップ時の再実測手順"
     を参照)。
+  - **既知のドリフト (0.19.1 時点)**: CLI 2.1.241 の `--permission-mode` は
+    **`manual`** も受け付けるが、上記 6 値にも `_KNOWN_PERMISSION_MODES` にも
+    含まれていない。envelope 実値の採取と定数更新は未実施 (`bd_092a232e-snw.28`)。
+    経緯と突合手順は `docs/MAINTAINING.md` の Runbook / Worked example を参照。
 
 tool_input の内訳:
 - Read: `file_path`

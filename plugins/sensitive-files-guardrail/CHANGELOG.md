@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -182,6 +182,36 @@ Codex round 2 で、上記 1 件目の修正自体に残っていた穴と、Run
   (major / minor / patch を問わない)**」+「リリースノートが permission mode に
   言及したとき」に書き換え、「この Runbook が唯一の検出手段であり、テストが green で
   あることは CLI が変わっていないことの証拠にならない」ことを明記した
+
+Codex round 3 で、その「唯一の検出手段」が**原理的に機能していない**ことが判明した。
+文面ではなく手順の構造を修正した:
+
+- **[R3] probe 手順が循環していて新 mode を発見できなかった**: 旧 step 3 は
+  「`default` / `auto` / `plan` / `acceptEdits` / `dontAsk` / `bypassPermissions`
+  のそれぞれで `date` を実行する」と**既知 6 値をハードコード**していた。採取される
+  envelope は必ず `_KNOWN_PERMISSION_MODES` から選んだ値の結果になるため、
+  step 4 の「列挙に無い値が出ていたら」という分岐は**到達不能**で、CLI が mode を
+  追加してもリポジトリは stale のままだった。R2 で「唯一の検出手段」と位置づけた
+  直後に、その手段が検出能力を持たないことが露呈した形。
+
+  手順の構造を変更した: **step 1 として「CLI が受け付ける mode を列挙する」
+  (`claude --help` の `--permission-mode` choices を読む) を新設**し、step 4
+  (旧 3) を「step 1 で列挙した mode を 1 つ残らず probe する」に書き換えて固定列挙を
+  撤去、step 5 (旧 4) の突合を**双方向**にした。差分の向きで対応を分ける —
+  「CLI 列挙にあって定数に無い」= 追加なので登録手順へ、「定数にあって CLI 列挙に
+  無い」= launch choice でないだけの可能性があるため **単純削除せず** envelope 実値を
+  確認する (`default` がこれに該当)。
+
+  **この修正により実際のドリフトが即座に露見した**: CLI **2.1.241** の
+  `--permission-mode` は **`manual`** を受け付けるが `_KNOWN_PERMISSION_MODES` に
+  無い (逆に `default` は choices に無いが envelope には出る)。旧手順ではこれを
+  発見できなかった。経緯を「Worked example: `manual` の取りこぼし」として docs に
+  記載し、Phase 0 実測ログにも 2026-08-24 / 2.1.241 の行を追加。
+  `tests/fixtures/envelopes/README.md` にも既知ドリフトとして明記した。
+  **`manual` は 0.19.1 では未追随** — 本リリースは docs 整合のみで
+  `_KNOWN_PERMISSION_MODES` / `LENIENT_MODES` は変更していない。登録と lenient 収録の
+  可否は envelope 実値の probe が要る (収録は判定境界の変更) ため
+  **`bd_092a232e-snw.28`** で対応する
 
 ### リリース手順への追加
 
