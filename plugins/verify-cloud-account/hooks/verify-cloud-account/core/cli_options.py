@@ -18,6 +18,23 @@ from __future__ import annotations
 import shlex
 from collections.abc import Collection
 
+_TRUE_VALUES = frozenset({"true", "t", "yes", "y", "1"})
+_FALSE_VALUES = frozenset({"false", "f", "no", "n", "0"})
+
+
+def _flag_value(value: str) -> str | bool:
+    """`--flag=<value>` の値を bool として解釈する (できなければ生文字列のまま)。
+
+    **剥がすかどうかの判定には使わない** (値に関わらず剥がす)。将来の flag 照合
+    (bd_092a232e-629.4) のために書かれた形を保つだけ。
+    """
+    v = value.strip().lower()
+    if v in _TRUE_VALUES:
+        return True
+    if v in _FALSE_VALUES:
+        return False
+    return value
+
 
 def strip_leading_options(
     candidate: str,
@@ -26,8 +43,12 @@ def strip_leading_options(
 ) -> tuple[str, dict[str, str | bool]]:
     """候補の CLI 名直後に並ぶ global option を剥がし (正規化後の候補, option dict) を返す。
 
-    - `--opt value` / `--opt=value` (with_value) と `--flag` (flags) を先頭から順に
-      消費する。`--` は option の終端 (それ自体も消費する)
+    - `--opt value` / `--opt=value` (with_value) と `--flag` / `--flag=<bool>` (flags)
+      を先頭から順に消費する。`--` は option の終端 (それ自体も消費する)。
+      boolean option の値は**剥がすかどうかに影響しない** (下記 `_flag_value`)
+    - 剥がすのは CLI 名直後の option だけで、その後ろの subcommand 列はそのまま
+      残る。つまり正規化しても「どの操作が走るか」は変わらないため、剥がし過ぎが
+      別の操作への誤判定になることはない
     - 未知の option (どちらの集合にも無い) や値の欠けた option に当たったら、値を取るか
       分からないのでそこで打ち切り **候補を変更せず**に返す (保守的: readonly / 切替
       判定に乗らず通常検証される)
@@ -60,8 +81,15 @@ def strip_leading_options(
             opts[name] = tokens[i + 1]
             i += 2
             continue
-        if name in flags and not eq:
-            opts[name] = True
+        if name in flags:
+            # boolean option は `--flag=true` / `--flag=false` の値付き形も取りうる
+            # (Go の pflag / cobra は bool に分離形 `--flag value` を許さず `=` 形のみ)。
+            # **値の真偽で剥がすかどうかを変えない** — 剥がす目的は後続の subcommand を
+            # 見つけることであって、flag の実効値は「どの操作が走るか」に影響しない。
+            # (Codex R5 P1-A: `kubectl --insecure-skip-tls-verify=true config
+            # use-context other` が剥がせず STATE_CHANGING に当たらず、切替後も
+            # 古い成功 cache が TTL 分残っていた)
+            opts[name] = _flag_value(value) if eq else True
             i += 1
             continue
         return candidate, {}

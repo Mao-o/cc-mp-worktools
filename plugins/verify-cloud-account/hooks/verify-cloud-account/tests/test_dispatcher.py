@@ -1485,6 +1485,16 @@ class TestLeadingGlobalOptions(BaseWithTmpProject):
             ("kubectl", "kubectl apply -f x.yaml", "kubectl --context foo config use-context other"),
             ("firebase", "firebase deploy", "firebase --project prod use other"),
             ("firebase", "firebase deploy", "firebase -P prod login"),
+            # boolean global flag の `=value` 形 (Codex R5 P1-A)。pflag/cobra は bool に
+            # 分離形を許さないためこれが正当な呼び出し形で、剥がせないと anchored な
+            # STATE_CHANGING に当たらず切替後も古い cache が TTL 分残る。
+            ("kubectl", "kubectl apply -f x.yaml",
+             "kubectl --insecure-skip-tls-verify=true config use-context other"),
+            ("kubectl", "kubectl apply -f x.yaml",
+             "kubectl --disable-compression=false config use-context other"),
+            ("gcloud", "gcloud run deploy", "gcloud --quiet=true config set project other"),
+            ("firebase", "firebase deploy", "firebase --debug=true use other"),
+            ("aws", "aws s3 cp a b", "aws --no-verify-ssl=true configure set region us-east-1"),
         ]
         for key, write, switch in rows:
             # cache dir を row ごとに作り直す (共有すると前 row の tombstone で
@@ -1505,6 +1515,10 @@ class TestLeadingGlobalOptions(BaseWithTmpProject):
         for switch in (
             "aws --profile prod eks update-kubeconfig --name c",
             "gcloud --project x container clusters get-credentials c --region r",
+            # release track 形 (Codex R5 P1-B)
+            "gcloud beta container clusters get-credentials c --region r",
+            "gcloud alpha container clusters get-credentials c --region r",
+            "gcloud --project x beta container clusters get-credentials c --region r",
         ):
             # `cache.invalidate("kubectl")` で前 subTest の cache を消していたが、
             # invalidate は tombstone も立てるため warm-up が publish できず vacuous

@@ -146,11 +146,39 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    値は将来の flag 照合 (629.4) 用に返し、deny 文面の検出コマンドには元の形を表示
    する。未知の option が先頭にあれば剥がさず通常検証 (保守的)。`--help` /
    `--version` は宣言しない (剥がすと `aws --version` が readonly から外れるため)。
+   **boolean flag の `--flag=<bool>` 形も剥がす** (Codex R5 P1-A) — Go の pflag /
+   cobra は bool に分離形 `--flag value` を許さず `=` 形のみ受け付けるため、
+   `kubectl --insecure-skip-tls-verify=true config use-context other` は正当な
+   呼び出し形。当初は `name in flags and not eq` として `=` 付きを「未知 option」
+   扱いで無変更にしており、STATE_CHANGING に当たらず切替後も古い成功 cache が
+   TTL 分残っていた。**値の真偽で剥がすかどうかは変えない** (剥がす目的は後続の
+   subcommand を見つけることで、flag の実効値は「どの操作が走るか」に影響しない)。
+   これは 629.2 の `--skip-ssh-key=false` (`github.is_readonly`) と同じ失敗形が
+   `cli_options` 側に残っていたもの。
 9. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
    再検証されない」注記と `export AWS_PROFILE` の記述を実装に合わせて更新、cache 節に
    「切替・ログイン系コマンドでの即時無効化」の表を追加、解析対象に「CLI 名直後の
    global option」を追記、既知の制限に「期待値以外への切替 + write を同一コマンドで
    実行すると実行前の状態で検証される」を追記。
+10. **gcloud の release track 形を READONLY / STATE_CHANGING に含める**
+    (Codex R5 P1-B + 自己 sweep) — gcloud はほぼ全てのコマンドを `alpha` / `beta`
+    (一部 `preview`) でも公開しており、同じ操作が同じ副作用で走る。anchored pattern を
+    GA 形だけで書いていたため track 形がすり抜けていた。Codex の指摘は cross-CLI の
+    `gcloud beta container clusters get-credentials` (kubectl の cache を破棄すべき形)
+    だったが、自己 sweep の結果 **gcloud 自身の STATE_CHANGING 全パターンが同じ穴**
+    だった: `gcloud beta config set project other` が切替として検出されず、warm な
+    成功 cache が残ったまま次の `gcloud run deploy` が通っていた。共有の
+    `_TRACK = r"(?:(?:alpha|beta|preview)\s+)?"` を READONLY (`auth list` /
+    `config get-value` / 認証取得系) と STATE_CHANGING (`config set|unset` /
+    `configurations activate|create` / `auth` 系 / `init`) の各 anchored pattern に
+    入れ、kubectl 側の cross-CLI pattern には `(?:(?:alpha|beta)\s+)?` を入れた。
+    track × command の実在は SDK 生成物 `data/cli/gcloud_completions.py` の
+    command tree で確認 (config / init は alpha・beta・preview、auth 系と
+    container clusters get-credentials は alpha・beta)。存在しない組に当たっても
+    実行が失敗するだけなので prefix は全パターンで統一した。
+    **資格情報を出力する `auth print-access-token` /
+    `auth application-default print-access-token` は track 形でも READONLY にしない**
+    (0.8.0 の carve-out を track 追加で広げていないことをテストで固定)。
 
 ### 非互換性
 

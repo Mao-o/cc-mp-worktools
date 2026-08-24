@@ -41,6 +41,47 @@ class TestStripLeadingOptions(unittest.TestCase):
             {"--debug": True, "--region": "us-east-1", "--no-verify-ssl": True, "--profile": "prod"},
         )
 
+    def test_boolean_flag_with_explicit_value_is_stripped(self):
+        """boolean option の `--flag=<bool>` 形も剥がす (Codex R5 P1-A)。
+
+        Go の pflag / cobra は bool に分離形 `--flag value` を許さず `=` 形のみ
+        受け付けるため、`--flag=true` は正当な呼び出し形。値の真偽で剥がすかどうかを
+        変えない (剥がす目的は後続の subcommand を見つけることなので値は無関係)。
+        """
+        for cmd, want_value in (
+            ("aws --debug=true configure sso", True),
+            ("aws --debug=false configure sso", False),
+            ("aws --debug=TRUE configure sso", True),
+            ("aws --debug=1 configure sso", True),
+            ("aws --debug=0 configure sso", False),
+            ("aws --debug=yes configure sso", True),
+            ("aws --debug=no configure sso", False),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(
+                    self._strip(cmd), ("aws configure sso", {"--debug": want_value})
+                )
+
+    def test_boolean_flag_with_unparsable_value_is_still_stripped(self):
+        """bool として読めない値でも剥がす (値は生文字列で保持)。
+
+        剥がさないと候補が正規化されず、anchored な READONLY / STATE_CHANGING を
+        すり抜ける — R5 P1-A の失敗形そのもの。
+        """
+        self.assertEqual(
+            self._strip("aws --debug=maybe configure sso"),
+            ("aws configure sso", {"--debug": "maybe"}),
+        )
+
+    def test_boolean_flag_equals_form_mixed_with_value_options(self):
+        norm, opts = self._strip(
+            "aws --debug=false --profile prod --no-verify-ssl=true configure sso"
+        )
+        self.assertEqual(norm, "aws configure sso")
+        self.assertEqual(
+            opts, {"--debug": False, "--profile": "prod", "--no-verify-ssl": True}
+        )
+
     def test_short_option(self):
         self.assertEqual(
             self._strip("firebase -P prod use other"),
@@ -54,11 +95,16 @@ class TestStripLeadingOptions(unittest.TestCase):
         )
 
     def test_unknown_option_leaves_candidate_unchanged(self):
-        # 値を取るか分からない option に当たったら保守的に無変更 (通常検証に落ちる)
+        # 値を取るか分からない option に当たったら保守的に無変更 (通常検証に落ちる)。
+        # **宣言済みの flag に `=value` が付いた形はここには入らない** — 以前は
+        # `aws --debug=true ...` を「未知 option」として無変更にしており、それが
+        # Codex R5 P1-A (`kubectl --insecure-skip-tls-verify=true config use-context`
+        # が STATE_CHANGING をすり抜ける) の作り込み地点だった。
+        # 宣言済み flag の値付き形は test_boolean_flag_with_explicit_value_is_stripped。
         for cmd in (
             "aws --unknown sso login",
             "aws --profile prod --unknown sso login",
-            "aws --debug=true sso login",
+            "aws --unknown=true sso login",
             "aws -x sso login",
         ):
             with self.subTest(cmd=cmd):

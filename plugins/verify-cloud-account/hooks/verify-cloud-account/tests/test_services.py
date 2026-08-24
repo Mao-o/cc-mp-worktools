@@ -759,6 +759,23 @@ class TestAuthCommandPatterns(unittest.TestCase):
             (gcloud, "gcloud auth revoke"),
             (gcloud, "gcloud auth application-default login"),
             (gcloud, "gcloud init"),
+            # release track 形も同じ操作が同じ副作用で走る (Codex R5 P1-B の自己 sweep)。
+            # 実在は SDK 生成物 data/cli/gcloud_completions.py の command tree で確認
+            # (config/init は alpha・beta・preview、auth 系は alpha・beta)。
+            (gcloud, "gcloud beta config set project x"),
+            (gcloud, "gcloud alpha config set project x"),
+            (gcloud, "gcloud preview config set project x"),
+            (gcloud, "gcloud beta config unset project"),
+            (gcloud, "gcloud alpha config configurations activate w"),
+            (gcloud, "gcloud beta config configurations create w"),
+            (gcloud, "gcloud beta auth login"),
+            (gcloud, "gcloud alpha auth login"),
+            (gcloud, "gcloud beta auth revoke"),
+            (gcloud, "gcloud beta auth activate-service-account --key-file=k"),
+            (gcloud, "gcloud alpha auth application-default login"),
+            (gcloud, "gcloud beta init"),
+            (kubectl, "gcloud beta container clusters get-credentials c --region r"),
+            (kubectl, "gcloud alpha container clusters get-credentials c --region r"),
             (firebase, "firebase use prod"),
             (firebase, "firebase use --clear"),
             (firebase, "firebase use --add"),
@@ -878,6 +895,22 @@ class TestAuthCommandPatterns(unittest.TestCase):
             (gcloud, "gcloud auth application-default print-access-token", False),
             (gcloud, "gcloud auth print-access-token", False),
             (gcloud, "gcloud config set project x", False),
+            # release track 形も GA 形と同じ扱いに揃える (Codex R5 P1-B の自己 sweep)
+            (gcloud, "gcloud beta auth login", True),
+            (gcloud, "gcloud alpha auth login", True),
+            (gcloud, "gcloud beta auth application-default login", True),
+            (gcloud, "gcloud beta auth activate-service-account --key-file=k", True),
+            (gcloud, "gcloud alpha auth revoke", True),
+            (gcloud, "gcloud beta auth list", True),
+            (gcloud, "gcloud beta config get-value project", True),
+            # **資格情報を出力するコマンドは track 形でも検証対象のまま**
+            # (CHANGELOG 0.8.0 の carve-out を track 追加で広げていないことの固定)
+            (gcloud, "gcloud beta auth print-access-token", False),
+            (gcloud, "gcloud alpha auth print-access-token", False),
+            (gcloud, "gcloud beta auth application-default print-access-token", False),
+            (gcloud, "gcloud beta config set project x", False),
+            # `init` の \b が別コマンドを巻き込まない
+            (gcloud, "gcloud beta interactive", False),
             (firebase, "firebase login", True),
             (firebase, "firebase login:ci", True),
             (firebase, "firebase logout", True),

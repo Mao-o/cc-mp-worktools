@@ -22,7 +22,11 @@ STATE_CHANGING = [
     # 全候補に当てるため、これらの直後の kubectl write も再検証される。
     r"^kubectl\s+ctx\b",
     r"^kubectx\b",
-    r"^gcloud\s+container\s+clusters\s+get-credentials\b",
+    # gcloud は同じコマンドを alpha / beta でも公開しており、どちらも kubeconfig を
+    # 更新して current context を変える (SDK 生成物 `data/cli/gcloud_completions.py`
+    # の command tree で `beta`/`alpha` 配下の実在を確認。preview 形は無い)。
+    # GA 形だけを anchor していると track 形が無効化をすり抜ける (Codex R5 P1-B)。
+    r"^gcloud\s+(?:(?:alpha|beta)\s+)?container\s+clusters\s+get-credentials\b",
     r"^aws\s+eks\s+update-kubeconfig\b",
     r"^az\s+aks\s+get-credentials\b",
 ]
