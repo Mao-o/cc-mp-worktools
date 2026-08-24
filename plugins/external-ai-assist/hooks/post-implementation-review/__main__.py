@@ -83,8 +83,9 @@ MAX_REVIEW_PATHS = 60
 # パス単位 diff 収集の時間予算。Stop の hook timeout 690s のうち cursor が上限 600s
 # (`cursor.MAX_TIMEOUT_SEC`。既定は 300s だが env で伸ばせるので上限で見る) +
 # kill 猶予 15s (3 × KILL_GRACE_SEC) を使うため、git に回せるのは約 75s。他の git 呼び出し
-# (rev-parse 2 + ls-files 10 + rev-parse 2) を引いた残りに収まるよう決めている
-# (式は tests/test_review_set.py::TestTimeoutBudgets で固定)。
+# (rev-parse 2 × 2 + ls-files 10 × 2 [symlink_map と untracked_among] + 予算判定後に走る
+# 最後の 1 パスの path_diff 5) を引いた残りに収まるよう決めている
+# (式は tests/test_review_set.py::TestTimeoutBudgets で固定。合計 59s)。
 COLLECT_BUDGET_SEC = 30
 
 # systemMessage / stderr に列挙するファイル名の上限 (それ以上は件数だけ)
@@ -384,21 +385,34 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
 
 
 def _count_changed_lines(sections: list[str]) -> int:
-    """diff の追加・削除行数を数える (`+++ ` / `--- ` のファイルヘッダは除く)。
+    """diff の追加・削除行数を数える。
 
     しきい値の単位を「ファイル数」ではなく行数にしているのは、typo 1 行の修正と
     1 ファイル 300 行の書き換えを区別したいのがチケットの主旨 (zh5.22) だから。
 
-    **ヘッダ判定には末尾の空白を含める**。unified diff のファイルヘッダは必ず
-    `--- a/path` / `+++ b/path` の形 (パスの前に空白) だが、`--` で始まる中身の行
-    (CLI オプションの説明、SQL コメント等) を削除すると `---foo` になる。空白を
-    見ないと、そういう行だけを消した差分が 0 行と数えられて MIN_LINES に引っかかり、
-    実質的な変更が黙って skip される。
+    **接頭辞でファイルヘッダを判別してはいけない**。`sections` の 1 要素は
+    `gitscan.path_diff` が返す 1 ファイル分の diff なので、`--- a/path` /
+    `+++ b/path` は必ず最初の `@@` より前に来る。逆に `@@` より後ろでは:
+
+    - `-- コメント` (SQL / Lua / Haskell) を削除した行が `--- コメント`
+    - `++ 何か` を追加した行が `+++ 何か`
+
+    になり、`"--- "` / `"+++ "` で弾くと中身の行まで落ちる。「SQL のコメント行
+    だけ消したターン」が 0 行と数えられ、`MIN_LINES` に引っかかって実質的な変更が
+    黙って skip される (最初の実装は `"---"` / `"+++"`、次が `"--- "` / `"+++ "`。
+    どちらも中身の行と区別できていなかった — 接頭辞では原理的に無理)。
+
+    **最初の `@@` 以降だけを数える**のが唯一の正確な方法。hunk ヘッダ自体は `@`
+    始まりなので数に入らず、中身がどんな文字列でも誤判定しない。`@@` を含まない
+    section (binary 差分など) は 0 行。
     """
     total = 0
     for section in sections:
+        in_hunk = False
         for line in section.splitlines():
-            if line.startswith(("+++ ", "--- ")):
+            if not in_hunk:
+                # ヘッダ領域 (`diff --git` / `index` / `---` / `+++`) を読み飛ばす
+                in_hunk = line.startswith("@@")
                 continue
             if line.startswith(("+", "-")):
                 total += 1

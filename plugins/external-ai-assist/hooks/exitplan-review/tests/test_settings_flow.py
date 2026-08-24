@@ -83,6 +83,25 @@ class TestReviewerSelection(HookTestCase):
         self.assertIn("gemini", data["systemMessage"])
 
 
+class TestSlotExhaustionNotice(HookTestCase):
+    """上限到達で黙って素通りしないこと (この batch が潰そうとしている「無言」そのもの)。"""
+
+    def test_cap_reached_tells_the_user(self):
+        os.environ["EXTERNAL_AI_REVIEW_MAX"] = "1"
+        self.assertBlocked(self.exitplan(SESSION, PLAN + "\n1 回目\n", FINDINGS, FINDINGS))
+
+        output = self.exitplan(SESSION, PLAN + "\n2 回目\n", FINDINGS, FINDINGS)
+        message = self.assertNotBlocked(output).get("systemMessage", "")
+        self.assertIn("EXTERNAL_AI_REVIEW_MAX=1", message)
+        self.assertIn("見送り", message)
+        self.assertEqual(self.cursor_calls, [], "上限到達なのにレビュアーが走った")
+
+    def test_same_plan_recheck_stays_quiet(self):
+        """同一プランの再確認は結果が変わらないので黙る (通知がノイズにならない)。"""
+        self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS))
+        self.assertEqual(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS), "")
+
+
 class TestContextMode(HookTestCase):
     """`EXTERNAL_AI_PLAN_REVIEW_MODE=context` は差し戻さず所見だけ渡す。"""
 

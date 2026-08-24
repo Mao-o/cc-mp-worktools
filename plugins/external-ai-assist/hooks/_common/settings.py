@@ -75,15 +75,21 @@ def duration(name: str, default: float, maximum: float) -> float:
 
 
 def count(name: str, default: int = 0) -> int:
-    """非負整数。未設定・非数値は `default`、負数は 0。`0` は「無効」を意味させてよい。"""
+    """非負整数。未設定・非数値は `default`、負数は 0。`0` は「無効」を意味させてよい。
+
+    `int()` ではなく `float()` を通してから丸める。`int("600.0")` / `int("6e2")` は
+    `ValueError` になるため、`int()` だけだと `COOLDOWN_SEC=1800.0` のような書き方が
+    `default` (= 0 = 無効) に落ちて **設定したつもりの抑制が黙って効かない**。
+    `duration()` は同じ文字列を受け付けるので、揃えないと変数ごとに解釈が変わる。
+    """
     value = raw(name)
     if not value:
         return default
     try:
-        parsed = int(value)
+        parsed = float(value)
     except ValueError:
         return default
-    return max(0, parsed)
+    return max(0, int(parsed))
 
 
 def names(name: str) -> list[str] | None:

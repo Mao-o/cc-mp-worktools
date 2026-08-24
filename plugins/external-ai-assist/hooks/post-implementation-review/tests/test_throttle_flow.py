@@ -70,6 +70,36 @@ class TestMinLines(HookTestCase):
         )
         self.assertEqual(count, 3)
 
+    def test_comment_lines_with_space_are_counted(self):
+        """`-- コメント` (SQL / Lua / Haskell) の削除は `--- コメント` になる。
+
+        接頭辞 `"--- "` / `"+++ "` で弾くとここが 0 行になり、コメントだけ消した
+        ターンが `MIN_LINES` に引っかかって黙って skip される。接頭辞では中身の行と
+        ファイルヘッダを原理的に区別できないので、最初の `@@` 以降だけを数える。
+        """
+        count = self.entry._count_changed_lines(
+            [
+                "diff --git a/q.sql b/q.sql\nindex 111..222 100644\n"
+                "--- a/q.sql\n+++ b/q.sql\n@@ -1,4 +1,3 @@\n"
+                "--- 旧コメント A\n"  # `-- 旧コメント A` の削除
+                "--- 旧コメント B\n"  # `-- 旧コメント B` の削除
+                "+++ 新コメント C\n"  # `++ 新コメント C` の追加
+                " unchanged\n"
+            ]
+        )
+        self.assertEqual(count, 3)
+
+    def test_multiple_hunks_and_no_hunk_sections(self):
+        two_hunks = (
+            "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n-a\n+b\n"
+            "@@ -10,2 +10,2 @@\n-c\n+d\n"
+        )
+        self.assertEqual(self.entry._count_changed_lines([two_hunks]), 4)
+        # binary 差分など hunk を持たない section は 0 行
+        self.assertEqual(
+            self.entry._count_changed_lines(["Binary files a/x.png and b/x.png differ\n"]), 0
+        )
+
     def test_content_lines_starting_with_dashes_are_counted(self):
         """`--` で始まる中身の行を消すと `---foo` になる。ヘッダと取り違えないこと。
 

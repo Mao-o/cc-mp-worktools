@@ -98,6 +98,13 @@ class TestCount(SettingsTestCase):
         self.set("many")
         self.assertEqual(settings.count(VAR, 2), 2)
 
+    def test_float_spellings_are_accepted_like_duration(self):
+        """`int()` だけだと `1800.0` が既定 (= 0 = 無効) に落ち、抑制が黙って効かない。"""
+        for value, expected in (("1800.0", 1800), ("6e2", 600), ("20.9", 20)):
+            with self.subTest(value=value):
+                self.set(value)
+                self.assertEqual(settings.count(VAR, 2), expected)
+
 
 class TestNames(SettingsTestCase):
     def test_unset_is_none(self):

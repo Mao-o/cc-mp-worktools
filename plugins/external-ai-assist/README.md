@@ -53,7 +53,9 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 
 両者のプロンプトは `hooks/exitplan-review/prompts/planning-{cursor,codex}.md` に外部化されている。出力は 5 項目立ての箇条書きに固定され、ノイズが少ない。
 
-- **セッション × プラン単位で最大 N 回ブロック** (既定 2 回、`EXTERNAL_AI_REVIEW_MAX` で変更可。`0` で無効化)
+- **セッション × プラン単位で最大 N 回レビュー** (既定 2 回、`EXTERNAL_AI_REVIEW_MAX` で変更可。
+  `0` で無効化)。`MODE=block` ではこれが差し戻し回数の上限。上限に達したターンは
+  「見送った」旨を `systemMessage` で通知する (黙って素通りしない)
 - プラン内容の SHA-256 ハッシュ (先頭 2000 文字の正規化版) で同一性判定
 - レビュー結果は `$TMPDIR/plan-review-<session_id>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
@@ -215,7 +217,7 @@ EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW
 | `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` | `600` | 両レビュアー共通の timeout (秒)。上限 `1500` (hooks.json の hook timeout で決まる。超える指定は clamp) |
 | `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` | 全件 | 走らせるレビュアーをカンマ区切りで選択 (例: `cursor`)。未知の名前だけを指定した場合は何も走らせない (既定へ fallback しない) |
 | `EXTERNAL_AI_PLAN_REVIEW_MODE` | `block` | `context` にすると差し戻さず、レビュー所見を `additionalContext` で Claude に渡すだけにする |
-| `EXTERNAL_AI_REVIEW_MAX` | `2` | セッション × プラン単位の最大ブロック回数。`0` で無効化 (0.2.0 からの名前。`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く) |
+| `EXTERNAL_AI_REVIEW_MAX` | `2` | セッションあたりの**最大レビュー回数**。`0` で無効化 (0.2.0 からの名前。`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く)。`MODE=block` では「差し戻す回数」と同義。`MODE=context` では差し戻さないので「所見を出す回数」の上限として効く。上限に達したターンは `systemMessage` でその旨を通知する |
 
 **待ち時間の見積り**: 承認前の待ちは最悪 `EXTERNAL_AI_REVIEW_MAX` × timeout。既定では
 2 × 10 分 = 20 分 (レビュアーは並列なので合計ではなく最大側)。`EXTERNAL_AI_REVIEW_MAX=1`

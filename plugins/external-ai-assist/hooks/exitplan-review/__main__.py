@@ -163,27 +163,40 @@ def _read_marker(f) -> tuple[str, int]:
     return saved_hash, count
 
 
-def reserve_slot(marker_file: str, current_hash: str, max_reviews: int) -> bool:
-    """ロック下で原子的にスロットを確保する。
+def reserve_slot(
+    marker_file: str, current_hash: str, max_reviews: int
+) -> tuple[bool, str | None]:
+    """ロック下で原子的にスロットを確保し `(確保できたか, 利用者向け通知)` を返す。
 
-    確保成功時は count を +1 して current_hash を書き込み True を返す。並行起動時も
+    確保成功時は count を +1 して current_hash を書き込む。並行起動時も
     `EXTERNAL_AI_REVIEW_MAX` を超えた確保は起きない。レビュー結果が REVIEW_CLEAN /
     reviewer 失敗の場合は release_slot() で枠を戻す。
+
+    **確保できない 2 つの理由は利用者から見て意味が違う**ので通知を分ける:
+
+    - **上限到達**: 利用者はレビューを期待しているのに走らない → 通知する。
+      黙って素通りすると「レビューが動かなくなった」と見え、この batch が潰そうと
+      している「無言」そのものになる
+    - **同一プランで再確認**: 直前と同じ内容なので結果は変わらない。毎回通知すると
+      ノイズにしかならない → 黙る (stderr にだけ残す)
     """
     try:
         with flock.locked_file(marker_file) as f:
             saved_hash, count = _read_marker(f)
             if count >= max_reviews:
                 log(f"レビュー回数上限 ({max_reviews}) に達した")
-                return False
+                return False, (
+                    f"{ENV_MAX_REVIEWS}={max_reviews} に達したためレビューを見送り "
+                    "(このセッションでは以後プランを差し戻しません)"
+                )
             if saved_hash == current_hash:
                 log("同一内容でレビュー済み")
-                return False
+                return False, None
             flock.rewrite(f, f"{current_hash}\n{count + 1}")
-            return True
+            return True, None
     except OSError as e:
         log(f"マーカー read/write 失敗: {e}")
-        return False
+        return False, None
 
 
 def release_slot(marker_file: str, reserved_hash: str) -> None:
@@ -341,7 +354,10 @@ def main() -> None:
     marker_file = os.path.join(marker_dir, f"{session_id}.exitplan.marker")
     current_hash = plan_hash(plan_stripped)
 
-    if not reserve_slot(marker_file, current_hash, max_reviews):
+    reserved, slot_notice = reserve_slot(marker_file, current_hash, max_reviews)
+    if not reserved:
+        if slot_notice:
+            notices.append(slot_notice)
         emit({}, notices)
         sys.exit(0)
 
