@@ -109,6 +109,39 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
+### 6. `docs/MAINTAINING.md` の記述を実態に合わせて訂正 (PR #45 Codex review P2 ×3)
+
+新設した保守者ガイドに、repo の実態と食い違う記述が 3 箇所あった。いずれも
+「ガイドを信じた保守者が損をする」ものなので docs のみで訂正した。
+
+- **テスト実行手順の `cd` 連鎖が壊れていた**: plugin root から 2 ブロックを続けて
+  貼ると、1 つ目の裸 `cd` でシェルが `hooks/redact-sensitive-reads` に残り、
+  2 つ目の `cd hooks/check-sensitive-files` がその下に解決されて "No such file or
+  directory" で失敗する (= check の 79 件が黙って走らない)。両ブロックを
+  サブシェル `(cd ... && python3 -m unittest discover tests)` 形式に変更し、
+  `find hooks -type d -name tests` を回す一括実行例も追加した。書き直した
+  ブロックを逐語コピーで実行し、827 / 79 とも green・実行後も cwd が plugin root
+  のままであることを実測確認済み
+- **CLI 再実測 Runbook の突合手順が嘘だった**: 「`TestLenientModesSubset` が red に
+  なれば CLI が新 mode を追加したサイン」は誤り。同テストが検査するのは
+  `LENIENT_MODES - _KNOWN_PERMISSION_MODES` という **リポジトリ内の静的定数どうしの
+  包含関係**だけで、採取した envelope を一切参照しない。CLI が新しい
+  `permission_mode` を返し始めても suite は green のままでシグナルにならない。
+  step 4 を「probe 値を `_KNOWN_PERMISSION_MODES` (現行 6 値) と人手で直接突合する」
+  に書き換え、`test_known_modes_contains_six_canonical_entries` は列挙を追加した
+  **後**に red になる「更新漏れ検知」であって CLI 変化の検知ではない旨と、
+  期待件数の更新手順を明記した
+- **テストの HOME 隔離の保証が嘘だった**: 「`HOME` / `XDG_CONFIG_HOME` は tmpdir に
+  差し替えて実ホームを汚染しない」は事実と異なる。共有の `tests/_testutil.py` は
+  `sys.path` を操作するだけで env を触らず、隔離は個々のテストクラスが
+  `mock.patch.dict(os.environ, ...)` で適用しているにすぎない。さらに
+  `patterns.local.txt` / stop-ack state が `Path.home()` を**関数内**で解決するのに
+  対し `core/logging.py::LOG_PATH` は **import 時**に確定するため、env を差し替えても
+  ログの向き先は変わらない (tmpdir に逃がしているのは
+  `mock.patch.object(L, "LOG_PATH", ...)` を使う `test_logging.py` のみ)。実態に
+  即した記述へ置換し、「ログ規則」節の既知課題と整合させた。**隔離の実装自体は
+  本リリースでは未対応** (docs のみの整合。実装は follow-up)
+
 ### リリース手順への追加
 
 `docs/MAINTAINING.md` の「リリース手順」に docs 整合チェックを追加した:

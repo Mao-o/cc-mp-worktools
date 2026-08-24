@@ -158,19 +158,44 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
 
 ## テスト実行
 
+plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` は必ず
+サブシェル `( ... )` に閉じ込める** — 裸の `cd` を続けて貼ると 1 つ目の後に
+シェルが `hooks/redact-sensitive-reads` に残り、2 つ目が
+`hooks/redact-sensitive-reads/hooks/check-sensitive-files` に解決されて
+"No such file or directory" になる (= 79 件の suite が黙って走らない)。
+
 ```bash
 # redact-sensitive-reads (0.19.1 時点 827 件)
-cd hooks/redact-sensitive-reads
-python3 -m unittest discover tests
+(cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
 # check-sensitive-files (0.19.1 時点 79 件、tmpdir に git repo を作って検査)
-cd hooks/check-sensitive-files
-python3 -m unittest discover tests
+(cd hooks/check-sensitive-files && python3 -m unittest discover tests)
+```
+
+両 suite を一括で回すなら (現状 `tests/` は上記 2 つだけ):
+
+```bash
+for d in $(find hooks -type d -name tests); do
+  (cd "$(dirname "$d")" && python3 -m unittest discover tests)
+done
 ```
 
 - `tests/_testutil.py` が hook dir と `hooks/` を `sys.path` に挿入するため環境
-  変数の設定は不要。`HOME` / `XDG_CONFIG_HOME` は tmpdir に差し替えて実ホームを
-  汚染しない
+  変数の設定は不要。ただし `_testutil.py` がするのは `sys.path` の操作**だけ**で、
+  `HOME` / `XDG_CONFIG_HOME` の隔離はしない。隔離は必要なテストクラスが個別に
+  `mock.patch.dict(os.environ, ...)` で適用している (`test_patterns_loader.py` /
+  `test_bash_handler.py` / `test_edit_handler.py` / `test_e2e.py` /
+  `test_checker.py` / `test_main.py` / `test_stop_ack.py` ほか)
+- 隔離が効く範囲は解決タイミングで決まる。`patterns.local.txt` と stop-ack state
+  は `Path.home()` を**関数内**で解決するため env 差し替えが効く
+  (`_shared/patterns.py::_resolve_local_patterns_path` /
+  `check-sensitive-files/stop_ack.py::resolve_state_dir`)。一方
+  `core/logging.py::LOG_PATH` は **import 時**に `Path.home()` で確定するので、
+  後から `HOME` を差し替えても向き先は変わらない。tmpdir に逃がしているのは
+  `mock.patch.object(L, "LOG_PATH", ...)` を使う `test_logging.py` だけで、
+  それ以外のテストは実 `~/.claude/logs/redact-hook.log` に書きうる
+  (「ログ規則」節の既知課題と同じ根。新しいテストでログ書込を伴う経路を叩くなら
+  `LOG_PATH` 自体を patch すること)
 - marketplace の CI (`.github/workflows/validate.yml`) も同じコマンドを Python
   3.11+ で実行する。3.11 未満では `tomllib` 不在で TOML 系テストが fail する
 - テストを追加するときは既存の書式 (mode 5 列の envelope fixture、`_make_envelope`
@@ -260,17 +285,30 @@ sys.stdout.write("{}")
 (`--permission-mode <mode>` で起動するか、セッション内でモードを切り替える)。
 `/tmp/envelope-bash-*.json` の `permission_mode` の値を確認する。
 
-### 4. 結果をテスト回帰検知 assert と突合
+### 4. probe 値を `_KNOWN_PERMISSION_MODES` と直接突合する
 
-`tests/test_envelope_shapes.py::TestLenientModesSubset` が red になれば CLI が
-新しい mode を追加したサイン。red になったら:
+**テストは CLI の新 mode を自動検出しない。突合は人手で行う。**
+`tests/test_envelope_shapes.py::TestLenientModesSubset` が検査しているのは
+`LENIENT_MODES - _KNOWN_PERMISSION_MODES` が空か、という**リポジトリ内の静的な
+定数どうしの包含関係**だけで、採取した envelope は一切参照しない。CLI が新しい
+`permission_mode` を返し始めても suite は green のままで、シグナルにはならない。
+
+step 3 で採取した `/tmp/envelope-bash-*.json` の `permission_mode` の値を、
+`tests/test_envelope_shapes.py` の `_KNOWN_PERMISSION_MODES` (現在は `default` /
+`plan` / `acceptEdits` / `auto` / `dontAsk` / `bypassPermissions` の 6 値) と
+突き合わせる。列挙に無い値が出ていたら:
 
 1. 実測で確認した新 mode を `_KNOWN_PERMISSION_MODES` に追加
-2. autonomous として扱ってよいなら `LENIENT_MODES` にも追加 (Bash の静的解析
+2. `TestLenientModesSubset::test_known_modes_contains_six_canonical_entries` の
+   期待件数を新しい件数に更新する (テスト名にも件数が入っているので rename も)。
+   この assert が red になるのは step 1 を入れた**後**であって、CLI 変化の検知
+   ではない。列挙を増やしたのに関連 docs を直し忘れる事故を止めるための
+   「更新漏れ検知」と理解する
+3. autonomous として扱ってよいなら `LENIENT_MODES` にも追加 (Bash の静的解析
    不能ケースで allow に倒したいかを判断)
-3. `tests/fixtures/envelopes/README.md` の列挙を更新
-4. `docs/DESIGN.md` (LENIENT_MODES 方針) と `docs/MATRIX.md` の mode 列を更新
-5. 下の実測ログに実測日と CLI version を追記
+4. `tests/fixtures/envelopes/README.md` の列挙を更新
+5. `docs/DESIGN.md` (LENIENT_MODES 方針) と `docs/MATRIX.md` の mode 列を更新
+6. 下の実測ログに実測日と CLI version を追記
 
 ### 5. debug 差し戻し
 
