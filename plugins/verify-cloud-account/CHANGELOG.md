@@ -12,7 +12,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
 
 1. **認証取得系コマンドを検証スキップ (READONLY) に** (629.2) — `aws sso login` /
    `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
-   logout` / `refresh` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きない
+   logout` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きない
    形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https` (`-p https`) 付き)
    のみ。判定は regex ではなく `github.is_readonly()` が token 列を走査して flag の
    **実効 boolean** を解釈する (`--skip-ssh-key=false` / `--with-token=0` のような明示
@@ -30,10 +30,24 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    一致して検証され、SSO token 期限切れ等で `aws sts get-caller-identity` が失敗すると
    deny 文面が案内する `aws sso login --profile <profile>` 自体が deny され、Claude
    内で回復できなかった。`--with-token` / `--web` / `--key-file` 等のオプション付きも
-   資源に触らないため同じ扱い。accounts.local.json 未設定のプロジェクトでも deny
-   しない。認証情報を出力する `aws configure export-credentials` /
+   資源に触らないため同じ扱い。READONLY に載せた形については accounts.local.json
+   未設定のプロジェクトでも deny しない。認証情報を出力する
+   `aws configure export-credentials` /
    `gcloud auth application-default print-access-token` は `gh auth token` と同じく
    検証対象のまま。
+   **素通しの基準は「コマンド名」ではなく「リモートに何も書かないと証明できる形」**
+   — 名前で括るとオプション次第で write に化ける形まで巻き込むため、証明できない
+   ものは READONLY に載せず、regex で表せない場合は `is_readonly()` で実効値を
+   解釈する。この基準により **`gh auth refresh` は READONLY に含めない** — 保存済み
+   認証情報の権限を拡張・修正するコマンドで、`gh auth refresh --scopes admin:org`
+   のように CLI OAuth app の grant scope をアカウント側 (= リモート) で変更しうる
+   ため、期待外アカウントに対してはリモート write と同じ扱いにする。`refresh` だけは
+   READONLY から外れるので accounts.local.json 未設定なら他の write と同様に deny
+   される (deny 文面は `refresh` を案内しないので remediation loop にはならない)。
+   一方 `STATE_CHANGING` には残すため、実行後の成功 cache は従来どおり破棄される。
+   `gh auth logout` はローカル `hosts.yml` のエントリ削除、`gh auth setup-git` は
+   ローカル git config の credential.helper 設定で、いずれもアカウント側の OAuth
+   grant には触れないため READONLY のまま。
 2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (629.2) —
    `tests/test_dispatcher.py::TestRemediationGuidanceContract` が各 service の verify
    を mock せず subprocess だけ差し替えて実際の deny 文面 (不一致 / 未ログイン / 未設定
@@ -137,6 +151,9 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   cache を書かない (毎回再検証)。
 - 素の `gh auth login` (`--skip-ssh-key` / `--with-token` / `--git-protocol https` 無し)
   は 0.8.0 でも従来どおり検証対象 (readonly にしたのは上記 3 形のみ)。
+- `gh auth refresh` も 0.8.0 で readonly にはしない (従来どおり検証対象)。
+  accounts.local.json 未設定 / 期待アカウント以外がアクティブなら deny される。
+  `STATE_CHANGING` には含めるので成功 cache の即時破棄は従来どおり働く。
 
 ### 対象外 (別項で扱う)
 
@@ -156,8 +173,9 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
   cache しない、別 CLI 経由の kubeconfig 書換、`npx firebase-tools` 形、他 service
   非影響、`firebase use prod && firebase deploy`、表示系 readonly は cache 維持、
   未設定時の無効化)
-- `tests/test_dispatcher.py::TestLoginCommandsReadonly` 3 件 (ログイン系 27 コマンドが
-  検証なしで allow / 未設定でも allow / 類似 write・認証情報出力は従来どおり deny)
+- `tests/test_dispatcher.py::TestLoginCommandsReadonly` 3 件 (ログイン系 30 コマンドが
+  検証なしで allow / 未設定でも allow / 類似 write・認証情報出力・`gh auth refresh`
+  (裸形 / `-s repo` / `--scopes admin:org` / `--remove-scopes repo`) は従来どおり deny)
 - `tests/test_dispatcher.py::TestRemediationGuidanceContract` 14 件 (上記 2.)
 - `tests/test_services.py` に `TestAws` 5 件 (案内の順序と `export` 不在 / config から
   の profile 解決 / 認証情報なし / HOME 不能時に例外を漏らさない) +

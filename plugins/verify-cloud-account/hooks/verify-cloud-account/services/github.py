@@ -15,11 +15,27 @@ import subprocess
 PATTERNS = [r"^gh\b"]
 READONLY = [
     r"^gh\s+auth\s+(status|list)\b",
-    # 認証取得系 (logout / refresh / setup-git) はリポジトリ等の資源を変更せず、
-    # ローカルの認証状態を作るだけ。未ログイン・別アカウントのとき deny 文面が案内する
-    # login 自体が deny される remediation loop を防ぐ。直後の write は
-    # (STATE_CHANGING で成功 cache も破棄されるため) 次回 hook で再検証される。
-    r"^gh\s+auth\s+(logout|refresh|setup-git)\b",
+    # 認証系の素通しは「コマンド名で括る」のではなく **リモートに何も書かないと
+    # 証明できる形だけ** に絞る。名前で括ると、オプション次第で write に化ける形まで
+    # 巻き込む (PR #43 Codex R2: `gh auth login` の SSH 鍵アップロード /
+    # R3: `--skip-ssh-key=false` / R4: `gh auth refresh --scopes`)。
+    # 証明できないものは READONLY から外すか、
+    # regex で表せないなら `is_readonly()` で実効値を解釈する (下記 `_login_is_keyless`)。
+    # - `logout`: ローカルの hosts.yml からホストエントリを消すだけ。アカウント側の
+    #   OAuth grant は残る (revoke は GitHub の設定画面が必要)
+    # - `setup-git`: ローカル git config に credential.helper を書くだけ
+    # どちらも取りうるオプション (`--hostname` / `--user` / `--force`) を足しても
+    # ローカル設定の範囲を出ない。
+    # `gh auth refresh` は **外した** (Codex R4): 保存済み認証情報の権限を拡張・修正する
+    # コマンドで、`--scopes admin:org` のように CLI OAuth app の grant scope を
+    # アカウント側 (= リモート) で変更しうる。期待外アカウントに対しては
+    # リモート write と同じ扱いにし、通常の検証対象に戻す。STATE_CHANGING には
+    # 残すので、実行後の成功 cache は従来どおり破棄される。
+    # deny 文面が案内するのは `gh auth login --skip-ssh-key` / `gh auth switch` だけで
+    # logout / setup-git / refresh は案内しないため、外しても remediation loop に
+    # ならない。直後の write は (STATE_CHANGING で成功 cache も破棄されるため)
+    # 次回 hook で再検証される。
+    r"^gh\s+auth\s+(logout|setup-git)\b",
     # `gh auth login` は SSH git protocol を選ぶと既存の SSH 公開鍵を GitHub アカウントに
     # **アップロード**しうる (gh 2.96 `gh auth login --help`: SSH 選択時に鍵を検出して
     # アップロード、`--skip-ssh-key` で抑止)。期待外アカウントへの SSH login はリモート
@@ -28,9 +44,11 @@ READONLY = [
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
 ]
-# アクティブアカウント (hosts.yml) を変えうるコマンド。dispatcher が検出すると
-# github の成功 cache を破棄する。`switch` は期待値向きなら self-remediation で
-# 検証なし、期待値以外なら通常検証 (実行前の状態) だが、どちらも cache は残さない。
+# アクティブアカウント (hosts.yml) や認証情報の権限を変えうるコマンド。dispatcher が
+# 検出すると github の成功 cache を破棄する。`switch` は期待値向きなら
+# self-remediation で検証なし、期待値以外なら通常検証 (実行前の状態) だが、どちらも
+# cache は残さない。`refresh` は READONLY から外した後もここには残す — 外すと
+# `gh auth refresh --scopes ...` 成功後に古い成功 cache が TTL 分残ってしまう。
 STATE_CHANGING = [r"^gh\s+auth\s+(switch|login|logout|refresh)\b"]
 ACCOUNT_KEY = "github"
 SETUP_HINT = (

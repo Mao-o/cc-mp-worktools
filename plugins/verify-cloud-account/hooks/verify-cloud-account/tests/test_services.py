@@ -746,7 +746,10 @@ class TestAuthCommandPatterns(unittest.TestCase):
             (github, "gh auth switch --user x"),
             (github, "gh auth login"),
             (github, "gh auth logout"),
+            # readonly から外した後も STATE_CHANGING には残る (Codex R4 P1)。
+            # 外すと refresh 成功後に古い成功 cache が TTL 分残る。
             (github, "gh auth refresh"),
+            (github, "gh auth refresh --scopes admin:org"),
             (gcloud, "gcloud config set project x"),
             (gcloud, "gcloud config unset project"),
             (gcloud, "gcloud config configurations activate w"),
@@ -853,8 +856,13 @@ class TestAuthCommandPatterns(unittest.TestCase):
             (github, "gh auth login --with-token=false", False),
             (github, "gh auth login --skip-ssh-key=true", True),
             (github, "gh auth logout", True),
-            (github, "gh auth refresh -s repo", True),
             (github, "gh auth setup-git", True),
+            # `gh auth refresh` は保存済み認証情報の権限をアカウント側で拡張・修正
+            # しうる (`--scopes admin:org`) ため readonly にしない (Codex R4 P1)
+            (github, "gh auth refresh", False),
+            (github, "gh auth refresh -s repo", False),
+            (github, "gh auth refresh --scopes admin:org", False),
+            (github, "gh auth refresh --remove-scopes repo", False),
             (github, "gh auth switch --user x", False),
             (github, "gh auth token", False),
             (github, "gh repo create x", False),

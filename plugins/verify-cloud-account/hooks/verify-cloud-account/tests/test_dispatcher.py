@@ -1009,7 +1009,8 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
         "gh auth login -p https --web",
         "gh auth login --git-protocol=https --hostname ghe.example.com",
         "gh auth logout --hostname github.com",
-        "gh auth refresh -s repo",
+        # `gh auth refresh` はここに置かない (Codex R4 P1) —
+        # test_similar_write_commands_still_verified 側で deny を assert する
         "gh auth setup-git",
         "gcloud auth login",
         "gcloud auth login --update-adc",
@@ -1049,7 +1050,8 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
                 self.assertIsNone(dispatch(cmd, str(self.project_dir)))
 
     def test_similar_write_commands_still_verified(self):
-        """ログイン系に似た名前の write / 認証情報を出力する読取 / 期待値以外への切替は
+        """ログイン系に似た名前の write / 認証情報を出力する読取 / 期待値以外への切替 /
+        リモートの認可を変更しうる認証系 (`gh auth refresh` の scope 変更) は
         従来どおり検証される。"""
         self._write_accounts(self._ACCOUNTS)
         self._patch_all_verify_to_deny()
@@ -1069,6 +1071,12 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
             "gh auth login --git-protocol ssh --skip-ssh-key=false",
             "gh auth login --with-token=false < token.txt",
             "gh auth login -p https --git-protocol ssh",
+            # `gh auth refresh` はアカウント側の OAuth grant scope を変えうる
+            # (Codex R4 P1)。裸形・scope 指定のどちらも検証対象。
+            "gh auth refresh",
+            "gh auth refresh -s repo",
+            "gh auth refresh --scopes admin:org",
+            "gh auth refresh --remove-scopes repo",
             "gcloud config set project other",
             "gcloud auth application-default print-access-token",
             "firebase use other",

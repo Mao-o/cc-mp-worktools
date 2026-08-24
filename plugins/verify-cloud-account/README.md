@@ -164,7 +164,11 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
   サブコマンド含む) — project を変更しない認証操作。未ログインだと `firebase use`
   が認証必須で失敗して現在値を取れず、`firebase login` 自体が deny されるデッド
   ロックになるのを防ぐ (v0.7.3)
-- **認証取得系** (v0.8.0): `gh auth logout` / `refresh` / `setup-git`、
+- **認証取得系** (v0.8.0): `gh auth logout` / `setup-git`
+  (`logout` はローカル `hosts.yml` のエントリ削除、`setup-git` はローカル git config の
+  credential.helper 設定で、どちらもアカウント側には何も書かない。**`gh auth refresh` は
+  含まない** — 保存済み認証情報の権限を拡張・修正するコマンドで
+  `--scopes admin:org` のようにアカウント側の OAuth grant を変更しうるため通常検証する)、
   `gh auth login` は **SSH 鍵のアップロードが起きない形のみ** (`--skip-ssh-key` /
   `--with-token` / `--git-protocol https` (`-p https`) 付き。flag 文字列の有無ではなく
   実効 boolean を解釈し、`--skip-ssh-key=false` / `--with-token=0` のような明示 false や
@@ -432,6 +436,12 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
   対象外 (透過 wrapper のリストに `bash` は含めていない)
 - `kubectl --context foo ...` の `--context` オプション指定による実行時
   コンテキスト override は検出しない (現在のデフォルトコンテキストだけ照合)
+- 同様に、`gh auth <sub> --hostname <host>` / `--user <user>` のように**操作対象の
+  host / アカウントをオプションで指定する形**も照合しない。検証はあくまで現在の
+  アクティブアカウントに対して行うため、アクティブが期待値なら別 host / 別ユーザー
+  向けの操作 (例: `gh auth refresh --hostname ghe.example.com`) は allow される
+  (str 形式の期待値で複数 host にログインしている場合は dict 形式にすると
+  host ごとに照合できる)
 - subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外
 - 期待値以外への切替と write を**同一コマンド**で実行した場合
   (`gh auth switch --user other && gh pr create`) は、実行前の状態で検証されるため
