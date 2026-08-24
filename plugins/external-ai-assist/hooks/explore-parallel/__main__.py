@@ -5,6 +5,11 @@
               ANALYZERS を順に起動し、バックグラウンドで並走調査させる。
 --phase post: PostToolUse(Agent) で呼ばれる。ANALYZERS の結果を待機して回収し、
               複数アナライザの出力を結合して additionalContext で親 Claude に注入。
+
+`EXTERNAL_AI_EXPLORE_PARALLEL=0` で無効化できる (0.6.0)。**止めるのは pre だけ**で、
+post は常に回す — 直前のターンで起動済みのアナライザが居ると、post を止めた瞬間に
+バックグラウンドの cursor と pid / 結果ファイルが孤児になる。何も起動していなければ
+post は元から no-op (アナライザ未インストール時と同じ経路)。
 """
 from __future__ import annotations
 
@@ -19,14 +24,26 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import hooklog  # noqa: E402
+from _common import hooklog, settings  # noqa: E402
 
 import cursor  # noqa: E402
 
 # 新しいアナライザを追加するときは import と ANALYZERS に追記する
 ANALYZERS = [cursor]
 
+ENV_ENABLED = "EXTERNAL_AI_EXPLORE_PARALLEL"
+
 log = hooklog.make_logger("explore-parallel")
+
+
+def enabled() -> bool:
+    """`EXTERNAL_AI_EXPLORE_PARALLEL=0` で並走を止める (既定は有効)。
+
+    0.5.0 まではスイッチが無く、`cursor` を PATH から外す以外に止める手段が無かった。
+    exitplan-review / post-implementation-review とは独立に切れる
+    (`EXTERNAL_AI_REVIEW_MAX=0` は exitplan-review だけを止める)。
+    """
+    return settings.flag(ENV_ENABLED, default=True)
 
 
 def _main() -> None:
@@ -48,6 +65,9 @@ def _main() -> None:
         return
 
     if args.phase == "pre":
+        if not enabled():
+            log(f"{ENV_ENABLED}=0 により並走を skip")
+            return
         prompt = tool_input.get("prompt", "")
         if not prompt:
             return

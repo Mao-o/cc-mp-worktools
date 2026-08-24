@@ -23,7 +23,23 @@ for _p in (_HOOKS_DIR, _PKG_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from _common import settings  # noqa: E402  (sys.path 挿入後に import する)
+
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
+
+
+def clear_plugin_env(keep: dict | None = None) -> None:
+    """開発者 shell の `EXTERNAL_AI_*` を外す (`keep` に挙げたものだけ残す)。
+
+    「未設定時は従来どおり」の回帰テストは、開発者が shell で
+    `EXTERNAL_AI_POST_REVIEW_TIMEOUT` 等を export していると嘘になる。個別に列挙する
+    方式だと変数が増えるたびに漏れるので接頭辞で一掃する。`mock.patch.dict` は stop 時に
+    dict の中身を丸ごと元に戻すので、start した後に消したキーも自動で復元される。
+    """
+    keep = keep or {}
+    for key in [k for k in os.environ if k.startswith(settings.ENV_PREFIX)]:
+        if key not in keep:
+            del os.environ[key]
 
 # 開発者の ~/.gitconfig (color.ui=always / diff.external / diff.noprefix 等) でテストが
 # 揺れないよう、git にグローバル/システム設定を読ませない
@@ -92,17 +108,16 @@ class HookTestCase(unittest.TestCase):
         base = self._tmp.name
         self.tmpdir = os.path.join(base, "tmp")
         os.makedirs(self.tmpdir, exist_ok=True)
+        pinned = {
+            "EXTERNAL_AI_POST_REVIEW": "1",
+            "EXTERNAL_AI_POST_REVIEW_BASH_TRACKING": "1",
+            **NEUTRAL_EXCLUSION_ENV,
+        }
         self._env = mock.patch.dict(
-            os.environ,
-            {
-                "TMPDIR": self.tmpdir,
-                "EXTERNAL_AI_POST_REVIEW": "1",
-                "EXTERNAL_AI_POST_REVIEW_BASH_TRACKING": "1",
-                **NEUTRAL_EXCLUSION_ENV,
-                **HERMETIC_GIT_ENV,
-            },
+            os.environ, {"TMPDIR": self.tmpdir, **pinned, **HERMETIC_GIT_ENV}
         )
         self._env.start()
+        clear_plugin_env(keep=pinned)
 
         self.repo = init_repo(os.path.join(base, "repo"))
         self.entry = load_entry()
@@ -190,6 +205,18 @@ class HookTestCase(unittest.TestCase):
 
     def assertNotReviewed(self) -> None:
         self.assertEqual(self.review_calls, [], "cursor.review() が呼ばれてしまった")
+
+    def assertNotBlocked(self, output: str) -> str:
+        """block していないこと。返り値は `systemMessage` 本文 (無ければ "")。
+
+        0.6.0 から、ブロックしないターンでも所要時間と結果を `systemMessage` で出す
+        ようになったので、「出力が空」は非 block の判定基準として使えない。
+        """
+        if not output:
+            return ""
+        data = json.loads(output)
+        self.assertNotIn("decision", data, "block してはいけない出力に decision がある")
+        return data.get("systemMessage", "")
 
     def pending(self, session_id: str) -> list[str]:
         path = os.path.join(self.tmpdir, "post-implementation-review", "state", f"{session_id}.json")

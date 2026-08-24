@@ -38,6 +38,10 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 から。それ以前は書込可能な
 `-p` 単独で起動していた)。
 
+`EXTERNAL_AI_EXPLORE_PARALLEL=0` で止められる (0.6.0)。止まるのは**起動側 (pre) だけ**で、
+結果の回収 (post) は常に動く — 直前のターンで起動済みの Cursor Agent と一時ファイルを
+孤児にしないため。
+
 ### exitplan-review (クロスレビュー)
 
 `ExitPlanMode` 呼び出し時に Cursor と Codex を **並列実行** し、両者の出力を統合して `decision: block` で Claude に返す。
@@ -53,6 +57,17 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 - プラン内容の SHA-256 ハッシュ (先頭 2000 文字の正規化版) で同一性判定
 - レビュー結果は `$TMPDIR/plan-review-<session_id>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
+- **完了時に所要時間と結果を `systemMessage` で表示** (0.6.0)。
+  `[exitplan-review] クロスレビュー完了 (4分12秒): codex=clean, cursor=指摘あり → プランを差し戻し`。
+  レビュー本文は通知に含めない (差し戻し本文は `reason`、参照コピーは上記ファイル)
+- **`EXTERNAL_AI_PLAN_REVIEW_MODE=context` で非ブロック運用** (0.6.0、opt-in)。差し戻さずに
+  レビュー所見を `additionalContext` で Claude の文脈へ渡す。「差し戻し → プラン修正 →
+  再 ExitPlanMode で再度フルレビュー」の往復が消えるので、承認前の待ちが 1 ラウンド分になる。
+  **プランの承認ゲート自体は残る** (hook は `permissionDecision` を返さないので、
+  利用者がプランを見て承認する流れは変わらない)。この出力形は公式ドキュメントに直接の
+  記述が無いため既定にはしていない
+- レビュアーの選択 (`EXTERNAL_AI_PLAN_REVIEW_REVIEWERS`) と timeout
+  (`EXTERNAL_AI_PLAN_REVIEW_TIMEOUT`) は環境変数で調整する (0.6.0)
 - 「指摘なし」は `REVIEW_CLEAN` sentinel で判定する。コードフェンス・装飾行・「指摘なし」を
   述べる短い前置き 1 文は許容し、sentinel + 指摘本文は block する
   (判定規則は `hooks/_common/sentinel.py`。両 hook 共通)
@@ -91,6 +106,12 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
   (超えた分の hunk は、そのファイルの差分が変わるまでレビューされない)
 - 除外・繰り越し・切り詰めが起きたターンは、対象ファイル名と理由を `systemMessage` と
   stderr に出す (ファイルの内容は出さない)
+- **レビューを走らせたターンは所要時間と結果を `systemMessage` で表示** (0.6.0)。
+  `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (Claude に対応を依頼しました)`。
+  編集 0 件のターンは従来どおり無出力
+- **頻度を落とす設定** (0.6.0): `EXTERNAL_AI_POST_REVIEW_MIN_LINES` (変更行数のしきい値) と
+  `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` (前回レビューからの間隔)。どちらの見送りも
+  pending を消費しないので、貯まった変更は次のレビューへまとめて載る
 - レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id>.txt` にも保存
 - 状態ファイルは 48 時間で GC (旧 `$TMPDIR/post-review-markers/` の残骸も掃除する)
 
@@ -149,35 +170,108 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
 3. **観点の分離** — タイミングごとに担当観点を変え、プロンプトを外部ファイルに分離して保守性を確保
 4. **クロスレビュー時は並列実行** — Cursor と Codex を `ThreadPoolExecutor` で並行起動。片方だけ取れても block 成立
 5. **共通化は同型が出揃ってから** — hook 間で同型だった処理 (sentinel 判定 / 外部 CLI 起動 /
-   flock / ログ) は `hooks/_common/` に集約し、各 hook は `__main__.py` 冒頭で `hooks/` を
-   `sys.path` に載せて参照する (plugin root 内の相対配置なので cache コピーでも壊れない)。
-   hook 固有の状態機械は共通化しない
-6. **外部 CLI は独自 process group で起動** — timeout 時は `os.killpg` でグループごと停止
+   flock / ログ / 環境変数の解釈 / 通知の組み立て) は `hooks/_common/` に集約し、各 hook は
+   `__main__.py` 冒頭で `hooks/` を `sys.path` に載せて参照する (plugin root 内の相対配置なので
+   cache コピーでも壊れない)。hook 固有の状態機械は共通化しない
+6. **timeout の上限はコード側に持つ** — hook timeout は `hooks.json` の静的値なので、環境変数で
+   伸ばせる値には `MAX_TIMEOUT_SEC` の上限を設けて clamp する。超えるとハーネスの kill が
+   先に来て、枠を戻す / pending を戻すといった後始末に到達しない (各 hook の tests が式で固定)
+7. **待たせるなら結果を見せる** — exit 0 の hook の stderr は debug log にしか出ない。
+   数分ブロックする処理は完了時に `systemMessage` で所要時間と結果を出す
+   (書いてよい内容の線引きは `hooks/_common/notify.py`)
+8. **外部 CLI は独自 process group で起動** — timeout 時は `os.killpg` でグループごと停止
    (SIGTERM → 猶予 → SIGKILL) し、同じグループに居る孫プロセス (stdout を継承した
    helper 等) を取り残さない。killpg は reap 前の子にだけ送る (pid 再利用の誤送信防止)。
    kill 猶予は hooks.json の hook timeout に織り込んである (各 tests が式で固定)
-7. **外部 AI は読み取り専用で起動する** — cursor は `--mode plan`、codex は
+9. **外部 AI は読み取り専用で起動する** — cursor は `--mode plan`、codex は
    `exec -s read-only --ephemeral`。調査 (explore-parallel) もレビューも外部 AI に作業ツリーを
    書き換えさせない。cursor の起動 argv は `hooks/_common/cursorcli.readonly_argv` に一本化し、
    3 hook それぞれの偽 CLI テストが `--mode plan` を固定する
 
 ## 環境変数
 
-| 変数 | 既定値 | 意味 |
-|---|---|---|
-| `EXTERNAL_AI_REVIEW_MAX` | `2` | `exitplan-review` のセッション × プラン単位の最大ブロック回数。`0` で hook 自体を無効化 |
-| `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` の有効/無効。`0` / `false` / `off` で無効化 |
-| `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING` | `1` | Bash 経由の変更検出。`0` にすると Bash 前後の `git status` を打たなくなる (巨大 repo での軽量化用。`sed -i` 等の変更は拾えなくなる) |
-| `EXTERNAL_AI_POST_REVIEW_EXCLUDE` | — | `post-implementation-review` で外部に送らないファイルをカンマ区切り glob で追加 (例: `docs/, *.csv`)。既定除外に加算される。`!glob` は逆に「必ず送る」 (例: `!credentials-service/*`) |
-| `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
-| `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` | `0` | `1` でコード以外 (`.md` / `.txt` / `.csv` / `.pdf` / 画像等。一覧は上の除外規則) を外部に送らない |
-| `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
+命名規則は **`EXTERNAL_AI_<機能>` が on/off、`EXTERNAL_AI_<機能>_<設定>` がその機能の設定**。
+`<機能>` は hook 名に対応する (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `POST_REVIEW`)。
+解釈できない値は既定値に倒す (タイプミスで機能が黙って止まらない)。
 
-一時的に無効化したい場合は `0` を設定するのが手軽:
+### 機能の on/off (3 hook を独立に切れる)
+
+| 変数 | 既定値 | 対象 |
+|---|---|---|
+| `EXTERNAL_AI_EXPLORE_PARALLEL` | `1` | `explore-parallel` (0.6.0 で新設) |
+| `EXTERNAL_AI_PLAN_REVIEW` | `1` | `exitplan-review` (0.6.0 で新設) |
+| `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` |
+
+`0` / `false` / `off` / `no` が無効。全部止めるなら:
 
 ```bash
-EXTERNAL_AI_REVIEW_MAX=0 EXTERNAL_AI_POST_REVIEW=0 claude
+EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW=0 claude
 ```
+
+### exitplan-review
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` | `600` | 両レビュアー共通の timeout (秒)。上限 `1500` (hooks.json の hook timeout で決まる。超える指定は clamp) |
+| `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` | 全件 | 走らせるレビュアーをカンマ区切りで選択 (例: `cursor`)。未知の名前だけを指定した場合は何も走らせない (既定へ fallback しない) |
+| `EXTERNAL_AI_PLAN_REVIEW_MODE` | `block` | `context` にすると差し戻さず、レビュー所見を `additionalContext` で Claude に渡すだけにする |
+| `EXTERNAL_AI_REVIEW_MAX` | `2` | セッション × プラン単位の最大ブロック回数。`0` で無効化 (0.2.0 からの名前。`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く) |
+
+**待ち時間の見積り**: 承認前の待ちは最悪 `EXTERNAL_AI_REVIEW_MAX` × timeout。既定では
+2 × 10 分 = 20 分 (レビュアーは並列なので合計ではなく最大側)。`EXTERNAL_AI_REVIEW_MAX=1`
+で 10 分、`MODE=context` なら差し戻しの往復が無くなるので 1 ラウンド分だけになる。
+
+### post-implementation-review
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_POST_REVIEW_TIMEOUT` | `300` | cursor の timeout (秒)。上限 `600` (超える指定は clamp) |
+| `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` (無効) | 送る diff の変更行数がこれ未満のターンはレビューを見送る (typo 修正で有料レビューを走らせない) |
+| `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` (無効) | 前回レビュー完了から N 秒未満のターンはレビューを見送る (セッション単位) |
+| `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING` | `1` | Bash 経由の変更検出。`0` にすると Bash 前後の `git status` を打たなくなる (巨大 repo での軽量化用。`sed -i` 等の変更は拾えなくなる) |
+| `EXTERNAL_AI_POST_REVIEW_EXCLUDE` | — | 外部に送らないファイルをカンマ区切り glob で追加 (例: `docs/, *.csv`)。既定除外に加算される。`!glob` は逆に「必ず送る」 (例: `!credentials-service/*`) |
+| `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
+| `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` | `0` | `1` でコード以外 (`.md` / `.txt` / `.csv` / `.pdf` / 画像等。一覧は上の除外規則) を外部に送らない。**「docs だけの変更でレビューを走らせたくない」用途はこれで足りる** |
+| `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
+
+**見送り (`MIN_LINES` / `COOLDOWN_SEC`) は pending を消費しない**。見送った変更は捨てられず、
+次に走るレビューへまとめて載る。
+
+### コストの目安
+
+外部 AI CLI の課金は各サービス側で発生する (本 plugin は課金しない)。**呼び出し回数**は
+次のとおりで、料金は利用中のプラン・モデルによる:
+
+| hook | 起動タイミング | 1 セッションあたりの回数 |
+|---|---|---|
+| `explore-parallel` | `Explore` サブエージェント起動ごと | Explore の呼び出し回数と同じ |
+| `exitplan-review` | `ExitPlanMode` ごと (プラン内容が変わったときだけ) | 最大 `EXTERNAL_AI_REVIEW_MAX` 回 (既定 2) |
+| `post-implementation-review` | **編集のあったターンの Stop ごと** | ターン数に比例 (上限なし) |
+
+コストが効くのは 3 つ目。長時間セッションや `/loop` では毎ターン走るので、
+`EXTERNAL_AI_POST_REVIEW_MIN_LINES` / `_COOLDOWN_SEC` で頻度を落とすか、
+`EXTERNAL_AI_POST_REVIEW=0` で切る。1 回あたりに送る diff は最大 40 KB
+(`MAX_DIFF_BYTES`) に制限されている。
+
+### プロジェクト単位で切る
+
+環境変数はプロジェクトの `.claude/settings.json` の `env` に書ける (公式の `env` は
+「Set environment variables for every session and for the subprocesses Claude Code
+starts from it」で、hook コマンドはその subprocess に含まれる):
+
+```json
+{
+  "env": {
+    "EXTERNAL_AI_PLAN_REVIEW": "0",
+    "EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC": "1800"
+  }
+}
+```
+
+**project / local settings の `env` が適用されるのは「workspace を trust した後」か
+`-p` モードの起動時**である点に注意 (公式 docs 記載)。自分だけに効かせたいなら
+`.claude/settings.local.json`、全プロジェクトに効かせたいなら
+`~/.claude/settings.json` に書く。
 
 ## ファイル構成
 
@@ -192,6 +286,8 @@ external-ai-assist/
     │   ├── sentinel.py                     ← REVIEW_CLEAN 判定
     │   ├── subproc.py                      ← 外部 CLI 起動 (process group + timeout)
     │   ├── cursorcli.py                    ← cursor agent の存在確認 / 読み取り専用 (--mode plan) 起動 argv (3 hook 共通)
+    │   ├── settings.py                     ← EXTERNAL_AI_* のパーサ (命名規則と解釈を 3 hook で統一)
+    │   ├── notify.py                       ← systemMessage の組み立て (所要時間の書式 / 何を書いてよいか)
     │   ├── flock.py                        ← flock 付き read-modify-write
     │   ├── hooklog.py                      ← stderr ログ
     │   └── tests/
@@ -233,9 +329,11 @@ external-ai-assist/
 
 ```python
 # exitplan-review/gemini.py
-NAME = "gemini"
-TIMEOUT_SEC = 600
+NAME = "gemini"              # EXTERNAL_AI_PLAN_REVIEW_REVIEWERS で指定する名前
+TIMEOUT_SEC = 600            # 既定
+MAX_TIMEOUT_SEC = 1500       # env で伸ばせる上限 (hooks.json の hook timeout 内に収める)
 def is_available() -> bool: ...
+def timeout_sec() -> float: ...          # settings.duration(ENV_TIMEOUT, TIMEOUT_SEC, MAX_TIMEOUT_SEC)
 def review(plan_text: str) -> str | None: ...
 ```
 

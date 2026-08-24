@@ -95,7 +95,7 @@ class TestFencedCleanSentinel(HookTestCase):
     def test_fenced_clean_does_not_block_and_marks_reviewed(self):
         self.edit(SESSION_A, "a.txt", "v1\n")
         output = self.stop(SESSION_A, self.REAL_WORLD_CLEAN)
-        self.assertEqual(output, "", "clean なのに block している")
+        self.assertIn("指摘なし", self.assertNotBlocked(output), "clean なのに block している")
         self.assertReviewed("a.txt")
 
         # レビュー済みとして確定し、次ターンで同じ差分を再レビューしない
@@ -369,7 +369,8 @@ class TestExclusion(HookTestCase):
 
     def test_no_notice_when_nothing_is_excluded(self):
         self.edit(SESSION_A, "a.py", "v1\n")
-        self.assertEqual(self.stop(SESSION_A, "REVIEW_CLEAN"), "")
+        message = self.assertNotBlocked(self.stop(SESSION_A, "REVIEW_CLEAN"))
+        self.assertNotIn("除外", message, "何も除外していないのに除外通知が出ている")
 
     def test_env_glob_excludes_documents(self):
         os.environ[self.entry.exclusion.ENV_EXCLUDE] = "docs/, *.csv"
@@ -495,7 +496,8 @@ class TestExclusion(HookTestCase):
                 f.write('{"k": 2}\n')
 
         self.bash(SESSION_A, "tu_sed", mutate)
-        self.assertEqual(self.stop(SESSION_A, "REVIEW_CLEAN"), "", "通知なし = 出力なし")
+        message = self.assertNotBlocked(self.stop(SESSION_A, "REVIEW_CLEAN"))
+        self.assertNotIn("除外", message, "symlink が無いのに除外通知が出ている")
         self.assertReviewed("ordinary/data.json", '"k": 2')
 
     def test_stale_state_from_older_version_is_drained(self):

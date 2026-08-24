@@ -11,8 +11,53 @@
 マーカーの read→判定→write は flock で排他ロック (`_common.flock`)。
 同一セッション並行起動時のカウント破綻を防ぐ。
 
-exit 0 (JSON なし): ブロックしない (clean / レビュー済み / 両方失敗 / エラー)
-exit 0 + JSON stdout: decision:block で差し戻し
+## 0.6.0 で入れた「待たせ方」の制御
+
+プラン承認前のブロックは最悪 `EXTERNAL_AI_REVIEW_MAX` 回 × 各レビュアーの timeout
+かかる。0.5.0 は codex が 1500s だったので最悪 52 分だった。次の 3 つで調整する:
+
+| 環境変数 | 既定 | 効果 |
+|---|---|---|
+| `EXTERNAL_AI_PLAN_REVIEW` | `1` | この hook 自体の on/off |
+| `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` | `600` | 両レビュアー共通の timeout (上限 1500) |
+| `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` | 全件 | `cursor` / `codex` の選択 |
+| `EXTERNAL_AI_PLAN_REVIEW_MODE` | `block` | `context` にすると差し戻さず所見だけ渡す |
+
+`EXTERNAL_AI_REVIEW_MAX` (ブロック回数) は 0.2.0 からある名前なので温存し、
+`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く (`=0` は従来どおり無効化スイッチ)。
+
+`MODE=context` は公式の PreToolUse decision control フィールド
+`hookSpecificOutput.additionalContext` ("String added to Claude's context alongside
+the tool result." 逐語) を使う。ブロックしないぶん「差し戻し → プラン修正 →
+再 ExitPlanMode で再度フルレビュー」の往復が消える (待ち時間が 1 ラウンド分になる)。
+
+**`permissionDecision` は意図的に省く**。3 択のうち省略以外は採れない:
+
+- `"allow"` は **ExitPlanMode の承認ゲートそのものを飛ばす**。この tool は「プランを
+  利用者に見せて承認を取る」ための tool なので、hook が allow を返すと利用者が
+  プランを見ないまま実装に入る。DX 改善のために承認を奪うのは本末転倒
+  (docs が `"allow"` に `updatedInput` との組を要求しているのもこの経路)
+- `"defer"` は docs に "Ignored when `permissionDecision` is `\"defer\"`" とあり、
+  肝心の `additionalContext` が無視されるので目的を果たさない
+- 省略すれば通常の承認フローが残ったまま所見だけが文脈に入る
+
+ただし **「`permissionDecision` を省いて `additionalContext` だけ返す」形を直接
+述べた記述は docs に無い** (2026-08 時点で明示的に探して不在を確認済み)。最も近いのは
+"Other exit codes" の "Each field the event supports is honored, including
+`permissionDecision`, `additionalContext`, `updatedInput`, and `systemMessage`" で、
+これは根拠にはなるが保証ではない。仕様として断定しないこと。既定を `block` のままに
+してあるのはこのため。
+
+なお **PreToolUse の top-level `decision` / `reason` は docs 上 deprecated**
+(`"block"` → `permissionDecision: "deny"` へのマッピングが明記されている)。既定の
+block 経路は 0.2.0 からこの形で動いており、本 batch (DX 改善) の範囲を超えるため
+移行していない — 別途起票する。PostToolUse / Stop の top-level `decision` / `reason`
+は現行フォーマットのままなので、post-implementation-review 側は対象外。
+
+exit 0 (JSON なし): ブロックしない (無効化 / レビュアー不在 / レビュー済み)
+exit 0 + {"systemMessage": ...}: 所要時間と結果の要約のみ (ブロックしない)
+exit 0 + {"decision": "block", "reason": ..., "systemMessage": ...}: 差し戻し
+exit 0 + {"hookSpecificOutput": {..., "additionalContext": ...}}: MODE=context の所見注入
 """
 from __future__ import annotations
 
@@ -20,6 +65,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
@@ -28,7 +74,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import flock, hooklog, sentinel  # noqa: E402
+from _common import flock, hooklog, notify, sentinel, settings  # noqa: E402
 
 import codex  # noqa: E402
 import cursor  # noqa: E402
@@ -41,20 +87,58 @@ _HEADERS = {
     "codex": "## Codex レビュー (要件・アーキ観点)",
 }
 
+ENV_ENABLED = "EXTERNAL_AI_PLAN_REVIEW"
+ENV_MAX_REVIEWS = "EXTERNAL_AI_REVIEW_MAX"
+ENV_REVIEWERS = "EXTERNAL_AI_PLAN_REVIEW_REVIEWERS"
+ENV_MODE = "EXTERNAL_AI_PLAN_REVIEW_MODE"
+
+MODE_BLOCK = "block"
+MODE_CONTEXT = "context"
+
 log = hooklog.make_logger("exitplan-review")
 
 # フェンス / 装飾 / 「指摘なし」の前置き 1 文を許容する判定 (規則は _common/sentinel.py)
 is_clean_review = sentinel.is_clean_review
 
 
+def review_enabled() -> bool:
+    """`EXTERNAL_AI_PLAN_REVIEW=0` で無効化 (0.6.0 で新設した正規のスイッチ)。
+
+    `EXTERNAL_AI_REVIEW_MAX=0` との関係は **AND**。post-implementation-review 側の
+    `EXTERNAL_AI_POST_REVIEW_MAX` は撤廃済みの死んだ別名なので「新しい変数が勝つ」で
+    よいが、こちらの `EXTERNAL_AI_REVIEW_MAX` は**現役の回数予算**で `0` に
+    「1 回も許さない」という固有の意味がある。新スイッチで上書きすると、
+    README に載っている無効化手段が黙って効かなくなる。
+    """
+    return settings.flag(ENV_ENABLED, default=True)
+
+
 def get_max_reviews() -> int:
-    raw = os.environ.get("EXTERNAL_AI_REVIEW_MAX", "").strip()
-    if not raw:
-        return DEFAULT_MAX_REVIEWS
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return DEFAULT_MAX_REVIEWS
+    return settings.count(ENV_MAX_REVIEWS, DEFAULT_MAX_REVIEWS)
+
+
+def get_mode() -> str:
+    """`block` (既定・従来どおり差し戻す) か `context` (所見だけ渡して素通り)。"""
+    raw = settings.raw(ENV_MODE).lower()
+    return MODE_CONTEXT if raw == MODE_CONTEXT else MODE_BLOCK
+
+
+def selected_reviewers() -> tuple[list, list[str]]:
+    """実際に走らせるレビュアーと、`EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` の未知名を返す。
+
+    **事前チェックと `run_reviewers()` で別々に集合を計算してはいけない**。ずれると、
+    1 つも走らないレビュアー集合のために `reserve_slot` が枠を消費し、以後の
+    ExitPlanMode が「レビュー済み」扱いで素通りする。
+
+    未知の名前 (`codx` のタイプミス等) しか指定されていない場合は空リストを返して
+    no-op にする。既定の全件へ fallback すると、外したはずのレビュアーが黙って
+    走ることになる。
+    """
+    wanted = settings.names(ENV_REVIEWERS)
+    known = {r.NAME for r in REVIEWERS}
+    unknown = [name for name in (wanted or []) if name not in known]
+    chosen = [r for r in REVIEWERS if wanted is None or r.NAME in wanted]
+    return [r for r in chosen if r.is_available()], unknown
 
 
 def plan_hash(text: str) -> str:
@@ -118,18 +202,21 @@ def release_slot(marker_file: str, reserved_hash: str) -> None:
         log(f"マーカー read/write 失敗: {e}")
 
 
-def run_reviewers(plan_text: str) -> dict[str, str]:
-    """利用可能なレビュアーを並列実行し、clean でない結果のみ {name: output} で返す。
+def run_reviewers(plan_text: str, active: list) -> tuple[dict[str, str], dict[str, str]]:
+    """レビュアーを並列実行し `(指摘のある結果, レビュアーごとの状態)` を返す。
 
-    全体 timeout は置かない。各レビュアーは自前の TIMEOUT_SEC で必ず返り、かつ
+    状態は利用者向けの要約 (`systemMessage`) 用で、レビュー本文は入れない
+    (`_common/notify.py` の方針)。
+
+    全体 timeout は置かない。各レビュアーは自前の timeout で必ず返り、かつ
     `ThreadPoolExecutor` の with 終端は全 future の完了を待つため、`as_completed` に
     timeout を渡しても実質効かない (0.3.1 までの overall_timeout は dead logic だった)。
     """
-    active = [r for r in REVIEWERS if r.is_available()]
     if not active:
-        return {}
+        return {}, {}
 
     results: dict[str, str] = {}
+    statuses: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
         future_map = {pool.submit(r.review, plan_text): r for r in active}
         for future in as_completed(future_map):
@@ -138,15 +225,28 @@ def run_reviewers(plan_text: str) -> dict[str, str]:
                 result = future.result()
             except Exception as e:
                 log(f"{reviewer.NAME} 失敗: {e}")
+                statuses[reviewer.NAME] = "失敗"
                 continue
             if not result:
-                log(f"{reviewer.NAME}: 結果なし")
+                log(f"{reviewer.NAME}: 結果なし (timeout / 空応答)")
+                statuses[reviewer.NAME] = "失敗"
                 continue
             if is_clean_review(result):
                 log(f"{reviewer.NAME}: REVIEW_CLEAN")
+                statuses[reviewer.NAME] = "clean"
                 continue
+            statuses[reviewer.NAME] = "指摘あり"
             results[reviewer.NAME] = result
-    return results
+    return results, statuses
+
+
+def summarize(statuses: dict[str, str], elapsed: float, outcome: str) -> str:
+    """`クロスレビュー完了 (4分12秒): cursor=指摘あり, codex=clean → プランを差し戻し`"""
+    detail = ", ".join(f"{name}={statuses[name]}" for name in sorted(statuses))
+    return (
+        f"クロスレビュー完了 ({notify.format_elapsed(elapsed)})"
+        f"{': ' + detail if detail else ''} → {outcome}"
+    )
 
 
 def build_reason(results: dict[str, str]) -> str:
@@ -157,13 +257,37 @@ def build_reason(results: dict[str, str]) -> str:
             header = _HEADERS.get(name, f"## {name} レビュー")
             sections.append(f"{header}\n\n{results[name]}")
 
+    body = "## クロスレビュー結果 (ExitPlanMode)\n\n" + "\n\n".join(sections) + "\n\n---\n\n"
+    if get_mode() == MODE_CONTEXT:
+        return (
+            body
+            + "**このレビューはプランを差し戻していません** "
+            + f"({ENV_MODE}={MODE_CONTEXT})。妥当な指摘があれば実装に反映し、"
+            "プランの前提が崩れる指摘なら利用者に確認してください。"
+        )
     return (
-        "## クロスレビュー結果 (ExitPlanMode)\n\n"
-        + "\n\n".join(sections)
-        + "\n\n---\n\n"
-        "レビュー指摘を踏まえてプランを見直し、再度 ExitPlanMode を呼んでください。"
+        body + "レビュー指摘を踏まえてプランを見直し、再度 ExitPlanMode を呼んでください。"
         "既に対処済み・妥当でない指摘は無視して構いません。"
     )
+
+
+def emit(output: dict, notices: list[str]) -> None:
+    """stdout に hook 出力 JSON を **1 回だけ** 書く (空なら何も書かない)。
+
+    stdout に JSON を 2 つ書くとハーネス側のパースが壊れるので、通知は溜めて
+    最後にまとめる。`systemMessage` は公式 docs の universal field
+    ("Every event accepts them") だが「some events discard them or deliver
+    `systemMessage` somewhere other than the transcript」とも書かれており、
+    対話 UI 以外での配信は本 plugin では未確認。同じ内容を `log()` にも出して、
+    通知が出ない環境でも `--debug` で追えるようにする。
+    """
+    for message in notices:
+        log(message)
+    combined = notify.compose("exitplan-review", notices)
+    if combined:
+        output = {**output, "systemMessage": combined}
+    if output:
+        json.dump(output, sys.stdout, ensure_ascii=False)
 
 
 def main() -> None:
@@ -193,14 +317,24 @@ def main() -> None:
 
     plan_stripped = plan_text.strip()
 
-    max_reviews = get_max_reviews()
-    if max_reviews <= 0:
-        log("EXTERNAL_AI_REVIEW_MAX=0 によりレビュー無効化")
+    if not review_enabled():
+        log(f"{ENV_ENABLED}=0 によりレビュー無効化")
         sys.exit(0)
 
-    active_names = [r.NAME for r in REVIEWERS if r.is_available()]
-    if not active_names:
-        log("利用可能なレビュアーなし (cursor/codex 未インストール)")
+    # `EXTERNAL_AI_REVIEW_MAX` は現役の回数予算で、0 は「1 回も許さない」。新スイッチと AND。
+    max_reviews = get_max_reviews()
+    if max_reviews <= 0:
+        log(f"{ENV_MAX_REVIEWS}=0 によりレビュー無効化")
+        sys.exit(0)
+
+    active, unknown = selected_reviewers()
+    notices: list[str] = []
+    if unknown:
+        # タイプミスで黙って no-op になるのを防ぐ (枠は消費しない)
+        notices.append(f"{ENV_REVIEWERS} の未知のレビュアー名を無視: {', '.join(unknown)}")
+    if not active:
+        log("実行するレビュアーなし (未インストール / 選択で全除外)")
+        emit({}, notices)
         sys.exit(0)
 
     marker_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), "plan-review-markers")
@@ -208,18 +342,46 @@ def main() -> None:
     current_hash = plan_hash(plan_stripped)
 
     if not reserve_slot(marker_file, current_hash, max_reviews):
+        emit({}, notices)
         sys.exit(0)
 
-    log(f"レビュー実行: {', '.join(active_names)}")
-    results = run_reviewers(plan_stripped)
+    mode = get_mode()
+    log(f"レビュー実行 (mode={mode}): {', '.join(r.NAME for r in active)}")
+    started = time.monotonic()
+    results, statuses = run_reviewers(plan_stripped, active)
+    elapsed = time.monotonic() - started
 
     if not results:
         log("全レビュアーが REVIEW_CLEAN または結果なし (block しない、スロット戻す)")
         release_slot(marker_file, current_hash)
+        notices.append(summarize(statuses, elapsed, "指摘なし (ブロックしません)"))
+        emit({}, notices)
         sys.exit(0)
 
     reason = build_reason(results)
+    _save_review_copy(session_id, reason)
 
+    if mode == MODE_CONTEXT:
+        # 差し戻さず所見だけ渡す。`permissionDecision` を **意図的に省く**:
+        # `"allow"` は ExitPlanMode の承認ゲートを飛ばして利用者がプランを見ないまま
+        # 実装に入ってしまい、`"defer"` は additionalContext が無視される (docs 逐語)。
+        # 省略形自体は docs に明示が無いので既定にはしない (詳細はモジュール docstring)。
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": reason,
+            }
+        }
+        outcome = "所見のみ提示 (ブロックしません)"
+    else:
+        output = {"decision": "block", "reason": reason}
+        outcome = "プランを差し戻し"
+
+    notices.append(summarize(statuses, elapsed, outcome))
+    emit(output, notices)
+
+
+def _save_review_copy(session_id: str, reason: str) -> None:
     review_file = os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
         f"plan-review-{session_id[:8]}.txt",
@@ -227,11 +389,9 @@ def main() -> None:
     try:
         with open(review_file, "w") as f:
             f.write(reason)
-        log(f"レビュー完了 ({', '.join(results.keys())}) → {review_file}")
+        log(f"レビュー結果を保存 → {review_file}")
     except OSError:
         log("参照コピーの保存に失敗")
-
-    json.dump({"decision": "block", "reason": reason}, sys.stdout, ensure_ascii=False)
 
 
 if __name__ == "__main__":

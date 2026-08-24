@@ -435,13 +435,21 @@ class TestTimeoutBudgets(ReviewSetTestCase):
             + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
         )
         # cursor の timeout 後に process group を止める経路 (SIGTERM 待ち / SIGKILL 待ち /
-        # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない
-        cursor_worst = cursor.TIMEOUT_SEC + 3 * subproc.KILL_GRACE_SEC
+        # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない。
+        # **既定値 (`TIMEOUT_SEC`) ではなく上限 (`MAX_TIMEOUT_SEC`) で見る**: 0.6.0 で
+        # `EXTERNAL_AI_POST_REVIEW_TIMEOUT` により env から伸ばせるようになったので、
+        # 既定値で見ると「上限まで設定した最悪ケース」が誰にも守られなくなる
+        cursor_worst = cursor.MAX_TIMEOUT_SEC + 3 * subproc.KILL_GRACE_SEC
         self.assertLess(
             cursor_worst + git_worst,
             timeouts["stop"],
             "cursor (kill 猶予込み) + git の最悪ケースが Stop の hook timeout を超えている",
         )
+
+    def test_default_timeout_does_not_exceed_ceiling(self):
+        import cursor
+
+        self.assertLessEqual(cursor.TIMEOUT_SEC, cursor.MAX_TIMEOUT_SEC)
 
 
 class TestSectionTruncate(ReviewSetTestCase):

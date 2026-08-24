@@ -126,22 +126,66 @@ class TestTimeoutBudget(unittest.TestCase):
     """レビュアーの timeout + kill 猶予が hooks.json の ExitPlanMode timeout に収まること。
 
     超えるとハーネスの kill が先に来て、release_slot (枠を戻す) に到達しない。
+
+    **既定値 (`TIMEOUT_SEC`) ではなく上限 (`MAX_TIMEOUT_SEC`) で見る**。0.6.0 で
+    `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` により env から伸ばせるようになったので、
+    既定値で見ると「env を上限まで設定した最悪ケース」を誰も守らなくなる。
     """
 
-    def test_reviewer_timeouts_fit_in_hook_timeout(self):
+    def _hook_timeout(self) -> int:
         hooks = json.loads((_PKG_DIR.parent / "hooks.json").read_text())
-        hook_timeout = None
         for entry in hooks["hooks"]["PreToolUse"]:
             if entry.get("matcher") == "ExitPlanMode":
-                hook_timeout = entry["hooks"][0]["timeout"]
-        self.assertIsNotNone(hook_timeout)
+                return entry["hooks"][0]["timeout"]
+        self.fail("hooks.json に ExitPlanMode の hook が無い")
 
-        worst = max(cursor.TIMEOUT_SEC, codex.TIMEOUT_SEC) + 3 * subproc.KILL_GRACE_SEC
+    def test_reviewer_timeout_ceilings_fit_in_hook_timeout(self):
+        worst = (
+            max(cursor.MAX_TIMEOUT_SEC, codex.MAX_TIMEOUT_SEC) + 3 * subproc.KILL_GRACE_SEC
+        )
         self.assertLess(
             worst,
-            hook_timeout,
-            "レビュアー timeout + kill 猶予 (3 × KILL_GRACE_SEC) が ExitPlanMode の hook timeout を超えている",
+            self._hook_timeout(),
+            "timeout 上限 + kill 猶予 (3 × KILL_GRACE_SEC) が ExitPlanMode の hook timeout を超えている",
         )
+
+    def test_defaults_do_not_exceed_ceilings(self):
+        for module in (cursor, codex):
+            with self.subTest(reviewer=module.NAME):
+                self.assertLessEqual(module.TIMEOUT_SEC, module.MAX_TIMEOUT_SEC)
+
+
+class TestTimeoutResolution(unittest.TestCase):
+    """`EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` の解決規則 (両レビュアー共通のつまみ)。"""
+
+    def setUp(self) -> None:
+        self._env = mock.patch.dict(os.environ, {})
+        self._env.start()
+        _testutil.clear_plugin_env()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+
+    def test_unset_uses_module_default(self):
+        """回帰: env 未設定なら 0.5.0 までと同じく モジュール既定値をそのまま使う。"""
+        self.assertEqual(cursor.timeout_sec(), cursor.TIMEOUT_SEC)
+        self.assertEqual(codex.timeout_sec(), codex.TIMEOUT_SEC)
+
+    def test_env_lowers_both_reviewers(self):
+        os.environ["EXTERNAL_AI_PLAN_REVIEW_TIMEOUT"] = "120"
+        self.assertEqual(cursor.timeout_sec(), 120)
+        self.assertEqual(codex.timeout_sec(), 120)
+
+    def test_env_is_clamped_to_ceiling(self):
+        os.environ["EXTERNAL_AI_PLAN_REVIEW_TIMEOUT"] = "99999"
+        self.assertEqual(cursor.timeout_sec(), cursor.MAX_TIMEOUT_SEC)
+        self.assertEqual(codex.timeout_sec(), codex.MAX_TIMEOUT_SEC)
+
+    def test_invalid_and_nonpositive_fall_back_to_default(self):
+        for value in ("abc", "0", "-5", ""):
+            with self.subTest(value=value):
+                os.environ["EXTERNAL_AI_PLAN_REVIEW_TIMEOUT"] = value
+                self.assertEqual(cursor.timeout_sec(), cursor.TIMEOUT_SEC)
 
 
 class TestReviewerArgvAndStdin(FakeCliTestCase):
