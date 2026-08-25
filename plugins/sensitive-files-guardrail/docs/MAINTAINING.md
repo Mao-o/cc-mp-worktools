@@ -165,10 +165,10 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 "No such file or directory" になる (= 79 件の suite が黙って走らない)。
 
 ```bash
-# redact-sensitive-reads (0.19.1 時点 827 件)
+# redact-sensitive-reads (0.20.0 時点 851 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (0.19.1 時点 79 件、tmpdir に git repo を作って検査)
+# check-sensitive-files (0.20.0 時点 79 件、tmpdir に git repo を作って検査)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 

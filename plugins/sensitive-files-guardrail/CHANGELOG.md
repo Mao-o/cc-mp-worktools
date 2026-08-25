@@ -14,7 +14,7 @@ commit 52113a1 で完了)。
   膨張、REVIEW_TASKS の plugin 外退避と CHANGELOG の archive 化に分割) は
   `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照。
   公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
-- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 847 /
+- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 851 /
   check 79) と乖離しており、「同型ケースの subTest 化で重複を畳む」に再定義して
   から着手する
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
@@ -28,7 +28,7 @@ commit 52113a1 で完了)。
 
 - **判定境界 (deny / allow / ask) の変化: なし。**
 - **情報面の変化: あり** (後述の「情報面の変化」節)。
-- テスト件数: redact 827 → **847** / check **79** (計 926)。
+- テスト件数: redact 827 → **851** / check **79** (計 930)。
 
 ### 1. 状況別の deny 文面 (4 分岐)
 
@@ -99,7 +99,7 @@ minimal info を載せる (`_fit_data_block`)。
 
 ### 5. 検証
 
-- 両 suite green (redact 847 / check 79)。`claude plugin validate` warning 0
+- 両 suite green (redact 851 / check 79)。`claude plugin validate` warning 0
 - **verdict 不変の機械確認**: tool 2 (Edit/Write) × target 5 (`.env` / `.envrc` /
   `credentials.json` / `.env.example` / `README.md`) × 最終要素 5 状態 (missing /
   regular / symlink / special (FIFO) / stat error) × 親 3 状態 (通常 dir /
@@ -108,6 +108,13 @@ minimal info を載せる (`_fit_data_block`)。
   (allow 480 / ask 360 / deny 360 / 構成不能 600)
 - 予算ロジックを無効化する mutation で予算テスト 3 件が落ちることを確認
   (テストが空振りしていないことの確認)
+- **32KB 超の既存ファイル**も回帰テストに含めた。`MAX_INLINE_BYTES` 超では
+  `_render_path` が `format_dotenv` + `build_reason` ではなく
+  `redact_large_file` (streaming 鍵名スキャン) に切り替わるため、`_fit_data_block`
+  の閉じタグ保持 (最終行 `</DATA>` 依存) が **別 renderer でも成立する**ことを
+  固定した。あわせて `_DATA_HEADER_LINES` / `_DATA_CLOSING_TAG` を
+  `build_reason` の実出力と突合するテストを追加 (ずれると「閉じない `<DATA>`」が
+  予算超過時にだけ静かに出るため)
 
 ## 0.19.1
 

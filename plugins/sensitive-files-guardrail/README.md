@@ -399,10 +399,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (827 tests, 0.19.1 時点)
+# redact-sensitive-reads (851 tests, 0.20.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (79 tests, 0.19.1 時点)
+# check-sensitive-files (79 tests, 0.20.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 

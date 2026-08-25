@@ -635,6 +635,25 @@ class TestOverwriteMinimalInfoFailure(BaseEdit):
             "edit_existing_render_failed", "RuntimeError",
         )
 
+    def test_base_exception_propagates(self):
+        """KeyboardInterrupt / SystemExit は握り潰さない。
+
+        ``_extract_dotenv_keys`` 側の同名保証
+        (``TestDotenvParseFailureLogged::test_unexpected_exception_propagates``)
+        と対にする。``except Exception`` は verdict 不変のための捕捉であって、
+        中断シグナルまで飲み込む意図ではない。
+        """
+        from handlers import edit_handler
+
+        with mock.patch.object(
+            edit_handler, "render_for_bash",
+            side_effect=KeyboardInterrupt(),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                edit_handler._render_existing(
+                    Path(self.tmp) / ".env", self.tmp,
+                )
+
 
 class TestOverwriteReasonByteBudget(BaseEdit):
     """E6: minimal info を足しても ``MAX_REASON_BYTES`` を超えないこと。
@@ -682,6 +701,42 @@ class TestOverwriteReasonByteBudget(BaseEdit):
         self.assertIn("... (5 more)", reason)
         self.assertIn("patterns.local.txt", reason)
         self.assertNotIn(output.TRUNCATE_MARKER.strip(), reason)
+
+    def test_large_existing_file_keeps_data_wrapper_intact(self):
+        """32KB 超の既存ファイル (``redact_large_file`` 経路) でも包装が壊れない。
+
+        ``MAX_INLINE_BYTES`` を超えると ``_render_path`` は
+        ``format_dotenv`` + ``build_reason`` ではなく ``redact_large_file``
+        (streaming 鍵名スキャン) に切り替わる。``_fit_data_block`` の閉じタグ
+        保持は最終行が ``</DATA>`` であることに依存しているので、**別 renderer
+        でも同じ形で終わる**ことを固定する (崩れると閉じない ``<DATA>`` が
+        大きいファイルのときだけ静かに出る)。
+        """
+        body = "".join(
+            f"BIG_KEY_{i}=value_that_is_long_enough_{i}\n" for i in range(1500)
+        )
+        target = Path(self.tmp) / ".env"
+        target.write_text(body)
+        self.assertGreater(target.stat().st_size, 32 * 1024)
+
+        envelope = _make_envelope("Edit", str(target), self.tmp)
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Edit")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertLessEqual(
+            len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+        )
+        # 開き / 閉じが 1 組で揃う (畳んでも閉じタグを落とさない)
+        self.assertEqual(reason.count("<DATA"), 1)
+        self.assertEqual(reason.count("</DATA>"), 1)
+        # large 経路であることの確認 + 実値は出ない
+        self.assertIn("keys-only scan", reason)
+        self.assertIn("BIG_KEY_0", reason)
+        self.assertNotIn("value_that_is_long_enough", reason)
+        # 末尾は除外案内のまま
+        self.assertTrue(reason.split("\n")[-1].startswith("suggestion:"))
+        self.assertIn("patterns.local.txt", reason)
 
     def test_suggested_keys_alone_over_budget_falls_back_to_truncate(self):
         """予算を ``suggested_keys`` だけで使い切る極端な入力の実際の挙動。

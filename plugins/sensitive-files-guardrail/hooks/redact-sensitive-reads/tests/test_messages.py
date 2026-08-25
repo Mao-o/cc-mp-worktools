@@ -172,6 +172,28 @@ class TestBashDeny(unittest.TestCase):
         self.assertNotIn("first_token:", msg)
 
 
+class TestDataBlockAssumptions(unittest.TestCase):
+    """``_fit_data_block`` が置いている ``<DATA>`` 包装の前提を固定する (E6)。
+
+    ``_DATA_HEADER_LINES`` / ``_DATA_CLOSING_TAG`` は
+    ``redaction.engine.build_reason`` の出力形に暗黙依存している。ここが
+    ずれると「header だけ載せて中身ゼロ」や「閉じタグを落とした包装」が
+    **予算超過時にだけ** 静かに出るので、生成側と突合しておく。
+    """
+
+    def test_build_reason_header_line_count_matches_constant(self):
+        from redaction.engine import build_reason
+
+        lines = build_reason(".env", "dotenv", "BODY_MARKER").split("\n")
+        self.assertEqual(lines.index("BODY_MARKER"), M._DATA_HEADER_LINES)
+
+    def test_build_reason_ends_with_closing_tag_constant(self):
+        from redaction.engine import build_reason
+
+        lines = build_reason(".env", "dotenv", "BODY_MARKER").split("\n")
+        self.assertEqual(lines[-1], M._DATA_CLOSING_TAG)
+
+
 class TestEditDeny(unittest.TestCase):
     def test_minimal_no_keys(self):
         msg = M.edit_deny("Edit", ".env", new_keys=None, kind="new")
