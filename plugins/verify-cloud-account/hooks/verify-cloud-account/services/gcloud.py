@@ -11,12 +11,59 @@ import re
 import subprocess
 
 PATTERNS = [r"^gcloud\b"]
+# release track prefix (`gcloud beta config set ...` / `gcloud alpha auth login`)。
+# gcloud はほぼ全てのコマンドを alpha / beta (一部 preview) でも公開しており、
+# 同じ操作が同じ副作用で走る。anchored pattern を GA 形だけで書くと track 形が
+# READONLY / STATE_CHANGING をすり抜ける (Codex R5 P1-B は cross-CLI の
+# `gcloud beta container clusters get-credentials` を指摘したが、自己 sweep の
+# 結果 gcloud 自身の STATE_CHANGING **全パターン**が同じ穴だった)。
+# 実在確認は SDK 生成物 `data/cli/gcloud_completions.py` の command tree で行った
+# (config set|unset / configurations activate|create / init は alpha・beta・preview、
+# auth 系と container clusters get-credentials は alpha・beta)。
+# 存在しない track × command の組に当たっても実行が失敗するだけなので、
+# 全パターンで同じ prefix を使う。
+_TRACK = r"(?:(?:alpha|beta|preview)\s+)?"
 READONLY = [
-    r"^gcloud\s+auth\s+list\b",
-    r"^gcloud\s+config\s+get-value\s+(project|account)\b",
+    rf"^gcloud\s+{_TRACK}auth\s+list\b",
+    rf"^gcloud\s+{_TRACK}config\s+get-value\s+(project|account)\b",
+    # 認証取得系 (login / application-default ... / activate-service-account / revoke)
+    # は GCP 資源を変更せず、ローカルの認証状態を作るだけ (`auth login` はブラウザ認可
+    # + credential のローカル保存、`activate-service-account` は鍵ファイルの読込、
+    # `revoke` は token 失効のみ。gh の SSH 鍵アップロードのようなリモート write は
+    # 無い)。未ログインで
+    # `gcloud config get-value` が取れないとき deny 文面から回復できる経路を残す。
+    # 直後の write は (STATE_CHANGING で成功 cache も破棄されるため) 再検証される。
+    # `application-default` は login / revoke / set-quota-project のみ (ADC の
+    # print-access-token は gcloud auth print-access-token と同じく検証対象のまま)。
+    rf"^gcloud\s+{_TRACK}auth\s+"
+    r"(login|application-default\s+(login|revoke|set-quota-project)"
+    r"|activate-service-account|revoke)\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gcloud\s+(--version|--help|version|help)\b",
 ]
+# アクティブ project / account を変えうるコマンド。dispatcher が検出すると gcloud の
+# 成功 cache を破棄する。`configurations create` は既定で作成した configuration を
+# activate する。`init` は対話的に account / project を設定し直す。
+STATE_CHANGING = [
+    rf"^gcloud\s+{_TRACK}config\s+(set|unset)\b",
+    rf"^gcloud\s+{_TRACK}config\s+configurations\s+(activate|create)\b",
+    rf"^gcloud\s+{_TRACK}auth\s+"
+    r"(login|activate-service-account|revoke"
+    r"|application-default\s+(login|revoke))\b",
+    rf"^gcloud\s+{_TRACK}init\b",
+]
+# CLI 名直後に置ける global flag (`gcloud --project x config set ...`)。dispatcher が
+# 剥がした形でも READONLY / STATE_CHANGING / self-remediation を判定する
+# (core/cli_options.py)。`--project` / `--account` / `--configuration` の値は将来の
+# flag 照合 (629.4) で使う。
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({
+    "--account", "--billing-project", "--configuration", "--flags-file", "--flatten",
+    "--format", "--project", "--verbosity", "--access-token-file",
+    "--impersonate-service-account", "--trace-token", "--universe-domain",
+})
+GLOBAL_FLAGS = frozenset({
+    "--quiet", "-q", "--log-http", "--user-output-enabled", "--no-user-output-enabled",
+})
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
     'GCP 最小例: {"gcloud": "my-project-id"}。'

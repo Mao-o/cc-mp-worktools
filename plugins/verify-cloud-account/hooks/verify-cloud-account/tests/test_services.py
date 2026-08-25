@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -167,6 +168,31 @@ class TestFirebase(unittest.TestCase):
                 err = firebase.verify("my-project", "/p")
         self.assertIn("firebase コマンドが見つかりません", err)
         self.assertIn("npm install", err)
+
+    def test_dict_unresolved_lists_alias_commands(self):
+        """dict 期待値 + 未解決 (未ログイン等) は placeholder ではなく alias ごとの
+        `firebase use <alias>` を案内する (self-remediation で通る形)。"""
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        with mock.patch("subprocess.run", return_value=_fake_run(returncode=1)):
+            with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
+                err = firebase.verify({"default": "proj-dev", "prod": "proj-prod"}, d)
+        self.assertIn("firebase login", err)
+        self.assertIn("firebase use default  # → proj-dev", err)
+        self.assertIn("firebase use prod  # → proj-prod", err)
+        self.assertNotIn("YOUR_PROJECT", err)
+
+    def test_invalid_expected_shapes_do_not_run_cli(self):
+        """期待値の形が不正なら CLI を叩かずに設定誘導の deny を返す。"""
+        with mock.patch("subprocess.run") as run:
+            self.assertIn("有効な", firebase.verify({"default": 123}, "/p"))
+            self.assertIn("文字列または", firebase.verify(42, "/p"))
+        run.assert_not_called()
+
+    def test_firebase_tools_alias_is_self_remediation(self):
+        self.assertTrue(firebase.is_self_remediation("firebase-tools use prod", {"prod": "proj-prod"}))
+        self.assertTrue(firebase.is_self_remediation("firebase-tools use proj", "proj"))
+        self.assertFalse(firebase.is_self_remediation("firebase-tools use other", "proj"))
 
     def test_dict_default_alias_match(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
@@ -536,6 +562,453 @@ class TestAws(unittest.TestCase):
     def test_invalid_expected_type(self):
         err = aws.verify({"unsupported": "dict"}, "/p")
         self.assertIn("文字列", err)
+
+    # --- bd_092a232e-629.6: 切替案内は export ではなく行頭インライン + sso login ---
+
+    _NO_CONFIG = {"AWS_CONFIG_FILE": "/nonexistent/aws/config"}
+
+    def _mismatch(self, env):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="111111111111\n")):
+            return aws.verify("123456789012", "/p", env=env)
+
+    def test_mismatch_guidance_inline_env_first_then_sso_login(self):
+        err = self._mismatch(self._NO_CONFIG)
+        lines = [line.strip() for line in err.splitlines()]
+        inline = next(i for i, l in enumerate(lines) if l.startswith("AWS_PROFILE=<profile> aws ..."))
+        sso = next(i for i, l in enumerate(lines) if l.startswith("aws sso login --profile <profile>"))
+        self.assertLess(inline, sso)
+        self.assertIn("この形のみ検証に反映", err)
+        # export はコマンド行 (インデント付き) として案内しない。注記で「効かない」と明示する
+        self.assertNotRegex(err, r"(?m)^\s+export\s")
+        self.assertIn("export AWS_PROFILE=... は Claude Code の Bash では次の呼出に持ち越されず", err)
+        # 不一致時は `aws configure` (認証情報の再設定) は案内しない
+        self.assertNotRegex(err, r"(?m)^\s+aws configure\s")
+        # profile が引けないときは確認コマンドを案内する
+        self.assertIn("aws configure list-profiles", err)
+
+    def test_mismatch_guidance_resolves_profile_from_aws_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config"
+            cfg.write_text(
+                "[profile dev]\nsso_account_id = 111111111111\n"
+                "[profile prod]\nsso_session = corp\nsso_account_id = 123456789012\n"
+                "[profile prod-admin]\nrole_arn = arn:aws:iam::123456789012:role/Admin\n"
+                "source_profile = prod\n"
+                "[sso-session corp]\nsso_start_url = https://corp.awsapps.com/start\n",
+                encoding="utf-8",
+            )
+            err = self._mismatch({"AWS_CONFIG_FILE": str(cfg)})
+        self.assertIn("AWS_PROFILE=prod aws ...", err)
+        self.assertIn("aws sso login --profile prod", err)
+        self.assertIn("profile: prod, prod-admin", err)
+        self.assertNotIn("<profile>", err)
+        # config の他の値 (sso_start_url 等) は文面に出さない
+        self.assertNotIn("awsapps", err)
+
+    def test_no_credentials_guidance_includes_configure_and_placeholder(self):
+        fake = _fake_run(
+            stdout="",
+            stderr="Error loading SSO Token: Token for corp does not exist\n",
+            returncode=255,
+        )
+        with mock.patch("subprocess.run", return_value=fake):
+            err = aws.verify("123456789012", "/p", env=self._NO_CONFIG)
+        self.assertIn("認証情報を取得できません (Error loading SSO Token", err)
+        self.assertIn("AWS_PROFILE=<profile> aws ...", err)
+        self.assertIn("aws sso login --profile <profile>", err)
+        self.assertRegex(err, r"(?m)^\s+aws configure\s")
+        self.assertNotRegex(err, r"(?m)^\s+export\s")
+
+    def test_no_credentials_guidance_resolves_profile(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config"
+            cfg.write_text("[profile prod]\nsso_account_id = 123456789012\n", encoding="utf-8")
+            with mock.patch("subprocess.run", return_value=_fake_run(stdout="", stderr="", returncode=255)):
+                err = aws.verify("123456789012", "/p", env={"AWS_CONFIG_FILE": str(cfg)})
+        self.assertIn("aws sso login --profile prod", err)
+        self.assertIn("AWS_PROFILE=prod aws ...", err)
+
+    def test_home_lookup_failure_does_not_raise(self):
+        """L2 P3: HOME 未設定 + `Path.home()` 不能 (RuntimeError) でも例外を漏らさない
+        (漏れると hook が異常終了して無音 fail-open)。"""
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("services.aws.Path.home", side_effect=RuntimeError("no home")), \
+             mock.patch("subprocess.run", return_value=_fake_run(stdout="111111111111\n")):
+            err = aws.verify("123456789012", "/p")
+        self.assertIn("不一致", err)
+        self.assertIn("<profile>", err)
+
+
+class TestAwsProfileScan(unittest.TestCase):
+    """profiles_for_account: AWS config から期待 Account ID に対応する profile 名を引く。"""
+
+    def _cfg(self, text: str) -> Path:
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        p = Path(d) / "config"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_sso_account_id_role_arn_and_default(self):
+        cfg = self._cfg(
+            "[default]\nsso_account_id = 123456789012\n"
+            "[profile dev]\nsso_account_id = 111111111111\n"
+            "[profile admin]\nrole_arn = arn:aws:iam::123456789012:role/Admin\n"
+            "[profile cn]\nrole_arn = arn:aws-cn:iam::123456789012:role/X\n"
+            "[profile other-role]\nrole_arn = arn:aws:iam::111111111111:role/X\n"
+        )
+        self.assertEqual(
+            aws.profiles_for_account("123456789012", {"AWS_CONFIG_FILE": str(cfg)}),
+            ["default", "admin", "cn"],
+        )
+
+    def test_nested_keys_and_non_profile_sections_ignored(self):
+        cfg = self._cfg(
+            "[profile dev]\ns3 =\n  sso_account_id = 123456789012\nregion = us-east-1\n"
+            "[sso-session corp]\nsso_account_id = 123456789012\n"
+            "[services s3x]\nsso_account_id = 123456789012\n"
+        )
+        self.assertEqual(
+            aws.profiles_for_account("123456789012", {"AWS_CONFIG_FILE": str(cfg)}), []
+        )
+
+    def test_comments_spacing_and_duplicates(self):
+        cfg = self._cfg(
+            "# comment\n; other\n[profile prod]  \n"
+            "SSO_ACCOUNT_ID =   123456789012   \n"
+            "role_arn = arn:aws:iam::123456789012:role/Admin\n"
+        )
+        self.assertEqual(
+            aws.profiles_for_account("123456789012", {"AWS_CONFIG_FILE": str(cfg)}), ["prod"]
+        )
+
+    def test_missing_or_undecodable_file(self):
+        self.assertEqual(
+            aws.profiles_for_account("123456789012", {"AWS_CONFIG_FILE": "/nonexistent/x"}), []
+        )
+        cfg = self._cfg("")
+        cfg.write_bytes(b"\xff\xfe[profile x]\nsso_account_id = 123456789012\n")
+        self.assertEqual(
+            aws.profiles_for_account("123456789012", {"AWS_CONFIG_FILE": str(cfg)}), []
+        )
+
+    def test_env_none_uses_process_home(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (Path(d) / ".aws").mkdir()
+        (Path(d) / ".aws" / "config").write_text(
+            "[profile prod]\nsso_account_id = 123456789012\n", encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"HOME": d}):
+            os.environ.pop("AWS_CONFIG_FILE", None)
+            self.assertEqual(aws.profiles_for_account("123456789012"), ["prod"])
+
+    def test_env_without_home_returns_empty(self):
+        self.assertEqual(aws.profiles_for_account("123456789012", {}), [])
+
+    def test_empty_account_id_returns_empty(self):
+        self.assertEqual(
+            aws.profiles_for_account("", {"AWS_CONFIG_FILE": "/nonexistent"}), []
+        )
+
+    def test_aws_config_file_tilde_expands_with_env_home(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (Path(d) / "cfg").write_text(
+            "[profile p]\nsso_account_id = 123456789012\n", encoding="utf-8"
+        )
+        self.assertEqual(
+            aws.profiles_for_account(
+                "123456789012", {"AWS_CONFIG_FILE": "~/cfg", "HOME": d}
+            ),
+            ["p"],
+        )
+
+
+class TestAuthCommandPatterns(unittest.TestCase):
+    """各 service の READONLY (認証取得系) と STATE_CHANGING (切替 / ログイン系) の
+    パターン表。表示系・write はどちらにも (READONLY の認証系には) 一致しない。"""
+
+    @staticmethod
+    def _matches(patterns, cmd: str) -> bool:
+        return any(re.search(p, cmd) for p in patterns)
+
+    @classmethod
+    def _readonly(cls, svc, cmd: str) -> bool:
+        """dispatcher と同じ: READONLY regex または service の is_readonly()。"""
+        if cls._matches(svc.READONLY, cmd):
+            return True
+        fn = getattr(svc, "is_readonly", None)
+        return bool(fn and fn(cmd))
+
+    def test_state_changing_positives(self):
+        rows = [
+            (github, "gh auth switch --user x"),
+            (github, "gh auth login"),
+            (github, "gh auth logout"),
+            # readonly から外した後も STATE_CHANGING には残る (Codex R4 P1)。
+            # 外すと refresh 成功後に古い成功 cache が TTL 分残る。
+            (github, "gh auth refresh"),
+            (github, "gh auth refresh --scopes admin:org"),
+            (gcloud, "gcloud config set project x"),
+            (gcloud, "gcloud config unset project"),
+            (gcloud, "gcloud config configurations activate w"),
+            (gcloud, "gcloud config configurations create w"),
+            (gcloud, "gcloud auth login"),
+            (gcloud, "gcloud auth activate-service-account --key-file=k"),
+            (gcloud, "gcloud auth revoke"),
+            (gcloud, "gcloud auth application-default login"),
+            (gcloud, "gcloud init"),
+            # release track 形も同じ操作が同じ副作用で走る (Codex R5 P1-B の自己 sweep)。
+            # 実在は SDK 生成物 data/cli/gcloud_completions.py の command tree で確認
+            # (config/init は alpha・beta・preview、auth 系は alpha・beta)。
+            (gcloud, "gcloud beta config set project x"),
+            (gcloud, "gcloud alpha config set project x"),
+            (gcloud, "gcloud preview config set project x"),
+            (gcloud, "gcloud beta config unset project"),
+            (gcloud, "gcloud alpha config configurations activate w"),
+            (gcloud, "gcloud beta config configurations create w"),
+            (gcloud, "gcloud beta auth login"),
+            (gcloud, "gcloud alpha auth login"),
+            (gcloud, "gcloud beta auth revoke"),
+            (gcloud, "gcloud beta auth activate-service-account --key-file=k"),
+            (gcloud, "gcloud alpha auth application-default login"),
+            (gcloud, "gcloud beta init"),
+            (kubectl, "gcloud beta container clusters get-credentials c --region r"),
+            (kubectl, "gcloud alpha container clusters get-credentials c --region r"),
+            (firebase, "firebase use prod"),
+            (firebase, "firebase use --clear"),
+            (firebase, "firebase use --add"),
+            (firebase, "firebase login"),
+            (firebase, "firebase login:use a@b.c"),
+            (firebase, "firebase logout"),
+            (kubectl, "kubectl config use-context x"),
+            (kubectl, "kubectl config set-context --current --namespace=n"),
+            (kubectl, "kubectl config set-credentials u --token=t"),
+            (kubectl, "kubectl config unset current-context"),
+            (kubectl, "kubectl config delete-context x"),
+            (kubectl, "kubectl config rename-context a b"),
+            (kubectl, "kubectl ctx other"),
+            (kubectl, "kubectx other"),
+            (kubectl, "gcloud container clusters get-credentials c --region r"),
+            (kubectl, "aws eks update-kubeconfig --name c"),
+            (kubectl, "az aks get-credentials -g rg -n c"),
+            (firebase, "firebase-tools use prod"),
+            (firebase, "firebase-tools login"),
+            (aws, "aws sso login --profile p"),
+            (aws, "aws sso logout"),
+            (aws, "aws login"),
+            (aws, "aws logout"),
+            (aws, "aws configure"),
+            (aws, "aws configure sso"),
+            (aws, "aws configure set region us-east-1"),
+            (aws, "aws configure import --csv file://c.csv"),
+        ]
+        for svc, cmd in rows:
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self._matches(svc.STATE_CHANGING, cmd))
+
+    def test_state_changing_negatives(self):
+        rows = [
+            (github, "gh auth status"),
+            (github, "gh auth setup-git"),
+            (github, "gh pr create"),
+            (gcloud, "gcloud config get-value project"),
+            (gcloud, "gcloud config list"),
+            (gcloud, "gcloud auth list"),
+            (gcloud, "gcloud auth print-access-token"),
+            (gcloud, "gcloud auth application-default print-access-token"),
+            (gcloud, "gcloud run deploy"),
+            (firebase, "firebase use"),
+            (firebase, "firebase-tools use"),
+            (firebase, "firebase deploy"),
+            (firebase, "firebase projects:list"),
+            (kubectl, "kubectl config current-context"),
+            (kubectl, "kubectl config view"),
+            (kubectl, "kubectl config get-contexts"),
+            (kubectl, "kubectl apply -f x"),
+            (kubectl, "gcloud container clusters list"),
+            (kubectl, "aws eks list-clusters"),
+            (aws, "aws sts get-caller-identity"),
+            (aws, "aws s3 cp a b"),
+            (aws, "aws sso-admin list-instances"),
+            (aws, "aws sso list-accounts"),
+            (aws, "aws configure list"),
+            (aws, "aws configure list-profiles"),
+            (aws, "aws configure get region"),
+            (aws, "aws configure export-credentials --profile p"),
+        ]
+        for svc, cmd in rows:
+            with self.subTest(cmd=cmd):
+                self.assertFalse(self._matches(svc.STATE_CHANGING, cmd))
+
+    def test_readonly_auth_commands(self):
+        rows = [
+            (aws, "aws sso login --profile p", True),
+            (aws, "aws sso logout", True),
+            (aws, "aws login", True),
+            (aws, "aws configure", True),
+            (aws, "aws configure sso", True),
+            (aws, "aws configure list-profiles", True),
+            (aws, "aws configure export-credentials --profile p", False),
+            (aws, "aws sso list-accounts --access-token t", False),
+            (aws, "aws sso-admin create-permission-set --name x", False),
+            (aws, "aws s3 cp a b", False),
+            (github, "gh auth login --with-token", True),
+            (github, "gh auth login --skip-ssh-key", True),
+            (github, "gh auth login --hostname ghe.example.com --skip-ssh-key", True),
+            (github, "gh auth login --git-protocol https", True),
+            (github, "gh auth login --git-protocol=https", True),
+            (github, "gh auth login -p https", True),
+            (github, "gh auth login -p=https", True),
+            # SSH 鍵アップロードが起きうる形は readonly ではない (Codex R2 P1-1)
+            (github, "gh auth login", False),
+            (github, "gh auth login --web", False),
+            (github, "gh auth login --hostname ghe.example.com", False),
+            (github, "gh auth login --git-protocol ssh", False),
+            (github, "gh auth login -p ssh", False),
+            (github, "gh auth login --skip-ssh-keys", False),
+            # 明示 false は無効 (Codex R3 P1: 実効 boolean を解釈する)
+            (github, "gh auth login --git-protocol ssh --skip-ssh-key=false", False),
+            (github, "gh auth login --with-token=false", False),
+            (github, "gh auth login --skip-ssh-key=true", True),
+            # scope 要求はアカウント側の OAuth grant を拡張する (Codex R4 P1 の
+            # 論拠を login にも適用)。鍵操作抑止 flag が付いていても readonly でない
+            (github, "gh auth login --skip-ssh-key --scopes admin:org", False),
+            (github, "gh auth login -s admin:org --skip-ssh-key", False),
+            (github, "gh auth logout", True),
+            (github, "gh auth setup-git", True),
+            # `gh auth refresh` は保存済み認証情報の権限をアカウント側で拡張・修正
+            # しうる (`--scopes admin:org`) ため readonly にしない (Codex R4 P1)
+            (github, "gh auth refresh", False),
+            (github, "gh auth refresh -s repo", False),
+            (github, "gh auth refresh --scopes admin:org", False),
+            (github, "gh auth refresh --remove-scopes repo", False),
+            (github, "gh auth switch --user x", False),
+            (github, "gh auth token", False),
+            (github, "gh repo create x", False),
+            (gcloud, "gcloud auth login", True),
+            (gcloud, "gcloud auth application-default login", True),
+            (gcloud, "gcloud auth activate-service-account --key-file=k", True),
+            (gcloud, "gcloud auth revoke", True),
+            (gcloud, "gcloud auth application-default set-quota-project p", True),
+            (gcloud, "gcloud auth application-default print-access-token", False),
+            (gcloud, "gcloud auth print-access-token", False),
+            (gcloud, "gcloud config set project x", False),
+            # release track 形も GA 形と同じ扱いに揃える (Codex R5 P1-B の自己 sweep)
+            (gcloud, "gcloud beta auth login", True),
+            (gcloud, "gcloud alpha auth login", True),
+            (gcloud, "gcloud beta auth application-default login", True),
+            (gcloud, "gcloud beta auth activate-service-account --key-file=k", True),
+            (gcloud, "gcloud alpha auth revoke", True),
+            (gcloud, "gcloud beta auth list", True),
+            (gcloud, "gcloud beta config get-value project", True),
+            # **資格情報を出力するコマンドは track 形でも検証対象のまま**
+            # (CHANGELOG 0.8.0 の carve-out を track 追加で広げていないことの固定)
+            (gcloud, "gcloud beta auth print-access-token", False),
+            (gcloud, "gcloud alpha auth print-access-token", False),
+            (gcloud, "gcloud beta auth application-default print-access-token", False),
+            (gcloud, "gcloud beta config set project x", False),
+            # `init` の \b が別コマンドを巻き込まない
+            (gcloud, "gcloud beta interactive", False),
+            (firebase, "firebase login", True),
+            (firebase, "firebase login:ci", True),
+            (firebase, "firebase logout", True),
+            (firebase, "firebase-tools login", True),
+            (firebase, "firebase-tools use", True),
+            (firebase, "firebase use prod", False),
+            (firebase, "firebase-tools use prod", False),
+        ]
+        for svc, cmd, expected in rows:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._readonly(svc, cmd), expected)
+
+
+class TestGithubLoginKeyless(unittest.TestCase):
+    """github.is_readonly: `gh auth login` がリモートに何も書かない形か。
+
+    (a) SSH 鍵のアップロードを伴わないか (flag 文字列の有無ではなく実効 boolean を
+    解釈する。Codex R3 P1)、かつ (b) `-s` / `--scopes` で OAuth grant scope を
+    要求していないか (Codex R4 P1 の論拠を login にも適用)。
+    """
+
+    def test_scopes_disqualifies_even_with_keyless_flags(self):
+        """`--scopes` / `-s` は値を取る flag なので `=false` で無効化できない。
+        鍵操作を抑止する flag が付いていても readonly にはしない
+        (`gh auth login --skip-ssh-key --scopes admin:org` はアカウント側の
+        OAuth grant を拡張する)。"""
+        for cmd in (
+            "gh auth login --skip-ssh-key --scopes admin:org",
+            "gh auth login --scopes admin:org --skip-ssh-key",
+            "gh auth login --scopes=admin:org --skip-ssh-key",
+            "gh auth login -s admin:org --skip-ssh-key",
+            "gh auth login -s=admin:org --with-token",
+            "gh auth login -sadmin:org --with-token",
+            "gh auth login -p https -s admin:org",
+            "gh auth login --git-protocol https --scopes repo,admin:org",
+            "gh auth login --with-token -s repo",
+            # 値 token を消費するので、後続を flag と誤解して readonly に転ばない
+            "gh auth login -s --skip-ssh-key",
+            "gh auth login -s repo --git-protocol https",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_readonly(cmd))
+
+    def test_scopes_after_double_dash_is_not_a_flag(self):
+        """`--` 以降は引数なので scope 要求とはみなさない (既存の `--` 規則に整合)。"""
+        self.assertTrue(github.is_readonly("gh auth login --skip-ssh-key -- --scopes x"))
+
+    def test_effective_true_forms_are_keyless(self):
+        for cmd in (
+            "gh auth login --skip-ssh-key",
+            "gh auth login --skip-ssh-key=true",
+            "gh auth login --skip-ssh-key=TRUE",
+            "gh auth login --skip-ssh-key=1",
+            "gh auth login --skip-ssh-key=yes",
+            "gh auth login --with-token",
+            "gh auth login --with-token=true < token.txt",
+            "gh auth login --with-token=1",
+            "gh auth login --git-protocol https",
+            "gh auth login --git-protocol=https",
+            "gh auth login --git-protocol=HTTPS",
+            "gh auth login -p https",
+            "gh auth login -p=https",
+            "gh auth login -phttps",
+            "gh auth login --git-protocol ssh --skip-ssh-key",
+            "gh auth login --git-protocol ssh --with-token=yes",
+            "gh auth login --git-protocol ssh --git-protocol https",  # 後勝ち
+            "gh auth login --hostname ghe.example.com --web --git-protocol https",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(github.is_readonly(cmd))
+
+    def test_explicit_false_and_ssh_forms_are_not_keyless(self):
+        for cmd in (
+            "gh auth login",
+            "gh auth login --web",
+            "gh auth login --git-protocol ssh",
+            "gh auth login --git-protocol ssh --skip-ssh-key=false",
+            "gh auth login --skip-ssh-key=0",
+            "gh auth login --skip-ssh-key=no",
+            "gh auth login --skip-ssh-key=NO",
+            "gh auth login --skip-ssh-key=maybe",  # gh がエラーにする値は保守的に無効
+            "gh auth login --with-token=false",
+            "gh auth login --with-token=0 < token.txt",
+            "gh auth login -p ssh",
+            "gh auth login -pssh",
+            "gh auth login --git-protocol https --git-protocol ssh",  # 後勝ち
+            "gh auth login --git-protocol",  # 値なし
+            "gh auth login -- --skip-ssh-key",  # `--` 以降は flag ではない
+            "gh auth login --skip-ssh-keys",
+            "gh auth status",
+            "gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_readonly(cmd))
+
+    def test_unbalanced_quote_falls_back_to_split(self):
+        self.assertTrue(github.is_readonly('gh auth login --skip-ssh-key "x'))
+        self.assertFalse(github.is_readonly('gh auth login --skip-ssh-key=false "x'))
 
 
 class TestGcloud(unittest.TestCase):

@@ -1,8 +1,10 @@
 """dispatcher のフロー全体テスト。各 service の verify() は mock で差し替える。"""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,7 @@ from unittest import mock
 import _testutil  # noqa: F401
 
 from core.dispatcher import dispatch  # noqa: E402
+from services import ALL as ALL_SERVICES  # noqa: E402
 
 
 class BaseWithTmpProject(unittest.TestCase):
@@ -27,6 +30,7 @@ class BaseWithTmpProject(unittest.TestCase):
 
         self._cache_tmp = Path(self.tmp) / "cache_tmp"
         self._cache_tmp.mkdir()
+        self._cache_seq = 0
 
         self._env_patcher = mock.patch.dict(
             os.environ,
@@ -41,6 +45,42 @@ class BaseWithTmpProject(unittest.TestCase):
     def _cleanup(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @contextlib.contextmanager
+    def isolated_cache(self):
+        """まっさらな cache dir でブロックを実行する (subTest 間の状態持ち越し防止)。
+
+        cache dir には service ごとの tombstone (`<service>.epoch` の `at_ns`) が残り、
+        `invalidate()` から `cache.IN_FLIGHT_SEC` (60 秒) の間は成功 cache の publish が
+        抑止される。1 つの test method 内で複数シナリオを回すと、前のシナリオの切替
+        コマンドが立てた tombstone によって **2 件目以降の warm-up が cache を publish
+        できない**。すると最後の write が再検証される理由が「切替で無効化されたから」
+        ではなく「そもそも cache が無いから」になり、無効化機構 (STATE_CHANGING) を
+        壊してもテストが green のままになる (vacuous)。
+
+        本番の挙動には影響しない — 変えるのは `TMPDIR` (どのディレクトリに cache を
+        置くか) だけで、`IN_FLIGHT_SEC` も時刻も production コードも触らない。
+        `TMPDIR` は元々 setUp がテスト用に差し替えている値。
+        """
+        self._cache_seq += 1
+        d = Path(self.tmp) / f"cache_tmp_{self._cache_seq}"
+        d.mkdir()
+        with mock.patch.dict(os.environ, {"TMPDIR": str(d)}):
+            yield d
+
+    def assert_cache_published(self, command, verify_mock, expected_calls=1):
+        """warm-up が成功 cache を **publish した** ことを直接確認する。
+
+        同じコマンドをもう一度通して verify が呼ばれない (cache hit する) ことを見る。
+        publish の有無を推測せず観測することで、後続の再検証が無効化機構によるもの
+        だと言い切れるようにする。
+        """
+        self.assertIsNone(dispatch(command, str(self.project_dir)))
+        self.assertEqual(
+            verify_mock.call_count,
+            expected_calls,
+            f"warm-up が成功 cache を publish していない (cache hit しなかった): {command}",
+        )
 
     def _write_accounts(self, data: dict):
         """新パス (`.claude/verify-cloud-account/accounts.local.json`) に書く。"""
@@ -758,6 +798,785 @@ class TestInfoCommandsReadonly(BaseWithTmpProject):
     def test_firebase_version_skipped(self):
         self._write_accounts({"firebase": "proj"})
         self.assertIsNone(dispatch("firebase --version", str(self.project_dir)))
+
+
+class TestAccountSwitchInvalidation(BaseWithTmpProject):
+    """bd_092a232e-629.3: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
+    したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
+    検証成功も cache しない。切替後の最初の write が必ず再検証されることを固定する。
+    (0.7.3 までは 30 秒の成功 cache が切替後も有効で、別アカウントの write が通った)"""
+
+    def test_gh_switch_to_other_then_write_reverifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            # 1) verify OK → cache 書込
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+            # 2) 期待値以外への切替: cache 破棄 → 実行前の状態を再検証 (OK) → cache なし
+            self.assertIsNone(
+                dispatch("gh auth switch --user other", str(self.project_dir))
+            )
+            # 3) 切替後の write は cache hit せず再検証 → 不一致なら deny
+            v.return_value = "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+            result = dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_switch_itself_does_not_seed_cache(self):
+        """切替コマンドの検証成功 (実行前の状態) を cache に残すと、直後の write が
+        切替後の状態を検証せずに通る。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_readonly_login_invalidates_cache(self):
+        """`gh auth login --skip-ssh-key` は検証しない (readonly) が、成功 cache は破棄する。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            self.assert_cache_published("gh pr list", v)
+            self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
+            self.assertEqual(v.call_count, 1)
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_self_remediation_invalidates_cache(self):
+        """期待値への切替 (self-remediation) も無条件に cache を破棄する
+        (切替が失敗して状態が変わらなかった場合に古い成功が残らないように)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            self.assert_cache_published("gh pr list", v)
+            self.assertIsNone(dispatch("gh auth switch -u Mao-o", str(self.project_dir)))
+            self.assertEqual(v.call_count, 1)
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_every_service_switch_invalidates_cache(self):
+        """service ごとの切替 / ログイン系コマンドの後、write が再検証される。"""
+        rows = [
+            # (accounts key, expected, warm write, switch command, write)
+            ("github", "Mao-o", "gh pr list", "gh auth logout", "gh pr create"),
+            ("github", "Mao-o", "gh pr list", "gh auth refresh -s repo", "gh pr create"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config set project other", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config set account x@example.com", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config configurations activate work", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud auth login", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud auth activate-service-account --key-file=k.json", "gcloud run deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase use other", "firebase deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase use --clear", "firebase deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase login", "firebase deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase login:use other@example.com", "firebase deploy"),
+            ("kubectl", "ctx", "kubectl apply -f x.yaml", "kubectl config use-context other", "kubectl apply -f x.yaml"),
+            ("kubectl", "ctx", "kubectl apply -f x.yaml", "kubectl config set-context --current --namespace=x", "kubectl apply -f x.yaml"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws sso login --profile prod", "aws s3 cp a b"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws configure", "aws s3 cp a b"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws configure set profile.x.region us-east-1", "aws s3 cp a b"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws login", "aws s3 cp a b"),
+        ]
+        for key, expected, warm, switch, write in rows:
+            # cache dir を row ごとに作り直す。共有すると前 row の tombstone で
+            # warm-up が cache を publish できず、この test が vacuous になる。
+            with self.subTest(switch=switch), self.isolated_cache():
+                self._write_accounts({key: expected})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    self.assertIsNone(dispatch(warm, str(self.project_dir)))
+                    self.assertEqual(v.call_count, 1)
+                    # 「切替で無効化された」と言えるためには、まず cache がある状態を
+                    # 作れていなければならない。publish を推測せず観測する。
+                    self.assert_cache_published(warm, v)
+                    self.assertIsNone(dispatch(switch, str(self.project_dir)))
+                    after_switch = v.call_count
+                    self.assertIsNone(dispatch(write, str(self.project_dir)))
+                # 切替後の write は cache hit せず必ず再検証される
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_readonly_login_compound_with_write_is_not_cached(self):
+        """L2 P1: readonly の login (cands に入らない) と write を同一コマンドで実行
+        しても、その service の検証成功は cache しない (判定は service 単位)。"""
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        rows = [
+            ("github", "gh auth login --with-token < other.txt && gh pr create", "gh pr merge 1"),
+            (
+                "gcloud",
+                "gcloud auth activate-service-account --key-file=sa.json && gcloud run deploy svc",
+                "gcloud run deploy svc",
+            ),
+        ]
+        for key, compound, write in rows:
+            with self.subTest(compound=compound):
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    self.assertIsNone(dispatch(compound, str(self.project_dir)))
+                    self.assertEqual(v.call_count, 1)
+                    dispatch(write, str(self.project_dir))
+                self.assertEqual(v.call_count, 2)
+
+    def test_switch_with_different_inline_env_target_is_not_cached(self):
+        """切替セグメントと write セグメントの inline env が異なり別 target になっても、
+        同 service の write 側の成功を cache しない。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch(
+                    "gh auth switch --user other && GH_HOST=github.com gh pr create",
+                    str(self.project_dir),
+                )
+            )
+            self.assertEqual(v.call_count, 2)
+            dispatch("GH_HOST=github.com gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+
+    def test_cross_cli_kubeconfig_switch_invalidates_kubectl_cache(self):
+        """L2 P2: 別 CLI / plugin が kubeconfig の current-context を書き換える形
+        (PATTERNS に一致しない候補を含む) でも kubectl の cache を破棄する。"""
+        self._write_accounts({"kubectl": "ctx", "gcloud": "my-proj", "aws": "123456789012"})
+        for switch in (
+            "gcloud container clusters get-credentials c --region r",
+            "aws eks update-kubeconfig --name c",
+            "az aks get-credentials -g rg -n c",
+            "kubectx other",
+            "kubectl ctx other",
+        ):
+            # cache dir ごと作り直す。以前は `cache.invalidate("kubectl")` で前 subTest の
+            # cache を消していたが、invalidate は tombstone も立てるため直後の warm-up が
+            # cache を publish できず、この test 全体が vacuous になっていた。
+            with self.subTest(switch=switch), self.isolated_cache():
+                with mock.patch("services.kubectl.verify", return_value=None) as v, \
+                     mock.patch("services.gcloud.verify", return_value=None), \
+                     mock.patch("services.aws.verify", return_value=None):
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                    self.assertEqual(v.call_count, 1)
+                    self.assert_cache_published("kubectl apply -f x.yaml", v)
+                    dispatch(switch, str(self.project_dir))
+                    # `kubectl ctx other` は kubectl の write として自身も検証される
+                    # (cache はしない)。他は kubectl の target にならない
+                    after_switch = v.call_count
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_npx_firebase_tools_forms(self):
+        """`npx firebase-tools ...` (剥がし後 `firebase-tools ...`) も firebase と同じ
+        readonly / self-remediation / 無効化の扱いになる。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        with mock.patch("services.firebase.verify", return_value="不一致") as v:
+            for cmd in ("npx firebase-tools login", "npx firebase-tools use", "npx firebase-tools use prod"):
+                with self.subTest(cmd=cmd):
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+            v.assert_not_called()
+        # 上の subTest ループの `login` / `use prod` が tombstone を立てているので、
+        # cache dir を作り直さないと warm-up が publish できず vacuous になる。
+        with self.isolated_cache(), \
+                mock.patch("services.firebase.verify", return_value=None) as v:
+            dispatch("npx firebase-tools deploy", str(self.project_dir))
+            self.assert_cache_published("npx firebase-tools deploy", v)
+            self.assertIsNone(dispatch("npx firebase-tools use other", str(self.project_dir)))
+            dispatch("npx firebase-tools deploy", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+
+    def test_switch_does_not_invalidate_other_services(self):
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.github.verify", return_value=None), \
+             mock.patch("services.aws.verify", return_value=None) as aws_v:
+            dispatch("aws s3 cp a b", str(self.project_dir))
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            dispatch("aws s3 cp a b", str(self.project_dir))
+        self.assertEqual(aws_v.call_count, 1)
+
+    def test_compound_switch_and_write_is_not_cached(self):
+        """`firebase use prod && firebase deploy` (期待値内の切替 + write) は実行前の
+        状態で 1 回検証するが、成功を cache しないため次の deploy は再検証される。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        with mock.patch("services.firebase.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch("firebase use prod && firebase deploy", str(self.project_dir))
+            )
+            self.assertEqual(v.call_count, 1)
+            dispatch("firebase deploy", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_display_only_commands_keep_cache(self):
+        """状態を変えない readonly (`firebase use` 引数なし / `gh auth status` /
+        `gcloud config get-value`) は cache を破棄しない (過剰な再検証を避ける)。"""
+        rows = [
+            ("github", "Mao-o", "gh pr list", "gh auth status", "gh pr create"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase use", "firebase deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config get-value project", "gcloud run deploy"),
+            ("kubectl", "ctx", "kubectl apply -f x.yaml", "kubectl config current-context", "kubectl apply -f x.yaml"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws sts get-caller-identity", "aws s3 cp a b"),
+        ]
+        for key, expected, warm, readonly, write in rows:
+            with self.subTest(readonly=readonly):
+                self._write_accounts({key: expected})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    dispatch(warm, str(self.project_dir))
+                    self.assertIsNone(dispatch(readonly, str(self.project_dir)))
+                    dispatch(write, str(self.project_dir))
+                self.assertEqual(v.call_count, 1)
+
+    def test_switch_invalidates_even_without_accounts_file(self):
+        """accounts 未設定 (deny) の状態でも切替コマンドは cache を破棄する
+        (設定追加 → 切替 → write の順でも古い成功が残らない)。"""
+        from core import cache
+
+        cache.set_success("github", str(self.project_dir), "Mao-o", 1.0)
+        # readonly の login は未設定でも allow (deny しない) かつ cache 破棄
+        self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
+        self.assertFalse(cache.get_success("github", str(self.project_dir), "Mao-o", 1.0))
+
+
+class TestLoginCommandsReadonly(BaseWithTmpProject):
+    """bd_092a232e-629.2: 認証取得系 (login / logout / configure 等) は資源を変更しない
+    ため検証せず allow する。未ログインで検証が失敗する状態でも、deny 文面が案内する
+    ログインコマンド自体が deny される remediation loop にならない。"""
+
+    _ACCOUNTS = {
+        "github": "Mao-o",
+        "aws": "123456789012",
+        "gcloud": "my-proj",
+        "firebase": "proj-dev",
+        "kubectl": "ctx",
+    }
+
+    _LOGIN_COMMANDS = [
+        "aws sso login",
+        "aws sso login --profile prod",
+        "aws sso logout",
+        "aws login",
+        "aws logout",
+        "aws configure",
+        "aws configure sso",
+        "aws configure sso-session",
+        "aws configure list-profiles",
+        "aws configure set region us-east-1 --profile prod",
+        "gh auth login --skip-ssh-key",
+        "gh auth login --skip-ssh-key=true",
+        "gh auth login --hostname ghe.example.com --skip-ssh-key",
+        "gh auth login --with-token < token.txt",
+        "gh auth login --with-token=1 < token.txt",
+        "gh auth login --git-protocol https",
+        "gh auth login -p https --web",
+        "gh auth login --git-protocol=https --hostname ghe.example.com",
+        "gh auth logout --hostname github.com",
+        # `gh auth refresh` はここに置かない (Codex R4 P1) —
+        # test_similar_write_commands_still_verified 側で deny を assert する
+        "gh auth setup-git",
+        "gcloud auth login",
+        "gcloud auth login --update-adc",
+        "gcloud auth application-default login",
+        "gcloud auth activate-service-account --key-file=key.json",
+        "gcloud auth revoke",
+        "firebase login",
+        "firebase login:ci",
+        "firebase logout",
+        "npx firebase-tools login",
+        "npx firebase-tools use",
+    ]
+
+    def _patch_all_verify_to_deny(self):
+        patchers = []
+        for svc in ALL_SERVICES:
+            name = svc.__name__.rsplit(".", 1)[-1]
+            p = mock.patch(f"services.{name}.verify", return_value="未ログイン (検証失敗)")
+            patchers.append((name, p.start()))
+            self.addCleanup(p.stop)
+        return dict(patchers)
+
+    def test_login_commands_allowed_without_verify(self):
+        self._write_accounts(self._ACCOUNTS)
+        mocks = self._patch_all_verify_to_deny()
+        for cmd in self._LOGIN_COMMANDS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+        for name, m in mocks.items():
+            self.assertEqual(m.call_count, 0, name)
+
+    def test_login_commands_allowed_without_accounts_file(self):
+        """accounts.local.json 未設定でもログイン系は deny しない (初期設定前の
+        `aws sso login` 等が止まらない)。"""
+        for cmd in self._LOGIN_COMMANDS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+
+    def test_similar_write_commands_still_verified(self):
+        """ログイン系に似た名前の write / 認証情報を出力する読取 / 期待値以外への切替 /
+        リモートの認可を変更しうる認証系 (`gh auth refresh` の scope 変更) は
+        従来どおり検証される。"""
+        self._write_accounts(self._ACCOUNTS)
+        self._patch_all_verify_to_deny()
+        for cmd in (
+            "aws sso-admin create-permission-set --name x",
+            "aws sso list-accounts --access-token t",
+            "aws configure export-credentials --profile prod",
+            "gh repo create foo",
+            "gh auth token",
+            # SSH 鍵のアップロードが起きうる login 形は readonly にしない (Codex R2 P1-1)
+            "gh auth login",
+            "gh auth login --web",
+            "gh auth login --hostname ghe.example.com",
+            "gh auth login --git-protocol ssh",
+            "gh auth login -p ssh --skip-ssh-keys",
+            # 明示 false は無効 (Codex R3 P1)
+            "gh auth login --git-protocol ssh --skip-ssh-key=false",
+            "gh auth login --with-token=false < token.txt",
+            "gh auth login -p https --git-protocol ssh",
+            # scope 要求はアカウント側の OAuth grant を拡張するので、鍵操作抑止
+            # flag が付いた login でも検証対象 (Codex R4 P1 の論拠を login にも適用)
+            "gh auth login --skip-ssh-key --scopes admin:org",
+            "gh auth login -s admin:org --skip-ssh-key",
+            "gh auth login -p https -s repo",
+            # `gh auth refresh` はアカウント側の OAuth grant scope を変えうる
+            # (Codex R4 P1)。裸形・scope 指定のどちらも検証対象。
+            "gh auth refresh",
+            "gh auth refresh -s repo",
+            "gh auth refresh --scopes admin:org",
+            "gh auth refresh --remove-scopes repo",
+            "gcloud config set project other",
+            "gcloud auth application-default print-access-token",
+            "firebase use other",
+            "kubectl config use-context other",
+        ):
+            with self.subTest(cmd=cmd):
+                result = dispatch(cmd, str(self.project_dir))
+                self.assertIsNotNone(result)
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+
+_CLI_CMD_RE = re.compile(
+    r"(?<![\w/.-])"                      # 直前が単語 / パス文字でない (ghe.example.com の gh 等を除外)
+    r"((?:[A-Z][A-Z0-9_]*=\S+\s+)?"      # 任意の行頭インライン env (AWS_PROFILE=prod)
+    r"(?:gh|firebase|aws|gcloud|kubectl)"
+    r"(?:\s+[A-Za-z0-9_.:/=<>@-]+)+)"    # ASCII 引数 1 個以上 (日本語に当たった時点で終端)
+)
+
+
+def _guided_commands(reason: str) -> list[str]:
+    """deny reason から案内されているコマンド行を抽出する (出現順・重複なし)。
+
+    `(検出コマンド: ...)` (D14) は deny を起こしたコマンド自身なので除外する。
+    `&&` は区切りとして扱い、`firebase login && firebase use x` は 2 コマンドになる。
+    """
+    cmds: list[str] = []
+    for line in reason.splitlines():
+        if line.lstrip().startswith("(検出コマンド:"):
+            continue
+        for m in _CLI_CMD_RE.finditer(line):
+            cmd = m.group(1).strip()
+            if cmd not in cmds:
+                cmds.append(cmd)
+    return cmds
+
+
+class TestRemediationGuidanceContract(BaseWithTmpProject):
+    """bd_092a232e-629.2 contract: deny 文面が案内するコマンドは必ず allow 経路にある。
+
+    各 service の verify を mock せず subprocess だけ差し替えて実際の deny 文面を
+    作り、そこから案内コマンドを抽出して dispatcher に通す。案内コマンドは
+    (a) readonly または self-remediation として **検証なしで allow** されるか、
+    (b) `AWS_PROFILE=<profile> aws ...` の行頭インライン指定は **その env で検証**
+    される (案内どおりに打てば検証に反映される) かのどちらかでなければならない。
+    deny → 案内どおり実行 → また deny、の remediation loop をここで機械的に防ぐ。
+    """
+
+    def setUp(self):
+        super().setUp()
+        home = Path(self.tmp) / "home"
+        (home / ".aws").mkdir(parents=True)
+        xdg = Path(self.tmp) / "xdg"
+        xdg.mkdir()
+        patcher = mock.patch.dict(
+            os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.home = home
+
+    def _deny_reason(self, command: str, run_mock) -> str:
+        with mock.patch("subprocess.run", side_effect=run_mock):
+            result = dispatch(command, str(self.project_dir))
+        self.assertIsNotNone(result, f"{command} should be denied")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        return out["permissionDecisionReason"]
+
+    def _assert_guidance_is_allowed(self, reason: str, run_mock) -> list[str]:
+        cmds = _guided_commands(reason)
+        self.assertTrue(cmds, f"no command extracted from:\n{reason}")
+        for cmd in cmds:
+            with self.subTest(guided=cmd):
+                if cmd.startswith("AWS_PROFILE="):
+                    # 行頭インライン指定は「その profile で検証される」ことが契約
+                    profile = cmd.split()[0].split("=", 1)[1]
+                    concrete = cmd.replace("aws ...", "aws s3 cp a s3://b")
+                    with mock.patch("subprocess.run", side_effect=run_mock) as run:
+                        dispatch(concrete, str(self.project_dir))
+                    self.assertTrue(run.called, concrete)
+                    env = run.call_args.kwargs.get("env") or {}
+                    self.assertEqual(env.get("AWS_PROFILE"), profile)
+                    continue
+                with mock.patch("subprocess.run", side_effect=run_mock) as run:
+                    result = dispatch(cmd, str(self.project_dir))
+                self.assertIsNone(result, f"guided command denied: {cmd}\n{reason}")
+                self.assertFalse(run.called, f"guided command was verified: {cmd}")
+        return cmds
+
+    @staticmethod
+    def _const(stdout="", stderr="", returncode=0):
+        fake = SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+        return lambda *_a, **_k: fake
+
+    # --- GitHub ---
+
+    def test_github_scalar_mismatch(self):
+        self._write_accounts({"github": "Mao-o"})
+        run = self._const(
+            "github.com\n  ✓ Logged in to github.com account other (keyring)\n"
+            "  - Active account: true\n"
+        )
+        reason = self._deny_reason("gh pr create", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gh auth switch --hostname github.com --user Mao-o", cmds)
+
+    def test_github_host_not_logged_in(self):
+        self._write_accounts(
+            {"github": {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}}
+        )
+        run = self._const(
+            "github.com\n  ✓ Logged in to github.com account Mao-o (keyring)\n"
+            "  - Active account: true\n"
+        )
+        reason = self._deny_reason("gh pr create", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gh auth login --hostname ghe.example.com --skip-ssh-key", cmds)
+
+    def test_github_no_active_account(self):
+        """未ログイン時の案内は SSH 鍵アップロードが起きない `--skip-ssh-key` 付きの形
+        (素の `gh auth login` は readonly ではないので案内すると loop になる)。"""
+        self._write_accounts({"github": "Mao-o"})
+        run = self._const("", "You are not logged into any GitHub hosts.\n", 1)
+        reason = self._deny_reason("gh pr create", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gh auth login --skip-ssh-key", cmds)
+        self.assertNotIn("gh auth login", cmds)
+
+    # --- Firebase ---
+
+    def test_firebase_scalar_mismatch(self):
+        self._write_accounts({"firebase": "proj-dev"})
+        run = self._const("proj-other\n")
+        reason = self._deny_reason("firebase deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase use proj-dev", cmds)
+
+    def test_firebase_dict_mismatch_lists_aliases(self):
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        run = self._const("proj-other\n")
+        reason = self._deny_reason("firebase deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase use default", cmds)
+        self.assertIn("firebase use prod", cmds)
+
+    def test_firebase_unresolved_suggests_login_and_use(self):
+        """未ログイン (`firebase use` 非ゼロ終了) + ローカル設定なし → `firebase login`
+        と `firebase use <期待>` を案内。両方とも検証なしで通る。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        run = self._const("", "Error: not logged in\n", 1)
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            reason = self._deny_reason("firebase deploy", run)
+            cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase login", cmds)
+        self.assertIn("firebase use proj-dev", cmds)
+
+    def test_firebase_dict_unresolved_lists_aliases(self):
+        """L2 P2: dict 期待値 + 未解決のときは `firebase use YOUR_PROJECT` (placeholder、
+        self-remediation に乗らず loop) ではなく alias ごとの具体コマンドを案内する。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        run = self._const("", "Error: not logged in\n", 1)
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            reason = self._deny_reason("firebase deploy", run)
+            cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase login", cmds)
+        self.assertIn("firebase use default", cmds)
+        self.assertIn("firebase use prod", cmds)
+        self.assertNotIn("YOUR_PROJECT", reason)
+
+    # --- AWS ---
+
+    def _write_aws_config(self, text: str) -> None:
+        (self.home / ".aws" / "config").write_text(text, encoding="utf-8")
+
+    def test_aws_mismatch_with_profile_in_config(self):
+        self._write_accounts({"aws": "123456789012"})
+        self._write_aws_config(
+            "[profile prod]\nsso_session = corp\nsso_account_id = 123456789012\n"
+            "[sso-session corp]\nsso_start_url = https://corp.awsapps.com/start\n"
+        )
+        run = self._const("111111111111\n")
+        reason = self._deny_reason("aws s3 cp a s3://b", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("AWS_PROFILE=prod aws ...", cmds)
+        self.assertIn("aws sso login --profile prod", cmds)
+        # export は「コマンド」として案内しない (Claude Code の Bash では効かない)
+        self.assertNotRegex(reason, r"(?m)^\s+export\s")
+        # config の他の値 (sso_start_url 等) を文面に漏らさない
+        self.assertNotIn("awsapps", reason)
+
+    def test_aws_no_credentials_without_config(self):
+        self._write_accounts({"aws": "123456789012"})
+        run = self._const("", "Error loading SSO Token: Token for corp does not exist\n", 255)
+        reason = self._deny_reason("aws s3 cp a s3://b", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("aws sso login --profile <profile>", cmds)
+        self.assertIn("aws configure", cmds)
+        self.assertIn("aws configure list-profiles", cmds)
+
+    # --- GCP ---
+
+    def test_gcloud_project_unset(self):
+        self._write_accounts({"gcloud": "my-proj"})
+        run = self._const("(unset)\n")
+        reason = self._deny_reason("gcloud run deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gcloud config set project my-proj", cmds)
+
+    def test_gcloud_dict_account_mismatch(self):
+        self._write_accounts({"gcloud": {"project": "my-proj", "account": "me@example.com"}})
+
+        def run(cmd, **_kw):
+            value = "my-proj\n" if cmd[-1] == "project" else "other@example.com\n"
+            return SimpleNamespace(stdout=value, stderr="", returncode=0)
+
+        reason = self._deny_reason("gcloud run deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gcloud config set account me@example.com", cmds)
+
+    # --- kubectl ---
+
+    def test_kubectl_context_mismatch(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        run = self._const("dev-ctx\n")
+        reason = self._deny_reason("kubectl apply -f x.yaml", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("kubectl config use-context prod-ctx", cmds)
+
+    def test_kubectl_context_unset(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        run = self._const("", "error: current-context is not set\n", 1)
+        reason = self._deny_reason("kubectl apply -f x.yaml", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("kubectl config use-context prod-ctx", cmds)
+
+    # --- 未設定 deny の SETUP_HINT ---
+
+    def test_setup_hints_commands_are_readonly(self):
+        """accounts 未設定 deny が案内する「現在値の確認コマンド」は accounts 無しでも通る。"""
+        run = self._const("", "", 1)
+        for write in (
+            "gh pr create",
+            "firebase deploy",
+            "aws s3 cp a s3://b",
+            "gcloud run deploy",
+            "kubectl apply -f x.yaml",
+        ):
+            with self.subTest(write=write):
+                reason = self._deny_reason(write, run)
+                self.assertIn("未設定", reason)
+                self._assert_guidance_is_allowed(reason, run)
+
+
+class TestConcurrentInvalidationRace(BaseWithTmpProject):
+    """PR #43 Codex R2 P1-2: 同じ service の Bash hook が並行したとき、切替前の状態を
+    検証した結果が切替後に公開されない (epoch + in-flight 窓)。"""
+
+    def test_verify_started_before_invalidate_is_not_published(self):
+        """hook B (`gh pr list`) の verify 中に hook A (`gh auth switch`) の PreToolUse が
+        cache を無効化 → B の成功は (開始時 epoch が古いので) 書かれない。"""
+        from core import cache
+
+        self._write_accounts({"github": "Mao-o"})
+        calls = []
+
+        def verify_then_concurrent_switch(*_a, **_k):
+            calls.append(1)
+            if len(calls) == 1:
+                cache.invalidate("github")  # B の検証中に A の無効化が走った
+            return None
+
+        with mock.patch.object(cache, "IN_FLIGHT_SEC", 0), \
+             mock.patch("services.github.verify", side_effect=verify_then_concurrent_switch) as v:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B
+            self.assertIsNone(dispatch("gh pr create", str(self.project_dir)))  # 切替後の write
+        self.assertEqual(v.call_count, 2)
+
+    def test_verify_started_after_invalidate_within_window_is_not_published(self):
+        """A: `gh auth switch --user other` の PreToolUse (無効化) → A の切替が完了する前に
+        B: `gh pr list` が旧状態を検証して成功 → in-flight 窓内なので entry は書かれず、
+        次の write は再検証される。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(dispatch("gh auth switch --user other", str(self.project_dir)))
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B (窓内)
+            self.assertEqual(v.call_count, 2)
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+
+    def test_cache_resumes_after_in_flight_window(self):
+        """窓を過ぎれば通常どおり成功が cache される (窓内の再検証は一時的なコスト)。"""
+        from core import cache
+
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            with mock.patch.object(cache, "IN_FLIGHT_SEC", 0):  # 60 秒経過した状況
+                dispatch("gh pr list", str(self.project_dir))
+                dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+
+class TestLeadingGlobalOptions(BaseWithTmpProject):
+    """PR #43 Codex P1: `aws --profile prod sso login` のように CLI 名直後に global
+    option が置かれた形 (`aws [global options] <command> <subcommand>`) でも、
+    剥がした形で readonly / 切替 (cache 無効化) / self-remediation を判定する。"""
+
+    _ACCOUNTS = {
+        "github": "Mao-o",
+        "aws": "123456789012",
+        "gcloud": "my-proj",
+        "firebase": "proj-dev",
+        "kubectl": "ctx",
+    }
+
+    def test_login_with_leading_options_is_readonly(self):
+        self._write_accounts(self._ACCOUNTS)
+        rows = [
+            ("aws", "aws --profile prod sso login"),
+            ("aws", "aws --profile=prod sso login"),
+            ("aws", "aws --region us-east-1 --profile prod configure sso"),
+            ("aws", "aws --debug --no-verify-ssl --output json sso logout"),
+            ("aws", "aws --profile default configure sso"),
+            ("aws", "aws --profile prod login"),
+            ("gcloud", "gcloud --account me@example.com auth login"),
+            ("gcloud", "gcloud --configuration work --quiet auth activate-service-account --key-file=k.json"),
+            ("gcloud", "gcloud --project x config get-value project"),
+            ("kubectl", "kubectl --context foo -n ns config current-context"),
+            ("kubectl", "kubectl --kubeconfig k.yaml config view"),
+            ("firebase", "firebase -P prod login"),
+            ("firebase", "firebase --debug use"),
+            ("firebase", "npx firebase-tools --project prod login:ci"),
+        ]
+        for key, cmd in rows:
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+    def test_switch_with_leading_options_invalidates_cache(self):
+        """P1 の再現: `aws s3 cp` (検証成功・cache) → `aws --profile default configure sso`
+        → `aws s3 cp` が cache hit せず再検証される。"""
+        rows = [
+            ("aws", "aws s3 cp a b", "aws --profile default configure sso"),
+            ("aws", "aws s3 cp a b", "aws --profile prod sso login"),
+            ("aws", "aws s3 cp a b", "aws --region us-east-1 --profile=prod sso login"),
+            ("gcloud", "gcloud run deploy", "gcloud --project x config set project other"),
+            ("gcloud", "gcloud run deploy", "gcloud --quiet auth login"),
+            ("kubectl", "kubectl apply -f x.yaml", "kubectl --context foo config use-context other"),
+            ("firebase", "firebase deploy", "firebase --project prod use other"),
+            ("firebase", "firebase deploy", "firebase -P prod login"),
+            # boolean global flag の `=value` 形 (Codex R5 P1-A)。pflag/cobra は bool に
+            # 分離形を許さないためこれが正当な呼び出し形で、剥がせないと anchored な
+            # STATE_CHANGING に当たらず切替後も古い cache が TTL 分残る。
+            ("kubectl", "kubectl apply -f x.yaml",
+             "kubectl --insecure-skip-tls-verify=true config use-context other"),
+            ("kubectl", "kubectl apply -f x.yaml",
+             "kubectl --disable-compression=false config use-context other"),
+            ("gcloud", "gcloud run deploy", "gcloud --quiet=true config set project other"),
+            ("firebase", "firebase deploy", "firebase --debug=true use other"),
+            ("aws", "aws s3 cp a b", "aws --no-verify-ssl=true configure set region us-east-1"),
+        ]
+        for key, write, switch in rows:
+            # cache dir を row ごとに作り直す (共有すると前 row の tombstone で
+            # warm-up が publish できず vacuous になる)。
+            with self.subTest(switch=switch), self.isolated_cache():
+                self._write_accounts({key: self._ACCOUNTS[key]})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    dispatch(write, str(self.project_dir))
+                    self.assertEqual(v.call_count, 1)
+                    self.assert_cache_published(write, v)
+                    self.assertIsNone(dispatch(switch, str(self.project_dir)))
+                    after_switch = v.call_count
+                    dispatch(write, str(self.project_dir))
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_cross_cli_kubeconfig_switch_with_leading_options(self):
+        self._write_accounts({"kubectl": "ctx", "aws": "123456789012", "gcloud": "my-proj"})
+        for switch in (
+            "aws --profile prod eks update-kubeconfig --name c",
+            "gcloud --project x container clusters get-credentials c --region r",
+            # release track 形 (Codex R5 P1-B)
+            "gcloud beta container clusters get-credentials c --region r",
+            "gcloud alpha container clusters get-credentials c --region r",
+            "gcloud --project x beta container clusters get-credentials c --region r",
+        ):
+            # `cache.invalidate("kubectl")` で前 subTest の cache を消していたが、
+            # invalidate は tombstone も立てるため warm-up が publish できず vacuous
+            # だった。cache dir ごと作り直す。
+            with self.subTest(switch=switch), self.isolated_cache():
+                with mock.patch("services.kubectl.verify", return_value=None) as v, \
+                     mock.patch("services.aws.verify", return_value=None), \
+                     mock.patch("services.gcloud.verify", return_value=None):
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                    self.assert_cache_published("kubectl apply -f x.yaml", v)
+                    dispatch(switch, str(self.project_dir))
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                self.assertEqual(v.call_count, 2)
+
+    def test_self_remediation_with_leading_options(self):
+        self._write_accounts(self._ACCOUNTS)
+        for key, cmd in (
+            ("gcloud", "gcloud --quiet config set project my-proj"),
+            ("kubectl", "kubectl --kubeconfig k.yaml config use-context ctx"),
+            ("firebase", "firebase --debug use proj-dev"),
+        ):
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+    def test_deny_reason_shows_original_candidate(self):
+        """剥がした形は判定にだけ使い、deny 文面の検出コマンドは元の形 (option 付き)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch(
+            "services.aws.verify", return_value="AWS アカウント不一致: 現在=x, 期待=y"
+        ):
+            result = dispatch("aws --profile other s3 rm s3://x", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("検出コマンド: aws --profile other s3 rm s3://x", reason)
+
+    def test_unknown_leading_option_is_verified_conservatively(self):
+        """未知の option が先頭にあれば剥がさず通常検証 (readonly に乗らない)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value="不一致") as v:
+            result = dispatch("aws --totally-unknown-option sso login", str(self.project_dir))
+        self.assertIsNotNone(result)
+        v.assert_called_once()
+
+    def test_version_and_help_remain_readonly(self):
+        """`aws --version` は剥がすと `aws` になるため元の形でも判定する。"""
+        self._write_accounts(self._ACCOUNTS)
+        for key, cmd in (
+            ("aws", "aws --version"),
+            ("gcloud", "gcloud --help"),
+            ("github", "gh --version"),
+            ("kubectl", "kubectl --help"),
+            ("firebase", "firebase --version"),
+        ):
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
 
 
 class TestDenyProvenance(BaseWithTmpProject):

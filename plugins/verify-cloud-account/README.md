@@ -121,6 +121,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
   [`docs/wrapper-env-audit.md`](docs/wrapper-env-audit.md))
 - 上記は多段ネストにも対応 (例: `sudo time mise exec -- firebase deploy` →
   `firebase deploy` として検証)
+- **CLI 名直後の global option** (v0.8.0): `aws --profile prod sso login` /
+  `gcloud --project X config set ...` / `kubectl --context X config use-context ...` /
+  `firebase -P X use ...` のようにサブコマンドの前に置かれた global option は、
+  剥がした形 (`aws sso login`) でも readonly / 切替 (cache 無効化) /
+  self-remediation を判定する (deny 文面の検出コマンドには元の形を表示)。各 service
+  が値を取る option / 取らない option を宣言し (`GLOBAL_OPTIONS_WITH_VALUE` /
+  `GLOBAL_FLAGS`)、未知の option が先頭にある場合は剥がさず通常検証する。
+  `--profile` / `--project` / `--context` の値を検証に反映するのは別項
+  (flag override 対応) の範囲
 
 | サービス | マッチ対象 | 期待値の取得 |
 |---|---|---|
@@ -155,6 +164,32 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
   サブコマンド含む) — project を変更しない認証操作。未ログインだと `firebase use`
   が認証必須で失敗して現在値を取れず、`firebase login` 自体が deny されるデッド
   ロックになるのを防ぐ (v0.7.3)
+- **認証取得系** (v0.8.0): `gh auth logout` / `setup-git`
+  (`logout` はローカル `hosts.yml` のエントリ削除、`setup-git` はローカル git config の
+  credential.helper 設定で、どちらもアカウント側には何も書かない。**`gh auth refresh` は
+  含まない** — 保存済み認証情報の権限を拡張・修正するコマンドで
+  `--scopes admin:org` のようにアカウント側の OAuth grant を変更しうるため通常検証する)、
+  `gh auth login` は **リモートに何も書かない形のみ** — (a) SSH 鍵のアップロードが
+  起きない (`--skip-ssh-key` / `--with-token` / `--git-protocol https` (`-p https`)
+  付き。flag 文字列の有無ではなく実効 boolean を解釈し、`--skip-ssh-key=false` /
+  `--with-token=0` のような明示 false や `--git-protocol ssh` は無効、繰り返しは後勝ち。
+  SSH git protocol を選ぶ login は既存の SSH 公開鍵を GitHub アカウントに
+  アップロードしうる) かつ (b) **`-s` / `--scopes` で OAuth grant scope を要求して
+  いない** (`gh auth login --skip-ssh-key --scopes admin:org` は鍵操作こそ起きないが
+  アカウント側の grant を拡張するため通常検証。値を取る flag なので `=false` では
+  無効化できず、付いていれば無条件に検証対象)。それ以外の `gh auth login` は
+  通常検証し、deny 文面では `--skip-ssh-key` 付きの形を案内する、
+  `aws sso login` / `aws sso logout` / `aws login` / `aws logout` /
+  `aws configure ...` (認証情報を出力する `configure export-credentials` は除く)、
+  `gcloud auth login` / `gcloud auth application-default login` / `revoke` /
+  `set-quota-project` / `gcloud auth activate-service-account` / `gcloud auth revoke`
+  (`firebase login` 系は `npx firebase-tools login` の形も同じ) — クラウド資源を
+  変更せず、ローカルの認証状態・profile 設定を作るだけ。未ログインで検証
+  (`aws sts get-caller-identity` 等) が失敗する状態では、deny 文面が案内する
+  `aws sso login --profile <profile>` / `gh auth login` 自体が deny される
+  remediation loop になっていた。これらは同時に「アカウント状態を変えうる
+  コマンド」として成功 cache を破棄するため、直後の write は必ず再検証される
+  (後述)
 - `aws sts get-caller-identity`
 - `gcloud auth list` / `gcloud config get-value project` / `... account`
 - `kubectl config current-context` / `... get-contexts` / `... view` /
@@ -179,11 +214,20 @@ deny される remediation loop を防ぐため、**accounts.local.json の期�
 - `firebase use <期待 alias または project ID>`
 - `kubectl config use-context <期待コンテキスト>`
 
-期待値**以外**への切替は従来どおり通常検証に落ち、切替後の write 操作も次回 hook で
-再検証されるため fail-closed は維持される (ただし直前の成功 cache (30 秒) が有効な
-間は再検証されない。切替コマンドでの cache 無効化は別途対応予定)。AWS は切替が `export AWS_PROFILE=...`
-(シェル組込のため hook 対象外) で、期待値 (Account ID) と profile 名の照合も hook
-からは不能なため、この特例の対象外。
+期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。切替コマンド
+(self-remediation を含む) を検出した時点で当該 service の成功 cache を破棄し、
+切替コマンド自身の検証成功も cache しないため、切替後の最初の write は成功 cache
+の残り時間に関係なく次回 hook で再検証される (v0.8.0。詳細は
+[パフォーマンス (短期キャッシュ)](#パフォーマンス-短期キャッシュ))。
+
+AWS は期待値 (Account ID) と profile 名の照合が hook からは不能なため、この特例の
+対象外。代わりに deny 文面は `AWS_PROFILE=<profile> aws ...` (行頭インライン env。
+検証にも反映される) を第一に、`aws sso login --profile <profile>` (readonly で
+検証なしに通る) を第二に案内し、`~/.aws/config` (または `$AWS_CONFIG_FILE`) に期待
+Account ID の `sso_account_id` / `role_arn` を持つ profile があれば `<profile>` を
+具体名にする (profile 名以外の内容は文面に出さない)。`export AWS_PROFILE=...` は
+Claude Code の Bash では次の呼出に持ち越されず、hook (Claude 本体の env を継承)
+の検証にも反映されないため、コマンドとしては案内しない (v0.8.0)。
 
 ## インライン環境変数の伝播 (v0.7.0)
 
@@ -348,9 +392,44 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 のような連打で毎回 `gh auth status` (〜500ms) や `aws sts get-caller-identity`
 (〜1-3s) を走らせるとストレスになる。そのため **検証成功を 30 秒キャッシュ** する。
 
-- 保存先: `$TMPDIR/cc-mp-verify-cloud-account/<sha256>.json`
-- 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損
+- 保存先: `$TMPDIR/cc-mp-verify-cloud-account/<service>-<sha256>.json`
+  (epoch は同じディレクトリの `<service>.epoch`)
+- 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損 /
+  **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) / entry の epoch が
+  現在と異なる
 - **失敗 (deny) 状態はキャッシュしない** — 切り替え後は即座に再検証が走る
+
+### 切替・ログイン系コマンドでの即時無効化 (v0.8.0)
+
+次のコマンドを含む Bash を検出すると、実行前 (PreToolUse) の時点で当該 service の
+成功 cache を **project / 期待値 / インライン env を問わず全て破棄**し、そのコマンド
+自身の検証成功 (実行前の状態) も cache しない。CLI のアカウント状態はマシン全体で
+共有される (`hosts.yml` / gcloud 設定 / configstore / kubeconfig / SSO token cache)
+ため service 単位で破棄する。過剰な破棄のコストは再検証 1 回で済む。
+
+| サービス | cache を破棄するコマンド |
+|---|---|
+| GitHub | `gh auth switch` / `login` / `logout` / `refresh` |
+| Firebase | 引数ありの `firebase use ...` (`--clear` / `--add` 含む。引数なしは表示のみで除外) / `firebase login*` / `logout` (`npx firebase-tools ...` 形も同じ) |
+| AWS | `aws sso login` / `sso logout` / `aws login` / `logout` / `aws configure ...` (表示系の `configure list` / `list-profiles` / `get` / `export-credentials` は除く) |
+| GCP | `gcloud config set` / `unset` / `gcloud config configurations activate` / `create` / `gcloud auth login` / `activate-service-account` / `revoke` / `application-default login` / `revoke` / `gcloud init` |
+| Kubernetes | `kubectl config use-context` / `set-context` / `set-cluster` / `set-credentials` / `set` / `unset` / `delete-*` / `rename-context`、および別 CLI / plugin 経由の kubeconfig 書換 `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` / `az aks get-credentials` / `kubectx` / `kubectl ctx` |
+
+切替セグメントが同じコマンド内の write と別セグメントでも (readonly の `gh auth login
+--skip-ssh-key && gh pr create`、inline env が異なる `gh auth switch --user other &&
+GH_HOST=... gh pr create`)、その service の検証成功は cache しない (判定は service 単位)。
+
+**並行する hook との競合 (epoch + in-flight 窓)**: 無効化は entry の削除だけでなく
+service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を検出した時刻
+(tombstone) を記録する。entry には verify 開始時点の epoch を記録し、読む側は epoch が
+現在と違えば無視、書く側は開始時と現在の epoch が違えば書かない (無効化**前**に開始
+した並行検証の結果を公開しない)。さらに tombstone から 60 秒 (`IN_FLIGHT_SEC`、定数)
+は「切替の実行中」とみなして成功 cache を書かない (無効化**後**・切替完了**前**に
+開始した並行検証の結果を公開しない)。hook は実行前にしか走らず切替コマンドの完了
+時刻が分からないため時間で区切る。代償は切替後 60 秒間の毎回再検証。
+
+従来 (〜0.7.3) は `gh pr list` (検証成功・cache 書込) → `gh auth switch --user other`
+→ `gh pr create` が 30 秒以内なら cache hit で別アカウントの write が通っていた。
 
 ## 既知の制限
 
@@ -361,7 +440,22 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
   対象外 (透過 wrapper のリストに `bash` は含めていない)
 - `kubectl --context foo ...` の `--context` オプション指定による実行時
   コンテキスト override は検出しない (現在のデフォルトコンテキストだけ照合)
+- 同様に、`gh auth <sub> --hostname <host>` / `--user <user>` のように**操作対象の
+  host / アカウントをオプションで指定する形**も照合しない。検証はあくまで現在の
+  アクティブアカウントに対して行うため、アクティブが期待値なら別 host / 別ユーザー
+  向けの操作 (例: `gh auth refresh --hostname ghe.example.com`) は allow される
+  (str 形式の期待値で複数 host にログインしている場合は dict 形式にすると
+  host ごとに照合できる)
 - subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外
+- 期待値以外への切替と write を**同一コマンド**で実行した場合
+  (`gh auth switch --user other && gh pr create`) は、実行前の状態で検証されるため
+  切替後の write は検証されない (hook は実行前にしか動かない)。別々のコマンドで
+  実行すれば切替で cache が破棄され、write は次回 hook で再検証される
+- **60 秒 (`IN_FLIGHT_SEC`) を超える対話 login** (`gh auth login --web` /
+  `aws sso login` 等のブラウザ認証) の最中に、同一 service の並行検証 (並列 Bash
+  呼出) があった場合、その検証が login 前の状態で成功すると entry が書かれ、login
+  完了後も最大 30 秒 (TTL) 有効になりうる。PostToolUse hook で実行後に無効化すれば
+  閉じるが、全 Bash 呼出に Python プロセスが恒久的に乗るため採用していない
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない

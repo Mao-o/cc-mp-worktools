@@ -9,7 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import cache, output, paths
+from core import cache, cli_options, output, paths
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -28,11 +28,57 @@ def _match_service(candidate: str):
     return None
 
 
-def _is_readonly(candidate: str, service) -> bool:
-    for pattern in getattr(service, "READONLY", []):
-        if re.search(pattern, candidate):
-            return True
-    return False
+def _normalize_candidate(candidate: str, service) -> tuple[str, dict]:
+    """CLI 名直後の global option (`aws --profile prod sso login`) を剥がした形を返す。
+
+    service が GLOBAL_OPTIONS_WITH_VALUE / GLOBAL_FLAGS を宣言していなければ無変更。
+    剥がした option は 2 要素目 (将来の flag 照合用。現状 dispatcher は使わない)。
+    """
+    with_value = getattr(service, "GLOBAL_OPTIONS_WITH_VALUE", frozenset())
+    flags = getattr(service, "GLOBAL_FLAGS", frozenset())
+    if not with_value and not flags:
+        return candidate, {}
+    return cli_options.strip_leading_options(candidate, with_value, flags)
+
+
+def _candidate_forms(candidate: str, service) -> tuple[str, ...]:
+    """判定に使う候補の形 (元の形 + global option を剥がした形、同じなら 1 つ)。
+
+    両方に当てるのは、`aws --version` のように剥がすと CLI 名だけになる形を元の
+    pattern (`^aws\\s+--version`) で拾い続けるため。
+    """
+    if service is None:
+        return (candidate,)
+    normalized, _opts = _normalize_candidate(candidate, service)
+    return (candidate, normalized) if normalized != candidate else (candidate,)
+
+
+def _matches_any(forms: tuple[str, ...], patterns) -> bool:
+    return any(re.search(p, form) for p in patterns for form in forms)
+
+
+def _is_readonly(forms: tuple[str, ...], service) -> bool:
+    """READONLY (regex) か、service の `is_readonly(candidate)` (regex で表せない判定、
+    例: 鍵操作を伴わない `gh auth login` 形) のどちらかに当たれば True。
+    判定中の例外は安全側 (通常検証)。"""
+    if _matches_any(forms, getattr(service, "READONLY", [])):
+        return True
+    fn = getattr(service, "is_readonly", None)
+    if fn is None:
+        return False
+    try:
+        return any(fn(form) for form in forms)
+    except Exception:
+        return False
+
+
+def _is_state_changing(forms: tuple[str, ...], service) -> bool:
+    """候補セグメントが service のアカウント状態を変えうる (切替 / ログイン系) なら True。"""
+    return _matches_any(forms, getattr(service, "STATE_CHANGING", []))
+
+
+def _service_name(service) -> str:
+    return service.__name__.rsplit(".", 1)[-1]
 
 
 def _find_accounts_file(
@@ -86,8 +132,16 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
     )
 
 
-def _collect_targets(command: str) -> list[tuple]:
-    """コマンドを分解し、検証対象 (non-readonly) の (svc, cands, inline_env) リストを返す。
+def _analyze_command(command: str) -> tuple[list[tuple], list]:
+    """コマンドを分解し (targets, switching) を返す。
+
+    targets は検証対象 (non-readonly) の (svc, cands, inline_env) リスト。cands の
+    各要素は (元の候補, global option を剥がした候補) の組で、前者は deny 文面の
+    検出コマンド表示、後者は self-remediation 判定に使う。
+    switching はアカウント状態を変えうるセグメント (STATE_CHANGING) を含む service の
+    リスト (重複なし、出現順)。readonly 扱いのセグメント (`gh auth login` /
+    `aws sso login` 等) も switching には含める — 検証はしないが、実行後に
+    アカウントが変わるため成功 cache を破棄する必要があるため。
 
     同一サービスでも **インライン env が異なるセグメントは別エントリ**にする。
     `AWS_PROFILE=prod aws ... && AWS_PROFILE=dev aws ...` のような複合コマンドで
@@ -103,20 +157,31 @@ def _collect_targets(command: str) -> list[tuple]:
     """
     order: list = []
     cand_map: dict = {}
+    switching: list = []
     for cand, inline_env in extract_candidates(command):
         svc = _match_service(cand)
-        if svc is None or _is_readonly(cand, svc):
+        # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
+        # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
+        forms = _candidate_forms(cand, svc)
+        # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
+        # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
+        # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
+        # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
+        for other in SERVICES:
+            if other not in switching and _is_state_changing(forms, other):
+                switching.append(other)
+        if svc is None or _is_readonly(forms, svc):
             continue
         key = (svc, tuple(sorted(inline_env.items())))
         if key not in cand_map:
             cand_map[key] = []
             order.append(key)
-        cand_map[key].append(cand)
+        cand_map[key].append((cand, forms[-1]))
     targets: list = []
     for key in order:
         svc, env_items = key
         targets.append((svc, cand_map[key], dict(env_items)))
-    return targets
+    return targets, switching
 
 
 def _all_self_remediation(cands: list, service, entry) -> bool:
@@ -200,7 +265,15 @@ def dispatch(command: str, cwd: str) -> dict | None:
     if not project_dir:
         return None
 
-    targets = _collect_targets(command)
+    targets, switching = _analyze_command(command)
+    # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
+    # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
+    # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
+    # 必ず再検証される (切替の実行中に並行した検証が成功を書く窓は cache 側の
+    # epoch + in-flight 窓で塞ぐ)。self-remediation (期待値への切替) や readonly
+    # 扱いの login も、実行に失敗して状態が変わらない可能性があるため無条件に破棄する。
+    for svc in switching:
+        cache.invalidate(_service_name(svc))
     if not targets:
         return None
 
@@ -262,11 +335,23 @@ def dispatch(command: str, cwd: str) -> dict | None:
             )
             continue
 
-        if _all_self_remediation(cands, svc, entry):
+        if _all_self_remediation([norm for _orig, norm in cands], svc, entry):
             continue
 
-        svc_name = svc.__name__.rsplit(".", 1)[-1]
-        if cache.get_success(svc_name, project_dir, entry, accounts_mtime, inline_env):
+        svc_name = _service_name(svc)
+        # verify 開始時点の epoch。開始後に (並行する hook の) 切替検出で epoch が進んだ
+        # 場合、この検証は旧状態を見ている可能性があるため結果を cache に公開しない
+        # (cache.set_success が epoch を照合する)。
+        epoch = cache.current_epoch(svc_name)
+        # 切替を含むコマンドでは、その service の target は cache を読まず (上で破棄
+        # 済みだが防御的に) 実行前の状態を新たに検証し、成功しても cache に残さない
+        # (実行後に状態が変わる)。判定は service 単位 — readonly の `gh auth login`
+        # は cands に入らず、inline env が違う切替セグメントは別 target になるため、
+        # cands だけを見ると `gh auth login && gh pr create` の成功が cache される。
+        switching_here = svc in switching
+        if not switching_here and cache.get_success(
+            svc_name, project_dir, entry, accounts_mtime, inline_env
+        ):
             continue
 
         # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
@@ -277,9 +362,13 @@ def dispatch(command: str, cwd: str) -> dict | None:
         if err:
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
-            errors.append(f"{err}\n(検出コマンド: {', '.join(cands)})")
-        else:
-            cache.set_success(svc_name, project_dir, entry, accounts_mtime, inline_env)
+            errors.append(
+                f"{err}\n(検出コマンド: {', '.join(orig for orig, _norm in cands)})"
+            )
+        elif not switching_here:
+            cache.set_success(
+                svc_name, project_dir, entry, accounts_mtime, inline_env, epoch=epoch
+            )
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
 
