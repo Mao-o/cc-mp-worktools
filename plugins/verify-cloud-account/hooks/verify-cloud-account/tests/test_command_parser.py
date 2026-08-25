@@ -634,6 +634,9 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
         ("AWS_PROFILE=prod time aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod nohup aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod command aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        # `builtin` は外部 CLI を起動しないので実運用では service に match しないが、
+        # parser の扱い (剥がして env を収集) は他の passthrough と同じ。
+        ("AWS_PROFILE=prod builtin aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod exec aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod npx aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         (
@@ -652,7 +655,49 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
             {"AWS_PROFILE": "prod"},
         ),
         ("AWS_PROFILE=prod bun x aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        # v0.9.0 追加の実行ラッパ。いずれも継承 env をそのまま子へ渡す。
+        ("AWS_PROFILE=prod timeout 30 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod nice -n 5 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod stdbuf -oL aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod setsid aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        (
+            "AWS_PROFILE=prod caffeinate -i aws s3 ls",
+            "aws s3 ls",
+            {"AWS_PROFILE": "prod"},
+        ),
+        ("AWS_PROFILE=prod watch -n 5 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod xargs -n 1 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
     ]
+
+    def test_every_passthrough_wrapper_has_a_propagation_case(self):
+        """passthrough 分類の全 wrapper が上の表に載っていることを強制する。
+
+        分類 (`_WRAPPER_ENV_CLASS`) を足しただけで伝播ケースを書かないと、
+        「剥がすが env を運ばない」「flag の消費規則が違う」といった実挙動の
+        ずれが誰にも観測されないまま入る。D16 チェックリスト手順 6 の機械化。
+        """
+        covered = set()
+        for command, _normalized, _env in self.PASSTHROUGH_CASES:
+            tokens = command.split()[1:]  # 先頭の inline env を除く
+            if not tokens:
+                continue
+            for size in (3, 2, 1):
+                key = tuple(tokens[:size]) if size > 1 else tokens[0]
+                if key in command_parser._WRAPPER_ENV_CLASS:
+                    covered.add(key)
+                    break
+        passthrough = {
+            w
+            for w, cls in command_parser._WRAPPER_ENV_CLASS.items()
+            if cls == "passthrough"
+        }
+        missing = passthrough - covered
+        self.assertEqual(
+            missing,
+            set(),
+            "PASSTHROUGH_CASES に env 伝播ケースの無い passthrough wrapper が "
+            f"あります: {sorted(map(str, missing))}",
+        )
 
     def test_passthrough_wrappers_propagate_pre_wrapper_env(self):
         for command, normalized, env in self.PASSTHROUGH_CASES:
@@ -699,6 +744,206 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
             extract_candidates("env AWS_PROFILE=prod aws s3 ls"),
             [("aws s3 ls", {"AWS_PROFILE": "prod"})],
         )
+
+
+class TestHeredocProtection(unittest.TestCase):
+    """heredoc 本文を候補セグメントにしない (誤 deny 防止)。
+
+    `cat > deploy.sh <<'EOF' ... EOF` の本文に書かれた CLI 例は**実行されない**
+    ただのテキストなので、候補として検証してはいけない。改行を無条件の区切りに
+    していた頃は本文 1 行 1 行が候補になり、スクリプトや PR 本文を heredoc で
+    書くだけでファイル生成そのものが deny されていた。
+    """
+
+    def test_body_lines_are_not_candidates(self):
+        cmd = "cat > deploy.sh <<'EOF'\n#!/bin/bash\ngh release create v1\nEOF"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 1)
+        self.assertTrue(cands[0].startswith("cat > deploy.sh"))
+
+    def test_command_after_heredoc_is_still_a_separate_candidate(self):
+        # delimiter 行の改行はトップレベルの区切り。閉じないと heredoc の次の
+        # コマンドが本文に吸収され、検証されないまま素通りする (バイパス)。
+        cmd = "cat > d.sh <<'EOF'\ngh release create v1\nEOF\ngh pr create --fill"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 2)
+        self.assertEqual(cands[1], "gh pr create --fill")
+
+    def test_unquoted_and_dash_forms(self):
+        # `<<-` は本文と delimiter 行の先頭タブを除去して比較する (man 1 bash)。
+        cmd = "cat <<-EOF > x\n\tgh pr create\n\tEOF\naws s3 ls"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 2)
+        self.assertEqual(cands[1], "aws s3 ls")
+
+    def test_double_quoted_and_backslash_delimiters(self):
+        for opener, closer in (('<<"EOF"', "EOF"), ("<<\\EOF", "EOF")):
+            with self.subTest(opener=opener):
+                cmd = f"cat {opener}\ngh pr create\n{closer}\naws s3 ls"
+                cands = [c for c, _env in extract_candidates(cmd)]
+                self.assertEqual(len(cands), 2)
+                self.assertEqual(cands[1], "aws s3 ls")
+
+    def test_multiple_heredocs_on_one_line(self):
+        cmd = "cat <<A <<B\na1\nA\nb1\nB\naws s3 ls"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 2)
+        self.assertEqual(cands[1], "aws s3 ls")
+
+    def test_here_string_is_not_a_heredoc(self):
+        # `<<<` は本文行を持たないので改行での分割を止めてはいけない。
+        cands = [c for c, _env in extract_candidates('grep foo <<< "$bar"\ngh pr list')]
+        self.assertEqual(cands, ['grep foo <<< "$bar"', "gh pr list"])
+
+    def test_arithmetic_left_shift_is_not_treated_as_heredoc(self):
+        # `(( x = 1 << 2 ))` の `2` を delimiter と誤認すると、その数字の行まで
+        # 飲み込んで後続の検証対象セグメントを消してしまう (バイパス)。
+        # bare 形の delimiter を識別子に限定することで防ぐ。
+        cands = [c for c, _env in extract_candidates("(( x = 1 << 2 ))\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+    def test_unterminated_heredoc_absorbs_to_end(self):
+        # bash も未終端 heredoc では後続を実行しないため、1 セグメントに閉じ込める。
+        cands = [c for c, _env in extract_candidates("cat <<EOF\ngh pr create\n")]
+        self.assertEqual(len(cands), 1)
+        self.assertTrue(cands[0].startswith("cat <<EOF"))
+
+
+class TestCommandBuiltinQuery(unittest.TestCase):
+    """`command -v gh` は存在確認なので wrapper として剥がさない (誤 deny 防止)。
+
+    `man 1 bash`: `command [-pVv] command [arg ...]` /「If either the -V or -v
+    option is supplied, a description of command is printed」。つまり `-v` 付きは
+    後続 CLI を実行しない。剥がすと `gh` 単体の候補になり、インストール確認の
+    定型句だけでアカウント検証が走って deny されていた。
+    """
+
+    def test_dash_v_stays_opaque(self):
+        for cmd in ("command -v gh", "command -V aws", "command -pv aws", "command -vp gh"):
+            with self.subTest(cmd=cmd):
+                normalized = strip_transparent_wrappers(cmd)
+                self.assertTrue(normalized.startswith("command "), normalized)
+
+    def test_dash_v_with_redirect_chain(self):
+        cands = [c for c, _e in extract_candidates("command -v gh >/dev/null 2>&1 && echo ok")]
+        self.assertTrue(cands[0].startswith("command -v gh"))
+
+    def test_executing_forms_are_still_stripped(self):
+        for cmd in ("command gh pr create", "command -p gh pr create", "command -- gh pr create"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+
+class TestExecutionWrappers(unittest.TestCase):
+    """v0.9.0 で追加した実行ラッパ。剥がさないと mutating コマンドが素通りする。"""
+
+    def test_timeout_consumes_duration_positional(self):
+        for cmd, want in (
+            ("timeout 30 gh pr create --fill", "gh pr create --fill"),
+            ("timeout 5m aws s3 sync . s3://b", "aws s3 sync . s3://b"),
+            ("timeout 1.5h gh pr create", "gh pr create"),
+            ("timeout -s KILL 30 gh pr create", "gh pr create"),
+            ("timeout --signal=KILL 30 gh pr create", "gh pr create"),
+            ("timeout -k 10 30 gh pr create", "gh pr create"),
+            ("timeout --preserve-status 30 gh pr create", "gh pr create"),
+            ("timeout -k10 30 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_timeout_without_duration_stays_opaque(self):
+        # DURATION の形をしていない = 文書化された呼び出し形ではない。本体トークンを
+        # 誤って食うより、不透明なまま検証をスキップする方が安全側 (lenient)。
+        self.assertEqual(
+            strip_transparent_wrappers("timeout notanumber gh pr create"),
+            "timeout notanumber gh pr create",
+        )
+
+    def test_other_wrappers(self):
+        for cmd, want in (
+            ("xargs -I{} gh pr close {}", "gh pr close {}"),
+            ("xargs -I {} gh pr close {}", "gh pr close {}"),
+            ("xargs -n 1 -P 4 aws s3 rm", "aws s3 rm"),
+            ("watch -n 5 kubectl get pods", "kubectl get pods"),
+            ("nice -n 10 aws s3 sync . s3://b", "aws s3 sync . s3://b"),
+            ("nice -5 aws s3 ls", "aws s3 ls"),
+            ("stdbuf -oL aws s3 ls", "aws s3 ls"),
+            ("stdbuf -o L aws s3 ls", "aws s3 ls"),
+            ("setsid gh pr create", "gh pr create"),
+            ("caffeinate -i aws s3 sync . s3://b", "aws s3 sync . s3://b"),
+            ("caffeinate -t 60 aws s3 ls", "aws s3 ls"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_pipeline_second_stage_is_extracted(self):
+        cands = [c for c, _e in extract_candidates("gh pr list | xargs -I{} gh pr close {}")]
+        self.assertEqual(cands, ["gh pr list", "gh pr close {}"])
+
+
+class TestShellSyntaxNormalization(unittest.TestCase):
+    """構文プレフィックス / 末尾記号 / パスの正規化 (検証バイパスの解消)。
+
+    いずれも行頭 anchored な PATTERNS (`^gh(?=\\s|$)`) に一致せず service=None に
+    なっていた形。Claude が日常的に生成する形なので、検証を走らせる側に倒す。
+    """
+
+    def test_grouping_and_negation_prefixes(self):
+        for cmd, want in (
+            ("(gh pr create --fill)", "gh pr create --fill"),
+            ("{ gh pr create", "gh pr create"),
+            ("! gh pr create", "gh pr create"),
+            ("(cd dir", "cd dir"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_reserved_word_prefixes(self):
+        for word in ("if", "then", "elif", "else", "do", "while", "until"):
+            with self.subTest(word=word):
+                self.assertEqual(
+                    strip_transparent_wrappers(f"{word} gh pr create"), "gh pr create"
+                )
+
+    def test_leading_redirections(self):
+        for cmd in (
+            "</dev/null gh pr create",
+            "2>/dev/null gh pr create",
+            ">out.txt gh pr create",
+            "> out.txt gh pr create",
+            "2>&1 gh pr create",
+            "&> out.txt gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+    def test_command_path_and_backslash_are_normalized(self):
+        for cmd, want in (
+            ("/opt/homebrew/bin/gh pr create", "gh pr create"),
+            ("./node_modules/.bin/firebase deploy", "firebase deploy"),
+            ("\\gh pr create", "gh pr create"),
+            ("AWS_PROFILE=prod /usr/bin/aws s3 ls", "aws s3 ls"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_balanced_parens_in_arguments_are_preserved(self):
+        # 末尾 `)` を無条件に剥がすと引数を壊す。開き括弧と対応していれば残す。
+        self.assertEqual(
+            strip_transparent_wrappers("gh pr view $(echo 1)"), "gh pr view $(echo 1)"
+        )
+
+    def test_for_loop_body_becomes_a_candidate(self):
+        cands = [
+            c for c, _e in extract_candidates(
+                'for f in *.tgz; do gh release upload v1 "$f"; done'
+            )
+        ]
+        self.assertIn('gh release upload v1 "$f"', cands)
+
+    def test_brace_group_with_trailing_close(self):
+        cands = [c for c, _e in extract_candidates("{ gh pr create; }")]
+        self.assertEqual(cands, ["gh pr create"])
 
 
 if __name__ == "__main__":

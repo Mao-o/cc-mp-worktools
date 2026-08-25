@@ -1604,5 +1604,160 @@ class TestDenyProvenance(BaseWithTmpProject):
         self.assertIn("[verify-cloud-account]", reason)
 
 
+class TestHyphenatedCommandsAreNotMatched(BaseWithTmpProject):
+    """`aws-vault` / `gh-ost` / `kubectl-*` は別コマンドなので発火しない。
+
+    `^aws\\b` は `aws-vault exec prod -- aws s3 rm` を aws として拾い、hook の
+    既定 profile で `sts` を実行していた。既定資格情報が無ければ永久 deny、
+    既定が期待値なら実行 profile が prod でも allow という二重の誤り。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts(
+            {"aws": "111111111111", "github": "Mao-o", "kubectl": "prod-ctx"}
+        )
+
+    def test_hyphenated_neighbours_do_not_fire(self):
+        # verify を必ず失敗させたうえで **呼ばれないこと** を見る。deny の有無だけを
+        # 見ると、実 CLI がたまたま期待値にログインしている環境では素通りして
+        # vacuous になる (実 CLI は起動させない)。
+        for command in (
+            "aws-vault exec prod -- aws s3 rm s3://b/x",
+            "gh-ost --help",
+            "kubectl-foo get pods",
+        ):
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch("services.aws.verify", return_value="AWS 不一致") as ma, \
+                     mock.patch("services.github.verify", return_value="GH 不一致") as mg, \
+                     mock.patch("services.kubectl.verify", return_value="k8s 不一致") as mk:
+                    self.assertIsNone(dispatch(command, str(self.project_dir)))
+                self.assertEqual(
+                    (ma.call_count, mg.call_count, mk.call_count), (0, 0, 0), command
+                )
+
+    def test_real_cli_still_fires(self):
+        with mock.patch("services.aws.verify", return_value="AWS 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("aws s3 rm s3://b/x", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+    def test_npx_firebase_tools_still_fires(self):
+        self._write_accounts({"firebase": "my-fb"})
+        with mock.patch("services.firebase.verify", return_value="FB 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("npx firebase-tools deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestSegmentationRegressions(BaseWithTmpProject):
+    """誤 deny / 検証バイパスだったセグメント形の回帰テスト。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111", "github": "Mao-o"})
+
+    def test_heredoc_body_does_not_trigger_verification(self):
+        # 誤 deny 側: heredoc 本文の CLI 例は実行されないので検証してはいけない。
+        command = "cat > deploy.sh <<'EOF'\n#!/bin/bash\ngh release create v1\nEOF"
+        with mock.patch("services.github.verify", return_value="GitHub 不一致") as m:
+            with self.isolated_cache():
+                self.assertIsNone(dispatch(command, str(self.project_dir)))
+        self.assertEqual(m.call_count, 0)
+
+    def test_command_v_does_not_trigger_verification(self):
+        with mock.patch("services.github.verify", return_value="GitHub 不一致") as m:
+            with self.isolated_cache():
+                self.assertIsNone(
+                    dispatch("command -v gh >/dev/null 2>&1", str(self.project_dir))
+                )
+        self.assertEqual(m.call_count, 0)
+
+    def test_previously_bypassing_forms_now_verify(self):
+        # バイパス側: いずれも実際に CLI が走る形なので検証を走らせる。
+        for command in (
+            "(gh pr create --fill)",
+            "{ gh pr create; }",
+            'for f in *.tgz; do gh release upload v1 "$f"; done',
+            "if gh pr create; then echo ok; fi",
+            "! gh pr create",
+            "</dev/null gh pr create",
+            "2>/dev/null gh pr create",
+            "/opt/homebrew/bin/gh pr create",
+            "\\gh pr create",
+            "timeout 30 gh pr create --fill",
+            "gh pr list | xargs -I{} gh pr close {}",
+            "nice -n 10 gh pr create",
+            "setsid gh pr create",
+        ):
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(
+                    "services.github.verify", return_value="GitHub 不一致"
+                ) as m:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(result, command)
+                self.assertGreaterEqual(m.call_count, 1, command)
+
+    def test_watch_wraps_kubectl(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        with mock.patch("services.kubectl.verify", return_value="ctx 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("watch -n 5 kubectl delete pod x", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestContextOptionRouting(BaseWithTmpProject):
+    """context option は inline env と同じく「別の検証対象」として扱う。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111"})
+
+    def test_context_is_passed_to_verify(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws --profile other s3 rm s3://b/x", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {"profile": "other"})
+
+    def test_flag_after_subcommand_is_seen(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws s3 rm s3://b/x --profile other", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {"profile": "other"})
+
+    def test_different_profiles_in_one_chain_are_verified_separately(self):
+        """1 コマンド内の 2 つ目の profile も検証する。
+
+        context を grouping key に含めないと 1 エントリに畳まれ、後段
+        (`--profile b`) が検証されないまま allow される。
+        """
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(
+                    "aws --profile a s3 rm x && aws --profile b s3 rm y",
+                    str(self.project_dir),
+                )
+        contexts = [c.kwargs.get("context") for c in m.call_args_list]
+        self.assertEqual(contexts, [{"profile": "a"}, {"profile": "b"}])
+
+    def test_no_flag_yields_empty_context(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws s3 rm s3://b/x", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+    def test_success_cache_is_not_shared_across_contexts(self):
+        """既定 profile の成功 cache を `--profile other` が hit してはいけない。"""
+        with self.isolated_cache():
+            with mock.patch("services.aws.verify", return_value=None) as m:
+                self.assert_cache_published("aws s3 rm s3://b/x", m, expected_calls=1)
+                # 別 context は cache を跨がず再検証される。
+                dispatch("aws --profile other s3 rm s3://b/x", str(self.project_dir))
+                self.assertEqual(m.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

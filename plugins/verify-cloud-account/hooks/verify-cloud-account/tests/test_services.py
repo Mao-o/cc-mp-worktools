@@ -1293,5 +1293,161 @@ class TestEnvPropagation(unittest.TestCase):
         self.assertEqual(m.call_args.kwargs.get("env"), custom)
 
 
+class TestContextOptionOverride(unittest.TestCase):
+    """コマンドが `--profile` / `--project` / `--context` で指定した対象を検証する。
+
+    従来は「hook の既定コンテキスト」だけを見ていたため、
+    `aws --profile other s3 rm` は既定が期待値なら allow されていた
+    (検証は既定 / 実行は other = false-allow)。誤アカウント事故の典型経路。
+    """
+
+    def test_aws_passes_profile_to_verification_command(self):
+        calls = []
+
+        def rec(argv, **kwargs):
+            calls.append(argv)
+            return _fake_run(stdout="222222222222\n")
+
+        with mock.patch("subprocess.run", side_effect=rec):
+            err = aws.verify("111111111111", "/p", context={"profile": "other"})
+        # 検証コマンドにも同じ --profile を付ける (CLI の資格情報解決順を実行時と揃える)。
+        self.assertIn("--profile", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--profile") + 1], "other")
+        self.assertIn("不一致", err)
+        self.assertIn("--profile other", err)
+
+    def test_aws_without_context_does_not_pass_profile(self):
+        calls = []
+
+        def rec(argv, **kwargs):
+            calls.append(argv)
+            return _fake_run(stdout="111111111111\n")
+
+        with mock.patch("subprocess.run", side_effect=rec):
+            self.assertIsNone(aws.verify("111111111111", "/p"))
+        self.assertNotIn("--profile", calls[0])
+
+    def test_gcloud_project_flag_is_compared_directly(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-proj\n")) as m:
+            err = gcloud.verify("my-proj", "/p", context={"project": "other"})
+        self.assertIn("不一致", err)
+        self.assertIn("--project=other", err)
+        # flag で決まるので現在値の問い合わせは不要。
+        self.assertEqual(m.call_count, 0)
+
+    def test_gcloud_project_flag_matching_expected_is_allowed(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="other\n")):
+            self.assertIsNone(gcloud.verify("my-proj", "/p", context={"project": "my-proj"}))
+
+    def test_gcloud_project_flag_does_not_skip_account_check(self):
+        """project を flag で上書きしても account は従来どおり照合する。
+
+        キー単位で上書きせず早期 return すると、`gcloud --project ok run deploy` が
+        account の不一致を見逃す新たな false-allow になる。
+        """
+        expected = {"project": "my-proj", "account": "me@example.com"}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="other@example.com\n")) as m:
+            err = gcloud.verify(expected, "/p", context={"project": "my-proj"})
+        self.assertIsNotNone(err)
+        self.assertIn("アカウント不一致", err)
+        # account の現在値だけを問い合わせている。
+        self.assertEqual(m.call_count, 1)
+        self.assertIn("account", m.call_args.args[0])
+
+    def test_gcloud_configuration_flag_is_forwarded(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-proj\n")) as m:
+            self.assertIsNone(
+                gcloud.verify("my-proj", "/p", context={"configuration": "alt"})
+            )
+        argv = m.call_args.args[0]
+        self.assertIn("--configuration", argv)
+        self.assertEqual(argv[argv.index("--configuration") + 1], "alt")
+
+    def test_kubectl_context_flag_is_compared_directly(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="prod-ctx\n")) as m:
+            err = kubectl.verify("prod-ctx", "/p", context={"context": "other"})
+        self.assertIn("不一致", err)
+        self.assertIn("--context=other", err)
+        self.assertEqual(m.call_count, 0)
+
+    def test_kubectl_context_flag_matching_expected_is_allowed(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="other\n")):
+            self.assertIsNone(
+                kubectl.verify("prod-ctx", "/p", context={"context": "prod-ctx"})
+            )
+
+    def test_kubectl_kubeconfig_flag_is_forwarded(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="prod-ctx\n")) as m:
+            self.assertIsNone(
+                kubectl.verify("prod-ctx", "/p", context={"kubeconfig": "/tmp/kc"})
+            )
+        argv = m.call_args.args[0]
+        self.assertIn("--kubeconfig", argv)
+        self.assertEqual(argv[argv.index("--kubeconfig") + 1], "/tmp/kc")
+
+    def test_firebase_project_flag_is_compared_directly(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-fb\n")) as m:
+            err = firebase.verify("my-fb", "/p", context={"project": "other"})
+        self.assertIn("不一致", err)
+        self.assertIn("--project other", err)
+        self.assertEqual(m.call_count, 0)
+
+    def test_firebase_project_flag_resolves_firebaserc_alias(self):
+        """firebase-tools と同じく alias → project ID に解決してから照合する。"""
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ".firebaserc").write_text(
+                json.dumps({"projects": {"prod": "proj-prod", "default": "proj-dev"}}),
+                encoding="utf-8",
+            )
+            with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
+                self.assertIsNone(
+                    firebase.verify("proj-prod", d, context={"project": "prod"})
+                )
+                err = firebase.verify("proj-dev", d, context={"project": "prod"})
+        self.assertIn("不一致", err)
+        self.assertIn("proj-prod", err)
+
+    def test_firebase_dict_expected_with_project_flag(self):
+        expected = {"default": "proj-dev", "prod": "proj-prod"}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
+            self.assertIsNone(
+                firebase.verify(expected, "/p", context={"project": "proj-prod"})
+            )
+            err = firebase.verify(expected, "/p", context={"project": "unknown-proj"})
+        self.assertIn("不一致", err)
+
+    def test_github_ignores_context(self):
+        # gh の --hostname / --user は操作対象の指定で、照合先は常にアクティブ
+        # アカウント (README 既知の制限)。context は受け取るが使わない。
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_GITHUB_COM_ONLY)):
+            self.assertIsNone(
+                github.verify("Mao-o", "/p", context={"hostname": "ghe.example.com"})
+            )
+
+
+class TestServiceContextContract(unittest.TestCase):
+    """全 service が同じ verify シグネチャと CONTEXT_OPTIONS 規約を守る。"""
+
+    SERVICES = (aws, firebase, gcloud, github, kubectl)
+
+    def test_verify_accepts_context_keyword(self):
+        import inspect
+
+        for svc in self.SERVICES:
+            with self.subTest(svc=svc.__name__):
+                params = inspect.signature(svc.verify).parameters
+                self.assertIn("context", params)
+                self.assertIs(params["context"].default, None)
+
+    def test_declared_context_options_are_global_or_known(self):
+        """CONTEXT_OPTIONS のキーは option 名 (`-` 始まり) で、値は論理名。"""
+        for svc in self.SERVICES:
+            options = getattr(svc, "CONTEXT_OPTIONS", {})
+            with self.subTest(svc=svc.__name__):
+                for name, key in options.items():
+                    self.assertTrue(name.startswith("-"), name)
+                    self.assertTrue(key and not key.startswith("-"), key)
+
+
 if __name__ == "__main__":
     unittest.main()
