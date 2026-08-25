@@ -1876,6 +1876,32 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ("kubectl --context other delete pod x", "kubectl"),
         # インライン env
         ("AWS_PROFILE=prod aws s3 rm s3://b/x", "aws"),
+        # --- wrapper の flag 形 (PR #48 Codex P1 x2) ---
+        # optional 引数を持つ long option の bare 形は値を取らない。
+        # 「値を取る」と誤登録すると後続のコマンド名を食って検証が消える。
+        ("xargs --replace gh pr close {}", "github"),
+        ("xargs --eof gh pr create", "github"),
+        ("xargs --max-lines gh pr create", "github"),
+        ("xargs --replace={} gh pr close {}", "github"),
+        # 値を取る flag を登録し損ねても、値が数値なら arg-like ネットで到達する。
+        # (`watch` は一次情報が取れないため flag 表を空にしてネットに任せている)
+        ("watch --equexit 5 gh pr create", "github"),
+        ("watch -q 5 gh pr create", "github"),
+        ("watch -n 5 gh pr create", "github"),
+        ("watch --interval=5 gh pr create", "github"),
+        # 非数値の値を取る flag は登録が要る (一次情報で確定済みのもの)
+        ("timeout -s KILL 30 gh pr create", "github"),
+        ("timeout --signal=KILL 30 gh pr create", "github"),
+        ("timeout --preserve-status 30 gh pr create", "github"),
+        ("stdbuf -o L gh pr create", "github"),
+        ("sudo -u deploy gh pr create", "github"),
+        ("npx -p pkg firebase deploy", "firebase"),
+        ("time -o out.txt gh pr create", "github"),
+        ("exec -a name gh pr create", "github"),
+        ("xargs -E END gh pr create", "github"),
+        ("xargs -I {} gh pr close {}", "github"),
+        ("nice -n 10 gh pr create", "github"),
+        ("caffeinate -t 60 gh pr create", "github"),
     ]
 
     def setUp(self):

@@ -132,6 +132,67 @@ env を伝播しない方向に倒したとき:
 **分類 guard** (`_WRAPPER_ENV_CLASS` + テスト) を入れて、将来の wrapper 追加時に
 env 挙動の分類を機械的に強制する。
 
+## wrapper flag 表の全件監査 (v0.9.0 / PR #48 Codex P1 x2 を受けて)
+
+env 挙動とは**別軸**の監査。「その flag が次の token を消費するか」を取り違えると、
+コマンド本体を見失って**検証がまるごと消える**。実際に 2 件の取り違えが
+**逆方向に 1 つずつ**出た (optional を必須扱い / 必須を bool 扱い)。
+
+### 3 分類
+
+| 分類 | 挙動 | 実装 |
+|---|---|---|
+| 値を取らない | 次の token を消費しない | どちらの集合にも載せない |
+| **必須**引数 | 分離形も `=` 形も値を取る | `_WRAPPER_FLAGS_WITH_VALUE` |
+| **optional** 引数 | **`=` 形 (long) / 引っ付け形 (short) でのみ**値を取る。bare 形は消費しない | `_WRAPPER_FLAGS_OPTIONAL_VALUE` |
+
+`--key=value` 形と短縮連結形 (`-oL` / `-I{}`) は**登録の有無に関わらず 1 トークンで
+消費される**ため、登録が要るのは「分離形で値を取る flag」だけ。
+
+### 監査結果 (出所付き)
+
+`[local]` = 開発機の man page を逐語確認 / `[ref]` = 上流の公式リファレンス記述のみ。
+
+| wrapper | 必須引数として登録 | 出所 | 備考 |
+|---|---|---|---|
+| `sudo` | `-u -g -U -p -C -D -h -r -t -T -R -a` + long 形 | [local] sudo(8) | `-C num` `-D dir` `-g group` `-h host` `-p prompt` `-R dir` `-T timeout` `-u user` `-U user` を synopsis で確認。`-a`/`-r`/`-t` は Linux 版 |
+| `time` | `-o` (+ GNU `-f`) | [local] time(1) | `time [-al] [-h \| -p] [-o file] utility` |
+| `exec` | `-a` | [local] bash(1) | `exec [-cl] [-a name] [command [arguments]]` |
+| `command` | (なし) | [local] bash(1) | `command [-pVv]` — 値を取る flag は無い。`-v`/`-V` は別扱い (存在確認) |
+| `nice` | `-n` (+ GNU `--adjustment`) | [local] nice(1) | `nice [-n increment] utility` |
+| `stdbuf` | `-i -o -e` + long 形 | [local] stdbuf(1) | `stdbuf [-e bufdef] [-i bufdef] [-o bufdef] [command]`。bufdef は `L`/`B` 等**非数値** |
+| `caffeinate` | `-t -w` | [local] caffeinate(8) | `caffeinate [-disu] [-t timeout] [-w pid] [utility ...]` |
+| `xargs` | `-E -I -J -L -n -P -R -S -s` | [local] xargs(1) | BSD/macOS man が**分離形で値を取ると明記**している短縮形のみ |
+| `timeout` | `-s --signal -k --kill-after` | [ref] GNU coreutils | 開発機に man 無し。SIGNAL は非数値 (`KILL`) なので登録が必須 |
+| `npx` | `-p --package -c --call --node-options --node-arg` | [ref] npx | 開発機に npx 無し。**v0.8.0 から存在**するので削除すると検証が新たに失われる |
+| `watch` | **(空)** | — | 開発機に man 無し。値付き option の値は**すべて数値**なので下の安全網に委ねる |
+| `setsid` | (なし) | [ref] util-linux | `-c/--ctty` `-f/--fork` `-w/--wait` のみで値を取る flag が無い |
+
+**optional 引数として登録**: `xargs` の `--replace` / `--eof` / `--max-lines`
+([ref] GNU findutils: `--replace[=R]` / `--eof[=eof-str]` / `--max-lines[=max-lines]`)。
+短縮の `-i[R]` / `-l[N]` は引っ付け形でのみ値を取るので bool 扱いで正しい。
+
+### 裏が取れず「消費しない」に倒した flag
+
+GNU 専用で開発機の man page に無く、値が**非数値**のもの:
+`xargs -a file` / `-d delim` / `--arg-file` / `--delimiter` / `--process-slot-var`。
+登録しないと `xargs -a list.txt gh pr close` は候補が不透明のまま残り検証されないが、
+これは **v0.8.0 と同じ「検証スキップ」**であって新たな退行ではない。誤って登録して
+コマンド名を食う方が危険なので、消費しない側に倒す。
+
+### 数値引数の安全網
+
+flag 表の取り違えに対する**構造的な保険**として、flag 領域を抜けた後に残る
+「純粋な数値 (+ 任意の時間単位)」トークンを読み飛ばす (`_ARG_LIKE_RE`)。
+実行可能ファイル名が純粋な数値になることは実質無いので、読み飛ばしがコマンドを
+食う心配がない。これがあるおかげで:
+
+- 値付き flag の**登録漏れ**があっても、値が数値ならコマンド本体に到達できる
+- `watch` のように一次情報を取れない wrapper の flag 表を**空にできる**
+  (`watch -q 5 cmd` が bool + 数値なのか値付き flag なのか判らなくても正しく動く)
+
+位置引数を持つ `timeout` だけは自前の DURATION 処理と衝突するため無効にしている。
+
 ## 将来 wrapper を追加するときのチェックリスト
 
 `ssh` / `docker run -e` / `kubectl exec` / `xargs` / `timeout` / `stdbuf` /
@@ -148,8 +209,15 @@ env 挙動の分類を機械的に強制する。
 4. `conditional_scrub` の場合は **scrub 補正ロジックと回帰テストを追加**する
    (`sudo` の `_sudo_preserves_env` + `_normalize_segment` の `collected.clear()`
    が雛形)。`test_only_sudo_is_conditional_scrub` も更新する。
-5. wrapper が **値を取るフラグ** (`-X value`) を持つなら
-   `_WRAPPER_FLAGS_WITH_VALUE` に登録する (`sudo -u deploy` の `gh` 誤消費を防ぐ)。
+5. wrapper の flag を **3 分類** (値を取らない / 必須引数 / optional 引数) に
+   確定させ、根拠を一次情報 (インストール済み man page または `--help` の出力) で
+   取って上の監査表に追記する。**記憶や推測で分類しない**。
+   - 必須引数 → `_WRAPPER_FLAGS_WITH_VALUE`
+   - optional 引数 (`--key[=value]`) → `_WRAPPER_FLAGS_OPTIONAL_VALUE`
+     (bare 形は次の token を消費しない。必須側に入れると `xargs --replace gh ...` の
+     `gh` を食って検証が消える)
+   - 裏が取れない flag は **登録しない** (消費しない側に倒す)。値が数値なら
+     `_ARG_LIKE_RE` の安全網が拾う
 6. `TestWrapperEnvPropagationContract` の `PASSTHROUGH_CASES` 等に
    **env 伝播/非伝播の固定化ケースを追加**する。
 7. 本ドキュメントの表と README の wrapper 節を更新する。

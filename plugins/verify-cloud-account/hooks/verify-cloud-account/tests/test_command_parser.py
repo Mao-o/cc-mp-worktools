@@ -606,6 +606,60 @@ class TestWrapperEnvClassificationGuard(unittest.TestCase):
             unknown, set(), f"未知の分類値: {sorted(unknown)}"
         )
 
+    def test_required_and_optional_value_flags_are_disjoint(self):
+        """同じ flag を「必須引数」と「optional 引数」の両方に載せない。
+
+        optional 引数の flag (GNU の `--replace[=R]` 等) を必須側に登録すると、
+        bare 形が次の token = コマンド名を食い、`xargs --replace gh pr close {}` の
+        `gh` が検証をすり抜ける (PR #48 Codex P1-A)。この 2 集合が交わっていないこと
+        自体が退行防止の番人になる。
+        """
+        for wrapper, optional in command_parser._WRAPPER_FLAGS_OPTIONAL_VALUE.items():
+            required = command_parser._WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+            overlap = optional & required
+            self.assertEqual(
+                overlap,
+                set(),
+                f"{wrapper}: optional 引数の flag を必須側にも登録している "
+                f"(bare 形がコマンド名を食う): {sorted(overlap)}",
+            )
+
+    def test_optional_value_flags_do_not_consume_bare(self):
+        for cmd, want in (
+            ("xargs --replace gh pr close {}", "gh pr close {}"),
+            ("xargs --eof gh pr create", "gh pr create"),
+            ("xargs --max-lines gh pr create", "gh pr create"),
+            # `=` 形は値を取る (1 トークンで消費される)
+            ("xargs --replace={} gh pr close {}", "gh pr close {}"),
+            ("xargs --max-lines=5 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_numeric_argument_safety_net(self):
+        """値付き flag の登録漏れがあっても、値が数値ならコマンドに到達する。
+
+        `watch` のように一次情報 (man page) を開発機で取れない wrapper は flag 表を
+        空にしてこのネットに委ねている。コマンド名が純粋な数値になることは無いので、
+        読み飛ばしがコマンドを食う心配がない。
+        """
+        for cmd, want in (
+            ("watch --equexit 5 gh pr create", "gh pr create"),
+            ("watch -q 5 gh pr create", "gh pr create"),
+            ("watch -n 5 kubectl get pods", "kubectl get pods"),
+            ("xargs -Z 5 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_timeout_duration_is_not_eaten_by_the_safety_net(self):
+        # timeout は位置引数 DURATION を自前で消費するのでネットを無効にしている。
+        # 有効だと DURATION が読み飛ばされ、コマンド名が DURATION と誤判定されて
+        # wrapper 剥がし自体が諦められる。
+        for cmd in ("timeout 30 gh pr create", "timeout -k 10 30 gh pr create"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
     def test_only_sudo_is_conditional_scrub(self):
         # 現状 scrub するのは sudo のみ。新しい conditional_scrub wrapper を
         # 足すときは scrub 補正ロジックと回帰テストの追加を忘れないよう、

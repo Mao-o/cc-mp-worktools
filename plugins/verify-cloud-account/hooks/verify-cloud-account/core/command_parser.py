@@ -94,53 +94,93 @@ _WRAPPER_ENV_CLASS = {
     ("mise", "exec", "--"): "passthrough",
 }
 
-# wrapper ごとに「値を取るフラグ」(短縮 / 長形式)。ここに無い `-X` は bool として
-# 単独トークン消費、`-X=value` / `--key=value` は形式的に 1 トークンで消費。
-# 短縮の連結形 (`stdbuf -oL` / `xargs -I{}` / `timeout -k10`) は「値を含む 1
-# トークン」としてそのまま消費されるため、ここに登録するのは**分離形**
-# (`stdbuf -o L`) が正当な flag だけでよい。
+# wrapper ごとの flag 分類。**3 分類**を厳密に区別する (PR #48 Codex P1 x2 の教訓):
+#
+#   1. 値を取らない       — 次の token を消費しない
+#   2. 必須引数を取る     — 分離形 (`-u deploy`) でも `=` 形でも値を取る
+#                          → `_WRAPPER_FLAGS_WITH_VALUE`
+#   3. optional 引数を取る — GNU の long option 規約により **`=` 形でのみ**値を取る。
+#                          bare 形 (`--replace`) は次の token を消費しない
+#                          → `_WRAPPER_FLAGS_OPTIONAL_VALUE`
+#
+# 3 を 2 として登録すると `xargs --replace gh pr close {}` が `pr close {}` に
+# 正規化され、実際には実行される `gh` が**検証をすり抜ける**。逆に 2 を 1 として
+# 扱うと値 token でループが止まり、やはりコマンドを見失う。**どちらの取り違えも
+# 「検証が消える」方向に倒れる**ため、分類は一次情報 (man page / --help) で確定させ、
+# 根拠を docs/wrapper-env-audit.md に記録すること。
+#
+# 短縮の連結形 (`stdbuf -oL` / `xargs -I{}` / `xargs -i{}` / `timeout -k10`) は
+# 「値を含む 1 トークン」としてそのまま消費されるため、登録は**分離形が正当な
+# flag だけ**でよい。同様に long の `--key=value` 形は登録の有無に関わらず
+# 1 トークンで消費される。
+#
+# 出所の凡例:
+#   [local]  開発機にインストール済みの man page を逐語確認
+#   [ref]    上流の公式リファレンス記述のみ (開発機に man page が無い)
 _WRAPPER_FLAGS_WITH_VALUE = {
+    # [local] sudo(8): `-C num` `-D directory` `-g group` `-h host` `-p prompt`
+    # `-R directory` `-T timeout` `-u user` `-U user`。`-a`/`-r`/`-t` は Linux 版の
+    # auth type / SELinux role / type (macOS の synopsis には無い)。
     "sudo": {
         "-u", "-g", "-U", "-p", "-C", "-D", "-h", "-r", "-t", "-T", "-R", "-a",
         "--user", "--group", "--other-user", "--prompt", "--close-from",
         "--chdir", "--host", "--role", "--type", "--command-timeout",
         "--chroot", "--auth-type",
     },
+    # [local] time(1): `time [-al] [-h | -p] [-o file] utility`。`-f/--format` は GNU 版。
     "time": {"-o", "-f", "--output", "--format"},
+    # [ref] npx: `-p, --package <spec>` / `-c, --call <cmd>` ほか。開発機に npx が
+    # 無く man も無い。**v0.8.0 から存在するエントリ**なので削除すると
+    # `npx -p pkg firebase deploy` の検証が新たに失われるため据え置く。
     "npx": {
         "-p", "--package", "-c", "--call",
         "--node-options", "--node-arg",
     },
+    # [local] `man 1 bash`: `exec [-cl] [-a name] [command [arguments]]`。
     "exec": {"-a"},
-    # GNU coreutils timeout(1): `timeout [OPTION] DURATION COMMAND [ARG]...`。
-    # 値を取るのは `-s/--signal` と `-k/--kill-after` のみ (`--preserve-status` /
-    # `--foreground` / `-v/--verbose` は bool)。DURATION は flag ではなく
-    # 位置引数なので `_drop_timeout_duration` が別に消費する。
+    # [ref] GNU coreutils timeout(1): `-s, --signal=SIGNAL` / `-k, --kill-after=DURATION`。
+    # SIGNAL は数値とは限らない (`KILL`) ため登録が要る。DURATION は下の
+    # arg-like ネットでも拾えるが、明示しておく。
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
-    # nice(1) (macOS man page 実測): `nice [-n increment] utility [argument ...]`。
-    # GNU 版の長形式 `--adjustment=N` も同義。`nice -5 cmd` の連結形は 1 トークン消費。
+    # [local] nice(1): `nice [-n increment] utility`。GNU の長形式も同義。
+    # 値は数値なので arg-like ネットでも拾えるが、一次情報があるので明示する。
     "nice": {"-n", "--adjustment"},
-    # stdbuf(1) (macOS man page 実測): `stdbuf [-e bufdef] [-i bufdef] [-o bufdef]
-    # [command [...]]`。GNU 版の長形式も同義。
+    # [local] stdbuf(1): `stdbuf [-e bufdef] [-i bufdef] [-o bufdef] [command]`。
+    # bufdef は `L` / `B` など**非数値**を取りうるので登録が必須。
     "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
-    # caffeinate(8) (macOS man page 実測):
-    # `caffeinate [-disu] [-t timeout] [-w pid] [utility arguments...]`。
+    # [local] caffeinate(8): `caffeinate [-disu] [-t timeout] [-w pid] [utility ...]`。
     "caffeinate": {"-t", "-w"},
-    # procps-ng watch(1): 値を取るのは `-n/--interval <secs>` のみ
-    # (`-d/--differences` は任意引数だが連結形のみ、他は bool)。
-    "watch": {"-n", "--interval"},
-    # xargs(1) (macOS man page 実測): `xargs [-0oprt] [-E eofstr]
-    # [-I replstr [-R replacements] [-S replsize]] [-J replstr] [-L number]
-    # [-n number [-x]] [-P maxprocs] [-s size] [utility [argument ...]]`。
-    # GNU 版が追加する `-a file` / `-d delim` と長形式も併記する。
-    "xargs": {
-        "-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-a", "-d",
-        "--eof", "--replace", "--max-lines", "--max-args", "--max-procs",
-        "--max-chars", "--arg-file", "--delimiter", "--process-slot-var",
-    },
-    # setsid(1) (util-linux) は `-c/--ctty` / `-f/--fork` / `-w/--wait` のみで
+    # [local] xargs(1) (BSD/macOS) が分離形で値を取ると明記している短縮形のみ。
+    # 長形式は man 上どれも `--key=value` 形での記載なので登録不要
+    # (`=` 形は登録の有無に関わらず 1 トークンで消費される)。
+    # GNU 専用の `-a file` / `-d delim` は開発機で裏が取れないため**登録しない**
+    # (消費しない側 = v0.8.0 と同じ「検証スキップ」に留まり、コマンドを食わない)。
+    "xargs": {"-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s"},
+    # `watch` は開発機に man page が無く一次情報を取れない。値を取る option
+    # (`-n/--interval` / `-q/--equexit` 等) の値は**すべて数値**なので、
+    # 表を空にしたうえで下の arg-like ネットに任せる。こうすると
+    # 「その flag が値を取るか」の推測が不要になり、`watch -q 5 gh pr create` の
+    # ように bool か値付きか判らない形でも正しくコマンドに到達できる。
+    "watch": set(),
+    # setsid(1) (util-linux) は `-c/--ctty` `-f/--fork` `-w/--wait` のみで
     # 値を取る flag が無い (= 既定の bool 扱いで足りる)。
 }
+
+# **`=` 形でのみ**値を取る flag (GNU の optional argument 規約)。bare 形は
+# 次の token を消費してはいけない。
+# [ref] GNU findutils xargs: `--replace[=R]` / `--eof[=eof-str]` /
+# `--max-lines[=max-lines]`。短縮の `-i[R]` / `-l[N]` は引っ付け形でのみ値を取るので
+# bool 扱い (連結形は 1 トークンで消費される) で正しく、ここには載せない。
+_WRAPPER_FLAGS_OPTIONAL_VALUE = {
+    "xargs": {"--replace", "--eof", "--max-lines"},
+}
+
+# 「コマンド名ではありえない」引数トークン: 純粋な数値 (+ 任意の時間単位)。
+# 未登録の値付き flag があっても、その値が数値ならここで読み飛ばしてコマンド本体に
+# 到達できる。実行可能ファイル名が純粋な数値になることは実質無いので、読み飛ばしが
+# コマンドを食う心配がない。**flag 表の取り違えに対する構造的な安全網**であり、
+# これがあるおかげで `watch` のように一次情報を取れない wrapper の表を空にできる。
+_ARG_LIKE_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$")
 
 
 # heredoc の開始 (`<<word` / `<<- word` / `<<'word'` / `<<"word"` / `<<\word`)。
@@ -451,16 +491,25 @@ def _drop_tokens(cmd: str, n: int) -> str:
     return remaining.lstrip()
 
 
-def _drop_wrapper_flags(cmd: str, wrapper: str) -> str:
-    """wrapper 直後のフラグ (値あり / 値なし) を剥がす。
+def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> str:
+    """wrapper 直後のフラグ (値あり / 値なし / optional) を剥がす。
 
     - `--` 単独トークンは POSIX の flag 終端として消費し、それ以降は一切剥がさない
     - `-X=value` / `--key=value` は 1 トークンで消費 (bool / 値あり問わず)
+    - `--key` が `_WRAPPER_FLAGS_OPTIONAL_VALUE[wrapper]` にあれば **bare 形は値を
+      取らない** (GNU の optional argument 規約。値は `=` 形でのみ渡る)
     - `-X` / `--key` が `_WRAPPER_FLAGS_WITH_VALUE[wrapper]` に含まれていれば
       次トークンを値として消費、そうでなければ bool と見なし単独消費
-    - 非 `-` トークンが現れた時点で終了 (= コマンド本体の始まり)
+    - 非 `-` トークンが現れた時点で flag 領域は終了 (= コマンド本体の始まり)
+
+    最後に `skip_arg_like` が真なら、**コマンド名ではありえない引数トークン**
+    (純粋な数値 + 任意の時間単位) を読み飛ばす。未登録の値付き flag があっても
+    値が数値ならコマンド本体に到達できる安全網で、これがあるので一次情報を
+    取れない wrapper (`watch` 等) の flag 表を空にできる。位置引数を持つ
+    `timeout` だけは自前の DURATION 処理と衝突するため無効にする。
     """
     flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+    flags_optional = _WRAPPER_FLAGS_OPTIONAL_VALUE.get(wrapper, set())
     s = cmd.lstrip()
     while s:
         m = re.match(r"^(\S+)", s)
@@ -475,12 +524,22 @@ def _drop_wrapper_flags(cmd: str, wrapper: str) -> str:
         if "=" in tok:
             s = s[m.end():].lstrip()
             continue
+        if tok in flags_optional:
+            # bare 形は値を取らない (`xargs --replace` の既定は `{}`)。
+            s = s[m.end():].lstrip()
+            continue
         if tok in flags_with_value:
             s = s[m.end():].lstrip()
             m2 = re.match(r"^(\S+)", s)
             if m2:
                 s = s[m2.end():].lstrip()
         else:
+            s = s[m.end():].lstrip()
+    if skip_arg_like:
+        while s:
+            m = re.match(r"^(\S+)", s)
+            if not m or not _ARG_LIKE_RE.match(m.group(1)):
+                break
             s = s[m.end():].lstrip()
     return s
 
@@ -552,7 +611,10 @@ def _strip_one_wrapper(cmd: str) -> str | None:
         rest = _drop_tokens(cmd, 1)
         if t0 == "command" and _command_is_query(rest):
             return None
-        rest = _drop_wrapper_flags(rest, t0)
+        # timeout は位置引数 DURATION を自前で消費するので、汎用の
+        # arg-like 読み飛ばしを無効にする (有効だと DURATION まで食われ、
+        # _drop_timeout_duration がコマンド名を DURATION と誤判定して剥がしを諦める)。
+        rest = _drop_wrapper_flags(rest, t0, skip_arg_like=(t0 != "timeout"))
         if t0 == "timeout":
             return _drop_timeout_duration(rest)
         return rest
