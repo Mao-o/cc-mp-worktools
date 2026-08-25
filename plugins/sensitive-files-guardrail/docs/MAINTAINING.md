@@ -154,7 +154,7 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
   basename までに留める (`docs/DESIGN.md` の設計原則 2)
-- 既知課題: unittest が実ログに書き込み計測値を汚染する (bd_092a232e-snw.6)
+- 既知課題: unittest が実ログに書き込み計測値を汚染する (内部バックログで追跡中)
 
 ## テスト実行
 
@@ -165,7 +165,7 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 "No such file or directory" になる (= 79 件の suite が黙って走らない)。
 
 ```bash
-# redact-sensitive-reads (0.20.0 時点 851 件)
+# redact-sensitive-reads (0.20.0 時点 862 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
 # check-sensitive-files (0.20.0 時点 79 件、tmpdir に git repo を作って検査)
@@ -546,7 +546,7 @@ step 5 の双方向突合にかけると:
 **現状 (0.19.1 時点): `manual` は未追随。** 本リリースは docs 整合のみのため
 `_KNOWN_PERMISSION_MODES` / `LENIENT_MODES` は変更していない。`manual` の登録と
 lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類しないと確定できず**
-(収録は判定境界の変更にあたる)、別チケット **`bd_092a232e-snw.28`** で対応する。
+(収録は判定境界の変更にあたる)、**内部バックログの別チケット**で対応する。
 `manual` は現状 `LENIENT_MODES` に無いため `ask_or_allow` は `ask` に倒れる = 安全側。
 
 ### Phase 0 実測ログ
@@ -556,7 +556,7 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
 | 2026-04-11 | 2.1.101 | `permissionDecisionReason` / `systemMessage` / `ask` reason の配信経路 | deny 時の reason はモデルに完全配信、`systemMessage` はモデルに届かない、`ask` reason はユーザー UI のみ。要点は `docs/DESIGN.md` の Phase 0 節 |
 | 2026-04-22 | 2.1.101 系 | plan mode での Bash hook 発火有無 | **非発火** (Case C)。`LENIENT_MODES` の `"plan"` は dead entry と判断し 0.6.0 で撤去 |
 | 2026-05-18 | 2.1.x (envelope 未採取) | plan mode での Bash hook 発火有無 (実機の体感) | **発火** を確認 (調査ワンライナーが ask に倒れた)。0.13.0 で `"plan"` を再追加。専用 envelope での再実測は未実施 |
-| 2026-08-24 | 2.1.241 | step 1 (`claude --help` の `--permission-mode` choices 列挙) のみ実施 | choices は `acceptEdits` / `auto` / `bypassPermissions` / **`manual`** / `dontAsk` / `plan`。**`manual` が `_KNOWN_PERMISSION_MODES` に無い**ことを検出 (上の Worked example)。`default` は choices に無いが envelope 側に出るため維持。envelope 採取 (step 2〜4)、behavioral probe による分類 (step 7)、定数更新は未実施 — `bd_092a232e-snw.28` |
+| 2026-08-24 | 2.1.241 | step 1 (`claude --help` の `--permission-mode` choices 列挙) のみ実施 | choices は `acceptEdits` / `auto` / `bypassPermissions` / **`manual`** / `dontAsk` / `plan`。**`manual` が `_KNOWN_PERMISSION_MODES` に無い**ことを検出 (上の Worked example)。`default` は choices に無いが envelope 側に出るため維持。envelope 採取 (step 2〜4)、behavioral probe による分類 (step 7)、定数更新は未実施 (内部バックログの別チケットで追跡) |
 
 ## 拡張ポイント
 

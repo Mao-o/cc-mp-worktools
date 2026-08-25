@@ -17,6 +17,15 @@ _KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][\w.\-]*)\s*[:=]")
 # 最大抽出鍵数 (reason コンテキスト圧迫防止)
 MAX_KEYS = 500
 
+# streaming 読み込みの 1 回あたりの chunk サイズ。
+_CHUNK_BYTES = 64 * 1024
+
+# 1 行のうち鍵名判定に使う先頭 byte 数の上限。``_KEY_RE`` は ``^`` 固定で
+# 鍵名は行頭にあり、``sanitize_key`` の上限も 128 文字なので、これを超えた
+# 位置を見る必要はない。レコード長に依存しないメモリ使用量を保証するための
+# 頭打ち (改行を含まない巨大レコード対策)。
+_MAX_LINE_PREFIX = 512
+
 
 def scan_keys(text: str) -> list[str]:
     """テキスト全体から鍵名を抽出する (重複は順序を保って一意化)。"""
@@ -42,32 +51,83 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
     呼出側は seek 位置を適切に戻しておく (先頭から読みたければ f.seek(0))。
     close はしない (呼出側責務)。
 
+    ### ``max_bytes`` は **実効的な上限** (0.20.0 で修正)
+
+    0.19.1 までは ``f.readline()`` で 1 行ずつ読み、``read_bytes < max_bytes``
+    を **行の切れ目でしか** 見ていなかった。``readline()`` は改行が来るまで
+    読み続けるため、**改行を含まない巨大なレコード 1 本で上限を突破する** —
+    8MB の 1 行ファイルで実測 8MB 読み込み / peak 16.1MB (公称上限 1MB)。
+    hook は 2 秒 timeout で、outer timeout の挙動は fail-open の可能性がある
+    (``__main__._is_unsupported_platform`` の注記) ため、**情報提供のための
+    描画がガードレール自体を落としうる**状態だった。
+
+    現在は固定長 chunk で読み、``max_bytes`` を 1 byte も超えない。行の判定に
+    必要なのは **行頭だけ** (``_KEY_RE`` は ``^`` 固定) なので、行バッファは
+    ``_MAX_LINE_PREFIX`` byte で頭打ちにし、超過分は捨てる。したがって
+    メモリ使用量は **レコード長に依存しない** (chunk + prefix のみ)。
+
+    行頭から ``_MAX_LINE_PREFIX`` byte を超えた位置にある鍵名は拾えなくなるが、
+    ``sanitize_key`` の上限が 128 文字であることを踏まえれば通常入力では届かない
+    (敵対的入力は非目的)。
+
     Returns:
-        (keys, total_bytes_read)
+        (keys, total_bytes_read) — ``total_bytes_read <= max_bytes`` が常に成立。
     """
     keys_seen: set[str] = set()
     ordered: list[str] = []
     read_bytes = 0
+    pending = bytearray()
+
+    def _consume(raw: bytes) -> bool:
+        """1 行分の先頭バイト列から鍵名を拾う。MAX_KEYS 到達で True。"""
+        try:
+            line = raw.decode("utf-8", errors="replace")
+        except Exception:
+            return False
+        m = _KEY_RE.match(line)
+        if not m:
+            return False
+        key = sanitize_key(m.group(1))
+        if key in keys_seen:
+            return False
+        keys_seen.add(key)
+        ordered.append(key)
+        return len(ordered) >= MAX_KEYS
+
     try:
         while read_bytes < max_bytes:
-            chunk = f.readline()
+            chunk = f.read(min(_CHUNK_BYTES, max_bytes - read_bytes))
             if not chunk:
                 break
             read_bytes += len(chunk)
-            try:
-                line = chunk.decode("utf-8", errors="replace")
-            except Exception:
-                continue
-            m = _KEY_RE.match(line)
-            if not m:
-                continue
-            key = sanitize_key(m.group(1))
-            if key in keys_seen:
-                continue
-            keys_seen.add(key)
-            ordered.append(key)
-            if len(ordered) >= MAX_KEYS:
+            start = 0
+            done = False
+            while True:
+                nl = chunk.find(b"\n", start)
+                seg_end = len(chunk) if nl < 0 else nl
+                room = _MAX_LINE_PREFIX - len(pending)
+                if room > 0:
+                    # 行頭 prefix 分だけを slice する (chunk 末尾までを一度
+                    # コピーしない — 長い行で無駄な 64KB コピーが出るため)。
+                    pending += chunk[start:min(seg_end, start + room)]
+                if nl < 0:
+                    break
+                done = _consume(bytes(pending))
+                pending.clear()
+                start = nl + 1
+                if done:
+                    break
+            if done:
                 break
+        # 最後に残った行頭バッファを評価する。これは
+        # (a) 改行で終わらないファイルの最終行、または
+        # (b) ``max_bytes`` に達して途中で切れた行の**先頭**
+        # のどちらかで、いずれも **行頭から始まっている** (改行ごとに clear する
+        # ため)。``_KEY_RE`` は行頭しか見ないので、行が未完結でも鍵名の判定は
+        # 成立する — 0.19.1 の ``readline()`` 版が「巨大な 1 行の先頭にある鍵名」
+        # を拾えていた挙動を、全体を読まずに維持するための処理。
+        if pending:
+            _consume(bytes(pending))
     except OSError:
         pass
     return ordered, read_bytes

@@ -698,18 +698,65 @@ deny reason のキー名ガイド:
 | `classify` | `kind` | 追加で出す情報 |
 |---|---|---|
 | `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき) |
-| `regular` | `overwrite` | **上書き対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用) の案内 |
+| `regular` | `overwrite` | **書き換え対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用) の案内 |
 | `symlink` | `symlink` | 実体側が書き換わる旨と symlink 運用の確認 |
 | `special` | `special` | FIFO / socket / device である旨と通常ファイル指定の確認 |
 
 **判定 (deny / ask / allow) は 0.19.1 から一切変わらない。** 変わるのは reason
 文字列だけで、`error` は従来どおり `ask_or_deny` に倒れる。
 
+##### 文面の軸は kind と tool の 2 つ
+
+`kind` (書き込み先の状態) と tool (`Edit` / `Write`) は **直交**する。
+`overwrite` の代替案だけが両方に依存するので、**tool 軸 clause × format 軸
+clause の連結**で作る (`_edit_kind_suggestion`)。手書きの文面を組み合わせ数だけ
+持つと、片方の軸を足したときに漏れるため。
+
+| tool | 書き換え方 | tool 軸 clause |
+|---|---|---|
+| `Write` | ファイル全体の置換 | 現在の値はすべて失われる |
+| `Edit` | 対象を絞った置換 | ファイル全体は失われないが機密ファイルへの書き込みは block 固定 |
+| 未確定 (`Edit/Write`) | — | tool 中立 (既存の機密ファイルへの書き込みは block 固定) |
+
+format 軸は tool に依存しない (dotenv → dotenv-cli の merge / それ以外 →
+差分適用 (patch))。`overwrite` の `note:` は tool 中立の「書き換え」にしてある —
+「上書き」と書くと Edit では事実と違うため。
+
+tool 軸を持つのは `overwrite` だけ。`new` / `symlink` / `special` の事情は
+Edit と Write で同じなので文面も同じになる (テストで固定)。
+
 情報面は変わる — `overwrite` では **モデルが要求していない既存ファイルの
 minimal info** が reason に載る (`redaction.file_render.render_for_bash` の
 再利用なので、粒度は Read handler / Bash deny と同一: キー名・型・prefix・
 length・status タグ・placeholder ヒントまで。実値は載らない)。既存値を保った
 まま作業する代替案を出すには、今そのファイルに何が入っているかが要るため。
+
+##### 描画のための読み取りには実効的な byte 上限が要る
+
+E6 で Edit/Write の deny 経路は **対象ファイルを 1 回 open + parse する**ように
+なった (0.19.1 までは `lstat` のみ)。`classify` が `regular` を返したケースだけで、
+`open_regular` (`O_NOFOLLOW`) 経由なので FIFO / symlink を掴む経路は無い。
+
+ただし **情報提供のための描画が hook 自体を落としてはいけない**。hook は 2 秒
+timeout で、outer timeout の挙動は fail-open の可能性がある (「Step 0-c」節) ため、
+描画のコストが無制限だと deny がバイパスに化けうる。
+
+32KB 超では `redaction.keyonly_scan.scan_stream` に到達する。0.19.1 までは
+`readline()` で読み、上限を **行の切れ目でしか** 見ていなかったため、改行を
+含まない巨大レコード 1 本で公称 1MB を突破していた。0.20.0 で固定長 chunk 読みに
+変え、`max_bytes` を 1 byte も超えず、メモリ使用量がレコード長に依存しない形にした。
+
+| 8MB を 1 行にしたファイル | 読み取り byte | peak allocation |
+|---|---|---|
+| 0.19.1 (`readline`) | 8,388,614 (公称上限の 8 倍) | 16.1 MB |
+| 0.20.0 (chunk) | 1,048,576 (上限ちょうど) | 0.25 MB |
+
+同関数は Read handler / Bash deny の描画も通るので、両経路の同種の露出も同時に
+塞がっている。いずれも判定には影響しない。
+
+なお **verdict は minimal info の有無に依存しない**。描画を丸ごと落としても deny は
+deny のまま (`_render_existing` が例外・失敗・空文字のいずれを返しても同じ) で、
+これはテストで固定してある。
 
 reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 

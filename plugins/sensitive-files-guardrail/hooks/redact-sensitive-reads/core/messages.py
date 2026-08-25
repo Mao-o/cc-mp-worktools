@@ -963,9 +963,12 @@ _EDIT_DENY_NOTE: dict[str, str] = {
         "しようとしたため block しました (実値が LLM コンテキストと作業ツリーに"
         "残るのを防ぐため)。"
     ),
+    # 「上書き」と書かないのは Edit と Write で書き換え方が違うため
+    # (Edit = 対象を絞った置換 / Write = ファイル全体の置換)。両方に当てはまる
+    # 「書き換え」にし、tool 差は ``_EDIT_OVERWRITE_TOOL_CLAUSE`` 側で言う。
     "overwrite": (
-        "{tool_label}: 既存の機密ファイル ({basename}) を上書きしようとしたため "
-        "block しました (現在入っている値が失われるのを防ぐため)。"
+        "{tool_label}: 既存の機密ファイル ({basename}) を書き換えようとしたため "
+        "block しました (既存の値の喪失と機密流出を防ぐため)。"
     ),
     "symlink": (
         "{tool_label}: symlink 経由で機密パターン一致のファイル ({basename}) に"
@@ -994,14 +997,35 @@ _EDIT_DENY_SUGGESTION: dict[str, str] = {
     ),
 }
 
-# ``overwrite`` の代替案。dotenv 系だけ dotenv-cli の merge を案内する。
-_EDIT_OVERWRITE_SUGGESTION_DOTENV = (
-    "`.env.example` の差分だけを取り込みたい場合は dotenv-cli の merge 機能で"
-    "既存値を保ったまま追記できます。ファイル全体の上書きは現在の値を失います。"
+# ``overwrite`` の代替案は **tool 軸 × format 軸の 2 つ**を連結して作る。
+# 手書きの文面を組み合わせ数だけ用意すると、片方の軸を足したときに漏れる。
+#
+# tool 軸: Edit と Write は書き換え方が違う。0.20.0 の初版は両方に
+# 「ファイル全体の上書きは現在の値を失います」「全体の上書きではなく差分適用を」
+# と書いていたが、**Edit は既に対象を絞った置換**なので事実と違い、かつ
+# 「patch にしろ」という助言も的外れだった (PR #47 Codex P2)。
+_EDIT_OVERWRITE_TOOL_CLAUSE: dict[str, str] = {
+    "Write": (
+        "Write はファイル全体を置き換えるため、現在の値はすべて失われます。"
+    ),
+    "Edit": (
+        "Edit は対象を絞った置換なのでファイル全体は失われませんが、"
+        "機密ファイルへの書き込みは block 固定です。"
+    ),
+}
+# ``handle()`` の既定 ``tool_label="Edit/Write"`` のような tool 未確定の呼び出し用。
+_EDIT_OVERWRITE_TOOL_CLAUSE_DEFAULT = (
+    "既存の機密ファイルへの書き込みは block 固定です。"
 )
-_EDIT_OVERWRITE_SUGGESTION_OTHER = (
-    "既存の値を保ったまま項目を足したい場合は、ファイル全体の上書きではなく"
-    "差分適用 (patch) を検討してください。"
+
+# format 軸: 「既存値を保ったまま反映する方法」。tool には依存しない。
+_EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV = (
+    "既存値を保ったまま項目を足すなら、dotenv-cli の merge 機能で "
+    "`.env.example` の差分だけを追記できます。"
+)
+_EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER = (
+    "既存値を保ったまま項目を足すなら、差分適用 (patch) での反映を"
+    "検討してください。"
 )
 
 # ``suggestion_alt:`` (new_keys があるときだけ出る) の kind 別文面。
@@ -1090,15 +1114,23 @@ def _fit_data_block(block: str, budget: int) -> list[str]:
     return kept + closing
 
 
-def _edit_kind_suggestion(kind: str, is_dotenv: bool) -> str:
-    """kind 別 ``suggestion:`` 行の本文を返す (無ければ空文字)。"""
-    if kind == "overwrite":
-        return (
-            _EDIT_OVERWRITE_SUGGESTION_DOTENV
-            if is_dotenv
-            else _EDIT_OVERWRITE_SUGGESTION_OTHER
-        )
-    return _EDIT_DENY_SUGGESTION.get(kind, "")
+def _edit_kind_suggestion(kind: str, is_dotenv: bool, tool_label: str) -> str:
+    """kind 別 ``suggestion:`` 行の本文を返す (無ければ空文字)。
+
+    ``overwrite`` だけ **tool 軸 × format 軸**の連結。それ以外の kind は tool に
+    依存しない (新規作成 / symlink / 特殊ファイルの事情は Edit と Write で同じ)。
+    """
+    if kind != "overwrite":
+        return _EDIT_DENY_SUGGESTION.get(kind, "")
+    tool_clause = _EDIT_OVERWRITE_TOOL_CLAUSE.get(
+        tool_label, _EDIT_OVERWRITE_TOOL_CLAUSE_DEFAULT
+    )
+    format_clause = (
+        _EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV
+        if is_dotenv
+        else _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER
+    )
+    return f"{tool_clause}{format_clause}"
 
 
 def _edit_existing_info_lines(
@@ -1155,8 +1187,17 @@ def edit_deny(
     (``suggested_keys`` だけで予算を使い切る極端な入力では、E6 以前と同様に
     ``core.output._truncate`` が最終防御として働く)。
 
+    ### 文面を決める軸は 2 つ (kind と tool)
+
+    ``kind`` (書き込み先の状態) と ``tool_label`` (Edit か Write か) は **直交**
+    する。``overwrite`` の代替案だけが両方に依存し、tool 軸の clause と format
+    軸の clause を連結して作る (``_edit_kind_suggestion``)。Edit は対象を絞った
+    置換、Write はファイル全体の置換なので、同じ ``overwrite`` でも
+    「現在の値がすべて失われる」かどうかが変わるため。
+
     Args:
-        tool_label: ``Edit`` / ``Write`` のラベル。
+        tool_label: ``Edit`` / ``Write`` のラベル。``overwrite`` の代替案の
+            tool 軸 clause の選択にも使う (未知の値は tool 中立の clause)。
         basename: 書き込み先ファイルの basename。``basename:`` 行と除外 hint で
             ``!<basename>`` に展開される。
         new_keys: dotenv parse で抽出された新規キー名リスト (順序維持)。
@@ -1199,7 +1240,7 @@ def edit_deny(
     if extra_note:
         tail.append(f"extra_note: {extra_note}")
 
-    kind_suggestion = _edit_kind_suggestion(kind, is_dotenv)
+    kind_suggestion = _edit_kind_suggestion(kind, is_dotenv, tool_label)
     if kind_suggestion:
         tail.append(f"suggestion: {kind_suggestion}")
 

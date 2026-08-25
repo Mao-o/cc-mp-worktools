@@ -14,7 +14,7 @@ commit 52113a1 で完了)。
   膨張、REVIEW_TASKS の plugin 外退避と CHANGELOG の archive 化に分割) は
   `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照。
   公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
-- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 851 /
+- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 862 /
   check 79) と乖離しており、「同型ケースの subTest 化で重複を畳む」に再定義して
   から着手する
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
@@ -28,7 +28,7 @@ commit 52113a1 で完了)。
 
 - **判定境界 (deny / allow / ask) の変化: なし。**
 - **情報面の変化: あり** (後述の「情報面の変化」節)。
-- テスト件数: redact 827 → **851** / check **79** (計 930)。
+- テスト件数: redact 827 → **862** / check **79** (計 941)。
 
 ### 1. 状況別の deny 文面 (4 分岐)
 
@@ -99,7 +99,7 @@ minimal info を載せる (`_fit_data_block`)。
 
 ### 5. 検証
 
-- 両 suite green (redact 851 / check 79)。`claude plugin validate` warning 0
+- 両 suite green (redact 862 / check 79)。`claude plugin validate` warning 0
 - **verdict 不変の機械確認**: tool 2 (Edit/Write) × target 5 (`.env` / `.envrc` /
   `credentials.json` / `.env.example` / `README.md`) × 最終要素 5 状態 (missing /
   regular / symlink / special (FIFO) / stat error) × 親 3 状態 (通常 dir /
@@ -115,6 +115,67 @@ minimal info を載せる (`_fit_data_block`)。
   固定した。あわせて `_DATA_HEADER_LINES` / `_DATA_CLOSING_TAG` を
   `build_reason` の実出力と突合するテストを追加 (ずれると「閉じない `<DATA>`」が
   予算超過時にだけ静かに出るため)
+
+### 6. リリース前の review 対応 (PR #47 Codex)
+
+#### 6-1. `keyonly_scan.scan_stream` の読み取りに **実効的な** byte 上限 (P1)
+
+E6 で Edit/Write の deny 経路が初めてファイルを読むようになったため、32KB 超の
+既存ファイルでは `keyonly_scan.scan_stream` に到達する。同関数は `f.readline()`
+で読み、`read_bytes < max_bytes` を **行の切れ目でしか見ていなかった**。
+`readline()` は改行が来るまで読み続けるので、**改行を含まない巨大レコード 1 本で
+公称 1MB の上限を突破する**。
+
+実測 (8MB を 1 行にしたファイル):
+
+| | 読み取り byte | peak allocation |
+|---|---|---|
+| 修正前 | **8,388,614** (= ファイル全体、公称上限の 8 倍) | 16.1 MB |
+| 修正後 | **1,048,576** (= 上限ちょうど) | 0.25 MB |
+
+64MB の 1 行でも読み取りは 1,048,576 byte / peak 0.25MB で、**メモリ使用量が
+レコード長に依存しない**。hook は 2 秒 timeout で outer timeout の挙動は
+fail-open の可能性がある (`__main__._is_unsupported_platform` の注記) ため、
+情報提供のための描画がガードレール自体を落としうる状態だった。
+
+- 固定長 chunk (`_CHUNK_BYTES` = 64KB) で読み、`max_bytes` を 1 byte も超えない
+- 行の判定に必要なのは行頭だけ (`_KEY_RE` は `^` 固定) なので、行バッファを
+  `_MAX_LINE_PREFIX` = 512 byte で頭打ちにする。超過分は捨てる
+- 途中で切れた行の**先頭**も評価する。0.19.1 の `readline()` 版が拾えていた
+  「巨大な 1 行の先頭にある鍵名」を、全体を読まずに維持するため
+- この関数は Read handler / Bash deny の描画も通るので、**両経路の同種の露出も
+  同時に塞がる** (E6 以前から存在した上限逸脱)。判定は変わらない
+- 回帰テストは wall-clock ではなく **読み取り byte 数を観測**する形にした
+  (時間 assert は flaky になりやすいため)。0.19.1 の実装に差し戻すと新規 7 件が
+  落ちることを確認済み
+
+#### 6-2. `overwrite` の代替案を Edit と Write で分ける (P2)
+
+初版は `kind` だけで文面を決めていたため、**Edit にも「ファイル全体の上書きは
+現在の値を失います」「差分適用 (patch) を検討してください」**と書いていた。
+Edit は既に対象を絞った置換なので事実と違い、助言としても的外れだった。
+
+`kind` (書き込み先の状態) と tool (Edit / Write) は **直交する軸**なので、
+`overwrite` の代替案だけを **tool 軸 clause × format 軸 clause の連結**にした
+(手書きの文面を組み合わせ数だけ持つと、軸を足したときに漏れるため)。
+
+| tool | dotenv | 出る代替案 |
+|---|---|---|
+| `Write` | ○ | ファイル全体を置き換えるため現在の値はすべて失われる + dotenv-cli の merge |
+| `Write` | × | 同上 + 差分適用 (patch) |
+| `Edit` | ○ | 対象を絞った置換なのでファイル全体は失われないが block 固定 + dotenv-cli の merge |
+| `Edit` | × | 同上 + 差分適用 (patch) |
+| 未確定 (`Edit/Write`) | ○ / × | tool 中立の clause + 各 format の clause |
+
+あわせて `overwrite` の `note:` を「上書き」から **tool 中立の「書き換え」**に変更。
+tool 軸を持つのは `overwrite` だけで、`new` / `symlink` / `special` は Edit と
+Write で文面が一致することもテストで固定した。
+
+#### 6-3. 再検証
+
+- 両 suite green (redact 862 / check 79 = 941)、`claude plugin validate` warning 0
+- **1800 セルの verdict 格子を再取得し、`origin/main` と diff ゼロを再確認**。
+  「描画を省略する経路」が verdict に影響しないことも個別テストで固定
 
 ## 0.19.1
 
