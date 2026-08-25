@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1 + R7 ×1)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1 + R7 ×1 + R8 ×1)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -325,6 +325,32 @@ Codex round 7 で、R5-2 (過去実行分が混ざる) と**対になる**採取
   `No such file or directory` で可視エラーになり silent empty にならないこと
   (R5 で確認した性質の維持)、`permission_mode` にパス区切りを混ぜても採取先ディレクトリの
   外に出ないこと、壊れた JSON でも落ちないことを確認した
+
+Codex round 8 で、R5 / R6 で付けた条件が**空文になっていた**ことが判明した:
+
+- **[R8] 分類を要求しているのに、分類する手段が runbook に無かった**: R5-1 / R6 で
+  「`LENIENT_MODES` 収録は autonomous だと**分類できた場合のみ**」と条件を付けたが、
+  **その分類を行う手順が runbook に存在しなかった**。step 2〜4 は `date` を実行しながら
+  envelope を保存するだけで、mode 文字列は分かっても「CLI がその mode でユーザーに確認を
+  出すか」は観測していない。したがって当時書いていた「envelope 実値で挙動を確認してから
+  決める」は収録判断の根拠を何も与えておらず、保守者が推測で収録して**判断の付かない
+  Bash を無条件 allow に変えてしまいうる**状態だった。
+
+  **step 7 として behavioral probe の手順を新設**し (旧 step 5 の条件付き項目は
+  **step 8** に分離)、鎖を「mode 発見 (1) → envelope 採取 (2〜4) → 必須更新 (5) →
+  debug 復旧 (6) → **分類 (7)** → 収録判断 (8)」として端から端まで繋いだ。step 7 は
+  hook が `ask` を返す状況を作り (`cat *.key` / `echo $HOME` など `ask_or_allow` に
+  倒れることが MATRIX / `_HARD_STOP_CHARS` で確認できるコマンド)、**ユーザー承認を
+  求めるか / 承認なしに進むか**を観測して 4 分類に当てはめる。既定は「収録しない」で、
+  分類が確定しない限り動かさない。step 6 を step 7 の前提として明示した
+  (capture 用 probe が刺さったままだと plugin の判定が走らないため)。
+
+  **step 7 は未実施** (nested claude の起動を伴うため、「Step 0-c 実測結果」節と同じ
+  扱い)。手順として成立するか自体も実機未確認で、`--permission-mode <新 mode>` で
+  hook が発火するとは限らない点 (`plan` に前例あり) 等を「未確定」として明記した。
+  あわせて `docstring` / `tests/fixtures/envelopes/README.md` / `docs/MATRIX.md` に
+  複製されていた「envelope 実値で挙動を確認」という**根拠を与えない文言も
+  step 7 / step 8 への参照に是正**した (残存 0 件)
 
 ### リリース手順への追加
 

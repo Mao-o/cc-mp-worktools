@@ -424,22 +424,93 @@ step 1 の CLI 列挙と step 4 の envelope 実測値を、`tests/test_envelope
    「更新漏れ検知」と理解する
 3. `tests/fixtures/envelopes/README.md` の `permission_mode` 列挙を更新
 4. `docs/DESIGN.md` の「LENIENT_MODES 方針」表と `docs/MATRIX.md` の mode 記述に
-   新 mode を追加する。**下の 6 で lenient に収録しない場合は `ask` 側として
+   新 mode を追加する。**step 8 で lenient に収録しない場合は `ask` 側として
    記載する** (新 mode が既定で非 lenient であることを docs にも残す)
 5. 下の実測ログに実測日と CLI version を追記
 
 **条件付き — 判定境界の変更を伴うので既定では実施しない**
 
-6. `core/output.py::LENIENT_MODES` への追加は、その mode が **autonomous 実行モード
-   だと分類が済んだ場合に限る**。収録すると Bash の静的解析不能ケースの
-   `ask_or_allow` が「対話でユーザーに確認」から allow に変わる = **判定境界の変更**。
-   envelope 実値で挙動を確認してから決め、**分類が未了なら追加しない**
-   (`manual` が現にこの状態 — 上の Worked example を参照)。追加した場合は
-   4 の記述も allow 側に直す
+`core/output.py::LENIENT_MODES` への収録は、**step 7 で autonomous か分類し、
+step 8 で判断する**。ここまでの step が与えるのは mode 文字列と envelope の中身だけで、
+**「CLI がその mode でユーザーに確認を出すか」は envelope からは分からない**。
+分類が済むまでは追加しない (`manual` が現にこの状態 — 下の Worked example を参照)。
 
 ### 6. debug 差し戻し
 
 `hooks.json` を元に戻し、`hooks/_debug/` を削除する。
+
+**step 7 の前に必ず実施する。** capture 用 probe が刺さったままだと plugin 本体の
+判定 (`ask_or_allow`) が走らず、step 7 の分類ができない。
+
+### 7. behavioral probe — 新 mode が autonomous か分類する (未実施)
+
+> **この手順は未実施。** 「Step 0-c 実測結果」節と同じ扱いで、記載はしてあるが
+> 実機での実行と結果の記録はまだ行っていない。**手順として成立するか自体も実機で
+> 確かめていない** (下の「未確定」を参照)。ここに実測結果らしきものを書かないこと。
+
+step 8 の収録判断は「その mode が autonomous 実行モードか」に依存するが、これは
+**envelope の中身からは決まらない**。envelope は `permission_mode` の文字列を教える
+だけで、CLI がその mode でユーザーに確認を出すかどうかは含まないため。
+**hook が `ask` を返す状況を実際に作り、承認を求められるかを観測する**必要がある。
+
+対象となる「新 mode」は、**step 5 の双方向突合で「CLI 列挙 / 実測値にあって定数に
+無い」= 追加と判定された mode**。複数あれば 1 つずつ分類する。
+
+前提: step 6 を完了し、`hooks.json` が本番 hook に戻っていること。
+
+1. 空の作業ディレクトリを作り、新 mode で対話セッションを起動する:
+
+   ```bash
+   mkdir -p /tmp/guardrail-modeprobe && cd /tmp/guardrail-modeprobe
+   claude --plugin-dir /path/to/plugins/sensitive-files-guardrail --permission-mode <新 mode>
+   ```
+
+2. `ask_or_allow` に落ちるコマンドを 1 つ実行させる。機密ファイルに触れないものを
+   選ぶ (`make_deny` に落ちると分類にならない)。判定フロー上 `ask_or_allow` に倒れる
+   ことが確認できている例:
+   - `cat *.key` — dotenv stem に一致しない glob (`docs/MATRIX.md` の Bash 表に
+     「default/acceptEdits/dontAsk = ask、auto/bypassPermissions = allow」の行がある)
+   - `echo $HOME` — `$` は `handlers/bash/constants.py::_HARD_STOP_CHARS` に含まれ、
+     hard-stop 経由で `pending_ask` に畳まれる
+3. hook 側が実際に ask を返したことを `~/.claude/logs/redact-hook.log` の
+   `bash_classify` 行で確認する (ここが ask でなければ probe になっていない)
+4. そのうえで **UI 側で何が起きたか**を記録する。下の分類表に当てはめる
+
+**観測 → 分類 → 収録判断の対応**
+
+| 観測 | 意味 | step 8 の判断 |
+|---|---|---|
+| 確認ダイアログが出て、承認するまで実行されない | その mode には実ユーザーの監督がある。plugin の `ask` は機能している | **収録しない** (ask のままが正しい) |
+| 確認なしに実行が進む | `ask` が素通りしている = autonomous 相当。plugin の `ask` は監督を提供していない | **収録候補**。ハーネス委譲方針 (`docs/DESIGN.md`) に照らし、二重停止を避ける意味で収録してよい |
+| 確認なしに実行が拒否される | `ask` が deny 相当に倒れている | **収録しない**。収録すると allow に変わり保護が弱まる方向 |
+| ハング / エラー / 判断が付かない | 分類不能 | **収録しない**。観測内容を下の実測ログに残して再検討 |
+
+**既定は「収録しない」。** 収録しなければ `ask_or_allow` は `ask` のままで、判断の
+付かない Bash が無条件 allow になることはない。**分類が確定しない限りこの既定から
+動かさない。**
+
+**未確定 (実機で確かめていないこと)**
+
+- `--permission-mode <新 mode>` で起動しても **hook がその mode で発火するとは限らない**。
+  `plan` は 0.6.0 当時「hook 非発火」と判断されて `LENIENT_MODES` から撤去され、
+  のちに発火が確認されて 0.13.0 で再追加された前例がある (下の実測ログ)。
+  発火しなければ ask 自体が起きないので、その場合は「分類不能」として扱う
+- 上の観測 4 分類が起こりうる全てかは未確認。想定外の挙動を見たら分類表に足したうえで、
+  既定 (収録しない) を維持する
+- headless (`claude -p`) で代用できるかは未確認。「手動スモーク」節のとおり headless では
+  `--permission-mode auto` と `< /dev/null` が要り、**ask の UI 挙動を観測する目的には
+  向かない**と考えられるため、対話セッションを前提に書いてある
+
+### 8. 条件付き — `LENIENT_MODES` 収録判断 (判定境界の変更)
+
+**step 7 の分類が「確認なしに実行が進む」= autonomous だった場合に限って**
+`core/output.py::LENIENT_MODES` に新 mode を追加する。それ以外 (確認が出る /
+拒否される / 分類不能 / step 7 未実施) は**追加しない**。
+
+収録すると Bash の静的解析不能ケースの `ask_or_allow` が「対話でユーザーに確認」から
+allow に変わる = **判定境界の変更**にあたる。追加した場合は step 5 の 4 で書いた
+`docs/DESIGN.md` / `docs/MATRIX.md` の記述も `ask` 側から allow 側に直し、
+下の実測ログに分類の根拠 (step 7 の観測内容) を残す。
 
 ### Worked example: `manual` の取りこぼし (CLI 2.1.241, 2026-08-24 実測)
 
@@ -474,8 +545,9 @@ step 5 の双方向突合にかけると:
 
 **現状 (0.19.1 時点): `manual` は未追随。** 本リリースは docs 整合のみのため
 `_KNOWN_PERMISSION_MODES` / `LENIENT_MODES` は変更していない。`manual` の登録と
-lenient 収録の可否は、envelope 実値を probe しないと確定できず (収録は判定境界の
-変更にあたる)、別チケット **`bd_092a232e-snw.28`** で対応する。
+lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類しないと確定できず**
+(収録は判定境界の変更にあたる)、別チケット **`bd_092a232e-snw.28`** で対応する。
+`manual` は現状 `LENIENT_MODES` に無いため `ask_or_allow` は `ask` に倒れる = 安全側。
 
 ### Phase 0 実測ログ
 
@@ -484,7 +556,7 @@ lenient 収録の可否は、envelope 実値を probe しないと確定でき�
 | 2026-04-11 | 2.1.101 | `permissionDecisionReason` / `systemMessage` / `ask` reason の配信経路 | deny 時の reason はモデルに完全配信、`systemMessage` はモデルに届かない、`ask` reason はユーザー UI のみ。要点は `docs/DESIGN.md` の Phase 0 節 |
 | 2026-04-22 | 2.1.101 系 | plan mode での Bash hook 発火有無 | **非発火** (Case C)。`LENIENT_MODES` の `"plan"` は dead entry と判断し 0.6.0 で撤去 |
 | 2026-05-18 | 2.1.x (envelope 未採取) | plan mode での Bash hook 発火有無 (実機の体感) | **発火** を確認 (調査ワンライナーが ask に倒れた)。0.13.0 で `"plan"` を再追加。専用 envelope での再実測は未実施 |
-| 2026-08-24 | 2.1.241 | step 1 (`claude --help` の `--permission-mode` choices 列挙) のみ実施 | choices は `acceptEdits` / `auto` / `bypassPermissions` / **`manual`** / `dontAsk` / `plan`。**`manual` が `_KNOWN_PERMISSION_MODES` に無い**ことを検出 (上の Worked example)。`default` は choices に無いが envelope 側に出るため維持。envelope 採取 (step 2〜4) と定数更新は未実施 — `bd_092a232e-snw.28` |
+| 2026-08-24 | 2.1.241 | step 1 (`claude --help` の `--permission-mode` choices 列挙) のみ実施 | choices は `acceptEdits` / `auto` / `bypassPermissions` / **`manual`** / `dontAsk` / `plan`。**`manual` が `_KNOWN_PERMISSION_MODES` に無い**ことを検出 (上の Worked example)。`default` は choices に無いが envelope 側に出るため維持。envelope 採取 (step 2〜4)、behavioral probe による分類 (step 7)、定数更新は未実施 — `bd_092a232e-snw.28` |
 
 ## 拡張ポイント
 

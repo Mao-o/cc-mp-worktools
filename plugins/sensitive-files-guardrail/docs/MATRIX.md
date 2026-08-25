@@ -18,8 +18,9 @@ bypassPermissions) での判定結果を完全列挙する。値は 0.19.0 時�
 `tests/fixtures/envelopes/README.md` の列挙 / 本ファイルと `docs/DESIGN.md` の
 mode 記述。完全な一覧は step 5)。**`LENIENT_MODES` への収録は
 autonomous 実行モードだと分類が済んだ場合に限る条件付き判断**で、収録すると
-`ask_or_allow` が ask から allow に変わる = 判定境界の変更にあたる。手順は
-[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook) の step 5。
+`ask_or_allow` が ask から allow に変わる = 判定境界の変更にあたる。分類は
+[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook) の
+step 7 (behavioral probe、未実施)、収録判断は step 8。
 
 > 0.13.0 (2026-05-18) で `plan` 列を `auto` と同等の lenient 扱いに戻した。
 > 0.6.0 で「現行 CLI では hook 非発火」と判断して dead entry を撤去していたが、

@@ -47,8 +47,9 @@ Phase 0 実測結果 (要点は `docs/DESIGN.md` の Phase 0 節と `docs/MAINTA
     **`LENIENT_MODES` への追加は必須ではない。** その mode が autonomous 実行モード
     だと**分類が済んだ場合に限って**追加する。`LENIENT_MODES` に入れると Bash の
     `ask_or_allow` が「対話でユーザーに確認」から allow に変わる = **判定境界の変更**
-    にあたるので、envelope 実値で挙動を確認してから決めること
-    (手順は `docs/MAINTAINING.md` の "CLI バージョンアップ時の再実測手順" step 5)
+    にあたる。envelope だけでは分類できないため、`docs/MAINTAINING.md` の Runbook
+    **step 7 の behavioral probe** で観測してから step 8 で決めること
+    (step 7 は現時点で未実施)
   - **既知のドリフト (0.19.1 時点)**: CLI 2.1.241 の `--permission-mode` は
     **`manual`** も受け付けるが、上記 6 値にも `_KNOWN_PERMISSION_MODES` にも
     含まれていない。envelope 実値の採取と定数更新は未実施 (`bd_092a232e-snw.28`)。

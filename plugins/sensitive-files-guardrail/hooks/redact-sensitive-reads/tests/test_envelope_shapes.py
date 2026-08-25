@@ -111,8 +111,11 @@ class TestLenientModesSubset(unittest.TestCase):
     ``core/output.py::LENIENT_MODES`` への追加は**必須ではなく条件付き**。その mode が
     autonomous 実行モードだと**分類が済んだ場合に限って**追加する。``LENIENT_MODES``
     に入れると Bash の ``ask_or_allow`` が「対話でユーザーに確認」から allow に変わる
-    = **判定境界の変更**なので、envelope 実値で挙動を確認してから決め、**分類が未了
-    なら追加しない**。手順の正典は ``docs/MAINTAINING.md`` の Runbook step 5。
+    = **判定境界の変更**。envelope だけでは分類できない (mode 文字列しか分からず、
+    CLI が確認を出すかは含まれない) ため、``docs/MAINTAINING.md`` の Runbook
+    **step 7 の behavioral probe** で「その mode で ask が実際にユーザー承認を
+    求めるか」を観測し、step 8 で決める。**分類が未了なら追加しない**
+    (step 7 は現時点で未実施)。
     """
 
     def test_lenient_modes_are_subset_of_known_permission_modes(self):
