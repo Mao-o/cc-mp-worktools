@@ -913,6 +913,89 @@ class TestHeredocProtection(unittest.TestCase):
         self.assertEqual(cands, ["cat <<EOF", "gh pr create"])
 
 
+class TestXargsOptionClassification(unittest.TestCase):
+    """GNU / BSD xargs の全 option を 3 分類で固定する。
+
+    **非数値の必須引数**は登録漏れが致命傷になる — 値トークンでループが止まり、
+    コマンド本体を見失って検証が消える (`xargs -a input gh pr close 1` の `gh`)。
+    数値の必須引数は `_ARG_LIKE_RE` の安全網が拾うので登録漏れが致命傷にならない。
+    分類の根拠と一覧は docs/wrapper-env-audit.md を参照。
+    """
+
+    # (コマンド, 期待する正規化後) — 必須引数 (非数値): 値を消費する
+    REQUIRED_NON_NUMERIC = [
+        ("xargs -a input gh pr close 1", "gh pr close 1"),
+        ("xargs --arg-file input gh pr close 1", "gh pr close 1"),
+        ("xargs --arg-file=input gh pr close 1", "gh pr close 1"),
+        ("xargs -ainput gh pr close 1", "gh pr close 1"),
+        ("xargs -d , gh pr close 1", "gh pr close 1"),
+        ("xargs --delimiter , gh pr close 1", "gh pr close 1"),
+        ("xargs -d, gh pr close 1", "gh pr close 1"),
+        ("xargs --process-slot-var V gh pr close 1", "gh pr close 1"),
+        ("xargs -E END gh pr create", "gh pr create"),
+        ("xargs -I {} gh pr close {}", "gh pr close {}"),
+        ("xargs -J % gh pr close %", "gh pr close %"),
+    ]
+    # 必須引数 (数値): 登録済み。仮に漏れても安全網が拾う
+    REQUIRED_NUMERIC = [
+        ("xargs -n 1 gh pr create", "gh pr create"),
+        ("xargs -P 4 gh pr create", "gh pr create"),
+        ("xargs -s 100 gh pr create", "gh pr create"),
+        ("xargs -L 1 gh pr create", "gh pr create"),
+        ("xargs --max-args 5 gh pr create", "gh pr create"),
+        ("xargs --max-procs 4 gh pr create", "gh pr create"),
+        ("xargs --max-chars 100 gh pr create", "gh pr create"),
+        ("xargs -R 2 gh pr create", "gh pr create"),
+        ("xargs -S 255 gh pr create", "gh pr create"),
+    ]
+    # optional 引数: bare 形は値を取らない (= 形でのみ取る)
+    OPTIONAL = [
+        ("xargs --replace gh pr close {}", "gh pr close {}"),
+        ("xargs --replace={} gh pr close {}", "gh pr close {}"),
+        ("xargs --eof gh pr create", "gh pr create"),
+        ("xargs --eof=END gh pr create", "gh pr create"),
+        ("xargs --max-lines gh pr create", "gh pr create"),
+        ("xargs --max-lines=5 gh pr create", "gh pr create"),
+        # 短縮の optional 形は引っ付け形でのみ値を取る = bool 扱いで正しい
+        ("xargs -i gh pr close {}", "gh pr close {}"),
+        ("xargs -i{} gh pr close {}", "gh pr close {}"),
+        ("xargs -e gh pr create", "gh pr create"),
+        ("xargs -l gh pr create", "gh pr create"),
+    ]
+    # 値を取らない
+    BOOLEAN = [
+        ("xargs -0 gh pr create", "gh pr create"),
+        ("xargs --null gh pr create", "gh pr create"),
+        ("xargs -p gh pr create", "gh pr create"),
+        ("xargs -r gh pr create", "gh pr create"),
+        ("xargs -t gh pr create", "gh pr create"),
+        ("xargs -x gh pr create", "gh pr create"),
+        ("xargs -o gh pr create", "gh pr create"),
+        ("xargs --show-limits gh pr create", "gh pr create"),
+        ("xargs --interactive gh pr create", "gh pr create"),
+        ("xargs --no-run-if-empty gh pr create", "gh pr create"),
+        ("xargs --verbose gh pr create", "gh pr create"),
+        ("xargs --exit gh pr create", "gh pr create"),
+    ]
+
+    def test_all_classifications(self):
+        for group, cases in (
+            ("required-non-numeric", self.REQUIRED_NON_NUMERIC),
+            ("required-numeric", self.REQUIRED_NUMERIC),
+            ("optional", self.OPTIONAL),
+            ("boolean", self.BOOLEAN),
+        ):
+            for cmd, want in cases:
+                with self.subTest(group=group, cmd=cmd):
+                    self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_npx_workspace_option_takes_a_value(self):
+        # `npx --help` 逐語: `[-w|--workspace <workspace-name> ...]`。非数値。
+        for cmd in ("npx -w pkg firebase deploy", "npx --workspace pkg firebase deploy"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "firebase deploy")
+
+
 class TestTerminatingWrapperOptions(unittest.TestCase):
     """`--help` / `--version` 付きの wrapper は後続コマンドを実行しない。
 

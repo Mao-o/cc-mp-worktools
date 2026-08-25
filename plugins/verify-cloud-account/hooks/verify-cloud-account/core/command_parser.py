@@ -132,8 +132,14 @@ _WRAPPER_FLAGS_WITH_VALUE = {
     # [ref] npx: `-p, --package <spec>` / `-c, --call <cmd>` ほか。開発機に npx が
     # 無く man も無い。**v0.8.0 から存在するエントリ**なので削除すると
     # `npx -p pkg firebase deploy` の検証が新たに失われるため据え置く。
+    # [local 実機] `npx --help` 逐語: `[--package <package-spec> ...]`
+    # `[-c|--call <call>]` `[-w|--workspace <workspace-name> ...]`。
+    # いずれも**非数値**なので登録必須。`--node-options` / `--node-arg` は
+    # v0.8.0 から存在するエントリなので据え置く。
+    # npm のグローバル option (`--registry` 等) は開集合で列挙不能 — 未登録のものは
+    # 値が非数値なら検証が消えうる (報告に開示)。
     "npx": {
-        "-p", "--package", "-c", "--call",
+        "-p", "--package", "-c", "--call", "-w", "--workspace",
         "--node-options", "--node-arg",
     },
     # [local] `man 1 bash`: `exec [-cl] [-a name] [command [arguments]]`。
@@ -150,12 +156,20 @@ _WRAPPER_FLAGS_WITH_VALUE = {
     "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
     # [local] caffeinate(8): `caffeinate [-disu] [-t timeout] [-w pid] [utility ...]`。
     "caffeinate": {"-t", "-w"},
-    # [local] xargs(1) (BSD/macOS) が分離形で値を取ると明記している短縮形のみ。
-    # 長形式は man 上どれも `--key=value` 形での記載なので登録不要
-    # (`=` 形は登録の有無に関わらず 1 トークンで消費される)。
-    # GNU 専用の `-a file` / `-d delim` は開発機で裏が取れないため**登録しない**
-    # (消費しない側 = v0.8.0 と同じ「検証スキップ」に留まり、コマンドを食わない)。
-    "xargs": {"-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s"},
+    # xargs は GNU / BSD の**全 option を列挙して分類済み** (docs の表を参照)。
+    # [local] xargs(1) (BSD/macOS): `-E -I -J -L -n -P -R -S -s`
+    # [ref] GNU findutils + GNU `xargs --help` 逐語 (外部レビュー環境で確認):
+    #   `-a, --arg-file=FILE` / `-d, --delimiter=CHARACTER` /
+    #   `--process-slot-var=VAR` はいずれも**必須引数かつ非数値**。
+    #   非数値は下の arg-like ネットが効かないので登録が必須
+    #   (登録漏れだと `xargs -a input gh pr close 1` の `gh` を見失い検証が消える)。
+    # 数値を取る長形式 (`--max-args` / `--max-procs` / `--max-chars`) も
+    # 分離形が正当なので明示する (ネットでも拾えるが二重の保険)。
+    "xargs": {
+        "-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-a", "-d",
+        "--arg-file", "--delimiter", "--process-slot-var",
+        "--max-args", "--max-procs", "--max-chars",
+    },
     # `watch` は開発機に man page が無く一次情報を取れない。値を取る option
     # (`-n/--interval` / `-q/--equexit` 等) の値は**すべて数値**なので、
     # 表を空にしたうえで下の arg-like ネットに任せる。こうすると

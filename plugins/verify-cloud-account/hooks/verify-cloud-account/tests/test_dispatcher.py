@@ -1914,6 +1914,15 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ("nice --help && gh pr create --fill", "github"),
         # 値を取る短縮形は終端扱いしない (過剰検証側)
         ("sudo -h myhost gh pr create", "github"),
+        # --- xargs の入力系 option は値を消費する (PR #48 Codex R3 P1) ---
+        # 非数値の値なので安全網が効かず、登録漏れだと検証が丸ごと消える。
+        ("xargs -a input gh pr close 1", "github"),
+        ("xargs --arg-file input gh pr close 1", "github"),
+        ("xargs -d , gh pr close 1", "github"),
+        ("xargs --delimiter , gh pr close 1", "github"),
+        ("xargs --process-slot-var V gh pr close 1", "github"),
+        ("npx -w pkg firebase deploy", "firebase"),
+        ("npx --workspace pkg firebase deploy", "firebase"),
     ]
 
     def setUp(self):

@@ -172,6 +172,60 @@ env 挙動とは**別軸**の監査。「その flag が次の token を消費�
 ([ref] GNU findutils: `--replace[=R]` / `--eof[=eof-str]` / `--max-lines[=max-lines]`)。
 短縮の `-i[R]` / `-l[N]` は引っ付け形でのみ値を取るので bool 扱いで正しい。
 
+### xargs の全 option 分類 (GNU + BSD)
+
+xargs だけは**完全列挙**する。piecemeal に足すと同じ穴が繰り返し出るため。
+**値が数値か非数値かを併記**するのが要点 — 数値は `_ARG_LIKE_RE` の安全網が拾うので
+登録漏れが致命傷にならないが、**非数値は安全網が効かないので登録が必須**。
+
+| option | 分類 | 値 | 出所 |
+|---|---|---|---|
+| `-0` / `--null` | 値なし | — | [local] xargs(1) |
+| `-a FILE` / `--arg-file=FILE` | **必須** | **非数値** | [ref] GNU `xargs --help` 逐語 (外部レビュー環境で確認) |
+| `-d CHAR` / `--delimiter=CHARACTER` | **必須** | **非数値** | [ref] 同上 |
+| `-E END` | **必須** | **非数値** | [local] xargs(1) |
+| `-e[END]` / `--eof[=END]` | optional | 非数値 | [ref] GNU findutils |
+| `-I R` | **必須** | **非数値** | [local] xargs(1) |
+| `-i[R]` / `--replace[=R]` | optional | 非数値 | [ref] GNU findutils |
+| `-J replstr` | **必須** | **非数値** | [local] xargs(1) (BSD 固有) |
+| `-L N` | **必須** | 数値 | [local] xargs(1) |
+| `-l[N]` / `--max-lines[=N]` | optional | 数値 | [ref] GNU findutils |
+| `-n N` / `--max-args=N` | **必須** | 数値 | [local] xargs(1) |
+| `-P N` / `--max-procs=N` | **必須** | 数値 | [local] xargs(1) |
+| `-p` / `--interactive` | 値なし | — | [local] xargs(1) |
+| `--process-slot-var=VAR` | **必須** | **非数値** | [ref] GNU findutils |
+| `-R replacements` | **必須** | 数値 | [local] xargs(1) (BSD 固有) |
+| `-r` / `--no-run-if-empty` | 値なし | — | [local] xargs(1) |
+| `-S replsize` | **必須** | 数値 | [local] xargs(1) (BSD 固有) |
+| `-s N` / `--max-chars=N` | **必須** | 数値 | [local] xargs(1) |
+| `--show-limits` | 値なし | — | [ref] GNU findutils |
+| `-t` / `--verbose` | 値なし | — | [local] xargs(1) |
+| `-o` | 値なし | — | [local] xargs(1) (BSD 固有) |
+| `-x` / `--exit` | 値なし | — | [local] xargs(1) |
+| `--help` / `--version` | 終端 | — | [local 実機] `xargs --help` |
+
+`-a` / `-d` は当初「開発機の man (BSD) に無く裏が取れない」として**登録を見送って
+いた**が、その判断を報告で開示したところ外部レビューが GNU `xargs --help` の逐語を
+提示してくれたため登録に切り替えた。BSD xargs にはこの 2 つが存在しないので、
+登録しても BSD 側の短縮形と衝突しない。**裏が取れないものを黙って落とさず開示する
+運用が、そのまま解消につながった実例**。
+
+### 他 wrapper の非数値必須引数の再確認
+
+xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参照元で再確認した結果:
+
+| wrapper | 非数値の必須引数 | 状態 |
+|---|---|---|
+| `timeout` | `-s/--signal SIGNAL` | 登録済み。他は `-k` (数値) と bool のみで**全 option 列挙済み** |
+| `watch` | **無し** | 値を取るのは `-n/--interval` `-q/--equexit` (いずれも数値) と `-d[=permanent]` (optional) だけ。**全て安全網でカバー**されるため表は空のままで正しい |
+| `setsid` | **無し** | `-c/--ctty` `-f/--fork` `-w/--wait` のみ (値を取る option 自体が無い) |
+| `time` | `-o FILE` / `-f FORMAT` | 登録済み。他は bool のみ |
+| `nohup` | **無し** | POSIX の `nohup utility [args]`。option を取らない |
+| `command` | **無し** | `command [-pVv]` (bash(1) 逐語)。値を取る option 無し |
+| `exec` | `-a name` | 登録済み。他は `-c` `-l` の bool のみ (bash(1) 逐語) |
+| `npx` | `--package` `-c/--call` `-w/--workspace` | `-w/--workspace` を今回追加 (`npx --help` 逐語)。npm のグローバル option は開集合で列挙不能 (下記に開示) |
+| `sudo` / `nice` / `stdbuf` / `caffeinate` | 登録済み | ローカル man page で全 option 確認済み |
+
 ### 終端 option (表示して終了する option)
 
 `--help` / `--version` 付きで呼ばれた wrapper は**後続コマンドを実行しない**。
