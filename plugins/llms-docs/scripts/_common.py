@@ -275,12 +275,26 @@ def default_cache_dir() -> str:
     does via ``create_parent``); computing a default should not have the
     side effect of creating an unused directory when the caller passes an
     explicit ``--cache-dir`` instead.
+
+    Per the XDG Base Directory spec, a relative ``$XDG_CACHE_HOME`` is
+    invalid and must be ignored (falling back to ``~/.cache``) rather than
+    resolved against the current working directory — otherwise the cache
+    location would silently depend on whichever directory the script
+    happened to be launched from, and could read/write into whatever
+    project directory happens to be the cwd. ``$LLMS_DOCS_CACHE_DIR`` is
+    this plugin's own escape hatch, not XDG-governed, so it is exempt from
+    this check and accepts a relative value as-is (resolved by the OS
+    against the cwd, same as any other relative path a user hands us).
     """
     override = os.environ.get("LLMS_DOCS_CACHE_DIR")
     if override:
         return os.path.expanduser(override)
-    xdg = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
-    return os.path.join(os.path.expanduser(xdg), "llms-docs")
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        expanded = os.path.expanduser(xdg)
+        if os.path.isabs(expanded):
+            return os.path.join(expanded, "llms-docs")
+    return os.path.join(os.path.expanduser("~/.cache"), "llms-docs")
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +367,12 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     Writes are atomic (see ``_atomic_write``) and validated against
     ``Content-Length`` when the server sends one — a response that reads
     fewer bytes than advertised is treated as a transport failure rather
-    than cached as if it were complete.
+    than cached as if it were complete. A ``Content-Length`` that isn't a
+    valid integer (a malformed or non-conformant server/intermediary) is
+    treated the same as no ``Content-Length`` at all: the check is simply
+    skipped rather than raising ``ValueError`` — the bytes we already read
+    are not in doubt just because the length header describing them is
+    garbled, so there is nothing to fall back to a stale cache *for*.
     """
     if os.path.exists(cache_path):
         if max_age is None:
@@ -367,9 +386,15 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             content_length = resp.headers.get("Content-Length")
-            if content_length is not None and len(data) != int(content_length):
+            expected_length = None
+            if content_length is not None:
+                try:
+                    expected_length = int(content_length)
+                except ValueError:
+                    expected_length = None  # malformed header; skip the check
+            if expected_length is not None and len(data) != expected_length:
                 raise http.client.IncompleteRead(
-                    data, int(content_length) - len(data)
+                    data, expected_length - len(data)
                 )
         if create_parent:
             parent = os.path.dirname(cache_path)

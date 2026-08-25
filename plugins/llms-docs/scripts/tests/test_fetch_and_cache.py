@@ -61,6 +61,43 @@ class DefaultCacheDirTest(unittest.TestCase):
         self.assertTrue(result.endswith(os.path.join(".cache", "llms-docs")))
         self.assertNotIn("~", result)  # expanduser must have run
 
+    def test_relative_xdg_cache_home_is_ignored(self):
+        # Per the XDG Base Directory spec, a relative $XDG_CACHE_HOME is
+        # invalid and must be ignored — not resolved against the cwd
+        # (which would make the cache location depend on whichever
+        # directory the script happened to be launched from, and could
+        # read/write into an unrelated project directory).
+        os.environ["XDG_CACHE_HOME"] = "relative/xdg/path"
+        result = _common.default_cache_dir()
+        self.assertTrue(os.path.isabs(result))
+        self.assertNotIn("relative/xdg/path", result)
+        self.assertTrue(result.endswith(os.path.join(".cache", "llms-docs")))
+
+    def test_empty_xdg_cache_home_is_ignored(self):
+        os.environ["XDG_CACHE_HOME"] = ""
+        result = _common.default_cache_dir()
+        self.assertTrue(os.path.isabs(result))
+        self.assertTrue(result.endswith(os.path.join(".cache", "llms-docs")))
+
+    def test_tilde_prefixed_xdg_cache_home_is_still_absolute(self):
+        # Guards against a future "simplification" of the isabs() check
+        # (e.g. to startswith("/")) that would wrongly reject this.
+        os.environ["XDG_CACHE_HOME"] = "~/custom-cache"
+        result = _common.default_cache_dir()
+        self.assertTrue(os.path.isabs(result))
+        self.assertEqual(
+            result,
+            os.path.join(os.path.expanduser("~/custom-cache"), "llms-docs"),
+        )
+
+    def test_llms_docs_cache_dir_override_accepts_relative_path(self):
+        # Unlike $XDG_CACHE_HOME, $LLMS_DOCS_CACHE_DIR is this plugin's own
+        # escape hatch and is not governed by the XDG spec — a relative
+        # value is passed through (resolved by the OS against the cwd),
+        # deliberately, not a bug.
+        os.environ["LLMS_DOCS_CACHE_DIR"] = "relative/override"
+        self.assertEqual(_common.default_cache_dir(), "relative/override")
+
     def test_does_not_create_the_directory_as_a_side_effect(self):
         target = "/tmp/llms-docs-should-not-be-created-test"
         if os.path.isdir(target):
@@ -146,6 +183,50 @@ class FetchUrlTest(unittest.TestCase):
                 )
         self.assertEqual(cm.exception.code, 1)
         self.assertFalse(os.path.exists(cache_path))
+
+    def test_content_length_mismatch_warning_does_not_dump_the_body(self):
+        # http.client.IncompleteRead carries the partial body as its sole
+        # constructor arg; if str(exc) ever rendered that raw payload, a
+        # truncated ~24MB fetch would dump megabytes into stderr instead of
+        # a short warning. Empirically verified safe on 3.11/3.12/3.14
+        # (IncompleteRead has a dedicated __str__), but pinned here as a
+        # regression test since that's an implementation detail of the
+        # stdlib, not a documented contract.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        body = b"x" * 100_000
+        resp = _FakeResponse(body, headers={"Content-Length": "999999"})
+        err = io.StringIO()
+        with mock.patch(
+            "urllib.request.urlopen", return_value=resp
+        ), contextlib.redirect_stderr(err):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        self.assertLess(len(err.getvalue()), 500)
+
+    def test_non_integer_content_length_does_not_raise(self):
+        # A malformed/non-conformant Content-Length header used to reach
+        # users as a raw ValueError traceback (int("not-a-number") raises,
+        # and ValueError isn't in fetch_url's except tuple). It is now
+        # treated the same as no Content-Length at all: the check is
+        # skipped and the (successfully read) body is cached normally.
+        cache_path = self._cache_path()
+        resp = _FakeResponse(
+            b"hello world", headers={"Content-Length": "not-a-number"}
+        )
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua"
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path, "rb") as f:
+            self.assertEqual(f.read(), b"hello world")
 
     def test_no_cache_and_fetch_fails_exits_1(self):
         cache_path = self._cache_path()

@@ -2,6 +2,44 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.16.1] - 2026-08-25
+
+### `default_cache_dir` / `fetch_url` のレビュー指摘 2 件を修正 (0.16.0 の追いコミット)
+
+- **相対パスの `$XDG_CACHE_HOME` を無効値として扱っていなかった**: XDG Base
+  Directory 仕様では `$XDG_CACHE_HOME` は絶対パスでなければならず、相対値は
+  無効として無視するのが正しい。従来は `os.path.expanduser` を通すだけで
+  絶対/相対を判定していなかったため、相対値を設定すると起動 cwd 相対で
+  キャッシュ先が決まってしまい (再現性が無く、想定外のプロジェクト
+  ディレクトリを汚染/書込失敗させ得る)、`~/.cache` へのフォールバックが
+  効いていなかった。`os.path.isabs()` で判定し、絶対パスの場合のみ採用、
+  相対 (空文字含む) は `~/.cache/llms-docs` にフォールバックするよう修正。
+  `$LLMS_DOCS_CACHE_DIR` (プラグイン独自の完全上書き用エスケープハッチ、
+  XDG 仕様の対象外) は意図的に対象外のまま維持 (相対値もそのまま受理)
+- **`Content-Length` が非整数のとき `ValueError` が未捕捉だった**: レスポンス
+  ヘッダーの `Content-Length` が数値として不正な値 (壊れた/非準拠な
+  サーバー・中間プロキシ由来) だった場合、`int(content_length)` が
+  `ValueError` を送出するが、`fetch_url` の except 節は
+  `(URLError, OSError, http.client.HTTPException)` のみを捕捉しており
+  対象外だった。その結果、期限切れキャッシュが存在していても stale-serve
+  フォールバックへ進まず、生の Python traceback が利用者に露出していた。
+  `int()` 変換を `try/except ValueError` で包み、変換失敗時は
+  `Content-Length` が無いのと同じ扱い (検証をスキップ) にする方式で修正
+  (読み取り自体は成功しているため、ヘッダーが壊れているという理由だけで
+  正常に受信済みのボディを破棄する理由が無い)
+
+### テスト
+
+`test_fetch_and_cache.py` に回帰テストを 6 件追加 (86 tests, 従来比 +6)。
+`DefaultCacheDirTest` に相対パス / 空文字 / `~` プレフィックス付き
+`$XDG_CACHE_HOME` の 3 パターンと `$LLMS_DOCS_CACHE_DIR` の相対値受理を
+確認する 1 件、`FetchUrlTest` に非整数 `Content-Length` で例外が飛ばない
+ことを確認する 1 件と、`Content-Length` 不一致時の警告メッセージが
+(`IncompleteRead` の `args` に載る) 受信済みボディ全体を stderr に
+ダンプしていないことを確認する 1 件を追加 (`IncompleteRead.__str__` が
+ペイロードでなく要約文字列を返すことは Python 3.11/3.12/3.14 で実機確認済み
+だが、標準ライブラリの実装詳細であり将来変わり得るため回帰テストとして固定)。
+
 ## [0.16.0] - 2026-08-25
 
 ### キャッシュディレクトリの既定値を `/tmp` から XDG 準拠に変更
