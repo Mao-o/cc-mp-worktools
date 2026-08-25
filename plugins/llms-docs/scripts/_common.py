@@ -11,9 +11,11 @@ to the symlink would shadow the real one.
 
 from __future__ import annotations
 
+import http.client
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -257,8 +259,73 @@ def build_url_to_full_index(docs) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Core: cache directory resolution
+# ---------------------------------------------------------------------------
+
+def default_cache_dir() -> str:
+    """Compute the default cache directory.
+
+    Resolution order: ``$LLMS_DOCS_CACHE_DIR`` (full override) >
+    ``$XDG_CACHE_HOME/llms-docs`` > ``~/.cache/llms-docs``. The old default
+    (``/tmp``) is not used as a fallback: it is cleared on reboot / OS
+    housekeeping (defeating the ``--max-age`` cache entirely on a fresh
+    session) and is world-writable on multi-user systems (a
+    ``PermissionError`` risk). Does not create the directory — callers that
+    actually write into it are responsible for that (``fetch_url`` already
+    does via ``create_parent``); computing a default should not have the
+    side effect of creating an unused directory when the caller passes an
+    explicit ``--cache-dir`` instead.
+    """
+    override = os.environ.get("LLMS_DOCS_CACHE_DIR")
+    if override:
+        return os.path.expanduser(override)
+    xdg = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
+    return os.path.join(os.path.expanduser(xdg), "llms-docs")
+
+
+# ---------------------------------------------------------------------------
 # Core: HTTP fetch + file IO
 # ---------------------------------------------------------------------------
+
+def _format_age(seconds: float) -> str:
+    """Format a duration in seconds as a short human-readable string."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.0f}m"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.0f}h"
+    return f"{hours / 24:.1f}d"
+
+
+def _atomic_write(path: str, data: bytes) -> None:
+    """Write *data* to *path* atomically.
+
+    Writes to a temp file in the *same directory* as *path* (a cross-
+    filesystem temp dir would make ``os.replace`` non-atomic, or raise) and
+    ``os.replace``s it into place. This guarantees a concurrent reader (a
+    parallel Skill fork, or a second invocation) never observes a partially
+    -written cache file — the previous implementation's plain ``open(...,
+    "wb")`` truncated the file before writing, so a reader mid-fetch could
+    see 0 bytes or a truncated body and silently mis-parse it as "0
+    entries" or "corrupt".
+    """
+    parent = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".fetch-tmp-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
 
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
@@ -269,8 +336,24 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     older than that. ``max_age=None`` (default) keeps the original behaviour
     of using the cache indefinitely once it exists.
 
-    On transport failure, prints ``Error: ...`` to stderr and exits 1
-    (mirrors the pre-refactor per-script helpers).
+    On transport failure:
+      * If a cache file already exists (even a stale one past *max_age*),
+        print a WARNING to stderr and return that stale copy rather than
+        failing outright — a transient network blip shouldn't break an
+        otherwise-usable session when a slightly-old copy is on disk.
+      * Otherwise (no cache at all), print an ``Error: ...`` and exit 1
+        (mirrors the pre-refactor per-script helpers).
+
+    Catches ``(urllib.error.URLError, OSError, http.client.HTTPException)``
+    — not just ``URLError`` — so a read timeout (``TimeoutError``, an
+    ``OSError`` subclass) or a truncated transfer
+    (``http.client.IncompleteRead``) hits this handling instead of
+    propagating as a raw Python traceback.
+
+    Writes are atomic (see ``_atomic_write``) and validated against
+    ``Content-Length`` when the server sends one — a response that reads
+    fewer bytes than advertised is treated as a transport failure rather
+    than cached as if it were complete.
     """
     if os.path.exists(cache_path):
         if max_age is None:
@@ -283,21 +366,41 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None and len(data) != int(content_length):
+                raise http.client.IncompleteRead(
+                    data, int(content_length) - len(data)
+                )
         if create_parent:
             parent = os.path.dirname(cache_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-        with open(cache_path, "wb") as f:
-            f.write(data)
+        _atomic_write(cache_path, data)
         return cache_path
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+        if os.path.exists(cache_path):
+            age = time.time() - os.path.getmtime(cache_path)
+            print(
+                f"WARNING: fetch failed ({e}); using cached copy "
+                f"({_format_age(age)} old)",
+                file=sys.stderr,
+            )
+            return cache_path
         print(f"Error: Failed to fetch {url}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
 def load_lines(path: str):
-    """Read file and return lines (preserving newlines)."""
-    with open(path, "r", encoding="utf-8") as f:
+    """Read file and return lines (preserving newlines).
+
+    Decodes with ``errors="replace"`` rather than the default ``"strict"``:
+    a cache file truncated mid-multibyte-character (e.g. by a killed
+    process, or the pre-atomic-write race this module now closes) would
+    otherwise raise ``UnicodeDecodeError`` and crash every subcommand that
+    touches that cache, instead of degrading to a few replacement
+    characters in whatever content was cut off.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         return f.readlines()
 
 
@@ -665,8 +768,14 @@ def next_hint(subcommand: str, *args: str) -> None:
 DEFAULT_MAX_AGE_SECONDS = 604800  # 7 days
 
 
-def add_cache_dir_arg(parser, *, default: str = "/tmp", help=None) -> None:
-    """Add ``--cache-dir`` to *parser*."""
+def add_cache_dir_arg(parser, *, default: str | None = None, help=None) -> None:
+    """Add ``--cache-dir`` to *parser*.
+
+    *default* resolves via ``default_cache_dir()`` (env-overridable XDG
+    cache dir) unless the caller passes an explicit value.
+    """
+    if default is None:
+        default = default_cache_dir()
     if help is None:
         help = f"Directory to cache files (default: {default})"
     parser.add_argument("--cache-dir", default=default, help=help)

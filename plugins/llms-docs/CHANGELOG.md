@@ -2,6 +2,66 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.16.0] - 2026-08-25
+
+### キャッシュディレクトリの既定値を `/tmp` から XDG 準拠に変更
+
+`/tmp` は再起動やOSの定期クリーンアップで消えるため `--max-age` によるキャッシュが
+実質無効化されていたほか、マルチユーザー環境では world-writable な `/tmp` を
+共有することによる `PermissionError` のリスクもあった。
+
+- `_common.default_cache_dir()` を追加。解決順は `$LLMS_DOCS_CACHE_DIR` (完全上書き)
+  > `$XDG_CACHE_HOME/llms-docs` > `~/.cache/llms-docs`
+- `add_cache_dir_arg()` の既定値をこの関数の戻り値に変更。`--cache-dir` での
+  個別指定は従来通り可能
+- 3 script (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`)
+  の `--cache-dir` 既定値・ヘルプ文言を統一。firebase の `DEFAULT_CACHE_DIR =
+  "/tmp"` 定数と ai-sdk のヘルプ文言に残っていたハードコードされた `/tmp` を除去
+- README.md のキャッシュ表・前提条件、3 SKILL.md のキャッシュ表・失敗時対処表の
+  `/tmp` 参照をすべて `~/.cache/llms-docs` ベースの記述に更新
+- **利用者向け挙動変更**: 既存の `/tmp` 配下のキャッシュファイルは新しい既定
+  ディレクトリからは見えなくなる (再取得が発生する)。旧 cache の自動移行は
+  行わない (import 元が `/tmp` で消えている可能性が高く、移行の実利が薄いため)
+
+### `fetch_url` の堅牢性向上: stale-serve / 例外拡張 / atomic write
+
+- **stale-serve**: fetch に失敗しても既存キャッシュ (期限切れ含む) があれば
+  `WARNING: fetch failed (...); using cached copy (<age> old)` を stderr に出し
+  そのキャッシュを返して継続する (exit 0)。キャッシュが無い場合のみ
+  `Error: ...` で exit 1。従来は期限切れキャッシュがあっても fetch 失敗で
+  即 exit 1 しており、「ネットワーク不調時だけ検索が完全に使えなくなる」
+  という壊れ方をしていた
+- **例外の捕捉範囲拡張**: `except urllib.error.URLError` を `except
+  (urllib.error.URLError, OSError, http.client.HTTPException)` に拡張。
+  read timeout (`TimeoutError`、`OSError` のサブクラス) や途中切断
+  (`http.client.IncompleteRead`) が生の Python traceback として利用者に
+  露出していたのを解消
+- **Content-Length 検証**: レスポンスに `Content-Length` があり受信バイト数と
+  不一致なら `IncompleteRead` として扱い、不完全なデータをキャッシュに
+  書き込まない
+- **atomic write**: `_common._atomic_write()` を追加。同一ディレクトリ内の
+  一時ファイルへ書いてから `os.replace` で原子的に差し替える (別ファイル
+  システム間の rename は atomic でなくなるため、必ず対象と同じディレクトリに
+  作成する)。並列 Skill fork や連続実行が同じキャッシュパスに競合しても、
+  読み手が truncate 直後の空/途中のファイルを掴むことがなくなる
+- **`load_lines` の decode を `errors="replace"` に変更**: 途中で打ち切られた
+  多バイト文字が原因の `UnicodeDecodeError` で全コマンドが traceback して
+  いたのを、置換文字で継続するよう緩和した
+- 3 SKILL.md の失敗時対処表の「ネットワーク失敗」「キャッシュ破損」行を
+  上記の新しい挙動 (stale-serve / `--max-age 0` 推奨) に合わせて書き換え。
+  SKILL.md metadata version をそれぞれ patch bump:
+  researching-claude-docs 3.4.1 → 3.4.2 / researching-ai-sdk 3.3.2 → 3.3.3 /
+  researching-firebase 2.1.1 → 2.1.2
+
+### テスト
+
+`scripts/tests/test_fetch_and_cache.py` を新設 (19 tests)。`default_cache_dir`
+の環境変数解決順、`_format_age`、`fetch_url` の atomic write / stale-serve /
+widened exception handling / Content-Length 検証、`load_lines` の
+`errors="replace"` をカバーする。ネットワーク失敗系のテストは
+`unittest.mock.patch("urllib.request.urlopen")` を使用 (cache fixture 方式は
+`fetch_url` の早期 return を突破できないため、この経路だけはモックが必要)。
+
 ## [0.15.0] - 2026-08-25
 
 ### 検索フォールバック: 本文にしか無い語で `search` が 0 件になる問題を修正

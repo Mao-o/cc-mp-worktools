@@ -49,7 +49,6 @@ from _common import (
 )
 
 LLMS_TXT_URL = "https://firebase.google.com/docs/llms.txt"
-DEFAULT_CACHE_DIR = "/tmp"
 INDEX_CACHE_NAME = "firebase-llms.txt"
 PAGES_CACHE_SUBDIR = "firebase-docs"
 
@@ -478,7 +477,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("fetch-index", help="Fetch and print page index")
-    add_cache_dir_arg(p_index, default=DEFAULT_CACHE_DIR)
+    add_cache_dir_arg(p_index)
     add_max_age_arg(p_index)
     p_index.add_argument(
         "--limit", type=int, default=100,
@@ -495,7 +494,7 @@ def main():
         p_sections,
         help="Page reference: integer index, URL slug (e.g. 'vector-search'), or full URL",
     )
-    add_cache_dir_arg(p_sections, default=DEFAULT_CACHE_DIR)
+    add_cache_dir_arg(p_sections)
     add_max_age_arg(p_sections)
     p_sections.set_defaults(func=cmd_sections)
 
@@ -505,7 +504,7 @@ def main():
         help="Page reference: integer index, URL slug, or full URL",
     )
     add_heading_path_arg(p_content, help="Heading path (omit for full page)")
-    add_cache_dir_arg(p_content, default=DEFAULT_CACHE_DIR)
+    add_cache_dir_arg(p_content)
     add_max_age_arg(p_content)
     p_content.set_defaults(func=cmd_content)
 
@@ -514,7 +513,7 @@ def main():
         "search-index",
         help="Rank pages by keyword (from llms.txt title/description)",
     )
-    add_cache_dir_arg(p_search_idx, default=DEFAULT_CACHE_DIR)
+    add_cache_dir_arg(p_search_idx)
     add_max_age_arg(p_search_idx)
     p_search_idx.add_argument("query", help="Space-separated keywords (AND search)")
     p_search_idx.add_argument("--limit", type=int, default=15,
@@ -526,7 +525,7 @@ def main():
         "search-content",
         help="Keyword search across one page or all pages (lazy fetch)",
     )
-    add_cache_dir_arg(p_search_body, default=DEFAULT_CACHE_DIR)
+    add_cache_dir_arg(p_search_body)
     add_max_age_arg(p_search_body)
     p_search_body.add_argument("query", help="Space-separated keywords (AND search)")
     p_search_body.add_argument(
@@ -548,7 +547,7 @@ def main():
         help="Smart search: rank pages via index and drill into top N bodies",
     )
     p_search.add_argument("query", help="Space-separated keywords (AND search)")
-    add_cache_dir_arg(p_search, default=DEFAULT_CACHE_DIR)
+    add_cache_dir_arg(p_search)
     add_max_age_arg(p_search)
     p_search.add_argument(
         "--top-n", type=int, default=5,
