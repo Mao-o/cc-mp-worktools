@@ -996,6 +996,107 @@ class TestXargsOptionClassification(unittest.TestCase):
                 self.assertEqual(strip_transparent_wrappers(cmd), "firebase deploy")
 
 
+class TestTimeoutDurationSyntax(unittest.TestCase):
+    """GNU timeout の DURATION は strtod ベースなので 10 進整数だけではない。
+
+    受理し損ねると wrapper を剥がせず**検証が消える**ので、迷う形は受理側に倒す。
+    公式記述は「浮動小数点数 + 任意の接尾辞 (s/m/h/d)」。
+    """
+
+    ACCEPTED = [
+        "30", "1.5", ".5", "5.", "0",
+        "1e3", "1E3", "1e-3", "1.5e2", "1E+3",
+        "inf", "infinity", "INF", "Infinity", "nan",
+        "0x1p3",
+        "30s", "5m", "2h", "1d", "1.5h",
+    ]
+
+    def test_accepted_durations_are_consumed(self):
+        for d in self.ACCEPTED:
+            with self.subTest(duration=d):
+                self.assertEqual(
+                    strip_transparent_wrappers(f"timeout {d} gh pr create"),
+                    "gh pr create",
+                )
+
+    def test_non_duration_leaves_segment_opaque(self):
+        # DURATION の形でなければ文書化された呼び出し形ではないので剥がさない。
+        for bad in ("notanum", "gh"):
+            with self.subTest(token=bad):
+                cmd = f"timeout {bad} pr create"
+                self.assertEqual(strip_transparent_wrappers(cmd), cmd)
+
+
+class TestShellExecutingWrappers(unittest.TestCase):
+    """引数を**シェル経由**で実行する wrapper はクォート内を解析する。
+
+    `watch 'gh pr create'` は `sh -c` にコマンド文字列として渡るので、クォートを
+    剥がさないと行頭 anchored な PATTERNS に一致せず、mutating コマンドが
+    検証なしに繰り返し実行される。直接 exec する wrapper (`timeout` 等) では
+    クォート塊は「空白入りのコマンド名」なので剥がしてはいけない。
+    分類と根拠は docs/wrapper-env-audit.md を参照。
+    """
+
+    def test_watch_default_form_parses_the_shell_command(self):
+        for cmd in ("watch 'gh pr create'", 'watch "gh pr create"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+    def test_watch_compound_shell_command_is_split(self):
+        cands = [c for c, _e in extract_candidates(
+            "watch 'gh pr create && aws s3 rm x'"
+        )]
+        self.assertEqual(cands, ["gh pr create", "aws s3 rm x"])
+
+    def test_watch_with_exec_does_not_unquote(self):
+        # `--exec` は sh -c を経由せず直接 exec するので、クォート塊は
+        # 「空白入りのコマンド名」= gh は実行されない。
+        for cmd in ("watch --exec 'gh pr create'", "watch -x 'gh pr create'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "'gh pr create'")
+
+    def test_watch_unquoted_form_is_unchanged(self):
+        self.assertEqual(
+            strip_transparent_wrappers("watch -n 5 kubectl get pods"),
+            "kubectl get pods",
+        )
+
+    def test_sudo_shell_flags(self):
+        for flag in ("-s", "-i", "--shell", "--login"):
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    strip_transparent_wrappers(f"sudo {flag} 'gh pr create'"),
+                    "gh pr create",
+                )
+
+    def test_sudo_without_shell_flag_is_direct_exec(self):
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -u deploy gh pr create"), "gh pr create"
+        )
+
+    def test_npx_call_option_is_a_shell_command(self):
+        for cmd in ("npx -c 'gh pr create'", "npx --call='gh pr create'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+    def test_direct_exec_wrappers_do_not_unquote(self):
+        # timeout / nice / xargs 等は `utility [argument ...]` 形 (直接 exec)。
+        for cmd in (
+            "timeout 30 'gh pr create'",
+            "nice -n 10 'gh pr create'",
+            "xargs -n 1 'gh pr create'",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(strip_transparent_wrappers(cmd).startswith("'"), cmd)
+
+    def test_quoted_option_values_do_not_leak_into_the_candidate(self):
+        # 値がクォートされていると `\S+` では途中で切れ、残りが候補先頭に混ざる。
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -p 'enter password' gh pr create"),
+            "gh pr create",
+        )
+
+
 class TestTerminatingWrapperOptions(unittest.TestCase):
     """`--help` / `--version` 付きの wrapper は後続コマンドを実行しない。
 

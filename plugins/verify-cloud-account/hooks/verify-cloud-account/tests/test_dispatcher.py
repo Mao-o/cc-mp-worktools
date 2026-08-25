@@ -1923,6 +1923,16 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ("xargs --process-slot-var V gh pr close 1", "github"),
         ("npx -w pkg firebase deploy", "firebase"),
         ("npx --workspace pkg firebase deploy", "firebase"),
+        # --- timeout の DURATION 全構文 (PR #48 Codex R4 P1) ---
+        ("timeout 1e3 gh pr create --fill", "github"),
+        ("timeout inf gh pr create --fill", "github"),
+        ("timeout .5 gh pr create --fill", "github"),
+        ("timeout 1E3 gh pr create --fill", "github"),
+        # --- シェル経由 wrapper のクォート内解析 (PR #48 Codex R4 P1) ---
+        ("watch 'gh pr create --fill'", "github"),
+        ("watch -n 5 'kubectl delete pod x'", "kubectl"),
+        ("npx -c 'gh pr create --fill'", "github"),
+        ("sudo -s 'gh pr create --fill'", "github"),
     ]
 
     def setUp(self):
@@ -1978,6 +1988,12 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         "sudo -V gh pr create",
         "npx --help gh pr create",
         "caffeinate --help gh pr create",
+        # --- 数値の heredoc delimiter は正当 (PR #48 Codex R4 P2) ---
+        # 弾くと本文の各行が候補になり、データを書くだけのコマンドを deny しうる。
+        "cat <<123\ngh pr create\n123",
+        "cat > x.sh <<456\naws s3 rm s3://b/x\n456",
+        # 直接 exec する wrapper のクォート塊は「空白入りのコマンド名」
+        "watch --exec 'gh pr create'",
     ]
 
     def test_listed_commands_do_not_reach_verification(self):

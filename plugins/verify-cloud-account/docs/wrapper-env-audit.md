@@ -226,6 +226,32 @@ xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参�
 | `npx` | `--package` `-c/--call` `-w/--workspace` | `-w/--workspace` を今回追加 (`npx --help` 逐語)。npm のグローバル option は開集合で列挙不能 (下記に開示) |
 | `sudo` / `nice` / `stdbuf` / `caffeinate` | 登録済み | ローカル man page で全 option 確認済み |
 
+### 引数の実行経路 (シェル経由 or 直接 exec)
+
+wrapper が引数列を **`sh -c` に渡すか、直接 exec するか**で、クォートの扱いが
+真逆になる。シェル経由の wrapper はクォート内が**コマンド文字列**なので剥がして
+解析しないと `watch 'gh pr create'` が検証されない。直接 exec の wrapper では
+クォート塊は「空白入りのコマンド名」なので、剥がすと**実行されないコマンド**で
+誤 deny する。
+
+| wrapper | 実行経路 | 出所 |
+|---|---|---|
+| `watch` (既定) | **シェル経由** (`sh -c`) | [ref] procps-ng `watch --help`: `-x, --exec` = 「pass command to exec instead of `sh -c`」= 既定は sh -c |
+| `watch --exec` / `-x` | 直接 exec | [ref] 同上 |
+| `sudo -s` / `--shell` / `-i` / `--login` | **シェル経由** | **[local man]** sudo(8):「If a command is specified, it is passed to the shell for execution via the shell's -c option」 |
+| `sudo` (それ以外) | 直接 exec | [local man] sudo(8) |
+| `npx -c` / `--call` の**値** | **シェル経由** | **[local 実機]** `npx --help` の usage 行 `npm exec -c '<cmd> [args...]'` |
+| `npx` (それ以外) | 直接 exec | [local 実機] `npx --help` |
+| `timeout` / `nice` / `stdbuf` / `setsid` / `caffeinate` / `xargs` / `time` / `nohup` / `env` / `command` / `exec` | 直接 exec | [local man] いずれも synopsis が `utility [argument ...]` 形 |
+
+シェル経由の wrapper では、クォート内が**複合コマンド**のこともある
+(`watch 'gh pr create && aws s3 rm x'`)。`extract_candidates` はクォートを剥がした
+結果を**もう一度セグメント分割**して各段を候補にする。
+
+`npx -c '<cmd>' <positional>` の positional は npm では package spec 扱いで実行され
+ない**はず**だが、その意味論の裏が取れていない。取りこぼしで検証が消えるより
+過剰検証側が安全なので、`-c` の値と残りの引数列の**両方**を候補として返している。
+
 ### 終端 option (表示して終了する option)
 
 `--help` / `--version` 付きで呼ばれた wrapper は**後続コマンドを実行しない**。

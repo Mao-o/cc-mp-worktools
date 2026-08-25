@@ -212,6 +212,31 @@ _WRAPPER_EXTRA_TERMINATING = {
 }
 
 
+# wrapper が引数列を **シェル経由 (`sh -c "..."`) で実行するか、直接 exec するか**。
+# シェル経由の場合、引数はクォートされた**コマンド文字列**として渡されることがあり、
+# クォートを剥がして中身を解析しないと `watch 'gh pr create'` が
+# `'gh pr create'` のまま残り、行頭 anchored な PATTERNS に一致せず検証が消える。
+#
+#   "shell_trailing" — flag の後ろの残り全体がシェルコマンド文字列
+#   "shell_flag"     — 特定 flag が付いているときだけ上記になる
+#   "shell_value"    — 特定 flag の**値**がシェルコマンド文字列
+#   (未掲載の wrapper はすべて直接 exec = `utility [argument ...]` 形)
+#
+# 根拠:
+#   watch : [ref] procps-ng `watch --help` の `-x, --exec` が
+#           「pass command to exec instead of 'sh -c'」= **既定は sh -c 経由**
+#   sudo  : [local man] sudo(8) `-s, --shell` /「If a command is specified, it is
+#           passed to the shell for execution via the shell's -c option」。
+#           `-i, --login` も同様
+#   npx   : [local 実機] `npx --help` の usage 行 `npm exec -c '<cmd> [args...]'`
+#           = `-c/--call` の値がシェルコマンド文字列
+_WRAPPER_SHELL_EXEC = {
+    "watch": ("shell_trailing", frozenset({"--exec", "-x"})),
+    "sudo": ("shell_flag", frozenset({"-s", "--shell", "-i", "--login"})),
+    "npx": ("shell_value", frozenset({"-c", "--call"})),
+}
+
+
 # 「コマンド名ではありえない」引数トークン: 純粋な数値 (+ 任意の時間単位)。
 # 未登録の値付き flag があっても、その値が数値ならここで読み飛ばしてコマンド本体に
 # 到達できる。実行可能ファイル名が純粋な数値になることは実質無いので、読み飛ばしが
@@ -240,19 +265,21 @@ _HEREDOC_START_RE = re.compile(
     )""",
     re.VERBOSE,
 )
-_NUMERIC_RE = re.compile(r"^[0-9]+$")
 
 
 def _heredoc_delimiter(match: re.Match) -> str | None:
-    """検出した heredoc の delimiter。delimiter として認めない形なら None。"""
+    """検出した heredoc の delimiter。delimiter として認めない形なら None。
+
+    **数値の word も正当な delimiter**。`cat <<123` 〜 `123` は bash が受理する形で、
+    弾くと本文の各行が個別の候補になり、本文に CLI 例が含まれるだけで誤 deny する。
+    算術左シフト (`1 << 2`) の除外は `split_on_operators` の**算術文脈追跡**が
+    担っているので、ここで語形から推定する必要はない (R2 で構文検出に移行した際の
+    残骸を R4 で撤去)。
+    """
     for name in ("sq", "dq", "bs", "bare"):
         value = match.group(name)
-        if value is None:
-            continue
-        if name in ("bs", "bare") and _NUMERIC_RE.match(value):
-            # 算術左シフト (`1 << 2`) の右辺。heredoc ではない。
-            return None
-        return value
+        if value is not None:
+            return value
     return None
 
 
@@ -550,6 +577,15 @@ def _drop_tokens(cmd: str, n: int) -> str:
     return remaining.lstrip()
 
 
+# option の**値**を 1 トークンとして取るための matcher。クォートされた値
+# (`sudo -p 'my prompt'` / `npx -c 'gh pr create'`) は空白を含むので `\S+` では
+# 途中で切れてしまい、残りが候補の先頭に混ざってコマンドを見失う。
+_VALUE_TOKEN_RE = re.compile(r"^('[^']*'|\"[^\"]*\"|\S+)")
+# シェルの 1 「語」。`--call='gh pr create'` のようにクォート部分に空白を含む語を
+# 1 トークンとして取る (`\S+` だと `--call='gh` で切れる)。
+_WORD_TOKEN_RE = re.compile(r"""^((?:[^\s'"]|'[^']*'|"[^"]*")+)""")
+
+
 def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> str:
     """wrapper 直後のフラグ (値あり / 値なし / optional) を剥がす。
 
@@ -571,7 +607,7 @@ def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> s
     flags_optional = _WRAPPER_FLAGS_OPTIONAL_VALUE.get(wrapper, set())
     s = cmd.lstrip()
     while s:
-        m = re.match(r"^(\S+)", s)
+        m = _WORD_TOKEN_RE.match(s)
         if not m:
             break
         tok = m.group(1)
@@ -589,22 +625,36 @@ def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> s
             continue
         if tok in flags_with_value:
             s = s[m.end():].lstrip()
-            m2 = re.match(r"^(\S+)", s)
+            m2 = _VALUE_TOKEN_RE.match(s)
             if m2:
                 s = s[m2.end():].lstrip()
         else:
             s = s[m.end():].lstrip()
     if skip_arg_like:
         while s:
-            m = re.match(r"^(\S+)", s)
+            m = _WORD_TOKEN_RE.match(s)
             if not m or not _ARG_LIKE_RE.match(m.group(1)):
                 break
             s = s[m.end():].lstrip()
     return s
 
 
-# GNU coreutils timeout(1) の DURATION: 「浮動小数点数 + 任意の接尾辞 s/m/h/d」。
-_TIMEOUT_DURATION_RE = re.compile(r"^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[smhd]?$")
+# GNU coreutils timeout(1) の DURATION。公式記述は「浮動小数点数 + 任意の接尾辞
+# (s/m/h/d)」で、実装は strtod ベースなので **10 進の整数・小数だけではない**:
+# 科学記数法 (`1e3` / `1E3` / `1e-3`)、小数点始まり (`.5`) / 終わり (`5.`)、
+# `inf` / `infinity` / `nan`、符号付き、16 進浮動小数 (`0x1p3`) まで受理される。
+# ここで**受理し損ねると wrapper を剥がせず検証が消える**ため、迷う形は受理側に倒す
+# (受理しすぎても、消費するのは DURATION の位置にある 1 トークンだけで、
+#  コマンド名が数値・inf・nan になることは実質無い)。
+_TIMEOUT_DURATION_RE = re.compile(
+    r"""^[+-]?(?:
+          inf(?:inity)?
+        | nan
+        | 0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?
+        | (?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
+    )[smhd]?$""",
+    re.VERBOSE | re.IGNORECASE,
+)
 
 
 def _drop_timeout_duration(rest: str) -> str | None:
@@ -621,6 +671,98 @@ def _drop_timeout_duration(rest: str) -> str | None:
     return rest[m.end():].lstrip()
 
 
+def _has_flag(rest: str, wrapper: str, names) -> bool:
+    """wrapper の flag 領域に `names` のいずれかがあるか (値の消費規則を尊重)。"""
+    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+    s = rest.lstrip()
+    while s:
+        m = _WORD_TOKEN_RE.match(s)
+        if not m:
+            break
+        tok = m.group(1)
+        if tok == "--" or tok == "-" or not tok.startswith("-"):
+            break
+        if tok.split("=", 1)[0] in names:
+            return True
+        s = s[m.end():].lstrip()
+        if "=" not in tok and tok in flags_with_value:
+            m2 = _VALUE_TOKEN_RE.match(s)
+            if m2:
+                s = s[m2.end():].lstrip()
+    return False
+
+
+def _flag_argument(rest: str, wrapper: str, names) -> str | None:
+    """wrapper の flag 領域から `names` のいずれかの**値**を取り出す。"""
+    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+    s = rest.lstrip()
+    while s:
+        m = _WORD_TOKEN_RE.match(s)
+        if not m:
+            break
+        tok = m.group(1)
+        if tok == "--" or tok == "-" or not tok.startswith("-"):
+            break
+        name, eq, embedded = tok.partition("=")
+        s = s[m.end():].lstrip()
+        if name in names:
+            if eq:
+                return embedded
+            m2 = _VALUE_TOKEN_RE.match(s)
+            return m2.group(1) if m2 else None
+        if not eq and tok in flags_with_value:
+            m2 = _VALUE_TOKEN_RE.match(s)
+            if m2:
+                s = s[m2.end():].lstrip()
+    return None
+
+
+def _unquote_shell_command(text: str) -> str:
+    """シェルコマンド文字列として渡された引数のクォートを 1 枚剥がす。
+
+    `watch 'gh pr create'` の引数は `sh -c` に渡る**コマンド文字列**なので、
+    クォートを剥がして中身を解析対象にする。単一のクォート塊でないとき
+    (`watch -n 5 kubectl get pods` のような素の引数列) はそのまま返す。
+    """
+    stripped = text.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "'\"":
+        inner = stripped[1:-1]
+        if stripped[0] not in inner:
+            return inner
+    return text
+
+
+def _shell_command_argument(rest: str, wrapper: str) -> str | None:
+    """wrapper がシェル経由で実行する場合の「コマンド文字列」を返す (無ければ None)。"""
+    spec = _WRAPPER_SHELL_EXEC.get(wrapper)
+    if spec is None:
+        return None
+    kind, names = spec
+    if kind == "shell_trailing":
+        # `--exec` が付いていれば直接 exec なのでシェル解釈しない。
+        if _has_flag(rest, wrapper, names):
+            return None
+        return _unquote_shell_command(_drop_wrapper_flags(rest, wrapper))
+    if kind == "shell_flag":
+        if not _has_flag(rest, wrapper, names):
+            return None
+        return _unquote_shell_command(_drop_wrapper_flags(rest, wrapper))
+    if kind == "shell_value":
+        value = _flag_argument(rest, wrapper, names)
+        if value is None:
+            return None
+        shell_cmd = _unquote_shell_command(value)
+        # `npx -c '<cmd>' <positional>` の positional は npm では package spec 扱いで
+        # 実行されない**はず**だが、その意味論まで裏が取れていない。取りこぼしで
+        # 検証が消えるより過剰検証側が安全なので、**両方**を候補として返す
+        # (改行はトップレベルの区切りなので extract_candidates が再分割する)。
+        remainder = _drop_wrapper_flags(rest, wrapper)
+        if remainder:
+            return f"{shell_cmd}\n{remainder}"
+        return shell_cmd
+    return None
+
+
 def _wrapper_terminates(rest: str, wrapper: str) -> bool:
     """wrapper の flag 領域に「表示して終了する」option があれば True。
 
@@ -634,7 +776,7 @@ def _wrapper_terminates(rest: str, wrapper: str) -> bool:
     flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
     s = rest.lstrip()
     while s:
-        m = re.match(r"^(\S+)", s)
+        m = _WORD_TOKEN_RE.match(s)
         if not m:
             break
         tok = m.group(1)
@@ -645,7 +787,7 @@ def _wrapper_terminates(rest: str, wrapper: str) -> bool:
             return True
         s = s[m.end():].lstrip()
         if "=" not in tok and tok in flags_with_value:
-            m2 = re.match(r"^(\S+)", s)
+            m2 = _VALUE_TOKEN_RE.match(s)
             if m2:
                 s = s[m2.end():].lstrip()
     return False
@@ -663,7 +805,7 @@ def _command_is_query(rest: str) -> bool:
     """
     s = rest.lstrip()
     while s:
-        m = re.match(r"^(\S+)", s)
+        m = _WORD_TOKEN_RE.match(s)
         if not m:
             break
         tok = m.group(1)
@@ -703,6 +845,10 @@ def _strip_one_wrapper(cmd: str) -> str | None:
         # `--help` / `--version` 付きは後続を実行しないので剥がさない。
         if _wrapper_terminates(rest, t0):
             return None
+        # シェル経由で実行する wrapper は、引数をコマンド**文字列**として解釈する。
+        shell_cmd = _shell_command_argument(rest, t0)
+        if shell_cmd is not None:
+            return shell_cmd
         # timeout は位置引数 DURATION を自前で消費するので、汎用の
         # arg-like 読み飛ばしを無効にする (有効だと DURATION まで食われ、
         # _drop_timeout_duration がコマンド名を DURATION と誤判定して剥がしを諦める)。
@@ -735,7 +881,7 @@ def _sudo_preserves_env(cmd_after_sudo: str) -> bool:
     """
     s = cmd_after_sudo.lstrip()
     while s:
-        m = re.match(r"^(\S+)", s)
+        m = _WORD_TOKEN_RE.match(s)
         if not m:
             break
         tok = m.group(1)
@@ -837,7 +983,7 @@ def _strip_leading_syntax(cmd: str) -> str:
         if s[0] in "({":
             s = s[1:].lstrip()
             continue
-        m = re.match(r"^(\S+)", s)
+        m = _WORD_TOKEN_RE.match(s)
         if not m:
             break
         tok = m.group(1)
@@ -1013,6 +1159,17 @@ def extract_candidates(command: str) -> list[tuple[str, dict[str, str]]]:
     out: list[tuple[str, dict[str, str]]] = []
     for seg in split_on_operators(command):
         normalized, env = _normalize_segment(seg)
-        if normalized:
-            out.append((normalized, env))
+        if not normalized:
+            continue
+        # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
+        # (`watch 'gh pr create && aws s3 rm x'`)。剥がした結果をもう一度分割して
+        # 各段を候補にする。分割が要らない通常のセグメントはここを素通りする。
+        parts = split_on_operators(normalized)
+        if len(parts) > 1:
+            for part in parts:
+                inner, inner_env = _normalize_segment(part)
+                if inner:
+                    out.append((inner, {**env, **inner_env}))
+            continue
+        out.append((normalized, env))
     return out
