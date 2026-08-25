@@ -6,7 +6,11 @@ import re
 import subprocess
 from pathlib import Path
 
-PATTERNS = [r"^aws\b"]
+# `\b` はハイフンも語境界扱いするため `aws-vault exec prod -- aws s3 rm` のような
+# **別コマンド**まで aws として拾ってしまう (aws-vault は hook の既定 profile で
+# sts を実行するので、未設定なら永久 deny、既定が期待値なら実行 profile が別でも
+# allow という二重の誤り)。空白または終端が続く形だけに限定する。
+PATTERNS = [r"^aws(?=\s|$)"]
 READONLY = [
     r"^aws\s+sts\s+get-caller-identity\b",
     # 認証取得系 (`aws sso login|logout` / `aws login|logout` / `aws configure ...`) は

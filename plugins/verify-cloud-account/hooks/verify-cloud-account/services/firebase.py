@@ -34,7 +34,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-PATTERNS = [r"^firebase\b"]
+# `\b` だとハイフン付き別コマンド全般を拾ってしまうため空白/終端に限定する。
+# ただし `npx firebase-tools deploy` は wrapper 剥がし後 `firebase-tools deploy`
+# になり、これは正当な検証対象なので `-tools` だけ明示的に許可する
+# (READONLY / STATE_CHANGING / self-remediation も同じ形を受け付けている)。
+PATTERNS = [r"^firebase(?:-tools)?(?=\s|$)"]
 # `npx firebase-tools ...` は wrapper 剥がし後 `firebase-tools ...` になり PATTERNS
 # (`^firebase\b`) に一致する。READONLY / STATE_CHANGING / self-remediation も同じ形を
 # 受け付けないと、`npx firebase-tools login` が検証され `use prod` の切替が cache される。

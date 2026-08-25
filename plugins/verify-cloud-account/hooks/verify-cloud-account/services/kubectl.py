@@ -4,7 +4,9 @@ from __future__ import annotations
 import re
 import subprocess
 
-PATTERNS = [r"^kubectl\b"]
+# `\b` だと `kubectl-foo` のような plugin バイナリまで kubectl として拾うため、
+# 空白または終端が続く形だけに限定する。
+PATTERNS = [r"^kubectl(?=\s|$)"]
 READONLY = [
     r"^kubectl\s+config\s+(current-context|get-contexts|view|get-clusters|get-users)\b",
     r"^kubectl\s+cluster-info\b",

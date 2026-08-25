@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 import subprocess
 
-PATTERNS = [r"^gcloud\b"]
+# `\b` だとハイフン付き別コマンドまで gcloud として拾うため、空白または終端が
+# 続く形だけに限定する。
+PATTERNS = [r"^gcloud(?=\s|$)"]
 # release track prefix (`gcloud beta config set ...` / `gcloud alpha auth login`)。
 # gcloud はほぼ全てのコマンドを alpha / beta (一部 preview) でも公開しており、
 # 同じ操作が同じ副作用で走る。anchored pattern を GA 形だけで書くと track 形が

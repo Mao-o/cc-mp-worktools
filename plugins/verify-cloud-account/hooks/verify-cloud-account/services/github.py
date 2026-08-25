@@ -12,7 +12,9 @@ import re
 import shlex
 import subprocess
 
-PATTERNS = [r"^gh\b"]
+# `\b` だと `gh-ost --help` のようなハイフン付き別コマンドまで拾うため、
+# 空白または終端が続く形だけに限定する。
+PATTERNS = [r"^gh(?=\s|$)"]
 READONLY = [
     r"^gh\s+auth\s+(status|list)\b",
     # 認証系の素通しは「コマンド名で括る」のではなく **リモートに何も書かないと
