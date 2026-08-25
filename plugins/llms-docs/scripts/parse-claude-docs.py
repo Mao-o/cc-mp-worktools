@@ -27,12 +27,15 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    assert_parsed,
     build_url_to_full_index,
+    check_join_rate,
     die,
     die_index_out_of_range,
     extract_content,
     extract_sections,
     fetch_url,
+    full_corpus_body_search,
     load_lines,
     next_hint,
     normalize_doc_url,
@@ -194,6 +197,15 @@ def split_documents(lines: list[str]) -> list[dict]:
     return docs
 
 
+def _split_documents_checked(lines: list[str], path: str) -> list[dict]:
+    """``split_documents`` wrapper that treats 0 docs as a format-changed
+    failure (exit 2) instead of silently behaving like a valid empty page
+    set — see ``_common.assert_parsed``."""
+    docs = split_documents(lines)
+    assert_parsed("claude-docs full-text", len(docs), path)
+    return docs
+
+
 # ---------------------------------------------------------------------------
 # Source resolution helpers
 # ---------------------------------------------------------------------------
@@ -260,6 +272,7 @@ def cmd_fetch_index(args):
                      max_age=args.max_age)
     lines = load_lines(path)
     entries = parse_llms_index(lines)
+    assert_parsed(f"{src['label']} index", len(entries), path)
 
     full_cache = _cache_path(args.cache_dir, src["full_cache"])
 
@@ -401,7 +414,7 @@ def cmd_sections(args):
     """List sections within a specific page."""
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
                                       max_age=args.max_age)
-    docs = split_documents(lines)
+    docs = _split_documents_checked(lines, file_path)
     idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
@@ -564,7 +577,7 @@ def cmd_content(args):
     """Print content of a specific page or section."""
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
                                       max_age=args.max_age)
-    docs = split_documents(lines)
+    docs = _split_documents_checked(lines, file_path)
     idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
@@ -595,6 +608,7 @@ def cmd_search_index(args):
     path = fetch_url(src["index_url"], index_cache, user_agent=USER_AGENT,
                      max_age=args.max_age)
     entries = parse_llms_index(load_lines(path))
+    assert_parsed(f"{src['label']} index", len(entries), path)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -609,7 +623,8 @@ def cmd_search_index(args):
     if not scored:
         print("No matching pages found.")
         print()
-        print("Tip: try broader keywords or 'search' to drill into bodies")
+        print("Tip: try broader keywords, 'search' for an automatic full-text "
+              "fallback, or 'search-content \"<query>\"' to search page bodies directly")
     else:
         for score, idx, entry in scored:
             print(f"[{idx}] {entry['title']} (score: {score})")
@@ -632,7 +647,7 @@ def cmd_search_content(args):
     """Keyword search across llms-full.txt bodies with snippets."""
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
                                       max_age=args.max_age)
-    docs = split_documents(lines)
+    docs = _split_documents_checked(lines, file_path)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -718,6 +733,7 @@ def _search_one_source(args, source_key: str) -> list[dict]:
     index_path = fetch_url(src["index_url"], index_cache,
                            user_agent=USER_AGENT, max_age=args.max_age)
     entries = parse_llms_index(load_lines(index_path))
+    assert_parsed(f"{src['label']} index", len(entries), index_path)
     scored_entries = search_index_entries(entries, args.query,
                                           limit=args.index_limit)
 
@@ -726,21 +742,16 @@ def _search_one_source(args, source_key: str) -> list[dict]:
     full_path = fetch_url(src["full_url"], full_cache,
                           user_agent=USER_AGENT, max_age=args.max_age)
     lines = load_lines(full_path)
-    docs = split_documents(lines)
+    docs = _split_documents_checked(lines, full_path)
     url_to_idx = build_url_to_full_index(docs)
 
-    # Phase 2.5: pre-flight URL join sanity (warn if join rate is too low)
+    # Phase 2.5: pre-flight URL join sanity (warn / hard-fail if join rate
+    # is too low — a rate this bad usually means the upstream format
+    # changed, not that a few pages legitimately lack full text)
     if entries:
         joinable = sum(1 for e in entries
                        if normalize_doc_url(e["url"]) in url_to_idx)
-        join_rate = joinable / len(entries)
-        if join_rate < 0.8:
-            print(
-                f"WARNING: URL join rate is {join_rate:.0%} "
-                f"({joinable}/{len(entries)}) for {src['label']}. "
-                f"Some index entries cannot be joined to full text.",
-                file=sys.stderr,
-            )
+        check_join_rate(f"{src['label']} index↔full-text", joinable, len(entries))
 
     # Phase 3: drill into bodies of candidate pages
     results = []
@@ -767,12 +778,42 @@ def _search_one_source(args, source_key: str) -> list[dict]:
             "body_hits": body_hits,
         })
 
+    # Phase 3.5: append full-corpus body-only hits when title/description
+    # ranking produced no candidates, or none of the drilled candidates had
+    # any body hits — e.g. the query only matches an option/field name that
+    # lives in a page body (bug: 'search' returned "no matching pages" for
+    # terms that 'search-content' could find). Appends rather than replaces:
+    # a page that legitimately ranked on title/description keeps its row
+    # (shown as "index match only") even when its body has no hits — the
+    # fallback only adds pages the index ranking missed entirely.
+    if not any(r["body_hits"]["total_matches"] for r in results):
+        already_shown = {r["doc_idx"] for r in results}
+        fallback = full_corpus_body_search(
+            [d["body_lines"] for d in docs], args.query,
+            context_lines=args.context, max_matches_per_doc=args.max_hits,
+            max_snippet_chars=args.max_snippet_chars, min_level=2,
+            limit=args.index_limit,
+        )
+        for idx, hits in fallback:
+            if idx in already_shown:
+                continue
+            results.append({
+                "source_key": source_key,
+                "source_label": src["label"],
+                "doc_idx": idx,
+                "title": docs[idx]["title"],
+                "url": docs[idx]["source_url"],
+                "index_score": None,
+                "body_hits": hits,
+                "body_only": True,
+            })
+
     # Phase 4: rank, applying changelog deprioritise unless opted out
     def _sort_key(r):
         return (
             (0 if args.include_changelog_priority else
              1 if _is_low_priority(r["title"]) else 0),
-            -r["index_score"],
+            -(r["index_score"] or 0),
             -r["body_hits"]["total_matches"],
             r["doc_idx"],
         )
@@ -787,7 +828,8 @@ def _print_search_results(results: list[dict], *, label_source: bool) -> None:
         hits = r["body_hits"]
         shown = len(hits["results"])
         src_tag = f"[{r['source_key']}] " if label_source else ""
-        print(f"{src_tag}[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
+        score_tag = " [body-only]" if r.get("body_only") else f" (index_score: {r['index_score']})"
+        print(f"{src_tag}[{r['doc_idx']}] {r['title']}{score_tag}")
         print(f"    URL: {r['url']}")
         if hits["total_matches"]:
             mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
@@ -843,6 +885,10 @@ def cmd_search(args):
             print()
             continue
         any_results = True
+        if all(r.get("body_only") for r in results):
+            print("  (no title/description match — showing full-body search "
+                  "results instead)")
+            print()
         _print_search_results(results, label_source=(len(source_keys) > 1))
         print(f"({len(results)} pages from {SOURCES[src_key]['label']})")
         print()
@@ -850,7 +896,8 @@ def cmd_search(args):
     if not any_results:
         print("No matching pages found.")
         print()
-        print("Tip: try broader keywords or switch --source")
+        print("Tip: try broader keywords, switch --source, or run "
+              "'search-content \"<query>\"' to search page bodies directly")
         return
 
     if len(source_keys) > 1:

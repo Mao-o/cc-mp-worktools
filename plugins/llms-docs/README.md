@@ -28,7 +28,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 
 ## 前提条件
 
-- `python3` (3.10+) — `parse-*.py` は PEP 604 記法 (`list[X]` / `X | None`) を使用。`scripts/_common.py` のみ `from __future__ import annotations` で 3.8+ 互換
+- `python3` (**3.11+ 必須**) — `parse-*.py` は PEP 604 記法 (`list[X]` / `X | None`) を定義時に評価するため、3.11 未満 (例: macOS 標準の `/usr/bin/python3` = 3.9 系) では起動直後に `TypeError: unsupported operand type(s) for ...` で失敗する。marketplace 横断方針により 3.9 互換 shim は追加しない — `mise use python@3.11` 等で新しい `python3` を用意すること。`scripts/_common.py` の `from __future__ import annotations` は既存のまま (3.9 互換化が目的ではない)
 - ネットワーク到達性（初回取得時に外部 llms.txt をダウンロード）
 - `/tmp` 書込み権限（キャッシュ保存先）
 

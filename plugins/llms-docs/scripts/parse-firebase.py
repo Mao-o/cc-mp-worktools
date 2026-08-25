@@ -33,6 +33,7 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    assert_parsed,
     die,
     die_index_out_of_range,
     extract_content,
@@ -99,12 +100,16 @@ def _pages_cache_dir(cache_dir: str) -> str:
 
 
 def _load_index(cache_dir: str, *, max_age: int | None = None) -> list[dict]:
-    """Fetch (if needed) the llms.txt index and return parsed entries."""
+    """Fetch (if needed) the llms.txt index and return parsed entries.
+
+    Exits 2 (not 1) when 0 entries parse — the same "upstream format may
+    have changed" failure class as claude-docs / ai-sdk use, distinguished
+    from a legitimate 0-result search (exit 0) via ``assert_parsed``.
+    """
     idx_path = fetch_url(LLMS_TXT_URL, _index_cache_path(cache_dir),
                          user_agent=USER_AGENT, max_age=max_age)
     entries = parse_llms_index(load_lines(idx_path))
-    if not entries:
-        die(f"no entries parsed from {idx_path}. Format may have changed.")
+    assert_parsed("firebase index", len(entries), idx_path)
     return entries
 
 
@@ -280,7 +285,9 @@ def cmd_search_index(args):
     if not scored:
         print("No matching pages found.")
         print()
-        print("Tip: try broader keywords or 'search' to drill into bodies")
+        print("Tip: try broader keywords, or 'search-content \"<query>\"' "
+              "(omit --page-ref to scan every page — slow on first run) to "
+              "search page bodies directly")
     else:
         for score, idx, entry in scored:
             print(f"[{idx}] {entry['title']} (score: {score})")
@@ -403,7 +410,9 @@ def cmd_search(args):
     if not scored_entries:
         print("No matching pages found.")
         print()
-        print("Tip: try broader keywords")
+        print("Tip: try broader keywords, or 'search-content \"<query>\"' "
+              "(omit --page-ref to scan every page — slow on first run) to "
+              "search page bodies directly")
         return
 
     results = []
