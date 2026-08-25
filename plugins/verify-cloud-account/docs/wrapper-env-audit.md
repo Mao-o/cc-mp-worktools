@@ -226,6 +226,51 @@ xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参�
 | `npx` | `--package` `-c/--call` `-w/--workspace` | `-w/--workspace` を今回追加 (`npx --help` 逐語)。npm のグローバル option は開集合で列挙不能 (下記に開示) |
 | `sudo` / `nice` / `stdbuf` / `caffeinate` | 登録済み | ローカル man page で全 option 確認済み |
 
+### `((` の解釈は 1 箇所に集約する
+
+`((` が「算術評価」なのか「入れ子の subshell」なのかを**経路ごとに推測すると必ず
+食い違う**。v0.9.0 開発中に実際、`split_on_operators` は算術として保護している
+のに `_strip_leading_syntax` はただの括弧として剥がしており、`(( gh ))` が `gh` に
+正規化されて**実行されないコマンドで誤 deny**していた (bash は算術式として変数を
+評価するだけで CLI を起動しない)。
+
+判定は `_arithmetic_span()` **のみ**が行う。現在この関数を共有している経路:
+
+| 経路 | 用途 |
+|---|---|
+| `split_on_operators` | 算術内の `<<` を左シフトとして扱う (heredoc と誤認しない) |
+| `_strip_heredoc_bodies` | 同上 (セグメント内の再スキャン時) |
+| `_strip_leading_syntax` | 算術コマンドの括弧を**剥がさない** (候補にしない) |
+
+`_strip_trailing_syntax` は「開き括弧と対応しない閉じ括弧だけを落とす」規則なので、
+括弧が均衡している算術コマンドには作用しない (整合済み)。
+`$(( ... ))` は `$(` の subshell 追跡側で保護される。
+**新しく `((` を見る経路を足すときは、必ず `_arithmetic_span` を呼ぶこと。**
+
+### heredoc delimiter はシェルの 1 語として解決する
+
+`man 1 bash` Here Documents 節の逐語:「If any characters in word are quoted, the
+delimiter is the result of quote removal on word」。つまり word は**隣接する断片の
+連結**で、`E"OF"` も `"EO"F` も `EOF` に解決される。断片の先頭だけを読むと
+delimiter を読み違え、一致する行が現れないまま**後続コマンドを本文として飲み込む**
+= 検証が消える。
+
+解決できる word 形 (すべて `EOF` に解決):
+
+| 書き方 | 種別 |
+|---|---|
+| `EOF` | bare |
+| `'EOF'` | single quote |
+| `"EOF"` | double quote |
+| `\EOF` | backslash |
+| `E"OF"` / `E'OF'` / `"EO"F` / `EO'F'` | **混在 (断片の連結)** |
+| `E\OF` | 途中の backslash |
+| `$'EOF'` | ANSI-C quoting (中のエスケープ展開までは未対応 — 下記に開示) |
+
+クォートが閉じない等で解決できないときは **heredoc と見なさない**
+(本文行が候補になる = 過剰検証側)。terminator が実在するときだけ本文として
+畳む規律とあわせて、「delimiter を読み違えて検証が消える」経路を塞いでいる。
+
 ### 引数の実行経路 (シェル経由 or 直接 exec)
 
 wrapper が引数列を **`sh -c` に渡すか、直接 exec するか**で、クォートの扱いが

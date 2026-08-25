@@ -1933,6 +1933,10 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ("watch -n 5 'kubectl delete pod x'", "kubectl"),
         ("npx -c 'gh pr create --fill'", "github"),
         ("sudo -s 'gh pr create --fill'", "github"),
+        # --- 混在クォート delimiter の後ろのコマンド (PR #48 Codex R5 P1) ---
+        ('cat <<E"OF"\nbody\nEOF\ngh pr create --fill', "github"),
+        ("cat <<E'OF'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
+        ('cat <<"EO"F\nbody\nEOF\ngh pr create --fill', "github"),
     ]
 
     def setUp(self):
@@ -1994,6 +1998,12 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         "cat > x.sh <<456\naws s3 rm s3://b/x\n456",
         # 直接 exec する wrapper のクォート塊は「空白入りのコマンド名」
         "watch --exec 'gh pr create'",
+        # --- 算術コマンドは CLI を実行しない (PR #48 Codex R5 P2) ---
+        "(( gh ))",
+        "(( aws + 1 ))",
+        "((gh))",
+        "(( kubectl > 0 ))",
+        "if (( gh )); then echo x; fi",
     ]
 
     def test_listed_commands_do_not_reach_verification(self):

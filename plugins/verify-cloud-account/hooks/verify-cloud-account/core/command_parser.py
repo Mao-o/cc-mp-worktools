@@ -245,42 +245,110 @@ _WRAPPER_SHELL_EXEC = {
 _ARG_LIKE_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$")
 
 
-# heredoc の開始 (`<<word` / `<<- word` / `<<'word'` / `<<"word"` / `<<\word`)。
-# `man 1 bash` の Here Documents 節: 形式は `<<[-]word`、本文は「word のみを含む行」
-# (末尾空白なし) までで、`<<-` は入力行および delimiter 行の先頭タブを除去する。
+# --- 算術評価 `(( ... ))` の検出 (**この 1 箇所が唯一の判定**) ---------------
 #
-# bare / backslash 形の word は **1 トークン丸ごと**取る。途中で切ると
-# (例: `<<END-OF-FILE` を `END` と読む) 一致する行が現れず、後続コマンドまで
-# heredoc 本文として飲み込んでしまう = 検証が丸ごと消える。
-# 純粋な数字だけは delimiter として認めない — `(( x = 1 << 2 ))` の算術左シフトを
-# heredoc と誤認しないため (bash の word としては valid だが、数字を delimiter に
-# する heredoc は実在しない)。
-_HEREDOC_WORD = r"[^\s;&|<>()'\"`$]+"
-_HEREDOC_START_RE = re.compile(
-    r"""<<(?P<dash>-?)[ \t]*(?:
-          '(?P<sq>[^']*)'
-        | "(?P<dq>[^"]*)"
-        | \\(?P<bs>""" + _HEREDOC_WORD + r""")
-        | (?P<bare>""" + _HEREDOC_WORD + r""")
-    )""",
-    re.VERBOSE,
-)
+# `((` の意味を複数の経路がそれぞれ推測すると必ず食い違う。実際 v0.9.0 開発中に
+# `split_on_operators` は算術として保護しているのに `_strip_leading_syntax` は
+# ただの括弧として剥がしており、`(( gh ))` が `gh` に正規化されて**実行されない
+# コマンドで誤 deny**していた。算術かどうかの判断は必ずこの関数を通すこと。
+def _arithmetic_span(text: str, i: int) -> int | None:
+    """`text[i:]` が算術評価 `(( ... ))` で始まるなら、その**直後**の index を返す。
 
-
-def _heredoc_delimiter(match: re.Match) -> str | None:
-    """検出した heredoc の delimiter。delimiter として認めない形なら None。
-
-    **数値の word も正当な delimiter**。`cat <<123` 〜 `123` は bash が受理する形で、
-    弾くと本文の各行が個別の候補になり、本文に CLI 例が含まれるだけで誤 deny する。
-    算術左シフト (`1 << 2`) の除外は `split_on_operators` の**算術文脈追跡**が
-    担っているので、ここで語形から推定する必要はない (R2 で構文検出に移行した際の
-    残骸を R4 で撤去)。
+    算術でない (= `((` で始まらない) か、閉じ `))` が現れないまま尽きるなら None。
+    閉じない `((` を算術扱いすると残り全部を飲み込んでしまうため、
+    **閉じているものだけ**を算術と認める (未終端 heredoc と同じ規律)。
+    `$(( ... ))` は `$(` の subshell 追跡側で保護されるのでここでは扱わない。
     """
-    for name in ("sq", "dq", "bs", "bare"):
-        value = match.group(name)
-        if value is not None:
-            return value
+    n = len(text)
+    if i + 1 >= n or text[i] != "(" or text[i + 1] != "(":
+        return None
+    depth = 2
+    j = i + 2
+    while j < n:
+        ch = text[j]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
     return None
+
+
+# --- heredoc の開始 (`<<[-]word`) ------------------------------------------
+#
+# `man 1 bash` Here Documents 節の逐語: 形式は `<<[-]word`、本文は「word のみを
+# 含む行」まで。「If any characters in word are quoted, the delimiter is the
+# result of quote removal on word」。
+#
+# つまり word は**シェルの 1 語**であり、`E"OF"` のように隣接する断片の連結で
+# 書ける (結果は `EOF`)。断片の先頭だけを読むと delimiter を読み違え、一致する
+# 行が現れないまま**後続コマンドを本文として飲み込む** = 検証が消える。
+_HEREDOC_WORD_STOP = " \t\n;&|<>()"
+
+
+def _scan_heredoc_word(text: str, i: int) -> tuple[str | None, int]:
+    r"""`text[i:]` の先頭にあるシェル語を読み、(quote 除去後の delimiter, 次の index)。
+
+    連結された断片をすべて連結してから quote を除去する:
+      `EOF` / `'EOF'` / `"EOF"` / `\EOF` / `E"OF"` / `E'OF'` / `"EO"F` / `$'EOF'`
+    いずれも `EOF` に解決する。クォートが閉じない等で解決できないときは
+    (None, i) を返し、**heredoc と見なさない** (本文行が候補になる = 過剰検証側)。
+    """
+    n = len(text)
+    parts: list[str] = []
+    while i < n:
+        ch = text[i]
+        if ch in _HEREDOC_WORD_STOP:
+            break
+        if ch == "$" and i + 1 < n and text[i + 1] in "'\"":
+            # ANSI-C quoting `$'...'` / locale translation `$"..."`。
+            # 中身のエスケープ展開まではしない (近似) が、`$` を落とす点が要点。
+            quote = text[i + 1]
+            end = text.find(quote, i + 2)
+            if end == -1:
+                return None, i
+            parts.append(text[i + 2:end])
+            i = end + 1
+            continue
+        if ch in "'\"":
+            end = text.find(ch, i + 1)
+            if end == -1:
+                return None, i
+            parts.append(text[i + 1:end])
+            i = end + 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            parts.append(text[i + 1])
+            i += 2
+            continue
+        parts.append(ch)
+        i += 1
+    word = "".join(parts)
+    if not word:
+        return None, i
+    return word, i
+
+
+def _scan_heredoc_start(text: str, i: int) -> tuple[str, bool, int] | None:
+    """`text[i:]` が `<<[-]word` なら (delimiter, tab 除去するか, 次の index)。"""
+    n = len(text)
+    if i + 1 >= n or text[i] != "<" or text[i + 1] != "<":
+        return None
+    if i + 2 < n and text[i + 2] == "<":
+        return None  # here-string `<<<` は heredoc ではない
+    j = i + 2
+    dash = False
+    if j < n and text[j] == "-":
+        dash = True
+        j += 1
+    while j < n and text[j] in " \t":
+        j += 1
+    delim, end = _scan_heredoc_word(text, j)
+    if delim is None:
+        return None
+    return delim, dash, end
 
 
 def _find_heredoc_end(command: str, i: int, delim: str, strip_tabs: bool) -> int | None:
@@ -324,7 +392,6 @@ def split_on_operators(command: str) -> list[str]:
     in_sq = False
     in_dq = False
     paren_depth = 0
-    arith_depth = 0
     btick = False
     pending_heredocs: list[tuple[str, bool]] = []
 
@@ -369,24 +436,12 @@ def split_on_operators(command: str) -> list[str]:
             continue
 
         # 算術評価 `(( ... ))` の内側では `<<` は**左シフト演算子**であって heredoc
-        # ではない。`$(( ... ))` は上の paren_depth で保護済みだが、素の `((` は
-        # 保護されておらず、`(( x = 1 << y ))` の `y` を delimiter と誤認して
-        # 後続コマンドを本文として飲み込んでいた (= 検証が消える)。
-        # delimiter 語の形 (数値か識別子か) から推定するのをやめ、**算術文脈そのもの**
-        # を構文として検出する。閉じ `))` が存在するときだけ算術と見なし、
-        # 閉じていない `((` で残り全部を飲み込まないようにする。
-        if ch == "(" and nxt == "(" and command.find("))", i + 2) != -1:
-            arith_depth = 2
-            buf.append("((")
-            i += 2
-            continue
-        if arith_depth > 0:
-            if ch == "(":
-                arith_depth += 1
-            elif ch == ")":
-                arith_depth -= 1
-            buf.append(ch)
-            i += 1
+        # ではない。判定は `_arithmetic_span` に一本化する (この理解を経路ごとに
+        # 推測すると必ず食い違う — R5 P2 の誤 deny がその実例)。
+        arith_end = _arithmetic_span(command, i)
+        if arith_end is not None:
+            buf.append(command[i:arith_end])
+            i = arith_end
             continue
 
         if ch == "`":
@@ -410,14 +465,15 @@ def split_on_operators(command: str) -> list[str]:
                 buf.append("<<<")
                 i += 3
                 continue
-            m = _HEREDOC_START_RE.match(command, i)
-            delim = _heredoc_delimiter(m) if m else None
-            if delim is not None:
-                pending_heredocs.append((delim, m.group("dash") == "-"))
-                buf.append(command[i:m.end()])
-                i = m.end()
+            found = _scan_heredoc_start(command, i)
+            if found is not None:
+                delim, dash, end = found
+                pending_heredocs.append((delim, dash))
+                buf.append(command[i:end])
+                i = end
                 continue
-            # delimiter として解釈できない `<<` (算術左シフト等) はそのまま流す。
+            # delimiter を解決できない `<<` (未閉じクォート等) はそのまま流す
+            # = heredoc と見なさない (本文行が候補になる = 過剰検証側)。
             buf.append("<<")
             i += 2
             continue
@@ -955,11 +1011,22 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         out.append(line)
         i = end
         # この行で開かれた heredoc の delimiter を宣言順に集める。
+        # 算術評価 `(( ... ))` の内側の `<<` は左シフトなので飛ばす
+        # (判定は `_arithmetic_span` に一本化)。
         pending: list[tuple[str, bool]] = []
-        for m in _HEREDOC_START_RE.finditer(line):
-            delim = _heredoc_delimiter(m)
-            if delim is not None:
-                pending.append((delim, m.group("dash") == "-"))
+        k = 0
+        while k < len(line):
+            arith_end = _arithmetic_span(line, k)
+            if arith_end is not None:
+                k = arith_end
+                continue
+            if line[k] == "<" and k + 1 < len(line) and line[k + 1] == "<":
+                found = _scan_heredoc_start(line, k)
+                if found is not None:
+                    pending.append((found[0], found[1]))
+                    k = found[2]
+                    continue
+            k += 1
         for delim, strip_tabs in pending:
             found = _find_heredoc_end(cmd, i, delim, strip_tabs)
             if found is None:
@@ -978,6 +1045,12 @@ def _strip_leading_syntax(cmd: str) -> str:
     """
     s = cmd.lstrip()
     while s:
+        # 算術コマンド `(( ... ))` は**括弧を剥がしてはいけない**。剥がすと
+        # `(( gh ))` が `gh` になり、bash は変数を評価するだけで CLI を実行しない
+        # のに検証が走って誤 deny する (R5 P2)。判定は `split_on_operators` と
+        # 同じ `_arithmetic_span` を共有する。
+        if _arithmetic_span(s, 0) is not None:
+            break
         # `(` はコマンド名と連結できる (`(gh pr create`)。`{` は bash では空白必須
         # だが、同じ扱いで剥がしても実害が無い。
         if s[0] in "({":

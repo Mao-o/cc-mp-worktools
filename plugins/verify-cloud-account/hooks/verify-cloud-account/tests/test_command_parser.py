@@ -996,6 +996,121 @@ class TestXargsOptionClassification(unittest.TestCase):
                 self.assertEqual(strip_transparent_wrappers(cmd), "firebase deploy")
 
 
+# シェルのクォート文字 (テスト文字列内で直接書くと読みにくいので定数にする)
+Q = chr(39)    # '
+DQ = chr(34)   # "
+BS = chr(92)   # \
+
+
+class TestHeredocDelimiterIsAShellWord(unittest.TestCase):
+    r"""delimiter は**シェルの 1 語**として解析し、連結後に quote 除去する。
+
+    `man 1 bash` Here Documents 節:「If any characters in word are quoted, the
+    delimiter is the result of quote removal on word」。断片の先頭だけを読むと
+    (`E"OF"` を `E` と読む等) 一致する行が現れず、**後続コマンドを本文として
+    飲み込んで検証が消える**。
+    """
+
+    # (word の書き方, quote 除去後の delimiter)
+    FORMS = [
+        ("EOF", "EOF"),
+        (Q + "EOF" + Q, "EOF"),
+        (DQ + "EOF" + DQ, "EOF"),
+        (BS + "EOF", "EOF"),
+        ("E" + DQ + "OF" + DQ, "EOF"),
+        ("E" + Q + "OF" + Q, "EOF"),
+        (DQ + "EO" + DQ + "F", "EOF"),
+        ("E" + BS + "OF", "EOF"),
+        ("$" + Q + "EOF" + Q, "EOF"),
+        ("EO" + Q + "F" + Q, "EOF"),
+    ]
+
+    def test_all_word_forms_resolve_to_the_same_delimiter(self):
+        for word, delim in self.FORMS:
+            cmd = f"cat <<{word}\nbody\n{delim}\ngh pr create\nE"
+            with self.subTest(word=word):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                # 本文は畳まれ、terminator の**後ろ**のコマンドは候補として残る。
+                self.assertIn("gh pr create", cands, cmd)
+                self.assertNotIn("body", cands, cmd)
+
+    def test_dash_form_with_mixed_quotes(self):
+        word = "E" + DQ + "OF" + DQ
+        cmd = f"cat <<-{word}\n\tbody\n\tEOF\ngh pr create"
+        cands = [c for c, _e in extract_candidates(cmd)]
+        self.assertEqual(cands, ["cat <<-" + word, "gh pr create"])
+
+    def test_unresolvable_word_is_not_treated_as_heredoc(self):
+        """クォートが閉じず delimiter を解決できないときは heredoc と見なさない。
+
+        本文の吸収 (= 検証の消失) を起こさないことが要点。なお入力自体は bash でも
+        未完了で、未終端クォートは行を跨いで続くため、後続行が独立したコマンドに
+        なるわけではない (そちらは heredoc とは別の既存規則)。
+        """
+        self.assertIsNone(
+            command_parser._scan_heredoc_start("cat <<E" + DQ + "OF", 4)
+        )
+
+    def test_resolvable_words_are_recognized(self):
+        for word, delim in self.FORMS:
+            with self.subTest(word=word):
+                found = command_parser._scan_heredoc_start(f"cat <<{word}", 4)
+                self.assertIsNotNone(found, word)
+                self.assertEqual(found[0], delim, word)
+
+
+class TestArithmeticCommandIsNotACandidate(unittest.TestCase):
+    """算術コマンド `(( ... ))` は CLI を実行しないので候補にしない。
+
+    bash は中身を**算術式として評価**するだけなので、`(( gh ))` は `gh` という
+    シェル変数を読むだけで gh CLI は起動しない。括弧を剥がして `gh` に正規化すると
+    実行されないコマンドで誤 deny する (R5 P2)。
+    `((` の判定は `split_on_operators` と `_strip_leading_syntax` で
+    **同じ `_arithmetic_span` を共有**する — 経路ごとに推測すると食い違う。
+    """
+
+    ARITHMETIC = [
+        "(( gh ))",
+        "(( aws + 1 ))",
+        "((gh))",
+        "(( x = 1 ))",
+        "(( kubectl > 0 ))",
+        "(( firebase++ ))",
+        "(( x = 1 << 2 ))",
+    ]
+
+    def test_arithmetic_commands_do_not_expose_a_cli_candidate(self):
+        for cmd in self.ARITHMETIC:
+            with self.subTest(cmd=cmd):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertEqual(len(cands), 1, cmd)
+                # 括弧が保たれている = 行頭 anchored な PATTERNS に一致しない
+                self.assertTrue(cands[0].startswith("(("), cands[0])
+
+    def test_reserved_word_prefix_still_reaches_the_arithmetic_form(self):
+        cands = [c for c, _e in extract_candidates("if (( gh )); then echo x; fi")]
+        self.assertIn("(( gh ))", cands)
+
+    def test_subshell_grouping_is_still_stripped(self):
+        # `( ... )` の subshell は**実行される**のでこれまでどおり候補にする。
+        for cmd, want in (
+            ("( gh pr create )", "gh pr create"),
+            ("(gh pr create --fill)", "gh pr create --fill"),
+            ("( (gh pr create) )", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIn(want, [c for c, _e in extract_candidates(cmd)])
+
+    def test_unclosed_double_paren_is_not_arithmetic(self):
+        # 閉じない `((` を算術扱いすると残りを飲み込むので、閉じているものだけ。
+        cands = [c for c, _e in extract_candidates("((\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+    def test_dollar_arithmetic_stays_consistent(self):
+        cands = [c for c, _e in extract_candidates("$(( 1 << 2 ))\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+
 class TestTimeoutDurationSyntax(unittest.TestCase):
     """GNU timeout の DURATION は strtod ベースなので 10 進整数だけではない。
 
