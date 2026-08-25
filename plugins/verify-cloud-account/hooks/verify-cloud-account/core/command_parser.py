@@ -175,6 +175,29 @@ _WRAPPER_FLAGS_OPTIONAL_VALUE = {
     "xargs": {"--replace", "--eof", "--max-lines"},
 }
 
+# 「表示して終了する」終端 option。これが付いた wrapper は**後続コマンドを実行しない**
+# ため、剥がしてはいけない (剥がすと `watch --help gh pr create` が `gh pr create` に
+# なり、実行されないコマンドで誤 deny する = 離脱要因そのもの)。
+#
+# 実機確認 (開発機にインストール済みのものを `--help` / `--version` で実行):
+#   nice(1)   : `nice: -help: invalid nice value` (BSD。エラー終了し utility を実行しない)
+#   stdbuf(1) : `illegal option -- -` + usage (同上)
+#   xargs(1)  : `unrecognized option '--help'` + usage (同上)
+#   npx       : help を表示して終了
+#   sudo(8)   : man に `-h, --help` / `-V, --version` (第 1 synopsis 形が終端形)
+# GNU 版は「help を表示して終了」、BSD 版は「不正 option でエラー終了」と挙動は違うが、
+# **どちらも後続コマンドを実行しない**点は同じ。timeout / watch / setsid は開発機に
+# 無く実機確認できないが、同じ POSIX/GNU 慣行に従う (報告に明記)。
+#
+# 短縮形 (`-h` / `-v` / `-V`) は**既定では終端扱いしない**。`sudo -h host` のように
+# 値を取る別 option と衝突し、終端と誤判定すると検証が消えるため (過剰検証側に倒す)。
+# 曖昧さの無い `sudo -V` だけ個別に登録する。
+_TERMINATING_FLAGS = frozenset({"--help", "--version"})
+_WRAPPER_EXTRA_TERMINATING = {
+    "sudo": frozenset({"-V"}),
+}
+
+
 # 「コマンド名ではありえない」引数トークン: 純粋な数値 (+ 任意の時間単位)。
 # 未登録の値付き flag があっても、その値が数値ならここで読み飛ばしてコマンド本体に
 # 到達できる。実行可能ファイル名が純粋な数値になることは実質無いので、読み飛ばしが
@@ -260,6 +283,7 @@ def split_on_operators(command: str) -> list[str]:
     in_sq = False
     in_dq = False
     paren_depth = 0
+    arith_depth = 0
     btick = False
     pending_heredocs: list[tuple[str, bool]] = []
 
@@ -299,6 +323,27 @@ def split_on_operators(command: str) -> list[str]:
                 paren_depth += 1
             elif ch == ")":
                 paren_depth -= 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        # 算術評価 `(( ... ))` の内側では `<<` は**左シフト演算子**であって heredoc
+        # ではない。`$(( ... ))` は上の paren_depth で保護済みだが、素の `((` は
+        # 保護されておらず、`(( x = 1 << y ))` の `y` を delimiter と誤認して
+        # 後続コマンドを本文として飲み込んでいた (= 検証が消える)。
+        # delimiter 語の形 (数値か識別子か) から推定するのをやめ、**算術文脈そのもの**
+        # を構文として検出する。閉じ `))` が存在するときだけ算術と見なし、
+        # 閉じていない `((` で残り全部を飲み込まないようにする。
+        if ch == "(" and nxt == "(" and command.find("))", i + 2) != -1:
+            arith_depth = 2
+            buf.append("((")
+            i += 2
+            continue
+        if arith_depth > 0:
+            if ch == "(":
+                arith_depth += 1
+            elif ch == ")":
+                arith_depth -= 1
             buf.append(ch)
             i += 1
             continue
@@ -562,6 +607,36 @@ def _drop_timeout_duration(rest: str) -> str | None:
     return rest[m.end():].lstrip()
 
 
+def _wrapper_terminates(rest: str, wrapper: str) -> bool:
+    """wrapper の flag 領域に「表示して終了する」option があれば True。
+
+    True のとき wrapper を剥がさないので、セグメントは不透明なまま残り検証されない
+    (= 実行されないコマンドで deny しない)。`--` 以降と非 flag トークン以降は
+    後続コマンドの引数なので見ない。`watch --help; gh pr create` のように**別
+    セグメント**として続くコマンドは、セグメント分割が先に走るためここの影響を
+    受けず従来どおり検証される。
+    """
+    terminating = _TERMINATING_FLAGS | _WRAPPER_EXTRA_TERMINATING.get(wrapper, frozenset())
+    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+    s = rest.lstrip()
+    while s:
+        m = re.match(r"^(\S+)", s)
+        if not m:
+            break
+        tok = m.group(1)
+        if tok == "--" or tok == "-" or not tok.startswith("-"):
+            break
+        name = tok.split("=", 1)[0]
+        if name in terminating:
+            return True
+        s = s[m.end():].lstrip()
+        if "=" not in tok and tok in flags_with_value:
+            m2 = re.match(r"^(\S+)", s)
+            if m2:
+                s = s[m2.end():].lstrip()
+    return False
+
+
 def _command_is_query(rest: str) -> bool:
     """`command -v` / `command -V` (存在確認クエリ) なら True。
 
@@ -610,6 +685,9 @@ def _strip_one_wrapper(cmd: str) -> str | None:
     if t0 in _WRAPPERS_SINGLE:
         rest = _drop_tokens(cmd, 1)
         if t0 == "command" and _command_is_query(rest):
+            return None
+        # `--help` / `--version` 付きは後続を実行しないので剥がさない。
+        if _wrapper_terminates(rest, t0):
             return None
         # timeout は位置引数 DURATION を自前で消費するので、汎用の
         # arg-like 読み飛ばしを無効にする (有効だと DURATION まで食われ、

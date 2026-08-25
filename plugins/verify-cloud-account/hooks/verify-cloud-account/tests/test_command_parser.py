@@ -884,15 +884,92 @@ class TestHeredocProtection(unittest.TestCase):
                 self.assertEqual(cands[1], "gh pr create --fill")
                 self.assertNotIn("body", cands[0])
 
-    def test_arithmetic_shift_with_identifier_operand(self):
-        # `1 << 2` (数字) だけでなく `1 << y` (識別子) も heredoc ではない。
-        # 識別子だけを弾く方式では防げないため、terminator の実在確認で担保する。
-        for cmd in ("(( x = 1 << y ))\ngh pr create", "(( x = 1 << 2 ))\ngh pr create"):
-            with self.subTest(cmd=cmd):
-                self.assertIn(
-                    "gh pr create", [c for c, _e in extract_candidates(cmd)]
-                )
+    def test_arithmetic_context_is_detected_syntactically(self):
+        r"""算術文脈そのものを構文で検出する (delimiter 語の形から推定しない)。
 
+        `(( ... ))` の内側の `<<` は左シフト演算子であって heredoc ではない。
+        「数値なら heredoc ではない」というガードでは `1 << y` のような識別子
+        オペランドを救えず、後方に `y` 行があると後続コマンドを本文として
+        飲み込んで**検証が消える** (PR #48 Codex R2 P1)。オペランドの形を
+        場当たりに足していく方向では別の形 (`(a+b)` / `$n` / `0x10`) で必ず抜ける。
+        """
+        for operand in ("y", "2", "(a+b)", "$n", "0x10", "a_b"):
+            cmd = f"(( x = 1 << {operand} ))\ngh pr create\n{operand}"
+            with self.subTest(operand=operand):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertIn("gh pr create", cands, cmd)
+
+    def test_dollar_arithmetic_is_also_protected(self):
+        cands = [c for c, _e in extract_candidates("$(( 1 << y ))\ngh pr create\ny")]
+        self.assertIn("gh pr create", cands)
+
+    def test_unclosed_arithmetic_does_not_swallow_the_rest(self):
+        # 閉じ `))` が無ければ算術と見なさない (未終端 heredoc と同じ規律)。
+        cands = [c for c, _e in extract_candidates("((\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+    def test_real_heredoc_still_works_after_arithmetic_handling(self):
+        cands = [c for c, _e in extract_candidates("cat <<EOF\nbody\nEOF\ngh pr create")]
+        self.assertEqual(cands, ["cat <<EOF", "gh pr create"])
+
+
+class TestTerminatingWrapperOptions(unittest.TestCase):
+    """`--help` / `--version` 付きの wrapper は後続コマンドを実行しない。
+
+    剥がすと `watch --help gh pr create` が `gh pr create` になり、**実行されない
+    コマンドで誤 deny** する (PR #48 Codex R2 P2)。誤 deny は本 plugin が最も
+    避けたい離脱要因。
+    """
+
+    WRAPPERS = (
+        "watch", "nice", "stdbuf", "setsid", "xargs", "timeout",
+        "sudo", "npx", "caffeinate", "time", "nohup",
+    )
+
+    def test_terminating_options_keep_the_segment_opaque(self):
+        for w in self.WRAPPERS:
+            for f in ("--help", "--version"):
+                cmd = f"{w} {f} gh pr create"
+                with self.subTest(cmd=cmd):
+                    # 剥がさない = セグメントがそのまま残る (service に match しない)
+                    self.assertEqual(strip_transparent_wrappers(cmd), cmd)
+
+    def test_sudo_short_version_flag(self):
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -V gh pr create"), "sudo -V gh pr create"
+        )
+
+    def test_ambiguous_short_flags_are_not_treated_as_terminating(self):
+        # `sudo -h host` は値を取る option。終端と誤判定すると検証が消えるので
+        # 短縮形は既定で終端扱いしない (過剰検証側)。
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -h myhost gh pr create"), "gh pr create"
+        )
+
+    def test_following_segments_are_still_verified(self):
+        # 終端 option の効果は「その wrapper が包む引数列」に限定する。
+        # 別コマンドとして続く形までスキップするとバイパスになる。
+        for cmd, tail in (
+            ("watch --help; gh pr create", "gh pr create"),
+            ("nice --help && aws s3 rm x", "aws s3 rm x"),
+            ("xargs --help | gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertIn(tail, cands)
+
+    def test_normal_forms_are_unaffected(self):
+        for cmd, want in (
+            ("watch -n 5 gh pr create", "gh pr create"),
+            ("nice -n 10 gh pr create", "gh pr create"),
+            ("xargs -I{} gh pr close {}", "gh pr close {}"),
+            ("timeout 30 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+
+class TestHeredocBodyExclusion(unittest.TestCase):
     def test_body_is_dropped_from_the_normalized_candidate(self):
         """本文はデータなので候補文字列に残さない (option 走査に食わせない)。"""
         cmd = "cat > deploy.sh <<'EOF'\n--profile prod\nEOF"

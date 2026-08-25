@@ -172,6 +172,39 @@ env 挙動とは**別軸**の監査。「その flag が次の token を消費�
 ([ref] GNU findutils: `--replace[=R]` / `--eof[=eof-str]` / `--max-lines[=max-lines]`)。
 短縮の `-i[R]` / `-l[N]` は引っ付け形でのみ値を取るので bool 扱いで正しい。
 
+### 終端 option (表示して終了する option)
+
+`--help` / `--version` 付きで呼ばれた wrapper は**後続コマンドを実行しない**。
+剥がすと「実行されないコマンド」で検証が走り、誤 deny する
+(`watch --help gh pr create` → `gh pr create` として deny)。誤 deny は本 plugin が
+最も避けたい離脱要因なので、終端 option を検出したら wrapper を剥がさない。
+
+| wrapper | 終端扱い | 出所 |
+|---|---|---|
+| `nice` | `--help` `--version` | **[local 実機]** `nice --help` → `nice: -help: invalid nice value` (BSD。エラー終了し utility を実行しない) |
+| `stdbuf` | `--help` `--version` | **[local 実機]** `stdbuf --help` → `illegal option -- -` + usage |
+| `xargs` | `--help` `--version` | **[local 実機]** `xargs --help` → `unrecognized option '--help'` + usage |
+| `npx` | `--help` `--version` | **[local 実機]** `npx --help` → help を表示して終了 |
+| `sudo` | `--help` `--version` `-V` | **[local man]** sudo(8) `-h, --help` / `-V, --version`、第 1 synopsis 形 `sudo -h \| -K \| -k \| -V` |
+| `caffeinate` | `--help` `--version` | [local man] caffeinate(8) に記載は無いが、未知 option は getopt がエラーにし utility を実行しない |
+| `timeout` / `watch` / `setsid` | `--help` `--version` | [ref] 開発機に無く実機確認できない。GNU coreutils / procps-ng / util-linux はいずれも `--help` を "display this help and exit" と記載 |
+| `time` / `nohup` / `command` / `exec` | `--help` `--version` | [ref] BSD 版は未知 option としてエラー、GNU/builtin 版は help 表示。**どちらも後続を実行しない** |
+
+**GNU 版は「help を表示して終了」、BSD 版は「不正 option でエラー終了」と挙動は
+違うが、後続コマンドを実行しない点は同じ**。開発機で実機確認できた 4 例
+(nice / stdbuf / xargs / npx) がいずれもこの結論だったため、同じ慣行に従う
+残りにも適用する。
+
+**短縮形 (`-h` / `-v` / `-V`) は既定で終端扱いしない**。`sudo -h host` のように
+値を取る別 option と衝突し、終端と誤判定すると**検証が消える**ため、過剰検証側に
+倒す。曖昧さの無い `sudo -V` だけ個別に登録した。この結果 `sudo -h gh pr create`
+(help のつもりの形) は `-h` の値として `gh` を消費し検証されないが、これは
+v0.8.0 と同じ挙動で新たな退行ではない。
+
+**効果は「その wrapper が包む引数列」に限定**する。`watch --help; gh pr create` の
+ように別コマンドとして続く形は、セグメント分割が先に走るため従来どおり検証される
+(ここを取り違えるとバイパスになる)。
+
 ### 裏が取れず「消費しない」に倒した flag
 
 GNU 専用で開発機の man page に無く、値が**非数値**のもの:

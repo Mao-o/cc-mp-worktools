@@ -1902,6 +1902,18 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ("xargs -I {} gh pr close {}", "github"),
         ("nice -n 10 gh pr create", "github"),
         ("caffeinate -t 60 gh pr create", "github"),
+        # --- 算術文脈の内側の `<<` は左シフト (PR #48 Codex R2 P1) ---
+        # delimiter 語の形から推定していた頃は、後方に同名の行があると
+        # 後続コマンドを heredoc 本文として飲み込んで検証が消えていた。
+        ("(( x = 1 << y ))\ngh pr create --fill\ny", "github"),
+        ("(( x = 1 << 2 ))\ngh pr create --fill\n2", "github"),
+        ("(( x = 1 << (a+b) ))\ngh pr create --fill\na+b", "github"),
+        ("$(( 1 << y ))\ngh pr create --fill\ny", "github"),
+        # 終端 option の効果は wrapper が包む引数列に限る (別セグメントは検証する)
+        ("watch --help; gh pr create --fill", "github"),
+        ("nice --help && gh pr create --fill", "github"),
+        # 値を取る短縮形は終端扱いしない (過剰検証側)
+        ("sudo -h myhost gh pr create", "github"),
     ]
 
     def setUp(self):
@@ -1945,6 +1957,18 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         "aws sts get-caller-identity",
         "npx firebase-tools@13.31.0 login",
         "npx firebase-tools@13 use",
+        # --- 終端 option 付きの wrapper は後続を実行しない (PR #48 Codex R2 P2) ---
+        "watch --help gh pr create",
+        "watch --version gh pr create",
+        "nice --help gh pr create",
+        "stdbuf --help gh pr create",
+        "setsid --help gh pr create",
+        "xargs --help gh pr create",
+        "timeout --help gh pr create",
+        "sudo --help gh pr create",
+        "sudo -V gh pr create",
+        "npx --help gh pr create",
+        "caffeinate --help gh pr create",
     ]
 
     def test_listed_commands_do_not_reach_verification(self):
