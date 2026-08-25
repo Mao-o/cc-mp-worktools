@@ -173,7 +173,7 @@ class TestBashDeny(unittest.TestCase):
 
 class TestEditDeny(unittest.TestCase):
     def test_minimal_no_keys(self):
-        msg = M.edit_deny("Edit", ".env", new_keys=None)
+        msg = M.edit_deny("Edit", ".env", new_keys=None, kind="new")
         self.assertIn("Edit", msg)
         self.assertIn(".env", msg)
         self.assertIn("`!.env`", msg)
@@ -185,6 +185,7 @@ class TestEditDeny(unittest.TestCase):
             "Write",
             ".env",
             new_keys=["DATABASE_URL", "JWT_SECRET", "DEBUG"],
+            kind="new",
         )
         self.assertIn("Write", msg)
         # キー名がそれぞれ別行で出る
@@ -198,7 +199,8 @@ class TestEditDeny(unittest.TestCase):
 
     def test_with_extra_note_no_keys(self):
         msg = M.edit_deny(
-            "Edit", ".env", new_keys=None, extra_note="NOTE: symlink でした。"
+            "Edit", ".env", new_keys=None, extra_note="NOTE: symlink でした。",
+            kind="symlink",
         )
         self.assertIn("symlink", msg)
         self.assertIn(".env", msg)
@@ -209,18 +211,30 @@ class TestEditDeny(unittest.TestCase):
             ".env",
             new_keys=["FOO"],
             extra_note="NOTE: 特殊ファイルでした。",
+            kind="special",
         )
         self.assertIn("FOO=", msg)
         self.assertIn("特殊ファイル", msg)
 
     def test_truncation_marker_for_many_keys(self):
         keys = [f"KEY_{i}" for i in range(40)]
-        msg = M.edit_deny("Edit", ".env", new_keys=keys, max_suggested_keys=30)
+        msg = M.edit_deny(
+            "Edit", ".env", new_keys=keys, kind="new", max_suggested_keys=30,
+        )
         self.assertIn("KEY_0=", msg)
         self.assertIn("KEY_29=", msg)
         # 30 個以上は切り詰め
         self.assertNotIn("KEY_30=", msg)
         self.assertIn("(10 more)", msg)
+
+    def test_kind_is_required_keyword(self):
+        """E6: ``kind`` を省略すると TypeError (誤った文面の silent 選択を防ぐ)。
+
+        既定値を置くと「新規作成しようとしたため block」という **事実と違う説明**
+        を返しうるため、呼び忘れを実行時に落とす設計にしている。
+        """
+        with self.assertRaises(TypeError):
+            M.edit_deny("Edit", ".env")  # type: ignore[call-arg]
 
 
 class TestPolicyUnavailable(unittest.TestCase):
@@ -408,13 +422,13 @@ class TestDenyPlainText(unittest.TestCase):
         self.assertIn("`!.env`", msg)
 
     def test_edit_deny_no_envelope(self):
-        msg = M.edit_deny("Edit", ".env")
+        msg = M.edit_deny("Edit", ".env", kind="new")
         self.assertNotIn("<GUARDRAIL_DENY", msg)
         self.assertIn("basename: .env", msg)
         self.assertIn("suggestion:", msg)
 
     def test_edit_deny_with_keys_no_envelope(self):
-        msg = M.edit_deny("Write", ".env", new_keys=["A", "B"])
+        msg = M.edit_deny("Write", ".env", new_keys=["A", "B"], kind="new")
         self.assertNotIn("<GUARDRAIL_DENY", msg)
         self.assertIn("suggested_keys:", msg)
         self.assertIn("  A=", msg)
@@ -426,6 +440,7 @@ class TestDenyPlainText(unittest.TestCase):
         msg = M.edit_deny(
             "Edit", ".env",
             extra_note="NOTE: symlink 経由だったため",
+            kind="symlink",
         )
         self.assertNotIn("<GUARDRAIL_DENY", msg)
         self.assertIn("extra_note:", msg)
@@ -457,9 +472,11 @@ class TestVocabularyConsistency(unittest.TestCase):
         # bash_deny
         msg = M.bash_deny(first_token="cat", operand=".env")
         self.assertIn("block しました", msg)
-        # edit_deny
-        msg2 = M.edit_deny("Write", ".env")
-        self.assertIn("block しました", msg2)
+        # edit_deny — E6 の 4 分岐すべてが語彙ルールを守ること
+        for kind in ("new", "overwrite", "symlink", "special"):
+            with self.subTest(kind=kind):
+                msg2 = M.edit_deny("Write", ".env", kind=kind)
+                self.assertIn("block しました", msg2)
         # policy_unavailable(deny)
         msg3 = M.policy_unavailable("deny")
         self.assertIn("block しました", msg3)
