@@ -139,7 +139,7 @@ class TestFirebaseActiveAccount(unittest.TestCase):
 
     def test_cli_wins_over_firebaserc(self):
         """`firebase use` の出力 (切替後の値) を .firebaserc の default より優先する
-        (bd_092a232e-629.1)。"""
+        (内部バックログ)。"""
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / ".firebaserc").write_text(
                 json.dumps({"projects": {"default": "proj-dev", "prod": "proj-prod"}}),

@@ -107,13 +107,27 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 ### 発火するコマンド
 
-各サービスの CLI が含まれるコマンドはすべて発火する。以下のチェーン・ラッパは
-自動で解析・剥がしたうえで CLI 部分だけを照合する:
+コマンドを**セグメントに分解して先頭が対象 CLI になる形**を照合する。以下の
+チェーン・構文・ラッパは自動で解析・剥がしたうえで CLI 部分だけを照合する:
 
 - **コマンドチェーン**: `&&` / `||` / `;` / `|` / 改行 (quote / $() / backtick 内は保護)
+- **heredoc** (v0.9.0): `cat > x.sh <<'EOF'` 〜 `EOF` の**本文は解析しない**。
+  本文に書かれた CLI 例は実行されないため (`<<-` のタブ除去、quote 付き
+  delimiter、1 行に複数 heredoc、here-string `<<<` の非対象化に対応)。
+  delimiter 行の次のコマンドは従来どおり別セグメントとして検証する
+- **シェル構文プレフィックス** (v0.9.0): `(` / `{` / `!` / 予約語
+  (`if` `then` `elif` `else` `do` `while` `until`) / コマンド本体前の
+  リダイレクト (`</dev/null gh ...` / `2>/dev/null gh ...`)、および末尾の
+  `)` `;` `}` `&`。`(gh pr create --fill)` や
+  `for f in *; do gh release upload ...; done` も検証対象になる
+- **コマンド名のパス / エスケープ** (v0.9.0): `/opt/homebrew/bin/gh` /
+  `./node_modules/.bin/firebase` / `\gh` は basename に正規化して照合する
 - **先頭の環境変数割当**: `FOO=bar gh ...`
 - **透過的 wrapper**: `sudo` / `time` / `nohup` / `command` / `builtin` / `exec` /
   `env [KEY=val...]` (ただし `env -i` / `env --` など option 付きは不透明扱い)
+- **実行ラッパ** (v0.9.0): `timeout` (先頭の DURATION 引数も消費) / `nice` /
+  `stdbuf` / `setsid` / `caffeinate` / `watch` / `xargs`。
+  `timeout 30 gh pr create` や `... | xargs -I{} gh pr close {}` の後段も検証する
 - **ランタイム / パッケージマネージャ**: `npx` / `pnpm exec` / `pnpm dlx` /
   `mise exec --` / `bun x`
 - 行頭インライン env の伝播は wrapper の実行時 env 挙動に従う
@@ -128,8 +142,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
   self-remediation を判定する (deny 文面の検出コマンドには元の形を表示)。各 service
   が値を取る option / 取らない option を宣言し (`GLOBAL_OPTIONS_WITH_VALUE` /
   `GLOBAL_FLAGS`)、未知の option が先頭にある場合は剥がさず通常検証する。
-  `--profile` / `--project` / `--context` の値を検証に反映するのは別項
-  (flag override 対応) の範囲
+  `--profile` / `--project` / `--context` の**値**をどう検証に使うかは
+  [コンテキスト指定 flag の反映](#コンテキスト指定-flag-の反映-v090) を参照
 
 | サービス | マッチ対象 | 期待値の取得 |
 |---|---|---|
@@ -197,6 +211,11 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
 - **情報系コマンド** (各 CLI の `--version` / `--help` / `version` / `help`) —
   アカウント検証不要。診断で打つ `command aws --version` 等が誤って検証対象に
   なり deny されるのを防ぐ (v0.7.0)
+- **存在確認** (v0.9.0): `command -v gh` / `command -V aws` / 連結形 `command -pv aws`。
+  `command` は `-v` / `-V` 付きだと**後続 CLI を実行せずパスを表示するだけ**
+  (`man 1 bash`) なので、透過 wrapper として剥がさず素通しする。剥がしていた頃は
+  インストール確認の定型句だけでアカウント検証が走って deny されていた。
+  `command gh ...` / `command -p gh ...` / `command -- gh ...` は実行するので従来どおり検証
 
 同一コマンドチェーン内で readonly と非 readonly が混在する場合
 (例: `gh auth status && gh pr list`) は非 readonly セグメントについて検証が走る。
@@ -228,6 +247,38 @@ Account ID の `sso_account_id` / `role_arn` を持つ profile があれば `<pr
 具体名にする (profile 名以外の内容は文面に出さない)。`export AWS_PROFILE=...` は
 Claude Code の Bash では次の呼出に持ち越されず、hook (Claude 本体の env を継承)
 の検証にも反映されないため、コマンドとしては案内しない (v0.8.0)。
+
+## コンテキスト指定 flag の反映 (v0.9.0)
+
+`aws --profile other s3 rm ...` のように、**コマンド側で照合先を切り替える
+flag** は、その値を検証に反映する。従来は hook の既定コンテキスト
+(既定 profile / アクティブ project / current-context) だけを見ていたため、
+「検証は既定 / 実行は other」という誤 allow になっていた。
+
+| サービス | 見る option | 検証への反映 |
+|---|---|---|
+| AWS | `--profile` | 検証コマンドにも `--profile` を付けて実行 (CLI の資格情報解決順を実行時と揃える) |
+| GCP | `--project` / `--account` | 値を期待値と直接照合 (アクティブ設定は見ない) |
+| GCP | `--configuration` | 現在値の取得コマンドに引き渡す |
+| Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則) |
+| Kubernetes | `--context` | 値を期待値と直接照合 |
+| Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
+
+- 記法は `--opt value` / `--opt=value` / 短縮の分離形 (`-P prod`) / 連結形
+  (`-Pprod`) / `-P=prod` を同じ規則で扱う。`--` 以降は後続コマンドの引数なので
+  見ない (`kubectl exec pod -- cmd --context x` の `--context` は採用しない)
+- 同じ option が複数あれば**最後が有効** (各 CLI の実装と同じ)
+- サブコマンドの**後ろ**に書かれた形 (`aws s3 ls --profile prod`) も拾う
+- **GCP は key ごとに独立**して上書きする。`gcloud --project ok run deploy` でも
+  `account` の期待値があれば account はアクティブ値と照合する
+- 値が変数展開などで静的に解決できない場合 (`--profile $PROF`) は、従来どおり
+  既定コンテキストで照合する
+- 1 コマンド内で異なる指定が混ざる形
+  (`aws --profile a s3 rm x && aws --profile b s3 rm y`) は**別々に検証**する。
+  成功キャッシュも指定ごとに分かれる
+- **`gh` は対象外**。`gh auth <sub> --hostname <host>` / `--user <user>` は
+  「どのアカウントで実行するか」ではなく**操作対象**の指定なので、照合先は常に
+  アクティブアカウント (後述の既知の制限を参照)
 
 ## インライン環境変数の伝播 (v0.7.0)
 
@@ -438,14 +489,26 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
   major update で壊れる可能性あり
 - `bash -c '...'` / `eval` 内に埋め込まれた CLI 呼び出しは静的解析できず検証
   対象外 (透過 wrapper のリストに `bash` は含めていない)
-- `kubectl --context foo ...` の `--context` オプション指定による実行時
-  コンテキスト override は検出しない (現在のデフォルトコンテキストだけ照合)
-- 同様に、`gh auth <sub> --hostname <host>` / `--user <user>` のように**操作対象の
-  host / アカウントをオプションで指定する形**も照合しない。検証はあくまで現在の
-  アクティブアカウントに対して行うため、アクティブが期待値なら別 host / 別ユーザー
+- `gh auth <sub> --hostname <host>` / `--user <user>` のように**操作対象の
+  host / アカウントをオプションで指定する形**は照合しない。これらは「どの
+  アカウントで実行するか」ではなく操作の**対象**指定なので、検証はあくまで現在の
+  アクティブアカウントに対して行う。アクティブが期待値なら別 host / 別ユーザー
   向けの操作 (例: `gh auth refresh --hostname ghe.example.com`) は allow される
   (str 形式の期待値で複数 host にログインしている場合は dict 形式にすると
   host ごとに照合できる)
+- **`aws-vault exec prod -- aws ...` のような別コマンド経由の実行は検証対象外**
+  (v0.9.0)。`aws-vault` は `aws` とは別のコマンドなので発火しない。従来は
+  `^aws\b` がハイフンを語境界として拾い、hook の**既定 profile**で `sts` を
+  実行していた — 未設定なら永久 deny、既定が期待値なら実行 profile が prod でも
+  allow という二重の誤りだったため、いったん対象外に倒した。`aws-vault exec <profile> --`
+  を「`AWS_PROFILE` を合成する条件付き wrapper」として扱う対応は今後の課題
+- **コンテキスト指定 flag の誤検出**: 値を取る未知の option の値がたまたま
+  `--profile` 等に見える形 (`aws s3 cp --exclude --profile x`) では、その値を
+  コンテキスト指定と誤読しうる。全サブコマンドの option 表を持てないため
+  避けられない。誤読しても照合先が変わるだけで、検証自体はスキップされない
+- heredoc 本文は解析しない。`cat <<EOF && gh pr create` のように**同じ行で**
+  heredoc と別コマンドを繋いだ場合、本文が後続セグメントの文字列に含まれる
+  (検証は正しく走るが deny 文面の「検出コマンド」表示に本文が混ざる)
 - subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外
 - 期待値以外への切替と write を**同一コマンド**で実行した場合
   (`gh auth switch --user other && gh pr create`) は、実行前の状態で検証されるため

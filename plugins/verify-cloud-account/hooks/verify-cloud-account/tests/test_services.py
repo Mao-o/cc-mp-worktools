@@ -237,7 +237,7 @@ class TestFirebase(unittest.TestCase):
             ):
                 self.assertIsNone(firebase.verify("my-project", d))
 
-    # --- 解決順 (bd_092a232e-629.1): firebase use → CLI 不可時のみ .firebaserc ---
+    # --- 解決順 (内部バックログ): firebase use → CLI 不可時のみ .firebaserc ---
 
     @staticmethod
     def _write_firebaserc(d: str, projects: dict) -> None:
@@ -563,7 +563,7 @@ class TestAws(unittest.TestCase):
         err = aws.verify({"unsupported": "dict"}, "/p")
         self.assertIn("文字列", err)
 
-    # --- bd_092a232e-629.6: 切替案内は export ではなく行頭インライン + sso login ---
+    # --- 内部バックログ: 切替案内は export ではなく行頭インライン + sso login ---
 
     _NO_CONFIG = {"AWS_CONFIG_FILE": "/nonexistent/aws/config"}
 

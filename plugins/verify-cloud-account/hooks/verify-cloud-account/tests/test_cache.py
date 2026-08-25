@@ -83,7 +83,7 @@ class TestCache(unittest.TestCase):
         cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
         self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
 
-    # --- invalidate (bd_092a232e-629.3: 切替コマンド検出時の service 単位破棄) ---
+    # --- invalidate (内部バックログ: 切替コマンド検出時の service 単位破棄) ---
 
     def test_invalidate_removes_only_that_service(self):
         cache.set_success("github", "/p", "exp", 1.0)

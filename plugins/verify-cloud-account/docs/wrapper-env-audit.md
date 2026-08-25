@@ -46,9 +46,37 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 | `env -i [...]` | 環境を **空にリセット**してから起動 | **剥がさない** (opaque) | 不可 → スキップ | 実機: `PROBE=x env -i env` に PROBE 出ない |
 | `env -u NAME [...]` | NAME のみ **unset** | **剥がさない** (opaque) | 不可 → スキップ | POSIX env |
 | `env -- [...]` | flag 終端 (以降を素の env で起動) | **剥がさない** (opaque) | スキップ (安全側) | parser は `-` 始まりトークンで env strip を中止 |
+| `timeout DURATION cmd` | 透過 (env 継承) | 収集。DURATION も消費 | 可 | GNU coreutils timeout(1) |
+| `nice [-n N] cmd` | 透過 (env 継承) | 収集 | 可 | ローカル man page nice(1) |
+| `stdbuf -o L cmd` | 透過 (env 継承。`LD_PRELOAD` 系を**追加**するだけ) | 収集 | 可 | ローカル man page stdbuf(1) |
+| `setsid cmd` | 透過 (新セッションで起動、env は継承) | 収集 | 可 | util-linux setsid(1) |
+| `caffeinate [-disu] cmd` | 透過 (env 継承) | 収集 | 可 | ローカル man page caffeinate(8) |
+| `watch -n N cmd` | 透過 (`sh -c` 経由で繰り返し起動、env は継承) | 収集 | 可 | procps-ng watch(1) |
+| `xargs [opts] cmd` | 透過 (env 継承。引数のみ stdin 由来) | 収集 | 可 | ローカル man page xargs(1) |
 
 (実機 probe は darwin / bash / mise 2.x / node 25 で 2026-06 に確認。詳細は本監査の
 コミットメッセージ参照。)
+
+### v0.9.0 追加分の根拠と未確認事項
+
+上表の下 7 行は v0.9.0 で透過 wrapper に追加した。`nice` / `stdbuf` /
+`caffeinate` / `xargs` は**開発機にインストール済みの man page から option 表を
+逐語確認**した。`timeout` / `setsid` / `watch` は開発機 (darwin) に man page が
+無く、GNU coreutils / util-linux / procps-ng の公式リファレンス記述に基づく。
+
+option 表を取り違えた場合の劣化方向は**片側だけ**である点に注意:
+
+- 値を取る flag の登録漏れ → 値トークンで剥がしが止まり、セグメントが不透明なまま
+  残る = **v0.8.0 と同じ「検証スキップ」に戻るだけ**
+- bool flag を値付きとして誤登録 → 次のトークン (CLI 名) を食って同じく検証スキップ
+
+どちらも誤 deny にはならず、既存の lenient 方針の範囲に収まる。逆に言えば
+**取り違えても静かに検証が消える**ので、`watch` / `timeout` / `setsid` を実際に
+使う環境で挙動が怪しいときは `_WRAPPER_FLAGS_WITH_VALUE` の該当エントリを
+実機の `--help` と突き合わせること。
+
+`ionice` は「cloud CLI と組み合わせる現実的な形が確認できず、開発機で man page も
+参照できない」ため**追加していない** (推測で allow-list を広げない方針)。
 
 ## 伝播してよい env / 保守的にスキップすべき経路の方針
 
@@ -133,9 +161,9 @@ env 挙動の分類を機械的に強制する。
 | `ssh host cmd` | リモートで実行され **ローカル env は届かない** (`SendEnv`/`AcceptEnv` 次第)。そもそも別ホストなのでローカル CLI 検証の意味が薄い | 透過 wrapper に **足さない** (検証スキップが妥当) |
 | `docker run -e FOO ...` | コンテナ内 env はホスト行頭 env と無関係。`-e`/`--env`/`--env-file` を解析しないと誤伝播 | 足すなら専用解析が必須。安易な passthrough は不可 |
 | `kubectl exec -- cmd` | Pod 内で実行。ローカル env は届かない | 足さない (検証スキップ) |
-| `xargs cmd` | stdin からの引数で cmd を起動。env は継承するが起動回数・引数が動的 | passthrough だが segment 抽出が別問題 |
-| `timeout 5 cmd` | 透過 (env 継承)。値を取る第1引数 (duration) の消費に注意 | `passthrough` + `_WRAPPER_FLAGS_WITH_VALUE` 相当の引数処理 |
-| `stdbuf -oL cmd` / `setsid cmd` | 透過 (env 継承) | `passthrough` |
+| `xargs cmd` | stdin からの引数で cmd を起動。env は継承するが起動回数・引数が動的 | ✅ v0.9.0 で `passthrough` として追加 |
+| `timeout 5 cmd` | 透過 (env 継承)。値を取る第1引数 (duration) の消費に注意 | ✅ v0.9.0 で `passthrough` + DURATION 消費として追加 |
+| `stdbuf -oL cmd` / `setsid cmd` | 透過 (env 継承) | ✅ v0.9.0 で `passthrough` として追加 |
 
 `ssh` / `docker` / `kubectl exec` のように **「別の実行コンテキストへ移送する」
 wrapper は、ローカル行頭 env が届かないので透過 wrapper に足さない**のが原則

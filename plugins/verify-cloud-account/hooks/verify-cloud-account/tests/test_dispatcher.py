@@ -344,7 +344,7 @@ class TestServiceInteractions(BaseWithTmpProject):
 
 
 class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
-    """bd_092a232e-629.1: firebase.verify を mock せず subprocess だけ差し替え、
+    """内部バックログ: firebase.verify を mock せず subprocess だけ差し替え、
     `.firebaserc` の default と `firebase use` の切替先が食い違うときの決定を
     dispatcher 経由で固定する。"""
 
@@ -801,7 +801,7 @@ class TestInfoCommandsReadonly(BaseWithTmpProject):
 
 
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
-    """bd_092a232e-629.3: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
+    """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
     したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
     検証成功も cache しない。切替後の最初の write が必ず再検証されることを固定する。
     (0.7.3 までは 30 秒の成功 cache が切替後も有効で、別アカウントの write が通った)"""
@@ -1027,7 +1027,7 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
 
 
 class TestLoginCommandsReadonly(BaseWithTmpProject):
-    """bd_092a232e-629.2: 認証取得系 (login / logout / configure 等) は資源を変更しない
+    """内部バックログ: 認証取得系 (login / logout / configure 等) は資源を変更しない
     ため検証せず allow する。未ログインで検証が失敗する状態でも、deny 文面が案内する
     ログインコマンド自体が deny される remediation loop にならない。"""
 
@@ -1171,7 +1171,7 @@ def _guided_commands(reason: str) -> list[str]:
 
 
 class TestRemediationGuidanceContract(BaseWithTmpProject):
-    """bd_092a232e-629.2 contract: deny 文面が案内するコマンドは必ず allow 経路にある。
+    """内部バックログ contract: deny 文面が案内するコマンドは必ず allow 経路にある。
 
     各 service の verify を mock せず subprocess だけ差し替えて実際の deny 文面を
     作り、そこから案内コマンドを抽出して dispatcher に通す。案内コマンドは

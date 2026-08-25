@@ -1,16 +1,118 @@
 # Changelog
 
+## 0.9.0
+
+**候補コマンドの切り出しと解釈を 1 つの解析層として作り直した** (内部バックログ
+6 件)。誤 deny (使えない) と検証バイパス (守れていない) の両方向に出ていた問題を
+まとめて塞ぐ。方針は従来どおり lenient — 誤 deny は allow 方向に倒し、バイパスは
+deny を増やすのではなく**「検証を走らせる」**方向に倒す。
+
+### 変更内容
+
+1. **コンテキスト指定 flag を検証に反映** (この batch の主眼) — `aws --profile
+   other s3 rm` / `gcloud --project other run deploy` / `firebase deploy -P other` /
+   `kubectl --context other delete pod` は、これまで hook の**既定コンテキスト**
+   だけを照合していた。既定が期待値なら「検証は既定 / 実行は other」で allow され、
+   誤アカウント事故の典型経路がそのまま通っていた (false-allow)。
+   `core/cli_options.py` に `find_context_options` を追加し、候補の**行全体**から
+   コンテキスト option の値を拾う。各 service は `CONTEXT_OPTIONS` を宣言し、
+   AWS は検証コマンドに `--profile` を付与 (CLI の資格情報解決順を実行時と揃える)、
+   GCP は `--project` / `--account` を直接照合し `--configuration` を引き渡し、
+   Firebase は `.firebaserc` の alias を解決してから照合、Kubernetes は
+   `--context` を直接照合し `--kubeconfig` を引き渡す。
+   **GCP は key ごとに独立して上書き**する — project を flag で上書きしても
+   account の期待値があれば account はアクティブ値と照合する (早期 return にすると
+   新たな false-allow を作る)。gh は `CONTEXT_OPTIONS` を宣言しない
+   (`--hostname` / `--user` は「どのアカウントで実行するか」ではなく操作**対象**の
+   指定のため。README 既知の制限のとおり)。
+   option の記法 (`--opt value` / `--opt=value` / `-Pprod` / `-P=prod` / `--` 終端 /
+   値トークンの消費) は既存の `strip_leading_options` と `_option_name_value` を
+   共有し、走査の打ち切り条件だけが違う (正規化は未知 option で打ち切る / context
+   抽出は global option を後方からも拾うため走査を続ける)。値が変数展開等で静的に
+   解決できないときは従来どおり既定コンテキストで照合する。
+   dispatcher は context を inline env と同じく **grouping key と cache key に含める**
+   — 含めないと `aws --profile a s3 rm x && aws --profile b s3 rm y` が 1 エントリに
+   畳まれて後段が検証されず、既定 profile の成功 cache を別 profile が hit する。
+   未配線の dead code だった `kubectl._context_override` は共通スキャナに統合して削除。
+
+2. **heredoc 本文を候補にしない** — `core/command_parser.py` は改行を無条件の
+   区切りにしており、`cat > deploy.sh <<'EOF' ... EOF` の本文 1 行 1 行が候補に
+   なっていた。本文の CLI 例は実行されないため、スクリプトや PR 本文を heredoc で
+   書くだけでファイル生成そのものが deny される (実際に本 batch の作業中、
+   インストール済みの 0.8.0 が commit message 作成を 2 回 deny した)。
+   `man 1 bash` の Here Documents 節に沿って `<<[-]word` を検出し、delimiter 行まで
+   同一セグメントに取り込む (quote 付き / `\` 付き delimiter、`<<-` のタブ除去、
+   1 行に複数 heredoc に対応。here-string `<<<` は対象外)。delimiter 行の改行では
+   セグメントを閉じるので、heredoc の**次**のコマンドは従来どおり検証される。
+   bare 形の delimiter は識別子に限定し、`(( x = 1 << 2 ))` の算術左シフトを
+   heredoc と誤検出して後続セグメントを飲み込むことがないようにした。
+
+3. **`command -v gh` を素通し** — `command` は透過 wrapper だが、`-v` / `-V` 付きは
+   後続 CLI を**実行せずパスを表示するだけ** (`man 1 bash`: `command [-pVv]`)。
+   剥がすと `gh` 単体の候補になり、インストール確認の定型句でアカウント検証が
+   走って deny されていた。`-v` / `-V` (連結形 `-pv` 含む) があれば剥がさない。
+   `command gh ...` / `command -p gh ...` / `command -- gh ...` は従来どおり検証。
+
+4. **PATTERNS の `\b` を `(?=\s|$)` に** — `\b` はハイフンも語境界とするため
+   `aws-vault exec prod -- aws s3 rm` が aws として発火し、hook の既定 profile で
+   `sts` を実行していた。既定資格情報が無ければ永久 deny、既定が期待値なら実行
+   profile が prod でも allow という**二重の誤り**。`gh-ost` / `kubectl-*` も同様。
+   全 service を空白/終端の lookahead に統一した。Firebase だけは
+   `npx firebase-tools deploy` が剥がし後に `firebase-tools deploy` になるため
+   `-tools` を明示的に許可する。これにより `aws-vault` 経由の実行は
+   「誤った検証」から「検証対象外」に変わる (README 既知の制限に明記)。
+
+5. **検証バイパスだったセグメント形を正規化** — `(gh pr create --fill)` /
+   `{ gh pr create; }` / `for f in *; do gh release upload ...; done` /
+   `if gh pr create; then` / `! gh pr create` / `</dev/null gh pr create` /
+   `2>/dev/null gh pr create` / `/opt/homebrew/bin/gh pr create` / `\gh pr create`
+   は、いずれも行頭 anchored な PATTERNS に一致せず service=None (検証スキップ) に
+   なっていた。先頭の `(` `{` `!` / 予約語 / リダイレクト、末尾の `)` `;` `}` `&`、
+   コマンド名のパスと `\` を正規化する。末尾の括弧は**開き括弧と対応していない
+   ときだけ**落とすので `gh pr view $(echo 1)` の引数は壊さない。
+
+6. **実行ラッパを追加** — `timeout` / `nice` / `stdbuf` / `setsid` / `caffeinate` /
+   `watch` / `xargs` を透過 wrapper に追加した。`timeout 30 gh pr create` /
+   `... | xargs -I{} gh pr close {}` / `watch -n 5 kubectl get pods` は全て
+   service=None で素通りしていた。`timeout` は flag だけでなく先頭の位置引数
+   DURATION も消費する (GNU の文法に一致しない形なら剥がさず不透明のまま =
+   従来どおり検証スキップ)。全て `_WRAPPER_ENV_CLASS` に `passthrough` として
+   登録。option 表の根拠と、取り違えた場合の劣化方向 (常に「検証スキップ」側で
+   誤 deny にはならない) は `docs/wrapper-env-audit.md` に記録した。
+   `ionice` は cloud CLI と組み合わせる現実的な形も開発機の man page も確認できず、
+   推測で allow-list を広げない方針から**追加していない**。
+
+### テスト
+
+448 → 514 件 (+66)。追加分は 17 パターンの mutation で検証済み — 各修正を 1 つずつ
+元に戻すと対応するテストが必ず落ちることを確認した。
+
+`TestWrapperEnvPropagationContract` に「passthrough 分類の全 wrapper が env 伝播
+ケースを持つ」guard を追加した (D16 チェックリスト手順 6 の機械化)。追加した時点で
+`builtin` の欠落を検出したのでケースを補っている。
+
+ハイフン付き別コマンドのテストは deny の有無ではなく `verify` の**呼び出し回数**で
+判定する。deny の有無だけを見ると、実 CLI がたまたま期待値にログインしている環境
+では素通りして vacuous になる (mutation 実行で実際に検出漏れとして現れた)。
+
+### 見送り
+
+- `aws-vault exec <profile> --` を「`AWS_PROFILE` を合成する条件付き wrapper」として
+  扱う対応 (今回は検証対象外に倒すところまで)
+- `gh auth status --show-token` 等の開示系オプションの扱い、READONLY の前方一致
+  regex 機構そのものの再設計 (いずれも別途)
+
 ## 0.8.0
 
 **remediation loop の解消 (ログイン系の素通し / AWS 切替案内の修正) と、切替
-コマンドでの成功 cache 即時無効化** (bd_092a232e-629.2 / 629.3 / 629.6)。
+コマンドでの成功 cache 即時無効化** (内部バックログ)。
 verify-cloud-account は「記載済み service の不一致 × 書込系コマンド」だけを deny
 し、それ以外は lenient に倒す方針に沿って、deny 文面が案内するコマンド自体が deny
 される 3 つの経路を塞いだ。
 
 ### 変更内容
 
-1. **認証取得系コマンドを検証スキップ (READONLY) に** (629.2) — `aws sso login` /
+1. **認証取得系コマンドを検証スキップ (READONLY) に** (内部バックログ) — `aws sso login` /
    `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
    logout` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きず、かつ
    scope 要求も無い形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https`
@@ -59,14 +161,14 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    削除、`gh auth setup-git` (`-f/--force` / `-h/--hostname`) はローカル git config の
    credential.helper 設定で、取りうるオプションを含めていずれもアカウント側の OAuth
    grant には触れないため READONLY のまま (gh 2.98 の各 man page で確認)。
-2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (629.2) —
+2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (内部バックログ) —
    `tests/test_dispatcher.py::TestRemediationGuidanceContract` が各 service の verify
    を mock せず subprocess だけ差し替えて実際の deny 文面 (不一致 / 未ログイン / 未設定
    / SETUP_HINT) を生成し、案内コマンドを抽出して dispatcher に通す。案内コマンドは
    readonly または self-remediation として検証なしで allow されるか、AWS の
    `AWS_PROFILE=<profile> aws ...` はその env で検証されることを assert する。
    今後 deny 文面に allow 経路の無いコマンドを書くと機械的に落ちる。
-3. **アカウント状態を変えうるコマンドで成功 cache を即時無効化** (629.3) — 各 service
+3. **アカウント状態を変えうるコマンドで成功 cache を即時無効化** (内部バックログ) — 各 service
    に `STATE_CHANGING` パターンを追加し、dispatcher が `gh auth switch` / `login` /
    `logout` / `refresh`、引数ありの `firebase use ...` / `firebase login*` / `logout`、
    `aws sso login` / `aws login` / `aws configure ...`、`gcloud config set` / `unset` /
@@ -105,7 +207,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    既知の制限)。PostToolUse hook で実行後に無効化する案は、全 Bash 呼出に Python
    プロセスが恒久的に乗ることと plugin 再読込の非互換を避けるため採用しない。
    cache / epoch の書き込みは tmp + `os.replace` の atomic write。
-4. **AWS deny 文面の切替案内を Claude Code で効く形に** (629.6) — 従来は
+4. **AWS deny 文面の切替案内を Claude Code で効く形に** (内部バックログ) — 従来は
    `export AWS_PROFILE=<profile>` を第一に案内していたが、Claude Code の Bash は
    呼出ごとに env を持ち越さず、hook は Claude 本体の env を継承するため、`export`
    しても次の `aws ...` は同じ理由で deny され続けた。案内を
@@ -143,7 +245,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    firebase。gh は root に `--help` / `--version` 以外の global option が無い) に
    従って先頭の option を剥がし、元の形と剥がした形の両方で READONLY /
    STATE_CHANGING を、剥がした形で self-remediation を判定する。剥がした option の
-   値は将来の flag 照合 (629.4) 用に返し、deny 文面の検出コマンドには元の形を表示
+   値は将来の flag 照合 (内部バックログ) 用に返し、deny 文面の検出コマンドには元の形を表示
    する。未知の option が先頭にあれば剥がさず通常検証 (保守的)。`--help` /
    `--version` は宣言しない (剥がすと `aws --version` が readonly から外れるため)。
    **boolean flag の `--flag=<bool>` 形も剥がす** (Codex R5 P1-A) — Go の pflag /
@@ -153,7 +255,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    扱いで無変更にしており、STATE_CHANGING に当たらず切替後も古い成功 cache が
    TTL 分残っていた。**値の真偽で剥がすかどうかは変えない** (剥がす目的は後続の
    subcommand を見つけることで、flag の実効値は「どの操作が走るか」に影響しない)。
-   これは 629.2 の `--skip-ssh-key=false` (`github.is_readonly`) と同じ失敗形が
+   これは 内部バックログ の `--skip-ssh-key=false` (`github.is_readonly`) と同じ失敗形が
    `cli_options` 側に残っていたもの。
 9. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
    再検証されない」注記と `export AWS_PROFILE` の記述を実装に合わせて更新、cache 節に
@@ -201,8 +303,8 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
 - 期待値以外への切替と write を同一コマンドで実行する形
   (`gh auth switch --user other && gh pr create`)。hook は実行前の状態でしか検証
   できないため、README の既知の制限に記載した。
-- 読み取り専用サブコマンド (`gh pr list` 等) の不一致時 allow + 警告 (629.5)、
-  `--profile` / `--project` flag の解析 (629.4)。
+- 読み取り専用サブコマンド (`gh pr list` 等) の不一致時 allow + 警告 (内部バックログ)、
+  `--profile` / `--project` flag の解析 (内部バックログ)。
 
 ### テスト
 
