@@ -80,6 +80,17 @@ class TestDuration(SettingsTestCase):
         """テストが TIMEOUT_SEC を float に差し替えてもそのまま通ること。"""
         self.assertEqual(settings.duration(VAR, 1.0, 600), 1.0)
 
+    def test_fractional_seconds_are_accepted(self):
+        """`count()` の整数判定を `duration()` に波及させないこと。
+
+        timeout は秒の小数指定に意味があり、0 以下は既定へ倒すので
+        `count()` のような「切り捨てで無効化」事故は起きない。
+        """
+        for value, expected in (("0.5", 0.5), ("1.5", 1.5), ("2.5", 2.5)):
+            with self.subTest(value=value):
+                self.set(value)
+                self.assertEqual(settings.duration(VAR, 300, 600), expected)
+
 
 class TestNonFinite(SettingsTestCase):
     """`nan` / `inf` は既定値に倒す (`float()` がこれらを受理してしまうため)。
@@ -130,12 +141,31 @@ class TestCount(SettingsTestCase):
         self.set("many")
         self.assertEqual(settings.count(VAR, 2), 2)
 
-    def test_float_spellings_are_accepted_like_duration(self):
-        """`int()` だけだと `1800.0` が既定 (= 0 = 無効) に落ち、抑制が黙って効かない。"""
-        for value, expected in (("1800.0", 1800), ("6e2", 600), ("20.9", 20)):
+    def test_integer_valued_float_spellings_are_accepted(self):
+        """判定は「値が整数か」であって「表記が整数か」ではない。
+
+        `int()` 直呼びだと `1800.0` が既定 (= 0 = 無効) に落ち、抑制が黙って効かない。
+        """
+        for value, expected in (("1800.0", 1800), ("6e2", 600), ("2.0", 2)):
             with self.subTest(value=value):
                 self.set(value)
                 self.assertEqual(settings.count(VAR, 2), expected)
+
+    def test_fractional_values_fall_back_instead_of_truncating(self):
+        """小数は切り捨てず既定値へ倒す。
+
+        `count()` の `0` は「無効化」という特別な意味を持つので、`REVIEW_MAX=0.5` を
+        切り捨てると 0 = 無効になり、打ち間違いが「既定で動く」でも「エラーで気付く」
+        でもなく **黙って機能が消える** に着地する。
+        """
+        for value in ("0.5", "1.5", "-0.5", "2.5", "0.999"):
+            with self.subTest(value=value):
+                self.set(value)
+                self.assertEqual(settings.count(VAR, 2), 2)
+
+    def test_plain_integer_is_unchanged(self):
+        self.set("2")
+        self.assertEqual(settings.count(VAR, 5), 2)
 
 
 class TestNames(SettingsTestCase):

@@ -89,25 +89,39 @@ def duration(name: str, default: float, maximum: float) -> float:
     if not value:
         return default
     parsed = _finite(value)
+    # 小数はそのまま通す (timeout は秒の小数指定に意味がある)。整数を要求するのは
+    # `count()` 側だけ — あちらは 0 が「無効化」なので切り捨てが機能の消失になる
     if parsed is None or parsed <= 0:
         return default
     return min(parsed, maximum)
 
 
 def count(name: str, default: int = 0) -> int:
-    """非負整数。未設定・非数値は `default`、負数は 0。`0` は「無効」を意味させてよい。
+    """非負整数。`0` は「無効」を意味させてよい (`EXTERNAL_AI_REVIEW_MAX=0` 等)。
 
-    `int()` ではなく `_finite()` を通してから丸める。`int("600.0")` / `int("6e2")` は
-    `ValueError` になるため、`int()` だけだと `COOLDOWN_SEC=1800.0` のような書き方が
-    `default` (= 0 = 無効) に落ちて **設定したつもりの抑制が黙って効かない**。
-    `duration()` と同じ入力を同じように解釈させるため、境界の判定は `_finite()` に
-    一本化する (非有限値の扱いが変数ごとに食い違わないように)。
+    検証は 3 段で、**先に落ちたものが勝つ**:
+
+    | 段 | 弾くもの | 結果 |
+    |---|---|---|
+    | 1. 有限か (`_finite`) | 未設定 / 非数値 / `nan` / `inf` | `default` |
+    | 2. 整数か (`is_integer`) | `0.5` `1.5` `-0.5` などの小数 | `default` |
+    | 3. 範囲 (`max(0, ...)`) | 負数 | `0` |
+
+    **2 段目は「値が整数か」であって「表記が整数か」ではない**。`600.0` / `6e2` /
+    `2.0` は整数値なので受理する (`int("600.0")` は `ValueError` なので、`int()` 直呼び
+    だと `COOLDOWN_SEC=1800.0` が `default` = 0 = 無効に落ちて抑制が黙って効かない)。
+
+    小数を切り捨てずに `default` へ倒すのは、**この関数の 0 が「無効化」という特別な
+    意味を持つ**から。`EXTERNAL_AI_REVIEW_MAX=0.5` を切り捨てると 0 = 無効になり、
+    打ち間違いが「既定で動く」でも「エラーで気付く」でもなく **黙って機能が消える** に
+    着地する。`duration()` が小数を受理する (2 段目を持たない) のは、timeout には
+    秒の小数指定に意味があり、かつ 0 以下を既定へ倒すので同種の事故が起きないため。
     """
     value = raw(name)
     if not value:
         return default
     parsed = _finite(value)
-    if parsed is None:
+    if parsed is None or not parsed.is_integer():
         return default
     return max(0, int(parsed))
 
