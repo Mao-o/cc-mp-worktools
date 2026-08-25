@@ -1416,6 +1416,26 @@ class TestContextOptionOverride(unittest.TestCase):
             err = firebase.verify(expected, "/p", context={"project": "unknown-proj"})
         self.assertIn("不一致", err)
 
+    def test_flag_mismatch_guidance_targets_the_flag_not_the_active_context(self):
+        """`--project` 不一致の案内は flag を直す形にする。
+
+        アクティブ project を切り替える `firebase use <alias>` を案内しても、その
+        コマンドは書かれた `--project` の値で実行されるので同じ deny を繰り返す
+        (案内どおりに直しても通らない)。kubectl / gcloud の文面と方針を揃える。
+        """
+        expected = {"default": "proj-dev", "prod": "proj-prod"}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
+            err = firebase.verify(expected, "/p", context={"project": "unknown-proj"})
+        self.assertNotIn("firebase use", err)
+        self.assertIn("--project prod", err)
+        # str 期待値・kubectl・gcloud も同じ「flag を直す」形になっている。
+        for other in (
+            firebase.verify("proj-dev", "/p", context={"project": "other"}),
+            kubectl.verify("prod-ctx", "/p", context={"context": "other"}),
+            gcloud.verify("my-proj", "/p", context={"project": "other"}),
+        ):
+            self.assertIn("外すか", other)
+
     def test_github_ignores_context(self):
         # gh の --hostname / --user は操作対象の指定で、照合先は常にアクティブ
         # アカウント (README 既知の制限)。context は受け取るが使わない。

@@ -275,6 +275,22 @@ def _alias_lines(expected: dict) -> str:
     )
 
 
+def _project_flag_lines(expected: dict) -> str:
+    """dict 期待値に対する `--project <alias>` の候補行。
+
+    `--project` 指定による不一致では、アクティブ project を切り替える
+    `firebase use <alias>` を案内しても解決しない — そのコマンドは書かれた
+    `--project` の値で実行されるので、切り替えても同じ deny を繰り返す
+    (案内どおりに直しても通らない = remediation loop)。flag 自体を直す形を案内する。
+    kubectl の `--context` / gcloud の `--project` 不一致文面と同じ方針。
+    """
+    return "\n".join(
+        f"  --project {k}  # → {v}"
+        for k, v in expected.items()
+        if isinstance(v, str) and v
+    )
+
+
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>"}`)。
 
@@ -311,7 +327,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             return (
                 f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
                 f"期待={', '.join(sorted(set(valid)))} のいずれか\n"
-                f"切り替え:\n{_alias_lines(expected)}"
+                f"--project を外すか、以下のいずれかを指定してください:\n"
+                f"{_project_flag_lines(expected)}"
             )
         if resolved == expected:
             return None
