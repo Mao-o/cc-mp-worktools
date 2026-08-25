@@ -5,19 +5,109 @@
 PR 6 (REVIEW_TASKS_2026-05-06.md の最終 PR) の **未着手分** のみを列挙する。
 E5 (json/toml/yaml の value status 拡張) は **0.14.0 で出荷済み** (commit 3189d907 は
 tag `v0.14.0` に含まれる) で、0.19.1 まで本節に置かれていた記述は `## 0.14.0` の
-「補遺」へ移した。plugin 名 `sensitive-files-guardrail` は維持 (0.14.0 で結論済み。
-内部呼称の統一 rename は commit 52113a1 で完了)。
+「補遺」へ移した。**E6 (Edit/Write の意図汲み取りメッセージ拡張) は 0.20.0 で
+出荷済み**で、記述は `## 0.20.0` へ移した。plugin 名
+`sensitive-files-guardrail` は維持 (0.14.0 で結論済み。内部呼称の統一 rename は
+commit 52113a1 で完了)。
 
-- **E6** (Edit/Write の意図汲み取りメッセージ拡張) — 未着手 (bd_092a232e-snw.9)
 - **D1** (docs 整理) — 未着手。0.19.1 時点の再見積り (docs は計画時の 2 倍超に
   膨張、REVIEW_TASKS の plugin 外退避と CHANGELOG の archive 化に分割) は
-  `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照 (bd_092a232e-snw.10)。
+  `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照。
   公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
-- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.19.1 時点の実測 (redact 827 /
+- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 847 /
   check 79) と乖離しており、「同型ケースの subTest 化で重複を畳む」に再定義して
-  から着手する (bd_092a232e-snw.13)
+  から着手する
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
+
+## 0.20.0
+
+**E6 (Edit/Write の意図汲み取りメッセージ拡張)**。`core.safepath.classify` の
+結果を `core.messages.edit_deny(kind=...)` に渡し、deny reason の**文面**を
+書き込み先の状態で 4 分岐する。
+
+- **判定境界 (deny / allow / ask) の変化: なし。**
+- **情報面の変化: あり** (後述の「情報面の変化」節)。
+- テスト件数: redact 827 → **847** / check **79** (計 926)。
+
+### 1. 状況別の deny 文面 (4 分岐)
+
+0.19.1 までは `missing` (新規作成) と `regular` (既存上書き) が同一の
+`edit_deny(tool_label, basename, new_keys)` に落ち、`symlink` / `special` は
+handler がベタ書きした `extra_note` 1 行の違いしか無かった
+(`docs/REVIEW_TASKS_2026-05-06.md` の E6)。
+
+| `classify` | `kind` | 追加で出す案内 |
+|---|---|---|
+| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする (実値は手動入力かシークレット管理ツール経由)。dotenv かつ追加キーありのときだけ |
+| `regular` | `overwrite` | **上書き対象の既存ファイルの Read 同等 minimal info** + `dotenv-cli` の merge で既存値を保つ案内 (非 dotenv は差分適用 (patch) の案内) |
+| `symlink` | `symlink` | 実体側が書き換わる旨と、コピーではなく symlink を維持する運用の確認 |
+| `special` | `special` | FIFO / socket / device である旨と、通常ファイル指定 / パス誤りの確認 |
+
+`error` は従来どおり `edit_deny` に到達せず `ask_or_deny(edit_pause("io_error"))`
+に倒れる。
+
+### 2. 情報面の変化 (判定は不変だが reason の中身は増える)
+
+`overwrite` では **モデルが要求していない既存ファイルの minimal info** が reason
+に載る。`redaction.file_render.render_for_bash` の再利用なので粒度は Read
+handler / Bash deny と同一 — キー名・型・prefix・length・status タグ・placeholder
+ヒントまでで、**実値は載らない**。既存値を保ったまま作業する代替案 (dotenv-cli
+merge) を出すには、今そのファイルに何が入っているかが要るため。
+
+副作用として Edit/Write の deny 経路は **対象ファイルを 1 回 open + parse する**
+ようになった (0.19.1 までは `lstat` のみ)。`classify` が `regular` を返した
+ケースだけで、`open_regular` (`O_NOFOLLOW`) 経由なので FIFO / symlink を掴む
+経路は無い。
+
+### 3. reason の byte 予算の扱い
+
+`edit_deny` は minimal info **以外**を先に組んでから残り byte
+(`core.output.MAX_REASON_BYTES` = 3KB) を計算し、その範囲に収まる行数だけ
+minimal info を載せる (`_fit_data_block`)。
+
+- 入り切らない分は `... (N more lines)` に畳み、`</DATA>` の閉じタグは必ず残す
+  (包装が壊れると `escape_data_tag` の外殻破壊防御が意味を失うため)
+- したがって **E6 の追加によって末尾の除外案内が truncate されることはない**
+- 内容行が 1 行も入らない / 取得に失敗した場合は黙って省略せず
+  `minimal info: unavailable (<理由>)` + next action に降りる (0.16.0 の silent
+  degradation 対策と同じ方針)
+- `suggested_keys` だけで予算を使い切る極端な入力では minimal info を丸ごと
+  省略し、残りは E6 以前と同じく `core.output._truncate` が引き取る
+
+### 4. 内部 API の変更
+
+- `core.messages.edit_deny`: **`kind` を必須キーワード引数に追加**
+  (`new` / `overwrite` / `symlink` / `special`)。既定値を置くと呼び忘れたときに
+  「新規作成しようとしたため block」という**事実と違う説明**を返しうるため、
+  実行時に落とす設計にした。あわせて `is_dotenv` / `existing_render` の
+  キーワード引数を追加 (どちらも既定値あり)
+  - 0.4.2 の `edit_deny(kind=...)` は `<GUARDRAIL_DENY reason="...">` 属性に
+    載せる**機械可読 schema** の一部で、後段 hook が存在せず overengineering
+    だったため 0.7.0 で撤去した。本引数は**その再導入ではなく**、思想 2
+    (block 時は意図を汲んだメッセージを返す) 側の拡張で、値は reason 文字列の
+    分岐にのみ使われる
+  - `extra_note` は引数として維持 (kind で表現しきれない文脈を呼出側が足すための
+    拡張点)。0.20.0 時点で handler からは渡していない — symlink / special の
+    ベタ書き `NOTE:` 文字列は `core/messages.py` の kind 別 template に移した
+    (「handler から文字列を直接組み立てない」= `docs/MAINTAINING.md`「拡張ポイント」
+    の規約に合わせた)
+- `core.messages` が `core.output.MAX_REASON_BYTES` を import する
+  (`core.output` は `typing` しか import しないため循環しない)
+- `handlers.edit_handler._render_existing` を新設 (`render_for_bash` の薄い
+  wrapper)。例外を捕捉して空文字を返すので、失敗しても verdict は動かない
+
+### 5. 検証
+
+- 両 suite green (redact 847 / check 79)。`claude plugin validate` warning 0
+- **verdict 不変の機械確認**: tool 2 (Edit/Write) × target 5 (`.env` / `.envrc` /
+  `credentials.json` / `.env.example` / `README.md`) × 最終要素 5 状態 (missing /
+  regular / symlink / special (FIFO) / stat error) × 親 3 状態 (通常 dir /
+  symlink dir / 不在) × content 2 (キーあり / 空) × `permission_mode` 6 =
+  **1800 セル**の `permissionDecision` を変更前後で突合し **diff ゼロ**
+  (allow 480 / ask 360 / deny 360 / 構成不能 600)
+- 予算ロジックを無効化する mutation で予算テスト 3 件が落ちることを確認
+  (テストが空振りしていないことの確認)
 
 ## 0.19.1
 

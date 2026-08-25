@@ -35,7 +35,7 @@ class TestExcludeHintBasename(unittest.TestCase):
         self.assertNotIn("<basename>", out)
 
     def test_exclude_hint_guides_project_section_by_default(self):
-        """0.19.0 (bd_092a232e-snw.23): 既定で [project:] セクション配下への追記を
+        """0.19.0: 既定で [project:] セクション配下への追記を
         案内し、ヘッダー無し (全プロジェクト共通) は明示的な選択にする。
         絶対パスは reason に出さない (環境変数名で示す)。"""
         out = M._exclude_hint(".env")

@@ -187,7 +187,7 @@ ask に倒れ autonomous で `cat .env*` が素通りしていた。0.11.0 で�
 畳む)。攻撃シナリオ `cat <(echo \(\)) < .env` は全 segment が hard-stop と
 なるため挙動不変 (思想 1 整合)。
 
-**0.18.0 (bd_092a232e-y5y)**: `_has_hard_stop` を **quote-aware** にした。Bash は
+**0.18.0**: `_has_hard_stop` を **quote-aware** にした。Bash は
 シングルクォート内を一切展開しないため、そこに現れる hard-stop char は静的解析を
 妨げない。これで 0.17.0 の残り穴 (`awk '{print}' .env` が `{` `}` `$` により
 opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形が operand scan に
@@ -365,7 +365,7 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   `&>` の spaced / fused 形に対応。内容露出ではなく破壊的書込みの懸念であり、
   Edit/Write の機密書込み deny と整合させる。`ls -la .env > /tmp/x` (read operand
   のみ機密、書込み先非機密) は allow 維持。
-- **0.19.0: 次善策コマンドの追加** (bd_092a232e-snw.3) — `chmod` / `chown` /
+- **0.19.0: 次善策コマンドの追加** — `chmod` / `chown` /
   `chgrp` / `touch` を `_METADATA_ONLY_FIRST_TOKENS` に、`git rm --cached` を
   条件付き (`_git_rm_is_index_only`: `--cached` が `--` より前に exact match、
   `--pathspec-from-file` 無し) で追加。両 hook の reason が「tracked なら
@@ -677,7 +677,7 @@ builder で 0.9.0 とほぼ同等の出力を生成するため互換維持。
 | ケース | 判定 |
 |---|---|
 | 機密 path への新規/既存 書き込み (通常ファイル) | **`deny` 固定** + dotenv ならキー名を reason に添える |
-| 機密 path + symlink / special | **`deny` 固定** + 対応の extra note |
+| 機密 path + symlink / special | **`deny` 固定** + 状況別の代替案 |
 | `.env.example` 等テンプレ除外 | allow |
 | 親ディレクトリが symlink / 特殊 / 不在 | `ask_or_deny` (判定不能、fail-closed) |
 | patterns.txt 読込失敗 / normalize 失敗 / stat 失敗 | `ask_or_deny` (fail-closed) |
@@ -687,6 +687,40 @@ deny reason のキー名ガイド:
   `tool_input` からキー名抽出 (Edit=new_string / Write=content)
 - 抽出結果を reason に箇条書きで添え、`.env.example` への移行を促す
 - 値そのものは一切 reason に含めない (キー名のみ、既存の minimal-info 原則と一致)
+
+#### 状況別の deny 文面 (0.20.0, E6)
+
+`core.safepath.classify` の結果を `core.messages.edit_deny(kind=...)` に渡し、
+**文面だけ** を 4 分岐する。0.19.1 までは `missing` (新規作成) と `regular`
+(既存上書き) が同一文面に落ち、`symlink` / `special` は `extra_note` 1 行の
+違いしか無かった。
+
+| `classify` | `kind` | 追加で出す情報 |
+|---|---|---|
+| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき) |
+| `regular` | `overwrite` | **上書き対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用) の案内 |
+| `symlink` | `symlink` | 実体側が書き換わる旨と symlink 運用の確認 |
+| `special` | `special` | FIFO / socket / device である旨と通常ファイル指定の確認 |
+
+**判定 (deny / ask / allow) は 0.19.1 から一切変わらない。** 変わるのは reason
+文字列だけで、`error` は従来どおり `ask_or_deny` に倒れる。
+
+情報面は変わる — `overwrite` では **モデルが要求していない既存ファイルの
+minimal info** が reason に載る (`redaction.file_render.render_for_bash` の
+再利用なので、粒度は Read handler / Bash deny と同一: キー名・型・prefix・
+length・status タグ・placeholder ヒントまで。実値は載らない)。既存値を保った
+まま作業する代替案を出すには、今そのファイルに何が入っているかが要るため。
+
+reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
+
+- `edit_deny` は minimal info **以外**を先に組んでから残り byte を計算し、その
+  範囲に収まる行数だけ minimal info を載せる。入り切らない分は
+  `... (N more lines)` に畳み、`</DATA>` の閉じタグは必ず残す
+- したがって **E6 の追加によって末尾の除外案内が truncate されることはない**
+- 取得失敗時は黙って省略せず `minimal info: unavailable (<理由>)` + next action
+  に降りる (0.16.0 の silent degradation 対策と同じ方針)
+- `suggested_keys` だけで予算を使い切る極端な入力では minimal info を丸ごと
+  省略し、残りは E6 以前と同じく `core.output._truncate` が引き取る
 
 `ask_or_deny`: `permission_mode == "bypassPermissions"` なら `deny`、それ以外は
 `ask`。**機密検出済み** のケースは `ask` を挟まず常に `deny` 固定 (うっかり
@@ -704,7 +738,7 @@ deny reason のキー名ガイド:
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知、報告済み集合を更新) |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
 
-#### session 単位の once-only (0.19.0, bd_092a232e-snw.2)
+#### session 単位の once-only (0.19.0)
 
 0.18.0 までの Stop hook は `stop_hook_active` しか見ず「報告済みか」の状態を
 持たなかったため、「意図的に管理対象とする」と承認された tracked ファイル

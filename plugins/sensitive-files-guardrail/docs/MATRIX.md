@@ -234,7 +234,7 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 (`git ls-files -s .env`) だけで、`git ls-files -s` 単体や
 `git ls-files -s README.md` は allow。
 
-`git rm` は **`--cached` 付きのみ** metadata-only (0.19.0, bd_092a232e-snw.3):
+`git rm` は **`--cached` 付きのみ** metadata-only (0.19.0):
 index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。
 `--cached` は `--` より前の完全一致。`--pathspec-from-file=<file>` は operand
 の中身を pathspec として読み不一致行を `fatal: pathspec '<行>' did not match` で
@@ -351,6 +351,11 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | path 最終要素が special (FIFO/socket/device) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | 親ディレクトリが symlink / 特殊 / 不在 | ask | ask | ask | ask | **deny** |
 | patterns.txt / normalize / stat 失敗 | ask | ask | ask | ask | **deny** |
+
+> 0.20.0 (E6) で deny reason の**文面**を書き込み先の状態
+> (新規 / 既存上書き / symlink / special) で 4 分岐したが、**上表の判定は
+> 1 セルも変わっていない**。文面の内訳は
+> [DESIGN.md](./DESIGN.md#状況別の-deny-文面-0200-e6) を参照。
 
 ## Stop handler
 

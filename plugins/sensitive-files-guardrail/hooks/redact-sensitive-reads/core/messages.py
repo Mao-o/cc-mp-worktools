@@ -22,7 +22,7 @@ next action」** の 2 文構造を取る。「続行しますか？」のよう
 そのままコピペで ``patterns.local.txt`` に追記できる形にする。glob operand
 (例: ``*.env*``) はそのまま basename として埋める。
 
-0.19.0 (bd_092a232e-snw.23) から hint は ``[project:$CLAUDE_PROJECT_DIR]``
+0.19.0 から hint は ``[project:$CLAUDE_PROJECT_DIR]``
 セクション配下への追記を **既定** として案内する (``_shared.patterns`` の
 レシピ定数と共通、Stop hook の block reason も同じ)。ヘッダー無し行
 (全プロジェクト共通) は明示的な選択にする。reason に絶対パスを出さない方針の
@@ -49,6 +49,19 @@ env-var 名を抽出 (E4) し、dotenv parse 結果と照合した ``matched_pat
 
 Read 側の ``<DATA untrusted="true">`` 包装と ``escape_data_tag`` は維持
 (鍵名が LLM コンテキストに残るため最低限の包装防御として意味あり)。
+
+0.20.0 で ``edit_deny`` を **kind 別 dispatch** に拡張 (E6)。書き込み先の状態
+(``new`` / ``overwrite`` / ``symlink`` / ``special``) で note と代替案を切替え、
+``overwrite`` では上書き対象の既存ファイルの minimal info を
+``<DATA untrusted>`` 包装で埋め込む。**判定 (deny/ask/allow) は変えず、reason
+文字列の情報量だけが変わる**のは 0.10.0 の bash_deny 拡張と同じ方針。
+
+## reason の byte 予算
+
+``core.output.MAX_REASON_BYTES`` (3KB) を超えた分は ``core.output._truncate``
+が末尾から切る。切られて困る行 (除外案内) が末尾にあるため、**サイズが入力
+依存で伸びるセクションを埋め込む builder は自分で予算内に収める**こと。
+``edit_deny`` の minimal info がその実装例 (``_fit_data_block``)。
 """
 from __future__ import annotations
 
@@ -110,7 +123,7 @@ def _exclude_hint(basename: str) -> str:
 
     basename が空なら一般化された hint。空でなければ ``!<basename>`` を埋め込む。
 
-    0.19.0 (bd_092a232e-snw.23): ``[project:$CLAUDE_PROJECT_DIR]`` セクション配下
+    0.19.0: ``[project:$CLAUDE_PROJECT_DIR]`` セクション配下
     への追記を既定として案内する。0.18.0 まではヘッダー無し行 (= 全プロジェクト
     共通) だけを案内していたため、あるプロジェクトで承認した除外が他プロジェクト
     にも無条件で効く側 (0.15.0 が ``[project:]`` セクションで防ごうとした事故) に
@@ -641,8 +654,7 @@ _GIT_GLOBAL_VALUE_OPTS = frozenset({
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
 })
 
-# git subcommand のうち「閲覧」ではなく index / 作業ツリーへの **操作** (0.19.0,
-# bd_092a232e-snw.3)。これ以外 (show / diff / log / cat-file / blame / grep 等)
+# git subcommand のうち「閲覧」ではなく index / 作業ツリーへの **操作** (0.19.0)。これ以外 (show / diff / log / cat-file / blame / grep 等)
 # は従来通り「commit / 差分の閲覧」文面。0.18.0 までは全 subcommand が閲覧文面
 # だったため ``git rm .env`` / ``git add .env`` が「閲覧しようとした」と誤った
 # 意図を返していた。
