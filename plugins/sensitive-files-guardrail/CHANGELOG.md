@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1 + R7 ×1 + R8 ×1)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1 + R7 ×1 + R8 ×1 + R9 ×1)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -351,6 +351,27 @@ Codex round 8 で、R5 / R6 で付けた条件が**空文になっていた**こ
   あわせて `docstring` / `tests/fixtures/envelopes/README.md` / `docs/MATRIX.md` に
   複製されていた「envelope 実値で挙動を確認」という**根拠を与えない文言も
   step 7 / step 8 への参照に是正**した (残存 0 件)
+
+Codex round 9 で、**この PR で追記したリリース履歴自体が判定境界を誤って記録して
+いた**ことが判明した (記述の誤りであり、実装は正しい):
+
+- **[R9] `git ls-files` の判定境界の記述が誤っていた**: 0.19.1 で `## 0.14.1` に
+  追記した「pathspec 無し形や `-s` / `--stage` 形は通常経路で従来どおり deny」は誤り。
+  **実測**したところ、`-s` / `--stage` / `--format` は metadata-only から外れて
+  **operand scan に回るだけ**で、deny になるのは operand に機密 path 候補がある形
+  だけだった (`git ls-files -s .env` = deny / `git ls-files`・
+  `git ls-files -s`・`git ls-files -s README.md` = allow)。
+  `--format` はクォートで分かれ、`--format='%(objectname)' .env` は 0.18.0 の
+  quote-aware 化で deny、クォート無し / ダブルクォート形は hard-stop 経由で
+  ask_or_allow。
+
+  **同じ誤りの複製を横断 grep で探し、4 箇所を実測に合わせた**: `CHANGELOG.md`
+  (`## 0.14.1`)、`docs/DESIGN.md` の撤去特例表 (**DESIGN 自身の metadata-only 節と
+  矛盾していた** — 節の側が正しい)、`docs/MATRIX.md` の解説文、`README.md` の
+  allowlist 解説。`docs/MATRIX.md` の判定表 (`git ls-files .env` = allow /
+  `-s .env`・`--stage .env`・`--format='%(objectname)' .env`・`-sz .env` = deny) は
+  実測と一致しており訂正不要だった。**実装 (`_is_metadata_only` / operand scan /
+  deny 判定) は一切変更していない。**
 
 ### リリース手順への追加
 
@@ -1306,8 +1327,11 @@ commit 52113a1) で custom `patterns.local.txt` の参照ディレクトリが
   (`--format='%(objectname)'` のように `(` を含み segment hard-stop に該当しても
   deny を優先する経路) を撤去した。`git ls-files --format='%(objectname)' .env` は
   **deny → ask_or_allow** (default / acceptEdits / dontAsk で ask、auto /
-  bypassPermissions / plan で allow) に降格。pathspec 無し形や `-s` / `--stage`
-  形は通常経路で従来どおり deny。根拠は同日の commit 6b56a81 で `docs/DESIGN.md`
+  bypassPermissions / plan で allow) に降格。**`-s` / `--stage` / `--format` 形が
+  deny になるのは operand に機密 path 候補があるときだけ**で、`git ls-files -s .env`
+  は deny、`git ls-files` / `git ls-files -s` / `git ls-files -s README.md`
+  は allow (0.19.1 で実測)。これらの option は metadata-only から外して operand scan に
+  回すだけで、option 自体が deny を決めるわけではない。根拠は同日の commit 6b56a81 で `docs/DESIGN.md`
   に明文化した「ハーネス委譲方針 (defense-in-depth の一層)」(判断困難 → deny 強制の
   特例は作らない)。この形は 0.18.0 の `_has_hard_stop` quote-aware 化で特例なしに
   operand scan へ到達し、deny に戻っている。

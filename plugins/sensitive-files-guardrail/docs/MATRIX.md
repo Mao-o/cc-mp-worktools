@@ -229,8 +229,10 @@ deny に倒る (Codex P1, 0.14.0)。
 
 `git ls-files` も **条件付き**: plain な `git ls-files .env` / `--error-unmatch`
 は名前一覧のみなので allow 維持。`-s` / `--stage` / `--format` は blob object
-name (= 内容の安定した指紋) を出せるため metadata-only から除外して deny
-(Codex P2 第3弾, 0.14.0)。
+name (= 内容の安定した指紋) を出せるため metadata-only から除外し、**operand scan に
+回す** (Codex P2 第3弾, 0.14.0)。deny になるのは operand に機密 path 候補がある形
+(`git ls-files -s .env`) だけで、`git ls-files -s` 単体や
+`git ls-files -s README.md` は allow。
 
 `git rm` は **`--cached` 付きのみ** metadata-only (0.19.0, bd_092a232e-snw.3):
 index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。

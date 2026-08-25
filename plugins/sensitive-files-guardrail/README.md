@@ -218,8 +218,10 @@ note: nested structure not parsed. only top-level key names returned.
 > 同様に `file -f` / `wc --files0-from` / `tree --fromfile` 等、operand の中身を
 > ファイル名リストとして読み echo するオプション付き形も deny (`file .env` /
 > `wc -l .env` の通常形は allow)。`git ls-files` は plain path-listing のみ
-> allow し、`-s` / `--stage` / `--format` は blob object name (= 内容の指紋) を
-> 出せるため deny。`git status` は `-v`/`--verbose` が staged diff (機密の
+> metadata-only として allow し、`-s` / `--stage` / `--format` は blob object name
+> (= 内容の指紋) を出せるため operand scan に回す (機密 operand を伴う
+> `git ls-files -s .env` は deny、`git ls-files -s` 単体は allow)。
+> `git status` は `-v`/`--verbose` が staged diff (機密の
 > 旧値/新値) を出すため allowlist 外 (裸 `git status` は allow、
 > `git status -v -- .env` は deny)。`cat` / `head` / `grep` 等の内容出力系と
 > `cp` / `mv` (複製で漏洩面が広がる)、`git show` / `git diff` / `git add` は

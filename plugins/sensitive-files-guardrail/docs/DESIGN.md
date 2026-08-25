@@ -114,7 +114,7 @@ dontAsk では `ask` 維持。**autonomous モードでは Claude Code ハーネ
 | `<` 入力リダイレクトの character-level parser | 0.7.0 (A1) | `cat <(echo \(\)) < .env` の escape paren depth tracking など敵対的バイパス対策が思想 1 に反する |
 | FOO=1 / env / sudo 等の prefix normalize | 0.8.0 (A4) | 「`FOO=1 cat .env` を `cat .env` に書き戻す」は敵対的解釈で思想 1 に反する |
 | 既定 rules 候補列挙 (glob × literal stem の連結候補化) | 0.8.0 (B3) | `*.log` が `.env.log` 連結で巻き込まれる false positive |
-| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 0.14.1 (commit 584afd1) | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 (0.18.0 で `_has_hard_stop` が quote-aware になり、この形は **特例なしで** 通常の operand scan に到達して deny する) |
+| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 0.14.1 (commit 584afd1) | **機密 operand を伴う形** (`git ls-files -s .env`) は通常の operand scan 経路で既に deny になるため特例不要 (`-s` 単体や `-s README.md` は operand が機密でないので allow。下の metadata-only 節の記述が正)。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 (0.18.0 で `_has_hard_stop` が quote-aware になり、この形は **特例なしで** 通常の operand scan に到達して deny する) |
 
 外部レビュー (Codex 等) が判断困難ケースの deny 強制を要求してきた場合も、
 本方針を根拠に「ask_or_allow で十分、それ以上の deny 強制はハーネス委譲する」と
