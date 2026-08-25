@@ -124,9 +124,16 @@ class TestInFlightTtl(StateTestCase):
         self.assertIsNotNone(claim)
         self.assertEqual(claim[1], ["/repo/a.py"])
 
-    def test_ttl_derives_from_cursor_timeout(self):
+    def test_ttl_derives_from_cursor_timeout_ceiling(self):
+        """TTL は **上限** から導出すること (0.6.0 で timeout が env 可変になった)。
+
+        既定値から導くと、`EXTERNAL_AI_POST_REVIEW_TIMEOUT` を短くしたセッションが、
+        長く設定した別セッションの in-flight を「TTL 超過」とみなして横取りする。
+        TTL は全セッションで同一でなければならない。
+        """
         import cursor
 
+        self.assertGreater(state.IN_FLIGHT_TTL_SEC, cursor.MAX_TIMEOUT_SEC)
         self.assertGreater(state.IN_FLIGHT_TTL_SEC, cursor.TIMEOUT_SEC)
 
 

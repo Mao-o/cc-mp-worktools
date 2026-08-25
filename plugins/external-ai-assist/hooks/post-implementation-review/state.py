@@ -32,7 +32,8 @@ UPS リセットを TTL ベースに置き換えている (hooks/diffstate.py �
   (非ブロッキング + fail-open 分岐が固有なので `_common` に寄せていない)
 
 Stop の取得順は cursor lock -> state lock -> (state 解放) -> review。state lock を
-握ったまま review すると、全セッションの PostToolUse が最大 600 秒ブロックされる。
+握ったまま review すると、全セッションの PostToolUse が cursor の timeout 上限 (600 秒) まで
+ブロックされる。
 PostToolUse は state lock しか取らないため、この順序で循環待ちは発生しない。
 """
 from __future__ import annotations
@@ -49,11 +50,16 @@ from _common import flock
 
 import cursor
 
-# in-flight の回収 TTL。cursor.TIMEOUT_SEC を**必ず超える**必要がある。
-# 下回ると、正常に走っている in-flight を別セッションの Stop が途中で横取りし、
-# 同じ diff で cursor が二重起動する。推奨値ではなく正しさの制約なので、
-# cursor 側の timeout から導出して手で乖離できないようにしている。
-IN_FLIGHT_TTL_SEC = cursor.TIMEOUT_SEC + 300
+# in-flight の回収 TTL。cursor の timeout を**必ず超える**必要がある。下回ると、
+# 正常に走っている in-flight を別セッションの Stop が途中で横取りし、同じ diff で
+# cursor が二重起動する。推奨値ではなく正しさの制約なので、cursor 側から導出して
+# 手で乖離できないようにしている。
+#
+# 導出元は既定値 (`TIMEOUT_SEC`) ではなく**上限** (`MAX_TIMEOUT_SEC`)。0.6.0 で
+# `EXTERNAL_AI_POST_REVIEW_TIMEOUT` により timeout が可変になったため、既定値から
+# 導くと「短く設定したセッションが、長く設定した別セッションの in-flight を
+# TTL 超過とみなして奪う」経路ができる。TTL は全セッションで同じ値でなければならない。
+IN_FLIGHT_TTL_SEC = cursor.MAX_TIMEOUT_SEC + 300
 
 # 状態ファイル自体の GC TTL (mtime 基準)。書き込みのたびに mtime が更新されるため、
 # 稼働中セッションのファイルが消えることはない。
@@ -98,11 +104,16 @@ def review_copy_path(session_id: str) -> str:
 
 
 def _empty_state() -> dict:
-    return {"v": 1, "pending": {}, "in_flight": {}, "reviewed": {}}
+    return {"v": 1, "pending": {}, "in_flight": {}, "reviewed": {}, "last_review_at": 0.0}
 
 
 def _normalize(raw) -> dict:
-    """壊れた/古い状態ファイルを黙って捨てて空状態に戻す (fail-open)。"""
+    """壊れた/古い状態ファイルを黙って捨てて空状態に戻す (fail-open)。
+
+    `_empty_state()` の**全キー**を引き継ぐこと。dict のキーだけをループしていた
+    0.5.0 の形のままスカラーを足すと、読むたびに `last_review_at` が 0 に戻り
+    cooldown が永久に効かない。
+    """
     if not isinstance(raw, dict):
         return _empty_state()
     state = _empty_state()
@@ -110,6 +121,9 @@ def _normalize(raw) -> dict:
         value = raw.get(key)
         if isinstance(value, dict):
             state[key] = value
+    stamp = raw.get("last_review_at")
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+        state["last_review_at"] = float(stamp)
     return state
 
 
@@ -227,6 +241,38 @@ def reviewed_hashes(session_id: str) -> dict[str, str]:
             return dict(state["reviewed"])
     except OSError:
         return {}
+
+
+def pending_count(session_id: str) -> int:
+    """claim せずに pending 件数だけ読む (cooldown 判定で「黙って skip」を避けるため)。"""
+    try:
+        with _locked_state(session_id) as state:
+            return len(state["pending"])
+    except OSError:
+        return 0
+
+
+def last_review_at(session_id: str) -> float:
+    """直近で cursor を実際に走らせ終えた時刻 (epoch 秒)。未実施なら 0。"""
+    try:
+        with _locked_state(session_id) as state:
+            return float(state.get("last_review_at") or 0.0)
+    except OSError:
+        return 0.0
+
+
+def mark_review_done(session_id: str) -> None:
+    """cursor の実行が終わった時点で呼ぶ (成功・失敗を問わない)。
+
+    cooldown は「レビューとレビューの間隔」なので**完了時刻**を基準にする。開始時刻に
+    すると、10 分かかったレビューの直後に次のレビューが走ってしまう。セッション単位で
+    持つ (状態ファイルがセッション単位。cursor lock だけが作業ツリー単位)。
+    """
+    try:
+        with _locked_state(session_id) as state:
+            state["last_review_at"] = time.time()
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------

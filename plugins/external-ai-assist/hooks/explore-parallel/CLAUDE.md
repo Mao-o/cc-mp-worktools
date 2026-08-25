@@ -13,6 +13,17 @@ Claude Code の `Explore` サブエージェントはリポジトリのコード
 pre フェーズで並走起動 → Explore 本体と同時に調査進行 → post フェーズで結果待ち受けして注入、
 という非同期パターンにより Explore 本体の応答遅延を最小化している。
 
+## 無効化 (`EXTERNAL_AI_EXPLORE_PARALLEL=0`, 0.6.0)
+
+0.5.0 まではスイッチが皆無で、`cursor` を PATH から外す以外に止める手段が無かった。
+`EXTERNAL_AI_EXPLORE_PARALLEL=0` で並走を止められる (他 2 hook とは独立。
+`EXTERNAL_AI_REVIEW_MAX=0` は exitplan-review にしか効かない)。
+
+**止めるのは pre だけで、post は常に回す**。post も止めると、直前のターンで起動済みの
+cursor と pid / 結果ファイルが孤児になる — 無効化した瞬間だけ発生するので気付きにくい。
+何も起動していなければ post は元から no-op (アナライザ未インストール時と同じ経路) なので、
+ゲートを外しておくコストは無い (`tests/test_disable_switch.py`)。
+
 ## ディレクトリ構成
 
 ```

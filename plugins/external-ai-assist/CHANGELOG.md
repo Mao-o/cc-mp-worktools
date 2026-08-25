@@ -5,6 +5,244 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.6.0
+
+**離脱率低減: 3 機能を独立に切れるスイッチ + timeout の環境変数化 + 完了通知 + 頻度制御**
+(2026-08 内部バックログの離脱率低減 batch)。既定 timeout を短縮するので
+挙動が変わる。機能追加を含むので minor bump。
+
+### 0. 環境変数の命名規則を統一
+
+`EXTERNAL_AI_<機能>` が on/off、`EXTERNAL_AI_<機能>_<設定>` がその機能の設定。`<機能>` は
+hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `POST_REVIEW`)。
+解釈は新設の `hooks/_common/settings.py` に集約し、3 hook で同じ規則にした:
+
+- **不正な値は既定値に倒す** (fail-open)。タイプミスでレビューが黙って全停止するより、
+  既定で動き続けるほうが事故が小さい
+- **`duration()` だけは上限で clamp する**。hook timeout は `hooks.json` の静的値なので、
+  超える値を許すとハーネスの kill が先に来て後始末 (枠を戻す / pending を戻す) に到達しない
+- `duration()` の `0` は「無効化」ではなく既定値扱い。「即 timeout」と「無効」の両方に
+  読める設定を作らない (無効化は on/off スイッチの仕事)
+
+**既存の変数は据置**。`EXTERNAL_AI_REVIEW_MAX` / `EXTERNAL_AI_POST_REVIEW` /
+`EXTERNAL_AI_POST_REVIEW_{BASH_TRACKING,EXCLUDE,EXCLUDE_DEFAULTS,CODE_ONLY,MAX}` は
+名前も意味も変えていない。
+
+### 1. 3 機能を独立に切れるスイッチ
+
+| 変数 | 既定 | 対象 |
+|---|---|---|
+| `EXTERNAL_AI_EXPLORE_PARALLEL` | `1` | explore-parallel (**新設**。0.5.0 まではスイッチが皆無で、`cursor` を PATH から外す以外に止める手段が無かった) |
+| `EXTERNAL_AI_PLAN_REVIEW` | `1` | exitplan-review (**新設**) |
+| `EXTERNAL_AI_POST_REVIEW` | `1` | post-implementation-review (既存) |
+
+- `EXTERNAL_AI_REVIEW_MAX=0` の後方互換は維持。ただし `EXTERNAL_AI_PLAN_REVIEW` とは
+  **AND** で効く (新スイッチが勝つ形にはしない)。`EXTERNAL_AI_REVIEW_MAX` は撤廃済みの
+  別名ではなく**現役の回数予算**で、`0` に「1 回も許さない」という固有の意味があるため。
+  post-implementation-review 側の `EXTERNAL_AI_POST_REVIEW_MAX` は 0.3.0 で撤廃済みの
+  死んだ別名なので、従来どおり新しい変数が勝つ (扱いが違う理由をコードに明記した)
+- explore-parallel で止まるのは **pre (起動側) だけ**。post (結果回収) は常に動かす。
+  post も止めると、直前のターンで起動済みの cursor と pid / 結果ファイルが孤児になる
+  (無効化した瞬間だけ起きるので気付きにくい)。何も起動していなければ post は元から no-op
+- プロジェクト単位の on/off は `.claude/settings.json` の `env` に書く手順を README に
+  記載した。公式 `env` は「Set environment variables for every session and for the
+  subprocesses Claude Code starts from it」で、hook コマンドはその subprocess に含まれる
+  (`CLAUDECODE` / `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` の説明が hook を名指ししている)。
+  **project / local settings の `env` が効くのは workspace を trust した後か `-p` 起動時**
+  という条件も併記。マーカーファイル読み込みの独自機構は実装しない (二重機構を避ける)
+
+### 2. exitplan-review: 待ち時間の制御と完了通知
+
+0.5.0 は承認前に最悪 52 分ブロックしえた (codex 1500s × `EXTERNAL_AI_REVIEW_MAX` 2 回) 上に、
+進捗も結果も利用者に出ていなかった。
+
+- **既定 timeout を変更 (挙動変更)**: codex **1500s → 600s**、cursor 600s は据置。
+  レビュアーは並列なので承認前の待ちは最悪 `2 × 25 分 = 50 分` から `2 × 10 分 = 20 分` になる。
+  `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` で両レビュアー一括変更 (上限 1500s = 従来値)
+- `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS=cursor,codex` でレビュアーを選択。
+  **事前チェックと実行で同じ集合を使う** (`selected_reviewers()` に一本化)。別々に計算すると、
+  1 つも走らない集合のために `reserve_slot` が枠を消費して以後素通りになる。未知の名前だけを
+  指定した場合 (`codx` のタイプミス) は既定の全件へ fallback せず no-op にし、通知を出す
+- `EXTERNAL_AI_PLAN_REVIEW_MODE=context` で**非ブロック運用** (opt-in、既定は `block` のまま)。
+  `decision: block` の代わりに `hookSpecificOutput.additionalContext` で所見だけ渡す。
+  公式の PreToolUse decision control に「`additionalContext`: String added to Claude's
+  context alongside the tool result.」と収載されている
+  (ページ内の簡約 "Key fields" 表には出てこないが、そちらは要約であって権威ある一覧ではない)
+- **`permissionDecision` は意図的に省く**。`"allow"` は **ExitPlanMode の承認ゲートそのものを
+  飛ばす** — この tool は「プランを利用者に見せて承認を取る」ためのものなので、hook が allow を
+  返すと利用者がプランを見ないまま実装に入る (docs が `"allow"` に `updatedInput` との組を
+  要求しているのもこの経路)。`"defer"` は "Ignored when `permissionDecision` is `\"defer\"`" で
+  肝心の `additionalContext` が無視される。省略すれば承認フローを残したまま所見だけ入る
+- ただし**「`permissionDecision` を省いて `additionalContext` だけ返す」形を直接述べた記述は
+  docs に無い** (明示的に探して不在を確認)。最も近いのは "Other exit codes" の "Each field the
+  event supports is honored, including `permissionDecision`, `additionalContext`, ..." で、
+  根拠にはなるが保証ではない。仕様として断定せず、既定を `block` に据え置いた理由でもある
+- **完了時に `systemMessage` で所要時間と結果を出す**。
+  `[exitplan-review] クロスレビュー完了 (4分12秒): codex=clean, cursor=指摘あり → プランを差し戻し`。
+  `log()` の stderr は exit 0 の hook では debug log 止まりで利用者に届かない。
+  通知にレビュー本文・diff・外部 AI の生出力は入れない (方針は `hooks/_common/notify.py`)
+- `DEFAULT_MAX_REVIEWS` は **2 のまま**。timeout 短縮で最悪 20 分まで下がっており、
+  2 回目は「修正後のプラン」を見る回で機能の主目的そのもの。10 分で足りる利用者は
+  `EXTERNAL_AI_REVIEW_MAX=1` を設定する (README に明記)
+- stdout に JSON を 2 つ書かないよう、通知は溜めて `emit()` で 1 回だけ出す
+
+### 3. post-implementation-review: timeout 短縮と完了通知
+
+- **既定 timeout を変更 (挙動変更)**: cursor **600s → 300s**。Stop は編集のあった全ターンで
+  発火するので待ち時間の期待値が体感を決める。`EXTERNAL_AI_POST_REVIEW_TIMEOUT` で変更可
+  (上限 600s = 従来値)
+- **`state.IN_FLIGHT_TTL_SEC` の導出元を既定値から上限へ変更** (`cursor.MAX_TIMEOUT_SEC + 300`
+  = 900s で結果的に同値)。既定値から導くと、timeout を短く設定したセッションが、長く設定した
+  別セッションの in-flight を「TTL 超過」とみなして横取りする。TTL は全セッションで同一である
+  必要がある
+- 同じ理由で、hooks.json の hook timeout に対する予算テストも**既定値ではなく上限**で
+  検証するように変更した (`test_cli_timeout.py::TestTimeoutBudget` /
+  `test_review_set.py::TestTimeoutBudgets`)。既定値のままだと「env を上限まで設定した
+  最悪ケース」を誰も守らなくなる
+- **レビューを走らせたターンは `systemMessage` で所要時間・ファイル数・結果を出す**。
+  `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (Claude に対応を依頼しました)`。
+  既存の除外・繰り越し通知と同じ `systemMessage` にまとめる (block 時は `decision` と同居)。
+  編集 0 件のターンは従来どおり無出力
+- **`hooks.json` は変更していない**。既定を下げたぶん hook timeout も下げると env で
+  伸ばせる上限を塞いでしまう。ceiling は現行の予算式に収まる (ExitPlanMode: 1500 + 15 < 1560、
+  Stop: git 59 + cursor 600 + kill 15 = 674 < 690)
+
+### 4. post-implementation-review: レビュー頻度としきい値
+
+編集があれば差分サイズに関係なく毎ターン有料レビューが走っていた (typo 1 行でも)。
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` (無効) | 送る diff の変更行数がこれ未満なら見送り |
+| `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` (無効) | 前回レビュー**完了**から N 秒未満なら見送り (セッション単位) |
+
+- **どちらの見送りも pending を消費しない**。cooldown は `claim_pending()` の**前**に判定して
+  claim 自体を行わず、min-lines は diff を見ないと行数が分からないので claim 後に
+  `restore_claim()` で戻す (cursor 失敗時と同じ経路。hash も記録しない)。貯まった変更は
+  次に走るレビューへまとめて載る
+- **min-lines は「そのターンの gate」であって遅延キューではない**: しきい値未満の編集で
+  セッションを終えると、そのファイルは追加の編集が来るまでレビューされない。pending の
+  タイムスタンプは `setdefault(p, now)` で再投入のたびに更新されるため、経過時間で開放弁を
+  作ろうとすると「変更の古さ」ではなく「最後に積まれてからのターン数」を測ることになる。
+  0 (無効) を既定にし、トレードオフを README に明記した上で意図的に採用した挙動
+- `last_review_at` を状態ファイルに追加。`_normalize()` は dict のキーだけをループしていたため、
+  スカラーを足すだけだと読むたびに 0 に戻って cooldown が永久に効かない (明示的に引き継ぐ)
+- 行数カウントのヘッダ判定は **末尾の空白を含めて** `--- ` / `+++ ` で見る。unified diff の
+  ファイルヘッダは必ずパスの前に空白が入るが、`--` で始まる中身の行 (CLI オプションの説明、
+  SQL コメント等) を削除すると `---quiet` になる。空白を見ないとそういう差分が 0 行と
+  数えられ、しきい値に引っかかって実質的な変更が黙って skip される
+- pending が空のターンでは cooldown 通知を出さない (毎ターン出ると通知自体が読まれなくなる)
+- 「docs / 設定ファイルだけの差分を skip」は既存の `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` /
+  `EXTERNAL_AI_POST_REVIEW_EXCLUDE` で足りるため新設しない (変数名の氾濫を避ける)。
+  README のコスト節から誘導する
+- README に**コストの目安**を追加。hook ごとの起動タイミングと 1 セッションあたりの回数
+  (post-implementation-review だけがターン数に比例して上限なし) を明記した
+
+### 5. PR レビュー (敵対的レビュー) の反映
+
+- **変更行数のカウントを接頭辞判定から hunk 基準に変更**。`-- コメント` (SQL / Lua /
+  Haskell) を削除した行は `--- コメント` に、`++ 何か` を追加した行は `+++ 何か` になり、
+  ファイルヘッダと**接頭辞では原理的に区別できない**。`"---"` → `"--- "` と直しても
+  「空白付きコメント」という最も普通の書き方が落ちたままだった (実測 3 行中 0 行)。
+  `sections` の 1 要素は 1 ファイル分の diff なので、**最初の `@@` 以降だけを数える**のが
+  唯一正確。`MIN_LINES` 既定 0 のため既定利用者への影響は無いが、有効化時に
+  「コメント行だけ消したターン」が黙って skip されていた
+- **`EXTERNAL_AI_REVIEW_MAX` 上限到達を `systemMessage` で通知**。上限に達したターンは
+  stdout が完全に無出力で、利用者から見ると「レビューが動かなくなった」と区別が付かなかった
+  — この batch が潰そうとしている「無言」そのものだった。`reserve_slot()` が
+  「上限到達」と「同一プランの再確認」を返り値で区別し、前者だけ通知する
+  (後者は結果が変わらないので黙る)
+- **`settings.count()` を `float()` 経由に変更**。`int("1800.0")` / `int("6e2")` は
+  `ValueError` になるため、`EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC=1800.0` が既定 (= 0 =
+  無効) に落ち、**設定したつもりの抑制が黙って効かない**状態だった。`duration()` は同じ
+  文字列を受け付けるので解釈が変数ごとに食い違ってもいた
+- `COLLECT_BUDGET_SEC` のコメントが git 予算を過少計上していた (`symlink_map` の
+  `ls-files` が抜けていた) のを実際の式 (59s) に合わせた。予算自体は変更なし
+- README の `EXTERNAL_AI_REVIEW_MAX` の説明を「最大ブロック回数」→「最大レビュー回数」に。
+  `MODE=context` では差し戻さないので、ブロック回数という表現と実際の意味がずれていた
+
+### 6. PR の外部レビュー指摘の反映 (設定値の検証 / claim の復元保証)
+
+- **`nan` / `inf` を設定値として弾く**。`float()` は `nan` / `inf` / `-inf` /
+  `Infinity` を大文字小文字を問わず受理する。`nan` は **NaN との比較が常に False** な
+  ため `duration()` の `parsed <= 0` を素通りし、`min(nan, maximum)` も NaN のまま
+  `Popen.communicate(timeout=nan)` へ渡って `ValueError` になっていた。`count()` 側も
+  `float()` 経由に変えた際に `int(nan)` (ValueError) / `int(inf)` (OverflowError) が
+  try の外へ抜ける穴ができていた。判定は `_finite()` に一本化し、両方から使う
+- **claim の復元を例外に対して保証**。`_review_claim()` を「claim を取って必ず後始末する
+  薄い外枠」と「実処理 (`_run_review()`)」に分割し、実処理から出た**あらゆる例外**で
+  `restore_claim()` を通すようにした。従来は claim 取得後に例外が出ると in-flight に
+  残ったまま hook が死に、`__main__` の fail-open はプロセスを守るだけで状態を戻さない
+  ため、TTL (900s) 超過まで pending が戻らず**レビューが 15 分沈黙**していた。
+  上記の非有限 timeout はその一経路にすぎず、**例外の出どころを 1 つずつ塞ぐより
+  「claim は必ず戻る」を構造で保証するほうが強い**という判断
+- 復元は claim 全件に対して行う。レビュー済みのものが混ざっても hash 一致で次回の
+  `_collect_diffs` が落とすので二重レビューにはならず、除外済みパスが戻っても除外は
+  claim のたびに再適用されるので外部に送られることはない
+
+- **`count()` が小数を黙って切り捨てるのをやめ、既定値へ倒すようにした**。
+  `EXTERNAL_AI_REVIEW_MAX=0.5` が `int()` で `0` になり、**この関数の `0` は「無効化」
+  という特別な意味を持つ**ため、打ち間違いが「既定で動く」でも「エラーで気付く」でも
+  なく **黙ってプランレビューが消える** に着地していた。cooldown / 最小行数も同様に
+  短縮・無効化されていた。判定は「値が整数か」であって「表記が整数か」ではないので、
+  `600.0` / `6e2` / `2.0` は引き続き受理する
+- `count()` の入力検証は 3 段になった (先に落ちたものが勝つ): **1.** 有限か
+  (`_finite`: 未設定 / 非数値 / `nan` / `inf` → 既定値) → **2.** 整数か
+  (`is_integer`: `0.5` `1.5` → 既定値) → **3.** 範囲 (`max(0, ...)`: 負数 → `0`)。
+  順序と各段の役割を docstring に表で残した
+- **`duration()` は小数を受理し続ける** (2 段目を持たない)。timeout には秒の小数指定に
+  意味があり、かつ 0 以下を既定へ倒すので `count()` と同種の事故が起きないため。
+  両者の扱いが違う理由は双方のコメントに明記した
+
+- **`EXTERNAL_AI_REVIEW_MAX` の説明と最悪ケース見積もりを実装に合わせた (docs のみ)**。
+  この上限が数えているのは **「指摘ありで返ってきた回数」だけ** で、指摘なし
+  (`REVIEW_CLEAN`) とレビュアー失敗は `release_slot()` が枠を戻すのでカウントされない。
+  README は「承認前の待ちは最悪 `REVIEW_MAX` × timeout = 20 分」と書いていたが、
+  **プラン内容を変えれば上限に達していなくても毎回レビューが走る**ので、
+  セッション全体の総待ち時間に上限は無い。「プラン 1 本あたりの待ち」「差し戻しの
+  往復の上限」「セッション全体 (上限なし)」を分けて書き直し、総量を抑える手段
+  (timeout / レビュアー選択 / 無効化) へ誘導するようにした。コスト表の
+  exitplan-review の行も「最大 `REVIEW_MAX` 回」→「上限なし」に訂正
+- **実装は変えていない**。枠を戻すのは意図的な設計で、完了した試行を数えると
+  「別のプランで 2 回 clean だった利用者が、その後の異なるプランでレビューを
+  受けられない」という後退になる。レビューはプランごとに走るものなので、
+  上限は「差し戻しの往復で前に進まなくなる」ことだけを守るのが正しい。
+  この意図と帰結を `release_slot()` の docstring にも残した
+- 実際の意味を `tests/test_settings_flow.py::TestWhatTheBudgetActuallyCaps` で固定
+  (指摘なし・失敗は枠を消費しない / 指摘ありだけが数えられ上限で止まる)。
+  docs が再び実装から乖離したらテストが落ちる
+
+### 既知の未対応 (別途起票)
+
+**PreToolUse の top-level `decision` / `reason` は docs 上 deprecated** で、
+`"block"` → `hookSpecificOutput.permissionDecision: "deny"` へのマッピングが明記されている。
+exitplan-review の既定 block 経路は 0.2.0 からこの deprecated 形で動いており、本 batch
+(DX 改善) の範囲を超えるため移行していない。移行は core の差し戻し経路を触るので、実機検証を
+伴う独立の変更として扱うべき。**PostToolUse / Stop の top-level `decision` / `reason` は現行
+フォーマットのまま**なので post-implementation-review 側は対象外。
+
+### 見送ったもの
+
+- **`async: true` / `asyncRewake` による非ブロック Stop** (当初案の 1 つ) — **実装しない**。
+  公式 docs を逐語確認したところ、これらは hook の JSON 出力ではなく `type: "command"`
+  ハンドラの**設定**フィールドで、かつ「Async hooks can't block or control Claude's behavior:
+  response fields like `decision`, `permissionDecision`, and `continue` have no effect」と
+  明記されている。この hook の中核は `decision: "block"` による差し戻しなので、async 化すると
+  機能が無効になる。対応イベントの一覧 (Stop が対象か) も docs に記載が無い
+
+### テスト
+
+- `hooks/_common/tests/test_settings.py` (新規) — パーサの解釈規則と通知の書式を網羅
+- `hooks/explore-parallel/tests/test_disable_switch.py` (新規) — スイッチ + 「post は止めない」
+- `hooks/exitplan-review/tests/test_settings_flow.py` (新規) — スイッチ / AND / レビュアー選択 /
+  context モード / 完了通知
+- `hooks/post-implementation-review/tests/test_throttle_flow.py` (新規) — min-lines / cooldown /
+  完了通知 / timeout 解決 / 無効化スイッチ
+- 各項目に**「env 未設定なら 0.5.0 と同じ挙動」の回帰テスト**を置いた
+- 3 hook のテスト基底クラスが `EXTERNAL_AI_` **接頭辞で環境変数を一掃**するようにした。
+  個別に列挙する方式だと変数が増えるたびに漏れ、開発者 shell の設定で「未設定時」の
+  回帰テストが嘘になる
+
 ## 0.5.0
 
 **post-implementation-review: 機密・非コードファイルを外部に送らない除外機構 + diff 予算を

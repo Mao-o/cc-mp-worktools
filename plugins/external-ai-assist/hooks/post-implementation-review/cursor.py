@@ -10,17 +10,39 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _common import cursorcli, subproc
+from _common import cursorcli, settings, subproc
 
 NAME = cursorcli.NAME
-TIMEOUT_SEC = 600
+
+#: 既定の timeout。**0.6.0 で 600 → 300 に短縮** (挙動変更)。Stop は編集のあった全ターンで
+#: 発火するので、待ち時間の期待値が体感を決める。長考させたい場合は
+#: `EXTERNAL_AI_POST_REVIEW_TIMEOUT=600` で従来値に戻せる。
+TIMEOUT_SEC = 300
+
+#: env で伸ばせる上限 (従来の既定値)。hooks.json の Stop timeout 690s は
+#: 「git 予算 59s + cursor 600s + kill 猶予 15s」で組んであるので、ここを上げるなら
+#: hooks.json 側も上げる必要がある (`tests/test_review_set.py::TestTimeoutBudgets`)。
+MAX_TIMEOUT_SEC = 600
+
 MAX_OUTPUT_BYTES = 16000
+
+ENV_TIMEOUT = "EXTERNAL_AI_POST_REVIEW_TIMEOUT"
 
 _PROMPT_FILE = Path(__file__).parent / "prompts" / "post-implementation-cursor.md"
 
 
 def is_available() -> bool:
     return cursorcli.is_available()
+
+
+def timeout_sec() -> float:
+    """実効 timeout。未設定なら `TIMEOUT_SEC`、`MAX_TIMEOUT_SEC` で clamp。
+
+    **`state.IN_FLIGHT_TTL_SEC` はこの値ではなく `MAX_TIMEOUT_SEC` から導出する**。
+    設定値から導けば、timeout を短くしたセッションが、長く設定した別セッションの
+    in-flight を「TTL 超過」とみなして横取りしてしまう。
+    """
+    return settings.duration(ENV_TIMEOUT, TIMEOUT_SEC, MAX_TIMEOUT_SEC)
 
 
 def review(diff_text: str) -> str | None:
@@ -35,6 +57,6 @@ def review(diff_text: str) -> str | None:
     )
     return subproc.run_for_output(
         cursorcli.readonly_argv(full_prompt),
-        timeout_sec=TIMEOUT_SEC,
+        timeout_sec=timeout_sec(),
         max_output_chars=MAX_OUTPUT_BYTES,
     )

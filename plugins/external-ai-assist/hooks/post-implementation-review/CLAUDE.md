@@ -37,7 +37,7 @@ post-implementation-review/
 ├── stategc.py          $TMPDIR の TTL GC (旧 post-review-markers も掃除)
 ├── gitscan.py          パス正規化 + git status スナップショット + パス単位 diff
 ├── exclusion.py        外部に送らないファイルの判定 (既定 glob / 追加 glob / CODE_ONLY)
-├── cursor.py           cursor agent 呼び出し (TIMEOUT_SEC = 600。起動は hooks/_common/subproc.py)
+├── cursor.py           cursor agent 呼び出し (既定 300s / 上限 600s。起動は hooks/_common/subproc.py)
 ├── prompts/
 │   └── post-implementation-cursor.md
 └── tests/              受け入れ基準の unittest スイート
@@ -160,21 +160,31 @@ diff が混入する (旧 state の `[.]env` が tracked の `.env` を拾う経
 と stderr に出す。内容は出さない。`systemMessage` は公式 docs の全イベント共通フィールドで
 Stop でも discard されないが、対話 UI 以外での表示は未確認なので stderr を併用している。
 
-### TTL は cursor の timeout を超える必要がある
+### TTL は cursor の timeout 上限を超える必要がある
 
-`IN_FLIGHT_TTL_SEC = cursor.TIMEOUT_SEC + 300`。これは運用上の推奨ではなく**正しさの制約**で、
+`IN_FLIGHT_TTL_SEC = cursor.MAX_TIMEOUT_SEC + 300`。これは運用上の推奨ではなく**正しさの制約**で、
 下回ると正常に走っている in-flight を別の Stop が途中で横取りする。手で乖離できないよう
-`cursor.TIMEOUT_SEC` から導出している (`tests/test_state.py::test_ttl_derives_from_cursor_timeout`)。
+cursor 側から導出している (`tests/test_state.py::test_ttl_derives_from_cursor_timeout_ceiling`)。
+
+**導出元は既定値 (`TIMEOUT_SEC`) ではなく上限 (`MAX_TIMEOUT_SEC`)** (0.6.0)。
+`EXTERNAL_AI_POST_REVIEW_TIMEOUT` で timeout が可変になったため、既定値から導くと
+「timeout を短く設定したセッションが、長く設定した別セッションの in-flight を TTL 超過と
+みなして奪う」経路ができる。TTL は全セッションで同じ値でなければならない。
+
+同じ理由で、hooks.json の hook timeout に対する予算テストも上限側で検証する
+(`tests/test_review_set.py::TestTimeoutBudgets`)。既定値で見ると「env を上限まで設定した
+最悪ケース」を誰も守らなくなる。
 
 ## ロックは 2 種類。ネストしたまま cursor を回さない
 
 | ロック | 対象 | 保持時間 |
 |---|---|---|
 | state lock | 状態ファイルの read-modify-write | 短時間 (ms) |
-| cursor lock | cwd をキーに `cursor agent` を直列化 | `review()` 実行中ずっと (最大 600s) |
+| cursor lock | cwd をキーに `cursor agent` を直列化 | `review()` 実行中ずっと (既定 300s / 上限 600s) |
 
 Stop の取得順は **cursor lock → state lock → (state 解放) → review**。
-state lock を握ったまま review すると、全セッションの PostToolUse が最大 600 秒ブロックされる。
+state lock を握ったまま review すると、全セッションの PostToolUse が cursor の timeout 上限
+(600 秒) までブロックされる。
 PostToolUse は state lock しか取らないため、この順序で循環待ちは起きない。
 
 **cursor lock に stale claim TTL を置いていないのは意図的**。flock はプロセス終了時に
@@ -243,7 +253,39 @@ Stop でレビューされる — 意図した挙動)。つまり MAX=2 は事�
 
 `EXTERNAL_AI_POST_REVIEW_MAX=0` を無効化スイッチとして使っていた環境があるため、
 **`0` のときだけ**後方互換で無効化として解釈する (それ以外の値は無視)。
-新しい正規のスイッチは `EXTERNAL_AI_POST_REVIEW=0`。
+新しい正規のスイッチは `EXTERNAL_AI_POST_REVIEW=0`。**撤廃済みの死んだ別名**なので
+`EXTERNAL_AI_POST_REVIEW` が設定されていればそちらが勝つ — exitplan-review の
+`EXTERNAL_AI_REVIEW_MAX` は現役の回数予算で AND で効き、扱いが違う (0.6.0)。
+
+## レビューの頻度と待ち時間 (0.6.0)
+
+Stop は編集のあった全ターンで発火し、その間ブロックする。0.5.0 は利用者向けの出力が
+一切無く (stderr は exit 0 の hook では debug log 止まり)、最大 11 分の無言になっていた。
+
+| 環境変数 | 既定 | 効果 |
+|---|---|---|
+| `EXTERNAL_AI_POST_REVIEW_TIMEOUT` | `300` | cursor の timeout (上限 `cursor.MAX_TIMEOUT_SEC` = 600) |
+| `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` | 送る diff の変更行数がこれ未満のターンは見送り |
+| `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` | 前回レビュー**完了**から N 秒未満のターンは見送り |
+
+**見送りは pending を消費しない**。cooldown は `claim_pending()` の前に判定して claim 自体を
+行わず (cursor lock も取らない)、min-lines は diff を見ないと行数が分からないので claim 後に
+`restore_claim()` で戻す (cursor 失敗時と同じ経路。hash も記録しない)。
+
+**min-lines は「そのターンの gate」であって遅延キューではない**。しきい値未満の編集で
+セッションを終えると、そのファイルは追加の編集が来るまでレビューされない。pending の
+タイムスタンプは `setdefault(p, now)` で再投入のたびに更新されるため、経過時間で開放弁を
+作ろうとすると「変更の古さ」ではなく「最後に積まれてからのターン数」を測ってしまう。
+既定 `0` (無効) にしてトレードオフを README に明記した上で、意図的にこの挙動を採っている
+(`tests/test_throttle_flow.py::TestMinLines`)。
+
+cooldown の起点 `last_review_at` は状態ファイルに持つ (= **セッション単位**。作業ツリー単位
+なのは cursor lock だけ)。`_normalize()` は dict のキーだけをループしていたので、スカラーを
+足すときは明示的に引き継ぐこと — 引き継ぎ漏れは「読むたびに 0 に戻って cooldown が永久に
+効かない」という静かな壊れ方をする。
+
+完了時は所要時間・ファイル数・結果を `systemMessage` に出す (除外・繰り越し通知と同じ枠に
+まとめ、block 時は `decision` と同居)。レビュー本文は入れない (方針は `_common/notify.py`)。
 
 ## テスト
 
@@ -272,6 +314,9 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
+| しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
+| レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
+| env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると
@@ -287,7 +332,7 @@ hook は合成 stdin で直接起動できるので `/plugin` 更新なしで手
 3. `cat $TMPDIR/post-implementation-review/state/<session_id>.json` —
    `pending` が空なら「このセッションはこのターンで何も編集していない」が正しい判定
 4. `in_flight` にエントリが残り続けている → 前回の Stop が kill された。
-   TTL (`cursor.TIMEOUT_SEC + 300` 秒) 経過後の Stop で回収される
+   TTL (`cursor.MAX_TIMEOUT_SEC + 300` = 900 秒) 経過後の Stop で回収される
 5. stderr の `[post-implementation-review]` プレフィクス付きログを確認
 6. 他セッションが `cursor agent` を走らせている間は skip する
    (「同一作業ツリーで別セッションがレビュー中」ログ)

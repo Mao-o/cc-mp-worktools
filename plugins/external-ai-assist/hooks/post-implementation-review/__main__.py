@@ -22,9 +22,25 @@ Bash 経由の変更も「どのセッションがやったか」付きで拾え
 in-flight 予約と TTL 回収の設計は state.py の docstring を参照。
 外部に送らないファイルの判定 (既定除外 glob / 追加 glob / CODE_ONLY) は exclusion.py。
 
+## 0.6.0 で入れた「頻度と待ち時間」の制御
+
+Stop は編集のあった全ターンで発火し、最大 `cursor.timeout_sec()` 秒ブロックする。
+0.5.0 は利用者向けの出力が一切無く (stderr は debug log 止まり)、最大 11 分の無言に
+なっていた。次で調整・可視化する:
+
+| 環境変数 | 既定 | 効果 |
+|---|---|---|
+| `EXTERNAL_AI_POST_REVIEW` | `1` | この hook 自体の on/off |
+| `EXTERNAL_AI_POST_REVIEW_TIMEOUT` | `300` | cursor の timeout (上限 600) |
+| `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` | 変更行数がこれ未満のターンは見送り |
+| `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` | 前回レビュー完了から N 秒は見送り |
+
+見送り (`MIN_LINES` / `COOLDOWN_SEC`) では **pending を消費しない**ので、貯まった
+変更は次に走るレビューへまとめて載る。所要時間と結果は `systemMessage` に出す。
+
 exit 0 (JSON なし): Stop を妨げない
-exit 0 + {"systemMessage": ...}: 除外・繰り越し・切り詰めの通知のみ (Stop を妨げない)
-exit 0 + {"decision": "block", "reason": ...}: Claude にレビュー結果を返し追加対応を促す
+exit 0 + {"systemMessage": ...}: 完了要約 / 除外・繰り越し・見送りの通知 (Stop を妨げない)
+exit 0 + {"decision": "block", "reason": ..., "systemMessage": ...}: レビュー結果を返す
 """
 from __future__ import annotations
 
@@ -40,7 +56,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import hooklog, sentinel  # noqa: E402
+from _common import hooklog, notify, sentinel, settings  # noqa: E402
 
 import cursor  # noqa: E402
 import exclusion  # noqa: E402
@@ -64,16 +80,24 @@ MAX_FILE_DIFF_BYTES = 32000
 # 次の Stop でレビューする (silent truncation にしない)。
 MAX_REVIEW_PATHS = 60
 
-# パス単位 diff 収集の時間予算。Stop の hook timeout 690s のうち cursor が最大 600s +
+# パス単位 diff 収集の時間予算。Stop の hook timeout 690s のうち cursor が上限 600s
+# (`cursor.MAX_TIMEOUT_SEC`。既定は 300s だが env で伸ばせるので上限で見る) +
 # kill 猶予 15s (3 × KILL_GRACE_SEC) を使うため、git に回せるのは約 75s。他の git 呼び出し
-# (rev-parse 2 + ls-files 10 + rev-parse 2) を引いた残りに収まるよう決めている
-# (式は tests/test_review_set.py::TestTimeoutBudgets で固定)。
+# (rev-parse 2 × 2 + ls-files 10 × 2 [symlink_map と untracked_among] + 予算判定後に走る
+# 最後の 1 パスの path_diff 5) を引いた残りに収まるよう決めている
+# (式は tests/test_review_set.py::TestTimeoutBudgets で固定。合計 59s)。
 COLLECT_BUDGET_SEC = 30
 
 # systemMessage / stderr に列挙するファイル名の上限 (それ以上は件数だけ)
 MAX_LISTED_NAMES = 10
 
 _EDIT_TOOLS = ("Write", "Edit", "NotebookEdit")
+
+ENV_ENABLED = "EXTERNAL_AI_POST_REVIEW"
+ENV_LEGACY_MAX = "EXTERNAL_AI_POST_REVIEW_MAX"
+ENV_BASH_TRACKING = "EXTERNAL_AI_POST_REVIEW_BASH_TRACKING"
+ENV_MIN_LINES = "EXTERNAL_AI_POST_REVIEW_MIN_LINES"
+ENV_COOLDOWN = "EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC"
 
 
 log = hooklog.make_logger("post-implementation-review")
@@ -88,17 +112,17 @@ def review_enabled() -> bool:
     v0.2.0 の `EXTERNAL_AI_POST_REVIEW_MAX` はレビュー回数の予算だったが、ターン
     スコープ化で意味を失ったため撤廃した。ただし `=0` を「hook の無効化スイッチ」
     として使っている既存環境があるので、その用法だけは互換のため生かしている
-    (0 以外の数値は無視 = 回数制限は掛からない)。
+    (0 以外の数値は無視 = 回数制限は掛からない)。**撤廃済みの死んだ別名**なので、
+    新しい変数が設定されていればそちらが勝つ。exitplan-review の
+    `EXTERNAL_AI_REVIEW_MAX` は現役の回数予算なので AND で効き、扱いが違う。
     """
-    raw = os.environ.get("EXTERNAL_AI_POST_REVIEW", "").strip().lower()
-    if raw:
-        return raw not in ("0", "false", "off", "no")
-    return os.environ.get("EXTERNAL_AI_POST_REVIEW_MAX", "").strip() != "0"
+    if settings.raw(ENV_ENABLED):
+        return settings.flag(ENV_ENABLED, default=True)
+    return settings.raw(ENV_LEGACY_MAX) != "0"
 
 
 def bash_tracking_enabled() -> bool:
-    raw = os.environ.get("EXTERNAL_AI_POST_REVIEW_BASH_TRACKING", "").strip().lower()
-    return raw not in ("0", "false", "off", "no")
+    return settings.flag(ENV_BASH_TRACKING, default=True)
 
 
 def diff_hash(text: str) -> str:
@@ -211,6 +235,14 @@ def handle_stop(payload: dict) -> None:
         log("git worktree 外のため skip")
         return
 
+    # cooldown は claim の**前**に見る (claim すると pending を消費してしまう)。
+    # cursor lock も取らない — ロックを取らずに済むなら他セッションを待たせない。
+    cooled = _cooldown_notice(session_id)
+    if cooled:
+        log(cooled)
+        json.dump(_with_notices({}, [cooled]), sys.stdout, ensure_ascii=False)
+        return
+
     # cursor lock を先に取る。取れなければ claim もしないので pending は温存される。
     # state lock は claim_pending() の内側で完結し、cursor 実行中は保持しない。
     with state.cursor_lock(root) as acquired:
@@ -223,19 +255,81 @@ def handle_stop(payload: dict) -> None:
         json.dump(output, sys.stdout, ensure_ascii=False)
 
 
-def _review_claim(payload: dict, session_id: str, root: str) -> dict:
-    """claim → 除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
+def _cooldown_notice(session_id: str) -> str | None:
+    """cooldown 中なら利用者向けの一文を返す (そうでなければ None)。
 
-    利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
-    `decision` / `reason` と同居させる。公式 docs の共通フィールドで Stop でも有効)。
-    systemMessage が表示されない環境でも stderr に同じ内容を残し、除外そのものは通知の
-    配信に依存しない。
+    `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` は「前回レビュー完了から N 秒未満なら
+    今回は走らせない」。**pending は消費しない**ので、貯まった変更は cooldown 明けの
+    Stop でまとめて 1 回のレビューに載る。
+
+    pending が空のターンでは黙る。編集していないターンまで毎回通知すると、
+    通知そのものがノイズになって読まれなくなる。
+
+    **副作用として、pending が空で in-flight だけが TTL 超過している場合は cooldown を
+    素通りして `claim_pending()` の回収経路に入る**。cooldown (`> IN_FLIGHT_TTL_SEC` の
+    設定時のみ起きる) より「kill されたレビューを取りこぼさない」ほうを優先する。
+    """
+    cooldown = settings.count(ENV_COOLDOWN, 0)
+    if cooldown <= 0:
+        return None
+    remaining = cooldown - (time.time() - state.last_review_at(session_id))
+    if remaining <= 0:
+        return None
+    waiting = state.pending_count(session_id)
+    if not waiting:
+        return None
+    return (
+        f"前回レビューから {cooldown} 秒 ({ENV_COOLDOWN}) 未満のためレビューを見送り: "
+        f"{waiting} ファイルは残り約 {int(remaining)} 秒後のターンでまとめてレビューします"
+    )
+
+
+def _review_claim(payload: dict, session_id: str, root: str) -> dict:
+    """claim を取り、**何が起きても握りっぱなしにしない**ことを保証する薄い外枠。
+
+    claim を取った後で例外が出ると、in-flight にエントリが残ったまま hook が死ぬ。
+    復元されるのは TTL (`IN_FLIGHT_TTL_SEC` = 900s) 超過後の Stop なので、その間
+    このセッションの変更は pending へ戻らず**レビューが 15 分沈黙する**。呼び出し元の
+    fail-open (`__main__` の `except Exception`) はプロセスを守るだけで状態は戻さない。
+
+    実際の経路: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` に非有限値が入ると
+    `Popen.communicate(timeout=nan)` が `ValueError` を投げる (この穴は
+    `_common/settings.py` 側でも塞いだが、**例外の出どころを 1 つ塞ぐより
+    「claim は必ず戻る」を構造で保証するほうが強い**)。
+
+    復元は `claimed` 全件に対して行う (レビュー済みのものが混ざっても、hash 一致で
+    次回の `_collect_diffs` が落とすので二重レビューにはならない)。除外済みパスが
+    戻っても、除外は claim のたびに再適用されるので外部に送られることはない。
     """
     claim = state.claim_pending(session_id)
     if claim is None:
         log("このセッションが変更したファイルが無いため skip")
         return {}
     claim_id, claimed = claim
+    try:
+        return _run_review(session_id, root, claim_id, claimed)
+    except Exception as e:
+        log(f"レビュー中に例外 (claim を pending へ戻す): {e}")
+        state.restore_claim(session_id, claim_id, claimed)
+        return _with_notices(
+            {},
+            [
+                f"レビューを完了できませんでした ({type(e).__name__})。"
+                f"{len(claimed)} ファイルは次のレビューに持ち越します"
+            ],
+        )
+
+
+def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -> dict:
+    """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
+
+    利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
+    `decision` / `reason` と同居させる。公式 docs の共通フィールドで Stop でも有効)。
+    systemMessage が表示されない環境でも stderr に同じ内容を残し、除外そのものは通知の
+    配信に依存しない。
+
+    ここから送出された例外は `_review_claim` が拾って claim を復元する。
+    """
     notices: list[str] = []
 
     rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
@@ -282,29 +376,91 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         state.complete_claim(session_id, claim_id, {})
         return _with_notices({}, notices)
 
+    # しきい値は「実際に送る diff」で測る (除外・繰り越し後の量が課金に対応するため)
+    min_lines = settings.count(ENV_MIN_LINES, 0)
+    changed_lines = _count_changed_lines(batch.sections)
+    if min_lines > 0 and changed_lines < min_lines:
+        # 消費せず pending に戻す (cursor 失敗時と同じ経路。hash も記録しない)
+        state.restore_claim(session_id, claim_id, batch.submitted)
+        notices.insert(
+            0,
+            f"変更 {changed_lines} 行が {ENV_MIN_LINES}={min_lines} に満たないため"
+            f"レビューを見送り: {len(batch.submitted)} ファイルは次のレビューにまとめます",
+        )
+        log(notices[0])
+        return _with_notices({}, notices)
+
     diff_text = "\n".join(batch.sections)
     log(f"Cursor によるレビューを実行 ({len(batch.submitted)} ファイル, {len(diff_text)} chars)")
+    started = time.monotonic()
     result = cursor.review(diff_text)
+    elapsed = time.monotonic() - started
+    state.mark_review_done(session_id)
+    summary = f"差分レビュー完了 ({notify.format_elapsed(elapsed)}, {len(batch.submitted)} ファイル)"
 
     if not result:
         log("Cursor レビュー失敗 (fail-open、pending に戻す)")
         state.restore_claim(session_id, claim_id, batch.submitted)
+        notices.insert(0, f"{summary} → 結果を取得できず (timeout / 失敗)。次ターンに持ち越し")
         return _with_notices({}, notices)
 
     if is_clean_review(result):
         log("Cursor: REVIEW_CLEAN (block しない、レビュー済みとして確定)")
         state.complete_claim(session_id, claim_id, batch.hashes)
+        notices.insert(0, f"{summary} → 指摘なし")
         return _with_notices({}, notices)
 
     reason = build_reason(result)
     state.complete_claim(session_id, claim_id, batch.hashes)
     _save_review_copy(session_id, reason)
+    notices.insert(0, f"{summary} → 指摘あり (Claude に対応を依頼しました)")
     return _with_notices({"decision": "block", "reason": reason}, notices)
 
 
+def _count_changed_lines(sections: list[str]) -> int:
+    """diff の追加・削除行数を数える。
+
+    しきい値の単位を「ファイル数」ではなく行数にしているのは、typo 1 行の修正と
+    1 ファイル 300 行の書き換えを区別したいのが本設定の主旨だから。
+
+    **接頭辞でファイルヘッダを判別してはいけない**。`sections` の 1 要素は
+    `gitscan.path_diff` が返す 1 ファイル分の diff なので、`--- a/path` /
+    `+++ b/path` は必ず最初の `@@` より前に来る。逆に `@@` より後ろでは:
+
+    - `-- コメント` (SQL / Lua / Haskell) を削除した行が `--- コメント`
+    - `++ 何か` を追加した行が `+++ 何か`
+
+    になり、`"--- "` / `"+++ "` で弾くと中身の行まで落ちる。「SQL のコメント行
+    だけ消したターン」が 0 行と数えられ、`MIN_LINES` に引っかかって実質的な変更が
+    黙って skip される (最初の実装は `"---"` / `"+++"`、次が `"--- "` / `"+++ "`。
+    どちらも中身の行と区別できていなかった — 接頭辞では原理的に無理)。
+
+    **最初の `@@` 以降だけを数える**のが唯一の正確な方法。hunk ヘッダ自体は `@`
+    始まりなので数に入らず、中身がどんな文字列でも誤判定しない。`@@` を含まない
+    section (binary 差分など) は 0 行。
+    """
+    total = 0
+    for section in sections:
+        in_hunk = False
+        for line in section.splitlines():
+            if not in_hunk:
+                # ヘッダ領域 (`diff --git` / `index` / `---` / `+++`) を読み飛ばす
+                in_hunk = line.startswith("@@")
+                continue
+            if line.startswith(("+", "-")):
+                total += 1
+    return total
+
+
 def _with_notices(output: dict, notices: list[str]) -> dict:
-    if notices:
-        output["systemMessage"] = "[post-implementation-review] " + "\n".join(notices)
+    """利用者向け通知を `systemMessage` に載せる (組み立ては両 review hook 共通)。
+
+    書いてよい内容の線引き (要約と件数のみ。レビュー本文・diff は出さない) は
+    `_common/notify.py` の docstring を正典とする。
+    """
+    message = notify.compose("post-implementation-review", notices)
+    if message:
+        output["systemMessage"] = message
     return output
 
 
@@ -427,7 +583,7 @@ def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> Revi
       予算が残っていれば送る (first-fit)
 
     COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred_time として返す。
-    Stop 全体の hook timeout (690s) のうち cursor が最大 600s + kill 猶予 15s を使うため、
+    Stop 全体の hook timeout (690s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
     git に使える時間は約 75s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
     頭を押さえる。deferred は捨てずに pending へ戻す。
     """

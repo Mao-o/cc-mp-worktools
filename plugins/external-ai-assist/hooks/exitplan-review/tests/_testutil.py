@@ -20,7 +20,23 @@ for _p in (_HOOKS_DIR, _PKG_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from _common import settings  # noqa: E402  (sys.path 挿入後に import する)
+
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
+
+
+def clear_plugin_env(keep: dict | None = None) -> None:
+    """開発者 shell の `EXTERNAL_AI_*` を外す (`keep` に挙げたものだけ残す)。
+
+    「未設定時は従来どおり」の回帰テストは、開発者が shell で
+    `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` 等を export していると嘘になる。個別に列挙する
+    方式だと変数が増えるたびに漏れるので接頭辞で一掃する。`mock.patch.dict` は stop 時に
+    dict の中身を丸ごと元に戻すので、start した後に消したキーも自動で復元される。
+    """
+    keep = keep or {}
+    for key in [k for k in os.environ if k.startswith(settings.ENV_PREFIX)]:
+        if key not in keep:
+            del os.environ[key]
 
 # 2026-08-20 の Stop hook 実出力相当 (zh5.1): 前置き 1 文 + フェンス付き sentinel
 FENCED_CLEAN_WITH_PREAMBLE = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
@@ -51,7 +67,7 @@ class HookTestCase(unittest.TestCase):
         os.makedirs(self.tmpdir, exist_ok=True)
         self._env = mock.patch.dict(os.environ, {"TMPDIR": self.tmpdir})
         self._env.start()
-        os.environ.pop("EXTERNAL_AI_REVIEW_MAX", None)
+        clear_plugin_env()
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]
@@ -149,5 +165,17 @@ class HookTestCase(unittest.TestCase):
         self.assertIn("## クロスレビュー結果 (ExitPlanMode)", data.get("reason", ""))
         return data
 
-    def assertNotBlocked(self, output: str) -> None:
-        self.assertEqual(output, "", "block してはいけない出力が出ている")
+    def assertNotBlocked(self, output: str) -> dict:
+        """block も所見注入もしていないこと。返り値は出力 JSON (無出力なら {})。
+
+        0.6.0 から、ブロックしないターンでも所要時間と結果の要約を `systemMessage`
+        だけの JSON で出す。「出力が空」を非 block の判定基準にはできない。
+        """
+        if not output:
+            return {}
+        data = json.loads(output)
+        self.assertNotIn("decision", data, "block してはいけない出力に decision がある")
+        self.assertNotIn(
+            "hookSpecificOutput", data, "block してはいけない出力に所見注入がある"
+        )
+        return data

@@ -25,7 +25,23 @@ for _p in (_HOOKS_DIR, _PKG_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from _common import settings  # noqa: E402  (sys.path 挿入後に import する)
+
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
+
+
+def clear_plugin_env(keep: dict | None = None) -> None:
+    """開発者 shell の `EXTERNAL_AI_*` を外す (`keep` に挙げたものだけ残す)。
+
+    「未設定時は従来どおり」の回帰テストは、開発者が shell で
+    `EXTERNAL_AI_EXPLORE_PARALLEL` 等を export していると嘘になる。個別に列挙する
+    方式だと変数が増えるたびに漏れるので接頭辞で一掃する。`mock.patch.dict` は stop 時に
+    dict の中身を丸ごと元に戻すので、start した後に消したキーも自動で復元される。
+    """
+    keep = keep or {}
+    for key in [k for k in os.environ if k.startswith(settings.ENV_PREFIX)]:
+        if key not in keep:
+            del os.environ[key]
 
 # argv は NUL 区切りで記録する (プロンプト本文に改行や `--` が含まれるため)
 _RECORD_ARGV = "for a in \"$@\"; do printf '%s\\0' \"$a\"; done > {argv_file}\n"
@@ -72,6 +88,7 @@ class HookTestCase(unittest.TestCase):
             },
         )
         self._env.start()
+        clear_plugin_env()
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]
