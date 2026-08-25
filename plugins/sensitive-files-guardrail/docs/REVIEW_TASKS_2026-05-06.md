@@ -1339,6 +1339,12 @@ false positive 解消リリース**として独立実施。0.12.0 / 0.13.0 と�
     (`sensitive-files-guard` ⇄ `sensitive-files-guardrail`) を **後者に統一**
     する内部整理。enabledPlugins キー / marketplace entry / 設定 dir は不変。
     PR 6 でのさらなる rename は不要
+- **ハーネス委譲方針の明文化**: **完了 (commit 6b56a81, 2026-06-15。0.14.1 に
+  同梱)**。`docs/DESIGN.md`「ハーネス委譲方針 (defense-in-depth の一層)」に
+  ask_or_allow の範囲 / deny 固定の境界 / 撤去した特例の表 / `patterns.txt`
+  読込失敗の例外を記述。同日の commit 584afd1 (git ls-files hard-stop 特例の
+  撤去、`--format='%(objectname)'` 形の deny → ask_or_allow) がその実装側で、
+  CHANGELOG 0.14.1 には 0.19.1 で追記した (2026-08-23 追記)
 
 ### 2026-06-15: PR 6 着手中 (Unreleased, 1.0.0 予定) — E5 仕上げ
 
@@ -1391,6 +1397,53 @@ CHANGELOG.md に集約。E6 / D1 / D2 を続けて取り込み次第 1.0.0 と�
 | P6 | E6 (Edit/Write リッチ化) | 未着手 (PR 6 残) |
 | P6 | D1 / D2 (docs / tests 整理) | 未着手 (PR 6 残) |
 
+### 2026-08-23: docs 整合 (0.19.1) — 出荷版の確定と PR 6 残の再見積り
+
+コード変更なし。2026-08-22 の plugin 精査 (bd_092a232e-snw.7 / snw.8 / snw.10 /
+snw.20 / snw.25) で見つかった docs の不整合を解消した。
+
+- **E5 の出荷版を確定**: commit 3189d907 は tag `v0.14.0` に含まれる (= **0.14.0
+  同梱**)、docs 反映 (commit 7dfce44) は 0.14.1 に同梱。上の表の「Unreleased ✓」は
+  実際には **0.14.0 ✓** で、CHANGELOG の E5 記述も `## Unreleased` から
+  `## 0.14.0` の補遺へ移した
+- **ハーネス委譲方針 (commit 6b56a81) / git ls-files hard-stop 特例の撤去 (commit
+  584afd1)**: いずれも 0.14.1 の bump commit (9aaf56f) の祖先 = **0.14.1 に同梱**。
+  CHANGELOG 0.14.1 に追記し、DESIGN.md の撤去表を「1.0.0」→「0.14.1」に訂正
+- **D1 の再見積り**: 計画時 (0.5.0) は docs ≈ 700 行削減の想定だったが、0.19.0
+  時点で DESIGN 880 / MATRIX 374 / PATTERNS 336 / REVIEW_TASKS 670 + 1418 /
+  CHANGELOG 2936 行と 2 倍超に膨張し、「docs/ 全削除 + README 集約」は現実的で
+  なくなった。以下に分割して別 PR で扱う (bd_092a232e-snw.10):
+  - (a) 公開の保守者ガイド `docs/MAINTAINING.md` を新設してリンク切れを解消
+    (plugin root の `CLAUDE.md` は `claude plugin validate` が warning を出すため
+    この名前にした) — **本リリースで実施**
+  - (b) `REVIEW_TASKS_*.md` を plugin 外 (marketplace 直下の archive) へ退避し、
+    DESIGN.md からの参照 2 箇所を更新
+  - (c) CHANGELOG は直近数版を残し旧版を archive へ
+  - (d) MATRIX.md は README に圧縮せず維持 (mode 5 列の完全表は回帰検知の根拠)
+- **D2 の再見積り**: 目標 ≈ 500 件に対し実測は 0.14.0 674 → 0.19.1 827 (redact) /
+  79 (check) と増加が続く。削減目標は撤回し「同型ケースの subTest 化で重複を畳む」
+  に再定義する (bd_092a232e-snw.13)
+
+#### 完了状況サマリ (0.19.1 時点)
+
+| Pri / カテゴリ | タスク | 状態 |
+|---|---|---|
+| P2 | A5 / A6 / A7 / B4 / B5 | **0.6.0 ✓** |
+| P1 | A1 / A2 / A3 | **0.7.0 ✓** |
+| P3 | A4 / B2 / B3 | **0.8.0 ✓** |
+| P4 | E1 / E2 | **0.9.0 ✓** |
+| P5 | E3 / E4 | **0.10.0 ✓** |
+| P1 | F1 (hard-stop の segment 単位再評価) | **0.11.0 ✓** |
+| P2 | F2 (read-only first_token allow-list) | **0.12.0 ✓** |
+| — | plan mode LENIENT 差し戻し (HOTFIX) | **0.13.0 ✓** |
+| P1 | G1 / G2 / G3 (離脱分析対応) | **0.14.0 ✓** |
+| — | plugin 内部呼称統一 (rename) | **commit 52113a1 ✓** (2026-06-14) |
+| P6 | E5 (json/toml/yaml status) | **0.14.0 ✓** (commit 3189d907、docs 反映は 0.14.1) |
+| — | ハーネス委譲方針の明文化 (PR 6 追加項目) | **0.14.1 ✓** (commit 6b56a81、実装側は 584afd1) |
+| P6 | E6 (Edit/Write リッチ化) | 未着手 (bd_092a232e-snw.9) |
+| P6 | D1 (docs 整理) | 未着手・再見積り済み (bd_092a232e-snw.10)。(a) 公開保守者ガイド (docs/MAINTAINING.md) のみ 0.19.1 で先行 |
+| P6 | D2 (tests 整理) | 未着手・目標再定義 (bd_092a232e-snw.13) |
+
 ---
 
 ## 新規セッションでこのファイルを開いた時の手順
@@ -1414,5 +1467,5 @@ CHANGELOG.md に集約。E6 / D1 / D2 を続けて取り込み次第 1.0.0 と�
 
 ## 関連メモリ
 
-- `~/.claude/projects/-Users-mao-dev-personal-cc-marketplaces-worktools/memory/project_sfg_review_2026_05_06.md`
-  にこのファイルへのポインタを保存済み
+- 保守者の Claude Code auto-memory (project scope) にこのファイルへのポインタを
+  保存済み (個人環境のパスは公開 docs に書かない方針のため具体パスは省略)

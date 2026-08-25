@@ -408,7 +408,7 @@ def _build_deny_response(
     elif render_status:
         # minimal info を出せなかった原因の分布を計測するためのログ。
         # render_status は file_render.py が返す固定 slug で、path / basename /
-        # 値は一切含まない (ログ規則: CLAUDE.md「ログ規則」節)。
+        # 値は一切含まない (ログ規則: docs/MAINTAINING.md「ログ規則」節)。
         L.log_info("bash_render_failed", render_status)
     grep_keys = extract_grep_keys(tokens) if is_grep_command(first) else None
     return output.make_deny(

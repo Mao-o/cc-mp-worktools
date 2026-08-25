@@ -25,7 +25,8 @@ _TOOL_INPUT_KEYS = {
     "write": {"file_path", "content"},
 }
 
-# fixtures/envelopes/README.md:22 と core/output.py::LENIENT_MODES を突合する
+# fixtures/envelopes/README.md の permission_mode 項と core/output.py::LENIENT_MODES
+# を突合する
 # 既知 permission_mode の完全列挙。CLI 2.1.x 系の実測に基づく。
 _KNOWN_PERMISSION_MODES = {
     "default",
@@ -80,16 +81,41 @@ class TestEnvelopeShapes(unittest.TestCase):
 
 
 class TestLenientModesSubset(unittest.TestCase):
-    """LENIENT_MODES と fixtures/envelopes/README.md の列挙が乖離していないか。
+    """``LENIENT_MODES`` が ``_KNOWN_PERMISSION_MODES`` の subset である回帰ガード。
 
-    CLI 側が permission_mode の新しい値を追加したとき、docs と実動が乖離する前に
-    気付けるようにする。本テストが red になったら:
-      1. 実 envelope を採取して permission_mode の値を確認
-         (``hooks/_debug/capture_envelope.py`` を作成して hooks.json 経由で取る)
-      2. `core/output.py::LENIENT_MODES` と
-         `tests/fixtures/envelopes/README.md:22` の列挙を同時更新
-      3. `docs/DESIGN.md` の lenient 方針も更新
-      4. `CLAUDE.md` の CLI 再実測 Runbook に実測日を追記
+    **本テストは CLI の permission_mode 追加を検出しない。** 見ているのは
+    ``LENIENT_MODES - _KNOWN_PERMISSION_MODES`` という、リポジトリ内の静的な定数
+    どうしの包含関係だけで、実際に捕捉した envelope は一切参照しない。したがって
+    CLI が新しい ``permission_mode`` を返し始めても green のままで、シグナルには
+    ならない。CLI 側の変化を知るには、``docs/MAINTAINING.md`` の
+    「CLI バージョンアップ時の再実測手順 (Runbook)」に従って probe で採取した値を
+    ``_KNOWN_PERMISSION_MODES`` と**人手で**突合すること。
+
+    実際に検出できるのは repo 内の自己矛盾 2 種:
+      - ``test_lenient_modes_are_subset_of_known_permission_modes``:
+        既知 mode の列挙を更新しないまま ``LENIENT_MODES`` に未登録の値を足した
+        とき red
+      - ``test_known_modes_contains_six_canonical_entries``:
+        ``_KNOWN_PERMISSION_MODES`` の件数を変えたとき red。新 mode を登録した
+        **後**に鳴る「更新漏れ検知」であって、CLI 変化の検知ではない
+
+    どちらかが red になったときの**必須**更新は、既知 mode の集合・件数と挙動記述:
+      1. 本ファイルの ``_KNOWN_PERMISSION_MODES`` に実測で確認した mode を追加
+      2. ``test_known_modes_contains_six_canonical_entries`` の期待件数を更新
+         (テスト名にも件数が入るので rename も)
+      3. ``tests/fixtures/envelopes/README.md`` (``permission_mode`` 項) の列挙
+      4. ``docs/DESIGN.md`` の「LENIENT_MODES 方針」表と ``docs/MATRIX.md`` の
+         mode 記述。**lenient に収録しないなら ``ask`` 側として記載する**
+      5. ``docs/MAINTAINING.md`` の CLI 再実測 Runbook に実測日と CLI version を追記
+
+    ``core/output.py::LENIENT_MODES`` への追加は**必須ではなく条件付き**。その mode が
+    autonomous 実行モードだと**分類が済んだ場合に限って**追加する。``LENIENT_MODES``
+    に入れると Bash の ``ask_or_allow`` が「対話でユーザーに確認」から allow に変わる
+    = **判定境界の変更**。envelope だけでは分類できない (mode 文字列しか分からず、
+    CLI が確認を出すかは含まれない) ため、``docs/MAINTAINING.md`` の Runbook
+    **step 7 の behavioral probe** で「その mode で ask が実際にユーザー承認を
+    求めるか」を観測し、step 8 で決める。**分類が未了なら追加しない**
+    (step 7 は現時点で未実施)。
     """
 
     def test_lenient_modes_are_subset_of_known_permission_modes(self):
@@ -99,7 +125,7 @@ class TestLenientModesSubset(unittest.TestCase):
             msg=(
                 f"LENIENT_MODES has unknown values: {sorted(unknown)}. "
                 "Update fixtures/envelopes/README.md, docs/DESIGN.md, and "
-                "CLAUDE.md's CLI re-probe Runbook if CLI added a new mode."
+                "docs/MAINTAINING.md's CLI re-probe Runbook if CLI added a new mode."
             ),
         )
 

@@ -1,7 +1,7 @@
 # sensitive-files-guardrail 設計詳細 (DESIGN.md)
 
 利用者向けの要約は [README.md](../README.md)、保守者向けの実務ガイドは
-[CLAUDE.md](../CLAUDE.md)、判定結果の完全マトリクスは [MATRIX.md](./MATRIX.md)、
+[MAINTAINING.md](./MAINTAINING.md)、判定結果の完全マトリクスは [MATRIX.md](./MATRIX.md)、
 パターン設定の詳細は [PATTERNS.md](./PATTERNS.md) を参照。
 
 本ドキュメントは「**なぜこの設計にしたか**」の根拠と実測ログを集約する。
@@ -36,7 +36,9 @@
 - envelope には `permission_mode` フィールドがあり bypass / plan 等の検出に使える
 - `tool_input` 形状: `Read:file_path` / `Bash:command,description` など
 
-詳細は `~/shared-context/security/claude-code-pretooluse-hook-spec.md` に恒久記録。
+バイト上限や envelope の生データなど詳細な実測ログは保守者の手元メモに恒久記録し、
+公開 docs には上記の要点のみ転記している (再実測の手順は
+[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook))。
 
 ### 2026-04-22 — plan mode での hook 発火有無 (0.3.3 → 0.6.0 で撤去)
 
@@ -112,7 +114,7 @@ dontAsk では `ask` 維持。**autonomous モードでは Claude Code ハーネ
 | `<` 入力リダイレクトの character-level parser | 0.7.0 (A1) | `cat <(echo \(\)) < .env` の escape paren depth tracking など敵対的バイパス対策が思想 1 に反する |
 | FOO=1 / env / sudo 等の prefix normalize | 0.8.0 (A4) | 「`FOO=1 cat .env` を `cat .env` に書き戻す」は敵対的解釈で思想 1 に反する |
 | 既定 rules 候補列挙 (glob × literal stem の連結候補化) | 0.8.0 (B3) | `*.log` が `.env.log` 連結で巻き込まれる false positive |
-| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 1.0.0 | pathspec 無し形 (`-s` 単体) は通常パスで既に deny になるため特例不要。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 (0.18.0 で `_has_hard_stop` が quote-aware になり、この形は **特例なしで** 通常の operand scan に到達して deny する) |
+| git ls-files hard-stop 特例 (`--format='%(objectname)'` 等を hard-stop 内でも deny 強制) | 0.14.1 (commit 584afd1) | **機密 operand を伴う形** (`git ls-files -s .env`) は通常の operand scan 経路で既に deny になるため特例不要 (`-s` 単体や `-s README.md` は operand が機密でないので allow。下の metadata-only 節の記述が正)。`--format` の hard-stop 形だけは ask に降格してハーネス委譲 (0.18.0 で `_has_hard_stop` が quote-aware になり、この形は **特例なしで** 通常の operand scan に到達して deny する) |
 
 外部レビュー (Codex 等) が判断困難ケースの deny 強制を要求してきた場合も、
 本方針を根拠に「ask_or_allow で十分、それ以上の deny 強制はハーネス委譲する」と
@@ -351,7 +353,7 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   維持。`-s` / `--stage` / `-sz` 等は blob object name (= 内容の安定した指紋)
   を出せるため operand scan → deny に倒す (Codex P2 第3弾, 2026-06-12)。
   `--format=%(...)` の quote 内に `(` を含む形は 0.17.0 まで segment hard-stop に
-  該当し ask_or_allow に降格していた (1.0.0 のハーネス委譲方針整理)。0.18.0 の
+  該当し ask_or_allow に降格していた (0.14.1、commit 584afd1 のハーネス委譲方針整理)。0.18.0 の
   quote-aware 化で segment が静的解析可能になり、**特例を足すことなく** `-s` /
   `--stage` と同じ deny 経路に到達する。
   pathspec 無し形 (`git ls-files -s` 単体、機密 path operand 無し) も
@@ -417,9 +419,9 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
 
 ## Bash handler 判定フロー
 
-0.3.2 で確定した三態判定は 0.3.3 でも挙動変更なし。詳細な mermaid フローは
-[CLAUDE.md](../CLAUDE.md) 側に集約。コマンド別の deny/allow/ask 一覧は
-[MATRIX.md](./MATRIX.md) を参照。
+0.3.2 で確定した三態判定の骨格は現在も同じ。最新 (0.19.0) の mermaid フローは
+[MAINTAINING.md](./MAINTAINING.md#bash-handler-判定フロー-0190) 側に集約。コマンド別の
+deny/allow/ask 一覧は [MATRIX.md](./MATRIX.md) を参照。
 
 ### 責務境界 (0.3.3 再設計、0.8.0 で簡素化)
 
@@ -497,11 +499,12 @@ github_pat < 30 / openai_key < 20 / url < 8 / uuid < 36 / email < 6。
 PLACEHOLDER_LITERALS (21 個) と PLACEHOLDER_PATTERNS (5 個 regex) で判定。
 ユーザー拡張点 (placeholders.local.txt) は **作らない** (Q1 = 簡易版で開始)。
 
-### json/toml/yaml の status 拡張 (Unreleased, E5)
+### json/toml/yaml の status 拡張 (0.14.0, E5)
 
 dotenv (E1+E2) で導入した value status / length / placeholder hint を、
 `redaction/jsonlike.py` / `redaction/tomllike.py` / `redaction/opaque.py` に
-横展開する (REVIEW_TASKS_2026-05-06.md L408-425、commit 3189d907 で実装)。
+横展開する (REVIEW_TASKS_2026-05-06.md L408-425、commit 3189d907 で実装。tag
+`v0.14.0` に同梱され 0.14.0 で出荷済み、docs への反映は 0.14.1)。
 B1 (「json/toml/yaml を opaque 統一」) を撤回して逆方向 (status 拡張) に倒した
 経緯は同ファイル L275-278 を参照。
 
@@ -658,7 +661,7 @@ builder で 0.9.0 とほぼ同等の出力を生成するため互換維持。
 ### Bash handler (三態判定)
 
 コマンド別の deny / allow / ask は [MATRIX.md](./MATRIX.md) を参照。mermaid
-フロー図は CLAUDE.md 側にある。
+フロー図は [MAINTAINING.md](./MAINTAINING.md#bash-handler-判定フロー-0190) 側にある。
 
 **unified operand scan**: 全セグメントで非 option トークンを一律
 `_operand_is_sensitive` (literal path / URI / VCS pathspec) または
@@ -760,7 +763,7 @@ deny reason のキー名ガイド:
   placeholder」はその repo の project スコープの include / exclude を黙って無効化
   していた)
 
-## 既知制限 (0.14.0 時点)
+## 既知制限 (0.14.0 で整理、以降の変更は各項目に版を付記)
 
 1. **MCP 経路は対象外** — MCP server 経由のファイルアクセスは hook が介在しない
 2. **Bash 間接アクセス (静的解析不能)** — `bash -c`, `eval`, `python3 -c`, `sudo`,
@@ -877,4 +880,5 @@ operand glob (`*` / `?` / `[`) の判定は数世代を経ている:
 暫定方針として Case A (timeout kill → allow/fail-open の最悪ケース想定) で
 Windows (SIGALRM 非対応) を hook 冒頭で deny exit にしている。
 
-実測手順は [CLAUDE.md](../CLAUDE.md) の "Step 0-c 実測結果" セクション参照。
+実測手順は [MAINTAINING.md](./MAINTAINING.md#step-0-c-実測結果-将来更新予定) の
+「Step 0-c 実測結果」セクション参照。

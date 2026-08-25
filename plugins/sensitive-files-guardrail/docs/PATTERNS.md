@@ -107,7 +107,7 @@ EOF
 cat ~/.claude/sensitive-files-guardrail/patterns.local.txt
 ```
 
-### プロジェクトスコープの rule (`[project:<path>]` セクション、Unreleased)
+### プロジェクトスコープの rule (`[project:<path>]` セクション、0.15.0)
 
 `patterns.local.txt` はユーザー単位の単一ファイルのままだが、ファイル内に
 `[project:<絶対パス>]` セクションを書くと、その rule は該当プロジェクトで
@@ -244,26 +244,34 @@ exclude は書けない:
 
 ## Bash の glob false positive 対策
 
-0.3.2 以降の glob 候補列挙は、operand の glob が既定 rules の literal stem と
-交差すると deny する。
+operand に glob (`*` / `?` / `[`) を含む Bash コマンドの判定は **0.8.0 で
+「dotenv stem 一致のみ deny」に縮小** した。0.3.2〜0.7.x の既定 rules 候補列挙
+(`cat *.json` を `credentials*.json` と交差させて deny) は `cat *.log` のような
+日常 glob まで巻き込む false positive があり撤廃済み (経緯は [DESIGN.md](./DESIGN.md)
+の「glob operand 判定の歴史」)。
 
-| コマンド | 挙動 | 備考 |
+| コマンド | 挙動 (default / autonomous) | 備考 |
 |---|---|---|
-| `cat *.json` | **deny** | `credentials*.json` と交差 |
-| `cat *.log` | allow | 既定 rules と非交差 |
+| `cat .env*`, `cat *.envrc`, `cat .e[n]v`, `cat .en?` | **deny / deny** | glob が `.env` / `.envrc` の literal stem に `fnmatchcase` 一致 |
+| `cat *.json`, `cat cred*.json`, `cat *.key`, `cat id_rsa*` | ask / allow | 既定 rules との交差は見ない (`ask_or_allow`) |
+| `cat *.log`, `cat .env.*`, `cat .env.example*` | ask / allow | 同上 (`.env.*` は `.env` 自体に一致しない) |
 
-project 固有の非機密 JSON を allow したい場合は `patterns.local.txt` で個別
-exclude するか、リテラル path に書き換える:
+つまり `cat *.json` は **deny されない** (default / acceptEdits / dontAsk では
+確認ダイアログ、auto / bypassPermissions / plan では素通り)。確定判定が欲しければ
+glob を使わずリテラル path に書き換える (`cat credentials.json` は deny、
+`cat package.json` は allow)。
+
+`patterns.local.txt` の `!<basename>` 除外は **glob operand の判定には効かない**
+(glob は既定 / ローカル rules と照合せず dotenv stem とだけ比較するため、除外する
+対象がない)。除外が効くのはリテラル path の operand scan と Read / Edit / Write /
+Stop の判定で、そこでも `!credentials*.json` のような **既定 rule を丸ごと打ち消す**
+書き方は推奨しない (新しい機密 basename が入ったとき見落とす)。具体 basename の
+exclude を重ねる運用が安全:
 
 ```
-# 機密 JSON 全般をすくった上で、特定のものだけ個別除外
+# 機密 rule は残したまま、非機密と分かっている具体 basename だけ除外
 !myapp-config.json
-!package-lock.json
 ```
-
-ただし `!credentials*.json` のような **既定 rule を丸ごと打ち消す** 書き方は
-推奨しない (新しい機密 basename が入ったとき見落とす)。具体 basename の
-exclude を重ねる運用が安全。
 
 ## `_detect_format` との同期
 
@@ -292,11 +300,16 @@ exclude を重ねる運用が安全。
 
 ## 実装詳細
 
+以下の関数はすべて `hooks/_shared/patterns.py` にある (0.2.0 で両 hook の実装を
+`_shared` に集約)。`redact-sensitive-reads/core/patterns.py` と
+`check-sensitive-files/checker.py` はそれを import して warn callback を注入する
+薄い wrapper で、論理コピーは持たない。
+
 ### `_parse_patterns_text(text) -> list[tuple[str, bool]]`
 
-`patterns.txt` / `patterns.local.txt` の 1 ファイル分テキストをパースする関数。
-両 hook で同じ仕様 (`core/patterns.py` と `check-sensitive-files/checker.py` に
-論理コピー)。
+既定 `patterns.txt` の 1 ファイル分テキストをパースする関数 (`[project:...]`
+セクションは解釈しない。`patterns.local.txt` は 0.15.0 から後述の
+`_parse_local_patterns_text` が担当)。
 
 - 空行・`#` で始まる行は無視 (先頭空白 strip 後に判定)
 - `!pattern` → `(pattern, True)` (exclude)
@@ -315,7 +328,7 @@ exclude を重ねる運用が安全。
 0.4.0〜0.5.x で存在した複数形 ``_resolve_local_patterns_paths`` (preferred +
 fallback の 2-tier) は 0.6.0 で撤去した。
 
-### `_resolve_project_key(cwd) -> str | None` (Unreleased)
+### `_resolve_project_key(cwd) -> str | None` (0.15.0)
 
 `[project:<key>]` セクションと突き合わせる識別子を解決する。
 
@@ -326,7 +339,7 @@ fallback の 2-tier) は 0.6.0 で撤去した。
 
 subprocess (`git rev-parse` 等) は呼ばない。
 
-### `_parse_local_patterns_text(text, project_key) -> list[tuple[str, bool]]` (Unreleased)
+### `_parse_local_patterns_text(text, project_key) -> list[tuple[str, bool]]` (0.15.0)
 
 `patterns.local.txt` 専用のパーサ。`_parse_patterns_text` と違い
 `[project:<path>]` セクションヘッダーを解釈する。ヘッダーより前の行は常に出力に

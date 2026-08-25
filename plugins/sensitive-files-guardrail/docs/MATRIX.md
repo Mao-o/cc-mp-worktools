@@ -1,9 +1,9 @@
 # 判定結果マトリクス (MATRIX.md)
 
 全 6 permission_mode (default / plan / acceptEdits / auto / dontAsk /
-bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 時点 (0.13.0)
-の挙動。設計方針は [DESIGN.md](./DESIGN.md)、コマンド例の解釈は
-[README.md](../README.md) を参照。
+bypassPermissions) での判定結果を完全列挙する。値は 0.19.0 時点の挙動
+(0.13.0 以降の変更は各表の注記にバージョンを付して追記)。設計方針は
+[DESIGN.md](./DESIGN.md)、コマンド例の解釈は [README.md](../README.md) を参照。
 
 > 表は紙幅の都合で従来通り 5 列 (default / acceptEdits / auto / dontAsk /
 > bypassPermissions) のみ列挙する。**`plan` 列は `auto` 列と同じ判定** (Bash
@@ -11,9 +11,16 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > 不能ケースは ask) として読むこと。`acceptEdits` / `dontAsk` のような ask 維持
 > 系とは挙動が異なるため、`auto` 列を参照する。
 
-`permission_mode` の列挙は `core/output.py::LENIENT_MODES` と
-`tests/fixtures/envelopes/README.md:22` で突合される。CLI 側が新しい mode を
-追加したら同時に更新すること (Runbook は [CLAUDE.md](../CLAUDE.md))。
+`permission_mode` の既知列挙は `tests/test_envelope_shapes.py` の
+`_KNOWN_PERMISSION_MODES` に固定され、`core/output.py::LENIENT_MODES` がその subset で
+あることをテストが突合する。CLI 側が新しい mode を追加したときの**必須**更新は
+**既知 mode 側** (`_KNOWN_PERMISSION_MODES` / 件数 assert /
+`tests/fixtures/envelopes/README.md` の列挙 / 本ファイルと `docs/DESIGN.md` の
+mode 記述。完全な一覧は step 5)。**`LENIENT_MODES` への収録は
+autonomous 実行モードだと分類が済んだ場合に限る条件付き判断**で、収録すると
+`ask_or_allow` が ask から allow に変わる = 判定境界の変更にあたる。分類は
+[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook) の
+step 7 (behavioral probe、未実施)、収録判断は step 8。
 
 > 0.13.0 (2026-05-18) で `plan` 列を `auto` と同等の lenient 扱いに戻した。
 > 0.6.0 で「現行 CLI では hook 非発火」と判断して dead entry を撤去していたが、
@@ -50,15 +57,15 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > (`matched="..."`) を追加。実値そのものは引き続き出さない。詳細は
 > [DESIGN.md](./DESIGN.md#dotenv-minimal-info-の拡張-090-e1--e2)。
 >
-> **Unreleased (PR 6, E5)** で上記 status (`<set>` / `<empty>` / `<placeholder>` /
+> **0.14.0 (E5)** で上記 status (`<set>` / `<empty>` / `<placeholder>` /
 > `<long>` / `<looks_truncated>` + `length=N` + `matched="..."`) を
 > **JSON / TOML の str scalar 値**、および **YAML の top-level 抽出** にも
-> 横展開する。`<short>` は型クラス前提のため dotenv 限定、`prefix=...` は
+> 横展開した。`<short>` は型クラス前提のため dotenv 限定、`prefix=...` は
 > 識別子型限定。bool / num / null / array / object には status を出さない。
 > yaml は完全パースしないため status 系は出さず top-level key 名と nested
 > 件数のみ。下表 (機密 + 通常ファイル deny) の reason に乗る情報量だけが
 > 拡張され、deny / allow / ask の判定境界は変化なし。詳細は
-> [DESIGN.md](./DESIGN.md#jsontomlyaml-の-status-拡張-unreleased-e5)。
+> [DESIGN.md](./DESIGN.md#jsontomlyaml-の-status-拡張-0140-e5)。
 >
 > 0.10.0 で **Bash deny の reason** にも上記 minimal info を埋め込むようになった
 > (Read 同等)。`first_token` カテゴリ別 (`read_full` / `read_partial` / `search`
@@ -69,7 +76,8 @@ bypassPermissions) での判定結果を完全列挙する。値は 2026-05-18 �
 > 下表の deny / allow / ask は 0.9.0 と完全に同じ。詳細は
 > [DESIGN.md](./DESIGN.md#bash-deny-の-category-別-reason-0100-e3--e4)。
 >
-> **0.17.0 で判定境界が変化** (0.10.0 以降で初): `awk` / `sed` を
+> **0.17.0 で判定境界が変化** (直近では 0.14.0 の metadata-only allow、0.14.1 の
+> `git ls-files --format` hard-stop 形 deny → ask_or_allow 降格に続く変更): `awk` / `sed` を
 > `_OPAQUE_WRAPPERS` から外し operand scan に到達させた。opaque の基準は
 > 「operand が静的に file path と判らない」ことで、script 引数の後ろが素直に
 > file operand である awk / sed は当てはまらないため。
@@ -221,8 +229,10 @@ deny に倒る (Codex P1, 0.14.0)。
 
 `git ls-files` も **条件付き**: plain な `git ls-files .env` / `--error-unmatch`
 は名前一覧のみなので allow 維持。`-s` / `--stage` / `--format` は blob object
-name (= 内容の安定した指紋) を出せるため metadata-only から除外して deny
-(Codex P2 第3弾, 0.14.0)。
+name (= 内容の安定した指紋) を出せるため metadata-only から除外し、**operand scan に
+回す** (Codex P2 第3弾, 0.14.0)。deny になるのは operand に機密 path 候補がある形
+(`git ls-files -s .env`) だけで、`git ls-files -s` 単体や
+`git ls-files -s README.md` は allow。
 
 `git rm` は **`--cached` 付きのみ** metadata-only (0.19.0, bd_092a232e-snw.3):
 index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。
