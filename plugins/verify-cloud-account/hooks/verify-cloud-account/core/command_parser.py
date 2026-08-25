@@ -276,6 +276,126 @@ def _arithmetic_span(text: str, i: int) -> int | None:
     return None
 
 
+# --- ANSI-C quoting `$'...'` の展開 ------------------------------------------
+#
+# `man 1 bash` QUOTING 節の逐語表 (bash 3.2 / 5.x の両方を確認):
+#   \a alert / \b backspace / \e \E escape / \f form feed / \n newline /
+#   \r carriage return / \t tab / \v vertical tab / \\ backslash /
+#   \' single quote / \" double quote / \? question mark /
+#   \nnn 8 進 (1-3 桁) / \xHH 16 進 (1-2 桁) /
+#   \uHHHH (1-4 桁) / \UHHHHHHHH (1-8 桁) / \cx control-x
+#
+# 展開せずに literal のまま delimiter にすると、`<<$'E\x4fF'` の terminator
+# (実際は `EOF`) を見つけられず、**後続コマンドを本文として飲み込む** = 検証が消える。
+_ANSI_C_SIMPLE = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+
+
+def _expand_ansi_c(text: str) -> str | None:
+    """`$'...'` の中身を展開する。解釈できないエスケープがあれば None。
+
+    None を返した場合、呼び出し側は **heredoc と見なさない** (本文行が候補になる
+    = 過剰検証側)。誤って別の delimiter に解決して本文を飲み込むより安全。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            return None  # 末尾の孤立した backslash は解釈不能
+        nxt = text[i + 1]
+        if nxt in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[nxt])
+            i += 2
+            continue
+        if nxt in "01234567":
+            j = i + 1
+            while j < n and j < i + 4 and text[j] in "01234567":
+                j += 1
+            out.append(chr(int(text[i + 1:j], 8) & 0xFF))
+            i = j
+            continue
+        if nxt in "xuU":
+            limit = {"x": 2, "u": 4, "U": 8}[nxt]
+            j = i + 2
+            while j < n and j < i + 2 + limit and text[j] in "0123456789abcdefABCDEF":
+                j += 1
+            if j == i + 2:
+                return None  # 桁が無い (`\x` 単独) は解釈不能
+            value = int(text[i + 2:j], 16)
+            out.append(chr(value & 0xFF) if nxt == "x" else chr(value))
+            i = j
+            continue
+        if nxt == "c":
+            if i + 2 >= n:
+                return None
+            out.append(chr(ord(text[i + 2].upper()) ^ 0x40))
+            i += 3
+            continue
+        return None  # 未知のエスケープ
+    return "".join(out)
+
+
+# --- シェル構文として解釈しない領域のスキップ (**この 1 箇所が唯一の判定**) -----
+#
+# quote / コマンド置換 / バッククォート / 算術評価の内側は「シェル構文もどき」が
+# 現れても構文として解釈してはいけない。この判断を経路ごとに書くと必ず食い違う —
+# v0.9.0 開発中に `split_on_operators` はクォートを追跡しているのに heredoc の
+# 再スキャンが追跡しておらず、`--metadata '{"k":"<<X bar"}' <<EOF` の `X` を
+# 先に delimiter として登録してしまい、**本文行が引数として解釈されて誤った
+# コンテキストで検証が通る**という質の悪い失敗を起こしていた (R6 P2)。
+def _skip_opaque(text: str, i: int) -> int | None:
+    """`text[i]` から始まる「構文として解釈しない領域」の終端 index を返す。
+
+    対象は backslash エスケープ / `'...'` / `"..."` / `` `...` `` / `$(...)` /
+    算術評価 `(( ... ))`。該当しなければ None。
+    未終端のクォート等は末尾までを 1 領域とみなす (bash も行を跨いで読み続ける)。
+    """
+    n = len(text)
+    if i >= n:
+        return None
+    ch = text[i]
+    if ch == "\\" and i + 1 < n:
+        return i + 2
+    if ch in "'\"":
+        j = i + 1
+        while j < n:
+            if ch == '"' and text[j] == "\\" and j + 1 < n:
+                j += 2
+                continue
+            if text[j] == ch:
+                return j + 1
+            j += 1
+        return n
+    if ch == "`":
+        j = text.find("`", i + 1)
+        return n if j == -1 else j + 1
+    if ch == "$" and i + 1 < n and text[i + 1] == "(":
+        depth = 1
+        j = i + 2
+        while j < n:
+            inner = _skip_opaque(text, j)
+            if inner is not None and inner > j:
+                j = inner
+                continue
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        return n
+    return _arithmetic_span(text, i)
+
+
 # --- heredoc の開始 (`<<[-]word`) ------------------------------------------
 #
 # `man 1 bash` Here Documents 節の逐語: 形式は `<<[-]word`、本文は「word のみを
@@ -303,13 +423,22 @@ def _scan_heredoc_word(text: str, i: int) -> tuple[str | None, int]:
         if ch in _HEREDOC_WORD_STOP:
             break
         if ch == "$" and i + 1 < n and text[i + 1] in "'\"":
-            # ANSI-C quoting `$'...'` / locale translation `$"..."`。
-            # 中身のエスケープ展開まではしない (近似) が、`$` を落とす点が要点。
             quote = text[i + 1]
             end = text.find(quote, i + 2)
             if end == -1:
                 return None, i
-            parts.append(text[i + 2:end])
+            body = text[i + 2:end]
+            if quote == "'":
+                # ANSI-C quoting: エスケープを展開してから連結する。literal のまま
+                # 使うと `$'E\x4fF'` の terminator (`EOF`) を見つけられず、
+                # 後続コマンドを本文として飲み込む (R6 P1)。
+                expanded = _expand_ansi_c(body)
+                if expanded is None:
+                    return None, i  # 解釈不能 → heredoc と見なさない
+                parts.append(expanded)
+            else:
+                # `$"..."` は locale 翻訳。C/POSIX ロケールでは `$` が無視されるだけ。
+                parts.append(body)
             i = end + 1
             continue
         if ch in "'\"":
@@ -373,9 +502,11 @@ def _find_heredoc_end(command: str, i: int, delim: str, strip_tabs: bool) -> int
 def split_on_operators(command: str) -> list[str]:
     """`&&`, `||`, `;`, `|`, `\\n` でトップレベル分割。
 
-    quote ('...' / "..."), $(...), バッククォート内は分割しない。
-    subshell `$()` 内でも quote をトラッキングし、`$(printf ")")` のように
-    値が `)` を含むケースでも paren_depth を正しく保つ。
+    quote / `$(...)` / バッククォート / 算術評価 `(( ... ))` の内側は
+    **シェル構文として解釈しない**。この判断は `_skip_opaque` に一本化してあり、
+    heredoc の再スキャン (`_strip_heredoc_bodies`) や括弧の均衡判定
+    (`_has_unbalanced_closer`) も同じ関数を通す。経路ごとに書くと必ず食い違う。
+
     unquoted な `#` (行頭 / 空白 / 演算子の直後に来るもの) 以降改行までは
     bash コメントとして無視する。
 
@@ -389,70 +520,18 @@ def split_on_operators(command: str) -> list[str]:
     buf: list[str] = []
     i = 0
     n = len(command)
-    in_sq = False
-    in_dq = False
-    paren_depth = 0
-    btick = False
     pending_heredocs: list[tuple[str, bool]] = []
 
     while i < n:
+        # quote / 置換 / 算術は 1 領域としてそのまま buf へ (構文解釈しない)。
+        opaque = _skip_opaque(command, i)
+        if opaque is not None and opaque > i:
+            buf.append(command[i:opaque])
+            i = opaque
+            continue
+
         ch = command[i]
         nxt = command[i + 1] if i + 1 < n else ""
-
-        if ch == "\\" and not in_sq and i + 1 < n:
-            buf.append(ch)
-            buf.append(command[i + 1])
-            i += 2
-            continue
-
-        if ch == "'" and not in_dq and not btick:
-            in_sq = not in_sq
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == '"' and not in_sq and not btick:
-            in_dq = not in_dq
-            buf.append(ch)
-            i += 1
-            continue
-        if in_sq or in_dq:
-            buf.append(ch)
-            i += 1
-            continue
-
-        if ch == "$" and nxt == "(":
-            paren_depth += 1
-            buf.append("$")
-            buf.append("(")
-            i += 2
-            continue
-        if paren_depth > 0:
-            if ch == "(":
-                paren_depth += 1
-            elif ch == ")":
-                paren_depth -= 1
-            buf.append(ch)
-            i += 1
-            continue
-
-        # 算術評価 `(( ... ))` の内側では `<<` は**左シフト演算子**であって heredoc
-        # ではない。判定は `_arithmetic_span` に一本化する (この理解を経路ごとに
-        # 推測すると必ず食い違う — R5 P2 の誤 deny がその実例)。
-        arith_end = _arithmetic_span(command, i)
-        if arith_end is not None:
-            buf.append(command[i:arith_end])
-            i = arith_end
-            continue
-
-        if ch == "`":
-            btick = not btick
-            buf.append(ch)
-            i += 1
-            continue
-        if btick:
-            buf.append(ch)
-            i += 1
-            continue
 
         if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
             while i < n and command[i] != "\n":
@@ -467,13 +546,13 @@ def split_on_operators(command: str) -> list[str]:
                 continue
             found = _scan_heredoc_start(command, i)
             if found is not None:
-                delim, dash, end = found
+                delim, dash, hd_end = found
                 pending_heredocs.append((delim, dash))
-                buf.append(command[i:end])
-                i = end
+                buf.append(command[i:hd_end])
+                i = hd_end
                 continue
-            # delimiter を解決できない `<<` (未閉じクォート等) はそのまま流す
-            # = heredoc と見なさない (本文行が候補になる = 過剰検証側)。
+            # delimiter を解決できない `<<` はそのまま流す = heredoc と見なさない
+            # (本文行が候補になる = 過剰検証側)。
             buf.append("<<")
             i += 2
             continue
@@ -482,21 +561,19 @@ def split_on_operators(command: str) -> list[str]:
             # **閉じている heredoc だけ**を本文として取り込む。terminator を
             # 探してから取り込むことで、delimiter の誤検出が「以降すべて検証
             # しない」に化けるのを防ぐ (誤検出時は下の通常分割にそのまま落ちる)。
-            end = i + 1
+            body_end = i + 1
             for delim, strip_tabs in pending_heredocs:
-                found = _find_heredoc_end(command, end, delim, strip_tabs)
-                if found is None:
-                    end = None
+                found_end = _find_heredoc_end(command, body_end, delim, strip_tabs)
+                if found_end is None:
+                    body_end = None
                     break
-                end = found
+                body_end = found_end
             pending_heredocs = []
-            if end is not None:
-                buf.append(command[i:end])
-                i = end
+            if body_end is not None:
+                buf.append(command[i:body_end])
+                i = body_end
                 # delimiter 行の改行はトップレベルの区切りなので、ここでセグメントを
-                # 閉じる。閉じないと heredoc の**次**のコマンド
-                # (`EOF` の後ろに続く `gh pr create` 等) が heredoc セグメントに
-                # 吸収され、検証されないまま素通りする。
+                # 閉じる。閉じないと heredoc の**次**のコマンドが吸収される。
                 segments.append("".join(buf))
                 buf = []
                 continue
@@ -1011,14 +1088,16 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         out.append(line)
         i = end
         # この行で開かれた heredoc の delimiter を宣言順に集める。
-        # 算術評価 `(( ... ))` の内側の `<<` は左シフトなので飛ばす
-        # (判定は `_arithmetic_span` に一本化)。
+        # quote / 置換 / 算術の内側は構文として解釈しない — `split_on_operators`
+        # と**同じ `_skip_opaque`** を通す。追跡を怠ると
+        # `--metadata '{"k":"<<X bar"}' <<EOF` の `X` を先に登録してしまい、
+        # 本文の除去に失敗して本文行が引数として解釈される (誤コンテキスト検証)。
         pending: list[tuple[str, bool]] = []
         k = 0
         while k < len(line):
-            arith_end = _arithmetic_span(line, k)
-            if arith_end is not None:
-                k = arith_end
+            opaque = _skip_opaque(line, k)
+            if opaque is not None and opaque > k:
+                k = opaque
                 continue
             if line[k] == "<" and k + 1 < len(line) and line[k + 1] == "<":
                 found = _scan_heredoc_start(line, k)
@@ -1077,27 +1156,24 @@ def _strip_leading_syntax(cmd: str) -> str:
 
 
 def _has_unbalanced_closer(s: str, closer: str) -> bool:
-    """quote を除いて数えたとき、閉じ括弧が開き括弧より多ければ True。"""
+    """構文として解釈する範囲で数えて、閉じ括弧が開き括弧より多ければ True。
+
+    quote / 置換 / 算術の内側は `_skip_opaque` で飛ばす (共有機構)。飛ばした領域は
+    内部で均衡しているので、外側の均衡判定には影響しない。
+    """
     opener = _CLOSER_TO_OPENER[closer]
     depth = 0
-    in_sq = False
-    in_dq = False
     i = 0
     n = len(s)
     while i < n:
-        ch = s[i]
-        if ch == "\\" and not in_sq and i + 1 < n:
-            i += 2
+        opaque = _skip_opaque(s, i)
+        if opaque is not None and opaque > i:
+            i = opaque
             continue
-        if ch == "'" and not in_dq:
-            in_sq = not in_sq
-        elif ch == '"' and not in_sq:
-            in_dq = not in_dq
-        elif not in_sq and not in_dq:
-            if ch == opener:
-                depth += 1
-            elif ch == closer:
-                depth -= 1
+        if s[i] == opener:
+            depth += 1
+        elif s[i] == closer:
+            depth -= 1
         i += 1
     return depth < 0
 

@@ -226,6 +226,42 @@ xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参�
 | `npx` | `--package` `-c/--call` `-w/--workspace` | `-w/--workspace` を今回追加 (`npx --help` 逐語)。npm のグローバル option は開集合で列挙不能 (下記に開示) |
 | `sudo` / `nice` / `stdbuf` / `caffeinate` | 登録済み | ローカル man page で全 option 確認済み |
 
+## 不変条件: シェル構文を見る経路は共有機構を必ず通す
+
+**2 ラウンド続けて「片方の経路が仕組みを持っているのに、もう片方が使っていない」
+型の不具合が出た** (R5 = 算術文脈、R6 = クォート状態)。しかも R6 の失敗は質が悪く、
+検証がスキップされるのではなく**本文行が引数として解釈され、承認されていない
+既定 profile で走るコマンドが「許可された profile」として検証を通って**いた。
+
+そこで次を**不変条件**とする:
+
+> **シェル構文 (`<<` / `((` / 演算子 / 括弧 / リダイレクト等) を新しく見る経路を
+> 足すときは、`_skip_opaque()` を必ず通すこと。**
+> `_skip_opaque` は quote / `$(...)` / バッククォート / 算術評価 `(( ... ))` を
+> 1 領域として飛ばす唯一の判定で、内部で `_arithmetic_span()` を呼ぶ。
+
+この不変条件は `TestQuoteStateIsSharedAcrossAllPaths` が**振る舞いで**守る —
+クォート内に置いた構文もどき (`&&` / `<<X` / `((` / `#` ほか) が、どの経路でも
+構文として解釈されないことを一括で表明している。新しい経路が共有機構を通していな
+ければ、この表が落ちる。
+
+### シェル構文を見る全経路 (棚卸し)
+
+| 経路 | 見る構文 | クォート状態 | 算術文脈 | 状態 |
+|---|---|---|---|---|
+| `split_on_operators` | 演算子 / heredoc / コメント | `_skip_opaque` | 経由 (`_skip_opaque`) | ✅ 共有 |
+| `_strip_heredoc_bodies` | heredoc 開始 | `_skip_opaque` | 経由 | ✅ 共有 (R6 で是正) |
+| `_has_unbalanced_closer` | `(` `)` `{` `}` の均衡 | `_skip_opaque` | 経由 | ✅ 共有 (R6 で是正) |
+| `_strip_leading_syntax` | `(` `{` `!` / 予約語 / リダイレクト | `_WORD_TOKEN_RE` | `_arithmetic_span` | ✅ 共有 |
+| `_drop_wrapper_flags` / `_has_flag` / `_flag_argument` / `_wrapper_terminates` / `_command_is_query` | option トークン | `_WORD_TOKEN_RE` / `_VALUE_TOKEN_RE` | 該当なし | ✅ quote 対応 |
+| `_scan_heredoc_word` | delimiter の word | **自前** (word の定義そのもの) | 該当なし | ⭕ 意図的に独立 |
+| `_scan_value_end` (`_parse_leading_env`) | env 代入値の終端 | 自前 + `$(`/backtick で保守的に停止 | 該当なし | ⭕ 意図的に独立 (値の走査であって構文走査ではない) |
+| `cli_options.strip_leading_options` / `find_context_options` | option トークン | `shlex.split` | 該当なし | ✅ quote 対応 |
+| `dispatcher._match_service` / `_is_readonly` 等 | (正規化済み候補への regex) | 該当なし | 該当なし | ⭕ シェル構文を見ない |
+
+⭕ の 3 つは「構文の探索」ではなく「その構文自身の定義」または「値の走査」なので
+共有対象外。それ以外は**すべて共有機構を通っている**。
+
 ### `((` の解釈は 1 箇所に集約する
 
 `((` が「算術評価」なのか「入れ子の subshell」なのかを**経路ごとに推測すると必ず
@@ -238,8 +274,10 @@ xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参�
 
 | 経路 | 用途 |
 |---|---|
+| `_skip_opaque` | 算術領域を 1 領域として飛ばす (下の 3 経路はここを経由する) |
 | `split_on_operators` | 算術内の `<<` を左シフトとして扱う (heredoc と誤認しない) |
 | `_strip_heredoc_bodies` | 同上 (セグメント内の再スキャン時) |
+| `_has_unbalanced_closer` | 括弧の均衡計算から算術領域を除く |
 | `_strip_leading_syntax` | 算術コマンドの括弧を**剥がさない** (候補にしない) |
 
 `_strip_trailing_syntax` は「開き括弧と対応しない閉じ括弧だけを落とす」規則なので、
@@ -265,9 +303,16 @@ delimiter を読み違え、一致する行が現れないまま**後続コマ�
 | `\EOF` | backslash |
 | `E"OF"` / `E'OF'` / `"EO"F` / `EO'F'` | **混在 (断片の連結)** |
 | `E\OF` | 途中の backslash |
-| `$'EOF'` | ANSI-C quoting (中のエスケープ展開までは未対応 — 下記に開示) |
+| `$'EOF'` / `$'E\\x4fF'` / `$'E\\117F'` | ANSI-C quoting (**エスケープを展開**してから delimiter にする) |
 
-クォートが閉じない等で解決できないときは **heredoc と見なさない**
+ANSI-C quoting `$'...'` は `man 1 bash` QUOTING 節の逐語表に従って展開する:
+`\\a` `\\b` `\\e` `\\E` `\\f` `\\n` `\\r` `\\t` `\\v` `\\\\` `\\'` `\\"` `\\?` /
+`\\nnn` (8 進 1-3 桁) / `\\xHH` (16 進 1-2 桁) / `\\uHHHH` (1-4 桁) /
+`\\UHHHHHHHH` (1-8 桁) / `\\cx` (control-x)。展開せず literal のまま使うと
+`<<$'E\\x4fF'` の terminator (実際は `EOF`) を見つけられず本文が伸び続ける。
+**解釈できないエスケープが 1 つでもあれば delimiter を確定させない**。
+
+クォートが閉じない / エスケープを解釈できない等で解決できないときは **heredoc と見なさない**
 (本文行が候補になる = 過剰検証側)。terminator が実在するときだけ本文として
 畳む規律とあわせて、「delimiter を読み違えて検証が消える」経路を塞いでいる。
 

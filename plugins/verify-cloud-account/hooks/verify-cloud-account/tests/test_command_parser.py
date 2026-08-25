@@ -1059,6 +1059,104 @@ class TestHeredocDelimiterIsAShellWord(unittest.TestCase):
                 self.assertEqual(found[0], delim, word)
 
 
+class TestAnsiCQuotedDelimiter(unittest.TestCase):
+    r"""`$'...'` の delimiter は ANSI-C エスケープを展開してから使う。
+
+    `man 1 bash` QUOTING 節の逐語表に従う。literal のまま使うと `<<$'E\x4fF'` の
+    terminator (実際は `EOF`) を見つけられず、**後続コマンドを本文として飲み込む**
+    = 検証が消える (R6 P1)。解釈できないエスケープがあれば heredoc と見なさない。
+    """
+
+    def test_escapes_are_expanded(self):
+        for body, delim in (
+            ("E" + BS + "x4fF", "EOF"),          # \xHH (16 進)
+            ("E" + BS + "x4F" + "F", "EOF"),
+            ("E" + BS + "117F", "EOF"),          # \nnn (8 進 O=117)
+            ("EOF", "EOF"),
+            ("E" + BS + BS + "OF", "E" + BS + "OF"),   # \\ はバックスラッシュ 1 つ
+            ("E" + BS + "u004fF", "EOF"),        # \uHHHH
+            ("E" + BS + "U0000004fF", "EOF"),    # \UHHHHHHHH
+        ):
+            word = "$" + Q + body + Q
+            with self.subTest(word=word):
+                found = command_parser._scan_heredoc_start(f"cat <<{word}", 4)
+                self.assertIsNotNone(found, word)
+                self.assertEqual(found[0], delim, word)
+
+    def test_expanded_delimiter_absorbs_the_body(self):
+        cmd = "cat <<$" + Q + "E" + BS + "x4fF" + Q + "\nbody\nEOF\ngh pr create"
+        cands = [c for c, _e in extract_candidates(cmd)]
+        self.assertIn("gh pr create", cands)
+        self.assertNotIn("body", cands)
+
+    def test_unknown_escape_is_not_treated_as_heredoc(self):
+        # 解釈できないエスケープ → delimiter を確定できない → heredoc と見なさない
+        # (本文行が候補になる = 過剰検証側)。
+        word = "$" + Q + "E" + BS + "q" + "OF" + Q
+        self.assertIsNone(command_parser._scan_heredoc_start(f"cat <<{word}", 4))
+
+
+class TestQuoteStateIsSharedAcrossAllPaths(unittest.TestCase):
+    r"""**不変条件**: クォート内のシェル構文もどきは、どの経路でも構文として
+    解釈されない。
+
+    2 ラウンド続けて「片方の経路が仕組みを持っているのに、もう片方が使っていない」
+    型の不具合が出た (算術文脈 / クォート状態)。個別の再現テストだけだと次の経路で
+    また抜けるので、**全経路をまとめて縛る**テストをここに置く。
+
+    新しくシェル構文を見る経路を足すときは、`_skip_opaque` (クォート / 置換 /
+    算術) を必ず通すこと。通していなければこのテストが落ちる。
+    """
+
+    # クォート内に置いても構文として解釈されてはいけない断片。
+    SYNTAX_LOOKALIKES = [
+        "&&", "||", ";", "|", "<<X", "<<-X", "((", "))", "$((", "#",
+        "\n", "<<EOF", "&", ">", "<", "`", "$(", "{", "}", "(", ")",
+    ]
+
+    def _wrap(self, fragment, quote):
+        # 実コマンドの引数としてクォート内に埋め込む。
+        return f"aws s3 cp file s3://b --metadata {quote}{fragment}{quote}"
+
+    def test_quoted_syntax_is_never_split(self):
+        for fragment in self.SYNTAX_LOOKALIKES:
+            for quote in (Q, DQ):
+                cmd = self._wrap(fragment, quote)
+                with self.subTest(fragment=fragment, quote=quote):
+                    self.assertEqual(
+                        split_on_operators(cmd), [cmd],
+                        f"クォート内の {fragment!r} が構文として解釈された",
+                    )
+
+    def test_quoted_syntax_yields_exactly_one_candidate(self):
+        for fragment in self.SYNTAX_LOOKALIKES:
+            for quote in (Q, DQ):
+                cmd = self._wrap(fragment, quote)
+                with self.subTest(fragment=fragment, quote=quote):
+                    cands = [c for c, _e in extract_candidates(cmd)]
+                    self.assertEqual(len(cands), 1, cmd)
+
+    def test_quoted_heredoc_lookalike_does_not_shadow_a_real_heredoc(self):
+        """クォート内の `<<X` を先に登録すると本物の heredoc の除去に失敗する。
+
+        失敗の質が悪い: 検証がスキップされるのではなく、**本文行が引数として
+        解釈されて誤ったコンテキストで検証が通る** (R6 P2)。
+        """
+        meta = Q + "{" + DQ + "foo" + DQ + ":" + DQ + "<<X bar" + DQ + "}" + Q
+        cmd = (
+            "aws s3api put-object --bucket b --key k --metadata " + meta
+            + " <<EOF\n--profile allowed\nEOF"
+        )
+        cands = [c for c, _e in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 1, cands)
+        # 本文 (`--profile allowed`) が候補に残っていない = 引数として読まれない
+        self.assertNotIn("--profile", cands[0])
+
+    def test_arithmetic_inside_quotes_is_not_arithmetic(self):
+        cmd = "aws s3 cp f s3://b --metadata " + Q + "(( gh ))" + Q
+        self.assertEqual(split_on_operators(cmd), [cmd])
+
+
 class TestArithmeticCommandIsNotACandidate(unittest.TestCase):
     """算術コマンド `(( ... ))` は CLI を実行しないので候補にしない。
 

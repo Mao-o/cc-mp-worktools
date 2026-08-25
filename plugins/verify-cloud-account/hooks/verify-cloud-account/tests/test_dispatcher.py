@@ -1937,6 +1937,9 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ('cat <<E"OF"\nbody\nEOF\ngh pr create --fill', "github"),
         ("cat <<E'OF'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
         ('cat <<"EO"F\nbody\nEOF\ngh pr create --fill', "github"),
+        # --- ANSI-C エスケープ delimiter の後ろのコマンド (PR #48 Codex R6 P1) ---
+        ("cat <<$'E\\x4fF'\nbody\nEOF\ngh pr create --fill", "github"),
+        ("cat <<$'E\\117F'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
     ]
 
     def setUp(self):
