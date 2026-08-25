@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1 + R7 ×1)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -301,6 +301,30 @@ Codex round 6 で、R5-1 で直した指示が**別ファイルにも複製さ�
   して記載する) ことを明示し、docstring 側の分類もこれに合わせた。
   `LENIENT_MODES` / `_KNOWN_PERMISSION_MODES` の値は不変で、`manual` は現状
   `LENIENT_MODES` に無いため `ask_or_allow` は **ask に倒れる (安全側)**
+
+Codex round 7 で、R5-2 (過去実行分が混ざる) と**対になる**採取事故が判明した:
+
+- **[R7] probe の採取ファイル名が秒解像度で衝突していた**: 掲載していた probe
+  スクリプトは `envelope-<tool>-<ts>.json` (`strftime` の秒解像度) で採取先を決めて
+  いたため、**同一秒内に 2 回 hook が呼ばれると後の envelope が前を黙って上書き**する。
+  mode を素早く切り替えた場合や step 4 を自動化した場合に起きる。R5-2 が「余計なものが
+  混ざる」事故なら、こちらは**あるべきものが消える**事故で、欠落した mode は step 5 の
+  突合で「定数にあるが観測されなかった」側に落ちるため誤判断に直結する。
+
+  ファイル名を **`envelope-<tool>-<mode>-<time_ns>.json`** に変更した。`time_ns()` で
+  同一秒内の衝突を防ぎ、`<mode>` を入れることでどのファイルがどの mode の envelope かを
+  ファイル名だけで判別できるようにした。`mode` は envelope 由来の外部入力なので、
+  パス区切り等が混ざらないよう文字種を絞ってから使う。あわせて
+  `tests/fixtures/envelopes/README.md` の採取方針にあった旧命名 (`/tmp/envelope-<tool>.json`)
+  も新命名に揃え、正典が `docs/MAINTAINING.md` の Runbook step 2〜4 であることを明記した。
+
+  実測 (docs 掲載のコードブロックを機械抽出して実行): 同一秒内に同一 mode で 5 連打 →
+  **5 ファイル全て残存**。対照として旧版 (秒解像度) で同じ 5 連打を行うと **2 ファイル**
+  しか残らず 3 件が黙って消えることを再現確認した。6 mode を連続 probe した場合も
+  step 4 の集計 grep が **6 mode すべてを拾う**こと、0 件時は従来どおり
+  `No such file or directory` で可視エラーになり silent empty にならないこと
+  (R5 で確認した性質の維持)、`permission_mode` にパス区切りを混ぜても採取先ディレクトリの
+  外に出ないこと、壊れた JSON でも落ちないことを確認した
 
 ### リリース手順への追加
 

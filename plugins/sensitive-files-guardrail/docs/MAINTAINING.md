@@ -298,8 +298,8 @@ mode の全量。以降の step ではこの列挙結果を probe 対象にす�
 
 ```python
 #!/usr/bin/env python3
-"""stdin JSON を <out>/envelope-<tool>-<ts>.json に保存し no-op allow を返す。"""
-import argparse, json, sys, time
+"""stdin JSON を <out>/envelope-<tool>-<mode>-<ns>.json に保存し no-op allow を返す。"""
+import argparse, json, re, sys, time
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -307,14 +307,17 @@ p.add_argument("--tool", required=True)
 p.add_argument("--out", required=True, help="採取先ディレクトリ (実行ごとに分ける)")
 args = p.parse_args()
 raw = sys.stdin.read()
-ts = time.strftime("%Y%m%dT%H%M%S")
-out_dir = Path(args.out)
-out_dir.mkdir(parents=True, exist_ok=True)
-out = out_dir / f"envelope-{args.tool}-{ts}.json"
 try:
     envelope = json.loads(raw) if raw.strip() else {}
 except Exception as e:
     envelope = {"_probe_parse_error": str(e), "_raw": raw}
+# mode は envelope 由来なのでファイル名に使う前にサニタイズする
+mode = re.sub(r"[^A-Za-z0-9_.-]", "_",
+              str(envelope.get("permission_mode") or "unknown"))[:32]
+out_dir = Path(args.out)
+out_dir.mkdir(parents=True, exist_ok=True)
+# time_ns() を入れることで同一秒内の連続呼び出しでも上書きされない
+out = out_dir / f"envelope-{args.tool}-{mode}-{time.time_ns()}.json"
 with out.open("w") as f:
     json.dump(envelope, f, indent=2, ensure_ascii=False)
 sys.stdout.write("{}")
@@ -322,6 +325,15 @@ sys.stdout.write("{}")
 
 `--out` を `required=True` にしてあるのは、指定を忘れたときに黙って共有の `/tmp` へ
 書くのではなく **probe が起動時に落ちて気付ける**ようにするため。
+
+ファイル名に **`<mode>` と `time.time_ns()` の両方**を入れているのは、秒解像度の
+タイムスタンプだと**同一秒内に 2 回 hook が呼ばれたとき後の envelope が前を黙って
+上書きする**ため (mode を素早く切り替えた場合や step 4 を自動化した場合に起きる)。
+上書きされた mode は step 4 の集計から消え、step 5 の突合で「定数にあるが観測されな
+かった」側に落ちて誤判断に直結する — step 4 の「過去実行分が混ざる」問題と対になる、
+**あるべきものが消える**側の事故。`<mode>` を入れてあるのでどのファイルがどの mode の
+envelope かはファイル名だけで分かる。`mode` は envelope 由来の外部入力なので、パス
+区切り等が混ざらないよう文字種を絞ってから使う。
 
 ### 3. hooks.json の matcher を差し替え
 

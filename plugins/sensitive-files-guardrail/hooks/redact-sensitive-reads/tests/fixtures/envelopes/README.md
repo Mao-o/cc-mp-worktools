@@ -9,8 +9,10 @@ Phase 0 実測結果 (要点は `docs/DESIGN.md` の Phase 0 節と `docs/MAINTA
 - Claude Code CLI のバージョン差で envelope のマイナーキーが変わる可能性があるため、
   テストは「必須キーの存在確認」のみに留める
 - 実機採取を再度行いたい場合は `hooks/_debug/capture_envelope.py` を一時的に
-  作成し、`sys.stdin.read()` を `/tmp/envelope-<tool>.json` に保存してから
-  `claude --plugin-dir .` で起動して各 tool を 1 回ずつ実行する
+  作成し、`sys.stdin.read()` を `<out>/envelope-<tool>-<mode>-<ns>.json` に
+  保存してから `claude --plugin-dir .` で起動して各 tool を 1 回ずつ実行する
+  (スクリプト本体・採取先の分離・命名規約は `docs/MAINTAINING.md` の
+  Runbook step 2〜4 が正典)
 - 採取後はこのディレクトリに転記して一時スクリプトを削除する
 
 ## 既知の必須キー (Phase 0 実測)
