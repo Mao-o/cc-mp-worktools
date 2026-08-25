@@ -11,10 +11,15 @@ bypassPermissions) での判定結果を完全列挙する。値は 0.19.0 時�
 > 不能ケースは ask) として読むこと。`acceptEdits` / `dontAsk` のような ask 維持
 > 系とは挙動が異なるため、`auto` 列を参照する。
 
-`permission_mode` の列挙は `core/output.py::LENIENT_MODES` と
-`tests/fixtures/envelopes/README.md` の `permission_mode` 項で突合される。CLI 側が新しい mode を
-追加したら同時に更新すること (Runbook は
-[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook))。
+`permission_mode` の既知列挙は `tests/test_envelope_shapes.py` の
+`_KNOWN_PERMISSION_MODES` に固定され、`core/output.py::LENIENT_MODES` がその subset で
+あることをテストが突合する。CLI 側が新しい mode を追加したときの**必須**更新は
+**既知 mode 側** (`_KNOWN_PERMISSION_MODES` / 件数 assert /
+`tests/fixtures/envelopes/README.md` の列挙 / 本ファイルと `docs/DESIGN.md` の
+mode 記述。完全な一覧は step 5)。**`LENIENT_MODES` への収録は
+autonomous 実行モードだと分類が済んだ場合に限る条件付き判断**で、収録すると
+`ask_or_allow` が ask から allow に変わる = 判定境界の変更にあたる。手順は
+[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook) の step 5。
 
 > 0.13.0 (2026-05-18) で `plan` 列を `auto` と同等の lenient 扱いに戻した。
 > 0.6.0 で「現行 CLI では hook 非発火」と判断して dead entry を撤去していたが、

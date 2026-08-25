@@ -37,9 +37,16 @@ Phase 0 実測結果 (要点は `docs/DESIGN.md` の Phase 0 節と `docs/MAINTA
     `dontAsk` は明示的に非 lenient を維持 (ask に倒る)。
   - 上記 6 値は `tests/test_envelope_shapes.py` の `_KNOWN_PERMISSION_MODES` で
     CLI 側の既知 mode として固定。`core/output.py::LENIENT_MODES` はその subset
-    (auto / bypassPermissions / plan の 3 値)。CLI が新 mode を追加したら両方を同時に
-    更新すること (Runbook は `docs/MAINTAINING.md` の "CLI バージョンアップ時の再実測手順"
-    を参照)。
+    (auto / bypassPermissions / plan の 3 値)
+  - CLI が新 mode を追加したときの**必須**更新は**既知 mode 側** —
+    `_KNOWN_PERMISSION_MODES` / 件数 assert / テスト名 / 上の列挙 /
+    `docs/DESIGN.md`・`docs/MATRIX.md` の mode 記述
+    (完全な一覧は `docs/MAINTAINING.md` の Runbook step 5)。
+    **`LENIENT_MODES` への追加は必須ではない。** その mode が autonomous 実行モード
+    だと**分類が済んだ場合に限って**追加する。`LENIENT_MODES` に入れると Bash の
+    `ask_or_allow` が「対話でユーザーに確認」から allow に変わる = **判定境界の変更**
+    にあたるので、envelope 実値で挙動を確認してから決めること
+    (手順は `docs/MAINTAINING.md` の "CLI バージョンアップ時の再実測手順" step 5)
   - **既知のドリフト (0.19.1 時点)**: CLI 2.1.241 の `--permission-mode` は
     **`manual`** も受け付けるが、上記 6 値にも `_KNOWN_PERMISSION_MODES` にも
     含まれていない。envelope 実値の採取と定数更新は未実施 (`bd_092a232e-snw.28`)。

@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3 + R6 ×1)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -273,6 +273,34 @@ Codex round 5 で 3 件。うち 1 件は **R4 で新設したブロックに、
   検出するはずの cut 漏れをそのまま受理する。「テスト実行」節と**同じ流儀**
   (サブシェル + サマリ出力後の `exit`) に統一し、同一文書内で 2 つの流儀が併存
   しないようにした
+
+Codex round 6 で、R5-1 で直した指示が**別ファイルにも複製されていた**ことが判明。
+「複製された虚偽記述」の 3 回目 (R1 の README の `cd` 連鎖、R3 の fixtures README、
+今回) なので、1 箇所ずつ直すのをやめ、**先に repo 全体を網羅探索してから一括で
+揃える**方針に切り替えた:
+
+- **[R6] mode 追加手順の「両方を同時に更新」指示が 2 ファイルに残っていた**:
+  `tests/fixtures/envelopes/README.md` が「CLI が新 mode を追加したら
+  `_KNOWN_PERMISSION_MODES` と `LENIENT_MODES` の**両方を同時に更新すること**」と
+  書いていた。R5-1 と同じ欠陥で、**autonomous と分類できていない mode まで
+  lenient に収録させ Bash の保護を弱めうる**。しかも同ファイルには R3 で追加した
+  `manual` ドリフト注記があるため、「今すぐ実行できてしまう」状態だった
+  (`manual` の envelope 挙動は未 probe)。
+
+  網羅探索 (`LENIENT_MODES` / `_KNOWN_PERMISSION_MODES` 言及の全ファイル +
+  「同時に更新」「両方を更新」等の言い回し) の結果、**同種の指示は
+  `docs/MATRIX.md` にもあった** (「CLI 側が新しい mode を追加したら同時に更新する
+  こと」)。**2 箇所を同じ方針に揃えた** — 必須は既知 mode 側、`LENIENT_MODES` は
+  「autonomous 実行モードだと分類が済んだ場合に限る」条件付き判断で判定境界の変更。
+
+  あわせて、参照先である Runbook step 5 が**フラットな 1〜6 の並列**で必須と
+  条件付きの区別が最も曖昧だった (正典が複製より不明確) ため、
+  **「必須」/「条件付き — 判定境界の変更を伴うので既定では実施しない」の 2 見出しに
+  再構成**した。また `docs/DESIGN.md` の LENIENT_MODES 方針表と `docs/MATRIX.md` の
+  mode 記述は **lenient 収録の有無に関わらず必須**である (収録しないなら `ask` 側と
+  して記載する) ことを明示し、docstring 側の分類もこれに合わせた。
+  `LENIENT_MODES` / `_KNOWN_PERMISSION_MODES` の値は不変で、`manual` は現状
+  `LENIENT_MODES` に無いため `ask_or_allow` は **ask に倒れる (安全側)**
 
 ### リリース手順への追加
 

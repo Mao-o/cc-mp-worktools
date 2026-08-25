@@ -398,7 +398,11 @@ step 1 の CLI 列挙と step 4 の envelope 実測値を、`tests/test_envelope
 | CLI 列挙 / 実測値に**あって**定数に**無い** | mode が**追加**された | 下の更新手順を実施 |
 | 定数に**あって** CLI 列挙に**無い** | launch choice ではないだけかもしれない (`default` が該当) | **単純削除しない**。step 4 の envelope 実測値に出るなら定数は維持が正しい。実測値にも出ないことを確認できて初めて削除を検討する |
 
-「追加」側を確認したときの更新手順:
+「追加」側を確認したときの更新手順。**必須なのは既知 mode 側だけ**で、
+`LENIENT_MODES` への収録は判定境界を動かす別枠の条件付き判断。この 2 つを混ぜない
+(本節がこの手順の正典で、docstring / fixtures README / MATRIX.md はここを参照する):
+
+**必須 — 既知 mode の集合・件数と、その mode の挙動記述を揃える**
 
 1. 実測で確認した新 mode を `_KNOWN_PERMISSION_MODES` に追加
 2. `TestLenientModesSubset::test_known_modes_contains_six_canonical_entries` の
@@ -406,12 +410,20 @@ step 1 の CLI 列挙と step 4 の envelope 実測値を、`tests/test_envelope
    この assert が red になるのは**上の 1. で列挙を増やした後**であって、CLI 変化の
    検知ではない。列挙を増やしたのに関連 docs を直し忘れる事故を止めるための
    「更新漏れ検知」と理解する
-3. autonomous として扱ってよいなら `LENIENT_MODES` にも追加 (Bash の静的解析
-   不能ケースで allow に倒したいかを判断)。**これは判定境界の変更**にあたるので、
-   envelope 実値で挙動を確認してから決める
-4. `tests/fixtures/envelopes/README.md` の列挙を更新
-5. `docs/DESIGN.md` (LENIENT_MODES 方針) と `docs/MATRIX.md` の mode 列を更新
-6. 下の実測ログに実測日と CLI version を追記
+3. `tests/fixtures/envelopes/README.md` の `permission_mode` 列挙を更新
+4. `docs/DESIGN.md` の「LENIENT_MODES 方針」表と `docs/MATRIX.md` の mode 記述に
+   新 mode を追加する。**下の 6 で lenient に収録しない場合は `ask` 側として
+   記載する** (新 mode が既定で非 lenient であることを docs にも残す)
+5. 下の実測ログに実測日と CLI version を追記
+
+**条件付き — 判定境界の変更を伴うので既定では実施しない**
+
+6. `core/output.py::LENIENT_MODES` への追加は、その mode が **autonomous 実行モード
+   だと分類が済んだ場合に限る**。収録すると Bash の静的解析不能ケースの
+   `ask_or_allow` が「対話でユーザーに確認」から allow に変わる = **判定境界の変更**。
+   envelope 実値で挙動を確認してから決め、**分類が未了なら追加しない**
+   (`manual` が現にこの状態 — 上の Worked example を参照)。追加した場合は
+   4 の記述も allow 側に直す
 
 ### 6. debug 差し戻し
 
