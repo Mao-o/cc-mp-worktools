@@ -802,11 +802,48 @@ class TestHeredocProtection(unittest.TestCase):
         cands = [c for c, _env in extract_candidates("(( x = 1 << 2 ))\ngh pr create")]
         self.assertIn("gh pr create", cands)
 
-    def test_unterminated_heredoc_absorbs_to_end(self):
-        # bash も未終端 heredoc では後続を実行しないため、1 セグメントに閉じ込める。
+    def test_unterminated_heredoc_does_not_swallow_the_rest(self):
+        """terminator が無ければ heredoc として扱わず、通常の改行分割に戻す。
+
+        「閉じていなければ末尾まで飲み込む」方式は、delimiter を 1 文字でも
+        読み違えた瞬間に「以降すべて検証しない」へ化ける。実際に
+        `cat <<END-OF-FILE` を `END` と読む / `(( x = 1 << y ))` を heredoc と読む
+        の 2 経路で、後続の `gh pr create` が丸ごと未検証になっていた。
+        未終端 heredoc は bash 側でもエラー (or 入力待ち) になる壊れたコマンドなので、
+        そちらを検証してしまう方の代償を取る。
+        """
         cands = [c for c, _env in extract_candidates("cat <<EOF\ngh pr create\n")]
-        self.assertEqual(len(cands), 1)
-        self.assertTrue(cands[0].startswith("cat <<EOF"))
+        self.assertIn("gh pr create", cands)
+
+    def test_delimiter_is_matched_as_a_whole_token(self):
+        # 途中で切ると (例: `END-OF-FILE` を `END` と読む) terminator が現れず、
+        # 後続コマンドまで本文として飲み込む = 検証が消える。
+        for opener, closer in (
+            ("<<END-OF-FILE", "END-OF-FILE"),
+            ("<<EOF.txt", "EOF.txt"),
+            ("<<1EOF", "1EOF"),
+        ):
+            with self.subTest(opener=opener):
+                cmd = f"cat {opener} > x\nbody\n{closer}\ngh pr create --fill"
+                cands = [c for c, _env in extract_candidates(cmd)]
+                self.assertEqual(len(cands), 2, cands)
+                self.assertEqual(cands[1], "gh pr create --fill")
+                self.assertNotIn("body", cands[0])
+
+    def test_arithmetic_shift_with_identifier_operand(self):
+        # `1 << 2` (数字) だけでなく `1 << y` (識別子) も heredoc ではない。
+        # 識別子だけを弾く方式では防げないため、terminator の実在確認で担保する。
+        for cmd in ("(( x = 1 << y ))\ngh pr create", "(( x = 1 << 2 ))\ngh pr create"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(
+                    "gh pr create", [c for c, _e in extract_candidates(cmd)]
+                )
+
+    def test_body_is_dropped_from_the_normalized_candidate(self):
+        """本文はデータなので候補文字列に残さない (option 走査に食わせない)。"""
+        cmd = "cat > deploy.sh <<'EOF'\n--profile prod\nEOF"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(cands, ["cat > deploy.sh <<'EOF'"])
 
 
 class TestCommandBuiltinQuery(unittest.TestCase):

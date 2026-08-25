@@ -251,5 +251,42 @@ class TestFindContextOptions(unittest.TestCase):
         self.assertEqual(self._find('aws s3 cp "a --profile prod'), {})
 
 
+class TestContextValueRejection(unittest.TestCase):
+    """コマンドラインの「値に見えるが値ではないもの」を採用しない。
+
+    採用すると照合先が実行時と食い違う。両方向に実害がある:
+    誤って別 profile で検証して allow する (false-allow) / 実在しない
+    コンテキスト名で deny する (false-deny)。
+    """
+
+    def _find(self, cmd, context, with_value=frozenset()):
+        return find_context_options(cmd, context, with_value)
+
+    def test_next_option_or_stdin_dash_is_not_a_value(self):
+        # heredoc / `-f -` で YAML を流し込む形。`-` は stdin であって context 名ではない。
+        self.assertEqual(
+            self._find("kubectl apply -f - --context -", {"--context": "context"}), {}
+        )
+        self.assertEqual(
+            self._find("aws s3 ls --profile --debug", {"--profile": "profile"}), {}
+        )
+
+    def test_xargs_replacement_placeholder_is_not_a_value(self):
+        # `xargs -I{}` の placeholder。実行時に別の文字列へ置換される。
+        self.assertEqual(
+            self._find("aws --profile {} s3 rm s3://b", {"--profile": "profile"}), {}
+        )
+
+    def test_ordinary_values_are_still_accepted(self):
+        for value in ("prod", "my-proj-123", "me@example.com", "/tmp/kubeconfig"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self._find(
+                        f"aws s3 ls --profile {value}", {"--profile": "profile"}
+                    ),
+                    {"profile": value},
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

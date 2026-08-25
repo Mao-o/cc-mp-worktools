@@ -71,10 +71,20 @@ def _option_name_value(
 def _is_statically_resolvable(value: str) -> bool:
     """flag の値をそのまま期待値と突き合わせてよいか。
 
-    未展開の変数参照 (`$VAR` / `${VAR}`) やコマンド置換を含む値、空文字は hook からは
-    解決できないので採用しない (= 既定コンテキストでの照合にフォールバックする)。
+    採用しない (= 既定コンテキストでの照合にフォールバックする) 値:
+
+    - 空文字
+    - 未展開の変数参照 (`$VAR` / `${VAR}`) やコマンド置換 — hook では解決できない
+    - `-` 始まり — 値ではなく**次の option** か stdin を指す `-`。`--context` の
+      直後に `-` が来る形は、YAML/JSON を heredoc や `-f -` で流し込むコマンドで
+      現れる。値として採用すると実在しないコンテキスト名で誤 deny する
+    - `{` / `}` を含む — `xargs -I{}` の置換 placeholder (`aws --profile {}`)。
+      実行時に別の文字列へ置き換わるので、その場の文字列で照合してはいけない。
+      アカウント / プロジェクト / コンテキスト名に波括弧は使えないため誤検出も無い
     """
-    return bool(value) and "$" not in value and "`" not in value
+    if not value or value.startswith("-"):
+        return False
+    return not any(ch in value for ch in "$`{}")
 
 
 def strip_leading_options(

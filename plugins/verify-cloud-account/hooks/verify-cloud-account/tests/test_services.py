@@ -1469,5 +1469,52 @@ class TestServiceContextContract(unittest.TestCase):
                     self.assertTrue(key and not key.startswith("-"), key)
 
 
+class TestFirebaseCliNameForms(unittest.TestCase):
+    """npm 経由の正当な CLI 名の形を全判定で受け付ける。
+
+    `npx firebase-tools@13.31.0 deploy` は CI / 再現手順で頻出する。
+    PATTERNS だけ通して READONLY / STATE_CHANGING が通らないと、`login` が切替として
+    認識されず古い成功 cache が残る (v0.9.0 開発中に作り込んだ退行の回帰テスト)。
+    """
+
+    FORMS = ("firebase", "firebase-tools", "firebase-tools@13.31.0", "firebase-tools@13")
+
+    def test_all_forms_match_patterns(self):
+        for name in self.FORMS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    any(re.search(p, f"{name} deploy") for p in firebase.PATTERNS), name
+                )
+
+    def test_all_forms_are_state_changing_for_login_and_use(self):
+        for name in self.FORMS:
+            for sub in (f"{name} login", f"{name} use prod"):
+                with self.subTest(cmd=sub):
+                    self.assertTrue(
+                        any(re.search(p, sub) for p in firebase.STATE_CHANGING), sub
+                    )
+
+    def test_all_forms_are_readonly_for_login(self):
+        for name in self.FORMS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    any(re.search(p, f"{name} login") for p in firebase.READONLY), name
+                )
+
+    def test_all_forms_support_self_remediation(self):
+        for name in self.FORMS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    firebase.is_self_remediation(f"{name} use prod", "prod"), name
+                )
+
+    def test_hyphenated_neighbours_still_excluded(self):
+        for name in ("firebase-admin", "firebaseX"):
+            with self.subTest(name=name):
+                self.assertFalse(
+                    any(re.search(p, f"{name} deploy") for p in firebase.PATTERNS), name
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

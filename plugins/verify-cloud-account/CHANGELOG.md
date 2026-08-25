@@ -82,9 +82,31 @@ deny を増やすのではなく**「検証を走らせる」**方向に倒す�
    `ionice` は cloud CLI と組み合わせる現実的な形も開発機の man page も確認できず、
    推測で allow-list を広げない方針から**追加していない**。
 
+7. **独立レビューで検出した自作の退行を修正** — 上記 2〜6 を入れた直後に、
+   0.8.0 と 0.9.0 の出力を突き合わせる敵対的レビューを別途かけ、**新規に作り込んだ
+   false-allow を 5 経路**見つけて潰した。いずれも「安全側に倒したつもりが、
+   検証そのものを消していた」型の誤り:
+   - `npx firebase-tools@13.31.0 deploy` — CLI 名の lookahead が `@` で失敗し
+     **検証対象から丸ごと外れていた**。`@<version>` を明示的に許可し、PATTERNS /
+     READONLY / STATE_CHANGING / self-remediation で同じ prefix を共有する
+     (片方だけ許可すると `login` が切替として認識されず成功 cache が残る)
+   - `cat <<END-OF-FILE` / `<<EOF.txt` — delimiter を識別子形に限定していたため
+     `END` までしか読めず、terminator が現れないまま**後続コマンドを全部**
+     本文として飲み込んでいた。delimiter は 1 トークン丸ごと取る
+   - `(( x = 1 << y ))` — 算術左シフトを heredoc と誤認して同様に飲み込む。
+     **terminator の実在を確認してから本文として扱う**方式に変更し、
+     「閉じていなければ末尾まで飲み込む」挙動そのものを廃止した
+     (誤検出が「以降すべて検証しない」に化ける経路を構造的に塞ぐ)
+   - heredoc 本文の行が option 走査に食われる — `--template-file - <<EOF` の本文に
+     `--profile prod` があると **prod で検証して allow** し、YAML マニフェストの
+     `- --context` / `- prod` があると**誤 deny** していた。本文は候補文字列からも
+     落とす
+   - context option の値として `-` (次の option / stdin) と `{}`
+     (`xargs -I{}` の置換 placeholder) を採用していた
+
 ### テスト
 
-448 → 514 件 (+66)。追加分は 17 パターンの mutation で検証済み — 各修正を 1 つずつ
+448 → 530 件 (+82)。追加分は 22 パターンの mutation で検証済み — 各修正を 1 つずつ
 元に戻すと対応するテストが必ず落ちることを確認した。
 
 `TestWrapperEnvPropagationContract` に「passthrough 分類の全 wrapper が env 伝播

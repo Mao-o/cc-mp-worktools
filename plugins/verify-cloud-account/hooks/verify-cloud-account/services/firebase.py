@@ -34,31 +34,34 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# `\b` だとハイフン付き別コマンド全般を拾ってしまうため空白/終端に限定する。
-# ただし `npx firebase-tools deploy` は wrapper 剥がし後 `firebase-tools deploy`
-# になり、これは正当な検証対象なので `-tools` だけ明示的に許可する
-# (READONLY / STATE_CHANGING / self-remediation も同じ形を受け付けている)。
-PATTERNS = [r"^firebase(?:-tools)?(?=\s|$)"]
-# `npx firebase-tools ...` は wrapper 剥がし後 `firebase-tools ...` になり PATTERNS
-# (`^firebase\b`) に一致する。READONLY / STATE_CHANGING / self-remediation も同じ形を
-# 受け付けないと、`npx firebase-tools login` が検証され `use prod` の切替が cache される。
+# CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
+# 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
+# - `npx firebase-tools deploy` → wrapper 剥がし後 `firebase-tools deploy`
+# - `npx firebase-tools@13.31.0 deploy` → 同 `firebase-tools@13.31.0 deploy`
+#   (npx は `<pkg>@<version>` で版を固定でき、CI や再現手順で頻出する)
+# `@<version>` を許可しないと lookahead が `@` で失敗し、**検証対象から丸ごと
+# 外れる** (v0.9.0 開発中に実際に作り込んだ退行)。PATTERNS / READONLY /
+# STATE_CHANGING / self-remediation の全てで同じ prefix を使うこと — 片方だけ
+# 許可すると `npx firebase-tools@13 login` が切替として認識されず成功 cache が残る。
+_CLI = r"firebase(?:-tools)?(?:@\S+)?"
+PATTERNS = [rf"^{_CLI}(?=\s|$)"]
 READONLY = [
-    r"^firebase(?:-tools)?\s+use\s*$",
+    rf"^{_CLI}\s+use\s*$",
     # 認証操作 (login / login:ci / login:add / login:use / logout) は project を
     # 変更しない (OAuth token の取得・ローカル保存のみ。gh の SSH 鍵アップロードの
     # ようなリモート write は無い)。未ログインだと `firebase use` が requireAuth で
     # 失敗して現在値を CLI から取れず、login 自体が deny されるデッドロックになるため
     # 素通しする。
-    r"^firebase(?:-tools)?\s+(login|logout)(:\S+)?\b",
+    rf"^{_CLI}\s+(login|logout)(:\S+)?\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
-    r"^firebase(?:-tools)?\s+(--version|--help|version|help)\b",
+    rf"^{_CLI}\s+(--version|--help|version|help)\b",
 ]
 # アクティブ project (configstore の activeProjects) や認証状態を変えうるコマンド。
 # dispatcher が検出すると firebase の成功 cache を破棄する。引数なしの `firebase use`
 # は表示のみ (READONLY) で対象外。`use --clear` / `--add` / `--unalias` は含む。
 STATE_CHANGING = [
-    r"^firebase(?:-tools)?\s+use\s+\S",
-    r"^firebase(?:-tools)?\s+(login|logout)\b",
+    rf"^{_CLI}\s+use\s+\S",
+    rf"^{_CLI}\s+(login|logout)\b",
 ]
 # CLI 名直後に置ける global option (`firebase -P prod use ...`)。dispatcher が剥がした
 # 形でも READONLY / STATE_CHANGING / self-remediation を判定する (core/cli_options.py)。
@@ -377,7 +380,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     return None
 
 
-_USE_RE = re.compile(r"^firebase(?:-tools)?\s+use\s+(\S+)\s*$")
+_USE_RE = re.compile(rf"^{_CLI}\s+use\s+(\S+)\s*$")
 
 
 def is_self_remediation(candidate: str, expected) -> bool:

@@ -1759,5 +1759,60 @@ class TestContextOptionRouting(BaseWithTmpProject):
                 self.assertEqual(m.call_count, 2)
 
 
+class TestHeredocBodyIsNotCommandLine(BaseWithTmpProject):
+    """heredoc 本文はデータであって引数ではない (両方向の実害を固定する)。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111", "kubectl": "prod-ctx"})
+
+    def test_body_does_not_choose_the_verification_target(self):
+        # 本文の `--profile prod` を採用すると、実行は既定 profile なのに prod で
+        # 検証して allow する (false-allow)。
+        command = (
+            "aws cloudformation deploy --template-file - <<EOF\n"
+            "--profile prod\nEOF"
+        )
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+    def test_yaml_body_does_not_cause_a_false_deny(self):
+        # マニフェスト本文の `- --context` / `- prod` を指定と誤読すると誤 deny。
+        command = (
+            "kubectl apply -f - <<'EOF'\nspec:\n  - args:\n"
+            "    - --context\n    - prod\nEOF"
+        )
+        with mock.patch("services.kubectl.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+
+class TestVersionPinnedNpxSpecs(BaseWithTmpProject):
+    """`npx firebase-tools@<version>` を検証対象から落とさない。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"firebase": "my-fb"})
+
+    def test_version_pinned_deploy_is_verified(self):
+        with mock.patch("services.firebase.verify", return_value="FB 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch(
+                    "npx firebase-tools@13.31.0 deploy --only hosting",
+                    str(self.project_dir),
+                )
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+    def test_version_pinned_login_invalidates_cache(self):
+        from core.dispatcher import _analyze_command
+
+        _targets, switching = _analyze_command("npx firebase-tools@13 login")
+        self.assertIn("services.firebase", [s.__name__ for s in switching])
+
+
 if __name__ == "__main__":
     unittest.main()

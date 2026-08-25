@@ -147,49 +147,55 @@ _WRAPPER_FLAGS_WITH_VALUE = {
 # `man 1 bash` の Here Documents 節: 形式は `<<[-]word`、本文は「word のみを含む行」
 # (末尾空白なし) までで、`<<-` は入力行および delimiter 行の先頭タブを除去する。
 #
-# **bare / backslash 形の word は識別子形 (`[A-Za-z_][A-Za-z0-9_]*`) に限定する**。
-# `(( x = 1 << 2 ))` のような算術左シフトは既存スキャナでは保護されておらず、
-# 数字を delimiter と誤認すると「その数字だけの行」まで飲み込んで後続セグメント
-# (= 検証対象) を消してしまう。識別子形に絞ることでこの誤検出を防ぐ
-# (`y << z` 形の算術シフトだけは依然として誤検出しうるが、複数行コマンド中の
-# 変数シフトという極めて稀な形に限られる)。
+# bare / backslash 形の word は **1 トークン丸ごと**取る。途中で切ると
+# (例: `<<END-OF-FILE` を `END` と読む) 一致する行が現れず、後続コマンドまで
+# heredoc 本文として飲み込んでしまう = 検証が丸ごと消える。
+# 純粋な数字だけは delimiter として認めない — `(( x = 1 << 2 ))` の算術左シフトを
+# heredoc と誤認しないため (bash の word としては valid だが、数字を delimiter に
+# する heredoc は実在しない)。
+_HEREDOC_WORD = r"[^\s;&|<>()'\"`$]+"
 _HEREDOC_START_RE = re.compile(
     r"""<<(?P<dash>-?)[ \t]*(?:
           '(?P<sq>[^']*)'
         | "(?P<dq>[^"]*)"
-        | \\(?P<bs>[A-Za-z_][A-Za-z0-9_]*)
-        | (?P<bare>[A-Za-z_][A-Za-z0-9_]*)
+        | \\(?P<bs>""" + _HEREDOC_WORD + r""")
+        | (?P<bare>""" + _HEREDOC_WORD + r""")
     )""",
     re.VERBOSE,
 )
+_NUMERIC_RE = re.compile(r"^[0-9]+$")
 
 
-def _heredoc_delimiter(match: re.Match) -> str:
+def _heredoc_delimiter(match: re.Match) -> str | None:
+    """検出した heredoc の delimiter。delimiter として認めない形なら None。"""
     for name in ("sq", "dq", "bs", "bare"):
         value = match.group(name)
-        if value is not None:
-            return value
-    return ""
+        if value is None:
+            continue
+        if name in ("bs", "bare") and _NUMERIC_RE.match(value):
+            # 算術左シフト (`1 << 2`) の右辺。heredoc ではない。
+            return None
+        return value
+    return None
 
 
-def _consume_heredoc_body(
-    command: str, i: int, delim: str, strip_tabs: bool, buf: list[str]
-) -> int:
-    """delimiter 行まで (delimiter 行を含む) を buf に取り込み、次の index を返す。
+def _find_heredoc_end(command: str, i: int, delim: str, strip_tabs: bool) -> int | None:
+    """delimiter 行の**次**の index を返す。terminator が無ければ None。
 
-    delimiter が現れないまま入力が尽きたら末尾まで取り込む (bash も未終端 heredoc
-    では後続を実行しないため、まとめて 1 セグメントに閉じ込めるのが実行時と整合する)。
+    None のときは呼び出し側が heredoc として扱わずに通常の改行分割へ戻す。
+    「terminator が見つからなければ末尾まで飲み込む」方式にすると、delimiter の
+    誤検出 (算術シフト等) がそのまま「以降すべて検証しない」に化けるため、
+    **実際に閉じている heredoc だけを heredoc として扱う**。
     """
     n = len(command)
     while i < n:
         eol = command.find("\n", i)
         end = n if eol == -1 else eol + 1
         line = command[i:end - 1] if eol != -1 else command[i:]
-        buf.append(command[i:end])
-        i = end
         if (line.lstrip("\t") if strip_tabs else line) == delim:
-            break
-    return i
+            return end
+        i = end
+    return None
 
 
 def split_on_operators(command: str) -> list[str]:
@@ -279,10 +285,9 @@ def split_on_operators(command: str) -> list[str]:
                 i += 3
                 continue
             m = _HEREDOC_START_RE.match(command, i)
-            if m:
-                pending_heredocs.append(
-                    (_heredoc_delimiter(m), m.group("dash") == "-")
-                )
+            delim = _heredoc_delimiter(m) if m else None
+            if delim is not None:
+                pending_heredocs.append((delim, m.group("dash") == "-"))
                 buf.append(command[i:m.end()])
                 i = m.end()
                 continue
@@ -292,18 +297,27 @@ def split_on_operators(command: str) -> list[str]:
             continue
 
         if ch == "\n" and pending_heredocs:
-            buf.append(ch)
-            i += 1
+            # **閉じている heredoc だけ**を本文として取り込む。terminator を
+            # 探してから取り込むことで、delimiter の誤検出が「以降すべて検証
+            # しない」に化けるのを防ぐ (誤検出時は下の通常分割にそのまま落ちる)。
+            end = i + 1
             for delim, strip_tabs in pending_heredocs:
-                i = _consume_heredoc_body(command, i, delim, strip_tabs, buf)
+                found = _find_heredoc_end(command, end, delim, strip_tabs)
+                if found is None:
+                    end = None
+                    break
+                end = found
             pending_heredocs = []
-            # delimiter 行の改行はトップレベルの区切りなので、ここでセグメントを
-            # 閉じる。閉じないと heredoc の**次**のコマンド
-            # (`EOF` の後ろに続く `gh pr create` 等) が heredoc セグメントに
-            # 吸収され、検証されないまま素通りする。
-            segments.append("".join(buf))
-            buf = []
-            continue
+            if end is not None:
+                buf.append(command[i:end])
+                i = end
+                # delimiter 行の改行はトップレベルの区切りなので、ここでセグメントを
+                # 閉じる。閉じないと heredoc の**次**のコマンド
+                # (`EOF` の後ろに続く `gh pr create` 等) が heredoc セグメントに
+                # 吸収され、検証されないまま素通りする。
+                segments.append("".join(buf))
+                buf = []
+                continue
 
         if ch == "&" and nxt == "&":
             segments.append("".join(buf))
@@ -613,6 +627,47 @@ _LEADING_REDIRECT_RE = re.compile(
 _CLOSER_TO_OPENER = {")": "(", "}": "{"}
 
 
+def _strip_heredoc_bodies(cmd: str) -> str:
+    """セグメントに取り込まれた heredoc 本文を落とし、コマンド行だけを残す。
+
+    `split_on_operators` は heredoc 本文を分割しないよう同一セグメントへ取り込む。
+    しかし本文は**コマンドの引数ではなくデータ**なので、そのまま候補文字列に残すと
+    後段の option 走査 (`cli_options.find_context_options`) が本文中の行を
+    コマンドラインの一部として読んでしまう。実害は両方向にある:
+
+    - `aws cloudformation deploy --template-file - <<EOF` の本文に `--profile prod`
+      があると、実行は既定 profile なのに **prod で検証して allow** する (false-allow)
+    - `kubectl apply -f - <<EOF` の YAML 本文に `- --context` / `- prod` があると
+      `--context` 指定と誤読して **誤 deny** する
+
+    本文を削っても heredoc の**開始行**は残るので、service の match / readonly 判定は
+    従来どおり動く。deny 文面の表示も本文が混ざらず読みやすくなる。
+    """
+    if "<<" not in cmd:
+        return cmd
+    out: list[str] = []
+    i = 0
+    n = len(cmd)
+    while i < n:
+        eol = cmd.find("\n", i)
+        end = n if eol == -1 else eol + 1
+        line = cmd[i:end]
+        out.append(line)
+        i = end
+        # この行で開かれた heredoc の delimiter を宣言順に集める。
+        pending: list[tuple[str, bool]] = []
+        for m in _HEREDOC_START_RE.finditer(line):
+            delim = _heredoc_delimiter(m)
+            if delim is not None:
+                pending.append((delim, m.group("dash") == "-"))
+        for delim, strip_tabs in pending:
+            found = _find_heredoc_end(cmd, i, delim, strip_tabs)
+            if found is None:
+                break
+            i = found  # 本文 + delimiter 行を出力せず読み飛ばす
+    return "".join(out)
+
+
 def _strip_leading_syntax(cmd: str) -> str:
     """コマンド本体の前に置かれた shell 構文プレフィックスを剥がす。
 
@@ -746,6 +801,9 @@ def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]
     pre-wrapper env を素通しするため従来どおり伝播する。
     """
     collected: dict[str, str] = {}
+    # heredoc 本文はデータであってコマンドラインではない。先に落としておかないと
+    # 後段の option 走査が本文の行を引数として読む (`_strip_heredoc_bodies` 参照)。
+    cmd = _strip_heredoc_bodies(cmd)
     for _ in range(max_iter):
         before = cmd
         # 構文プレフィックス → 先頭 env → コマンド名のパス正規化 の順。

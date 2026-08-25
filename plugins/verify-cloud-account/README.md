@@ -113,8 +113,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 - **コマンドチェーン**: `&&` / `||` / `;` / `|` / 改行 (quote / $() / backtick 内は保護)
 - **heredoc** (v0.9.0): `cat > x.sh <<'EOF'` 〜 `EOF` の**本文は解析しない**。
   本文に書かれた CLI 例は実行されないため (`<<-` のタブ除去、quote 付き
-  delimiter、1 行に複数 heredoc、here-string `<<<` の非対象化に対応)。
-  delimiter 行の次のコマンドは従来どおり別セグメントとして検証する
+  delimiter、`END-OF-FILE` のようなハイフン入り delimiter、1 行に複数 heredoc、
+  here-string `<<<` の非対象化に対応)。delimiter 行の次のコマンドは従来どおり
+  別セグメントとして検証する。本文は候補文字列からも落とすので、本文中の
+  `--profile` 等がコマンドの option として解釈されることもない
 - **シェル構文プレフィックス** (v0.9.0): `(` / `{` / `!` / 予約語
   (`if` `then` `elif` `else` `do` `while` `until`) / コマンド本体前の
   リダイレクト (`</dev/null gh ...` / `2>/dev/null gh ...`)、および末尾の
@@ -506,9 +508,17 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
   `--profile` 等に見える形 (`aws s3 cp --exclude --profile x`) では、その値を
   コンテキスト指定と誤読しうる。全サブコマンドの option 表を持てないため
   避けられない。誤読しても照合先が変わるだけで、検証自体はスキップされない
-- heredoc 本文は解析しない。`cat <<EOF && gh pr create` のように**同じ行で**
-  heredoc と別コマンドを繋いだ場合、本文が後続セグメントの文字列に含まれる
-  (検証は正しく走るが deny 文面の「検出コマンド」表示に本文が混ざる)
+- heredoc 本文は解析対象から外す (開始行だけを候補に残す)。ただし **terminator が
+  無い未終端 heredoc は heredoc として扱わない** — 「閉じていなければ末尾まで
+  本文とみなす」方式だと delimiter を読み違えた瞬間に「以降すべて検証しない」に
+  化けるため、通常の改行分割に戻す。結果として未終端 heredoc の本文行は候補に
+  なりうる (bash 側でもエラーになる壊れたコマンドなので、そちらの代償を取る)
+- `kubectl --kubeconfig <file> --context <ctx>` は `--context` の**名前だけ**で
+  照合する。コンテキスト名は kubeconfig ファイルを跨いで一意ではないため、
+  別ファイルの同名コンテキストは区別できない
+- `if false; then aws ...; fi` のように**実行されない分岐**の中身も候補になる。
+  予約語 (`then` / `else` / `do`) を剥がして本体を検証対象にしている副作用で、
+  条件の真偽までは静的に評価しない (実行される場合を取りこぼさない側に倒している)
 - subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外
 - 期待値以外への切替と write を**同一コマンド**で実行した場合
   (`gh auth switch --user other && gh pr create`) は、実行前の状態で検証されるため
