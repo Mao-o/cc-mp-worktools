@@ -1814,5 +1814,132 @@ class TestVersionPinnedNpxSpecs(BaseWithTmpProject):
         self.assertIn("services.firebase", [s.__name__ for s in switching])
 
 
+class TestVerificationCoverageFloor(BaseWithTmpProject):
+    r"""「検証対象であり続ける」ことを入力の一覧で固定する (カバレッジの床)。
+
+    mutation テストは**新しい挙動が効いていること**しか見ないので、
+    「以前は検証できていた入力を取りこぼすようになった」型の退行を原理的に
+    検出できない。v0.9.0 の開発中に実際、`(?=\s|$)` 化と heredoc delimiter の
+    制限で 5 経路の検証が静かに消えた (0.8.0 との出力突き合わせで発見)。
+
+    lenient 方針は「deny を減らす」であって「検証しない」ではない。
+    ここに並ぶのは**実際に CLI が実行される**形なので、検証対象から外れたら退行。
+    """
+
+    # (コマンド, 検証対象になるべき service)
+    MUST_VERIFY = [
+        # 素の形
+        ("gh pr create --fill", "github"),
+        ("aws s3 rm s3://b/x", "aws"),
+        ("gcloud run deploy svc --image x", "gcloud"),
+        ("firebase deploy --only hosting", "firebase"),
+        ("kubectl delete pod x", "kubectl"),
+        # npm 経由 (版固定を含む) — lookahead 化で一度落とした形
+        ("npx firebase-tools deploy", "firebase"),
+        ("npx firebase-tools@13.31.0 deploy --only hosting", "firebase"),
+        ("npx firebase-tools@13 deploy", "firebase"),
+        # 透過 wrapper / 実行ラッパ
+        ("sudo aws s3 rm s3://b/x", "aws"),
+        ("timeout 30 gh pr create --fill", "github"),
+        ("nice -n 10 aws s3 rm s3://b/x", "aws"),
+        ("stdbuf -oL gcloud run deploy svc --image x", "gcloud"),
+        ("watch -n 5 kubectl delete pod x", "kubectl"),
+        ("xargs -I{} gh pr close {}", "github"),
+        ("mise exec -- firebase deploy", "firebase"),
+        ("env FOO=bar aws s3 rm s3://b/x", "aws"),
+        ("command aws s3 rm s3://b/x", "aws"),
+        ("command -p gh pr create", "github"),
+        # パス / エスケープ
+        ("/opt/homebrew/bin/gh pr create", "github"),
+        ("./node_modules/.bin/firebase deploy", "firebase"),
+        ("\\gh pr create", "github"),
+        # 構文プレフィックス (実際に実行される位置)
+        ("(gh pr create --fill)", "github"),
+        ("{ gh pr create; }", "github"),
+        ("! gh pr create", "github"),
+        ("2>/dev/null gh pr create", "github"),
+        ('for f in *; do gh release upload v1 "$f"; done', "github"),
+        # 複合コマンドの各段
+        ("gh auth status && gh pr create --fill", "github"),
+        ("cd /tmp; aws s3 rm s3://b/x", "aws"),
+        ("gh pr list | xargs -I{} gh pr close {}", "github"),
+        # heredoc の**外**にある実行コマンド
+        ("cat > x.sh <<'EOF'\nnot executed\nEOF\ngh pr create --fill", "github"),
+        ("cat <<END-OF-FILE\nbody\nEND-OF-FILE\naws s3 rm s3://b/x", "aws"),
+        ("(( x = 1 << 2 ))\ngh pr create --fill", "github"),
+        ("(( x = 1 << y ))\ngh pr create --fill", "github"),
+        # context flag 付きでも検証対象であること (照合先が変わるだけ)
+        ("aws --profile other s3 rm s3://b/x", "aws"),
+        ("aws s3 rm s3://b/x --profile other", "aws"),
+        ("gcloud --project other run deploy svc --image x", "gcloud"),
+        ("firebase deploy -P other", "firebase"),
+        ("kubectl --context other delete pod x", "kubectl"),
+        # インライン env
+        ("AWS_PROFILE=prod aws s3 rm s3://b/x", "aws"),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts(
+            {
+                "github": "Mao-o",
+                "aws": "111111111111",
+                "gcloud": "my-proj",
+                "firebase": "my-fb",
+                "kubectl": "prod-ctx",
+            }
+        )
+
+    def test_all_listed_commands_reach_verification(self):
+        for command, service in self.MUST_VERIFY:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(
+                    f"services.{service}.verify", return_value="不一致"
+                ) as m:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(
+                    result, f"検証対象から外れた (退行): {command!r}"
+                )
+                self.assertGreaterEqual(
+                    m.call_count, 1, f"{service}.verify が呼ばれない: {command!r}"
+                )
+
+    # 逆側の床: 実行されない / 別コマンドなので検証してはいけない形。
+    MUST_NOT_VERIFY = [
+        "cat > deploy.sh <<'EOF'\ngh release create v1\nEOF",
+        "cat <<-EOF\n\taws s3 rm s3://b/x\n\tEOF",
+        "command -v gh",
+        "command -V aws",
+        "command -pv aws",
+        "aws-vault exec prod -- aws s3 rm s3://b/x",
+        "gh-ost --help",
+        "kubectl-foo get pods",
+        "firebase-admin deploy",
+        "gh auth status",
+        "aws sts get-caller-identity",
+        "npx firebase-tools@13.31.0 login",
+        "npx firebase-tools@13 use",
+    ]
+
+    def test_listed_commands_do_not_reach_verification(self):
+        for command in self.MUST_NOT_VERIFY:
+            with self.subTest(command=command), self.isolated_cache():
+                with contextlib.ExitStack() as stack:
+                    mocks = [
+                        stack.enter_context(
+                            mock.patch(
+                                f"services.{svc}.verify", return_value="不一致"
+                            )
+                        )
+                        for svc in (
+                            "github", "aws", "gcloud", "firebase", "kubectl",
+                        )
+                    ]
+                    result = dispatch(command, str(self.project_dir))
+                    calls = sum(m.call_count for m in mocks)
+                self.assertIsNone(result, f"検証されてしまう: {command!r}")
+                self.assertEqual(calls, 0, f"verify が呼ばれた: {command!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
