@@ -910,7 +910,7 @@ class TestHeredocProtection(unittest.TestCase):
 
     def test_real_heredoc_still_works_after_arithmetic_handling(self):
         cands = [c for c, _e in extract_candidates("cat <<EOF\nbody\nEOF\ngh pr create")]
-        self.assertEqual(cands, ["cat <<EOF", "gh pr create"])
+        self.assertEqual(cands, ["cat", "gh pr create"])
 
 
 class TestXargsOptionClassification(unittest.TestCase):
@@ -1038,7 +1038,7 @@ class TestHeredocDelimiterIsAShellWord(unittest.TestCase):
         word = "E" + DQ + "OF" + DQ
         cmd = f"cat <<-{word}\n\tbody\n\tEOF\ngh pr create"
         cands = [c for c, _e in extract_candidates(cmd)]
-        self.assertEqual(cands, ["cat <<-" + word, "gh pr create"])
+        self.assertEqual(cands, ["cat", "gh pr create"])
 
     def test_unresolvable_word_is_not_treated_as_heredoc(self):
         """クォートが閉じず delimiter を解決できないときは heredoc と見なさない。
@@ -1209,6 +1209,93 @@ class TestArithmeticCommandIsNotACandidate(unittest.TestCase):
         self.assertIn("gh pr create", cands)
 
 
+class TestShortOptionClustering(unittest.TestCase):
+    """短縮 option の連結 (`-vk 1`) の中にある必須値も消費する。
+
+    POSIX/GNU の慣行では `-abc` は `-a -b -c` と等価で、連結の途中で値を取る
+    option に当たったら**それ以降が値**になる。完全一致でしか flag を探さないと
+    `timeout -vk 1 5 gh pr create` の `-k` の値を取り逃し、`5` を DURATION と
+    取り違えて `gh` を見失う (R7 A)。消費規則は `_parse_wrapper_flags` に一本化。
+    """
+
+    # (コマンド, 期待する正規化後)
+    CASES = [
+        # 連結の末尾が値を取る option → 次のトークンが値
+        ("timeout -vk 1 5 gh pr create", "gh pr create"),
+        ("sudo -Eu deploy gh pr create", "gh pr create"),
+        ("xargs -tI {} gh pr close {}", "gh pr close {}"),
+        # 連結の途中に値を取る option → それ以降の文字が値 (引っ付け形)
+        ("timeout -k1 5 gh pr create", "gh pr create"),
+        ("sudo -Eudeploy gh pr create", "gh pr create"),
+        ("stdbuf -oL gh pr create", "gh pr create"),
+        ("xargs -tI{} gh pr close {}", "gh pr close {}"),
+        ("nice -n5 gh pr create", "gh pr create"),
+        ("time -oout.txt gh pr create", "gh pr create"),
+        ("exec -aname gh pr create", "gh pr create"),
+        # bool のみの連結
+        ("xargs -0rt gh pr create", "gh pr create"),
+        ("caffeinate -dis gh pr create", "gh pr create"),
+        # `=` 形との併用
+        ("timeout -s=KILL 30 gh pr create", "gh pr create"),
+    ]
+
+    def test_clustered_short_options(self):
+        for cmd, want in self.CASES:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_clustered_query_flag_is_still_detected(self):
+        # `command -pv` の連結も存在確認として素通しする。
+        for cmd in ("command -pv aws", "command -vp gh", "command -V aws"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(strip_transparent_wrappers(cmd).startswith("command "))
+
+
+class TestHeredocWithOperatorsBeforeNewline(unittest.TestCase):
+    """heredoc 宣言の後、改行より前に演算子が来ても本文の帰属を壊さない。
+
+    宣言と本文が別セグメントに分かれると、本文が後続セグメントに付いて再分割され、
+    **データとして書いているだけの行が実行可能な候補**になる (R7 B)。
+    逆に演算子の後ろの**実際に実行されるコマンド**は検証対象であり続ける必要がある。
+    """
+
+    OPERATORS = [";", "|", "&&", "||"]
+
+    def test_body_is_never_a_candidate(self):
+        for op in self.OPERATORS:
+            cmd = f"cat <<EOF {op} echo done\ngh pr create\nEOF"
+            with self.subTest(op=op):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertNotIn("gh pr create", cands, cmd)
+
+    def test_command_after_the_operator_is_still_verified(self):
+        for op in self.OPERATORS:
+            cmd = f"cat <<EOF {op} gh pr create\nbody\nEOF"
+            with self.subTest(op=op):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertIn("gh pr create", cands, cmd)
+
+    def test_redirect_and_multiple_heredocs(self):
+        for cmd, forbidden in (
+            ("cat <<EOF > out; echo x\ngh pr create\nEOF", "gh pr create"),
+            ("cat <<A <<B; echo x\na\nA\ngh pr create\nB", "gh pr create"),
+            ("cat <<-EOF; echo x\n\tgh pr create\n\tEOF", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertNotIn(forbidden, cands, cmd)
+
+    def test_multiple_heredocs_still_verify_the_real_command(self):
+        cands = [c for c, _e in extract_candidates(
+            "cat <<A <<B; gh pr create\na\nA\nb\nB"
+        )]
+        self.assertIn("gh pr create", cands)
+
+    def test_here_string_is_unaffected(self):
+        cands = [c for c, _e in extract_candidates('grep foo <<< "$bar"\ngh pr list')]
+        self.assertEqual(cands, ['grep foo <<< "$bar"', "gh pr list"])
+
+
 class TestTimeoutDurationSyntax(unittest.TestCase):
     """GNU timeout の DURATION は strtod ベースなので 10 進整数だけではない。
 
@@ -1219,10 +1306,23 @@ class TestTimeoutDurationSyntax(unittest.TestCase):
     ACCEPTED = [
         "30", "1.5", ".5", "5.", "0",
         "1e3", "1E3", "1e-3", "1.5e2", "1E+3",
-        "inf", "infinity", "INF", "Infinity", "nan",
+        "inf", "infinity", "INF", "Infinity",
         "0x1p3",
         "30s", "5m", "2h", "1d", "1.5h",
     ]
+
+    # `timeout` が**拒否**する形。受理すると「実行されないコマンド」で誤 deny する。
+    # timeout.c の parse_duration(): `! (0 <= duration)` が NaN と負値を弾き、
+    # 残ってよいのは 1 文字だけ、その文字は apply_suffix() の小文字 s/m/h/d のみ。
+    REJECTED = [
+        "nan", "NaN", "-5", "-1.5", "30S", "30M", "30ss", "5x", "abc", "",
+    ]
+
+    def test_rejected_durations_leave_the_segment_opaque(self):
+        for d in self.REJECTED:
+            cmd = f"timeout {d} gh pr create".replace("timeout  ", "timeout ")
+            with self.subTest(duration=d):
+                self.assertEqual(strip_transparent_wrappers(cmd), cmd)
 
     def test_accepted_durations_are_consumed(self):
         for d in self.ACCEPTED:
@@ -1371,7 +1471,9 @@ class TestHeredocBodyExclusion(unittest.TestCase):
         """本文はデータなので候補文字列に残さない (option 走査に食わせない)。"""
         cmd = "cat > deploy.sh <<'EOF'\n--profile prod\nEOF"
         cands = [c for c, _env in extract_candidates(cmd)]
-        self.assertEqual(cands, ["cat > deploy.sh <<'EOF'"])
+        # 本文だけでなく、消費済みの `<<delim` 宣言トークンも落とす
+        # (残すと再分割で「本文待ち」と誤解釈され、演算子で切れなくなる)。
+        self.assertEqual(cands, ["cat > deploy.sh"])
 
 
 class TestCommandBuiltinQuery(unittest.TestCase):

@@ -578,31 +578,39 @@ def split_on_operators(command: str) -> list[str]:
                 buf = []
                 continue
 
-        if ch == "&" and nxt == "&":
-            segments.append("".join(buf))
-            buf = []
-            i += 2
-            continue
-        if ch == "|" and nxt == "|":
-            segments.append("".join(buf))
-            buf = []
-            i += 2
-            continue
-        if ch == ";":
-            segments.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        if ch == "|":
-            segments.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        if ch == "\n":
-            segments.append("".join(buf))
-            buf = []
-            i += 1
-            continue
+        # heredoc の宣言から本文の終わりまでは、途中に演算子が来ても**セグメントを
+        # 切らない**。切ると本文が後続セグメントに付き、あとで再分割されて
+        # 「データとして書いているだけの行」が実行可能な候補になる (R7 B)。
+        # 例: `cat <<EOF; echo done\ngh pr create\nEOF` の `gh pr create` は本文。
+        # 宣言と本文を 1 つの不透明なセグメントに保ち、本文の除去は
+        # `_strip_heredoc_bodies` に任せる (宣言の後ろに続く実コマンドは、本文除去後の
+        # 再分割で改めて候補になるので取りこぼさない)。
+        if not pending_heredocs:
+            if ch == "&" and nxt == "&":
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if ch == "|" and nxt == "|":
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if ch == ";":
+                segments.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            if ch == "|":
+                segments.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            if ch == "\n":
+                segments.append("".join(buf))
+                buf = []
+                i += 1
+                continue
 
         buf.append(ch)
         i += 1
@@ -719,50 +727,91 @@ _VALUE_TOKEN_RE = re.compile(r"^('[^']*'|\"[^\"]*\"|\S+)")
 _WORD_TOKEN_RE = re.compile(r"""^((?:[^\s'"]|'[^']*'|"[^"]*")+)""")
 
 
-def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> str:
-    """wrapper 直後のフラグ (値あり / 値なし / optional) を剥がす。
+def _parse_wrapper_flags(rest: str, wrapper: str) -> tuple[list[tuple[str, str | None]], str]:
+    """wrapper の flag 領域を 1 回だけ解析し `(flags, 残りの文字列)` を返す。
 
-    - `--` 単独トークンは POSIX の flag 終端として消費し、それ以降は一切剥がさない
-    - `-X=value` / `--key=value` は 1 トークンで消費 (bool / 値あり問わず)
-    - `--key` が `_WRAPPER_FLAGS_OPTIONAL_VALUE[wrapper]` にあれば **bare 形は値を
-      取らない** (GNU の optional argument 規約。値は `=` 形でのみ渡る)
-    - `-X` / `--key` が `_WRAPPER_FLAGS_WITH_VALUE[wrapper]` に含まれていれば
-      次トークンを値として消費、そうでなければ bool と見なし単独消費
-    - 非 `-` トークンが現れた時点で flag 領域は終了 (= コマンド本体の始まり)
+    `flags` は `[(option 名, 値 or None), ...]`。**この関数が flag 消費の唯一の実装**で、
+    「剥がす」「特定 flag があるか」「その値は何か」「終端 option か」の 4 用途が
+    すべてここを通る。用途ごとに走査を書くと消費規則が食い違い、実際に
+    `timeout -vk 1 5 cmd` の `-k` の値を取り逃してコマンドを見失っていた (R7 A)。
 
-    最後に `skip_arg_like` が真なら、**コマンド名ではありえない引数トークン**
-    (純粋な数値 + 任意の時間単位) を読み飛ばす。未登録の値付き flag があっても
-    値が数値ならコマンド本体に到達できる安全網で、これがあるので一次情報を
-    取れない wrapper (`watch` 等) の flag 表を空にできる。位置引数を持つ
-    `timeout` だけは自前の DURATION 処理と衝突するため無効にする。
+    消費規則:
+
+    - `--` は POSIX の flag 終端。それ以降は解析しない
+    - `--key=value` / `-x=value` は 1 トークンに値が埋まっている
+    - **短縮 option の連結** (`-vk` = `-v -k`) を分解する。POSIX/GNU の慣行どおり、
+      連結の途中で値を取る option に当たったら**それ以降の文字が値**になり
+      (`-k1` の `1`)、文字が尽きていれば**次のトークンが値**になる
+      (`-vk 1` の `1`)。GNU の「long option の必須引数は短縮形でも必須」に対応
+    - optional 引数 (`--key[=value]`) の bare 形は次のトークンを消費しない
+    - 未知の option は値を取らない (bool) と見なす
     """
-    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
-    flags_optional = _WRAPPER_FLAGS_OPTIONAL_VALUE.get(wrapper, set())
-    s = cmd.lstrip()
+    with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+    optional = _WRAPPER_FLAGS_OPTIONAL_VALUE.get(wrapper, set())
+    flags: list[tuple[str, str | None]] = []
+    s = rest.lstrip()
     while s:
         m = _WORD_TOKEN_RE.match(s)
         if not m:
             break
         tok = m.group(1)
         if tok == "--":
-            s = s[m.end():].lstrip()
+            return flags, s[m.end():].lstrip()
+        if tok == "-" or not tok.startswith("-"):
             break
-        if not tok.startswith("-"):
-            break
-        if "=" in tok:
-            s = s[m.end():].lstrip()
+        s = s[m.end():].lstrip()
+        name, eq, embedded = tok.partition("=")
+        if eq:
+            flags.append((name, embedded))
             continue
-        if tok in flags_optional:
-            # bare 形は値を取らない (`xargs --replace` の既定は `{}`)。
-            s = s[m.end():].lstrip()
+        if tok.startswith("--"):
+            if tok in with_value and tok not in optional:
+                m2 = _VALUE_TOKEN_RE.match(s)
+                if m2:
+                    flags.append((tok, m2.group(1)))
+                    s = s[m2.end():].lstrip()
+                else:
+                    flags.append((tok, None))
+            else:
+                flags.append((tok, None))
             continue
-        if tok in flags_with_value:
-            s = s[m.end():].lstrip()
-            m2 = _VALUE_TOKEN_RE.match(s)
-            if m2:
-                s = s[m2.end():].lstrip()
-        else:
-            s = s[m.end():].lstrip()
+        # 短縮 option の連結を 1 文字ずつ分解する。
+        letters = tok[1:]
+        k = 0
+        while k < len(letters):
+            short = "-" + letters[k]
+            tail = letters[k + 1:]
+            if short in with_value:
+                if tail:
+                    flags.append((short, tail))
+                else:
+                    m2 = _VALUE_TOKEN_RE.match(s)
+                    if m2:
+                        flags.append((short, m2.group(1)))
+                        s = s[m2.end():].lstrip()
+                    else:
+                        flags.append((short, None))
+                break  # 以降の文字は値として消費済み
+            if short in optional:
+                # optional は引っ付け形でのみ値を取る (bare は次を消費しない)。
+                flags.append((short, tail or None))
+                break
+            flags.append((short, None))
+            k += 1
+    return flags, s
+
+
+def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> str:
+    """wrapper 直後の flag 領域を剥がし、コマンド本体の先頭を返す。
+
+    消費規則は `_parse_wrapper_flags` に一本化。最後に `skip_arg_like` が真なら
+    **コマンド名ではありえない引数トークン** (純粋な数値 + 任意の時間単位) を
+    読み飛ばす。未登録の値付き flag があっても値が数値ならコマンド本体に到達できる
+    安全網で、これがあるので一次情報を取れない wrapper (`watch` 等) の flag 表を
+    空にできる。位置引数を持つ `timeout` だけは自前の DURATION 処理と衝突するため
+    無効にする。
+    """
+    _flags, s = _parse_wrapper_flags(cmd, wrapper)
     if skip_arg_like:
         while s:
             m = _WORD_TOKEN_RE.match(s)
@@ -772,22 +821,59 @@ def _drop_wrapper_flags(cmd: str, wrapper: str, skip_arg_like: bool = True) -> s
     return s
 
 
-# GNU coreutils timeout(1) の DURATION。公式記述は「浮動小数点数 + 任意の接尾辞
-# (s/m/h/d)」で、実装は strtod ベースなので **10 進の整数・小数だけではない**:
-# 科学記数法 (`1e3` / `1E3` / `1e-3`)、小数点始まり (`.5`) / 終わり (`5.`)、
-# `inf` / `infinity` / `nan`、符号付き、16 進浮動小数 (`0x1p3`) まで受理される。
-# ここで**受理し損ねると wrapper を剥がせず検証が消える**ため、迷う形は受理側に倒す
-# (受理しすぎても、消費するのは DURATION の位置にある 1 トークンだけで、
-#  コマンド名が数値・inf・nan になることは実質無い)。
-_TIMEOUT_DURATION_RE = re.compile(
+# GNU coreutils `timeout` が受理する DURATION。
+#
+# 「浮動小数点数 + 任意の接尾辞」だが、**strtod が受理する = timeout が受理する
+# ではない**。timeout.c の `parse_duration()` は strtod の上に独自の検証を重ねる:
+#
+#   1. strtod で解釈できること (ERANGE = 桁溢れは許容)
+#   2. `! (0 <= duration)` で弾く → **NaN と負値は拒否**
+#      (NaN との比較は常に偽なので `0 <= nan` が偽になり拒否される)
+#   3. 数値の後に残ってよい文字は **1 文字だけ**
+#   4. その 1 文字は `apply_suffix()` の switch にある `s` `m` `h` `d` のみ
+#      (**小文字のみ**。`30S` は拒否される)
+#
+# 受理しすぎると「実行されないコマンド」で誤 deny (R7 C)、受理し損ねると wrapper を
+# 剥がせず検証が消える (R4 A)。**両方向にリスクがある**ので、strtod 文法ではなく
+# timeout の受理規則そのものを実装する。
+_C_DOUBLE_RE = re.compile(
     r"""^[+-]?(?:
           inf(?:inity)?
-        | nan
-        | 0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?
+        | nan(?:\([0-9A-Za-z_]*\))?
+        | 0[xX](?:[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?|\.[0-9a-fA-F]+)(?:[pP][+-]?[0-9]+)?
         | (?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
-    )[smhd]?$""",
+    )$""",
     re.VERBOSE | re.IGNORECASE,
 )
+_TIMEOUT_SUFFIXES = "smhd"
+
+
+def _parse_c_double(text: str) -> float | None:
+    """C の strtod と同じ文法で解釈して値を返す (解釈できなければ None)。"""
+    if not _C_DOUBLE_RE.match(text):
+        return None
+    try:
+        if "x" in text.lower():
+            return float.fromhex(text)
+        return float(text)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _is_timeout_duration(token: str) -> bool:
+    """`timeout` が DURATION として受理する形かどうか。"""
+    if not token:
+        return False
+    candidates = [token]
+    if len(token) > 1 and token[-1] in _TIMEOUT_SUFFIXES:
+        candidates.append(token[:-1])
+    for body in candidates:
+        value = _parse_c_double(body)
+        if value is None:
+            continue
+        # timeout.c: `! (0 <= duration)` が NaN と負値を弾く。
+        return 0 <= value
+    return False
 
 
 def _drop_timeout_duration(rest: str) -> str | None:
@@ -799,54 +885,23 @@ def _drop_timeout_duration(rest: str) -> str | None:
     検証をスキップする方が安全側 (lenient)。
     """
     m = re.match(r"^(\S+)", rest)
-    if not m or not _TIMEOUT_DURATION_RE.match(m.group(1)):
+    if not m or not _is_timeout_duration(m.group(1)):
         return None
     return rest[m.end():].lstrip()
 
 
 def _has_flag(rest: str, wrapper: str, names) -> bool:
-    """wrapper の flag 領域に `names` のいずれかがあるか (値の消費規則を尊重)。"""
-    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
-    s = rest.lstrip()
-    while s:
-        m = _WORD_TOKEN_RE.match(s)
-        if not m:
-            break
-        tok = m.group(1)
-        if tok == "--" or tok == "-" or not tok.startswith("-"):
-            break
-        if tok.split("=", 1)[0] in names:
-            return True
-        s = s[m.end():].lstrip()
-        if "=" not in tok and tok in flags_with_value:
-            m2 = _VALUE_TOKEN_RE.match(s)
-            if m2:
-                s = s[m2.end():].lstrip()
-    return False
+    """wrapper の flag 領域に `names` のいずれかがあるか (消費規則は共有)。"""
+    flags, _rest = _parse_wrapper_flags(rest, wrapper)
+    return any(name in names for name, _value in flags)
 
 
 def _flag_argument(rest: str, wrapper: str, names) -> str | None:
-    """wrapper の flag 領域から `names` のいずれかの**値**を取り出す。"""
-    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
-    s = rest.lstrip()
-    while s:
-        m = _WORD_TOKEN_RE.match(s)
-        if not m:
-            break
-        tok = m.group(1)
-        if tok == "--" or tok == "-" or not tok.startswith("-"):
-            break
-        name, eq, embedded = tok.partition("=")
-        s = s[m.end():].lstrip()
+    """wrapper の flag 領域から `names` のいずれかの**値**を取り出す (消費規則は共有)。"""
+    flags, _rest = _parse_wrapper_flags(rest, wrapper)
+    for name, value in flags:
         if name in names:
-            if eq:
-                return embedded
-            m2 = _VALUE_TOKEN_RE.match(s)
-            return m2.group(1) if m2 else None
-        if not eq and tok in flags_with_value:
-            m2 = _VALUE_TOKEN_RE.match(s)
-            if m2:
-                s = s[m2.end():].lstrip()
+            return value
     return None
 
 
@@ -900,30 +955,13 @@ def _wrapper_terminates(rest: str, wrapper: str) -> bool:
     """wrapper の flag 領域に「表示して終了する」option があれば True。
 
     True のとき wrapper を剥がさないので、セグメントは不透明なまま残り検証されない
-    (= 実行されないコマンドで deny しない)。`--` 以降と非 flag トークン以降は
-    後続コマンドの引数なので見ない。`watch --help; gh pr create` のように**別
-    セグメント**として続くコマンドは、セグメント分割が先に走るためここの影響を
-    受けず従来どおり検証される。
+    (= 実行されないコマンドで deny しない)。効果は wrapper が包む引数列に限定され、
+    `watch --help; gh pr create` のように**別セグメント**として続くコマンドは
+    セグメント分割が先に走るため従来どおり検証される。消費規則は共有パーサ。
     """
     terminating = _TERMINATING_FLAGS | _WRAPPER_EXTRA_TERMINATING.get(wrapper, frozenset())
-    flags_with_value = _WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
-    s = rest.lstrip()
-    while s:
-        m = _WORD_TOKEN_RE.match(s)
-        if not m:
-            break
-        tok = m.group(1)
-        if tok == "--" or tok == "-" or not tok.startswith("-"):
-            break
-        name = tok.split("=", 1)[0]
-        if name in terminating:
-            return True
-        s = s[m.end():].lstrip()
-        if "=" not in tok and tok in flags_with_value:
-            m2 = _VALUE_TOKEN_RE.match(s)
-            if m2:
-                s = s[m2.end():].lstrip()
-    return False
+    flags, _rest = _parse_wrapper_flags(rest, wrapper)
+    return any(name in terminating for name, _value in flags)
 
 
 def _command_is_query(rest: str) -> bool:
@@ -933,22 +971,10 @@ def _command_is_query(rest: str) -> bool:
     -v option is supplied, a description of command is printed」。つまり `-v` /
     `-V` 付きの `command` は後続 CLI を**実行しない**ので、wrapper として剥がして
     しまうと `command -v gh` が `gh` 単体の候補になり、単なる存在確認で
-    アカウント検証が走って誤 deny される。`-pv` のような連結形も同じ扱い。
-    `-p` のみ / `--` / フラグ無しは実行するので従来どおり剥がす。
+    アカウント検証が走って誤 deny される。連結形 (`-pv`) も共有パーサが分解する。
     """
-    s = rest.lstrip()
-    while s:
-        m = _WORD_TOKEN_RE.match(s)
-        if not m:
-            break
-        tok = m.group(1)
-        if tok == "--" or tok == "-" or not tok.startswith("-"):
-            break
-        # `command` に長形式オプションは無い (bash / POSIX とも `-p` `-v` `-V`)。
-        if not tok.startswith("--") and ("v" in tok[1:] or "V" in tok[1:]):
-            return True
-        s = s[m.end():].lstrip()
-    return False
+    flags, _rest = _parse_wrapper_flags(rest, "command")
+    return any(name in ("-v", "-V") for name, _value in flags)
 
 
 def _strip_one_wrapper(cmd: str) -> str | None:
@@ -1061,20 +1087,26 @@ _CLOSER_TO_OPENER = {")": "(", "}": "{"}
 
 
 def _strip_heredoc_bodies(cmd: str) -> str:
-    """セグメントに取り込まれた heredoc 本文を落とし、コマンド行だけを残す。
+    """セグメントに取り込まれた heredoc の**本文と宣言トークン**を落とす。
 
-    `split_on_operators` は heredoc 本文を分割しないよう同一セグメントへ取り込む。
-    しかし本文は**コマンドの引数ではなくデータ**なので、そのまま候補文字列に残すと
-    後段の option 走査 (`cli_options.find_context_options`) が本文中の行を
-    コマンドラインの一部として読んでしまう。実害は両方向にある:
+    `split_on_operators` は heredoc 本文を分割しないよう同一セグメントへ取り込み、
+    宣言から本文終端までは演算子でもセグメントを切らない。ここで残骸を掃除する:
 
-    - `aws cloudformation deploy --template-file - <<EOF` の本文に `--profile prod`
-      があると、実行は既定 profile なのに **prod で検証して allow** する (false-allow)
-    - `kubectl apply -f - <<EOF` の YAML 本文に `- --context` / `- prod` があると
-      `--context` 指定と誤読して **誤 deny** する
+    1. **本文**を落とす — 本文はコマンドの引数ではなく**データ**。残すと後段の
+       option 走査 (`cli_options.find_context_options`) が本文の行をコマンドラインの
+       一部として読む。実害は両方向にあり、本文の `--profile prod` で別 profile を
+       検証して allow したり (false-allow)、YAML の `- --context` を指定と誤読して
+       誤 deny したりする
+    2. **`<<delim` の宣言トークン**も落とす — 本文を消した後まで宣言が残っていると、
+       再分割のときに再び「本文待ち」と解釈され、`cat <<EOF; gh pr create` の
+       `;` で切れなくなって**実行される `gh` が候補から消える**
+       (R7 B の修正で演算子 flush を抑止した副作用)。宣言はもう消費済みなので
+       落として構わない
 
-    本文を削っても heredoc の**開始行**は残るので、service の match / readonly 判定は
-    従来どおり動く。deny 文面の表示も本文が混ざらず読みやすくなる。
+    quote / 置換 / 算術の内側は構文として解釈しない — `split_on_operators` と
+    **同じ `_skip_opaque`** を通す。追跡を怠ると
+    `--metadata '{"k":"<<X bar"}' <<EOF` の `X` を先に登録してしまい、本文の除去に
+    失敗して本文行が引数として解釈される (誤コンテキスト検証)。
     """
     if "<<" not in cmd:
         return cmd
@@ -1083,34 +1115,42 @@ def _strip_heredoc_bodies(cmd: str) -> str:
     n = len(cmd)
     while i < n:
         eol = cmd.find("\n", i)
-        end = n if eol == -1 else eol + 1
-        line = cmd[i:end]
-        out.append(line)
-        i = end
-        # この行で開かれた heredoc の delimiter を宣言順に集める。
-        # quote / 置換 / 算術の内側は構文として解釈しない — `split_on_operators`
-        # と**同じ `_skip_opaque`** を通す。追跡を怠ると
-        # `--metadata '{"k":"<<X bar"}' <<EOF` の `X` を先に登録してしまい、
-        # 本文の除去に失敗して本文行が引数として解釈される (誤コンテキスト検証)。
+        line_end = n if eol == -1 else eol + 1
+        line = cmd[i:line_end]
+        i = line_end
+
+        # この行で開かれた heredoc を宣言順に集めつつ、宣言トークンを除いた行を作る。
         pending: list[tuple[str, bool]] = []
+        kept: list[str] = []
         k = 0
         while k < len(line):
             opaque = _skip_opaque(line, k)
             if opaque is not None and opaque > k:
+                kept.append(line[k:opaque])
                 k = opaque
                 continue
             if line[k] == "<" and k + 1 < len(line) and line[k + 1] == "<":
+                # here-string `<<<` は heredoc ではない (本文行を持たない)。
+                # `split_on_operators` と同じ guard を置かないと、3 つ目の `<` から
+                # 再び `<<` を読み取って後続を delimiter と誤認する。
+                if k + 2 < len(line) and line[k + 2] == "<":
+                    kept.append("<<<")
+                    k += 3
+                    continue
                 found = _scan_heredoc_start(line, k)
                 if found is not None:
                     pending.append((found[0], found[1]))
-                    k = found[2]
+                    k = found[2]  # 宣言トークンは kept に入れない (= 落とす)
                     continue
+            kept.append(line[k])
             k += 1
+        out.append("".join(kept))
+
         for delim, strip_tabs in pending:
-            found = _find_heredoc_end(cmd, i, delim, strip_tabs)
-            if found is None:
+            found_end = _find_heredoc_end(cmd, i, delim, strip_tabs)
+            if found_end is None:
                 break
-            i = found  # 本文 + delimiter 行を出力せず読み飛ばす
+            i = found_end  # 本文 + delimiter 行を出力せず読み飛ばす
     return "".join(out)
 
 

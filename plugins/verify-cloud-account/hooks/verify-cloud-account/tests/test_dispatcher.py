@@ -1940,6 +1940,14 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         # --- ANSI-C エスケープ delimiter の後ろのコマンド (PR #48 Codex R6 P1) ---
         ("cat <<$'E\\x4fF'\nbody\nEOF\ngh pr create --fill", "github"),
         ("cat <<$'E\\117F'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
+        # --- 短縮 option の連結内の必須値 (PR #48 Codex R7 A) ---
+        ("timeout -vk 1 5 gh pr create --fill", "github"),
+        ("timeout -k1 5 gh pr create --fill", "github"),
+        ("sudo -Eu deploy gh pr create --fill", "github"),
+        ("xargs -tI{} gh pr close {}", "github"),
+        # --- heredoc 宣言 + 演算子の後ろの実コマンドは検証する (R7 B の逆側) ---
+        ("cat <<EOF; gh pr create --fill\nbody\nEOF", "github"),
+        ("cat <<EOF && aws s3 rm s3://b/x\nbody\nEOF", "aws"),
     ]
 
     def setUp(self):
@@ -2007,6 +2015,15 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         "((gh))",
         "(( kubectl > 0 ))",
         "if (( gh )); then echo x; fi",
+        # --- heredoc 本文は演算子が挟まってもデータのまま (PR #48 Codex R7 B) ---
+        "cat <<EOF; echo done\ngh pr create\nEOF",
+        "cat <<EOF | tee f\ngh pr create\nEOF",
+        "cat <<EOF > out; echo x\naws s3 rm s3://b/x\nEOF",
+        # --- timeout が拒否する duration は剥がさない (PR #48 Codex R7 C) ---
+        "timeout nan gh pr create",
+        "timeout -5 gh pr create",
+        "timeout 30S gh pr create",
+        "timeout 30ss gh pr create",
     ]
 
     def test_listed_commands_do_not_reach_verification(self):
