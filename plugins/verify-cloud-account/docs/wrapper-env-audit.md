@@ -46,9 +46,37 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 | `env -i [...]` | 環境を **空にリセット**してから起動 | **剥がさない** (opaque) | 不可 → スキップ | 実機: `PROBE=x env -i env` に PROBE 出ない |
 | `env -u NAME [...]` | NAME のみ **unset** | **剥がさない** (opaque) | 不可 → スキップ | POSIX env |
 | `env -- [...]` | flag 終端 (以降を素の env で起動) | **剥がさない** (opaque) | スキップ (安全側) | parser は `-` 始まりトークンで env strip を中止 |
+| `timeout DURATION cmd` | 透過 (env 継承) | 収集。DURATION も消費 | 可 | GNU coreutils timeout(1) |
+| `nice [-n N] cmd` | 透過 (env 継承) | 収集 | 可 | ローカル man page nice(1) |
+| `stdbuf -o L cmd` | 透過 (env 継承。`LD_PRELOAD` 系を**追加**するだけ) | 収集 | 可 | ローカル man page stdbuf(1) |
+| `setsid cmd` | 透過 (新セッションで起動、env は継承) | 収集 | 可 | util-linux setsid(1) |
+| `caffeinate [-disu] cmd` | 透過 (env 継承) | 収集 | 可 | ローカル man page caffeinate(8) |
+| `watch -n N cmd` | 透過 (`sh -c` 経由で繰り返し起動、env は継承) | 収集 | 可 | procps-ng watch(1) |
+| `xargs [opts] cmd` | 透過 (env 継承。引数のみ stdin 由来) | 収集 | 可 | ローカル man page xargs(1) |
 
 (実機 probe は darwin / bash / mise 2.x / node 25 で 2026-06 に確認。詳細は本監査の
 コミットメッセージ参照。)
+
+### v0.9.0 追加分の根拠と未確認事項
+
+上表の下 7 行は v0.9.0 で透過 wrapper に追加した。`nice` / `stdbuf` /
+`caffeinate` / `xargs` は**開発機にインストール済みの man page から option 表を
+逐語確認**した。`timeout` / `setsid` / `watch` は開発機 (darwin) に man page が
+無く、GNU coreutils / util-linux / procps-ng の公式リファレンス記述に基づく。
+
+option 表を取り違えた場合の劣化方向は**片側だけ**である点に注意:
+
+- 値を取る flag の登録漏れ → 値トークンで剥がしが止まり、セグメントが不透明なまま
+  残る = **v0.8.0 と同じ「検証スキップ」に戻るだけ**
+- bool flag を値付きとして誤登録 → 次のトークン (CLI 名) を食って同じく検証スキップ
+
+どちらも誤 deny にはならず、既存の lenient 方針の範囲に収まる。逆に言えば
+**取り違えても静かに検証が消える**ので、`watch` / `timeout` / `setsid` を実際に
+使う環境で挙動が怪しいときは `_WRAPPER_FLAGS_WITH_VALUE` の該当エントリを
+実機の `--help` と突き合わせること。
+
+`ionice` は「cloud CLI と組み合わせる現実的な形が確認できず、開発機で man page も
+参照できない」ため**追加していない** (推測で allow-list を広げない方針)。
 
 ## 伝播してよい env / 保守的にスキップすべき経路の方針
 
@@ -104,6 +132,316 @@ env を伝播しない方向に倒したとき:
 **分類 guard** (`_WRAPPER_ENV_CLASS` + テスト) を入れて、将来の wrapper 追加時に
 env 挙動の分類を機械的に強制する。
 
+## wrapper flag 表の全件監査 (v0.9.0 / PR #48 Codex P1 x2 を受けて)
+
+env 挙動とは**別軸**の監査。「その flag が次の token を消費するか」を取り違えると、
+コマンド本体を見失って**検証がまるごと消える**。実際に 2 件の取り違えが
+**逆方向に 1 つずつ**出た (optional を必須扱い / 必須を bool 扱い)。
+
+### 3 分類
+
+| 分類 | 挙動 | 実装 |
+|---|---|---|
+| 値を取らない | 次の token を消費しない | どちらの集合にも載せない |
+| **必須**引数 | 分離形も `=` 形も値を取る | `_WRAPPER_FLAGS_WITH_VALUE` |
+| **optional** 引数 | **`=` 形 (long) / 引っ付け形 (short) でのみ**値を取る。bare 形は消費しない | `_WRAPPER_FLAGS_OPTIONAL_VALUE` |
+
+`--key=value` 形は登録の有無に関わらず 1 トークンで消費されるが、**短縮 option の
+連結 (`-vk 1` / `-k1`) は登録が要る**。POSIX/GNU の慣行では `-abc` は `-a -b -c` と
+等価で、連結の途中で値を取る option に当たったら**それ以降が値**になる
+(`-k1` の `1`)。文字が尽きていれば**次のトークンが値**になる (`-vk 1` の `1`)。
+GNU は「long option の必須引数は短縮形でも必須」と明記している。連結を分解しないと
+`timeout -vk 1 5 cmd` の `-k` の値を取り逃し、`5` を DURATION と取り違えて
+コマンドを見失う。
+
+**flag 消費の実装は `_parse_wrapper_flags` の 1 つだけ**。「剥がす」「特定 flag が
+あるか」「その値は何か」「終端 option か」の 4 用途がすべてここを通る。用途ごとに
+走査を書くと消費規則が食い違う (実際に連結の取り逃しがこの形で起きた)。
+
+### 監査結果 (出所付き)
+
+`[local]` = 開発機の man page を逐語確認 / `[ref]` = 上流の公式リファレンス記述のみ。
+
+| wrapper | 必須引数として登録 | 出所 | 備考 |
+|---|---|---|---|
+| `sudo` | `-u -g -U -p -C -D -h -r -t -T -R -a` + long 形 | [local] sudo(8) | `-C num` `-D dir` `-g group` `-h host` `-p prompt` `-R dir` `-T timeout` `-u user` `-U user` を synopsis で確認。`-a`/`-r`/`-t` は Linux 版 |
+| `time` | `-o` (+ GNU `-f`) | [local] time(1) | `time [-al] [-h \| -p] [-o file] utility` |
+| `exec` | `-a` | [local] bash(1) | `exec [-cl] [-a name] [command [arguments]]` |
+| `command` | (なし) | [local] bash(1) | `command [-pVv]` — 値を取る flag は無い。`-v`/`-V` は別扱い (存在確認) |
+| `nice` | `-n` (+ GNU `--adjustment`) | [local] nice(1) | `nice [-n increment] utility` |
+| `stdbuf` | `-i -o -e` + long 形 | [local] stdbuf(1) | `stdbuf [-e bufdef] [-i bufdef] [-o bufdef] [command]`。bufdef は `L`/`B` 等**非数値** |
+| `caffeinate` | `-t -w` | [local] caffeinate(8) | `caffeinate [-disu] [-t timeout] [-w pid] [utility ...]` |
+| `xargs` | `-E -I -J -L -n -P -R -S -s` | [local] xargs(1) | BSD/macOS man が**分離形で値を取ると明記**している短縮形のみ |
+| `timeout` | `-s --signal -k --kill-after` | [ref] GNU coreutils | 開発機に man 無し。SIGNAL は非数値 (`KILL`) なので登録が必須 |
+| `npx` | `-p --package -c --call --node-options --node-arg` | [ref] npx | 開発機に npx 無し。**v0.8.0 から存在**するので削除すると検証が新たに失われる |
+| `watch` | **(空)** | — | 開発機に man 無し。値付き option の値は**すべて数値**なので下の安全網に委ねる |
+| `setsid` | (なし) | [ref] util-linux | `-c/--ctty` `-f/--fork` `-w/--wait` のみで値を取る flag が無い |
+
+**optional 引数として登録**: `xargs` の `--replace` / `--eof` / `--max-lines`
+([ref] GNU findutils: `--replace[=R]` / `--eof[=eof-str]` / `--max-lines[=max-lines]`)。
+短縮の `-i[R]` / `-l[N]` は引っ付け形でのみ値を取るので bool 扱いで正しい。
+
+### xargs の全 option 分類 (GNU + BSD)
+
+xargs だけは**完全列挙**する。piecemeal に足すと同じ穴が繰り返し出るため。
+**値が数値か非数値かを併記**するのが要点 — 数値は `_ARG_LIKE_RE` の安全網が拾うので
+登録漏れが致命傷にならないが、**非数値は安全網が効かないので登録が必須**。
+
+| option | 分類 | 値 | 出所 |
+|---|---|---|---|
+| `-0` / `--null` | 値なし | — | [local] xargs(1) |
+| `-a FILE` / `--arg-file=FILE` | **必須** | **非数値** | [ref] GNU `xargs --help` 逐語 (外部レビュー環境で確認) |
+| `-d CHAR` / `--delimiter=CHARACTER` | **必須** | **非数値** | [ref] 同上 |
+| `-E END` | **必須** | **非数値** | [local] xargs(1) |
+| `-e[END]` / `--eof[=END]` | optional | 非数値 | [ref] GNU findutils |
+| `-I R` | **必須** | **非数値** | [local] xargs(1) |
+| `-i[R]` / `--replace[=R]` | optional | 非数値 | [ref] GNU findutils |
+| `-J replstr` | **必須** | **非数値** | [local] xargs(1) (BSD 固有) |
+| `-L N` | **必須** | 数値 | [local] xargs(1) |
+| `-l[N]` / `--max-lines[=N]` | optional | 数値 | [ref] GNU findutils |
+| `-n N` / `--max-args=N` | **必須** | 数値 | [local] xargs(1) |
+| `-P N` / `--max-procs=N` | **必須** | 数値 | [local] xargs(1) |
+| `-p` / `--interactive` | 値なし | — | [local] xargs(1) |
+| `--process-slot-var=VAR` | **必須** | **非数値** | [ref] GNU findutils |
+| `-R replacements` | **必須** | 数値 | [local] xargs(1) (BSD 固有) |
+| `-r` / `--no-run-if-empty` | 値なし | — | [local] xargs(1) |
+| `-S replsize` | **必須** | 数値 | [local] xargs(1) (BSD 固有) |
+| `-s N` / `--max-chars=N` | **必須** | 数値 | [local] xargs(1) |
+| `--show-limits` | 値なし | — | [ref] GNU findutils |
+| `-t` / `--verbose` | 値なし | — | [local] xargs(1) |
+| `-o` | 値なし | — | [local] xargs(1) (BSD 固有) |
+| `-x` / `--exit` | 値なし | — | [local] xargs(1) |
+| `--help` / `--version` | 終端 | — | [local 実機] `xargs --help` |
+
+`-a` / `-d` は当初「開発機の man (BSD) に無く裏が取れない」として**登録を見送って
+いた**が、その判断を報告で開示したところ外部レビューが GNU `xargs --help` の逐語を
+提示してくれたため登録に切り替えた。BSD xargs にはこの 2 つが存在しないので、
+登録しても BSD 側の短縮形と衝突しない。**裏が取れないものを黙って落とさず開示する
+運用が、そのまま解消につながった実例**。
+
+### 他 wrapper の非数値必須引数の再確認
+
+xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参照元で再確認した結果:
+
+| wrapper | 非数値の必須引数 | 状態 |
+|---|---|---|
+| `timeout` | `-s/--signal SIGNAL` | 登録済み。他は `-k` (数値) と bool のみで**全 option 列挙済み** |
+| `watch` | **無し** | 値を取るのは `-n/--interval` `-q/--equexit` (いずれも数値) と `-d[=permanent]` (optional) だけ。**全て安全網でカバー**されるため表は空のままで正しい |
+| `setsid` | **無し** | `-c/--ctty` `-f/--fork` `-w/--wait` のみ (値を取る option 自体が無い) |
+| `time` | `-o FILE` / `-f FORMAT` | 登録済み。他は bool のみ |
+| `nohup` | **無し** | POSIX の `nohup utility [args]`。option を取らない |
+| `command` | **無し** | `command [-pVv]` (bash(1) 逐語)。値を取る option 無し |
+| `exec` | `-a name` | 登録済み。他は `-c` `-l` の bool のみ (bash(1) 逐語) |
+| `npx` | `--package` `-c/--call` `-w/--workspace` | `-w/--workspace` を今回追加 (`npx --help` 逐語)。npm のグローバル option は開集合で列挙不能 (下記に開示) |
+| `sudo` / `nice` / `stdbuf` / `caffeinate` | 登録済み | ローカル man page で全 option 確認済み |
+
+## 不変条件: シェル構文を見る経路は共有機構を必ず通す
+
+**2 ラウンド続けて「片方の経路が仕組みを持っているのに、もう片方が使っていない」
+型の不具合が出た** (R5 = 算術文脈、R6 = クォート状態)。しかも R6 の失敗は質が悪く、
+検証がスキップされるのではなく**本文行が引数として解釈され、承認されていない
+既定 profile で走るコマンドが「許可された profile」として検証を通って**いた。
+
+そこで次を**不変条件**とする:
+
+> **シェル構文 (`<<` / `((` / 演算子 / 括弧 / リダイレクト等) を新しく見る経路を
+> 足すときは、`_skip_opaque()` を必ず通すこと。**
+> `_skip_opaque` は quote / `$(...)` / バッククォート / 算術評価 `(( ... ))` を
+> 1 領域として飛ばす唯一の判定で、内部で `_arithmetic_span()` を呼ぶ。
+
+この不変条件は `TestQuoteStateIsSharedAcrossAllPaths` が**振る舞いで**守る —
+クォート内に置いた構文もどき (`&&` / `<<X` / `((` / `#` ほか) が、どの経路でも
+構文として解釈されないことを一括で表明している。新しい経路が共有機構を通していな
+ければ、この表が落ちる。
+
+### シェル構文を見る全経路 (棚卸し)
+
+| 経路 | 見る構文 | クォート状態 | 算術文脈 | 状態 |
+|---|---|---|---|---|
+| `split_on_operators` | 演算子 / heredoc / コメント | `_skip_opaque` | 経由 (`_skip_opaque`) | ✅ 共有 |
+| `_strip_heredoc_bodies` | heredoc 開始 | `_skip_opaque` | 経由 | ✅ 共有 (R6 で是正) |
+| `_has_unbalanced_closer` | `(` `)` `{` `}` の均衡 | `_skip_opaque` | 経由 | ✅ 共有 (R6 で是正) |
+| `_strip_leading_syntax` | `(` `{` `!` / 予約語 / リダイレクト | `_WORD_TOKEN_RE` | `_arithmetic_span` | ✅ 共有 |
+| `_drop_wrapper_flags` / `_has_flag` / `_flag_argument` / `_wrapper_terminates` / `_command_is_query` | option トークン | `_WORD_TOKEN_RE` / `_VALUE_TOKEN_RE` | 該当なし | ✅ quote 対応 |
+| `_scan_heredoc_word` | delimiter の word | **自前** (word の定義そのもの) | 該当なし | ⭕ 意図的に独立 |
+| `_scan_value_end` (`_parse_leading_env`) | env 代入値の終端 | 自前 + `$(`/backtick で保守的に停止 | 該当なし | ⭕ 意図的に独立 (値の走査であって構文走査ではない) |
+| `cli_options.strip_leading_options` / `find_context_options` | option トークン | `shlex.split` | 該当なし | ✅ quote 対応 |
+| `dispatcher._match_service` / `_is_readonly` 等 | (正規化済み候補への regex) | 該当なし | 該当なし | ⭕ シェル構文を見ない |
+
+⭕ の 3 つは「構文の探索」ではなく「その構文自身の定義」または「値の走査」なので
+共有対象外。それ以外は**すべて共有機構を通っている**。
+
+### `((` の解釈は 1 箇所に集約する
+
+`((` が「算術評価」なのか「入れ子の subshell」なのかを**経路ごとに推測すると必ず
+食い違う**。v0.9.0 開発中に実際、`split_on_operators` は算術として保護している
+のに `_strip_leading_syntax` はただの括弧として剥がしており、`(( gh ))` が `gh` に
+正規化されて**実行されないコマンドで誤 deny**していた (bash は算術式として変数を
+評価するだけで CLI を起動しない)。
+
+判定は `_arithmetic_span()` **のみ**が行う。現在この関数を共有している経路:
+
+| 経路 | 用途 |
+|---|---|
+| `_skip_opaque` | 算術領域を 1 領域として飛ばす (下の 3 経路はここを経由する) |
+| `split_on_operators` | 算術内の `<<` を左シフトとして扱う (heredoc と誤認しない) |
+| `_strip_heredoc_bodies` | 同上 (セグメント内の再スキャン時) |
+| `_has_unbalanced_closer` | 括弧の均衡計算から算術領域を除く |
+| `_strip_leading_syntax` | 算術コマンドの括弧を**剥がさない** (候補にしない) |
+
+`_strip_trailing_syntax` は「開き括弧と対応しない閉じ括弧だけを落とす」規則なので、
+括弧が均衡している算術コマンドには作用しない (整合済み)。
+`$(( ... ))` は `$(` の subshell 追跡側で保護される。
+**新しく `((` を見る経路を足すときは、必ず `_arithmetic_span` を呼ぶこと。**
+
+### heredoc delimiter はシェルの 1 語として解決する
+
+`man 1 bash` Here Documents 節の逐語:「If any characters in word are quoted, the
+delimiter is the result of quote removal on word」。つまり word は**隣接する断片の
+連結**で、`E"OF"` も `"EO"F` も `EOF` に解決される。断片の先頭だけを読むと
+delimiter を読み違え、一致する行が現れないまま**後続コマンドを本文として飲み込む**
+= 検証が消える。
+
+解決できる word 形 (すべて `EOF` に解決):
+
+| 書き方 | 種別 |
+|---|---|
+| `EOF` | bare |
+| `'EOF'` | single quote |
+| `"EOF"` | double quote |
+| `\EOF` | backslash |
+| `E"OF"` / `E'OF'` / `"EO"F` / `EO'F'` | **混在 (断片の連結)** |
+| `E\OF` | 途中の backslash |
+| `$'EOF'` / `$'E\\x4fF'` / `$'E\\117F'` | ANSI-C quoting (**エスケープを展開**してから delimiter にする) |
+
+ANSI-C quoting `$'...'` は `man 1 bash` QUOTING 節の逐語表に従って展開する:
+`\\a` `\\b` `\\e` `\\E` `\\f` `\\n` `\\r` `\\t` `\\v` `\\\\` `\\'` `\\"` `\\?` /
+`\\nnn` (8 進 1-3 桁) / `\\xHH` (16 進 1-2 桁) / `\\uHHHH` (1-4 桁) /
+`\\UHHHHHHHH` (1-8 桁) / `\\cx` (control-x)。展開せず literal のまま使うと
+`<<$'E\\x4fF'` の terminator (実際は `EOF`) を見つけられず本文が伸び続ける。
+**解釈できないエスケープが 1 つでもあれば delimiter を確定させない**。
+
+クォートが閉じない / エスケープを解釈できない等で解決できないときは **heredoc と見なさない**
+(本文行が候補になる = 過剰検証側)。terminator が実在するときだけ本文として
+畳む規律とあわせて、「delimiter を読み違えて検証が消える」経路を塞いでいる。
+
+### 引数の実行経路 (シェル経由 or 直接 exec)
+
+wrapper が引数列を **`sh -c` に渡すか、直接 exec するか**で、クォートの扱いが
+真逆になる。シェル経由の wrapper はクォート内が**コマンド文字列**なので剥がして
+解析しないと `watch 'gh pr create'` が検証されない。直接 exec の wrapper では
+クォート塊は「空白入りのコマンド名」なので、剥がすと**実行されないコマンド**で
+誤 deny する。
+
+| wrapper | 実行経路 | 出所 |
+|---|---|---|
+| `watch` (既定) | **シェル経由** (`sh -c`) | [ref] procps-ng `watch --help`: `-x, --exec` = 「pass command to exec instead of `sh -c`」= 既定は sh -c |
+| `watch --exec` / `-x` | 直接 exec | [ref] 同上 |
+| `sudo -s` / `--shell` / `-i` / `--login` | **シェル経由** | **[local man]** sudo(8):「If a command is specified, it is passed to the shell for execution via the shell's -c option」 |
+| `sudo` (それ以外) | 直接 exec | [local man] sudo(8) |
+| `npx -c` / `--call` の**値** | **シェル経由** | **[local 実機]** `npx --help` の usage 行 `npm exec -c '<cmd> [args...]'` |
+| `npx` (それ以外) | 直接 exec | [local 実機] `npx --help` |
+| `timeout` / `nice` / `stdbuf` / `setsid` / `caffeinate` / `xargs` / `time` / `nohup` / `env` / `command` / `exec` | 直接 exec | [local man] いずれも synopsis が `utility [argument ...]` 形 |
+
+シェル経由の wrapper では、クォート内が**複合コマンド**のこともある
+(`watch 'gh pr create && aws s3 rm x'`)。`extract_candidates` はクォートを剥がした
+結果を**もう一度セグメント分割**して各段を候補にする。
+
+`npx -c '<cmd>' <positional>` の positional は npm では package spec 扱いで実行され
+ない**はず**だが、その意味論の裏が取れていない。取りこぼしで検証が消えるより
+過剰検証側が安全なので、`-c` の値と残りの引数列の**両方**を候補として返している。
+
+### 終端 option (表示して終了する option)
+
+`--help` / `--version` 付きで呼ばれた wrapper は**後続コマンドを実行しない**。
+剥がすと「実行されないコマンド」で検証が走り、誤 deny する
+(`watch --help gh pr create` → `gh pr create` として deny)。誤 deny は本 plugin が
+最も避けたい離脱要因なので、終端 option を検出したら wrapper を剥がさない。
+
+| wrapper | 終端扱い | 出所 |
+|---|---|---|
+| `nice` | `--help` `--version` | **[local 実機]** `nice --help` → `nice: -help: invalid nice value` (BSD。エラー終了し utility を実行しない) |
+| `stdbuf` | `--help` `--version` | **[local 実機]** `stdbuf --help` → `illegal option -- -` + usage |
+| `xargs` | `--help` `--version` | **[local 実機]** `xargs --help` → `unrecognized option '--help'` + usage |
+| `npx` | `--help` `--version` | **[local 実機]** `npx --help` → help を表示して終了 |
+| `sudo` | `--help` `--version` `-V` | **[local man]** sudo(8) `-h, --help` / `-V, --version`、第 1 synopsis 形 `sudo -h \| -K \| -k \| -V` |
+| `caffeinate` | `--help` `--version` | [local man] caffeinate(8) に記載は無いが、未知 option は getopt がエラーにし utility を実行しない |
+| `timeout` / `watch` / `setsid` | `--help` `--version` | [ref] 開発機に無く実機確認できない。GNU coreutils / procps-ng / util-linux はいずれも `--help` を "display this help and exit" と記載 |
+| `time` / `nohup` / `command` / `exec` | `--help` `--version` | [ref] BSD 版は未知 option としてエラー、GNU/builtin 版は help 表示。**どちらも後続を実行しない** |
+
+**GNU 版は「help を表示して終了」、BSD 版は「不正 option でエラー終了」と挙動は
+違うが、後続コマンドを実行しない点は同じ**。開発機で実機確認できた 4 例
+(nice / stdbuf / xargs / npx) がいずれもこの結論だったため、同じ慣行に従う
+残りにも適用する。
+
+**短縮形 (`-h` / `-v` / `-V`) は既定で終端扱いしない**。`sudo -h host` のように
+値を取る別 option と衝突し、終端と誤判定すると**検証が消える**ため、過剰検証側に
+倒す。曖昧さの無い `sudo -V` だけ個別に登録した。この結果 `sudo -h gh pr create`
+(help のつもりの形) は `-h` の値として `gh` を消費し検証されないが、これは
+v0.8.0 と同じ挙動で新たな退行ではない。
+
+**効果は「その wrapper が包む引数列」に限定**する。`watch --help; gh pr create` の
+ように別コマンドとして続く形は、セグメント分割が先に走るため従来どおり検証される
+(ここを取り違えるとバイパスになる)。
+
+### `timeout` の DURATION は「strtod が受理する形」ではない
+
+`timeout` の DURATION は「浮動小数点数 + 任意の接尾辞」だが、**strtod が受理する =
+timeout が受理する、ではない**。coreutils の `timeout.c` は `parse_duration()` で
+strtod の上に独自の検証を重ねる:
+
+1. strtod で解釈できること (ERANGE = 桁溢れは許容)
+2. `! (0 <= duration)` で弾く → **NaN と負値は拒否**
+   (NaN との比較は常に偽なので `0 <= nan` が偽になり拒否される)
+3. 数値の後に残ってよい文字は **1 文字だけ**
+4. その 1 文字は `apply_suffix()` の switch にある `s` `m` `h` `d` のみ (**小文字のみ**)
+
+| 受理 | 拒否 |
+|---|---|
+| `30` `1.5` `.5` `5.` `0` `+30` `-0` | `-5` `-1.5` (負値) |
+| `1e3` `1E3` `1e-3` `1.5e2` `1E+3` | `1e` `0x` (数値として不完全) |
+| `inf` `infinity` `INF` `Infinity` | **`nan` `NaN` `NAN`** (`0 <= nan` が偽) |
+| `0x1p3` (16 進浮動小数) | `abc` `5x` |
+| `30s` `5m` `2h` `1d` `1.5h` | **`30S` `30M` `30H` `30D`** (大文字接尾辞) |
+| | `30ss` (残り 2 文字) |
+
+**この判定は両方向にリスクがある**: 受理しすぎると「実行されないコマンド」で誤 deny、
+受理し損ねると wrapper を剥がせず検証が消える。だから strtod の文法ではなく
+**timeout の受理規則そのもの**を実装する。
+
+### heredoc の宣言・本文と演算子の共存
+
+heredoc の宣言から本文の終わりまでは、途中に演算子 (`;` `|` `&&` `||`) が来ても
+**セグメントを切らない**。切ると本文が後続セグメントに付き、あとで再分割されて
+「データとして書いているだけの行」が実行可能な候補になる
+(`cat <<EOF; echo done` + 改行 + 本文の形)。
+
+そのうえで `_strip_heredoc_bodies` が**本文と `<<delim` の宣言トークンの両方**を
+落とす。宣言を残すと再分割のときに再び「本文待ち」と解釈され、演算子で切れなくなって
+**実際に実行されるコマンドが候補から消える**。宣言はもう消費済みなので落として構わない。
+here-string (`<<<`) は heredoc ではないので、再スキャン側にも同じ guard を置く。
+
+### 裏が取れず「消費しない」に倒した flag
+
+GNU 専用で開発機の man page に無く、値が**非数値**のもの:
+`xargs -a file` / `-d delim` / `--arg-file` / `--delimiter` / `--process-slot-var`。
+登録しないと `xargs -a list.txt gh pr close` は候補が不透明のまま残り検証されないが、
+これは **v0.8.0 と同じ「検証スキップ」**であって新たな退行ではない。誤って登録して
+コマンド名を食う方が危険なので、消費しない側に倒す。
+
+### 数値引数の安全網
+
+flag 表の取り違えに対する**構造的な保険**として、flag 領域を抜けた後に残る
+「純粋な数値 (+ 任意の時間単位)」トークンを読み飛ばす (`_ARG_LIKE_RE`)。
+実行可能ファイル名が純粋な数値になることは実質無いので、読み飛ばしがコマンドを
+食う心配がない。これがあるおかげで:
+
+- 値付き flag の**登録漏れ**があっても、値が数値ならコマンド本体に到達できる
+- `watch` のように一次情報を取れない wrapper の flag 表を**空にできる**
+  (`watch -q 5 cmd` が bool + 数値なのか値付き flag なのか判らなくても正しく動く)
+
+位置引数を持つ `timeout` だけは自前の DURATION 処理と衝突するため無効にしている。
+
 ## 将来 wrapper を追加するときのチェックリスト
 
 `ssh` / `docker run -e` / `kubectl exec` / `xargs` / `timeout` / `stdbuf` /
@@ -120,8 +458,15 @@ env 挙動の分類を機械的に強制する。
 4. `conditional_scrub` の場合は **scrub 補正ロジックと回帰テストを追加**する
    (`sudo` の `_sudo_preserves_env` + `_normalize_segment` の `collected.clear()`
    が雛形)。`test_only_sudo_is_conditional_scrub` も更新する。
-5. wrapper が **値を取るフラグ** (`-X value`) を持つなら
-   `_WRAPPER_FLAGS_WITH_VALUE` に登録する (`sudo -u deploy` の `gh` 誤消費を防ぐ)。
+5. wrapper の flag を **3 分類** (値を取らない / 必須引数 / optional 引数) に
+   確定させ、根拠を一次情報 (インストール済み man page または `--help` の出力) で
+   取って上の監査表に追記する。**記憶や推測で分類しない**。
+   - 必須引数 → `_WRAPPER_FLAGS_WITH_VALUE`
+   - optional 引数 (`--key[=value]`) → `_WRAPPER_FLAGS_OPTIONAL_VALUE`
+     (bare 形は次の token を消費しない。必須側に入れると `xargs --replace gh ...` の
+     `gh` を食って検証が消える)
+   - 裏が取れない flag は **登録しない** (消費しない側に倒す)。値が数値なら
+     `_ARG_LIKE_RE` の安全網が拾う
 6. `TestWrapperEnvPropagationContract` の `PASSTHROUGH_CASES` 等に
    **env 伝播/非伝播の固定化ケースを追加**する。
 7. 本ドキュメントの表と README の wrapper 節を更新する。
@@ -133,9 +478,9 @@ env 挙動の分類を機械的に強制する。
 | `ssh host cmd` | リモートで実行され **ローカル env は届かない** (`SendEnv`/`AcceptEnv` 次第)。そもそも別ホストなのでローカル CLI 検証の意味が薄い | 透過 wrapper に **足さない** (検証スキップが妥当) |
 | `docker run -e FOO ...` | コンテナ内 env はホスト行頭 env と無関係。`-e`/`--env`/`--env-file` を解析しないと誤伝播 | 足すなら専用解析が必須。安易な passthrough は不可 |
 | `kubectl exec -- cmd` | Pod 内で実行。ローカル env は届かない | 足さない (検証スキップ) |
-| `xargs cmd` | stdin からの引数で cmd を起動。env は継承するが起動回数・引数が動的 | passthrough だが segment 抽出が別問題 |
-| `timeout 5 cmd` | 透過 (env 継承)。値を取る第1引数 (duration) の消費に注意 | `passthrough` + `_WRAPPER_FLAGS_WITH_VALUE` 相当の引数処理 |
-| `stdbuf -oL cmd` / `setsid cmd` | 透過 (env 継承) | `passthrough` |
+| `xargs cmd` | stdin からの引数で cmd を起動。env は継承するが起動回数・引数が動的 | ✅ v0.9.0 で `passthrough` として追加 |
+| `timeout 5 cmd` | 透過 (env 継承)。値を取る第1引数 (duration) の消費に注意 | ✅ v0.9.0 で `passthrough` + DURATION 消費として追加 |
+| `stdbuf -oL cmd` / `setsid cmd` | 透過 (env 継承) | ✅ v0.9.0 で `passthrough` として追加 |
 
 `ssh` / `docker` / `kubectl exec` のように **「別の実行コンテキストへ移送する」
 wrapper は、ローカル行頭 env が届かないので透過 wrapper に足さない**のが原則

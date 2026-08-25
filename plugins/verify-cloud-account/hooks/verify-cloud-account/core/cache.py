@@ -87,13 +87,20 @@ def _write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _cache_key(service_name: str, project_dir: str, expected, inline_env=None) -> str:
+def _cache_key(
+    service_name: str, project_dir: str, expected, inline_env=None, context=None
+) -> str:
     material = json.dumps(
         {
             "svc": service_name,
             "pd": project_dir,
             "exp": expected,
             "env": inline_env or {},
+            # コンテキスト option (`--profile` / `--project` / `--context` 等) も
+            # 検証結果を左右するのでキーに含める。含めないと
+            # `aws --profile other s3 rm` が既定 profile の成功 entry を hit して
+            # 未検証のまま allow される。
+            "ctx": context or {},
         },
         sort_keys=True,
         default=str,
@@ -132,15 +139,19 @@ def get_success(
     expected,
     accounts_mtime: float,
     inline_env=None,
+    context=None,
 ) -> bool:
     """検証成功が短期キャッシュにあれば True を返す。
 
-    inline_env (コマンド行頭の `AWS_PROFILE=...` 等) が異なれば検証結果も
-    変わりうるためキーに含める。env 差で別エントリになり、profile A の成功が
-    profile B で誤って allow されることを防ぐ。
+    inline_env (コマンド行頭の `AWS_PROFILE=...` 等) と context (コマンドの
+    `--profile` / `--project` / `--context` 等) が異なれば検証結果も変わりうるため
+    どちらもキーに含める。差で別エントリになり、profile A の成功が profile B で
+    誤って allow されることを防ぐ。
     entry の epoch が現在の epoch と違えば (書かれた後に切替が検出された) 無視する。
     """
-    path = _cache_path(_cache_key(service_name, project_dir, expected, inline_env))
+    path = _cache_path(
+        _cache_key(service_name, project_dir, expected, inline_env, context)
+    )
     if path is None or not path.is_file():
         return False
     try:
@@ -165,6 +176,7 @@ def set_success(
     expected,
     accounts_mtime: float,
     inline_env=None,
+    context=None,
     epoch: int | None = None,
 ) -> bool:
     """検証成功をキャッシュする。書けたら True。
@@ -175,7 +187,9 @@ def set_success(
     切替検出 (tombstone) から IN_FLIGHT_SEC 以内も書かない (切替の実行中とみなす)。
     書き込み失敗は無視 (キャッシュはベストエフォート)。
     """
-    path = _cache_path(_cache_key(service_name, project_dir, expected, inline_env))
+    path = _cache_path(
+        _cache_key(service_name, project_dir, expected, inline_env, context)
+    )
     if path is None:
         return False
     epoch_now, tombstone_ns = _read_epoch(service_name)

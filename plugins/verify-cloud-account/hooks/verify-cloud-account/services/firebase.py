@@ -34,35 +34,45 @@ import shutil
 import subprocess
 from pathlib import Path
 
-PATTERNS = [r"^firebase\b"]
-# `npx firebase-tools ...` は wrapper 剥がし後 `firebase-tools ...` になり PATTERNS
-# (`^firebase\b`) に一致する。READONLY / STATE_CHANGING / self-remediation も同じ形を
-# 受け付けないと、`npx firebase-tools login` が検証され `use prod` の切替が cache される。
+# CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
+# 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
+# - `npx firebase-tools deploy` → wrapper 剥がし後 `firebase-tools deploy`
+# - `npx firebase-tools@13.31.0 deploy` → 同 `firebase-tools@13.31.0 deploy`
+#   (npx は `<pkg>@<version>` で版を固定でき、CI や再現手順で頻出する)
+# `@<version>` を許可しないと lookahead が `@` で失敗し、**検証対象から丸ごと
+# 外れる** (v0.9.0 開発中に実際に作り込んだ退行)。PATTERNS / READONLY /
+# STATE_CHANGING / self-remediation の全てで同じ prefix を使うこと — 片方だけ
+# 許可すると `npx firebase-tools@13 login` が切替として認識されず成功 cache が残る。
+_CLI = r"firebase(?:-tools)?(?:@\S+)?"
+PATTERNS = [rf"^{_CLI}(?=\s|$)"]
 READONLY = [
-    r"^firebase(?:-tools)?\s+use\s*$",
+    rf"^{_CLI}\s+use\s*$",
     # 認証操作 (login / login:ci / login:add / login:use / logout) は project を
     # 変更しない (OAuth token の取得・ローカル保存のみ。gh の SSH 鍵アップロードの
     # ようなリモート write は無い)。未ログインだと `firebase use` が requireAuth で
     # 失敗して現在値を CLI から取れず、login 自体が deny されるデッドロックになるため
     # 素通しする。
-    r"^firebase(?:-tools)?\s+(login|logout)(:\S+)?\b",
+    rf"^{_CLI}\s+(login|logout)(:\S+)?\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
-    r"^firebase(?:-tools)?\s+(--version|--help|version|help)\b",
+    rf"^{_CLI}\s+(--version|--help|version|help)\b",
 ]
 # アクティブ project (configstore の activeProjects) や認証状態を変えうるコマンド。
 # dispatcher が検出すると firebase の成功 cache を破棄する。引数なしの `firebase use`
 # は表示のみ (READONLY) で対象外。`use --clear` / `--add` / `--unalias` は含む。
 STATE_CHANGING = [
-    r"^firebase(?:-tools)?\s+use\s+\S",
-    r"^firebase(?:-tools)?\s+(login|logout)\b",
+    rf"^{_CLI}\s+use\s+\S",
+    rf"^{_CLI}\s+(login|logout)\b",
 ]
 # CLI 名直後に置ける global option (`firebase -P prod use ...`)。dispatcher が剥がした
 # 形でも READONLY / STATE_CHANGING / self-remediation を判定する (core/cli_options.py)。
-# `--project` / `-P` の値は将来の flag 照合 (629.4) で使う。
 GLOBAL_OPTIONS_WITH_VALUE = frozenset({
     "--project", "-P", "--account", "--config", "-c", "--token",
 })
 GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interactive"})
+# 「どの project に対して実行するか」をコマンド側で指定する option (v0.9.0)。
+# firebase-tools は `--project` / `-P` の値を `.firebaserc` の alias として解決し、
+# 該当が無ければ project ID そのものとして使う (requireProject)。
+CONTEXT_OPTIONS = {"--project": "project", "-P": "project"}
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
@@ -268,7 +278,29 @@ def _alias_lines(expected: dict) -> str:
     )
 
 
-def verify(expected, project_dir: str, env=None) -> str | None:
+def _project_flag_lines(expected: dict) -> str:
+    """dict 期待値に対する `--project <alias>` の候補行。
+
+    `--project` 指定による不一致では、アクティブ project を切り替える
+    `firebase use <alias>` を案内しても解決しない — そのコマンドは書かれた
+    `--project` の値で実行されるので、切り替えても同じ deny を繰り返す
+    (案内どおりに直しても通らない = remediation loop)。flag 自体を直す形を案内する。
+    kubectl の `--context` / gcloud の `--project` 不一致文面と同じ方針。
+    """
+    return "\n".join(
+        f"  --project {k}  # → {v}"
+        for k, v in expected.items()
+        if isinstance(v, str) and v
+    )
+
+
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>"}`)。
+
+    `--project` / `-P` はその実行だけ対象 project を差し替えるため、アクティブ
+    project ではなく **flag の値を `.firebaserc` で解決したもの**を照合する
+    (CLI 本体の解決規則と同じ: alias にあれば対応 project ID、無ければ値そのもの)。
+    """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
     if isinstance(expected, dict):
         valid = [v for v in expected.values() if isinstance(v, str) and v]
@@ -281,6 +313,31 @@ def verify(expected, project_dir: str, env=None) -> str | None:
         return (
             f'Firebase: accounts.local.json の "firebase" は文字列または '
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
+        )
+
+    override = (context or {}).get("project")
+    if override is not None:
+        root = _project_root(project_dir)
+        resolved = _firebaserc_aliases(root).get(override, override)
+        shown = (
+            f"--project {override}"
+            if resolved == override
+            else f"--project {override} (→ {resolved})"
+        )
+        if isinstance(expected, dict):
+            if resolved in valid:
+                return None
+            return (
+                f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
+                f"期待={', '.join(sorted(set(valid)))} のいずれか\n"
+                f"--project を外すか、以下のいずれかを指定してください:\n"
+                f"{_project_flag_lines(expected)}"
+            )
+        if resolved == expected:
+            return None
+        return (
+            f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={expected}"
+            f" — --project を外すか --project {expected} を指定してください"
         )
 
     current, err = _resolve(project_dir, env)
@@ -323,7 +380,7 @@ def verify(expected, project_dir: str, env=None) -> str | None:
     return None
 
 
-_USE_RE = re.compile(r"^firebase(?:-tools)?\s+use\s+(\S+)\s*$")
+_USE_RE = re.compile(rf"^{_CLI}\s+use\s+(\S+)\s*$")
 
 
 def is_self_remediation(candidate: str, expected) -> bool:

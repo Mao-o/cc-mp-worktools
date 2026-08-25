@@ -606,6 +606,60 @@ class TestWrapperEnvClassificationGuard(unittest.TestCase):
             unknown, set(), f"未知の分類値: {sorted(unknown)}"
         )
 
+    def test_required_and_optional_value_flags_are_disjoint(self):
+        """同じ flag を「必須引数」と「optional 引数」の両方に載せない。
+
+        optional 引数の flag (GNU の `--replace[=R]` 等) を必須側に登録すると、
+        bare 形が次の token = コマンド名を食い、`xargs --replace gh pr close {}` の
+        `gh` が検証をすり抜ける (PR #48 Codex P1-A)。この 2 集合が交わっていないこと
+        自体が退行防止の番人になる。
+        """
+        for wrapper, optional in command_parser._WRAPPER_FLAGS_OPTIONAL_VALUE.items():
+            required = command_parser._WRAPPER_FLAGS_WITH_VALUE.get(wrapper, set())
+            overlap = optional & required
+            self.assertEqual(
+                overlap,
+                set(),
+                f"{wrapper}: optional 引数の flag を必須側にも登録している "
+                f"(bare 形がコマンド名を食う): {sorted(overlap)}",
+            )
+
+    def test_optional_value_flags_do_not_consume_bare(self):
+        for cmd, want in (
+            ("xargs --replace gh pr close {}", "gh pr close {}"),
+            ("xargs --eof gh pr create", "gh pr create"),
+            ("xargs --max-lines gh pr create", "gh pr create"),
+            # `=` 形は値を取る (1 トークンで消費される)
+            ("xargs --replace={} gh pr close {}", "gh pr close {}"),
+            ("xargs --max-lines=5 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_numeric_argument_safety_net(self):
+        """値付き flag の登録漏れがあっても、値が数値ならコマンドに到達する。
+
+        `watch` のように一次情報 (man page) を開発機で取れない wrapper は flag 表を
+        空にしてこのネットに委ねている。コマンド名が純粋な数値になることは無いので、
+        読み飛ばしがコマンドを食う心配がない。
+        """
+        for cmd, want in (
+            ("watch --equexit 5 gh pr create", "gh pr create"),
+            ("watch -q 5 gh pr create", "gh pr create"),
+            ("watch -n 5 kubectl get pods", "kubectl get pods"),
+            ("xargs -Z 5 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_timeout_duration_is_not_eaten_by_the_safety_net(self):
+        # timeout は位置引数 DURATION を自前で消費するのでネットを無効にしている。
+        # 有効だと DURATION が読み飛ばされ、コマンド名が DURATION と誤判定されて
+        # wrapper 剥がし自体が諦められる。
+        for cmd in ("timeout 30 gh pr create", "timeout -k 10 30 gh pr create"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
     def test_only_sudo_is_conditional_scrub(self):
         # 現状 scrub するのは sudo のみ。新しい conditional_scrub wrapper を
         # 足すときは scrub 補正ロジックと回帰テストの追加を忘れないよう、
@@ -634,6 +688,9 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
         ("AWS_PROFILE=prod time aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod nohup aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod command aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        # `builtin` は外部 CLI を起動しないので実運用では service に match しないが、
+        # parser の扱い (剥がして env を収集) は他の passthrough と同じ。
+        ("AWS_PROFILE=prod builtin aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod exec aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod npx aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         (
@@ -652,7 +709,49 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
             {"AWS_PROFILE": "prod"},
         ),
         ("AWS_PROFILE=prod bun x aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        # v0.9.0 追加の実行ラッパ。いずれも継承 env をそのまま子へ渡す。
+        ("AWS_PROFILE=prod timeout 30 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod nice -n 5 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod stdbuf -oL aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod setsid aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        (
+            "AWS_PROFILE=prod caffeinate -i aws s3 ls",
+            "aws s3 ls",
+            {"AWS_PROFILE": "prod"},
+        ),
+        ("AWS_PROFILE=prod watch -n 5 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod xargs -n 1 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
     ]
+
+    def test_every_passthrough_wrapper_has_a_propagation_case(self):
+        """passthrough 分類の全 wrapper が上の表に載っていることを強制する。
+
+        分類 (`_WRAPPER_ENV_CLASS`) を足しただけで伝播ケースを書かないと、
+        「剥がすが env を運ばない」「flag の消費規則が違う」といった実挙動の
+        ずれが誰にも観測されないまま入る。D16 チェックリスト手順 6 の機械化。
+        """
+        covered = set()
+        for command, _normalized, _env in self.PASSTHROUGH_CASES:
+            tokens = command.split()[1:]  # 先頭の inline env を除く
+            if not tokens:
+                continue
+            for size in (3, 2, 1):
+                key = tuple(tokens[:size]) if size > 1 else tokens[0]
+                if key in command_parser._WRAPPER_ENV_CLASS:
+                    covered.add(key)
+                    break
+        passthrough = {
+            w
+            for w, cls in command_parser._WRAPPER_ENV_CLASS.items()
+            if cls == "passthrough"
+        }
+        missing = passthrough - covered
+        self.assertEqual(
+            missing,
+            set(),
+            "PASSTHROUGH_CASES に env 伝播ケースの無い passthrough wrapper が "
+            f"あります: {sorted(map(str, missing))}",
+        )
 
     def test_passthrough_wrappers_propagate_pre_wrapper_env(self):
         for command, normalized, env in self.PASSTHROUGH_CASES:
@@ -699,6 +798,819 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
             extract_candidates("env AWS_PROFILE=prod aws s3 ls"),
             [("aws s3 ls", {"AWS_PROFILE": "prod"})],
         )
+
+
+class TestHeredocProtection(unittest.TestCase):
+    """heredoc 本文を候補セグメントにしない (誤 deny 防止)。
+
+    `cat > deploy.sh <<'EOF' ... EOF` の本文に書かれた CLI 例は**実行されない**
+    ただのテキストなので、候補として検証してはいけない。改行を無条件の区切りに
+    していた頃は本文 1 行 1 行が候補になり、スクリプトや PR 本文を heredoc で
+    書くだけでファイル生成そのものが deny されていた。
+    """
+
+    def test_body_lines_are_not_candidates(self):
+        cmd = "cat > deploy.sh <<'EOF'\n#!/bin/bash\ngh release create v1\nEOF"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 1)
+        self.assertTrue(cands[0].startswith("cat > deploy.sh"))
+
+    def test_command_after_heredoc_is_still_a_separate_candidate(self):
+        # delimiter 行の改行はトップレベルの区切り。閉じないと heredoc の次の
+        # コマンドが本文に吸収され、検証されないまま素通りする (バイパス)。
+        cmd = "cat > d.sh <<'EOF'\ngh release create v1\nEOF\ngh pr create --fill"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 2)
+        self.assertEqual(cands[1], "gh pr create --fill")
+
+    def test_unquoted_and_dash_forms(self):
+        # `<<-` は本文と delimiter 行の先頭タブを除去して比較する (man 1 bash)。
+        cmd = "cat <<-EOF > x\n\tgh pr create\n\tEOF\naws s3 ls"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 2)
+        self.assertEqual(cands[1], "aws s3 ls")
+
+    def test_double_quoted_and_backslash_delimiters(self):
+        for opener, closer in (('<<"EOF"', "EOF"), ("<<\\EOF", "EOF")):
+            with self.subTest(opener=opener):
+                cmd = f"cat {opener}\ngh pr create\n{closer}\naws s3 ls"
+                cands = [c for c, _env in extract_candidates(cmd)]
+                self.assertEqual(len(cands), 2)
+                self.assertEqual(cands[1], "aws s3 ls")
+
+    def test_multiple_heredocs_on_one_line(self):
+        cmd = "cat <<A <<B\na1\nA\nb1\nB\naws s3 ls"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 2)
+        self.assertEqual(cands[1], "aws s3 ls")
+
+    def test_here_string_is_not_a_heredoc(self):
+        # `<<<` は本文行を持たないので改行での分割を止めてはいけない。
+        cands = [c for c, _env in extract_candidates('grep foo <<< "$bar"\ngh pr list')]
+        self.assertEqual(cands, ['grep foo <<< "$bar"', "gh pr list"])
+
+    def test_arithmetic_left_shift_is_not_treated_as_heredoc(self):
+        # `(( x = 1 << 2 ))` の `2` を delimiter と誤認すると、その数字の行まで
+        # 飲み込んで後続の検証対象セグメントを消してしまう (バイパス)。
+        # bare 形の delimiter を識別子に限定することで防ぐ。
+        cands = [c for c, _env in extract_candidates("(( x = 1 << 2 ))\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+    def test_unterminated_heredoc_does_not_swallow_the_rest(self):
+        """terminator が無ければ heredoc として扱わず、通常の改行分割に戻す。
+
+        「閉じていなければ末尾まで飲み込む」方式は、delimiter を 1 文字でも
+        読み違えた瞬間に「以降すべて検証しない」へ化ける。実際に
+        `cat <<END-OF-FILE` を `END` と読む / `(( x = 1 << y ))` を heredoc と読む
+        の 2 経路で、後続の `gh pr create` が丸ごと未検証になっていた。
+        未終端 heredoc は bash 側でもエラー (or 入力待ち) になる壊れたコマンドなので、
+        そちらを検証してしまう方の代償を取る。
+        """
+        cands = [c for c, _env in extract_candidates("cat <<EOF\ngh pr create\n")]
+        self.assertIn("gh pr create", cands)
+
+    def test_delimiter_is_matched_as_a_whole_token(self):
+        # 途中で切ると (例: `END-OF-FILE` を `END` と読む) terminator が現れず、
+        # 後続コマンドまで本文として飲み込む = 検証が消える。
+        for opener, closer in (
+            ("<<END-OF-FILE", "END-OF-FILE"),
+            ("<<EOF.txt", "EOF.txt"),
+            ("<<1EOF", "1EOF"),
+        ):
+            with self.subTest(opener=opener):
+                cmd = f"cat {opener} > x\nbody\n{closer}\ngh pr create --fill"
+                cands = [c for c, _env in extract_candidates(cmd)]
+                self.assertEqual(len(cands), 2, cands)
+                self.assertEqual(cands[1], "gh pr create --fill")
+                self.assertNotIn("body", cands[0])
+
+    def test_arithmetic_context_is_detected_syntactically(self):
+        r"""算術文脈そのものを構文で検出する (delimiter 語の形から推定しない)。
+
+        `(( ... ))` の内側の `<<` は左シフト演算子であって heredoc ではない。
+        「数値なら heredoc ではない」というガードでは `1 << y` のような識別子
+        オペランドを救えず、後方に `y` 行があると後続コマンドを本文として
+        飲み込んで**検証が消える** (PR #48 Codex R2 P1)。オペランドの形を
+        場当たりに足していく方向では別の形 (`(a+b)` / `$n` / `0x10`) で必ず抜ける。
+        """
+        for operand in ("y", "2", "(a+b)", "$n", "0x10", "a_b"):
+            cmd = f"(( x = 1 << {operand} ))\ngh pr create\n{operand}"
+            with self.subTest(operand=operand):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertIn("gh pr create", cands, cmd)
+
+    def test_dollar_arithmetic_is_also_protected(self):
+        cands = [c for c, _e in extract_candidates("$(( 1 << y ))\ngh pr create\ny")]
+        self.assertIn("gh pr create", cands)
+
+    def test_unclosed_arithmetic_does_not_swallow_the_rest(self):
+        # 閉じ `))` が無ければ算術と見なさない (未終端 heredoc と同じ規律)。
+        cands = [c for c, _e in extract_candidates("((\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+    def test_real_heredoc_still_works_after_arithmetic_handling(self):
+        cands = [c for c, _e in extract_candidates("cat <<EOF\nbody\nEOF\ngh pr create")]
+        self.assertEqual(cands, ["cat", "gh pr create"])
+
+
+class TestXargsOptionClassification(unittest.TestCase):
+    """GNU / BSD xargs の全 option を 3 分類で固定する。
+
+    **非数値の必須引数**は登録漏れが致命傷になる — 値トークンでループが止まり、
+    コマンド本体を見失って検証が消える (`xargs -a input gh pr close 1` の `gh`)。
+    数値の必須引数は `_ARG_LIKE_RE` の安全網が拾うので登録漏れが致命傷にならない。
+    分類の根拠と一覧は docs/wrapper-env-audit.md を参照。
+    """
+
+    # (コマンド, 期待する正規化後) — 必須引数 (非数値): 値を消費する
+    REQUIRED_NON_NUMERIC = [
+        ("xargs -a input gh pr close 1", "gh pr close 1"),
+        ("xargs --arg-file input gh pr close 1", "gh pr close 1"),
+        ("xargs --arg-file=input gh pr close 1", "gh pr close 1"),
+        ("xargs -ainput gh pr close 1", "gh pr close 1"),
+        ("xargs -d , gh pr close 1", "gh pr close 1"),
+        ("xargs --delimiter , gh pr close 1", "gh pr close 1"),
+        ("xargs -d, gh pr close 1", "gh pr close 1"),
+        ("xargs --process-slot-var V gh pr close 1", "gh pr close 1"),
+        ("xargs -E END gh pr create", "gh pr create"),
+        ("xargs -I {} gh pr close {}", "gh pr close {}"),
+        ("xargs -J % gh pr close %", "gh pr close %"),
+    ]
+    # 必須引数 (数値): 登録済み。仮に漏れても安全網が拾う
+    REQUIRED_NUMERIC = [
+        ("xargs -n 1 gh pr create", "gh pr create"),
+        ("xargs -P 4 gh pr create", "gh pr create"),
+        ("xargs -s 100 gh pr create", "gh pr create"),
+        ("xargs -L 1 gh pr create", "gh pr create"),
+        ("xargs --max-args 5 gh pr create", "gh pr create"),
+        ("xargs --max-procs 4 gh pr create", "gh pr create"),
+        ("xargs --max-chars 100 gh pr create", "gh pr create"),
+        ("xargs -R 2 gh pr create", "gh pr create"),
+        ("xargs -S 255 gh pr create", "gh pr create"),
+    ]
+    # optional 引数: bare 形は値を取らない (= 形でのみ取る)
+    OPTIONAL = [
+        ("xargs --replace gh pr close {}", "gh pr close {}"),
+        ("xargs --replace={} gh pr close {}", "gh pr close {}"),
+        ("xargs --eof gh pr create", "gh pr create"),
+        ("xargs --eof=END gh pr create", "gh pr create"),
+        ("xargs --max-lines gh pr create", "gh pr create"),
+        ("xargs --max-lines=5 gh pr create", "gh pr create"),
+        # 短縮の optional 形は引っ付け形でのみ値を取る = bool 扱いで正しい
+        ("xargs -i gh pr close {}", "gh pr close {}"),
+        ("xargs -i{} gh pr close {}", "gh pr close {}"),
+        ("xargs -e gh pr create", "gh pr create"),
+        ("xargs -l gh pr create", "gh pr create"),
+    ]
+    # 値を取らない
+    BOOLEAN = [
+        ("xargs -0 gh pr create", "gh pr create"),
+        ("xargs --null gh pr create", "gh pr create"),
+        ("xargs -p gh pr create", "gh pr create"),
+        ("xargs -r gh pr create", "gh pr create"),
+        ("xargs -t gh pr create", "gh pr create"),
+        ("xargs -x gh pr create", "gh pr create"),
+        ("xargs -o gh pr create", "gh pr create"),
+        ("xargs --show-limits gh pr create", "gh pr create"),
+        ("xargs --interactive gh pr create", "gh pr create"),
+        ("xargs --no-run-if-empty gh pr create", "gh pr create"),
+        ("xargs --verbose gh pr create", "gh pr create"),
+        ("xargs --exit gh pr create", "gh pr create"),
+    ]
+
+    def test_all_classifications(self):
+        for group, cases in (
+            ("required-non-numeric", self.REQUIRED_NON_NUMERIC),
+            ("required-numeric", self.REQUIRED_NUMERIC),
+            ("optional", self.OPTIONAL),
+            ("boolean", self.BOOLEAN),
+        ):
+            for cmd, want in cases:
+                with self.subTest(group=group, cmd=cmd):
+                    self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_npx_workspace_option_takes_a_value(self):
+        # `npx --help` 逐語: `[-w|--workspace <workspace-name> ...]`。非数値。
+        for cmd in ("npx -w pkg firebase deploy", "npx --workspace pkg firebase deploy"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "firebase deploy")
+
+
+# シェルのクォート文字 (テスト文字列内で直接書くと読みにくいので定数にする)
+Q = chr(39)    # '
+DQ = chr(34)   # "
+BS = chr(92)   # \
+
+
+class TestHeredocDelimiterIsAShellWord(unittest.TestCase):
+    r"""delimiter は**シェルの 1 語**として解析し、連結後に quote 除去する。
+
+    `man 1 bash` Here Documents 節:「If any characters in word are quoted, the
+    delimiter is the result of quote removal on word」。断片の先頭だけを読むと
+    (`E"OF"` を `E` と読む等) 一致する行が現れず、**後続コマンドを本文として
+    飲み込んで検証が消える**。
+    """
+
+    # (word の書き方, quote 除去後の delimiter)
+    FORMS = [
+        ("EOF", "EOF"),
+        (Q + "EOF" + Q, "EOF"),
+        (DQ + "EOF" + DQ, "EOF"),
+        (BS + "EOF", "EOF"),
+        ("E" + DQ + "OF" + DQ, "EOF"),
+        ("E" + Q + "OF" + Q, "EOF"),
+        (DQ + "EO" + DQ + "F", "EOF"),
+        ("E" + BS + "OF", "EOF"),
+        ("$" + Q + "EOF" + Q, "EOF"),
+        ("EO" + Q + "F" + Q, "EOF"),
+    ]
+
+    def test_all_word_forms_resolve_to_the_same_delimiter(self):
+        for word, delim in self.FORMS:
+            cmd = f"cat <<{word}\nbody\n{delim}\ngh pr create\nE"
+            with self.subTest(word=word):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                # 本文は畳まれ、terminator の**後ろ**のコマンドは候補として残る。
+                self.assertIn("gh pr create", cands, cmd)
+                self.assertNotIn("body", cands, cmd)
+
+    def test_dash_form_with_mixed_quotes(self):
+        word = "E" + DQ + "OF" + DQ
+        cmd = f"cat <<-{word}\n\tbody\n\tEOF\ngh pr create"
+        cands = [c for c, _e in extract_candidates(cmd)]
+        self.assertEqual(cands, ["cat", "gh pr create"])
+
+    def test_unresolvable_word_is_not_treated_as_heredoc(self):
+        """クォートが閉じず delimiter を解決できないときは heredoc と見なさない。
+
+        本文の吸収 (= 検証の消失) を起こさないことが要点。なお入力自体は bash でも
+        未完了で、未終端クォートは行を跨いで続くため、後続行が独立したコマンドに
+        なるわけではない (そちらは heredoc とは別の既存規則)。
+        """
+        self.assertIsNone(
+            command_parser._scan_heredoc_start("cat <<E" + DQ + "OF", 4)
+        )
+
+    def test_resolvable_words_are_recognized(self):
+        for word, delim in self.FORMS:
+            with self.subTest(word=word):
+                found = command_parser._scan_heredoc_start(f"cat <<{word}", 4)
+                self.assertIsNotNone(found, word)
+                self.assertEqual(found[0], delim, word)
+
+
+class TestAnsiCQuotedDelimiter(unittest.TestCase):
+    r"""`$'...'` の delimiter は ANSI-C エスケープを展開してから使う。
+
+    `man 1 bash` QUOTING 節の逐語表に従う。literal のまま使うと `<<$'E\x4fF'` の
+    terminator (実際は `EOF`) を見つけられず、**後続コマンドを本文として飲み込む**
+    = 検証が消える (R6 P1)。解釈できないエスケープがあれば heredoc と見なさない。
+    """
+
+    def test_escapes_are_expanded(self):
+        for body, delim in (
+            ("E" + BS + "x4fF", "EOF"),          # \xHH (16 進)
+            ("E" + BS + "x4F" + "F", "EOF"),
+            ("E" + BS + "117F", "EOF"),          # \nnn (8 進 O=117)
+            ("EOF", "EOF"),
+            ("E" + BS + BS + "OF", "E" + BS + "OF"),   # \\ はバックスラッシュ 1 つ
+            ("E" + BS + "u004fF", "EOF"),        # \uHHHH
+            ("E" + BS + "U0000004fF", "EOF"),    # \UHHHHHHHH
+        ):
+            word = "$" + Q + body + Q
+            with self.subTest(word=word):
+                found = command_parser._scan_heredoc_start(f"cat <<{word}", 4)
+                self.assertIsNotNone(found, word)
+                self.assertEqual(found[0], delim, word)
+
+    def test_expanded_delimiter_absorbs_the_body(self):
+        cmd = "cat <<$" + Q + "E" + BS + "x4fF" + Q + "\nbody\nEOF\ngh pr create"
+        cands = [c for c, _e in extract_candidates(cmd)]
+        self.assertIn("gh pr create", cands)
+        self.assertNotIn("body", cands)
+
+    def test_unknown_escape_is_not_treated_as_heredoc(self):
+        # 解釈できないエスケープ → delimiter を確定できない → heredoc と見なさない
+        # (本文行が候補になる = 過剰検証側)。
+        word = "$" + Q + "E" + BS + "q" + "OF" + Q
+        self.assertIsNone(command_parser._scan_heredoc_start(f"cat <<{word}", 4))
+
+
+class TestQuoteStateIsSharedAcrossAllPaths(unittest.TestCase):
+    r"""**不変条件**: クォート内のシェル構文もどきは、どの経路でも構文として
+    解釈されない。
+
+    2 ラウンド続けて「片方の経路が仕組みを持っているのに、もう片方が使っていない」
+    型の不具合が出た (算術文脈 / クォート状態)。個別の再現テストだけだと次の経路で
+    また抜けるので、**全経路をまとめて縛る**テストをここに置く。
+
+    新しくシェル構文を見る経路を足すときは、`_skip_opaque` (クォート / 置換 /
+    算術) を必ず通すこと。通していなければこのテストが落ちる。
+    """
+
+    # クォート内に置いても構文として解釈されてはいけない断片。
+    SYNTAX_LOOKALIKES = [
+        "&&", "||", ";", "|", "<<X", "<<-X", "((", "))", "$((", "#",
+        "\n", "<<EOF", "&", ">", "<", "`", "$(", "{", "}", "(", ")",
+    ]
+
+    def _wrap(self, fragment, quote):
+        # 実コマンドの引数としてクォート内に埋め込む。
+        return f"aws s3 cp file s3://b --metadata {quote}{fragment}{quote}"
+
+    def test_quoted_syntax_is_never_split(self):
+        for fragment in self.SYNTAX_LOOKALIKES:
+            for quote in (Q, DQ):
+                cmd = self._wrap(fragment, quote)
+                with self.subTest(fragment=fragment, quote=quote):
+                    self.assertEqual(
+                        split_on_operators(cmd), [cmd],
+                        f"クォート内の {fragment!r} が構文として解釈された",
+                    )
+
+    def test_quoted_syntax_yields_exactly_one_candidate(self):
+        for fragment in self.SYNTAX_LOOKALIKES:
+            for quote in (Q, DQ):
+                cmd = self._wrap(fragment, quote)
+                with self.subTest(fragment=fragment, quote=quote):
+                    cands = [c for c, _e in extract_candidates(cmd)]
+                    self.assertEqual(len(cands), 1, cmd)
+
+    def test_quoted_heredoc_lookalike_does_not_shadow_a_real_heredoc(self):
+        """クォート内の `<<X` を先に登録すると本物の heredoc の除去に失敗する。
+
+        失敗の質が悪い: 検証がスキップされるのではなく、**本文行が引数として
+        解釈されて誤ったコンテキストで検証が通る** (R6 P2)。
+        """
+        meta = Q + "{" + DQ + "foo" + DQ + ":" + DQ + "<<X bar" + DQ + "}" + Q
+        cmd = (
+            "aws s3api put-object --bucket b --key k --metadata " + meta
+            + " <<EOF\n--profile allowed\nEOF"
+        )
+        cands = [c for c, _e in extract_candidates(cmd)]
+        self.assertEqual(len(cands), 1, cands)
+        # 本文 (`--profile allowed`) が候補に残っていない = 引数として読まれない
+        self.assertNotIn("--profile", cands[0])
+
+    def test_arithmetic_inside_quotes_is_not_arithmetic(self):
+        cmd = "aws s3 cp f s3://b --metadata " + Q + "(( gh ))" + Q
+        self.assertEqual(split_on_operators(cmd), [cmd])
+
+
+class TestArithmeticCommandIsNotACandidate(unittest.TestCase):
+    """算術コマンド `(( ... ))` は CLI を実行しないので候補にしない。
+
+    bash は中身を**算術式として評価**するだけなので、`(( gh ))` は `gh` という
+    シェル変数を読むだけで gh CLI は起動しない。括弧を剥がして `gh` に正規化すると
+    実行されないコマンドで誤 deny する (R5 P2)。
+    `((` の判定は `split_on_operators` と `_strip_leading_syntax` で
+    **同じ `_arithmetic_span` を共有**する — 経路ごとに推測すると食い違う。
+    """
+
+    ARITHMETIC = [
+        "(( gh ))",
+        "(( aws + 1 ))",
+        "((gh))",
+        "(( x = 1 ))",
+        "(( kubectl > 0 ))",
+        "(( firebase++ ))",
+        "(( x = 1 << 2 ))",
+    ]
+
+    def test_arithmetic_commands_do_not_expose_a_cli_candidate(self):
+        for cmd in self.ARITHMETIC:
+            with self.subTest(cmd=cmd):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertEqual(len(cands), 1, cmd)
+                # 括弧が保たれている = 行頭 anchored な PATTERNS に一致しない
+                self.assertTrue(cands[0].startswith("(("), cands[0])
+
+    def test_reserved_word_prefix_still_reaches_the_arithmetic_form(self):
+        cands = [c for c, _e in extract_candidates("if (( gh )); then echo x; fi")]
+        self.assertIn("(( gh ))", cands)
+
+    def test_subshell_grouping_is_still_stripped(self):
+        # `( ... )` の subshell は**実行される**のでこれまでどおり候補にする。
+        for cmd, want in (
+            ("( gh pr create )", "gh pr create"),
+            ("(gh pr create --fill)", "gh pr create --fill"),
+            ("( (gh pr create) )", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIn(want, [c for c, _e in extract_candidates(cmd)])
+
+    def test_unclosed_double_paren_is_not_arithmetic(self):
+        # 閉じない `((` を算術扱いすると残りを飲み込むので、閉じているものだけ。
+        cands = [c for c, _e in extract_candidates("((\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+    def test_dollar_arithmetic_stays_consistent(self):
+        cands = [c for c, _e in extract_candidates("$(( 1 << 2 ))\ngh pr create")]
+        self.assertIn("gh pr create", cands)
+
+
+class TestShortOptionClustering(unittest.TestCase):
+    """短縮 option の連結 (`-vk 1`) の中にある必須値も消費する。
+
+    POSIX/GNU の慣行では `-abc` は `-a -b -c` と等価で、連結の途中で値を取る
+    option に当たったら**それ以降が値**になる。完全一致でしか flag を探さないと
+    `timeout -vk 1 5 gh pr create` の `-k` の値を取り逃し、`5` を DURATION と
+    取り違えて `gh` を見失う (R7 A)。消費規則は `_parse_wrapper_flags` に一本化。
+    """
+
+    # (コマンド, 期待する正規化後)
+    CASES = [
+        # 連結の末尾が値を取る option → 次のトークンが値
+        ("timeout -vk 1 5 gh pr create", "gh pr create"),
+        ("sudo -Eu deploy gh pr create", "gh pr create"),
+        ("xargs -tI {} gh pr close {}", "gh pr close {}"),
+        # 連結の途中に値を取る option → それ以降の文字が値 (引っ付け形)
+        ("timeout -k1 5 gh pr create", "gh pr create"),
+        ("sudo -Eudeploy gh pr create", "gh pr create"),
+        ("stdbuf -oL gh pr create", "gh pr create"),
+        ("xargs -tI{} gh pr close {}", "gh pr close {}"),
+        ("nice -n5 gh pr create", "gh pr create"),
+        ("time -oout.txt gh pr create", "gh pr create"),
+        ("exec -aname gh pr create", "gh pr create"),
+        # bool のみの連結
+        ("xargs -0rt gh pr create", "gh pr create"),
+        ("caffeinate -dis gh pr create", "gh pr create"),
+        # `=` 形との併用
+        ("timeout -s=KILL 30 gh pr create", "gh pr create"),
+    ]
+
+    def test_clustered_short_options(self):
+        for cmd, want in self.CASES:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_clustered_query_flag_is_still_detected(self):
+        # `command -pv` の連結も存在確認として素通しする。
+        for cmd in ("command -pv aws", "command -vp gh", "command -V aws"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(strip_transparent_wrappers(cmd).startswith("command "))
+
+
+class TestHeredocWithOperatorsBeforeNewline(unittest.TestCase):
+    """heredoc 宣言の後、改行より前に演算子が来ても本文の帰属を壊さない。
+
+    宣言と本文が別セグメントに分かれると、本文が後続セグメントに付いて再分割され、
+    **データとして書いているだけの行が実行可能な候補**になる (R7 B)。
+    逆に演算子の後ろの**実際に実行されるコマンド**は検証対象であり続ける必要がある。
+    """
+
+    OPERATORS = [";", "|", "&&", "||"]
+
+    def test_body_is_never_a_candidate(self):
+        for op in self.OPERATORS:
+            cmd = f"cat <<EOF {op} echo done\ngh pr create\nEOF"
+            with self.subTest(op=op):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertNotIn("gh pr create", cands, cmd)
+
+    def test_command_after_the_operator_is_still_verified(self):
+        for op in self.OPERATORS:
+            cmd = f"cat <<EOF {op} gh pr create\nbody\nEOF"
+            with self.subTest(op=op):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertIn("gh pr create", cands, cmd)
+
+    def test_redirect_and_multiple_heredocs(self):
+        for cmd, forbidden in (
+            ("cat <<EOF > out; echo x\ngh pr create\nEOF", "gh pr create"),
+            ("cat <<A <<B; echo x\na\nA\ngh pr create\nB", "gh pr create"),
+            ("cat <<-EOF; echo x\n\tgh pr create\n\tEOF", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertNotIn(forbidden, cands, cmd)
+
+    def test_multiple_heredocs_still_verify_the_real_command(self):
+        cands = [c for c, _e in extract_candidates(
+            "cat <<A <<B; gh pr create\na\nA\nb\nB"
+        )]
+        self.assertIn("gh pr create", cands)
+
+    def test_here_string_is_unaffected(self):
+        cands = [c for c, _e in extract_candidates('grep foo <<< "$bar"\ngh pr list')]
+        self.assertEqual(cands, ['grep foo <<< "$bar"', "gh pr list"])
+
+
+class TestTimeoutDurationSyntax(unittest.TestCase):
+    """GNU timeout の DURATION は strtod ベースなので 10 進整数だけではない。
+
+    受理し損ねると wrapper を剥がせず**検証が消える**ので、迷う形は受理側に倒す。
+    公式記述は「浮動小数点数 + 任意の接尾辞 (s/m/h/d)」。
+    """
+
+    ACCEPTED = [
+        "30", "1.5", ".5", "5.", "0",
+        "1e3", "1E3", "1e-3", "1.5e2", "1E+3",
+        "inf", "infinity", "INF", "Infinity",
+        "0x1p3",
+        "30s", "5m", "2h", "1d", "1.5h",
+    ]
+
+    # `timeout` が**拒否**する形。受理すると「実行されないコマンド」で誤 deny する。
+    # timeout.c の parse_duration(): `! (0 <= duration)` が NaN と負値を弾き、
+    # 残ってよいのは 1 文字だけ、その文字は apply_suffix() の小文字 s/m/h/d のみ。
+    REJECTED = [
+        "nan", "NaN", "-5", "-1.5", "30S", "30M", "30ss", "5x", "abc", "",
+    ]
+
+    def test_rejected_durations_leave_the_segment_opaque(self):
+        for d in self.REJECTED:
+            cmd = f"timeout {d} gh pr create".replace("timeout  ", "timeout ")
+            with self.subTest(duration=d):
+                self.assertEqual(strip_transparent_wrappers(cmd), cmd)
+
+    def test_accepted_durations_are_consumed(self):
+        for d in self.ACCEPTED:
+            with self.subTest(duration=d):
+                self.assertEqual(
+                    strip_transparent_wrappers(f"timeout {d} gh pr create"),
+                    "gh pr create",
+                )
+
+    def test_non_duration_leaves_segment_opaque(self):
+        # DURATION の形でなければ文書化された呼び出し形ではないので剥がさない。
+        for bad in ("notanum", "gh"):
+            with self.subTest(token=bad):
+                cmd = f"timeout {bad} pr create"
+                self.assertEqual(strip_transparent_wrappers(cmd), cmd)
+
+
+class TestShellExecutingWrappers(unittest.TestCase):
+    """引数を**シェル経由**で実行する wrapper はクォート内を解析する。
+
+    `watch 'gh pr create'` は `sh -c` にコマンド文字列として渡るので、クォートを
+    剥がさないと行頭 anchored な PATTERNS に一致せず、mutating コマンドが
+    検証なしに繰り返し実行される。直接 exec する wrapper (`timeout` 等) では
+    クォート塊は「空白入りのコマンド名」なので剥がしてはいけない。
+    分類と根拠は docs/wrapper-env-audit.md を参照。
+    """
+
+    def test_watch_default_form_parses_the_shell_command(self):
+        for cmd in ("watch 'gh pr create'", 'watch "gh pr create"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+    def test_watch_compound_shell_command_is_split(self):
+        cands = [c for c, _e in extract_candidates(
+            "watch 'gh pr create && aws s3 rm x'"
+        )]
+        self.assertEqual(cands, ["gh pr create", "aws s3 rm x"])
+
+    def test_watch_with_exec_does_not_unquote(self):
+        # `--exec` は sh -c を経由せず直接 exec するので、クォート塊は
+        # 「空白入りのコマンド名」= gh は実行されない。
+        for cmd in ("watch --exec 'gh pr create'", "watch -x 'gh pr create'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "'gh pr create'")
+
+    def test_watch_unquoted_form_is_unchanged(self):
+        self.assertEqual(
+            strip_transparent_wrappers("watch -n 5 kubectl get pods"),
+            "kubectl get pods",
+        )
+
+    def test_sudo_shell_flags(self):
+        for flag in ("-s", "-i", "--shell", "--login"):
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    strip_transparent_wrappers(f"sudo {flag} 'gh pr create'"),
+                    "gh pr create",
+                )
+
+    def test_sudo_without_shell_flag_is_direct_exec(self):
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -u deploy gh pr create"), "gh pr create"
+        )
+
+    def test_npx_call_option_is_a_shell_command(self):
+        for cmd in ("npx -c 'gh pr create'", "npx --call='gh pr create'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+    def test_direct_exec_wrappers_do_not_unquote(self):
+        # timeout / nice / xargs 等は `utility [argument ...]` 形 (直接 exec)。
+        for cmd in (
+            "timeout 30 'gh pr create'",
+            "nice -n 10 'gh pr create'",
+            "xargs -n 1 'gh pr create'",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(strip_transparent_wrappers(cmd).startswith("'"), cmd)
+
+    def test_quoted_option_values_do_not_leak_into_the_candidate(self):
+        # 値がクォートされていると `\S+` では途中で切れ、残りが候補先頭に混ざる。
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -p 'enter password' gh pr create"),
+            "gh pr create",
+        )
+
+
+class TestTerminatingWrapperOptions(unittest.TestCase):
+    """`--help` / `--version` 付きの wrapper は後続コマンドを実行しない。
+
+    剥がすと `watch --help gh pr create` が `gh pr create` になり、**実行されない
+    コマンドで誤 deny** する (PR #48 Codex R2 P2)。誤 deny は本 plugin が最も
+    避けたい離脱要因。
+    """
+
+    WRAPPERS = (
+        "watch", "nice", "stdbuf", "setsid", "xargs", "timeout",
+        "sudo", "npx", "caffeinate", "time", "nohup",
+    )
+
+    def test_terminating_options_keep_the_segment_opaque(self):
+        for w in self.WRAPPERS:
+            for f in ("--help", "--version"):
+                cmd = f"{w} {f} gh pr create"
+                with self.subTest(cmd=cmd):
+                    # 剥がさない = セグメントがそのまま残る (service に match しない)
+                    self.assertEqual(strip_transparent_wrappers(cmd), cmd)
+
+    def test_sudo_short_version_flag(self):
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -V gh pr create"), "sudo -V gh pr create"
+        )
+
+    def test_ambiguous_short_flags_are_not_treated_as_terminating(self):
+        # `sudo -h host` は値を取る option。終端と誤判定すると検証が消えるので
+        # 短縮形は既定で終端扱いしない (過剰検証側)。
+        self.assertEqual(
+            strip_transparent_wrappers("sudo -h myhost gh pr create"), "gh pr create"
+        )
+
+    def test_following_segments_are_still_verified(self):
+        # 終端 option の効果は「その wrapper が包む引数列」に限定する。
+        # 別コマンドとして続く形までスキップするとバイパスになる。
+        for cmd, tail in (
+            ("watch --help; gh pr create", "gh pr create"),
+            ("nice --help && aws s3 rm x", "aws s3 rm x"),
+            ("xargs --help | gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                cands = [c for c, _e in extract_candidates(cmd)]
+                self.assertIn(tail, cands)
+
+    def test_normal_forms_are_unaffected(self):
+        for cmd, want in (
+            ("watch -n 5 gh pr create", "gh pr create"),
+            ("nice -n 10 gh pr create", "gh pr create"),
+            ("xargs -I{} gh pr close {}", "gh pr close {}"),
+            ("timeout 30 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+
+class TestHeredocBodyExclusion(unittest.TestCase):
+    def test_body_is_dropped_from_the_normalized_candidate(self):
+        """本文はデータなので候補文字列に残さない (option 走査に食わせない)。"""
+        cmd = "cat > deploy.sh <<'EOF'\n--profile prod\nEOF"
+        cands = [c for c, _env in extract_candidates(cmd)]
+        # 本文だけでなく、消費済みの `<<delim` 宣言トークンも落とす
+        # (残すと再分割で「本文待ち」と誤解釈され、演算子で切れなくなる)。
+        self.assertEqual(cands, ["cat > deploy.sh"])
+
+
+class TestCommandBuiltinQuery(unittest.TestCase):
+    """`command -v gh` は存在確認なので wrapper として剥がさない (誤 deny 防止)。
+
+    `man 1 bash`: `command [-pVv] command [arg ...]` /「If either the -V or -v
+    option is supplied, a description of command is printed」。つまり `-v` 付きは
+    後続 CLI を実行しない。剥がすと `gh` 単体の候補になり、インストール確認の
+    定型句だけでアカウント検証が走って deny されていた。
+    """
+
+    def test_dash_v_stays_opaque(self):
+        for cmd in ("command -v gh", "command -V aws", "command -pv aws", "command -vp gh"):
+            with self.subTest(cmd=cmd):
+                normalized = strip_transparent_wrappers(cmd)
+                self.assertTrue(normalized.startswith("command "), normalized)
+
+    def test_dash_v_with_redirect_chain(self):
+        cands = [c for c, _e in extract_candidates("command -v gh >/dev/null 2>&1 && echo ok")]
+        self.assertTrue(cands[0].startswith("command -v gh"))
+
+    def test_executing_forms_are_still_stripped(self):
+        for cmd in ("command gh pr create", "command -p gh pr create", "command -- gh pr create"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+
+class TestExecutionWrappers(unittest.TestCase):
+    """v0.9.0 で追加した実行ラッパ。剥がさないと mutating コマンドが素通りする。"""
+
+    def test_timeout_consumes_duration_positional(self):
+        for cmd, want in (
+            ("timeout 30 gh pr create --fill", "gh pr create --fill"),
+            ("timeout 5m aws s3 sync . s3://b", "aws s3 sync . s3://b"),
+            ("timeout 1.5h gh pr create", "gh pr create"),
+            ("timeout -s KILL 30 gh pr create", "gh pr create"),
+            ("timeout --signal=KILL 30 gh pr create", "gh pr create"),
+            ("timeout -k 10 30 gh pr create", "gh pr create"),
+            ("timeout --preserve-status 30 gh pr create", "gh pr create"),
+            ("timeout -k10 30 gh pr create", "gh pr create"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_timeout_without_duration_stays_opaque(self):
+        # DURATION の形をしていない = 文書化された呼び出し形ではない。本体トークンを
+        # 誤って食うより、不透明なまま検証をスキップする方が安全側 (lenient)。
+        self.assertEqual(
+            strip_transparent_wrappers("timeout notanumber gh pr create"),
+            "timeout notanumber gh pr create",
+        )
+
+    def test_other_wrappers(self):
+        for cmd, want in (
+            ("xargs -I{} gh pr close {}", "gh pr close {}"),
+            ("xargs -I {} gh pr close {}", "gh pr close {}"),
+            ("xargs -n 1 -P 4 aws s3 rm", "aws s3 rm"),
+            ("watch -n 5 kubectl get pods", "kubectl get pods"),
+            ("nice -n 10 aws s3 sync . s3://b", "aws s3 sync . s3://b"),
+            ("nice -5 aws s3 ls", "aws s3 ls"),
+            ("stdbuf -oL aws s3 ls", "aws s3 ls"),
+            ("stdbuf -o L aws s3 ls", "aws s3 ls"),
+            ("setsid gh pr create", "gh pr create"),
+            ("caffeinate -i aws s3 sync . s3://b", "aws s3 sync . s3://b"),
+            ("caffeinate -t 60 aws s3 ls", "aws s3 ls"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_pipeline_second_stage_is_extracted(self):
+        cands = [c for c, _e in extract_candidates("gh pr list | xargs -I{} gh pr close {}")]
+        self.assertEqual(cands, ["gh pr list", "gh pr close {}"])
+
+
+class TestShellSyntaxNormalization(unittest.TestCase):
+    """構文プレフィックス / 末尾記号 / パスの正規化 (検証バイパスの解消)。
+
+    いずれも行頭 anchored な PATTERNS (`^gh(?=\\s|$)`) に一致せず service=None に
+    なっていた形。Claude が日常的に生成する形なので、検証を走らせる側に倒す。
+    """
+
+    def test_grouping_and_negation_prefixes(self):
+        for cmd, want in (
+            ("(gh pr create --fill)", "gh pr create --fill"),
+            ("{ gh pr create", "gh pr create"),
+            ("! gh pr create", "gh pr create"),
+            ("(cd dir", "cd dir"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_reserved_word_prefixes(self):
+        for word in ("if", "then", "elif", "else", "do", "while", "until"):
+            with self.subTest(word=word):
+                self.assertEqual(
+                    strip_transparent_wrappers(f"{word} gh pr create"), "gh pr create"
+                )
+
+    def test_leading_redirections(self):
+        for cmd in (
+            "</dev/null gh pr create",
+            "2>/dev/null gh pr create",
+            ">out.txt gh pr create",
+            "> out.txt gh pr create",
+            "2>&1 gh pr create",
+            "&> out.txt gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), "gh pr create")
+
+    def test_command_path_and_backslash_are_normalized(self):
+        for cmd, want in (
+            ("/opt/homebrew/bin/gh pr create", "gh pr create"),
+            ("./node_modules/.bin/firebase deploy", "firebase deploy"),
+            ("\\gh pr create", "gh pr create"),
+            ("AWS_PROFILE=prod /usr/bin/aws s3 ls", "aws s3 ls"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(strip_transparent_wrappers(cmd), want)
+
+    def test_balanced_parens_in_arguments_are_preserved(self):
+        # 末尾 `)` を無条件に剥がすと引数を壊す。開き括弧と対応していれば残す。
+        self.assertEqual(
+            strip_transparent_wrappers("gh pr view $(echo 1)"), "gh pr view $(echo 1)"
+        )
+
+    def test_for_loop_body_becomes_a_candidate(self):
+        cands = [
+            c for c, _e in extract_candidates(
+                'for f in *.tgz; do gh release upload v1 "$f"; done'
+            )
+        ]
+        self.assertIn('gh release upload v1 "$f"', cands)
+
+    def test_brace_group_with_trailing_close(self):
+        cands = [c for c, _e in extract_candidates("{ gh pr create; }")]
+        self.assertEqual(cands, ["gh pr create"])
 
 
 if __name__ == "__main__":

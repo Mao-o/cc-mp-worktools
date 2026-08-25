@@ -1,16 +1,275 @@
 # Changelog
 
+## 0.9.0
+
+**候補コマンドの切り出しと解釈を 1 つの解析層として作り直した** (内部バックログ
+6 件)。誤 deny (使えない) と検証バイパス (守れていない) の両方向に出ていた問題を
+まとめて塞ぐ。方針は従来どおり lenient — 誤 deny は allow 方向に倒し、バイパスは
+deny を増やすのではなく**「検証を走らせる」**方向に倒す。
+
+### 変更内容
+
+1. **コンテキスト指定 flag を検証に反映** (この batch の主眼) — `aws --profile
+   other s3 rm` / `gcloud --project other run deploy` / `firebase deploy -P other` /
+   `kubectl --context other delete pod` は、これまで hook の**既定コンテキスト**
+   だけを照合していた。既定が期待値なら「検証は既定 / 実行は other」で allow され、
+   誤アカウント事故の典型経路がそのまま通っていた (false-allow)。
+   `core/cli_options.py` に `find_context_options` を追加し、候補の**行全体**から
+   コンテキスト option の値を拾う。各 service は `CONTEXT_OPTIONS` を宣言し、
+   AWS は検証コマンドに `--profile` を付与 (CLI の資格情報解決順を実行時と揃える)、
+   GCP は `--project` / `--account` を直接照合し `--configuration` を引き渡し、
+   Firebase は `.firebaserc` の alias を解決してから照合、Kubernetes は
+   `--context` を直接照合し `--kubeconfig` を引き渡す。
+   **GCP は key ごとに独立して上書き**する — project を flag で上書きしても
+   account の期待値があれば account はアクティブ値と照合する (早期 return にすると
+   新たな false-allow を作る)。gh は `CONTEXT_OPTIONS` を宣言しない
+   (`--hostname` / `--user` は「どのアカウントで実行するか」ではなく操作**対象**の
+   指定のため。README 既知の制限のとおり)。
+   option の記法 (`--opt value` / `--opt=value` / `-Pprod` / `-P=prod` / `--` 終端 /
+   値トークンの消費) は既存の `strip_leading_options` と `_option_name_value` を
+   共有し、走査の打ち切り条件だけが違う (正規化は未知 option で打ち切る / context
+   抽出は global option を後方からも拾うため走査を続ける)。値が変数展開等で静的に
+   解決できないときは従来どおり既定コンテキストで照合する。
+   dispatcher は context を inline env と同じく **grouping key と cache key に含める**
+   — 含めないと `aws --profile a s3 rm x && aws --profile b s3 rm y` が 1 エントリに
+   畳まれて後段が検証されず、既定 profile の成功 cache を別 profile が hit する。
+   未配線の dead code だった `kubectl._context_override` は共通スキャナに統合して削除。
+
+2. **heredoc 本文を候補にしない** — `core/command_parser.py` は改行を無条件の
+   区切りにしており、`cat > deploy.sh <<'EOF' ... EOF` の本文 1 行 1 行が候補に
+   なっていた。本文の CLI 例は実行されないため、スクリプトや PR 本文を heredoc で
+   書くだけでファイル生成そのものが deny される (実際に本 batch の作業中、
+   インストール済みの 0.8.0 が commit message 作成を 2 回 deny した)。
+   `man 1 bash` の Here Documents 節に沿って `<<[-]word` を検出し、delimiter 行まで
+   同一セグメントに取り込む (quote 付き / `\` 付き delimiter、`<<-` のタブ除去、
+   1 行に複数 heredoc に対応。here-string `<<<` は対象外)。delimiter 行の改行では
+   セグメントを閉じるので、heredoc の**次**のコマンドは従来どおり検証される。
+   bare 形の delimiter は識別子に限定し、`(( x = 1 << 2 ))` の算術左シフトを
+   heredoc と誤検出して後続セグメントを飲み込むことがないようにした。
+
+3. **`command -v gh` を素通し** — `command` は透過 wrapper だが、`-v` / `-V` 付きは
+   後続 CLI を**実行せずパスを表示するだけ** (`man 1 bash`: `command [-pVv]`)。
+   剥がすと `gh` 単体の候補になり、インストール確認の定型句でアカウント検証が
+   走って deny されていた。`-v` / `-V` (連結形 `-pv` 含む) があれば剥がさない。
+   `command gh ...` / `command -p gh ...` / `command -- gh ...` は従来どおり検証。
+
+4. **PATTERNS の `\b` を `(?=\s|$)` に** — `\b` はハイフンも語境界とするため
+   `aws-vault exec prod -- aws s3 rm` が aws として発火し、hook の既定 profile で
+   `sts` を実行していた。既定資格情報が無ければ永久 deny、既定が期待値なら実行
+   profile が prod でも allow という**二重の誤り**。`gh-ost` / `kubectl-*` も同様。
+   全 service を空白/終端の lookahead に統一した。Firebase だけは
+   `npx firebase-tools deploy` が剥がし後に `firebase-tools deploy` になるため
+   `-tools` を明示的に許可する。これにより `aws-vault` 経由の実行は
+   「誤った検証」から「検証対象外」に変わる (README 既知の制限に明記)。
+
+5. **検証バイパスだったセグメント形を正規化** — `(gh pr create --fill)` /
+   `{ gh pr create; }` / `for f in *; do gh release upload ...; done` /
+   `if gh pr create; then` / `! gh pr create` / `</dev/null gh pr create` /
+   `2>/dev/null gh pr create` / `/opt/homebrew/bin/gh pr create` / `\gh pr create`
+   は、いずれも行頭 anchored な PATTERNS に一致せず service=None (検証スキップ) に
+   なっていた。先頭の `(` `{` `!` / 予約語 / リダイレクト、末尾の `)` `;` `}` `&`、
+   コマンド名のパスと `\` を正規化する。末尾の括弧は**開き括弧と対応していない
+   ときだけ**落とすので `gh pr view $(echo 1)` の引数は壊さない。
+
+6. **実行ラッパを追加** — `timeout` / `nice` / `stdbuf` / `setsid` / `caffeinate` /
+   `watch` / `xargs` を透過 wrapper に追加した。`timeout 30 gh pr create` /
+   `... | xargs -I{} gh pr close {}` / `watch -n 5 kubectl get pods` は全て
+   service=None で素通りしていた。`timeout` は flag だけでなく先頭の位置引数
+   DURATION も消費する (GNU の文法に一致しない形なら剥がさず不透明のまま =
+   従来どおり検証スキップ)。全て `_WRAPPER_ENV_CLASS` に `passthrough` として
+   登録。option 表の根拠と、取り違えた場合の劣化方向 (常に「検証スキップ」側で
+   誤 deny にはならない) は `docs/wrapper-env-audit.md` に記録した。
+   `ionice` は cloud CLI と組み合わせる現実的な形も開発機の man page も確認できず、
+   推測で allow-list を広げない方針から**追加していない**。
+
+7. **独立レビューで検出した自作の退行を修正** — 上記 2〜6 を入れた直後に、
+   0.8.0 と 0.9.0 の出力を突き合わせる敵対的レビューを別途かけ、**新規に作り込んだ
+   false-allow を 5 経路**見つけて潰した。いずれも「安全側に倒したつもりが、
+   検証そのものを消していた」型の誤り:
+   - `npx firebase-tools@13.31.0 deploy` — CLI 名の lookahead が `@` で失敗し
+     **検証対象から丸ごと外れていた**。`@<version>` を明示的に許可し、PATTERNS /
+     READONLY / STATE_CHANGING / self-remediation で同じ prefix を共有する
+     (片方だけ許可すると `login` が切替として認識されず成功 cache が残る)
+   - `cat <<END-OF-FILE` / `<<EOF.txt` — delimiter を識別子形に限定していたため
+     `END` までしか読めず、terminator が現れないまま**後続コマンドを全部**
+     本文として飲み込んでいた。delimiter は 1 トークン丸ごと取る
+   - `(( x = 1 << y ))` — 算術左シフトを heredoc と誤認して同様に飲み込む。
+     **terminator の実在を確認してから本文として扱う**方式に変更し、
+     「閉じていなければ末尾まで飲み込む」挙動そのものを廃止した
+     (誤検出が「以降すべて検証しない」に化ける経路を構造的に塞ぐ)
+   - heredoc 本文の行が option 走査に食われる — `--template-file - <<EOF` の本文に
+     `--profile prod` があると **prod で検証して allow** し、YAML マニフェストの
+     `- --context` / `- prod` があると**誤 deny** していた。本文は候補文字列からも
+     落とす
+   - context option の値として `-` (次の option / stdin) と `{}`
+     (`xargs -I{}` の置換 placeholder) を採用していた
+
+8. **wrapper flag 表を 3 分類で全件監査** — 「その flag が次の token を消費するか」の
+   取り違えが**逆方向に 2 件**見つかった (PR #48 Codex P1 x2)。どちらも
+   コマンド本体を見失って**検証がまるごと消える**方向:
+   - `xargs --replace gh pr close {}` — GNU の long option は optional 引数を
+     **`=` 形でのみ**取るのに必須扱いで登録していたため、bare 形が `gh` を食っていた。
+     `_WRAPPER_FLAGS_OPTIONAL_VALUE` を導入して bare 形は消費しないようにした
+     (`--replace` / `--eof` / `--max-lines`)
+   - `watch --equexit 5 gh pr create` — 値を取る flag の登録漏れで `5` がコマンド名の
+     位置に残っていた
+   あわせて全 wrapper の flag を「値を取らない / 必須引数 / optional 引数」の
+   3 分類に確定させ、**根拠 (ローカル man page か上流リファレンスか) を明記**して
+   `docs/wrapper-env-audit.md` に記録した。裏が取れない flag は登録しない
+   (消費しない側 = v0.8.0 と同じ検証スキップに留まり、コマンドを食わない)。
+   構造的な保険として、flag 領域の後に残る**純粋な数値トークンを読み飛ばす**安全網を
+   入れた。コマンド名が純粋な数値になることは無いので安全で、これにより一次情報を
+   取れない `watch` の flag 表を**空にできる** (値が bool か数値かを推測しなくてよい)。
+
+9. **算術文脈を構文として検出 / wrapper の終端 option を処理** (PR #48 Codex R2) —
+   - `(( x = 1 << y ))` の左シフトを heredoc 開始と誤認し、後方に `y` 行があると
+     後続コマンドを本文として飲み込んで**検証が消えて**いた。delimiter 語の形
+     (数値か識別子か) から推定する方式は `(a+b)` / `$n` / `0x10` など別の
+     オペランド形で必ず抜けるため、**算術文脈そのもの** (`(( ... ))`) を構文として
+     検出する方式に変えた (`$(( ... ))` は従来から保護済み)。閉じ `))` が
+     存在するときだけ算術と見なし、未閉じで残り全部を飲み込まないようにしている
+   - `watch --help gh pr create` のように**表示して終了する option** 付きで
+     呼ばれた wrapper を剥がすと、実行されないコマンドで**誤 deny** していた。
+     終端 option を検出したら wrapper を剥がさない。効果は wrapper が包む引数列に
+     限定し、`watch --help; gh pr create` のように別コマンドとして続く形は
+     従来どおり検証する (ここを取り違えるとバイパスになる)。
+     短縮形 (`-h` / `-v`) は `sudo -h host` のような値付き option と衝突するため
+     既定では終端扱いせず、過剰検証側に倒した
+
+10. **xargs の全 option を列挙して分類しきる** (PR #48 Codex R3) —
+    `xargs -a input gh pr close 1` / `-d , ...` は入力系 option が次の token を
+    消費するのに未登録で、コマンド本体を見失って**検証が消えて**いた。
+    `-a` / `--arg-file` / `-d` / `--delimiter` / `--process-slot-var` を必須値として
+    登録し、あわせて **GNU / BSD xargs の全 option を 3 分類で完全列挙**した
+    (piecemeal に足すと同じ穴が繰り返し出るため)。
+    分類表には**値が数値か非数値か**を併記した — 数値は arg-like 安全網が拾うので
+    登録漏れが致命傷にならないが、**非数値は安全網が効かないので登録が必須**という
+    区別が、今回の見落としの本質だったため。
+    他 wrapper も同じ観点で再確認し、`npx` の `-w/--workspace` (非数値) を追加。
+    `watch` は値を取る option が**すべて数値**であることを確認したので、flag 表を
+    空にしたまま安全網に委ねる判断は正しいと再確認できた。
+
+    なお `-a` / `-d` は当初「開発機の man (BSD) に無く裏が取れない」として登録を
+    見送り、その判断を**報告で開示**していた。外部レビューが GNU `xargs --help` の
+    逐語を提示してくれたことで解消した — **裏が取れないものを黙って落とさず開示する
+    運用がそのまま解消につながった実例**として記録しておく。
+
+11. **duration 全構文 / シェル経由 wrapper の解析 / 数値 heredoc delimiter**
+    (PR #48 Codex R4) —
+    - `timeout` の DURATION は strtod ベースなので 10 進整数・小数だけではない。
+      `timeout 1e3 gh pr create` / `timeout inf ...` が剥がせず**検証が消えて**いた。
+      科学記数法 / `inf` / `infinity` / `nan` / 小数点始まり・終わり / 16 進浮動小数 /
+      接尾辞付きを受理する。受理し損ねる方が危険なので迷う形は受理側に倒した
+    - `watch 'gh pr create'` は既定で `sh -c` に渡る**コマンド文字列**なのに、
+      クォートを剥がさず `'gh pr create'` のままにしていたため検証されなかった。
+      wrapper を「シェル経由 / 直接 exec」で分類し、シェル経由のものはクォートを
+      剥がして中身を解析する (`--exec` 付きの `watch` は直接 exec なので剥がさない)。
+      クォート内が複合コマンドの場合は剥がした結果を**再分割**して各段を候補にする。
+      同じ分類で `sudo -s|-i` と `npx -c` も解析対象に加えた。あわせて option の
+      値がクォートされている形 (`sudo -p 'enter password' gh ...`) で値が途中で
+      切れ、残りが候補先頭に混ざる問題も直した
+    - **数値の heredoc delimiter を弾いていたガードを撤去**した。`cat <<123` は
+      bash が受理する正当な形で、弾くと本文の各行が候補になり**データを書くだけの
+      コマンドを誤 deny** する。算術シフトの除外は算術文脈の構文検出が担っており、
+      語形からの推定は不要になっていた (前 round の残骸)
+
+12. **heredoc delimiter のシェル word 解析 / 算術コマンドの括弧保持**
+    (PR #48 Codex R5) —
+    - delimiter を「先頭の 1 断片」しか読んでいなかったため、`cat <<E"OF"` を
+      `E` と誤読し、一致する行が現れないまま**後続コマンドを本文として飲み込んで
+      いた** (検証が消える)。`man 1 bash` の「delimiter is the result of quote
+      removal on word」に従い、**隣接断片を連結してから quote 除去する**形に変えた
+      (`E"OF"` / `"EO"F` / `E\\OF` / `$'EOF'` 等がすべて `EOF` に解決)。
+      解決できない word は heredoc と見なさない (過剰検証側)
+    - `(( gh ))` のように**保護対象の CLI 名で始まる算術コマンド**の括弧を剥がして
+      `gh` に正規化しており、bash が変数を評価するだけで CLI を実行しないのに
+      **誤 deny** していた。これは内部の不整合で、R2 で入れた算術文脈の追跡を
+      括弧剥がしの経路が使っていなかったのが原因。判定を `_arithmetic_span` に
+      一本化し、`((` を見る全経路 (セグメント分割 / heredoc 本文除去 /
+      構文プレフィックス剥がし) で共有させた。subshell の `( ... )` は従来どおり
+      候補にする
+
+13. **ANSI-C エスケープ展開とクォート状態の全経路共有** (PR #48 Codex R6) —
+    - `<<$'E\\x4fF'` の delimiter を literal のまま扱っていたため、bash が
+      `EOF` に展開する terminator を見つけられず**後続コマンドを本文として
+      飲み込んで**いた。`man 1 bash` QUOTING 節の逐語表に従って ANSI-C
+      エスケープを展開してから delimiter にする。解釈できないエスケープが
+      あれば delimiter を確定させない (過剰検証側)
+    - heredoc 開始の再スキャンがクォート状態を追跡しておらず、
+      `--metadata '{"k":"<<X bar"}' <<EOF` の `X` を先に登録して本物の heredoc の
+      本文除去に失敗していた。**失敗の質が悪く**、検証がスキップされるのではなく
+      本文行 (`--profile allowed`) が引数として解釈され、**承認されていない既定
+      profile で走るコマンドが「許可された profile」として検証を通って**いた
+    - 2 ラウンド続けて「片方の経路が仕組みを持っているのに、もう片方が使って
+      いない」型が出たため、個別対応をやめて**シェル構文を見る全経路を棚卸し**した。
+      quote / 置換 / 算術のスキップを `_skip_opaque` に一本化し、
+      セグメント分割・heredoc 本文除去・括弧の均衡判定がすべてこれを通る。
+      **不変条件として docs に明記**し、`TestQuoteStateIsSharedAcrossAllPaths` が
+      振る舞いで守る (クォート内の構文もどきがどの経路でも解釈されないことを一括表明)
+
+14. **短縮 option 連結の値解析 / heredoc と演算子の共存 / duration の受理範囲**
+    (PR #48 Codex R7) —
+    - 値を取る短縮 option が他と連結されていると引数を取り逃していた
+      (`timeout -vk 1 5 cmd` / `sudo -Eu deploy cmd`)。POSIX/GNU の連結規則を
+      実装し、**flag 消費を `_parse_wrapper_flags` の 1 実装に統合**した
+      (「剥がす」「有無」「値」「終端判定」の 4 用途が同じ規則を通る)
+    - heredoc 宣言の後、改行より前に演算子が来ると本文が後続セグメントに付き、
+      **データとして書いているだけの行が実行可能な候補**になっていた。宣言から
+      本文終端までは演算子でセグメントを切らないようにし、あわせて本文除去時に
+      **`<<delim` の宣言トークンも落とす** (残すと再分割で「本文待ち」と再解釈され、
+      演算子の後ろの**実際に実行されるコマンドが候補から消える**)
+    - `timeout` の DURATION を strtod 文法で受理していたため `nan` / `30S` など
+      **timeout 自身が拒否する形**まで剥がしており、実行されないコマンドで
+      誤 deny しうる状態だった。coreutils の `parse_duration()` / `apply_suffix()`
+      の規則 (NaN・負値・大文字接尾辞・余分な文字を拒否) をそのまま実装した
+
+### テスト
+
+448 → 581 件 (+133)。追加分は 39 パターンの mutation で検証済み — 各修正を 1 つずつ
+元に戻すと対応するテストが必ず落ちることを確認した。
+
+**mutation テストだけでは足りない**ことが今回はっきりした。mutation は「新しい挙動が
+効いていること」しか見ないので、**以前は検証できていた入力を取りこぼすようになった**型の
+退行を原理的に検出できない。実際 5 経路の検証が静かに消えていた。そのため
+0.8.0 と 0.9.0 に**同一のコマンド文字列コーパス (2457 件)** を流し、「どの service が
+検証対象になるか」を全件突き合わせる差分検証を実施した (コーパスは 0.8.0 の全テストに
+登場する文字列 + 新規テストの入力 + service × 操作 × コンテキスト flag × wrapper ×
+複合形 + **各 wrapper の文書化された全 flag × bare / `=value` / 分離形 / 短縮連結**の
+マトリクス)。結果は「検証が消えた」51 件がすべて意図した修正 (heredoc 本文 /
+`command -v` / ハイフン付き別コマンド) か改善 (0.8.0 が readonly を検証していた形) で、
+**説明のつかない消失はゼロ**。導出したコンテキスト値 65 件も全て実在する flag に由来する
+ことを確認した。
+
+この差分検証の観点を恒久化するため、`TestVerificationCoverageFloor` に
+「検証対象であり続けるべき入力」と「検証してはいけない入力」の一覧を置いた。
+lenient 方針は「deny を減らす」であって「検証しない」ではない。
+
+`TestWrapperEnvPropagationContract` に「passthrough 分類の全 wrapper が env 伝播
+ケースを持つ」guard を追加した (D16 チェックリスト手順 6 の機械化)。追加した時点で
+`builtin` の欠落を検出したのでケースを補っている。
+
+ハイフン付き別コマンドのテストは deny の有無ではなく `verify` の**呼び出し回数**で
+判定する。deny の有無だけを見ると、実 CLI がたまたま期待値にログインしている環境
+では素通りして vacuous になる (mutation 実行で実際に検出漏れとして現れた)。
+
+### 見送り
+
+- `aws-vault exec <profile> --` を「`AWS_PROFILE` を合成する条件付き wrapper」として
+  扱う対応 (今回は検証対象外に倒すところまで)
+- `gh auth status --show-token` 等の開示系オプションの扱い、READONLY の前方一致
+  regex 機構そのものの再設計 (いずれも別途)
+
 ## 0.8.0
 
 **remediation loop の解消 (ログイン系の素通し / AWS 切替案内の修正) と、切替
-コマンドでの成功 cache 即時無効化** (bd_092a232e-629.2 / 629.3 / 629.6)。
+コマンドでの成功 cache 即時無効化** (内部バックログ)。
 verify-cloud-account は「記載済み service の不一致 × 書込系コマンド」だけを deny
 し、それ以外は lenient に倒す方針に沿って、deny 文面が案内するコマンド自体が deny
 される 3 つの経路を塞いだ。
 
 ### 変更内容
 
-1. **認証取得系コマンドを検証スキップ (READONLY) に** (629.2) — `aws sso login` /
+1. **認証取得系コマンドを検証スキップ (READONLY) に** (内部バックログ) — `aws sso login` /
    `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
    logout` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きず、かつ
    scope 要求も無い形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https`
@@ -59,14 +318,14 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    削除、`gh auth setup-git` (`-f/--force` / `-h/--hostname`) はローカル git config の
    credential.helper 設定で、取りうるオプションを含めていずれもアカウント側の OAuth
    grant には触れないため READONLY のまま (gh 2.98 の各 man page で確認)。
-2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (629.2) —
+2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (内部バックログ) —
    `tests/test_dispatcher.py::TestRemediationGuidanceContract` が各 service の verify
    を mock せず subprocess だけ差し替えて実際の deny 文面 (不一致 / 未ログイン / 未設定
    / SETUP_HINT) を生成し、案内コマンドを抽出して dispatcher に通す。案内コマンドは
    readonly または self-remediation として検証なしで allow されるか、AWS の
    `AWS_PROFILE=<profile> aws ...` はその env で検証されることを assert する。
    今後 deny 文面に allow 経路の無いコマンドを書くと機械的に落ちる。
-3. **アカウント状態を変えうるコマンドで成功 cache を即時無効化** (629.3) — 各 service
+3. **アカウント状態を変えうるコマンドで成功 cache を即時無効化** (内部バックログ) — 各 service
    に `STATE_CHANGING` パターンを追加し、dispatcher が `gh auth switch` / `login` /
    `logout` / `refresh`、引数ありの `firebase use ...` / `firebase login*` / `logout`、
    `aws sso login` / `aws login` / `aws configure ...`、`gcloud config set` / `unset` /
@@ -105,7 +364,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    既知の制限)。PostToolUse hook で実行後に無効化する案は、全 Bash 呼出に Python
    プロセスが恒久的に乗ることと plugin 再読込の非互換を避けるため採用しない。
    cache / epoch の書き込みは tmp + `os.replace` の atomic write。
-4. **AWS deny 文面の切替案内を Claude Code で効く形に** (629.6) — 従来は
+4. **AWS deny 文面の切替案内を Claude Code で効く形に** (内部バックログ) — 従来は
    `export AWS_PROFILE=<profile>` を第一に案内していたが、Claude Code の Bash は
    呼出ごとに env を持ち越さず、hook は Claude 本体の env を継承するため、`export`
    しても次の `aws ...` は同じ理由で deny され続けた。案内を
@@ -143,7 +402,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    firebase。gh は root に `--help` / `--version` 以外の global option が無い) に
    従って先頭の option を剥がし、元の形と剥がした形の両方で READONLY /
    STATE_CHANGING を、剥がした形で self-remediation を判定する。剥がした option の
-   値は将来の flag 照合 (629.4) 用に返し、deny 文面の検出コマンドには元の形を表示
+   値は将来の flag 照合 (内部バックログ) 用に返し、deny 文面の検出コマンドには元の形を表示
    する。未知の option が先頭にあれば剥がさず通常検証 (保守的)。`--help` /
    `--version` は宣言しない (剥がすと `aws --version` が readonly から外れるため)。
    **boolean flag の `--flag=<bool>` 形も剥がす** (Codex R5 P1-A) — Go の pflag /
@@ -153,7 +412,7 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
    扱いで無変更にしており、STATE_CHANGING に当たらず切替後も古い成功 cache が
    TTL 分残っていた。**値の真偽で剥がすかどうかは変えない** (剥がす目的は後続の
    subcommand を見つけることで、flag の実効値は「どの操作が走るか」に影響しない)。
-   これは 629.2 の `--skip-ssh-key=false` (`github.is_readonly`) と同じ失敗形が
+   これは 内部バックログ の `--skip-ssh-key=false` (`github.is_readonly`) と同じ失敗形が
    `cli_options` 側に残っていたもの。
 9. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
    再検証されない」注記と `export AWS_PROFILE` の記述を実装に合わせて更新、cache 節に
@@ -201,8 +460,8 @@ verify-cloud-account は「記載済み service の不一致 × 書込系コマ�
 - 期待値以外への切替と write を同一コマンドで実行する形
   (`gh auth switch --user other && gh pr create`)。hook は実行前の状態でしか検証
   できないため、README の既知の制限に記載した。
-- 読み取り専用サブコマンド (`gh pr list` 等) の不一致時 allow + 警告 (629.5)、
-  `--profile` / `--project` flag の解析 (629.4)。
+- 読み取り専用サブコマンド (`gh pr list` 等) の不一致時 allow + 警告 (内部バックログ)、
+  `--profile` / `--project` flag の解析 (内部バックログ)。
 
 ### テスト
 

@@ -344,7 +344,7 @@ class TestServiceInteractions(BaseWithTmpProject):
 
 
 class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
-    """bd_092a232e-629.1: firebase.verify を mock せず subprocess だけ差し替え、
+    """内部バックログ: firebase.verify を mock せず subprocess だけ差し替え、
     `.firebaserc` の default と `firebase use` の切替先が食い違うときの決定を
     dispatcher 経由で固定する。"""
 
@@ -801,7 +801,7 @@ class TestInfoCommandsReadonly(BaseWithTmpProject):
 
 
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
-    """bd_092a232e-629.3: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
+    """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
     したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
     検証成功も cache しない。切替後の最初の write が必ず再検証されることを固定する。
     (0.7.3 までは 30 秒の成功 cache が切替後も有効で、別アカウントの write が通った)"""
@@ -1027,7 +1027,7 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
 
 
 class TestLoginCommandsReadonly(BaseWithTmpProject):
-    """bd_092a232e-629.2: 認証取得系 (login / logout / configure 等) は資源を変更しない
+    """内部バックログ: 認証取得系 (login / logout / configure 等) は資源を変更しない
     ため検証せず allow する。未ログインで検証が失敗する状態でも、deny 文面が案内する
     ログインコマンド自体が deny される remediation loop にならない。"""
 
@@ -1171,7 +1171,7 @@ def _guided_commands(reason: str) -> list[str]:
 
 
 class TestRemediationGuidanceContract(BaseWithTmpProject):
-    """bd_092a232e-629.2 contract: deny 文面が案内するコマンドは必ず allow 経路にある。
+    """内部バックログ contract: deny 文面が案内するコマンドは必ず allow 経路にある。
 
     各 service の verify を mock せず subprocess だけ差し替えて実際の deny 文面を
     作り、そこから案内コマンドを抽出して dispatcher に通す。案内コマンドは
@@ -1602,6 +1602,448 @@ class TestDenyProvenance(BaseWithTmpProject):
         result = dispatch("gh pr create", str(self.project_dir))
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("[verify-cloud-account]", reason)
+
+
+class TestHyphenatedCommandsAreNotMatched(BaseWithTmpProject):
+    """`aws-vault` / `gh-ost` / `kubectl-*` は別コマンドなので発火しない。
+
+    `^aws\\b` は `aws-vault exec prod -- aws s3 rm` を aws として拾い、hook の
+    既定 profile で `sts` を実行していた。既定資格情報が無ければ永久 deny、
+    既定が期待値なら実行 profile が prod でも allow という二重の誤り。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts(
+            {"aws": "111111111111", "github": "Mao-o", "kubectl": "prod-ctx"}
+        )
+
+    def test_hyphenated_neighbours_do_not_fire(self):
+        # verify を必ず失敗させたうえで **呼ばれないこと** を見る。deny の有無だけを
+        # 見ると、実 CLI がたまたま期待値にログインしている環境では素通りして
+        # vacuous になる (実 CLI は起動させない)。
+        for command in (
+            "aws-vault exec prod -- aws s3 rm s3://b/x",
+            "gh-ost --help",
+            "kubectl-foo get pods",
+        ):
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch("services.aws.verify", return_value="AWS 不一致") as ma, \
+                     mock.patch("services.github.verify", return_value="GH 不一致") as mg, \
+                     mock.patch("services.kubectl.verify", return_value="k8s 不一致") as mk:
+                    self.assertIsNone(dispatch(command, str(self.project_dir)))
+                self.assertEqual(
+                    (ma.call_count, mg.call_count, mk.call_count), (0, 0, 0), command
+                )
+
+    def test_real_cli_still_fires(self):
+        with mock.patch("services.aws.verify", return_value="AWS 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("aws s3 rm s3://b/x", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+    def test_npx_firebase_tools_still_fires(self):
+        self._write_accounts({"firebase": "my-fb"})
+        with mock.patch("services.firebase.verify", return_value="FB 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("npx firebase-tools deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestSegmentationRegressions(BaseWithTmpProject):
+    """誤 deny / 検証バイパスだったセグメント形の回帰テスト。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111", "github": "Mao-o"})
+
+    def test_heredoc_body_does_not_trigger_verification(self):
+        # 誤 deny 側: heredoc 本文の CLI 例は実行されないので検証してはいけない。
+        command = "cat > deploy.sh <<'EOF'\n#!/bin/bash\ngh release create v1\nEOF"
+        with mock.patch("services.github.verify", return_value="GitHub 不一致") as m:
+            with self.isolated_cache():
+                self.assertIsNone(dispatch(command, str(self.project_dir)))
+        self.assertEqual(m.call_count, 0)
+
+    def test_command_v_does_not_trigger_verification(self):
+        with mock.patch("services.github.verify", return_value="GitHub 不一致") as m:
+            with self.isolated_cache():
+                self.assertIsNone(
+                    dispatch("command -v gh >/dev/null 2>&1", str(self.project_dir))
+                )
+        self.assertEqual(m.call_count, 0)
+
+    def test_previously_bypassing_forms_now_verify(self):
+        # バイパス側: いずれも実際に CLI が走る形なので検証を走らせる。
+        for command in (
+            "(gh pr create --fill)",
+            "{ gh pr create; }",
+            'for f in *.tgz; do gh release upload v1 "$f"; done',
+            "if gh pr create; then echo ok; fi",
+            "! gh pr create",
+            "</dev/null gh pr create",
+            "2>/dev/null gh pr create",
+            "/opt/homebrew/bin/gh pr create",
+            "\\gh pr create",
+            "timeout 30 gh pr create --fill",
+            "gh pr list | xargs -I{} gh pr close {}",
+            "nice -n 10 gh pr create",
+            "setsid gh pr create",
+        ):
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(
+                    "services.github.verify", return_value="GitHub 不一致"
+                ) as m:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(result, command)
+                self.assertGreaterEqual(m.call_count, 1, command)
+
+    def test_watch_wraps_kubectl(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        with mock.patch("services.kubectl.verify", return_value="ctx 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("watch -n 5 kubectl delete pod x", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestContextOptionRouting(BaseWithTmpProject):
+    """context option は inline env と同じく「別の検証対象」として扱う。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111"})
+
+    def test_context_is_passed_to_verify(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws --profile other s3 rm s3://b/x", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {"profile": "other"})
+
+    def test_flag_after_subcommand_is_seen(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws s3 rm s3://b/x --profile other", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {"profile": "other"})
+
+    def test_different_profiles_in_one_chain_are_verified_separately(self):
+        """1 コマンド内の 2 つ目の profile も検証する。
+
+        context を grouping key に含めないと 1 エントリに畳まれ、後段
+        (`--profile b`) が検証されないまま allow される。
+        """
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(
+                    "aws --profile a s3 rm x && aws --profile b s3 rm y",
+                    str(self.project_dir),
+                )
+        contexts = [c.kwargs.get("context") for c in m.call_args_list]
+        self.assertEqual(contexts, [{"profile": "a"}, {"profile": "b"}])
+
+    def test_no_flag_yields_empty_context(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws s3 rm s3://b/x", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+    def test_success_cache_is_not_shared_across_contexts(self):
+        """既定 profile の成功 cache を `--profile other` が hit してはいけない。"""
+        with self.isolated_cache():
+            with mock.patch("services.aws.verify", return_value=None) as m:
+                self.assert_cache_published("aws s3 rm s3://b/x", m, expected_calls=1)
+                # 別 context は cache を跨がず再検証される。
+                dispatch("aws --profile other s3 rm s3://b/x", str(self.project_dir))
+                self.assertEqual(m.call_count, 2)
+
+
+class TestHeredocBodyIsNotCommandLine(BaseWithTmpProject):
+    """heredoc 本文はデータであって引数ではない (両方向の実害を固定する)。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111", "kubectl": "prod-ctx"})
+
+    def test_body_does_not_choose_the_verification_target(self):
+        # 本文の `--profile prod` を採用すると、実行は既定 profile なのに prod で
+        # 検証して allow する (false-allow)。
+        command = (
+            "aws cloudformation deploy --template-file - <<EOF\n"
+            "--profile prod\nEOF"
+        )
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+    def test_yaml_body_does_not_cause_a_false_deny(self):
+        # マニフェスト本文の `- --context` / `- prod` を指定と誤読すると誤 deny。
+        command = (
+            "kubectl apply -f - <<'EOF'\nspec:\n  - args:\n"
+            "    - --context\n    - prod\nEOF"
+        )
+        with mock.patch("services.kubectl.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+
+class TestVersionPinnedNpxSpecs(BaseWithTmpProject):
+    """`npx firebase-tools@<version>` を検証対象から落とさない。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"firebase": "my-fb"})
+
+    def test_version_pinned_deploy_is_verified(self):
+        with mock.patch("services.firebase.verify", return_value="FB 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch(
+                    "npx firebase-tools@13.31.0 deploy --only hosting",
+                    str(self.project_dir),
+                )
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+    def test_version_pinned_login_invalidates_cache(self):
+        from core.dispatcher import _analyze_command
+
+        _targets, switching = _analyze_command("npx firebase-tools@13 login")
+        self.assertIn("services.firebase", [s.__name__ for s in switching])
+
+
+class TestVerificationCoverageFloor(BaseWithTmpProject):
+    r"""「検証対象であり続ける」ことを入力の一覧で固定する (カバレッジの床)。
+
+    mutation テストは**新しい挙動が効いていること**しか見ないので、
+    「以前は検証できていた入力を取りこぼすようになった」型の退行を原理的に
+    検出できない。v0.9.0 の開発中に実際、`(?=\s|$)` 化と heredoc delimiter の
+    制限で 5 経路の検証が静かに消えた (0.8.0 との出力突き合わせで発見)。
+
+    lenient 方針は「deny を減らす」であって「検証しない」ではない。
+    ここに並ぶのは**実際に CLI が実行される**形なので、検証対象から外れたら退行。
+    """
+
+    # (コマンド, 検証対象になるべき service)
+    MUST_VERIFY = [
+        # 素の形
+        ("gh pr create --fill", "github"),
+        ("aws s3 rm s3://b/x", "aws"),
+        ("gcloud run deploy svc --image x", "gcloud"),
+        ("firebase deploy --only hosting", "firebase"),
+        ("kubectl delete pod x", "kubectl"),
+        # npm 経由 (版固定を含む) — lookahead 化で一度落とした形
+        ("npx firebase-tools deploy", "firebase"),
+        ("npx firebase-tools@13.31.0 deploy --only hosting", "firebase"),
+        ("npx firebase-tools@13 deploy", "firebase"),
+        # 透過 wrapper / 実行ラッパ
+        ("sudo aws s3 rm s3://b/x", "aws"),
+        ("timeout 30 gh pr create --fill", "github"),
+        ("nice -n 10 aws s3 rm s3://b/x", "aws"),
+        ("stdbuf -oL gcloud run deploy svc --image x", "gcloud"),
+        ("watch -n 5 kubectl delete pod x", "kubectl"),
+        ("xargs -I{} gh pr close {}", "github"),
+        ("mise exec -- firebase deploy", "firebase"),
+        ("env FOO=bar aws s3 rm s3://b/x", "aws"),
+        ("command aws s3 rm s3://b/x", "aws"),
+        ("command -p gh pr create", "github"),
+        # パス / エスケープ
+        ("/opt/homebrew/bin/gh pr create", "github"),
+        ("./node_modules/.bin/firebase deploy", "firebase"),
+        ("\\gh pr create", "github"),
+        # 構文プレフィックス (実際に実行される位置)
+        ("(gh pr create --fill)", "github"),
+        ("{ gh pr create; }", "github"),
+        ("! gh pr create", "github"),
+        ("2>/dev/null gh pr create", "github"),
+        ('for f in *; do gh release upload v1 "$f"; done', "github"),
+        # 複合コマンドの各段
+        ("gh auth status && gh pr create --fill", "github"),
+        ("cd /tmp; aws s3 rm s3://b/x", "aws"),
+        ("gh pr list | xargs -I{} gh pr close {}", "github"),
+        # heredoc の**外**にある実行コマンド
+        ("cat > x.sh <<'EOF'\nnot executed\nEOF\ngh pr create --fill", "github"),
+        ("cat <<END-OF-FILE\nbody\nEND-OF-FILE\naws s3 rm s3://b/x", "aws"),
+        ("(( x = 1 << 2 ))\ngh pr create --fill", "github"),
+        ("(( x = 1 << y ))\ngh pr create --fill", "github"),
+        # context flag 付きでも検証対象であること (照合先が変わるだけ)
+        ("aws --profile other s3 rm s3://b/x", "aws"),
+        ("aws s3 rm s3://b/x --profile other", "aws"),
+        ("gcloud --project other run deploy svc --image x", "gcloud"),
+        ("firebase deploy -P other", "firebase"),
+        ("kubectl --context other delete pod x", "kubectl"),
+        # インライン env
+        ("AWS_PROFILE=prod aws s3 rm s3://b/x", "aws"),
+        # --- wrapper の flag 形 (PR #48 Codex P1 x2) ---
+        # optional 引数を持つ long option の bare 形は値を取らない。
+        # 「値を取る」と誤登録すると後続のコマンド名を食って検証が消える。
+        ("xargs --replace gh pr close {}", "github"),
+        ("xargs --eof gh pr create", "github"),
+        ("xargs --max-lines gh pr create", "github"),
+        ("xargs --replace={} gh pr close {}", "github"),
+        # 値を取る flag を登録し損ねても、値が数値なら arg-like ネットで到達する。
+        # (`watch` は一次情報が取れないため flag 表を空にしてネットに任せている)
+        ("watch --equexit 5 gh pr create", "github"),
+        ("watch -q 5 gh pr create", "github"),
+        ("watch -n 5 gh pr create", "github"),
+        ("watch --interval=5 gh pr create", "github"),
+        # 非数値の値を取る flag は登録が要る (一次情報で確定済みのもの)
+        ("timeout -s KILL 30 gh pr create", "github"),
+        ("timeout --signal=KILL 30 gh pr create", "github"),
+        ("timeout --preserve-status 30 gh pr create", "github"),
+        ("stdbuf -o L gh pr create", "github"),
+        ("sudo -u deploy gh pr create", "github"),
+        ("npx -p pkg firebase deploy", "firebase"),
+        ("time -o out.txt gh pr create", "github"),
+        ("exec -a name gh pr create", "github"),
+        ("xargs -E END gh pr create", "github"),
+        ("xargs -I {} gh pr close {}", "github"),
+        ("nice -n 10 gh pr create", "github"),
+        ("caffeinate -t 60 gh pr create", "github"),
+        # --- 算術文脈の内側の `<<` は左シフト (PR #48 Codex R2 P1) ---
+        # delimiter 語の形から推定していた頃は、後方に同名の行があると
+        # 後続コマンドを heredoc 本文として飲み込んで検証が消えていた。
+        ("(( x = 1 << y ))\ngh pr create --fill\ny", "github"),
+        ("(( x = 1 << 2 ))\ngh pr create --fill\n2", "github"),
+        ("(( x = 1 << (a+b) ))\ngh pr create --fill\na+b", "github"),
+        ("$(( 1 << y ))\ngh pr create --fill\ny", "github"),
+        # 終端 option の効果は wrapper が包む引数列に限る (別セグメントは検証する)
+        ("watch --help; gh pr create --fill", "github"),
+        ("nice --help && gh pr create --fill", "github"),
+        # 値を取る短縮形は終端扱いしない (過剰検証側)
+        ("sudo -h myhost gh pr create", "github"),
+        # --- xargs の入力系 option は値を消費する (PR #48 Codex R3 P1) ---
+        # 非数値の値なので安全網が効かず、登録漏れだと検証が丸ごと消える。
+        ("xargs -a input gh pr close 1", "github"),
+        ("xargs --arg-file input gh pr close 1", "github"),
+        ("xargs -d , gh pr close 1", "github"),
+        ("xargs --delimiter , gh pr close 1", "github"),
+        ("xargs --process-slot-var V gh pr close 1", "github"),
+        ("npx -w pkg firebase deploy", "firebase"),
+        ("npx --workspace pkg firebase deploy", "firebase"),
+        # --- timeout の DURATION 全構文 (PR #48 Codex R4 P1) ---
+        ("timeout 1e3 gh pr create --fill", "github"),
+        ("timeout inf gh pr create --fill", "github"),
+        ("timeout .5 gh pr create --fill", "github"),
+        ("timeout 1E3 gh pr create --fill", "github"),
+        # --- シェル経由 wrapper のクォート内解析 (PR #48 Codex R4 P1) ---
+        ("watch 'gh pr create --fill'", "github"),
+        ("watch -n 5 'kubectl delete pod x'", "kubectl"),
+        ("npx -c 'gh pr create --fill'", "github"),
+        ("sudo -s 'gh pr create --fill'", "github"),
+        # --- 混在クォート delimiter の後ろのコマンド (PR #48 Codex R5 P1) ---
+        ('cat <<E"OF"\nbody\nEOF\ngh pr create --fill', "github"),
+        ("cat <<E'OF'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
+        ('cat <<"EO"F\nbody\nEOF\ngh pr create --fill', "github"),
+        # --- ANSI-C エスケープ delimiter の後ろのコマンド (PR #48 Codex R6 P1) ---
+        ("cat <<$'E\\x4fF'\nbody\nEOF\ngh pr create --fill", "github"),
+        ("cat <<$'E\\117F'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
+        # --- 短縮 option の連結内の必須値 (PR #48 Codex R7 A) ---
+        ("timeout -vk 1 5 gh pr create --fill", "github"),
+        ("timeout -k1 5 gh pr create --fill", "github"),
+        ("sudo -Eu deploy gh pr create --fill", "github"),
+        ("xargs -tI{} gh pr close {}", "github"),
+        # --- heredoc 宣言 + 演算子の後ろの実コマンドは検証する (R7 B の逆側) ---
+        ("cat <<EOF; gh pr create --fill\nbody\nEOF", "github"),
+        ("cat <<EOF && aws s3 rm s3://b/x\nbody\nEOF", "aws"),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts(
+            {
+                "github": "Mao-o",
+                "aws": "111111111111",
+                "gcloud": "my-proj",
+                "firebase": "my-fb",
+                "kubectl": "prod-ctx",
+            }
+        )
+
+    def test_all_listed_commands_reach_verification(self):
+        for command, service in self.MUST_VERIFY:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(
+                    f"services.{service}.verify", return_value="不一致"
+                ) as m:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(
+                    result, f"検証対象から外れた (退行): {command!r}"
+                )
+                self.assertGreaterEqual(
+                    m.call_count, 1, f"{service}.verify が呼ばれない: {command!r}"
+                )
+
+    # 逆側の床: 実行されない / 別コマンドなので検証してはいけない形。
+    MUST_NOT_VERIFY = [
+        "cat > deploy.sh <<'EOF'\ngh release create v1\nEOF",
+        "cat <<-EOF\n\taws s3 rm s3://b/x\n\tEOF",
+        "command -v gh",
+        "command -V aws",
+        "command -pv aws",
+        "aws-vault exec prod -- aws s3 rm s3://b/x",
+        "gh-ost --help",
+        "kubectl-foo get pods",
+        "firebase-admin deploy",
+        "gh auth status",
+        "aws sts get-caller-identity",
+        "npx firebase-tools@13.31.0 login",
+        "npx firebase-tools@13 use",
+        # --- 終端 option 付きの wrapper は後続を実行しない (PR #48 Codex R2 P2) ---
+        "watch --help gh pr create",
+        "watch --version gh pr create",
+        "nice --help gh pr create",
+        "stdbuf --help gh pr create",
+        "setsid --help gh pr create",
+        "xargs --help gh pr create",
+        "timeout --help gh pr create",
+        "sudo --help gh pr create",
+        "sudo -V gh pr create",
+        "npx --help gh pr create",
+        "caffeinate --help gh pr create",
+        # --- 数値の heredoc delimiter は正当 (PR #48 Codex R4 P2) ---
+        # 弾くと本文の各行が候補になり、データを書くだけのコマンドを deny しうる。
+        "cat <<123\ngh pr create\n123",
+        "cat > x.sh <<456\naws s3 rm s3://b/x\n456",
+        # 直接 exec する wrapper のクォート塊は「空白入りのコマンド名」
+        "watch --exec 'gh pr create'",
+        # --- 算術コマンドは CLI を実行しない (PR #48 Codex R5 P2) ---
+        "(( gh ))",
+        "(( aws + 1 ))",
+        "((gh))",
+        "(( kubectl > 0 ))",
+        "if (( gh )); then echo x; fi",
+        # --- heredoc 本文は演算子が挟まってもデータのまま (PR #48 Codex R7 B) ---
+        "cat <<EOF; echo done\ngh pr create\nEOF",
+        "cat <<EOF | tee f\ngh pr create\nEOF",
+        "cat <<EOF > out; echo x\naws s3 rm s3://b/x\nEOF",
+        # --- timeout が拒否する duration は剥がさない (PR #48 Codex R7 C) ---
+        "timeout nan gh pr create",
+        "timeout -5 gh pr create",
+        "timeout 30S gh pr create",
+        "timeout 30ss gh pr create",
+    ]
+
+    def test_listed_commands_do_not_reach_verification(self):
+        for command in self.MUST_NOT_VERIFY:
+            with self.subTest(command=command), self.isolated_cache():
+                with contextlib.ExitStack() as stack:
+                    mocks = [
+                        stack.enter_context(
+                            mock.patch(
+                                f"services.{svc}.verify", return_value="不一致"
+                            )
+                        )
+                        for svc in (
+                            "github", "aws", "gcloud", "firebase", "kubectl",
+                        )
+                    ]
+                    result = dispatch(command, str(self.project_dir))
+                    calls = sum(m.call_count for m in mocks)
+                self.assertIsNone(result, f"検証されてしまう: {command!r}")
+                self.assertEqual(calls, 0, f"verify が呼ばれた: {command!r}")
 
 
 if __name__ == "__main__":

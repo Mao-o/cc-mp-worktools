@@ -237,7 +237,7 @@ class TestFirebase(unittest.TestCase):
             ):
                 self.assertIsNone(firebase.verify("my-project", d))
 
-    # --- 解決順 (bd_092a232e-629.1): firebase use → CLI 不可時のみ .firebaserc ---
+    # --- 解決順 (内部バックログ): firebase use → CLI 不可時のみ .firebaserc ---
 
     @staticmethod
     def _write_firebaserc(d: str, projects: dict) -> None:
@@ -563,7 +563,7 @@ class TestAws(unittest.TestCase):
         err = aws.verify({"unsupported": "dict"}, "/p")
         self.assertIn("文字列", err)
 
-    # --- bd_092a232e-629.6: 切替案内は export ではなく行頭インライン + sso login ---
+    # --- 内部バックログ: 切替案内は export ではなく行頭インライン + sso login ---
 
     _NO_CONFIG = {"AWS_CONFIG_FILE": "/nonexistent/aws/config"}
 
@@ -1291,6 +1291,229 @@ class TestEnvPropagation(unittest.TestCase):
         ) as m:
             self.assertIsNone(kubectl.verify("prod-ctx", "/p", env=custom))
         self.assertEqual(m.call_args.kwargs.get("env"), custom)
+
+
+class TestContextOptionOverride(unittest.TestCase):
+    """コマンドが `--profile` / `--project` / `--context` で指定した対象を検証する。
+
+    従来は「hook の既定コンテキスト」だけを見ていたため、
+    `aws --profile other s3 rm` は既定が期待値なら allow されていた
+    (検証は既定 / 実行は other = false-allow)。誤アカウント事故の典型経路。
+    """
+
+    def test_aws_passes_profile_to_verification_command(self):
+        calls = []
+
+        def rec(argv, **kwargs):
+            calls.append(argv)
+            return _fake_run(stdout="222222222222\n")
+
+        with mock.patch("subprocess.run", side_effect=rec):
+            err = aws.verify("111111111111", "/p", context={"profile": "other"})
+        # 検証コマンドにも同じ --profile を付ける (CLI の資格情報解決順を実行時と揃える)。
+        self.assertIn("--profile", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--profile") + 1], "other")
+        self.assertIn("不一致", err)
+        self.assertIn("--profile other", err)
+
+    def test_aws_without_context_does_not_pass_profile(self):
+        calls = []
+
+        def rec(argv, **kwargs):
+            calls.append(argv)
+            return _fake_run(stdout="111111111111\n")
+
+        with mock.patch("subprocess.run", side_effect=rec):
+            self.assertIsNone(aws.verify("111111111111", "/p"))
+        self.assertNotIn("--profile", calls[0])
+
+    def test_gcloud_project_flag_is_compared_directly(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-proj\n")) as m:
+            err = gcloud.verify("my-proj", "/p", context={"project": "other"})
+        self.assertIn("不一致", err)
+        self.assertIn("--project=other", err)
+        # flag で決まるので現在値の問い合わせは不要。
+        self.assertEqual(m.call_count, 0)
+
+    def test_gcloud_project_flag_matching_expected_is_allowed(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="other\n")):
+            self.assertIsNone(gcloud.verify("my-proj", "/p", context={"project": "my-proj"}))
+
+    def test_gcloud_project_flag_does_not_skip_account_check(self):
+        """project を flag で上書きしても account は従来どおり照合する。
+
+        キー単位で上書きせず早期 return すると、`gcloud --project ok run deploy` が
+        account の不一致を見逃す新たな false-allow になる。
+        """
+        expected = {"project": "my-proj", "account": "me@example.com"}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="other@example.com\n")) as m:
+            err = gcloud.verify(expected, "/p", context={"project": "my-proj"})
+        self.assertIsNotNone(err)
+        self.assertIn("アカウント不一致", err)
+        # account の現在値だけを問い合わせている。
+        self.assertEqual(m.call_count, 1)
+        self.assertIn("account", m.call_args.args[0])
+
+    def test_gcloud_configuration_flag_is_forwarded(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-proj\n")) as m:
+            self.assertIsNone(
+                gcloud.verify("my-proj", "/p", context={"configuration": "alt"})
+            )
+        argv = m.call_args.args[0]
+        self.assertIn("--configuration", argv)
+        self.assertEqual(argv[argv.index("--configuration") + 1], "alt")
+
+    def test_kubectl_context_flag_is_compared_directly(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="prod-ctx\n")) as m:
+            err = kubectl.verify("prod-ctx", "/p", context={"context": "other"})
+        self.assertIn("不一致", err)
+        self.assertIn("--context=other", err)
+        self.assertEqual(m.call_count, 0)
+
+    def test_kubectl_context_flag_matching_expected_is_allowed(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="other\n")):
+            self.assertIsNone(
+                kubectl.verify("prod-ctx", "/p", context={"context": "prod-ctx"})
+            )
+
+    def test_kubectl_kubeconfig_flag_is_forwarded(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="prod-ctx\n")) as m:
+            self.assertIsNone(
+                kubectl.verify("prod-ctx", "/p", context={"kubeconfig": "/tmp/kc"})
+            )
+        argv = m.call_args.args[0]
+        self.assertIn("--kubeconfig", argv)
+        self.assertEqual(argv[argv.index("--kubeconfig") + 1], "/tmp/kc")
+
+    def test_firebase_project_flag_is_compared_directly(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="my-fb\n")) as m:
+            err = firebase.verify("my-fb", "/p", context={"project": "other"})
+        self.assertIn("不一致", err)
+        self.assertIn("--project other", err)
+        self.assertEqual(m.call_count, 0)
+
+    def test_firebase_project_flag_resolves_firebaserc_alias(self):
+        """firebase-tools と同じく alias → project ID に解決してから照合する。"""
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ".firebaserc").write_text(
+                json.dumps({"projects": {"prod": "proj-prod", "default": "proj-dev"}}),
+                encoding="utf-8",
+            )
+            with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
+                self.assertIsNone(
+                    firebase.verify("proj-prod", d, context={"project": "prod"})
+                )
+                err = firebase.verify("proj-dev", d, context={"project": "prod"})
+        self.assertIn("不一致", err)
+        self.assertIn("proj-prod", err)
+
+    def test_firebase_dict_expected_with_project_flag(self):
+        expected = {"default": "proj-dev", "prod": "proj-prod"}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
+            self.assertIsNone(
+                firebase.verify(expected, "/p", context={"project": "proj-prod"})
+            )
+            err = firebase.verify(expected, "/p", context={"project": "unknown-proj"})
+        self.assertIn("不一致", err)
+
+    def test_flag_mismatch_guidance_targets_the_flag_not_the_active_context(self):
+        """`--project` 不一致の案内は flag を直す形にする。
+
+        アクティブ project を切り替える `firebase use <alias>` を案内しても、その
+        コマンドは書かれた `--project` の値で実行されるので同じ deny を繰り返す
+        (案内どおりに直しても通らない)。kubectl / gcloud の文面と方針を揃える。
+        """
+        expected = {"default": "proj-dev", "prod": "proj-prod"}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
+            err = firebase.verify(expected, "/p", context={"project": "unknown-proj"})
+        self.assertNotIn("firebase use", err)
+        self.assertIn("--project prod", err)
+        # str 期待値・kubectl・gcloud も同じ「flag を直す」形になっている。
+        for other in (
+            firebase.verify("proj-dev", "/p", context={"project": "other"}),
+            kubectl.verify("prod-ctx", "/p", context={"context": "other"}),
+            gcloud.verify("my-proj", "/p", context={"project": "other"}),
+        ):
+            self.assertIn("外すか", other)
+
+    def test_github_ignores_context(self):
+        # gh の --hostname / --user は操作対象の指定で、照合先は常にアクティブ
+        # アカウント (README 既知の制限)。context は受け取るが使わない。
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_GITHUB_COM_ONLY)):
+            self.assertIsNone(
+                github.verify("Mao-o", "/p", context={"hostname": "ghe.example.com"})
+            )
+
+
+class TestServiceContextContract(unittest.TestCase):
+    """全 service が同じ verify シグネチャと CONTEXT_OPTIONS 規約を守る。"""
+
+    SERVICES = (aws, firebase, gcloud, github, kubectl)
+
+    def test_verify_accepts_context_keyword(self):
+        import inspect
+
+        for svc in self.SERVICES:
+            with self.subTest(svc=svc.__name__):
+                params = inspect.signature(svc.verify).parameters
+                self.assertIn("context", params)
+                self.assertIs(params["context"].default, None)
+
+    def test_declared_context_options_are_global_or_known(self):
+        """CONTEXT_OPTIONS のキーは option 名 (`-` 始まり) で、値は論理名。"""
+        for svc in self.SERVICES:
+            options = getattr(svc, "CONTEXT_OPTIONS", {})
+            with self.subTest(svc=svc.__name__):
+                for name, key in options.items():
+                    self.assertTrue(name.startswith("-"), name)
+                    self.assertTrue(key and not key.startswith("-"), key)
+
+
+class TestFirebaseCliNameForms(unittest.TestCase):
+    """npm 経由の正当な CLI 名の形を全判定で受け付ける。
+
+    `npx firebase-tools@13.31.0 deploy` は CI / 再現手順で頻出する。
+    PATTERNS だけ通して READONLY / STATE_CHANGING が通らないと、`login` が切替として
+    認識されず古い成功 cache が残る (v0.9.0 開発中に作り込んだ退行の回帰テスト)。
+    """
+
+    FORMS = ("firebase", "firebase-tools", "firebase-tools@13.31.0", "firebase-tools@13")
+
+    def test_all_forms_match_patterns(self):
+        for name in self.FORMS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    any(re.search(p, f"{name} deploy") for p in firebase.PATTERNS), name
+                )
+
+    def test_all_forms_are_state_changing_for_login_and_use(self):
+        for name in self.FORMS:
+            for sub in (f"{name} login", f"{name} use prod"):
+                with self.subTest(cmd=sub):
+                    self.assertTrue(
+                        any(re.search(p, sub) for p in firebase.STATE_CHANGING), sub
+                    )
+
+    def test_all_forms_are_readonly_for_login(self):
+        for name in self.FORMS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    any(re.search(p, f"{name} login") for p in firebase.READONLY), name
+                )
+
+    def test_all_forms_support_self_remediation(self):
+        for name in self.FORMS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    firebase.is_self_remediation(f"{name} use prod", "prod"), name
+                )
+
+    def test_hyphenated_neighbours_still_excluded(self):
+        for name in ("firebase-admin", "firebaseX"):
+            with self.subTest(name=name):
+                self.assertFalse(
+                    any(re.search(p, f"{name} deploy") for p in firebase.PATTERNS), name
+                )
 
 
 if __name__ == "__main__":

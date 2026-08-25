@@ -83,7 +83,7 @@ class TestCache(unittest.TestCase):
         cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
         self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
 
-    # --- invalidate (bd_092a232e-629.3: 切替コマンド検出時の service 単位破棄) ---
+    # --- invalidate (内部バックログ: 切替コマンド検出時の service 単位破棄) ---
 
     def test_invalidate_removes_only_that_service(self):
         cache.set_success("github", "/p", "exp", 1.0)
@@ -208,6 +208,43 @@ class TestCache(unittest.TestCase):
         cache.set_success("github", "/p", "exp", 1.0)
         cache.invalidate("github")
         self.assertEqual([p.name for p in self._base().glob("*.tmp")], [])
+
+
+class TestContextInCacheKey(unittest.TestCase):
+    """context option も cache キーに含める。
+
+    含めないと `aws --profile other s3 rm` が既定 profile の成功 entry を hit し、
+    未検証のまま allow される (TTL の 30 秒間、別アカウントへの write が通る)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self._p = mock.patch.dict(os.environ, {"TMPDIR": self.tmp})
+        self._p.start()
+        self.addCleanup(self._p.stop)
+
+    def test_different_context_is_a_different_entry(self):
+        cache.set_success("aws", "/p", "exp", 1.0, None, {"profile": "a"})
+        self.assertFalse(
+            cache.get_success("aws", "/p", "exp", 1.0, None, {"profile": "b"})
+        )
+
+    def test_same_context_round_trips(self):
+        cache.set_success("aws", "/p", "exp", 1.0, None, {"profile": "a"})
+        self.assertTrue(
+            cache.get_success("aws", "/p", "exp", 1.0, None, {"profile": "a"})
+        )
+
+    def test_context_entry_does_not_satisfy_default_lookup(self):
+        cache.set_success("aws", "/p", "exp", 1.0, None, {"profile": "a"})
+        self.assertFalse(cache.get_success("aws", "/p", "exp", 1.0))
+
+    def test_default_entry_does_not_satisfy_context_lookup(self):
+        cache.set_success("aws", "/p", "exp", 1.0)
+        self.assertFalse(
+            cache.get_success("aws", "/p", "exp", 1.0, None, {"profile": "a"})
+        )
 
 
 if __name__ == "__main__":
