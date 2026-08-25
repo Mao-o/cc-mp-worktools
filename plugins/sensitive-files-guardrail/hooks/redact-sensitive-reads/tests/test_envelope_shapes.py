@@ -99,12 +99,19 @@ class TestLenientModesSubset(unittest.TestCase):
         ``_KNOWN_PERMISSION_MODES`` の件数を変えたとき red。新 mode を登録した
         **後**に鳴る「更新漏れ検知」であって、CLI 変化の検知ではない
 
-    どちらかが red になったら次を同時に更新する:
-      1. ``core/output.py::LENIENT_MODES`` と本ファイルの
-         ``_KNOWN_PERMISSION_MODES`` (件数 assert とテスト名にも件数が入る)
-      2. ``tests/fixtures/envelopes/README.md`` (``permission_mode`` 項) の列挙
-      3. ``docs/DESIGN.md`` の lenient 方針
+    どちらかが red になったときの**必須**更新は、既知 mode の集合と件数だけ:
+      1. 本ファイルの ``_KNOWN_PERMISSION_MODES`` に実測で確認した mode を追加
+      2. ``test_known_modes_contains_six_canonical_entries`` の期待件数を更新
+         (テスト名にも件数が入るので rename も)
+      3. ``tests/fixtures/envelopes/README.md`` (``permission_mode`` 項) の列挙
       4. ``docs/MAINTAINING.md`` の CLI 再実測 Runbook に実測日と CLI version を追記
+
+    ``core/output.py::LENIENT_MODES`` への追加は**必須ではなく条件付き**。その mode が
+    autonomous 実行モードだと判断できた場合に**限って**追加する。``LENIENT_MODES`` に
+    入れると Bash の ``ask_or_allow`` が「対話でユーザーに確認」から allow に変わる
+    = **判定境界の変更**なので、envelope 実値で挙動を確認してから決めること。
+    追加する場合は ``docs/DESIGN.md`` の lenient 方針と ``docs/MATRIX.md`` の mode 列も
+    同時に更新する。条件と手順は ``docs/MAINTAINING.md`` の Runbook step 5 と同じ。
     """
 
     def test_lenient_modes_are_subset_of_known_permission_modes(self):

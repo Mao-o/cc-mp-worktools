@@ -109,7 +109,7 @@ Unreleased と表記」「CHANGELOG 未記載の判定境界変更」「存在�
   1 項目追記、REVIEW_TASKS の「v1.0.0 (PR 6) での追加検討事項」に「完了
   (6b56a81)」として登録、README の関連ドキュメント一覧から同節へリンク
 
-### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1)
+### 6. 保守者ガイド / README / テスト docstring の記述を実態に合わせて訂正 (PR #45 Codex review P2: R1 ×3 + R2 ×2 + R3 ×1 + R4 ×1 + R5 ×3)
 
 新設した `docs/MAINTAINING.md` に、repo の実態と食い違う記述が 3 箇所あった。
 いずれも「ガイドを信じた保守者が損をする」ものなので**記述のみ**で訂正した
@@ -240,6 +240,39 @@ Codex round 4 で、**この 0.19.1 自身が直した snw.7 を、リリース�
   ヒットして決して満たせない条件になる)。よって cut の前後どちらで実行しても
   期待値は同じ = 「本節の記述以外ヒットなし」であることを docs に明記した。
   受け身の注記は cut step へのポインタに置き換え、記述が 2 箇所に散らないようにした
+
+Codex round 5 で 3 件。うち 1 件は **R4 で新設したブロックに、R2 で直したのと同じ
+欠陥を持ち込んでいた**もの (R4 の sweep は「その時点で存在していた内容」だけを
+監査し、同じ commit で自分が書き足した内容が対象から漏れていた):
+
+- **[R5-1] docstring が `LENIENT_MODES` 追加を必須手順として書いていた (セキュリティ)**:
+  R1 で書き換えた `TestLenientModesSubset` の docstring が「red になったら次を同時に
+  更新する」の項目 1 に `LENIENT_MODES` と `_KNOWN_PERMISSION_MODES` を並べており、
+  **条件付きであることが落ちていた**。`LENIENT_MODES` への収録は Bash の
+  `ask_or_allow` を「対話でユーザーに確認」から allow に変える = 判定境界の変更
+  なので、文字どおり実行すると **autonomous でない mode に対して Bash の保護を
+  弱めうる**。Runbook step 5 の 3 番目は正しく「autonomous として扱ってよいなら」と
+  条件付きだったので、docstring 側が不整合だった。**必須更新を
+  `_KNOWN_PERMISSION_MODES` + 件数 assert / テスト名 + docs 列挙に限定**し、
+  `LENIENT_MODES` は「autonomous 実行モードだと判断できた場合に限る」「判定境界の
+  変更にあたる」条件付き判断として別枠に分離、Runbook step 5 と表現を揃えた。
+  docstring のみの変更で `LENIENT_MODES` / `_KNOWN_PERMISSION_MODES` の値は不変
+  (docstring 除去後の AST が変更前と完全一致することを確認済み)
+- **[R5-2] probe の envelope 採取が前回実行分と混ざる**: 旧 step 4 は
+  `/tmp/envelope-bash-*.json` という**共有 glob** で実測値を集めていた。R3 で
+  step 5 に「定数にあって CLI 列挙に無い mode が envelope 実測値に出るなら維持」と
+  いう判断を入れたため、`/tmp` が残っていると**現行 CLI が既に廃止した mode が
+  実測値集合に残り、それを「維持すべき根拠」として誤読する**構造になっていた。
+  probe スクリプトに `--out` (required) を追加して **CLI バージョン付きディレクトリ**
+  へ採取し、step 4 冒頭で `rm -rf "$OUT" && mkdir -p "$OUT"` してから始める形に変更。
+  `--out` を必須にしたのは、指定漏れ時に黙って共有 `/tmp` へ書かず probe が起動時に
+  落ちて気付けるようにするため
+- **[R5-3] cut チェックが失敗時も exit 0 を返していた (R2 と同じ欠陥の再発)**:
+  R4 で新設した機械チェックが `grep -q … && echo "OK…" || echo "NG…"` の形で、
+  `echo` が成功するため常に status 0 を返していた。自動化に組み込むと、この step が
+  検出するはずの cut 漏れをそのまま受理する。「テスト実行」節と**同じ流儀**
+  (サブシェル + サマリ出力後の `exit`) に統一し、同一文書内で 2 つの流儀が併存
+  しないようにした
 
 ### リリース手順への追加
 

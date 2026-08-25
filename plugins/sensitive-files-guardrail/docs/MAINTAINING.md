@@ -293,18 +293,24 @@ mode の全量。以降の step ではこの列挙結果を probe 対象にす�
 `hooks/_debug/capture_envelope.py` として配置する (実測後に削除する。
 `hooks/_debug/` は commit しない):
 
+採取先は `--out` で **CLI バージョンごとの専用ディレクトリ**を指定する
+(既定の `/tmp` 直置きにしない理由は step 4 を参照):
+
 ```python
 #!/usr/bin/env python3
-"""stdin JSON を /tmp/envelope-<tool>-<ts>.json に保存し no-op allow を返す。"""
+"""stdin JSON を <out>/envelope-<tool>-<ts>.json に保存し no-op allow を返す。"""
 import argparse, json, sys, time
 from pathlib import Path
 
 p = argparse.ArgumentParser()
 p.add_argument("--tool", required=True)
+p.add_argument("--out", required=True, help="採取先ディレクトリ (実行ごとに分ける)")
 args = p.parse_args()
 raw = sys.stdin.read()
 ts = time.strftime("%Y%m%dT%H%M%S")
-out = Path("/tmp") / f"envelope-{args.tool}-{ts}.json"
+out_dir = Path(args.out)
+out_dir.mkdir(parents=True, exist_ok=True)
+out = out_dir / f"envelope-{args.tool}-{ts}.json"
 try:
     envelope = json.loads(raw) if raw.strip() else {}
 except Exception as e:
@@ -313,6 +319,9 @@ with out.open("w") as f:
     json.dump(envelope, f, indent=2, ensure_ascii=False)
 sys.stdout.write("{}")
 ```
+
+`--out` を `required=True` にしてあるのは、指定を忘れたときに黙って共有の `/tmp` へ
+書くのではなく **probe が起動時に落ちて気付ける**ようにするため。
 
 ### 3. hooks.json の matcher を差し替え
 
@@ -325,14 +334,28 @@ sys.stdout.write("{}")
   "hooks": [
     {
       "type": "command",
-      "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/_debug/capture_envelope.py --tool bash",
+      "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/_debug/capture_envelope.py --tool bash --out /tmp/envelope-probe-2.1.241",
       "timeout": 2
     }
   ]
 }
 ```
 
+`--out` の `2.1.241` は **step 1 で確認した実際の CLI バージョンに置き換える**
+(実行ごとに別ディレクトリになるようにする)。
+
 ### 4. step 1 で列挙した mode を 1 つ残らず probe する
+
+まず採取先を用意する。**同じバージョンで再実行するときは中身を消してから始める**:
+
+```bash
+OUT=/tmp/envelope-probe-2.1.241   # step 3 の --out と同じ値にする
+rm -rf "$OUT" && mkdir -p "$OUT"
+```
+
+step 3 の `--out` と食い違わせた場合は、下の集計 grep が
+`No such file or directory` で落ちる (空の結果を黙って返すことはない) ので、
+取り違えたまま誤った突合に進むことはない。
 
 `claude --plugin-dir .` で起動し、**step 1 の `choices:` に出た値すべて**について
 `--permission-mode <mode>` で起動 (またはセッション内で切替) して `date` を 1 回ずつ
@@ -346,11 +369,17 @@ sys.stdout.write("{}")
 採取した envelope から実測値の集合を作る:
 
 ```bash
-grep -h '"permission_mode"' /tmp/envelope-bash-*.json | sort -u
+grep -h '"permission_mode"' "$OUT"/envelope-bash-*.json | sort -u
 ```
 
 この集合 (= 実際に envelope へ出た値) と step 1 の choices の両方が、step 5 の
 突合対象になる。
+
+**`/tmp/envelope-bash-*.json` のような共有 glob で集めてはいけない。** step 5 は
+「定数にあって CLI 列挙に無い mode が envelope 実測値に出るなら、その定数は維持する」
+と判断する。前回以前の実行分が混ざると、**現行 CLI が既に廃止した mode が実測値集合に
+残り、それを「維持すべき根拠」として誤読する**。バージョン付きディレクトリに分け、
+再実行時は上のとおり中身を消すことで、実測値集合をその CLI の 1 回分に限定する。
 
 ### 5. `_KNOWN_PERMISSION_MODES` と**双方向**に突合する
 
@@ -471,12 +500,25 @@ lenient 収録の可否は、envelope 実値を probe しないと確定でき�
      ことで起きたので、**この突合が再発防止の本体**。機械判定できないので目視で行う
    - 移し終えたら、`## Unreleased` に残った各項目について「今回の実装・テスト・
      `## X.Y.Z` 節のいずれにも現れない」ことを確認する
-   - 機械チェック (cut 忘れの検出):
+   - 機械チェック (cut 忘れの検出)。「テスト実行」節の一括実行ブロックと同じ流儀で、
+     **サマリを出した後に非ゼロで終わる**形にする (`&& echo … || echo …` だけだと
+     `echo` が成功して常に status 0 になり、自動化が cut 漏れをそのまま受理する):
 
      ```bash
-     v=$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')
-     grep -q "^## ${v}\$" CHANGELOG.md && echo "OK: ## ${v} あり" || echo "NG: cut 忘れ"
+     (
+       v=$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+       if grep -q "^## ${v}\$" CHANGELOG.md; then
+         echo "OK: ## ${v} あり"
+       else
+         echo "NG: cut 忘れ (## ${v} が CHANGELOG.md に無い)"
+         exit 1
+       fi
+     )
      ```
+
+     `( … )` で囲うのは「テスト実行」節と同じ理由 — 対話シェルに逐語コピーしても
+     `exit` がシェルごと落とさず、スクリプトに埋め込めば終了ステータスがそのまま
+     ブロックの結果になる (直後の `echo $?` で 0 / 非 0 を確認できる)。
 
      これが捕まえるのは「bump したのに節を作っていない」場合**だけ**で、上の突合
      (出荷済み項目が `## Unreleased` に残っている) は**検出しない**。snw.7 のときも
