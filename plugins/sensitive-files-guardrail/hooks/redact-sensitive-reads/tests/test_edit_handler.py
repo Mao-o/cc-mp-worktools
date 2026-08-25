@@ -411,5 +411,305 @@ class TestDenyReasonBasename(BaseEdit):
         self.assertIn("`!.env`", reason)
 
 
+class TestEditDenyKindBranches(BaseEdit):
+    """E6 (0.20.0): ``classify`` の結果ごとに deny 文面が分岐すること。
+
+    **判定は 4 分岐すべて deny 固定のまま**で、変わるのは reason 文字列だけ
+    (verdict 不変は ``TestEditExistingFile`` / ``TestWriteNewFile`` /
+    ``TestSymlinkTargetDenies`` が引き続き担保する)。
+
+    ここでは「この文面はこう出ると主張している」内容を実文字列で固定する。
+    docstring や CHANGELOG に書いた案内が実際に出ていることの機械的な裏付け。
+    """
+
+    EXISTING = (
+        "DATABASE_URL=postgresql://user:pw@host/db\n"
+        "API_TOKEN=sk-abcdefghijklmnopqrst\n"
+        "EMPTY_ONE=\n"
+    )
+
+    def _write_existing(self, name: str = ".env", body: str | None = None):
+        p = Path(self.tmp) / name
+        p.write_text(self.EXISTING if body is None else body)
+        return p
+
+    # -- new (missing) ---------------------------------------------------
+
+    def test_new_branch_note_says_new_file(self):
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("新規作成しようとしたため block しました", reason)
+        self.assertNotIn("上書きしようとしたため", reason)
+
+    def test_new_branch_guides_env_example_with_empty_values(self):
+        """REVIEW_TASKS E6 の「同じキーで .env.example を作り空値にする」案内。"""
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Write"))
+        self.assertIn(
+            "同じキー名で `.env.example` を作成し、値は空にしてください。",
+            reason,
+        )
+        self.assertIn("1Password CLI", reason)
+
+    def test_new_branch_has_no_existing_minimal_info(self):
+        """新規作成には既存ファイルが無いので minimal info セクションを出さない。"""
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Write"))
+        self.assertNotIn("上書き対象の既存ファイル", reason)
+        self.assertNotIn("<DATA", reason)
+        self.assertNotIn("minimal info", reason)
+
+    # -- overwrite (regular) ---------------------------------------------
+
+    def test_overwrite_branch_note_says_overwrite(self):
+        self._write_existing()
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Edit")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("既存の機密ファイル", reason)
+        self.assertIn("上書きしようとしたため block しました", reason)
+        self.assertNotIn("新規作成しようとしたため", reason)
+
+    def test_overwrite_branch_embeds_existing_key_names(self):
+        """既存 key 名を Read 同等 minimal info として返す (E6 の本体)。"""
+        self._write_existing()
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertIn(
+            "minimal info (Read 同等 / 上書き対象の既存ファイル):", reason,
+        )
+        # <DATA> 包装が閉じタグまで揃っていること (外殻破壊防御の前提)
+        self.assertIn('<DATA untrusted="true"', reason)
+        self.assertIn("</DATA>", reason)
+        # 既存キー名は出る
+        self.assertIn("DATABASE_URL", reason)
+        self.assertIn("API_TOKEN", reason)
+        self.assertIn("EMPTY_ONE", reason)
+        # 追加予定キーとは別セクションで並ぶ
+        self.assertIn("suggested_keys:", reason)
+        self.assertIn("  NEW_KEY=", reason)
+
+    def test_overwrite_branch_does_not_leak_existing_values(self):
+        """minimal info は鍵名・型・length・status まで。実値は出さない。"""
+        self._write_existing()
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertNotIn("postgresql://user", reason)
+        self.assertNotIn("user:pw@host", reason)
+        self.assertNotIn("abcdefghijklmnopqrst", reason)
+        # 型 / status / length の要約は出る (Read handler と同じ粒度)
+        self.assertIn("<type=url>", reason)
+        self.assertIn("<empty>", reason)
+        self.assertIn("length=", reason)
+
+    def test_overwrite_dotenv_suggests_dotenv_cli_merge(self):
+        self._write_existing()
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertIn("dotenv-cli", reason)
+        self.assertIn("merge", reason)
+
+    def test_overwrite_non_dotenv_suggests_patch_not_dotenv_cli(self):
+        """非 dotenv (credentials.json) に dotenv-cli を勧めない。"""
+        self._write_existing(
+            "credentials.json", '{"client_id": "abc", "token": "xyz"}',
+        )
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / "credentials.json"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = '{"a": "b"}'
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertIn("差分適用 (patch)", reason)
+        # 非 dotenv でも既存の鍵名構造は minimal info で返る
+        self.assertIn("client_id", reason)
+        self.assertNotIn("xyz", reason)
+
+    # -- symlink / special -----------------------------------------------
+
+    def test_symlink_branch_asks_to_confirm_target(self):
+        target = Path(self.tmp) / "real.env"
+        target.write_text("FOO=bar\n")
+        link = Path(self.tmp) / ".env"
+        os.symlink(target, link)
+        envelope = _make_envelope("Edit", str(link), self.tmp)
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Edit")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("symlink 経由で", reason)
+        self.assertIn("symlink 先が意図した参照か確認してください", reason)
+        self.assertIn("symlink を維持する運用を推奨", reason)
+        # 実体 path は reason に出さない (絶対パス非開示方針)
+        self.assertNotIn(str(target), reason)
+        self.assertNotIn(self.tmp, reason)
+
+    def test_special_branch_names_the_file_kind(self):
+        fifo = Path(self.tmp) / ".env"
+        os.mkfifo(fifo)
+        envelope = _make_envelope("Write", str(fifo), self.tmp)
+        envelope["tool_input"]["content"] = "NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("非通常ファイル (FIFO / socket / device)", reason)
+        self.assertIn("通常ファイルを対象にするか", reason)
+        # symlink / overwrite の文面が混ざらない
+        self.assertNotIn("上書き対象の既存ファイル", reason)
+        self.assertNotIn("symlink 先が意図した参照か", reason)
+
+
+class TestOverwriteMinimalInfoFailure(BaseEdit):
+    """E6: 既存ファイルの minimal info 取得に失敗しても **verdict は動かない**。
+
+    0.16.0 の silent degradation 対策と同じ方針で、取れなかったことと next
+    action を明示する。
+    """
+
+    def _run(self):
+        (Path(self.tmp) / ".env").write_text("FOO=bar\n")
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "NEW_KEY=1\n"
+        return handle(envelope, tool_label="Edit")
+
+    def test_render_failure_reports_unavailable_with_next_action(self):
+        from handlers import edit_handler
+
+        with mock.patch.object(
+            edit_handler, "render_for_bash",
+            return_value=(None, None, "open_failed", ""),
+        ):
+            r = self._run()
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn(
+            "minimal info: unavailable (既存ファイルの読み取り / 解析に失敗)",
+            reason,
+        )
+        self.assertIn("Read tool に", reason)
+        # 除外案内は従来どおり残る
+        self.assertIn("patterns.local.txt", reason)
+
+    def test_render_exception_still_denies(self):
+        """``render_for_bash`` が例外を投げても deny のまま (verdict 不変)。"""
+        from handlers import edit_handler
+        from core import logging as L
+
+        with mock.patch.object(
+            edit_handler, "render_for_bash",
+            side_effect=RuntimeError("simulated"),
+        ):
+            with mock.patch.object(L, "log_error") as mock_log:
+                r = self._run()
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("minimal info: unavailable", _reason(r))
+        mock_log.assert_any_call(
+            "edit_existing_render_failed", "RuntimeError",
+        )
+
+
+class TestOverwriteReasonByteBudget(BaseEdit):
+    """E6: minimal info を足しても ``MAX_REASON_BYTES`` を超えないこと。
+
+    ``edit_deny`` は minimal info 以外を先に組んでから残り byte を計算し、
+    その範囲に収まる行数だけ載せる。したがって **E6 の追加によって末尾の
+    除外案内が truncate で失われることはない**。
+    """
+
+    def _overwrite_reason(self, existing_keys: int, new_keys: int) -> str:
+        body = "".join(
+            f"EXISTING_KEY_{i}=value{i}\n" for i in range(existing_keys)
+        )
+        (Path(self.tmp) / ".env").write_text(body)
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "".join(
+            f"ADDED_KEY_{i}=v\n" for i in range(new_keys)
+        )
+        r = handle(envelope, tool_label="Write")
+        self.assertEqual(_decision(r), "deny")
+        return _reason(r)
+
+    def test_huge_existing_file_fits_budget_and_keeps_hint(self):
+        reason = self._overwrite_reason(existing_keys=300, new_keys=1)
+        self.assertLessEqual(
+            len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+        )
+        # 予算内に畳んだ痕跡と、壊れていない <DATA> 包装
+        self.assertRegex(reason, r"  \.\.\. \(\d+ more lines\)")
+        self.assertIn("</DATA>", reason)
+        # 末尾の除外案内が生き残る = output._truncate は発火していない
+        self.assertIn("patterns.local.txt", reason)
+        self.assertIn("`!.env`", reason)
+        self.assertNotIn(output.TRUNCATE_MARKER.strip(), reason)
+
+    def test_huge_existing_plus_many_new_keys_fits_budget(self):
+        reason = self._overwrite_reason(existing_keys=300, new_keys=35)
+        self.assertLessEqual(
+            len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+        )
+        # 追加キー側の切り詰め (30 件 + "... (5 more)") は従来どおり
+        self.assertIn("  ADDED_KEY_29=", reason)
+        self.assertIn("... (5 more)", reason)
+        self.assertIn("patterns.local.txt", reason)
+        self.assertNotIn(output.TRUNCATE_MARKER.strip(), reason)
+
+    def test_suggested_keys_alone_over_budget_falls_back_to_truncate(self):
+        """予算を ``suggested_keys`` だけで使い切る極端な入力の実際の挙動。
+
+        この場合 E6 の minimal info セクションは **丸ごと省略** され
+        (載せる余地が無いため)、残りは E6 以前と同じく
+        ``core.output._truncate`` が最終防御として切る。E6 が状況を悪化させて
+        いないこと (= 省略するだけで、他の行を押し出さないこと) を固定する。
+        """
+        (Path(self.tmp) / ".env").write_text("FOO=bar\n")
+        long_name = "K" * 200  # sanitize_key で 131 文字に丸められる
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "".join(
+            f"{long_name}{i}=v\n" for i in range(30)
+        )
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertLessEqual(
+            len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+        )
+        # minimal info セクションは載る余地が無いので出ない
+        self.assertNotIn("上書き対象の既存ファイル", reason)
+        # 予算切れは output._truncate が引き取る (E6 以前と同じ挙動)
+        self.assertIn(output.TRUNCATE_MARKER.strip(), reason)
+
+
 if __name__ == "__main__":
     unittest.main()

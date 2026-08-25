@@ -22,6 +22,7 @@ from _shared.patterns import (
     exclude_recipe_lines,
 )
 from core import messages as M
+from core import output
 
 
 class TestExcludeHintBasename(unittest.TestCase):
@@ -226,6 +227,73 @@ class TestEditDeny(unittest.TestCase):
         # 30 個以上は切り詰め
         self.assertNotIn("KEY_30=", msg)
         self.assertIn("(10 more)", msg)
+
+    def test_overwrite_without_render_reports_unavailable(self):
+        """``existing_render`` が空なら黙って省略せず unavailable + next action。"""
+        msg = M.edit_deny("Edit", ".env", kind="overwrite")
+        self.assertIn(
+            "minimal info: unavailable (既存ファイルの読み取り / 解析に失敗)",
+            msg,
+        )
+        self.assertIn("Read tool に", msg)
+
+    def test_overwrite_many_lines_are_folded_not_dropped(self):
+        """行数が多いだけなら入る分を載せ、残りを ``... (N more lines)`` に畳む。"""
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: x", "file: .env"]
+            + [f"  {i}. KEY_{i}  <type=str>  <set>  length=8"
+               for i in range(400)]
+            + ["</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Edit", ".env", kind="overwrite", existing_render=render,
+        )
+        self.assertLessEqual(len(msg.encode("utf-8")), output.MAX_REASON_BYTES)
+        self.assertIn("上書き対象の既存ファイル", msg)
+        self.assertIn("  0. KEY_0", msg)
+        self.assertRegex(msg, r"  \.\.\. \(\d+ more lines\)")
+        # 閉じタグは畳んでも残す (外殻破壊防御の前提)
+        self.assertTrue(msg.split("\n")[-1].startswith("suggestion:"))
+        self.assertIn("</DATA>", msg)
+
+    def test_overwrite_render_too_large_reports_budget_reason(self):
+        """内容行が 1 行も入らないときは理由を「予算」と明示して 2 行に降りる。
+
+        ``<DATA>`` の header 3 行だけを載せても情報量ゼロの包装が残るだけなので、
+        ``_fit_data_block`` は空リストを返し unavailable 分岐に降ろす。
+        """
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: " + "x" * 4000, "file: .env",
+             "  1. FOO  <type=str>", "</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Edit", ".env", kind="overwrite", existing_render=render,
+        )
+        self.assertIn(
+            "minimal info: unavailable (reason の byte 予算に収まらないため省略)",
+            msg,
+        )
+        self.assertNotIn("<DATA", msg)
+        self.assertLessEqual(len(msg.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_overwrite_budget_exhausted_by_keys_omits_section(self):
+        """``suggested_keys`` で予算を使い切ると minimal info を丸ごと落とす。
+
+        末尾の除外案内を残す方を優先する設計 (``_edit_existing_info_lines``)。
+        """
+        keys = ["K" * 120 + str(i) for i in range(30)]
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: x", "file: .env", "  1. FOO  <type=str>", "</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Write", ".env", new_keys=keys, kind="overwrite",
+            existing_render=render,
+        )
+        self.assertNotIn("上書き対象の既存ファイル", msg)
+        self.assertNotIn("minimal info: unavailable", msg)
 
     def test_kind_is_required_keyword(self):
         """E6: ``kind`` を省略すると TypeError (誤った文面の silent 選択を防ぐ)。
