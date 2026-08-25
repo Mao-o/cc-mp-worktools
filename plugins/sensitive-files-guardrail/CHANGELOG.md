@@ -5,19 +5,177 @@
 PR 6 (REVIEW_TASKS_2026-05-06.md の最終 PR) の **未着手分** のみを列挙する。
 E5 (json/toml/yaml の value status 拡張) は **0.14.0 で出荷済み** (commit 3189d907 は
 tag `v0.14.0` に含まれる) で、0.19.1 まで本節に置かれていた記述は `## 0.14.0` の
-「補遺」へ移した。plugin 名 `sensitive-files-guardrail` は維持 (0.14.0 で結論済み。
-内部呼称の統一 rename は commit 52113a1 で完了)。
+「補遺」へ移した。**E6 (Edit/Write の意図汲み取りメッセージ拡張) は 0.20.0 で
+出荷済み**で、記述は `## 0.20.0` へ移した。plugin 名
+`sensitive-files-guardrail` は維持 (0.14.0 で結論済み。内部呼称の統一 rename は
+commit 52113a1 で完了)。
 
-- **E6** (Edit/Write の意図汲み取りメッセージ拡張) — 未着手 (bd_092a232e-snw.9)
 - **D1** (docs 整理) — 未着手。0.19.1 時点の再見積り (docs は計画時の 2 倍超に
   膨張、REVIEW_TASKS の plugin 外退避と CHANGELOG の archive 化に分割) は
-  `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照 (bd_092a232e-snw.10)。
+  `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照。
   公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
-- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.19.1 時点の実測 (redact 827 /
+- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 862 /
   check 79) と乖離しており、「同型ケースの subTest 化で重複を畳む」に再定義して
-  から着手する (bd_092a232e-snw.13)
+  から着手する
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
+
+## 0.20.0
+
+**E6 (Edit/Write の意図汲み取りメッセージ拡張)**。`core.safepath.classify` の
+結果を `core.messages.edit_deny(kind=...)` に渡し、deny reason の**文面**を
+書き込み先の状態で 4 分岐する。
+
+- **判定境界 (deny / allow / ask) の変化: なし。**
+- **情報面の変化: あり** (後述の「情報面の変化」節)。
+- テスト件数: redact 827 → **862** / check **79** (計 941)。
+
+### 1. 状況別の deny 文面 (4 分岐)
+
+0.19.1 までは `missing` (新規作成) と `regular` (既存上書き) が同一の
+`edit_deny(tool_label, basename, new_keys)` に落ち、`symlink` / `special` は
+handler がベタ書きした `extra_note` 1 行の違いしか無かった
+(`docs/REVIEW_TASKS_2026-05-06.md` の E6)。
+
+| `classify` | `kind` | 追加で出す案内 |
+|---|---|---|
+| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする (実値は手動入力かシークレット管理ツール経由)。dotenv かつ追加キーありのときだけ |
+| `regular` | `overwrite` | **上書き対象の既存ファイルの Read 同等 minimal info** + `dotenv-cli` の merge で既存値を保つ案内 (非 dotenv は差分適用 (patch) の案内) |
+| `symlink` | `symlink` | 実体側が書き換わる旨と、コピーではなく symlink を維持する運用の確認 |
+| `special` | `special` | FIFO / socket / device である旨と、通常ファイル指定 / パス誤りの確認 |
+
+`error` は従来どおり `edit_deny` に到達せず `ask_or_deny(edit_pause("io_error"))`
+に倒れる。
+
+### 2. 情報面の変化 (判定は不変だが reason の中身は増える)
+
+`overwrite` では **モデルが要求していない既存ファイルの minimal info** が reason
+に載る。`redaction.file_render.render_for_bash` の再利用なので粒度は Read
+handler / Bash deny と同一 — キー名・型・prefix・length・status タグ・placeholder
+ヒントまでで、**実値は載らない**。既存値を保ったまま作業する代替案 (dotenv-cli
+merge) を出すには、今そのファイルに何が入っているかが要るため。
+
+副作用として Edit/Write の deny 経路は **対象ファイルを 1 回 open + parse する**
+ようになった (0.19.1 までは `lstat` のみ)。`classify` が `regular` を返した
+ケースだけで、`open_regular` (`O_NOFOLLOW`) 経由なので FIFO / symlink を掴む
+経路は無い。
+
+### 3. reason の byte 予算の扱い
+
+`edit_deny` は minimal info **以外**を先に組んでから残り byte
+(`core.output.MAX_REASON_BYTES` = 3KB) を計算し、その範囲に収まる行数だけ
+minimal info を載せる (`_fit_data_block`)。
+
+- 入り切らない分は `... (N more lines)` に畳み、`</DATA>` の閉じタグは必ず残す
+  (包装が壊れると `escape_data_tag` の外殻破壊防御が意味を失うため)
+- したがって **E6 の追加によって末尾の除外案内が truncate されることはない**
+- 内容行が 1 行も入らない / 取得に失敗した場合は黙って省略せず
+  `minimal info: unavailable (<理由>)` + next action に降りる (0.16.0 の silent
+  degradation 対策と同じ方針)
+- `suggested_keys` だけで予算を使い切る極端な入力では minimal info を丸ごと
+  省略し、残りは E6 以前と同じく `core.output._truncate` が引き取る
+
+### 4. 内部 API の変更
+
+- `core.messages.edit_deny`: **`kind` を必須キーワード引数に追加**
+  (`new` / `overwrite` / `symlink` / `special`)。既定値を置くと呼び忘れたときに
+  「新規作成しようとしたため block」という**事実と違う説明**を返しうるため、
+  実行時に落とす設計にした。あわせて `is_dotenv` / `existing_render` の
+  キーワード引数を追加 (どちらも既定値あり)
+  - 0.4.2 の `edit_deny(kind=...)` は `<GUARDRAIL_DENY reason="...">` 属性に
+    載せる**機械可読 schema** の一部で、後段 hook が存在せず overengineering
+    だったため 0.7.0 で撤去した。本引数は**その再導入ではなく**、思想 2
+    (block 時は意図を汲んだメッセージを返す) 側の拡張で、値は reason 文字列の
+    分岐にのみ使われる
+  - `extra_note` は引数として維持 (kind で表現しきれない文脈を呼出側が足すための
+    拡張点)。0.20.0 時点で handler からは渡していない — symlink / special の
+    ベタ書き `NOTE:` 文字列は `core/messages.py` の kind 別 template に移した
+    (「handler から文字列を直接組み立てない」= `docs/MAINTAINING.md`「拡張ポイント」
+    の規約に合わせた)
+- `core.messages` が `core.output.MAX_REASON_BYTES` を import する
+  (`core.output` は `typing` しか import しないため循環しない)
+- `handlers.edit_handler._render_existing` を新設 (`render_for_bash` の薄い
+  wrapper)。例外を捕捉して空文字を返すので、失敗しても verdict は動かない
+
+### 5. 検証
+
+- 両 suite green (redact 862 / check 79)。`claude plugin validate` warning 0
+- **verdict 不変の機械確認**: tool 2 (Edit/Write) × target 5 (`.env` / `.envrc` /
+  `credentials.json` / `.env.example` / `README.md`) × 最終要素 5 状態 (missing /
+  regular / symlink / special (FIFO) / stat error) × 親 3 状態 (通常 dir /
+  symlink dir / 不在) × content 2 (キーあり / 空) × `permission_mode` 6 =
+  **1800 セル**の `permissionDecision` を変更前後で突合し **diff ゼロ**
+  (allow 480 / ask 360 / deny 360 / 構成不能 600)
+- 予算ロジックを無効化する mutation で予算テスト 3 件が落ちることを確認
+  (テストが空振りしていないことの確認)
+- **32KB 超の既存ファイル**も回帰テストに含めた。`MAX_INLINE_BYTES` 超では
+  `_render_path` が `format_dotenv` + `build_reason` ではなく
+  `redact_large_file` (streaming 鍵名スキャン) に切り替わるため、`_fit_data_block`
+  の閉じタグ保持 (最終行 `</DATA>` 依存) が **別 renderer でも成立する**ことを
+  固定した。あわせて `_DATA_HEADER_LINES` / `_DATA_CLOSING_TAG` を
+  `build_reason` の実出力と突合するテストを追加 (ずれると「閉じない `<DATA>`」が
+  予算超過時にだけ静かに出るため)
+
+### 6. リリース前の review 対応 (PR #47 Codex)
+
+#### 6-1. `keyonly_scan.scan_stream` の読み取りに **実効的な** byte 上限 (P1)
+
+E6 で Edit/Write の deny 経路が初めてファイルを読むようになったため、32KB 超の
+既存ファイルでは `keyonly_scan.scan_stream` に到達する。同関数は `f.readline()`
+で読み、`read_bytes < max_bytes` を **行の切れ目でしか見ていなかった**。
+`readline()` は改行が来るまで読み続けるので、**改行を含まない巨大レコード 1 本で
+公称 1MB の上限を突破する**。
+
+実測 (8MB を 1 行にしたファイル):
+
+| | 読み取り byte | peak allocation |
+|---|---|---|
+| 修正前 | **8,388,614** (= ファイル全体、公称上限の 8 倍) | 16.1 MB |
+| 修正後 | **1,048,576** (= 上限ちょうど) | 0.25 MB |
+
+64MB の 1 行でも読み取りは 1,048,576 byte / peak 0.25MB で、**メモリ使用量が
+レコード長に依存しない**。hook は 2 秒 timeout で outer timeout の挙動は
+fail-open の可能性がある (`__main__._is_unsupported_platform` の注記) ため、
+情報提供のための描画がガードレール自体を落としうる状態だった。
+
+- 固定長 chunk (`_CHUNK_BYTES` = 64KB) で読み、`max_bytes` を 1 byte も超えない
+- 行の判定に必要なのは行頭だけ (`_KEY_RE` は `^` 固定) なので、行バッファを
+  `_MAX_LINE_PREFIX` = 512 byte で頭打ちにする。超過分は捨てる
+- 途中で切れた行の**先頭**も評価する。0.19.1 の `readline()` 版が拾えていた
+  「巨大な 1 行の先頭にある鍵名」を、全体を読まずに維持するため
+- この関数は Read handler / Bash deny の描画も通るので、**両経路の同種の露出も
+  同時に塞がる** (E6 以前から存在した上限逸脱)。判定は変わらない
+- 回帰テストは wall-clock ではなく **読み取り byte 数を観測**する形にした
+  (時間 assert は flaky になりやすいため)。0.19.1 の実装に差し戻すと新規 7 件が
+  落ちることを確認済み
+
+#### 6-2. `overwrite` の代替案を Edit と Write で分ける (P2)
+
+初版は `kind` だけで文面を決めていたため、**Edit にも「ファイル全体の上書きは
+現在の値を失います」「差分適用 (patch) を検討してください」**と書いていた。
+Edit は既に対象を絞った置換なので事実と違い、助言としても的外れだった。
+
+`kind` (書き込み先の状態) と tool (Edit / Write) は **直交する軸**なので、
+`overwrite` の代替案だけを **tool 軸 clause × format 軸 clause の連結**にした
+(手書きの文面を組み合わせ数だけ持つと、軸を足したときに漏れるため)。
+
+| tool | dotenv | 出る代替案 |
+|---|---|---|
+| `Write` | ○ | ファイル全体を置き換えるため現在の値はすべて失われる + dotenv-cli の merge |
+| `Write` | × | 同上 + 差分適用 (patch) |
+| `Edit` | ○ | 対象を絞った置換なのでファイル全体は失われないが block 固定 + dotenv-cli の merge |
+| `Edit` | × | 同上 + 差分適用 (patch) |
+| 未確定 (`Edit/Write`) | ○ / × | tool 中立の clause + 各 format の clause |
+
+あわせて `overwrite` の `note:` を「上書き」から **tool 中立の「書き換え」**に変更。
+tool 軸を持つのは `overwrite` だけで、`new` / `symlink` / `special` は Edit と
+Write で文面が一致することもテストで固定した。
+
+#### 6-3. 再検証
+
+- 両 suite green (redact 862 / check 79 = 941)、`claude plugin validate` warning 0
+- **1800 セルの verdict 格子を再取得し、`origin/main` と diff ゼロを再確認**。
+  「描画を省略する経路」が verdict に影響しないことも個別テストで固定
 
 ## 0.19.1
 

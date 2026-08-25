@@ -22,7 +22,7 @@ next action」** の 2 文構造を取る。「続行しますか？」のよう
 そのままコピペで ``patterns.local.txt`` に追記できる形にする。glob operand
 (例: ``*.env*``) はそのまま basename として埋める。
 
-0.19.0 (bd_092a232e-snw.23) から hint は ``[project:$CLAUDE_PROJECT_DIR]``
+0.19.0 から hint は ``[project:$CLAUDE_PROJECT_DIR]``
 セクション配下への追記を **既定** として案内する (``_shared.patterns`` の
 レシピ定数と共通、Stop hook の block reason も同じ)。ヘッダー無し行
 (全プロジェクト共通) は明示的な選択にする。reason に絶対パスを出さない方針の
@@ -49,6 +49,19 @@ env-var 名を抽出 (E4) し、dotenv parse 結果と照合した ``matched_pat
 
 Read 側の ``<DATA untrusted="true">`` 包装と ``escape_data_tag`` は維持
 (鍵名が LLM コンテキストに残るため最低限の包装防御として意味あり)。
+
+0.20.0 で ``edit_deny`` を **kind 別 dispatch** に拡張 (E6)。書き込み先の状態
+(``new`` / ``overwrite`` / ``symlink`` / ``special``) で note と代替案を切替え、
+``overwrite`` では上書き対象の既存ファイルの minimal info を
+``<DATA untrusted>`` 包装で埋め込む。**判定 (deny/ask/allow) は変えず、reason
+文字列の情報量だけが変わる**のは 0.10.0 の bash_deny 拡張と同じ方針。
+
+## reason の byte 予算
+
+``core.output.MAX_REASON_BYTES`` (3KB) を超えた分は ``core.output._truncate``
+が末尾から切る。切られて困る行 (除外案内) が末尾にあるため、**サイズが入力
+依存で伸びるセクションを埋め込む builder は自分で予算内に収める**こと。
+``edit_deny`` の minimal info がその実装例 (``_fit_data_block``)。
 """
 from __future__ import annotations
 
@@ -62,6 +75,10 @@ from _shared.patterns import (
     PROJECT_SECTION_HEADER_HINT,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
 )
+# reason の byte 予算。``core.output`` は typing しか import しないため循環しない。
+# builder 側で予算を見るのは E6 (0.20.0) の minimal info 埋め込みだけで、
+# ``_truncate`` による最終防御は従来どおり ``core.output`` 側に残る。
+from core.output import MAX_REASON_BYTES
 
 # 除外行を書き足す patterns.local.txt の preferred パス (表示用。実体の解決は
 # ``_shared.patterns._resolve_local_patterns_path``、0.19.0 で _shared と共有)。
@@ -106,7 +123,7 @@ def _exclude_hint(basename: str) -> str:
 
     basename が空なら一般化された hint。空でなければ ``!<basename>`` を埋め込む。
 
-    0.19.0 (bd_092a232e-snw.23): ``[project:$CLAUDE_PROJECT_DIR]`` セクション配下
+    0.19.0: ``[project:$CLAUDE_PROJECT_DIR]`` セクション配下
     への追記を既定として案内する。0.18.0 まではヘッダー無し行 (= 全プロジェクト
     共通) だけを案内していたため、あるプロジェクトで承認した除外が他プロジェクト
     にも無条件で効く側 (0.15.0 が ``[project:]`` セクションで防ごうとした事故) に
@@ -637,8 +654,7 @@ _GIT_GLOBAL_VALUE_OPTS = frozenset({
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
 })
 
-# git subcommand のうち「閲覧」ではなく index / 作業ツリーへの **操作** (0.19.0,
-# bd_092a232e-snw.3)。これ以外 (show / diff / log / cat-file / blame / grep 等)
+# git subcommand のうち「閲覧」ではなく index / 作業ツリーへの **操作** (0.19.0)。これ以外 (show / diff / log / cat-file / blame / grep 等)
 # は従来通り「commit / 差分の閲覧」文面。0.18.0 までは全 subcommand が閲覧文面
 # だったため ``git rm .env`` / ``git add .env`` が「閲覧しようとした」と誤った
 # 意図を返していた。
@@ -928,56 +944,316 @@ def bash_deny(
     )
 
 
+# -- E6: Edit / Write の状況別 deny 文面 (0.20.0) --------------------------
+#
+# ``kind`` は書き込み先の最終要素の状態 (``core.safepath.classify`` の結果) を
+# **文面の分岐**に使うためのもの。0.4.2 の ``edit_deny(kind=...)`` は
+# ``<GUARDRAIL_DENY reason="...">`` 属性に載せる **機械可読 schema** の一部で、
+# 後段 hook が存在せず overengineering だったため 0.7.0 で撤去した。本引数は
+# その再導入ではなく、思想 2 (block 時は意図を汲んだメッセージを返す) 側の
+# 拡張で、値は reason 文字列の分岐にのみ使われる。
+EditDenyKind = Literal["new", "overwrite", "symlink", "special"]
+
+# kind → ``note:`` 行の本文テンプレート (``tool_label`` / ``basename`` を埋める)。
+# 全 kind が語彙ルールどおり「block しました」で終わること
+# (``tests/test_messages.py::TestVocabularyConsistency`` が全 kind を fixate)。
+_EDIT_DENY_NOTE: dict[str, str] = {
+    "new": (
+        "{tool_label}: 機密パターン一致のファイル ({basename}) を新規作成"
+        "しようとしたため block しました (実値が LLM コンテキストと作業ツリーに"
+        "残るのを防ぐため)。"
+    ),
+    # 「上書き」と書かないのは Edit と Write で書き換え方が違うため
+    # (Edit = 対象を絞った置換 / Write = ファイル全体の置換)。両方に当てはまる
+    # 「書き換え」にし、tool 差は ``_EDIT_OVERWRITE_TOOL_CLAUSE`` 側で言う。
+    "overwrite": (
+        "{tool_label}: 既存の機密ファイル ({basename}) を書き換えようとしたため "
+        "block しました (既存の値の喪失と機密流出を防ぐため)。"
+    ),
+    "symlink": (
+        "{tool_label}: symlink 経由で機密パターン一致のファイル ({basename}) に"
+        "書き込もうとしたため block しました (実体側のファイルが書き換わるため)。"
+    ),
+    "special": (
+        "{tool_label}: 非通常ファイル (FIFO / socket / device) である "
+        "{basename} への書き込みを block しました。"
+    ),
+}
+
+# kind → ``suggestion:`` 行 (除外 hint の手前に置く状況別の代替案)。
+# ``overwrite`` は dotenv かどうかで文面が変わるため別扱い
+# (``_edit_kind_suggestion``)。``new`` は代替案が「同じキーで .env.example を
+# 作る」= dotenv 前提なので ``suggestion_alt`` (new_keys 依存) 側に置き、
+# ここには行を持たない。
+_EDIT_DENY_SUGGESTION: dict[str, str] = {
+    "symlink": (
+        "symlink 先が意図した参照か確認してください。実体が複数プロジェクトで"
+        "共有される場所にあるなら、コピーを作らず symlink を維持する運用を"
+        "推奨します。"
+    ),
+    "special": (
+        "FIFO / socket / device への書き込みは意図しない副作用を招きます。"
+        "通常ファイルを対象にするか、パス指定の誤りが無いか確認してください。"
+    ),
+}
+
+# ``overwrite`` の代替案は **tool 軸 × format 軸の 2 つ**を連結して作る。
+# 手書きの文面を組み合わせ数だけ用意すると、片方の軸を足したときに漏れる。
+#
+# tool 軸: Edit と Write は書き換え方が違う。0.20.0 の初版は両方に
+# 「ファイル全体の上書きは現在の値を失います」「全体の上書きではなく差分適用を」
+# と書いていたが、**Edit は既に対象を絞った置換**なので事実と違い、かつ
+# 「patch にしろ」という助言も的外れだった (PR #47 Codex P2)。
+_EDIT_OVERWRITE_TOOL_CLAUSE: dict[str, str] = {
+    "Write": (
+        "Write はファイル全体を置き換えるため、現在の値はすべて失われます。"
+    ),
+    "Edit": (
+        "Edit は対象を絞った置換なのでファイル全体は失われませんが、"
+        "機密ファイルへの書き込みは block 固定です。"
+    ),
+}
+# ``handle()`` の既定 ``tool_label="Edit/Write"`` のような tool 未確定の呼び出し用。
+_EDIT_OVERWRITE_TOOL_CLAUSE_DEFAULT = (
+    "既存の機密ファイルへの書き込みは block 固定です。"
+)
+
+# format 軸: 「既存値を保ったまま反映する方法」。tool には依存しない。
+_EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV = (
+    "既存値を保ったまま項目を足すなら、dotenv-cli の merge 機能で "
+    "`.env.example` の差分だけを追記できます。"
+)
+_EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER = (
+    "既存値を保ったまま項目を足すなら、差分適用 (patch) での反映を"
+    "検討してください。"
+)
+
+# ``suggestion_alt:`` (new_keys があるときだけ出る) の kind 別文面。
+_EDIT_SUGGESTION_ALT_NEW = (
+    "同じキー名で `.env.example` を作成し、値は空にしてください。"
+    "実値は手動入力か 1Password CLI 等のシークレット管理ツール経由で設定します。"
+)
+_EDIT_SUGGESTION_ALT_DEFAULT = (
+    "追加予定のキー名を `.env.example` に追記すると、"
+    "差分把握がしやすくなります (値は後で個別設定)。"
+)
+
+# 上書き対象の既存ファイルを Read 同等 minimal info として載せるときのラベル。
+_EDIT_EXISTING_LABEL = "minimal info (Read 同等 / 上書き対象の既存ファイル):"
+
+# minimal info を出せなかったときの理由ラベル。Bash 側の
+# ``_MINIMAL_INFO_UNAVAILABLE`` を流用しない理由: あちらの next action は
+# 「Read tool に **絶対パス** を渡す (先行 cd で cwd がずれる)」という Bash 固有
+# の事情を前提にしており、file_path が最初から絶対パスで確定している Edit/Write
+# では誤った説明になる。Edit 側で取れる next action は失敗理由によらず同じ
+# (Read tool で同じ絶対パスを読む) ため、理由ラベルだけ差し替える。
+_EDIT_EXISTING_UNAVAILABLE_RENDER = "既存ファイルの読み取り / 解析に失敗"
+_EDIT_EXISTING_UNAVAILABLE_BUDGET = "reason の byte 予算に収まらないため省略"
+_EDIT_EXISTING_NEXT_ACTION = (
+    "既存のキー構成を確認したい場合は、同じ **絶対パス** を Read tool に"
+    "渡してください (Read も block されますが同じ minimal info が返ります)。"
+)
+
+# ``redaction.engine.build_reason`` が組む ``<DATA>`` 包装の閉じタグと
+# header 行数 (``<DATA ...>`` / ``NOTE: ...`` / ``file: ...``)。
+_DATA_CLOSING_TAG = "</DATA>"
+_DATA_HEADER_LINES = 3
+
+
+def _line_cost(line: str) -> int:
+    """``"\\n".join`` に 1 行足したときの増分 byte 数 (改行 1 byte 込み)。"""
+    return len(line.encode("utf-8")) + 1
+
+
+def _omit_marker(n: int) -> str:
+    return f"  ... ({n} more lines)"
+
+
+def _fit_data_block(block: str, budget: int) -> list[str]:
+    """``<DATA>`` 包装済み minimal info を ``budget`` byte 以内の行列に収める。
+
+    先頭から行を採用し、入り切らない分は ``  ... (N more lines)`` に畳む。
+    閉じタグ ``</DATA>`` は必ず残す (包装が壊れると ``escape_data_tag`` の
+    外殻破壊防御が意味を失うため)。header 3 行しか入らない場合は「中身ゼロの
+    包装」になるだけなので空リストを返し、呼出側の unavailable 分岐に降ろす。
+
+    Args:
+        block: ``redaction.file_render.render_for_bash`` の 1 番目の戻り値。
+        budget: この block に使ってよい byte 数 (各行の改行 1 byte を含む)。
+
+    Returns:
+        採用した行のリスト。1 行も採用できなければ空リスト。
+    """
+    lines = block.split("\n")
+    closing: list[str] = []
+    body = lines
+    if lines and lines[-1] == _DATA_CLOSING_TAG:
+        closing = [lines[-1]]
+        body = lines[:-1]
+    closing_cost = sum(_line_cost(x) for x in closing)
+    # 省略マーカーの上限幅 (件数が最大のとき = 最長) で予約する。実際に出る
+    # マーカーはこれ以下なので、予約しておけば予算超過は起きない。
+    marker_reserve = _line_cost(_omit_marker(len(body)))
+
+    kept: list[str] = []
+    used = 0
+    for i, line in enumerate(body):
+        cost = _line_cost(line)
+        has_rest = i < len(body) - 1
+        need = cost + closing_cost + (marker_reserve if has_rest else 0)
+        if used + need > budget:
+            break
+        used += cost
+        kept.append(line)
+
+    if len(kept) <= _DATA_HEADER_LINES:
+        return []
+    omitted = len(body) - len(kept)
+    if omitted:
+        kept.append(_omit_marker(omitted))
+    return kept + closing
+
+
+def _edit_kind_suggestion(kind: str, is_dotenv: bool, tool_label: str) -> str:
+    """kind 別 ``suggestion:`` 行の本文を返す (無ければ空文字)。
+
+    ``overwrite`` だけ **tool 軸 × format 軸**の連結。それ以外の kind は tool に
+    依存しない (新規作成 / symlink / 特殊ファイルの事情は Edit と Write で同じ)。
+    """
+    if kind != "overwrite":
+        return _EDIT_DENY_SUGGESTION.get(kind, "")
+    tool_clause = _EDIT_OVERWRITE_TOOL_CLAUSE.get(
+        tool_label, _EDIT_OVERWRITE_TOOL_CLAUSE_DEFAULT
+    )
+    format_clause = (
+        _EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV
+        if is_dotenv
+        else _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER
+    )
+    return f"{tool_clause}{format_clause}"
+
+
+def _edit_existing_info_lines(
+    existing_render: str,
+    budget: int,
+) -> list[str]:
+    """``overwrite`` の minimal info セクションを予算内で組む。
+
+    予算に収まらないときは **黙って省略せず** ``minimal info: unavailable``
+    + next action の 2 行に降りる (0.16.0 の silent degradation 対策と同じ方針)。
+    その 2 行すら入らない場合だけセクション全体を落とす — 末尾の除外案内
+    (``suggestion: ... patterns.local.txt ...``) を残す方を優先するため。
+    """
+    unavailable_reason = _EDIT_EXISTING_UNAVAILABLE_RENDER
+    if existing_render:
+        fitted = _fit_data_block(
+            existing_render, budget - _line_cost(_EDIT_EXISTING_LABEL)
+        )
+        if fitted:
+            return [_EDIT_EXISTING_LABEL] + fitted
+        unavailable_reason = _EDIT_EXISTING_UNAVAILABLE_BUDGET
+
+    fallback = [
+        f"minimal info: unavailable ({unavailable_reason})",
+        f"suggestion: {_EDIT_EXISTING_NEXT_ACTION}",
+    ]
+    if sum(_line_cost(x) for x in fallback) > budget:
+        return []
+    return fallback
+
+
 def edit_deny(
     tool_label: str,
     basename: str,
     new_keys: list[str] | None = None,
     extra_note: str = "",
     *,
+    kind: EditDenyKind,
+    is_dotenv: bool = False,
+    existing_render: str = "",
     max_suggested_keys: int = 30,
 ) -> str:
-    """Edit / Write の deny reason を plain text で構築する。
+    """Edit / Write の deny reason を plain text で構築する (0.20.0 で kind 分岐)。
 
-    dotenv 系で書き込み予定のキー名 ``new_keys`` が渡されたときは
-    ``.env.example`` への代替案を埋め込む。``extra_note`` は symlink / special
-    等の追加事情を ``extra_note:`` 行として挿入する (0.7.0 で kind 引数を
-    廃止し、文脈は extra_note のみで表現する形に縮約)。
+    行の並びは Bash 側 builder と揃える —
+    ``note:`` → ``basename:`` → minimal info → ``suggested_keys:`` →
+    ``extra_note:`` → 状況別 ``suggestion:`` → 除外案内 ``suggestion:``。
+
+    ### 予算 (``core.output.MAX_REASON_BYTES``) の扱い
+
+    minimal info セクション以外を先に組んでから残り byte を計算し、その範囲に
+    収まる行数だけ minimal info を載せる。したがって **この関数が minimal info
+    を足したせいで末尾の除外案内が truncate されることはない**
+    (``suggested_keys`` だけで予算を使い切る極端な入力では、E6 以前と同様に
+    ``core.output._truncate`` が最終防御として働く)。
+
+    ### 文面を決める軸は 2 つ (kind と tool)
+
+    ``kind`` (書き込み先の状態) と ``tool_label`` (Edit か Write か) は **直交**
+    する。``overwrite`` の代替案だけが両方に依存し、tool 軸の clause と format
+    軸の clause を連結して作る (``_edit_kind_suggestion``)。Edit は対象を絞った
+    置換、Write はファイル全体の置換なので、同じ ``overwrite`` でも
+    「現在の値がすべて失われる」かどうかが変わるため。
 
     Args:
-        tool_label: ``Edit`` / ``Write`` のラベル。
+        tool_label: ``Edit`` / ``Write`` のラベル。``overwrite`` の代替案の
+            tool 軸 clause の選択にも使う (未知の値は tool 中立の clause)。
         basename: 書き込み先ファイルの basename。``basename:`` 行と除外 hint で
             ``!<basename>`` に展開される。
         new_keys: dotenv parse で抽出された新規キー名リスト (順序維持)。
             非 dotenv では空リストか None を渡す。
-        extra_note: ``extra_note:`` 行に入れる補足 (symlink / special など)。
+        extra_note: ``extra_note:`` 行に入れる補足。kind で表現しきれない文脈を
+            呼出側が足すための拡張点 (0.20.0 時点で handler は使わない)。
+        kind: 書き込み先の状態 (``new`` / ``overwrite`` / ``symlink`` /
+            ``special``)。文面の分岐にのみ使い、判定 (deny/ask/allow) には
+            影響しない。**必須キーワード** — 既定値を置くと呼び忘れたときに
+            「新規作成です」と誤った説明を返してしまうため。
+        is_dotenv: 対象 basename が dotenv 系か。``overwrite`` の代替案を
+            dotenv-cli merge にするかの判定に使う。
+        existing_render: ``kind == "overwrite"`` のとき、上書き対象の既存
+            ファイルを ``redaction.file_render.render_for_bash`` に通した
+            ``<DATA>`` 包装文字列。空なら unavailable 行に降りる。
         max_suggested_keys: ``new_keys`` の上限 (3KB 制約のため切り詰める)。
     """
-    note = (
-        f"{tool_label}: 機密パターン一致のファイル ({basename}) への書き込みを "
-        "block しました (値喪失や機密流出防止のため)。"
+    note = _EDIT_DENY_NOTE[kind].format(
+        tool_label=tool_label, basename=basename
     )
 
-    lines: list[str] = [f"note: {note}", f"basename: {basename}"]
+    head: list[str] = [f"note: {note}", f"basename: {basename}"]
+    tail: list[str] = []
 
     if new_keys:
         shown = new_keys[:max_suggested_keys]
         remaining = len(new_keys) - len(shown)
-        lines.append("suggested_keys:")
+        tail.append("suggested_keys:")
         for k in shown:
-            lines.append(f"  {k}=")
+            tail.append(f"  {k}=")
         if remaining > 0:
-            lines.append(f"  ... ({remaining} more)")
-        lines.append(
-            "suggestion_alt: 追加予定のキー名を `.env.example` に追記すると、"
-            "差分把握がしやすくなります (値は後で個別設定)。"
+            tail.append(f"  ... ({remaining} more)")
+        alt = (
+            _EDIT_SUGGESTION_ALT_NEW
+            if kind == "new"
+            else _EDIT_SUGGESTION_ALT_DEFAULT
         )
+        tail.append(f"suggestion_alt: {alt}")
 
     if extra_note:
-        lines.append(f"extra_note: {extra_note}")
+        tail.append(f"extra_note: {extra_note}")
 
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
+    kind_suggestion = _edit_kind_suggestion(kind, is_dotenv, tool_label)
+    if kind_suggestion:
+        tail.append(f"suggestion: {kind_suggestion}")
 
-    return "\n".join(lines)
+    tail.append(f"suggestion: {_exclude_hint(basename)}")
+
+    info: list[str] = []
+    if kind == "overwrite":
+        used = len("\n".join(head + tail).encode("utf-8"))
+        info = _edit_existing_info_lines(
+            existing_render, MAX_REASON_BYTES - used
+        )
+
+    return "\n".join(head + info + tail)
 
 
 # -- M3: patterns.txt 読込失敗 --------------------------------------------

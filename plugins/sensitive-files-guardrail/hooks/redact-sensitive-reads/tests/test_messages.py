@@ -22,6 +22,7 @@ from _shared.patterns import (
     exclude_recipe_lines,
 )
 from core import messages as M
+from core import output
 
 
 class TestExcludeHintBasename(unittest.TestCase):
@@ -34,7 +35,7 @@ class TestExcludeHintBasename(unittest.TestCase):
         self.assertNotIn("<basename>", out)
 
     def test_exclude_hint_guides_project_section_by_default(self):
-        """0.19.0 (bd_092a232e-snw.23): 既定で [project:] セクション配下への追記を
+        """0.19.0: 既定で [project:] セクション配下への追記を
         案内し、ヘッダー無し (全プロジェクト共通) は明示的な選択にする。
         絶対パスは reason に出さない (環境変数名で示す)。"""
         out = M._exclude_hint(".env")
@@ -171,9 +172,31 @@ class TestBashDeny(unittest.TestCase):
         self.assertNotIn("first_token:", msg)
 
 
+class TestDataBlockAssumptions(unittest.TestCase):
+    """``_fit_data_block`` が置いている ``<DATA>`` 包装の前提を固定する (E6)。
+
+    ``_DATA_HEADER_LINES`` / ``_DATA_CLOSING_TAG`` は
+    ``redaction.engine.build_reason`` の出力形に暗黙依存している。ここが
+    ずれると「header だけ載せて中身ゼロ」や「閉じタグを落とした包装」が
+    **予算超過時にだけ** 静かに出るので、生成側と突合しておく。
+    """
+
+    def test_build_reason_header_line_count_matches_constant(self):
+        from redaction.engine import build_reason
+
+        lines = build_reason(".env", "dotenv", "BODY_MARKER").split("\n")
+        self.assertEqual(lines.index("BODY_MARKER"), M._DATA_HEADER_LINES)
+
+    def test_build_reason_ends_with_closing_tag_constant(self):
+        from redaction.engine import build_reason
+
+        lines = build_reason(".env", "dotenv", "BODY_MARKER").split("\n")
+        self.assertEqual(lines[-1], M._DATA_CLOSING_TAG)
+
+
 class TestEditDeny(unittest.TestCase):
     def test_minimal_no_keys(self):
-        msg = M.edit_deny("Edit", ".env", new_keys=None)
+        msg = M.edit_deny("Edit", ".env", new_keys=None, kind="new")
         self.assertIn("Edit", msg)
         self.assertIn(".env", msg)
         self.assertIn("`!.env`", msg)
@@ -185,6 +208,7 @@ class TestEditDeny(unittest.TestCase):
             "Write",
             ".env",
             new_keys=["DATABASE_URL", "JWT_SECRET", "DEBUG"],
+            kind="new",
         )
         self.assertIn("Write", msg)
         # キー名がそれぞれ別行で出る
@@ -198,7 +222,8 @@ class TestEditDeny(unittest.TestCase):
 
     def test_with_extra_note_no_keys(self):
         msg = M.edit_deny(
-            "Edit", ".env", new_keys=None, extra_note="NOTE: symlink でした。"
+            "Edit", ".env", new_keys=None, extra_note="NOTE: symlink でした。",
+            kind="symlink",
         )
         self.assertIn("symlink", msg)
         self.assertIn(".env", msg)
@@ -209,18 +234,97 @@ class TestEditDeny(unittest.TestCase):
             ".env",
             new_keys=["FOO"],
             extra_note="NOTE: 特殊ファイルでした。",
+            kind="special",
         )
         self.assertIn("FOO=", msg)
         self.assertIn("特殊ファイル", msg)
 
     def test_truncation_marker_for_many_keys(self):
         keys = [f"KEY_{i}" for i in range(40)]
-        msg = M.edit_deny("Edit", ".env", new_keys=keys, max_suggested_keys=30)
+        msg = M.edit_deny(
+            "Edit", ".env", new_keys=keys, kind="new", max_suggested_keys=30,
+        )
         self.assertIn("KEY_0=", msg)
         self.assertIn("KEY_29=", msg)
         # 30 個以上は切り詰め
         self.assertNotIn("KEY_30=", msg)
         self.assertIn("(10 more)", msg)
+
+    def test_overwrite_without_render_reports_unavailable(self):
+        """``existing_render`` が空なら黙って省略せず unavailable + next action。"""
+        msg = M.edit_deny("Edit", ".env", kind="overwrite")
+        self.assertIn(
+            "minimal info: unavailable (既存ファイルの読み取り / 解析に失敗)",
+            msg,
+        )
+        self.assertIn("Read tool に", msg)
+
+    def test_overwrite_many_lines_are_folded_not_dropped(self):
+        """行数が多いだけなら入る分を載せ、残りを ``... (N more lines)`` に畳む。"""
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: x", "file: .env"]
+            + [f"  {i}. KEY_{i}  <type=str>  <set>  length=8"
+               for i in range(400)]
+            + ["</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Edit", ".env", kind="overwrite", existing_render=render,
+        )
+        self.assertLessEqual(len(msg.encode("utf-8")), output.MAX_REASON_BYTES)
+        self.assertIn("上書き対象の既存ファイル", msg)
+        self.assertIn("  0. KEY_0", msg)
+        self.assertRegex(msg, r"  \.\.\. \(\d+ more lines\)")
+        # 閉じタグは畳んでも残す (外殻破壊防御の前提)
+        self.assertTrue(msg.split("\n")[-1].startswith("suggestion:"))
+        self.assertIn("</DATA>", msg)
+
+    def test_overwrite_render_too_large_reports_budget_reason(self):
+        """内容行が 1 行も入らないときは理由を「予算」と明示して 2 行に降りる。
+
+        ``<DATA>`` の header 3 行だけを載せても情報量ゼロの包装が残るだけなので、
+        ``_fit_data_block`` は空リストを返し unavailable 分岐に降ろす。
+        """
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: " + "x" * 4000, "file: .env",
+             "  1. FOO  <type=str>", "</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Edit", ".env", kind="overwrite", existing_render=render,
+        )
+        self.assertIn(
+            "minimal info: unavailable (reason の byte 予算に収まらないため省略)",
+            msg,
+        )
+        self.assertNotIn("<DATA", msg)
+        self.assertLessEqual(len(msg.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_overwrite_budget_exhausted_by_keys_omits_section(self):
+        """``suggested_keys`` で予算を使い切ると minimal info を丸ごと落とす。
+
+        末尾の除外案内を残す方を優先する設計 (``_edit_existing_info_lines``)。
+        """
+        keys = ["K" * 120 + str(i) for i in range(30)]
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: x", "file: .env", "  1. FOO  <type=str>", "</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Write", ".env", new_keys=keys, kind="overwrite",
+            existing_render=render,
+        )
+        self.assertNotIn("上書き対象の既存ファイル", msg)
+        self.assertNotIn("minimal info: unavailable", msg)
+
+    def test_kind_is_required_keyword(self):
+        """E6: ``kind`` を省略すると TypeError (誤った文面の silent 選択を防ぐ)。
+
+        既定値を置くと「新規作成しようとしたため block」という **事実と違う説明**
+        を返しうるため、呼び忘れを実行時に落とす設計にしている。
+        """
+        with self.assertRaises(TypeError):
+            M.edit_deny("Edit", ".env")  # type: ignore[call-arg]
 
 
 class TestPolicyUnavailable(unittest.TestCase):
@@ -408,13 +512,13 @@ class TestDenyPlainText(unittest.TestCase):
         self.assertIn("`!.env`", msg)
 
     def test_edit_deny_no_envelope(self):
-        msg = M.edit_deny("Edit", ".env")
+        msg = M.edit_deny("Edit", ".env", kind="new")
         self.assertNotIn("<GUARDRAIL_DENY", msg)
         self.assertIn("basename: .env", msg)
         self.assertIn("suggestion:", msg)
 
     def test_edit_deny_with_keys_no_envelope(self):
-        msg = M.edit_deny("Write", ".env", new_keys=["A", "B"])
+        msg = M.edit_deny("Write", ".env", new_keys=["A", "B"], kind="new")
         self.assertNotIn("<GUARDRAIL_DENY", msg)
         self.assertIn("suggested_keys:", msg)
         self.assertIn("  A=", msg)
@@ -426,6 +530,7 @@ class TestDenyPlainText(unittest.TestCase):
         msg = M.edit_deny(
             "Edit", ".env",
             extra_note="NOTE: symlink 経由だったため",
+            kind="symlink",
         )
         self.assertNotIn("<GUARDRAIL_DENY", msg)
         self.assertIn("extra_note:", msg)
@@ -457,9 +562,11 @@ class TestVocabularyConsistency(unittest.TestCase):
         # bash_deny
         msg = M.bash_deny(first_token="cat", operand=".env")
         self.assertIn("block しました", msg)
-        # edit_deny
-        msg2 = M.edit_deny("Write", ".env")
-        self.assertIn("block しました", msg2)
+        # edit_deny — E6 の 4 分岐すべてが語彙ルールを守ること
+        for kind in ("new", "overwrite", "symlink", "special"):
+            with self.subTest(kind=kind):
+                msg2 = M.edit_deny("Write", ".env", kind=kind)
+                self.assertIn("block しました", msg2)
         # policy_unavailable(deny)
         msg3 = M.policy_unavailable("deny")
         self.assertIn("block しました", msg3)

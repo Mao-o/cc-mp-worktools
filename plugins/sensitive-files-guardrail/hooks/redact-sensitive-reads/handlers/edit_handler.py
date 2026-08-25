@@ -21,6 +21,24 @@ dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込み
 する際、``tool_input`` から追加予定のキー名を抽出して reason に添える。
 ユーザーが「どのキーを ``.env.example`` に移せばよいか」を見てすぐ代替行動できる。
 
+### 状況別の deny 文面 (E6, 0.20.0)
+
+``classify`` の結果を ``edit_deny(kind=...)`` に渡し、文面を 4 分岐する。
+0.19.1 までは ``missing`` (新規作成) と ``regular`` (既存上書き) が同一文面に
+落ち、``symlink`` / ``special`` は ``extra_note`` 1 行の違いしかなかった。
+
+| ``classify`` | ``kind`` | 文面 |
+|---|---|---|
+| ``missing`` | ``new`` | 同じキー名で ``.env.example`` を作る案内 (dotenv かつ追加キーありのとき) |
+| ``regular`` | ``overwrite`` | **既存ファイルの Read 同等 minimal info** + dotenv-cli merge の案内 |
+| ``symlink`` | ``symlink`` | 実体側が書き換わる旨と symlink 運用の確認 |
+| ``special`` | ``special`` | FIFO / socket / device への書き込みである旨 |
+
+**判定 (deny / ask / allow) は 0.19.1 から一切変えていない。** 変わるのは
+reason 文字列だけで、``error`` は従来どおり ``ask_or_deny`` に倒れる。
+``overwrite`` の minimal info 取得が失敗しても deny は動かない
+(``_render_existing`` を参照)。
+
 両 tool (Edit / Write) とも ``tool_input.file_path`` を共通キーとして持つため、
 同じ dispatch で処理する。MultiEdit は CLI 2.1.x で非搭載のため 0.6.0 で
 対応コードを撤去 (`hooks.json` の matcher も除外済み)。再搭載時は本 docstring と
@@ -34,6 +52,8 @@ dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込み
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from core import logging as L
 from core import messages as M
 from core import output
@@ -42,6 +62,7 @@ from core.patterns import load_patterns
 from core.safepath import classify, is_regular_directory, normalize
 from redaction.dotenv import redact_dotenv
 from redaction.engine import _detect_format
+from redaction.file_render import render_for_bash
 
 
 def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list[str]:
@@ -81,6 +102,27 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
         L.log_info("dotenv_parse_failed", type(e).__name__)
         return []
     return [k["name"] for k in info.get("keys", [])]
+
+
+def _render_existing(path: Path, cwd: str) -> str:
+    """上書き対象の既存ファイルを Read 同等 minimal info にする (E6, 0.20.0)。
+
+    ``redaction.file_render.render_for_bash`` を再利用する。渡すのは normalize
+    済みの **絶対パス** なので、同関数の project root 再解決 (相対 operand 専用)
+    には入らず、``resolved_base`` / ``status == "project_root"`` は発生しない。
+
+    この関数が返すのは reason 文字列の材料だけで、**判定 (deny/ask/allow) には
+    一切影響しない**。呼出時点で deny は確定しており、失敗しても
+    ``core.messages.edit_deny`` が unavailable 行に降りるだけ。
+    ``render_for_bash`` は内部で例外を握り潰す実装だが、将来の変更で例外が
+    漏れても verdict が動かないよう、ここでも捕捉して空文字を返す。
+    """
+    try:
+        reason, _info, _status, _base = render_for_bash(str(path), cwd)
+    except Exception as e:  # noqa: BLE001 (verdict 不変を優先した意図的な捕捉)
+        L.log_error("edit_existing_render_failed", type(e).__name__)
+        return ""
+    return reason or ""
 
 
 def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
@@ -135,15 +177,17 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     basename = path.name
     new_keys = _extract_dotenv_keys(envelope, tool_label, basename)
 
+    is_dotenv = _detect_format(basename) == "dotenv"
+
     if cls == "symlink":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            extra_note="NOTE: symlink 経由だったため実体側の位置にも注意してください。",
+            kind="symlink", is_dotenv=is_dotenv,
         ))
     if cls == "special":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            extra_note="NOTE: 非通常ファイル (FIFO/socket/device) への書き込みでした。",
+            kind="special", is_dotenv=is_dotenv,
         ))
     if cls == "error":
         return output.ask_or_deny(
@@ -151,5 +195,17 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
             envelope,
         )
 
-    # regular (既存上書き) / missing (新規作成) は deny 固定
-    return output.make_deny(M.edit_deny(tool_label, basename, new_keys))
+    if cls == "regular":
+        # 既存上書き: Read 同等 minimal info で「今そのファイルに何が入って
+        # いるか」(鍵名まで) を返す。deny は既に確定しているので、この情報は
+        # reason の情報量だけを増やす。
+        return output.make_deny(M.edit_deny(
+            tool_label, basename, new_keys,
+            kind="overwrite", is_dotenv=is_dotenv,
+            existing_render=_render_existing(path, cwd),
+        ))
+
+    # missing (新規作成) も deny 固定
+    return output.make_deny(M.edit_deny(
+        tool_label, basename, new_keys, kind="new", is_dotenv=is_dotenv,
+    ))

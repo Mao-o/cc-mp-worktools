@@ -229,7 +229,7 @@ note: nested structure not parsed. only top-level key names returned.
 > の ask 経路が先に効くため緩まない。metadata-only ∩ safe_read コマンドの
 > `ls > .env` 系 redirect 書込みも deny (破壊的書込み)。
 
-> **0.19.0 で次善策コマンドを metadata-only に追加** (bd_092a232e-snw.3): 両 hook
+> **0.19.0 で次善策コマンドを metadata-only に追加**: 両 hook
 > の reason が「tracked なら `git rm --cached <path>` で untrack」「`chmod 600 .env`」
 > と案内しながら Bash hook 自身がそれらを deny する自己矛盾があった。
 > `git rm --cached` (`--cached` 完全一致。`--no-cached` / `--pathspec-from-file` や
@@ -269,6 +269,25 @@ hint もこの形を案内する。[docs/PATTERNS.md](./docs/PATTERNS.md))。
 dotenv 系 (`.env` / `.env.*` / `*.envrc`) を Edit/Write で block した際は、
 `tool_input` から追加予定のキー名を抽出して reason に代替案として添える。
 値そのものは含まれない (キー名のみ)。
+
+block の理由は書き込み先の状態で 4 分岐する (0.20.0)。**判定はいずれも deny
+固定で変わらず、変わるのは案内の文面だけ**:
+
+| 書き込み先 | 案内 |
+|---|---|
+| 新規作成 | 同じキー名で `.env.example` を作り値を空にする (実値は手動入力かシークレット管理ツール経由) |
+| 既存ファイルの書き換え | **既存ファイルの minimal info** (キー名・型・値の状態) + `dotenv-cli` の merge で既存値を保つ案内 |
+| symlink 経由 | 実体側が書き換わる旨と、コピーではなく symlink を維持する運用の確認 |
+| FIFO / socket / device | 通常ファイルを対象にするか、パス指定の誤りの確認 |
+
+既存ファイルの書き換えでは、`Edit` (対象を絞った置換) と `Write`
+(ファイル全体の置換) で代替案が変わる — 「現在の値がすべて失われる」のは
+`Write` だけなので、その警告は `Write` にのみ出る。
+
+既存ファイルの minimal info は Read tool の deny reason と同じ粒度
+(キー名・型・prefix・length・値の状態タグ・placeholder ヒント) で、実値は
+含まれない。取得のための読み取りには byte 上限があり (改行を含まない巨大な
+ファイルでも上限を超えて読まない)、取得できなくても block の判定は変わらない。
 
 #### Read と Edit/Write の symlink 対応の非対称性
 
@@ -385,10 +404,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (827 tests, 0.19.1 時点)
+# redact-sensitive-reads (862 tests, 0.20.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (79 tests, 0.19.1 時点)
+# check-sensitive-files (79 tests, 0.20.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
