@@ -102,6 +102,49 @@ class TestSlotExhaustionNotice(HookTestCase):
         self.assertEqual(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS), "")
 
 
+class TestWhatTheBudgetActuallyCaps(HookTestCase):
+    """`EXTERNAL_AI_REVIEW_MAX` が何の上限なのかを実装どおりに固定する。
+
+    `main()` は指摘なし (`REVIEW_CLEAN`) / レビュアー失敗のとき `release_slot()` を呼び、
+    count を戻して hash も消す。つまりこの上限が数えているのは **外部 AI の呼び出し回数
+    ではなく「指摘ありで返ってきた回数」** (block モードなら差し戻した回数)。
+
+    README がここを取り違えると、最悪待ち時間の見積もりごと嘘になるのでテストで縛る。
+    """
+
+    def test_clean_reviews_do_not_consume_the_budget(self):
+        """指摘なしなら何プランでもレビューが走る (枠を戻すため)。"""
+        os.environ["EXTERNAL_AI_REVIEW_MAX"] = "2"
+        for i in range(4):
+            self.exitplan(SESSION, f"{PLAN}\n案 {i}\n", FENCED_CLEAN, FENCED_CLEAN)
+            self.assertEqual(len(self.cursor_calls), 1, f"{i} 回目でレビューが走らなかった")
+        self.assertEqual(self.marker(SESSION), ("", 0), "clean は枠も hash も残さない")
+
+    def test_failed_reviews_do_not_consume_the_budget(self):
+        os.environ["EXTERNAL_AI_REVIEW_MAX"] = "2"
+        for i in range(3):
+            self.exitplan(SESSION, f"{PLAN}\n案 {i}\n", None, None)
+            self.assertEqual(len(self.cursor_calls), 1)
+        self.assertEqual(self.marker(SESSION), ("", 0))
+
+    def test_only_findings_consume_the_budget(self):
+        """指摘ありだけが枠を減らし、上限に達すると以後は走らない。"""
+        os.environ["EXTERNAL_AI_REVIEW_MAX"] = "2"
+        for i in range(2):
+            self.assertBlocked(self.exitplan(SESSION, f"{PLAN}\n案 {i}\n", FINDINGS, FENCED_CLEAN))
+        self.assertEqual(self.marker(SESSION)[1], 2, "指摘ありが 2 回分カウントされていない")
+
+        output = self.exitplan(SESSION, f"{PLAN}\n案 3\n", FINDINGS, FENCED_CLEAN)
+        self.assertNotBlocked(output)
+        self.assertEqual(self.cursor_calls, [], "上限到達後にレビューが走った")
+
+    def test_clean_then_findings_still_has_full_budget(self):
+        """clean が枠を食わないので、その後の別プランで所定回数ブロックできる。"""
+        os.environ["EXTERNAL_AI_REVIEW_MAX"] = "1"
+        self.exitplan(SESSION, f"{PLAN}\n案 A\n", FENCED_CLEAN, FENCED_CLEAN)
+        self.assertBlocked(self.exitplan(SESSION, f"{PLAN}\n案 B\n", FINDINGS, FENCED_CLEAN))
+
+
 class TestContextMode(HookTestCase):
     """`EXTERNAL_AI_PLAN_REVIEW_MODE=context` は差し戻さず所見だけ渡す。"""
 

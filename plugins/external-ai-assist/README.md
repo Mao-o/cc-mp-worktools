@@ -53,9 +53,12 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 
 両者のプロンプトは `hooks/exitplan-review/prompts/planning-{cursor,codex}.md` に外部化されている。出力は 5 項目立ての箇条書きに固定され、ノイズが少ない。
 
-- **セッション × プラン単位で最大 N 回レビュー** (既定 2 回、`EXTERNAL_AI_REVIEW_MAX` で変更可。
-  `0` で無効化)。`MODE=block` ではこれが差し戻し回数の上限。上限に達したターンは
-  「見送った」旨を `systemMessage` で通知する (黙って素通りしない)
+- **`EXTERNAL_AI_REVIEW_MAX` は「指摘ありで返ってきた回数」の上限** (既定 2 回、`0` で無効化)。
+  指摘なし (`REVIEW_CLEAN`) とレビュアー失敗は枠を戻すのでカウントされない。したがって
+  これは **差し戻しの往復 (差し戻し → 修正 → 再 ExitPlanMode) が無限に続くのを止める**
+  ための上限であって、セッション全体のレビュー回数や総待ち時間の上限ではない
+  (後述の「待ち時間とコストの見積り」を参照)。上限に達したターンは「見送った」旨を
+  `systemMessage` で通知する (黙って素通りしない)
 - プラン内容の SHA-256 ハッシュ (先頭 2000 文字の正規化版) で同一性判定
 - レビュー結果は `$TMPDIR/plan-review-<session_id>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
@@ -217,11 +220,31 @@ EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW
 | `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` | `600` | 両レビュアー共通の timeout (秒)。上限 `1500` (hooks.json の hook timeout で決まる。超える指定は clamp) |
 | `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` | 全件 | 走らせるレビュアーをカンマ区切りで選択 (例: `cursor`)。未知の名前だけを指定した場合は何も走らせない (既定へ fallback しない) |
 | `EXTERNAL_AI_PLAN_REVIEW_MODE` | `block` | `context` にすると差し戻さず、レビュー所見を `additionalContext` で Claude に渡すだけにする |
-| `EXTERNAL_AI_REVIEW_MAX` | `2` | セッションあたりの**最大レビュー回数**。`0` で無効化 (0.2.0 からの名前。`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く)。`MODE=block` では「差し戻す回数」と同義。`MODE=context` では差し戻さないので「所見を出す回数」の上限として効く。上限に達したターンは `systemMessage` でその旨を通知する |
+| `EXTERNAL_AI_REVIEW_MAX` | `2` | **指摘ありで返ってきた回数**の上限 (`MODE=block` なら差し戻した回数、`context` なら所見を出した回数)。指摘なし・レビュアー失敗は枠を戻すので数えない。`0` は特別扱いで hook 自体を止める (レビューを 1 回も走らせない)。0.2.0 からの名前で、`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く。上限到達時は `systemMessage` で通知する |
 
-**待ち時間の見積り**: 承認前の待ちは最悪 `EXTERNAL_AI_REVIEW_MAX` × timeout。既定では
-2 × 10 分 = 20 分 (レビュアーは並列なので合計ではなく最大側)。`EXTERNAL_AI_REVIEW_MAX=1`
-で 10 分、`MODE=context` なら差し戻しの往復が無くなるので 1 ラウンド分だけになる。
+**待ち時間の見積り**: 2 つを分けて考える必要がある。
+
+| 何 | 上限 |
+|---|---|
+| **プラン 1 本あたりの待ち** | `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` (既定 10 分)。レビュアーは並列なので合計ではなく**最大側** |
+| **差し戻しの往復** | `EXTERNAL_AI_REVIEW_MAX` 回 (既定 2)。`MODE=block` の「差し戻し → 修正 → 再 ExitPlanMode」ループはここで打ち止め |
+| **セッション全体の総待ち時間** | **上限なし** |
+
+総待ち時間に上限が無いのは、**指摘なしで終わったレビューが `EXTERNAL_AI_REVIEW_MAX` の
+枠を消費しない**ため。プラン内容を変えて `ExitPlanMode` を呼ぶたびに、新しいプランとして
+もう 1 回分のレビュー待ちが発生しうる (`EXTERNAL_AI_REVIEW_MAX=2` でも 3 本目・4 本目の
+プランはレビューされる)。`EXTERNAL_AI_REVIEW_MAX` が守っているのは
+「同じ作業が差し戻され続けて前に進まない」ことだけで、時間の総量ではない。
+
+総量を抑えたいときに効くのは次の 3 つ:
+
+- `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` — 1 本あたりの待ちを直接下げる (最も効く)
+- `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` — レビュアーを 1 つに絞る (並列なので待ちは
+  遅いほうに引きずられる。遅いレビュアーを外すと待ちが縮む)
+- `EXTERNAL_AI_PLAN_REVIEW=0` — この hook を止める
+
+`MODE=context` は差し戻しの往復を無くすので**その分**は縮むが、プランごとの
+1 回分の待ちは変わらない。
 
 ### post-implementation-review
 
@@ -247,10 +270,10 @@ EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW
 | hook | 起動タイミング | 1 セッションあたりの回数 |
 |---|---|---|
 | `explore-parallel` | `Explore` サブエージェント起動ごと | Explore の呼び出し回数と同じ |
-| `exitplan-review` | `ExitPlanMode` ごと (プラン内容が変わったときだけ) | 最大 `EXTERNAL_AI_REVIEW_MAX` 回 (既定 2) |
+| `exitplan-review` | `ExitPlanMode` ごと (プラン内容が変わったときだけ) | **上限なし** — プラン内容が変わるたび 1 回。`EXTERNAL_AI_REVIEW_MAX` が数えるのは「指摘ありで返った回数」だけなので、呼び出し回数の上限にはならない |
 | `post-implementation-review` | **編集のあったターンの Stop ごと** | ターン数に比例 (上限なし) |
 
-コストが効くのは 3 つ目。長時間セッションや `/loop` では毎ターン走るので、
+回数が伸びるのは 2 つ目と 3 つ目。長時間セッションや `/loop` では毎ターン走るので、
 `EXTERNAL_AI_POST_REVIEW_MIN_LINES` / `_COOLDOWN_SEC` で頻度を落とすか、
 `EXTERNAL_AI_POST_REVIEW=0` で切る。1 回あたりに送る diff は最大 40 KB
 (`MAX_DIFF_BYTES`) に制限されている。

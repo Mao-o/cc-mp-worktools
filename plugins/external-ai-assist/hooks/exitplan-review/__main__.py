@@ -13,8 +13,8 @@
 
 ## 0.6.0 で入れた「待たせ方」の制御
 
-プラン承認前のブロックは最悪 `EXTERNAL_AI_REVIEW_MAX` 回 × 各レビュアーの timeout
-かかる。0.5.0 は codex が 1500s だったので最悪 52 分だった。次の 3 つで調整する:
+プラン 1 本あたりの承認前の待ちは最悪「各レビュアーの timeout」分 (並列なので最大側)。
+0.5.0 は codex が 1500s だったのでこれだけで 25 分だった。次の 4 つで調整する:
 
 | 環境変数 | 既定 | 効果 |
 |---|---|---|
@@ -23,8 +23,16 @@
 | `EXTERNAL_AI_PLAN_REVIEW_REVIEWERS` | 全件 | `cursor` / `codex` の選択 |
 | `EXTERNAL_AI_PLAN_REVIEW_MODE` | `block` | `context` にすると差し戻さず所見だけ渡す |
 
-`EXTERNAL_AI_REVIEW_MAX` (ブロック回数) は 0.2.0 からある名前なので温存し、
-`EXTERNAL_AI_PLAN_REVIEW` と **AND** で効く (`=0` は従来どおり無効化スイッチ)。
+`EXTERNAL_AI_REVIEW_MAX` は 0.2.0 からある名前なので温存し、`EXTERNAL_AI_PLAN_REVIEW`
+と **AND** で効く (`=0` は従来どおり無効化スイッチ)。
+
+**この上限が数えているのは「指摘ありで返ってきた回数」だけ**である点に注意。
+指摘なし (`REVIEW_CLEAN`) とレビュアー失敗は `release_slot()` が枠を戻すので
+カウントされない (`tests/test_settings_flow.py::TestWhatTheBudgetActuallyCaps`)。
+つまりこれは**差し戻しの往復が無限に続くのを止める**ための上限であって、
+セッション全体のレビュー回数や総待ち時間の上限ではない — プラン内容を変えて
+`ExitPlanMode` を呼べば、上限に達していなくても新しいプランとして毎回レビューが走る。
+総量を抑える手段は timeout / レビュアー選択 / hook 自体の無効化 (README 参照)。
 
 `MODE=context` は公式の PreToolUse decision control フィールド
 `hookSpecificOutput.additionalContext` ("String added to Claude's context alongside
@@ -205,6 +213,11 @@ def release_slot(marker_file: str, reserved_hash: str) -> None:
     - count を -1 (0 未満にはしない)
     - saved_hash がまだ自分 (reserved_hash) なら空に戻す
     - 他プロセスが追い越して saved_hash を上書きしていれば hash は触らない
+
+    枠を戻すのは意図的。上限は「差し戻しの往復で前に進まなくなる」のを止めるための
+    ものなので、利用者を足止めしなかったレビュー (指摘なし / 失敗) に budget を
+    払わせない。**帰結として上限は外部 AI の呼び出し回数を縛らない** — 別のプランを
+    出せば毎回レビューが走る。README の待ち時間・コスト見積もりはこの前提で書くこと。
     """
     try:
         with flock.locked_file(marker_file) as f:
