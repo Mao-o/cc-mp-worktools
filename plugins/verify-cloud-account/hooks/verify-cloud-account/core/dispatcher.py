@@ -41,6 +41,20 @@ def _normalize_candidate(candidate: str, service) -> tuple[str, dict]:
     return cli_options.strip_leading_options(candidate, with_value, flags)
 
 
+def _context_override(candidate: str, service) -> dict[str, str]:
+    """候補に書かれた「照合先を決める option」の値を返す (`--profile` / `--project` 等)。
+
+    service が `CONTEXT_OPTIONS` を宣言していなければ常に空 dict (= 従来どおり
+    アクティブなアカウントと照合)。値の解析は共通スキャナ
+    (`cli_options.find_context_options`) に一本化してある。
+    """
+    options = getattr(service, "CONTEXT_OPTIONS", None)
+    if not options:
+        return {}
+    with_value = getattr(service, "GLOBAL_OPTIONS_WITH_VALUE", frozenset())
+    return cli_options.find_context_options(candidate, options, with_value)
+
+
 def _candidate_forms(candidate: str, service) -> tuple[str, ...]:
     """判定に使う候補の形 (元の形 + global option を剥がした形、同じなら 1 つ)。
 
@@ -172,15 +186,20 @@ def _analyze_command(command: str) -> tuple[list[tuple], list]:
                 switching.append(other)
         if svc is None or _is_readonly(forms, svc):
             continue
-        key = (svc, tuple(sorted(inline_env.items())))
+        # コンテキスト option (`aws --profile other ...`) は inline env と同じく
+        # 「検証すべき対象」を変えるので grouping key に含める。含めないと
+        # `aws --profile a s3 rm && aws --profile b s3 rm` が 1 エントリに畳まれ、
+        # 後段 (b) が検証されないまま誤 allow される。
+        ctx = _context_override(cand, svc)
+        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
         if key not in cand_map:
             cand_map[key] = []
             order.append(key)
         cand_map[key].append((cand, forms[-1]))
     targets: list = []
     for key in order:
-        svc, env_items = key
-        targets.append((svc, cand_map[key], dict(env_items)))
+        svc, env_items, ctx_items = key
+        targets.append((svc, cand_map[key], dict(env_items), dict(ctx_items)))
     return targets, switching
 
 
@@ -287,7 +306,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         return output.deny(body)
 
     if accounts_path is None:
-        hints = [getattr(svc, "SETUP_HINT", "") for svc, *_ in targets]
+        hints = [getattr(svc, "SETUP_HINT", "") for svc, *_rest in targets]
         hint_block = "\n".join(h for h in hints if h)
         msg = (
             ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
@@ -319,7 +338,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         accounts_mtime = 0.0
 
     errors: list[str] = []
-    for svc, cands, inline_env in targets:
+    for svc, cands, inline_env, ctx in targets:
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
             errors.append(
@@ -350,7 +369,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         # cands だけを見ると `gh auth login && gh pr create` の成功が cache される。
         switching_here = svc in switching
         if not switching_here and cache.get_success(
-            svc_name, project_dir, entry, accounts_mtime, inline_env
+            svc_name, project_dir, entry, accounts_mtime, inline_env, ctx
         ):
             continue
 
@@ -358,7 +377,7 @@ def dispatch(command: str, cwd: str) -> dict | None:
         # inline_env が空なら env=None (= 親環境継承) のままにする。空 dict を
         # subprocess.run(env={}) に渡すと環境変数が一切無い状態になり危険なため。
         proc_env = {**os.environ, **inline_env} if inline_env else None
-        err = svc.verify(entry, project_dir, env=proc_env)
+        err = svc.verify(entry, project_dir, env=proc_env, context=ctx)
         if err:
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
@@ -367,7 +386,8 @@ def dispatch(command: str, cwd: str) -> dict | None:
             )
         elif not switching_here:
             cache.set_success(
-                svc_name, project_dir, entry, accounts_mtime, inline_env, epoch=epoch
+                svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
+                epoch=epoch,
             )
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""

@@ -62,11 +62,14 @@ STATE_CHANGING = [
 ]
 # CLI 名直後に置ける global option (`firebase -P prod use ...`)。dispatcher が剥がした
 # 形でも READONLY / STATE_CHANGING / self-remediation を判定する (core/cli_options.py)。
-# `--project` / `-P` の値は将来の flag 照合 (629.4) で使う。
 GLOBAL_OPTIONS_WITH_VALUE = frozenset({
     "--project", "-P", "--account", "--config", "-c", "--token",
 })
 GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interactive"})
+# 「どの project に対して実行するか」をコマンド側で指定する option (v0.9.0)。
+# firebase-tools は `--project` / `-P` の値を `.firebaserc` の alias として解決し、
+# 該当が無ければ project ID そのものとして使う (requireProject)。
+CONTEXT_OPTIONS = {"--project": "project", "-P": "project"}
 ACCOUNT_KEY = "firebase"
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
@@ -272,7 +275,13 @@ def _alias_lines(expected: dict) -> str:
     )
 
 
-def verify(expected, project_dir: str, env=None) -> str | None:
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>"}`)。
+
+    `--project` / `-P` はその実行だけ対象 project を差し替えるため、アクティブ
+    project ではなく **flag の値を `.firebaserc` で解決したもの**を照合する
+    (CLI 本体の解決規則と同じ: alias にあれば対応 project ID、無ければ値そのもの)。
+    """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
     if isinstance(expected, dict):
         valid = [v for v in expected.values() if isinstance(v, str) and v]
@@ -285,6 +294,30 @@ def verify(expected, project_dir: str, env=None) -> str | None:
         return (
             f'Firebase: accounts.local.json の "firebase" は文字列または '
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
+        )
+
+    override = (context or {}).get("project")
+    if override is not None:
+        root = _project_root(project_dir)
+        resolved = _firebaserc_aliases(root).get(override, override)
+        shown = (
+            f"--project {override}"
+            if resolved == override
+            else f"--project {override} (→ {resolved})"
+        )
+        if isinstance(expected, dict):
+            if resolved in valid:
+                return None
+            return (
+                f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
+                f"期待={', '.join(sorted(set(valid)))} のいずれか\n"
+                f"切り替え:\n{_alias_lines(expected)}"
+            )
+        if resolved == expected:
+            return None
+        return (
+            f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={expected}"
+            f" — --project を外すか --project {expected} を指定してください"
         )
 
     current, err = _resolve(project_dir, env)

@@ -56,8 +56,7 @@ STATE_CHANGING = [
 ]
 # CLI 名直後に置ける global flag (`gcloud --project x config set ...`)。dispatcher が
 # 剥がした形でも READONLY / STATE_CHANGING / self-remediation を判定する
-# (core/cli_options.py)。`--project` / `--account` / `--configuration` の値は将来の
-# flag 照合 (629.4) で使う。
+# (core/cli_options.py)。
 GLOBAL_OPTIONS_WITH_VALUE = frozenset({
     "--account", "--billing-project", "--configuration", "--flags-file", "--flatten",
     "--format", "--project", "--verbosity", "--access-token-file",
@@ -66,6 +65,15 @@ GLOBAL_OPTIONS_WITH_VALUE = frozenset({
 GLOBAL_FLAGS = frozenset({
     "--quiet", "-q", "--log-http", "--user-output-enabled", "--no-user-output-enabled",
 })
+# 「どの project / account / configuration に対して実行するか」をコマンド側で指定する
+# option (v0.9.0)。dispatcher が候補全体から値を拾い verify に渡す。
+# `--project` / `--account` は値そのものが照合対象になり、`--configuration` は
+# 「どの設定セットの現在値を読むか」を変えるので検証コマンドに引き渡す。
+CONTEXT_OPTIONS = {
+    "--project": "project",
+    "--account": "account",
+    "--configuration": "configuration",
+}
 ACCOUNT_KEY = "gcloud"
 SETUP_HINT = (
     'GCP 最小例: {"gcloud": "my-project-id"}。'
@@ -74,16 +82,22 @@ SETUP_HINT = (
 )
 
 
-def _get(key: str, env=None) -> tuple[str | None, str | None]:
+def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None]:
     """`gcloud config get-value <key>` を実行し (value, error) を返す。
 
     env: コマンド行頭のインライン環境変数をマージした完全 env
     (`CLOUDSDK_CORE_PROJECT` / `CLOUDSDK_ACTIVE_CONFIG_NAME` 等)。
     None なら hook プロセスの環境を継承する。
+    configuration: 候補コマンドが `--configuration X` を指定していた場合の値。
+    `--configuration` は gcloud の global flag でどのコマンドにも付けられるため、
+    検証コマンドにも同じ値を渡して実行時と同じ設定セットの現在値を読む。
     """
+    argv = ["gcloud", "config", "get-value", key]
+    if configuration:
+        argv += ["--configuration", configuration]
     try:
         result = subprocess.run(
-            ["gcloud", "config", "get-value", key],
+            argv,
             capture_output=True,
             text=True,
             timeout=10,
@@ -102,8 +116,24 @@ def _get(key: str, env=None) -> tuple[str | None, str | None]:
     return value, None
 
 
-def _check_project(expected: str, env=None) -> str | None:
-    current, err = _get("project", env)
+def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str | None:
+    """`--project` / `--account` の値を期待値と直接照合する (一致なら None)。
+
+    これらの flag はその実行だけ対象を差し替えるので、アクティブ設定ではなく
+    **書かれた値そのもの**が実際に使われる対象になる。
+    """
+    if override == expected:
+        return None
+    return (
+        f"GCP {label}不一致: コマンド指定 {flag}={override}, 期待={expected}"
+        f" — {flag} を外すか {flag} {expected} を指定してください"
+    )
+
+
+def _check_project(expected: str, env=None, configuration=None, override=None) -> str | None:
+    if override is not None:
+        return _flag_mismatch("プロジェクト", "--project", override, expected)
+    current, err = _get("project", env, configuration)
     if err:
         return err
     if current is None:
@@ -119,8 +149,10 @@ def _check_project(expected: str, env=None) -> str | None:
     return None
 
 
-def _check_account(expected: str, env=None) -> str | None:
-    current, err = _get("account", env)
+def _check_account(expected: str, env=None, configuration=None, override=None) -> str | None:
+    if override is not None:
+        return _flag_mismatch("アカウント", "--account", override, expected)
+    current, err = _get("account", env, configuration)
     if err:
         return err
     if current is None:
@@ -170,7 +202,20 @@ def suggest_accounts_entry(project_dir: str) -> str | dict | None:
     return entry or None
 
 
-def verify(expected, project_dir: str, env=None) -> str | None:
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 候補コマンドのコンテキスト option。
+
+    `--project` / `--account` は**キーごとに独立して**上書きする。
+    `gcloud --project other run deploy` は project の照合先を other に変えるが、
+    account の期待値がある限り account は従来どおりアクティブ値と照合する
+    (project だけ見て早期 return すると account の false-allow を作ってしまう)。
+    `--configuration` は上書きされなかったキーの現在値取得に引き渡す。
+    """
+    ctx = context or {}
+    configuration = ctx.get("configuration")
+    project_override = ctx.get("project")
+    account_override = ctx.get("account")
+
     if isinstance(expected, dict):
         project_want = expected.get("project")
         account_want = expected.get("account")
@@ -187,7 +232,9 @@ def verify(expected, project_dir: str, env=None) -> str | None:
                     f"(現在: {type(project_want).__name__})。"
                 )
             else:
-                err = _check_project(project_want, env)
+                err = _check_project(
+                    project_want, env, configuration, project_override
+                )
                 if err:
                     errors.append(err)
         if account_want:
@@ -197,7 +244,9 @@ def verify(expected, project_dir: str, env=None) -> str | None:
                     f"(現在: {type(account_want).__name__})。"
                 )
             else:
-                err = _check_account(account_want, env)
+                err = _check_account(
+                    account_want, env, configuration, account_override
+                )
                 if err:
                     errors.append(err)
         if not errors:
@@ -212,7 +261,7 @@ def verify(expected, project_dir: str, env=None) -> str | None:
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
         )
 
-    return _check_project(expected, env)
+    return _check_project(expected, env, configuration, project_override)
 
 
 _CONFIG_SET_RE = re.compile(r"^gcloud\s+config\s+set\s+(project|account)\s+(\S+)\s*$")

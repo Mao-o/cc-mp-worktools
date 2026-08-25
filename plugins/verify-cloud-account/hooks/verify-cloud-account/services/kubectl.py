@@ -34,8 +34,7 @@ STATE_CHANGING = [
 ]
 # CLI 名直後に置ける global option (`kubectl --context x config use-context ...`)。
 # dispatcher が剥がした形でも READONLY / STATE_CHANGING / self-remediation を判定する
-# (core/cli_options.py)。`--context` / `--kubeconfig` の値は将来の flag 照合 (629.4)
-# で使う (`_context_override` は現状未配線)。
+# (core/cli_options.py)。
 GLOBAL_OPTIONS_WITH_VALUE = frozenset({
     "--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server",
     "-s", "--token", "--as", "--as-group", "--as-uid", "--cache-dir",
@@ -47,33 +46,34 @@ GLOBAL_FLAGS = frozenset({
     "--insecure-skip-tls-verify", "--match-server-version", "--warnings-as-errors",
     "--disable-compression",
 })
+# 「どの context / kubeconfig に対して実行するか」をコマンド側で指定する option
+# (v0.9.0)。dispatcher が候補全体から値を拾い verify に渡す。
+# 旧 `_context_override` (このモジュール専用の regex) は共通スキャナ
+# (core/cli_options.find_context_options) に置き換えて削除した — `--context=x` /
+# `--context x` しか見ておらず、値を取る他 option の値に現れた `--context` を
+# 誤採用しうるうえ、どこからも呼ばれていなかった。
+CONTEXT_OPTIONS = {"--context": "context", "--kubeconfig": "kubeconfig"}
 ACCOUNT_KEY = "kubectl"
 SETUP_HINT = (
     'kubectl 最小例: {"kubectl": "my-context-name"}。'
     "kubectl config current-context で現在値を確認可"
 )
 
-_CONTEXT_OVERRIDE_RE = re.compile(r"(?:^|\s)--context(?:=|\s+)(\S+)")
 
-
-def _context_override(command: str) -> str | None:
-    """`kubectl --context foo ...` のようなオプション指定があれば抽出する。
-
-    見つからなければ None。見つかった場合は値の文字列を返す。
-    """
-    m = _CONTEXT_OVERRIDE_RE.search(command)
-    return m.group(1) if m else None
-
-
-def _run_current_context(env=None) -> tuple[str | None, str | None]:
+def _run_current_context(env=None, kubeconfig=None) -> tuple[str | None, str | None]:
     """kubectl config current-context を実行し (context, error_reason) を返す。
 
     env: コマンド行頭のインライン環境変数をマージした完全 env (`KUBECONFIG` 等)。
     None なら hook プロセスの環境を継承する。
+    kubeconfig: 候補コマンドが `--kubeconfig X` を指定していた場合の値。
+    同じ option を検証コマンドにも渡し、実行時と同じファイルの current-context を読む。
     """
+    argv = ["kubectl", "config", "current-context"]
+    if kubeconfig:
+        argv += ["--kubeconfig", kubeconfig]
     try:
         result = subprocess.run(
-            ["kubectl", "config", "current-context"],
+            argv,
             capture_output=True,
             text=True,
             timeout=10,
@@ -101,13 +101,29 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
-def verify(expected, project_dir: str, env=None) -> str | None:
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 候補コマンドのコンテキスト option (`{"context": ..., "kubeconfig": ...}`)。
+
+    `--context X` はその実行だけ context を差し替えるので、現在の
+    current-context ではなく **X 自体**を期待値と照合する。`--kubeconfig X` は
+    検証コマンドにも渡して同じファイルの current-context を読む。
+    """
     if not isinstance(expected, str):
         return (
             f'kubectl: accounts.local.json の "{ACCOUNT_KEY}" 値は文字列で指定してください。'
         )
 
-    current, err = _run_current_context(env)
+    ctx = context or {}
+    override = ctx.get("context")
+    if override is not None:
+        if override == expected:
+            return None
+        return (
+            f"kubectl コンテキスト不一致: コマンド指定 --context={override}, "
+            f"期待={expected} — --context を外すか --context {expected} を指定してください"
+        )
+
+    current, err = _run_current_context(env, ctx.get("kubeconfig"))
     if err:
         return err
 

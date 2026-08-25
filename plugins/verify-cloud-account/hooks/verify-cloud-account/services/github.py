@@ -166,7 +166,14 @@ def suggest_accounts_entry(project_dir: str) -> str | dict | None:
     return dict(active)
 
 
-def verify(expected, project_dir: str, env=None) -> str | None:
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 他 service と揃えた interface。gh では**使わない**。
+
+    `gh` の `--hostname` / `--user` は「どのアカウントで実行するか」ではなく
+    **操作対象**の指定 (例: `gh auth refresh --hostname ghe.example.com` は
+    アクティブアカウントのままリモートを指定するだけ) なので、`CONTEXT_OPTIONS`
+    を宣言せず照合先は常にアクティブアカウントとする (README 既知の制限)。
+    """
     active, err = _fetch_active_accounts(env)
     if err:
         return err

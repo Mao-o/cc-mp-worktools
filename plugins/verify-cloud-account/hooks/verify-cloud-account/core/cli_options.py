@@ -7,16 +7,27 @@
 pattern (`^aws\\s+sso\\s+login`) はこの形に一致しないため、dispatcher は判定の前に
 option を剥がして `aws sso login` に正規化する (元の形も併せて判定する)。
 
-剥がした option は dict で返す。`--profile` / `--project` / `--context` の値は
-将来の flag 照合 (bd_092a232e-629.4) で検証に反映するために捨てない。
-各 service は `GLOBAL_OPTIONS_WITH_VALUE` (値を取る option) / `GLOBAL_FLAGS`
-(値を取らない option) を宣言する。`--help` / `--version` は含めない (剥がすと
-`aws --version` が `aws` になり readonly 判定から外れるため、元の形で判定させる)。
+剥がした option は dict で返す。各 service は `GLOBAL_OPTIONS_WITH_VALUE`
+(値を取る option) / `GLOBAL_FLAGS` (値を取らない option) を宣言する。
+`--help` / `--version` は含めない (剥がすと `aws --version` が `aws` になり
+readonly 判定から外れるため、元の形で判定させる)。
+
+このモジュールには**用途の違う 2 つの走査**がある。option トークンの分解規則
+(`--key=value` / 分離形 / 短縮連結 `-Pprod` / `--` 終端) は
+`_option_name_value` に一本化してあり、差は「どこで走査をやめるか」だけ:
+
+- `strip_leading_options`: CLI 名直後の option 列だけを見て**正規化**する。
+  未知の option は値を取るか判らないので**そこで打ち切り候補を変更しない**
+  (保守的 = readonly / 切替判定に乗らず通常検証へ落ちる)
+- `find_context_options`: どのアカウントと照合するかを決める option
+  (`--profile` / `--project` / `--context` 等) を**行全体**から拾う。
+  これらはサブコマンドの後ろにも書けるため (`aws s3 ls --profile prod`)、
+  未知の `-x` は bool と見なして**走査を続ける**必要がある
 """
 from __future__ import annotations
 
 import shlex
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 
 _TRUE_VALUES = frozenset({"true", "t", "yes", "y", "1"})
 _FALSE_VALUES = frozenset({"false", "f", "no", "n", "0"})
@@ -25,8 +36,8 @@ _FALSE_VALUES = frozenset({"false", "f", "no", "n", "0"})
 def _flag_value(value: str) -> str | bool:
     """`--flag=<value>` の値を bool として解釈する (できなければ生文字列のまま)。
 
-    **剥がすかどうかの判定には使わない** (値に関わらず剥がす)。将来の flag 照合
-    (bd_092a232e-629.4) のために書かれた形を保つだけ。
+    **剥がすかどうかの判定には使わない** (値に関わらず剥がす)。書かれた形を
+    option dict に保つためだけに使う。
     """
     v = value.strip().lower()
     if v in _TRUE_VALUES:
@@ -36,6 +47,36 @@ def _flag_value(value: str) -> str | bool:
     return value
 
 
+def _option_name_value(
+    tok: str, with_value: Collection[str]
+) -> tuple[str, str | None, bool]:
+    """option トークンを (name, 埋め込み値, 値が埋め込まれているか) に分解する。
+
+    - `--key=value` / `-x=value` → (`--key`, `value`, True)
+    - 短縮の連結形 `-Pprod` (`-P` が値を取る option のときだけ)
+      → (`-P`, `prod`, True)
+    - それ以外 (`--key` / `-x` / 未知トークン) → (tok, None, False)
+
+    `--flag=false` のような明示 false も「値が埋め込まれた 1 トークン」として
+    同じ経路で扱う (真偽の解釈は呼び出し側の責務)。
+    """
+    name, eq, value = tok.partition("=")
+    if eq:
+        return name, value, True
+    if len(tok) > 2 and not tok.startswith("--") and tok[:2] in with_value:
+        return tok[:2], tok[2:], True
+    return tok, None, False
+
+
+def _is_statically_resolvable(value: str) -> bool:
+    """flag の値をそのまま期待値と突き合わせてよいか。
+
+    未展開の変数参照 (`$VAR` / `${VAR}`) やコマンド置換を含む値、空文字は hook からは
+    解決できないので採用しない (= 既定コンテキストでの照合にフォールバックする)。
+    """
+    return bool(value) and "$" not in value and "`" not in value
+
+
 def strip_leading_options(
     candidate: str,
     with_value: Collection[str],
@@ -43,8 +84,9 @@ def strip_leading_options(
 ) -> tuple[str, dict[str, str | bool]]:
     """候補の CLI 名直後に並ぶ global option を剥がし (正規化後の候補, option dict) を返す。
 
-    - `--opt value` / `--opt=value` (with_value) と `--flag` / `--flag=<bool>` (flags)
-      を先頭から順に消費する。`--` は option の終端 (それ自体も消費する)。
+    - `--opt value` / `--opt=value` / 短縮連結 `-Pvalue` (with_value) と
+      `--flag` / `--flag=<bool>` (flags) を先頭から順に消費する。
+      `--` は option の終端 (それ自体も消費する)。
       boolean option の値は**剥がすかどうかに影響しない** (下記 `_flag_value`)
     - 剥がすのは CLI 名直後の option だけで、その後ろの subcommand 列はそのまま
       残る。つまり正規化しても「どの操作が走るか」は変わらないため、剥がし過ぎが
@@ -70,9 +112,11 @@ def strip_leading_options(
             break
         if not tok.startswith("-") or tok == "-":
             break
-        name, eq, value = tok.partition("=")
+        name, embedded, has_value = _option_name_value(tok, with_value)
+        eq = has_value
+        value = embedded if embedded is not None else ""
         if name in with_value:
-            if eq:
+            if has_value:
                 opts[name] = value
                 i += 1
                 continue
@@ -96,3 +140,67 @@ def strip_leading_options(
     if i == 1:
         return candidate, {}
     return shlex.join([tokens[0], *tokens[i:]]), opts
+
+
+def find_context_options(
+    candidate: str,
+    context_options: Mapping[str, str],
+    with_value: Collection[str],
+) -> dict[str, str]:
+    """候補の**全体**を走査し、照合先コンテキストを決める option の値を返す。
+
+    `aws --profile other s3 rm ...` / `gcloud run deploy --project other` /
+    `kubectl get pods --context other` のように、「どのアカウント / プロジェクト /
+    コンテキストに対して実行するか」を指定する option の値を取り出す。返り値の
+    キーは `context_options` の値 (論理名、例 `"profile"`)。
+
+    `strip_leading_options` との違いは**走査をやめる条件**だけ:
+
+    - これらの option は global option なのでサブコマンドの後ろにも書ける。
+      未知の `-x` に当たるたび打ち切っていては拾えないので、未知 option は
+      値を取らない (bool) と見なして走査を続ける
+    - 代償として「未知の値付き option の値が context option に見える」形
+      (`aws s3 cp --exclude --profile x`) は誤検出しうる。全サブコマンドの
+      option 表を持てない以上避けられないため、README の既知の制限に明記する
+
+    形式は `_option_name_value` に一本化 (= `--opt value` / `--opt=value` /
+    `-Pvalue` / `-P=value` / `-P value` を同じ規則で扱う)。`--` 以降は後続コマンドの
+    引数なので走査しない (`kubectl exec pod -- cmd --context x` を誤採用しない)。
+    同名 option が複数あれば最後が有効 (argparse / pflag / commander いずれも
+    last-wins)。値が静的に解決できない (`$VAR` 等) 場合はキーごと捨てて既定
+    コンテキストでの照合にフォールバックする。
+    """
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        return {}
+    # context option 自身も「値を取る option」として消費規則に載せる。
+    known_with_value = set(with_value) | set(context_options)
+    found: dict[str, str] = {}
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if tok == "--":
+            break
+        if not tok.startswith("-") or tok == "-":
+            continue
+        name, embedded, has_value = _option_name_value(tok, known_with_value)
+        if name not in known_with_value:
+            # 未知 option は bool 扱いで 1 トークン消費し、走査を続ける。
+            continue
+        if has_value:
+            value = embedded or ""
+        else:
+            if i >= len(tokens):
+                break
+            value = tokens[i]
+            i += 1
+        key = context_options.get(name)
+        if key is None:
+            continue
+        if _is_statically_resolvable(value):
+            found[key] = value
+        else:
+            found.pop(key, None)
+    return found

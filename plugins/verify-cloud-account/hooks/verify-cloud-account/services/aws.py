@@ -37,7 +37,7 @@ STATE_CHANGING = [
 ]
 # CLI 名直後に置ける global option (`aws --profile prod sso login`)。dispatcher が
 # 剥がした形 (`aws sso login`) でも READONLY / STATE_CHANGING を判定する
-# (core/cli_options.py)。`--profile` の値は将来の flag 照合 (629.4) で使う。
+# (core/cli_options.py)。
 GLOBAL_OPTIONS_WITH_VALUE = frozenset({
     "--profile", "--region", "--output", "--query", "--endpoint-url", "--color",
     "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--cli-binary-format",
@@ -46,6 +46,11 @@ GLOBAL_FLAGS = frozenset({
     "--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request", "--no-cli-pager",
     "--cli-auto-prompt", "--no-cli-auto-prompt",
 })
+# 「どの認証情報で実行するか」をコマンド側で指定する option (v0.9.0)。dispatcher が
+# 候補全体から値を拾い (core/cli_options.find_context_options)、verify に渡す。
+# `aws --profile other s3 rm ...` を hook の既定 profile で検証すると
+# 「検証は既定 / 実行は other」の false-allow になるため、検証もその profile で行う。
+CONTEXT_OPTIONS = {"--profile": "profile"}
 ACCOUNT_KEY = "aws"
 SETUP_HINT = (
     'AWS 最小例: {"aws": "123456789012"}。'
@@ -55,7 +60,7 @@ SETUP_HINT = (
 _ROLE_ARN_ACCOUNT_RE = re.compile(r"^arn:aws[\w-]*:iam::(\d{12}):")
 
 
-def _run_sts_get_caller_identity(env=None) -> tuple[str | None, str | None, str]:
+def _run_sts_get_caller_identity(env=None, profile=None) -> tuple[str | None, str | None, str]:
     """aws sts get-caller-identity を実行し (account_id, cli_error, stderr_hint) を返す。
 
     - 取得成功: (account_id, None, "")
@@ -65,10 +70,18 @@ def _run_sts_get_caller_identity(env=None) -> tuple[str | None, str | None, str]
 
     env: コマンド行頭のインライン環境変数をマージした完全 env (`AWS_PROFILE` 等)。
     None なら hook プロセスの環境を継承する (builder からの呼び出し等)。
+    profile: 検証対象コマンドが `--profile X` で指定していた profile 名。
+    同じ option を検証コマンドにも付けることで、CLI の資格情報解決順
+    (コマンドライン option > 環境変数) を実行時とそのまま揃える
+    (`AWS_PROFILE` を env にマージする方式だと、行頭インライン env と
+    `--profile` が食い違ったとき実行時と逆の優先順になる)。
     """
+    argv = ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"]
+    if profile:
+        argv += ["--profile", profile]
     try:
         result = subprocess.run(
-            ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"],
+            argv,
             capture_output=True,
             text=True,
             timeout=15,
@@ -219,27 +232,36 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
-def verify(expected, project_dir: str, env=None) -> str | None:
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 候補コマンドが指定していたコンテキスト option (`{"profile": "..."}`)。
+
+    profile 指定があればその profile で `sts get-caller-identity` を実行し、
+    「実行されるアカウント」を検証する (指定が無ければ従来どおり既定で照合)。
+    """
     if not isinstance(expected, str):
         return (
             f'AWS: accounts.local.json の "aws" は文字列で指定してください '
             f'(現在: {type(expected).__name__})。'
         )
 
-    current, err, hint = _run_sts_get_caller_identity(env)
+    profile = (context or {}).get("profile")
+    current, err, hint = _run_sts_get_caller_identity(env, profile)
     if err:
         return err
+
+    # どの profile で検証したかを文面に出す (既定と `--profile` 指定を区別できるように)。
+    scope = f" (--profile {profile})" if profile else ""
 
     if current is None:
         detail = f" ({hint})" if hint else ""
         return (
-            f"AWS: 認証情報を取得できません{detail}。\n"
+            f"AWS: 認証情報を取得できません{scope}{detail}。\n"
             + _switch_guidance(expected, env, include_configure=True)
         )
 
     if current != expected:
         return (
-            f"AWS アカウント不一致: 現在={current}, 期待={expected}\n"
+            f"AWS アカウント不一致{scope}: 現在={current}, 期待={expected}\n"
             + _switch_guidance(expected, env, include_configure=False)
         )
 
