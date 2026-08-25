@@ -81,6 +81,38 @@ class TestDuration(SettingsTestCase):
         self.assertEqual(settings.duration(VAR, 1.0, 600), 1.0)
 
 
+class TestNonFinite(SettingsTestCase):
+    """`nan` / `inf` は既定値に倒す (`float()` がこれらを受理してしまうため)。
+
+    `nan` を通すと `parsed <= 0` の下限チェックをすり抜け、`min(nan, maximum)` も
+    NaN のまま `Popen.communicate(timeout=...)` に渡って `ValueError` になる。
+    Stop hook はそこで claim を握ったまま落ち、TTL (900s) までレビューが沈黙する。
+    """
+
+    _NON_FINITE = ("nan", "NaN", "NAN", "inf", "INF", "-inf", "Infinity", "-Infinity")
+
+    def test_duration_rejects_non_finite(self):
+        for value in self._NON_FINITE:
+            with self.subTest(value=value):
+                self.set(value)
+                self.assertEqual(settings.duration(VAR, 300, 600), 300)
+
+    def test_count_rejects_non_finite(self):
+        """`int(nan)` は ValueError、`int(inf)` は OverflowError を送出する。"""
+        for value in self._NON_FINITE:
+            with self.subTest(value=value):
+                self.set(value)
+                self.assertEqual(settings.count(VAR, 2), 2)
+
+    def test_finite_values_still_pass_through(self):
+        """回帰: 非有限を弾く判定が普通の値まで巻き込まないこと。"""
+        for value, dur, cnt in (("600", 600, 600), ("1800.0", 600, 1800), ("6e2", 600, 600)):
+            with self.subTest(value=value):
+                self.set(value)
+                self.assertEqual(settings.duration(VAR, 300, 600), dur)
+                self.assertEqual(settings.count(VAR, 2), cnt)
+
+
 class TestCount(SettingsTestCase):
     def test_unset_uses_default(self):
         self.assertEqual(settings.count(VAR, 2), 2)

@@ -1,4 +1,4 @@
-"""0.6.0 の頻度制御と完了通知 (zh5.4 / zh5.22)。
+"""0.6.0 の頻度制御と完了通知。
 
 - `EXTERNAL_AI_POST_REVIEW_MIN_LINES` / `_COOLDOWN_SEC` の見送りは **pending を消費しない**
 - 完了時に所要時間と結果を `systemMessage` で出す
@@ -202,8 +202,45 @@ class TestCooldown(HookTestCase):
         self.assertReviewed("b.py")
 
 
+class TestClaimSurvivesException(HookTestCase):
+    """レビュー中の例外で claim を握ったまま落ちないこと。
+
+    落ちると in-flight に残り、TTL (900s) が切れるまでこのセッションの変更が
+    pending へ戻らない = 15 分間レビューが沈黙する。「hook が無言で詰まる」という
+    この batch の対象そのものなので、例外は必ず復元経路を通す。
+    """
+
+    def test_exception_restores_pending_and_does_not_propagate(self):
+        path = self.edit(SESSION, "a.py", "v1\n")
+        # 不正な timeout が Popen に渡ったときに実際に出る例外
+        output = self.stop_raising(SESSION, ValueError("timeout must be a number"))
+
+        self.assertEqual(self.pending(SESSION), [path], "例外で claim が失われている")
+        self.assertIn("レビューを完了できませんでした", output)
+
+    def test_next_turn_reviews_the_restored_paths(self):
+        self.edit(SESSION, "a.py", "v1\n")
+        self.stop_raising(SESSION, RuntimeError("boom"))
+
+        self.stop(SESSION, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+
+    def test_in_flight_is_cleared_so_ttl_is_not_needed(self):
+        self.edit(SESSION, "a.py", "v1\n")
+        self.stop_raising(SESSION, RuntimeError("boom"))
+
+        import json as _json
+        import os as _os
+
+        state_file = _os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{SESSION}.json"
+        )
+        with open(state_file) as f:
+            self.assertEqual(_json.load(f)["in_flight"], {}, "in-flight が残っている")
+
+
 class TestCompletionNotice(HookTestCase):
-    """zh5.4: 最大 5 分ブロックした結果を利用者に伝える (stderr は debug log 止まり)。"""
+    """最大 5 分ブロックした結果を利用者に伝える (stderr は debug log 止まり)。"""
 
     def test_clean_reports_elapsed_and_file_count(self):
         self.edit(SESSION, "a.py", "v1\n")

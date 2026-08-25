@@ -1,4 +1,4 @@
-"""zh5.6: `EXTERNAL_AI_EXPLORE_PARALLEL=0` で並走を止められること。
+"""`EXTERNAL_AI_EXPLORE_PARALLEL=0` で並走を止められること。
 
 0.5.0 まではスイッチが皆無で、`cursor` を PATH から外す以外に止める手段が無かった。
 他 2 hook (`EXTERNAL_AI_REVIEW_MAX` / `EXTERNAL_AI_POST_REVIEW`) とは独立に効く。

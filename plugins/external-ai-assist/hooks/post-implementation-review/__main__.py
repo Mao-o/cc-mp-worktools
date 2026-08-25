@@ -260,7 +260,7 @@ def _cooldown_notice(session_id: str) -> str | None:
 
     `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` は「前回レビュー完了から N 秒未満なら
     今回は走らせない」。**pending は消費しない**ので、貯まった変更は cooldown 明けの
-    Stop でまとめて 1 回のレビューに載る (zh5.22)。
+    Stop でまとめて 1 回のレビューに載る。
 
     pending が空のターンでは黙る。編集していないターンまで毎回通知すると、
     通知そのものがノイズになって読まれなくなる。
@@ -285,18 +285,51 @@ def _cooldown_notice(session_id: str) -> str | None:
 
 
 def _review_claim(payload: dict, session_id: str, root: str) -> dict:
-    """claim → 除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
+    """claim を取り、**何が起きても握りっぱなしにしない**ことを保証する薄い外枠。
 
-    利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
-    `decision` / `reason` と同居させる。公式 docs の共通フィールドで Stop でも有効)。
-    systemMessage が表示されない環境でも stderr に同じ内容を残し、除外そのものは通知の
-    配信に依存しない。
+    claim を取った後で例外が出ると、in-flight にエントリが残ったまま hook が死ぬ。
+    復元されるのは TTL (`IN_FLIGHT_TTL_SEC` = 900s) 超過後の Stop なので、その間
+    このセッションの変更は pending へ戻らず**レビューが 15 分沈黙する**。呼び出し元の
+    fail-open (`__main__` の `except Exception`) はプロセスを守るだけで状態は戻さない。
+
+    実際の経路: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` に非有限値が入ると
+    `Popen.communicate(timeout=nan)` が `ValueError` を投げる (この穴は
+    `_common/settings.py` 側でも塞いだが、**例外の出どころを 1 つ塞ぐより
+    「claim は必ず戻る」を構造で保証するほうが強い**)。
+
+    復元は `claimed` 全件に対して行う (レビュー済みのものが混ざっても、hash 一致で
+    次回の `_collect_diffs` が落とすので二重レビューにはならない)。除外済みパスが
+    戻っても、除外は claim のたびに再適用されるので外部に送られることはない。
     """
     claim = state.claim_pending(session_id)
     if claim is None:
         log("このセッションが変更したファイルが無いため skip")
         return {}
     claim_id, claimed = claim
+    try:
+        return _run_review(session_id, root, claim_id, claimed)
+    except Exception as e:
+        log(f"レビュー中に例外 (claim を pending へ戻す): {e}")
+        state.restore_claim(session_id, claim_id, claimed)
+        return _with_notices(
+            {},
+            [
+                f"レビューを完了できませんでした ({type(e).__name__})。"
+                f"{len(claimed)} ファイルは次のレビューに持ち越します"
+            ],
+        )
+
+
+def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -> dict:
+    """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
+
+    利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
+    `decision` / `reason` と同居させる。公式 docs の共通フィールドで Stop でも有効)。
+    systemMessage が表示されない環境でも stderr に同じ内容を残し、除外そのものは通知の
+    配信に依存しない。
+
+    ここから送出された例外は `_review_claim` が拾って claim を復元する。
+    """
     notices: list[str] = []
 
     rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
@@ -388,7 +421,7 @@ def _count_changed_lines(sections: list[str]) -> int:
     """diff の追加・削除行数を数える。
 
     しきい値の単位を「ファイル数」ではなく行数にしているのは、typo 1 行の修正と
-    1 ファイル 300 行の書き換えを区別したいのがチケットの主旨 (zh5.22) だから。
+    1 ファイル 300 行の書き換えを区別したいのが本設定の主旨だから。
 
     **接頭辞でファイルヘッダを判別してはいけない**。`sections` の 1 要素は
     `gitscan.path_diff` が返す 1 ファイル分の diff なので、`--- a/path` /

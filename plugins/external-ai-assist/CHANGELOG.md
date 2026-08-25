@@ -8,10 +8,10 @@ version 据え置きで main に入った後続 commit はその version の節�
 ## 0.6.0
 
 **離脱率低減: 3 機能を独立に切れるスイッチ + timeout の環境変数化 + 完了通知 + 頻度制御**
-(2026-08 精査バックログ zh5.4 / zh5.5 / zh5.6 / zh5.22)。既定 timeout を短縮するので
+(2026-08 内部バックログの離脱率低減 batch)。既定 timeout を短縮するので
 挙動が変わる。機能追加を含むので minor bump。
 
-### 0. 環境変数の命名規則を統一 (zh5.6)
+### 0. 環境変数の命名規則を統一
 
 `EXTERNAL_AI_<機能>` が on/off、`EXTERNAL_AI_<機能>_<設定>` がその機能の設定。`<機能>` は
 hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `POST_REVIEW`)。
@@ -28,7 +28,7 @@ hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `
 `EXTERNAL_AI_POST_REVIEW_{BASH_TRACKING,EXCLUDE,EXCLUDE_DEFAULTS,CODE_ONLY,MAX}` は
 名前も意味も変えていない。
 
-### 1. 3 機能を独立に切れるスイッチ (zh5.6)
+### 1. 3 機能を独立に切れるスイッチ
 
 | 変数 | 既定 | 対象 |
 |---|---|---|
@@ -51,7 +51,7 @@ hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `
   **project / local settings の `env` が効くのは workspace を trust した後か `-p` 起動時**
   という条件も併記。マーカーファイル読み込みの独自機構は実装しない (二重機構を避ける)
 
-### 2. exitplan-review: 待ち時間の制御と完了通知 (zh5.5)
+### 2. exitplan-review: 待ち時間の制御と完了通知
 
 0.5.0 は承認前に最悪 52 分ブロックしえた (codex 1500s × `EXTERNAL_AI_REVIEW_MAX` 2 回) 上に、
 進捗も結果も利用者に出ていなかった。
@@ -86,7 +86,7 @@ hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `
   `EXTERNAL_AI_REVIEW_MAX=1` を設定する (README に明記)
 - stdout に JSON を 2 つ書かないよう、通知は溜めて `emit()` で 1 回だけ出す
 
-### 3. post-implementation-review: timeout 短縮と完了通知 (zh5.4)
+### 3. post-implementation-review: timeout 短縮と完了通知
 
 - **既定 timeout を変更 (挙動変更)**: cursor **600s → 300s**。Stop は編集のあった全ターンで
   発火するので待ち時間の期待値が体感を決める。`EXTERNAL_AI_POST_REVIEW_TIMEOUT` で変更可
@@ -107,7 +107,7 @@ hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `
   伸ばせる上限を塞いでしまう。ceiling は現行の予算式に収まる (ExitPlanMode: 1500 + 15 < 1560、
   Stop: git 59 + cursor 600 + kill 15 = 674 < 690)
 
-### 4. post-implementation-review: レビュー頻度としきい値 (zh5.22)
+### 4. post-implementation-review: レビュー頻度としきい値
 
 編集があれば差分サイズに関係なく毎ターン有料レビューが走っていた (typo 1 行でも)。
 
@@ -161,6 +161,25 @@ hook ディレクトリ名に 1:1 対応 (`EXPLORE_PARALLEL` / `PLAN_REVIEW` / `
 - README の `EXTERNAL_AI_REVIEW_MAX` の説明を「最大ブロック回数」→「最大レビュー回数」に。
   `MODE=context` では差し戻さないので、ブロック回数という表現と実際の意味がずれていた
 
+### 6. PR の外部レビュー指摘の反映 (非有限 timeout / claim の復元保証)
+
+- **`nan` / `inf` を設定値として弾く**。`float()` は `nan` / `inf` / `-inf` /
+  `Infinity` を大文字小文字を問わず受理する。`nan` は **NaN との比較が常に False** な
+  ため `duration()` の `parsed <= 0` を素通りし、`min(nan, maximum)` も NaN のまま
+  `Popen.communicate(timeout=nan)` へ渡って `ValueError` になっていた。`count()` 側も
+  `float()` 経由に変えた際に `int(nan)` (ValueError) / `int(inf)` (OverflowError) が
+  try の外へ抜ける穴ができていた。判定は `_finite()` に一本化し、両方から使う
+- **claim の復元を例外に対して保証**。`_review_claim()` を「claim を取って必ず後始末する
+  薄い外枠」と「実処理 (`_run_review()`)」に分割し、実処理から出た**あらゆる例外**で
+  `restore_claim()` を通すようにした。従来は claim 取得後に例外が出ると in-flight に
+  残ったまま hook が死に、`__main__` の fail-open はプロセスを守るだけで状態を戻さない
+  ため、TTL (900s) 超過まで pending が戻らず**レビューが 15 分沈黙**していた。
+  上記の非有限 timeout はその一経路にすぎず、**例外の出どころを 1 つずつ塞ぐより
+  「claim は必ず戻る」を構造で保証するほうが強い**という判断
+- 復元は claim 全件に対して行う。レビュー済みのものが混ざっても hash 一致で次回の
+  `_collect_diffs` が落とすので二重レビューにはならず、除外済みパスが戻っても除外は
+  claim のたびに再適用されるので外部に送られることはない
+
 ### 既知の未対応 (別途起票)
 
 **PreToolUse の top-level `decision` / `reason` は docs 上 deprecated** で、
@@ -172,7 +191,7 @@ exitplan-review の既定 block 経路は 0.2.0 からこの deprecated 形で�
 
 ### 見送ったもの
 
-- **`async: true` / `asyncRewake` による非ブロック Stop** (zh5.4 の提案 3) — **実装しない**。
+- **`async: true` / `asyncRewake` による非ブロック Stop** (当初案の 1 つ) — **実装しない**。
   公式 docs を逐語確認したところ、これらは hook の JSON 出力ではなく `type: "command"`
   ハンドラの**設定**フィールドで、かつ「Async hooks can't block or control Claude's behavior:
   response fields like `decision`, `permissionDecision`, and `continue` have no effect」と

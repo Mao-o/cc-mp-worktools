@@ -27,6 +27,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 
 _FALSY = frozenset(("0", "false", "off", "no"))
@@ -55,8 +56,30 @@ def flag(name: str, default: bool = True) -> bool:
     return default
 
 
+def _finite(value: str) -> float | None:
+    """文字列を**有限の** float として読む。数値でない / 非有限なら None。
+
+    `float()` は `nan` / `inf` / `-inf` / `Infinity` を大文字小文字を問わず受理する。
+    これを素通しすると、環境変数のタイプミス 1 つで hook が壊れる:
+
+    - **`nan`**: NaN との比較は常に False なので `parsed <= 0` の下限チェックを
+      すり抜け、`min(nan, maximum)` も NaN のまま残る。これが
+      `Popen.communicate(timeout=nan)` に渡ると `ValueError` になり、Stop hook が
+      **claim を握ったまま**落ちて TTL (900s) まで pending が戻らない
+    - **`inf` / `-inf`**: `int(inf)` は `OverflowError`、`int(nan)` は `ValueError`。
+      `count()` は `float()` だけを try で囲っているのでこれらが外へ抜ける
+
+    どちらも「設定を間違えた人が hook の故障で気付く」形なので、既定値に倒す。
+    """
+    try:
+        parsed = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def duration(name: str, default: float, maximum: float) -> float:
-    """秒数。未設定・非数値・0 以下は `default`、`maximum` を超える値は clamp する。
+    """秒数。未設定・非数値・非有限・0 以下は `default`、`maximum` を超える値は clamp。
 
     `0` を「無効化」として解釈しないのは意図的で、無効化は `flag()` のスイッチの仕事。
     `EXTERNAL_AI_POST_REVIEW_TIMEOUT=0` が「即 timeout」と「無効」のどちらにも読めると、
@@ -65,11 +88,8 @@ def duration(name: str, default: float, maximum: float) -> float:
     value = raw(name)
     if not value:
         return default
-    try:
-        parsed = float(value)
-    except ValueError:
-        return default
-    if parsed <= 0:
+    parsed = _finite(value)
+    if parsed is None or parsed <= 0:
         return default
     return min(parsed, maximum)
 
@@ -77,17 +97,17 @@ def duration(name: str, default: float, maximum: float) -> float:
 def count(name: str, default: int = 0) -> int:
     """非負整数。未設定・非数値は `default`、負数は 0。`0` は「無効」を意味させてよい。
 
-    `int()` ではなく `float()` を通してから丸める。`int("600.0")` / `int("6e2")` は
+    `int()` ではなく `_finite()` を通してから丸める。`int("600.0")` / `int("6e2")` は
     `ValueError` になるため、`int()` だけだと `COOLDOWN_SEC=1800.0` のような書き方が
     `default` (= 0 = 無効) に落ちて **設定したつもりの抑制が黙って効かない**。
-    `duration()` は同じ文字列を受け付けるので、揃えないと変数ごとに解釈が変わる。
+    `duration()` と同じ入力を同じように解釈させるため、境界の判定は `_finite()` に
+    一本化する (非有限値の扱いが変数ごとに食い違わないように)。
     """
     value = raw(name)
     if not value:
         return default
-    try:
-        parsed = float(value)
-    except ValueError:
+    parsed = _finite(value)
+    if parsed is None:
         return default
     return max(0, int(parsed))
 

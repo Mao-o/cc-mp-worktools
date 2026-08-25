@@ -167,6 +167,18 @@ class HookTestCase(unittest.TestCase):
         self.review_calls = calls
         return output
 
+    def stop_raising(self, session_id: str, error: Exception) -> str:
+        """Stop hook を起動し、`cursor.review()` が例外を投げる状況を作る。
+
+        外部 CLI ラッパは OSError / タイムアウトを内部で吸うが、それ以外
+        (不正な timeout 値による ValueError 等) はそのまま上がってくる。
+        """
+        with mock.patch.object(self.cursor, "review", side_effect=error):
+            return self.run_hook(
+                "stop",
+                {"session_id": session_id, "cwd": self.repo, "stop_hook_active": False},
+            )
+
     def edit(self, session_id: str, rel: str, content: str) -> str:
         """Write ツール相当: ファイルを書いて PostToolUse を発火させる。"""
         full = write(self.repo, rel, content)

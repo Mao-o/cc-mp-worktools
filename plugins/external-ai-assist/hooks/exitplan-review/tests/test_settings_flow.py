@@ -1,4 +1,4 @@
-"""0.6.0 の設定体系: on/off スイッチ・レビュアー選択・mode・完了通知 (zh5.5 / zh5.6)。
+"""0.6.0 の設定体系: on/off スイッチ・レビュアー選択・mode・完了通知。
 
 env 未設定時に 0.5.0 と同じ挙動になること (回帰) を各項目で押さえる。
 """
@@ -144,7 +144,7 @@ class TestContextMode(HookTestCase):
 
 
 class TestCompletionNotice(HookTestCase):
-    """完了時に所要時間と結果を `systemMessage` で出す (zh5.5: 無言でブロックしない)。"""
+    """完了時に所要時間と結果を `systemMessage` で出す (無言でブロックしない)。"""
 
     def test_block_carries_summary_alongside_decision(self):
         data = self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, FENCED_CLEAN))
