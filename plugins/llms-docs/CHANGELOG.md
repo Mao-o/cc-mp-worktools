@@ -2,9 +2,105 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.15.0] - 2026-08-25
+
+### 検索フォールバック: 本文にしか無い語で `search` が 0 件になる問題を修正
+
+`search` (claude-docs / ai-sdk) は llms.txt の title/description で候補ページを
+先に絞り込み (index ランキング)、その上位候補の本文だけを検索していたため、
+オプション名やフィールド名のように**本文にしか出現しない語**で検索すると、
+候補ページ自体が 0 件になり `search-content` なら hit するはずの語が
+「No matching pages found」になっていた (例: `compact_summary` / `onFinish`)。
+
+- `_common.py` に `full_corpus_body_search()` を追加。index 候補が 0 件、または
+  絞り込んだ候補の本文ヒットが全て 0 件のときに、ロード済み全ドキュメントへ
+  本文検索を実行し、上位 N 件を `[body-only]` 付きで**追加**表示する
+- **index 候補を上書きしない**: title/description で正しくランクされたページは
+  本文ヒットが 0 件でも従来通り「(no body hits — index match only)」として
+  残る。フォールバックは index ランキングが拾えなかったページを**追加**するだけ
+  (最初の実装では結果を丸ごと置き換えてしまい、正しく index マッチしたページが
+  本文 0 件というだけで結果から消える回帰があったため、追加方式に修正)
+- firebase は対象外 (本文検索の全文フォールバックは全ページ HTTP fetch が
+  必要でコストが高すぎるため)。代わりに `search` / `search-index` の 0 件 Tip に
+  `search-content "<query>"` (`--page-ref` 省略で全ページ横断) を明記
+- `search-index` (3 script) の 0 件 Tip にも `search-content` を明記
+
+### 上流フォーマット変化の検知: index/doc が 0 件でも無警告 exit 0 だった問題を修正
+
+`_common.py` に `assert_parsed(label, count, path)` を追加。パース結果が
+0 件のとき `Error: <source> format may have changed` を stderr に出し
+**exit 2** で終了する。「クエリに対する正当な 0 件検索結果」(exit 0) と
+「パーサ自体が壊れている 0 件」を区別する。claude-docs / ai-sdk の index
+パース・llms-full.txt パースの全呼び出し箇所に適用した。
+
+- firebase は元々 `die()` (exit 1) で 0 件を検知していたが、`assert_parsed`
+  (exit 2) に統一した。**利用者向け挙動変更: exit code が 1 → 2 になる**
+  (メッセージ文言も他 2 script と揃えた)
+- `_common.py` に `check_join_rate(label, joinable, total)` を追加。
+  claude-docs の index↔full-text URL join rate が 50% 未満のとき exit 2
+  (50〜80% は従来通り WARNING のみで継続)
+- `parse_llms_index` の箇条書き記法を `-` 限定から `-`/`*`/`+` に拡張
+  (インデントは従来通り strip 済みなので無条件で許容)。上流が bullet
+  記号を変えただけで index が silent に 0 件になる故障モードを縮小
+- ai-sdk: パースした doc の 10% 超が frontmatter title 無しのとき
+  `fetch-index` / `search-index` / `search` で WARNING を出す
+  (body の `---` 水平線を新規 frontmatter と誤認する等の兆候)
+
+### テスト基盤: scripts/tests/ を新設 (stdlib unittest, 61 tests)
+
+`scripts/` 配下にテストが 0 件だったため fixture ベースの回帰テストを新設した。
+`parse-*.py` はファイル名にハイフンを含み通常の `import` ができないため、
+`tests/_loader.py` が `importlib.util.spec_from_file_location` でロードする
+helper を提供する (CLI レベルのテストは `--cache-dir` に事前生成した cache
+ファイルを置くことで、`fetch_url` のキャッシュ短絡経路を使いネットワーク
+アクセス無しで実行できる)。CI (`.github/workflows/validate.yml`) は
+`find plugins -type d -name tests` で自動検出するため追加設定は不要。
+
+- `test_common.py`: `parse_llms_index` (3 記法 + `*`/`+`/インデント + 非
+  ASCII)、`extract_sections` (レベル飛び)、`extract_content` (fence 延長 /
+  table 保護)、`score_entry`、`search_content_in_body` (AND→partial /
+  overflow)、`assert_parsed` / `check_join_rate` / `full_corpus_body_search`
+- `test_parse_claude_docs.py`: `split_documents` (fence 内 H1 / platform
+  重複 H1 merge / Source・URL 抽出)、検索フォールバックと format-change
+  検知の CLI 統合テスト
+- `test_parse_ai_sdk.py`: `split_documents` (先頭ゴミ / fence 内 `---`)、
+  `parse_frontmatter`、検索フォールバック・format-change 検知・
+  untitled-ratio 警告の CLI 統合テスト
+- `test_parse_firebase.py`: cache fixture (`_url_to_cache_filename` を
+  再利用してページキャッシュを命名) 経由の CLI 統合テスト
+- **characterization test を 2 件追加** (既知の未修正の限界を「バグとして
+  固定」ではなく「現状の挙動として明示的に pin」する目的、修正は別スコープ):
+  - `_common.FenceTracker` が backtick fence (` ``` `) のみを認識し
+    tilde fence (`~~~`) を認識しない (今回のテスト作成中に新規発見。
+    3 script 共通の `split_documents`/`extract_sections`/`extract_content`
+    全てに影響するため、実データでの before/after diff 無しに直すのは
+    リスクが高いと判断し本 PR では見送り。内部バックログでの追跡を推奨)
+  - ai-sdk `split_documents` が本文の `---` + `Note:` 等の散文で偽の
+    doc 境界を作る (既知の限界。内部バックログで追跡中、P3)
+
+### Python バージョン要件を明文化 (3.11+)
+
+`parse-*.py` は PEP 604 記法 (`list[X]` / `X | None`) を素の型注釈として
+使っており、Python 3.11 未満 (例: macOS 標準の `/usr/bin/python3` = 3.9 系)
+では起動直後に `TypeError: unsupported operand type(s) for ...` で
+クラッシュする。marketplace 横断方針により **3.11+ を宣言する** 対応を採用した
+(3.9 互換化のための `from __future__ import annotations` 追加は不採用 —
+`scripts/_common.py` の既存 shim はそのまま維持するが、3 script 側の型注釈を
+3.9 互換にする目的の変更は行わない)。
+
+- README.md の前提条件を「3.10+」→「3.11+ 必須」に書き換え、
+  `TypeError` が起きる理由と対処 (`mise use python@3.11` 等) を明記
+- 3 SKILL.md の「失敗時の対処」表に Python バージョン不足の行を追加
+  (`TypeError` から即座に原因が分かるようにし、WebFetch フォールバックへの
+  不要な迂回を減らす)。SKILL.md metadata version をそれぞれ patch bump:
+  researching-claude-docs 3.4.0 → 3.4.1 / researching-ai-sdk 3.3.1 → 3.3.2 /
+  researching-firebase 2.1.0 → 2.1.1
+- CI (`.github/workflows/validate.yml`) は既に Python 3.12 (3.11+) を
+  使用済みのため変更不要
+
 ## [0.14.0] - 2026-06-08
 
-### researching-ai-sdk: ai-sdk.dev 上流構造変更に追従 (bd_092a232e-n9i)
+### researching-ai-sdk: ai-sdk.dev 上流構造変更に追従
 
 ai-sdk.dev/llms.txt が ~2KB / 46 行のインデックス + 検索 API 案内 + llms-full.txt
 リンクに分離され、本体は `llms-full.txt` (~5MB / 530 doc) に移動した。
@@ -328,13 +424,13 @@ paths:
 
 ## [0.8.0] - 2026-05-26
 
-### SessionStart hook 追加 (5dk.7)
+### SessionStart hook 追加
 
 - doc-researcher plugin 有効時に SessionStart で「WebFetch より doc-researcher スキルを優先」リマインドを注入
 - 生 stdout 形式で 1 行のみ (SessionStart では plain stdout が Claude に届く — 公式推奨。トークン最小化)
 - plugin hook のため doc-researcher 未インストール環境では発火しない
 
-### キャッシュ TTL 既定値統一 (5dk.9)
+### キャッシュ TTL 既定値統一
 
 - 3 スクリプト全てに `--max-age` を統一実装 (既定: 604800 秒 = 7 日)
 - `_common.py` に `DEFAULT_MAX_AGE_SECONDS` 定数 + `add_max_age_arg()` ヘルパー追加

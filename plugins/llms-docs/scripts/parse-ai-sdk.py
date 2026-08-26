@@ -39,17 +39,25 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    assert_parsed,
     die,
     die_index_out_of_range,
     extract_content,
     extract_sections,
     fetch_url,
+    full_corpus_body_search,
     load_lines,
     next_hint,
     print_metadata_header,
     search_content_in_body,
     search_index_entries,
 )
+
+# A document with no frontmatter ``title:`` field almost always means
+# split_documents mis-split the file (e.g. a body '---' horizontal rule
+# mistaken for a new frontmatter block) rather than the upstream docs
+# genuinely lacking titles. Warn once this many documents come back untitled.
+UNTITLED_WARN_RATIO = 0.10
 
 LLMS_TXT_URL = "https://ai-sdk.dev/llms-full.txt"
 DEFAULT_CACHE_FILENAME = "ai-sdk-llms-full.txt"
@@ -235,14 +243,40 @@ def _load_docs(file_arg: str | None, cache_dir: str,
     if file_arg is None:
         cache_path = _default_cache_path(cache_dir)
         cache_path = fetch_llms_txt(cache_path, max_age=max_age)
-        return cache_path, split_documents(load_lines(cache_path))
+        docs = split_documents(load_lines(cache_path))
+        assert_parsed("ai-sdk", len(docs), cache_path)
+        return cache_path, docs
 
     if not os.path.exists(file_arg):
         die(
             f"--file '{file_arg}' does not exist. Drop --file to auto-fetch "
             f"to the cache, or download the snapshot manually first."
         )
-    return file_arg, split_documents(load_lines(file_arg))
+    docs = split_documents(load_lines(file_arg))
+    assert_parsed("ai-sdk", len(docs), file_arg)
+    return file_arg, docs
+
+
+def _warn_if_untitled_ratio_high(docs: list[dict], path: str) -> None:
+    """Warn on stderr when too many parsed docs have an empty frontmatter
+    title (see ``UNTITLED_WARN_RATIO``). Called only from the "browse the
+    whole corpus" commands (fetch-index / search-index / search) — not from
+    single-document hot paths like ``content`` / ``sections`` — since it
+    re-parses frontmatter for every document."""
+    if not docs:
+        return
+    untitled = sum(
+        1 for d in docs if not parse_frontmatter(d["frontmatter_lines"]).get("title")
+    )
+    ratio = untitled / len(docs)
+    if ratio > UNTITLED_WARN_RATIO:
+        print(
+            f"WARNING: {untitled}/{len(docs)} documents ({ratio:.0%}) have no "
+            f"title in {path}. The upstream format may have changed, or a "
+            f"stray '---' line inside a document body is being mistaken for "
+            f"a new document boundary.",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +327,9 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
 
 def cmd_fetch_index(args):
     """Fetch (if needed) and print document index."""
-    cache_path = _default_cache_path(args.cache_dir)
-    path = fetch_llms_txt(cache_path, max_age=args.max_age)
-    lines = load_lines(path)
-    docs = split_documents(lines)
+    # fetch-index has no --file flag, so file_arg is always None here.
+    cache_path, docs = _load_docs(None, args.cache_dir, max_age=args.max_age)
+    _warn_if_untitled_ratio_high(docs, cache_path)
 
     print(f"AI SDK llms-full.txt Document Index (file: {cache_path})")
     print("=" * 60)
@@ -389,6 +422,7 @@ def cmd_content(args):
 def cmd_search_index(args):
     """Rank documents by keyword match (title, description, tags, headings)."""
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
+    _warn_if_untitled_ratio_high(docs, file_path)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -417,7 +451,9 @@ def cmd_search_index(args):
     if not scored:
         print("No matching documents found.")
         print()
-        print("Tip: try broader keywords, 'search' for body matches, or 'fetch-index --compact' to browse")
+        print("Tip: try broader keywords, 'search' for an automatic full-text "
+              "fallback, 'search-content' to search bodies directly, or "
+              "'fetch-index --compact' to browse")
     else:
         for score, idx, _entry in scored:
             fm = fms[idx]
@@ -520,6 +556,7 @@ def cmd_search(args):
     position.
     """
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
+    _warn_if_untitled_ratio_high(docs, file_path)
 
     if not args.query.strip():
         die("query must not be empty")
@@ -544,12 +581,6 @@ def cmd_search(args):
     print("=" * 60)
     print()
 
-    if not scored:
-        print("No matching documents found.")
-        print()
-        print("Tip: try broader keywords or 'fetch-index --compact' to browse")
-        return
-
     results = []
     for score, idx, _entry in scored:
         doc = docs[idx]
@@ -567,18 +598,60 @@ def cmd_search(args):
             "tags": fm["tags"],
             "index_score": score,
             "body_hits": body_hits,
+            "body_only": False,
         })
+
+    # Append full-corpus body-only hits when title/description/tags ranking
+    # produced no candidates, or none of the drilled candidates had any body
+    # hits — e.g. the query only matches an option/field name that lives in
+    # a doc body (bug: 'search' returned "no matching documents" for terms
+    # that 'search-content' could find). Appends rather than replaces: a doc
+    # that legitimately ranked on title/description/tags keeps its row
+    # (shown as "index match only") even when its body has no hits — the
+    # fallback only adds docs the index ranking missed entirely.
+    if not any(r["body_hits"]["total_matches"] for r in results):
+        already_shown = {r["doc_idx"] for r in results}
+        fallback = full_corpus_body_search(
+            [d["body_lines"] for d in docs], args.query,
+            context_lines=args.context, max_matches_per_doc=args.max_hits,
+            max_snippet_chars=args.max_snippet_chars, min_level=1,
+            limit=args.top_n,
+        )
+        for idx, hits in fallback:
+            if idx in already_shown:
+                continue
+            results.append({
+                "doc_idx": idx,
+                "title": fms[idx]["title"] or "(untitled)",
+                "tags": fms[idx]["tags"],
+                "index_score": None,
+                "body_hits": hits,
+                "body_only": True,
+            })
+
+    if not results:
+        print("No matching documents found.")
+        print()
+        print("Tip: try broader keywords, 'search-content' for a full-body "
+              "scan, or 'fetch-index --compact' to browse")
+        return
+
+    if all(r["body_only"] for r in results):
+        print("  (no title/description/tags match — showing full-body "
+              "search results instead)")
+        print()
 
     results.sort(key=lambda r: (
         -r["body_hits"]["total_matches"],
-        -r["index_score"],
+        -(r["index_score"] or 0),
         r["doc_idx"],
     ))
 
     for r in results:
         hits = r["body_hits"]
         shown = len(hits["results"])
-        print(f"[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
+        score_tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
+        print(f"[{r['doc_idx']}] {r['title']}{score_tag}")
         if r["tags"]:
             print(f"    tags: {', '.join(r['tags'])}")
         if hits["total_matches"]:

@@ -190,6 +190,11 @@ def extract_content(body_lines, heading_path=None, *,
 # Core: llms.txt lightweight index parser
 # ---------------------------------------------------------------------------
 
+_INDEX_ENTRY_RE = re.compile(
+    r"^[-*+]\s+\[(.+?)\]\((https?://\S+?)\)(?:(?::\s*|\s+-\s+)(.+))?$"
+)
+
+
 def parse_llms_index(lines):
     """Parse a llms.txt lightweight index into page entries.
 
@@ -198,11 +203,17 @@ def parse_llms_index(lines):
         - ``- [Title](URL) - Description``
         - ``- [Title](URL)``
 
+    The bullet marker may be ``-``, ``*``, or ``+`` (all valid Markdown list
+    markers) and leading indentation is ignored (line is stripped before
+    matching) — an upstream source switching its bullet character between
+    releases should not silently drop to 0 parsed entries (see internal
+    backlog notes on llms.txt format-change detection).
+
     Returns a list of dicts: ``{"title": str, "url": str, "description": str}``.
     """
     entries = []
     for line in lines:
-        m = re.match(r"^- \[(.+?)\]\((https?://\S+?)\)(?:(?::\s*|\s+-\s+)(.+))?$", line.strip())
+        m = _INDEX_ENTRY_RE.match(line.strip())
         if m:
             entries.append({
                 "title": m.group(1),
@@ -494,6 +505,42 @@ def search_content_in_body(body_lines, query: str, *,
     }
 
 
+def full_corpus_body_search(docs_body_lines, query: str, *,
+                            context_lines: int = 2,
+                            max_matches_per_doc: int = 3,
+                            max_snippet_chars: int | None = None,
+                            min_level: int = 2,
+                            limit: int = 5):
+    """Search *query* across every doc's body, ignoring index ranking.
+
+    Fallback for when title/description-based ranking finds no candidates,
+    or none of the ranked candidates have any body hits — e.g. the query
+    only matches an option/field name that lives in a page body, not its
+    title or description. Without this, a query like that returns "no
+    matching pages" from the smart ``search`` command even though
+    ``search-content`` (which scans every body unconditionally) finds it.
+
+    *docs_body_lines* is a list of ``body_lines`` (one per doc, in doc-index
+    order). Returns a list of ``(doc_idx, hits)`` tuples — *hits* being a
+    ``search_content_in_body`` result dict — for docs with at least one
+    match, sorted by total_matches desc then doc_idx asc, truncated to
+    *limit*.
+    """
+    results = []
+    for idx, body_lines in enumerate(docs_body_lines):
+        hits = search_content_in_body(
+            body_lines, query,
+            context_lines=context_lines,
+            max_matches_per_doc=max_matches_per_doc,
+            min_level=min_level,
+            max_snippet_chars=max_snippet_chars,
+        )
+        if hits["total_matches"] > 0:
+            results.append((idx, hits))
+    results.sort(key=lambda t: (-t[1]["total_matches"], t[0]))
+    return results[:limit]
+
+
 # ---------------------------------------------------------------------------
 # Error helpers
 # ---------------------------------------------------------------------------
@@ -518,6 +565,59 @@ def die_index_out_of_range(idx: int, total: int, name: str = "doc_index") -> Non
     """Print out-of-range error and exit 1."""
     print(f"Error: {name} {idx} out of range (0-{total - 1})", file=sys.stderr)
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Upstream format-change detection
+# ---------------------------------------------------------------------------
+
+def assert_parsed(label: str, count: int, path: str) -> None:
+    """Exit 2 when *count* parsed items is 0.
+
+    Distinguishes "the parser found nothing because the upstream format
+    changed" (exit 2) from "the parser worked fine but this particular
+    query had 0 hits" (exit 0). Call this immediately after parsing an
+    index or full-text file, before any query-dependent logic runs, so a
+    malformed/empty source fails loudly instead of silently behaving like
+    an empty search result.
+    """
+    if count == 0:
+        print(
+            f"Error: {label} format may have changed (0 entries parsed "
+            f"from {path}). Retry with --max-age 0; if it persists, "
+            f"report an issue.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def check_join_rate(label: str, joinable: int, total: int, *,
+                    warn_threshold: float = 0.8, fail_threshold: float = 0.5) -> None:
+    """Check the fraction of index entries that joined to a full-text doc.
+
+    Below *fail_threshold* the join is broken badly enough to indicate an
+    upstream format change rather than a handful of legitimately-missing
+    pages — exit 2 (same failure class as ``assert_parsed``). Between
+    *fail_threshold* and *warn_threshold*, print a WARNING and continue
+    (some pages can legitimately lack a full-text counterpart).
+    """
+    if total == 0:
+        return
+    ratio = joinable / total
+    if ratio < fail_threshold:
+        print(
+            f"Error: {label} join rate is {ratio:.0%} ({joinable}/{total}), "
+            f"far below expected. The upstream format may have changed. "
+            f"Retry with --max-age 0; if it persists, report an issue.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if ratio < warn_threshold:
+        print(
+            f"WARNING: {label} join rate is {ratio:.0%} ({joinable}/{total}). "
+            f"Some index entries cannot be joined to full text.",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------

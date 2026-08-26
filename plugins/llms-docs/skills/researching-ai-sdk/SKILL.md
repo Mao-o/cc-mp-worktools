@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.3.1"
+  version: "3.3.2"
 ---
 
 # AI SDK ドキュメント調査
@@ -145,7 +145,8 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 | ネットワーク失敗 | fetch timeout / connection error | `--max-age 0` で cache 無視して再試行 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `/tmp/ai-sdk-llms-full.txt` を削除して再実行 |
 | 結果ゼロ | `No results found` | キーワードを変えて再試行。`fetch-index --compact` で一覧確認 |
-| スクリプトエラー | Python traceback | 下記 WebFetch フォールバックへ |
+| Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
+| スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |
 
 ### WebFetch フォールバック
 
