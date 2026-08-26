@@ -131,6 +131,7 @@ HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skel
 `scripts/_common.py` に集約済み。新しい doc source を追加する際は、source 固有の
 `split_documents` と表示層のみを書き、共通部分は `_common` から import すること。
 
-`search-content` はセクション単位の AND 検索 — 指定した全キーワードが同じセクション内に
-揃って出現するセクションのみを返す。OR 挙動（どれか 1 つでもマッチすれば hit）ではない
-点に注意。
+`search-content` はセクション単位の AND 検索が既定 — 指定した全キーワードが同じセクション内に
+揃って出現するセクションのみを返す。単純な OR 挙動（どれか 1 つでもマッチすれば hit）ではない。
+ただし完全 AND が 1 件も無い場合（複数キーワード時のみ）、キーワードの半分以上が揃うセクションへ
+自動でフォールバックし、出力に `[partial match]` と一致キーワードを明示する（soft-AND）。
