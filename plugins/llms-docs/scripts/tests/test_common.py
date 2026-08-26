@@ -197,6 +197,37 @@ class ExtractContentTest(unittest.TestCase):
         self.assertIn("a", content)
         self.assertNotIn("b", content)
 
+    def test_case_insensitive_exact_match_beats_descendant_partial_match(self):
+        # Heading matching is documented as case-insensitive. A query that
+        # differs from a section's title only by case must resolve via the
+        # (new) case-folded exact-match tier and win outright — not fall
+        # through to the substring tier, where it would also match its own
+        # nested child ("Configuration/Options" contains "configuration")
+        # and die as ambiguous even though only one *heading* actually
+        # equals the query.
+        body = [
+            "## Configuration\n",
+            "top-level config text\n",
+            "### Options\n",
+            "nested options text\n",
+        ]
+        content, resolved = _common.extract_content(body, "configuration")
+        self.assertEqual(resolved, "Configuration")
+        self.assertIn("top-level config text", content)
+
+    def test_case_insensitive_exact_match_on_heading_path_form(self):
+        # Same tier, exercised against a multi-segment heading_path (not
+        # just a bare title) copied back with different casing.
+        body = [
+            "## Guide\n",
+            "intro\n",
+            "### Setup\n",
+            "setup text\n",
+        ]
+        content, resolved = _common.extract_content(body, "guide/setup")
+        self.assertEqual(resolved, "Guide/Setup")
+        self.assertIn("setup text", content)
+
     def test_top_heading_path_returns_preamble_before_first_heading(self):
         # search can report a body hit above the first heading as
         # Section: (top), and its Next hint tells the caller to copy that
@@ -268,6 +299,34 @@ class NormalizationStemmingTest(unittest.TestCase):
         # Normalization must not turn matching lenient enough to create
         # false positives between unrelated words.
         self.assertEqual(_common.score_entry("Skill", "", ["firestore"]), 0)
+
+
+class ScoreEntryEmptyNormalizedKeywordTest(unittest.TestCase):
+    """A keyword consisting only of characters _norm() strips (separators
+    like '-'/'_') normalizes to "". Left unguarded, "" is a substring of
+    every string, so every 'kw_norm in <field>' check in score_entry would
+    trivially succeed — turning a degenerate keyword into a match against
+    the entire corpus instead of a no-op."""
+
+    def test_separator_only_keyword_does_not_match_everything(self):
+        self.assertEqual(_common.score_entry("Hooks", "Configure hook matchers", ["_"]), 0)
+        self.assertEqual(_common.score_entry("Skills", "Reusable capabilities", ["--"]), 0)
+        self.assertEqual(_common.score_entry("Anything", "Any description at all", ["_-"]), 0)
+
+    def test_separator_only_keyword_does_not_inflate_score_when_mixed_with_real_keyword(self):
+        # The garbage keyword must contribute nothing — no extra points,
+        # and it must not count toward (or against) the all-keywords-
+        # matched AND bonus threshold.
+        only_real = _common.score_entry("Hooks", "", ["hooks"])
+        real_plus_garbage = _common.score_entry("Hooks", "", ["hooks", "_"])
+        self.assertEqual(only_real, real_plus_garbage)
+
+    def test_two_real_keywords_still_get_and_bonus_alongside_garbage_keyword(self):
+        two_real = _common.score_entry("Hook events", "matcher config", ["hook", "matcher"])
+        two_real_plus_garbage = _common.score_entry(
+            "Hook events", "matcher config", ["hook", "matcher", "--"]
+        )
+        self.assertEqual(two_real, two_real_plus_garbage)
 
 
 class ScoreEntryRegressionFloorTest(unittest.TestCase):
