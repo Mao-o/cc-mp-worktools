@@ -178,18 +178,77 @@ class GoldenOutputTest(unittest.TestCase):
             "parse-firebase.py", "content", "0", "--cache-dir", tmp,
         ])
         self.assertEqual(code, 0, err)
+        # bd 2wd.18: firebase's content now gets the same subsection-hint
+        # block (before AND after the body — bd 2wd.10) that claude-docs
+        # already had.
+        hint_block = (
+            "\n"
+            "--- Top-level sections (1) ---\n"
+            "  - Limits\n"
+            "\n"
+            'Next: parse-firebase.py content 0 "<heading_path from above>"\n'
+        )
         expected = (
             "# doc_title: Firestore Query Limits\n"
             "# source: https://firebase.google.com/docs/firestore/query-limit.md.txt\n"
             "---\n"
-            "# Firestore Query Limits\n"
+            + hint_block
+            + "# Firestore Query Limits\n"
             "\n"
             "Intro text before any heading.\n"
             "\n"
             "## Limits\n"
             "Max 100 results per query.\n"
+            + hint_block
         )
         self.assertEqual(out, expected)
+
+    def test_no_subsection_hints_suppresses_both_occurrences(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "firebase-llms.txt").write_text(
+            "- [Doc](https://firebase.google.com/docs/doc.md.txt): desc\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/doc.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Doc\n\n## Options\ntext\n", encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "content", "0",
+            "--cache-dir", tmp, "--no-subsection-hints",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Top-level sections", out)
+        self.assertNotIn("Next:", out)
+
+    def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "firebase-llms.txt").write_text(
+            "- [Doc](https://firebase.google.com/docs/doc.md.txt): desc\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/doc.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Doc\n\n"
+            "0123456789 0123456789 0123456789 0123456789 0123456789\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "content", "0",
+            "--cache-dir", tmp, "--max-chars", "20",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("chars truncated", out)
+        self.assertIn('narrow with parse-firebase.py content 0 "<heading_path>"', out)
+        self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
 
 if __name__ == "__main__":

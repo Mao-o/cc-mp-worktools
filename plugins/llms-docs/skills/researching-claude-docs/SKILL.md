@@ -35,7 +35,7 @@ paths:
   - "**/hooks.json"
 metadata:
   author: mao
-  version: "3.4.3"
+  version: "3.4.4"
 ---
 
 # Claude ドキュメント Progressive Loader
@@ -101,7 +101,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 ```
 
-`content` は本文の末尾に **サブセクション一覧** (`Subsections of '...'`) を自動で出力する。さらに深掘りする際は `sections` を再度呼ばずに、そのまま次の `content` クエリに heading_path を渡せる。出力に含めたくない場合は `--no-subsection-hints` を付ける。
+`content` は **サブセクション一覧** (`Subsections of '...'`) と次の `content` 呼び出し例を、本文の**前後両方**（metadata header 直後 と 本文末尾）に自動で出力する。長いページで本文が途中で切り詰められても（ターミナル/ツール側の出力上限）前側のヒントは必ず見える。さらに深掘りする際は `sections` を再度呼ばずに、そのまま次の `content` クエリに heading_path を渡せる。出力に含めたくない場合は `--no-subsection-hints` を付ける。
+
+本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
 
 本文中の Markdown リンク (`[Text](/en/...)` や `[Text](https://code.claude.com/...)`) のうち同 source 内の既知ページを指すものには、自動で `→ [doc_idx N]` のアノテーションが付く。follow-up の `content` で page を切り替える時の手数を減らす。コードフェンス内と Markdown テーブル行は対象外。抑制したい場合は `--no-link-annotations`。
 
@@ -122,7 +124,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 | コマンド | 引数 | 説明 |
 |---------|------|------|
 | `search` | `<query> [--source {code,platform,both}] [--index-limit N] [--max-hits N] [--context N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | **推奨**: llms.txt ランキング + llms-full.txt 本文を URL で join、1 コマンドで候補ページ + 本文ヒットを返す。`--source both` で code/platform 両方を並列検索 |
-| `content` | `<page_ref> [heading_path] [--file F] [--source S] [--max-age S] [--no-subsection-hints] [--no-link-annotations]` | セクション本文を表示。末尾にサブセクション一覧、本文中の docs リンクには `→ [doc_idx N]` を付与 |
+| `content` | `<page_ref> [heading_path] [--file F] [--source S] [--max-age S] [--max-chars N] [--no-subsection-hints] [--no-link-annotations]` | セクション本文を表示。前後にサブセクション一覧、本文中の docs リンクには `→ [doc_idx N]` を付与。既定 24000 文字で切り詰め |
 | `sections` | `<page_ref> [--file F] [--source S] [--max-age S]` | 指定ページの見出し一覧を表示 |
 | `search-content` | `<query> [--page-ref R] [--file F] [--source S] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | llms-full.txt 本文のみキーワード検索。`--page-ref` で 1 ページに絞れる |
 | `search-index` | `<query> [--source S] [--limit N] [--max-age S]` | llms.txt のタイトル/説明だけをスコアリング (本文ヒット無し) |

@@ -449,5 +449,199 @@ class GoldenOutputTest(unittest.TestCase):
         self.assertEqual(out, expected)
 
 
+class FetchIndexDocIdxJoinTest(unittest.TestCase):
+    """bd 2wd.9: fetch-index showed the llms.txt list POSITION as `[N]`,
+    but 'sections'/'content' resolve integer refs against the llms-full.txt
+    DOC_IDX — a different numbering whenever the two files aren't in the
+    same order. Passing the displayed [N] through silently opened the
+    wrong page. fetch-index must never eagerly fetch llms-full.txt just to
+    compute this label (that would make the documented *lightweight*
+    fallback command the heaviest one in the tool for 'platform')."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_shows_slug_and_does_not_fetch_full_text_when_uncached(self):
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks]", out)
+        self.assertNotIn("[0]", out)
+        self.assertFalse(
+            os.path.exists(os.path.join(self.tmp, "claude-code-llms-full.txt"))
+        )
+
+    def test_shows_joined_full_text_doc_idx_when_full_text_already_cached(self):
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        # llms-full.txt order deliberately differs from llms.txt order —
+        # this is exactly the case that made the old raw-position label
+        # wrong (Skills is llms.txt entry 0 but llms-full.txt doc 1, and
+        # vice versa for Hooks).
+        Path(self.tmp, "claude-code-llms-full.txt").write_text(
+            "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+            "# Skills\nSource: https://example.com/en/skills\n\nbody\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Skills", out)
+        self.assertIn("[0] Hooks", out)
+
+    def test_grouped_variants_show_per_variant_ref_not_misleading_range(self):
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Batches (Python)](https://example.com/en/batches-py): Python batches\n"
+            "- [Batches (Go)](https://example.com/en/batches-go): Go batches\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Batches", out)
+        self.assertIn("Python [batches-py]", out)
+        self.assertIn("Go [batches-go]", out)
+        # No misleading numeric range bracket like "[0-1]" (an llms.txt
+        # list position, not a valid sections/content doc_idx).
+        self.assertNotIn("[0-1]", out)
+
+
+class SearchIndexDocIdxJoinTest(unittest.TestCase):
+    """bd 2wd.9: search-index had the same raw-list-position bug as
+    fetch-index, papered over with an unconditional disclaimer note
+    instead of a fix. Now it joins when llms-full.txt is already cached
+    (dropping the note, since the numbering is then actually correct) and
+    falls back to a slug + a conditional note otherwise."""
+
+    def test_uses_slug_and_shows_note_when_full_text_uncached(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "claude-code-llms.txt").write_text(
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-index", "hooks", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertIn("Note:", out)
+
+    def test_uses_joined_doc_idx_and_omits_note_when_full_text_cached(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "claude-code-llms.txt").write_text(
+            "- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        Path(tmp, "claude-code-llms-full.txt").write_text(
+            "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+            "# Skills\nSource: https://example.com/en/skills\n\nbody\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-index", "hooks", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[0] Hooks", out)
+        self.assertNotIn("Note:", out)
+
+
+class ContentMaxCharsTruncationTest(unittest.TestCase):
+    """bd 2wd.10: content had no output-size cap, so a large page (Platform
+    pages average ~38KB) silently overflowed the Bash tool's ~30KB inline-
+    output threshold, hiding the subsection hint / Next line at the end."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+            "# Hooks\n"
+            "Source: https://example.com/hooks\n"
+            "\n"
+            "0123456789 0123456789 0123456789 0123456789 0123456789\n",
+        )
+
+    def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "content", "0",
+            "--cache-dir", self.tmp, "--max-chars", "20",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("chars truncated", out)
+        self.assertIn('narrow with parse-claude-docs.py content 0 "<heading_path>"', out)
+        self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
+
+    def test_max_chars_zero_disables_truncation(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "content", "0",
+            "--cache-dir", self.tmp, "--max-chars", "0",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("chars truncated", out)
+        self.assertIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
+
+
+class ContentSubsectionHintBeforeAndAfterTest(unittest.TestCase):
+    """bd 2wd.10: the subsection hint / Next line, previously printed only
+    AFTER the body, is now ALSO printed right after the metadata header
+    (before the body) so it survives truncation regardless of where the
+    cut lands — not just when --max-chars happens to catch it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+            "# Hooks\n"
+            "Source: https://example.com/hooks\n"
+            "\n"
+            "## Configuration\n"
+            "short body text\n",
+        )
+
+    def test_hint_and_next_line_appear_both_before_and_after_body(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "content", "0", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("--- Top-level sections (1) ---"), 2)
+        self.assertEqual(
+            out.count('Next: parse-claude-docs.py content 0 "<heading_path from above>"'),
+            2,
+        )
+        # The first hint occurrence must come before the body text, and the
+        # second after it — not both on the same side.
+        hint_pos = out.index("--- Top-level sections (1) ---")
+        body_pos = out.index("short body text")
+        second_hint_pos = out.index("--- Top-level sections (1) ---", hint_pos + 1)
+        self.assertLess(hint_pos, body_pos)
+        self.assertGreater(second_hint_pos, body_pos)
+
+    def test_no_subsection_hints_suppresses_both_occurrences(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "content", "0",
+            "--cache-dir", self.tmp, "--no-subsection-hints",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Top-level sections", out)
+        self.assertNotIn("Next:", out)
+
+
 if __name__ == "__main__":
     unittest.main()

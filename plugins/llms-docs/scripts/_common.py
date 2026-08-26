@@ -968,3 +968,130 @@ def add_doc_index_arg(parser, *, help: str = "Document index (from fetch-index)"
 def add_heading_path_arg(parser, *, help: str = "Heading path (omit for full document)") -> None:
     """Add optional positional ``heading_path`` to *parser*."""
     parser.add_argument("heading_path", nargs="?", default=None, help=help)
+
+
+# ---------------------------------------------------------------------------
+# Content-size cap (``content`` subcommand)
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_CONTENT_CHARS = 24000
+
+
+def add_max_chars_arg(parser) -> None:
+    """Add ``--max-chars`` to *parser* (``content`` subcommand only).
+
+    The 24000-char default keeps a typical ``content`` call's total output
+    (metadata header + body + subsection hints) comfortably under the
+    Claude Code Bash tool's ~30KB threshold for showing output inline
+    rather than diverting it to a file and showing only the first ~2KB —
+    past that threshold the subsection hint / ``Next:`` line at the end of
+    the output becomes invisible, defeating progressive drill-down.
+    """
+    parser.add_argument(
+        "--max-chars", type=int, default=DEFAULT_MAX_CONTENT_CHARS,
+        help=f"Truncate the content body to N chars (default: "
+             f"{DEFAULT_MAX_CONTENT_CHARS}, 0 = no limit)",
+    )
+
+
+def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
+    """Truncate *content* to *max_chars* characters (``<= 0`` disables this).
+
+    Appends a note showing how many characters were cut and a caller-
+    supplied *narrow_hint* — typically a fuller ``content <ref>
+    "<heading_path>"`` invocation string — telling the reader how to fetch
+    a smaller slice instead of the same truncated one again. Callers
+    should apply this AFTER every other content transform (fence/table
+    protection already happened inside ``extract_content``; link
+    annotation, where applicable, adds text too) so the truncation point
+    reflects the actual length of what the reader receives, not a
+    pre-annotation length that the annotations could then push back over
+    the limit.
+    """
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+    cut = len(content) - max_chars
+    return (
+        content[:max_chars]
+        + f"\n... ({cut} chars truncated; narrow with {narrow_hint})\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subsection hints (``content`` subcommand)
+# ---------------------------------------------------------------------------
+
+def print_subsection_hints(body_lines, page_ref, heading_path, *,
+                            min_level: int = 2, extra_hint_args: tuple = ()) -> None:
+    """Print direct child sections of *heading_path* (or top-level if
+    ``None``) as a hint block, followed by a ``Next: <script> content
+    <page_ref> "..."`` line. Lets the caller drill down further without
+    re-running ``sections``.
+
+    Shared by all three ``parse-*.py`` scripts' ``cmd_content`` (moved out
+    of claude-docs-only ``_print_subsection_hints`` so ai-sdk/firebase get
+    the same drill-down experience claude-docs already had).
+
+    *heading_path* must already be the *resolved* canonical path returned
+    by ``extract_content`` (or ``None``/``"(top)"``) — not the caller's
+    raw, possibly-partial input; resolution (including the ambiguous-
+    partial-match check) happens exactly once, in ``extract_content``.
+    Looking it up again here from a raw argument would risk silently
+    disagreeing with what the content body actually displayed. No section
+    is ever literally titled ``"(top)"``, so that sentinel falls through
+    to "no hint" below — the preamble before the first heading has no
+    child sections to hint at.
+
+    *min_level* must match the value the caller's ``extract_content``/
+    ``extract_sections`` calls use for the same document (2 for
+    claude-docs/firebase, 1 for ai-sdk) — see ``extract_content``'s own
+    docstring for why a mismatch here would show one heading hierarchy
+    while resolving against another.
+    """
+    sections = extract_sections(body_lines, min_level=min_level)
+    if not sections:
+        return
+
+    if heading_path is None:
+        children = [s for s in sections if s["level"] == min_level]
+        label = "Top-level sections"
+    else:
+        target = None
+        for s in sections:
+            if s["heading_path"] == heading_path:
+                target = s
+                break
+        if target is None:
+            return
+        target_idx = sections.index(target)
+        # Block extent = up to the next section at same or higher (smaller-
+        # number) level. ``target["line_end"]`` only spans until the
+        # immediate next heading, which would stop at the first child and
+        # miss the rest of the block.
+        block_end = len(body_lines)
+        for s in sections[target_idx + 1:]:
+            if s["level"] <= target["level"]:
+                block_end = s["line_start"]
+                break
+        child_level = target["level"] + 1
+        children = [
+            s for s in sections[target_idx + 1:]
+            if s["line_start"] < block_end and s["level"] == child_level
+        ]
+        label = f"Subsections of '{target['heading_path']}'"
+
+    if not children:
+        return
+
+    print()
+    print(f"--- {label} ({len(children)}) ---")
+    for s in children:
+        code_marker = " [code]" if s["has_code_blocks"] else ""
+        print(f"  - {s['heading_path']}{code_marker}")
+    print()
+    basename = os.path.basename(sys.argv[0])
+    extra_suffix = (" " + " ".join(extra_hint_args)) if extra_hint_args else ""
+    print(
+        f'Next: {basename} content {page_ref} '
+        f'"<heading_path from above>"{extra_suffix}'
+    )

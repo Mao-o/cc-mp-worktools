@@ -33,6 +33,7 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    add_max_chars_arg,
     assert_parsed,
     die,
     die_index_out_of_range,
@@ -45,8 +46,10 @@ from _common import (
     normalize_doc_url,
     parse_llms_index,
     print_metadata_header,
+    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    truncate_content,
 )
 
 LLMS_TXT_URL = "https://firebase.google.com/docs/llms.txt"
@@ -259,12 +262,24 @@ def cmd_content(args):
 
     content, resolved_heading_path = extract_content(lines, args.heading_path)
 
+    narrow_hint = f'parse-firebase.py content {idx} "<heading_path>"'
+    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+
     print_metadata_header(
         entry["title"],
         source=entry["url"],
         heading_path=resolved_heading_path,
     )
+
+    # Printed BEFORE the body too — see parse-claude-docs.py's cmd_content
+    # for why (survives truncation regardless of where the cut lands).
+    if not args.no_subsection_hints:
+        print_subsection_hints(lines, idx, resolved_heading_path)
+
     print(content, end="")
+
+    if not args.no_subsection_hints:
+        print_subsection_hints(lines, idx, resolved_heading_path)
 
 
 def cmd_search_index(args):
@@ -507,6 +522,11 @@ def main():
     add_heading_path_arg(p_content, help="Heading path (omit for full page)")
     add_cache_dir_arg(p_content)
     add_max_age_arg(p_content)
+    add_max_chars_arg(p_content)
+    p_content.add_argument(
+        "--no-subsection-hints", action="store_true",
+        help="Suppress the subsection hint block printed before/after content",
+    )
     p_content.set_defaults(func=cmd_content)
 
     # search-index

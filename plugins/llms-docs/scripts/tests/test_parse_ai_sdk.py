@@ -328,17 +328,63 @@ class GoldenOutputTest(unittest.TestCase):
             "parse-ai-sdk.py", "content", "0", "--cache-dir", tmp,
         ])
         self.assertEqual(code, 0, err)
+        # bd 2wd.18: ai-sdk's content now gets the same subsection-hint
+        # block (before AND after the body — bd 2wd.10) that claude-docs
+        # already had. min_level=1 means the doc's own H1 counts as its
+        # one top-level section here, matching what 'sections' already
+        # shows for ai-sdk.
+        hint_block = (
+            "\n"
+            "--- Top-level sections (1) ---\n"
+            "  - streamText\n"
+            "\n"
+            'Next: parse-ai-sdk.py content 0 "<heading_path from above>"\n'
+        )
         expected = (
             "# doc_title: streamText\n"
             "# doc_tags: core, streaming\n"
             "---\n"
-            "\n"
+            + hint_block
+            + "\n"
             "# streamText\n"
             "\n"
             "## Options\n"
             "Configure options here.\n"
+            + hint_block
         )
         self.assertEqual(out, expected)
+
+    def test_no_subsection_hints_suppresses_both_occurrences(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\ntitle: Doc\n---\n\n# Doc\n\n## Options\ntext\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "content", "0",
+            "--cache-dir", tmp, "--no-subsection-hints",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Top-level sections", out)
+        self.assertNotIn("Next:", out)
+
+    def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\ntitle: Doc\n---\n\n# Doc\n\n"
+            "0123456789 0123456789 0123456789 0123456789 0123456789\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "content", "0",
+            "--cache-dir", tmp, "--max-chars", "20",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("chars truncated", out)
+        self.assertIn('narrow with parse-ai-sdk.py content 0 "<heading_path>"', out)
+        self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
 
 if __name__ == "__main__":

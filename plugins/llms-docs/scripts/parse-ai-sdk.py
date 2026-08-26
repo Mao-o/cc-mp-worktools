@@ -39,6 +39,7 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    add_max_chars_arg,
     assert_parsed,
     die,
     die_index_out_of_range,
@@ -50,8 +51,10 @@ from _common import (
     load_lines,
     next_hint,
     print_metadata_header,
+    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    truncate_content,
 )
 
 # A document with no frontmatter ``title:`` field almost always means
@@ -414,12 +417,24 @@ def cmd_content(args):
         protect_tables=False, min_level=1,
     )
 
+    narrow_hint = f'parse-ai-sdk.py content {idx} "<heading_path>"'
+    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+
     print_metadata_header(
         fm["title"] or "(untitled)",
         tags=fm["tags"] or None,
         heading_path=resolved_heading_path,
     )
+
+    # Printed BEFORE the body too — see parse-claude-docs.py's cmd_content
+    # for why (survives truncation regardless of where the cut lands).
+    if not args.no_subsection_hints:
+        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path, min_level=1)
+
     print(content, end="")
+
+    if not args.no_subsection_hints:
+        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path, min_level=1)
 
 
 def cmd_search_index(args):
@@ -763,6 +778,11 @@ def main():
     _add_file_arg(p_content)
     add_cache_dir_arg(p_content)
     add_max_age_arg(p_content)
+    add_max_chars_arg(p_content)
+    p_content.add_argument(
+        "--no-subsection-hints", action="store_true",
+        help="Suppress the subsection hint block printed before/after content",
+    )
     p_content.set_defaults(func=cmd_content)
 
     # search (smart: index rank + body drill-in)

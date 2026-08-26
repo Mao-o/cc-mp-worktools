@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.3.4"
+  version: "3.3.5"
 ---
 
 # AI SDK ドキュメント調査
@@ -75,7 +75,7 @@ title / description / tags / 見出しでスコアリングして上位 5 件（
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<heading_path>"
 ```
 
-`heading_path` を省略するとドキュメント全体を取得。
+`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。
 
 ### 補助: セクション一覧を確認したいとき
 
@@ -117,7 +117,7 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 | `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
 | `fetch-index` | `[--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
 | `sections` | `<page_ref> [--file F] [--cache-dir DIR]` | 指定ドキュメントの見出し一覧を表示 |
-| `content` | `<page_ref> [heading_path] [--file F] [--cache-dir DIR]` | セクション本文を表示 |
+| `content` | `<page_ref> [heading_path] [--file F] [--cache-dir DIR] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`
 

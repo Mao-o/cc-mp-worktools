@@ -2,6 +2,74 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.18.0] - 2026-08-27
+
+### `fetch-index` / `search-index`: llms.txt の一覧位置を doc_idx として表示していた問題を修正
+
+`fetch-index` の `[N]` と `search-index` の `[idx]` は llms.txt の**一覧内の位置**
+をそのまま表示していたが、`sections`/`content` は llms-full.txt の doc_idx を
+期待する — 2 つのファイルの並び順が一致しない限り (上流が並び替え/追加した
+時点で崩れる)、表示された番号をそのまま渡すと**別のページが開く**。
+
+- llms-full.txt が既にキャッシュ済みなら URL join で正しい doc_idx を表示、
+  未キャッシュなら (このためだけに数十 MB の llms-full.txt を fetch すると
+  fetch-index が「軽量なフォールバック」でなくなるため) 代わりに URL slug を
+  `[slug]` として表示し、`Next: sections <slug>` に変更する
+  (slug も `sections`/`content` の有効な入力形式)
+- `search-index` にあった「番号がずれるかもしれない」という無条件の注意書きは
+  削除し、未キャッシュ時のみ表示する条件付きの Note に置き換えた
+  (キャッシュ済みなら実際に正しいので注意書き自体が不要)
+- `fetch-index` の variant グループ表示 (`Batches (Python)`/`Batches (Go)` 等)
+  も同じ理由で `[0-1]` のような一覧内レンジ表示をやめ、variant ごとに
+  `Python [ref]` の形式にした
+
+### `content`: 出力サイズ上限が無く長いページで末尾のヒントが不可視化する問題を修正
+
+`content` の出力に上限が無く、Platform ページ (平均 ~38KB) 等では Bash tool の
+~30KB inline 表示上限を超えて別ファイルに退避され、先頭 2KB しか見えなくなる。
+本文末尾にしか出していなかったサブセクション一覧 / `Next:` ヒントがこの状態で
+不可視になり、`heading_path` を省略した 2 手目の深掘りができなくなっていた。
+
+- `--max-chars` (既定 24000、`0` で無制限) を 3 script の `content` に追加。
+  超過時は `... (N chars truncated; narrow with <script> content <ref>
+  "<heading_path>")` を出す
+- サブセクション一覧 + `Next:` ヒントを **metadata header 直後 (本文の前)
+  にも** 出力するよう変更 (末尾には従来どおり出力、前後の二重掲載)。
+  `--max-chars 0` 等で本文が長くても、前側のヒントは常に生き残る
+
+### ai-sdk / firebase の `content` にもサブセクション一覧を追加 (claude-docs と同機能に統一)
+
+claude-docs の `content` だけが持っていたサブセクション一覧 + `Next:` ヒントを
+ai-sdk / firebase にも追加した。claude-docs 専用実装だった
+`_print_subsection_hints` を `_common.print_subsection_hints()` として汎用化し
+(min_level を引数化)、3 script が共有する。ai-sdk / firebase の `content` に
+`--no-subsection-hints` フラグも新設 (claude-docs は既存)。
+
+- **利用者向け挙動変更**: ai-sdk / firebase の `content` は既定で
+  サブセクション一覧を出力するようになる (抑制したい場合は
+  `--no-subsection-hints`)
+- 本バッチでは firebase 本文中のリンクへの `→ [doc_idx N]` 注釈付与
+  (claude-docs にある機能) は対象外とした — サブセクション一覧という
+  中核機能のパリティを優先し、範囲を絞った
+
+### SKILL.md
+
+3 SKILL とも `content` のコマンドリファレンスと Quick Start 相当の説明に
+`--max-chars` / (ai-sdk・firebase は新規) `--no-subsection-hints` / 前後二重
+掲載の挙動を追記。metadata version を patch bump:
+researching-claude-docs 3.4.3 → 3.4.4 / researching-ai-sdk 3.3.4 → 3.3.5 /
+researching-firebase 2.1.3 → 2.1.4
+
+### テスト
+
+`scripts/tests/` に回帰テストを 13 件追加 (129 tests, 従来比 +13)。
+`fetch-index`/`search-index` の doc_idx join (キャッシュ有無の両方)、
+`--max-chars` の切り詰めと `--max-chars 0` での無効化、前後ヒントの二重
+掲載と `--no-subsection-hints` によるその抑制を claude-docs/ai-sdk/firebase
+それぞれで検証。ai-sdk/firebase の既存 golden 出力テストは今回の意図した
+挙動変更 (サブセクション一覧の追加) に合わせて期待値を更新した
+(golden テストが壊れた = 退行ではなく意図した機能追加の確認)。
+
 ## [0.17.0] - 2026-08-26
 
 ### `content` の heading_path 解決: 曖昧な部分一致の無言解決 / `(top)` 未対応を修正
