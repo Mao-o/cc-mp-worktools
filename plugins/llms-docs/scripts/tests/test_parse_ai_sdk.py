@@ -328,8 +328,8 @@ class GoldenOutputTest(unittest.TestCase):
             "parse-ai-sdk.py", "content", "0", "--cache-dir", tmp,
         ])
         self.assertEqual(code, 0, err)
-        # bd 2wd.18: ai-sdk's content now gets the same subsection-hint
-        # block (before AND after the body — bd 2wd.10) that claude-docs
+        # ai-sdk's content now gets the same subsection-hint
+        # block (before AND after the body) that claude-docs
         # already had. min_level=1 means the doc's own H1 counts as its
         # one top-level section here, matching what 'sections' already
         # shows for ai-sdk.

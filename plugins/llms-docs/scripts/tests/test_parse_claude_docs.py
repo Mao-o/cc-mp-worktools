@@ -450,7 +450,7 @@ class GoldenOutputTest(unittest.TestCase):
 
 
 class FetchIndexDocIdxJoinTest(unittest.TestCase):
-    """bd 2wd.9: fetch-index showed the llms.txt list POSITION as `[N]`,
+    """fetch-index showed the llms.txt list POSITION as `[N]`,
     but 'sections'/'content' resolve integer refs against the llms-full.txt
     DOC_IDX — a different numbering whenever the two files aren't in the
     same order. Passing the displayed [N] through silently opened the
@@ -518,7 +518,7 @@ class FetchIndexDocIdxJoinTest(unittest.TestCase):
 
 
 class SearchIndexDocIdxJoinTest(unittest.TestCase):
-    """bd 2wd.9: search-index had the same raw-list-position bug as
+    """search-index had the same raw-list-position bug as
     fetch-index, papered over with an unconditional disclaimer note
     instead of a fix. Now it joins when llms-full.txt is already cached
     (dropping the note, since the numbering is then actually correct) and
@@ -560,7 +560,7 @@ class SearchIndexDocIdxJoinTest(unittest.TestCase):
 
 
 class ContentMaxCharsTruncationTest(unittest.TestCase):
-    """bd 2wd.10: content had no output-size cap, so a large page (Platform
+    """content had no output-size cap, so a large page (Platform
     pages average ~38KB) silently overflowed the Bash tool's ~30KB inline-
     output threshold, hiding the subsection hint / Next line at the end."""
 
@@ -597,7 +597,7 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
 
 
 class ContentSubsectionHintBeforeAndAfterTest(unittest.TestCase):
-    """bd 2wd.10: the subsection hint / Next line, previously printed only
+    """The subsection hint / Next line, previously printed only
     AFTER the body, is now ALSO printed right after the metadata header
     (before the body) so it survives truncation regardless of where the
     cut lands — not just when --max-chars happens to catch it."""

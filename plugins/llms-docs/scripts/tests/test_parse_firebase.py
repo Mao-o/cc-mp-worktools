@@ -178,8 +178,8 @@ class GoldenOutputTest(unittest.TestCase):
             "parse-firebase.py", "content", "0", "--cache-dir", tmp,
         ])
         self.assertEqual(code, 0, err)
-        # bd 2wd.18: firebase's content now gets the same subsection-hint
-        # block (before AND after the body — bd 2wd.10) that claude-docs
+        # firebase's content now gets the same subsection-hint
+        # block (before AND after the body) that claude-docs
         # already had.
         hint_block = (
             "\n"
