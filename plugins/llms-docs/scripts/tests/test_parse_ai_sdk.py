@@ -270,7 +270,7 @@ class UntitledRatioWarningTest(unittest.TestCase):
 
 
 class FileReadOnlyModeTest(unittest.TestCase):
-    """bd 2wd.12: --file must be read-only — no fetch, no overwrite — and a
+    """--file must be read-only — no fetch, no overwrite — and a
     missing path must fail with a clear message. Unlike claude-docs, ai-sdk
     has a single source, so there is no source/path mismatch case here."""
 
@@ -303,7 +303,7 @@ class FileReadOnlyModeTest(unittest.TestCase):
 
 
 class GoldenOutputTest(unittest.TestCase):
-    """bd 2wd.12: pin one representative command's FULL stdout verbatim so
+    """Pin one representative command's FULL stdout verbatim so
     a future change to this independently-implemented output format shows
     up as an explicit, intentional diff here instead of silent drift (see
     the claude-docs/firebase counterparts of this test)."""
