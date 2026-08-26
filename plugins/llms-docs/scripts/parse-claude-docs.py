@@ -19,6 +19,7 @@ import argparse
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -268,9 +269,10 @@ def _group_index_entries(entries: list[dict]) -> list[dict]:
     return items
 
 
-def _load_url_to_idx_if_cached(full_cache: str) -> dict:
+def _load_url_to_idx_if_cached(full_cache: str, max_age: int | None = None) -> dict:
     """Join llms.txt URLs to llms-full.txt doc_idx — but ONLY if the
-    full-text file is already cached; never fetch it just for this.
+    full-text file is already cached AND still fresh under *max_age*;
+    never fetch it just for this.
 
     ``fetch-index``/``search-index`` only need the lightweight llms.txt
     index; eagerly fetching llms-full.txt to compute a display label would
@@ -281,9 +283,23 @@ def _load_url_to_idx_if_cached(full_cache: str) -> dict:
     full-text file should degrade this join to "unavailable" (falls back
     to slug display below), not crash the lightweight index command that
     doesn't otherwise depend on llms-full.txt at all.
+
+    A cached file older than *max_age* is *also* treated as "unavailable"
+    here, even though it exists and could be read right now: a later
+    ``sections``/``content`` call passes this same *max_age* to
+    ``fetch_url`` (see its ``age < max_age`` check) and will actually
+    refetch it. If upstream reordered/inserted pages since this stale copy
+    was written, joining against its about-to-be-replaced doc_idx would
+    silently reproduce the exact numbering drift this feature exists to
+    prevent — falling back to the slug form (always valid, ageless) until
+    a fresh copy exists is the same trade-off ``fetch_url`` itself makes.
     """
     if not os.path.exists(full_cache):
         return {}
+    if max_age is not None:
+        age = time.time() - os.path.getmtime(full_cache)
+        if age >= max_age:
+            return {}
     return build_url_to_full_index(split_documents(load_lines(full_cache)))
 
 
@@ -316,7 +332,7 @@ def cmd_fetch_index(args):
     assert_parsed(f"{src['label']} index", len(entries), path)
 
     full_cache = _cache_path(args.cache_dir, src["full_cache"])
-    url_to_idx = _load_url_to_idx_if_cached(full_cache)
+    url_to_idx = _load_url_to_idx_if_cached(full_cache, max_age=args.max_age)
 
     grouped = _group_index_entries(entries)
 
@@ -476,7 +492,12 @@ def cmd_sections(args):
     for s in sections:
         indent = "  " * (s["level"] - 2)  # H2 = no indent, H3 = 2 spaces, etc.
         code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"{indent}[L{s['level']}] {s['title']}{code_marker}")
+        # Print the canonical heading_path, not the bare title: this line
+        # is documented (SKILL.md) as copy-pasteable straight into
+        # content's heading_path argument, and two sibling subsections
+        # with the same title (e.g. "Examples" under two different
+        # parents) are only distinguishable via the full path.
+        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
 
     print()
     print(f"({len(sections)} sections)")
@@ -621,7 +642,7 @@ def cmd_search_index(args):
     scored = search_index_entries(entries, args.query, limit=args.limit)
 
     full_cache = _cache_path(args.cache_dir, src["full_cache"])
-    url_to_idx = _load_url_to_idx_if_cached(full_cache)
+    url_to_idx = _load_url_to_idx_if_cached(full_cache, max_age=args.max_age)
 
     print(f'Search-index results for "{args.query}" ({src["label"]})')
     print(f"  (index: {path})")

@@ -369,6 +369,41 @@ class GoldenOutputTest(unittest.TestCase):
         self.assertNotIn("Top-level sections", out)
         self.assertNotIn("Next:", out)
 
+
+class SectionsHeadingPathTest(unittest.TestCase):
+    """'sections' printed the bare title, not the heading_path it is
+    documented (SKILL.md) as safe to copy straight into content's
+    heading_path argument. Two sibling subsections sharing a title under
+    different parents (e.g. "Examples" under two different H2s) were
+    indistinguishable in the listing even though only the full path
+    identifies which one 'content' would actually resolve."""
+
+    def test_nested_sections_show_full_path_not_ambiguous_bare_title(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\ntitle: Guide\n---\n\n"
+            "# Guide\n\n"
+            "## Client\n"
+            "text\n"
+            "### Examples\n"
+            "client examples\n\n"
+            "## Server\n"
+            "text\n"
+            "### Examples\n"
+            "server examples\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "sections", "0", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Client/Examples", out)
+        self.assertIn("Server/Examples", out)
+        # The old bug printed just "Examples" for both — assert the bare,
+        # unqualified label no longer appears on its own heading line.
+        self.assertNotIn("] Examples\n", out)
+
     def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)

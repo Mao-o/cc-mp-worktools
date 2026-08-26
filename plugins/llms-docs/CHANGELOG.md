@@ -2,6 +2,31 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.18.1] - 2026-08-27
+
+### doc_idx 表示のレビュー指摘 1 件 + `sections` のドキュメント不整合 1 件を修正 (0.18.0 の追いコミット)
+
+- **`fetch-index`/`search-index` が期限切れの llms-full.txt キャッシュからも doc_idx を join していた**:
+  `--max-age` を過ぎたキャッシュは、後続の `sections`/`content` 呼び出しが実際に
+  再取得する対象。再取得後は上流の並び替え/追加で doc_idx が変わり得るため、
+  期限切れキャッシュとの join は「これから置き換わる番号」を表示する形になり、
+  この機能が防ぐはずだった番号ズレを再現してしまっていた。`_load_url_to_idx_if_cached`
+  に `max_age` を渡し、`fetch_url` 自身の再取得判定 (`age >= max_age`) と同じ基準で
+  「未キャッシュ」と同様 slug 表示にフォールバックするよう修正
+- **`sections` が (3 script 共通で) 生の見出しタイトルを表示しており、ネストした
+  同名見出しが区別できなかった**: SKILL.md は `sections`/`search`/`content` の
+  出力を「そのまま `content` の heading_path にコピーしてよい」と案内しているが、
+  `sections` は完全パスではなく末尾のタイトルのみ (例: 2 つの `## Client`/
+  `## Server` 配下にそれぞれ `### Examples` があると両方とも `Examples` とだけ
+  表示) を出力していたため、コピーした値が `content` の完全一致ではなく部分一致
+  (曖昧チェック対象) に落ちてしまうことがあった。`format_heading_path_for_display`
+  (search 系が既に使っている表示関数) を再利用し、3 script 全ての `sections` で
+  完全な heading_path を表示するよう修正 (トップレベル見出しは従来どおり
+  タイトル単体と同じ表示になるため、既存の golden output テストへの影響は無い)
+
+回帰テスト 5 件追加 (`test_parse_claude_docs.py` 3 件、`test_parse_ai_sdk.py` 1 件、
+`test_parse_firebase.py` 1 件、135 tests, all green)。
+
 ## [0.18.0] - 2026-08-27
 
 ### `fetch-index` / `search-index`: llms.txt の一覧位置を doc_idx として表示していた問題を修正

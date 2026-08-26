@@ -396,7 +396,12 @@ def cmd_sections(args):
     for s in sections:
         indent = "  " * (s["level"] - 1)
         code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"{indent}[L{s['level']}] {s['title']}{code_marker}")
+        # Print the canonical heading_path, not the bare title: this line
+        # is documented (SKILL.md) as copy-pasteable straight into
+        # content's heading_path argument, and two sibling subsections
+        # with the same title (e.g. "Examples" under two different
+        # parents) are only distinguishable via the full path.
+        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
 
     print()
     print(f"({len(sections)} sections)")

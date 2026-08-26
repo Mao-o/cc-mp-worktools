@@ -449,6 +449,44 @@ class GoldenOutputTest(unittest.TestCase):
         self.assertEqual(out, expected)
 
 
+class SectionsHeadingPathTest(unittest.TestCase):
+    """'sections' printed the bare title, not the heading_path it is
+    documented (SKILL.md) as safe to copy straight into content's
+    heading_path argument. Two sibling subsections sharing a title under
+    different parents (e.g. "Examples" under two different H2s) were
+    indistinguishable in the listing even though only the full path
+    identifies which one 'content' would actually resolve."""
+
+    def test_nested_sections_show_full_path_not_ambiguous_bare_title(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "- [Guide](https://example.com/guide): Guide\n",
+            "# Guide\n"
+            "Source: https://example.com/guide\n"
+            "\n"
+            "## Client\n"
+            "text\n"
+            "### Examples\n"
+            "client examples\n"
+            "\n"
+            "## Server\n"
+            "text\n"
+            "### Examples\n"
+            "server examples\n",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "sections", "0", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[L3] Client/Examples", out)
+        self.assertIn("[L3] Server/Examples", out)
+        # The old bug printed just "Examples" for both — no longer present
+        # as a standalone (non-prefixed) heading label.
+        self.assertNotIn("[L3] Examples", out)
+
+
 class FetchIndexDocIdxJoinTest(unittest.TestCase):
     """fetch-index showed the llms.txt list POSITION as `[N]`,
     but 'sections'/'content' resolve integer refs against the llms-full.txt
@@ -516,6 +554,58 @@ class FetchIndexDocIdxJoinTest(unittest.TestCase):
         # list position, not a valid sections/content doc_idx).
         self.assertNotIn("[0-1]", out)
 
+    def test_falls_back_to_slug_when_full_text_cache_is_stale(self):
+        # llms-full.txt exists but is older than --max-age: a later
+        # sections/content call (passed this same --max-age) will actually
+        # refetch it. Joining against this about-to-be-replaced numbering
+        # would silently reproduce the exact drift this feature exists to
+        # prevent, so a stale cache must be treated the same as "uncached".
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        full_path = Path(self.tmp, "claude-code-llms-full.txt")
+        full_path.write_text(
+            "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+            "# Skills\nSource: https://example.com/en/skills\n\nbody\n",
+            encoding="utf-8",
+        )
+        stale = time.time() - 1000
+        os.utime(full_path, (stale, stale))
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index", "--cache-dir", self.tmp,
+            "--max-age", "100",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[skills] Skills", out)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertNotIn("[0]", out)
+        self.assertNotIn("[1]", out)
+
+    def test_fresh_full_text_cache_within_max_age_still_joins(self):
+        # The negative case for the test above: a cache younger than
+        # --max-age is exactly what fetch_url would also keep using, so
+        # the join must still happen (this isn't "never join with
+        # --max-age set", only "not with a cache old enough to refetch").
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        Path(self.tmp, "claude-code-llms-full.txt").write_text(
+            "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+            "# Skills\nSource: https://example.com/en/skills\n\nbody\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index", "--cache-dir", self.tmp,
+            "--max-age", "1000",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Skills", out)
+        self.assertIn("[0] Hooks", out)
+
 
 class SearchIndexDocIdxJoinTest(unittest.TestCase):
     """search-index had the same raw-list-position bug as
@@ -557,6 +647,30 @@ class SearchIndexDocIdxJoinTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("[0] Hooks", out)
         self.assertNotIn("Note:", out)
+
+    def test_falls_back_to_slug_and_shows_note_when_full_text_cache_is_stale(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "claude-code-llms.txt").write_text(
+            "- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        full_path = Path(tmp, "claude-code-llms-full.txt")
+        full_path.write_text(
+            "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+            "# Skills\nSource: https://example.com/en/skills\n\nbody\n",
+            encoding="utf-8",
+        )
+        stale = time.time() - 1000
+        os.utime(full_path, (stale, stale))
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-index", "hooks", "--cache-dir", tmp,
+            "--max-age", "100",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertIn("Note:", out)
 
 
 class ContentMaxCharsTruncationTest(unittest.TestCase):

@@ -203,6 +203,46 @@ class GoldenOutputTest(unittest.TestCase):
         )
         self.assertEqual(out, expected)
 
+
+class SectionsHeadingPathTest(unittest.TestCase):
+    """'sections' printed the bare title, not the heading_path it is
+    documented (SKILL.md) as safe to copy straight into content's
+    heading_path argument. Two sibling subsections sharing a title under
+    different parents (e.g. "Examples" under two different H2s) were
+    indistinguishable in the listing even though only the full path
+    identifies which one 'content' would actually resolve."""
+
+    def test_nested_sections_show_full_path_not_ambiguous_bare_title(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "firebase-llms.txt").write_text(
+            "- [Guide](https://firebase.google.com/docs/guide.md.txt): Guide\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/guide.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Guide\n\n"
+            "## Client\n"
+            "text\n"
+            "### Examples\n"
+            "client examples\n\n"
+            "## Server\n"
+            "text\n"
+            "### Examples\n"
+            "server examples\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "sections", "0", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[L3] Client/Examples", out)
+        self.assertIn("[L3] Server/Examples", out)
+        self.assertNotIn("[L3] Examples", out)
+
     def test_no_subsection_hints_suppresses_both_occurrences(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
