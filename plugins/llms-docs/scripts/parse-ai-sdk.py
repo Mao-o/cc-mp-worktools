@@ -45,6 +45,7 @@ from _common import (
     extract_content,
     extract_sections,
     fetch_url,
+    format_heading_path_for_display,
     full_corpus_body_search,
     load_lines,
     next_hint,
@@ -408,13 +409,15 @@ def cmd_content(args):
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
 
-    content = extract_content(doc["body_lines"], args.heading_path,
-                              protect_tables=False, min_level=1)
+    content, resolved_heading_path = extract_content(
+        doc["body_lines"], args.heading_path,
+        protect_tables=False, min_level=1,
+    )
 
     print_metadata_header(
         fm["title"] or "(untitled)",
         tags=fm["tags"] or None,
-        heading_path=args.heading_path,
+        heading_path=resolved_heading_path,
     )
     print(content, end="")
 
@@ -528,7 +531,7 @@ def cmd_search_content(args):
         print(f"    ({hits['total_matches']} hits in this document, showing {shown}){mode_note}")
         for r in hits["results"]:
             kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            print(f"    Section: {r['heading_path']}  (x{r['hit_count']}){kw_info}")
+            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
             print()
@@ -659,7 +662,7 @@ def cmd_search(args):
             print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
             for s in hits["results"]:
                 kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                print(f"    Section: {s['heading_path']}  (x{s['hit_count']}){kw_info}")
+                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
                 print()

@@ -7,10 +7,12 @@ untitled-ratio warning, and the search-fallback fix — using pre-seeded
 cache-dir fixtures so no network access is needed.
 """
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 
@@ -265,6 +267,78 @@ class UntitledRatioWarningTest(unittest.TestCase):
         ])
         self.assertEqual(code, 0)
         self.assertNotIn("WARNING", err)
+
+
+class FileReadOnlyModeTest(unittest.TestCase):
+    """bd 2wd.12: --file must be read-only — no fetch, no overwrite — and a
+    missing path must fail with a clear message. Unlike claude-docs, ai-sdk
+    has a single source, so there is no source/path mismatch case here."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_file_flag_is_used_verbatim_without_fetching(self):
+        snapshot = Path(self.tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "---\ntitle: Doc\n---\n\n# Doc\n\nbody\n", encoding="utf-8",
+        )
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            code, out, err = _loader.run_cli(parse_ai_sdk, [
+                "parse-ai-sdk.py", "sections", "0",
+                "--file", str(snapshot), "--cache-dir", self.tmp,
+            ])
+        self.assertEqual(code, 0, err)
+        mock_urlopen.assert_not_called()
+        self.assertIn("Doc", out)
+
+    def test_missing_file_dies_with_clear_message(self):
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "sections", "0",
+            "--file", os.path.join(self.tmp, "does-not-exist.txt"),
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", err)
+
+
+class GoldenOutputTest(unittest.TestCase):
+    """bd 2wd.12: pin one representative command's FULL stdout verbatim so
+    a future change to this independently-implemented output format shows
+    up as an explicit, intentional diff here instead of silent drift (see
+    the claude-docs/firebase counterparts of this test)."""
+
+    def test_content_full_output_is_pinned(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\n"
+            "title: streamText\n"
+            "description: Stream text generation\n"
+            "tags: [core, streaming]\n"
+            "---\n"
+            "\n"
+            "# streamText\n"
+            "\n"
+            "## Options\n"
+            "Configure options here.\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "content", "0", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        expected = (
+            "# doc_title: streamText\n"
+            "# doc_tags: core, streaming\n"
+            "---\n"
+            "\n"
+            "# streamText\n"
+            "\n"
+            "## Options\n"
+            "Configure options here.\n"
+        )
+        self.assertEqual(out, expected)
 
 
 if __name__ == "__main__":

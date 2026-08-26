@@ -116,8 +116,37 @@ def _is_table_line(line: str) -> bool:
     return bool(stripped) and stripped.startswith("|") and stripped.endswith("|")
 
 
+def _extend_for_fence_and_table(content_lines, end_line, body_lines, protect_tables):
+    """Extend *content_lines* (already sliced up to *end_line*) so it never
+    ends mid code-fence or mid Markdown-table.
+
+    Shared by every ``extract_content`` return path (the normal
+    heading-section slice and the ``(top)`` preamble slice) so the two
+    can't drift into inconsistent fence/table handling.
+    """
+    fence = FenceTracker()
+    for line in content_lines:
+        fence.update(line)
+    if fence.in_fence:
+        i = end_line
+        while i < len(body_lines):
+            content_lines.append(body_lines[i])
+            fence.update(body_lines[i])
+            i += 1
+            if not fence.in_fence:
+                break
+
+    if protect_tables and content_lines and _is_table_line(content_lines[-1]):
+        i = end_line
+        while i < len(body_lines) and _is_table_line(body_lines[i]):
+            content_lines.append(body_lines[i])
+            i += 1
+
+    return content_lines
+
+
 def extract_content(body_lines, heading_path=None, *,
-                    protect_tables: bool = True, min_level: int = 2) -> str:
+                    protect_tables: bool = True, min_level: int = 2):
     """Extract content from *body_lines*.
 
     If *heading_path* is None, return the entire body. Otherwise, find the
@@ -125,17 +154,53 @@ def extract_content(body_lines, heading_path=None, *,
     any unclosed code fence. When *protect_tables* is True, also extend to
     include a Markdown table that straddles the section boundary.
 
+    *heading_path* of ``"(top)"`` is a reserved sentinel meaning "the
+    preamble before the first heading" — the same value ``search`` prints
+    as ``Section: (top)`` for a body hit above the first heading (see
+    ``_build_section_results``). Passing that value back here (as the
+    ``Next:`` hint tells the caller to) returns everything from the start
+    of *body_lines* up to (not including) the first heading, rather than
+    falling through to the heading-lookup below where no section is ever
+    literally titled ``"(top)"``.
+
     *min_level* must match what the caller's ``cmd_sections`` prints — otherwise
     the AI agent sees one heading hierarchy but searches another, which lets
     a stray H1/H2 of the same title silently match the wrong section. AI SDK
     passes ``min_level=1`` (its body_lines include the H1); Claude/Firebase
     keep the default of 2 because Firebase hands the full page (H1 included)
     to this function and must not collapse an H1 onto an identically-named H2.
+
+    Returns a tuple ``(content, resolved_heading_path)``. *resolved_heading_path*
+    is ``None`` when *heading_path* was ``None`` (whole document), ``"(top)"``
+    for the preamble case, or the matched section's canonical ``heading_path``
+    otherwise. A caller-supplied *heading_path* that only partially matched
+    (e.g. a bare title, or a case-insensitive substring) resolves to a
+    *different*, fuller string here — callers should display the returned
+    value in headers/hints, not echo back the raw argument, so a reader can
+    tell which section was actually picked.
+
+    A partial match (no exact ``heading_path``/``title`` hit) that is
+    ambiguous — two or more sections match the same case-insensitive
+    substring — exits with an ``Error: ambiguous heading ...`` listing every
+    candidate instead of silently picking the first one (mirroring how
+    ``_resolve_page_ref``'s slug lookup handles an ambiguous slug). An exact
+    match is checked first and always wins outright, so a ``heading_path``
+    copied verbatim from a previous ``sections``/``content``/``search`` call
+    is never subject to this check even if it would *also* satisfy other
+    sections' partial-match pattern.
     """
     if heading_path is None:
-        return "".join(body_lines)
+        return "".join(body_lines), None
 
     sections = extract_sections(body_lines, min_level=min_level)
+
+    if heading_path == "(top)":
+        end_line = sections[0]["line_start"] if sections else len(body_lines)
+        content_lines = _extend_for_fence_and_table(
+            list(body_lines[:end_line]), end_line, body_lines, protect_tables
+        )
+        return "".join(content_lines), "(top)"
+
     target = None
     for s in sections:
         if s["heading_path"] == heading_path or s["title"] == heading_path:
@@ -144,10 +209,14 @@ def extract_content(body_lines, heading_path=None, *,
 
     if target is None:
         heading_lower = heading_path.lower()
-        for s in sections:
-            if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower():
-                target = s
-                break
+        matches = [
+            s for s in sections
+            if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower()
+        ]
+        if len(matches) > 1:
+            die_ambiguous_heading(heading_path, matches)
+        if matches:
+            target = matches[0]
 
     if target is None:
         die_heading_not_found(heading_path, sections)
@@ -163,29 +232,11 @@ def extract_content(body_lines, heading_path=None, *,
             end_line = s["line_start"]
             break
 
-    content_lines = list(body_lines[target["line_start"]:end_line])
+    content_lines = _extend_for_fence_and_table(
+        list(body_lines[target["line_start"]:end_line]), end_line, body_lines, protect_tables
+    )
 
-    # Code-fence protection: if we end inside a fence, extend to closing
-    fence = FenceTracker()
-    for line in content_lines:
-        fence.update(line)
-    if fence.in_fence:
-        i = end_line
-        while i < len(body_lines):
-            content_lines.append(body_lines[i])
-            fence.update(body_lines[i])
-            i += 1
-            if not fence.in_fence:
-                break
-
-    # Table protection: if we end inside a table, extend to table end
-    if protect_tables and content_lines and _is_table_line(content_lines[-1]):
-        i = end_line
-        while i < len(body_lines) and _is_table_line(body_lines[i]):
-            content_lines.append(body_lines[i])
-            i += 1
-
-    return "".join(content_lines)
+    return "".join(content_lines), target["heading_path"]
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +484,51 @@ def load_lines(path: str):
 # Core: keyword search over index entries and body content
 # ---------------------------------------------------------------------------
 
+def _norm(tok: str) -> str:
+    """Lowercase, strip ``-``/``_`` separators, and apply a light plural-to-
+    singular stem so ``score_entry`` treats e.g. ``"skills"``/``"Skill"``,
+    ``"hooks"``/``"Hook events"``, and ``"stream-text"``/``"streamText"`` as
+    equivalent tokens.
+
+    Not a real stemmer (no Porter/Snowball) — just enough to fold the common
+    English plural suffixes and hyphen/underscore spelling variants that show
+    up across the doc corpora. Order matters: the multi-character sibilant
+    endings (``-ses``/``-xes``/``-zes``/``-ches``/``-shes``, e.g. "boxes" →
+    "box") are checked *before* the generic single-``s`` strip, because
+    stripping only the trailing ``s`` from those would leave a dangling
+    ``e`` (e.g. "boxes" → "boxe"). Words already ending in ``ss`` (e.g.
+    "process") are left untouched to avoid mangling a non-plural word.
+    """
+    t = tok.lower().replace("-", "").replace("_", "")
+    if t.endswith("ies") and len(t) > 4:
+        return t[:-3] + "y"
+    if t.endswith(("ses", "xes", "zes", "ches", "shes")) and len(t) > 4:
+        return t[:-2]
+    if t.endswith("s") and not t.endswith("ss") and len(t) > 2:
+        return t[:-1]
+    return t
+
+
+def _norm_phrase(text: str) -> str:
+    """Apply ``_norm()`` to *text* one whitespace-separated word at a time
+    and rejoin with single spaces.
+
+    ``_norm()``'s length gates (``len(t) > 4`` / ``len(t) > 2``) are sized
+    for a single word — applying it to a whole multi-word string directly
+    would measure those gates against the *combined* length of every word,
+    not the last word alone, so the very same suffix on the very same word
+    could pass the gate in a short title/query and fail it once embedded in
+    a longer phrase (e.g. ``_norm("uses")`` strips to ``"use"``, but a
+    naive whole-string ``_norm("Common uses")`` — length 11 — would instead
+    strip the trailing ``"es"`` off the *entire string* to ``"common us"``,
+    losing the substring match a plain, un-normalized ``"uses" in "common
+    uses"`` used to find). Normalizing word-by-word keeps every word's
+    stemming decision local to that word, so a phrase and a bare keyword
+    that share a final word always normalize that shared word the same way.
+    """
+    return " ".join(_norm(word) for word in text.split())
+
+
 def score_entry(title: str, description: str, keywords,
                 *, tags=None, headings=None) -> int:
     """Score a single index entry against *keywords* (case-insensitive substring).
@@ -445,31 +541,44 @@ def score_entry(title: str, description: str, keywords,
         description match  :  +2
         heading match      :  +1 (if *headings* provided)
         all-keyword bonus  : +10 (when len(keywords) > 1)
+
+    Both the keyword and every comparison field are normalized before
+    matching — so a plural query still finds a singular title (and vice
+    versa), and a normalized whole-string match now counts as "exact"
+    (+10) rather than merely a substring (+5). *keywords* and *tags* are
+    already atomic single tokens (``query.split()`` / a tag list), so they
+    go through ``_norm()`` directly; *title*/*description*/*headings* are
+    free-text phrases and go through ``_norm_phrase()`` (word-by-word — see
+    its docstring for why applying ``_norm()`` to the whole phrase directly
+    would be wrong). Two equal raw strings are still equal after the same
+    deterministic transform is applied to both, so this cannot turn a
+    previously-exact match into a partial one — it only ever adds new
+    matches / upgrades partial matches to exact.
     """
-    title_lower = (title or "").lower()
-    desc_lower = (description or "").lower()
-    tags_lower = [t.lower() for t in (tags or [])]
-    headings_lower = [h.lower() for h in (headings or [])]
+    title_norm = _norm_phrase(title or "")
+    desc_norm = _norm_phrase(description or "")
+    tags_norm = [_norm(t) for t in (tags or [])]
+    headings_norm = [_norm_phrase(h) for h in (headings or [])]
 
     total = 0
     matched_keywords = 0
 
     for kw in keywords:
-        kw_lower = kw.lower()
+        kw_norm = _norm(kw)
         kw_score = 0
 
-        if kw_lower == title_lower:
+        if kw_norm == title_norm:
             kw_score += 10
-        elif kw_lower in title_lower:
+        elif kw_norm in title_norm:
             kw_score += 5
 
-        if any(kw_lower == t or kw_lower in t for t in tags_lower):
+        if any(kw_norm == t or kw_norm in t for t in tags_norm):
             kw_score += 4
 
-        if kw_lower in desc_lower:
+        if kw_norm in desc_norm:
             kw_score += 2
 
-        if any(kw_lower in h for h in headings_lower):
+        if any(kw_norm in h for h in headings_norm):
             kw_score += 1
 
         if kw_score > 0:
@@ -511,6 +620,26 @@ def search_index_entries(entries, query: str, *, limit: int = 15, get_extras=Non
 
     scored.sort(key=lambda x: -x[0])
     return scored[:limit]
+
+
+def format_heading_path_for_display(heading_path: str) -> str:
+    """Render a ``heading_path`` for a ``Section:`` display line.
+
+    ``"(top)"`` is the reserved sentinel ``_build_section_results`` uses for
+    a body hit above a page's first heading, and the same string
+    ``extract_content`` recognizes to return that preamble (see its
+    docstring for the full round-trip contract). Displayed bare, "(top)"
+    reads as cryptic. Annotated inline as e.g. "(top: before first
+    heading)" it would read clearly but would no longer be safe to copy
+    verbatim into ``content``'s heading_path argument. This appends the
+    clarification as a separate bracketed suffix instead — matching the
+    existing "[partial match]" / "(x3)" annotation style already used on
+    these same result lines — so the text up to the first two spaces is
+    always exactly the value ``content`` expects.
+    """
+    if heading_path == "(top)":
+        return "(top)  [before first heading]"
+    return heading_path
 
 
 def _build_section_results(section_hits, sections, body_lines, keywords,
@@ -684,6 +813,23 @@ def die_heading_not_found(heading_path: str, sections) -> None:
     available = "\n".join(f"  - {s['heading_path']}" for s in sections)
     print(
         f"Error: heading '{heading_path}' not found.\n\nAvailable sections:\n{available}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def die_ambiguous_heading(heading_path: str, matches) -> None:
+    """Print an ambiguous-heading error (2+ case-insensitive partial matches
+    for the same *heading_path*) listing every candidate, and exit 1.
+
+    Mirrors the ambiguous-slug error the parse-*.py scripts already raise
+    from ``_resolve_page_ref`` — silently picking the first partial match
+    risks the caller reading (and citing) the wrong section with no
+    indication that other candidates existed.
+    """
+    detail = "\n  ".join(f"- {m['heading_path']}" for m in matches)
+    print(
+        f"Error: ambiguous heading '{heading_path}'. Matches:\n  {detail}",
         file=sys.stderr,
     )
     sys.exit(1)

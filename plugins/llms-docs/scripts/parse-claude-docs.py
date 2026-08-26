@@ -35,6 +35,7 @@ from _common import (
     extract_content,
     extract_sections,
     fetch_url,
+    format_heading_path_for_display,
     full_corpus_body_search,
     load_lines,
     next_hint,
@@ -516,6 +517,19 @@ def _print_subsection_hints(doc: dict, idx: int, heading_path: str | None,
     """Print direct child sections of *heading_path* (or top-level if None)
     as a hint block after the content. Lets the caller drill down further
     without re-running ``sections``.
+
+    *heading_path* must already be the *resolved* canonical path returned by
+    ``extract_content`` (or ``None``/``"(top)"``) — not the caller's raw,
+    possibly-partial input. Resolution (including the ambiguous-partial-match
+    check) happens exactly once, in ``extract_content``; doing it again here
+    from a raw argument would risk silently disagreeing with what the content
+    body above actually displayed (this used to run its own copy of the same
+    exact/partial-match search as ``extract_content``, with the same
+    silently-picks-the-first-partial-match behavior — since every caller now
+    passes the already-resolved path, only an exact lookup is needed). No
+    section is ever literally titled ``"(top)"``, so that sentinel falls
+    through to "no hint" below rather than a lookup miss being treated as an
+    error — the preamble has no child sections to hint at.
     """
     sections = extract_sections(doc["body_lines"])
     if not sections:
@@ -527,16 +541,10 @@ def _print_subsection_hints(doc: dict, idx: int, heading_path: str | None,
         label = "Top-level sections"
     else:
         target = None
-        hp_lower = heading_path.lower()
         for s in sections:
-            if s["heading_path"] == heading_path or s["title"] == heading_path:
+            if s["heading_path"] == heading_path:
                 target = s
                 break
-        if target is None:
-            for s in sections:
-                if hp_lower in s["heading_path"].lower() or hp_lower in s["title"].lower():
-                    target = s
-                    break
         if target is None:
             return
         target_idx = sections.index(target)
@@ -581,7 +589,7 @@ def cmd_content(args):
     idx = _resolve_page_ref(docs, args.page_ref)
 
     doc = docs[idx]
-    content = extract_content(doc["body_lines"], args.heading_path)
+    content, resolved_heading_path = extract_content(doc["body_lines"], args.heading_path)
 
     if not args.no_link_annotations:
         url_to_idx = build_url_to_full_index(docs)
@@ -591,13 +599,13 @@ def cmd_content(args):
     print_metadata_header(
         doc["title"],
         source=doc["source_url"] or None,
-        heading_path=args.heading_path,
+        heading_path=resolved_heading_path,
     )
     print(content, end="")
 
     if not args.no_subsection_hints:
         _print_subsection_hints(
-            doc, idx, args.heading_path, _source_hint_args(args)
+            doc, idx, resolved_heading_path, _source_hint_args(args)
         )
 
 
@@ -697,7 +705,7 @@ def cmd_search_content(args):
         print(f"    ({hits['total_matches']} hits in this page, showing {shown}){mode_note}")
         for r in hits["results"]:
             kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            print(f"    Section: {r['heading_path']}  (x{r['hit_count']}){kw_info}")
+            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
             print()
@@ -705,7 +713,7 @@ def cmd_search_content(args):
         if overflow:
             print(f"    Other sections with hits (not shown):")
             for s in overflow:
-                print(f"      - {s['heading_path']}  (x{s['hit_count']})")
+                print(f"      - {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']})")
             print()
         print()
 
@@ -836,7 +844,7 @@ def _print_search_results(results: list[dict], *, label_source: bool) -> None:
             print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
             for s in hits["results"]:
                 kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                print(f"    Section: {s['heading_path']}  (x{s['hit_count']}){kw_info}")
+                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
                 print()
@@ -844,7 +852,7 @@ def _print_search_results(results: list[dict], *, label_source: bool) -> None:
             if overflow:
                 print(f"    Other sections with hits (not shown):")
                 for s in overflow:
-                    print(f"      - {s['heading_path']}  (x{s['hit_count']})")
+                    print(f"      - {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']})")
                 print()
         else:
             print(f"    (no body hits — index match only)")

@@ -101,5 +101,96 @@ class AssertParsedIntegrationTest(unittest.TestCase):
         self.assertIn("format may have changed", err)
 
 
+class TopHeadingPathRoundTripTest(unittest.TestCase):
+    """bd 2wd.15: a firebase page's own H1 is part of the "(top)" preamble
+    here (unlike claude-docs, firebase hands the raw page — H1 included —
+    straight through to extract_sections/extract_content, since it has no
+    split_documents step to strip the H1 first). The (top) sentinel must
+    still round-trip end-to-end through search-content -> content."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "firebase-llms.txt").write_text(
+            "- [Auth Overview](https://firebase.google.com/docs/auth/overview.md.txt): Overview of auth\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(self.tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/auth/overview.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Auth Overview\n"
+            "\n"
+            "Text mentioning zzzpreambleterm before any heading.\n"
+            "\n"
+            "## Introduction\n"
+            "Authenticate users.\n",
+            encoding="utf-8",
+        )
+
+    def test_top_hit_is_displayed_with_clarifying_suffix(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search-content", "zzzpreambleterm",
+            "--page-ref", "0", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Section: (top)  [before first heading]", out)
+
+    def test_top_value_copied_into_content_resolves_the_preamble(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "content", "0", "(top)",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("zzzpreambleterm", out)
+        self.assertIn("heading_path: (top)", out)
+        self.assertNotIn("Authenticate users", out)
+
+
+class GoldenOutputTest(unittest.TestCase):
+    """bd 2wd.12: pin one representative command's FULL stdout verbatim so
+    a future change to this independently-implemented output format shows
+    up as an explicit, intentional diff here instead of silent drift (see
+    the claude-docs/ai-sdk counterparts of this test)."""
+
+    def test_content_full_output_is_pinned(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Path(tmp, "firebase-llms.txt").write_text(
+            "- [Firestore Query Limits](https://firebase.google.com/docs/firestore/query-limit.md.txt): Limits on queries\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/firestore/query-limit.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Firestore Query Limits\n"
+            "\n"
+            "Intro text before any heading.\n"
+            "\n"
+            "## Limits\n"
+            "Max 100 results per query.\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "content", "0", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        expected = (
+            "# doc_title: Firestore Query Limits\n"
+            "# source: https://firebase.google.com/docs/firestore/query-limit.md.txt\n"
+            "---\n"
+            "# Firestore Query Limits\n"
+            "\n"
+            "Intro text before any heading.\n"
+            "\n"
+            "## Limits\n"
+            "Max 100 results per query.\n"
+        )
+        self.assertEqual(out, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
