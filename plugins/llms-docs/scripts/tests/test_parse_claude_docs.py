@@ -259,14 +259,14 @@ class JoinRateHardFailTest(unittest.TestCase):
 
 
 class SearchToContentRoundTripTest(unittest.TestCase):
-    """bd 2wd.15: 'search' can report a body hit above a page's first
-    heading as 'Section: (top)', and the tool's own documented flow (see
-    SKILL.md Quick Start) is to copy a search/content result straight into
-    the next 'content' call. This must actually work end-to-end — not just
-    at the extract_content unit level (see test_common.py) — and the
-    display's clarifying suffix (bd 2wd.15's "(top: before first heading)"
-    request, implemented as a separate bracketed annotation so the raw
-    value stays copy-paste-safe) must not corrupt what gets copied."""
+    """'search' can report a body hit above a page's first heading as
+    'Section: (top)', and the tool's own documented flow (see SKILL.md
+    Quick Start) is to copy a search/content result straight into the next
+    'content' call. This must actually work end-to-end — not just at the
+    extract_content unit level (see test_common.py) — and the display's
+    clarifying suffix ("(top)  [before first heading]", a separate
+    bracketed annotation chosen so the raw value stays copy-paste-safe)
+    must not corrupt what gets copied."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -303,7 +303,7 @@ class SearchToContentRoundTripTest(unittest.TestCase):
 
 
 class MaxAgeBoundaryIntegrationTest(unittest.TestCase):
-    """bd 2wd.12: --max-age must gate the re-fetch decision through the
+    """--max-age must gate the re-fetch decision through the
     WHOLE CLI pipeline, exercised here through 'fetch-index' with a mocked
     urlopen so the age < max_age boundary is deterministic (no reliance on
     real elapsed time or network access)."""
@@ -346,7 +346,7 @@ class MaxAgeBoundaryIntegrationTest(unittest.TestCase):
 
 
 class FileReadOnlyModeTest(unittest.TestCase):
-    """bd 2wd.12: --file must be read-only — no fetch, no overwrite — and a
+    """--file must be read-only — no fetch, no overwrite — and a
     missing path or a source/path mismatch must fail with a clear message
     rather than a silent wrong-source read or an unhandled crash."""
 
@@ -391,7 +391,7 @@ class FileReadOnlyModeTest(unittest.TestCase):
 
 
 class ArgparseErrorExitCodeTest(unittest.TestCase):
-    """bd 2wd.12: usage errors (argparse's own exit 2) must not be confused
+    """Usage errors (argparse's own exit 2) must not be confused
     with this plugin's exit 1 ("normal" failure) or exit 2 ("upstream
     format may have changed") — argparse happens to also use 2, but for a
     different reason (bad invocation vs. bad data), so pin both here."""
@@ -410,7 +410,7 @@ class ArgparseErrorExitCodeTest(unittest.TestCase):
 
 
 class GoldenOutputTest(unittest.TestCase):
-    """bd 2wd.12: pin one representative command's FULL stdout verbatim so
+    """Pin one representative command's FULL stdout verbatim so
     a future change to this independently-implemented output format shows
     up as an explicit, intentional diff here instead of silent drift
     (each of the 3 parse-*.py scripts formats its own output; see the

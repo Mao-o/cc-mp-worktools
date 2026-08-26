@@ -102,7 +102,7 @@ class AssertParsedIntegrationTest(unittest.TestCase):
 
 
 class TopHeadingPathRoundTripTest(unittest.TestCase):
-    """bd 2wd.15: a firebase page's own H1 is part of the "(top)" preamble
+    """A firebase page's own H1 is part of the "(top)" preamble
     here (unlike claude-docs, firebase hands the raw page — H1 included —
     straight through to extract_sections/extract_content, since it has no
     split_documents step to strip the H1 first). The (top) sentinel must
@@ -149,7 +149,7 @@ class TopHeadingPathRoundTripTest(unittest.TestCase):
 
 
 class GoldenOutputTest(unittest.TestCase):
-    """bd 2wd.12: pin one representative command's FULL stdout verbatim so
+    """Pin one representative command's FULL stdout verbatim so
     a future change to this independently-implemented output format shows
     up as an explicit, intentional diff here instead of silent drift (see
     the claude-docs/ai-sdk counterparts of this test)."""

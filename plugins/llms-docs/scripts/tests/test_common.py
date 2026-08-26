@@ -148,9 +148,9 @@ class ExtractContentTest(unittest.TestCase):
         self.assertIsNone(resolved)
 
     def test_partial_match_resolves_to_canonical_heading_path(self):
-        # bd 2wd.14: the header/hint block must show the section that was
-        # ACTUALLY picked, not echo back the caller's raw (possibly
-        # partial) input — "config" here only matches the nested H3.
+        # The header/hint block must show the section that was ACTUALLY
+        # picked, not echo back the caller's raw (possibly partial) input
+        # — "config" here only matches the nested H3.
         body = [
             "## Frontmatter reference\n",
             "text\n",
@@ -162,10 +162,10 @@ class ExtractContentTest(unittest.TestCase):
         self.assertIn("deep", content)
 
     def test_ambiguous_partial_match_dies_instead_of_silently_picking_first(self):
-        # bd 2wd.14: two sibling "... Configuration" sections both match the
-        # case-insensitive substring "config" — silently taking the first
-        # (the old behavior) risks the caller reading/citing the wrong
-        # section with no indication another candidate existed.
+        # Two sibling "... Configuration" sections both match the case-
+        # insensitive substring "config" — silently taking the first (the
+        # old behavior) risks the caller reading/citing the wrong section
+        # with no indication another candidate existed.
         body = [
             "## Client Configuration\n",
             "a\n",
@@ -177,9 +177,10 @@ class ExtractContentTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
 
     def test_exact_heading_path_copied_from_output_never_hits_ambiguity_check(self):
-        # bd 2wd.14 x bd 2wd.15 interaction: a heading_path copied verbatim
-        # from a previous sections/content/search call must always resolve
-        # via the exact-match branch first, even when it would ALSO satisfy
+        # Interaction between the two fixes above: a heading_path copied
+        # verbatim from a previous sections/content/search call must
+        # always resolve via the exact-match branch first, even when it
+        # would ALSO satisfy
         # >= 2 other sections' partial-match pattern — the ambiguity check
         # must never run once an exact match exists. Otherwise the tool's
         # own documented copy-paste round trip (see SKILL.md Quick Start)
@@ -197,7 +198,7 @@ class ExtractContentTest(unittest.TestCase):
         self.assertNotIn("b", content)
 
     def test_top_heading_path_returns_preamble_before_first_heading(self):
-        # bd 2wd.15: search can report a body hit above the first heading as
+        # search can report a body hit above the first heading as
         # Section: (top), and its Next hint tells the caller to copy that
         # value straight into content's heading_path argument — this must
         # resolve, not fall through to "heading not found".
@@ -223,7 +224,7 @@ class ScoreEntryTest(unittest.TestCase):
         self.assertEqual(_common.score_entry("Hooks", "", ["hooks"]), 10)
 
     def test_plural_query_now_matches_multiword_title(self):
-        # bd 2wd.20: previously a characterization test pinning score 0 (no
+        # Previously a characterization test pinning score 0 (no
         # stemming). _norm() now folds "hooks" -> "hook", which is a
         # substring of normalized "hook events" -> scores as a partial
         # match (5), not an exact one (10), since the full normalized
@@ -240,11 +241,11 @@ class ScoreEntryTest(unittest.TestCase):
 
 
 class NormalizationStemmingTest(unittest.TestCase):
-    """bd 2wd.20: a light plural-to-singular + separator-stripping fold so
+    """A light plural-to-singular + separator-stripping fold so
     plural/singular and hyphen/camelCase spelling variants score as
     equivalent, fixing the previously-zero cases fixed above and pinning
-    two more from the same ticket (fixture pairs named in the ticket body:
-    skills/Skill, hooks/Hook events, stream-text/streamText)."""
+    two more representative pairs: skills/Skill, hooks/Hook events,
+    stream-text/streamText."""
 
     def test_plural_query_matches_singular_title_exactly(self):
         self.assertEqual(_common.score_entry("Skill", "", ["skills"]), 10)
@@ -270,7 +271,7 @@ class NormalizationStemmingTest(unittest.TestCase):
 
 
 class ScoreEntryRegressionFloorTest(unittest.TestCase):
-    """bd 2wd.20 regression floor, per this repo's discipline of diffing a
+    """Regression floor, per this repo's discipline of diffing a
     changed analysis/ranking function against its pre-change output over a
     representative corpus (not just mutation-testing the new code): these
     exact (title, description, keywords) -> minimum-score pairs were
