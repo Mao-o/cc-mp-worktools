@@ -30,7 +30,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 
 - `python3` (**3.11+ 必須**) — `parse-*.py` は PEP 604 記法 (`list[X]` / `X | None`) を定義時に評価するため、3.11 未満 (例: macOS 標準の `/usr/bin/python3` = 3.9 系) では起動直後に `TypeError: unsupported operand type(s) for ...` で失敗する。marketplace 横断方針により 3.9 互換 shim は追加しない — `mise use python@3.11` 等で新しい `python3` を用意すること。`scripts/_common.py` の `from __future__ import annotations` は既存のまま (3.9 互換化が目的ではない)
 - ネットワーク到達性（初回取得時に外部 llms.txt をダウンロード）
-- `/tmp` 書込み権限（キャッシュ保存先）
+- キャッシュ保存先 (既定 `~/.cache/llms-docs`、`$XDG_CACHE_HOME` / `$LLMS_DOCS_CACHE_DIR` で上書き可) への書込み権限
 
 ## 動作確認
 
@@ -65,14 +65,16 @@ python3 plugins/llms-docs/scripts/parse-firebase.py fetch-index --limit 10
 
 ## キャッシュ
 
-| スキル | キャッシュファイル |
-|--------|-------------------|
-| claude-docs (Code) | `/tmp/claude-code-llms.txt`, `/tmp/claude-code-llms-full.txt` |
-| claude-docs (Platform) | `/tmp/claude-platform-llms.txt`, `/tmp/claude-platform-llms-full.txt` |
-| ai-sdk | `/tmp/ai-sdk-llms-full.txt` |
-| firebase | `/tmp/firebase-llms.txt` (index), `/tmp/firebase-docs/` (per-page) |
+既定のキャッシュディレクトリは `~/.cache/llms-docs` (`$XDG_CACHE_HOME/llms-docs` があればそちら、`$LLMS_DOCS_CACHE_DIR` で完全上書き可)。`--cache-dir` で個別指定も可能。
 
-最新版が必要な場合は該当ファイルを `rm` してから再実行する。
+| スキル | キャッシュファイル (`<cache-dir>` 配下) |
+|--------|-------------------|
+| claude-docs (Code) | `claude-code-llms.txt`, `claude-code-llms-full.txt` |
+| claude-docs (Platform) | `claude-platform-llms.txt`, `claude-platform-llms-full.txt` |
+| ai-sdk | `ai-sdk-llms-full.txt` |
+| firebase | `firebase-llms.txt` (index), `firebase-docs/` (per-page) |
+
+最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。
 
 ## 既知の制約
 

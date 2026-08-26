@@ -2,6 +2,104 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.16.1] - 2026-08-25
+
+### `default_cache_dir` / `fetch_url` のレビュー指摘 2 件を修正 (0.16.0 の追いコミット)
+
+- **相対パスの `$XDG_CACHE_HOME` を無効値として扱っていなかった**: XDG Base
+  Directory 仕様では `$XDG_CACHE_HOME` は絶対パスでなければならず、相対値は
+  無効として無視するのが正しい。従来は `os.path.expanduser` を通すだけで
+  絶対/相対を判定していなかったため、相対値を設定すると起動 cwd 相対で
+  キャッシュ先が決まってしまい (再現性が無く、想定外のプロジェクト
+  ディレクトリを汚染/書込失敗させ得る)、`~/.cache` へのフォールバックが
+  効いていなかった。`os.path.isabs()` で判定し、絶対パスの場合のみ採用、
+  相対 (空文字含む) は `~/.cache/llms-docs` にフォールバックするよう修正。
+  `$LLMS_DOCS_CACHE_DIR` (プラグイン独自の完全上書き用エスケープハッチ、
+  XDG 仕様の対象外) は意図的に対象外のまま維持 (相対値もそのまま受理)
+- **`Content-Length` が非整数のとき `ValueError` が未捕捉だった**: レスポンス
+  ヘッダーの `Content-Length` が数値として不正な値 (壊れた/非準拠な
+  サーバー・中間プロキシ由来) だった場合、`int(content_length)` が
+  `ValueError` を送出するが、`fetch_url` の except 節は
+  `(URLError, OSError, http.client.HTTPException)` のみを捕捉しており
+  対象外だった。その結果、期限切れキャッシュが存在していても stale-serve
+  フォールバックへ進まず、生の Python traceback が利用者に露出していた。
+  `int()` 変換を `try/except ValueError` で包み、変換失敗時は
+  `Content-Length` が無いのと同じ扱い (検証をスキップ) にする方式で修正
+  (読み取り自体は成功しているため、ヘッダーが壊れているという理由だけで
+  正常に受信済みのボディを破棄する理由が無い)
+
+### テスト
+
+`test_fetch_and_cache.py` に回帰テストを 6 件追加 (86 tests, 従来比 +6)。
+`DefaultCacheDirTest` に相対パス / 空文字 / `~` プレフィックス付き
+`$XDG_CACHE_HOME` の 3 パターンと `$LLMS_DOCS_CACHE_DIR` の相対値受理を
+確認する 1 件、`FetchUrlTest` に非整数 `Content-Length` で例外が飛ばない
+ことを確認する 1 件と、`Content-Length` 不一致時の警告メッセージが
+(`IncompleteRead` の `args` に載る) 受信済みボディ全体を stderr に
+ダンプしていないことを確認する 1 件を追加 (`IncompleteRead.__str__` が
+ペイロードでなく要約文字列を返すことは Python 3.11/3.12/3.14 で実機確認済み
+だが、標準ライブラリの実装詳細であり将来変わり得るため回帰テストとして固定)。
+
+## [0.16.0] - 2026-08-25
+
+### キャッシュディレクトリの既定値を `/tmp` から XDG 準拠に変更
+
+`/tmp` は再起動やOSの定期クリーンアップで消えるため `--max-age` によるキャッシュが
+実質無効化されていたほか、マルチユーザー環境では world-writable な `/tmp` を
+共有することによる `PermissionError` のリスクもあった。
+
+- `_common.default_cache_dir()` を追加。解決順は `$LLMS_DOCS_CACHE_DIR` (完全上書き)
+  > `$XDG_CACHE_HOME/llms-docs` > `~/.cache/llms-docs`
+- `add_cache_dir_arg()` の既定値をこの関数の戻り値に変更。`--cache-dir` での
+  個別指定は従来通り可能
+- 3 script (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`)
+  の `--cache-dir` 既定値・ヘルプ文言を統一。firebase の `DEFAULT_CACHE_DIR =
+  "/tmp"` 定数と ai-sdk のヘルプ文言に残っていたハードコードされた `/tmp` を除去
+- README.md のキャッシュ表・前提条件、3 SKILL.md のキャッシュ表・失敗時対処表の
+  `/tmp` 参照をすべて `~/.cache/llms-docs` ベースの記述に更新
+- **利用者向け挙動変更**: 既存の `/tmp` 配下のキャッシュファイルは新しい既定
+  ディレクトリからは見えなくなる (再取得が発生する)。旧 cache の自動移行は
+  行わない (import 元が `/tmp` で消えている可能性が高く、移行の実利が薄いため)
+
+### `fetch_url` の堅牢性向上: stale-serve / 例外拡張 / atomic write
+
+- **stale-serve**: fetch に失敗しても既存キャッシュ (期限切れ含む) があれば
+  `WARNING: fetch failed (...); using cached copy (<age> old)` を stderr に出し
+  そのキャッシュを返して継続する (exit 0)。キャッシュが無い場合のみ
+  `Error: ...` で exit 1。従来は期限切れキャッシュがあっても fetch 失敗で
+  即 exit 1 しており、「ネットワーク不調時だけ検索が完全に使えなくなる」
+  という壊れ方をしていた
+- **例外の捕捉範囲拡張**: `except urllib.error.URLError` を `except
+  (urllib.error.URLError, OSError, http.client.HTTPException)` に拡張。
+  read timeout (`TimeoutError`、`OSError` のサブクラス) や途中切断
+  (`http.client.IncompleteRead`) が生の Python traceback として利用者に
+  露出していたのを解消
+- **Content-Length 検証**: レスポンスに `Content-Length` があり受信バイト数と
+  不一致なら `IncompleteRead` として扱い、不完全なデータをキャッシュに
+  書き込まない
+- **atomic write**: `_common._atomic_write()` を追加。同一ディレクトリ内の
+  一時ファイルへ書いてから `os.replace` で原子的に差し替える (別ファイル
+  システム間の rename は atomic でなくなるため、必ず対象と同じディレクトリに
+  作成する)。並列 Skill fork や連続実行が同じキャッシュパスに競合しても、
+  読み手が truncate 直後の空/途中のファイルを掴むことがなくなる
+- **`load_lines` の decode を `errors="replace"` に変更**: 途中で打ち切られた
+  多バイト文字が原因の `UnicodeDecodeError` で全コマンドが traceback して
+  いたのを、置換文字で継続するよう緩和した
+- 3 SKILL.md の失敗時対処表の「ネットワーク失敗」「キャッシュ破損」行を
+  上記の新しい挙動 (stale-serve / `--max-age 0` 推奨) に合わせて書き換え。
+  SKILL.md metadata version をそれぞれ patch bump:
+  researching-claude-docs 3.4.1 → 3.4.2 / researching-ai-sdk 3.3.2 → 3.3.3 /
+  researching-firebase 2.1.1 → 2.1.2
+
+### テスト
+
+`scripts/tests/test_fetch_and_cache.py` を新設 (19 tests)。`default_cache_dir`
+の環境変数解決順、`_format_age`、`fetch_url` の atomic write / stale-serve /
+widened exception handling / Content-Length 検証、`load_lines` の
+`errors="replace"` をカバーする。ネットワーク失敗系のテストは
+`unittest.mock.patch("urllib.request.urlopen")` を使用 (cache fixture 方式は
+`fetch_url` の早期 return を突破できないため、この経路だけはモックが必要)。
+
 ## [0.15.0] - 2026-08-25
 
 ### 検索フォールバック: 本文にしか無い語で `search` が 0 件になる問題を修正

@@ -695,7 +695,7 @@ def main():
 
     # fetch-index
     p_index = sub.add_parser("fetch-index", help="Fetch and print document index")
-    add_cache_dir_arg(p_index, help="Directory to cache llms.txt (default: /tmp)")
+    add_cache_dir_arg(p_index)
     add_max_age_arg(p_index)
     p_index.add_argument(
         "--compact", action="store_true",

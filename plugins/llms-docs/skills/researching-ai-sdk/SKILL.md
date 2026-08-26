@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.3.2"
+  version: "3.3.3"
 ---
 
 # AI SDK ドキュメント調査
@@ -142,8 +142,8 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 | パターン | 症状 | 対処 |
 |----------|------|------|
 | キャッシュ期限切れ | 7 日超のキャッシュ | 自動 re-fetch (既定 `--max-age 604800`) |
-| ネットワーク失敗 | fetch timeout / connection error | `--max-age 0` で cache 無視して再試行 |
-| キャッシュ破損 | パースエラー / 不正なインデックス | `/tmp/ai-sdk-llms-full.txt` を削除して再実行 |
+| ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
+| キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No results found` | キーワードを変えて再試行。`fetch-index --compact` で一覧確認 |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |

@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.1.1"
+  version: "2.1.2"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -67,7 +67,7 @@ v2 で `search` が推奨入口に統一された。旧フローの `search-inde
 | index 行数 | ~7000 |
 | ページ数 | ~6970 (Android/iOS/JS/C++ 各 SDK の API reference を含む) |
 | インデックスサイズ | ~1.8MB |
-| キャッシュ | `/tmp/firebase-llms.txt` (index) + `/tmp/firebase-docs/` (per-page) |
+| キャッシュ | `<cache-dir>/firebase-llms.txt` (index) + `<cache-dir>/firebase-docs/` (per-page)、既定 `<cache-dir>` = `~/.cache/llms-docs` |
 
 ## 調査フロー
 
@@ -157,7 +157,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 | `sections` | `<page_ref>` | 指定ページの見出し一覧を表示 (該当ページを auto-fetch) |
 | `content` | `<page_ref> [heading_path]` | セクション本文を表示 (該当ページを auto-fetch) |
 
-すべて `--cache-dir DIR` を受け付ける (default: `/tmp`)。
+すべて `--cache-dir DIR` を受け付ける (default: `~/.cache/llms-docs`、`$XDG_CACHE_HOME` / `$LLMS_DOCS_CACHE_DIR` で上書き可)。
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py`
 
 ### heading_path の指定方法
@@ -183,8 +183,8 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 | パターン | 症状 | 対処 |
 |----------|------|------|
 | キャッシュ期限切れ | 7 日超のキャッシュ | 自動 re-fetch (既定 `--max-age 604800`) |
-| ネットワーク失敗 | fetch timeout / connection error | `--max-age 0` で cache 無視して再試行 |
-| キャッシュ破損 | パースエラー / 不正なインデックス | `/tmp/firebase-llms.txt` と `/tmp/firebase-docs/` を削除して再実行 |
+| ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
+| キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No results found` | キーワードを変えて再試行。`fetch-index` で一覧確認 |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |
