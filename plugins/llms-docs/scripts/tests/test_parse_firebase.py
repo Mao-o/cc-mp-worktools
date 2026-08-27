@@ -180,13 +180,16 @@ class GoldenOutputTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         # firebase's content now gets the same subsection-hint
         # block (before AND after the body) that claude-docs
-        # already had.
+        # already had. The non-default --cache-dir (a tempdir, as every
+        # test here uses) is echoed into the Next: hint so a reader
+        # following it stays on the same corpus instead of falling back
+        # to the default cache dir.
         hint_block = (
             "\n"
             "--- Top-level sections (1) ---\n"
             "  - Limits\n"
             "\n"
-            'Next: parse-firebase.py content 0 "<heading_path from above>"\n'
+            f'Next: parse-firebase.py content 0 "<heading_path from above>" --cache-dir {tmp}\n'
         )
         expected = (
             "# doc_title: Firestore Query Limits\n"

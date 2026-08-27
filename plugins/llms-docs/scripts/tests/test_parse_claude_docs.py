@@ -606,6 +606,29 @@ class FetchIndexDocIdxJoinTest(unittest.TestCase):
         self.assertIn("[1] Skills", out)
         self.assertIn("[0] Hooks", out)
 
+    def test_colliding_last_segment_slugs_are_disambiguated(self):
+        # Two pages whose URLs share the same LAST path segment ("hooks")
+        # must not both fall back to the same ambiguous short slug — that
+        # would make _resolve_page_ref reject either one as ambiguous when
+        # the displayed reference is copied back in, exactly defeating the
+        # point of a copy-pasteable fallback reference.
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n"
+            "- [Agent SDK Hooks](https://example.com/en/agent-sdk/hooks): Agent SDK hook matchers\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        # Both collide at the bare "hooks" slug, so BOTH must grow past it
+        # (there's no way to keep one side short once they tie at depth 1)
+        # — Hooks needs its preceding "en" segment, Agent SDK Hooks its
+        # "agent-sdk" one, and the two no longer collide at that depth.
+        self.assertIn("[en/hooks] Hooks", out)
+        self.assertIn("[agent-sdk/hooks] Agent SDK Hooks", out)
+        self.assertNotIn("[hooks]", out)
+
 
 class SearchIndexDocIdxJoinTest(unittest.TestCase):
     """search-index had the same raw-list-position bug as
@@ -699,6 +722,32 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
         self.assertIn("chars truncated", out)
         self.assertIn('narrow with parse-claude-docs.py content 0 "<heading_path>"', out)
         self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
+
+    def test_narrow_hint_retains_both_source_and_file(self):
+        # A truncation hint that drops --source and/or --file would send a
+        # follow-up command back to the default source / a freshly fetched
+        # copy instead of this read-only platform-source snapshot — the
+        # SAME numeric page index could then identify a different document.
+        snapshot = Path(self.tmp, "platform-snapshot.txt")
+        snapshot.write_text(
+            "# Doc\n"
+            "Source: https://platform.example.com/en/doc\n"
+            "\n"
+            "0123456789 0123456789 0123456789 0123456789 0123456789\n",
+            encoding="utf-8",
+        )
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            code, out, err = _loader.run_cli(parse_claude_docs, [
+                "parse-claude-docs.py", "content", "0", "--source", "platform",
+                "--file", str(snapshot), "--cache-dir", self.tmp, "--max-chars", "20",
+            ])
+        mock_urlopen.assert_not_called()
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            f'narrow with parse-claude-docs.py content 0 "<heading_path>" '
+            f"--source platform --file {snapshot}", out,
+        )
+        self.assertNotIn("--cache-dir", out)  # --file makes it irrelevant
 
     def test_max_chars_zero_disables_truncation(self):
         code, out, err = _loader.run_cli(parse_claude_docs, [

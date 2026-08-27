@@ -952,6 +952,40 @@ def add_cache_dir_arg(parser, *, default: str | None = None, help=None) -> None:
     parser.add_argument("--cache-dir", default=default, help=help)
 
 
+def corpus_hint_args(args) -> tuple:
+    """Return ``--file``/``--cache-dir`` CLI args needed to keep a
+    generated follow-up command hint pointed at the same corpus as the
+    current invocation, instead of silently falling back to defaults.
+
+    A hint (e.g. the ``--max-chars`` truncation notice's "narrow with
+    ..." suggestion, or ``print_subsection_hints``'s ``Next:`` line) that
+    drops a non-default ``--file``/``--cache-dir`` selection can point the
+    *same numeric page index* at an entirely different document once the
+    reader follows it and it re-resolves against the default corpus
+    instead of the snapshot/cache dir just displayed. ``--file`` is only
+    present on scripts that support a read-only snapshot override
+    (checked via ``getattr`` so scripts without it, e.g. firebase, are
+    unaffected).
+
+    ``--file`` and ``--cache-dir`` are mutually exclusive in every loader
+    that supports both (``_load_docs``/``_load_full_txt``): once
+    ``--file`` is given, ``cache_dir`` is never even read. Echoing both
+    would mislead a reader into thinking ``--cache-dir`` still matters, so
+    ``--cache-dir`` is only included when ``--file`` is absent, and even
+    then only when it differs from ``default_cache_dir()`` (itself
+    env-overridable, so a plain string default would false-positive under
+    ``$XDG_CACHE_HOME``/``$LLMS_DOCS_CACHE_DIR``).
+    """
+    file_val = getattr(args, "file", None)
+    if file_val:
+        return ("--file", file_val)
+    result = []
+    cache_dir = getattr(args, "cache_dir", None)
+    if cache_dir and cache_dir != default_cache_dir():
+        result += ["--cache-dir", cache_dir]
+    return tuple(result)
+
+
 def add_max_age_arg(parser) -> None:
     """Add ``--max-age`` to *parser* with a 7-day default."""
     parser.add_argument(
@@ -995,14 +1029,28 @@ def add_max_chars_arg(parser) -> None:
 
 
 def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
-    """Truncate *content* to *max_chars* characters (``<= 0`` disables this).
+    """Truncate *content* to at most *max_chars* characters (``<= 0``
+    disables this), cutting at a line boundary that is not inside a
+    fenced code block or Markdown table.
+
+    A raw ``content[:max_chars]`` slice can land inside a fence or table
+    (undoing ``extract_content``'s own boundary protection, which only
+    guards heading-section cuts, not this later character-budget cut) or
+    even split a single line in half, leaving both the truncated
+    construct and the appended notice malformed. This instead walks
+    lines from the start, remembering the end of the last line that (a)
+    is itself not a table row and (b) leaves ``FenceTracker`` closed, and
+    cuts there — never later than *max_chars*, but possibly a little
+    earlier if the naive boundary falls mid-fence/mid-table. Preferring
+    an earlier cut (over extending forward to finish the block, the way
+    ``extract_content`` does for its own boundary) keeps this a true
+    upper bound on output size, which is the whole point of --max-chars.
 
     Appends a note showing how many characters were cut and a caller-
     supplied *narrow_hint* — typically a fuller ``content <ref>
     "<heading_path>"`` invocation string — telling the reader how to fetch
     a smaller slice instead of the same truncated one again. Callers
-    should apply this AFTER every other content transform (fence/table
-    protection already happened inside ``extract_content``; link
+    should apply this AFTER every other content transform (link
     annotation, where applicable, adds text too) so the truncation point
     reflects the actual length of what the reader receives, not a
     pre-annotation length that the annotations could then push back over
@@ -1010,9 +1058,27 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
     """
     if max_chars <= 0 or len(content) <= max_chars:
         return content
-    cut = len(content) - max_chars
+
+    fence = FenceTracker()
+    cumulative = 0
+    safe_cut = 0
+    for line in content.splitlines(keepends=True):
+        line_end = cumulative + len(line)
+        fence.update(line)
+        if line_end > max_chars:
+            break
+        if not fence.in_fence and not _is_table_line(line):
+            safe_cut = line_end
+        cumulative = line_end
+    if safe_cut == 0:
+        # Degenerate case (e.g. the very first line, or an unclosed
+        # fence/table from the start, already reaches max_chars): fall
+        # back to the raw slice rather than emitting empty content.
+        safe_cut = max_chars
+
+    cut = len(content) - safe_cut
     return (
-        content[:max_chars]
+        content[:safe_cut]
         + f"\n... ({cut} chars truncated; narrow with {narrow_hint})\n"
     )
 

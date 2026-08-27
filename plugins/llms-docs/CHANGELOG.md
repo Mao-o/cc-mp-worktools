@@ -2,6 +2,36 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.18.2] - 2026-08-27
+
+### `fetch-index`/`search-index`のslug衝突・`content`切り詰めのMarkdown境界破壊・絞り込みヒントの corpus 選択欠落 (0.18.1 の追いコミット)
+
+- **URL末尾が同じ複数ページで slug が衝突していた**: `.../hooks` と
+  `.../agent-sdk/hooks` のように最後のパス要素だけが一致する2ページは、
+  従来どちらも `[hooks]` と表示されており、その値を `sections`/`content` に
+  そのまま渡すと `_resolve_page_ref` 自身の曖昧slugエラーで弾かれ、
+  フォールバック参照として機能しなかった。`_build_unique_slugs()` を追加し、
+  全ページの中で一意になるまでパス要素を後ろから伸ばして (`hooks` →
+  `agent-sdk/hooks` 等) 表示するよう修正 (claude-docsの`fetch-index`/
+  `search-index`のみ該当。他2 scriptはこの参照形式を使わない)
+- **`--max-chars` の切り詰めが生の文字数スライスで、コードフェンス/表の
+  途中で切れることがあった**: `truncate_content()` を行単位の走査に変更し、
+  `FenceTracker` が閉じておりかつ表の行でもない、直近の安全な行境界まで
+  戻ってから切り詰めるよう修正 (安全な境界が `max_chars` 未満になっても、
+  フェンス/表を最後まで含めて `max_chars` を超えるよりは安全側に倒す設計)
+- **`--max-chars` の絞り込みヒント / `sections`のサブセクション追いヒントが
+  `--file`/`--cache-dir` を引き継いでいなかった**: 非既定の corpus 選択で
+  実行した際、ヒント通りにフォローアップコマンドを打つと既定の corpus に
+  フォールバックし、同じ番号が別のドキュメントを指す事故があった。
+  `corpus_hint_args()` を追加し3 script共通で伝播するよう修正
+  (`--file`と`--cache-dir`は排他 — `_load_docs`/`_load_full_txt`は`--file`
+  指定時`cache_dir`を一切参照しないため、両方を出すと誤解を招く。
+  `--file`があれば`--cache-dir`は出さない)
+
+回帰テスト12件追加 (`test_common.py` 9件、`test_parse_claude_docs.py` 2件、
+`test_parse_ai_sdk.py` 1件、既存golden出力テスト2件を新挙動に更新。
+147 tests, all green)。
+
 ## [0.18.1] - 2026-08-27
 
 ### doc_idx 表示のレビュー指摘 1 件 + `sections` のドキュメント不整合 1 件を修正 (0.18.0 の追いコミット)

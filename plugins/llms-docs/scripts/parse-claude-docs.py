@@ -32,6 +32,7 @@ from _common import (
     assert_parsed,
     build_url_to_full_index,
     check_join_rate,
+    corpus_hint_args,
     die,
     die_index_out_of_range,
     extract_content,
@@ -303,10 +304,45 @@ def _load_url_to_idx_if_cached(full_cache: str, max_age: int | None = None) -> d
     return build_url_to_full_index(split_documents(load_lines(full_cache)))
 
 
-def _joined_or_slug_ref(entry: dict, url_to_idx: dict) -> str:
+def _build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
+    """Map each *normalized* URL (keys are ``normalize_doc_url(u)`` for
+    each ``u`` in *raw_urls*) to a display slug unique across all of them.
+
+    Starts from the single last path segment (e.g. ``"hooks"``) and, only
+    for URLs whose slug collides with another URL's, grows the suffix one
+    segment at a time (``"agent-sdk/hooks"``, ...) until it no longer
+    collides — both single- and multi-segment slugs are valid
+    ``sections``/``content`` input (``_resolve_page_ref`` matches on the
+    URL's trailing path, see its docstring). Falls back to the full path
+    if even that doesn't disambiguate (only possible for literal URL
+    duplicates). Without this, ``.../hooks`` and ``.../agent-sdk/hooks``
+    would both display as ``[hooks]``, and passing either back in would
+    hit ``_resolve_page_ref``'s own ambiguous-slug error — making the
+    advertised copy-and-paste fallback reference unusable for exactly the
+    pages that need it most.
+    """
+    normalized = [normalize_doc_url(u) for u in raw_urls]
+    all_segments = [u.rstrip("/").lstrip("/").split("/") for u in normalized]
+    result = {}
+    for i, url in enumerate(normalized):
+        segments = all_segments[i]
+        for n in range(1, len(segments) + 1):
+            candidate = "/".join(segments[-n:])
+            if not any(
+                j != i and "/".join(all_segments[j][-n:]) == candidate
+                for j in range(len(normalized))
+            ):
+                result[url] = candidate
+                break
+        else:
+            result[url] = "/".join(segments) or "?"
+    return result
+
+
+def _joined_or_slug_ref(entry: dict, url_to_idx: dict, unique_slugs: dict) -> str:
     """Return a doc reference for *entry*: the llms-full.txt-joined
-    doc_idx when available in *url_to_idx*, else the URL's last path
-    segment (a slug).
+    doc_idx when available in *url_to_idx*, else a slug unique across the
+    whole index (see ``_build_unique_slugs``).
 
     Both forms are valid ``sections``/``content`` input (see
     ``_resolve_page_ref``) — the raw llms.txt list position is NOT, and
@@ -314,11 +350,11 @@ def _joined_or_slug_ref(entry: dict, url_to_idx: dict) -> str:
     the two indexes weren't in the same order (e.g. after either source
     reorders/inserts a page).
     """
-    joined = url_to_idx.get(normalize_doc_url(entry.get("url", "")))
+    url = normalize_doc_url(entry.get("url", ""))
+    joined = url_to_idx.get(url)
     if joined is not None:
         return str(joined)
-    slug = normalize_doc_url(entry.get("url", "")).rstrip("/").rsplit("/", 1)[-1]
-    return slug or "?"
+    return unique_slugs.get(url, "?")
 
 
 def cmd_fetch_index(args):
@@ -333,6 +369,7 @@ def cmd_fetch_index(args):
 
     full_cache = _cache_path(args.cache_dir, src["full_cache"])
     url_to_idx = _load_url_to_idx_if_cached(full_cache, max_age=args.max_age)
+    unique_slugs = _build_unique_slugs([e.get("url", "") for e in entries])
 
     grouped = _group_index_entries(entries)
 
@@ -345,7 +382,7 @@ def cmd_fetch_index(args):
     for item in grouped:
         if item["type"] == "single":
             entry = item["entry"]
-            print(f"[{_joined_or_slug_ref(entry, url_to_idx)}] {entry['title']}")
+            print(f"[{_joined_or_slug_ref(entry, url_to_idx, unique_slugs)}] {entry['title']}")
             if entry["description"]:
                 desc = entry["description"]
                 if len(desc) > 120:
@@ -356,7 +393,7 @@ def cmd_fetch_index(args):
         else:
             variants = item["variants"]
             variant_labels = [
-                f"{name} [{_joined_or_slug_ref(entries[i], url_to_idx)}]"
+                f"{name} [{_joined_or_slug_ref(entries[i], url_to_idx, unique_slugs)}]"
                 for i, name in variants
             ]
             print(item["base"])
@@ -595,9 +632,9 @@ def cmd_content(args):
         path_to_idx = _build_path_to_idx(docs)
         content = _annotate_doc_links(content, url_to_idx, path_to_idx, self_idx=idx)
 
-    src_args = _source_hint_args(args)
-    src_suffix = (" " + " ".join(src_args)) if src_args else ""
-    narrow_hint = f'parse-claude-docs.py content {idx} "<heading_path>"{src_suffix}'
+    hint_args = _source_hint_args(args) + corpus_hint_args(args)
+    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
+    narrow_hint = f'parse-claude-docs.py content {idx} "<heading_path>"{hint_suffix}'
     content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
 
     print_metadata_header(
@@ -616,14 +653,14 @@ def cmd_content(args):
     # where the cut lands.
     if not args.no_subsection_hints:
         print_subsection_hints(
-            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=src_args
+            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=hint_args
         )
 
     print(content, end="")
 
     if not args.no_subsection_hints:
         print_subsection_hints(
-            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=src_args
+            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=hint_args
         )
 
 
@@ -643,6 +680,11 @@ def cmd_search_index(args):
 
     full_cache = _cache_path(args.cache_dir, src["full_cache"])
     url_to_idx = _load_url_to_idx_if_cached(full_cache, max_age=args.max_age)
+    # Built from the FULL entries list, not just the top-N `scored` results:
+    # a slug only "looks" unique within the displayed subset would still
+    # collide with some other (unshown) page in _resolve_page_ref's full
+    # search, defeating the point of disambiguating it here.
+    unique_slugs = _build_unique_slugs([e.get("url", "") for e in entries])
 
     print(f'Search-index results for "{args.query}" ({src["label"]})')
     print(f"  (index: {path})")
@@ -656,7 +698,7 @@ def cmd_search_index(args):
               "fallback, or 'search-content \"<query>\"' to search page bodies directly")
     else:
         for score, _idx, entry in scored:
-            ref = _joined_or_slug_ref(entry, url_to_idx)
+            ref = _joined_or_slug_ref(entry, url_to_idx, unique_slugs)
             print(f"[{ref}] {entry['title']} (score: {score})")
             if entry["description"]:
                 desc = entry["description"]
