@@ -355,10 +355,20 @@ def _operand_is_sensitive(
     - VCS pathspec (``HEAD:.env``, ``user@host:/p/.env``): コロンで分割して各片の
       basename も追加で判定
 
+    0.22.0: ``is_sensitive`` は ``parts=False`` (basename のみ) で呼ぶ。Bash
+    operand は path とは限らない文字列 (sed / awk の式、option の値) を含み、
+    ``normalize`` で合成パスになった瞬間 (``/cwd/s/.env/X/p``) に親 dir 名の
+    ``.env`` で deny になっていた。parts 一致の根拠 (symlink race 等の偽装) は
+    思想 1 が射程外とする敵対的シナリオで、既定 patterns.txt は basename 形のみ
+    なので本物の機密パスは basename で include 決着する (保護低下なし)。
+    Read / Edit / Stop は実在ファイルの実パスを扱うため従来どおり parts も見る。
+    副産物として ``python -m venv .env`` した仮想環境配下 (``.env/bin/activate``)
+    の操作も止まらなくなる。
+
     ``normalize`` 失敗 (ValueError / OSError) は再送出 (呼び出し側で fail-closed)。
     """
     abs_path = normalize(raw, cwd)
-    if is_sensitive(abs_path, rules):
+    if is_sensitive(abs_path, rules, parts=False):
         return True
     if ":" in raw:
         for piece in raw.split(":"):
@@ -368,7 +378,7 @@ def _operand_is_sensitive(
                 piece_path = normalize(piece, cwd)
             except (ValueError, OSError):
                 continue
-            if is_sensitive(piece_path, rules):
+            if is_sensitive(piece_path, rules, parts=False):
                 return True
     return False
 

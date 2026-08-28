@@ -2646,6 +2646,66 @@ class TestGrepPatternPositional(BaseBash):
         self.assertIn("matched_operand: .env", _reason(r))
 
 
+class TestBashOperandBasenameOnly(BaseBash):
+    """0.22.0: Bash operand の機密判定は **basename だけ** を使う (``is_sensitive``
+    の ``parts=False``)。
+
+    ``_shared.matcher.is_sensitive`` は basename が nomatch のとき親ディレクトリ名
+    (``pathlib.parts``) も評価する。Bash operand は「path とは限らない文字列」
+    (sed / awk の式、option の値) を扱うため、``normalize`` で合成パスになった
+    瞬間 (``/cwd/s/.env/X/p``) に parts の ``.env`` で deny になっていた。parts
+    一致の根拠 (symlink race 等の偽装) は思想 1 が射程外とする敵対的シナリオで、
+    観測される実効果は非パス文字列の誤 deny だけ。Read / Edit / Stop は実在
+    ファイルの実パスなので従来どおり parts も見る。
+
+    副産物として ``python -m venv .env`` した仮想環境配下の操作
+    (``.env/bin/activate``) も解消する。
+    """
+
+    ALLOW = (
+        "cat .env/bin/activate",
+        "source .env/bin/activate",
+        ". .env/bin/activate",
+        "head -n 1 .env/pyvenv.cfg",
+        "cat a/.env/b",
+        "cat secrets.pem/notes.txt",
+        # sed / awk の式 (script 枠でも除外されるが、option の値経由でも同じ)。
+        # file 名は sed の動的コマンド文字 (e r R w W) で始めない (``_sed_scripts``
+        # が option 経由の script のとき positional 枠を消費せず file operand を
+        # script 候補に含める既知の別課題を踏まないため)
+        "sed -n 's/.env/X/p' notes.txt",
+        "sed -n -e 's/.env/X/p' notes.txt",
+        "awk '/.env/ {print}' notes.txt",
+    )
+    DENY = (
+        "cat .env/bin/id_rsa",
+        "cat sub/.env",
+        "cat .env",
+        "cat a/.env/b/.env.local",
+        "git show HEAD:.env",
+    )
+
+    def test_parent_dir_name_does_not_deny(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_basename_match_still_denies(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+
 class TestOptionValueNotPath(BaseBash):
     """0.22.0: option の値が検索文字列 / 正規表現 / 書式 / glob / 数値のとき、
     その値を path operand として誤読しない。

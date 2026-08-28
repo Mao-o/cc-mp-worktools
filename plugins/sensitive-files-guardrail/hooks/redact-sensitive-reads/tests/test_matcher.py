@@ -86,8 +86,26 @@ class TestMatcherBasic(unittest.TestCase):
         self.assertTrue(is_sensitive("accounts.local.json", rules))
 
     def test_parts_match_parent_dir(self):
-        # 親ディレクトリ名が機密パターンの場合 (symlink race 等の偽装対策)
+        # 親ディレクトリ名が機密パターンの場合 (Read / Edit / Stop の実在パス向け)
         self.assertTrue(is_sensitive("/foo/.env/leak.txt", DEFAULT_RULES))
+
+    def test_parts_false_uses_basename_only(self):
+        # 0.22.0: Bash operand は「path とは限らない文字列」(sed / awk の式、
+        # option の値) を扱うため parts 一致を使わない。sed -n 's/.env/X/p' は
+        # normalize で /cwd/s/.env/X/p という合成パスになり、parts の .env で
+        # deny になっていた
+        self.assertFalse(is_sensitive("/tmp/x/s/.env/X/p", DEFAULT_RULES, parts=False))
+        self.assertFalse(is_sensitive("/tmp/x/.env/p", DEFAULT_RULES, parts=False))
+        self.assertFalse(is_sensitive("/tmp/x/.env/bin/activate", DEFAULT_RULES, parts=False))
+        self.assertFalse(is_sensitive("/foo/.env/leak.txt", DEFAULT_RULES, parts=False))
+        # 本物の機密パスは basename で include 決着するので保護は落ちない
+        self.assertTrue(is_sensitive("/tmp/x/.env", DEFAULT_RULES, parts=False))
+        self.assertTrue(is_sensitive("/tmp/x/cert.pem", DEFAULT_RULES, parts=False))
+        self.assertTrue(is_sensitive("/tmp/x/.env/bin/id_rsa", DEFAULT_RULES, parts=False))
+        # basename の exclude 決着も同じ
+        self.assertFalse(is_sensitive("/tmp/.env/.env.example", DEFAULT_RULES, parts=False))
+        # 既定 (parts=True) は従来どおり
+        self.assertTrue(is_sensitive("/tmp/x/s/.env/X/p", DEFAULT_RULES))
 
     def test_empty_rules(self):
         self.assertFalse(is_sensitive(".env", []))
