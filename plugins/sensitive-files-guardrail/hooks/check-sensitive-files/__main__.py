@@ -40,6 +40,7 @@ if _hooks_dir not in sys.path:
 from _shared.patterns import (  # noqa: E402
     LOCAL_PATTERNS_DISPLAY_PATH,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
+    EXCLUDE_SCOPE_WARNING,
     exclude_recipe_lines,
 )
 from checker import find_sensitive_files, load_patterns, repo_context  # noqa: E402
@@ -102,9 +103,10 @@ def _build_reason(
     sections.append("")
     sections.append(
         "【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を"
-        f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を追記すると、以後の"
-        " Stop / Read / Bash で報告されなくなります"
-        f" ({PROJECT_SECTION_PLACEHOLDER_NOTE}):"
+        f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を追記します"
+        f" ({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
+        + EXCLUDE_SCOPE_WARNING.format(scope="下記の各行と同じ名前のファイル")
+        + "追記内容:"
     )
     basenames = [os.path.basename(p) for p in [*tracked, *untracked]]
     for line in exclude_recipe_lines(basenames):

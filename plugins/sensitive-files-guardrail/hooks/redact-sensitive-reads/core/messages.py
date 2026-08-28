@@ -71,6 +71,7 @@ import shlex
 from typing import Callable, Literal
 
 from _shared.patterns import (
+    EXCLUDE_SCOPE_WARNING,
     LOCAL_PATTERNS_DISPLAY_PATH,
     PROJECT_SECTION_HEADER_HINT,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
@@ -132,13 +133,19 @@ def _exclude_hint(basename: str) -> str:
     """
     if basename:
         entry = f"`!{_sanitize_for_inline(basename)}`"
+        scope = (
+            "このプロジェクト内の "
+            f"`{_sanitize_for_inline(basename)}` という名前のファイル"
+        )
     else:
         entry = "除外行 (`!<basename>`)"
+        scope = "このプロジェクト内の同名ファイル"
     return (
         "恒久的に許可したい場合は、ユーザーの承認を得た上で "
         f"`{_LOCAL_PATTERNS_PATH}` の `{PROJECT_SECTION_HEADER_HINT}` "
         f"セクション配下に {entry} を追加してください "
         f"({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
+        f"{EXCLUDE_SCOPE_WARNING.format(scope=scope)}"
         "承認なしに自分で追加しないこと。"
     )
 

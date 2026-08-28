@@ -85,6 +85,25 @@ PROJECT_SECTION_PLACEHOLDER_NOTE = (
     "全プロジェクト共通にしたい場合のみヘッダー無しの行に書く"
 )
 
+# 除外行を追加する前にユーザーへ伝えるべき影響範囲 (0.21.0、両 hook 共通)。
+#
+# 除外行は **basename 単位**で評価される (matcher は basename と
+# ``pathlib.parts`` しか見ず、相対パス全体との比較を行わない)。したがって
+# ``!.env`` はプロジェクト内の **すべての** ``.env`` に効き、承認した 1 ファイル
+# だけを対象にすることはできない。さらに効果は Stop の報告に留まらず
+# **Read / Bash / Edit / Write の保護そのもの**が落ちる。
+#
+# 「以後 ... で報告されなくなります」という従来の文面では、"報告されない" が
+# "保護されない" と同義であることも、同名ファイル全部が巻き添えになることも
+# 伝わらなかった。範囲を狭める作業は別途進行中だが、それまでの間、黙った
+# 過剰付与を informed consent に変えるための文言。
+EXCLUDE_SCOPE_WARNING = (
+    "この行は basename 単位で効くため、{scope}が**すべて**対象になります"
+    " (承認した 1 ファイルだけを外すことはできません)。"
+    "また Stop の報告が止まるだけでなく、Read / Bash / Edit / Write の"
+    "**保護そのものが外れます**。"
+)
+
 # ``[project:]`` ヘッダーが書き損じのときに ``header_warn_callback`` へ渡す固定
 # トークン (パスを含めない — core.logging の detail ホワイトリスト適合)。
 PROJECT_HEADER_WARN_EMPTY = "project_header_empty"
