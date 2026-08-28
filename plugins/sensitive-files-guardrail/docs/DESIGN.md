@@ -892,7 +892,10 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
    `cp * dst/` / heredoc 本文の `kb * 1024`) が「`.env` に一致する glob」と
    誤判定され全 mode で deny になっていた (0.22.0 で修正。ファイル名先頭の `.`
    は pattern 先頭の literal `.` でしか一致しない — POSIX 2.13.3、bash 3.2 /
-   zsh 5 実測)。
+   zsh 5 実測)。同じコマンド内で `shopt -s dotglob` / `GLOBIGNORE=` /
+   `setopt globdots` を有効化している形は `*` が dotfile にも展開されるので、
+   fnmatch の意味論 (0.21.x) に戻して deny を維持する
+   (`_command_enables_dotglob`)。profile で常時有効な環境は hook から見えない。
 5. **autonomous モードでの opaque 緩和** — `bash -c 'cat .env'` の
    ような shell wrapper 内に機密 path があっても auto/bypass では allow に
    倒る。wrapper 内部の script を解析しないため検出できない。autonomous モード

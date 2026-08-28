@@ -804,6 +804,36 @@ class TestBareGlobLeadingDot(BaseBash):
                     r = handle(_make_envelope(cmd, self.tmp, mode=mode))
                     self.assertEqual(_decision(r), "deny")
 
+    def test_dotglob_in_same_command_keeps_conservative_semantics(self):
+        # Codex R1 P1: 同じコマンド内で dotglob / GLOB_DOTS / GLOBIGNORE を有効化
+        # すると ``*`` は dotfile にも展開されるので、0.21.x までの意味論 (deny)
+        # に戻す。shell option は Bash tool 呼び出しごとに初期化されるため
+        # 同一コマンド内の形だけが対象
+        for cmd in (
+            "shopt -s dotglob; cat *",
+            "shopt -s dotglob && cat [.]env",
+            "shopt -s extglob dotglob; head -n 1 *",
+            "setopt globdots; cat *",
+            "GLOBIGNORE=x; cat *",
+            "export GLOBIGNORE=.git; cat *.envrc",
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+        # 対照: dotglob 以外の shell option / 非機密 operand
+        for cmd in ("shopt -s nullglob; cat *", "shopt -s extglob; cat *"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("shopt -s dotglob; cat README.md", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
 
 class TestGlobUncertainAskOrAllow(BaseBash):
     """0.8.0: dotenv literal stem に fnmatch しない glob は ``ask_or_allow``
@@ -2764,6 +2794,7 @@ class TestOptionValueNotPath(BaseBash):
         "rg --ignore-file .env TODO",
         "tar -czf out.tgz .env",
         "tar -T .env -cf out.tgz",
+        "tar --exclude-ignore=.env -cf out.tar src",
         "rsync -a .env host:dst/",
         "rsync --files-from=.env src dst",
         "zip -r out.zip .env",

@@ -278,3 +278,14 @@ _GLOB_CHARS = frozenset("*?[")
 # 透過剥がしを撤廃したため、この regex は「第一トークンが env-assignment 形式
 # なら opaque 扱い」の判定で 1 回だけ使う)。
 _ENV_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# 同一コマンド内で「glob が dotfile にも展開される」状態を作る形の検出 (0.22.0、
+# Codex R1)。bash の ``shopt -s dotglob`` / ``GLOBIGNORE=<非空>`` (設定されると
+# dotglob が暗黙に有効になる)、zsh の ``setopt globdots`` (option 名は大文字小文字
+# と ``_`` を無視するので ``GLOB_DOTS`` / ``glob_dots`` も)。shell option は Bash
+# tool の呼び出しごとに初期化されるため、同じコマンド文字列に現れる形だけが
+# 対象 (profile で常時有効な環境は hook から見えない — docs で開示)。検出は
+# 保守的 (``shopt -u dotglob`` や単なる言及でも一致) で、効果は
+# ``_glob_operand_is_dotenv_match`` が fnmatch の意味論 (先頭ドットも一致) に
+# 戻る = deny 寄りにしか倒れない。
+_DOTGLOB_HINT_RE = re.compile(r"dotglob|glob_?dots|GLOBIGNORE=", re.IGNORECASE)

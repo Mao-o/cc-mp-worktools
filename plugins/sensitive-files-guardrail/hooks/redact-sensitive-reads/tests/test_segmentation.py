@@ -89,6 +89,23 @@ class TestHeredocBodyIsNotASegment(unittest.TestCase):
         cmd = "cat <<EOF\nline1\nline2"
         self.assertEqual(_split_command_on_operators(cmd), ["cat <<EOF", "line1", "line2"])
 
+    def test_arithmetic_shift_is_not_a_heredoc(self):
+        # Codex R1 P1: ``$((1<<2))`` の ``<<`` はシフト演算子。terminator 未検出の
+        # fallback だけに頼ると、後続に右オペランドと同じ行 (``2``) があったとき
+        # ``cat .env`` が本文扱いで消える。算術式 (``$((`` / ``((``) の中では
+        # heredoc を検出しない
+        cases = {
+            "echo $((1<<2))\ncat .env\n2": ["echo $((1<<2))", "cat .env", "2"],
+            "(( x = 1<<2 ))\ncat .env\n2": ["(( x = 1<<2 ))", "cat .env", "2"],
+            "echo $(( (1<<2) + 1 ))\ncat .env\n2": ["echo $(( (1<<2) + 1 ))", "cat .env", "2"],
+            "x=$((a<<b))\ncat .env\nb": ["x=$((a<<b))", "cat .env", "b"],
+            # 算術式を抜けた後の本物の heredoc は従来どおり
+            "echo $((1<<2)); cat <<EOF\nbody\nEOF\necho x": ["echo $((1<<2))", "cat <<EOF", "echo x"],
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), expected)
+
     def test_quoted_operator_is_not_a_heredoc(self):
         cmd = "echo '<<EOF'\ncat .env"
         self.assertEqual(_split_command_on_operators(cmd), ["echo '<<EOF'", "cat .env"])
@@ -155,6 +172,8 @@ class TestHeredocVerdict(unittest.TestCase):
             "cat <<EOF && cat .env\nbody\nEOF",
             "cat <<EOF\nbody\nEOF\ncat .env",
             "echo $((1<<2))\ncat .env",
+            "echo $((1<<2))\ncat .env\n2",
+            "(( x = 1<<2 ))\ncat .env\n2",
             "cat <<EOF | tee .env\nbody\nEOF",
         ):
             for mode in ("default", "auto"):

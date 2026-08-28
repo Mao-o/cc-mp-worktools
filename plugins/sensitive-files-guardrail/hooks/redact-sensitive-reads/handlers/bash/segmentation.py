@@ -174,6 +174,13 @@ def _lex(command: str) -> list[tuple[str, str]]:
       載せない。演算子と delimiter 語自体は plain のまま残るので、その segment は
       ``<`` で従来どおり hard-stop (ask_or_allow)。terminator が無い ``<<`` は
       heredoc として扱わない (``_consume_heredoc_bodies``)
+    - **算術式の中の ``<<`` はシフト演算子** (Codex R1 P1): クォート外の ``((``
+      (``$((`` 算術展開 / ``((`` 算術コマンド) から対応する ``))`` までは heredoc
+      を検出しない。``echo $((1<<2))`` の後ろに右オペランドと同じ行 (``2``) が
+      あると terminator 未検出の fallback が効かず、間の ``cat .env`` が本文
+      扱いで消えるため。文字自体は plain のまま (``$`` ``(`` は hard-stop として
+      数える)。``$( (cmd) )`` のような擬似形は ``))`` が来ず算術扱いのまま終わる
+      が、その場合は heredoc 検出が止まる (= 0.21.x の行分割) だけ
     """
     out: list[tuple[str, str]] = []
     n = len(command)
@@ -181,6 +188,8 @@ def _lex(command: str) -> list[tuple[str, str]]:
     in_single = False
     in_double = False
     in_comment = False
+    in_arith = False    # クォート外の ``((`` 〜 ``))`` の中
+    arith_depth = 0     # 算術式内の ``(`` の入れ子深さ
     bs_run = 0
     word_start = True
     pending_heredocs: list[tuple[str, bool]] = []
@@ -222,6 +231,38 @@ def _lex(command: str) -> list[tuple[str, str]]:
             i += 1
             continue
         # --- クォート外 ---
+        if in_arith:
+            if c == "(":
+                arith_depth += 1
+            elif c == ")":
+                if arith_depth > 0:
+                    arith_depth -= 1
+                elif command.startswith("))", i):
+                    out.append((c, _ST_PLAIN))
+                    out.append((c, _ST_PLAIN))
+                    in_arith = False
+                    word_start = False
+                    i += 2
+                    continue
+            # 算術式の中は heredoc / コメント / 行継続を見ない (``<<`` はシフト)。
+            # クォートは上の in_single / in_double 分岐が先に処理する
+            if c == "'":
+                in_single = True
+            elif c == '"':
+                in_double = True
+                bs_run = 0
+            out.append((c, _ST_PLAIN))
+            word_start = False
+            i += 1
+            continue
+        if c == "(" and command.startswith("((", i):
+            in_arith = True
+            arith_depth = 0
+            out.append((c, _ST_PLAIN))
+            out.append((c, _ST_PLAIN))
+            word_start = False
+            i += 2
+            continue
         if c == "<" and command.startswith("<<", i):
             if command.startswith("<<<", i):
                 # here-string: literal 渡しで heredoc ではない (``<`` は hard-stop)

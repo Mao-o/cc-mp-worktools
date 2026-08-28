@@ -158,7 +158,11 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > **allow**。(5) **heredoc 本文を segment 分割から外す** — `cat > x.py <<'PY'` の
 > 本文 `n = kb * 1024` が deny を起こさない (演算子行は `<` で従来どおり ask /
 > allow)。改善側で deny になるのは `grep foo README.md >.env` (密着 redirect の
-> 書込み先) と `cat */.env` / `cat **/.env` の 3 形。
+> 書込み先) と `cat */.env` / `cat **/.env` の 3 形。Codex R1 で保守側に戻した
+> 形: 同一コマンド内で `shopt -s dotglob` / `GLOBIGNORE=` / `setopt globdots` を
+> 有効化しているときの glob (`shopt -s dotglob; cat *` は deny)、算術式
+> `$((1<<2))` の `<<` (heredoc 検出から除外)、tar `--exclude-ignore=FILE`
+> (FILE の中身を読むので path)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
@@ -184,6 +188,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `cat .e[n]v`, `cat .en?` (`.env` literal 一致 char class / `?`。先頭は literal `.`) |
 | `cat */.env`, `cat **/.env` (0.22.0: path 要素ごとの展開で basename 側が `.env`。0.21.x までは ask / allow) |
 | `grep foo README.md >.env` (0.22.0: 密着形 redirect の書込み先。分離形 `> .env` は従来から deny) |
+| `shopt -s dotglob; cat *`, `GLOBIGNORE=x; cat *`, `setopt globdots; cat *` (0.22.0: 同一コマンド内で dotglob 系を有効化すると `*` は dotfile にも展開されるので fnmatch の意味論に戻す) |
 
 > 0.8.0 で **prefix normalize** (`FOO=1 cat .env` を `cat .env` と解釈する処理) と
 > **既定 rules 候補列挙** (`cat *.key` / `cat id_rsa*` / `cat cred*.json` を

@@ -274,14 +274,17 @@ _GIT_FOR_EACH_REF_SPEC = _spec({
 
 # --- archive / sync / diff (positional = path) ---
 # tar: ``--exclude PATTERN`` は glob、``-X`` / ``-T`` (exclude-from / files-from)
-# と ``-f`` (archive) / ``-C`` (directory) は path。``-s`` は bsdtar (置換
-# regex) と GNU (``--preserve-order`` flag) で異なるので未登録。
+# と ``-f`` (archive) / ``-C`` (directory) は path。GNU tar の
+# ``--exclude-ignore[-recursive]=FILE`` は各ディレクトリ内の FILE を読んで除外
+# pattern にする (``-X`` と同じ「中身を読む」option) ので path (Codex R1 P1)。
+# ``-s`` は bsdtar (置換 regex) と GNU (``--preserve-order`` flag) で異なるので
+# 未登録。
 _TAR_SPEC = _spec({
     "--exclude": "n", "-X": "p", "--exclude-from": "p",
     "-T": "p", "--files-from": "p",
+    "--exclude-ignore": "p", "--exclude-ignore-recursive": "p",
     "--strip-components": "n", "--transform": "n", "--xform": "n",
     "--mode": "n", "--owner": "n", "--group": "n", "--mtime": "n",
-    "--exclude-ignore": "n", "--exclude-ignore-recursive": "n",
     "-f": "p", "--file": "p", "-C": "p", "--directory": "p",
 })
 # rsync: filter 系 (``--exclude`` / ``--include`` / ``-f`` / ``--filter``) は

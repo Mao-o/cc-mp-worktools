@@ -248,6 +248,11 @@ class TestOptionValueIsNotAPath(unittest.TestCase):
             "tar -czf out.tgz .env": ["out.tgz", ".env"],
             "tar -T .env -cf out.tgz": [".env", "out.tgz"],
             "tar -X .env -cf out.tgz src": [".env", "out.tgz", "src"],
+            # GNU tar の ``--exclude-ignore[-recursive]=FILE`` は各ディレクトリ内の
+            # FILE を読んで pattern にする (``-X`` と同じ「中身を読む」option)
+            "tar --exclude-ignore=.env -cf out.tar src": [".env", "out.tar", "src"],
+            "tar --exclude-ignore .env -cf out.tar src": [".env", "out.tar", "src"],
+            "tar --exclude-ignore-recursive=.env -cf out.tar src": [".env", "out.tar", "src"],
             "tar czf out.tgz .env": ["czf", "out.tgz", ".env"],
             "rsync -a .env host:dst/": [".env", "host:dst/"],
             "rsync --files-from=.env src dst": [".env", "src", "dst"],

@@ -50,7 +50,11 @@ from handlers.bash.command_specs import (
     _CmdSpec,
     _split_kinds,
 )
-from handlers.bash.constants import _GIT_GLOBAL_VALUE_OPTS, _GLOB_CHARS
+from handlers.bash.constants import (
+    _DOTGLOB_HINT_RE,
+    _GIT_GLOBAL_VALUE_OPTS,
+    _GLOB_CHARS,
+)
 from handlers.bash.redirects import _WRITE_REDIRECT_RE
 
 # dotenv ファミリーで「うっかり頻出」とする literal stem (0.8.0)。
@@ -66,7 +70,14 @@ def _has_glob(token: str) -> bool:
     return any(c in _GLOB_CHARS for c in token)
 
 
-def _glob_operand_is_dotenv_match(operand: str) -> bool:
+def _command_enables_dotglob(command: str) -> bool:
+    """コマンド文字列の中で dotglob / GLOB_DOTS / GLOBIGNORE を有効化しているか
+    (``_DOTGLOB_HINT_RE``)。True なら ``_glob_operand_is_dotenv_match`` を
+    ``dotglob=True`` (fnmatch の意味論 = 先頭ドットも一致) で呼ぶ。"""
+    return bool(command) and _DOTGLOB_HINT_RE.search(command) is not None
+
+
+def _glob_operand_is_dotenv_match(operand: str, *, dotglob: bool = False) -> bool:
     """operand glob が **shell の pathname expansion で** dotenv 系の literal stem
     (``.env`` / ``.envrc``) に展開されうるか。
 
@@ -77,7 +88,12 @@ def _glob_operand_is_dotenv_match(operand: str) -> bool:
     2. ファイル名先頭の ``.`` は pattern 先頭の **literal ``.``** でしか一致しない
        (POSIX 2.13.3、bash 3.2 / zsh 5 実測、dotglob 未設定の既定挙動)。``*`` /
        ``?`` / bracket 式 (``[.]``) は先頭ドットに一致しない。stem は全て ``.``
-       始まりなので、basename glob が ``.`` で始まらなければ一致しない
+       始まりなので、basename glob が ``.`` で始まらなければ一致しない。
+       ``dotglob=True`` (同じコマンド内で ``shopt -s dotglob`` / ``GLOBIGNORE=`` /
+       ``setopt globdots`` を有効化している、``_command_enables_dotglob``) のとき
+       はこの規則を外し、0.21.x までの fnmatch の意味論で判定する (bash 3.2
+       実測: dotglob で ``*`` → ``.env``、``[.]env`` → ``.env``、``*.envrc`` →
+       ``.envrc foo.envrc``)。Codex R1 P1
     3. その上で ``fnmatchcase(stem, basename_glob)``
 
     例:
@@ -114,7 +130,7 @@ def _glob_operand_is_dotenv_match(operand: str) -> bool:
     if not stem_glob:
         return False
     for stem in _DOTENV_GLOB_STEMS:
-        if stem.startswith(".") and not stem_glob.startswith("."):
+        if not dotglob and stem.startswith(".") and not stem_glob.startswith("."):
             continue  # 先頭ドットは literal ``.`` でしか一致しない
         if fnmatchcase(stem, stem_glob):
             return True

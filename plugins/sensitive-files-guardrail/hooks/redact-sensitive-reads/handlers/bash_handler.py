@@ -128,6 +128,7 @@ from handlers.bash.interpreters import (  # noqa: F401
     _quoted_hard_stop_reason,
 )
 from handlers.bash.operand_lexer import (  # noqa: F401
+    _command_enables_dotglob,
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
     _has_glob,
@@ -446,12 +447,21 @@ def _analyze_segment(
     tokens: list[str],
     envelope: dict,
     rules: list[tuple[str, bool]],
+    *,
+    dotglob: bool = False,
 ) -> dict:
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
     機密 path 一致 → ``make_deny`` 固定 (0.10.0 で reason に minimal info /
     matched_pattern_keys を埋め込み)。判定不能 → ``ask_or_allow``
     (default=ask, auto/bypass=allow)。それ以外 → allow。
+
+    ``dotglob`` (0.22.0): コマンド全体のどこかで ``shopt -s dotglob`` /
+    ``GLOBIGNORE=`` / ``setopt globdots`` を有効化しているとき True
+    (``handle`` が ``_command_enables_dotglob`` で 1 回判定)。glob operand の
+    dotenv 判定を 0.21.x までの fnmatch の意味論 (``*`` が dotfile にも一致) に
+    戻す。shell option は segment を跨いで効くので segment 単位ではなく
+    コマンド単位で決める。
 
     0.12.0: ``first_token`` が ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの見る・
     数える系 allow-list) に該当する場合、``_segment_has_residual_metachar`` の
@@ -527,7 +537,7 @@ def _analyze_segment(
         if not p:
             continue
         if _has_glob(p):
-            if _glob_operand_is_dotenv_match(p):
+            if _glob_operand_is_dotenv_match(p, dotglob=dotglob):
                 L.log_info("bash_classify", f"glob_match:{first}")
                 return _build_deny_response(tokens, p, envelope)
             if pending_glob_ask is None:
@@ -595,6 +605,12 @@ def handle(envelope: dict) -> dict:
     if not segments:
         return output.make_allow()
 
+    # 0.22.0 (Codex R1): 同じコマンド内で dotglob / GLOBIGNORE / globdots を
+    # 有効化していれば、glob operand の dotenv 判定を保守的な意味論に戻す。
+    # shell option は Bash tool の呼び出しごとに初期化されるので、コマンド文字列
+    # に現れる形だけを見る (segment を跨いで効くのでコマンド単位で 1 回判定)。
+    dotglob = _command_enables_dotglob(command)
+
     # 2. 各セグメントを独立に判定。deny 優先、ask は最後に畳む。
     #    hard-stop / shlex 失敗の segment は pending_ask に格納して continue
     #    (他 segment の deny 検出を続ける)。
@@ -621,7 +637,7 @@ def handle(envelope: dict) -> dict:
             continue
         tokens = _strip_safe_redirects(tokens)
 
-        result = _analyze_segment(tokens, envelope, rules)
+        result = _analyze_segment(tokens, envelope, rules, dotglob=dotglob)
         decision = _decision_of(result)
 
         if decision == "deny":

@@ -14,7 +14,10 @@ from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
-from handlers.bash.operand_lexer import _glob_operand_is_dotenv_match
+from handlers.bash.operand_lexer import (
+    _command_enables_dotglob,
+    _glob_operand_is_dotenv_match,
+)
 
 
 class TestDotenvGlobMatch(unittest.TestCase):
@@ -85,6 +88,58 @@ class TestLeadingDotSemantics(unittest.TestCase):
         for op in (".env*", ".en?", ".e[n]v", ".*", ".[e]nv*"):
             with self.subTest(op=op):
                 self.assertTrue(_glob_operand_is_dotenv_match(op))
+
+    def test_dotglob_restores_conservative_semantics(self):
+        # Codex R1 P1: ``shopt -s dotglob`` / ``GLOBIGNORE=x`` (zsh は
+        # ``setopt globdots``) が有効だと ``*`` は dotfile にも展開される
+        # (bash 3.2 実測: dotglob で ``*`` → .env、``[.]env`` → .env、
+        # ``*.envrc`` → .envrc foo.envrc)。同じコマンド内で有効化されている
+        # ときは 0.21.x までの fnmatch の意味論 (先頭ドットも一致) で判定する
+        # ``sub/*`` も dotglob 下では ``sub/.env`` に展開される
+        for op in ("*", "?env", "*env", "[.]env", "*.envrc", "*/.env", ".env*", "sub/*"):
+            with self.subTest(op=op):
+                self.assertTrue(_glob_operand_is_dotenv_match(op, dotglob=True))
+        for op in ("*.log", "id_rsa*", ".env.*", "*.env.example"):
+            with self.subTest(op=op):
+                self.assertFalse(_glob_operand_is_dotenv_match(op, dotglob=True))
+
+
+class TestCommandEnablesDotglob(unittest.TestCase):
+    """同一コマンド内の dotglob / GLOB_DOTS / GLOBIGNORE の有効化を検出する。
+
+    shell option は Bash tool の呼び出しごとに初期化されるため、同じコマンド文字列
+    に現れる形だけが対象。profile (.bashrc / .zshenv) で常時有効な環境は hook から
+    見えない (docs で開示)。検出は保守的 (``shopt -u dotglob`` や単なる言及でも
+    True) で、効果は「fnmatch の意味論に戻る」= deny 寄りにしか倒れない。
+    """
+
+    def test_detects_enabling_forms(self):
+        for cmd in (
+            "shopt -s dotglob; cat *",
+            "shopt -s extglob dotglob && cat *",
+            "shopt -sq dotglob; cat *",
+            "setopt globdots; cat *",
+            "setopt GLOB_DOTS; cat *",
+            "setopt glob_dots; cat *",
+            "set -o globdots; cat *",
+            "GLOBIGNORE=x; cat *",
+            "export GLOBIGNORE=.git; cat *",
+            "shopt -u dotglob; cat *",  # 保守側 (無効化も True)
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(_command_enables_dotglob(cmd))
+
+    def test_ignores_unrelated_commands(self):
+        for cmd in (
+            "cat *",
+            "shopt -s nullglob; cat *",
+            "shopt -s extglob; cat *",
+            "git add *",
+            "echo $GLOBIGNORE",
+            "",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(_command_enables_dotglob(cmd))
 
 
 class TestNonDotenvGlobAskOrAllow(unittest.TestCase):

@@ -88,6 +88,9 @@ arity の概念自体が無かったので、分離形 `git log --grep -x.env` �
 - metadata-only gate (`_reads_file_content` / `_git_ls_files_exposes_object`) は
   生の token 列で判定するため影響なし。`file -f .env` / `wc --files0-from=.env` /
   `tree --fromfile .env` / `git ls-files -s .env` の deny を回帰テストで固定
+- GNU tar の `--exclude-ignore[-recursive]=FILE` は各ディレクトリ内の FILE を
+  読んで除外 pattern にする (`-X` と同じ「中身を読む」option) ので path として
+  登録 (Codex R1 P1。当初は pattern と誤登録していた)
 
 ### 3. 裸の `*` が hard deny (shell glob と fnmatch のドット意味論相違)
 
@@ -105,6 +108,13 @@ bash 3.2 / zsh 5 実測: `echo *` `echo ?env` `echo [.]env` `echo *.envrc` は
   `**/.env` は `sub/.env` に展開されるため deny (0.21.x は operand 全体を fnmatch
   して ask_or_allow = auto で素通りだった)
 - `.env*` `.en?` `.e[n]v` `.envrc*` `.*` の deny は不変
+- 同じコマンド内で `shopt -s dotglob` / `GLOBIGNORE=<非空>` (bash) /
+  `setopt globdots` (zsh) を有効化している形は、`*` が dotfile にも展開される
+  (bash 3.2 実測: dotglob で `*` → `.env`、`[.]env` → `.env`) ので 0.21.x までの
+  fnmatch の意味論に戻して deny を維持する (`_command_enables_dotglob`、Codex
+  R1 P1)。shell option は Bash tool の呼び出しごとに初期化されるため同一
+  コマンド内の形だけが対象。検出は保守的 (`shopt -u dotglob` や言及でも一致) で
+  deny 寄りにしか倒れない
 
 ### 4. `is_sensitive` の parts 一致が非パス文字列を deny に変える
 
@@ -141,6 +151,12 @@ docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read �
 - terminator が見つからない `<<` は heredoc として扱わない (0.21.x と同じ
   行分割)。`$((1<<2))` を heredoc と誤認して以降を丸ごと本文にすると後続の
   `cat .env` が解析されず auto で素通りするため
+- 算術式 (`$((` 算術展開 / `((` 算術コマンド) の中の `<<` はシフト演算子として
+  heredoc 検出から外す (Codex R1 P1)。terminator 未検出の fallback だけでは、
+  後続に右オペランドと同じ行 (`echo $((1<<2))` の後の `2`) があると間の
+  `cat .env` が本文扱いで消えた。`$( (cmd) )` のような擬似形は `))` が来ず
+  算術扱いのまま終わるが、その場合は heredoc 検出が止まる (= 0.21.x の行分割)
+  だけで allow 側には倒れない
 
 ### 動作変化 (in-process 実測、default / auto)
 
@@ -163,6 +179,9 @@ docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read �
 | `cat .env*`, `cat .en?`, `cat .e[n]v`, `cat .envrc*`, `cat .env`, `cat sub/.env`, `cat .env/bin/id_rsa`, `git show HEAD:.env` | deny / deny | deny / deny (不変) |
 | `cat *.json`, `cat *.key`, `cat id_rsa*`, `cat .env.*`, `cat sub/*` | ask / allow | ask / allow (不変) |
 | `echo *`, `wc -l *`, `chmod 644 *`, `ls -la *` (metadata-only) | allow / allow | allow / allow (不変) |
+| `shopt -s dotglob; cat *`, `setopt globdots; cat *`, `GLOBIGNORE=x; cat *`, `export GLOBIGNORE=.git; cat *.envrc` (同一コマンド内で dotglob 系を有効化) | deny / deny | deny / deny (不変、Codex R1) |
+| `echo $((1<<2))` + `cat .env` + `2` (算術シフトの後ろに右オペランドと同じ行) | deny / deny | deny / deny (不変、Codex R1) |
+| `tar --exclude-ignore=.env -cf out.tar src` | deny / deny | deny / deny (不変、Codex R1) |
 
 ### 開示事項 (裏が取れなかったこと / 判断で倒したこと)
 
@@ -181,6 +200,18 @@ docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read �
   `-C [NUM]` が値省略可) で判断し、密着形のみ値を取る側 (deny 寄り) に倒した
 - zip の `-x` は複数 pattern を取るが 1 つ目だけ消費する。2 つ目以降は glob なら
   ask_or_allow、literal なら候補に残る (保守側)
+- profile (`.bashrc` / `.zshenv`) で `dotglob` / `GLOB_DOTS` / `GLOBIGNORE` が
+  常時有効な環境は hook から見えない。その環境では裸の `*` が dotfile に展開
+  されるが、本版の判定は同一コマンド内で有効化している形だけを保守側に戻す
+
+#### Codex R1 対応 (P1 x3)
+
+1. `$((1<<2))` の `<<` を heredoc と誤認し、後続に右オペランドと同じ行があると
+   `cat .env` が本文扱いで消える → 算術式の中では heredoc を検出しない (上記 5.)
+2. `shopt -s dotglob; cat *` / `GLOBIGNORE=x; cat *` で `*` が `.env` に展開される
+   のに allow → 同一コマンド内の有効化を検出して 0.21.x の意味論に戻す (上記 3.)
+3. tar `--exclude-ignore[-recursive]=FILE` は FILE の中身を読む → path として
+   登録 (上記 2.)
 
 ## 0.20.0
 
