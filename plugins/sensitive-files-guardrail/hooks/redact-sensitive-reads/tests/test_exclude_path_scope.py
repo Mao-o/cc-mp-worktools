@@ -146,6 +146,14 @@ class TestReadHandlerPathRule(BaseProjectScoped):
         self.assertEqual(_decision(self._read(self._file(".env"))), "allow")
         self.assertEqual(_decision(self._read(self._file("sub/.env"))), "deny")
 
+    def test_malformed_path_rule_denies_normally_instead_of_internal_error(self):
+        # 逆順の文字範囲 (Codex R2 P2): re.error を外に出さず「一致しない」扱い
+        self._write_local("!secrets/[z-a].pem\n")
+        resp = self._read(self._file("secrets/a.pem"))
+        self.assertEqual(_decision(resp), "deny")
+        self.assertNotIn("internal", _reason(resp).lower())
+        self.assertEqual(_decision(self._read(self._file("README.md", "x\n"))), "allow")
+
 
 # -- Edit / Write ------------------------------------------------------------
 
@@ -343,11 +351,38 @@ class TestBashHandlerPathRule(BaseProjectScoped):
         self.assertIn("`!.env`", reason)
         self.assertNotIn("この 1 ファイルだけ", reason)
 
-    def test_path_rule_applies_to_vcs_pathspec_piece(self):
-        # 判定側はコロン分割した各片を root 相対で見るので、rule は効く
-        self._write_local("!sub/.env\n")
-        self.assertEqual(_decision(self._bash("git show HEAD:sub/.env")), "allow")
+    def test_path_rule_is_not_applied_to_vcs_pathspec(self):
+        """コロンを含む operand (pathspec / URI) には path 形 rule を適用しない
+        (Codex R2 P1)。git の ``<rev>:<path>`` は tree root 相対だが hook は cwd に
+        結合するので、サブディレクトリから ``git show HEAD:secret/.env`` を実行
+        すると ``a/secret/.env`` として評価され、そちらを承認した
+        ``!a/secret/.env`` が未承認の root 直下の secret を allow してしまう。
+        basename 形のみ (0.23.0 までと同じ) に倒す。"""
+        self._write_local("!a/secret/.env\n!sub/.env\n")
+        sub = self.root / "a"
+        sub.mkdir(exist_ok=True)
+        # Codex の再現形: cwd=/r/a から HEAD:secret/.env (git は /r/secret/.env を読む)
+        self.assertEqual(
+            _decision(self._bash("git show HEAD:secret/.env", cwd=str(sub))), "deny"
+        )
+        # 承認済み path 形は pathspec には効かない (過剰 deny 側)
+        self.assertEqual(_decision(self._bash("git show HEAD:sub/.env")), "deny")
         self.assertEqual(_decision(self._bash("git show HEAD:.env")), "deny")
+        self.assertEqual(_decision(self._bash("scp host:sub/.env .")), "deny")
+        # plain operand で書けば path 形が効く
+        self.assertEqual(_decision(self._bash("git show HEAD -- sub/.env")), "allow")
+        self.assertEqual(_decision(self._bash("cat sub/.env")), "allow")
+        # basename 形は pathspec にも従来どおり効く
+        self._write_local("!.env\n")
+        self.assertEqual(_decision(self._bash("git show HEAD:sub/.env")), "allow")
+
+    def test_malformed_path_rule_does_not_break_the_hook(self):
+        # 逆順の文字範囲を含む path 形 rule は「一致しない」だけで、他の判定は通常どおり
+        self._write_local("!secrets/[z-a].pem\n!config/prod.pem\n")
+        self._file("secrets/a.pem")
+        self.assertEqual(_decision(self._bash("cat secrets/a.pem")), "deny")
+        self.assertEqual(_decision(self._bash("cat config/prod.pem")), "allow")
+        self.assertEqual(_decision(self._bash("cat README.md")), "allow")
 
     def test_operand_outside_root_keeps_basename_form(self):
         outside = Path(self.tmp) / "elsewhere" / ".env"

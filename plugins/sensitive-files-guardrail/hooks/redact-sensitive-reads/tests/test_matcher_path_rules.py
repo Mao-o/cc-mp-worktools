@@ -186,6 +186,24 @@ class TestPathRuleWildcards(unittest.TestCase):
         self.assertFalse(is_sensitive("/r/certs/k[1.pem", rules, root=ROOT))
         self.assertTrue(is_sensitive("/r/certs/k1.pem", rules, root=ROOT))
 
+    def test_invalid_char_range_never_matches_instead_of_raising(self):
+        """逆順の範囲 ``[z-a]`` は regex として不正 (Codex R2 P2)。例外を hook の
+        外に通すと全 tool が internal error deny / Stop が無言終了になるので、
+        fnmatch と同じく「何にも一致しない」に畳む。exclude なら保護が残る側。"""
+        for bad in ("secrets/[z-a].pem", "secrets/[9-0]x.pem", "[z-a]/x.pem"):
+            with self.subTest(rule=bad):
+                excl = _with((bad, True))
+                self.assertTrue(is_sensitive("/r/secrets/a.pem", excl, root=ROOT))
+                self.assertTrue(is_sensitive("/r/secrets/z.pem", excl, root=ROOT))
+                incl = [(bad, False)]
+                self.assertFalse(is_sensitive("/r/secrets/a.txt", incl, root=ROOT))
+        # 同じ壊れ方の basename 形は fnmatch 側で既に never-match (挙動の対称性)
+        self.assertFalse(is_sensitive("/r/a.txt", [("[z-a].txt", False)], root=ROOT))
+        # 壊れた rule が混ざっていても他の rule は通常どおり効く
+        mixed = _with(("secrets/[z-a].pem", True), ("secrets/a.pem", True))
+        self.assertFalse(is_sensitive("/r/secrets/a.pem", mixed, root=ROOT))
+        self.assertTrue(is_sensitive("/r/secrets/b.pem", mixed, root=ROOT))
+
 
 class TestDirectoryRules(unittest.TestCase):
     def test_trailing_slash_only_matches_at_any_depth(self):

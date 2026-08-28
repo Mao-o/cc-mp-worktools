@@ -274,10 +274,17 @@ export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
   symlink 経由のパスで `cwd` が実体パス (またはその逆) のように**文字列として
   root 配下にならない**組み合わせでは path 形は一致しない (basename 形は従来どおり)
 - Bash operand も path 形 rule を評価する (`cat config/prod.pem`、
-  `cat ../config/prod.pem`、`git show HEAD:config/prod.pem` のコロン後の片)。
+  `cat ../config/prod.pem`、`git show HEAD -- config/prod.pem`)。ただし
+  **コロンを含む operand** (`git show HEAD:config/prod.pem` の pathspec、
+  `user@host:path`、`file://...`) には適用しない — git の `<rev>:<path>` は
+  tree root 相対で hook の cwd 基準と一致せず、別ファイルを承認した rule が
+  未承認のファイルを許可しうるため (basename 形は従来どおり効く)。
   途中に `/` を含む rule は root アンカーなので、`sed 's/secrets/x/'` の式が
   合成 path になっても `secrets/*.yaml` のような rule には当たらない
   (`**/` で始める rule だけは当たりうる)
+- 正規表現として不正な文字クラス (逆順の範囲 `[z-a]` 等) を含む path 形 rule は
+  **何にも一致しない** (basename 形の fnmatch と同じ扱い)。壊れた行 1 つで hook
+  全体が止まることはない
 
 ### parts (親 dir 名) は basename 形の補助
 

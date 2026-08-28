@@ -112,6 +112,11 @@ def _translate_path_pattern(pattern: str) -> str:
     - ``\\`` はエスケープではなく literal (basename 形の fnmatch と同じ)。
       メタ文字を literal にしたいときは ``[*]`` のように文字クラスで包む
       (``_shared.patterns.escape_glob`` がレシピ生成時に行う変換と同じ)
+    - 正規表現として不正な文字クラス (逆順の範囲 ``[z-a]`` 等) を含む rule は
+      **何にも一致しない** (``_compiled_path`` が ``re.error`` を never-match に
+      畳む)。``fnmatch.translate`` が空になった範囲を ``(?!)`` にするのと同じ
+      扱いで、壊れた local rule 1 行で全 tool が internal error deny / Stop が
+      無言終了になるのを防ぐ (Codex R2 P2)
     """
     pat = pattern
     anchored = pat.startswith(("/", "./"))
@@ -187,10 +192,26 @@ def _translate_path_pattern(pattern: str) -> str:
     return "".join(out)
 
 
+# 何にも一致しない regex (不正な path 形 rule のフォールバック)。
+_NEVER_MATCH = re.compile(r"(?!)")
+
+
 def _compiled_path(pattern: str) -> "re.Pattern[str]":
+    """path 形 rule の compiled regex を返す (キャッシュ付き)。
+
+    translator は文字クラスの中身をそのまま regex に渡すため、``[z-a]`` のような
+    逆順の範囲は ``re.error`` になる。例外を hook の外まで通すと、PreToolUse は
+    全 tool で internal error deny、Stop は block を出さずに終了する — 壊れた
+    local rule 1 行の影響としては大きすぎるので、その rule は **何にも一致しない**
+    ものとして扱う (fnmatch が空の範囲を ``(?!)`` にするのと同じ。exclude なら
+    保護が残る側、include なら元々効いていない側に倒れる)。
+    """
     hit = _PATH_PATTERN_CACHE.get(pattern)
     if hit is None:
-        hit = re.compile(_translate_path_pattern(pattern))
+        try:
+            hit = re.compile(_translate_path_pattern(pattern))
+        except re.error:
+            hit = _NEVER_MATCH
         _PATH_PATTERN_CACHE[pattern] = hit
     return hit
 

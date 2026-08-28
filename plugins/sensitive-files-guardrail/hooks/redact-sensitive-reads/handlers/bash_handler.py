@@ -368,7 +368,16 @@ def _operand_is_sensitive(
 
     ``root`` (0.24.0): path 形 rule (``!config/prod.pem``) の基準。normalize
     済みの絶対 path を root 相対にして比較する (``_shared.matcher.is_sensitive``)。
-    None なら path 形 rule は評価しない。
+    None なら path 形 rule は評価しない。**コロンを含む operand には適用しない**
+    (``root=None`` で basename 形のみ、0.23.0 までと同じ): git の ``<rev>:<path>``
+    は ``<path>`` を tree root 相対で解釈するが、hook は cwd に結合するため
+    サブディレクトリから ``git show HEAD:secret/.env`` を実行すると別ファイル
+    (``a/secret/.env``) として評価され、そちらを承認した ``!a/secret/.env`` が
+    **未承認の root 直下の secret を allow** しうる (Codex R2 P1)。リモート
+    pathspec (``user@host:path``) や URI も基準を確定できないので同じ扱い。
+    その分 ``git show HEAD:sub/.env`` は path 形で承認していても deny のまま
+    (過剰 deny 側。``git show HEAD -- sub/.env`` のように plain operand で書けば
+    path 形が効く)。
 
     0.22.0: ``is_sensitive`` は ``parts=False`` (basename のみ) で呼ぶ。Bash
     operand は path とは限らない文字列 (sed / awk の式、option の値) を含み、
@@ -381,30 +390,23 @@ def _operand_is_sensitive(
     の操作も止まらなくなる。
 
     ``normalize`` 失敗 (ValueError / OSError) は再送出 (呼び出し側で fail-closed)。
-
-    コロン分割した片の basename が operand 全体の basename と同じなら、**全体の
-    評価は skip して片だけを評価する** (0.24.0)。basename 階層の verdict は
-    同じで、path 階層は片の方だけが意味を持つ (``HEAD:sub/.env`` の全体は
-    ``HEAD:sub/.env`` という root 相対 path になり ``!sub/.env`` が効かないが、
-    片 ``sub/.env`` には効く)。片が全体と別 basename のとき (``cred:x.json``
-    のように basename 自体にコロンを含む形) は従来どおり全体も評価する。
     """
+    # コロンを含む operand (pathspec / URI) は片の基準を確定できないので
+    # path 形 rule を適用しない (上記 Codex R2 P1)。
+    form_root = None if ":" in raw else root
     abs_path = normalize(raw, cwd)
-    pieces: list = []
+    if is_sensitive(abs_path, rules, parts=False, root=form_root):
+        return True
     if ":" in raw:
         for piece in raw.split(":"):
             if not piece or piece == raw:
                 continue
             try:
-                pieces.append(normalize(piece, cwd))
+                piece_path = normalize(piece, cwd)
             except (ValueError, OSError):
                 continue
-    if not any(p.name == abs_path.name for p in pieces):
-        if is_sensitive(abs_path, rules, parts=False, root=root):
-            return True
-    for piece_path in pieces:
-        if is_sensitive(piece_path, rules, parts=False, root=root):
-            return True
+            if is_sensitive(piece_path, rules, parts=False, root=None):
+                return True
     return False
 
 

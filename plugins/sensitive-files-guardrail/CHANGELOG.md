@@ -33,12 +33,11 @@ commit 52113a1 で完了)。
   verdict は変わらない。(2) Stop hook がサブディレクトリで発火したとき、親 dir 名
   (parts) を cwd 相対ではなく **root 相対**で評価する (cwd と root の間の
   ディレクトリ名も見る = root で発火したときと同じ verdict。deny 側にしか
-  動かない)。(3) VCS pathspec (`HEAD:sub/.env`) は片の basename が operand 全体の
-  basename と同じなら片だけを評価する (path 形を効かせるため。basename 形だけなら
-  verdict は不変)
+  動かない)。コロンを含む Bash operand (VCS / リモート pathspec、URI) には
+  path 形 rule を**適用しない** (basename 形のみ = 0.23.0 までと同じ、§5 R2 P1)
 - 旧版 (main) と本 branch で同一コーパス (matcher 592 + Bash 2,616 + Read/Edit 96 +
-  Stop 9 = **3,350 verdict**) を流した diff は 194 件で、**すべて上記 (1)(2) に分類
-  でき説明不能ゼロ** (path 形 rule を与えた変種と、Stop の root 相対 parts 1 件)
+  Stop 9 = **3,350 verdict**) を流した diff は**すべて上記 (1)(2) に分類でき
+  説明不能ゼロ** (path 形 rule を与えた変種と、Stop の root 相対 parts 1 件)
 - テスト件数: redact 1,024 → **1,051** / check 80 → **92** (計 1,143)
 
 ### 1. path 形 rule (`_shared/matcher.py`)
@@ -86,7 +85,8 @@ Stop が出したレシピが Read / Edit / Bash で効かなくなるため。4
 - Bash: コマンド単位で root を 1 回解決して全 segment / operand で共有
   (`_analyze_segment` / `_operand_is_sensitive` / `_sensitive_redirect_target`)。
   Bash operand は引き続き `parts=False` だが path 形は評価する (Bash で
-  レシピが効かなければ 1 ファイルに絞る意味が無い)
+  レシピが効かなければ 1 ファイルに絞る意味が無い)。コロンを含む operand は
+  片の基準を確定できないため path 形を適用しない (§5 R2 P1)
 - Stop: `git ls-files` の cwd 相対 path に `checker.root_offset(cwd, root)` を
   前置して **root 相対**に組み立てて渡す。戻り値の `path` (表示 / stop-ack) は
   cwd 相対のまま
@@ -114,9 +114,10 @@ Stop が出したレシピが Read / Edit / Bash で効かなくなるため。4
 ### 4. 裏が取れなかったこと (開示)
 
 - **VCS pathspec の基準**: `git show HEAD:sub/.env` の `sub/.env` は git では
-  repo root 相対だが、hook は cwd に結合して評価する。cwd ≠ root のとき git の
-  実際の対象と食い違う可能性があるため、path 形の**案内**は出さない側に倒した
-  (判定は片ごとに root 相対で行うので、`!sub/.env` は cwd = root なら効く)
+  tree root 相対だが、hook は cwd に結合して評価する。初版は案内だけを出さない
+  側に倒し判定には path 形を適用していたが、Codex R2 P1 の再現形 (cwd=`/r/a` で
+  `HEAD:secret/.env` → 承認済み `!a/secret/.env` が未承認の `/r/secret/.env` を
+  allow) を受けて**判定にも適用しない**に確定した (§5)
 - **symlink / realpath**: `$CLAUDE_PROJECT_DIR` と `cwd` の一方が symlink 経由で
   文字列として配下関係にならない組み合わせでは path 形が一致しない (basename 形は
   従来どおり)。hook の stat 予算と TOCTOU 方針 (resolve しない) から lexical に
@@ -143,6 +144,26 @@ Stop が出したレシピが Read / Edit / Bash で効かなくなるため。4
   `.env` の minimal info が押し出されて鍵一覧が消えた (既存テスト 2 件が検出)。
   書き方の説明は docs とレシピ生成に任せて警告文を 1,205〜1,247 byte に戻し、
   案内が伸びると minimal info が消える境界を実測して床テストで固定した
+- **R2 P1 — VCS pathspec の片を cwd 基準で解決すると別ファイルを許可しうる**:
+  git の `<rev>:<path>` は `<path>` を tree root 相対で解釈するが、hook は cwd に
+  結合する。サブディレクトリ `/r/a` から `git show HEAD:secret/.env` を実行すると
+  git は `/r/secret/.env` を読むのに hook は `/r/a/secret/.env` を評価するため、
+  そちらを承認した `!a/secret/.env` が basename の include を打ち消し、**未承認の
+  root 直下の secret が allow** になっていた。repo root を subprocess 無しで確定
+  できず (`$CLAUDE_PROJECT_DIR` は git toplevel と一致しない場合がある)、リモート
+  pathspec / URI には基準そのものが無いため、**コロンを含む operand には path 形
+  rule を適用しない** (basename 形のみ = 0.23.0 と同じ、過剰 deny 側) に確定。
+  R1 で入れた「片の basename が全体と同じなら全体評価を skip」は目的を失うので
+  撤去し、pathspec の判定は 0.23.0 と同一に戻した。`git show HEAD -- sub/.env` の
+  ような plain operand なら path 形が効く
+- **R2 P2 — 不正な文字クラスを含む path 形 rule が `re.error` を投げる**:
+  `secrets/[z-a].pem` のような逆順の範囲は translator がそのまま regex に渡して
+  compile 時に落ち、PreToolUse は全 tool で internal error deny、Stop は block を
+  出さずに終了していた (壊れた local rule 1 行の影響として大きすぎる)。
+  `_compiled_path` が `re.error` を never-match (`(?!)`) に畳む — fnmatch が空の
+  範囲を `(?!)` にするのと同じ扱いで、exclude なら保護が残る側、include なら元々
+  効いていない側に倒れる。matcher / Read / Bash / Stop の各経路で「壊れた rule が
+  混ざっても他の rule は通常どおり効く」ことを固定
 
 ## 0.23.0
 

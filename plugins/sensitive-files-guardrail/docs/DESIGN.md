@@ -669,11 +669,15 @@ builder で 0.9.0 とほぼ同等の出力を生成するため互換維持。
 `_operand_is_sensitive` (literal path / URI / VCS pathspec) または
 `_glob_operand_is_dotenv_match` (glob 含み、dotenv stem 一致) に通す。コロンを
 含む operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の basename も
-判定 (0.24.0: 片の basename が operand 全体の basename と同じなら全体の評価は
-skip して片だけを評価する — 全体 `HEAD:sub/.env` は root 相対 path として
-`!sub/.env` に一致しないが、片 `sub/.env` には一致するため)。判定は
-**basename + root 相対の path 形 rule** で、親 dir 名の parts は見ない (0.22.0、
-`is_sensitive(..., parts=False)`)。Bash operand は path とは限らない文字列
+判定。判定は **basename + root 相対の path 形 rule** で、親 dir 名の parts は
+見ない (0.22.0、`is_sensitive(..., parts=False)`)。ただし **コロンを含む operand
+には path 形 rule を適用しない** (basename 形のみ、0.24.0 Codex R2 P1): git の
+`<rev>:<path>` は `<path>` を tree root 相対で解釈するが hook は cwd に結合する
+ため、サブディレクトリから `git show HEAD:secret/.env` を実行すると別ファイル
+`a/secret/.env` として評価され、そちらを承認した `!a/secret/.env` が未承認の
+root 直下の secret を allow しうる。リモート pathspec / URI も基準を確定できない
+ので同じ扱い (過剰 deny 側。`git show HEAD -- sub/.env` のような plain operand
+なら path 形が効く)。Bash operand は path とは限らない文字列
 (sed / awk の式、option の値) を含み、親 dir 名の parts 一致は
 `sed -n 's/.env/X/p'` の合成パス `/cwd/s/.env/X/p` を deny に変えるだけだった
 (Read / Edit / Stop は実在パスなので parts も見る)。path 形 rule (0.24.0) は

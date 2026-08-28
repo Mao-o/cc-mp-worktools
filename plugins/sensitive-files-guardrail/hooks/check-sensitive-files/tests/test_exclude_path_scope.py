@@ -161,6 +161,18 @@ class TestFindSensitiveFilesPathRule(Base):
         # root 不明なら従来どおり (cwd 相対だけを見る)
         self.assertEqual(find_sensitive_files(cwd, rules), [])
 
+    def test_malformed_path_rule_does_not_abort_the_scan(self):
+        # 逆順の文字範囲 (Codex R2 P2): Stop が例外で無言終了せず、報告が出る
+        self._write("secrets/a.pem")
+        self._write("config/prod.pem")
+        self._write_local("!secrets/[z-a].pem\n!config/prod.pem\n")
+        rules = load_patterns(_PATTERNS, cwd=str(self.repo))
+        root = resolve_project_root(str(self.repo))
+        paths = {r["path"] for r in find_sensitive_files(str(self.repo), rules, root=root)}
+        self.assertEqual(paths, {"secrets/a.pem"})
+        reason = _reason(_run_main({"cwd": str(self.repo), "session_id": "s10"}))
+        self.assertIn("secrets/a.pem", reason)
+
     def test_directory_rule_excludes_descendants(self):
         self._write("fixtures/a.pem")
         self._write("fixtures/deep/b.pem")
