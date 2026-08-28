@@ -140,6 +140,12 @@ class TestReadHandlerPathRule(BaseProjectScoped):
         self.assertEqual(_decision(self._read(self._file("config/prod.pem"))), "allow")
         self.assertEqual(_decision(self._read(self._file("other/prod.pem"))), "allow")
 
+    def test_root_level_rule_needs_leading_slash(self):
+        # root 直下の 1 ファイルは `!/.env` (Codex R1 P1)。`!.env` は同名すべて
+        self._write_local("!/.env\n")
+        self.assertEqual(_decision(self._read(self._file(".env"))), "allow")
+        self.assertEqual(_decision(self._read(self._file("sub/.env"))), "deny")
+
 
 # -- Edit / Write ------------------------------------------------------------
 
@@ -171,7 +177,7 @@ class TestEditHandlerPathRule(BaseProjectScoped):
         self.assertIn("同名ファイルをすべて外したい場合だけ `!prod.pem`", reason)
         # 絶対パスは reason に出さない (0.19.0 からの方針)
         self.assertNotIn(str(self.root), reason)
-        self.assertNotIn("`!/", reason)
+        self.assertNotIn("`!" + str(self.root), reason)
 
     def test_deny_reason_for_existing_file_keeps_path_form(self):
         # overwrite 経路 (minimal info を埋め込む builder) でも案内は path 形
@@ -200,6 +206,56 @@ class TestEditHandlerPathRule(BaseProjectScoped):
         self._write_local("!other/prod.pem\n")
         self.assertEqual(_decision(self._write(self.root / "other" / "prod.pem")), "allow")
         self.assertEqual(_decision(self._write(self.root / "config" / "prod.pem")), "deny")
+
+    def test_large_existing_file_keeps_keys_alongside_path_form_hint(self):
+        """path 形の案内 (relpath あり) が付いても、32KB 超の既存 `.env` の
+        minimal info (鍵一覧) が押し出されないこと。
+
+        案内は必ず全文残す代わりに可変長側を削るので、案内が伸びると鍵一覧が
+        丸ごと消える。0.24.0 の初版で実際に起きた (test_exclude_hint_budget 参照)。
+        ここでは root 解決済み (= path 形が付く) の経路で同じ性質を固定する。
+        """
+        from core import output
+
+        body = b"".join(
+            b"BIG_KEY_%d=value_that_is_long_enough_%d\n" % (i, i) for i in range(1500)
+        )
+        target = self.root / "svc" / ".env"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+        resp = edit_handler.handle(
+            {
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": str(target),
+                    "old_string": "a",
+                    "new_string": "NEW_KEY=1\n",
+                },
+                "cwd": str(self.root),
+                "permission_mode": "default",
+            },
+            tool_label="Edit",
+        )
+        self.assertEqual(_decision(resp), "deny")
+        reason = _reason(resp)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+        self.assertIn("`!svc/.env` (この 1 ファイルだけ)", reason)
+        self.assertIn("keys-only scan", reason)
+        self.assertIn("BIG_KEY_0", reason)
+
+    def test_root_level_file_recipe_is_path_form(self):
+        """root 直下の `.env` は `!/.env` で案内し、それを書けば root の `.env`
+        だけが allow になる (Codex R1 P1: `!.env` だと同名すべてが外れる)。"""
+        resp = self._write(self.root / ".env")
+        self.assertEqual(_decision(resp), "deny")
+        reason = _reason(resp)
+        self.assertIn("`!/.env` (この 1 ファイルだけ)", reason)
+        self.assertIn("同名ファイルをすべて外したい場合だけ `!.env`", reason)
+        self._write_local("!/.env\n")
+        self.assertEqual(_decision(self._write(self.root / ".env")), "allow")
+        self.assertEqual(_decision(self._write(self.root / "sub" / ".env")), "deny")
+        outside = Path(self.tmp) / "elsewhere" / ".env"
+        self.assertEqual(_decision(self._write(outside)), "deny")
 
 
 # -- Bash --------------------------------------------------------------------
@@ -247,6 +303,23 @@ class TestBashHandlerPathRule(BaseProjectScoped):
         self.assertIn("`!other/prod.pem` (この 1 ファイルだけ)", reason)
         self.assertIn("同名ファイルをすべて外したい場合だけ `!prod.pem`", reason)
         self.assertNotIn(str(self.root), reason)
+
+    def test_root_level_operand_recipe_is_path_form(self):
+        # `cat .env` (root 直下) の案内は `!/.env`。書けば root の .env だけ allow
+        self._file(".env", "KEY=v\n")
+        self._file("sub/.env", "KEY=v\n")
+        resp = self._bash("cat .env")
+        self.assertEqual(_decision(resp), "deny")
+        self.assertIn("`!/.env` (この 1 ファイルだけ)", _reason(resp))
+        self._write_local("!/.env\n")
+        self.assertEqual(_decision(self._bash("cat .env")), "allow")
+        self.assertEqual(_decision(self._bash("cat sub/.env")), "deny")
+        self.assertEqual(
+            _decision(self._bash("cat .env", cwd=str(self.root / "sub"))), "deny"
+        )
+        self.assertEqual(
+            _decision(self._bash("cat ../.env", cwd=str(self.root / "sub"))), "allow"
+        )
 
     def test_deny_reason_resolves_relpath_from_subdirectory_cwd(self):
         resp = self._bash("cat prod.pem", cwd=str(self.root / "other"))

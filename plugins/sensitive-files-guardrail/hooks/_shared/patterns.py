@@ -107,15 +107,19 @@ PROJECT_SECTION_PLACEHOLDER_NOTE = (
 # 「以後 ... で報告されなくなります」という従来の文面では、"報告されない" が
 # "保護されない" と同義であることも、同名ファイル全部が巻き添えになることも
 # 伝わらなかった。0.23.0 で開示を足し、0.24.0 で範囲を絞る path 形を足した。
+#
+# 文言は **byte 予算を食う** (reason 全体 3KB、UTF-8 で日本語 1 字 3 byte) ので
+# 必要最小限に留める。0.24.0 の初版で root 直下の書き方 (`!/<名前>`) まで
+# ここに書いたところ、Edit の deny reason で大きな `.env` の minimal info が
+# 押し出されて鍵一覧が消えた (既存テスト 2 件が検出)。書き方の説明は docs と
+# レシピ生成 (`path_rule_for` が先頭 `/` を付ける) に任せる。
 EXCLUDE_SCOPE_WARNING = (
-    "影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ**"
-    " (プロジェクト root 相対で評価するので root 配下のみ)。"
+    "影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ** (root 配下のみ)。"
     "basename 形 (`!<名前>`) は{scope}が**すべて**対象で、"
     "**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致"
     "する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、"
     "basename 形は**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。"
-    "どちらの形も、外れるのは Stop の報告だけでなく"
-    " **Read / Bash / Edit / Write の保護そのもの**です。"
+    "外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。"
 )
 
 # ``[project:]`` ヘッダーが書き損じのときに ``header_warn_callback`` へ渡す固定
@@ -147,6 +151,22 @@ def escape_glob(name: str) -> str:
     if not isinstance(name, str) or not any(c in name for c in _GLOB_META):
         return name if isinstance(name, str) else ""
     return "".join(f"[{c}]" if c in _GLOB_META else c for c in name)
+
+
+def path_rule_for(relpath: str) -> str:
+    """root 相対 path を **path 形** rule の文字列にする (0.24.0)。
+
+    rule は ``/`` を含むかどうかで形が決まる (``_shared.matcher.is_path_rule``)。
+    root 直下のファイルは相対 path が ``.env`` のように ``/`` を含まないため、
+    そのまま ``!.env`` と書くと basename 形 (同名すべて) に化ける — 案内文が
+    「この 1 ファイルだけ」と言いながら、セッションが触る ``.env`` 全部の保護を
+    外す最悪の形 (Codex R1 P1)。先頭に ``/`` (root アンカー) を付けて path 形で
+    あることを保つ。既に ``/`` を含む path はそのまま。メタ文字の literal 化は
+    呼出側 (``escape_glob``) が行う (``/`` は escape の対象外なので順序は問わない)。
+    """
+    if not relpath:
+        return relpath
+    return relpath if "/" in relpath else "/" + relpath
 
 
 def exclude_recipe_lines(names: Iterable[str], limit: int = 20) -> list[str]:

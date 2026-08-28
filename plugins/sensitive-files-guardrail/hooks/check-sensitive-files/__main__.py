@@ -45,6 +45,7 @@ from _shared.patterns import (  # noqa: E402
     PROJECT_SECTION_PLACEHOLDER_NOTE,
     EXCLUDE_SCOPE_WARNING,
     exclude_recipe_lines,
+    path_rule_for,
     resolve_project_root,
 )
 from checker import (  # noqa: E402
@@ -77,12 +78,16 @@ def _recipe_names(paths: list[str], root_offset_: str | None) -> list[str] | Non
     からの相対 prefix、``checker.root_offset``) を前置して root 相対にする。
     None (root 不明 / cwd が root 配下でない) なら path 形は組み立てられない
     ので None を返し、呼出側は basename 形だけを載せる。
+
+    root 直下のファイル (``.env``) は ``/`` を含まないので ``path_rule_for`` が
+    先頭 ``/`` を付ける (``!.env`` のままだと basename 形 = 同名すべてに化けて、
+    「1 ファイルだけ」の案内と矛盾する、Codex R1 P1)。
     """
     if root_offset_ is None:
         return None
     if not root_offset_:
-        return list(paths)
-    return [f"{root_offset_}/{p}" for p in paths]
+        return [path_rule_for(p) for p in paths]
+    return [path_rule_for(f"{root_offset_}/{p}") for p in paths]
 
 
 def _build_reason(

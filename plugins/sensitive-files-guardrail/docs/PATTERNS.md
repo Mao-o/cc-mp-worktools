@@ -141,7 +141,9 @@ Stop の block reason は、除外の恒久化として `[project:$CLAUDE_PROJEC
 0.24.0 から除外行は **path 形** `!<root 相対パス>` (承認した 1 ファイルだけを外す)
 を既定とし、basename 形 `!<basename>` (同名すべてを外す) は「同名ファイルをすべて
 外したい場合だけ」の明示的な選択として併記する (両形の違いは後述「rule の形で
-比較対象が決まる」)。root 相対 path を確定できないとき (root 不明 / root 配下でない /
+比較対象が決まる」)。root 直下のファイルは `!/.env` のように**先頭 `/` 付き**で
+案内する (`!.env` だと basename 形に化けて同名すべてが外れるため、
+`_shared.patterns.path_rule_for` が付ける)。root 相対 path を確定できないとき (root 不明 / root 配下でない /
 glob operand / VCS pathspec) は basename 形だけを案内する。
 `$CLAUDE_PROJECT_DIR` は **プレースホルダ** で、書くときはそのプロジェクトの
 絶対パスに置き換える (hook はヘッダーを展開しない。reason に絶対パスを出さない
@@ -229,6 +231,9 @@ export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
 # 承認した 1 ファイルだけを外す (0.24.0)
 !config/prod.pem
 
+# root 直下の 1 ファイル — 先頭 / を付けないと basename 形 (同名すべて) になる
+!/.env
+
 # fixtures ディレクトリ配下すべて (任意の深さ)
 !fixtures/
 
@@ -243,6 +248,7 @@ export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
 |---|---|---|---|
 | `config/prod.pem` | root 相対の path 1 本。途中に `/` があれば root アンカー | `config/prod.pem` | `x/config/prod.pem`、`config/prod.pem/inner` |
 | `/config/prod.pem`、`./config/prod.pem` | 同上 (先頭 `/` `./` はアンカーの明示) | `config/prod.pem` | `x/config/prod.pem` |
+| `/.env` | **root 直下**の 1 ファイル。root 直下は相対 path に `/` が無いので**先頭 `/` が必須** (`.env` だけだと basename 形 = 同名すべて) | `.env` | `sub/.env`、root 外の `.env` |
 | `fixtures/` | 末尾 `/` はディレクトリ。`/` が末尾だけなら任意の深さ | `fixtures/a.pem`、`a/fixtures/b/c.pem` | `fixtures` (同名ファイル)、`fixtures2/x` |
 | `/fixtures/`、`certs/fixtures/` | アンカー付きディレクトリ | `certs/fixtures/x.pem` | `a/certs/fixtures/x.pem` |
 | `fixtures/*.pem` | `*` は `/` を跨がない | `fixtures/a.pem` | `fixtures/deep/a.pem` |

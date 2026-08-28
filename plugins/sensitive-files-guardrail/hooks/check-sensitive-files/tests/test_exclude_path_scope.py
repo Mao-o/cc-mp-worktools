@@ -219,8 +219,25 @@ class TestStopReasonRecipe(Base):
         reason = _reason(
             _run_main({"cwd": str(self.repo / "pkg" / "a"), "session_id": "s5"})
         )
-        self.assertIn("  !.env", reason)
+        # root 直下なので先頭 / 付き (path 形を保つ)
+        self.assertIn("  !/.env", reason)
         self.assertNotIn("!pkg/a/.env", reason)
+
+    def test_root_level_file_recipe_is_path_form(self):
+        """root 直下の `.env` は `!/.env` で案内する (Codex R1 P1)。`!.env` だと
+        basename 形に化けて同名すべての保護が外れる。書けば root の `.env` だけが
+        次の Stop から消え、`sub/.env` は残る。"""
+        self._write(".env", "KEY=v\n")
+        self._write("sub/.env", "KEY=v\n")
+        reason = _reason(_run_main({"cwd": str(self.repo), "session_id": "s8"}))
+        self.assertIn("  !/.env\n", reason)
+        self.assertIn("  !sub/.env\n", reason)
+        self.assertNotIn("  !.env\n", reason)
+        self.assertIn("basename 形にする: `!.env`", reason)
+        self._write_local("!/.env\n")
+        reason2 = _reason(_run_main({"cwd": str(self.repo), "session_id": "s9"}))
+        self.assertNotIn("  - .env\n", reason2)
+        self.assertIn("  - sub/.env\n", reason2)
 
     def test_cwd_outside_project_dir_falls_back_to_basename_form(self):
         self._write("sub/.env", "KEY=v\n")

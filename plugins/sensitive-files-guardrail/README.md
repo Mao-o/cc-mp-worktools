@@ -380,7 +380,8 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 > `secrets/**`) は basename ではなく **プロジェクト root からの相対 path 全体**と
 > gitignore 準拠の意味論 (`*` は `/` を跨がない、`**` は跨ぐ、先頭 `/` は root
 > アンカー、末尾 `/` はディレクトリ) で比較する。承認した 1 ファイルだけを
-> 除外できるのはこの形。root は `[project:]` セクションと同じ解決
+> 除外できるのはこの形 (root 直下のファイルは `!/.env` のように先頭 `/` を付ける —
+> 付けないと basename 形になる)。root は `[project:]` セクションと同じ解決
 > (`$CLAUDE_PROJECT_DIR` → `.git` 上方探索) で、root を解決できない場所では
 > 一致しない。`/` を含まない行は従来どおり basename 形 (同名すべて)。詳細は
 > [docs/PATTERNS.md](./docs/PATTERNS.md) の「rule の形で比較対象が決まる」節。

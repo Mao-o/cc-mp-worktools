@@ -95,6 +95,18 @@ class TestPathRuleBasics(unittest.TestCase):
         self.assertFalse(is_sensitive("config/prod.pem", rules, root=ROOT))
         self.assertTrue(is_sensitive("sub/config/prod.pem", rules, root=ROOT))
 
+    def test_root_level_file_needs_leading_slash_to_stay_path_form(self):
+        # root 直下のファイルは相対 path に / が無いので、先頭 / を付けて初めて
+        # path 形になる。`.env` だけだと basename 形 (同名すべて) — Codex R1 P1
+        rules = _with(("/.env", True))
+        self.assertFalse(is_sensitive("/r/.env", rules, root=ROOT))
+        self.assertTrue(is_sensitive("/r/sub/.env", rules, root=ROOT))
+        self.assertTrue(is_sensitive("/elsewhere/.env", rules, root=ROOT))
+        self.assertTrue(is_sensitive("/r/.env", rules))  # root 不明なら効かない
+        rules_b = _with((".env", True))
+        self.assertFalse(is_sensitive("/r/sub/.env", rules_b, root=ROOT))
+        self.assertFalse(is_sensitive("/elsewhere/.env", rules_b, root=ROOT))
+
     def test_leading_slash_and_dot_slash_anchor(self):
         for pat in ("/config/prod.pem", "./config/prod.pem"):
             with self.subTest(pat=pat):
@@ -281,6 +293,29 @@ class TestGeneratedRecipeRoundTrip(unittest.TestCase):
 
     def test_plain_path_is_untouched(self):
         self.assertEqual(escape_glob("config/prod.pem"), "config/prod.pem")
+
+    def test_generated_rule_is_always_path_form(self):
+        """レシピ生成が返す rule は root 直下でも path 形であること (Codex R1 P1)。
+
+        root 相対 path が ``.env`` (``/`` 無し) のとき ``!.env`` と書くと basename
+        形に化け、「この 1 ファイルだけ」の案内と矛盾して同名すべての保護が外れる。
+        """
+        from _shared.matcher import is_path_rule
+        from _shared.patterns import path_rule_for
+
+        for rel in (".env", "id_rsa", "key[1].pem", "sub/.env", "a/b/c.pem"):
+            with self.subTest(rel=rel):
+                self.assertTrue(is_path_rule(path_rule_for(rel)))
+        self.assertEqual(path_rule_for(".env"), "/.env")
+        self.assertEqual(path_rule_for("sub/.env"), "sub/.env")
+        self.assertEqual(path_rule_for(""), "")
+        rules = _with((escape_glob(path_rule_for(".env")), True))
+        self.assertFalse(is_sensitive("/r/.env", rules, root=ROOT))
+        self.assertTrue(is_sensitive("/r/sub/.env", rules, root=ROOT))
+        rules2 = _with((escape_glob(path_rule_for("key[1].pem")), True))
+        self.assertFalse(is_sensitive("/r/key[1].pem", rules2, root=ROOT))
+        self.assertTrue(is_sensitive("/r/key1.pem", rules2, root=ROOT))
+        self.assertTrue(is_sensitive("/r/sub/key[1].pem", rules2, root=ROOT))
 
 
 class TestBackwardCompatibilityFloor(unittest.TestCase):

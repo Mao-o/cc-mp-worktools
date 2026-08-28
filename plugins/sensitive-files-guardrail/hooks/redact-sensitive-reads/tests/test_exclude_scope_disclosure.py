@@ -201,6 +201,19 @@ class TestExcludeHintPathForm(unittest.TestCase):
         # 既定の追記先は [project:] セクション (0.19.0 の規律を維持)
         self.assertIn("`[project:$CLAUDE_PROJECT_DIR]`", hint)
 
+    def test_root_level_relpath_is_prefixed_to_stay_path_form(self):
+        """root 直下のファイル (relpath に / が無い) は `!/.env` にする (Codex R1 P1)。
+
+        `!.env` と書くと basename 形になり、案内の「この 1 ファイルだけ」に反して
+        セッションが触る同名ファイルすべての保護が外れる。
+        """
+        hint = _exclude_hint(".env", relpath=".env")
+        self.assertIn("`!/.env` (この 1 ファイルだけ)", hint)
+        self.assertIn("同名ファイルをすべて外したい場合だけ `!.env` にします", hint)
+        # escape と併用しても path 形のまま
+        hint2 = _exclude_hint("key[1].pem", relpath="key[1].pem")
+        self.assertIn("`!/key[[]1[]].pem` (この 1 ファイルだけ)", hint2)
+
     def test_without_relpath_explains_why_path_form_is_missing(self):
         hint = _exclude_hint(".env")
         self.assertIn("`!.env`", hint)
@@ -214,7 +227,8 @@ class TestExcludeHintPathForm(unittest.TestCase):
         # 側のテスト (test_exclude_path_scope) が固定する
         hint = _exclude_hint("prod.pem", relpath="config/prod.pem")
         self.assertIn("`!config/prod.pem`", hint)
-        self.assertNotIn("`!/", hint)
+        # / を含む相対 path には先頭 / を足さない (root 直下だけ `path_rule_for` が足す)
+        self.assertNotIn("`!/config/prod.pem`", hint)
 
     def test_backtick_in_relpath_is_dropped(self):
         hint = _exclude_hint(".env", relpath="s`ub/.env")

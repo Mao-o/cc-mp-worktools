@@ -125,6 +125,25 @@ Stop が出したレシピが Read / Edit / Bash で効かなくなるため。4
   整合性の改善と判断したが、cwd がたまたま機密名ディレクトリ (`.env/`) 配下の
   とき報告が増える (deny 側)
 
+### 5. PR レビュー指摘の反映
+
+- **R1 P1 — root 直下のレシピが basename 形に化ける**: root 直下のファイル
+  (最典型は root の `.env`) は root 相対 path に `/` が無いため、生成した
+  `!.env` は path 形ではなく basename 形として評価される。案内は「この 1 ファイル
+  だけ」と言いながら、実際にはセッションが触る `.env` 全部 (nested / 他
+  プロジェクト含む) の保護が外れていた。`_shared.patterns.path_rule_for` を
+  新設して **`/` を含まない相対 path には先頭 `/` (root アンカー) を付け**、
+  Stop のレシピと Read / Edit / Bash の案内の両方に通した (`!/.env`)。
+  docs (PATTERNS.md / README) にも「root 直下は先頭 `/` が必須」を明記。
+  回帰テストは matcher (`/.env` が root の 1 本だけに一致) / hint / Edit / Bash /
+  Stop の各経路で、案内どおりに書いた rule がその 1 ファイルだけを外すことを
+  固定する
+- **案内文の byte 予算**: 上記の書き方を `EXCLUDE_SCOPE_WARNING` にも書いた初版は
+  案内が 1,427 byte (0.23.0 は 1,061) になり、Edit の deny reason で 32KB 超の
+  `.env` の minimal info が押し出されて鍵一覧が消えた (既存テスト 2 件が検出)。
+  書き方の説明は docs とレシピ生成に任せて警告文を 1,205〜1,247 byte に戻し、
+  案内が伸びると minimal info が消える境界を実測して床テストで固定した
+
 ## 0.23.0
 
 2026-08-28 の多角レビュー (main + サブエージェント 8 体) で検出した不具合の修正。

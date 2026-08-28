@@ -81,6 +81,7 @@ from _shared.patterns import (
     EXCLUDE_SCOPE_WARNING,
     LOCAL_PATTERNS_DISPLAY_PATH,
     escape_glob,
+    path_rule_for,
     PROJECT_SECTION_HEADER_HINT,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
 )
@@ -216,17 +217,17 @@ def _exclude_hint(
     if relpath:
         # path 形は実ファイルの root 相対 path (glob ではない) なので常に
         # literal 化する。``/`` は ``escape_glob`` の対象外なのでそのまま残る。
-        path_entry = f"`!{_sanitize_for_inline(escape_glob(relpath))}`"
+        # root 直下のファイル (``.env``) は ``path_rule_for`` が先頭 ``/`` を
+        # 付けて path 形を保つ (``!.env`` だと basename 形に化ける、Codex R1 P1)。
+        path_entry = (
+            f"`!{_sanitize_for_inline(escape_glob(path_rule_for(relpath)))}`"
+        )
         target = f"{path_entry} (この 1 ファイルだけ)"
         alt = f"同名ファイルをすべて外したい場合だけ {entry} にします。"
     else:
         target = entry
-        alt = (
-            "(root 相対 path を確定できないため、1 ファイルだけを外す path 形"
-            " `!<root 相対パス>` は案内できません。)"
-            if basename
-            else ""
-        )
+        # 短く保つ (byte 予算。理由の詳細は docs/PATTERNS.md に任せる)
+        alt = "(root を解決できないため path 形は案内できません。)" if basename else ""
     return (
         "恒久的に許可したい場合は、ユーザーの承認を得た上で "
         f"`{_LOCAL_PATTERNS_PATH}` の `{PROJECT_SECTION_HEADER_HINT}` "
