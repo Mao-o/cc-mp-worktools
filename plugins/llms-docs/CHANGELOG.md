@@ -2,6 +2,171 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.7] - 2026-08-28
+
+### リダイレクト経由の304誤信頼を構造的に根絶: conditionalヘッダーをredirect時に剥がす (0.21.6 の追いコミット)
+
+Codex R6指摘1件 (P2)。0.21.6の修正 (`resp.url != url` チェック) は200成功パスのみをカバーしており、
+既存のsidecarが**リダイレクトが始まる前の正当なvalidator**を持っているケースでは、そのvalidatorが
+リダイレクト先に転送されて偶然304を引き当てる可能性を防げていなかった。304のレスポンスは
+`e.url` (最終到達URL) を持つことを実機確認したが、advisor相談のうえ「304分岐にもチェックを
+追加する」対症療法ではなく、**根本原因 (conditionalヘッダーがredirectで転送されること自体)** を
+断つ方向に修正した。
+
+- `urllib.request.HTTPRedirectHandler` を継承した `_NoValidatorRedirectHandler` を追加し、
+  `redirect_request()` でリダイレクト後のリクエストから `If-None-Match`/`If-Modified-Since` を
+  剥がすようにした。`urllib.request.install_opener()` でプロセス全体のデフォルトopenerとして
+  組み込むため、`fetch_url`側は従来どおり `urllib.request.urlopen()` を呼ぶだけで自動的に適用される
+  (各`parse-*.py`は単機能プロセスとして実行されるため、プロセス全体への副作用も安全)
+- これによりconditionalヘッダーがリダイレクト先に到達すること自体が無くなり、304分岐での
+  誤信頼は構造的に発生し得なくなった。0.21.6で追加した `resp.url != url` チェック (200パス側) は
+  多重防御として維持: 仮に将来このredirect handlerが外れても、リダイレクト越しに得たvalidatorを
+  保存しない側で二重に守る
+
+回帰テスト2件追加。実際の(モックしていない) `HTTPRedirectHandler.redirect_request()` 呼び出しで
+ヘッダーが剥がれることと、`_NoValidatorRedirectHandler` がプロセスのデフォルトopenerに実際に
+組み込まれていることを検証 (`test_fetch_and_cache.py`、192 tests, all green)。
+
+## [0.21.6] - 2026-08-28
+
+### リダイレクトを跨いだ場合にetag/last_modifiedを保存しないよう修正 (0.21.5 の追いコミット)
+
+Codex R5指摘1件 (P2)。これまでの4ラウンドとは異なるカテゴリの指摘 (sidecarの検証ではなく
+リダイレクト時のHTTPセマンティクスの正しさ)。
+
+- **設定URLがリダイレクトする場合、`urllib.request.HTTPRedirectHandler` がconditionalヘッダー
+  (`If-None-Match`/`If-Modified-Since`) を含む元リクエストのヘッダーをリダイレクト先にそのまま
+  転送することを実機確認**: リダイレクト先が後で変わった場合、旧リダイレクト先向けのvalidatorが
+  新しいリダイレクト先に送られてしまい、新リダイレクト先の`Last-Modified`がたまたま条件を満たすと
+  304が返り、実際には別サーバーの別コンテンツであるにもかかわらず旧bodyを`--max-age`ごとに
+  保持し続けてしまう。`resp.url` (urllibがリダイレクト追跡後の最終URLをセットする) と要求元の
+  `url` を比較し、一致しない (=リダイレクトが発生した) fetchでは`etag`/`last_modified`を
+  sidecarに保存しないよう修正。`content_hash`はサーバーに送信されないため引き続き保存する
+
+回帰テスト1件追加。`If-None-Match`が実際に別ホストへのリダイレクトを跨いで転送されることを
+`httpbin.org`への実リクエストで確認したうえで実装 (`test_fetch_and_cache.py`、190 tests,
+all green)。
+
+## [0.21.5] - 2026-08-28
+
+### sidecarのstring validatorがHTTPヘッダーとして不正な場合の生tracebackを構造的に修正 (0.21.4 の追いコミット)
+
+Codex R4指摘1件 (P2)。0.21.2〜0.21.4は「sidecarの値が期待した型/構造か」を`_load_fetch_meta`側で
+個別にguardする対応を3ラウンド続けたが、今回の指摘は「型はstringだが中身がHTTPヘッダーとして不正
+(改行を含む＝ヘッダーインジェクション、Latin-1範囲外の文字を含む)」というケースで、`_load_fetch_meta`
+の型チェックでは列挙しきれない。advisorとの相談を経て、個別guardを積み増す方針ではなく、実際に
+送信を試みる`urllib.request.urlopen`呼び出し自体を`ValueError`込みで捕捉する構造的な修正に切り替えた
+(`UnicodeEncodeError`は`ValueError`のサブクラスであることを実機確認済み)。
+
+- **既存の例外捕捉タプルに `ValueError` を追加**。try節内で唯一 `ValueError` を送出しうる箇所
+  (`int(content_length)` の変換) は既に内側の try/except で個別に捕捉・無害化されており、
+  この追加が意図しない挙動を隠す経路にならないことを確認済み
+- `_load_fetch_meta` の型guard (0.21.2〜0.21.4) は**早期リジェクトの最適化**として維持: 不正な
+  sidecarをネットワーク往復の前に弾く。今回追加した `ValueError` 捕捉は**その guard が列挙し
+  きれない残り全部に対するbackstop** — 将来また新しいHTTPヘッダー制約が見つかっても、個別対応
+  なしでこの1箇所が拾う
+
+回帰テスト2件追加 (`test_fetch_and_cache.py`)。実際の (接続はしない) `http.client.putheader()`
+を経由させて本物の `ValueError`/`UnicodeEncodeError` を発生させる方式で検証しており、将来の
+Python側の仕様変更にも追従する。189 tests, all green。
+
+## [0.21.4] - 2026-08-28
+
+### `_load_fetch_meta` の型チェックに `content_hash` を追加し3フィールドを一貫させる (0.21.3 の追いコミット)
+
+R3修正後の自主監査 (advisor起点、Codexの新規指摘ではない)。`etag`/`last_modified` のみ
+非string値を弾いていたが `content_hash` は対象外だった。非string content_hashは
+現在のファイルhash (常にstring) と一致し得ないため実害はないが、「このsidecarの値は
+全てstring」という契約を`_load_fetch_meta`が一貫して保証するよう `content_hash` も
+チェック対象に追加。あわせて以下2点を実機確認し、追加修正が不要と判断:
+
+- `gzip.BadGzipFile` (非gzipボディにgzipヘッダーが付いていた場合の例外) は `OSError`
+  を継承しており、既存の例外捕捉タプルで既にカバー済み
+- `email.message.Message.get()` は重複ヘッダーがあっても常に先頭の値を単一のstringで
+  返す (`get_all()` と異なりリストにはならない) ため、`resp.headers.get("ETag")` /
+  `get("Last-Modified")` が非string値を返すケースは無い
+
+回帰テスト1件追加 (`test_fetch_and_cache.py`、187 tests, all green)。
+
+## [0.21.3] - 2026-08-28
+
+### sidecarのetag/last_modifiedが非string値だとTypeErrorで生tracebackになるバグを修正 (0.21.2 の追いコミット)
+
+Codex R3指摘1件 (P2)。
+
+- **手編集・破損・将来のフォーマット変更などで sidecar の `etag`/`last_modified` が truthyな非string値
+  (list/dict等) になっていた場合、content_hashが一致してさえいれば、その値がそのままリクエスト
+  ヘッダーに渡っていた**: `int` は `http.client.putheader` が黙って `str()` 変換するため実害はないが、
+  list/dict等は `putheader` 内部の `bytes.join()` が `TypeError` を投げ、documented なstale-cache
+  フォールバックを迂回して生tracebackになることを実機確認。`_load_fetch_meta` に型チェックを追加し、
+  `etag`/`last_modified` が存在するのにstringでない場合はsidecar全体を `{}` (無効) 扱いにするよう修正
+
+回帰テスト1件追加 (`test_fetch_and_cache.py`、186 tests, all green)。
+
+## [0.21.2] - 2026-08-28
+
+### 304応答後のmtime更新失敗が生tracebackになるバグを修正 (0.21.1 の追いコミット)
+
+Codex R2指摘1件 (P2)。
+
+- **304ハンドラ内の `os.utime()` が投げる `OSError` が未捕捉だった**: 読み取り専用ファイルシステム・
+  キャッシュファイルの並行削除・所有者変更などで `os.utime()` が失敗すると、この呼び出しは
+  `except HTTPError` ブロックの内側で実行されるため、兄弟の `except (..., OSError, ...)` では
+  捕捉できない (兄弟except節はtryブロックのみを対象とし、他のexcept節内の例外は対象外)。
+  条件付きGET自体は成功しているにもかかわらず、生tracebackで終了していた。
+  `os.utime()` を個別のtry/exceptで囲み、失敗時は他の失敗経路と同じ `_handle_fetch_failure`
+  に流してstale cacheへフォールバックするよう修正
+
+回帰テスト1件追加 (`test_fetch_and_cache.py`、185 tests, all green)。
+
+## [0.21.1] - 2026-08-28
+
+### 破損gzipストリームの未捕捉例外 + body/sidecarの非atomicなペア書き込みによる整合性崩れを修正 (0.21.0 の追いコミット)
+
+Codex R1指摘2件 (P2)。
+
+- **`gzip.decompress` が投げる `EOFError`/`zlib.error` が既存の例外捕捉範囲外だった**:
+  破損・切り詰められたgzipストリームは `Content-Length` 不一致では検知できないケースがあり、
+  これらの例外は既存の `(URLError, OSError, HTTPException)` に含まれず生tracebackとして
+  露出していた。例外捕捉タプルに `EOFError, zlib.error` を追加
+- **body書き込みとsidecar書き込みが別々のatomic writeで、ペアとしては非atomicだった**:
+  同一の期限切れキャッシュを2プロセスが並行して再取得し、かつ2つのレスポンスの間で上流の内容が
+  変わっていた場合、それぞれ独立にatomicな書き込みが競合して「片方のbody + もう片方のETag」の
+  ような組み合わせで保存され得る。次回の条件付きGETがこの不整合なETagで304を受け取ると、実際の
+  bodyとは対応しない304を「有効」と誤認し、誤ったbodyをさらに1 `--max-age` 分保持し続けてしまう。
+  `<cache>.meta.json` に書き込み時点のbodyの `content_hash` (sha256) を追加保存し、条件付き
+  ヘッダーを送る前にキャッシュファイルの現在のbytesのhashと突き合わせるよう修正。不一致なら
+  条件ヘッダーを送らず無条件GETにフォールバックし、body・sidecarを揃って再書き込みして不整合を解消する。
+  この突き合わせは `--max-age` 超過ごとにキャッシュファイル全体を読んでhash化するコストを追加するが、
+  実測では24MB (platformページ相当の上限規模) のsha256計算が約7ms (`hashlib.sha256`、Python 3標準)
+  であり、ネットワークI/Oが支配的な処理全体において無視できる
+
+回帰テスト5件追加・既存3件をcontent_hash込みのfixtureに更新、既存1件にsidecar自己修復の検証を追加
+(`test_fetch_and_cache.py`、184 tests, all green)。
+
+## [0.21.0] - 2026-08-28
+
+### HTTP取得にgzip圧縮転送 + 条件付きGET (ETag/Last-Modified) を追加し、無条件の全量再取得を削減
+
+`fetch_url` は `Accept-Encoding` を送らず (非圧縮転送)、ETag/Last-Modifiedも保存しないため、
+`--max-age` 超過時は内容が同じでも常に全量GETしていた。platformページ (text, ~23.8MB) はgzipで
+1/4〜1/5に縮小できる見込みで、再取得の遅さはfork subagentの応答遅延=離脱要因になっていた。
+
+- `Accept-Encoding: gzip` を常時送信。`Content-Encoding: gzip` の応答は `gzip.decompress` (stdlib)
+  で展開してからキャッシュに書き込む (`urllib`は自動展開しないため)。`Content-Length` 検証は
+  展開前の圧縮バイト数に対して行う (このヘッダーは転送サイズ=圧縮後サイズを表すため)
+- `<cache>.meta.json` サイドカーに `ETag`/`Last-Modified` を保存。`--max-age` 超過時の再取得は
+  `If-None-Match`/`If-Modified-Since` 付きの条件付きGETを送り、`304 Not Modified` (urllibは
+  `HTTPError(code=304)` として送出、通常のレスポンスとしては返らない) ならボディ再取得・
+  キャッシュ書き込みをせず `os.utime` でmtimeだけ更新 (`--max-age` の時計をリセット)。
+  サイドカーが無い既存キャッシュ (この機能追加以前に書かれたもの) は条件ヘッダー無しの
+  無条件GETにフォールバックする。304以外のHTTPエラー (404/500等) は既存のstale-serve/exit/raise
+  と同じ扱い
+- サイドカーは応答が両ヘッダーとも送らなかった場合も (空で) 上書きする。前回分のETag等が
+  古いまま残り、サーバーが対応をやめた後も送り続けてしまう事故を防ぐため
+
+回帰テスト12件追加 (`test_fetch_and_cache.py`、181 tests, all green)。
+
 ## [0.20.1] - 2026-08-28
 
 ### `search-content` の全ページスキャンが全fetch完了を待ってから結果を出す barrier になっていた問題を修正 (0.20.0 の追いコミット)
