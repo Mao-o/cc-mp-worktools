@@ -15,7 +15,12 @@ import time
 import unittest
 from fnmatch import fnmatchcase
 
-from _shared.matcher import _compiled, _fnmatch_cached, is_sensitive
+from _shared.matcher import (
+    _PATTERN_CACHE,
+    _compiled,
+    _fnmatch_cached,
+    is_sensitive,
+)
 
 # fnmatchcase との等価性を確認する (name, pattern) の組。
 # glob メタ文字 (* ? [] [!]) と、パターン中のドット・記号を網羅する。
@@ -57,20 +62,25 @@ class TestFnmatchEquivalence(unittest.TestCase):
 
 
 class TestPatternCacheIsEffective(unittest.TestCase):
-    def test_repeated_pattern_hits_cache(self):
-        _compiled.cache_clear()
+    def test_repeated_pattern_compiles_once(self):
+        _PATTERN_CACHE.clear()
+        first = _compiled("*.env")
         for _ in range(10):
             _fnmatch_cached("some/name", "*.env")
-        info = _compiled.cache_info()
-        self.assertEqual(info.misses, 1, "同一パターンが複数回コンパイルされた")
-        self.assertEqual(info.hits, 9)
+        self.assertIs(_compiled("*.env"), first, "同一パターンが再コンパイルされた")
+        self.assertEqual(len(_PATTERN_CACHE), 1)
 
-    def test_cache_size_is_independent_of_fnmatch(self):
-        """自前キャッシュの容量が rules 件数の実用域を包含していること。
+    def test_cache_has_no_eviction_limit(self):
+        """上限付き LRU だと「rules 件数 > maxsize」で同じ崖が再現するため、
+        エントリを捨てない実装であることを pin する。
 
-        fnmatch 側の maxsize (3.9 では 256) に依存しないことの pin。
+        初版は maxsize=8192 で、3.11+ の fnmatch (32768) より小さいために
+        8,192 件超の rules でむしろ退行した (8,202 rules / 10 paths = 4.9 秒)。
         """
-        self.assertGreaterEqual(_compiled.cache_info().maxsize, 4096)
+        _PATTERN_CACHE.clear()
+        for i in range(9000):
+            _compiled(f"pattern-{i}-*.cfg")
+        self.assertEqual(len(_PATTERN_CACHE), 9000, "エントリが evict された")
 
 
 class TestNoCliffAcrossRuleCounts(unittest.TestCase):
@@ -86,7 +96,7 @@ class TestNoCliffAcrossRuleCounts(unittest.TestCase):
         rules += [(f"custom-{i}-*.cfg", False) for i in range(850)]
         operands = [f"/repo/src/file{i}.txt" for i in range(50)]
 
-        _compiled.cache_clear()
+        _PATTERN_CACHE.clear()
         start = time.perf_counter()
         for op in operands:
             is_sensitive(op, rules)

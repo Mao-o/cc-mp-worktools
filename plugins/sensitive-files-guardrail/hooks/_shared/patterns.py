@@ -100,6 +100,8 @@ PROJECT_SECTION_PLACEHOLDER_NOTE = (
 EXCLUDE_SCOPE_WARNING = (
     "この行は basename 単位で効くため、{scope}が**すべて**対象になります"
     " (承認した 1 ファイルだけを外すことはできません)。"
+    "**同じ名前のディレクトリがあれば、その配下のファイルも保護から外れます**"
+    " (例: `!certs` はディレクトリ `certs/` の中身も対象)。"
     "また Stop の報告が止まるだけでなく、Read / Bash / Edit / Write の"
     "**保護そのものが外れます**。"
 )

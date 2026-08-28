@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **913** / check 79 → **80** (計 993)
+- テスト件数: redact 862 → **914** / check 79 → **80** (計 994)
 
 ### 1. 不具合の内容
 
@@ -93,7 +93,9 @@ Stop / Read / Bash が案内する恒久除外レシピは **basename 単位**�
 なることも伝わらなかった。
 
 `_shared.patterns.EXCLUDE_SCOPE_WARNING` を新設し、両 hook の案内文に挟む形で
-この 2 点を明示する。**範囲は狭まらない** (黙った過剰付与を informed consent に
+この 2 点を明示する。あわせて、`is_sensitive` が親ディレクトリ名も評価するため
+**同名ディレクトリの配下も保護から外れる**ことも明記した
+(`!certs` はディレクトリ `certs/` の中身にも及ぶ)。**範囲は狭まらない** (黙った過剰付与を informed consent に
 変えるだけ)。範囲を狭める作業 (matcher に相対パス階層を追加) は判定境界の変更に
 あたるため別途対応する。
 
@@ -124,6 +126,13 @@ plugin から制御できない。rules が maxsize を超えると **operand �
 恒久除外レシピが誘導する使い方そのもの。自前の regex キャッシュを持たせて
 Python バージョンへの依存を断った。Stop hook の 15 秒超過要因も同一原因で、
 1 箇所の修正で両経路が解消する。
+
+キャッシュは **上限を設けない dict** にしている。上限付き LRU では
+「rules 件数 > maxsize」で同じ崖が再現するため (初版は maxsize=8192 にしたが、
+3.11+ の `fnmatch` (32768) より小さいので **8,192 件超でむしろ退行**した —
+8,002 rules が 139.7ms に対し 8,202 rules で 4,884.3ms)。hook プロセスは
+1 ツール呼び出しで終わる短命プロセスで、rules は patterns ファイルで有界なので
+上限なしで安全。修正後は 12,002 rules でも 222.5ms で線形。
 
 **(b) `shlex` の超線形コスト** — `handlers/bash_handler.py` の `shlex.split` は
 segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一トークンの総 479ms

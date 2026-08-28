@@ -11,6 +11,7 @@ class TestStopReasonDisclosure(unittest.TestCase):
         text = EXCLUDE_SCOPE_WARNING.format(scope="下記の各行と同じ名前のファイル")
         self.assertIn("basename 単位", text)
         self.assertIn("保護そのものが外れます", text)
+        self.assertIn("同じ名前のディレクトリ", text)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,13 @@ class TestExcludeScopeWarningText(unittest.TestCase):
         self.assertIn("basename 単位", text)
         self.assertIn("すべて", text)
 
+    def test_states_directory_descendants_are_affected(self):
+        """is_sensitive は親ディレクトリ名も評価するため、同名ディレクトリの
+        配下も保護から外れる。開示文がその事実に言及していること。"""
+        text = EXCLUDE_SCOPE_WARNING.format(scope="X")
+        self.assertIn("同じ名前のディレクトリ", text)
+        self.assertIn("配下", text)
+
     def test_states_protection_not_just_reporting(self):
         text = EXCLUDE_SCOPE_WARNING.format(scope="X")
         # 「報告が止まる」だけでなく「保護が外れる」ことを述べていること

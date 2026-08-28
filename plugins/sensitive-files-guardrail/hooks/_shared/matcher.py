@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import re
 from fnmatch import translate
-from functools import lru_cache
 from pathlib import PurePath
 
 # パターン -> compiled regex のキャッシュ (0.21.0)。
@@ -37,19 +36,33 @@ from pathlib import PurePath
 # ``[project:]`` セクションに 250 件超の承認除外を蓄積する**こと — 本 plugin の
 # 恒久除外レシピが誘導する使い方そのもの。
 #
-# 自前のキャッシュを持つことで Python バージョンへの依存を断つ。maxsize は
-# 「rules 件数 x (case-sensitive / insensitive の 2 通り)」を十分に包含する値。
-_PATTERN_CACHE_SIZE = 8192
+# 自前のキャッシュを持つことで Python バージョンへの依存を断つ。
+#
+# **上限を設けない** — 上限付き LRU では「rules 件数 > maxsize」で同じ崖が
+# 再現するため。初版は maxsize=8192 にしていたが、3.11+ の fnmatch (32768) より
+# 小さいので **8,192 件を超える rules ではむしろ退行**した
+# (実測: 8,002 rules / 10 paths = 139.7ms に対し 8,202 rules = 4,884.3ms)。
+# 「rule 数を包含する十分大きな値」を選ぶ方針自体が、上流の rule 数に依存する
+# 調整パラメータを増やすだけで筋が悪い。
+#
+# 上限なしで安全な理由: hook プロセスは **1 ツール呼び出しで終了する短命プロセス**
+# で、rules は起動時に patterns ファイルから 1 度読むだけ。したがって dict の
+# エントリ数は「patterns ファイルの行数 x case 変種」で有界であり、
+# 長時間走るプロセスのような無制限成長は起きない。
+_PATTERN_CACHE: dict[str, "re.Pattern[str]"] = {}
 
 
-@lru_cache(maxsize=_PATTERN_CACHE_SIZE)
 def _compiled(pattern: str) -> "re.Pattern[str]":
-    """``fnmatchcase`` と同じ意味論の compiled regex を返す。
+    """``fnmatchcase`` と同じ意味論の compiled regex を返す (キャッシュ付き)。
 
     ``fnmatch.translate`` は ``\\Z`` 終端付きの完全一致パターンを返すため、
     ``.match()`` で ``fnmatchcase`` と等価になる。
     """
-    return re.compile(translate(pattern))
+    hit = _PATTERN_CACHE.get(pattern)
+    if hit is None:
+        hit = re.compile(translate(pattern))
+        _PATTERN_CACHE[pattern] = hit
+    return hit
 
 
 def _fnmatch_cached(name: str, pattern: str) -> bool:
