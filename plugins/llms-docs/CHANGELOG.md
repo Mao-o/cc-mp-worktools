@@ -2,6 +2,24 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.4] - 2026-08-28
+
+### `_load_fetch_meta` の型チェックに `content_hash` を追加し3フィールドを一貫させる (0.21.3 の追いコミット)
+
+R3修正後の自主監査 (advisor起点、Codexの新規指摘ではない)。`etag`/`last_modified` のみ
+非string値を弾いていたが `content_hash` は対象外だった。非string content_hashは
+現在のファイルhash (常にstring) と一致し得ないため実害はないが、「このsidecarの値は
+全てstring」という契約を`_load_fetch_meta`が一貫して保証するよう `content_hash` も
+チェック対象に追加。あわせて以下2点を実機確認し、追加修正が不要と判断:
+
+- `gzip.BadGzipFile` (非gzipボディにgzipヘッダーが付いていた場合の例外) は `OSError`
+  を継承しており、既存の例外捕捉タプルで既にカバー済み
+- `email.message.Message.get()` は重複ヘッダーがあっても常に先頭の値を単一のstringで
+  返す (`get_all()` と異なりリストにはならない) ため、`resp.headers.get("ETag")` /
+  `get("Last-Modified")` が非string値を返すケースは無い
+
+回帰テスト1件追加 (`test_fetch_and_cache.py`、187 tests, all green)。
+
 ## [0.21.3] - 2026-08-28
 
 ### sidecarのetag/last_modifiedが非string値だとTypeErrorで生tracebackになるバグを修正 (0.21.2 の追いコミット)

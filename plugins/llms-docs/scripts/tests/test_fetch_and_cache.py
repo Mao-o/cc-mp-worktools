@@ -520,6 +520,39 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         self.assertEqual(result, cache_path)
         self.assertIsNone(captured["if_none_match"])
 
+    def test_non_string_content_hash_in_sidecar_is_treated_like_a_missing_one(self):
+        # A non-string content_hash can't crash the way a non-string etag/
+        # last_modified can (it just never equals the current file's
+        # string hash, so the sidecar already reads as "mismatched" and
+        # falls through to no conditional headers) — but _load_fetch_meta
+        # rejects it anyway, for the same reason it rejects a non-dict
+        # top-level shape: every value it hands back should be a string a
+        # caller can trust without a second type check.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "content_hash": ["not-a-string"],
+                "etag": '"abc123"',
+            }, f)
+
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            return _FakeResponse(b"fresh content")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        self.assertIsNone(captured["if_none_match"])
+
     def test_stale_past_max_age_sends_conditional_headers_from_sidecar(self):
         cache_path = self._cache_path()
         with open(cache_path, "w") as f:

@@ -444,14 +444,18 @@ def _load_fetch_meta(cache_path: str) -> dict:
 
     Returns ``{}`` when there is no sidecar, it's unreadable/corrupt, it
     parses to valid JSON that isn't a ``dict`` (e.g. a list or bare string),
-    or its ``etag``/``last_modified`` values aren't strings — nothing
-    guarantees the file wasn't hand-edited or written by some future
-    version with a different shape, and a non-string validator would
-    otherwise reach ``fetch_url``'s request headers, where ``urllib``
-    raises an uncaught ``TypeError`` instead of falling back cleanly. In
-    every rejected case the caller just ends up sending no conditional
-    headers, falling back to the plain unconditional GET this always did
-    before conditional support existed.
+    or its ``content_hash``/``etag``/``last_modified`` values aren't strings
+    — nothing guarantees the file wasn't hand-edited or written by some
+    future version with a different shape. A non-string ``etag``/
+    ``last_modified`` would otherwise reach ``fetch_url``'s request headers,
+    where ``urllib`` raises an uncaught ``TypeError`` instead of falling
+    back cleanly; a non-string ``content_hash`` can't crash the same way
+    (it just never equals the current file's hash) but is rejected too so
+    every value this function hands back is guaranteed a string — a caller
+    shouldn't have to separately re-check that. In every rejected case the
+    caller just ends up sending no conditional headers, falling back to the
+    plain unconditional GET this always did before conditional support
+    existed.
     """
     try:
         with open(_meta_path(cache_path), "r", encoding="utf-8") as f:
@@ -460,7 +464,7 @@ def _load_fetch_meta(cache_path: str) -> dict:
         return {}
     if not isinstance(meta, dict):
         return {}
-    for key in ("etag", "last_modified"):
+    for key in ("content_hash", "etag", "last_modified"):
         if key in meta and not isinstance(meta[key], str):
             return {}
     return meta
