@@ -40,6 +40,12 @@ def classify_growth(tool_name: str, tool_input: dict, text: str | None = None) -
     - 末尾の ``"foo"`` → ``"foo\\n"``: 改行数は 1 増えるが行数は変わらない
 
     末尾以外の置換では改行数の差がそのまま行数の差になるため補正は不要。
+
+    補正は「置換が末尾で起きたと**確定できる**とき」だけ適用する。``new_string``
+    が編集後の全文にちょうど 1 箇所しか現れず、それが末尾にある場合に限る。
+    ``text.endswith(new_string)`` だけでは足りない — 別の場所を置換した結果
+    たまたま同じ文字列が末尾にもある場合に、誤った補正がかかるため。
+    確定できないときは改行数の差による近似に戻す (0.2.0 と同じ精度)。
     """
     if tool_name != "Edit":
         return UNKNOWN
@@ -51,8 +57,13 @@ def classify_growth(tool_name: str, tool_input: dict, text: str | None = None) -
 
     delta = new.count("\n") - old.count("\n")
 
-    if isinstance(text, str) and new and text.endswith(new):
-        before = text[: len(text) - len(new)] + old
-        delta += _unterminated_tail(text) - _unterminated_tail(before)
+    if isinstance(text, str) and new:
+        tail_start = len(text) - len(new)
+        # find == rfind == tail_start で「出現がちょうど 1 箇所、かつ末尾」を確定
+        # する。endswith だけだと、前方を置換した結果たまたま同じ文字列が末尾に
+        # もある場合に誤って補正がかかる。
+        if tail_start >= 0 and text.find(new) == tail_start == text.rfind(new):
+            before = text[:tail_start] + old
+            delta += _unterminated_tail(text) - _unterminated_tail(before)
 
     return GREW if delta > 0 else NOT_GREW

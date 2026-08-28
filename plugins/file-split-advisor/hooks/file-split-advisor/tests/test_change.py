@@ -80,6 +80,24 @@ class TestEndOfFileCorrection(unittest.TestCase):
     def test_empty_new_string_deletion_is_not_grew(self):
         self.assertEqual(self._classify("line0\nfoo\n", "bar\n", ""), change.NOT_GREW)
 
+    def test_correction_is_skipped_when_new_string_also_occurs_elsewhere(self):
+        """末尾に同じ文字列があっても、置換箇所が末尾とは限らない。
+
+        ``"X\\nsomething\\nfoo\\n"`` の先頭 ``X`` を ``"foo\\n"`` に置換すると
+        3 行 → 4 行に増えるが、結果の末尾にも元からあった ``"foo\\n"`` が並ぶ。
+        ``endswith`` だけで補正すると増加分が打ち消されて NOT_GREW になる。
+        """
+        text = "foo\n\nsomething\nfoo\n"
+        self.assertTrue(text.endswith("foo\n"))  # 誤補正の前提条件は成立している
+        before = "X\nsomething\nfoo\n"
+        self.assertEqual(len(text.splitlines()) - len(before.splitlines()), 1)
+        self.assertEqual(self._classify(text, "X", "foo\n"), change.GREW)
+
+    def test_correction_is_skipped_for_overlapping_tail_occurrences(self):
+        # "aaa" に対する "aa" は非重複カウントでは 1 件だが出現位置は 2 箇所。
+        # find/rfind が一致しないので補正しない。
+        self.assertEqual(self._classify("aaa", "b", "aa"), change.NOT_GREW)
+
 
 class TestUnknownCases(unittest.TestCase):
     def test_write_is_unknown(self):
