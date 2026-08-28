@@ -724,10 +724,15 @@ class TestGlobDotenvDeny(BaseBash):
         r = handle(_make_envelope("cat .env*", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_star_envrc_deny(self):
-        # fnmatchcase(".envrc", "*.envrc") = True → deny
+    def test_star_envrc_is_uncertain_glob(self):
+        # 0.22.0: 実シェルの ``*.envrc`` は ``.envrc`` に展開されない (先頭ドットは
+        # literal ``.`` でしか一致しない)。``foo.envrc`` への展開は ``*.key`` と
+        # 同じ「既定 rules との交差」クラスで ask_or_allow (0.21.x までは
+        # fnmatch の意味論で deny)
         r = handle(_make_envelope("cat *.envrc", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("cat *.envrc", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
 
     def test_envrc_star_deny(self):
         r = handle(_make_envelope("cat .envrc*", self.tmp))
@@ -743,10 +748,61 @@ class TestGlobDotenvDeny(BaseBash):
         r = handle(_make_envelope("grep SECRET .e[n]v", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_char_class_deny(self):
-        # fnmatchcase(".env", "[.]env") = True → deny
+    def test_char_class_is_uncertain_glob(self):
+        # 0.22.0: bash / zsh の ``[.]env`` は ``.env`` に展開されない (bracket 式は
+        # 先頭ドットに一致しない)。0.21.x までは fnmatch の意味論で deny
         r = handle(_make_envelope("cat [.]env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("cat [.]env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_directory_glob_with_dotenv_basename_deny(self):
+        # 0.22.0: ``*/.env`` は ``sub/.env`` に展開される (bash 3.2 / zsh 実測)。
+        # 0.21.x は operand 全体を fnmatch していたため ask_or_allow (auto で
+        # 素通り) だった
+        for cmd in ("cat */.env", "cat **/.env", "head -n 3 */.env*"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+
+class TestBareGlobLeadingDot(BaseBash):
+    """0.22.0: 裸の ``*`` / ``?env`` / ``[.]env`` は実シェルで dotfile に展開されない
+    ので dotenv stem 一致 (deny 固定) ではなく、他の不確定 glob と同じ
+    ``ask_or_allow``。0.21.x までは ``fnmatchcase(".env", "*")`` = True のため
+    ``git add *`` / ``cp * dst/`` / ``tar czf out.tgz *`` が全 mode で deny
+    だった (deny は lenient mode でも緩和されないため作業が止まる)。
+    """
+
+    def test_bare_star_is_uncertain_glob(self):
+        for cmd in ("cat *", "git add *", "cp * /tmp/dest/",
+                    "tar czf out.tgz *", "cat ?env", "cat *env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_metadata_only_with_bare_star_allows(self):
+        # 対照: metadata-only は glob を見ずに allow (0.14.0 から不変)
+        for cmd in ("echo *", "wc -l *", "chmod 644 *", "ls -la *"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(output.is_allow(r), msg=cmd)
+
+    def test_explicit_leading_dot_still_denies(self):
+        for cmd in ("cat .env*", "cat .en?", "cat .e[n]v", "cat .envrc*", "cat .*"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
 
 
 class TestGlobUncertainAskOrAllow(BaseBash):

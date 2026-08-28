@@ -32,16 +32,59 @@ class TestDotenvGlobMatch(unittest.TestCase):
         # fnmatchcase(".env", ".e[n]v") = True
         self.assertTrue(_glob_operand_is_dotenv_match(".e[n]v"))
 
-    def test_dotenv_with_outer_char_class(self):
-        # fnmatchcase(".env", "[.]env") = True
-        self.assertTrue(_glob_operand_is_dotenv_match("[.]env"))
-
     def test_envrc_star(self):
         self.assertTrue(_glob_operand_is_dotenv_match(".envrc*"))
 
-    def test_star_envrc(self):
-        # fnmatchcase(".envrc", "*.envrc") = True
-        self.assertTrue(_glob_operand_is_dotenv_match("*.envrc"))
+    def test_directory_glob_with_literal_dotenv_basename(self):
+        # 0.22.0: shell の pathname expansion は path 要素ごと。``*/.env`` は
+        # ``sub/.env`` に展開される (bash 3.2 / zsh 実測) ので basename 部分
+        # ``.env`` で判定する。0.21.x は operand 全体を fnmatch していて
+        # ``fnmatchcase(".env", "*/.env")`` = False → ask_or_allow に落ちていた
+        self.assertTrue(_glob_operand_is_dotenv_match("*/.env"))
+        self.assertTrue(_glob_operand_is_dotenv_match("**/.env"))
+        self.assertTrue(_glob_operand_is_dotenv_match("*/.env*"))
+        self.assertTrue(_glob_operand_is_dotenv_match("sub*/.envrc"))
+
+
+class TestLeadingDotSemantics(unittest.TestCase):
+    """0.22.0: shell (POSIX / bash / zsh) の pathname expansion では、ファイル名先頭の
+    ``.`` は pattern 先頭の literal ``.`` でしか一致しない。``*`` / ``?`` /
+    bracket 式は先頭ドットに一致しない (bash 3.2 / zsh 5 実測: ``echo *`` /
+    ``echo ?env`` / ``echo [.]env`` / ``echo *.envrc`` は ``.env`` / ``.envrc``
+    に展開されない)。fnmatch はこの規則を持たないため 0.21.x までは
+    ``fnmatchcase(".env", "*")`` = True で裸の ``*`` が全 mode deny だった。
+    """
+
+    def test_bare_star_does_not_match_dotfiles(self):
+        # `git add *` / `cp * dst/` / `tar czf out.tgz *` / heredoc 内の `kb * 1024`
+        self.assertFalse(_glob_operand_is_dotenv_match("*"))
+
+    def test_question_and_star_prefix_do_not_match_leading_dot(self):
+        self.assertFalse(_glob_operand_is_dotenv_match("?env"))
+        self.assertFalse(_glob_operand_is_dotenv_match("*env"))
+        self.assertFalse(_glob_operand_is_dotenv_match("*.env"))
+
+    def test_bracket_does_not_match_leading_dot(self):
+        # POSIX は implementation-defined だが bash / zsh とも一致しない
+        self.assertFalse(_glob_operand_is_dotenv_match("[.]env"))
+        self.assertFalse(_glob_operand_is_dotenv_match("[.a]env"))
+
+    def test_star_envrc_matches_only_non_dot_names(self):
+        # ``*.envrc`` は ``foo.envrc`` にしか展開されない。``foo.envrc`` は既定
+        # rules (``*.envrc``) の対象だが、``*.key`` / ``cred*.json`` と同じ
+        # 「既定 rules との交差」クラスなので 0.8.0 の方針どおり ask_or_allow
+        self.assertFalse(_glob_operand_is_dotenv_match("*.envrc"))
+
+    def test_directory_glob_only(self):
+        # basename 部分に glob が無く dotenv でもない / 空
+        self.assertFalse(_glob_operand_is_dotenv_match("sub/*"))
+        self.assertFalse(_glob_operand_is_dotenv_match(".env/*"))
+        self.assertFalse(_glob_operand_is_dotenv_match("*/"))
+
+    def test_explicit_leading_dot_still_matches(self):
+        for op in (".env*", ".en?", ".e[n]v", ".*", ".[e]nv*"):
+            with self.subTest(op=op):
+                self.assertTrue(_glob_operand_is_dotenv_match(op))
 
 
 class TestNonDotenvGlobAskOrAllow(unittest.TestCase):
@@ -76,12 +119,12 @@ class TestEmptyAndEdgeCases(unittest.TestCase):
         self.assertFalse(_glob_operand_is_dotenv_match(""))
 
     def test_pure_star_returns_false(self):
-        # fnmatchcase(".env", "*") = True だが、"*" 単体は意図しない過検出を
-        # 避けるため False が望ましい — ただし fnmatchcase("*", ...) の挙動上
-        # ".env" は "*" に match するので True を返してしまう。これは「危険な
-        # glob を打つ時点で日常から逸脱している」として deny で許容する。
-        # (実機の `cat *` は通常意図した結果ではないため deny 倒れで問題なし)
-        self.assertTrue(_glob_operand_is_dotenv_match("*"))
+        # 0.21.x までは fnmatchcase(".env", "*") = True を「危険な glob を打つ
+        # 時点で日常から逸脱している」として deny で許容していたが、実シェルの
+        # ``*`` は dotfile に展開されず、`git add *` / `cp * dst/` /
+        # `tar czf out.tgz *` / heredoc 本文の `kb * 1024` が全 mode で止まって
+        # いた (``TestLeadingDotSemantics``)。
+        self.assertFalse(_glob_operand_is_dotenv_match("*"))
 
     def test_no_glob_chars_still_works(self):
         # glob 文字なし。fnmatchcase は exact match と同等になる

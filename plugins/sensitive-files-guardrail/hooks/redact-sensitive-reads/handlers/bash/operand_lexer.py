@@ -67,20 +67,35 @@ def _has_glob(token: str) -> bool:
 
 
 def _glob_operand_is_dotenv_match(operand: str) -> bool:
-    """operand glob が dotenv 系の literal stem (``.env`` / ``.envrc``) に一致するか。
+    """operand glob が **shell の pathname expansion で** dotenv 系の literal stem
+    (``.env`` / ``.envrc``) に展開されうるか。
 
-    判定: ``fnmatchcase(stem, op_glob)`` を ``stem ∈ _DOTENV_GLOB_STEMS`` で実施。
+    判定 (0.22.0 で shell の意味論に合わせた):
+
+    1. 展開は path 要素ごとなので、operand の **最後の path 要素** (basename 側の
+       glob) だけを stem と比較する。``*/.env`` は ``sub/.env`` に展開される
+    2. ファイル名先頭の ``.`` は pattern 先頭の **literal ``.``** でしか一致しない
+       (POSIX 2.13.3、bash 3.2 / zsh 5 実測、dotglob 未設定の既定挙動)。``*`` /
+       ``?`` / bracket 式 (``[.]``) は先頭ドットに一致しない。stem は全て ``.``
+       始まりなので、basename glob が ``.`` で始まらなければ一致しない
+    3. その上で ``fnmatchcase(stem, basename_glob)``
 
     例:
-    - ``.env*`` → ``fnmatchcase(".env", ".env*")`` = True → deny
+    - ``.env*`` → deny (``.env`` ``.envrc`` に展開)
+    - ``.en?`` / ``.e[n]v`` / ``.*`` → deny
+    - ``*/.env`` / ``**/.env`` / ``*/.env*`` → deny (0.21.x は operand 全体を
+      fnmatch して ask_or_allow だった)
+    - ``*`` / ``?env`` / ``*env`` / ``[.]env`` → 一致しない → ask_or_allow
+      (0.21.x は ``fnmatchcase(".env", "*")`` = True で裸の ``*`` が全 mode deny
+      になり、``git add *`` / ``cp * dst/`` / heredoc 本文の ``kb * 1024`` が
+      止まっていた)
+    - ``*.envrc`` → ``.envrc`` には展開されない → ask_or_allow (``foo.envrc``
+      への展開は ``*.key`` / ``cred*.json`` と同じ「既定 rules との交差」クラス。
+      0.21.x は fnmatch の意味論で deny)
     - ``.env.*`` → ``fnmatchcase(".env", ".env.*")`` = False (".env." 以降が必要)
-      → ask_or_allow に格下げ
-    - ``*.envrc`` → ``fnmatchcase(".envrc", "*.envrc")`` = True → deny
-    - ``.envrc*`` → ``fnmatchcase(".envrc", ".envrc*")`` = True → deny
-    - ``.e[n]v`` / ``.en?`` / ``[.]env`` → ``fnmatchcase(".env", op)`` = True → deny
-    - ``id_rsa*`` / ``*.key`` / ``cred*.json`` / ``*.log`` → どちらの stem にも
-      一致しない → ask_or_allow に格下げ
-    - ``.env.example*`` → ``.env`` にも ``.envrc`` にも一致しない → ask_or_allow
+      → ask_or_allow
+    - ``id_rsa*`` / ``*.key`` / ``cred*.json`` / ``*.log`` / ``.env.example*`` →
+      どちらの stem にも一致しない → ask_or_allow
 
     0.3.2〜0.7.x で行っていた既定 rules への候補列挙
     (``_glob_candidates`` / ``_glob_operand_is_sensitive``) は思想 1 に対して
@@ -95,8 +110,13 @@ def _glob_operand_is_dotenv_match(operand: str) -> bool:
         return False
     cs = os.environ.get("SFG_CASE_SENSITIVE") == "1"
     op = operand if cs else operand.lower()
+    stem_glob = op.rsplit("/", 1)[-1]
+    if not stem_glob:
+        return False
     for stem in _DOTENV_GLOB_STEMS:
-        if fnmatchcase(stem, op):
+        if stem.startswith(".") and not stem_glob.startswith("."):
+            continue  # 先頭ドットは literal ``.`` でしか一致しない
+        if fnmatchcase(stem, stem_glob):
             return True
     return False
 
