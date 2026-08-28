@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **910** / check 79 → **80** (計 990)
+- テスト件数: redact 862 → **913** / check 79 → **80** (計 993)
 
 ### 1. 不具合の内容
 
@@ -168,6 +168,12 @@ segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一�
 「50 block」と報告され、END との差から**誤った BEGIN/END 不一致 note** まで出ていた。
 `_MAX_BLOCKS` は列挙する label の preview 上限であって block 数の上限ではないので、
 件数は全件数え、label だけを打ち切る形に直した (streaming 版と同じ扱い)。
+
+**(e) preview 打ち切りの note は label を実際に省いたときだけ出す** —
+ちょうど `_MAX_BLOCKS` 件のとき、全 label を列挙できているのに
+「最初の 50 件のみ」と表示していた (境界の off-by-one)。inline / streaming の
+両経路で `> _MAX_BLOCKS` に統一した。49 / 50 / 51 の 3 点と、両経路の判定一致を
+テストで固定している。
 
 **(d) 綴りベースのヒューリスティックを撤去し parser context に一本化** —
 `looks_base64_fragment` は「24 文字以上 / `_` を含まない / 大小混在 / 数字あり」で

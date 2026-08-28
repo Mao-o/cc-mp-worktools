@@ -73,13 +73,11 @@ def redact_pem(text: str) -> dict:
     # あって block 数の上限ではない (上限で break すると 60 block の bundle が
     # 「50 block」と報告され、END との差から誤った不一致 note まで出る)。
     labels: list[str] = []
-    named = 0
     for m in _BEGIN_RE.finditer(text):
-        if named < _MAX_BLOCKS:
+        if len(labels) < _MAX_BLOCKS:
             labels.append(sanitize_key(m.group(1).strip() or "(unlabeled)"))
-            named += 1
         else:
-            labels.append("")
+            labels.append("")  # 上限超過分は件数だけ数える
 
     ordered_unique: list[str] = []
     seen: set[str] = set()
@@ -95,7 +93,9 @@ def redact_pem(text: str) -> dict:
         "block_types": ordered_unique,
         "end_markers": end_count,
         "armored_bytes": len(text.encode("utf-8", errors="replace")),
-        "truncated_blocks": named >= _MAX_BLOCKS,
+        # label が実際に省かれたときだけ立てる。ちょうど ``_MAX_BLOCKS`` 件なら
+        # 全件列挙できているので「最初の N 件のみ」とは言わない。
+        "truncated_blocks": len(labels) > _MAX_BLOCKS,
     }
 
 
@@ -202,6 +202,7 @@ def scan_pem_markers(f, max_bytes: int = 1024 * 1024) -> dict:
         "block_types": ordered_unique,
         "end_markers": end_count,
         "armored_bytes": read_bytes,
-        "truncated_blocks": len(named) >= _MAX_BLOCKS,
+        # redact_pem と同じ境界 (label が実際に省かれたときだけ)
+        "truncated_blocks": len(labels) > _MAX_BLOCKS,
         "truncated_scan": truncated,
     }

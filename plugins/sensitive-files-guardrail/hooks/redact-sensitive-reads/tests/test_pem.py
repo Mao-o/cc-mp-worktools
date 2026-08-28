@@ -15,6 +15,7 @@ from pathlib import Path
 
 from redaction.engine import redact, redact_large_file
 from redaction.keyonly_scan import scan_keys
+from redaction.pem import _MAX_BLOCKS as MAX_BLOCKS
 from redaction.pem import (
     format_pem,
     looks_pem,
@@ -328,6 +329,48 @@ class TestInlineBundleBlockCount(unittest.TestCase):
     def test_label_preview_is_capped_and_disclosed(self):
         out = format_pem(redact_pem(self._inline_bundle(60)))
         self.assertIn("block labels are listed", out)
+
+
+class TestLabelCapBoundary(unittest.TestCase):
+    """preview 打ち切りの note は label が**実際に省かれた**ときだけ出すこと。
+
+    ちょうど ``_MAX_BLOCKS`` 件のときは全件列挙できているので
+    「最初の N 件のみ」と言ってはいけない (off-by-one)。
+    inline / streaming の両経路で同じ境界にする。
+    """
+
+    def _bundle_text(self, n: int) -> str:
+        return "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" * n
+
+    def test_inline_boundary(self):
+        for n, expect in ((MAX_BLOCKS - 1, False), (MAX_BLOCKS, False),
+                          (MAX_BLOCKS + 1, True)):
+            with self.subTest(blocks=n):
+                info = redact_pem(self._bundle_text(n))
+                self.assertEqual(info["blocks"], n)
+                self.assertEqual(info["truncated_blocks"], expect)
+                note_shown = "block labels are listed" in format_pem(info)
+                self.assertEqual(note_shown, expect)
+
+    def test_streaming_boundary(self):
+        for n, expect in ((MAX_BLOCKS - 1, False), (MAX_BLOCKS, False),
+                          (MAX_BLOCKS + 1, True)):
+            with self.subTest(blocks=n):
+                info = scan_pem_markers(BytesIO(self._bundle_text(n).encode()))
+                self.assertEqual(info["blocks"], n)
+                self.assertEqual(info["truncated_blocks"], expect)
+
+    def test_both_paths_agree_on_the_boundary(self):
+        """同じ入力で inline と streaming の判定が一致すること。"""
+        for n in (MAX_BLOCKS - 1, MAX_BLOCKS, MAX_BLOCKS + 1):
+            with self.subTest(blocks=n):
+                text = self._bundle_text(n)
+                inline = redact_pem(text)
+                stream = scan_pem_markers(BytesIO(text.encode()))
+                self.assertEqual(inline["blocks"], stream["blocks"])
+                self.assertEqual(
+                    inline["truncated_blocks"], stream["truncated_blocks"]
+                )
 
 
 if __name__ == "__main__":
