@@ -20,8 +20,19 @@ PEM / armored 鍵形状の fixture。**実鍵は置かない** (公開 repo に�
 
 | ファイル | 性質 |
 |---|---|
-| `synthetic_rsa.pem` | 最終行が `...EFghIJkl=` で `+` `/` を含まない = **修正前は漏洩した形**。本文は `NOTAREALKEY` を含む明示的な合成データ |
+| `synthetic_rsa.pem.txt` | 最終行が `...EFghIJkl=` で `+` `/` を含まない = **修正前は漏洩した形**。本文は `NOTAREALKEY` を含む明示的な合成データ |
 
 `+` `/` を含む形 (漏洩しなかった側) は、上記が pass すれば自動的に pass するため
-fixture としては置かない。32KB 超の bundle 経路と `.env` 埋め込み経路は
+fixture としては置かない。
+
+## 拡張子が `.pem.txt` である理由
+
+`.pem` のままだと **本 plugin 自身の Stop hook が毎セッション block する**。
+除外レシピは `~/.claude/` 配下のユーザー単位ファイルにしか書けず、repo に
+commit して貢献者・CI と共有する手段が無いため、fixture 側の拡張子で回避する。
+
+PEM 判定は 0.21.0 で **内容の sniff** (`redaction/pem.py::looks_pem`) に
+なったため、拡張子を変えてもテストの検証力は落ちない
+(`_detect_format` は `.txt` を `opaque` に落とし、そこから content sniff で
+pem 経路に入る)。32KB 超の bundle 経路と `.env` 埋め込み経路は
 テスト側で動的に生成する (`test_pem.py`)。

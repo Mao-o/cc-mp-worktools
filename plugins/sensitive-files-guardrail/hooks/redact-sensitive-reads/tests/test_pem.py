@@ -22,7 +22,7 @@ from redaction.pem import (
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "keys"
-SYNTHETIC_PEM = FIXTURE_DIR / "synthetic_rsa.pem"
+SYNTHETIC_PEM = FIXTURE_DIR / "synthetic_rsa.pem.txt"
 
 # fixture 本文に現れる base64 様の行 (これが reason に出たら漏洩)
 _BODY_FRAGMENTS = [
