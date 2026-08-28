@@ -29,7 +29,7 @@ from .sanitize import escape_data_tag, sanitize_basename
 
 # DATA 包装の guard marker。固定値にすることで E2E テストが deterministic になる。
 DATA_GUARD = "guardrail-v1"
-from .pem import format_pem, looks_pem, redact_pem
+from .pem import format_pem, looks_pem, redact_pem, scan_pem_markers
 from .tomllike import format_toml, redact_toml
 
 # inline 読み込みの上限 (32KB + 1 byte 読んで truncate 判定)
@@ -187,11 +187,14 @@ def redact_large_file(f: IO[bytes], basename: str) -> str:
                 basename, fmt, format_keyonly(keys, scanned, fmt_hint=fmt)
             )
         if looks_pem(head.decode("utf-8", errors="replace")):
-            # 全文を読み直さずに済むよう、block 種別は head から数える。
-            # ``armored_bytes`` は head 分しか見ていないため上書きする。
-            info = redact_pem(head.decode("utf-8", errors="replace"))
-            info["armored_bytes"] = _stream_size(f)
-            info["end_markers"] = info["blocks"]  # head だけでは END を数えられない
+            # block 数は **ストリーム全体**を走査して数える。head だけで数えると
+            # 20 block の証明書バンドルが「5 block」と報告される (Codex P2)。
+            # marker の走査は行 regex のみで安く、``scan_stream`` と同じ 1MB 上限で
+            # 打ち切り、超過時は ``truncated_scan`` で件数が部分的である旨を出す。
+            info = scan_pem_markers(f)
+            size = _stream_size(f)
+            if size >= 0:
+                info["armored_bytes"] = size
             try:
                 f.seek(0)
             except (OSError, AttributeError):

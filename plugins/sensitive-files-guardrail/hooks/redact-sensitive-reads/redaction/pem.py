@@ -36,6 +36,13 @@ _SNIFF_LINES = 40
 # 列挙する block の上限 (証明書バンドルは数百 block になりうる)。
 _MAX_BLOCKS = 50
 
+# 他モジュール (dotenv) が block 内かどうかを追跡するために使う軽量 marker。
+# ``_BEGIN_RE`` / ``_END_RE`` は行全体一致 (MULTILINE + 行末まで) を要求するが、
+# ``.env`` の値に埋め込まれた形 (``KEY=-----BEGIN X-----``) では行頭に来ないため、
+# 部分一致で拾える版を別に持つ。
+PEM_BEGIN_MARKER = re.compile(r"-{5}BEGIN [A-Z0-9 ._-]*-{5}")
+PEM_END_MARKER = re.compile(r"-{5}END [A-Z0-9 ._-]*-{5}")
+
 
 def looks_pem(text: str) -> bool:
     """テキストが armored 鍵 / 証明書ファイルらしいか判定する。
@@ -93,7 +100,15 @@ def format_pem(info: dict) -> str:
     else:
         lines.append("(no BEGIN marker parsed)")
     if info["truncated_blocks"]:
-        lines.append(f"note: only the first {_MAX_BLOCKS} blocks were counted.")
+        lines.append(
+            f"note: only the first {_MAX_BLOCKS} block labels are listed "
+            "(the count above covers all blocks scanned)."
+        )
+    if info.get("truncated_scan"):
+        lines.append(
+            "note: the file is larger than the scan limit; "
+            "counts cover the scanned portion only."
+        )
     if info["blocks"] != info["end_markers"]:
         lines.append(
             f"note: BEGIN markers ({info['blocks']}) and END markers "
@@ -139,3 +154,77 @@ def looks_base64_fragment(candidate: str) -> bool:
     has_lower = any(c.islower() for c in candidate)
     has_digit = any(c.isdigit() for c in candidate)
     return has_upper and has_lower and has_digit
+
+
+# --------------------------------------------------------------------------
+# 32KB 超の bundle 用: ストリーム全体の marker を数える
+# --------------------------------------------------------------------------
+
+# chunk 境界で marker が分断されないよう保持する重なり幅。
+# ``-----BEGIN CERTIFICATE REQUEST-----`` 級でも 40 文字未満なので余裕を取る。
+_MARKER_OVERLAP = 128
+
+_STREAM_CHUNK = 64 * 1024
+
+
+def scan_pem_markers(f, max_bytes: int = 1024 * 1024) -> dict:
+    """file-like をストリームで走査し BEGIN / END marker を数える。
+
+    ``redact_pem`` は全文を str で受けるが、32KB 超の bundle を全文展開せずに
+    **正確な block 数**を出すための streaming 版。先頭 8KB だけを見て
+    その件数を「完全な blocks 数」として提示すると、20 block の証明書バンドルが
+    「5 block」と報告される (Codex P2)。
+
+    ``max_bytes`` を超えた分は走査せず ``truncated_scan`` を立てる
+    (件数を「完全」と偽らないため)。呼出側は seek 位置を先頭に戻しておくこと。
+    close はしない。
+    """
+    labels: list[str] = []
+    end_count = 0
+    read_bytes = 0
+    carry = ""
+    truncated = False
+
+    while read_bytes < max_bytes:
+        chunk = f.read(min(_STREAM_CHUNK, max_bytes - read_bytes))
+        if not chunk:
+            break
+        read_bytes += len(chunk)
+        carry_len = len(carry)
+        text = carry + chunk.decode("utf-8", errors="replace")
+        # carry 内で**完結している** marker は前回すでに数えている。
+        # 二重計上を避けるため、carry の末尾を越えて終わる match だけを採る
+        # (境界を跨いだ marker は前回は不完全でマッチせず、今回初めて完成する)。
+        for m in PEM_BEGIN_MARKER.finditer(text):
+            if m.end() <= carry_len:
+                continue
+            if len(labels) < _MAX_BLOCKS:
+                inner = m.group(0)[len("-----BEGIN "):-len("-----")]
+                labels.append(sanitize_key(inner.strip() or "(unlabeled)"))
+            else:
+                labels.append("")  # 上限超過分は件数だけ数える
+        end_count += sum(
+            1 for m in PEM_END_MARKER.finditer(text) if m.end() > carry_len
+        )
+        carry = text[-_MARKER_OVERLAP:] if len(text) > _MARKER_OVERLAP else text
+    else:
+        # max_bytes に到達してループを抜けた = まだ続きがあるかもしれない
+        truncated = bool(f.read(1))
+
+    named = [x for x in labels if x]
+    ordered_unique: list[str] = []
+    seen: set[str] = set()
+    for label in named:
+        if label not in seen:
+            seen.add(label)
+            ordered_unique.append(label)
+
+    return {
+        "format": "pem",
+        "blocks": len(labels),
+        "block_types": ordered_unique,
+        "end_markers": end_count,
+        "armored_bytes": read_bytes,
+        "truncated_blocks": len(named) >= _MAX_BLOCKS,
+        "truncated_scan": truncated,
+    }

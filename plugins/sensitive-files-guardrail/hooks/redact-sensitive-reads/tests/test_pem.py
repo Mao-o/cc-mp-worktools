@@ -19,6 +19,7 @@ from redaction.pem import (
     looks_base64_fragment,
     looks_pem,
     redact_pem,
+    scan_pem_markers,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "keys"
@@ -107,6 +108,114 @@ class TestPemLeakRegression(unittest.TestCase):
         # base64 継続行が「鍵名」として出ないこと
         for frag in _BODY_FRAGMENTS:
             self.assertNotIn(frag, reason, f"継続行が鍵名として漏洩: {frag}")
+
+
+class TestDotenvPemBlockTracking(unittest.TestCase):
+    """`.env` 埋め込み PEM は**パーサ状態**で継続行を捨てること (Codex P1)。
+
+    初版は候補文字列のヒューリスティック (24 文字以上 / 大小混在 / 数字あり) だけで
+    弾いていたが、RSA / EC PKCS#8 の末尾行は短いことがあり閾値を素通りして
+    鍵の断片が「鍵名」として出ていた。
+    """
+
+    def _env_with_pem(self, tail: str) -> str:
+        return (
+            "APP_NAME=demo\n"
+            "PRIVATE_KEY=-----BEGIN EC PRIVATE KEY-----\n"
+            "MHcCAQEEIBvXQ0mKZ8lNqWrTyUiOpAsDfGhJkLzXcVbNm1234567890abcdEFgh\n"
+            f"{tail}\n"
+            "-----END EC PRIVATE KEY-----\n"
+            "AFTER=tail\n"
+        )
+
+    def test_short_padded_tail_is_not_reported_as_key(self):
+        """末尾行が閾値未満でも鍵名として出ないこと (P1 の本丸)。"""
+        reason = _redact_text(".env", self._env_with_pem("AbCd12="))
+        self.assertNotIn("AbCd12", reason)
+        self.assertIn("entries: 3", reason)
+
+    def test_long_tail_still_rejected(self):
+        long_tail = "NotARealKeyJustTestDataAAAABBBBCCCC1234567890abcdEFghIJkl="
+        reason = _redact_text(".env", self._env_with_pem(long_tail))
+        self.assertNotIn("NotARealKey", reason)
+        self.assertIn("entries: 3", reason)
+
+    def test_surrounding_keys_are_preserved(self):
+        """block の前後の正当なキーは残ること。"""
+        reason = _redact_text(".env", self._env_with_pem("AbCd12="))
+        for key in ("APP_NAME", "PRIVATE_KEY", "AFTER"):
+            self.assertIn(key, reason)
+
+    def test_body_lines_without_padding_are_also_skipped(self):
+        """`=` を持たない本文行も block 内なら捨てられること。"""
+        reason = _redact_text(".env", self._env_with_pem("PlainBodyLineNoPadding"))
+        self.assertNotIn("PlainBodyLineNoPadding", reason)
+
+    def test_keys_after_block_end_resume(self):
+        """END 以降は通常のパースに戻ること (block が閉じない bug の pin)。"""
+        text = self._env_with_pem("AbCd12=") + "TRAILING=value\n"
+        reason = _redact_text(".env", text)
+        self.assertIn("TRAILING", reason)
+
+    def test_unterminated_block_does_not_swallow_rest_silently(self):
+        """END が無い壊れた入力でも例外にならないこと。"""
+        text = (
+            "APP_NAME=demo\n"
+            "PRIVATE_KEY=-----BEGIN EC PRIVATE KEY-----\n"
+            "AbCd12=\n"
+        )
+        reason = _redact_text(".env", text)
+        self.assertIn("APP_NAME", reason)
+        self.assertNotIn("AbCd12", reason)
+
+
+class TestLargeBundleBlockCount(unittest.TestCase):
+    """32KB 超 bundle の block 数がストリーム全体から数えられること (Codex P2)。"""
+
+    def _bundle(self, n_blocks: int) -> bytes:
+        body = "\n".join("A" * 64 for _ in range(30))
+        block = (
+            f"-----BEGIN CERTIFICATE-----\n{body}\nX1=\n"
+            "-----END CERTIFICATE-----\n"
+        )
+        return (block * n_blocks).encode()
+
+    def test_counts_all_blocks_not_just_head(self):
+        data = self._bundle(20)
+        self.assertGreater(len(data), 32 * 1024)
+        reason = redact_large_file(BytesIO(data), "bundle.key")
+        self.assertIn("blocks: 20", reason)
+
+    def test_begin_and_end_counts_match(self):
+        """head 限定だった頃は end_markers を blocks で上書きして差異を隠していた。"""
+        reason = redact_large_file(BytesIO(self._bundle(20)), "bundle.key")
+        self.assertNotIn("do not match", reason)
+
+    def test_armored_bytes_is_whole_file(self):
+        data = self._bundle(20)
+        reason = redact_large_file(BytesIO(data), "bundle.key")
+        self.assertIn(f"armored bytes: {len(data)}", reason)
+
+    def test_scan_limit_is_disclosed(self):
+        """走査上限を超えたら件数が部分的である旨を出すこと。"""
+        f = BytesIO(self._bundle(20))
+        info = scan_pem_markers(f, max_bytes=4096)
+        self.assertTrue(info["truncated_scan"])
+        self.assertIn("scan limit", format_pem(info))
+
+    def test_marker_split_across_chunk_boundary_is_counted(self):
+        """chunk 境界に marker が跨っても取りこぼさないこと。"""
+        from redaction import pem as pem_mod
+        data = self._bundle(3)
+        f = BytesIO(data)
+        original = pem_mod._STREAM_CHUNK
+        try:
+            pem_mod._STREAM_CHUNK = 37  # marker 長より短い chunk で境界を跨がせる
+            info = scan_pem_markers(f)
+        finally:
+            pem_mod._STREAM_CHUNK = original
+        self.assertEqual(info["blocks"], 3)
+        self.assertEqual(info["end_markers"], 3)
 
 
 class TestLooksPem(unittest.TestCase):

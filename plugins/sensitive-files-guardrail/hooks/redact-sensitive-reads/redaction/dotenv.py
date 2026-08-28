@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 
 from .placeholders import looks_placeholder
+from .pem import PEM_BEGIN_MARKER as _PEM_BEGIN_RE
+from .pem import PEM_END_MARKER as _PEM_END_RE
 from .pem import looks_base64_fragment
 from .sanitize import sanitize_key
 
@@ -224,19 +226,35 @@ def redact_dotenv(text: str) -> dict:
         }
     """
     keys: list[dict] = []
+    # ``.env`` の値として複数行 PEM を埋めた形では、armored 本文の各行が
+    # 独立した行として現れ、末尾パディング ``=`` が ``KEY=`` に見えて base64 本体が
+    # 鍵名として出る。**パーサ状態で block 内を追跡**して継続行を丸ごと捨てる
+    # (0.21.0 の初版は候補文字列のヒューリスティックだけで弾いていたが、
+    # RSA / EC PKCS#8 の末尾行は短いことがあり閾値を素通りした)。
+    in_pem_block = False
     for line in text.splitlines():
         # コメント・空行スキップ
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+
+        if in_pem_block:
+            if _PEM_END_RE.search(stripped):
+                in_pem_block = False
+            continue
+
         m = _LINE_RE.match(line)
         if not m:
+            # ``-----BEGIN ...-----`` だけの行 (値が次行から始まる形) もここに来る
+            if _PEM_BEGIN_RE.search(stripped):
+                in_pem_block = True
             continue
         raw_key, raw_val = m.group(1), m.group(2)
-        # ``.env`` の値として複数行 PEM を埋めた形では、継続行の末尾パディング
-        # ``=`` が ``KEY=`` に見えて base64 本体が鍵名として出る。base64 断片は
-        # 棄却する (多層防御。詳細は redaction/pem.py)
-        if looks_base64_fragment(raw_key):
+        # ``KEY=-----BEGIN ...-----`` 形。鍵名は残しつつ、以降の本文行を捨てる
+        if _PEM_BEGIN_RE.search(raw_val):
+            in_pem_block = not _PEM_END_RE.search(raw_val)
+        # 多層防御: block 外に落ちた base64 断片も棄却する (詳細は redaction/pem.py)
+        elif looks_base64_fragment(raw_key):
             continue
         v = _preprocess_value(raw_val)
         type_class, prefix = _detect_type_and_prefix(v)

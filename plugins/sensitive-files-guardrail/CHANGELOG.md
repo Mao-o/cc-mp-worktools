@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **897** / check 79 → **80** (計 977)
+- テスト件数: redact 862 → **908** / check 79 → **80** (計 988)
 
 ### 1. 不具合の内容
 
@@ -151,7 +151,30 @@ segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一�
 通常のセッションが書く形ではなく、`ask_or_allow` は lenient mode で allow に
 なるため autonomous 実行への影響は無い。
 
-### 6. テスト
+
+### 6. PR レビュー指摘の反映
+
+**(a) `.env` 埋め込み PEM をパーサ状態で追跡する** — §2 の多層防御ゲートは
+「24 文字以上 / `_` を含まない / 大小混在 / 数字あり」というヒューリスティックで、
+**RSA / EC PKCS#8 の末尾行が閾値より短い**ケースを素通りしていた。
+実測: 末尾行 `AbCd12=` (6 文字) が鍵名として出力される。
+
+候補文字列の形ではなく **`-----BEGIN` / `-----END` によるブロック状態**を
+`redact_dotenv` で追跡し、block 内の行を丸ごと捨てる形に変更した。
+ヒューリスティックは block 外に落ちた断片用の第 2 層として残す。
+
+**(b) 32KB 超 bundle の block 数をストリーム全体から数える** — 先頭 8KB だけを
+見て `redact_pem` に渡していたため、**20 block の証明書バンドルが「約 5 block」と
+報告**されていた。さらに `end_markers` を `blocks` で上書きしていたため、
+BEGIN/END の不一致 note も出ず truncation が隠れていた。
+
+`pem.scan_pem_markers` を新設し、`scan_stream` と同じ 1MB 上限でストリーム全体の
+marker を数える。上限超過時は `truncated_scan` で件数が部分的である旨を出す。
+chunk 境界を跨ぐ marker のため 128 文字の重なりを保持するが、
+**carry 内で完結する match は前回計上済みなので `m.end() > len(carry)` で除外**する
+(この除外が無いと境界付近の marker が二重計上される — chunk サイズ 7 通りで検証)。
+
+### 7. テスト
 
 `tests/test_pem.py` (17 件) と `tests/fixtures/keys/synthetic_rsa.pem` を追加。
 
