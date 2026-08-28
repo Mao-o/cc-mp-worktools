@@ -724,10 +724,15 @@ class TestGlobDotenvDeny(BaseBash):
         r = handle(_make_envelope("cat .env*", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_star_envrc_deny(self):
-        # fnmatchcase(".envrc", "*.envrc") = True → deny
+    def test_star_envrc_is_uncertain_glob(self):
+        # 0.22.0: 実シェルの ``*.envrc`` は ``.envrc`` に展開されない (先頭ドットは
+        # literal ``.`` でしか一致しない)。``foo.envrc`` への展開は ``*.key`` と
+        # 同じ「既定 rules との交差」クラスで ask_or_allow (0.21.x までは
+        # fnmatch の意味論で deny)
         r = handle(_make_envelope("cat *.envrc", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("cat *.envrc", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
 
     def test_envrc_star_deny(self):
         r = handle(_make_envelope("cat .envrc*", self.tmp))
@@ -743,10 +748,91 @@ class TestGlobDotenvDeny(BaseBash):
         r = handle(_make_envelope("grep SECRET .e[n]v", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
-    def test_char_class_deny(self):
-        # fnmatchcase(".env", "[.]env") = True → deny
+    def test_char_class_is_uncertain_glob(self):
+        # 0.22.0: bash / zsh の ``[.]env`` は ``.env`` に展開されない (bracket 式は
+        # 先頭ドットに一致しない)。0.21.x までは fnmatch の意味論で deny
         r = handle(_make_envelope("cat [.]env", self.tmp))
-        self.assertEqual(_decision(r), "deny")
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("cat [.]env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_directory_glob_with_dotenv_basename_deny(self):
+        # 0.22.0: ``*/.env`` は ``sub/.env`` に展開される (bash 3.2 / zsh 実測)。
+        # 0.21.x は operand 全体を fnmatch していたため ask_or_allow (auto で
+        # 素通り) だった
+        for cmd in ("cat */.env", "cat **/.env", "head -n 3 */.env*"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+
+class TestBareGlobLeadingDot(BaseBash):
+    """0.22.0: 裸の ``*`` / ``?env`` / ``[.]env`` は実シェルで dotfile に展開されない
+    ので dotenv stem 一致 (deny 固定) ではなく、他の不確定 glob と同じ
+    ``ask_or_allow``。0.21.x までは ``fnmatchcase(".env", "*")`` = True のため
+    ``git add *`` / ``cp * dst/`` / ``tar czf out.tgz *`` が全 mode で deny
+    だった (deny は lenient mode でも緩和されないため作業が止まる)。
+    """
+
+    def test_bare_star_is_uncertain_glob(self):
+        for cmd in ("cat *", "git add *", "cp * /tmp/dest/",
+                    "tar czf out.tgz *", "cat ?env", "cat *env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_metadata_only_with_bare_star_allows(self):
+        # 対照: metadata-only は glob を見ずに allow (0.14.0 から不変)
+        for cmd in ("echo *", "wc -l *", "chmod 644 *", "ls -la *"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(output.is_allow(r), msg=cmd)
+
+    def test_explicit_leading_dot_still_denies(self):
+        for cmd in ("cat .env*", "cat .en?", "cat .e[n]v", "cat .envrc*", "cat .*"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_dotglob_in_same_command_keeps_conservative_semantics(self):
+        # Codex R1 P1: 同じコマンド内で dotglob / GLOB_DOTS / GLOBIGNORE を有効化
+        # すると ``*`` は dotfile にも展開されるので、0.21.x までの意味論 (deny)
+        # に戻す。shell option は Bash tool 呼び出しごとに初期化されるため
+        # 同一コマンド内の形だけが対象
+        for cmd in (
+            "shopt -s dotglob; cat *",
+            "shopt -s dotglob && cat [.]env",
+            "shopt -s extglob dotglob; head -n 1 *",
+            "setopt globdots; cat *",
+            "GLOBIGNORE=x; cat *",
+            "export GLOBIGNORE=.git; cat *.envrc",
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+        # 対照: dotglob 以外の shell option / 非機密 operand
+        for cmd in ("shopt -s nullglob; cat *", "shopt -s extglob; cat *"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask")
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("shopt -s dotglob; cat README.md", self.tmp))
+        self.assertTrue(output.is_allow(r))
 
 
 class TestGlobUncertainAskOrAllow(BaseBash):
@@ -870,10 +956,18 @@ class TestAttachedShortOption(BaseBash):
         ))
         self.assertEqual(_decision(r), "deny")
 
-    def test_grep_multi_flag_attached_sensitive(self):
-        r = handle(_make_envelope(
-            "grep -vn .env.local README.md", self.tmp,
-        ))
+    def test_grep_multi_flag_then_pattern_and_file(self):
+        # 0.22.0: ``-vn`` は flag の束ねで ``.env.local`` は grep の **pattern**、
+        # README.md が file operand。0.21.x までは bare token を一律 path 候補に
+        # していたため deny だったが、grep は .env.local を読まない
+        # (``TestGrepPatternPositional`` の一連の形と同じ)。
+        for mode in ("default", "auto"):
+            r = handle(_make_envelope(
+                "grep -vn .env.local README.md", self.tmp, mode=mode,
+            ))
+            self.assertTrue(output.is_allow(r), msg=mode)
+        # 束ね flag の後ろに file operand が来る形は従来どおり deny
+        r = handle(_make_envelope("grep -vn TODO .env.local", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_ls_flag_group_allow(self):
@@ -2500,6 +2594,242 @@ class TestRecommendedRemedyAllow(BaseBash):
         r = handle(_make_envelope("git show HEAD:.env", self.tmp))
         self.assertEqual(_decision(r), "deny")
         self.assertIn("閲覧", _reason(r))
+
+
+class TestGrepPatternPositional(BaseBash):
+    """0.22.0: grep 系 / jq の **第 1 positional は pattern / filter** であって
+    path ではない (``handlers/bash/grep_extract.py`` は 0.10.0 から同じ前提で
+    deny reason を組み立てていたが、判定側の ``_find_path_candidates`` は bare
+    token を一律 path 候補にしていた plugin 内部の矛盾)。
+
+    ``.env`` を参照しているファイルを探す / ``id_rsa`` の記述箇所を grep する /
+    ``jq '.env'`` で JSON の env フィールドを見る、が全 mode で止まっていた。
+    default / auto の両 mode で verdict を固定する。
+    """
+
+    ALLOW = (
+        "grep .env README.md",
+        "grep -rn '.env' src/",
+        "grep -v '.env' out.txt",
+        "grep -E '.env|.envrc' notes.md",
+        "grep -vn .env.local README.md",
+        "egrep id_rsa README.md",
+        "rg '.env' src/",
+        "rg -n id_rsa .",
+        "ag '.env' .",
+        "ack '.env' lib/",
+        "jq '.env' package.json",
+        "jq -r '.env.NODE_ENV' cfg.json",
+        "git grep -n '.env' -- src/",
+        "grep -r .env",
+        # pattern を option で与えた形: 値は pattern、positional は path
+        "grep -e .env README.md",
+        "grep --regexp=.env README.md",
+    )
+    DENY = (
+        # 対照: 本当に path のものは deny を維持
+        "grep TODO .env",
+        "grep -rn TODO -- .env",
+        "grep -vn TODO .env.local",
+        "grep -f .env x.txt",
+        "grep --file=.env foo README.md",
+        "grep -f.env foo README.md",
+        "grep -rne TODO .env",
+        "grep --reg=TODO .env",
+        "rg TODO .env",
+        "rg -f pats.txt .env",
+        "jq . .env",
+        "jq -f filter.jq .env",
+        "git grep -e TODO -- .env",
+        "grep foo README.md > .env",
+        "grep > .env foo",
+        "grep SECRET .env > out.txt",
+        # 密着形の書込み redirect (0.21.x までは ``>.env`` が 1 token のまま
+        # basename 不一致で拾えていなかった)
+        "grep foo README.md >.env",
+    )
+
+    def test_pattern_positional_allows_in_all_modes(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_file_operand_denies_in_all_modes(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_deny_reason_still_names_the_file_operand(self):
+        # deny のとき reason に載る operand は pattern ではなく file 側
+        r = handle(_make_envelope("grep DATABASE_URL .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("matched_operand: .env", _reason(r))
+
+
+class TestBashOperandBasenameOnly(BaseBash):
+    """0.22.0: Bash operand の機密判定は **basename だけ** を使う (``is_sensitive``
+    の ``parts=False``)。
+
+    ``_shared.matcher.is_sensitive`` は basename が nomatch のとき親ディレクトリ名
+    (``pathlib.parts``) も評価する。Bash operand は「path とは限らない文字列」
+    (sed / awk の式、option の値) を扱うため、``normalize`` で合成パスになった
+    瞬間 (``/cwd/s/.env/X/p``) に parts の ``.env`` で deny になっていた。parts
+    一致の根拠 (symlink race 等の偽装) は思想 1 が射程外とする敵対的シナリオで、
+    観測される実効果は非パス文字列の誤 deny だけ。Read / Edit / Stop は実在
+    ファイルの実パスなので従来どおり parts も見る。
+
+    副産物として ``python -m venv .env`` した仮想環境配下の操作
+    (``.env/bin/activate``) も解消する。
+    """
+
+    ALLOW = (
+        "cat .env/bin/activate",
+        "source .env/bin/activate",
+        ". .env/bin/activate",
+        "head -n 1 .env/pyvenv.cfg",
+        "cat a/.env/b",
+        "cat secrets.pem/notes.txt",
+        # sed / awk の式 (script 枠でも除外されるが、option の値経由でも同じ)。
+        # file 名は sed の動的コマンド文字 (e r R w W) で始めない (``_sed_scripts``
+        # が option 経由の script のとき positional 枠を消費せず file operand を
+        # script 候補に含める既知の別課題を踏まないため)
+        "sed -n 's/.env/X/p' notes.txt",
+        "sed -n -e 's/.env/X/p' notes.txt",
+        "awk '/.env/ {print}' notes.txt",
+    )
+    DENY = (
+        "cat .env/bin/id_rsa",
+        "cat sub/.env",
+        "cat .env",
+        "cat a/.env/b/.env.local",
+        "git show HEAD:.env",
+    )
+
+    def test_parent_dir_name_does_not_deny(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_basename_match_still_denies(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+
+class TestOptionValueNotPath(BaseBash):
+    """0.22.0: option の値が検索文字列 / 正規表現 / 書式 / glob / 数値のとき、
+    その値を path operand として誤読しない。
+
+    0.21.x までは ``--opt=VALUE`` の RHS と ``-XVALUE`` の ``tok[2:]`` を意図的に
+    候補に入れており (``file -f .env`` / ``grep -f.env`` を捕まえる設計)、option
+    の意味を見ないため ``git log -S.env`` (pickaxe) や
+    ``grep -rn TODO --exclude='.env'`` (**ユーザーが .env を読ませないと明示して
+    いる形**) まで hard deny になっていた。arity の概念自体が無かったので、
+    ``git log --grep -x.env`` の分離形は ``-x.env`` の ``tok[2:]`` = 元の文字列に
+    存在しない ``.env`` で一致していた。
+
+    値が path の option (``-f FILE`` / ``--files-from`` / ``--slurpfile`` /
+    ``--output``) と metadata-only gate の 4 形 (``file -f`` /
+    ``wc --files0-from`` / ``tree --fromfile`` / ``git ls-files -s``) は deny 維持。
+    """
+
+    ALLOW = (
+        "git log -S.env --oneline",
+        "git log -S .env",
+        "git log --grep=.env",
+        "git log --grep .env",
+        "git log --grep -x.env",
+        "git log --author=.env",
+        "git log --committer=.env",
+        "git log --format=.env",
+        "git log -G'.env'",
+        "grep -rn TODO --exclude='.env'",
+        "grep -rn TODO --exclude-dir=.env",
+        "grep -rn TODO --include='*.env'",
+        "grep -A 3 .env README.md",
+        "rg TODO -g '*.env'",
+        "rg -g '!.env' TODO",
+        "rg -t py .env src/",
+        "tar --exclude='.env' -czf out.tgz src",
+        "tar -czf out.tgz --exclude .env src",
+        "rsync -a --exclude='.env' src/ dst/",
+        "zip -r out.zip src -x '.env'",
+        "jq --arg k .env '.[$k]' cfg.json",
+        "diff --ignore-matching-lines=.env a b",
+        "diff -I .env a b",
+    )
+    DENY = (
+        "git log -p .env",
+        "git log -p -- .env",
+        "git log -L1,10:.env",
+        "git log -L 1,10:.env",
+        "git log --pretty .env -p",
+        "git log --output=.env",
+        "git commit -F .env",
+        "git commit -S .env",
+        "git diff --cached .env",
+        "grep -A3 TODO .env",
+        "grep -rn TODO --exclude-from=.env src/",
+        "rg -t py TODO .env",
+        "rg --ignore-file .env TODO",
+        "tar -czf out.tgz .env",
+        "tar -T .env -cf out.tgz",
+        "tar --exclude-ignore=.env -cf out.tar src",
+        "gawk -i .env 'BEGIN {print 1}'",
+        "awk --include=.env 'BEGIN {print 1}'",
+        "ack --ackrc .env TODO lib/",
+        "rsync -a .env host:dst/",
+        "rsync --files-from=.env src dst",
+        "zip -r out.zip .env",
+        "jq --slurpfile x .env . cfg.json",
+        "diff .env .env.example",
+        # metadata-only gate の 4 形 (gate は生の token 列で判定し、gate を抜けた
+        # 後の operand scan がここで値を拾う)
+        "file -f .env",
+        "wc --files0-from=.env",
+        "tree --fromfile .env",
+        "git ls-files -s .env",
+    )
+
+    def test_non_path_option_values_allow_in_all_modes(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_path_option_values_deny_in_all_modes(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
 
 
 if __name__ == "__main__":

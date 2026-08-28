@@ -155,8 +155,11 @@ note: nested structure not parsed. only top-level key names returned.
 **三態判定** (deny / ask_or_allow / allow) で静的解析する:
 
 - **deny 固定**: literal operand が機密パターンに一致、または operand glob が
-  dotenv stem (`.env` / `.envrc`) に fnmatch 一致。bypass / auto を含めて全 mode
-  で block
+  shell の展開で dotenv stem (`.env` / `.envrc`) に一致しうる (`.env*` /
+  `*/.env`。裸の `*` は dotfile に展開されないので対象外)。bypass / auto を
+  含めて全 mode で block。grep 系 / jq / awk / sed の第 1 positional (pattern /
+  script) と値が path ではない option の値 (`git log -S.env` /
+  `--exclude='.env'`) は operand として数えない (0.22.0)
 - **ask_or_allow**: 静的解析不能ケース (`<` 入力リダイレクト、heredoc / process
   sub / 動的展開 / shell wrapper / 任意 path 実行 等)。`default` /
   `acceptEdits` / `dontAsk` では `ask` (ユーザー介在)、`auto` /
@@ -256,9 +259,11 @@ hint もこの形を案内する。[docs/PATTERNS.md](./docs/PATTERNS.md))。
 > `credentials*.json` と交差させて deny に倒していたが、思想 1 (うっかり露出予防、
 > 敵対的防御は非目的) に対し deny 寄り過ぎる (`cat *.json` `cat *.key` `cat *.log`
 > 等の日常 glob まで巻き込む) ため 0.8.0 で撤廃した。現在は operand glob が
-> `.env` / `.envrc` literal に ``fnmatchcase`` で一致するときだけ deny 固定で、
-> それ以外の glob (`id_rsa*`, `*.key`, `cred*.json`, `*.log` 等) は ``ask_or_allow``
-> (default=ask, autonomous=allow) に倒す。
+> shell の pathname expansion で `.env` / `.envrc` literal に展開されうるとき
+> だけ deny 固定で、それ以外の glob (`id_rsa*`, `*.key`, `cred*.json`, `*.log`
+> 等、および shell では dotfile に展開されない `*` / `?env` / `[.]env` /
+> `*.envrc`) は ``ask_or_allow`` (default=ask, autonomous=allow) に倒す
+> (0.22.0 で fnmatch の意味論から shell の意味論に修正)。
 
 ### `PreToolUse(Edit | Write)` — redact-sensitive-reads
 

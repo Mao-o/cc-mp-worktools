@@ -58,14 +58,21 @@ segment 単位再評価へ移行)。
      完全一致 + 既知の安全な option 以外が無いとき。未知・省略形の ``--xxx``
      が 1 つでもあれば fail-closed で通常経路) も metadata-only。両 hook
      の reason が推奨する次善策を自分で deny していた自己矛盾の解消
-     (bd_092a232e-snw.3)。plain ``git rm`` (作業ツリー削除) は deny 維持
-   - operand scan: 各 path 候補について
-     - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
-       ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
+     (2026-08 精査)。plain ``git rm`` (作業ツリー削除) は deny 維持
+   - operand scan: 各 path 候補について。候補は ``_find_path_candidates`` が
+     コマンド別の option 知識 (``handlers/bash/command_specs.py``、0.22.0) で
+     token 列を option / 値 / positional / redirect に字句分けして決める:
+     grep 系 / jq / awk / sed の第 1 positional (pattern / filter / script) と、
+     値が path ではない option の値 (``git log -S<string>`` / ``--exclude=``)
+     は候補にしない。spec に無いコマンド・option は従来規則
+     - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が shell の
+       pathname expansion で ``.env`` / ``.envrc`` literal に展開されうる。先頭
+       ドットは literal ``.`` でのみ一致、0.22.0) で True なら **deny 固定**、
        False なら ``ask_or_allow``。0.3.2 で導入した既定 rules への候補列挙
        (``_glob_operand_is_sensitive`` / ``_glob_candidates``) は 0.8.0 で撤廃
-     - literal → ``_operand_is_sensitive`` (basename + URI/VCS pathspec 分割) で
-       True なら **deny 固定**、False なら allow
+     - literal → ``_operand_is_sensitive`` (basename のみ + URI/VCS pathspec
+       分割。親 dir 名の parts 一致は使わない、0.22.0) で True なら **deny
+       固定**、False なら allow
 3. **集約** — deny > ask > allow。``pending_ask`` は最後に畳む。
 
 ### patterns.txt 読込失敗 = 全 mode deny 固定
@@ -121,6 +128,7 @@ from handlers.bash.interpreters import (  # noqa: F401
     _quoted_hard_stop_reason,
 )
 from handlers.bash.operand_lexer import (  # noqa: F401
+    _command_enables_dotglob,
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
     _has_glob,
@@ -225,7 +233,7 @@ def _git_ls_files_exposes_object(args: list[str]) -> bool:
 
 def _git_rm_is_index_only(args: list[str]) -> bool:
     """``git rm`` が index からの除去のみ (``--cached``) で、作業ツリーの実ファイルを
-    消さず内容も出力しないか (0.19.0, bd_092a232e-snw.3)。
+    消さず内容も出力しないか (0.19.0, 2026-08 精査)。
 
     **fail-closed** (Codex review P1): git は long option の **一意な接頭辞** を
     受理する (``--no-cach`` = ``--no-cached`` は後勝ちで作業ツリーも削除、
@@ -293,7 +301,7 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     は operand に機密 path が無いため operand scan で allow に倒れる。global
     option 前置 (``git -C dir check-ignore``) は保守的に対象外。
 
-    0.19.0 (bd_092a232e-snw.3): ``git rm`` は ``--cached`` 付きのみ metadata-only
+    0.19.0 (2026-08 精査): ``git rm`` は ``--cached`` 付きのみ metadata-only
     (``_git_rm_is_index_only``)。index からの除去だけで実ファイルは残り内容も
     出ない。両 hook の reason が「tracked なら ``git rm --cached`` で untrack」と
     案内しているのに自分で deny していた自己矛盾を解消する。``chmod`` /
@@ -355,10 +363,20 @@ def _operand_is_sensitive(
     - VCS pathspec (``HEAD:.env``, ``user@host:/p/.env``): コロンで分割して各片の
       basename も追加で判定
 
+    0.22.0: ``is_sensitive`` は ``parts=False`` (basename のみ) で呼ぶ。Bash
+    operand は path とは限らない文字列 (sed / awk の式、option の値) を含み、
+    ``normalize`` で合成パスになった瞬間 (``/cwd/s/.env/X/p``) に親 dir 名の
+    ``.env`` で deny になっていた。parts 一致の根拠 (symlink race 等の偽装) は
+    思想 1 が射程外とする敵対的シナリオで、既定 patterns.txt は basename 形のみ
+    なので本物の機密パスは basename で include 決着する (保護低下なし)。
+    Read / Edit / Stop は実在ファイルの実パスを扱うため従来どおり parts も見る。
+    副産物として ``python -m venv .env`` した仮想環境配下 (``.env/bin/activate``)
+    の操作も止まらなくなる。
+
     ``normalize`` 失敗 (ValueError / OSError) は再送出 (呼び出し側で fail-closed)。
     """
     abs_path = normalize(raw, cwd)
-    if is_sensitive(abs_path, rules):
+    if is_sensitive(abs_path, rules, parts=False):
         return True
     if ":" in raw:
         for piece in raw.split(":"):
@@ -368,7 +386,7 @@ def _operand_is_sensitive(
                 piece_path = normalize(piece, cwd)
             except (ValueError, OSError):
                 continue
-            if is_sensitive(piece_path, rules):
+            if is_sensitive(piece_path, rules, parts=False):
                 return True
     return False
 
@@ -429,12 +447,21 @@ def _analyze_segment(
     tokens: list[str],
     envelope: dict,
     rules: list[tuple[str, bool]],
+    *,
+    dotglob: bool = False,
 ) -> dict:
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
     機密 path 一致 → ``make_deny`` 固定 (0.10.0 で reason に minimal info /
     matched_pattern_keys を埋め込み)。判定不能 → ``ask_or_allow``
     (default=ask, auto/bypass=allow)。それ以外 → allow。
+
+    ``dotglob`` (0.22.0): コマンド全体のどこかで ``shopt -s dotglob`` /
+    ``GLOBIGNORE=`` / ``setopt globdots`` を有効化しているとき True
+    (``handle`` が ``_command_enables_dotglob`` で 1 回判定)。glob operand の
+    dotenv 判定を 0.21.x までの fnmatch の意味論 (``*`` が dotfile にも一致) に
+    戻す。shell option は segment を跨いで効くので segment 単位ではなく
+    コマンド単位で決める。
 
     0.12.0: ``first_token`` が ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの見る・
     数える系 allow-list) に該当する場合、``_segment_has_residual_metachar`` の
@@ -510,7 +537,7 @@ def _analyze_segment(
         if not p:
             continue
         if _has_glob(p):
-            if _glob_operand_is_dotenv_match(p):
+            if _glob_operand_is_dotenv_match(p, dotglob=dotglob):
                 L.log_info("bash_classify", f"glob_match:{first}")
                 return _build_deny_response(tokens, p, envelope)
             if pending_glob_ask is None:
@@ -578,6 +605,12 @@ def handle(envelope: dict) -> dict:
     if not segments:
         return output.make_allow()
 
+    # 0.22.0 (Codex R1): 同じコマンド内で dotglob / GLOBIGNORE / globdots を
+    # 有効化していれば、glob operand の dotenv 判定を保守的な意味論に戻す。
+    # shell option は Bash tool の呼び出しごとに初期化されるので、コマンド文字列
+    # に現れる形だけを見る (segment を跨いで効くのでコマンド単位で 1 回判定)。
+    dotglob = _command_enables_dotglob(command)
+
     # 2. 各セグメントを独立に判定。deny 優先、ask は最後に畳む。
     #    hard-stop / shlex 失敗の segment は pending_ask に格納して continue
     #    (他 segment の deny 検出を続ける)。
@@ -604,7 +637,7 @@ def handle(envelope: dict) -> dict:
             continue
         tokens = _strip_safe_redirects(tokens)
 
-        result = _analyze_segment(tokens, envelope, rules)
+        result = _analyze_segment(tokens, envelope, rules, dotglob=dotglob)
         decision = _decision_of(result)
 
         if decision == "deny":
