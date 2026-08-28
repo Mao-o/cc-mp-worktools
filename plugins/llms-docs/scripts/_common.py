@@ -521,6 +521,37 @@ def _handle_fetch_failure(url: str, cache_path: str, error: Exception,
     sys.exit(1)
 
 
+class _NoValidatorRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strips conditional-GET headers before forwarding a redirected request.
+
+    ``urllib``'s default redirect handling copies a request's headers
+    (``If-None-Match``/``If-Modified-Since`` included) onto the redirected
+    request unchanged — verified empirically against a live redirect. Sent
+    toward a redirect destination, those validators describe whatever this
+    process last cached under *this* function's own bookkeeping, not
+    anything the destination server has ever confirmed — a coincidental
+    match there can 304 into silently keeping the wrong body indefinitely
+    (see ``fetch_url``'s docstring). Installed as the process-wide default
+    opener (see below) so every ``urllib.request.urlopen`` call in this
+    process is covered, not just calls this module makes directly; safe
+    because each ``parse-*.py`` runs as its own single-purpose process with
+    no unrelated code sharing it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            for header in ("If-none-match", "If-modified-since"):
+                new_req.headers.pop(header, None)
+                new_req.unredirected_hdrs.pop(header, None)
+        return new_req
+
+
+urllib.request.install_opener(
+    urllib.request.build_opener(_NoValidatorRedirectHandler())
+)
+
+
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
               max_age: int | None = None, raise_on_error: bool = False) -> str:
@@ -603,18 +634,18 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     Any other HTTP status/transport error falls through to the same
     stale-serve/exit/raise handling as before.
 
-    ``etag``/``last_modified`` are persisted only when the response's
-    resolved URL (``resp.url``, which ``urllib`` sets to the final URL
-    after following any redirects) equals *url* itself — i.e. this
-    particular fetch involved no redirect. ``HTTPRedirectHandler`` forwards
-    a request's headers, conditional ones included, to the redirected
-    request unchanged (verified empirically) — so a validator obtained via
-    a redirect describes *that hop's destination*, not *url* in general.
-    If *url*'s redirect target ever changes later, sending that stale
-    validator toward the new target could coincidentally 304 and lock in
-    the old target's body indefinitely. ``content_hash`` is still recorded
-    either way — it doesn't carry this risk since it's compared against
-    the cache file's own bytes, not sent to any server.
+    The process-wide default opener installed just above this function
+    (``_NoValidatorRedirectHandler``) strips conditional-GET headers before
+    ``urllib`` forwards a redirected request — the primary defense against
+    a validator ending up sent toward a destination it was never confirmed
+    against. ``etag``/``last_modified`` are *also* persisted only when the
+    response's resolved URL (``resp.url``, which ``urllib`` sets to the
+    final URL after following any redirects) equals *url* itself, as a
+    second, independent layer: even if the redirect-handler stripping were
+    ever bypassed or removed, a validator obtained through a redirect
+    still wouldn't be saved in the first place. ``content_hash`` is
+    recorded either way — it doesn't carry this risk since it's compared
+    against the cache file's own bytes, not sent to any server.
     """
     cache_exists = os.path.exists(cache_path)
     if cache_exists:
@@ -662,17 +693,11 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 data = gzip.decompress(data)
             etag = resp.headers.get("ETag")
             last_modified = resp.headers.get("Last-Modified")
-            # urllib.request.HTTPRedirectHandler forwards this request's
-            # headers — including If-None-Match/If-Modified-Since, verified
-            # empirically — to a redirected request unchanged. If *url*
-            # redirects, and where it redirects to ever changes later, the
-            # validators cached here would describe the *old* destination
-            # but get sent (via the same forwarding) toward whatever *url*
-            # now redirects to; a coincidental match there would 304 into
-            # keeping the old destination's body forever. Since the
-            # redirect target isn't guaranteed stable across fetches,
-            # never cache validators obtained through one — content_hash
-            # is unaffected and still recorded, just not etag/last_modified.
+            # Defense-in-depth alongside _NoValidatorRedirectHandler
+            # (module-level, installed above fetch_url): even if header
+            # stripping on redirect were ever bypassed or removed, still
+            # never persist a validator obtained through a redirect —
+            # content_hash is unaffected and still recorded either way.
             redirected = resp.url != url
         if create_parent:
             parent = os.path.dirname(cache_path)

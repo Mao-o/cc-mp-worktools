@@ -24,6 +24,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.request
 from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
@@ -921,6 +922,54 @@ class LoadLinesTest(unittest.TestCase):
             f.write("非ASCII テキスト\n")
         lines = _common.load_lines(path)
         self.assertEqual(lines, ["非ASCII テキスト\n"])
+
+
+class NoValidatorRedirectHandlerTest(unittest.TestCase):
+    """Drives the real (base-class) redirect_request() logic directly —
+    no network, no mocked urlopen — to prove the actual stdlib interaction
+    this depends on, the same way the putheader() tests above do for a
+    different stdlib boundary. A live end-to-end test through a real
+    redirecting server would prove the same thing less directly, at the
+    cost of making the whole suite network-dependent; this file's tests
+    are deliberately network-free (see the module docstring).
+    """
+
+    def test_conditional_headers_are_stripped_from_the_redirected_request(self):
+        handler = _common._NoValidatorRedirectHandler()
+        req = urllib.request.Request(
+            "https://example.com/old",
+            headers={
+                "If-None-Match": '"stale-etag"',
+                "If-Modified-Since": "Wed, 01 Jan 2026 00:00:00 GMT",
+                "User-Agent": "ua",
+            },
+        )
+        new_req = handler.redirect_request(
+            req, fp=None, code=302, msg="Found", headers={},
+            newurl="https://example.com/new",
+        )
+        self.assertIsNotNone(new_req)
+        self.assertNotIn("If-none-match", new_req.headers)
+        self.assertNotIn("If-modified-since", new_req.headers)
+        # Confirms this exercised the base class's real redirect-following
+        # logic (constructing an actual new Request for the new URL, method
+        # preserved, other headers intact) rather than a stub that merely
+        # returns something non-None.
+        self.assertEqual(new_req.full_url, "https://example.com/new")
+        self.assertEqual(new_req.get_method(), "GET")
+        self.assertEqual(new_req.headers.get("User-agent"), "ua")
+
+    def test_redirect_handler_is_installed_as_the_process_default_opener(self):
+        # fetch_url relies on plain urllib.request.urlopen() picking up
+        # this handler automatically (see _common's module-level
+        # install_opener call) rather than callers having to build/pass
+        # a custom opener themselves.
+        opener = urllib.request._opener
+        self.assertIsNotNone(opener)
+        self.assertTrue(
+            any(isinstance(h, _common._NoValidatorRedirectHandler)
+                for h in opener.handlers)
+        )
 
 
 if __name__ == "__main__":

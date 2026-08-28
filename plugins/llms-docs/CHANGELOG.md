@@ -2,6 +2,31 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.7] - 2026-08-28
+
+### リダイレクト経由の304誤信頼を構造的に根絶: conditionalヘッダーをredirect時に剥がす (0.21.6 の追いコミット)
+
+Codex R6指摘1件 (P2)。0.21.6の修正 (`resp.url != url` チェック) は200成功パスのみをカバーしており、
+既存のsidecarが**リダイレクトが始まる前の正当なvalidator**を持っているケースでは、そのvalidatorが
+リダイレクト先に転送されて偶然304を引き当てる可能性を防げていなかった。304のレスポンスは
+`e.url` (最終到達URL) を持つことを実機確認したが、advisor相談のうえ「304分岐にもチェックを
+追加する」対症療法ではなく、**根本原因 (conditionalヘッダーがredirectで転送されること自体)** を
+断つ方向に修正した。
+
+- `urllib.request.HTTPRedirectHandler` を継承した `_NoValidatorRedirectHandler` を追加し、
+  `redirect_request()` でリダイレクト後のリクエストから `If-None-Match`/`If-Modified-Since` を
+  剥がすようにした。`urllib.request.install_opener()` でプロセス全体のデフォルトopenerとして
+  組み込むため、`fetch_url`側は従来どおり `urllib.request.urlopen()` を呼ぶだけで自動的に適用される
+  (各`parse-*.py`は単機能プロセスとして実行されるため、プロセス全体への副作用も安全)
+- これによりconditionalヘッダーがリダイレクト先に到達すること自体が無くなり、304分岐での
+  誤信頼は構造的に発生し得なくなった。0.21.6で追加した `resp.url != url` チェック (200パス側) は
+  多重防御として維持: 仮に将来このredirect handlerが外れても、リダイレクト越しに得たvalidatorを
+  保存しない側で二重に守る
+
+回帰テスト2件追加。実際の(モックしていない) `HTTPRedirectHandler.redirect_request()` 呼び出しで
+ヘッダーが剥がれることと、`_NoValidatorRedirectHandler` がプロセスのデフォルトopenerに実際に
+組み込まれていることを検証 (`test_fetch_and_cache.py`、192 tests, all green)。
+
 ## [0.21.6] - 2026-08-28
 
 ### リダイレクトを跨いだ場合にetag/last_modifiedを保存しないよう修正 (0.21.5 の追いコミット)
