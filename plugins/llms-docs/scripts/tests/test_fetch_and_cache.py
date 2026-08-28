@@ -14,13 +14,16 @@ code path these tests need to get past.
 """
 
 import contextlib
+import gzip
 import http.client
 import io
+import json
 import os
 import shutil
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
@@ -325,6 +328,269 @@ class FetchUrlTest(unittest.TestCase):
             )
         mock_urlopen.assert_not_called()
         self.assertEqual(result, cache_path)
+
+
+def _http_error(code: int, url: str = "https://example.com/x") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, code, f"HTTP {code}", {}, None)
+
+
+class GzipAndConditionalGetTest(unittest.TestCase):
+    """gzip decompression and ETag/Last-Modified conditional GET.
+
+    ``urllib`` never auto-decompresses ``Content-Encoding: gzip`` and never
+    returns a 304 as a normal response object (it raises ``HTTPError`` with
+    ``code=304`` instead) — both need to be handled explicitly, and both
+    need a mocked ``urlopen`` (a cache fixture alone can't exercise either).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _cache_path(self, name="cache.txt"):
+        return os.path.join(self.tmp, name)
+
+    def _meta_path(self, cache_path):
+        return cache_path + ".meta.json"
+
+    def test_gzip_content_encoding_is_decompressed_before_caching(self):
+        body = b"plain text body" * 100
+        compressed = gzip.compress(body)
+        resp = _FakeResponse(compressed, headers={
+            "Content-Encoding": "gzip",
+            "Content-Length": str(len(compressed)),
+        })
+        cache_path = self._cache_path()
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua"
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path, "rb") as f:
+            self.assertEqual(f.read(), body)
+
+    def test_content_length_is_validated_against_compressed_bytes(self):
+        # Content-Length describes what was actually transferred (the
+        # gzip-encoded body), not the decompressed size — a mismatch here
+        # must still be caught even though the *decompressed* size might
+        # look unrelated to either number.
+        body = b"plain text body" * 100
+        compressed = gzip.compress(body)
+        bad_resp = _FakeResponse(compressed[:-5], headers={
+            "Content-Encoding": "gzip",
+            "Content-Length": str(len(compressed)),
+        })
+        cache_path = self._cache_path()
+        with mock.patch("urllib.request.urlopen", return_value=bad_resp):
+            with self.assertRaises(SystemExit) as cm:
+                _common.fetch_url(
+                    "https://example.com/x", cache_path, user_agent="ua"
+                )
+        self.assertEqual(cm.exception.code, 1)
+        self.assertFalse(os.path.exists(cache_path))
+
+    def test_accept_encoding_gzip_header_is_always_sent(self):
+        cache_path = self._cache_path()
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["accept_encoding"] = req.get_header("Accept-encoding")
+            return _FakeResponse(b"hello")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
+        self.assertEqual(captured["accept_encoding"], "gzip")
+
+    def test_successful_fetch_persists_etag_and_last_modified_sidecar(self):
+        cache_path = self._cache_path()
+        resp = _FakeResponse(b"hello", headers={
+            "ETag": '"abc123"', "Last-Modified": "Wed, 01 Jan 2026 00:00:00 GMT",
+        })
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
+        with open(self._meta_path(cache_path), encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta, {
+            "etag": '"abc123"', "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT",
+        })
+
+    def test_response_without_validators_writes_empty_sidecar(self):
+        # A server that never sends ETag/Last-Modified must not leave a
+        # *previous* fetch's stale sidecar lying around to be sent on the
+        # next conditional GET.
+        cache_path = self._cache_path()
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({"etag": '"stale"'}, f)
+        with mock.patch(
+            "urllib.request.urlopen", return_value=_FakeResponse(b"hello")
+        ):
+            _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
+        with open(self._meta_path(cache_path), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {})
+
+    def test_sidecar_write_failure_does_not_fail_an_otherwise_successful_fetch(self):
+        # The cache file itself is already written by the time the sidecar
+        # write is attempted — losing the sidecar is a pure optimization
+        # loss (no conditional GET next time), never a reason to report
+        # this fetch as failed.
+        cache_path = self._cache_path()
+        real_atomic_write = _common._atomic_write
+
+        def _fail_only_for_sidecar(path, data):
+            if path.endswith(".meta.json"):
+                raise OSError("disk full")
+            return real_atomic_write(path, data)
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=_FakeResponse(b"hello", headers={"ETag": '"abc123"'}),
+        ), mock.patch.object(
+            _common, "_atomic_write", side_effect=_fail_only_for_sidecar
+        ):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua"
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path, "rb") as f:
+            self.assertEqual(f.read(), b"hello")
+        self.assertFalse(os.path.exists(self._meta_path(cache_path)))
+
+    def test_non_dict_sidecar_is_treated_like_a_missing_one(self):
+        # Valid JSON that isn't an object (a list, a bare string, ...) —
+        # nothing guarantees the sidecar file was never hand-edited or
+        # written by some future version with a different shape.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump(["not", "a", "dict"], f)
+
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            return _FakeResponse(b"fresh content")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        self.assertIsNone(captured["if_none_match"])
+
+    def test_stale_past_max_age_sends_conditional_headers_from_sidecar(self):
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "etag": '"abc123"', "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT",
+            }, f)
+
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            captured["if_modified_since"] = req.get_header("If-modified-since")
+            return _FakeResponse(b"fresh content")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(captured["if_none_match"], '"abc123"')
+        self.assertEqual(captured["if_modified_since"], "Wed, 01 Jan 2026 00:00:00 GMT")
+
+    def test_no_conditional_headers_sent_without_a_sidecar(self):
+        # A cache file written before this feature existed has no sidecar
+        # at all — must fall back to a plain unconditional GET, not crash.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            captured["if_modified_since"] = req.get_header("If-modified-since")
+            return _FakeResponse(b"fresh content")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertIsNone(captured["if_none_match"])
+        self.assertIsNone(captured["if_modified_since"])
+
+    def test_304_bumps_mtime_without_rewriting_or_redownloading_content(self):
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("still valid content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({"etag": '"abc123"'}, f)
+
+        with mock.patch(
+            "urllib.request.urlopen", side_effect=_http_error(304)
+        ) as mock_urlopen:
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        mock_urlopen.assert_called_once()
+        self.assertEqual(result, cache_path)
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "still valid content")
+        # The sidecar is untouched (still just the original etag, no
+        # last_modified key added) — a 304 means "your validators are
+        # still current," not "here is a fresh response to re-persist."
+        with open(self._meta_path(cache_path), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"etag": '"abc123"'})
+        age = time.time() - os.path.getmtime(cache_path)
+        self.assertLess(age, 5)
+
+    def test_304_with_no_existing_cache_is_a_normal_failure(self):
+        # Can't happen via this function's own request (no cache means no
+        # conditional headers are ever sent) but a defensively-coded path
+        # for a server that 304s an unconditional request anyway: there is
+        # no body to fall back to, so this must behave like any other
+        # fetch failure with nothing cached — not crash on the 304 itself.
+        cache_path = self._cache_path()
+        with mock.patch(
+            "urllib.request.urlopen", side_effect=_http_error(304)
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                _common.fetch_url(
+                    "https://example.com/x", cache_path, user_agent="ua"
+                )
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_non_304_http_error_falls_back_to_stale_cache_like_any_other_failure(self):
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with mock.patch(
+            "urllib.request.urlopen", side_effect=_http_error(404)
+        ):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "stale content")
 
 
 class LoadLinesTest(unittest.TestCase):

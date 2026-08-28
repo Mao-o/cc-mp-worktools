@@ -11,7 +11,9 @@ to the symlink would shadow the real one.
 
 from __future__ import annotations
 
+import gzip
 import http.client
+import json
 import os
 import re
 import shlex
@@ -431,6 +433,66 @@ class FetchError(Exception):
         self.cause = cause
 
 
+def _meta_path(cache_path: str) -> str:
+    return cache_path + ".meta.json"
+
+
+def _load_fetch_meta(cache_path: str) -> dict:
+    """Return the persisted ETag/Last-Modified sidecar for *cache_path*.
+
+    Returns ``{}`` when there is no sidecar, it's unreadable/corrupt, or it
+    parses to valid JSON that isn't a ``dict`` (e.g. a list or bare string
+    — nothing guarantees the file wasn't hand-edited or written by some
+    future version with a different shape) — in every case the caller just
+    ends up sending no conditional headers, falling back to the plain
+    unconditional GET this always did before conditional support existed.
+    """
+    try:
+        with open(_meta_path(cache_path), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _save_fetch_meta(cache_path: str, etag: str | None, last_modified: str | None) -> None:
+    """Persist *etag*/*last_modified* alongside *cache_path* for the next fetch's
+    conditional GET.
+
+    Always overwrites — including with an empty dict when the response sent
+    neither header — so a server that stops sending them doesn't leave a
+    stale conditional value that would keep being sent on every future
+    fetch (and keep getting silently ignored, or worse, matched by
+    coincidence).
+    """
+    meta = {}
+    if etag:
+        meta["etag"] = etag
+    if last_modified:
+        meta["last_modified"] = last_modified
+    _atomic_write(_meta_path(cache_path), json.dumps(meta).encode("utf-8"))
+
+
+def _handle_fetch_failure(url: str, cache_path: str, error: Exception,
+                           raise_on_error: bool) -> str:
+    """Shared tail of ``fetch_url``'s failure handling (stale-serve / exit /
+    raise), factored out so both the ``HTTPError`` branch (304 aside) and
+    the general transport-error branch apply it identically.
+    """
+    if os.path.exists(cache_path):
+        age = time.time() - os.path.getmtime(cache_path)
+        print(
+            f"WARNING: fetch failed ({error}); using cached copy "
+            f"({_format_age(age)} old)",
+            file=sys.stderr,
+        )
+        return cache_path
+    if raise_on_error:
+        raise FetchError(url, error) from error
+    print(f"Error: Failed to fetch {url}: {error}", file=sys.stderr)
+    sys.exit(1)
+
+
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
               max_age: int | None = None, raise_on_error: bool = False) -> str:
@@ -468,16 +530,42 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     skipped rather than raising ``ValueError`` — the bytes we already read
     are not in doubt just because the length header describing them is
     garbled, so there is nothing to fall back to a stale cache *for*.
+
+    Sends ``Accept-Encoding: gzip`` and decompresses a ``Content-Encoding:
+    gzip`` response before caching (``urllib`` does not auto-decompress).
+    The ``Content-Length`` check above runs on the *compressed* bytes
+    actually read off the wire — that header describes the transferred
+    (encoded) size, not the decompressed size — so it is validated before
+    ``gzip.decompress`` is called.
+
+    When an existing cache has a persisted ``ETag``/``Last-Modified`` (see
+    ``_load_fetch_meta``/``_save_fetch_meta``), a re-fetch past *max_age*
+    sends them as ``If-None-Match``/``If-Modified-Since``. A ``304 Not
+    Modified`` response (raised by ``urllib`` as ``HTTPError`` with
+    ``code=304``, not returned as a normal response) is treated as
+    success: the cache file's mtime is bumped to now (resetting the
+    *max_age* clock) without re-writing its content, and no bytes are
+    re-downloaded. Any other HTTP status/transport error falls through to
+    the same stale-serve/exit/raise handling as before.
     """
-    if os.path.exists(cache_path):
+    cache_exists = os.path.exists(cache_path)
+    if cache_exists:
         if max_age is None:
             return cache_path
         age = time.time() - os.path.getmtime(cache_path)
         if age < max_age:
             return cache_path
 
+    headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip"}
+    if cache_exists:
+        meta = _load_fetch_meta(cache_path)
+        if meta.get("etag"):
+            headers["If-None-Match"] = meta["etag"]
+        if meta.get("last_modified"):
+            headers["If-Modified-Since"] = meta["last_modified"]
+
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             content_length = resp.headers.get("Content-Length")
@@ -491,25 +579,35 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 raise http.client.IncompleteRead(
                     data, expected_length - len(data)
                 )
+            if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+                data = gzip.decompress(data)
+            etag = resp.headers.get("ETag")
+            last_modified = resp.headers.get("Last-Modified")
         if create_parent:
             parent = os.path.dirname(cache_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
         _atomic_write(cache_path, data)
-        return cache_path
-    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
-        if os.path.exists(cache_path):
-            age = time.time() - os.path.getmtime(cache_path)
+        try:
+            _save_fetch_meta(cache_path, etag, last_modified)
+        except OSError as e:
+            # The fetch itself already succeeded and cache_path is already
+            # written — a failure persisting the *sidecar* (disk full, a
+            # read-only cache dir that still somehow let the first write
+            # through, ...) is a pure optimization loss (no conditional GET
+            # next time), never a reason to report this fetch as failed.
             print(
-                f"WARNING: fetch failed ({e}); using cached copy "
-                f"({_format_age(age)} old)",
+                f"WARNING: could not save fetch metadata for {url}: {e}",
                 file=sys.stderr,
             )
+        return cache_path
+    except urllib.error.HTTPError as e:
+        if e.code == 304 and cache_exists:
+            os.utime(cache_path, None)
             return cache_path
-        if raise_on_error:
-            raise FetchError(url, e) from e
-        print(f"Error: Failed to fetch {url}: {e}", file=sys.stderr)
-        sys.exit(1)
+        return _handle_fetch_failure(url, cache_path, e, raise_on_error)
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+        return _handle_fetch_failure(url, cache_path, e, raise_on_error)
 
 
 def load_lines(path: str):

@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.0] - 2026-08-28
+
+### HTTP取得にgzip圧縮転送 + 条件付きGET (ETag/Last-Modified) を追加し、無条件の全量再取得を削減
+
+`fetch_url` は `Accept-Encoding` を送らず (非圧縮転送)、ETag/Last-Modifiedも保存しないため、
+`--max-age` 超過時は内容が同じでも常に全量GETしていた。platformページ (text, ~23.8MB) はgzipで
+1/4〜1/5に縮小できる見込みで、再取得の遅さはfork subagentの応答遅延=離脱要因になっていた。
+
+- `Accept-Encoding: gzip` を常時送信。`Content-Encoding: gzip` の応答は `gzip.decompress` (stdlib)
+  で展開してからキャッシュに書き込む (`urllib`は自動展開しないため)。`Content-Length` 検証は
+  展開前の圧縮バイト数に対して行う (このヘッダーは転送サイズ=圧縮後サイズを表すため)
+- `<cache>.meta.json` サイドカーに `ETag`/`Last-Modified` を保存。`--max-age` 超過時の再取得は
+  `If-None-Match`/`If-Modified-Since` 付きの条件付きGETを送り、`304 Not Modified` (urllibは
+  `HTTPError(code=304)` として送出、通常のレスポンスとしては返らない) ならボディ再取得・
+  キャッシュ書き込みをせず `os.utime` でmtimeだけ更新 (`--max-age` の時計をリセット)。
+  サイドカーが無い既存キャッシュ (この機能追加以前に書かれたもの) は条件ヘッダー無しの
+  無条件GETにフォールバックする。304以外のHTTPエラー (404/500等) は既存のstale-serve/exit/raise
+  と同じ扱い
+- サイドカーは応答が両ヘッダーとも送らなかった場合も (空で) 上書きする。前回分のETag等が
+  古いまま残り、サーバーが対応をやめた後も送り続けてしまう事故を防ぐため
+
+回帰テスト12件追加 (`test_fetch_and_cache.py`、181 tests, all green)。
+
 ## [0.20.1] - 2026-08-28
 
 ### `search-content` の全ページスキャンが全fetch完了を待ってから結果を出す barrier になっていた問題を修正 (0.20.0 の追いコミット)
