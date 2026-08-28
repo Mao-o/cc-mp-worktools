@@ -425,17 +425,28 @@ def _build_deny_response(
     )
 
 
-# 1 セグメントを ``shlex.split`` に渡す長さの上限 (0.21.0)。
+# 静的解析にかける command / segment の長さ上限 (0.21.0)。
 #
-# 実測 (subprocess end-to-end):
+# 実測 A — ``shlex.split`` の超線形コスト (subprocess end-to-end):
 #   200KB ->   396 ms   400KB -> 1,178 ms
 #   600KB -> 2,570 ms (2 秒 timeout 超過)   800KB -> 4,809 ms
 #
-# 64KB は「実測で <100ms 目標の内側に収まる」かつ「通常のセッションが書く
-# コマンド長を十分に包含する」点を取った値。超過分は tokenize せず
-# ask_or_allow に倒す (allow ではない — lenient mode で allow になるのは
-# 他の静的解析不能ケースと同じ扱い)。
-_MAX_SEGMENT_CHARS = 64 * 1024
+# 実測 B — segmentation + hard-stop の 2 パス (どちらも per-character lexer で
+# これ自体も超線形。**ガードより前に走る**ので、ここを通す時点で予算を失う):
+#    64KB ->    17.2 ms    512KB ->   145.9 ms
+#  1024KB ->   429.8 ms   2048KB -> 1,398.6 ms
+#
+# したがって長さ判定は **command 全体に対して segmentation の前** に行う
+# (``handle`` 冒頭)。segment 単位の判定も残してあるが、command 全体が上限内なら
+# 個々の segment も上限内なので実質は冗長な安全網。
+#
+# 64KB は「実測 B が 20ms 未満に収まる」かつ「通常のセッションが書くコマンド長を
+# 十分に包含する」点を取った値。超過分は tokenize せず ask_or_allow に倒す
+# (allow ではない — lenient mode で allow になるのは他の静的解析不能ケースと同じ)。
+_MAX_COMMAND_CHARS = 64 * 1024
+
+# 後方互換の別名 (segment 単位の判定と既存テストが参照する)。
+_MAX_SEGMENT_CHARS = _MAX_COMMAND_CHARS
 
 
 def _analyze_segment(
@@ -569,6 +580,23 @@ def handle(envelope: dict) -> dict:
 
     if not isinstance(command, str) or not command.strip():
         return output.make_allow()
+
+    # 長さガードは **segmentation より前** に置く (0.21.0)。
+    #
+    # ``_split_command_on_operators`` と ``_has_hard_stop`` はどちらも全文字を
+    # 舐める per-character lexer で、しかも超線形。ガードを segment ループ内に
+    # 置くと、そこへ到達する前にこの 2 パスで timeout 予算を使い切ってしまう。
+    #
+    # 実測 (2 パスのみ、プロセス起動と JSON パースを除く):
+    #     64KB ->    17.2 ms      512KB ->   145.9 ms
+    #   1024KB ->   429.8 ms     2048KB -> 1,398.6 ms
+    #
+    # hook の timeout は 2 秒で、超過時は**出力が破棄され decision が消える**
+    # (公式仕様)。時間内に自分で ``ask_or_allow`` を返すためには、
+    # 高価なパスを 1 つも走らせる前に長さで打ち切る必要がある。
+    if len(command) > _MAX_COMMAND_CHARS:
+        L.log_info("bash_classify", "segment_too_large")
+        return output.ask_or_allow(M.bash_lenient("segment_too_large"), envelope)
 
     try:
         rules = load_patterns(cwd=cwd)

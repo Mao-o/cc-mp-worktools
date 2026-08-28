@@ -14,7 +14,7 @@ import time
 import unittest
 
 from handlers import bash_handler
-from handlers.bash_handler import _MAX_SEGMENT_CHARS, handle
+from handlers.bash_handler import _MAX_COMMAND_CHARS, handle
 
 
 def _envelope(command: str, mode: str = "default") -> dict:
@@ -42,29 +42,63 @@ class TestSegmentSizeGuard(unittest.TestCase):
         self.assertEqual(_verdict(handle(_envelope(cmd))), "allow")
 
     def test_over_limit_falls_back_to_ask(self):
-        cmd = "echo '" + "A" * (_MAX_SEGMENT_CHARS + 100) + "'"
+        cmd = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
         self.assertEqual(_verdict(handle(_envelope(cmd))), "ask")
 
     def test_over_limit_is_lenient_in_autonomous_mode(self):
         """ask_or_allow なので auto では allow (他の静的解析不能ケースと同じ)。"""
-        cmd = "echo '" + "A" * (_MAX_SEGMENT_CHARS + 100) + "'"
+        cmd = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
         self.assertEqual(_verdict(handle(_envelope(cmd, "auto"))), "allow")
 
     def test_reason_explains_the_length_limit(self):
-        cmd = "echo '" + "A" * (_MAX_SEGMENT_CHARS + 100) + "'"
+        cmd = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
         out = handle(_envelope(cmd))
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("長さ上限", reason)
 
-    def test_other_segments_still_reach_deny(self):
-        """巨大セグメントがあっても、他セグメントの deny 検出は続く。
+    def test_composite_under_limit_still_reaches_deny(self):
+        """上限内なら複合コマンドの deny 検出は従来どおり働く。
 
-        ガードは ``continue`` で pending_ask に積むだけで early return しない
-        (0.11.0 の segment 単位再評価の設計を維持していること)。
+        0.11.0 の segment 単位再評価 (1 セグメントが解析不能でも他セグメントの
+        deny を拾う) が壊れていないことの回帰。
         """
-        big = "echo '" + "A" * (_MAX_SEGMENT_CHARS + 100) + "'"
-        cmd = f"{big} && cat /tmp/.env"
+        filler = "echo '" + "A" * 1000 + "'"
+        cmd = f"{filler} && cat /tmp/.env"
+        self.assertLess(len(cmd), _MAX_COMMAND_CHARS)
         self.assertEqual(_verdict(handle(_envelope(cmd))), "deny")
+
+    def test_over_limit_composite_is_ask_even_with_sensitive_operand(self):
+        """**意図したトレードオフ**: 上限超過の複合コマンドは deny に到達しない。
+
+        その operand を見つけるには ``_split_command_on_operators`` と
+        ``_has_hard_stop`` を全文字に対して走らせる必要があり、それ自体が
+        2 秒予算を超える (2MiB で 2 パス合計 1,399ms、超線形)。timeout すると
+        hook の出力ごと破棄されて **decision が消える** ため、
+        「時間内に ask を返す」方が「時間切れで何も返さない」より強い。
+
+        64KB 超のコマンドに機密 operand を同居させる形は「うっかり」の範疇を
+        超えるので、思想 1 の射程外として受容する。
+        """
+        big = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
+        cmd = f"{big} && cat /tmp/.env"
+        self.assertEqual(_verdict(handle(_envelope(cmd))), "ask")
+
+    def test_guard_runs_before_expensive_lexing(self):
+        """ガードが segmentation より前にあること (到達コストの回帰)。
+
+        segment ループ内に置くと、そこへ到達する前に 2 パスで予算を使い切る。
+        2MiB で 2 パス合計 1,399ms だったので、上限は十分下回る必要がある。
+        """
+        cmd = "echo '" + "A" * (2 * 1024 * 1024) + "'"
+        start = time.perf_counter()
+        result = handle(_envelope(cmd))
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        self.assertEqual(_verdict(result), "ask")
+        self.assertLess(
+            elapsed_ms, 200,
+            f"2MiB のコマンドに {elapsed_ms:.0f}ms — "
+            "ガードが高価なパスより後ろにある可能性",
+        )
 
     def test_guard_avoids_superlinear_cost(self):
         """上限超過の入力が実用的な時間で返ること。
@@ -83,8 +117,8 @@ class TestSegmentSizeGuard(unittest.TestCase):
 
     def test_limit_is_documented_constant(self):
         """上限がマジックナンバーではなく名前付き定数であること。"""
-        self.assertEqual(_MAX_SEGMENT_CHARS, 64 * 1024)
-        self.assertTrue(hasattr(bash_handler, "_MAX_SEGMENT_CHARS"))
+        self.assertEqual(_MAX_COMMAND_CHARS, 64 * 1024)
+        self.assertTrue(hasattr(bash_handler, "_MAX_COMMAND_CHARS"))
 
 
 if __name__ == "__main__":

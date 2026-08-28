@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **914** / check 79 → **80** (計 994)
+- テスト件数: redact 862 → **916** / check 79 → **80** (計 996)
 
 ### 1. 不具合の内容
 
@@ -148,12 +148,32 @@ segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一�
 | 600KB | **2,569.6 ms** (2 秒 timeout 超過) | 203.4 ms |
 | 800KB | 4,808.8 ms | 296.8 ms |
 
-`_MAX_SEGMENT_CHARS` (64KB) を超えた segment は tokenize せず
+長さ判定は **segmentation より前** (`handle` 冒頭) で command 全体に対して行う。
+`_split_command_on_operators` と `_has_hard_stop` はどちらも全文字を舐める
+per-character lexer で、しかも超線形なため、ガードを segment ループ内に置くと
+**そこへ到達する前に予算を使い切る**:
+
+| command | 2 パスのみ (修正前) | end-to-end (修正後) |
+|---|---|---|
+| 64KB | 17.2 ms | 42.0 ms |
+| 512KB | 145.9 ms | 29.6 ms |
+| 1024KB | 429.8 ms | 32.7 ms |
+| 2048KB | **1,398.6 ms** | **37.5 ms** |
+
+`_MAX_COMMAND_CHARS` (64KB) を超えた command は tokenize せず
 `ask_or_allow("segment_too_large")` に倒す。hook が**時間内に自ら decision を
 返す**ため、timeout で出力ごと破棄されて無音 fail-open になる経路
 (公式仕様: timeout 到達時は hook の出力は破棄され decision は無し) を避けられる。
-`continue` で `pending_ask` に積むだけなので、他 segment の deny 検出は続く
-(0.11.0 の segment 単位再評価を維持)。
+上限**内**であれば `continue` で `pending_ask` に積むだけなので、他 segment の
+deny 検出は従来どおり続く (0.11.0 の segment 単位再評価を維持)。
+
+**意図したトレードオフ**: 上限を**超えた**複合コマンド
+(`<64KB 超の引数> && cat .env` 等) は deny に到達しない。その operand を
+見つけるには上記 2 パスを全文字に走らせる必要があり、それ自体が予算を
+超えるため。timeout すると hook の出力ごと破棄され **decision が消える**ので、
+「時間内に ask を返す」方が「時間切れで何も返さない」より強い。64KB 超の
+コマンドに機密 operand を同居させる形は「うっかり」の範疇を超えるため、
+思想 1 の射程外として受容する。
 
 **判定境界の変化**: (a) は無し。(b) は 64KB 超の segment が `ask_or_allow` に
 倒れるようになる (従来はそのまま解析していた)。ただし 64KB 超の単一 segment は
