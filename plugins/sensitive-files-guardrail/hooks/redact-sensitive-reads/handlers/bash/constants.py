@@ -131,6 +131,17 @@ _METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
     "tree": frozenset({"--fromfile"}),
 }
 
+# git のサブコマンド前 global option のうち、**次の token を値として取る** もの
+# (``-C <path>`` / ``-c <name>=<value>`` / ``--git-dir <path>`` /
+# ``--work-tree <path>`` / ``--namespace <name>`` / ``--config-env <name>=<envvar>``)。
+# ``=`` 結合形 (``--git-dir=x``) と密着形 (``-Cdir`` / ``-ck=v``) は 1 token で
+# 完結する。``interpreters._git_global_options`` (サブコマンド特定) と
+# ``operand_lexer._git_subcommand_index`` (コマンド別 option 知識の適用位置) が
+# 同じ規則でサブコマンドを探すための共有定義 (0.22.0)。
+_GIT_GLOBAL_VALUE_OPTS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+})
+
 # git の metadata-only subcommand (``git <sub>`` 直書き形のみ認識)。
 # ``git -C dir check-ignore`` のような global option 前置形は対象外 (従来通り
 # operand scan → deny。保守側に倒す)。``show`` / ``diff`` / ``log`` /

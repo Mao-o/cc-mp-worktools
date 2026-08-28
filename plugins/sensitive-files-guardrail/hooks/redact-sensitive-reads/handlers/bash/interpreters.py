@@ -45,6 +45,7 @@ from __future__ import annotations
 import re
 
 from handlers.bash.constants import (
+    _GIT_GLOBAL_VALUE_OPTS,
     _METADATA_ONLY_FIRST_TOKENS,
     _OPAQUE_WRAPPERS,
     _SAFE_READ_FIRST_TOKENS,
@@ -448,7 +449,8 @@ def _git_global_options(tokens: list[str]) -> tuple[bool, bool, str | None]:
             has_config = True
             i += 1 if "=" in t else 2
             continue
-        if t in ("-C", "--git-dir", "--work-tree", "--namespace"):
+        if t in _GIT_GLOBAL_VALUE_OPTS:
+            # ``-c`` / ``--config-env`` は上で処理済み。残りは値を 1 token 取る
             i += 2
             continue
         if t.startswith("-"):

@@ -1,5 +1,6 @@
 """operand トークンの glob 判定 / dotenv glob 判定 / path 候補抽出
-(0.3.3 分解、0.8.0 で `_literalize` / `_glob_candidates` / `_is_absolute_or_relative_path_exec` 撤廃)。
+(0.3.3 分解、0.8.0 で `_literalize` / `_glob_candidates` / `_is_absolute_or_relative_path_exec` 撤廃、
+0.22.0 で path 候補抽出にコマンド別の option 知識 (``_CmdSpec``) を導入)。
 
 このモジュールは副作用なし・plugin 状態非依存。``SFG_CASE_SENSITIVE`` 環境変数の
 参照のみ外部状態 (全テストで同じ解釈をしたいため、``is_sensitive`` 側の opt-out
@@ -7,16 +8,50 @@
 
 ``_operand_is_sensitive`` は ``is_sensitive`` / ``normalize`` に依存する plugin
 ステート側の処理なので ``bash_handler.py`` に残す。
+
+### path 候補抽出の設計 (0.22.0)
+
+0.21.x までの ``_find_path_candidates`` は「option で始まらない token = path 候補、
+``--opt=value`` / ``-Xvalue`` の value も候補」の一律規則だった。このため
+
+- grep 系 / jq / awk / sed の **第 1 positional** (pattern / filter / script) が
+  path 候補になり、``grep .env README.md`` / ``jq '.env' package.json`` /
+  ``sed -n 's/.env/X/p' README.md`` が「``.env`` を読む」と誤認されて hard deny
+- 値が path ではない option の値 (``git log -S.env`` / ``--exclude='.env'``) が
+  候補になり、**ユーザーが「.env を読ませない」と明示している** ``grep -rn TODO
+  --exclude='.env'`` まで deny
+
+していた (2026-08 精査。実ログの hard deny のうち git / grep / sed / awk で 48%)。
+
+コマンド別の ``_CmdSpec`` (値を取る option とその値の種別、第 1 positional が
+pattern か) を持ち、token 列を「option / option の値 / positional / redirect」に
+字句分けしてから候補を決める。**spec に無いコマンド・option は 0.21.x までの
+規則そのまま** (分離形の値は bare token として候補、``=`` / 密着形の値は候補)。
+spec への登録は「deny を外す側」なので、漏れ = 現状維持 (false positive が残る
+だけ)、誤登録 (値を取らない option を値あり、path の値を non-path と書く) だけが
+保護の穴になる。登録する option は **全形で必ず値を取るもの** に限り、
+``--color[=WHEN]`` のような値省略可の option は登録しない (分離形の次 token を
+値と誤認して path を読み飛ばすため)。
+
+metadata-only gate (``bash_handler._reads_file_content`` /
+``_git_ls_files_exposes_object``) は **生の token 列** で判定しているため、ここでの
+除外は gate の判定に影響しない (``file -f .env`` / ``wc --files0-from=.env`` /
+``tree --fromfile .env`` / ``git ls-files -s .env`` は gate を抜けた後の operand
+scan で従来どおり deny)。
 """
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 
-from handlers.bash.constants import _GLOB_CHARS
+from handlers.bash.constants import _GIT_GLOBAL_VALUE_OPTS, _GLOB_CHARS
+from handlers.bash.grep_extract import _GREP_FIRST_TOKENS
+from handlers.bash.interpreters import _AWK_FIRST_TOKENS, _SED_FIRST_TOKENS
+from handlers.bash.redirects import _WRITE_REDIRECT_RE
 
 # dotenv ファミリーで「うっかり頻出」とする literal stem (0.8.0)。
-# operand glob (例: ``.env*`` / ``*.envrc``) がこれらに ``fnmatchcase`` で
+# operand glob (例: ``.env*``) がこれらに shell の pathname expansion と同じ意味論で
 # 一致するときだけ deny に倒す。それ以外の glob (``id_rsa*`` / ``*.key`` /
 # ``cred*.json`` / ``*.log`` 等) は ``ask_or_allow`` に格下げ (思想 1: うっかり
 # 露出予防が目的、敵対的防御は非目的)。
@@ -63,6 +98,275 @@ def _glob_operand_is_dotenv_match(operand: str) -> bool:
     return False
 
 
+# -- コマンド別 option 知識 (0.22.0) ----------------------------------------
+
+# option の値の種別 (``_CmdSpec.values`` の値文字列の 1 文字 = 値 1 token)。
+_VALUE_NON_PATH = "n"   # pattern / 正規表現 / 数値 / 書式 / glob … → 候補から外す
+_VALUE_PATH = "p"       # patterns file / ignore file / archive … → 候補に残す
+
+
+@dataclass(frozen=True)
+class _CmdSpec:
+    """コマンド 1 つ分の option 知識。
+
+    values: option 名 → 値の種別列。1 文字が値 1 token に対応し ``n`` = path では
+        ない値 (候補から外す)、``p`` = path の値 (候補に残す)。短形 (``-e``) は束ね
+        (``-rne PAT``) と密着 (``-ePAT``)、長形 (``--regexp``) は分離と ``=`` 結合、
+        および GNU getopt_long の一意な prefix 省略 (``--reg=PAT``) を解釈する。
+        **ここに無い option は値を取らない扱い** (0.21.x までの規則)。
+    pattern_slot: 第 1 positional が pattern / filter / script であって path では
+        ないコマンド (grep 系 / jq / awk / sed) なら True。
+    pattern_opts: pattern を option 経由で与える option。token 列のどこかに 1 つ
+        でも現れたら positional は全て path (``grep -e PAT file`` /
+        ``grep -f FILE file`` / ``sed -e SCRIPT file``)。
+    """
+
+    values: dict[str, str] = field(default_factory=dict)
+    pattern_slot: bool = False
+    pattern_opts: frozenset[str] = frozenset()
+
+
+def _spec(values: dict[str, str] | None = None, *,
+          pattern_opts: tuple[str, ...] | None = None) -> _CmdSpec:
+    """``_CmdSpec`` の短い組み立て。
+
+    ``pattern_opts`` を渡す (空 tuple 可) と「第 1 positional は pattern」の
+    コマンド、None なら positional は全て path のコマンド。
+    """
+    return _CmdSpec(
+        values=dict(values or {}),
+        pattern_slot=pattern_opts is not None,
+        pattern_opts=frozenset(pattern_opts or ()),
+    )
+
+
+# grep / egrep / fgrep (GNU / BSD 共通の必須値 option のみ)。
+# ``-e`` / ``--regexp`` の値は pattern (non-path)、``-f`` / ``--file`` の値は
+# patterns file (path、``grep -f .env x.txt`` は .env の中身を pattern として読む
+# ので deny 維持)。どちらかがあれば positional は全て file。
+_GREP_SPEC = _spec(
+    {"-e": "n", "--regexp": "n", "-f": "p", "--file": "p"},
+    pattern_opts=("-e", "--regexp", "-f", "--file"),
+)
+# ripgrep: pattern 供給 option は grep と同じ。
+_RG_SPEC = _spec(
+    {"-e": "n", "--regexp": "n", "-f": "p", "--file": "p"},
+    pattern_opts=("-e", "--regexp", "-f", "--file"),
+)
+# ag (the silver searcher): pattern は positional のみ (``-e`` 無し、``-f`` は
+# ``--follow`` で値を取らない)。
+_AG_SPEC = _spec({}, pattern_opts=())
+# ack: ``--match PAT`` で pattern を与える。``-f`` は「PATTERN 無しでファイル名
+# だけ出す」flag (値なし) で、あれば positional は全て path。
+_ACK_SPEC = _spec({"--match": "n"}, pattern_opts=("--match", "-f"))
+# git grep: ``-e PAT`` / ``-f FILE`` は grep と同じ。
+_GIT_GREP_SPEC = _spec({"-e": "n", "-f": "p"}, pattern_opts=("-e", "-f"))
+# jq: 第 1 positional は filter。``-f`` / ``--from-file FILE`` なら filter は
+# ファイルから読み positional は全て入力 JSON (path)。
+_JQ_SPEC = _spec(
+    {"-f": "p", "--from-file": "p"},
+    pattern_opts=("-f", "--from-file"),
+)
+# awk 系: 第 1 positional は program。``-f`` / ``--file`` (gawk ``-E`` /
+# ``--exec``) なら program はファイルから読み positional は全て入力 file。
+# ``-F fs`` / ``-v var=val`` (gawk ``--field-separator`` / ``--assign``) は
+# 必須値の option (値は path ではない)。gawk ``-e`` / ``--source`` は program
+# text の供給。
+_AWK_SPEC = _spec(
+    {
+        "-f": "p", "--file": "p", "-E": "p", "--exec": "p",
+        "-e": "n", "--source": "n",
+        "-F": "n", "--field-separator": "n", "-v": "n", "--assign": "n",
+    },
+    pattern_opts=("-f", "--file", "-E", "--exec", "-e", "--source"),
+)
+# sed 系: 第 1 positional は script。``-e`` / ``--expression`` / ``-f`` /
+# ``--file`` があれば positional は全て入力 file。GNU / BSD で値の有無が異なる
+# ``-i`` / ``-l`` は **登録しない** (BSD の値なし ``-l`` を値ありと誤認すると
+# script を値として消費し、本当の file operand が script 枠に落ちて allow に
+# なる = 保護の穴)。GNU 専用の ``--line-length N`` は BSD に長形が無く誤認
+# しようがないので登録する。
+_SED_SPEC = _spec(
+    {
+        "-e": "n", "--expression": "n", "-f": "p", "--file": "p",
+        "--line-length": "n",
+    },
+    pattern_opts=("-e", "--expression", "-f", "--file"),
+)
+
+_SPECS: dict[str, _CmdSpec] = {}
+for _tok in _GREP_FIRST_TOKENS:
+    _SPECS[_tok] = _GREP_SPEC
+_SPECS["rg"] = _RG_SPEC
+_SPECS["ag"] = _AG_SPEC
+_SPECS["ack"] = _ACK_SPEC
+_SPECS["jq"] = _JQ_SPEC
+for _tok in _AWK_FIRST_TOKENS:
+    _SPECS[_tok] = _AWK_SPEC
+for _tok in _SED_FIRST_TOKENS:
+    _SPECS[_tok] = _SED_SPEC
+# git はサブコマンド単位で持つ (``git <sub>`` を key にする)。
+_SPECS["git grep"] = _GIT_GREP_SPEC
+del _tok
+
+
+# ``_lex_args`` が返す entry の種別。
+_K_OPT = "opt"      # option 名 (``-e`` / ``--regexp``。束ねは 1 文字ずつ ``-x``)
+_K_NON_PATH = "n"   # spec で non-path と分かっている option の値
+_K_PATH = "p"       # spec で path と分かっている option の値 / redirect の書込み先
+_K_UNKNOWN = "x"    # spec に無い option の ``=`` / 密着値 (0.21.x 互換で候補)
+_K_POS = "pos"      # positional (pattern 枠の判定対象)
+
+
+def _git_subcommand_index(tokens: list[str]) -> int | None:
+    """``git`` の global option を読み飛ばし、サブコマンド token の index を返す。
+
+    ``interpreters._git_global_options`` と同じ規則 (``_GIT_GLOBAL_VALUE_OPTS`` は
+    次の token を値として消費、それ以外の ``-`` 始まりは 1 token)。
+    サブコマンドが無ければ None。
+    """
+    i = 1
+    n = len(tokens)
+    while i < n:
+        t = tokens[i]
+        if t in _GIT_GLOBAL_VALUE_OPTS:
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        return i
+    return None
+
+
+def _resolve_long_option(name: str, values: dict[str, str]) -> str | None:
+    """``--NAME`` を spec の long option に解決する (完全一致 or 一意な prefix)。
+
+    GNU getopt_long / git parse-options は一意な prefix 省略 (``--reg`` =
+    ``--regexp``) を受理する。spec が知らない option の prefix を spec 内の別 option
+    に誤って解決しても、実コマンド側では曖昧 (error) か別の意味になるだけで、
+    こちらは pattern 枠を閉じる / 値を読み飛ばす方向 (= deny 寄り or 実行されない)
+    にしか倒れない。
+    """
+    if name in values:
+        return name
+    cands = [k for k in values if k.startswith("--") and k.startswith(name)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _lex_args(args: list[str], spec: _CmdSpec | None) -> list[tuple[str, str]]:
+    """引数 token 列を ``(種別, 文字列)`` の entry 列に字句分けする。
+
+    - ``--`` 以降は全て positional
+    - 書込み redirect (``>`` ``>>`` ``2>`` ``&>`` ``>|``、safe-read コマンドでは
+      residual metachar 判定を skip するためここまで届く) は、分離形なら次 token、
+      密着形 (``>.env``) ならその target を path 値にする (書込み先が機密 path
+      なら truncate なので候補に残す)
+    - spec に登録された option は値の種別列に従って後続 token / 密着部 / ``=``
+      の RHS を値として消費する
+    - spec に無い option は 0.21.x までの規則 (``=`` の RHS / 短形の密着部は
+      ``x``、分離形の値は消費せず次 token は positional)
+    """
+    values = spec.values if spec is not None else {}
+    out: list[tuple[str, str]] = []
+    pending = ""  # これから来る token を値として消費する種別列
+    in_ddash = False
+    for tok in args:
+        if pending:
+            out.append((pending[0], tok))
+            pending = pending[1:]
+            continue
+        if in_ddash:
+            out.append((_K_POS, tok))
+            continue
+        if tok == "--":
+            in_ddash = True
+            continue
+        if tok == "-":
+            # stdin。0.21.x までと同じく候補にしない (pattern 枠でもない)
+            out.append((_K_OPT, tok))
+            continue
+        m = _WRITE_REDIRECT_RE.match(tok) if tok and tok[0] in ">&0123456789" else None
+        if m:
+            target = m.group("target")
+            if not target:
+                out.append((_K_OPT, tok))
+                pending = _VALUE_PATH
+            elif not target.startswith("&"):  # ``>&1`` / ``>&-`` の fd 複製は除外
+                out.append((_K_PATH, target))
+            else:
+                out.append((_K_OPT, tok))
+            continue
+        if tok.startswith("--") and len(tok) > 2:
+            name, eq, rhs = tok.partition("=")
+            full = _resolve_long_option(name, values)
+            if full is None:
+                out.append((_K_OPT, name))
+                if eq and rhs:
+                    out.append((_K_UNKNOWN, rhs))
+                continue
+            out.append((_K_OPT, full))
+            kinds = values[full]
+            if eq:
+                if rhs:
+                    out.append((kinds[0], rhs))
+                pending = kinds[1:]
+            else:
+                pending = kinds
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            if "=" in tok:
+                # ``-o=value`` (0.3.1 からの互換規則。GNU getopt は解釈しないが
+                # 独自 parser のコマンドで使われる)
+                name, _, rhs = tok.partition("=")
+                out.append((_K_OPT, name))
+                if rhs:
+                    kinds = values.get(name)
+                    out.append((kinds[0] if kinds else _K_UNKNOWN, rhs))
+                continue
+            letters = tok[1:]
+            for k, ch in enumerate(letters):
+                key = "-" + ch
+                out.append((_K_OPT, key))
+                kinds = values.get(key)
+                if kinds is None:
+                    continue
+                attached = letters[k + 1:]
+                if attached:
+                    out.append((kinds[0], attached))
+                    pending = kinds[1:]
+                else:
+                    pending = kinds
+                break
+            else:
+                if len(tok) > 2 and spec is None:
+                    # 値を取る option 文字が無い束ね / 密着形: spec の無いコマンド
+                    # では 0.21.x までと同じく ``tok[2:]`` を候補に残す (``-f.env``
+                    # 型の取りこぼし防止)。spec のあるコマンドは値を取る短形
+                    # option を登録済みなので、残りは flag の束ね (``-rn``) として
+                    # 扱う
+                    out.append((_K_UNKNOWN, tok[2:]))
+            continue
+        out.append((_K_POS, tok))
+    return out
+
+
+def _command_spec(tokens: list[str]) -> tuple[_CmdSpec | None, int, int]:
+    """first token (git はサブコマンド込み) の spec と、
+    ``(global option 区間の終端 index, 引数の開始 index)`` を返す。
+
+    git 以外は両 index とも 1。git はサブコマンド token を挟んで
+    ``tokens[1:j]`` が global option、``tokens[j+1:]`` が引数。
+    """
+    first = tokens[0]
+    if first == "git":
+        j = _git_subcommand_index(tokens)
+        if j is None:
+            return None, 1, 1
+        return _SPECS.get(f"git {tokens[j]}"), j, j + 1
+    return _SPECS.get(first), 1, 1
+
+
 def _find_path_candidates(tokens: list[str]) -> list[str]:
     """第 1 トークン以降から、path 候補を抽出。
 
@@ -72,29 +376,41 @@ def _find_path_candidates(tokens: list[str]) -> list[str]:
     - ``--opt=value`` / ``-o=value`` の ``=`` 以降 (RHS) を候補に追加
     - 短形 option に value が **連結** した形 ``-X<value>`` (``-f.env`` 等) は
       ``tok[2:]`` を候補に追加
+
+    0.22.0 からの例外 (コマンド別 ``_CmdSpec``、モジュール docstring 参照):
+    - grep 系 / jq / awk / sed の **第 1 positional** (pattern / filter / script)
+      は候補にしない。ただし pattern を option で与える形 (``-e`` / ``-f`` 等) が
+      あれば positional は全て path
+    - spec が「値は path ではない」と知っている option の値 (``-e PAT`` 等) は
+      候補にしない。「値は path」と知っている option の値 (``-f FILE``) は候補
+    - 書込み redirect の target (``> .env`` / ``>.env``) は path 候補 (0.21.x
+      までは分離形のみ bare token として拾えていた)
     """
+    if len(tokens) < 2:
+        return []
+    spec, opts_end, start = _command_spec(tokens)
+    entries: list[tuple[str, str]] = []
+    if opts_end > 1:
+        # git の global option 区間 (``-C dir`` 等): 0.21.x までと同じ規則で
+        # 候補化するが、pattern 枠の対象にはしない。サブコマンド token 自体
+        # (``log`` / ``grep``) はコマンド語であって operand ではないので候補外
+        for kind, text in _lex_args(tokens[1:opts_end], None):
+            entries.append((_K_UNKNOWN if kind == _K_POS else kind, text))
+    entries.extend(_lex_args(tokens[start:], spec))
+
+    slot_open = spec is not None and spec.pattern_slot
+    if slot_open and spec is not None and spec.pattern_opts:
+        seen = {text for kind, text in entries if kind == _K_OPT}
+        if seen & spec.pattern_opts:
+            slot_open = False
+
     candidates: list[str] = []
-    in_ddash = False
-    for tok in tokens[1:]:
-        if tok == "--":
-            in_ddash = True
-            continue
-        if in_ddash:
-            candidates.append(tok)
-            continue
-        if tok.startswith("--"):
-            if "=" in tok:
-                rhs = tok.split("=", 1)[1]
-                if rhs:
-                    candidates.append(rhs)
-            continue
-        if tok.startswith("-"):
-            if "=" in tok:
-                rhs = tok.split("=", 1)[1]
-                if rhs:
-                    candidates.append(rhs)
-            elif len(tok) > 2:
-                candidates.append(tok[2:])
-            continue
-        candidates.append(tok)
+    for kind, text in entries:
+        if kind == _K_POS:
+            if slot_open:
+                slot_open = False  # pattern / filter / script 枠を消費
+                continue
+            candidates.append(text)
+        elif kind in (_K_PATH, _K_UNKNOWN):
+            candidates.append(text)
     return candidates

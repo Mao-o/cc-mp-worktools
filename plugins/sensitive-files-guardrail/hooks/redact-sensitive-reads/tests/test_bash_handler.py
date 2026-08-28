@@ -870,10 +870,18 @@ class TestAttachedShortOption(BaseBash):
         ))
         self.assertEqual(_decision(r), "deny")
 
-    def test_grep_multi_flag_attached_sensitive(self):
-        r = handle(_make_envelope(
-            "grep -vn .env.local README.md", self.tmp,
-        ))
+    def test_grep_multi_flag_then_pattern_and_file(self):
+        # 0.22.0: ``-vn`` は flag の束ねで ``.env.local`` は grep の **pattern**、
+        # README.md が file operand。0.21.x までは bare token を一律 path 候補に
+        # していたため deny だったが、grep は .env.local を読まない
+        # (``TestGrepPatternPositional`` の一連の形と同じ)。
+        for mode in ("default", "auto"):
+            r = handle(_make_envelope(
+                "grep -vn .env.local README.md", self.tmp, mode=mode,
+            ))
+            self.assertTrue(output.is_allow(r), msg=mode)
+        # 束ね flag の後ろに file operand が来る形は従来どおり deny
+        r = handle(_make_envelope("grep -vn TODO .env.local", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
     def test_ls_flag_group_allow(self):
@@ -2500,6 +2508,86 @@ class TestRecommendedRemedyAllow(BaseBash):
         r = handle(_make_envelope("git show HEAD:.env", self.tmp))
         self.assertEqual(_decision(r), "deny")
         self.assertIn("閲覧", _reason(r))
+
+
+class TestGrepPatternPositional(BaseBash):
+    """0.22.0: grep 系 / jq の **第 1 positional は pattern / filter** であって
+    path ではない (``handlers/bash/grep_extract.py`` は 0.10.0 から同じ前提で
+    deny reason を組み立てていたが、判定側の ``_find_path_candidates`` は bare
+    token を一律 path 候補にしていた plugin 内部の矛盾)。
+
+    ``.env`` を参照しているファイルを探す / ``id_rsa`` の記述箇所を grep する /
+    ``jq '.env'`` で JSON の env フィールドを見る、が全 mode で止まっていた。
+    default / auto の両 mode で verdict を固定する。
+    """
+
+    ALLOW = (
+        "grep .env README.md",
+        "grep -rn '.env' src/",
+        "grep -v '.env' out.txt",
+        "grep -E '.env|.envrc' notes.md",
+        "grep -vn .env.local README.md",
+        "egrep id_rsa README.md",
+        "rg '.env' src/",
+        "rg -n id_rsa .",
+        "ag '.env' .",
+        "ack '.env' lib/",
+        "jq '.env' package.json",
+        "jq -r '.env.NODE_ENV' cfg.json",
+        "git grep -n '.env' -- src/",
+        "grep -r .env",
+        # pattern を option で与えた形: 値は pattern、positional は path
+        "grep -e .env README.md",
+        "grep --regexp=.env README.md",
+    )
+    DENY = (
+        # 対照: 本当に path のものは deny を維持
+        "grep TODO .env",
+        "grep -rn TODO -- .env",
+        "grep -vn TODO .env.local",
+        "grep -f .env x.txt",
+        "grep --file=.env foo README.md",
+        "grep -f.env foo README.md",
+        "grep -rne TODO .env",
+        "grep --reg=TODO .env",
+        "rg TODO .env",
+        "rg -f pats.txt .env",
+        "jq . .env",
+        "jq -f filter.jq .env",
+        "git grep -e TODO -- .env",
+        "grep foo README.md > .env",
+        "grep > .env foo",
+        "grep SECRET .env > out.txt",
+        # 密着形の書込み redirect (0.21.x までは ``>.env`` が 1 token のまま
+        # basename 不一致で拾えていなかった)
+        "grep foo README.md >.env",
+    )
+
+    def test_pattern_positional_allows_in_all_modes(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_file_operand_denies_in_all_modes(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_deny_reason_still_names_the_file_operand(self):
+        # deny のとき reason に載る operand は pattern ではなく file 側
+        r = handle(_make_envelope("grep DATABASE_URL .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("matched_operand: .env", _reason(r))
 
 
 if __name__ == "__main__":
