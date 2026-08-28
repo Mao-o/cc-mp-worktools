@@ -9,6 +9,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
+import change
 import state
 
 
@@ -79,6 +80,121 @@ class TestTryReserveEmit(BaseStateTest):
         state.try_reserve_emit("session-1", "/repo/b.py", "review", 20)
         raw = json.loads(state._state_path("session-1").read_text())
         self.assertEqual(raw["__emit_count__"], 2)
+
+
+class TestGrowthAndLineRecording(BaseStateTest):
+    """0.2.0: 行数記録と成長判定。"""
+
+    def _record(self, session_id: str, abs_path: str) -> dict:
+        raw = json.loads(state._state_path(session_id).read_text())
+        return raw[abs_path]
+
+    def test_not_grew_is_suppressed(self):
+        self.assertFalse(
+            state.try_reserve_emit(
+                "session-1", "/repo/foo.py", "strong", 20, growth=change.NOT_GREW
+            )
+        )
+
+    def test_not_grew_still_records_line_count(self):
+        state.try_reserve_emit(
+            "session-1", "/repo/foo.py", "strong", 20, line_count=900, growth=change.NOT_GREW
+        )
+        self.assertEqual(self._record("session-1", "/repo/foo.py")["lines"], 900)
+
+    def test_suppressed_call_does_not_advance_tier(self):
+        # 抑制した呼び出しで tier を進めると、その後の本当の成長が恒久的に
+        # 抑制されてしまう。
+        state.try_reserve_emit(
+            "session-1", "/repo/foo.py", "strong", 20, line_count=900, growth=change.NOT_GREW
+        )
+        self.assertEqual(self._record("session-1", "/repo/foo.py")["tier"], "ok")
+        self.assertTrue(
+            state.try_reserve_emit(
+                "session-1", "/repo/foo.py", "strong", 20, line_count=901, growth=change.GREW
+            )
+        )
+
+    def test_suppressed_call_does_not_consume_emit_budget(self):
+        state.try_reserve_emit(
+            "session-1", "/repo/a.py", "warn", 1, line_count=600, growth=change.NOT_GREW
+        )
+        self.assertTrue(
+            state.try_reserve_emit("session-1", "/repo/b.py", "warn", 1, line_count=600)
+        )
+
+    def test_unknown_growth_falls_back_to_line_comparison(self):
+        state.try_reserve_emit(
+            "session-1", "/repo/foo.py", "strong", 20, line_count=900, growth=change.NOT_GREW
+        )
+        # 縮んだ / 変わらない → 抑制
+        self.assertFalse(
+            state.try_reserve_emit("session-1", "/repo/foo.py", "strong", 20, line_count=850)
+        )
+        self.assertFalse(
+            state.try_reserve_emit("session-1", "/repo/foo.py", "strong", 20, line_count=850)
+        )
+        # 伸びた → 通知
+        self.assertTrue(
+            state.try_reserve_emit("session-1", "/repo/foo.py", "strong", 20, line_count=1000)
+        )
+
+    def test_unknown_growth_without_prior_record_is_allowed(self):
+        self.assertTrue(
+            state.try_reserve_emit("session-1", "/repo/foo.py", "warn", 20, line_count=600)
+        )
+
+    def test_emit_candidate_false_records_lines_and_returns_false(self):
+        self.assertFalse(
+            state.try_reserve_emit(
+                "session-1", "/repo/foo.py", "review", 20, line_count=350, emit_candidate=False
+            )
+        )
+        record = self._record("session-1", "/repo/foo.py")
+        self.assertEqual(record["lines"], 350)
+        self.assertEqual(record["tier"], "ok")
+
+    def test_legacy_string_record_is_still_honoured(self):
+        # 0.1.0 が書いた state ファイル (tier 文字列) を読んでも壊れない。
+        state_file = state._state_path("session-1")
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps({"__emit_count__": 1, "/repo/foo.py": "warn"}))
+        self.assertFalse(
+            state.try_reserve_emit("session-1", "/repo/foo.py", "review", 20, line_count=400)
+        )
+        self.assertTrue(
+            state.try_reserve_emit("session-1", "/repo/foo.py", "strong", 20, line_count=900)
+        )
+
+    def test_malformed_record_shapes_are_ignored(self):
+        state_file = state._state_path("session-1")
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        for bad in [{"tier": 5, "lines": "many"}, {"tier": "nonsense"}, ["warn"], 42, True]:
+            with self.subTest(bad=bad):
+                state_file.write_text(json.dumps({"/repo/foo.py": bad}))
+                self.assertTrue(
+                    state.try_reserve_emit(
+                        "session-1", "/repo/foo.py", "warn", 20, line_count=600
+                    )
+                )
+
+    def test_io_failure_still_honours_not_grew(self):
+        with mock.patch.object(state.os, "makedirs", side_effect=OSError("boom")):
+            self.assertFalse(
+                state.try_reserve_emit(
+                    "session-1", "/repo/foo.py", "strong", 20, growth=change.NOT_GREW
+                )
+            )
+            self.assertTrue(
+                state.try_reserve_emit("session-1", "/repo/foo.py", "strong", 20)
+            )
+
+    def test_empty_session_id_still_honours_not_grew(self):
+        self.assertFalse(
+            state.try_reserve_emit("", "/repo/foo.py", "strong", 20, growth=change.NOT_GREW)
+        )
+        self.assertTrue(state.try_reserve_emit("", "/repo/foo.py", "strong", 20))
+        self.assertFalse(state._base_dir().exists())
 
 
 class TestSessionIdHashing(BaseStateTest):

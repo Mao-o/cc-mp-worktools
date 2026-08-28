@@ -8,6 +8,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# 判定対象の allowlist を兼ねる: ここに無い拡張子は `is_code_path` が False を
+# 返し、__main__ が早期 skip する (0.2.0 以降)。Markdown / JSON / YAML / CSV /
+# SQL 等の非コードファイルが行数だけで分割検討を促されるのを避けるため。
 EXTENSION_LANGUAGE: dict[str, str] = {
     ".py": "python",
     ".js": "javascript",
@@ -27,6 +30,41 @@ EXTENSION_LANGUAGE: dict[str, str] = {
     ".rs": "rust",
     ".rb": "ruby",
     ".php": "php",
+    # 以下は 0.2.0 で追加。allowlist 化する前は "generic" (係数 1.0) として
+    # 判定されていた実コードであり、登録しないと判定対象から丸ごと外れる。
+    ".swift": "swift",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".m": "objectivec",
+    ".mm": "objectivec",
+    ".scala": "scala",
+    ".ex": "elixir",
+    ".exs": "elixir",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".lua": "lua",
+    ".pl": "perl",
+    ".pm": "perl",
+    ".r": "r",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".groovy": "groovy",
+    ".ps1": "powershell",
+    ".clj": "clojure",
+    ".cljs": "clojure",
+    ".cljc": "clojure",
+    ".hs": "haskell",
+    ".erl": "erlang",
+    ".jl": "julia",
+    ".zig": "zig",
+    ".nim": "nim",
 }
 
 _TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs", "e2e"})
@@ -76,6 +114,16 @@ _TOKEN_SPLIT_RE = re.compile(r"[_\-.]+")
 
 def detect_language(path: Path) -> str:
     return EXTENSION_LANGUAGE.get(path.suffix.lower(), "generic")
+
+
+def is_code_path(path: Path) -> bool:
+    """拡張子が ``EXTENSION_LANGUAGE`` に登録されているか (判定対象 allowlist)。
+
+    未登録の拡張子と拡張子なしのファイルは False。後者には shebang 付きの
+    スクリプトが含まれるが、内容を読む前の名前だけの判定に閉じている
+    (shebang 判定は別途の課題)。
+    """
+    return path.suffix.lower() in EXTENSION_LANGUAGE
 
 
 def is_test_path(path: Path) -> bool:
