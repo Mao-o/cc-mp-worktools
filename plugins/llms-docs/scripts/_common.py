@@ -602,6 +602,19 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     prevented the conditional request), and no bytes are re-downloaded.
     Any other HTTP status/transport error falls through to the same
     stale-serve/exit/raise handling as before.
+
+    ``etag``/``last_modified`` are persisted only when the response's
+    resolved URL (``resp.url``, which ``urllib`` sets to the final URL
+    after following any redirects) equals *url* itself — i.e. this
+    particular fetch involved no redirect. ``HTTPRedirectHandler`` forwards
+    a request's headers, conditional ones included, to the redirected
+    request unchanged (verified empirically) — so a validator obtained via
+    a redirect describes *that hop's destination*, not *url* in general.
+    If *url*'s redirect target ever changes later, sending that stale
+    validator toward the new target could coincidentally 304 and lock in
+    the old target's body indefinitely. ``content_hash`` is still recorded
+    either way — it doesn't carry this risk since it's compared against
+    the cache file's own bytes, not sent to any server.
     """
     cache_exists = os.path.exists(cache_path)
     if cache_exists:
@@ -649,13 +662,30 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 data = gzip.decompress(data)
             etag = resp.headers.get("ETag")
             last_modified = resp.headers.get("Last-Modified")
+            # urllib.request.HTTPRedirectHandler forwards this request's
+            # headers — including If-None-Match/If-Modified-Since, verified
+            # empirically — to a redirected request unchanged. If *url*
+            # redirects, and where it redirects to ever changes later, the
+            # validators cached here would describe the *old* destination
+            # but get sent (via the same forwarding) toward whatever *url*
+            # now redirects to; a coincidental match there would 304 into
+            # keeping the old destination's body forever. Since the
+            # redirect target isn't guaranteed stable across fetches,
+            # never cache validators obtained through one — content_hash
+            # is unaffected and still recorded, just not etag/last_modified.
+            redirected = resp.url != url
         if create_parent:
             parent = os.path.dirname(cache_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
         _atomic_write(cache_path, data)
         try:
-            _save_fetch_meta(cache_path, etag, last_modified, _content_hash(data))
+            _save_fetch_meta(
+                cache_path,
+                None if redirected else etag,
+                None if redirected else last_modified,
+                _content_hash(data),
+            )
         except OSError as e:
             # The fetch itself already succeeded and cache_path is already
             # written — a failure persisting the *sidecar* (disk full, a

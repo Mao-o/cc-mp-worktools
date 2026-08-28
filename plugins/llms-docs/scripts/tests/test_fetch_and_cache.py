@@ -130,9 +130,14 @@ class FormatAgeTest(unittest.TestCase):
 class _FakeResponse:
     """Minimal stand-in for the object ``urllib.request.urlopen`` returns."""
 
-    def __init__(self, data, headers=None):
+    def __init__(self, data, headers=None, url="https://example.com/x"):
         self._data = data
         self.headers = headers or {}
+        # Every existing test fetches "https://example.com/x" — defaulting
+        # to that keeps them all reading as "no redirect happened" without
+        # having to pass url= at every call site. A test that needs to
+        # simulate a redirect passes a different url= explicitly.
+        self.url = url
 
     def read(self):
         return self._data
@@ -414,6 +419,33 @@ class GzipAndConditionalGetTest(unittest.TestCase):
             "content_hash": _common._content_hash(b"hello"),
             "etag": '"abc123"', "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT",
         })
+
+    def test_redirected_fetch_does_not_persist_etag_or_last_modified(self):
+        # urllib.request.HTTPRedirectHandler forwards a request's headers
+        # unchanged to the redirected request (verified empirically against
+        # a live redirect) — including any future If-None-Match/
+        # If-Modified-Since this function would send. If the requested
+        # url's redirect target ever changes later, a validator cached
+        # from *this* redirect's destination would be sent toward the
+        # *new* target instead; a coincidental 304 there would lock in the
+        # old target's body indefinitely. So a fetch that resolves to a
+        # different URL than requested (resp.url != url, exactly what
+        # urllib sets on a real redirected response) must not persist
+        # etag/last_modified — content_hash is unaffected and still saved.
+        cache_path = self._cache_path()
+        resp = _FakeResponse(
+            b"hello",
+            headers={
+                "ETag": '"abc123"',
+                "Last-Modified": "Wed, 01 Jan 2026 00:00:00 GMT",
+            },
+            url="https://example.com/redirected-destination",
+        )
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
+        with open(self._meta_path(cache_path), encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta, {"content_hash": _common._content_hash(b"hello")})
 
     def test_response_without_validators_still_persists_a_content_hash(self):
         # A server that never sends ETag/Last-Modified must not leave a

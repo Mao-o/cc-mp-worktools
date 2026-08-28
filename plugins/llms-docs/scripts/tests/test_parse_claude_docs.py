@@ -30,9 +30,10 @@ def _write_fixture(cache_dir, index_text, full_text):
 class _FakeResponse:
     """Minimal stand-in for the object ``urllib.request.urlopen`` returns."""
 
-    def __init__(self, data, headers=None):
+    def __init__(self, data, headers=None, url=None):
         self._data = data
         self.headers = headers or {}
+        self.url = url
 
     def read(self):
         return self._data
@@ -333,10 +334,18 @@ class MaxAgeBoundaryIntegrationTest(unittest.TestCase):
 
     def test_cache_older_than_max_age_is_refetched(self):
         self._age_cache(300)
-        fresh = _FakeResponse(
-            b"- [Hooks](https://example.com/hooks): Configure hook matchers\n"
-        )
-        with mock.patch("urllib.request.urlopen", return_value=fresh) as mock_urlopen:
+
+        def _fresh(req, timeout=None):
+            # url=req.full_url mirrors what urllib itself sets on a real,
+            # non-redirected response (see AbstractHTTPHandler.do_open) —
+            # fetch_url now compares resp.url against the requested url to
+            # decide whether a fetch involved a redirect.
+            return _FakeResponse(
+                b"- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+                url=req.full_url,
+            )
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fresh) as mock_urlopen:
             code, out, err = _loader.run_cli(parse_claude_docs, [
                 "parse-claude-docs.py", "fetch-index",
                 "--cache-dir", self.tmp, "--max-age", "200",

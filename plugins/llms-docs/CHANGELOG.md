@@ -2,6 +2,26 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.6] - 2026-08-28
+
+### リダイレクトを跨いだ場合にetag/last_modifiedを保存しないよう修正 (0.21.5 の追いコミット)
+
+Codex R5指摘1件 (P2)。これまでの4ラウンドとは異なるカテゴリの指摘 (sidecarの検証ではなく
+リダイレクト時のHTTPセマンティクスの正しさ)。
+
+- **設定URLがリダイレクトする場合、`urllib.request.HTTPRedirectHandler` がconditionalヘッダー
+  (`If-None-Match`/`If-Modified-Since`) を含む元リクエストのヘッダーをリダイレクト先にそのまま
+  転送することを実機確認**: リダイレクト先が後で変わった場合、旧リダイレクト先向けのvalidatorが
+  新しいリダイレクト先に送られてしまい、新リダイレクト先の`Last-Modified`がたまたま条件を満たすと
+  304が返り、実際には別サーバーの別コンテンツであるにもかかわらず旧bodyを`--max-age`ごとに
+  保持し続けてしまう。`resp.url` (urllibがリダイレクト追跡後の最終URLをセットする) と要求元の
+  `url` を比較し、一致しない (=リダイレクトが発生した) fetchでは`etag`/`last_modified`を
+  sidecarに保存しないよう修正。`content_hash`はサーバーに送信されないため引き続き保存する
+
+回帰テスト1件追加。`If-None-Match`が実際に別ホストへのリダイレクトを跨いで転送されることを
+`httpbin.org`への実リクエストで確認したうえで実装 (`test_fetch_and_cache.py`、190 tests,
+all green)。
+
 ## [0.21.5] - 2026-08-28
 
 ### sidecarのstring validatorがHTTPヘッダーとして不正な場合の生tracebackを構造的に修正 (0.21.4 の追いコミット)
