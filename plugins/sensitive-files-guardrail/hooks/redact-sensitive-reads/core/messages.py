@@ -71,7 +71,9 @@ import shlex
 from typing import Callable, Literal
 
 from _shared.patterns import (
+    EXCLUDE_SCOPE_WARNING,
     LOCAL_PATTERNS_DISPLAY_PATH,
+    escape_glob,
     PROJECT_SECTION_HEADER_HINT,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
 )
@@ -83,6 +85,46 @@ from core.output import MAX_REASON_BYTES
 # 除外行を書き足す patterns.local.txt の preferred パス (表示用。実体の解決は
 # ``_shared.patterns._resolve_local_patterns_path``、0.19.0 で _shared と共有)。
 _LOCAL_PATTERNS_PATH = LOCAL_PATTERNS_DISPLAY_PATH
+
+
+def _join_with_exclude_hint(
+    lines: list[str], basename: str, literal_name: bool = False
+) -> str:
+    """本文 + 除外案内を組み立てる。**案内は必ず全文残す** (0.23.0)。
+
+    除外案内には「この行は basename 単位で効く」「Read/Bash/Edit/Write の保護
+    そのものが外れる」という影響範囲の開示が含まれる。``core.output._truncate``
+    は末尾から無条件に切るため、minimal info が大きいと
+    **レシピ (``!.env``) だけ見えて警告が切れる**状態になっていた
+    (30 キーの ``.env`` で実測: reason 3,071 byte、`保護そのものが外れます` が消失)。
+    実行可能な除外コマンドを見せながら影響範囲を隠すのは informed consent の
+    逆なので、可変長側 (minimal info) を先に削って案内の場所を確保する。
+
+    ``_truncate`` 自体は最終防御としてそのまま残す (ここを通らない経路もあるため)。
+    """
+    hint = f"suggestion: {_exclude_hint(basename, literal_name)}"
+    tail = "\n" + hint
+    budget = MAX_REASON_BYTES - len(tail.encode("utf-8"))
+    body = "\n".join(lines)
+
+    if budget <= 0:
+        # 案内だけで予算を超える異常ケース。本文を捨ててでも案内を優先する
+        # (本文は情報提供、案内は安全側の判断材料)。
+        return hint
+
+    encoded = body.encode("utf-8")
+    if len(encoded) > budget:
+        marker = "\n...[truncated]"
+        keep = budget - len(marker.encode("utf-8"))
+        if keep <= 0:
+            return hint
+        cut = encoded[:keep]
+        # UTF-8 の途中で切らない
+        while cut and (cut[-1] & 0xC0) == 0x80:
+            cut = cut[:-1]
+        body = cut.decode("utf-8", errors="ignore") + marker
+
+    return body + tail
 
 
 def _basename_of(operand: str) -> str:
@@ -118,7 +160,7 @@ def _sanitize_for_inline(text: str) -> str:
     return text.replace("`", "")
 
 
-def _exclude_hint(basename: str) -> str:
+def _exclude_hint(basename: str, literal_name: bool = False) -> str:
     """``patterns.local.txt`` への除外行追加案内を返す。
 
     basename が空なら一般化された hint。空でなければ ``!<basename>`` を埋め込む。
@@ -131,14 +173,28 @@ def _exclude_hint(basename: str) -> str:
     ``$CLAUDE_PROJECT_DIR`` の変数名で示し、書き込む側が実パスに置き換える。
     """
     if basename:
-        entry = f"`!{_sanitize_for_inline(basename)}`"
+        # ``literal_name`` のときだけ fnmatch のメタ文字を escape する。
+        #
+        # Read / Edit / Stop の basename は実ファイル名なので、``key[1].pem`` の
+        # ような名前をそのまま出すとレシピが別物になる (自身にマッチせず
+        # ``key1.pem`` を巻き込む)。一方 Bash の operand は
+        # ``cat .env*`` のように**ユーザーが書いた glob** でありうるので、
+        # そこを escape すると意図した glob 除外が壊れる。
+        rule = escape_glob(basename) if literal_name else basename
+        entry = f"`!{_sanitize_for_inline(rule)}`"
+        # スコープ修飾は EXCLUDE_SCOPE_WARNING 側が説明するので、ここでは
+        # 名前だけを示す ([project:] は rule の読込先を決めるだけで、
+        # 読み込まれた後は絶対パス全部に効くため「このプロジェクト内」は誤り)。
+        scope = f"`{_sanitize_for_inline(basename)}` という名前のファイル"
     else:
         entry = "除外行 (`!<basename>`)"
+        scope = "同名のファイル"
     return (
         "恒久的に許可したい場合は、ユーザーの承認を得た上で "
         f"`{_LOCAL_PATTERNS_PATH}` の `{PROJECT_SECTION_HEADER_HINT}` "
         f"セクション配下に {entry} を追加してください "
         f"({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
+        f"{EXCLUDE_SCOPE_WARNING.format(scope=scope)}"
         "承認なしに自分で追加しないこと。"
     )
 
@@ -440,8 +496,7 @@ def _bash_deny_read_full(
     # info を出せているのに Read を勧めるのは、同じ情報を取り直させるだけの
     # 往復の無駄になるため。
     _append_minimal_info(lines, file_render, render_status, resolved_base)
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_read_partial(
@@ -483,8 +538,7 @@ def _bash_deny_read_partial(
         _append_project_root_caveat(lines, render_status, resolved_base)
     else:
         _append_minimal_info(lines, file_render, render_status, resolved_base)
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_search(
@@ -546,8 +600,7 @@ def _bash_deny_search(
     other = _suggestion_other_keys(dotenv_info)
     if other:
         lines.append(f"suggestion: {other}")
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_mutate(
@@ -583,8 +636,7 @@ def _bash_deny_mutate(
         " 値の置換が目的なら、対象ファイルを直接編集する代わりに別ファイルへの"
         " patch / diff 適用を検討してください。"
     )
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_load(
@@ -613,8 +665,7 @@ def _bash_deny_load(
         " dotenv-cli の利用を推奨します。"
         " 1Password CLI / pass / git-secret 経由の secret 読込でも代替できます。"
     )
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_move(
@@ -643,8 +694,7 @@ def _bash_deny_move(
         " `.env.example` 派生で運用するなら `cp .env.example .env.local` の"
         "方向で代替できます。"
     )
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 # git の global option のうち値を **別トークン** で取るもの (subcommand 抽出時に
@@ -791,8 +841,7 @@ def _bash_deny_history(
             " してください (この形は allow されます)。"
             " untracked なら別パスから誤って参照していないか確認してください。"
         )
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_transfer(
@@ -820,8 +869,7 @@ def _bash_deny_transfer(
         " secrets manager (1Password CLI / Vault / SOPS 等) に置く構成に"
         "してください。"
     )
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_archive(
@@ -850,8 +898,7 @@ def _bash_deny_archive(
         f" tar なら `--exclude={safe_basename}`、zip なら `-x {safe_basename}`、"
         " gzip は単一ファイル圧縮なので別ファイルを対象にしてください。"
     )
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 def _bash_deny_generic(
@@ -875,8 +922,7 @@ def _bash_deny_generic(
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
     _append_minimal_info(lines, file_render, render_status, resolved_base)
-    lines.append(f"suggestion: {_exclude_hint(basename)}")
-    return "\n".join(lines)
+    return _join_with_exclude_hint(lines, basename)
 
 
 # 9 builder + generic を category キーで dispatch する table。
@@ -1244,16 +1290,27 @@ def edit_deny(
     if kind_suggestion:
         tail.append(f"suggestion: {kind_suggestion}")
 
-    tail.append(f"suggestion: {_exclude_hint(basename)}")
+    # 除外案内は ``_join_with_exclude_hint`` が最後に付ける (Bash 経路と同じ)。
+    #
+    # 0.23.0 の初版は tail に直接 append していたが、``suggested_keys`` が
+    # 予算計算に入っていなかったため、書き込む content にキーが多いと
+    # **レシピ (`!.env`) だけ見えて警告と「承認なしに追加しない」が切れる**
+    # 状態になっていた (実測: 57 文字級のキー 30 本で発生)。
+    # 可変長側 (suggested_keys / existing info) を削って案内の場所を確保する。
+    hint_len = len(
+        f"\nsuggestion: {_exclude_hint(basename, literal_name=True)}".encode("utf-8")
+    )
 
     info: list[str] = []
     if kind == "overwrite":
-        used = len("\n".join(head + tail).encode("utf-8"))
+        used = len("\n".join(head + tail).encode("utf-8")) + hint_len
         info = _edit_existing_info_lines(
             existing_render, MAX_REASON_BYTES - used
         )
 
-    return "\n".join(head + info + tail)
+    return _join_with_exclude_hint(
+        head + info + tail, basename, literal_name=True
+    )
 
 
 # -- M3: patterns.txt 読込失敗 --------------------------------------------
@@ -1374,6 +1431,7 @@ BashLenientKind = Literal[
     "residual_metachar",
     "shell_keyword",
     "tokenize_failed",
+    "segment_too_large",
     "normalize_failed",
     "program_dynamic",
 ]
@@ -1403,6 +1461,11 @@ def bash_lenient(kind: BashLenientKind, detail: str = "") -> str:
         head = (
             "Bash コマンドが静的解析対象外の wrapper / インタプリタ / 任意 path "
             "実行で始まっています。"
+        )
+    elif kind == "segment_too_large":
+        head = (
+            "Bash セグメントが静的解析の長さ上限を超えています "
+            "(巨大な引数やペイロードを 1 コマンドに埋め込んだ形)。"
         )
     elif kind == "residual_metachar":
         head = (

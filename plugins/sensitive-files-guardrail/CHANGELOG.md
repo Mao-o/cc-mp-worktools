@@ -20,6 +20,280 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.23.0
+
+2026-08-28 の多角レビュー (main + サブエージェント 8 体) で検出した不具合の修正。
+**秘密鍵の生バイトが reason に混入する P0** と、**レイテンシ予算の大幅超過 2 経路**が
+中心。
+
+- **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
+  `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
+  `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
+- テスト件数: redact 862 → **934** / check 79 → **80** (計 1,014)
+
+### 1. 不具合の内容
+
+`redaction/keyonly_scan.py:15` の
+`_KEY_RE = ^\s*(?:export\s+)?([A-Za-z_][\w.\-]*)\s*[:=]` が、PEM 最終行
+(base64 パディング `=` で終わる行) を `KEY=` 形式と誤判定し、**base64 本体を
+そのまま「鍵名」として reason に出力していた**。
+
+`[\w.\-]` は base64 の `+` `/` を含まないため **最終行に `+` `/` が無いときだけ**
+発火する確率的な漏れで、実測の発火率は RSA-2048 で 30 本中 1 本程度。
+出力は `NOTE: ... Real values are NOT in context.` と
+`note: ... values never read.` に挟まれた位置に出ており、**内容と主張が矛盾**していた。
+
+同一欠陥が 3 経路にあった: `redaction/opaque.py` (`scan_keys`, 32KB 以下) /
+`redaction/engine.py` (`scan_stream`, 32KB 超) / `redaction/dotenv.py`
+(`_LINE_RE`, `.env` に値として PEM を埋めた形)。
+
+941 件のテストを通過していた理由は、**PEM 形状の fixture が 1 件も無かった**ため
+(`grep -rni 'BEGIN RSA|BEGIN PRIVATE|BEGIN OPENSSH' tests/` → 0 件)。
+
+### 2. 対処 (2 層)
+
+**`redaction/pem.py` (新規)** — ファイル全体が armored 鍵なら専用経路に分け、
+block の種別と件数だけを返す:
+
+```
+format: pem (armored key / certificate)
+blocks: 1
+block types:
+  1. RSA PRIVATE KEY
+armored bytes: 1679
+note: key material is never parsed or returned. only block labels and counts are shown.
+```
+
+判定は basename ではなく**内容の sniff** (先頭 40 行以内の `-----BEGIN ...-----`)。
+`id_rsa` のような拡張子なしファイルを basename だけで判別できないため。
+`_detect_format` が既に format を確定しているケース (`.env` 等) には介入しない
+(`.env` に PEM を値として埋めた形は dotenv 経路のまま扱いたいため)。
+
+**多層防御** — `keyonly_scan` / `dotenv` の鍵名候補に
+`pem.looks_base64_fragment` ゲートを追加。「24 文字以上 / `_` を含まない /
+英大小混在 / 数字を含む」を全て満たす候補を base64 断片とみなして棄却する。
+閾値を 24 にしているのは `someVeryLongCamelCaseKeyName` のような正当な名前を
+巻き込まないため (数字を含む条件と併せて false negative を抑える)。
+
+### 3. 情報面の変化
+
+PEM ファイルの reason は「鍵名の羅列 (実体は base64 断片)」から
+「block 種別 + 件数 + armored バイト数」に変わる。**漏れを塞ぐと同時に
+「何のファイルか」が従来より明確になる** (思想 2 に整合)。
+BEGIN と END の数が合わないときは truncate の可能性を note で示す。
+
+
+### 4. 恒久除外レシピの影響範囲を開示
+
+Stop / Read / Bash が案内する恒久除外レシピは **basename 単位**で効くため、
+承認した 1 ファイルではなく**プロジェクト内の同名ファイル全部**の保護が落ちる。
+しかも効果は Stop の報告に留まらず **Read / Bash / Edit / Write の保護そのもの**に
+及ぶ。従来の文面「以後の Stop / Read / Bash で報告されなくなります」では、
+"報告されない" が "保護されない" と同義であることも、同名ファイルが巻き添えに
+なることも伝わらなかった。
+
+`_shared.patterns.EXCLUDE_SCOPE_WARNING` を新設し、両 hook の案内文に挟む形で
+この 2 点を明示する。あわせて、`is_sensitive` が親ディレクトリ名も評価するため
+**同名ディレクトリの配下も保護から外れる**ことも明記した
+(`!certs` はディレクトリ `certs/` の中身にも及ぶ)。ただし `is_sensitive` は
+basename を先に評価するため、配下のファイルが別の include 行に単独で一致
+する場合 (`certs/.env` 等) はそちらが優先され保護が残る。開示文が過大主張に
+ならないようこの限定も併記している。
+
+さらに **`[project:]` はどの rule を読み込むかを決めるだけ**で、読み込まれた
+後の matcher は operand がプロジェクト配下かを見ない。したがって除外は
+**そのセッションが触る絶対パス全部** (他プロジェクトの同名ファイルを含む) に
+効く。当初「このプロジェクト内」と書いていたのは誤りだったので訂正した
+(実測: `[project:/repo-a]` 配下で `!.env` を足すと `/other/repo/.env` の
+保護も外れる)。**範囲を実際にプロジェクト内へ限定する作業は判定境界の変更**
+にあたるため別途対応する。
+
+案内は **必ず全文が残る**ようにした。`core.output._truncate` は末尾から
+無条件に切るため、minimal info が大きいと**レシピ (`!.env`) だけ見えて警告が
+切れる**状態になっていた (30 キーの `.env` で実測: reason 3,071 byte、
+`保護そのもの` が消失)。実行可能な除外コマンドを見せながら影響範囲を隠すのは
+informed consent の逆なので、`_join_with_exclude_hint` を新設し
+**可変長側 (minimal info / suggested_keys) を先に削って案内の場所を確保**する。
+**Bash の 10 経路と Edit/Write 経路のすべてがこれを通る**。
+
+当初は Bash 側だけを直し、Edit/Write 側は `existing_render` しか予算に
+入れていなかったため `suggested_keys` が膨らむと同じ不具合が残っていた
+(実測: 57 文字級のキー 30 本を Write する content で、`!.env` は見えるのに
+`保護そのもの` と `承認なしに追加しない` が消失)。
+
+この「片方の経路だけ直す」ミスは 0.23.0 で 3 回起きた
+(inline/streaming の block 数、dotenv/keyonly のコメント除去、本件) ため、
+`tests/test_exclude_hint_never_truncated.py` で**経路を列挙して横断的に**
+検査する。修正を無効化した negative control で両経路とも落ちることを確認済み。
+
+**生成する除外行は fnmatch の literal 化**する (`escape_glob`)。rule は
+`fnmatchcase` で評価されるので、`key[1].pem` のようにメタ文字を含む
+ファイル名をそのまま出すと **その file 自身にマッチせず** `key1.pem` を
+巻き込む — 承認したファイルの保護が残り、無関係なファイルの保護が外れる
+という、影響範囲の開示と正反対の結果になる。
+
+escape するのは **実ファイル名を扱う経路だけ** (Stop のレシピ / Read・Edit の
+案内)。Bash の operand は `cat .env*` のように**ユーザーが書いた glob** で
+ありうるので、そこを escape すると意図した glob 除外が壊れる
+(`!.env*` が「`.env*` という名前のファイル」の除外に化ける)。
+メタ文字を含まない名前は素通しなので、通常のレシピの見た目は変わらない。**範囲は狭まらない** (黙った過剰付与を informed consent に
+変えるだけ)。範囲を狭める作業 (matcher に相対パス階層を追加) は判定境界の変更に
+あたるため別途対応する。
+
+
+### 5. レイテンシ: パターンキャッシュと巨大セグメントのガード
+
+`docs/DESIGN.md` 設計原則 4 の **「Latency <100ms 目標」**に対し、2 経路で
+大幅な超過が実測された。この hook は Read / Bash / Edit / Write の毎回発火し
+全セッションにレイテンシを足すため、目標超過そのものが実害になる。
+
+**(a) `fnmatch` の内部キャッシュ境界** — `_shared/matcher.py::_last_match_verdict`
+は rules 全件を operand ごとに走査するが、`fnmatch._compile_pattern` の
+`lru_cache` は **maxsize が Python バージョン依存** (3.9 = 256 / 3.11+ = 32768) で
+plugin から制御できない。rules が maxsize を超えると **operand 数 × rule 数の
+オーダーで正規表現が再コンパイル**される。
+
+実測 (system python 3.9.6 / 50 operands):
+
+| rules | 修正前 | 修正後 |
+|---|---|---|
+| 256 | 11.0 ms | 9.0 ms |
+| 306 | **338.5 ms** | 10.0 ms |
+| 556 | 3,470.6 ms | 23.4 ms |
+| 856 | **5,380.0 ms** | **32.1 ms** |
+
+到達経路は「多数プロジェクトへの分散」ではなく **1 つの長寿命 repo が自分の
+`[project:]` セクションに 250 件超の承認除外を蓄積する**こと — 本 plugin の
+恒久除外レシピが誘導する使い方そのもの。自前の regex キャッシュを持たせて
+Python バージョンへの依存を断った。Stop hook の 15 秒超過要因も同一原因で、
+1 箇所の修正で両経路が解消する。
+
+キャッシュは **上限を設けない dict** にしている。上限付き LRU では
+「rules 件数 > maxsize」で同じ崖が再現するため (初版は maxsize=8192 にしたが、
+3.11+ の `fnmatch` (32768) より小さいので **8,192 件超でむしろ退行**した —
+8,002 rules が 139.7ms に対し 8,202 rules で 4,884.3ms)。hook プロセスは
+1 ツール呼び出しで終わる短命プロセスで、rules は patterns ファイルで有界なので
+上限なしで安全。修正後は 12,002 rules でも 222.5ms で線形。
+
+**(b) `shlex` の超線形コスト** — `handlers/bash_handler.py` の `shlex.split` は
+segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一トークンの総 479ms
+のうち **341ms が stdlib `shlex.py::read_token`** (plugin 自前の `_lex()` は
+66ms で線形)。
+
+実測 (subprocess end-to-end):
+
+| 引数サイズ | 修正前 | 修正後 |
+|---|---|---|
+| 200KB | 395.9 ms | **72.9 ms** |
+| 400KB | 1,178.2 ms | 124.7 ms |
+| 600KB | **2,569.6 ms** (2 秒 timeout 超過) | 203.4 ms |
+| 800KB | 4,808.8 ms | 296.8 ms |
+
+長さ判定は **policy 読込の後、segmentation の前**で command 全体に対して行う。
+`patterns.txt` 読込失敗は全 mode deny 固定 (README の Fail-closed 表) なので、
+長さガードを先に置くと 64KB 超のコマンドに限ってこの fail-closed を迂回して
+`ask_or_allow` (= lenient mode では allow) になってしまう。policy 読込は
+ファイル 2 つの読み取りだけで、後段の per-character lexer に比べれば安価。
+`_split_command_on_operators` と `_has_hard_stop` はどちらも全文字を舐める
+per-character lexer で、しかも超線形なため、ガードを segment ループ内に置くと
+**そこへ到達する前に予算を使い切る**:
+
+| command | 2 パスのみ (修正前) | end-to-end (修正後) |
+|---|---|---|
+| 64KB | 17.2 ms | 42.0 ms |
+| 512KB | 145.9 ms | 29.6 ms |
+| 1024KB | 429.8 ms | 32.7 ms |
+| 2048KB | **1,398.6 ms** | **37.5 ms** |
+
+`_MAX_COMMAND_CHARS` (64KB) を超えた command は tokenize せず
+`ask_or_allow("segment_too_large")` に倒す。hook が**時間内に自ら decision を
+返す**ため、timeout で出力ごと破棄されて無音 fail-open になる経路
+(公式仕様: timeout 到達時は hook の出力は破棄され decision は無し) を避けられる。
+上限**内**であれば `continue` で `pending_ask` に積むだけなので、他 segment の
+deny 検出は従来どおり続く (0.11.0 の segment 単位再評価を維持)。
+
+**意図したトレードオフ**: 上限を**超えた**複合コマンド
+(`<64KB 超の引数> && cat .env` 等) は deny に到達しない。その operand を
+見つけるには上記 2 パスを全文字に走らせる必要があり、それ自体が予算を
+超えるため。timeout すると hook の出力ごと破棄され **decision が消える**ので、
+「時間内に ask を返す」方が「時間切れで何も返さない」より強い。64KB 超の
+コマンドに機密 operand を同居させる形は「うっかり」の範疇を超えるため、
+思想 1 の射程外として受容する。
+
+**判定境界の変化**: (a) は無し。(b) は 64KB 超の segment が `ask_or_allow` に
+倒れるようになる (従来はそのまま解析していた)。ただし 64KB 超の単一 segment は
+通常のセッションが書く形ではなく、`ask_or_allow` は lenient mode で allow に
+なるため autonomous 実行への影響は無い。
+
+
+### 6. PR レビュー指摘の反映
+
+**(a) `.env` 埋め込み PEM をパーサ状態で追跡する** — §2 の多層防御ゲートは
+「24 文字以上 / `_` を含まない / 大小混在 / 数字あり」というヒューリスティックで、
+**RSA / EC PKCS#8 の末尾行が閾値より短い**ケースを素通りしていた。
+実測: 末尾行 `AbCd12=` (6 文字) が鍵名として出力される。
+
+候補文字列の形ではなく **`-----BEGIN` / `-----END` によるブロック状態**を
+`redact_dotenv` で追跡し、block 内の行を丸ごと捨てる形に変更した。
+ヒューリスティックは block 外に落ちた断片用の第 2 層として残す。
+
+**(c) inline 経路でも 50 block 超を数え落とさない** — `redact_pem` は
+`_MAX_BLOCKS` で `break` していたため、32KB 未満で 60 block のバンドルが
+「50 block」と報告され、END との差から**誤った BEGIN/END 不一致 note** まで出ていた。
+`_MAX_BLOCKS` は列挙する label の preview 上限であって block 数の上限ではないので、
+件数は全件数え、label だけを打ち切る形に直した (streaming 版と同じ扱い)。
+
+**(e) preview 打ち切りの note は label を実際に省いたときだけ出す** —
+ちょうど `_MAX_BLOCKS` 件のとき、全 label を列挙できているのに
+「最初の 50 件のみ」と表示していた (境界の off-by-one)。inline / streaming の
+両経路で `> _MAX_BLOCKS` に統一した。49 / 50 / 51 の 3 点と、両経路の判定一致を
+テストで固定している。
+
+**(d) 綴りベースのヒューリスティックを撤去し parser context に一本化** —
+`looks_base64_fragment` は「24 文字以上 / `_` を含まない / 大小混在 / 数字あり」で
+判定していたが、`oauth2ClientSecretProduction` / `stripeApiKeyV2Production` のような
+**versioned camelCase の正当な鍵名を巻き込んで黙って報告から落として**いた
+(entries が過少になり設定のメタ情報が隠れる)。
+
+ブロック判定は **コメント除去後の値**で行う。生の値で見ると
+`A=one # -----BEGIN PRIVATE KEY-----` のようにインラインコメントへ例示として
+書いただけの marker で block が開き、END が現れるまで以降のキーが丸ごと
+報告から消える。
+
+判定は `pem.opens_pem_block` / `closes_pem_block` の 2 関数に集約し、
+dotenv (inline) と keyonly_scan (32KB 超の streaming) の**両方がこれを呼ぶ**。
+当初は inline 側だけにコメント除去を実装したため、`redact_large_file` 経由の
+大きい `.env` で同じ不具合が残っていた — 片側だけ直すと挙動が割れる箇所なので
+共通関数にした。
+
+(a) で `redact_dotenv` に入れたブロック追跡を `keyonly_scan` の
+`scan_keys` / `scan_stream` にも展開し、**ヒューリスティックは削除**した。
+ブロック状態の追跡は位置にも綴りにも依存しないため、
+(a) の「短い末尾行」と (d) の「長い正当な鍵名」の両方向の誤りが同時に消える。
+
+**(b) 32KB 超 bundle の block 数をストリーム全体から数える** — 先頭 8KB だけを
+見て `redact_pem` に渡していたため、**20 block の証明書バンドルが「約 5 block」と
+報告**されていた。さらに `end_markers` を `blocks` で上書きしていたため、
+BEGIN/END の不一致 note も出ず truncation が隠れていた。
+
+`pem.scan_pem_markers` を新設し、`scan_stream` と同じ 1MB 上限でストリーム全体の
+marker を数える。上限超過時は `truncated_scan` で件数が部分的である旨を出す。
+chunk 境界を跨ぐ marker のため 128 文字の重なりを保持するが、
+**carry 内で完結する match は前回計上済みなので `m.end() > len(carry)` で除外**する
+(この除外が無いと境界付近の marker が二重計上される — chunk サイズ 7 通りで検証)。
+
+### 7. テスト
+
+`tests/test_pem.py` (17 件) と `tests/fixtures/keys/synthetic_rsa.pem` を追加。
+
+fixture は**実鍵ではなく合成データを固定**で置く。発火は最終行に `+` `/` が
+無いときだけなので、実鍵を生成してテストすると**約 90% の確率で pass する
+flaky テスト**になるため (経緯は `tests/fixtures/keys/README.md`)。
+`test_fixture_has_the_triggering_shape` が「fixture が発火する形であること」自体を
+pin しており、fixture が更新されてもテストが空振りにならない。
+
+修正を無効化した negative control で 17 件中 7 件が失敗することを確認済み。
+
 ## 0.22.0
 
 **Bash operand の取り出し方の誤読 5 件を修正** (2026-08 精査の「operand をどう

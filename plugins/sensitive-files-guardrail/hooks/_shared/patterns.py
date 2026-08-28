@@ -85,10 +85,55 @@ PROJECT_SECTION_PLACEHOLDER_NOTE = (
     "全プロジェクト共通にしたい場合のみヘッダー無しの行に書く"
 )
 
+# 除外行を追加する前にユーザーへ伝えるべき影響範囲 (0.23.0、両 hook 共通)。
+#
+# 除外行は **basename 単位**で評価される (matcher は basename と
+# ``pathlib.parts`` しか見ず、相対パス全体との比較を行わない)。したがって
+# ``!.env`` はプロジェクト内の **すべての** ``.env`` に効き、承認した 1 ファイル
+# だけを対象にすることはできない。さらに効果は Stop の報告に留まらず
+# **Read / Bash / Edit / Write の保護そのもの**が落ちる。
+#
+# 「以後 ... で報告されなくなります」という従来の文面では、"報告されない" が
+# "保護されない" と同義であることも、同名ファイル全部が巻き添えになることも
+# 伝わらなかった。範囲を狭める作業は別途進行中だが、それまでの間、黙った
+# 過剰付与を informed consent に変えるための文言。
+EXCLUDE_SCOPE_WARNING = (
+    "影響範囲: basename 単位なので{scope}が**すべて**対象 (1 ファイルだけの除外は"
+    "不可)、**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致"
+    "する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、"
+    "**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。"
+    "外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。"
+)
+
 # ``[project:]`` ヘッダーが書き損じのときに ``header_warn_callback`` へ渡す固定
 # トークン (パスを含めない — core.logging の detail ホワイトリスト適合)。
 PROJECT_HEADER_WARN_EMPTY = "project_header_empty"
 PROJECT_HEADER_WARN_PLACEHOLDER = "project_header_unexpanded_placeholder"
+
+
+# fnmatch のメタ文字。生成する除外行では literal として扱わせる必要がある。
+_GLOB_META = "*?[]"
+
+
+def escape_glob(name: str) -> str:
+    """basename を fnmatch の literal パターンに変換する (0.23.0)。
+
+    rule は ``fnmatchcase`` で評価されるため、basename に ``*`` ``?`` ``[`` ``]``
+    が含まれると**生成した除外行が別物になる**。実測 (既定 rules に対し
+    ``key[1].pem`` を承認した場合):
+
+    - ``!key[1].pem`` は ``key[1].pem`` に**マッチしない** (承認したファイルの
+      保護が残り、レシピが効かない)
+    - 代わりに ``key1.pem`` にマッチする (**無関係なファイルの保護が外れる**)
+
+    どちらも影響範囲の開示と矛盾するので、メタ文字を文字クラスで包んで
+    literal 化する (``[`` → ``[[]`` / ``]`` → ``[]]`` / ``*`` → ``[*]`` /
+    ``?`` → ``[?]``)。メタ文字を含まない名前は**そのまま**返すので、
+    通常のレシピの見た目は変わらない。
+    """
+    if not isinstance(name, str) or not any(c in name for c in _GLOB_META):
+        return name if isinstance(name, str) else ""
+    return "".join(f"[{c}]" if c in _GLOB_META else c for c in name)
 
 
 def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]:
@@ -108,7 +153,7 @@ def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]
             seen.add(name)
             ordered.append(name)
     lines = [PROJECT_SECTION_HEADER_HINT]
-    lines.extend(f"!{name}" for name in ordered[:limit])
+    lines.extend(f"!{escape_glob(name)}" for name in ordered[:limit])
     if len(ordered) > limit:
         lines.append(f"... ({len(ordered) - limit} more)")
     return lines

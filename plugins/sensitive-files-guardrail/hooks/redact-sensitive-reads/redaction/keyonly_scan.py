@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from typing import IO
 
+from .pem import closes_pem_block, opens_pem_block
 from .sanitize import sanitize_key
 
 _KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][\w.\-]*)\s*[:=]")
@@ -31,7 +32,18 @@ def scan_keys(text: str) -> list[str]:
     """テキスト全体から鍵名を抽出する (重複は順序を保って一意化)。"""
     seen: set[str] = set()
     ordered: list[str] = []
+    # PEM 本文の行は末尾のパディング ``=`` が ``KEY=`` に見えるため、
+    # ``-----BEGIN`` / ``-----END`` のブロック状態を追跡して本文行を捨てる
+    # (詳細は redaction/pem.py)。候補文字列の形で弾くヒューリスティックは
+    # ``oauth2ClientSecretProduction`` のような正当な鍵名まで巻き込むため使わない。
+    in_pem_block = False
     for line in text.splitlines():
+        if in_pem_block:
+            if closes_pem_block(line):
+                in_pem_block = False
+            continue
+        if opens_pem_block(line):
+            in_pem_block = not closes_pem_block(line)
         m = _KEY_RE.match(line)
         if not m:
             continue
@@ -77,6 +89,8 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
     ordered: list[str] = []
     read_bytes = 0
     pending = bytearray()
+    # scan_keys と同じ PEM ブロック追跡 (list で包むのは closure から書き換えるため)
+    in_pem_block = [False]
 
     def _consume(raw: bytes) -> bool:
         """1 行分の先頭バイト列から鍵名を拾う。MAX_KEYS 到達で True。"""
@@ -84,6 +98,12 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
             line = raw.decode("utf-8", errors="replace")
         except Exception:
             return False
+        if in_pem_block[0]:
+            if closes_pem_block(line):
+                in_pem_block[0] = False
+            return False
+        if opens_pem_block(line):
+            in_pem_block[0] = not closes_pem_block(line)
         m = _KEY_RE.match(line)
         if not m:
             return False

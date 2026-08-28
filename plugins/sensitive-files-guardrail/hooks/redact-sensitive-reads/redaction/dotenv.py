@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 
 from .placeholders import looks_placeholder
+from .pem import closes_pem_block, opens_pem_block
 from .sanitize import sanitize_key
 
 # KEY=VALUE / export KEY=VALUE の行をざっくり捕捉
@@ -223,16 +224,41 @@ def redact_dotenv(text: str) -> dict:
         }
     """
     keys: list[dict] = []
+    # ``.env`` の値として複数行 PEM を埋めた形では、armored 本文の各行が
+    # 独立した行として現れ、末尾パディング ``=`` が ``KEY=`` に見えて base64 本体が
+    # 鍵名として出る。**パーサ状態で block 内を追跡**して継続行を丸ごと捨てる
+    # (0.23.0 の初版は候補文字列のヒューリスティックだけで弾いていたが、
+    # RSA / EC PKCS#8 の末尾行は短いことがあり閾値を素通りした)。
+    in_pem_block = False
     for line in text.splitlines():
         # コメント・空行スキップ
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+
+        if in_pem_block:
+            if closes_pem_block(stripped):
+                in_pem_block = False
+            continue
+
         m = _LINE_RE.match(line)
         if not m:
+            # ``-----BEGIN ...-----`` だけの行 (値が次行から始まる形) もここに来る。
+            # KEY= 形と同じくコメント除去後で判定する (末尾コメントに marker を
+            # 書いただけの行で block を開かないため)。
+            if opens_pem_block(stripped):
+                in_pem_block = True
             continue
         raw_key, raw_val = m.group(1), m.group(2)
         v = _preprocess_value(raw_val)
+        # ``KEY=-----BEGIN ...-----`` 形。鍵名は残しつつ、以降の本文行を捨てる。
+        #
+        # 判定は **コメント除去後の値** (``v``) で行う。生の値で見ると
+        # ``A=one # -----BEGIN PRIVATE KEY-----`` のようにインラインコメントへ
+        # 例示として書いただけの marker で block が開き、END が現れるまで
+        # 以降のキーが丸ごと報告から消える。
+        if opens_pem_block(v):
+            in_pem_block = not closes_pem_block(v)
         type_class, prefix = _detect_type_and_prefix(v)
         is_ph, ph_label = looks_placeholder(v)
         tags, length = _classify_status(

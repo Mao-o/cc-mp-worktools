@@ -29,6 +29,7 @@ from .sanitize import escape_data_tag, sanitize_basename
 
 # DATA 包装の guard marker。固定値にすることで E2E テストが deterministic になる。
 DATA_GUARD = "guardrail-v1"
+from .pem import format_pem, looks_pem, redact_pem, scan_pem_markers
 from .tomllike import format_toml, redact_toml
 
 # inline 読み込みの上限 (32KB + 1 byte 読んで truncate 判定)
@@ -141,10 +142,21 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
             return build_reason(basename, fmt, body, extras)
         except Exception:
             pass
+    # armored 鍵 / 証明書は専用経路 (0.23.0)。format 未確定 (opaque) のときだけ
+    # 内容を sniff する。``.env`` に PEM を値として埋めた形は dotenv 経路のまま
+    # 扱いたいので、既に format が確定しているケースには介入しない。
+    if fmt == "opaque" and looks_pem(text):
+        return build_reason(basename, "pem", format_pem(redact_pem(text)), extras)
+
     # yaml / opaque / json 失敗 / toml 失敗 → opaque fallback
     info = redact_opaque(text, fmt_hint=fmt)
     body = format_opaque(info)
     return build_reason(basename, fmt, body, extras)
+
+
+# PEM sniff 用に先頭から読む byte 数。``pem._SNIFF_LINES`` (40 行) を確実に
+# 含む長さにしておく。証明書バンドルでもヘッダは先頭に来る。
+_PEM_SNIFF_BYTES = 8 * 1024
 
 
 def redact_large_file(f: IO[bytes], basename: str) -> str:
@@ -152,12 +164,55 @@ def redact_large_file(f: IO[bytes], basename: str) -> str:
 
     呼出側は fd を ``os.fdopen(fd, "rb")`` で wrap したものを渡す。seek(0) は
     engine 側で行う。
+
+    0.23.0: format 未確定 (opaque) のときは先頭 8KB だけ先に読んで armored 鍵か
+    どうかを判定する。鍵バンドルは ``scan_stream`` に流すと PEM 本文の行が
+    ``KEY=`` として拾われるため (``redaction/pem.py`` 冒頭参照)。
     """
     fmt = _detect_format(basename)
     try:
         f.seek(0)
     except (OSError, AttributeError):
         pass
+
+    if fmt == "opaque":
+        head = f.read(_PEM_SNIFF_BYTES)
+        try:
+            f.seek(0)
+        except (OSError, AttributeError):
+            # seek 不能なら sniff 分を読み飛ばしたまま続行するしかないので、
+            # 誤判定を避けて従来経路に倒す (fail-safe 側)。
+            keys, scanned = scan_stream(f)
+            return build_reason(
+                basename, fmt, format_keyonly(keys, scanned, fmt_hint=fmt)
+            )
+        if looks_pem(head.decode("utf-8", errors="replace")):
+            # block 数は **ストリーム全体**を走査して数える。head だけで数えると
+            # 20 block の証明書バンドルが「5 block」と報告される (Codex P2)。
+            # marker の走査は行 regex のみで安く、``scan_stream`` と同じ 1MB 上限で
+            # 打ち切り、超過時は ``truncated_scan`` で件数が部分的である旨を出す。
+            info = scan_pem_markers(f)
+            size = _stream_size(f)
+            if size >= 0:
+                info["armored_bytes"] = size
+            try:
+                f.seek(0)
+            except (OSError, AttributeError):
+                pass
+            return build_reason(basename, "pem", format_pem(info))
+
     keys, scanned = scan_stream(f)
     body = format_keyonly(keys, scanned, fmt_hint=fmt)
     return build_reason(basename, fmt, body)
+
+
+def _stream_size(f: IO[bytes]) -> int:
+    """seek/tell でストリーム全体の byte 数を求める (失敗時は -1)。"""
+    try:
+        cur = f.tell()
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(cur)
+        return size
+    except (OSError, AttributeError, ValueError):
+        return -1
