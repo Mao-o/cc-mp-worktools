@@ -111,6 +111,31 @@ PROJECT_HEADER_WARN_EMPTY = "project_header_empty"
 PROJECT_HEADER_WARN_PLACEHOLDER = "project_header_unexpanded_placeholder"
 
 
+# fnmatch のメタ文字。生成する除外行では literal として扱わせる必要がある。
+_GLOB_META = "*?[]"
+
+
+def escape_glob(name: str) -> str:
+    """basename を fnmatch の literal パターンに変換する (0.21.0)。
+
+    rule は ``fnmatchcase`` で評価されるため、basename に ``*`` ``?`` ``[`` ``]``
+    が含まれると**生成した除外行が別物になる**。実測 (既定 rules に対し
+    ``key[1].pem`` を承認した場合):
+
+    - ``!key[1].pem`` は ``key[1].pem`` に**マッチしない** (承認したファイルの
+      保護が残り、レシピが効かない)
+    - 代わりに ``key1.pem`` にマッチする (**無関係なファイルの保護が外れる**)
+
+    どちらも影響範囲の開示と矛盾するので、メタ文字を文字クラスで包んで
+    literal 化する (``[`` → ``[[]`` / ``]`` → ``[]]`` / ``*`` → ``[*]`` /
+    ``?`` → ``[?]``)。メタ文字を含まない名前は**そのまま**返すので、
+    通常のレシピの見た目は変わらない。
+    """
+    if not isinstance(name, str) or not any(c in name for c in _GLOB_META):
+        return name if isinstance(name, str) else ""
+    return "".join(f"[{c}]" if c in _GLOB_META else c for c in name)
+
+
 def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]:
     """``patterns.local.txt`` に追記する恒久除外レシピ (行リスト) を返す。
 
@@ -128,7 +153,7 @@ def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]
             seen.add(name)
             ordered.append(name)
     lines = [PROJECT_SECTION_HEADER_HINT]
-    lines.extend(f"!{name}" for name in ordered[:limit])
+    lines.extend(f"!{escape_glob(name)}" for name in ordered[:limit])
     if len(ordered) > limit:
         lines.append(f"... ({len(ordered) - limit} more)")
     return lines

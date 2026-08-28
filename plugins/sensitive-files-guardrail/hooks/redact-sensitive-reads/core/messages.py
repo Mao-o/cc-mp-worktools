@@ -73,6 +73,7 @@ from typing import Callable, Literal
 from _shared.patterns import (
     EXCLUDE_SCOPE_WARNING,
     LOCAL_PATTERNS_DISPLAY_PATH,
+    escape_glob,
     PROJECT_SECTION_HEADER_HINT,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
 )
@@ -86,7 +87,9 @@ from core.output import MAX_REASON_BYTES
 _LOCAL_PATTERNS_PATH = LOCAL_PATTERNS_DISPLAY_PATH
 
 
-def _join_with_exclude_hint(lines: list[str], basename: str) -> str:
+def _join_with_exclude_hint(
+    lines: list[str], basename: str, literal_name: bool = False
+) -> str:
     """本文 + 除外案内を組み立てる。**案内は必ず全文残す** (0.21.0)。
 
     除外案内には「この行は basename 単位で効く」「Read/Bash/Edit/Write の保護
@@ -99,7 +102,7 @@ def _join_with_exclude_hint(lines: list[str], basename: str) -> str:
 
     ``_truncate`` 自体は最終防御としてそのまま残す (ここを通らない経路もあるため)。
     """
-    hint = f"suggestion: {_exclude_hint(basename)}"
+    hint = f"suggestion: {_exclude_hint(basename, literal_name)}"
     tail = "\n" + hint
     budget = MAX_REASON_BYTES - len(tail.encode("utf-8"))
     body = "\n".join(lines)
@@ -157,7 +160,7 @@ def _sanitize_for_inline(text: str) -> str:
     return text.replace("`", "")
 
 
-def _exclude_hint(basename: str) -> str:
+def _exclude_hint(basename: str, literal_name: bool = False) -> str:
     """``patterns.local.txt`` への除外行追加案内を返す。
 
     basename が空なら一般化された hint。空でなければ ``!<basename>`` を埋め込む。
@@ -170,7 +173,15 @@ def _exclude_hint(basename: str) -> str:
     ``$CLAUDE_PROJECT_DIR`` の変数名で示し、書き込む側が実パスに置き換える。
     """
     if basename:
-        entry = f"`!{_sanitize_for_inline(basename)}`"
+        # ``literal_name`` のときだけ fnmatch のメタ文字を escape する。
+        #
+        # Read / Edit / Stop の basename は実ファイル名なので、``key[1].pem`` の
+        # ような名前をそのまま出すとレシピが別物になる (自身にマッチせず
+        # ``key1.pem`` を巻き込む)。一方 Bash の operand は
+        # ``cat .env*`` のように**ユーザーが書いた glob** でありうるので、
+        # そこを escape すると意図した glob 除外が壊れる。
+        rule = escape_glob(basename) if literal_name else basename
+        entry = f"`!{_sanitize_for_inline(rule)}`"
         # スコープ修飾は EXCLUDE_SCOPE_WARNING 側が説明するので、ここでは
         # 名前だけを示す ([project:] は rule の読込先を決めるだけで、
         # 読み込まれた後は絶対パス全部に効くため「このプロジェクト内」は誤り)。
@@ -1279,7 +1290,7 @@ def edit_deny(
     if kind_suggestion:
         tail.append(f"suggestion: {kind_suggestion}")
 
-    tail.append(f"suggestion: {_exclude_hint(basename)}")
+    tail.append(f"suggestion: {_exclude_hint(basename, literal_name=True)}")
 
     info: list[str] = []
     if kind == "overwrite":

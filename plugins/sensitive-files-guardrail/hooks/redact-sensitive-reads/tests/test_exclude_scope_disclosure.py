@@ -49,6 +49,61 @@ class TestExcludeScopeWarningText(unittest.TestCase):
         self.assertIn("1 ファイルだけの除外は不可", text)
 
 
+class TestGeneratedRuleIsLiteral(unittest.TestCase):
+    """実ファイル名から作るレシピは fnmatch の literal にすること (Codex R9)。
+
+    ``key[1].pem`` をそのまま ``!key[1].pem`` と出すと、fnmatch では文字クラスに
+    なるため **その file 自身にはマッチせず** ``key1.pem`` 等を巻き込む。
+    承認したファイルの保護が残り、無関係なファイルの保護が外れるので、
+    影響範囲の開示と正反対の結果になる。
+    """
+
+    def test_escape_glob_wraps_metacharacters(self):
+        from _shared.patterns import escape_glob
+
+        self.assertEqual(escape_glob("key[1].pem"), "key[[]1[]].pem")
+        self.assertEqual(escape_glob("a*b.pem"), "a[*]b.pem")
+        self.assertEqual(escape_glob("q?.pem"), "q[?].pem")
+
+    def test_escape_glob_leaves_plain_names_untouched(self):
+        """メタ文字が無ければ見た目を変えない (通常のレシピは従来どおり)。"""
+        from _shared.patterns import escape_glob
+
+        for name in (".env", ".envrc", "normal.pem", "id_rsa"):
+            self.assertEqual(escape_glob(name), name)
+
+    def test_escaped_rule_actually_excludes_the_file(self):
+        """escape 後の rule が対象ファイルを除外し、他を巻き込まないこと。"""
+        from _shared.matcher import is_sensitive
+        from _shared.patterns import escape_glob
+
+        rules = [("*.pem", False)]
+        excluded = rules + [(escape_glob("key[1].pem"), True)]
+        self.assertFalse(is_sensitive("/r/key[1].pem", excluded))
+        self.assertTrue(is_sensitive("/r/key1.pem", excluded))
+
+    def test_stop_recipe_escapes(self):
+        from _shared.patterns import exclude_recipe_lines
+
+        lines = exclude_recipe_lines(["key[1].pem"])
+        self.assertIn("!key[[]1[]].pem", lines)
+
+    def test_edit_read_hint_escapes(self):
+        """実ファイル名を扱う経路 (literal_name=True) は escape する。"""
+        hint = _exclude_hint("key[1].pem", literal_name=True)
+        self.assertIn("!key[[]1[]].pem", hint)
+
+    def test_bash_glob_operand_is_not_escaped(self):
+        """Bash の operand はユーザーが書いた glob でありうるのでそのまま。
+
+        ``cat .env*`` の deny で ``!.env[*]`` を出すと、意図した glob 除外が
+        「``.env*`` という名前のファイル」の除外に化ける。
+        """
+        hint = _exclude_hint(".env*")
+        self.assertIn("!.env*", hint)
+        self.assertNotIn("!.env[*]", hint)
+
+
 class TestExcludeHintCarriesWarning(unittest.TestCase):
     """Read / Bash の deny reason に載る除外案内が開示を含むこと。"""
 
