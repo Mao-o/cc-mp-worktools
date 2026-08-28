@@ -302,6 +302,36 @@ class NormalizationStemmingTest(unittest.TestCase):
         self.assertEqual(_common.score_entry("Hooks", "", ["HOOKS"]), 10)
         self.assertEqual(_common.score_entry("Skill", "", ["SKILLS"]), 10)
 
+    def test_silent_e_plural_is_overstemmed_known_limitation(self):
+        """Characterization test, not a spec assertion.
+
+        The sibilant-suffix branch (``ses``/``xes``/``zes``/``ches``/``shes``
+        -> strip 2 chars) exists so hard-consonant plurals like "matches"
+        fold to "match". But a plural formed from a silent-e root —
+        "response" -> "Responses", "release" -> "Releases", "database" ->
+        "Databases", "cache" -> "Caches" — ends in the exact same letters
+        ("...ches", "...ses") as those hard-consonant plurals, and this
+        branch strips it the same way, producing "respons"/"releas"/
+        "databas"/"cach" instead of the singular. The singular keyword
+        keeps its final "e", so a previously working substring match now
+        scores 0.
+
+        Not fixable by a smarter suffix rule: "caches" and "matches" are
+        surface-identical from "...ches" onward (confirmed for "xes"/
+        "zes"/"ses" too: axes/axe vs axes/axis, mazes/maze vs gazes/gaze-
+        adjacent hard forms, gases/gas vs cases/case) — distinguishing them
+        needs a root word list or a real stemmer, not a character-suffix
+        check, and per this repo's regression discipline that needs a
+        real-corpus before/after diff, not a synthetic fixture. Tracked in
+        the internal backlog, not covered by any existing item before this.
+        This test pins the current (imperfect) behavior so a future
+        deliberate fix changes it on purpose.
+        """
+        self.assertEqual(_common.score_entry("Responses", "", ["response"]), 0)
+        self.assertEqual(_common.score_entry("Releases", "", ["release"]), 0)
+        self.assertEqual(_common.score_entry("Databases", "", ["database"]), 0)
+        self.assertEqual(_common.score_entry("Caches", "", ["cache"]), 0)
+
 
 class ScoreEntryEmptyNormalizedKeywordTest(unittest.TestCase):
     """A keyword consisting only of characters _norm() strips (separators

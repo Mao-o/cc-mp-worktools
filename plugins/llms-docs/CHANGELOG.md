@@ -2,6 +2,25 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.18.4] - 2026-08-28
+
+### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)
+
+Codex R4 で `_norm()` の sibilant-suffix 規則 (`ses`/`xes`/`zes`/`ches`/`shes`
+終わりの語から2文字strip) が silent-e語根の複数形も誤って2文字stripしてしまう
+指摘を受けた (`Responses`→`respons`, `Caches`→`cach` 等、単数キーワードは
+末尾`e`を保持するため一致しなくなる)。別branch (`_common.py` の並行コピー)
+と同一の指摘のため、同じ判断をこちらにも適用する。
+
+調査の結果、これは文字パターンだけでは解決不可能な曖昧性と判断した:
+`caches`(cache+s, silent-e語根) と `matches`(match+es, 硬子音語根) は
+末尾が完全に同形で、辞書 (語根リスト) か本物のstemmerなしに文字列だけからは
+判別できない。既存テストはこの硬子音側の挙動を一切pinしていなかったため
+安全側 (どちらの挙動も壊さない) を優先し、現状挙動をcharacterization test
+として明文化するに留めた。修正は内部バックログで追跡する。
+
+回帰テスト1件追加 (`test_common.py`、163 tests, all green)。
+
 ## [0.18.3] - 2026-08-28
 
 ### レビュー指摘4件を修正 + 別branchで先に直した2件をこの `_common.py` にも適用 (0.18.2 の追いコミット)
