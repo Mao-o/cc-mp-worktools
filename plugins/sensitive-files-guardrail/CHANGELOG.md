@@ -22,12 +22,14 @@ commit 52113a1 で完了)。
 
 ## 0.21.0
 
-**PEM / armored 鍵の専用経路を追加し、秘密鍵の生バイトが reason に混入する不具合を
-修正**。2026-08-28 の多角レビューで検出。
+2026-08-28 の多角レビュー (main + サブエージェント 8 体) で検出した不具合の修正。
+**秘密鍵の生バイトが reason に混入する P0** と、**レイテンシ予算の大幅超過 2 経路**が
+中心。
 
-- **判定境界 (deny / allow / ask) の変化: なし。** `.pem` / `.key` / `id_rsa*` は
-  従来どおり機密パターンに一致して deny になる。変わるのは reason の**中身**
-- テスト件数: redact 862 → **886** / check 79 → **80** (計 966)
+- **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
+  `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
+  `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
+- テスト件数: redact 862 → **897** / check 79 → **80** (計 977)
 
 ### 1. 不具合の内容
 
@@ -95,7 +97,61 @@ Stop / Read / Bash が案内する恒久除外レシピは **basename 単位**�
 変えるだけ)。範囲を狭める作業 (matcher に相対パス階層を追加) は判定境界の変更に
 あたるため別途対応する。
 
-### 5. テスト
+
+### 5. レイテンシ: パターンキャッシュと巨大セグメントのガード
+
+`docs/DESIGN.md` 設計原則 4 の **「Latency <100ms 目標」**に対し、2 経路で
+大幅な超過が実測された。この hook は Read / Bash / Edit / Write の毎回発火し
+全セッションにレイテンシを足すため、目標超過そのものが実害になる。
+
+**(a) `fnmatch` の内部キャッシュ境界** — `_shared/matcher.py::_last_match_verdict`
+は rules 全件を operand ごとに走査するが、`fnmatch._compile_pattern` の
+`lru_cache` は **maxsize が Python バージョン依存** (3.9 = 256 / 3.11+ = 32768) で
+plugin から制御できない。rules が maxsize を超えると **operand 数 × rule 数の
+オーダーで正規表現が再コンパイル**される。
+
+実測 (system python 3.9.6 / 50 operands):
+
+| rules | 修正前 | 修正後 |
+|---|---|---|
+| 256 | 11.0 ms | 9.0 ms |
+| 306 | **338.5 ms** | 10.0 ms |
+| 556 | 3,470.6 ms | 23.4 ms |
+| 856 | **5,380.0 ms** | **32.1 ms** |
+
+到達経路は「多数プロジェクトへの分散」ではなく **1 つの長寿命 repo が自分の
+`[project:]` セクションに 250 件超の承認除外を蓄積する**こと — 本 plugin の
+恒久除外レシピが誘導する使い方そのもの。自前の regex キャッシュを持たせて
+Python バージョンへの依存を断った。Stop hook の 15 秒超過要因も同一原因で、
+1 箇所の修正で両経路が解消する。
+
+**(b) `shlex` の超線形コスト** — `handlers/bash_handler.py` の `shlex.split` は
+segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一トークンの総 479ms
+のうち **341ms が stdlib `shlex.py::read_token`** (plugin 自前の `_lex()` は
+66ms で線形)。
+
+実測 (subprocess end-to-end):
+
+| 引数サイズ | 修正前 | 修正後 |
+|---|---|---|
+| 200KB | 395.9 ms | **72.9 ms** |
+| 400KB | 1,178.2 ms | 124.7 ms |
+| 600KB | **2,569.6 ms** (2 秒 timeout 超過) | 203.4 ms |
+| 800KB | 4,808.8 ms | 296.8 ms |
+
+`_MAX_SEGMENT_CHARS` (64KB) を超えた segment は tokenize せず
+`ask_or_allow("segment_too_large")` に倒す。hook が**時間内に自ら decision を
+返す**ため、timeout で出力ごと破棄されて無音 fail-open になる経路
+(公式仕様: timeout 到達時は hook の出力は破棄され decision は無し) を避けられる。
+`continue` で `pending_ask` に積むだけなので、他 segment の deny 検出は続く
+(0.11.0 の segment 単位再評価を維持)。
+
+**判定境界の変化**: (a) は無し。(b) は 64KB 超の segment が `ask_or_allow` に
+倒れるようになる (従来はそのまま解析していた)。ただし 64KB 超の単一 segment は
+通常のセッションが書く形ではなく、`ask_or_allow` は lenient mode で allow に
+なるため autonomous 実行への影響は無い。
+
+### 6. テスト
 
 `tests/test_pem.py` (17 件) と `tests/fixtures/keys/synthetic_rsa.pem` を追加。
 

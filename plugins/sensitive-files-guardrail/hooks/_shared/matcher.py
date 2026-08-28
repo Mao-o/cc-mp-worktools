@@ -13,8 +13,48 @@ rules は ``list[tuple[str, bool]]`` 形式で、各 tuple は ``(pattern, is_ex
 from __future__ import annotations
 
 import os
-from fnmatch import fnmatchcase
+import re
+from fnmatch import translate
+from functools import lru_cache
 from pathlib import PurePath
+
+# パターン -> compiled regex のキャッシュ (0.21.0)。
+#
+# 0.20.0 までは ``fnmatch.fnmatchcase`` を直接呼んでいたが、その内部
+# ``fnmatch._compile_pattern`` の ``lru_cache`` は **maxsize が Python
+# バージョン依存** (3.9 = 256 / 3.11+ = 32768) で plugin 側から制御できない。
+# ``_last_match_verdict`` は rules 全件を operand ごとに走査するため、
+# rules 件数が maxsize を超えると **operand 数 x rule 数のオーダーで正規表現が
+# 再コンパイル**され、破局的に遅くなる。
+#
+# 実測 (system python 3.9.6 / 50 operands):
+#   256 rules ->    11.0 ms
+#   306 rules ->   338.5 ms   (31 倍のジャンプ)
+#   856 rules -> 5,380.0 ms
+# 同条件の 3.11+ は 856 rules でも 34.3 ms で線形。
+#
+# 到達経路は「多数プロジェクトへの分散」ではなく **1 つの長寿命 repo が自分の
+# ``[project:]`` セクションに 250 件超の承認除外を蓄積する**こと — 本 plugin の
+# 恒久除外レシピが誘導する使い方そのもの。
+#
+# 自前のキャッシュを持つことで Python バージョンへの依存を断つ。maxsize は
+# 「rules 件数 x (case-sensitive / insensitive の 2 通り)」を十分に包含する値。
+_PATTERN_CACHE_SIZE = 8192
+
+
+@lru_cache(maxsize=_PATTERN_CACHE_SIZE)
+def _compiled(pattern: str) -> "re.Pattern[str]":
+    """``fnmatchcase`` と同じ意味論の compiled regex を返す。
+
+    ``fnmatch.translate`` は ``\\Z`` 終端付きの完全一致パターンを返すため、
+    ``.match()`` で ``fnmatchcase`` と等価になる。
+    """
+    return re.compile(translate(pattern))
+
+
+def _fnmatch_cached(name: str, pattern: str) -> bool:
+    """``fnmatchcase(name, pattern)`` と等価 (自前キャッシュ経由)。"""
+    return _compiled(pattern).match(name) is not None
 
 
 def _is_case_sensitive() -> bool:
@@ -41,7 +81,7 @@ def _last_match_verdict(name: str, rules: list[tuple[str, bool]]) -> str:
     last: str | None = None
     for pattern, is_exclude in rules:
         pat = pattern if cs else pattern.lower()
-        if fnmatchcase(target, pat):
+        if _fnmatch_cached(target, pat):
             last = "exclude" if is_exclude else "include"
     return last or "nomatch"
 

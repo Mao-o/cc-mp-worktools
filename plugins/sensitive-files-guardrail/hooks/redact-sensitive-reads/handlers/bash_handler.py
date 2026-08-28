@@ -425,6 +425,19 @@ def _build_deny_response(
     )
 
 
+# 1 セグメントを ``shlex.split`` に渡す長さの上限 (0.21.0)。
+#
+# 実測 (subprocess end-to-end):
+#   200KB ->   396 ms   400KB -> 1,178 ms
+#   600KB -> 2,570 ms (2 秒 timeout 超過)   800KB -> 4,809 ms
+#
+# 64KB は「実測で <100ms 目標の内側に収まる」かつ「通常のセッションが書く
+# コマンド長を十分に包含する」点を取った値。超過分は tokenize せず
+# ask_or_allow に倒す (allow ではない — lenient mode で allow になるのは
+# 他の静的解析不能ケースと同じ扱い)。
+_MAX_SEGMENT_CHARS = 64 * 1024
+
+
 def _analyze_segment(
     tokens: list[str],
     envelope: dict,
@@ -588,6 +601,26 @@ def handle(envelope: dict) -> dict:
             if pending_ask is None:
                 pending_ask = output.ask_or_allow(
                     M.bash_lenient("hard_stop"),
+                    envelope,
+                )
+            continue
+
+        # stdlib ``shlex`` は 1 トークンが長くなると超線形になる (0.21.0)。
+        # cProfile で 200KB 単一トークンの総 479ms のうち 341ms が
+        # ``shlex.py::read_token``。plugin 自前の ``_lex()`` は線形なので
+        # 犯人は stdlib 側。DESIGN.md 設計原則 4 の「Latency <100ms 目標」に対し
+        # 実測 200KB で 396ms (4 倍) / 600KB で 2,570ms (hook の 2 秒 timeout 超過)。
+        #
+        # 上限を超えたセグメントは tokenize せず ``ask_or_allow`` に倒す。
+        # hook が時間内に自ら decision を返すため、timeout で出力ごと破棄されて
+        # 無音 fail-open になる経路 (公式仕様: timeout 到達時は decision なし) を
+        # 避けられる。長い引数は base64 blob / JSON ペイロードが典型で、
+        # そこに機密 operand が同居する形は静的解析の射程外 (思想 1)。
+        if len(seg) > _MAX_SEGMENT_CHARS:
+            L.log_info("bash_classify", "segment_too_large")
+            if pending_ask is None:
+                pending_ask = output.ask_or_allow(
+                    M.bash_lenient("segment_too_large"),
                     envelope,
                 )
             continue

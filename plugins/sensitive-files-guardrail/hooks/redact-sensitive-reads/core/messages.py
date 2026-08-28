@@ -1381,6 +1381,7 @@ BashLenientKind = Literal[
     "residual_metachar",
     "shell_keyword",
     "tokenize_failed",
+    "segment_too_large",
     "normalize_failed",
     "program_dynamic",
 ]
@@ -1410,6 +1411,11 @@ def bash_lenient(kind: BashLenientKind, detail: str = "") -> str:
         head = (
             "Bash コマンドが静的解析対象外の wrapper / インタプリタ / 任意 path "
             "実行で始まっています。"
+        )
+    elif kind == "segment_too_large":
+        head = (
+            "Bash セグメントが静的解析の長さ上限を超えています "
+            "(巨大な引数やペイロードを 1 コマンドに埋め込んだ形)。"
         )
     elif kind == "residual_metachar":
         head = (
