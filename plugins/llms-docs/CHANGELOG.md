@@ -2,6 +2,22 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.20.1] - 2026-08-28
+
+### `search-content` の全ページスキャンが全fetch完了を待ってから結果を出す barrier になっていた問題を修正 (0.20.0 の追いコミット)
+
+Codex R1 指摘 (P2)。0.20.0 で `search-content`/`search` 共通で `_fetch_pages_concurrently`
+(ThreadPoolExecutor) を使うようにしたが、`--page-ref` 省略時 (index 全体、最大 ~7000件) は
+全ページの fetch が完了するまで `cmd_search_content` が何も出力しないbarrierになっていた。
+8並列・per-page timeout 30sの構成では、dead linkが33件混ざるだけで最低5波 (約150秒) かかり、
+本来の修正目的だった「Bash toolの既定120秒timeoutでkillされる」を形を変えて再現してしまう。
+
+`search-content` は逐次fetch (`raise_on_error=True` + 1件ずつskip) に戻し、元の実装同様
+結果をfetchの進行に合わせてstreamingで出力するよう修正。並列化は境界が明確な `search`
+(`--top-n`, 既定5) 側のみ維持する。
+
+169 tests, all green (テスト内容の変更なし、既存のskipテストが引き続き通ることを確認)。
+
 ## [0.20.0] - 2026-08-28
 
 ### firebase の `search`/`search-content`: 候補ページ1件のHTTP失敗で全体がexit 1する問題を修正

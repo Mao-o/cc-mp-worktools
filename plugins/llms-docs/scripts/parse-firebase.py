@@ -406,22 +406,33 @@ def cmd_search_content(args):
     print("=" * 60)
     print()
 
-    page_paths, skipped = _fetch_pages_concurrently(
-        ((idx, entries[idx]["url"]) for idx in target_indexes),
-        args.cache_dir, max_age=args.max_age,
-    )
-    for _idx, url, error in skipped:
-        print(f"(skip: fetch failed {url}: {error})", file=sys.stderr)
-
     total_hits = 0
     docs_matched = 0
     printed_docs = 0
+    skipped = []
 
+    # Fetched and processed one page at a time (not via
+    # _fetch_pages_concurrently) so results still stream out as each page
+    # completes, same as before this fix. target_indexes can span the
+    # *entire* index (up to ~7000 pages) when --page-ref is omitted — a
+    # thread pool there would need to wait for every future before this
+    # loop could print anything, turning a handful of slow dead links into
+    # a multi-wave barrier that can itself exceed a caller's timeout budget
+    # (Codex R1 P2). --page-ref's single-page case doesn't warrant a pool
+    # either way. cmd_search's much smaller, bounded --top-n set is the one
+    # that benefits from _fetch_pages_concurrently.
     for idx in target_indexes:
-        if idx not in page_paths:
-            continue
         entry = entries[idx]
-        lines = load_lines(page_paths[idx])
+        try:
+            page_path = _fetch_page(
+                entry["url"], args.cache_dir, max_age=args.max_age,
+                timeout=PAGE_FETCH_TIMEOUT, raise_on_error=True,
+            )
+        except FetchError as e:
+            skipped.append((idx, e.url, e.cause))
+            print(f"(skip: fetch failed {e.url}: {e.cause})", file=sys.stderr)
+            continue
+        lines = load_lines(page_path)
 
         hits = search_content_in_body(
             lines, args.query,
