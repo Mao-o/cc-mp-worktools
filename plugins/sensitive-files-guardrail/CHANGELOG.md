@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **908** / check 79 → **80** (計 988)
+- テスト件数: redact 862 → **910** / check 79 → **80** (計 990)
 
 ### 1. 不具合の内容
 
@@ -162,6 +162,23 @@ segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一�
 候補文字列の形ではなく **`-----BEGIN` / `-----END` によるブロック状態**を
 `redact_dotenv` で追跡し、block 内の行を丸ごと捨てる形に変更した。
 ヒューリスティックは block 外に落ちた断片用の第 2 層として残す。
+
+**(c) inline 経路でも 50 block 超を数え落とさない** — `redact_pem` は
+`_MAX_BLOCKS` で `break` していたため、32KB 未満で 60 block のバンドルが
+「50 block」と報告され、END との差から**誤った BEGIN/END 不一致 note** まで出ていた。
+`_MAX_BLOCKS` は列挙する label の preview 上限であって block 数の上限ではないので、
+件数は全件数え、label だけを打ち切る形に直した (streaming 版と同じ扱い)。
+
+**(d) 綴りベースのヒューリスティックを撤去し parser context に一本化** —
+`looks_base64_fragment` は「24 文字以上 / `_` を含まない / 大小混在 / 数字あり」で
+判定していたが、`oauth2ClientSecretProduction` / `stripeApiKeyV2Production` のような
+**versioned camelCase の正当な鍵名を巻き込んで黙って報告から落として**いた
+(entries が過少になり設定のメタ情報が隠れる)。
+
+(a) で `redact_dotenv` に入れたブロック追跡を `keyonly_scan` の
+`scan_keys` / `scan_stream` にも展開し、**ヒューリスティックは削除**した。
+ブロック状態の追跡は位置にも綴りにも依存しないため、
+(a) の「短い末尾行」と (d) の「長い正当な鍵名」の両方向の誤りが同時に消える。
 
 **(b) 32KB 超 bundle の block 数をストリーム全体から数える** — 先頭 8KB だけを
 見て `redact_pem` に渡していたため、**20 block の証明書バンドルが「約 5 block」と

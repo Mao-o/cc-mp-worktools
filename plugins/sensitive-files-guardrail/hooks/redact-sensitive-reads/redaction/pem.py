@@ -7,13 +7,19 @@
 無いときだけ**発火する確率的な漏れで、テストの fixture に PEM が 1 件も無かった
 ため 941 件のテストを通過していた。
 
-対処は 2 層:
+対処は 2 層とも **parser context** で行う:
 
 1. **本モジュール** — ファイル全体が armored 鍵なら専用経路に分け、
    block 種別と件数だけを返す (base64 本体には一切触れない)
-2. ``keyonly_scan`` / ``dotenv`` 側の妥当性ゲート — 鍵名候補が base64 断片の
-   形をしていたら棄却する (``.env`` に PEM を値として埋めた形など、
-   本モジュールが介入しない経路の多層防御)
+2. ``keyonly_scan`` / ``dotenv`` — ``PEM_BEGIN_MARKER`` / ``PEM_END_MARKER`` で
+   ブロック状態を追跡し、block 内の行を丸ごと捨てる (``.env`` に PEM を値として
+   埋めた形など、本モジュールが介入しない経路)
+
+初版は「候補文字列が base64 断片に見えるか」というヒューリスティックで弾いて
+いたが、(a) RSA / EC PKCS#8 の短い末尾行が閾値を素通りする
+(b) ``oauth2ClientSecretProduction`` のような正当な鍵名を巻き込んで黙って
+落とす、の両方向に外れるため撤去した。ブロック状態の追跡は位置にも綴りにも
+依存しない。
 
 判定境界は変えない。``.pem`` / ``.key`` / ``id_rsa*`` はいずれも従来どおり
 機密パターンに一致して deny になり、変わるのは reason の**中身**だけ。
@@ -63,17 +69,22 @@ def redact_pem(text: str) -> dict:
     base64 本体には一切触れない。``armored_bytes`` はファイル全体の byte 数で、
     鍵の実バイト長ではない (鍵長の推定に使える情報は返さない)。
     """
+    # 件数は**全件**数える。``_MAX_BLOCKS`` は列挙する label の preview 上限で
+    # あって block 数の上限ではない (上限で break すると 60 block の bundle が
+    # 「50 block」と報告され、END との差から誤った不一致 note まで出る)。
     labels: list[str] = []
+    named = 0
     for m in _BEGIN_RE.finditer(text):
-        label = sanitize_key(m.group(1).strip() or "(unlabeled)")
-        labels.append(label)
-        if len(labels) >= _MAX_BLOCKS:
-            break
+        if named < _MAX_BLOCKS:
+            labels.append(sanitize_key(m.group(1).strip() or "(unlabeled)"))
+            named += 1
+        else:
+            labels.append("")
 
     ordered_unique: list[str] = []
     seen: set[str] = set()
     for label in labels:
-        if label not in seen:
+        if label and label not in seen:
             seen.add(label)
             ordered_unique.append(label)
 
@@ -84,7 +95,7 @@ def redact_pem(text: str) -> dict:
         "block_types": ordered_unique,
         "end_markers": end_count,
         "armored_bytes": len(text.encode("utf-8", errors="replace")),
-        "truncated_blocks": len(labels) >= _MAX_BLOCKS,
+        "truncated_blocks": named >= _MAX_BLOCKS,
     }
 
 
@@ -120,40 +131,6 @@ def format_pem(info: dict) -> str:
         "only block labels and counts are shown."
     )
     return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------
-# 多層防御: 鍵名候補が base64 断片かどうか
-# --------------------------------------------------------------------------
-
-# PEM 本文の行は 64 文字幅が標準で、大小英字 + 数字が混在する。環境変数名は
-# 慣習的に ``_`` 区切りの大文字か、短い camelCase なので、
-# 「長い / ``_`` を含まない / 大小混在 / 数字を含む」を全て満たすものは
-# 実運用の鍵名としては現れないとみなして棄却する。
-#
-# 閾値を 24 にしているのは ``someVeryLongCamelCaseKey`` のような正当な名前を
-# 巻き込まないため (数字を含む条件と併せて false negative を抑える)。
-_MIN_B64_FRAGMENT_LEN = 24
-
-
-def looks_base64_fragment(candidate: str) -> bool:
-    """鍵名候補が base64 本体の断片に見えるか判定する (多層防御)。
-
-    ``keyonly_scan`` / ``dotenv`` が ``KEY=`` として拾ってしまった行が、
-    実際には PEM 本文の 1 行である場合を弾く。
-    """
-    if not isinstance(candidate, str):
-        return False
-    if len(candidate) < _MIN_B64_FRAGMENT_LEN:
-        return False
-    if "_" in candidate:
-        return False
-    if not candidate.isascii() or not candidate.isalnum():
-        return False
-    has_upper = any(c.isupper() for c in candidate)
-    has_lower = any(c.islower() for c in candidate)
-    has_digit = any(c.isdigit() for c in candidate)
-    return has_upper and has_lower and has_digit
 
 
 # --------------------------------------------------------------------------

@@ -14,9 +14,9 @@ from io import BytesIO
 from pathlib import Path
 
 from redaction.engine import redact, redact_large_file
+from redaction.keyonly_scan import scan_keys
 from redaction.pem import (
     format_pem,
-    looks_base64_fragment,
     looks_pem,
     redact_pem,
     scan_pem_markers,
@@ -263,36 +263,71 @@ class TestRedactPem(unittest.TestCase):
         self.assertNotIn("SECRETBODYLINE", out)
 
 
-class TestLooksBase64Fragment(unittest.TestCase):
-    """多層防御ゲートが正当な鍵名を巻き込まないこと。"""
+class TestLegitimateKeysArePreserved(unittest.TestCase):
+    """正当な鍵名が「base64 断片っぽい」だけで落とされないこと (Codex R2 P2)。
 
-    def test_rejects_base64_body_line(self):
-        self.assertTrue(
-            looks_base64_fragment(
-                "NotARealKeyJustTestDataAAAABBBBCCCCDDDD1234567890abcdEFghIJkl"
-            )
+    初版は「24 文字以上 / ``_`` を含まない / 大小混在 / 数字あり」で弾いていたが、
+    ``oauth2ClientSecretProduction`` のような versioned camelCase を巻き込んで
+    黙って報告から消していた。判定は綴りではなく PEM ブロック状態で行う。
+    """
+
+    LEGIT_KEYS = [
+        "oauth2ClientSecretProduction",
+        "stripeApiKeyV2Production",
+        "auth0TenantDomainStaging",
+        "gcpServiceAccount2024Key",
+        "DATABASE_URL",
+        "apiKey",
+    ]
+
+    def test_dotenv_keeps_versioned_camelcase_keys(self):
+        for name in self.LEGIT_KEYS:
+            with self.subTest(name=name):
+                text = f"APP=demo\n{name}=value\nAFTER=x\n"
+                reason = _redact_text(".env", text)
+                self.assertIn(name, reason, f"正当な鍵名が落ちた: {name}")
+
+    def test_keyonly_scan_keeps_versioned_camelcase_keys(self):
+        text = "\n".join(f"{n}: value" for n in self.LEGIT_KEYS)
+        found = scan_keys(text)
+        for name in self.LEGIT_KEYS:
+            self.assertIn(name, found, f"正当な鍵名が落ちた: {name}")
+
+    def test_keyonly_scan_skips_pem_body_by_block_state(self):
+        """綴りではなくブロック状態で本文行を捨てること。"""
+        text = (
+            "REAL_KEY: value\n"
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "AbCd12=\n"
+            "NotARealKeyJustTestDataAAAABBBBCCCC1234567890abcdEFghIJkl=\n"
+            "-----END RSA PRIVATE KEY-----\n"
+            "AFTER_KEY: value\n"
         )
+        found = scan_keys(text)
+        self.assertIn("REAL_KEY", found)
+        self.assertIn("AFTER_KEY", found)
+        self.assertNotIn("AbCd12", found)
+        self.assertEqual(len(found), 2)
 
-    def test_keeps_ordinary_env_names(self):
-        for name in [
-            "DATABASE_URL",
-            "AWS_SECRET_ACCESS_KEY",
-            "STRIPE_KEY",
-            "apiKey",
-            "someVeryLongCamelCaseKeyName",  # 24 文字超だが数字なし
-            "PORT",
-            "x",
-        ]:
-            self.assertFalse(
-                looks_base64_fragment(name), f"正当な鍵名を棄却した: {name}"
-            )
 
-    def test_short_mixed_case_alnum_is_kept(self):
-        """閾値未満は常に通す (camelCase の短い名前を守る)。"""
-        self.assertFalse(looks_base64_fragment("apiKey2"))
+class TestInlineBundleBlockCount(unittest.TestCase):
+    """32KB 未満の inline bundle でも 50 block 超を数え落とさないこと (Codex R2 P2)。"""
 
-    def test_non_str_is_safe(self):
-        self.assertFalse(looks_base64_fragment(None))  # type: ignore[arg-type]
+    def _inline_bundle(self, n: int) -> str:
+        return "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" * n
+
+    def test_counts_all_blocks_past_label_cap(self):
+        info = redact_pem(self._inline_bundle(60))
+        self.assertEqual(info["blocks"], 60)
+        self.assertEqual(info["end_markers"], 60)
+
+    def test_no_false_mismatch_note(self):
+        out = format_pem(redact_pem(self._inline_bundle(60)))
+        self.assertNotIn("do not match", out)
+
+    def test_label_preview_is_capped_and_disclosed(self):
+        out = format_pem(redact_pem(self._inline_bundle(60)))
+        self.assertIn("block labels are listed", out)
 
 
 if __name__ == "__main__":

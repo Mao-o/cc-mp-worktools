@@ -24,7 +24,6 @@ import re
 from .placeholders import looks_placeholder
 from .pem import PEM_BEGIN_MARKER as _PEM_BEGIN_RE
 from .pem import PEM_END_MARKER as _PEM_END_RE
-from .pem import looks_base64_fragment
 from .sanitize import sanitize_key
 
 # KEY=VALUE / export KEY=VALUE の行をざっくり捕捉
@@ -253,9 +252,6 @@ def redact_dotenv(text: str) -> dict:
         # ``KEY=-----BEGIN ...-----`` 形。鍵名は残しつつ、以降の本文行を捨てる
         if _PEM_BEGIN_RE.search(raw_val):
             in_pem_block = not _PEM_END_RE.search(raw_val)
-        # 多層防御: block 外に落ちた base64 断片も棄却する (詳細は redaction/pem.py)
-        elif looks_base64_fragment(raw_key):
-            continue
         v = _preprocess_value(raw_val)
         type_class, prefix = _detect_type_and_prefix(v)
         is_ph, ph_label = looks_placeholder(v)
