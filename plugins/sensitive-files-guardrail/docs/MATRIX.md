@@ -140,6 +140,26 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > (`rebase --exec` / `bisect run` / `submodule foreach` / 未知 = alias) で ask、
 > sed の省略 long option (`--expr='e …'`) も解決してスクリプトを検査する。
 
+> **0.22.0 で判定境界が変化** (operand の取り出し方の修正、5 件): (1) grep 系 /
+> jq / awk / sed の **第 1 positional は pattern / filter / script** で path では
+> ない — `grep .env README.md` / `rg -n id_rsa .` / `jq '.env' package.json` /
+> `sed -n 's/.env/X/p' README.md` は deny → **allow** (pattern を option で与える
+> `grep -e PAT file` / `grep -f FILE file` では positional は全て path)。
+> (2) **値が path ではない option の値** を path として読まない — `git log -S.env` /
+> `--grep=.env` / `--author=` / `--format=` / `grep --exclude='.env'` /
+> `--exclude-dir=` / `--include='*.env'` / `rg -g` / `tar --exclude` /
+> `rsync --exclude` / `zip -x` / `jq --arg` / `diff -I` は deny → **allow**
+> (`handlers/bash/command_specs.py` に登録したコマンド・option のみ。値が path の
+> `-f FILE` / `--files-from` / `--slurpfile` / `--output` は deny 維持)。(3) glob の
+> dotenv 判定を **shell の意味論** に — 裸の `*` / `?env` / `[.]env` / `*.envrc` は
+> dotfile に展開されないので deny → **ask / allow**、`*/.env` は `sub/.env` に
+> 展開されるので ask / allow → **deny**。(4) Bash operand の機密判定は
+> **basename のみ** (parts 一致を使わない) — `cat .env/bin/activate` は deny →
+> **allow**。(5) **heredoc 本文を segment 分割から外す** — `cat > x.py <<'PY'` の
+> 本文 `n = kb * 1024` が deny を起こさない (演算子行は `<` で従来どおり ask /
+> allow)。改善側で deny になるのは `grep foo README.md >.env` (密着 redirect の
+> 書込み先) と `cat */.env` / `cat **/.env` の 3 形。
+
 ## Bash handler — 機密確定 match (全 mode で deny)
 
 以下は全 mode で **deny 固定** (autonomous を含む)。
@@ -158,9 +178,12 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `timeout 1 cat .env`, `nice cat .env`, `stdbuf -o0 cat .env`, `busybox cat .env` |
 | `cp .env /tmp/x`, `mv .env .env.old` |
 | `curl file://.env`, `git show HEAD:.env` |
-| `grep --file=.env foo`, `grep -f.env foo` |
-| `cat .env*`, `cat *.envrc`, `cat .envrc*` (operand glob が `.env` / `.envrc` 一致) |
-| `cat .e[n]v`, `cat .en?`, `cat [.]env` (`.env` literal 一致 char class / `?`) |
+| `grep --file=.env foo`, `grep -f.env foo`, `grep -f .env foo`, `grep TODO .env`, `rg -f pats.txt .env`, `jq . .env` (値が path の option / pattern の後ろの file operand) |
+| `git log -p .env`, `git log -L1,10:.env`, `git log --pretty .env -p`, `git log --output=.env`, `git commit -F .env`, `tar -T .env -cf out.tgz`, `rsync --files-from=.env src dst`, `jq --slurpfile x .env . cfg.json` (0.22.0: 値が path の option は候補に残す。`--pretty` は値省略可なので分離形の次 token は path) |
+| `cat .env*`, `cat .envrc*` (operand glob が shell の展開で `.env` / `.envrc` に一致) |
+| `cat .e[n]v`, `cat .en?` (`.env` literal 一致 char class / `?`。先頭は literal `.`) |
+| `cat */.env`, `cat **/.env` (0.22.0: path 要素ごとの展開で basename 側が `.env`。0.21.x までは ask / allow) |
+| `grep foo README.md >.env` (0.22.0: 密着形 redirect の書込み先。分離形 `> .env` は従来から deny) |
 
 > 0.8.0 で **prefix normalize** (`FOO=1 cat .env` を `cat .env` と解釈する処理) と
 > **既定 rules 候補列挙** (`cat *.key` / `cat id_rsa*` / `cat cred*.json` を
@@ -178,6 +201,11 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `cat .env.example`, `cat .env.sample` (literal、テンプレ除外 last-match-wins) |
 | `sed -n p notes.txt`, `awk /x/ notes.txt` (0.17.0: opaque 除外の副次効果で ask → allow。false positive 減) |
 | `grep '(=)' notes.txt`, `awk '{print $1}' notes.txt`, `echo '$(cat .env)'` (0.18.0: hard-stop quote-aware 化の副次効果で ask → allow。シングルクォート内は展開されない) |
+| `grep .env README.md`, `grep -rn '.env' src/`, `grep -v '.env' out.txt`, `rg -n id_rsa .`, `ag '.env' .`, `jq '.env' package.json`, `git grep -n '.env' -- src/`, `grep -e .env README.md` (0.22.0: 第 1 positional は pattern、`-e` の値は pattern) |
+| `git log -S.env --oneline`, `git log --grep=.env`, `git log --grep -x.env`, `git log --author=.env`, `git log --format=.env`, `grep -rn TODO --exclude='.env'`, `grep -rn TODO --exclude-dir=.env`, `grep -rn TODO --include='*.env'`, `rg TODO -g '*.env'`, `tar --exclude='.env' -czf out.tgz src`, `rsync -a --exclude='.env' src/ dst/`, `zip -r out.zip src -x '.env'`, `jq --arg k .env '.[$k]' cfg.json`, `diff -I .env a b` (0.22.0: 値が path ではない option の値) |
+| `sed -n 's/.env/X/p' notes.txt`, `awk '/.env/ {print}' notes.txt`, `cat .env/bin/activate`, `source .env/bin/activate` (0.22.0: script は path ではない / Bash operand は basename のみで判定) |
+| `cat *`, `git add *`, `cp * /tmp/dest/`, `cat ?env`, `cat [.]env`, `cat *.envrc` → **ask / allow** (0.22.0: shell の `*` / `?` / bracket 式は dotfile に展開されない。deny から他の不確定 glob と同じ ask_or_allow へ) |
+| `cat > x.py <<'PY'` + 本文 `n = kb * 1024` + `PY` → **ask / allow** (0.22.0: heredoc 本文は segment にしない。演算子行は `<` で hard-stop) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
 

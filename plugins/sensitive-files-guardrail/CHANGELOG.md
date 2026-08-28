@@ -20,6 +20,168 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.22.0
+
+**Bash operand の取り出し方の誤読 5 件を修正** (2026-08 精査の「operand をどう
+取り出すか」クラスタ)。実ログ (burst 除去後 2.5 か月) の hard deny のうち git /
+grep / sed / awk の 4 コマンドで 48%、hard_stop_quoted 193 件のほぼ全部が本節の
+(3) と (5) に相当し、いずれも **deny は lenient mode でも緩和されないため作業が
+止まる** 種類の false positive だった。判定境界は「誤読を直す」方向に動き、既定
+patterns.txt が守る本物の機密パス (basename 一致) の deny は不変。改善側で deny
+に変わる形が 3 つある (後述の表)。
+
+- テスト件数: redact 862 → **910** / check **79** (計 989)。
+- 新規: `handlers/bash/command_specs.py` (コマンド別 option 知識)、
+  `tests/test_operand_candidates.py`、`tests/test_segmentation.py`。
+- 旧版 (0.20.0) と本版で 306 コマンドのコーパスを流した verdict diff は 50 件、
+  全件が本節で意図した変更か開示事項 (説明不能ゼロ)。
+
+### 1. grep 系 / jq / awk / sed の第 1 positional (pattern) が path 扱いで hard deny
+
+`operand_lexer._find_path_candidates` は「option で始まらない token = path 候補」
+の一律規則だったため、`grep <pattern> <file>` の pattern 側も path 候補になり
+`grep .env README.md` / `grep -rn '.env' src/` / `rg -n id_rsa .` /
+`jq '.env' package.json` が「機密ファイルを読む」と誤認されて全 mode で deny に
+なっていた (`grep_extract.py` は 0.10.0 から「最初の positional は pattern」前提で
+deny reason を組み立てており、判定側と説明側で同じ token の扱いが矛盾していた)。
+
+- コマンド別の option 知識 `_CmdSpec` を導入し、token 列を option / option の値 /
+  positional / redirect に字句分けしてから候補を決める
+- grep egrep fgrep rg ag ack / git grep / jq / awk 系 / sed 系は第 1 positional
+  (pattern / filter / script) を候補にしない。pattern を option で与える形
+  (grep `-e` `--regexp` `-f` `--file`、jq `-f`、awk `-f`、sed `-e` `-f`) が 1 つ
+  でもあれば positional は全て path (`grep -f .env x.txt` / `grep TODO .env` の
+  deny は維持)
+- 長形 option は GNU getopt_long の一意な prefix 省略 (`--reg=`) も解決する
+- 書込み redirect の密着形 (`grep foo README.md >.env`) の target も path 候補に
+  する (分離形 `> .env` は従来から bare token として拾えていた)
+- `grep -vn .env.local README.md` の既存テスト期待値は grep の意味論
+  (`.env.local` は pattern) に合わせて deny → allow に改めた
+
+### 2. 値が path ではない option の値が path operand として誤読される
+
+`--opt=VALUE` の RHS と `-XVALUE` の `tok[2:]` は意図的に候補へ入れていた
+(`file -f .env` / `grep -f.env` を捕まえる設計) が、option の意味を見ないため
+`git log -S.env` (pickaxe) / `--grep=.env` / `--author=` / `--format=` /
+`grep -rn TODO --exclude='.env'` / `--exclude-dir=.env` / `--include='*.env'` /
+`rg TODO -g '*.env'` / `tar --exclude='.env'` / `rsync --exclude='.env'` /
+`zip -x '.env'` / `jq --arg k .env` / `diff --ignore-matching-lines=.env` まで
+deny になっていた (除外指定は「.env を読ませない」とユーザーが明示している形)。
+arity の概念自体が無かったので、分離形 `git log --grep -x.env` は `-x.env` の
+`tok[2:]` = 元の文字列に存在しない `.env` で一致していた。
+
+- `_CmdSpec.values` に「値を取る option → 値の種別列」を持つ (`n` = pattern /
+  regex / 数値 / 書式 / glob、`p` = patterns file / files-from / password-file /
+  出力先)。値省略可の option (`git log --pretty[=<fmt>]` / GNU diff `-U[NUM]` /
+  ag `-C [LINES]` / BSD grep `-C[num]`) は密着形のみ値を取る (`=n`) として登録し、
+  分離形の次 token を誤って読み飛ばさない (`git log --pretty .env -p` は deny
+  維持)
+- 対象: grep egrep fgrep / rg / ag / ack / git grep / jq / tar / rsync / zip /
+  unzip / diff、git は log show whatchanged rev-list / diff 系 / shortlog /
+  commit tag branch merge stash for-each-ref をサブコマンド単位で
+- 登録規則: **全形で必ず値を取る option のみ**。GNU / BSD で値の有無が異なる
+  もの (BSD sed `-l` / BSD grep `-C`) は BSD (値なし) 側に合わせる。誤登録
+  (値を取らない option を値あり、path の値を non-path) だけが保護の穴になり、
+  漏れは現状維持 (false positive が残るだけ) なので保守的に少数から始めた。
+  実測: git 2.50 / BSD grep 2.6 / bsdtar 3.5 / jq 1.7 / openrsync / zip 3.0 /
+  BSD awk・sed
+- metadata-only gate (`_reads_file_content` / `_git_ls_files_exposes_object`) は
+  生の token 列で判定するため影響なし。`file -f .env` / `wc --files0-from=.env` /
+  `tree --fromfile .env` / `git ls-files -s .env` の deny を回帰テストで固定
+
+### 3. 裸の `*` が hard deny (shell glob と fnmatch のドット意味論相違)
+
+`_glob_operand_is_dotenv_match` は `fnmatchcase(".env", op)` で判定していたが、
+shell の `*` / `?` / bracket 式はファイル名先頭の `.` に一致しない (POSIX 2.13.3、
+bash 3.2 / zsh 5 実測: `echo *` `echo ?env` `echo [.]env` `echo *.envrc` は
+`.env` / `.envrc` に展開されない)。fnmatch にはこの規則が無いため裸の `*` が
+「.env に一致する glob」と誤判定され、`git add *` / `cp * dst/` /
+`tar czf out.tgz *` / heredoc 本文の `n = kb * 1024` が全 mode で deny になって
+いた。
+
+- basename 側の glob が literal `.` で始まらなければ dotenv stem に一致しない
+  (`*` `?env` `*env` `[.]env` `*.envrc` → 他の不確定 glob と同じ ask_or_allow)
+- 展開は path 要素ごとなので最後の path 要素だけを stem と比較する。`*/.env` /
+  `**/.env` は `sub/.env` に展開されるため deny (0.21.x は operand 全体を fnmatch
+  して ask_or_allow = auto で素通りだった)
+- `.env*` `.en?` `.e[n]v` `.envrc*` `.*` の deny は不変
+
+### 4. `is_sensitive` の parts 一致が非パス文字列を deny に変える
+
+`_shared.matcher.is_sensitive` は basename が nomatch のとき親ディレクトリ名
+(`pathlib.parts`) も評価する。Bash operand は path とは限らない文字列 (sed / awk
+の式、option の値) を含むため、`normalize` で合成パスになった瞬間
+(`sed -n 's/.env/X/p'` → `/cwd/s/.env/X/p`) に parts の `.env` で deny になって
+いた。parts 一致の根拠 (symlink race 等の偽装) は思想 1 が射程外とする敵対的
+シナリオで、観測される実効果は非パス文字列を deny に変えることだけ。
+
+- `is_sensitive(path, rules, *, parts=True)` に keyword-only 引数を追加。
+  `bash_handler._operand_is_sensitive` は `parts=False` で呼ぶ
+- Read / Edit / Stop (実在ファイルの実パス) は既定の `parts=True` のまま
+- 既定 patterns.txt は全て basename 形なので、本物の機密パスは basename で
+  include 決着する (保護低下なし)。副産物として `python -m venv .env` した
+  仮想環境配下 (`.env/bin/activate`) の操作が止まらなくなる
+
+### 5. heredoc 本文が segment として解析される
+
+`_split_command_on_operators` が `\n` で分割するだけだったため、heredoc 本文の
+各行が「コマンド」として解析されていた。`cat > x.py <<'PY'` の本文
+`n = kb * 1024` が `n` コマンドの operand `*` として判定され、reason は
+matched_operand: * / first_token: n でユーザーには意味不明だった。
+docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read 対象外」
+と宣言しており、実装を docs に合わせた。
+
+- `_lex` がクォート外の `<<` / `<<-` (`<<<` here-string は除く) の delimiter 語
+  (`'EOF'` / `"EOF"` / `\EOF` のクォート込み) を読み、その行の次の plain な改行
+  から terminator 行までを新状態 `_ST_HEREDOC` にする (同じ行の複数 heredoc は
+  順番に)。`_split_command_on_operators` は heredoc 文字を落とす
+- 演算子と delimiter 語自体は plain のまま残るので、その segment は `<` で
+  従来どおり hard-stop (ask_or_allow)。同じ行の `&&` / `|` 以降や terminator の
+  後ろの行は従来どおり解析する
+- terminator が見つからない `<<` は heredoc として扱わない (0.21.x と同じ
+  行分割)。`$((1<<2))` を heredoc と誤認して以降を丸ごと本文にすると後続の
+  `cat .env` が解析されず auto で素通りするため
+
+### 動作変化 (in-process 実測、default / auto)
+
+| コマンド | 0.21.x | 0.22.0 |
+|---|---|---|
+| `grep .env README.md`, `grep -rn '.env' src/`, `grep -v '.env' out.txt`, `grep -E '.env\|.envrc' notes.md`, `rg '.env' src/`, `rg -n id_rsa .`, `ag '.env' .`, `jq '.env' package.json`, `jq -r '.env.NODE_ENV' cfg.json`, `git grep -n '.env' -- src/` | deny / deny | **allow / allow** |
+| `grep -vn .env.local README.md`, `grep -A 3 .env README.md`, `grep -e .env README.md` | deny / deny | **allow / allow** |
+| `git log -S.env --oneline`, `git log -G'.env'`, `git log --grep=.env`, `git log --grep .env`, `git log --grep -x.env`, `git log --author=.env`, `git log --committer=.env`, `git log --format=.env`, `git -C repo log -S.env`, `git shortlog -s --author .env`, `git diff -I .env HEAD` | deny / deny | **allow / allow** |
+| `grep -rn TODO --exclude='.env'`, `grep -rn TODO --exclude-dir=.env`, `grep -rn TODO --include='*.env'`, `rg TODO -g '*.env'`, `tar --exclude='.env' -czf out.tgz src`, `rsync -a --exclude='.env' src/ dst/`, `zip -r out.zip src -x '.env'`, `jq --arg k .env '.[$k]' cfg.json`, `diff --ignore-matching-lines=.env a b` | deny / deny | **allow / allow** |
+| `sed -n 's/.env/X/p' README.md`, `sed -n '/.env/p' README.md`, `sed --expr='s/.env/X/' notes.txt`, `awk '/.env/ {print}' notes.txt`, `cat .env/bin/activate`, `source .env/bin/activate` | deny / deny | **allow / allow** |
+| `git add *`, `cp * /tmp/dest/`, `tar czf out.tgz *`, `cat *`, `cat ?env`, `cat [.]env`, `cat *.envrc` | deny / deny | **ask / allow** |
+| `cat > x.py <<'PY'` + 本文 `n = kb * 1024` + `PY`、`cat <<'EOF' > notes.txt` + 本文 `cat .env` + `EOF` | deny / deny | **ask / allow** |
+| `bash <<EOF` + 本文 `cat .env` + `EOF` (`bash -c '…'` と同じ opaque wrapper) | deny / deny | **ask / allow** |
+| `sed -n -e '/.env/p' README.md` | deny / deny | **ask / allow** (default の ask は `_sed_scripts` が option 経由の script のとき `README.md` を script 候補に含め `R` を動的コマンド扱いする既存の別課題) |
+| `grep foo README.md >.env` (密着 redirect の書込み先) | allow / allow | **deny / deny** |
+| `cat */.env`, `cat **/.env` (`sub/.env` に展開される) | ask / allow | **deny / deny** |
+| `grep TODO .env`, `grep -f .env x.txt`, `grep --file=.env foo`, `grep -f.env foo`, `grep -rne TODO .env`, `rg TODO .env`, `jq . .env`, `grep foo README.md > .env` | deny / deny | deny / deny (不変) |
+| `git log -p .env`, `git log -L1,10:.env`, `git log --pretty .env -p`, `git log --output=.env`, `git commit -F .env`, `git commit -S .env`, `git diff --cached .env`, `tar -czf out.tgz .env`, `tar -T .env -cf out.tgz`, `rsync -a .env host:dst/`, `zip -r out.zip .env`, `jq --slurpfile x .env . cfg.json`, `diff .env .env.example` | deny / deny | deny / deny (不変) |
+| `file -f .env`, `wc --files0-from=.env`, `tree --fromfile .env`, `git ls-files -s .env` (metadata-only gate の 4 形) | deny / deny | deny / deny (不変) |
+| `cat .env*`, `cat .en?`, `cat .e[n]v`, `cat .envrc*`, `cat .env`, `cat sub/.env`, `cat .env/bin/id_rsa`, `git show HEAD:.env` | deny / deny | deny / deny (不変) |
+| `cat *.json`, `cat *.key`, `cat id_rsa*`, `cat .env.*`, `cat sub/*` | ask / allow | ask / allow (不変) |
+| `echo *`, `wc -l *`, `chmod 644 *`, `ls -la *` (metadata-only) | allow / allow | allow / allow (不変) |
+
+### 開示事項 (裏が取れなかったこと / 判断で倒したこと)
+
+- `cat *.envrc` / `cat [.]env` / `cat ?env` は deny → ask / allow に**緩む**。
+  実シェルはこれらを `.envrc` / `.env` に展開しないため「dotenv stem に一致する
+  glob」という deny 根拠が成り立たない。`*.envrc` が `foo.envrc` (既定 rules の
+  対象) に展開される点は `*.key` / `cred*.json` と同じ「既定 rules との交差」
+  クラスで、0.8.0 の方針どおり ask_or_allow に揃えた
+- `bash <<EOF … cat .env … EOF` は deny → ask / allow に緩む。0.21.x の deny は
+  本文の `cat .env` が偶然 segment になっていたもので設計された guard ではなく、
+  `bash -c 'cat .env'` (DESIGN.md「autonomous モードでの opaque 緩和」) と同じ
+  扱いに揃えた
+- rg は手元に無く、option の arity は docs (clap parser、登録した option は全て
+  必須値) で判断した。他は実測 (上記)
+- ag / ack の option 仕様は `--help` の記述 (ag の `-A/-B/-C [LINES]`、ack の
+  `-C [NUM]` が値省略可) で判断し、密着形のみ値を取る側 (deny 寄り) に倒した
+- zip の `-x` は複数 pattern を取るが 1 つ目だけ消費する。2 つ目以降は glob なら
+  ask_or_allow、literal なら候補に残る (保守側)
+
 ## 0.20.0
 
 **E6 (Edit/Write の意図汲み取りメッセージ拡張)**。`core.safepath.classify` の

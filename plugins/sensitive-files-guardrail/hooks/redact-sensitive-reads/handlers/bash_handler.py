@@ -58,14 +58,21 @@ segment 単位再評価へ移行)。
      完全一致 + 既知の安全な option 以外が無いとき。未知・省略形の ``--xxx``
      が 1 つでもあれば fail-closed で通常経路) も metadata-only。両 hook
      の reason が推奨する次善策を自分で deny していた自己矛盾の解消
-     (bd_092a232e-snw.3)。plain ``git rm`` (作業ツリー削除) は deny 維持
-   - operand scan: 各 path 候補について
-     - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が
-       ``.env`` / ``.envrc`` literal に fnmatch) で True なら **deny 固定**、
+     (2026-08 精査)。plain ``git rm`` (作業ツリー削除) は deny 維持
+   - operand scan: 各 path 候補について。候補は ``_find_path_candidates`` が
+     コマンド別の option 知識 (``handlers/bash/command_specs.py``、0.22.0) で
+     token 列を option / 値 / positional / redirect に字句分けして決める:
+     grep 系 / jq / awk / sed の第 1 positional (pattern / filter / script) と、
+     値が path ではない option の値 (``git log -S<string>`` / ``--exclude=``)
+     は候補にしない。spec に無いコマンド・option は従来規則
+     - glob 含む → ``_glob_operand_is_dotenv_match`` (operand glob が shell の
+       pathname expansion で ``.env`` / ``.envrc`` literal に展開されうる。先頭
+       ドットは literal ``.`` でのみ一致、0.22.0) で True なら **deny 固定**、
        False なら ``ask_or_allow``。0.3.2 で導入した既定 rules への候補列挙
        (``_glob_operand_is_sensitive`` / ``_glob_candidates``) は 0.8.0 で撤廃
-     - literal → ``_operand_is_sensitive`` (basename + URI/VCS pathspec 分割) で
-       True なら **deny 固定**、False なら allow
+     - literal → ``_operand_is_sensitive`` (basename のみ + URI/VCS pathspec
+       分割。親 dir 名の parts 一致は使わない、0.22.0) で True なら **deny
+       固定**、False なら allow
 3. **集約** — deny > ask > allow。``pending_ask`` は最後に畳む。
 
 ### patterns.txt 読込失敗 = 全 mode deny 固定
@@ -225,7 +232,7 @@ def _git_ls_files_exposes_object(args: list[str]) -> bool:
 
 def _git_rm_is_index_only(args: list[str]) -> bool:
     """``git rm`` が index からの除去のみ (``--cached``) で、作業ツリーの実ファイルを
-    消さず内容も出力しないか (0.19.0, bd_092a232e-snw.3)。
+    消さず内容も出力しないか (0.19.0, 2026-08 精査)。
 
     **fail-closed** (Codex review P1): git は long option の **一意な接頭辞** を
     受理する (``--no-cach`` = ``--no-cached`` は後勝ちで作業ツリーも削除、
@@ -293,7 +300,7 @@ def _is_metadata_only(tokens: list[str]) -> bool:
     は operand に機密 path が無いため operand scan で allow に倒れる。global
     option 前置 (``git -C dir check-ignore``) は保守的に対象外。
 
-    0.19.0 (bd_092a232e-snw.3): ``git rm`` は ``--cached`` 付きのみ metadata-only
+    0.19.0 (2026-08 精査): ``git rm`` は ``--cached`` 付きのみ metadata-only
     (``_git_rm_is_index_only``)。index からの除去だけで実ファイルは残り内容も
     出ない。両 hook の reason が「tracked なら ``git rm --cached`` で untrack」と
     案内しているのに自分で deny していた自己矛盾を解消する。``chmod`` /

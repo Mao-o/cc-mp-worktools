@@ -84,7 +84,7 @@ _METADATA_ONLY_FIRST_TOKENS = frozenset({
     "basename", "dirname", "realpath", "readlink",
     # 引数をそのまま表示 (ファイルを開かない)
     "echo", "printf",
-    # 0.19.0 (bd_092a232e-snw.3): 属性 / タイムスタンプ操作。出力は無し、または
+    # 0.19.0 (2026-08 精査): 属性 / タイムスタンプ操作。出力は無し、または
     # ``-v`` / ``-c`` での変更前後の mode / owner のみで内容は出ない。
     # ``--reference=RFILE`` / ``touch -r RFILE`` は RFILE の mode / owner /
     # timestamp (= metadata) を読むだけで、内容を読む option は存在しない。
@@ -173,7 +173,7 @@ _GIT_LS_FILES_OBJECT_OPTS = frozenset({"-s", "--stage", "--format"})
 # ``-x`` / ``-X`` は値を取るため除外 (``-x s.env`` を誤検出しないため)。
 _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 
-# git rm の「index からの除去のみ」flag (0.19.0, bd_092a232e-snw.3)。
+# git rm の「index からの除去のみ」flag (0.19.0, 2026-08 精査)。
 # ``git rm --cached <path>`` は作業ツリーの実ファイルを消さず内容も出力しない
 # (出力は ``rm '<path>'`` の path 文字列のみ) ため metadata-only。両 hook の
 # reason が「tracked なら ``git rm --cached`` で untrack」と案内しているのに
@@ -234,13 +234,13 @@ _SAFE_REDIRECT_TARGETS = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout"})
 # script 引数の後ろの positional が素直に file operand なので、この基準に
 # 当てはまらない。opaque のままだと ``sed -n 1,5p .env`` が autonomous で素通り
 # し、DESIGN.md が定める確信 deny 条件 (機密 operand 確定 × 内容出力) と実装が
-# 食い違っていた (bd_092a232e-5pn)。
+# 食い違っていた (内部バックログ)。
 #
 # 副作用 (``sed -i`` の in-place / ``awk 'print > "f"'`` の redirect) への慎重さは
 # ``_SAFE_READ_FIRST_TOKENS`` に **入れない**ことで維持する — ``sed s/x/y/ f > out``
 # は residual metachar 経由で従来どおり ask_or_allow に倒れる。
 #
-# 0.18.0 (bd_092a232e-y5y): ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が
+# 0.18.0 (内部バックログ): ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が
 # ``_HARD_STOP_CHARS`` に該当し opaque 判定より **前** の hard-stop で ask に
 # 倒れていた (awk 最頻形の穴)。``_has_hard_stop`` を quote-aware
 # (シングルクォート内を無視) にして operand scan に到達させ、この穴を塞いだ。
