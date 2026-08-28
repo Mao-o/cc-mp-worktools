@@ -41,6 +41,7 @@ from _common import (
     add_max_age_arg,
     add_max_chars_arg,
     assert_parsed,
+    corpus_hint_args,
     die,
     die_index_out_of_range,
     extract_content,
@@ -396,7 +397,12 @@ def cmd_sections(args):
     for s in sections:
         indent = "  " * (s["level"] - 1)
         code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"{indent}[L{s['level']}] {s['title']}{code_marker}")
+        # Print the canonical heading_path, not the bare title: this line
+        # is documented (SKILL.md) as copy-pasteable straight into
+        # content's heading_path argument, and two sibling subsections
+        # with the same title (e.g. "Examples" under two different
+        # parents) are only distinguishable via the full path.
+        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
 
     print()
     print(f"({len(sections)} sections)")
@@ -417,7 +423,9 @@ def cmd_content(args):
         protect_tables=False, min_level=1,
     )
 
-    narrow_hint = f'parse-ai-sdk.py content {idx} "<heading_path>"'
+    hint_args = corpus_hint_args(args)
+    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
+    narrow_hint = f'parse-ai-sdk.py content {idx} "<heading_path>"{hint_suffix}'
     content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
 
     print_metadata_header(
@@ -429,12 +437,14 @@ def cmd_content(args):
     # Printed BEFORE the body too — see parse-claude-docs.py's cmd_content
     # for why (survives truncation regardless of where the cut lands).
     if not args.no_subsection_hints:
-        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path, min_level=1)
+        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path,
+                               min_level=1, extra_hint_args=hint_args)
 
     print(content, end="")
 
     if not args.no_subsection_hints:
-        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path, min_level=1)
+        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path,
+                               min_level=1, extra_hint_args=hint_args)
 
 
 def cmd_search_index(args):

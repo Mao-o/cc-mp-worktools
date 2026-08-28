@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -179,15 +180,25 @@ def extract_content(body_lines, heading_path=None, *,
     value in headers/hints, not echo back the raw argument, so a reader can
     tell which section was actually picked.
 
-    A partial match (no exact ``heading_path``/``title`` hit) that is
-    ambiguous — two or more sections match the same case-insensitive
-    substring — exits with an ``Error: ambiguous heading ...`` listing every
-    candidate instead of silently picking the first one (mirroring how
-    ``_resolve_page_ref``'s slug lookup handles an ambiguous slug). An exact
-    match is checked first and always wins outright, so a ``heading_path``
-    copied verbatim from a previous ``sections``/``content``/``search`` call
-    is never subject to this check even if it would *also* satisfy other
-    sections' partial-match pattern.
+    A partial match (no exact ``heading_path``/``title`` hit, case-sensitive
+    or not) that is ambiguous — two or more sections match the same
+    case-insensitive substring — exits with an ``Error: ambiguous heading
+    ...`` listing every candidate instead of silently picking the first one
+    (mirroring how ``_resolve_page_ref``'s slug lookup handles an ambiguous
+    slug). Exact matches are checked first and always win outright, so a
+    ``heading_path`` copied verbatim from a previous
+    ``sections``/``content``/``search`` call is never subject to this check
+    even if it would *also* satisfy other sections' partial-match pattern.
+    Heading matching is documented as case-insensitive, so the exact-match
+    tier itself has two passes: case-sensitive first, then case-folded —
+    both take the first matching section outright with no ambiguity check,
+    the same as the case-sensitive form always has. Without the second
+    pass, a case-differing exact match (e.g. querying ``"configuration"``
+    against a page with ``## Configuration`` followed by a nested
+    ``### Options``) would fall through to the substring tier and could
+    die as "ambiguous" against its own descendant (``"Configuration/
+    Options"`` also contains the substring ``"configuration"``), even
+    though this exact heading exists and is not actually ambiguous.
     """
     if heading_path is None:
         return "".join(body_lines), None
@@ -207,8 +218,21 @@ def extract_content(body_lines, heading_path=None, *,
             target = s
             break
 
+    heading_lower = heading_path.lower()
+
     if target is None:
-        heading_lower = heading_path.lower()
+        # Case-folded exact match, still a second "exact" tier — not a
+        # substring/partial one — so it also wins outright with no
+        # ambiguity check. Skipping this and falling straight to the
+        # substring tier below would wrongly treat a case-differing exact
+        # match as merely "ambiguous" whenever it happens to also be a
+        # substring of one of its own descendants' heading_path.
+        for s in sections:
+            if s["heading_path"].lower() == heading_lower or s["title"].lower() == heading_lower:
+                target = s
+                break
+
+    if target is None:
         matches = [
             s for s in sections
             if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower()
@@ -498,8 +522,30 @@ def _norm(tok: str) -> str:
     stripping only the trailing ``s`` from those would leave a dangling
     ``e`` (e.g. "boxes" → "boxe"). Words already ending in ``ss`` (e.g.
     "process") are left untouched to avoid mangling a non-plural word.
+
+    A token with an uppercase letter NOT in the first position, mixed
+    with at least one lowercase letter elsewhere, in its ORIGINAL spelling
+    (checked before lowercasing) skips all of the above stripping: this
+    exact shape — "iOS", "macOS", "tvOS" — is how brand/acronym tokens get
+    written, and an ordinary English plural is essentially never mixed-
+    case like this. Without this guard, a query for "iOS" would strip to
+    "io" and substring-match unrelated titles like "Configuration" or
+    "Migrations" purely by coincidence — especially harmful for sources
+    with no full-corpus search fallback, where a handful of spurious "io"
+    hits can crowd the intended page out of a small top-N candidate list.
+    Deliberately narrower than "any token with 2+ capitals": an ALL-CAPS
+    query like "HOOKS" (a user typing an ordinary plural in shouty case,
+    not an acronym) must still stem to "hook" — the same result "Hooks"
+    stems to — or an otherwise-exact match silently becomes a miss solely
+    because of how the user capitalized it. Still lowercased and
+    separator-stripped like any other token, just not stemmed.
     """
+    is_acronym_like = (
+        any(c.isupper() for c in tok[1:]) and any(c.islower() for c in tok)
+    )
     t = tok.lower().replace("-", "").replace("_", "")
+    if is_acronym_like:
+        return t
     if t.endswith("ies") and len(t) > 4:
         return t[:-3] + "y"
     if t.endswith(("ses", "xes", "zes", "ches", "shes")) and len(t) > 4:
@@ -554,6 +600,16 @@ def score_entry(title: str, description: str, keywords,
     deterministic transform is applied to both, so this cannot turn a
     previously-exact match into a partial one — it only ever adds new
     matches / upgrades partial matches to exact.
+
+    A keyword made up entirely of characters ``_norm()`` strips (``-``,
+    ``_``, or a mix, e.g. ``"_"``/``"--"``/``"_-"``) normalizes to ``""``.
+    Left unguarded, every ``kw_norm in <field>`` check below would then
+    trivially succeed for every entry (the empty string is a substring of
+    any string), turning a degenerate keyword into a universal match
+    instead of a no-op. Such keywords are skipped entirely — contributing
+    no score and not counting toward *keywords* for the all-keyword bonus
+    below — so e.g. a lone ``"_"`` keyword scores every entry 0 rather than
+    matching the whole corpus.
     """
     title_norm = _norm_phrase(title or "")
     desc_norm = _norm_phrase(description or "")
@@ -562,9 +618,13 @@ def score_entry(title: str, description: str, keywords,
 
     total = 0
     matched_keywords = 0
+    scorable_keywords = 0
 
     for kw in keywords:
         kw_norm = _norm(kw)
+        if not kw_norm:
+            continue
+        scorable_keywords += 1
         kw_score = 0
 
         if kw_norm == title_norm:
@@ -585,7 +645,7 @@ def score_entry(title: str, description: str, keywords,
             matched_keywords += 1
         total += kw_score
 
-    if len(keywords) > 1 and matched_keywords == len(keywords):
+    if scorable_keywords > 1 and matched_keywords == scorable_keywords:
         total += 10
 
     return total
@@ -952,6 +1012,51 @@ def add_cache_dir_arg(parser, *, default: str | None = None, help=None) -> None:
     parser.add_argument("--cache-dir", default=default, help=help)
 
 
+def corpus_hint_args(args) -> tuple:
+    """Return ``--file``/``--cache-dir``/``--max-age`` CLI args needed to
+    keep a generated follow-up command hint pointed at the same corpus as
+    the current invocation, instead of silently falling back to defaults.
+
+    A hint (e.g. the ``--max-chars`` truncation notice's "narrow with
+    ..." suggestion, or ``print_subsection_hints``'s ``Next:`` line) that
+    drops a non-default ``--file``/``--cache-dir``/``--max-age`` selection
+    can point the *same numeric page index* at an entirely different
+    document once the reader follows it: it re-resolves against the
+    default corpus instead of the snapshot/cache dir just displayed, or
+    (with a nondefault ``--max-age`` that intentionally accepts an older
+    cache) re-fetches and can land on a different upstream ordering.
+    ``--file`` is only present on scripts that support a read-only
+    snapshot override (checked via ``getattr`` so scripts without it,
+    e.g. firebase, are unaffected).
+
+    ``--file`` makes ``--cache-dir``/``--max-age`` irrelevant in every
+    loader that supports it (``_load_docs``/``_load_full_txt``): once
+    ``--file`` is given, neither is ever even read. Echoing them anyway
+    would mislead a reader into thinking they still matter, so once
+    ``--file`` is present it is returned alone. ``--cache-dir`` is
+    included only when it differs from ``default_cache_dir()`` (itself
+    env-overridable, so a plain string default would false-positive under
+    ``$XDG_CACHE_HOME``/``$LLMS_DOCS_CACHE_DIR``); ``--max-age`` only when
+    it differs from ``DEFAULT_MAX_AGE_SECONDS``. Both a nondefault path
+    value are shell-quoted (``shlex.quote``) since these strings are
+    spliced verbatim into a copy-pasteable shell command line — an
+    unquoted path containing a space or shell metacharacter would
+    otherwise split into extra arguments or trigger shell expansion when
+    the reader actually runs the generated command.
+    """
+    file_val = getattr(args, "file", None)
+    if file_val:
+        return ("--file", shlex.quote(file_val))
+    result = []
+    cache_dir = getattr(args, "cache_dir", None)
+    if cache_dir and cache_dir != default_cache_dir():
+        result += ["--cache-dir", shlex.quote(cache_dir)]
+    max_age = getattr(args, "max_age", None)
+    if max_age is not None and max_age != DEFAULT_MAX_AGE_SECONDS:
+        result += ["--max-age", str(max_age)]
+    return tuple(result)
+
+
 def add_max_age_arg(parser) -> None:
     """Add ``--max-age`` to *parser* with a 7-day default."""
     parser.add_argument(
@@ -995,14 +1100,28 @@ def add_max_chars_arg(parser) -> None:
 
 
 def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
-    """Truncate *content* to *max_chars* characters (``<= 0`` disables this).
+    """Truncate *content* to at most *max_chars* characters (``<= 0``
+    disables this), cutting at a line boundary that is not inside a
+    fenced code block or Markdown table.
+
+    A raw ``content[:max_chars]`` slice can land inside a fence or table
+    (undoing ``extract_content``'s own boundary protection, which only
+    guards heading-section cuts, not this later character-budget cut) or
+    even split a single line in half, leaving both the truncated
+    construct and the appended notice malformed. This instead walks
+    lines from the start, remembering the end of the last line that (a)
+    is itself not a table row and (b) leaves ``FenceTracker`` closed, and
+    cuts there — never later than *max_chars*, but possibly a little
+    earlier if the naive boundary falls mid-fence/mid-table. Preferring
+    an earlier cut (over extending forward to finish the block, the way
+    ``extract_content`` does for its own boundary) keeps this a true
+    upper bound on output size, which is the whole point of --max-chars.
 
     Appends a note showing how many characters were cut and a caller-
     supplied *narrow_hint* — typically a fuller ``content <ref>
     "<heading_path>"`` invocation string — telling the reader how to fetch
     a smaller slice instead of the same truncated one again. Callers
-    should apply this AFTER every other content transform (fence/table
-    protection already happened inside ``extract_content``; link
+    should apply this AFTER every other content transform (link
     annotation, where applicable, adds text too) so the truncation point
     reflects the actual length of what the reader receives, not a
     pre-annotation length that the annotations could then push back over
@@ -1010,9 +1129,28 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
     """
     if max_chars <= 0 or len(content) <= max_chars:
         return content
-    cut = len(content) - max_chars
+
+    fence = FenceTracker()
+    cumulative = 0
+    safe_cut = 0
+    for line in content.splitlines(keepends=True):
+        line_end = cumulative + len(line)
+        fence.update(line)
+        if line_end > max_chars:
+            break
+        if not fence.in_fence and not _is_table_line(line):
+            safe_cut = line_end
+        cumulative = line_end
+    # safe_cut deliberately stays 0 (rather than falling back to a raw
+    # content[:max_chars] slice) when no line boundary is safe within
+    # budget — e.g. the very first line alone exceeds max_chars, or an
+    # unclosed fence/table runs from the start past it. A raw slice in
+    # that case would reintroduce exactly the malformed-cut failure this
+    # function exists to prevent; emitting no body at all before the
+    # notice is always well-formed, if less useful.
+    cut = len(content) - safe_cut
     return (
-        content[:max_chars]
+        content[:safe_cut]
         + f"\n... ({cut} chars truncated; narrow with {narrow_hint})\n"
     )
 

@@ -57,6 +57,104 @@ metadata version を patch bump:
 researching-claude-docs 3.4.4 → 3.4.5 / researching-ai-sdk 3.3.5 → 3.3.6 /
 researching-firebase 2.1.4 → 2.1.5
 
+## [0.18.4] - 2026-08-28
+
+### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)
+
+Codex R4 で `_norm()` の sibilant-suffix 規則 (`ses`/`xes`/`zes`/`ches`/`shes`
+終わりの語から2文字strip) が silent-e語根の複数形も誤って2文字stripしてしまう
+指摘を受けた (`Responses`→`respons`, `Caches`→`cach` 等、単数キーワードは
+末尾`e`を保持するため一致しなくなる)。別branch (`_common.py` の並行コピー)
+と同一の指摘のため、同じ判断をこちらにも適用する。
+
+調査の結果、これは文字パターンだけでは解決不可能な曖昧性と判断した:
+`caches`(cache+s, silent-e語根) と `matches`(match+es, 硬子音語根) は
+末尾が完全に同形で、辞書 (語根リスト) か本物のstemmerなしに文字列だけからは
+判別できない。既存テストはこの硬子音側の挙動を一切pinしていなかったため
+安全側 (どちらの挙動も壊さない) を優先し、現状挙動をcharacterization test
+として明文化するに留めた。修正は内部バックログで追跡する。
+
+回帰テスト1件追加 (`test_common.py`、163 tests, all green)。
+
+## [0.18.3] - 2026-08-28
+
+### レビュー指摘4件を修正 + 別branchで先に直した2件をこの `_common.py` にも適用 (0.18.2 の追いコミット)
+
+- **絞り込みヒントに含める `--file`/`--cache-dir` がshell quoteされていなかった**:
+  値をコピー&ペースト実行可能なシェルコマンド行にそのまま埋め込んでいたため、
+  空白やシェル特殊文字を含むパスだとコマンドが分裂・意図しないシェル展開を
+  起こしていた。`shlex.quote()`で両方の値をquoteするよう修正
+- **絞り込みヒントが非既定の `--max-age` を引き継いでいなかった**: 意図的に
+  7日デフォルトより古いキャッシュを許容していても、ヒントどおりに追いコマンドを
+  打つと既定のmax-ageに戻り再取得が起きてしまう。`corpus_hint_args()`に
+  `--max-age`の伝播を追加 (`--file`指定時は`--cache-dir`と同様に無関係になるため
+  含めない)
+- **`truncate_content`の安全な境界が見つからない場合、生スライスにfallbackしていた**:
+  1行目単体で既にmax_charsを超える等の縮退ケースで、本来防ぐべき「境界を跨いだ
+  切り詰め」を結局再現していた。安全な境界が無い場合は本文を一切出さず切り詰め
+  通知のみを返すよう修正 (常に整形済み)
+- **別branchで先に修正済みだった2件をこの`_common.py`のコピーにも反映**:
+  `score_entry`の正規化空文字列キーワード除外・`_norm`の頭字語(mixed case)
+  判定。分岐が異なるbranchで並行開発していたため、このコピーには未反映のまま
+  残っていた
+
+回帰テスト15件追加 (`test_common.py`、162 tests, all green)。
+
+## [0.18.2] - 2026-08-27
+
+### `fetch-index`/`search-index`のslug衝突・`content`切り詰めのMarkdown境界破壊・絞り込みヒントの corpus 選択欠落 (0.18.1 の追いコミット)
+
+- **URL末尾が同じ複数ページで slug が衝突していた**: `.../hooks` と
+  `.../agent-sdk/hooks` のように最後のパス要素だけが一致する2ページは、
+  従来どちらも `[hooks]` と表示されており、その値を `sections`/`content` に
+  そのまま渡すと `_resolve_page_ref` 自身の曖昧slugエラーで弾かれ、
+  フォールバック参照として機能しなかった。`_build_unique_slugs()` を追加し、
+  全ページの中で一意になるまでパス要素を後ろから伸ばして (`hooks` →
+  `agent-sdk/hooks` 等) 表示するよう修正 (claude-docsの`fetch-index`/
+  `search-index`のみ該当。他2 scriptはこの参照形式を使わない)
+- **`--max-chars` の切り詰めが生の文字数スライスで、コードフェンス/表の
+  途中で切れることがあった**: `truncate_content()` を行単位の走査に変更し、
+  `FenceTracker` が閉じておりかつ表の行でもない、直近の安全な行境界まで
+  戻ってから切り詰めるよう修正 (安全な境界が `max_chars` 未満になっても、
+  フェンス/表を最後まで含めて `max_chars` を超えるよりは安全側に倒す設計)
+- **`--max-chars` の絞り込みヒント / `sections`のサブセクション追いヒントが
+  `--file`/`--cache-dir` を引き継いでいなかった**: 非既定の corpus 選択で
+  実行した際、ヒント通りにフォローアップコマンドを打つと既定の corpus に
+  フォールバックし、同じ番号が別のドキュメントを指す事故があった。
+  `corpus_hint_args()` を追加し3 script共通で伝播するよう修正
+  (`--file`と`--cache-dir`は排他 — `_load_docs`/`_load_full_txt`は`--file`
+  指定時`cache_dir`を一切参照しないため、両方を出すと誤解を招く。
+  `--file`があれば`--cache-dir`は出さない)
+
+回帰テスト12件追加 (`test_common.py` 9件、`test_parse_claude_docs.py` 2件、
+`test_parse_ai_sdk.py` 1件、既存golden出力テスト2件を新挙動に更新。
+147 tests, all green)。
+
+## [0.18.1] - 2026-08-27
+
+### doc_idx 表示のレビュー指摘 1 件 + `sections` のドキュメント不整合 1 件を修正 (0.18.0 の追いコミット)
+
+- **`fetch-index`/`search-index` が期限切れの llms-full.txt キャッシュからも doc_idx を join していた**:
+  `--max-age` を過ぎたキャッシュは、後続の `sections`/`content` 呼び出しが実際に
+  再取得する対象。再取得後は上流の並び替え/追加で doc_idx が変わり得るため、
+  期限切れキャッシュとの join は「これから置き換わる番号」を表示する形になり、
+  この機能が防ぐはずだった番号ズレを再現してしまっていた。`_load_url_to_idx_if_cached`
+  に `max_age` を渡し、`fetch_url` 自身の再取得判定 (`age >= max_age`) と同じ基準で
+  「未キャッシュ」と同様 slug 表示にフォールバックするよう修正
+- **`sections` が (3 script 共通で) 生の見出しタイトルを表示しており、ネストした
+  同名見出しが区別できなかった**: SKILL.md は `sections`/`search`/`content` の
+  出力を「そのまま `content` の heading_path にコピーしてよい」と案内しているが、
+  `sections` は完全パスではなく末尾のタイトルのみ (例: 2 つの `## Client`/
+  `## Server` 配下にそれぞれ `### Examples` があると両方とも `Examples` とだけ
+  表示) を出力していたため、コピーした値が `content` の完全一致ではなく部分一致
+  (曖昧チェック対象) に落ちてしまうことがあった。`format_heading_path_for_display`
+  (search 系が既に使っている表示関数) を再利用し、3 script 全ての `sections` で
+  完全な heading_path を表示するよう修正 (トップレベル見出しは従来どおり
+  タイトル単体と同じ表示になるため、既存の golden output テストへの影響は無い)
+
+回帰テスト 5 件追加 (`test_parse_claude_docs.py` 3 件、`test_parse_ai_sdk.py` 1 件、
+`test_parse_firebase.py` 1 件、135 tests, all green)。
+
 ## [0.18.0] - 2026-08-27
 
 ### `fetch-index` / `search-index`: llms.txt の一覧位置を doc_idx として表示していた問題を修正
@@ -124,6 +222,83 @@ researching-firebase 2.1.3 → 2.1.4
 それぞれで検証。ai-sdk/firebase の既存 golden 出力テストは今回の意図した
 挙動変更 (サブセクション一覧の追加) に合わせて期待値を更新した
 (golden テストが壊れた = 退行ではなく意図した機能追加の確認)。
+
+## [0.17.4] - 2026-08-28
+
+### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)
+
+Codex R4 で `_norm()` の sibilant-suffix 規則 (`ses`/`xes`/`zes`/`ches`/`shes`
+終わりの語から2文字strip) が silent-e語根の複数形も誤って2文字stripしてしまう
+指摘を受けた (`Responses`→`respons`, `Caches`→`cach` 等、単数キーワードは
+末尾`e`を保持するため一致しなくなる)。
+
+調査の結果、これは文字パターンだけでは解決不可能な曖昧性と判断した:
+`caches`(cache+s, silent-e語根) と `matches`(match+es, 硬子音語根) は
+末尾が完全に同形で、辞書 (語根リスト) か本物のstemmerなしに文字列だけからは
+判別できない。既存テストはこの硬子音側の挙動を一切pinしていなかったため
+安全側 (どちらの挙動も壊さない) を優先し、現状挙動をcharacterization test
+として明文化するに留めた。修正は内部バックログで追跡する。
+
+回帰テスト1件追加 (`test_common.py`、126 tests, all green)。
+
+## [0.17.3] - 2026-08-27
+
+### ALL-CAPSの通常複数形 (`HOOKS`等) が単複変換されず一致しなくなる回帰を修正 (0.17.2 の追いコミット)
+
+0.17.2 の頭字語判定 (`_norm()` の大文字2文字以上をacronymとみなすguard) は
+`HOOKS`/`SKILLS`のような**全て大文字の通常の複数形**も誤ってacronym扱い
+していた。クエリ側は変換されず`"hooks"`のままなのに、コーパス側の
+`"Hooks"`は通常どおり`"hook"`に変換されるため、本来完全一致するはずの
+組み合わせが不一致になっていた (`score_entry("Hooks", "", ["HOOKS"])` が
+0点)。
+
+判定条件を「大文字2文字以上」から「先頭以外に大文字があり、かつ小文字も
+含む (mixed case)」に絞り込み。`"iOS"`/`"macOS"`はこの条件を満たすため
+引き続きacronym扱いされる一方、`"HOOKS"`(小文字を含まない全大文字)は
+条件を満たさず通常どおり単複変換されるよう修正。
+
+回帰テスト1件追加 (`test_common.py`、125 tests, all green)。
+
+## [0.17.2] - 2026-08-27
+
+### `score_entry` が頭字語 "iOS" 等を複数形と誤認し無関係な語に誤ヒットする問題を修正 (0.17.1 の追いコミット)
+
+`_norm()` の単複変換 (末尾 `s` 除去) は "iOS" のような 2 文字以上の大文字を含む
+頭字語にも無条件で適用されており、"iOS" → "io" に変換されていた。"io" は
+"Configuration" や "Migrations" など無関係な多くの語にも部分文字列として
+含まれるため、これらが偽陽性でヒットしていた。候補が上位 5 件までしか本文に
+潜らない Firebase の `search` では、この偽陽性が本来ヒットすべきページを
+候補から押し出しかねない実害があった。
+
+元のスペルに大文字が 2 文字以上含まれるトークンは単複変換をスキップする
+(通常の英語複数形が "DogS" のように大文字を複数含む形で書かれることは
+まず無いため、これを頭字語/固有名詞の signal として扱う) よう修正。
+小文字化・区切り文字除去自体はそれ以外のトークンと同様に行う。
+
+回帰テスト3件追加 (`test_common.py`、124 tests, all green)。
+
+## [0.17.1] - 2026-08-27
+
+### `extract_content` / `score_entry` のレビュー指摘 2 件を修正 (0.17.0 の追いコミット)
+
+- **大文字小文字違いの完全一致が、部分一致の曖昧判定より後に評価されていた**:
+  見出しマッチングは大文字小文字を区別しないと文書化されているにも関わらず、
+  完全一致の判定は大文字小文字を区別する形のみで、大文字小文字違いの完全一致
+  (例: `## Configuration` に対する `"configuration"`) は完全一致扱いされず
+  部分一致の曖昧チェックまで落ちていた。ネストした子見出し (`### Options`)
+  があると、子の heading_path (`Configuration/Options`) も同じ部分文字列
+  `"configuration"` を含むため、実際には曖昧でない入力が
+  `Error: ambiguous heading` で失敗していた。完全一致の判定に大文字小文字を
+  区別しない第2パスを追加し、部分一致の曖昧チェックより先に評価するよう修正
+- **`score_entry` の正規化して空文字列になるキーワードが全件にマッチしていた**:
+  `_norm()` が区切り文字のみを除去する性質上、`"_"` / `"--"` / `"_-"` のような
+  キーワードは正規化後に空文字列になる。空文字列はどの文字列に対しても
+  `in` 判定が真になるため、こうした縮退キーワードが実質「全件マッチ」として
+  スコアされていた (`search-index "_"` 等が全件をヒットさせる)。正規化後に
+  空文字列になるキーワードはスコア計算・all-keywords-matched ボーナス判定の
+  両方から除外するよう修正
+
+回帰テスト 5 件追加 (`test_common.py`、121 tests, all green)。
 
 ## [0.17.0] - 2026-08-26
 
