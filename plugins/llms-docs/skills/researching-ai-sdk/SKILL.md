@@ -10,9 +10,9 @@ when_to_use: |
   questions about any ai-sdk.dev API — especially before editing code that
   imports from `ai` / `@ai-sdk/*`.
   Triggers: "AI SDK", "Vercel AI SDK", "ai-sdk", "streamText", "generateText",
-  "useChat", "streamObject", "generateObject", "useObject", "tool", "tools",
-  "embed", "embedMany", "convertToModelMessages", "provider",
-  "AI SDK ドキュメント", "researching-ai-sdk"
+  "useChat", "streamObject", "generateObject", "useObject", "AI SDK tool()",
+  "tool calling in AI SDK", "embed()/embedMany()", "convertToModelMessages",
+  "@ai-sdk provider", "AI SDK ドキュメント", "researching-ai-sdk"
 context: fork
 model: sonnet
 allowed-tools:
@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.3.5"
+  version: "3.3.6"
 ---
 
 # AI SDK ドキュメント調査
@@ -101,7 +101,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 
 ## page_ref の指定方法
 
-3 形式を受け付ける (claude-docs / firebase と統一):
+2 形式を受け付ける (claude-docs / firebase は URL slug / 完全 URL も含め 3 形式):
 
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
@@ -121,7 +121,7 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`
 
-すべてのサブコマンドで `--file <path>` 省略時は `--cache-dir`/`ai-sdk-llms-full.txt` を auto-fetch / 再利用する。
+`fetch-index` 以外の全サブコマンドで `--file <path>` を受け付け、省略時は `--cache-dir`/`ai-sdk-llms-full.txt` を auto-fetch / 再利用する (`fetch-index` に `--file` は無い — 常に `--cache-dir` 側を使う)。
 
 ### heading_path の指定方法
 
@@ -143,6 +143,18 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 - **全文読み込み禁止**: `search` → `content`、または `search-index` → `sections` → `content` の順で絞り込むこと
 - **コードフェンス保護**: スクリプトがコードブロックの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Snippet>`, `<Note>` 等の JSX 記法はテキストとして読む
+
+## 禁止事項
+
+`allowed-tools` に Read/Bash があるため技術的には実行できてしまうが、
+段階的絞り込みを迂回し全文読み込み相当になるため使用しない:
+
+| 禁止 | 理由 | 代替 |
+|------|------|------|
+| `grep`/`rg "<kw>" <cache ファイル>` | キャッシュへの直接 grep は本文検索を迂回する | `search-content "<kw>"` |
+| `Read <cache ファイル> lines X-Y` | 行番号直読みも同様に迂回する | `content <page_ref> "<heading_path>"` |
+| `fetch-index \| grep` | 一覧のパイプ絞り込みも同様 | `search-index "<kw>"` |
+| `cat <cache ファイル>` | キャッシュ全文の直接出力 | `fetch-index --compact` → `search` から段階的に |
 
 ## 失敗時の対処
 

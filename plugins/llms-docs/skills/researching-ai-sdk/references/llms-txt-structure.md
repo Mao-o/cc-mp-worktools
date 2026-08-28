@@ -62,14 +62,18 @@ Markdown 内に JSX 風のカスタムコンポーネントが含まれる:
 
 これらは Markdown パーサーでは解釈できないが、テキストとしては読める。
 
-## ドキュメントのカテゴリ
+## ドキュメントのカテゴリ (目安)
 
-| カテゴリ | doc_index 範囲（目安） | 内容 |
-|---------|----------------------|------|
-| チュートリアル | 0-5 | RAG Agent, Multi-Modal Agent 等の実践ガイド |
-| Getting Started | 6-17 | 各モデルプロバイダーの導入ガイド |
-| Guides | 18-30 | API サーバー、ストリーミング、エラー処理等 |
-| API Reference | 30-100 | generateText, streamText, useChat 等のAPI詳細 |
-| Providers | 100+ | OpenAI, Anthropic, Google 等のプロバイダー設定 |
+大まかに以下のようなカテゴリで構成される:
 
-※ インデックス範囲は llms-full.txt の更新により変動する。`fetch-index` で最新を確認すること。
+- **チュートリアル**: RAG Agent, Multi-Modal Agent 等の実践ガイド
+- **Getting Started**: 各モデルプロバイダーの導入ガイド
+- **Guides**: API サーバー、ストリーミング、エラー処理等
+- **API Reference**: generateText, streamText, useChat 等の API 詳細
+- **Providers**: OpenAI, Anthropic, Google 等のプロバイダー設定
+
+具体的な doc_index の範囲は llms-full.txt の更新のたびに変動するため、この
+ファイルには記載しない (旧版にあった数値範囲表は 0.14.0 以前の構造に基づく
+ものになり陳腐化した実績あり)。最新の割り当ては `fetch-index --compact`
+(全件を index 番号付きでコンパクト表示) または `search "<キーワード>"` で
+都度確認すること。

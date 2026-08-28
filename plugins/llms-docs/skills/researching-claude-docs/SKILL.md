@@ -14,8 +14,9 @@ when_to_use: |
   Triggers: "Claude Code", "AgentSkill", "Skill", "hook schema", "subagent",
   "plugin manifest", "slash command", "settings.json", "permission", "MCP",
   "Anthropic API", "researching-claude-docs",
-  "disable-model-invocation", "user-invocable", "argument-hint", "effort",
-  "arguments", "context: fork", "paths", "SubagentStop", "$ARGUMENTS",
+  "disable-model-invocation", "user-invocable", "argument-hint",
+  "skill frontmatter effort", "slash command arguments", "context: fork",
+  "skill frontmatter paths", "SubagentStop", "$ARGUMENTS",
   "$CLAUDE_SKILL_DIR", "output style"
 context: fork
 model: sonnet
@@ -35,7 +36,7 @@ paths:
   - "**/hooks.json"
 metadata:
   author: mao
-  version: "3.4.4"
+  version: "3.4.5"
 ---
 
 # Claude ドキュメント Progressive Loader
@@ -81,7 +82,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 # Claude Developer Platform
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワード>" --source platform
 
-# 両 source を並列に (Skill や hook のように両方に解説がある topic 向け)
+# 両 source を順に (Skill や hook のように両方に解説がある topic 向け)
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワード>" --source both
 ```
 
@@ -123,7 +124,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--source {code,platform,both}] [--index-limit N] [--max-hits N] [--context N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | **推奨**: llms.txt ランキング + llms-full.txt 本文を URL で join、1 コマンドで候補ページ + 本文ヒットを返す。`--source both` で code/platform 両方を並列検索 |
+| `search` | `<query> [--source {code,platform,both}] [--index-limit N] [--max-hits N] [--context N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | **推奨**: llms.txt ランキング + llms-full.txt 本文を URL で join、1 コマンドで候補ページ + 本文ヒットを返す。`--source both` で code/platform 両方を順に検索 |
 | `content` | `<page_ref> [heading_path] [--file F] [--source S] [--max-age S] [--max-chars N] [--no-subsection-hints] [--no-link-annotations]` | セクション本文を表示。前後にサブセクション一覧、本文中の docs リンクには `→ [doc_idx N]` を付与。既定 24000 文字で切り詰め |
 | `sections` | `<page_ref> [--file F] [--source S] [--max-age S]` | 指定ページの見出し一覧を表示 |
 | `search-content` | `<query> [--page-ref R] [--file F] [--source S] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | llms-full.txt 本文のみキーワード検索。`--page-ref` で 1 ページに絞れる |
@@ -163,6 +164,18 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 - **コードフェンス保護**: スクリプトがコードブロックの途中分割を自動防止する
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **カスタムコンポーネント**: `<Note>`, `<Frame>`, `<Expandable>`, `<Card>` 等の JSX 記法はテキストとして読む
+
+## 禁止事項
+
+`allowed-tools` に Read/Bash があるため技術的には実行できてしまうが、
+段階的絞り込みを迂回し全文読み込み相当になるため使用しない:
+
+| 禁止 | 理由 | 代替 |
+|------|------|------|
+| `grep`/`rg "<kw>" <cache ファイル>` | キャッシュへの直接 grep は本文検索を迂回する | `search-content "<kw>"` |
+| `Read <cache ファイル> lines X-Y` | 行番号直読みも同様に迂回する | `content <page_ref> "<heading_path>"` |
+| `fetch-index \| grep` | 一覧のパイプ絞り込みも同様 | `search-index "<kw>"` |
+| `cat <cache ファイル>` | キャッシュ全文の直接出力 | `fetch-index` → `search` から段階的に |
 
 ## 失敗時の対処
 

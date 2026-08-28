@@ -2,6 +2,61 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.19.0] - 2026-08-27
+
+### SessionStart hook: `resume` での再発火・スキル参照の分かりにくさを修正
+
+`hooks/hooks.json` の `SessionStart` に `matcher` が無く、`resume`
+(セッション再開) や `fork` でも毎回メッセージが出ていた。実際に
+促したいのは「新しい会話状況になった」タイミング (`startup`/`clear`/`compact`)
+のみで、`resume` は直前セッションの続きなので不要、`fork` も親から
+状況が引き継がれるため同様。`matcher: "startup|clear|compact"` を追加して
+両方を除外した。
+
+あわせて printf メッセージが「researching-claude-docs」等のスキル名だけを
+挙げており `Skill` ツールで起動する対象だと分かりにくかったため、
+`Skill: llms-docs:researching-claude-docs` の形式に統一し、文末を
+「Skill ツールで起動」に変更した。
+
+### README: `search-content` の soft-AND フォールバックが未記載だった問題を修正
+
+`search-content` の説明が「AND 検索、OR ではない」とだけ書かれており、
+完全 AND が 0 件のとき自動でキーワード過半数一致にフォールバックする
+既存の soft-AND 挙動 (`[partial match]` 表示) が記載から漏れていた。
+フォールバック条件と `[partial match]` 表示を追記。
+
+### SKILL.md: 禁止事項の明文化 + trigger word の誤爆防止 + 陳腐化した記述の修正
+
+3 SKILL とも `allowed-tools` に Read/Bash があるため、段階的絞り込み
+(`search`/`search-content`/`content` 等) を迂回してキャッシュファイルに
+直接 `grep`/`cat`/行番号 Read することが技術的には可能だった。迂回は
+全文読み込み相当になり進捗開示の設計意図に反するため、「禁止事項」表を
+3 SKILL 共通で新設し、迂回パターンと正しい代替コマンドを明記した。
+
+- **researching-claude-docs**: trigger word の `"effort"` / `"arguments"` /
+  `"paths"` は汎用語すぎて無関係な会話でも誤発火しうるため、
+  `"skill frontmatter effort"` / `"slash command arguments"` /
+  `"skill frontmatter paths"` に具体化。あわせて `--source both` の説明
+  「並列検索」が実装 (逐次実行) と食い違っていたため「順に検索」に修正
+- **researching-ai-sdk**: trigger word の `"tool"` / `"tools"` /
+  `"embed"` / `"embedMany"` / `"provider"` も同様に汎用語すぎるため
+  `"AI SDK tool()"` / `"tool calling in AI SDK"` / `"embed()/embedMany()"` /
+  `"@ai-sdk provider"` に具体化。`page_ref` の説明が「3 形式」と書かれて
+  いたが ai-sdk の llms-full.txt は URL を持たないため実際は整数
+  index とタイトル部分一致の「2 形式」のみだった (URL/slug を受け付けるのは
+  claude-docs/firebase側) — 記載を修正。`--file` の説明が「すべての
+  サブコマンドで」となっていたが `fetch-index` に `--file` 引数は無い
+  (常に `--cache-dir` 側を使う) ため、対象範囲を明記
+- **researching-ai-sdk/references/llms-txt-structure.md**: doc_index の
+  数値範囲表 (`0-5` 等) が 0.14.0 以前の llms-full.txt 構造に基づくもので
+  既に実態と乖離していた。今後も上流更新のたびに陳腐化するため、
+  数値範囲を削除しカテゴリ名のみの一覧に置き換え、最新の割り当ては
+  `fetch-index --compact` / `search` で確認する旨を追記した
+
+metadata version を patch bump:
+researching-claude-docs 3.4.4 → 3.4.5 / researching-ai-sdk 3.3.5 → 3.3.6 /
+researching-firebase 2.1.4 → 2.1.5
+
 ## [0.18.4] - 2026-08-28
 
 ### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)

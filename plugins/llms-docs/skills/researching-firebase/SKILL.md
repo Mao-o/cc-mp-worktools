@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.1.4"
+  version: "2.1.5"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -186,6 +186,18 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - **テーブル保護**: Markdown テーブルの途中分割を自動防止する
 - **on-demand fetch**: ページキャッシュは初回のみネットワークから取得 (sections / content / search-content / search 実行時)
 - **search-content の全ページ横断は重い**: `--page-ref` 省略すると 7000 ページ近い HTTP fetch を発火する (初回のみ)。明示指定を推奨
+
+## 禁止事項
+
+`allowed-tools` に Read/Bash があるため技術的には実行できてしまうが、
+段階的絞り込みを迂回し全文読み込み相当になるため使用しない:
+
+| 禁止 | 理由 | 代替 |
+|------|------|------|
+| `grep`/`rg "<kw>" <cache ファイル>` | キャッシュへの直接 grep は本文検索を迂回する | `search-content "<kw>"` |
+| `Read <cache ファイル> lines X-Y` | 行番号直読みも同様に迂回する | `content <page_ref> "<heading_path>"` |
+| `fetch-index \| grep` | 一覧のパイプ絞り込みも同様 | `search-index "<kw>"` |
+| `cat <cache ファイル>` | キャッシュ全文の直接出力 (7000 ページ近いためとりわけ危険) | `fetch-index` → `search` から段階的に |
 
 ## 失敗時の対処
 
