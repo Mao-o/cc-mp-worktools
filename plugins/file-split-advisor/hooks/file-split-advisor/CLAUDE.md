@@ -40,11 +40,12 @@ file-split-advisor/
         ├── __main__.py             エントリポイント、パイプライン統括、fail-open
         ├── CLAUDE.md                本ファイル
         ├── source.py                 I/O 境界: パス解決・早期 skip・安全な読み込み
-        ├── language.py                純粋関数: 言語判定・test判定・generated判定・vague filename
+        ├── language.py                純粋関数: 拡張子 allowlist・言語判定・test判定・generated判定・vague filename
         ├── metrics.py                  純粋関数: テキスト → 数値メトリクス
         ├── judge.py                     純粋関数: 閾値テーブル・tier/emit 判定
-        ├── state.py                      唯一の I/O 副作用: session_id ベース debounce store
-        ├── message.py                     additionalContext 文面組み立て
+        ├── change.py                     純粋関数: tool_input → 編集がファイルを大きくしたか
+        ├── state.py                       唯一の I/O 副作用: session_id ベース debounce store
+        ├── message.py                      additionalContext 文面組み立て
         └── tests/
 ```
 
@@ -65,36 +66,63 @@ flowchart TD
     C -- no --> D[source.resolve_path]
     D --> E{should_skip_by_name?<br/>lockfile/minified/generated}
     E -- yes --> Z
-    E -- no --> F[source.load_text<br/>symlink/2MB/20000行の安全弁]
+    E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
+    N -- no --> Z
+    N -- yes --> F[source.load_text<br/>symlink/2MB/20000行の安全弁]
     F -- None --> Z
     F -- LoadedFile --> G{先頭5行に<br/>generated marker?}
     G -- yes --> Z
     G -- no --> H[language 判定<br/>detect_language / is_test_path]
     H --> I[metrics.compute<br/>line_count/def_count/import多様性/制御フロー密度/vague filename]
     I --> J[judge.judge<br/>effective_thresholds → tier → signals → should_emit]
-    J -- should_emit=False --> Z
-    J -- should_emit=True --> K[state.try_reserve_emit<br/>debounce + emit上限を単一ロック区間で]
+    J -- tier=ok --> Z
+    J -- tier>=note --> P[change.classify_growth<br/>Edit の行数差 → grew/not_grew/unknown]
+    P --> K[state.try_reserve_emit<br/>行数記録 + 成長判定 + debounce + emit上限を単一ロック区間で]
     K -- False --> Z
     K -- True --> L[message.build]
     L --> M[additionalContext を stdout に JSON dump]
 ```
 
+`tier=ok` で打ち切るのは、大半の編集で state の I/O を発生させないため。ok の
+ファイルを成長判定の基準として残す必要もない (次に review 以上へ育ったときは
+Edit の行差分か「記録なし = 判定不能」で決まる)。
+
 ## 判定ロジックの設計判断
 
-### review 以上は signal 数によらず常に emit する
+### 「行数だけで emit」は warn 以上に限定する (0.2.0 で変更)
 
-`judge.py::judge()` の emit 判定は、tier が `review`/`warn`/`strong` なら
-構造シグナルの有無を問わず emit する。見落としではなく意図的な設計判断:
-ユーザー提示の参考資料自身が「300 行超はレビューを促す」「500-800 行は分割
-候補」「800 行超は設計再確認」と、**大きさそのものを review 発火の十分条件と
-して扱っている**ことに整合させたもの。
+0.1.0 は tier が `review`/`warn`/`strong` なら構造シグナルの有無を問わず emit
+していた。ユーザー提示の参考資料が「300 行超はレビューを促す」「500-800 行は
+分割候補」「800 行超は設計再確認」と大きさそのものを発火条件として扱っている
+ことに整合させた設計判断だったが、**実測すると通知の大半 (63 件中 55 件) が
+シグナル 0 件**で、この repo の tracked file の 20% が初回編集で発火していた。
 
-構造シグナルは「行数判定を上書きする独立ゲート」にはせず、代わりに (1) 言語/
+0.2.0 では「大きさそのものが十分条件」を `warn` 以上に引き上げ、`review` は
+シグナル 1 個以上を要求する。あわせて Python の言語係数を 0.7 → 1.0 に戻した
+(0.7 では review 閾値が 210 行で、pylint の `too-many-lines` 既定 1000 や
+ESLint の `max-lines` 既定 300 と比べて突出して厳しかった)。実測値の前後比較は
+CHANGELOG 0.2.0 に記録している。
+
+構造シグナルは依然として「行数判定を上書きする独立ゲート」ではなく、(1) 言語/
 role 係数・宣言的緩和という形で `effective_thresholds` 自体に織り込み、(2)
-`note` tier (150〜300 相当) の昇格判定 (シグナル 2 個以上で emit) という 2 箇所
-で行数評価の解像度を上げる役割に限定している。透明性確保のため、`message.py`
-は signal_count==0 で emit された場合 (行数のみが根拠) は「検出された構造
-シグナル: なし」と明示する。
+`note` tier の昇格判定 (シグナル 2 個以上)、(3) `review` tier の昇格判定
+(シグナル 1 個以上) という 3 箇所で行数評価の解像度を上げる役割に限定している。
+透明性確保のため、`message.py` は signal_count==0 で emit された場合 (warn/strong
+のみ) は「検出された構造シグナル: なし」と明示する。
+
+### `EXTENSION_LANGUAGE` を判定対象の allowlist に兼用する (0.2.0)
+
+`language.py::is_code_path()` は `path.suffix.lower() in EXTENSION_LANGUAGE` を
+返すだけ。denylist (`.md` / `.json` / … を列挙して弾く) ではなく allowlist に
+したのは、未知の拡張子が現れたときの失敗方向を「通知しない」に倒すため
+(advisory hook の `fail-open` = 通知しない側、という設計原則に合わせている)。
+
+代償として **拡張子を持たない shebang スクリプトも判定対象から外れる**。
+`is_code_path` は内容を読む前に呼ばれる名前だけの判定なので、shebang を見る
+なら `source.load_text` の後に判定を移す設計変更が要る。0.2.0 では行っていない。
+
+新しい言語を追加するときは `EXTENSION_LANGUAGE` に拡張子を足せば判定対象に
+入る。`judge.py::LANGUAGE_MULTIPLIER` への追加は任意で、未登録なら 1.0。
 
 ### `Metrics` に `import_categories` (カテゴリ名のタプル) を追加した理由
 
@@ -152,6 +180,23 @@ MainClaude/Subagent が並行して複数ファイルを Write/Edit する運用
   なしで動作継続」に degrade する方が「ロックはあるが起動不能」より適切、と
   判断して `try/except ImportError` + `HAVE_FLOCK` フラグに変更した
 
+### 行数の記録と「tier を進めない抑制」 (0.2.0)
+
+パスごとの記録が tier 文字列から `{"tier": ..., "lines": ...}` に変わった
+(0.1.0 が書いた文字列形式も `_read_record` が引き続き読む)。`Write` は編集前の
+内容が hook に渡らないため、直近に観測した行数を比較対象として使う。
+
+**行数は通知の有無に関わらず記録するが、tier は通知したときだけ進める。**
+これを取り違えると、typo 修正で抑制した編集が `tier=strong` を記録してしまい、
+その後にそのファイルが本当に成長しても「同一 tier」とみなされてセッション内で
+恒久的に抑制される。`state.py::try_reserve_emit` の `granted` と `record` の
+分岐、および `tests/test_main.py::TestGrowthGate` の
+`test_suppressed_edit_does_not_consume_the_tier_high_water_mark` で固定している。
+
+成長方向が `UNKNOWN` (Write、または `old_string`/`new_string` が無い・型が違う
+Edit) のときは、記録があれば行数比較で決め、記録が無ければ通知する。envelope の
+形が将来変わったときに通知が黙って全滅するより、0.1.0 と同じ挙動に戻す方を選ぶ。
+
 ## テスト実行
 
 ```bash
@@ -182,12 +227,26 @@ echo '{"session_id":"smoke","cwd":"'"$PWD"'","tool_name":"Write",
 - **新しい import カテゴリ / キーワード**: `metrics.py::IMPORT_CATEGORY_KEYWORDS`
   に追記する。カテゴリ自体を増やす場合は `judge.py::IMPORT_DIVERSITY_SIGNAL_THRESHOLD`
   (現状 7 カテゴリ中 4 種) も見直す
-- **新しい言語**: `language.py::EXTENSION_LANGUAGE` に拡張子を追加し、
-  `judge.py::LANGUAGE_MULTIPLIER` に係数を追加する (未登録なら `generic` = 1.0
-  にフォールバック)
+- **新しい言語**: `language.py::EXTENSION_LANGUAGE` に拡張子を追加する
+  (= 判定対象に入る)。`judge.py::LANGUAGE_MULTIPLIER` への係数追加は任意で、
+  未登録なら 1.0
+
+## 発火率を変える変更をしたときの測定
+
+閾値・シグナル・skip 条件を触ったら、**変更前後の実コードで同じコーパスを流して
+通知件数を比較する**。「新しい判定が動くこと」は単体テストで確認できるが、
+「旧版が拾えていた入力を落としたこと」は前後比較でしか分からない。
+
+手順は「repo の全 tracked file に対して `should_skip_by_name` →
+`is_code_path` → `load_text` → `is_generated_by_content` → `compute` →
+`judge` を流し、1 ファイル 1 レコードで結果を出す」だけ。state (debounce) は
+通さない (= 「そのファイルをセッション内で初めて編集したときに通知が出るか」を
+測る)。差分は「意図した変更 / 改善 / 説明不能」に分類し、説明不能をゼロにする。
+
+0.2.0 の測定結果は CHANGELOG に記録している。編集内容に依存する成長判定
+(`change.py`) の効果はこの走査には現れないので、別途 `tests/test_main.py::
+TestGrowthGate` で固定する。
 
 ## 依存関係
 
-標準ライブラリのみ。`pip install` 不要。Python 3.9+ 想定
-(`from __future__ import annotations` + PEP 604 スタイルの型ヒントを
-`__future__` import 経由で使用)。
+標準ライブラリのみ。`pip install` 不要。Python 3.11+ 想定。

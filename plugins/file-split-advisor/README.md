@@ -24,14 +24,16 @@
 によって「適正な長さ」は変わる。単純な行数一律基準は誤検出が多いため、以下を
 組み合わせて判定する:
 
-1. **言語係数** — Python は密度が高いので閾値を下げ、Java/C#/Kotlin はボイラー
-   プレートで長くなりやすいので閾値を上げる
+1. **言語係数** — Java/C#/Kotlin/Swift/C++ 等はボイラープレートで長くなりやすい
+   ので閾値を上げる
 2. **role 係数** — テストファイルは記述が単調に伸びやすいため閾値を 1.6 倍緩和
 3. **宣言的コード緩和** — 制御フロー密度が低い (ルーティング定義・型定義・DTO
    等) ファイルは閾値をさらに 1.6 倍緩和
 4. **構造シグナル** — import カテゴリの多様性・命名の抽象度・定義数過多・制御
-   フロー密度の高さを検出し、行数が中庸 (note tier) でも責務混在が疑われる
-   ファイルを拾い上げる
+   フロー密度の高さを検出し、行数だけでは判断できない責務混在を拾い上げる
+
+さらに、**判定対象は実コードの拡張子に限定**し、**ファイルを大きくしない編集
+(typo 修正など) では通知しない**。
 
 ## 判定ロジックサマリ
 
@@ -43,12 +45,14 @@
 
 | 言語 | 係数 | 言語 | 係数 |
 |---|---|---|---|
-| python | 0.7 | go | 1.0 |
-| javascript / typescript | 1.0 | rust | 1.1 |
-| javascriptreact / typescriptreact | 1.15 | ruby | 1.0 |
-| java / csharp | 1.5 | php | 1.1 |
-| kotlin | 1.4 | generic (未知拡張子) | 1.0 |
-| dart | 1.3 | | |
+| java / csharp | 1.5 | dart | 1.3 |
+| objectivec | 1.4 | cpp | 1.3 |
+| kotlin | 1.4 | swift / c / powershell | 1.2 |
+| javascriptreact / typescriptreact | 1.15 | rust / php | 1.1 |
+| vue / svelte | 1.15 | 上記以外 | 1.0 |
+
+係数 1.0 の言語: python / javascript / typescript / go / ruby / scala / elixir /
+shell / lua / perl / r / groovy / clojure / haskell / erlang / julia / zig / nim。
 
 role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_density < 0.02`
 のときに 1.6 倍。
@@ -64,14 +68,21 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 
 ### emit するかどうか
 
-- tier が `review` 以上 → 常に emit (シグナル数によらない。行数の大きさ自体を
-  レビュー発火の十分条件として扱う設計)
+- tier が `warn` 以上 → 常に emit (シグナル数によらない。この大きさになれば
+  行数そのものをレビュー発火の十分条件として扱う)
+- tier が `review` → 構造シグナルが 1 個以上のときのみ emit
 - tier が `note` → 構造シグナルが 2 個以上のときのみ emit (行数は中庸だが責務
   混在が疑われるファイルを拾う)
 - tier が `ok` → emit しない
 
 ## 通知の抑制 (debounce)
 
+- **ファイルを大きくしない編集では通知しない**
+  - `Edit` は `old_string` / `new_string` の行数差で判定する。差が 0 以下
+    (typo 修正・同じ行数のリファクタ・行を削る編集) なら通知しない。
+    `replace_all` でも 1 箇所あたりの差分の符号は変わらないため考慮不要
+  - `Write` は編集前の内容が hook に渡らないため、同一セッション内に直近の
+    行数記録があればそれと比較する。記録が無い初回は通知する
 - **1 セッション内で 1 ファイル × 1 tier につき 1 回のみ** 通知 (ハイウォーター
   マーク方式。tier が悪化したときのみ再警告し、shrink→regrow で同一 tier に
   戻っても再警告しない)
@@ -91,8 +102,14 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 - minified (`*.min.js` / `*.min.css` / `*.map`)
 - generated ファイル名パターン (`*.pb.go` / `*_pb2.py` / `*_pb2_grpc.py` /
   `*.g.dart` / `*.freezed.dart` / `*_generated.*`)
+- **上の言語係数表に載っていない拡張子のファイル全般** — Markdown / JSON / YAML /
+  TOML / CSV / XML / SVG / HTML / SQL / notebook / プレーンテキスト等。行数だけで
+  分割検討を促しても有用でないため判定対象にしない
+- **拡張子を持たないファイル** — shebang 付きスクリプトを含む。内容を読む前の
+  名前だけの判定に閉じているための制約
 - ファイル先頭 5 行に `@generated` / `do not edit` 等の generated マーカーを
   含むファイル
+- symlink / FIFO 等の非通常ファイル、2MB 超、20,000 行超のファイル
 
 ## 設計原則
 
@@ -111,6 +128,9 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
   含まない
 - `line_count` が `note` 閾値未満のファイルは、構造シグナルが何個点火していても
   emit しない (小さいが責務混在したファイルの検出は範囲外)
+- 拡張子を持たないスクリプトは shebang を見ずに skip する
+- `Write` が既存ファイルを縮めたかどうかは、同一セッション内に直近の行数記録が
+  あるときしか分からない (記録が無い初回は通知する)
 - Java/C#/Kotlin は `def_count` シグナルがほぼ機能しない (メソッド宣言に
   `def`/`function`/`func` 等のキーワードを伴わないため)。これらの言語では行数
   (1.5x 係数) と import カテゴリ多様性・制御フロー密度が主戦力になる

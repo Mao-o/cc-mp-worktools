@@ -16,6 +16,7 @@ _PKG_DIR = str(Path(__file__).resolve().parent)
 if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
 
+import change  # noqa: E402
 import judge  # noqa: E402
 import language  # noqa: E402
 import message  # noqa: E402
@@ -60,12 +61,18 @@ def main() -> None:
     if not file_path or not isinstance(file_path, str):
         return
 
+    tool_name = payload.get("tool_name", "")
     cwd = payload.get("cwd", "")
     session_id = payload.get("session_id", "")
 
     path = source.resolve_path(file_path, cwd)
 
     if source.should_skip_by_name(path):
+        return
+
+    # 拡張子 allowlist。Markdown / JSON / YAML / CSV 等の非コードファイルを
+    # 行数だけで分割対象として扱わない。
+    if not language.is_code_path(path):
         return
 
     loaded = source.load_text(path)
@@ -81,11 +88,23 @@ def main() -> None:
     file_metrics = metrics_mod.compute(loaded, lang, path)
     verdict = judge.judge(file_metrics, lang, role)
 
-    if not verdict.should_emit:
+    # tier が ok のファイルでは state を触らない: 大半の編集で I/O を発生させ
+    # ないため。ok のファイルを成長判定の基準として残す必要もない (次に review
+    # 以上へ育ったときは Edit の行差分か「記録なし = 判定不能」で決まる)。
+    if verdict.tier == "ok":
         return
 
+    growth = change.classify_growth(tool_name, tool_input)
     max_emits = _get_max_emits()
-    if not state.try_reserve_emit(session_id, str(path), verdict.tier, max_emits):
+    if not state.try_reserve_emit(
+        session_id,
+        str(path),
+        verdict.tier,
+        max_emits,
+        line_count=file_metrics.line_count,
+        growth=growth,
+        emit_candidate=verdict.should_emit,
+    ):
         return
 
     display_path = path

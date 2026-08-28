@@ -29,12 +29,19 @@ def _metrics(
 
 class TestEffectiveThresholds(unittest.TestCase):
     def test_language_and_role_multiplier_combine(self):
-        # python (0.7) x test (1.6) = 1.12
-        v = judge.judge(_metrics(line_count=0), "python", "test")
-        self.assertAlmostEqual(v.thresholds["note"], 150 * 0.7 * 1.6)
-        self.assertAlmostEqual(v.thresholds["review"], 300 * 0.7 * 1.6)
-        self.assertAlmostEqual(v.thresholds["warn"], 500 * 0.7 * 1.6)
-        self.assertAlmostEqual(v.thresholds["strong"], 800 * 0.7 * 1.6)
+        # java (1.5) x test (1.6) = 2.4
+        v = judge.judge(_metrics(line_count=0), "java", "test")
+        self.assertAlmostEqual(v.thresholds["note"], 150 * 1.5 * 1.6)
+        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 1.6)
+        self.assertAlmostEqual(v.thresholds["warn"], 500 * 1.5 * 1.6)
+        self.assertAlmostEqual(v.thresholds["strong"], 800 * 1.5 * 1.6)
+
+    def test_python_multiplier_is_neutral(self):
+        # 0.2.0 で 0.7 → 1.0。review=210 行という突出して厳しい閾値が通常の
+        # 実装ファイルを初回編集で発火させる主因だったため。
+        self.assertAlmostEqual(judge.LANGUAGE_MULTIPLIER["python"], 1.0)
+        v = judge.judge(_metrics(line_count=0), "python", "normal")
+        self.assertAlmostEqual(v.thresholds["review"], 300)
 
     def test_declarative_relaxation_applied_when_density_low(self):
         m = _metrics(line_count=0, control_flow_density=0.01)  # < 0.02
@@ -144,11 +151,20 @@ class TestEmitMatrix(unittest.TestCase):
         self.assertGreaterEqual(len(v.signals), 2)
         self.assertTrue(v.should_emit)
 
-    def test_review_tier_emits_regardless_of_signals(self):
+    def test_review_tier_without_signals_does_not_emit(self):
+        # 0.1.0 では emit していた。行数のみを根拠にした通知が emit の大半を
+        # 占めていたため、0.2.0 で「シグナル 1 個以上」を要求するようにした。
         m = _metrics(line_count=300)  # no signals at all
         v = judge.judge(m, "typescript", "normal")
         self.assertEqual(v.tier, "review")
         self.assertEqual(v.signals, ())
+        self.assertFalse(v.should_emit)
+
+    def test_review_tier_with_one_signal_emits(self):
+        m = _metrics(line_count=300, vague_filename=True)
+        v = judge.judge(m, "typescript", "normal")
+        self.assertEqual(v.tier, "review")
+        self.assertEqual(len(v.signals), 1)
         self.assertTrue(v.should_emit)
 
     def test_warn_tier_emits_regardless_of_signals(self):
