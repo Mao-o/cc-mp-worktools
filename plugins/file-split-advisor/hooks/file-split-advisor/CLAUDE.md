@@ -75,17 +75,18 @@ flowchart TD
     G -- no --> H[language 判定<br/>detect_language / is_test_path]
     H --> I[metrics.compute<br/>line_count/def_count/import多様性/制御フロー密度/vague filename]
     I --> J[judge.judge<br/>effective_thresholds → tier → signals → should_emit]
-    J -- tier=ok --> Z
-    J -- tier>=note --> P[change.classify_growth<br/>Edit の行数差 → grew/not_grew/unknown]
+    J --> P[change.classify_growth<br/>Edit の行数差 → grew/not_grew/unknown]
     P --> K[state.try_reserve_emit<br/>行数記録 + 成長判定 + debounce + emit上限を単一ロック区間で]
     K -- False --> Z
     K -- True --> L[message.build]
     L --> M[additionalContext を stdout に JSON dump]
 ```
 
-`tier=ok` で打ち切るのは、大半の編集で state の I/O を発生させないため。ok の
-ファイルを成長判定の基準として残す必要もない (次に review 以上へ育ったときは
-Edit の行差分か「記録なし = 判定不能」で決まる)。
+**tier が `ok` でも `try_reserve_emit` を呼ぶ**。judge の結果で打ち切ると、
+縮んで `ok` に戻ったファイルの行数記録が古いまま残り、その後の再成長が
+「記録より小さい」と誤判定されて抑制される (900 行を記録 → 100 行に縮む →
+600 行に成長、で 600 < 900 とみなされる)。`emit_candidate=False` を渡せば
+記録だけ行って False が返る。
 
 ## 判定ロジックの設計判断
 
@@ -196,6 +197,22 @@ MainClaude/Subagent が並行して複数ファイルを Write/Edit する運用
 成長方向が `UNKNOWN` (Write、または `old_string`/`new_string` が無い・型が違う
 Edit) のときは、記録があれば行数比較で決め、記録が無ければ通知する。envelope の
 形が将来変わったときに通知が黙って全滅するより、0.1.0 と同じ挙動に戻す方を選ぶ。
+
+### `change.py`: 改行数の差 ≠ 行数の差 (ファイル末尾だけ)
+
+行数は `splitlines()` で数えるため「改行で終わらない最終行」が 1 行として
+数えられるが、改行の個数はこれを含まない。したがって **ファイル末尾の置換が
+改行終端の有無を変える場合だけ**、改行数の差と行数の差が 1 ずれる:
+
+| 末尾の置換 | 改行数の差 | 実際の行数の差 |
+|---|---|---|
+| `"foo\n"` → `"foo\nbar"` | 0 | **+1** |
+| `"foo"` → `"foo\n"` | +1 | **0** |
+
+末尾以外の置換では、置換前後のテキストの末尾が変わらないため差は一致する。
+`classify_growth` は編集後の全文 (`loaded.text`) を受け取り、`text.endswith(new)`
+のときだけ「置換前の末尾テキスト」を復元して補正する。全文を渡さない呼び方でも
+改行数の差による近似で動く (`tests/test_change.py` の両方を固定している)。
 
 ## テスト実行
 

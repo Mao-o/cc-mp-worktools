@@ -88,13 +88,9 @@ def main() -> None:
     file_metrics = metrics_mod.compute(loaded, lang, path)
     verdict = judge.judge(file_metrics, lang, role)
 
-    # tier が ok のファイルでは state を触らない: 大半の編集で I/O を発生させ
-    # ないため。ok のファイルを成長判定の基準として残す必要もない (次に review
-    # 以上へ育ったときは Edit の行差分か「記録なし = 判定不能」で決まる)。
-    if verdict.tier == "ok":
-        return
-
-    growth = change.classify_growth(tool_name, tool_input)
+    # tier が ok でも state を更新する: 記録した行数を最新に保たないと、縮んで
+    # ok まで戻ったファイルが古い行数と比較され、その後の成長を誤って抑制する。
+    growth = change.classify_growth(tool_name, tool_input, loaded.text)
     max_emits = _get_max_emits()
     if not state.try_reserve_emit(
         session_id,

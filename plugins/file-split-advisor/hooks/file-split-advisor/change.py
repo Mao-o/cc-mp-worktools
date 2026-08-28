@@ -14,7 +14,12 @@ NOT_GREW = "not_grew"
 UNKNOWN = "unknown"
 
 
-def classify_growth(tool_name: str, tool_input: dict) -> str:
+def _unterminated_tail(text: str) -> int:
+    """``splitlines()`` が数える「改行で終わらない最終行」の分 (0 か 1)。"""
+    return 1 if text and not text.endswith("\n") else 0
+
+
+def classify_growth(tool_name: str, tool_input: dict, text: str | None = None) -> str:
     """``GREW`` / ``NOT_GREW`` / ``UNKNOWN`` のいずれかを返す。
 
     - ``Edit``: ``new_string`` と ``old_string`` の改行数の差で判定する。
@@ -25,6 +30,16 @@ def classify_growth(tool_name: str, tool_input: dict) -> str:
       内に直近の行数記録があれば state.py 側でそれと突き合わせる。
     - フィールドが欠けている / 型が違う場合も ``UNKNOWN``。envelope の形が将来
       変わったときに通知が黙って全滅するより、0.1.0 と同じ挙動に戻す方を選ぶ。
+
+    ``text`` (編集後のファイル全文) を渡すと、**ファイル末尾の置換**を補正する。
+    行数は ``splitlines()`` で数えるため「改行で終わらない最終行」が 1 行として
+    数えられるが、改行の個数はこれを含まない。したがって末尾の置換が改行終端の
+    有無を変える場合だけ、改行数の差と行数の差がずれる:
+
+    - 末尾の ``"foo\\n"`` → ``"foo\\nbar"``: 改行数は同じだが 1 行増える
+    - 末尾の ``"foo"`` → ``"foo\\n"``: 改行数は 1 増えるが行数は変わらない
+
+    末尾以外の置換では改行数の差がそのまま行数の差になるため補正は不要。
     """
     if tool_name != "Edit":
         return UNKNOWN
@@ -35,4 +50,9 @@ def classify_growth(tool_name: str, tool_input: dict) -> str:
         return UNKNOWN
 
     delta = new.count("\n") - old.count("\n")
+
+    if isinstance(text, str) and new and text.endswith(new):
+        before = text[: len(text) - len(new)] + old
+        delta += _unterminated_tail(text) - _unterminated_tail(before)
+
     return GREW if delta > 0 else NOT_GREW

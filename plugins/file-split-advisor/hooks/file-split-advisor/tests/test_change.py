@@ -38,6 +38,49 @@ class TestClassifyGrowth(unittest.TestCase):
         self.assertEqual(self._edit("", "line\n"), change.GREW)
 
 
+class TestEndOfFileCorrection(unittest.TestCase):
+    """末尾の置換では、改行数の差と ``splitlines()`` の行数の差がずれる。"""
+
+    def _classify(self, text: str, old: str, new: str) -> str:
+        return change.classify_growth(
+            "Edit", {"old_string": old, "new_string": new}, text
+        )
+
+    def _actual_delta(self, text: str, old: str, new: str) -> int:
+        before = text[: len(text) - len(new)] + old
+        return len(text.splitlines()) - len(before.splitlines())
+
+    def test_append_line_without_trailing_newline_is_grew(self):
+        text, old, new = "line0\nfoo\nbar", "foo\n", "foo\nbar"
+        self.assertEqual(self._actual_delta(text, old, new), 1)
+        self.assertEqual(self._classify(text, old, new), change.GREW)
+
+    def test_adding_only_a_trailing_newline_is_not_grew(self):
+        text, old, new = "line0\nfoo\n", "foo", "foo\n"
+        self.assertEqual(self._actual_delta(text, old, new), 0)
+        self.assertEqual(self._classify(text, old, new), change.NOT_GREW)
+
+    def test_removing_the_trailing_newline_is_not_grew(self):
+        text, old, new = "line0\nfoo", "foo\n", "foo"
+        self.assertEqual(self._actual_delta(text, old, new), 0)
+        self.assertEqual(self._classify(text, old, new), change.NOT_GREW)
+
+    def test_mid_file_edit_is_unaffected_by_the_correction(self):
+        text = "a\nb\nc\ntail"
+        self.assertEqual(self._classify(text, "b", "b\nb2"), change.GREW)
+        self.assertEqual(self._classify(text, "b\nc", "b"), change.NOT_GREW)
+
+    def test_correction_is_skipped_without_text(self):
+        # text 無しでも従来どおり改行数の差で判定する (近似)。
+        self.assertEqual(
+            change.classify_growth("Edit", {"old_string": "a", "new_string": "a\nb"}),
+            change.GREW,
+        )
+
+    def test_empty_new_string_deletion_is_not_grew(self):
+        self.assertEqual(self._classify("line0\nfoo\n", "bar\n", ""), change.NOT_GREW)
+
+
 class TestUnknownCases(unittest.TestCase):
     def test_write_is_unknown(self):
         result = change.classify_growth("Write", {"file_path": "/repo/foo.py", "content": "x"})
