@@ -2,6 +2,22 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.2] - 2026-08-28
+
+### 304応答後のmtime更新失敗が生tracebackになるバグを修正 (0.21.1 の追いコミット)
+
+Codex R2指摘1件 (P2)。
+
+- **304ハンドラ内の `os.utime()` が投げる `OSError` が未捕捉だった**: 読み取り専用ファイルシステム・
+  キャッシュファイルの並行削除・所有者変更などで `os.utime()` が失敗すると、この呼び出しは
+  `except HTTPError` ブロックの内側で実行されるため、兄弟の `except (..., OSError, ...)` では
+  捕捉できない (兄弟except節はtryブロックのみを対象とし、他のexcept節内の例外は対象外)。
+  条件付きGET自体は成功しているにもかかわらず、生tracebackで終了していた。
+  `os.utime()` を個別のtry/exceptで囲み、失敗時は他の失敗経路と同じ `_handle_fetch_failure`
+  に流してstale cacheへフォールバックするよう修正
+
+回帰テスト1件追加 (`test_fetch_and_cache.py`、185 tests, all green)。
+
 ## [0.21.1] - 2026-08-28
 
 ### 破損gzipストリームの未捕捉例外 + body/sidecarの非atomicなペア書き込みによる整合性崩れを修正 (0.21.0 の追いコミット)

@@ -659,6 +659,38 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         age = time.time() - os.path.getmtime(cache_path)
         self.assertLess(age, 5)
 
+    def test_utime_failure_after_304_falls_back_to_stale_cache_like_any_other_failure(self):
+        # os.utime() can raise OSError (read-only filesystem, cache deleted
+        # concurrently, ownership change, ...). It runs inside the
+        # `except HTTPError` block handling the 304 itself, so the sibling
+        # `except (..., OSError, ...)` below it can never catch it — that
+        # sibling only covers the try block, not other except blocks. Left
+        # unhandled, a *successful* conditional request would end in a raw
+        # traceback instead of the documented stale-cache fallback.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("still valid content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "content_hash": _common._content_hash(b"still valid content"),
+                "etag": '"abc123"',
+            }, f)
+
+        with mock.patch(
+            "urllib.request.urlopen", side_effect=_http_error(304)
+        ), mock.patch(
+            "os.utime", side_effect=OSError("Read-only file system")
+        ):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "still valid content")
+
     def test_304_with_no_existing_cache_is_a_normal_failure(self):
         # Can't happen via this function's own request (no cache means no
         # conditional headers are ever sent) but a defensively-coded path

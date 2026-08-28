@@ -643,7 +643,18 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
         return cache_path
     except urllib.error.HTTPError as e:
         if e.code == 304 and cache_exists:
-            os.utime(cache_path, None)
+            try:
+                os.utime(cache_path, None)
+            except OSError as utime_err:
+                # A sibling except clause below can't catch this — it only
+                # covers the try block above, not exceptions raised inside
+                # this except block. Route it through the same
+                # stale-cache-fallback path explicitly instead of letting
+                # it escape as a raw traceback despite the fetch itself
+                # (the conditional GET) having succeeded.
+                return _handle_fetch_failure(
+                    url, cache_path, utime_err, raise_on_error
+                )
             return cache_path
         return _handle_fetch_failure(url, cache_path, e, raise_on_error)
     except (urllib.error.URLError, OSError, http.client.HTTPException,
