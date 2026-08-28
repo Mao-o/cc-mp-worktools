@@ -141,6 +141,13 @@ class TestAwkSedScriptIsNotAPath(unittest.TestCase):
             "awk '{print}' .env": [".env"],
             "awk -f prog.awk .env": ["prog.awk", ".env"],
             "awk -F , '{print $2}' .env": [".env"],
+            # gawk の ``-i FILE`` / ``--include=FILE`` は FILE を awk source として
+            # 読み込んで実行する (Codex R2 P1)。未登録だと FILE が program 枠に
+            # 落ちて候補から消える
+            "gawk -i .env 'BEGIN {print 1}'": [".env"],
+            "gawk --include=.env 'BEGIN {print 1}'": [".env"],
+            "awk --include .env 'BEGIN {print}' notes.txt": [".env", "notes.txt"],
+            "gawk -i.env 'BEGIN {print 1}'": [".env"],
         }
         for cmd, expected in cases.items():
             with self.subTest(cmd=cmd):
@@ -228,6 +235,10 @@ class TestOptionValueIsNotAPath(unittest.TestCase):
             "rg -t py TODO .env": [".env"],
             "grep -rn TODO --exclude-from=.env src/": [".env", "src/"],
             "rg --ignore-file .env TODO": [".env"],
+            # ack の ``--ackrc=FILE`` は FILE から option を読む (slot コマンドで
+            # path を読む option は登録しないと値が pattern 枠に落ちる)
+            "ack --ackrc .env TODO lib/": [".env", "lib/"],
+            "ack --ackrc=.env TODO": [".env"],
             # ag の ``-C [LINES]`` は値省略可 → 分離形の次 token は pattern 枠
             "ag -C 3 TODO": ["TODO"],
         }

@@ -174,13 +174,16 @@ def _lex(command: str) -> list[tuple[str, str]]:
       載せない。演算子と delimiter 語自体は plain のまま残るので、その segment は
       ``<`` で従来どおり hard-stop (ask_or_allow)。terminator が無い ``<<`` は
       heredoc として扱わない (``_consume_heredoc_bodies``)
-    - **算術式の中の ``<<`` はシフト演算子** (Codex R1 P1): クォート外の ``((``
-      (``$((`` 算術展開 / ``((`` 算術コマンド) から対応する ``))`` までは heredoc
-      を検出しない。``echo $((1<<2))`` の後ろに右オペランドと同じ行 (``2``) が
-      あると terminator 未検出の fallback が効かず、間の ``cat .env`` が本文
-      扱いで消えるため。文字自体は plain のまま (``$`` ``(`` は hard-stop として
-      数える)。``$( (cmd) )`` のような擬似形は ``))`` が来ず算術扱いのまま終わる
-      が、その場合は heredoc 検出が止まる (= 0.21.x の行分割) だけ
+    - **算術式の中の ``<<`` はシフト演算子** (Codex R1 / R2 P1): クォート外の
+      ``((`` (``$((`` 算術展開 / ``((`` 算術コマンド) から対応する ``))`` まで、
+      および legacy の ``$[`` から対応する ``]`` までは heredoc を検出しない。
+      ``echo $((1<<2))`` / ``echo $[1<<2]`` の後ろに右オペランドと同じ行 (``2`` /
+      ``2]``) があると terminator 未検出の fallback が効かず、間の ``cat .env``
+      が本文扱いで消えるため (bash 3.2 実測: ``$[1<<2]`` の次行の ``cat`` は実行
+      される)。文字自体は plain のまま (``$`` ``(`` は hard-stop として数える)。
+      ``$( (cmd) )`` のような擬似形は ``))`` が来ず算術扱いのまま終わるが、
+      その場合は heredoc 検出が止まる (= 0.21.x の行分割) だけ。``let x=1<<2``
+      は bash 自身が heredoc として解釈する (実測) ので従来どおり heredoc
     """
     out: list[tuple[str, str]] = []
     n = len(command)
@@ -188,8 +191,8 @@ def _lex(command: str) -> list[tuple[str, str]]:
     in_single = False
     in_double = False
     in_comment = False
-    in_arith = False    # クォート外の ``((`` 〜 ``))`` の中
-    arith_depth = 0     # 算術式内の ``(`` の入れ子深さ
+    arith_close = ""    # 算術式の中なら閉じ記号 (``))`` or ``]``)、外なら空
+    arith_depth = 0     # 算術式内の開き記号 (``(`` / ``[``) の入れ子深さ
     bs_run = 0
     word_start = True
     pending_heredocs: list[tuple[str, bool]] = []
@@ -231,18 +234,19 @@ def _lex(command: str) -> list[tuple[str, str]]:
             i += 1
             continue
         # --- クォート外 ---
-        if in_arith:
-            if c == "(":
+        if arith_close:
+            opener, closer = ("(", ")") if arith_close == "))" else ("[", "]")
+            if c == opener:
                 arith_depth += 1
-            elif c == ")":
+            elif c == closer:
                 if arith_depth > 0:
                     arith_depth -= 1
-                elif command.startswith("))", i):
-                    out.append((c, _ST_PLAIN))
-                    out.append((c, _ST_PLAIN))
-                    in_arith = False
+                elif command.startswith(arith_close, i):
+                    for ch in arith_close:
+                        out.append((ch, _ST_PLAIN))
+                    i += len(arith_close)
+                    arith_close = ""
                     word_start = False
-                    i += 2
                     continue
             # 算術式の中は heredoc / コメント / 行継続を見ない (``<<`` はシフト)。
             # クォートは上の in_single / in_double 分岐が先に処理する
@@ -255,11 +259,13 @@ def _lex(command: str) -> list[tuple[str, str]]:
             word_start = False
             i += 1
             continue
-        if c == "(" and command.startswith("((", i):
-            in_arith = True
+        if (c == "(" and command.startswith("((", i)) or (
+            c == "$" and command.startswith("$[", i)
+        ):
+            arith_close = "))" if c == "(" else "]"
             arith_depth = 0
             out.append((c, _ST_PLAIN))
-            out.append((c, _ST_PLAIN))
+            out.append((command[i + 1], _ST_PLAIN))
             word_start = False
             i += 2
             continue

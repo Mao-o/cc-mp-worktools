@@ -101,6 +101,12 @@ class TestHeredocBodyIsNotASegment(unittest.TestCase):
             "x=$((a<<b))\ncat .env\nb": ["x=$((a<<b))", "cat .env", "b"],
             # 算術式を抜けた後の本物の heredoc は従来どおり
             "echo $((1<<2)); cat <<EOF\nbody\nEOF\necho x": ["echo $((1<<2))", "cat <<EOF", "echo x"],
+            # Codex R2 P1: legacy の ``$[...]`` 算術展開も同じ (bash 3.2 実測:
+            # ``echo $[1<<2]`` の後の ``cat`` は実行され、最終行 ``2]`` で失敗)
+            "echo $[1<<2]\ncat .env\n2]": ["echo $[1<<2]", "cat .env", "2]"],
+            "x=$[a<<b]\ncat .env\nb]": ["x=$[a<<b]", "cat .env", "b]"],
+            "echo $[ $[1<<2] + a[1] ]\ncat .env\n2]": ["echo $[ $[1<<2] + a[1] ]", "cat .env", "2]"],
+            "echo $[1<<2]; cat <<EOF\nbody\nEOF\necho x": ["echo $[1<<2]", "cat <<EOF", "echo x"],
         }
         for cmd, expected in cases.items():
             with self.subTest(cmd=cmd):
@@ -174,6 +180,7 @@ class TestHeredocVerdict(unittest.TestCase):
             "echo $((1<<2))\ncat .env",
             "echo $((1<<2))\ncat .env\n2",
             "(( x = 1<<2 ))\ncat .env\n2",
+            "echo $[1<<2]\ncat .env\n2]",
             "cat <<EOF | tee .env\nbody\nEOF",
         ):
             for mode in ("default", "auto"):

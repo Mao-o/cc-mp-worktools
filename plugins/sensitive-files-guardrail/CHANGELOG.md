@@ -55,6 +55,12 @@ deny reason を組み立てており、判定側と説明側で同じ token の�
 - 長形 option は GNU getopt_long の一意な prefix 省略 (`--reg=`) も解決する
 - 書込み redirect の密着形 (`grep foo README.md >.env`) の target も path 候補に
   する (分離形 `> .env` は従来から bare token として拾えていた)
+- pattern 枠を持つコマンドでは「値を読む option」を path として登録しないと、
+  値が pattern 枠に落ちて候補から消える (0.21.x では bare token として deny
+  していた形の退行)。grep `-f` / `--exclude-from`、rg `-f` / `--ignore-file`、
+  ag `-p`、ack `--files-from` / `--ackrc`、git grep `-f`、jq `-f` /
+  `--slurpfile` / `--rawfile` / `-L`、awk `-f` / `-E` / `-i` / `--include`、
+  sed `-f` を登録 (gawk `-i .env 'BEGIN {…}'` と ack `--ackrc` は Codex R2 P1)
 - `grep -vn .env.local README.md` の既存テスト期待値は grep の意味論
   (`.env.local` は pattern) に合わせて deny → allow に改めた
 
@@ -151,12 +157,14 @@ docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read �
 - terminator が見つからない `<<` は heredoc として扱わない (0.21.x と同じ
   行分割)。`$((1<<2))` を heredoc と誤認して以降を丸ごと本文にすると後続の
   `cat .env` が解析されず auto で素通りするため
-- 算術式 (`$((` 算術展開 / `((` 算術コマンド) の中の `<<` はシフト演算子として
-  heredoc 検出から外す (Codex R1 P1)。terminator 未検出の fallback だけでは、
-  後続に右オペランドと同じ行 (`echo $((1<<2))` の後の `2`) があると間の
-  `cat .env` が本文扱いで消えた。`$( (cmd) )` のような擬似形は `))` が来ず
-  算術扱いのまま終わるが、その場合は heredoc 検出が止まる (= 0.21.x の行分割)
-  だけで allow 側には倒れない
+- 算術式 (`$((` 算術展開 / `((` 算術コマンド、および legacy の `$[…]`) の中の
+  `<<` はシフト演算子として heredoc 検出から外す (Codex R1 / R2 P1)。terminator
+  未検出の fallback だけでは、後続に右オペランドと同じ行 (`echo $((1<<2))` の
+  後の `2`、`echo $[1<<2]` の後の `2]`) があると間の `cat .env` が本文扱いで
+  消えた (bash 3.2 実測: `$[1<<2]` の次行の `cat` は実行される)。`$( (cmd) )`
+  のような擬似形は `))` が来ず算術扱いのまま終わるが、その場合は heredoc 検出が
+  止まる (= 0.21.x の行分割) だけで allow 側には倒れない。`let x=1<<2` は bash
+  自身が heredoc として解釈する (実測) ので heredoc のまま
 
 ### 動作変化 (in-process 実測、default / auto)
 
@@ -180,8 +188,9 @@ docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read �
 | `cat *.json`, `cat *.key`, `cat id_rsa*`, `cat .env.*`, `cat sub/*` | ask / allow | ask / allow (不変) |
 | `echo *`, `wc -l *`, `chmod 644 *`, `ls -la *` (metadata-only) | allow / allow | allow / allow (不変) |
 | `shopt -s dotglob; cat *`, `setopt globdots; cat *`, `GLOBIGNORE=x; cat *`, `export GLOBIGNORE=.git; cat *.envrc` (同一コマンド内で dotglob 系を有効化) | deny / deny | deny / deny (不変、Codex R1) |
-| `echo $((1<<2))` + `cat .env` + `2` (算術シフトの後ろに右オペランドと同じ行) | deny / deny | deny / deny (不変、Codex R1) |
+| `echo $((1<<2))` + `cat .env` + `2`、`echo $[1<<2]` + `cat .env` + `2]` (算術シフトの後ろに右オペランドと同じ行) | deny / deny | deny / deny (不変、Codex R1 / R2) |
 | `tar --exclude-ignore=.env -cf out.tar src` | deny / deny | deny / deny (不変、Codex R1) |
+| `gawk -i .env 'BEGIN {print 1}'`, `awk --include=.env 'BEGIN {print 1}'`, `ack --ackrc .env TODO lib/` | deny / deny | deny / deny (不変、Codex R2) |
 
 ### 開示事項 (裏が取れなかったこと / 判断で倒したこと)
 
@@ -212,6 +221,14 @@ docs/DESIGN.md は以前から「`<<` heredoc, `<<-` | delimiter/body は read �
    のに allow → 同一コマンド内の有効化を検出して 0.21.x の意味論に戻す (上記 3.)
 3. tar `--exclude-ignore[-recursive]=FILE` は FILE の中身を読む → path として
    登録 (上記 2.)
+
+#### Codex R2 対応 (P1 x2)
+
+1. gawk `-i FILE` / `--include=FILE` (FILE を awk source として読み込み実行) が
+   未登録で、FILE が program 枠に落ちて候補から消えていた (0.21.x は deny) →
+   path として登録。同型を横断確認し ack `--ackrc FILE` も登録 (上記 1.)
+2. legacy 算術展開 `$[1<<2]` の `<<` を heredoc と誤認 → `$[` 〜 `]` も算術文脈
+   として追跡 (上記 5.)
 
 ## 0.20.0
 

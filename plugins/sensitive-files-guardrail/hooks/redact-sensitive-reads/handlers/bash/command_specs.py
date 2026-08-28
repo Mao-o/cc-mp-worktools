@@ -149,7 +149,11 @@ _ACK_SPEC = _spec(
         "-t": "n", "--type": "n", "--type-add": "n", "--type-set": "n",
         "--ignore-dir": "n", "--ignore-file": "n", "--pager": "n",
         "--output": "n", "--color-filename": "n", "--color-match": "n",
-        "--color-lineno": "n", "--files-from": "p",
+        "--color-lineno": "n",
+        # ``--files-from FILE`` は検索対象リスト、``--ackrc FILE`` は option を
+        # 読む設定ファイル。pattern 枠を持つコマンドでは「値を読む option」を
+        # 登録しないと値が pattern 枠に落ちて候補から消える (Codex R2)
+        "--files-from": "p", "--ackrc": "p",
     },
     pattern_opts=("--match", "-f"),
 )
@@ -180,10 +184,14 @@ _JQ_SPEC = _spec(
 # ``--exec``) なら program はファイルから読み positional は全て入力 file。
 # ``-F fs`` / ``-v var=val`` (gawk ``--field-separator`` / ``--assign``) は
 # 必須値の option (値は path ではない)。gawk ``-e`` / ``--source`` は program
-# text の供給。
+# text の供給。gawk ``-i FILE`` / ``--include=FILE`` は FILE を awk source
+# library として読み込んで実行する (program は positional のまま) ので path
+# (Codex R2 P1: 未登録だと FILE が program 枠に落ちて候補から消え、旧版が
+# deny していた ``gawk -i .env 'BEGIN {…}'`` が allow になっていた)。
 _AWK_SPEC = _spec(
     {
         "-f": "p", "--file": "p", "-E": "p", "--exec": "p",
+        "-i": "p", "--include": "p",
         "-e": "n", "--source": "n",
         "-F": "n", "--field-separator": "n", "-v": "n", "--assign": "n",
     },

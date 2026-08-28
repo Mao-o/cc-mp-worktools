@@ -161,8 +161,10 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > 書込み先) と `cat */.env` / `cat **/.env` の 3 形。Codex R1 で保守側に戻した
 > 形: 同一コマンド内で `shopt -s dotglob` / `GLOBIGNORE=` / `setopt globdots` を
 > 有効化しているときの glob (`shopt -s dotglob; cat *` は deny)、算術式
-> `$((1<<2))` の `<<` (heredoc 検出から除外)、tar `--exclude-ignore=FILE`
-> (FILE の中身を読むので path)。
+> `$((1<<2))` / `$[1<<2]` の `<<` (heredoc 検出から除外)、tar
+> `--exclude-ignore=FILE` (FILE の中身を読むので path)、gawk `-i FILE` /
+> `--include=FILE` と ack `--ackrc FILE` (pattern 枠を持つコマンドで値を読む
+> option は path 登録が必要。`gawk -i .env 'BEGIN {…}'` は deny)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
