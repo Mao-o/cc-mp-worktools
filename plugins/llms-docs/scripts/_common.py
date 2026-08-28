@@ -180,15 +180,25 @@ def extract_content(body_lines, heading_path=None, *,
     value in headers/hints, not echo back the raw argument, so a reader can
     tell which section was actually picked.
 
-    A partial match (no exact ``heading_path``/``title`` hit) that is
-    ambiguous — two or more sections match the same case-insensitive
-    substring — exits with an ``Error: ambiguous heading ...`` listing every
-    candidate instead of silently picking the first one (mirroring how
-    ``_resolve_page_ref``'s slug lookup handles an ambiguous slug). An exact
-    match is checked first and always wins outright, so a ``heading_path``
-    copied verbatim from a previous ``sections``/``content``/``search`` call
-    is never subject to this check even if it would *also* satisfy other
-    sections' partial-match pattern.
+    A partial match (no exact ``heading_path``/``title`` hit, case-sensitive
+    or not) that is ambiguous — two or more sections match the same
+    case-insensitive substring — exits with an ``Error: ambiguous heading
+    ...`` listing every candidate instead of silently picking the first one
+    (mirroring how ``_resolve_page_ref``'s slug lookup handles an ambiguous
+    slug). Exact matches are checked first and always win outright, so a
+    ``heading_path`` copied verbatim from a previous
+    ``sections``/``content``/``search`` call is never subject to this check
+    even if it would *also* satisfy other sections' partial-match pattern.
+    Heading matching is documented as case-insensitive, so the exact-match
+    tier itself has two passes: case-sensitive first, then case-folded —
+    both take the first matching section outright with no ambiguity check,
+    the same as the case-sensitive form always has. Without the second
+    pass, a case-differing exact match (e.g. querying ``"configuration"``
+    against a page with ``## Configuration`` followed by a nested
+    ``### Options``) would fall through to the substring tier and could
+    die as "ambiguous" against its own descendant (``"Configuration/
+    Options"`` also contains the substring ``"configuration"``), even
+    though this exact heading exists and is not actually ambiguous.
     """
     if heading_path is None:
         return "".join(body_lines), None
@@ -208,8 +218,21 @@ def extract_content(body_lines, heading_path=None, *,
             target = s
             break
 
+    heading_lower = heading_path.lower()
+
     if target is None:
-        heading_lower = heading_path.lower()
+        # Case-folded exact match, still a second "exact" tier — not a
+        # substring/partial one — so it also wins outright with no
+        # ambiguity check. Skipping this and falling straight to the
+        # substring tier below would wrongly treat a case-differing exact
+        # match as merely "ambiguous" whenever it happens to also be a
+        # substring of one of its own descendants' heading_path.
+        for s in sections:
+            if s["heading_path"].lower() == heading_lower or s["title"].lower() == heading_lower:
+                target = s
+                break
+
+    if target is None:
         matches = [
             s for s in sections
             if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower()

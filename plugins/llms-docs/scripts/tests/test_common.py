@@ -199,6 +199,37 @@ class ExtractContentTest(unittest.TestCase):
         self.assertIn("a", content)
         self.assertNotIn("b", content)
 
+    def test_case_insensitive_exact_match_beats_descendant_partial_match(self):
+        # Heading matching is documented as case-insensitive. A query that
+        # differs from a section's title only by case must resolve via the
+        # (new) case-folded exact-match tier and win outright — not fall
+        # through to the substring tier, where it would also match its own
+        # nested child ("Configuration/Options" contains "configuration")
+        # and die as ambiguous even though only one *heading* actually
+        # equals the query.
+        body = [
+            "## Configuration\n",
+            "top-level config text\n",
+            "### Options\n",
+            "nested options text\n",
+        ]
+        content, resolved = _common.extract_content(body, "configuration")
+        self.assertEqual(resolved, "Configuration")
+        self.assertIn("top-level config text", content)
+
+    def test_case_insensitive_exact_match_on_heading_path_form(self):
+        # Same tier, exercised against a multi-segment heading_path (not
+        # just a bare title) copied back with different casing.
+        body = [
+            "## Guide\n",
+            "intro\n",
+            "### Setup\n",
+            "setup text\n",
+        ]
+        content, resolved = _common.extract_content(body, "guide/setup")
+        self.assertEqual(resolved, "Guide/Setup")
+        self.assertIn("setup text", content)
+
     def test_top_heading_path_returns_preamble_before_first_heading(self):
         # search can report a body hit above the first heading as
         # Section: (top), and its Next hint tells the caller to copy that
@@ -298,7 +329,8 @@ class NormalizationStemmingTest(unittest.TestCase):
         # lowercase letter anywhere. It must still stem to "hook" (the
         # same result "Hooks" stems to) rather than staying "hooks" and
         # silently missing an otherwise-exact match solely because of
-        # capitalization.
+        # capitalization. This is the regression case for the mixed-case
+        # (not just "2+ capitals") guard above.
         self.assertEqual(_common.score_entry("Hooks", "", ["HOOKS"]), 10)
         self.assertEqual(_common.score_entry("Skill", "", ["SKILLS"]), 10)
 
