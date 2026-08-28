@@ -115,6 +115,29 @@ class TestSegmentSizeGuard(unittest.TestCase):
             f"600KB のセグメントに {elapsed_ms:.0f}ms — ガードが効いていない可能性",
         )
 
+    def test_policy_failure_stays_fail_closed_regardless_of_length(self):
+        """patterns 読込失敗は長さに関わらず全 mode deny (fail-closed) のまま。
+
+        長さガードを load_patterns より前に置くと、64KB 超のコマンドに限って
+        fail-closed を迂回し ask_or_allow (= lenient mode では allow) になる。
+        README の Fail-closed 表が保証する挙動の回帰。
+        """
+        def boom(**kwargs):
+            raise FileNotFoundError("patterns.txt")
+
+        original = bash_handler.load_patterns
+        bash_handler.load_patterns = boom
+        try:
+            big = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
+            for cmd in ("cat /tmp/x.txt", big):
+                for mode in ("default", "auto", "bypassPermissions"):
+                    with self.subTest(size=len(cmd), mode=mode):
+                        self.assertEqual(
+                            _verdict(handle(_envelope(cmd, mode))), "deny"
+                        )
+        finally:
+            bash_handler.load_patterns = original
+
     def test_limit_is_documented_constant(self):
         """上限がマジックナンバーではなく名前付き定数であること。"""
         self.assertEqual(_MAX_COMMAND_CHARS, 64 * 1024)

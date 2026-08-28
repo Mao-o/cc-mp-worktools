@@ -158,6 +158,37 @@ class TestDotenvPemBlockTracking(unittest.TestCase):
         reason = _redact_text(".env", text)
         self.assertIn("TRAILING", reason)
 
+    def test_inline_comment_marker_does_not_open_block(self):
+        """インラインコメント内の marker で block を開かないこと (Codex R6 P2)。
+
+        生の値で判定すると ``A=one # -----BEGIN PRIVATE KEY-----`` のような
+        例示コメントで block が開き、END が現れるまで以降のキーが丸ごと
+        報告から消える。判定はコメント除去後の値で行う。
+        """
+        text = (
+            "APP_NAME=demo\n"
+            "A=one # -----BEGIN PRIVATE KEY-----\n"
+            "AFTER1=x\n"
+            "AFTER2=y\n"
+        )
+        reason = _redact_text(".env", text)
+        self.assertIn("entries: 4", reason)
+        for key in ("APP_NAME", "A", "AFTER1", "AFTER2"):
+            self.assertIn(key, reason)
+
+    def test_quoted_marker_value_still_opens_block(self):
+        """クォート付きの実 PEM 値では従来どおり block を開くこと。"""
+        text = (
+            "APP_NAME=demo\n"
+            'PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----"\n'
+            "AbCd12=\n"
+            "-----END RSA PRIVATE KEY-----\n"
+            "AFTER=tail\n"
+        )
+        reason = _redact_text(".env", text)
+        self.assertNotIn("AbCd12", reason)
+        self.assertIn("AFTER", reason)
+
     def test_unterminated_block_does_not_swallow_rest_silently(self):
         """END が無い壊れた入力でも例外にならないこと。"""
         text = (

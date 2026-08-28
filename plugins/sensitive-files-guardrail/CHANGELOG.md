@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **916** / check 79 → **80** (計 996)
+- テスト件数: redact 862 → **919** / check 79 → **80** (計 999)
 
 ### 1. 不具合の内容
 
@@ -148,7 +148,11 @@ segment 長に関わらず無条件に呼ばれる。cProfile で 200KB 単一�
 | 600KB | **2,569.6 ms** (2 秒 timeout 超過) | 203.4 ms |
 | 800KB | 4,808.8 ms | 296.8 ms |
 
-長さ判定は **segmentation より前** (`handle` 冒頭) で command 全体に対して行う。
+長さ判定は **policy 読込の後、segmentation の前**で command 全体に対して行う。
+`patterns.txt` 読込失敗は全 mode deny 固定 (README の Fail-closed 表) なので、
+長さガードを先に置くと 64KB 超のコマンドに限ってこの fail-closed を迂回して
+`ask_or_allow` (= lenient mode では allow) になってしまう。policy 読込は
+ファイル 2 つの読み取りだけで、後段の per-character lexer に比べれば安価。
 `_split_command_on_operators` と `_has_hard_stop` はどちらも全文字を舐める
 per-character lexer で、しかも超線形なため、ガードを segment ループ内に置くと
 **そこへ到達する前に予算を使い切る**:
@@ -209,6 +213,11 @@ deny 検出は従来どおり続く (0.11.0 の segment 単位再評価を維持
 判定していたが、`oauth2ClientSecretProduction` / `stripeApiKeyV2Production` のような
 **versioned camelCase の正当な鍵名を巻き込んで黙って報告から落として**いた
 (entries が過少になり設定のメタ情報が隠れる)。
+
+ブロック判定は **コメント除去後の値**で行う。生の値で見ると
+`A=one # -----BEGIN PRIVATE KEY-----` のようにインラインコメントへ例示として
+書いただけの marker で block が開き、END が現れるまで以降のキーが丸ごと
+報告から消える。
 
 (a) で `redact_dotenv` に入れたブロック追跡を `keyonly_scan` の
 `scan_keys` / `scan_stream` にも展開し、**ヒューリスティックは削除**した。

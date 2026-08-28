@@ -244,15 +244,22 @@ def redact_dotenv(text: str) -> dict:
 
         m = _LINE_RE.match(line)
         if not m:
-            # ``-----BEGIN ...-----`` だけの行 (値が次行から始まる形) もここに来る
-            if _PEM_BEGIN_RE.search(stripped):
+            # ``-----BEGIN ...-----`` だけの行 (値が次行から始まる形) もここに来る。
+            # KEY= 形と同じくコメント除去後で判定する (末尾コメントに marker を
+            # 書いただけの行で block を開かないため)。
+            if _PEM_BEGIN_RE.search(_preprocess_value(stripped)):
                 in_pem_block = True
             continue
         raw_key, raw_val = m.group(1), m.group(2)
-        # ``KEY=-----BEGIN ...-----`` 形。鍵名は残しつつ、以降の本文行を捨てる
-        if _PEM_BEGIN_RE.search(raw_val):
-            in_pem_block = not _PEM_END_RE.search(raw_val)
         v = _preprocess_value(raw_val)
+        # ``KEY=-----BEGIN ...-----`` 形。鍵名は残しつつ、以降の本文行を捨てる。
+        #
+        # 判定は **コメント除去後の値** (``v``) で行う。生の値で見ると
+        # ``A=one # -----BEGIN PRIVATE KEY-----`` のようにインラインコメントへ
+        # 例示として書いただけの marker で block が開き、END が現れるまで
+        # 以降のキーが丸ごと報告から消える。
+        if _PEM_BEGIN_RE.search(v):
+            in_pem_block = not _PEM_END_RE.search(v)
         type_class, prefix = _detect_type_and_prefix(v)
         is_ph, ph_label = looks_placeholder(v)
         tags, length = _classify_status(

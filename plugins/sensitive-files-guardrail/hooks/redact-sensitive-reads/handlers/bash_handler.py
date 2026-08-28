@@ -581,6 +581,21 @@ def handle(envelope: dict) -> dict:
     if not isinstance(command, str) or not command.strip():
         return output.make_allow()
 
+    # policy の読込は **長さガードより前** に置く (0.21.0)。
+    #
+    # ``patterns.txt`` が読めないケースは「policy が無いのに lenient で素通り」を
+    # 避けるため全 mode で deny 固定にしてある (README の Fail-closed 表)。
+    # 長さガードを先に置くと、64KB 超のコマンドに限ってこの fail-closed を
+    # 迂回して ``ask_or_allow`` (= lenient mode では allow) になってしまう。
+    # ファイルを 2 つ読むだけなので、後段の per-character lexer に比べれば安価。
+    try:
+        rules = load_patterns(cwd=cwd)
+    except (FileNotFoundError, OSError) as e:
+        L.log_error("patterns_unavailable", type(e).__name__)
+        return output.make_deny(M.policy_unavailable("deny"))
+    if not rules:
+        return output.make_allow()
+
     # 長さガードは **segmentation より前** に置く (0.21.0)。
     #
     # ``_split_command_on_operators`` と ``_has_hard_stop`` はどちらも全文字を
@@ -597,14 +612,6 @@ def handle(envelope: dict) -> dict:
     if len(command) > _MAX_COMMAND_CHARS:
         L.log_info("bash_classify", "segment_too_large")
         return output.ask_or_allow(M.bash_lenient("segment_too_large"), envelope)
-
-    try:
-        rules = load_patterns(cwd=cwd)
-    except (FileNotFoundError, OSError) as e:
-        L.log_error("patterns_unavailable", type(e).__name__)
-        return output.make_deny(M.policy_unavailable("deny"))
-    if not rules:
-        return output.make_allow()
 
     # 1. segment split (&& / || / ; / | / \n, quote を尊重)
     #    0.11.0 (F1): hard-stop は segment 単位で再評価する。0.10.0 までは
