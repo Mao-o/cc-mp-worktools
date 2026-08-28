@@ -198,6 +198,47 @@ class CmdSearchFallbackDoesNotDropIndexMatchesTest(unittest.TestCase):
         self.assertNotIn("no title/description/tags match", out)
 
 
+class SearchContentMaxSnippetCharsTest(unittest.TestCase):
+    """search-content used to have no --max-snippet-chars at all (unlike
+    search, and unlike claude-docs' own search-content) — every snippet was
+    printed in full, however long. Confirms the flag now truncates here too."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        long_line = "keywordhit " + ("x" * 200) + " end of line\n"
+        _write_fixture(
+            self.tmp,
+            "---\n"
+            "title: streamText\n"
+            "description: Stream text generation\n"
+            "---\n"
+            "\n"
+            "# streamText\n"
+            "\n"
+            "## Options\n"
+            + long_line,
+        )
+
+    def test_default_does_not_truncate_a_short_enough_snippet(self):
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "search-content", "keywordhit",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("chars truncated", out)
+        self.assertIn("end of line", out)
+
+    def test_max_snippet_chars_truncates_a_long_snippet(self):
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "search-content", "keywordhit",
+            "--cache-dir", self.tmp, "--max-snippet-chars", "20",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("chars truncated", out)
+        self.assertNotIn("end of line", out)
+
+
 class AssertParsedIntegrationTest(unittest.TestCase):
     """A malformed/empty source must exit 2 (format changed), distinct
     from a legitimately-empty search result (exit 0)."""
@@ -300,6 +341,22 @@ class FileReadOnlyModeTest(unittest.TestCase):
         ])
         self.assertEqual(code, 1)
         self.assertIn("does not exist", err)
+
+    def test_fetch_index_file_flag_is_used_verbatim_without_fetching(self):
+        # fetch-index used to be the one subcommand without --file (always
+        # auto-fetched under --cache-dir) — now consistent with the rest.
+        snapshot = Path(self.tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "---\ntitle: Doc\n---\n\n# Doc\n\nbody\n", encoding="utf-8",
+        )
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            code, out, err = _loader.run_cli(parse_ai_sdk, [
+                "parse-ai-sdk.py", "fetch-index",
+                "--file", str(snapshot), "--cache-dir", self.tmp,
+            ])
+        self.assertEqual(code, 0, err)
+        mock_urlopen.assert_not_called()
+        self.assertIn("Doc", out)
 
 
 class GoldenOutputTest(unittest.TestCase):

@@ -124,7 +124,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--source {code,platform,both}] [--index-limit N] [--max-hits N] [--context N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | **推奨**: llms.txt ランキング + llms-full.txt 本文を URL で join、1 コマンドで候補ページ + 本文ヒットを返す。`--source both` で code/platform 両方を順に検索 |
+| `search` | `<query> [--source {code,platform,both}] [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | **推奨**: llms.txt ランキング + llms-full.txt 本文を URL で join、1 コマンドで候補ページ + 本文ヒットを返す。`--source both` で code/platform 両方を順に検索 (`--file` は単一 source 限定) |
 | `content` | `<page_ref> [heading_path] [--file F] [--source S] [--max-age S] [--max-chars N] [--no-subsection-hints] [--no-link-annotations]` | セクション本文を表示。前後にサブセクション一覧、本文中の docs リンクには `→ [doc_idx N]` を付与。既定 24000 文字で切り詰め |
 | `sections` | `<page_ref> [--file F] [--source S] [--max-age S]` | 指定ページの見出し一覧を表示 |
 | `search-content` | `<query> [--page-ref R] [--file F] [--source S] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--max-age S] [--include-changelog-priority]` | llms-full.txt 本文のみキーワード検索。`--page-ref` で 1 ページに絞れる |

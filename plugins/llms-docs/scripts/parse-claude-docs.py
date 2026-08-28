@@ -29,6 +29,7 @@ from _common import (
     add_heading_path_arg,
     add_max_age_arg,
     add_max_chars_arg,
+    add_max_snippet_chars_arg,
     assert_parsed,
     build_url_to_full_index,
     check_join_rate,
@@ -410,7 +411,7 @@ def cmd_fetch_index(args):
     print(f"({len(entries)} pages total, {displayed} entries shown — {grouped_count} pages grouped)")
     print()
     if url_to_idx:
-        next_hint("sections", "<doc_index>", *_source_hint_args(args))
+        next_hint("sections", "<page_ref>", *_source_hint_args(args))
         print(f"  (llms-full.txt will be fetched automatically on first use)")
     else:
         next_hint("sections", "<slug>", *_source_hint_args(args))
@@ -791,7 +792,7 @@ def cmd_search_content(args):
     else:
         print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
     print()
-    next_hint("content", "<doc_index>", '"<heading_path>"', *_source_hint_args(args))
+    next_hint("content", "<page_ref>", '"<heading_path>"', *_source_hint_args(args))
 
 
 def _search_one_source(args, source_key: str) -> list[dict]:
@@ -810,13 +811,11 @@ def _search_one_source(args, source_key: str) -> list[dict]:
     entries = parse_llms_index(load_lines(index_path))
     assert_parsed(f"{src['label']} index", len(entries), index_path)
     scored_entries = search_index_entries(entries, args.query,
-                                          limit=args.index_limit)
+                                          limit=args.top_n)
 
-    # Phase 2: load llms-full.txt + build URL → doc_idx mapping
-    full_cache = _cache_path(args.cache_dir, src["full_cache"])
-    full_path = fetch_url(src["full_url"], full_cache,
-                          user_agent=USER_AGENT, max_age=args.max_age)
-    lines = load_lines(full_path)
+    # Phase 2: load llms-full.txt (respecting --file) + build URL → doc_idx mapping
+    full_path, lines = _load_full_txt(args.file, source_key, args.cache_dir,
+                                      max_age=args.max_age)
     docs = _split_documents_checked(lines, full_path)
     url_to_idx = build_url_to_full_index(docs)
 
@@ -867,7 +866,7 @@ def _search_one_source(args, source_key: str) -> list[dict]:
             [d["body_lines"] for d in docs], args.query,
             context_lines=args.context, max_matches_per_doc=args.max_hits,
             max_snippet_chars=args.max_snippet_chars, min_level=2,
-            limit=args.index_limit,
+            limit=args.top_n,
         )
         for idx, hits in fallback:
             if idx in already_shown:
@@ -935,9 +934,16 @@ def cmd_search(args):
     and results are grouped under per-source headers. The ``doc_idx`` is only
     unique within a source, so follow-up ``content``/``sections`` calls need an
     explicit ``--source`` matching the bracket label in the output.
+
+    ``--file`` (a local llms-full.txt snapshot) requires a single ``--source``
+    — there's no one local file that could stand in for both at once.
     """
     if not args.query.strip():
         die("query must not be empty")
+
+    if args.file is not None and args.source == "both":
+        die("--file requires a single --source (not 'both') — "
+            "pick --source code or --source platform")
 
     if args.source == "both":
         source_keys = ["code", "platform"]
@@ -979,10 +985,10 @@ def cmd_search(args):
         print("Note: doc_idx is unique within a source. For follow-up commands, "
               "pass the matching --source <code|platform> explicitly.")
         print()
-        next_hint("content", "<doc_index>", '"<heading_path>"',
+        next_hint("content", "<page_ref>", '"<heading_path>"',
                   "--source", "<code|platform>")
     else:
-        next_hint("content", "<doc_index>", '"<heading_path>"',
+        next_hint("content", "<page_ref>", '"<heading_path>"',
                   *_source_hint_args(args))
 
 
@@ -1085,10 +1091,7 @@ def main():
                                help="Context lines around each hit (default: 2)")
     p_search_body.add_argument("--max-hits", type=int, default=5,
                                help="Max hits to display per page (default: 5)")
-    p_search_body.add_argument(
-        "--max-snippet-chars", type=int, default=500,
-        help="Truncate each snippet to N chars (0 = no limit, default: 500)",
-    )
+    add_max_snippet_chars_arg(p_search_body)
     p_search_body.add_argument(
         "--include-changelog-priority", action="store_true",
         help="Do not deprioritize Changelog / release-notes pages",
@@ -1108,18 +1111,22 @@ def main():
         help=f"Documentation source (default: {DEFAULT_SOURCE}; 'both' "
              f"queries code + platform in sequence)",
     )
+    _add_file_arg(p_search)
     add_cache_dir_arg(p_search)
     add_max_age_arg(p_search)
-    p_search.add_argument("--index-limit", type=int, default=5,
-                          help="Max candidate pages from index (default: 5)")
+    p_search.add_argument(
+        "--top-n", type=int, default=5, dest="top_n",
+        help="Max candidate pages from index (default: 5)",
+    )
+    # --index-limit predates the --top-n rename (unifying the name
+    # ai-sdk/firebase already used) — kept as a hidden, functioning alias so
+    # an existing invocation doesn't silently break.
+    p_search.add_argument("--index-limit", type=int, dest="top_n", help=argparse.SUPPRESS)
     p_search.add_argument("--max-hits", type=int, default=3,
                           help="Max body hits per page (default: 3)")
     p_search.add_argument("--context", type=int, default=2,
                           help="Context lines around each hit (default: 2)")
-    p_search.add_argument(
-        "--max-snippet-chars", type=int, default=500,
-        help="Truncate each snippet to N chars (0 = no limit, default: 500)",
-    )
+    add_max_snippet_chars_arg(p_search)
     p_search.add_argument(
         "--include-changelog-priority", action="store_true",
         help="Do not deprioritize Changelog / release-notes pages",

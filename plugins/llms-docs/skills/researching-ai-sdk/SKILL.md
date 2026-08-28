@@ -112,16 +112,16 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits |
+| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits |
 | `search-index` | `<query> [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
-| `fetch-index` | `[--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
+| `search-content` | `<query> [--file F] [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
+| `fetch-index` | `[--file F] [--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
 | `sections` | `<page_ref> [--file F] [--cache-dir DIR]` | 指定ドキュメントの見出し一覧を表示 |
 | `content` | `<page_ref> [heading_path] [--file F] [--cache-dir DIR] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`
 
-`fetch-index` 以外の全サブコマンドで `--file <path>` を受け付け、省略時は `--cache-dir`/`ai-sdk-llms-full.txt` を auto-fetch / 再利用する (`fetch-index` に `--file` は無い — 常に `--cache-dir` 側を使う)。
+全サブコマンドで `--file <path>` を受け付け、省略時は `--cache-dir`/`ai-sdk-llms-full.txt` を auto-fetch / 再利用する。
 
 ### heading_path の指定方法
 
