@@ -2590,5 +2590,97 @@ class TestGrepPatternPositional(BaseBash):
         self.assertIn("matched_operand: .env", _reason(r))
 
 
+class TestOptionValueNotPath(BaseBash):
+    """0.22.0: option の値が検索文字列 / 正規表現 / 書式 / glob / 数値のとき、
+    その値を path operand として誤読しない。
+
+    0.21.x までは ``--opt=VALUE`` の RHS と ``-XVALUE`` の ``tok[2:]`` を意図的に
+    候補に入れており (``file -f .env`` / ``grep -f.env`` を捕まえる設計)、option
+    の意味を見ないため ``git log -S.env`` (pickaxe) や
+    ``grep -rn TODO --exclude='.env'`` (**ユーザーが .env を読ませないと明示して
+    いる形**) まで hard deny になっていた。arity の概念自体が無かったので、
+    ``git log --grep -x.env`` の分離形は ``-x.env`` の ``tok[2:]`` = 元の文字列に
+    存在しない ``.env`` で一致していた。
+
+    値が path の option (``-f FILE`` / ``--files-from`` / ``--slurpfile`` /
+    ``--output``) と metadata-only gate の 4 形 (``file -f`` /
+    ``wc --files0-from`` / ``tree --fromfile`` / ``git ls-files -s``) は deny 維持。
+    """
+
+    ALLOW = (
+        "git log -S.env --oneline",
+        "git log -S .env",
+        "git log --grep=.env",
+        "git log --grep .env",
+        "git log --grep -x.env",
+        "git log --author=.env",
+        "git log --committer=.env",
+        "git log --format=.env",
+        "git log -G'.env'",
+        "grep -rn TODO --exclude='.env'",
+        "grep -rn TODO --exclude-dir=.env",
+        "grep -rn TODO --include='*.env'",
+        "grep -A 3 .env README.md",
+        "rg TODO -g '*.env'",
+        "rg -g '!.env' TODO",
+        "rg -t py .env src/",
+        "tar --exclude='.env' -czf out.tgz src",
+        "tar -czf out.tgz --exclude .env src",
+        "rsync -a --exclude='.env' src/ dst/",
+        "zip -r out.zip src -x '.env'",
+        "jq --arg k .env '.[$k]' cfg.json",
+        "diff --ignore-matching-lines=.env a b",
+        "diff -I .env a b",
+    )
+    DENY = (
+        "git log -p .env",
+        "git log -p -- .env",
+        "git log -L1,10:.env",
+        "git log -L 1,10:.env",
+        "git log --pretty .env -p",
+        "git log --output=.env",
+        "git commit -F .env",
+        "git commit -S .env",
+        "git diff --cached .env",
+        "grep -A3 TODO .env",
+        "grep -rn TODO --exclude-from=.env src/",
+        "rg -t py TODO .env",
+        "rg --ignore-file .env TODO",
+        "tar -czf out.tgz .env",
+        "tar -T .env -cf out.tgz",
+        "rsync -a .env host:dst/",
+        "rsync --files-from=.env src dst",
+        "zip -r out.zip .env",
+        "jq --slurpfile x .env . cfg.json",
+        "diff .env .env.example",
+        # metadata-only gate の 4 形 (gate は生の token 列で判定し、gate を抜けた
+        # 後の operand scan がここで値を拾う)
+        "file -f .env",
+        "wc --files0-from=.env",
+        "tree --fromfile .env",
+        "git ls-files -s .env",
+    )
+
+    def test_non_path_option_values_allow_in_all_modes(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_path_option_values_deny_in_all_modes(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

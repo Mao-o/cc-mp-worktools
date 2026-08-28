@@ -147,6 +147,135 @@ class TestAwkSedScriptIsNotAPath(unittest.TestCase):
                 self.assertEqual(_cands(cmd), expected)
 
 
+class TestOptionValueIsNotAPath(unittest.TestCase):
+    """値が path ではない option (検索文字列 / 正規表現 / 数値 / 書式 / glob) の値を
+    候補から外す。値が path の option (patterns file / files-from / 出力先) の値と、
+    値省略可の option の分離形の次 token は候補に残す。"""
+
+    def test_git_log_like(self):
+        cases = {
+            "git log -S.env --oneline": [],
+            "git log -S .env": [],
+            "git log -G.env": [],
+            "git log --grep=.env": [],
+            "git log --grep .env": [],
+            # 分離形の値が ``-`` で始まる (0.21.x は ``-x.env`` の ``tok[2:]`` =
+            # 元の文字列に無い ``.env`` で一致していた)
+            "git log --grep -x.env": [],
+            "git log --author=.env": [],
+            "git log --committer .env": [],
+            "git log --format=.env": [],
+            "git log --pretty=.env": [],
+            "git log -n 5 --since=.env --until .env": [],
+            "git show -s --format=%H HEAD": ["HEAD"],
+            "git -C repo log -S.env": ["repo"],
+            "git shortlog -s --author .env": [],
+            "git diff -I .env HEAD": ["HEAD"],
+            "git diff --diff-filter A -- src/": ["src/"],
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_cands(cmd), expected)
+
+    def test_git_controls_keep_path_operands(self):
+        cases = {
+            "git log -p -- .env": [".env"],
+            "git log -p .env": [".env"],
+            # ``-L <range>:<file>`` は値に file を含む (行範囲の履歴 = 内容出力)
+            "git log -L1,10:.env": ["1,10:.env"],
+            "git log -L 1,10:.env": ["1,10:.env"],
+            # ``--pretty`` は値省略可 (``git log --pretty oneline`` は oneline を
+            # path 扱いする、git 2.50 実測)。分離形の次 token は path のまま
+            "git log --pretty .env -p": [".env"],
+            "git log --output=.env": [".env"],
+            "git log -O.env": [".env"],
+            "git diff --cached .env": [".env"],
+            "git show HEAD:.env": ["HEAD:.env"],
+            "git commit -m x .env": [".env"],
+            "git commit -F .env": [".env"],
+            # commit の ``-S[<keyid>]`` は値省略可 → 分離形は消費しない
+            "git commit -S .env": [".env"],
+            # log の ``-m`` は値を取らない (commit の ``-m`` と別物)
+            "git log -m .env -p": [".env"],
+            # spec の無いサブコマンドは 0.21.x の規則
+            "git format-patch -n .env": [".env"],
+            "git add .env": [".env"],
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_cands(cmd), expected)
+
+    def test_grep_family_values(self):
+        cases = {
+            "grep -rn TODO --exclude=.env": [],
+            "grep -rn TODO --exclude .env": [],
+            "grep -rn TODO --exclude-dir=.env": [],
+            "grep -rn TODO --include='*.env' src/": ["src/"],
+            # ``-A`` の値 (数値) を pattern 枠と誤認しない
+            "grep -A 3 .env README.md": ["README.md"],
+            "grep -m 1 -B 2 TODO README.md": ["README.md"],
+            "rg TODO -g '*.env'": [],
+            "rg -g '!.env' TODO": [],
+            "rg --max-depth 2 TODO src/": ["src/"],
+            "rg -A 2 .env src/": ["src/"],
+            "rg -t py .env src/": ["src/"],
+            "ag -G .env TODO src/": ["src/"],
+            "ag --ignore .env TODO": [],
+            "ack --type=perl TODO lib/": ["lib/"],
+            "ack -A 2 TODO lib/": ["lib/"],
+            # 対照
+            "grep -A3 TODO .env": [".env"],
+            "rg -t py TODO .env": [".env"],
+            "grep -rn TODO --exclude-from=.env src/": [".env", "src/"],
+            "rg --ignore-file .env TODO": [".env"],
+            # ag の ``-C [LINES]`` は値省略可 → 分離形の次 token は pattern 枠
+            "ag -C 3 TODO": ["TODO"],
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_cands(cmd), expected)
+
+    def test_archive_and_sync_values(self):
+        cases = {
+            "tar --exclude='.env' -czf out.tgz src": ["out.tgz", "src"],
+            "tar -czf out.tgz --exclude .env src": ["out.tgz", "src"],
+            "tar --strip-components=1 -xf a.tgz": ["a.tgz"],
+            "rsync -a --exclude='.env' src/ dst/": ["src/", "dst/"],
+            "rsync -av --exclude .env --exclude '*.log' src/ host:dst/": ["src/", "host:dst/"],
+            "zip -r out.zip src -x '.env'": ["out.zip", "src"],
+            "unzip -l out.zip -x .env": ["out.zip"],
+            # 対照
+            "tar -czf out.tgz .env": ["out.tgz", ".env"],
+            "tar -T .env -cf out.tgz": [".env", "out.tgz"],
+            "tar -X .env -cf out.tgz src": [".env", "out.tgz", "src"],
+            "tar czf out.tgz .env": ["czf", "out.tgz", ".env"],
+            "rsync -a .env host:dst/": [".env", "host:dst/"],
+            "rsync --files-from=.env src dst": [".env", "src", "dst"],
+            "zip -r out.zip .env": ["out.zip", ".env"],
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_cands(cmd), expected)
+
+    def test_jq_and_diff_values(self):
+        cases = {
+            "jq --arg k .env '.[$k]' cfg.json": ["cfg.json"],
+            "jq --argjson v '{\"a\":1}' . cfg.json": ["cfg.json"],
+            "jq --indent 2 . cfg.json": ["cfg.json"],
+            "diff --ignore-matching-lines=.env a b": ["a", "b"],
+            "diff -I .env a b": ["a", "b"],
+            "diff -x .env -r a b": ["a", "b"],
+            # 対照 (値が path の option / 値省略可の ``-U``)
+            "jq --slurpfile x .env . cfg.json": [".env", "cfg.json"],
+            "jq --rawfile x .env . cfg.json": [".env", "cfg.json"],
+            "diff -U 3 a b": ["3", "a", "b"],
+            "diff .env .env.example": [".env", ".env.example"],
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_cands(cmd), expected)
+
+
 class TestUnknownCommandsUnchanged(unittest.TestCase):
     """option 知識の無いコマンドは 0.21.x までの規則そのまま (後方互換)。"""
 

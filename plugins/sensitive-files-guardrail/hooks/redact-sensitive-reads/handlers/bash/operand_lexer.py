@@ -1,6 +1,6 @@
 """operand トークンの glob 判定 / dotenv glob 判定 / path 候補抽出
 (0.3.3 分解、0.8.0 で `_literalize` / `_glob_candidates` / `_is_absolute_or_relative_path_exec` 撤廃、
-0.22.0 で path 候補抽出にコマンド別の option 知識 (``_CmdSpec``) を導入)。
+0.22.0 で path 候補抽出にコマンド別の option 知識 (``command_specs._CmdSpec``) を導入)。
 
 このモジュールは副作用なし・plugin 状態非依存。``SFG_CASE_SENSITIVE`` 環境変数の
 参照のみ外部状態 (全テストで同じ解釈をしたいため、``is_sensitive`` 側の opt-out
@@ -42,12 +42,15 @@ scan で従来どおり deny)。
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 
+from handlers.bash.command_specs import (
+    _SPECS,
+    _VALUE_PATH,
+    _CmdSpec,
+    _split_kinds,
+)
 from handlers.bash.constants import _GIT_GLOBAL_VALUE_OPTS, _GLOB_CHARS
-from handlers.bash.grep_extract import _GREP_FIRST_TOKENS
-from handlers.bash.interpreters import _AWK_FIRST_TOKENS, _SED_FIRST_TOKENS
 from handlers.bash.redirects import _WRITE_REDIRECT_RE
 
 # dotenv ファミリーで「うっかり頻出」とする literal stem (0.8.0)。
@@ -96,118 +99,6 @@ def _glob_operand_is_dotenv_match(operand: str) -> bool:
         if fnmatchcase(stem, op):
             return True
     return False
-
-
-# -- コマンド別 option 知識 (0.22.0) ----------------------------------------
-
-# option の値の種別 (``_CmdSpec.values`` の値文字列の 1 文字 = 値 1 token)。
-_VALUE_NON_PATH = "n"   # pattern / 正規表現 / 数値 / 書式 / glob … → 候補から外す
-_VALUE_PATH = "p"       # patterns file / ignore file / archive … → 候補に残す
-
-
-@dataclass(frozen=True)
-class _CmdSpec:
-    """コマンド 1 つ分の option 知識。
-
-    values: option 名 → 値の種別列。1 文字が値 1 token に対応し ``n`` = path では
-        ない値 (候補から外す)、``p`` = path の値 (候補に残す)。短形 (``-e``) は束ね
-        (``-rne PAT``) と密着 (``-ePAT``)、長形 (``--regexp``) は分離と ``=`` 結合、
-        および GNU getopt_long の一意な prefix 省略 (``--reg=PAT``) を解釈する。
-        **ここに無い option は値を取らない扱い** (0.21.x までの規則)。
-    pattern_slot: 第 1 positional が pattern / filter / script であって path では
-        ないコマンド (grep 系 / jq / awk / sed) なら True。
-    pattern_opts: pattern を option 経由で与える option。token 列のどこかに 1 つ
-        でも現れたら positional は全て path (``grep -e PAT file`` /
-        ``grep -f FILE file`` / ``sed -e SCRIPT file``)。
-    """
-
-    values: dict[str, str] = field(default_factory=dict)
-    pattern_slot: bool = False
-    pattern_opts: frozenset[str] = frozenset()
-
-
-def _spec(values: dict[str, str] | None = None, *,
-          pattern_opts: tuple[str, ...] | None = None) -> _CmdSpec:
-    """``_CmdSpec`` の短い組み立て。
-
-    ``pattern_opts`` を渡す (空 tuple 可) と「第 1 positional は pattern」の
-    コマンド、None なら positional は全て path のコマンド。
-    """
-    return _CmdSpec(
-        values=dict(values or {}),
-        pattern_slot=pattern_opts is not None,
-        pattern_opts=frozenset(pattern_opts or ()),
-    )
-
-
-# grep / egrep / fgrep (GNU / BSD 共通の必須値 option のみ)。
-# ``-e`` / ``--regexp`` の値は pattern (non-path)、``-f`` / ``--file`` の値は
-# patterns file (path、``grep -f .env x.txt`` は .env の中身を pattern として読む
-# ので deny 維持)。どちらかがあれば positional は全て file。
-_GREP_SPEC = _spec(
-    {"-e": "n", "--regexp": "n", "-f": "p", "--file": "p"},
-    pattern_opts=("-e", "--regexp", "-f", "--file"),
-)
-# ripgrep: pattern 供給 option は grep と同じ。
-_RG_SPEC = _spec(
-    {"-e": "n", "--regexp": "n", "-f": "p", "--file": "p"},
-    pattern_opts=("-e", "--regexp", "-f", "--file"),
-)
-# ag (the silver searcher): pattern は positional のみ (``-e`` 無し、``-f`` は
-# ``--follow`` で値を取らない)。
-_AG_SPEC = _spec({}, pattern_opts=())
-# ack: ``--match PAT`` で pattern を与える。``-f`` は「PATTERN 無しでファイル名
-# だけ出す」flag (値なし) で、あれば positional は全て path。
-_ACK_SPEC = _spec({"--match": "n"}, pattern_opts=("--match", "-f"))
-# git grep: ``-e PAT`` / ``-f FILE`` は grep と同じ。
-_GIT_GREP_SPEC = _spec({"-e": "n", "-f": "p"}, pattern_opts=("-e", "-f"))
-# jq: 第 1 positional は filter。``-f`` / ``--from-file FILE`` なら filter は
-# ファイルから読み positional は全て入力 JSON (path)。
-_JQ_SPEC = _spec(
-    {"-f": "p", "--from-file": "p"},
-    pattern_opts=("-f", "--from-file"),
-)
-# awk 系: 第 1 positional は program。``-f`` / ``--file`` (gawk ``-E`` /
-# ``--exec``) なら program はファイルから読み positional は全て入力 file。
-# ``-F fs`` / ``-v var=val`` (gawk ``--field-separator`` / ``--assign``) は
-# 必須値の option (値は path ではない)。gawk ``-e`` / ``--source`` は program
-# text の供給。
-_AWK_SPEC = _spec(
-    {
-        "-f": "p", "--file": "p", "-E": "p", "--exec": "p",
-        "-e": "n", "--source": "n",
-        "-F": "n", "--field-separator": "n", "-v": "n", "--assign": "n",
-    },
-    pattern_opts=("-f", "--file", "-E", "--exec", "-e", "--source"),
-)
-# sed 系: 第 1 positional は script。``-e`` / ``--expression`` / ``-f`` /
-# ``--file`` があれば positional は全て入力 file。GNU / BSD で値の有無が異なる
-# ``-i`` / ``-l`` は **登録しない** (BSD の値なし ``-l`` を値ありと誤認すると
-# script を値として消費し、本当の file operand が script 枠に落ちて allow に
-# なる = 保護の穴)。GNU 専用の ``--line-length N`` は BSD に長形が無く誤認
-# しようがないので登録する。
-_SED_SPEC = _spec(
-    {
-        "-e": "n", "--expression": "n", "-f": "p", "--file": "p",
-        "--line-length": "n",
-    },
-    pattern_opts=("-e", "--expression", "-f", "--file"),
-)
-
-_SPECS: dict[str, _CmdSpec] = {}
-for _tok in _GREP_FIRST_TOKENS:
-    _SPECS[_tok] = _GREP_SPEC
-_SPECS["rg"] = _RG_SPEC
-_SPECS["ag"] = _AG_SPEC
-_SPECS["ack"] = _ACK_SPEC
-_SPECS["jq"] = _JQ_SPEC
-for _tok in _AWK_FIRST_TOKENS:
-    _SPECS[_tok] = _AWK_SPEC
-for _tok in _SED_FIRST_TOKENS:
-    _SPECS[_tok] = _SED_SPEC
-# git はサブコマンド単位で持つ (``git <sub>`` を key にする)。
-_SPECS["git grep"] = _GIT_GREP_SPEC
-del _tok
 
 
 # ``_lex_args`` が返す entry の種別。
@@ -306,12 +197,12 @@ def _lex_args(args: list[str], spec: _CmdSpec | None) -> list[tuple[str, str]]:
                     out.append((_K_UNKNOWN, rhs))
                 continue
             out.append((_K_OPT, full))
-            kinds = values[full]
+            attached_only, kinds = _split_kinds(values[full])
             if eq:
                 if rhs:
                     out.append((kinds[0], rhs))
                 pending = kinds[1:]
-            else:
+            elif not attached_only:
                 pending = kinds
             continue
         if tok.startswith("-") and len(tok) > 1:
@@ -322,7 +213,8 @@ def _lex_args(args: list[str], spec: _CmdSpec | None) -> list[tuple[str, str]]:
                 out.append((_K_OPT, name))
                 if rhs:
                     kinds = values.get(name)
-                    out.append((kinds[0] if kinds else _K_UNKNOWN, rhs))
+                    kind = _split_kinds(kinds)[1][0] if kinds else _K_UNKNOWN
+                    out.append((kind, rhs))
                 continue
             letters = tok[1:]
             for k, ch in enumerate(letters):
@@ -331,11 +223,12 @@ def _lex_args(args: list[str], spec: _CmdSpec | None) -> list[tuple[str, str]]:
                 kinds = values.get(key)
                 if kinds is None:
                     continue
+                attached_only, kinds = _split_kinds(kinds)
                 attached = letters[k + 1:]
                 if attached:
                     out.append((kinds[0], attached))
                     pending = kinds[1:]
-                else:
+                elif not attached_only:
                     pending = kinds
                 break
             else:
