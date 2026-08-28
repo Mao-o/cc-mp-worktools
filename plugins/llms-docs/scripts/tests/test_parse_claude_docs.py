@@ -471,6 +471,27 @@ class FileReadOnlyModeTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         mock_urlopen.assert_not_called()
         self.assertIn("Hooks", out)
+        # Codex R1 P1: the printed page_ref is only valid against *this*
+        # snapshot — a follow-up 'content' hint that dropped --file would
+        # resolve the same integer against the default cached corpus
+        # instead, silently returning a different page.
+        self.assertIn(f"--file {snapshot}", out)
+
+    def test_search_content_file_flag_hint_includes_file(self):
+        # search-content already had --file before this round of changes;
+        # found to have the identical gap while fixing the ones Codex
+        # flagged on the newly-added search/fetch-index --file support.
+        snapshot = Path(self.tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "# Hooks\nSource: https://example.com/hooks\n\nhook body text\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-content", "hook",
+            "--file", str(snapshot), "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"--file {snapshot}", out)
 
     def test_search_file_flag_with_source_both_dies_with_clear_message(self):
         code, out, err = _loader.run_cli(parse_claude_docs, [
@@ -537,7 +558,11 @@ class GoldenOutputTest(unittest.TestCase):
             "\n"
             "(2 sections)\n"
             "\n"
-            'Next: parse-claude-docs.py content 0 "<heading_path>"\n'
+            # --cache-dir here is non-default (this test's own tmp dir), so
+            # corpus_hint_args correctly echoes it — a follow-up 'content'
+            # command that dropped it would resolve doc_idx 0 against the
+            # default cache instead, silently returning a different page.
+            f'Next: parse-claude-docs.py content 0 "<heading_path>" --cache-dir {tmp}\n'
         )
         self.assertEqual(out, expected)
 

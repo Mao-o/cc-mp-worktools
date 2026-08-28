@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.22.1] - 2026-08-28
+
+### 新規追加した --file が follow-up hint から脱落し別ドキュメントを指す事故を修正 (0.22.0 の追いコミット)
+
+Codex R1指摘2件 (P1)。0.22.0 で claude-docs の `search` と ai-sdk の `fetch-index` に
+`--file` を新規追加したが、実行後に表示される `Next: ...` の follow-up ヒントが `--file` を
+含めておらず、そのヒントをそのまま実行すると **デフォルトのキャッシュ済みcorpusを再ロードし、
+同じ番号 (page_ref/doc_idx) が別ドキュメントを指してしまう** (`corpus_hint_args` はまさに
+この事故を防ぐために既に存在するヘルパーだが、新設した2箇所で呼び忘れていた)。
+
+- claude-docs `search` (Codex指摘) / ai-sdk `fetch-index` (Codex指摘) を修正
+- 修正のついでに同一パターンを全 `next_hint()` 呼び出しに対して監査した結果、
+  **既存の (今回新規追加ではない) `--file` 対応コマンドにも同じ配線漏れが計6箇所** 見つかった:
+  claude-docs の `search-content` / `sections`、ai-sdk の `sections` / `search-index` /
+  `search-content` / `search`。これらは今回のPRの新規機能ではなく以前からのバグだが、
+  同一ファイル内で同一パターンの指摘2件を直すのに隣の同型バグを放置するのは不自然なため
+  合わせて修正した
+
+回帰テスト4件追加 (`--file` 指定時に follow-up hint が `--file` を含むことを確認)。
+既存の golden output テスト1件 (`test_sections_full_output_is_pinned`) は非デフォルト
+`--cache-dir` を使っており、修正後は正しく `--cache-dir` がヒントに含まれるため期待値を更新。
+205 tests, all green。
+
 ## [0.22.0] - 2026-08-28
 
 ### 3 script間のフラグ名・placeholder不統一を解消 (ランキング順の統一は別途)

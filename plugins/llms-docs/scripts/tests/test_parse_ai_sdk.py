@@ -357,6 +357,26 @@ class FileReadOnlyModeTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         mock_urlopen.assert_not_called()
         self.assertIn("Doc", out)
+        # Codex R1 P1: the printed index is only valid against *this*
+        # snapshot — a follow-up 'sections' hint that dropped --file would
+        # resolve the same integer against the default cached corpus
+        # instead, silently returning a different document.
+        self.assertIn(f"--file {snapshot}", out)
+
+    def test_sections_file_flag_hint_includes_file(self):
+        # sections already had --file before this round of changes; found
+        # to have the identical gap while fixing the one Codex flagged on
+        # the newly-added fetch-index --file support.
+        snapshot = Path(self.tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "---\ntitle: Doc\n---\n\n# Doc\n\n## Section\nbody\n", encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "sections", "0",
+            "--file", str(snapshot), "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"--file {snapshot}", out)
 
 
 class GoldenOutputTest(unittest.TestCase):

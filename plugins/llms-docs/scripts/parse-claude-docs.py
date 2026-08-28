@@ -540,7 +540,8 @@ def cmd_sections(args):
     print()
     print(f"({len(sections)} sections)")
     print()
-    next_hint("content", str(idx), '"<heading_path>"', *_source_hint_args(args))
+    next_hint("content", str(idx), '"<heading_path>"',
+              *(_source_hint_args(args) + corpus_hint_args(args)))
 
 
 _DOC_LINK_RE = re.compile(r'\((https?://[^\s)]+|/[^\s)]+)\)')
@@ -792,7 +793,8 @@ def cmd_search_content(args):
     else:
         print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *_source_hint_args(args))
+    next_hint("content", "<page_ref>", '"<heading_path>"',
+              *(_source_hint_args(args) + corpus_hint_args(args)))
 
 
 def _search_one_source(args, source_key: str) -> list[dict]:
@@ -989,7 +991,7 @@ def cmd_search(args):
                   "--source", "<code|platform>")
     else:
         next_hint("content", "<page_ref>", '"<heading_path>"',
-                  *_source_hint_args(args))
+                  *(_source_hint_args(args) + corpus_hint_args(args)))
 
 
 # ---------------------------------------------------------------------------
