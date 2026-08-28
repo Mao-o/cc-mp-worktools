@@ -2,6 +2,21 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.3] - 2026-08-28
+
+### sidecarのetag/last_modifiedが非string値だとTypeErrorで生tracebackになるバグを修正 (0.21.2 の追いコミット)
+
+Codex R3指摘1件 (P2)。
+
+- **手編集・破損・将来のフォーマット変更などで sidecar の `etag`/`last_modified` が truthyな非string値
+  (list/dict等) になっていた場合、content_hashが一致してさえいれば、その値がそのままリクエスト
+  ヘッダーに渡っていた**: `int` は `http.client.putheader` が黙って `str()` 変換するため実害はないが、
+  list/dict等は `putheader` 内部の `bytes.join()` が `TypeError` を投げ、documented なstale-cache
+  フォールバックを迂回して生tracebackになることを実機確認。`_load_fetch_meta` に型チェックを追加し、
+  `etag`/`last_modified` が存在するのにstringでない場合はsidecar全体を `{}` (無効) 扱いにするよう修正
+
+回帰テスト1件追加 (`test_fetch_and_cache.py`、186 tests, all green)。
+
 ## [0.21.2] - 2026-08-28
 
 ### 304応答後のmtime更新失敗が生tracebackになるバグを修正 (0.21.1 の追いコミット)

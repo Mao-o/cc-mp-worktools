@@ -442,19 +442,28 @@ def _meta_path(cache_path: str) -> str:
 def _load_fetch_meta(cache_path: str) -> dict:
     """Return the persisted ETag/Last-Modified sidecar for *cache_path*.
 
-    Returns ``{}`` when there is no sidecar, it's unreadable/corrupt, or it
-    parses to valid JSON that isn't a ``dict`` (e.g. a list or bare string
-    — nothing guarantees the file wasn't hand-edited or written by some
-    future version with a different shape) — in every case the caller just
-    ends up sending no conditional headers, falling back to the plain
-    unconditional GET this always did before conditional support existed.
+    Returns ``{}`` when there is no sidecar, it's unreadable/corrupt, it
+    parses to valid JSON that isn't a ``dict`` (e.g. a list or bare string),
+    or its ``etag``/``last_modified`` values aren't strings — nothing
+    guarantees the file wasn't hand-edited or written by some future
+    version with a different shape, and a non-string validator would
+    otherwise reach ``fetch_url``'s request headers, where ``urllib``
+    raises an uncaught ``TypeError`` instead of falling back cleanly. In
+    every rejected case the caller just ends up sending no conditional
+    headers, falling back to the plain unconditional GET this always did
+    before conditional support existed.
     """
     try:
         with open(_meta_path(cache_path), "r", encoding="utf-8") as f:
             meta = json.load(f)
     except (OSError, ValueError):
         return {}
-    return meta if isinstance(meta, dict) else {}
+    if not isinstance(meta, dict):
+        return {}
+    for key in ("etag", "last_modified"):
+        if key in meta and not isinstance(meta[key], str):
+            return {}
+    return meta
 
 
 def _content_hash(data: bytes) -> str:

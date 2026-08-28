@@ -484,6 +484,42 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         self.assertEqual(result, cache_path)
         self.assertIsNone(captured["if_none_match"])
 
+    def test_non_string_validator_in_sidecar_is_treated_like_a_missing_one(self):
+        # A hand edit, corruption, or a future format change could leave a
+        # truthy non-string etag/last_modified in an otherwise-valid sidecar
+        # (matching content_hash included). Inserted as-is into the request
+        # headers, urllib raises an uncaught TypeError while sending the
+        # request (verified empirically: http.client.putheader() special-
+        # cases int — silently str()-coerced, no crash — but a list/dict
+        # value fails bytes.join() inside putheader with exactly this
+        # TypeError, which is what a JSON array value round-trips to).
+        # Reject the whole sidecar instead, same as a structurally invalid
+        # one.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "content_hash": _common._content_hash(b"stale content"),
+                "etag": ["not-a-string"],
+            }, f)
+
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            return _FakeResponse(b"fresh content")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        self.assertIsNone(captured["if_none_match"])
+
     def test_stale_past_max_age_sends_conditional_headers_from_sidecar(self):
         cache_path = self._cache_path()
         with open(cache_path, "w") as f:
