@@ -10,8 +10,7 @@ import re
 from pathlib import Path
 from typing import IO
 
-from .pem import PEM_BEGIN_MARKER as _PEM_BEGIN_RE
-from .pem import PEM_END_MARKER as _PEM_END_RE
+from .pem import closes_pem_block, opens_pem_block
 from .sanitize import sanitize_key
 
 _KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][\w.\-]*)\s*[:=]")
@@ -40,11 +39,11 @@ def scan_keys(text: str) -> list[str]:
     in_pem_block = False
     for line in text.splitlines():
         if in_pem_block:
-            if _PEM_END_RE.search(line):
+            if closes_pem_block(line):
                 in_pem_block = False
             continue
-        if _PEM_BEGIN_RE.search(line):
-            in_pem_block = not _PEM_END_RE.search(line)
+        if opens_pem_block(line):
+            in_pem_block = not closes_pem_block(line)
         m = _KEY_RE.match(line)
         if not m:
             continue
@@ -100,11 +99,11 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
         except Exception:
             return False
         if in_pem_block[0]:
-            if _PEM_END_RE.search(line):
+            if closes_pem_block(line):
                 in_pem_block[0] = False
             return False
-        if _PEM_BEGIN_RE.search(line):
-            in_pem_block[0] = not _PEM_END_RE.search(line)
+        if opens_pem_block(line):
+            in_pem_block[0] = not closes_pem_block(line)
         m = _KEY_RE.match(line)
         if not m:
             return False

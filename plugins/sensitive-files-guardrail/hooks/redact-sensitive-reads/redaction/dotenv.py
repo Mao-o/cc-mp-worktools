@@ -22,8 +22,7 @@ from __future__ import annotations
 import re
 
 from .placeholders import looks_placeholder
-from .pem import PEM_BEGIN_MARKER as _PEM_BEGIN_RE
-from .pem import PEM_END_MARKER as _PEM_END_RE
+from .pem import closes_pem_block, opens_pem_block
 from .sanitize import sanitize_key
 
 # KEY=VALUE / export KEY=VALUE の行をざっくり捕捉
@@ -238,7 +237,7 @@ def redact_dotenv(text: str) -> dict:
             continue
 
         if in_pem_block:
-            if _PEM_END_RE.search(stripped):
+            if closes_pem_block(stripped):
                 in_pem_block = False
             continue
 
@@ -247,7 +246,7 @@ def redact_dotenv(text: str) -> dict:
             # ``-----BEGIN ...-----`` だけの行 (値が次行から始まる形) もここに来る。
             # KEY= 形と同じくコメント除去後で判定する (末尾コメントに marker を
             # 書いただけの行で block を開かないため)。
-            if _PEM_BEGIN_RE.search(_preprocess_value(stripped)):
+            if opens_pem_block(stripped):
                 in_pem_block = True
             continue
         raw_key, raw_val = m.group(1), m.group(2)
@@ -258,8 +257,8 @@ def redact_dotenv(text: str) -> dict:
         # ``A=one # -----BEGIN PRIVATE KEY-----`` のようにインラインコメントへ
         # 例示として書いただけの marker で block が開き、END が現れるまで
         # 以降のキーが丸ごと報告から消える。
-        if _PEM_BEGIN_RE.search(v):
-            in_pem_block = not _PEM_END_RE.search(v)
+        if opens_pem_block(v):
+            in_pem_block = not closes_pem_block(v)
         type_class, prefix = _detect_type_and_prefix(v)
         is_ph, ph_label = looks_placeholder(v)
         tags, length = _classify_status(

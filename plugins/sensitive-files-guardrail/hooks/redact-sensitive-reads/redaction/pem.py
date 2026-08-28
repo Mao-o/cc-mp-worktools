@@ -49,6 +49,36 @@ _MAX_BLOCKS = 50
 PEM_BEGIN_MARKER = re.compile(r"-{5}BEGIN [A-Z0-9 ._-]*-{5}")
 PEM_END_MARKER = re.compile(r"-{5}END [A-Z0-9 ._-]*-{5}")
 
+# インラインコメント (`` #`` 以降) を落とすための regex。dotenv の
+# ``_preprocess_value`` と同じ形。
+_INLINE_COMMENT_RE = re.compile(r"\s+#")
+
+
+def _without_inline_comment(text: str) -> str:
+    """行末コメントを落とす。marker 判定を**コメント除去後**に行うため。
+
+    ``A=one # -----BEGIN PRIVATE KEY-----`` のように例示として書いただけの
+    marker で block が開くと、END が現れるまで以降のキーが丸ごと報告から消える。
+    """
+    if not isinstance(text, str):
+        return ""
+    m = _INLINE_COMMENT_RE.search(text)
+    return text[: m.start()] if m else text
+
+
+def opens_pem_block(text: str) -> bool:
+    """この行で armored block が開くか (コメント除去後で判定)。
+
+    ``closes_pem_block`` と対で使う。**dotenv / keyonly_scan の両方がこの 2 つを
+    呼ぶ**こと — 片方だけがコメント除去を実装すると挙動が割れる (実際に割れた)。
+    """
+    return PEM_BEGIN_MARKER.search(_without_inline_comment(text)) is not None
+
+
+def closes_pem_block(text: str) -> bool:
+    """この行で armored block が閉じるか (コメント除去後で判定)。"""
+    return PEM_END_MARKER.search(_without_inline_comment(text)) is not None
+
 
 def looks_pem(text: str) -> bool:
     """テキストが armored 鍵 / 証明書ファイルらしいか判定する。

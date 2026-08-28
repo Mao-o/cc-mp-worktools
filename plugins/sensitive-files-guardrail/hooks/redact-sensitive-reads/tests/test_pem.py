@@ -176,6 +176,44 @@ class TestDotenvPemBlockTracking(unittest.TestCase):
         for key in ("APP_NAME", "A", "AFTER1", "AFTER2"):
             self.assertIn(key, reason)
 
+    def test_streaming_path_also_ignores_comment_markers(self):
+        """32KB 超の .env (streaming 経路) でも同じ扱いになること (Codex R7 P2)。
+
+        inline 側だけコメント除去を実装すると、``redact_large_file`` 経由の
+        大きい .env で以降のキーが消える。marker 判定は
+        ``pem.opens_pem_block`` / ``closes_pem_block`` に集約してある。
+        """
+        # 32KB 超にしつつ、キー数は format_keyonly の preview_cap (60) 未満に
+        # 収める (長い値で嵩を稼ぐ)。cap を超えると後半のキーが表示から
+        # 落ちるだけで、抽出自体の成否と区別できなくなるため。
+        pad = "".join(f"PAD{i}=" + "x" * 2000 + "\n" for i in range(20))
+        text = (
+            pad
+            + "A=one # -----BEGIN PRIVATE KEY-----\n"
+            + "AFTER1=x\nAFTER2=y\n"
+        )
+        data = text.encode()
+        self.assertGreater(len(data), 32 * 1024)
+        reason = redact_large_file(BytesIO(data), ".env")
+        self.assertIn("AFTER1", reason)
+        self.assertIn("AFTER2", reason)
+
+    def test_streaming_path_still_skips_real_pem_body(self):
+        """コメント除去を入れても実 PEM 本文は従来どおり捨てること。"""
+        pad = "".join(f"PAD{i}=" + "x" * 2000 + "\n" for i in range(20))
+        text = (
+            pad
+            + "PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n"
+            + "AbCd12=\n"
+            + "-----END RSA PRIVATE KEY-----\n"
+            + "AFTER=tail\n"
+        )
+        data = text.encode()
+        self.assertGreater(len(data), 32 * 1024)
+        reason = redact_large_file(BytesIO(data), ".env")
+        self.assertNotIn("AbCd12", reason)
+        self.assertIn("AFTER", reason)
+
     def test_quoted_marker_value_still_opens_block(self):
         """クォート付きの実 PEM 値では従来どおり block を開くこと。"""
         text = (

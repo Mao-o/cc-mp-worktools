@@ -12,6 +12,7 @@ class TestStopReasonDisclosure(unittest.TestCase):
         self.assertIn("basename 単位", text)
         self.assertIn("保護そのものが外れます", text)
         self.assertIn("同じ名前のディレクトリ", text)
+        self.assertIn("別の include 行", text)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **919** / check 79 → **80** (計 999)
+- テスト件数: redact 862 → **921** / check 79 → **80** (計 1,001)
 
 ### 1. 不具合の内容
 
@@ -95,7 +95,10 @@ Stop / Read / Bash が案内する恒久除外レシピは **basename 単位**�
 `_shared.patterns.EXCLUDE_SCOPE_WARNING` を新設し、両 hook の案内文に挟む形で
 この 2 点を明示する。あわせて、`is_sensitive` が親ディレクトリ名も評価するため
 **同名ディレクトリの配下も保護から外れる**ことも明記した
-(`!certs` はディレクトリ `certs/` の中身にも及ぶ)。**範囲は狭まらない** (黙った過剰付与を informed consent に
+(`!certs` はディレクトリ `certs/` の中身にも及ぶ)。ただし `is_sensitive` は
+basename を先に評価するため、配下のファイルが別の include 行に単独で一致
+する場合 (`certs/.env` 等) はそちらが優先され保護が残る。開示文が過大主張に
+ならないようこの限定も併記している。**範囲は狭まらない** (黙った過剰付与を informed consent に
 変えるだけ)。範囲を狭める作業 (matcher に相対パス階層を追加) は判定境界の変更に
 あたるため別途対応する。
 
@@ -218,6 +221,12 @@ deny 検出は従来どおり続く (0.11.0 の segment 単位再評価を維持
 `A=one # -----BEGIN PRIVATE KEY-----` のようにインラインコメントへ例示として
 書いただけの marker で block が開き、END が現れるまで以降のキーが丸ごと
 報告から消える。
+
+判定は `pem.opens_pem_block` / `closes_pem_block` の 2 関数に集約し、
+dotenv (inline) と keyonly_scan (32KB 超の streaming) の**両方がこれを呼ぶ**。
+当初は inline 側だけにコメント除去を実装したため、`redact_large_file` 経由の
+大きい `.env` で同じ不具合が残っていた — 片側だけ直すと挙動が割れる箇所なので
+共通関数にした。
 
 (a) で `redact_dotenv` に入れたブロック追跡を `keyonly_scan` の
 `scan_keys` / `scan_stream` にも展開し、**ヒューリスティックは削除**した。

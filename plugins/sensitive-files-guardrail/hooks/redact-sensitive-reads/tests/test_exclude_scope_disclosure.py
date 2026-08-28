@@ -27,6 +27,8 @@ class TestExcludeScopeWarningText(unittest.TestCase):
         text = EXCLUDE_SCOPE_WARNING.format(scope="X")
         self.assertIn("同じ名前のディレクトリ", text)
         self.assertIn("配下", text)
+        # 過大主張しないこと: basename が独立一致すれば保護は残る
+        self.assertIn("別の include 行", text)
 
     def test_states_protection_not_just_reporting(self):
         text = EXCLUDE_SCOPE_WARNING.format(scope="X")
