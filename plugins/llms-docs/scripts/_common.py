@@ -1318,11 +1318,6 @@ def add_max_age_arg(parser) -> None:
     )
 
 
-def add_doc_index_arg(parser, *, help: str = "Document index (from fetch-index)") -> None:
-    """Add positional ``doc_index`` (int) to *parser*."""
-    parser.add_argument("doc_index", type=int, help=help)
-
-
 def add_heading_path_arg(parser, *, help: str = "Heading path (omit for full document)") -> None:
     """Add optional positional ``heading_path`` to *parser*."""
     parser.add_argument("heading_path", nargs="?", default=None, help=help)
@@ -1349,6 +1344,20 @@ def add_max_chars_arg(parser) -> None:
         "--max-chars", type=int, default=DEFAULT_MAX_CONTENT_CHARS,
         help=f"Truncate the content body to N chars (default: "
              f"{DEFAULT_MAX_CONTENT_CHARS}, 0 = no limit)",
+    )
+
+
+DEFAULT_MAX_SNIPPET_CHARS = 500
+
+
+def add_max_snippet_chars_arg(parser) -> None:
+    """Add ``--max-snippet-chars`` to *parser* (any ``search``/``search-content``
+    subcommand that renders per-hit snippets via ``search_content_in_body``).
+    """
+    parser.add_argument(
+        "--max-snippet-chars", type=int, default=DEFAULT_MAX_SNIPPET_CHARS,
+        help=f"Truncate each snippet to N chars (0 = no limit, default: "
+             f"{DEFAULT_MAX_SNIPPET_CHARS})",
     )
 
 

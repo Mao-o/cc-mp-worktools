@@ -154,7 +154,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 |---------|------|------|
 | `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits |
 | `search-index` | `<query> [--limit N]` | title/description でキーワード検索（候補だけ取得） |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
+| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
 | `fetch-index` | `[--offset N] [--limit N]` | page index を paginated 表示（default --limit 100、フォールバック用） |
 | `sections` | `<page_ref>` | 指定ページの見出し一覧を表示 (該当ページを auto-fetch) |
 | `content` | `<page_ref> [heading_path] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示 (該当ページを auto-fetch)。前後にサブセクション一覧、既定 24000 文字で切り詰め |

@@ -2,6 +2,64 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.22.1] - 2026-08-28
+
+### 新規追加した --file が follow-up hint から脱落し別ドキュメントを指す事故を修正 (0.22.0 の追いコミット)
+
+Codex R1指摘2件 (P1)。0.22.0 で claude-docs の `search` と ai-sdk の `fetch-index` に
+`--file` を新規追加したが、実行後に表示される `Next: ...` の follow-up ヒントが `--file` を
+含めておらず、そのヒントをそのまま実行すると **デフォルトのキャッシュ済みcorpusを再ロードし、
+同じ番号 (page_ref/doc_idx) が別ドキュメントを指してしまう** (`corpus_hint_args` はまさに
+この事故を防ぐために既に存在するヘルパーだが、新設した2箇所で呼び忘れていた)。
+
+- claude-docs `search` (Codex指摘) / ai-sdk `fetch-index` (Codex指摘) を修正
+- 修正のついでに同一パターンを全 `next_hint()` 呼び出しに対して監査した結果、
+  **既存の (今回新規追加ではない) `--file` 対応コマンドにも同じ配線漏れが計6箇所** 見つかった:
+  claude-docs の `search-content` / `sections`、ai-sdk の `sections` / `search-index` /
+  `search-content` / `search`。これらは今回のPRの新規機能ではなく以前からのバグだが、
+  同一ファイル内で同一パターンの指摘2件を直すのに隣の同型バグを放置するのは不自然なため
+  合わせて修正した
+
+回帰テスト4件追加 (`--file` 指定時に follow-up hint が `--file` を含むことを確認)。
+既存の golden output テスト1件 (`test_sections_full_output_is_pinned`) は非デフォルト
+`--cache-dir` を使っており、修正後は正しく `--cache-dir` がヒントに含まれるため期待値を更新。
+205 tests, all green。
+
+## [0.22.0] - 2026-08-28
+
+### 3 script間のフラグ名・placeholder不統一を解消 (ランキング順の統一は別途)
+
+2026-08 精査で指摘された「3 scriptで引数・placeholderが統一されていない」不整合を、
+挙動を変えない範囲 (追加的な変更のみ) で解消。ランキング順の統一 (index_score優先 vs
+body-hits優先 + changelog除外の扱い) はユーザー可視の出力順が変わる別種の変更のため、
+今回は対象外とし別PRで扱う。
+
+- **`--top-n` に統一**: claude-docs の `search` だけ `--index-limit` という別名だった。
+  `--top-n` を正式名にし、`--index-limit` は非表示 (`--help` に出ない) だが引き続き動作する
+  hidden alias として残した (既存の呼び出しを壊さないため)。`skills/researching-claude-docs/SKILL.md`
+  の記載も追従
+- **`--max-snippet-chars` を `_common.add_max_snippet_chars_arg` に集約**: ai-sdk・firebase の
+  `search-content` にこのフラグが存在せず、スニペットが無制限に出力されていた
+  (`search` にはあった)。共通ヘルパーを新設し、claude-docs/ai-sdk/firebase の `search` /
+  `search-content` 計6箇所全てで使うよう統一。ai-sdk・firebase の `cmd_search_content` は
+  `search_content_in_body` 呼び出しに `max_snippet_chars` を渡していなかった配線漏れも解消
+- **`--file` を欠けていた箇所に追加**: ai-sdk の `fetch-index` (`_load_docs` は元々 `file_arg`
+  を汎用サポートしていたが、`fetch-index` だけ `None` 固定で呼んでいた) と claude-docs の
+  `search` (Phase 2 の llms-full.txt 読み込みを `_load_full_txt` 経由に変更し `--file` を反映)。
+  claude-docs の `search` は `--source both` と `--file` の組み合わせ (どのファイルが「両方」に
+  対応するか一意に決まらない) を明示的にエラーにする
+- **placeholder を `<page_ref>` に統一 — チケット原案の `<doc_idx>` から変更**: 実装を確認した
+  結果、`page_ref` は3 script共通で「整数 index / URL slug / 完全URL」を受け付ける実際の
+  argparse引数名であり、`<doc_idx>` (search結果の `[N]` に表示される値を指す語) をヒント文言に
+  使うと非整数の入力形態を誤って排除して見える。ai-sdk・firebaseの `next_hint()` は元々
+  `<page_ref>` で統一済みだったため、claude-docs側の4箇所 (`<doc_index>` という3つ目の綴り) を
+  それに合わせた。`<doc_idx>` は「search結果の `[N]` の値」を指す語として文書内では引き続き使う
+- 不要になっていた未使用ヘルパー `_common.add_doc_index_arg` (呼び出し箇所0件) を削除
+
+回帰テスト11件追加 (claude-docs: `--top-n`/`--index-limit` alias 4件 + `--file` 2件、
+ai-sdk: `fetch-index --file` 1件 + `--max-snippet-chars` 2件、firebase:
+`--max-snippet-chars` 2件)。203 tests, all green。`claude plugin validate` warning 0。
+
 ## [0.21.7] - 2026-08-28
 
 ### リダイレクト経由の304誤信頼を構造的に根絶: conditionalヘッダーをredirect時に剥がす (0.21.6 の追いコミット)
