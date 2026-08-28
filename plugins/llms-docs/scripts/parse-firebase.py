@@ -22,6 +22,7 @@ Page references (``<page_ref>``) accept three forms:
 """
 
 import argparse
+import concurrent.futures
 import hashlib
 import os
 import re
@@ -30,6 +31,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from _common import (
+    FetchError,
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
@@ -52,6 +54,9 @@ from _common import (
     search_index_entries,
     truncate_content,
 )
+
+PAGE_FETCH_TIMEOUT = 30
+PAGE_FETCH_MAX_WORKERS = 8
 
 LLMS_TXT_URL = "https://firebase.google.com/docs/llms.txt"
 INDEX_CACHE_NAME = "firebase-llms.txt"
@@ -117,11 +122,56 @@ def _load_index(cache_dir: str, *, max_age: int | None = None) -> list[dict]:
     return entries
 
 
-def _fetch_page(url: str, cache_dir: str, *, max_age: int | None = None) -> str:
+def _fetch_page(url: str, cache_dir: str, *, max_age: int | None = None,
+                 timeout: int = 120, raise_on_error: bool = False) -> str:
     """Fetch an individual page ``.md.txt`` on demand and return its cache path."""
     filename = _url_to_cache_filename(url)
     page_path = os.path.join(_pages_cache_dir(cache_dir), filename)
-    return fetch_url(url, page_path, user_agent=USER_AGENT, max_age=max_age)
+    return fetch_url(url, page_path, user_agent=USER_AGENT, max_age=max_age,
+                      timeout=timeout, raise_on_error=raise_on_error)
+
+
+def _fetch_pages_concurrently(indexed_urls, cache_dir: str, *, max_age: int | None = None):
+    """Fetch multiple pages in parallel, skipping (not raising on) failures.
+
+    *indexed_urls* is an iterable of ``(idx, url)`` pairs. Returns
+    ``(page_paths, skipped)`` where ``page_paths`` maps ``idx -> cache path``
+    for pages that fetched successfully, and ``skipped`` is a list of
+    ``(idx, url, error)`` for pages that failed with no cache to fall back
+    to. Order of the two return values does not depend on fetch completion
+    order — callers should iterate their own ``idx`` sequence for
+    deterministic output.
+
+    Uses a thread pool (not a process pool): each fetch is I/O-bound
+    (``urllib`` blocks on the network), so threads avoid the pickling/IPC
+    overhead of processes while still overlapping the wait time across
+    pages. A dead link no longer costs the full request timeout serially
+    for every candidate behind it in the list — see ``FetchError``/
+    ``raise_on_error`` in ``_common.fetch_url``.
+    """
+    page_paths: dict[int, str] = {}
+    skipped: list[tuple[int, str, Exception]] = []
+
+    def _fetch_one(idx: int, url: str):
+        try:
+            path = _fetch_page(
+                url, cache_dir, max_age=max_age,
+                timeout=PAGE_FETCH_TIMEOUT, raise_on_error=True,
+            )
+        except FetchError as e:
+            return idx, url, None, e.cause
+        return idx, url, path, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PAGE_FETCH_MAX_WORKERS) as pool:
+        futures = [pool.submit(_fetch_one, idx, url) for idx, url in indexed_urls]
+        for future in concurrent.futures.as_completed(futures):
+            idx, url, path, error = future.result()
+            if error is not None:
+                skipped.append((idx, url, error))
+            else:
+                page_paths[idx] = path
+
+    return page_paths, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -356,14 +406,22 @@ def cmd_search_content(args):
     print("=" * 60)
     print()
 
+    page_paths, skipped = _fetch_pages_concurrently(
+        ((idx, entries[idx]["url"]) for idx in target_indexes),
+        args.cache_dir, max_age=args.max_age,
+    )
+    for _idx, url, error in skipped:
+        print(f"(skip: fetch failed {url}: {error})", file=sys.stderr)
+
     total_hits = 0
     docs_matched = 0
     printed_docs = 0
 
     for idx in target_indexes:
+        if idx not in page_paths:
+            continue
         entry = entries[idx]
-        page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
-        lines = load_lines(page_path)
+        lines = load_lines(page_paths[idx])
 
         hits = search_content_in_body(
             lines, args.query,
@@ -401,6 +459,8 @@ def cmd_search_content(args):
         print("Tip: use 'search-index' first, then pass the top doc_index to --page-ref")
     else:
         print(f"({total_hits} hits across {docs_matched}/{len(target_indexes)} pages, showing top {printed_docs})")
+    if skipped:
+        print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
     next_hint("content", "<page_ref>", '"<heading_path>"')
 
@@ -438,10 +498,18 @@ def cmd_search(args):
               "search page bodies directly")
         return
 
+    page_paths, skipped = _fetch_pages_concurrently(
+        ((idx, entry["url"]) for _score, idx, entry in scored_entries),
+        args.cache_dir, max_age=args.max_age,
+    )
+    for _idx, url, error in skipped:
+        print(f"(skip: fetch failed {url}: {error})", file=sys.stderr)
+
     results = []
     for score, idx, entry in scored_entries:
-        page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
-        lines = load_lines(page_path)
+        if idx not in page_paths:
+            continue
+        lines = load_lines(page_paths[idx])
         body_hits = search_content_in_body(
             lines, args.query,
             context_lines=args.context,
@@ -482,6 +550,8 @@ def cmd_search(args):
         print()
 
     print(f"({len(results)} pages, ranked via index → body fetch)")
+    if skipped:
+        print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
     next_hint("content", "<page_ref>", '"<heading_path>"')
 

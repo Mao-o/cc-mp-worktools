@@ -237,6 +237,37 @@ class FetchUrlTest(unittest.TestCase):
                 )
         self.assertEqual(cm.exception.code, 1)
 
+    def test_no_cache_and_raise_on_error_true_raises_instead_of_exiting(self):
+        # A caller fetching many independent pages in a loop (Firebase's
+        # search/search-content) needs to catch one page's failure and
+        # keep going, rather than the whole process dying via sys.exit.
+        cache_path = self._cache_path()
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            with self.assertRaises(_common.FetchError) as cm:
+                _common.fetch_url(
+                    "https://example.com/x", cache_path, user_agent="ua",
+                    raise_on_error=True,
+                )
+        self.assertEqual(cm.exception.url, "https://example.com/x")
+        self.assertIsInstance(cm.exception.cause, OSError)
+        self.assertFalse(os.path.exists(cache_path))
+
+    def test_stale_cache_still_served_with_raise_on_error_true(self):
+        # raise_on_error only changes the *no cache at all* branch — the
+        # stale-serve fallback is a success path (returns a cache path),
+        # not a failure, and must stay that way regardless of the flag.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800, raise_on_error=True,
+            )
+        self.assertEqual(result, cache_path)
+
     def test_stale_cache_served_on_fetch_failure(self):
         cache_path = self._cache_path()
         with open(cache_path, "w") as f:

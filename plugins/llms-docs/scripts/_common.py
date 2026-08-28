@@ -416,9 +416,24 @@ def _atomic_write(path: str, data: bytes) -> None:
         raise
 
 
+class FetchError(Exception):
+    """Raised by ``fetch_url(..., raise_on_error=True)`` instead of exiting.
+
+    Lets a caller that fetches many independent pages in a loop (Firebase's
+    ``search``/``search-content``, which have no single upstream index to
+    fail on) catch a single page's failure and skip it, rather than the
+    whole process dying on the first dead link in a ~7000-entry index.
+    """
+
+    def __init__(self, url: str, cause: Exception):
+        super().__init__(f"{url}: {cause}")
+        self.url = url
+        self.cause = cause
+
+
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
-              max_age: int | None = None) -> str:
+              max_age: int | None = None, raise_on_error: bool = False) -> str:
     """Return path to cached file, fetching from *url* if it doesn't exist yet.
 
     When *max_age* is given (seconds), re-fetches if the existing cache is
@@ -430,8 +445,13 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
         print a WARNING to stderr and return that stale copy rather than
         failing outright — a transient network blip shouldn't break an
         otherwise-usable session when a slightly-old copy is on disk.
-      * Otherwise (no cache at all), print an ``Error: ...`` and exit 1
-        (mirrors the pre-refactor per-script helpers).
+      * Otherwise (no cache at all) and *raise_on_error* is false (the
+        default), print an ``Error: ...`` and exit 1 (mirrors the
+        pre-refactor per-script helpers) — appropriate for a single
+        upstream index/page that the whole command depends on.
+      * Otherwise (no cache, *raise_on_error* true), raise ``FetchError``
+        instead of exiting — for a caller fetching many independent pages
+        in a loop (one dead link shouldn't kill the other N-1 fetches).
 
     Catches ``(urllib.error.URLError, OSError, http.client.HTTPException)``
     — not just ``URLError`` — so a read timeout (``TimeoutError``, an
@@ -486,6 +506,8 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 file=sys.stderr,
             )
             return cache_path
+        if raise_on_error:
+            raise FetchError(url, e) from e
         print(f"Error: Failed to fetch {url}: {e}", file=sys.stderr)
         sys.exit(1)
 

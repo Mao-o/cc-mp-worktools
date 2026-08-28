@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 
@@ -80,6 +81,60 @@ class FirebaseCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("No matching pages found", out)
         self.assertIn("search-content", out)
+
+
+class SearchSkipsUnreachablePagesTest(unittest.TestCase):
+    """One index entry has no cached page and its fetch fails (mocked
+    urlopen); the other entry is cache-hit. search / search-content must
+    skip the unreachable page (stderr note + stdout skip count) and still
+    report the reachable page's hits, instead of the whole command
+    exiting via the old sys.exit(1)-on-first-failure behaviour."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "firebase-llms.txt").write_text(
+            "- [Firestore Query Limits](https://firebase.google.com/docs/firestore/query-limit.md.txt): Reference docs on query limits\n"
+            "- [Dead Page](https://firebase.google.com/docs/dead/page.md.txt): Reference docs that always fail to fetch\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(self.tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/firestore/query-limit.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Firestore Query Limits\n\n## Limits\nMax 100 zzzonlyinbody results per query.\n",
+            encoding="utf-8",
+        )
+        # "Dead Page" has no cache file — fetching it will call the
+        # (mocked) urlopen and fail, with no stale copy to fall back to.
+
+    def test_search_content_skips_dead_page_and_still_reports_live_hits(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("404")):
+            code, out, err = _loader.run_cli(parse_firebase, [
+                "parse-firebase.py", "search-content", "zzzonlyinbody",
+                "--cache-dir", self.tmp,
+            ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("zzzonlyinbody", out)
+        self.assertIn("1 pages skipped", out)
+        self.assertIn("skip: fetch failed", err)
+        self.assertIn("dead/page.md.txt", err)
+
+    def test_search_skips_dead_page_and_still_reports_live_hits(self):
+        # Query matches both entries' description ("Reference docs...") so
+        # both are ranked as index candidates and both get fetch-attempted
+        # — this exercises the fetch/skip path, not just index ranking.
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("404")):
+            code, out, err = _loader.run_cli(parse_firebase, [
+                "parse-firebase.py", "search", "reference",
+                "--cache-dir", self.tmp,
+            ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Firestore Query Limits", out)
+        self.assertNotIn("Dead Page", out)
+        self.assertIn("1 pages skipped", out)
+        self.assertIn("skip: fetch failed", err)
 
 
 class AssertParsedIntegrationTest(unittest.TestCase):
