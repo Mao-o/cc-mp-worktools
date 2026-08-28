@@ -70,9 +70,9 @@ segment 単位再評価へ移行)。
        ドットは literal ``.`` でのみ一致、0.22.0) で True なら **deny 固定**、
        False なら ``ask_or_allow``。0.3.2 で導入した既定 rules への候補列挙
        (``_glob_operand_is_sensitive`` / ``_glob_candidates``) は 0.8.0 で撤廃
-     - literal → ``_operand_is_sensitive`` (basename のみ + URI/VCS pathspec
-       分割。親 dir 名の parts 一致は使わない、0.22.0) で True なら **deny
-       固定**、False なら allow
+     - literal → ``_operand_is_sensitive`` (basename + root 相対の path 形 rule
+       + URI/VCS pathspec 分割。親 dir 名の parts 一致は使わない、0.22.0。
+       path 形は 0.24.0) で True なら **deny 固定**、False なら allow
 3. **集約** — deny > ask > allow。``pending_ask`` は最後に畳む。
 
 ### patterns.txt 読込失敗 = 全 mode deny 固定
@@ -87,7 +87,8 @@ import shlex
 from core import logging as L
 from core import messages as M
 from core import output
-from _shared.matcher import is_sensitive
+from _shared.matcher import is_sensitive, root_relative
+from _shared.patterns import resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import normalize
 
@@ -328,6 +329,7 @@ def _sensitive_redirect_target(
     tokens: list[str],
     cwd: str,
     rules: list[tuple[str, bool]],
+    root: str | None = None,
 ) -> str | None:
     """機密 path への **書き込みリダイレクト** target を返す (無ければ None) (0.14.0, P2)。
 
@@ -344,7 +346,7 @@ def _sensitive_redirect_target(
     """
     for target in _redirect_write_targets(tokens):
         try:
-            if _operand_is_sensitive(target, cwd, rules):
+            if _operand_is_sensitive(target, cwd, rules, root=root):
                 return target
         except (ValueError, OSError):
             return target
@@ -355,6 +357,7 @@ def _operand_is_sensitive(
     raw: str,
     cwd: str,
     rules: list[tuple[str, bool]],
+    root: str | None = None,
 ) -> bool:
     """operand (literal path / URI / VCS pathspec) が機密パターンに該当するか。
 
@@ -362,6 +365,10 @@ def _operand_is_sensitive(
     - URI (``file://.env``): ``normalize`` が ``file:/.env`` に潰すため同じく検知
     - VCS pathspec (``HEAD:.env``, ``user@host:/p/.env``): コロンで分割して各片の
       basename も追加で判定
+
+    ``root`` (0.24.0): path 形 rule (``!config/prod.pem``) の基準。normalize
+    済みの絶対 path を root 相対にして比較する (``_shared.matcher.is_sensitive``)。
+    None なら path 形 rule は評価しない。
 
     0.22.0: ``is_sensitive`` は ``parts=False`` (basename のみ) で呼ぶ。Bash
     operand は path とは限らない文字列 (sed / awk の式、option の値) を含み、
@@ -374,27 +381,60 @@ def _operand_is_sensitive(
     の操作も止まらなくなる。
 
     ``normalize`` 失敗 (ValueError / OSError) は再送出 (呼び出し側で fail-closed)。
+
+    コロン分割した片の basename が operand 全体の basename と同じなら、**全体の
+    評価は skip して片だけを評価する** (0.24.0)。basename 階層の verdict は
+    同じで、path 階層は片の方だけが意味を持つ (``HEAD:sub/.env`` の全体は
+    ``HEAD:sub/.env`` という root 相対 path になり ``!sub/.env`` が効かないが、
+    片 ``sub/.env`` には効く)。片が全体と別 basename のとき (``cred:x.json``
+    のように basename 自体にコロンを含む形) は従来どおり全体も評価する。
     """
     abs_path = normalize(raw, cwd)
-    if is_sensitive(abs_path, rules, parts=False):
-        return True
+    pieces: list = []
     if ":" in raw:
         for piece in raw.split(":"):
             if not piece or piece == raw:
                 continue
             try:
-                piece_path = normalize(piece, cwd)
+                pieces.append(normalize(piece, cwd))
             except (ValueError, OSError):
                 continue
-            if is_sensitive(piece_path, rules, parts=False):
-                return True
+    if not any(p.name == abs_path.name for p in pieces):
+        if is_sensitive(abs_path, rules, parts=False, root=root):
+            return True
+    for piece_path in pieces:
+        if is_sensitive(piece_path, rules, parts=False, root=root):
+            return True
     return False
+
+
+def _operand_relpath(operand: str, cwd: str, root: str | None) -> str:
+    """除外案内を path 形 (``!<root 相対パス>``、1 ファイルだけ) にするための
+    operand の project root 相対 path (0.24.0)。**判定には影響しない**。
+
+    literal path (glob 無し、``:`` 無し) が root 配下に解決できたときだけ返す:
+
+    - glob operand (``cat .env*``) はユーザーが書いた glob そのものを basename
+      形で案内する (escape すると意図した glob 除外が壊れる) ので対象外
+    - VCS / リモート pathspec (``HEAD:.env`` / ``user@host:/p/.env``) は
+      ``normalize`` で cwd に結合した形が git の解釈 (repo root 相対) と一致
+      しない場合があるため path 形は案内しない (basename 形のみ)
+    - root 不明 / root 配下でない / normalize 失敗は空文字
+    """
+    if not root or not operand or ":" in operand or _has_glob(operand):
+        return ""
+    try:
+        abs_path = normalize(operand, cwd)
+    except (ValueError, OSError):
+        return ""
+    return root_relative(abs_path, root) or ""
 
 
 def _build_deny_response(
     tokens: list[str],
     operand: str,
     envelope: dict,
+    root: str | None = None,
 ) -> dict:
     """Bash deny 確定時の hook 出力 dict を組み立てる (0.10.0 で導入)。
 
@@ -439,6 +479,7 @@ def _build_deny_response(
             grep_keys=grep_keys,
             render_status=render_status,
             resolved_base=resolved_base,
+            relpath=_operand_relpath(operand, cwd, root),
         )
     )
 
@@ -473,6 +514,7 @@ def _analyze_segment(
     rules: list[tuple[str, bool]],
     *,
     dotglob: bool = False,
+    root: str | None = None,
 ) -> dict:
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
@@ -544,11 +586,13 @@ def _analyze_segment(
     # 機密でも書込み先が非機密なら allow 維持。
     if _is_metadata_only(tokens):
         redirect_target = _sensitive_redirect_target(
-            tokens, envelope.get("cwd", ""), rules
+            tokens, envelope.get("cwd", ""), rules, root=root
         )
         if redirect_target is not None:
             L.log_info("bash_classify", f"metadata_redirect_deny:{first}")
-            return _build_deny_response(tokens, redirect_target, envelope)
+            return _build_deny_response(
+                tokens, redirect_target, envelope, root=root
+            )
         L.log_info("bash_classify", f"metadata_only_allow:{first}")
         return output.make_allow()
 
@@ -563,7 +607,7 @@ def _analyze_segment(
         if _has_glob(p):
             if _glob_operand_is_dotenv_match(p, dotglob=dotglob):
                 L.log_info("bash_classify", f"glob_match:{first}")
-                return _build_deny_response(tokens, p, envelope)
+                return _build_deny_response(tokens, p, envelope, root=root)
             if pending_glob_ask is None:
                 L.log_info("bash_classify", "glob_uncertain_lenient")
                 pending_glob_ask = output.ask_or_allow(
@@ -572,9 +616,9 @@ def _analyze_segment(
                 )
             continue
         try:
-            if _operand_is_sensitive(p, envelope.get("cwd", ""), rules):
+            if _operand_is_sensitive(p, envelope.get("cwd", ""), rules, root=root):
                 L.log_info("bash_classify", f"match:{first}")
-                return _build_deny_response(tokens, p, envelope)
+                return _build_deny_response(tokens, p, envelope, root=root)
         except (ValueError, OSError):
             return output.ask_or_allow(
                 M.bash_lenient("normalize_failed"),
@@ -622,6 +666,9 @@ def handle(envelope: dict) -> dict:
         return output.make_deny(M.policy_unavailable("deny"))
     if not rules:
         return output.make_allow()
+    # path 形 rule の基準 root (= [project:] セクションの key、0.24.0)。
+    # コマンド単位で 1 回解決し、全 segment / operand で共有する。
+    root = resolve_project_root(cwd)
 
     # 長さガードは **segmentation より前** に置く (0.23.0)。
     #
@@ -705,7 +752,9 @@ def handle(envelope: dict) -> dict:
             continue
         tokens = _strip_safe_redirects(tokens)
 
-        result = _analyze_segment(tokens, envelope, rules, dotglob=dotglob)
+        result = _analyze_segment(
+            tokens, envelope, rules, dotglob=dotglob, root=root
+        )
         decision = _decision_of(result)
 
         if decision == "deny":

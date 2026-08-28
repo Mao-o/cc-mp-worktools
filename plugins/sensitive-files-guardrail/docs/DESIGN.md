@@ -669,10 +669,18 @@ builder で 0.9.0 とほぼ同等の出力を生成するため互換維持。
 `_operand_is_sensitive` (literal path / URI / VCS pathspec) または
 `_glob_operand_is_dotenv_match` (glob 含み、dotenv stem 一致) に通す。コロンを
 含む operand (`HEAD:.env`, `user@host:/p/.env`) はコロン分割後の各片の basename も
-判定。判定は **basename のみ** (0.22.0、`is_sensitive(..., parts=False)`)。Bash
-operand は path とは限らない文字列 (sed / awk の式、option の値) を含み、親 dir
-名の parts 一致は `sed -n 's/.env/X/p'` の合成パス `/cwd/s/.env/X/p` を deny に
-変えるだけだった (Read / Edit / Stop は実在パスなので parts も見る)。
+判定 (0.24.0: 片の basename が operand 全体の basename と同じなら全体の評価は
+skip して片だけを評価する — 全体 `HEAD:sub/.env` は root 相対 path として
+`!sub/.env` に一致しないが、片 `sub/.env` には一致するため)。判定は
+**basename + root 相対の path 形 rule** で、親 dir 名の parts は見ない (0.22.0、
+`is_sensitive(..., parts=False)`)。Bash operand は path とは限らない文字列
+(sed / awk の式、option の値) を含み、親 dir 名の parts 一致は
+`sed -n 's/.env/X/p'` の合成パス `/cwd/s/.env/X/p` を deny に変えるだけだった
+(Read / Edit / Stop は実在パスなので parts も見る)。path 形 rule (0.24.0) は
+途中に `/` を含めば root アンカーなので、合成パスに当たるのは `**/` で始まる
+rule だけ (過剰 deny 側に倒れる)。root は `_shared.patterns.resolve_project_root`
+(= `[project:]` セクションの key) をコマンド単位で 1 回解決して全 segment /
+operand で共有する。
 0.22.0 からは非 option トークンのうち **grep 系 / jq / awk / sed の第 1
 positional** (pattern / filter / script) と、**値が path ではない option の値**
 (`git log -S<string>` / `--grep=` / `--exclude=` / `-A NUM` 等) をコマンド別の
@@ -681,7 +689,8 @@ option 知識 (`handlers/bash/command_specs.py`) で候補から外す。spec �
 必ず値を取る option」だけを登録する)。
 コマンドが実際に file を読むかどうかは静的に判別しないため false positive
 (`echo .env`, `ls .env`, `mkdir .env`) が出るが、`patterns.local.txt` の
-`!<basename>` exclude で個別対処できる。glob で dotenv stem と一致しないものは
+`!<root 相対パス>` (1 ファイルだけ、0.24.0) / `!<basename>` (同名すべて) の
+exclude で個別対処できる。glob で dotenv stem と一致しないものは
 ``ask_or_allow`` (0.8.0)。
 
 ### Edit/Write handler
@@ -838,10 +847,14 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 - state の読取 / 書込失敗は `warn` callback 経由で stderr に
   `stop_ack_unavailable: load:<Exc>` / `save:<Exc>` を 1 行出す (不在 = 初回は
   出さない)。判定は従来通り block
-- block reason には恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` + `!<basename>`
-  行、`_shared.patterns.exclude_recipe_lines`) と「このセッションでは同じ集合を
+- block reason には恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` +
+  `!<root 相対パス>` 行、`_shared.patterns.exclude_recipe_lines`。0.24.0 から
+  path 形が既定で、basename 形 `!<basename>` は「同名すべて」の明示的な選択として
+  併記。root を解決できないときは basename 形のみ) と「このセッションでは同じ集合を
   再 block しない」注記を載せる。絶対パスは出さない (ヘッダーは環境変数名で示し、
-  書き込む側が実パスに置き換える)。`$CLAUDE_PROJECT_DIR` は Bash tool の環境で
+  書き込む側が実パスに置き換える)。レシピの root は Read / Edit / Bash と同じ
+  `resolve_project_root(cwd)` (git toplevel ではない)。`git ls-files` の cwd 相対
+  path は `checker.root_offset` を前置して root 相対にする。`$CLAUDE_PROJECT_DIR` は Bash tool の環境で
   未設定なので unquoted echo だと空に展開され、quoted heredoc / Write だと literal
   に残る — どちらも一致しないため、`_parse_local_patterns_text` の
   `header_warn_callback` が固定トークン (`project_header_empty` /

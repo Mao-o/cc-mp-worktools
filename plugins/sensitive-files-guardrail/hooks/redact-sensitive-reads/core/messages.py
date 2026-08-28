@@ -1,8 +1,8 @@
 """Reason text builder。
 
 各 handler は本モジュールの builder のみを呼び、``permissionDecisionReason`` に
-入れる文字列を直接組み立てない。文言の語彙ルール、除外案内 (`!<basename>`) の
-basename 展開を 1 箇所に集約する。
+入れる文字列を直接組み立てない。文言の語彙ルール、除外案内 (`!<root 相対パス>` /
+`!<basename>`) の展開を 1 箇所に集約する。
 
 ## 語彙ルール (H2)
 
@@ -21,6 +21,13 @@ next action」** の 2 文構造を取る。「続行しますか？」のよう
 メッセージ末尾の hint は ``!<basename>`` を **実 basename に展開** して、LLM が
 そのままコピペで ``patterns.local.txt`` に追記できる形にする。glob operand
 (例: ``*.env*``) はそのまま basename として埋める。
+
+0.24.0 から、project root 相対 path を確定できる経路 (Edit / Write の
+``file_path``、Bash の literal operand) では **path 形** ``!<root 相対パス>``
+(承認した 1 ファイルだけを外す) を既定として案内し、basename 形 (同名すべて)
+は明示的な選択として併記する。glob operand / VCS pathspec (``HEAD:.env``) /
+root 配下でない path / root 不明のときは basename 形だけを案内する
+(``_exclude_hint`` の ``relpath`` 引数)。
 
 0.19.0 から hint は ``[project:$CLAUDE_PROJECT_DIR]``
 セクション配下への追記を **既定** として案内する (``_shared.patterns`` の
@@ -88,21 +95,27 @@ _LOCAL_PATTERNS_PATH = LOCAL_PATTERNS_DISPLAY_PATH
 
 
 def _join_with_exclude_hint(
-    lines: list[str], basename: str, literal_name: bool = False
+    lines: list[str],
+    basename: str,
+    literal_name: bool = False,
+    relpath: str = "",
 ) -> str:
     """本文 + 除外案内を組み立てる。**案内は必ず全文残す** (0.23.0)。
 
-    除外案内には「この行は basename 単位で効く」「Read/Bash/Edit/Write の保護
-    そのものが外れる」という影響範囲の開示が含まれる。``core.output._truncate``
-    は末尾から無条件に切るため、minimal info が大きいと
-    **レシピ (``!.env``) だけ見えて警告が切れる**状態になっていた
+    除外案内には「path 形は 1 ファイル / basename 形は同名すべて」
+    「Read/Bash/Edit/Write の保護そのものが外れる」という影響範囲の開示が
+    含まれる。``core.output._truncate`` は末尾から無条件に切るため、minimal
+    info が大きいと **レシピ (``!.env``) だけ見えて警告が切れる**状態になっていた
     (30 キーの ``.env`` で実測: reason 3,071 byte、`保護そのものが外れます` が消失)。
     実行可能な除外コマンドを見せながら影響範囲を隠すのは informed consent の
     逆なので、可変長側 (minimal info) を先に削って案内の場所を確保する。
 
+    ``relpath`` (0.24.0) は project root 相対 path。空でなければ path 形の
+    レシピを既定として案内する (``_exclude_hint`` 参照)。
+
     ``_truncate`` 自体は最終防御としてそのまま残す (ここを通らない経路もあるため)。
     """
-    hint = f"suggestion: {_exclude_hint(basename, literal_name)}"
+    hint = f"suggestion: {_exclude_hint(basename, literal_name, relpath)}"
     tail = "\n" + hint
     budget = MAX_REASON_BYTES - len(tail.encode("utf-8"))
     body = "\n".join(lines)
@@ -160,10 +173,20 @@ def _sanitize_for_inline(text: str) -> str:
     return text.replace("`", "")
 
 
-def _exclude_hint(basename: str, literal_name: bool = False) -> str:
+def _exclude_hint(
+    basename: str, literal_name: bool = False, relpath: str = ""
+) -> str:
     """``patterns.local.txt`` への除外行追加案内を返す。
 
     basename が空なら一般化された hint。空でなければ ``!<basename>`` を埋め込む。
+
+    ``relpath`` (project root 相対 path、0.24.0) が空でなければ **path 形**
+    ``!<relpath>`` (承認した 1 ファイルだけを外す) を既定として案内し、
+    basename 形は「同名ファイルをすべて外したい場合だけ」の明示的な選択として
+    併記する。relpath が無い (root 不明 / root 配下でない / glob operand /
+    VCS pathspec) ときは従来どおり basename 形だけを案内し、path 形を案内
+    できない旨を添える (影響範囲の開示 ``EXCLUDE_SCOPE_WARNING`` は両形を
+    説明しているので、読み手が basename 形の広さを知らずに書くことはない)。
 
     0.19.0: ``[project:$CLAUDE_PROJECT_DIR]`` セクション配下
     への追記を既定として案内する。0.18.0 まではヘッダー無し行 (= 全プロジェクト
@@ -189,11 +212,26 @@ def _exclude_hint(basename: str, literal_name: bool = False) -> str:
     else:
         entry = "除外行 (`!<basename>`)"
         scope = "同名のファイル"
+
+    if relpath:
+        # path 形は実ファイルの root 相対 path (glob ではない) なので常に
+        # literal 化する。``/`` は ``escape_glob`` の対象外なのでそのまま残る。
+        path_entry = f"`!{_sanitize_for_inline(escape_glob(relpath))}`"
+        target = f"{path_entry} (この 1 ファイルだけ)"
+        alt = f"同名ファイルをすべて外したい場合だけ {entry} にします。"
+    else:
+        target = entry
+        alt = (
+            "(root 相対 path を確定できないため、1 ファイルだけを外す path 形"
+            " `!<root 相対パス>` は案内できません。)"
+            if basename
+            else ""
+        )
     return (
         "恒久的に許可したい場合は、ユーザーの承認を得た上で "
         f"`{_LOCAL_PATTERNS_PATH}` の `{PROJECT_SECTION_HEADER_HINT}` "
-        f"セクション配下に {entry} を追加してください "
-        f"({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
+        f"セクション配下に {target} を追加してください "
+        f"({PROJECT_SECTION_PLACEHOLDER_NOTE})。{alt}"
         f"{EXCLUDE_SCOPE_WARNING.format(scope=scope)}"
         "承認なしに自分で追加しないこと。"
     )
@@ -480,6 +518,7 @@ def _bash_deny_read_full(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``cat`` / ``less`` / ``more`` / ``bat`` / ``xxd`` / ``od`` / ``hexdump``
     / ``base64`` 等、ファイル全体を閲覧する意図の deny reason。"""
@@ -496,7 +535,7 @@ def _bash_deny_read_full(
     # info を出せているのに Read を勧めるのは、同じ情報を取り直させるだけの
     # 往復の無駄になるため。
     _append_minimal_info(lines, file_render, render_status, resolved_base)
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_read_partial(
@@ -509,6 +548,7 @@ def _bash_deny_read_partial(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``head`` / ``tail`` の deny reason。``-n N`` の値で鍵 list を絞る。"""
     basename = _basename_of(operand)
@@ -538,7 +578,7 @@ def _bash_deny_read_partial(
         _append_project_root_caveat(lines, render_status, resolved_base)
     else:
         _append_minimal_info(lines, file_render, render_status, resolved_base)
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_search(
@@ -551,6 +591,7 @@ def _bash_deny_search(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``grep`` / ``rg`` / ``ag`` / ``ack`` / ``egrep`` / ``fgrep`` の deny reason。
 
@@ -600,7 +641,7 @@ def _bash_deny_search(
     other = _suggestion_other_keys(dotenv_info)
     if other:
         lines.append(f"suggestion: {other}")
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_mutate(
@@ -613,6 +654,7 @@ def _bash_deny_mutate(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``awk`` / ``sed`` の deny reason。加工は実行できないが minimal info は返す。"""
     basename = _basename_of(operand)
@@ -636,7 +678,7 @@ def _bash_deny_mutate(
         " 値の置換が目的なら、対象ファイルを直接編集する代わりに別ファイルへの"
         " patch / diff 適用を検討してください。"
     )
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_load(
@@ -649,6 +691,7 @@ def _bash_deny_load(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。"""
     basename = _basename_of(operand)
@@ -665,7 +708,7 @@ def _bash_deny_load(
         " dotenv-cli の利用を推奨します。"
         " 1Password CLI / pass / git-secret 経由の secret 読込でも代替できます。"
     )
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_move(
@@ -678,6 +721,7 @@ def _bash_deny_move(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。"""
     basename = _basename_of(operand)
@@ -694,7 +738,7 @@ def _bash_deny_move(
         " `.env.example` 派生で運用するなら `cp .env.example .env.local` の"
         "方向で代替できます。"
     )
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 # git の global option のうち値を **別トークン** で取るもの (subcommand 抽出時に
@@ -804,6 +848,7 @@ def _bash_deny_history(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``git`` の deny reason。subcommand で文面を分ける (0.19.0)。
 
@@ -841,7 +886,7 @@ def _bash_deny_history(
             " してください (この形は allow されます)。"
             " untracked なら別パスから誤って参照していないか確認してください。"
         )
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_transfer(
@@ -854,6 +899,7 @@ def _bash_deny_transfer(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``curl`` / ``wget`` / ``scp`` / ``rsync`` の deny reason。"""
     basename = _basename_of(operand)
@@ -869,7 +915,7 @@ def _bash_deny_transfer(
         " secrets manager (1Password CLI / Vault / SOPS 等) に置く構成に"
         "してください。"
     )
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_archive(
@@ -882,6 +928,7 @@ def _bash_deny_archive(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """``tar`` / ``zip`` / ``gzip`` の deny reason。--exclude を推奨。"""
     basename = _basename_of(operand)
@@ -898,7 +945,7 @@ def _bash_deny_archive(
         f" tar なら `--exclude={safe_basename}`、zip なら `-x {safe_basename}`、"
         " gzip は単一ファイル圧縮なので別ファイルを対象にしてください。"
     )
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 def _bash_deny_generic(
@@ -911,6 +958,7 @@ def _bash_deny_generic(
     grep_keys: list[str] | None,
     render_status: str,
     resolved_base: str,
+    relpath: str = "",
 ) -> str:
     """既知 category 外の deny reason (0.7.0〜0.9.0 の generic 相当に minimal info を追加)。"""
     basename = _basename_of(operand)
@@ -922,7 +970,7 @@ def _bash_deny_generic(
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
     _append_minimal_info(lines, file_render, render_status, resolved_base)
-    return _join_with_exclude_hint(lines, basename)
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
 # 9 builder + generic を category キーで dispatch する table。
@@ -951,6 +999,7 @@ def bash_deny(
     grep_keys: list[str] | None = None,
     render_status: str = "",
     resolved_base: str = "",
+    relpath: str = "",
 ) -> str:
     """Bash 操作の deny reason を plain text で構築する (0.10.0 で category dispatch)。
 
@@ -975,6 +1024,10 @@ def bash_deny(
         render_status: ``render_for_bash`` の 3 番目の戻り値 (失敗 kind)。
             ``file_render`` が空のとき ``minimal info: unavailable (<理由>)``
             の理由ラベルと next action の選択に使う。成功時は空文字。
+        relpath: operand の project root 相対 path (0.24.0)。literal operand が
+            root 配下に解決できたときだけ handler が渡し、除外案内を path 形
+            (``!<relpath>``、1 ファイルだけ) にする。glob / VCS pathspec /
+            root 外は空文字 (basename 形のみ案内)。
     """
     category = _category_for_first_token(first_token)
     builder = _BASH_DENY_BUILDERS[category]
@@ -987,6 +1040,7 @@ def bash_deny(
         grep_keys=grep_keys,
         render_status=render_status,
         resolved_base=resolved_base,
+        relpath=relpath,
     )
 
 
@@ -1218,6 +1272,7 @@ def edit_deny(
     is_dotenv: bool = False,
     existing_render: str = "",
     max_suggested_keys: int = 30,
+    relpath: str = "",
 ) -> str:
     """Edit / Write の deny reason を plain text で構築する (0.20.0 で kind 分岐)。
 
@@ -1260,6 +1315,9 @@ def edit_deny(
             ファイルを ``redaction.file_render.render_for_bash`` に通した
             ``<DATA>`` 包装文字列。空なら unavailable 行に降りる。
         max_suggested_keys: ``new_keys`` の上限 (3KB 制約のため切り詰める)。
+        relpath: 書き込み先の project root 相対 path (0.24.0)。root 配下に
+            解決できたときだけ handler が渡し、除外案内を path 形
+            (``!<relpath>``、1 ファイルだけ) にする。空なら basename 形のみ。
     """
     note = _EDIT_DENY_NOTE[kind].format(
         tool_label=tool_label, basename=basename
@@ -1298,7 +1356,7 @@ def edit_deny(
     # 状態になっていた (実測: 57 文字級のキー 30 本で発生)。
     # 可変長側 (suggested_keys / existing info) を削って案内の場所を確保する。
     hint_len = len(
-        f"\nsuggestion: {_exclude_hint(basename, literal_name=True)}".encode("utf-8")
+        f"\nsuggestion: {_exclude_hint(basename, True, relpath)}".encode("utf-8")
     )
 
     info: list[str] = []
@@ -1309,7 +1367,7 @@ def edit_deny(
         )
 
     return _join_with_exclude_hint(
-        head + info + tail, basename, literal_name=True
+        head + info + tail, basename, literal_name=True, relpath=relpath
     )
 
 

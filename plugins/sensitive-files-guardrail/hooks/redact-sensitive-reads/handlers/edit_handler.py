@@ -57,7 +57,8 @@ from pathlib import Path
 from core import logging as L
 from core import messages as M
 from core import output
-from _shared.matcher import is_sensitive
+from _shared.matcher import is_sensitive, root_relative
+from _shared.patterns import resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import classify, is_regular_directory, normalize
 from redaction.dotenv import redact_dotenv
@@ -159,8 +160,13 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
             envelope,
         )
 
-    if not is_sensitive(path, rules):
+    # root は [project:] セクションの key と同じ値 (path 形 rule の基準、0.24.0)
+    root = resolve_project_root(cwd)
+    if not is_sensitive(path, rules, root=root):
         return output.make_allow()
+    # 除外案内を path 形 (1 ファイルだけ) にするための root 相対 path。root 不明 /
+    # root 配下でなければ空 (basename 形のみ案内)。判定には影響しない
+    relpath = root_relative(path, root) or ""
 
     # 最終要素の分類 (新規/既存/symlink/special)
     cls = classify(path)
@@ -182,12 +188,12 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     if cls == "symlink":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            kind="symlink", is_dotenv=is_dotenv,
+            kind="symlink", is_dotenv=is_dotenv, relpath=relpath,
         ))
     if cls == "special":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            kind="special", is_dotenv=is_dotenv,
+            kind="special", is_dotenv=is_dotenv, relpath=relpath,
         ))
     if cls == "error":
         return output.ask_or_deny(
@@ -203,9 +209,11 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
             tool_label, basename, new_keys,
             kind="overwrite", is_dotenv=is_dotenv,
             existing_render=_render_existing(path, cwd),
+            relpath=relpath,
         ))
 
     # missing (新規作成) も deny 固定
     return output.make_deny(M.edit_deny(
         tool_label, basename, new_keys, kind="new", is_dotenv=is_dotenv,
+        relpath=relpath,
     ))

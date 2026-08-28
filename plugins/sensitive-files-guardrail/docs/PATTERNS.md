@@ -135,13 +135,19 @@ EOF
 と**文字列完全一致**する必要がある (末尾スラッシュは正規化されるが、シンボリック
 リンク解決や相対パスの `~` 展開はしない — 絶対パスをそのまま書く)。
 
-**reason からの誘導 (0.19.0)**: Read / Bash / Edit / Write の deny reason と Stop の
-block reason は、除外の恒久化として `[project:$CLAUDE_PROJECT_DIR]` ヘッダー +
-`!<basename>` 行のレシピを案内する (ヘッダー無し行 = 全プロジェクト共通は明示的な
-選択)。`$CLAUDE_PROJECT_DIR` は **プレースホルダ** で、書くときはそのプロジェクトの
+**reason からの誘導 (0.19.0 / 0.24.0)**: Read / Bash / Edit / Write の deny reason と
+Stop の block reason は、除外の恒久化として `[project:$CLAUDE_PROJECT_DIR]` ヘッダー +
+除外行のレシピを案内する (ヘッダー無し行 = 全プロジェクト共通は明示的な選択)。
+0.24.0 から除外行は **path 形** `!<root 相対パス>` (承認した 1 ファイルだけを外す)
+を既定とし、basename 形 `!<basename>` (同名すべてを外す) は「同名ファイルをすべて
+外したい場合だけ」の明示的な選択として併記する (両形の違いは後述「rule の形で
+比較対象が決まる」)。root 相対 path を確定できないとき (root 不明 / root 配下でない /
+glob operand / VCS pathspec) は basename 形だけを案内する。
+`$CLAUDE_PROJECT_DIR` は **プレースホルダ** で、書くときはそのプロジェクトの
 絶対パスに置き換える (hook はヘッダーを展開しない。reason に絶対パスを出さない
 方針のため変数名で示している)。Stop の block reason は検出した全ファイルの
-`!<basename>` 行をまとめて出す (20 件で畳む)。
+除外行をまとめて出す (20 件で畳む)。サブディレクトリで発火しても表示の file 一覧は
+cwd 相対、レシピは root 相対 (`!sub/.env`)。
 
 **書き損じの警告**: Bash tool の環境では `CLAUDE_PROJECT_DIR` が未設定なので、
 unquoted の `echo "[project:$CLAUDE_PROJECT_DIR]" >> patterns.local.txt` は
@@ -206,24 +212,78 @@ rules は `既定 → ローカル (共通行 → 一致した [project:...] 行
 export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
 ```
 
-## basename のみで判定される (parts は補助)
+## rule の形で比較対象が決まる (basename 形 / path 形)
 
-両 hook ともパターンは **basename** に対して fnmatch する (0.2.0 以降、Stop 側も
-Read 側と同じく親 dir 名の parts も補助的に評価する。ただし **Bash operand の
-判定は 0.22.0 から basename のみ** — sed / awk の式や option の値のような「path
-とは限らない文字列」が親 dir 名の `.env` で deny になるのを避けるため)。
-ディレクトリ固有の exclude は書けない:
+| 形 | 例 | 比較対象 | 効く範囲 |
+|---|---|---|---|
+| **basename 形** (`/` を含まない) | `.env` / `*.pem` / `!ca-*.pem` | basename (fnmatch)。Read / Edit / Stop では親 dir 名 (parts) も補助的に評価 | **同名すべて** — どのディレクトリでも、`[project:]` セクション内に書いても他プロジェクトの同名 path にも効く |
+| **path 形** (`/` を含む、0.24.0) | `!config/prod.pem` / `!fixtures/` / `secrets/**` | **project root からの相対 path 全体** (gitignore 準拠の translator) | **root 配下のその path だけ** |
+
+両形は 1 本のリストとして **出現順に last-match-wins** で評価する (形ごとに階層を
+分けない)。既定 `patterns.txt` はすべて basename 形なので、ローカルに書いた
+`!config/prod.pem` は既定の `*.pem` より後ろで評価され、その 1 ファイルだけを
+外す。0.23.0 までは path 形の行は格納されても**一度も一致しなかった**
+(matcher が basename と parts しか見なかったため)。
 
 ```
-# NG: パスセグメントは効かない
-!fixtures/*.pem
+# 承認した 1 ファイルだけを外す (0.24.0)
+!config/prod.pem
 
-# OK: basename だけで区別する
-!fixture-*.pem
-!test-*.pem
-!ca-*.pem
+# fixtures ディレクトリ配下すべて (任意の深さ)
+!fixtures/
+
+# basename 形: 同名ファイルをすべて外す (0.23.0 までの唯一の書き方)
 !ca-bundle.pem
+!fixture-*.pem
 ```
+
+### path 形の意味論 (gitignore 準拠、fnmatch ではない)
+
+| 書き方 | 意味 | 一致する | 一致しない |
+|---|---|---|---|
+| `config/prod.pem` | root 相対の path 1 本。途中に `/` があれば root アンカー | `config/prod.pem` | `x/config/prod.pem`、`config/prod.pem/inner` |
+| `/config/prod.pem`、`./config/prod.pem` | 同上 (先頭 `/` `./` はアンカーの明示) | `config/prod.pem` | `x/config/prod.pem` |
+| `fixtures/` | 末尾 `/` はディレクトリ。`/` が末尾だけなら任意の深さ | `fixtures/a.pem`、`a/fixtures/b/c.pem` | `fixtures` (同名ファイル)、`fixtures2/x` |
+| `/fixtures/`、`certs/fixtures/` | アンカー付きディレクトリ | `certs/fixtures/x.pem` | `a/certs/fixtures/x.pem` |
+| `fixtures/*.pem` | `*` は `/` を跨がない | `fixtures/a.pem` | `fixtures/deep/a.pem` |
+| `fixtures/**/*.pem` | 中間 `/**/` は 0 個以上のディレクトリ | `fixtures/a.pem`、`fixtures/d/e/a.pem` | `other/a.pem` |
+| `**/fixtures/*.pem` | 先頭 `**/` は任意の深さ | `a/b/fixtures/x.pem` | `a/fixturesx/x.pem` |
+| `secrets/**` | 末尾 `/**` は配下すべて | `secrets/a`、`secrets/d/b` | `secrets` |
+| `k?y/a.pem`、`certs/[ab].pem` | `?` と `[...]` は `/` 以外の 1 文字 | `key/a.pem`、`certs/a.pem` | `k/y/a.pem`、`certs/c.pem` |
+
+- **root** は `[project:...]` セクションの key と同じ解決 (`$CLAUDE_PROJECT_DIR` →
+  無ければ `cwd` から `.git` を上方探索。`_shared.patterns.resolve_project_root`)。
+  root を解決できない (非 git ディレクトリ等) / path が root 配下でない場合、
+  path 形 rule は**一度も一致しない** (0.23.0 までと同じ挙動)
+- 相対 path の基準は **root であって cwd ではない**。サブディレクトリで発火しても
+  同じ rule が同じファイルに効く
+- **末尾 `/` の無い rule は path 1 本だけ**に一致し、同名ディレクトリの配下には
+  及ばない (gitignore は「ディレクトリに一致したら配下も」だが、除外は狭い方が
+  安全なので採らない)。配下を含めたければ `fixtures/` か `fixtures/**` と書く
+- `\` はエスケープではなく literal (basename 形の fnmatch と同じ)。メタ文字を
+  literal にしたいときは `[*]` のように文字クラスで包む (両 hook のレシピ生成は
+  `escape_glob` で自動的にそうする)
+- 大文字小文字は basename 形と同じく既定で無視 (`SFG_CASE_SENSITIVE=1` で区別)
+- 比較は lexical (symlink 解決も実在確認もしない)。`$CLAUDE_PROJECT_DIR` が
+  symlink 経由のパスで `cwd` が実体パス (またはその逆) のように**文字列として
+  root 配下にならない**組み合わせでは path 形は一致しない (basename 形は従来どおり)
+- Bash operand も path 形 rule を評価する (`cat config/prod.pem`、
+  `cat ../config/prod.pem`、`git show HEAD:config/prod.pem` のコロン後の片)。
+  途中に `/` を含む rule は root アンカーなので、`sed 's/secrets/x/'` の式が
+  合成 path になっても `secrets/*.yaml` のような rule には当たらない
+  (`**/` で始める rule だけは当たりうる)
+
+### parts (親 dir 名) は basename 形の補助
+
+Read / Edit / Stop は実在ファイルの実パスを扱うため、basename が決着しなければ
+親 dir 名 (`pathlib.parts`) も basename 形 rule で評価する (`/foo/.env/bar` を
+検出する経路)。**Bash operand は 0.22.0 から parts を見ない** — sed / awk の式や
+option の値のような「path とは限らない文字列」が親 dir 名の `.env` で deny に
+なるのを避けるため。path 形 rule は parts 経由では評価しない (root 相対 path
+全体との比較のみ)。Stop は 0.24.0 から root 相対 path で parts を評価するので、
+サブディレクトリで発火しても root で発火したときと同じ verdict になる
+(0.23.0 までは cwd 相対だったため、cwd と root の間のディレクトリ名は見て
+いなかった)。
 
 ## `*.pem` / `*.key` の false positive 対策例
 
@@ -266,14 +326,18 @@ operand に glob (`*` / `?` / `[`) を含む Bash コマンドの判定は **0.8
 glob を使わずリテラル path に書き換える (`cat credentials.json` は deny、
 `cat package.json` は allow)。
 
-`patterns.local.txt` の `!<basename>` 除外は **glob operand の判定には効かない**
-(glob は既定 / ローカル rules と照合せず dotenv stem とだけ比較するため、除外する
-対象がない)。除外が効くのはリテラル path の operand scan と Read / Edit / Write /
-Stop の判定で、そこでも `!credentials*.json` のような **既定 rule を丸ごと打ち消す**
-書き方は推奨しない (新しい機密 basename が入ったとき見落とす)。具体 basename の
+`patterns.local.txt` の除外行 (`!<basename>` / `!<root 相対パス>`) は **glob operand
+の判定には効かない** (glob は既定 / ローカル rules と照合せず dotenv stem とだけ
+比較するため、除外する対象がない)。除外が効くのはリテラル path の operand scan と
+Read / Edit / Write / Stop の判定で、そこでも `!credentials*.json` のような
+**既定 rule を丸ごと打ち消す**書き方は推奨しない (新しい機密 basename が入ったとき
+見落とす)。承認した 1 ファイルなら path 形、同名をまとめて外すなら具体 basename の
 exclude を重ねる運用が安全:
 
 ```
+# 承認した 1 ファイルだけ (0.24.0)
+!config/myapp-config.json
+
 # 機密 rule は残したまま、非機密と分かっている具体 basename だけ除外
 !myapp-config.json
 ```
@@ -352,3 +416,23 @@ subprocess (`git rev-parse` 等) は呼ばない。
 行を出力に含める。**出現順を保持したまま**返す (グループ単位で並べ替えない)。
 `project_key` が `None` ならどのセクションにも一致せず、共通行のみを返す —
 ヘッダーを含まない既存ファイルは `_parse_patterns_text` と完全に同じ結果になる。
+
+### `resolve_project_root(cwd) -> str | None` (0.24.0)
+
+path 形 rule の基準 root。値は `_resolve_project_key` と**同一** (別名で公開して
+いるのは、`[project:<key>]` の key とそのセクションに書いた path 形 rule の基準
+root が定義上同じものであることを示すため)。Read / Edit / Bash / Stop の 4 箇所が
+同じ root で matcher を呼ぶので、どの hook が出したレシピも他の hook で同じ
+1 ファイルに効く。Stop だけ git の toplevel を使うと、monorepo
+(`$CLAUDE_PROJECT_DIR` がサブディレクトリ) で Stop のレシピが Read で効かなくなる。
+
+### `_shared/matcher.py` の path 形対応 (0.24.0)
+
+- `is_sensitive(path, rules, *, parts=True, root=None)` — `root` を渡すと `/` を
+  含む rule を root 相対 path と比較する。`path` が相対なら root 相対と見なす
+  (Stop hook が `git ls-files` の cwd 相対 path を root 相対に組み立てて渡す経路)
+- `root_relative(path, root)` — lexical な相対化 (symlink 解決なし)。root 自身・
+  配下でない・`..` で外に出るものは `None`
+- `_translate_path_pattern(pattern)` — gitignore 準拠の translator。`fnmatch` の
+  `*` は `/` を跨ぐので継承せず、自前で正規表現に変換する (キャッシュは
+  basename 形と同様に上限なし)

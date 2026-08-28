@@ -15,8 +15,11 @@ tracked / untracked の両方を検査し、``.gitignore`` 済みでも **tracke
 する。``session_id`` が無い / 不正な hook input では従来通り毎回 block する。
 
 block reason には ``patterns.local.txt`` への恒久除外レシピ
-(``[project:$CLAUDE_PROJECT_DIR]`` + ``!<basename>``) を載せる (0.19.0、read 側
-deny reason の hint と同じ ``_shared.patterns.exclude_recipe_lines``)。絶対パスは
+(``[project:$CLAUDE_PROJECT_DIR]`` + ``!<root 相対パス>``) を載せる (0.19.0、read 側
+deny reason の hint と同じ ``_shared.patterns.exclude_recipe_lines``)。0.24.0 から
+既定は **path 形** (承認した 1 ファイルだけを外す) で、basename 形 (同名すべて)
+は明示的な選択として併記する。project root を解決できない (``resolve_project_root``
+が None / cwd が root 配下でない) ときだけ basename 形のみ。絶対パスは
 reason に出さない。
 
 patterns.txt の読み取りに失敗した場合は stderr warning のみ出して exit 0
@@ -42,8 +45,14 @@ from _shared.patterns import (  # noqa: E402
     PROJECT_SECTION_PLACEHOLDER_NOTE,
     EXCLUDE_SCOPE_WARNING,
     exclude_recipe_lines,
+    resolve_project_root,
 )
-from checker import find_sensitive_files, load_patterns, repo_context  # noqa: E402
+from checker import (  # noqa: E402
+    find_sensitive_files,
+    load_patterns,
+    repo_context,
+    root_offset,
+)
 from stop_ack import (  # noqa: E402
     digest_entries,
     load_acked,
@@ -61,17 +70,38 @@ def _warn_stop_ack(detail: str) -> None:
     sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
 
 
+def _recipe_names(paths: list[str], root_offset_: str | None) -> list[str] | None:
+    """レシピの path 形に使う root 相対 path 一覧を返す (0.24.0)。
+
+    ``paths`` は ``git ls-files`` の cwd 相対 path。``root_offset_`` (cwd の root
+    からの相対 prefix、``checker.root_offset``) を前置して root 相対にする。
+    None (root 不明 / cwd が root 配下でない) なら path 形は組み立てられない
+    ので None を返し、呼出側は basename 形だけを載せる。
+    """
+    if root_offset_ is None:
+        return None
+    if not root_offset_:
+        return list(paths)
+    return [f"{root_offset_}/{p}" for p in paths]
+
+
 def _build_reason(
     tracked: list[str],
     untracked: list[str],
     session_scoped: bool,
+    root_offset_: str | None = None,
 ) -> str:
     """block reason (LLM 向け plain text) を組み立てる。
 
     tracked / untracked を別セクションで列挙し、AskUserQuestion の選択肢と
-    恒久除外レシピ (``[project:$CLAUDE_PROJECT_DIR]`` + ``!<basename>``) を添える。
-    絶対パスは出さない (ヘッダーは環境変数名で示す)。``session_scoped`` なら
-    「このセッションでは同じ集合を再 block しない」注記を付ける。
+    恒久除外レシピ (``[project:$CLAUDE_PROJECT_DIR]`` + ``!<root 相対パス>``) を
+    添える。絶対パスは出さない (ヘッダーは環境変数名で示す)。``session_scoped``
+    なら「このセッションでは同じ集合を再 block しない」注記を付ける。
+
+    ``root_offset_`` (0.24.0): cwd の project root からの相対 prefix
+    (``checker.root_offset``)。None 以外ならレシピを **path 形** (承認した
+    1 ファイルだけ) で出し、basename 形 (同名すべて) を明示的な選択として
+    併記する。None なら従来どおり basename 形だけを出す。
     """
     sections: list[str] = ["【セキュリティ確認】", ""]
     if tracked:
@@ -101,16 +131,36 @@ def _build_reason(
     sections.append("  選択肢1: 「.gitignore に追加」 (Recommended)")
     sections.append("  選択肢2: 「意図的に管理対象とする」")
     sections.append("")
+    paths = [*tracked, *untracked]
+    basenames = [os.path.basename(p) for p in paths]
+    path_names = _recipe_names(paths, root_offset_)
+    if path_names is not None:
+        intro = "追記内容 (path 形 — 承認した 1 ファイルだけを外す):"
+        recipe = exclude_recipe_lines(path_names)
+    else:
+        intro = (
+            "追記内容 (basename 形 — プロジェクト root を解決できないため"
+            " path 形は組み立てられない):"
+        )
+        recipe = exclude_recipe_lines(basenames)
     sections.append(
         "【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を"
         f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を追記します"
         f" ({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
-        + EXCLUDE_SCOPE_WARNING.format(scope="下記の各行と同じ名前のファイル")
-        + "追記内容:"
+        + EXCLUDE_SCOPE_WARNING.format(scope="同じ名前のファイル")
+        + intro
     )
-    basenames = [os.path.basename(p) for p in [*tracked, *untracked]]
-    for line in exclude_recipe_lines(basenames):
+    for line in recipe:
         sections.append(f"  {line}")
+    if path_names is not None:
+        # basename 形は「同名すべて」を承知の上での明示的な選択として併記する
+        alts = " / ".join(
+            f"`{line}`" if line.startswith("!") else line
+            for line in exclude_recipe_lines(basenames)[1:]
+        )
+        sections.append(
+            f"同名ファイルをすべて外したい場合だけ basename 形にする: {alts}"
+        )
     if session_scoped:
         sections.append("")
         sections.append(
@@ -153,7 +203,10 @@ def main() -> int:
     if not rules:
         return 0
 
-    sensitive = find_sensitive_files(cwd, rules)
+    # path 形 rule の基準 root (= [project:] セクションの key、0.24.0)。git の
+    # toplevel ではなく Read / Edit / Bash と同じ解決を使う (レシピの互換性)
+    root = resolve_project_root(cwd)
+    sensitive = find_sensitive_files(cwd, rules, root=root)
     if not sensitive:
         return 0
 
@@ -171,7 +224,10 @@ def main() -> int:
     tracked = [f["path"] for f in sensitive if f["status"] == "tracked"]
     untracked = [f["path"] for f in sensitive if f["status"] == "untracked"]
     reason = _build_reason(
-        tracked, untracked, session_scoped=session_id is not None
+        tracked,
+        untracked,
+        session_scoped=session_id is not None,
+        root_offset_=root_offset(cwd, root),
     )
 
     if session_id is not None:

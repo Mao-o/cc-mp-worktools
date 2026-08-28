@@ -12,6 +12,7 @@ from core import logging as L
 from core import messages as M
 from core import output
 from _shared.matcher import is_sensitive
+from _shared.patterns import resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import classify, normalize, open_regular
 from redaction.engine import MAX_INLINE_BYTES, redact, redact_large_file
@@ -47,7 +48,8 @@ def handle(envelope: dict) -> dict:
         return output.ask_or_deny(M.read_ask("normalize_failed"), envelope)
 
     basename = path.name
-    if not is_sensitive(path, rules):
+    # root は [project:] セクションの key と同じ値 (path 形 rule の基準、0.24.0)
+    if not is_sensitive(path, rules, root=resolve_project_root(cwd)):
         return output.make_allow()
 
     cls = classify(path)

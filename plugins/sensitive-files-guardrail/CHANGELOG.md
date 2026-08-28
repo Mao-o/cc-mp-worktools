@@ -20,6 +20,111 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.24.0
+
+恒久除外レシピを**承認した 1 ファイルだけ**に絞れるようにした。0.23.0 で開示した
+「除外行は basename 単位でしか書けず、同名ファイル全部の保護が落ちる」制約の解消
+(2026-08-28 の多角レビューで別件に切り出した follow-up)。
+
+- **判定境界 (deny / allow / ask) の変化**: (1) `/` を含む rule (**path 形**) が
+  project root 相対 path と比較されて**一致するようになる**。0.23.0 までは
+  `!config/prod.pem` は格納されても一度も一致しなかった。既定 `patterns.txt` に
+  path 形の行は無いので、`patterns.local.txt` に path 形を書いていない限り既存の
+  verdict は変わらない。(2) Stop hook がサブディレクトリで発火したとき、親 dir 名
+  (parts) を cwd 相対ではなく **root 相対**で評価する (cwd と root の間の
+  ディレクトリ名も見る = root で発火したときと同じ verdict。deny 側にしか
+  動かない)。(3) VCS pathspec (`HEAD:sub/.env`) は片の basename が operand 全体の
+  basename と同じなら片だけを評価する (path 形を効かせるため。basename 形だけなら
+  verdict は不変)
+- 旧版 (main) と本 branch で同一コーパス (matcher 592 + Bash 2,616 + Read/Edit 96 +
+  Stop 9 = **3,350 verdict**) を流した diff は 194 件で、**すべて上記 (1)(2) に分類
+  でき説明不能ゼロ** (path 形 rule を与えた変種と、Stop の root 相対 parts 1 件)
+- テスト件数: redact 1,024 → **1,051** / check 80 → **92** (計 1,143)
+
+### 1. path 形 rule (`_shared/matcher.py`)
+
+rule の**形**で比較対象が決まる: `/` を含まない行は従来どおり basename (と
+parts) に fnmatch、`/` を含む行は **project root からの相対 path 全体**と比較する。
+両形は 1 本のリストとして出現順に last-match-wins で評価し、形ごとに階層を
+分けない (「書いた順が強さ」の契約を守る。既定 → ローカルの順なので、ローカルの
+`!config/prod.pem` は既定の `*.pem` より後ろで評価される)。
+
+意味論は fnmatch の継承ではなく **gitignore 準拠を明示的に採用**した
+(`fnmatch` の `*` は `/` を跨ぐため、`!*/prod.pem` が gitignore に慣れた読み手の
+期待と違う動きをする)。小さな translator を自前で持つ:
+
+| 書き方 | 意味 |
+|---|---|
+| `config/prod.pem` / `/config/prod.pem` / `./config/prod.pem` | root 相対の path 1 本 (途中に `/` があれば root アンカー) |
+| `fixtures/` | 任意の深さの `fixtures` ディレクトリ配下すべて (末尾 `/` だけの rule はアンカー無し) |
+| `/fixtures/` / `certs/fixtures/` | アンカー付きディレクトリ |
+| `*` / `?` / `[...]` | `/` を跨がない |
+| `**/x` / `x/**` / `a/**/b` | 任意の深さ / 配下すべて / 0 個以上のディレクトリ |
+
+gitignore との**意図的な相違**: 末尾 `/` の無い rule は path 1 本だけに一致し、
+同名ディレクトリの配下には及ばない (除外は狭い方が安全。配下を含めたければ
+`fixtures/` か `fixtures/**` と書く)。`\` はエスケープではなく literal
+(basename 形と同じ)。比較は lexical (symlink 解決なし)、大文字小文字は
+basename 形と同じ既定 (無視)。全表は `docs/PATTERNS.md` の「rule の形で比較対象が
+決まる」節。
+
+**root の定義**: `resolve_project_root(cwd)` = `[project:]` セクションの key と
+同じ値 (`$CLAUDE_PROJECT_DIR` → `.git` 上方探索)。Stop だけ git の toplevel を
+使う案は採らなかった — monorepo (`$CLAUDE_PROJECT_DIR` がサブディレクトリ) で
+Stop が出したレシピが Read / Edit / Bash で効かなくなるため。4 つの呼出点
+(Read / Edit / Bash / Stop) が同じ root で matcher を呼ぶので、どの hook が出した
+レシピも他の hook で同じ 1 ファイルに効く。root を解決できない場所 (非 git
+ディレクトリ等) / root 配下でない path では path 形は一致しない (0.23.0 までと
+同じ挙動)。
+
+### 2. 呼出点 (9 箇所 / 4 handler)
+
+`is_sensitive(path, rules, *, parts=True, root=None)` に keyword-only の `root`
+を追加 (0.22.0 の `parts` の延長)。
+
+- Read / Edit: `normalize` 済みの絶対 path + `resolve_project_root(cwd)`
+- Bash: コマンド単位で root を 1 回解決して全 segment / operand で共有
+  (`_analyze_segment` / `_operand_is_sensitive` / `_sensitive_redirect_target`)。
+  Bash operand は引き続き `parts=False` だが path 形は評価する (Bash で
+  レシピが効かなければ 1 ファイルに絞る意味が無い)
+- Stop: `git ls-files` の cwd 相対 path に `checker.root_offset(cwd, root)` を
+  前置して **root 相対**に組み立てて渡す。戻り値の `path` (表示 / stop-ack) は
+  cwd 相対のまま
+
+### 3. レシピと開示文の書き換え
+
+- `_exclude_hint(basename, literal_name, relpath)`: `relpath` (root 相対 path) が
+  あれば **path 形を既定**に案内し (`!other/prod.pem` (この 1 ファイルだけ))、
+  basename 形は「同名ファイルをすべて外したい場合だけ `!prod.pem`」として併記。
+  無いときは basename 形のみ + 「path 形は案内できない」注記。Bash の 10
+  category builder と `edit_deny` に `relpath` を通した
+- Bash の `relpath` は **literal operand (glob 無し・`:` 無し) が root 配下に
+  解決できたときだけ** (`_operand_relpath`)。glob はユーザーが書いた形をそのまま、
+  VCS / リモート pathspec は git の解釈 (repo root 相対) と cwd 結合が一致しない
+  場合があるため basename 形のみ
+- Stop の `_build_reason`: レシピを path 形 (`!sub/deep/.env`、cwd に関わらず
+  root 相対) で出し、basename 形を「同名ファイルをすべて外したい場合だけ
+  basename 形にする: `!.env` / ...」として併記。root を解決できないときは
+  basename 形のみ (intro にその旨を書く)
+- `EXCLUDE_SCOPE_WARNING` を 2 形に書き分け: path 形 = その 1 ファイルだけ
+  (root 配下のみ) / basename 形 = 同名すべて + 同名ディレクトリ配下 + セッションが
+  触る絶対パス全部。0.23.0 の「1 ファイルだけの除外は不可」は事実と矛盾するので
+  削除
+
+### 4. 裏が取れなかったこと (開示)
+
+- **VCS pathspec の基準**: `git show HEAD:sub/.env` の `sub/.env` は git では
+  repo root 相対だが、hook は cwd に結合して評価する。cwd ≠ root のとき git の
+  実際の対象と食い違う可能性があるため、path 形の**案内**は出さない側に倒した
+  (判定は片ごとに root 相対で行うので、`!sub/.env` は cwd = root なら効く)
+- **symlink / realpath**: `$CLAUDE_PROJECT_DIR` と `cwd` の一方が symlink 経由で
+  文字列として配下関係にならない組み合わせでは path 形が一致しない (basename 形は
+  従来どおり)。hook の stat 予算と TOCTOU 方針 (resolve しない) から lexical に
+  留めた
+- **Stop の root 相対 parts**: 「サブディレクトリでも root と同じ verdict」を
+  整合性の改善と判断したが、cwd がたまたま機密名ディレクトリ (`.env/`) 配下の
+  とき報告が増える (deny 側)
+
 ## 0.23.0
 
 2026-08-28 の多角レビュー (main + サブエージェント 8 体) で検出した不具合の修正。

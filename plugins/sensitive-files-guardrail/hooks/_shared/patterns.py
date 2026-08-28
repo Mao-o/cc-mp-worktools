@@ -47,6 +47,11 @@ _resolve_local_patterns_path:
 - reason に絶対パスを出さない方針のため、ヘッダーは環境変数名のまま示し、
   書き込む側 (ユーザー / LLM) が実際の絶対パスへ置き換える。ヘッダー自体は
   ``_parse_local_patterns_text`` で展開されない (文字列完全一致)。
+- 0.24.0 からレシピは **path 形** (``!<root 相対パス>``、承認した 1 ファイルだけ
+  を外す) を既定にし、basename 形 (``!<basename>``、同名すべて) は明示的な
+  選択として併記する。path 形の基準 root は ``resolve_project_root`` (=
+  ``[project:]`` セクションの key と同じ値) で、両 hook の matcher も同じ root
+  で評価するため、どの hook が出したレシピも他の hook で同じ 1 ファイルに効く。
 """
 from __future__ import annotations
 
@@ -85,24 +90,32 @@ PROJECT_SECTION_PLACEHOLDER_NOTE = (
     "全プロジェクト共通にしたい場合のみヘッダー無しの行に書く"
 )
 
-# 除外行を追加する前にユーザーへ伝えるべき影響範囲 (0.23.0、両 hook 共通)。
+# 除外行を追加する前にユーザーへ伝えるべき影響範囲 (0.23.0、両 hook 共通。
+# 0.24.0 で path 形 / basename 形の 2 形に書き分け)。
 #
-# 除外行は **basename 単位**で評価される (matcher は basename と
-# ``pathlib.parts`` しか見ず、相対パス全体との比較を行わない)。したがって
-# ``!.env`` はプロジェクト内の **すべての** ``.env`` に効き、承認した 1 ファイル
-# だけを対象にすることはできない。さらに効果は Stop の報告に留まらず
-# **Read / Bash / Edit / Write の保護そのもの**が落ちる。
+# 除外行は形で効く範囲が違う:
+# - **path 形** (``!config/prod.pem``、``/`` を含む): project root 相対で評価
+#   されるので、承認した **その 1 ファイルだけ** に効く (root 配下のみ)
+# - **basename 形** (``!.env``): basename と ``pathlib.parts`` で評価されるので
+#   プロジェクト内の **すべての** 同名ファイルに効き、同名ディレクトリの配下も
+#   外れる。しかも ``[project:]`` は rule の読込先を決めるだけで、読み込まれた
+#   後の matcher は operand がプロジェクト配下かを見ないため、そのセッションが
+#   触る絶対パス全部 (他プロジェクト含む) に効く
+# どちらの形も、効果は Stop の報告に留まらず **Read / Bash / Edit / Write の
+# 保護そのもの**が落ちる。
 #
 # 「以後 ... で報告されなくなります」という従来の文面では、"報告されない" が
 # "保護されない" と同義であることも、同名ファイル全部が巻き添えになることも
-# 伝わらなかった。範囲を狭める作業は別途進行中だが、それまでの間、黙った
-# 過剰付与を informed consent に変えるための文言。
+# 伝わらなかった。0.23.0 で開示を足し、0.24.0 で範囲を絞る path 形を足した。
 EXCLUDE_SCOPE_WARNING = (
-    "影響範囲: basename 単位なので{scope}が**すべて**対象 (1 ファイルだけの除外は"
-    "不可)、**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致"
+    "影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ**"
+    " (プロジェクト root 相対で評価するので root 配下のみ)。"
+    "basename 形 (`!<名前>`) は{scope}が**すべて**対象で、"
+    "**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致"
     "する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、"
-    "**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。"
-    "外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。"
+    "basename 形は**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。"
+    "どちらの形も、外れるのは Stop の報告だけでなく"
+    " **Read / Bash / Edit / Write の保護そのもの**です。"
 )
 
 # ``[project:]`` ヘッダーが書き損じのときに ``header_warn_callback`` へ渡す固定
@@ -136,19 +149,22 @@ def escape_glob(name: str) -> str:
     return "".join(f"[{c}]" if c in _GLOB_META else c for c in name)
 
 
-def exclude_recipe_lines(basenames: Iterable[str], limit: int = 20) -> list[str]:
+def exclude_recipe_lines(names: Iterable[str], limit: int = 20) -> list[str]:
     """``patterns.local.txt`` に追記する恒久除外レシピ (行リスト) を返す。
 
-    ``[project:$CLAUDE_PROJECT_DIR]`` ヘッダー + ``!<basename>`` 行。重複は出現順を
-    保って除去し (順序付き list と set を並行して持ち線形 — list membership だと
-    二次計算で数万件の repo で Stop の 15s timeout を超えうる、Codex R5 P2-2)、
-    空 basename は捨てる。``limit`` 件を超えた分は ``... (N more)`` に畳む (Stop の
-    block reason が肥大しないため)。両 hook が同じレシピを提示するためにここ
-    (patterns.local.txt 形式の所有者) に置く。
+    ``[project:$CLAUDE_PROJECT_DIR]`` ヘッダー + ``!<name>`` 行。``names`` は
+    root 相対 path (path 形、0.24.0 の既定) でも basename (basename 形) でもよく、
+    呼出側が解決できた方を渡す。重複は出現順を保って除去し (順序付き list と set
+    を並行して持ち線形 — list membership だと二次計算で数万件の repo で Stop の
+    15s timeout を超えうる、Codex R5 P2-2)、空文字列は捨てる。``limit`` 件を
+    超えた分は ``... (N more)`` に畳む (Stop の block reason が肥大しないため)。
+    両 hook が同じレシピを提示するためにここ (patterns.local.txt 形式の所有者)
+    に置く。メタ文字は ``escape_glob`` で literal 化する (path 形でも ``/`` は
+    そのまま)。
     """
     seen: set[str] = set()
     ordered: list[str] = []
-    for name in basenames:
+    for name in names:
         if name and name not in seen:
             seen.add(name)
             ordered.append(name)
@@ -213,6 +229,23 @@ def _resolve_project_key(cwd: str) -> Optional[str]:
         if parent == current:
             return None
         current = parent
+
+
+def resolve_project_root(cwd: str) -> Optional[str]:
+    """path 形 rule (``config/prod.pem`` 等) の基準となる project root を返す
+    (0.24.0)。
+
+    値は ``_resolve_project_key`` と**同一** (``$CLAUDE_PROJECT_DIR`` 優先 →
+    ``.git`` 上方探索)。同じ関数を別名で公開するのは意図的で、
+    「``[project:<key>]`` セクションの key」と「そのセクションに書いた path 形
+    rule の基準 root」が定義上同じものであることを呼出側に示すため。両 hook
+    (Read / Edit / Bash / Stop) が同じ root で matcher を呼ぶので、どの hook が
+    出したレシピも他の hook で同じ 1 ファイルに効く。git の toplevel を Stop
+    だけで使うと monorepo (``$CLAUDE_PROJECT_DIR`` がサブディレクトリ) で
+    Stop のレシピが Read で効かなくなるため、あえて git には寄せない。
+    None (root 不明) なら path 形 rule は評価されない。
+    """
+    return _resolve_project_key(cwd)
 
 
 def _parse_patterns_text(text: str) -> list[tuple[str, bool]]:
