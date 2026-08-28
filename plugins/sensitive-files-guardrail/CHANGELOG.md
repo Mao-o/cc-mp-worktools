@@ -20,6 +20,78 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.21.0
+
+**PEM / armored 鍵の専用経路を追加し、秘密鍵の生バイトが reason に混入する不具合を
+修正**。2026-08-28 の多角レビューで検出。
+
+- **判定境界 (deny / allow / ask) の変化: なし。** `.pem` / `.key` / `id_rsa*` は
+  従来どおり機密パターンに一致して deny になる。変わるのは reason の**中身**
+- テスト件数: redact 862 → **879** / check **79** (計 958)
+
+### 1. 不具合の内容
+
+`redaction/keyonly_scan.py:15` の
+`_KEY_RE = ^\s*(?:export\s+)?([A-Za-z_][\w.\-]*)\s*[:=]` が、PEM 最終行
+(base64 パディング `=` で終わる行) を `KEY=` 形式と誤判定し、**base64 本体を
+そのまま「鍵名」として reason に出力していた**。
+
+`[\w.\-]` は base64 の `+` `/` を含まないため **最終行に `+` `/` が無いときだけ**
+発火する確率的な漏れで、実測の発火率は RSA-2048 で 30 本中 1 本程度。
+出力は `NOTE: ... Real values are NOT in context.` と
+`note: ... values never read.` に挟まれた位置に出ており、**内容と主張が矛盾**していた。
+
+同一欠陥が 3 経路にあった: `redaction/opaque.py` (`scan_keys`, 32KB 以下) /
+`redaction/engine.py` (`scan_stream`, 32KB 超) / `redaction/dotenv.py`
+(`_LINE_RE`, `.env` に値として PEM を埋めた形)。
+
+941 件のテストを通過していた理由は、**PEM 形状の fixture が 1 件も無かった**ため
+(`grep -rni 'BEGIN RSA|BEGIN PRIVATE|BEGIN OPENSSH' tests/` → 0 件)。
+
+### 2. 対処 (2 層)
+
+**`redaction/pem.py` (新規)** — ファイル全体が armored 鍵なら専用経路に分け、
+block の種別と件数だけを返す:
+
+```
+format: pem (armored key / certificate)
+blocks: 1
+block types:
+  1. RSA PRIVATE KEY
+armored bytes: 1679
+note: key material is never parsed or returned. only block labels and counts are shown.
+```
+
+判定は basename ではなく**内容の sniff** (先頭 40 行以内の `-----BEGIN ...-----`)。
+`id_rsa` のような拡張子なしファイルを basename だけで判別できないため。
+`_detect_format` が既に format を確定しているケース (`.env` 等) には介入しない
+(`.env` に PEM を値として埋めた形は dotenv 経路のまま扱いたいため)。
+
+**多層防御** — `keyonly_scan` / `dotenv` の鍵名候補に
+`pem.looks_base64_fragment` ゲートを追加。「24 文字以上 / `_` を含まない /
+英大小混在 / 数字を含む」を全て満たす候補を base64 断片とみなして棄却する。
+閾値を 24 にしているのは `someVeryLongCamelCaseKeyName` のような正当な名前を
+巻き込まないため (数字を含む条件と併せて false negative を抑える)。
+
+### 3. 情報面の変化
+
+PEM ファイルの reason は「鍵名の羅列 (実体は base64 断片)」から
+「block 種別 + 件数 + armored バイト数」に変わる。**漏れを塞ぐと同時に
+「何のファイルか」が従来より明確になる** (思想 2 に整合)。
+BEGIN と END の数が合わないときは truncate の可能性を note で示す。
+
+### 4. テスト
+
+`tests/test_pem.py` (17 件) と `tests/fixtures/keys/synthetic_rsa.pem` を追加。
+
+fixture は**実鍵ではなく合成データを固定**で置く。発火は最終行に `+` `/` が
+無いときだけなので、実鍵を生成してテストすると**約 90% の確率で pass する
+flaky テスト**になるため (経緯は `tests/fixtures/keys/README.md`)。
+`test_fixture_has_the_triggering_shape` が「fixture が発火する形であること」自体を
+pin しており、fixture が更新されてもテストが空振りにならない。
+
+修正を無効化した negative control で 17 件中 7 件が失敗することを確認済み。
+
 ## 0.20.0
 
 **E6 (Edit/Write の意図汲み取りメッセージ拡張)**。`core.safepath.classify` の

@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from typing import IO
 
+from .pem import looks_base64_fragment
 from .sanitize import sanitize_key
 
 _KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][\w.\-]*)\s*[:=]")
@@ -34,6 +35,10 @@ def scan_keys(text: str) -> list[str]:
     for line in text.splitlines():
         m = _KEY_RE.match(line)
         if not m:
+            continue
+        # PEM 本文の行は末尾のパディング ``=`` が ``KEY=`` に見えるため、
+        # base64 断片は鍵名候補から棄却する (多層防御。詳細は redaction/pem.py)
+        if looks_base64_fragment(m.group(1)):
             continue
         key = sanitize_key(m.group(1))
         if key in seen:
@@ -86,6 +91,9 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
             return False
         m = _KEY_RE.match(line)
         if not m:
+            return False
+        # scan_keys と同じ多層防御 (詳細は redaction/pem.py)
+        if looks_base64_fragment(m.group(1)):
             return False
         key = sanitize_key(m.group(1))
         if key in keys_seen:

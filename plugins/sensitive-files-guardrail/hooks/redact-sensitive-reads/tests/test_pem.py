@@ -1,0 +1,190 @@
+"""PEM / armored 鍵の minimal-info 化 (0.21.0)。
+
+回帰対象: ``_KEY_RE`` が PEM 最終行の base64 パディング ``=`` を ``KEY=`` と
+誤認し、base64 本体を「鍵名」として reason に出していた不具合。
+
+fixture は**実鍵ではなく合成データ**を固定で使う。発火は最終行に ``+`` ``/`` が
+無いときだけなので、実鍵を生成すると約 90% の確率で pass する flaky テストになる
+(詳細は ``tests/fixtures/keys/README.md``)。
+"""
+from __future__ import annotations
+
+import unittest
+from io import BytesIO
+from pathlib import Path
+
+from redaction.engine import redact, redact_large_file
+from redaction.pem import (
+    format_pem,
+    looks_base64_fragment,
+    looks_pem,
+    redact_pem,
+)
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "keys"
+SYNTHETIC_PEM = FIXTURE_DIR / "synthetic_rsa.pem"
+
+# fixture 本文に現れる base64 様の行 (これが reason に出たら漏洩)
+_BODY_FRAGMENTS = [
+    "NOTAREALKEYNOTAREALKEY",
+    "syntheticTestDataOnly",
+    "NotARealKeyJustTestDataAAAABBBBCCCCDDDD1234567890abcdEFghIJkl",
+]
+
+
+def _redact_text(basename: str, text: str) -> str:
+    data = text.encode("utf-8")
+    return redact(BytesIO(data), basename, len(data))
+
+
+class TestPemLeakRegression(unittest.TestCase):
+    """base64 本体が reason に出ないこと (本丸)。"""
+
+    def setUp(self) -> None:
+        self.text = SYNTHETIC_PEM.read_text()
+
+    def test_fixture_has_the_triggering_shape(self):
+        """fixture が「修正前に漏洩した形」であることを固定する。
+
+        最終 body 行が ``=`` で終わり ``+`` ``/`` を含まないこと。この性質が
+        崩れると本テストは不具合を検出しなくなる (テスト自身の前提の pin)。
+        """
+        body_lines = [
+            ln for ln in self.text.splitlines()
+            if ln and not ln.startswith("-----")
+        ]
+        last = body_lines[-1]
+        self.assertTrue(last.endswith("="), f"最終行が = で終わらない: {last!r}")
+        self.assertNotIn("+", last)
+        self.assertNotIn("/", last)
+
+    def test_inline_path_does_not_leak_body(self):
+        reason = _redact_text("synthetic_rsa.pem", self.text)
+        for frag in _BODY_FRAGMENTS:
+            self.assertNotIn(frag, reason, f"base64 本体が漏洩: {frag}")
+
+    def test_inline_path_reports_pem_format(self):
+        reason = _redact_text("synthetic_rsa.pem", self.text)
+        self.assertIn("format: pem", reason)
+        self.assertIn("RSA PRIVATE KEY", reason)
+        self.assertIn("blocks: 1", reason)
+
+    def test_large_file_path_does_not_leak_body(self):
+        """32KB 超は ``redact_large_file`` (scan_stream) 経路に入る。"""
+        # block を繰り返して 32KB 超の bundle を作る
+        bundle = self.text * 200
+        data = bundle.encode("utf-8")
+        self.assertGreater(len(data), 32 * 1024)
+        reason = redact_large_file(BytesIO(data), "bundle.key")
+        for frag in _BODY_FRAGMENTS:
+            self.assertNotIn(frag, reason, f"base64 本体が漏洩: {frag}")
+        self.assertIn("format: pem", reason)
+
+    def test_extensionless_key_is_detected_by_content(self):
+        """``id_rsa`` のような拡張子なしでも content sniff で PEM 経路に入る。"""
+        reason = _redact_text("id_rsa", self.text)
+        self.assertIn("format: pem", reason)
+        for frag in _BODY_FRAGMENTS:
+            self.assertNotIn(frag, reason)
+
+    def test_dotenv_with_embedded_pem_does_not_leak_continuation_lines(self):
+        """``.env`` の値に複数行 PEM を埋めた形 (dotenv 経路の多層防御)。"""
+        env_text = (
+            "APP_NAME=demo\n"
+            "PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n"
+            + "\n".join(
+                ln for ln in self.text.splitlines() if not ln.startswith("-----")
+            )
+            + "\n-----END RSA PRIVATE KEY-----\n"
+            "AFTER_KEY=tail\n"
+        )
+        reason = _redact_text(".env", env_text)
+        # dotenv 経路のままであること (format は dotenv)
+        self.assertIn("format: dotenv", reason)
+        # 正当なキーは見えること
+        self.assertIn("APP_NAME", reason)
+        self.assertIn("AFTER_KEY", reason)
+        # base64 継続行が「鍵名」として出ないこと
+        for frag in _BODY_FRAGMENTS:
+            self.assertNotIn(frag, reason, f"継続行が鍵名として漏洩: {frag}")
+
+
+class TestLooksPem(unittest.TestCase):
+    def test_detects_begin_marker(self):
+        self.assertTrue(looks_pem("-----BEGIN RSA PRIVATE KEY-----\nabc\n"))
+        self.assertTrue(looks_pem("# comment\n-----BEGIN CERTIFICATE-----\n"))
+
+    def test_rejects_non_pem(self):
+        self.assertFalse(looks_pem("KEY=value\nOTHER=x\n"))
+        self.assertFalse(looks_pem(""))
+        self.assertFalse(looks_pem("just text"))
+
+    def test_begin_marker_far_down_is_ignored(self):
+        """先頭 40 行を超える位置の BEGIN は sniff 対象外 (dotenv 誤判定回避)。"""
+        text = "\n".join(f"K{i}=v" for i in range(60))
+        text += "\n-----BEGIN RSA PRIVATE KEY-----\n"
+        self.assertFalse(looks_pem(text))
+
+
+class TestRedactPem(unittest.TestCase):
+    def test_counts_multiple_blocks(self):
+        text = (
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nBBBB\n-----END RSA PRIVATE KEY-----\n"
+        )
+        info = redact_pem(text)
+        self.assertEqual(info["blocks"], 2)
+        self.assertEqual(info["block_types"], ["CERTIFICATE", "RSA PRIVATE KEY"])
+        self.assertEqual(info["end_markers"], 2)
+
+    def test_dedupes_block_types_but_keeps_count(self):
+        text = ("-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n") * 3
+        info = redact_pem(text)
+        self.assertEqual(info["blocks"], 3)
+        self.assertEqual(info["block_types"], ["CERTIFICATE"])
+
+    def test_mismatched_markers_are_reported(self):
+        text = "-----BEGIN CERTIFICATE-----\nA\n"  # END なし
+        out = format_pem(redact_pem(text))
+        self.assertIn("do not match", out)
+
+    def test_format_never_includes_body(self):
+        text = "-----BEGIN X-----\nSECRETBODYLINE\n-----END X-----\n"
+        out = format_pem(redact_pem(text))
+        self.assertNotIn("SECRETBODYLINE", out)
+
+
+class TestLooksBase64Fragment(unittest.TestCase):
+    """多層防御ゲートが正当な鍵名を巻き込まないこと。"""
+
+    def test_rejects_base64_body_line(self):
+        self.assertTrue(
+            looks_base64_fragment(
+                "NotARealKeyJustTestDataAAAABBBBCCCCDDDD1234567890abcdEFghIJkl"
+            )
+        )
+
+    def test_keeps_ordinary_env_names(self):
+        for name in [
+            "DATABASE_URL",
+            "AWS_SECRET_ACCESS_KEY",
+            "STRIPE_KEY",
+            "apiKey",
+            "someVeryLongCamelCaseKeyName",  # 24 文字超だが数字なし
+            "PORT",
+            "x",
+        ]:
+            self.assertFalse(
+                looks_base64_fragment(name), f"正当な鍵名を棄却した: {name}"
+            )
+
+    def test_short_mixed_case_alnum_is_kept(self):
+        """閾値未満は常に通す (camelCase の短い名前を守る)。"""
+        self.assertFalse(looks_base64_fragment("apiKey2"))
+
+    def test_non_str_is_safe(self):
+        self.assertFalse(looks_base64_fragment(None))  # type: ignore[arg-type]
+
+
+if __name__ == "__main__":
+    unittest.main()

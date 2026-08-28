@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 
 from .placeholders import looks_placeholder
+from .pem import looks_base64_fragment
 from .sanitize import sanitize_key
 
 # KEY=VALUE / export KEY=VALUE の行をざっくり捕捉
@@ -232,6 +233,11 @@ def redact_dotenv(text: str) -> dict:
         if not m:
             continue
         raw_key, raw_val = m.group(1), m.group(2)
+        # ``.env`` の値として複数行 PEM を埋めた形では、継続行の末尾パディング
+        # ``=`` が ``KEY=`` に見えて base64 本体が鍵名として出る。base64 断片は
+        # 棄却する (多層防御。詳細は redaction/pem.py)
+        if looks_base64_fragment(raw_key):
+            continue
         v = _preprocess_value(raw_val)
         type_class, prefix = _detect_type_and_prefix(v)
         is_ph, ph_label = looks_placeholder(v)

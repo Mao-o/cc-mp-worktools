@@ -150,6 +150,27 @@ note: nested structure not parsed. only top-level key names returned.
 > セクション」を伝える設計 (思想 1 = うっかり露出予防の射程、完全な情報遮断
 > ではない)。`<nested>` で 1 件カウントするのみで nested の key 名は出さない。
 
+PEM / armored 鍵 (`.pem` / `.key` / `id_rsa` など) は専用経路で block の種別と
+件数だけを返す (0.21.0):
+
+```
+<DATA untrusted="true" source="redact-hook" guard="guardrail-v1">
+NOTE: sanitized data from a sensitive file. Real values are NOT in context.
+file: id_rsa
+format: pem (armored key / certificate)
+blocks: 1
+block types:
+  1. RSA PRIVATE KEY
+armored bytes: 1679
+note: key material is never parsed or returned. only block labels and counts are shown.
+</DATA>
+```
+
+> 判定は basename ではなく**内容の sniff** (先頭 40 行以内の `-----BEGIN ...-----`)
+> で行う。`id_rsa` のような拡張子なしファイルを basename だけで判別できないため。
+> format が既に確定しているケース (`.env` に PEM を値として埋めた形など) には
+> 介入せず、その形式のパーサをそのまま使う。
+
 ### `PreToolUse(Bash)` — redact-sensitive-reads
 
 **三態判定** (deny / ask_or_allow / allow) で静的解析する:
@@ -404,10 +425,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (862 tests, 0.20.0 時点)
+# redact-sensitive-reads (879 tests, 0.21.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (79 tests, 0.20.0 時点)
+# check-sensitive-files (79 tests, 0.21.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
