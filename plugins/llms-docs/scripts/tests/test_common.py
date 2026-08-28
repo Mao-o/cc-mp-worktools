@@ -271,6 +271,65 @@ class NormalizationStemmingTest(unittest.TestCase):
         # false positives between unrelated words.
         self.assertEqual(_common.score_entry("Skill", "", ["firestore"]), 0)
 
+    def test_mixed_case_acronym_is_not_treated_as_plural(self):
+        # "iOS" is not the plural of "iO" — stripping its trailing "s" the
+        # same way "Hooks" -> "Hook" is stripped turns it into "io", which
+        # then substring-matches any title/description merely containing
+        # that pair of letters (e.g. "Configuration", "Migrations").
+        self.assertEqual(_common.score_entry("Configuration", "", ["iOS"]), 0)
+        self.assertEqual(_common.score_entry("Migrations", "", ["iOS"]), 0)
+
+    def test_mixed_case_acronym_still_matches_itself_exactly(self):
+        self.assertEqual(_common.score_entry("iOS", "", ["iOS"]), 10)
+        # Substring match still works when the title spells out the same
+        # acronym with its real capitalization (as any actual "iOS ..."
+        # doc title would) — both sides normalize to the same "ios" token.
+        self.assertEqual(_common.score_entry("iOS App Development", "", ["iOS"]), 5)
+
+    def test_single_capital_word_is_still_stemmed_normally(self):
+        # The guard is specifically for mixed-case acronyms; an ordinary
+        # Title-cased single word (exactly one capital, at position 0)
+        # must keep stemming as before.
+        self.assertEqual(_common.score_entry("Skill", "", ["Skills"]), 10)
+
+    def test_all_caps_ordinary_plural_is_still_stemmed_and_matches(self):
+        # An ALL-CAPS query ("HOOKS") is a user typing an ordinary plural
+        # in shouty case, not an acronym — unlike "iOS" it has no
+        # lowercase letter anywhere. It must still stem to "hook" (the
+        # same result "Hooks" stems to) rather than staying "hooks" and
+        # silently missing an otherwise-exact match solely because of
+        # capitalization.
+        self.assertEqual(_common.score_entry("Hooks", "", ["HOOKS"]), 10)
+        self.assertEqual(_common.score_entry("Skill", "", ["SKILLS"]), 10)
+
+
+class ScoreEntryEmptyNormalizedKeywordTest(unittest.TestCase):
+    """A keyword consisting only of characters _norm() strips (separators
+    like '-'/'_') normalizes to "". Left unguarded, "" is a substring of
+    every string, so every 'kw_norm in <field>' check in score_entry would
+    trivially succeed — turning a degenerate keyword into a match against
+    the entire corpus instead of a no-op."""
+
+    def test_separator_only_keyword_does_not_match_everything(self):
+        self.assertEqual(_common.score_entry("Hooks", "Configure hook matchers", ["_"]), 0)
+        self.assertEqual(_common.score_entry("Skills", "Reusable capabilities", ["--"]), 0)
+        self.assertEqual(_common.score_entry("Anything", "Any description at all", ["_-"]), 0)
+
+    def test_separator_only_keyword_does_not_inflate_score_when_mixed_with_real_keyword(self):
+        # The garbage keyword must contribute nothing — no extra points,
+        # and it must not count toward (or against) the all-keywords-
+        # matched AND bonus threshold.
+        only_real = _common.score_entry("Hooks", "", ["hooks"])
+        real_plus_garbage = _common.score_entry("Hooks", "", ["hooks", "_"])
+        self.assertEqual(only_real, real_plus_garbage)
+
+    def test_two_real_keywords_still_get_and_bonus_alongside_garbage_keyword(self):
+        two_real = _common.score_entry("Hook events", "matcher config", ["hook", "matcher"])
+        two_real_plus_garbage = _common.score_entry(
+            "Hook events", "matcher config", ["hook", "matcher", "--"]
+        )
+        self.assertEqual(two_real, two_real_plus_garbage)
+
 
 class ScoreEntryRegressionFloorTest(unittest.TestCase):
     """Regression floor, per this repo's discipline of diffing a
@@ -467,6 +526,25 @@ class TruncateContentPreservesMarkdownBoundariesTest(unittest.TestCase):
             _common.truncate_content(content, 1000, narrow_hint="hint"), content
         )
 
+    def test_no_safe_boundary_emits_empty_body_not_a_raw_cut(self):
+        # Degenerate case: even the very first line alone exceeds
+        # max_chars. Falling back to a raw content[:max_chars] slice here
+        # would cut mid-line (or mid-fence, if the long first line opened
+        # one) — exactly the malformed-cut failure this function exists
+        # to prevent. Emitting no body before the notice is always
+        # well-formed, if less useful.
+        content = "a" * 100 + "\nsecond line\n"
+        result = _common.truncate_content(content, 10, narrow_hint="hint")
+        visible_body = result.split("\n... (")[0]
+        self.assertEqual(visible_body, "")
+        self.assertIn("chars truncated", result)
+
+    def test_no_safe_boundary_inside_an_unclosed_fence_from_the_start(self):
+        content = "```python\n" + ("x = 1\n" * 20)
+        result = _common.truncate_content(content, 15, narrow_hint="hint")
+        visible_body = result.split("\n... (")[0]
+        self.assertEqual(visible_body, "")
+
 
 class CorpusHintArgsTest(unittest.TestCase):
     """A hint suggesting a follow-up command (the --max-chars truncation
@@ -506,6 +584,51 @@ class CorpusHintArgsTest(unittest.TestCase):
     def test_missing_file_attribute_is_treated_as_absent(self, _mock):
         # firebase's args namespace has no --file flag at all.
         args = types.SimpleNamespace(cache_dir="/default/cache")
+        self.assertEqual(_common.corpus_hint_args(args), ())
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_file_path_with_space_is_shell_quoted(self, _mock):
+        # These values are spliced verbatim into a copy-pasteable shell
+        # command line; an unquoted space would split into an extra
+        # argument when the reader actually runs the generated command.
+        args = types.SimpleNamespace(file="/my docs/snap.txt", cache_dir="/default/cache")
+        self.assertEqual(
+            _common.corpus_hint_args(args), ("--file", "'/my docs/snap.txt'")
+        )
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_cache_dir_with_shell_metacharacter_is_shell_quoted(self, _mock):
+        args = types.SimpleNamespace(file=None, cache_dir="/cache;rm -rf /")
+        self.assertEqual(
+            _common.corpus_hint_args(args),
+            ("--cache-dir", "'/cache;rm -rf /'"),
+        )
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_non_default_max_age_is_included(self, _mock):
+        args = types.SimpleNamespace(
+            file=None, cache_dir="/default/cache", max_age=0,
+        )
+        self.assertEqual(_common.corpus_hint_args(args), ("--max-age", "0"))
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_default_max_age_is_omitted(self, _mock):
+        args = types.SimpleNamespace(
+            file=None, cache_dir="/default/cache",
+            max_age=_common.DEFAULT_MAX_AGE_SECONDS,
+        )
+        self.assertEqual(_common.corpus_hint_args(args), ())
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_max_age_is_omitted_once_file_takes_precedence(self, _mock):
+        # --file makes --max-age irrelevant too (read-only snapshot mode
+        # never re-fetches), same reasoning as --cache-dir above.
+        args = types.SimpleNamespace(file="/snap.txt", cache_dir="/default/cache", max_age=0)
+        self.assertEqual(_common.corpus_hint_args(args), ("--file", "/snap.txt"))
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_missing_max_age_attribute_is_treated_as_absent(self, _mock):
+        args = types.SimpleNamespace(file=None, cache_dir="/default/cache")
         self.assertEqual(_common.corpus_hint_args(args), ())
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -498,8 +499,30 @@ def _norm(tok: str) -> str:
     stripping only the trailing ``s`` from those would leave a dangling
     ``e`` (e.g. "boxes" → "boxe"). Words already ending in ``ss`` (e.g.
     "process") are left untouched to avoid mangling a non-plural word.
+
+    A token with an uppercase letter NOT in the first position, mixed
+    with at least one lowercase letter elsewhere, in its ORIGINAL spelling
+    (checked before lowercasing) skips all of the above stripping: this
+    exact shape — "iOS", "macOS", "tvOS" — is how brand/acronym tokens get
+    written, and an ordinary English plural is essentially never mixed-
+    case like this. Without this guard, a query for "iOS" would strip to
+    "io" and substring-match unrelated titles like "Configuration" or
+    "Migrations" purely by coincidence — especially harmful for sources
+    with no full-corpus search fallback, where a handful of spurious "io"
+    hits can crowd the intended page out of a small top-N candidate list.
+    Deliberately narrower than "any token with 2+ capitals": an ALL-CAPS
+    query like "HOOKS" (a user typing an ordinary plural in shouty case,
+    not an acronym) must still stem to "hook" — the same result "Hooks"
+    stems to — or an otherwise-exact match silently becomes a miss solely
+    because of how the user capitalized it. Still lowercased and
+    separator-stripped like any other token, just not stemmed.
     """
+    is_acronym_like = (
+        any(c.isupper() for c in tok[1:]) and any(c.islower() for c in tok)
+    )
     t = tok.lower().replace("-", "").replace("_", "")
+    if is_acronym_like:
+        return t
     if t.endswith("ies") and len(t) > 4:
         return t[:-3] + "y"
     if t.endswith(("ses", "xes", "zes", "ches", "shes")) and len(t) > 4:
@@ -554,6 +577,16 @@ def score_entry(title: str, description: str, keywords,
     deterministic transform is applied to both, so this cannot turn a
     previously-exact match into a partial one — it only ever adds new
     matches / upgrades partial matches to exact.
+
+    A keyword made up entirely of characters ``_norm()`` strips (``-``,
+    ``_``, or a mix, e.g. ``"_"``/``"--"``/``"_-"``) normalizes to ``""``.
+    Left unguarded, every ``kw_norm in <field>`` check below would then
+    trivially succeed for every entry (the empty string is a substring of
+    any string), turning a degenerate keyword into a universal match
+    instead of a no-op. Such keywords are skipped entirely — contributing
+    no score and not counting toward *keywords* for the all-keyword bonus
+    below — so e.g. a lone ``"_"`` keyword scores every entry 0 rather than
+    matching the whole corpus.
     """
     title_norm = _norm_phrase(title or "")
     desc_norm = _norm_phrase(description or "")
@@ -562,9 +595,13 @@ def score_entry(title: str, description: str, keywords,
 
     total = 0
     matched_keywords = 0
+    scorable_keywords = 0
 
     for kw in keywords:
         kw_norm = _norm(kw)
+        if not kw_norm:
+            continue
+        scorable_keywords += 1
         kw_score = 0
 
         if kw_norm == title_norm:
@@ -585,7 +622,7 @@ def score_entry(title: str, description: str, keywords,
             matched_keywords += 1
         total += kw_score
 
-    if len(keywords) > 1 and matched_keywords == len(keywords):
+    if scorable_keywords > 1 and matched_keywords == scorable_keywords:
         total += 10
 
     return total
@@ -953,36 +990,47 @@ def add_cache_dir_arg(parser, *, default: str | None = None, help=None) -> None:
 
 
 def corpus_hint_args(args) -> tuple:
-    """Return ``--file``/``--cache-dir`` CLI args needed to keep a
-    generated follow-up command hint pointed at the same corpus as the
-    current invocation, instead of silently falling back to defaults.
+    """Return ``--file``/``--cache-dir``/``--max-age`` CLI args needed to
+    keep a generated follow-up command hint pointed at the same corpus as
+    the current invocation, instead of silently falling back to defaults.
 
     A hint (e.g. the ``--max-chars`` truncation notice's "narrow with
     ..." suggestion, or ``print_subsection_hints``'s ``Next:`` line) that
-    drops a non-default ``--file``/``--cache-dir`` selection can point the
-    *same numeric page index* at an entirely different document once the
-    reader follows it and it re-resolves against the default corpus
-    instead of the snapshot/cache dir just displayed. ``--file`` is only
-    present on scripts that support a read-only snapshot override
-    (checked via ``getattr`` so scripts without it, e.g. firebase, are
-    unaffected).
+    drops a non-default ``--file``/``--cache-dir``/``--max-age`` selection
+    can point the *same numeric page index* at an entirely different
+    document once the reader follows it: it re-resolves against the
+    default corpus instead of the snapshot/cache dir just displayed, or
+    (with a nondefault ``--max-age`` that intentionally accepts an older
+    cache) re-fetches and can land on a different upstream ordering.
+    ``--file`` is only present on scripts that support a read-only
+    snapshot override (checked via ``getattr`` so scripts without it,
+    e.g. firebase, are unaffected).
 
-    ``--file`` and ``--cache-dir`` are mutually exclusive in every loader
-    that supports both (``_load_docs``/``_load_full_txt``): once
-    ``--file`` is given, ``cache_dir`` is never even read. Echoing both
-    would mislead a reader into thinking ``--cache-dir`` still matters, so
-    ``--cache-dir`` is only included when ``--file`` is absent, and even
-    then only when it differs from ``default_cache_dir()`` (itself
+    ``--file`` makes ``--cache-dir``/``--max-age`` irrelevant in every
+    loader that supports it (``_load_docs``/``_load_full_txt``): once
+    ``--file`` is given, neither is ever even read. Echoing them anyway
+    would mislead a reader into thinking they still matter, so once
+    ``--file`` is present it is returned alone. ``--cache-dir`` is
+    included only when it differs from ``default_cache_dir()`` (itself
     env-overridable, so a plain string default would false-positive under
-    ``$XDG_CACHE_HOME``/``$LLMS_DOCS_CACHE_DIR``).
+    ``$XDG_CACHE_HOME``/``$LLMS_DOCS_CACHE_DIR``); ``--max-age`` only when
+    it differs from ``DEFAULT_MAX_AGE_SECONDS``. Both a nondefault path
+    value are shell-quoted (``shlex.quote``) since these strings are
+    spliced verbatim into a copy-pasteable shell command line — an
+    unquoted path containing a space or shell metacharacter would
+    otherwise split into extra arguments or trigger shell expansion when
+    the reader actually runs the generated command.
     """
     file_val = getattr(args, "file", None)
     if file_val:
-        return ("--file", file_val)
+        return ("--file", shlex.quote(file_val))
     result = []
     cache_dir = getattr(args, "cache_dir", None)
     if cache_dir and cache_dir != default_cache_dir():
-        result += ["--cache-dir", cache_dir]
+        result += ["--cache-dir", shlex.quote(cache_dir)]
+    max_age = getattr(args, "max_age", None)
+    if max_age is not None and max_age != DEFAULT_MAX_AGE_SECONDS:
+        result += ["--max-age", str(max_age)]
     return tuple(result)
 
 
@@ -1070,12 +1118,13 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
         if not fence.in_fence and not _is_table_line(line):
             safe_cut = line_end
         cumulative = line_end
-    if safe_cut == 0:
-        # Degenerate case (e.g. the very first line, or an unclosed
-        # fence/table from the start, already reaches max_chars): fall
-        # back to the raw slice rather than emitting empty content.
-        safe_cut = max_chars
-
+    # safe_cut deliberately stays 0 (rather than falling back to a raw
+    # content[:max_chars] slice) when no line boundary is safe within
+    # budget — e.g. the very first line alone exceeds max_chars, or an
+    # unclosed fence/table runs from the start past it. A raw slice in
+    # that case would reintroduce exactly the malformed-cut failure this
+    # function exists to prevent; emitting no body at all before the
+    # notice is always well-formed, if less useful.
     cut = len(content) - safe_cut
     return (
         content[:safe_cut]
