@@ -2,6 +2,31 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.1] - 2026-08-28
+
+### 破損gzipストリームの未捕捉例外 + body/sidecarの非atomicなペア書き込みによる整合性崩れを修正 (0.21.0 の追いコミット)
+
+Codex R1指摘2件 (P2)。
+
+- **`gzip.decompress` が投げる `EOFError`/`zlib.error` が既存の例外捕捉範囲外だった**:
+  破損・切り詰められたgzipストリームは `Content-Length` 不一致では検知できないケースがあり、
+  これらの例外は既存の `(URLError, OSError, HTTPException)` に含まれず生tracebackとして
+  露出していた。例外捕捉タプルに `EOFError, zlib.error` を追加
+- **body書き込みとsidecar書き込みが別々のatomic writeで、ペアとしては非atomicだった**:
+  同一の期限切れキャッシュを2プロセスが並行して再取得し、かつ2つのレスポンスの間で上流の内容が
+  変わっていた場合、それぞれ独立にatomicな書き込みが競合して「片方のbody + もう片方のETag」の
+  ような組み合わせで保存され得る。次回の条件付きGETがこの不整合なETagで304を受け取ると、実際の
+  bodyとは対応しない304を「有効」と誤認し、誤ったbodyをさらに1 `--max-age` 分保持し続けてしまう。
+  `<cache>.meta.json` に書き込み時点のbodyの `content_hash` (sha256) を追加保存し、条件付き
+  ヘッダーを送る前にキャッシュファイルの現在のbytesのhashと突き合わせるよう修正。不一致なら
+  条件ヘッダーを送らず無条件GETにフォールバックし、body・sidecarを揃って再書き込みして不整合を解消する。
+  この突き合わせは `--max-age` 超過ごとにキャッシュファイル全体を読んでhash化するコストを追加するが、
+  実測では24MB (platformページ相当の上限規模) のsha256計算が約7ms (`hashlib.sha256`、Python 3標準)
+  であり、ネットワークI/Oが支配的な処理全体において無視できる
+
+回帰テスト5件追加・既存3件をcontent_hash込みのfixtureに更新、既存1件にsidecar自己修復の検証を追加
+(`test_fetch_and_cache.py`、184 tests, all green)。
+
 ## [0.21.0] - 2026-08-28
 
 ### HTTP取得にgzip圧縮転送 + 条件付きGET (ETag/Last-Modified) を追加し、無条件の全量再取得を削減

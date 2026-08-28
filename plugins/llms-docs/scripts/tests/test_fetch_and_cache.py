@@ -411,13 +411,15 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         with open(self._meta_path(cache_path), encoding="utf-8") as f:
             meta = json.load(f)
         self.assertEqual(meta, {
+            "content_hash": _common._content_hash(b"hello"),
             "etag": '"abc123"', "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT",
         })
 
-    def test_response_without_validators_writes_empty_sidecar(self):
+    def test_response_without_validators_still_persists_a_content_hash(self):
         # A server that never sends ETag/Last-Modified must not leave a
-        # *previous* fetch's stale sidecar lying around to be sent on the
-        # next conditional GET.
+        # *previous* fetch's stale validators lying around to be sent on
+        # the next conditional GET — but the content_hash (this function's
+        # own bookkeeping, not server-dependent) is always (re)written.
         cache_path = self._cache_path()
         with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
             json.dump({"etag": '"stale"'}, f)
@@ -426,7 +428,8 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         ):
             _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
         with open(self._meta_path(cache_path), encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {})
+            meta = json.load(f)
+        self.assertEqual(meta, {"content_hash": _common._content_hash(b"hello")})
 
     def test_sidecar_write_failure_does_not_fail_an_otherwise_successful_fetch(self):
         # The cache file itself is already written by the time the sidecar
@@ -489,6 +492,7 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         os.utime(cache_path, (old_time, old_time))
         with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
             json.dump({
+                "content_hash": _common._content_hash(b"stale content"),
                 "etag": '"abc123"', "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT",
             }, f)
 
@@ -531,6 +535,86 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         self.assertIsNone(captured["if_none_match"])
         self.assertIsNone(captured["if_modified_since"])
 
+    def test_mismatched_content_hash_sends_no_conditional_headers(self):
+        # Simulates the interleaving Codex flagged: two processes racing
+        # to refresh the same stale cache pair one response's body with a
+        # *different* response's sidecar (independently atomic writes,
+        # not atomic as a pair). The sidecar's content_hash then no longer
+        # matches the file's actual bytes — the fix is to distrust the
+        # validators in that case and force an unconditional GET, rather
+        # than risk a 304 that's valid for the sidecar's response but not
+        # for the body actually on disk.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("body from process A")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "content_hash": _common._content_hash(b"body from process B"),
+                "etag": '"etag-from-process-b"',
+            }, f)
+
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            return _FakeResponse(b"resynced content")
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertIsNone(captured["if_none_match"])
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "resynced content")
+        # The resync must be self-healing: the rewritten sidecar has to match
+        # the rewritten body, or the next refresh repeats the same mismatch.
+        with open(self._meta_path(cache_path), encoding="utf-8") as f:
+            self.assertEqual(
+                json.load(f)["content_hash"],
+                _common._content_hash(b"resynced content"),
+            )
+
+    def test_truncated_gzip_stream_is_treated_as_a_transport_failure(self):
+        # gzip.decompress() raises EOFError/zlib.error for a truncated or
+        # corrupt stream — neither is an OSError subclass, so without
+        # explicit handling these would escape as a raw traceback instead
+        # of hitting the same stale-serve/exit/raise path as any other
+        # transport failure.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        truncated = gzip.compress(b"x" * 1000)[:-5]
+        resp = _FakeResponse(truncated, headers={
+            "Content-Encoding": "gzip", "Content-Length": str(len(truncated)),
+        })
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "stale content")
+
+    def test_truncated_gzip_stream_with_no_cache_exits_1(self):
+        cache_path = self._cache_path()
+        truncated = gzip.compress(b"x" * 1000)[:-5]
+        resp = _FakeResponse(truncated, headers={
+            "Content-Encoding": "gzip", "Content-Length": str(len(truncated)),
+        })
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            with self.assertRaises(SystemExit) as cm:
+                _common.fetch_url(
+                    "https://example.com/x", cache_path, user_agent="ua"
+                )
+        self.assertEqual(cm.exception.code, 1)
+        self.assertFalse(os.path.exists(cache_path))
+
     def test_304_bumps_mtime_without_rewriting_or_redownloading_content(self):
         cache_path = self._cache_path()
         with open(cache_path, "w") as f:
@@ -538,24 +622,40 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         old_time = time.time() - 8 * 86400
         os.utime(cache_path, (old_time, old_time))
         with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
-            json.dump({"etag": '"abc123"'}, f)
+            json.dump({
+                "content_hash": _common._content_hash(b"still valid content"),
+                "etag": '"abc123"',
+            }, f)
+
+        captured = {}
+
+        def _raise_304(req, timeout=None):
+            captured["if_none_match"] = req.get_header("If-none-match")
+            raise _http_error(304)
 
         with mock.patch(
-            "urllib.request.urlopen", side_effect=_http_error(304)
+            "urllib.request.urlopen", side_effect=_raise_304
         ) as mock_urlopen:
             result = _common.fetch_url(
                 "https://example.com/x", cache_path, user_agent="ua",
                 max_age=604800,
             )
         mock_urlopen.assert_called_once()
+        # Confirms this 304 followed a real conditional request (matching
+        # the sidecar's content_hash) rather than an unconditional one a
+        # real server would never 304.
+        self.assertEqual(captured["if_none_match"], '"abc123"')
         self.assertEqual(result, cache_path)
         with open(cache_path) as f:
             self.assertEqual(f.read(), "still valid content")
-        # The sidecar is untouched (still just the original etag, no
-        # last_modified key added) — a 304 means "your validators are
-        # still current," not "here is a fresh response to re-persist."
+        # The sidecar is untouched (still just the original content_hash/
+        # etag, no last_modified key added) — a 304 means "your validators
+        # are still current," not "here is a fresh response to re-persist."
         with open(self._meta_path(cache_path), encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {"etag": '"abc123"'})
+            self.assertEqual(json.load(f), {
+                "content_hash": _common._content_hash(b"still valid content"),
+                "etag": '"abc123"',
+            })
         age = time.time() - os.path.getmtime(cache_path)
         self.assertLess(age, 5)
 
