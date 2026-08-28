@@ -300,7 +300,7 @@ class NormalizationStemmingTest(unittest.TestCase):
         # false positives between unrelated words.
         self.assertEqual(_common.score_entry("Skill", "", ["firestore"]), 0)
 
-    def test_acronym_with_two_or_more_capitals_is_not_treated_as_plural(self):
+    def test_mixed_case_acronym_is_not_treated_as_plural(self):
         # "iOS" is not the plural of "iO" — stripping its trailing "s" the
         # same way "Hooks" -> "Hook" is stripped turns it into "io", which
         # then substring-matches any title/description merely containing
@@ -308,7 +308,7 @@ class NormalizationStemmingTest(unittest.TestCase):
         self.assertEqual(_common.score_entry("Configuration", "", ["iOS"]), 0)
         self.assertEqual(_common.score_entry("Migrations", "", ["iOS"]), 0)
 
-    def test_acronym_with_two_or_more_capitals_still_matches_itself_exactly(self):
+    def test_mixed_case_acronym_still_matches_itself_exactly(self):
         self.assertEqual(_common.score_entry("iOS", "", ["iOS"]), 10)
         # Substring match still works when the title spells out the same
         # acronym with its real capitalization (as any actual "iOS ..."
@@ -316,10 +316,21 @@ class NormalizationStemmingTest(unittest.TestCase):
         self.assertEqual(_common.score_entry("iOS App Development", "", ["iOS"]), 5)
 
     def test_single_capital_word_is_still_stemmed_normally(self):
-        # The guard is specifically for 2+ capitals; an ordinary
+        # The guard is specifically for mixed-case acronyms; an ordinary
         # Title-cased single word (exactly one capital, at position 0)
         # must keep stemming as before.
         self.assertEqual(_common.score_entry("Skill", "", ["Skills"]), 10)
+
+    def test_all_caps_ordinary_plural_is_still_stemmed_and_matches(self):
+        # An ALL-CAPS query ("HOOKS") is a user typing an ordinary plural
+        # in shouty case, not an acronym — unlike "iOS" it has no
+        # lowercase letter anywhere. It must still stem to "hook" (the
+        # same result "Hooks" stems to) rather than staying "hooks" and
+        # silently missing an otherwise-exact match solely because of
+        # capitalization. This is the regression case for the mixed-case
+        # (not just "2+ capitals") guard above.
+        self.assertEqual(_common.score_entry("Hooks", "", ["HOOKS"]), 10)
+        self.assertEqual(_common.score_entry("Skill", "", ["SKILLS"]), 10)
 
 
 class ScoreEntryEmptyNormalizedKeywordTest(unittest.TestCase):

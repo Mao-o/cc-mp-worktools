@@ -522,21 +522,28 @@ def _norm(tok: str) -> str:
     ``e`` (e.g. "boxes" → "boxe"). Words already ending in ``ss`` (e.g.
     "process") are left untouched to avoid mangling a non-plural word.
 
-    A token with 2+ uppercase letters in its ORIGINAL spelling (checked
-    before lowercasing) skips all of the above stripping: an ordinary
-    English plural is essentially never written with 2+ capitals (nobody
-    types "DogS"), so this pattern is a reliable signal for a proper
-    acronym/brand token instead. Without this guard, a query for "iOS"
-    would strip to "io" and substring-match unrelated titles like
-    "Configuration" or "Migrations" purely by coincidence — especially
-    harmful for sources with no full-corpus search fallback, where a
-    handful of spurious "io" hits can crowd the intended page out of a
-    small top-N candidate list. Still lowercased and separator-stripped
-    like any other token, just not stemmed.
+    A token with an uppercase letter NOT in the first position, mixed
+    with at least one lowercase letter elsewhere, in its ORIGINAL spelling
+    (checked before lowercasing) skips all of the above stripping: this
+    exact shape — "iOS", "macOS", "tvOS" — is how brand/acronym tokens get
+    written, and an ordinary English plural is essentially never mixed-
+    case like this. Without this guard, a query for "iOS" would strip to
+    "io" and substring-match unrelated titles like "Configuration" or
+    "Migrations" purely by coincidence — especially harmful for sources
+    with no full-corpus search fallback, where a handful of spurious "io"
+    hits can crowd the intended page out of a small top-N candidate list.
+    Deliberately narrower than "any token with 2+ capitals": an ALL-CAPS
+    query like "HOOKS" (a user typing an ordinary plural in shouty case,
+    not an acronym) must still stem to "hook" — the same result "Hooks"
+    stems to — or an otherwise-exact match silently becomes a miss solely
+    because of how the user capitalized it. Still lowercased and
+    separator-stripped like any other token, just not stemmed.
     """
-    has_multi_upper = sum(1 for c in tok if c.isupper()) >= 2
+    is_acronym_like = (
+        any(c.isupper() for c in tok[1:]) and any(c.islower() for c in tok)
+    )
     t = tok.lower().replace("-", "").replace("_", "")
-    if has_multi_upper:
+    if is_acronym_like:
         return t
     if t.endswith("ies") and len(t) > 4:
         return t[:-3] + "y"
