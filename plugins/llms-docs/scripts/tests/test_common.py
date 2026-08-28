@@ -119,10 +119,11 @@ class ExtractContentTest(unittest.TestCase):
             "```\n",
             "## Section C\n",
         ]
-        content = _common.extract_content(body, "Section A")
+        content, resolved = _common.extract_content(body, "Section A")
         self.assertIn("x = 1", content)
         self.assertIn("## Section B", content)  # still inside the fenced block
         self.assertNotIn("Section C", content)
+        self.assertEqual(resolved, "Section A")
 
     def test_extends_to_include_straddling_table(self):
         body = [
@@ -135,24 +136,131 @@ class ExtractContentTest(unittest.TestCase):
             "## Section C\n",
             "more\n",
         ]
-        content = _common.extract_content(body, "Section B")
+        content, resolved = _common.extract_content(body, "Section B")
         self.assertIn("| 1 | 2 |", content)
         self.assertNotIn("Section C", content)
+        self.assertEqual(resolved, "Section B")
 
     def test_full_document_when_heading_path_none(self):
         body = ["## A\n", "x\n"]
-        self.assertEqual(_common.extract_content(body, None), "".join(body))
+        content, resolved = _common.extract_content(body, None)
+        self.assertEqual(content, "".join(body))
+        self.assertIsNone(resolved)
+
+    def test_partial_match_resolves_to_canonical_heading_path(self):
+        # The header/hint block must show the section that was ACTUALLY
+        # picked, not echo back the caller's raw (possibly partial) input
+        # — "config" here only matches the nested H3.
+        body = [
+            "## Frontmatter reference\n",
+            "text\n",
+            "### Advanced Configuration\n",
+            "deep\n",
+        ]
+        content, resolved = _common.extract_content(body, "config")
+        self.assertEqual(resolved, "Frontmatter reference/Advanced Configuration")
+        self.assertIn("deep", content)
+
+    def test_ambiguous_partial_match_dies_instead_of_silently_picking_first(self):
+        # Two sibling "... Configuration" sections both match the case-
+        # insensitive substring "config" — silently taking the first (the
+        # old behavior) risks the caller reading/citing the wrong section
+        # with no indication another candidate existed.
+        body = [
+            "## Client Configuration\n",
+            "a\n",
+            "## Server Configuration\n",
+            "b\n",
+        ]
+        with self.assertRaises(SystemExit) as cm:
+            _common.extract_content(body, "config")
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_exact_heading_path_copied_from_output_never_hits_ambiguity_check(self):
+        # Interaction between the two fixes above: a heading_path copied
+        # verbatim from a previous sections/content/search call must
+        # always resolve via the exact-match branch first, even when it
+        # would ALSO satisfy
+        # >= 2 other sections' partial-match pattern — the ambiguity check
+        # must never run once an exact match exists. Otherwise the tool's
+        # own documented copy-paste round trip (see SKILL.md Quick Start)
+        # would newly break for any heading_path that happens to be a
+        # substring of a sibling section's path too.
+        body = [
+            "## Client Configuration\n",
+            "a\n",
+            "## Server Configuration\n",
+            "b\n",
+        ]
+        content, resolved = _common.extract_content(body, "Client Configuration")
+        self.assertEqual(resolved, "Client Configuration")
+        self.assertIn("a", content)
+        self.assertNotIn("b", content)
+
+    def test_case_insensitive_exact_match_beats_descendant_partial_match(self):
+        # Heading matching is documented as case-insensitive. A query that
+        # differs from a section's title only by case must resolve via the
+        # (new) case-folded exact-match tier and win outright — not fall
+        # through to the substring tier, where it would also match its own
+        # nested child ("Configuration/Options" contains "configuration")
+        # and die as ambiguous even though only one *heading* actually
+        # equals the query.
+        body = [
+            "## Configuration\n",
+            "top-level config text\n",
+            "### Options\n",
+            "nested options text\n",
+        ]
+        content, resolved = _common.extract_content(body, "configuration")
+        self.assertEqual(resolved, "Configuration")
+        self.assertIn("top-level config text", content)
+
+    def test_case_insensitive_exact_match_on_heading_path_form(self):
+        # Same tier, exercised against a multi-segment heading_path (not
+        # just a bare title) copied back with different casing.
+        body = [
+            "## Guide\n",
+            "intro\n",
+            "### Setup\n",
+            "setup text\n",
+        ]
+        content, resolved = _common.extract_content(body, "guide/setup")
+        self.assertEqual(resolved, "Guide/Setup")
+        self.assertIn("setup text", content)
+
+    def test_top_heading_path_returns_preamble_before_first_heading(self):
+        # search can report a body hit above the first heading as
+        # Section: (top), and its Next hint tells the caller to copy that
+        # value straight into content's heading_path argument — this must
+        # resolve, not fall through to "heading not found".
+        body = [
+            "preamble line\n",
+            "## First\n",
+            "first body\n",
+        ]
+        content, resolved = _common.extract_content(body, "(top)")
+        self.assertEqual(resolved, "(top)")
+        self.assertIn("preamble line", content)
+        self.assertNotIn("first body", content)
+
+    def test_top_heading_path_on_document_with_no_headings_returns_everything(self):
+        body = ["only preamble\n", "more preamble\n"]
+        content, resolved = _common.extract_content(body, "(top)")
+        self.assertEqual(resolved, "(top)")
+        self.assertEqual(content, "".join(body))
 
 
 class ScoreEntryTest(unittest.TestCase):
     def test_title_exact_match_scores_highest(self):
         self.assertEqual(_common.score_entry("Hooks", "", ["hooks"]), 10)
 
-    def test_plural_mismatch_scores_zero_known_limitation(self):
-        # Characterization test: score_entry does no stemming, so a plural
-        # query does not match a singular title (tracked separately as a
-        # search-quality improvement).
-        self.assertEqual(_common.score_entry("Hook events", "", ["hooks"]), 0)
+    def test_plural_query_now_matches_multiword_title(self):
+        # Previously a characterization test pinning score 0 (no
+        # stemming). _norm() now folds "hooks" -> "hook", which is a
+        # substring of normalized "hook events" -> scores as a partial
+        # match (5), not an exact one (10), since the full normalized
+        # strings still differ.
+        self.assertEqual(_common.score_entry("Hook events", "", ["hooks"]), 5)
 
     def test_title_substring_match(self):
         self.assertGreater(_common.score_entry("Hooks reference", "", ["hooks"]), 0)
@@ -161,6 +269,185 @@ class ScoreEntryTest(unittest.TestCase):
         multi = _common.score_entry("Hook events", "matcher config", ["hook", "matcher"])
         single = _common.score_entry("Hook events", "matcher config", ["hook"])
         self.assertGreater(multi, single)
+
+
+class NormalizationStemmingTest(unittest.TestCase):
+    """A light plural-to-singular + separator-stripping fold so
+    plural/singular and hyphen/camelCase spelling variants score as
+    equivalent, fixing the previously-zero cases fixed above and pinning
+    two more representative pairs: skills/Skill, hooks/Hook events,
+    stream-text/streamText."""
+
+    def test_plural_query_matches_singular_title_exactly(self):
+        self.assertEqual(_common.score_entry("Skill", "", ["skills"]), 10)
+
+    def test_normalized_exact_match_outranks_mere_substring(self):
+        exact = _common.score_entry("Skill", "", ["skills"])
+        substring = _common.score_entry("Skill reference", "", ["skills"])
+        self.assertGreater(exact, substring)
+
+    def test_hyphenated_query_matches_camelcase_title_exactly(self):
+        self.assertEqual(_common.score_entry("streamText", "", ["stream-text"]), 10)
+
+    def test_singular_query_matches_plural_title_as_exact(self):
+        # The already-working reverse direction (score_entry('Skills', '',
+        # ['skill']) == 5, substring only) should be UPGRADED to an exact
+        # match now that both sides are normalized before comparing.
+        self.assertEqual(_common.score_entry("Hooks", "", ["hook"]), 10)
+
+    def test_unrelated_keyword_still_scores_zero(self):
+        # Normalization must not turn matching lenient enough to create
+        # false positives between unrelated words.
+        self.assertEqual(_common.score_entry("Skill", "", ["firestore"]), 0)
+
+    def test_mixed_case_acronym_is_not_treated_as_plural(self):
+        # "iOS" is not the plural of "iO" — stripping its trailing "s" the
+        # same way "Hooks" -> "Hook" is stripped turns it into "io", which
+        # then substring-matches any title/description merely containing
+        # that pair of letters (e.g. "Configuration", "Migrations").
+        self.assertEqual(_common.score_entry("Configuration", "", ["iOS"]), 0)
+        self.assertEqual(_common.score_entry("Migrations", "", ["iOS"]), 0)
+
+    def test_mixed_case_acronym_still_matches_itself_exactly(self):
+        self.assertEqual(_common.score_entry("iOS", "", ["iOS"]), 10)
+        # Substring match still works when the title spells out the same
+        # acronym with its real capitalization (as any actual "iOS ..."
+        # doc title would) — both sides normalize to the same "ios" token.
+        self.assertEqual(_common.score_entry("iOS App Development", "", ["iOS"]), 5)
+
+    def test_single_capital_word_is_still_stemmed_normally(self):
+        # The guard is specifically for mixed-case acronyms; an ordinary
+        # Title-cased single word (exactly one capital, at position 0)
+        # must keep stemming as before.
+        self.assertEqual(_common.score_entry("Skill", "", ["Skills"]), 10)
+
+    def test_all_caps_ordinary_plural_is_still_stemmed_and_matches(self):
+        # An ALL-CAPS query ("HOOKS") is a user typing an ordinary plural
+        # in shouty case, not an acronym — unlike "iOS" it has no
+        # lowercase letter anywhere. It must still stem to "hook" (the
+        # same result "Hooks" stems to) rather than staying "hooks" and
+        # silently missing an otherwise-exact match solely because of
+        # capitalization. This is the regression case for the mixed-case
+        # (not just "2+ capitals") guard above.
+        self.assertEqual(_common.score_entry("Hooks", "", ["HOOKS"]), 10)
+        self.assertEqual(_common.score_entry("Skill", "", ["SKILLS"]), 10)
+
+    def test_silent_e_plural_is_overstemmed_known_limitation(self):
+        """Characterization test, not a spec assertion.
+
+        The sibilant-suffix branch (``ses``/``xes``/``zes``/``ches``/``shes``
+        -> strip 2 chars) exists so hard-consonant plurals like "matches"
+        fold to "match". But a plural formed from a silent-e root —
+        "response" -> "Responses", "release" -> "Releases", "database" ->
+        "Databases", "cache" -> "Caches" — ends in the exact same letters
+        ("...ches", "...ses") as those hard-consonant plurals, and this
+        branch strips it the same way, producing "respons"/"releas"/
+        "databas"/"cach" instead of the singular. The singular keyword
+        keeps its final "e", so a previously working substring match now
+        scores 0.
+
+        Not fixable by a smarter suffix rule: "caches" and "matches" are
+        surface-identical from "...ches" onward (confirmed for "xes"/
+        "zes"/"ses" too: axes/axe vs axes/axis, mazes/maze vs gazes/gaze-
+        adjacent hard forms, gases/gas vs cases/case) — distinguishing them
+        needs a root word list or a real stemmer, not a character-suffix
+        check, and per this repo's regression discipline that needs a
+        real-corpus before/after diff, not a synthetic fixture. Tracked in
+        the internal backlog, not covered by any existing item before this.
+        This test pins the current (imperfect) behavior so a future
+        deliberate fix changes it on purpose.
+        """
+        self.assertEqual(_common.score_entry("Responses", "", ["response"]), 0)
+        self.assertEqual(_common.score_entry("Releases", "", ["release"]), 0)
+        self.assertEqual(_common.score_entry("Databases", "", ["database"]), 0)
+        self.assertEqual(_common.score_entry("Caches", "", ["cache"]), 0)
+
+
+class ScoreEntryEmptyNormalizedKeywordTest(unittest.TestCase):
+    """A keyword consisting only of characters _norm() strips (separators
+    like '-'/'_') normalizes to "". Left unguarded, "" is a substring of
+    every string, so every 'kw_norm in <field>' check in score_entry would
+    trivially succeed — turning a degenerate keyword into a match against
+    the entire corpus instead of a no-op."""
+
+    def test_separator_only_keyword_does_not_match_everything(self):
+        self.assertEqual(_common.score_entry("Hooks", "Configure hook matchers", ["_"]), 0)
+        self.assertEqual(_common.score_entry("Skills", "Reusable capabilities", ["--"]), 0)
+        self.assertEqual(_common.score_entry("Anything", "Any description at all", ["_-"]), 0)
+
+    def test_separator_only_keyword_does_not_inflate_score_when_mixed_with_real_keyword(self):
+        # The garbage keyword must contribute nothing — no extra points,
+        # and it must not count toward (or against) the all-keywords-
+        # matched AND bonus threshold.
+        only_real = _common.score_entry("Hooks", "", ["hooks"])
+        real_plus_garbage = _common.score_entry("Hooks", "", ["hooks", "_"])
+        self.assertEqual(only_real, real_plus_garbage)
+
+    def test_two_real_keywords_still_get_and_bonus_alongside_garbage_keyword(self):
+        two_real = _common.score_entry("Hook events", "matcher config", ["hook", "matcher"])
+        two_real_plus_garbage = _common.score_entry(
+            "Hook events", "matcher config", ["hook", "matcher", "--"]
+        )
+        self.assertEqual(two_real, two_real_plus_garbage)
+
+
+class ScoreEntryRegressionFloorTest(unittest.TestCase):
+    """Regression floor, per this repo's discipline of diffing a
+    changed analysis/ranking function against its pre-change output over a
+    representative corpus (not just mutation-testing the new code): these
+    exact (title, description, keywords) -> minimum-score pairs were
+    verified via an old-vs-new differential script against the
+    pre-stemming score_entry (merged main, commit 054815f) to have zero
+    unexplained losses across a ~2800-combination matrix of doc-corpus-like
+    titles/descriptions/keywords.
+
+    They were chosen to pin the specific bug caught in review: _norm()'s
+    length gates (``len(t) > 4`` / ``len(t) > 2``) are sized for a single
+    word. An early version of this change applied _norm() directly to
+    whole multi-word title/description strings, so the gate was measured
+    against the combined length of every word instead of the last word
+    alone — "Common uses" (len 11) took the multi-char sibilant branch
+    (stripping "es") while the bare keyword "uses" (len 4) fell through to
+    the single-"s" branch instead, producing "common us" vs "use" — two
+    strings that no longer share the substring the *unnormalized* text did
+    ("uses" in "Common uses"). ``_norm_phrase()`` (word-by-word, then
+    rejoin) fixes this by keeping every word's stemming decision local to
+    that word. If any case here drops below its floor, _norm_phrase
+    regressed back to whole-string normalization.
+    """
+
+    def test_previously_working_matches_do_not_score_lower_than_before(self):
+        cases = [
+            ("Common uses", "", ["uses"], 5),
+            ("Chart axes", "", ["axes"], 5),
+            ("Tool use", "Common uses of this API", ["uses"], 2),
+            ("Hooks", "Configure hook matchers here", ["hooks"], 10),
+            ("Rate limits and quotas", "", ["limits"], 5),
+            ("Cloud Functions for Firebase", "", ["functions"], 5),
+        ]
+        for title, desc, kws, minimum in cases:
+            with self.subTest(title=title, keywords=kws):
+                self.assertGreaterEqual(
+                    _common.score_entry(title, desc, kws), minimum
+                )
+
+    def test_previously_exact_matches_are_still_at_least_exact(self):
+        for title, kw in [("Hooks", "hooks"), ("Skill", "skill"), ("Analysis", "analysis")]:
+            with self.subTest(title=title):
+                self.assertGreaterEqual(_common.score_entry(title, "", [kw]), 10)
+
+
+class FormatHeadingPathForDisplayTest(unittest.TestCase):
+    def test_top_sentinel_gets_clarifying_suffix(self):
+        rendered = _common.format_heading_path_for_display("(top)")
+        self.assertTrue(rendered.startswith("(top)"))
+        self.assertIn("before first heading", rendered)
+
+    def test_regular_heading_path_is_unchanged(self):
+        self.assertEqual(
+            _common.format_heading_path_for_display("Hooks/Configuration"),
+            "Hooks/Configuration",
+        )
 
 
 class SearchContentInBodyTest(unittest.TestCase):

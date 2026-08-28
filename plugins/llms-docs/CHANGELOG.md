@@ -2,6 +2,186 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.17.4] - 2026-08-28
+
+### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)
+
+Codex R4 で `_norm()` の sibilant-suffix 規則 (`ses`/`xes`/`zes`/`ches`/`shes`
+終わりの語から2文字strip) が silent-e語根の複数形も誤って2文字stripしてしまう
+指摘を受けた (`Responses`→`respons`, `Caches`→`cach` 等、単数キーワードは
+末尾`e`を保持するため一致しなくなる)。
+
+調査の結果、これは文字パターンだけでは解決不可能な曖昧性と判断した:
+`caches`(cache+s, silent-e語根) と `matches`(match+es, 硬子音語根) は
+末尾が完全に同形で、辞書 (語根リスト) か本物のstemmerなしに文字列だけからは
+判別できない。既存テストはこの硬子音側の挙動を一切pinしていなかったため
+安全側 (どちらの挙動も壊さない) を優先し、現状挙動をcharacterization test
+として明文化するに留めた。修正は内部バックログで追跡する。
+
+回帰テスト1件追加 (`test_common.py`、126 tests, all green)。
+
+## [0.17.3] - 2026-08-27
+
+### ALL-CAPSの通常複数形 (`HOOKS`等) が単複変換されず一致しなくなる回帰を修正 (0.17.2 の追いコミット)
+
+0.17.2 の頭字語判定 (`_norm()` の大文字2文字以上をacronymとみなすguard) は
+`HOOKS`/`SKILLS`のような**全て大文字の通常の複数形**も誤ってacronym扱い
+していた。クエリ側は変換されず`"hooks"`のままなのに、コーパス側の
+`"Hooks"`は通常どおり`"hook"`に変換されるため、本来完全一致するはずの
+組み合わせが不一致になっていた (`score_entry("Hooks", "", ["HOOKS"])` が
+0点)。
+
+判定条件を「大文字2文字以上」から「先頭以外に大文字があり、かつ小文字も
+含む (mixed case)」に絞り込み。`"iOS"`/`"macOS"`はこの条件を満たすため
+引き続きacronym扱いされる一方、`"HOOKS"`(小文字を含まない全大文字)は
+条件を満たさず通常どおり単複変換されるよう修正。
+
+回帰テスト1件追加 (`test_common.py`、125 tests, all green)。
+
+## [0.17.2] - 2026-08-27
+
+### `score_entry` が頭字語 "iOS" 等を複数形と誤認し無関係な語に誤ヒットする問題を修正 (0.17.1 の追いコミット)
+
+`_norm()` の単複変換 (末尾 `s` 除去) は "iOS" のような 2 文字以上の大文字を含む
+頭字語にも無条件で適用されており、"iOS" → "io" に変換されていた。"io" は
+"Configuration" や "Migrations" など無関係な多くの語にも部分文字列として
+含まれるため、これらが偽陽性でヒットしていた。候補が上位 5 件までしか本文に
+潜らない Firebase の `search` では、この偽陽性が本来ヒットすべきページを
+候補から押し出しかねない実害があった。
+
+元のスペルに大文字が 2 文字以上含まれるトークンは単複変換をスキップする
+(通常の英語複数形が "DogS" のように大文字を複数含む形で書かれることは
+まず無いため、これを頭字語/固有名詞の signal として扱う) よう修正。
+小文字化・区切り文字除去自体はそれ以外のトークンと同様に行う。
+
+回帰テスト3件追加 (`test_common.py`、124 tests, all green)。
+
+## [0.17.1] - 2026-08-27
+
+### `extract_content` / `score_entry` のレビュー指摘 2 件を修正 (0.17.0 の追いコミット)
+
+- **大文字小文字違いの完全一致が、部分一致の曖昧判定より後に評価されていた**:
+  見出しマッチングは大文字小文字を区別しないと文書化されているにも関わらず、
+  完全一致の判定は大文字小文字を区別する形のみで、大文字小文字違いの完全一致
+  (例: `## Configuration` に対する `"configuration"`) は完全一致扱いされず
+  部分一致の曖昧チェックまで落ちていた。ネストした子見出し (`### Options`)
+  があると、子の heading_path (`Configuration/Options`) も同じ部分文字列
+  `"configuration"` を含むため、実際には曖昧でない入力が
+  `Error: ambiguous heading` で失敗していた。完全一致の判定に大文字小文字を
+  区別しない第2パスを追加し、部分一致の曖昧チェックより先に評価するよう修正
+- **`score_entry` の正規化して空文字列になるキーワードが全件にマッチしていた**:
+  `_norm()` が区切り文字のみを除去する性質上、`"_"` / `"--"` / `"_-"` のような
+  キーワードは正規化後に空文字列になる。空文字列はどの文字列に対しても
+  `in` 判定が真になるため、こうした縮退キーワードが実質「全件マッチ」として
+  スコアされていた (`search-index "_"` 等が全件をヒットさせる)。正規化後に
+  空文字列になるキーワードはスコア計算・all-keywords-matched ボーナス判定の
+  両方から除外するよう修正
+
+回帰テスト 5 件追加 (`test_common.py`、121 tests, all green)。
+
+## [0.17.0] - 2026-08-26
+
+### `content` の heading_path 解決: 曖昧な部分一致の無言解決 / `(top)` 未対応を修正
+
+`_common.extract_content()` の見出し解決ロジックに 2 件の不具合があった。
+
+- **曖昧な部分一致を無言で先頭候補に解決していた**: 完全一致が無い場合の
+  部分一致検索は最初にマッチした 1 件を無条件で採用しており、`"config"` の
+  ような曖昧な入力が複数セクション ("Client Configuration" / "Server
+  Configuration" 等) に一致しても警告なく先頭を返していた。呼び出し側が
+  どのセクションが実際に選ばれたか判別できず、誤引用の温床になっていた。
+  部分一致の候補が 2 件以上ある場合は `Error: ambiguous heading '...'.
+  Matches: ...` で候補一覧を出して exit 1 するよう変更 (`_resolve_page_ref`
+  の slug 解決が既に持っていたのと同じ設計)。**完全一致は従来どおり最優先
+  — 曖昧チェックより先に判定するため、`sections`/`content`/`search` の出力
+  からそのままコピーした heading_path が新たに失敗することはない**
+- **`search` が返す `Section: (top)` を `content` に渡すとエラーになっていた**:
+  見出し前の本文ヒットは `heading_path` が `"(top)"` として返るが、
+  `extract_content` にはこの値を認識する分岐が無く `Error: heading '(top)'
+  not found` になっていた。`heading_path == "(top)"` を先頭〜最初の見出し
+  直前までを返す専用分岐として処理するよう修正。`search`/`search-content`
+  の `Section: (top)` 表示は `(top)  [before first heading]` という
+  区切りのある注釈付きに変更 (値部分の `(top)` 自体はそのまま `content`
+  にコピーできる — 表示だけを分かりやすくし、コピー&ペースト前提の
+  値は壊さない設計)
+- 上記に伴い `extract_content()` は `content` 単体の文字列ではなく
+  `(content, resolved_heading_path)` のタプルを返すよう変更。3 script の
+  `cmd_content` は解決済みの `resolved_heading_path` をヘッダー表示と
+  サブセクションヒントに使うようになり、部分一致で入力とは異なる
+  正式なパスに解決された場合もヘッダーに正しい値が表示される
+  (従来は呼び出し側が渡した生の入力をそのままヘッダーにエコーしていた)
+- `parse-claude-docs.py` の `_print_subsection_hints` が持っていた
+  独自の部分一致検索 (`extract_content` と同じ「無言で先頭候補」ロジックの
+  重複実装) を削除し、呼び出し側から渡される解決済みパスへの完全一致
+  検索のみに簡略化 (二重実装が片方だけ直って表示とヒントが食い違う事故を防ぐ)
+
+### 検索スコアリング: 単複同形の揺れ (skills ↔ Skill 等) が 0 点になる問題を修正
+
+`_common.score_entry()` は単純な部分一致のみで、`score_entry('Skill', '',
+['skills'])` や `score_entry('Hook events', '', ['hooks'])` が 0 点になって
+いた (逆方向の `skill` → `Skills` は部分一致で 5 点)。上位 5 件しか本文に
+潜らない `search` では、複数形で検索しただけで該当ページが候補から
+落ちていた。
+
+- `_norm()` を追加: 小文字化 + `-`/`_` 除去 + 末尾の軽量な単複変換
+  (`ies→y`、`ses/xes/zes/ches/shes→` 語幹、それ以外の末尾 `s` 除去。
+  `ss` で終わる語は対象外)。クエリキーワードと `tags` (元々 1 語単位の
+  ラベル) はこれをそのまま適用
+- `_norm_phrase()` を追加: title/description/headings (複数語の自由文) は
+  `_norm()` を**単語単位**で適用してから再結合する。`_norm()` の長さ判定
+  (`len(t) > 4` 等) は 1 語想定のため、複数語の文字列全体にそのまま
+  適用すると閾値が「文字列全体の長さ」で評価され、同じ単語 (例:
+  `"uses"`) が短いクエリでは 1 語として正しく変換されるのに、長い
+  フレーズ (例: `"Common uses"`) に埋め込まれると末尾 2 文字を
+  機械的に削るだけの変換になり、正規化前なら一致していたはずの
+  部分一致 (`"uses" in "Common uses"`) を失う回帰を実装レビューで発見・
+  修正した (`"Common uses"` → 誤: `"common us"` / 正: `"common use"`)。
+  完全一致判定も正規化後の文字列で行う (同じ変換を同じ文字列に適用する
+  だけなので、既存の完全一致判定が緩んで partial 側に落ちることはない
+  — 新しい一致が増える方向にのみ働く)
+- 変更前後の `score_entry` を実データ相当のタイトル/説明/クエリ
+  (~2800 通りの組み合わせ) で突き合わせる差分スクリプトを実行し、
+  「変更前は 0 点超だったのに変更後 0 点になった」組み合わせが 0 件、
+  「変更前は完全一致 (10 点) だったのに変更後 10 点未満になった」
+  組み合わせが 0 件であることを確認 (差分は新規一致 74 件・スコア
+  上昇 28 件のみで説明不能な後退は無し)。うち代表的な組み合わせは
+  `ScoreEntryRegressionFloorTest` として恒久的な回帰テストに固定した
+
+### テスト
+
+`scripts/tests/` に回帰テストを 30 件追加 (116 tests, 従来比 +30)。
+
+- `test_common.py`: `extract_content` の `(top)` 処理 2 件、部分一致の
+  正式パス解決 1 件、曖昧な部分一致の die 化 1 件、完全一致が曖昧チェックに
+  先立つことを確認する回帰 1 件、`_norm`/`_norm_phrase` の単複/ハイフン
+  変換 5 件、上記差分スクリプトで確認した後退ゼロを固定する
+  `ScoreEntryRegressionFloorTest` 2 件、`format_heading_path_for_display`
+  2 件を追加。既存の
+  `test_plural_mismatch_scores_zero_known_limitation` (characterization
+  test) は今回の修正で実際に挙動が変わったため
+  `test_plural_query_now_matches_multiword_title` として「修正後の正しい
+  挙動」に書き換えた (characterization test のまま放置すると退行検知に
+  ならないため)
+- `test_parse_claude_docs.py` / `test_parse_ai_sdk.py` /
+  `test_parse_firebase.py` に CLI 統合テストを追加: `search` →
+  `content "(top)"` の実際のコピー&ペースト経路を通しで検証する
+  round-trip テスト (claude-docs / firebase)、`--max-age` の再取得境界を
+  `urlopen` モック + `os.utime` で決定論的に検証するテスト、`--file`
+  読み取り専用モード (fetch なし・存在しないパス・source 不一致) のテスト、
+  argparse 自身の usage error (exit 2) を plugin 側の exit 2 (「上流
+  フォーマット変化」) と混同しないことを確認するテスト、3 script
+  それぞれの代表コマンドの標準出力を verbatim で固定する golden 風テスト
+  (出力フォーマットは 3 script が独立実装のため、将来のドリフトを検知する)
+
+### SKILL.md
+
+3 SKILL とも `heading_path` の指定方法を見直した: 推奨を「`sections`/
+`search`/`content` 出力の完全なパスをそのままコピー」に変更し (短い
+部分一致は曖昧だと die するようになったため)、「曖昧な部分一致は die
+する」「`(top)` は `content` にそのまま渡せる」を明記。metadata version
+を patch bump: researching-claude-docs 3.4.2 → 3.4.3 / researching-ai-sdk
+3.3.3 → 3.3.4 / researching-firebase 2.1.2 → 2.1.3
+
 ## [0.16.1] - 2026-08-25
 
 ### `default_cache_dir` / `fetch_url` のレビュー指摘 2 件を修正 (0.16.0 の追いコミット)

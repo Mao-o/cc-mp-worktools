@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.1.2"
+  version: "2.1.3"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -162,9 +162,16 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 ### heading_path の指定方法
 
-- 見出しテキストそのまま: `"Properties"`
-- スラッシュ区切りの階層パス: `"Properties/generationConfig"`
-- 部分一致 (大文字小文字無視) で検索される
+- **推奨**: `sections` / `search` / `content` の出力にある完全なパスをそのまま
+  コピーする (スラッシュ区切りの階層パス、例: `"Properties/generationConfig"`)
+- 見出しテキストの短い一部分だけを渡すこともできる: `"Properties"`
+  (ただし他の見出しとも部分一致し得るため、曖昧な場合はエラーになる — 下記)
+- 部分一致 (大文字小文字無視) で検索される。完全一致が優先され、部分一致の候補が
+  2 件以上ある場合は `Error: ambiguous heading '...'. Matches: ...` で候補一覧を
+  示して終了する (曖昧な入力を無言で先頭候補に解決しない)
+- `search` / `search-content` が本文中の見出し前ヒットを `Section: (top)` として
+  返すことがある。この `(top)` をそのまま `content` の heading_path に渡すと、
+  最初の見出しの直前までの本文 (プリアンブル) を取得できる
 
 reference ページの多くは H2 のみのフラット構造、guide ページは H2/H3 の階層を持つ。
 
