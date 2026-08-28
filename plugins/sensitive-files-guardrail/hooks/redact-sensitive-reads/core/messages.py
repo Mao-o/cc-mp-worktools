@@ -1290,16 +1290,27 @@ def edit_deny(
     if kind_suggestion:
         tail.append(f"suggestion: {kind_suggestion}")
 
-    tail.append(f"suggestion: {_exclude_hint(basename, literal_name=True)}")
+    # 除外案内は ``_join_with_exclude_hint`` が最後に付ける (Bash 経路と同じ)。
+    #
+    # 0.21.0 の初版は tail に直接 append していたが、``suggested_keys`` が
+    # 予算計算に入っていなかったため、書き込む content にキーが多いと
+    # **レシピ (`!.env`) だけ見えて警告と「承認なしに追加しない」が切れる**
+    # 状態になっていた (実測: 57 文字級のキー 30 本で発生)。
+    # 可変長側 (suggested_keys / existing info) を削って案内の場所を確保する。
+    hint_len = len(
+        f"\nsuggestion: {_exclude_hint(basename, literal_name=True)}".encode("utf-8")
+    )
 
     info: list[str] = []
     if kind == "overwrite":
-        used = len("\n".join(head + tail).encode("utf-8"))
+        used = len("\n".join(head + tail).encode("utf-8")) + hint_len
         info = _edit_existing_info_lines(
             existing_render, MAX_REASON_BYTES - used
         )
 
-    return "\n".join(head + info + tail)
+    return _join_with_exclude_hint(
+        head + info + tail, basename, literal_name=True
+    )
 
 
 # -- M3: patterns.txt 読込失敗 --------------------------------------------

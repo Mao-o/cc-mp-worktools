@@ -29,7 +29,7 @@ commit 52113a1 で完了)。
 - **判定境界 (deny / allow / ask) の変化: 1 点のみ** — 64KB 超の Bash segment が
   `ask_or_allow` に倒れるようになる (§5b)。それ以外は不変で、`.pem` / `.key` /
   `id_rsa*` は従来どおり deny、変わるのは reason の**中身**
-- テスト件数: redact 862 → **931** / check 79 → **80** (計 1,011)
+- テスト件数: redact 862 → **934** / check 79 → **80** (計 1,014)
 
 ### 1. 不具合の内容
 
@@ -113,9 +113,18 @@ basename を先に評価するため、配下のファイルが別の include �
 切れる**状態になっていた (30 キーの `.env` で実測: reason 3,071 byte、
 `保護そのもの` が消失)。実行可能な除外コマンドを見せながら影響範囲を隠すのは
 informed consent の逆なので、`_join_with_exclude_hint` を新設し
-**可変長側 (minimal info) を先に削って案内の場所を確保**する
-(deny reason の組み立て 10 箇所すべてがこれを通る)。
-キー数 5 / 30 / 80 / 200 で、レシピと警告が全文残ることを確認。
+**可変長側 (minimal info / suggested_keys) を先に削って案内の場所を確保**する。
+**Bash の 10 経路と Edit/Write 経路のすべてがこれを通る**。
+
+当初は Bash 側だけを直し、Edit/Write 側は `existing_render` しか予算に
+入れていなかったため `suggested_keys` が膨らむと同じ不具合が残っていた
+(実測: 57 文字級のキー 30 本を Write する content で、`!.env` は見えるのに
+`保護そのもの` と `承認なしに追加しない` が消失)。
+
+この「片方の経路だけ直す」ミスは 0.21.0 で 3 回起きた
+(inline/streaming の block 数、dotenv/keyonly のコメント除去、本件) ため、
+`tests/test_exclude_hint_never_truncated.py` で**経路を列挙して横断的に**
+検査する。修正を無効化した negative control で両経路とも落ちることを確認済み。
 
 **生成する除外行は fnmatch の literal 化**する (`escape_glob`)。rule は
 `fnmatchcase` で評価されるので、`key[1].pem` のようにメタ文字を含む
