@@ -90,7 +90,7 @@ _LOCAL_PATTERNS_PATH = LOCAL_PATTERNS_DISPLAY_PATH
 def _join_with_exclude_hint(
     lines: list[str], basename: str, literal_name: bool = False
 ) -> str:
-    """本文 + 除外案内を組み立てる。**案内は必ず全文残す** (0.21.0)。
+    """本文 + 除外案内を組み立てる。**案内は必ず全文残す** (0.23.0)。
 
     除外案内には「この行は basename 単位で効く」「Read/Bash/Edit/Write の保護
     そのものが外れる」という影響範囲の開示が含まれる。``core.output._truncate``
@@ -1292,7 +1292,7 @@ def edit_deny(
 
     # 除外案内は ``_join_with_exclude_hint`` が最後に付ける (Bash 経路と同じ)。
     #
-    # 0.21.0 の初版は tail に直接 append していたが、``suggested_keys`` が
+    # 0.23.0 の初版は tail に直接 append していたが、``suggested_keys`` が
     # 予算計算に入っていなかったため、書き込む content にキーが多いと
     # **レシピ (`!.env`) だけ見えて警告と「承認なしに追加しない」が切れる**
     # 状態になっていた (実測: 57 文字級のキー 30 本で発生)。

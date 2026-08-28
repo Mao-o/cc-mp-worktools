@@ -83,6 +83,48 @@ class FirebaseCliTest(unittest.TestCase):
         self.assertIn("search-content", out)
 
 
+class SearchContentMaxSnippetCharsTest(unittest.TestCase):
+    """search-content used to have no --max-snippet-chars at all (unlike
+    search) — every snippet was printed in full, however long. Confirms the
+    flag now truncates here too."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "firebase-llms.txt").write_text(
+            "- [Firestore Query Limits](https://firebase.google.com/docs/firestore/query-limit.md.txt): Limits on queries\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(self.tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/firestore/query-limit.md.txt"
+        long_line = "keywordhit " + ("x" * 200) + " end of line\n"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Firestore Query Limits\n\n## Limits\n" + long_line,
+            encoding="utf-8",
+        )
+
+    def test_default_does_not_truncate_a_short_enough_snippet(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search-content", "keywordhit",
+            "--page-ref", "0", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("chars truncated", out)
+        self.assertIn("end of line", out)
+
+    def test_max_snippet_chars_truncates_a_long_snippet(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search-content", "keywordhit",
+            "--page-ref", "0", "--cache-dir", self.tmp,
+            "--max-snippet-chars", "20",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("chars truncated", out)
+        self.assertNotIn("end of line", out)
+
+
 class SearchSkipsUnreachablePagesTest(unittest.TestCase):
     """One index entry has no cached page and its fetch fails (mocked
     urlopen); the other entry is cache-hit. search / search-content must

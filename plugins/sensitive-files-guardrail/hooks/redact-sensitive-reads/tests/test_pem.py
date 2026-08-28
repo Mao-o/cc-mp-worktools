@@ -1,4 +1,4 @@
-"""PEM / armored 鍵の minimal-info 化 (0.21.0)。
+"""PEM / armored 鍵の minimal-info 化 (0.23.0)。
 
 回帰対象: ``_KEY_RE`` が PEM 最終行の base64 パディング ``=`` を ``KEY=`` と
 誤認し、base64 本体を「鍵名」として reason に出していた不具合。

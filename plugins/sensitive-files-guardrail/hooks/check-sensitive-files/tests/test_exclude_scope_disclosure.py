@@ -1,4 +1,4 @@
-"""Stop hook の block reason が除外レシピの影響範囲を開示していること (0.21.0)。"""
+"""Stop hook の block reason が除外レシピの影響範囲を開示していること (0.23.0)。"""
 from __future__ import annotations
 
 import unittest

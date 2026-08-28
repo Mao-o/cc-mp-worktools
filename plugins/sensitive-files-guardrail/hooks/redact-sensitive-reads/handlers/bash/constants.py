@@ -84,7 +84,7 @@ _METADATA_ONLY_FIRST_TOKENS = frozenset({
     "basename", "dirname", "realpath", "readlink",
     # 引数をそのまま表示 (ファイルを開かない)
     "echo", "printf",
-    # 0.19.0 (bd_092a232e-snw.3): 属性 / タイムスタンプ操作。出力は無し、または
+    # 0.19.0 (2026-08 精査): 属性 / タイムスタンプ操作。出力は無し、または
     # ``-v`` / ``-c`` での変更前後の mode / owner のみで内容は出ない。
     # ``--reference=RFILE`` / ``touch -r RFILE`` は RFILE の mode / owner /
     # timestamp (= metadata) を読むだけで、内容を読む option は存在しない。
@@ -131,6 +131,17 @@ _METADATA_CONTENT_READING_OPTS: dict[str, frozenset[str]] = {
     "tree": frozenset({"--fromfile"}),
 }
 
+# git のサブコマンド前 global option のうち、**次の token を値として取る** もの
+# (``-C <path>`` / ``-c <name>=<value>`` / ``--git-dir <path>`` /
+# ``--work-tree <path>`` / ``--namespace <name>`` / ``--config-env <name>=<envvar>``)。
+# ``=`` 結合形 (``--git-dir=x``) と密着形 (``-Cdir`` / ``-ck=v``) は 1 token で
+# 完結する。``interpreters._git_global_options`` (サブコマンド特定) と
+# ``operand_lexer._git_subcommand_index`` (コマンド別 option 知識の適用位置) が
+# 同じ規則でサブコマンドを探すための共有定義 (0.22.0)。
+_GIT_GLOBAL_VALUE_OPTS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+})
+
 # git の metadata-only subcommand (``git <sub>`` 直書き形のみ認識)。
 # ``git -C dir check-ignore`` のような global option 前置形は対象外 (従来通り
 # operand scan → deny。保守側に倒す)。``show`` / ``diff`` / ``log`` /
@@ -162,7 +173,7 @@ _GIT_LS_FILES_OBJECT_OPTS = frozenset({"-s", "--stage", "--format"})
 # ``-x`` / ``-X`` は値を取るため除外 (``-x s.env`` を誤検出しないため)。
 _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 
-# git rm の「index からの除去のみ」flag (0.19.0, bd_092a232e-snw.3)。
+# git rm の「index からの除去のみ」flag (0.19.0, 2026-08 精査)。
 # ``git rm --cached <path>`` は作業ツリーの実ファイルを消さず内容も出力しない
 # (出力は ``rm '<path>'`` の path 文字列のみ) ため metadata-only。両 hook の
 # reason が「tracked なら ``git rm --cached`` で untrack」と案内しているのに
@@ -223,13 +234,13 @@ _SAFE_REDIRECT_TARGETS = frozenset({"/dev/null", "/dev/stderr", "/dev/stdout"})
 # script 引数の後ろの positional が素直に file operand なので、この基準に
 # 当てはまらない。opaque のままだと ``sed -n 1,5p .env`` が autonomous で素通り
 # し、DESIGN.md が定める確信 deny 条件 (機密 operand 確定 × 内容出力) と実装が
-# 食い違っていた (bd_092a232e-5pn)。
+# 食い違っていた (内部バックログ)。
 #
 # 副作用 (``sed -i`` の in-place / ``awk 'print > "f"'`` の redirect) への慎重さは
 # ``_SAFE_READ_FIRST_TOKENS`` に **入れない**ことで維持する — ``sed s/x/y/ f > out``
 # は residual metachar 経由で従来どおり ask_or_allow に倒れる。
 #
-# 0.18.0 (bd_092a232e-y5y): ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が
+# 0.18.0 (内部バックログ): ``awk '{print}' .env`` は ``{`` ``}`` ``$`` が
 # ``_HARD_STOP_CHARS`` に該当し opaque 判定より **前** の hard-stop で ask に
 # 倒れていた (awk 最頻形の穴)。``_has_hard_stop`` を quote-aware
 # (シングルクォート内を無視) にして operand scan に到達させ、この穴を塞いだ。
@@ -267,3 +278,14 @@ _GLOB_CHARS = frozenset("*?[")
 # 透過剥がしを撤廃したため、この regex は「第一トークンが env-assignment 形式
 # なら opaque 扱い」の判定で 1 回だけ使う)。
 _ENV_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# 同一コマンド内で「glob が dotfile にも展開される」状態を作る形の検出 (0.22.0、
+# Codex R1)。bash の ``shopt -s dotglob`` / ``GLOBIGNORE=<非空>`` (設定されると
+# dotglob が暗黙に有効になる)、zsh の ``setopt globdots`` (option 名は大文字小文字
+# と ``_`` を無視するので ``GLOB_DOTS`` / ``glob_dots`` も)。shell option は Bash
+# tool の呼び出しごとに初期化されるため、同じコマンド文字列に現れる形だけが
+# 対象 (profile で常時有効な環境は hook から見えない — docs で開示)。検出は
+# 保守的 (``shopt -u dotglob`` や単なる言及でも一致) で、効果は
+# ``_glob_operand_is_dotenv_match`` が fnmatch の意味論 (先頭ドットも一致) に
+# 戻る = deny 寄りにしか倒れない。
+_DOTGLOB_HINT_RE = re.compile(r"dotglob|glob_?dots|GLOBIGNORE=", re.IGNORECASE)

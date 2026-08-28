@@ -1,4 +1,4 @@
-"""PEM / armored 鍵ファイルの minimal-info 化 (0.21.0)。
+"""PEM / armored 鍵ファイルの minimal-info 化 (0.23.0)。
 
 ``keyonly_scan`` の ``_KEY_RE`` は ``^\\s*(?:export\\s+)?([A-Za-z_][\\w.\\-]*)\\s*[:=]``
 で「鍵名 = 値」の行を拾うが、**PEM の最終行は base64 パディング ``=`` で終わる**ため

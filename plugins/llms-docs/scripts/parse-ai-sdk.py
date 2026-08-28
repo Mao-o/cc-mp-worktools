@@ -40,6 +40,7 @@ from _common import (
     add_heading_path_arg,
     add_max_age_arg,
     add_max_chars_arg,
+    add_max_snippet_chars_arg,
     assert_parsed,
     corpus_hint_args,
     die,
@@ -332,8 +333,7 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
 
 def cmd_fetch_index(args):
     """Fetch (if needed) and print document index."""
-    # fetch-index has no --file flag, so file_arg is always None here.
-    cache_path, docs = _load_docs(None, args.cache_dir, max_age=args.max_age)
+    cache_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
     _warn_if_untitled_ratio_high(docs, cache_path)
 
     print(f"AI SDK llms-full.txt Document Index (file: {cache_path})")
@@ -377,7 +377,7 @@ def cmd_fetch_index(args):
     print(f"({len(docs)} documents total)")
     print()
     print("Tip: use 'search' to rank docs + drill into bodies in one call")
-    next_hint("sections", "<page_ref>")
+    next_hint("sections", "<page_ref>", *corpus_hint_args(args))
 
 
 def cmd_sections(args):
@@ -407,7 +407,7 @@ def cmd_sections(args):
     print()
     print(f"({len(sections)} sections)")
     print()
-    next_hint("content", str(idx), '"<heading_path>"')
+    next_hint("content", str(idx), '"<heading_path>"', *corpus_hint_args(args))
 
 
 def cmd_content(args):
@@ -503,7 +503,7 @@ def cmd_search_index(args):
 
     print(f"({len(scored)} results, {len(docs)} documents searched)")
     print()
-    next_hint("search", '"<query>"')
+    next_hint("search", '"<query>"', *corpus_hint_args(args))
 
 
 def cmd_search_content(args):
@@ -536,6 +536,7 @@ def cmd_search_content(args):
             context_lines=args.context,
             max_matches_per_doc=args.max_hits,
             min_level=1,
+            max_snippet_chars=args.max_snippet_chars,
         )
 
         if hits["total_matches"] == 0:
@@ -569,7 +570,7 @@ def cmd_search_content(args):
     else:
         print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"')
+    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
 
 
 def cmd_search(args):
@@ -697,7 +698,7 @@ def cmd_search(args):
 
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"')
+    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +724,7 @@ def main():
 
     # fetch-index
     p_index = sub.add_parser("fetch-index", help="Fetch and print document index")
+    _add_file_arg(p_index)
     add_cache_dir_arg(p_index)
     add_max_age_arg(p_index)
     p_index.add_argument(
@@ -765,6 +767,7 @@ def main():
                                help="Context lines around each hit (default: 2)")
     p_search_body.add_argument("--max-hits", type=int, default=5,
                                help="Max hits to display per document (default: 5)")
+    add_max_snippet_chars_arg(p_search_body)
     p_search_body.set_defaults(func=cmd_search_content)
 
     # sections
@@ -812,10 +815,7 @@ def main():
                           help="Max body hits per document (default: 3)")
     p_search.add_argument("--context", type=int, default=2,
                           help="Context lines around each hit (default: 2)")
-    p_search.add_argument(
-        "--max-snippet-chars", type=int, default=500,
-        help="Truncate each snippet to N chars (0 = no limit, default: 500)",
-    )
+    add_max_snippet_chars_arg(p_search)
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

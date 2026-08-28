@@ -11,7 +11,10 @@ to the symlink would shadow the real one.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import http.client
+import json
 import os
 import re
 import shlex
@@ -20,6 +23,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +435,123 @@ class FetchError(Exception):
         self.cause = cause
 
 
+def _meta_path(cache_path: str) -> str:
+    return cache_path + ".meta.json"
+
+
+def _load_fetch_meta(cache_path: str) -> dict:
+    """Return the persisted ETag/Last-Modified sidecar for *cache_path*.
+
+    Returns ``{}`` when there is no sidecar, it's unreadable/corrupt, it
+    parses to valid JSON that isn't a ``dict`` (e.g. a list or bare string),
+    or its ``content_hash``/``etag``/``last_modified`` values aren't strings
+    — nothing guarantees the file wasn't hand-edited or written by some
+    future version with a different shape. A non-string ``etag``/
+    ``last_modified`` would otherwise reach ``fetch_url``'s request headers,
+    where ``urllib`` raises an uncaught ``TypeError`` instead of falling
+    back cleanly; a non-string ``content_hash`` can't crash the same way
+    (it just never equals the current file's hash) but is rejected too so
+    every value this function hands back is guaranteed a string — a caller
+    shouldn't have to separately re-check that. In every rejected case the
+    caller just ends up sending no conditional headers, falling back to the
+    plain unconditional GET this always did before conditional support
+    existed.
+    """
+    try:
+        with open(_meta_path(cache_path), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    for key in ("content_hash", "etag", "last_modified"):
+        if key in meta and not isinstance(meta[key], str):
+            return {}
+    return meta
+
+
+def _content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _save_fetch_meta(cache_path: str, etag: str | None, last_modified: str | None,
+                      content_hash: str) -> None:
+    """Persist *etag*/*last_modified*/*content_hash* alongside *cache_path*
+    for the next fetch's conditional GET.
+
+    *content_hash* (the sha256 of the exact bytes just written to
+    *cache_path*) is always stored, independent of what the server sent,
+    and is what ``fetch_url`` checks before trusting the ETag/Last-Modified
+    to send as conditional headers — see its docstring for why: two
+    concurrent writers of the same cache file can interleave their
+    (independently atomic) body write and sidecar write, pairing one
+    response's body with a *different* response's validators.
+
+    Otherwise always overwrites — including with no ``etag``/
+    ``last_modified`` keys when the response sent neither header — so a
+    server that stops sending them doesn't leave a stale conditional value
+    that would keep being sent on every future fetch (and keep getting
+    silently ignored, or worse, matched by coincidence).
+    """
+    meta = {"content_hash": content_hash}
+    if etag:
+        meta["etag"] = etag
+    if last_modified:
+        meta["last_modified"] = last_modified
+    _atomic_write(_meta_path(cache_path), json.dumps(meta).encode("utf-8"))
+
+
+def _handle_fetch_failure(url: str, cache_path: str, error: Exception,
+                           raise_on_error: bool) -> str:
+    """Shared tail of ``fetch_url``'s failure handling (stale-serve / exit /
+    raise), factored out so both the ``HTTPError`` branch (304 aside) and
+    the general transport-error branch apply it identically.
+    """
+    if os.path.exists(cache_path):
+        age = time.time() - os.path.getmtime(cache_path)
+        print(
+            f"WARNING: fetch failed ({error}); using cached copy "
+            f"({_format_age(age)} old)",
+            file=sys.stderr,
+        )
+        return cache_path
+    if raise_on_error:
+        raise FetchError(url, error) from error
+    print(f"Error: Failed to fetch {url}: {error}", file=sys.stderr)
+    sys.exit(1)
+
+
+class _NoValidatorRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strips conditional-GET headers before forwarding a redirected request.
+
+    ``urllib``'s default redirect handling copies a request's headers
+    (``If-None-Match``/``If-Modified-Since`` included) onto the redirected
+    request unchanged — verified empirically against a live redirect. Sent
+    toward a redirect destination, those validators describe whatever this
+    process last cached under *this* function's own bookkeeping, not
+    anything the destination server has ever confirmed — a coincidental
+    match there can 304 into silently keeping the wrong body indefinitely
+    (see ``fetch_url``'s docstring). Installed as the process-wide default
+    opener (see below) so every ``urllib.request.urlopen`` call in this
+    process is covered, not just calls this module makes directly; safe
+    because each ``parse-*.py`` runs as its own single-purpose process with
+    no unrelated code sharing it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            for header in ("If-none-match", "If-modified-since"):
+                new_req.headers.pop(header, None)
+                new_req.unredirected_hdrs.pop(header, None)
+        return new_req
+
+
+urllib.request.install_opener(
+    urllib.request.build_opener(_NoValidatorRedirectHandler())
+)
+
+
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
               max_age: int | None = None, raise_on_error: bool = False) -> str:
@@ -453,11 +574,24 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
         instead of exiting — for a caller fetching many independent pages
         in a loop (one dead link shouldn't kill the other N-1 fetches).
 
-    Catches ``(urllib.error.URLError, OSError, http.client.HTTPException)``
-    — not just ``URLError`` — so a read timeout (``TimeoutError``, an
-    ``OSError`` subclass) or a truncated transfer
-    (``http.client.IncompleteRead``) hits this handling instead of
-    propagating as a raw Python traceback.
+    Catches ``(urllib.error.URLError, OSError, http.client.HTTPException,
+    EOFError, zlib.error, ValueError)`` — not just ``URLError`` — so a read
+    timeout (``TimeoutError``, an ``OSError`` subclass), a truncated
+    transfer (``http.client.IncompleteRead``), a truncated/corrupt gzip
+    stream, or a validator string ``http.client.putheader`` rejects at
+    send time (a bare newline, or a non-Latin-1 character —
+    ``UnicodeEncodeError`` is a ``ValueError`` subclass) hits this handling
+    instead of propagating as a raw Python traceback. The ``ValueError``
+    entry is a backstop, not the primary defense: ``_load_fetch_meta``
+    already rejects a non-string/malformed validator *before* a request is
+    even built, purely to skip a pointless network round-trip for a sidecar
+    already known to be unusable. This clause exists because a sidecar can
+    still hold a *string* that is itself an invalid HTTP field value (hand
+    edit, corruption, an upstream that started sending exotic characters)
+    — a case `_load_fetch_meta`'s type check can't enumerate in advance.
+    The only ``ValueError`` raised *inside* this try block on the success
+    path (a malformed ``Content-Length``) is already caught and neutralized
+    in its own inner ``try``/``except`` below, so it can never reach here.
 
     Writes are atomic (see ``_atomic_write``) and validated against
     ``Content-Length`` when the server sends one — a response that reads
@@ -468,16 +602,80 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     skipped rather than raising ``ValueError`` — the bytes we already read
     are not in doubt just because the length header describing them is
     garbled, so there is nothing to fall back to a stale cache *for*.
+
+    Sends ``Accept-Encoding: gzip`` and decompresses a ``Content-Encoding:
+    gzip`` response before caching (``urllib`` does not auto-decompress).
+    The ``Content-Length`` check above runs on the *compressed* bytes
+    actually read off the wire — that header describes the transferred
+    (encoded) size, not the decompressed size — so it is validated before
+    ``gzip.decompress`` is called. A truncated/malformed gzip stream
+    (``EOFError``/``zlib.error`` from ``gzip.decompress``, or
+    ``gzip.BadGzipFile`` — an ``OSError`` subclass, already covered) is
+    treated as the same kind of transport failure as ``IncompleteRead``.
+
+    When an existing cache has a persisted ``ETag``/``Last-Modified`` (see
+    ``_load_fetch_meta``/``_save_fetch_meta``), a re-fetch past *max_age*
+    sends them as ``If-None-Match``/``If-Modified-Since`` — but only if the
+    sidecar's ``content_hash`` still matches the cache file's actual
+    current bytes. Without that check, two processes racing to refresh the
+    same stale cache could interleave their (independently atomic) body
+    write and sidecar write, pairing one response's body with a
+    *different* response's validators; a later conditional GET could then
+    get a 304 that's valid for the *sidecar's* response but not for the
+    body actually on disk, silently locking in a stale/wrong body for
+    another *max_age* interval. A hash mismatch instead falls back to an
+    unconditional GET, which rewrites both files together and resolves the
+    inconsistency. A ``304 Not Modified`` response (raised by ``urllib`` as
+    ``HTTPError`` with ``code=304``, not returned as a normal response) is
+    treated as success: the cache file's mtime is bumped to now (resetting
+    the *max_age* clock) without re-writing its content or the sidecar
+    (both are already known-consistent, or the hash check above would have
+    prevented the conditional request), and no bytes are re-downloaded.
+    Any other HTTP status/transport error falls through to the same
+    stale-serve/exit/raise handling as before.
+
+    The process-wide default opener installed just above this function
+    (``_NoValidatorRedirectHandler``) strips conditional-GET headers before
+    ``urllib`` forwards a redirected request — the primary defense against
+    a validator ending up sent toward a destination it was never confirmed
+    against. ``etag``/``last_modified`` are *also* persisted only when the
+    response's resolved URL (``resp.url``, which ``urllib`` sets to the
+    final URL after following any redirects) equals *url* itself, as a
+    second, independent layer: even if the redirect-handler stripping were
+    ever bypassed or removed, a validator obtained through a redirect
+    still wouldn't be saved in the first place. ``content_hash`` is
+    recorded either way — it doesn't carry this risk since it's compared
+    against the cache file's own bytes, not sent to any server.
     """
-    if os.path.exists(cache_path):
+    cache_exists = os.path.exists(cache_path)
+    if cache_exists:
         if max_age is None:
             return cache_path
         age = time.time() - os.path.getmtime(cache_path)
         if age < max_age:
             return cache_path
 
+    headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip"}
+    if cache_exists:
+        meta = _load_fetch_meta(cache_path)
+        try:
+            with open(cache_path, "rb") as f:
+                current_hash = _content_hash(f.read())
+        except OSError:
+            current_hash = None
+        if meta.get("content_hash") == current_hash:
+            if meta.get("etag"):
+                headers["If-None-Match"] = meta["etag"]
+            if meta.get("last_modified"):
+                headers["If-Modified-Since"] = meta["last_modified"]
+        # else: sidecar doesn't match the cache file's current bytes (a
+        # concurrent writer's interleaved update, or a sidecar left behind
+        # by an older version of this function that never wrote one) —
+        # send no conditional headers, forcing an unconditional GET that
+        # rewrites both files together and resolves the inconsistency.
+
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             content_length = resp.headers.get("Content-Length")
@@ -491,25 +689,58 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 raise http.client.IncompleteRead(
                     data, expected_length - len(data)
                 )
+            if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+                data = gzip.decompress(data)
+            etag = resp.headers.get("ETag")
+            last_modified = resp.headers.get("Last-Modified")
+            # Defense-in-depth alongside _NoValidatorRedirectHandler
+            # (module-level, installed above fetch_url): even if header
+            # stripping on redirect were ever bypassed or removed, still
+            # never persist a validator obtained through a redirect —
+            # content_hash is unaffected and still recorded either way.
+            redirected = resp.url != url
         if create_parent:
             parent = os.path.dirname(cache_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
         _atomic_write(cache_path, data)
-        return cache_path
-    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
-        if os.path.exists(cache_path):
-            age = time.time() - os.path.getmtime(cache_path)
+        try:
+            _save_fetch_meta(
+                cache_path,
+                None if redirected else etag,
+                None if redirected else last_modified,
+                _content_hash(data),
+            )
+        except OSError as e:
+            # The fetch itself already succeeded and cache_path is already
+            # written — a failure persisting the *sidecar* (disk full, a
+            # read-only cache dir that still somehow let the first write
+            # through, ...) is a pure optimization loss (no conditional GET
+            # next time), never a reason to report this fetch as failed.
             print(
-                f"WARNING: fetch failed ({e}); using cached copy "
-                f"({_format_age(age)} old)",
+                f"WARNING: could not save fetch metadata for {url}: {e}",
                 file=sys.stderr,
             )
+        return cache_path
+    except urllib.error.HTTPError as e:
+        if e.code == 304 and cache_exists:
+            try:
+                os.utime(cache_path, None)
+            except OSError as utime_err:
+                # A sibling except clause below can't catch this — it only
+                # covers the try block above, not exceptions raised inside
+                # this except block. Route it through the same
+                # stale-cache-fallback path explicitly instead of letting
+                # it escape as a raw traceback despite the fetch itself
+                # (the conditional GET) having succeeded.
+                return _handle_fetch_failure(
+                    url, cache_path, utime_err, raise_on_error
+                )
             return cache_path
-        if raise_on_error:
-            raise FetchError(url, e) from e
-        print(f"Error: Failed to fetch {url}: {e}", file=sys.stderr)
-        sys.exit(1)
+        return _handle_fetch_failure(url, cache_path, e, raise_on_error)
+    except (urllib.error.URLError, OSError, http.client.HTTPException,
+            EOFError, zlib.error, ValueError) as e:
+        return _handle_fetch_failure(url, cache_path, e, raise_on_error)
 
 
 def load_lines(path: str):
@@ -1087,11 +1318,6 @@ def add_max_age_arg(parser) -> None:
     )
 
 
-def add_doc_index_arg(parser, *, help: str = "Document index (from fetch-index)") -> None:
-    """Add positional ``doc_index`` (int) to *parser*."""
-    parser.add_argument("doc_index", type=int, help=help)
-
-
 def add_heading_path_arg(parser, *, help: str = "Heading path (omit for full document)") -> None:
     """Add optional positional ``heading_path`` to *parser*."""
     parser.add_argument("heading_path", nargs="?", default=None, help=help)
@@ -1118,6 +1344,20 @@ def add_max_chars_arg(parser) -> None:
         "--max-chars", type=int, default=DEFAULT_MAX_CONTENT_CHARS,
         help=f"Truncate the content body to N chars (default: "
              f"{DEFAULT_MAX_CONTENT_CHARS}, 0 = no limit)",
+    )
+
+
+DEFAULT_MAX_SNIPPET_CHARS = 500
+
+
+def add_max_snippet_chars_arg(parser) -> None:
+    """Add ``--max-snippet-chars`` to *parser* (any ``search``/``search-content``
+    subcommand that renders per-hit snippets via ``search_content_in_body``).
+    """
+    parser.add_argument(
+        "--max-snippet-chars", type=int, default=DEFAULT_MAX_SNIPPET_CHARS,
+        help=f"Truncate each snippet to N chars (0 = no limit, default: "
+             f"{DEFAULT_MAX_SNIPPET_CHARS})",
     )
 
 

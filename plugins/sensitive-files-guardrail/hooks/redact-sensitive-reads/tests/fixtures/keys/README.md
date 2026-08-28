@@ -31,7 +31,7 @@ fixture としては置かない。
 除外レシピは `~/.claude/` 配下のユーザー単位ファイルにしか書けず、repo に
 commit して貢献者・CI と共有する手段が無いため、fixture 側の拡張子で回避する。
 
-PEM 判定は 0.21.0 で **内容の sniff** (`redaction/pem.py::looks_pem`) に
+PEM 判定は 0.23.0 で **内容の sniff** (`redaction/pem.py::looks_pem`) に
 なったため、拡張子を変えてもテストの検証力は落ちない
 (`_detect_format` は `.txt` を `opaque` に落とし、そこから content sniff で
 pem 経路に入る)。32KB 超の bundle 経路と `.env` 埋め込み経路は

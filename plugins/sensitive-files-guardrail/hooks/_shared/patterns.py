@@ -85,7 +85,7 @@ PROJECT_SECTION_PLACEHOLDER_NOTE = (
     "全プロジェクト共通にしたい場合のみヘッダー無しの行に書く"
 )
 
-# 除外行を追加する前にユーザーへ伝えるべき影響範囲 (0.21.0、両 hook 共通)。
+# 除外行を追加する前にユーザーへ伝えるべき影響範囲 (0.23.0、両 hook 共通)。
 #
 # 除外行は **basename 単位**で評価される (matcher は basename と
 # ``pathlib.parts`` しか見ず、相対パス全体との比較を行わない)。したがって
@@ -116,7 +116,7 @@ _GLOB_META = "*?[]"
 
 
 def escape_glob(name: str) -> str:
-    """basename を fnmatch の literal パターンに変換する (0.21.0)。
+    """basename を fnmatch の literal パターンに変換する (0.23.0)。
 
     rule は ``fnmatchcase`` で評価されるため、basename に ``*`` ``?`` ``[`` ``]``
     が含まれると**生成した除外行が別物になる**。実測 (既定 rules に対し

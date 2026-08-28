@@ -30,9 +30,10 @@ def _write_fixture(cache_dir, index_text, full_text):
 class _FakeResponse:
     """Minimal stand-in for the object ``urllib.request.urlopen`` returns."""
 
-    def __init__(self, data, headers=None):
+    def __init__(self, data, headers=None, url=None):
         self._data = data
         self.headers = headers or {}
+        self.url = url
 
     def read(self):
         return self._data
@@ -172,6 +173,56 @@ class CmdSearchFallbackDoesNotDropIndexMatchesTest(unittest.TestCase):
         # The summary note is only for the "nothing ranked at all" case —
         # it must not appear when a real index match is present.
         self.assertNotIn("no title/description match", out)
+
+
+class SearchTopNAliasTest(unittest.TestCase):
+    """--index-limit predates the --top-n rename (unifying the name
+    ai-sdk/firebase already used) and is kept as a hidden but fully
+    functioning alias so an existing invocation doesn't silently break."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "- [Widget One](https://example.com/one): A widget page\n"
+            "- [Widget Two](https://example.com/two): Another widget page\n"
+            "- [Widget Three](https://example.com/three): A third widget page\n",
+            "# Widget One\nSource: https://example.com/one\n\n## Info\nBody one.\n\n"
+            "# Widget Two\nSource: https://example.com/two\n\n## Info\nBody two.\n\n"
+            "# Widget Three\nSource: https://example.com/three\n\n## Info\nBody three.\n",
+        )
+
+    def test_default_returns_all_three_candidates(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "widget", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("Widget "), 3)
+
+    def test_top_n_limits_candidates(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "widget",
+            "--cache-dir", self.tmp, "--top-n", "1",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("Widget "), 1)
+
+    def test_index_limit_alias_limits_candidates_identically(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "widget",
+            "--cache-dir", self.tmp, "--index-limit", "1",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("Widget "), 1)
+
+    def test_index_limit_is_hidden_from_help(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "--help",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("--top-n", out)
+        self.assertNotIn("--index-limit", out)
 
 
 class AssertParsedIntegrationTest(unittest.TestCase):
@@ -333,10 +384,18 @@ class MaxAgeBoundaryIntegrationTest(unittest.TestCase):
 
     def test_cache_older_than_max_age_is_refetched(self):
         self._age_cache(300)
-        fresh = _FakeResponse(
-            b"- [Hooks](https://example.com/hooks): Configure hook matchers\n"
-        )
-        with mock.patch("urllib.request.urlopen", return_value=fresh) as mock_urlopen:
+
+        def _fresh(req, timeout=None):
+            # url=req.full_url mirrors what urllib itself sets on a real,
+            # non-redirected response (see AbstractHTTPHandler.do_open) —
+            # fetch_url now compares resp.url against the requested url to
+            # decide whether a fetch involved a redirect.
+            return _FakeResponse(
+                b"- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+                url=req.full_url,
+            )
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fresh) as mock_urlopen:
             code, out, err = _loader.run_cli(parse_claude_docs, [
                 "parse-claude-docs.py", "fetch-index",
                 "--cache-dir", self.tmp, "--max-age", "200",
@@ -388,6 +447,61 @@ class FileReadOnlyModeTest(unittest.TestCase):
         ])
         self.assertEqual(code, 1)
         self.assertIn("platform", err)
+
+    def test_search_file_flag_is_used_verbatim_without_fetching(self):
+        # search used to be the one search-family command without --file.
+        # --file only overrides the llms-full.txt body — the (small, always
+        # cheap) llms.txt index is still fetched normally, so pre-seed it
+        # on disk (fresh mtime = within default --max-age) rather than
+        # asserting urlopen is never called at all.
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+            encoding="utf-8",
+        )
+        snapshot = Path(self.tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "# Hooks\nSource: https://example.com/hooks\n\nhook body text\n",
+            encoding="utf-8",
+        )
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            code, out, err = _loader.run_cli(parse_claude_docs, [
+                "parse-claude-docs.py", "search", "Hooks",
+                "--file", str(snapshot), "--cache-dir", self.tmp,
+            ])
+        self.assertEqual(code, 0, err)
+        mock_urlopen.assert_not_called()
+        self.assertIn("Hooks", out)
+        # Codex R1 P1: the printed page_ref is only valid against *this*
+        # snapshot — a follow-up 'content' hint that dropped --file would
+        # resolve the same integer against the default cached corpus
+        # instead, silently returning a different page.
+        self.assertIn(f"--file {snapshot}", out)
+
+    def test_search_content_file_flag_hint_includes_file(self):
+        # search-content already had --file before this round of changes;
+        # found to have the identical gap while fixing the ones Codex
+        # flagged on the newly-added search/fetch-index --file support.
+        snapshot = Path(self.tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "# Hooks\nSource: https://example.com/hooks\n\nhook body text\n",
+            encoding="utf-8",
+        )
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-content", "hook",
+            "--file", str(snapshot), "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"--file {snapshot}", out)
+
+    def test_search_file_flag_with_source_both_dies_with_clear_message(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "Hooks",
+            "--file", str(Path(self.tmp, "whatever.txt")), "--source", "both",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("--file", err)
+        self.assertIn("both", err)
 
 
 class ArgparseErrorExitCodeTest(unittest.TestCase):
@@ -444,7 +558,11 @@ class GoldenOutputTest(unittest.TestCase):
             "\n"
             "(2 sections)\n"
             "\n"
-            'Next: parse-claude-docs.py content 0 "<heading_path>"\n'
+            # --cache-dir here is non-default (this test's own tmp dir), so
+            # corpus_hint_args correctly echoes it — a follow-up 'content'
+            # command that dropped it would resolve doc_idx 0 against the
+            # default cache instead, silently returning a different page.
+            f'Next: parse-claude-docs.py content 0 "<heading_path>" --cache-dir {tmp}\n'
         )
         self.assertEqual(out, expected)
 

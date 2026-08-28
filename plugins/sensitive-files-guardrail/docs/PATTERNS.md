@@ -209,8 +209,10 @@ export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
 ## basename のみで判定される (parts は補助)
 
 両 hook ともパターンは **basename** に対して fnmatch する (0.2.0 以降、Stop 側も
-Read 側と同じく親 dir 名の parts も補助的に評価する)。ディレクトリ固有の
-exclude は書けない:
+Read 側と同じく親 dir 名の parts も補助的に評価する。ただし **Bash operand の
+判定は 0.22.0 から basename のみ** — sed / awk の式や option の値のような「path
+とは限らない文字列」が親 dir 名の `.env` で deny になるのを避けるため)。
+ディレクトリ固有の exclude は書けない:
 
 ```
 # NG: パスセグメントは効かない
@@ -252,7 +254,10 @@ operand に glob (`*` / `?` / `[`) を含む Bash コマンドの判定は **0.8
 
 | コマンド | 挙動 (default / autonomous) | 備考 |
 |---|---|---|
-| `cat .env*`, `cat *.envrc`, `cat .e[n]v`, `cat .en?` | **deny / deny** | glob が `.env` / `.envrc` の literal stem に `fnmatchcase` 一致 |
+| `cat .env*`, `cat .e[n]v`, `cat .en?`, `cat .envrc*` | **deny / deny** | glob が shell の展開で `.env` / `.envrc` の literal stem に一致 |
+| `cat */.env`, `cat **/.env` | **deny / deny** | 展開は path 要素ごと。basename 側が `.env` (0.22.0。0.21.x までは ask / allow) |
+| `cat *`, `git add *`, `cp * dst/`, `cat ?env`, `cat [.]env`, `cat *.envrc` | ask / allow | shell の `*` / `?` / bracket 式はファイル名先頭の `.` に一致しない (POSIX、bash / zsh 実測)。0.21.x までは fnmatch の意味論で **deny** になっていた (0.22.0 で修正) |
+| `shopt -s dotglob; cat *`, `GLOBIGNORE=x; cat *`, `setopt globdots; cat *` | **deny / deny** | 同一コマンド内で dotglob 系を有効化していれば `*` は dotfile にも展開されるので 0.21.x の意味論に戻す。profile (`.bashrc` / `.zshenv`) で常時有効な環境は hook から見えない |
 | `cat *.json`, `cat cred*.json`, `cat *.key`, `cat id_rsa*` | ask / allow | 既定 rules との交差は見ない (`ask_or_allow`) |
 | `cat *.log`, `cat .env.*`, `cat .env.example*` | ask / allow | 同上 (`.env.*` は `.env` 自体に一致しない) |
 

@@ -1,4 +1,4 @@
-"""matcher のパターンキャッシュ (0.21.0)。
+"""matcher のパターンキャッシュ (0.23.0)。
 
 ``fnmatch._compile_pattern`` の ``lru_cache`` は maxsize が Python バージョン依存
 (3.9 = 256 / 3.11+ = 32768) で plugin から制御できない。``_last_match_verdict`` は

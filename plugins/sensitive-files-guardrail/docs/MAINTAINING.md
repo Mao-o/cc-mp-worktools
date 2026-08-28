@@ -71,7 +71,8 @@ sensitive-files-guardrail/
         │       ├── constants.py     allow-list / hard-stop / opaque wrapper / shell keyword
         │       ├── segmentation.py  quote-aware segment 分割 / hard-stop 検出 (0.18.0 で lexer を統一)
         │       ├── interpreters.py  awk / sed プログラム内の動的構文・別インタプリタ委譲の検出 (0.18.0)
-        │       ├── operand_lexer.py glob 判定 / path 候補抽出
+        │       ├── operand_lexer.py glob 判定 / path 候補抽出 (0.22.0: option / 値 / positional / redirect の字句分け + pattern 枠)
+        │       ├── command_specs.py コマンド別 option 知識 (値を取る option と値の種別、第 1 positional が pattern か。0.22.0)
         │       ├── redirects.py     安全リダイレクト剥離 / 残留 metachar / 書込み target 抽出
         │       └── grep_extract.py  grep family の env-var 名抽出
         └── tests/                   unittest + fixtures/envelopes/
@@ -123,8 +124,15 @@ flowchart TD
 図で省略している分岐:
 
 - rules が空 (patterns.txt が空) → allow
-- operand scan で glob が dotenv stem (`.env` / `.envrc`) に一致しない
-  (`cat *.json` 等) → `ask_or_allow` (pending に畳む)。normalize 失敗も同じ
+- operand scan で glob が dotenv stem (`.env` / `.envrc`) に shell の展開で
+  一致しない (`cat *.json` / `cat *` 等) → `ask_or_allow` (pending に畳む)。
+  normalize 失敗も同じ
+- segment split の前に `_lex` が heredoc 本文 (`<<EOF` 〜 terminator 行) を
+  落とす (0.22.0)。演算子行は `<` で hard-stop
+- operand scan の候補抽出 (`_find_path_candidates`) は 0.22.0 からコマンド別の
+  option 知識 (`command_specs.py`) で、grep 系 / jq / awk / sed の第 1 positional
+  (pattern / script) と値が path ではない option の値を候補から外す。spec の
+  無いコマンド・option は従来規則。機密判定は basename のみ (`parts=False`)
 - metadata-only のうち `find` は `-exec` / `-delete` 等を含まない形のみ、
   `file` / `wc` / `du` / `tree` は `-f` / `--files0-from` 等のリスト読込
   option が無い形のみ、`git ls-files` は `-s` / `--stage` / `--format` 無しの形

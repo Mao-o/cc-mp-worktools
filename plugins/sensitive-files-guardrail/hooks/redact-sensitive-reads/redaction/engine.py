@@ -142,7 +142,7 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
             return build_reason(basename, fmt, body, extras)
         except Exception:
             pass
-    # armored 鍵 / 証明書は専用経路 (0.21.0)。format 未確定 (opaque) のときだけ
+    # armored 鍵 / 証明書は専用経路 (0.23.0)。format 未確定 (opaque) のときだけ
     # 内容を sniff する。``.env`` に PEM を値として埋めた形は dotenv 経路のまま
     # 扱いたいので、既に format が確定しているケースには介入しない。
     if fmt == "opaque" and looks_pem(text):
@@ -165,7 +165,7 @@ def redact_large_file(f: IO[bytes], basename: str) -> str:
     呼出側は fd を ``os.fdopen(fd, "rb")`` で wrap したものを渡す。seek(0) は
     engine 側で行う。
 
-    0.21.0: format 未確定 (opaque) のときは先頭 8KB だけ先に読んで armored 鍵か
+    0.23.0: format 未確定 (opaque) のときは先頭 8KB だけ先に読んで armored 鍵か
     どうかを判定する。鍵バンドルは ``scan_stream`` に流すと PEM 本文の行が
     ``KEY=`` として拾われるため (``redaction/pem.py`` 冒頭参照)。
     """

@@ -36,6 +36,7 @@ from _common import (
     add_heading_path_arg,
     add_max_age_arg,
     add_max_chars_arg,
+    add_max_snippet_chars_arg,
     assert_parsed,
     corpus_hint_args,
     die,
@@ -439,6 +440,7 @@ def cmd_search_content(args):
             context_lines=args.context,
             max_matches_per_doc=args.max_hits,
             min_level=2,
+            max_snippet_chars=args.max_snippet_chars,
         )
 
         if hits["total_matches"] == 0:
@@ -649,6 +651,7 @@ def main():
                                help="Context lines around each hit (default: 2)")
     p_search_body.add_argument("--max-hits", type=int, default=5,
                                help="Max hits to display per page (default: 5)")
+    add_max_snippet_chars_arg(p_search_body)
     p_search_body.set_defaults(func=cmd_search_content)
 
     # search (smart: index rank + on-demand body drill-in)
@@ -667,10 +670,7 @@ def main():
                           help="Max body hits per page (default: 3)")
     p_search.add_argument("--context", type=int, default=2,
                           help="Context lines around each hit (default: 2)")
-    p_search.add_argument(
-        "--max-snippet-chars", type=int, default=500,
-        help="Truncate each snippet to N chars (0 = no limit, default: 500)",
-    )
+    add_max_snippet_chars_arg(p_search)
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
