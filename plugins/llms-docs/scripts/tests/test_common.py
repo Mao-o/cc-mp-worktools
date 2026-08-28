@@ -7,7 +7,9 @@ overflow reporting, and the format-change detection helpers
 (assert_parsed / check_join_rate / full_corpus_body_search).
 """
 
+import types
 import unittest
+from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 
@@ -523,6 +525,173 @@ class FullCorpusBodySearchTest(unittest.TestCase):
         docs_body_lines = [["## D%d\n" % i, "target\n"] for i in range(5)]
         results = _common.full_corpus_body_search(docs_body_lines, "target", limit=2)
         self.assertEqual(len(results), 2)
+
+
+class TruncateContentPreservesMarkdownBoundariesTest(unittest.TestCase):
+    """A raw content[:max_chars] slice could land inside a fenced code
+    block or Markdown table — extract_content's own fence/table
+    protection only guards heading-section cuts, not this later
+    character-budget cut — leaving the truncated construct and the
+    appended notice both malformed."""
+
+    def test_cut_inside_fence_backs_up_to_before_the_fence(self):
+        content = (
+            "intro text here\n"
+            "```python\n"
+            "x = 1\n"
+            "y = 2\n"
+            "z = 3\n"
+            "```\n"
+            "trailing text\n"
+        )
+        # max_chars deliberately lands partway through the fence body.
+        max_chars = content.index("y = 2")
+        result = _common.truncate_content(
+            content, max_chars, narrow_hint='content 0 "<heading_path>"'
+        )
+        visible_body = result.split("\n... (")[0]
+        self.assertIn("intro text here", visible_body)
+        self.assertNotIn("```", visible_body)  # backed up before the fence entirely
+        self.assertIn("chars truncated", result)
+
+    def test_cut_inside_table_backs_up_to_before_the_table(self):
+        content = (
+            "intro\n"
+            "| a | b |\n"
+            "|---|---|\n"
+            "| 1 | 2 |\n"
+            "| 3 | 4 |\n"
+            "after table\n"
+        )
+        # max_chars deliberately lands partway through the table.
+        max_chars = content.index("| 1 | 2 |")
+        result = _common.truncate_content(
+            content, max_chars, narrow_hint='content 0 "<heading_path>"'
+        )
+        visible_body = result.split("\n... (")[0]
+        self.assertIn("intro", visible_body)
+        self.assertNotIn("|", visible_body)  # backed up before the table entirely
+
+    def test_cut_mid_plain_line_backs_up_to_the_previous_line_boundary(self):
+        # No fence or table involved at all — this pins the more general
+        # "never split a single line in half" guarantee the line-boundary
+        # walk gives for free, not just the fence/table cases above.
+        content = "line one\nline two\nline three\nline four\n"
+        max_chars = len("line one\nline two\n") + 3  # partway through "line three"
+        result = _common.truncate_content(content, max_chars, narrow_hint="hint")
+        visible_body = result.split("\n... (")[0]
+        self.assertEqual(visible_body, "line one\nline two\n")
+
+    def test_short_enough_content_is_returned_unchanged(self):
+        content = "short\n"
+        self.assertEqual(
+            _common.truncate_content(content, 1000, narrow_hint="hint"), content
+        )
+
+    def test_no_safe_boundary_emits_empty_body_not_a_raw_cut(self):
+        # Degenerate case: even the very first line alone exceeds
+        # max_chars. Falling back to a raw content[:max_chars] slice here
+        # would cut mid-line (or mid-fence, if the long first line opened
+        # one) — exactly the malformed-cut failure this function exists
+        # to prevent. Emitting no body before the notice is always
+        # well-formed, if less useful.
+        content = "a" * 100 + "\nsecond line\n"
+        result = _common.truncate_content(content, 10, narrow_hint="hint")
+        visible_body = result.split("\n... (")[0]
+        self.assertEqual(visible_body, "")
+        self.assertIn("chars truncated", result)
+
+    def test_no_safe_boundary_inside_an_unclosed_fence_from_the_start(self):
+        content = "```python\n" + ("x = 1\n" * 20)
+        result = _common.truncate_content(content, 15, narrow_hint="hint")
+        visible_body = result.split("\n... (")[0]
+        self.assertEqual(visible_body, "")
+
+
+class CorpusHintArgsTest(unittest.TestCase):
+    """A hint suggesting a follow-up command (the --max-chars truncation
+    notice, print_subsection_hints' Next: line) that drops a non-default
+    --file/--cache-dir selection can point the SAME numeric page index at
+    an entirely different document once the reader follows it and it
+    re-resolves against the default corpus instead of the snapshot/cache
+    dir just displayed."""
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_default_cache_dir_and_no_file_yields_nothing(self, _mock):
+        args = types.SimpleNamespace(file=None, cache_dir="/default/cache")
+        self.assertEqual(_common.corpus_hint_args(args), ())
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_non_default_cache_dir_is_included(self, _mock):
+        args = types.SimpleNamespace(file=None, cache_dir="/custom/cache")
+        self.assertEqual(
+            _common.corpus_hint_args(args), ("--cache-dir", "/custom/cache")
+        )
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_file_is_included_even_with_default_cache_dir(self, _mock):
+        args = types.SimpleNamespace(file="/snap.txt", cache_dir="/default/cache")
+        self.assertEqual(_common.corpus_hint_args(args), ("--file", "/snap.txt"))
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_file_takes_precedence_over_cache_dir(self, _mock):
+        # --file and --cache-dir are mutually exclusive in every loader
+        # that supports both (once --file is given, cache_dir is never
+        # even read), so echoing --cache-dir alongside it would mislead a
+        # reader into thinking it still matters.
+        args = types.SimpleNamespace(file="/snap.txt", cache_dir="/custom/cache")
+        self.assertEqual(_common.corpus_hint_args(args), ("--file", "/snap.txt"))
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_missing_file_attribute_is_treated_as_absent(self, _mock):
+        # firebase's args namespace has no --file flag at all.
+        args = types.SimpleNamespace(cache_dir="/default/cache")
+        self.assertEqual(_common.corpus_hint_args(args), ())
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_file_path_with_space_is_shell_quoted(self, _mock):
+        # These values are spliced verbatim into a copy-pasteable shell
+        # command line; an unquoted space would split into an extra
+        # argument when the reader actually runs the generated command.
+        args = types.SimpleNamespace(file="/my docs/snap.txt", cache_dir="/default/cache")
+        self.assertEqual(
+            _common.corpus_hint_args(args), ("--file", "'/my docs/snap.txt'")
+        )
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_cache_dir_with_shell_metacharacter_is_shell_quoted(self, _mock):
+        args = types.SimpleNamespace(file=None, cache_dir="/cache;rm -rf /")
+        self.assertEqual(
+            _common.corpus_hint_args(args),
+            ("--cache-dir", "'/cache;rm -rf /'"),
+        )
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_non_default_max_age_is_included(self, _mock):
+        args = types.SimpleNamespace(
+            file=None, cache_dir="/default/cache", max_age=0,
+        )
+        self.assertEqual(_common.corpus_hint_args(args), ("--max-age", "0"))
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_default_max_age_is_omitted(self, _mock):
+        args = types.SimpleNamespace(
+            file=None, cache_dir="/default/cache",
+            max_age=_common.DEFAULT_MAX_AGE_SECONDS,
+        )
+        self.assertEqual(_common.corpus_hint_args(args), ())
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_max_age_is_omitted_once_file_takes_precedence(self, _mock):
+        # --file makes --max-age irrelevant too (read-only snapshot mode
+        # never re-fetches), same reasoning as --cache-dir above.
+        args = types.SimpleNamespace(file="/snap.txt", cache_dir="/default/cache", max_age=0)
+        self.assertEqual(_common.corpus_hint_args(args), ("--file", "/snap.txt"))
+
+    @mock.patch("_common.default_cache_dir", return_value="/default/cache")
+    def test_missing_max_age_attribute_is_treated_as_absent(self, _mock):
+        args = types.SimpleNamespace(file=None, cache_dir="/default/cache")
+        self.assertEqual(_common.corpus_hint_args(args), ())
 
 
 if __name__ == "__main__":

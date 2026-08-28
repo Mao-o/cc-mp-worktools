@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.1.3"
+  version: "2.1.4"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -107,6 +107,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref> "<h
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref>
 ```
 
+**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方 (metadata header 直後 と 末尾) に自動出力する (`--no-subsection-hints` で抑制可)。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。
+
 ### 補助: セクション一覧を確認したいとき
 
 ```bash
@@ -155,7 +157,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 | `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
 | `fetch-index` | `[--offset N] [--limit N]` | page index を paginated 表示（default --limit 100、フォールバック用） |
 | `sections` | `<page_ref>` | 指定ページの見出し一覧を表示 (該当ページを auto-fetch) |
-| `content` | `<page_ref> [heading_path]` | セクション本文を表示 (該当ページを auto-fetch) |
+| `content` | `<page_ref> [heading_path] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示 (該当ページを auto-fetch)。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 
 すべて `--cache-dir DIR` を受け付ける (default: `~/.cache/llms-docs`、`$XDG_CACHE_HOME` / `$LLMS_DOCS_CACHE_DIR` で上書き可)。
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py`

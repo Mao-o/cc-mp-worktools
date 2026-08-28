@@ -2,6 +2,172 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.18.4] - 2026-08-28
+
+### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)
+
+Codex R4 で `_norm()` の sibilant-suffix 規則 (`ses`/`xes`/`zes`/`ches`/`shes`
+終わりの語から2文字strip) が silent-e語根の複数形も誤って2文字stripしてしまう
+指摘を受けた (`Responses`→`respons`, `Caches`→`cach` 等、単数キーワードは
+末尾`e`を保持するため一致しなくなる)。別branch (`_common.py` の並行コピー)
+と同一の指摘のため、同じ判断をこちらにも適用する。
+
+調査の結果、これは文字パターンだけでは解決不可能な曖昧性と判断した:
+`caches`(cache+s, silent-e語根) と `matches`(match+es, 硬子音語根) は
+末尾が完全に同形で、辞書 (語根リスト) か本物のstemmerなしに文字列だけからは
+判別できない。既存テストはこの硬子音側の挙動を一切pinしていなかったため
+安全側 (どちらの挙動も壊さない) を優先し、現状挙動をcharacterization test
+として明文化するに留めた。修正は内部バックログで追跡する。
+
+回帰テスト1件追加 (`test_common.py`、163 tests, all green)。
+
+## [0.18.3] - 2026-08-28
+
+### レビュー指摘4件を修正 + 別branchで先に直した2件をこの `_common.py` にも適用 (0.18.2 の追いコミット)
+
+- **絞り込みヒントに含める `--file`/`--cache-dir` がshell quoteされていなかった**:
+  値をコピー&ペースト実行可能なシェルコマンド行にそのまま埋め込んでいたため、
+  空白やシェル特殊文字を含むパスだとコマンドが分裂・意図しないシェル展開を
+  起こしていた。`shlex.quote()`で両方の値をquoteするよう修正
+- **絞り込みヒントが非既定の `--max-age` を引き継いでいなかった**: 意図的に
+  7日デフォルトより古いキャッシュを許容していても、ヒントどおりに追いコマンドを
+  打つと既定のmax-ageに戻り再取得が起きてしまう。`corpus_hint_args()`に
+  `--max-age`の伝播を追加 (`--file`指定時は`--cache-dir`と同様に無関係になるため
+  含めない)
+- **`truncate_content`の安全な境界が見つからない場合、生スライスにfallbackしていた**:
+  1行目単体で既にmax_charsを超える等の縮退ケースで、本来防ぐべき「境界を跨いだ
+  切り詰め」を結局再現していた。安全な境界が無い場合は本文を一切出さず切り詰め
+  通知のみを返すよう修正 (常に整形済み)
+- **別branchで先に修正済みだった2件をこの`_common.py`のコピーにも反映**:
+  `score_entry`の正規化空文字列キーワード除外・`_norm`の頭字語(mixed case)
+  判定。分岐が異なるbranchで並行開発していたため、このコピーには未反映のまま
+  残っていた
+
+回帰テスト15件追加 (`test_common.py`、162 tests, all green)。
+
+## [0.18.2] - 2026-08-27
+
+### `fetch-index`/`search-index`のslug衝突・`content`切り詰めのMarkdown境界破壊・絞り込みヒントの corpus 選択欠落 (0.18.1 の追いコミット)
+
+- **URL末尾が同じ複数ページで slug が衝突していた**: `.../hooks` と
+  `.../agent-sdk/hooks` のように最後のパス要素だけが一致する2ページは、
+  従来どちらも `[hooks]` と表示されており、その値を `sections`/`content` に
+  そのまま渡すと `_resolve_page_ref` 自身の曖昧slugエラーで弾かれ、
+  フォールバック参照として機能しなかった。`_build_unique_slugs()` を追加し、
+  全ページの中で一意になるまでパス要素を後ろから伸ばして (`hooks` →
+  `agent-sdk/hooks` 等) 表示するよう修正 (claude-docsの`fetch-index`/
+  `search-index`のみ該当。他2 scriptはこの参照形式を使わない)
+- **`--max-chars` の切り詰めが生の文字数スライスで、コードフェンス/表の
+  途中で切れることがあった**: `truncate_content()` を行単位の走査に変更し、
+  `FenceTracker` が閉じておりかつ表の行でもない、直近の安全な行境界まで
+  戻ってから切り詰めるよう修正 (安全な境界が `max_chars` 未満になっても、
+  フェンス/表を最後まで含めて `max_chars` を超えるよりは安全側に倒す設計)
+- **`--max-chars` の絞り込みヒント / `sections`のサブセクション追いヒントが
+  `--file`/`--cache-dir` を引き継いでいなかった**: 非既定の corpus 選択で
+  実行した際、ヒント通りにフォローアップコマンドを打つと既定の corpus に
+  フォールバックし、同じ番号が別のドキュメントを指す事故があった。
+  `corpus_hint_args()` を追加し3 script共通で伝播するよう修正
+  (`--file`と`--cache-dir`は排他 — `_load_docs`/`_load_full_txt`は`--file`
+  指定時`cache_dir`を一切参照しないため、両方を出すと誤解を招く。
+  `--file`があれば`--cache-dir`は出さない)
+
+回帰テスト12件追加 (`test_common.py` 9件、`test_parse_claude_docs.py` 2件、
+`test_parse_ai_sdk.py` 1件、既存golden出力テスト2件を新挙動に更新。
+147 tests, all green)。
+
+## [0.18.1] - 2026-08-27
+
+### doc_idx 表示のレビュー指摘 1 件 + `sections` のドキュメント不整合 1 件を修正 (0.18.0 の追いコミット)
+
+- **`fetch-index`/`search-index` が期限切れの llms-full.txt キャッシュからも doc_idx を join していた**:
+  `--max-age` を過ぎたキャッシュは、後続の `sections`/`content` 呼び出しが実際に
+  再取得する対象。再取得後は上流の並び替え/追加で doc_idx が変わり得るため、
+  期限切れキャッシュとの join は「これから置き換わる番号」を表示する形になり、
+  この機能が防ぐはずだった番号ズレを再現してしまっていた。`_load_url_to_idx_if_cached`
+  に `max_age` を渡し、`fetch_url` 自身の再取得判定 (`age >= max_age`) と同じ基準で
+  「未キャッシュ」と同様 slug 表示にフォールバックするよう修正
+- **`sections` が (3 script 共通で) 生の見出しタイトルを表示しており、ネストした
+  同名見出しが区別できなかった**: SKILL.md は `sections`/`search`/`content` の
+  出力を「そのまま `content` の heading_path にコピーしてよい」と案内しているが、
+  `sections` は完全パスではなく末尾のタイトルのみ (例: 2 つの `## Client`/
+  `## Server` 配下にそれぞれ `### Examples` があると両方とも `Examples` とだけ
+  表示) を出力していたため、コピーした値が `content` の完全一致ではなく部分一致
+  (曖昧チェック対象) に落ちてしまうことがあった。`format_heading_path_for_display`
+  (search 系が既に使っている表示関数) を再利用し、3 script 全ての `sections` で
+  完全な heading_path を表示するよう修正 (トップレベル見出しは従来どおり
+  タイトル単体と同じ表示になるため、既存の golden output テストへの影響は無い)
+
+回帰テスト 5 件追加 (`test_parse_claude_docs.py` 3 件、`test_parse_ai_sdk.py` 1 件、
+`test_parse_firebase.py` 1 件、135 tests, all green)。
+
+## [0.18.0] - 2026-08-27
+
+### `fetch-index` / `search-index`: llms.txt の一覧位置を doc_idx として表示していた問題を修正
+
+`fetch-index` の `[N]` と `search-index` の `[idx]` は llms.txt の**一覧内の位置**
+をそのまま表示していたが、`sections`/`content` は llms-full.txt の doc_idx を
+期待する — 2 つのファイルの並び順が一致しない限り (上流が並び替え/追加した
+時点で崩れる)、表示された番号をそのまま渡すと**別のページが開く**。
+
+- llms-full.txt が既にキャッシュ済みなら URL join で正しい doc_idx を表示、
+  未キャッシュなら (このためだけに数十 MB の llms-full.txt を fetch すると
+  fetch-index が「軽量なフォールバック」でなくなるため) 代わりに URL slug を
+  `[slug]` として表示し、`Next: sections <slug>` に変更する
+  (slug も `sections`/`content` の有効な入力形式)
+- `search-index` にあった「番号がずれるかもしれない」という無条件の注意書きは
+  削除し、未キャッシュ時のみ表示する条件付きの Note に置き換えた
+  (キャッシュ済みなら実際に正しいので注意書き自体が不要)
+- `fetch-index` の variant グループ表示 (`Batches (Python)`/`Batches (Go)` 等)
+  も同じ理由で `[0-1]` のような一覧内レンジ表示をやめ、variant ごとに
+  `Python [ref]` の形式にした
+
+### `content`: 出力サイズ上限が無く長いページで末尾のヒントが不可視化する問題を修正
+
+`content` の出力に上限が無く、Platform ページ (平均 ~38KB) 等では Bash tool の
+~30KB inline 表示上限を超えて別ファイルに退避され、先頭 2KB しか見えなくなる。
+本文末尾にしか出していなかったサブセクション一覧 / `Next:` ヒントがこの状態で
+不可視になり、`heading_path` を省略した 2 手目の深掘りができなくなっていた。
+
+- `--max-chars` (既定 24000、`0` で無制限) を 3 script の `content` に追加。
+  超過時は `... (N chars truncated; narrow with <script> content <ref>
+  "<heading_path>")` を出す
+- サブセクション一覧 + `Next:` ヒントを **metadata header 直後 (本文の前)
+  にも** 出力するよう変更 (末尾には従来どおり出力、前後の二重掲載)。
+  `--max-chars 0` 等で本文が長くても、前側のヒントは常に生き残る
+
+### ai-sdk / firebase の `content` にもサブセクション一覧を追加 (claude-docs と同機能に統一)
+
+claude-docs の `content` だけが持っていたサブセクション一覧 + `Next:` ヒントを
+ai-sdk / firebase にも追加した。claude-docs 専用実装だった
+`_print_subsection_hints` を `_common.print_subsection_hints()` として汎用化し
+(min_level を引数化)、3 script が共有する。ai-sdk / firebase の `content` に
+`--no-subsection-hints` フラグも新設 (claude-docs は既存)。
+
+- **利用者向け挙動変更**: ai-sdk / firebase の `content` は既定で
+  サブセクション一覧を出力するようになる (抑制したい場合は
+  `--no-subsection-hints`)
+- 本バッチでは firebase 本文中のリンクへの `→ [doc_idx N]` 注釈付与
+  (claude-docs にある機能) は対象外とした — サブセクション一覧という
+  中核機能のパリティを優先し、範囲を絞った
+
+### SKILL.md
+
+3 SKILL とも `content` のコマンドリファレンスと Quick Start 相当の説明に
+`--max-chars` / (ai-sdk・firebase は新規) `--no-subsection-hints` / 前後二重
+掲載の挙動を追記。metadata version を patch bump:
+researching-claude-docs 3.4.3 → 3.4.4 / researching-ai-sdk 3.3.4 → 3.3.5 /
+researching-firebase 2.1.3 → 2.1.4
+
+### テスト
+
+`scripts/tests/` に回帰テストを 13 件追加 (129 tests, 従来比 +13)。
+`fetch-index`/`search-index` の doc_idx join (キャッシュ有無の両方)、
+`--max-chars` の切り詰めと `--max-chars 0` での無効化、前後ヒントの二重
+掲載と `--no-subsection-hints` によるその抑制を claude-docs/ai-sdk/firebase
+それぞれで検証。ai-sdk/firebase の既存 golden 出力テストは今回の意図した
+挙動変更 (サブセクション一覧の追加) に合わせて期待値を更新した
+(golden テストが壊れた = 退行ではなく意図した機能追加の確認)。
+
 ## [0.17.4] - 2026-08-28
 
 ### silent-e複数形 (Responses/Releases/Databases/Caches) の誤stem化を既知の限界として明文化 (未修正)

@@ -39,7 +39,9 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    add_max_chars_arg,
     assert_parsed,
+    corpus_hint_args,
     die,
     die_index_out_of_range,
     extract_content,
@@ -50,8 +52,10 @@ from _common import (
     load_lines,
     next_hint,
     print_metadata_header,
+    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    truncate_content,
 )
 
 # A document with no frontmatter ``title:`` field almost always means
@@ -393,7 +397,12 @@ def cmd_sections(args):
     for s in sections:
         indent = "  " * (s["level"] - 1)
         code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"{indent}[L{s['level']}] {s['title']}{code_marker}")
+        # Print the canonical heading_path, not the bare title: this line
+        # is documented (SKILL.md) as copy-pasteable straight into
+        # content's heading_path argument, and two sibling subsections
+        # with the same title (e.g. "Examples" under two different
+        # parents) are only distinguishable via the full path.
+        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
 
     print()
     print(f"({len(sections)} sections)")
@@ -414,12 +423,28 @@ def cmd_content(args):
         protect_tables=False, min_level=1,
     )
 
+    hint_args = corpus_hint_args(args)
+    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
+    narrow_hint = f'parse-ai-sdk.py content {idx} "<heading_path>"{hint_suffix}'
+    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+
     print_metadata_header(
         fm["title"] or "(untitled)",
         tags=fm["tags"] or None,
         heading_path=resolved_heading_path,
     )
+
+    # Printed BEFORE the body too — see parse-claude-docs.py's cmd_content
+    # for why (survives truncation regardless of where the cut lands).
+    if not args.no_subsection_hints:
+        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path,
+                               min_level=1, extra_hint_args=hint_args)
+
     print(content, end="")
+
+    if not args.no_subsection_hints:
+        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path,
+                               min_level=1, extra_hint_args=hint_args)
 
 
 def cmd_search_index(args):
@@ -763,6 +788,11 @@ def main():
     _add_file_arg(p_content)
     add_cache_dir_arg(p_content)
     add_max_age_arg(p_content)
+    add_max_chars_arg(p_content)
+    p_content.add_argument(
+        "--no-subsection-hints", action="store_true",
+        help="Suppress the subsection hint block printed before/after content",
+    )
     p_content.set_defaults(func=cmd_content)
 
     # search (smart: index rank + body drill-in)

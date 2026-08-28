@@ -19,6 +19,7 @@ import argparse
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -27,9 +28,11 @@ from _common import (
     add_cache_dir_arg,
     add_heading_path_arg,
     add_max_age_arg,
+    add_max_chars_arg,
     assert_parsed,
     build_url_to_full_index,
     check_join_rate,
+    corpus_hint_args,
     die,
     die_index_out_of_range,
     extract_content,
@@ -42,8 +45,10 @@ from _common import (
     normalize_doc_url,
     parse_llms_index,
     print_metadata_header,
+    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    truncate_content,
 )
 
 # ---------------------------------------------------------------------------
@@ -265,6 +270,93 @@ def _group_index_entries(entries: list[dict]) -> list[dict]:
     return items
 
 
+def _load_url_to_idx_if_cached(full_cache: str, max_age: int | None = None) -> dict:
+    """Join llms.txt URLs to llms-full.txt doc_idx — but ONLY if the
+    full-text file is already cached AND still fresh under *max_age*;
+    never fetch it just for this.
+
+    ``fetch-index``/``search-index`` only need the lightweight llms.txt
+    index; eagerly fetching llms-full.txt to compute a display label would
+    turn ``fetch-index`` — documented as the lightweight fallback command
+    (see SKILL.md) — into the single heaviest command in the tool (23.8MB
+    for ``platform``). Uses plain ``split_documents`` (not
+    ``_split_documents_checked``): an already-cached-but-stale/corrupt
+    full-text file should degrade this join to "unavailable" (falls back
+    to slug display below), not crash the lightweight index command that
+    doesn't otherwise depend on llms-full.txt at all.
+
+    A cached file older than *max_age* is *also* treated as "unavailable"
+    here, even though it exists and could be read right now: a later
+    ``sections``/``content`` call passes this same *max_age* to
+    ``fetch_url`` (see its ``age < max_age`` check) and will actually
+    refetch it. If upstream reordered/inserted pages since this stale copy
+    was written, joining against its about-to-be-replaced doc_idx would
+    silently reproduce the exact numbering drift this feature exists to
+    prevent — falling back to the slug form (always valid, ageless) until
+    a fresh copy exists is the same trade-off ``fetch_url`` itself makes.
+    """
+    if not os.path.exists(full_cache):
+        return {}
+    if max_age is not None:
+        age = time.time() - os.path.getmtime(full_cache)
+        if age >= max_age:
+            return {}
+    return build_url_to_full_index(split_documents(load_lines(full_cache)))
+
+
+def _build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
+    """Map each *normalized* URL (keys are ``normalize_doc_url(u)`` for
+    each ``u`` in *raw_urls*) to a display slug unique across all of them.
+
+    Starts from the single last path segment (e.g. ``"hooks"``) and, only
+    for URLs whose slug collides with another URL's, grows the suffix one
+    segment at a time (``"agent-sdk/hooks"``, ...) until it no longer
+    collides — both single- and multi-segment slugs are valid
+    ``sections``/``content`` input (``_resolve_page_ref`` matches on the
+    URL's trailing path, see its docstring). Falls back to the full path
+    if even that doesn't disambiguate (only possible for literal URL
+    duplicates). Without this, ``.../hooks`` and ``.../agent-sdk/hooks``
+    would both display as ``[hooks]``, and passing either back in would
+    hit ``_resolve_page_ref``'s own ambiguous-slug error — making the
+    advertised copy-and-paste fallback reference unusable for exactly the
+    pages that need it most.
+    """
+    normalized = [normalize_doc_url(u) for u in raw_urls]
+    all_segments = [u.rstrip("/").lstrip("/").split("/") for u in normalized]
+    result = {}
+    for i, url in enumerate(normalized):
+        segments = all_segments[i]
+        for n in range(1, len(segments) + 1):
+            candidate = "/".join(segments[-n:])
+            if not any(
+                j != i and "/".join(all_segments[j][-n:]) == candidate
+                for j in range(len(normalized))
+            ):
+                result[url] = candidate
+                break
+        else:
+            result[url] = "/".join(segments) or "?"
+    return result
+
+
+def _joined_or_slug_ref(entry: dict, url_to_idx: dict, unique_slugs: dict) -> str:
+    """Return a doc reference for *entry*: the llms-full.txt-joined
+    doc_idx when available in *url_to_idx*, else a slug unique across the
+    whole index (see ``_build_unique_slugs``).
+
+    Both forms are valid ``sections``/``content`` input (see
+    ``_resolve_page_ref``) — the raw llms.txt list position is NOT, and
+    passing it through used to silently resolve to the wrong page whenever
+    the two indexes weren't in the same order (e.g. after either source
+    reorders/inserts a page).
+    """
+    url = normalize_doc_url(entry.get("url", ""))
+    joined = url_to_idx.get(url)
+    if joined is not None:
+        return str(joined)
+    return unique_slugs.get(url, "?")
+
+
 def cmd_fetch_index(args):
     """Fetch lightweight llms.txt index and print page list with descriptions."""
     src = _get_source(args)
@@ -276,6 +368,8 @@ def cmd_fetch_index(args):
     assert_parsed(f"{src['label']} index", len(entries), path)
 
     full_cache = _cache_path(args.cache_dir, src["full_cache"])
+    url_to_idx = _load_url_to_idx_if_cached(full_cache, max_age=args.max_age)
+    unique_slugs = _build_unique_slugs([e.get("url", "") for e in entries])
 
     grouped = _group_index_entries(entries)
 
@@ -287,9 +381,8 @@ def cmd_fetch_index(args):
     grouped_count = 0
     for item in grouped:
         if item["type"] == "single":
-            i = item["index"]
             entry = item["entry"]
-            print(f"[{i}] {entry['title']}")
+            print(f"[{_joined_or_slug_ref(entry, url_to_idx, unique_slugs)}] {entry['title']}")
             if entry["description"]:
                 desc = entry["description"]
                 if len(desc) > 120:
@@ -299,24 +392,31 @@ def cmd_fetch_index(args):
             displayed += 1
         else:
             variants = item["variants"]
-            first_idx = variants[0][0]
-            last_idx = variants[-1][0]
-            variant_names = [v[1] for v in variants]
-            print(f"[{first_idx}-{last_idx}] {item['base']}")
+            variant_labels = [
+                f"{name} [{_joined_or_slug_ref(entries[i], url_to_idx, unique_slugs)}]"
+                for i, name in variants
+            ]
+            print(item["base"])
             if item["desc"]:
                 desc = item["desc"]
                 if len(desc) > 120:
                     desc = desc[:117] + "..."
                 print(f"    {desc}")
-            print(f"    Variants: {', '.join(variant_names)}")
+            print(f"    Variants: {', '.join(variant_labels)}")
             print()
             displayed += 1
             grouped_count += len(variants)
 
     print(f"({len(entries)} pages total, {displayed} entries shown — {grouped_count} pages grouped)")
     print()
-    next_hint("sections", "<doc_index>", *_source_hint_args(args))
-    print(f"  (llms-full.txt will be fetched automatically on first use)")
+    if url_to_idx:
+        next_hint("sections", "<doc_index>", *_source_hint_args(args))
+        print(f"  (llms-full.txt will be fetched automatically on first use)")
+    else:
+        next_hint("sections", "<slug>", *_source_hint_args(args))
+        print("  (llms-full.txt not cached yet, so the bracketed ref above is a")
+        print("   URL slug, not an integer doc_idx; run 'search' once to fetch")
+        print("   it and get numeric doc_idx here too)")
 
 
 def _resolve_source_from_path(file_path: str) -> tuple[str, dict] | None:
@@ -429,7 +529,12 @@ def cmd_sections(args):
     for s in sections:
         indent = "  " * (s["level"] - 2)  # H2 = no indent, H3 = 2 spaces, etc.
         code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"{indent}[L{s['level']}] {s['title']}{code_marker}")
+        # Print the canonical heading_path, not the bare title: this line
+        # is documented (SKILL.md) as copy-pasteable straight into
+        # content's heading_path argument, and two sibling subsections
+        # with the same title (e.g. "Examples" under two different
+        # parents) are only distinguishable via the full path.
+        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
 
     print()
     print(f"({len(sections)} sections)")
@@ -512,75 +617,6 @@ def _annotate_doc_links(content: str, url_to_idx: dict, path_to_idx: dict,
     return "\n".join(out)
 
 
-def _print_subsection_hints(doc: dict, idx: int, heading_path: str | None,
-                             source_args: tuple) -> None:
-    """Print direct child sections of *heading_path* (or top-level if None)
-    as a hint block after the content. Lets the caller drill down further
-    without re-running ``sections``.
-
-    *heading_path* must already be the *resolved* canonical path returned by
-    ``extract_content`` (or ``None``/``"(top)"``) — not the caller's raw,
-    possibly-partial input. Resolution (including the ambiguous-partial-match
-    check) happens exactly once, in ``extract_content``; doing it again here
-    from a raw argument would risk silently disagreeing with what the content
-    body above actually displayed (this used to run its own copy of the same
-    exact/partial-match search as ``extract_content``, with the same
-    silently-picks-the-first-partial-match behavior — since every caller now
-    passes the already-resolved path, only an exact lookup is needed). No
-    section is ever literally titled ``"(top)"``, so that sentinel falls
-    through to "no hint" below rather than a lookup miss being treated as an
-    error — the preamble has no child sections to hint at.
-    """
-    sections = extract_sections(doc["body_lines"])
-    if not sections:
-        return
-
-    if heading_path is None:
-        target_level = 2
-        children = [s for s in sections if s["level"] == target_level]
-        label = "Top-level sections"
-    else:
-        target = None
-        for s in sections:
-            if s["heading_path"] == heading_path:
-                target = s
-                break
-        if target is None:
-            return
-        target_idx = sections.index(target)
-        # Block extent = up to the next section at same or higher (smaller-number)
-        # level. ``target.line_end`` only spans until the immediate next heading,
-        # which would stop at the first child and miss the rest of the block.
-        block_end = len(doc["body_lines"])
-        for s in sections[target_idx + 1:]:
-            if s["level"] <= target["level"]:
-                block_end = s["line_start"]
-                break
-        child_level = target["level"] + 1
-        children = [
-            s for s in sections[target_idx + 1:]
-            if s["line_start"] < block_end and s["level"] == child_level
-        ]
-        label = f"Subsections of '{target['heading_path']}'"
-
-    if not children:
-        return
-
-    print()
-    print(f"--- {label} ({len(children)}) ---")
-    for s in children:
-        code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"  - {s['heading_path']}{code_marker}")
-    print()
-    src_suffix = ""
-    if source_args:
-        src_suffix = " " + " ".join(source_args)
-    print(
-        f"Next: parse-claude-docs.py content {idx} "
-        f'"<heading_path from above>"{src_suffix}'
-    )
-
-
 def cmd_content(args):
     """Print content of a specific page or section."""
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
@@ -596,16 +632,35 @@ def cmd_content(args):
         path_to_idx = _build_path_to_idx(docs)
         content = _annotate_doc_links(content, url_to_idx, path_to_idx, self_idx=idx)
 
+    hint_args = _source_hint_args(args) + corpus_hint_args(args)
+    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
+    narrow_hint = f'parse-claude-docs.py content {idx} "<heading_path>"{hint_suffix}'
+    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+
     print_metadata_header(
         doc["title"],
         source=doc["source_url"] or None,
         heading_path=resolved_heading_path,
     )
+
+    # Printed BEFORE the body too (duplicating the same hint printed after
+    # it, below): a long page can exceed the Bash tool's ~30KB inline-
+    # output threshold even after --max-chars truncation (e.g. --max-chars
+    # 0, or a large metadata header), and the diverted output shows only
+    # the first ~2KB — hiding the after-body hint entirely. The subsection
+    # list + Next hint are the tool's own documented drill-down path (see
+    # SKILL.md Quick Start), so they must survive truncation regardless of
+    # where the cut lands.
+    if not args.no_subsection_hints:
+        print_subsection_hints(
+            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=hint_args
+        )
+
     print(content, end="")
 
     if not args.no_subsection_hints:
-        _print_subsection_hints(
-            doc, idx, resolved_heading_path, _source_hint_args(args)
+        print_subsection_hints(
+            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=hint_args
         )
 
 
@@ -623,6 +678,14 @@ def cmd_search_index(args):
 
     scored = search_index_entries(entries, args.query, limit=args.limit)
 
+    full_cache = _cache_path(args.cache_dir, src["full_cache"])
+    url_to_idx = _load_url_to_idx_if_cached(full_cache, max_age=args.max_age)
+    # Built from the FULL entries list, not just the top-N `scored` results:
+    # a slug only "looks" unique within the displayed subset would still
+    # collide with some other (unshown) page in _resolve_page_ref's full
+    # search, defeating the point of disambiguating it here.
+    unique_slugs = _build_unique_slugs([e.get("url", "") for e in entries])
+
     print(f'Search-index results for "{args.query}" ({src["label"]})')
     print(f"  (index: {path})")
     print("=" * 60)
@@ -634,8 +697,9 @@ def cmd_search_index(args):
         print("Tip: try broader keywords, 'search' for an automatic full-text "
               "fallback, or 'search-content \"<query>\"' to search page bodies directly")
     else:
-        for score, idx, entry in scored:
-            print(f"[{idx}] {entry['title']} (score: {score})")
+        for score, _idx, entry in scored:
+            ref = _joined_or_slug_ref(entry, url_to_idx, unique_slugs)
+            print(f"[{ref}] {entry['title']} (score: {score})")
             if entry["description"]:
                 desc = entry["description"]
                 if len(desc) > 120:
@@ -646,8 +710,11 @@ def cmd_search_index(args):
 
     print(f"({len(scored)} results, {len(entries)} pages searched)")
     print()
-    print("Note: llms.txt and llms-full.txt may use different doc_index numbering.")
-    print("      Prefer 'search' (URL-joined) for a stable doc_idx into content/sections.")
+    if not url_to_idx:
+        print("Note: llms-full.txt is not cached yet, so [ref] above is a URL "
+              "slug, not an integer doc_idx. Run 'search' once (or 'sections "
+              "<slug>' directly) to populate doc_idx numbering here too.")
+        print()
     next_hint("search", '"<query>"', *_source_hint_args(args))
 
 
@@ -974,9 +1041,10 @@ def main():
     _add_source_arg(p_content)
     add_cache_dir_arg(p_content)
     add_max_age_arg(p_content)
+    add_max_chars_arg(p_content)
     p_content.add_argument(
         "--no-subsection-hints", action="store_true",
-        help="Suppress the subsection hint block printed after content",
+        help="Suppress the subsection hint block printed before/after content",
     )
     p_content.add_argument(
         "--no-link-annotations", action="store_true",

@@ -328,17 +328,127 @@ class GoldenOutputTest(unittest.TestCase):
             "parse-ai-sdk.py", "content", "0", "--cache-dir", tmp,
         ])
         self.assertEqual(code, 0, err)
+        # ai-sdk's content now gets the same subsection-hint
+        # block (before AND after the body) that claude-docs
+        # already had. min_level=1 means the doc's own H1 counts as its
+        # one top-level section here, matching what 'sections' already
+        # shows for ai-sdk. The non-default --cache-dir (a tempdir, as
+        # every test here uses) is echoed into the Next: hint so a reader
+        # following it stays on the same corpus instead of falling back
+        # to the default cache dir.
+        hint_block = (
+            "\n"
+            "--- Top-level sections (1) ---\n"
+            "  - streamText\n"
+            "\n"
+            f'Next: parse-ai-sdk.py content 0 "<heading_path from above>" --cache-dir {tmp}\n'
+        )
         expected = (
             "# doc_title: streamText\n"
             "# doc_tags: core, streaming\n"
             "---\n"
-            "\n"
+            + hint_block
+            + "\n"
             "# streamText\n"
             "\n"
             "## Options\n"
             "Configure options here.\n"
+            + hint_block
         )
         self.assertEqual(out, expected)
+
+    def test_no_subsection_hints_suppresses_both_occurrences(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\ntitle: Doc\n---\n\n# Doc\n\n## Options\ntext\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "content", "0",
+            "--cache-dir", tmp, "--no-subsection-hints",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Top-level sections", out)
+        self.assertNotIn("Next:", out)
+
+
+class SectionsHeadingPathTest(unittest.TestCase):
+    """'sections' printed the bare title, not the heading_path it is
+    documented (SKILL.md) as safe to copy straight into content's
+    heading_path argument. Two sibling subsections sharing a title under
+    different parents (e.g. "Examples" under two different H2s) were
+    indistinguishable in the listing even though only the full path
+    identifies which one 'content' would actually resolve."""
+
+    def test_nested_sections_show_full_path_not_ambiguous_bare_title(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\ntitle: Guide\n---\n\n"
+            "# Guide\n\n"
+            "## Client\n"
+            "text\n"
+            "### Examples\n"
+            "client examples\n\n"
+            "## Server\n"
+            "text\n"
+            "### Examples\n"
+            "server examples\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "sections", "0", "--cache-dir", tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Client/Examples", out)
+        self.assertIn("Server/Examples", out)
+        # The old bug printed just "Examples" for both — assert the bare,
+        # unqualified label no longer appears on its own heading line.
+        self.assertNotIn("] Examples\n", out)
+
+    def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _write_fixture(
+            tmp,
+            "---\ntitle: Doc\n---\n\n# Doc\n\n"
+            "0123456789 0123456789 0123456789 0123456789 0123456789\n",
+        )
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "content", "0",
+            "--cache-dir", tmp, "--max-chars", "20",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("chars truncated", out)
+        self.assertIn('narrow with parse-ai-sdk.py content 0 "<heading_path>"', out)
+        self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
+
+    def test_narrow_hint_and_subsection_hints_retain_file_flag(self):
+        # A truncation/subsection-drilldown hint that drops --file would
+        # send a follow-up command back to fetching/reading the default
+        # corpus instead of this read-only snapshot — the SAME numeric
+        # page index could then identify a completely different document.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        snapshot = Path(tmp, "my-snapshot.txt")
+        snapshot.write_text(
+            "---\ntitle: Doc\n---\n\n# Doc\n\n## Options\n"
+            "0123456789 0123456789 0123456789 0123456789 0123456789\n",
+            encoding="utf-8",
+        )
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            code, out, err = _loader.run_cli(parse_ai_sdk, [
+                "parse-ai-sdk.py", "content", "0",
+                "--file", str(snapshot), "--cache-dir", tmp, "--max-chars", "20",
+            ])
+        mock_urlopen.assert_not_called()
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"narrow with parse-ai-sdk.py content 0 \"<heading_path>\" --file {snapshot}", out)
+        self.assertIn(f'Next: parse-ai-sdk.py content 0 "<heading_path from above>" --file {snapshot}', out)
+        # --file makes --cache-dir irrelevant (read-only mode never
+        # touches the cache), so it must NOT also be echoed redundantly.
+        self.assertNotIn("--cache-dir", out)
 
 
 if __name__ == "__main__":
