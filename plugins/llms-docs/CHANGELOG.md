@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.21.5] - 2026-08-28
+
+### sidecarのstring validatorがHTTPヘッダーとして不正な場合の生tracebackを構造的に修正 (0.21.4 の追いコミット)
+
+Codex R4指摘1件 (P2)。0.21.2〜0.21.4は「sidecarの値が期待した型/構造か」を`_load_fetch_meta`側で
+個別にguardする対応を3ラウンド続けたが、今回の指摘は「型はstringだが中身がHTTPヘッダーとして不正
+(改行を含む＝ヘッダーインジェクション、Latin-1範囲外の文字を含む)」というケースで、`_load_fetch_meta`
+の型チェックでは列挙しきれない。advisorとの相談を経て、個別guardを積み増す方針ではなく、実際に
+送信を試みる`urllib.request.urlopen`呼び出し自体を`ValueError`込みで捕捉する構造的な修正に切り替えた
+(`UnicodeEncodeError`は`ValueError`のサブクラスであることを実機確認済み)。
+
+- **既存の例外捕捉タプルに `ValueError` を追加**。try節内で唯一 `ValueError` を送出しうる箇所
+  (`int(content_length)` の変換) は既に内側の try/except で個別に捕捉・無害化されており、
+  この追加が意図しない挙動を隠す経路にならないことを確認済み
+- `_load_fetch_meta` の型guard (0.21.2〜0.21.4) は**早期リジェクトの最適化**として維持: 不正な
+  sidecarをネットワーク往復の前に弾く。今回追加した `ValueError` 捕捉は**その guard が列挙し
+  きれない残り全部に対するbackstop** — 将来また新しいHTTPヘッダー制約が見つかっても、個別対応
+  なしでこの1箇所が拾う
+
+回帰テスト2件追加 (`test_fetch_and_cache.py`)。実際の (接続はしない) `http.client.putheader()`
+を経由させて本物の `ValueError`/`UnicodeEncodeError` を発生させる方式で検証しており、将来の
+Python側の仕様変更にも追従する。189 tests, all green。
+
 ## [0.21.4] - 2026-08-28
 
 ### `_load_fetch_meta` の型チェックに `content_hash` を追加し3フィールドを一貫させる (0.21.3 の追いコミット)

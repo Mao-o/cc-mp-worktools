@@ -553,6 +553,81 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         self.assertEqual(result, cache_path)
         self.assertIsNone(captured["if_none_match"])
 
+    def _putheader_failure(self, value):
+        # Drives the *real* http.client.putheader() (never-connected — no
+        # network I/O) so these tests fail if a future Python version
+        # changes what it accepts, instead of asserting against a
+        # hand-constructed exception that could drift from reality.
+        def _side_effect(req, timeout=None):
+            conn = http.client.HTTPConnection("localhost", 1)
+            conn.putrequest("GET", "/x", skip_host=True,
+                             skip_accept_encoding=True)
+            conn.putheader("If-None-Match", value)
+            raise AssertionError(
+                "putheader() did not raise for %r as expected" % (value,)
+            )
+        return _side_effect
+
+    def test_header_injection_etag_falls_back_to_stale_cache_like_any_other_failure(self):
+        # A string etag that is nonetheless an unsafe HTTP header value (a
+        # bare newline — header injection) isn't rejected by
+        # _load_fetch_meta's type check (it's a string) but is rejected by
+        # http.client.putheader() itself, raising ValueError. Confirmed
+        # empirically before adding ValueError to fetch_url's caught
+        # exceptions.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "content_hash": _common._content_hash(b"stale content"),
+                "etag": "abc\ninjected: header",
+            }, f)
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=self._putheader_failure("abc\ninjected: header"),
+        ):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "stale content")
+
+    def test_non_latin1_etag_falls_back_to_stale_cache_like_any_other_failure(self):
+        # A string etag containing a character outside Latin-1 (an
+        # upstream that started sending exotic characters, or a hand edit)
+        # isn't rejected by _load_fetch_meta's type check either, but
+        # http.client.putheader()'s str.encode('latin-1') raises
+        # UnicodeEncodeError — a ValueError subclass, confirmed
+        # empirically — while building the request.
+        cache_path = self._cache_path()
+        with open(cache_path, "w") as f:
+            f.write("stale content")
+        old_time = time.time() - 8 * 86400
+        os.utime(cache_path, (old_time, old_time))
+        with open(self._meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump({
+                "content_hash": _common._content_hash(b"stale content"),
+                "etag": "etag-日本語",
+            }, f)
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=self._putheader_failure("etag-日本語"),
+        ):
+            result = _common.fetch_url(
+                "https://example.com/x", cache_path, user_agent="ua",
+                max_age=604800,
+            )
+        self.assertEqual(result, cache_path)
+        with open(cache_path) as f:
+            self.assertEqual(f.read(), "stale content")
+
     def test_stale_past_max_age_sends_conditional_headers_from_sidecar(self):
         cache_path = self._cache_path()
         with open(cache_path, "w") as f:

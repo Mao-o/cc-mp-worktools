@@ -544,10 +544,23 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
         in a loop (one dead link shouldn't kill the other N-1 fetches).
 
     Catches ``(urllib.error.URLError, OSError, http.client.HTTPException,
-    EOFError, zlib.error)`` — not just ``URLError`` — so a read timeout
-    (``TimeoutError``, an ``OSError`` subclass), a truncated transfer
-    (``http.client.IncompleteRead``), or a truncated/corrupt gzip stream
-    hits this handling instead of propagating as a raw Python traceback.
+    EOFError, zlib.error, ValueError)`` — not just ``URLError`` — so a read
+    timeout (``TimeoutError``, an ``OSError`` subclass), a truncated
+    transfer (``http.client.IncompleteRead``), a truncated/corrupt gzip
+    stream, or a validator string ``http.client.putheader`` rejects at
+    send time (a bare newline, or a non-Latin-1 character —
+    ``UnicodeEncodeError`` is a ``ValueError`` subclass) hits this handling
+    instead of propagating as a raw Python traceback. The ``ValueError``
+    entry is a backstop, not the primary defense: ``_load_fetch_meta``
+    already rejects a non-string/malformed validator *before* a request is
+    even built, purely to skip a pointless network round-trip for a sidecar
+    already known to be unusable. This clause exists because a sidecar can
+    still hold a *string* that is itself an invalid HTTP field value (hand
+    edit, corruption, an upstream that started sending exotic characters)
+    — a case `_load_fetch_meta`'s type check can't enumerate in advance.
+    The only ``ValueError`` raised *inside* this try block on the success
+    path (a malformed ``Content-Length``) is already caught and neutralized
+    in its own inner ``try``/``except`` below, so it can never reach here.
 
     Writes are atomic (see ``_atomic_write``) and validated against
     ``Content-Length`` when the server sends one — a response that reads
@@ -671,7 +684,7 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
             return cache_path
         return _handle_fetch_failure(url, cache_path, e, raise_on_error)
     except (urllib.error.URLError, OSError, http.client.HTTPException,
-            EOFError, zlib.error) as e:
+            EOFError, zlib.error, ValueError) as e:
         return _handle_fetch_failure(url, cache_path, e, raise_on_error)
 
 
