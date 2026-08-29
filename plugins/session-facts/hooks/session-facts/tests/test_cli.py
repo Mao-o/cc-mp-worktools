@@ -1004,3 +1004,24 @@ class NestedDiscoveryBoundsTest(unittest.TestCase):
                 )
             self.assertLessEqual(len(calls), MAX_NESTED_SCAN_ENTRIES + 5)
 
+
+class DropWithoutMarkerHeadroomTest(unittest.TestCase):
+    """PR #67 (Codex P2): セクションを丸ごと落として上限に収まったが、
+    marker を置く余地だけが無く、削れる木構造の末尾も残っていない場合、
+    marker 無しで返していた。セクションが消えているのに完全な出力に見える。
+    """
+
+    def test_marker_survives_when_a_section_was_dropped(self):
+        header = "## Project Facts\n- repo_root: /example"
+        sections = ["## Scripts\n- build: x", "## Test Snapshot\n- tests: 1"]
+        full = "\n\n".join([header] + sections)
+        # Scripts を落とすとちょうど収まるが marker のぶんは残らない幅にする。
+        without_scripts = "\n\n".join([header, sections[1]])
+        budget = len(without_scripts) + 3
+        self.assertLess(budget, len(full))
+
+        result = _enforce_output_budget(header, sections, budget)
+        self.assertLessEqual(len(result), budget)
+        self.assertNotIn("## Scripts", result)
+        self.assertIn("truncated", result)
+

@@ -210,6 +210,17 @@ def _enforce_output_budget(header: str, sections: Sequence[str], max_chars: int)
     if len(retried_result) + len(marker) <= max_chars:
         return retried_result + marker
 
+    # 「削った結果は上限に収まっているが marker を置く余地だけが無い」場合、
+    # marker を諦めるとセクションが丸ごと消えているのに完全な出力に見えて
+    # しまう (受け取った側が欠落に気付けない)。内容を数文字削ってでも marker
+    # を残す方が安全側なので、marker のぶんだけ削って付ける。
+    #
+    # 結果が上限を超えたままのケース (末尾が切られる場合) はここに含めない。
+    # そちらはハードカット自体が省略の印として働き、かつ marker のために
+    # 保護セクションの先頭まで削ると「何が残っているか」も分からなくなる。
+    if dropped and len(result) <= max_chars and max_chars >= len(marker):
+        return result[: max_chars - len(marker)] + marker
+
     return result[:max_chars]
 
 
