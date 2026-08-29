@@ -73,8 +73,15 @@ def _format_signal(key: str, metrics: Metrics) -> str:
 
 def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metrics) -> str:
     tier_a, tier_b = _display_tiers(verdict.tier)
+    # judge.judge() が返す Verdict は現状 4 tier (note/review/warn/strong) 全てを
+    # 埋めるため到達不能だが、0.1.0 にあった防御ガード (``if tier in
+    # verdict.thresholds``) を復元する (P3-5)。ガード無しだと、将来
+    # judge 側が部分的な thresholds を返すようになったとき KeyError が
+    # __main__ の fail-open 経路に落ちてメモそのものが消えてしまう。
     thresholds_str = " ".join(
-        f"{tier}={round(verdict.thresholds[tier])}" for tier in (tier_a, tier_b)
+        f"{tier}={round(verdict.thresholds[tier])}"
+        for tier in (tier_a, tier_b)
+        if tier in verdict.thresholds
     )
     breakdown = _multiplier_breakdown(language, verdict)
     # scale (FILE_SPLIT_ADVISOR_SCALE) は applied_multipliers に含めない

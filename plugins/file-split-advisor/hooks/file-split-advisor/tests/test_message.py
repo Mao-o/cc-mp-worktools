@@ -175,6 +175,23 @@ class TestScaleNote(unittest.TestCase):
         self.assertIn("(test: 閾値 1.6倍)", text)
 
 
+class TestPartialThresholds(unittest.TestCase):
+    """P3-5 回帰: 0.1.0 は ``if tier in verdict.thresholds`` という防御ガードを
+    持っていたが、0.3.0 の ``_display_tiers`` 導入で無条件の
+    ``verdict.thresholds[tier]`` になり消えていた。judge.judge() が返す
+    Verdict は現状 4 tier 全てを埋めるため到達不能だが、将来 judge 側が
+    部分的な thresholds を返すようになったときに KeyError で fail-open
+    (メモが消える) にならないよう、表示側にも防御を戻す。
+    """
+
+    def test_missing_display_tier_key_does_not_raise(self):
+        v = _verdict(tier="review", thresholds={"review": 300})  # note/warn/strong 欠如
+        text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
+        self.assertIn("review=300", text)
+        self.assertNotIn("warn=", text)
+        self.assertNotIn("note=", text)
+
+
 class TestDisplayTiers(unittest.TestCase):
     """目安は判定 tier + 隣接 tier を表示する (以前は review/warn 固定)。"""
 
