@@ -23,6 +23,16 @@ import state
 
 _ENTRY_PATH = Path(__file__).resolve().parent.parent / "__main__.py"
 
+# BaseMainTest.setUp が isolation する plugin 環境変数 (P3-4)。これらを
+# export した端末/CI では、isolation が漏れていると green の意味が変わる。
+_ISOLATED_ENV_KEYS = (
+    "FILE_SPLIT_ADVISOR_DISABLED",
+    "FILE_SPLIT_ADVISOR_MAX_EMITS",
+    "FILE_SPLIT_ADVISOR_CWD_ONLY",
+    "FILE_SPLIT_ADVISOR_IGNORE",
+    "FILE_SPLIT_ADVISOR_SCALE",
+)
+
 
 def _load_entry():
     spec = importlib.util.spec_from_file_location("file_split_advisor_entry", _ENTRY_PATH)
@@ -67,6 +77,15 @@ class BaseMainTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(self._cleanup)
+        # 実行機/CI がこれらを export していても Green の意味が変わらない
+        # よう、テスト中は必ず未設定にする (P3-4)。個別テストは
+        # mock.patch.dict(os.environ, {...}) で明示的に上書きできる
+        # (mock.patch.dict はネストしても内側の変更だけを正しく巻き戻す)。
+        self._env_isolation_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self._env_isolation_patcher.start()
+        self.addCleanup(self._env_isolation_patcher.stop)
+        for key in _ISOLATED_ENV_KEYS:
+            os.environ.pop(key, None)
         self._base_dir_patcher = mock.patch.object(
             state, "_base_dir", return_value=Path(self.tmp) / "_state"
         )
@@ -111,6 +130,36 @@ class BaseMainTest(unittest.TestCase):
             "tool_name": tool_name,
             "tool_input": tool_input,
         }
+
+
+class TestSetUpIsolatesAmbientEnv(BaseMainTest):
+    """P3-4 回帰: setUp 実行前から export されていた plugin 環境変数 5 つを
+    ``BaseMainTest.setUp`` が確実に除去すること。これらを export した
+    端末/CI では、isolation が漏れていると green の意味が変わってしまう。
+    """
+
+    _AMBIENT_KEYS = (
+        "FILE_SPLIT_ADVISOR_DISABLED",
+        "FILE_SPLIT_ADVISOR_MAX_EMITS",
+        "FILE_SPLIT_ADVISOR_CWD_ONLY",
+        "FILE_SPLIT_ADVISOR_IGNORE",
+        "FILE_SPLIT_ADVISOR_SCALE",
+    )
+
+    def setUp(self):
+        # BaseMainTest.setUp による isolation より "前" に、既に export
+        # されていた状態を模す。
+        self._ambient_patcher = mock.patch.dict(
+            os.environ, {key: "ambient-value" for key in self._AMBIENT_KEYS}
+        )
+        self._ambient_patcher.start()
+        self.addCleanup(self._ambient_patcher.stop)
+        super().setUp()
+
+    def test_ambient_env_vars_are_removed(self):
+        for key in self._AMBIENT_KEYS:
+            with self.subTest(key=key):
+                self.assertNotIn(key, os.environ)
 
 
 class TestBelowThreshold(BaseMainTest):
