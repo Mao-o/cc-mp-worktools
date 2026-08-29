@@ -253,6 +253,11 @@ PROJECT_MARKERS = (
     # ファイル比率による言語検出もランタイム情報の収集も走らないまま
     # facts が丸ごと消える。
     ".python-version",
+    # collectors/env_keys.py の ENV_FILE_CANDIDATES。テンプレートだけを
+    # 置くプロジェクト (実 .env は gitignore) でも env keys とソース由来の
+    # facts は出せるので、gate で落とさない。実体の `.env` は機密なので
+    # マーカーに含めない。
+    *ENV_FILE_CANDIDATES,
     # detectors/nextjs.py
     *NEXT_CONFIG_CANDIDATES,
     # detectors/node_typescript.py

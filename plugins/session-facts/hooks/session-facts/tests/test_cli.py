@@ -1123,6 +1123,33 @@ class GlobMarkerScanBoundTest(unittest.TestCase):
             self.assertLessEqual(len(seen), MAX_NESTED_SCAN_ENTRIES)
 
 
+class CandidateTupleMarkerParityTest(unittest.TestCase):
+    """`core/constants.py` の `*_CANDIDATES` 系タプル (収集側が root 直下で
+    探すファイル名の一覧) が、すべて gate のマーカーに入っていることを固定する。
+
+    このクラスの穴 -- 「検出はできるのに gate で落ちる」= facts が丸ごと
+    消える -- は本 PR のレビューで lockfile・ランタイム固定・ローカル venv・
+    env テンプレートの 4 回出た。個別のモジュールごとに閉じても次の
+    モジュールから出てくるので、候補タプルという単位でまとめて固定する。
+    """
+
+    def test_all_candidate_tuples_are_markers(self):
+        import core.constants as constants
+        from core.constants import PROJECT_MARKERS
+
+        missing = {}
+        for name in dir(constants):
+            if not name.endswith("_CANDIDATES"):
+                continue
+            values = getattr(constants, name)
+            if not isinstance(values, (tuple, list)):
+                continue
+            gaps = [v for v in values if v not in PROJECT_MARKERS]
+            if gaps:
+                missing[name] = gaps
+        self.assertEqual(missing, {}, f"gate に無い候補: {missing}")
+
+
 class RuntimeMarkerParityTest(unittest.TestCase):
     """検出側が根拠にするファイル名と gate のマーカー一覧がずれないことを固定する。
 
@@ -1148,4 +1175,24 @@ class RuntimeMarkerParityTest(unittest.TestCase):
             )
         )
         self.assertEqual(missing, [], f"gate に無い検出ファイル: {missing}")
+
+
+class EnvTemplateMarkerTest(unittest.TestCase):
+    """PR #67 (Codex P2): env テンプレートだけを持つ非 git プロジェクトが
+    gate で落ち、env keys もソース由来の facts も出なくなっていた。
+    """
+
+    def test_env_example_only_project_passes_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env.example").write_text("API_KEY=\n")
+            (root / "app.py").write_text("print(1)\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found; facts skipped", out)
+
+    def test_real_env_file_is_not_a_marker(self):
+        # 実体の .env は機密。テンプレートと違い gate 通過の根拠にしない。
+        from core.constants import PROJECT_MARKERS
+
+        self.assertNotIn(".env", PROJECT_MARKERS)
 
