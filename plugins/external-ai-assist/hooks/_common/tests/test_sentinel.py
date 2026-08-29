@@ -38,7 +38,7 @@ class TestBareSentinel(unittest.TestCase):
 
 
 class TestFencesAndDecorations(unittest.TestCase):
-    """zh5.1: prompts が提示していたフェンス付き形式を指摘扱いしない。"""
+    """内部バックログの指摘: prompts が提示していたフェンス付き形式を指摘扱いしない。"""
 
     def test_fenced_sentinel(self):
         for text in (

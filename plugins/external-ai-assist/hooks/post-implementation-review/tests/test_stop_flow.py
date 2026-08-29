@@ -80,7 +80,7 @@ class TestReviewedPathsAreNotRepeated(HookTestCase):
     def test_block_result_also_marks_reviewed(self):
         self.edit(SESSION_A, "a.txt", "v1\n")
         output = self.stop(SESSION_A, "1. **直接影響** — 何か壊れる")
-        self.assertIn('"decision": "block"', output.replace('"decision":"block"', '"decision": "block"'))
+        self.assertBlocked(output)
         self.assertReviewed("a.txt")
 
         self.stop(SESSION_A, "REVIEW_CLEAN")
@@ -106,7 +106,7 @@ class TestFencedCleanSentinel(HookTestCase):
     def test_sentinel_followed_by_findings_still_blocks(self):
         self.edit(SESSION_A, "a.txt", "v1\n")
         output = self.stop(SESSION_A, "```\nREVIEW_CLEAN\n```\n\n1. **直接影響** — 実は壊れる")
-        self.assertIn('"decision": "block"', output.replace('"decision":"block"', '"decision": "block"'))
+        self.assertBlocked(output)
 
 
 class TestCursorFailureRestoresPaths(HookTestCase):
@@ -393,6 +393,7 @@ class TestExclusion(HookTestCase):
         self.assertEqual(self.pending(SESSION_A), [], "除外は恒久 (pending に戻さない)")
         parsed = _parse_output(output)
         self.assertNotIn("decision", parsed)
+        self.assertNotIn("hookSpecificOutput", parsed)
         self.assertIn("1 ファイルを外部 AI レビューから除外", parsed["systemMessage"])
         self.assertIn(".env (既定除外: .env)", parsed["systemMessage"])
         self.assertNotIn("sk-live", parsed["systemMessage"], "内容は通知にも出さない")
@@ -417,8 +418,7 @@ class TestExclusion(HookTestCase):
     def test_block_output_carries_both_decision_and_notice(self):
         self.edit(SESSION_A, ".env", self.SECRET)
         self.edit(SESSION_A, "a.py", "v1\n")
-        parsed = _parse_output(self.stop(SESSION_A, "1. **直接影響** — 何か壊れる"))
-        self.assertEqual(parsed["decision"], "block")
+        parsed = self.assertBlocked(self.stop(SESSION_A, "1. **直接影響** — 何か壊れる"))
         self.assertIn("直接影響", parsed["reason"])
         self.assertIn(".env", parsed["systemMessage"])
 

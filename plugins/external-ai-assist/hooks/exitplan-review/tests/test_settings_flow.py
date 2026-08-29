@@ -173,9 +173,35 @@ class TestContextMode(HookTestCase):
     """`EXTERNAL_AI_PLAN_REVIEW_MODE=context` は差し戻さず所見だけ渡す。"""
 
     def test_default_mode_blocks(self):
-        """回帰: 未設定なら従来どおり decision:block。"""
-        data = self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS))
-        self.assertNotIn("hookSpecificOutput", data)
+        """回帰: 未設定なら従来どおり差し戻す
+        (0.8.0 から hookSpecificOutput.permissionDecision: "deny" 形式。
+        deprecated だった top-level decision:block は使わない — 検証は assertBlocked に集約)。
+        """
+        self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS))
+
+    def test_default_mode_does_not_use_deprecated_top_level_fields(self):
+        """0.8.0 移行の固定: 公式 docs (`PreToolUse decision control`) は
+
+        "PreToolUse previously used top-level decision and reason fields, but these are
+        deprecated for this event. ... The deprecated values "approve" and "block" map to
+        "allow" and "deny" respectively."
+
+        と明記している。0.7.0 まではこの deprecated な top-level 形式 (`decision: "block"`)
+        のまま動いていたが、0.8.0 で `hookSpecificOutput.permissionDecision: "deny"` +
+        `permissionDecisionReason` に移行した。廃止した形式が復活しないことをここで固定する。
+        """
+        data = json.loads(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertNotIn("reason", data)
+        specific = data["hookSpecificOutput"]
+        self.assertEqual(specific["hookEventName"], "PreToolUse")
+        self.assertEqual(specific["permissionDecision"], "deny")
+        self.assertIn(
+            "## クロスレビュー結果 (ExitPlanMode)", specific["permissionDecisionReason"]
+        )
+        self.assertNotIn(
+            "additionalContext", specific, "deny 経路で additionalContext は不要"
+        )
 
     def test_context_mode_injects_additional_context(self):
         os.environ["EXTERNAL_AI_PLAN_REVIEW_MODE"] = "context"
@@ -184,12 +210,13 @@ class TestContextMode(HookTestCase):
         self.assertNotIn("decision", data, "context モードで block してはいけない")
         specific = data["hookSpecificOutput"]
         self.assertEqual(specific["hookEventName"], "PreToolUse")
-        # `permissionDecision` を返さないことは安全性の要件。`"allow"` を返すと
-        # ExitPlanMode の承認ゲートが飛び、利用者がプランを見ないまま実装に入る
+        # `permissionDecision` を返さないことは安全性の要件。`"allow"` は
+        # `updatedInput` とペアで使わない限り承認ゲートを飛ばさないが、ペアに
+        # すれば飛ばせてしまい利用者がプランを見ないまま実装に入ってしまう
         self.assertNotIn(
             "permissionDecision",
             specific,
-            "承認判断を返してはいけない (プランの承認ゲートを飛ばしてしまう)",
+            "承認判断を返してはいけない (allow は updatedInput とペアで承認ゲートを飛ばしうる)",
         )
         self.assertIn("## クロスレビュー結果 (ExitPlanMode)", specific["additionalContext"])
         self.assertIn("差し戻していません", specific["additionalContext"])

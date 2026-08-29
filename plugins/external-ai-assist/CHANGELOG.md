@@ -5,6 +5,151 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.8.0
+
+**Stop / PreToolUse(ExitPlanMode) の hook 出力形式を見直した batch (2026-08 内部
+バックログ精査)。挙動 (Claude が指摘を読んで継続する) は変えず表示形式のみ変更する
+ので minor bump。**(4. で post-implementation-review の既定表示形式が Claude Code の
+実行版数に応じた自動選択に発展したが、「Claude が指摘を読んで継続する」という効果は
+どちらの表示形式でも変わらないという前提は一貫している)
+
+### 1. post-implementation-review: Stop の既定を `decision: "block"` から `hookSpecificOutput.additionalContext` に変更
+
+0.7.0 までは指摘があるたび `decision: "block"` を返しており、Claude Code のトランス
+クリプト上で毎回**エラー扱い**として表示されていた。正常に完了したレビューがエラー
+通知に見えるのは離脱率の観点で好ましくない。公式 Hooks reference
+(`Stop decision control` 節) 逐語:
+
+> `hookSpecificOutput.additionalContext`: Non-error feedback for Claude. The
+> conversation continues so Claude can act on it, but unlike `decision: "block"` it
+> is shown in the transcript as hook feedback rather than a hook error.
+>
+> It keeps the conversation going through the same loop protections as
+> `decision: "block"`, namely the `stop_hook_active` input and the
+> 8-consecutive-continuation cap, but the transcript labels it "Stop hook feedback"
+> and no hook error notification is shown.
+
+- **既定を `hookSpecificOutput.additionalContext` (`hookEventName: "Stop"`) に変更**。
+  ループ保護 (`stop_hook_active` / 8 連続上限) はハーネス側の同一機構なので Claude の
+  動作は変わらず、表示だけが変わる
+- **実機確認 (nested `claude -p`, CLI 2.1.251, 2026-08-30)**: `additionalContext` を
+  返した次の Stop payload が `stop_hook_active: true` で再度発火することを確認した
+  (継続が実際に起きている)。確認は 2 段階で行った: 1 段目は injection 文言で試し、
+  Claude が「フック出力経由の注入」と見なして拒否したため、これだけでは指摘への
+  関与の証拠にならなかった。2 段目で `build_reason()` と同じ形の現実的な指摘文に
+  差し替えたところ、Claude は指摘を 1 件ずつ評価し理由を添えて明示的にスキップする
+  応答をした (`decision: "block"` の `reason` と同様に指摘へ関与することを確認済み)
+- **公式 changelog 記載の対応下限は CLI 2.1.163 (2026-06-04)**: 「Hooks: Stop and
+  SubagentStop hooks can now return `hookSpecificOutput.additionalContext` to give
+  Claude feedback and keep the turn going without being labeled a hook error」
+  (逐語)。これ未満の CLI では効かない可能性がある
+- **新設 `EXTERNAL_AI_POST_REVIEW_MODE`** (既定 `context`)。`block` にすると 0.7.0
+  までの `decision: "block"` に戻せる (2.1.163 未満の CLI を使っている場合や、外部
+  ツールが hook のエラー扱いをシグナルとして監視している場合の避難路)
+
+### 2. exitplan-review: 既定 block 経路を deprecated な top-level `decision`/`reason` から移行
+
+0.6.0 の CHANGELOG に「既知の未対応」として記載し「移行は core の差し戻し経路を
+触るので、実機検証を伴う独立の変更として扱うべき」として見送っていた移行を実施した。
+公式 Hooks reference (`PreToolUse decision control` 節) 逐語:
+
+> PreToolUse previously used top-level `decision` and `reason` fields, but these are
+> deprecated for this event. Use `hookSpecificOutput.permissionDecision` and
+> `hookSpecificOutput.permissionDecisionReason` instead. The deprecated values
+> `"approve"` and `"block"` map to `"allow"` and `"deny"` respectively. Other events
+> like PostToolUse and Stop continue to use top-level `decision` and `reason` as
+> their current format.
+
+- **`MODE=block` (既定) の出力を `{"decision": "block", "reason": ...}` から
+  `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+  "permissionDecisionReason": ...}}` に変更**。`"deny"` の `permissionDecisionReason`
+  は Claude に見える (docs: "For `"deny"`, shown to Claude") ので、指摘を読んで再度
+  `ExitPlanMode` を呼ぶという既存の挙動は変わらない
+- **`MODE=context` はこの移行と無関係**。`permissionDecision` を意図的に省く設計
+  (`"defer"` は `additionalContext` を無視し、省略形は docs に明示が無いため)
+  は変えていない
+- **PostToolUse / Stop の top-level `decision` / `reason` は現行フォーマットのまま**
+  (docs 逐語: "Other events like PostToolUse and Stop continue to use top-level
+  `decision` and `reason` as their current format")。1. の post-implementation-review
+  側の変更は deprecation 対応ではなく別の理由 (hook error に見せない) による
+- **移行前に 0.7.0 までの block 動作を固定してから envelope だけ置き換えた**。
+  `tests/_testutil.py::assertBlocked` を新形式の検証に更新し、`permissionDecisionReason`
+  を `data["reason"]` としてエイリアス返却することで、reason の本文・reviewer 別
+  ヘッダ・マーカー状態遷移を検証する既存テスト群を書き換えずに済ませた
+
+### 3. README を実装に合わせて修正 (内部バックログの精査で判明した乖離)
+
+- `plan_hash` の説明を「先頭 2000 文字の正規化版」から「プラン全文の空白正規化版
+  (切り詰めなし)」に訂正 (実装は一度も先頭 N 文字への切り詰めをしていなかった)
+- `plan-review-<session_id>.txt` / `reviews/<session_id>.txt` が実際には
+  session_id の先頭 8 文字 / 16 文字だけを使うことを明記
+- **待ち時間の絶対上限を明記**: exitplan-review は env を上限まで伸ばした場合
+  1 ラウンド最大 26 分 (`hooks.json` のハード上限)、既定 `EXTERNAL_AI_REVIEW_MAX=2`
+  なら最大 52 分。post-implementation-review の Stop は 1 回あたり最大 690 秒
+  (約 11 分 30 秒、`hooks.json` のハード上限)
+- **`claude -p` (headless) / CI での無効化を推奨する節を追加**。待ち時間がそのまま
+  自動化の所要時間に乗る点と、Cursor/Codex の課金が実行回数に比例して積み上がる点の
+  2 つを理由に明記
+- **POSIX 限定 (Windows 非対応) を明記**。`exitplan-review` / `post-implementation-review`
+  は `fcntl.flock` (状態排他) と `os.killpg` (外部 CLI 停止) に依存し、`fcntl` は
+  Windows に存在しないモジュールのため起動直後の import で例外になる (`main()` を
+  囲む try/except より前で失敗するため fail-open しない)。`explore-parallel` は
+  この 2 つに依存しない軽量な実装 (`os.kill` ベース) だが Windows での動作は未検証と
+  明記した
+- ファイル構成 / 動作サマリ / 環境変数表を 1. 2. の出力形式変更に合わせて更新
+
+### 4. post-implementation-review: 未対応 CLI での自動 fail-closed (Codex R1 P1)
+
+1. の変更だけでは、2.1.163 未満の CLI で plugin を更新した既存ユーザーが
+`EXTERNAL_AI_POST_REVIEW_MODE=block` という新しい opt-in の存在を知らない限り、
+`additionalContext` が黙って無視されレビュー指摘が届かないまま Stop してしまう。
+しかも `_run_review` は指摘を組み立てた時点で既に `state.complete_claim(...)` を
+呼んでいるため、この指摘は再試行されず永久に失われる (Codex PR #69 R1 レビュー指摘)。
+
+- **`EXTERNAL_AI_POST_REVIEW_MODE` を 3 値に拡張**: `block` (明示) / `context`
+  (明示。版数判定を飛ばす、利用者の責任) / それ以外 (`auto` 明示・未設定・未知の値)。
+  `auto` は実行中の Claude Code の版数を検出し、2.1.163 以上なら `context`、
+  **未満または検出できなければ自動的に `block` に fail-closed する** (指摘を Claude に
+  届かないまま失う方向には倒さない。コストは legacy 表示に戻るだけ)
+- **版数検出は 3 段** (`_claude_code_version()`): (a) 環境変数 `CLAUDE_CODE_VERSION`、
+  (b) 環境変数 `CLAUDE_CODE_EXECPATH` のパス要素のうち版数だけの文字列、(c)
+  `claude --version` の subprocess 実行 (timeout 3秒)。判定結果はプロセス内で
+  1 回だけ計算してキャッシュする (state ファイルへの永続化はしない)
+- **`llms-docs:researching-claude-docs` で公式ドキュメントを逐語確認した結果、(a)(b)
+  はいずれも hooks 向けの公式契約の外側にあると判明した**: `CLAUDE_CODE_VERSION` と
+  いう変数名自体は公式 Claude Code settings reference (`policyHelper` 節) に存在するが
+  Enterprise の managed settings 解決ヘルパー専用で、hook プロセスへの注入は明記され
+  ていない。`CLAUDE_CODE_EXECPATH` は `hooks` / `hooks-guide` / `env-vars` /
+  `settings-reference` / `plugins-reference` を含む公式コーパス全体でゼロヒットの
+  未文書化の内部実装詳細 (実機観測: `~/.local/share/claude/versions/<version>/claude`
+  形)。このため (c) の `claude --version` subprocess 実行を、最終的な信頼できる
+  フォールバックとして必ず残す設計にした ((a)(b) の形式が将来変わっても「版数が
+  分かる」経路自体は失われない)
+- 版数を理由に auto 解決が `block` に倒れたときだけ、`systemMessage` に
+  「(Claude Code <版数 または 不明> は Stop の additionalContext 非対応のため block で
+  差し戻し)」を付記する。明示 `MODE=block` ではこの付記文を混ぜない (利用者が意図して
+  選んだモードに版数起因の言い訳を添えると、「なぜ block なのか」の説明が矛盾して見える)
+- **Stop の待ち時間の絶対上限が 674 秒 → 677 秒に変化** (`claude --version` の
+  timeout 3秒が新たに worst case に加わるため。`hooks.json` 側の Stop timeout
+  690秒はそのままで収まる。`tests/test_review_set.py::TestTimeoutBudgets` を
+  この 3秒込みの式に更新した)
+- テストは実機の `claude` を起動しない (版数検出は `subprocess.run` を mock する)。
+  既存の `TestOutputMode` を含む全テストは `CLAUDE_CODE_VERSION` を対応版数に固定する
+  fixture (`tests/_testutil.py::PINNED_VERSION_ENV`) の下で走るため、実行環境で
+  実際に動いている Claude Code の版数に依存しない
+
+### テスト
+
+累計 **426 件**。直前の記録 (399 件) は本 batch 内の後続 commit (通知文のモード分岐
+修正) で追加した回帰テスト 2 件
+(`test_default_mode_notice_does_not_claim_claude_was_asked` /
+`test_block_mode_notice_claims_claude_was_asked`) が反映されておらず実際は
+401 件だった (この節で訂正)。そこからの正味の増分は post-implementation-review
++25: `test_version_detect.py` 16 新設 (版数検出 3 段の単体テスト)、
+`TestVersionAwareMode` 9 新設 (auto 解決の分岐・通知文・実検出経路の結合テスト)。
+exitplan-review (70) / explore-parallel (11) / `_common` (82) は変更していない
+ため件数不変。
+
 ## 0.7.0
 
 **2026-08 内部バックログ精査の修正 batch (誤帰属・無効時の無駄な処理・

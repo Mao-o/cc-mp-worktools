@@ -1,4 +1,4 @@
-"""cursor agent の起動 argv 契約 (zh5.2: 3 hook 共通で読み取り専用 `--mode plan`)。
+"""cursor agent の起動 argv 契約 (内部バックログの指摘: 3 hook 共通で読み取り専用 `--mode plan`)。
 
 `-p` / `--print` 単独は cursor-agent の help で「Has access to all tools, including write and
 shell」とされる書込可能モード。`readonly_argv` がそこへ戻らないことを固定する。

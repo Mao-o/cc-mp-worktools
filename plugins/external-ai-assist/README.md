@@ -7,8 +7,8 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 | Hook | 発火イベント | 役割 |
 |---|---|---|
 | `explore-parallel` | `PreToolUse(Agent)` + `PostToolUse(Agent)` | `Explore` サブエージェント起動時に Cursor Agent を並走させ、完了時に `additionalContext` として親 Claude に注入 |
-| `exitplan-review` | `PreToolUse(ExitPlanMode)` | プラン承認前に **Cursor (既存コードベース整合) + Codex (要件・アーキ) を並列クロスレビュー** し、指摘を `decision: block` で Claude に差し戻す |
-| `post-implementation-review` | `PreToolUse(Bash)` + `PostToolUse(Write/Edit/NotebookEdit/Bash)` + `Stop` | **そのターンにこのセッションが編集したファイルだけ**を Cursor でレビューし、影響範囲・リグレッションリスク等を `decision: block` で Claude に返す |
+| `exitplan-review` | `PreToolUse(ExitPlanMode)` | プラン承認前に **Cursor (既存コードベース整合) + Codex (要件・アーキ) を並列クロスレビュー** し、指摘を `hookSpecificOutput.permissionDecision: "deny"` で Claude に差し戻す |
+| `post-implementation-review` | `PreToolUse(Bash)` + `PostToolUse(Write/Edit/NotebookEdit/Bash)` + `Stop` | **そのターンにこのセッションが編集したファイルだけ**を Cursor でレビューし、影響範囲・リグレッションリスク等を `hookSpecificOutput.additionalContext` で Claude に返す |
 
 ## インストール
 
@@ -20,6 +20,13 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 ## 前提
 
 - **Python 3.11+** (標準ライブラリのみ使用)
+- **POSIX 環境のみ** (Linux / macOS)。**Windows 非対応**: `exitplan-review` と
+  `post-implementation-review` は状態ファイルの排他に `fcntl.flock`、外部 CLI の停止に
+  `os.killpg` (プロセスグループ単位の SIGTERM/SIGKILL) を使い、どちらも POSIX 専用
+  API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は起動直後の
+  import で例外になる (`main()` を囲む try/except より前で失敗するため fail-open
+  しない)。`explore-parallel` はこの 2 つに依存しない軽量な実装 (`os.kill` ベース) だが
+  Windows での動作は未検証
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
   3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
@@ -28,6 +35,18 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 
 **どちらの CLI も未インストールでも Claude Code 本体の動作には影響しない** (fail-open)。
 片方だけインストールされていれば、その片方の観点だけでレビューが成立する。
+
+**`claude -p` (headless) や CI での実行では、3 hook とも `EXTERNAL_AI_*=0` で無効化する
+ことを推奨する**。理由は 2 つ: (1) 各レビューは数分単位でブロックしうる (下記
+「待ち時間の見積り」参照) ため、人間が離席前提の対話セッションと違い自動化された
+実行では待ち時間がそのまま所要時間に乗る、(2) Cursor / Codex CLI の呼び出しは
+それぞれの課金が発生する (下記「コストの目安」参照) ため、CI の実行回数だけ
+無関係な課金が積み上がる。プロジェクト単位で切る手順は後述の「プロジェクト単位で
+切る」を参照:
+
+```bash
+EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW=0 claude -p "..."
+```
 
 ## 動作サマリ
 
@@ -44,7 +63,10 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 
 ### exitplan-review (クロスレビュー)
 
-`ExitPlanMode` 呼び出し時に Cursor と Codex を **並列実行** し、両者の出力を統合して `decision: block` で Claude に返す。
+`ExitPlanMode` 呼び出し時に Cursor と Codex を **並列実行** し、両者の出力を統合して
+`hookSpecificOutput.permissionDecision: "deny"` (+ `permissionDecisionReason`) で
+Claude に差し戻す (0.8.0 から。PreToolUse の top-level `decision` / `reason` は公式
+docs 上 deprecated なため移行した)。
 
 - **Cursor (primary)**: コードベース上の具体的な根拠を持つ観点
   - 既存コードベースとの整合性・影響範囲・依存の妥当性・見落とし箇所・テスト戦略
@@ -63,14 +85,15 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
   再 ExitPlanMode) の総回数」を縛らない** — 修正のたびにプラン本文が変わり
   hash も変わるため、同じ内容を変えずに出し直した場合にだけ効く。往復回数
   そのものを縛る仕組みは現状無い (後述の「待ち時間とコストの見積り」を参照)
-- プラン内容の SHA-256 ハッシュ (先頭 2000 文字の正規化版) で同一性判定。マーカーは
-  `$TMPDIR/plan-review-markers/<session_id>.exitplan.marker` に JSON で
+- プラン**全文**を空白正規化 (連続する空白・改行を半角スペース 1 個に畳む) した文字列の
+  SHA-256 ハッシュ (先頭 16 桁) で同一性判定 (先頭 N 文字などへの切り詰めはしない)。
+  マーカーは `$TMPDIR/plan-review-markers/<session_id>.exitplan.marker` に JSON で
   `{hash: 該当プランの block 回数}` を持つ。同時に「未確定 (レビュー実行中に
   hook が kill された)」仮予約を `RESERVATION_TTL_SEC` (両レビュアーの timeout
   上限 + 300 秒) 経過後に回収し、記録エントリ数は 50 件を超えたら古い順に捨てる。
   マーカーファイルおよび `$TMPDIR/plan-review-*.txt` (0.6.0 以前の形式を含む) は
   mtime 48 時間で GC する
-- レビュー結果は `$TMPDIR/plan-review-<session_id>.txt` にも保存
+- レビュー結果は `$TMPDIR/plan-review-<session_id の先頭 8 文字>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
 - **完了時に所要時間と結果を `systemMessage` で表示** (0.6.0)。
   `[exitplan-review] クロスレビュー完了 (4分12秒): codex=clean, cursor=指摘あり → プランを差し戻し`。
@@ -126,12 +149,22 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 - 除外・繰り越し・切り詰めが起きたターンは、対象ファイル名と理由を `systemMessage` と
   stderr に出す (ファイルの内容は出さない)
 - **レビューを走らせたターンは所要時間と結果を `systemMessage` で表示** (0.6.0)。
-  `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (Claude に対応を依頼しました)`。
+  `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (レビュー結果を Claude の文脈に渡しました)`。
   編集 0 件のターンは従来どおり無出力
+- **指摘ありは既定 (`auto`) で `hookSpecificOutput.additionalContext` (hookEventName:
+  `Stop`) で返す** (0.8.0)。公式 docs は「`decision: "block"` と同じループ保護
+  (`stop_hook_active` / 8 連続上限) が働くが、トランスクリプト上は hook エラーではなく
+  フィードバックとして表示される」と明記しており、Claude 側の効果 (継続して指摘を読む) は
+  変わらず表示だけが変わる。**CLI 2.1.163 未満では `additionalContext` が Stop で
+  効かない**ため、`auto` は実行中の Claude Code の版数を自動検出し、**2.1.163 未満・
+  検出できない場合は自動的に `decision: "block"` (0.7.0 までの形式) に fail-closed
+  する** — 指摘を Claude に届かないまま失う方向には倒さない。`EXTERNAL_AI_POST_REVIEW_MODE`
+  に `block` / `context` を明示すれば版数判定を飛ばして固定できる (詳細は環境変数表)
 - **頻度を落とす設定** (0.6.0): `EXTERNAL_AI_POST_REVIEW_MIN_LINES` (変更行数のしきい値) と
   `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` (前回レビューからの間隔)。どちらの見送りも
   pending を消費しないので、貯まった変更は次のレビューへまとめて載る
-- レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id>.txt` にも保存
+- レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id の先頭 16 文字>.txt`
+  にも保存
 - 状態ファイルは 48 時間で GC (旧 `$TMPDIR/post-review-markers/` の残骸も掃除する)
 
 プロンプトは `hooks/post-implementation-review/prompts/post-implementation-cursor.md` に外部化され、出力は 5 項目 (直接影響 / 間接影響 / 未検証ケース / 追加テスト / マージ前確認) に固定。
@@ -263,6 +296,14 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 `MODE=context` は差し戻しの往復を無くすので**その分**は縮むが、プランごとの
 1 回分の待ちは変わらない。
 
+**env を上限まで伸ばした場合の絶対上限**: `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` の上限は
+`1500` 秒 (25分)。これに kill 猶予 (最大 3 × 5 秒 = 15秒) を足した 1515 秒でも収まる
+よう、`hooks.json` 側のハード上限は `1560` 秒 (26分) に設定されている。これを超えると
+ハーネスが後始末 (枠を戻す等) の前に hook プロセスを kill する。**既定の
+`EXTERNAL_AI_REVIEW_MAX=2` で同一プランを無修正のまま
+2 回連続提出すると、timeout を上限まで伸ばした環境では最大 26分 × 2 ≈ 52分待つ**
+(既定の `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT=600` (10分) のままなら 20分)。
+
 ### post-implementation-review
 
 | 変数 | 既定値 | 意味 |
@@ -275,9 +316,19 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 | `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
 | `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` | `0` | `1` でコード以外 (`.md` / `.txt` / `.csv` / `.pdf` / 画像等。一覧は上の除外規則) を外部に送らない。**「docs だけの変更でレビューを走らせたくない」用途はこれで足りる** |
 | `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
+| `EXTERNAL_AI_POST_REVIEW_MODE` | `auto` | 指摘ありの返し方。3 値: `auto` (既定・未設定・未知の値も同じ扱い) は実行中の Claude Code の版数を自動検出し、2.1.163 以上なら `context` (`hookSpecificOutput.additionalContext`、hook error に見せない)、**未満または検出できなければ `block` に fail-closed する** (指摘を届かないまま失う方向には倒さない)。`block` / `context` を明示すると版数判定を飛ばして固定できる (`context` を明示した場合、2.1.163 未満での既知の問題を承知の上という前提で利用者の責任)。版数検出は環境変数 `CLAUDE_CODE_VERSION` → `CLAUDE_CODE_EXECPATH` のパス要素 → `claude --version` の順 (後2つは hooks 向けの公式契約の外側にあるベストエフォートの手段。詳細は `hooks/post-implementation-review/__main__.py` の docstring) |
 
 **見送り (`MIN_LINES` / `COOLDOWN_SEC`) は pending を消費しない**。見送った変更は捨てられず、
 次に走るレビューへまとめて載る。
+
+**1 回あたりの絶対上限**: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` の上限は `600` 秒 (10分)。
+これに kill 猶予 (最大 15秒)、git 予算 (最大 59秒)、`MODE=auto` が版数検出で
+`claude --version` の subprocess にフォールバックした場合の追加分 (最大 3秒) を
+足した合計 677秒でも収まるよう、`hooks.json` 側の Stop timeout は `690` 秒
+(約11分30秒) に設定されている。
+exitplan-review と違って同一内容の再提出を縛る回数上限は無く、**編集のあったターンの
+Stop ごとに毎回この上限まで待ちうる** (総待ち時間はターン数に比例し上限なし。詳細は
+後述の「コストの目安」)。
 
 ### コストの目安
 

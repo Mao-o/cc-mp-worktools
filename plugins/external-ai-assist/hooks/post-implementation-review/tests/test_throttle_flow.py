@@ -6,6 +6,7 @@
 """
 import json
 import os
+import subprocess
 import time
 import unittest
 from unittest import mock
@@ -252,8 +253,7 @@ class TestCompletionNotice(HookTestCase):
 
     def test_block_carries_summary_alongside_decision(self):
         self.edit(SESSION, "a.py", "v1\n")
-        data = json.loads(self.stop(SESSION, FINDINGS))
-        self.assertEqual(data["decision"], "block")
+        data = self.assertBlocked(self.stop(SESSION, FINDINGS))
         self.assertIn("指摘あり", data["systemMessage"])
         self.assertIn("直接影響", data["reason"], "本文は reason 側に残っていること")
 
@@ -322,6 +322,169 @@ class TestDisableSwitch(HookTestCase):
         os.environ.pop("EXTERNAL_AI_POST_REVIEW", None)
         os.environ["EXTERNAL_AI_POST_REVIEW_MAX"] = "2"
         self.assertTrue(self.entry.review_enabled())
+
+
+class TestOutputMode(HookTestCase):
+    """`EXTERNAL_AI_POST_REVIEW_MODE` (0.8.0 新設)。
+
+    既定は `context` (`hookSpecificOutput.additionalContext`、hook error に見せない)。
+    `block` にすると 0.7.0 までの top-level `decision: "block"` に戻せる。公式 docs
+    (`Stop decision control` 節) は、`additionalContext` でも `decision: "block"` と
+    同じループ保護 (`stop_hook_active` / 8 連続上限) が働くと明記しているため、
+    どちらのモードでも Claude 側の効果 (継続して reason を読む) は同じ。
+    """
+
+    def test_default_mode_uses_additional_context_not_decision(self):
+        """回帰: 未設定なら 0.8.0 の新既定 (additionalContext) を使う。"""
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertNotIn("reason", data)
+        specific = data["hookSpecificOutput"]
+        self.assertEqual(specific["hookEventName"], "Stop")
+        self.assertIn("直接影響", specific["additionalContext"])
+
+    def test_block_mode_restores_legacy_top_level_decision(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertIn("直接影響", data["reason"])
+        self.assertNotIn("hookSpecificOutput", data)
+
+    def test_unknown_mode_falls_back_to_context(self):
+        """タイプミスで既定 (additionalContext) から外れない (fail-open)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "whatever"
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertEqual(data["hookSpecificOutput"]["hookEventName"], "Stop")
+
+    def test_mode_does_not_affect_clean_review(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION, "a.py", "v1\n")
+        self.assertNotBlocked(self.stop(SESSION, "REVIEW_CLEAN"))
+
+    def test_default_mode_notice_does_not_claim_claude_was_asked(self):
+        """回帰: 既定 (additionalContext) は CLI 2.1.163 未満で無視されうるため、
+        systemMessage は「Claude に対応を依頼しました」と断定しない (内部バックログの指摘)。
+        """
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("依頼しました", data["systemMessage"])
+
+    def test_block_mode_notice_claims_claude_was_asked(self):
+        """回帰: MODE=block はハーネスが継続を保証するので、
+        systemMessage で「Claude に対応を依頼しました」と言い切ってよい。
+        """
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertIn("依頼しました", data["systemMessage"])
+
+
+class TestVersionAwareMode(HookTestCase):
+    """`EXTERNAL_AI_POST_REVIEW_MODE` の auto 解決が Claude Code の版数を見て
+    fail-closed すること (Codex R1 P1: 2.1.163 未満の CLI で `additionalContext` が
+    無視され、`state.complete_claim` 済みの指摘が永久に失われる問題への対応)。
+
+    版数検出そのもの (`_claude_code_version` の 3 段) の単体テストは
+    `test_version_detect.py`。ここでは `_claude_code_version` を直接 mock して
+    「版数が与えられたときにモード解決がどちらに転ぶか」だけを検証する
+    (`HookTestCase` の既定 pin は `CLAUDE_CODE_VERSION=9.9.9` = 常に対応版数)。
+    """
+
+    def test_auto_mode_falls_back_to_block_when_version_unsupported(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(2, 1, 100)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertNotIn("hookSpecificOutput", data)
+        self.assertIn("2.1.100", data["systemMessage"])
+        self.assertIn("additionalContext 非対応のため block で差し戻し", data["systemMessage"])
+
+    def test_auto_mode_falls_back_to_block_when_version_unknown(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertIn("不明", data["systemMessage"])
+
+    def test_auto_mode_uses_context_when_version_supported(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(2, 1, 163)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertEqual(data["hookSpecificOutput"]["hookEventName"], "Stop")
+
+    def test_auto_literal_behaves_like_unset(self):
+        """`MODE=auto` を明示しても、未設定と同じ自動選択になる。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = self.entry.MODE_AUTO
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(2, 1, 163)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+
+    def test_explicit_block_mode_ignores_supported_version(self):
+        """明示 `block` は版数が対応していても勝つ (版数判定を飛ばす)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(9, 9, 9)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+
+    def test_explicit_block_mode_omits_version_fallback_reason(self):
+        """明示 `block` では、たとえ版数が非対応でも auto フォールバックの付記文を
+        混ぜない (利用者が意図して選んだモードに「版数のせいで block」という
+        言い訳を添えると矛盾して見える)。
+        """
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertIn("依頼しました", data["systemMessage"])
+        self.assertNotIn("additionalContext 非対応のため", data["systemMessage"])
+
+    def test_explicit_context_mode_ignores_unsupported_version(self):
+        """明示 `context` は版数が非対応・不明でも勝つ (利用者の責任)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "context"
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertEqual(data["hookSpecificOutput"]["hookEventName"], "Stop")
+
+    def test_auto_mode_falls_back_to_block_when_version_cannot_be_detected(self):
+        """版数検出そのもの (env var 不在・EXECPATH に版数無し・subprocess 失敗) と
+        モード解決の結合テスト。`_claude_code_version` を直接 mock せず、実際の検出
+        経路をすべて塞いで確認する (`test_version_detect.py` の単体テストと違い、
+        ここは配線まで含めた end-to-end)。
+
+        `subprocess.run` は `claude` 呼び出しだけを失敗させ、`gitscan.py` が使う git
+        呼び出しは実行にそのまま通す (全体を潰すと git status/diff まで壊れて
+        別の理由で失敗する)。
+        """
+        real_run = subprocess.run
+
+        def fake_run(argv, *a, **kw):
+            if list(argv)[:1] == ["claude"]:
+                raise FileNotFoundError()
+            return real_run(argv, *a, **kw)
+
+        os.environ.pop("CLAUDE_CODE_VERSION", None)
+        os.environ["CLAUDE_CODE_EXECPATH"] = (
+            "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        )
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertIn("不明", data["systemMessage"])
+
+    def test_mode_does_not_affect_clean_review(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            self.assertNotBlocked(self.stop(SESSION, "REVIEW_CLEAN"))
 
 
 if __name__ == "__main__":

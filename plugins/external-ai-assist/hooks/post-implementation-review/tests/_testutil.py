@@ -52,6 +52,19 @@ NEUTRAL_EXCLUSION_ENV = {
     "EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS": "1",
 }
 
+# `CLAUDE_CODE_VERSION` は `_claude_code_version()` の検出順で最優先に見られる値
+# (`__main__.py` モジュール docstring「未対応 CLI での自動 fail-closed」節参照)。ここで
+# 固定しないと、開発者の実行環境で実在する `CLAUDE_CODE_EXECPATH` (ローカルインストール)
+# や実際の `claude --version` の結果に頼ってしまい、「auto モード = additionalContext」を
+# 前提にした既存テストが「今この端末で動いている Claude Code の版数」次第で揺れる
+# (かつ実機の `claude` を起動しかねない — 禁止事項)。値は下限 2.1.163 より十分大きい
+# "9.9.9" を使い、既定を「常に additionalContext 対応」に固定する。auto の block
+# フォールバックを明示的にテストしたいケースは、各テストが `_claude_code_version` を
+# 直接 mock する (`test_throttle_flow.py::TestVersionAwareMode`)。版数検出そのもの
+# (env var / EXECPATH / subprocess の 3 段) の単体テストは `test_version_detect.py`
+# (こちらは `_claude_code_version` を mock せず `subprocess.run` を mock する)。
+PINNED_VERSION_ENV = {"CLAUDE_CODE_VERSION": "9.9.9"}
+
 
 def load_entry():
     """`__main__.py` を `__main__` 以外の名前で読み込む (main() の自動実行を避ける)。"""
@@ -114,7 +127,8 @@ class HookTestCase(unittest.TestCase):
             **NEUTRAL_EXCLUSION_ENV,
         }
         self._env = mock.patch.dict(
-            os.environ, {"TMPDIR": self.tmpdir, **pinned, **HERMETIC_GIT_ENV}
+            os.environ,
+            {"TMPDIR": self.tmpdir, **pinned, **HERMETIC_GIT_ENV, **PINNED_VERSION_ENV},
         )
         self._env.start()
         clear_plugin_env(keep=pinned)
@@ -228,7 +242,42 @@ class HookTestCase(unittest.TestCase):
             return ""
         data = json.loads(output)
         self.assertNotIn("decision", data, "block してはいけない出力に decision がある")
+        self.assertNotIn(
+            "hookSpecificOutput", data, "block してはいけない出力に所見注入がある"
+        )
         return data.get("systemMessage", "")
+
+    def assertBlocked(self, output: str) -> dict:
+        """指摘ありでレビュー結果を返したことを検証する。
+
+        0.8.0 から既定は `hookSpecificOutput.additionalContext` (hookEventName: "Stop")。
+        `EXTERNAL_AI_POST_REVIEW_MODE=block` なら 0.7.0 までの top-level
+        `decision: "block"` + `reason` に戻る。どちらのモードでも Claude に届く本文は
+        同じなので、呼び出し側の便宜のために `data["reason"]` へエイリアスして返す
+        (実際の wire format の検証はここで一度だけ行う)。公式 docs
+        (`Stop decision control` 節) は `additionalContext` について
+        "It keeps the conversation going through the same loop protections as
+        decision: block" と明記しており、モードによって Claude 側の効果は変わらない。
+
+        **どちらの envelope も受理するのは意図的**。既定 (`context`) を明示的に
+        固定したいテストは `test_throttle_flow.py::TestOutputMode` を見ること — ここは
+        「内容 (reason 相当の本文) がどちらのモードでも一貫していること」だけを保証し、
+        個々の block/繰り越し系テストは env を切り替えなくても両モードで動くようにする
+        (=このメソッドを寛容にすることで、内容アサーションを重複させない)。
+        """
+        self.assertTrue(output, "レビュー結果の JSON が出力されていない")
+        data = json.loads(output)
+        if "decision" in data:
+            self.assertEqual(data["decision"], "block")
+            reason = data.get("reason", "")
+        else:
+            specific = data.get("hookSpecificOutput", {})
+            self.assertEqual(specific.get("hookEventName"), "Stop")
+            self.assertNotIn("decision", data)
+            reason = specific.get("additionalContext", "")
+            data["reason"] = reason
+        self.assertIn("## 実装直後レビュー結果 (Cursor, 差分レビュー)", reason)
+        return data
 
     def pending(self, session_id: str) -> list[str]:
         path = os.path.join(self.tmpdir, "post-implementation-review", "state", f"{session_id}.json")

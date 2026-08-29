@@ -1,6 +1,6 @@
 """cursor ラッパの起動引数を PATH 先頭の偽 cursor で固定する。
 
-zh5.2: 3 hook とも cursor agent は読み取り専用 (`--mode plan`) で起動する。この hook は
+内部バックログの指摘: 3 hook とも cursor agent は読み取り専用 (`--mode plan`) で起動する。この hook は
 0.2.0 から付いているが argv を assert するテストが無かった (他のテストは `review()` を
 mock する) ので、`-p` 単独 (書込可能) に戻らないことをここで固定する。
 """
