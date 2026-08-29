@@ -73,6 +73,14 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
    期待値と現在値が出る。ユーザーに「CLI の切り替え」か「accounts.local.json
    の更新」のどちらを行うか相談する。
 
+## 表示対象のファイル
+
+show は **hook (dispatcher) が実際に読むファイル**を表示する。cwd 階層に無ければ
+親ディレクトリを遡って探すため、worktree から親 repo の設定を継承している場合は
+親側のファイルが出る。stdout 先頭の `対象: <パス>` 行に解決結果 (継承の有無を含む)
+が出るので、ユーザーに伝えること。特定のファイルを名指しで見たいときは
+`--path <file>` を付ける。
+
 ## 複数パス競合時
 
 show が exit 1 で「複数のパスに accounts.local.json が存在します」と stderr

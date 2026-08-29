@@ -110,3 +110,36 @@ def discover_accounts_files_with_ancestors(
             break
         current = parent
     return [], None
+
+
+def resolve_accounts_file(
+    project_dir: str,
+) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None]:
+    """`project_dir` から見て **hook が実際に読む** accounts.local.json を決める。
+
+    3-tier lookup (`discover_all_accounts_files`) と親ディレクトリ遡及
+    (`discover_accounts_files_with_ancestors`) を組み合わせた唯一の解決関数。
+    `core/dispatcher.py` (検証時) と `scripts/accounts_builder.py` (編集時) の
+    **両方がこれを呼ぶ**: builder が独自に「cwd 直下の新パス」を対象にすると、
+    親から継承しているプロジェクト (worktree / サブディレクトリ) で編集した
+    service だけを含む子ファイルが生まれ、dispatcher の遡及がその子ファイルで
+    止まって継承していた他 service が全て未設定になる。読む側と書く側で解決を
+    共有することでこの shadowing を構造的に防ぐ。
+
+    Returns:
+        (path, kind, conflicts, resolved_dir):
+          - path: 採用するファイルのパス。見つからない or 競合時は None
+          - kind: "new" / "deprecated" / "legacy" のいずれか (採用されたもの)
+          - conflicts: 同一階層に複数 tier が存在した場合の検出リスト
+                       (採用は保留。呼び出し側で fail-closed deny する — D4)
+          - resolved_dir: 採用 (または競合検出) した階層の絶対パス。親遡及で
+                          project_dir の祖先を採用した場合はその祖先。
+                          何も見つからなければ None
+    """
+    found, resolved_dir = discover_accounts_files_with_ancestors(project_dir)
+    if len(found) >= 2:
+        return None, None, found, resolved_dir
+    if len(found) == 1:
+        kind, path = found[0]
+        return path, kind, [], resolved_dir
+    return None, None, [], None

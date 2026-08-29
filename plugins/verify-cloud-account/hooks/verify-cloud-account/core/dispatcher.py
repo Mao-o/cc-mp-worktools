@@ -100,29 +100,14 @@ def _find_accounts_file(
 ) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None]:
     """accounts.local.json を 3-tier + 親ディレクトリ遡及で探す。
 
-    cwd 階層から始めて 1 階層ずつ親へ遡り、最初に accounts.local.json が
-    見つかった階層を採用する。同一階層に複数 tier が同居する場合は
-    fail-closed (D4) のため `conflicts` を返す。worktree から親 repo の
-    `.claude/verify-cloud-account/accounts.local.json` を継承する運用を
-    透過的にサポートし、worktree 内に同名ファイルを複製する必要を無くす。
-
-    Returns:
-        (path, kind, conflicts, resolved_dir):
-          - path: 採用するファイルのパス。見つからない or 競合時は None
-          - kind: "new" / "deprecated" / "legacy" のいずれか (採用されたもの)
-          - conflicts: 同一階層に複数 tier が存在した場合の検出リスト
-                       (採用は保留。呼び出し側で fail-closed deny する)
-          - resolved_dir: 採用 (または競合検出) した階層の絶対パス。
-                          親遡及で worktree 外を採用した場合は project_dir の
-                          祖先を指す。何も見つからなければ None
+    実体は `core/paths.resolve_accounts_file()` — **builder
+    (`scripts/accounts_builder.py`) と同じ解決を共有する**ための薄い委譲。
+    「hook が読むファイル」と「builder が書くファイル」が食い違うと、親から
+    継承しているプロジェクトで builder が子ファイルを作り、その子ファイルで
+    遡及が止まって継承分が全て未設定になる (詳細は paths 側の docstring)。
+    戻り値の意味も paths 側の docstring を参照。
     """
-    found, resolved_dir = paths.discover_accounts_files_with_ancestors(project_dir)
-    if len(found) >= 2:
-        return None, None, found, resolved_dir
-    if len(found) == 1:
-        kind, path = found[0]
-        return path, kind, [], resolved_dir
-    return None, None, [], None
+    return paths.resolve_accounts_file(project_dir)
 
 
 def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:

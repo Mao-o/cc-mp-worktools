@@ -1,5 +1,194 @@
 # Changelog
 
+## 0.10.0
+
+**builder (`scripts/accounts_builder.py`) に既存値の更新・削除と、書込前の
+入力検証を追加した** (内部バックログ)。`init` は既存キーと異なる値を拒否
+するだけで、値の切替や削除の手段が無かった問題と、`--value` / `migrate`
+経由で不正な形の値が書き込まれ、後になって dispatcher の hook 実行時に
+初めて deny される問題を解消する。
+
+### 変更内容
+
+1. **`set` / `remove` サブコマンドを追加** — `set --service <svc>
+   [--value <v> | --from-cli] [--host <h>] [--dry-run|--commit]` は既存キーの
+   値を更新する (無ければ新規追加)。`remove --service <svc> [--host <h>]
+   [--dry-run|--commit]` は既存キーを削除する。どちらも `--host` で dict 値
+   (GitHub の hostname / Firebase の alias 等) の特定キーだけを追加・上書き・
+   削除できる。**最後の 1 つの host/alias を remove すると、空 dict `{}` を
+   残さずキー自体を削除する** — 空 dict のままだと github/firebase/gcloud の
+   `verify()` が「オブジェクトが空です」で permanent deny するが、この deny
+   文面は次に何をすべきか分からない。未記載にしておけば dispatcher が
+   「キーがありません。対象サービスのアカウントを追加してください」で deny
+   するため、設定を促す案内としてこちらのほうが分かりやすい。dict を
+   受け付けない service
+   (aws/kubectl) への `--host` 指定は早期にエラーにする。書込パス固定
+   (D2)・値隠蔽 (D3)・mtime 更新による cache 無効化・CLAUDE.md/`.gitignore`
+   の自動同梱は init/migrate と同じ経路を流用する。
+   `accounts-init` SKILL の skipped 分岐 (旧: 「手動でファイルを編集するか
+   将来の switch サブコマンドを使う」) は `set`/`remove` の案内に差し替えた。
+   さらに **`remove` は値が `null` (壊れた entry) のキーも削除できるように
+   した** (独立レビュー指摘で修正)。当初は `existing.get(service_key) is
+   None` で『キーが存在しない』と『値が `null`』を区別しておらず、
+   `{"github": null}` のように dispatcher がまさに deny する形を見つけても
+   remove が「何もしません」と早期終了し、修復する手段が無かった。キーの
+   有無を `in` 演算子で判定するように直し、`--host` 指定時は従来どおり
+   (既存値がオブジェクトでない) エラーに倒す。`set` は元々 commit 時に
+   既存値の有無に関わらず値を上書きするため、この形は当初から修復できて
+   いた (回帰テストで固定)。さらに **`remove --host` は削除後の残り dict の
+   形も再検証するようにした** (独立レビュー指摘で修正) — 最後の 1 つでなくても
+   残り dict が `_validate_entry_shape(strict_keys=False)` に拒否される形
+   (例: `DICT_ALLOWED_KEYS` を宣言する gcloud で project/account 以外の
+   キーだけが残る) になることがあり、そのままでは書込は成功しても
+   `verify()` が fail-closed deny する状態になっていた。この形も空 dict の
+   場合と同じくキー自体を削除し、理由を stdout に明示する。
+2. **`--value` の JSON dict を構造化データとして解釈** — 従来は `--value` を
+   常に生文字列として保存していたため、`--value
+   '{"project":"p","account":"a"}'` が JSON 文字列そのものとして保存され、
+   gcloud の `verify()` が dict 期待値と JSON 文字列を比較して永久不一致に
+   なっていた。`json.loads` を試み、**dict なら dict として保存し、それ以外
+   (不正な JSON、または dict 以外の JSON 型) は生文字列のまま保存する**
+   (`init` / `set` 共通の `_parse_value`)。dict 以外を素通しするのは、数字
+   だけの username (`--value 12345`) のような値が JSON 数値/真偽値/配列に
+   暗黙変換されて型が壊れるのを防ぐため。
+3. **書込前スキーマ検証 (`_validate_entry_shape`)** — `init` / `set` /
+   `migrate` は書込前に値の形 (文字列、または service ごとの許容 dict 形) を
+   検証し、不正なら書き込まずに exit 1 にする。各 service は
+   `ACCEPTS_DICT` (dict 形を受け付けるか) と、`gcloud` のみ
+   `DICT_ALLOWED_KEYS = frozenset({"project","account"})` (許容キー) を宣言
+   する。`init`/`set` は未知キーも個々の値の不正も即座に拒否する厳格モード
+   だが、**`migrate` は旧パスから取り込む値 (additions) だけを対象にし、
+   未知キーと「dict 内に使える値が 1 つでも残っていれば良い」の両方を
+   許容する** (`strict_keys=False`) — `gcloud.verify()` は宣言外のキーを
+   黙って無視するだけで拒否しないし、`gcloud`/`firebase` の `verify()` は
+   `{"default":"proj-dev","old":null}` のような部分的に壊れた dict も
+   使える値が 1 つ残っていれば成立させる。migrate でだけ厳格化すると
+   verify() では通っていた形を後から書けなくする退行になる。migrate が
+   触っていない新パス側の既存エントリは検証対象にしない (無関係な統合作業
+   まで exit 1 にしないため)。
+   **この leniency の範囲は service ごとの `DICT_VALUE_CHECK` 契約に限る**
+   (独立レビュー指摘で修正)。当初は全 service に一律で適用していたため、
+   **その service の `verify()` が形を理由に deny する値まで書けてしまい、
+   書込時検証をすり抜けて実行時 deny に化けていた** — 例:
+   `{"gcloud":{"project":"p","account":123}}` は `gcloud.verify()` が
+   truthy な非文字列の `account` を「文字列で指定してください」で拒否するのに、
+   builder は「`project` が有効だから」と通していた。各 service は
+   `verify()` の実装に対応する契約を宣言する: `github` は `"all"`
+   (dict の全キーの値が文字列必須)、`gcloud` は `"truthy"`
+   (falsy な値は `verify()` が黙って無視するので許容、truthy な非文字列は
+   拒否)、`firebase` は `"none"` (`verify()` が使えない値を filter で捨てる
+   ので値の型では拒否しない)。守る不変条件は「**builder が受理した形は、
+   その service の `verify()` が形を理由に deny しない**」で、service ×
+   形状 (scalar / 正常 dict / 部分欠落 / falsy 値 / truthy 非文字列 /
+   未知キー / 空 dict) の表で固定した。
+   さらに **`DICT_ALLOWED_KEYS` 宣言時は「使える値が 1 つでもあるか」の判定を
+   許可キーの値だけに限定した** (独立レビュー指摘で修正)。
+   `{"gcloud":{"region":"us-central1"}}` は未知キー `region` の非空文字列を
+   使える値と誤認して受理していたが、`gcloud.verify()` は `project` も
+   `account` も無いとして deny する — migrate は成功と報告した entry が
+   そのままでは使えなかった。`DICT_ALLOWED_KEYS` を宣言しない service
+   (`github`/`firebase`) は影響を受けない。
+4. **空文字・空白のみの値を書けないようにした** (独立レビュー指摘)。
+   `set --service aws --value "$UNSET_VAR" --commit` のように未定義の環境変数を
+   渡すと空文字に展開され、`"aws": ""` が書き込めてしまっていた。dispatcher は
+   `entry == ""` を**キーの欠落と同じ**扱いにするため、以後その service は
+   設定を直すまで恒久 deny になる — 書込時検証を追加した当の builder 自身が、
+   検証をすり抜ける値を作っていたことになる。scalar の値にも dict のキー・値と
+   同じ規則 (`strip()` 後に非空) を課し、`init` / `set` / `migrate` の全経路で
+   効くようにした (ガードは `_validate_entry_shape` の 1 箇所)。
+5. **migrate の衝突判定を情報欠落の有無で判定する専用の比較関数に変更** —
+   新旧で `merged[key] != value` という値そのものの不一致だけを見ていた
+   ため、scalar `"USER"` と dict `{"github.com":"USER"}` のように
+   **意味的には同じアカウント**を指す新旧値まで値衝突として手動解決を
+   要求していた。当初 `show`/`verify` 用の `_entries_equal` (CLI 実測値が
+   期待値を満たすかの非対称な述語) を流用したが、独立レビューで
+   **multi-host/multi-alias dict が絡むと情報が黙って失われる**ことが
+   判明した — 例: new=scalar `"USER"` / old=dict
+   `{"github.com":"USER","ghe.example.com":"example-org"}` は、
+   `_entries_equal` が最初の host の値だけを見て一致と判定し、
+   `ghe.example.com` の値を conflict 検出も警告もなく消してしまう。
+   `_migrate_keep_new_without_loss` を新設し、「new 側を採用しても old 側の
+   情報を失わないか」だけを見る専用の比較にした。dict-dict でも同じ考え方
+   (old の全キーが new に含まれているか) を適用し、new が old のサブセット
+   になるケースも conflict のまま手動解決に落とす。
+   さらに **scalar と dict の比較に host / フィールドの意味論を持たせた**
+   (独立レビュー指摘で修正)。当初は「値が一致し old が単一キーなら非損失」と
+   していたが、これは**どのホストを照合するかという制約の違いを見ていない**:
+   scalar の `"github": "USER"` はアクティブな状態に応じた 1 ホストを照合するのに対し
+   `{"ghe.example.com": "USER"}` は名指しの GHE ホストを照合するので、値が
+   同じでも制約は別物で、統合すると GHE の制約が conflict 検出も警告もなく
+   消えていた。各 service が「scalar 期待値と等価になる dict キー」
+   (`SCALAR_EQUIVALENT_DICT_KEY`) を宣言し、両方向をそれで判定する。
+   **宣言できるのは scalar の照合先が実行時の状態に依らず固定される service
+   だけで、現状は `gcloud` の `"project"` のみ** — `verify()` の scalar 分岐が
+   project しか照合しないため、`{"project": <同値>}` と静的に等価になる。
+   `github` は一度 `"github.com"` を宣言したが**撤回した** (独立レビュー指摘で
+   修正): scalar の照合先は「github.com にログイン中ならそれ、無ければ最初の
+   ログイン済みホスト」で**実行時の状態に依存する**ため、GHE だけにログイン
+   している環境では scalar `"USER"` は通り `{"github.com":"USER"}` は
+   「このホストにログインしていません」で deny になる。等価でないものを等価と
+   宣言していたので、統合時に明示された `github.com` の要求が無警告で
+   書き換わる/消える余地が残っていた。`firebase` も**宣言しない** — dict キーは
+   `.firebaserc` の alias 名で `verify()` の判定 (値のいずれかに一致するか) には
+   効かない一方、`firebase use <alias>` の自己回復案内が読む情報を持つため、
+   畳み込むと案内先が消える。キーを宣言しない service と、キーが一致しない
+   組み合わせは conflict にして利用者に選ばせる。
+   加えて **dict どうしの比較でキーの存在を先に要求するようにした**
+   (独立レビュー指摘で修正)。`new_val.get(k) == v` だけで比較していたため、
+   old が `{"ghe.example.com": null}` のような壊れた値を持ち new がその
+   ホストを省略していると、「キー欠落の `None`」と「保存された `null`」が
+   どちらも `None` になって一致と判定され、conflict にならなかった。
+   old 側の値は追加分ではないので形式検証にもかからず、ホストの entry が
+   黙って失われたまま「旧ファイルを削除してよい」と案内していた。
+
+6. **builder の対象ファイルを dispatcher と同じ解決に揃えた** (独立レビュー
+   指摘で修正)。従来 builder は常に cwd 直下の新パスを対象にしていたため、
+   **祖先の accounts.local.json を継承している worktree / サブディレクトリで
+   設定を壊していた**: `set --commit` が編集した service だけを含む子ファイルを
+   作り、dispatcher の親ディレクトリ遡及がその子ファイルで止まるため、
+   継承していた他の service が一斉に未設定 (deny) になる。`remove` も継承
+   entry を「存在しません」と報告し、`show` は「ファイルが無い」と表示して
+   いた。3-tier lookup + 親遡及の解決を `core/paths.resolve_accounts_file()`
+   に切り出し、**dispatcher と builder の両方がこれを呼ぶ**ようにした
+   (`init` / `show` / `set` / `remove` / `migrate` の全サブコマンド)。
+   あわせて:
+   - 解決した対象パスを dry-run / commit の出力の先頭に
+     `対象: <パス> (祖先ディレクトリ <親> から継承)` の形で必ず表示する
+   - `init` は継承中に cwd 直下へ新規作成しようとすると **exit 2 で拒否**する
+     (shadowing の説明と `set` / `remove` / `--path` の案内付き)
+   - 全サブコマンドに **`--path <file>`** を追加した。明示時は解決を飛ばして
+     そのファイルを対象にする (worktree 専用設定を意図的に作るための
+     escape hatch)。受け付けるのは dispatcher が読む配置だけで、書込を伴う
+     コマンドでは新パスのみ — 他の場所に書いても hook が読まないため
+   - 複数 tier が同居する階層 (D4 fail-closed) は builder も同じ理由で拒否する。
+     判定を cwd ではなく**解決した階層**で行うようにしたので、継承先に旧パスが
+     同居している場合も見落とさない
+   - `--path` の指定先が解決結果と食い違う場合は警告を出す (近い側を指定すると
+     現在有効な設定を覆い隠し、遠い側を指定すると書いても読まれない)
+   - `.gitignore` への追記と `CLAUDE.md` の同梱先も、cwd ではなく**書き込んだ
+     ファイルが属するディレクトリ**に合わせた
+
+   **この変更で builder の書込範囲は cwd 配下に限られなくなる**: 解決は最大
+   10 階層まで親を遡るため、accounts.local.json を持たないプロジェクトで
+   `set` を実行すると、祖先 (ホームディレクトリを含む) のファイルが編集対象に
+   なりうる。「hook が読むファイルを編集する」という意図どおりの挙動だが、
+   従来より書込先が広がるため、対象パスを出力先頭に必ず表示する仕様と合わせて
+   README にも明記した。
+
+### 既知の制限 (新規)
+
+- `git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は元々
+  検証対象外だったが、README に明記していなかったので追記した (挙動の変更
+  ではない)。
+- scalar 期待値と dict 期待値の統合を自動で非衝突と判定できるのは、
+  `SCALAR_EQUIVALENT_DICT_KEY` を宣言する service (**現状 `gcloud` のみ**) に
+  限る。`github` は scalar の照合先が「github.com がアクティブでなければ最初の
+  アクティブホスト」という**実行時の状態に依存する**照合なのでどの静的な
+  ホスト名とも等価にならず、`firebase` は dict キー (alias) が照合の判定に
+  効かない。どちらも値が一致していても conflict として手動解決を求める
+  (どちらの形を残すかで検証対象と自己回復の案内が変わるため、自動では
+  選べない)。
+
 ## 0.9.0
 
 **候補コマンドの切り出しと解釈を 1 つの解析層として作り直した** (内部バックログ

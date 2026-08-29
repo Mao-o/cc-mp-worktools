@@ -103,6 +103,55 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 ただし Agent Skill の方が dry-run → AskUserQuestion 承認 → commit の確認
 フローを含むため、通常はこちらを使う。
 
+### 既存値の更新・削除 (`set` / `remove`)
+
+`init` は既存キーを上書きしない (異なる値なら `skipped` して終了する)。
+値を切り替えたい・削除したいときは `set` / `remove` サブコマンドを使う:
+
+```bash
+# 既存値を上書き (無ければ新規追加)。--from-cli で CLI 現在値を使うことも可能
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  set --service github --value new-user --commit
+
+# dict 値 (GHE の hostname / Firebase の alias 等) の特定キーだけを追加・上書き
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  set --service github --host ghe.example.com --value mao-corp --commit
+
+# キー全体を削除
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  remove --service github --commit
+
+# dict 値の特定キーだけを削除 (最後の 1 つを消すとキー自体が削除される —
+# 空オブジェクトを残すと該当 service が「オブジェクトが空です」で永久 deny
+# されるため。最後の 1 つでなくても、残りが該当 service にとって使えない
+# 形になる場合 (例: gcloud で project/account 以外のキーだけが残る) は
+# 同じくキー自体を削除し、理由を出力する)
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  remove --service github --host ghe.example.com --commit
+```
+
+`{"github": null}` のように値が壊れている (dispatcher が設定なしと同じ扱いで
+必ず deny する) entry も、`--host` を付けずに `remove --service <svc> --commit`
+すればキーごと削除できる。
+
+`--host` は既存値がオブジェクト (または未設定) のときだけ使える。既存値が
+文字列の service に `--host` を付けるとエラーになる (先に `remove` で削除
+するか `--host` を外して上書きする)。`--host` と `--from-cli` は併用できない
+(CLI の現在値がどの host/alias のものかを builder は判別できないため、
+`--host` 指定時は `--value` で値を明示する)。`--value` は `init` と同じく JSON
+object 文字列 (例: `'{"project":"p","account":"a"}'`) を渡すと dict として
+保存し、それ以外は生文字列として保存する。dict を受け付けない service
+(aws / kubectl) にオブジェクトを渡す、gcloud に未対応キーを渡す、といった
+形式不正は `--commit` 前に検出して exit 1 にする (accounts.local.json への
+書込は行われない)。いずれも既定では stdout に値を出さず、`--show-values`
+明示時のみ表示する (D3 と同じ)。
+
+対象ファイルは **hook が実際に読むもの**に揃う (3-tier lookup + 親ディレクトリ
+遡及)。解決したパスは dry-run / commit の出力先頭に `対象: <パス>` として出る。
+worktree などで親から継承している場合は親側のファイルが編集され、この階層専用の
+設定を作りたいときだけ `--path <file>` で明示する (詳細は
+[builder も同じ解決を使う](#builder-も同じ解決を使う))。
+
 ## 対象コマンドと検証スキップ
 
 ### 発火するコマンド
@@ -439,6 +488,35 @@ worktree 内に同名ファイルを置く必要は無い。
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
+### builder も同じ解決を使う
+
+`accounts_builder.py` の `init` / `show` / `set` / `remove` / `migrate` は
+**dispatcher と同じ解決** (3-tier lookup + 親ディレクトリ遡及) で対象ファイルを
+決め、解決したパスを dry-run / commit の出力の先頭に `対象: <パス>` として表示する。
+読む側と書く側で解決を共有しないと、継承中の worktree で `set` が編集した service
+だけを含む子ファイルを作り、dispatcher の遡及がそこで止まって**継承していた他の
+service が一斉に未設定 (deny)** になる。
+
+- 継承中の `set` / `remove` / `migrate` は**継承元のファイル**を直接編集する
+- 継承中の `init` は cwd 直下に作ると継承中の設定を覆い隠すため **exit 2 で拒否**
+  し、`set` / `remove` (値の変更・削除) か `--path` (この階層専用の設定を作る) を
+  案内する
+- `--path <file>` を全サブコマンドに指定でき、明示時は解決を飛ばしてそのファイルを
+  対象にする。受け付けるのは dispatcher が読む配置
+  (`.claude/verify-cloud-account/accounts.local.json` と旧 2 パス) だけで、書込を
+  伴うコマンドでは新パスのみ — 他の場所に書いても hook が読まないため。
+  指定先が解決結果と食い違う場合は「hook が現在読むのは別ファイル」の警告を出す
+  (近い側を指定すると現在の設定を覆い隠し、遠い側を指定すると書いても読まれない)
+- 対象階層に複数 tier が同居する場合は builder も同じ理由で拒否する (D4)
+
+**書込範囲についての注意**: 解決は最大 10 階層まで親を遡る
+(`ANCESTOR_SEARCH_MAX_LEVELS`)。つまり accounts.local.json を持たないプロジェクトで
+`set` を実行すると、10 階層以内の祖先 (ホームディレクトリを含む) にファイルがあれば
+**そちらが編集対象になる**。これは「hook が読むファイルを編集する」という意図どおりの
+挙動だが、builder の書込範囲は cwd 配下に限られない。対象は出力先頭の `対象:` 行に
+必ず出るので、commit 前に確認すること (この階層専用の設定にしたい場合は `--path`)。
+`.gitignore` への追記も同じ階層に対して行われる。
+
 ## パフォーマンス (短期キャッシュ)
 
 PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && gh pr comment`
@@ -498,6 +576,11 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
   向けの操作 (例: `gh auth refresh --hostname ghe.example.com`) は allow される
   (str 形式の期待値で複数 host にログインしている場合は dict 形式にすると
   host ごとに照合できる)
+- **`git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は
+  検証対象外**。PATTERNS は `^gh(?=\s|$)` のみで `git` コマンド自体には一致
+  しない。SSH 鍵や git credential helper 経由で別アカウントの GitHub へ
+  push/clone しても、この plugin は関与しない (対象はあくまで `gh` CLI 経由の
+  操作)
 - **`aws-vault exec prod -- aws ...` のような別コマンド経由の実行は検証対象外**
   (v0.9.0)。`aws-vault` は `aws` とは別のコマンドなので発火しない。従来は
   `^aws\b` がハイフンを語境界として拾い、hook の**既定 profile**で `sts` を
@@ -554,6 +637,10 @@ hook の出力を確認するには `claude --verbose` でセッションを起�
 (hook の stdout/stderr がターミナルに表示される)。
 
 詳細な設計背景は CLAUDE.local.md (開発者向け、リポジトリ未同梱) を参照。
+
+## 互換性
+
+- Python 3.11+ (標準ライブラリのみ)
 
 ## テスト実行
 

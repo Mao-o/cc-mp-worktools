@@ -27,11 +27,31 @@ verify-cloud-account plugin の **builder スクリプト経由 (Bash)** が唯�
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
-  <init|show|migrate> [args...]
+  <init|show|migrate|set|remove> [args...]
+
+# set / remove の引数例
+#   set --service <svc> --value <v> [--host <h>] --commit
+#   remove --service <svc> [--host <h>] --commit
+#   (--host 指定時、削除後に残る entry がその service にとって使えない
+#    形になる場合はキーごと削除されます)
 ```
 
 `${CLAUDE_PLUGIN_ROOT}` は plugin hook 経由で展開される変数です。Agent Skill
 から呼び出すと自動展開されます。
+
+## 対象ファイルの決まり方
+
+builder は **dispatcher (hook) が実際に読むファイル**を対象にします。cwd 階層に
+`accounts.local.json` が無ければ親ディレクトリを 1 階層ずつ遡り、最初に見つかった
+ファイルを編集します (worktree から親 repo の設定を継承している場合はその親の
+ファイル)。解決したパスは dry-run / commit の出力の先頭に「対象: ...」として
+表示されます。
+
+- 継承中に `init` を実行すると、cwd 直下に作ったファイルが継承中の設定を覆い隠す
+  (記載していない service が一斉に未設定になる) ため拒否されます。値の変更・削除は
+  `set` / `remove` を使ってください
+- この階層専用の設定を意図的に作りたい場合のみ `--path <file>` で対象を明示します
+  (指定できるのは dispatcher が読む配置のみ)
 
 ## やってはいけないこと
 
@@ -45,8 +65,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 ## このファイルについて
 
-このファイルは `accounts_builder.py init --commit` または
-`accounts_builder.py migrate --commit` の初回実行時に自動生成されます。既に
-存在する場合は上書きされません (ユーザー編集を尊重)。不要であれば削除して
-構いません — signpost が消えるだけで verify-cloud-account 本体の動作には影響
-しません。
+このファイルは `accounts_builder.py` の `init` / `set` / `remove` / `migrate`
+の `--commit` 初回実行時に自動生成されます。既に存在する場合は上書きされません
+(ユーザー編集を尊重)。不要であれば削除して構いません — signpost が消えるだけで
+verify-cloud-account 本体の動作には影響しません。
