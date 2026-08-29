@@ -200,7 +200,17 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # requirements-dev.txt) -- not just the exact "requirements.txt" name.
 # `$HOME` 直下ではユーザー全体の既定を意味し、そのディレクトリが
 # プロジェクトであることを示さないマーカー (mise config と同じ扱い)。
-GLOBAL_ONLY_AT_HOME_MARKERS = (".tool-versions", ".python-version")
+GLOBAL_ONLY_AT_HOME_MARKERS = (
+    ".tool-versions",
+    ".python-version",
+    # core/runtime.py::detect_venv() が見るローカル venv。
+    ".venv/pyvenv.cfg",
+    "venv/pyvenv.cfg",
+    # `$HOME/.venv` は「ホーム直下に作った作業用 venv」であって、
+    # ホームがプロジェクトであることを示さない。
+    ".venv/pyvenv.cfg",
+    "venv/pyvenv.cfg",
+)
 
 PROJECT_MARKERS = (
     "package.json",

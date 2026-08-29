@@ -1054,3 +1054,98 @@ class DropWithoutMarkerHeadroomTest(unittest.TestCase):
         self.assertNotIn("## Scripts", result)
         self.assertIn("truncated", result)
 
+
+class LocalVenvMarkerTest(unittest.TestCase):
+    """PR #67 (Codex P2): ローカル venv だけを持つ非 git の Python
+    プロジェクトが gate で落ち、ランタイム情報もソースも出なくなっていた。
+    """
+
+    def test_local_venv_project_passes_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".venv").mkdir()
+            (root / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+            (root / "app.py").write_text("print(1)\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found; facts skipped", out)
+
+    def test_home_local_venv_does_not_pass_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".venv").mkdir(parents=True)
+            (home / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+            with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                self.assertFalse(_has_relevant_project_markers(home))
+
+
+class GlobMarkerScanBoundTest(unittest.TestCase):
+    """PR #67 (Codex P2): glob マーカーを 1 パターンずつ `glob()` で回すと、
+    マッチしないときにパターン数ぶんルートを全列挙する。マーカー無しの巨大な
+    フラットディレクトリ (この gate が抑止したい対象そのもの) で実行時間上限
+    を食い潰しうる。
+    """
+
+    def test_glob_markers_scan_the_root_once_with_a_bound(self):
+        from core.fs import MAX_NESTED_SCAN_ENTRIES, has_project_markers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            total = MAX_NESTED_SCAN_ENTRIES + 400
+            for i in range(total):
+                (root / f"f{i:05d}.txt").write_text("x")
+            seen = []
+            real_scandir = os.scandir
+
+            def counting_scandir(path):
+                it = real_scandir(path)
+
+                class Counting:
+                    def __enter__(self_inner):
+                        return self_inner
+
+                    def __exit__(self_inner, *exc):
+                        return it.__exit__(*exc)
+
+                    def __iter__(self_inner):
+                        for entry in it:
+                            seen.append(entry)
+                            yield entry
+
+                return Counting()
+
+            with mock.patch.object(os, "scandir", counting_scandir):
+                self.assertFalse(
+                    has_project_markers(
+                        root, ("requirements*.txt", "*.csproj", "*.tf")
+                    )
+                )
+            # パターン数ぶんの全列挙 (3 * total) にならず、1 パス・上限つき。
+            self.assertLessEqual(len(seen), MAX_NESTED_SCAN_ENTRIES)
+
+
+class RuntimeMarkerParityTest(unittest.TestCase):
+    """検出側が根拠にするファイル名と gate のマーカー一覧がずれないことを固定する。
+
+    ずれると「検出はできるのに gate で落ちる」= facts が丸ごと消える構成が
+    生まれる。本 PR のレビューでは lockfile・ランタイム固定・ローカル venv の
+    3 クラスで実際にこの穴が見つかった。lockfile だけを固定したときは venv の
+    漏れを防げなかったので、ランタイム検出側も対象に含める。
+    """
+
+    def test_runtime_detected_files_are_markers(self):
+        import re
+        from core.constants import PROJECT_MARKERS
+
+        src = (Path(__file__).resolve().parent.parent / "core" / "runtime.py").read_text()
+        # runtime.py が根拠にするファイル名リテラル (root / "..." の形)。
+        detected = set(re.findall(r'root / "([^"]+)"', src))
+        # ディレクトリ判定に使うだけのものは除外する。
+        detected = {n for n in detected if "." in n or "/" in n}
+        missing = sorted(
+            n for n in detected
+            if n not in PROJECT_MARKERS and not any(
+                m.startswith(n + "/") for m in PROJECT_MARKERS
+            )
+        )
+        self.assertEqual(missing, [], f"gate に無い検出ファイル: {missing}")
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from fnmatch import fnmatch
 from itertools import islice
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -125,12 +126,27 @@ def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
     ``*.csproj`` for a stack with no fixed manifest filename) is matched via
     ``Path.glob()`` instead of a literal ``exists()`` check.
     """
+    globs = []
     for marker in markers:
         if "*" in marker or "?" in marker:
-            if any(root.glob(marker)):
-                return True
+            globs.append(marker)
         elif (root / marker).exists():
             return True
+    if not globs:
+        return False
+    # glob マーカーは `root.glob()` を 1 パターンずつ回すと、マッチしない
+    # ときに毎回ルートを全列挙する (パターン数ぶんの全列挙になる)。マーカー
+    # 無しの巨大なフラットディレクトリ -- まさにこの gate が抑止したい対象 --
+    # で hook の実行時間上限を食い潰しうるので、列挙は 1 回・件数上限つきに
+    # し、その 1 パスで全パターンを突き合わせる。
+    try:
+        with os.scandir(root) as it:
+            for entry in islice(it, MAX_NESTED_SCAN_ENTRIES):
+                name = entry.name
+                if any(fnmatch(name, pattern) for pattern in globs):
+                    return True
+    except OSError:
+        return False
     return False
 
 
