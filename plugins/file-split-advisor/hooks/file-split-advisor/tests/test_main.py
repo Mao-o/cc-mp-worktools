@@ -368,6 +368,28 @@ class TestScaleEnvVar(BaseMainTest):
             out, _ = _run_main(self._envelope(path))
         self.assertIn("判定: warn", self._context(out))
 
+    def test_nan_scale_falls_back_to_default(self):
+        # P2-3: float("nan") は変換に成功し `<= 0` も False を返すため、
+        # 修正前は nan がそのまま実効閾値の乗数になり、line_count >= nan が
+        # 常に False になって全ファイルが tier=ok (無言) に落ちていた。
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "nan"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
+
+    def test_inf_scale_falls_back_to_default(self):
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "inf"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
+
+    def test_overflow_scale_falls_back_to_default(self):
+        # float("1e400") は OverflowError にならず inf になる。
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "1e400"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
+
     def test_scale_note_shown_in_memo_when_scale_applied(self):
         # P2-1 回帰 (レビュー PROBE 3 の再現): SCALE=2.0 のとき、目安に出る
         # 倍率の根拠 (全体 2.0倍) が明示され、printed 係数だけから実効閾値

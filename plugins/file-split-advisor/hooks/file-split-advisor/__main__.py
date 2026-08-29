@@ -8,6 +8,7 @@ state.py に分離。何が起きても exit 0 (fail-open) を徹底する。
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -45,8 +46,12 @@ def _get_max_emits() -> int:
 def _get_scale() -> float:
     """``FILE_SPLIT_ADVISOR_SCALE``: 全閾値 (note/review/warn/strong) に掛ける倍率。
 
-    未設定・数値変換失敗・0 以下はすべて既定 (1.0) にフォールバックする
-    (0 以下だと実効閾値が 0 以下になり判定が意味を失うため)。
+    未設定・数値変換失敗・0 以下・非有限値 (``nan``/``inf``/``1e400`` 等) は
+    すべて既定 (1.0) にフォールバックする。``nan``/``inf`` は ``float()`` の
+    変換自体は成功し ``value <= 0`` も False を返すため、有限性チェックを
+    別途行わないと素通りする (P2-3)。非有限な scale は実効閾値を
+    nan/inf にし、``line_count >= threshold`` が常に False になって全ファイル
+    が無言になる (plugin の実質的な無効化)。
     """
     raw = os.environ.get("FILE_SPLIT_ADVISOR_SCALE", "").strip()
     if not raw:
@@ -55,7 +60,7 @@ def _get_scale() -> float:
         value = float(raw)
     except ValueError:
         return DEFAULT_SCALE
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         return DEFAULT_SCALE
     return value
 

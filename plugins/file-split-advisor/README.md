@@ -114,7 +114,7 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 | `FILE_SPLIT_ADVISOR_MAX_EMITS` | `20` | セッション内の最大 emit 回数 |
 | `FILE_SPLIT_ADVISOR_CWD_ONLY` | (未設定) | `1`/`true`/`yes`/`on` で `cwd` 外のファイルを skip する。既定 off — `--add-dir` で cwd 外を正当に編集する運用を壊さないための opt-in |
 | `FILE_SPLIT_ADVISOR_IGNORE` | (未設定) | 判定対象から除外する glob (カンマ区切り、fnmatch)。ファイル名・フルパスの両方に対して判定する |
-| `FILE_SPLIT_ADVISOR_SCALE` | `1.0` | 全閾値 (note/review/warn/strong) に一律で掛ける倍率。0 以下や数値に変換できない値は既定 (1.0) にフォールバックする |
+| `FILE_SPLIT_ADVISOR_SCALE` | `1.0` | 全閾値 (note/review/warn/strong) に一律で掛ける倍率。0 以下・数値に変換できない値・`nan`/`inf` 等の非有限値は既定 (1.0) にフォールバックする |
 
 `FILE_SPLIT_ADVISOR_IGNORE` に加え、`~/.claude/file-split-advisor/ignore.local.txt`
 (1 行 1 glob、`#` 始まりはコメント、空行は無視) があれば読み込んで併用する
