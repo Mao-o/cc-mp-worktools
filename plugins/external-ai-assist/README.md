@@ -151,13 +151,15 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 - **レビューを走らせたターンは所要時間と結果を `systemMessage` で表示** (0.6.0)。
   `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (レビュー結果を Claude の文脈に渡しました)`。
   編集 0 件のターンは従来どおり無出力
-- **指摘ありは既定で `hookSpecificOutput.additionalContext` (hookEventName: `Stop`) で返す**
-  (0.8.0)。公式 docs は「`decision: "block"` と同じループ保護
+- **指摘ありは既定 (`auto`) で `hookSpecificOutput.additionalContext` (hookEventName:
+  `Stop`) で返す** (0.8.0)。公式 docs は「`decision: "block"` と同じループ保護
   (`stop_hook_active` / 8 連続上限) が働くが、トランスクリプト上は hook エラーではなく
   フィードバックとして表示される」と明記しており、Claude 側の効果 (継続して指摘を読む) は
   変わらず表示だけが変わる。**CLI 2.1.163 未満では `additionalContext` が Stop で
-  効かない可能性がある** ため、`EXTERNAL_AI_POST_REVIEW_MODE=block` で 0.7.0 までの
-  `decision: "block"` に戻せる (opt-in)
+  効かない**ため、`auto` は実行中の Claude Code の版数を自動検出し、**2.1.163 未満・
+  検出できない場合は自動的に `decision: "block"` (0.7.0 までの形式) に fail-closed
+  する** — 指摘を Claude に届かないまま失う方向には倒さない。`EXTERNAL_AI_POST_REVIEW_MODE`
+  に `block` / `context` を明示すれば版数判定を飛ばして固定できる (詳細は環境変数表)
 - **頻度を落とす設定** (0.6.0): `EXTERNAL_AI_POST_REVIEW_MIN_LINES` (変更行数のしきい値) と
   `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` (前回レビューからの間隔)。どちらの見送りも
   pending を消費しないので、貯まった変更は次のレビューへまとめて載る
@@ -314,14 +316,16 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 | `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
 | `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` | `0` | `1` でコード以外 (`.md` / `.txt` / `.csv` / `.pdf` / 画像等。一覧は上の除外規則) を外部に送らない。**「docs だけの変更でレビューを走らせたくない」用途はこれで足りる** |
 | `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
-| `EXTERNAL_AI_POST_REVIEW_MODE` | `context` | 指摘ありの返し方。既定は `hookSpecificOutput.additionalContext` (hook error に見せない、0.8.0)。`block` で 0.7.0 までの `decision: "block"` に戻す (`EXTERNAL_AI_PLAN_REVIEW_MODE` と違い、こちらは**表示形式だけ**の切り替えで、Claude が指摘を読んで継続する点は両モードとも同じ) |
+| `EXTERNAL_AI_POST_REVIEW_MODE` | `auto` | 指摘ありの返し方。3 値: `auto` (既定・未設定・未知の値も同じ扱い) は実行中の Claude Code の版数を自動検出し、2.1.163 以上なら `context` (`hookSpecificOutput.additionalContext`、hook error に見せない)、**未満または検出できなければ `block` に fail-closed する** (指摘を届かないまま失う方向には倒さない)。`block` / `context` を明示すると版数判定を飛ばして固定できる (`context` を明示した場合、2.1.163 未満での既知の問題を承知の上という前提で利用者の責任)。版数検出は環境変数 `CLAUDE_CODE_VERSION` → `CLAUDE_CODE_EXECPATH` のパス要素 → `claude --version` の順 (後2つは hooks 向けの公式契約の外側にあるベストエフォートの手段。詳細は `hooks/post-implementation-review/__main__.py` の docstring) |
 
 **見送り (`MIN_LINES` / `COOLDOWN_SEC`) は pending を消費しない**。見送った変更は捨てられず、
 次に走るレビューへまとめて載る。
 
 **1 回あたりの絶対上限**: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` の上限は `600` 秒 (10分)。
-これに kill 猶予 (最大 15秒) と git 予算 (最大 59秒、合計 674秒) を足しても収まるよう、
-`hooks.json` 側の Stop timeout は `690` 秒 (約11分30秒) に設定されている。
+これに kill 猶予 (最大 15秒)、git 予算 (最大 59秒)、`MODE=auto` が版数検出で
+`claude --version` の subprocess にフォールバックした場合の追加分 (最大 3秒) を
+足した合計 677秒でも収まるよう、`hooks.json` 側の Stop timeout は `690` 秒
+(約11分30秒) に設定されている。
 exitplan-review と違って同一内容の再提出を縛る回数上限は無く、**編集のあったターンの
 Stop ごとに毎回この上限まで待ちうる** (総待ち時間はターン数に比例し上限なし。詳細は
 後述の「コストの目安」)。

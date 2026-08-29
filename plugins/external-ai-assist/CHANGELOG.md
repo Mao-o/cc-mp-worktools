@@ -96,12 +96,57 @@ version 据え置きで main に入った後続 commit はその version の節�
   明記した
 - ファイル構成 / 動作サマリ / 環境変数表を 1. 2. の出力形式変更に合わせて更新
 
+### 4. post-implementation-review: 未対応 CLI での自動 fail-closed (Codex R1 P1)
+
+1. の変更だけでは、2.1.163 未満の CLI で plugin を更新した既存ユーザーが
+`EXTERNAL_AI_POST_REVIEW_MODE=block` という新しい opt-in の存在を知らない限り、
+`additionalContext` が黙って無視されレビュー指摘が届かないまま Stop してしまう。
+しかも `_run_review` は指摘を組み立てた時点で既に `state.complete_claim(...)` を
+呼んでいるため、この指摘は再試行されず永久に失われる (Codex PR #69 R1 レビュー指摘)。
+
+- **`EXTERNAL_AI_POST_REVIEW_MODE` を 3 値に拡張**: `block` (明示) / `context`
+  (明示。版数判定を飛ばす、利用者の責任) / それ以外 (`auto` 明示・未設定・未知の値)。
+  `auto` は実行中の Claude Code の版数を検出し、2.1.163 以上なら `context`、
+  **未満または検出できなければ自動的に `block` に fail-closed する** (指摘を Claude に
+  届かないまま失う方向には倒さない。コストは legacy 表示に戻るだけ)
+- **版数検出は 3 段** (`_claude_code_version()`): (a) 環境変数 `CLAUDE_CODE_VERSION`、
+  (b) 環境変数 `CLAUDE_CODE_EXECPATH` のパス要素のうち版数だけの文字列、(c)
+  `claude --version` の subprocess 実行 (timeout 3秒)。判定結果はプロセス内で
+  1 回だけ計算してキャッシュする (state ファイルへの永続化はしない)
+- **`llms-docs:researching-claude-docs` で公式ドキュメントを逐語確認した結果、(a)(b)
+  はいずれも hooks 向けの公式契約の外側にあると判明した**: `CLAUDE_CODE_VERSION` と
+  いう変数名自体は公式 Claude Code settings reference (`policyHelper` 節) に存在するが
+  Enterprise の managed settings 解決ヘルパー専用で、hook プロセスへの注入は明記され
+  ていない。`CLAUDE_CODE_EXECPATH` は `hooks` / `hooks-guide` / `env-vars` /
+  `settings-reference` / `plugins-reference` を含む公式コーパス全体でゼロヒットの
+  未文書化の内部実装詳細 (実機観測: `~/.local/share/claude/versions/<version>/claude`
+  形)。このため (c) の `claude --version` subprocess 実行を、最終的な信頼できる
+  フォールバックとして必ず残す設計にした ((a)(b) の形式が将来変わっても「版数が
+  分かる」経路自体は失われない)
+- 版数を理由に auto 解決が `block` に倒れたときだけ、`systemMessage` に
+  「(Claude Code <版数 または 不明> は Stop の additionalContext 非対応のため block で
+  差し戻し)」を付記する。明示 `MODE=block` ではこの付記文を混ぜない (利用者が意図して
+  選んだモードに版数起因の言い訳を添えると、「なぜ block なのか」の説明が矛盾して見える)
+- **Stop の待ち時間の絶対上限が 674 秒 → 677 秒に変化** (`claude --version` の
+  timeout 3秒が新たに worst case に加わるため。`hooks.json` 側の Stop timeout
+  690秒はそのままで収まる。`tests/test_review_set.py::TestTimeoutBudgets` を
+  この 3秒込みの式に更新した)
+- テストは実機の `claude` を起動しない (版数検出は `subprocess.run` を mock する)。
+  既存の `TestOutputMode` を含む全テストは `CLAUDE_CODE_VERSION` を対応版数に固定する
+  fixture (`tests/_testutil.py::PINNED_VERSION_ENV`) の下で走るため、実行環境で
+  実際に動いている Claude Code の版数に依存しない
+
 ### テスト
 
-累計 **399 件** (+5: exitplan-review 1 新設 [deprecated top-level 形式が復活しないことの
-固定]、post-implementation-review 4 新設 [`TestOutputMode`: 既定 `context` / opt-in
-`block` / 未知値の fallback / clean レビューへの無影響])。explore-parallel /
-`_common` は変更していないため件数不変 (11 件 / 82 件)。
+累計 **426 件**。直前の記録 (399 件) は本 batch 内の後続 commit (通知文のモード分岐
+修正) で追加した回帰テスト 2 件
+(`test_default_mode_notice_does_not_claim_claude_was_asked` /
+`test_block_mode_notice_claims_claude_was_asked`) が反映されておらず実際は
+401 件だった (この節で訂正)。そこからの正味の増分は post-implementation-review
++25: `test_version_detect.py` 16 新設 (版数検出 3 段の単体テスト)、
+`TestVersionAwareMode` 9 新設 (auto 解決の分岐・通知文・実検出経路の結合テスト)。
+exitplan-review (70) / explore-parallel (11) / `_common` (82) は変更していない
+ため件数不変。
 
 ## 0.7.0
 

@@ -464,10 +464,16 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         # `EXTERNAL_AI_POST_REVIEW_TIMEOUT` により env から伸ばせるようになったので、
         # 既定値で見ると「上限まで設定した最悪ケース」が誰にも守られなくなる
         cursor_worst = cursor.MAX_TIMEOUT_SEC + 3 * subproc.KILL_GRACE_SEC
+        # 指摘ありのターンで auto 解決 (MODE 未設定/auto/未知値) が版数検出のため
+        # `claude --version` に subprocess フォールバックした場合の追加コスト
+        # (Codex R1 P1 対応。`_claude_code_version` 参照)。cursor 完了後・git 完了後に
+        # 順番に足される、独立した最悪ケースなので別項として加える
+        version_worst = self.entry._VERSION_SUBPROCESS_TIMEOUT_SEC
         self.assertLess(
-            cursor_worst + git_worst,
+            cursor_worst + git_worst + version_worst,
             timeouts["stop"],
-            "cursor (kill 猶予込み) + git の最悪ケースが Stop の hook timeout を超えている",
+            "cursor (kill 猶予込み) + git + 版数検出 subprocess の最悪ケースが"
+            " Stop の hook timeout を超えている",
         )
 
     def test_default_timeout_does_not_exceed_ceiling(self):

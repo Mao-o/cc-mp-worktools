@@ -52,6 +52,17 @@ NEUTRAL_EXCLUSION_ENV = {
     "EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS": "1",
 }
 
+# `CLAUDE_CODE_VERSION` は `_claude_code_version()` の検出順で最優先に見られる値
+# (`__main__.py` モジュール docstring「未対応 CLI での自動 fail-closed」節参照)。ここで
+# 固定しないと、開発者の実行環境で実在する `CLAUDE_CODE_EXECPATH` (ローカルインストール)
+# や実際の `claude --version` の結果に頼ってしまい、「auto モード = additionalContext」を
+# 前提にした既存テストが「今この端末で動いている Claude Code の版数」次第で揺れる
+# (かつ実機の `claude` を起動しかねない — 禁止事項)。値は下限 2.1.163 より十分大きい
+# "9.9.9" を使い、既定を「常に additionalContext 対応」に固定する。auto の block
+# フォールバックを明示的にテストしたいケースは、各テストが `_claude_code_version` を
+# 直接 mock する (`test_version_detect.py` / `test_throttle_flow.py::TestOutputMode`)。
+PINNED_VERSION_ENV = {"CLAUDE_CODE_VERSION": "9.9.9"}
+
 
 def load_entry():
     """`__main__.py` を `__main__` 以外の名前で読み込む (main() の自動実行を避ける)。"""
@@ -114,7 +125,8 @@ class HookTestCase(unittest.TestCase):
             **NEUTRAL_EXCLUSION_ENV,
         }
         self._env = mock.patch.dict(
-            os.environ, {"TMPDIR": self.tmpdir, **pinned, **HERMETIC_GIT_ENV}
+            os.environ,
+            {"TMPDIR": self.tmpdir, **pinned, **HERMETIC_GIT_ENV, **PINNED_VERSION_ENV},
         )
         self._env.start()
         clear_plugin_env(keep=pinned)

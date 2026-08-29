@@ -80,18 +80,65 @@ Claude Code のトランスクリプト上で**エラー扱い**として表示�
   (opt-in)。2.1.163 未満の CLI を使っている場合や、外部ツールが hook のエラー扱いを
   シグナルとして監視している場合の避難路
 
+## 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch への追補、Codex R1 P1 対応)
+
+上の opt-in だけでは、2.1.163 未満の CLI で plugin を更新した既存ユーザーが
+`EXTERNAL_AI_POST_REVIEW_MODE=block` の存在を知らない限り、`additionalContext` が
+黙って無視されレビュー指摘が届かないまま Stop してしまう。しかも `_run_review` は
+指摘を組み立てた時点で既に `state.complete_claim(...)` を呼んでいるため、この指摘は
+再試行されず永久に失われる。
+
+`get_mode()` (実体は `_resolve_mode()`) を 3 値に拡張して対処する:
+
+| `EXTERNAL_AI_POST_REVIEW_MODE` | 挙動 |
+|---|---|
+| `block` | 明示。版数判定を飛ばし常に `decision: "block"` |
+| `context` | 明示。版数判定を飛ばし常に `additionalContext` (2.1.163 未満での既知の問題を承知の上という前提。利用者の責任) |
+| 未設定 / `auto` / 未知の値 | 版数を検出し、2.1.163 以上なら `context`、**未満または不明なら `block`** に fail-closed する (指摘を届かないまま失う方向には倒さない。コストは legacy 表示に戻るだけ) |
+
+版数検出は 3 段 (`_claude_code_version()` / `_detect_claude_code_version()`):
+
+1. 環境変数 `CLAUDE_CODE_VERSION` — **公式 Hooks reference の環境変数一覧には無い**。
+   同名の変数自体は公式 Claude Code settings reference (`policyHelper` 節) に存在するが
+   Enterprise の managed settings 解決ヘルパー専用で、hook プロセスへの注入は明記されて
+   いない (`llms-docs:researching-claude-docs` で 2026-08-30 に逐語確認、以下 Q1〜Q3)。
+   将来 hooks 側にも公開された場合に備えて一応最初に見るが、現状は素通りして次段に進む
+   想定
+2. 環境変数 `CLAUDE_CODE_EXECPATH` のパス要素のうち版数だけの文字列
+   (`^\\d+\\.\\d+\\.\\d+$`) に一致するもの。ローカルインストール
+   (`~/.local/share/claude/versions/<version>/...`) で実機観測された形式だが、
+   **公式ドキュメントのどこにも記載が無い未文書化の内部実装詳細**
+   (`hooks` / `hooks-guide` / `env-vars` / `settings-reference` / `plugins-reference`
+   を含む公式コーパス全体でゼロヒットを確認済み)。npm 配布はこの形式のパスにならない
+   ため、その場合は次段に進む
+3. `claude --version` を subprocess で実行 (timeout `_VERSION_SUBPROCESS_TIMEOUT_SEC` =
+   3 秒)。stdout 先頭の `\\d+\\.\\d+\\.\\d+` を parse。PATH に無い / timeout / parse 失敗は
+   すべて None。長時間 CLI (cursor/codex) 用の `_common/subproc.py` (孫プロセスの
+   process group 管理付き) ではなく `subprocess.run` を直接使う — 即座に終了する単純な
+   probe であり、`subproc.py` 内部の `ps` 呼び出しと同じ扱いで十分なため
+
+2 と 3 は公式契約の外側にあるベストエフォートの手段なので、**3 (subprocess) を
+最終的な信頼できるフォールバックとして必ず残す** (2 の形式が将来変わっても、
+「版数が分かる」経路自体は失われない)。判定結果はプロセス内で 1 回だけ計算して
+キャッシュする (Claude Code の版数はプロセスの生存中に変わらないため、state
+ファイルへの永続化は不要)。
+
 exit 0 (JSON なし): Stop を妨げない
 exit 0 + {"systemMessage": ...}: 完了要約 / 除外・繰り越し・見送りの通知 (Stop を妨げない)
 exit 0 + {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": ...},
-          "systemMessage": ...}: レビュー結果を返す (既定。0.8.0 から)
+          "systemMessage": ...}: レビュー結果を返す (`EXTERNAL_AI_POST_REVIEW_MODE=context`
+    明示、または auto 解決で対応版数と判定した場合)
 exit 0 + {"decision": "block", "reason": ..., "systemMessage": ...}:
-    レビュー結果を返す (`EXTERNAL_AI_POST_REVIEW_MODE=block` の場合のみ)
+    レビュー結果を返す (`EXTERNAL_AI_POST_REVIEW_MODE=block` 明示、または auto 解決で
+    非対応・不明な版数と判定した場合)
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 
@@ -147,6 +194,37 @@ ENV_MODE = "EXTERNAL_AI_POST_REVIEW_MODE"
 
 MODE_CONTEXT = "context"
 MODE_BLOCK = "block"
+#: `block` / `context` どちらでもない値の正規の綴り。実際の分岐では未設定・未知の値と
+#: 区別しない (どちらも版数に応じた自動選択に落ちる) が、README / エラーメッセージで
+#: 「意図して auto を選んだ」ことを書けるように定数化しておく。
+MODE_AUTO = "auto"
+
+# Stop の `additionalContext` が効く最低版数 (根拠はモジュール docstring
+# 「0.8.0 で入れた『hook error に見せない』変更」節に逐語引用した公式 changelog、
+# 2026-06-04 付・CLI 2.1.163)。
+_MIN_VERSION_FOR_ADDITIONAL_CONTEXT = (2, 1, 163)
+
+# `_claude_code_version()` の検出順で見る環境変数 (根拠と注意点はモジュール docstring
+# 「未対応 CLI での自動 fail-closed」節)。
+ENV_CC_VERSION = "CLAUDE_CODE_VERSION"
+ENV_CC_EXECPATH = "CLAUDE_CODE_EXECPATH"
+
+# `claude --version` probe の timeout (秒)。cursor/codex のような長時間 CLI ではなく
+# 即終了する単純な呼び出しなので、`_common/subproc.py` の process group 管理は使わず
+# 短い固定値で十分 (`_version_from_subprocess` 参照)。
+_VERSION_SUBPROCESS_TIMEOUT_SEC = 3
+
+# バージョン文字列の parse に使う 2 種類の正規表現。EXECPATH のパス要素は「その要素が
+# 版数だけであること」を要求する完全一致、env var / `claude --version` の出力は
+# 末尾に他の文字列 (`(Claude Code)` 等) が付きうるので先頭一致にする。
+_VERSION_FULL_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
+
+# `_claude_code_version()` の結果 (このモジュール読み込み単位で 1 回だけ計算)。
+# None も有効な計算結果 (「検出できなかった」) なので、「未計算」との区別に
+# 専用のキーを使う (dict にキーが無ければ未計算)。
+_VERSION_CACHE: dict[str, tuple[int, int, int] | None] = {}
+_VERSION_CACHE_KEY = "detected"
 
 
 log = hooklog.make_logger("post-implementation-review")
@@ -155,16 +233,126 @@ log = hooklog.make_logger("post-implementation-review")
 is_clean_review = sentinel.is_clean_review
 
 
+def _match_version(pattern: re.Pattern, text: str) -> tuple[int, int, int] | None:
+    match = pattern.match(text.strip())
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _version_from_subprocess() -> tuple[int, int, int] | None:
+    """`claude --version` を実行して版数を取り出す (`_claude_code_version()` 最終段)。
+
+    PATH に無い (`FileNotFoundError` — `OSError` のサブクラス) / timeout / stdout の
+    parse 失敗はすべて None (fail-open: この関数自体は例外を外に投げない)。
+    `check=True` は使わない — 非 0 終了でも stdout があれば parse を試み、無ければ
+    自然に None へ落ちる (`CalledProcessError` を個別に捕捉する必要が無い)。
+    stdin は hook 自身の stdin (payload の pipe) を子に継承させないため明示的に
+    `DEVNULL` にする (`_common/subproc.py::run_captured` と同じ配慮)。
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_SUBPROCESS_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return _match_version(_VERSION_PREFIX_RE, result.stdout or "")
+
+
+def _detect_claude_code_version() -> tuple[int, int, int] | None:
+    """`_claude_code_version()` の実処理 (キャッシュ無し)。検出順は 3 段。
+
+    a. 環境変数 `CLAUDE_CODE_VERSION`
+    b. 環境変数 `CLAUDE_CODE_EXECPATH` のパス要素のうち版数だけの文字列に一致するもの
+    c. `claude --version` の subprocess 実行
+
+    各段の根拠・公式ドキュメントとの整合性 (a/b は非公式) はモジュール docstring
+    「未対応 CLI での自動 fail-closed」節を参照。
+    """
+    version = _match_version(_VERSION_PREFIX_RE, os.environ.get(ENV_CC_VERSION, ""))
+    if version is not None:
+        return version
+
+    execpath = os.environ.get(ENV_CC_EXECPATH, "")
+    for part in execpath.split(os.sep):
+        version = _match_version(_VERSION_FULL_RE, part)
+        if version is not None:
+            return version
+
+    return _version_from_subprocess()
+
+
+def _claude_code_version() -> tuple[int, int, int] | None:
+    """このプロセスから見える Claude Code の版数 (`(major, minor, patch)`)。
+
+    検出できなければ None。プロセス内 (このモジュール読み込み単位) で 1 回だけ計算し
+    キャッシュする — Claude Code の版数は hook プロセスの生存中に変わらないため、
+    state ファイルへの永続化は不要 (hook は 1 回の呼び出しごとに使い捨てのプロセス)。
+    """
+    if _VERSION_CACHE_KEY not in _VERSION_CACHE:
+        _VERSION_CACHE[_VERSION_CACHE_KEY] = _detect_claude_code_version()
+    return _VERSION_CACHE[_VERSION_CACHE_KEY]
+
+
+def _stop_supports_additional_context(version: tuple[int, int, int] | None) -> bool:
+    """Stop の `hookSpecificOutput.additionalContext` が効く版数 (2.1.163 以上) か。"""
+    return version is not None and version >= _MIN_VERSION_FOR_ADDITIONAL_CONTEXT
+
+
+def _format_version(version: tuple[int, int, int] | None) -> str:
+    return ".".join(str(part) for part in version) if version is not None else "不明"
+
+
+def _resolve_mode() -> tuple[str, str | None]:
+    """`(mode, version_fallback_notice)` を返す (`get_mode()` と `_run_review()` の共通実体)。
+
+    `block` / `context` の明示指定は版数判定を飛ばし、そのまま使う (`context` を明示した
+    利用者は 2.1.163 未満での既知の問題を承知の上という前提 — 利用者の責任)。
+
+    それ以外 (未設定 / `MODE_AUTO` / 未知の値) はすべて自動選択: `_claude_code_version()`
+    で検出した版数が `_stop_supports_additional_context()` を満たせば `context`、満たさない
+    (未満 または 検出できない) なら **`block` に倒す** (fail-closed: 指摘を Claude に
+    届かないまま失う方向には倒さない。コストは legacy の `decision: "block"` 表示に
+    戻るだけ — Codex R1 P1 指摘への対応。モジュール docstring
+    「未対応 CLI での自動 fail-closed」節を参照)。
+
+    `version_fallback_notice` は「auto 解決で版数非対応と判定して block に倒した」ときだけ
+    利用者向けの付記文を返す (それ以外は None)。明示指定 (`block`/`context`) では常に
+    None — 利用者が意図して選んだモードに版数起因の言い訳を混ぜると、「なぜ block なのか」
+    の説明が矛盾して見える。
+    """
+    raw = settings.raw(ENV_MODE).lower()
+    if raw == MODE_BLOCK:
+        return MODE_BLOCK, None
+    if raw == MODE_CONTEXT:
+        return MODE_CONTEXT, None
+
+    version = _claude_code_version()
+    if _stop_supports_additional_context(version):
+        return MODE_CONTEXT, None
+    notice = (
+        f"(Claude Code {_format_version(version)} は Stop の additionalContext "
+        "非対応のため block で差し戻し)"
+    )
+    return MODE_BLOCK, notice
+
+
 def get_mode() -> str:
     """`context` (既定・0.8.0 から): `hookSpecificOutput.additionalContext` で所見を渡す
     (hook error に見せない。モジュール docstring の「0.8.0 で入れた変更」参照)。
     `block` にすると 0.7.0 までの `decision: "block"` に戻せる。
 
-    未知の値は既定 (`context`) に倒す。他の on/off スイッチと同じく、タイプミスで
-    機能が壊れた見た目にならないようにするため (README の環境変数の命名規則を参照)。
+    未設定・`auto`・未知の値は、実行中の Claude Code が対応版数 (2.1.163 以上) かを
+    自動検出して選ぶ (`_resolve_mode()`)。版数が未満・不明なら **`block` に fail-closed
+    する** (0.7.0 までと同じ表示に戻るだけで、指摘そのものは失わない)。版数を理由に
+    block へ倒したことを利用者に伝える付記文が要る場合は `_resolve_mode()` を直接使う
+    (`_run_review` 参照)。
     """
-    raw = settings.raw(ENV_MODE).lower()
-    return MODE_BLOCK if raw == MODE_BLOCK else MODE_CONTEXT
+    return _resolve_mode()[0]
 
 
 def review_enabled() -> bool:
@@ -507,12 +695,18 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     reason = build_reason(result)
     state.complete_claim(session_id, claim_id, batch.hashes)
     _save_review_copy(session_id, reason)
-    # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。MODE=block は
-    # ハーネスが継続を保証するので「依頼しました」は真だが、既定 (additionalContext)
-    # は CLI 2.1.163 未満で無視されうる。その場合ここで「依頼しました」と言い切ると、
-    # 指摘が Claude に届かないまま利用者にだけ「依頼した」と誤って伝えることになる。
-    if get_mode() == MODE_BLOCK:
-        notices.insert(0, f"{summary} → 指摘あり (Claude に対応を依頼しました)")
+    # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。block (明示、または
+    # auto 解決で版数非対応と判定した場合) はハーネスが継続を保証するので「依頼しました」
+    # と言い切ってよい。既定の auto 解決は、版数が additionalContext に対応していれば
+    # context を選ぶのでここでも「依頼しました」は真になる。版数非対応で自動的に block
+    # へ倒れたときだけ、`_resolve_mode()` の付記文でどの版数だったか (不明なら「不明」)
+    # を添える — 明示 `MODE=block` では付記文は None なので何も足されない。
+    mode, version_fallback_notice = _resolve_mode()
+    if mode == MODE_BLOCK:
+        message = f"{summary} → 指摘あり (Claude に対応を依頼しました)"
+        if version_fallback_notice:
+            message += f" {version_fallback_notice}"
+        notices.insert(0, message)
         return _with_notices({"decision": "block", "reason": reason}, notices)
     notices.insert(0, f"{summary} → 指摘あり (レビュー結果を Claude の文脈に渡しました)")
     return _with_notices(

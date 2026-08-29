@@ -2,9 +2,11 @@
 
 `PreToolUse(Bash)` / `PostToolUse(Write|Edit|NotebookEdit|Bash)` / `Stop` の 3 フックで動作し、
 **そのターンにこのセッションが変更したファイルだけ**を Cursor に差分レビューさせ、
-critical な指摘があれば `hookSpecificOutput.additionalContext` (既定。0.8.0 から) で
-Claude に返す。`EXTERNAL_AI_POST_REVIEW_MODE=block` で 0.7.0 までの `decision: block`
-に戻せる (詳細は「出力形式: hook error に見せない (0.8.0)」節)。
+critical な指摘があれば `hookSpecificOutput.additionalContext` (既定 `auto`。0.8.0 から) で
+Claude に返す。`auto` は実行中の Claude Code の版数を自動検出し、2.1.163 未満・不明
+なら 0.7.0 までの `decision: block` に自動で fail-closed する (`EXTERNAL_AI_POST_REVIEW_MODE`
+に `block`/`context` を明示すれば固定できる。詳細は「出力形式: hook error に見せない
+(0.8.0)」節)。
 
 ## 目的
 
@@ -320,9 +322,39 @@ reference (`Stop decision control` 節) 逐語:
   最初の実験では injected instruction とみなされ拒否されたが、現実的な指摘文では
   再現しなかった — テストするなら実際の `build_reason()` 出力形で行うこと
 - **公式 changelog 記載の対応下限は CLI 2.1.163 (2026-06-04)**。これ未満では
-  `additionalContext` が Stop で効かない可能性があるため、
-  `EXTERNAL_AI_POST_REVIEW_MODE=block` で 0.7.0 までの `decision: "block"` に
-  戻せる (opt-in)
+  `additionalContext` が Stop で効かない
+
+### 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch、Codex R1 P1 対応)
+
+上記の下限を README に書いて利用者に周知するだけでは、2.1.163 未満の CLI で plugin を
+更新した既存ユーザーが opt-in (`EXTERNAL_AI_POST_REVIEW_MODE=block`) の存在を知らない
+限り、`additionalContext` が黙って無視されレビュー指摘が届かないまま Stop してしまう。
+しかも `_run_review` は指摘を組み立てた時点で既に `state.complete_claim(...)` を
+呼んでいるため、この指摘は再試行されず永久に失われる (Codex PR #69 R1 レビュー指摘)。
+
+`EXTERNAL_AI_POST_REVIEW_MODE` を 3 値に拡張して対処した:
+
+- `block` / `context` の明示指定は版数判定を飛ばし、そのまま使う (`context` を明示した
+  利用者は 2.1.163 未満での既知の問題を承知の上という前提 — 利用者の責任)
+- それ以外 (未設定 / `auto` / 未知の値) は `_claude_code_version()` で実行中の
+  Claude Code の版数を検出し、2.1.163 以上なら `context`、**未満または検出できなければ
+  自動的に `block` に fail-closed する** (指摘を届かないまま失う方向には倒さない)
+- 版数検出は 3 段: (a) 環境変数 `CLAUDE_CODE_VERSION`、(b) 環境変数
+  `CLAUDE_CODE_EXECPATH` のパス要素のうち版数だけの文字列、(c) `claude --version` の
+  subprocess 実行 (timeout 3秒)。**(a)(b) はいずれも hooks 向けの公式契約の外側**
+  (`llms-docs:researching-claude-docs` で逐語確認: `CLAUDE_CODE_VERSION` という変数名
+  自体は公式 settings reference に存在するが Enterprise `policyHelper` 専用で hook への
+  注入は不明記、`CLAUDE_CODE_EXECPATH` は公式コーパス全体でゼロヒットの未文書化の内部
+  実装詳細)。このため (c) を最終的な信頼できるフォールバックとして必ず残す
+- 版数を理由に auto 解決が `block` に倒れたときだけ `systemMessage` に付記文を足す
+  (どの版数だったか、または「不明」)。明示 `MODE=block` では付記文を混ぜない
+- Stop の待ち時間の絶対上限が 674 秒 → 677 秒に変化 (`claude --version` の timeout
+  3秒が worst case に加わる。690秒の hook timeout には収まる。
+  `tests/test_review_set.py::TestTimeoutBudgets` 参照)
+- テストは実機の `claude` を起動しない。既存テストを含む全体が
+  `tests/_testutil.py::PINNED_VERSION_ENV` (`CLAUDE_CODE_VERSION` を対応版数に固定) の
+  下で走るため、実行環境の実際の Claude Code 版数に依存しない
+  (`tests/test_version_detect.py` / `test_throttle_flow.py::TestVersionAwareMode`)
 
 ## テスト
 
@@ -353,7 +385,9 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
-| 指摘ありは既定で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |
+| 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |
+| `auto` は版数非対応・不明なら自動で `block` に fail-closed する (Codex R1 P1) | `test_throttle_flow.py::TestVersionAwareMode` |
+| 版数検出の 3 段 (env var → EXECPATH → subprocess) と閾値判定 | `test_version_detect.py` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを

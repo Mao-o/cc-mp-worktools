@@ -6,6 +6,7 @@
 """
 import json
 import os
+import subprocess
 import time
 import unittest
 from unittest import mock
@@ -380,6 +381,110 @@ class TestOutputMode(HookTestCase):
         self.edit(SESSION, "a.py", "v1\n")
         data = json.loads(self.stop(SESSION, FINDINGS))
         self.assertIn("依頼しました", data["systemMessage"])
+
+
+class TestVersionAwareMode(HookTestCase):
+    """`EXTERNAL_AI_POST_REVIEW_MODE` の auto 解決が Claude Code の版数を見て
+    fail-closed すること (Codex R1 P1: 2.1.163 未満の CLI で `additionalContext` が
+    無視され、`state.complete_claim` 済みの指摘が永久に失われる問題への対応)。
+
+    版数検出そのもの (`_claude_code_version` の 3 段) の単体テストは
+    `test_version_detect.py`。ここでは `_claude_code_version` を直接 mock して
+    「版数が与えられたときにモード解決がどちらに転ぶか」だけを検証する
+    (`HookTestCase` の既定 pin は `CLAUDE_CODE_VERSION=9.9.9` = 常に対応版数)。
+    """
+
+    def test_auto_mode_falls_back_to_block_when_version_unsupported(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(2, 1, 100)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertNotIn("hookSpecificOutput", data)
+        self.assertIn("2.1.100", data["systemMessage"])
+        self.assertIn("additionalContext 非対応のため block で差し戻し", data["systemMessage"])
+
+    def test_auto_mode_falls_back_to_block_when_version_unknown(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertIn("不明", data["systemMessage"])
+
+    def test_auto_mode_uses_context_when_version_supported(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(2, 1, 163)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertEqual(data["hookSpecificOutput"]["hookEventName"], "Stop")
+
+    def test_auto_literal_behaves_like_unset(self):
+        """`MODE=auto` を明示しても、未設定と同じ自動選択になる。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = self.entry.MODE_AUTO
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(2, 1, 163)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+
+    def test_explicit_block_mode_ignores_supported_version(self):
+        """明示 `block` は版数が対応していても勝つ (版数判定を飛ばす)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=(9, 9, 9)):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+
+    def test_explicit_block_mode_omits_version_fallback_reason(self):
+        """明示 `block` では、たとえ版数が非対応でも auto フォールバックの付記文を
+        混ぜない (利用者が意図して選んだモードに「版数のせいで block」という
+        言い訳を添えると矛盾して見える)。
+        """
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertIn("依頼しました", data["systemMessage"])
+        self.assertNotIn("additionalContext 非対応のため", data["systemMessage"])
+
+    def test_explicit_context_mode_ignores_unsupported_version(self):
+        """明示 `context` は版数が非対応・不明でも勝つ (利用者の責任)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "context"
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertEqual(data["hookSpecificOutput"]["hookEventName"], "Stop")
+
+    def test_auto_mode_falls_back_to_block_when_version_cannot_be_detected(self):
+        """版数検出そのもの (env var 不在・EXECPATH に版数無し・subprocess 失敗) と
+        モード解決の結合テスト。`_claude_code_version` を直接 mock せず、実際の検出
+        経路をすべて塞いで確認する (`test_version_detect.py` の単体テストと違い、
+        ここは配線まで含めた end-to-end)。
+
+        `subprocess.run` は `claude` 呼び出しだけを失敗させ、`gitscan.py` が使う git
+        呼び出しは実行にそのまま通す (全体を潰すと git status/diff まで壊れて
+        別の理由で失敗する)。
+        """
+        real_run = subprocess.run
+
+        def fake_run(argv, *a, **kw):
+            if list(argv)[:1] == ["claude"]:
+                raise FileNotFoundError()
+            return real_run(argv, *a, **kw)
+
+        os.environ.pop("CLAUDE_CODE_VERSION", None)
+        os.environ["CLAUDE_CODE_EXECPATH"] = (
+            "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        )
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            self.edit(SESSION, "a.py", "v1\n")
+            data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertIn("不明", data["systemMessage"])
+
+    def test_mode_does_not_affect_clean_review(self):
+        with mock.patch.object(self.entry, "_claude_code_version", return_value=None):
+            self.edit(SESSION, "a.py", "v1\n")
+            self.assertNotBlocked(self.stop(SESSION, "REVIEW_CLEAN"))
 
 
 if __name__ == "__main__":
