@@ -836,6 +836,22 @@ class TestValidateEntryShape(unittest.TestCase):
                 reason = builder._validate_entry_shape(self.github, bad)
                 self.assertIsNotNone(reason)
 
+    def test_empty_string_key_rejected_when_strict(self):
+        reason = builder._validate_entry_shape(
+            self.github, {"": "Mao-o"}, strict_keys=True
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("空文字", reason)
+
+    def test_empty_string_key_rejected_when_not_strict(self):
+        """空文字キーは strict_keys の緩和 (未知キー/個々の値の不正) の
+        対象外 — 型不正・空 dict と同じく常に検証する。"""
+        reason = builder._validate_entry_shape(
+            self.github, {"": "Mao-o"}, strict_keys=False
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("空文字", reason)
+
 
 class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
     """`_migrate_keep_new_without_loss` の direct unit tests (内部バックログ:
@@ -865,10 +881,12 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
             )
         )
 
-    def test_multi_host_dict_old_with_all_same_value_is_not_lossy(self):
-        """old の全 value が new (scalar) と同じなら、複数キーでも情報は
-        失われない (どのキーも同じ事実を指しているだけ) → True。"""
-        self.assertTrue(
+    def test_multi_host_dict_old_with_all_same_value_is_lossy(self):
+        """old が複数 host/alias を持つ場合、値が全て new (scalar) と同じでも
+        「照合される host 集合」は new では 1 つに縮む (github.verify は
+        github.com か最初の active host のみを照合する) ため、値が同じでも
+        情報欠落として False (conflict のまま) になる。"""
+        self.assertFalse(
             builder._migrate_keep_new_without_loss(
                 "Mao-o", {"github.com": "Mao-o", "ghe.example.com": "Mao-o"}
             )
@@ -1155,7 +1173,52 @@ class TestSet(BaseBuilder):
         self.assertEqual(code, 1)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
         self.assertEqual(data, {"github": "Mao-o"})  # 変更されない
-        self.assertIn("既存値は文字列です", err)
+        self.assertIn("オブジェクトではありません", err)
+
+    def test_host_rejected_when_existing_is_list(self):
+        """非対称の回帰防止: 既存値が list のときも str と同じく明示エラーに
+        する (従来は `isinstance(existing_value, str)` しか弾かず、list は
+        `base_dict = {}` で黙って dict に作り替えられ既存値を破棄していた)。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": ["Mao-o", "other"]}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--host", "github.com",
+                "--value", "other", "--commit",
+            ]
+        )
+        self.assertEqual(code, 1)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": ["Mao-o", "other"]})  # 変更されない
+        self.assertIn("オブジェクトではありません", err)
+
+    def test_host_empty_string_rejected(self):
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--host", "",
+                "--value", "Mao-o", "--commit",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--host", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_host_and_from_cli_rejected(self):
+        """`--host` + `--from-cli` は builder がどの host の値かを判別できない
+        ため明示エラーにする (単一 host ログイン中に別 host の期待値として
+        CLI 現在値が書かれてしまう事故の防止)。"""
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--host", "ghe.example.com",
+                "--from-cli", "--commit",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--host", err)
+        self.assertIn("--value", err)
+        self.assertFalse(self._new_path().exists())
 
     def test_host_rejected_for_scalar_only_service(self):
         code, _out, err = self._run(
@@ -1315,6 +1378,19 @@ class TestRemove(BaseBuilder):
         self.assertIn("何もしません", out)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
         self.assertEqual(data, {"github": {"github.com": "Mao-o"}})
+
+    def test_host_empty_string_rejected(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["remove", "--service", "github", "--host", "", "--commit"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--host", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"github.com": "Mao-o"}})  # 変更されない
 
     def test_host_rejected_when_existing_is_scalar(self):
         self.new_dir.mkdir(parents=True)

@@ -18,7 +18,8 @@
    削除できる。**最後の 1 つの host/alias を remove すると、空 dict `{}` を
    残さずキー自体を削除する** — 空 dict は github/firebase/gcloud の
    `verify()` が「オブジェクトが空です」で permanent deny する形のため、
-   残すと該当 service が動かなくなる。dict を受け付けない service
+   残すと『オブジェクトが空です』の deny になり案内が不明瞭になる (未記載の
+   「キーがありません」設定誘導のほうが分かりやすい)。dict を受け付けない service
    (aws/kubectl) への `--host` 指定は早期にエラーにする。書込パス固定
    (D2)・値隠蔽 (D3)・mtime 更新による cache 無効化・CLAUDE.md/`.gitignore`
    の自動同梱は init/migrate と同じ経路を流用する。
@@ -50,13 +51,13 @@
    まで exit 1 にしないため)。
 4. **migrate の衝突判定を情報欠落の有無で判定する専用の比較関数に変更** —
    新旧で `merged[key] != value` という値そのものの不一致だけを見ていた
-   ため、scalar `"Mao-o"` と dict `{"github.com":"Mao-o"}` のように
+   ため、scalar `"USER"` と dict `{"github.com":"USER"}` のように
    **意味的には同じアカウント**を指す新旧値まで値衝突として手動解決を
    要求していた。当初 `show`/`verify` 用の `_entries_equal` (CLI 実測値が
    期待値を満たすかの非対称な述語) を流用したが、独立レビューで
    **multi-host/multi-alias dict が絡むと情報が黙って失われる**ことが
-   判明した — 例: new=scalar `"Mao-o"` / old=dict
-   `{"github.com":"Mao-o","ghe.example.com":"mao-corp"}` は、
+   判明した — 例: new=scalar `"USER"` / old=dict
+   `{"github.com":"USER","ghe.example.com":"example-org"}` は、
    `_entries_equal` が最初の host の値だけを見て一致と判定し、
    `ghe.example.com` の値を conflict 検出も警告もなく消してしまう。
    `_migrate_keep_new_without_loss` を新設し、「new 側を採用しても old 側の
@@ -69,6 +70,10 @@
 - `git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は元々
   検証対象外だったが、README に明記していなかったので追記した (挙動の変更
   ではない)。
+- `_migrate_keep_new_without_loss` の dict-new / str-old 分岐 (new が dict、
+  old が scalar) は値の一致だけで判定するため、old の scalar 値が具体的に
+  どの host/alias を指していたかは区別できない。migrate 時点の CLI 状態に
+  依存し不可知なため、決定的な判定手段が無い。
 
 ## 0.9.0
 

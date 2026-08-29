@@ -27,7 +27,11 @@ verify-cloud-account plugin の **builder スクリプト経由 (Bash)** が唯�
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
-  <init|show|migrate> [args...]
+  <init|show|migrate|set|remove> [args...]
+
+# set / remove の引数例
+#   set --service <svc> --value <v> [--host <h>] --commit
+#   remove --service <svc> [--host <h>] --commit
 ```
 
 `${CLAUDE_PLUGIN_ROOT}` は plugin hook 経由で展開される変数です。Agent Skill
@@ -45,8 +49,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 ## このファイルについて
 
-このファイルは `accounts_builder.py init --commit` または
-`accounts_builder.py migrate --commit` の初回実行時に自動生成されます。既に
-存在する場合は上書きされません (ユーザー編集を尊重)。不要であれば削除して
-構いません — signpost が消えるだけで verify-cloud-account 本体の動作には影響
-しません。
+このファイルは `accounts_builder.py` の `init` / `set` / `remove` / `migrate`
+の `--commit` 初回実行時に自動生成されます。既に存在する場合は上書きされません
+(ユーザー編集を尊重)。不要であれば削除して構いません — signpost が消えるだけで
+verify-cloud-account 本体の動作には影響しません。

@@ -32,8 +32,8 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 - **D8**: `migrate` の衝突判定は `_migrate_keep_new_without_loss()` で
   「new 側を採用しても old 側の情報を失わないか」だけを見る。既存の
   `_entries_equal()` (show/verify 用、CLI 実測値が期待値を満たすかの非対称な
-  述語) をそのまま流用すると、new=scalar "Mao-o" / old=multi-host dict
-  `{"github.com":"Mao-o","ghe.example.com":"mao-corp"}` のような入力で
+  述語) をそのまま流用すると、new=scalar "USER" / old=multi-host dict
+  `{"github.com":"USER","ghe.example.com":"example-org"}` のような入力で
   `next(iter(old.values()))` (= 最初の host の値) だけを見て一致と判定し、
   `ghe.example.com` の値を conflict 検出も警告もなく消してしまう
   (advisor レビューで検出)。migrate は「意味的に同じアカウントか」ではなく
@@ -261,6 +261,11 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                     f"{service.ACCOUNT_KEY}: オブジェクトのキーは文字列である"
                     "必要があります。"
                 )
+            if not k:
+                return (
+                    f"{service.ACCOUNT_KEY}: オブジェクトのキーに空文字は"
+                    "使えません。"
+                )
             if strict_keys and allowed_keys is not None and k not in allowed_keys:
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトのキー '{k}' は未対応です"
@@ -448,6 +453,21 @@ def _cmd_set(
         )
         return 2
 
+    if args.host is not None and not args.host.strip():
+        print(
+            "error: --host に空文字は使えません。",
+            file=stderr,
+        )
+        return 2
+
+    if args.host is not None and args.from_cli:
+        print(
+            "error: --host 指定時は --value で値を明示してください (CLI の"
+            "現在値がどの host のものかを builder は判別できません)。",
+            file=stderr,
+        )
+        return 2
+
     project_dir = _project_dir()
     target = paths.accounts_file_new(project_dir)
 
@@ -484,9 +504,10 @@ def _cmd_set(
                 file=stderr,
             )
             return 1
-        if isinstance(existing_value, str):
+        if not isinstance(existing_value, (dict, type(None))):
             print(
-                f"error: {service_key} の既存値は文字列です。--host は既存値が"
+                f"error: {service_key} の既存値がオブジェクトではありません "
+                f"(現在: {type(existing_value).__name__})。--host は既存値が"
                 " オブジェクトのとき (または未設定のとき) だけ使えます。先に "
                 f"`remove --service {service_key} --commit` で削除してから "
                 "オブジェクト形式で作り直すか、--host を外して上書きして"
@@ -564,6 +585,13 @@ def _cmd_remove(
         )
         return 2
 
+    if args.host is not None and not args.host.strip():
+        print(
+            "error: --host に空文字は使えません。",
+            file=stderr,
+        )
+        return 2
+
     project_dir = _project_dir()
     target = paths.accounts_file_new(project_dir)
 
@@ -616,7 +644,9 @@ def _cmd_remove(
         # 最後の 1 つの host/alias を消す = キー自体を残す意味が無い
         # (dict が空になると github/firebase/gcloud の verify() は
         # 「オブジェクトが空です」で永久 deny になるため、空 dict を残さず
-        # 未記載 = 検証対象外の状態に戻す)。
+        # 未記載 = 「キーがありません」の設定誘導 deny に戻す。dispatcher は
+        # 未記載サービスも fail-closed で deny するが、「オブジェクトが
+        # 空です」より案内が明確)。
         _print_change_line(
             "- remove (最後の host/alias のためキー全体を削除)",
             f"{service_key}[{args.host}]", existing_value,
@@ -676,21 +706,27 @@ def _migrate_keep_new_without_loss(new_val: Any, old_val: Any) -> bool:
     キーを無視する) — アカウント一致の判定としては正しいが、ここで必要な
     「old 側の値を切り捨てて良いか」の判定にそのまま使うと**情報が失われる
     方向**に倒れる。実例 (内部バックログ: advisor レビューで検出):
-    new="Mao-o" (scalar) / old={"github.com":"Mao-o","ghe.example.com":
-    "mao-corp"} (multi-host dict) で `_entries_equal("Mao-o", old)` は
-    `next(iter(old.values()))` (= "Mao-o") だけを見て True を返すため、
+    new="USER" (scalar) / old={"github.com":"USER","ghe.example.com":
+    "example-org"} (multi-host dict) で `_entries_equal("USER", old)` は
+    `next(iter(old.values()))` (= "USER") だけを見て True を返すため、
     `ghe.example.com` の値がconflict 検出も警告もなく消えていた。
 
     ここでは「old の持つ情報が new に全て含まれているか」だけを見る
     (どちらの型が expected/current かという役割を持たない対称寄りの判定)。
     old が new に無い情報を 1 つでも持っていれば False (conflict のまま)。
+
+    既知の制限: dict-new / str-old (old が scalar) の分岐は値の一致だけで
+    判定するため、old の scalar 値が具体的にどの host/alias を指していたかは
+    区別できない。migrate 時点の CLI 状態に依存し不可知なため、決定的な
+    判定手段が無い (CHANGELOG の既知の制限を参照)。
     """
     if new_val == old_val:
         return True
     if isinstance(new_val, str) and isinstance(old_val, dict):
-        # old (dict) の全 value が new (scalar) と同じ値でなければ、
-        # new 側に無い情報 (別の値を持つ host/alias) が old にあるということ。
-        return all(v == new_val for v in old_val.values())
+        # scalar 期待値は host を 1 つしか照合しない (github.verify は github.com
+        # か最初の active host のみ) ため、old が 2 つ以上の host/alias を持つなら
+        # 値が同じでも「照合される host 集合」が縮む = 情報欠落。
+        return len(old_val) == 1 and next(iter(old_val.values())) == new_val
     if isinstance(new_val, dict) and isinstance(old_val, str):
         # old (scalar) の値が new (dict) のどこかに残っていれば、new は old の
         # スーパーセットなので情報は失われない。
@@ -825,7 +861,7 @@ def _cmd_migrate(
                 merged[key] = value
                 additions.append((key, value, kind))
             elif not _migrate_keep_new_without_loss(merged[key], value):
-                # new="Mao-o" (scalar) / old={"github.com":"Mao-o"} (dict、
+                # new="USER" (scalar) / old={"github.com":"USER"} (dict、
                 # 単一 host) のように、old の情報が new に全て含まれる場合だけ
                 # conflict にせず new 側を維持する (内部バックログ: 意味的に
                 # 等価な新旧値も値衝突として手動解決を要求していた不具合の修正)。
@@ -933,7 +969,7 @@ def _cmd_migrate(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="accounts_builder",
-        description="accounts.local.json の唯一の書込経路 (D1-D5).",
+        description="accounts.local.json の唯一の書込経路 (D1-D9).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

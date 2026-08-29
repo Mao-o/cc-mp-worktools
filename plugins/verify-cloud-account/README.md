@@ -130,7 +130,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 `--host` は既存値がオブジェクト (または未設定) のときだけ使える。既存値が
 文字列の service に `--host` を付けるとエラーになる (先に `remove` で削除
-するか `--host` を外して上書きする)。`--value` は `init` と同じく JSON
+するか `--host` を外して上書きする)。`--host` と `--from-cli` は併用できない
+(CLI の現在値がどの host/alias のものかを builder は判別できないため、
+`--host` 指定時は `--value` で値を明示する)。`--value` は `init` と同じく JSON
 object 文字列 (例: `'{"project":"p","account":"a"}'`) を渡すと dict として
 保存し、それ以外は生文字列として保存する。dict を受け付けない service
 (aws / kubectl) にオブジェクトを渡す、gcloud に未対応キーを渡す、といった
