@@ -28,12 +28,28 @@ tests/          — unittest（python3 -m unittest discover tests）
 
 ## 実行フロー
 
-1. `git ls-files` → `ctx.tracked_files`
+0. **marker gate**（`cli.py::summarize_repo`）: 非 git かつ `--root` 直下に
+   project marker（`core/constants.py` の `PROJECT_MARKERS`）が一つも無く
+   `--force-walk` も無い場合は、ここで最小ヘッダー（`repo_root` /
+   `git_repo: false` / `--force-walk` ヒント）のみを `_enforce_output_budget()`
+   （手順 6 と同じ関数、セクション無しで呼ぶ）に通してから返し、以降の全
+   ステップを skip する（走査コストの高い非プロジェクト dir 分析を避け、
+   かつ `--max-output-chars` をこの経路でも実際の上限として働かせるため）。
+   ただし mise の 3 config 名（`.mise.toml` / `mise.toml` /
+   `.config/mise/config.toml`）は `has_project_markers()` の単純 exists()
+   判定ではなく `core/runtime.py::mise_config_path()` 経由で判定する。
+   `--root` が `$HOME` のとき XDG グローバル設定
+   (`.config/mise/config.toml`) だけを対象外にする例外がそちらにあり、
+   マーカー判定側で同じ判断を書き直さず共有するため
+   （`cli.py::_has_relevant_project_markers()`）
+1. `git ls-files`（非 git かつ marker gate を通過した場合は `walk_files`
+   でファイルシステム直接走査）→ `ctx.tracked_files`
 2. パッケージマネージャ検出 → `ctx.results["package_manager"]`
 3. Purpose 推定 → `ctx.results["purpose"]`
 4. Detector（priority 昇順）→ `ctx.stack` に追加
 5. Collector（priority 昇順）→ セクション生成 + `ctx.results` への書き込み
-6. ヘッダーレンダリング → セクション結合 → 出力
+6. ヘッダーレンダリング → セクション結合 → **`_enforce_output_budget()`**
+   で出力全体を `--max-output-chars`（既定 8,000）以内に段階的削減 → 出力
 
 ## プラグイン規約
 

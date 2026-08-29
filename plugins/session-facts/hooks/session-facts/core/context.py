@@ -16,6 +16,7 @@ from .constants import (
     DEFAULT_MAX_HUB_FILES,
     DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
+    DEFAULT_MAX_OUTPUT_CHARS,
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
@@ -72,6 +73,9 @@ class AnalysisConfig:
     # SessionStart passes False: the harness already injects recent commits
     # there (gitStatus), while subagents receive no git context at all.
     include_recent_commits: bool = True
+    # Hard ceiling on the whole rendered output (see DEFAULT_MAX_OUTPUT_CHARS
+    # for the rationale). Enforced by cli.py's _enforce_output_budget().
+    max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
 
 
 @dataclass

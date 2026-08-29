@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
@@ -14,6 +15,8 @@ from core.runtime import (
     build_runtime_info,
     detect_venv,
     first_version,
+    has_mise,
+    mise_config_path,
     parse_mise_tools,
     parse_tool_versions,
     read_python_version,
@@ -234,6 +237,52 @@ class MiseDetectorConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = RepoContext(root=Path(tmp), config=AnalysisConfig())
             self.assertEqual(MiseDetector().detect(ctx), [])
+
+
+class MiseConfigHomeExclusionTest(unittest.TestCase):
+    """internal backlog: running from $HOME picked up the XDG global mise
+    config (tool pins unrelated to any "project") as if it were a project's
+    own runtime pin."""
+
+    def test_xdg_config_skipped_at_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cfg_dir = home / ".config" / "mise"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.toml").write_text('[tools]\nawscli = "latest"\n')
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                self.assertIsNone(mise_config_path(home))
+
+    def test_xdg_config_still_used_for_non_home_root(self):
+        # Same layout, but root != the (mocked) home dir -- unaffected.
+        with tempfile.TemporaryDirectory() as project_tmp, \
+                tempfile.TemporaryDirectory() as home_tmp:
+            project_root = Path(project_tmp)
+            home = Path(home_tmp)
+            cfg_dir = project_root / ".config" / "mise"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.toml").write_text('[tools]\npython = "3.12"\n')
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                result = mise_config_path(project_root)
+            self.assertEqual(result, cfg_dir / "config.toml")
+
+    def test_dotmise_toml_still_honored_at_home(self):
+        # Only the XDG path is excluded -- a project-style .mise.toml placed
+        # directly at $HOME is still a deliberate config, not noise.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".mise.toml").write_text('[tools]\nnode = "20"\n')
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                self.assertEqual(mise_config_path(home), home / ".mise.toml")
+
+    def test_tool_versions_still_fires_at_home(self):
+        # has_mise() / .tool-versions is untouched by the XDG exclusion.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".tool-versions").write_text("python 3.12.0\n")
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                self.assertIsNone(mise_config_path(home))
+                self.assertTrue(has_mise(home))
 
 
 if __name__ == "__main__":

@@ -2,30 +2,53 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 from core.constants import (
+    SKIP_DIRS,
+    GLOBAL_ONLY_AT_HOME_MARKERS,
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
     DEFAULT_MAX_HUB_FILES,
     DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
+    DEFAULT_MAX_OUTPUT_CHARS,
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
     MAX_TREE_DEPTH,
     MIN_TREE_DEPTH,
+    PROJECT_MARKERS,
     SKIP_DIRS,
 )
 from core.context import AnalysisConfig, RepoContext
-from core.fs import read_text, walk_files
+from core.fs import (
+    scan_project_markers,
+    has_nested_project_markers,
+    has_project_markers,
+    read_text,
+    walk_files,
+)
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
+from core.runtime import MISE_CONFIG_NAMES, is_home_dir, mise_config_path
 from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
 from renderer import render_header
+
+# PROJECT_MARKERS minus the mise config names: those three are checked via
+# mise_config_path() in _has_relevant_project_markers() below instead of a
+# plain has_project_markers() exists() check, so that function's $HOME/XDG
+# -global exception (see its docstring) applies to the marker gate too,
+# rather than re-deriving an "is root $HOME" judgment here separately.
+_NON_MISE_PROJECT_MARKERS = tuple(
+    m
+    for m in PROJECT_MARKERS
+    if m not in MISE_CONFIG_NAMES and m not in GLOBAL_ONLY_AT_HOME_MARKERS
+)
 
 
 def _iter_readme_body_lines(text: str):
@@ -70,13 +93,242 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
     return None
 
 
+def _trim_tree_sections(header: str, sections: List[str], target: int) -> List[str]:
+    """Shrink ``## Subtree`` then ``## Structure`` tails, one tree line at a
+    time, until the joined result fits ``target`` or both are down to their
+    bare header line (whichever comes first). Returns a new list; does not
+    mutate ``sections``.
+
+    Subtree is tried first: in cwd-scoped mode (SubagentStart Explore/Plan),
+    ``## Structure`` self-shrinks to a small top-level, cross-module
+    overview ("just enough to know which other modules exist") while
+    ``## Subtree`` carries the cwd-scoped detail and is usually the larger
+    of the two -- so it is the one to sacrifice first.
+    """
+    secs = list(sections)
+
+    def joined(candidate_secs: List[str]) -> str:
+        return "\n\n".join([header] + candidate_secs)
+
+    for prefix in ("## Subtree", "## Structure"):
+        for i, sec in enumerate(secs):
+            if not sec.startswith(prefix):
+                continue
+            lines = sec.splitlines()
+            sec_header, body = lines[0], lines[1:]
+            while body:
+                candidate = "\n".join([sec_header] + body)
+                candidate_secs = secs[:i] + [candidate] + secs[i + 1:]
+                if len(joined(candidate_secs)) <= target:
+                    secs[i] = candidate
+                    break
+                body.pop()
+            else:
+                secs[i] = sec_header
+            break
+        if len(joined(secs)) <= target:
+            break
+    return secs
+
+
+def _escape_surrogates(text: str) -> str:
+    r"""stdout に出るのと同じ表現へ正規化する。
+
+    非 UTF-8 のバイトを含むファイル名は ``os.walk()`` から surrogateescape の
+    コードポイントとして渡る。上限判定は 1 文字と数えるが、stdout の
+    ``backslashreplace`` ハンドラが出力時に ``\udcff`` の 6 文字へ展開する
+    ため、上限ちょうどに収めたつもりの出力が実際には大きく超えうる。
+    判定前にここで展開しておき、``len()`` が実際の出力長と一致するようにする。
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _enforce_output_budget(header: str, sections: Sequence[str], max_chars: int) -> str:
+    """Trim total output to max_chars, shrinking the lowest-value content
+    first, in this order: the dynamic-depth tree sections' tails
+    (``## Subtree`` then ``## Structure``, one line at a time -- see
+    _trim_tree_sections()), then ``## Scripts``, ``## Env Keys``, and
+    ``## Repo-Specific Notes`` dropped wholesale. ``## Test Snapshot``,
+    ``## Service Entry Points``, and ``## Likely Commands`` are never
+    touched by this cascade -- they carry facts an agent is least able to
+    reconstruct on its own.
+
+    Every step targets max_chars itself, not some pre-shrunk "leave room
+    for the marker" budget: a 1-character overage should cost 1 character
+    of tree tail, not an extra whole section dropped just to reserve
+    marker headroom. Once the cascade is as small as it can get, a marker
+    is attached only if something was actually dropped/shrunk (tracked
+    directly, not inferred from where the result length happens to land)
+    and the marker itself still fits under max_chars; if it doesn't fit,
+    the fine-grained tree-tail lever gets one more targeted trim to make
+    exactly enough room for it, without sacrificing an additional whole
+    section purely for that cosmetic purpose. Hard-cuts as a last resort
+    so the result never exceeds max_chars even if what remains is itself
+    oversized or nothing could be trimmed/dropped at all.
+    """
+    sections = list(sections)
+    original_sections = list(sections)
+
+    header = _escape_surrogates(header)
+    sections = [_escape_surrogates(sec) for sec in sections]
+
+    def joined(candidate_secs: Sequence[str]) -> str:
+        return "\n\n".join([header] + list(candidate_secs))
+
+    if len(joined(sections)) <= max_chars:
+        return joined(sections)
+
+    marker = "\n\n... (truncated)"
+
+    # Step 1: shrink the tree sections' tails against max_chars directly.
+    sections = _trim_tree_sections(header, sections, max_chars)
+
+    # Steps 2-4: drop lower-priority sections wholesale, one at a time,
+    # stopping as soon as the result fits max_chars.
+    if len(joined(sections)) > max_chars:
+        for title in ("## Scripts", "## Env Keys", "## Repo-Specific Notes"):
+            sections = [s for s in sections if not s.startswith(title)]
+            if len(joined(sections)) <= max_chars:
+                break
+
+    result = joined(sections)
+    dropped = sections != original_sections
+    if not dropped:
+        # Nothing this cascade knows how to shrink/drop was present, yet
+        # the original was over max_chars: hard-cut with no marker (there
+        # is no drop to announce).
+        return result[:max_chars]
+
+    if len(result) + len(marker) <= max_chars:
+        return result + marker
+
+    # Marker-headroom retry: give the fine-grained tree-tail lever one more
+    # chance to carve out exactly len(marker) more characters so the
+    # marker can be shown, without dropping any additional whole section
+    # purely for that headroom.
+    retried = _trim_tree_sections(header, sections, max_chars - len(marker))
+    retried_result = joined(retried)
+    if len(retried_result) + len(marker) <= max_chars:
+        return retried_result + marker
+
+    # 「削った結果は上限に収まっているが marker を置く余地だけが無い」場合、
+    # marker を諦めるとセクションが丸ごと消えているのに完全な出力に見えて
+    # しまう (受け取った側が欠落に気付けない)。内容を数文字削ってでも marker
+    # を残す方が安全側なので、marker のぶんだけ削って付ける。
+    #
+    # 結果が上限を超えたままのケース (末尾が切られる場合) はここに含めない。
+    # そちらはハードカット自体が省略の印として働き、かつ marker のために
+    # 保護セクションの先頭まで削ると「何が残っているか」も分からなくなる。
+    if dropped and len(result) <= max_chars and max_chars >= len(marker):
+        return result[: max_chars - len(marker)] + marker
+
+    return result[:max_chars]
+
+
+def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
+    """The gate-skipped header for a non-project, non-git directory.
+
+    Names the analyzed directory (root) and, since neither the target
+    directory nor the existence of a flag to force a full scan is
+    otherwise discoverable from this output alone, points at --force-walk
+    so an agent that actually needed the full analysis here isn't stuck
+    with no way out. Mirrors renderer._render_more_hint()'s
+    invoked_as/shlex.quote handling: invoked_as is sys.argv[0], the
+    *directory* the interpreter was pointed at for a real hook run, so the
+    printed command keeps the ``python3 `` prefix and quotes the path in
+    case the plugin is installed under a directory containing spaces.
+    """
+    lines = [
+        "## Project Facts",
+        f"- repo_root: {root}",
+        "- git_repo: false",
+        "- no project markers found; facts skipped",
+    ]
+    # ヒントには解析対象 root を必ず含める。`--root` を明示して別ディレクトリ
+    # から起動された場合、root を落としたヒントをそのまま実行すると
+    # `Path.cwd()` が解析され、ヘッダーに出している repo_root とは別の
+    # ディレクトリの結果が返る (復帰経路として機能しない)。
+    root_arg = f"--root {shlex.quote(str(root))}"
+    if invoked_as:
+        lines.append(
+            f"- more: run `python3 {shlex.quote(invoked_as)} {root_arg} "
+            "--force-walk` to force the full analysis anyway"
+        )
+    else:
+        lines.append(
+            f"- more: pass `{root_arg} --force-walk` to force the full "
+            "analysis anyway"
+        )
+    return "\n".join(lines)
+
+
+def _has_relevant_project_markers(root: Path) -> bool:
+    """PROJECT_MARKERS gate check, with the mise config names routed through
+    core.runtime.mise_config_path() instead of has_project_markers()'s plain
+    exists() check.
+
+    Without this, a user's global mise config at ``~/.config/mise/config.toml``
+    (XDG default) makes the gate treat $HOME as "a project" -- exactly the
+    environment this gate exists to protect -- because a literal exists()
+    check cannot tell that path apart from a deliberate project-level config.
+    mise_config_path() already carries that distinction (see its docstring);
+    sharing it here keeps the exception defined in one place instead of
+    reimplementing an "is root $HOME" check against this gate too.
+    """
+    found, complete = scan_project_markers(root, _NON_MISE_PROJECT_MARKERS)
+    if found:
+        return True
+    if not complete and not is_home_dir(root):
+        # ルート直下の列挙を件数上限で打ち切った場合、「マーカーが無い」とは
+        # 断定できない。ここで skip すると、ルートのファイル数が多い実在の
+        # プロジェクトで facts が丸ごと消える (この gate が避けたい失敗方向)。
+        # 後続の走査自体に件数上限があるので、判断を委ねる方が安全。
+        # ホームは gate の存在理由そのものなので、この救済からは外す。
+        return True
+    if not is_home_dir(root) and has_project_markers(
+        root, GLOBAL_ONLY_AT_HOME_MARKERS
+    ):
+        # `.tool-versions` / `.python-version` は `$HOME` 直下だと
+        # ユーザー全体の既定を意味する。mise config と同じ例外を適用し、
+        # グローバルなランタイム固定でホーム全体を「プロジェクト」と
+        # 判定しない (この gate が守ろうとしている当の環境なので)。
+        return True
+    if mise_config_path(root) is not None:
+        return True
+    if is_home_dir(root):
+        # ホームディレクトリは「配下のどこかにプロジェクトがある」のが常態
+        # なので、入れ子探索を許すと必ず 1 件見つかり gate が素通りする。
+        # この gate が存在する理由そのものなので、ここでは探索しない。
+        return False
+    # ルート直下にマニフェストを置かないワークスペース (サブディレクトリ側に
+    # だけマニフェストがある構成) を取りこぼさない。深さと訪問ディレクトリ数を
+    # 限定しているので、gate が避けたい「無関係な巨大ディレクトリの全走査」に
+    # はならない。
+    return has_nested_project_markers(root, PROJECT_MARKERS, SKIP_DIRS)
+
+
 def summarize_repo(
     root: Path,
     config: AnalysisConfig,
     is_git: bool,
     cwd: Optional[Path] = None,
     invoked_as: Optional[str] = None,
+    force_walk: bool = False,
 ) -> str:
+    # Non-git directories with no recognizable project marker (package.json,
+    # pyproject.toml, Makefile, ...) get a filesystem walk (core/fs.py's
+    # walk_files(), capped at 5000 files but otherwise unconditional) that
+    # produces a Structure/Test Snapshot/etc. bundle built from whatever
+    # happens to be lying around -- e.g. running from $HOME or Desktop,
+    # unrelated to any coding task. Skip straight to a minimal header
+    # instead; --force-walk restores the old unconditional behaviour.
+    if not is_git and not force_walk and not _has_relevant_project_markers(root):
+        # Route through the same budget enforcement as the full-analysis
+        # path below: with no sections to shrink/drop, this is a no-op when
+        # the header already fits max_chars, and a marker-free hard cut
+        # when it doesn't (a long --root/invoked_as can push this well past
+        # a small custom --max-output-chars otherwise).
+        return _enforce_output_budget(_minimal_header(root, invoked_as), [], config.max_output_chars)
     ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
@@ -120,8 +372,22 @@ def summarize_repo(
             print(f"[session-facts] WARNING: collector {collector_name} failed: {e}", file=sys.stderr)
 
     # Header rendered after collectors so ctx.results is fully populated
-    sections = [render_header(ctx)] + collected_sections
-    return "\n\n".join(sections)
+    header = render_header(ctx)
+    return _enforce_output_budget(header, collected_sections, config.max_output_chars)
+
+
+def _non_negative_int(raw: str) -> int:
+    """``--max-output-chars`` 用の型。負値を拒否する。
+
+    ハードカットは ``result[:max_chars]`` で行うため、負値を通すと Python の
+    負インデックス slice になり「ほぼ全文」が返る。上限として機能しないまま
+    ハーネスの注入上限を超えうるので、引数解析の時点で弾く
+    (0 は「すべて削る」の意味で意図的に許容している)。
+    """
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or greater, got {value}")
+    return value
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -174,6 +440,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Max entries in the major_dependencies header line.",
     )
     parser.add_argument(
+        "--max-output-chars", type=_non_negative_int,
+        default=DEFAULT_MAX_OUTPUT_CHARS,
+        help=(
+            "Hard ceiling on the whole rendered output. Beyond this, the "
+            "Structure section's tail is trimmed first, then Scripts / Env "
+            "Keys / Repo-Specific Notes are dropped wholesale, in that order."
+        ),
+    )
+    parser.add_argument(
         "--include-domain-types",
         action="store_true",
         help=(
@@ -206,6 +481,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=(
             "Skip the recent_commits header lines. Use on SessionStart, where "
             "the harness already injects the same commits via gitStatus."
+        ),
+    )
+    parser.add_argument(
+        "--force-walk",
+        action="store_true",
+        help=(
+            "Run the full filesystem-walk analysis on a non-git directory "
+            "even when no project marker (package.json, pyproject.toml, "
+            "Makefile, ...) is found at --root. Without this, such "
+            "directories get a minimal 2-line header instead of a facts "
+            "bundle built from whatever files happen to be there."
         ),
     )
     parser.add_argument(
@@ -242,6 +528,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_env_keys=args.max_env_keys,
         max_notes=args.max_notes,
         max_major_deps=args.max_major_deps,
+        # plain stdout 経路は print() が末尾に改行を 1 文字足すため、その分を
+        # 予約する。予約しないと、外部ハーネスの上限ちょうどを指定した呼び出しが
+        # 必ず 1 文字超える。JSON 経路は改行が payload の外なので予約しない。
+        max_output_chars=(
+            args.max_output_chars
+            if args.emit == "subagent-json"
+            else max(0, args.max_output_chars - 1)
+        ),
         include_domain_types=args.include_domain_types,
         max_domain_types=args.max_domain_types,
         include_hub_files=args.include_hub_files,
@@ -257,7 +551,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ${CLAUDE_PLUGIN_ROOT}-resolved directory), which the injected output
     # would otherwise have no way to name for a follow-up --help call.
     try:
-        output = summarize_repo(root, config, is_git, cwd=resolved, invoked_as=sys.argv[0])
+        output = summarize_repo(
+            root, config, is_git, cwd=resolved, invoked_as=sys.argv[0], force_walk=args.force_walk,
+        )
     except Exception as e:
         # Per-detector/collector isolation above covers the expected failure
         # points; this guard covers the rest of summarize_repo() itself, so a
@@ -268,7 +564,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # and the final print/json.dumps. A failure in those still exits
         # non-zero with no output.
         print(f"[session-facts] WARNING: summarize_repo failed, emitting minimal header: {e}", file=sys.stderr)
-        output = f"## Project Facts\n- repo_root: {root}"
+        # このフォールバックも上限適用を通す。通さないと
+        # `--max-output-chars` が「出力全体の上限」として成立せず、
+        # 長い root を持つ環境ではハーネスの注入上限を超えうる。
+        output = _enforce_output_budget(
+            f"## Project Facts\n- repo_root: {root}",
+            [],
+            config.max_output_chars,
+        )
     if args.emit == "subagent-json":
         print(json.dumps({
             "hookSpecificOutput": {
@@ -276,6 +579,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "additionalContext": output,
             }
         }, ensure_ascii=False))
-    else:
+    elif output:
         print(output)
+    else:
+        # 上限 0 のとき print() は改行 1 文字を出してしまい、「出力全体が
+        # 上限以内」という約束を上限ちょうどで破る。何も出さない。
+        pass
     return 0

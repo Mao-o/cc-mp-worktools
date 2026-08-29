@@ -27,13 +27,19 @@ python3 <plugin-root>/hooks/session-facts --format markdown --include-domain-typ
 python3 <plugin-root>/hooks/session-facts --format markdown --include-domain-types --no-recent-commits
 ```
 
-plugin root が環境変数で得られる場合は `${PLUGIN_ROOT}` を使うのが最も確実です (同梱 hook と同じ解決)。
+plugin root が環境変数で得られる場合はそれを使うのが最も確実です (同梱 hook と同じ解決)。**変数名はハーネスで異なります**: Claude Code は `${CLAUDE_PLUGIN_ROOT}`、Codex は `${PLUGIN_ROOT}` です (`hooks/hooks.json` と `hooks/codex-hooks.json` それぞれの実際の解決を参照)。
 
 ```bash
+# Claude Code
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
+
+# Codex
 python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
 ```
 
-得られない場合は、この `SKILL.md` のあるディレクトリ (`<plugin-root>/skills/session-facts/`) を基準に 2 階層上の `../../hooks/session-facts` を使います。いずれの場合も**作業ディレクトリは解析対象 repo** にしてください (ツール自身は `--root` か cwd で対象を決めます)。
+どちらの環境変数も未定義な場合は、自動注入された `## Project Facts` の `- more:` 行にある絶対パス (後述の `<invoked_as>`) をそのまま使ってください。これは実際に呼ばれた際の解決済みパスなので確実です。
+
+skill ディレクトリから見た相対パス `../../hooks/session-facts` も使えますが、これは**この `SKILL.md` 自身の絶対パス (`<plugin-root>/skills/session-facts/`) が分かっている場合限定**のフォールバックです — パスが分からない状態では起点にできないため、優先順位は「環境変数 → `- more:` 行の絶対パス → この相対パス」の順にしてください。いずれの場合も**作業ディレクトリは解析対象 repo** にしてください (ツール自身は `--root` か cwd で対象を決めます)。
 
 自動注入された `## Project Facts` の `- more:` 行には、実際に呼ばれたパス込みで `python3 <invoked_as> --help` が書かれています。それをそのまま実行すればオプション全量が確認できます (`<invoked_as>` はディレクトリを指すことがあり、`python3` を付けないと実行できません)。
 
@@ -42,7 +48,7 @@ python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-ty
 1. ユーザーが対象 repo / cwd を指定している場合は、そのディレクトリで実行する。
 2. 指定がない場合は現在の作業ディレクトリを対象にする。
 3. 出力された Markdown を要約しすぎず、必要な範囲だけ会話に貼る。
-4. 大きい repo では `--max-tree-lines`、`--max-service-entries`、`--max-script-entries` などで出力量を抑える。
+4. 大きい repo では `--max-tree-lines`、`--max-service-entries`、`--max-script-entries` などで出力量を抑える。ただし出力全体には既定 8,000 文字の自動上限 (`--max-output-chars`) が既にかかっており、超過分は優先度の低いセクションから段階的に削られる — 通常はこれらのフラグを手で調整しなくても上限を超えない。
 
 ## 主要オプション
 
@@ -55,6 +61,8 @@ python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-ty
 - `--max-service-entries <n>`: service entry の最大件数。
 - `--max-script-entries <n>`: scripts 表示の最大件数。
 - `--max-env-keys <n>`: env key 表示の最大件数。
+- `--max-output-chars <n>`: 出力全体の文字数上限 (既定 8,000)。超過時は Structure/Subtree の末尾行 → Scripts → Env Keys → Repo-Specific Notes の順で段階的に削り、削った場合は末尾に `... (truncated)` を付ける。
+- `--force-walk`: 非 git かつ project marker (`core/constants.py` の `PROJECT_MARKERS`) が無いディレクトリでも、従来どおりフルの走査解析を強制する。既定では該当ディレクトリは最小ヘッダーのみを返す。
 
 ## 注意
 

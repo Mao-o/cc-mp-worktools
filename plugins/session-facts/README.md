@@ -155,14 +155,63 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--max-env-keys` | (定数) | env キー最大数 |
 | `--max-notes` | (定数) | Notes セクション最大数 |
 | `--max-major-deps` | 8 | 主要依存表示数 |
+| `--max-output-chars` | 8,000 | 出力全体の文字数上限 (下記「出力サイズ上限」参照) |
 | `--include-domain-types` | false | ドメイン型 Collector を有効化 |
 | `--max-domain-types` | 10 | ドメイン型最大数 |
 | `--include-hub-files` | false | Hub Files Collector を有効化 (被参照数ランキング) |
 | `--max-hub-files` | 8 | Hub Files 最大数 |
 | `--no-recent-commits` | false | `recent_commits` 行を抑制 (gitStatus を注入する main セッション向け) |
+| `--force-walk` | false | 非 git かつ project marker が無いディレクトリでもフルの走査解析を強制 (下記「非プロジェクトディレクトリ」参照) |
 | `--emit` | `stdout` | 出力エンベロープ。`subagent-json` で SubagentStart 用 `hookSpecificOutput` JSON に包む |
 
 既定値の実体は `core/constants.py` を参照。
+
+### 非プロジェクトディレクトリでの挙動
+
+非 git かつ `--root` 直下に project marker (`package.json` / `pyproject.toml` /
+`go.mod` / `Cargo.toml` / `pubspec.yaml` / `Makefile` 等。全量は
+`core/constants.py` の `PROJECT_MARKERS` を参照) が一つも無い場合、通常の
+走査・解析は行わず次の最小ヘッダーのみを出力する:
+
+```markdown
+## Project Facts
+- repo_root: /path/to/analyzed/dir
+- git_repo: false
+- no project markers found; facts skipped
+- more: run `python3 <invoked_as> --force-walk` to force the full analysis anyway
+```
+
+`$HOME` や `Desktop` など、質問目的でコーディング用途以外のディレクトリから
+起動したときに、無関係なファイル/ディレクトリ名から作られる無意味な
+facts (Structure・Test Snapshot 等 100 行超) が注入されるのを避けるため。
+解析対象ディレクトリ (`repo_root`) と、従来どおりフル解析したい場合の
+`--force-walk` フラグは、この最小ヘッダー自身にも常に記載される。この
+最小ヘッダーも次節の「出力サイズ上限」と同じ `_enforce_output_budget()`
+を経由するため、`--max-output-chars` に極端に小さい値を指定した場合でも
+その上限を超えない。
+
+git repo (`.git` 検出済み) の場合はこの判定自体が働かない — project marker
+の有無に関わらず常にフル解析する (git ls-files ベースの解析は元々軽量なため)。
+
+### 出力サイズ上限
+
+Claude Code の `SessionStart` hook が plain stdout / `additionalContext` として
+注入できる分量には実際の上限 (約 10,000 文字) があり、超過分はファイル保存 +
+プレビュー置換にフォールバックする (ハーネス自身の挙動)。`--max-output-chars`
+(既定 8,000) はこの上限より小さく設定してあり、通常は facts バンドル全体が
+そのまま注入される側に倒す。
+
+上限を超える場合は優先度の低いセクションから段階的に削る:
+`## Subtree` / `## Structure` の末尾行 (cwd スコープ時は構造セクションが
+depth=1 に自己縮小し本体が `## Subtree` に移るため、両方が対象) →
+`## Scripts` → `## Env Keys` → `## Repo-Specific Notes` の順で、削った
+場合は末尾に `... (truncated)` を付ける。`## Test Snapshot` /
+`## Service Entry Points` / `## Likely Commands` はこの段階的削減の対象外
+(agent が自力で再構成しにくい情報のため)。
+
+`--emit subagent-json` は JSON エンベロープ・エスケープ分だけ `--max-output-chars`
+の外側にバイト数が増える。ハーネス側の 10,000 文字上限がペイロード全体
+(エンベロープ込み) にかかる場合は、その分の余白を見込んだ値に調整すること。
 
 ## カスタム detector / collector の書き方
 

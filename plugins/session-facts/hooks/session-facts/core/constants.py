@@ -36,6 +36,14 @@ TEST_PATH_MARKERS = {
     "__tests__", "test", "tests", "spec", "specs", "cypress", "playwright", "e2e"
 }
 
+# collectors/scripts.py: a Dockerfile alone only grounds `docker build .`;
+# these additionally ground `docker compose up`. Kept separate from
+# detectors/docker.py's own (Dockerfile + these) tuple, which only needs to
+# know "is docker present at all", not which specific command it grounds.
+COMPOSE_FILE_CANDIDATES = (
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+)
+
 SERVICE_DIR_MARKERS = [
     "services",
     "service",
@@ -147,6 +155,154 @@ DEFAULT_MAX_MAJOR_DEPS = 8
 DEFAULT_MAX_DOMAIN_TYPES = 10
 DEFAULT_MAX_CONFIG_HINTS = 8
 DEFAULT_MAX_HUB_FILES = 8
+
+# cli.py's _enforce_output_budget(): a hard ceiling on the whole rendered
+# output. Claude Code's SessionStart plain-stdout / additionalContext
+# injection has a real ceiling of its own (~10,000 chars) beyond which the
+# harness saves the content to a file and substitutes a preview instead of
+# injecting it directly; 8,000 leaves headroom under that so the full facts
+# bundle is normally injected in place rather than falling back to a file.
+DEFAULT_MAX_OUTPUT_CHARS = 8000
+
+# collectors/scripts.py: a single overly-long script command (some
+# generators produce one-liners several hundred chars wide) can dominate
+# the ## Scripts section on its own; cap each command's displayed length.
+MAX_SCRIPT_COMMAND_CHARS = 120
+
+# cli.py: root-level files/dirs that mark a directory as "a project" worth
+# the (potentially expensive, filesystem-walking) non-git analysis at all.
+# A false negative here (a real project mistaken for a bare directory)
+# silently drops facts for a legitimate repo, which is worse than
+# occasionally still walking a marker-light edge case -- so both tiers
+# below deliberately err toward inclusion, not toward a tight, provable
+# scope.
+#
+# Tier 1: every static file/dir that one of this plugin's own detectors/
+# or collectors/ already keys off of directly (mechanically grepped for
+# ``.exists()`` checks -- or, for requirements*.txt, the equivalent
+# startswith()/endswith() basename check -- against a plugin-recognised
+# name), so a stack this plugin already recognises is never skipped by the
+# gate. A handful of entries predate that discipline and match no current
+# detector at all (Pipfile/setup.cfg/setup.py -- detectors/python_stack.py
+# only reads pyproject.toml or a whole-tree .py-file-ratio heuristic that a
+# marker *filename* fundamentally cannot express); they are kept for the
+# same false-negative-avoidance reason, not removed for consistency.
+#
+# Tier 2: common project roots for stacks this plugin has no detector for
+# at all yet (C/C++, Swift, Elixir, Scala, .NET, Terraform). Still worth a
+# walk: the generic collectors (Structure, Test Snapshot, Scripts, ...)
+# produce useful output even without a "stack:" line naming the language.
+# Three of these are glob patterns (matched via has_project_markers()'s
+# Path.glob() branch, not a literal exists() check): *.csproj/*.tf since the
+# manifest filename is project-specific, not fixed, and requirements*.txt to
+# mirror collectors/dependencies.py's _tracked_requirements(), which already
+# recognises any requirements-prefixed/.txt-suffixed basename (e.g.
+# requirements-dev.txt) -- not just the exact "requirements.txt" name.
+# `$HOME` 直下ではユーザー全体の既定を意味し、そのディレクトリが
+# プロジェクトであることを示さないマーカー (mise config と同じ扱い)。
+GLOBAL_ONLY_AT_HOME_MARKERS = (
+    ".tool-versions",
+    ".python-version",
+    # core/runtime.py::detect_venv() が見るローカル venv。
+    ".venv/pyvenv.cfg",
+    "venv/pyvenv.cfg",
+    # `$HOME/.venv` は「ホーム直下に作った作業用 venv」であって、
+    # ホームがプロジェクトであることを示さない。
+    ".venv/pyvenv.cfg",
+    "venv/pyvenv.cfg",
+)
+
+PROJECT_MARKERS = (
+    "package.json",
+    "pyproject.toml",
+    "requirements*.txt",
+    "Pipfile",
+    "setup.cfg",
+    "setup.py",
+    "go.mod",
+    "Cargo.toml",
+    "pubspec.yaml",
+    "Gemfile",
+    "composer.json",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradlew",
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "Justfile",
+    "justfile",
+    "Taskfile.yml",
+    "Taskfile.yaml",
+    "deno.json",
+    "deno.jsonc",
+    "marketplace.json",
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    # detectors/docker.py
+    "Dockerfile",
+    *COMPOSE_FILE_CANDIDATES,
+    # detectors/mise.py, via core/runtime.py's has_mise()/_MISE_CONFIG_NAMES
+    ".mise.toml",
+    "mise.toml",
+    ".config/mise/config.toml",
+    ".tool-versions",
+    # core/runtime.py::build_runtime_info() はこれも読む。ランタイム
+    # 固定ファイルだけを持つ Python プロジェクトを gate で落とすと、
+    # ファイル比率による言語検出もランタイム情報の収集も走らないまま
+    # facts が丸ごと消える。
+    ".python-version",
+    # collectors/env_keys.py の ENV_FILE_CANDIDATES。テンプレートだけを
+    # 置くプロジェクト (実 .env は gitignore) でも env keys とソース由来の
+    # facts は出せるので、gate で落とさない。実体の `.env` は機密なので
+    # マーカーに含めない。
+    *ENV_FILE_CANDIDATES,
+    # detectors/nextjs.py
+    *NEXT_CONFIG_CANDIDATES,
+    # detectors/node_typescript.py
+    "tsconfig.json",
+    "tsconfig.base.json",
+    # detectors/prisma.py (directory, not a file -- exists() doesn't care)
+    "prisma",
+    # detectors/python_stack.py
+    # core/pm.py::detect_package_manager() が認識する lockfile 一式。
+    # lockfile だけを持つディレクトリ (マニフェストが消えている / 生成物だけ
+    # 配布されている構成) でも package manager・構造・ソース・テストの収集は
+    # 動くので、gate で落とすと facts が無意味に消える。
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "uv.toml",
+    "uv.lock",
+    "uv.toml",
+    "poetry.lock",
+    # detectors/react_vite.py
+    "vite.config.ts",
+    "vite.config.js",
+    # detectors/taskrunner.py
+    "nx.json",
+    # detectors/testing.py
+    "pnpm-workspace.yaml",
+    "turbo.json",
+    "playwright.config.ts",
+    "cypress.config.ts",
+    # collectors/repo_notes.py's firebase-integration note wording
+    "firebase.json",
+    ".firebaserc",
+    # Tier 2 (see module comment above)
+    "CMakeLists.txt",
+    "Package.swift",
+    "mix.exs",
+    "build.sbt",
+    "Cargo.lock",
+    "Gemfile.lock",
+    "*.csproj",
+    "*.tf",
+)
 
 # hub_files collector (core/imports.py + collectors/hub_files.py): scanning
 # every candidate file's body is real work, so cap the candidate count to

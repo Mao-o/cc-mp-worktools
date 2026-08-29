@@ -64,6 +64,63 @@ class AggregatePathsTest(unittest.TestCase):
         result = aggregate_paths(paths)
         self.assertLessEqual(len(result), 3)
 
+    def test_fully_wildcarded_pattern_lists_originals_instead(self):
+        # internal backlog: aggregate_paths used to collapse this group to a
+        # single "*/*" line -- every segment differs, so no literal survives
+        # anywhere and the pattern carries zero localization info. All 3
+        # inputs share nothing but segment count, so all 3 are listed
+        # verbatim instead (well under the 4-entry cap, no "+N more").
+        paths = ["api/tests", "web/__tests__", "sdks/spec"]
+        result = aggregate_paths(paths)
+        self.assertNotIn("*/*", result)
+        self.assertEqual(sorted(result), ["api/tests", "sdks/spec", "web/__tests__"])
+
+    def test_fully_wildcarded_leftovers_are_capped(self):
+        # 6 same-length paths where BOTH segments differ across the board
+        # (no two share a leading directory, no two share a trailing one
+        # either) -- the naive pattern is fully wildcarded ("*/*"), so all 6
+        # would-be leftovers get capped at max_listed=4 plus a "+N more"
+        # line instead of dumping all 6 raw paths.
+        paths = [f"dir{i}/leaf{i}" for i in range(1, 7)]
+        result = aggregate_paths(paths, max_listed=4)
+        self.assertEqual(len(result), 5)  # 4 verbatim + 1 "+N more" line
+        self.assertEqual(result[:4], ["dir1/leaf1", "dir2/leaf2", "dir3/leaf3", "dir4/leaf4"])
+        self.assertEqual(result[4], "... (+2 more)")
+
+    def test_wildcard_group_still_collapses_shared_prefix_subset(self):
+        # Mixed group: 2 paths share a leading directory (collapse to a
+        # useful pattern) while a 3rd has a unique leading directory (listed
+        # verbatim) -- the prefix re-split keeps the useful aggregate
+        # instead of falling back to raw-listing everything.
+        paths = ["packages/a/tests", "packages/b/tests", "other/x/y"]
+        result = aggregate_paths(paths)
+        self.assertEqual(sorted(result), ["other/x/y", "packages/*/tests"])
+
+    def test_degenerate_group_with_many_collapsible_prefixes_is_capped(self):
+        # internal backlog P2-3: a monorepo with 25 packages, each having a
+        # (tests/, e2e/) pair, degenerates to "*/*" at the top level, then
+        # re-splits by leading directory into 25 genuinely-collapsible
+        # "pkgN/*" patterns -- previously only the *leftover* (unpaired)
+        # branch was capped, so this produced 25 raw output lines instead
+        # of respecting max_listed.
+        paths = []
+        for i in range(25):
+            paths.append(f"pkg{i}/tests")
+            paths.append(f"pkg{i}/e2e")
+        result = aggregate_paths(paths, max_listed=4)
+        self.assertEqual(len(result), 5)  # 4 pattern lines + 1 "+N more"
+        self.assertEqual(result[-1], "... (+21 more)")
+        for line in result[:-1]:
+            self.assertRegex(line, r"^pkg\d+/\*$")
+
+    def test_pattern_with_surviving_literal_segment_is_not_touched(self):
+        # A pattern that keeps at least one literal segment (here "tests" at
+        # the tail) still localizes part of the path, so it is NOT treated
+        # as degenerate even though the leading segment is a wildcard.
+        paths = ["api/tests", "web/tests", "worker/tests"]
+        result = aggregate_paths(paths)
+        self.assertEqual(result, ["*/tests"])
+
 
 if __name__ == "__main__":
     unittest.main()

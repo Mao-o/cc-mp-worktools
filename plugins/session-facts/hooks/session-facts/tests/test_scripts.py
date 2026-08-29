@@ -2,12 +2,13 @@
 uv/poetry が自前 env 管理で不変なこと、bare-python (.py 比率) ケース。"""
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from collectors.scripts import _likely_commands
+from collectors.scripts import ScriptsCollector, _likely_commands
 from core.context import AnalysisConfig, RepoContext
 
 
@@ -62,6 +63,35 @@ class LikelyCommandsRuntimeTest(unittest.TestCase):
         ctx = _ctx(pm=None, stack=["python"])
         cmds = _likely_commands(ctx, max_items=16)
         self.assertFalse(any("pytest" in c for c in cmds))
+
+
+class ScriptCommandLengthCapTest(unittest.TestCase):
+    """internal backlog: a single overly-long script command (some
+    generators produce one-liners several hundred chars wide, e.g. the
+    reported 354-char case) used to render unbounded in ## Scripts."""
+
+    def test_long_command_is_truncated_to_120_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            long_command = "echo " + ("x" * 350)  # 355 chars total
+            (root / "package.json").write_text(
+                '{"scripts": {"build": "%s"}}' % long_command
+            )
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            out = ScriptsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            line = next(ln for ln in out.splitlines() if ln.startswith("- build:"))
+            # "- build: " prefix + the (<=120-char) command.
+            self.assertLessEqual(len(line) - len("- build: "), 120)
+            self.assertTrue(line.endswith("…"))
+
+    def test_short_command_is_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"scripts": {"test": "jest --watch"}}')
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            out = ScriptsCollector().collect(ctx)
+            self.assertIn("- test: jest --watch", out)
 
 
 if __name__ == "__main__":

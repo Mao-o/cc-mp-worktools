@@ -14,8 +14,11 @@ _INLINE_VERSION_RE = re.compile(r"""\bversion\s*=\s*["']([^"']*)["']""")
 # A bare ``key = value`` assignment line inside a TOML table.
 _ASSIGN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")
 
-# mise config locations, in resolution order.
-_MISE_CONFIG_NAMES = (".mise.toml", "mise.toml", ".config/mise/config.toml")
+# mise config locations, in resolution order. Public: cli.py's marker gate
+# (core/constants.py's PROJECT_MARKERS) imports this to route these same
+# three names through mise_config_path() below instead of a plain exists()
+# check, so its $HOME/XDG-global exception applies to the gate too.
+MISE_CONFIG_NAMES = (".mise.toml", "mise.toml", ".config/mise/config.toml")
 
 
 def first_version(value: str) -> str:
@@ -36,12 +39,41 @@ def first_version(value: str) -> str:
     return value.split("#", 1)[0].strip().strip("[]{},")
 
 
+def is_home_dir(root: Path) -> bool:
+    """Public alias of :func:`_is_home_dir` for the marker gate.
+
+    ランタイム固定ファイル (`.tool-versions` / `.python-version`) は
+    `$HOME` 直下に置かれるとユーザー全体の既定を意味し、そのディレクトリが
+    プロジェクトであることを示さない。mise config と同じ例外をここで共有し、
+    gate 側に「root が $HOME か」の判定を書き直さない。
+    """
+    return _is_home_dir(root)
+
+
+def _is_home_dir(root: Path) -> bool:
+    try:
+        return root.resolve() == Path.home().resolve()
+    except Exception:
+        return False
+
+
 def mise_config_path(root: Path) -> Optional[Path]:
     """Return the first existing mise config file under ``root``, or None.
 
     Checks ``.mise.toml`` / ``mise.toml`` (dotless) / ``.config/mise/config.toml``.
+
+    The XDG global config (``.config/mise/config.toml``) is skipped when
+    ``root`` is the user's home directory: it reflects mise's global tool
+    pins (e.g. a system-wide awscli/terraform version), not anything about
+    the "project" being analyzed, so surfacing it there is noise rather than
+    a fact about root. ``.mise.toml``/``mise.toml`` are still honoured even
+    at $HOME -- those are project-style configs a user placed there
+    deliberately, unlike the XDG path.
     """
-    for name in _MISE_CONFIG_NAMES:
+    skip_xdg = _is_home_dir(root)
+    for name in MISE_CONFIG_NAMES:
+        if skip_xdg and name == ".config/mise/config.toml":
+            continue
         path = root / name
         if path.exists():
             return path
