@@ -3,19 +3,23 @@
 ## 0.8.0
 
 **Likely Commands の根拠強化 / 出力サイズ上限 / 非プロジェクトディレクトリ抑止 /
-test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き。不具合修正 4 件と
-ドキュメント修正 1 件。
+test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き、および同バックログの
+隔離内レビュー (R3) で見つかった P2/P3 指摘 8 件の追加修正。不具合修正 4 件と
+ドキュメント修正 2 件 (レビュー起因分を各項目に統合)。
 
 ### 不具合修正
 
-1. **test_dir 集約が全ワイルドカードに退化する問題を修正** (`core/util.py`) —
+1. **test_dir 集約が全ワイルドカードに退化する問題、および退化後の再分割
+   自体が出力行数無制限だった問題を修正** (`core/util.py`) —
    `aggregate_paths()` は同じセグメント数のパス群を位置ごとに比較し、異なる
    位置を `*` に置き換えて集約するが、全位置が異なると `*/*` のような
    情報量ゼロのパターンになっていた (実測:
    `['api/tests','web/__tests__','sdks/spec']` → `['*/*']`)。集約結果に
    literal セグメントが一つも残らない場合は先頭ディレクトリで再分割して
-   から集約し直し、なお集約できない残りは元パスのまま列挙する (上限 4 件 +
-   `... (+N more)`)
+   から集約し直すが、この再分割で得られる「集約できたパターン行」自体に
+   上限が無く、同型パッケージの多いモノレポ (例: 25 パッケージ ×
+   (tests/, e2e/)) で 25 行がそのまま出ていた。パターン行 + 集約できない
+   残りの元パス列挙を合算した件数を上限 4 件 + `... (+N more)` に揃えた
 2. **Likely Commands が根拠の無いコマンドを出す問題を修正**
    (`collectors/scripts.py`) — `docker compose up` は Dockerfile 単体でも
    出ていた (compose ファイル存在時のみに変更、単体は `docker build .`)。
@@ -25,24 +29,42 @@ test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き。不具
    が実在する時のみに変更)。pytest が pyproject.toml の依存として検出され
    ない場合は、root 直下の `tests/` に `test_*.py` がある時に限り
    `python3 -m unittest discover tests` を代替提案する
-3. **出力全体に文字数上限が無く harness の注入上限超過の恐れがあった問題を
-   修正** (`cli.py`, `core/context.py`, `collectors/scripts.py`) —
+3. **出力全体の文字数上限が無かった問題、cwd スコープ時に削減余地が最大の
+   `## Subtree` が段階的削減の対象外だった問題、削減ステップが実際の上限
+   より 17 文字 (マーカー分) 厳しい目標を使っていたため軽微な超過でも
+   セクションを余分に落としていた問題を修正**
+   (`cli.py`, `core/context.py`, `core/util.py`, `collectors/scripts.py`) —
    `AnalysisConfig` に `max_output_chars` (既定 8,000。CLI:
-   `--max-output-chars`) を追加し、超過時は `## Structure` の末尾行 →
-   `## Scripts` → `## Env Keys` → `## Repo-Specific Notes` の順で段階的に
-   削る (`## Test Snapshot` / `## Service Entry Points` /
-   `## Likely Commands` は対象外)。個々の script command も 120 文字で
-   切り詰める
+   `--max-output-chars`) を追加し、超過時は `## Subtree` / `## Structure`
+   の末尾行 (cwd スコープ時は構造セクションが depth=1 に自己縮小し本体が
+   Subtree に移るため両方を対象) → `## Scripts` → `## Env Keys` →
+   `## Repo-Specific Notes` の順で段階的に削る (`## Test Snapshot` /
+   `## Service Entry Points` / `## Likely Commands` は対象外)。各ステップ
+   は上限そのものを目標にし、削除が実際に発生したかどうかで
+   `... (truncated)` マーカーの付与を決める (以前は上限より 17 文字厳しい
+   窓で判定していたため、削除が起きたのにマーカーが付かない/不要な追加
+   セクションまで落ちる、の両方が起き得た)。個々の script command も
+   120 文字で切り詰める。`truncate_text()` は上限 1 未満で空文字を返す
+   よう修正 (以前は上限 0 でも省略記号 1 文字を返し、「上限を超えない」
+   という自身の契約の反例になっていた)
 4. **非プロジェクトディレクトリ (ホーム等) で起動すると走査由来の無意味な
-   facts を大量注入していた問題を修正** (`cli.py`, `core/constants.py`,
-   `core/fs.py`, `core/runtime.py`) — 非 git かつ root 直下に project
-   marker (`package.json`/`pyproject.toml`/`Makefile` 等) が一つも無い
-   場合は最小ヘッダー 2 行 (`git_repo: false` /
-   `no project markers found; facts skipped`) のみを出力する
-   (`--force-walk` で従来の無条件走査に戻せる)。あわせて
-   `.config/mise/config.toml` (XDG グローバル設定) は root が $HOME の
-   ときのみ除外するようにした (グローバルな tool pin が repo のものと
-   誤認されるのを防ぐ)
+   facts を大量注入していた問題、および project marker 一覧が自 plugin の
+   detector 群を網羅しておらず Dockerfile 単体・uv.lock 単体などの正当な
+   プロジェクトも同じ最小ヘッダーに落ちていた問題を修正**
+   (`cli.py`, `core/constants.py`, `core/fs.py`) — 非 git かつ root 直下に
+   project marker が一つも無い場合は最小ヘッダーのみを出力する仕組みは
+   維持しつつ、`PROJECT_MARKERS` を detectors/・collectors/ の実装から
+   機械的に洗い出し直して 25 件超を追加 (Dockerfile/uv.lock/nx.json/
+   tsconfig.json/vite.config.ts/prisma/ など自 plugin の detector が
+   認識するファイル・ディレクトリに加え、CMakeLists.txt/Package.swift
+   など detector 非対応だが一般的な project root も false negative
+   回避のため追加)。固定ファイル名を持たない `*.csproj`/`*.tf` のため
+   `has_project_markers()` に glob 対応を追加。最小ヘッダー自体にも解析
+   対象ディレクトリ (`repo_root`) と `--force-walk` へのヒント行を追加し、
+   従来の無条件走査に戻す経路をヘッダー単体からも辿れるようにした。
+   あわせて `.config/mise/config.toml` (XDG グローバル設定) は root が
+   $HOME のときのみ除外するようにした (グローバルな tool pin が repo の
+   ものと誤認されるのを防ぐ)
 
 ### ドキュメント
 
@@ -52,6 +74,13 @@ test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き。不具
    両ハーネスを併記し、どちらも未定義な場合のフォールバック順序
    (環境変数 → 自動注入された `- more:` 行の絶対パス → SKILL.md 自身の
    場所を起点にした相対パス) を明確化した
+6. **SKILL.md の主要オプション表に `--max-output-chars` / `--force-walk`
+   が抜けていた問題を修正** (`skills/session-facts/SKILL.md`) — README には
+   既に記載済みだった 2 フラグを追記し、「使い方」節にも既定 8,000 文字の
+   自動上限が既にかかっている旨を追記した。あわせて
+   `hooks/session-facts/CLAUDE.md` の実行フロー説明を、marker gate に
+   よる早期 return と `_enforce_output_budget()` の適用を反映した内容に
+   更新した
 
 ## 0.7.0
 
