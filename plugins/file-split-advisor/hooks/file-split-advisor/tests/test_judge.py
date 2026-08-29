@@ -59,7 +59,7 @@ class TestEffectiveThresholds(unittest.TestCase):
 
 
 class TestAppliedMultipliers(unittest.TestCase):
-    """yaf.13: message.py が「なぜこの閾値か」を説明するための内訳。"""
+    """message.py が「なぜこの閾値か」を説明するための内訳。"""
 
     def test_language_and_role_recorded_even_when_neutral(self):
         m = _metrics(line_count=0, control_flow_density=0.1)  # not declarative
@@ -87,7 +87,7 @@ class TestAppliedMultipliers(unittest.TestCase):
 
 
 class TestScale(unittest.TestCase):
-    """yaf.10: FILE_SPLIT_ADVISOR_SCALE (全閾値への一律倍率)。"""
+    """FILE_SPLIT_ADVISOR_SCALE (全閾値への一律倍率)。"""
 
     def test_default_scale_is_neutral(self):
         v = judge.judge(_metrics(line_count=0), "python", "normal")

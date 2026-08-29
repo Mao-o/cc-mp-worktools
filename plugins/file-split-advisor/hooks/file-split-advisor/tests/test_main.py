@@ -229,7 +229,7 @@ class TestDisableEnvVar(BaseMainTest):
 
 
 class TestIgnoreGlobEnvVar(BaseMainTest):
-    """yaf.10: FILE_SPLIT_ADVISOR_IGNORE / ignore.local.txt による除外設定。"""
+    """FILE_SPLIT_ADVISOR_IGNORE / ignore.local.txt による除外設定。"""
 
     def test_ignored_glob_suppresses_output(self):
         path = self._write("test_helpers.py", _python_lines(900))
@@ -264,7 +264,7 @@ class TestIgnoreGlobEnvVar(BaseMainTest):
 
 
 class TestScaleEnvVar(BaseMainTest):
-    """yaf.10: FILE_SPLIT_ADVISOR_SCALE による全閾値の倍率調整。"""
+    """FILE_SPLIT_ADVISOR_SCALE による全閾値の倍率調整。"""
 
     def test_scale_up_suppresses_output_below_scaled_threshold(self):
         # checkout_flow.py @ 550 行は既定 (scale=1.0) では warn (500 以上) だが、
@@ -297,7 +297,7 @@ class TestScaleEnvVar(BaseMainTest):
 
 
 class TestTempDirSkip(BaseMainTest):
-    """yaf.11: 一時領域配下のファイルは (cwd が一時領域外なら) 常時 skip する。"""
+    """一時領域配下のファイルは (cwd が一時領域外なら) 常時 skip する。"""
 
     def test_temp_scratch_file_is_silent_when_cwd_is_a_real_project(self):
         # self.tmp は tempfile.mkdtemp() の実体で OS の一時領域配下にあるため、
@@ -318,7 +318,7 @@ class TestTempDirSkip(BaseMainTest):
 
 
 class TestCwdOnlyOptIn(BaseMainTest):
-    """yaf.11: FILE_SPLIT_ADVISOR_CWD_ONLY=1 の opt-in cwd 外 skip。
+    """FILE_SPLIT_ADVISOR_CWD_ONLY=1 の opt-in cwd 外 skip。
 
     常時 on の temp-dir skip と条件が重ならないよう (self.tmp 自体が OS の
     一時領域配下にあるため)、_temp_dir_roots を空にして温存領域スキップを

@@ -67,7 +67,7 @@ class TestFormatMultiplier(unittest.TestCase):
 
 
 class TestSignalCountZeroFallback(unittest.TestCase):
-    """yaf.13: 宣言的コードの推測は実際に緩和が適用されたときだけ表示する。"""
+    """宣言的コードの推測は実際に緩和が適用されたときだけ表示する。"""
 
     def test_declarative_relaxation_applied_shows_declarative_guess(self):
         v = _verdict(
@@ -136,7 +136,7 @@ class TestMultiplierBreakdown(unittest.TestCase):
 
 
 class TestDisplayTiers(unittest.TestCase):
-    """yaf.13: 目安は判定 tier + 隣接 tier を表示する (以前は review/warn 固定)。"""
+    """目安は判定 tier + 隣接 tier を表示する (以前は review/warn 固定)。"""
 
     def test_note_tier_shows_note_and_review(self):
         v = _verdict(tier="note")
