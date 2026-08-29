@@ -26,9 +26,18 @@ test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き、およ
    `mise install` は `.tool-versions` (asdf 形式) 単体でも出ていた (mise
    config 存在時のみに変更、単体は `asdf install`)。pytest 系コマンドは
    test_files の有無に関わらず無条件に出ていた (test_snapshot.test_files
-   が実在する時のみに変更)。pytest が pyproject.toml の依存として検出され
-   ない場合は、root 直下の `tests/` に `test_*.py` がある時に限り
-   `python3 -m unittest discover tests` を代替提案する
+   が実在する時のみに変更)。pytest が検出されない場合は、root 直下の
+   `tests/` に `test_*.py` がある時に限り `python3 -m unittest discover
+   tests` を代替提案する (検出は `pyproject.toml` の依存判定に加え
+   `requirements*.txt` / `Pipfile` / `setup.cfg` 経由の宣言も見る:
+   `collectors/dependencies.py::is_python_dependency_declared()`)。
+   **隔離内レビュー追加指摘**: 当初は `pyproject.toml` 経由の検出
+   (`detectors/python_stack.py` が `ctx.stack` に `"pytest"` を追加するのは
+   pyproject.toml のテキスト部分一致でのみ) だけに頼っていたため、
+   requirements*.txt/Pipfile/setup.cfg でのみ pytest を宣言するプロジェクト
+   は、ルート直下に pytest 形式の関数テストがあっても `unittest discover
+   tests` に誤ってフォールバックし、0 件収集されるおそれがあった。
+   依存収集側が既に持つ解析結果を再利用して修正した
 3. **出力全体の文字数上限が無かった問題、cwd スコープ時に削減余地が最大の
    `## Subtree` が段階的削減の対象外だった問題、削減ステップが実際の上限
    より 17 文字 (マーカー分) 厳しい目標を使っていたため軽微な超過でも

@@ -401,6 +401,59 @@ def _collect_major_dependencies(ctx: RepoContext, max_items: int) -> List[str]:
     return [_format_dep(name, version) for name, version, _tier in items[:max_items]]
 
 
+def is_python_dependency_declared(ctx: RepoContext, name: str) -> bool:
+    """True when ``name`` (case-insensitive) is declared as a Python
+    dependency in any source _collect_major_dependencies() itself parses --
+    pyproject.toml (PEP 621 + poetry), Pipfile, requirements*.txt, or
+    setup.cfg -- independent of the IMPORTANT_DEPENDENCIES allow-list or the
+    max_major_deps truncation applied to the rendered ``major_dependencies``
+    header line (a dev-tier dep can be crowded out of that capped list even
+    when it is genuinely declared, so that line cannot answer this question
+    on its own).
+
+    Used by collectors/scripts.py to tell whether pytest is available
+    before falling back to a plain unittest-discovery command:
+    detectors/python_stack.py's ``"pytest" in ctx.stack`` only ever fires
+    when pyproject.toml exists and mentions pytest, so a project declaring
+    it solely via requirements*.txt / Pipfile / setup.cfg was invisible to
+    that check even though this module's own parsers already read those
+    files.
+    """
+    target = name.lower()
+    root = ctx.root
+
+    pyproject = ctx.pyproject_toml
+    if pyproject:
+        pep621 = parse_pep621_deps(pyproject) + parse_pep621_optional_deps(pyproject)
+        if any(dep_name.lower() == target for dep_name, _v in pep621):
+            return True
+        poetry_runtime, poetry_dev = parse_poetry_deps(pyproject)
+        if any(dep_name.lower() == target for dep_name, _v in poetry_runtime + poetry_dev):
+            return True
+
+    for rel in _tracked_with_basename(ctx, "Pipfile")[:_MAX_DEP_FILES]:
+        grouped = parse_pipfile_grouped(read_text(root / rel))
+        names = grouped["packages"] + grouped["dev-packages"]
+        if any(dep_name.lower() == target for dep_name, _v in names):
+            return True
+
+    for rel in _tracked_requirements(ctx)[:_MAX_DEP_FILES]:
+        if any(
+            dep_name.lower() == target
+            for dep_name, _v in parse_requirements(read_text(root / rel))
+        ):
+            return True
+
+    for rel in _tracked_with_basename(ctx, "setup.cfg")[:_MAX_DEP_FILES]:
+        if any(
+            dep_name.lower() == target
+            for dep_name, _v in parse_setup_cfg_requires(read_text(root / rel))
+        ):
+            return True
+
+    return False
+
+
 class DependenciesCollector:
     name = "dependencies"
     section_title = ""

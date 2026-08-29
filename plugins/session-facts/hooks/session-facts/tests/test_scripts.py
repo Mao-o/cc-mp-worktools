@@ -15,7 +15,7 @@ from pathlib import Path
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from collectors.scripts import ScriptsCollector, _likely_commands
+from collectors.scripts import ScriptsCollector, _likely_commands, _test_tool_name
 from core.context import AnalysisConfig, RepoContext
 
 
@@ -178,6 +178,65 @@ class UnittestFallbackTest(unittest.TestCase):
         ctx = _ctx(pm="python", stack=[], tracked_files=["tests/sub/test_nested.py"])
         cmds = _likely_commands(ctx, max_items=16)
         self.assertIn("python3 -m unittest discover tests", cmds)
+
+
+class PytestDeclaredOutsidePyprojectTest(unittest.TestCase):
+    """Isolated-review P2-c (PR #67): _test_tool_name() only ever recognised
+    pytest via `"pytest" in ctx.stack`, and detectors/python_stack.py only
+    adds that stack entry when pyproject.toml exists and mentions pytest.
+    A project declaring pytest solely via requirements*.txt / Pipfile /
+    setup.cfg was invisible to that check, so a root tests/ dir made this
+    fall back to `unittest discover tests` even though the tests are
+    pytest-style bare functions that plain unittest discovery collects as
+    zero tests. These use real files on disk (unlike test_scripts.py's
+    fake-root `_ctx()` helper) because the fix reads them via
+    collectors.dependencies.is_python_dependency_declared()."""
+
+    def test_pytest_in_requirements_dev_txt_wins_over_unittest_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements-dev.txt").write_text("pytest==7.4.0\n")
+            (root / "tests").mkdir()
+            (root / "tests" / "test_a.py").write_text("def test_a():\n    assert True\n")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = ["requirements-dev.txt", "tests/test_a.py"]
+            ctx.stack = []  # no pyproject.toml -> python_stack.py never adds "pytest"
+            ctx.results["test_snapshot"] = {"test_files": 1}
+            self.assertEqual(_test_tool_name(ctx), "pytest")
+
+    def test_no_pytest_declared_anywhere_still_falls_back_to_unittest(self):
+        # Sanity check the fix doesn't make the fallback fire unconditionally.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "tests" / "test_a.py").write_text("def test_a():\n    assert True\n")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = ["tests/test_a.py"]
+            ctx.stack = []
+            ctx.results["test_snapshot"] = {"test_files": 1}
+            self.assertEqual(_test_tool_name(ctx), "unittest discover tests")
+
+    def test_pyproject_present_but_silent_on_pytest_still_finds_it_in_requirements(self):
+        # The realistic shape: a project mid-migration that already has a
+        # pyproject.toml (so pm.py resolves pm="python" and python_stack.py
+        # runs its pyproject-substring check) but keeps pytest declared in
+        # requirements-dev.txt rather than pyproject.toml itself. End-to-end
+        # through _likely_commands()'s pm="python" branch, which the other
+        # two tests in this class do not exercise.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text('[project]\ndependencies = ["flask==3.0"]\n')
+            (root / "requirements-dev.txt").write_text("pytest==7.4.0\n")
+            (root / "tests").mkdir()
+            (root / "tests" / "test_a.py").write_text("def test_a():\n    assert True\n")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = ["pyproject.toml", "requirements-dev.txt", "tests/test_a.py"]
+            ctx.results["package_manager"] = "python"
+            ctx.stack = []  # pyproject.toml text has no "pytest" substring
+            ctx.results["test_snapshot"] = {"test_files": 1}
+            cmds = _likely_commands(ctx, max_items=16)
+            self.assertIn("python -m pytest", cmds)
+            self.assertNotIn("python3 -m unittest discover tests", cmds)
 
 
 class DockerCommandGroundingTest(unittest.TestCase):

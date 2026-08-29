@@ -11,6 +11,7 @@ import _testutil  # noqa: F401  (sys.path 整備)
 from collectors.dependencies import (
     _collect_major_dependencies,
     _is_dev_requirements,
+    is_python_dependency_declared,
     parse_pep621_deps,
     parse_pep621_optional_deps,
     parse_pipfile,
@@ -223,6 +224,79 @@ class CollectMajorDependenciesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = self._ctx(tmp, {"src/index.ts": "export {}\n"})
             self.assertEqual(_collect_major_dependencies(ctx, max_items=8), [])
+
+
+class IsPythonDependencyDeclaredTest(unittest.TestCase):
+    """Isolated-review P2-c (PR #67): collectors/scripts.py's pytest
+    fallback only checked `"pytest" in ctx.stack`, which
+    detectors/python_stack.py only ever sets when pyproject.toml exists and
+    mentions pytest -- a project declaring pytest solely via
+    requirements*.txt / Pipfile / setup.cfg was invisible to that check even
+    though this module's own parsers already read those files.
+    is_python_dependency_declared() answers the same question from those
+    existing parsers directly, independent of the IMPORTANT_DEPENDENCIES
+    allow-list / max_major_deps truncation applied to the rendered header
+    line (a dev-tier dep like pytest can be crowded out of that capped list
+    even when it is genuinely declared)."""
+
+    def _ctx(self, tmp, files):
+        root = Path(tmp)
+        for rel, content in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        ctx = RepoContext(root=root, config=AnalysisConfig())
+        ctx.tracked_files = list(files.keys())
+        return ctx
+
+    def test_declared_in_requirements_dev_txt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {"requirements-dev.txt": "pytest==7.4.0\n"})
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_declared_in_pipfile_dev_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {"Pipfile": '[dev-packages]\npytest = "*"\n'})
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_declared_in_setup_cfg_install_requires(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "setup.cfg": "[options]\ninstall_requires =\n    pytest\n",
+            })
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_declared_in_pyproject_pep621(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "pyproject.toml": '[project]\ndependencies = ["pytest==8.0.0"]\n',
+            })
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_declared_in_poetry_dev_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "pyproject.toml": (
+                    "[tool.poetry.group.dev.dependencies]\n"
+                    'pytest = "^8.0.0"\n'
+                ),
+            })
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_case_insensitive_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {"requirements.txt": "PyTest==7.4.0\n"})
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_not_declared_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {"requirements.txt": "flask==3.0\n"})
+            self.assertFalse(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_no_files_at_all_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {})
+            self.assertFalse(is_python_dependency_declared(ctx, "pytest"))
 
 
 class ParsePep621Test(unittest.TestCase):

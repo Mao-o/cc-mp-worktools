@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from collectors.dependencies import is_python_dependency_declared
 from core.constants import (
     COMPOSE_FILE_CANDIDATES,
     MAKE_TARGET_PRIORITY_PATTERNS,
@@ -110,16 +111,21 @@ def _has_root_unittest_tests(ctx: RepoContext) -> bool:
 
 def _test_tool_name(ctx: RepoContext) -> Optional[str]:
     """'pytest' when python_stack.py detected it as a pyproject.toml
-    dependency; the literal ``unittest discover tests`` invocation when it
-    wasn't but a root-level ``tests/`` directory grounds it (see
-    :func:`_has_root_unittest_tests`); ``None`` when there is no test_files
-    signal at all, or when neither condition holds -- callers must suggest
-    nothing rather than guess a command that would fail.
+    dependency, OR when collectors/dependencies.py's own parsers find it
+    declared in requirements*.txt / Pipfile / setup.cfg (python_stack.py's
+    stack entry only ever comes from a pyproject.toml substring match, so a
+    project declaring pytest solely via one of those other files would
+    otherwise be invisible here); the literal ``unittest discover tests``
+    invocation when neither holds but a root-level ``tests/`` directory
+    grounds it (see :func:`_has_root_unittest_tests`); ``None`` when there
+    is no test_files signal at all, or when nothing grounds either command
+    -- callers must suggest nothing rather than guess a command that would
+    fail.
     """
     test_snapshot = ctx.results.get("test_snapshot") or {}
     if not test_snapshot.get("test_files"):
         return None
-    if "pytest" in ctx.stack:
+    if "pytest" in ctx.stack or is_python_dependency_declared(ctx, "pytest"):
         return "pytest"
     if _has_root_unittest_tests(ctx):
         return "unittest discover tests"
