@@ -1497,6 +1497,25 @@ class TestSet(BaseBuilder):
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
         self.assertEqual(data, {"github": "new-user"})
 
+    def test_overwrites_null_entry(self):
+        """`{"github": null}` のような壊れた entry も set で上書き (修復)
+        できることを固定する (Codex R2 P2)。remove は `existing.get()` が
+        null と欠落キーを区別できず削除できないバグだったが、set は
+        commit 時に `updated[service_key] = new_entry` を既存値の有無に
+        関係なく書くため、この形はもともと修復できていた — action の表示は
+        `existing_value is None` (= 欠落と同じ判定) により『+ add』になる。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": None, "aws": "111"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "new-user", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("+ add", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "new-user", "aws": "111"})
+
     def test_dry_run_does_not_write(self):
         self.new_dir.mkdir(parents=True)
         self._new_path().write_text(
@@ -1791,6 +1810,25 @@ class TestRemove(BaseBuilder):
         self.assertEqual(data, {"aws": "111"})
         self.assertNotIn("github", data)
 
+    def test_removes_key_with_null_value(self):
+        """`{"github": null}` のような壊れた entry (dispatcher がキー欠落と
+        同じ扱いで絶対 deny する形) も、キーごと削除できる (Codex R2 P2)。
+        修正前は `existing.get(service_key) is None` で判定しており、null
+        値と『キーが存在しない』を区別できず、この test_noop_when_key_absent
+        と同じ『何もしません』分岐に落ちて何も削除されなかった。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": None, "aws": "111"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["remove", "--service", "github", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("- remove", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"aws": "111"})
+        self.assertNotIn("github", data)
+
     def test_noop_when_key_absent(self):
         self.new_dir.mkdir(parents=True)
         self._new_path().write_text(json.dumps({"aws": "111"}), encoding="utf-8")
@@ -1903,6 +1941,22 @@ class TestRemove(BaseBuilder):
         self.assertIn("オブジェクトではありません", err)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
         self.assertEqual(data, {"github": "Mao-o"})  # 変更されない
+
+    def test_host_rejected_when_existing_is_null(self):
+        """null (壊れた entry) は dict ではないので、--host 指定時は scalar と
+        同じ『オブジェクトではありません』エラーに倒す (Codex R2 P2)。この形を
+        削除するには --host を外す (test_removes_key_with_null_value)。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": None}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["remove", "--service", "github", "--host", "github.com", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("オブジェクトではありません", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": None})  # 変更されない
 
     def test_host_rejected_for_scalar_only_service(self):
         self.new_dir.mkdir(parents=True)

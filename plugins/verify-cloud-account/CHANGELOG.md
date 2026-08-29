@@ -27,6 +27,15 @@
    の自動同梱は init/migrate と同じ経路を流用する。
    `accounts-init` SKILL の skipped 分岐 (旧: 「手動でファイルを編集するか
    将来の switch サブコマンドを使う」) は `set`/`remove` の案内に差し替えた。
+   さらに **`remove` は値が `null` (壊れた entry) のキーも削除できるように
+   した** (独立レビュー指摘で修正)。当初は `existing.get(service_key) is
+   None` で『キーが存在しない』と『値が `null`』を区別しておらず、
+   `{"github": null}` のように dispatcher がまさに deny する形を見つけても
+   remove が「何もしません」と早期終了し、修復する手段が無かった。キーの
+   有無を `in` 演算子で判定するように直し、`--host` 指定時は従来どおり
+   (既存値がオブジェクトでない) エラーに倒す。`set` は元々 commit 時に
+   既存値の有無に関わらず値を上書きするため、この形は当初から修復できて
+   いた (回帰テストで固定)。
 2. **`--value` の JSON dict を構造化データとして解釈** — 従来は `--value` を
    常に生文字列として保存していたため、`--value
    '{"project":"p","account":"a"}'` が JSON 文字列そのものとして保存され、

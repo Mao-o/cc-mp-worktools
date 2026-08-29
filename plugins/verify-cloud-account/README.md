@@ -128,6 +128,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
   remove --service github --host ghe.example.com --commit
 ```
 
+`{"github": null}` のように値が壊れている (dispatcher が設定なしと同じ扱いで
+必ず deny する) entry も、`--host` を付けずに `remove --service <svc> --commit`
+すればキーごと削除できる。
+
 `--host` は既存値がオブジェクト (または未設定) のときだけ使える。既存値が
 文字列の service に `--host` を付けるとエラーになる (先に `remove` で削除
 するか `--host` を外して上書きする)。`--host` と `--from-cli` は併用できない

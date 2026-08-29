@@ -682,10 +682,16 @@ def _cmd_remove(
         print(f"error: {e}", file=stderr)
         return 1
 
-    existing_value = existing.get(service_key)
-    if existing_value is None:
+    # キー自体が無い場合と `{"github": null}` のように値が None (壊れた
+    # entry) の場合を区別する (Codex R2 P2)。`.get(service_key) is None` だと
+    # 両者を同一視してしまい、dispatcher がまさに deny するこの null entry
+    # (dispatcher は None も未設定と同じ扱いで deny する) を remove で
+    # 削除できなくなる — 直す唯一の手段である remove がここで早期 return
+    # すると、設定を直せないまま `deny` が固定化される。
+    if service_key not in existing:
         print(f"{service_key} は {target} に存在しません。何もしません。", file=stdout)
         return 0
+    existing_value = existing[service_key]
 
     if args.host is not None:
         if not isinstance(existing_value, dict):
