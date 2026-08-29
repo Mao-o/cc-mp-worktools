@@ -180,9 +180,13 @@ note: key material is never parsed or returned. only block labels and counts are
   `*/.env`。裸の `*` は dotfile に展開されないので対象外)。bypass / auto を
   含めて全 mode で block。grep 系 / jq / awk / sed の第 1 positional (pattern /
   script) と値が path ではない option の値 (`git log -S.env` /
-  `--exclude='.env'`) は operand として数えない (0.22.0)
+  `--exclude='.env'`) は operand として数えない (0.22.0)。単純変数展開
+  (`$NAME` / `${NAME}`) を含む operand も、変数の展開結果に依らず basename が
+  確定する形 (`cat $PWD/.env` — 何に展開されても basename は `.env`) は
+  deny に届く (0.25.0)
 - **ask_or_allow**: 静的解析不能ケース (`<` 入力リダイレクト、heredoc / process
-  sub / 動的展開 / shell wrapper / 任意 path 実行 等)。`default` /
+  sub / コマンド置換 / shell wrapper / 任意 path 実行、および展開結果が判定を
+  左右する変数 operand (`cat $X` / `cat $X.env`) 等)。`default` /
   `acceptEdits` / `dontAsk` では `ask` (ユーザー介在)、`auto` /
   `bypassPermissions` では `allow` (autonomous 実行で日常コマンドが止まるのを
   避ける)
@@ -251,7 +255,10 @@ note: key material is never parsed or returned. only block labels and counts are
 > `cp` / `mv` (複製で漏洩面が広がる)、`git show` / `git diff` / `git add` は
 > 従来通り deny 固定。`echo KEY=val > .env` のような書込み形は residual metachar
 > の ask 経路が先に効くため緩まない。metadata-only ∩ safe_read コマンドの
-> `ls > .env` 系 redirect 書込みも deny (破壊的書込み)。
+> `ls > .env` 系 redirect 書込みも deny (破壊的書込み。`>|` clobber 上書きを
+> 含む — 0.25.0 で splitter が `>|` を 1 演算子として読むようになり、`|` の
+> 分割で target が別 segment に割れて全 mode allow に素通りしていた
+> 取りこぼしを解消)。
 
 > **0.19.0 で次善策コマンドを metadata-only に追加**: 両 hook
 > の reason が「tracked なら `git rm --cached <path>` で untrack」「`chmod 600 .env`」
@@ -415,7 +422,10 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
    autonomous / plan モードでは allow (日常コマンドを止めない方針)。
    `echo KEY=val > .env` / `cat > .env <<EOF` のような redirect / heredoc
    書込みも同様に通る (本 plugin はセキュリティ担保ではなく、うっかり露出
-   予防が主目的。設計判断として受容済み)
+   予防が主目的。設計判断として受容済み)。0.25.0 から、単純変数展開だけが
+   理由で解析を放棄していた形 (`cat $PWD/.env` — 展開結果に依らず basename
+   `.env` が確定) は deny に届く。展開結果が判定を左右する形 (`cat $X`) は
+   従来どおり allow に倒る
 3. **TOCTOU 完全排除は非目的** — fd ベース reader により「同一プロセス内の
    再 open」race は排除済みだが、hook 読取と Claude 実 Read/Write の分離は範囲外
 4. **Windows は現状 fail-closed で deny exit** — SIGALRM 非対応のため
@@ -446,10 +456,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (934 tests, 0.23.0 時点)
+# redact-sensitive-reads (1,111 tests, 0.25.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (80 tests, 0.23.0 時点)
+# check-sensitive-files (94 tests, 0.25.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 

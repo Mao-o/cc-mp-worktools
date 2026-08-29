@@ -1945,8 +1945,8 @@ class TestQuoteAwareHardStop(BaseBash):
 
 class TestSafeReadAllowlist(BaseBash):
     """0.12.0: ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの read-only allow-list) に
-    該当する first_token は ``_segment_has_residual_metachar`` の ask 経路を
-    スキップして operand scan に直行する。
+    該当する first_token は residual metachar の ask 経路をスキップして
+    operand scan に直行する。
 
     `grep foo > /tmp/out` `ls > listing.txt` のような調査用ワンライナーを
     ask に倒さないため (ログ実測で ask 発火の 約 80% が residual_metachar 起因)。
@@ -2404,14 +2404,19 @@ class TestMetadataRedirectTarget(BaseBash):
                 msg=f"{cmd!r} should deny but got {_decision(r)!r}",
             )
 
-    def test_clobber_override_redirect_out_of_scope(self):
-        # `>|` (clobber override) は `|` が segment 分割で pipe として割られ
-        # `tree >` と `.env` に分離するため検出できない。`>|` を意図的に書くのは
-        # noclobber を知る上級者で「うっかり」ではない (思想 1 の射程外) ため、
-        # 既知限界として allow を許容する。realistic な `>` / `>>` / `&>` /
-        # `n>` は上の各テストでカバー済み。
-        r = handle(_make_envelope("tree >| .env", self.tmp))
-        self.assertTrue(output.is_allow(r))
+    def test_clobber_override_redirect_to_dotenv_deny(self):
+        # `>|` (clobber override) は noclobber を無視して .env を truncate する
+        # 破壊的書込みで、通常の `>` より意図的に強い形。0.24.0 までは `|` が
+        # segment 分割で pipe として割られ `tree >` と `.env` に分離し、全 mode
+        # allow で素通りしていた (0.25.0 で splitter が `>|` を 1 演算子として
+        # 読むようになり、`>` と同じ deny に到達する)。
+        modes = ("default", "auto", "bypassPermissions", "acceptEdits", "dontAsk", "plan")
+        for mode in modes:
+            r = handle(_make_envelope("tree >| .env", self.tmp, mode=mode))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"tree >| .env with mode={mode} should deny but got {_decision(r)!r}",
+            )
 
     def test_ls_redirect_to_nonsensitive_allow(self):
         # 書込み先が非機密なら従来通り allow (0.12.0 の調査ワンライナー意図を維持)
@@ -2429,6 +2434,125 @@ class TestMetadataRedirectTarget(BaseBash):
         # 従来通り operand scan で .env を捕まえて deny (regression なし確認)。
         r = handle(_make_envelope("grep foo README.md > .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
+
+
+class TestClobberRedirectSplit(BaseBash):
+    """0.25.0: splitter の ``>`` 演算子最長一致読み (``>>`` / ``>|``)。
+
+    0.24.0 までは ``_split_command_on_operators`` が ``>|`` の ``|`` を pipe と
+    して区切り、redirect target が「機密パスだけの segment」に割れて書込み
+    リダイレクト判定 (``_sensitive_redirect_target`` / operand scan / 救済 scan)
+    に届かず、機密パスへの clobber 上書きが **全 mode allow** で素通りしていた
+    (`>` / `>>` / `n>` / `&>` の通常形は deny なのに、noclobber を明示的に
+    無視するより強い形だけが緩いという非対称)。bash は演算子を最長一致で読む
+    (bash 3.2 / 5.3 実測: ``echo x >| f`` は f を truncate する 1 コマンド、
+    ``>>|`` は ``>>`` + ``|`` の syntax error) ので splitter を同じ字句に揃えた。
+    """
+
+    def test_splitter_keeps_clobber_target_in_segment(self):
+        # `>|` は 1 演算子。target を同一 segment に保つ (spaced / fused / fd 付き)。
+        for cmd in ("ls -la >| .env", "ls >|.env", "ls 2>| .env", "ls 12>|.env"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), [cmd])
+
+    def test_splitter_pipe_and_logical_or_still_split(self):
+        # 通常の pipe / `||` の分割は不変。`>||` は bash と同じく `>|` + `|`
+        # (`||` と誤認して 2 文字消費しない)。`>>|` は `>>` + `|` (pipe) で、
+        # 2 つ目の `>` から `>|` を合成しない。
+        cases = {
+            "cat .env | wc -l": ["cat .env", "wc -l"],
+            "ls || cat .env": ["ls", "cat .env"],
+            "ls >|| cat .env": ["ls >|", "cat .env"],
+            "ls >>| .env": ["ls >>", ".env"],
+            "ls >| .env | wc -l": ["ls >| .env", "wc -l"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+
+    def test_splitter_quoted_or_escaped_clobber_is_not_an_operator(self):
+        # クォート内の `>|` は data (区切らない・結合の対象でもない)。
+        # エスケープ済み `\>` の直後の `|` は bash 的に pipe (実測: `echo \>| cat`
+        # は `>` を cat に流す) なので従来どおり区切る。
+        self.assertEqual(
+            _split_command_on_operators("echo '>|' x"), ["echo '>|' x"],
+        )
+        self.assertEqual(
+            _split_command_on_operators("echo \\>| cat .env"),
+            ["echo \\>", "cat .env"],
+        )
+
+    def test_metadata_clobber_to_sensitive_deny_all_forms(self):
+        # metadata-only ∩ safe_read (ls / stat / wc) の機密 path clobber は
+        # `ls > .env` と同じ metadata_redirect_deny 経路で deny。
+        for cmd in (
+            "ls -la >| .env",
+            "stat x >| .env",
+            "wc -l f >| .env",
+            "ls >|.env",
+            "ls 2>| .env",
+            "ls 2>|.env",
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} mode={mode} should deny but got {_decision(r)!r}",
+                    )
+
+    def test_content_reader_clobber_to_sensitive_deny(self):
+        # cat / grep (safe_read・非 metadata) は operand scan の redirect target
+        # 候補として `.env` を拾って deny (`grep foo > .env` と同じ経路)。
+        for cmd in ("cat f >| .env", "grep foo README.md >| .env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_variable_prefixed_clobber_reaches_rescue_scan(self):
+        # hard-stop segment でも救済 scan (0.25.0) が同一 segment 内の clobber
+        # target を拾う (0.24.0 までは分割で target が別 segment に消えていた)。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("cat $X >| .env", self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"mode={mode} should deny but got {_decision(r)!r}",
+                )
+
+    def test_clobber_to_nonsensitive_matches_plain_redirect(self):
+        # 書込み先が非機密なら `>` と同じ扱い: metadata-only は allow、
+        # safe_read 外 (echo) は residual metachar の ask_or_allow。
+        r = handle(_make_envelope("ls >| /tmp/listing.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("ls >| /dev/null", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("echo x >| out.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("echo x >| out.txt", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_echo_clobber_to_sensitive_stays_residual_ask(self):
+        # safe_read 外の first_token は `echo KEY=val > .env` と同じ residual
+        # metachar 経路 (default=ask / auto=allow)。clobber で緩めも締めもしない。
+        r = handle(_make_envelope("echo KEY=val >| .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("echo KEY=val >| .env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_syntax_error_forms_do_not_lose_protection(self):
+        # `>||` / `>>|` は bash では syntax error で実行されない形。分割後の
+        # 後続 segment の機密 operand deny は維持される (allow 側へ緩まない)。
+        for cmd in ("ls >|| cat .env", "ls >>| f && cat .env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+                )
 
 
 class TestRecommendedRemedyAllow(BaseBash):
@@ -2830,6 +2954,880 @@ class TestOptionValueNotPath(BaseBash):
                         _decision(r), "deny",
                         msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
                     )
+
+
+class TestHardStopLiteralOperandScan(BaseBash):
+    """0.25.0 (2026-08 精査): hard-stop segment のリテラル operand 救済 scan。
+
+    ``cat $PWD/.env`` は ``$`` の hard-stop で operand scan がまるごと放棄され
+    auto mode で無言 allow だった (実 Bash コマンドの 26.3% が同経路)。単純変数
+    展開 (``$NAME`` / ``${NAME}``) を「不明な 1 文字列」placeholder に置換すると
+    残りは静的に解析できる — 変数がどう展開されても basename ``.env`` は確定する
+    (``X + "/.env"`` の basename は X に依らず ``.env``) ので、これは
+    「静的解析不能」ではなく確信 deny 条件 (機密 operand 確定 × 内容出力) を
+    満たす。deny だけを採用し、それ以外は従来どおり ask_or_allow (ハーネス委譲)。
+    """
+
+    DENY = (
+        "cat $PWD/.env",
+        "cat ${PWD}/.env",
+        'cat "$PWD/.env"',
+        "REPO=. ; cat $REPO/.env",       # 変数 segment は opaque、cat segment で deny
+        "cat $OPTS .env",                # 変数と同居する素の literal operand
+        "grep KEY $CFG/.env",            # grep spec (pattern 枠) も placeholder 越しに効く
+        "cat $D/.env*",                  # glob dotenv 判定も適用される
+        "head -n 5 $ROOT/config/.envrc",
+        "cat $HOME/keys/server.pem",     # 接尾辞 pattern (*.pem) は展開に依らず一致
+    )
+
+    # 従来どおり ask (default) / allow (auto) に留まる形。
+    KEEP_ASK = (
+        "cat $X",                        # 変数単体の展開先は判定不能 (従来方針)
+        "cat $X.env",                    # basename が変数に跨る (X.env ≠ .env)
+        "cat $(pwd)/.env",               # コマンド置換は救済対象外 (hard-stop 残存)
+        "cat ${X:-fallback}/.env",       # 複合展開は救済対象外
+        "$PAGER .env",                   # first token が変数 = 未知コマンド実行
+        "cat \\$PWD/.env",               # エスケープ済み ``\\$`` は literal (置換しない)
+        "echo \"$(cat $PWD/.env)\"",     # コマンド置換入りは残存 hard-stop で断念
+    )
+
+    def test_literal_tail_after_expansion_denies_in_all_modes(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_undecidable_expansions_keep_ask_or_allow(self):
+        for cmd in self.KEEP_ASK:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_harvest_never_loosens_default_ask_to_allow(self):
+        # 救済 scan は deny だけを採用する。置換後の解析が allow 相当
+        # (metadata-only / 非機密 operand) でも、default mode の従来 ask を
+        # allow に緩めてはいけない (境界変更は「見逃しの解消」方向のみ)。
+        for cmd in ("ls $D/.env", "echo $GREETING/.env", "stat $F/.env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should stay ask but got {_decision(r)!r}",
+                )
+
+    def test_exclusion_rules_apply_to_placeholder_operand(self):
+        # 除外 rule (!*.example) は placeholder 置換後の basename にも効く。
+        r = handle(_make_envelope("cat $X/.env.example", self.tmp))
+        self.assertEqual(_decision(r), "ask")  # 非機密 → deny せず従来の ask
+
+    def test_deny_reason_shows_display_placeholder_not_internal(self):
+        r = handle(_make_envelope("cat $PWD/.env", self.tmp))
+        reason = _reason(r)
+        self.assertNotIn("__sfg_unexpanded__", reason)
+        self.assertIn("${…}/.env", reason)
+        # path 形の除外案内 (``!<相対パス>``) は変数部分が確定しないので出さない
+        self.assertNotIn("!${…}", reason)
+
+    def test_compound_command_still_denies_on_literal_segment_first(self):
+        # 既存挙動の維持: literal segment の deny は救済 scan と無関係に先行。
+        r = handle(_make_envelope("cat $X | head .env | wc -l", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
+class TestVanishingExpansionWordReading(BaseBash):
+    """0.25.0 (Codex R1 P2): 空展開しうる非クォート変数は引数位置をずらす。
+
+    Bash の word splitting では、非クォートの変数展開が空文字列になると **語
+    ごと消える**。``grep $PAT .env`` は ``PAT`` が空なら ``grep .env`` になり、
+    ``.env`` は FILE ではなく **検索 pattern** として解釈されて入力は stdin から
+    来る (``Usage: grep [OPTION]... PATTERNS [FILE]...``) — つまりファイルは
+    読まれない。placeholder を「必ず 1 語ある」前提で置くと、この読みを潰して
+    誤 deny になっていた。
+
+    救済 scan は「展開が 1 語になる」読みと「展開が消える」読みの **両方が
+    deny** のときだけ deny を採用する。第 1 positional の意味は
+    ``command_specs._CmdSpec.pattern_slot``、option の値の消費は ``values`` が
+    既に知っているので、コマンドを列挙し直さずに両方の読みを評価できる。
+
+    本クラスは**語数の 2 読み**だけを扱う。第 3 の読み (展開がオプション
+    トークンになる) は ``TestOptionTokenExpansionReading`` 側。
+    """
+
+    # 両読みが食い違う → 従来どおり ask (default) / allow (auto)。
+    AMBIGUOUS = (
+        "grep $PAT .env",           # 空展開なら .env は pattern
+        "sed $SCRIPT .env",         # sed の script 枠
+        "awk $PROG .env",           # awk の program 枠
+        "jq $F .env",               # jq の filter 枠 (spec 駆動である証拠)
+        "rg $PAT .env",             # ripgrep も同じ pattern 枠
+        "grep $PAT .env README.md",  # 読みごとに deny 対象の operand が変わる
+        "git log -n $N .env",       # 空展開なら .env が -n の値 (pattern 枠以外)
+    )
+
+    # 両読みで機密 operand が確定する → deny 維持。
+    # (``grep "$PAT" .env`` / ``grep -e KEY $X .env`` は語数の 2 読みでは
+    #  deny だが、読み 3 = オプショントークン展開で ask に戻る。
+    #  ``TestOptionTokenExpansionReading`` 側で扱う)
+    STILL_DENY = (
+        "grep '$PAT' .env",         # シングルクォートは展開しない = literal 1 語
+        "grep -f $F .env",          # -f の値は path なのでどの展開でも .env は FILE
+        "cat $OPTS .env",           # cat は positional を全てファイルに取る
+        "cat $X .env",
+        "cat $X >| .env",           # clobber target は語が消えても残る
+        "grep KEY $CFG >| .env",
+        "cat $PWD/.env",            # 語内の展開は語数を変えない
+        'cat "$PWD/.env"',
+        "cat $HOME/keys/server.pem",
+    )
+
+    def test_word_vanishing_readings_disagree_keeps_ask_or_allow(self):
+        for cmd in self.AMBIGUOUS:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_both_readings_sensitive_still_denies(self):
+        for cmd in self.STILL_DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_ambiguous_reading_is_logged_as_such(self):
+        # 「救済 scan が deny を見つけたが読みが食い違った」を診断できるように
+        # 専用ラベルを残す (hard_stop_literal_deny とは別物)。
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope("grep $PAT .env", self.tmp))
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_ambiguous", labels)
+        self.assertNotIn("hard_stop_literal_deny", labels)
+
+    def test_confirmation_pass_does_not_double_count_diagnostics(self):
+        # 確認 pass (読み 2 = 0 語読み / 読み 3 = オプショントークン読み) は
+        # verdict を決めるためだけの再実行なので、分類ラベルと render counter を
+        # 二重計上してはいけない (`bash_render_failed` は「minimal info を
+        # 出せなかった原因の分布」を測る counter で、倍増すると計測が壊れる)。
+        # `grep -e KEY .env $X` は deny を採用しつつ**読み 3 も走る**形
+        # (bare expansion word が機密 operand の後ろ) なので、読み 3 側の
+        # `quiet=True` もここで固定される。
+        for cmd in ("cat $OPTS .env", "cat $X .env", "cat $X >| .env",
+                    "grep -e KEY .env $X"):
+            with self.subTest(cmd=cmd):
+                with mock.patch("handlers.bash_handler.L.log_info") as spy:
+                    r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "deny")
+                labels = [c.args[1] for c in spy.call_args_list]
+                self.assertEqual(
+                    len(labels), len(set(labels)),
+                    msg=f"{cmd!r} logged duplicate labels: {labels}",
+                )
+
+    def test_expansion_readings_unit(self):
+        from handlers.bash.segmentation import (
+            _EXPANSION_PLACEHOLDER,
+            _expansion_readings,
+        )
+        p = _EXPANSION_PLACEHOLDER
+        # 語まるごとが非クォート展開 → 0 語読みが存在する
+        self.assertEqual(
+            _expansion_readings("grep $PAT .env"),
+            (f"grep {p} .env", "grep .env"),
+        )
+        # 非クォート展開が複数並ぶだけの語も全部空なら消える
+        self.assertEqual(
+            _expansion_readings("grep $A$B .env"),
+            (f"grep {p}{p} .env", "grep .env"),
+        )
+        # 語内にリテラルがある / クォートされている → 語数は変わらない
+        self.assertEqual(_expansion_readings("cat $PWD/.env"), (f"cat {p}/.env", None))
+        self.assertEqual(
+            _expansion_readings('grep "$PAT" .env'), (f'grep "{p}" .env', None)
+        )
+        # 置換対象が無ければ None
+        self.assertIsNone(_expansion_readings("grep KEY .env"))
+
+
+class TestOptionTokenExpansionReading(BaseBash):
+    """0.25.0 (Codex R2 P2): 変数はオプショントークンにも展開される。
+
+    語数が変わらなくても **役割** は変わりうる。``X=-e`` のとき
+    ``grep -e KEY $X .env`` は ``grep -e KEY -e .env`` として実行され、``.env``
+    は第 2 の検索 pattern になる (grep は stdin から読むのでファイルは開かれ
+    ない)。語数の 2 読みはどちらも ``.env`` を FILE と分類するので、この読みを
+    足さないと誤 deny のままになる。
+
+    **クォートは word splitting を止めるだけでオプション解釈は止めない**ので、
+    読み 2 (語ごと消える読み) と違ってクォート形も対象になる。
+
+    読みは **arity (分離形で consume する語数) ごと**に作る (0.25.0 R5)。
+    ``jq --arg NAME VALUE`` のような 2 語 consume の形まで含めるため、
+    「値 1 つ・non-path・宣言順で最初の 1 option」という R4 の絞り込みは撤去
+    した。値を取らない flag (arity 0) は spec の有無に依らず必ず読みを作る。
+    コマンドを新たに列挙せず ``command_specs`` の既存知識だけを使う点は不変。
+    """
+
+    # 読み 3 で役割が変わりうる → 従来どおり ask (default) / allow (auto)。
+    AMBIGUOUS = (
+        "grep -e KEY $X .env",       # Codex R2 P2 の指摘そのもの
+        'grep -e KEY "$X" .env',     # クォートしてもオプションとしては解釈される
+        'grep "$PAT" .env',          # R3 でクォート形として deny 維持していた形
+        'sed "$SCRIPT" .env',
+        'awk "$PROG" .env',
+        'jq "$F" .env',
+        'rg "$PAT" .env',
+        "git log $OPT .env",         # git はサブコマンド単位の spec
+        "diff $OPT .env other.txt",
+        "tar -cf out.tar $X .env",
+        "grep -e K $A $B .env",      # bare expansion word が複数
+        # --- R5 (Codex R3 P2): 値を 2 つ取る option に化ける形 ---
+        # ``X=--arg`` なら ``NAME`` と ``.env`` が option の 2 値として消費され、
+        # jq は stdin から読む (ファイルは開かれない)。値 1 つの option しか
+        # 試さない実装ではこの読みが作れず誤 deny になっていた
+        'jq . "$X" NAME .env',
+        "jq . $X NAME .env",
+        'jq "$X" NAME .env',
+        'jq -r "$X" NAME .env',
+        # --- R5: pattern 枠を閉じない option に化ける形 ---
+        # ``PAT=--include`` なら ``other`` が値として消費され ``.env`` が検索
+        # pattern になる。``-e`` (pattern_opt) だけを反例にすると pattern 枠が
+        # 閉じて ``.env`` が FILE のままになり誤 deny になっていた
+        'grep "$PAT" other .env',
+        "grep $PAT other .env",
+        'rg "$PAT" other .env',
+        'ag "$PAT" other .env',
+        # --- R5: git の global option 区間 (option 表が 2 つある) ---
+        # ``OPT=-C`` なら ``log`` が値として消費され ``.env`` がサブコマンド
+        # 位置に落ちる (git は「.env というサブコマンドは無い」と言って終わる)
+        "git $OPT log .env",
+        'git "$OPT" log .env',
+        "git $OPT show HEAD:.env",
+        "git $OPT log -- .env",
+        # 複数語が同時に役割を変える形 (先頭が flag、次が値を取る global option)。
+        # 対象外の bare expansion word を背景の flag に置く設計で覆われる
+        "git $A $B log .env",
+        'jq "$A" "$B" .env',
+    )
+
+    # 読み 3 が成立しない / 役割が変わらない → deny 維持。
+    STILL_DENY = (
+        # 語の**内部**に展開がある形 (本 PR の動機ケース)。bare expansion word が
+        # 無いので読み 3 を 1 つも作らない。spec の有無と無関係であることを
+        # 示すため、spec を持つコマンド (grep / awk / sed / diff / git) を含める
+        "cat $PWD/.env",
+        'cat "$PWD/.env"',
+        'cat "$PWD"/.env',
+        "cat ${PWD}/.env",
+        "cat $A$B/.env",
+        "cat $HOME/keys/server.pem",
+        "grep KEY $D/.env",
+        "grep -e KEY $D/.env",
+        "awk '{print}' $D/.env",
+        "sed -n 1,5p $D/.env",
+        "diff $A/.env $B/.env",
+        "git show HEAD:$D/.env",
+        "head -n 3 ${DIR}/.env",
+        "cp $SRC/.env /tmp/x",
+        # spec が「値を取る option」を知らない / 実際に持たないコマンド。
+        # R5 で arity 0 (値を取らない flag) の読みは必ず作るようになったが、
+        # flag に化けても後続語の役割は変わらないので deny のまま
+        "cat $OPTS .env",
+        'cat "$OPTS" .env',
+        "cat $X .env",
+        'cat "$X" .env',
+        "head $OPTS .env",
+        "head -n $N .env",
+        "base64 $D/.env",
+        # 値が path の option しか噛まない (どの展開でも .env は FILE)
+        "grep -f $F .env",
+        # bare expansion word が機密 operand より **後ろ** にある
+        "grep -e KEY .env $X",
+        "tar -cf out.tar .env $X",
+        # --- R5: 距離が spec の宣言 arity を超える形 (deny 維持) ---
+        # 展開は自分の位置より後ろに語を挿し込めないので、operand を値として
+        # 飲み込むには「operand の d 語前に arity >= d の option」が要る。
+        # jq の宣言 arity は最大 2 なので 3 語前からは届かない
+        'jq . "$X" NAME other .env',
+        # git log は pattern 枠を持たず、宣言 arity は 1 だけ
+        'git log "$OPT" other .env',
+        "diff $OPT other .env",
+        # git の global option 区間より **後ろ** の語 (サブコマンド確定後) は
+        # 区間の代表 (`-C`) に化けても operand の役割を変えない
+        "git log $OPT -- .env",
+        "cat $A $B .env",
+        "cat $A $B $C .env",
+        "tar -cf out.tar .env $A $B",
+    )
+
+    def test_option_token_reading_disagrees_keeps_ask_or_allow(self):
+        for cmd in self.AMBIGUOUS:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_all_readings_sensitive_still_denies(self):
+        for cmd in self.STILL_DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_option_ambiguous_reading_is_logged_as_such(self):
+        # 読み 2 の食い違い (hard_stop_literal_ambiguous) と区別できる専用ラベル。
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope("grep -e KEY $X .env", self.tmp))
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_option_ambiguous", labels)
+        self.assertNotIn("hard_stop_literal_deny", labels)
+
+    def test_many_readings_falls_back_to_ask(self):
+        # 読み 3 は「bare expansion word 数 × arity 種類数」だけ operand scan を
+        # 回すので、**読みの総数**に上限 (`_MAX_OPTION_READINGS`) を設けている。
+        # 超えたら救済 scan を諦める (摩擦側 = ask)。上限は hook の 2 秒 timeout
+        # 予算からの逆算 (コーパス実測の最大は 4 読み)。
+        from handlers.bash.operand_lexer import _option_reading_tokens
+        from handlers.bash_handler import _MAX_OPTION_READINGS
+
+        # 読みの総数 = 語数 × (代表数 - 1) + 1 (arity 0 の読みは全語で 1 つに
+        # 畳まれる)。上限を跨ぐ語数をその式から逆算する
+        arities = len(_option_reading_tokens(["grep", "x"]))  # flag + arity 1
+        self.assertGreater(arities, 1)
+        at_limit = (_MAX_OPTION_READINGS - 1) // (arities - 1)
+        over = at_limit + 1
+
+        def bare_words(n: int) -> str:
+            return " ".join(f"${chr(ord('A') + i)}" for i in range(n))
+
+        # 読みの総数が上限を **超える** 語数 → 評価せず諦めて ask。
+        # 「読みが食い違った」のではなく「測っていない」ので別ラベルで数える
+        cmd = f"grep -e K {bare_words(over)} .env"
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            self.assertEqual(_decision(handle(_make_envelope(cmd, self.tmp))), "ask")
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_option_budget", labels)
+        self.assertNotIn("hard_stop_literal_option_ambiguous", labels)
+
+        # 上限ちょうどなら読みを作る (諦めるのは超過時だけ)。この形も読み 3 で
+        # 役割が変わるので結論は ask だが、経路が違う (専用ラベルで区別)。
+        self.assertGreaterEqual(at_limit, 1)
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope(
+                f"grep -e K {bare_words(at_limit)} .env", self.tmp))
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_option_ambiguous", labels)
+
+    def test_option_reading_tokens_unit(self):
+        from handlers.bash.operand_lexer import (
+            _FLAG_OPTION_TOKEN,
+            _option_reading_tokens,
+        )
+        f = _FLAG_OPTION_TOKEN
+        # arity ごとに代表を 1 つ。arity 0 (値を取らない flag) は spec の有無に
+        # 依らず必ず入る。代表は「値が全て non-path」かつ「pattern_opt でない」
+        # ものを優先する (同 arity の他の option を支配するため)
+        self.assertEqual(_option_reading_tokens(["grep", "x"]), [f, "--include"])
+        self.assertEqual(_option_reading_tokens(["tar", "x"]), [f, "--exclude"])
+        # git は option 表が 2 つ (global / サブコマンド) あるので両方から借りる
+        self.assertEqual(_option_reading_tokens(["git", "log", "x"]), [f, "-C", "-S"])
+        self.assertEqual(_option_reading_tokens(["git", "x"]), [f, "-C"])
+        from handlers.bash.constants import _GIT_GLOBAL_VALUE_OPTS
+        from handlers.bash.operand_lexer import _GIT_GLOBAL_VALUE_REPRESENTATIVE
+        self.assertIn(_GIT_GLOBAL_VALUE_REPRESENTATIVE, _GIT_GLOBAL_VALUE_OPTS)
+        # 値 2 つの option (``jq --arg NAME VALUE``) も arity 2 の代表として入る
+        self.assertEqual(_option_reading_tokens(["jq", "x"]), [f, "--indent", "--arg"])
+        # spec が無いコマンド → arity 0 の読みだけ
+        self.assertEqual(_option_reading_tokens(["cat", "x"]), [f])
+        self.assertEqual(_option_reading_tokens(["head", "x"]), [f])
+        self.assertEqual(_option_reading_tokens([]), [f])
+
+    def test_flag_option_token_is_inert_for_every_spec(self):
+        # arity 0 の合成トークンは「値を取らない未知の long option」として
+        # 解釈されなければならない。どれかの spec の long option と完全一致 /
+        # prefix 一致すると値を consume してしまい arity 0 の読みでなくなる。
+        from handlers.bash.command_specs import _SPECS
+        from handlers.bash.operand_lexer import (
+            _FLAG_OPTION_TOKEN,
+            _find_path_candidates,
+            _resolve_long_option,
+        )
+        for name, spec in _SPECS.items():
+            with self.subTest(cmd=name):
+                self.assertIsNone(
+                    _resolve_long_option(_FLAG_OPTION_TOKEN, spec.values))
+                self.assertNotIn(_FLAG_OPTION_TOKEN, spec.pattern_opts)
+        # spec の無いコマンドでも候補にならない (`-X<value>` 密着形と誤読しない)
+        self.assertEqual(
+            _find_path_candidates(["cat", _FLAG_OPTION_TOKEN, "README.md"]),
+            ["README.md"],
+        )
+
+    def test_spec_table_has_dominant_option_per_arity(self):
+        """spec は arity ごとに「値が全て non-path」かつ「pattern_opt でない」
+        option を宣言している。
+
+        この不変が成り立つ限り、arity ごとに代表を **1 つ** 選べば同 arity の
+        他の option を支配する (``p`` の値は候補に残り、pattern_opt は pattern
+        枠を閉じて候補を増やすので、どちらも deny を崩さない = 反例として弱い)。
+        崩れると「代表では ask にならないが他の option なら ask になる」形が
+        生まれるので、spec を足すときはここで気付けるようにしておく。
+
+        同時に「複数語が同時に flag に化ける組合せ」の読みが不要な根拠でもある
+        (pattern 枠に operand を落とす読みは、operand の直前語を arity >= 1 の
+        代表に置き換えた単語ごとの読みが必ず作るため)。
+        """
+        from handlers.bash.command_specs import _SPECS, _VALUE_NON_PATH, _split_kinds
+        for name, spec in _SPECS.items():
+            arities: dict[int, list[str]] = {}
+            for opt, raw in spec.values.items():
+                attached_only, kinds = _split_kinds(raw)
+                if attached_only or not kinds:
+                    continue
+                arities.setdefault(len(kinds), []).append(opt)
+            for arity, opts in arities.items():
+                with self.subTest(cmd=name, arity=arity):
+                    dominant = [
+                        o for o in opts
+                        if _split_kinds(spec.values[o])[1]
+                        == _VALUE_NON_PATH * arity
+                        and o not in spec.pattern_opts
+                    ]
+                    self.assertTrue(
+                        dominant,
+                        msg=(f"{name} の arity {arity} に「全 non-path かつ "
+                             f"pattern_opt でない」option が無い: {opts}"),
+                    )
+
+    def test_expansion_option_readings_unit(self):
+        from handlers.bash.segmentation import (
+            _EXPANSION_PLACEHOLDER,
+            _expansion_option_readings,
+        )
+        opts = ["-0", "-1", "-2"]  # arity 代表の並び (先頭 = arity 0 の flag)
+        # 読みは (bare expansion word) × (arity 代表) の全組合せ。クォート形も対象
+        self.assertEqual(
+            _expansion_option_readings("grep -e KEY $X .env", opts[:1], limit=8),
+            ["grep -e KEY -0 .env"],
+        )
+        self.assertEqual(
+            _expansion_option_readings("grep -e KEY $X .env", opts, limit=8),
+            ["grep -e KEY -0 .env", "grep -e KEY -1 .env", "grep -e KEY -2 .env"],
+        )
+        self.assertEqual(
+            _expansion_option_readings('grep "$PAT" .env', opts[:2], limit=8),
+            ["grep -0 .env", "grep -1 .env"],
+        )
+        # 対象外の bare expansion word は **背景の flag** (opts[0]) に置く。
+        # 「全部 flag」の読みはどの対象からも同じ文字列になるので 1 つに畳む
+        self.assertEqual(
+            _expansion_option_readings("grep -e K $A $B .env", opts[:2], limit=8),
+            ["grep -e K -0 -0 .env", "grep -e K -1 -0 .env", "grep -e K -0 -1 .env"],
+        )
+        # 語の内部に展開がある形は bare expansion word ではない (動機ケース)
+        self.assertEqual(
+            _expansion_option_readings("cat $PWD/.env", opts, limit=8), []
+        )
+        self.assertEqual(
+            _expansion_option_readings('cat "$PWD"/.env', opts, limit=8), []
+        )
+        # 置換対象が無ければ空
+        self.assertEqual(_expansion_option_readings("cat .env", opts, limit=8), [])
+        # arity 0 の代表しか無いコマンドは、語がいくつあっても読みは 1 つ
+        # (どの語を対象にしても「全部 flag」の同一文字列になるため)
+        self.assertEqual(
+            _expansion_option_readings("cat $A $B $C .env", opts[:1], limit=2),
+            ["cat -0 -0 -0 .env"],
+        )
+        # 上限は **読みの総数** = 語数 × (代表数 - 1) + 1。超過は None
+        # (救済 scan を諦める)
+        self.assertIsNone(
+            _expansion_option_readings("grep -e K $A $B .env", opts[:2], limit=2)
+        )
+        self.assertIsNotNone(
+            _expansion_option_readings("grep -e K $A $B .env", opts[:2], limit=3)
+        )
+        self.assertIsNone(
+            _expansion_option_readings("grep -e K $A .env", opts, limit=2)
+        )
+
+
+class TestQuoteAwareResidualMetachar(BaseBash):
+    """0.25.0 (2026-08 精査): residual metachar 判定の quote-aware 化。
+
+    0.24.0 までは shlex 後の token を見ていたため、クォート内の ``|`` ``&``
+    ``>`` ``<`` (literal データ) を演算子と誤認して日常コマンドを ask に倒して
+    いた (実ログ 429 件 / 0.5%)。演算子になり得るのはクォート外・非エスケープ
+    の文字だけ (bash 文法) なので、raw segment を ``_lex`` で走査して判定する。
+    """
+
+    ALLOW = (
+        "git commit -m 'fix: a & b'",
+        "git commit -m 'a & b' 2>&1",    # 安全リダイレクトの word は除外して判定
+        "echo 'a|b'",
+        'echo "a > b"',
+        "echo 'x<y'",
+        "tar -cf out.tar 'weird|name'",
+        "echo \\> x",                    # エスケープ済み ``\\>`` は literal (redirect しない)
+    )
+
+    KEEP_ASK = (
+        "echo KEY=val > .env",           # クォート外の ``>`` は本物の書込み redirect
+        "echo foo > out.txt",
+        "tar -cf out.tar src > log.txt",
+        "echo foo > '&2'",               # target がクォートでも演算子 ``>`` は残る
+    )
+
+    def test_quoted_metachars_are_data_not_operators(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_unquoted_operators_keep_residual_ask(self):
+        for cmd in self.KEEP_ASK:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+
+    def test_quoted_metachar_no_longer_masks_sensitive_operand(self):
+        # residual ask が消えた分、literal 機密 operand は無クォート形と同じ
+        # deny に到達する (`mv a .env` が deny なのと一貫)。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("mv 'a|b' .env", self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_quoted_fused_redirect_lookalike_is_operand_not_redirect(self):
+        # `ls '>.env'` は「>.env という名前のファイル」の listing で、redirect
+        # ではない (0.24.0 まで metadata_redirect_deny に誤爆していた)。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("ls '>.env'", self.tmp, mode=mode))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"ls '>.env' ({mode}) should allow but got {_decision(r)!r}",
+                )
+
+    def test_unquoted_fused_redirect_to_sensitive_still_denies(self):
+        for cmd in ("ls >.env", "ls > .env", "ls &> .env"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_live_operator_metachars_unit(self):
+        from handlers.bash.redirects import _live_operator_metachars
+        self.assertEqual(_live_operator_metachars("git commit -m 'a & b'"), frozenset())
+        self.assertEqual(_live_operator_metachars('echo "a > b"'), frozenset())
+        self.assertEqual(_live_operator_metachars("echo a > b"), frozenset(">"))
+        # 安全リダイレクトは word 単位で除外 (1 token 形 / op + target 分離形)
+        self.assertEqual(_live_operator_metachars("grep x f 2>/dev/null"), frozenset())
+        self.assertEqual(_live_operator_metachars("grep x f 2>&1"), frozenset())
+        self.assertEqual(_live_operator_metachars("grep x f > /dev/null"), frozenset())
+        # 非 safe target への redirect は live
+        self.assertEqual(_live_operator_metachars("echo x > out.txt"), frozenset(">"))
+        # エスケープ済みは literal
+        self.assertEqual(_live_operator_metachars("echo \\> x"), frozenset())
+        # クォート内 ``>`` とクォート外 ``>`` の同居は live 側だけ数える
+        self.assertEqual(
+            _live_operator_metachars("echo 'a>b' > out.txt"), frozenset(">")
+        )
+
+
+class TestQuotedSafeRedirectTarget(BaseBash):
+    """0.25.0 (Codex R1 P2): 安全リダイレクトの target がクォートされている形。
+
+    Bash は target を quote removal してから使うので、``2>"/dev/null"`` は
+    ``2>/dev/null`` と同じリダイレクトになる。0.24.0 の quote-aware 化は「word
+    全体が非クォートであること」を剥離の条件にしていたため、target をクォート
+    すると剥離されず、後段が live な ``>`` を見て ``git commit -m x
+    2>"/dev/null"`` のような日常形を allow → ask に退行させていた。演算子の
+    判定 (クォート外・非エスケープ) と target の quote removal を分離して解消。
+    """
+
+    ALLOW = (
+        'git commit -m x 2>"/dev/null"',
+        "git commit -m x 2>'/dev/null'",
+        'git commit -m x 2> "/dev/null"',   # 分離形 + quoted target
+        'make build 2>"/dev/null"',
+        'make build &>"/dev/null"',
+        'make build 2>&"1"',                # fd 複製のクォート変種
+        'make build 2>"&1"',
+        'make build > "/dev/stdout"',
+        "echo '2>/dev/null'",               # リダイレクト表記そのものがデータ
+        'echo "2>/dev/null"',
+    )
+
+    KEEP_ASK = (
+        'make build 2>"/tmp/log"',          # 安全 target ではない
+        'echo KEY=val > ".env"',            # クォートしても書込み先は live
+        'tar -cf out.tar src > "log.txt"',
+    )
+
+    STILL_DENY = (
+        'ls > ".env"',                      # 分離形 + quoted 機密 target
+        'ls >".env"',                       # fused + quoted
+        'ls -la >| ".env"',                 # clobber (0.25.0 の修正) + quoted
+        'ls -la >|".env"',
+        'stat x >| ".env"',
+    )
+
+    def test_quoted_safe_redirect_targets_stay_allow(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_quoted_non_safe_target_keeps_residual_ask(self):
+        for cmd in self.KEEP_ASK:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+
+    def test_quoted_sensitive_redirect_target_still_denies(self):
+        for cmd in self.STILL_DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_quoted_redirect_unit(self):
+        from handlers.bash.redirects import _live_operator_metachars, _quote_removed
+        from handlers.bash.segmentation import _ST_DOUBLE, _ST_PLAIN
+        # 演算子部が live なら target のクォートは剥がして安全判定
+        for seg in (
+            'git commit -m x 2>"/dev/null"',
+            "git commit -m x 2>'/dev/null'",
+            'git commit -m x 2> "/dev/null"',
+            'echo x 2>&"1"',
+            'echo x 2>"&1"',
+            'echo x &>"/dev/null"',
+        ):
+            with self.subTest(seg=seg):
+                self.assertEqual(_live_operator_metachars(seg), frozenset())
+        # 演算子部までクォート内 = データなので演算子ではない (剥離もしない)
+        self.assertEqual(
+            _live_operator_metachars('echo "2>" /dev/null > out.txt'), frozenset(">")
+        )
+        # 安全 target 以外は live なまま / clobber は安全リダイレクトに数えない
+        self.assertEqual(_live_operator_metachars('echo x 2>"/dev/nul"'), frozenset(">"))
+        self.assertEqual(
+            _live_operator_metachars('ls -la >| ".env"'), frozenset({">", "|"})
+        )
+        # quote removal 単体
+        self.assertEqual(
+            _quote_removed([('"', _ST_PLAIN), ("a", _ST_DOUBLE), ('"', _ST_PLAIN)]), "a"
+        )
+
+
+class TestDoubleQuoteInertHardStop(BaseBash):
+    """0.25.0 (2026-08 精査): ダブルクォート内の不活性 char は hard-stop にしない。
+
+    Bash はダブルクォート内で ``$`` とバッククォートだけを解釈する。``(`` ``)``
+    ``{`` ``}`` ``<`` は literal なので、シングルクォート形 (0.18.0 で緩和済み)
+    と同じ経路に載せる。これで ``git ls-files --format`` の verdict がクォートの
+    書き方だけで deny / ask / allow に分かれていた非一貫性が解消する
+    (単一クォート形の deny が正 — blob object name は内容の指紋)。
+    """
+
+    def test_ls_files_format_quote_forms_agree_on_deny(self):
+        # 二重クォート形が単一クォート形と同じ deny に揃う (指紋露出)。
+        for cmd in (
+            "git ls-files --format='%(objectname)' .env",
+            'git ls-files --format="%(objectname)" .env',
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_ls_files_format_unquoted_stays_hard_stop(self):
+        # 無クォート形は実 bash では `syntax error near unexpected token '('`
+        # (bash 5 実測) で実行されない形。クォート外 ``(`` の hard-stop のまま
+        # 残しても実害が無いので従来どおり ask / allow (ハーネス委譲)。
+        cmd = "git ls-files --format=%(objectname) .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_double_quoted_inert_chars_reach_operand_scan(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in (
+            'git diff "HEAD@{1}"',
+            'git stash apply "stash@{0}"',
+            'awk "{print}" notes.txt',
+            'echo "{a,b}"',
+            'echo "a<b"',
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_double_quoted_expansion_chars_keep_hard_stop(self):
+        # ``$`` / バッククォートはダブルクォート内でも展開されるので維持。
+        for cmd in ('echo "$(cat .env)"', 'echo "`cat .env`"', 'cat "$X"'):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_double_quoted_forms_go_through_inert_gates(self):
+        # 0.18.0 のシングルクォート緩和と同じ後段 gate が二重クォートにも効く:
+        # inert allowlist 外の first token / 委譲形 / awk 動的構文は ask に戻る。
+        for cmd in (
+            'docker run img "cmd(arg)"',                    # not_inert
+            'find . -name x -exec sh -c "cat {}" ";"',      # delegate:-exec
+            'awk "BEGIN { system(\\"cat x\\") }" notes.txt',  # awk_dynamic
+        ):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_double_quoted_sensitive_operand_denies_like_single(self):
+        # 0.18.0 の `awk '{print}' .env` deny と対称。
+        for cmd in ('awk "{print}" .env', 'sed "s/(=)/X/" .env'):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+
+class TestSedOptionScriptConsumesPositionalSlot(BaseBash):
+    """0.25.0 (2026-08 精査): ``-e`` / ``--expression`` / ``-f`` 経由でスクリプトを
+    与えた sed は positional が全て入力ファイル (sed の仕様)。
+
+    0.24.0 までの ``_sed_scripts`` は positional 枠を消費せず、後続のファイル
+    operand をスクリプトとして再解析していた。先頭付近の文字が動的コマンド
+    (``e`` ``r`` ``w`` 等) に見えるファイル名 (``report.txt`` / ``e.txt``) が
+    ``sed_dynamic:<cmd>`` の ask に誤って倒れていた。
+    """
+
+    ALLOW = (
+        "sed -e 's/a/b/' report.txt",    # 旧: ファイル名の先頭 ``r`` を r コマンド誤認
+        "sed -e p e.txt",                # 旧: ``e`` コマンド誤認
+        "sed -e p wender.txt",           # 旧: ``w`` コマンド誤認
+        "sed --expression=p e.txt",
+        "sed --expression 'p' e.txt",
+        "sed -ne p e.txt",               # 束ね形
+        "sed -e p -- e.txt",             # ``--`` 以降も入力ファイル
+    )
+
+    def test_file_operands_after_option_script_are_not_scripts(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_dynamic_detection_still_works_where_it_should(self):
+        # 動的構文の検出そのものは維持: option script 内の動的コマンド /
+        # ``-f`` (スクリプトを検査できない) / -e 無しの positional script。
+        for cmd in (
+            "sed -e 'w out.txt' notes.txt",
+            "sed -f lib.sed data.txt",
+            "sed 'e x' notes.txt",
+        ):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_sensitive_file_operand_still_denies_before_dynamic_check(self):
+        for cmd in ("sed -e 's/a/b/' .env", "sed -e p .env"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_sed_scripts_unit(self):
+        from handlers.bash.interpreters import _sed_scripts
+        # option script があれば positional はファイル (script 候補にしない)
+        self.assertEqual(_sed_scripts(["-e", "p", "file.txt"]), (["p"], False))
+        self.assertEqual(_sed_scripts(["--expression=p", "e.txt"]), (["p"], False))
+        self.assertEqual(_sed_scripts(["-ne", "p", "e.txt"]), (["p"], False))
+        # 順序に依らない (GNU getopt の permute 相当): 先行 positional もファイル
+        self.assertEqual(_sed_scripts(["p", "-e", "q", "f.txt"]), (["q"], False))
+        # -f があれば positional はファイル (script_file フラグで ask 側に倒す)
+        self.assertEqual(_sed_scripts(["-f", "s.sed", "data.txt"]), ([], True))
+        # option script が無ければ従来どおり最初の positional が script
+        self.assertEqual(_sed_scripts(["p", "file.txt"]), (["p"], False))
 
 
 if __name__ == "__main__":

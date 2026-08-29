@@ -2,13 +2,28 @@
 
 このモジュールは副作用なし・plugin 状態非依存。文字列処理のみ。
 
-0.18.0 で ``_has_hard_stop`` を quote-aware にした際、2 つの scanner
-(``_split_command_on_operators`` / ``_has_hard_stop``) の字句状態が一致して
-いないと guard が落ちることが review で繰り返し判明した (クォート外の ``\\'`` /
-コメント / 行継続 / 行継続で合成される演算子)。review R7 で **両 scanner が共有
-する 1 つの lexer** (``_lex``) に統一した: 行継続 ``\\<newline>`` を除去し、各文字に
-quote / escape / comment / heredoc の字句状態を付けた列を作り、分割と hard-stop
-判定はその列だけを見る。字句規則を直すときは ``_lex`` だけを直すこと。
+0.18.0 で ``_has_hard_stop`` を quote-aware にした際、scanner 同士の字句状態が
+一致していないと guard が落ちることが review で繰り返し判明した (クォート外の
+``\\'`` / コメント / 行継続 / 行継続で合成される演算子)。review R7 で **全 scanner
+が共有する 1 つの lexer** (``_lex``) に統一した: 行継続 ``\\<newline>`` を除去し、
+各文字に quote / escape / comment / heredoc の字句状態を付けた列を作り、判定は
+その列だけを見る。字句規則を直すときは ``_lex`` だけを直すこと。
+
+``_lex`` を見る scanner は 0.25.0 時点で 4 つ:
+
+1. ``_split_command_on_operators`` (segment 分割)
+2. ``_has_hard_stop`` (静的解析不能 char の検出)
+3. ``_expansion_chars`` (単純変数展開の placeholder 置換、0.25.0。この 1 つの
+   char 列から救済 scan の読みを作る: ``_expansion_readings`` が語数の
+   2 通り、``_expansion_option_readings`` が「bare expansion word がオプション
+   トークンになる」読みを **arity ごと**に。``_replace_simple_expansions`` は
+   「1 語読み」のラッパ)
+4. ``redirects._live_operator_metachars`` (residual metachar の quote-aware 判定、
+   0.25.0。0.24.0 までの ``_segment_has_residual_metachar`` は shlex 後の token
+   しか見えず、クォート内の ``|`` ``&`` ``>`` を演算子と誤認していた)
+
+``_has_quoted_hard_stop`` だけは意図的に字句状態を見ない raw 走査
+(前提条件付き。関数 docstring 参照)。
 
 0.22.0: heredoc (``<<`` / ``<<-``) の本文を ``_lex`` が ``_ST_HEREDOC`` にし、
 segment 分割から外す (``docs/DESIGN.md`` の「``<<`` heredoc | delimiter/body は
@@ -16,7 +31,9 @@ read 対象外」に実装を合わせた)。
 """
 from __future__ import annotations
 
-from handlers.bash.constants import _HARD_STOP_CHARS
+import re
+
+from handlers.bash.constants import _DQ_LIVE_HARD_STOPS, _HARD_STOP_CHARS
 
 # 単語区切り: この直後は「単語の先頭」= ``#`` がコメントを開始できる位置。
 # Bash 上は ``(`` ``)`` ``{`` ``}`` も単語境界だが hard-stop で先に ask に倒れる
@@ -345,32 +362,361 @@ def _has_hard_stop(command: str) -> bool:
       端末表示偽装の guard なので「展開されない = 安全」の理屈が当てはまらない
     - **コメント内の文字は hard-stop 判定から除外** (``\\r`` を除く)
 
-    シングルクォート内は Bash にとって不活性だが、**呼び出されるプログラムに
-    とっては不活性ではない** (``awk 'BEGIN { system("cat .env") }'`` /
+    0.25.0: **ダブルクォート内は展開が生きる char (``$`` バッククォート =
+    ``_DQ_LIVE_HARD_STOPS``) だけを hard-stop にする**。Bash はダブルクォート内で
+    ``(`` ``)`` ``{`` ``}`` ``<`` を一切解釈しない (literal) ため、
+    ``git ls-files --format="%(objectname)" .env`` / ``git diff "HEAD@{1}"`` が
+    シングルクォート形 (0.18.0 で緩和済み) と同じく operand scan に到達する。
+    同一セマンティクスのコマンドの verdict がクォートの書き方だけで
+    deny/ask/allow に分かれていた非一貫性の解消 (2026-08 精査)。
+    ``"$(cat .env)"`` は ``$`` が live なので従来どおり hard-stop。
+
+    クォート内は Bash にとって不活性でも、**呼び出されるプログラムにとっては
+    不活性ではない** (``awk 'BEGIN { system("cat .env") }'`` /
     ``find -exec sh -c '…'``)。その扱いは ``handlers.bash.interpreters`` が
     operand scan の後に行う (緩和は inert な first token に限定)。
     """
     for c, st in _lex(command):
         if c == "\r":
             return True
-        if st in (_ST_PLAIN, _ST_ESCAPED, _ST_DOUBLE) and c in _HARD_STOP_CHARS:
+        if st in (_ST_PLAIN, _ST_ESCAPED) and c in _HARD_STOP_CHARS:
+            return True
+        if st == _ST_DOUBLE and c in _DQ_LIVE_HARD_STOPS:
             return True
     return False
 
 
 def _has_quoted_hard_stop(segment: str) -> bool:
-    """``_has_hard_stop`` が False の segment に、シングルクォート内の hard-stop
-    char が残っているか (= 0.18.0 の quote-aware 化で緩んだ segment か)。
+    """``_has_hard_stop`` が False の segment に、クォート内の hard-stop char が
+    残っているか (= 0.18.0 / 0.25.0 の quote-aware 化で緩んだ segment か)。
 
     前提: ``_has_hard_stop(segment)`` が False であること。その条件下では、
-    ダブルクォート内・クォート外 (エスケープ込み) の hard-stop char は既に True
-    を返しているので、残る hard-stop char はシングルクォート内のものだけ
-    (コメントは splitter が落としている)。呼び出し側はこれが True のときだけ
+    クォート外 (エスケープ込み) の hard-stop char と、ダブルクォート内で展開が
+    生きる char (``$`` バッククォート) は既に True を返しているので、残る
+    hard-stop char は **シングルクォート内のもの** と **ダブルクォート内の不活性
+    char (``(`` ``)`` ``{`` ``}`` ``<``、0.25.0)** だけ (コメントは splitter が
+    落としている)。呼び出し側はこれが True のときだけ
     ``interpreters._quoted_hard_stop_reason`` を適用し、inert でない first token
     やクォート文字列を別のインタプリタに渡す形 (``find -exec sh -c '...'``) を
-    ask に戻す (0.18.0 review R5 / R6)。
+    ask に戻す (0.18.0 review R5 / R6)。ダブルクォート形もこの gate を通るので、
+    ``docker run img "cmd(arg)"`` は従来どおり ask に倒れる。
     """
     return any(c in _HARD_STOP_CHARS for c in segment)
+
+
+# 単純変数展開の置換 placeholder (0.25.0)。既定 patterns / 一般的なユーザー
+# pattern のどの literal 部分とも衝突しない綴りにする (衝突すると変数 operand が
+# 常に deny になる誤爆。glob 文字 / ``/`` / ``:`` / ``=`` / ``.`` を含めないこと
+# — 含めると shlex 分割・pathspec 分割・env-assignment 判定の意味が変わる)。
+_EXPANSION_PLACEHOLDER = "__sfg_unexpanded__"
+
+# 単純変数展開の NAME 部分 (Bash の識別子)。positional (``$1``) / special
+# (``$?`` ``$@`` 等) / ``${VAR:-...}`` などの複合形は対象外 (置換しない)。
+_SIMPLE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _split_expansion_words(
+    chars: list[tuple[str, str, bool]],
+) -> list[tuple[str, bool, bool]]:
+    """placeholder 置換後の char 列を word に切り、2 つの性質を付ける (0.25.0)。
+
+    Args:
+        chars: ``(文字, 字句状態, その文字が展開由来か)`` の列。
+
+    Returns:
+        ``(word 文字列, vanishes, bare_expansion)`` の列。
+
+        - ``vanishes``: **クォート外の展開だけ**で構成される word。Bash の word
+          splitting では、非クォートの変数展開が空文字列になると **その語ごと
+          消える** (``_drop_vanishing_words`` = 読み 2)
+        - ``bare_expansion``: **クォート区切り文字を除くと展開だけ**で構成される
+          word。この語は丸ごと 1 つの値になるので、その値が ``-`` 始まりなら
+          **オプショントークン**として解釈される (``_option_word_readings`` =
+          読み 3)。クォートは word splitting を止めるだけでオプション解釈は
+          止めない (``grep -e K "$X" .env`` で ``X=-e`` なら ``.env`` は第 2 の
+          検索 pattern) ため、``vanishes`` と違ってクォートの有無を問わない
+          (``vanishes`` ⊂ ``bare_expansion``)
+
+    word 区切りは **クォート外の空白** のみ (クォート内の空白は語の一部)。
+    """
+    words: list[tuple[str, bool, bool]] = []
+    buf: list[str] = []
+    vanishes = True
+    all_expansion = True
+    any_expansion = False
+
+    def flush() -> None:
+        words.append(("".join(buf), vanishes, all_expansion and any_expansion))
+
+    for c, st, from_expansion in chars:
+        if st == _ST_PLAIN and c in " \t\n":
+            if buf:
+                flush()
+            buf = []
+            vanishes = True
+            all_expansion = True
+            any_expansion = False
+            continue
+        buf.append(c)
+        if from_expansion:
+            any_expansion = True
+        elif st == _ST_PLAIN and c in "'\"":
+            pass  # クォート区切り自体は「展開以外の成分」に数えない
+        else:
+            all_expansion = False
+        if not (from_expansion and st == _ST_PLAIN):
+            vanishes = False
+    if buf:
+        flush()
+    return words
+
+
+def _drop_vanishing_words(chars: list[tuple[str, str, bool]]) -> str | None:
+    """**クォート外の展開だけで構成される word** を落とした読みを返す (0.25.0)。
+
+    Bash の word splitting では、非クォートの変数展開が空文字列になると
+    **その語ごと消える**。``grep $PAT .env`` は ``PAT`` が空なら ``grep .env``
+    になり、``.env`` は FILE ではなく **検索 pattern** として解釈される
+    (``Usage: grep [OPTION]... PATTERNS [FILE]...``、入力は stdin)。
+    ``$A$B`` のように非クォート展開が複数並ぶだけの語も、全部が空なら消える。
+
+    消えない形:
+
+    - 語の中にリテラル成分がある (``$X/.env`` → 空でも ``/.env`` の 1 語)
+    - クォートされた展開 (``"$X"`` → 空でも「空文字列の 1 語」として残る)
+
+    Args:
+        chars: ``(文字, 字句状態, その文字が非クォート展開由来か)`` の列。
+
+    Returns:
+        消えうる word を落とした読み。そういう word が 1 つも無ければ ``None``
+        (= 語数が変わる読みは存在しない)。
+    """
+    words = _split_expansion_words(chars)
+    if not any(v for _, v, _ in words):
+        return None
+    return " ".join(w for w, v, _ in words if not v)
+
+
+def _option_word_readings(
+    chars: list[tuple[str, str, bool]], options: list[str], *, limit: int,
+) -> list[str] | None:
+    """**bare expansion word がオプショントークンに展開される読み** を返す (0.25.0)。
+
+    変数は ``-e`` のような **値を取るオプション** にも展開されうる。そうなると
+    後続の語はそのオプションの **値** として consume され、operand の役割が
+    変わる: ``X=-e`` のとき ``grep -e KEY $X .env`` は ``grep -e KEY -e .env``
+    として実行され、``.env`` は第 2 の検索 pattern になる (grep は stdin から
+    読むのでファイルは開かれない、Codex R2 P2)。値を 2 つ取る option
+    (``jq --arg NAME VALUE``) なら 2 語先まで consume する。
+
+    ``(bare expansion word) × (options)`` の全組合せで読みを作る。``options``
+    は **arity ごとの代表** (``operand_lexer._option_reading_tokens``) なので、
+    読みの数は語数と arity 種類数だけで決まり、option 数には比例しない
+    (正確な式は Returns を参照)。
+
+    **どの語を置き換えるかを総当りする**ので、「機密 operand より前にある語」
+    だけが役割を変える、という絞り込みは ``_analyze_segment`` の再実行で自動的
+    に成立する (operand より後ろの語を置き換えた読みは operand の役割を変え
+    ないので deny のまま残る)。距離も自動で効く: ``W`` が operand の d 語前に
+    あるとき、operand を値として飲み込めるのは arity >= d の読みだけ。
+
+    **他の bare expansion word は「値を取らない flag」に置く** (``options`` の
+    先頭 = arity 0 の代表)。これも 1 つの実在しうる読みであり、こう置くことで
+    読みの族が **最も緩い側** になる: operand が候補から外れる経路は
+    「(a) どれかの語が option になって operand を値として飲む」か
+    「(b) operand より前の positional が全部消えて operand が第 1 positional
+    (pattern 枠 / ``git`` のサブコマンド位置) に落ちる」の 2 つで、(b) は
+    「他の語が全部 flag」のときに最大化されるため。複数語が**同時に**役割を
+    変える組合せを別に作らなくてよいのはこの背景のおかげ (組合せは語数の指数に
+    なるので作れない)。
+
+    Args:
+        chars: ``_expansion_chars`` が返した char 列。
+        options: 置き換えに使うオプショントークンの列 (arity ごとに 1 つ)。
+            **先頭は arity 0 (値を取らない flag) の代表**であること — 対象外の
+            bare expansion word の背景に使う。
+        limit: **読みの総数** の上限 (式は Returns)。超える segment は
+            ``None`` を返し、呼び出し側は ``_analyze_segment`` を N 回走らせずに
+            諦める (hook の 2 秒 timeout 予算を守るための保険。摩擦側に倒れる)。
+
+    Returns:
+        読みの列 (bare expansion word が無ければ空 list)。読みの総数が上限を
+        超えたら ``None``。
+
+        総数は **語数 × (arity 種類数 - 1) + 1**。arity 0 (flag) を対象語に
+        当てた読みはどの語を選んでも「全部 flag」の同一文字列になるので 1 つに
+        畳まれる (``cat $A $B $C .env`` のように arity 0 しか代表が無い
+        コマンドは、語がいくつあっても読みは 1 つ)。
+    """
+    words = _split_expansion_words(chars)
+    targets = [i for i, (_, _, bare) in enumerate(words) if bare]
+    if not targets or not options:
+        return []
+    background, others = options[0], options[1:]
+    if len(targets) * len(others) + 1 > limit:
+        return None
+    base = [background if bare else w for w, _, bare in words]
+    readings = [" ".join(base)]
+    for i in targets:
+        for option in others:
+            row = list(base)
+            row[i] = option
+            readings.append(" ".join(row))
+    return readings
+
+
+def _expansion_chars(segment: str) -> list[tuple[str, str, bool]] | None:
+    """live な単純変数展開を placeholder に置換した char 列を返す (0.25.0)。
+
+    ``(文字, 字句状態, その文字が展開由来か)`` の列。読み 1 / 読み 2 / 読み 3
+    (``_expansion_readings`` / ``_option_word_readings``) はいずれもこの 1 つの
+    列から作る。置換対象の展開が 1 つも無ければ ``None``。
+
+    置換位置の規則は ``_replace_simple_expansions`` の docstring を参照。
+    """
+    lx = _lex(segment)
+    out: list[tuple[str, str, bool]] = []
+    replaced = False
+    i = 0
+    n = len(lx)
+
+    def emit_placeholder(state: str) -> None:
+        for ch in _EXPANSION_PLACEHOLDER:
+            out.append((ch, state, True))
+
+    while i < n:
+        c, st = lx[i]
+        if c != "$" or st not in (_ST_PLAIN, _ST_DOUBLE):
+            out.append((c, st, False))
+            i += 1
+            continue
+        if st == _ST_DOUBLE:
+            # ダブルクォート内の ``\$`` (奇数個の直前バックスラッシュ) は literal
+            bs = 0
+            j = i - 1
+            while j >= 0 and lx[j] == ("\\", _ST_DOUBLE):
+                bs += 1
+                j -= 1
+            if bs % 2 == 1:
+                out.append((c, st, False))
+                i += 1
+                continue
+        # ``${NAME}`` 形
+        if i + 1 < n and lx[i + 1][0] == "{":
+            j = i + 2
+            name_chars: list[str] = []
+            while j < n and lx[j][0] != "}":
+                name_chars.append(lx[j][0])
+                j += 1
+            name = "".join(name_chars)
+            if j < n and name and _SIMPLE_NAME_RE.fullmatch(name):
+                emit_placeholder(st)
+                replaced = True
+                i = j + 1
+                continue
+            out.append((c, st, False))
+            i += 1
+            continue
+        # ``$NAME`` 形 (最長一致)
+        j = i + 1
+        name_chars = []
+        while j < n and lx[j][1] == st and (
+            lx[j][0].isalnum() or lx[j][0] == "_"
+        ):
+            name_chars.append(lx[j][0])
+            j += 1
+        name = "".join(name_chars)
+        if name and _SIMPLE_NAME_RE.fullmatch(name):
+            emit_placeholder(st)
+            replaced = True
+            i = j
+            continue
+        out.append((c, st, False))
+        i += 1
+    return out if replaced else None
+
+
+def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
+    """単純変数展開を placeholder に置換した **語数に関する 2 通りの読み** を返す。
+
+    ``_replace_simple_expansions`` は「展開は必ず 1 語になる」前提の読みしか
+    作らないが、非クォートの展開は空になると語ごと消えて **後続 operand の
+    引数位置がずれる** (0.25.0、Codex R1 P2)。``grep $PAT .env`` は 1 語読みでは
+    ``.env`` が FILE、0 語読みでは ``.env`` が検索 pattern (ファイルは読まれ
+    ない) で、意味が食い違う。救済 scan の呼び出し側 (``bash_handler.
+    _hard_stop_literal_scan``) は **全ての読みで deny になるときだけ** deny を
+    採用し、食い違えば従来どおり ``ask_or_allow`` に落とす。
+
+    語数が変わらない読みでも **役割** が変わる第 3 の読み (展開がオプション
+    トークンになる) は ``_option_word_readings`` 側。呼び出し側はコマンドの
+    spec を見てその読みも要るかどうかを決める。
+
+    Returns:
+        ``(1 語読み, 0 語読み)``。0 語読みは消えうる word が無ければ ``None``
+        (その場合 1 語読みだけを見ればよい)。置換対象の展開が 1 つも無ければ
+        関数全体が ``None``。
+
+    既知の限界: placeholder 文字列そのもの (``__sfg_unexpanded__``) を literal
+    で書いた語は 0 語読みで消える扱いになる。ずれる方向は「読みが食い違う →
+    ask_or_allow」= 救済 scan を諦める側だけなので、保護は落ちない。
+    """
+    out = _expansion_chars(segment)
+    if out is None:
+        return None
+    return "".join(ch for ch, _, _ in out), _drop_vanishing_words(out)
+
+
+def _expansion_option_readings(
+    segment: str, options: list[str], *, limit: int,
+) -> list[str] | None:
+    """``_expansion_chars`` → ``_option_word_readings`` の薄いラッパ (読み 3)。
+
+    置換対象の展開が無ければ空 list (= 読み 3 は存在しない)。読みの総数
+    (語数 × ``options`` 数) が ``limit`` を超えたら ``None`` (呼び出し側は救済
+    scan を諦める)。
+    """
+    out = _expansion_chars(segment)
+    if out is None:
+        return []
+    return _option_word_readings(out, options, limit=limit)
+
+
+def _replace_simple_expansions(segment: str) -> str | None:
+    """live な単純変数展開 (``$NAME`` / ``${NAME}``) を placeholder に置換する。
+
+    hard-stop segment の「リテラル operand 救済 scan」(0.25.0、
+    ``bash_handler._hard_stop_literal_scan``) の前処理。``cat $PWD/.env`` の
+    ``$PWD`` を「不明な 1 文字列」として ``__sfg_unexpanded__`` に置き換え、
+    残りが静的に解析できる形なら通常の operand scan を再実行できるようにする。
+    basename 判定 (0.22.0) の下では、placeholder が pattern の literal 部分に
+    一致しない限り「変数がどう展開されても basename が機密 pattern に一致する
+    形」だけが deny に届く (``$X/.env`` → 常に basename ``.env`` / ``$X.pem`` →
+    常に ``*.pem`` 一致。``$X.env`` は ``.env`` に一致せず deny しない)。
+
+    置換するのは **展開が生きている** 位置のみ:
+
+    - クォート外 (``_ST_PLAIN``) とダブルクォート内 (``_ST_DOUBLE``)。ただし
+      ダブルクォート内は直前の連続バックスラッシュが偶数個のときだけ
+      (``"\\$x"`` は literal)
+    - シングルクォート内 / エスケープ済み (``\\$``) / コメント / heredoc 本文は
+      literal なので置換しない
+
+    ``$NAME`` は識別子を最長一致で読む (``$PWDx`` = 変数 PWDx)。``${NAME}`` は
+    中身が識別子だけのとき置換する。``$(`` ``$((`` ``$[`` ``$?`` ``$1`` ``${X:-}``
+    等の複合形は置換せず残す — 呼び出し側は置換後も ``_has_hard_stop`` が True
+    なら救済 scan を断念する (従来どおり ask_or_allow) ので、複合形が残る
+    segment の挙動は変わらない。
+
+    ``_expansion_readings`` の「1 語読み」だけを取り出す薄いラッパ。語数が変わる
+    読み (非クォート展開が空になって語ごと消える形) が要るときは
+    ``_expansion_readings`` を直接使うこと。
+
+    Returns:
+        置換後の segment 文字列。置換対象が 1 つも無ければ ``None``。
+    """
+    readings = _expansion_readings(segment)
+    return None if readings is None else readings[0]
 
 
 def _split_command_on_operators(command: str) -> list[str]:
@@ -383,6 +729,18 @@ def _split_command_on_operators(command: str) -> list[str]:
     (非同期リスト) も区切る (review R9: ``ls '{' & cat .env`` が 1 segment に
     潰れ ``ls`` の metadata-only 経路で素通りしていた)。``2>&1`` ``&>`` の
     ``&`` はリダイレクトの一部なので区切らない。
+
+    ``>`` から始まる演算子は bash と同じく**最長一致**で読む (0.25.0):
+    ``>>`` (append) と ``>|`` (clobber 上書き) は 2 文字で 1 演算子。特に
+    ``>|`` の ``|`` は pipe ではないので区切らない (bash 3.2 / 5.3 実測:
+    ``ls -la >| .env`` は .env を truncate する 1 コマンド)。0.24.0 までは
+    この ``|`` で分割して redirect target が「機密パスだけの segment」に割れ、
+    書込みリダイレクト判定 (``_sensitive_redirect_target`` / operand scan) に
+    届かないまま全 mode allow で素通りしていた。``>>`` を先に消費するのも同じ
+    最長一致の一部: ``>>|`` は bash では ``>>`` + ``|`` (pipe) の syntax error
+    形であり、2 つ目の ``>`` から ``>|`` を合成してはならない。``&>|`` だけは
+    bash の字句 (``&>`` + ``|`` = syntax error) と異なり ``>|`` を結合するが、
+    実行不能な形が deny 側 (機密 target 検出) に倒れるだけで保護は落ちない。
 
     Bash コメントは segment から落とす (Bash が解釈しない文字列を shlex に
     渡さない)。改行は区切りとして残す。``\\r`` 入りのコメントだけは丸ごと
@@ -439,6 +797,17 @@ def _split_command_on_operators(command: str) -> list[str]:
                     buf = []
                     i += 1
                     continue
+            # ``>`` 演算子の最長一致読み (0.25.0): ``>>`` (append) / ``>|``
+            # (clobber) は 2 文字まとめて消費する。``>|`` の ``|`` を pipe と
+            # して区切ると redirect target が別 segment に割れ、機密パスへの
+            # clobber 上書きが書込みリダイレクト判定に届かず素通りする。
+            if c == ">" and i + 1 < n and lx[i + 1][1] == _ST_PLAIN and (
+                lx[i + 1][0] in ">|"
+            ):
+                buf.append(c)
+                buf.append(lx[i + 1][0])
+                i += 2
+                continue
         buf.append(c)
         i += 1
     if buf:

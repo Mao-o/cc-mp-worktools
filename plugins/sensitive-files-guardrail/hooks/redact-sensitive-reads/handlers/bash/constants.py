@@ -18,7 +18,8 @@ _SOURCE_CMDS = frozenset({"source", "."})
 
 # 0.12.0: read-only first_token allow-list。
 # 「副作用なしの見る・数える系」だけを集める。これらが segment の first_token に
-# 出現したときは ``_segment_has_residual_metachar`` (= ``>`` ``&`` 等の剥がし残り)
+# 出現したときは residual metachar (= ``>`` ``&`` 等の剥がし残り、0.25.0 から
+# ``_live_operator_metachars`` の quote-aware 判定)
 # / ``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` による ask 経路を **スキップして
 # operand scan に直行** する (ask_or_allow ではなく operand scan 結果のみで決定)。
 #
@@ -206,15 +207,38 @@ _GIT_RM_SAFE_SHORT_FLAGS = frozenset("fnrq")
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
 # 0.18.0: 判定 (``_has_hard_stop``) は quote-aware になり、**シングルクォート内**
 # の該当 char は展開されないため無視する (``\r`` のみクォート内でも hard-stop)。
+# 0.25.0: ダブルクォート内は ``_DQ_LIVE_HARD_STOPS`` のみ hard-stop (下記)。
 _HARD_STOP_CHARS = frozenset("$`(){}<\r")
 
+# ダブルクォート内でも **展開が生きる** hard-stop char (0.25.0)。
+# Bash はダブルクォート内で ``$`` (変数 / コマンド / 算術展開) とバッククォート
+# (コマンド置換) だけを解釈し、``(`` ``)`` ``{`` ``}`` ``<`` は literal になる
+# (bash 5 実測: ``echo "A%(b)A"`` は literal 出力、無クォートは syntax error)。
+# ``--format="%(objectname)"`` / ``"HEAD@{1}"`` のような日常形をシングル
+# クォート形 (0.18.0 で緩和済み) と同じ経路に載せるための絞り込み。
+_DQ_LIVE_HARD_STOPS = frozenset("$`")
+
 # セグメント内に剥がしきれずに残ると ``ask_or_allow`` する metachar セット。
+# 0.25.0: 判定は ``redirects._live_operator_metachars`` が raw segment を
+# quote-aware に走査する (クォート内 / エスケープ済みの文字は演算子になれない)。
 _SEGMENT_RESIDUAL_METACHARS = frozenset("&|<>")
 
 # 安全リダイレクト: ``/dev/null`` / ``/dev/stderr`` / ``/dev/stdout`` / fd 複製。
 # 1 トークン化されたもの (``2>/dev/null`` 等) に一致。
+#
+# 0.25.0: **演算子部と target 部をフラグメントに分けて 1 か所で定義する**。
+# quote-aware 走査 (``redirects._live_operator_metachars``) は「演算子が live
+# (クォート外・非エスケープ) か」と「quote removal 後の target が安全か」を
+# 別々に判定する必要がある (bash は ``2>"/dev/null"`` を無クォート形と同じ
+# リダイレクトとして扱う) が、そこで regex をもう 1 本手書きすると 2 つの文法が
+# 必ず drift する。演算子の形 (``>>`` / ``>|`` を **含まない**) はここが唯一の
+# 定義で、フラグメントを足し引きすると両経路が同時に変わる。
+_SAFE_REDIRECT_OP = r"(?:&|[0-9]+)?>"
+_SAFE_REDIRECT_TARGET = r"(?:&[0-9]+|/dev/null|/dev/stderr|/dev/stdout)"
+_SAFE_REDIRECT_OP_RE = re.compile(_SAFE_REDIRECT_OP)
+_SAFE_REDIRECT_TARGET_RE = re.compile(_SAFE_REDIRECT_TARGET)
 _SAFE_REDIRECT_RE = re.compile(
-    r"^(?:&|[0-9]+)?>(?:&[0-9]+|/dev/null|/dev/stderr|/dev/stdout)$"
+    f"^{_SAFE_REDIRECT_OP}{_SAFE_REDIRECT_TARGET}$"
 )
 # 空白区切りで分割されたリダイレクト前半 (``2>`` + ``/dev/null`` 等) を扱うための受け皿。
 _REDIRECT_OP_TOKENS = frozenset({">", "1>", "2>", "&>"})

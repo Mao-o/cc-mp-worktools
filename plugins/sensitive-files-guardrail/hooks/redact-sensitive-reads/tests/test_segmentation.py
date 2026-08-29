@@ -18,7 +18,9 @@ from _testutil import FIXTURES  # noqa: F401
 
 from core import output
 from handlers.bash.segmentation import (
+    _EXPANSION_PLACEHOLDER,
     _has_hard_stop,
+    _replace_simple_expansions,
     _split_command_on_operators,
 )
 from handlers.bash_handler import handle
@@ -199,6 +201,61 @@ class TestHeredocVerdict(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self._decision(self._run(cmd, "default")), "ask")
                 self.assertTrue(output.is_allow(self._run(cmd, "auto")))
+
+
+class TestReplaceSimpleExpansions(unittest.TestCase):
+    """0.25.0: hard-stop 救済 scan の前処理 (単純変数展開の placeholder 置換)。"""
+
+    P = _EXPANSION_PLACEHOLDER
+
+    def test_plain_and_braced_names(self):
+        self.assertEqual(
+            _replace_simple_expansions("cat $PWD/.env"), f"cat {self.P}/.env"
+        )
+        self.assertEqual(
+            _replace_simple_expansions("cat ${PWD}/.env"), f"cat {self.P}/.env"
+        )
+
+    def test_double_quoted_expansion_is_live(self):
+        self.assertEqual(
+            _replace_simple_expansions('cat "$PWD/.env"'), f'cat "{self.P}/.env"'
+        )
+
+    def test_single_quoted_and_escaped_are_literal(self):
+        self.assertIsNone(_replace_simple_expansions("echo '$PWD/.env'"))
+        self.assertIsNone(_replace_simple_expansions("cat \\$PWD/.env"))
+        # ダブルクォート内の \$ も literal
+        self.assertIsNone(_replace_simple_expansions('echo "\\$PWD"'))
+
+    def test_complex_forms_are_not_replaced(self):
+        # 置換対象ゼロ → None
+        self.assertIsNone(_replace_simple_expansions("cat $(pwd)/.env"))
+        self.assertIsNone(_replace_simple_expansions("cat ${X:-fallback}/.env"))
+        self.assertIsNone(_replace_simple_expansions("echo $? $1 $@"))
+        # 単純形と複合形が同居する場合は単純形だけ置換し、複合形は残す
+        out = _replace_simple_expansions("cat $(x) $PWD/.env")
+        self.assertEqual(out, f"cat $(x) {self.P}/.env")
+        self.assertTrue(_has_hard_stop(out))  # 呼び出し側はここで救済を断念する
+
+    def test_longest_match_name(self):
+        self.assertEqual(
+            _replace_simple_expansions("cat $PWDx/.env"), f"cat {self.P}/.env"
+        )
+
+    def test_adjacent_expansions(self):
+        self.assertEqual(
+            _replace_simple_expansions("cat $A$B/.env"),
+            f"cat {self.P}{self.P}/.env",
+        )
+
+    def test_no_expansion_returns_none(self):
+        self.assertIsNone(_replace_simple_expansions("cat .env"))
+        self.assertIsNone(_replace_simple_expansions("echo cost$"))
+
+    def test_placeholder_survives_hard_stop_check(self):
+        out = _replace_simple_expansions("cat $PWD/.env")
+        self.assertIsNotNone(out)
+        self.assertFalse(_has_hard_stop(out))
 
 
 if __name__ == "__main__":

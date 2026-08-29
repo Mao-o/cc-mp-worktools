@@ -78,10 +78,14 @@ plugin を無効化する (= 防御がゼロになる) という事故が実際�
 
 「判断困難」とは以下のような **静的解析不能** な segment:
 
-- `_has_hard_stop` 該当 (`$` / バッククォート / `(` / `)` / `{` / `}` / `<` / `\r`)
+- `_has_hard_stop` 該当 (`$` / バッククォート / `(` / `)` / `{` / `}` / `<` /
+  `\r`。0.18.0 / 0.25.0 の quote-aware 化でクォート内の不活性 char は除外。
+  0.25.0 からは単純変数展開だけが理由の hard-stop で、置換後に basename が
+  確定する形は「静的解析不能」に該当しない — 下の救済 scan 参照)
 - `_is_opaque_first_token` 該当 (env-assignment / 任意 path exec / opaque wrapper)
 - `_SHELL_KEYWORDS` (`if` / `for` / `do` 等)
-- `_segment_has_residual_metachar` (非 `_SAFE_READ_FIRST_TOKENS` での `>` / `&` 等)
+- residual metachar (非 `_SAFE_READ_FIRST_TOKENS` での `>` / `&` 等。0.25.0 から
+  quote-aware — クォート内・エスケープ済みは演算子になれないので数えない)
 - `shlex.split` 失敗 / `normalize` 失敗
 - glob operand が dotenv stem に一致しないケース
 
@@ -157,8 +161,9 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 `_SAFE_READ_FIRST_TOKENS` (副作用なしの read-only コマンド: `ls cat head tail
 nl tac bat less more view wc file stat du df tree grep egrep fgrep rg ag ack
 od xxd hexdump`) を `handlers/bash/constants.py` に定義。第一トークンがこの
-セットに該当する segment は、`_segment_has_residual_metachar` の ask 経路を
-**スキップ** して operand scan に直行する。
+セットに該当する segment は、residual metachar (0.25.0 から
+`_live_operator_metachars` の quote-aware 判定) の ask 経路を **スキップ** して
+operand scan に直行する。
 
 導入背景: 0.11.0 までの実測ログで `bash_classify` の ask 発火の **約 80%** が
 `segment_residual_metachar_lenient` (= `>` 出力リダイレクトや `&` background
@@ -197,17 +202,177 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
 緩めない側は意図的に非対称にしてある (guard を落とさないため):
 
 - **ダブルクォート内は hard-stop 維持** — `echo "$(cat .env)"` は展開される
+  (0.25.0 で「展開が生きる char のみ」に精緻化 — 下記)
 - **クォート外のバックスラッシュは quote を開かない** — `\'` は literal `'`
   であってシングルクォート開始ではない (Bash 仕様)。取り違えると
   `cat \'$(cat .env)\'` で guard が落ちる。一方 `\$` `\(` 自体は hard-stop として
   数え続けるため `cat <(echo \(\)) < .env` は挙動不変
 - **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
 
+**0.25.0 (判定境界バッチ、2026-08 精査)**: quote-aware 化を 3 点仕上げ、
+隔離内レビューで発覚した splitter の clobber 取りこぼし (4 点目) を塞いだ。
+
+1. **ダブルクォート内は「展開が生きる char (`$` バッククォート =
+   `_DQ_LIVE_HARD_STOPS`) のみ」hard-stop** にする。Bash はダブルクォート内で
+   `(` `)` `{` `}` `<` を一切解釈しない (bash 5 実測: `echo "A%(b)A"` は
+   literal 出力、無クォートの `%(b)` は syntax error で実行されない)。これで
+   `git ls-files --format="%(objectname)" .env` が単一クォート形 (0.18.0 で
+   到達済み) と同じ operand scan → `_GIT_LS_FILES_OBJECT_OPTS` 経由の deny に
+   揃い、「同一セマンティクスのコマンドの verdict がクォートの書き方だけで
+   deny / ask / allow に分かれる」非一貫性が解消した (blob object name =
+   内容の指紋なので deny 側に揃えるのが正。無クォート形は syntax error で
+   実行されない形なので hard-stop の ask / allow のままで実害なし)。二重
+   クォート形にも 0.18.0 と同じ後段 gate (`_quoted_hard_stop_reason` の inert
+   allowlist / 委譲判定 / awk・sed 動的構文) が適用されるため、
+   `docker run img "cmd(arg)"` / `find . -exec sh -c "cat {}" ";"` は従来どおり
+   ask に倒れる。緩む側は `git diff "HEAD@{1}"` / `git stash apply "stash@{0}"`
+   / `awk "{print}" f` (シングルクォート形と対称)。
+
+2. **residual metachar (`>` `&` `|` `<`) の判定を raw segment の quote-aware
+   走査にする** (`redirects._live_operator_metachars`)。これらの文字が演算子と
+   して働くのはクォート外・非エスケープのときだけで、0.24.0 までの token
+   ベース判定 (shlex がクォートを剥がした後) は `git commit -m 'a & b'` の
+   `&` (literal データ) と `echo x > f` の `>` (演算子) を区別できず、実ログ
+   429 件 (0.5%) の日常コマンドを ask に倒していた。安全リダイレクトは word
+   単位で除外するが、**演算子の live 性 (クォート外・非エスケープ) と target の
+   quote removal は分離する** (`_is_safe_redirect_word` / `_quote_removed`)。
+   bash は target をクォート除去してから使うので `2>"/dev/null"` /
+   `2>'/dev/null'` / `2>&"1"` / `2> "/dev/null"` は無クォート形と同じ安全
+   リダイレクトで、「word 全体が非クォート」を条件にすると
+   `git commit -m x 2>"/dev/null"` / `make build 2>"/dev/null"` が live な `>`
+   を見て ask に倒れる (Codex R1 P2)。逆に演算子部までクォート内の形
+   (`echo '2>/dev/null'` / `echo "2>" /dev/null`) は演算子ではないデータなので
+   剥離しない — `_lex` はクォート / エスケープの区切り文字自体も word に残す
+   ため、word のクォート外の接頭部にだけ演算子を照合すればこの区別が付く。
+   副次効果 2 つ: (a) `mv 'a|b' .env` は residual ask に隠れていた literal
+   機密 operand が見えるようになり deny (無クォートの `mv ab .env` と一貫)、
+   (b) `ls '>.env'` のクォート済み operand を fused redirect と誤認して deny
+   していた metadata-only 経路の誤検知が解消 (live に `>` が無ければ
+   `_sensitive_redirect_target` を呼ばない)。機密 target への書込み
+   (`ls > ".env"` / `ls -la >| ".env"`) は target をクォートしても deny のまま
+   (`>|` clobber は安全リダイレクトの演算子形に含めない)。
+
+3. **hard-stop segment のリテラル operand 救済 scan**
+   (`bash_handler._hard_stop_literal_scan`)。単純変数展開 (`$NAME` /
+   `${NAME}`) を「不明な 1 文字列」placeholder に置換して hard-stop が消える
+   segment は、通常の operand scan (spec の pattern 枠 / option 値の除外 /
+   glob dotenv 判定 / basename match をそのまま) にかけ、**deny だけを採用**
+   する。`cat $PWD/.env` は変数の展開結果に依らず読まれるファイルの basename
+   が `.env` で確定する (`X + "/.env"` の basename は X に依らない) ので、
+   確信 deny 条件 (機密 operand 確定 × 内容出力) を満たす — 「静的解析不能」
+   ではないものを解析不能扱いしていた分類の是正であり、判断困難 → deny 強制の
+   特例では**ない** (placeholder が pattern に一致しない `cat $X`、basename が
+   変数に跨る `cat $X.env`、コマンド置換・複合展開・positional 変数が残る形、
+   first token が変数の形は従来どおり ask_or_allow)。deny 以外の結論 (allow /
+   ask) は捨てて従来の hard-stop ask に倒すので、この scan が verdict を
+   緩める方向に働くことはない。placeholder (`__sfg_unexpanded__`) は既定 /
+   一般的な pattern の literal 部と衝突しない綴りを選び、deny reason では
+   `${…}` に置換して表示、path 形の除外案内は抑止する (変数部分が確定しない
+   rule を案内しないため)。既知の残余リスク: placeholder に一致する custom
+   pattern (`*unexpanded*` 等) を書いているユーザーには変数だけの operand
+   (`cat $VAR`) まで誤 deny になり、deny は全 mode terminal (`make_deny` 固定)
+   のため **mode 変更で回避できない** — 該当 custom pattern の削除・変更が
+   唯一の回避手段 (既定 patterns は一致しないので out-of-box では発火しない。
+   `CHANGELOG.md` 0.25.0 の開示参照)。
+
+   救済 scan の deny は「literal を直書きした同型コマンドが deny になる場合」
+   に限って発火する (置換後の token 列に既存の判定をそのまま適用するだけ) ため、
+   個々の deny の妥当性は literal 側の既存ポリシーに帰着する。旧版との同一
+   コーパス diff (1,413 コマンド × 2 mode = 2,826 verdict、変更 280 件) で
+   説明不能ゼロを確認した (`CHANGELOG.md` 0.25.0)。
+
+   **全読み一致ゲート**: 変数の展開結果によって機密 operand の**役割**が変わる
+   形があるため、救済 scan が deny を採用してよいのは次の 3 つの読みすべてで
+   「機密ファイル operand」に分類されるときだけとし、食い違えば従来どおり
+   `ask_or_allow` に落とす。
+
+   1. **展開が 1 語になる読み** (placeholder 置換そのもの)
+   2. **展開が語ごと消える読み** (`hard_stop_literal_ambiguous`) — 非クォート
+      の変数展開は空文字列になると Bash の word splitting で**語ごと消える**。
+      `grep $PAT .env` は `PAT` が空なら `grep .env` になり、`.env` は FILE
+      ではなく**検索 pattern** として解釈されて入力は stdin から来る
+      (= ファイルは読まれない)
+   3. **展開がオプショントークンになる読み**
+      (`hard_stop_literal_option_ambiguous`) — 語全体が展開である語 (bare
+      expansion word) は `-e` のような**値を取るオプション**にも展開されうる。
+      `X=-e` のとき `grep -e KEY $X .env` は `grep -e KEY -e .env` として実行
+      され、`.env` は第 2 の検索 pattern になる。**クォートは word splitting を
+      止めるだけでオプション解釈は止めない**ので、読み 2 と違いクォート形も対象
+
+   判定は `_analyze_segment` を各読みで走らせるだけで、**コマンドを列挙し
+   直さない** — 第 1 positional が pattern / program かは `command_specs.
+   _CmdSpec.pattern_slot`、option が値を取るかは同 `values` が既に知っている
+   ので、読みの違いはそのまま候補集合の違いになる。
+
+   読み 3 は **arity (分離形で consume する語数) ごと**に作る
+   (`operand_lexer._option_reading_tokens`)。値を取らない flag (arity 0) は
+   spec の有無に依らず必ず 1 つ、あとは spec が宣言する arity ごとに代表を
+   1 つずつ借りる (`jq --arg NAME VALUE` の arity 2 まで)。`git` は option 表を
+   2 つ持つ (global option 区間 / サブコマンド) ので両方から借りる。読みの数は
+   「bare expansion word 数 × (arity 種類数 - 1) + 1」で、**option 数には
+   比例しない** (arity の種類は 3〜4 で頭打ち)。代表は「値が全て non-path」
+   かつ「`pattern_opts` でない」ものを優先する — この 2 条件を満たす option は
+   同 arity の他の option を支配する (path の値は候補に残り、pattern_opt は
+   pattern 枠を閉じて候補を**増やす**ので、どちらも反例として弱い)。
+
+   対象外の bare expansion word は **背景として flag に置く**。これも実在
+   しうる読みで、こう置くと読みの族が最も緩い側になる (下記 (b) が最大化
+   される)。複数語が同時に役割を変える組合せを別に列挙しなくて済むのはこの
+   背景のおかげ (組合せは語数の指数になるので作れない)。
+
+   **なぜ語 × arity で尽きるか**: operand `O` が候補から外れる経路は 2 つ
+   しかない。(a) どれかの語が option になって `O` を値として飲む —
+   これには `O` の d 語前に arity >= d の option トークンが要り、展開は自分の
+   位置より後ろに語を挿し込めないので「`O` の d 語前の bare expansion word が
+   arity >= d の option に化ける」読みだけが該当する。(b) `O` より前の
+   positional が全部消えて `O` が第 1 positional (pattern 枠 / `git` の
+   サブコマンド位置) に落ちる — これは他の語が全部 flag のときに最大化され、
+   背景の flag がその読みを常に含む。よって語ごと × arity ごとの総当りで尽きる。
+   「機密 operand より**前**にある語だけが役割を変える」という絞り込みも
+   再実行の結果として自動的に成立する。
+
+   ask_or_allow に戻る形: `grep $PAT .env` / `sed $SCRIPT .env` /
+   `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` / `git log -n $N .env`
+   (読み 2)、`grep "$PAT" .env` / `sed "$SCRIPT" .env` / `grep -e KEY $X .env` /
+   `git log $OPT .env` / `tar -cf out.tar $X .env` / `jq . $X NAME .env`
+   (arity 2 の option に化ける形) / `grep "$PAT" other .env` (pattern 枠を
+   閉じない option に化ける形) / `git $OPT log .env` (global option 区間の語が
+   `-C` に化けてサブコマンド位置がずれる形) (読み 3)。
+   deny 維持: 語**内**に展開がある形 (`cat $PWD/.env` / `grep -e KEY $D/.env`
+   — bare expansion word が無いので読み 3 を 1 つも作らない)、値を取る
+   オプションを持たないコマンド (`cat $OPTS .env` / `cat $X >| .env` /
+   `head $OPTS .env` — arity 0 の読みは作るが flag に化けても後続語の役割は
+   変わらない)、値が path のオプションしか噛まない形 (`grep -f $F .env`)、
+   bare expansion word が機密 operand より後ろにある形 (`grep -e KEY .env $X`)、
+   距離が spec の宣言 arity を超える形 (`jq . "$X" NAME other .env` /
+   `git log "$OPT" other .env`)。
+
+   読み 2 / 読み 3 はどちらも `command_specs` の被覆に依存する境界を持つ
+   (spec 未登録のコマンドは deny 維持 = 過剰 deny 側に倒れる)。
+   `CHANGELOG.md` 0.25.0 の開示を参照。
+
+4. **splitter が `>` 演算子を bash と同じ最長一致で読む** (`>>` append /
+   `>|` clobber は 2 文字で 1 演算子)。0.24.0 までは `>|` の `|` を pipe と
+   して区切っていたため、redirect target が「機密パスだけの segment」に割れ、
+   機密パスへの clobber 上書き (`ls -la >| .env` — noclobber を明示的に無視
+   する破壊的 truncate) が書込みリダイレクト判定
+   (`_sensitive_redirect_target` / operand scan / 救済 scan) に届かず
+   first_token を問わず**全 mode allow** で素通りしていた (通常の `>` / `>>` /
+   `n>` / `&>` は deny なのに、より意図的に強い形だけが緩い非対称)。spaced /
+   fused / fd 番号付き (`2>|` / `12>|`) の全形が `>` 形と同じ verdict に揃う。
+   `>>` を先に消費するのも同じ最長一致の一部 (`>>|` は bash では `>>` + `|`
+   の syntax error 形で、2 つ目の `>` から `>|` を合成しない。bash 3.2 / 5.3
+   実測)。`&>|` だけは bash の字句 (`&>` + `|` = syntax error) と異なり `>|`
+   を結合するが、実行不能な形が deny 側に倒れるだけで保護は落ちない。gate 側
+   (`may_write_redirect` / `_WRITE_REDIRECT_RE`) は 0.25.0 の実装が最初から
+   `>|` を扱えており、修正は splitter の分割のみ。
+
 **splitter と hard-stop は 1 つの lexer (`_lex`) を共有する** (PR #38 review R7
 で統一)。`_lex` が行継続 `\<newline>` を除去し (クォート外とダブルクォート内。
 シングルクォート内とコメント内は literal)、各文字に quote / escape / comment の
 字句状態を付けた列を作る。分割 (`&&` `||` `;` `|` 改行、および単独 `&` =
-非同期リスト。`2>&1` `&>` の `&` は除く) と hard-stop 判定はその列だけを見る
+非同期リスト。`2>&1` `&>` の `&` と、`>|` clobber の `|` (0.25.0 — `>` 演算子
+は `>>` / `>|` を最長一致で読む) は除く) と hard-stop 判定はその列だけを見る
 ので、`ls &\` ⏎ `& cat .env` のように継続をまたいで合成される演算子も正しく
 区切れる。字句規則を直すときは `_lex` だけを直す。以下は統一前に個別に
 見つかった desync の記録。
@@ -883,6 +1048,13 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
    hard-stop quote-aware 化で `awk '{...}' .env` 形も operand scan に到達する)。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
    `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` も
    ``ask_or_allow`` に格下げした (0.3.2〜0.7.x の prefix normalize は撤廃)。
+   0.25.0 から、operand 内の**単純変数展開** (`$NAME` / `${NAME}`) だけが
+   理由で解析を放棄していた形は「静的解析不能」から外れる — `cat $PWD/.env`
+   のように展開結果に依らず basename が確定する形は deny に届く (リテラル
+   operand 救済 scan、上の 0.25.0 節)。展開結果が判定を左右する形
+   (`cat $X` / `cat $X.env`)、展開結果によって operand の役割が変わりうる形
+   (`grep $PAT .env` の語消失 / `grep -e KEY $X .env` のオプショントークン)、
+   コマンド置換・複合展開は従来どおり本項の扱い。
 3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0、0.11.0 で segment 単位
    再評価)** — 0.3.4〜0.6.x では character-level quote-aware parser で
    `cat < .env` / `cat<.env` / `cat 0<.env` / `cat < ".env"` などから target
@@ -946,12 +1118,10 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
     十分」の思想)。ただし **metadata-only ∩ safe_read コマンド**
     (`ls` / `stat` / `wc` 等) の `ls > .env` 形だけは 0.14.0 で metadata-only
     shortcut を入れた結果 regression したため、`_sensitive_redirect_target` で
-    deny を復活させている (Codex P2)
-15. **`>|` clobber override redirect は未対応** — `tree >| .env` の `>|` は
-    `|` が segment 分割で pipe として割られ `tree >` と `.env` に分離するため、
-    機密 redirect target を検出できず allow に倒る。`>|` を意図的に書くのは
-    `noclobber` を理解した上級者で「うっかり」ではない (思想 1 射程外) ため
-    既知限界とする。`>` / `>>` / `n>` / `&>` の通常 redirect は検出する
+    deny を復活させている (Codex P2)。検出対象の書込み redirect は `>` / `>>`
+    / `n>` / `&>` / `>|` の全形 (`>|` clobber は 0.25.0 まで `|` が segment
+    分割で pipe として割られ検出できない既知限界だったが、splitter の最長一致
+    読みで解消し `>` と同扱いになった)
 
 ## Edit/Write hook の発火経路 (2026-04-18 実機観測)
 
