@@ -55,8 +55,33 @@ def resolve_path(file_path: str, cwd: str) -> Path:
     return Path(cwd) / path if cwd else path
 
 
+def _realpath(path: Path) -> Path:
+    """containment 判定専用の realpath 正規化 (存在しないパスでも動作する)。
+
+    macOS では ``/tmp`` / ``/var`` が ``/private/tmp`` / ``/private/var`` への
+    symlink であり (``ls -ld /tmp /var`` で確認できる)、正規化しないと
+    containment 判定が表記揺れで壊れる:
+
+    - path が resolved 形 (``/private/var/folders/...``) で渡るのに roots の
+      素の列挙 (``/var/folders``) にしか一致しない (一時ファイルが skip
+      されない方向)
+    - ``cwd`` と ``path`` で表記が割れ (例: cwd は resolved、path は
+      unresolved)、本来 ``cwd`` の内側にあるファイルが「``cwd`` の外の別の
+      一時ディレクトリ」と誤判定されて skip される方向
+
+    in-repo 先例:
+    ``external-ai-assist/hooks/post-implementation-review/gitscan.py::worktree_root``
+    が同じ罠を realpath で解決している。
+
+    ``resolve_path()`` の「symlink を正規化しない」方針 (``load_text`` の
+    ``lstat`` ベース symlink 判定を守るため) はここでは変更しない —
+    containment 判定用にここだけ別途正規化した値を使う。
+    """
+    return Path(os.path.realpath(str(path)))
+
+
 def _temp_dir_roots() -> tuple[Path, ...]:
-    """一時ディレクトリとして扱う既知のルート。
+    """一時ディレクトリとして扱う既知のルート (realpath 正規化済み)。
 
     ``$TMPDIR`` に加え、環境によらず存在しうる固定パスも列挙する
     (``$TMPDIR`` が未設定/別プロセスの値のまま渡ってくる場合の保険)。
@@ -67,14 +92,24 @@ def _temp_dir_roots() -> tuple[Path, ...]:
         env_path = Path(env_tmpdir)
         if env_path not in roots:
             roots.append(env_path)
-    return tuple(roots)
+    normalized: list[Path] = []
+    for root in roots:
+        normalized_root = _realpath(root)
+        if normalized_root not in normalized:
+            normalized.append(normalized_root)
+    return tuple(normalized)
 
 
 def is_under_temp_dir(path: Path) -> bool:
-    """``path`` が ``$TMPDIR`` / ``/tmp`` / ``/private/tmp`` / ``/var/folders`` 配下か。"""
+    """``path`` が ``$TMPDIR`` / ``/tmp`` / ``/private/tmp`` / ``/var/folders`` 配下か。
+
+    containment 判定は realpath 正規化した上で行う (macOS の ``/tmp``/``/var``
+    symlink による表記揺れ対策)。
+    """
+    normalized_path = _realpath(path)
     for root in _temp_dir_roots():
         try:
-            if path.is_relative_to(root):
+            if normalized_path.is_relative_to(root):
                 return True
         except (TypeError, ValueError):
             continue
@@ -101,7 +136,7 @@ def should_skip_temp_dir(path: Path, cwd: str) -> bool:
         return False
     if cwd:
         try:
-            if path.is_relative_to(Path(cwd)):
+            if _realpath(path).is_relative_to(_realpath(Path(cwd))):
                 return False
         except (TypeError, ValueError):
             pass
@@ -118,7 +153,7 @@ def is_outside_cwd(path: Path, cwd: str) -> bool:
     if not cwd:
         return False
     try:
-        return not path.is_relative_to(Path(cwd))
+        return not _realpath(path).is_relative_to(_realpath(Path(cwd)))
     except (TypeError, ValueError):
         return False
 

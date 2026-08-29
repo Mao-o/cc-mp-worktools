@@ -12,6 +12,18 @@ import _testutil  # noqa: F401
 import source
 
 
+def _fake_macos_realpath(path: str) -> str:
+    """macOS の ``/tmp`` / ``/var`` symlink (実体は ``/private/tmp`` /
+    ``/private/var``) だけを模した ``os.path.realpath`` の fake。それ以外の
+    パスは無変換で返す。実機 (macOS) の挙動を決定論的に再現し、CI/実行環境の
+    違いに左右されないテストにするため (P1)。
+    """
+    for prefix in ("/tmp", "/var"):
+        if path == prefix or path.startswith(prefix + "/"):
+            return "/private" + path
+    return path
+
+
 class TestResolvePath(unittest.TestCase):
     def test_absolute_path_returned_as_is(self):
         result = source.resolve_path("/abs/path/foo.py", "/some/cwd")
@@ -47,6 +59,61 @@ class TestIsUnderTempDir(unittest.TestCase):
         # "/tmpfoo" は "/tmp" 配下ではない (前方一致ではなくパスセグメント単位で
         # 判定するため誤検知しない)。
         self.assertFalse(source.is_under_temp_dir(Path("/tmpfoo/bar.py")))
+
+    def test_realpath_resolved_var_folders_form_is_also_temp(self):
+        # P1 face A: macOS では /var が /private/var の symlink (`ls -ld /var`
+        # で確認できる)。$TMPDIR (mkdtemp 等) は resolved 形
+        # (/private/var/folders/...) で渡ってくることがあるが、正規化前は
+        # roots に /var/folders しか列挙しておらず検出できなかった。
+        # 実機 (macOS) の実際の symlink 解決で確認する (mock を使わない)。
+        self.assertTrue(
+            source.is_under_temp_dir(Path("/private/var/folders/xx/yyyy/T/foo.py"))
+        )
+
+
+class TestRealpathAliasNormalization(unittest.TestCase):
+    """P1: macOS の ``/tmp``/``/var`` symlink による表記揺れを realpath 正規化で
+    吸収する。``os.path.realpath`` を fake に差し替え、ホスト環境の実際の
+    symlink 構成に依存しない決定論的なテストにする。
+    """
+
+    def test_face_a_unresolved_root_matches_resolved_path_form(self):
+        # face A: path が resolved 形 (/private/var/folders/...) で来ても、
+        # 正規化前の roots (/var/folders) にしか一致していなかった経路。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertTrue(
+                source.is_under_temp_dir(Path("/private/var/folders/xx/T/foo.py"))
+            )
+
+    def test_face_b_cwd_resolved_path_unresolved_still_not_skipped(self):
+        # face B: cwd が resolved 形 (/private/tmp/proj) で渡り、file_path が
+        # unresolved 形 (/tmp/proj/foo.py) のとき、正規化前は
+        # path.is_relative_to(Path(cwd)) が False になり「cwd の外の別の
+        # 一時ディレクトリ」と誤判定して skip していた (本来は skip しては
+        # いけない cwd 内のファイル)。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertFalse(
+                source.should_skip_temp_dir(
+                    Path("/tmp/proj/checkout_flow.py"), "/private/tmp/proj"
+                )
+            )
+
+    def test_face_b_reverse_alias_direction_still_not_skipped(self):
+        # 逆方向: path が resolved 形、cwd が unresolved 形。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertFalse(
+                source.should_skip_temp_dir(
+                    Path("/private/tmp/proj/checkout_flow.py"), "/tmp/proj"
+                )
+            )
+
+    def test_is_outside_cwd_not_confused_by_alias(self):
+        # FILE_SPLIT_ADVISOR_CWD_ONLY=1 用の is_outside_cwd も同じ alias で
+        # 「cwd の外」と誤判定してはいけない。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertFalse(
+                source.is_outside_cwd(Path("/tmp/proj/foo.py"), "/private/tmp/proj")
+            )
 
 
 class TestShouldSkipTempDir(unittest.TestCase):
