@@ -85,8 +85,13 @@ builder は以下の順でパスをスキャンし、統合する:
    - **`error: 旧パスから取り込む値の形式が不正です`** (exit 1): 旧パスの値が
      文字列でもオブジェクトでもない (list 等)、対象 service がオブジェクト
      形式を受け付けない、値が空文字・空白のみ (dispatcher がキーの欠落と同じ
-     扱いで恒久 deny する形)、または **その service の `verify()` が形を理由に
-     拒否する値**が入っている (例: gcloud の `account` に文字列以外)。
+     扱いで恒久 deny する形)、**その service の `verify()` が形を理由に
+     拒否する値**が入っている (例: gcloud の `account` に文字列以外)、または
+     **対象 service が参照するキー (許可キーが宣言されている場合。gcloud なら
+     `project`/`account`) に使える値が 1 つも無い** (例: `{"gcloud":
+     {"region":"us-central1"}}` — `region` はどの service の許可キーでも
+     ないため `verify()` からは無視され、project/account 不在の deny に
+     化ける)。
      ユーザーに「表示されたキーについて、旧パスの該当値を
      手動で修正するか削除してから再実行してください」と案内する
      (accounts.local.json を Claude が直接編集するのではなく、ユーザー自身に

@@ -75,6 +75,13 @@
    その service の `verify()` が形を理由に deny しない**」で、service ×
    形状 (scalar / 正常 dict / 部分欠落 / falsy 値 / truthy 非文字列 /
    未知キー / 空 dict) の表で固定した。
+   さらに **`DICT_ALLOWED_KEYS` 宣言時は「使える値が 1 つでもあるか」の判定を
+   許可キーの値だけに限定した** (独立レビュー指摘で修正)。
+   `{"gcloud":{"region":"us-central1"}}` は未知キー `region` の非空文字列を
+   使える値と誤認して受理していたが、`gcloud.verify()` は `project` も
+   `account` も無いとして deny する — migrate は成功と報告した entry が
+   そのままでは使えなかった。`DICT_ALLOWED_KEYS` を宣言しない service
+   (`github`/`firebase`) は影響を受けない。
 4. **空文字・空白のみの値を書けないようにした** (独立レビュー指摘)。
    `set --service aws --value "$UNSET_VAR" --commit` のように未定義の環境変数を
    渡すと空文字に展開され、`"aws": ""` が書き込めてしまっていた。dispatcher は

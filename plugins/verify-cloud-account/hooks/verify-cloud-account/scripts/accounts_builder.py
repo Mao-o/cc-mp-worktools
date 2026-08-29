@@ -63,6 +63,17 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   判定すると GHE の制約を無警告で捨てていた。キーを宣言しない service
   (firebase — alias は verdict に効かず、キーを畳み込むと自己回復の案内先が
   消える) と、キーが一致しない組は conflict に倒す。
+- **D12**: D9 の「dict 内に使える値が 1 つでも残っていれば良い」は、
+  `DICT_ALLOWED_KEYS` を宣言する service では**許可キーの値だけ**を数える
+  (Codex R3 P2): `{"gcloud":{"region":"us-central1"}}` は "region" が非空
+  文字列なので D9 の基準では「使える値がある」と誤認して受理していたが、
+  `gcloud.verify()` は `DICT_ALLOWED_KEYS` 外のキーを読まないため project も
+  account も無いとして deny する — migrate は成功と報告したのに、書いた
+  entry がそのままでは使えない状態になっていた。未知キーの値そのものは
+  (D10 の `DICT_VALUE_CHECK` 契約に従う形である限り) 引き続き許容するが、
+  「使える値が 1 つでもあるか」の判定からは除外する。`DICT_ALLOWED_KEYS` を
+  宣言しない service (`github`/`firebase`) は影響を受けない — allowed_keys が
+  `None` のときは従来どおり全キーの値を対象にする。
 """
 from __future__ import annotations
 
@@ -284,6 +295,10 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
     しまい、書込時検証をすり抜けて実行時 deny に化ける (Codex R1 P2:
     `{"project":"p","account":123}` は gcloud.verify() が truthy 非 str の
     account を reject するのに builder が通していた)。
+    さらに「使える値が 1 つでもあるか」の判定は、`DICT_ALLOWED_KEYS` 宣言時は
+    **許可キーの値だけ**を対象にする (D12)。未知キーの非空文字列値まで
+    数えると、`{"region":"us-central1"}` のように project/account が無い
+    entry を「使える値がある」と誤認して受理してしまう。
     型不正 (list/int/None 等トップレベルの型) と空 dict は verify() 自体が
     拒否するため strict_keys に関わらず常に検証する。空文字・空白のみの
     **値**も同様に常に拒否する — どの service でも実在の CLI 値と一致し得ず
@@ -336,7 +351,14 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                 )
             if isinstance(v, str):
                 if v.strip():
-                    good_values += 1
+                    # 未知キー (DICT_ALLOWED_KEYS 宣言時) の値は形として許すが、
+                    # 「使える値」の数には入れない (Codex R3 P2): verify() は
+                    # 宣言外のキーをそもそも読まないため、許可キーに使える値が
+                    # 1 つも無いのに未知キーの値だけで受理すると、migrate は
+                    # 成功と報告したのに verify() は project も account も
+                    # 無いとして deny する entry を書いてしまう。
+                    if allowed_keys is None or k in allowed_keys:
+                        good_values += 1
                     continue
                 # 空文字・空白のみの値は strict / lenient を問わず拒否する。
                 # 空文字キー (上) と同じく、実在の CLI 値と一致し得ず永久 deny に
@@ -361,6 +383,12 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                     " この service の verify() はこの形を検証時に拒否します。"
                 )
         if not strict_keys and good_values == 0:
+            if allowed_keys is not None:
+                return (
+                    f"{service.ACCOUNT_KEY}: オブジェクトにこの service が参照する"
+                    f"キーの有効な値がありません (許容: "
+                    f"{', '.join(sorted(allowed_keys))})。"
+                )
             return f"{service.ACCOUNT_KEY}: 有効な値を持つキーがありません。"
         return None
     return (
@@ -1001,7 +1029,9 @@ def _cmd_migrate(
     # すらいない既存データの形が (verify() では許容されている緩い形でも) 不合格
     # というだけで、無関係な統合作業まで exit 1 にしてしまう
     # (strict_keys=False: gcloud の未知キー等、verify() が黙って無視するだけの
-    # 形は migrate では許容し、型不正 (list/int/None 等) と空 dict だけを拒否する)。
+    # 形は migrate では許容する。型不正 (list/int/None 等)・空 dict・空文字値に
+    # 加え、DICT_ALLOWED_KEYS 宣言時は許可キーに使える値が 1 つも無い場合も
+    # 拒否する — 詳細は `_validate_entry_shape` の docstring (D9/D10/D12) 参照)。
     # 内部バックログ: 旧ファイルの値型を検証せず list 等がそのまま merged に入り、
     # 後で dispatcher が deny する (書込時ではなく実行時に初めて発覚する) 不具合の修正。
     invalid: list[tuple[str, str]] = []

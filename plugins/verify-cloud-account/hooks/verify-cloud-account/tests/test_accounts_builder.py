@@ -17,6 +17,7 @@ migrate 3 シナリオ:
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import tempfile
@@ -33,6 +34,24 @@ from scripts import accounts_builder as builder  # noqa: E402
 
 def _fake_run(stdout: str = "", stderr: str = "", returncode: int = 0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+
+
+# TestBuilderAcceptedShapesPassVerify の全数探索 (Codex R3 P2) が使う値種別:
+# 不在 / 正常な非空文字列 / 空文字列 / None / 非文字列 truthy (int)。
+# 空白のみの文字列は `v.strip()` 判定で "" と同じ分岐を通るため別枠は起こさない。
+_ABSENT = object()
+_DICT_VALUE_KINDS = (_ABSENT, "sample-value", "", None, 123)
+
+
+def _iter_dict_shapes(keys):
+    """`keys` の全部分集合 (空集合含む) × 各キーの値種別の直積を生成する。
+
+    各キーが独立に `_DICT_VALUE_KINDS` の 5 状態 (不在含む) を取るとみなし、
+    `len(keys)` 個の直積 (5**len(keys) 通り) を作る。「部分集合 × 4 値種別
+    (不在キーを除く) の直積」と数は一致する (二項定理 Σ_k C(n,k) 4^k = 5^n)。
+    """
+    for combo in itertools.product(_DICT_VALUE_KINDS, repeat=len(keys)):
+        yield {k: v for k, v in zip(keys, combo) if v is not _ABSENT}
 
 
 class BaseBuilder(unittest.TestCase):
@@ -863,6 +882,24 @@ class TestValidateEntryShape(unittest.TestCase):
         )
         self.assertIsNone(reason)
 
+    def test_gcloud_unknown_key_only_rejected_when_not_strict(self):
+        """Codex R3 P2 の指摘そのもの: `{"region": "us-central1"}` は
+        project も account も無いのに、未知キー "region" の非空文字列値を
+        「使える値」として good_values に数えて受理していた。
+        gcloud.verify() は DICT_ALLOWED_KEYS 外のキーをそもそも読まないため、
+        project も account も無いとして deny する — migrate は成功と報告した
+        のに、書いた entry がそのままでは使えない状態になる。
+        `test_gcloud_truthy_non_str_on_unknown_key_tolerated_when_not_strict`
+        (未知キーの値の**形**は問わない) とは区別すること — こちらは
+        「使える値の**在り処**」の話で、未知キーの値だけでは good_values の
+        対象にならない。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"region": "us-central1"}, strict_keys=False
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("project", reason)
+        self.assertIn("account", reason)
+
     def test_github_non_str_value_rejected_when_not_strict(self):
         """github.verify() は dict の**全キー**の値を isinstance(str) で検査し、
         1 つでも非 str なら (falsy な None でも) その host のエラーを積む
@@ -1060,6 +1097,12 @@ class TestBuilderAcceptedShapesPassVerify(unittest.TestCase):
             {"project": "p", "account": 123},
             {"project": "p", "account": None},
         ),
+        # Codex R3 P2 の指摘そのもの: 未知キーのみで project/account が無い
+        (
+            "gcloud",
+            {"region": "us-central1"},
+            {"project": "p", "account": None},
+        ),
         (
             "github",
             {"github.com": "USER", "ghe.example.com": 123},
@@ -1157,6 +1200,101 @@ class TestBuilderAcceptedShapesPassVerify(unittest.TestCase):
                 self.assertIsNotNone(
                     self._verify_with_active(svc_name, expected, active),
                     "verify() が deny しない形を builder が拒否している (過剰)",
+                )
+
+    # dict を受け付ける service ごとの全数探索キー全体 (Codex R3 P2)。
+    # DICT_ALLOWED_KEYS 宣言時 (gcloud) は「許可キー全部 + 未知キー 1 つ」、
+    # 未宣言時 (github/firebase) は許可/未知の区別が無いため代表キー 2 つ
+    # (複数キー相互作用 — DICT_VALUE_CHECK が全キーに一貫して効くか — の確認用)。
+    _EXHAUSTIVE_DICT_UNIVERSE = {
+        "gcloud": ("project", "account", "region"),
+        "github": ("host-a", "host-b"),
+        "firebase": ("alias-a", "alias-b"),
+    }
+
+    def _active_from_expected(self, svc_name: str, expected: dict):
+        """accepted shape (使える値が 1 つ以上ある) から、それに一致する
+        active を合成する。`_verify_with_active` の mock 経路の形に合わせ、
+        firebase は scalar (現在値 1 つ)、gcloud/github は dict を返す。
+        builder が受理した形である前提なので、使える値は必ず 1 つ以上ある。
+        """
+        if svc_name == "gcloud":
+            def usable(key):
+                v = expected.get(key)
+                return v if isinstance(v, str) and v.strip() else None
+            return {"project": usable("project"), "account": usable("account")}
+        if svc_name == "github":
+            return {
+                k: v for k, v in expected.items() if isinstance(v, str) and v.strip()
+            }
+        if svc_name == "firebase":
+            for v in expected.values():
+                if isinstance(v, str) and v.strip():
+                    return v
+            raise AssertionError(
+                f"accepted firebase shape {expected!r} has no usable value"
+            )
+        raise AssertionError(
+            f"unsupported service for exhaustive shape test: {svc_name}"
+        )
+
+    def test_accepted_shapes_exhaustive_enumeration_pass_verify(self):
+        """`ACCEPTED` の手書き表は「気付いた形」しか拾えない。Codex R3 P2:
+        `{"region": "us-central1"}` だけの gcloud dict は表に無く、
+        `good_values` が未知キーの値まで数える不具合を検出できなかった
+        (project も account も無いのに builder は受理し、gcloud.verify() は
+        両方無いとして deny していた)。
+
+        dict を受け付ける各 service について、`_EXHAUSTIVE_DICT_UNIVERSE` の
+        キー全体の全部分集合 × 値種別 {正常 str, "", None, 123} の直積
+        (`_iter_dict_shapes`) を全数探索し、builder (strict_keys 両方の値) が
+        受理した形はすべて verify() が形を理由に deny しないことを確認する
+        (D10/D12 の不変条件)。aws/kubectl (ACCEPTS_DICT=False) と scalar 値の
+        ケースは対象外 (`ACCEPTED` の手書き表がそちらを担当する)。
+        """
+        accepted_counts = {svc_name: 0 for svc_name in self._EXHAUSTIVE_DICT_UNIVERSE}
+        checked = 0
+        for svc_name, keys in self._EXHAUSTIVE_DICT_UNIVERSE.items():
+            svc = builder._SERVICE_BY_KEY[svc_name]
+            for expected in _iter_dict_shapes(keys):
+                checked += 1
+                for strict_keys in (False, True):
+                    reason = builder._validate_entry_shape(
+                        svc, expected, strict_keys=strict_keys
+                    )
+                    if reason is not None:
+                        continue
+                    active = self._active_from_expected(svc_name, expected)
+                    with self.subTest(
+                        svc=svc_name, expected=expected, strict_keys=strict_keys
+                    ):
+                        verify_reason = self._verify_with_active(
+                            svc_name, expected, active
+                        )
+                        self.assertIsNone(
+                            verify_reason,
+                            "builder "
+                            f"({'strict' if strict_keys else 'lenient'}) が"
+                            f"受理した形を verify() が形を理由に deny した: "
+                            f"{expected!r} -> {verify_reason!r}",
+                        )
+                    accepted_counts[svc_name] += 1
+        expected_checked = sum(
+            5 ** len(keys) for keys in self._EXHAUSTIVE_DICT_UNIVERSE.values()
+        )
+        self.assertEqual(
+            checked,
+            expected_checked,
+            "全数探索が生成した形の総数が想定 (5**len(keys) の合計) と異なる"
+            " (_iter_dict_shapes の実装ミスの可能性)",
+        )
+        for svc_name, count in accepted_counts.items():
+            with self.subTest(svc=svc_name):
+                self.assertGreater(
+                    count,
+                    0,
+                    f"{svc_name} の全数探索が受理形を 1 件も見つけていない"
+                    " (universe 設定ミスで検査が空振りしている可能性)",
                 )
 
     def test_empty_scalar_rejected_for_every_service(self):
