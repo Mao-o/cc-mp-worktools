@@ -210,12 +210,13 @@ class TestContextMode(HookTestCase):
         self.assertNotIn("decision", data, "context モードで block してはいけない")
         specific = data["hookSpecificOutput"]
         self.assertEqual(specific["hookEventName"], "PreToolUse")
-        # `permissionDecision` を返さないことは安全性の要件。`"allow"` を返すと
-        # ExitPlanMode の承認ゲートが飛び、利用者がプランを見ないまま実装に入る
+        # `permissionDecision` を返さないことは安全性の要件。`"allow"` は
+        # `updatedInput` とペアで使わない限り承認ゲートを飛ばさないが、ペアに
+        # すれば飛ばせてしまい利用者がプランを見ないまま実装に入ってしまう
         self.assertNotIn(
             "permissionDecision",
             specific,
-            "承認判断を返してはいけない (プランの承認ゲートを飛ばしてしまう)",
+            "承認判断を返してはいけない (allow は updatedInput とペアで承認ゲートを飛ばしうる)",
         )
         self.assertIn("## クロスレビュー結果 (ExitPlanMode)", specific["additionalContext"])
         self.assertIn("差し戻していません", specific["additionalContext"])
