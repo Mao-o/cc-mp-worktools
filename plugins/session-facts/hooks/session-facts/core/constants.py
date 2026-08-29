@@ -234,6 +234,11 @@ PROJECT_MARKERS = (
     "mise.toml",
     ".config/mise/config.toml",
     ".tool-versions",
+    # core/runtime.py::build_runtime_info() はこれも読む。ランタイム
+    # 固定ファイルだけを持つ Python プロジェクトを gate で落とすと、
+    # ファイル比率による言語検出もランタイム情報の収集も走らないまま
+    # facts が丸ごと消える。
+    ".python-version",
     # detectors/nextjs.py
     *NEXT_CONFIG_CANDIDATES,
     # detectors/node_typescript.py

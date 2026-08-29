@@ -731,3 +731,42 @@ class MaxOutputCharsValidationTest(unittest.TestCase):
     def test_zero_budget_is_still_accepted(self):
         args = parse_args(["--root", ".", "--max-output-chars", "0"])
         self.assertEqual(args.max_output_chars, 0)
+
+
+class ExceptionFallbackBudgetTest(unittest.TestCase):
+    """PR #67 round 6 (Codex P2): summarize_repo() が予期せず落ちたときの
+    フォールバックが上限適用を通っておらず、`--max-output-chars` が出力全体の
+    上限として成立していなかった (長い root ではハーネスの注入上限を超えうる)。
+    """
+
+    def test_fallback_output_respects_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ("d" * 120)
+            root.mkdir()
+            with mock.patch(
+                "cli.summarize_repo", side_effect=RuntimeError("boom")
+            ), mock.patch("sys.stderr", new=io.StringIO()):
+                buf = io.StringIO()
+                with mock.patch("sys.stdout", new=buf):
+                    rc = main(["--root", str(root), "--max-output-chars", "10"])
+            self.assertEqual(rc, 0)
+            self.assertLessEqual(len(buf.getvalue().strip()), 10)
+
+
+class PythonVersionMarkerTest(unittest.TestCase):
+    """PR #67 round 6 (Codex P2): ランタイム固定ファイルだけを持つ非 git の
+    Python プロジェクトが marker gate で落ち、facts が丸ごと消えていた。
+    """
+
+    def test_python_version_only_project_is_analyzed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".python-version").write_text("3.11.9\n")
+            (root / "app.py").write_text("print('hi')\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found; facts skipped", out)
+            # gate を通ったことの実証: ランタイム検出とファイル走査の両方が
+            # 実際に走っている (最小ヘッダーではどちらも出ない)。
+            self.assertIn("- runtime: python 3.11.9 (.python-version)", out)
+            self.assertIn("app.py", out)
+

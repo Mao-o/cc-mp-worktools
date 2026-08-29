@@ -492,7 +492,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # and the final print/json.dumps. A failure in those still exits
         # non-zero with no output.
         print(f"[session-facts] WARNING: summarize_repo failed, emitting minimal header: {e}", file=sys.stderr)
-        output = f"## Project Facts\n- repo_root: {root}"
+        # このフォールバックも上限適用を通す。通さないと
+        # `--max-output-chars` が「出力全体の上限」として成立せず、
+        # 長い root を持つ環境ではハーネスの注入上限を超えうる。
+        output = _enforce_output_budget(
+            f"## Project Facts\n- repo_root: {root}",
+            [],
+            config.max_output_chars,
+        )
     if args.emit == "subagent-json":
         print(json.dumps({
             "hookSpecificOutput": {
