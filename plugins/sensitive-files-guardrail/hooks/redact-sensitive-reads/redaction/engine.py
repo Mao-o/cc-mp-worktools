@@ -146,6 +146,14 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
             info = redact_toml(text)
             body = format_toml(info)
             return build_reason(basename, fmt, body, extras)
+        except RecursionError:
+            # 深いネスト (実測: 配列 500 段) で ``tomllib.loads`` が投げる。
+            # ``RecursionError`` は ``RuntimeError`` のサブクラスなので、下の
+            # tomllib 未搭載分岐が先に捕まえて「Python 3.11+ が必要」という
+            # **事実に反する** note を出していた (0.26.0 隔離内レビュー P2-2)。
+            # json 分岐が ``except (ValueError, RecursionError)`` を明示して
+            # いるのと同じ理由で、toml 側でも先に分けて捕まえる。
+            fallback_reason = "parse_failed"
         except RuntimeError:
             # tomllib 未搭載 (Python < 3.11)。パース自体を試みていない。
             fallback_reason = "toml_unsupported"

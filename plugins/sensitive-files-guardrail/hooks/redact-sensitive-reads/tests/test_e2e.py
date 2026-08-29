@@ -617,5 +617,87 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         self.assertNotIn(str(self.repo), reason)
 
 
+class TestE2EKeyonlyKeepsKeyNames(unittest.TestCase):
+    """0.26.0 隔離内レビュー P1-1 の 3 経路回帰 (Read / Bash / Edit)。
+
+    >32KB のファイルは ``redaction.engine.redact_large_file`` →
+    ``format_keyonly`` に降りる。0.26.0 で予算内折り畳みを Read / Bash に
+    配線した際、``format_keyonly`` が全鍵名を **1 行**に並べていたため
+    「行ごと落ちて鍵名 0 個」になっていた (0.25.0 の盲目 cut では数十個
+    見えていた = 退行)。3 経路とも鍵名が残ることを固定する。
+
+    値は 1 文字も出さない (これが崩れたら redaction そのものの破綻)。
+    """
+
+    _KEY_COUNT = 200
+    _VALUE = "sk_live_" + "v" * 297
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        pad = "X" * 26
+        self.keys = [
+            f"SERVICE_API_KEY_{pad}_{i:03d}" for i in range(self._KEY_COUNT)
+        ]
+        self.path = Path(self.tmp) / ".env.longkeys"
+        self.path.write_text(
+            "".join(f"{k}={self._VALUE}\n" for k in self.keys)
+        )
+        # keys-only scan (>32KB) 経路に入ることを前提にした fixture
+        self.assertGreater(self.path.stat().st_size, 32 * 1024)
+
+    def _assert_keys_survive(self, reason: str, minimum: int):
+        self.assertLessEqual(len(reason.encode("utf-8")), 3 * 1024)
+        self.assertIn("keys-only scan", reason)
+        self.assertNotIn("sk_live_", reason)
+        visible = sum(1 for k in self.keys if k in reason)
+        self.assertGreaterEqual(
+            visible,
+            minimum,
+            f"鍵名が {visible} 個しか残っていない"
+            f" (reason {len(reason.encode('utf-8'))} byte)",
+        )
+
+    def _reason(self, envelope: dict, argv: list[str]) -> str:
+        result = _run_main(envelope, argv)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_read_keeps_key_names(self):
+        reason = self._reason({
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(self.path)},
+            "cwd": self.tmp,
+            "permission_mode": "bypassPermissions",
+        }, ["--tool", "read"])
+        self._assert_keys_survive(reason, 20)
+
+    def test_bash_cat_keeps_key_names(self):
+        reason = self._reason({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env.longkeys"},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }, ["--tool", "bash"])
+        self._assert_keys_survive(reason, 10)
+        # 除外案内は従来どおり全文残る (0.23.0 の保護を壊していない)
+        self.assertIn("patterns.local.txt", reason)
+
+    def test_edit_overwrite_keeps_key_names(self):
+        reason = self._reason({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(self.path),
+                "old_string": "x=1",
+                "new_string": "y=2",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }, ["--tool", "edit"])
+        self._assert_keys_survive(reason, 10)
+
+
 if __name__ == "__main__":
     unittest.main()

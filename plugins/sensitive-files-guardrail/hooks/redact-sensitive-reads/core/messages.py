@@ -1231,11 +1231,18 @@ _EDIT_SUGGESTION_ALT_DEFAULT = (
 # セクションで「既存キーとして表示」しているのと矛盾)。suggested_keys の
 # 2 セクション化はしない (変更範囲を最小にする判断、NOTES 参照) 代わりに、
 # alt 側で **上の一覧が更新であって追加ではない**ことを明示的に言い直す。
+#
+# **長さは既定文言と同程度に保つ** (0.26.0 隔離内レビュー P2-1)。``edit_deny``
+# は tail (この文言を含む) を先に組んでから残りを minimal info の予算に回す
+# ため、ここが長いと minimal info セクションが丸ごと消える
+# (``minimal info: unavailable`` すら出ない)。初版は 383 byte あり、corpus
+# 1,623 件中 30 件で実際に消えていた。「値の更新はユーザーに直接依頼するか
+# 1Password CLI 経由で」の一文は ``_EDIT_OVERWRITE_*_CLAUSE`` 側の
+# suggestion と重複するので落とす。上限は
+# ``tests/test_messages.py::TestEditSuggestionAltUpdateBudget`` が固定する。
 _EDIT_SUGGESTION_ALT_UPDATE = (
-    "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です。"
-    "`.env.example` へのキー名追記は新規キーのときの案内なので不要です"
-    "（キー名は既に記載されているはずです）。値の更新はユーザーに直接依頼するか、"
-    "1Password CLI 等のシークレット管理ツール経由で行ってください。"
+    "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
+    "（`.env.example` への追記は不要）。"
 )
 
 # 上書き対象の既存ファイルを Read 同等 minimal info として載せるときのラベル。
@@ -1301,10 +1308,39 @@ def _line_cost(line: str) -> int:
 # 勧める) になり事実として無意味なため。
 _OMIT_ACTION_USE_READ = "use Read tool with the absolute path for the rest"
 
+# 省略マーカーの単位ラベル (0.26.0)。既定は「行」。keys-only scan のブロックは
+# 1 行 = 1 鍵なので「鍵」と言い換える — ``... (2 more lines)`` では「鍵名を
+# 何個落としたか」が読み手に伝わらないため。
+_OMIT_UNIT_LINES = "lines"
+_OMIT_UNIT_KEYS = "keys"
 
-def _omit_marker(n: int, next_action: str = "") -> str:
+# ``redaction.keyonly_scan.KEYONLY_SCAN_MARKER`` と同じ文字列。``core`` から
+# ``redaction`` を import すると依存が逆流する (``redaction.file_render`` が
+# ``core.safepath`` を使っている) ため、実体は両側に置き
+# ``tests/test_messages.py`` の assumption test で突合する。
+_KEYONLY_SCAN_MARKER = "keys-only scan"
+
+
+def _omit_marker(
+    n: int, next_action: str = "", unit: str = _OMIT_UNIT_LINES
+) -> str:
     suffix = f"; {next_action}" if next_action else ""
-    return f"  ... ({n} more lines{suffix})"
+    return f"  ... ({n} more {unit}{suffix})"
+
+
+def _omit_unit_for(block: str) -> str:
+    """``<DATA>`` ブロックの ``format:`` 行から省略単位ラベルを決める。
+
+    ``build_reason`` の header 3 行の直後が本文の 1 行目 (``format:``) である
+    ことに依存する (``_DATA_HEADER_LINES`` と同じ前提。
+    ``TestDataBlockAssumptions`` が生成側と突合している)。
+    """
+    for line in block.split("\n", _DATA_HEADER_LINES + 1)[
+        : _DATA_HEADER_LINES + 1
+    ]:
+        if line.startswith("format:") and _KEYONLY_SCAN_MARKER in line:
+            return _OMIT_UNIT_KEYS
+    return _OMIT_UNIT_LINES
 
 
 def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]:
@@ -1331,18 +1367,24 @@ def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]
     Returns:
         採用した行のリスト。1 行も採用できなければ空リスト。
     """
+    unit = _omit_unit_for(block)
     fitted = _fit_data_block_core(
-        block, budget, protect_note=True, next_action=next_action,
+        block, budget, protect_note=True, next_action=next_action, unit=unit,
     )
     if fitted:
         return fitted
     return _fit_data_block_core(
-        block, budget, protect_note=False, next_action=next_action,
+        block, budget, protect_note=False, next_action=next_action, unit=unit,
     )
 
 
 def _fit_data_block_core(
-    block: str, budget: int, *, protect_note: bool, next_action: str = "",
+    block: str,
+    budget: int,
+    *,
+    protect_note: bool,
+    next_action: str = "",
+    unit: str = _OMIT_UNIT_LINES,
 ) -> list[str]:
     """``_fit_data_block`` の実装本体 (note 保護の有無を切替可能にしたもの)。"""
     lines = block.split("\n")
@@ -1357,7 +1399,7 @@ def _fit_data_block_core(
     closing_cost = sum(_line_cost(x) for x in closing)
     # 省略マーカーの上限幅 (件数が最大のとき = 最長) で予約する。実際に出る
     # マーカーはこれ以下なので、予約しておけば予算超過は起きない。
-    marker_reserve = _line_cost(_omit_marker(len(body), next_action))
+    marker_reserve = _line_cost(_omit_marker(len(body), next_action, unit))
 
     kept: list[str] = []
     used = 0
@@ -1374,7 +1416,7 @@ def _fit_data_block_core(
         return []
     omitted = len(body) - len(kept)
     if omitted:
-        kept.append(_omit_marker(omitted, next_action))
+        kept.append(_omit_marker(omitted, next_action, unit))
     return kept + closing
 
 

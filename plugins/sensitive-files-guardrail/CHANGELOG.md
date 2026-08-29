@@ -23,9 +23,12 @@ commit 52113a1 で完了)。
 ## 0.26.0
 
 deny reason の**レンダリング領域** (文言・情報量) の不具合 5 件を修正 (内部
-バックログの精査で発見)。**判定境界 (deny / allow / ask) の変化: なし。**
-変わるのは reason 文字列の正確さ・情報量だけ。テスト件数: redact 1119 →
-**1149** (check 94 は変化なし)。
+バックログの精査で発見) + 隔離内レビュー指摘の反映 4 件。**判定境界
+(deny / allow / ask) の変化: なし。** 変わるのは reason 文字列の正確さ・
+情報量だけ (Read/Bash/Edit/Write × permission_mode 3 種 × fixture 30 個 =
+1,623 件のコーパスを 0.25.0 と突き合わせ、`permissionDecision` の差分 0 /
+reason の予算超過 0 を確認)。テスト件数: redact 1119 → **1169**
+(check 94 は変化なし)。
 
 1. **Edit/Write の既存ファイル minimal info 取得失敗時、理由 (kind) を握り
    つぶさず reason に反映**。`handlers.edit_handler._render_existing` が
@@ -57,13 +60,43 @@ deny reason の**レンダリング領域** (文言・情報量) の不具合 5 
    タグと「実値は無い」の免責事項が key 行の途中で失われていた
    (90 key の `.env` で実測)。あわせて折り畳み機構自体が末尾 note を保護
    しておらず、Edit 経由でも 20 key 前後から note が消えていた欠陥も修正
-   (note を守ると中身が 0 行になる極端な入力では、旧来どおり中身を優先する
-   フォールバック付き)。
+   (note を守ると 1 行も載せられなくなる極端な入力では、note を諦めて中身を
+   優先するフォールバック付き)。
+   なお note と省略マーカーの next action が固定費として乗るぶん、**予算が
+   元々きつい Edit / Write の minimal info では表示される key 行が 0.25.0
+   より 1〜2 行減る** (コーパス実測: 鍵数の多い dotenv の上書きで 2 行 → 0 行
+   になる組み合わせがある)。免責事項と閉じタグを優先した意図的なトレードオフ。
+   Read / Bash では逆に増える (同コーパスで 258 件増 / 減少は Edit・Write 側
+   のみ)。
 5. **JSON/TOML パース失敗時の reason が小ファイルでも「large / too large」
    と誤表示する不具合を修正**。keys-only scan フォールバックに理由
    (`large` / `parse_failed` / `toml_unsupported`) を渡せるようにし、
    壊れた JSON や tomllib 未搭載環境の TOML でも事実どおりのラベルと note
    (「パース失敗」「Python 3.11+ が必要」) を出すようにした。
+6. **keys-only scan で鍵名が 1 つも表示されなくなる退行を修正**
+   (上記 4 の初版が持ち込んだもの)。鍵名を `keys: A, B, C, ...` の **1 行**に
+   並べていたため、折り畳みが行単位でしか効かず、その 1 行が残予算に入らないと
+   行ごと落ちていた (32KB 超のファイルと JSON/TOML のパース失敗が該当。長い
+   鍵名 200 個の `.env` を Read すると 3,072 byte 中 2,753 byte を使い残して
+   鍵名 0 個)。盲目 cut の頃は途中で切れた 1 行として数十個見えていたので、
+   折り畳みの導入が情報を減らしていた。**1 鍵 1 行**に変え、preview 上限の
+   告知を末尾行から header 行へ移した。あわせて省略マーカーの単位を
+   keys-only のブロックだけ `lines` → `keys` にし、「鍵名を何個落としたか」が
+   読めるようにした。
+7. **「既存キーの値の更新」文面が minimal info セクションを押し出す退行を
+   修正** (上記 2 の初版が持ち込んだもの)。`edit_deny` は末尾側を先に組んで
+   から残りを minimal info の予算に回すため、383 byte (既定文言の約 2.9 倍)
+   あった新文面によってセクションが丸ごと消えていた (`minimal info:
+   unavailable` すら出ない = silent degradation。コーパス 1,623 件中 30 件)。
+   `suggestion:` 側と重複する 1 文を落として既定文言と同程度に短縮した。
+8. **深いネストの TOML を「Python 3.11+ が必要」と誤表示する不具合を修正**。
+   `RecursionError` は `RuntimeError` のサブクラスなので、tomllib 未搭載の
+   検知分岐が先に捕まえ、tomllib のある環境でも事実に反する note を出して
+   いた (実測: 配列 500 段)。パース失敗として扱うよう分岐を分けた。
+9. **空の dotenv で末尾 note が出ない不具合を修正**。`format_dotenv` の
+   `entries == 0` 早期 return が、上記 4 で `format_keyonly` に対して直した
+   のと同じ欠陥を残していた。内容が空でも「実値は context に無い」の開示は
+   出す (コーパスで `<DATA>` ブロックの note 欠落は 0.25.0 の 621 件 → 0 件)。
 
 ## 0.25.0
 

@@ -1155,5 +1155,49 @@ class TestScanStreamBound(unittest.TestCase):
         self.assertLess(large, small * 4)
 
 
+class TestUpdateWordingKeepsMinimalInfo(BaseEdit):
+    """0.26.0 隔離内レビュー P2-1: 「更新」文面で minimal info を押し出さない。
+
+    ``edit_deny`` は tail (``suggestion_alt`` を含む) を先に組んでから残りを
+    minimal info の予算に回す。0.26.0 で新設した「既存キーの値の更新」文面が
+    383 byte (既定文言の約 2.9 倍) あったため、鍵数の多い dotenv では
+    minimal info セクションが **丸ごと** 消えていた (``minimal info:
+    unavailable`` すら出ない = silent degradation)。レビューの corpus 実測で
+    1,623 件中 30 件が該当。
+    """
+
+    def test_many_key_value_update_still_carries_minimal_info(self):
+        keys = [f"SERVICE_API_KEY_{i:03d}" for i in range(100)]
+        (Path(self.tmp) / ".env").write_text(
+            "".join(f"{k}=sk_live_{'x' * 32}{i:03d}\n" for i, k in enumerate(keys))
+        )
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "\n".join(
+            f"{k}=new{i}" for i, k in enumerate(keys[:40])
+        )
+        resp = handle(envelope, tool_label="Edit")
+        self.assertEqual(_decision(resp), "deny")
+        reason = _reason(resp)
+        # 「更新」文面に切り替わっている (退行はこの分岐でのみ起きる)
+        self.assertIn("既存キーの値の更新", reason)
+        # minimal info セクションが <DATA> 包装ごと残る
+        #
+        # このケースで **表示される鍵行は 0 行**である (`entries: 100` と
+        # 折り畳みマーカーだけ)。0.26.0 で入れた note 保護 + omit marker の
+        # next action が固定費として乗り、0.25.0 なら 2 行入っていた枠が
+        # 消えるため。レビューが P3-4 として計測済みの意図されたトレードオフ
+        # で、ここでの回帰対象は **セクションが丸ごと消えること**。
+        self.assertIn("minimal info (Read", reason)
+        self.assertIn("</DATA>", reason)
+        self.assertIn("entries: 100", reason)
+        # 予算と末尾の除外案内は従来どおり
+        self.assertLessEqual(
+            len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+        )
+        self.assertIn("patterns.local.txt", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

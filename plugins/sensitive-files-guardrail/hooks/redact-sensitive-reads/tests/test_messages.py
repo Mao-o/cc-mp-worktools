@@ -870,5 +870,133 @@ class TestFitReadReason(unittest.TestCase):
         self.assertEqual(M.fit_read_reason(reason, budget=5), reason)
 
 
+def _keyonly_block(n: int = 200, name_len: int = 46) -> tuple[list[str], str]:
+    """keys-only scan の ``<DATA>`` ブロックを実物の builder で組む。
+
+    鍵名の長さは ``sanitize_key`` の上限 (128) 未満で、レビューの実測 fixture
+    (``.env.longkeys``: 200 keys / 70,600 byte) と同程度のものを使う。
+
+    Returns:
+        ``(keys, block)`` — 鍵名リストと ``build_reason`` 済みブロック。
+    """
+    from redaction.engine import build_reason
+    from redaction.keyonly_scan import format_keyonly
+
+    pad = "X" * max(0, name_len - 20)
+    keys = [f"SERVICE_API_KEY_{pad}_{i:03d}" for i in range(n)]
+    body = format_keyonly(keys, 70600, fmt_hint="opaque")
+    return keys, build_reason(".env.longkeys", "opaque", body)
+
+
+class TestKeyonlyFoldKeepsKeys(unittest.TestCase):
+    """0.26.0 レビュー P1-1: 予算が余っているのに鍵名 0 個、を作らない。
+
+    ``format_keyonly`` が全鍵名を 1 行に並べていた頃は、その 1 行が残予算に
+    入らないと行ごと落ち、Read で 3,072 byte 中 2,753 byte を使い残したまま
+    鍵名が 0 個になっていた (旧 0.25.0 は盲目 cut だったので 55 個見えていた
+    = 本 PR の退行)。fixture 単位の assertion だけだと別サイズでの再混入を
+    拾えないので、**性質**として固定する。
+    """
+
+    def setUp(self):
+        self.keys, self.block = _keyonly_block()
+
+    def _visible_keys(self, fitted: list[str]) -> int:
+        joined = "\n".join(fitted)
+        return sum(1 for k in self.keys if k in joined)
+
+    def test_no_budget_left_over_with_zero_keys(self):
+        for budget in range(400, 3300, 25):
+            with self.subTest(budget=budget):
+                fitted = M._fit_data_block(self.block, budget)
+                if not fitted:
+                    continue
+                used = len("\n".join(fitted).encode("utf-8"))
+                self.assertLessEqual(used, budget)
+                leftover = budget - used
+                if leftover >= 1024:
+                    self.assertGreater(
+                        self._visible_keys(fitted),
+                        0,
+                        f"budget={budget}: {leftover} byte 余らせたまま鍵名 0 個",
+                    )
+
+    def test_full_reason_budget_shows_many_keys(self):
+        fitted = M._fit_data_block(self.block, output.MAX_REASON_BYTES)
+        self.assertGreater(self._visible_keys(fitted), 20)
+        self.assertEqual(fitted[-1], "</DATA>")
+        self.assertTrue(fitted[-2].startswith("note:"))
+
+    def test_fit_read_reason_path_shows_many_keys(self):
+        fitted = M.fit_read_reason(self.block)
+        self.assertLessEqual(
+            len(fitted.encode("utf-8")), output.MAX_REASON_BYTES
+        )
+        self.assertGreater(sum(1 for k in self.keys if k in fitted), 20)
+
+
+class TestOmitMarkerUnit(unittest.TestCase):
+    """omit marker の省略単位ラベル (0.26.0 レビュー P1-1)。
+
+    ``... (2 more lines)`` では「鍵名を何個落としたか」が読み手に伝わらない。
+    keys-only scan のブロックだけ単位を ``keys`` に切り替える。単位の判定は
+    ``format:`` 行の marker を見て行う (``core`` → ``redaction`` の依存を
+    作らないため、marker 文字列は両側に置いて下の assumption test で突合する)。
+    """
+
+    def test_keyonly_block_marker_counts_keys(self):
+        _keys, block = _keyonly_block()
+        joined = "\n".join(M._fit_data_block(block, 900))
+        self.assertRegex(joined, r"\.\.\. \(\d+ more keys\)")
+
+    def test_keyonly_marker_keeps_next_action(self):
+        _keys, block = _keyonly_block()
+        joined = "\n".join(M._fit_data_block(block, 900, next_action="do X"))
+        self.assertRegex(joined, r"\.\.\. \(\d+ more keys; do X\)")
+
+    def test_non_keyonly_block_marker_still_counts_lines(self):
+        from io import BytesIO
+
+        from redaction.engine import redact
+
+        text = "".join(f"KEY_{i:03d}=value_{i:03d}_padding\n" for i in range(90))
+        data = text.encode("utf-8")
+        reason = redact(BytesIO(data), ".env", len(data))
+        joined = "\n".join(M._fit_data_block(reason, 900))
+        self.assertRegex(joined, r"\.\.\. \(\d+ more lines\)")
+
+    def test_keyonly_marker_constant_matches_format_keyonly_output(self):
+        """``core.messages`` 側の sniff 用定数を生成側の出力と突合する。
+
+        ``TestDataBlockAssumptions`` と同じ趣旨 — ここがずれると、単位ラベルが
+        **予算超過時にだけ** 静かに ``lines`` へ戻る。
+        """
+        from redaction.keyonly_scan import format_keyonly
+
+        header = format_keyonly(["A"], 10, fmt_hint="opaque").split("\n")[0]
+        self.assertTrue(header.startswith("format:"))
+        self.assertIn(M._KEYONLY_SCAN_MARKER, header)
+
+
+class TestEditSuggestionAltUpdateBudget(unittest.TestCase):
+    """0.26.0 レビュー P2-1: ``suggestion_alt`` が minimal info を押し出さない。
+
+    ``edit_deny`` は tail (``suggestion_alt`` を含む) を先に組んでから残りを
+    minimal info の予算に回すため、alt 文言が長いとセクションが丸ごと消える
+    (``minimal info: unavailable`` すら出ない)。文言の長さそのものが予算の
+    安全余裕なので、**既定文言との差**として上限を固定する。
+    """
+
+    def test_update_alt_is_not_materially_longer_than_default(self):
+        default_len = len(M._EDIT_SUGGESTION_ALT_DEFAULT.encode("utf-8"))
+        update_len = len(M._EDIT_SUGGESTION_ALT_UPDATE.encode("utf-8"))
+        self.assertLessEqual(
+            update_len,
+            default_len + 32,
+            "suggestion_alt (update) が既定文言より大幅に長い。"
+            " minimal info セクションを押し出す (レビュー実測: corpus 30 件)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
