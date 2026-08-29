@@ -70,6 +70,38 @@ class TestPending(StateTestCase):
         self.assertIsNone(state.claim_pending("sess-b"))
 
 
+class TestNoOpAvoidsFileCreation(StateTestCase):
+    """何もしていないセッションで state ファイルを生成しない。
+
+    `_locked_state` は `flock.locked_file` (`a+` open) を経由するため、呼ぶだけで
+    空ファイルが生成され、末尾で必ず書き戻す。読み取り専用の意図の呼び出しでも
+    セッション数だけ空 state が溜まっていた (実測 19 件)。
+    """
+
+    def _state_path(self, session_id: str = SESSION) -> str:
+        return os.path.join(state.state_root(), "state", f"{session_id}.json")
+
+    def test_claim_pending_on_untouched_session_creates_no_file(self):
+        self.assertIsNone(state.claim_pending(SESSION))
+        self.assertFalse(os.path.exists(self._state_path()))
+
+    def test_pending_count_on_untouched_session_creates_no_file(self):
+        self.assertEqual(state.pending_count(SESSION), 0)
+        self.assertFalse(os.path.exists(self._state_path()))
+
+    def test_last_review_at_on_untouched_session_creates_no_file(self):
+        self.assertEqual(state.last_review_at(SESSION), 0.0)
+        self.assertFalse(os.path.exists(self._state_path()))
+
+    def test_claim_pending_still_works_once_file_exists(self):
+        """回帰: 既に state ファイルがあるセッションは今までどおり claim できる。"""
+        state.record_pending(SESSION, ["/repo/a.py"])
+        self.assertTrue(os.path.exists(self._state_path()))
+        claim = state.claim_pending(SESSION)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim[1], ["/repo/a.py"])
+
+
 class TestClaimLifecycle(StateTestCase):
     def test_complete_clears_in_flight_and_records_hashes(self):
         state.record_pending(SESSION, ["/repo/a.py"])

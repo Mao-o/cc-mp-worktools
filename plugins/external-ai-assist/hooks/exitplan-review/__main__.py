@@ -154,21 +154,108 @@ def plan_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
-def _read_marker(f) -> tuple[str, int]:
-    """マーカー本文 (1 行目 hash / 2 行目 count) を読む。壊れていれば空扱い。
+# マーカーに記録するプラン (hash) の最大件数。長いセッションで多数の異なるプランを
+# 出しても $TMPDIR のマーカーファイルが際限なく肥大化しないための安全弁。
+# 超過分は古い順 (挿入順) に捨てる。
+MAX_PLAN_ENTRIES = 50
 
-    release_slot() が hash を空にすると本文は `"\\n<count>"` になる。0.3.1 までは全体を
-    strip() してから分割していたため、この形を `["<count>"]` と誤読して hash=<count> /
-    count=0 になり、枠を 1 つ戻しただけで上限カウントがリセットされていた。行単位で
-    読んで 1 行目 (空) を hash として扱う。
+# 予約 (reserve_slot が結果を知る前に +1 する仮の枠) が確定 (confirm_slot) も
+# 解放 (release_slot) もされないまま残っている場合の回収 TTL。両レビュアーの
+# timeout **上限** より必ず大きく取る必要がある — 下回ると、まだ走っている
+# レビューの予約を別の ExitPlanMode 呼び出しが「kill された」と誤認して横取りする
+# (post-implementation-review の IN_FLIGHT_TTL_SEC と同じ考え方)。
+RESERVATION_TTL_SEC = max(cursor.MAX_TIMEOUT_SEC, codex.MAX_TIMEOUT_SEC) + 300
+
+# plan-review-markers/ と plan-review-*.txt (0.6.0 以前を含む) の mtime GC TTL。
+# post-implementation-review/state.py の STATE_TTL_SEC と同じ値・同じ方式だが、
+# 実装はこの hook 内で完結させる (hook 固有の状態機械は共通化しない方針)。
+MARKER_STATE_TTL_SEC = 48 * 3600
+
+
+def _empty_marker() -> dict:
+    return {"v": 1, "last": "", "plans": {}}
+
+
+def _load_marker(f) -> dict:
+    """マーカー本文 (JSON) を読む。壊れていれば (0.6.0 以前のテキスト形式を含め)
+    空マーカー扱いにする (fail-open)。
+
+    0.6.0 までは `"<hash>\\n<count>"` の 2 行テキストで、単一の (hash, count) しか
+    持てなかった。JSON として解析できない旧形式は素通しで空マーカーに落ちる —
+    1 セッション分の枠情報を失うだけで実害は $TMPDIR の 48 時間 TTL に収まる。
     """
-    lines = [line.strip() for line in flock.read_all(f).split("\n")]
-    saved_hash = lines[0] if lines else ""
+    raw = flock.read_all(f)
+    if not raw.strip():
+        return _empty_marker()
     try:
-        count = int(lines[1]) if len(lines) > 1 and lines[1] else 0
-    except ValueError:
-        count = 0
-    return saved_hash, count
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return _empty_marker()
+    if not isinstance(data, dict):
+        return _empty_marker()
+
+    plans: dict[str, dict] = {}
+    raw_plans = data.get("plans")
+    if isinstance(raw_plans, dict):
+        for hash_key, entry in raw_plans.items():
+            if not isinstance(entry, dict):
+                continue
+            count = entry.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+                continue
+            reserved_at = entry.get("reserved_at")
+            if not isinstance(reserved_at, (int, float)) or isinstance(reserved_at, bool):
+                reserved_at = None
+            plans[hash_key] = {"count": count, "reserved_at": reserved_at}
+
+    last = data.get("last")
+    return {"v": 1, "last": last if isinstance(last, str) else "", "plans": plans}
+
+
+def _dump_marker(marker: dict) -> str:
+    return json.dumps(marker, ensure_ascii=False)
+
+
+def _reclaim_stale_reservations(marker: dict, now: float) -> None:
+    """kill された hook が確定も解放もできなかった仮予約を TTL 経過後に回収する。
+
+    reserve_slot は結果を知る前に count を +1 する「仮予約」を書き込み、
+    `reserved_at` にその時刻を残す。レビューが REVIEW_CLEAN / 全失敗なら
+    release_slot が、指摘ありで block/所見注入を確定したなら confirm_slot が
+    `reserved_at` を None に戻す。ハーネスの hook timeout (ExitPlanMode: 1560s) で
+    kill されるとどちらも呼ばれず、仮予約が残ったままになる。
+    RESERVATION_TTL_SEC (両レビュアーの timeout 上限 + 猶予) を過ぎても
+    `reserved_at` が残っているエントリは、レビューはとうに終わっているはずなのに
+    確定も解放もされていない = kill されたとみなしてロールバックする。
+    """
+    for hash_key, entry in list(marker["plans"].items()):
+        reserved_at = entry.get("reserved_at")
+        if reserved_at is None or now - reserved_at <= RESERVATION_TTL_SEC:
+            continue
+        entry["count"] -= 1
+        entry["reserved_at"] = None
+        if entry["count"] <= 0:
+            del marker["plans"][hash_key]
+            if marker["last"] == hash_key:
+                marker["last"] = ""
+
+
+def _evict_overflow_plans(marker: dict) -> None:
+    """エントリ数が MAX_PLAN_ENTRIES を超えたら古い順 (挿入順) に捨てる。
+
+    `marker["last"]` が指す hash がここで捨てられても `last` 自体は書き換えない
+    (= dangling を許容する)。安全な理由: 唯一の参照元である reserve_slot の
+    重複判定が `marker["last"] == current_hash and current_hash in marker["plans"]`
+    と AND 条件になっており、`plans` に無い hash を `last` が指していても
+    dedup 判定は素通り (False) するだけで実害が無いため。`_reclaim_stale_reservations`
+    が `last` を明示的にクリアしているのとは非対称だが、そちらは「参照先が生きたまま
+    無効化する」経路なので扱いが異なる。
+    """
+    plans = marker["plans"]
+    if len(plans) <= MAX_PLAN_ENTRIES:
+        return
+    for stale in list(plans)[: len(plans) - MAX_PLAN_ENTRIES]:
+        del plans[stale]
 
 
 def reserve_slot(
@@ -176,9 +263,24 @@ def reserve_slot(
 ) -> tuple[bool, str | None]:
     """ロック下で原子的にスロットを確保し `(確保できたか, 利用者向け通知)` を返す。
 
-    確保成功時は count を +1 して current_hash を書き込む。並行起動時も
-    `EXTERNAL_AI_REVIEW_MAX` を超えた確保は起きない。レビュー結果が REVIEW_CLEAN /
-    reviewer 失敗の場合は release_slot() で枠を戻す。
+    0.7.0 でマーカーを JSON 化し、上限を**プラン (hash) 単位**にした。
+    0.6.0 までは単一の (hash, count) しか持てず、count は
+    block のたびに +1 されプランが変わっても戻らなかった。長いセッションで
+    無関係な別プランの block が積み重なると、以後**すべての**プランが
+    レビュー無しで通ってしまっていた。
+
+    - `last` (旧 `saved_hash` の一般化): 直近に試みたプランの hash。**これと一致し
+      かつ `plans` にまだ記録がある**場合だけ「同一内容の再確認」として黙って
+      スキップする。1 つ前の試行としか比較しないので、途中で別プランを挟んで
+      元のプランに戻ってきた場合は「同一内容」扱いにならず、通常の per-plan
+      count 判定に入る (= 戻ってきたプラン自身の累積回数が問われる)
+    - `plans[hash].count`: そのプラン (完全一致の hash) が block された回数。
+      上限判定はこの値だけを見る — 別プランの block 回数は一切参照しない
+
+    確保成功時は該当 hash の count を +1 し `reserved_at` を記録して `last` を
+    更新する。レビュー結果が REVIEW_CLEAN / 全失敗なら release_slot()、
+    指摘ありで block/所見注入を確定したら confirm_slot() を呼ぶこと
+    (`reserved_at` を消して TTL 回収の対象から外すため)。
 
     **確保できない 2 つの理由は利用者から見て意味が違う**ので通知を分ける:
 
@@ -190,17 +292,30 @@ def reserve_slot(
     """
     try:
         with flock.locked_file(marker_file) as f:
-            saved_hash, count = _read_marker(f)
-            if count >= max_reviews:
-                log(f"レビュー回数上限 ({max_reviews}) に達した")
-                return False, (
-                    f"{ENV_MAX_REVIEWS}={max_reviews} に達したためレビューを見送り "
-                    "(このセッションでは以後プランを差し戻しません)"
-                )
-            if saved_hash == current_hash:
+            marker = _load_marker(f)
+            now = time.time()
+            _reclaim_stale_reservations(marker, now)
+
+            if marker["last"] == current_hash and current_hash in marker["plans"]:
                 log("同一内容でレビュー済み")
+                flock.rewrite(f, _dump_marker(marker))
                 return False, None
-            flock.rewrite(f, f"{current_hash}\n{count + 1}")
+
+            entry = marker["plans"].get(current_hash, {"count": 0, "reserved_at": None})
+            if entry["count"] >= max_reviews:
+                log(f"レビュー回数上限 ({max_reviews}) に達した")
+                flock.rewrite(f, _dump_marker(marker))
+                return False, (
+                    f"{ENV_MAX_REVIEWS}={max_reviews} に達したためこのプランのレビューを"
+                    "見送り (内容を変えれば新しいプランとして再度レビューします)"
+                )
+
+            entry["count"] += 1
+            entry["reserved_at"] = now
+            marker["plans"][current_hash] = entry
+            marker["last"] = current_hash
+            _evict_overflow_plans(marker)
+            flock.rewrite(f, _dump_marker(marker))
             return True, None
     except OSError as e:
         log(f"マーカー read/write 失敗: {e}")
@@ -208,24 +323,81 @@ def reserve_slot(
 
 
 def release_slot(marker_file: str, reserved_hash: str) -> None:
-    """reserve_slot() で確保した枠を戻す (REVIEW_CLEAN / reviewer 失敗時)。
+    """reserve_slot() で確保した枠を戻す (REVIEW_CLEAN / reviewer 全失敗時)。
 
-    - count を -1 (0 未満にはしない)
-    - saved_hash がまだ自分 (reserved_hash) なら空に戻す
-    - 他プロセスが追い越して saved_hash を上書きしていれば hash は触らない
+    該当 hash の count を -1 (0 未満にはしない。0 になればエントリごと削除) し、
+    `reserved_at` を None に戻す。`last` が自分 (reserved_hash) ならクリアする
+    (他プランが追い越して `last` を書き換えていればそちらは触らない)。
 
     枠を戻すのは意図的。上限は「差し戻しの往復で前に進まなくなる」のを止めるための
     ものなので、利用者を足止めしなかったレビュー (指摘なし / 失敗) に budget を
-    払わせない。**帰結として上限は外部 AI の呼び出し回数を縛らない** — 別のプランを
-    出せば毎回レビューが走る。README の待ち時間・コスト見積もりはこの前提で書くこと。
+    払わせない。
     """
     try:
         with flock.locked_file(marker_file) as f:
-            saved_hash, count = _read_marker(f)
-            new_hash = "" if saved_hash == reserved_hash else saved_hash
-            flock.rewrite(f, f"{new_hash}\n{max(0, count - 1)}")
+            marker = _load_marker(f)
+            entry = marker["plans"].get(reserved_hash)
+            if entry is not None:
+                entry["count"] -= 1
+                entry["reserved_at"] = None
+                if entry["count"] <= 0:
+                    del marker["plans"][reserved_hash]
+            if marker["last"] == reserved_hash:
+                marker["last"] = ""
+            flock.rewrite(f, _dump_marker(marker))
     except OSError as e:
         log(f"マーカー read/write 失敗: {e}")
+
+
+def confirm_slot(marker_file: str, reserved_hash: str) -> None:
+    """指摘ありで block / 所見注入 (MODE_CONTEXT) を確定した時に呼ぶ。
+
+    count は消費したまま (差し戻し済みとして永続) にしつつ `reserved_at` だけ
+    None に戻し、TTL 回収の対象から外す。**これを呼ばないと、正当に確定した
+    block も RESERVATION_TTL_SEC 経過後に「kill された仮予約」と誤認されて count
+    が静かにロールバックされ、上限が実質緩んでしまう。**
+    """
+    try:
+        with flock.locked_file(marker_file) as f:
+            marker = _load_marker(f)
+            entry = marker["plans"].get(reserved_hash)
+            if entry is not None:
+                entry["reserved_at"] = None
+            flock.rewrite(f, _dump_marker(marker))
+    except OSError as e:
+        log(f"マーカー read/write 失敗: {e}")
+
+
+def _gc_stale_markers(now: float | None = None) -> None:
+    """plan-review-markers/*.marker と plan-review-*.txt を mtime TTL で掃除する。
+    post-implementation-review/stategc.py と同じ mtime TTL
+    GC の考え方を踏襲するが、実装はこの hook 内で完結させる (hook 固有の状態機械は
+    共通化しない方針)。
+    """
+    now = time.time() if now is None else now
+    tmp_root = os.environ.get("TMPDIR", "/tmp")
+    marker_dir = os.path.join(tmp_root, "plan-review-markers")
+    candidates: list[str] = []
+    if os.path.isdir(marker_dir):
+        try:
+            candidates.extend(
+                os.path.join(marker_dir, name) for name in os.listdir(marker_dir)
+            )
+        except OSError:
+            pass
+    try:
+        for name in os.listdir(tmp_root):
+            if name.startswith("plan-review-") and name.endswith(".txt"):
+                candidates.append(os.path.join(tmp_root, name))
+    except OSError:
+        pass
+
+    for path in candidates:
+        try:
+            if now - os.path.getmtime(path) > MARKER_STATE_TTL_SEC:
+                os.unlink(path)
+        except OSError:
+            continue
 
 
 def run_reviewers(plan_text: str, active: list) -> tuple[dict[str, str], dict[str, str]]:
@@ -326,6 +498,8 @@ def main() -> None:
     if payload.get("tool_name") != "ExitPlanMode":
         sys.exit(0)
 
+    _gc_stale_markers()
+
     session_id = payload.get("session_id", "")
     if not session_id:
         log("session_id が空")
@@ -388,6 +562,10 @@ def main() -> None:
         sys.exit(0)
 
     reason = build_reason(results)
+    # 指摘ありで確定 (block / 所見注入) するので、この予約は「kill された仮予約」
+    # ではないと印を付ける。呼び忘れると RESERVATION_TTL_SEC
+    # 経過後に正当な block まで TTL 回収でロールバックされてしまう。
+    confirm_slot(marker_file, current_hash)
     _save_review_copy(session_id, reason)
 
     if mode == MODE_CONTEXT:

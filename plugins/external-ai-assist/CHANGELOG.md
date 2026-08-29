@@ -5,6 +5,89 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.7.0
+
+**2026-08 内部バックログ精査の修正 batch (誤帰属・無効時の無駄な処理・
+セッション累積漏れ・DX)。挙動変更を含むので minor bump。**
+
+### post-implementation-review: git status 失敗時の誤帰属を修正
+
+`gitscan.status_snapshot` は git status の失敗 (timeout / 非 0 終了) や
+`MAX_SNAPSHOT_ENTRIES` 超過 (不完全) の際に `{}` を返しており、Bash 実行前後の
+スナップショット比較 (`changed_between`) が「空」と「本当は全件変化した」を
+区別できなかった。片方が失敗すると、もう片方の全エントリ (他セッション・
+他人の変更を含む) が誤って pending に積まれていた。失敗/不完全のどちらも
+`None` を返すよう変更し、pre/post いずれかが `None` なら属性付けを断念する。
+
+### post-implementation-review: 無効化 / cursor 不在時の無駄な git・state 処理を削減
+
+`handle_pre_tool` / `handle_post_tool` が `bash_tracking_enabled()` しか
+見ておらず、`EXTERNAL_AI_POST_REVIEW=0` や cursor 未インストールの環境でも
+Bash/Edit のたびに git status と state 書込が走っていた。両関数の先頭で
+`review_enabled()` と `cursor.is_available()` を確認して即 return するよう
+変更。加えて `claim_pending` / `pending_count` / `last_review_at` は
+state ファイルが一度も無いセッションを開かなくなった (以前は呼ぶだけで
+「編集ゼロの空 state」が生成されていた)。
+
+**開示**: 0.6.0 までは無効化中でも pending への記録自体は続いており、
+セッション途中で `EXTERNAL_AI_POST_REVIEW=1` に切り替えると無効化中の
+編集も遡ってレビュー対象になっていた。0.7.0 は無効化中は記録そのものを
+止めるため、この遡及は起きなくなる (チケットが要求した挙動どおりだが、
+チケット本文には明記されていなかった副作用として記載)。
+
+### exitplan-review: `EXTERNAL_AI_REVIEW_MAX` をプラン単位にした (破壊的変更寄り)
+
+マーカーが単一の (hash, count) しか持てず、count は block のたびに +1 され
+プランが変わっても戻らなかった。長いセッションで無関係な別プランの block が
+積み重なると、以後**すべての**プランがレビュー無しで通ってしまっていた
+(README の「セッション×プラン単位」という説明と実装が乖離していた)。
+
+マーカーを JSON 化し `{hash: {count, reserved_at}}` のプラン単位に変更。
+上限判定は完全一致の hash ごとに独立する。付随して:
+
+- **仮予約の TTL 回収**: hook が harness timeout で kill されると、確定
+  (block/所見注入) も解放 (release) もされない仮予約が残っていた。
+  `RESERVATION_TTL_SEC` (両レビュアーの timeout 上限 + 300 秒) 経過後に
+  未確定の予約だけを回収する
+- **エントリ数の上限**: 1 セッションが記録するプラン数を 50 件に制限し、
+  超過分は古い順に捨てる
+- **GC**: `plan-review-markers/` と `plan-review-*.txt` (0.6.0 以前の形式を
+  含む) を mtime 48 時間で掃除する (post-implementation-review と同じ方式)
+
+**開示 (破壊的変更寄り)**: プラン単位化の帰結として、`EXTERNAL_AI_REVIEW_MAX`
+は**もはや「差し戻し→修正→再 ExitPlanMode」という往復の総回数を縛らない**。
+修正のたびにプラン本文の hash が変わるため、新しいプランとして毎回フルの
+予算が与えられる。0.6.0 までの「セッション累積」はこの往復を打ち止めに
+できていたが、無関係な別プランを巻き込む副作用があったため、0.7.0 では
+副作用の除去を優先しこの上限機能を受け入れた (README の待ち時間見積りを
+書き換え済み)。
+
+### 既知の未対応 (別途起票)
+
+**pending に記録してから Stop までの間にそのファイルが commit されると、差分が空になり
+レビューされないまま消費される。** 差分の基点を記録時点の commit にずらす修正を一度入れたが、
+その方式では「記録から Stop までの間にそのパスを通過した全ての変更」が差分に載ることが
+マージ前レビューで判明したため取り下げた。単一のセッションが作業中に pull しただけでも
+成立し、この plugin は差分を外部の AI CLI に送るため、他人が書いた行が外部へ出る。
+
+基点を過去にずらす方向では自分の変更と他者の変更を分離できないので、記録時点の内容そのものを
+退避して比較する方式などへ設計をやり直す必要がある。**送信範囲が広がる側には倒さない**
+(差分が取れないなら送らない) 方針は維持する。
+
+### DX: テストディレクトリの単体指定と flaky テストの修正
+
+`hooks/*/tests/__init__.py` (4 ディレクトリ全て) が `_testutil` 等の共有
+ヘルパーをトップレベル名で import する構成のため、`python3 -m unittest
+tests.test_x.Class.method` のような単体指定や pytest のノード ID で
+`ModuleNotFoundError` になっていた。各 `__init__.py` に自分のディレクトリを
+sys.path へ足す処理を追加し解消。
+
+`hooks/_common/tests/test_subproc.py::TestNormalExitCleanup::test_normal_exit_without_leftovers_is_not_delayed`
+は wall-clock (elapsed < 0.5秒) で「待っていない」を測っていたため、
+プロセス起動オーバヘッド自体が閾値に近い環境で flaky だった (実測 0.511 秒で
+fail)。状態遷移の観測 (`kill_process_group` が呼ばれていないことを直接検証)
+に置換し、時間に依存しないようにした。
+
 ## 0.6.0
 
 **離脱率低減: 3 機能を独立に切れるスイッチ + timeout の環境変数化 + 完了通知 + 頻度制御**
@@ -246,10 +329,10 @@ exitplan-review の既定 block 経路は 0.2.0 からこの deprecated 形で�
 ## 0.5.0
 
 **post-implementation-review: 機密・非コードファイルを外部に送らない除外機構 + diff 予算を
-ファイル単位に変更 (切り落としたファイルをレビュー済みにしない)** (2026-08 精査バックログ
-zh5.9 / zh5.8)。送信内容が変わるので minor bump。
+ファイル単位に変更 (切り落としたファイルをレビュー済みにしない)** (2026-08 精査バックログ)。
+送信内容が変わるので minor bump。
 
-### 1. 外部に送らないファイルの除外 (zh5.9)
+### 1. 外部に送らないファイルの除外
 
 0.4.1 までは編集パス全件の HEAD 基準 diff (untracked は全文) を Cursor に渡し、除外は
 gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、議事録や顧客メールの
@@ -302,7 +385,7 @@ gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、
   `decision` / `reason` と同居) と stderr に件数・ファイル名・理由 (当たったパターン) を出す。
   内容は出さない。他 plugin (sensitive-files-guardrail 等) には依存しない
 
-### 2. diff 予算をファイル単位に変更 (zh5.8)
+### 2. diff 予算をファイル単位に変更
 
 結合テキストを `MAX_DIFF_BYTES=40000` で末尾から切る方式だったため、切り落とされた
 ファイルの hash も `complete_claim` で記録され、Cursor が一度も見ていないファイルが
@@ -388,7 +471,7 @@ stderr にも残している。
 ## 0.4.1
 
 **explore-parallel の cursor agent を読み取り専用 (`--mode plan`) で起動する** (2026-08 精査
-バックログ zh5.2)。挙動変更はこの 1 点のみ。
+バックログ)。挙動変更はこの 1 点のみ。
 
 1. **explore-parallel が書込可能モードで cursor を起動していた** — `cursor agent --trust -p`
    で起動しており `--mode plan` が無かった。cursor-agent (2026.08.11) の help では `-p/--print`
@@ -428,9 +511,9 @@ stderr にも残している。
 
 **コードフェンス付き REVIEW_CLEAN の誤 block 修正 + hook 共通ヘルパー `hooks/_common/`
 新設 + 外部 CLI の process group 停止 + CHANGELOG 新設** (2026-08 精査バックログ
-zh5.1 / zh5.27 / zh5.15 / zh5.19 を 1 batch で対応)。
+を 1 batch で対応)。
 
-### 1. REVIEW_CLEAN 判定の修正 (zh5.1, 誤 block)
+### 1. REVIEW_CLEAN 判定の修正 (誤 block)
 
 `is_clean_review` は「非空行が 1 行だけ」を要求していたが、prompts 自体が sentinel を
 コードフェンス内で提示していたため LLM はそれを写し、
@@ -467,7 +550,7 @@ exitplan-review ではこの誤 block が `EXTERNAL_AI_REVIEW_MAX` の枠も消�
 - cursor の `--output-format json` 採用は見送り (sentinel 判定で吸収でき、出力契約を
   増やさない。必要になれば別 issue)
 
-### 2. hook 共通ヘルパー `hooks/_common/` の新設 (zh5.27)
+### 2. hook 共通ヘルパー `hooks/_common/` の新設
 
 3 hook で同型だった処理を `hooks/_common/` に集約し、各 hook の `__main__.py` 冒頭で
 `hooks/` を `sys.path` に載せて参照する。`__file__` 相対の plugin root 内配置なので、
@@ -489,7 +572,7 @@ exitplan-review ではこの誤 block が `EXTERNAL_AI_REVIEW_MAX` の枠も消�
   timeout は実質効いていなかった (dead logic)
 - README の設計原則 5 (「hook 間の共通ヘルパーなし」) を現状に合わせて更新
 
-### 3. 外部 CLI の timeout 時に process group ごと停止 (zh5.15)
+### 3. 外部 CLI の timeout 時に process group ごと停止
 
 cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` から
 `_common.subproc.run_captured` (`Popen(start_new_session=True)` + `communicate(timeout)` +
@@ -533,7 +616,7 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
 - stdin は `input_text` が無ければ `/dev/null` (hook 自身の stdin = payload の pipe を
   子に継承させない)。出力は `errors="replace"` でデコードし、非 UTF-8 出力で例外にしない
 - explore-parallel のバックグラウンド起動 (`os.kill(pid, SIGTERM)` でリーダーのみ停止)
-  は zh5.13 (残骸 GC / PID 再利用対策) と合わせて扱うため本リリースでは変更していない
+  は (残骸 GC / PID 再利用対策) と合わせて扱うため本リリースでは変更していない
 
 ### 4. exitplan-review のマーカー読み取りバグ修正 (新規テストで発見)
 
@@ -542,7 +625,7 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
 だけで上限カウントがリセットされていた (block → 別プラン clean → 以降 1 回多く block
 できる)。行単位で読むよう修正。
 
-### 5. CHANGELOG 新設 / docs (zh5.19)
+### 5. CHANGELOG 新設 / docs
 
 - `CHANGELOG.md` を新設し 0.1.0 → 0.3.1 を git log から起こした。撤廃済み環境変数
   `EXTERNAL_AI_POST_REVIEW_MAX` と互換挙動は 0.3.0 の Deprecated 節に記載

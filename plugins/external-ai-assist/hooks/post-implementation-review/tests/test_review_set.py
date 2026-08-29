@@ -84,7 +84,7 @@ class TestResolvePaths(ReviewSetTestCase):
 
 
 class TestResolvePathsExclusion(ReviewSetTestCase):
-    """zh5.9: 除外パスは rels にも overflow にも入らず、(rel, 理由) として返る。"""
+    """除外パスは rels にも overflow にも入らず、(rel, 理由) として返る。"""
 
     def test_default_globs_exclude_secrets(self):
         claimed = [
@@ -326,7 +326,7 @@ class TestCollectBudget(ReviewSetTestCase):
 
 
 class TestByteBudget(ReviewSetTestCase):
-    """zh5.8: 合計 MAX_DIFF_BYTES はファイル単位で当て、収まらないファイルは hash を記録しない。"""
+    """合計 MAX_DIFF_BYTES はファイル単位で当て、収まらないファイルは hash を記録しない。"""
 
     def _big(self, rel: str, kib: int, seed: str = "x") -> str:
         """kib KiB ちょうどの新規ファイルを書く (1 行 64 バイト。行境界の切り詰めが効く diff)。"""
@@ -409,17 +409,41 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         return found
 
     def test_pre_and_post_tool_fit_in_hook_budget(self):
+        """post-tool は Bash 経路と Edit 系経路で git 呼び出し数が異なる
+        (`__main__.py` の `_record_bash_changes` / `handle_post_tool` 参照)。
+        どちらも同じ `post-tool` hook timeout を共有するため、大きい方
+        (Bash: worktree_root + status_snapshot) で判定する。
+
+        実測 (`gitscan._git` をカウンタでラップして pre-tool / post-tool(Bash) /
+        post-tool(Edit) を個別に起動): pre-tool と post-tool/Bash はどちらも
+        rev-parse 1 回 + status 1 回、post-tool/Edit,Write,NotebookEdit は
+        git 呼び出し 0 回だった。
+        """
         import gitscan
 
         timeouts = self._hook_timeouts()
-        worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
-        for phase in ("pre-tool", "post-tool"):
-            self.assertIn(phase, timeouts)
-            self.assertLess(
-                worst,
-                timeouts[phase],
-                f"{phase} の内部 git timeout 合計 {worst}s が hook timeout に収まっていない",
-            )
+
+        pre_tool_worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        self.assertIn("pre-tool", timeouts)
+        self.assertLess(
+            pre_tool_worst,
+            timeouts["pre-tool"],
+            f"pre-tool の内部 git timeout 合計 {pre_tool_worst}s が hook timeout に収まっていない",
+        )
+
+        # post-tool / Bash: _record_bash_changes が worktree_root (rev-parse) +
+        # status_snapshot (status) を呼ぶ。
+        post_tool_bash_worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        # post-tool / Edit,Write,NotebookEdit: handle_post_tool は git を一切呼ばない
+        # (_edited_paths はパス整形のみ、state.record_pending も git 非依存)。
+        post_tool_edit_worst = 0
+        post_tool_worst = max(post_tool_bash_worst, post_tool_edit_worst)
+        self.assertIn("post-tool", timeouts)
+        self.assertLess(
+            post_tool_worst,
+            timeouts["post-tool"],
+            f"post-tool の内部 git timeout 合計 {post_tool_worst}s が hook timeout に収まっていない",
+        )
 
     def test_stop_git_budget_fits_beside_cursor(self):
         import cursor
@@ -492,7 +516,7 @@ class TestIsCleanReview(ReviewSetTestCase):
         self.assertTrue(self.entry.is_clean_review(""))
 
     def test_fenced_sentinel_with_preamble_is_clean(self):
-        """zh5.1: 2026-08-20 の実出力相当 (前置き 1 文 + フェンス付き sentinel)。"""
+        """2026-08-20 の実出力相当 (前置き 1 文 + フェンス付き sentinel)。"""
         self.assertTrue(self.entry.is_clean_review("```\nREVIEW_CLEAN\n```"))
         self.assertTrue(
             self.entry.is_clean_review("critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n")

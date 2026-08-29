@@ -38,7 +38,7 @@ def clear_plugin_env(keep: dict | None = None) -> None:
         if key not in keep:
             del os.environ[key]
 
-# 2026-08-20 の Stop hook 実出力相当 (zh5.1): 前置き 1 文 + フェンス付き sentinel
+# 2026-08-20 の Stop hook 実出力相当: 前置き 1 文 + フェンス付き sentinel
 FENCED_CLEAN_WITH_PREAMBLE = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
 FENCED_CLEAN = "```\nREVIEW_CLEAN\n```"
 FINDINGS = (
@@ -140,14 +140,35 @@ class HookTestCase(unittest.TestCase):
 
     # -- 状態の読み出し ----------------------------------------------------
 
-    def marker(self, session_id: str) -> tuple[str, int]:
-        """(hash, count)。マーカー未作成なら ("", 0)。"""
-        path = os.path.join(self.tmpdir, "plan-review-markers", f"{session_id}.exitplan.marker")
+    def _marker_path(self, session_id: str) -> str:
+        return os.path.join(self.tmpdir, "plan-review-markers", f"{session_id}.exitplan.marker")
+
+    def marker_raw(self, session_id: str) -> dict:
+        """マーカー本文 (JSON) をそのまま dict で返す。無ければ空マーカー相当。"""
+        path = self._marker_path(session_id)
         if not os.path.exists(path):
-            return "", 0
+            return {"v": 1, "last": "", "plans": {}}
         with open(path) as f:
-            lines = [line.strip() for line in f.read().split("\n")]
-        return lines[0], int(lines[1]) if len(lines) > 1 and lines[1] else 0
+            return json.load(f)
+
+    def marker(self, session_id: str) -> tuple[str, int]:
+        """(last, 全プラン合算 count)。マーカー未作成なら ("", 0)。
+
+        0.7.0 でマーカーが JSON (プラン単位の {hash: count}) になった。
+        「特定 1 プランの count」を見たいテストは
+        `marker_count_for()` を使うこと。合算は「何も予約が残っていない」
+        ことを確認する用途 (clean/失敗後の後始末確認) に使う。
+        """
+        data = self.marker_raw(session_id)
+        plans = data.get("plans", {})
+        total = sum(entry.get("count", 0) for entry in plans.values())
+        return data.get("last", ""), total
+
+    def marker_count_for(self, session_id: str, plan_text: str) -> int:
+        """特定のプラン本文 (hash 化前のテキスト) の count。記録が無ければ 0。"""
+        data = self.marker_raw(session_id)
+        h = self.entry.plan_hash(plan_text.strip())
+        return data.get("plans", {}).get(h, {}).get("count", 0)
 
     def review_copy(self, session_id: str) -> str | None:
         path = os.path.join(self.tmpdir, f"plan-review-{session_id[:8]}.txt")

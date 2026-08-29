@@ -34,10 +34,18 @@ import subprocess
 # 内部 timeout は hooks.json の hook timeout に**収まる**ように決める。超えると
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
-#   pre-tool / post-tool (hook 10s): rev-parse 2 + status 5 = 最悪 7s
+#   pre-tool (hook 10s): REV_PARSE_TIMEOUT_SEC × 1 + STATUS_TIMEOUT_SEC × 1
+#     = 最悪 7s
+#   post-tool / Bash (hook 10s): worktree_root (REV_PARSE_TIMEOUT_SEC × 1) +
+#     status_snapshot (STATUS_TIMEOUT_SEC × 1) = 最悪 7s
+#   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s)
 #   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
-#     rev-parse 2 + ls-files (symlink 一覧) 10 + ls-files (untracked) 10 + rev-parse 2
-#     + パス単位 diff (COLLECT_BUDGET_SEC 30 + 最後の 1 パス 5) = 59s
+#     REV_PARSE_TIMEOUT_SEC × 2 (worktree_root + head_exists)
+#     + LS_FILES_TIMEOUT_SEC × 2 (symlink_map + untracked_among)
+#     + COLLECT_BUDGET_SEC 30 + PATH_DIFF_TIMEOUT_SEC × 1 (予算判定後に走る
+#       最後の 1 パス) = 59s
+#   実際の予算計算とテストは tests/test_review_set.py::TestTimeoutBudgets を参照。
+#   ここでの数値は目安のコメントに過ぎず、乖離したらテストの方を正とする。
 REV_PARSE_TIMEOUT_SEC = 2
 STATUS_TIMEOUT_SEC = 5
 LS_FILES_TIMEOUT_SEC = 10
@@ -191,7 +199,7 @@ def _add_link(root: str, links: dict[str, str], rel: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def status_snapshot(root: str) -> dict[str, list]:
+def status_snapshot(root: str) -> dict[str, list] | None:
     """dirty / untracked なパス -> [status_code, size, mtime_ns] を返す。
 
     **行の集合ではなく (code, size, mtime_ns) のタプルを記録するのが要点**。
@@ -205,6 +213,15 @@ def status_snapshot(root: str) -> dict[str, list]:
     ただし `-uall` でも**入れ子の git リポジトリは展開されず `dir/` のまま**返る
     (別の worktree を `.claude/worktrees/` 配下に作った場合など)。中身は別リポジトリの
     変更なのでレビュー対象にしてはならず、末尾 `/` のエントリは捨てる。
+
+    **失敗 (timeout / 非 0 終了) と、収まりきらない (`MAX_SNAPSHOT_ENTRIES` 超過で
+    不完全) 場合は `None` を返す**。以前はどちらも `{}` を
+    返しており、呼び出し側 (`__main__._record_bash_changes`) の
+    `changed_between(pre, post)` が「空」と「取得できた全件消えた」を区別できず、
+    片方が失敗したもう片方の全エントリ (他セッション・他人の変更を含む) を
+    "変化あり" として pending に積んでいた。不完全な部分集合も同じ理由で危険:
+    pre/post で切り詰めの境界 (どのエントリまで拾えたか) がずれると、実際は
+    変化していないパスが「片方にしか無い」ことになり誤検出する。
     """
     res = _git(
         root,
@@ -212,19 +229,19 @@ def status_snapshot(root: str) -> dict[str, list]:
         timeout=STATUS_TIMEOUT_SEC,
     )
     if res is None or res.returncode != 0:
-        return {}
+        return None
 
     snapshot: dict[str, list] = {}
     for code, rel in _parse_porcelain_z(_decode(res.stdout)):
         if rel.endswith("/"):
             continue
+        if len(snapshot) >= MAX_SNAPSHOT_ENTRIES:
+            return None  # 収まりきらない (不完全) → 比較不能として諦める
         try:
             st = os.stat(os.path.join(root, rel))
             snapshot[rel] = [code, st.st_size, st.st_mtime_ns]
         except OSError:
             snapshot[rel] = [code, -1, -1]
-        if len(snapshot) >= MAX_SNAPSHOT_ENTRIES:
-            break
     return snapshot
 
 

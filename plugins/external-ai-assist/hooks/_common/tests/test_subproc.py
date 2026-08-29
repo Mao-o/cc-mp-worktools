@@ -1,6 +1,6 @@
 """外部 CLI 起動ヘルパー (process group 停止 / 残出力の読み捨て / 出力契約)。
 
-zh5.15: `subprocess.run(capture_output=True, timeout=…)` は timeout 時に直接の子だけ
+`subprocess.run(capture_output=True, timeout=…)` は timeout 時に直接の子だけ
 kill するため、stdout を継承した孫 (`sleep`) が取り残される。本ヘルパーは process group
 ごと停止し、timeout 直後に返ることを偽 CLI で固定する。
 
@@ -303,12 +303,23 @@ class TestNormalExitCleanup(SubprocTestCase):
         self.assertTrue(wait_until_dead(grandchild), "正常終了後に残った TERM 無視メンバーが止まっていない")
 
     def test_normal_exit_without_leftovers_is_not_delayed(self):
+        """残存メンバーが無い正常終了では、追加の停止処理を一切行わない。
+
+        wall-clock (elapsed 時間 < GRACE) で「待っていない」を
+        測ると、プロセス起動自体のオーバヘッドが閾値に近い環境で flaky になる
+        (実測 0.511 秒で fail。5 回中 3 回の flake率。**変更前の commit でも
+        再現する構造的な欠陥**であり、この PR の変更とは無関係)。
+
+        ここでは `run_captured` が正常終了後に呼ぶ「グループに残存メンバーが
+        居れば止める」経路 (`kill_process_group`。内部の `_settle` が SIGTERM
+        猶予のポーリング待機を行う) が**そもそも呼ばれていないこと**を直接検証する
+        (状態遷移の観測。時間を測らないので負荷に依存しない)。
+        """
         cli = write_script(self.dir, "ok", "printf 'hello'\n")
-        started = time.monotonic()
-        result = subproc.run_captured([cli], timeout_sec=5)
-        elapsed = time.monotonic() - started
+        with mock.patch.object(subproc, "kill_process_group") as kill_group:
+            result = subproc.run_captured([cli], timeout_sec=5)
         self.assertEqual(result.stdout, "hello")
-        self.assertLess(elapsed, GRACE, "残存メンバーが無いのに猶予を待っている")
+        kill_group.assert_not_called()
 
 
 class TestRunCapturedContract(SubprocTestCase):

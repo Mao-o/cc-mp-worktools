@@ -257,6 +257,35 @@ class TestStatusSnapshot(GitScanTestCase):
         )
 
 
+class TestStatusSnapshotFailure(GitScanTestCase):
+    """失敗/不完全は {} ではなく None (比較不能) を返す。"""
+
+    def test_git_failure_returns_none(self):
+        with mock.patch.object(gitscan, "_git", return_value=None):
+            self.assertIsNone(gitscan.status_snapshot(self.repo))
+
+    def test_nonzero_exit_returns_none(self):
+        fake = mock.Mock(returncode=1, stdout=b"")
+        with mock.patch.object(gitscan, "_git", return_value=fake):
+            self.assertIsNone(gitscan.status_snapshot(self.repo))
+
+    def test_truncated_snapshot_returns_none(self):
+        """MAX_SNAPSHOT_ENTRIES に収まらない (打ち切りが起きる) なら None。"""
+        for i in range(3):
+            write(self.repo, f"many{i}.txt", "x\n")
+        with mock.patch.object(gitscan, "MAX_SNAPSHOT_ENTRIES", 1):
+            self.assertIsNone(gitscan.status_snapshot(self.repo))
+
+    def test_exactly_at_cap_is_not_treated_as_truncated(self):
+        """総エントリ数が上限とちょうど一致する場合は打ち切りではないので通常どおり返す。"""
+        for i in range(2):
+            write(self.repo, f"many{i}.txt", "x\n")
+        with mock.patch.object(gitscan, "MAX_SNAPSHOT_ENTRIES", 2):
+            snapshot = gitscan.status_snapshot(self.repo)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot), 2)
+
+
 class TestChangedBetween(GitScanTestCase):
     def test_detects_new_modified_and_vanished(self):
         pre = {"a.txt": ["??", 3, 100], "b.txt": [" M", 5, 200]}
