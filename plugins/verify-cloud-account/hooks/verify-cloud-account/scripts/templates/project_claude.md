@@ -32,6 +32,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 # set / remove の引数例
 #   set --service <svc> --value <v> [--host <h>] --commit
 #   remove --service <svc> [--host <h>] --commit
+#   (--host 指定時、削除後に残る entry がその service にとって使えない
+#    形になる場合はキーごと削除されます)
 ```
 
 `${CLAUDE_PLUGIN_ROOT}` は plugin hook 経由で展開される変数です。Agent Skill

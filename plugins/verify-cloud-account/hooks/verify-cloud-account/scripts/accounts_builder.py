@@ -6,7 +6,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 `accounts-show` `accounts-migrate`) が対話フローを提供し、Claude は skill
 経由で builder を呼ぶ。
 
-設計判断 (D1〜D11):
+設計判断 (D1〜D13):
 
 - **D1**: builder が唯一の正規経路。書込パスの固定、JSON フォーマットの
   一貫化、既存キーの温存、CLI 現在値との突合、旧パス統合を一元管理する。
@@ -74,6 +74,19 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   「使える値が 1 つでもあるか」の判定からは除外する。`DICT_ALLOWED_KEYS` を
   宣言しない service (`github`/`firebase`) は影響を受けない — allowed_keys が
   `None` のときは従来どおり全キーの値を対象にする。
+- **D13**: `remove --host` で dict 値の特定キーを削除した後の**残り dict**も
+  書込前に形を再検証する。D6 は「最後の 1 キーを消して空 dict になる」場合
+  だけキー自体を削除していたが、それ以外でも残り dict がその service に
+  とって `_validate_entry_shape(strict_keys=False)` (D9/D12 と同じ lenient
+  判定) に拒否される形になることがある。例: `DICT_ALLOWED_KEYS` を宣言する
+  gcloud で `{"project":"p","region":"x"}` から `project` を削除すると
+  `{"region":"x"}` が残るが、`region` は許可キー外で `gcloud.verify()` が
+  読まないため project も account も無いとして deny する — 空 dict と同じく
+  「書込は成功するのに verify() が fail-closed deny する」状態になる。
+  lenient 検証に拒否される残り dict は、空 dict の場合と同じくキー自体を
+  削除し、なぜ消したかを `_validate_entry_shape` の理由文字列をそのまま
+  stdout に明示する (D3 の値隠蔽とは衝突しない — 理由文字列はキー名/型名の
+  みを含み、dict の値そのものは含まない)。
 """
 from __future__ import annotations
 
@@ -740,16 +753,41 @@ def _cmd_remove(
             return 0
         removed_value = existing_value[args.host]
         remaining = {k: v for k, v in existing_value.items() if k != args.host}
-        drop_whole_key = not remaining
+        shape_error: str | None = None
+        if remaining:
+            # 最後の 1 つでなくても、残り dict がこの service にとって
+            # 「使える値が無い」形になっていることがある (D13): 例えば gcloud
+            # の {"project":"p","region":"x"} から project を消すと
+            # {"region":"x"} が残るが、region は DICT_ALLOWED_KEYS 外で
+            # verify() が読まないため project も account も無いとして deny
+            # する。migrate の取り込み判定と同じ lenient 検証
+            # (strict_keys=False) で残り dict を再検証し、拒否されるなら
+            # 最後の 1 つを消したときと同じくキーごと削除する — 空 dict を
+            # 残さないのと同じ理由 (書込は成功するのに verify() が
+            # fail-closed deny する状態を作らない)。
+            shape_error = _validate_entry_shape(svc, remaining, strict_keys=False)
+        drop_whole_key = not remaining or shape_error is not None
     else:
         removed_value = existing_value
         remaining = {}
         drop_whole_key = True
+        shape_error = None
 
     print(f"=== changes to {target} ===", file=stdout)
     if args.host is not None and not drop_whole_key:
         _print_change_line(
             "- remove", f"{service_key}[{args.host}]", removed_value,
+            args.show_values, stdout,
+        )
+    elif args.host is not None and shape_error is not None:
+        # 残り dict はあるが、この service にとって使える値が無い形になった
+        # (上のコメント参照)。空 dict を残さないのと同じ理由でキー全体を
+        # 削除し、なぜ消したかを validator のメッセージでそのまま明示する
+        # (D3: このメッセージはキー名・型名のみを含み値そのものは含まない)。
+        _print_change_line(
+            "- remove (残りの entry に使える値が無いため "
+            f"{service_key} をキーごと削除します。理由: {shape_error})",
+            f"{service_key}[{args.host}]", existing_value,
             args.show_values, stdout,
         )
     elif args.host is not None:

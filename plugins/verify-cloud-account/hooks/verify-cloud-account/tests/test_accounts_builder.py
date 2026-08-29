@@ -2138,6 +2138,90 @@ class TestRemove(BaseBuilder):
         self.assertEqual(code, 0)
         self.assertIn("secret-user", out)
 
+    def test_removes_host_drops_whole_key_when_remaining_has_no_usable_value(self):
+        """`--host` 削除後の残り dict も、最後の 1 つを消したときと同じ基準
+        (`_validate_entry_shape(strict_keys=False)`) で検証する。gcloud は
+        `DICT_ALLOWED_KEYS = {"project", "account"}` を宣言しており、
+        `region` は verify() が読まない未知キーなので、"project" を消すと
+        残りは `{"region": "x"}` になり許可キーに使える値が 1 つも無くなる。
+        この形をそのまま書くと `gcloud.verify()` は project も account も
+        無いとして deny する (書込は成功したのに実行時に fail-closed deny)。
+        最後の host/alias を消したときと同じくキー自体を削除するのが正しい。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"gcloud": {"project": "p", "region": "x"}, "aws": "111"}),
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            ["remove", "--service", "gcloud", "--host", "project", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("キーごと削除", out)
+        self.assertIn("有効な値がありません", out)  # validator の理由を明示する
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"aws": "111"})
+        self.assertNotIn("gcloud", data)  # {"region": "x"} ではなくキー自体が無い
+
+    def test_removes_host_keeps_remaining_dict_when_shape_still_accepted(self):
+        """残り dict に許可キー (account) の使える値が残っていれば、従来どおり
+        dict のまま書く (キーごと削除しない)。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"gcloud": {"project": "p", "account": "a"}}),
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            ["remove", "--service", "gcloud", "--host", "project", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("キーごと削除", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"gcloud": {"account": "a"}})
+
+    def test_removes_host_unaffected_for_service_without_dict_allowed_keys(self):
+        """`DICT_ALLOWED_KEYS` を宣言しない service (github) は影響を受けない
+        — 残ったキー (ghe.example.com) がどんな名前でも、非空文字列の値で
+        あれば従来どおり『使える値がある』として dict のまま残す。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps(
+                {"github": {"github.com": "U", "ghe.example.com": "U"}}
+            ),
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            [
+                "remove", "--service", "github", "--host", "github.com",
+                "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("キーごと削除", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"ghe.example.com": "U"}})
+
+    def test_removes_host_drop_whole_key_dry_run_hides_value_in_reason(self):
+        """dry-run でも同じ判定・同じメッセージになり (書込前に検証するため)、
+        かつ理由メッセージ (validator の shape_error) が dict の値そのものを
+        含まない (D3: 既定では値を stdout に出さない) ことを確認する。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"gcloud": {"project": "super-secret-proj", "region": "x"}}),
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            ["remove", "--service", "gcloud", "--host", "project", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("(dry-run", out)
+        self.assertIn("キーごと削除", out)
+        self.assertNotIn("super-secret-proj", out)  # D3: 理由に値そのものは出ない
+        # dry-run なので書込は行われない (既存値のまま)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(
+            data, {"gcloud": {"project": "super-secret-proj", "region": "x"}}
+        )
+
 
 class TestMigrateValueSemantics(BaseBuilder):
     """migrate の意味論的等価比較 + 追加値スキーマ検証 (内部バックログ:

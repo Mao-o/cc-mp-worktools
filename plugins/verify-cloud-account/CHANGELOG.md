@@ -35,7 +35,13 @@
    有無を `in` 演算子で判定するように直し、`--host` 指定時は従来どおり
    (既存値がオブジェクトでない) エラーに倒す。`set` は元々 commit 時に
    既存値の有無に関わらず値を上書きするため、この形は当初から修復できて
-   いた (回帰テストで固定)。
+   いた (回帰テストで固定)。さらに **`remove --host` は削除後の残り dict の
+   形も再検証するようにした** (独立レビュー指摘で修正) — 最後の 1 つでなくても
+   残り dict が `_validate_entry_shape(strict_keys=False)` に拒否される形
+   (例: `DICT_ALLOWED_KEYS` を宣言する gcloud で project/account 以外の
+   キーだけが残る) になることがあり、そのままでは書込は成功しても
+   `verify()` が fail-closed deny する状態になっていた。この形も空 dict の
+   場合と同じくキー自体を削除し、理由を stdout に明示する。
 2. **`--value` の JSON dict を構造化データとして解釈** — 従来は `--value` を
    常に生文字列として保存していたため、`--value
    '{"project":"p","account":"a"}'` が JSON 文字列そのものとして保存され、

@@ -123,7 +123,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 # dict 値の特定キーだけを削除 (最後の 1 つを消すとキー自体が削除される —
 # 空オブジェクトを残すと該当 service が「オブジェクトが空です」で永久 deny
-# されるため)
+# されるため。最後の 1 つでなくても、残りが該当 service にとって使えない
+# 形になる場合 (例: gcloud で project/account 以外のキーだけが残る) は
+# 同じくキー自体を削除し、理由を出力する)
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
   remove --service github --host ghe.example.com --commit
 ```
