@@ -32,7 +32,14 @@ tests/          — unittest（python3 -m unittest discover tests）
    project marker（`core/constants.py` の `PROJECT_MARKERS`）が一つも無く
    `--force-walk` も無い場合は、ここで最小ヘッダー（`repo_root` /
    `git_repo: false` / `--force-walk` ヒント）のみを返して以降の全ステップ
-   を skip する（走査コストの高い非プロジェクト dir 分析を避けるため）
+   を skip する（走査コストの高い非プロジェクト dir 分析を避けるため）。
+   ただし mise の 3 config 名（`.mise.toml` / `mise.toml` /
+   `.config/mise/config.toml`）は `has_project_markers()` の単純 exists()
+   判定ではなく `core/runtime.py::mise_config_path()` 経由で判定する。
+   `--root` が `$HOME` のとき XDG グローバル設定
+   (`.config/mise/config.toml`) だけを対象外にする例外がそちらにあり、
+   マーカー判定側で同じ判断を書き直さず共有するため
+   （`cli.py::_has_relevant_project_markers()`）
 1. `git ls-files`（非 git かつ marker gate を通過した場合は `walk_files`
    でファイルシステム直接走査）→ `ctx.tracked_files`
 2. パッケージマネージャ検出 → `ctx.results["package_manager"]`

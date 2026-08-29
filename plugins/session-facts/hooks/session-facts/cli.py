@@ -26,9 +26,17 @@ from core.context import AnalysisConfig, RepoContext
 from core.fs import has_project_markers, read_text, walk_files
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
+from core.runtime import MISE_CONFIG_NAMES, mise_config_path
 from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
 from renderer import render_header
+
+# PROJECT_MARKERS minus the mise config names: those three are checked via
+# mise_config_path() in _has_relevant_project_markers() below instead of a
+# plain has_project_markers() exists() check, so that function's $HOME/XDG
+# -global exception (see its docstring) applies to the marker gate too,
+# rather than re-deriving an "is root $HOME" judgment here separately.
+_NON_MISE_PROJECT_MARKERS = tuple(m for m in PROJECT_MARKERS if m not in MISE_CONFIG_NAMES)
 
 
 def _iter_readme_body_lines(text: str):
@@ -208,6 +216,24 @@ def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
     return "\n".join(lines)
 
 
+def _has_relevant_project_markers(root: Path) -> bool:
+    """PROJECT_MARKERS gate check, with the mise config names routed through
+    core.runtime.mise_config_path() instead of has_project_markers()'s plain
+    exists() check.
+
+    Without this, a user's global mise config at ``~/.config/mise/config.toml``
+    (XDG default) makes the gate treat $HOME as "a project" -- exactly the
+    environment this gate exists to protect -- because a literal exists()
+    check cannot tell that path apart from a deliberate project-level config.
+    mise_config_path() already carries that distinction (see its docstring);
+    sharing it here keeps the exception defined in one place instead of
+    reimplementing an "is root $HOME" check against this gate too.
+    """
+    if has_project_markers(root, _NON_MISE_PROJECT_MARKERS):
+        return True
+    return mise_config_path(root) is not None
+
+
 def summarize_repo(
     root: Path,
     config: AnalysisConfig,
@@ -223,7 +249,7 @@ def summarize_repo(
     # happens to be lying around -- e.g. running from $HOME or Desktop,
     # unrelated to any coding task. Skip straight to a minimal header
     # instead; --force-walk restores the old unconditional behaviour.
-    if not is_git and not force_walk and not has_project_markers(root, PROJECT_MARKERS):
+    if not is_git and not force_walk and not _has_relevant_project_markers(root):
         return _minimal_header(root, invoked_as)
     ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)

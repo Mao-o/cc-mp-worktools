@@ -14,8 +14,11 @@ _INLINE_VERSION_RE = re.compile(r"""\bversion\s*=\s*["']([^"']*)["']""")
 # A bare ``key = value`` assignment line inside a TOML table.
 _ASSIGN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")
 
-# mise config locations, in resolution order.
-_MISE_CONFIG_NAMES = (".mise.toml", "mise.toml", ".config/mise/config.toml")
+# mise config locations, in resolution order. Public: cli.py's marker gate
+# (core/constants.py's PROJECT_MARKERS) imports this to route these same
+# three names through mise_config_path() below instead of a plain exists()
+# check, so its $HOME/XDG-global exception applies to the gate too.
+MISE_CONFIG_NAMES = (".mise.toml", "mise.toml", ".config/mise/config.toml")
 
 
 def first_version(value: str) -> str:
@@ -57,7 +60,7 @@ def mise_config_path(root: Path) -> Optional[Path]:
     deliberately, unlike the XDG path.
     """
     skip_xdg = _is_home_dir(root)
-    for name in _MISE_CONFIG_NAMES:
+    for name in MISE_CONFIG_NAMES:
         if skip_xdg and name == ".config/mise/config.toml":
             continue
         path = root / name

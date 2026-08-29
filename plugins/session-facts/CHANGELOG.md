@@ -51,20 +51,29 @@ test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き、およ
    facts を大量注入していた問題、および project marker 一覧が自 plugin の
    detector 群を網羅しておらず Dockerfile 単体・uv.lock 単体などの正当な
    プロジェクトも同じ最小ヘッダーに落ちていた問題を修正**
-   (`cli.py`, `core/constants.py`, `core/fs.py`) — 非 git かつ root 直下に
-   project marker が一つも無い場合は最小ヘッダーのみを出力する仕組みは
-   維持しつつ、`PROJECT_MARKERS` を detectors/・collectors/ の実装から
-   機械的に洗い出し直して 25 件超を追加 (Dockerfile/uv.lock/nx.json/
-   tsconfig.json/vite.config.ts/prisma/ など自 plugin の detector が
-   認識するファイル・ディレクトリに加え、CMakeLists.txt/Package.swift
-   など detector 非対応だが一般的な project root も false negative
-   回避のため追加)。固定ファイル名を持たない `*.csproj`/`*.tf` のため
-   `has_project_markers()` に glob 対応を追加。最小ヘッダー自体にも解析
-   対象ディレクトリ (`repo_root`) と `--force-walk` へのヒント行を追加し、
-   従来の無条件走査に戻す経路をヘッダー単体からも辿れるようにした。
-   あわせて `.config/mise/config.toml` (XDG グローバル設定) は root が
-   $HOME のときのみ除外するようにした (グローバルな tool pin が repo の
-   ものと誤認されるのを防ぐ)
+   (`cli.py`, `core/constants.py`, `core/fs.py`, `core/runtime.py`) —
+   非 git かつ root 直下に project marker が一つも無い場合は最小ヘッダー
+   のみを出力する仕組みは維持しつつ、`PROJECT_MARKERS` を detectors/・
+   collectors/ の実装から機械的に洗い出し直して 25 件超を追加
+   (Dockerfile/uv.lock/nx.json/tsconfig.json/vite.config.ts/prisma/ など
+   自 plugin の detector が認識するファイル・ディレクトリに加え、
+   CMakeLists.txt/Package.swift など detector 非対応だが一般的な
+   project root も false negative 回避のため追加)。固定ファイル名を
+   持たない `*.csproj`/`*.tf` のため `has_project_markers()` に glob
+   対応を追加。最小ヘッダー自体にも解析対象ディレクトリ (`repo_root`) と
+   `--force-walk` へのヒント行を追加し、従来の無条件走査に戻す経路を
+   ヘッダー単体からも辿れるようにした。あわせて `.config/mise/config.toml`
+   (XDG グローバル設定) は root が $HOME のときのみ除外するようにした
+   (グローバルな tool pin が repo のものと誤認されるのを防ぐ)。
+   **隔離内レビュー追加指摘**: この $HOME 除外は `core/runtime.py::
+   mise_config_path()`（stack 検出等が使う経路）にのみ実装されており、
+   marker gate 自体は 3 つの mise config 名を素の `exists()` で判定して
+   いたため、$HOME 直下にユーザーの XDG グローバル mise 設定
+   (`~/.config/mise/config.toml`) があると「project marker あり」と
+   誤判定され、抑止したかった当の $HOME で全走査が復活していた
+   (自己適用の失敗)。marker gate 側もこの 3 名だけは `mise_config_path()`
+   を経由するように変更し、判断ロジックを 1 箇所に統一した
+   (`cli.py::_has_relevant_project_markers()`)
 
 ### ドキュメント
 

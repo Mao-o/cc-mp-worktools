@@ -530,6 +530,52 @@ class ProjectMarkerGateTest(unittest.TestCase):
             )
 
 
+class ProjectMarkerHomeMiseExclusionTest(unittest.TestCase):
+    """Isolated-review P2-a (PR #67): the marker gate checked
+    ``.config/mise/config.toml`` via has_project_markers()'s plain exists()
+    check, so a user's global XDG mise config at $HOME made the gate treat
+    $HOME as "a project" -- exactly the environment this gate exists to
+    protect. core.runtime.mise_config_path() already excludes that path at
+    $HOME (see test_runtime.py's MiseConfigHomeExclusionTest); the gate must
+    share that exception instead of applying a plain exists() check that
+    knows nothing about it."""
+
+    def test_xdg_global_mise_config_alone_at_home_still_gets_minimal_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cfg_dir = home / ".config" / "mise"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.toml").write_text('[tools]\nawscli = "latest"\n')
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                out = summarize_repo(home, AnalysisConfig(), is_git=False, invoked_as=None)
+            self.assertIn("no project markers found", out)
+
+    def test_project_style_mise_toml_at_home_still_gets_full_analysis(self):
+        # Only the XDG global path is excluded -- a project-style .mise.toml
+        # placed directly at $HOME is still a deliberate marker (matches
+        # mise_config_path()'s own test_dotmise_toml_still_honored_at_home).
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".mise.toml").write_text('[tools]\nnode = "20"\n')
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                out = summarize_repo(home, AnalysisConfig(), is_git=False, invoked_as=None)
+            self.assertNotIn("no project markers found", out)
+
+    def test_xdg_global_mise_config_still_fires_gate_outside_home(self):
+        # Same layout, but root is not the (mocked) home dir -- the
+        # exclusion must not leak outside the one directory it targets.
+        with tempfile.TemporaryDirectory() as project_tmp, \
+                tempfile.TemporaryDirectory() as home_tmp:
+            root = Path(project_tmp)
+            home = Path(home_tmp)
+            cfg_dir = root / ".config" / "mise"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.toml").write_text('[tools]\npython = "3.12"\n')
+            with mock.patch("core.runtime.Path.home", return_value=home):
+                out = summarize_repo(root, AnalysisConfig(), is_git=False, invoked_as=None)
+            self.assertNotIn("no project markers found", out)
+
+
 class ProjectMarkerCoverageTest(unittest.TestCase):
     """internal backlog P2-1: PROJECT_MARKERS used to list only ~27 files,
     missing markers for stacks this plugin's own detectors/collectors
