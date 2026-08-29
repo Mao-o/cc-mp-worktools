@@ -179,10 +179,11 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 #
 # Tier 1: every static file/dir that one of this plugin's own detectors/
 # or collectors/ already keys off of directly (mechanically grepped for
-# ``.exists()`` checks against a literal name), so a stack this plugin
-# already recognises is never skipped by the gate. A handful of entries
-# predate that discipline and match no current detector at all
-# (Pipfile/setup.cfg/setup.py/requirements.txt -- detectors/python_stack.py
+# ``.exists()`` checks -- or, for requirements*.txt, the equivalent
+# startswith()/endswith() basename check -- against a plugin-recognised
+# name), so a stack this plugin already recognises is never skipped by the
+# gate. A handful of entries predate that discipline and match no current
+# detector at all (Pipfile/setup.cfg/setup.py -- detectors/python_stack.py
 # only reads pyproject.toml or a whole-tree .py-file-ratio heuristic that a
 # marker *filename* fundamentally cannot express); they are kept for the
 # same false-negative-avoidance reason, not removed for consistency.
@@ -191,13 +192,16 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # at all yet (C/C++, Swift, Elixir, Scala, .NET, Terraform). Still worth a
 # walk: the generic collectors (Structure, Test Snapshot, Scripts, ...)
 # produce useful output even without a "stack:" line naming the language.
-# Two of these are glob patterns (matched via has_project_markers()'s
-# Path.glob() branch, not a literal exists() check) since the manifest
-# filename is project-specific, not fixed.
+# Three of these are glob patterns (matched via has_project_markers()'s
+# Path.glob() branch, not a literal exists() check): *.csproj/*.tf since the
+# manifest filename is project-specific, not fixed, and requirements*.txt to
+# mirror collectors/dependencies.py's _tracked_requirements(), which already
+# recognises any requirements-prefixed/.txt-suffixed basename (e.g.
+# requirements-dev.txt) -- not just the exact "requirements.txt" name.
 PROJECT_MARKERS = (
     "package.json",
     "pyproject.toml",
-    "requirements.txt",
+    "requirements*.txt",
     "Pipfile",
     "setup.cfg",
     "setup.py",

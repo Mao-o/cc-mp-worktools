@@ -634,5 +634,35 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
                     self.assertIn("## Project Facts", out)
 
 
+class RequirementsVariantMarkerTest(unittest.TestCase):
+    """Isolated-review P2-b (PR #67): the `requirements.txt` PROJECT_MARKERS
+    entry was a literal, so a non-git Python project whose only manifest is
+    a common variant (requirements-dev.txt, requirements-prod.txt, ...) fell
+    through the gate to the minimal header even though
+    collectors/dependencies.py's _tracked_requirements() already recognises
+    every ``requirements*.txt`` basename. The marker must mirror that same
+    glob so the two definitions do not drift apart again."""
+
+    REQUIREMENTS_VARIANTS = [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements_dev.txt",
+        "requirements-prod.txt",
+        "requirements-test.txt",
+    ]
+
+    def test_requirements_variant_alone_avoids_the_minimal_header(self):
+        for name in self.REQUIREMENTS_VARIANTS:
+            with self.subTest(marker=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / name).write_text("flask==3.0\n")
+                    out = _run_cli(["--root", str(root)])
+                    self.assertNotIn(
+                        "no project markers found", out, f"marker {name!r} was not recognised"
+                    )
+                    self.assertIn("## Project Facts", out)
+
+
 if __name__ == "__main__":
     unittest.main()

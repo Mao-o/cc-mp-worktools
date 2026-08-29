@@ -73,7 +73,14 @@ test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き、およ
    誤判定され、抑止したかった当の $HOME で全走査が復活していた
    (自己適用の失敗)。marker gate 側もこの 3 名だけは `mise_config_path()`
    を経由するように変更し、判断ロジックを 1 箇所に統一した
-   (`cli.py::_has_relevant_project_markers()`)
+   (`cli.py::_has_relevant_project_markers()`)。同レビューでもう1件、
+   `requirements.txt` マーカーが厳密一致のみで、非 git な Python
+   プロジェクトのマニフェストが `requirements-dev.txt` のような一般的な
+   変種しかない場合に facts を丸ごと失っていた問題も見つかった。
+   `collectors/dependencies.py` の `_tracked_requirements()` は
+   `requirements` で始まり `.txt` で終わる basename を既に幅広く認識して
+   いるため、マーカー側も `requirements*.txt` の glob に変更して同じ規則
+   を表現した
 
 ### ドキュメント
 
