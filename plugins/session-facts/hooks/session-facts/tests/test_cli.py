@@ -19,7 +19,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from cli import _enforce_output_budget, main, summarize_repo
+from cli import parse_args, _enforce_output_budget, main, summarize_repo
 from core.context import AnalysisConfig
 
 
@@ -716,3 +716,18 @@ class RequirementsVariantMarkerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaxOutputCharsValidationTest(unittest.TestCase):
+    """PR #67 round 4 (Codex P2): 負値を通すと `result[:max_chars]` が
+    Python の負インデックス slice になり「ほぼ全文」が返る。上限として
+    機能しないままハーネスの注入上限を超えうるので引数解析で弾く。
+    """
+
+    def test_negative_budget_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            parse_args(["--root", ".", "--max-output-chars", "-1"])
+
+    def test_zero_budget_is_still_accepted(self):
+        args = parse_args(["--root", ".", "--max-output-chars", "0"])
+        self.assertEqual(args.max_output_chars, 0)

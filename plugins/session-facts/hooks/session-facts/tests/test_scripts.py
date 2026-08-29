@@ -166,6 +166,45 @@ class TestFilesGateTest(unittest.TestCase):
 
 
 
+class UnittestCollectableMethodTest(unittest.TestCase):
+    """PR #67 round 4 (Codex P2): `TestCase` の基底クラス宣言だけでは
+    `discover` は 0 件しか収集しない。ヘルパー基底しか無いモジュールで
+    提案を出すと「根拠の無いコマンド」になる。
+    """
+
+    def _cmds_for(self, body):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "tests" / "test_x.py").write_text(body)
+            ctx = _real_ctx(
+                root, pm="python", stack=[], tracked_files=["tests/test_x.py"]
+            )
+            return _likely_commands(ctx, max_items=16)
+
+    def test_helper_base_without_test_method_is_not_suggested(self):
+        cmds = self._cmds_for(
+            "import unittest\n\n\nclass BaseTestCase(unittest.TestCase):\n"
+            "    pass\n"
+        )
+        self.assertNotIn("python3 -m unittest discover tests", cmds)
+
+    def test_testcase_with_a_test_method_is_suggested(self):
+        cmds = self._cmds_for(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_x(self):\n        pass\n"
+        )
+        self.assertIn("python3 -m unittest discover tests", cmds)
+
+    def test_helper_only_methods_are_not_mistaken_for_tests(self):
+        cmds = self._cmds_for(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n"
+            "    def setUp(self):\n        pass\n\n"
+            "    def helper_test(self):\n        pass\n"
+        )
+        self.assertNotIn("python3 -m unittest discover tests", cmds)
+
+
 class UnittestDefaultPatternTest(unittest.TestCase):
     """PR #67 round 3 (Codex P2): `discover` の既定パターンは `test*.py`
     (`python3 -m unittest discover -h` に明記) で、`test_` 始まりに限らない。

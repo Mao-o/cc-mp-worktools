@@ -108,10 +108,22 @@ _PYTEST_STYLE_NAME_RE = re.compile(r"^(test_.+|.+_test)\.py$")
 # multi-line class headers too (``[^)]`` includes newlines).
 _UNITTEST_CLASS_RE = re.compile(r"class\s+\w+\s*\([^)]*TestCase\b")
 
+# `discover` が実際に収集するのは `TestCase` サブクラスの `test*` メソッド。
+# 基底クラスの宣言だけでは 0 件になりうる (例: ヘルパー基底
+# `class BaseTestCase(unittest.TestCase): pass` しか無いモジュール) ため、
+# メソッド定義の存在も併せて要求する。既定の prefix は `test` (`test_` に
+# 限らない)。
+_UNITTEST_METHOD_RE = re.compile(r"^\s+(?:async\s+)?def\s+test\w*\s*\(", re.M)
+
 
 def _looks_like_unittest_test(text: str) -> bool:
     """True when ``text`` defines at least one class whose base-class list
-    contains a literal ``TestCase``.
+    contains a literal ``TestCase`` **and** at least one ``test*`` method.
+
+    The class header alone is not enough: a module holding only an empty
+    helper base (``class BaseTestCase(unittest.TestCase): pass``) is
+    collected as "Ran 0 tests", so suggesting the command would be
+    unfounded.
 
     A module of bare ``def test_x():`` functions (pytest's convention, not
     unittest's) is *not* discoverable by ``unittest discover``: its
@@ -123,7 +135,9 @@ def _looks_like_unittest_test(text: str) -> bool:
     through an import alias -- a false negative there only costs a missed
     (safe) suggestion, never a wrong one.
     """
-    return bool(_UNITTEST_CLASS_RE.search(text))
+    return bool(_UNITTEST_CLASS_RE.search(text)) and bool(
+        _UNITTEST_METHOD_RE.search(text)
+    )
 
 
 def _has_root_unittest_tests(ctx: RepoContext) -> bool:

@@ -311,6 +311,20 @@ def summarize_repo(
     return _enforce_output_budget(header, collected_sections, config.max_output_chars)
 
 
+def _non_negative_int(raw: str) -> int:
+    """``--max-output-chars`` 用の型。負値を拒否する。
+
+    ハードカットは ``result[:max_chars]`` で行うため、負値を通すと Python の
+    負インデックス slice になり「ほぼ全文」が返る。上限として機能しないまま
+    ハーネスの注入上限を超えうるので、引数解析の時点で弾く
+    (0 は「すべて削る」の意味で意図的に許容している)。
+    """
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or greater, got {value}")
+    return value
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a compact session-start facts bundle for coding agents."
@@ -361,7 +375,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Max entries in the major_dependencies header line.",
     )
     parser.add_argument(
-        "--max-output-chars", type=int, default=DEFAULT_MAX_OUTPUT_CHARS,
+        "--max-output-chars", type=_non_negative_int,
+        default=DEFAULT_MAX_OUTPUT_CHARS,
         help=(
             "Hard ceiling on the whole rendered output. Beyond this, the "
             "Structure section's tail is trimmed first, then Scripts / Env "
