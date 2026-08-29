@@ -188,12 +188,7 @@ def handle_post_tool(payload: dict) -> None:
     if tool_name in _EDIT_TOOLS:
         paths = _edited_paths(payload.get("tool_input") or {}, cwd)
         if paths:
-            # bd_092a232e-zh5.16: pending 記録時点の HEAD を残す (commit 済みで
-            # 消えるバグの対策)。root が取れない/HEAD が無ければ None のままでよい
-            # (Stop 側が現行 HEAD にフォールバックする)。
-            root = gitscan.worktree_root(cwd)
-            head = gitscan.head_sha(root) if root else None
-            state.record_pending(session_id, paths, {p: head for p in paths})
+            state.record_pending(session_id, paths)
         return
 
     if tool_name == "Bash":
@@ -240,11 +235,7 @@ def _record_bash_changes(payload: dict, session_id: str, cwd: str) -> None:
         return
     changed = gitscan.changed_between(pre, post)
     if changed:
-        # bd_092a232e-zh5.16: Bash 実行直後 (= 変化を検出した今この時点) の HEAD を
-        # 記録する。これも同一ターン内で後から commit されると diff が消える対象。
-        abs_paths = [os.path.join(root, rel) for rel in changed]
-        head = gitscan.head_sha(root)
-        state.record_pending(session_id, abs_paths, {p: head for p in abs_paths})
+        state.record_pending(session_id, [os.path.join(root, rel) for rel in changed])
 
 
 # --------------------------------------------------------------------------
@@ -348,14 +339,11 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         log("このセッションが変更したファイルが無いため skip")
         return {}
     claim_id, claimed = claim
-    # bd_092a232e-zh5.16: pending 記録時点の HEAD (絶対パス→SHA)。claim_pending() の
-    # tuple 形状を変えずに済ませるため in-flight エントリから別途取得する。
-    heads = state.claim_heads(session_id, claim_id)
     try:
-        return _run_review(session_id, root, claim_id, claimed, heads)
+        return _run_review(session_id, root, claim_id, claimed)
     except Exception as e:
         log(f"レビュー中に例外 (claim を pending へ戻す): {e}")
-        state.restore_claim(session_id, claim_id, claimed, heads)
+        state.restore_claim(session_id, claim_id, claimed)
         return _with_notices(
             {},
             [
@@ -365,13 +353,7 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         )
 
 
-def _run_review(
-    session_id: str,
-    root: str,
-    claim_id: str,
-    claimed: list[str],
-    heads: dict[str, str | None] | None = None,
-) -> dict:
+def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -> dict:
     """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
 
     利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
@@ -380,14 +362,8 @@ def _run_review(
     配信に依存しない。
 
     ここから送出された例外は `_review_claim` が拾って claim を復元する。
-
-    `heads` (bd_092a232e-zh5.16): pending 記録時点の HEAD (絶対パス→SHA)。
-    `_resolve_paths` の返り値 arity は変えていない (呼び出し側の 3-tuple unpack を
-    壊さない — test_review_set.py に多数あるため) — 代わりにここで
-    `gitscan.to_relative` を使い rel (作業ツリー相対) 単位の `rel_heads` を作り直す。
     """
     notices: list[str] = []
-    heads = heads or {}
 
     rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
     if excluded:
@@ -402,19 +378,12 @@ def _run_review(
             "次ターンに繰り越し: " + _list_names(_rel_names(root, overflow))
         )
 
-    rel_heads: dict[str, str | None] = {}
-    for path, head in heads.items():
-        rel = gitscan.to_relative(root, path)
-        if rel:
-            rel_heads[rel] = head
-    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id), rel_heads)
+    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
     # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
     # 積む: 予算超過 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順
     carried = batch.deferred + overflow
     if carried:
-        # 元 claim が持っていた heads をそのまま渡す (新しい HEAD で上書きしない —
-        # 上書きすると繰り越すたびに基点が現行 HEAD に近づき zh5.16 のバグを再導入する)
-        state.record_pending(session_id, carried, heads)
+        state.record_pending(session_id, carried)
     if batch.deferred_time:
         notices.append(
             f"{len(batch.deferred_time)} ファイルは git diff の時間予算超過により"
@@ -445,7 +414,7 @@ def _run_review(
     changed_lines = _count_changed_lines(batch.sections)
     if min_lines > 0 and changed_lines < min_lines:
         # 消費せず pending に戻す (cursor 失敗時と同じ経路。hash も記録しない)
-        state.restore_claim(session_id, claim_id, batch.submitted, heads)
+        state.restore_claim(session_id, claim_id, batch.submitted)
         notices.insert(
             0,
             f"変更 {changed_lines} 行が {ENV_MIN_LINES}={min_lines} に満たないため"
@@ -464,7 +433,7 @@ def _run_review(
 
     if not result:
         log("Cursor レビュー失敗 (fail-open、pending に戻す)")
-        state.restore_claim(session_id, claim_id, batch.submitted, heads)
+        state.restore_claim(session_id, claim_id, batch.submitted)
         notices.insert(0, f"{summary} → 結果を取得できず (timeout / 失敗)。次ターンに持ち越し")
         return _with_notices({}, notices)
 
@@ -631,12 +600,7 @@ class ReviewBatch:
         return self.deferred_size + self.deferred_time
 
 
-def _collect_diffs(
-    root: str,
-    rels: list[str],
-    reviewed: dict[str, str],
-    rel_heads: dict[str, str | None] | None = None,
-) -> ReviewBatch:
+def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> ReviewBatch:
     """パスごとに diff を取り、予算に収まるものだけを ReviewBatch に積む。
 
     前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
@@ -655,14 +619,9 @@ def _collect_diffs(
     Stop 全体の hook timeout (690s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
     git に使える時間は約 75s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
     頭を押さえる。deferred は捨てずに pending へ戻す。
-
-    `rel_heads` (bd_092a232e-zh5.16): パスごとの「pending 記録時点の HEAD」。
-    与えられていれば `gitscan.path_diff` がまずそれを基点に diff を試みる (同一ターン
-    内で commit されて現行 HEAD 基準の diff が空になる問題への対処)。
     """
     untracked = gitscan.untracked_among(root, rels)
     has_head = gitscan.head_exists(root)
-    rel_heads = rel_heads or {}
 
     batch = ReviewBatch()
     used = 0
@@ -673,7 +632,7 @@ def _collect_diffs(
             batch.deferred_time = [os.path.join(root, r) for r in rels[index:]]
             break
 
-        text = gitscan.path_diff(root, rel, rel in untracked, has_head, rel_heads.get(rel))
+        text = gitscan.path_diff(root, rel, rel in untracked, has_head)
         if not text.strip():
             continue
         abs_path = os.path.join(root, rel)
