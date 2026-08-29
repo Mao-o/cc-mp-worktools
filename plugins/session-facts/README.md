@@ -157,6 +157,8 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--max-major-deps` | 8 | 主要依存表示数 |
 | `--include-domain-types` | false | ドメイン型 Collector を有効化 |
 | `--max-domain-types` | 10 | ドメイン型最大数 |
+| `--include-hub-files` | false | Hub Files Collector を有効化 (被参照数ランキング) |
+| `--max-hub-files` | 8 | Hub Files 最大数 |
 | `--no-recent-commits` | false | `recent_commits` 行を抑制 (gitStatus を注入する main セッション向け) |
 | `--emit` | `stdout` | 出力エンベロープ。`subagent-json` で SubagentStart 用 `hookSpecificOutput` JSON に包む |
 
@@ -227,12 +229,12 @@ def register():
   常に上限を持つ。全量ダンプは非目的
 - **敵対的入力は非対象** — リポジトリ内容が信頼できる前提。prompt injection を仕掛けた
   README 等への防御はしない
-- **標準ライブラリのみ** — `pip install` 不要。3.8 以降を想定
+- **標準ライブラリのみ** — `pip install` 不要。3.11 以降を想定
 
 ## 互換性
 
 - Claude Code CLI 2.1.100+
-- Python 3.8+ (標準ライブラリのみ)
+- Python 3.11+ (標準ライブラリのみ)
 - macOS / Linux (`git ls-files` が使えれば動作)
 
 ## ログ
@@ -240,3 +242,18 @@ def register():
 hook 自身はログを書かない。出力は stdout のみ。SessionStart では plain stdout が
 そのままコンテキストに入り、SubagentStart では `--emit subagent-json` による
 `hookSpecificOutput.additionalContext` JSON を Claude Code 側が消費する。
+
+## リリース手順
+
+session-facts は Claude Code 向け (`.claude-plugin/plugin.json`) と Codex 向け
+(`.codex-plugin/plugin.json`) の 2 つの manifest を持つ。**version は必ず両方を
+同時に bump し、同じ値にする** (CI が不一致を検知して落とす)。
+
+1. `.claude-plugin/plugin.json` と `.codex-plugin/plugin.json` の両方で
+   `version` を bump する (同じ値にする。片方だけ更新すると CI が落ちる)
+2. 挙動変更・機能追加を伴うコミットは、同じ batch で [CHANGELOG.md](./CHANGELOG.md)
+   を更新する (実装だけ先に入れて記録を後回しにしない)
+3. `claude plugin validate plugins/session-facts` で warning ゼロを確認する
+
+`description` は Codex 側がプラットフォーム固有の記述 (トリガーとなる hook イベント等)
+を持つため文言を完全一致させる必要はないが、明らかに古い記述のまま放置しない。

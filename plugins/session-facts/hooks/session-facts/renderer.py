@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from typing import List
 
 from core.context import RepoContext
@@ -48,10 +49,24 @@ def _render_more_hint(ctx: RepoContext) -> str:
     runs), the hint is a copy-pasteable command — the injected text has no
     other way to name a runnable path, since ${CLAUDE_PLUGIN_ROOT} is
     resolved by the hook, not present in what gets injected.
+
+    invoked_as is sys.argv[0], which for the real hook invocation
+    (``python3 <dir>``) is the *directory* the interpreter was pointed at,
+    not an executable file. Without the ``python3 `` prefix the printed
+    command is unrunnable as-is (``permission denied``: it names a
+    directory, not a program), so the prefix must stay even though it makes
+    the string a little redundant when invoked_as already looks like a
+    script path.
+
+    The path is shell-quoted: the plugin can be installed under a directory
+    containing spaces, and an unquoted path makes the interpreter open only
+    the first segment. shlex.quote leaves ordinary paths untouched, so the
+    common case reads the same as before.
     """
     if ctx.invoked_as:
         return (
-            f"- more: this is the default view; run `{ctx.invoked_as} --help` "
+            f"- more: this is the default view; run "
+            f"`python3 {shlex.quote(ctx.invoked_as)} --help` "
             "for additional opt-in analyses"
         )
     return "- more: this is the default view; the session-facts skill has additional opt-in analyses (see --help)"

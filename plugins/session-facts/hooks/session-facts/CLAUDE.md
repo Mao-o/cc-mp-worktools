@@ -111,3 +111,10 @@ Collector も同様の考え方で、dependencies=5 → structure=10 → ... →
 - `--max-*` 引数で出力量を制限可能にしておく
 - ファイル探索は `ctx.tracked_files`（git ls-files ベース）を使う — ファイルシステム直接走査は避ける
 - `ctx.results` はフェーズ間通信に使う辞書。Collector からヘッダーに情報を渡す際に利用
+- **機能コミット = version bump + CHANGELOG 同時更新**。実装だけ先に main へ入れて
+  version/CHANGELOG の更新を後回しにすると、次に気づいたときには「どのコミットが
+  どの version に属するか」を git log から re-construct する羽目になる
+  (実際にあった: Hub Files collector + `- more:` ヒント + `invoked_as` が 3 コミット
+  分 0.6.0 のまま積み上がり、0.7.0 でまとめて CHANGELOG に補完した)。
+  version は 2 つの manifest ([README.md](../../README.md) の「リリース手順」参照)
+  両方を同時に bump する

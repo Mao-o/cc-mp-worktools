@@ -1,7 +1,7 @@
 {
   "name": "session-facts",
-  "version": "0.6.0",
-  "description": "リポジトリを分析し、スタック/スクリプト/env キー/ドメイン型などのコンパクトなファクトバンドルを生成する Codex plugin。",
+  "version": "0.7.0",
+  "description": "セッション開始時にリポジトリを分析し、スタック/スクリプト/env キー/ドメイン型のファクトバンドルを Markdown で生成する Codex plugin。SessionStart で発火",
   "author": {
     "name": "Mao"
   },
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Session Facts",
     "shortDescription": "リポジトリの要点を Markdown で生成します。",
-    "longDescription": "session-facts は既存リポジトリを解析し、スタック、依存、スクリプト、env キー、テスト状況、ディレクトリ構造、ドメイン型などをコンパクトな Project Facts として Codex に渡しやすい Markdown にまとめます。",
+    "longDescription": "session-facts は既存リポジトリを解析し、スタック、依存、スクリプト、env キー、テスト状況、ディレクトリ構造、ドメイン型、被参照数の多いファイル (Hub Files) などをコンパクトな Project Facts として Codex に渡しやすい Markdown にまとめます。",
     "developerName": "Mao",
     "category": "Productivity",
     "capabilities": [

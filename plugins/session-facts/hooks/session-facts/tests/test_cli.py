@@ -1,18 +1,26 @@
 """cli レベルのテスト (v0.5): --emit subagent-json (.1)、--no-recent-commits (.2)、
-purpose dirname fallback 省略 (.3)。"""
+purpose dirname fallback 省略 (.3)。
+
+v0.7 で追加: `- more:` ヒントが `python3` 付きで実行可能なこと、detector/collector
+の例外が隔離され他のセクションを道連れにしないこと、summarize_repo() 自体が
+落ちても main() が最低限のヘッダーで exit 0 すること。"""
 from __future__ import annotations
 
 import io
 import json
 import subprocess
+import shlex
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from cli import main
+from cli import main, summarize_repo
+from core.context import AnalysisConfig
 
 
 def _git(args, cwd):
@@ -87,6 +95,155 @@ class PurposeFallbackTest(unittest.TestCase):
             )
             out = _run_cli(["--root", str(root)])
             self.assertIn("- purpose: Does something useful", out)
+
+
+class MoreHintInvokedAsTest(unittest.TestCase):
+    """`- more:` names a directory (real hook invocation is `python3 <dir>`),
+    so the printed follow-up command must keep the `python3 ` prefix or it is
+    unrunnable as-is ('permission denied': it names a directory, not a
+    program)."""
+
+    def test_hint_command_is_runnable_with_python3_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            fake_invoked_as = str(root / "hooks" / "session-facts")
+            with mock.patch.object(sys, "argv", [fake_invoked_as]):
+                out = _run_cli(["--root", str(root)])
+            self.assertIn(
+                f"- more: this is the default view; run `python3 {fake_invoked_as} --help` "
+                "for additional opt-in analyses",
+                out,
+            )
+
+    def test_hint_command_quotes_paths_containing_spaces(self):
+        # The plugin can be installed under a directory with spaces; an
+        # unquoted path makes the interpreter open only the first segment,
+        # so the printed command is not runnable as promised.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            spaced = str(root / "plugin root" / "session-facts")
+            with mock.patch.object(sys, "argv", [spaced]):
+                out = _run_cli(["--root", str(root)])
+            self.assertIn(f"`python3 {shlex.quote(spaced)} --help`", out)
+            self.assertNotIn(f"`python3 {spaced} --help`", out)
+
+    def test_fallback_wording_when_invoked_as_is_none(self):
+        # summarize_repo() called as a library (invoked_as=None, e.g. not
+        # via the CLI's sys.argv[0]) keeps the skill-pointer wording instead
+        # of rendering a command with nothing to name.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            out = summarize_repo(root, AnalysisConfig(), is_git=True, cwd=root, invoked_as=None)
+            self.assertIn(
+                "- more: this is the default view; the session-facts skill "
+                "has additional opt-in analyses (see --help)",
+                out,
+            )
+            self.assertNotIn("run `", out)
+
+
+class ExceptionIsolationTest(unittest.TestCase):
+    """A detector/collector that raises must not blank out the rest of the
+    output (internal backlog: collector/detector 例外が隔離されず出力ゼロ)."""
+
+    @staticmethod
+    def _fake_discover_plugins(pkg_dir, base_package):
+        class _GoodDetector:
+            name = "good_detector"
+            priority = 1
+
+            def detect(self, ctx):
+                return ["good_stack_marker"]
+
+        class _BadDetector:
+            name = "bad_detector"
+            priority = 2
+
+            def detect(self, ctx):
+                raise RuntimeError("detector boom")
+
+        class _GoodCollector:
+            name = "good_collector"
+            section_title = "## Good Section"
+            priority = 1
+
+            def should_run(self, ctx):
+                return True
+
+            def collect(self, ctx):
+                return "## Good Section\n- ok"
+
+        class _BadCollector:
+            name = "bad_collector"
+            section_title = "## Bad Section"
+            priority = 2
+
+            def should_run(self, ctx):
+                return True
+
+            def collect(self, ctx):
+                raise RuntimeError("collector boom")
+
+        if base_package == "detectors":
+            return [_GoodDetector(), _BadDetector()]
+        if base_package == "collectors":
+            return [_GoodCollector(), _BadCollector()]
+        return []
+
+    def test_bad_detector_and_collector_do_not_suppress_good_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with mock.patch("cli.discover_plugins", side_effect=self._fake_discover_plugins):
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = main(["--root", str(root)])
+            self.assertEqual(rc, 0)
+            out = out_buf.getvalue()
+            err = err_buf.getvalue()
+            # Header always renders.
+            self.assertIn("## Project Facts", out)
+            # The good detector's stack entry and the good collector's
+            # section both survive despite their "bad" siblings raising.
+            self.assertIn("good_stack_marker", out)
+            self.assertIn("## Good Section", out)
+            self.assertIn("- ok", out)
+            # The failing ones are skipped, not silently retried or crashed.
+            self.assertNotIn("## Bad Section", out)
+            # Failures are surfaced on stderr with the plugin's name, not
+            # swallowed entirely.
+            self.assertIn("[session-facts] WARNING: detector bad_detector failed", err)
+            self.assertIn("[session-facts] WARNING: collector bad_collector failed", err)
+
+
+class SummarizeRepoFailureFallbackTest(unittest.TestCase):
+    """If summarize_repo() itself raises (any failure not already isolated
+    per-detector/collector), main() must still exit 0 with a minimal header
+    rather than exit 1 with a traceback and no output at all."""
+
+    def test_exit_0_with_minimal_header_on_unexpected_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with mock.patch("cli.summarize_repo", side_effect=RuntimeError("total meltdown")):
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = main(["--root", str(root)])
+            self.assertEqual(rc, 0)
+            self.assertIn("## Project Facts", out_buf.getvalue())
+            self.assertIn("[session-facts] WARNING", err_buf.getvalue())
+            self.assertIn("total meltdown", err_buf.getvalue())
+
+    def test_subagent_json_envelope_still_wraps_the_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with mock.patch("cli.summarize_repo", side_effect=RuntimeError("total meltdown")):
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = main(["--root", str(root), "--emit", "subagent-json"])
+            self.assertEqual(rc, 0)
+            payload = json.loads(out_buf.getvalue())
+            hso = payload["hookSpecificOutput"]
+            self.assertEqual(hso["hookEventName"], "SubagentStart")
+            self.assertIn("## Project Facts", hso["additionalContext"])
 
 
 if __name__ == "__main__":
