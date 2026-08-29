@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,25 @@ class TestCountDefsPython(unittest.TestCase):
         result = metrics.compute(_loaded(text), "python", Path("/repo/broken.py"))
         # regex フォールバック: 行頭 "def " にマッチする行数
         self.assertEqual(result.def_count, 2)
+
+
+class TestCountDefsPythonSyntaxWarnings(unittest.TestCase):
+    def test_invalid_escape_sequences_do_not_leak_syntax_warning(self):
+        # 無効なエスケープシーケンス ("\d" 等) を含む文字列リテラルは、
+        # ast.parse() が SyntaxWarning を出す (Python 3.12+)。debounce で
+        # 抑制される場合も含め毎回の判定で発生するため、stderr を汚さないよう
+        # count_defs_python 内で抑制することを固定する。
+        text = "\n".join(f'x{i} = "\\d+"' for i in range(50)) + "\n"
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            metrics.count_defs_python(text)
+        syntax_warnings = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+        self.assertEqual(syntax_warnings, [])
+
+    def test_invalid_escape_sequences_still_parse_correctly(self):
+        # 警告の抑制が解析結果自体に影響しないことを確認する。
+        text = 'def a():\n    x = "\\d+"\n    return x\n'
+        self.assertEqual(metrics.count_defs_python(text), 1)
 
 
 class TestCountDefsGeneric(unittest.TestCase):
