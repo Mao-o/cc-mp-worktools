@@ -169,6 +169,19 @@ auth)」とカテゴリ名を列挙するには件数だけでは足りない。
 を見出し行に追記するようになったが、`role` はここに含めない。上記の role_note
 と重複表示になるため、role 係数の可視化は role_note 側に残している。
 
+### `Verdict.scale` は `applied_multipliers` と別枠で保持する (0.3.0 レビュー対応)
+
+`FILE_SPLIT_ADVISOR_SCALE` (全閾値への一律倍率) は当初、実効閾値の計算にだけ
+反映し表示には一切出していなかった。これは「宣言的 ×1.6 が理由不明のまま
+表示される」(yaf.13) を修正した同じリリースで、SCALE についても同じ欠陥
+(倍率 1.0 以外のとき「目安」の数値が printed 係数から導出できない) を
+自己再導入していたバグで、レビューで指摘された。`scale` は judge の設計判断
+どおり `applied_multipliers` には含めない (グローバル config であり per-file
+の推論シグナルではないため) が、`Verdict.scale` という別フィールドで保持し、
+`message.build` が role_note と同じ形の専用 parenthetical
+(`(全体 2.0倍)`) を breakdown の直後に追記する。judge 側の実効閾値計算・
+tier/emit 判定ロジックは変更していない (表示だけの修正)。
+
 ### 目安の表示 tier は判定 tier + 隣接 tier (0.3.0)
 
 `message.build` の「目安」表示は以前 review/warn 固定だったため、note/strong

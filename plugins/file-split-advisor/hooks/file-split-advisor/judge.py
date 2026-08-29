@@ -76,6 +76,7 @@ class Verdict:
     signals: tuple[str, ...]
     thresholds: dict[str, float]
     applied_multipliers: dict[str, float]
+    scale: float = 1.0
 
 
 def _effective_thresholds(
@@ -92,6 +93,10 @@ def _effective_thresholds(
     ``scale`` (``FILE_SPLIT_ADVISOR_SCALE``) はユーザーが設定するグローバルな
     倍率で、ファイル個別の推論シグナルではないため ``applied_multipliers`` には
     含めない (message.py の breakdown 表示対象外)。実効閾値の計算には反映する。
+    ただし表示から完全に消すと「目安の数値が printed 係数から導出できない」
+    (0.3.0 で顕在化した欠陥) になるため、``Verdict.scale`` という別フィールドで
+    保持し、message.py はそこから role_note と同じ形の専用 parenthetical
+    (``(全体 N倍)``) を組み立てる。
     """
     is_declarative = metrics.control_flow_density < DECLARATIVE_THRESHOLD
     multipliers = {
@@ -168,4 +173,5 @@ def judge(metrics: Metrics, language: str, role: str, scale: float = 1.0) -> Ver
         signals=signals,
         thresholds=thresholds,
         applied_multipliers=multipliers,
+        scale=scale,
     )

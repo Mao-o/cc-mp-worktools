@@ -35,6 +35,7 @@ def _verdict(
     signals=(),
     thresholds=None,
     applied_multipliers=None,
+    scale=1.0,
 ) -> Verdict:
     """test_message.py 専用の Verdict ファクトリ。
 
@@ -51,6 +52,7 @@ def _verdict(
         signals=signals,
         thresholds=thresholds,
         applied_multipliers=applied_multipliers,
+        scale=scale,
     )
 
 
@@ -133,6 +135,44 @@ class TestMultiplierBreakdown(unittest.TestCase):
         self.assertIn("(test: 閾値 1.6倍)", text)
         self.assertNotIn("test 1.6", text)
         self.assertIn("(python 1.0)", text)
+
+
+class TestScaleNote(unittest.TestCase):
+    """P2-1 回帰: FILE_SPLIT_ADVISOR_SCALE != 1.0 のとき、目安に表示される
+    倍率がどこから来たか (全体倍率) を明示する。scale は breakdown
+    (applied_multipliers) には含めないが、role_note と同じ形の専用
+    parenthetical で別枠表示する。"""
+
+    def test_scale_note_appended_when_scale_is_not_neutral(self):
+        # レビュー PROBE 3 の再現値 (base warn=500/strong=800 に scale=2.0):
+        # 目安 warn=1000 strong=1600 (python 1.0) (全体 2.0倍)。
+        v = _verdict(
+            tier="warn",
+            thresholds={"note": 300, "review": 600, "warn": 1000, "strong": 1600},
+            scale=2.0,
+        )
+        text = message.build(
+            Path("foo.py"), "python", "normal", v, _metrics(line_count=1200)
+        )
+        self.assertIn("warn=1000", text)
+        self.assertIn("(全体 2.0倍)", text)
+
+    def test_scale_note_omitted_when_scale_is_neutral(self):
+        v = _verdict(tier="warn", scale=1.0)
+        text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
+        self.assertNotIn("全体", text)
+
+    def test_scale_note_combines_with_role_note(self):
+        # role_note (test: 閾値 1.6倍) と scale note (全体 N倍) は両立し、
+        # 互いを上書きしない。
+        v = _verdict(
+            tier="warn",
+            applied_multipliers={"language": 1.0, "role": 1.6, "declarative": 1.0},
+            scale=0.5,
+        )
+        text = message.build(Path("foo_test.py"), "python", "test", v, _metrics())
+        self.assertIn("(全体 0.5倍)", text)
+        self.assertIn("(test: 閾値 1.6倍)", text)
 
 
 class TestDisplayTiers(unittest.TestCase):

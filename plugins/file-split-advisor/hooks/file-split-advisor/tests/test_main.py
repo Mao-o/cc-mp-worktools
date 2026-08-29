@@ -295,6 +295,18 @@ class TestScaleEnvVar(BaseMainTest):
             out, _ = _run_main(self._envelope(path))
         self.assertIn("判定: warn", self._context(out))
 
+    def test_scale_note_shown_in_memo_when_scale_applied(self):
+        # P2-1 回帰 (レビュー PROBE 3 の再現): SCALE=2.0 のとき、目安に出る
+        # 倍率の根拠 (全体 2.0倍) が明示され、printed 係数だけから実効閾値
+        # (warn=1000) を導出できることを固定する。
+        path = self._write("checkout_flow.py", _python_lines(1200))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "2.0"}):
+            out, _ = _run_main(self._envelope(path))
+        text = self._context(out)
+        self.assertIn("判定: warn", text)
+        self.assertIn("warn=1000", text)
+        self.assertIn("(全体 2.0倍)", text)
+
 
 class TestTempDirSkip(BaseMainTest):
     """一時領域配下のファイルは (cwd が一時領域外なら) 常時 skip する。"""

@@ -108,10 +108,17 @@ class TestScale(unittest.TestCase):
     def test_scale_not_recorded_in_applied_multipliers(self):
         # scale はグローバル config であり per-file の推論シグナルではないため、
         # message.py の breakdown 表示対象である applied_multipliers には
-        # 含めない (実効閾値の計算にだけ反映する)。
+        # 含めない (実効閾値の計算にだけ反映する)。ただし表示から完全に
+        # 消してよいわけではない (P2-1): 別フィールド Verdict.scale として
+        # 保持し、message.py 側の専用 parenthetical 表示に使う。
         v = judge.judge(_metrics(line_count=0), "python", "normal", scale=2.0)
         self.assertNotIn("scale", v.applied_multipliers)
         self.assertAlmostEqual(v.applied_multipliers["language"], 1.0)
+        self.assertAlmostEqual(v.scale, 2.0)
+
+    def test_default_scale_is_recorded_on_verdict(self):
+        v = judge.judge(_metrics(line_count=0), "python", "normal")
+        self.assertAlmostEqual(v.scale, 1.0)
 
 
 class TestTierBoundaries(unittest.TestCase):

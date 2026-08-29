@@ -77,11 +77,19 @@ def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metri
         f"{tier}={round(verdict.thresholds[tier])}" for tier in (tier_a, tier_b)
     )
     breakdown = _multiplier_breakdown(language, verdict)
+    # scale (FILE_SPLIT_ADVISOR_SCALE) は applied_multipliers に含めない
+    # (judge.py の設計判断: グローバル config であり per-file の推論シグナル
+    # ではないため) が、role_note と同じ形の専用 parenthetical で別枠表示する。
+    # これが無いと、倍率が 1.0 以外のとき「目安」の数値が printed 係数だけから
+    # 導出できなくなる (P2-1)。
+    scale_note = (
+        f" (全体 {_format_multiplier(verdict.scale)}倍)" if verdict.scale != 1.0 else ""
+    )
     role_note = " (test: 閾値 1.6倍)" if role == "test" else ""
     header = (
         f"静的解析メモ (file-split-advisor): {path}\n"
         f"行数: {metrics.line_count} (言語: {language}, 判定: {verdict.tier}"
-        f" / 目安 {thresholds_str} ({breakdown}){role_note})"
+        f" / 目安 {thresholds_str} ({breakdown}){scale_note}{role_note})"
     )
 
     if verdict.signals:
