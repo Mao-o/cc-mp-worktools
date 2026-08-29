@@ -35,16 +35,12 @@ import subprocess
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
 #   pre-tool (hook 10s): rev-parse 1 + status 1 = 最悪 7s
-#   post-tool / Bash (hook 10s, bd_092a232e-zh5.16 で rev-parse が 1 → 2 に増加):
-#     rev-parse (worktree_root) 1 + status 1 + rev-parse (head_sha) 1 = 最悪 9s
-#   post-tool / Edit,Write,NotebookEdit (hook 10s, 0.6.0 まで git 呼び出し無しだったが
-#     bd_092a232e-zh5.16 で追加): rev-parse (worktree_root) 1 + rev-parse (head_sha) 1
-#     = 最悪 4s
+#   post-tool / Bash (hook 10s): worktree_root (rev-parse) 1 + status_snapshot 1
+#     = 最悪 7s
+#   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s)
 #   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
 #     rev-parse 2 + ls-files (symlink 一覧) 10 + ls-files (untracked) 10
-#     + パス単位 diff (COLLECT_BUDGET_SEC 30 + 予算判定後に走る最後の 1 パス。
-#       bd_092a232e-zh5.16 の base_sha フォールバックで最悪 2 回 git diff を呼ぶため
-#       PATH_DIFF_TIMEOUT_SEC の 2 倍で見る = 10) = 64s
+#     + パス単位 diff (COLLECT_BUDGET_SEC 30 + 予算判定後に走る最後の 1 パス 5) = 59s
 #   実際の予算計算とテストは tests/test_review_set.py::TestTimeoutBudgets を参照。
 #   ここでの数値は目安のコメントに過ぎず、乖離したらテストの方を正とする。
 REV_PARSE_TIMEOUT_SEC = 2

@@ -409,10 +409,15 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         return found
 
     def test_pre_and_post_tool_fit_in_hook_budget(self):
-        """bd_092a232e-zh5.16: post-tool は Bash 経路と Edit 系経路で git 呼び出し数が
-        異なる (`__main__.py` の `_record_bash_changes` / `handle_post_tool` 参照)。
+        """post-tool は Bash 経路と Edit 系経路で git 呼び出し数が異なる
+        (`__main__.py` の `_record_bash_changes` / `handle_post_tool` 参照)。
         どちらも同じ `post-tool` hook timeout を共有するため、大きい方
-        (Bash: worktree_root + status_snapshot + head_sha) で判定する。
+        (Bash: worktree_root + status_snapshot) で判定する。
+
+        実測 (`gitscan._git` をカウンタでラップして pre-tool / post-tool(Bash) /
+        post-tool(Edit) を個別に起動): pre-tool と post-tool/Bash はどちらも
+        rev-parse 1 回 + status 1 回、post-tool/Edit,Write,NotebookEdit は
+        git 呼び出し 0 回だった。
         """
         import gitscan
 
@@ -427,11 +432,11 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         )
 
         # post-tool / Bash: _record_bash_changes が worktree_root (rev-parse) +
-        # status_snapshot (status) + head_sha (rev-parse) を呼ぶ。
-        post_tool_bash_worst = 2 * gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
-        # post-tool / Edit,Write,NotebookEdit: handle_post_tool が worktree_root +
-        # head_sha (どちらも rev-parse) を呼ぶ。status_snapshot は呼ばない。
-        post_tool_edit_worst = 2 * gitscan.REV_PARSE_TIMEOUT_SEC
+        # status_snapshot (status) を呼ぶ。
+        post_tool_bash_worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        # post-tool / Edit,Write,NotebookEdit: handle_post_tool は git を一切呼ばない
+        # (_edited_paths はパス整形のみ、state.record_pending も git 非依存)。
+        post_tool_edit_worst = 0
         post_tool_worst = max(post_tool_bash_worst, post_tool_edit_worst)
         self.assertIn("post-tool", timeouts)
         self.assertLess(
@@ -451,10 +456,7 @@ class TestTimeoutBudgets(ReviewSetTestCase):
             + gitscan.LS_FILES_TIMEOUT_SEC  # symlink 一覧 (symlink_map)
             + gitscan.LS_FILES_TIMEOUT_SEC  # untracked 判定 (untracked_among)
             + self.entry.COLLECT_BUDGET_SEC
-            # 予算判定後に走る最後の 1 パス。bd_092a232e-zh5.16 の base_sha が
-            # 無効/到達不能だと path_diff が base_sha 試行 + HEAD フォールバックの
-            # 2 回 git diff を呼ぶ (gitscan.path_diff 参照) ので 2 倍で見る。
-            + 2 * gitscan.PATH_DIFF_TIMEOUT_SEC
+            + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
         )
         # cursor の timeout 後に process group を止める経路 (SIGTERM 待ち / SIGKILL 待ち /
         # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない。
