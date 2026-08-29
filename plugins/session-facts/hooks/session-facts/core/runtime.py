@@ -39,6 +39,17 @@ def first_version(value: str) -> str:
     return value.split("#", 1)[0].strip().strip("[]{},")
 
 
+def is_home_dir(root: Path) -> bool:
+    """Public alias of :func:`_is_home_dir` for the marker gate.
+
+    ランタイム固定ファイル (`.tool-versions` / `.python-version`) は
+    `$HOME` 直下に置かれるとユーザー全体の既定を意味し、そのディレクトリが
+    プロジェクトであることを示さない。mise config と同じ例外をここで共有し、
+    gate 側に「root が $HOME か」の判定を書き直さない。
+    """
+    return _is_home_dir(root)
+
+
 def _is_home_dir(root: Path) -> bool:
     try:
         return root.resolve() == Path.home().resolve()

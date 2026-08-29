@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from core.constants import (
+    GLOBAL_ONLY_AT_HOME_MARKERS,
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
     DEFAULT_MAX_HUB_FILES,
@@ -26,7 +27,7 @@ from core.context import AnalysisConfig, RepoContext
 from core.fs import has_project_markers, read_text, walk_files
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
-from core.runtime import MISE_CONFIG_NAMES, mise_config_path
+from core.runtime import MISE_CONFIG_NAMES, is_home_dir, mise_config_path
 from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
 from renderer import render_header
@@ -36,7 +37,11 @@ from renderer import render_header
 # plain has_project_markers() exists() check, so that function's $HOME/XDG
 # -global exception (see its docstring) applies to the marker gate too,
 # rather than re-deriving an "is root $HOME" judgment here separately.
-_NON_MISE_PROJECT_MARKERS = tuple(m for m in PROJECT_MARKERS if m not in MISE_CONFIG_NAMES)
+_NON_MISE_PROJECT_MARKERS = tuple(
+    m
+    for m in PROJECT_MARKERS
+    if m not in MISE_CONFIG_NAMES and m not in GLOBAL_ONLY_AT_HOME_MARKERS
+)
 
 
 def _iter_readme_body_lines(text: str):
@@ -119,6 +124,18 @@ def _trim_tree_sections(header: str, sections: List[str], target: int) -> List[s
     return secs
 
 
+def _escape_surrogates(text: str) -> str:
+    r"""stdout に出るのと同じ表現へ正規化する。
+
+    非 UTF-8 のバイトを含むファイル名は ``os.walk()`` から surrogateescape の
+    コードポイントとして渡る。上限判定は 1 文字と数えるが、stdout の
+    ``backslashreplace`` ハンドラが出力時に ``\udcff`` の 6 文字へ展開する
+    ため、上限ちょうどに収めたつもりの出力が実際には大きく超えうる。
+    判定前にここで展開しておき、``len()`` が実際の出力長と一致するようにする。
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _enforce_output_budget(header: str, sections: Sequence[str], max_chars: int) -> str:
     """Trim total output to max_chars, shrinking the lowest-value content
     first, in this order: the dynamic-depth tree sections' tails
@@ -144,6 +161,9 @@ def _enforce_output_budget(header: str, sections: Sequence[str], max_chars: int)
     """
     sections = list(sections)
     original_sections = list(sections)
+
+    header = _escape_surrogates(header)
+    sections = [_escape_surrogates(sec) for sec in sections]
 
     def joined(candidate_secs: Sequence[str]) -> str:
         return "\n\n".join([header] + list(candidate_secs))
@@ -238,6 +258,14 @@ def _has_relevant_project_markers(root: Path) -> bool:
     reimplementing an "is root $HOME" check against this gate too.
     """
     if has_project_markers(root, _NON_MISE_PROJECT_MARKERS):
+        return True
+    if not is_home_dir(root) and has_project_markers(
+        root, GLOBAL_ONLY_AT_HOME_MARKERS
+    ):
+        # `.tool-versions` / `.python-version` は `$HOME` 直下だと
+        # ユーザー全体の既定を意味する。mise config と同じ例外を適用し、
+        # グローバルなランタイム固定でホーム全体を「プロジェクト」と
+        # 判定しない (この gate が守ろうとしている当の環境なので)。
         return True
     return mise_config_path(root) is not None
 

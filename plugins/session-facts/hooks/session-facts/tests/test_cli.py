@@ -19,7 +19,13 @@ from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from cli import parse_args, _enforce_output_budget, main, summarize_repo
+from cli import (
+    _enforce_output_budget,
+    _has_relevant_project_markers,
+    main,
+    parse_args,
+    summarize_repo,
+)
 from core.context import AnalysisConfig
 
 
@@ -769,4 +775,44 @@ class PythonVersionMarkerTest(unittest.TestCase):
             # 実際に走っている (最小ヘッダーではどちらも出ない)。
             self.assertIn("- runtime: python 3.11.9 (.python-version)", out)
             self.assertIn("app.py", out)
+
+
+class SurrogateBudgetTest(unittest.TestCase):
+    r"""PR #67 (Codex P2): 非 UTF-8 バイトを含むファイル名は surrogateescape の
+    コードポイントで渡り、上限判定は 1 文字と数えるが、stdout の
+    backslashreplace ハンドラが出力時に 6 文字 (\udcff の形) へ展開する。
+    上限ちょうどに収めたつもりの出力が実際には大きく超えていた。
+    """
+
+    def test_budget_counts_the_escaped_representation(self):
+        surrogate = chr(0xDCFF)
+        header = "## Project Facts\n- repo_root: /x/" + surrogate * 20
+        out = _enforce_output_budget(header, [], 100)
+        emitted = out.encode("utf-8", "backslashreplace").decode("utf-8")
+        self.assertLessEqual(len(emitted), 100)
+
+
+class HomeRuntimePinMarkerTest(unittest.TestCase):
+    """PR #67 (Codex P2): `$HOME` 直下のランタイム固定ファイルはユーザー全体の
+    既定を意味し、そのディレクトリがプロジェクトであることを示さない。
+    gate がこれを通すと、まさに守るべきホームで全走査が復活する。
+    """
+
+    def test_home_runtime_pin_does_not_pass_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            (home / ".tool-versions").write_text("python 3.11.9\n")
+            with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                self.assertFalse(_has_relevant_project_markers(home))
+
+    def test_same_pin_outside_home_still_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            proj = Path(tmp) / "proj"
+            proj.mkdir()
+            (proj / ".tool-versions").write_text("python 3.11.9\n")
+            with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                self.assertTrue(_has_relevant_project_markers(proj))
 

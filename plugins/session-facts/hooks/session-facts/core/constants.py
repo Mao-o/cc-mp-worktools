@@ -198,6 +198,10 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # mirror collectors/dependencies.py's _tracked_requirements(), which already
 # recognises any requirements-prefixed/.txt-suffixed basename (e.g.
 # requirements-dev.txt) -- not just the exact "requirements.txt" name.
+# `$HOME` 直下ではユーザー全体の既定を意味し、そのディレクトリが
+# プロジェクトであることを示さないマーカー (mise config と同じ扱い)。
+GLOBAL_ONLY_AT_HOME_MARKERS = (".tool-versions", ".python-version")
+
 PROJECT_MARKERS = (
     "package.json",
     "pyproject.toml",
