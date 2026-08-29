@@ -86,25 +86,38 @@ def summarize_repo(
         ctx.results["purpose"] = purpose
     ctx.results["package_manager"] = detect_package_manager(ctx)
 
-    # Phase 1: Run stack detectors
+    # Phase 1: Run stack detectors. Each detector is isolated: one raising
+    # (e.g. on a malformed config file it tries to parse) must not blank out
+    # the stack line and every section that follows it — the caller only
+    # sees a stderr warning and the run continues with the rest.
     pkg_dir = Path(__file__).resolve().parent
     detectors = discover_plugins(pkg_dir / "detectors", "detectors")
     detectors.sort(key=lambda d: d.priority)
     for detector in detectors:
-        ctx.stack.extend(detector.detect(ctx))
+        detector_name = getattr(detector, "name", detector.__class__.__name__)
+        try:
+            ctx.stack.extend(detector.detect(ctx))
+        except Exception as e:
+            print(f"[session-facts] WARNING: detector {detector_name} failed: {e}", file=sys.stderr)
 
     # Phase 2: Run section collectors
     collectors = discover_plugins(pkg_dir / "collectors", "collectors")
     collectors.extend(discover_custom_plugins(pkg_dir / "custom"))
     collectors.sort(key=lambda c: c.priority)
 
-    # Collect sections (some collectors populate ctx.results for header)
+    # Collect sections (some collectors populate ctx.results for header).
+    # Same isolation as detectors above: a collector that raises loses only
+    # its own section, not the rest of the output.
     collected_sections = []
     for collector in collectors:
-        if collector.should_run(ctx):
-            section = collector.collect(ctx)
-            if section:
-                collected_sections.append(section)
+        collector_name = getattr(collector, "name", collector.__class__.__name__)
+        try:
+            if collector.should_run(ctx):
+                section = collector.collect(ctx)
+                if section:
+                    collected_sections.append(section)
+        except Exception as e:
+            print(f"[session-facts] WARNING: collector {collector_name} failed: {e}", file=sys.stderr)
 
     # Header rendered after collectors so ctx.results is fully populated
     sections = [render_header(ctx)] + collected_sections
@@ -209,6 +222,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # Force UTF-8 + a non-fatal error handler on stdout before printing
+    # anything. Without this, a lone surrogate from a non-UTF-8 filename, or
+    # an inherited non-UTF-8 stdout encoding (e.g. PYTHONIOENCODING=ascii
+    # with Japanese README text or the tree-drawing box characters), raises
+    # UnicodeEncodeError and the whole facts bundle is lost. Guarded because
+    # not every stdout-like object supports reconfigure() (e.g. io.StringIO
+    # used by tests to capture output in-process).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     args = parse_args(argv)
     config = AnalysisConfig(
         tree_depth=args.tree_depth,
@@ -234,7 +256,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # sys.argv[0] is the literal path the hook invoked (e.g. the
     # ${CLAUDE_PLUGIN_ROOT}-resolved directory), which the injected output
     # would otherwise have no way to name for a follow-up --help call.
-    output = summarize_repo(root, config, is_git, cwd=resolved, invoked_as=sys.argv[0])
+    try:
+        output = summarize_repo(root, config, is_git, cwd=resolved, invoked_as=sys.argv[0])
+    except Exception as e:
+        # Per-detector/collector isolation above covers the expected failure
+        # points, but this is the last line of defense: hooks are
+        # non-blocking by contract, so a bug anywhere in the pipeline should
+        # degrade to a minimal header instead of exit 1 + traceback (which
+        # silently drops the entire facts bundle from the agent's context).
+        print(f"[session-facts] WARNING: summarize_repo failed, emitting minimal header: {e}", file=sys.stderr)
+        output = f"## Project Facts\n- repo_root: {root}"
     if args.emit == "subagent-json":
         print(json.dumps({
             "hookSpecificOutput": {

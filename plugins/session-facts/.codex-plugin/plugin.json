@@ -1,7 +1,7 @@
 {
   "name": "session-facts",
-  "version": "0.6.0",
-  "description": "リポジトリを分析し、スタック/スクリプト/env キー/ドメイン型などのコンパクトなファクトバンドルを生成する Codex plugin。",
+  "version": "0.7.0",
+  "description": "セッション開始時にリポジトリを分析し、スタック/スクリプト/env キー/ドメイン型のファクトバンドルを Markdown で生成する Codex plugin。SessionStart で発火",
   "author": {
     "name": "Mao"
   },

@@ -45,7 +45,14 @@ def git_ls_files(root: Path) -> List[str]:
     )
     if cp.returncode != 0:
         return []
-    return [raw.decode("utf-8", "surrogateescape") for raw in cp.stdout.split(b"\0") if raw]
+    # errors="replace" (not "surrogateescape"): tracked_files is used for
+    # display and for extension/prefix matching, not for a byte-exact
+    # round-trip back to the filesystem, so there is nothing to gain from
+    # preserving the invalid byte. surrogateescape would instead produce a
+    # lone surrogate (U+DCxx) that later crashes any strict-UTF-8 print of
+    # the rendered output; "replace" maps it to U+FFFD, which is always
+    # safely printable.
+    return [raw.decode("utf-8", "replace") for raw in cp.stdout.split(b"\0") if raw]
 
 
 def current_branch(root: Path) -> Optional[str]:

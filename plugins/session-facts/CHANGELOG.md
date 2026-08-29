@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.7.0
+
+**Hub Files / `--help` ポインタの正式反映 + 例外隔離・エンコーディング耐性 (v0.7)**。
+0.6.0 の bump 後、version を上げないまま Hub Files collector と `- more:` ヒント /
+`invoked_as` の 2 コミットが main に積み上がっていた (CHANGELOG・README・version が
+未追従)。本 version でこれらを正式に取り込んで記載し、あわせて 2026-08 精査
+バックログで見つかった不具合を修正する。
+
+### 新機能 (0.6.0 bump 後、無 version のまま先行 merge されていたものを正式反映)
+
+1. **Hub Files collector** (`core/imports.py` 新規, `collectors/hub_files.py` 新規) —
+   opt-in `--include-hub-files` で、JS/TS・Python の import 文を正規表現で抽出して
+   相対 import を解決し、被参照数の多い順に `## Hub Files` セクションへ表示する。
+   件数上限は `--max-hub-files`。リファクタ前に「どのファイルが中心的か」を
+   把握する用途で、AST は使わない軽量ヒューリスティック (tsconfig の path alias や
+   node_modules 解決、複雑な Python package 構成は対象外)
+2. **`- more:` --help ポインタ** (`core/context.py`, `renderer.py`, `cli.py`) —
+   自動注入された Project Facts を読むだけでは opt-in オプションの存在に気付けない
+   問題に対処。`RepoContext.invoked_as` (= `sys.argv[0]`) 経由で、ヘッダー末尾に
+   実行可能な追加コマンドを案内するようにした。`SKILL.md` の description も
+   フラグ列挙をやめ what/when の記述に戻した
+
+### 不具合修正 (2026-08 精査バックログ)
+
+3. **`- more:` ヒントの案内コマンドが実行不能だった問題を修正**
+   (`renderer.py`, `core/context.py`, `skills/session-facts/SKILL.md`) —
+   実際の hook 起動 (`python3 <dir>`) では `sys.argv[0]` がディレクトリを指すため、
+   案内された `<invoked_as> --help` をそのまま実行すると `permission denied`
+   になっていた (ディレクトリを直接実行しようとするため)。`python3 <invoked_as>
+   --help` の形に修正し、`tests/test_cli.py` に実行可能な形で始まることを
+   検証するテストを追加
+4. **collector/detector の例外が隔離されず出力が丸ごと消える問題を修正**
+   (`cli.py`, `registry.py`) — 1 つの detector/collector が例外を投げると
+   traceback 付きで exit 1 になり、facts が全セクション消えていた。
+   `detector.detect()` と `collector.should_run()`/`collect()` の呼び出しを
+   それぞれ try/except で隔離し、失敗した plugin 名を `[session-facts] WARNING:
+   ...` として stderr に出しつつ他のセクションは継続するよう変更。
+   `registry.py` 側のモジュール import / `register()` 呼び出しも同様に隔離し、
+   1 モジュールの読み込み失敗が同ディレクトリの他モジュールの検出を道連れに
+   しないようにした。`summarize_repo()` 自体が上記以外の理由で失敗した場合の
+   最終防御として、`main()` が最低限 `## Project Facts` ヘッダーのみ出力して
+   exit 0 にするフォールバックも追加
+5. **非 UTF-8 ファイル名・非 UTF-8 stdout ターゲットでの `UnicodeEncodeError` を修正**
+   (`core/git.py`, `cli.py`) — `git ls-files` が返す非 UTF-8 バイト列を
+   `errors="surrogateescape"` で decode するとローンサロゲート (U+DCxx) になり、
+   標準出力への `print()` が `UnicodeEncodeError` で失敗して facts が丸ごと
+   失われていた。decode を `errors="replace"` (表示用途のため元バイトへの
+   往復は不要) に変更。あわせて `main()` 冒頭で
+   `sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")` を
+   行い、`PYTHONIOENCODING=ascii` のような非 UTF-8 stdout ターゲットでも
+   ツリー罫線 (`├──` 等) や日本語テキストで落ちないようにした
+
+### 保守
+
+6. **Codex 向け manifest との version 統一 + bump 手順の明文化**
+   (`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `README.md`) —
+   Claude 向けと Codex 向けの 2 manifest の version が乖離しうる (bump 漏れ事故)
+   問題に対応。両 manifest の version を統一し、README に「リリース手順」節を
+   新設して「2 manifest 同時 bump」を明記した
+7. **Python 互換性表記を 3.11+ に統一** (`README.md`,
+   `skills/session-facts/SKILL.md`) — marketplace 全体の 3.11+ 方針
+   (旧 3.8+ 表記からの統一) に合わせて修正
+8. **CHANGELOG に 0.1.0〜0.3.0 を追補** — 本ファイル下部を参照。plugin.json の
+   version 履歴はあったが CHANGELOG の記録が 0.4.0 からしか無かったため、
+   git log から要約を補った。以後「機能コミット = version bump + CHANGELOG
+   同時更新」を [hooks/session-facts/CLAUDE.md](./hooks/session-facts/CLAUDE.md)
+   に明記し、本 version のような後追い記録を防ぐ
+
+テスト 177 件 (新規 14 件: `tests/test_registry.py` 新設 (5 件、registry.py の
+import/register 隔離)、`tests/test_fs.py` 新設 (4 件、非 UTF-8 decode と
+stdout エンコーディング耐性)、`tests/test_cli.py` に `- more:` ヒント・
+例外隔離・フォールバックのテストを追加 (5 件))。
+
 ## 0.6.0
 
 **実行コンテキスト (runtime/venv) の可視化 + 依存収集のハイブリッド化 (v0.6)**。
@@ -182,3 +255,65 @@ plugin.json から解決。
 - **P4 (`--exclude-if-in-claudemd`)** — CLAUDE.md 既出情報の出力抑止モードは、
   受け入れ基準に複数プロジェクトでの false-positive ゼロ検証を含むため将来対応に
   見送り。
+
+## 0.3.0
+
+**出力品質改善 7 件**。エージェント文脈への注入精度を 7 軸で改善した (0.7.0 時点の
+追記: 本節以下 0.1.0 までは git log からの要約で、リリース当時に CHANGELOG へは
+未記載だった)。
+
+1. **purpose 長さ上限** (140 chars) + Markdown 強調・HTML タグ・YAML frontmatter の
+   strip、先頭文優先の抽出に変更。
+2. **`claude_plugin` detector 新設** — `.claude-plugin/plugin.json` /
+   `marketplace.json` を検出し、stack に `claude-code-plugin` /
+   `claude-code-marketplace` を追加。
+3. **`python_stack` の fallback 追加** — `pyproject.toml` が無くても `.py` 比率
+   20% 以上かつ 10 ファイル以上で python を検出するようにし、plugin repo 等の
+   検出漏れを解消。
+4. **Service Entry Points のノイズ抑制** — `__init__.py` / `index.*` / `types.*`
+   を減点、`__main__.py` / `main.*` / `app.py` / `server.*` を加点するスコアリング
+   を追加。
+5. **cwd スコープの分離** — cwd != repo_root のとき Service Entry Points を
+   cwd-scoped + repo-wide に分離、Test Snapshot も cwd-scoped に切替
+   (cwd 配下に code が無ければ repo-wide にフォールバック)。
+6. **firebase 判定の根拠強化** — `firebase.json` / `.firebaserc` / 依存 /
+   pyproject の evidence を要求し、件数に応じて minimal/moderate/substantial の
+   段階表現に変更。meta-tooling 由来の誤検出 note を抑制。
+7. **`walk_files` に `respect_subgit=True`** — 非 git な親ディレクトリで子 git
+   repo に侵入しないようにし、子 repo のファイルが親の Service/Test セクションに
+   混入する問題を解消。
+
+## 0.2.0
+
+**cwd != repo_root 時に cwd 行と Subtree ブロックを追加**。monorepo /
+サブプロジェクト構成で呼び出したとき、リポジトリ全体のファクトしか注入されず
+「カレントの作業範囲」と「リポジトリ全体」をエージェントが区別できない問題を
+解消した。
+
+- `core/context.py`: `RepoContext` に `cwd` フィールドと `cwd_relative`
+  プロパティを追加。
+- `cli.py`: `main()` で `cwd` を保持し `RepoContext` に渡すよう変更。
+- `renderer.py`: `cwd != root` のとき `- cwd: <relative> (subdirectory of
+  repo_root)` をヘッダーに追加。
+- `collectors/cwd_subtree.py` (新規): priority=15 で `## Subtree (cwd: ...)` を
+  `## Structure` の直後に出力。
+- `README.md`: 「cwd != repo_root のとき」節を新設。
+
+cwd == repo_root のときは追加出力なし、従来挙動と完全に一致する。
+
+## 0.1.0
+
+**初回リリース**。git tracked files ベースでリポジトリを分析し、スタック検出・
+主要スクリプト・env キー・ディレクトリ構造・Test Snapshot・ドメイン型などを
+Markdown でまとめる中核パイプラインを実装した。
+
+- `cli.py` / `registry.py` / `renderer.py` / `__main__.py` によるオーケストレーション
+  (引数解析 → detector 実行 → collector 実行 → header + セクション結合 → 出力)。
+- `core/`: `context.py`（`RepoContext` / `AnalysisConfig`）, `constants.py`,
+  `pm.py`（パッケージマネージャ検出）, `fs.py`, `git.py`, `tree.py`, `util.py`。
+- `detectors/`: deno / docker / firebase / go / java / mise / nextjs /
+  node_typescript / php / prisma / python / react_vite / ruby / rust /
+  taskrunner / testing の各スタック検出。
+- `collectors/`: dependencies / domain_types / env_keys / nextjs_facts /
+  repo_notes / scripts / services / structure / tests の各セクション。
+- テストはまだ同梱していない (unittest 一式は 0.4.0 で新設)。

@@ -81,9 +81,11 @@ class RepoContext:
     cwd: Optional[Path] = None
     # The literal path this run was invoked with (sys.argv[0]), so the
     # injected output can name a copy-pasteable follow-up command (e.g.
-    # `<invoked_as> --help`) without the reader needing to resolve
-    # ${CLAUDE_PLUGIN_ROOT} itself. None when summarize_repo() is called as a
-    # library (e.g. from tests).
+    # `python3 <invoked_as> --help`) without the reader needing to resolve
+    # ${CLAUDE_PLUGIN_ROOT} itself. invoked_as is a directory for the real
+    # `python3 <dir>` hook invocation, not an executable, so the `python3 `
+    # prefix is required for the command to actually run. None when
+    # summarize_repo() is called as a library (e.g. from tests).
     invoked_as: Optional[str] = None
     tracked_files: List[str] = field(default_factory=list)
     stack: List[str] = field(default_factory=list)
