@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.8.0
+
+**Likely Commands の根拠強化 / 出力サイズ上限 / 非プロジェクトディレクトリ抑止 /
+test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き。不具合修正 4 件と
+ドキュメント修正 1 件。
+
+### 不具合修正
+
+1. **test_dir 集約が全ワイルドカードに退化する問題を修正** (`core/util.py`) —
+   `aggregate_paths()` は同じセグメント数のパス群を位置ごとに比較し、異なる
+   位置を `*` に置き換えて集約するが、全位置が異なると `*/*` のような
+   情報量ゼロのパターンになっていた (実測:
+   `['api/tests','web/__tests__','sdks/spec']` → `['*/*']`)。集約結果に
+   literal セグメントが一つも残らない場合は先頭ディレクトリで再分割して
+   から集約し直し、なお集約できない残りは元パスのまま列挙する (上限 4 件 +
+   `... (+N more)`)
+2. **Likely Commands が根拠の無いコマンドを出す問題を修正**
+   (`collectors/scripts.py`) — `docker compose up` は Dockerfile 単体でも
+   出ていた (compose ファイル存在時のみに変更、単体は `docker build .`)。
+   `mise install` は `.tool-versions` (asdf 形式) 単体でも出ていた (mise
+   config 存在時のみに変更、単体は `asdf install`)。pytest 系コマンドは
+   test_files の有無に関わらず無条件に出ていた (test_snapshot.test_files
+   が実在する時のみに変更)。pytest が pyproject.toml の依存として検出され
+   ない場合は、root 直下の `tests/` に `test_*.py` がある時に限り
+   `python3 -m unittest discover tests` を代替提案する
+3. **出力全体に文字数上限が無く harness の注入上限超過の恐れがあった問題を
+   修正** (`cli.py`, `core/context.py`, `collectors/scripts.py`) —
+   `AnalysisConfig` に `max_output_chars` (既定 8,000。CLI:
+   `--max-output-chars`) を追加し、超過時は `## Structure` の末尾行 →
+   `## Scripts` → `## Env Keys` → `## Repo-Specific Notes` の順で段階的に
+   削る (`## Test Snapshot` / `## Service Entry Points` /
+   `## Likely Commands` は対象外)。個々の script command も 120 文字で
+   切り詰める
+4. **非プロジェクトディレクトリ (ホーム等) で起動すると走査由来の無意味な
+   facts を大量注入していた問題を修正** (`cli.py`, `core/constants.py`,
+   `core/fs.py`, `core/runtime.py`) — 非 git かつ root 直下に project
+   marker (`package.json`/`pyproject.toml`/`Makefile` 等) が一つも無い
+   場合は最小ヘッダー 2 行 (`git_repo: false` /
+   `no project markers found; facts skipped`) のみを出力する
+   (`--force-walk` で従来の無条件走査に戻せる)。あわせて
+   `.config/mise/config.toml` (XDG グローバル設定) は root が $HOME の
+   ときのみ除外するようにした (グローバルな tool pin が repo のものと
+   誤認されるのを防ぐ)
+
+### ドキュメント
+
+5. **SKILL.md が Codex 専用の `${PLUGIN_ROOT}` を Claude Code 向けの案内
+   としてそのまま書いていた問題を修正** (`skills/session-facts/SKILL.md`) —
+   Claude Code は `${CLAUDE_PLUGIN_ROOT}`、Codex は `${PLUGIN_ROOT}` と
+   両ハーネスを併記し、どちらも未定義な場合のフォールバック順序
+   (環境変数 → 自動注入された `- more:` 行の絶対パス → SKILL.md 自身の
+   場所を起点にした相対パス) を明確化した
+
 ## 0.7.0
 
 **Hub Files / `--help` ポインタの正式反映 + 例外隔離・エンコーディング耐性 (v0.7)**。
