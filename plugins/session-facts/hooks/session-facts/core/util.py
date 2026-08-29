@@ -52,6 +52,19 @@ def truncate_purpose(text: str, max_chars: int = MAX_PURPOSE_CHARS) -> str:
     return window.rstrip() + "…"
 
 
+def truncate_text(text: str, max_chars: int) -> str:
+    """Hard-truncate ``text`` to ``max_chars``, appending an ellipsis when cut.
+
+    Unlike truncate_purpose(), this does no markdown stripping or
+    sentence-boundary search: it is for values like shell commands
+    (collectors/scripts.py) where stripping ``**``/``_`` as markdown
+    emphasis would corrupt the literal text.
+    """
+    if len(text) <= max_chars:
+        return text
+    return text[: max(max_chars - 1, 0)].rstrip() + "…"
+
+
 def normalize_version(version: str) -> str:
     version = version.strip()
     version = re.sub(r'^[\^~<>= ]+', '', version)

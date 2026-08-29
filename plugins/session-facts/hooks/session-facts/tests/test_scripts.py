@@ -15,7 +15,7 @@ from pathlib import Path
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from collectors.scripts import _likely_commands
+from collectors.scripts import ScriptsCollector, _likely_commands
 from core.context import AnalysisConfig, RepoContext
 
 
@@ -249,6 +249,35 @@ class MiseCommandGroundingTest(unittest.TestCase):
             cmds = _likely_commands(ctx, max_items=16)
             self.assertIn("mise install", cmds)
             self.assertNotIn("asdf install", cmds)
+
+
+class ScriptCommandLengthCapTest(unittest.TestCase):
+    """internal backlog: a single overly-long script command (some
+    generators produce one-liners several hundred chars wide, e.g. the
+    reported 354-char case) used to render unbounded in ## Scripts."""
+
+    def test_long_command_is_truncated_to_120_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            long_command = "echo " + ("x" * 350)  # 355 chars total
+            (root / "package.json").write_text(
+                '{"scripts": {"build": "%s"}}' % long_command
+            )
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            out = ScriptsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            line = next(ln for ln in out.splitlines() if ln.startswith("- build:"))
+            # "- build: " prefix + the (<=120-char) command.
+            self.assertLessEqual(len(line) - len("- build: "), 120)
+            self.assertTrue(line.endswith("…"))
+
+    def test_short_command_is_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"scripts": {"test": "jest --watch"}}')
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            out = ScriptsCollector().collect(ctx)
+            self.assertIn("- test: jest --watch", out)
 
 
 if __name__ == "__main__":

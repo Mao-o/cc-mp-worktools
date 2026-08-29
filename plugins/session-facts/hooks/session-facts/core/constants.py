@@ -156,6 +156,19 @@ DEFAULT_MAX_DOMAIN_TYPES = 10
 DEFAULT_MAX_CONFIG_HINTS = 8
 DEFAULT_MAX_HUB_FILES = 8
 
+# cli.py's _enforce_output_budget(): a hard ceiling on the whole rendered
+# output. Claude Code's SessionStart plain-stdout / additionalContext
+# injection has a real ceiling of its own (~10,000 chars) beyond which the
+# harness saves the content to a file and substitutes a preview instead of
+# injecting it directly; 8,000 leaves headroom under that so the full facts
+# bundle is normally injected in place rather than falling back to a file.
+DEFAULT_MAX_OUTPUT_CHARS = 8000
+
+# collectors/scripts.py: a single overly-long script command (some
+# generators produce one-liners several hundred chars wide) can dominate
+# the ## Scripts section on its own; cap each command's displayed length.
+MAX_SCRIPT_COMMAND_CHARS = 120
+
 # hub_files collector (core/imports.py + collectors/hub_files.py): scanning
 # every candidate file's body is real work, so cap the candidate count to
 # bound worst-case cost on very large repos, and require multiple distinct

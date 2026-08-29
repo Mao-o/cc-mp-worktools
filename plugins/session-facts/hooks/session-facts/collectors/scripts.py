@@ -4,12 +4,17 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from core.constants import COMPOSE_FILE_CANDIDATES, MAKE_TARGET_PRIORITY_PATTERNS, SCRIPT_PRIORITY_PATTERNS
+from core.constants import (
+    COMPOSE_FILE_CANDIDATES,
+    MAKE_TARGET_PRIORITY_PATTERNS,
+    MAX_SCRIPT_COMMAND_CHARS,
+    SCRIPT_PRIORITY_PATTERNS,
+)
 from core.context import RepoContext
 from core.fs import read_text
 from core.makefile import extract_targets
 from core.runtime import mise_config_path, runner_prefix
-from core.util import collapse_space
+from core.util import collapse_space, truncate_text
 
 
 class ScriptsCollector:
@@ -62,7 +67,8 @@ def _collect_scripts(ctx: RepoContext, max_items: int) -> List[Dict[str, str]]:
             if re.search(pattern, name):
                 score = idx
                 break
-        scored.append((score, str(name), collapse_space(str(command))))
+        command_text = truncate_text(collapse_space(str(command)), MAX_SCRIPT_COMMAND_CHARS)
+        scored.append((score, str(name), command_text))
     scored.sort(key=lambda item: (item[0], item[1]))
     return [{"name": name, "command": command} for _score, name, command in scored[:max_items]]
 

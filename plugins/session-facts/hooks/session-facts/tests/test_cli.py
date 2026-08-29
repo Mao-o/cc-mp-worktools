@@ -19,7 +19,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
-from cli import main, summarize_repo
+from cli import _enforce_output_budget, main, summarize_repo
 from core.context import AnalysisConfig
 
 
@@ -244,6 +244,103 @@ class SummarizeRepoFailureFallbackTest(unittest.TestCase):
             hso = payload["hookSpecificOutput"]
             self.assertEqual(hso["hookEventName"], "SubagentStart")
             self.assertIn("## Project Facts", hso["additionalContext"])
+
+
+class OutputBudgetTest(unittest.TestCase):
+    """internal backlog: no cap on total output size risked exceeding the
+    harness's own additionalContext/plain-stdout injection ceiling."""
+
+    HEADER = "## Project Facts\n- repo_root: /example"
+
+    def test_under_budget_returned_unchanged(self):
+        sections = ["## Test Snapshot\n- code_files: 3"]
+        result = _enforce_output_budget(self.HEADER, sections, max_chars=1000)
+        self.assertEqual(result, "\n\n".join([self.HEADER] + sections))
+        self.assertNotIn("truncated", result)
+
+    def test_structure_tail_is_trimmed_first_leaving_other_sections_intact(self):
+        structure = "\n".join(
+            ["## Structure (dirs only, depth=3)"] + [f"├── dir{i}/" for i in range(60)]
+        )
+        scripts = "## Scripts\n- test: jest --watch"
+        sections = [structure, scripts]
+        full_len = len("\n\n".join([self.HEADER] + sections))
+        # Budget well below the full length but comfortably above header +
+        # scripts alone -- only Structure needs to shrink, nothing else.
+        max_chars = len(self.HEADER) + len(scripts) + 60
+        self.assertLess(max_chars, full_len)
+
+        result = _enforce_output_budget(self.HEADER, sections, max_chars)
+        self.assertLessEqual(len(result), max_chars)
+        self.assertIn("## Scripts\n- test: jest --watch", result)  # untouched
+        self.assertIn("... (truncated)", result)
+        self.assertIn("## Structure", result)  # shrunk, not dropped
+        self.assertLess(result.count("├──"), 60)
+
+    def test_drops_scripts_then_env_keys_then_notes_before_protected_sections(self):
+        sections = [
+            "## Structure (dirs only, depth=1)\n├── src/",
+            "## Scripts\n- test: jest",
+            "## Env Keys\n- API_KEY",
+            "## Repo-Specific Notes\n- note: something",
+            "## Test Snapshot\n- code_files: 3",
+        ]
+        # Small enough that Structure's tiny body can't save it, but big
+        # enough to keep Test Snapshot -- Scripts/Env Keys/Notes must go.
+        max_chars = len(self.HEADER) + len("## Test Snapshot\n- code_files: 3") + 40
+        result = _enforce_output_budget(self.HEADER, sections, max_chars)
+        self.assertLessEqual(len(result), max_chars)
+        self.assertNotIn("## Scripts", result)
+        self.assertNotIn("## Env Keys", result)
+        self.assertNotIn("## Repo-Specific Notes", result)
+        self.assertIn("## Test Snapshot", result)  # protected, survives
+
+    def test_never_silently_drops_protected_sections_hard_cuts_instead(self):
+        # Budget so tight even the protected sections alone don't fit -- the
+        # cascade must not drop them; it hard-cuts the joined string instead
+        # (the max_chars contract holds either way).
+        sections = [
+            "## Scripts\n- test: jest",
+            "## Test Snapshot\n- code_files: 3\n- test_files: 1",
+            "## Service Entry Points\n- src/api.py",
+            "## Likely Commands\n- npm test",
+        ]
+        result = _enforce_output_budget(self.HEADER, sections, max_chars=30)
+        self.assertLessEqual(len(result), 30)
+
+    def test_result_never_exceeds_max_chars_even_for_pathological_budgets(self):
+        # Including budgets smaller than the "... (truncated)" marker itself
+        # -- finish() must skip the marker rather than overflow max_chars.
+        for max_chars in (0, 1, 5, 10, 17, 25):
+            with self.subTest(max_chars=max_chars):
+                result = _enforce_output_budget(
+                    self.HEADER, ["## Scripts\n- a: b"], max_chars
+                )
+                self.assertLessEqual(len(result), max_chars)
+
+
+class HugePackageJsonWithinBudgetTest(unittest.TestCase):
+    """Ticket acceptance case: a package.json with many scripts must still
+    produce output within max_output_chars, not an unbounded dump."""
+
+    def test_many_long_scripts_stay_within_default_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            scripts = {
+                f"script{i}": "run-something --with-a-fairly-long-flag-list " * 4
+                for i in range(80)
+            }
+            (root / "package.json").write_text(json.dumps({"scripts": scripts}))
+            out = _run_cli(["--root", str(root)])
+            self.assertLessEqual(len(out), AnalysisConfig().max_output_chars)
+
+    def test_custom_max_output_chars_is_honored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            scripts = {f"script{i}": "echo hi" for i in range(80)}
+            (root / "package.json").write_text(json.dumps({"scripts": scripts}))
+            out = _run_cli(["--root", str(root), "--max-output-chars", "500"])
+            self.assertLessEqual(len(out), 500)
 
 
 if __name__ == "__main__":

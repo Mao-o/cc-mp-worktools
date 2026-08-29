@@ -12,6 +12,7 @@ from core.constants import (
     DEFAULT_MAX_HUB_FILES,
     DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
+    DEFAULT_MAX_OUTPUT_CHARS,
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
@@ -70,6 +71,70 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
     return None
 
 
+def _enforce_output_budget(header: str, sections: Sequence[str], max_chars: int) -> str:
+    """Trim total output to max_chars, shrinking the lowest-value content
+    first, in this order: the ``## Structure`` section's tail (one line at
+    a time), then ``## Scripts``, ``## Env Keys``, and
+    ``## Repo-Specific Notes`` dropped wholesale. ``## Test Snapshot``,
+    ``## Service Entry Points``, and ``## Likely Commands`` are never
+    touched by this cascade -- they carry facts an agent is least able to
+    reconstruct on its own. Appends a single "... (truncated)" marker if
+    anything had to give, and hard-cuts as a last resort so the result never
+    exceeds max_chars even if what remains is itself oversized.
+    """
+    sections = list(sections)
+
+    def joined() -> str:
+        return "\n\n".join([header] + sections)
+
+    if len(joined()) <= max_chars:
+        return joined()
+
+    marker = "\n\n... (truncated)"
+
+    def finish(content: str) -> str:
+        """Append the marker if it fits under max_chars; otherwise hard-cut
+        with no marker (there is no length left to spare on one). Either
+        way the result never exceeds max_chars, even for a pathologically
+        small budget shorter than the marker itself.
+        """
+        if len(content) + len(marker) <= max_chars:
+            return content + marker
+        return content[:max_chars]
+
+    budget = max(max_chars - len(marker), 0)
+
+    # Step 1: shrink the Structure section's tail, one tree line at a time.
+    for i, sec in enumerate(sections):
+        if not sec.startswith("## Structure"):
+            continue
+        struct_lines = sec.splitlines()
+        struct_header, body = struct_lines[0], struct_lines[1:]
+        while body:
+            candidate = "\n".join([struct_header] + body)
+            if len("\n\n".join([header] + sections[:i] + [candidate] + sections[i + 1:])) <= budget:
+                sections[i] = candidate
+                break
+            body.pop()
+        else:
+            sections[i] = struct_header
+        break
+
+    if len(joined()) <= budget:
+        return finish(joined())
+
+    # Steps 2-4: drop lower-priority sections wholesale, one at a time.
+    for title in ("## Scripts", "## Env Keys", "## Repo-Specific Notes"):
+        sections = [s for s in sections if not s.startswith(title)]
+        if len(joined()) <= budget:
+            return finish(joined())
+
+    # Last resort: guarantees the result never exceeds max_chars even if
+    # what remains (header, Test Snapshot, Service Entry Points, Likely
+    # Commands, ...) is itself larger than the budget.
+    return finish(joined())
+
+
 def summarize_repo(
     root: Path,
     config: AnalysisConfig,
@@ -120,8 +185,8 @@ def summarize_repo(
             print(f"[session-facts] WARNING: collector {collector_name} failed: {e}", file=sys.stderr)
 
     # Header rendered after collectors so ctx.results is fully populated
-    sections = [render_header(ctx)] + collected_sections
-    return "\n\n".join(sections)
+    header = render_header(ctx)
+    return _enforce_output_budget(header, collected_sections, config.max_output_chars)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -172,6 +237,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-major-deps", type=int, default=DEFAULT_MAX_MAJOR_DEPS,
         help="Max entries in the major_dependencies header line.",
+    )
+    parser.add_argument(
+        "--max-output-chars", type=int, default=DEFAULT_MAX_OUTPUT_CHARS,
+        help=(
+            "Hard ceiling on the whole rendered output. Beyond this, the "
+            "Structure section's tail is trimmed first, then Scripts / Env "
+            "Keys / Repo-Specific Notes are dropped wholesale, in that order."
+        ),
     )
     parser.add_argument(
         "--include-domain-types",
@@ -242,6 +315,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_env_keys=args.max_env_keys,
         max_notes=args.max_notes,
         max_major_deps=args.max_major_deps,
+        max_output_chars=args.max_output_chars,
         include_domain_types=args.include_domain_types,
         max_domain_types=args.max_domain_types,
         include_hub_files=args.include_hub_files,

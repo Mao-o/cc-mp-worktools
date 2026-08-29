@@ -155,6 +155,7 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--max-env-keys` | (定数) | env キー最大数 |
 | `--max-notes` | (定数) | Notes セクション最大数 |
 | `--max-major-deps` | 8 | 主要依存表示数 |
+| `--max-output-chars` | 8,000 | 出力全体の文字数上限 (下記「出力サイズ上限」参照) |
 | `--include-domain-types` | false | ドメイン型 Collector を有効化 |
 | `--max-domain-types` | 10 | ドメイン型最大数 |
 | `--include-hub-files` | false | Hub Files Collector を有効化 (被参照数ランキング) |
@@ -163,6 +164,24 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--emit` | `stdout` | 出力エンベロープ。`subagent-json` で SubagentStart 用 `hookSpecificOutput` JSON に包む |
 
 既定値の実体は `core/constants.py` を参照。
+
+### 出力サイズ上限
+
+Claude Code の `SessionStart` hook が plain stdout / `additionalContext` として
+注入できる分量には実際の上限 (約 10,000 文字) があり、超過分はファイル保存 +
+プレビュー置換にフォールバックする (ハーネス自身の挙動)。`--max-output-chars`
+(既定 8,000) はこの上限より小さく設定してあり、通常は facts バンドル全体が
+そのまま注入される側に倒す。
+
+上限を超える場合は優先度の低いセクションから段階的に削る:
+`## Structure` の末尾行 → `## Scripts` → `## Env Keys` →
+`## Repo-Specific Notes` の順で、削った場合は末尾に `... (truncated)` を
+付ける。`## Test Snapshot` / `## Service Entry Points` / `## Likely Commands`
+はこの段階的削減の対象外 (agent が自力で再構成しにくい情報のため)。
+
+`--emit subagent-json` は JSON エンベロープ・エスケープ分だけ `--max-output-chars`
+の外側にバイト数が増える。ハーネス側の 10,000 文字上限がペイロード全体
+(エンベロープ込み) にかかる場合は、その分の余白を見込んだ値に調整すること。
 
 ## カスタム detector / collector の書き方
 
