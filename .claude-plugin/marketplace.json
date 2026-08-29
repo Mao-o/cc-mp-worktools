@@ -10,97 +10,38 @@
     {
       "name": "llms-docs",
       "source": "./plugins/llms-docs",
-      "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
-      "category": "research",
-      "keywords": [
-        "documentation",
-        "research",
-        "claude-docs",
-        "ai-sdk",
-        "firebase",
-        "llms-txt"
-      ]
+      "displayName": "LLMs Docs",
+      "category": "research"
     },
     {
       "name": "sensitive-files-guardrail",
       "source": "./plugins/sensitive-files-guardrail",
-      "description": "機密ファイル (.env, *.secret, 秘密鍵, クレデンシャル) のうっかり露出を予防する多段 hook。Read/Bash 時の実値 redaction と Stop 時の .gitignore 未登録検出を同梱。敵対的バイパス対策ではない",
-      "category": "security",
-      "keywords": [
-        "security",
-        "hooks",
-        "pretooluse",
-        "stop",
-        "dotenv",
-        "redaction",
-        "gitignore"
-      ]
+      "displayName": "Sensitive Files Guardrail",
+      "category": "security"
     },
     {
       "name": "session-facts",
       "source": "./plugins/session-facts",
-      "description": "セッション開始時にリポジトリを分析したファクトバンドル (スタック/スクリプト/env キー/ドメイン型) を Markdown で注入する hook。SessionStart と SubagentStart(Explore/Plan) で発火",
-      "category": "context",
-      "keywords": [
-        "session-start",
-        "subagent-start",
-        "context-injection",
-        "repo-facts",
-        "markdown",
-        "hooks"
-      ]
+      "displayName": "Session Facts",
+      "category": "context"
     },
     {
       "name": "external-ai-assist",
       "source": "./plugins/external-ai-assist",
-      "description": "Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集。Explore の Cursor 並走、ExitPlanMode の Cursor+Codex クロスレビュー、Stop 時の Cursor 差分レビューを提供する",
-      "category": "productivity",
-      "keywords": [
-        "hooks",
-        "pretooluse",
-        "posttooluse",
-        "stop",
-        "explore",
-        "exitplanmode",
-        "codex",
-        "cursor",
-        "external-ai",
-        "code-review",
-        "cross-review",
-        "diff-review"
-      ]
+      "displayName": "External AI Assist",
+      "category": "productivity"
     },
     {
       "name": "verify-cloud-account",
       "source": "./plugins/verify-cloud-account",
-      "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud / kubectl) のアクティブアカウントがプロジェクト想定値と一致するか検証する hook。コマンドチェーン・ラッパ対応、hostname 別 / alias / account 拡張、短期キャッシュ付き",
-      "category": "security",
-      "keywords": [
-        "security",
-        "hooks",
-        "pretooluse",
-        "bash",
-        "github",
-        "firebase",
-        "aws",
-        "gcloud",
-        "kubectl",
-        "account-verification",
-        "multi-account"
-      ]
+      "displayName": "Verify Cloud Account",
+      "category": "security"
     },
     {
       "name": "file-split-advisor",
       "source": "./plugins/file-split-advisor",
-      "description": "Write/Edit 後に行数 tier と責務混在シグナル (import 多様性・命名の抽象度・定義数・制御フロー密度) を組み合わせて分割検討メモを additionalContext で返す非 block hook。言語/役割 (テスト/宣言的コード) で閾値を調整する",
-      "category": "code-quality",
-      "keywords": [
-        "posttooluse",
-        "code-quality",
-        "static-analysis",
-        "refactoring",
-        "hooks"
-      ]
+      "displayName": "File Split Advisor",
+      "category": "code-quality"
     }
   ]
 }

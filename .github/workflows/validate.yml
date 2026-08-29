@@ -4,9 +4,18 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # 毎週月曜 06:00 UTC に @latest の Claude Code CLI で canary 検証する。
+    # CLI の schema 受理範囲/挙動は version で変わりうるため
+    # (.claude/rules/cli-spec-divergence.md 参照)、乖離を早期検知する。
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   validate:
+    # 週次 schedule は canary (validate-latest-canary) 専用。pull_request/push/
+    # workflow_dispatch では常に固定版で本チェックを実行する。
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -23,8 +32,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      # CLI の schema 受理範囲は version で変わりうる (2.1.101→2.1.175 の実例あり)。
+      # 固定版にすることで、同一 commit でも実行日次第で pass/fail が変わる揺れを
+      # 無くす。乖離の早期検知は validate-latest-canary job (週次 schedule /
+      # workflow_dispatch) が別途担当する。bump は Dependabot/Renovate 等の npm
+      # 更新 PR に任せる。
+      - name: Install Claude Code (pinned)
+        run: npm install -g @anthropic-ai/claude-code@2.1.251
+
+      - name: Show Claude Code version
+        run: claude --version
 
       - name: Validate marketplace manifest
         run: claude plugin validate .
@@ -38,39 +55,56 @@ jobs:
             claude plugin validate "$dir"
           done
 
-      # 各 plugin の unit test を実行し、test regression を CI で検出する。
-      # plugins/*/hooks/*/tests を動的列挙し、その parent (= パッケージ root) を
-      # cwd にして `python3 -m unittest discover tests` を走らせる
-      # (import が package-root 相対のため cwd を合わせる必要がある)。
-      # いずれかのスイートが失敗したら fail=1 を立て、最後に exit して job を fail させる
-      # (set -e で即中断せず全スイートを走らせ、失敗ログを漏れなく出すため)。
+      # marketplace.json の entry と plugin.json の description/keywords が
+      # 再び drift しないかの回帰ガード (entry は縮約済みで通常は対象 0 件)。
+      - name: Check marketplace entry / plugin.json drift
+        run: python3 scripts/check_entry_drift.py
+
+      # Codex 向け .codex-plugin/plugin.json を持つ plugin (現状 session-facts の
+      # み) の version が Claude 向け plugin.json と一致しているか検証する。
+      # 対象 plugin が無くても fail しない。
+      - name: Check Codex manifest version consistency
+        run: python3 scripts/check_codex_manifest_version.py
+
+      # 列挙ロジックは scripts/test-all.sh に一本化してあり、ローカルでも
+      # 同じコマンドで再現できる (`scripts/test-all.sh` または `make test`)。
       - name: Run plugin unit tests
+        run: scripts/test-all.sh
+
+  validate-latest-canary:
+    # @latest で claude plugin validate の挙動変化を早期検知する canary job。
+    # continue-on-error のため red になっても他 job や PR をブロックしない。
+    # 週次 schedule、または手動の workflow_dispatch でのみ実行する。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Claude Code (latest)
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Show Claude Code version
+        run: claude --version
+
+      - name: Validate marketplace manifest
+        run: claude plugin validate .
+
+      - name: Validate each plugin
         run: |
           set -e
-          # silent な取りこぼし防止: 検出したテストディレクトリ件数を先に数えて echo する
-          count=0
-          while IFS= read -r tdir; do
-            count=$((count + 1))
-          done < <(find plugins -type d -name tests | sort)
-          echo "検出したテストディレクトリ件数: $count"
-          if [ "$count" -eq 0 ]; then
-            echo "ERROR: テストディレクトリが見つかりません (plugins/*/hooks/*/tests)" >&2
-            exit 1
-          fi
-
-          fail=0
-          while IFS= read -r tdir; do
-            pkg_root=$(dirname "$tdir")
-            echo ""
-            echo "== Running unit tests in $pkg_root =="
-            if ! ( cd "$pkg_root" && python3 -m unittest discover tests ); then
-              echo "FAILED: $pkg_root" >&2
-              fail=1
-            fi
-          done < <(find plugins -type d -name tests | sort)
-
-          if [ "$fail" -ne 0 ]; then
-            echo "::error::1 つ以上の plugin unit test スイートが失敗しました" >&2
-            exit 1
-          fi
-          echo "全 unit test スイートが green でした"
+          for dir in plugins/*/; do
+            [ -d "$dir" ] || continue
+            echo "== Validating $dir =="
+            claude plugin validate "$dir"
+          done
