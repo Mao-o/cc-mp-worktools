@@ -97,9 +97,15 @@ def _collect_test_snapshot(tracked_files: List[str]) -> TestSnapshot:
     if e2e:
         snapshot["e2e_tests"] = e2e
     if test_dirs:
-        # Keep the raw set generous; aggregate_paths() collapses siblings to a
-        # glob pattern at render time, so truncating here would only risk
-        # dropping a whole directory shape before it can be folded.
+        # Keep the raw set generous: aggregate_paths() needs to see every
+        # sibling to recognise a shared shape and fold it into one pattern
+        # line, so truncating tighter here would risk cutting a shape down
+        # before it can even be recognised. aggregate_paths() itself now
+        # also caps its own rendered output per degenerate group (P2-3:
+        # core/util.py's max_listed), so a large raw set here no longer
+        # risks an unbounded number of *rendered* lines downstream -- this
+        # 50 only needs to be generous enough for the folding step, not for
+        # the final line count.
         snapshot["test_dirs"] = sorted(test_dirs)[:50]
     return snapshot
 

@@ -35,8 +35,14 @@ class TruncateTextTest(unittest.TestCase):
         result = truncate_text(command, 120)
         self.assertEqual(result, command)  # under 120 chars: untouched
 
-    def test_zero_max_chars_returns_ellipsis_only(self):
-        self.assertEqual(truncate_text("anything", 0), "…")
+    def test_zero_max_chars_returns_empty_string(self):
+        # internal backlog P3-6: the contract is "never exceed max_chars"
+        # for any input. truncate_text("anything", 0) used to return "…"
+        # (length 1), which is itself a contract violation for a 0 budget.
+        self.assertEqual(truncate_text("anything", 0), "")
+
+    def test_negative_max_chars_returns_empty_string(self):
+        self.assertEqual(truncate_text("anything", -5), "")
 
 
 if __name__ == "__main__":

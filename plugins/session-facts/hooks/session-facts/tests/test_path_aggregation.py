@@ -96,6 +96,23 @@ class AggregatePathsTest(unittest.TestCase):
         result = aggregate_paths(paths)
         self.assertEqual(sorted(result), ["other/x/y", "packages/*/tests"])
 
+    def test_degenerate_group_with_many_collapsible_prefixes_is_capped(self):
+        # internal backlog P2-3: a monorepo with 25 packages, each having a
+        # (tests/, e2e/) pair, degenerates to "*/*" at the top level, then
+        # re-splits by leading directory into 25 genuinely-collapsible
+        # "pkgN/*" patterns -- previously only the *leftover* (unpaired)
+        # branch was capped, so this produced 25 raw output lines instead
+        # of respecting max_listed.
+        paths = []
+        for i in range(25):
+            paths.append(f"pkg{i}/tests")
+            paths.append(f"pkg{i}/e2e")
+        result = aggregate_paths(paths, max_listed=4)
+        self.assertEqual(len(result), 5)  # 4 pattern lines + 1 "+N more"
+        self.assertEqual(result[-1], "... (+21 more)")
+        for line in result[:-1]:
+            self.assertRegex(line, r"^pkg\d+/\*$")
+
     def test_pattern_with_surviving_literal_segment_is_not_touched(self):
         # A pattern that keeps at least one literal segment (here "tests" at
         # the tail) still localizes part of the path, so it is NOT treated

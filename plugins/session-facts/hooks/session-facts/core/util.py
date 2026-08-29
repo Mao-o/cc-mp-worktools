@@ -59,7 +59,14 @@ def truncate_text(text: str, max_chars: int) -> str:
     sentence-boundary search: it is for values like shell commands
     (collectors/scripts.py) where stripping ``**``/``_`` as markdown
     emphasis would corrupt the literal text.
+
+    The contract is "never return more than max_chars" for any input,
+    including ``max_chars < 1``: the ellipsis itself is 1 character, so
+    appending it to an empty slice would return a length-1 string that
+    exceeds a 0 (or negative) budget. Those cases return "" instead.
     """
+    if max_chars < 1:
+        return ""
     if len(text) <= max_chars:
         return text
     return text[: max(max_chars - 1, 0)].rstrip() + "…"
@@ -125,11 +132,14 @@ def aggregate_paths(paths: Sequence[str], max_listed: int = 4) -> List[str]:
     its leading directory instead: subsets that DO share a leading directory
     still collapse to a useful pattern (e.g. ``packages/*/tests``), and the
     remainder — paths whose leading directory is unique within the group —
-    are listed verbatim, capped at ``max_listed`` entries plus an
-    ``... (+N more)`` line so an unbounded pile of unrelated one-off paths
-    can't flood the output. A pattern that keeps at least one literal
-    segment (e.g. ``*/tests`` or ``*/*/tests``) is left aggregated as-is —
-    it still localizes some part of the path.
+    are listed verbatim. The re-split's TOTAL output for this group
+    (collapsed patterns and verbatim leftovers combined) is capped at
+    ``max_listed`` entries plus an ``... (+N more)`` line, so neither an
+    unbounded pile of unrelated one-off paths NOR a monorepo with many
+    same-shaped packages (one collapsed pattern line each) can flood the
+    output. A pattern that keeps at least one literal segment (e.g.
+    ``*/tests`` or ``*/*/tests``) is left aggregated as-is — it still
+    localizes some part of the path.
     """
     unique = sorted(dict.fromkeys(paths))
     if len(unique) <= 1:
@@ -157,17 +167,23 @@ def aggregate_paths(paths: Sequence[str], max_listed: int = 4) -> List[str]:
         by_prefix: dict = {}
         for segs in group:
             by_prefix.setdefault(segs[0], []).append(segs)
+        patterns: List[str] = []
         leftovers: List[str] = []
         for prefix in sorted(by_prefix):
             sub = by_prefix[prefix]
             if len(sub) == 1:
                 leftovers.append("/".join(sub[0]))
             else:
-                out.append("/".join(_build_pattern(sub, length)))
-        if leftovers:
-            if len(leftovers) > max_listed:
-                out.extend(leftovers[:max_listed])
-                out.append(f"... (+{len(leftovers) - max_listed} more)")
-            else:
-                out.extend(leftovers)
+                patterns.append("/".join(_build_pattern(sub, length)))
+        # Cap this degenerate group's TOTAL emitted line count (collapsed
+        # patterns + verbatim leftovers combined), not just the leftovers:
+        # a monorepo with many same-shaped packages (e.g. 25 packages each
+        # with a (tests/, e2e/) pair) produces one genuinely-useful pattern
+        # line PER package here, which was previously unbounded.
+        combined = patterns + leftovers
+        if len(combined) > max_listed:
+            out.extend(combined[:max_listed])
+            out.append(f"... (+{len(combined) - max_listed} more)")
+        else:
+            out.extend(combined)
     return out
