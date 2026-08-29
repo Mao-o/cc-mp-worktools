@@ -260,10 +260,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output = summarize_repo(root, config, is_git, cwd=resolved, invoked_as=sys.argv[0])
     except Exception as e:
         # Per-detector/collector isolation above covers the expected failure
-        # points, but this is the last line of defense: hooks are
-        # non-blocking by contract, so a bug anywhere in the pipeline should
-        # degrade to a minimal header instead of exit 1 + traceback (which
-        # silently drops the entire facts bundle from the agent's context).
+        # points; this guard covers the rest of summarize_repo() itself, so a
+        # bug there degrades to a minimal header instead of exit 1 + traceback
+        # (which silently drops the entire facts bundle from the agent's
+        # context). Scope note: this does NOT cover the steps outside the try
+        # block -- stdout reconfiguration, path resolution, the git-root probe,
+        # and the final print/json.dumps. A failure in those still exits
+        # non-zero with no output.
         print(f"[session-facts] WARNING: summarize_repo failed, emitting minimal header: {e}", file=sys.stderr)
         output = f"## Project Facts\n- repo_root: {root}"
     if args.emit == "subagent-json":

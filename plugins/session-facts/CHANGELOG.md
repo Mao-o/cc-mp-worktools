@@ -311,7 +311,7 @@ Markdown でまとめる中核パイプラインを実装した。
 
 - `cli.py` / `registry.py` / `renderer.py` / `__main__.py` によるオーケストレーション
   (引数解析 → detector 実行 → collector 実行 → header + セクション結合 → 出力)。
-- `core/`: `context.py`（`RepoContext` / `AnalysisConfig`）, `constants.py`,
+- `core/`: `context.py`（`RepoContext`）, `constants.py`,
   `pm.py`（パッケージマネージャ検出）, `fs.py`, `git.py`, `tree.py`, `util.py`。
 - `detectors/`: deno / docker / firebase / go / java / mise / nextjs /
   node_typescript / php / prisma / python / react_vite / ruby / rust /
