@@ -6,8 +6,7 @@ on:
     branches: [main]
   schedule:
     # 毎週月曜 06:00 UTC に @latest の Claude Code CLI で canary 検証する。
-    # CLI の schema 受理範囲/挙動は version で変わりうるため
-    # (.claude/rules/cli-spec-divergence.md 参照)、乖離を早期検知する。
+    # CLI の schema 受理範囲/挙動は version で変わりうるため、乖離を早期検知する。
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
@@ -68,11 +67,15 @@ jobs:
 
   validate-latest-canary:
     # @latest で claude plugin validate の挙動変化を早期検知する canary job。
-    # continue-on-error のため red になっても他 job や PR をブロックしない。
     # 週次 schedule、または手動の workflow_dispatch でのみ実行する。
+    #
+    # continue-on-error は schedule 以外でだけ有効にする。schedule では本 job が
+    # 唯一の job になるため、常に許容すると CLI 非互換を検出しても run が green の
+    # まま通知が飛ばず、canary の目的が成立しない。手動起動時は固定版の validate と
+    # 併走するので、canary の red で run 全体を落とさない。
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    continue-on-error: true
+    continue-on-error: ${{ github.event_name != 'schedule' }}
     steps:
       - uses: actions/checkout@v6
 

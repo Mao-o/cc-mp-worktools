@@ -5,7 +5,7 @@
 
 validate:
 	claude plugin validate .
-	for dir in plugins/*/; do [ -d "$$dir" ] || continue; echo "== Validating $$dir =="; claude plugin validate "$$dir"; done
+	for dir in plugins/*/; do [ -d "$$dir" ] || continue; echo "== Validating $$dir =="; claude plugin validate "$$dir" || exit 1; done
 	python3 scripts/check_codex_manifest_version.py
 
 test:
