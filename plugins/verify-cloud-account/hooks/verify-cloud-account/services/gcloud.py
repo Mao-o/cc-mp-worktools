@@ -85,6 +85,15 @@ SETUP_HINT = (
 # 2 つだけ)。
 ACCEPTS_DICT = True
 DICT_ALLOWED_KEYS = frozenset({"project", "account"})
+# 下の verify() は dict 期待値の project / account を `if <key>_want:` で拾うため、
+# **falsy な値 (None / "" 等) は黙って無視**する一方、**truthy な非 str**
+# (例: `{"account": 123}`) は「文字列で指定してください」で reject する。
+# builder は migrate の緩和モードでもこの非対称に合わせる → "truthy"。
+# DICT_ALLOWED_KEYS 外のキーは verify() が読まないので値の形は問わない。
+DICT_VALUE_CHECK = "truthy"
+# scalar 期待値と等価になる dict キー。verify() の str 分岐は
+# `_check_project(expected, ...)` だけを呼ぶ (account は照合しない)。
+SCALAR_EQUIVALENT_DICT_KEY = "project"
 
 
 def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None]:

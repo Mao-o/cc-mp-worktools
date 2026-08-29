@@ -67,6 +67,16 @@ SETUP_HINT = (
 # hostname は任意の文字列を許すため DICT_ALLOWED_KEYS は宣言しない
 # (builder 側は getattr の既定値 None を「キー制限なし」と解釈する)。
 ACCEPTS_DICT = True
+# 下の verify() は dict 期待値の**全キー**の値を `isinstance(want, str)` で検査し、
+# 1 つでも非 str なら (falsy な None でも) その host のエラーを積む。よって builder は
+# migrate の緩和モードでも非 str 値を素通ししてはならない → "all"。
+DICT_VALUE_CHECK = "all"
+# scalar 期待値と等価になる dict キー。verify() の str 分岐は
+# 「github.com が active ならそれ、無ければ最初の active host」を照合する動的な
+# 意味論なので、静的比較で等価と言い切れるのは github.com の場合だけ。
+# builder の migrate 衝突判定はこれを使い、他 host の単一 dict は conflict に倒す
+# (scalar と `{"ghe.example.com": ...}` は照合する host が違う = 制約が違う)。
+SCALAR_EQUIVALENT_DICT_KEY = "github.com"
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
 

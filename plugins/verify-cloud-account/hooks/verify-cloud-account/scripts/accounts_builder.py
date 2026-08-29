@@ -6,7 +6,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 `accounts-show` `accounts-migrate`) が対話フローを提供し、Claude は skill
 経由で builder を呼ぶ。
 
-設計判断 (D1〜D9):
+設計判断 (D1〜D11):
 
 - **D1**: builder が唯一の正規経路。書込パスの固定、JSON フォーマットの
   一貫化、既存キーの温存、CLI 現在値との突合、旧パス統合を一元管理する。
@@ -40,14 +40,29 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   「情報を捨てて良いか」を判定する必要があるため、別関数として実装した。
 - **D9**: `_validate_entry_shape()` の dict 内の値チェックは、`strict_keys`
   (D7) の他に「dict 全体で有効な値が 1 つも無いときだけ拒否する」形にした。
-  github.verify() は dict 内の全キーを厳格に要求するが、gcloud/firebase の
-  verify() は使える値が 1 つでも残っていれば動く (例:
+  gcloud/firebase の verify() は使える値が 1 つでも残っていれば動く (例:
   `{"default":"proj-dev","old":null}` は firebase.verify() が "old" を
-  無視して成立させる)。migrate だけに github 相当の厳格さを適用すると、
-  gcloud/firebase では起きない退行を生むため、全 service に同じ leniency を
-  適用する (github の multi-host dict で 1 キーだけ不正な場合、理論上は
-  migrate がそれを素通しし得るが、本 plugin の一貫方針「誤 deny は allow
-  方向に倒す」を優先した)。
+  無視して成立させる)。migrate だけに厳格さを適用すると、verify() では
+  通っていた形を後から書けなくする退行を生む。
+- **D10**: ただし D9 の leniency は **service ごとの `DICT_VALUE_CHECK` 契約**
+  (services/__init__.py) の範囲に限る。当初は全 service に一律で適用していたが、
+  それだと**その service の verify() が形を理由に deny する値**まで書けてしまい、
+  書込時検証をすり抜けて実行時 deny に化けていた (Codex R1 P2:
+  `{"project":"p","account":123}` は gcloud.verify() が truthy 非 str の account
+  を reject するのに builder は通していた)。守る不変条件は
+  「`_validate_entry_shape()` が受理した形は、その service の `verify()` が
+  **形を理由に** deny しない」。tests/test_accounts_builder.py の
+  `TestBuilderAcceptedShapesPassVerify` が service × 形状の表で固定する。
+  空文字・空白のみの値は例外的に全 service で常に拒否する — どの service でも
+  実在の CLI 値と一致し得ず永久 deny になるだけの形だから (空文字キーと同じ扱い)。
+- **D11**: `_migrate_keep_new_without_loss()` の scalar↔dict 比較は
+  service の `SCALAR_EQUIVALENT_DICT_KEY` を使う。値と dict 長だけで比較して
+  いた当初の実装は **host 意味論を持たない** (Codex R1 P1): scalar "USER" は
+  github.com (active なら) を照合し、`{"ghe.example.com":"USER"}` は名指しの
+  GHE ホストを照合するので、値が同じでも制約が違う。値一致だけで非損失と
+  判定すると GHE の制約を無警告で捨てていた。キーを宣言しない service
+  (firebase — alias は verdict に効かず、キーを畳み込むと自己回復の案内先が
+  消える) と、キーが一致しない組は conflict に倒す。
 """
 from __future__ import annotations
 
@@ -214,6 +229,36 @@ def _parse_value(raw: str) -> Any:
     return raw
 
 
+def _dict_value_shape_denied(service, key: str, val: Any, *, allowed_keys) -> bool:
+    """非 str の dict 値を、その service の `verify()` が**形を理由に** deny するか。
+
+    services/*.py の `DICT_VALUE_CHECK` 契約 (services/__init__.py 参照) を読む。
+    builder の緩和モード (strict_keys=False) が「verify() は拒否するのに builder は
+    書ける」形を作らないための対応表:
+
+    - ``"all"`` (github): verify() は dict の**全キー**の値を `isinstance(v, str)`
+      で検査するので、非 str は falsy でも deny 要因 → 常に True
+    - ``"truthy"`` (gcloud): verify() は `if <key>_want:` で値を拾うため falsy は
+      黙って無視し、truthy な非 str だけ「文字列で指定してください」で reject
+      → truthy のときだけ True
+    - ``"none"`` (firebase): verify() は使えない値を filter で捨てるだけで、値の形を
+      理由に deny しない → 常に False
+
+    `DICT_ALLOWED_KEYS` を宣言している service では、宣言外のキーは verify() が
+    そもそも読まない (gcloud は未知キーを無視する) ため、値の形は問わない。
+    未宣言時の既定は最も厳しい ``"all"`` — 新しい service が宣言を忘れたときに
+    「素通し」ではなく「厳しすぎる」方向で失敗させるため (穴を作らない側)。
+    """
+    mode = getattr(service, "DICT_VALUE_CHECK", "all")
+    if mode == "none":
+        return False
+    if allowed_keys is not None and key not in allowed_keys:
+        return False
+    if mode == "truthy":
+        return bool(val)
+    return True
+
+
 def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> str | None:
     """value が service の accounts.local.json 値として許容される**形**か検証する。
 
@@ -233,17 +278,29 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
     成立させる) を後から書けなくする退行になる (migrate が触っていない新パス側
     の既存エントリまで巻き込んで書込全体を deny すると、この plugin が解消
     しようとしている「手動 JSON 編集の要求」を復活させてしまう)。
-    このため strict_keys=False では「dict 全体で有効な値が 1 つも無い」ときだけ
-    拒否する (個々のキーの不正では即 reject しない)。github.verify() は実際には
-    dict 内の**全キー**を厳格に要求する (1 つでも不正なら拒否) ため、
-    migrate がこの leniency を github に適用すると理論上は github.verify() が
-    後で拒否する形をわずかに素通しし得るが、gcloud/firebase 側の退行 (無関係な
-    統合作業まで exit 1 にする) を避けることを優先した (本 plugin の一貫方針
-    「誤 deny は allow 方向に倒す」)。
+    ただし leniency の範囲は **service ごとの `DICT_VALUE_CHECK` 契約**に合わせる
+    (D10)。「dict 全体で有効な値が 1 つも無いときだけ拒否」を全 service に一律
+    適用すると、その service の verify() が**形を理由に deny する**値まで書けて
+    しまい、書込時検証をすり抜けて実行時 deny に化ける (Codex R1 P2:
+    `{"project":"p","account":123}` は gcloud.verify() が truthy 非 str の
+    account を reject するのに builder が通していた)。
     型不正 (list/int/None 等トップレベルの型) と空 dict は verify() 自体が
-    拒否するため strict_keys に関わらず常に検証する。
+    拒否するため strict_keys に関わらず常に検証する。空文字・空白のみの
+    **値**も同様に常に拒否する — どの service でも実在の CLI 値と一致し得ず
+    永久 deny になる形で、空文字キーと同じ失敗形だから (Codex R1 P2:
+    scalar 側の `--value "$UNSET_VAR"` と同じ穴の dict 版)。
     """
     if isinstance(value, str):
+        if not value.strip():
+            # dispatcher は `entry == ""` を**キー欠落と同じ**扱いにして恒久 deny
+            # する (core/dispatcher.py)。`set --value "$UNSET_VAR"` のように未定義の
+            # 変数が空文字に展開されるとここを素通りし、書込時検証を通ったのに
+            # 次の CLI 操作が deny される状態を作ってしまう。dict の値・キーと
+            # 同じ規則 (strip 後に非空) を scalar にも課す。
+            return (
+                f"{service.ACCOUNT_KEY}: 値に空文字・空白のみの文字列は使えません"
+                " (未設定の環境変数を渡していないか確認してください)。"
+            )
         return None
     if isinstance(value, dict):
         if not getattr(service, "ACCEPTS_DICT", False):
@@ -277,17 +334,32 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                     f"{service.ACCOUNT_KEY}: オブジェクトのキー '{k}' は未対応です"
                     f" (許容: {', '.join(sorted(allowed_keys))})。"
                 )
-            if isinstance(v, str) and v:
-                good_values += 1
-                continue
+            if isinstance(v, str):
+                if v.strip():
+                    good_values += 1
+                    continue
+                # 空文字・空白のみの値は strict / lenient を問わず拒否する。
+                # 空文字キー (上) と同じく、実在の CLI 値と一致し得ず永久 deny に
+                # なるだけの形なので、verify() が形として通すかに関係なく弾く。
+                return (
+                    f"{service.ACCOUNT_KEY}: オブジェクトの値に空文字・空白のみの"
+                    f"文字列は使えません (キー '{k}')。"
+                )
             if strict_keys:
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値は空でない文字列で"
                     f"ある必要があります (キー '{k}')。"
                 )
-            # strict_keys=False: このキーの値は不正だが、verify() 自体が
-            # 個々のキーの不正より「使える値が 1 つも無いか」を見る service が
-            # あるため、ここでは即 reject せず good_values のカウントに任せる。
+            # strict_keys=False: 非 str 値をどこまで許すかは service の
+            # DICT_VALUE_CHECK 契約に従う。verify() が形を理由に deny する値は
+            # ここで止め (書込時検証をすり抜けさせない)、verify() が黙って無視
+            # するだけの値は good_values のカウントに任せる (D9 の leniency)。
+            if _dict_value_shape_denied(service, k, v, allowed_keys=allowed_keys):
+                return (
+                    f"{service.ACCOUNT_KEY}: オブジェクトの値は文字列である必要が"
+                    f"あります (キー '{k}', 現在: {type(v).__name__})。"
+                    " この service の verify() はこの形を検証時に拒否します。"
+                )
         if not strict_keys and good_values == 0:
             return f"{service.ACCOUNT_KEY}: 有効な値を持つキーがありません。"
         return None
@@ -703,7 +775,7 @@ def _entries_equal(expected: Any, current: Any) -> bool:
     return False
 
 
-def _migrate_keep_new_without_loss(new_val: Any, old_val: Any) -> bool:
+def _migrate_keep_new_without_loss(service, new_val: Any, old_val: Any) -> bool:
     """migrate で new_val (書込先に残る側) を採用しても old_val の情報を
     失わないときだけ True を返す (True なら conflict にせず new を維持)。
 
@@ -721,22 +793,39 @@ def _migrate_keep_new_without_loss(new_val: Any, old_val: Any) -> bool:
     (どちらの型が expected/current かという役割を持たない対称寄りの判定)。
     old が new に無い情報を 1 つでも持っていれば False (conflict のまま)。
 
-    既知の制限: dict-new / str-old (old が scalar) の分岐は値の一致だけで
-    判定するため、old の scalar 値が具体的にどの host/alias を指していたかは
-    区別できない。migrate 時点の CLI 状態に依存し不可知なため、決定的な
-    判定手段が無い (CHANGELOG の既知の制限を参照)。
+    **scalar と dict の混在は値だけでは比較できない** (D11 / Codex R1 P1)。
+    scalar 期待値と dict 期待値は「どの host/alias を照合するか」という制約が
+    違うので、値が一致しても同じ制約とは限らない — 例えば github の scalar
+    "USER" は github.com (active なら) を照合するが `{"ghe.example.com":"USER"}`
+    は名指しの GHE ホストを照合する。値の一致だけで非損失と判定すると、GHE の
+    制約を conflict 検出も警告もなく捨てていた。
+    そこで service が宣言する `SCALAR_EQUIVALENT_DICT_KEY`
+    (= scalar 期待値と等価になる dict キー。services/__init__.py 参照) を使う:
+
+    - scalar new / dict old: 非損失 ⇔ `old == {SCALAR_KEY: new}`
+      (キーがそれ 1 つだけで値も一致)
+    - dict new / scalar old: 非損失 ⇔ `new.get(SCALAR_KEY) == old`
+      (old の制約が new にそのまま含まれる)
+    - キー未宣言の service (firebase / 未知キー) と上に当てはまらない組は
+      conflict。自動で畳み込まず、利用者が両側を見て選ぶ方が安全側に倒れる
     """
     if new_val == old_val:
         return True
+    scalar_key = getattr(service, "SCALAR_EQUIVALENT_DICT_KEY", None)
     if isinstance(new_val, str) and isinstance(old_val, dict):
-        # scalar 期待値は host を 1 つしか照合しない (github.verify は github.com
-        # か最初の active host のみ) ため、old が 2 つ以上の host/alias を持つなら
-        # 値が同じでも「照合される host 集合」が縮む = 情報欠落。
-        return len(old_val) == 1 and next(iter(old_val.values())) == new_val
+        # scalar 期待値が照合するのは SCALAR_EQUIVALENT_DICT_KEY の 1 か所だけ。
+        # old がそれ以外のキーを 1 つでも持てば、そのキーの制約は new では
+        # 失われる (別 host の単一 dict も「照合先が違う」ので非損失ではない)。
+        if scalar_key is None:
+            return False
+        return old_val == {scalar_key: new_val}
     if isinstance(new_val, dict) and isinstance(old_val, str):
-        # old (scalar) の値が new (dict) のどこかに残っていれば、new は old の
-        # スーパーセットなので情報は失われない。
-        return any(v == old_val for v in new_val.values())
+        # old (scalar) が課していた制約は SCALAR_EQUIVALENT_DICT_KEY の照合。
+        # new の同じキーが同じ値を持つときだけ、その制約が引き継がれる
+        # (別キーに同じ値があっても照合先が違うので引き継ぎにならない)。
+        if scalar_key is None:
+            return False
+        return new_val.get(scalar_key) == old_val
     if isinstance(new_val, dict) and isinstance(old_val, dict):
         # old の全キーが new に同じ値で存在するかどうかだけを見る
         # (new 側の余剰キーは old 由来ではないのでここでは無関係)。
@@ -866,7 +955,9 @@ def _cmd_migrate(
             if key not in merged:
                 merged[key] = value
                 additions.append((key, value, kind))
-            elif not _migrate_keep_new_without_loss(merged[key], value):
+            elif not _migrate_keep_new_without_loss(
+                _SERVICE_BY_KEY.get(key), merged[key], value
+            ):
                 # new="USER" (scalar) / old={"github.com":"USER"} (dict、
                 # 単一 host) のように、old の情報が new に全て含まれる場合だけ
                 # conflict にせず new 側を維持する (内部バックログ: 意味的に
@@ -876,6 +967,9 @@ def _cmd_migrate(
                 # `_migrate_keep_new_without_loss` で情報欠落の有無を直接見る —
                 # old が multi-host/multi-alias dict で new (scalar) に無い
                 # 値を持つ場合は、conflict のまま手動解決に落とす。
+                # service を渡すのは scalar↔dict の等価性が service ごとの
+                # 意味論 (SCALAR_EQUIVALENT_DICT_KEY) に依存するため。未知キーは
+                # None が渡り、cross-type は常に conflict になる (安全側)。
                 conflicts.append((key, merged[key], value, kind))
 
     if conflicts:
@@ -975,7 +1069,7 @@ def _cmd_migrate(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="accounts_builder",
-        description="accounts.local.json の唯一の書込経路 (D1-D9).",
+        description="accounts.local.json の唯一の書込経路 (D1-D11).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -753,12 +753,14 @@ class TestParseValue(unittest.TestCase):
 
 class TestValidateEntryShape(unittest.TestCase):
     """`_validate_entry_shape` の direct unit tests (内部バックログ: 書込前
-    スキーマ検証)。services.github / gcloud / aws を実サービスとして使う。"""
+    スキーマ検証 + Codex R1 P2 の service ごとの DICT_VALUE_CHECK 契約)。
+    services.github / gcloud / firebase / aws を実サービスとして使う。"""
 
     def setUp(self):
-        from services import aws, gcloud, github  # noqa: E402 (test-local import)
+        from services import aws, firebase, gcloud, github  # noqa: E402
         self.github = github
         self.gcloud = gcloud
+        self.firebase = firebase
         self.aws = aws
 
     def test_str_value_always_ok(self):
@@ -816,11 +818,115 @@ class TestValidateEntryShape(unittest.TestCase):
         `{"default":"proj-dev","old":null}` のような**部分的に不正**な dict
         を、"old" を無視して "default" だけで成立させる (dict 内に使える値が
         1 つでも残っていれば良い)。migrate (strict_keys=False) がこれより
-        厳しいと、verify() が許容する形を migrate だけが拒否する退行になる。"""
+        厳しいと、verify() が許容する形を migrate だけが拒否する退行になる。
+
+        Codex R1 P2 の修正で、この leniency は service の DICT_VALUE_CHECK
+        契約の範囲に限定した。この test は**契約が "none" の firebase**
+        (docstring が元々説明していた service) で leniency を固定する。
+        修正前はここで gcloud + truthy 非 str (`{"account":111}`) を使って
+        おり、gcloud.verify() が形を理由に reject する形を「許容される」と
+        主張してしまっていた (= test が不具合を固定していた)。gcloud の
+        truthy 非 str が reject されることは
+        `test_gcloud_truthy_non_str_value_rejected_when_not_strict` で固定する。
+        """
         reason = builder._validate_entry_shape(
-            self.gcloud, {"project": "p", "account": 111}, strict_keys=False
+            self.firebase, {"default": "proj-dev", "old": None}, strict_keys=False
         )
         self.assertIsNone(reason)
+
+    def test_gcloud_falsy_value_tolerated_when_not_strict(self):
+        """gcloud.verify() は `if project_want:` / `if account_want:` で値を拾う
+        ため falsy な値は黙って無視する (DICT_VALUE_CHECK="truthy")。
+        許可キーであっても falsy なら migrate は通す。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": "p", "account": None}, strict_keys=False
+        )
+        self.assertIsNone(reason)
+
+    def test_gcloud_truthy_non_str_value_rejected_when_not_strict(self):
+        """Codex R1 P2 の指摘そのもの: `{"project":"p","account":123}` は
+        lenient 検証を通っていたが、gcloud.verify() は truthy な非 str の
+        account を「文字列で指定してください」で reject する。書込時に止めないと
+        次の gcloud 操作で初めて deny される (実行時に化ける)。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": "p", "account": 123}, strict_keys=False
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("account", reason)
+
+    def test_gcloud_truthy_non_str_on_unknown_key_tolerated_when_not_strict(self):
+        """未知キーの値は形を問わない — gcloud.verify() は DICT_ALLOWED_KEYS
+        以外のキーをそもそも読まないため、値が壊れていても deny 要因にならない
+        (ここで弾くと verify() が許す形を migrate だけが拒否する退行になる)。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": "p", "region": 123}, strict_keys=False
+        )
+        self.assertIsNone(reason)
+
+    def test_github_non_str_value_rejected_when_not_strict(self):
+        """github.verify() は dict の**全キー**の値を isinstance(str) で検査し、
+        1 つでも非 str なら (falsy な None でも) その host のエラーを積む
+        (DICT_VALUE_CHECK="all")。migrate でも素通ししない。"""
+        for bad in (123, None, ["x"], {"y": "z"}):
+            with self.subTest(bad=bad):
+                reason = builder._validate_entry_shape(
+                    self.github,
+                    {"github.com": "USER", "ghe.example.com": bad},
+                    strict_keys=False,
+                )
+                self.assertIsNotNone(reason)
+
+    def test_firebase_truthy_non_str_value_tolerated_when_not_strict(self):
+        """firebase.verify() は使えない値を filter で捨てるだけで、値の形を
+        理由に deny しない (DICT_VALUE_CHECK="none")。falsy / truthy を問わず
+        migrate は通す。"""
+        for bad in (123, None, ["x"]):
+            with self.subTest(bad=bad):
+                reason = builder._validate_entry_shape(
+                    self.firebase,
+                    {"default": "proj-dev", "old": bad},
+                    strict_keys=False,
+                )
+                self.assertIsNone(reason)
+
+    def test_blank_dict_value_rejected_regardless_of_strictness(self):
+        """空文字・空白のみの**値**は空文字キーと同じ失敗形 (実在の CLI 値と
+        一致し得ず永久 deny) なので、DICT_VALUE_CHECK 契約に関わらず常に弾く。
+        `--host` 経由 / `--value` の dict 直接指定 / migrate の取り込みの
+        全経路がここを通る。"""
+        for svc_name, svc, shape in (
+            ("github", self.github, {"github.com": "USER", "ghe.example.com": ""}),
+            ("github", self.github, {"github.com": "   "}),
+            ("gcloud", self.gcloud, {"project": "p", "account": "  "}),
+            ("firebase", self.firebase, {"default": "proj-dev", "prod": ""}),
+        ):
+            for strict in (True, False):
+                with self.subTest(svc=svc_name, shape=shape, strict=strict):
+                    reason = builder._validate_entry_shape(
+                        svc, shape, strict_keys=strict
+                    )
+                    self.assertIsNotNone(reason)
+                    self.assertIn("空文字", reason)
+
+    def test_empty_scalar_rejected(self):
+        """Codex R1 P2: `set --service aws --value "$UNSET_VAR"` で空文字が
+        書けていた。dispatcher は `entry == ""` をキー欠落と同じ扱いにして
+        恒久 deny するため、書込時に弾く (dict の値・キーと同じ規則)。"""
+        for svc_name, svc in (
+            ("aws", self.aws),
+            ("github", self.github),
+            ("gcloud", self.gcloud),
+        ):
+            for bad in ("", "   ", "\t\n"):
+                with self.subTest(svc=svc_name, bad=repr(bad)):
+                    reason = builder._validate_entry_shape(svc, bad)
+                    self.assertIsNotNone(reason)
+                    self.assertIn("空文字", reason)
+
+    def test_scalar_with_surrounding_whitespace_still_accepted(self):
+        """非空であれば前後の空白は許す (値そのものは書き換えない) — 判定は
+        `strip()` 後の非空だけで、正規化はしない。"""
+        self.assertIsNone(builder._validate_entry_shape(self.aws, " 123456789012 "))
 
     def test_one_bad_value_among_good_ones_still_rejected_when_strict(self):
         """init/set (strict_keys=True) は authoring 時の即時フィードバックを
@@ -871,22 +977,230 @@ class TestValidateEntryShape(unittest.TestCase):
         self.assertIn("空文字", reason)
 
 
+class TestBuilderAcceptedShapesPassVerify(unittest.TestCase):
+    """D10 の不変条件を service × 形状の表で固定する (Codex R1 P2)。
+
+    **不変条件**: `_validate_entry_shape()` が受理した形は、その service の
+    `verify()` が**形を理由に** deny しない。
+
+    構成上の要点: 各ケースの active 値は**その期待値を満たすように mock する**。
+    そのため verify() が非 None を返したら、それは値の不一致ではなく形の拒否で
+    あることが構成から保証される (エラー文面の文字列マッチで「形の deny」と
+    「値の deny」を選り分けない = 判定の抜けを作らない)。
+    クラウド CLI は起動せず、各 service の現在値取得関数だけを差し替える。
+    """
+
+    # (service 名, 期待値, その期待値を満たす active 値, strict でも受理されるか)
+    ACCEPTED = [
+        # --- scalar ---
+        ("aws", "123456789012", "123456789012", True),
+        ("kubectl", "my-context", "my-context", True),
+        ("github", "USER", {"github.com": "USER"}, True),
+        ("gcloud", "my-project", {"project": "my-project", "account": None}, True),
+        ("firebase", "proj-dev", "proj-dev", True),
+        # --- 正常 dict ---
+        ("github", {"github.com": "USER"}, {"github.com": "USER"}, True),
+        (
+            "github",
+            {"github.com": "USER", "ghe.example.com": "example-org"},
+            {"github.com": "USER", "ghe.example.com": "example-org"},
+            True,
+        ),
+        (
+            "gcloud",
+            {"project": "p", "account": "me@example.com"},
+            {"project": "p", "account": "me@example.com"},
+            True,
+        ),
+        (
+            "firebase",
+            {"default": "proj-dev", "prod": "proj-prod"},
+            "proj-dev",
+            True,
+        ),
+        # --- 部分欠落 (dict の一部キーだけ) ---
+        ("gcloud", {"project": "p"}, {"project": "p", "account": None}, True),
+        (
+            "gcloud",
+            {"account": "me@example.com"},
+            {"project": None, "account": "me@example.com"},
+            True,
+        ),
+        # --- falsy 値 (lenient のみ。verify() が黙って無視する形) ---
+        (
+            "gcloud",
+            {"project": "p", "account": None},
+            {"project": "p", "account": None},
+            False,
+        ),
+        ("firebase", {"default": "proj-dev", "old": None}, "proj-dev", False),
+        # --- truthy 非 str (lenient のみ。verify() が読まない/捨てる位置に限る) ---
+        (
+            "gcloud",
+            {"project": "p", "region": 123},
+            {"project": "p", "account": None},
+            False,
+        ),
+        ("firebase", {"default": "proj-dev", "old": 123}, "proj-dev", False),
+        # --- 未知キー (lenient のみ) ---
+        (
+            "gcloud",
+            {"project": "p", "region": "us-central1"},
+            {"project": "p", "account": None},
+            False,
+        ),
+    ]
+
+    # 逆側: builder が拒否する形。verify() が形を理由に deny することも併せて
+    # 確認し、拒否が過剰でない (実在の穴を塞いでいる) ことを示す。
+    REJECTED_AND_DENIED_BY_VERIFY = [
+        # Codex R1 P2 の指摘そのもの
+        (
+            "gcloud",
+            {"project": "p", "account": 123},
+            {"project": "p", "account": None},
+        ),
+        (
+            "github",
+            {"github.com": "USER", "ghe.example.com": 123},
+            {"github.com": "USER", "ghe.example.com": "example-org"},
+        ),
+        (
+            "github",
+            {"github.com": "USER", "ghe.example.com": None},
+            {"github.com": "USER", "ghe.example.com": "example-org"},
+        ),
+        # 空 dict は全 service の verify() が拒否する
+        ("github", {}, {"github.com": "USER"}),
+        ("gcloud", {}, {"project": "p", "account": None}),
+    ]
+
+    def _verify_with_active(self, svc_name: str, expected, active):
+        """active 値を mock して verify() を呼ぶ (CLI は起動しない)。"""
+        from services import aws, firebase, gcloud, github, kubectl  # noqa: E402
+
+        if svc_name == "github":
+            with mock.patch.object(
+                github, "_fetch_active_accounts", return_value=(active, None)
+            ):
+                return github.verify(expected, "/p")
+        if svc_name == "gcloud":
+            def fake_get(key, env=None, configuration=None):
+                return active.get(key), None
+            with mock.patch.object(gcloud, "_get", side_effect=fake_get):
+                return gcloud.verify(expected, "/p")
+        if svc_name == "firebase":
+            with mock.patch.object(
+                firebase, "_resolve", return_value=(active, None)
+            ):
+                return firebase.verify(expected, "/p")
+        if svc_name == "aws":
+            with mock.patch.object(
+                aws, "_run_sts_get_caller_identity", return_value=(active, None, "")
+            ):
+                return aws.verify(expected, "/p")
+        if svc_name == "kubectl":
+            with mock.patch.object(
+                kubectl, "_run_current_context", return_value=(active, None)
+            ):
+                return kubectl.verify(expected, "/p")
+        raise AssertionError(f"unknown service {svc_name}")
+
+    def test_mock_harness_actually_reaches_verify(self):
+        """negative control: mock が効いていて verify() が値の判定まで到達して
+        いることを確かめる (全ケースが素通しで None になっていたら、この表は
+        何も検証していない)。期待値を満たさない active では deny されること。"""
+        for svc_name, expected, _active, _strict in self.ACCEPTED:
+            with self.subTest(svc=svc_name, expected=expected):
+                bad_active = {
+                    "github": {"github.com": "someone-else"},
+                    "gcloud": {"project": "other-proj", "account": "x@example.com"},
+                    "firebase": "other-proj",
+                    "aws": "999999999999",
+                    "kubectl": "other-context",
+                }[svc_name]
+                self.assertIsNotNone(
+                    self._verify_with_active(svc_name, expected, bad_active)
+                )
+
+    def test_accepted_shapes_are_not_denied_for_shape(self):
+        """表の全ケースで builder が受理し、かつ verify() が None を返す。"""
+        for svc_name, expected, active, strict_ok in self.ACCEPTED:
+            svc = builder._SERVICE_BY_KEY[svc_name]
+            with self.subTest(svc=svc_name, expected=expected):
+                self.assertIsNone(
+                    builder._validate_entry_shape(svc, expected, strict_keys=False),
+                    "builder (lenient) が受理するはずの形を拒否した",
+                )
+                if strict_ok:
+                    self.assertIsNone(
+                        builder._validate_entry_shape(
+                            svc, expected, strict_keys=True
+                        ),
+                        "builder (strict) が受理するはずの形を拒否した",
+                    )
+                self.assertIsNone(
+                    self._verify_with_active(svc_name, expected, active),
+                    "builder が受理した形を verify() が deny した (不変条件違反)",
+                )
+
+    def test_rejected_shapes_would_have_been_denied_by_verify(self):
+        """builder が拒否する形は、verify() 側でも実際に deny される
+        (過剰な拒否ではなく、実行時 deny に化ける穴を書込時に塞いでいる)。"""
+        for svc_name, expected, active in self.REJECTED_AND_DENIED_BY_VERIFY:
+            svc = builder._SERVICE_BY_KEY[svc_name]
+            with self.subTest(svc=svc_name, expected=expected):
+                self.assertIsNotNone(
+                    builder._validate_entry_shape(svc, expected, strict_keys=False),
+                    "builder (lenient) が verify() の deny する形を素通しした",
+                )
+                self.assertIsNotNone(
+                    self._verify_with_active(svc_name, expected, active),
+                    "verify() が deny しない形を builder が拒否している (過剰)",
+                )
+
+    def test_empty_scalar_rejected_for_every_service(self):
+        """空文字 scalar はどの service でも書けてはならない。
+
+        根拠: dispatcher は空文字の entry をキーの欠落と同じ扱いにするため、
+        書けてしまうと以後その service は設定を直すまで恒久 deny になる
+        (verify() に到達すらしない)。dispatcher 側の挙動そのものは
+        test_dispatcher.py の担当なので、ここでは「builder が書かせない」ことだけを
+        固定する。
+        """
+        for svc_name in ("aws", "github", "gcloud", "firebase", "kubectl"):
+            svc = builder._SERVICE_BY_KEY[svc_name]
+            with self.subTest(svc=svc_name):
+                self.assertIsNotNone(builder._validate_entry_shape(svc, ""))
+
+
 class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
     """`_migrate_keep_new_without_loss` の direct unit tests (内部バックログ:
-    advisor レビューで検出した multi-host/multi-alias の情報欠落の修正)。"""
+    advisor レビューで検出した multi-host/multi-alias の情報欠落の修正 +
+    Codex R1 P1: scalar↔dict 比較に host 意味論を持たせた D11)。"""
+
+    def setUp(self):
+        from services import firebase, gcloud, github  # noqa: E402
+        self.github = github
+        self.gcloud = gcloud
+        self.firebase = firebase
 
     def test_identical_values(self):
-        self.assertTrue(builder._migrate_keep_new_without_loss("a", "a"))
         self.assertTrue(
-            builder._migrate_keep_new_without_loss({"x": 1}, {"x": 1})
+            builder._migrate_keep_new_without_loss(self.github, "a", "a")
+        )
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                self.gcloud, {"project": "p"}, {"project": "p"}
+            )
         )
 
     def test_single_host_dict_old_matches_new_scalar(self):
-        """ticket の実例: old が単一 host/alias の dict で new (scalar) と
-        同じ値 → 情報は失われないので True。"""
+        """old が SCALAR_EQUIVALENT_DICT_KEY 1 つだけの dict で new (scalar) と
+        同じ値 → scalar が照合する host と一致するので情報は失われない。"""
         self.assertTrue(
             builder._migrate_keep_new_without_loss(
-                "Mao-o", {"github.com": "Mao-o"}
+                self.github, "USER", {"github.com": "USER"}
             )
         )
 
@@ -895,7 +1209,9 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
         無い値を持つ場合は False (conflict のまま、silent data loss を防ぐ)。"""
         self.assertFalse(
             builder._migrate_keep_new_without_loss(
-                "Mao-o", {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+                self.github,
+                "USER",
+                {"github.com": "USER", "ghe.example.com": "example-org"},
             )
         )
 
@@ -906,29 +1222,32 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
         情報欠落として False (conflict のまま) になる。"""
         self.assertFalse(
             builder._migrate_keep_new_without_loss(
-                "Mao-o", {"github.com": "Mao-o", "ghe.example.com": "Mao-o"}
+                self.github,
+                "USER",
+                {"github.com": "USER", "ghe.example.com": "USER"},
             )
         )
 
     def test_dict_new_superset_of_scalar_old(self):
-        """対称ケース: new (dict) が old (scalar) の値を含んでいれば
-        new はスーパーセットなので情報は失われない → True。"""
+        """対称ケース: new (dict) が SCALAR_EQUIVALENT_DICT_KEY で old (scalar)
+        と同じ値を持てば、old の制約はそのまま引き継がれる → True。"""
         self.assertTrue(
             builder._migrate_keep_new_without_loss(
-                {"github.com": "Mao-o"}, "Mao-o"
+                self.github, {"github.com": "USER"}, "USER"
             )
         )
 
     def test_dict_new_missing_scalar_old_value_is_lossy(self):
         self.assertFalse(
             builder._migrate_keep_new_without_loss(
-                {"github.com": "other"}, "Mao-o"
+                self.github, {"github.com": "other"}, "USER"
             )
         )
 
     def test_dict_dict_new_has_all_old_keys_is_not_lossy(self):
         self.assertTrue(
             builder._migrate_keep_new_without_loss(
+                self.gcloud,
                 {"project": "p", "account": "a", "extra": "z"},
                 {"project": "p", "account": "a"},
             )
@@ -939,20 +1258,132 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
         無ければ False (silent drop を許さない)。"""
         self.assertFalse(
             builder._migrate_keep_new_without_loss(
-                {"project": "p"}, {"project": "p", "account": "a"}
+                self.gcloud, {"project": "p"}, {"project": "p", "account": "a"}
             )
         )
 
     def test_dict_dict_differing_value_is_lossy(self):
         self.assertFalse(
             builder._migrate_keep_new_without_loss(
+                self.gcloud,
                 {"project": "p", "account": "a"},
                 {"project": "p", "account": "b"},
             )
         )
 
     def test_unequal_scalars(self):
-        self.assertFalse(builder._migrate_keep_new_without_loss("a", "b"))
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(self.github, "a", "b")
+        )
+
+    # --- D11 / Codex R1 P1: scalar↔dict は host 意味論で判定する ---
+
+    def test_single_non_scalar_key_dict_old_is_conflict(self):
+        """P1 の指摘そのもの: scalar "USER" は github.com (active なら) を
+        照合するが `{"ghe.example.com":"USER"}` は名指しの GHE ホストを照合する。
+        値が一致し dict が単一キーでも**制約が違う**ので conflict に倒す
+        (修正前は len(old)==1 かつ値一致で True = GHE の制約を無警告で破棄)。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.github, "USER", {"ghe.example.com": "USER"}
+            )
+        )
+
+    def test_dict_new_without_scalar_key_does_not_cover_scalar_old(self):
+        """逆方向 (dict-new / str-old)。修正前は `any(v == old)` で値がどこかに
+        あれば True にしていたため、old の scalar が照合していた github.com の
+        制約が new に無くても非損失と判定していた (S3 で「既知の制限」として
+        残していた分岐。D11 で解消)。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.github, {"ghe.example.com": "USER"}, "USER"
+            )
+        )
+
+    def test_gcloud_scalar_key_is_project(self):
+        """gcloud.verify() の scalar 分岐は project だけを照合する
+        (SCALAR_EQUIVALENT_DICT_KEY = "project")。"""
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                self.gcloud, "my-project", {"project": "my-project"}
+            )
+        )
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                self.gcloud,
+                {"project": "my-project", "account": "me@example.com"},
+                "my-project",
+            )
+        )
+
+    def test_gcloud_scalar_new_drops_account_constraint(self):
+        """scalar new は account の制約を持てないので、old が account を
+        持っていれば conflict (情報欠落)。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.gcloud,
+                "my-project",
+                {"project": "my-project", "account": "me@example.com"},
+            )
+        )
+
+    def test_gcloud_dict_new_on_other_key_does_not_cover_scalar_old(self):
+        """old scalar は project の制約。new が account にだけ同じ値を持っていても
+        引き継ぎにならない (照合先が違う)。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.gcloud, {"account": "my-project"}, "my-project"
+            )
+        )
+
+    def test_firebase_cross_type_is_conflict(self):
+        """firebase は SCALAR_EQUIVALENT_DICT_KEY を宣言しない — dict キーは
+        alias 名で verify() の verdict (`current in valid`) に効かない一方、
+        is_self_remediation が `firebase use <alias>` の対象として読む情報を
+        持つため、畳み込むと自己回復の案内先が消える。値が一致しても両方向
+        conflict に倒し、利用者に選ばせる。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.firebase, "proj-dev", {"default": "proj-dev"}
+            )
+        )
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.firebase, {"default": "proj-dev"}, "proj-dev"
+            )
+        )
+
+    def test_firebase_same_type_comparisons_unaffected(self):
+        """キー未宣言でも同型比較 (dict-dict / 完全一致) は従来どおり働く。"""
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                self.firebase, {"default": "proj-dev"}, {"default": "proj-dev"}
+            )
+        )
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                self.firebase,
+                {"default": "proj-dev", "prod": "proj-prod"},
+                {"default": "proj-dev"},
+            )
+        )
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.firebase, {"default": "proj-dev"}, {"default": "other"}
+            )
+        )
+
+    def test_unknown_service_cross_type_is_conflict(self):
+        """service が None (accounts.local.json に未知のキーがある) の場合も
+        scalar↔dict は conflict。SCALAR_EQUIVALENT_DICT_KEY を読めないので
+        等価性を主張できない。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(None, "USER", {"a": "USER"})
+        )
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(None, {"a": "USER"}, "USER")
+        )
+        self.assertTrue(builder._migrate_keep_new_without_loss(None, "x", "x"))
 
 
 class TestInitValueValidation(BaseBuilder):
@@ -1013,6 +1444,15 @@ class TestInitValueValidation(BaseBuilder):
             ]
         )
         self.assertEqual(code, 1)
+        self.assertFalse(self._new_path().exists())
+
+    def test_rejects_empty_scalar_value(self):
+        """init 経路も同じ `_validate_entry_shape` を通る (ガードは 1 箇所)。"""
+        code, _out, err = self._run(
+            ["init", "--service", "aws", "--value", "", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("空文字", err)
         self.assertFalse(self._new_path().exists())
 
     def test_skipped_message_points_to_set_subcommand(self):
@@ -1254,6 +1694,31 @@ class TestSet(BaseBuilder):
             ["set", "--service", "aws", "--value", '{"foo":"bar"}', "--commit"]
         )
         self.assertEqual(code, 1)
+        self.assertFalse(self._new_path().exists())
+
+    def test_rejects_empty_scalar_value(self):
+        """Codex R1 P2: `--value "$UNSET_VAR"` が空文字に展開されると
+        `"aws": ""` を書けてしまい、dispatcher がキー欠落と同じ扱いで恒久 deny
+        する状態を builder 自身が作っていた。書込前に exit 1 で止める。"""
+        for bad in ("", "   "):
+            with self.subTest(bad=repr(bad)):
+                code, _out, err = self._run(
+                    ["set", "--service", "aws", "--value", bad, "--commit"]
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("空文字", err)
+                self.assertFalse(self._new_path().exists())
+
+    def test_rejects_empty_scalar_value_via_host(self):
+        """--host 経由 (dict の 1 キー) でも同じガードが効く。"""
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--host", "github.com",
+                "--value", "  ", "--commit",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("空文字", err)
         self.assertFalse(self._new_path().exists())
 
     def test_rejects_whitespace_only_dict_key_via_value(self):
@@ -1587,6 +2052,92 @@ class TestMigrateValueSemantics(BaseBuilder):
         self.assertEqual(code, 0)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
         self.assertEqual(data, {"firebase": {"default": "proj-dev", "old": None}})
+
+    def test_non_scalar_key_host_dict_is_conflict_not_silently_collapsed(self):
+        """Codex R1 P1 の end-to-end: new=scalar "USER" /
+        old={"ghe.example.com":"USER"} は値が一致し old が単一キーでも、
+        scalar が照合するのは github.com なので **GHE の制約が消える**。
+        conflict のまま手動解決に落とし、書き込まない。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "USER"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"github": {"ghe.example.com": "USER"}}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit", "--show-values"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+        self.assertIn("ghe.example.com", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "USER"})
+
+    def test_dict_new_on_other_host_does_not_absorb_scalar_old(self):
+        """逆方向 (S3 で「既知の制限」として残していた分岐)。new が
+        github.com を持たなければ old scalar の制約は引き継がれない。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"ghe.example.com": "USER"}}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"github": "USER"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+
+    def test_firebase_scalar_and_alias_dict_is_conflict(self):
+        """firebase は SCALAR_EQUIVALENT_DICT_KEY を宣言しないので、値が
+        一致する scalar↔dict も conflict (alias 名を無警告で捨てない)。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"firebase": "proj-dev"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"firebase": {"default": "proj-dev"}}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+
+    def test_gcloud_scalar_and_project_dict_is_not_conflict(self):
+        """gcloud の SCALAR_EQUIVALENT_DICT_KEY = "project" — scalar 期待値は
+        project だけを照合するので `{"project": <同値>}` とは等価。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"gcloud": "my-project"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"gcloud": {"project": "my-project"}}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"gcloud": "my-project"})
+
+    def test_addition_with_truthy_non_str_on_read_key_is_rejected(self):
+        """Codex R1 P2 の end-to-end: gcloud.verify() が reject する
+        truthy 非 str の account を、migrate が旧パスから取り込めていた
+        (書込は通り、次の gcloud 操作で初めて deny される形)。"""
+        self._deprecated_path().write_text(
+            json.dumps({"gcloud": {"project": "p", "account": 123}}),
+            encoding="utf-8",
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("不正です", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_addition_with_empty_scalar_from_old_path_is_rejected(self):
+        """旧パスに `"aws": ""` が残っていた場合も取り込まない
+        (dispatcher がキー欠落と同じ扱いで恒久 deny する形)。"""
+        self._deprecated_path().write_text(
+            json.dumps({"aws": ""}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("空文字", err)
+        self.assertFalse(self._new_path().exists())
 
     def test_rejects_invalid_shape_from_old_path(self):
         """旧パスの新規追加キーが list 等の不正型 → 書込前に exit 1

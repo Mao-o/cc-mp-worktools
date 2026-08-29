@@ -60,6 +60,8 @@ SETUP_HINT = (
 )
 # builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
 # kubectl の期待値は context 名の文字列のみ (verify() も isinstance str のみ受理)。
+# dict を受け付けないので DICT_ALLOWED_KEYS / DICT_VALUE_CHECK /
+# SCALAR_EQUIVALENT_DICT_KEY はいずれも宣言しない (builder は dict 自体を弾く)。
 ACCEPTS_DICT = False
 
 

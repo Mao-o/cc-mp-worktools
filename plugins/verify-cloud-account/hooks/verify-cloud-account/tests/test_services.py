@@ -1490,6 +1490,36 @@ class TestServiceContextContract(unittest.TestCase):
                 self.assertIsInstance(allowed_keys, frozenset)
                 self.assertTrue(all(isinstance(k, str) for k in allowed_keys))
 
+    def test_dict_services_declare_dict_value_check(self):
+        """ACCEPTS_DICT=True の service は DICT_VALUE_CHECK を明示宣言する
+        (builder の緩和モードが「verify() が形で deny する値」を素通ししない
+        ための契約。既定値に頼ると新 service の宣言漏れを検出できない)。
+        scalar 専用の service は dict 契約自体が無意味なので宣言しない。"""
+        for svc in self.SERVICES:
+            with self.subTest(svc=svc.__name__):
+                if not svc.ACCEPTS_DICT:
+                    self.assertNotIn("DICT_VALUE_CHECK", vars(svc))
+                    continue
+                self.assertIn("DICT_VALUE_CHECK", vars(svc))
+                self.assertIn(svc.DICT_VALUE_CHECK, ("all", "truthy", "none"))
+
+    def test_scalar_equivalent_dict_key_only_on_dict_services(self):
+        """SCALAR_EQUIVALENT_DICT_KEY は「scalar 期待値と等価になる dict キー」。
+        宣言は任意 (firebase のように verify() が dict キーを読まない service は
+        宣言しない) だが、宣言する場合は ACCEPTS_DICT=True かつ、
+        DICT_ALLOWED_KEYS を持つ service ではその許容キーの 1 つであること。"""
+        for svc in self.SERVICES:
+            with self.subTest(svc=svc.__name__):
+                key = getattr(svc, "SCALAR_EQUIVALENT_DICT_KEY", None)
+                if key is None:
+                    continue
+                self.assertTrue(svc.ACCEPTS_DICT)
+                self.assertIsInstance(key, str)
+                self.assertTrue(key.strip())
+                allowed_keys = getattr(svc, "DICT_ALLOWED_KEYS", None)
+                if allowed_keys is not None:
+                    self.assertIn(key, allowed_keys)
+
 
 class TestFirebaseCliNameForms(unittest.TestCase):
     """npm 経由の正当な CLI 名の形を全判定で受け付ける。

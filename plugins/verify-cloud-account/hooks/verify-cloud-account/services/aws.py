@@ -58,6 +58,8 @@ SETUP_HINT = (
 )
 # builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
 # aws の期待値は Account ID の文字列のみ (verify() も isinstance str のみ受理)。
+# dict を受け付けないので DICT_ALLOWED_KEYS / DICT_VALUE_CHECK /
+# SCALAR_EQUIVALENT_DICT_KEY はいずれも宣言しない (builder は dict 自体を弾く)。
 ACCEPTS_DICT = False
 
 _ROLE_ARN_ACCOUNT_RE = re.compile(r"^arn:aws[\w-]*:iam::(\d{12}):")

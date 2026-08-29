@@ -18,6 +18,28 @@
                                     self-remediation を判定する (core/cli_options.py)
      - ACCOUNT_KEY: str             accounts.local.json 上のキー名
      - SETUP_HINT: str              accounts.local.json 未設定時の案内文
+     - ACCEPTS_DICT: bool           期待値に dict 形を許すか (全 service 必須)
+     - DICT_ALLOWED_KEYS: frozenset[str]
+                                    (任意) dict の許容キー。未宣言 = キー制限なし
+     - DICT_VALUE_CHECK: str        (ACCEPTS_DICT=True のとき) verify() が dict の
+                                    **値**をどこまで形で拒否するかの宣言。builder は
+                                    migrate の緩和モードでこれに合わせて拒否する:
+                                      "all"    全キーの値が str 必須 (github)
+                                      "truthy" truthy な値だけ str 必須、falsy は
+                                               verify() が無視する (gcloud)
+                                      "none"   verify() が使えない値を黙って捨てる
+                                               ので値の型では拒否しない (firebase)
+                                    未宣言時の builder 既定は最も厳しい "all"
+     - SCALAR_EQUIVALENT_DICT_KEY: str
+                                    (任意) scalar 期待値と**等価**になる dict キー。
+                                    verify() の str 分岐が照合する対象が特定の
+                                    キーに対応するときだけ宣言する (github:
+                                    "github.com" / gcloud: "project")。builder の
+                                    migrate はこれで scalar↔dict の非損失性を判定し、
+                                    未宣言なら混在を conflict (手動解決) に倒す。
+                                    firebase のようにキーが verdict に効かない
+                                    service では宣言しないこと (畳み込むと alias 名の
+                                    情報が消える)
      - verify(expected, project_dir) -> str | None  検証関数 (None=成功, 文字列=エラー理由)
      - get_active_account(project_dir) -> str | dict | None  現在のアクティブ値
      - suggest_accounts_entry(project_dir) -> str | dict | None  builder 書込用 suggestion

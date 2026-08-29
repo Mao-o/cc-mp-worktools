@@ -51,7 +51,30 @@
    verify() では通っていた形を後から書けなくする退行になる。migrate が
    触っていない新パス側の既存エントリは検証対象にしない (無関係な統合作業
    まで exit 1 にしないため)。
-4. **migrate の衝突判定を情報欠落の有無で判定する専用の比較関数に変更** —
+   **この leniency の範囲は service ごとの `DICT_VALUE_CHECK` 契約に限る**
+   (独立レビュー指摘で修正)。当初は全 service に一律で適用していたため、
+   **その service の `verify()` が形を理由に deny する値まで書けてしまい、
+   書込時検証をすり抜けて実行時 deny に化けていた** — 例:
+   `{"gcloud":{"project":"p","account":123}}` は `gcloud.verify()` が
+   truthy な非文字列の `account` を「文字列で指定してください」で拒否するのに、
+   builder は「`project` が有効だから」と通していた。各 service は
+   `verify()` の実装に対応する契約を宣言する: `github` は `"all"`
+   (dict の全キーの値が文字列必須)、`gcloud` は `"truthy"`
+   (falsy な値は `verify()` が黙って無視するので許容、truthy な非文字列は
+   拒否)、`firebase` は `"none"` (`verify()` が使えない値を filter で捨てる
+   ので値の型では拒否しない)。守る不変条件は「**builder が受理した形は、
+   その service の `verify()` が形を理由に deny しない**」で、service ×
+   形状 (scalar / 正常 dict / 部分欠落 / falsy 値 / truthy 非文字列 /
+   未知キー / 空 dict) の表で固定した。
+4. **空文字・空白のみの値を書けないようにした** (独立レビュー指摘)。
+   `set --service aws --value "$UNSET_VAR" --commit` のように未定義の環境変数を
+   渡すと空文字に展開され、`"aws": ""` が書き込めてしまっていた。dispatcher は
+   `entry == ""` を**キーの欠落と同じ**扱いにするため、以後その service は
+   設定を直すまで恒久 deny になる — 書込時検証を追加した当の builder 自身が、
+   検証をすり抜ける値を作っていたことになる。scalar の値にも dict のキー・値と
+   同じ規則 (`strip()` 後に非空) を課し、`init` / `set` / `migrate` の全経路で
+   効くようにした (ガードは `_validate_entry_shape` の 1 箇所)。
+5. **migrate の衝突判定を情報欠落の有無で判定する専用の比較関数に変更** —
    新旧で `merged[key] != value` という値そのものの不一致だけを見ていた
    ため、scalar `"USER"` と dict `{"github.com":"USER"}` のように
    **意味的には同じアカウント**を指す新旧値まで値衝突として手動解決を
@@ -66,16 +89,34 @@
    情報を失わないか」だけを見る専用の比較にした。dict-dict でも同じ考え方
    (old の全キーが new に含まれているか) を適用し、new が old のサブセット
    になるケースも conflict のまま手動解決に落とす。
+   さらに **scalar と dict の比較に host / フィールドの意味論を持たせた**
+   (独立レビュー指摘で修正)。当初は「値が一致し old が単一キーなら非損失」と
+   していたが、これは**どのホストを照合するかという制約の違いを見ていない**:
+   scalar の `"github": "USER"` は github.com (アクティブなら) を照合するのに対し
+   `{"ghe.example.com": "USER"}` は名指しの GHE ホストを照合するので、値が
+   同じでも制約は別物で、統合すると GHE の制約が conflict 検出も警告もなく
+   消えていた。各 service が「scalar 期待値と等価になる dict キー」
+   (`SCALAR_EQUIVALENT_DICT_KEY`) を宣言し、両方向をそれで判定する
+   (`github` は `"github.com"`、`gcloud` は `verify()` の scalar 分岐が照合する
+   `"project"`)。`firebase` は**宣言しない** — dict キーは `.firebaserc` の
+   alias 名で `verify()` の判定 (値のいずれかに一致するか) には効かない一方、
+   `firebase use <alias>` の自己回復案内が読む情報を持つため、畳み込むと
+   案内先が消える。キーを宣言しない service と、キーが一致しない組み合わせは
+   conflict にして利用者に選ばせる。
 
 ### 既知の制限 (新規)
 
 - `git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は元々
   検証対象外だったが、README に明記していなかったので追記した (挙動の変更
   ではない)。
-- `_migrate_keep_new_without_loss` の dict-new / str-old 分岐 (new が dict、
-  old が scalar) は値の一致だけで判定するため、old の scalar 値が具体的に
-  どの host/alias を指していたかは区別できない。migrate 時点の CLI 状態に
-  依存し不可知なため、決定的な判定手段が無い。
+- scalar 期待値と dict 期待値の統合は、`SCALAR_EQUIVALENT_DICT_KEY` を宣言する
+  service (`github` / `gcloud`) でのみ自動で非衝突と判定できる。`firebase` の
+  ように dict キーが照合の判定に効かない service では、値が一致していても
+  conflict として手動解決を求める (どちらの形を残すかで自己回復の案内が
+  変わるため、自動では選べない)。
+  なお `github` の scalar は「github.com がアクティブでなければ最初の
+  アクティブホスト」という**実行時の状態に依存する**照合をするため、静的比較で
+  等価と言い切れるのは `github.com` の場合だけで、それ以外は conflict に倒す。
 
 ## 0.9.0
 

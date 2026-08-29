@@ -83,6 +83,17 @@ SETUP_HINT = (
 # alias 名は任意の文字列を許すため DICT_ALLOWED_KEYS は宣言しない
 # (builder 側は getattr の既定値 None を「キー制限なし」と解釈する)。
 ACCEPTS_DICT = True
+# 下の verify() は dict 期待値を `[v for v in expected.values() if isinstance(v, str)
+# and v]` で filter し、**使えない値は falsy / truthy を問わず黙って捨てる**
+# (1 つも残らないときだけ reject)。値の形を理由に deny することが無いので、
+# builder も個々の値の型では reject しない → "none"。
+DICT_VALUE_CHECK = "none"
+# SCALAR_EQUIVALENT_DICT_KEY は**宣言しない**。firebase の dict キーは
+# `.firebaserc` の alias 名で、verify() の照合 (`current in valid`) は値だけを見て
+# キーを一切読まない — つまり「scalar と等価になる特定のキー」が存在しない。
+# 一方 alias 名は is_self_remediation が `firebase use <alias>` の対象として受理する
+# 情報を持つため、dict → scalar の畳み込みは情報を落とす。builder はキー未宣言の
+# service の scalar/dict 混在を conflict (手動解決) に倒す。
 TIMEOUT_REASON = (
     "Firebase: firebase use がタイムアウトしました。"
     "再試行するか、ネットワーク接続を確認してください。"
