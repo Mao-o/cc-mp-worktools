@@ -979,3 +979,28 @@ class NestedDiscoveryBoundsTest(unittest.TestCase):
             # 200 件すべてを列挙してから打ち切るのではなく、予算ぶんで止まる。
             self.assertLess(len(seen), 200)
 
+    def test_stat_calls_are_bounded_on_a_file_heavy_directory(self):
+        """候補ディレクトリが 1 つも無い巨大ディレクトリでも stat が全件に
+        及ばないこと。実コストは列挙 + is_dir/is_symlink/.git の stat なので、
+        打ち切りは候補件数ではなく列挙件数にかける必要がある。
+        """
+        from core.fs import MAX_NESTED_SCAN_ENTRIES, has_nested_project_markers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            total = MAX_NESTED_SCAN_ENTRIES + 300
+            for i in range(total):
+                (root / f"f{i:05d}.txt").write_text("x")
+            calls = []
+            real_is_dir = Path.is_dir
+
+            def counting_is_dir(self):
+                calls.append(self)
+                return real_is_dir(self)
+
+            with mock.patch.object(Path, "is_dir", counting_is_dir):
+                self.assertFalse(
+                    has_nested_project_markers(root, ("package.json",), ())
+                )
+            self.assertLessEqual(len(calls), MAX_NESTED_SCAN_ENTRIES + 5)
+

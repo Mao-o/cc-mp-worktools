@@ -28,6 +28,10 @@ def safe_iterdir(path: Path) -> List[Path]:
         return []
 
 
+# 1 ディレクトリあたり列挙する項目数の上限 (stat 回数の上限でもある)。
+MAX_NESTED_SCAN_ENTRIES = 512
+
+
 def has_nested_project_markers(
     root: Path,
     markers: Iterable[str],
@@ -68,11 +72,17 @@ def has_nested_project_markers(
         if remaining <= 0:
             continue
         try:
-            for entry in islice(
-                (e for e in current.iterdir() if _is_candidate_dir(e, skip)),
-                remaining,
-            ):
-                queue.append((entry, depth + 1))
+            # 打ち切りは「候補ディレクトリの件数」ではなく「列挙した項目数」に
+            # かける。実コストは iterdir の列挙と _is_candidate_dir の stat 呼び
+            # 出し (is_dir / is_symlink / .git の 3 回) であり、候補で数えると
+            # 候補が 1 つも無い巨大ディレクトリで全件 stat してしまう。
+            # 代償として、大量のファイルの後ろに埋もれたサブプロジェクトは
+            # 見つからないことがある。--force-walk が escape hatch になる。
+            for entry in islice(current.iterdir(), max(remaining, MAX_NESTED_SCAN_ENTRIES)):
+                if _is_candidate_dir(entry, skip):
+                    queue.append((entry, depth + 1))
+                    if len(queue) + visited >= max_dirs:
+                        break
         except OSError:
             continue
     return False
