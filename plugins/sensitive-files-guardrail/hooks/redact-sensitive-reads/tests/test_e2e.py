@@ -185,6 +185,75 @@ class TestE2EReadHandler(unittest.TestCase):
         # 値は漏れない
         self.assertNotIn("value_0", reason)
 
+    def test_read_many_key_dotenv_keeps_closing_tag_and_note(self):
+        """0.26.0: 32KB 未満だが鍵数が多い ``.env`` で ``</DATA>`` と末尾 note が
+        生き残ること。
+
+        ``test_read_large_file_keyonly`` は 32KB 超 (``redact_large_file`` /
+        keyonly scan) 経路の回帰。こちらは **inline (``format_dotenv``) 経路**
+        の回帰で、90 key 程度の ``.env`` で ``</DATA>`` 閉じタグと「実値は
+        無い」の末尾 note が key 行の途中で失われていた実測 (0.26.0 以前) の
+        直接の再現先。
+        """
+        p = Path(self.tmp) / ".env"
+        p.write_text(
+            "".join(
+                f"KEY_{i:03d}=value_that_is_reasonably_long_{i:03d}\n"
+                for i in range(90)
+            )
+        )
+        self.assertLess(p.stat().st_size, 32 * 1024)
+        envelope = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": ".env"},
+            "cwd": self.tmp,
+            "permission_mode": "bypassPermissions",
+        }
+        result = _run_main(envelope, ["--tool", "read"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertLessEqual(len(reason.encode("utf-8")), 3 * 1024)
+        self.assertIn("</DATA>", reason)
+        self.assertIn("real values are not in context", reason)
+        self.assertRegex(reason, r"\.\.\. \(\d+ more lines\)")
+        # 値は漏れない
+        self.assertNotIn("value_that_is_reasonably_long_0\n", reason)
+
+    def test_bash_cat_many_key_env_keeps_closing_tag_note_and_exclude_hint(self):
+        """0.26.0: Bash ``cat`` 経路でも ``</DATA>`` / note / 除外案内が両立する。
+
+        除外案内自体は 0.23.0 で ``_join_with_exclude_hint`` が保護済みだが、
+        埋め込まれた ``<DATA>`` ブロック自身の閉じタグと末尾 note は保護
+        対象外で、盲目 byte cut で key 行の途中から失われていた (90 key の
+        ``.env`` で実測)。
+        """
+        p = Path(self.tmp) / ".env"
+        p.write_text(
+            "".join(
+                f"KEY_{i:03d}=value_that_is_reasonably_long_{i:03d}\n"
+                for i in range(90)
+            )
+        )
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env", "description": "test"},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        result = _run_main(envelope, ["--tool", "bash"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertLessEqual(len(reason.encode("utf-8")), 3 * 1024)
+        self.assertIn("</DATA>", reason)
+        self.assertIn("real values are not in context", reason)
+        self.assertIn("patterns.local.txt", reason)
+        self.assertIn("保護そのもの", reason)
+        self.assertNotIn("value_that_is_reasonably_long_0\n", reason)
+
     def test_bash_cat_env_denies(self):
         """Bash handler は ``cat .env`` を deny 固定 (0.2.0 で ask_or_deny → deny に変更)。"""
         envelope = {
@@ -407,7 +476,7 @@ class TestE2EReadHandler(unittest.TestCase):
         )
 
 
-# ---- 両 hook の推奨コマンドが Bash hook を通過する (0.19.0, snw.3) ------------
+# ---- 両 hook の推奨コマンドが Bash hook を通過する (0.19.0) ------------
 
 _REMEDY_CMD_WORDS = frozenset({"git", "chmod", "chown", "chgrp", "touch"})
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
@@ -441,7 +510,7 @@ def _git(args: list[str], cwd: str) -> None:
 
 class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
     """両 hook の reason が推奨する次善策コマンドが Bash hook を通過することを
-    固定する (0.19.0, bd_092a232e-snw.3)。
+    固定する (0.19.0)。
 
     0.18.0 までは Stop hook と ``_bash_deny_history`` が ``git rm --cached <path>``
     を案内しながら Bash hook 自身がそれを deny していた (自己矛盾)。reason から

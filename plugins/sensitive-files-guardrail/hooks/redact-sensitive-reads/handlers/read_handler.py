@@ -80,4 +80,10 @@ def handle(envelope: dict) -> dict:
         L.log_error("redaction_failed", type(e).__name__)
         return output.ask_or_deny(M.read_ask("redaction_failed"), envelope)
 
-    return output.make_deny(reason)
+    # 0.26.0: reason (<DATA> 包装の 1 ブロック) が 3KB 予算を超える
+    # 場合、以前は core.output._truncate の盲目 byte cut だけに頼っており、
+    # 鍵数の多い dotenv / json / yaml で閉じタグと末尾 note が key 行の途中で
+    # 失われていた。M.fit_read_reason が閉じタグ・末尾 note を保護したまま
+    # 折り畳む (収まらなければ入力をそのまま返し、_truncate が最終防御を担う
+    # ので verdict には影響しない)。
+    return output.make_deny(M.fit_read_reason(reason))

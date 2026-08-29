@@ -166,19 +166,63 @@ def scan_file(path: Path, max_bytes: int = 1024 * 1024) -> tuple[list[str], int]
         return [], 0
 
 
-def format_keyonly(keys: list[str], total_bytes: int, fmt_hint: str = "unknown") -> str:
+# keys-only scan に降りた理由 → ``format:`` 行に載せるラベル (0.26.0)。
+# 旧実装は理由を問わず一律 "large" と表示しており、43 byte の壊れた JSON でも
+# 「(large, keys-only scan)」と出て小ファイルなのに「大きすぎる」と誤った事実を
+# 伝えていた (バグ報告そのものが LLM に伝わらなくなる)。``format_opaque`` 経由で
+# 呼ばれる際に理由を引き渡し、事実どおりのラベルに分岐する。
+_KEYONLY_REASON_LABELS: dict[str, str] = {
+    "large": "large",
+    "parse_failed": "parse failed",
+    "toml_unsupported": "unsupported",
+}
+
+
+def _keyonly_note(reason: str, fmt_hint: str) -> str:
+    """理由別の ``note:`` 行本文を返す (常に「値は読んでいない」で終える)。"""
+    if reason == "parse_failed":
+        return (
+            f"note: {fmt_hint.upper()} parse failed — file may be malformed."
+            " values never read."
+        )
+    if reason == "toml_unsupported":
+        return (
+            "note: TOML structure needs Python 3.11+ (tomllib unavailable)."
+            " values never read."
+        )
+    return "note: file too large for full parse. values never read."
+
+
+def format_keyonly(
+    keys: list[str],
+    total_bytes: int,
+    fmt_hint: str = "unknown",
+    reason: str = "large",
+) -> str:
+    """streaming 鍵名抽出の結果を reason 用に整形する。
+
+    Args:
+        keys: 抽出済み鍵名リスト。
+        total_bytes: スキャンした byte 数。
+        fmt_hint: ``format:`` 行に出す format 名。
+        reason: keys-only scan に降りた理由 (``large`` / ``parse_failed`` /
+            ``toml_unsupported``)。未知値は ``large`` 相当 (旧来の表示) に
+            フォールバックする。``format:`` 行のラベルと末尾 ``note:`` の
+            文面の両方を切り替える。
+    """
+    label = _KEYONLY_REASON_LABELS.get(reason, "large")
     lines = [
-        f"format: {fmt_hint} (large, keys-only scan)",
+        f"format: {fmt_hint} ({label}, keys-only scan)",
         f"entries: {len(keys)}",
         f"scanned_bytes: {total_bytes}",
     ]
     if not keys:
         lines.append("(no keys matched)")
-        return "\n".join(lines)
-    preview_cap = 60
-    shown = keys[:preview_cap]
-    lines.append("keys: " + ", ".join(shown))
-    if len(keys) > preview_cap:
-        lines.append(f"... ({len(keys) - preview_cap} more)")
-    lines.append("note: file too large for full parse. values never read.")
+    else:
+        preview_cap = 60
+        shown = keys[:preview_cap]
+        lines.append("keys: " + ", ".join(shown))
+        if len(keys) > preview_cap:
+            lines.append(f"... ({len(keys) - preview_cap} more)")
+    lines.append(_keyonly_note(reason, fmt_hint))
     return "\n".join(lines)

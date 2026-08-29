@@ -20,6 +20,51 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.26.0
+
+deny reason の**レンダリング領域** (文言・情報量) の不具合 5 件を修正 (内部
+バックログの精査で発見)。**判定境界 (deny / allow / ask) の変化: なし。**
+変わるのは reason 文字列の正確さ・情報量だけ。テスト件数: redact 1119 →
+**1149** (check 94 は変化なし)。
+
+1. **Edit/Write の既存ファイル minimal info 取得失敗時、理由 (kind) を握り
+   つぶさず reason に反映**。`handlers.edit_handler._render_existing` が
+   `render_for_bash` の失敗理由を捨てていたため、権限エラー・symlink 検知・
+   形式不明などあらゆる失敗が単一の汎用ラベルに潰れ、しかも失敗分布を測る
+   ログも無かった。Bash 側と同じ `log_info` 計測に乗せ、理由ごとに異なる
+   ラベルを出すようにした。next action も修正: 旧文言は「同じ絶対パスを
+   Read tool に渡してください (block されますが同じ minimal info が返り
+   ます)」だったが、これは二重に事実と違った — render 失敗時は Read も
+   **同じ理由で失敗し情報は増えず**、しかも verdict は (bypass モード以外)
+   block ではなく確認 (ask) になる。budget 超過 (情報自体は取得できている)
+   のケースだけは、実際に Read で続きを確認できるため従来の誘導を維持する。
+2. **overwrite で既存キーの値更新を「追加予定のキー名」と誤ラベルする不具合
+   を修正**。上書き対象の既存キー集合を取得できるようにし、`suggested_keys`
+   の全件が既存キーと一致する (= 新規追加が無い、純粋な値の更新) ときだけ
+   `suggestion_alt` を「既存キーの値の更新」に切り替えた。新規キーとの混在、
+   非 dotenv、既存キー集合を取得できない (render 失敗) ケースは、誤って
+   「更新」と断定しない安全側に倒し、従来の「追加予定」文言のまま維持する。
+3. **overwrite の note 括弧内の rationale を tool 中立な文言に修正**。
+   「既存の値の喪失」(Write 前提の表現) が、Edit 向け suggestion の
+   「対象を絞った置換なのでファイル全体は失われません」と同じ reason 内で
+   自己矛盾していたため、「意図しない値の破壊」に差し替えた。
+4. **reason の byte 予算 (3KB) を超える折り畳みで `</DATA>` 閉じタグと末尾
+   note を失う不具合を修正**。Edit の overwrite minimal info 用に実装済み
+   だった予算内折り畳み機構を、Read handler と Bash builder にも配線した。
+   従来 Read には同等の機構が無く、Bash も除外案内 (`patterns.local.txt`
+   への追記案内) だけを保護し埋め込みの `<DATA>` ブロック自体は盲目 byte
+   cut に晒していたため、鍵数の多い dotenv / json / yaml ファイルで閉じ
+   タグと「実値は無い」の免責事項が key 行の途中で失われていた
+   (90 key の `.env` で実測)。あわせて折り畳み機構自体が末尾 note を保護
+   しておらず、Edit 経由でも 20 key 前後から note が消えていた欠陥も修正
+   (note を守ると中身が 0 行になる極端な入力では、旧来どおり中身を優先する
+   フォールバック付き)。
+5. **JSON/TOML パース失敗時の reason が小ファイルでも「large / too large」
+   と誤表示する不具合を修正**。keys-only scan フォールバックに理由
+   (`large` / `parse_failed` / `toml_unsupported`) を渡せるようにし、
+   壊れた JSON や tomllib 未搭載環境の TOML でも事実どおりのラベルと note
+   (「パース失敗」「Python 3.11+ が必要」) を出すようにした。
+
 ## 0.25.0
 
 Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ) + 隔離内レビュー

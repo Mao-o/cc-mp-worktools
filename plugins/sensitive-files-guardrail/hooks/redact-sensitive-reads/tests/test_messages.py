@@ -194,6 +194,151 @@ class TestDataBlockAssumptions(unittest.TestCase):
         self.assertEqual(lines[-1], M._DATA_CLOSING_TAG)
 
 
+class TestFitDataBlockNoteProtection(unittest.TestCase):
+    """0.26.0: ``_fit_data_block`` は閉じタグと一緒に末尾 ``note:`` 行も守る。
+
+    0.26.0 以前は ``</DATA>`` だけを固定 tail 扱いし、直前の per-format note
+    (``format_dotenv`` 等が必ず最後に置く「実値は無い」の免責事項) を可変長
+    body の一部として畳んでいた。実測で 20 key 前後から note が消えることを
+    確認した (edit_deny 経由の折り畳みで実証済み)。
+
+    ただし note を守ろうとして key 行が **前より減る**のは本末転倒なので、
+    「note を守れないなら守らずに済ませる (旧来動作)」の 2 段構えを固定する。
+    """
+
+    _BLOCK = "\n".join(
+        ['<DATA untrusted="true" source="redact-hook" guard="g">',
+         "NOTE: x", "file: .env"]
+        + [f"  {i}. KEY_{i}  <type=str>  <set>  length=8" for i in range(50)]
+        + ["note: real values are not in context. only key names are returned."]
+        + ["</DATA>"]
+    )
+
+    def test_note_survives_when_budget_allows(self):
+        fitted = M._fit_data_block(self._BLOCK, 2000)
+        joined = "\n".join(fitted)
+        self.assertIn("real values are not in context", joined)
+        self.assertEqual(fitted[-1], "</DATA>")
+        self.assertEqual(fitted[-2], "note: real values are not in context. only key names are returned.")
+
+    def test_never_regresses_to_empty_when_legacy_would_show_something(self):
+        """note 保護によって「以前は見えていたのに何も見えなくなる」budget が
+        存在しないこと。
+
+        note 保護に使った budget 分だけ key 行が 1 行分減ることは意図した
+        トレードオフ (note を残す方を優先する設計) なので regression としては
+        扱わない。regression として絶対に避けたいのは「旧アルゴリズムなら
+        鍵情報を出せていたのに、note を守ろうとして中身ゼロ (unavailable) に
+        落ちる」ケースだけ — これは advisor 指摘の 2 段構えフォールバックで
+        防いでいる。
+        """
+        for budget in range(0, 400, 5):
+            with self.subTest(budget=budget):
+                legacy = M._fit_data_block_core(
+                    self._BLOCK, budget, protect_note=False,
+                )
+                current = M._fit_data_block(self._BLOCK, budget)
+                if legacy:
+                    self.assertTrue(
+                        current,
+                        f"budget={budget}: 旧アルゴリズムは非空なのに"
+                        " 2 段構え版が空を返した (regression)",
+                    )
+
+    def test_falls_back_to_no_note_when_note_protection_yields_nothing(self):
+        """note を守ると中身ゼロになる budget では、note を諦めて中身を出す。"""
+        # header 3 行 + key 1 行 + closing はギリギリ入るが、note 行
+        # (約 70 byte) まで追加で確保しようとすると header だけになる budget。
+        narrow_block = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: x", "file: .env",
+             "  1. KEY_1  <type=str>  <set>  length=8",
+             "note: real values are not in context. only key names are returned.",
+             "</DATA>"]
+        )
+        found_fallback_case = False
+        for budget in range(40, 250, 1):
+            protected = M._fit_data_block_core(
+                narrow_block, budget, protect_note=True,
+            )
+            unprotected = M._fit_data_block_core(
+                narrow_block, budget, protect_note=False,
+            )
+            if not protected and unprotected:
+                found_fallback_case = True
+                two_tier = M._fit_data_block(narrow_block, budget)
+                self.assertEqual(two_tier, unprotected)
+                self.assertTrue(
+                    any(line.startswith("  1. KEY_1") for line in two_tier),
+                )
+        self.assertTrue(
+            found_fallback_case,
+            "note 保護が中身ゼロに追い込む budget 帯が見つからなかった"
+            " (テスト fixture の調整が必要)",
+        )
+
+    def test_omit_marker_carries_next_action_when_provided(self):
+        fitted = M._fit_data_block(self._BLOCK, 400, next_action="do X")
+        joined = "\n".join(fitted)
+        self.assertRegex(joined, r"\.\.\. \(\d+ more lines; do X\)")
+
+    def test_omit_marker_has_no_next_action_by_default(self):
+        fitted = M._fit_data_block(self._BLOCK, 400)
+        joined = "\n".join(fitted)
+        self.assertRegex(joined, r"\.\.\. \(\d+ more lines\)")
+        self.assertNotIn(";", joined.split("more lines")[1].split(")")[0])
+
+
+class TestFitDataBlockAcrossFormats(unittest.TestCase):
+    """0.26.0 で範囲補正した「dotenv / jsonlike / opaque の 3 形式すべてを対象に」
+    を実データで固定する。
+
+    ``build_reason`` が組む実物のブロックを ``_fit_data_block`` に通し、
+    形式によらず閉じタグと末尾 note が保護されることを確認する。
+    """
+
+    def _reason_for(self, fmt: str, n: int) -> str:
+        from io import BytesIO
+
+        from redaction.engine import redact
+
+        if fmt == "dotenv":
+            text = "".join(f"KEY_{i:03d}=value_{i:03d}_padding\n" for i in range(n))
+            basename = ".env"
+        elif fmt == "json":
+            import json as _json
+
+            text = _json.dumps(
+                {f"key_{i:03d}": f"value_{i:03d}_padding" for i in range(n)}
+            )
+            basename = "credentials.json"
+        else:  # opaque/yaml
+            text = "".join(f"key_{i:03d}: value_{i:03d}_padding\n" for i in range(n))
+            basename = "secrets.local.yaml"
+        data = text.encode("utf-8")
+        return redact(BytesIO(data), basename, len(data))
+
+    def test_dotenv_fold_keeps_closing_and_note(self):
+        reason = self._reason_for("dotenv", 90)
+        fitted = "\n".join(M._fit_data_block(reason, 900))
+        self.assertTrue(fitted.endswith("</DATA>"))
+        self.assertIn("real values are not in context", fitted)
+
+    def test_jsonlike_fold_keeps_closing_and_note(self):
+        reason = self._reason_for("json", 90)
+        fitted = "\n".join(M._fit_data_block(reason, 900))
+        self.assertTrue(fitted.endswith("</DATA>"))
+        self.assertIn(
+            "string scalar values are summarized to status tags", fitted,
+        )
+
+    def test_opaque_yaml_fold_keeps_closing_and_note(self):
+        reason = self._reason_for("yaml", 200)
+        fitted = "\n".join(M._fit_data_block(reason, 900))
+        self.assertTrue(fitted.endswith("</DATA>"))
+        self.assertIn("nested structure not parsed", fitted)
+
+
 class TestEditDeny(unittest.TestCase):
     def test_minimal_no_keys(self):
         msg = M.edit_deny("Edit", ".env", new_keys=None, kind="new")
@@ -251,13 +396,64 @@ class TestEditDeny(unittest.TestCase):
         self.assertIn("(10 more)", msg)
 
     def test_overwrite_without_render_reports_unavailable(self):
-        """``existing_render`` が空なら黙って省略せず unavailable + next action。"""
+        """``existing_render`` が空なら黙って省略せず unavailable + next action。
+
+        ``existing_render_status`` 未指定 (0.26.0 以前の呼び出し形) は既知の
+        status に該当しないため、従来どおりの汎用ラベルにフォールバックする。
+        next action は render 失敗系の新文言 (Read へ誘導しない) になる —
+        旧文言「Read も block されますが同じ minimal info が返ります」は
+        render 失敗時には二重に事実と違ったため。
+        """
         msg = M.edit_deny("Edit", ".env", kind="overwrite")
         self.assertIn(
             "minimal info: unavailable (既存ファイルの読み取り / 解析に失敗)",
             msg,
         )
+        self.assertIn("同じ理由で失敗し、情報は返りません", msg)
+        self.assertNotIn("Read tool に", msg)
+        self.assertNotIn("block されますが", msg)
+
+    def test_overwrite_status_specific_labels(self):
+        """``existing_render_status`` の値ごとに理由ラベルが分岐する (0.26.0)。"""
+        cases = {
+            "unresolved": "既存ファイルが見つからない",
+            "not_regular": "通常ファイルではない",
+            "stat_failed": "ファイル状態の確認に失敗した",
+            "open_failed": "安全な open に失敗した",
+            "redact_failed": "内容の解析に失敗した",
+            "normalize_failed": "パスの正規化に失敗した",
+        }
+        for status, expect in cases.items():
+            with self.subTest(status=status):
+                msg = M.edit_deny(
+                    "Edit", ".env", kind="overwrite",
+                    existing_render_status=status,
+                )
+                self.assertIn(expect, msg)
+
+    def test_overwrite_budget_case_keeps_read_redirect(self):
+        """budget 超過 (情報自体は取れている) は従来どおり Read 誘導のまま。
+
+        render 自体は成功しているので、``existing_render_status`` を渡しても
+        (実際には budget 分岐が優先されるので) Read へ誘導する旧来の
+        next action を維持する。render 失敗と budget 超過を混同しないこと
+        の確認。
+        """
+        render = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: " + "x" * 4000, "file: .env",
+             "  1. FOO  <type=str>", "</DATA>"]
+        )
+        msg = M.edit_deny(
+            "Edit", ".env", kind="overwrite", existing_render=render,
+            existing_render_status="open_failed",  # 無視されるべき
+        )
+        self.assertIn(
+            "minimal info: unavailable (reason の byte 予算に収まらないため省略)",
+            msg,
+        )
         self.assertIn("Read tool に", msg)
+        self.assertIn("block されますが", msg)
 
     def test_overwrite_many_lines_are_folded_not_dropped(self):
         """行数が多いだけなら入る分を載せ、残りを ``... (N more lines)`` に畳む。"""
@@ -274,7 +470,7 @@ class TestEditDeny(unittest.TestCase):
         self.assertLessEqual(len(msg.encode("utf-8")), output.MAX_REASON_BYTES)
         self.assertIn("上書き対象の既存ファイル", msg)
         self.assertIn("  0. KEY_0", msg)
-        self.assertRegex(msg, r"  \.\.\. \(\d+ more lines\)")
+        self.assertRegex(msg, r"  \.\.\. \(\d+ more lines")
         # 閉じタグは畳んでも残す (外殻破壊防御の前提)
         self.assertTrue(msg.split("\n")[-1].startswith("suggestion:"))
         self.assertIn("</DATA>", msg)
@@ -325,6 +521,23 @@ class TestEditDeny(unittest.TestCase):
         """
         with self.assertRaises(TypeError):
             M.edit_deny("Edit", ".env")  # type: ignore[call-arg]
+
+    def test_overwrite_note_parenthetical_is_tool_neutral(self):
+        """``overwrite`` の note 括弧内は tool 中立 (Edit でも事実に反しない)。
+
+        直上のコメントは動詞 (「書き換え」) を tool 中立にした理由を説明するが、
+        旧文言は括弧内の rationale だけ「既存の値の喪失」という Write 前提の
+        まま取り残されていた (Edit は対象を絞った置換なので「喪失」は起きうる
+        破壊の一部でしかなく、tool clause 側の「ファイル全体は失われません」と
+        同じ reason 内で自己矛盾していた)。
+        """
+        for tool_label in ("Edit", "Write"):
+            with self.subTest(tool=tool_label):
+                msg = M.edit_deny(
+                    tool_label, ".env", kind="overwrite", is_dotenv=True,
+                )
+                self.assertIn("意図しない値の破壊と機密流出を防ぐため", msg)
+                self.assertNotIn("既存の値の喪失", msg)
 
 
 class TestPolicyUnavailable(unittest.TestCase):
@@ -596,6 +809,65 @@ class TestVocabularyConsistency(unittest.TestCase):
                 "確認を挟みます", msg,
                 msg=f"bash_lenient({kind!r}) lacks 確認を挟みます in: {msg!r}",
             )
+
+
+class TestFitReadReason(unittest.TestCase):
+    """``fit_read_reason`` (0.26.0): Read handler 専用の budget 折り畳み。
+
+    Read の reason は他の固定行を持たず ``<DATA>`` ブロックそのものなので、
+    budget を素通しで ``_fit_data_block`` に渡すだけでよい。以前は Read だけ
+    折り畳み機構が無く、``core.output._truncate`` の盲目 cut に単独で
+    晒されていた (Bash は 0.23.0 の除外案内保護、Edit は 0.20.0 の
+    ``_fit_data_block`` 配線があったが、Read には同等のものが無かった)。
+    """
+
+    def _big_dotenv_reason(self, n: int) -> str:
+        from io import BytesIO
+
+        from redaction.engine import redact
+
+        text = "".join(f"KEY_{i:03d}=value_{i:03d}_padding_padding\n" for i in range(n))
+        data = text.encode("utf-8")
+        return redact(BytesIO(data), ".env", len(data))
+
+    def test_within_budget_is_returned_unchanged(self):
+        reason = self._big_dotenv_reason(5)
+        self.assertEqual(M.fit_read_reason(reason), reason)
+
+    def test_over_budget_keeps_closing_tag_and_note(self):
+        reason = self._big_dotenv_reason(90)
+        self.assertGreater(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+        fitted = M.fit_read_reason(reason)
+        self.assertLessEqual(len(fitted.encode("utf-8")), output.MAX_REASON_BYTES)
+        self.assertTrue(fitted.endswith("</DATA>"))
+        self.assertIn("real values are not in context", fitted)
+        self.assertRegex(fitted, r"\.\.\. \(\d+ more lines\)")
+
+    def test_omit_marker_does_not_suggest_read_tool(self):
+        """Read の中で「Read tool を使え」は自己参照で無意味。
+
+        Bash/Edit の折り畳み (``_fold_data_block`` / ``_edit_existing_info_lines``)
+        は omit marker に Read への誘導を付けるが、``fit_read_reason`` 自身は
+        付けない設計であることを固定する。
+        """
+        reason = self._big_dotenv_reason(90)
+        fitted = M.fit_read_reason(reason)
+        self.assertNotIn("use Read tool", fitted)
+
+    def test_custom_budget_is_respected(self):
+        reason = self._big_dotenv_reason(30)
+        fitted = M.fit_read_reason(reason, budget=800)
+        self.assertLessEqual(len(fitted.encode("utf-8")), 800)
+        self.assertTrue(fitted.endswith("</DATA>"))
+
+    def test_unfoldable_extreme_case_returns_input_unchanged(self):
+        """header 3 行すら budget に収まらない極端なケースは折り畳みを諦める。
+
+        ``core.output.make_deny`` の ``_truncate`` が最終防御として働くので、
+        ここで無理に何かを作ろうとせず入力をそのまま返す。
+        """
+        reason = self._big_dotenv_reason(5)
+        self.assertEqual(M.fit_read_reason(reason, budget=5), reason)
 
 
 if __name__ == "__main__":

@@ -65,13 +65,21 @@ def redact_opaque(text: str, fmt_hint: str = "opaque") -> dict:
     }
 
 
-def format_opaque(info: dict) -> str:
+def format_opaque(info: dict, reason: str = "large") -> str:
+    """``redact_opaque`` の結果を整形する。
+
+    ``reason`` (0.26.0) は yaml 以外 (``format_keyonly`` 経由) のときだけ効く。
+    ``engine.redact`` が json/toml のパース失敗・tomllib 不在を検知して
+    ``"parse_failed"`` / ``"toml_unsupported"`` を渡す。既定 ``"large"`` は
+    従来どおり (yaml / 純粋な opaque format 自体の扱いは変えない、スコープ外)。
+    """
     if info.get("format") == "yaml" and "nested_count" in info:
         return _format_yaml(info)
     return format_keyonly(
         info["keys"],
         info["scanned_bytes"],
         fmt_hint=info["format"],
+        reason=reason,
     )
 
 

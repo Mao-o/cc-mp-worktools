@@ -124,6 +124,12 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
         extras.append("note: content was truncated (>32KB); using head-only redaction.")
     text = raw.decode("utf-8", errors="replace")
 
+    # keys-only scan (opaque fallback) に降りた場合の理由 (0.26.0)。
+    # 既定 "large" は yaml / 純粋な opaque format の従来表示を保つ。json/toml が
+    # 失敗した場合だけ実際の理由に差し替え、``format_opaque`` → ``format_keyonly``
+    # に伝えて「small file なのに large と表示される」誤りを解消する。
+    fallback_reason = "large"
+
     if fmt == "dotenv":
         info = redact_dotenv(text)
         body = format_dotenv(info)
@@ -134,14 +140,18 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
             body = format_jsonlike(info)
             return build_reason(basename, fmt, body, extras)
         except (ValueError, RecursionError):
-            pass
+            fallback_reason = "parse_failed"
     if fmt == "toml":
         try:
             info = redact_toml(text)
             body = format_toml(info)
             return build_reason(basename, fmt, body, extras)
+        except RuntimeError:
+            # tomllib 未搭載 (Python < 3.11)。パース自体を試みていない。
+            fallback_reason = "toml_unsupported"
         except Exception:
-            pass
+            # tomllib.TOMLDecodeError (ValueError 派生) 等、内容の構文エラー。
+            fallback_reason = "parse_failed"
     # armored 鍵 / 証明書は専用経路 (0.23.0)。format 未確定 (opaque) のときだけ
     # 内容を sniff する。``.env`` に PEM を値として埋めた形は dotenv 経路のまま
     # 扱いたいので、既に format が確定しているケースには介入しない。
@@ -150,7 +160,7 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
 
     # yaml / opaque / json 失敗 / toml 失敗 → opaque fallback
     info = redact_opaque(text, fmt_hint=fmt)
-    body = format_opaque(info)
+    body = format_opaque(info, reason=fallback_reason)
     return build_reason(basename, fmt, body, extras)
 
 

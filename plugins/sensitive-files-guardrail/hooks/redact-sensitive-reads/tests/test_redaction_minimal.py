@@ -695,5 +695,98 @@ class TestDotenvInlineComment(unittest.TestCase):
         self.assertNotIn("ship it", reason)
 
 
+class TestKeyonlyFallbackReason(unittest.TestCase):
+    """keys-only scan フォールバックの理由別ラベル (0.26.0)。
+
+    旧実装は理由を問わず ``format: <fmt> (large, keys-only scan)`` と表示して
+    いたため、43 byte の壊れた JSON でも「大きすぎる」と事実に反する説明が
+    出ていた。json/toml のパース失敗・tomllib 不在を区別し、事実どおりの
+    ラベルと note を出す。
+    """
+
+    def test_broken_small_json_reports_parse_failed_not_large(self):
+        text = "{not valid json"
+        reason = _redact_text("credentials.json", text)
+        self.assertIn("format: json (parse failed, keys-only scan)", reason)
+        self.assertNotIn("(large,", reason)
+        self.assertIn("JSON parse failed", reason)
+        self.assertIn("file may be malformed", reason)
+        # 43 byte 級の小ファイルで「too large」という事実に反する語を出さない
+        self.assertNotIn("too large", reason)
+
+    def test_broken_small_json_with_zero_keys_still_gets_note(self):
+        """entries: 0 (鍵が一切マッチしない) でも note を省略しない。
+
+        旧実装は ``format_keyonly`` の空 keys 分岐が note 追加より前に
+        return していたため、この形だけ理由も no next-action も無い reason に
+        なっていた (silent degradation と同型の欠落)。
+        """
+        text = "{not valid json"
+        reason = _redact_text("credentials.json", text)
+        self.assertIn("entries: 0", reason)
+        self.assertIn("(no keys matched)", reason)
+        self.assertIn("JSON parse failed", reason)
+
+    def test_broken_small_toml_reports_parse_failed(self):
+        text = "key = [1, 2"  # 閉じ括弧が無い不正 TOML
+        reason = _redact_text("secrets.local.toml", text)
+        self.assertIn("format: toml (parse failed, keys-only scan)", reason)
+        self.assertNotIn("(large,", reason)
+        self.assertIn("TOML parse failed", reason)
+        self.assertNotIn("too large", reason)
+
+    def test_tomllib_unavailable_reports_unsupported_not_large(self):
+        """tomllib 不在 (Python < 3.11 相当) は「壊れている」ではなく「未対応」。
+
+        妥当な TOML を渡しても、tomllib 自体が無ければパースを試みる前に
+        RuntimeError で降りる。これを parse_failed と混同しないこと。
+        """
+        from unittest import mock
+
+        from redaction import tomllike
+
+        text = "key = 1\n"  # 正常な TOML (パース自体は成功しうる内容)
+        with mock.patch.object(tomllike, "tomllib", None):
+            reason = _redact_text("secrets.local.toml", text)
+        self.assertIn("format: toml (unsupported, keys-only scan)", reason)
+        self.assertNotIn("(large,", reason)
+        self.assertNotIn("parse failed", reason)
+        self.assertIn("Python 3.11+", reason)
+
+    def test_format_keyonly_reason_labels_direct(self):
+        from redaction.keyonly_scan import format_keyonly
+
+        large = format_keyonly(["A"], 100, fmt_hint="opaque")
+        self.assertIn("(large, keys-only scan)", large)
+        self.assertIn("file too large for full parse", large)
+
+        parse_failed = format_keyonly(
+            ["A"], 43, fmt_hint="json", reason="parse_failed",
+        )
+        self.assertIn("(parse failed, keys-only scan)", parse_failed)
+        self.assertIn("JSON parse failed", parse_failed)
+
+        unsupported = format_keyonly(
+            [], 47, fmt_hint="toml", reason="toml_unsupported",
+        )
+        self.assertIn("(unsupported, keys-only scan)", unsupported)
+        self.assertIn("Python 3.11+", unsupported)
+
+        # 未知の reason は旧来の "large" 相当にフォールバックする (安全側)
+        unknown = format_keyonly(["A"], 10, fmt_hint="opaque", reason="???")
+        self.assertIn("(large, keys-only scan)", unknown)
+
+    def test_format_opaque_default_reason_is_large(self):
+        """``format_opaque`` の既定は従来どおり (yaml / 純粋 opaque への影響なし)。"""
+        from redaction.opaque import format_opaque
+
+        info = {"format": "opaque", "keys": ["A"], "scanned_bytes": 10}
+        self.assertIn("(large, keys-only scan)", format_opaque(info))
+        self.assertIn(
+            "(parse failed, keys-only scan)",
+            format_opaque(info, reason="parse_failed"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
