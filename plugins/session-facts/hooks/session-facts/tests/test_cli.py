@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import shlex
 import sys
 import tempfile
 import unittest
@@ -113,6 +114,18 @@ class MoreHintInvokedAsTest(unittest.TestCase):
                 "for additional opt-in analyses",
                 out,
             )
+
+    def test_hint_command_quotes_paths_containing_spaces(self):
+        # The plugin can be installed under a directory with spaces; an
+        # unquoted path makes the interpreter open only the first segment,
+        # so the printed command is not runnable as promised.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            spaced = str(root / "plugin root" / "session-facts")
+            with mock.patch.object(sys, "argv", [spaced]):
+                out = _run_cli(["--root", str(root)])
+            self.assertIn(f"`python3 {shlex.quote(spaced)} --help`", out)
+            self.assertNotIn(f"`python3 {spaced} --help`", out)
 
     def test_fallback_wording_when_invoked_as_is_none(self):
         # summarize_repo() called as a library (invoked_as=None, e.g. not
