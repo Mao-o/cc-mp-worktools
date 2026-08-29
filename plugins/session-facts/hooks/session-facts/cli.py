@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from core.constants import (
+    SKIP_DIRS,
     GLOBAL_ONLY_AT_HOME_MARKERS,
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
@@ -24,7 +25,12 @@ from core.constants import (
     SKIP_DIRS,
 )
 from core.context import AnalysisConfig, RepoContext
-from core.fs import has_project_markers, read_text, walk_files
+from core.fs import (
+    has_nested_project_markers,
+    has_project_markers,
+    read_text,
+    walk_files,
+)
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
 from core.runtime import MISE_CONFIG_NAMES, is_home_dir, mise_config_path
@@ -267,7 +273,13 @@ def _has_relevant_project_markers(root: Path) -> bool:
         # グローバルなランタイム固定でホーム全体を「プロジェクト」と
         # 判定しない (この gate が守ろうとしている当の環境なので)。
         return True
-    return mise_config_path(root) is not None
+    if mise_config_path(root) is not None:
+        return True
+    # ルート直下にマニフェストを置かないワークスペース (サブディレクトリ側に
+    # だけマニフェストがある構成) を取りこぼさない。深さと訪問ディレクトリ数を
+    # 限定しているので、gate が避けたい「無関係な巨大ディレクトリの全走査」に
+    # はならない。
+    return has_nested_project_markers(root, PROJECT_MARKERS, SKIP_DIRS)
 
 
 def summarize_repo(

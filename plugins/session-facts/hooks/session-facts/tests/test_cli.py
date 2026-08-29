@@ -816,3 +816,40 @@ class HomeRuntimePinMarkerTest(unittest.TestCase):
             with mock.patch.object(Path, "home", staticmethod(lambda: home)):
                 self.assertTrue(_has_relevant_project_markers(proj))
 
+
+class NestedWorkspaceMarkerTest(unittest.TestCase):
+    """PR #67 (Codex P2): ルート直下にマニフェストを置かないワークスペースを
+    「非プロジェクト」と誤判定すると facts が丸ごと消える。gate の目的は
+    無関係な巨大ディレクトリの全走査回避なので、深さと件数を限定して探す。
+    """
+
+    def test_nested_manifests_pass_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "web").mkdir()
+            (root / "web" / "package.json").write_text("{}\n")
+            (root / "api").mkdir()
+            (root / "api" / "pyproject.toml").write_text("[project]\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found; facts skipped", out)
+
+    def test_directory_without_any_manifest_is_still_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Photos").mkdir()
+            (root / "Photos" / "a.jpg").write_text("x")
+            (root / "notes.txt").write_text("shopping list\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertIn("no project markers found; facts skipped", out)
+
+    def test_deeply_buried_manifest_is_not_searched(self):
+        # 深さ上限を超える位置のマニフェストは探さない (gate が避けたい
+        # 「無制限の探索」に戻らないことの固定)。
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deep = root / "a" / "b" / "c" / "d"
+            deep.mkdir(parents=True)
+            (deep / "package.json").write_text("{}\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertIn("no project markers found; facts skipped", out)
+

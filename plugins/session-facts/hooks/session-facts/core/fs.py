@@ -27,6 +27,55 @@ def safe_iterdir(path: Path) -> List[Path]:
         return []
 
 
+def has_nested_project_markers(
+    root: Path,
+    markers: Iterable[str],
+    skip_dirs: Iterable[str] = (),
+    max_depth: int = 2,
+    max_dirs: int = 64,
+) -> bool:
+    """True when any of ``markers`` exists in a bounded subtree under ``root``.
+
+    ルート直下にマニフェストを置かないワークスペース (例: ``web/`` と ``api/``
+    にそれぞれのマニフェストがあり、ルートには何も無い構成) を「非プロジェクト」
+    と誤判定すると、構造・依存・スタック・テストの収集が丸ごと走らず facts が
+    消える。gate の目的は「無関係なディレクトリの高コストな全走査を避けること」
+    なので、探索は深さと訪問ディレクトリ数の両方で必ず打ち切る。
+
+    ``max_dirs`` に達したら False を返す (「見つからなかった」ではなく
+    「これ以上は見ない」の意味だが、gate としては同じ扱いでよい -- 走査を
+    避けたい相手はまさに巨大なディレクトリなので)。
+    """
+    markers = list(markers)
+    skip = set(skip_dirs)
+    queue = [(root, 0)]
+    visited = 0
+    while queue:
+        current, depth = queue.pop(0)
+        if depth > 0:
+            visited += 1
+            if visited > max_dirs:
+                return False
+            if has_project_markers(current, markers):
+                return True
+        if depth >= max_depth:
+            continue
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") or name in skip:
+                continue
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    queue.append((entry, depth + 1))
+            except OSError:
+                continue
+    return False
+
+
 def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
     """True when any of ``markers`` (root-relative paths, e.g. from
     core/constants.py's PROJECT_MARKERS) exists directly under ``root``.
