@@ -36,6 +36,14 @@ TEST_PATH_MARKERS = {
     "__tests__", "test", "tests", "spec", "specs", "cypress", "playwright", "e2e"
 }
 
+# collectors/scripts.py: a Dockerfile alone only grounds `docker build .`;
+# these additionally ground `docker compose up`. Kept separate from
+# detectors/docker.py's own (Dockerfile + these) tuple, which only needs to
+# know "is docker present at all", not which specific command it grounds.
+COMPOSE_FILE_CANDIDATES = (
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+)
+
 SERVICE_DIR_MARKERS = [
     "services",
     "service",

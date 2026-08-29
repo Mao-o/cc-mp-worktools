@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from core.constants import MAKE_TARGET_PRIORITY_PATTERNS, SCRIPT_PRIORITY_PATTERNS
+from core.constants import COMPOSE_FILE_CANDIDATES, MAKE_TARGET_PRIORITY_PATTERNS, SCRIPT_PRIORITY_PATTERNS
 from core.context import RepoContext
 from core.fs import read_text
 from core.makefile import extract_targets
-from core.runtime import runner_prefix
+from core.runtime import mise_config_path, runner_prefix
 from core.util import collapse_space
 
 
@@ -80,6 +81,74 @@ def _runner_prefix(ctx: RepoContext) -> Optional[str]:
     return runner_prefix(ctx.results.get("runtime") or {})
 
 
+def _has_compose_file(root: Path) -> bool:
+    return any((root / f).exists() for f in COMPOSE_FILE_CANDIDATES)
+
+
+def _has_root_unittest_tests(ctx: RepoContext) -> bool:
+    """True when a root-level ``tests/`` directory contains at least one
+    ``test_*.py`` file -- the exact layout ``python3 -m unittest discover
+    tests`` needs (discovery starts at ``tests`` relative to the invocation
+    root). A test file living under ``spec/``/``e2e/`` or nested inside a
+    subproject (e.g. ``hooks/x/tests/``) does not satisfy this -- discover
+    would find nothing there.
+    """
+    for path_str in ctx.tracked_files:
+        parts = Path(path_str).parts
+        if len(parts) >= 2 and parts[0] == "tests":
+            name = parts[-1]
+            if name.startswith("test_") and name.endswith(".py"):
+                return True
+    return False
+
+
+def _test_tool_name(ctx: RepoContext) -> Optional[str]:
+    """'pytest' when python_stack.py detected it as a pyproject.toml
+    dependency; the literal ``unittest discover tests`` invocation when it
+    wasn't but a root-level ``tests/`` directory grounds it (see
+    :func:`_has_root_unittest_tests`); ``None`` when there is no test_files
+    signal at all, or when neither condition holds -- callers must suggest
+    nothing rather than guess a command that would fail.
+    """
+    test_snapshot = ctx.results.get("test_snapshot") or {}
+    if not test_snapshot.get("test_files"):
+        return None
+    if "pytest" in ctx.stack:
+        return "pytest"
+    if _has_root_unittest_tests(ctx):
+        return "unittest discover tests"
+    return None
+
+
+def _pm_run_test_command(ctx: RepoContext, run_prefix: str) -> Optional[str]:
+    """uv/poetry style: ``<run_prefix>pytest`` or
+    ``<run_prefix>python -m unittest discover tests``."""
+    tool = _test_tool_name(ctx)
+    if tool is None:
+        return None
+    if tool == "pytest":
+        return f"{run_prefix}pytest"
+    return f"{run_prefix}python -m {tool}"
+
+
+def _module_test_command(ctx: RepoContext, run_prefix: Optional[str]) -> Optional[str]:
+    """python-pm / bare-python style: ``<run_prefix>python -m pytest`` or
+    ``<run_prefix>python -m unittest discover tests``. With no known runner,
+    falls back to a bare ``python -m pytest`` (pre-existing behaviour) or
+    ``python3 -m unittest discover tests`` (matches the ticket's literal
+    wording, and this plugin's own SKILL.md/hooks.json convention of naming
+    the interpreter explicitly as ``python3``).
+    """
+    tool = _test_tool_name(ctx)
+    if tool is None:
+        return None
+    if run_prefix:
+        return f"{run_prefix}python -m {tool}"
+    if tool == "pytest":
+        return "python -m pytest"
+    return f"python3 -m {tool}"
+
+
 def _make_commands(ctx: RepoContext, max_items: int) -> List[str]:
     """Surface conventional Makefile targets as ``make <target>`` commands.
 
@@ -127,12 +196,17 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     elif pm == "deno":
         commands.extend(["deno task dev", "deno test"])
     elif pm == "uv":
-        commands.append("uv run pytest")
+        cmd = _pm_run_test_command(ctx, "uv run ")
+        if cmd:
+            commands.append(cmd)
     elif pm == "poetry":
-        commands.append("poetry run pytest")
+        cmd = _pm_run_test_command(ctx, "poetry run ")
+        if cmd:
+            commands.append(cmd)
     elif pm == "python":
-        prefix = _runner_prefix(ctx)
-        commands.append(f"{prefix}python -m pytest" if prefix else "python -m pytest")
+        cmd = _module_test_command(ctx, _runner_prefix(ctx))
+        if cmd:
+            commands.append(cmd)
     elif pm == "gradle":
         commands.extend(["./gradlew build", "./gradlew test"])
     elif pm == "maven":
@@ -148,9 +222,11 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     # from the chain above. Only surface one when a concrete runner (venv/mise)
     # is known, so we never suggest a global ``python`` the repo may not use.
     if pm is None and "python" in stack:
-        prefix = _runner_prefix(ctx)
-        if prefix:
-            commands.append(f"{prefix}python -m pytest")
+        run_prefix = _runner_prefix(ctx)
+        if run_prefix:
+            cmd = _module_test_command(ctx, run_prefix)
+            if cmd:
+                commands.append(cmd)
 
     # Flutter/Dart toolchain
     if "flutter" in stack:
@@ -168,9 +244,20 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     if "nx" in stack:
         commands.append("nx run-many --target=build")
     if "mise" in stack:
-        commands.append("mise install")
+        # has_mise() (core/runtime.py) also recognises a bare .tool-versions
+        # (asdf-style) file as "mise"-compatible, but `mise install` only
+        # actually applies when a real mise config exists.
+        if mise_config_path(ctx.root) is not None:
+            commands.append("mise install")
+        elif (ctx.root / ".tool-versions").exists():
+            commands.append("asdf install")
     if "docker" in stack:
-        commands.append("docker compose up")
+        # detectors/docker.py fires "docker" on a bare Dockerfile too, but
+        # `docker compose up` only applies when a compose file is present.
+        if _has_compose_file(ctx.root):
+            commands.append("docker compose up")
+        else:
+            commands.append("docker build .")
 
     deduped: List[str] = []
     seen: Set[str] = set()
