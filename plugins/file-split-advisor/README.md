@@ -57,6 +57,24 @@ shell / lua / perl / r / groovy / clojure / haskell / erlang / julia / zig / nim
 role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_density < 0.02`
 のときに 1.6 倍。
 
+### test 判定
+
+以下のいずれかに一致すると role が `test` になり、role 係数 (1.6倍) が適用され
+`def_count` シグナルの評価対象からも除外される。
+
+- **ディレクトリ名** (パス中のいずれかの階層、大文字小文字を無視):
+  `test` / `tests` / `__tests__` / `spec` / `specs` / `e2e`
+- **ファイル名パターン**:
+
+  | パターン | 例 |
+  |---|---|
+  | `test_*.py` | `test_foo.py` |
+  | `*_test.py` | `foo_test.py` |
+  | `*.test.ts` / `*.test.tsx` | `foo.test.tsx` |
+  | `*.spec.ts` / `*.spec.tsx` | `foo.spec.tsx` |
+  | `*Test.java` | `FooTest.java` |
+  | `*_test.go` | `foo_test.go` |
+
 ### 構造シグナル
 
 | シグナル | 条件 |
@@ -131,9 +149,17 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 - 拡張子を持たないスクリプトは shebang を見ずに skip する
 - `Write` が既存ファイルを縮めたかどうかは、同一セッション内に直近の行数記録が
   あるときしか分からない (記録が無い初回は通知する)
-- Java/C#/Kotlin は `def_count` シグナルがほぼ機能しない (メソッド宣言に
-  `def`/`function`/`func` 等のキーワードを伴わないため)。これらの言語では行数
-  (1.5x 係数) と import カテゴリ多様性・制御フロー密度が主戦力になる
+- `def_count` は行頭キーワード正規表現 (`def`/`class`/`function`/`func`/
+  `interface`/`struct`/`enum`) にマッチする行を数える (Python のみ AST で厳密に
+  カウントし、構文エラー時だけこの正規表現にフォールバックする)。関数/メソッド
+  宣言がこれらのキーワードで始まらない言語では機能しない: Java/C# はアクセス
+  修飾子や戻り値型から始まるためほぼ機能しない。**Kotlin はメソッド宣言に
+  `fun` キーワードを伴うが、正規表現が認識するのは Go 想定の `func` のみで
+  `fun` とは一致しないため、同様にほぼ機能しない** (「キーワードを伴わない」の
+  ではなく「未対応のキーワード」)。Rust の関数宣言 (`fn`) も同じ理由で拾えない
+  (Rust の `struct`/`enum` 宣言は対応するキーワードに一致するため数えられる)。
+  これらの言語では行数 (Java/C# 1.5x, Kotlin 1.4x 係数) と import カテゴリ
+  多様性・制御フロー密度が主戦力になる
 - import カテゴリ分類はキーワード辞書によるヒューリスティックで、精密な import
   resolver ではない
 - 閾値のローカル上書き機構 (`config.local.json` 等) は v1 に含まない
