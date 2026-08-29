@@ -32,14 +32,21 @@
                                     未宣言時の builder 既定は最も厳しい "all"
      - SCALAR_EQUIVALENT_DICT_KEY: str
                                     (任意) scalar 期待値と**等価**になる dict キー。
-                                    verify() の str 分岐が照合する対象が特定の
-                                    キーに対応するときだけ宣言する (github:
-                                    "github.com" / gcloud: "project")。builder の
-                                    migrate はこれで scalar↔dict の非損失性を判定し、
-                                    未宣言なら混在を conflict (手動解決) に倒す。
-                                    firebase のようにキーが verdict に効かない
-                                    service では宣言しないこと (畳み込むと alias 名の
-                                    情報が消える)
+                                    verify() の str 分岐が照合する対象が
+                                    **実行時の状態に依らず**特定のキーに固定される
+                                    ときだけ宣言する (現状は gcloud の "project"
+                                    だけ — scalar 分岐が `_check_project()` しか
+                                    呼ばない)。builder の migrate はこれで
+                                    scalar↔dict の非損失性を判定し、未宣言なら
+                                    混在を**両方向とも** conflict (手動解決) に倒す。
+                                    宣言してはいけない例:
+                                      - firebase: dict キー (alias) が verify() の
+                                        verdict に効かない (畳み込むと alias 名の
+                                        情報が消える)
+                                      - github: scalar 分岐が「github.com が active
+                                        ならそれ、無ければ最初の active host」という
+                                        動的な照合をするため、どの静的 hostname とも
+                                        等価にならない
      - verify(expected, project_dir) -> str | None  検証関数 (None=成功, 文字列=エラー理由)
      - get_active_account(project_dir) -> str | dict | None  現在のアクティブ値
      - suggest_accounts_entry(project_dir) -> str | dict | None  builder 書込用 suggestion

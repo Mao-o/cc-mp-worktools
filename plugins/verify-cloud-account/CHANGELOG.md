@@ -114,31 +114,80 @@
    さらに **scalar と dict の比較に host / フィールドの意味論を持たせた**
    (独立レビュー指摘で修正)。当初は「値が一致し old が単一キーなら非損失」と
    していたが、これは**どのホストを照合するかという制約の違いを見ていない**:
-   scalar の `"github": "USER"` は github.com (アクティブなら) を照合するのに対し
+   scalar の `"github": "USER"` はアクティブな状態に応じた 1 ホストを照合するのに対し
    `{"ghe.example.com": "USER"}` は名指しの GHE ホストを照合するので、値が
    同じでも制約は別物で、統合すると GHE の制約が conflict 検出も警告もなく
    消えていた。各 service が「scalar 期待値と等価になる dict キー」
-   (`SCALAR_EQUIVALENT_DICT_KEY`) を宣言し、両方向をそれで判定する
-   (`github` は `"github.com"`、`gcloud` は `verify()` の scalar 分岐が照合する
-   `"project"`)。`firebase` は**宣言しない** — dict キーは `.firebaserc` の
-   alias 名で `verify()` の判定 (値のいずれかに一致するか) には効かない一方、
-   `firebase use <alias>` の自己回復案内が読む情報を持つため、畳み込むと
-   案内先が消える。キーを宣言しない service と、キーが一致しない組み合わせは
-   conflict にして利用者に選ばせる。
+   (`SCALAR_EQUIVALENT_DICT_KEY`) を宣言し、両方向をそれで判定する。
+   **宣言できるのは scalar の照合先が実行時の状態に依らず固定される service
+   だけで、現状は `gcloud` の `"project"` のみ** — `verify()` の scalar 分岐が
+   project しか照合しないため、`{"project": <同値>}` と静的に等価になる。
+   `github` は一度 `"github.com"` を宣言したが**撤回した** (独立レビュー指摘で
+   修正): scalar の照合先は「github.com にログイン中ならそれ、無ければ最初の
+   ログイン済みホスト」で**実行時の状態に依存する**ため、GHE だけにログイン
+   している環境では scalar `"USER"` は通り `{"github.com":"USER"}` は
+   「このホストにログインしていません」で deny になる。等価でないものを等価と
+   宣言していたので、統合時に明示された `github.com` の要求が無警告で
+   書き換わる/消える余地が残っていた。`firebase` も**宣言しない** — dict キーは
+   `.firebaserc` の alias 名で `verify()` の判定 (値のいずれかに一致するか) には
+   効かない一方、`firebase use <alias>` の自己回復案内が読む情報を持つため、
+   畳み込むと案内先が消える。キーを宣言しない service と、キーが一致しない
+   組み合わせは conflict にして利用者に選ばせる。
+   加えて **dict どうしの比較でキーの存在を先に要求するようにした**
+   (独立レビュー指摘で修正)。`new_val.get(k) == v` だけで比較していたため、
+   old が `{"ghe.example.com": null}` のような壊れた値を持ち new がその
+   ホストを省略していると、「キー欠落の `None`」と「保存された `null`」が
+   どちらも `None` になって一致と判定され、conflict にならなかった。
+   old 側の値は追加分ではないので形式検証にもかからず、ホストの entry が
+   黙って失われたまま「旧ファイルを削除してよい」と案内していた。
+
+6. **builder の対象ファイルを dispatcher と同じ解決に揃えた** (独立レビュー
+   指摘で修正)。従来 builder は常に cwd 直下の新パスを対象にしていたため、
+   **祖先の accounts.local.json を継承している worktree / サブディレクトリで
+   設定を壊していた**: `set --commit` が編集した service だけを含む子ファイルを
+   作り、dispatcher の親ディレクトリ遡及がその子ファイルで止まるため、
+   継承していた他の service が一斉に未設定 (deny) になる。`remove` も継承
+   entry を「存在しません」と報告し、`show` は「ファイルが無い」と表示して
+   いた。3-tier lookup + 親遡及の解決を `core/paths.resolve_accounts_file()`
+   に切り出し、**dispatcher と builder の両方がこれを呼ぶ**ようにした
+   (`init` / `show` / `set` / `remove` / `migrate` の全サブコマンド)。
+   あわせて:
+   - 解決した対象パスを dry-run / commit の出力の先頭に
+     `対象: <パス> (祖先ディレクトリ <親> から継承)` の形で必ず表示する
+   - `init` は継承中に cwd 直下へ新規作成しようとすると **exit 2 で拒否**する
+     (shadowing の説明と `set` / `remove` / `--path` の案内付き)
+   - 全サブコマンドに **`--path <file>`** を追加した。明示時は解決を飛ばして
+     そのファイルを対象にする (worktree 専用設定を意図的に作るための
+     escape hatch)。受け付けるのは dispatcher が読む配置だけで、書込を伴う
+     コマンドでは新パスのみ — 他の場所に書いても hook が読まないため
+   - 複数 tier が同居する階層 (D4 fail-closed) は builder も同じ理由で拒否する。
+     判定を cwd ではなく**解決した階層**で行うようにしたので、継承先に旧パスが
+     同居している場合も見落とさない
+   - `--path` の指定先が解決結果と食い違う場合は警告を出す (近い側を指定すると
+     現在有効な設定を覆い隠し、遠い側を指定すると書いても読まれない)
+   - `.gitignore` への追記と `CLAUDE.md` の同梱先も、cwd ではなく**書き込んだ
+     ファイルが属するディレクトリ**に合わせた
+
+   **この変更で builder の書込範囲は cwd 配下に限られなくなる**: 解決は最大
+   10 階層まで親を遡るため、accounts.local.json を持たないプロジェクトで
+   `set` を実行すると、祖先 (ホームディレクトリを含む) のファイルが編集対象に
+   なりうる。「hook が読むファイルを編集する」という意図どおりの挙動だが、
+   従来より書込先が広がるため、対象パスを出力先頭に必ず表示する仕様と合わせて
+   README にも明記した。
 
 ### 既知の制限 (新規)
 
 - `git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は元々
   検証対象外だったが、README に明記していなかったので追記した (挙動の変更
   ではない)。
-- scalar 期待値と dict 期待値の統合は、`SCALAR_EQUIVALENT_DICT_KEY` を宣言する
-  service (`github` / `gcloud`) でのみ自動で非衝突と判定できる。`firebase` の
-  ように dict キーが照合の判定に効かない service では、値が一致していても
-  conflict として手動解決を求める (どちらの形を残すかで自己回復の案内が
-  変わるため、自動では選べない)。
-  なお `github` の scalar は「github.com がアクティブでなければ最初の
-  アクティブホスト」という**実行時の状態に依存する**照合をするため、静的比較で
-  等価と言い切れるのは `github.com` の場合だけで、それ以外は conflict に倒す。
+- scalar 期待値と dict 期待値の統合を自動で非衝突と判定できるのは、
+  `SCALAR_EQUIVALENT_DICT_KEY` を宣言する service (**現状 `gcloud` のみ**) に
+  限る。`github` は scalar の照合先が「github.com がアクティブでなければ最初の
+  アクティブホスト」という**実行時の状態に依存する**照合なのでどの静的な
+  ホスト名とも等価にならず、`firebase` は dict キー (alias) が照合の判定に
+  効かない。どちらも値が一致していても conflict として手動解決を求める
+  (どちらの形を残すかで検証対象と自己回復の案内が変わるため、自動では
+  選べない)。
 
 ## 0.9.0
 

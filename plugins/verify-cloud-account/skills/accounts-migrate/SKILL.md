@@ -50,6 +50,12 @@ builder は以下の順でパスをスキャンし、統合する:
 2. **deprecated**: `.claude/accounts.local.json`
 3. **legacy**: `.claude/accounts.json`
 
+スキャンする階層は **hook (dispatcher) が実際に読む階層**に揃える。cwd 階層に
+どのパスも無ければ親ディレクトリを 1 階層ずつ遡り、最初に見つかった階層で統合する
+(worktree から親 repo の設定を継承しているときは親側で統合される)。解決した対象は
+出力の先頭に `対象: <パス>` として表示されるので、ユーザーに伝えること。
+この階層専用の設定として統合したい場合だけ `--path <file>` で対象を明示する。
+
 統合ルール:
 
 - 新パス優先 (new のキーはそのまま残る)
@@ -70,11 +76,16 @@ builder は以下の順でパスをスキャンし、統合する:
      「移行作業は不要」と伝えて終了。
    - **`error: 同一キーで値が衝突しています`** (exit 1): 新旧で値が食い違うか、
      **同じ値でも「照合する対象」が違う**。scalar と dict が自動で解決されるのは、
-     dict のキーが「その service の scalar 期待値と等価なキー」1 つだけのとき
-     (github なら `github.com`、gcloud なら `project`)。値が一致していても
-     `{"github": {"ghe.example.com": "..."}}` のような別ホストの dict や、
-     firebase の alias 形式は**制約が別物**なので衝突として手動解決に落ちる
-     (どちらの形を残すかで検証対象と自己回復の案内が変わるため)。
+     その service の scalar 期待値が「実行時の状態に依らず特定の dict キーと
+     等価」と宣言できる場合だけで、**現状これに当てはまるのは gcloud の
+     `project` のみ**。`github` / `firebase` は scalar と dict を混ぜると
+     値が一致していても衝突として手動解決に落ちる:
+     - `github` の scalar は「github.com にログイン中ならそれ、無ければ最初の
+       ログイン済みホスト」を照合する — つまり照合先が実行時の状態で変わるため、
+       `{"github": {"github.com": "..."}}` とも等価にならない
+       (GHE だけにログインしている環境では判定が食い違う)
+     - `firebase` の dict キーは alias 名で、どちらの形を残すかで
+       `firebase use <alias>` の自己回復案内が変わる
      `AskUserQuestion`:
      - question: 「衝突したキーの具体値を表示して確認しますか?」
      - options: `値を表示して原因特定する (Recommended)` / `表示せず手動解決` /

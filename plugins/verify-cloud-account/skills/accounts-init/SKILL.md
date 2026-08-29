@@ -37,6 +37,12 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
 - 書込先パス (`.claude/verify-cloud-account/accounts.local.json`)、JSON の
   インデント・改行・ソート順、既存キーの扱いは builder 内部で固定されており、
   手動編集より一貫した結果になる
+- 対象ファイルは **hook (dispatcher) が実際に読むもの**に揃う。cwd 階層に無ければ
+  親ディレクトリを遡って探し、解決したパスを出力の先頭に `対象: <パス>` として
+  表示する。祖先から継承している階層で `init` を実行すると、cwd 直下のファイルが
+  継承中の設定を覆い隠す (記載していない service が一斉に未設定になる) ため
+  **exit 2 で拒否**される — 値の変更・削除は `set` / `remove`、この階層専用の設定を
+  作る場合だけ `--path <file>` で明示する
 - stdout は既定で値を表示しない。明示の `--show-values` を付けたときだけ
   露出する (AskUserQuestion で承認を得てから切り替える)
 
@@ -107,8 +113,13 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
    ```
    (既定では `--show-values` なし。commit の stdout も値隠蔽)
 
-6. 書き込まれたパス (`.claude/verify-cloud-account/accounts.local.json`) を
-   ユーザーに伝える。builder は commit 時に `.gitignore` へのエントリ追加も
+   `error:` + exit 2 で「祖先ディレクトリから継承しています」と出た場合は、
+   その階層に新しいファイルを作ると継承中の設定を覆い隠す。ユーザーに
+   「継承元の値を変えるなら `set`、この階層専用の設定を作るなら `--path` で
+   明示」を案内し、どちらにするか `AskUserQuestion` で確認する。
+
+6. 書き込まれたパス (stdout 冒頭の `対象:` 行) をユーザーに伝える。
+   builder は commit 時に `.gitignore` へのエントリ追加も
    自動で行う (stdout に `updated: ... (... を追加)` の行が出る)。
    `.gitignore` 自体がプロジェクトに存在しない場合だけ自動追加されない
    (builder は `.gitignore` を新規作成しない) ため、その場合のみ手動追加を

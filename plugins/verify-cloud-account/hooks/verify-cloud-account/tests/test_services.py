@@ -1520,6 +1520,41 @@ class TestServiceContextContract(unittest.TestCase):
                 if allowed_keys is not None:
                     self.assertIn(key, allowed_keys)
 
+    def test_github_does_not_declare_scalar_equivalent_dict_key(self):
+        """github は SCALAR_EQUIVALENT_DICT_KEY を**宣言してはならない**
+        (Codex R4 P1)。
+
+        `github.verify()` の str 分岐は「github.com が active ならそれ、無ければ
+        最初の active host」を照合する **実行時の状態に依存する**意味論なので、
+        どの静的な hostname キーとも等価にならない。反例: ghe.example.com だけが
+        active で値が USER のとき、scalar "USER" は allow だが
+        `{"github.com": "USER"}` は「このホストにログインしていません」で deny。
+        宣言すると builder の migrate が両者を非衝突扱いにして、明示された
+        github.com の要求を無警告で捨てる。再宣言を防ぐための lock。"""
+        self.assertNotIn("SCALAR_EQUIVALENT_DICT_KEY", vars(github))
+
+    def test_gcloud_scalar_branch_only_checks_project(self):
+        """gcloud が SCALAR_EQUIVALENT_DICT_KEY = "project" を宣言できる根拠を
+        実測で固定する: scalar 期待値と `{"project": <同値>}` は verify() の
+        呼び出しが一致する (どちらも project だけを照合し、account は見ない)。
+
+        github と違い照合先が active 値の状態で変わらないため、静的なキー宣言が
+        成立する。"""
+        calls: list[str] = []
+
+        def fake_get(key, env=None, configuration=None):
+            calls.append(key)
+            return "my-project" if key == "project" else "other@example.com", None
+
+        with mock.patch.object(gcloud, "_get", side_effect=fake_get):
+            self.assertIsNone(gcloud.verify("my-project", "/p"))
+        self.assertEqual(calls, ["project"])
+
+        calls.clear()
+        with mock.patch.object(gcloud, "_get", side_effect=fake_get):
+            self.assertIsNone(gcloud.verify({"project": "my-project"}, "/p"))
+        self.assertEqual(calls, ["project"])
+
 
 class TestFirebaseCliNameForms(unittest.TestCase):
     """npm 経由の正当な CLI 名の形を全判定で受け付ける。

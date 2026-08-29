@@ -295,13 +295,30 @@ class TestWriteTargetFixed(BaseBuilder):
                 )
 
     def test_argv_cannot_redirect_write_target(self):
-        """D2: argv に任意のパスフラグが存在しない (argparse で unknown 扱い)。"""
-        # --output / --path / --target が accepts されないことを検証
-        for flag in ("--output", "--path", "--target", "--file"):
+        """D2: 任意パスへ書込先を向けるフラグは存在しない (argparse で unknown)。
+
+        D14 で `--path` を追加したが、受け付けるのは dispatcher が読む配置
+        (`_PATH_TIERS`) だけで、任意パスは exit 2 で拒否する
+        (TestExplicitPathArgument が範囲を固定する)。ここでは `--path` 以外の
+        経路が増えていないことだけを見る。
+        """
+        for flag in ("--output", "--target", "--file"):
             code, _out, _err = self._run(
                 ["init", "--service", "github", "--value", "u", "--commit", flag, "/tmp/evil.json"]
             )
             self.assertEqual(code, 2, f"flag {flag!r} should be rejected by argparse")
+
+    def test_path_flag_cannot_target_arbitrary_location(self):
+        """D2/D14: `--path` は accounts.local.json の 3-tier 配置に限る。"""
+        evil = Path(self.tmp) / "evil.json"
+        code, _out, _err = self._run(
+            [
+                "init", "--service", "github", "--value", "u", "--commit",
+                "--path", str(evil),
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertFalse(evil.exists())
 
 
 class TestInitSuggestion(BaseBuilder):
@@ -1333,10 +1350,16 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
             )
         )
 
-    def test_single_host_dict_old_matches_new_scalar(self):
-        """old が SCALAR_EQUIVALENT_DICT_KEY 1 つだけの dict で new (scalar) と
-        同じ値 → scalar が照合する host と一致するので情報は失われない。"""
-        self.assertTrue(
+    def test_github_com_dict_old_is_still_conflict_with_new_scalar(self):
+        """Codex R4 P1: github の scalar は `{"github.com": <同値>}` とも等価に
+        ならない。`github.verify()` の str 分岐は「github.com が active なら
+        それ、無ければ**最初の active host**」を照合する動的な意味論
+        (services/github.py の str 分岐) なので、ghe だけが active な環境では
+        scalar "USER" は allow・`{"github.com":"USER"}` は deny になる。
+        静的なキー宣言では等価と言い切れないので、github は
+        SCALAR_EQUIVALENT_DICT_KEY を宣言せず両方向 conflict に倒す
+        (R1 では True としていた組を反転させた)。"""
+        self.assertFalse(
             builder._migrate_keep_new_without_loss(
                 self.github, "USER", {"github.com": "USER"}
             )
@@ -1366,10 +1389,14 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
             )
         )
 
-    def test_dict_new_superset_of_scalar_old(self):
-        """対称ケース: new (dict) が SCALAR_EQUIVALENT_DICT_KEY で old (scalar)
-        と同じ値を持てば、old の制約はそのまま引き継がれる → True。"""
-        self.assertTrue(
+    def test_github_dict_new_with_github_com_is_still_conflict_with_scalar_old(self):
+        """対称ケース (Codex R4 P1): dict `{"github.com":"USER"}` は
+        「github.com にログイン済みで USER であること」を要求するが、scalar
+        "USER" は github.com が無ければ最初の active host で満たされる。
+        dict 側のほうが厳しいので old (scalar) の制約自体は失われないが、
+        **等価ではない**ため R4 では両方向 conflict に倒し、利用者に選ばせる
+        (R1 では True としていた組を反転させた)。"""
+        self.assertFalse(
             builder._migrate_keep_new_without_loss(
                 self.github, {"github.com": "USER"}, "USER"
             )
@@ -1397,6 +1424,34 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
         self.assertFalse(
             builder._migrate_keep_new_without_loss(
                 self.gcloud, {"project": "p"}, {"project": "p", "account": "a"}
+            )
+        )
+
+    def test_dict_dict_old_key_absent_in_new_with_null_value_is_lossy(self):
+        """Codex R4 P2: old が `{"ghe.example.com": null}` のような壊れた値を
+        持ち new がその host を**省略**している場合、`new_val.get(k) == v` は
+        「欠落した key の None」と「保存された null」が両方 None になるため
+        真になり、conflict が検出されなかった。しかも old 側の値は addition
+        ではないので `_validate_entry_shape` の検査も通らず、host entry が
+        黙って失われたまま「旧ファイルを削除してよい」と案内していた。
+        値を比較する前に `k in new_val` (キーの存在) を要求する。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                self.github,
+                {"github.com": "USER"},
+                {"github.com": "USER", "ghe.example.com": None},
+            )
+        )
+
+    def test_dict_dict_old_null_value_present_in_new_is_not_lossy(self):
+        """対になる正ケース: new が同じキーを同じ値 (null) で持っていれば
+        情報は失われないので True のまま (キー存在チェックが過剰に
+        conflict を増やしていないことを固定する)。"""
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                self.github,
+                {"github.com": "USER", "ghe.example.com": None},
+                {"github.com": "USER", "ghe.example.com": None},
             )
         )
 
@@ -1510,6 +1565,58 @@ class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
                 self.firebase, {"default": "proj-dev"}, {"default": "other"}
             )
         )
+
+    # (service 名, scalar 値, dict 値,
+    #  scalar-new/dict-old の非損失, dict-new/scalar-old の非損失)
+    SCALAR_DICT_MATRIX = [
+        # github: SCALAR_EQUIVALENT_DICT_KEY を宣言しない (Codex R4 P1) ため
+        # 等価に見える組も含め両方向 conflict。
+        ("github", "USER", {"github.com": "USER"}, False, False),
+        ("github", "USER", {"ghe.example.com": "USER"}, False, False),
+        (
+            "github",
+            "USER",
+            {"github.com": "USER", "ghe.example.com": "USER"},
+            False,
+            False,
+        ),
+        # gcloud: scalar 分岐が静的に project だけを照合するので "project" は等価。
+        ("gcloud", "my-project", {"project": "my-project"}, True, True),
+        ("gcloud", "my-project", {"account": "my-project"}, False, False),
+        (
+            "gcloud",
+            "my-project",
+            {"project": "my-project", "account": "me@example.com"},
+            # scalar-new は account の制約を持てない (情報欠落) / dict-new は
+            # old scalar の project 制約を含む (非損失)
+            False,
+            True,
+        ),
+        # firebase: dict キー (alias) が verdict に効かないので未宣言 → 両方向 conflict。
+        ("firebase", "proj-dev", {"default": "proj-dev"}, False, False),
+        # dict を受け付けない service も同様 (キー未宣言なので常に conflict)。
+        ("aws", "123456789012", {"default": "123456789012"}, False, False),
+        ("kubectl", "my-context", {"default": "my-context"}, False, False),
+    ]
+
+    def test_scalar_dict_matrix_both_directions(self):
+        """service × 両方向の表で scalar↔dict の非損失判定を固定する。
+
+        github が `SCALAR_EQUIVALENT_DICT_KEY` を撤回した (Codex R4 P1) 結果を
+        含め、どの service のどちらの方向が conflict になるかを 1 か所で読める
+        ようにする。"""
+        for svc_name, scalar, dct, scalar_new_ok, dict_new_ok in self.SCALAR_DICT_MATRIX:
+            svc = builder._SERVICE_BY_KEY[svc_name]
+            with self.subTest(svc=svc_name, dct=dct, direction="scalar-new/dict-old"):
+                self.assertEqual(
+                    builder._migrate_keep_new_without_loss(svc, scalar, dct),
+                    scalar_new_ok,
+                )
+            with self.subTest(svc=svc_name, dct=dct, direction="dict-new/scalar-old"):
+                self.assertEqual(
+                    builder._migrate_keep_new_without_loss(svc, dct, scalar),
+                    dict_new_ok,
+                )
 
     def test_unknown_service_cross_type_is_conflict(self):
         """service が None (accounts.local.json に未知のキーがある) の場合も
@@ -2227,36 +2334,42 @@ class TestMigrateValueSemantics(BaseBuilder):
     """migrate の意味論的等価比較 + 追加値スキーマ検証 (内部バックログ:
     型不正/等価値を扱えない不具合の修正)。"""
 
-    def test_semantically_equal_scalar_new_and_dict_old_not_conflict(self):
-        """new=scalar "Mao-o" / old=dict {"github.com":"Mao-o"} は意味的に
-        等価 → conflict にせず new (scalar) 側を維持する。"""
+    def test_github_scalar_new_and_github_com_dict_old_is_conflict(self):
+        """Codex R4 P1 の end-to-end (R1 では非衝突としていた組を反転)。
+        new=scalar "USER" / old=dict {"github.com":"USER"} は値が一致しても
+        **制約が違う** — scalar は「github.com が active ならそれ、無ければ
+        最初の active host」を照合するので、ghe だけが active な環境では
+        scalar は allow・dict は deny になる。等価と決め打ちして畳み込むと
+        明示された github.com の要求が黙って消えるため conflict に倒す。"""
         self.new_dir.mkdir(parents=True)
         self._new_path().write_text(
-            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+            json.dumps({"github": "USER"}), encoding="utf-8"
         )
         self._deprecated_path().write_text(
-            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+            json.dumps({"github": {"github.com": "USER"}}), encoding="utf-8"
         )
-        code, out, _err = self._run(["migrate", "--commit"])
-        self.assertEqual(code, 0)
-        self.assertNotIn("衝突", out)
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
-        self.assertEqual(data, {"github": "Mao-o"})
+        self.assertEqual(data, {"github": "USER"})
 
-    def test_semantically_equal_dict_new_and_scalar_old_not_conflict(self):
-        """対称ケース: new=dict {"github.com":"Mao-o"} / old=scalar "Mao-o"
-        も意味的に等価 → conflict にせず new (dict) 側を維持する。"""
+    def test_github_github_com_dict_new_and_scalar_old_is_conflict(self):
+        """対称ケース (Codex R4 P1): new=dict {"github.com":"USER"} /
+        old=scalar "USER" も conflict。どちらを残すかで照合対象のホストが
+        変わるため、利用者が両側を見て選ぶ。"""
         self.new_dir.mkdir(parents=True)
         self._new_path().write_text(
-            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+            json.dumps({"github": {"github.com": "USER"}}), encoding="utf-8"
         )
         self._deprecated_path().write_text(
-            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+            json.dumps({"github": "USER"}), encoding="utf-8"
         )
-        code, _out, _err = self._run(["migrate", "--commit"])
-        self.assertEqual(code, 0)
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
-        self.assertEqual(data, {"github": {"github.com": "Mao-o"}})
+        self.assertEqual(data, {"github": {"github.com": "USER"}})
 
     def test_semantically_different_values_still_conflict(self):
         """既存 R9 回帰確認: 意味的にも異なる値は従来どおり conflict。"""
@@ -2313,6 +2426,28 @@ class TestMigrateValueSemantics(BaseBuilder):
         # new 側 (書込先) は失敗時点で unchanged のまま (書き込まれない)
         data = json.loads(self._new_path().read_text(encoding="utf-8"))
         self.assertEqual(data, {"gcloud": {"project": "p"}})
+
+    def test_dict_dict_old_null_host_missing_in_new_is_conflict(self):
+        """Codex R4 P2 の end-to-end: old に `{"ghe.example.com": null}` が
+        あり new がその host を省略していると、キー存在を見ない比較では
+        「非衝突」と判定され、旧ファイル削除の案内まで進んでしまう
+        (host entry は黙って消える)。conflict にして手動解決へ落とす。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"github.com": "USER"}}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps(
+                {"github": {"github.com": "USER", "ghe.example.com": None}}
+            ),
+            encoding="utf-8",
+        )
+        code, _out, err = self._run(["migrate", "--commit", "--show-values"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+        self.assertIn("ghe.example.com", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"github.com": "USER"}})
 
     def test_addition_with_one_bad_value_among_good_ones_is_tolerated(self):
         """内部バックログ (advisor レビュー): firebase.verify() は dict 内に
@@ -2532,6 +2667,293 @@ class TestEntriesEqual(unittest.TestCase):
     def test_unequal_otherwise(self):
         self.assertFalse(builder._entries_equal("a", "b"))
         self.assertFalse(builder._entries_equal(None, "a"))
+
+
+class TestInheritedAncestorFile(BaseBuilder):
+    """Codex R4 P2: 祖先の accounts.local.json を継承している階層での builder。
+
+    fixture は入れ子ディレクトリ (親に accounts.local.json、その配下の
+    `worktrees/feature-x` を cwd) — dispatcher が親遡及で親のファイルを読む
+    のと同じ状況。修正前の builder は常に cwd 直下の新パスを対象にしていた
+    ため、`set --commit` が**編集した service だけを含む子ファイル**を作り、
+    dispatcher の遡及がその子ファイルで止まって、継承していた他 service が
+    一斉に未設定 (deny) になっていた。`remove` も継承 entry を「存在しません」
+    と報告していた。
+    """
+
+    ANCESTOR_ENTRIES = {"github": "USER", "aws": "111111111111"}
+
+    def setUp(self):
+        super().setUp()
+        self.ancestor_path = self._new_path()
+        self.ancestor_path.parent.mkdir(parents=True)
+        self.ancestor_path.write_text(
+            json.dumps(self.ANCESTOR_ENTRIES) + "\n", encoding="utf-8"
+        )
+        self.child_dir = self.project_dir / "worktrees" / "feature-x"
+        self.child_dir.mkdir(parents=True)
+        self._child_env = mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECT_DIR": str(self.child_dir)}
+        )
+        self._child_env.start()
+        self.addCleanup(self._child_env.stop)
+
+    def _child_new_path(self) -> Path:
+        return (
+            self.child_dir
+            / ".claude"
+            / "verify-cloud-account"
+            / "accounts.local.json"
+        )
+
+    def _ancestor_data(self) -> dict:
+        return json.loads(self.ancestor_path.read_text(encoding="utf-8"))
+
+    def test_set_commit_updates_ancestor_and_creates_no_child_file(self):
+        """(1) 継承中の `set --commit` は親ファイルを更新し、子ファイルを
+        作らない (修正前は子ファイルを作り、継承していた aws が消えていた)。"""
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "new-user", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("継承", out)
+        self.assertIn(str(self.ancestor_path), out)
+        self.assertFalse(
+            self._child_new_path().exists(),
+            "子ファイルを作ると dispatcher の遡及がそこで止まり継承分が消える",
+        )
+        self.assertEqual(
+            self._ancestor_data(),
+            {"github": "new-user", "aws": "111111111111"},
+        )
+
+    def test_remove_commit_deletes_entry_from_ancestor(self):
+        """(2) 継承中の `remove --commit` は親ファイルの entry を削除する
+        (修正前は子ファイルを見て「存在しません」と報告していた)。"""
+        code, out, _err = self._run(["remove", "--service", "aws", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertIn("継承", out)
+        self.assertNotIn("存在しません", out)
+        self.assertFalse(self._child_new_path().exists())
+        self.assertEqual(self._ancestor_data(), {"github": "USER"})
+
+    def test_init_refuses_to_shadow_inherited_file(self):
+        """(3) 継承中の `init` は shadowing になるので exit 2 で拒否し、
+        set / remove / --path を案内する。"""
+        code, _out, err = self._run(
+            ["init", "--service", "gcloud", "--value", "p", "--commit"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("継承", err)
+        self.assertIn("set", err)
+        self.assertIn("--path", err)
+        self.assertFalse(self._child_new_path().exists())
+        self.assertEqual(self._ancestor_data(), self.ANCESTOR_ENTRIES)
+
+    def test_path_creates_child_specific_file_without_touching_ancestor(self):
+        """(4) `--path` 明示時は解決を飛ばして子側に作れる (worktree 専用設定の
+        escape hatch)。祖先は変更されない。"""
+        code, out, _err = self._run(
+            [
+                "init", "--service", "gcloud", "--value", "p", "--commit",
+                "--path", str(self._child_new_path()),
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("--path", out)
+        self.assertEqual(
+            json.loads(self._child_new_path().read_text(encoding="utf-8")),
+            {"gcloud": "p"},
+        )
+        self.assertEqual(self._ancestor_data(), self.ANCESTOR_ENTRIES)
+
+    def test_path_warns_that_it_shadows_the_inherited_file(self):
+        """`--path` は `init` が exit 2 で止めた shadowing を意図的に許す経路
+        なので、**その代償をその場で必ず言う**。継承中のファイルを覆い隠すと、
+        指定先に書いていない service (ここでは github / aws) が一斉に未設定
+        (deny) になる。案内した先で黙って同じ事故を起こさせない。"""
+        code, out, _err = self._run(
+            [
+                "init", "--service", "gcloud", "--value", "p",
+                "--path", str(self._child_new_path()),
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("警告", out)
+        # symlink (macOS の /var → /private/var) を挟んでも一致するよう
+        # 解決後のパスで照合する
+        self.assertIn(str(self.ancestor_path.resolve()), out)
+        self.assertIn("deny", out)
+
+    def test_path_pointing_at_resolved_file_does_not_warn(self):
+        """解決結果と同じファイルを --path で名指ししただけなら shadowing は
+        起きないので警告しない (警告が常時出ると読まれなくなる)。"""
+        code, out, _err = self._run(
+            [
+                "set", "--service", "github", "--value", "new-user",
+                "--path", str(self.ancestor_path),
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("警告", out)
+
+    def test_migrate_path_targets_given_level(self):
+        """migrate も `--path` で統合先の階層を明示できる。子側の旧パスだけを
+        子側の新パスへ統合し、祖先には触らない。"""
+        child_claude = self.child_dir / ".claude"
+        child_claude.mkdir(parents=True)
+        (child_claude / "accounts.json").write_text(
+            json.dumps({"gcloud": "my-project"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["migrate", "--commit", "--path", str(self._child_new_path())]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("--path", out)
+        self.assertEqual(
+            json.loads(self._child_new_path().read_text(encoding="utf-8")),
+            {"gcloud": "my-project"},
+        )
+        self.assertEqual(self._ancestor_data(), self.ANCESTOR_ENTRIES)
+
+    def test_show_displays_inherited_file(self):
+        """(5) `show` は継承元のファイルとその内容を表示する
+        (修正前は「子側に無い」として no accounts.local.json と報告していた)。"""
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={"github.com": "USER"},
+        ), mock.patch(
+            "services.aws.get_active_account", return_value="111111111111"
+        ):
+            code, out, _err = self._run(["show", "--show-values"])
+        self.assertEqual(code, 0)
+        self.assertIn("継承", out)
+        self.assertIn(str(self.ancestor_path), out)
+        self.assertIn("111111111111", out)
+        self.assertNotIn("no accounts.local.json", out)
+
+    def test_set_dry_run_shows_resolved_path_and_writes_nothing(self):
+        """dry-run でも解決パスを表示する (書込前に対象を確認できないと、
+        親 repo の設定を意図せず書き換える事故を止められない)。"""
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "new-user"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("継承", out)
+        self.assertIn(str(self.ancestor_path), out)
+        self.assertIn("(dry-run", out)
+        self.assertFalse(self._child_new_path().exists())
+        self.assertEqual(self._ancestor_data(), self.ANCESTOR_ENTRIES)
+
+    def test_migrate_targets_ancestor_level(self):
+        """継承中の migrate は**祖先階層**の旧パスを統合する。cwd 直下に
+        統合すると祖先の設定を覆い隠す子ファイルを作ってしまう。"""
+        deprecated = self.claude_dir / "accounts.local.json"
+        deprecated.write_text(
+            json.dumps({"gcloud": "my-project"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertIn("継承", out)
+        self.assertFalse(self._child_new_path().exists())
+        self.assertEqual(
+            self._ancestor_data(),
+            {"github": "USER", "aws": "111111111111", "gcloud": "my-project"},
+        )
+
+    def test_set_refuses_when_ancestor_level_has_legacy_path(self):
+        """継承先の階層に旧パスが同居していれば (D4 conflict)、cwd 側から
+        操作しても同じ理由で拒否する — 書けてしまうと dispatcher は
+        fail-closed deny のままになる。"""
+        (self.claude_dir / "accounts.local.json").write_text(
+            json.dumps({"gcloud": "my-project"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["set", "--service", "github", "--value", "new-user", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+        self.assertIn("migrate", err)
+        self.assertEqual(self._ancestor_data(), self.ANCESTOR_ENTRIES)
+
+
+class TestExplicitPathArgument(BaseBuilder):
+    """`--path` の受理範囲 (D2 / D14)。
+
+    builder は「dispatcher が読む配置」以外には書けないままにする — 任意
+    パスへの書込を許すと、書けても hook が一生読まない設定ファイルを作れて
+    しまい、利用者から見ると「設定したのに検証されない」になる。
+    """
+
+    def test_rejects_path_outside_known_tiers(self):
+        code, _out, err = self._run(
+            [
+                "init", "--service", "github", "--value", "u", "--commit",
+                "--path", str(self.project_dir / "accounts.local.json"),
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--path", err)
+        self.assertFalse((self.project_dir / "accounts.local.json").exists())
+
+    def test_rejects_write_to_deprecated_tier(self):
+        """書込を伴うコマンドの --path は new パスのみ (旧パスへの新規書込は
+        複数パス conflict を自作することになる)。"""
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--value", "u", "--commit",
+                "--path", str(self.claude_dir / "accounts.local.json"),
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("新パス", err)
+        self.assertFalse((self.claude_dir / "accounts.local.json").exists())
+
+    def test_show_accepts_deprecated_tier_path(self):
+        """show は読み取り専用なので旧パスも直接見られる。"""
+        deprecated = self.claude_dir / "accounts.local.json"
+        deprecated.write_text(json.dumps({"aws": "111"}), encoding="utf-8")
+        code, out, _err = self._run(
+            ["show", "--show-values", "--path", str(deprecated)]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn(str(deprecated), out)
+        self.assertIn("111", out)
+
+    def test_path_writes_only_to_given_file(self):
+        """--path 指定時は 3-tier 解決を飛ばし、指定ファイルだけを書く。"""
+        other = self.project_dir / "sub"
+        target = other / ".claude" / "verify-cloud-account" / "accounts.local.json"
+        code, out, _err = self._run(
+            [
+                "init", "--service", "aws", "--value", "111", "--commit",
+                "--path", str(target),
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("--path", out)
+        self.assertEqual(
+            json.loads(target.read_text(encoding="utf-8")), {"aws": "111"}
+        )
+        self.assertFalse(self._new_path().exists())
+
+    def test_path_still_refuses_same_level_conflict(self):
+        """--path が飛ばすのは**探索**であって D4 の fail-closed ではない。
+        指定先と同じ階層に旧パスが同居していれば拒否する (自作の conflict を
+        書き込ませない)。"""
+        self.claude_dir.mkdir(parents=True, exist_ok=True)
+        (self.claude_dir / "accounts.json").write_text(
+            json.dumps({"aws": "111"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--value", "u", "--commit",
+                "--path", str(self._new_path()),
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+        self.assertFalse(self._new_path().exists())
 
 
 if __name__ == "__main__":

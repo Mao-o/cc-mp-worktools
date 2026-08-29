@@ -71,12 +71,17 @@ ACCEPTS_DICT = True
 # 1 つでも非 str なら (falsy な None でも) その host のエラーを積む。よって builder は
 # migrate の緩和モードでも非 str 値を素通ししてはならない → "all"。
 DICT_VALUE_CHECK = "all"
-# scalar 期待値と等価になる dict キー。verify() の str 分岐は
-# 「github.com が active ならそれ、無ければ最初の active host」を照合する動的な
-# 意味論なので、静的比較で等価と言い切れるのは github.com の場合だけ。
-# builder の migrate 衝突判定はこれを使い、他 host の単一 dict は conflict に倒す
-# (scalar と `{"ghe.example.com": ...}` は照合する host が違う = 制約が違う)。
-SCALAR_EQUIVALENT_DICT_KEY = "github.com"
+# SCALAR_EQUIVALENT_DICT_KEY は**宣言しない**。github の scalar 期待値は
+# 「github.com が active ならそれ、無ければ**最初の active host**」を照合する
+# (下の verify() の str 分岐 = `if "github.com" in active: ... else:
+# host = next(iter(active))`)。照合先が実行時の active 状態で変わる**動的な
+# 意味論**なので、どの静的な hostname キーとも等価にならない。
+# 反例: ghe.example.com だけが active で値が USER のとき、scalar "USER" は
+# allow だが `{"github.com": "USER"}` は「このホストにログインしていません」で
+# deny する。`"github.com"` を宣言すると builder の migrate が両者を非衝突と
+# 判定し、明示された github.com の要求を無警告で捨てる/書き換えてしまう。
+# 未宣言なので builder は scalar/dict の混在を**両方向とも conflict** に倒し、
+# 利用者が両側を見て選ぶ (test_services.py の lock テストで再宣言を防ぐ)。
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
 

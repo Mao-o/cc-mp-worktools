@@ -10,8 +10,15 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 
 - **D1**: builder が唯一の正規経路。書込パスの固定、JSON フォーマットの
   一貫化、既存キーの温存、CLI 現在値との突合、旧パス統合を一元管理する。
-- **D2**: 書込対象パスは `core/paths.accounts_file_new()` に固定。argv から
-  上書きできない (`_ALLOWED_BASENAME` で basename を assertion)。
+- **D2**: 書込対象は 3-tier の **new パス** (`core/paths.accounts_file_new()`
+  = `<anchor>/.claude/verify-cloud-account/accounts.local.json`) に固定。
+  basename は `_ALLOWED_BASENAME` の assertion で保証する。
+  **D14 で `--path` を追加したため「argv から一切変えられない」ではなくなった**
+  が、`--path` が受け付けるのは `_PATH_TIERS` の配置だけで、書込を伴う
+  コマンドでは new パスに限る。つまり builder が書くファイルは常に
+  「どこかの project ディレクトリ配下の
+  `.claude/verify-cloud-account/accounts.local.json`」= dispatcher が読む
+  配置であり、任意パスへの書込には使えない。
 - **D3**: stdout の値表示は既定で隠蔽。`--show-values` 明示時のみ値を
   stdout に出す。
 - **D4**: 3-tier lookup で競合検出時は deny。migrate で統合する。
@@ -60,9 +67,20 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   いた当初の実装は **host 意味論を持たない** (Codex R1 P1): scalar "USER" は
   github.com (active なら) を照合し、`{"ghe.example.com":"USER"}` は名指しの
   GHE ホストを照合するので、値が同じでも制約が違う。値一致だけで非損失と
-  判定すると GHE の制約を無警告で捨てていた。キーを宣言しない service
-  (firebase — alias は verdict に効かず、キーを畳み込むと自己回復の案内先が
-  消える) と、キーが一致しない組は conflict に倒す。
+  判定すると GHE の制約を無警告で捨てていた。キーを宣言しない service と、
+  キーが一致しない組は conflict に倒す。
+  **宣言できるのは「scalar 分岐の照合先が実行時の状態に依らず固定」の service
+  だけ** (Codex R4 P1)。現状の宣言は gcloud の `"project"` のみ:
+  `gcloud.verify()` の str 分岐は `_check_project()` しか呼ばず account を
+  見ないため、scalar と `{"project": <同値>}` は静的に等価になる。
+  一方 `github` は当初 `"github.com"` を宣言していたが**撤回した** —
+  `github.verify()` の str 分岐は「github.com が active ならそれ、無ければ
+  最初の active host」を照合する動的な意味論で、ghe だけが active な環境では
+  scalar "USER" が allow・`{"github.com":"USER"}` が deny になる。等価でない
+  ものを等価と宣言すると、migrate が明示された github.com の要求を無警告で
+  捨てる/書き換える。`firebase` も未宣言 (alias は verdict に効かず、
+  畳み込むと自己回復の案内先が消える)。未宣言 service の scalar/dict 混在は
+  **両方向とも** conflict。
 - **D12**: D9 の「dict 内に使える値が 1 つでも残っていれば良い」は、
   `DICT_ALLOWED_KEYS` を宣言する service では**許可キーの値だけ**を数える
   (Codex R3 P2): `{"gcloud":{"region":"us-central1"}}` は "region" が非空
@@ -87,6 +105,20 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   削除し、なぜ消したかを `_validate_entry_shape` の理由文字列をそのまま
   stdout に明示する (D3 の値隠蔽とは衝突しない — 理由文字列はキー名/型名の
   みを含み、dict の値そのものは含まない)。
+- **D14**: 全サブコマンドは **dispatcher と同じ解決** (`_resolve_target()` →
+  `core/paths.resolve_accounts_file()` と同じ 3-tier + 親遡及) で
+  「hook が実際に読むファイル」を対象にする (Codex R4 P2)。従来は常に
+  `accounts_file_new(cwd)` を対象にしていたため、祖先の accounts.local.json を
+  継承している worktree / サブディレクトリで `set --commit` が**編集した
+  service だけを含む子ファイル**を作り、dispatcher の遡及がその子ファイルで
+  止まって継承していた他 service が一斉に未設定 (deny) になっていた
+  (`remove` も継承 entry を「存在しません」と報告していた)。
+  対象パスは dry-run / commit の両方で先頭に表示する (`_target_note()`)。
+  `init` は継承中に cwd 直下へ新規作成しようとすると shadowing になるため
+  exit 2 で拒否し、`set` / `remove` / `--path` を案内する。
+  `--path <file>` は解決を飛ばして対象を明示する escape hatch
+  (worktree 専用設定を意図的に作る場合)。受け付ける配置は `_PATH_TIERS` に
+  限る (D2 参照)。
 """
 from __future__ import annotations
 
@@ -95,7 +127,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, NamedTuple
 
 _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
@@ -118,11 +150,191 @@ _PROJECT_CLAUDE_MD_TEMPLATE = _HERE / "templates" / "project_claude.md"
 
 
 class _BuilderError(Exception):
-    """builder 内部のビジネスエラー。exit 1 に繋げる。"""
+    """builder 内部のビジネスエラー。既定で exit 1 に繋げる。
+
+    `exit_code` で使い方の誤り (exit 2) と実行時の業務エラー (exit 1) を
+    区別する。argparse の usage error と同じ 2 を使い分けることで、呼び出し側
+    (skill / スクリプト) が「引数を直せば良い」のか「環境を直す必要がある」の
+    かを終了コードだけで判別できる。
+    """
+
+    def __init__(self, message: str, *, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 def _project_dir() -> str:
     return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+
+# `--path` が受け付ける配置 (project ディレクトリからの相対)。dispatcher が
+# 読むのはこの 3 つだけなので、ここに当てはまらないパスを許すと「builder は
+# 書けるが hook は一生読まない」ファイルを作れてしまう。D2 (書込先固定) は
+# `--path` の導入で「argv から一切変えられない」ではなくなったが、
+# **書込先は必ず 3-tier の new パス (basename は accounts.local.json)** という
+# 形で維持する。
+_PATH_TIERS = (
+    ("new", paths.ACCOUNTS_FILE_NEW),
+    ("deprecated", paths.ACCOUNTS_FILE_DEPRECATED),
+    ("legacy", paths.ACCOUNTS_FILE_LEGACY),
+)
+
+
+class _Target(NamedTuple):
+    """操作対象の accounts.local.json と、それが属する project ディレクトリ。
+
+    - path: 対象ファイルの絶対パス
+    - anchor: そのファイルが属する project ディレクトリ (絶対パス)。
+      3-tier 探索・.gitignore 更新・CLAUDE.md 同梱の基準になる
+    - kind: "new" / "deprecated" / "legacy"
+    - origin: どう決まったか。
+      "explicit" (--path) / "cwd" (cwd 階層で発見) /
+      "ancestor" (祖先階層から継承) / "fresh" (どこにも無いので新規作成)
+    """
+
+    path: Path
+    anchor: Path
+    kind: str
+    origin: str
+
+
+def _split_tier_path(path: Path) -> tuple[str, Path] | None:
+    """絶対パスを (kind, anchor) に分解する。3-tier のどれでもなければ None。"""
+    parts = path.parts
+    for kind, rel in _PATH_TIERS:
+        rel_parts = rel.parts
+        if len(parts) > len(rel_parts) and parts[-len(rel_parts):] == rel_parts:
+            return kind, Path(*parts[: -len(rel_parts)])
+    return None
+
+
+def _resolve_target(
+    project_dir: str,
+    explicit: str | None,
+    *,
+    require_new: bool,
+) -> _Target:
+    """**hook が実際に読むファイル**を対象として決める (Codex R4 P2)。
+
+    `--path` 未指定なら `core/paths.resolve_accounts_file()` と同じ探索
+    (3-tier lookup + 親ディレクトリ遡及) を使い、dispatcher が読むのと同じ
+    ファイルを対象にする。builder が常に cwd 直下の新パスを対象にしていた
+    従来の実装は、**祖先の accounts.local.json を継承している worktree /
+    サブディレクトリで shadowing を起こしていた**: `set --commit` が編集した
+    service だけを含む子ファイルを作り、dispatcher の遡及がその子ファイルで
+    止まるため、継承していた他 service が一斉に未設定 (deny) になる。
+    `remove` も継承 entry を「存在しません」と報告していた。
+
+    `--path` 指定時は探索を飛ばしてそのファイルを対象にする (worktree 専用
+    設定を意図的に作るための escape hatch)。ただし dispatcher が読む配置
+    (`_PATH_TIERS`) に限る — それ以外は「書けるが読まれない」設定になるため。
+    書込を伴うコマンド (`require_new=True`) では new パスのみ許可する。
+    """
+    if explicit is not None:
+        path = Path(explicit).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        # 解決経路 (`discover_accounts_files_with_ancestors`) 側も resolve() を
+        # 通すので、比較・表示のために同じ正規化を掛ける。揃えないと symlink
+        # (macOS の /var → /private/var 等) を挟んだだけで「別ファイル」と
+        # 誤判定し、shadowing 警告が誤発火する。
+        try:
+            path = path.resolve()
+        except OSError:
+            path = Path(os.path.normpath(str(path)))
+        split = _split_tier_path(path)
+        if split is None:
+            raise _BuilderError(
+                f"--path は dispatcher が読む配置を指してください (指定: {path})。"
+                "許容する末尾: "
+                + " / ".join(str(rel) for _kind, rel in _PATH_TIERS)
+                + "。これ以外の場所に書いても hook は読み込みません。",
+                exit_code=2,
+            )
+        kind, anchor = split
+        if require_new and kind != "new":
+            raise _BuilderError(
+                f"--path の書込先は {paths.ACCOUNTS_FILE_NEW} で終わる新パスに"
+                f"してください (指定: {path} は {kind} パス)。"
+                "旧パスへの新規書込は複数パス conflict の原因になります。",
+                exit_code=2,
+            )
+        return _Target(path=path, anchor=anchor, kind=kind, origin="explicit")
+
+    try:
+        project = Path(project_dir).resolve()
+    except OSError:
+        project = Path(project_dir)
+    found, resolved_dir = paths.discover_accounts_files_with_ancestors(project_dir)
+    if not found:
+        return _Target(
+            path=paths.accounts_file_new(str(project)),
+            anchor=project,
+            kind="new",
+            origin="fresh",
+        )
+    # found は new → deprecated → legacy の優先度順。複数 tier が同居する
+    # (D4 conflict) 場合も先頭を代表として返し、拒否は呼び出し側が行う
+    # (`_refuse_if_legacy_paths_exist` / show の複数パス error / migrate の統合)。
+    kind, path = found[0]
+    anchor = resolved_dir if resolved_dir is not None else project
+    return _Target(
+        path=path,
+        anchor=anchor,
+        kind=kind,
+        origin="ancestor" if anchor != project else "cwd",
+    )
+
+
+def _hook_reads_instead(target: _Target, project_dir: str) -> Path | None:
+    """`--path` 指定が、解決なら選ばれていたファイルと食い違うならそのパスを返す。
+
+    `--path` は「解決を飛ばす escape hatch」なので、指定先が hook の読むファイルと
+    ずれることがある。ずれの向きで結果が変わる:
+
+    - 指定先が cwd に**近い**: 書いた瞬間から hook はそちらを読む = 現在有効な
+      設定を覆い隠す (指定先に記載しない service は未設定 = deny)。`init` が
+      exit 2 で止めている shadowing を、`--path` は意図的に許す形になるため、
+      **その代償をその場で必ず言う**
+    - 指定先が cwd から**遠い**: hook は近い方を読み続けるので、書いても効かない
+
+    どちらも黙って進むと「設定したのに検証されない / 別 service が急に deny
+    される」になるので、区別せず 1 本の警告にまとめる。
+    """
+    if target.origin != "explicit":
+        return None
+    try:
+        resolved = _resolve_target(project_dir, None, require_new=False)
+    except _BuilderError:
+        return None
+    if resolved.origin == "fresh" or resolved.path == target.path:
+        return None
+    return resolved.path
+
+
+def _target_note(target: _Target, project_dir: str) -> str:
+    """出力の先頭に置く「どのファイルを対象にしたか」の 1 行 (+ 必要なら警告)。
+
+    親から継承しているケースを利用者が見落とすと、意図せず親 repo の設定を
+    書き換える / 書き換えたつもりが効かない、のどちらかが起きるため、
+    dry-run と commit の両方で必ず表示する。
+    """
+    if target.origin == "ancestor":
+        return f"対象: {target.path} (祖先ディレクトリ {target.anchor} から継承)"
+    if target.origin == "explicit":
+        note = f"対象: {target.path} (--path で明示指定)"
+        other = _hook_reads_instead(target, project_dir)
+        if other is not None:
+            note += (
+                f"\n警告: hook が現在読むのは {other} です。--path はそれとは別の"
+                "ファイルを対象にするため、指定先が cwd に近ければ現在の設定を"
+                "覆い隠し (指定先に記載しない service は未設定 = deny)、遠ければ"
+                "書いても読まれません。"
+            )
+        return note
+    if target.origin == "fresh":
+        return f"対象: {target.path} (新規作成)"
+    return f"対象: {target.path}"
 
 
 def _load_existing(path: Path) -> dict[str, Any]:
@@ -152,14 +364,22 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
-def _ensure_gitignore_entry(project_dir: str, stdout: IO[str]) -> None:
+def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
     """accounts.local.json を .gitignore に追加する (best-effort)。
 
     既に該当エントリがあればスキップ。.gitignore が存在しなければ作成しない
     (プロジェクトに .gitignore が無い環境で勝手に作ると意図しない副作用になる)。
+
+    対象は **書き込んだファイルが属する project ディレクトリ** (`target.anchor`)
+    の .gitignore で、エントリもそこからの相対パスにする。cwd 固定にすると、
+    祖先から継承しているとき「親 repo のファイルを書いたのに cwd 側の
+    .gitignore を編集する」ちぐはぐな挙動になる (D14)。
     """
-    gitignore = Path(project_dir) / ".gitignore"
-    entry = ".claude/verify-cloud-account/accounts.local.json"
+    gitignore = target.anchor / ".gitignore"
+    try:
+        entry = target.path.relative_to(target.anchor).as_posix()
+    except ValueError:
+        return
     if not gitignore.exists():
         return
     try:
@@ -175,8 +395,9 @@ def _ensure_gitignore_entry(project_dir: str, stdout: IO[str]) -> None:
         print(f"warning: .gitignore の更新に失敗しました: {e}", file=stdout)
 
 
-def _ensure_project_claude_md(project_dir: str, stdout: IO[str]) -> None:
-    """新パスと同じディレクトリに Claude 向け signpost (`CLAUDE.md`) を同梱する。
+def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
+    """書き込んだファイルと同じディレクトリに Claude 向け signpost
+    (`CLAUDE.md`) を同梱する。
 
     - 既に CLAUDE.md が存在する場合は何もしない (ユーザー編集を尊重)
     - テンプレート読み込み・書き込みのいずれかが失敗しても警告を 1 行出すだけで
@@ -188,7 +409,7 @@ def _ensure_project_claude_md(project_dir: str, stdout: IO[str]) -> None:
     `*.local.json` への直接アクセスを deny する事情と、builder 経由の正規経路
     (Agent Skill / Bash) を Claude (LLM) に伝える。
     """
-    target_dir = paths.accounts_file_new(project_dir).parent
+    target_dir = target.path.parent
     md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
     if md_path.exists():
         print(f"(skipped: {md_path} already exists)", file=stdout)
@@ -426,35 +647,42 @@ def _cmd_init(
         return 2
 
     project_dir = _project_dir()
-    target = paths.accounts_file_new(project_dir)
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=True)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+
+    # 祖先の accounts.local.json を継承している階層で init すると、cwd 直下に
+    # 2 つ目のファイルを作って**継承していた設定を丸ごと覆い隠す** (dispatcher の
+    # 遡及は cwd 側で止まるため、編集していない service まで一斉に未設定に
+    # なる)。set / remove は継承先を直接編集するのでこの問題が無い (D14)。
+    if target.origin == "ancestor":
+        print(
+            f"error: accounts.local.json は祖先ディレクトリ {target.anchor} から"
+            f"継承しています ({target.path})。"
+            "init で cwd 直下に作ると継承中の設定を覆い隠し、"
+            "記載していない service が一斉に未設定 (deny) になるため拒否します。",
+            file=stderr,
+        )
+        print(
+            f"継承中の {target.path} を編集するには set / remove を使ってください。"
+            "この階層専用の設定を作る場合は --path で明示してください。",
+            file=stderr,
+        )
+        return 2
 
     # 旧パス (deprecated/legacy) が存在する場合、init で新パスに書くと
     # dispatcher の _find_accounts_file が複数パス conflict で fail-closed deny に
     # 回帰するため refuse。先に migrate --commit で統合してから init を実行させる。
-    found = paths.discover_all_accounts_files(project_dir)
-    legacy_paths = [(kind, path) for kind, path in found if kind != "new"]
-    if legacy_paths:
-        print(
-            "error: 旧パスに accounts.local.json が存在します。"
-            "init で新パスに書き込むと複数パス conflict で fail-closed deny に"
-            "回帰するため拒否します。",
-            file=stderr,
-        )
-        for kind, path in legacy_paths:
-            print(f"  - {path} ({kind})", file=stderr)
-        print(
-            "先に migrate --commit で新パスへ統合してから init を実行してください: "
-            "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/"
-            "accounts_builder.py migrate --commit",
-            file=stderr,
-        )
+    if _refuse_if_legacy_paths_exist("init", target, stderr):
         return 1
 
     try:
-        existing = _load_existing(target)
+        existing = _load_existing(target.path)
     except _BuilderError as e:
         print(f"error: {e}", file=stderr)
-        return 1
+        return e.exit_code
 
     if args.value is not None:
         new_entry: Any = _parse_value(args.value)
@@ -481,7 +709,8 @@ def _cmd_init(
     else:
         action = "skipped"
 
-    print(f"=== changes to {target} ===", file=stdout)
+    print(_target_note(target, project_dir), file=stdout)
+    print(f"=== changes to {target.path} ===", file=stdout)
     if action == "add":
         _print_change_line("+ add", service_key, new_entry, args.show_values, stdout)
     elif action == "unchanged":
@@ -506,13 +735,13 @@ def _cmd_init(
         if action == "add":
             updated[service_key] = new_entry
         try:
-            _write_json(target, updated)
+            _write_json(target.path, updated)
         except OSError as e:
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
-        print(f"\nwritten: {target}", file=stdout)
-        _ensure_project_claude_md(project_dir, stdout)
-        _ensure_gitignore_entry(project_dir, stdout)
+        print(f"\nwritten: {target.path}", file=stdout)
+        _ensure_project_claude_md(target, stdout)
+        _ensure_gitignore_entry(target, stdout)
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
@@ -520,14 +749,19 @@ def _cmd_init(
 
 
 def _refuse_if_legacy_paths_exist(
-    command: str, project_dir: str, stderr: IO[str]
+    command: str, target: _Target, stderr: IO[str]
 ) -> bool:
-    """旧パスが存在すれば True を返しつつ refuse 理由を stderr に書く。
+    """対象階層に旧パスが存在すれば True を返しつつ refuse 理由を stderr に書く。
 
-    init と同じ理由 (新パスへの書込で dispatcher が複数パス conflict の
-    fail-closed deny に回帰する) を set / remove にも適用する。
+    新パスへの書込で dispatcher が複数パス conflict の fail-closed deny に
+    回帰するため、`init` / `set` / `remove` の全てで適用する。
+
+    判定は **解決した対象階層 (`target.anchor`)** で行う (D14)。cwd 固定だと、
+    祖先を継承しているときにその祖先階層の旧パスを見落として、fail-closed
+    deny を誘発する書込を通してしまう。同一階層に複数 tier が同居する D4 の
+    conflict もここで捕まる (2 つ以上なら必ず non-new が 1 つ以上含まれる)。
     """
-    found = paths.discover_all_accounts_files(project_dir)
+    found = paths.discover_all_accounts_files(str(target.anchor))
     legacy_paths = [(kind, path) for kind, path in found if kind != "new"]
     if not legacy_paths:
         return False
@@ -588,16 +822,20 @@ def _cmd_set(
         return 2
 
     project_dir = _project_dir()
-    target = paths.accounts_file_new(project_dir)
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=True)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
 
-    if _refuse_if_legacy_paths_exist("set", project_dir, stderr):
+    if _refuse_if_legacy_paths_exist("set", target, stderr):
         return 1
 
     try:
-        existing = _load_existing(target)
+        existing = _load_existing(target.path)
     except _BuilderError as e:
         print(f"error: {e}", file=stderr)
-        return 1
+        return e.exit_code
 
     if args.value is not None:
         raw_new_value: Any = _parse_value(args.value)
@@ -651,7 +889,8 @@ def _cmd_set(
     else:
         action = "update"
 
-    print(f"=== changes to {target} ===", file=stdout)
+    print(_target_note(target, project_dir), file=stdout)
+    print(f"=== changes to {target.path} ===", file=stdout)
     if action == "add":
         _print_change_line("+ add", service_key, new_entry, args.show_values, stdout)
     elif action == "unchanged":
@@ -668,13 +907,13 @@ def _cmd_set(
         updated = dict(existing)
         updated[service_key] = new_entry
         try:
-            _write_json(target, updated)
+            _write_json(target.path, updated)
         except OSError as e:
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
-        print(f"\nwritten: {target}", file=stdout)
-        _ensure_project_claude_md(project_dir, stdout)
-        _ensure_gitignore_entry(project_dir, stdout)
+        print(f"\nwritten: {target.path}", file=stdout)
+        _ensure_project_claude_md(target, stdout)
+        _ensure_gitignore_entry(target, stdout)
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
@@ -712,16 +951,20 @@ def _cmd_remove(
         return 2
 
     project_dir = _project_dir()
-    target = paths.accounts_file_new(project_dir)
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=True)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
 
-    if _refuse_if_legacy_paths_exist("remove", project_dir, stderr):
+    if _refuse_if_legacy_paths_exist("remove", target, stderr):
         return 1
 
     try:
-        existing = _load_existing(target)
+        existing = _load_existing(target.path)
     except _BuilderError as e:
         print(f"error: {e}", file=stderr)
-        return 1
+        return e.exit_code
 
     # キー自体が無い場合と `{"github": null}` のように値が None (壊れた
     # entry) の場合を区別する (Codex R2 P2)。`.get(service_key) is None` だと
@@ -730,7 +973,11 @@ def _cmd_remove(
     # 削除できなくなる — 直す唯一の手段である remove がここで早期 return
     # すると、設定を直せないまま `deny` が固定化される。
     if service_key not in existing:
-        print(f"{service_key} は {target} に存在しません。何もしません。", file=stdout)
+        print(_target_note(target, project_dir), file=stdout)
+        print(
+            f"{service_key} は {target.path} に存在しません。何もしません。",
+            file=stdout,
+        )
         return 0
     existing_value = existing[service_key]
 
@@ -745,6 +992,7 @@ def _cmd_remove(
             )
             return 1
         if args.host not in existing_value:
+            print(_target_note(target, project_dir), file=stdout)
             print(
                 f"{service_key} に host/alias '{args.host}' は存在しません。"
                 "何もしません。",
@@ -773,7 +1021,8 @@ def _cmd_remove(
         drop_whole_key = True
         shape_error = None
 
-    print(f"=== changes to {target} ===", file=stdout)
+    print(_target_note(target, project_dir), file=stdout)
+    print(f"=== changes to {target.path} ===", file=stdout)
     if args.host is not None and not drop_whole_key:
         _print_change_line(
             "- remove", f"{service_key}[{args.host}]", removed_value,
@@ -814,13 +1063,13 @@ def _cmd_remove(
         else:
             updated[service_key] = remaining
         try:
-            _write_json(target, updated)
+            _write_json(target.path, updated)
         except OSError as e:
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
-        print(f"\nwritten: {target}", file=stdout)
-        _ensure_project_claude_md(project_dir, stdout)
-        _ensure_gitignore_entry(project_dir, stdout)
+        print(f"\nwritten: {target.path}", file=stdout)
+        _ensure_project_claude_md(target, stdout)
+        _ensure_gitignore_entry(target, stdout)
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
@@ -866,11 +1115,11 @@ def _migrate_keep_new_without_loss(service, new_val: Any, old_val: Any) -> bool:
     old が new に無い情報を 1 つでも持っていれば False (conflict のまま)。
 
     **scalar と dict の混在は値だけでは比較できない** (D11 / Codex R1 P1)。
-    scalar 期待値と dict 期待値は「どの host/alias を照合するか」という制約が
-    違うので、値が一致しても同じ制約とは限らない — 例えば github の scalar
-    "USER" は github.com (active なら) を照合するが `{"ghe.example.com":"USER"}`
-    は名指しの GHE ホストを照合する。値の一致だけで非損失と判定すると、GHE の
-    制約を conflict 検出も警告もなく捨てていた。
+    scalar 期待値と dict 期待値は「どの host/alias/フィールドを照合するか」と
+    いう制約が違うので、値が一致しても同じ制約とは限らない — 例えば github の
+    scalar "USER" は active な状態に応じた 1 ホストを照合するが
+    `{"ghe.example.com":"USER"}` は名指しの GHE ホストを照合する。値の一致だけで
+    非損失と判定すると、GHE の制約を conflict 検出も警告もなく捨てていた。
     そこで service が宣言する `SCALAR_EQUIVALENT_DICT_KEY`
     (= scalar 期待値と等価になる dict キー。services/__init__.py 参照) を使う:
 
@@ -878,8 +1127,17 @@ def _migrate_keep_new_without_loss(service, new_val: Any, old_val: Any) -> bool:
       (キーがそれ 1 つだけで値も一致)
     - dict new / scalar old: 非損失 ⇔ `new.get(SCALAR_KEY) == old`
       (old の制約が new にそのまま含まれる)
-    - キー未宣言の service (firebase / 未知キー) と上に当てはまらない組は
-      conflict。自動で畳み込まず、利用者が両側を見て選ぶ方が安全側に倒れる
+    - キー未宣言の service と上に当てはまらない組は conflict。
+      自動で畳み込まず、利用者が両側を見て選ぶ方が安全側に倒れる
+
+    現状キーを宣言しているのは **gcloud (`"project"`) だけ**。`github` は
+    Codex R4 P1 で宣言を撤回した — scalar 分岐の照合先が「github.com が active
+    ならそれ、無ければ最初の active host」と**実行時の状態で変わる**ため、
+    どの静的 hostname とも等価にならない (ghe だけが active なら scalar は
+    allow・`{"github.com":...}` は deny)。`firebase` も未宣言 (alias は
+    verify() の verdict に効かない一方、畳み込むと `firebase use <alias>` の
+    自己回復案内が読む情報が消える)。よって github/firebase の scalar↔dict は
+    **両方向とも** conflict になる。
     """
     if new_val == old_val:
         return True
@@ -901,7 +1159,13 @@ def _migrate_keep_new_without_loss(service, new_val: Any, old_val: Any) -> bool:
     if isinstance(new_val, dict) and isinstance(old_val, dict):
         # old の全キーが new に同じ値で存在するかどうかだけを見る
         # (new 側の余剰キーは old 由来ではないのでここでは無関係)。
-        return all(new_val.get(k) == v for k, v in old_val.items())
+        # **キーの存在を先に要求する** (Codex R4 P2): `.get()` だけで比較すると
+        # 「new にキーが無い」と「new にキーがあり値が null」が両方 None になり、
+        # old が `{"ghe.example.com": null}` のような壊れた値を持つとき
+        # (new がその host を省略していても) 非損失と誤判定していた。old 側の
+        # 値は addition ではないので `_validate_entry_shape` の検査も通らず、
+        # host entry が黙って失われたまま旧ファイル削除まで案内していた。
+        return all(k in new_val and new_val[k] == v for k, v in old_val.items())
     return False
 
 
@@ -911,11 +1175,21 @@ def _cmd_show(
     stderr: IO[str],
 ) -> int:
     project_dir = _project_dir()
-    found = paths.discover_all_accounts_files(project_dir)
+    # show は読み取り専用なので旧パスの内容も直接見せてよい (require_new=False)。
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=False)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+
+    if target.origin == "explicit":
+        found = [(target.kind, target.path)] if target.path.is_file() else []
+    else:
+        found = paths.discover_all_accounts_files(str(target.anchor))
 
     if not found:
-        target = paths.accounts_file_new(project_dir)
-        print(f"no accounts.local.json found at {target}", file=stdout)
+        print(_target_note(target, project_dir), file=stdout)
+        print(f"no accounts.local.json found at {target.path}", file=stdout)
         print(
             "run `accounts_builder.py init --service <name> --commit` to create one.",
             file=stdout,
@@ -940,8 +1214,9 @@ def _cmd_show(
         existing = _load_existing(path)
     except _BuilderError as e:
         print(f"error: {e}", file=stderr)
-        return 1
+        return e.exit_code
 
+    print(_target_note(target, project_dir), file=stdout)
     print(f"=== {path} ({kind}) ===", file=stdout)
     if not existing:
         print("(empty)", file=stdout)
@@ -995,8 +1270,18 @@ def _cmd_migrate(
     stderr: IO[str],
 ) -> int:
     project_dir = _project_dir()
-    new_path = paths.accounts_file_new(project_dir)
-    found = paths.discover_all_accounts_files(project_dir)
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=True)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+    # 統合先は「解決した階層」の新パス。祖先の旧パスを継承している状態で
+    # cwd 直下に統合すると、その場で複数パス conflict を作るか、祖先の設定を
+    # 覆い隠す (D14)。
+    new_path = paths.accounts_file_new(str(target.anchor))
+    found = paths.discover_all_accounts_files(str(target.anchor))
+
+    print(_target_note(target, project_dir), file=stdout)
 
     if not found:
         print("no accounts.local.json found in any path. nothing to migrate.", file=stdout)
@@ -1030,8 +1315,8 @@ def _cmd_migrate(
             elif not _migrate_keep_new_without_loss(
                 _SERVICE_BY_KEY.get(key), merged[key], value
             ):
-                # new="USER" (scalar) / old={"github.com":"USER"} (dict、
-                # 単一 host) のように、old の情報が new に全て含まれる場合だけ
+                # new="my-project" (scalar) / old={"project":"my-project"}
+                # (gcloud) のように、old の情報が new に全て含まれる場合だけ
                 # conflict にせず new 側を維持する (内部バックログ: 意味的に
                 # 等価な新旧値も値衝突として手動解決を要求していた不具合の修正)。
                 # `_entries_equal` (show/verify 用、CLI 実測値との一致判定) は
@@ -1119,8 +1404,11 @@ def _cmd_migrate(
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
         print(f"\nwritten: {new_path}", file=stdout)
-        _ensure_project_claude_md(project_dir, stdout)
-        _ensure_gitignore_entry(project_dir, stdout)
+        written = _Target(
+            path=new_path, anchor=target.anchor, kind="new", origin=target.origin
+        )
+        _ensure_project_claude_md(written, stdout)
+        _ensure_gitignore_entry(written, stdout)
         retained = [
             (kind, path)
             for kind, path in source_paths.items()
@@ -1140,10 +1428,22 @@ def _cmd_migrate(
     return 0
 
 
+_PATH_HELP = (
+    "対象ファイルを明示指定して 3-tier lookup / 親ディレクトリ遡及を"
+    "スキップする (worktree 専用設定を意図的に作る場合の escape hatch)。"
+    "dispatcher が読む配置 (.claude/verify-cloud-account/accounts.local.json 等) "
+    "のみ受け付ける"
+)
+
+
+def _add_path_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--path", default=None, metavar="FILE", help=_PATH_HELP)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="accounts_builder",
-        description="accounts.local.json の唯一の書込経路 (D1-D11).",
+        description="accounts.local.json の唯一の書込経路 (D1-D14).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1167,6 +1467,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mx_init = p_init.add_mutually_exclusive_group()
     mx_init.add_argument("--dry-run", action="store_true")
     mx_init.add_argument("--commit", action="store_true")
+    _add_path_arg(p_init)
     p_init.add_argument(
         "--show-values",
         action="store_true",
@@ -1180,12 +1481,14 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=_SERVICE_NAMES,
         help="対象サービスで絞り込む (省略時は全件)",
     )
+    _add_path_arg(p_show)
     p_show.add_argument("--show-values", action="store_true")
 
     p_migrate = sub.add_parser("migrate", help="旧パスから新パスへ統合")
     mx_migrate = p_migrate.add_mutually_exclusive_group()
     mx_migrate.add_argument("--dry-run", action="store_true")
     mx_migrate.add_argument("--commit", action="store_true")
+    _add_path_arg(p_migrate)
     p_migrate.add_argument("--show-values", action="store_true")
 
     p_set = sub.add_parser(
@@ -1222,6 +1525,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mx_set = p_set.add_mutually_exclusive_group()
     mx_set.add_argument("--dry-run", action="store_true")
     mx_set.add_argument("--commit", action="store_true")
+    _add_path_arg(p_set)
     p_set.add_argument(
         "--show-values",
         action="store_true",
@@ -1248,6 +1552,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mx_remove = p_remove.add_mutually_exclusive_group()
     mx_remove.add_argument("--dry-run", action="store_true")
     mx_remove.add_argument("--commit", action="store_true")
+    _add_path_arg(p_remove)
     p_remove.add_argument(
         "--show-values",
         action="store_true",
