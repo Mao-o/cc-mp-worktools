@@ -17,6 +17,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
+import source
 import state
 
 _ENTRY_PATH = Path(__file__).resolve().parent.parent / "__main__.py"
@@ -218,6 +219,66 @@ class TestDisableEnvVar(BaseMainTest):
         with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_DISABLED": "1"}):
             out, _ = _run_main(self._envelope(path))
         self.assertEqual(out, "")
+
+
+class TestTempDirSkip(BaseMainTest):
+    """yaf.11: 一時領域配下のファイルは (cwd が一時領域外なら) 常時 skip する。"""
+
+    def test_temp_scratch_file_is_silent_when_cwd_is_a_real_project(self):
+        # self.tmp は tempfile.mkdtemp() の実体で OS の一時領域配下にあるため、
+        # cwd だけを実プロジェクト風の非一時パスに差し替えれば「Claude が
+        # scratchpad に書いた一時ファイル」を再現できる。
+        path = self._write("escapes_big.py", _python_lines(900))
+        envelope = self._envelope(path)
+        envelope["cwd"] = "/Users/example/project"
+        out, _ = _run_main(envelope)
+        self.assertEqual(out, "")
+
+    def test_temp_file_still_judged_when_cwd_is_also_under_temp(self):
+        # 既存フィクスチャ (cwd == self.tmp、実体は OS の一時領域) の回帰確認:
+        # session 全体がその場限りの一時プロジェクトであるケースは skip しない。
+        path = self._write("checkout_flow.py", _python_lines(900))
+        out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: strong", self._context(out))
+
+
+class TestCwdOnlyOptIn(BaseMainTest):
+    """yaf.11: FILE_SPLIT_ADVISOR_CWD_ONLY=1 の opt-in cwd 外 skip。
+
+    常時 on の temp-dir skip と条件が重ならないよう (self.tmp 自体が OS の
+    一時領域配下にあるため)、_temp_dir_roots を空にして温存領域スキップを
+    無効化し、CWD_ONLY の挙動だけを分離して確認する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._no_temp_roots_patcher = mock.patch.object(
+            source, "_temp_dir_roots", return_value=()
+        )
+        self._no_temp_roots_patcher.start()
+        self.addCleanup(self._no_temp_roots_patcher.stop)
+
+    def test_outside_cwd_judged_by_default(self):
+        # 既定 off: --add-dir 運用を壊さないよう、cwd 外でも通常どおり判定する。
+        path = self._write("checkout_flow.py", _python_lines(900))
+        envelope = self._envelope(path)
+        envelope["cwd"] = "/Users/example/other-project"
+        out, _ = _run_main(envelope)
+        self.assertIn("判定: strong", self._context(out))
+
+    def test_outside_cwd_silent_when_opted_in(self):
+        path = self._write("checkout_flow.py", _python_lines(900))
+        envelope = self._envelope(path)
+        envelope["cwd"] = "/Users/example/other-project"
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_CWD_ONLY": "1"}):
+            out, _ = _run_main(envelope)
+        self.assertEqual(out, "")
+
+    def test_inside_cwd_still_judged_when_opted_in(self):
+        path = self._write("checkout_flow.py", _python_lines(900))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_CWD_ONLY": "1"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: strong", self._context(out))
 
 
 class TestDebounce(BaseMainTest):

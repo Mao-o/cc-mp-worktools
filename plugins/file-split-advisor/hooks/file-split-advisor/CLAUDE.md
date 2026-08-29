@@ -64,7 +64,11 @@ flowchart TD
     B -- yes --> C{FILE_SPLIT_ADVISOR_DISABLED?}
     C -- yes --> Z
     C -- no --> D[source.resolve_path]
-    D --> E{should_skip_by_name?<br/>lockfile/minified/generated}
+    D --> T{should_skip_temp_dir?<br/>一時領域配下 かつ cwd の外}
+    T -- yes --> Z
+    T -- no --> W{CWD_ONLY かつ<br/>is_outside_cwd?}
+    W -- yes --> Z
+    W -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated}
     E -- yes --> Z
     E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
     N -- no --> Z
@@ -157,6 +161,57 @@ auth)」とカテゴリ名を列挙するには件数だけでは足りない。
 2 つの出力例 (いずれも role=="normal" 相当) では表示に現れない。未使用の死んだ
 引数にしないため、`role == "test"` のときだけ見出し行に `(test: 閾値 1.6倍)`
 を追記する形で使っている。`role=="normal"` の出力は計画の例と完全一致する。
+
+0.3.0 で `judge.Verdict.applied_multipliers` (language/role/declarative の実際の
+係数) を追加し、`message._multiplier_breakdown` が「言語 係数 (× 宣言的 係数)」
+を見出し行に追記するようになったが、`role` はここに含めない。上記の role_note
+と重複表示になるため、role 係数の可視化は role_note 側に残している。
+
+### 目安の表示 tier は判定 tier + 隣接 tier (0.3.0)
+
+`message.build` の「目安」表示は以前 review/warn 固定だったため、note/strong
+判定時には無関係な review/warn の数値だけが表示され、実際の判定根拠になった
+閾値が示されないことがあった (`message.py:14` 相当の不正確さ)。`_display_tiers`
+が判定 tier に応じて動的に 2 tier を選ぶ (strong のときだけ「1 つ下 + 自身」、
+それ以外は「自身 + 1 つ上」)。judge 側の tier/emit 判定ロジックは変更していない
+(表示だけの修正)。
+
+### `Verdict.applied_multipliers` に signal_count==0 の推測文言の条件を持たせた (0.3.0)
+
+`message.build` は signal_count==0 (行数のみが emit 根拠) のとき、以前は常に
+「宣言的なコードの可能性があります」と表示していたが、実際に宣言的緩和
+(`control_flow_density < DECLARATIVE_THRESHOLD`) が適用されていないファイル
+(分岐の多いハンドラ等) にも同じ文言が付く不正確さがあった。
+`verdict.applied_multipliers["declarative"]` (1.0 なら未適用) で判定するように
+修正した。judge 側は `_effective_thresholds` が内部で計算済みの
+`is_declarative` を `applied_multipliers` として外部に公開するだけで、
+判定ロジック自体 (`_collect_signals` の独自計算) は変更していない。
+
+## 一時ディレクトリ・cwd 外の skip (`source.py`, 0.3.0)
+
+### `should_skip_temp_dir` は「cwd 自体が一時領域か」ではなく「path が cwd の内側か」で決める
+
+一時領域 (scratchpad 等) 配下のファイルは、実測で `/private/tmp/…/scratchpad/`
+配下に絶対パス付きの分割助言が emit されることを確認した (Claude が分析用ダンプ
+や handoff メモを scratchpad に書く運用)。これを常時 skip する機構を追加する際、
+「`cwd` 自体が一時領域配下なら丸ごと除外する」設計も検討したが、この場合
+`cwd=/private/tmp/projA` で `path=/private/tmp/projB/foo.py` (cwd の外にある
+**別の**一時ディレクトリ) まで免除されてしまい、対象外にしたい「本来プロジェクト
+外のファイル」を見逃す。最終的に `is_under_temp_dir(path) and not
+path.is_relative_to(cwd)` (path が cwd の内側なら skip しない) に絞った。
+
+**この設計は既存テストスイートとの互換性の鍵でもある**: `tempfile.mkdtemp()`
+は本 repo の開発機 (macOS) で `/var/folders/...` 配下を返すため、`tests/` 配下の
+全フィクスチャ (`cwd == self.tmp`、`self.tmp` 配下にファイルを書く) は実質的に
+「一時領域配下で cwd もそこにある」状態になる。`path.is_relative_to(cwd)` が
+常に True になるこのケースを skip しない設計にしたことで、既存 141 テストへの
+影響ゼロで機能追加できた (`cwd` 自体が一時領域かどうかだけで免除する設計だと
+同じ結果になるが、上記の兄弟ディレクトリ誤判定を残したままになる)。
+
+`FILE_SPLIT_ADVISOR_CWD_ONLY` (opt-in, 既定 off) 用のテストはこの常時 on の
+temp-dir skip と条件が重なるため、`source._temp_dir_roots` を空にモックして
+温存領域スキップ自体を無効化し、CWD_ONLY 単体の挙動を分離して確認している
+(`tests/test_main.py::TestCwdOnlyOptIn`)。
 
 ## debounce (`state.py`)
 

@@ -26,6 +26,72 @@ class TestResolvePath(unittest.TestCase):
         self.assertEqual(result, Path("foo.py"))
 
 
+class TestIsUnderTempDir(unittest.TestCase):
+    def test_slash_tmp_is_temp(self):
+        self.assertTrue(source.is_under_temp_dir(Path("/tmp/foo.py")))
+
+    def test_private_tmp_is_temp(self):
+        self.assertTrue(source.is_under_temp_dir(Path("/private/tmp/scratchpad/foo.py")))
+
+    def test_var_folders_is_temp(self):
+        self.assertTrue(source.is_under_temp_dir(Path("/var/folders/xx/yyyy/T/foo.py")))
+
+    def test_tmpdir_env_root_is_temp(self):
+        with mock.patch.dict(os.environ, {"TMPDIR": "/custom/tmp-root"}):
+            self.assertTrue(source.is_under_temp_dir(Path("/custom/tmp-root/sub/foo.py")))
+
+    def test_project_path_is_not_temp(self):
+        self.assertFalse(source.is_under_temp_dir(Path("/repo/src/foo.py")))
+
+    def test_similar_prefix_is_not_falsely_matched(self):
+        # "/tmpfoo" は "/tmp" 配下ではない (前方一致ではなくパスセグメント単位で
+        # 判定するため誤検知しない)。
+        self.assertFalse(source.is_under_temp_dir(Path("/tmpfoo/bar.py")))
+
+
+class TestShouldSkipTempDir(unittest.TestCase):
+    def test_temp_path_skipped_when_cwd_is_real_project(self):
+        self.assertTrue(
+            source.should_skip_temp_dir(Path("/private/tmp/scratch/foo.py"), "/repo")
+        )
+
+    def test_temp_path_not_skipped_when_path_is_inside_temp_cwd(self):
+        # session 全体が一時領域内 (ephemeral project) で、path がその cwd の
+        # 内側にあるときは skip しない。
+        self.assertFalse(
+            source.should_skip_temp_dir(
+                Path("/private/tmp/proj/foo.py"), "/private/tmp/proj"
+            )
+        )
+
+    def test_sibling_temp_dir_outside_cwd_is_still_skipped(self):
+        # cwd 自体は一時領域配下でも、path が cwd の外にある別の一時ディレクトリ
+        # (兄弟プロジェクト) なら skip する。「cwd が一時領域かどうか」ではなく
+        # 「path が cwd の内側かどうか」で判定する。
+        self.assertTrue(
+            source.should_skip_temp_dir(
+                Path("/private/tmp/projB/foo.py"), "/private/tmp/projA"
+            )
+        )
+
+    def test_non_temp_path_never_skipped(self):
+        self.assertFalse(source.should_skip_temp_dir(Path("/repo/src/foo.py"), "/repo"))
+
+    def test_empty_cwd_does_not_prevent_skip(self):
+        self.assertTrue(source.should_skip_temp_dir(Path("/tmp/foo.py"), ""))
+
+
+class TestIsOutsideCwd(unittest.TestCase):
+    def test_path_inside_cwd_is_not_outside(self):
+        self.assertFalse(source.is_outside_cwd(Path("/repo/src/foo.py"), "/repo"))
+
+    def test_path_outside_cwd_is_outside(self):
+        self.assertTrue(source.is_outside_cwd(Path("/other/foo.py"), "/repo"))
+
+    def test_empty_cwd_never_outside(self):
+        self.assertFalse(source.is_outside_cwd(Path("/other/foo.py"), ""))
+
+
 class TestShouldSkipByName(unittest.TestCase):
     def test_lockfiles_skipped(self):
         for name in (

@@ -112,6 +112,7 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 |---|---|---|
 | `FILE_SPLIT_ADVISOR_DISABLED` | (未設定) | `1`/`true`/`yes`/`on` で hook を無効化 |
 | `FILE_SPLIT_ADVISOR_MAX_EMITS` | `20` | セッション内の最大 emit 回数 |
+| `FILE_SPLIT_ADVISOR_CWD_ONLY` | (未設定) | `1`/`true`/`yes`/`on` で `cwd` 外のファイルを skip する。既定 off — `--add-dir` で cwd 外を正当に編集する運用を壊さないための opt-in |
 
 ## 早期 skip 対象
 
@@ -128,6 +129,11 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 - ファイル先頭 5 行に `@generated` / `do not edit` 等の generated マーカーを
   含むファイル
 - symlink / FIFO 等の非通常ファイル、2MB 超、20,000 行超のファイル
+- **一時ディレクトリ配下のファイル** (`$TMPDIR` / `/tmp` / `/private/tmp` /
+  `/var/folders` 配下)。ただし対象ファイルが `cwd` の内側にあるとき (session
+  全体がその場限りの一時プロジェクトである場合を含む) は対象にする。Claude が
+  分析用ダンプ・handoff メモ等の一時ファイルを scratchpad に書く運用があり、
+  プロジェクト外のファイルにまで分割助言が注入されるのを防ぐ (opt-out 機構なし)
 
 ## 設計原則
 

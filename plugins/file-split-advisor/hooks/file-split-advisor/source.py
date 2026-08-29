@@ -7,6 +7,7 @@ language.py / metrics.py / judge.py を純粋関数のまま保つため、フ�
 from __future__ import annotations
 
 import fnmatch
+import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,74 @@ def resolve_path(file_path: str, cwd: str) -> Path:
     if path.is_absolute():
         return path
     return Path(cwd) / path if cwd else path
+
+
+def _temp_dir_roots() -> tuple[Path, ...]:
+    """一時ディレクトリとして扱う既知のルート。
+
+    ``$TMPDIR`` に加え、環境によらず存在しうる固定パスも列挙する
+    (``$TMPDIR`` が未設定/別プロセスの値のまま渡ってくる場合の保険)。
+    """
+    roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders")]
+    env_tmpdir = os.environ.get("TMPDIR", "").strip()
+    if env_tmpdir:
+        env_path = Path(env_tmpdir)
+        if env_path not in roots:
+            roots.append(env_path)
+    return tuple(roots)
+
+
+def is_under_temp_dir(path: Path) -> bool:
+    """``path`` が ``$TMPDIR`` / ``/tmp`` / ``/private/tmp`` / ``/var/folders`` 配下か。"""
+    for root in _temp_dir_roots():
+        try:
+            if path.is_relative_to(root):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def should_skip_temp_dir(path: Path, cwd: str) -> bool:
+    """一時領域配下のファイルを、``cwd`` に含まれない限り常時 skip する (opt-out 機構なし)。
+
+    Claude が一時スクリプト・分析用ダンプ・handoff メモを scratchpad
+    (``$TMPDIR`` 配下) に書く運用があり、プロジェクト外のこれらのファイルに
+    まで分割助言を出すのは有用でない。
+
+    ``path`` が ``cwd`` 配下にあるとき (session 全体がその場限りの一時
+    プロジェクトである場合を含む) は skip しない — この場合 ``path`` は
+    announce された cwd の一部であり、単に「一時領域にある」というだけで
+    対象外にすると、本来判定したいファイルまで黙って落としてしまう。
+
+    逆に ``cwd`` 自身が一時領域配下でも、``path`` が cwd の**外**にある別の
+    一時ディレクトリ (兄弟プロジェクト等) のときは skip する。
+    (``FILE_SPLIT_ADVISOR_CWD_ONLY`` を待たず、一時領域同士でも対象外にする)。
+    """
+    if not is_under_temp_dir(path):
+        return False
+    if cwd:
+        try:
+            if path.is_relative_to(Path(cwd)):
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+def is_outside_cwd(path: Path, cwd: str) -> bool:
+    """``FILE_SPLIT_ADVISOR_CWD_ONLY=1`` 用: ``path`` が ``cwd`` 配下でないか。
+
+    既定 off の opt-in 専用。既定で有効にすると ``--add-dir`` で cwd 外の
+    ディレクトリを正当に編集する運用を壊すため、呼び出し側で env var 判定して
+    から使うことを想定する。
+    """
+    if not cwd:
+        return False
+    try:
+        return not path.is_relative_to(Path(cwd))
+    except (TypeError, ValueError):
+        return False
 
 
 def should_skip_by_name(path: Path) -> bool:

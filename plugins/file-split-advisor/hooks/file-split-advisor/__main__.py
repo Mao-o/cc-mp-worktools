@@ -67,6 +67,19 @@ def main() -> None:
 
     path = source.resolve_path(file_path, cwd)
 
+    # 一時領域 (scratchpad 等) 配下のファイルは常時 skip (cwd 自体がそこに
+    # 無い限り)。Claude が分析用ダンプ・handoff メモをそこに書く運用があり、
+    # プロジェクト外のファイルにまで分割助言を出すのは有用でないため。
+    if source.should_skip_temp_dir(path, cwd):
+        return
+
+    # FILE_SPLIT_ADVISOR_CWD_ONLY=1 の opt-in (既定 off): --add-dir で cwd 外を
+    # 正当に編集する運用を壊さないよう、既定では cwd 外でも通常どおり判定する。
+    if _is_truthy(os.environ.get("FILE_SPLIT_ADVISOR_CWD_ONLY", "")) and source.is_outside_cwd(
+        path, cwd
+    ):
+        return
+
     if source.should_skip_by_name(path):
         return
 
