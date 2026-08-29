@@ -58,7 +58,9 @@
    (`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `README.md`) —
    Claude 向けと Codex 向けの 2 manifest の version が乖離しうる (bump 漏れ事故)
    問題に対応。両 manifest の version を統一し、README に「リリース手順」節を
-   新設して「2 manifest 同時 bump」を明記した
+   新設して「2 manifest 同時 bump」を明記した。あわせて `.codex-plugin/plugin.json`
+   の `interface.longDescription` (Codex 向け UI 表示文言) が Hub Files 機能を
+   欠いたままだったのも更新し、既存の「ドメイン型」と同じ扱いに揃えた
 7. **Python 互換性表記を 3.11+ に統一** (`README.md`,
    `skills/session-facts/SKILL.md`) — marketplace 全体の 3.11+ 方針
    (旧 3.8+ 表記からの統一) に合わせて修正
