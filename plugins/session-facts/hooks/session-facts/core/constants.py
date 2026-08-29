@@ -169,6 +169,43 @@ DEFAULT_MAX_OUTPUT_CHARS = 8000
 # the ## Scripts section on its own; cap each command's displayed length.
 MAX_SCRIPT_COMMAND_CHARS = 120
 
+# cli.py: root-level files that mark a directory as "a project" worth the
+# (potentially expensive, filesystem-walking) non-git analysis at all.
+# Deliberately broad -- one entry per stack this plugin's own detectors
+# already recognise -- because a false negative here (a real, marker-having
+# project mistaken for a bare directory) silently drops facts for a
+# legitimate repo, which is worse than occasionally still walking a
+# marker-light edge case.
+PROJECT_MARKERS = (
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "Pipfile",
+    "setup.cfg",
+    "setup.py",
+    "go.mod",
+    "Cargo.toml",
+    "pubspec.yaml",
+    "Gemfile",
+    "composer.json",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradlew",
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "Justfile",
+    "justfile",
+    "Taskfile.yml",
+    "Taskfile.yaml",
+    "deno.json",
+    "deno.jsonc",
+    "marketplace.json",
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+)
+
 # hub_files collector (core/imports.py + collectors/hub_files.py): scanning
 # every candidate file's body is real work, so cap the candidate count to
 # bound worst-case cost on very large repos, and require multiple distinct

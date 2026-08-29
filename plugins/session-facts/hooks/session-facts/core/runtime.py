@@ -36,12 +36,30 @@ def first_version(value: str) -> str:
     return value.split("#", 1)[0].strip().strip("[]{},")
 
 
+def _is_home_dir(root: Path) -> bool:
+    try:
+        return root.resolve() == Path.home().resolve()
+    except Exception:
+        return False
+
+
 def mise_config_path(root: Path) -> Optional[Path]:
     """Return the first existing mise config file under ``root``, or None.
 
     Checks ``.mise.toml`` / ``mise.toml`` (dotless) / ``.config/mise/config.toml``.
+
+    The XDG global config (``.config/mise/config.toml``) is skipped when
+    ``root`` is the user's home directory: it reflects mise's global tool
+    pins (e.g. a system-wide awscli/terraform version), not anything about
+    the "project" being analyzed, so surfacing it there is noise rather than
+    a fact about root. ``.mise.toml``/``mise.toml`` are still honoured even
+    at $HOME -- those are project-style configs a user placed there
+    deliberately, unlike the XDG path.
     """
+    skip_xdg = _is_home_dir(root)
     for name in _MISE_CONFIG_NAMES:
+        if skip_xdg and name == ".config/mise/config.toml":
+            continue
         path = root / name
         if path.exists():
             return path

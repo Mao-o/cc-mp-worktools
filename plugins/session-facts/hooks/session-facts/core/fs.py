@@ -27,6 +27,12 @@ def safe_iterdir(path: Path) -> List[Path]:
         return []
 
 
+def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
+    """True when any of ``markers`` (root-relative paths, e.g. from
+    core/constants.py's PROJECT_MARKERS) exists directly under ``root``."""
+    return any((root / marker).exists() for marker in markers)
+
+
 def walk_files(
     root: Path,
     skip_dirs: Iterable[str],

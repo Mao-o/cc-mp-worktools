@@ -161,9 +161,31 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--include-hub-files` | false | Hub Files Collector を有効化 (被参照数ランキング) |
 | `--max-hub-files` | 8 | Hub Files 最大数 |
 | `--no-recent-commits` | false | `recent_commits` 行を抑制 (gitStatus を注入する main セッション向け) |
+| `--force-walk` | false | 非 git かつ project marker が無いディレクトリでもフルの走査解析を強制 (下記「非プロジェクトディレクトリ」参照) |
 | `--emit` | `stdout` | 出力エンベロープ。`subagent-json` で SubagentStart 用 `hookSpecificOutput` JSON に包む |
 
 既定値の実体は `core/constants.py` を参照。
+
+### 非プロジェクトディレクトリでの挙動
+
+非 git かつ `--root` 直下に project marker (`package.json` / `pyproject.toml` /
+`go.mod` / `Cargo.toml` / `pubspec.yaml` / `Makefile` 等。全量は
+`core/constants.py` の `PROJECT_MARKERS` を参照) が一つも無い場合、通常の
+走査・解析は行わず次の最小ヘッダーのみを出力する:
+
+```markdown
+## Project Facts
+- git_repo: false
+- no project markers found; facts skipped
+```
+
+`$HOME` や `Desktop` など、質問目的でコーディング用途以外のディレクトリから
+起動したときに、無関係なファイル/ディレクトリ名から作られる無意味な
+facts (Structure・Test Snapshot 等 100 行超) が注入されるのを避けるため。
+従来どおりフル解析したい場合は `--force-walk` を付ける。
+
+git repo (`.git` 検出済み) の場合はこの判定自体が働かない — project marker
+の有無に関わらず常にフル解析する (git ls-files ベースの解析は元々軽量なため)。
 
 ### 出力サイズ上限
 

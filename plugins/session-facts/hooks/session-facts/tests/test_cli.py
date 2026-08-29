@@ -84,6 +84,12 @@ class PurposeFallbackTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "a.py").write_text("x = 1\n")
+            # A project marker keeps this exercising _infer_purpose()'s own
+            # fallback logic -- without one, the non-git/no-marker gate
+            # (internal backlog) would short-circuit to the minimal header
+            # before purpose inference even runs, passing this assertion
+            # for an unrelated reason.
+            (root / "Makefile").write_text("test:\n\techo hi\n")
             out = _run_cli(["--root", str(root)])
             self.assertNotIn("- purpose:", out)
 
@@ -341,6 +347,62 @@ class HugePackageJsonWithinBudgetTest(unittest.TestCase):
             (root / "package.json").write_text(json.dumps({"scripts": scripts}))
             out = _run_cli(["--root", str(root), "--max-output-chars", "500"])
             self.assertLessEqual(len(out), 500)
+
+
+class ProjectMarkerGateTest(unittest.TestCase):
+    """internal backlog: running from a non-project, non-git directory
+    (e.g. $HOME, Desktop) used to unconditionally filesystem-walk and
+    produce 100+ lines of noise built from whatever files happen to be
+    there."""
+
+    def test_non_git_no_markers_gets_minimal_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("shopping list\n")
+            (root / "Photos").mkdir()
+            out = _run_cli(["--root", str(root)])
+            self.assertEqual(
+                out.strip(),
+                "## Project Facts\n"
+                "- git_repo: false\n"
+                "- no project markers found; facts skipped",
+            )
+            self.assertNotIn("## Structure", out)
+            self.assertNotIn("## Test Snapshot", out)
+
+    def test_non_git_with_marker_gets_full_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name": "x"}')
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found", out)
+            self.assertIn("## Project Facts", out)
+
+    def test_force_walk_restores_full_analysis_without_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("shopping list\n")
+            out = _run_cli(["--root", str(root), "--force-walk"])
+            self.assertNotIn("no project markers found", out)
+
+    def test_git_repo_without_markers_is_unaffected(self):
+        # is_git bypasses the gate entirely regardless of project markers.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)  # git-init'd, only a.txt tracked
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found", out)
+            self.assertIn("## Project Facts", out)
+
+    def test_subagent_json_envelope_wraps_the_minimal_header_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            out = _run_cli(["--root", str(root), "--emit", "subagent-json"])
+            payload = json.loads(out)
+            self.assertIn(
+                "no project markers found",
+                payload["hookSpecificOutput"]["additionalContext"],
+            )
 
 
 if __name__ == "__main__":

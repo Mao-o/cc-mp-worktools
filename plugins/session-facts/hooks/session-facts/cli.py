@@ -18,10 +18,11 @@ from core.constants import (
     DEFAULT_MAX_TREE_LINES,
     MAX_TREE_DEPTH,
     MIN_TREE_DEPTH,
+    PROJECT_MARKERS,
     SKIP_DIRS,
 )
 from core.context import AnalysisConfig, RepoContext
-from core.fs import read_text, walk_files
+from core.fs import has_project_markers, read_text, walk_files
 from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
 from core.util import truncate_purpose
@@ -141,7 +142,21 @@ def summarize_repo(
     is_git: bool,
     cwd: Optional[Path] = None,
     invoked_as: Optional[str] = None,
+    force_walk: bool = False,
 ) -> str:
+    # Non-git directories with no recognizable project marker (package.json,
+    # pyproject.toml, Makefile, ...) get a filesystem walk (core/fs.py's
+    # walk_files(), capped at 5000 files but otherwise unconditional) that
+    # produces a Structure/Test Snapshot/etc. bundle built from whatever
+    # happens to be lying around -- e.g. running from $HOME or Desktop,
+    # unrelated to any coding task. Skip straight to a minimal header
+    # instead; --force-walk restores the old unconditional behaviour.
+    if not is_git and not force_walk and not has_project_markers(root, PROJECT_MARKERS):
+        return "\n".join([
+            "## Project Facts",
+            "- git_repo: false",
+            "- no project markers found; facts skipped",
+        ])
     ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
@@ -282,6 +297,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--force-walk",
+        action="store_true",
+        help=(
+            "Run the full filesystem-walk analysis on a non-git directory "
+            "even when no project marker (package.json, pyproject.toml, "
+            "Makefile, ...) is found at --root. Without this, such "
+            "directories get a minimal 2-line header instead of a facts "
+            "bundle built from whatever files happen to be there."
+        ),
+    )
+    parser.add_argument(
         "--emit",
         choices=("stdout", "subagent-json"),
         default="stdout",
@@ -331,7 +357,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ${CLAUDE_PLUGIN_ROOT}-resolved directory), which the injected output
     # would otherwise have no way to name for a follow-up --help call.
     try:
-        output = summarize_repo(root, config, is_git, cwd=resolved, invoked_as=sys.argv[0])
+        output = summarize_repo(
+            root, config, is_git, cwd=resolved, invoked_as=sys.argv[0], force_walk=args.force_walk,
+        )
     except Exception as e:
         # Per-detector/collector isolation above covers the expected failure
         # points; this guard covers the rest of summarize_repo() itself, so a
