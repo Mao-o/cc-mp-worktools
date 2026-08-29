@@ -140,6 +140,10 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 
 詳細な設計判断の経緯は [hooks/file-split-advisor/CLAUDE.md](./hooks/file-split-advisor/CLAUDE.md) 参照。
 
+## 依存関係
+
+標準ライブラリのみ。`pip install` 不要。Python 3.11+ を想定する。
+
 ## テスト
 
 ```bash
