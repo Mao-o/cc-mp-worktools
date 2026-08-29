@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 from core.constants import (
     DEFAULT_MAX_DOMAIN_TYPES,
@@ -72,68 +73,139 @@ def _infer_purpose(ctx: RepoContext) -> Optional[str]:
     return None
 
 
+def _trim_tree_sections(header: str, sections: List[str], target: int) -> List[str]:
+    """Shrink ``## Subtree`` then ``## Structure`` tails, one tree line at a
+    time, until the joined result fits ``target`` or both are down to their
+    bare header line (whichever comes first). Returns a new list; does not
+    mutate ``sections``.
+
+    Subtree is tried first: in cwd-scoped mode (SubagentStart Explore/Plan),
+    ``## Structure`` self-shrinks to a small top-level, cross-module
+    overview ("just enough to know which other modules exist") while
+    ``## Subtree`` carries the cwd-scoped detail and is usually the larger
+    of the two -- so it is the one to sacrifice first.
+    """
+    secs = list(sections)
+
+    def joined(candidate_secs: List[str]) -> str:
+        return "\n\n".join([header] + candidate_secs)
+
+    for prefix in ("## Subtree", "## Structure"):
+        for i, sec in enumerate(secs):
+            if not sec.startswith(prefix):
+                continue
+            lines = sec.splitlines()
+            sec_header, body = lines[0], lines[1:]
+            while body:
+                candidate = "\n".join([sec_header] + body)
+                candidate_secs = secs[:i] + [candidate] + secs[i + 1:]
+                if len(joined(candidate_secs)) <= target:
+                    secs[i] = candidate
+                    break
+                body.pop()
+            else:
+                secs[i] = sec_header
+            break
+        if len(joined(secs)) <= target:
+            break
+    return secs
+
+
 def _enforce_output_budget(header: str, sections: Sequence[str], max_chars: int) -> str:
     """Trim total output to max_chars, shrinking the lowest-value content
-    first, in this order: the ``## Structure`` section's tail (one line at
-    a time), then ``## Scripts``, ``## Env Keys``, and
+    first, in this order: the dynamic-depth tree sections' tails
+    (``## Subtree`` then ``## Structure``, one line at a time -- see
+    _trim_tree_sections()), then ``## Scripts``, ``## Env Keys``, and
     ``## Repo-Specific Notes`` dropped wholesale. ``## Test Snapshot``,
     ``## Service Entry Points``, and ``## Likely Commands`` are never
     touched by this cascade -- they carry facts an agent is least able to
-    reconstruct on its own. Appends a single "... (truncated)" marker if
-    anything had to give, and hard-cuts as a last resort so the result never
-    exceeds max_chars even if what remains is itself oversized.
+    reconstruct on its own.
+
+    Every step targets max_chars itself, not some pre-shrunk "leave room
+    for the marker" budget: a 1-character overage should cost 1 character
+    of tree tail, not an extra whole section dropped just to reserve
+    marker headroom. Once the cascade is as small as it can get, a marker
+    is attached only if something was actually dropped/shrunk (tracked
+    directly, not inferred from where the result length happens to land)
+    and the marker itself still fits under max_chars; if it doesn't fit,
+    the fine-grained tree-tail lever gets one more targeted trim to make
+    exactly enough room for it, without sacrificing an additional whole
+    section purely for that cosmetic purpose. Hard-cuts as a last resort
+    so the result never exceeds max_chars even if what remains is itself
+    oversized or nothing could be trimmed/dropped at all.
     """
     sections = list(sections)
+    original_sections = list(sections)
 
-    def joined() -> str:
-        return "\n\n".join([header] + sections)
+    def joined(candidate_secs: Sequence[str]) -> str:
+        return "\n\n".join([header] + list(candidate_secs))
 
-    if len(joined()) <= max_chars:
-        return joined()
+    if len(joined(sections)) <= max_chars:
+        return joined(sections)
 
     marker = "\n\n... (truncated)"
 
-    def finish(content: str) -> str:
-        """Append the marker if it fits under max_chars; otherwise hard-cut
-        with no marker (there is no length left to spare on one). Either
-        way the result never exceeds max_chars, even for a pathologically
-        small budget shorter than the marker itself.
-        """
-        if len(content) + len(marker) <= max_chars:
-            return content + marker
-        return content[:max_chars]
+    # Step 1: shrink the tree sections' tails against max_chars directly.
+    sections = _trim_tree_sections(header, sections, max_chars)
 
-    budget = max(max_chars - len(marker), 0)
-
-    # Step 1: shrink the Structure section's tail, one tree line at a time.
-    for i, sec in enumerate(sections):
-        if not sec.startswith("## Structure"):
-            continue
-        struct_lines = sec.splitlines()
-        struct_header, body = struct_lines[0], struct_lines[1:]
-        while body:
-            candidate = "\n".join([struct_header] + body)
-            if len("\n\n".join([header] + sections[:i] + [candidate] + sections[i + 1:])) <= budget:
-                sections[i] = candidate
+    # Steps 2-4: drop lower-priority sections wholesale, one at a time,
+    # stopping as soon as the result fits max_chars.
+    if len(joined(sections)) > max_chars:
+        for title in ("## Scripts", "## Env Keys", "## Repo-Specific Notes"):
+            sections = [s for s in sections if not s.startswith(title)]
+            if len(joined(sections)) <= max_chars:
                 break
-            body.pop()
-        else:
-            sections[i] = struct_header
-        break
 
-    if len(joined()) <= budget:
-        return finish(joined())
+    result = joined(sections)
+    dropped = sections != original_sections
+    if not dropped:
+        # Nothing this cascade knows how to shrink/drop was present, yet
+        # the original was over max_chars: hard-cut with no marker (there
+        # is no drop to announce).
+        return result[:max_chars]
 
-    # Steps 2-4: drop lower-priority sections wholesale, one at a time.
-    for title in ("## Scripts", "## Env Keys", "## Repo-Specific Notes"):
-        sections = [s for s in sections if not s.startswith(title)]
-        if len(joined()) <= budget:
-            return finish(joined())
+    if len(result) + len(marker) <= max_chars:
+        return result + marker
 
-    # Last resort: guarantees the result never exceeds max_chars even if
-    # what remains (header, Test Snapshot, Service Entry Points, Likely
-    # Commands, ...) is itself larger than the budget.
-    return finish(joined())
+    # Marker-headroom retry: give the fine-grained tree-tail lever one more
+    # chance to carve out exactly len(marker) more characters so the
+    # marker can be shown, without dropping any additional whole section
+    # purely for that headroom.
+    retried = _trim_tree_sections(header, sections, max_chars - len(marker))
+    retried_result = joined(retried)
+    if len(retried_result) + len(marker) <= max_chars:
+        return retried_result + marker
+
+    return result[:max_chars]
+
+
+def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
+    """The gate-skipped header for a non-project, non-git directory.
+
+    Names the analyzed directory (root) and, since neither the target
+    directory nor the existence of a flag to force a full scan is
+    otherwise discoverable from this output alone, points at --force-walk
+    so an agent that actually needed the full analysis here isn't stuck
+    with no way out. Mirrors renderer._render_more_hint()'s
+    invoked_as/shlex.quote handling: invoked_as is sys.argv[0], the
+    *directory* the interpreter was pointed at for a real hook run, so the
+    printed command keeps the ``python3 `` prefix and quotes the path in
+    case the plugin is installed under a directory containing spaces.
+    """
+    lines = [
+        "## Project Facts",
+        f"- repo_root: {root}",
+        "- git_repo: false",
+        "- no project markers found; facts skipped",
+    ]
+    if invoked_as:
+        lines.append(
+            f"- more: run `python3 {shlex.quote(invoked_as)} --force-walk` "
+            "to force the full analysis anyway"
+        )
+    else:
+        lines.append("- more: pass --force-walk to force the full analysis anyway")
+    return "\n".join(lines)
 
 
 def summarize_repo(
@@ -152,11 +224,7 @@ def summarize_repo(
     # unrelated to any coding task. Skip straight to a minimal header
     # instead; --force-walk restores the old unconditional behaviour.
     if not is_git and not force_walk and not has_project_markers(root, PROJECT_MARKERS):
-        return "\n".join([
-            "## Project Facts",
-            "- git_repo: false",
-            "- no project markers found; facts skipped",
-        ])
+        return _minimal_header(root, invoked_as)
     ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
