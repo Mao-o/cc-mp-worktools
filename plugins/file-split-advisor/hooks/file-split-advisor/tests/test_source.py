@@ -52,6 +52,21 @@ class TestIsUnderTempDir(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TMPDIR": "/custom/tmp-root"}):
             self.assertTrue(source.is_under_temp_dir(Path("/custom/tmp-root/sub/foo.py")))
 
+    def test_shallow_tmpdir_env_is_taken_verbatim(self):
+        """P3-2 (characterization test, バグ修正ではない): ``$TMPDIR`` は深さや
+        ``cwd`` との関係を検証せず root として無条件に採用する。既知の限界として
+        README に明記済み — 浅い値 (``/Users`` 等) や実際にはプロジェクトの祖先
+        ディレクトリにあたる値が設定されていると、無関係な兄弟ディレクトリの
+        ファイルまで「一時領域」扱いになる。この特性は稀な設定ミス時にしか
+        顕在化しないため、修正では既定の skip 判定表 (``is_under_temp_dir`` の
+        シグネチャ) 自体を変えるほどの対応はせず、現状の挙動をここに固定して
+        将来の変更を意図的なものにする。
+        """
+        with mock.patch.dict(os.environ, {"TMPDIR": "/Users"}):
+            self.assertTrue(
+                source.is_under_temp_dir(Path("/Users/example/dev/proj/a.py"))
+            )
+
     def test_project_path_is_not_temp(self):
         self.assertFalse(source.is_under_temp_dir(Path("/repo/src/foo.py")))
 

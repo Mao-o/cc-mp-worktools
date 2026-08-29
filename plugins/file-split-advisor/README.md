@@ -186,6 +186,11 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 - 閾値の詳細な上書き (tier ごと・言語ごとの個別設定) はできない。
   `FILE_SPLIT_ADVISOR_SCALE` は全閾値に一律の倍率をかけるのみで、
   `config.local.json` 的なきめ細かい上書き機構ではない
+- **`$TMPDIR` は無検証で一時ディレクトリの root として取り込む**。極端に浅い値
+  (`/` や `/Users` 等) や、実際にはプロジェクトの祖先ディレクトリにあたる値
+  (`/Users/you/dev` 等) が設定されていると、無関係な兄弟ディレクトリのファイル
+  まで「一時領域」扱いになり、`cwd` の外にある限り skip されてしまう
+  (通常 `$TMPDIR` は OS が管理する専用パスであり、この状況は稀)
 
 詳細な設計判断の経緯は [hooks/file-split-advisor/CLAUDE.md](./hooks/file-split-advisor/CLAUDE.md) 参照。
 
