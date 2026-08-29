@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.10.0
+
+**builder (`scripts/accounts_builder.py`) に既存値の更新・削除と、書込前の
+入力検証を追加した** (内部バックログ)。`init` は既存キーと異なる値を拒否
+するだけで、値の切替や削除の手段が無かった問題と、`--value` / `migrate`
+経由で不正な形の値が書き込まれ、後になって dispatcher の hook 実行時に
+初めて deny される問題を解消する。
+
+### 変更内容
+
+1. **`set` / `remove` サブコマンドを追加** — `set --service <svc>
+   [--value <v> | --from-cli] [--host <h>] [--dry-run|--commit]` は既存キーの
+   値を更新する (無ければ新規追加)。`remove --service <svc> [--host <h>]
+   [--dry-run|--commit]` は既存キーを削除する。どちらも `--host` で dict 値
+   (GitHub の hostname / Firebase の alias 等) の特定キーだけを追加・上書き・
+   削除できる。**最後の 1 つの host/alias を remove すると、空 dict `{}` を
+   残さずキー自体を削除する** — 空 dict は github/firebase/gcloud の
+   `verify()` が「オブジェクトが空です」で permanent deny する形のため、
+   残すと該当 service が動かなくなる。dict を受け付けない service
+   (aws/kubectl) への `--host` 指定は早期にエラーにする。書込パス固定
+   (D2)・値隠蔽 (D3)・mtime 更新による cache 無効化・CLAUDE.md/`.gitignore`
+   の自動同梱は init/migrate と同じ経路を流用する。
+   `accounts-init` SKILL の skipped 分岐 (旧: 「手動でファイルを編集するか
+   将来の switch サブコマンドを使う」) は `set`/`remove` の案内に差し替えた。
+2. **`--value` の JSON dict を構造化データとして解釈** — 従来は `--value` を
+   常に生文字列として保存していたため、`--value
+   '{"project":"p","account":"a"}'` が JSON 文字列そのものとして保存され、
+   gcloud の `verify()` が dict 期待値と JSON 文字列を比較して永久不一致に
+   なっていた。`json.loads` を試み、**dict なら dict として保存し、それ以外
+   (不正な JSON、または dict 以外の JSON 型) は生文字列のまま保存する**
+   (`init` / `set` 共通の `_parse_value`)。dict 以外を素通しするのは、数字
+   だけの username (`--value 12345`) のような値が JSON 数値/真偽値/配列に
+   暗黙変換されて型が壊れるのを防ぐため。
+3. **書込前スキーマ検証 (`_validate_entry_shape`)** — `init` / `set` /
+   `migrate` は書込前に値の形 (文字列、または service ごとの許容 dict 形) を
+   検証し、不正なら書き込まずに exit 1 にする。各 service は
+   `ACCEPTS_DICT` (dict 形を受け付けるか) と、`gcloud` のみ
+   `DICT_ALLOWED_KEYS = frozenset({"project","account"})` (許容キー) を宣言
+   する。`init`/`set` は未知キーも拒否する厳格モードだが、**`migrate` は
+   旧パスから取り込む値 (additions) だけを対象にし、かつ未知キーは許容する**
+   (`strict_keys=False`) — `gcloud.verify()` 等は宣言外のキーを黙って無視
+   するだけで拒否しないため、migrate でだけ厳格化すると verify() では通って
+   いた形を後から書けなくする退行になる。migrate が触っていない新パス側の
+   既存エントリは検証対象にしない (無関係な統合作業まで exit 1 にしないため)。
+4. **migrate の衝突判定を意味論的比較に変更** — 新旧で `merged[key] != value`
+   という値そのものの不一致だけを見ていたため、scalar `"Mao-o"` と dict
+   `{"github.com":"Mao-o"}` のように**意味的には同じアカウント**を指す新旧値
+   まで値衝突として手動解決を要求していた。`show` / `verify` で既に使って
+   いる `_entries_equal` (dict/scalar 混在の同値判定) を流用し、意味的に
+   等価なら衝突にせず new 側を維持する。
+
+### 既知の制限 (新規)
+
+- `git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は元々
+  検証対象外だったが、README に明記していなかったので追記した (挙動の変更
+  ではない)。
+
 ## 0.9.0
 
 **候補コマンドの切り出しと解釈を 1 つの解析層として作り直した** (内部バックログ

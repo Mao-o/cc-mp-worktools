@@ -23,7 +23,7 @@ allowed-tools:
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.3.1"
+  version: "0.3.2"
 ---
 
 # accounts-migrate
@@ -68,7 +68,9 @@ builder は以下の順でパスをスキャンし、統合する:
 
    - **`nothing to migrate`**: 新パスのみ存在または全パス無し。ユーザーに
      「移行作業は不要」と伝えて終了。
-   - **`error: 同一キーで値が衝突しています`** (exit 1): 新旧で値が食い違う。
+   - **`error: 同一キーで値が衝突しています`** (exit 1): 新旧で値が食い違う
+     (scalar と dict でも意味的に同じアカウントを指す形は衝突扱いにならず
+     自動で解決されるため、ここに出るのは実質的に異なる値だけ)。
      `AskUserQuestion`:
      - question: 「衝突したキーの具体値を表示して確認しますか?」
      - options: `値を表示して原因特定する (Recommended)` / `表示せず手動解決` /
@@ -76,6 +78,13 @@ builder は以下の順でパスをスキャンし、統合する:
      - 「表示」選択時は `--show-values --dry-run` で再実行。
      - ユーザーに「新旧どちらが正しいかを判断し、間違っている側のファイルを
        手動で削除するか値を合わせてから再実行」と案内。
+   - **`error: 旧パスから取り込む値の形式が不正です`** (exit 1): 旧パスの値が
+     文字列でもオブジェクトでもない (list 等) か、対象 service がオブジェクト
+     形式を受け付けない。ユーザーに「表示されたキーについて、旧パスの該当値を
+     手動で修正するか削除してから再実行してください」と案内する
+     (accounts.local.json を Claude が直接編集するのではなく、ユーザー自身に
+     旧ファイルを直させる — このエラーは新パスへの書込前に検出されるため、
+     まだ何も書き込まれていない)。
    - **正常な merge proposal**: `+ merged from deprecated/legacy: <key>` が並ぶ
      stdout。`AskUserQuestion`:
      - question: 「統合内容を値込みで確認しますか?」

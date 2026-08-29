@@ -103,6 +103,41 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 ただし Agent Skill の方が dry-run → AskUserQuestion 承認 → commit の確認
 フローを含むため、通常はこちらを使う。
 
+### 既存値の更新・削除 (`set` / `remove`)
+
+`init` は既存キーを上書きしない (異なる値なら `skipped` して終了する)。
+値を切り替えたい・削除したいときは `set` / `remove` サブコマンドを使う:
+
+```bash
+# 既存値を上書き (無ければ新規追加)。--from-cli で CLI 現在値を使うことも可能
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  set --service github --value new-user --commit
+
+# dict 値 (GHE の hostname / Firebase の alias 等) の特定キーだけを追加・上書き
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  set --service github --host ghe.example.com --value mao-corp --commit
+
+# キー全体を削除
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  remove --service github --commit
+
+# dict 値の特定キーだけを削除 (最後の 1 つを消すとキー自体が削除される —
+# 空オブジェクトを残すと該当 service が「オブジェクトが空です」で永久 deny
+# されるため)
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  remove --service github --host ghe.example.com --commit
+```
+
+`--host` は既存値がオブジェクト (または未設定) のときだけ使える。既存値が
+文字列の service に `--host` を付けるとエラーになる (先に `remove` で削除
+するか `--host` を外して上書きする)。`--value` は `init` と同じく JSON
+object 文字列 (例: `'{"project":"p","account":"a"}'`) を渡すと dict として
+保存し、それ以外は生文字列として保存する。dict を受け付けない service
+(aws / kubectl) にオブジェクトを渡す、gcloud に未対応キーを渡す、といった
+形式不正は `--commit` 前に検出して exit 1 にする (accounts.local.json への
+書込は行われない)。いずれも既定では stdout に値を出さず、`--show-values`
+明示時のみ表示する (D3 と同じ)。
+
 ## 対象コマンドと検証スキップ
 
 ### 発火するコマンド
@@ -498,6 +533,11 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
   向けの操作 (例: `gh auth refresh --hostname ghe.example.com`) は allow される
   (str 形式の期待値で複数 host にログインしている場合は dict 形式にすると
   host ごとに照合できる)
+- **`git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は
+  検証対象外**。PATTERNS は `^gh(?=\s|$)` のみで `git` コマンド自体には一致
+  しない。SSH 鍵や git credential helper 経由で別アカウントの GitHub へ
+  push/clone しても、この plugin は関与しない (対象はあくまで `gh` CLI 経由の
+  操作)
 - **`aws-vault exec prod -- aws ...` のような別コマンド経由の実行は検証対象外**
   (v0.9.0)。`aws-vault` は `aws` とは別のコマンドなので発火しない。従来は
   `^aws\b` がハイフンを語境界として拾い、hook の**既定 profile**で `sts` を
@@ -554,6 +594,10 @@ hook の出力を確認するには `claude --verbose` でセッションを起�
 (hook の stdout/stderr がターミナルに表示される)。
 
 詳細な設計背景は CLAUDE.local.md (開発者向け、リポジトリ未同梱) を参照。
+
+## 互換性
+
+- Python 3.11+ (標準ライブラリのみ)
 
 ## テスト実行
 

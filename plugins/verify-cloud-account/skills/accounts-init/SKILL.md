@@ -21,7 +21,7 @@ allowed-tools:
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.3.1"
+  version: "0.3.2"
 ---
 
 # accounts-init
@@ -82,8 +82,14 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
    - **skipped** のとき: 既存値と異なる値が提案された。init は overwrite
      しない。ユーザーに以下を案内して終了:
      1. `/verify-cloud-account:accounts-show` で現在の設定値と CLI 値を比較
-     2. 変更が必要なら accounts.local.json の該当キーを削除してから
-        再度 accounts-init を実行 (builder が新しい値で再登録する)
+     2. 変更が必要なら builder の `set` サブコマンドで更新する (accounts.local.json
+        を手動編集する必要はない):
+        ```bash
+        python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py set --service <service> --value <new-value> --commit
+        ```
+        CLI の現在値をそのまま使うなら `--value <new-value>` の代わりに
+        `--from-cli` を付ける。dict 値 (GitHub の GHE host 等) の特定
+        host/alias だけを追加・上書きしたいときは `--host <host>` を併用する。
 
 4. ユーザー選択に応じて:
    - 「値を表示」→ `--show-values --dry-run` で再実行:
@@ -102,7 +108,11 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
    (既定では `--show-values` なし。commit の stdout も値隠蔽)
 
 6. 書き込まれたパス (`.claude/verify-cloud-account/accounts.local.json`) を
-   ユーザーに伝え、`.gitignore` にまだ入れていなければ追加を促す。
+   ユーザーに伝える。builder は commit 時に `.gitignore` へのエントリ追加も
+   自動で行う (stdout に `updated: ... (... を追加)` の行が出る)。
+   `.gitignore` 自体がプロジェクトに存在しない場合だけ自動追加されない
+   (builder は `.gitignore` を新規作成しない) ため、その場合のみ手動追加を
+   促す。
 
 7. **CLAUDE.md 自動同梱の確認** — `--commit` 成功時、builder は同ディレクトリに
    `CLAUDE.md` (Claude 向け signpost) を自動生成する (既存の場合はスキップ、
