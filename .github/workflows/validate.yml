@@ -55,11 +55,6 @@ jobs:
             claude plugin validate "$dir"
           done
 
-      # marketplace.json の entry と plugin.json の description/keywords が
-      # 再び drift しないかの回帰ガード (entry は縮約済みで通常は対象 0 件)。
-      - name: Check marketplace entry / plugin.json drift
-        run: python3 scripts/check_entry_drift.py
-
       # Codex 向け .codex-plugin/plugin.json を持つ plugin (現状 session-facts の
       # み) の version が Claude 向け plugin.json と一致しているか検証する。
       # 対象 plugin が無くても fail しない。

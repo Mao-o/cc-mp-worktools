@@ -57,10 +57,13 @@ Local development:
 codex plugin marketplace add Mao-o/cc-mp-worktools
 ```
 
-続けて `codex plugin add` で `session-facts` を有効化してください。引数の正確な構文は
-Codex CLI のバージョンで変わりうるため `codex plugin --help` で確認してください
-(実機 `codex-cli 0.142.2` で marketplace 登録から `installed, enabled` までは動作確認済み。
-詳細は [plugins/session-facts/CHANGELOG.md](plugins/session-facts/CHANGELOG.md) を参照)。
+続けて `codex plugin add` で `session-facts` を有効化してください。**上記を含め、
+Codex 側のコマンド引数はこの repo では未検証です。**正確な構文は Codex CLI の
+バージョンで変わりうるため `codex plugin --help` で確認してください。
+
+裏が取れているのは「`codex-cli 0.142.2` で `session-facts` が `installed, enabled`
+になり、manifest / hook が error なく受理された」ところまでです
+(詳細は [plugins/session-facts/CHANGELOG.md](plugins/session-facts/CHANGELOG.md))。
 
 ## Renamed / removed plugins
 
