@@ -84,7 +84,7 @@ class TestResolvePaths(ReviewSetTestCase):
 
 
 class TestResolvePathsExclusion(ReviewSetTestCase):
-    """zh5.9: 除外パスは rels にも overflow にも入らず、(rel, 理由) として返る。"""
+    """除外パスは rels にも overflow にも入らず、(rel, 理由) として返る。"""
 
     def test_default_globs_exclude_secrets(self):
         claimed = [
@@ -326,7 +326,7 @@ class TestCollectBudget(ReviewSetTestCase):
 
 
 class TestByteBudget(ReviewSetTestCase):
-    """zh5.8: 合計 MAX_DIFF_BYTES はファイル単位で当て、収まらないファイルは hash を記録しない。"""
+    """合計 MAX_DIFF_BYTES はファイル単位で当て、収まらないファイルは hash を記録しない。"""
 
     def _big(self, rel: str, kib: int, seed: str = "x") -> str:
         """kib KiB ちょうどの新規ファイルを書く (1 行 64 バイト。行境界の切り詰めが効く diff)。"""
@@ -516,7 +516,7 @@ class TestIsCleanReview(ReviewSetTestCase):
         self.assertTrue(self.entry.is_clean_review(""))
 
     def test_fenced_sentinel_with_preamble_is_clean(self):
-        """zh5.1: 2026-08-20 の実出力相当 (前置き 1 文 + フェンス付き sentinel)。"""
+        """2026-08-20 の実出力相当 (前置き 1 文 + フェンス付き sentinel)。"""
         self.assertTrue(self.entry.is_clean_review("```\nREVIEW_CLEAN\n```"))
         self.assertTrue(
             self.entry.is_clean_review("critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n")

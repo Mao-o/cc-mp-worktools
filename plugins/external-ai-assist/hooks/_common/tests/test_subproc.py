@@ -1,6 +1,6 @@
 """外部 CLI 起動ヘルパー (process group 停止 / 残出力の読み捨て / 出力契約)。
 
-zh5.15: `subprocess.run(capture_output=True, timeout=…)` は timeout 時に直接の子だけ
+`subprocess.run(capture_output=True, timeout=…)` は timeout 時に直接の子だけ
 kill するため、stdout を継承した孫 (`sleep`) が取り残される。本ヘルパーは process group
 ごと停止し、timeout 直後に返ることを偽 CLI で固定する。
 

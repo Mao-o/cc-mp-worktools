@@ -12,7 +12,7 @@ SESSION = "sess-plan-0001"
 
 
 class TestCleanSentinelDoesNotBlock(HookTestCase):
-    """zh5.1: コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いして block しない。"""
+    """コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いして block しない。"""
 
     def test_real_world_fenced_clean_with_preamble(self):
         output = self.exitplan(SESSION, PLAN, FENCED_CLEAN_WITH_PREAMBLE, "REVIEW_CLEAN")

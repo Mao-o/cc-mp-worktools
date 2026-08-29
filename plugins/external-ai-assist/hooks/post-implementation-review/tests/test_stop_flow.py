@@ -88,7 +88,7 @@ class TestReviewedPathsAreNotRepeated(HookTestCase):
 
 
 class TestFencedCleanSentinel(HookTestCase):
-    """zh5.1: コードフェンス付き REVIEW_CLEAN (+ 前置き 1 文) を指摘扱いして Stop を block しない。"""
+    """コードフェンス付き REVIEW_CLEAN (+ 前置き 1 文) を指摘扱いして Stop を block しない。"""
 
     REAL_WORLD_CLEAN = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
 
@@ -381,7 +381,7 @@ def _parse_output(output: str) -> dict:
 
 
 class TestExclusion(HookTestCase):
-    """zh5.9: 機密・非コードファイルの差分を外部 AI に送らない。除外は恒久で通知を出す。"""
+    """機密・非コードファイルの差分を外部 AI に送らない。除外は恒久で通知を出す。"""
 
     SECRET = "API_KEY=sk-live-DO-NOT-SEND\n"
 
@@ -613,7 +613,7 @@ class TestLiteralPathspecFlow(HookTestCase):
 
 
 class TestByteBudgetFlow(HookTestCase):
-    """zh5.8: 予算に収まらないファイルは pending に戻り hash 未記録、巨大単一ファイルは truncated。"""
+    """予算に収まらないファイルは pending に戻り hash 未記録、巨大単一ファイルは truncated。"""
 
     def _content(self, kib: int, seed: str = "x") -> str:
         return _testutil.content_kib(kib, seed)

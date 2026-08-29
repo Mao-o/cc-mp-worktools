@@ -38,7 +38,7 @@ def clear_plugin_env(keep: dict | None = None) -> None:
         if key not in keep:
             del os.environ[key]
 
-# 2026-08-20 の Stop hook 実出力相当 (zh5.1): 前置き 1 文 + フェンス付き sentinel
+# 2026-08-20 の Stop hook 実出力相当: 前置き 1 文 + フェンス付き sentinel
 FENCED_CLEAN_WITH_PREAMBLE = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
 FENCED_CLEAN = "```\nREVIEW_CLEAN\n```"
 FINDINGS = (

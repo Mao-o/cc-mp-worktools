@@ -317,10 +317,10 @@ exitplan-review の既定 block 経路は 0.2.0 からこの deprecated 形で�
 ## 0.5.0
 
 **post-implementation-review: 機密・非コードファイルを外部に送らない除外機構 + diff 予算を
-ファイル単位に変更 (切り落としたファイルをレビュー済みにしない)** (2026-08 精査バックログ
-zh5.9 / zh5.8)。送信内容が変わるので minor bump。
+ファイル単位に変更 (切り落としたファイルをレビュー済みにしない)** (2026-08 精査バックログ)。
+送信内容が変わるので minor bump。
 
-### 1. 外部に送らないファイルの除外 (zh5.9)
+### 1. 外部に送らないファイルの除外
 
 0.4.1 までは編集パス全件の HEAD 基準 diff (untracked は全文) を Cursor に渡し、除外は
 gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、議事録や顧客メールの
@@ -373,7 +373,7 @@ gitignore 済みのみだった。tracked の `.env` / `*.pem` / 認証情報、
   `decision` / `reason` と同居) と stderr に件数・ファイル名・理由 (当たったパターン) を出す。
   内容は出さない。他 plugin (sensitive-files-guardrail 等) には依存しない
 
-### 2. diff 予算をファイル単位に変更 (zh5.8)
+### 2. diff 予算をファイル単位に変更
 
 結合テキストを `MAX_DIFF_BYTES=40000` で末尾から切る方式だったため、切り落とされた
 ファイルの hash も `complete_claim` で記録され、Cursor が一度も見ていないファイルが
@@ -459,7 +459,7 @@ stderr にも残している。
 ## 0.4.1
 
 **explore-parallel の cursor agent を読み取り専用 (`--mode plan`) で起動する** (2026-08 精査
-バックログ zh5.2)。挙動変更はこの 1 点のみ。
+バックログ)。挙動変更はこの 1 点のみ。
 
 1. **explore-parallel が書込可能モードで cursor を起動していた** — `cursor agent --trust -p`
    で起動しており `--mode plan` が無かった。cursor-agent (2026.08.11) の help では `-p/--print`
@@ -499,9 +499,9 @@ stderr にも残している。
 
 **コードフェンス付き REVIEW_CLEAN の誤 block 修正 + hook 共通ヘルパー `hooks/_common/`
 新設 + 外部 CLI の process group 停止 + CHANGELOG 新設** (2026-08 精査バックログ
-zh5.1 / zh5.27 / zh5.15 / zh5.19 を 1 batch で対応)。
+を 1 batch で対応)。
 
-### 1. REVIEW_CLEAN 判定の修正 (zh5.1, 誤 block)
+### 1. REVIEW_CLEAN 判定の修正 (誤 block)
 
 `is_clean_review` は「非空行が 1 行だけ」を要求していたが、prompts 自体が sentinel を
 コードフェンス内で提示していたため LLM はそれを写し、
@@ -538,7 +538,7 @@ exitplan-review ではこの誤 block が `EXTERNAL_AI_REVIEW_MAX` の枠も消�
 - cursor の `--output-format json` 採用は見送り (sentinel 判定で吸収でき、出力契約を
   増やさない。必要になれば別 issue)
 
-### 2. hook 共通ヘルパー `hooks/_common/` の新設 (zh5.27)
+### 2. hook 共通ヘルパー `hooks/_common/` の新設
 
 3 hook で同型だった処理を `hooks/_common/` に集約し、各 hook の `__main__.py` 冒頭で
 `hooks/` を `sys.path` に載せて参照する。`__file__` 相対の plugin root 内配置なので、
@@ -560,7 +560,7 @@ exitplan-review ではこの誤 block が `EXTERNAL_AI_REVIEW_MAX` の枠も消�
   timeout は実質効いていなかった (dead logic)
 - README の設計原則 5 (「hook 間の共通ヘルパーなし」) を現状に合わせて更新
 
-### 3. 外部 CLI の timeout 時に process group ごと停止 (zh5.15)
+### 3. 外部 CLI の timeout 時に process group ごと停止
 
 cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` から
 `_common.subproc.run_captured` (`Popen(start_new_session=True)` + `communicate(timeout)` +
@@ -604,7 +604,7 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
 - stdin は `input_text` が無ければ `/dev/null` (hook 自身の stdin = payload の pipe を
   子に継承させない)。出力は `errors="replace"` でデコードし、非 UTF-8 出力で例外にしない
 - explore-parallel のバックグラウンド起動 (`os.kill(pid, SIGTERM)` でリーダーのみ停止)
-  は zh5.13 (残骸 GC / PID 再利用対策) と合わせて扱うため本リリースでは変更していない
+  は (残骸 GC / PID 再利用対策) と合わせて扱うため本リリースでは変更していない
 
 ### 4. exitplan-review のマーカー読み取りバグ修正 (新規テストで発見)
 
@@ -613,7 +613,7 @@ cursor / codex の起動を `subprocess.run(capture_output=True, timeout=…)` �
 だけで上限カウントがリセットされていた (block → 別プラン clean → 以降 1 回多く block
 できる)。行単位で読むよう修正。
 
-### 5. CHANGELOG 新設 / docs (zh5.19)
+### 5. CHANGELOG 新設 / docs
 
 - `CHANGELOG.md` を新設し 0.1.0 → 0.3.1 を git log から起こした。撤廃済み環境変数
   `EXTERNAL_AI_POST_REVIEW_MAX` と互換挙動は 0.3.0 の Deprecated 節に記載
