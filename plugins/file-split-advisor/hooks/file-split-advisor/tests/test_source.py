@@ -161,9 +161,12 @@ class TestIsOutsideCwd(unittest.TestCase):
 
 class TestParseIgnoreGlobs(unittest.TestCase):
     def test_skips_blank_and_comment_lines(self):
-        text = "\n".join(["# comment", "", "*.generated.py", "  ", "migrations/*"])
+        # サンプル pattern は実際に (絶対パスに対して) マッチする書き方を使う
+        # (P3-1: 以前は "migrations/*" という anchored fnmatch では決して
+        # マッチしない書き方が例として使われていた)。
+        text = "\n".join(["# comment", "", "*.generated.py", "  ", "*/migrations/*"])
         self.assertEqual(
-            source._parse_ignore_globs(text), ("*.generated.py", "migrations/*")
+            source._parse_ignore_globs(text), ("*.generated.py", "*/migrations/*")
         )
 
     def test_empty_text_yields_no_patterns(self):
@@ -189,9 +192,10 @@ class TestLoadIgnoreGlobs(unittest.TestCase):
         return path
 
     def test_merges_env_and_file(self):
-        ignore_file = self._write_ignore_file("legacy/*\n# comment\n")
+        # P3-1: "*/legacy/*" (実際にマッチする書き方) をサンプルに使う。
+        ignore_file = self._write_ignore_file("*/legacy/*\n# comment\n")
         patterns = source.load_ignore_globs("*.min.py, foo_*.py", ignore_file)
-        self.assertEqual(patterns, ("*.min.py", "foo_*.py", "legacy/*"))
+        self.assertEqual(patterns, ("*.min.py", "foo_*.py", "*/legacy/*"))
 
     def test_missing_file_is_ignored(self):
         patterns = source.load_ignore_globs("*.foo", Path(self.tmp) / "does-not-exist.txt")
@@ -239,6 +243,24 @@ class TestMatchesIgnoreGlob(unittest.TestCase):
 
     def test_empty_patterns_never_match(self):
         self.assertFalse(source.matches_ignore_glob(Path("/repo/handler.py"), ()))
+
+    def test_relative_style_pattern_never_matches_absolute_path(self):
+        # P3-1 (characterization test): fnmatch は完全一致 (anchored) であり、
+        # 相対パス形に見えるパターン ("migrations/*") は絶対パスの途中にしか
+        # 現れない文字列には決してマッチしない。ディレクトリを狙うには
+        # "*/migrations/*" のように先頭に "*" を置く必要がある (README に明記)。
+        # これは既存の (意図した) 挙動を固定するテストであり、バグ修正では
+        # ない。
+        self.assertFalse(
+            source.matches_ignore_glob(
+                Path("/repo/migrations/0001_init.py"), ("migrations/*",)
+            )
+        )
+        self.assertTrue(
+            source.matches_ignore_glob(
+                Path("/repo/migrations/0001_init.py"), ("*/migrations/*",)
+            )
+        )
 
 
 class TestShouldSkipByName(unittest.TestCase):

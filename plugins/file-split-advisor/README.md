@@ -119,7 +119,13 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 `FILE_SPLIT_ADVISOR_IGNORE` に加え、`~/.claude/file-split-advisor/ignore.local.txt`
 (1 行 1 glob、`#` 始まりはコメント、空行は無視) があれば読み込んで併用する
 (gitignore の否定 `!` 等の完全な構文には対応しない、素朴な fnmatch のみ)。
-ファイルが存在しない/読めない場合は無視する (fail-open)。
+ファイルが存在しない/読めない場合 (非UTF-8 を含む) は無視する (fail-open)。
+
+**glob は fnmatch ベースの完全一致 (anchored) で、ファイル名または
+フルパス (絶対パス) のいずれかに対して判定する。** gitignore 風に見えても
+相対パス形のパターン (例: `migrations/*`) は絶対パスの途中にしか現れない
+文字列には決してマッチしない。ディレクトリを対象にしたい場合は
+`*/migrations/*` のように先頭に `*` を置く。
 
 ## 早期 skip 対象
 
