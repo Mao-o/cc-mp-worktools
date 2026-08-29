@@ -87,10 +87,15 @@ class TestSlotExhaustionNotice(HookTestCase):
     """上限到達で黙って素通りしないこと (この batch が潰そうとしている「無言」そのもの)。"""
 
     def test_cap_reached_tells_the_user(self):
+        """bd_092a232e-zh5.10: 上限はプラン単位。同じプランへ非連続に戻ってきた
+        ときに到達を通知する (別プランの block では到達しない)。"""
         os.environ["EXTERNAL_AI_REVIEW_MAX"] = "1"
-        self.assertBlocked(self.exitplan(SESSION, PLAN + "\n1 回目\n", FINDINGS, FINDINGS))
+        plan_a = PLAN + "\nプラン A\n"
+        plan_b = PLAN + "\nプラン B\n"
+        self.assertBlocked(self.exitplan(SESSION, plan_a, FINDINGS, FINDINGS))
+        self.assertBlocked(self.exitplan(SESSION, plan_b, FINDINGS, FINDINGS))  # 別プランは別枠
 
-        output = self.exitplan(SESSION, PLAN + "\n2 回目\n", FINDINGS, FINDINGS)
+        output = self.exitplan(SESSION, plan_a, FINDINGS, FINDINGS)  # A に戻ると上限到達
         message = self.assertNotBlocked(output).get("systemMessage", "")
         self.assertIn("EXTERNAL_AI_REVIEW_MAX=1", message)
         self.assertIn("見送り", message)
@@ -128,15 +133,34 @@ class TestWhatTheBudgetActuallyCaps(HookTestCase):
         self.assertEqual(self.marker(SESSION), ("", 0))
 
     def test_only_findings_consume_the_budget(self):
-        """指摘ありだけが枠を減らし、上限に達すると以後は走らない。"""
+        """指摘ありだけが枠を減らし、そのプラン自身が上限に達すると以後は見送る
+        (同じプランへ非連続に戻ってきた場合)。"""
         os.environ["EXTERNAL_AI_REVIEW_MAX"] = "2"
-        for i in range(2):
-            self.assertBlocked(self.exitplan(SESSION, f"{PLAN}\n案 {i}\n", FINDINGS, FENCED_CLEAN))
-        self.assertEqual(self.marker(SESSION)[1], 2, "指摘ありが 2 回分カウントされていない")
+        plan = f"{PLAN}\n対象プラン\n"
+        other = f"{PLAN}\n無関係な別プラン\n"
 
-        output = self.exitplan(SESSION, f"{PLAN}\n案 3\n", FINDINGS, FENCED_CLEAN)
+        self.assertBlocked(self.exitplan(SESSION, plan, FINDINGS, FENCED_CLEAN))
+        self.assertBlocked(self.exitplan(SESSION, other, FINDINGS, FENCED_CLEAN))  # last をずらす
+        self.assertBlocked(self.exitplan(SESSION, plan, FINDINGS, FENCED_CLEAN))
+        self.assertEqual(
+            self.marker_count_for(SESSION, plan), 2, "指摘ありが 2 回分カウントされていない"
+        )
+
+        self.assertBlocked(self.exitplan(SESSION, other, FINDINGS, FENCED_CLEAN))  # 再度ずらす
+        output = self.exitplan(SESSION, plan, FINDINGS, FENCED_CLEAN)
         self.assertNotBlocked(output)
         self.assertEqual(self.cursor_calls, [], "上限到達後にレビューが走った")
+
+    def test_different_plans_each_get_their_own_budget(self):
+        """bd_092a232e-zh5.10 の回帰テスト本体: 異なるプランは互いの block 回数を
+        消費しない。0.6.0 までは単一のセッション累積カウンタだったため、無関係な
+        プランを (この上限設定なら) 1 回 block すると以後**すべての**プランが
+        レビュー無しで通っていた。"""
+        os.environ["EXTERNAL_AI_REVIEW_MAX"] = "1"
+        for i in range(4):
+            self.assertBlocked(
+                self.exitplan(SESSION, f"{PLAN}\n案 {i}\n", FINDINGS, FENCED_CLEAN)
+            )
 
     def test_clean_then_findings_still_has_full_budget(self):
         """clean が枠を食わないので、その後の別プランで所定回数ブロックできる。"""

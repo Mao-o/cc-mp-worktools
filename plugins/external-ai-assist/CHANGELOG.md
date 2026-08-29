@@ -5,6 +5,85 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.7.0
+
+**2026-08 内部バックログ精査の修正 batch (誤帰属・無効時の無駄な処理・
+セッション累積漏れ・DX)。挙動変更を含むので minor bump。**
+
+### post-implementation-review: git status 失敗時の誤帰属を修正
+
+`gitscan.status_snapshot` は git status の失敗 (timeout / 非 0 終了) や
+`MAX_SNAPSHOT_ENTRIES` 超過 (不完全) の際に `{}` を返しており、Bash 実行前後の
+スナップショット比較 (`changed_between`) が「空」と「本当は全件変化した」を
+区別できなかった。片方が失敗すると、もう片方の全エントリ (他セッション・
+他人の変更を含む) が誤って pending に積まれていた。失敗/不完全のどちらも
+`None` を返すよう変更し、pre/post いずれかが `None` なら属性付けを断念する。
+
+### post-implementation-review: 無効化 / cursor 不在時の無駄な git・state 処理を削減
+
+`handle_pre_tool` / `handle_post_tool` が `bash_tracking_enabled()` しか
+見ておらず、`EXTERNAL_AI_POST_REVIEW=0` や cursor 未インストールの環境でも
+Bash/Edit のたびに git status と state 書込が走っていた。両関数の先頭で
+`review_enabled()` と `cursor.is_available()` を確認して即 return するよう
+変更。加えて `claim_pending` / `pending_count` / `last_review_at` は
+state ファイルが一度も無いセッションを開かなくなった (以前は呼ぶだけで
+「編集ゼロの空 state」が生成されていた)。
+
+### post-implementation-review: 同一ターン内で commit した変更もレビューする
+
+差分は常に現行 `HEAD` を基点にしていたため、編集後に同一ターンで
+`git commit` すると Stop 時点では差分が既に HEAD に含まれてしまい、
+一度もレビューされずに消えていた。pending 記録時点の HEAD SHA を保持し、
+Stop ではその SHA を基点に diff を取る (取得できない/到達不能なら現行 HEAD に
+フォールバック) よう変更。
+
+**開示**: pending 記録時点の SHA を基点にすると、記録から Stop までの間に
+**別セッションがそのファイルへ commit した内容**も diff に混ざりうる (HEAD
+基準なら見えなかった)。同一ファイルを複数セッションが同時編集し、かつ
+その間に commit が挟まる狭いケースに限られるが、0.3.0 で潰した「隣の
+セッションの編集をレビューしてしまう」不変条件を欠く。ガードは設けていない。
+
+### exitplan-review: `EXTERNAL_AI_REVIEW_MAX` をプラン単位にした (破壊的変更寄り)
+
+マーカーが単一の (hash, count) しか持てず、count は block のたびに +1 され
+プランが変わっても戻らなかった。長いセッションで無関係な別プランの block が
+積み重なると、以後**すべての**プランがレビュー無しで通ってしまっていた
+(README の「セッション×プラン単位」という説明と実装が乖離していた)。
+
+マーカーを JSON 化し `{hash: {count, reserved_at}}` のプラン単位に変更。
+上限判定は完全一致の hash ごとに独立する。付随して:
+
+- **仮予約の TTL 回収**: hook が harness timeout で kill されると、確定
+  (block/所見注入) も解放 (release) もされない仮予約が残っていた。
+  `RESERVATION_TTL_SEC` (両レビュアーの timeout 上限 + 300 秒) 経過後に
+  未確定の予約だけを回収する
+- **エントリ数の上限**: 1 セッションが記録するプラン数を 50 件に制限し、
+  超過分は古い順に捨てる
+- **GC**: `plan-review-markers/` と `plan-review-*.txt` (0.6.0 以前の形式を
+  含む) を mtime 48 時間で掃除する (post-implementation-review と同じ方式)
+
+**開示 (破壊的変更寄り)**: プラン単位化の帰結として、`EXTERNAL_AI_REVIEW_MAX`
+は**もはや「差し戻し→修正→再 ExitPlanMode」という往復の総回数を縛らない**。
+修正のたびにプラン本文の hash が変わるため、新しいプランとして毎回フルの
+予算が与えられる。0.6.0 までの「セッション累積」はこの往復を打ち止めに
+できていたが、無関係な別プランを巻き込む副作用があったため、0.7.0 では
+副作用の除去を優先しこの上限機能を受け入れた (README の待ち時間見積りを
+書き換え済み)。
+
+### DX: テストディレクトリの単体指定と flaky テストの修正
+
+`hooks/*/tests/__init__.py` (4 ディレクトリ全て) が `_testutil` 等の共有
+ヘルパーをトップレベル名で import する構成のため、`python3 -m unittest
+tests.test_x.Class.method` のような単体指定や pytest のノード ID で
+`ModuleNotFoundError` になっていた。各 `__init__.py` に自分のディレクトリを
+sys.path へ足す処理を追加し解消。
+
+`hooks/_common/tests/test_subproc.py::TestNormalExitCleanup::test_normal_exit_without_leftovers_is_not_delayed`
+は wall-clock (elapsed < 0.5秒) で「待っていない」を測っていたため、
+プロセス起動オーバヘッド自体が閾値に近い環境で flaky だった (実測 0.511 秒で
+fail)。状態遷移の観測 (`kill_process_group` が呼ばれていないことを直接検証)
+に置換し、時間に依存しないようにした。
+
 ## 0.6.0
 
 **離脱率低減: 3 機能を独立に切れるスイッチ + timeout の環境変数化 + 完了通知 + 頻度制御**

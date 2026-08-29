@@ -81,26 +81,49 @@ class TestMarkerStateMachine(HookTestCase):
         self.assertEqual(self.cursor_calls, [], "同一 hash は再レビューしない")
 
     def test_block_limit_is_enforced(self):
+        """bd_092a232e-zh5.10: 上限はプラン (hash) 単位。別プランには波及しない。
+
+        0.6.0 までは単一のセッション累積カウンタだったため、別プランの block でも
+        この上限が消費され、以後すべてのプランがレビュー無しで通っていた。
+        """
         os.environ["EXTERNAL_AI_REVIEW_MAX"] = "1"
-        self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, "REVIEW_CLEAN"))
-        output = self.exitplan(SESSION, PLAN + "\n修正済み\n", FINDINGS, "REVIEW_CLEAN")
+        plan_a = PLAN
+        plan_b = PLAN + "\n修正済み\n"
+        self.assertBlocked(self.exitplan(SESSION, plan_a, FINDINGS, "REVIEW_CLEAN"))
+        # 別プランは別枠を持つので、A が上限でも B はレビューされ block される
+        self.assertBlocked(self.exitplan(SESSION, plan_b, FINDINGS, "REVIEW_CLEAN"))
+
+        # A 自身に戻ってくると、A 自身の上限 (1) に達しているので見送り
+        output = self.exitplan(SESSION, plan_a, FINDINGS, "REVIEW_CLEAN")
         self.assertNotBlocked(output)
         self.assertEqual(self.cursor_calls, [])
         self.assertIn("上限", self.last_stderr)
 
     def test_release_after_partial_consumption_keeps_count(self):
-        """block (count 1) → 別プラン clean (reserve 2 → release 1) の後も上限が効くこと。
+        """block (count 1) → 別プラン clean (reserve→release で count 0 に戻る) の後も、
+        元のプラン自身の count は保たれていること。
 
         0.3.1 までは release 後の本文 `"\\n1"` を hash="1" / count=0 と誤読し、上限が
-        1 回分リセットされていた。
+        1 回分リセットされていた (テキスト形式時代の回帰保護)。JSON 化後も
+        「release は decrement であって reset ではない」という核心は変わらない。
         """
         os.environ["EXTERNAL_AI_REVIEW_MAX"] = "2"
-        self.assertBlocked(self.exitplan(SESSION, PLAN + "A", FINDINGS, "REVIEW_CLEAN"))
-        self.assertNotBlocked(self.exitplan(SESSION, PLAN + "B", FENCED_CLEAN, "REVIEW_CLEAN"))
-        self.assertEqual(self.marker(SESSION), ("", 1))
-        self.assertBlocked(self.exitplan(SESSION, PLAN + "C", FINDINGS, "REVIEW_CLEAN"))
-        self.assertNotBlocked(self.exitplan(SESSION, PLAN + "D", FINDINGS, "REVIEW_CLEAN"))
-        self.assertEqual(self.cursor_calls, [], "上限 2 回に達したらレビューしない")
+        plan_a = PLAN + "A"
+        plan_b = PLAN + "B"
+        self.assertBlocked(self.exitplan(SESSION, plan_a, FINDINGS, "REVIEW_CLEAN"))
+        self.assertNotBlocked(self.exitplan(SESSION, plan_b, FENCED_CLEAN, "REVIEW_CLEAN"))
+        self.assertEqual(self.marker_count_for(SESSION, plan_a), 1, "A の枠が保たれていない")
+        self.assertEqual(self.marker_count_for(SESSION, plan_b), 0, "clean は枠を残さない")
+
+        # A 自身の累積 (1) に対してもう 1 回分ブロックできる (上限 2)
+        self.assertBlocked(self.exitplan(SESSION, plan_a, FINDINGS, "REVIEW_CLEAN"))
+        self.assertEqual(self.marker_count_for(SESSION, plan_a), 2)
+
+        # 別プランを挟んでから A に 3 回目戻ると、A 自身の上限に達しているので見送り
+        self.assertNotBlocked(self.exitplan(SESSION, plan_b, FENCED_CLEAN, "REVIEW_CLEAN"))
+        output = self.exitplan(SESSION, plan_a, FINDINGS, "REVIEW_CLEAN")
+        self.assertNotBlocked(output)
+        self.assertEqual(self.cursor_calls, [], "A 自身の上限 2 回に達したらレビューしない")
 
     def test_sessions_have_independent_markers(self):
         os.environ["EXTERNAL_AI_REVIEW_MAX"] = "1"
