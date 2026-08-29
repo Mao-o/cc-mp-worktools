@@ -31,8 +31,10 @@ tests/          — unittest（python3 -m unittest discover tests）
 0. **marker gate**（`cli.py::summarize_repo`）: 非 git かつ `--root` 直下に
    project marker（`core/constants.py` の `PROJECT_MARKERS`）が一つも無く
    `--force-walk` も無い場合は、ここで最小ヘッダー（`repo_root` /
-   `git_repo: false` / `--force-walk` ヒント）のみを返して以降の全ステップ
-   を skip する（走査コストの高い非プロジェクト dir 分析を避けるため）。
+   `git_repo: false` / `--force-walk` ヒント）のみを `_enforce_output_budget()`
+   （手順 6 と同じ関数、セクション無しで呼ぶ）に通してから返し、以降の全
+   ステップを skip する（走査コストの高い非プロジェクト dir 分析を避け、
+   かつ `--max-output-chars` をこの経路でも実際の上限として働かせるため）。
    ただし mise の 3 config 名（`.mise.toml` / `mise.toml` /
    `.config/mise/config.toml`）は `has_project_markers()` の単純 exists()
    判定ではなく `core/runtime.py::mise_config_path()` 経由で判定する。

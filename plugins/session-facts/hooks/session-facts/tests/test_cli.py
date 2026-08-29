@@ -576,6 +576,35 @@ class ProjectMarkerHomeMiseExclusionTest(unittest.TestCase):
             self.assertNotIn("no project markers found", out)
 
 
+class MinimalHeaderOutputBudgetTest(unittest.TestCase):
+    """Isolated-review P2-d (PR #67): the marker gate's early return
+    (_minimal_header()) bypassed _enforce_output_budget() entirely, so
+    --max-output-chars was not actually a ceiling on the whole output on
+    this path -- only on the (never-reached) full-analysis path. A budget
+    of 100 still let the minimal header (~150-200+ chars depending on how
+    long --root/invoked_as are) through untouched."""
+
+    def test_minimal_header_is_capped_by_max_output_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            out = summarize_repo(
+                root, AnalysisConfig(max_output_chars=100), is_git=False, invoked_as=None,
+            )
+            self.assertLessEqual(len(out), 100)
+
+    def test_minimal_header_under_budget_is_returned_unchanged(self):
+        # Sanity check: a generous (default) budget must still yield the
+        # full, untruncated minimal header -- this must not regress into
+        # always hard-cutting regardless of budget.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            out = summarize_repo(root, AnalysisConfig(), is_git=False, invoked_as=None)
+            self.assertIn("- no project markers found; facts skipped", out)
+            self.assertIn("--force-walk", out)
+
+
 class ProjectMarkerCoverageTest(unittest.TestCase):
     """internal backlog P2-1: PROJECT_MARKERS used to list only ~27 files,
     missing markers for stacks this plugin's own detectors/collectors

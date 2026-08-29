@@ -250,7 +250,12 @@ def summarize_repo(
     # unrelated to any coding task. Skip straight to a minimal header
     # instead; --force-walk restores the old unconditional behaviour.
     if not is_git and not force_walk and not _has_relevant_project_markers(root):
-        return _minimal_header(root, invoked_as)
+        # Route through the same budget enforcement as the full-analysis
+        # path below: with no sections to shrink/drop, this is a no-op when
+        # the header already fits max_chars, and a marker-free hard cut
+        # when it doesn't (a long --root/invoked_as can push this well past
+        # a small custom --max-output-chars otherwise).
+        return _enforce_output_budget(_minimal_header(root, invoked_as), [], config.max_output_chars)
     ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
     ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
     ctx.results["is_git_repo"] = is_git
