@@ -86,6 +86,34 @@ class TestAppliedMultipliers(unittest.TestCase):
         self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
 
 
+class TestScale(unittest.TestCase):
+    """yaf.10: FILE_SPLIT_ADVISOR_SCALE (全閾値への一律倍率)。"""
+
+    def test_default_scale_is_neutral(self):
+        v = judge.judge(_metrics(line_count=0), "python", "normal")
+        self.assertAlmostEqual(v.thresholds["review"], 300)
+
+    def test_scale_multiplies_all_thresholds(self):
+        v = judge.judge(_metrics(line_count=0), "python", "normal", scale=2.0)
+        self.assertAlmostEqual(v.thresholds["note"], 300)
+        self.assertAlmostEqual(v.thresholds["review"], 600)
+        self.assertAlmostEqual(v.thresholds["warn"], 1000)
+        self.assertAlmostEqual(v.thresholds["strong"], 1600)
+
+    def test_scale_combines_with_language_and_role_multipliers(self):
+        # java (1.5) x test (1.6) x scale (0.5) = 1.2
+        v = judge.judge(_metrics(line_count=0), "java", "test", scale=0.5)
+        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 1.6 * 0.5)
+
+    def test_scale_not_recorded_in_applied_multipliers(self):
+        # scale はグローバル config であり per-file の推論シグナルではないため、
+        # message.py の breakdown 表示対象である applied_multipliers には
+        # 含めない (実効閾値の計算にだけ反映する)。
+        v = judge.judge(_metrics(line_count=0), "python", "normal", scale=2.0)
+        self.assertNotIn("scale", v.applied_multipliers)
+        self.assertAlmostEqual(v.applied_multipliers["language"], 1.0)
+
+
 class TestTierBoundaries(unittest.TestCase):
     """半開区間: note <= x < review, review <= x < warn, ... (係数 1.0 相当の言語/role で確認)。"""
 

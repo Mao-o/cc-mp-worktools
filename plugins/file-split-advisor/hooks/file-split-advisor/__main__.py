@@ -25,6 +25,7 @@ import source  # noqa: E402
 import state  # noqa: E402
 
 DEFAULT_MAX_EMITS = 20
+DEFAULT_SCALE = 1.0
 
 
 def _is_truthy(value: str) -> bool:
@@ -39,6 +40,28 @@ def _get_max_emits() -> int:
         return max(0, int(raw))
     except ValueError:
         return DEFAULT_MAX_EMITS
+
+
+def _get_scale() -> float:
+    """``FILE_SPLIT_ADVISOR_SCALE``: 全閾値 (note/review/warn/strong) に掛ける倍率。
+
+    未設定・数値変換失敗・0 以下はすべて既定 (1.0) にフォールバックする
+    (0 以下だと実効閾値が 0 以下になり判定が意味を失うため)。
+    """
+    raw = os.environ.get("FILE_SPLIT_ADVISOR_SCALE", "").strip()
+    if not raw:
+        return DEFAULT_SCALE
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_SCALE
+    if value <= 0:
+        return DEFAULT_SCALE
+    return value
+
+
+def _get_ignore_patterns() -> tuple[str, ...]:
+    return source.load_ignore_globs(os.environ.get("FILE_SPLIT_ADVISOR_IGNORE", ""))
 
 
 def main() -> None:
@@ -80,6 +103,11 @@ def main() -> None:
     ):
         return
 
+    # FILE_SPLIT_ADVISOR_IGNORE (カンマ区切り glob) + ~/.claude/file-split-advisor/
+    # ignore.local.txt (gitignore 風 glob) に一致するファイルを skip する。
+    if source.matches_ignore_glob(path, _get_ignore_patterns()):
+        return
+
     if source.should_skip_by_name(path):
         return
 
@@ -99,7 +127,7 @@ def main() -> None:
     role = "test" if language.is_test_path(path) else "normal"
 
     file_metrics = metrics_mod.compute(loaded, lang, path)
-    verdict = judge.judge(file_metrics, lang, role)
+    verdict = judge.judge(file_metrics, lang, role, scale=_get_scale())
 
     # tier が ok でも state を更新する: 記録した行数を最新に保たないと、縮んで
     # ok まで戻ったファイルが古い行数と比較され、その後の成長を誤って抑制する。

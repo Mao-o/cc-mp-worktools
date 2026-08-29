@@ -113,6 +113,13 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 | `FILE_SPLIT_ADVISOR_DISABLED` | (未設定) | `1`/`true`/`yes`/`on` で hook を無効化 |
 | `FILE_SPLIT_ADVISOR_MAX_EMITS` | `20` | セッション内の最大 emit 回数 |
 | `FILE_SPLIT_ADVISOR_CWD_ONLY` | (未設定) | `1`/`true`/`yes`/`on` で `cwd` 外のファイルを skip する。既定 off — `--add-dir` で cwd 外を正当に編集する運用を壊さないための opt-in |
+| `FILE_SPLIT_ADVISOR_IGNORE` | (未設定) | 判定対象から除外する glob (カンマ区切り、fnmatch)。ファイル名・フルパスの両方に対して判定する |
+| `FILE_SPLIT_ADVISOR_SCALE` | `1.0` | 全閾値 (note/review/warn/strong) に一律で掛ける倍率。0 以下や数値に変換できない値は既定 (1.0) にフォールバックする |
+
+`FILE_SPLIT_ADVISOR_IGNORE` に加え、`~/.claude/file-split-advisor/ignore.local.txt`
+(1 行 1 glob、`#` 始まりはコメント、空行は無視) があれば読み込んで併用する
+(gitignore の否定 `!` 等の完全な構文には対応しない、素朴な fnmatch のみ)。
+ファイルが存在しない/読めない場合は無視する (fail-open)。
 
 ## 早期 skip 対象
 
@@ -134,6 +141,8 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
   全体がその場限りの一時プロジェクトである場合を含む) は対象にする。Claude が
   分析用ダンプ・handoff メモ等の一時ファイルを scratchpad に書く運用があり、
   プロジェクト外のファイルにまで分割助言が注入されるのを防ぐ (opt-out 機構なし)
+- `FILE_SPLIT_ADVISOR_IGNORE` / `ignore.local.txt` に一致するファイル (上記
+  「環境変数」参照)
 
 ## 設計原則
 
@@ -168,7 +177,9 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
   多様性・制御フロー密度が主戦力になる
 - import カテゴリ分類はキーワード辞書によるヒューリスティックで、精密な import
   resolver ではない
-- 閾値のローカル上書き機構 (`config.local.json` 等) は v1 に含まない
+- 閾値の詳細な上書き (tier ごと・言語ごとの個別設定) はできない。
+  `FILE_SPLIT_ADVISOR_SCALE` は全閾値に一律の倍率をかけるのみで、
+  `config.local.json` 的なきめ細かい上書き機構ではない
 
 詳細な設計判断の経緯は [hooks/file-split-advisor/CLAUDE.md](./hooks/file-split-advisor/CLAUDE.md) 参照。
 

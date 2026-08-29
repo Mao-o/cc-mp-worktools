@@ -123,6 +123,67 @@ def is_outside_cwd(path: Path, cwd: str) -> bool:
         return False
 
 
+def _default_ignore_file() -> Path:
+    """ユーザーの永続 ignore 設定の既定パス。
+
+    ``sensitive-files-guardrail`` の ``patterns.local.txt`` 慣例に倣い、
+    plugin 名を切った独自ディレクトリに置く。
+    """
+    return Path.home() / ".claude" / "file-split-advisor" / "ignore.local.txt"
+
+
+def _parse_ignore_globs(text: str) -> tuple[str, ...]:
+    """gitignore 風の簡易パーサ: 1 行 1 glob、``#`` 始まりはコメント、空行は無視。
+
+    否定 (``!``) やディレクトリ限定の末尾 ``/`` 等、完全な .gitignore 構文は
+    実装しない (fnmatch ベースの素朴な glob のみ)。
+    """
+    patterns = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        patterns.append(stripped)
+    return tuple(patterns)
+
+
+def load_ignore_globs(env_value: str, ignore_file: Path | None = None) -> tuple[str, ...]:
+    """``FILE_SPLIT_ADVISOR_IGNORE`` (カンマ区切り) と ``ignore.local.txt`` を統合する。
+
+    ファイルが存在しない/読めない場合は黙って無視する (fail-open)。
+    """
+    patterns: list[str] = []
+    for part in env_value.split(","):
+        stripped = part.strip()
+        if stripped:
+            patterns.append(stripped)
+
+    path = ignore_file if ignore_file is not None else _default_ignore_file()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    patterns.extend(_parse_ignore_globs(text))
+    return tuple(patterns)
+
+
+def matches_ignore_glob(path: Path, patterns: tuple[str, ...]) -> bool:
+    """``path`` がいずれかの ignore glob (fnmatch) に一致するか。
+
+    ファイル名のみの glob (``test_*.py`` 等) とフルパスの glob
+    (``*/migrations/*`` 等) の両方を許すため、``path.name`` と
+    ``path.as_posix()`` の両方に対して判定する。
+    """
+    if not patterns:
+        return False
+    full = path.as_posix()
+    name = path.name
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(full, pattern):
+            return True
+    return False
+
+
 def should_skip_by_name(path: Path) -> bool:
     """lockfile / minified / generated-path パターンに一致するか (内容を見ない早期 skip)。"""
     name = path.name

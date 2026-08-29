@@ -79,7 +79,7 @@ class Verdict:
 
 
 def _effective_thresholds(
-    language: str, role: str, metrics: Metrics
+    language: str, role: str, metrics: Metrics, scale: float = 1.0
 ) -> tuple[dict[str, float], dict[str, float]]:
     """実効閾値と、その根拠になった個別係数 (``applied_multipliers``) を返す。
 
@@ -88,6 +88,10 @@ def _effective_thresholds(
     効いたときだけ 1.0 でない値になる)。role はここでは記録するが、
     message.py 側は既存の role_note 表示と役割が重複するため breakdown には
     含めない (test 係数の可視化は role_note に残す)。
+
+    ``scale`` (``FILE_SPLIT_ADVISOR_SCALE``) はユーザーが設定するグローバルな
+    倍率で、ファイル個別の推論シグナルではないため ``applied_multipliers`` には
+    含めない (message.py の breakdown 表示対象外)。実効閾値の計算には反映する。
     """
     is_declarative = metrics.control_flow_density < DECLARATIVE_THRESHOLD
     multipliers = {
@@ -95,7 +99,9 @@ def _effective_thresholds(
         "role": ROLE_MULTIPLIER.get(role, 1.0),
         "declarative": DECLARATIVE_RELAXATION if is_declarative else 1.0,
     }
-    combined = multipliers["language"] * multipliers["role"] * multipliers["declarative"]
+    combined = (
+        multipliers["language"] * multipliers["role"] * multipliers["declarative"] * scale
+    )
     thresholds = {tier: base * combined for tier, base in BASE_THRESHOLDS.items()}
     return thresholds, multipliers
 
@@ -122,7 +128,7 @@ def _collect_signals(metrics: Metrics, role: str) -> tuple[str, ...]:
     return tuple(signals)
 
 
-def judge(metrics: Metrics, language: str, role: str) -> Verdict:
+def judge(metrics: Metrics, language: str, role: str, scale: float = 1.0) -> Verdict:
     """emit 判定行列:
 
     - tier が warn/strong → 常に emit (signal 数によらない)
@@ -139,8 +145,11 @@ def judge(metrics: Metrics, language: str, role: str) -> Verdict:
     構造シグナルは行数判定を上書きする独立ゲートではなく、(1) effective_thresholds
     (言語/role/宣言的緩和)、(2) note tier の昇格判定、(3) review tier の昇格判定
     の 3 箇所で行数評価の解像度を上げる役割を持つ。
+
+    ``scale`` (既定 1.0) は ``FILE_SPLIT_ADVISOR_SCALE`` から呼び出し側が渡す
+    グローバルな倍率。全閾値に一律で掛かる (0.3.0)。
     """
-    thresholds, multipliers = _effective_thresholds(language, role, metrics)
+    thresholds, multipliers = _effective_thresholds(language, role, metrics, scale)
     tier = _compute_tier(metrics.line_count, thresholds)
     signals = _collect_signals(metrics, role)
 

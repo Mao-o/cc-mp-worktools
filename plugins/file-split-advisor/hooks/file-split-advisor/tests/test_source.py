@@ -92,6 +92,77 @@ class TestIsOutsideCwd(unittest.TestCase):
         self.assertFalse(source.is_outside_cwd(Path("/other/foo.py"), ""))
 
 
+class TestParseIgnoreGlobs(unittest.TestCase):
+    def test_skips_blank_and_comment_lines(self):
+        text = "\n".join(["# comment", "", "*.generated.py", "  ", "migrations/*"])
+        self.assertEqual(
+            source._parse_ignore_globs(text), ("*.generated.py", "migrations/*")
+        )
+
+    def test_empty_text_yields_no_patterns(self):
+        self.assertEqual(source._parse_ignore_globs(""), ())
+
+    def test_strips_surrounding_whitespace(self):
+        self.assertEqual(source._parse_ignore_globs("  test_*.py  \n"), ("test_*.py",))
+
+
+class TestLoadIgnoreGlobs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_ignore_file(self, content: str) -> Path:
+        path = Path(self.tmp) / "ignore.local.txt"
+        path.write_text(content)
+        return path
+
+    def test_merges_env_and_file(self):
+        ignore_file = self._write_ignore_file("legacy/*\n# comment\n")
+        patterns = source.load_ignore_globs("*.min.py, foo_*.py", ignore_file)
+        self.assertEqual(patterns, ("*.min.py", "foo_*.py", "legacy/*"))
+
+    def test_missing_file_is_ignored(self):
+        patterns = source.load_ignore_globs("*.foo", Path(self.tmp) / "does-not-exist.txt")
+        self.assertEqual(patterns, ("*.foo",))
+
+    def test_empty_env_value_and_no_file(self):
+        patterns = source.load_ignore_globs("", Path(self.tmp) / "does-not-exist.txt")
+        self.assertEqual(patterns, ())
+
+    def test_env_value_with_only_whitespace_entries_ignored(self):
+        patterns = source.load_ignore_globs(" , ,", Path(self.tmp) / "does-not-exist.txt")
+        self.assertEqual(patterns, ())
+
+    def test_default_ignore_file_path(self):
+        expected = Path.home() / ".claude" / "file-split-advisor" / "ignore.local.txt"
+        self.assertEqual(source._default_ignore_file(), expected)
+
+
+class TestMatchesIgnoreGlob(unittest.TestCase):
+    def test_matches_by_filename(self):
+        self.assertTrue(source.matches_ignore_glob(Path("/repo/test_foo.py"), ("test_*.py",)))
+
+    def test_matches_by_full_path(self):
+        self.assertTrue(
+            source.matches_ignore_glob(
+                Path("/repo/migrations/0001_init.py"), ("*/migrations/*",)
+            )
+        )
+
+    def test_no_match(self):
+        self.assertFalse(
+            source.matches_ignore_glob(Path("/repo/handler.py"), ("test_*.py",))
+        )
+
+    def test_empty_patterns_never_match(self):
+        self.assertFalse(source.matches_ignore_glob(Path("/repo/handler.py"), ()))
+
+
 class TestShouldSkipByName(unittest.TestCase):
     def test_lockfiles_skipped(self):
         for name in (

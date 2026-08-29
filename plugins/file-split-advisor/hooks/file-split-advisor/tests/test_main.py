@@ -71,6 +71,13 @@ class BaseMainTest(unittest.TestCase):
         )
         self._base_dir_patcher.start()
         self.addCleanup(self._base_dir_patcher.stop)
+        # 実行機の ~/.claude/file-split-advisor/ignore.local.txt に依存しない
+        # よう、既定では存在しないパスを指すようにする (個別テストで上書き可能)。
+        self._ignore_file_patcher = mock.patch.object(
+            source, "_default_ignore_file", return_value=Path(self.tmp) / "_no_ignore_file"
+        )
+        self._ignore_file_patcher.start()
+        self.addCleanup(self._ignore_file_patcher.stop)
 
     def _cleanup(self):
         import shutil
@@ -219,6 +226,74 @@ class TestDisableEnvVar(BaseMainTest):
         with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_DISABLED": "1"}):
             out, _ = _run_main(self._envelope(path))
         self.assertEqual(out, "")
+
+
+class TestIgnoreGlobEnvVar(BaseMainTest):
+    """yaf.10: FILE_SPLIT_ADVISOR_IGNORE / ignore.local.txt による除外設定。"""
+
+    def test_ignored_glob_suppresses_output(self):
+        path = self._write("test_helpers.py", _python_lines(900))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_IGNORE": "test_*.py"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertEqual(out, "")
+
+    def test_non_matching_glob_still_judged(self):
+        path = self._write("checkout_flow.py", _python_lines(900))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_IGNORE": "test_*.py"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: strong", self._context(out))
+
+    def test_ignore_local_txt_suppresses_output(self):
+        path = self._write("legacy_migration.py", _python_lines(900))
+        ignore_file = Path(self.tmp) / "ignore.local.txt"
+        ignore_file.write_text("legacy_*.py\n")
+        with mock.patch.object(source, "_default_ignore_file", return_value=ignore_file):
+            out, _ = _run_main(self._envelope(path))
+        self.assertEqual(out, "")
+
+    def test_env_and_file_patterns_are_merged(self):
+        # env var の glob だけでファイルが一致しなくても、ignore.local.txt 側の
+        # glob と併用できることを確認する。
+        path = self._write("legacy_migration.py", _python_lines(900))
+        ignore_file = Path(self.tmp) / "ignore.local.txt"
+        ignore_file.write_text("legacy_*.py\n")
+        with mock.patch.object(source, "_default_ignore_file", return_value=ignore_file):
+            with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_IGNORE": "unrelated_*.py"}):
+                out, _ = _run_main(self._envelope(path))
+        self.assertEqual(out, "")
+
+
+class TestScaleEnvVar(BaseMainTest):
+    """yaf.10: FILE_SPLIT_ADVISOR_SCALE による全閾値の倍率調整。"""
+
+    def test_scale_up_suppresses_output_below_scaled_threshold(self):
+        # checkout_flow.py @ 550 行は既定 (scale=1.0) では warn (500 以上) だが、
+        # scale=2.0 なら実効閾値が note=300/review=600 になり note tier (シグナル
+        # 0 個) に留まり emit しない。
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "2.0"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertEqual(out, "")
+
+    def test_scale_down_emits_earlier(self):
+        # scale=0.5 なら warn 閾値が 250 相当になり、260 行で warn tier に達し
+        # (signal 数によらず emit) 通知される。
+        path = self._write("checkout_flow.py", _python_lines(260))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "0.5"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
+
+    def test_invalid_scale_falls_back_to_default(self):
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "not-a-number"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
+
+    def test_non_positive_scale_falls_back_to_default(self):
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "0"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
 
 
 class TestTempDirSkip(BaseMainTest):

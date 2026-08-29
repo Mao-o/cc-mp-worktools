@@ -21,11 +21,11 @@
   解析のみ
 - **`line_count` が `note` 閾値未満のファイルの責務混在検出は範囲外**。構造
   シグナルが何個点火していても、行数が小さければ emit しない
-- **閾値のローカル上書き機構 (`config.local.json` 等) は v1 に含まない**。
-  `sensitive-files-guardrail/patterns.local.txt` の運用実績から保守コストは
-  分かっているが、v1 は誰にも使われておらず何をチューニングしたいかの実証
-  データがない (YAGNI)。追加するなら全閾値上書きより path-ignore リストの方が
-  需要を見積もりやすいと想定している
+- **`config.local.json` 的な、tier ごと・言語ごとの個別閾値上書きは 0.3.0 でも
+  含まない**。0.3.0 で `FILE_SPLIT_ADVISOR_IGNORE`/`ignore.local.txt`
+  (path-ignore) と `FILE_SPLIT_ADVISOR_SCALE` (全閾値一律倍率) を追加した
+  (詳細は「拡張ポイント」節参照) が、これは「対象を除外する」「感度を一律に
+  調整する」の 2 手段であり、tier/言語単位の individual な閾値上書きではない
 
 ## ディレクトリ構成
 
@@ -68,7 +68,9 @@ flowchart TD
     T -- yes --> Z
     T -- no --> W{CWD_ONLY かつ<br/>is_outside_cwd?}
     W -- yes --> Z
-    W -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated}
+    W -- no --> IG{IGNORE glob /<br/>ignore.local.txt に一致?}
+    IG -- yes --> Z
+    IG -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated}
     E -- yes --> Z
     E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
     N -- no --> Z
@@ -78,7 +80,7 @@ flowchart TD
     G -- yes --> Z
     G -- no --> H[language 判定<br/>detect_language / is_test_path]
     H --> I[metrics.compute<br/>line_count/def_count/import多様性/制御フロー密度/vague filename]
-    I --> J[judge.judge<br/>effective_thresholds → tier → signals → should_emit]
+    I --> J[judge.judge<br/>effective_thresholds (SCALE 反映) → tier → signals → should_emit]
     J --> P[change.classify_growth<br/>Edit の行数差 → grew/not_grew/unknown]
     P --> K[state.try_reserve_emit<br/>行数記録 + 成長判定 + debounce + emit上限を単一ロック区間で]
     K -- False --> Z
@@ -306,9 +308,17 @@ echo '{"session_id":"smoke","cwd":"'"$PWD"'","tool_name":"Write",
 
 ## 拡張ポイント
 
-- **path-ignore リスト**: 「このパスは無視する」という需要が見えたら
-  `source.should_skip_by_name` の並びに追加するのが次の一手候補 (config.local
-  的な全閾値上書きより先に検討する)
+- **path-ignore リスト (0.3.0 で実装済み)**: `source.load_ignore_globs` /
+  `source.matches_ignore_glob` が `FILE_SPLIT_ADVISOR_IGNORE` (カンマ区切り
+  glob) と `~/.claude/file-split-advisor/ignore.local.txt` (gitignore 風、
+  1 行 1 glob) を統合する。fnmatch ベースの素朴な glob のみで、否定 (`!`) 等の
+  完全な .gitignore 構文は実装していない。`__main__.py` は
+  `source.should_skip_by_name` より前でこの判定を行う
+- **全閾値の一律倍率 (0.3.0 で実装済み)**: `FILE_SPLIT_ADVISOR_SCALE` を
+  `judge.judge(..., scale=...)` に渡す。tier/言語ごとの個別上書きではなく
+  グローバルな倍率のみ。`judge.Verdict.applied_multipliers` には含めない
+  (per-file の推論シグナルではなくグローバル config のため、message.py の
+  breakdown 表示対象外)
 - **新しい import カテゴリ / キーワード**: `metrics.py::IMPORT_CATEGORY_KEYWORDS`
   に追記する。カテゴリ自体を増やす場合は `judge.py::IMPORT_DIVERSITY_SIGNAL_THRESHOLD`
   (現状 7 カテゴリ中 4 種) も見直す
