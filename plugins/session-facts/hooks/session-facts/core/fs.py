@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import islice
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -54,26 +55,47 @@ def has_nested_project_markers(
         current, depth = queue.pop(0)
         if depth > 0:
             visited += 1
-            if visited > max_dirs:
-                return False
             if has_project_markers(current, markers):
                 return True
-        if depth >= max_depth:
+        if depth >= max_depth or visited >= max_dirs:
+            continue
+        # ディレクトリ全体を列挙・ソートしてから打ち切ると、子が数十万ある
+        # ディレクトリでメモリと時間を食い、この関数が主張する上限が意味を
+        # 失う (hook の実行時間上限を超えうる)。残り予算ぶんだけ取り出して
+        # 打ち切る。そのため cap に達したときの結果は列挙順に依存するが、
+        # 走査を避けたい相手はまさに巨大なディレクトリなので許容する。
+        remaining = max_dirs - visited - len(queue)
+        if remaining <= 0:
             continue
         try:
-            entries = sorted(current.iterdir())
+            for entry in islice(
+                (e for e in current.iterdir() if _is_candidate_dir(e, skip)),
+                remaining,
+            ):
+                queue.append((entry, depth + 1))
         except OSError:
             continue
-        for entry in entries:
-            name = entry.name
-            if name.startswith(".") or name in skip:
-                continue
-            try:
-                if entry.is_dir() and not entry.is_symlink():
-                    queue.append((entry, depth + 1))
-            except OSError:
-                continue
     return False
+
+
+def _is_candidate_dir(entry: Path, skip: set) -> bool:
+    """入れ子マーカー探索で降りてよいディレクトリか。
+
+    ``.git`` を持つディレクトリは独立した repo であり、その存在は親を
+    「プロジェクト」にしない。``walk_files(..., respect_subgit=True)`` も
+    同じ境界で刈るので、判定をそちらに揃える (揃えないと、clone を 1 つ
+    置いただけのディレクトリが gate を通り、しかも walk 側は clone を刈る
+    ため無関係な兄弟だけを拾った誤解を招く facts が出る)。
+    """
+    name = entry.name
+    if name.startswith(".") or name in skip:
+        return False
+    try:
+        if not entry.is_dir() or entry.is_symlink():
+            return False
+        return not (entry / ".git").exists()
+    except OSError:
+        return False
 
 
 def has_project_markers(root: Path, markers: Iterable[str]) -> bool:

@@ -934,3 +934,48 @@ class ZeroBudgetEmitsNothingTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(buf.getvalue(), "")
 
+
+class NestedDiscoveryBoundsTest(unittest.TestCase):
+    """PR #67 (Codex P2): 入れ子マーカー探索の 2 つの穴。
+
+    1. clone を 1 つ置いただけのディレクトリが「ワークスペース」と判定される。
+       walk 側は clone を .git 境界で刈るため、無関係な兄弟だけを拾った
+       誤解を招く facts が出る
+    2. 打ち切り前にディレクトリ全体を列挙・ソートしており、子が大量にある
+       ディレクトリで上限が意味を失う
+    """
+
+    def test_directory_holding_only_a_clone_is_still_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Desktop"
+            clone = root / "repo"
+            clone.mkdir(parents=True)
+            (clone / ".git").mkdir()
+            (clone / "package.json").write_text("{}\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertIn("no project markers found; facts skipped", out)
+
+    def test_enumeration_stops_at_the_visit_budget(self):
+        from core.fs import has_nested_project_markers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for i in range(200):
+                (root / f"d{i:03d}").mkdir()
+            seen = []
+            real_iterdir = Path.iterdir
+
+            def counting_iterdir(self):
+                for entry in real_iterdir(self):
+                    seen.append(entry)
+                    yield entry
+
+            with mock.patch.object(Path, "iterdir", counting_iterdir):
+                self.assertFalse(
+                    has_nested_project_markers(
+                        root, ("package.json",), (), max_depth=2, max_dirs=8
+                    )
+                )
+            # 200 件すべてを列挙してから打ち切るのではなく、予算ぶんで止まる。
+            self.assertLess(len(seen), 200)
+
