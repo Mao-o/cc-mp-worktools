@@ -266,6 +266,31 @@ class TestDataBlockAssumptions(unittest.TestCase):
                 )
                 self.assertTrue(any(line.startswith("note:") for line in lines))
 
+    def test_entries_line_sits_inside_the_scan_window(self):
+        """``_entries_total`` の走査窓 (header 3 行 + 2) を生成側と突合する。
+
+        ``entries:`` は本文 2 行目 (``format:`` の直後) という前提で読んでいる。
+        renderer が前に 1 行足すと総数を読めなくなり、省略マーカーの件数が
+        **予算超過時にだけ** 静かに「落とした行数」へ戻る (0.26.0 外部レビュー
+        R1 で直した挙動そのものに逆戻りする)。
+        """
+        from redaction.engine import build_reason
+        from redaction.keyonly_scan import format_keyonly
+
+        keys = [f"KEY_{i}" for i in range(7)]
+        block = build_reason(
+            ".env", "opaque", format_keyonly(keys, 100, fmt_hint="opaque")
+        )
+        lines = block.split("\n")
+        self.assertTrue(
+            lines[M._DATA_HEADER_LINES + 1].startswith(M._DATA_ENTRIES_PREFIX),
+            lines[: M._DATA_HEADER_LINES + 2],
+        )
+        self.assertEqual(M._entries_total(block), len(keys))
+        # 明細行に ``entries:`` が現れても窓の外なので拾わない
+        self.assertEqual(M._entries_total(block.replace("KEY_0", "entries: 99")),
+                         len(keys))
+
     def test_omit_marker_is_not_counted_as_detail_line(self):
         """省略マーカーは明細行と同じインデントを持つが明細ではない。"""
         marker = M._omit_marker(3, unit=M._OMIT_UNIT_KEYS)
@@ -1165,6 +1190,180 @@ class TestOmitMarkerUnit(unittest.TestCase):
         reason = redact(BytesIO(data), ".env", len(data))
         joined = "\n".join(M._fit_data_block(reason, 900))
         self.assertRegex(joined, r"\.\.\. \(\d+ more lines\)")
+
+    def test_keyonly_marker_counts_hidden_keys_not_dropped_lines(self):
+        """**0.26.0 外部レビュー R1 の本体**。
+
+        折り畳みは preview 上限 (``PREVIEW_CAP`` = 60) の **さらに内側**で
+        効くので、「落とした行数」を出すと preview 段階で隠れた分が数から
+        消える。500 鍵の 60 行 preview から 23 行しか残らなくても
+        ``... (37 more keys)`` としか言わず、477 件不可視という事実を隠して
+        いた (レビュー指摘そのもの)。
+        """
+        keys, block = _keyonly_block(n=500)
+        fitted = M._fit_data_block(block, 1200)
+        visible = M._count_detail_lines(fitted)
+        self.assertGreater(visible, 0, "前提: 鍵行が残る budget で測る")
+        self.assertLess(visible, len(keys), "前提: 一部しか見えていない")
+        n = self._marker_count(fitted)
+        self.assertEqual(
+            n,
+            len(keys) - visible,
+            f"marker が {n} 件と言っているが、見えていない鍵は"
+            f" {len(keys) - visible} 件 (entries={len(keys)} / 表示={visible})",
+        )
+
+    def test_marker_and_visible_keys_account_for_every_key(self):
+        """全 budget 帯で「見えている鍵 + marker 件数 == entries」を固定する。
+
+        単一 fixture の assertion だと別サイズで再混入するため、**性質**として
+        押さえる (``TestKeyonlyFoldKeepsKeys`` と同じ趣旨)。
+        """
+        for n in (61, 100, 200, 500):
+            keys, block = _keyonly_block(n=n)
+            for budget in range(400, 3300, 50):
+                with self.subTest(n=n, budget=budget):
+                    fitted = M._fit_data_block(block, budget)
+                    if not fitted:
+                        continue
+                    self.assertLessEqual(
+                        len("\n".join(fitted).encode("utf-8")), budget
+                    )
+                    count = self._marker_count(fitted)
+                    if count is None:
+                        continue
+                    self.assertEqual(
+                        count + M._count_detail_lines(fitted), len(keys)
+                    )
+
+    def test_marker_does_not_overstate_when_non_key_lines_are_dropped(self):
+        """``omitted`` (落とした行数) は明細行以外も数えるので鍵数を過大に言う。
+
+        鍵 5 個のファイルをきつく畳むと ``scanned_bytes:`` / ``keys (...)``
+        見出し / ``note:`` も落ちるため、行数ベースでは ``entries: 5`` と
+        ``... (9 more keys)`` が同居していた。
+        """
+        keys, block = _keyonly_block(n=5)
+        for budget in range(200, 700, 5):
+            with self.subTest(budget=budget):
+                count = self._marker_count(M._fit_data_block(block, budget))
+                if count is not None:
+                    self.assertLessEqual(count, len(keys))
+
+    def test_omit_count_rules(self):
+        """件数の決め方 3 通りを直接固定する (``_omit_count``)。"""
+        kept = [
+            '<DATA untrusted="true">', "NOTE: x", "file: .env",
+            "format: opaque (large, keys-only scan)", "entries: 500",
+            "  1. A", "  2. B",
+        ]
+        self.assertEqual(M._count_detail_lines(kept), 2)
+        # 総数が読めない → 従来どおり「落とした行数」
+        self.assertEqual(M._omit_count(7, kept, None), 7)
+        # 読めた → 総数 − 残した明細行数 (preview 段階で隠れた分も含む)
+        self.assertEqual(M._omit_count(7, kept, 500), 498)
+        # 総数より明細行が多い = 前提が崩れたブロック → 行数に戻す
+        self.assertEqual(M._omit_count(7, kept, 2), 7)
+
+    def test_falls_back_to_line_count_when_entries_is_unreadable(self):
+        """``entries:`` を読めないブロックは従来どおり「落とした行数」。
+
+        件数の意味が静かに入れ替わるより、読めた時だけ厳密解にする。
+        """
+        _keys, block = _keyonly_block(n=200)
+        broken = block.replace("entries: 200", "entries: n/a", 1)
+        self.assertIsNone(M._entries_total(broken))
+
+        fitted = M._fit_data_block(broken, 1200)
+        # note 保護つきの段が採用される前提 (明細行が残る budget を選んでいる)
+        self.assertTrue(fitted[-2].startswith("note:"), fitted[-2:])
+        body = broken.split("\n")[:-2]  # note と閉じタグは body ではない
+        kept_body = [
+            x for x in fitted
+            if not x.startswith(M._OMIT_MARKER_PREFIX)
+            and not x.startswith("note:")
+            and x != M._DATA_CLOSING_TAG
+        ]
+        self.assertEqual(
+            self._marker_count(fitted), len(body) - len(kept_body)
+        )
+
+    def test_marker_width_reserve_is_not_inflated_by_the_total(self):
+        """件数の**桁が変わらない**限り、表示できる鍵行を 1 行も減らさない。
+
+        marker の予約幅は件数の桁数で決まる。``entries:`` の総数 (最大
+        ``MAX_KEYS`` = 500) で常に予約すると、桁が増えたぶん (67 → 500 で
+        +1 byte) だけ収まっていた鍵行が落ちる。``_fit_data_block_core`` は
+        「落とした行数」の幅で予約し、実際に出す件数がその幅に収まらない
+        ときだけ畳み直す。
+
+        比較対象は **同じ byte 数で ``entries:`` だけ読めなくしたブロック**
+        (``n/a`` は ``100`` と同じ 3 文字)。100 鍵なら件数は行数ベースでも
+        鍵数ベースでも 2 桁なので、予約幅は同じでなければならない = 明細行数
+        は全 budget で一致する。
+        """
+        _keys, block = _keyonly_block(n=100)
+        broken = block.replace("entries: 100", "entries: n/a", 1)
+        self.assertEqual(len(block.encode("utf-8")), len(broken.encode("utf-8")))
+        for budget in range(300, 3300, 5):
+            with self.subTest(budget=budget):
+                self.assertEqual(
+                    M._count_detail_lines(M._fit_data_block(block, budget)),
+                    M._count_detail_lines(M._fit_data_block(broken, budget)),
+                )
+
+    def test_wider_count_costs_at_most_one_detail_line(self):
+        """件数の桁が実際に増えるケースの代償を **1 行以内**に押さえる。
+
+        500 鍵では鍵数ベースの件数 (3 桁) が行数ベース (2 桁) より 1 byte
+        太るので、きつい budget では鍵行が 1 行減りうる (逆に増える budget も
+        ある)。ここを 2 行以上に広げる変更は情報量の退行なので落とす。
+        """
+        _keys, block = _keyonly_block(n=500)
+        broken = block.replace("entries: 500", "entries: n/a", 1)
+        for budget in range(300, 3300, 5):
+            with self.subTest(budget=budget):
+                self.assertLessEqual(
+                    abs(
+                        M._count_detail_lines(M._fit_data_block(block, budget))
+                        - M._count_detail_lines(M._fit_data_block(broken, budget))
+                    ),
+                    1,
+                )
+
+    def test_fold_terminates_on_pathological_input(self):
+        """予約の畳み直しループが止まる (hook は 2 秒 timeout の下で動く)。
+
+        件数の桁が最大 (``MAX_KEYS``) / next_action が長い / budget が極小、の
+        組合せでも戻ってくること。実測では畳み直しは最大 2 周。
+        """
+        from redaction.engine import build_reason
+        from redaction.keyonly_scan import MAX_KEYS, format_keyonly
+
+        block = build_reason(
+            ".env",
+            "opaque",
+            format_keyonly([f"K{i:03d}" for i in range(MAX_KEYS)], 10**9,
+                           fmt_hint="opaque"),
+        )
+        long_action = M._OMIT_ACTION_USE_READ * 4
+        for budget in range(50, 900, 7):
+            with self.subTest(budget=budget):
+                fitted = M._fit_data_block(block, budget, next_action=long_action)
+                self.assertLessEqual(
+                    len("\n".join(fitted).encode("utf-8")), budget
+                )
+
+    @staticmethod
+    def _marker_count(fitted: list[str]) -> int | None:
+        """省略マーカーの件数 (無ければ None)。"""
+        import re
+
+        for line in fitted:
+            m = re.match(r"^  \.\.\. \((\d+) more ", line)
+            if m:
+                return int(m.group(1))
+        return None
 
     def test_keyonly_marker_constant_matches_format_keyonly_output(self):
         """``core.messages`` 側の sniff 用定数を生成側の出力と突合する。

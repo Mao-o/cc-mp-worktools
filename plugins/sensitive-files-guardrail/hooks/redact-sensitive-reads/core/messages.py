@@ -1375,6 +1375,66 @@ def _omit_unit_for(block: str) -> str:
     return _OMIT_UNIT_LINES
 
 
+# per-format renderer が本文 2 行目に必ず置く総数の行 (``entries: N``)。
+# ``format:`` 行の直後という位置も ``TestDataBlockAssumptions`` で生成側と
+# 突合する。
+_DATA_ENTRIES_PREFIX = "entries: "
+
+
+def _entries_total(block: str) -> int | None:
+    """``<DATA>`` ブロックの見出しから ``entries: N`` の総数を読む。
+
+    省略マーカーに「実際に見えていない件数」を出すために使う (0.26.0 外部
+    レビュー R1)。``format:`` 行の sniff (``_omit_unit_for``) と同じ header
+    領域だけを見る — 明細行に ``entries:`` が現れることはないが、走査範囲を
+    見出しに限れば将来 renderer が変わっても誤検出しない。
+
+    Returns:
+        読めた総数。行が無い / 整数でない場合は ``None`` (呼出側は従来の
+        「落とした行数」に fallback する)。
+    """
+    for line in block.split("\n", _DATA_HEADER_LINES + 2)[
+        : _DATA_HEADER_LINES + 2
+    ]:
+        if line.startswith(_DATA_ENTRIES_PREFIX):
+            try:
+                return int(line[len(_DATA_ENTRIES_PREFIX):].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _omit_count(omitted: int, kept: list[str], total: int | None) -> int:
+    """省略マーカーに出す件数を決める。
+
+    既定は ``omitted`` (= 落とした**行数**)。``total`` (``entries:``) を
+    読めた場合は **総数 − 残した明細行数** = 「実際に見えていない件数」を出す。
+
+    行数ベースが不足する理由 (0.26.0 外部レビュー R1): 折り畳みは preview
+    上限 (``keyonly_scan.PREVIEW_CAP``) の **さらに内側**で効くため、
+    「60 行の preview のうち 37 行を落とした」しか言えず、preview 段階で
+    隠れた 440 件が数から消える (500 鍵で ``... (37 more keys)`` と出て
+    477 件不可視を隠していた)。
+
+    逆向きの誤りもある: ``omitted`` は明細行以外 (``scanned_bytes:`` /
+    ``keys (...)`` 見出し / note 保護を外した 2 段目の ``note:``) も数えるので、
+    きつい折り畳みでは鍵数を **過大**に言う (掃引実測: 5 鍵のファイルで
+    ``entries: 5`` と ``... (9 more keys)`` が同居。最大 +4)。``total`` が
+    読めるブロックでは ``entries:`` と明細行の対応が renderer 側で保証されて
+    いる (``TestDataBlockAssumptions``) ので ``hidden`` が厳密解であり、
+    過小にも過大にもならない。
+
+    ``hidden <= 0`` は「総数より多くの明細行が残っている」= 前提が崩れた
+    ブロックなので、従来値 (``omitted``) に戻す。0 を出して「隠れているものは
+    無い」と言い切るより、行数ベースの概数のほうが安全側 (省略マーカー自体が
+    「何かは落ちた」の signal であり、0 と併記すると矛盾する)。
+    """
+    if total is None:
+        return omitted
+    hidden = total - _count_detail_lines(kept)
+    return hidden if hidden > 0 else omitted
+
+
 def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]:
     """``<DATA>`` 包装済み minimal info を ``budget`` byte 以内の行列に収める。
 
@@ -1403,6 +1463,11 @@ def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]
     など) では note 保護つきの結果を返す — 得るものが無いのに免責事項だけ
     落とすのは純損失なため。閉じタグと省略マーカーはどちらの段でも残る。
 
+    省略マーカーの件数は、``entries:`` を読める keys-only ブロックでは
+    **総数 − 残した明細行数** (``_omit_count``)。折り畳みは preview 上限
+    (``keyonly_scan.PREVIEW_CAP``) の内側で効くので、落とした**行数**では
+    preview 段階で隠れた分を数え落とす (0.26.0 外部レビュー R1)。
+
     Args:
         block: ``redaction.file_render.render_for_bash`` の 1 番目の戻り値。
         budget: この block に使ってよい byte 数 (各行の改行 1 byte を含む)。
@@ -1413,13 +1478,19 @@ def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]
         採用した行のリスト。1 行も採用できなければ空リスト。
     """
     unit = _omit_unit_for(block)
+    # 総数は keys-only のときだけ使う (省略マーカーの単位が「鍵」= 明細行と
+    # 1:1 対応する形のときにしか「総数 − 残した明細行数」が意味を持たない。
+    # dotenv 等は preview 上限が無いので落とした行数と一致する)。
+    total = _entries_total(block) if unit == _OMIT_UNIT_KEYS else None
     fitted = _fit_data_block_core(
         block, budget, protect_note=True, next_action=next_action, unit=unit,
+        total=total,
     )
     if _count_detail_lines(fitted):
         return fitted
     relaxed = _fit_data_block_core(
         block, budget, protect_note=False, next_action=next_action, unit=unit,
+        total=total,
     )
     if _count_detail_lines(relaxed) > _count_detail_lines(fitted):
         return relaxed
@@ -1433,8 +1504,13 @@ def _fit_data_block_core(
     protect_note: bool,
     next_action: str = "",
     unit: str = _OMIT_UNIT_LINES,
+    total: int | None = None,
 ) -> list[str]:
-    """``_fit_data_block`` の実装本体 (note 保護の有無を切替可能にしたもの)。"""
+    """``_fit_data_block`` の実装本体 (note 保護の有無を切替可能にしたもの)。
+
+    ``total`` は ``entries:`` の総数 (``_entries_total``)。渡すと省略マーカーの
+    件数が「総数 − 残した明細行数」になる (``_omit_count``)。
+    """
     lines = block.split("\n")
     closing: list[str] = []
     body = lines
@@ -1445,27 +1521,36 @@ def _fit_data_block_core(
             closing = [body[-1]] + closing
             body = body[:-1]
     closing_cost = sum(_line_cost(x) for x in closing)
-    # 省略マーカーの上限幅 (件数が最大のとき = 最長) で予約する。実際に出る
-    # マーカーはこれ以下なので、予約しておけば予算超過は起きない。
+    # 省略マーカーの幅は件数の桁数で変わる。まず「落とした行数」の上限
+    # (``len(body)``) で予約し、実際に出す件数がその予約に収まらなければ
+    # 予約を広げて畳み直す。``total`` (最大 ``keyonly_scan.MAX_KEYS``) で
+    # 常に予約すると桁が増えたぶん (例: 67 → 500 で +1 byte) だけ、収まって
+    # いたはずの明細行を 1 行落とす — 掃引実測で 183 点。
+    # 停止性: 予約 cost は毎周 **狭義単調増加**し、件数は
+    # ``max(len(body), total)`` に有界なので必ず止まる (実測は最大 2 周)。
     marker_reserve = _line_cost(_omit_marker(len(body), next_action, unit))
+    while True:
+        kept: list[str] = []
+        used = 0
+        for i, line in enumerate(body):
+            cost = _line_cost(line)
+            has_rest = i < len(body) - 1
+            need = cost + closing_cost + (marker_reserve if has_rest else 0)
+            if used + need > budget:
+                break
+            used += cost
+            kept.append(line)
 
-    kept: list[str] = []
-    used = 0
-    for i, line in enumerate(body):
-        cost = _line_cost(line)
-        has_rest = i < len(body) - 1
-        need = cost + closing_cost + (marker_reserve if has_rest else 0)
-        if used + need > budget:
-            break
-        used += cost
-        kept.append(line)
-
-    if len(kept) <= _DATA_HEADER_LINES:
-        return []
-    omitted = len(body) - len(kept)
-    if omitted:
-        kept.append(_omit_marker(omitted, next_action, unit))
-    return kept + closing
+        if len(kept) <= _DATA_HEADER_LINES:
+            return []
+        omitted = len(body) - len(kept)
+        if not omitted:
+            return kept + closing
+        marker = _omit_marker(_omit_count(omitted, kept, total), next_action, unit)
+        if _line_cost(marker) <= marker_reserve:
+            kept.append(marker)
+            return kept + closing
+        marker_reserve = _line_cost(marker)
 
 
 def _edit_kind_suggestion(kind: str, is_dotenv: bool, tool_label: str) -> str:

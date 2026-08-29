@@ -827,9 +827,31 @@ class TestKeyonlyLineGranularity(unittest.TestCase):
         # 総数は entries: が持つ (header 側で重複して数を主張しない)
         self.assertIn(f"entries: {len(keys)}", out)
         header = next(ln for ln in lines if ln.startswith("keys"))
-        self.assertIn("first", header)
+        self.assertIn(f"max {PREVIEW_CAP} shown", header)
         # 末尾は必ず note (折り畳みの note 保護が効く形を維持する)
         self.assertTrue(lines[-1].startswith("note:"), lines[-1])
+
+    def test_preview_header_is_an_upper_bound_not_a_claim(self):
+        """header は **上限** として書く (0.26.0 外部レビュー R1)。
+
+        header の後段で ``core.messages._fit_data_block`` が予算でさらに畳む
+        ため、``first N shown`` のような断定形は折り畳み後に嘘になる
+        (500 鍵で「60 個表示」と言いながら実際は 23 行しか残らない)。
+        """
+        from redaction.keyonly_scan import PREVIEW_CAP, format_keyonly
+
+        keys = [f"KEY_{i:04d}" for i in range(PREVIEW_CAP * 3)]
+        header = next(
+            ln
+            for ln in format_keyonly(keys, 1000, fmt_hint="opaque").split("\n")
+            if ln.startswith("keys")
+        )
+        self.assertNotIn("first", header)
+        for word in ("max", "up to", "at most"):
+            if word in header:
+                break
+        else:  # pragma: no cover - 失敗時のメッセージ用
+            self.fail(f"header が上限表現になっていない: {header!r}")
 
     def test_all_keys_shown_header_has_no_partial_wording(self):
         from redaction.keyonly_scan import format_keyonly
@@ -837,6 +859,7 @@ class TestKeyonlyLineGranularity(unittest.TestCase):
         out = format_keyonly(["A", "B"], 10, fmt_hint="opaque")
         header = next(ln for ln in out.split("\n") if ln.startswith("keys"))
         self.assertNotIn("first", header)
+        self.assertNotIn("max", header)
 
 
 class TestTomlRecursionErrorLabel(unittest.TestCase):

@@ -238,6 +238,24 @@ def format_keyonly(
     preview 上限の告知は末尾行ではなく **header 行**に置く。末尾行は畳んだ
     ときに真っ先に落ちるうえ、omit marker の件数と二重になって「いくつ
     落ちたか」が読めなくなるため。総数は ``entries:`` が持つ。
+
+    ### header は「上限」として、かつ **短く** 書く (0.26.0 外部レビュー R1)
+
+    文言は ``max N shown`` — **``first N shown`` と書いてはいけない**。
+    この header 行は preview 上限を告げるが、そのあとに
+    ``core.messages._fit_data_block`` が予算で **さらに** 畳むため、実際に
+    残る鍵行は N 未満になりうる (500 鍵で 60 行の preview のうち 23 行しか
+    残らない実測例がある)。断定形だと折り畳み後に header だけが「60 個
+    見せている」と嘘をつく。上限表現なら畳まれても真のまま。
+    実際に何個隠れているかは省略マーカーが ``entries:`` 基準で言う
+    (``core.messages._omit_marker`` / ``_entries_total``)。
+
+    ``up to N shown`` (旧 ``first N shown`` と同じ byte 数) ではなく
+    **2 byte 短い ``max``** を選んでいるのは、同じ R1 対応で省略マーカーの
+    件数が「落とした行数」から「隠れている鍵数」に変わり、桁が増えて 1〜2
+    byte 太るため。この 2 byte を header 側で返さないと、きつい予算では
+    **鍵行が 1 行落ちる** (コーパス 1,623 件で 6 件が退行、``max`` なら 0 件で
+    3 件は逆に増える)。文言を長くするときは同じ計測をやり直すこと。
     """
     label = _KEYONLY_REASON_LABELS.get(reason, "large")
     lines = [
@@ -250,7 +268,7 @@ def format_keyonly(
     else:
         shown = keys[:PREVIEW_CAP]
         if len(keys) > PREVIEW_CAP:
-            lines.append(f"keys (in order, first {len(shown)} shown):")
+            lines.append(f"keys (in order, max {len(shown)} shown):")
         else:
             lines.append("keys (in order):")
         lines.extend(f"  {i}. {k}" for i, k in enumerate(shown, 1))
