@@ -206,13 +206,21 @@ def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
         "- git_repo: false",
         "- no project markers found; facts skipped",
     ]
+    # ヒントには解析対象 root を必ず含める。`--root` を明示して別ディレクトリ
+    # から起動された場合、root を落としたヒントをそのまま実行すると
+    # `Path.cwd()` が解析され、ヘッダーに出している repo_root とは別の
+    # ディレクトリの結果が返る (復帰経路として機能しない)。
+    root_arg = f"--root {shlex.quote(str(root))}"
     if invoked_as:
         lines.append(
-            f"- more: run `python3 {shlex.quote(invoked_as)} --force-walk` "
-            "to force the full analysis anyway"
+            f"- more: run `python3 {shlex.quote(invoked_as)} {root_arg} "
+            "--force-walk` to force the full analysis anyway"
         )
     else:
-        lines.append("- more: pass --force-walk to force the full analysis anyway")
+        lines.append(
+            f"- more: pass `{root_arg} --force-walk` to force the full "
+            "analysis anyway"
+        )
     return "\n".join(lines)
 
 

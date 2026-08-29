@@ -469,8 +469,12 @@ class ProjectMarkerGateTest(unittest.TestCase):
             fake_invoked_as = str(root / "hooks" / "session-facts")
             with mock.patch.object(sys, "argv", [fake_invoked_as]):
                 out = _run_cli(["--root", str(root)])
+            # PR #67 round 3 (Codex P2): --root を明示して別ディレクトリから
+            # 起動された場合、ヒントが root を落とすと Path.cwd() が解析され、
+            # ヘッダーの repo_root とは別のディレクトリの結果が返る。
             self.assertIn(
-                f"- more: run `python3 {fake_invoked_as} --force-walk` "
+                f"- more: run `python3 {fake_invoked_as} "
+                f"--root {shlex.quote(str(root.resolve()))} --force-walk` "
                 "to force the full analysis anyway",
                 out,
             )
@@ -482,8 +486,11 @@ class ProjectMarkerGateTest(unittest.TestCase):
             spaced = str(root / "plugin root" / "session-facts")
             with mock.patch.object(sys, "argv", [spaced]):
                 out = _run_cli(["--root", str(root)])
-            self.assertIn(f"`python3 {shlex.quote(spaced)} --force-walk`", out)
-            self.assertNotIn(f"`python3 {spaced} --force-walk`", out)
+            root_arg = f"--root {shlex.quote(str(root.resolve()))}"
+            self.assertIn(
+                f"`python3 {shlex.quote(spaced)} {root_arg} --force-walk`", out
+            )
+            self.assertNotIn(f"`python3 {spaced} {root_arg} --force-walk`", out)
 
     def test_minimal_header_fallback_wording_when_invoked_as_is_none(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,9 +498,23 @@ class ProjectMarkerGateTest(unittest.TestCase):
             (root / "notes.txt").write_text("x\n")
             out = summarize_repo(root, AnalysisConfig(), is_git=False, invoked_as=None)
             self.assertIn(
-                "- more: pass --force-walk to force the full analysis anyway", out
+                f"- more: pass `--root {shlex.quote(str(root))} --force-walk` "
+                "to force the full analysis anyway",
+                out,
             )
             self.assertNotIn("run `", out)
+
+    def test_minimal_header_hint_quotes_analyzed_root_with_spaces(self):
+        """PR #67 round 3 (Codex P2): ヒントに載せる root も quote する。
+        空白を含むディレクトリでヒントをそのまま実行すると引数が割れる。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "my project"
+            root.mkdir()
+            (root / "notes.txt").write_text("x\n")
+            out = summarize_repo(root, AnalysisConfig(), is_git=False, invoked_as=None)
+            self.assertIn(shlex.quote(str(root)), out)
+            self.assertNotIn(f"--root {root} --force-walk", out)
 
     def test_non_git_with_marker_gets_full_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:

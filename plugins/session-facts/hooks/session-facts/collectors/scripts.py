@@ -92,6 +92,14 @@ def _has_compose_file(root: Path) -> bool:
     return any((root / f).exists() for f in COMPOSE_FILE_CANDIDATES)
 
 
+# pytest の既定 ``python_files`` (``test_*.py`` / ``*_test.py``) だけを見る。
+#
+# 既知の限界: ``python_files = check_*.py`` のように既定を上書きしている
+# プロジェクトでは、収集可能なファイルをここが弾いて pytest の提案が出なく
+# なる。設定を読むには pytest 設定 (pyproject.toml / pytest.ini / tox.ini /
+# setup.cfg の 4 系統) のパーサが要り、このモジュールの責務を超えるため
+# 意図的に既定のみとした。**外し方は「提案を出さない」側**で、本 collector が
+# 避けたい失敗 (根拠の無いコマンドを出す) の反対方向にあたる。
 _PYTEST_STYLE_NAME_RE = re.compile(r"^(test_.+|.+_test)\.py$")
 
 # A base-class list containing a literal "TestCase" (``unittest.TestCase``,
@@ -150,7 +158,11 @@ def _has_root_unittest_tests(ctx: RepoContext) -> bool:
         if len(parts) < 2 or parts[0] != "tests":
             continue
         name = parts[-1]
-        if not (name.startswith("test_") and name.endswith(".py")):
+        # `discover` の既定パターンは `test*.py` (`python3 -m unittest
+        # discover -h` に明記)。`test_` 始まりに限定すると `testmath.py` の
+        # ように実際には収集される名前を取りこぼし、収集可能なのに提案が
+        # 出ない方向に外す。
+        if not (name.startswith("test") and name.endswith(".py")):
             continue
         if len(parts) > 2:
             # Every directory strictly between "tests" (parts[0], excluded)

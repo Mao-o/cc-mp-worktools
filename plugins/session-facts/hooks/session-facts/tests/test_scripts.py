@@ -164,6 +164,47 @@ class TestFilesGateTest(unittest.TestCase):
         self.assertIn("python -m pytest", cmds)
 
 
+
+
+class UnittestDefaultPatternTest(unittest.TestCase):
+    """PR #67 round 3 (Codex P2): `discover` の既定パターンは `test*.py`
+    (`python3 -m unittest discover -h` に明記) で、`test_` 始まりに限らない。
+    `test_` を要求すると `testmath.py` のように実際には収集されるファイルを
+    取りこぼし、収集可能なのに提案が出ない方向に外す。
+    """
+
+    _BODY = (
+        "import unittest\n\n\nclass T(unittest.TestCase):\n"
+        "    def test_x(self):\n        pass\n"
+    )
+
+    def _cmds_for(self, filename):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            (tests_dir / filename).write_text(self._BODY)
+            ctx = _real_ctx(
+                root,
+                pm="python",
+                stack=[],
+                tracked_files=[f"tests/{filename}"],
+            )
+            return _likely_commands(ctx, max_items=16)
+
+    def test_name_without_underscore_is_still_a_unittest_candidate(self):
+        # `testmath.py` は `test*.py` に一致するので discover が実際に収集する。
+        self.assertIn(
+            "python3 -m unittest discover tests", self._cmds_for("testmath.py")
+        )
+
+    def test_non_test_prefixed_name_is_still_rejected(self):
+        # `helpers.py` は `test*.py` に一致しないので収集されない。
+        self.assertNotIn(
+            "python3 -m unittest discover tests", self._cmds_for("helpers.py")
+        )
+
+
 class UnittestFallbackTest(unittest.TestCase):
     """internal backlog: no pytest dependency + a root tests/ directory
     (this plugin's own layout convention) should surface `unittest discover
