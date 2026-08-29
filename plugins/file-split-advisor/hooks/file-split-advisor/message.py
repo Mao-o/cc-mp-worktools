@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from judge import Verdict
@@ -95,8 +96,22 @@ def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metri
     # verdict.thresholds``) を復元する (P3-5)。ガード無しだと、将来
     # judge 側が部分的な thresholds を返すようになったとき KeyError が
     # __main__ の fail-open 経路に落ちてメモそのものが消えてしまう。
+    #
+    # 表示する行数は round() ではなく math.ceil() を使う (P3)。判定は
+    # ``line_count >= threshold`` (半開区間、judge.py::_compute_tier) なので、
+    # そのtierに最初に到達する整数行数は常に ceil(threshold) であり、これは
+    # 事前に丸めたりせず実際に比較に使われる値そのものに対して行う。
+    # round() は threshold がちょうど .5 のとき Python の偶数丸めで 1 小さい
+    # 値を返すことがあり (例: 172.5 → 172)、この場合 172 行はまだそのtierに
+    # 届いていないのに届いていると表示してしまう。scale (SCALE) を使わない
+    # 既定経路でも、言語係数が非整数 (jsx/tsx の 1.15 等) だったり role/
+    # 宣言的緩和 (1.6) との掛け算が二進浮動小数点の丸め誤差で整数からわずかに
+    # ずれたりする (例: 150*1.5*1.6 は数式上 360 だが実際には
+    # 360.00000000000006 になる) ため、この不正確さは SCALE 機能に限らない。
+    # ceil() は丸め誤差がある場合も含めて「実際に比較に使われる値」に忠実
+    # なので、tier/emit の判定ロジック自体は一切変更していない。
     thresholds_str = " ".join(
-        f"{tier}={round(verdict.thresholds[tier])}"
+        f"{tier}={math.ceil(verdict.thresholds[tier])}"
         for tier in (tier_a, tier_b)
         if tier in verdict.thresholds
     )

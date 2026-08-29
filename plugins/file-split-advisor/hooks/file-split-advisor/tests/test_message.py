@@ -6,6 +6,7 @@ from pathlib import Path
 
 import _testutil  # noqa: F401
 
+import judge
 import message
 from judge import Verdict
 from metrics import Metrics
@@ -255,6 +256,55 @@ class TestDisplayTiers(unittest.TestCase):
         self.assertIn("strong=800", text)
         self.assertNotIn("note=", text)
         self.assertNotIn("review=", text)
+
+
+class TestThresholdDisplayRounding(unittest.TestCase):
+    """P3 回帰: 判定は ``line_count >= threshold`` (半開区間) なので、閾値に
+    最初に到達する整数行数は ``ceil(threshold)`` である。以前は ``round()``
+    を使っており、Python の偶数丸めで閾値ちょうど .5 のとき 1 小さい値を
+    表示していた。この不正確さは倍率機能 (SCALE) に限らず、言語係数のみの
+    既定経路 (SCALE 未設定) でも起きる — 基準 150 (note) に非整数係数の
+    言語を掛けると同じ形の閾値になる。
+    """
+
+    def test_fractional_threshold_rounds_up_not_to_even(self):
+        # 172.5 ちょうどのとき、round(172.5) は Python の偶数丸めで 172 に
+        # なるが、実際に note tier へ最初に到達するのは 173 行 (173 >= 172.5
+        # は True, 172 >= 172.5 は False)。
+        v = _verdict(
+            tier="note", thresholds={"note": 172.5, "review": 300, "warn": 500, "strong": 800}
+        )
+        text = message.build(Path("foo.jsx"), "javascriptreact", "normal", v, _metrics(line_count=173))
+        self.assertIn("note=173", text)
+        self.assertNotIn("note=172", text)
+
+    def test_default_path_jsx_note_threshold_rounds_up(self):
+        # 倍率機能 (SCALE) を一切使わない既定経路の実例: 基準 150 (note) ×
+        # javascriptreact の言語係数 1.15 = 172.5。judge.judge() が実際に
+        # 返す Verdict をそのまま message.build() に通して確認する。
+        m = _metrics(line_count=173)
+        v = judge.judge(m, "javascriptreact", "normal")
+        self.assertEqual(v.thresholds["note"], 172.5)
+        text = message.build(Path("Foo.jsx"), "javascriptreact", "normal", v, m)
+        self.assertIn("note=173", text)
+        self.assertNotIn("note=172", text)
+
+    def test_default_path_float_dust_threshold_rounds_up_to_actual_boundary(self):
+        # 既定経路のもう1つの実例 (role 係数 1.6 との組み合わせ): 基準 150 ×
+        # java の言語係数 1.5 × test の role 係数 1.6 は数式上は 360 だが、
+        # float 演算の丸め誤差で実際には 360.00000000000006 になる
+        # (150*1.5*1.6 は二進浮動小数点では厳密な整数にならない)。
+        # ``_compute_tier`` が使う実際の比較 (line_count >= threshold) では
+        # 360 行は note tier に届かず、361 行で初めて届く。ceil() はこの
+        # 「実際の境界」に忠実で、round() が示す 360 は実際には note に
+        # 届かない値を「届く」と誤って表示することになる。
+        below = judge.judge(_metrics(line_count=360), "java", "test")
+        at = judge.judge(_metrics(line_count=361), "java", "test")
+        self.assertEqual(below.tier, "ok")  # 360 行はまだ note に届かない
+        self.assertEqual(at.tier, "note")  # 361 行で届く
+        text = message.build(Path("FooTest.java"), "java", "test", at, _metrics(line_count=361))
+        self.assertIn("note=361", text)
+        self.assertNotIn("note=360", text)
 
 
 if __name__ == "__main__":
