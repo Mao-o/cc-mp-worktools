@@ -180,10 +180,27 @@ class HookTestCase(unittest.TestCase):
     # -- assertion ヘルパー ------------------------------------------------
 
     def assertBlocked(self, output: str) -> dict:
+        """既定 (`MODE=block`) の差し戻し出力を検証する。
+
+        0.8.0 で top-level `decision: "block"` から
+        `hookSpecificOutput.permissionDecision: "deny"` + `permissionDecisionReason` へ
+        移行した (公式 docs: PreToolUse の top-level decision/reason は deprecated、
+        "block" -> "deny" のマッピングが明記されている)。内容だけを見たい既存テストの
+        ために、`permissionDecisionReason` を `data["reason"]` のエイリアスとしても
+        返す (実際の wire format は `hookSpecificOutput` 側であり、この検証はここで
+        一度だけ行う)。
+        """
         self.assertTrue(output, "block の JSON が出力されていない")
         data = json.loads(output)
-        self.assertEqual(data.get("decision"), "block")
-        self.assertIn("## クロスレビュー結果 (ExitPlanMode)", data.get("reason", ""))
+        self.assertNotIn(
+            "decision", data, "廃止済みの top-level decision を使っている (deprecated)"
+        )
+        specific = data.get("hookSpecificOutput", {})
+        self.assertEqual(specific.get("hookEventName"), "PreToolUse")
+        self.assertEqual(specific.get("permissionDecision"), "deny")
+        reason = specific.get("permissionDecisionReason", "")
+        self.assertIn("## クロスレビュー結果 (ExitPlanMode)", reason)
+        data["reason"] = reason
         return data
 
     def assertNotBlocked(self, output: str) -> dict:

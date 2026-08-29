@@ -252,8 +252,7 @@ class TestCompletionNotice(HookTestCase):
 
     def test_block_carries_summary_alongside_decision(self):
         self.edit(SESSION, "a.py", "v1\n")
-        data = json.loads(self.stop(SESSION, FINDINGS))
-        self.assertEqual(data["decision"], "block")
+        data = self.assertBlocked(self.stop(SESSION, FINDINGS))
         self.assertIn("指摘あり", data["systemMessage"])
         self.assertIn("直接影響", data["reason"], "本文は reason 側に残っていること")
 
@@ -322,6 +321,48 @@ class TestDisableSwitch(HookTestCase):
         os.environ.pop("EXTERNAL_AI_POST_REVIEW", None)
         os.environ["EXTERNAL_AI_POST_REVIEW_MAX"] = "2"
         self.assertTrue(self.entry.review_enabled())
+
+
+class TestOutputMode(HookTestCase):
+    """`EXTERNAL_AI_POST_REVIEW_MODE` (0.8.0 新設)。
+
+    既定は `context` (`hookSpecificOutput.additionalContext`、hook error に見せない)。
+    `block` にすると 0.7.0 までの top-level `decision: "block"` に戻せる。公式 docs
+    (`Stop decision control` 節) は、`additionalContext` でも `decision: "block"` と
+    同じループ保護 (`stop_hook_active` / 8 連続上限) が働くと明記しているため、
+    どちらのモードでも Claude 側の効果 (継続して reason を読む) は同じ。
+    """
+
+    def test_default_mode_uses_additional_context_not_decision(self):
+        """回帰: 未設定なら 0.8.0 の新既定 (additionalContext) を使う。"""
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertNotIn("reason", data)
+        specific = data["hookSpecificOutput"]
+        self.assertEqual(specific["hookEventName"], "Stop")
+        self.assertIn("直接影響", specific["additionalContext"])
+
+    def test_block_mode_restores_legacy_top_level_decision(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertEqual(data["decision"], "block")
+        self.assertIn("直接影響", data["reason"])
+        self.assertNotIn("hookSpecificOutput", data)
+
+    def test_unknown_mode_falls_back_to_context(self):
+        """タイプミスで既定 (additionalContext) から外れない (fail-open)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "whatever"
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("decision", data)
+        self.assertEqual(data["hookSpecificOutput"]["hookEventName"], "Stop")
+
+    def test_mode_does_not_affect_clean_review(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION, "a.py", "v1\n")
+        self.assertNotBlocked(self.stop(SESSION, "REVIEW_CLEAN"))
 
 
 if __name__ == "__main__":

@@ -56,15 +56,42 @@ the tool result." 逐語) を使う。ブロックしないぶん「差し戻し
 これは根拠にはなるが保証ではない。仕様として断定しないこと。既定を `block` のままに
 してあるのはこのため。
 
-なお **PreToolUse の top-level `decision` / `reason` は docs 上 deprecated**
-(`"block"` → `permissionDecision: "deny"` へのマッピングが明記されている)。既定の
-block 経路は 0.2.0 からこの形で動いており、本 batch (DX 改善) の範囲を超えるため
-移行していない — 別途起票する。PostToolUse / Stop の top-level `decision` / `reason`
-は現行フォーマットのままなので、post-implementation-review 側は対象外。
+## 0.8.0 で行った、既定 block 経路の deprecated 形式からの移行
+
+**PreToolUse の top-level `decision` / `reason` は docs 上 deprecated**。0.6.0 まではこの
+移行を DX 改善の範囲外として見送っていたが (経緯は CHANGELOG 0.6.0/0.7.0 の
+「既知の未対応」節)、0.8.0 で移行した。公式 Hooks reference
+(`PreToolUse decision control` 節) 逐語:
+
+> PreToolUse previously used top-level `decision` and `reason` fields, but these are
+> deprecated for this event. Use `hookSpecificOutput.permissionDecision` and
+> `hookSpecificOutput.permissionDecisionReason` instead. The deprecated values
+> `"approve"` and `"block"` map to `"allow"` and `"deny"` respectively. Other events like
+> PostToolUse and Stop continue to use top-level `decision` and `reason` as their current
+> format.
+
+既定の block 経路 (`MODE=block`) は `{"decision": "block", "reason": reason}` から
+`{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+"permissionDecisionReason": reason}}` に変わった。`"deny"` は
+`permissionDecisionReason` が Claude に見える (docs: "For `"deny"`, shown to Claude")
+ので、Claude が指摘を読んで再度 `ExitPlanMode` を呼ぶという既存の挙動は変わらない —
+変わるのは JSON の envelope だけ。移行前に `tests/_testutil.py::assertBlocked` で
+0.7.0 までの `decision: "block"` 形式の内容 (reason の本文・reviewer 別ヘッダ・
+マーカー状態遷移) を固定してから、出力形式だけを置き換えた。
+
+**PostToolUse / Stop の top-level `decision` / `reason` は現行フォーマットのまま**
+(docs 逐語: "Other events like PostToolUse and Stop continue to use top-level
+`decision` and `reason` as their current format")。post-implementation-review 側は
+別の理由 (hook error に見せない表示改善) で `hookSpecificOutput.additionalContext` へ
+0.8.0 で移行しているが、これは deprecation 対応ではない (詳細はそちらの docstring)。
+
+**`MODE=context` の `additionalContext` 経路はこの移行と無関係**。`permissionDecision`
+を意図的に省く設計は変えていない (下記の理由のまま)。
 
 exit 0 (JSON なし): ブロックしない (無効化 / レビュアー不在 / レビュー済み)
 exit 0 + {"systemMessage": ...}: 所要時間と結果の要約のみ (ブロックしない)
-exit 0 + {"decision": "block", "reason": ..., "systemMessage": ...}: 差し戻し
+exit 0 + {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+          "permissionDecisionReason": ...}, "systemMessage": ...}: 差し戻し (既定。0.8.0 から)
 exit 0 + {"hookSpecificOutput": {..., "additionalContext": ...}}: MODE=context の所見注入
 """
 from __future__ import annotations
@@ -581,7 +608,17 @@ def main() -> None:
         }
         outcome = "所見のみ提示 (ブロックしません)"
     else:
-        output = {"decision": "block", "reason": reason}
+        # PreToolUse の top-level decision/reason は docs 上 deprecated
+        # ("block" -> permissionDecision: "deny" へのマッピングが明記されている)。
+        # permissionDecisionReason は "deny" では Claude に見える (docs 逐語) ので
+        # 挙動は変わらない (詳細はモジュール docstring の「0.8.0 で行った移行」)。
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
         outcome = "プランを差し戻し"
 
     notices.append(summarize(statuses, elapsed, outcome))

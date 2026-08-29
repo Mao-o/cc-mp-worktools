@@ -228,7 +228,42 @@ class HookTestCase(unittest.TestCase):
             return ""
         data = json.loads(output)
         self.assertNotIn("decision", data, "block してはいけない出力に decision がある")
+        self.assertNotIn(
+            "hookSpecificOutput", data, "block してはいけない出力に所見注入がある"
+        )
         return data.get("systemMessage", "")
+
+    def assertBlocked(self, output: str) -> dict:
+        """指摘ありでレビュー結果を返したことを検証する。
+
+        0.8.0 から既定は `hookSpecificOutput.additionalContext` (hookEventName: "Stop")。
+        `EXTERNAL_AI_POST_REVIEW_MODE=block` なら 0.7.0 までの top-level
+        `decision: "block"` + `reason` に戻る。どちらのモードでも Claude に届く本文は
+        同じなので、呼び出し側の便宜のために `data["reason"]` へエイリアスして返す
+        (実際の wire format の検証はここで一度だけ行う)。公式 docs
+        (`Stop decision control` 節) は `additionalContext` について
+        "It keeps the conversation going through the same loop protections as
+        decision: block" と明記しており、モードによって Claude 側の効果は変わらない。
+
+        **どちらの envelope も受理するのは意図的**。既定 (`context`) を明示的に
+        固定したいテストは `test_throttle_flow.py::TestOutputMode` を見ること — ここは
+        「内容 (reason 相当の本文) がどちらのモードでも一貫していること」だけを保証し、
+        個々の block/繰り越し系テストは env を切り替えなくても両モードで動くようにする
+        (=このメソッドを寛容にすることで、内容アサーションを重複させない)。
+        """
+        self.assertTrue(output, "レビュー結果の JSON が出力されていない")
+        data = json.loads(output)
+        if "decision" in data:
+            self.assertEqual(data["decision"], "block")
+            reason = data.get("reason", "")
+        else:
+            specific = data.get("hookSpecificOutput", {})
+            self.assertEqual(specific.get("hookEventName"), "Stop")
+            self.assertNotIn("decision", data)
+            reason = specific.get("additionalContext", "")
+            data["reason"] = reason
+        self.assertIn("## 実装直後レビュー結果 (Cursor, 差分レビュー)", reason)
+        return data
 
     def pending(self, session_id: str) -> list[str]:
         path = os.path.join(self.tmpdir, "post-implementation-review", "state", f"{session_id}.json")
