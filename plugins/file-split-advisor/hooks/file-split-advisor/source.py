@@ -158,6 +158,23 @@ def is_outside_cwd(path: Path, cwd: str) -> bool:
         return False
 
 
+def relative_to_cwd(path: Path, cwd: str) -> Path:
+    """表示用の相対パス化。``cwd`` の内側なら相対パスを、そうでなければ
+    ``path`` をそのまま返す。
+
+    containment 判定 (``is_under_temp_dir`` 等) と同じ realpath 正規化を使う。
+    正規化しないと macOS の ``/tmp``/``/var`` symlink による表記揺れで
+    ``path.relative_to(cwd)`` が ``ValueError`` になり、本来 ``cwd`` の内側に
+    あるファイルまで絶対パス表示にフォールバックしていた (P3-3、P1 と同根)。
+    """
+    if not cwd:
+        return path
+    try:
+        return _realpath(path).relative_to(_realpath(Path(cwd)))
+    except (TypeError, ValueError):
+        return path
+
+
 def _default_ignore_file() -> Path:
     """ユーザーの永続 ignore 設定の既定パス。
 

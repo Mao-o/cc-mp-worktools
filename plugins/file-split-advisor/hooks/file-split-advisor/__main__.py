@@ -149,12 +149,11 @@ def main() -> None:
     ):
         return
 
-    display_path = path
-    if cwd:
-        try:
-            display_path = path.relative_to(cwd)
-        except ValueError:
-            display_path = path
+    # P1 と同じ realpath 正規化 (source.relative_to_cwd) を使う。素の
+    # path.relative_to(cwd) だと macOS の /tmp・/var symlink による表記揺れで
+    # ValueError になり、cwd 内側のファイルまで絶対パス表示にフォールバック
+    # していた (P3-3)。
+    display_path = source.relative_to_cwd(path, cwd)
 
     text = message.build(display_path, lang, role, verdict, file_metrics)
     output = {

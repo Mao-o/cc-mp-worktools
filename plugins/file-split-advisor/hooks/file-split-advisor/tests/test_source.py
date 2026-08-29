@@ -174,6 +174,48 @@ class TestIsOutsideCwd(unittest.TestCase):
         self.assertFalse(source.is_outside_cwd(Path("/other/foo.py"), ""))
 
 
+class TestRelativeToCwd(unittest.TestCase):
+    """P3-3: 表示用パス相対化。P1 と同じ realpath 正規化を使い、
+    ``__main__.py`` の ``path.relative_to(cwd)`` が macOS の ``/tmp``/``/var``
+    alias で ValueError になり絶対パス表示にフォールバックしていた問題を
+    解消する。
+    """
+
+    def test_relative_path_returned_when_inside_cwd(self):
+        self.assertEqual(
+            source.relative_to_cwd(Path("/repo/src/foo.py"), "/repo"),
+            Path("src/foo.py"),
+        )
+
+    def test_absolute_path_returned_when_outside_cwd(self):
+        self.assertEqual(
+            source.relative_to_cwd(Path("/other/foo.py"), "/repo"),
+            Path("/other/foo.py"),
+        )
+
+    def test_empty_cwd_returns_path_unchanged(self):
+        self.assertEqual(
+            source.relative_to_cwd(Path("/repo/foo.py"), ""), Path("/repo/foo.py")
+        )
+
+    def test_realpath_alias_mismatch_still_relativizes(self):
+        # P3-3 本体: cwd が resolved 形、path が unresolved 形でも
+        # (逆方向も同様) ValueError にならず正しく相対化できる。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertEqual(
+                source.relative_to_cwd(
+                    Path("/tmp/project/foo.py"), "/private/tmp/project"
+                ),
+                Path("foo.py"),
+            )
+            self.assertEqual(
+                source.relative_to_cwd(
+                    Path("/private/tmp/project/foo.py"), "/tmp/project"
+                ),
+                Path("foo.py"),
+            )
+
+
 class TestParseIgnoreGlobs(unittest.TestCase):
     def test_skips_blank_and_comment_lines(self):
         # サンプル pattern は実際に (絶対パスに対して) マッチする書き方を使う
