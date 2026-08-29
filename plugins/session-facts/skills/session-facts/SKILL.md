@@ -27,13 +27,19 @@ python3 <plugin-root>/hooks/session-facts --format markdown --include-domain-typ
 python3 <plugin-root>/hooks/session-facts --format markdown --include-domain-types --no-recent-commits
 ```
 
-plugin root が環境変数で得られる場合は `${PLUGIN_ROOT}` を使うのが最も確実です (同梱 hook と同じ解決)。
+plugin root が環境変数で得られる場合はそれを使うのが最も確実です (同梱 hook と同じ解決)。**変数名はハーネスで異なります**: Claude Code は `${CLAUDE_PLUGIN_ROOT}`、Codex は `${PLUGIN_ROOT}` です (`hooks/hooks.json` と `hooks/codex-hooks.json` それぞれの実際の解決を参照)。
 
 ```bash
+# Claude Code
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
+
+# Codex
 python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
 ```
 
-得られない場合は、この `SKILL.md` のあるディレクトリ (`<plugin-root>/skills/session-facts/`) を基準に 2 階層上の `../../hooks/session-facts` を使います。いずれの場合も**作業ディレクトリは解析対象 repo** にしてください (ツール自身は `--root` か cwd で対象を決めます)。
+どちらの環境変数も未定義な場合は、自動注入された `## Project Facts` の `- more:` 行にある絶対パス (後述の `<invoked_as>`) をそのまま使ってください。これは実際に呼ばれた際の解決済みパスなので確実です。
+
+skill ディレクトリから見た相対パス `../../hooks/session-facts` も使えますが、これは**この `SKILL.md` 自身の絶対パス (`<plugin-root>/skills/session-facts/`) が分かっている場合限定**のフォールバックです — パスが分からない状態では起点にできないため、優先順位は「環境変数 → `- more:` 行の絶対パス → この相対パス」の順にしてください。いずれの場合も**作業ディレクトリは解析対象 repo** にしてください (ツール自身は `--root` か cwd で対象を決めます)。
 
 自動注入された `## Project Facts` の `- more:` 行には、実際に呼ばれたパス込みで `python3 <invoked_as> --help` が書かれています。それをそのまま実行すればオプション全量が確認できます (`<invoked_as>` はディレクトリを指すことがあり、`python3` を付けないと実行できません)。
 
