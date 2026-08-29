@@ -352,8 +352,17 @@ class TestIgnoreFileInvalidUtf8E2E(unittest.TestCase):
                 "tool_input": {"file_path": str(target)},
             }
         )
+        # state は TMPDIR 配下に session_id のハッシュで保存される。子プロセスに
+        # 実 TMPDIR を渡すと、リテラル固定の session_id が常に同じファイルを指し、
+        # emit 回数がテスト実行を跨いで蓄積して上限に達し、いずれ「出力なし」で
+        # 落ちる (実マシンの TMPDIR も汚す)。in-process の mock は subprocess に
+        # 届かないため、子プロセスの TMPDIR 自体をテスト専用ディレクトリに向ける。
+        state_dir = Path(self.tmp) / "state"
+        state_dir.mkdir()
+
         env = dict(os.environ)
         env["HOME"] = str(home)
+        env["TMPDIR"] = str(state_dir)
         for key in (
             "FILE_SPLIT_ADVISOR_DISABLED",
             "FILE_SPLIT_ADVISOR_IGNORE",
