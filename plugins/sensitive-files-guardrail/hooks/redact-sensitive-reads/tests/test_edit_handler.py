@@ -8,6 +8,7 @@ MultiEdit は CLI 非搭載のため 0.6.0 で test を撤去。
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -1183,15 +1184,30 @@ class TestUpdateWordingKeepsMinimalInfo(BaseEdit):
         # 「更新」文面に切り替わっている (退行はこの分岐でのみ起きる)
         self.assertIn("既存キーの値の更新", reason)
         # minimal info セクションが <DATA> 包装ごと残る
-        #
-        # このケースで **表示される鍵行は 0 行**である (`entries: 100` と
-        # 折り畳みマーカーだけ)。0.26.0 で入れた note 保護 + omit marker の
-        # next action が固定費として乗り、0.25.0 なら 2 行入っていた枠が
-        # 消えるため。レビューが P3-4 として計測済みの意図されたトレードオフ
-        # で、ここでの回帰対象は **セクションが丸ごと消えること**。
         self.assertIn("minimal info (Read", reason)
         self.assertIn("</DATA>", reason)
         self.assertIn("entries: 100", reason)
+        # **鍵名が実際に見えている**こと (0.26.0 レビュー P3-4)。
+        #
+        # 0.26.0 の初版はここで **表示鍵行 0 行** (`entries: 100` と折り畳み
+        # マーカーだけ) だった。note 保護の固定費に押されたのに
+        # ``_fit_data_block`` のフォールバックが「1 行も採用できない」条件で
+        # 書かれていて発火しなかったため。0.25.0 は同じケースで 2 行出して
+        # いたので、折り畳みの導入が情報を減らす退行になっていた。
+        #
+        # 鍵名は ``suggested_keys`` にも列挙されるので、素の ``assertIn`` では
+        # **DATA ブロックの外**を拾って空振りする。明細行の**形**
+        # (2 space インデント + 連番) で確かめる。
+        data_block = re.search(r"<DATA .*?</DATA>", reason, re.S)
+        self.assertIsNotNone(data_block)
+        detail_lines = re.findall(
+            r"^  (?!\.\.\.)\S.*$", data_block.group(0), re.M,
+        )
+        self.assertGreaterEqual(
+            len(detail_lines), 1,
+            "minimal info の <DATA> ブロックに明細行 (鍵名) が 1 行も無い",
+        )
+        self.assertRegex(detail_lines[0], r"^  1\. SERVICE_API_KEY_000\b")
         # 予算と末尾の除外案内は従来どおり
         self.assertLessEqual(
             len(reason.encode("utf-8")), output.MAX_REASON_BYTES,

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import re
 import unittest
 from pathlib import Path
 
@@ -172,6 +173,34 @@ class TestBashDeny(unittest.TestCase):
         self.assertNotIn("first_token:", msg)
 
 
+# ``<DATA>`` ブロックの **明細行** (1 エントリ 1 行) を数える。実装の
+# ``core.messages._count_detail_lines`` とは独立に、外形 (2 space インデント
+# かつ省略マーカーでない) だけで数える — 実装を参照すると「実装が壊れたら
+# テストも同じように壊れる」ため。コーパス計測で使っている正規表現と同一。
+_DETAIL_LINE_RE = re.compile(r"^  (?!\.\.\.)\S")
+
+
+def _detail_lines(lines: list[str]) -> int:
+    return sum(1 for line in lines if _DETAIL_LINE_RE.match(line))
+
+
+def _real_dotenv_block(n: int = 50) -> str:
+    """``redaction.engine.redact`` が実際に組む dotenv の ``<DATA>`` ブロック。
+
+    手書きの fixture と違い ``format:`` / ``entries:`` の**見出し行**を持つ。
+    フォールバック条件の検証はこの形でしか成立しない — 見出しが常に載る
+    せいで「1 行も採用できない」条件が発火しなくなるのが 0.26.0 初版の欠陥
+    だったため。
+    """
+    from io import BytesIO
+
+    from redaction.engine import redact
+
+    text = "".join(f"KEY_{i:03d}=value_{i:03d}_padding\n" for i in range(n))
+    data = text.encode("utf-8")
+    return redact(BytesIO(data), ".env", len(data))
+
+
 class TestDataBlockAssumptions(unittest.TestCase):
     """``_fit_data_block`` が置いている ``<DATA>`` 包装の前提を固定する (E6)。
 
@@ -193,6 +222,61 @@ class TestDataBlockAssumptions(unittest.TestCase):
         lines = build_reason(".env", "dotenv", "BODY_MARKER").split("\n")
         self.assertEqual(lines[-1], M._DATA_CLOSING_TAG)
 
+    def test_detail_line_indent_matches_every_formatter(self):
+        """``_count_detail_lines`` の「2 space インデント = 明細行」規約を
+        生成側の実出力と突合する (0.26.0 レビュー P3-4)。
+
+        ここがずれると、フォールバック判定が「明細行 0」を検出できず
+        **予算超過時にだけ** 中身ゼロの ``<DATA>`` ブロックが静かに出る
+        (0.26.0 の初版がまさにこの状態だった)。dotenv / keys-only /
+        yaml / jsonlike の 4 形式で、明細行が entries と一致し、見出し行と
+        末尾 note が数に入らないことを固定する。
+        """
+        from redaction.dotenv import format_dotenv, redact_dotenv
+        from redaction.engine import build_reason
+        from redaction.jsonlike import format_jsonlike, redact_jsonlike
+        from redaction.keyonly_scan import format_keyonly
+        from redaction.opaque import _format_yaml
+
+        n = 5
+        bodies = {
+            "dotenv": format_dotenv(
+                redact_dotenv("".join(f"KEY_{i}=v{i}\n" for i in range(n)))
+            ),
+            "keyonly": format_keyonly(
+                [f"KEY_{i}" for i in range(n)], 100, fmt_hint="opaque"
+            ),
+            "yaml": _format_yaml(
+                {"format": "yaml", "entries": n, "nested_count": 0,
+                 "keys": [f"key_{i}" for i in range(n)]}
+            ),
+            "jsonlike": format_jsonlike(
+                redact_jsonlike(
+                    '{' + ", ".join(f'"k{i}": "v{i}"' for i in range(n)) + '}'
+                )
+            ),
+        }
+        for label, body in bodies.items():
+            with self.subTest(format=label):
+                lines = build_reason(".env", label, body).split("\n")
+                self.assertEqual(M._count_detail_lines(lines), n)
+                # 見出し行・note 行は明細行として数えない。
+                self.assertTrue(
+                    any(line.startswith("format:") for line in lines)
+                )
+                self.assertTrue(any(line.startswith("note:") for line in lines))
+
+    def test_omit_marker_is_not_counted_as_detail_line(self):
+        """省略マーカーは明細行と同じインデントを持つが明細ではない。"""
+        marker = M._omit_marker(3, unit=M._OMIT_UNIT_KEYS)
+        self.assertTrue(marker.startswith(M._OMIT_MARKER_PREFIX))
+        self.assertTrue(marker.startswith(M._DATA_DETAIL_INDENT))
+        header = ["<DATA x>", "NOTE: x", "file: .env"]
+        self.assertEqual(M._count_detail_lines(header + [marker]), 0)
+        self.assertEqual(
+            M._count_detail_lines(header + ["  1. KEY", marker]), 1
+        )
+
 
 class TestFitDataBlockNoteProtection(unittest.TestCase):
     """0.26.0: ``_fit_data_block`` は閉じタグと一緒に末尾 ``note:`` 行も守る。
@@ -204,6 +288,12 @@ class TestFitDataBlockNoteProtection(unittest.TestCase):
 
     ただし note を守ろうとして key 行が **前より減る**のは本末転倒なので、
     「note を守れないなら守らずに済ませる (旧来動作)」の 2 段構えを固定する。
+
+    フォールバックの発火条件は **明細行 (key 行) が 0 になるとき** であって
+    「1 行も採用できないとき」ではない。0.26.0 の初版は後者で書かれており、
+    見出し行が常に載るせいで発火しなかった (下の
+    ``test_never_zero_detail_lines_when_dropping_note_would_show_some`` /
+    ``test_falls_back_when_note_protection_leaves_zero_detail_lines``)。
     """
 
     _BLOCK = "\n".join(
@@ -225,12 +315,13 @@ class TestFitDataBlockNoteProtection(unittest.TestCase):
         """note 保護によって「以前は見えていたのに何も見えなくなる」budget が
         存在しないこと。
 
-        note 保護に使った budget 分だけ key 行が 1 行分減ることは意図した
+        note 保護に使った budget 分だけ key 行が数行減ることは意図した
         トレードオフ (note を残す方を優先する設計) なので regression としては
-        扱わない。regression として絶対に避けたいのは「旧アルゴリズムなら
-        鍵情報を出せていたのに、note を守ろうとして中身ゼロ (unavailable) に
-        落ちる」ケースだけ — これは advisor 指摘の 2 段構えフォールバックで
-        防いでいる。
+        扱わない。regression として避けたいのは「旧アルゴリズムなら鍵情報を
+        出せていたのに、note を守ろうとして情報がゼロになる」ケース。
+        ここは**空リストに落ちる**段を固定し、**明細行 0 に落ちる**段は
+        ``test_never_zero_detail_lines_when_dropping_note_would_show_some``
+        が固定する (0.26.0 初版が取り逃していたのは後者)。
         """
         for budget in range(0, 400, 5):
             with self.subTest(budget=budget):
@@ -276,6 +367,116 @@ class TestFitDataBlockNoteProtection(unittest.TestCase):
             "note 保護が中身ゼロに追い込む budget 帯が見つからなかった"
             " (テスト fixture の調整が必要)",
         )
+
+    def test_never_zero_detail_lines_when_dropping_note_would_show_some(self):
+        """**明細行 0** に後退する budget が存在しないこと (0.26.0 レビュー P3-4)。
+
+        0.26.0 の初版はフォールバック条件を「1 行も採用できない」で書いて
+        いたが、``<DATA>`` ブロックには header 3 行と ``format:`` /
+        ``entries:`` の見出しが必ず入るので空リストにはならず、フォールバック
+        が発火しなかった。結果、note 保護の固定費 (約 120 byte) に押されて
+        **見出しと省略マーカーだけ**のブロックが出ていた (コーパス実測で
+        Edit / Write の 114 件)。docstring が言う「key 行が 0 行に後退する
+        なら諦める」を実装が満たしていない状態。
+
+        fixture 単位ではサイズ依存で再混入を取り逃すので、budget 掃引の
+        **性質**として固定する。実装の ``_count_detail_lines`` ではなく
+        外形 (``_detail_lines``) で数える。
+        """
+        block = _real_dotenv_block()
+        for budget in range(0, 800, 5):
+            with self.subTest(budget=budget):
+                legacy = M._fit_data_block_core(
+                    block, budget, protect_note=False,
+                )
+                current = M._fit_data_block(block, budget)
+                if _detail_lines(legacy):
+                    self.assertGreater(
+                        _detail_lines(current),
+                        0,
+                        f"budget={budget}: note 保護を外せば明細行を出せるのに"
+                        " 見出しだけのブロックになった (regression)",
+                    )
+
+    def test_falls_back_when_note_protection_leaves_zero_detail_lines(self):
+        """明細行 0 に追い込まれる budget 帯が実在し、そこで note を諦めること。
+
+        「1 行も採用できない」条件との差を示す negative control。この帯では
+        note 保護版も **非空** (見出しは載る) なので、旧条件ではフォールバック
+        しない。
+        """
+        block = _real_dotenv_block()
+        found = False
+        for budget in range(0, 800, 1):
+            protected = M._fit_data_block_core(
+                block, budget, protect_note=True,
+            )
+            relaxed = M._fit_data_block_core(
+                block, budget, protect_note=False,
+            )
+            if (protected and not _detail_lines(protected)
+                    and _detail_lines(relaxed)):
+                found = True
+                self.assertEqual(M._fit_data_block(block, budget), relaxed)
+        self.assertTrue(
+            found,
+            "note 保護版が「非空だが明細行 0」になる budget 帯が見つからな"
+            "かった (テスト fixture の調整が必要)",
+        )
+
+    def test_header_disclosure_survives_every_fold(self):
+        """どの budget でも ``<DATA>`` header の 3 行は落ちない。
+
+        フォールバックが手放すのは per-format の補足説明 (``note:``) であって
+        「実値は context に無い」という**開示そのもの**ではない、という
+        CHANGELOG / DESIGN.md の記述を固定する。header 3 行が入らなければ
+        ``_fit_data_block_core`` は何も返さない実装なので構造的な保証だが、
+        条件を緩める改変で静かに崩れうる。
+        """
+        block = _real_dotenv_block()
+        header = block.split("\n")[:3]
+        self.assertIn("Real values are NOT in context", header[1])
+        seen_folded = False
+        for budget in range(0, 900, 5):
+            fitted = M._fit_data_block(block, budget)
+            if not fitted:
+                continue
+            self.assertEqual(fitted[:3], header, f"budget={budget}")
+            if any(x.startswith(M._OMIT_MARKER_PREFIX) for x in fitted):
+                seen_folded = True
+        self.assertTrue(seen_folded, "折り畳みが起きる budget 帯が無い")
+
+    def test_keeps_note_when_dropping_it_gains_no_detail_line(self):
+        """明細行を持ちえないブロックでは note を落とさない。
+
+        ``(no entries)`` / ``(no keys matched)`` や JSON の root が配列・
+        スカラーのブロックは、note 保護を外しても明細行が増えない。ここで
+        「明細行 0 なら常に保護を外す」と書くと、得るものが無いのに免責事項
+        だけ消える純損失になる (条件を ``>`` 比較にしている理由)。
+        """
+        block = "\n".join(
+            ['<DATA untrusted="true" source="redact-hook" guard="g">',
+             "NOTE: x", "file: .env",
+             "format: dotenv",
+             "entries: 0",
+             "(no entries)",
+             "note: real values are not in context.",
+             "</DATA>"]
+        )
+        kept_note = 0
+        for budget in range(0, 300, 1):
+            fitted = M._fit_data_block(block, budget)
+            if not fitted:
+                continue
+            self.assertLessEqual(len("\n".join(fitted).encode("utf-8")), budget)
+            relaxed = M._fit_data_block_core(block, budget, protect_note=False)
+            if any(x.startswith("note:") for x in fitted):
+                kept_note += 1
+            elif any(x.startswith("note:") for x in relaxed):
+                self.fail(
+                    f"budget={budget}: 明細行が増えないのに note を落とした",
+                )
+        self.assertGreater(kept_note, 0, "note を保持する budget 帯が無い")
 
     def test_omit_marker_carries_next_action_when_provided(self):
         fitted = M._fit_data_block(self._BLOCK, 400, next_action="do X")

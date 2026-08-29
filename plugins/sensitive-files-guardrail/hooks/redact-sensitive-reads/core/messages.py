@@ -1320,12 +1320,44 @@ _OMIT_UNIT_KEYS = "keys"
 # ``tests/test_messages.py`` の assumption test で突合する。
 _KEYONLY_SCAN_MARKER = "keys-only scan"
 
+# ``<DATA>`` ブロック内で **明細行 (1 エントリ 1 行)** に使われるインデント。
+# per-format の renderer (``format_dotenv`` / ``format_keyonly`` /
+# ``format_jsonlike`` / ``_format_yaml`` / ``format_pem``) はすべて、エントリ
+# 1 件を 2 space インデントの 1 行として出す規約になっている。見出し行
+# (``format:`` / ``entries:`` / ``keys (in order):``) と末尾 ``note:`` は
+# インデントしない。``_count_detail_lines`` はこの規約で明細行を数える
+# (``tests/test_messages.py`` の assumption test が生成側と突合する)。
+_DATA_DETAIL_INDENT = "  "
+
+# 省略マーカーの固定 prefix。``_omit_marker`` の出力もこれで始まる (明細行と
+# 同じインデントなので、明細行を数えるときは prefix で除外する)。
+_OMIT_MARKER_PREFIX = f"{_DATA_DETAIL_INDENT}... ("
+
 
 def _omit_marker(
     n: int, next_action: str = "", unit: str = _OMIT_UNIT_LINES
 ) -> str:
     suffix = f"; {next_action}" if next_action else ""
-    return f"  ... ({n} more {unit}{suffix})"
+    return f"{_OMIT_MARKER_PREFIX}{n} more {unit}{suffix})"
+
+
+def _count_detail_lines(lines: list[str]) -> int:
+    """``<DATA>`` ブロックの行列から**明細行**の数を返す。
+
+    明細行 = 見出し行 (``build_reason`` の header 3 行 + ``format:`` /
+    ``entries:`` / ``keys (in order):`` 等) でも末尾 ``note:`` でも省略
+    マーカーでもない、実際のエントリ 1 件を表す行。``_DATA_DETAIL_INDENT``
+    の規約で判定する。
+
+    header 3 行を index で読み飛ばす前提は ``_omit_unit_for`` の
+    ``format:`` 行 sniff と同じ (``_DATA_HEADER_LINES``)。
+    """
+    return sum(
+        1
+        for line in lines[_DATA_HEADER_LINES:]
+        if line.startswith(_DATA_DETAIL_INDENT)
+        and not line.startswith(_OMIT_MARKER_PREFIX)
+    )
 
 
 def _omit_unit_for(block: str) -> str:
@@ -1353,10 +1385,23 @@ def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]
     0.26.0 から、閉じタグの直前が per-format の ``note:`` 行 (「実値は
     無い」等の免責事項。``format_dotenv`` / ``format_jsonlike`` /
     ``format_opaque`` は全て末尾をこの規約で終える) なら、それも閉じタグと
-    同格の固定 tail として保護を試みる。ただし note を保護すると header 3 行
-    しか入らなくなる (= それまで見えていた key 行が 0 行に後退する) 場合は、
-    **note を諦めて閉じタグだけを保護する従来動作にフォールバック**する。
-    情報を今までより減らしてしまっては本末転倒なため、2 段構えにしている。
+    同格の固定 tail として保護を試みる。ただし note を保護すると
+    **明細行 (``_count_detail_lines``) が 0 行に後退する**場合は、
+    **note を諦めて閉じタグだけを保護する従来動作にフォールバック**し、
+    浮いた予算を明細行に回す。情報を今までより減らしてしまっては本末転倒
+    なため、2 段構えにしている。
+
+    フォールバックの判定は「1 行も採用できないか」ではなく
+    **「明細行が 0 になるか」**である。``<DATA>`` ブロックには header 3 行と
+    ``format:`` / ``entries:`` の見出しが常に入るので、前者の条件では
+    「見出しと省略マーカーだけで中身ゼロ」の状態を検出できない
+    (0.26.0 の初版はこの取り違えで、Edit / Write の minimal info で
+    0.25.0 なら見えていた key 行が 0 行に落ちていた)。
+
+    保護を外しても明細行が増えないブロック (明細行を持ちえない
+    ``(no entries)`` / ``(no keys matched)`` / JSON の root が配列やスカラー、
+    など) では note 保護つきの結果を返す — 得るものが無いのに免責事項だけ
+    落とすのは純損失なため。閉じタグと省略マーカーはどちらの段でも残る。
 
     Args:
         block: ``redaction.file_render.render_for_bash`` の 1 番目の戻り値。
@@ -1371,11 +1416,14 @@ def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]
     fitted = _fit_data_block_core(
         block, budget, protect_note=True, next_action=next_action, unit=unit,
     )
-    if fitted:
+    if _count_detail_lines(fitted):
         return fitted
-    return _fit_data_block_core(
+    relaxed = _fit_data_block_core(
         block, budget, protect_note=False, next_action=next_action, unit=unit,
     )
+    if _count_detail_lines(relaxed) > _count_detail_lines(fitted):
+        return relaxed
+    return fitted if fitted else relaxed
 
 
 def _fit_data_block_core(
