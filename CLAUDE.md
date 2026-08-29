@@ -12,9 +12,9 @@
 | 項目 | 値 |
 |---|---|
 | marketplace name | `mao-worktools` |
-| リポジトリ (予定) | `Mao-o/cc-mp-worktools` |
+| リポジトリ | `Mao-o/cc-mp-worktools` |
 
-## インストール経路 (将来)
+## インストール経路
 
 ```
 /plugin marketplace add Mao-o/cc-mp-worktools
@@ -46,11 +46,17 @@ claude plugin validate .
 - `marketplace.json` の `name` は `mao-worktools`
   （予約語回避のため `mao-` プレフィクス）
 - plugin の version は **`plugin.json` 側のみ** に書く (相対パスでも)。
-  公式ドキュメントの Warning は相対パス plugin で marketplace.json 側を推奨
-  するが、CLI 2.1.101 の `plugin validate` は plugin.json に version がないと
-  warning を出すため、実装優先で plugin.json 側に一本化。初期開発版は `"0.1.0"`
+  version の解決順は plugin.json → marketplace entry → git commit SHA で、
+  **両方に書くと `plugin.json` の値が警告なく勝つ** (marketplace.json 側で
+  bump したつもりが反映されない事故のもと)。entry 側のみに書き plugin.json に
+  version が無いと `claude plugin validate` が warning を出すため、warning
+  ゼロ運用のために plugin.json 側に一本化する。初期開発版は `"0.1.0"`
 - plugin ルートの**外**への相対参照は禁止 (cache コピーで壊れる)
 - hook スクリプトは `${CLAUDE_PLUGIN_ROOT}` 経由で参照する
+- plugin を rename する場合は、**旧名の marketplace entry を 1 リリース残し
+  SessionStart hook で deprecation 通知を出す** (orphan 化防止)。旧名のまま
+  install 済みのユーザーは `/plugin update` で新名に追従できないため。過去の
+  rename 実績は [README.md](README.md) の「Renamed / removed plugins」節を参照
 
 ## 親ディレクトリのルール
 

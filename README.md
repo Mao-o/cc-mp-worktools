@@ -1,6 +1,14 @@
 # cc-mp-worktools
 
+> **Note:** Documentation is in Japanese.
+
 Work-related Claude Code plugins.
+
+## Requirements
+
+- **Python 3.11+** (PATH 上の `python3`) — hook の実行に必要。3.11 未満の環境では
+  各 hook は fail-open で処理をスキップし、起動時に 1 回だけ警告する
+- **git**
 
 ## Install
 
@@ -17,10 +25,34 @@ Local development:
 
 ## Plugins
 
-| Plugin | Description |
-|---|---|
-| `llms-docs` | Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader) |
-| `file-split-advisor` | Write/Edit 後に行数 tier + 責務混在シグナルを組み合わせて分割検討メモを返す非 block hook |
+| Plugin | Description | Trigger | Docs |
+|---|---|---|---|
+| `llms-docs` | Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader) | Skill (on-demand) + SessionStart | [README](plugins/llms-docs/README.md) |
+| `sensitive-files-guardrail` | 機密ファイル (.env, 秘密鍵等) のうっかり露出を予防する多段 hook (実値 redaction + .gitignore 未登録検出) | PreToolUse (Read/Bash/Edit/Write) + Stop | [README](plugins/sensitive-files-guardrail/README.md) |
+| `session-facts` | セッション開始時にリポジトリの分析結果 (スタック/スクリプト/env キー等) を Markdown で注入する hook | SessionStart + SubagentStart (Explore/Plan) | [README](plugins/session-facts/README.md) |
+| `external-ai-assist` | Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集 | PreToolUse/PostToolUse (Agent/Bash/Write/Edit/NotebookEdit) + Stop | [README](plugins/external-ai-assist/README.md) |
+| `verify-cloud-account` | Bash 実行前にクラウド CLI (gh/firebase/aws/gcloud/kubectl) のアクティブアカウントを検証する hook | PreToolUse (Bash) | [README](plugins/verify-cloud-account/README.md) |
+| `file-split-advisor` | 行数 tier + 責務混在シグナルを組み合わせて分割検討メモを返す非 block hook | PostToolUse (Write/Edit) | [README](plugins/file-split-advisor/README.md) |
+
+## Renamed / removed plugins
+
+過去に名前が変わった、または削除された plugin です。旧名のまま install 済みの場合は
+`/plugin update` では追従できず古いバージョンのまま残るため、手動で入れ替えてください。
+
+| 旧名 | 現在 | 対応 |
+|---|---|---|
+| `doc-researcher` | `llms-docs` (0.9.0 で rename) | `/plugin uninstall doc-researcher@mao-worktools` → `/plugin install llms-docs@mao-worktools` |
+| `sensitive-files-guard` | `sensitive-files-guardrail` (0.14.x で rename) | `/plugin uninstall sensitive-files-guard@mao-worktools` → `/plugin install sensitive-files-guardrail@mao-worktools` |
+| `agent-org` | 別 marketplace へ分離 (本 marketplace では削除) | `/plugin uninstall agent-org@mao-worktools` (後継 plugin は本 marketplace の対象外) |
+
+`sensitive-files-guard` → `sensitive-files-guardrail` の rename に伴い、
+`patterns.local.txt` の設置先ディレクトリも変わっています。詳細は
+[plugins/sensitive-files-guardrail/README.md](plugins/sensitive-files-guardrail/README.md)
+の「パターン設定」節を参照してください。
+
+過去の rename は旧 entry を残さない clean-cut 方針でしたが、今後の rename は
+1 リリース旧 entry を残し deprecation 通知を出す方針に変更しています
+([CLAUDE.md](CLAUDE.md) 参照)。
 
 ## Development
 
