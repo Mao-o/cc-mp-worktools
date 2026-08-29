@@ -2,13 +2,14 @@
 
 ## 0.8.0
 
-**Likely Commands の根拠強化 / 出力サイズ上限 / 非プロジェクトディレクトリ抑止 /
-test_dir 集約修正 (v0.8)**。2026-08 精査バックログの続き、および同バックログの
-隔離内レビュー (R3) で見つかった P2/P3 指摘 8 件の追加修正。不具合修正 4 件と
-ドキュメント修正 2 件 (レビュー起因分を各項目に統合)。さらにその後の隔離内
-レビューで見つかった P2 指摘 4 件 (項目 2・4 に統合) を追加修正。加えて、PR の
-外部レビュー (Codex) 2 巡目で見つかった P2 指摘 3 件 (いずれも項目 2 の
-pytest/unittest 判定に対するもの) も追加修正した。
+**出力サイズ上限 / 非プロジェクトディレクトリ抑止 / test_dir 集約修正
+(v0.8)**。2026-08 精査バックログの続き。隔離内レビューと PR の外部レビューで
+見つかった指摘を各項目に統合済み。
+
+Likely Commands の根拠強化 (テスト実行コマンドの提案条件) は、外部レビューで
+5 巡にわたり同領域の指摘が続き収束しなかったため本リリースから切り離した。
+pytest / unittest / mise の解決規則を正確に模す必要があり、ヒューリスティックな
+判定では扱いきれないと判断している。別途対応する。
 
 ### 不具合修正
 
@@ -23,59 +24,7 @@ pytest/unittest 判定に対するもの) も追加修正した。
    上限が無く、同型パッケージの多いモノレポ (例: 25 パッケージ ×
    (tests/, e2e/)) で 25 行がそのまま出ていた。パターン行 + 集約できない
    残りの元パス列挙を合算した件数を上限 4 件 + `... (+N more)` に揃えた
-2. **Likely Commands が根拠の無いコマンドを出す問題を修正**
-   (`collectors/scripts.py`) — `docker compose up` は Dockerfile 単体でも
-   出ていた (compose ファイル存在時のみに変更、単体は `docker build .`)。
-   `mise install` は `.tool-versions` (asdf 形式) 単体でも出ていた (mise
-   config 存在時のみに変更、単体は `asdf install`)。pytest 系コマンドは
-   test_files の有無に関わらず無条件に出ていた (test_snapshot.test_files
-   が実在する時のみに変更)。pytest が検出されない場合は、root 直下の
-   `tests/` に `test_*.py` がある時に限り `python3 -m unittest discover
-   tests` を代替提案する (検出は `pyproject.toml` の依存判定に加え
-   `requirements*.txt` / `Pipfile` / `setup.cfg` 経由の宣言も見る:
-   `collectors/dependencies.py::is_python_dependency_declared()`)。
-   **隔離内レビュー追加指摘**: 当初は `pyproject.toml` 経由の検出
-   (`detectors/python_stack.py` が `ctx.stack` に `"pytest"` を追加するのは
-   pyproject.toml のテキスト部分一致でのみ) だけに頼っていたため、
-   requirements*.txt/Pipfile/setup.cfg でのみ pytest を宣言するプロジェクト
-   は、ルート直下に pytest 形式の関数テストがあっても `unittest discover
-   tests` に誤ってフォールバックし、0 件収集されるおそれがあった。
-   依存収集側が既に持つ解析結果を再利用して修正した。
-   **外部レビュー 2 巡目追加指摘 (3 件、いずれも「条件は真でもコマンドが
-   0 件収集」という同型の穴)**:
-   (a) pytest 系コマンドは `test_snapshot.test_files` が非ゼロであることと
-   pytest 宣言の有無だけで判定していたが、この件数は全言語合算のため、
-   TypeScript のみのテストがある混在言語プロジェクトで pytest を宣言して
-   いる場合、Python のテストが 0 件でも pytest コマンドを提案していた。
-   `.py` かつ `test_*.py`/`*_test.py` 命名の追跡ファイルが実在することを
-   追加条件にした。
-   (b) `unittest discover tests` の代替提案は「root 直下の `tests/` に
-   `test_*.py` があるか」だけを見ており、`tests/` 配下にネストした
-   非パッケージディレクトリ (中間ディレクトリに `__init__.py` が無い) の
-   テストファイルも対象にしていたが、`discover` はモジュールがトップレベル
-   からインポート可能であることを要求するため (`--help` に明記)、この
-   構成では 0 件収集になる (実機検証済み)。`tests/` 直下からファイルまでの
-   中間ディレクトリ全てに追跡済み `__init__.py` があることを検証するよう
-   修正 (`tests/` 自身は不要 -- 開始ディレクトリ自体はインポートされず
-   走査されるのみのため)。
-   (c) `is_python_dependency_declared()` の setup.cfg 判定は
-   `[options] install_requires` のみを見ており、
-   `[options.extras_require]` (例: `test = pytest`) 経由の宣言を検出でき
-   なかった。この形式で pytest を宣言しているプロジェクトはルート直下に
-   pytest 形式の関数テストがあっても検出できず (b) の修正後も
-   `unittest discover tests` にフォールバックしたままだった。
-   `parse_setup_cfg_extras_require()` を新設し `[options.extras_require]`
-   の全 extra を横断的に確認するよう追加 (`_collect_major_dependencies()`
-   の major_dependencies 表示は従来どおり install_requires のみで変更なし --
-   test/dev extra は「主要な実行時依存」ではないため)。
-   加えて、この 3 件を直した後も (b) の周辺に同型の穴が残っていたため
-   自主的に追加修正: root 直下の `test_*.py` が pytest 形式の素の関数
-   テストのみ (unittest.TestCase を継承するクラスが無い) の場合、レイアウト
-   条件を満たしていても `unittest` の TestLoader はクラスベースのテストしか
-   収集しないため 0 件になる (実機検証済み)。候補ファイルの内容が
-   `unittest.TestCase` 系クラスを実際に定義しているかまで確認するよう
-   `_has_root_unittest_tests()` を拡張した
-3. **出力全体の文字数上限が無かった問題、cwd スコープ時に削減余地が最大の
+2. **出力全体の文字数上限が無かった問題、cwd スコープ時に削減余地が最大の
    `## Subtree` が段階的削減の対象外だった問題、削減ステップが実際の上限
    より 17 文字 (マーカー分) 厳しい目標を使っていたため軽微な超過でも
    セクションを余分に落としていた問題を修正**
@@ -93,7 +42,7 @@ pytest/unittest 判定に対するもの) も追加修正した。
    120 文字で切り詰める。`truncate_text()` は上限 1 未満で空文字を返す
    よう修正 (以前は上限 0 でも省略記号 1 文字を返し、「上限を超えない」
    という自身の契約の反例になっていた)
-4. **非プロジェクトディレクトリ (ホーム等) で起動すると走査由来の無意味な
+3. **非プロジェクトディレクトリ (ホーム等) で起動すると走査由来の無意味な
    facts を大量注入していた問題、および project marker 一覧が自 plugin の
    detector 群を網羅しておらず Dockerfile 単体・uv.lock 単体などの正当な
    プロジェクトも同じ最小ヘッダーに落ちていた問題を修正**
@@ -134,13 +83,13 @@ pytest/unittest 判定に対するもの) も追加修正した。
    (セクションが空なので通常は無変更、上限超過時のみマーカー無しで
    ハードカットする)、上限適用経路を一本化した
 
-5. **SKILL.md が Codex 専用の `${PLUGIN_ROOT}` を Claude Code 向けの案内
+4. **SKILL.md が Codex 専用の `${PLUGIN_ROOT}` を Claude Code 向けの案内
    としてそのまま書いていた問題を修正** (`skills/session-facts/SKILL.md`) —
    Claude Code は `${CLAUDE_PLUGIN_ROOT}`、Codex は `${PLUGIN_ROOT}` と
    両ハーネスを併記し、どちらも未定義な場合のフォールバック順序
    (環境変数 → 自動注入された `- more:` 行の絶対パス → SKILL.md 自身の
    場所を起点にした相対パス) を明確化した
-6. **SKILL.md の主要オプション表に `--max-output-chars` / `--force-walk`
+5. **SKILL.md の主要オプション表に `--max-output-chars` / `--force-walk`
    が抜けていた問題を修正** (`skills/session-facts/SKILL.md`) — README には
    既に記載済みだった 2 フラグを追記し、「使い方」節にも既定 8,000 文字の
    自動上限が既にかかっている旨を追記した。あわせて
@@ -151,15 +100,6 @@ pytest/unittest 判定に対するもの) も追加修正した。
 - 最小ヘッダーの復帰ヒントに解析対象 root を明示するようにした。`--root` を
   指定して別ディレクトリから起動された場合、ヒントをそのまま実行すると
   カレントディレクトリが解析され、ヘッダーが示す対象と食い違っていた
-- 標準ライブラリ側のテスト検出を discovery の既定パターン (`test*.py`) に
-  合わせた。`test_` 始まりに限定していたため、実際には収集されるファイルを
-  取りこぼして提案が出ないことがあった
-- pytest のファイル名判定は既定の命名のみを見る。`python_files` で既定を
-  上書きしているプロジェクトでは提案が出ない (既知の限界。外し方は
-  「提案を出さない」側で、根拠の無いコマンドを出す方向ではない)
-- 標準ライブラリ側のテスト提案に、収集可能な `test*` メソッドの存在を要求
-  するようにした。`TestCase` を継承したヘルパー基底しか無いモジュールでは
-  discovery が 0 件になるため、提案自体が根拠を欠いていた
 - 出力上限に負値を渡せてしまう問題を修正。ハードカットが負インデックスの
   slice になり「ほぼ全文」が返るため、上限として機能していなかった
   (0 は「すべて削る」の意味で従来どおり許容)
@@ -188,14 +128,14 @@ pytest/unittest 判定に対するもの) も追加修正した。
 
 ### 不具合修正 (2026-08 精査バックログ)
 
-3. **`- more:` ヒントの案内コマンドが実行不能だった問題を修正**
+2. **`- more:` ヒントの案内コマンドが実行不能だった問題を修正**
    (`renderer.py`, `core/context.py`, `skills/session-facts/SKILL.md`) —
    実際の hook 起動 (`python3 <dir>`) では `sys.argv[0]` がディレクトリを指すため、
    案内された `<invoked_as> --help` をそのまま実行すると `permission denied`
    になっていた (ディレクトリを直接実行しようとするため)。`python3 <invoked_as>
    --help` の形に修正し、`tests/test_cli.py` に実行可能な形で始まることを
    検証するテストを追加
-4. **collector/detector の例外が隔離されず出力が丸ごと消える問題を修正**
+3. **collector/detector の例外が隔離されず出力が丸ごと消える問題を修正**
    (`cli.py`, `registry.py`) — 1 つの detector/collector が例外を投げると
    traceback 付きで exit 1 になり、facts が全セクション消えていた。
    `detector.detect()` と `collector.should_run()`/`collect()` の呼び出しを
@@ -206,7 +146,7 @@ pytest/unittest 判定に対するもの) も追加修正した。
    しないようにした。`summarize_repo()` 自体が上記以外の理由で失敗した場合の
    最終防御として、`main()` が最低限 `## Project Facts` ヘッダーのみ出力して
    exit 0 にするフォールバックも追加
-5. **非 UTF-8 ファイル名・非 UTF-8 stdout ターゲットでの `UnicodeEncodeError` を修正**
+4. **非 UTF-8 ファイル名・非 UTF-8 stdout ターゲットでの `UnicodeEncodeError` を修正**
    (`core/git.py`, `cli.py`) — `git ls-files` が返す非 UTF-8 バイト列を
    `errors="surrogateescape"` で decode するとローンサロゲート (U+DCxx) になり、
    標準出力への `print()` が `UnicodeEncodeError` で失敗して facts が丸ごと
@@ -218,17 +158,17 @@ pytest/unittest 判定に対するもの) も追加修正した。
 
 ### 保守
 
-6. **Codex 向け manifest との version 統一 + bump 手順の明文化**
+5. **Codex 向け manifest との version 統一 + bump 手順の明文化**
    (`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `README.md`) —
    Claude 向けと Codex 向けの 2 manifest の version が乖離しうる (bump 漏れ事故)
    問題に対応。両 manifest の version を統一し、README に「リリース手順」節を
    新設して「2 manifest 同時 bump」を明記した。あわせて `.codex-plugin/plugin.json`
    の `interface.longDescription` (Codex 向け UI 表示文言) が Hub Files 機能を
    欠いたままだったのも更新し、既存の「ドメイン型」と同じ扱いに揃えた
-7. **Python 互換性表記を 3.11+ に統一** (`README.md`,
+6. **Python 互換性表記を 3.11+ に統一** (`README.md`,
    `skills/session-facts/SKILL.md`) — marketplace 全体の 3.11+ 方針
    (旧 3.8+ 表記からの統一) に合わせて修正
-8. **CHANGELOG に 0.1.0〜0.3.0 を追補** — 本ファイル下部を参照。plugin.json の
+7. **CHANGELOG に 0.1.0〜0.3.0 を追補** — 本ファイル下部を参照。plugin.json の
    version 履歴はあったが CHANGELOG の記録が 0.4.0 からしか無かったため、
    git log から要約を補った。以後「機能コミット = version bump + CHANGELOG
    同時更新」を [hooks/session-facts/CLAUDE.md](./hooks/session-facts/CLAUDE.md)
@@ -272,7 +212,7 @@ stdout エンコーディング耐性)、`tests/test_cli.py` に `- more:` ヒ�
    (`[project] dependencies` / `[project.optional-dependencies]` / poetry 各テーブル /
    Pipfile グループ) で正確化。副次的に、旧「どこでもマッチ」正規表現が poetry の
    dev グループ依存を runtime と誤表示していた潜在バグも解消した。
-3. **Likely Commands の runtime 補正** (`collectors/scripts.py`) — venv があれば
+2. **Likely Commands の runtime 補正** (`collectors/scripts.py`) — venv があれば
    `.venv/bin/python -m pytest`、mise-python なら `mise exec -- python -m pytest` を
    出す (venv 優先)。`uv run` / `poetry run` は自前 env 管理のため不変。pyproject も
    lockfile も無い bare-python (.py 比率検出) でも、runner が確定するときだけ pytest
@@ -335,10 +275,10 @@ plugin.json から解決。
    (3 件) はその完全サブセットだった。`--no-recent-commits` を SessionStart 側に
    のみ付与。subagent には harness の git 情報が一切注入されない (実測) ため、
    SubagentStart 側では維持する。
-3. **purpose の dirname fallback 廃止** (`cli.py`) — fallback chain
+2. **purpose の dirname fallback 廃止** (`cli.py`) — fallback chain
    (package.json description → README 先頭行 → ディレクトリ名) の最終段は
    repo_root の再掲で情報量ゼロのため、field ごと省略する。
-4. **Test Snapshot の「テスト無し」明示** (`collectors/tests.py`) —
+3. **Test Snapshot の「テスト無し」明示** (`collectors/tests.py`) —
    test_files=0 のとき code_files 単独表示 (ミスリード) をやめ、
    `- tests: none detected` の 1 行に置換。
 
@@ -361,18 +301,18 @@ plugin.json から解決。
 2. **subtree モードの Structure 圧縮** (`collectors/structure.py`) —
    cwd != repo_root のとき、repo 全体の Structure は top-level dir 名のみ
    (depth=1) に圧縮し、詳細は cwd 配下の Subtree 側に寄せる。
-3. **chain 圧縮** (`core/tree.py::render_tree`) — 子が 1 つだけの中間ディレクトリ
+2. **chain 圧縮** (`core/tree.py::render_tree`) — 子が 1 つだけの中間ディレクトリ
    を `a/b/c/` の 1 行に畳む。行数を稼ぎつつ可読性を維持。
-4. **Repo-Specific Notes の汎用 note 抑制** (`collectors/repo_notes.py`) —
+3. **Repo-Specific Notes の汎用 note 抑制** (`collectors/repo_notes.py`) —
    `api-related files...` の閾値を `>= 5` から `>= 20` に引き上げ。ほぼ全 repo で
    出てノイズ化していたため、本当に api-heavy な repo でのみ出すようにした。
-5. **test_dir の共通祖先集約** (`core/util.py::aggregate_paths`, `collectors/tests.py`) —
+4. **test_dir の共通祖先集約** (`core/util.py::aggregate_paths`, `collectors/tests.py`) —
    sibling な test ディレクトリを `plugins/*/hooks/*/tests` のような glob 1 行に
    集約。単一の test_dir はそのまま個別表示。
 
 ### P2: 言語サポート拡張
 
-6. **Flutter/Dart 対応** (`detectors/flutter.py` 新規, `core/constants.py`,
+5. **Flutter/Dart 対応** (`detectors/flutter.py` 新規, `core/constants.py`,
    `collectors/dependencies.py`, `collectors/scripts.py`) — tracked な
    pubspec.yaml 検出 (monorepo の `apps/<name>/pubspec.yaml` 等、repo root 直下
    以外も対象) で `stack: flutter, dart`、`.dart` を CODE_EXTENSIONS に追加
@@ -380,24 +320,24 @@ plugin.json から解決。
    (firebase_core / riverpod / dio 等) を
    major_dependencies に、`flutter pub get` / `flutter run` / `flutter test` を
    Likely Commands に追加。
-7. **Python requirements/Pipfile/setup.cfg の依存取得** (`collectors/dependencies.py`) —
+6. **Python requirements/Pipfile/setup.cfg の依存取得** (`collectors/dependencies.py`) —
    従来 pyproject.toml のみだった major_dependencies を requirements*.txt /
    Pipfile / setup.cfg からも取得 (優先度 pyproject > Pipfile > requirements >
    setup.cfg)。celery / alembic / redis / gunicorn / httpx 等を IMPORTANT_DEPENDENCIES
    に追加。
-8. **Makefile target の抽出** (`core/makefile.py` 新規, `collectors/scripts.py`) —
+7. **Makefile target の抽出** (`core/makefile.py` 新規, `collectors/scripts.py`) —
    `make` 1 行だけでなく、Makefile の conventional target (`make test` /
    `make build` / `make dev` 等) を優先度順に Likely Commands へ。変数代入・
    `.PHONY`・recipe 行・非定型 target は除外。
 
 ### P3: 価値の高い情報の追加
 
-9. **git 進行情報** (`core/git.py`, `collectors/git_progress.py` 新規,
+8. **git 進行情報** (`core/git.py`, `collectors/git_progress.py` 新規,
    `renderer.py`) — Project Facts に `branch` (ahead/behind vs upstream) と
    `recent_commits` (直近 3 件、subject + 相対日時) を追加。デフォルトブランチ
    (main/master) で差分が無いときは branch 行を省略。detached HEAD / upstream
    無し / 非 git は silent skip。
-10. **Domain Types 検出のパス緩和** (`collectors/domain_types.py`) —
+9. **Domain Types 検出のパス緩和** (`collectors/domain_types.py`) —
     対象パスに `/repositories/` `/services/` `/schemas/` `/dto/` 等を追加、
     走査をファイル先頭 200 行に限定、stop_names 拡張 + infra suffix
     (`*Repository` / `*Service` 等) 除外、「unique 型名 5 個以上」を表示条件に
@@ -433,19 +373,19 @@ plugin.json から解決。
 2. **`claude_plugin` detector 新設** — `.claude-plugin/plugin.json` /
    `marketplace.json` を検出し、stack に `claude-code-plugin` /
    `claude-code-marketplace` を追加。
-3. **`python_stack` の fallback 追加** — `pyproject.toml` が無くても `.py` 比率
+2. **`python_stack` の fallback 追加** — `pyproject.toml` が無くても `.py` 比率
    20% 以上かつ 10 ファイル以上で python を検出するようにし、plugin repo 等の
    検出漏れを解消。
-4. **Service Entry Points のノイズ抑制** — `__init__.py` / `index.*` / `types.*`
+3. **Service Entry Points のノイズ抑制** — `__init__.py` / `index.*` / `types.*`
    を減点、`__main__.py` / `main.*` / `app.py` / `server.*` を加点するスコアリング
    を追加。
-5. **cwd スコープの分離** — cwd != repo_root のとき Service Entry Points を
+4. **cwd スコープの分離** — cwd != repo_root のとき Service Entry Points を
    cwd-scoped + repo-wide に分離、Test Snapshot も cwd-scoped に切替
    (cwd 配下に code が無ければ repo-wide にフォールバック)。
-6. **firebase 判定の根拠強化** — `firebase.json` / `.firebaserc` / 依存 /
+5. **firebase 判定の根拠強化** — `firebase.json` / `.firebaserc` / 依存 /
    pyproject の evidence を要求し、件数に応じて minimal/moderate/substantial の
    段階表現に変更。meta-tooling 由来の誤検出 note を抑制。
-7. **`walk_files` に `respect_subgit=True`** — 非 git な親ディレクトリで子 git
+6. **`walk_files` に `respect_subgit=True`** — 非 git な親ディレクトリで子 git
    repo に侵入しないようにし、子 repo のファイルが親の Service/Test セクションに
    混入する問題を解消。
 
