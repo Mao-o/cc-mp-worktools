@@ -72,23 +72,30 @@ def has_nested_project_markers(
         if remaining <= 0:
             continue
         try:
+            # `os.scandir()` を直接使う。`Path.iterdir()` は CPython では
+            # 内部で全エントリをスナップショットしてから yield するため、
+            # 何件目で打ち切っても「巨大ディレクトリを丸ごと読む」コストは
+            # 避けられない (hook の実行時間上限を超えうる)。scandir は
+            # ストリーミングで、しかも DirEntry が種別をキャッシュするので
+            # 判定側の stat 呼び出しも減る。
+            #
             # 打ち切りは「候補ディレクトリの件数」ではなく「列挙した項目数」に
-            # かける。実コストは iterdir の列挙と _is_candidate_dir の stat 呼び
-            # 出し (is_dir / is_symlink / .git の 3 回) であり、候補で数えると
-            # 候補が 1 つも無い巨大ディレクトリで全件 stat してしまう。
-            # 代償として、大量のファイルの後ろに埋もれたサブプロジェクトは
-            # 見つからないことがある。--force-walk が escape hatch になる。
-            for entry in islice(current.iterdir(), max(remaining, MAX_NESTED_SCAN_ENTRIES)):
-                if _is_candidate_dir(entry, skip):
-                    queue.append((entry, depth + 1))
-                    if len(queue) + visited >= max_dirs:
-                        break
+            # かける。候補で数えると、候補が 1 つも無い巨大ディレクトリで
+            # 全件を見てしまうため。代償として、大量のファイルの後ろに埋もれた
+            # サブプロジェクトは見つからないことがある (走査を強制する
+            # オプションが escape hatch)。
+            with os.scandir(current) as it:
+                for entry in islice(it, MAX_NESTED_SCAN_ENTRIES):
+                    if _is_candidate_dir(entry, skip):
+                        queue.append((Path(entry.path), depth + 1))
+                        if len(queue) + visited >= max_dirs:
+                            break
         except OSError:
             continue
     return False
 
 
-def _is_candidate_dir(entry: Path, skip: set) -> bool:
+def _is_candidate_dir(entry: "os.DirEntry[str]", skip: set) -> bool:
     """入れ子マーカー探索で降りてよいディレクトリか。
 
     ``.git`` を持つディレクトリは独立した repo であり、その存在は親を
@@ -101,9 +108,11 @@ def _is_candidate_dir(entry: Path, skip: set) -> bool:
     if name.startswith(".") or name in skip:
         return False
     try:
-        if not entry.is_dir() or entry.is_symlink():
+        # DirEntry のキャッシュを使う (follow_symlinks=False で追加の stat を
+        # 避ける)。`.git` の有無だけは実際に見る必要がある。
+        if not entry.is_dir(follow_symlinks=False):
             return False
-        return not (entry / ".git").exists()
+        return not (Path(entry.path) / ".git").exists()
     except OSError:
         return False
 

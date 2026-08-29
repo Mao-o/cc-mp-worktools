@@ -7,6 +7,7 @@ v0.7 で追加: `- more:` ヒントが `python3` 付きで実行可能なこと�
 from __future__ import annotations
 
 import io
+import os
 import json
 import subprocess
 import shlex
@@ -963,14 +964,26 @@ class NestedDiscoveryBoundsTest(unittest.TestCase):
             for i in range(200):
                 (root / f"d{i:03d}").mkdir()
             seen = []
-            real_iterdir = Path.iterdir
+            real_scandir = os.scandir
 
-            def counting_iterdir(self):
-                for entry in real_iterdir(self):
-                    seen.append(entry)
-                    yield entry
+            def counting_scandir(path):
+                it = real_scandir(path)
 
-            with mock.patch.object(Path, "iterdir", counting_iterdir):
+                class Counting:
+                    def __enter__(self_inner):
+                        return self_inner
+
+                    def __exit__(self_inner, *exc):
+                        return it.__exit__(*exc)
+
+                    def __iter__(self_inner):
+                        for entry in it:
+                            seen.append(entry)
+                            yield entry
+
+                return Counting()
+
+            with mock.patch.object(os, "scandir", counting_scandir):
                 self.assertFalse(
                     has_nested_project_markers(
                         root, ("package.json",), (), max_depth=2, max_dirs=8
@@ -991,18 +1004,34 @@ class NestedDiscoveryBoundsTest(unittest.TestCase):
             total = MAX_NESTED_SCAN_ENTRIES + 300
             for i in range(total):
                 (root / f"f{i:05d}.txt").write_text("x")
-            calls = []
-            real_is_dir = Path.is_dir
+            seen = []
+            real_scandir = os.scandir
 
-            def counting_is_dir(self):
-                calls.append(self)
-                return real_is_dir(self)
+            def counting_scandir(path):
+                it = real_scandir(path)
 
-            with mock.patch.object(Path, "is_dir", counting_is_dir):
+                class Counting:
+                    def __enter__(self_inner):
+                        return self_inner
+
+                    def __exit__(self_inner, *exc):
+                        return it.__exit__(*exc)
+
+                    def __iter__(self_inner):
+                        for entry in it:
+                            seen.append(entry)
+                            yield entry
+
+                return Counting()
+
+            with mock.patch.object(os, "scandir", counting_scandir):
                 self.assertFalse(
                     has_nested_project_markers(root, ("package.json",), ())
                 )
-            self.assertLessEqual(len(calls), MAX_NESTED_SCAN_ENTRIES + 5)
+            # 列挙自体が上限で止まる (scandir はストリーミングなので、
+            # ここで止めれば巨大ディレクトリを丸ごと読むコストが発生しない)。
+            self.assertLessEqual(len(seen), MAX_NESTED_SCAN_ENTRIES)
+            self.assertLess(len(seen), total)
 
 
 class DropWithoutMarkerHeadroomTest(unittest.TestCase):
