@@ -34,13 +34,16 @@ import subprocess
 # 内部 timeout は hooks.json の hook timeout に**収まる**ように決める。超えると
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
-#   pre-tool (hook 10s): rev-parse 1 + status 1 = 最悪 7s
-#   post-tool / Bash (hook 10s): worktree_root (rev-parse) 1 + status_snapshot 1
+#   pre-tool (hook 10s): REV_PARSE_TIMEOUT_SEC × 1 + STATUS_TIMEOUT_SEC × 1
 #     = 最悪 7s
+#   post-tool / Bash (hook 10s): worktree_root (REV_PARSE_TIMEOUT_SEC × 1) +
+#     status_snapshot (STATUS_TIMEOUT_SEC × 1) = 最悪 7s
 #   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s)
 #   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
-#     rev-parse 2 + ls-files (symlink 一覧) 10 + ls-files (untracked) 10
-#     + パス単位 diff (COLLECT_BUDGET_SEC 30 + 予算判定後に走る最後の 1 パス 5) = 59s
+#     REV_PARSE_TIMEOUT_SEC × 2 (worktree_root + head_exists)
+#     + LS_FILES_TIMEOUT_SEC × 2 (symlink_map + untracked_among)
+#     + COLLECT_BUDGET_SEC 30 + PATH_DIFF_TIMEOUT_SEC × 1 (予算判定後に走る
+#       最後の 1 パス) = 59s
 #   実際の予算計算とテストは tests/test_review_set.py::TestTimeoutBudgets を参照。
 #   ここでの数値は目安のコメントに過ぎず、乖離したらテストの方を正とする。
 REV_PARSE_TIMEOUT_SEC = 2
