@@ -2,13 +2,24 @@
 
 このモジュールは副作用なし・plugin 状態非依存。文字列処理のみ。
 
-0.18.0 で ``_has_hard_stop`` を quote-aware にした際、2 つの scanner
-(``_split_command_on_operators`` / ``_has_hard_stop``) の字句状態が一致して
-いないと guard が落ちることが review で繰り返し判明した (クォート外の ``\\'`` /
-コメント / 行継続 / 行継続で合成される演算子)。review R7 で **両 scanner が共有
-する 1 つの lexer** (``_lex``) に統一した: 行継続 ``\\<newline>`` を除去し、各文字に
-quote / escape / comment / heredoc の字句状態を付けた列を作り、分割と hard-stop
-判定はその列だけを見る。字句規則を直すときは ``_lex`` だけを直すこと。
+0.18.0 で ``_has_hard_stop`` を quote-aware にした際、scanner 同士の字句状態が
+一致していないと guard が落ちることが review で繰り返し判明した (クォート外の
+``\\'`` / コメント / 行継続 / 行継続で合成される演算子)。review R7 で **全 scanner
+が共有する 1 つの lexer** (``_lex``) に統一した: 行継続 ``\\<newline>`` を除去し、
+各文字に quote / escape / comment / heredoc の字句状態を付けた列を作り、判定は
+その列だけを見る。字句規則を直すときは ``_lex`` だけを直すこと。
+
+``_lex`` を見る scanner は 0.25.0 時点で 4 つ:
+
+1. ``_split_command_on_operators`` (segment 分割)
+2. ``_has_hard_stop`` (静的解析不能 char の検出)
+3. ``_replace_simple_expansions`` (単純変数展開の placeholder 置換、0.25.0)
+4. ``redirects._live_operator_metachars`` (residual metachar の quote-aware 判定、
+   0.25.0。0.24.0 までの ``_segment_has_residual_metachar`` は shlex 後の token
+   しか見えず、クォート内の ``|`` ``&`` ``>`` を演算子と誤認していた)
+
+``_has_quoted_hard_stop`` だけは意図的に字句状態を見ない raw 走査
+(前提条件付き。関数 docstring 参照)。
 
 0.22.0: heredoc (``<<`` / ``<<-``) の本文を ``_lex`` が ``_ST_HEREDOC`` にし、
 segment 分割から外す (``docs/DESIGN.md`` の「``<<`` heredoc | delimiter/body は
@@ -16,7 +27,9 @@ read 対象外」に実装を合わせた)。
 """
 from __future__ import annotations
 
-from handlers.bash.constants import _HARD_STOP_CHARS
+import re
+
+from handlers.bash.constants import _DQ_LIVE_HARD_STOPS, _HARD_STOP_CHARS
 
 # 単語区切り: この直後は「単語の先頭」= ``#`` がコメントを開始できる位置。
 # Bash 上は ``(`` ``)`` ``{`` ``}`` も単語境界だが hard-stop で先に ask に倒れる
@@ -345,32 +358,145 @@ def _has_hard_stop(command: str) -> bool:
       端末表示偽装の guard なので「展開されない = 安全」の理屈が当てはまらない
     - **コメント内の文字は hard-stop 判定から除外** (``\\r`` を除く)
 
-    シングルクォート内は Bash にとって不活性だが、**呼び出されるプログラムに
-    とっては不活性ではない** (``awk 'BEGIN { system("cat .env") }'`` /
+    0.25.0: **ダブルクォート内は展開が生きる char (``$`` バッククォート =
+    ``_DQ_LIVE_HARD_STOPS``) だけを hard-stop にする**。Bash はダブルクォート内で
+    ``(`` ``)`` ``{`` ``}`` ``<`` を一切解釈しない (literal) ため、
+    ``git ls-files --format="%(objectname)" .env`` / ``git diff "HEAD@{1}"`` が
+    シングルクォート形 (0.18.0 で緩和済み) と同じく operand scan に到達する。
+    同一セマンティクスのコマンドの verdict がクォートの書き方だけで
+    deny/ask/allow に分かれていた非一貫性の解消 (2026-08 精査)。
+    ``"$(cat .env)"`` は ``$`` が live なので従来どおり hard-stop。
+
+    クォート内は Bash にとって不活性でも、**呼び出されるプログラムにとっては
+    不活性ではない** (``awk 'BEGIN { system("cat .env") }'`` /
     ``find -exec sh -c '…'``)。その扱いは ``handlers.bash.interpreters`` が
     operand scan の後に行う (緩和は inert な first token に限定)。
     """
     for c, st in _lex(command):
         if c == "\r":
             return True
-        if st in (_ST_PLAIN, _ST_ESCAPED, _ST_DOUBLE) and c in _HARD_STOP_CHARS:
+        if st in (_ST_PLAIN, _ST_ESCAPED) and c in _HARD_STOP_CHARS:
+            return True
+        if st == _ST_DOUBLE and c in _DQ_LIVE_HARD_STOPS:
             return True
     return False
 
 
 def _has_quoted_hard_stop(segment: str) -> bool:
-    """``_has_hard_stop`` が False の segment に、シングルクォート内の hard-stop
-    char が残っているか (= 0.18.0 の quote-aware 化で緩んだ segment か)。
+    """``_has_hard_stop`` が False の segment に、クォート内の hard-stop char が
+    残っているか (= 0.18.0 / 0.25.0 の quote-aware 化で緩んだ segment か)。
 
     前提: ``_has_hard_stop(segment)`` が False であること。その条件下では、
-    ダブルクォート内・クォート外 (エスケープ込み) の hard-stop char は既に True
-    を返しているので、残る hard-stop char はシングルクォート内のものだけ
-    (コメントは splitter が落としている)。呼び出し側はこれが True のときだけ
+    クォート外 (エスケープ込み) の hard-stop char と、ダブルクォート内で展開が
+    生きる char (``$`` バッククォート) は既に True を返しているので、残る
+    hard-stop char は **シングルクォート内のもの** と **ダブルクォート内の不活性
+    char (``(`` ``)`` ``{`` ``}`` ``<``、0.25.0)** だけ (コメントは splitter が
+    落としている)。呼び出し側はこれが True のときだけ
     ``interpreters._quoted_hard_stop_reason`` を適用し、inert でない first token
     やクォート文字列を別のインタプリタに渡す形 (``find -exec sh -c '...'``) を
-    ask に戻す (0.18.0 review R5 / R6)。
+    ask に戻す (0.18.0 review R5 / R6)。ダブルクォート形もこの gate を通るので、
+    ``docker run img "cmd(arg)"`` は従来どおり ask に倒れる。
     """
     return any(c in _HARD_STOP_CHARS for c in segment)
+
+
+# 単純変数展開の置換 placeholder (0.25.0)。既定 patterns / 一般的なユーザー
+# pattern のどの literal 部分とも衝突しない綴りにする (衝突すると変数 operand が
+# 常に deny になる誤爆。glob 文字 / ``/`` / ``:`` / ``=`` / ``.`` を含めないこと
+# — 含めると shlex 分割・pathspec 分割・env-assignment 判定の意味が変わる)。
+_EXPANSION_PLACEHOLDER = "__sfg_unexpanded__"
+
+# 単純変数展開の NAME 部分 (Bash の識別子)。positional (``$1``) / special
+# (``$?`` ``$@`` 等) / ``${VAR:-...}`` などの複合形は対象外 (置換しない)。
+_SIMPLE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _replace_simple_expansions(segment: str) -> str | None:
+    """live な単純変数展開 (``$NAME`` / ``${NAME}``) を placeholder に置換する。
+
+    hard-stop segment の「リテラル operand 救済 scan」(0.25.0、
+    ``bash_handler._hard_stop_literal_scan``) の前処理。``cat $PWD/.env`` の
+    ``$PWD`` を「不明な 1 文字列」として ``__sfg_unexpanded__`` に置き換え、
+    残りが静的に解析できる形なら通常の operand scan を再実行できるようにする。
+    basename 判定 (0.22.0) の下では、placeholder が pattern の literal 部分に
+    一致しない限り「変数がどう展開されても basename が機密 pattern に一致する
+    形」だけが deny に届く (``$X/.env`` → 常に basename ``.env`` / ``$X.pem`` →
+    常に ``*.pem`` 一致。``$X.env`` は ``.env`` に一致せず deny しない)。
+
+    置換するのは **展開が生きている** 位置のみ:
+
+    - クォート外 (``_ST_PLAIN``) とダブルクォート内 (``_ST_DOUBLE``)。ただし
+      ダブルクォート内は直前の連続バックスラッシュが偶数個のときだけ
+      (``"\\$x"`` は literal)
+    - シングルクォート内 / エスケープ済み (``\\$``) / コメント / heredoc 本文は
+      literal なので置換しない
+
+    ``$NAME`` は識別子を最長一致で読む (``$PWDx`` = 変数 PWDx)。``${NAME}`` は
+    中身が識別子だけのとき置換する。``$(`` ``$((`` ``$[`` ``$?`` ``$1`` ``${X:-}``
+    等の複合形は置換せず残す — 呼び出し側は置換後も ``_has_hard_stop`` が True
+    なら救済 scan を断念する (従来どおり ask_or_allow) ので、複合形が残る
+    segment の挙動は変わらない。
+
+    Returns:
+        置換後の segment 文字列。置換対象が 1 つも無ければ ``None``。
+    """
+    lx = _lex(segment)
+    out: list[str] = []
+    replaced = False
+    i = 0
+    n = len(lx)
+    while i < n:
+        c, st = lx[i]
+        if c != "$" or st not in (_ST_PLAIN, _ST_DOUBLE):
+            out.append(c)
+            i += 1
+            continue
+        if st == _ST_DOUBLE:
+            # ダブルクォート内の ``\$`` (奇数個の直前バックスラッシュ) は literal
+            bs = 0
+            j = i - 1
+            while j >= 0 and lx[j] == ("\\", _ST_DOUBLE):
+                bs += 1
+                j -= 1
+            if bs % 2 == 1:
+                out.append(c)
+                i += 1
+                continue
+        # ``${NAME}`` 形
+        if i + 1 < n and lx[i + 1][0] == "{":
+            j = i + 2
+            name_chars: list[str] = []
+            while j < n and lx[j][0] != "}":
+                name_chars.append(lx[j][0])
+                j += 1
+            name = "".join(name_chars)
+            if j < n and name and _SIMPLE_NAME_RE.fullmatch(name):
+                out.append(_EXPANSION_PLACEHOLDER)
+                replaced = True
+                i = j + 1
+                continue
+            out.append(c)
+            i += 1
+            continue
+        # ``$NAME`` 形 (最長一致)
+        j = i + 1
+        name_chars = []
+        while j < n and lx[j][1] == st and (
+            lx[j][0].isalnum() or lx[j][0] == "_"
+        ):
+            name_chars.append(lx[j][0])
+            j += 1
+        name = "".join(name_chars)
+        if name and _SIMPLE_NAME_RE.fullmatch(name):
+            out.append(_EXPANSION_PLACEHOLDER)
+            replaced = True
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    if not replaced:
+        return None
+    return "".join(out)
 
 
 def _split_command_on_operators(command: str) -> list[str]:

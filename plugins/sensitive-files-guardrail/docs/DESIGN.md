@@ -78,10 +78,14 @@ plugin を無効化する (= 防御がゼロになる) という事故が実際�
 
 「判断困難」とは以下のような **静的解析不能** な segment:
 
-- `_has_hard_stop` 該当 (`$` / バッククォート / `(` / `)` / `{` / `}` / `<` / `\r`)
+- `_has_hard_stop` 該当 (`$` / バッククォート / `(` / `)` / `{` / `}` / `<` /
+  `\r`。0.18.0 / 0.25.0 の quote-aware 化でクォート内の不活性 char は除外。
+  0.25.0 からは単純変数展開だけが理由の hard-stop で、置換後に basename が
+  確定する形は「静的解析不能」に該当しない — 下の救済 scan 参照)
 - `_is_opaque_first_token` 該当 (env-assignment / 任意 path exec / opaque wrapper)
 - `_SHELL_KEYWORDS` (`if` / `for` / `do` 等)
-- `_segment_has_residual_metachar` (非 `_SAFE_READ_FIRST_TOKENS` での `>` / `&` 等)
+- residual metachar (非 `_SAFE_READ_FIRST_TOKENS` での `>` / `&` 等。0.25.0 から
+  quote-aware — クォート内・エスケープ済みは演算子になれないので数えない)
 - `shlex.split` 失敗 / `normalize` 失敗
 - glob operand が dotenv stem に一致しないケース
 
@@ -197,11 +201,67 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
 緩めない側は意図的に非対称にしてある (guard を落とさないため):
 
 - **ダブルクォート内は hard-stop 維持** — `echo "$(cat .env)"` は展開される
+  (0.25.0 で「展開が生きる char のみ」に精緻化 — 下記)
 - **クォート外のバックスラッシュは quote を開かない** — `\'` は literal `'`
   であってシングルクォート開始ではない (Bash 仕様)。取り違えると
   `cat \'$(cat .env)\'` で guard が落ちる。一方 `\$` `\(` 自体は hard-stop として
   数え続けるため `cat <(echo \(\)) < .env` は挙動不変
 - **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
+
+**0.25.0 (判定境界バッチ、2026-08 精査)**: quote-aware 化を 3 点仕上げた。
+
+1. **ダブルクォート内は「展開が生きる char (`$` バッククォート =
+   `_DQ_LIVE_HARD_STOPS`) のみ」hard-stop** にする。Bash はダブルクォート内で
+   `(` `)` `{` `}` `<` を一切解釈しない (bash 5 実測: `echo "A%(b)A"` は
+   literal 出力、無クォートの `%(b)` は syntax error で実行されない)。これで
+   `git ls-files --format="%(objectname)" .env` が単一クォート形 (0.18.0 で
+   到達済み) と同じ operand scan → `_GIT_LS_FILES_OBJECT_OPTS` 経由の deny に
+   揃い、「同一セマンティクスのコマンドの verdict がクォートの書き方だけで
+   deny / ask / allow に分かれる」非一貫性が解消した (blob object name =
+   内容の指紋なので deny 側に揃えるのが正。無クォート形は syntax error で
+   実行されない形なので hard-stop の ask / allow のままで実害なし)。二重
+   クォート形にも 0.18.0 と同じ後段 gate (`_quoted_hard_stop_reason` の inert
+   allowlist / 委譲判定 / awk・sed 動的構文) が適用されるため、
+   `docker run img "cmd(arg)"` / `find . -exec sh -c "cat {}" ";"` は従来どおり
+   ask に倒れる。緩む側は `git diff "HEAD@{1}"` / `git stash apply "stash@{0}"`
+   / `awk "{print}" f` (シングルクォート形と対称)。
+
+2. **residual metachar (`>` `&` `|` `<`) の判定を raw segment の quote-aware
+   走査にする** (`redirects._live_operator_metachars`)。これらの文字が演算子と
+   して働くのはクォート外・非エスケープのときだけで、0.24.0 までの token
+   ベース判定 (shlex がクォートを剥がした後) は `git commit -m 'a & b'` の
+   `&` (literal データ) と `echo x > f` の `>` (演算子) を区別できず、実ログ
+   429 件 (0.5%) の日常コマンドを ask に倒していた。安全リダイレクトは word
+   単位 (全文字クォート外のときのみ) で除外する。副次効果 2 つ: (a)
+   `mv 'a|b' .env` は residual ask に隠れていた literal 機密 operand が
+   見えるようになり deny (無クォートの `mv ab .env` と一貫)、(b) `ls '>.env'`
+   のクォート済み operand を fused redirect と誤認して deny していた
+   metadata-only 経路の誤検知が解消 (live に `>` が無ければ
+   `_sensitive_redirect_target` を呼ばない)。
+
+3. **hard-stop segment のリテラル operand 救済 scan**
+   (`bash_handler._hard_stop_literal_scan`)。単純変数展開 (`$NAME` /
+   `${NAME}`) を「不明な 1 文字列」placeholder に置換して hard-stop が消える
+   segment は、通常の operand scan (spec の pattern 枠 / option 値の除外 /
+   glob dotenv 判定 / basename match をそのまま) にかけ、**deny だけを採用**
+   する。`cat $PWD/.env` は変数の展開結果に依らず読まれるファイルの basename
+   が `.env` で確定する (`X + "/.env"` の basename は X に依らない) ので、
+   確信 deny 条件 (機密 operand 確定 × 内容出力) を満たす — 「静的解析不能」
+   ではないものを解析不能扱いしていた分類の是正であり、判断困難 → deny 強制の
+   特例では**ない** (placeholder が pattern に一致しない `cat $X`、basename が
+   変数に跨る `cat $X.env`、コマンド置換・複合展開・positional 変数が残る形、
+   first token が変数の形は従来どおり ask_or_allow)。deny 以外の結論 (allow /
+   ask) は捨てて従来の hard-stop ask に倒すので、この scan が verdict を
+   緩める方向に働くことはない。placeholder (`__sfg_unexpanded__`) は既定 /
+   一般的な pattern の literal 部と衝突しない綴りを選び、deny reason では
+   `${…}` に置換して表示、path 形の除外案内は抑止する (変数部分が確定しない
+   rule を案内しないため)。
+
+   救済 scan の deny は「literal を直書きした同型コマンドが deny になる場合」
+   に限って発火する (置換後の token 列に既存の判定をそのまま適用するだけ) ため、
+   個々の deny の妥当性は literal 側の既存ポリシーに帰着する。旧版との同一
+   コーパス diff (1,199 コマンド × 2 mode = 2,398 verdict、変更 144 件) で
+   説明不能ゼロを確認した (`CHANGELOG.md` 0.25.0)。
 
 **splitter と hard-stop は 1 つの lexer (`_lex`) を共有する** (PR #38 review R7
 で統一)。`_lex` が行継続 `\<newline>` を除去し (クォート外とダブルクォート内。
@@ -883,6 +943,11 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
    hard-stop quote-aware 化で `awk '{...}' .env` 形も operand scan に到達する)。0.8.0 で `FOO=1 cat .env`, `env cat .env`,
    `command cat .env`, `nohup cat .env`, `/usr/bin/env FOO=1 cat .env` も
    ``ask_or_allow`` に格下げした (0.3.2〜0.7.x の prefix normalize は撤廃)。
+   0.25.0 から、operand 内の**単純変数展開** (`$NAME` / `${NAME}`) だけが
+   理由で解析を放棄していた形は「静的解析不能」から外れる — `cat $PWD/.env`
+   のように展開結果に依らず basename が確定する形は deny に届く (リテラル
+   operand 救済 scan、上の 0.25.0 節)。展開結果が判定を左右する形
+   (`cat $X` / `cat $X.env`) とコマンド置換・複合展開は従来どおり本項の扱い。
 3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0、0.11.0 で segment 単位
    再評価)** — 0.3.4〜0.6.x では character-level quote-aware parser で
    `cat < .env` / `cat<.env` / `cat 0<.env` / `cat < ".env"` などから target

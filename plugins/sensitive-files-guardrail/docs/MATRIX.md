@@ -167,6 +167,36 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > `--include=FILE` と ack `--ackrc FILE` (pattern 枠を持つコマンドで値を読む
 > option は path 登録が必要。`gawk -i .env 'BEGIN {…}'` は deny)。
 
+> **0.25.0 で判定境界が変化** (判定境界バッチ、2026-08 精査。4 件):
+> (1) **hard-stop segment のリテラル operand 救済 scan** — 単純変数展開
+> (`$NAME` / `${NAME}`) を「不明な 1 文字列」placeholder に置換して hard-stop が
+> 消える segment は通常の operand scan を再実行し、**deny だけを採用** する。
+> `cat $PWD/.env` / `cat "$PWD/.env"` / `grep KEY $CFG/.env` / `cat $OPTS .env` /
+> `cat $HOME/keys/server.pem` は ask / allow → **deny** (変数の展開結果に依らず
+> basename が確定する形のみ。`cat $X` / `cat $X.env` / `cat $(pwd)/.env` /
+> `${X:-…}` / `$PAGER .env` は従来どおり ask / allow)。(2) **residual metachar の
+> quote-aware 化** — クォート内・エスケープ済みの `|` `&` `>` `<` は演算子に
+> なれないので ask に倒さない。`git commit -m 'fix: a & b'` / `echo 'a|b'` /
+> `jq '.a | .b' cfg.json` は ask → **allow**、`mv 'a|b' .env` は機密 operand が
+> 見えるようになり ask / allow → **deny**、`ls '>.env'` / `ls \>.env` は
+> クォート済み operand を fused redirect と誤認していた deny → **allow**
+> (無クォートの `ls >.env` / `echo KEY=val > .env` は従来どおり)。
+> (3) **ダブルクォート内の不活性 char (`(` `)` `{` `}` `<`) を hard-stop に
+> しない** (`$` バッククォートは展開が生きるので維持) — `git ls-files
+> --format="%(objectname)" .env` が単一クォート形と同じ **deny** に揃い
+> (verdict がクォートの書き方だけで分かれる非一貫性の解消。無クォート形は実
+> bash で syntax error になる形なので hard-stop の ask / allow のまま)、
+> `git diff "HEAD@{1}"` / `git stash apply "stash@{0}"` / `awk "{print}" f` は
+> ask → **allow** (0.18.0 のシングルクォート緩和と同じ inert gate / 委譲判定 /
+> awk・sed 動的構文判定が二重クォートにも適用される)。(4) **sed のオプション
+> 経由 script は positional 枠を消費** — `-e` / `--expression` / `-f` があれば
+> positional は全て入力ファイル (sed の仕様)。`sed -e 's/a/b/' report.txt` の
+> `report.txt` を script として再解析し先頭文字で `sed_dynamic:r` の ask に
+> 倒していた誤検知が **allow** になる。
+> 旧版 (main) との同一コーパス diff (1,199 コマンド × default / auto =
+> 2,398 verdict): 変更 144 件 = deny 増 88 / deny 減 6 / ask → allow 50、
+> **説明不能ゼロ** (全件が上記 (1)〜(4) に分類)。
+
 ## Bash handler — 機密確定 match (全 mode で deny)
 
 以下は全 mode で **deny 固定** (autonomous を含む)。
@@ -192,6 +222,10 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `cat */.env`, `cat **/.env` (0.22.0: path 要素ごとの展開で basename 側が `.env`。0.21.x までは ask / allow) |
 | `grep foo README.md >.env` (0.22.0: 密着形 redirect の書込み先。分離形 `> .env` は従来から deny) |
 | `shopt -s dotglob; cat *`, `GLOBIGNORE=x; cat *`, `setopt globdots; cat *` (0.22.0: 同一コマンド内で dotglob 系を有効化すると `*` は dotfile にも展開されるので fnmatch の意味論に戻す) |
+| `cat $PWD/.env`, `cat ${PWD}/.env`, `cat "$PWD/.env"`, `REPO=. ; cat $REPO/.env`, `grep KEY $CFG/.env`, `head -n 3 ${DIR}/.env`, `cat $HOME/keys/server.pem`, `cat $X/id_rsa`, `cp $SRC/.env /tmp/x`, `cat $D/.env*`, `shopt -s dotglob; cat $D/*` (0.25.0: 単純変数展開を placeholder に置換した救済 scan。展開結果に依らず basename が機密 pattern に一致する形だけ deny) |
+| `cat $OPTS .env`, `grep $PAT .env` (0.25.0: 変数と同居していても literal operand は救済 scan が拾う) |
+| `awk "{print}" .env`, `sed "s/(=)/X/" .env`, `git ls-files --format="%(objectname)" .env` (0.25.0: ダブルクォート内の `{` `(` は不活性。単一クォート形と同じ deny 経路に到達) |
+| `mv 'a|b' .env` (0.25.0: クォート内 `\|` は演算子ではないので residual ask にならず、literal 機密 operand の deny に到達) |
 
 > 0.8.0 で **prefix normalize** (`FOO=1 cat .env` を `cat .env` と解釈する処理) と
 > **既定 rules 候補列挙** (`cat *.key` / `cat id_rsa*` / `cat cred*.json` を
@@ -214,6 +248,9 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `sed -n 's/.env/X/p' notes.txt`, `awk '/.env/ {print}' notes.txt`, `cat .env/bin/activate`, `source .env/bin/activate` (0.22.0: script は path ではない / Bash operand は親 dir 名を見ない。0.24.0 の path 形 rule は root 相対で評価するが既定 patterns には無い) |
 | `cat *`, `git add *`, `cp * /tmp/dest/`, `cat ?env`, `cat [.]env`, `cat *.envrc` → **ask / allow** (0.22.0: shell の `*` / `?` / bracket 式は dotfile に展開されない。deny から他の不確定 glob と同じ ask_or_allow へ) |
 | `cat > x.py <<'PY'` + 本文 `n = kb * 1024` + `PY` → **ask / allow** (0.22.0: heredoc 本文は segment にしない。演算子行は `<` で hard-stop) |
+| `git commit -m 'fix: a & b'`, `git commit -m 'a & b' 2>&1`, `echo 'a\|b'`, `echo "a > b"`, `tar -cf out.tar 'weird\|name'`, `jq '.a \| .b' cfg.json`, `git log --grep='a&b' --oneline`, `echo \> x` (0.25.0: クォート内・エスケープ済みの metachar は literal データ。residual ask に倒さない) |
+| `git diff "HEAD@{1}"`, `git stash apply "stash@{0}"`, `awk "{print}" notes.txt`, `sed "s/(=)/X/" notes.txt`, `echo "{a,b}"`, `echo "a<b"`, `cat "file(1).txt"`, `git commit -m "fix (parser) & cleanup"` (0.25.0: ダブルクォート内の `(` `)` `{` `}` `<` は不活性。0.18.0 のシングルクォート形と同じ扱い) |
+| `sed -e 's/a/b/' report.txt`, `sed -e p e.txt`, `sed --expression=p e.txt`, `sed -ne p e.txt`, `sed -e p -- e.txt` (0.25.0: `-e` / `--expression` / `-f` があれば positional は全て入力ファイル。script として再解析しない) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
 
@@ -304,8 +341,9 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `file -f .env`, `file --files-from=.env` (各行を名前扱いしエラーに echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `wc --files0-from=.env`, `du --files0-from=.env`, `tree --fromfile .env` | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `file .env`, `wc -l .env`, `du -sh .env`, `tree .env` (通常形、内容は出ない) | allow | allow | allow | allow | allow |
-| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files -sz .env` (blob object name = 内容の指紋。`--format` 形は 0.17.0 まで `(` の hard-stop で ask に降格していたが 0.18.0 の quote-aware 化で表どおり deny に到達) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files --format="%(objectname)" .env`, `git ls-files -sz .env` (blob object name = 内容の指紋。単一クォート形は 0.18.0、二重クォート形は 0.25.0 の quote-aware 化で表どおり deny に到達。無クォート形は実 bash で syntax error になる形なので hard-stop の ask / allow のまま) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `ls '>.env'`, `ls \>.env` (0.25.0: クォート / エスケープ済みの `>` は redirect ではなく「`>.env` という名前のファイル」の operand。0.24.0 までは fused redirect と誤認して deny) | allow | allow | allow | allow | allow |
 | `tree >\| .env` (`>\|` clobber は `\|` が segment 分割で割れる既知限界、思想 1 射程外) | allow | allow | allow | allow | allow |
 
 > **metadata-only ∩ safe_read の redirect 書込み (Codex P2, 0.14.0)**: `ls` /
@@ -343,6 +381,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | `cat $X`, `cat "$X"`, `cat $(echo .env)` (動的展開) | ask | ask | **allow** | ask | **allow** |
+| `cat $X.env`, `cat $A/$B.env`, `cat $(pwd)/.env`, `cat ${X:-fallback}/.env`, `$PAGER .env`, `cat $1/.env`, `` cat `pwd`/.env `` (0.25.0 の救済 scan 対象外: basename が変数に跨る / コマンド置換・複合展開・positional 変数が残る / first token が変数) | ask | ask | **allow** | ask | **allow** |
 | `cat << EOF ... EOF`, `cat <(cat .env)`, `cat <&2` | ask | ask | **allow** | ask | **allow** |
 | `cat < .env`, `cat<.env`, `cat 0< .env`, `cat < ".env"` (`<` 入力リダイレクト, 0.7.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `cat <<< '.env'` (herestring, literal 渡し) | ask | ask | **allow** | ask | **allow** |

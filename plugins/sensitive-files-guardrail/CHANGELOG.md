@@ -20,6 +20,114 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.25.0
+
+Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ、model:fable lane)。
+「静的解析不能ではないものを解析不能扱いしていた」分類の是正 3 件と、sed の
+option script が positional 枠を消費しない誤検知 1 件。緩和方針 (判断困難は
+auto で allow) の縮小ではなく、**リテラルで見えている機密 operand の見逃し**と
+**クォート内 literal データの演算子誤認**の解消。
+
+- **判定境界 (deny / allow / ask) の変化** (4 件):
+  1. **hard-stop segment のリテラル operand 救済 scan** — 単純変数展開
+     (`$NAME` / `${NAME}`) を「不明な 1 文字列」placeholder に置換して
+     hard-stop が消える segment は通常の operand scan を再実行し、**deny だけ
+     を採用**する。`cat $PWD/.env` / `cat "$PWD/.env"` / `REPO=. ; cat
+     $REPO/.env` / `cat $OPTS .env` / `cat $HOME/keys/server.pem` は
+     ask / allow → **deny** (実ログで hard_stop 経路は Bash 分類の 26.3%。
+     auto mode では無言 allow だった)。変数の展開結果に依らず basename が
+     確定する形だけが対象で、`cat $X` / `cat $X.env` / `cat $(pwd)/.env` /
+     `${X:-…}` / `$PAGER .env` は従来どおり ask / allow (deny 以外の結論は
+     捨てるので、この scan が verdict を緩めることはない)
+  2. **residual metachar (`>` `&` `|` `<`) の quote-aware 化** — 演算子に
+     なり得るのはクォート外・非エスケープの文字だけ (raw segment を共有 lexer
+     で走査)。`git commit -m 'fix: a & b'` / `echo 'a|b'` / `jq '.a | .b'
+     cfg.json` / `git log --grep='a&b'` は ask → **allow** (実ログ 429 件 /
+     0.5% の誤 ask)。`mv 'a|b' .env` は隠れていた機密 operand が見えるように
+     なり **deny** (無クォート形と一貫)。`ls '>.env'` / `ls \>.env` は
+     クォート済み operand を fused redirect と誤認していた **deny → allow**。
+     無クォートの `echo KEY=val > .env` / `ls >.env` は従来どおり
+  3. **ダブルクォート内の不活性 char (`(` `)` `{` `}` `<`) を hard-stop に
+     しない** (`$` バッククォートは展開が生きるので維持) — `git ls-files
+     --format="%(objectname)" .env` が単一クォート形と同じ **deny** に揃い、
+     クォートの書き方だけで verdict が分かれる非一貫性を解消 (指紋 = 値露出と
+     同格の設計方針に基づき deny 側に統一。無クォート形は実 bash で syntax
+     error になり実行されない形なので hard-stop の ask / allow のまま)。
+     `git diff "HEAD@{1}"` / `git stash apply "stash@{0}"` / `awk "{print}" f`
+     は ask → **allow**。0.18.0 の後段 gate (inert allowlist / 委譲判定 /
+     awk・sed 動的構文) は二重クォート形にもそのまま適用され、`docker run img
+     "cmd(arg)"` / `find . -exec sh -c "cat {}" ";"` は ask 維持
+  4. **sed の option script は positional 枠を消費** — `-e` / `--expression` /
+     `-f` が 1 つでもあれば positional は全て入力ファイル (sed の仕様、
+     operand scan 側の sed spec と同じ規則)。`sed -e 's/a/b/' report.txt` の
+     `report.txt` を sed script として再解析し、先頭文字が `r` / `e` / `w` の
+     ファイル名を `sed_dynamic:<cmd>` の ask に倒していた誤検知が **allow** に
+     (`sed -f script.sed f` の `sed_script_file` ask と、option script 内の
+     動的コマンド検出は従来どおり)
+- 旧版 (main) と本 branch で同一コーパス (テスト由来 + 手書き変種 1,199
+  コマンド × default / auto = **2,398 verdict**) を流した diff は 144 件 =
+  deny 増 88 / deny 減 6 / ask → allow 50 で、**すべて上記 4 件に分類でき
+  説明不能ゼロ**。deny 増 88 件は全件「literal を直書きした同型コマンドが
+  現行版で deny になる形」(置換後の token 列に既存判定を適用しただけ) で、
+  deny 減 6 件は全件 `ls '>.env'` 族 (redirect が存在しないのに redirect
+  扱いしていた誤検知)
+- テスト件数: redact 1,063 → **1,093** / check 94 (変更なし、計 1,187)
+
+### 1. hard-stop リテラル救済 scan (`handlers/bash/segmentation.py` + `bash_handler.py`)
+
+`_replace_simple_expansions` が live な単純変数展開 (クォート外とダブル
+クォート内。シングルクォート内・`\$`・heredoc 本文は literal なので対象外) を
+placeholder `__sfg_unexpanded__` に置換する。`_hard_stop_literal_scan` は置換後
+に `_has_hard_stop` が消えたときだけ shlex → `_analyze_segment` を再実行し、
+deny 以外は捨てる。first token に placeholder が残る形 (`$PAGER .env`) は
+`/bin/cat .env` の opaque ask と同格に扱い救済しない。deny reason の
+placeholder は `${…}` に置換して表示し、path 形の除外案内 (`!<相対パス>`) は
+変数部分が確定しないため抑止する (basename 形の案内のみ)。placeholder の
+綴りは既定 patterns / 一般的なユーザー pattern の literal 部と衝突しない形を
+選んだ (衝突すると変数 operand が常に deny になるため。既知の残余リスク:
+`*unexpanded*` のような pattern を書くユーザーには誤爆する)。
+
+### 2. residual metachar の quote-aware 化 (`handlers/bash/redirects.py`)
+
+`_live_operator_metachars(segment)` が raw segment を `_lex` で word 分割し
+(クォート外の空白のみが word 境界)、全文字クォート外の word に限り安全
+リダイレクト (`2>/dev/null` / `2>&1` / `>` + `/dev/null`) を除外した上で、
+クォート外の metachar の集合を返す。`_analyze_segment` は (a) 集合が空で
+なければ従来どおり residual ask、(b) `>` が無ければ書込みリダイレクトは
+存在し得ないので metadata-only 経路の `_sensitive_redirect_target` を skip
+する (`ls '>.env'` の誤 deny 解消)。token ベースの
+`_segment_has_residual_metachar` は raw segment を渡せない旧 caller 向けの
+後方互換 fallback として残した。エスケープ済み (`\>`) は bash 的に literal
+なので数えない (`echo \> x` は `> x` を出力するだけでファイルを作らない —
+bash 5 実測)。
+
+### 3. ダブルクォート内 hard-stop の精緻化 (`handlers/bash/segmentation.py`)
+
+`_has_hard_stop` はダブルクォート内では `_DQ_LIVE_HARD_STOPS` (`$` バック
+クォート) だけを数える。`(` `)` `{` `}` `<` はダブルクォート内で literal
+(bash 5 実測: `echo "A%(b)A"` は literal 出力 / 無クォートは syntax error)。
+`_has_quoted_hard_stop` の前提条件 (`_has_hard_stop` False の segment に残る
+hard-stop char はクォート内の不活性 char のみ) を docstring ごと更新。
+`_lex` を見る scanner は 4 つ (`_split_command_on_operators` /
+`_has_hard_stop` / `_replace_simple_expansions` / `_live_operator_metachars`)
+になり、module docstring に列挙した。
+
+### 4. sed option script の positional 枠 (`handlers/bash/interpreters.py`)
+
+`_sed_scripts` を option 経由 script と positional script の 2 リストに分離し、
+`-e` / `--expression` / `-f` / `--file` が 1 つでもあれば positional を script
+候補にしない (全 token を見てから決める — `sed p -e q f` の先行 positional
+`p` もファイル)。機密 operand の deny は operand scan 側 (sed spec の
+pattern_opts) が先に返すため保護は落ちない。
+
+### 検証
+
+- 4 件とも修正前に失敗する回帰テストを追加してから修正 (negative control:
+  修正 5 ファイルを stash して新テスト 22 件を実行 → 49 failures + 1 error を
+  確認 → pop)
+- 旧版コーパス diff (上記 2,398 verdict) の分類は集計 key を TAB 区切りで
+  実施 (コマンド本文に `|` が現れるため `|` 区切りは使わない)
+
 ## 0.24.0
 
 恒久除外レシピを**承認した 1 ファイルだけ**に絞れるようにした。0.23.0 で開示した

@@ -1,8 +1,11 @@
 """Bash リダイレクト関連 pure helper (0.3.3 分解、0.7.0 縮小)。
 
-このモジュールは副作用なし・plugin 状態非依存。token 列の並べ替え / regex match
-のみ。安全リダイレクト剥離 (``2>/dev/null`` / ``2>&1`` / ``&>/dev/null`` 等) と、
-剥離後の残留 metachar (``>`` ``&`` ``|`` ``<``) 検出のみに責任を限定する。
+このモジュールは副作用なし・plugin 状態非依存。安全リダイレクト剥離
+(``2>/dev/null`` / ``2>&1`` / ``&>/dev/null`` 等) と、剥離後の残留 metachar
+(``>`` ``&`` ``|`` ``<``) 検出のみに責任を限定する。0.25.0 から残留 metachar
+判定は raw segment を ``segmentation._lex`` で quote-aware に走査する
+(``_live_operator_metachars``)。token ベースの
+``_segment_has_residual_metachar`` は後方互換 fallback として残す。
 
 0.3.4〜0.6.x で持っていた ``<`` 入力リダイレクト target 抽出用の
 character-level quote-aware parser (``_scan_input_redirect_targets_with_form`` /
@@ -23,6 +26,7 @@ from handlers.bash.constants import (
     _SAFE_REDIRECT_TARGETS,
     _SEGMENT_RESIDUAL_METACHARS,
 )
+from handlers.bash.segmentation import _ST_PLAIN, _lex
 
 # 書き込みリダイレクト演算子 (任意 fd 番号 / ``&`` + ``>`` / ``>>`` / ``>|``)。
 # target が fused (``>.env``) でも別トークン (``> .env``) でも拾えるよう、前半を
@@ -63,11 +67,98 @@ def _strip_safe_redirects(tokens: list[str]) -> list[str]:
 def _segment_has_residual_metachar(tokens: list[str]) -> bool:
     """``_strip_safe_redirects`` 後もセグメントに残っている ``>`` ``&`` ``|`` ``<``
     を持つトークンがあるか。
+
+    0.25.0: **quote-blind な後方互換 fallback**。shlex 後の token はクォートが
+    剥がれているため、``git commit -m 'a & b'`` の ``&`` (literal データ) と
+    ``echo x > f`` の ``>`` (演算子) を区別できない。``_analyze_segment`` は
+    raw segment を quote-aware に走査する ``_live_operator_metachars`` の結果を
+    受け取ったときはそちらを使う。この関数は raw segment を渡せない旧 caller /
+    テスト向けに残している。
     """
     for t in tokens:
         if any(c in _SEGMENT_RESIDUAL_METACHARS for c in t):
             return True
     return False
+
+
+def _live_operator_metachars(segment: str) -> frozenset[str]:
+    """raw segment 中で **演算子になり得る** residual metachar (``&`` ``|`` ``<``
+    ``>``) の集合を返す (quote-aware、0.25.0)。
+
+    Bash でこれらの文字が演算子として働くのは **クォート外・非エスケープ**
+    (``_lex`` の ``_ST_PLAIN``) のときだけ。シングル / ダブルクォート内・
+    ``\\`` エスケープ済みは literal データで、リダイレクトにも pipe にも
+    background にもならない (bash 5 実測: ``echo \\> x`` は ``> x`` を出力する
+    だけでファイルを作らない)。0.24.0 までの token ベース判定
+    (``_segment_has_residual_metachar``) はこの区別ができず、
+    ``git commit -m 'fix: a & b'`` / ``curl 'https://x/a?b=1&c=2'`` /
+    ``echo "a > b"`` のような日常コマンドを ask に倒していた (実ログ 429 件 /
+    0.5%)。
+
+    安全リダイレクト (``2>/dev/null`` / ``2>&1`` / ``>`` + ``/dev/null`` 等) は
+    token 版の ``_strip_safe_redirects`` と同じ規則で除外する。ただし word が
+    **全文字クォート外** のときだけ (``echo '2>/dev/null'`` は operand であって
+    リダイレクトではない — その ``>`` はそもそもクォート内なので数えない)。
+
+    戻り値の使い方 (``bash_handler._analyze_segment``):
+
+    - 空でなければ従来どおり ``ask_or_allow("residual_metachar")``
+    - ``>`` を含まなければ書き込みリダイレクトは存在し得ないので、
+      metadata-only 経路の ``_sensitive_redirect_target`` 判定を skip する
+      (``ls '>.env'`` のようなクォート済み operand を fused redirect と誤認して
+      deny しない)
+
+    注意: ``|`` と単独 ``&`` は ``_split_command_on_operators`` が segment 境界
+    として先に消費するため、ここで観測されるのは主に ``>`` (書き込み) と
+    リダイレクト複合の ``&`` (``3>&2`` 等の非 safe 形)。``<`` はクォート外なら
+    hard-stop が先に効くので、実際にはクォート内 = 非演算子側でしか現れない。
+    """
+    found: set[str] = set()
+    # word = クォート外の空白で区切った並び。各 word について
+    # (raw 文字列, 全文字がクォート外か, クォート外の metachar 集合) を持つ。
+    words: list[tuple[str, bool, set[str]]] = []
+    buf: list[str] = []
+    all_plain = True
+    metas: set[str] = set()
+
+    def flush() -> None:
+        nonlocal buf, all_plain, metas
+        if buf:
+            words.append(("".join(buf), all_plain, metas))
+        buf = []
+        all_plain = True
+        metas = set()
+
+    for c, st in _lex(segment):
+        if st == _ST_PLAIN and c in " \t\n":
+            flush()
+            continue
+        buf.append(c)
+        if st != _ST_PLAIN:
+            all_plain = False
+        elif c in _SEGMENT_RESIDUAL_METACHARS:
+            metas.add(c)
+    flush()
+
+    i = 0
+    n = len(words)
+    while i < n:
+        raw, plain, word_metas = words[i]
+        if plain and _SAFE_REDIRECT_RE.match(raw):
+            i += 1
+            continue
+        if (
+            plain
+            and raw in _REDIRECT_OP_TOKENS
+            and i + 1 < n
+            and words[i + 1][1]
+            and words[i + 1][0] in _SAFE_REDIRECT_TARGETS
+        ):
+            i += 2
+            continue
+        found |= word_metas
+        i += 1
+    return frozenset(found)
 
 
 def _redirect_write_targets(tokens: list[str]) -> list[str]:

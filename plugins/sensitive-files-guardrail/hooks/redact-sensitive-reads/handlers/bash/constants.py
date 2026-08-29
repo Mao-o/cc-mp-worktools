@@ -206,9 +206,20 @@ _GIT_RM_SAFE_SHORT_FLAGS = frozenset("fnrq")
 # ``<`` は target 抽出を試みた上で残りを ``ask_or_allow`` に倒す。
 # 0.18.0: 判定 (``_has_hard_stop``) は quote-aware になり、**シングルクォート内**
 # の該当 char は展開されないため無視する (``\r`` のみクォート内でも hard-stop)。
+# 0.25.0: ダブルクォート内は ``_DQ_LIVE_HARD_STOPS`` のみ hard-stop (下記)。
 _HARD_STOP_CHARS = frozenset("$`(){}<\r")
 
+# ダブルクォート内でも **展開が生きる** hard-stop char (0.25.0)。
+# Bash はダブルクォート内で ``$`` (変数 / コマンド / 算術展開) とバッククォート
+# (コマンド置換) だけを解釈し、``(`` ``)`` ``{`` ``}`` ``<`` は literal になる
+# (bash 5 実測: ``echo "A%(b)A"`` は literal 出力、無クォートは syntax error)。
+# ``--format="%(objectname)"`` / ``"HEAD@{1}"`` のような日常形をシングル
+# クォート形 (0.18.0 で緩和済み) と同じ経路に載せるための絞り込み。
+_DQ_LIVE_HARD_STOPS = frozenset("$`")
+
 # セグメント内に剥がしきれずに残ると ``ask_or_allow`` する metachar セット。
+# 0.25.0: 判定は ``redirects._live_operator_metachars`` が raw segment を
+# quote-aware に走査する (クォート内 / エスケープ済みの文字は演算子になれない)。
 _SEGMENT_RESIDUAL_METACHARS = frozenset("&|<>")
 
 # 安全リダイレクト: ``/dev/null`` / ``/dev/stderr`` / ``/dev/stdout`` / fd 複製。

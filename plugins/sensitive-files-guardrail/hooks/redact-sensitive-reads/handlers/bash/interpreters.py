@@ -171,11 +171,22 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
     token を候補に入れつつ positional とは数えない (候補を増やしても ask 側に
     しか倒れない)。ファイル operand は含めない。
 
+    0.25.0: スクリプトを **オプション経由** (``-e`` / ``--expression`` / ``-f`` /
+    ``--file``) で 1 つでも与えた場合、positional は全て入力ファイル (sed の
+    仕様。``operand_lexer`` の sed spec ``pattern_opts`` と同じ規則)。0.24.0 まで
+    は positional 枠を消費せず、``sed -e 's/a/b/' report.txt`` の ``report.txt``
+    を sed スクリプトとして再解析し、先頭文字が ``r`` / ``e`` / ``w`` 等の
+    ファイル名を ``sed_dynamic:<cmd>`` の ask に誤って倒していた (2026-08 精査)。
+    判定は左から右の走査ではなく全 token を見てから決める (``sed p -e q f`` の
+    ような順序でも positional ``p`` はファイル)。
+
     Returns:
         ``(候補スクリプト列, -f / --file が指定されたか)``
     """
-    scripts: list[str] = []
+    option_scripts: list[str] = []
+    positional_scripts: list[str] = []
     script_file = False
+    script_option = False
     expect_script = False
     expect_file = False
     ambiguous_next = False
@@ -183,7 +194,7 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
     opts_done = False
     for t in rest:
         if expect_script:
-            scripts.append(t)
+            option_scripts.append(t)
             expect_script = False
             continue
         if expect_file:
@@ -191,12 +202,12 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
             expect_file = False
             continue
         if ambiguous_next:
-            scripts.append(t)
+            option_scripts.append(t)
             ambiguous_next = False
             continue
         if opts_done or not t.startswith("-") or t == "-":
             if not positional_taken:
-                scripts.append(t)
+                positional_scripts.append(t)
                 positional_taken = True
             continue
         if t == "--":
@@ -206,8 +217,9 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
             name, eq, val = t[2:].partition("=")
             full = _resolve_sed_long_opt(name)
             if full == "expression":
+                script_option = True
                 if eq:
-                    scripts.append(val)
+                    option_scripts.append(val)
                 else:
                     expect_script = True
             elif full == "file":
@@ -229,8 +241,9 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
             ch = letters[k]
             attached = letters[k + 1:]
             if ch == "e":
+                script_option = True
                 if attached:
-                    scripts.append(attached)
+                    option_scripts.append(attached)
                 else:
                     expect_script = True
                 break
@@ -252,7 +265,12 @@ def _sed_scripts(rest: list[str]) -> tuple[list[str], bool]:
                     ambiguous_next = True  # BSD ``-i ext`` / GNU ``-i`` (引数なし)
                 break  # 密着 suffix (GNU ``-i.bak``) は残りを消費
             k += 1
-    return scripts, script_file
+    if script_option or script_file:
+        # オプション経由でスクリプトを与えた形: positional は入力ファイル。
+        # 候補から外しても、機密 operand なら operand scan (sed spec) が deny を
+        # 先に返すので保護は落ちない。
+        return option_scripts, script_file
+    return option_scripts + positional_scripts, script_file
 
 
 def _sed_script_dynamic(script: str) -> str | None:

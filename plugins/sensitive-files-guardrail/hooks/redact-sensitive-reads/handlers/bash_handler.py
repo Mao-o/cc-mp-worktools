@@ -22,19 +22,27 @@ segment 単位再評価へ移行)。
 
 1. **segment split** — ``&&`` ``||`` ``;`` ``|`` ``\\n`` を quote-aware に分割。
 2. **per-segment 解析** — 各セグメントで:
-   - **hard-stop 再判定 (0.11.0 / 0.18.0 quote-aware)** — ``$`` ``(`` ``)``
-     ``{`` ``}`` ``<`` バッククォート ``\\r`` を **クォート外またはダブル
-     クォート内に** 含む segment は静的解析不能のため
-     ``ask_or_allow`` を ``pending_ask`` に格納して **continue** (他 segment の
-     deny 検出を続ける)。0.10.0 までは command 全体に hard-stop が 1 つでも
-     あると early return していたが、``cat .env | sed 's/(=)/X/'`` のような
-     複合で sed segment の ``(`` が原因で全体 ask に倒れ autonomous で素通り
-     していたため、segment 単位再評価に細粒度化。攻撃シナリオ ``cat <(echo
-     \\(\\)) < .env`` は全 segment hard-stop となるため挙動不変 (思想 1
-     整合)。0.3.4〜0.6.x で ``<`` のみ target を抽出していた経路は 0.7.0 で
-     撤廃済み。0.18.0 でシングルクォート内の hard-stop char を無視するように
-     し、``awk '{print}' .env`` / ``sed 's/(=)/X/' .env`` が operand scan に
-     到達するようになった (詳細は ``handlers/bash/segmentation.py``)。
+   - **hard-stop 再判定 (0.11.0 / 0.18.0 / 0.25.0 quote-aware)** — ``$`` ``(``
+     ``)`` ``{`` ``}`` ``<`` バッククォート ``\\r`` を **クォート外に** 含む
+     (またはダブルクォート内に展開が生きる ``$`` バッククォートを含む) segment
+     は静的解析不能のため ``ask_or_allow`` を ``pending_ask`` に格納して
+     **continue** (他 segment の deny 検出を続ける)。0.10.0 までは command
+     全体に hard-stop が 1 つでもあると early return していたが、``cat .env |
+     sed 's/(=)/X/'`` のような複合で sed segment の ``(`` が原因で全体 ask に
+     倒れ autonomous で素通りしていたため、segment 単位再評価に細粒度化。
+     攻撃シナリオ ``cat <(echo \\(\\)) < .env`` は全 segment hard-stop となる
+     ため挙動不変 (思想 1 整合)。0.3.4〜0.6.x で ``<`` のみ target を抽出して
+     いた経路は 0.7.0 で撤廃済み。0.18.0 でシングルクォート内、0.25.0 で
+     ダブルクォート内の不活性 char (``(`` ``)`` ``{`` ``}`` ``<``) を無視する
+     ようにし、``awk '{print}' .env`` / ``sed 's/(=)/X/' .env`` /
+     ``git ls-files --format="%(objectname)" .env`` が operand scan に到達する
+     ようになった (詳細は ``handlers/bash/segmentation.py``)。
+   - **hard-stop segment のリテラル operand 救済 scan (0.25.0)** — 単純変数展開
+     (``$NAME`` / ``${NAME}``) を placeholder に置換して hard-stop が消えるなら
+     通常の operand scan を再実行し、**deny だけを採用** する
+     (``cat $PWD/.env`` は変数の展開結果に依らず basename ``.env`` が確定する
+     ので deny。``cat $X`` は placeholder が pattern に一致せず従来どおり
+     ask_or_allow。``_hard_stop_literal_scan``)
    - shlex.split → 失敗 → ``ask_or_allow`` を ``pending_ask`` に格納して continue
    - 安全リダイレクト剥離 (``>/dev/null`` / ``2>&1`` 等)
    - **opaque first token 判定 (0.8.0)** — 第一トークンが env-assignment
@@ -43,7 +51,10 @@ segment 単位再評価へ移行)。
      exec (``/bin/cat`` / ``./script``) のいずれかなら ``ask_or_allow``。
      0.3.2 で導入していた prefix normalize (``FOO=1 cat .env`` →
      ``cat .env`` と解釈して deny) は 0.8.0 で撤廃。
-   - 残留 metachar (``>`` ``&`` 等) → ``ask_or_allow``
+   - 残留 metachar (``>`` ``&`` 等) → ``ask_or_allow``。0.25.0 から raw segment
+     の quote-aware 走査 (``_live_operator_metachars``) で「演算子になり得る」
+     文字だけを数える (``git commit -m 'a & b'`` の ``&`` は literal データ
+     なので ask に倒さない)
    - shell keyword (``if``/``for``/``do`` 等) → ``ask_or_allow``
    - **metadata-only 判定 (0.14.0)** — 第一トークンが「operand の内容を出力
      しない」コマンド (``ls`` / ``stat`` / ``echo`` 等、git は ``check-ignore``
@@ -136,13 +147,16 @@ from handlers.bash.operand_lexer import (  # noqa: F401
 )
 from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
+    _live_operator_metachars,
     _redirect_write_targets,
     _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
 from handlers.bash.segmentation import (  # noqa: F401
+    _EXPANSION_PLACEHOLDER,
     _has_hard_stop,
     _has_quoted_hard_stop,
+    _replace_simple_expansions,
     _split_command_on_operators,
 )
 from redaction.file_render import render_for_bash
@@ -425,6 +439,12 @@ def _operand_relpath(operand: str, cwd: str, root: str | None) -> str:
     """
     if not root or not operand or ":" in operand or _has_glob(operand):
         return ""
+    if _EXPANSION_PLACEHOLDER in operand:
+        # hard-stop 救済 scan (0.25.0) の placeholder 入り operand。実パスの
+        # 変数部分が確定しないため path 形の除外案内は作れない (作ると
+        # ``!__sfg_unexpanded__/...`` という決して一致しない rule を案内して
+        # しまう)。basename 形の案内だけに任せる。
+        return ""
     try:
         abs_path = normalize(operand, cwd)
     except (ValueError, OSError):
@@ -517,6 +537,7 @@ def _analyze_segment(
     *,
     dotglob: bool = False,
     root: str | None = None,
+    live_metachars: frozenset[str] | None = None,
 ) -> dict:
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
@@ -544,6 +565,20 @@ def _analyze_segment(
     residual metachar 判定を skip するため、``ls > .env`` のような機密 path への
     redirect 書込みが shortcut で allow に倒れる穴があった。redirect target が
     機密のときは shortcut せず operand scan → deny に倒す (Codex P2)。
+
+    ``live_metachars`` (0.25.0): raw segment の quote-aware 走査
+    (``_live_operator_metachars``) で得た「演算子になり得る residual metachar」
+    の集合。呼び出し側 (``handle`` / ``_hard_stop_literal_scan``) が segment
+    文字列から計算して渡す。None のときは 0.24.0 までの token ベース判定
+    (quote-blind) に fallback する。役割は 2 つ:
+
+    - residual metachar の ask 判定 (クォート内の ``|`` ``&`` ``>`` ``<`` は
+      literal データなので ask に倒さない)
+    - ``>`` が live に無ければ書き込みリダイレクトは存在し得ないので、
+      metadata-only 経路の ``_sensitive_redirect_target`` を skip する
+      (``ls '>.env'`` のクォート済み operand を fused redirect と誤認して deny
+      していた誤検知の解消。token ベースの ``_redirect_write_targets`` は
+      クォートが剥がれた後の token しか見えない)
     """
     if not tokens:
         return output.make_allow()
@@ -558,7 +593,14 @@ def _analyze_segment(
             envelope,
         )
 
-    if not is_safe_read and _segment_has_residual_metachar(tokens):
+    if live_metachars is None:
+        has_residual = _segment_has_residual_metachar(tokens)
+        may_write_redirect = True
+    else:
+        has_residual = bool(live_metachars)
+        may_write_redirect = ">" in live_metachars
+
+    if not is_safe_read and has_residual:
         L.log_info("bash_classify", "segment_residual_metachar_lenient")
         return output.ask_or_allow(
             M.bash_lenient("residual_metachar"),
@@ -587,8 +629,12 @@ def _analyze_segment(
     # ここで直接 deny する。`ls -la .env > /tmp/x` のように read operand が
     # 機密でも書込み先が非機密なら allow 維持。
     if _is_metadata_only(tokens):
-        redirect_target = _sensitive_redirect_target(
-            tokens, envelope.get("cwd", ""), rules, root=root
+        redirect_target = (
+            _sensitive_redirect_target(
+                tokens, envelope.get("cwd", ""), rules, root=root
+            )
+            if may_write_redirect
+            else None
         )
         if redirect_target is not None:
             L.log_info("bash_classify", f"metadata_redirect_deny:{first}")
@@ -635,6 +681,83 @@ def _analyze_segment(
 def _decision_of(result: dict) -> str | None:
     hook = result.get("hookSpecificOutput") or {}
     return hook.get("permissionDecision")
+
+
+# deny reason 内で placeholder を読者向けに置き換える表示 (0.25.0)。
+_PLACEHOLDER_DISPLAY = "${…}"
+
+
+def _hard_stop_literal_scan(
+    seg: str,
+    envelope: dict,
+    rules: list[tuple[str, bool]],
+    *,
+    dotglob: bool = False,
+    root: str | None = None,
+) -> dict | None:
+    """hard-stop segment の「リテラル operand 救済 scan」(0.25.0)。
+
+    ``cat $PWD/.env`` は ``$`` の hard-stop で operand scan がまるごと放棄され、
+    auto mode では allow (実 Bash コマンドの 26.3% が同経路) — だが operand の
+    **末尾リテラル成分** ``/.env`` は静的に見えており、変数がどう展開されても
+    実際に読まれるファイルの basename は ``.env`` で確定する (``X + "/.env"`` の
+    basename は X に依らず ``.env``)。「静的解析不能」ではないものを解析不能
+    扱いしていた分類の是正。
+
+    仕組み: 単純変数展開 (``$NAME`` / ``${NAME}``) を「不明な 1 文字列」の
+    placeholder に置換し (``_replace_simple_expansions``)、置換後に hard-stop が
+    消えた segment を **通常の operand scan** (``_analyze_segment``) にかけて、
+    **deny だけを採用** する。deny 以外 (allow / ask) は捨てて従来どおり
+    ``ask_or_allow("hard_stop")`` に倒す — この scan は既存の deny 判定
+    (spec 由来の pattern 枠 / option 値の除外 / glob dotenv 判定 / basename
+    match) を placeholder 置換後の token 列に適用するだけなので、「literal を
+    そのまま書いた同型コマンドが deny になる場合」に限って deny する。緩和方向
+    (ask → allow) には一切使わない。
+
+    deny を採用しない (None を返して従来の hard-stop ask に倒す) ケース:
+
+    - 置換対象の単純変数展開が無い / 置換後も hard-stop char が残る
+      (``$(cmd)`` / ``$((…))`` / ``${X:-…}`` / バッククォート / ``<`` 等)
+    - 置換後の first token が placeholder を含む (``$PAGER .env`` — 未知
+      コマンドの実行は ``/bin/cat .env`` の opaque ask と同格に扱う)
+    - shlex 失敗 / 空 token / segment 長超過
+    - ``_analyze_segment`` の結論が deny でない (変数 operand ``cat $X`` は
+      placeholder が pattern に一致しないので必ずここに落ちる)
+
+    採用した deny の reason に含まれる placeholder は表示用の ``${…}`` に
+    置き換える (除外案内の path 形は ``_operand_relpath`` 側で抑止済み)。
+    """
+    if len(seg) > _MAX_SEGMENT_CHARS:
+        return None
+    transformed = _replace_simple_expansions(seg)
+    if transformed is None or _has_hard_stop(transformed):
+        return None
+    try:
+        tokens = shlex.split(transformed, comments=False, posix=True)
+    except ValueError:
+        return None
+    tokens = _strip_safe_redirects(tokens)
+    if not tokens or _EXPANSION_PLACEHOLDER in tokens[0]:
+        return None
+    result = _analyze_segment(
+        tokens,
+        envelope,
+        rules,
+        dotglob=dotglob,
+        root=root,
+        live_metachars=_live_operator_metachars(transformed),
+    )
+    if _decision_of(result) != "deny":
+        return None
+    L.log_info("bash_classify", "hard_stop_literal_deny")
+    hook = result.get("hookSpecificOutput")
+    if isinstance(hook, dict):
+        reason = hook.get("permissionDecisionReason")
+        if isinstance(reason, str) and _EXPANSION_PLACEHOLDER in reason:
+            hook["permissionDecisionReason"] = reason.replace(
+                _EXPANSION_PLACEHOLDER, _PLACEHOLDER_DISPLAY
+            )
+    return result
 
 
 # -- 責務: orchestration -------------------------------------------------
@@ -714,6 +837,16 @@ def handle(envelope: dict) -> dict:
     pending_ask: dict | None = None
     for seg in segments:
         if _has_hard_stop(seg):
+            # 0.25.0 (2026-08 精査): hard-stop でも、単純変数展開を placeholder に
+            # 置換すれば通常の operand scan が成立する segment はリテラル成分を
+            # 検査し、deny だけを採用する (``cat $PWD/.env`` — 変数がどう展開
+            # されても basename は ``.env`` で確定)。deny 以外は従来どおり
+            # ask_or_allow (ハーネス委譲) に倒す。
+            harvested = _hard_stop_literal_scan(
+                seg, envelope, rules, dotglob=dotglob, root=root
+            )
+            if harvested is not None:
+                return harvested
             L.log_info("bash_classify", "hard_stop_lenient")
             if pending_ask is None:
                 pending_ask = output.ask_or_allow(
@@ -755,7 +888,12 @@ def handle(envelope: dict) -> dict:
         tokens = _strip_safe_redirects(tokens)
 
         result = _analyze_segment(
-            tokens, envelope, rules, dotglob=dotglob, root=root
+            tokens,
+            envelope,
+            rules,
+            dotglob=dotglob,
+            root=root,
+            live_metachars=_live_operator_metachars(seg),
         )
         decision = _decision_of(result)
 

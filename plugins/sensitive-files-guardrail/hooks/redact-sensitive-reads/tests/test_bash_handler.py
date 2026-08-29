@@ -2832,5 +2832,346 @@ class TestOptionValueNotPath(BaseBash):
                     )
 
 
+class TestHardStopLiteralOperandScan(BaseBash):
+    """0.25.0 (2026-08 精査): hard-stop segment のリテラル operand 救済 scan。
+
+    ``cat $PWD/.env`` は ``$`` の hard-stop で operand scan がまるごと放棄され
+    auto mode で無言 allow だった (実 Bash コマンドの 26.3% が同経路)。単純変数
+    展開 (``$NAME`` / ``${NAME}``) を「不明な 1 文字列」placeholder に置換すると
+    残りは静的に解析できる — 変数がどう展開されても basename ``.env`` は確定する
+    (``X + "/.env"`` の basename は X に依らず ``.env``) ので、これは
+    「静的解析不能」ではなく確信 deny 条件 (機密 operand 確定 × 内容出力) を
+    満たす。deny だけを採用し、それ以外は従来どおり ask_or_allow (ハーネス委譲)。
+    """
+
+    DENY = (
+        "cat $PWD/.env",
+        "cat ${PWD}/.env",
+        'cat "$PWD/.env"',
+        "REPO=. ; cat $REPO/.env",       # 変数 segment は opaque、cat segment で deny
+        "cat $OPTS .env",                # 変数と同居する素の literal operand
+        "grep KEY $CFG/.env",            # grep spec (pattern 枠) も placeholder 越しに効く
+        "cat $D/.env*",                  # glob dotenv 判定も適用される
+        "head -n 5 $ROOT/config/.envrc",
+        "cat $HOME/keys/server.pem",     # 接尾辞 pattern (*.pem) は展開に依らず一致
+    )
+
+    # 従来どおり ask (default) / allow (auto) に留まる形。
+    KEEP_ASK = (
+        "cat $X",                        # 変数単体の展開先は判定不能 (従来方針)
+        "cat $X.env",                    # basename が変数に跨る (X.env ≠ .env)
+        "cat $(pwd)/.env",               # コマンド置換は救済対象外 (hard-stop 残存)
+        "cat ${X:-fallback}/.env",       # 複合展開は救済対象外
+        "$PAGER .env",                   # first token が変数 = 未知コマンド実行
+        "cat \\$PWD/.env",               # エスケープ済み ``\\$`` は literal (置換しない)
+        "echo \"$(cat $PWD/.env)\"",     # コマンド置換入りは残存 hard-stop で断念
+    )
+
+    def test_literal_tail_after_expansion_denies_in_all_modes(self):
+        for cmd in self.DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_undecidable_expansions_keep_ask_or_allow(self):
+        for cmd in self.KEEP_ASK:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_harvest_never_loosens_default_ask_to_allow(self):
+        # 救済 scan は deny だけを採用する。置換後の解析が allow 相当
+        # (metadata-only / 非機密 operand) でも、default mode の従来 ask を
+        # allow に緩めてはいけない (境界変更は「見逃しの解消」方向のみ)。
+        for cmd in ("ls $D/.env", "echo $GREETING/.env", "stat $F/.env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should stay ask but got {_decision(r)!r}",
+                )
+
+    def test_exclusion_rules_apply_to_placeholder_operand(self):
+        # 除外 rule (!*.example) は placeholder 置換後の basename にも効く。
+        r = handle(_make_envelope("cat $X/.env.example", self.tmp))
+        self.assertEqual(_decision(r), "ask")  # 非機密 → deny せず従来の ask
+
+    def test_deny_reason_shows_display_placeholder_not_internal(self):
+        r = handle(_make_envelope("cat $PWD/.env", self.tmp))
+        reason = _reason(r)
+        self.assertNotIn("__sfg_unexpanded__", reason)
+        self.assertIn("${…}/.env", reason)
+        # path 形の除外案内 (``!<相対パス>``) は変数部分が確定しないので出さない
+        self.assertNotIn("!${…}", reason)
+
+    def test_compound_command_still_denies_on_literal_segment_first(self):
+        # 既存挙動の維持: literal segment の deny は救済 scan と無関係に先行。
+        r = handle(_make_envelope("cat $X | head .env | wc -l", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+
+class TestQuoteAwareResidualMetachar(BaseBash):
+    """0.25.0 (2026-08 精査): residual metachar 判定の quote-aware 化。
+
+    0.24.0 までは shlex 後の token を見ていたため、クォート内の ``|`` ``&``
+    ``>`` ``<`` (literal データ) を演算子と誤認して日常コマンドを ask に倒して
+    いた (実ログ 429 件 / 0.5%)。演算子になり得るのはクォート外・非エスケープ
+    の文字だけ (bash 文法) なので、raw segment を ``_lex`` で走査して判定する。
+    """
+
+    ALLOW = (
+        "git commit -m 'fix: a & b'",
+        "git commit -m 'a & b' 2>&1",    # 安全リダイレクトの word は除外して判定
+        "echo 'a|b'",
+        'echo "a > b"',
+        "echo 'x<y'",
+        "tar -cf out.tar 'weird|name'",
+        "echo \\> x",                    # エスケープ済み ``\\>`` は literal (redirect しない)
+    )
+
+    KEEP_ASK = (
+        "echo KEY=val > .env",           # クォート外の ``>`` は本物の書込み redirect
+        "echo foo > out.txt",
+        "tar -cf out.tar src > log.txt",
+        "echo foo > '&2'",               # target がクォートでも演算子 ``>`` は残る
+    )
+
+    def test_quoted_metachars_are_data_not_operators(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_unquoted_operators_keep_residual_ask(self):
+        for cmd in self.KEEP_ASK:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+
+    def test_quoted_metachar_no_longer_masks_sensitive_operand(self):
+        # residual ask が消えた分、literal 機密 operand は無クォート形と同じ
+        # deny に到達する (`mv a .env` が deny なのと一貫)。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("mv 'a|b' .env", self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_quoted_fused_redirect_lookalike_is_operand_not_redirect(self):
+        # `ls '>.env'` は「>.env という名前のファイル」の listing で、redirect
+        # ではない (0.24.0 まで metadata_redirect_deny に誤爆していた)。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("ls '>.env'", self.tmp, mode=mode))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"ls '>.env' ({mode}) should allow but got {_decision(r)!r}",
+                )
+
+    def test_unquoted_fused_redirect_to_sensitive_still_denies(self):
+        for cmd in ("ls >.env", "ls > .env", "ls &> .env"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_live_operator_metachars_unit(self):
+        from handlers.bash.redirects import _live_operator_metachars
+        self.assertEqual(_live_operator_metachars("git commit -m 'a & b'"), frozenset())
+        self.assertEqual(_live_operator_metachars('echo "a > b"'), frozenset())
+        self.assertEqual(_live_operator_metachars("echo a > b"), frozenset(">"))
+        # 安全リダイレクトは word 単位で除外 (1 token 形 / op + target 分離形)
+        self.assertEqual(_live_operator_metachars("grep x f 2>/dev/null"), frozenset())
+        self.assertEqual(_live_operator_metachars("grep x f 2>&1"), frozenset())
+        self.assertEqual(_live_operator_metachars("grep x f > /dev/null"), frozenset())
+        # 非 safe target への redirect は live
+        self.assertEqual(_live_operator_metachars("echo x > out.txt"), frozenset(">"))
+        # エスケープ済みは literal
+        self.assertEqual(_live_operator_metachars("echo \\> x"), frozenset())
+        # クォート内 ``>`` とクォート外 ``>`` の同居は live 側だけ数える
+        self.assertEqual(
+            _live_operator_metachars("echo 'a>b' > out.txt"), frozenset(">")
+        )
+
+
+class TestDoubleQuoteInertHardStop(BaseBash):
+    """0.25.0 (2026-08 精査): ダブルクォート内の不活性 char は hard-stop にしない。
+
+    Bash はダブルクォート内で ``$`` とバッククォートだけを解釈する。``(`` ``)``
+    ``{`` ``}`` ``<`` は literal なので、シングルクォート形 (0.18.0 で緩和済み)
+    と同じ経路に載せる。これで ``git ls-files --format`` の verdict がクォートの
+    書き方だけで deny / ask / allow に分かれていた非一貫性が解消する
+    (単一クォート形の deny が正 — blob object name は内容の指紋)。
+    """
+
+    def test_ls_files_format_quote_forms_agree_on_deny(self):
+        # 二重クォート形が単一クォート形と同じ deny に揃う (指紋露出)。
+        for cmd in (
+            "git ls-files --format='%(objectname)' .env",
+            'git ls-files --format="%(objectname)" .env',
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_ls_files_format_unquoted_stays_hard_stop(self):
+        # 無クォート形は実 bash では `syntax error near unexpected token '('`
+        # (bash 5 実測) で実行されない形。クォート外 ``(`` の hard-stop のまま
+        # 残しても実害が無いので従来どおり ask / allow (ハーネス委譲)。
+        cmd = "git ls-files --format=%(objectname) .env"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_double_quoted_inert_chars_reach_operand_scan(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in (
+            'git diff "HEAD@{1}"',
+            'git stash apply "stash@{0}"',
+            'awk "{print}" notes.txt',
+            'echo "{a,b}"',
+            'echo "a<b"',
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_double_quoted_expansion_chars_keep_hard_stop(self):
+        # ``$`` / バッククォートはダブルクォート内でも展開されるので維持。
+        for cmd in ('echo "$(cat .env)"', 'echo "`cat .env`"', 'cat "$X"'):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_double_quoted_forms_go_through_inert_gates(self):
+        # 0.18.0 のシングルクォート緩和と同じ後段 gate が二重クォートにも効く:
+        # inert allowlist 外の first token / 委譲形 / awk 動的構文は ask に戻る。
+        for cmd in (
+            'docker run img "cmd(arg)"',                    # not_inert
+            'find . -name x -exec sh -c "cat {}" ";"',      # delegate:-exec
+            'awk "BEGIN { system(\\"cat x\\") }" notes.txt',  # awk_dynamic
+        ):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_double_quoted_sensitive_operand_denies_like_single(self):
+        # 0.18.0 の `awk '{print}' .env` deny と対称。
+        for cmd in ('awk "{print}" .env', 'sed "s/(=)/X/" .env'):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+
+class TestSedOptionScriptConsumesPositionalSlot(BaseBash):
+    """0.25.0 (2026-08 精査): ``-e`` / ``--expression`` / ``-f`` 経由でスクリプトを
+    与えた sed は positional が全て入力ファイル (sed の仕様)。
+
+    0.24.0 までの ``_sed_scripts`` は positional 枠を消費せず、後続のファイル
+    operand をスクリプトとして再解析していた。先頭付近の文字が動的コマンド
+    (``e`` ``r`` ``w`` 等) に見えるファイル名 (``report.txt`` / ``e.txt``) が
+    ``sed_dynamic:<cmd>`` の ask に誤って倒れていた。
+    """
+
+    ALLOW = (
+        "sed -e 's/a/b/' report.txt",    # 旧: ファイル名の先頭 ``r`` を r コマンド誤認
+        "sed -e p e.txt",                # 旧: ``e`` コマンド誤認
+        "sed -e p wender.txt",           # 旧: ``w`` コマンド誤認
+        "sed --expression=p e.txt",
+        "sed --expression 'p' e.txt",
+        "sed -ne p e.txt",               # 束ね形
+        "sed -e p -- e.txt",             # ``--`` 以降も入力ファイル
+    )
+
+    def test_file_operands_after_option_script_are_not_scripts(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_dynamic_detection_still_works_where_it_should(self):
+        # 動的構文の検出そのものは維持: option script 内の動的コマンド /
+        # ``-f`` (スクリプトを検査できない) / -e 無しの positional script。
+        for cmd in (
+            "sed -e 'w out.txt' notes.txt",
+            "sed -f lib.sed data.txt",
+            "sed 'e x' notes.txt",
+        ):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(output.is_allow(r))
+
+    def test_sensitive_file_operand_still_denies_before_dynamic_check(self):
+        for cmd in ("sed -e 's/a/b/' .env", "sed -e p .env"):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_sed_scripts_unit(self):
+        from handlers.bash.interpreters import _sed_scripts
+        # option script があれば positional はファイル (script 候補にしない)
+        self.assertEqual(_sed_scripts(["-e", "p", "file.txt"]), (["p"], False))
+        self.assertEqual(_sed_scripts(["--expression=p", "e.txt"]), (["p"], False))
+        self.assertEqual(_sed_scripts(["-ne", "p", "e.txt"]), (["p"], False))
+        # 順序に依らない (GNU getopt の permute 相当): 先行 positional もファイル
+        self.assertEqual(_sed_scripts(["p", "-e", "q", "f.txt"]), (["q"], False))
+        # -f があれば positional はファイル (script_file フラグで ask 側に倒す)
+        self.assertEqual(_sed_scripts(["-f", "s.sed", "data.txt"]), ([], True))
+        # option script が無ければ従来どおり最初の positional が script
+        self.assertEqual(_sed_scripts(["p", "file.txt"]), (["p"], False))
+
+
 if __name__ == "__main__":
     unittest.main()
