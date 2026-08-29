@@ -167,7 +167,8 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > `--include=FILE` と ack `--ackrc FILE` (pattern 枠を持つコマンドで値を読む
 > option は path 登録が必要。`gawk -i .env 'BEGIN {…}'` は deny)。
 
-> **0.25.0 で判定境界が変化** (判定境界バッチ、2026-08 精査。4 件):
+> **0.25.0 で判定境界が変化** (判定境界バッチ、2026-08 精査。4 件 + 隔離内
+> レビューで発覚した clobber 形の取りこぼし 1 件):
 > (1) **hard-stop segment のリテラル operand 救済 scan** — 単純変数展開
 > (`$NAME` / `${NAME}`) を「不明な 1 文字列」placeholder に置換して hard-stop が
 > 消える segment は通常の operand scan を再実行し、**deny だけを採用** する。
@@ -192,10 +193,17 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > 経由 script は positional 枠を消費** — `-e` / `--expression` / `-f` があれば
 > positional は全て入力ファイル (sed の仕様)。`sed -e 's/a/b/' report.txt` の
 > `report.txt` を script として再解析し先頭文字で `sed_dynamic:r` の ask に
-> 倒していた誤検知が **allow** になる。
-> 旧版 (main) との同一コーパス diff (1,199 コマンド × default / auto =
-> 2,398 verdict): 変更 144 件 = deny 増 88 / deny 減 6 / ask → allow 50、
-> **説明不能ゼロ** (全件が上記 (1)〜(4) に分類)。
+> 倒していた誤検知が **allow** になる。(5) **`>\|` clobber 上書きを `>` と
+> 同じ書込みリダイレクトとして分割** — splitter が `>` 演算子を bash と同じ
+> 最長一致で読む (`>>` / `>\|` は 2 文字で 1 演算子)。0.24.0 までは `>\|` の
+> `\|` を pipe として区切り、target が「機密パスだけの segment」に割れて
+> 書込み判定に届かず、機密パスへの clobber 上書き (noclobber を明示的に無視
+> する破壊的 truncate) が first_token を問わず**全 mode allow** で素通り
+> していた。spaced / fused / fd 番号付き (`2>\|` / `12>\|`) の全形が `>` 形と
+> 同じ deny / ask / allow に揃う (下の redirect 各表)。
+> 旧版 (main) との同一コーパス diff (1,257 コマンド × default / auto =
+> 2,514 verdict): 変更 205 件 = deny 増 140 / deny 減 8 / ask → allow 57、
+> **説明不能ゼロ** (全件が上記 (1)〜(5) に分類)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
@@ -256,13 +264,14 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 
 `first_token` が `_SAFE_READ_FIRST_TOKENS` (`ls cat head tail nl tac bat less
 more view wc file stat du df tree grep egrep fgrep rg ag ack od xxd hexdump`)
-に該当する segment は、`_segment_has_residual_metachar` の ask 経路を **スキップ
-して operand scan に直行** する。`>`/`>>` 出力リダイレクトや `&` background を
-含んでも allow に倒る (非機密 operand のとき)。
+に該当する segment は、residual metachar (0.25.0 から `_live_operator_metachars`
+の quote-aware 判定) の ask 経路を **スキップして operand scan に直行** する。
+`>`/`>>` 出力リダイレクトや `&` background を含んでも allow に倒る (非機密
+operand のとき)。
 
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
-| `grep foo README.md > /tmp/out`, `grep foo file >> /tmp/out` (出力 redirect) | allow | allow | allow | allow | allow |
+| `grep foo README.md > /tmp/out`, `grep foo file >> /tmp/out`, `grep foo f >\| /tmp/out` (出力 redirect。0.25.0 から clobber 形も同扱い — 0.24.0 までは `\|` の分割で target 側 segment が opaque ask になっていた) | allow | allow | allow | allow | allow |
 | `ls -la > /tmp/listing.txt`, `cat README.md > /tmp/out`, `head -5 README.md > /tmp/x` | allow | allow | allow | allow | allow |
 | `wc -l README.md > /tmp/count`, `file README.md > /tmp/x`, `stat README.md > /tmp/x` | allow | allow | allow | allow | allow |
 | `grep foo README.md \| wc -l > /tmp/count` (pipe + redirect、全 segment が allow-list) | allow | allow | allow | allow | allow |
@@ -344,7 +353,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files --format="%(objectname)" .env`, `git ls-files -sz .env` (blob object name = 内容の指紋。単一クォート形は 0.18.0、二重クォート形は 0.25.0 の quote-aware 化で表どおり deny に到達。無クォート形は実 bash で syntax error になる形なので hard-stop の ask / allow のまま) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls '>.env'`, `ls \>.env` (0.25.0: クォート / エスケープ済みの `>` は redirect ではなく「`>.env` という名前のファイル」の operand。0.24.0 までは fused redirect と誤認して deny) | allow | allow | allow | allow | allow |
-| `tree >\| .env` (`>\|` clobber は `\|` が segment 分割で割れる既知限界、思想 1 射程外) | allow | allow | allow | allow | allow |
+| `ls >\| .env`, `tree >\| .env`, `stat x >\| .env`, `wc -l f >\| .env`, `ls >\|.env`, `ls 2>\| .env`, `ls 12>\|.env` (0.25.0: `>\|` clobber 上書きは noclobber を明示的に無視する破壊的 truncate。metadata-only ∩ safe_read の first_token 全般で `>` 形と同じ deny。0.24.0 までは `\|` が segment 分割で pipe として割られ全 mode allow に素通り) | **deny** | **deny** | **deny** | **deny** | **deny** |
 
 > **metadata-only ∩ safe_read の redirect 書込み (Codex P2, 0.14.0)**: `ls` /
 > `stat` / `wc` / `file` / `du` / `df` / `tree` は metadata-only かつ safe_read の
@@ -352,9 +361,10 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 > redirect 書込みする形は内容露出こそ無いが `.env` を truncate する破壊的書込み
 > なので、`_sensitive_redirect_target` で検出して **deny** に倒す (Edit/Write の
 > 機密書込み deny と整合)。`>.env` / `>>.env` の fused 形も対応。`>\|` clobber
-> override は `\|` が segment 分割で pipe として割れるため未対応 (obscure・思想 1
-> 射程外)。read operand のみ機密で書込み先が非機密な `ls -la .env > /tmp/x` は
-> allow 維持 (内容も破壊もしない)。
+> override も 0.25.0 から同じ deny (splitter が `>\|` を 1 演算子として読む —
+> 0.24.0 までは `\|` が pipe として割られ target が別 segment に落ちて全 mode
+> allow だった)。read operand のみ機密で書込み先が非機密な
+> `ls -la .env > /tmp/x` は allow 維持 (内容も破壊もしない)。
 | `cat .env`, `head .env`, `grep KEY .env`, `od -c .env` (内容出力系は対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `cp .env /tmp/x`, `mv .env /tmp/x` (複製で漏洩面が広がるため対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |
@@ -363,7 +373,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env`, `git rm --cached -h .env` (未知 / 省略形の option は fail-closed で通常経路 → deny。Codex review P1) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo check-ignore .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
-| `echo KEY=val > .env` (echo は safe-read 外: residual `>` が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
+| `echo KEY=val > .env`, `echo KEY=val >\| .env` (echo は safe-read 外: residual `>` が先に効き ask 維持。clobber 形も同じ) | ask | ask | **allow** | ask | **allow** |
 | `chmod 600 x > .env`, `touch x > .env` (chmod / touch も safe-read 外: residual `>` が先に効き ask 維持。0.19.0 で緩めていない) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env -exec cat {} +` (`{}` hard-stop が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env > /tmp/x` (find は safe-read 外: residual `>` で ask 維持) | ask | ask | **allow** | ask | **allow** |

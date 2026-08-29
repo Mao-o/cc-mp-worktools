@@ -1945,8 +1945,8 @@ class TestQuoteAwareHardStop(BaseBash):
 
 class TestSafeReadAllowlist(BaseBash):
     """0.12.0: ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの read-only allow-list) に
-    該当する first_token は ``_segment_has_residual_metachar`` の ask 経路を
-    スキップして operand scan に直行する。
+    該当する first_token は residual metachar の ask 経路をスキップして
+    operand scan に直行する。
 
     `grep foo > /tmp/out` `ls > listing.txt` のような調査用ワンライナーを
     ask に倒さないため (ログ実測で ask 発火の 約 80% が residual_metachar 起因)。
@@ -2404,14 +2404,19 @@ class TestMetadataRedirectTarget(BaseBash):
                 msg=f"{cmd!r} should deny but got {_decision(r)!r}",
             )
 
-    def test_clobber_override_redirect_out_of_scope(self):
-        # `>|` (clobber override) は `|` が segment 分割で pipe として割られ
-        # `tree >` と `.env` に分離するため検出できない。`>|` を意図的に書くのは
-        # noclobber を知る上級者で「うっかり」ではない (思想 1 の射程外) ため、
-        # 既知限界として allow を許容する。realistic な `>` / `>>` / `&>` /
-        # `n>` は上の各テストでカバー済み。
-        r = handle(_make_envelope("tree >| .env", self.tmp))
-        self.assertTrue(output.is_allow(r))
+    def test_clobber_override_redirect_to_dotenv_deny(self):
+        # `>|` (clobber override) は noclobber を無視して .env を truncate する
+        # 破壊的書込みで、通常の `>` より意図的に強い形。0.24.0 までは `|` が
+        # segment 分割で pipe として割られ `tree >` と `.env` に分離し、全 mode
+        # allow で素通りしていた (0.25.0 で splitter が `>|` を 1 演算子として
+        # 読むようになり、`>` と同じ deny に到達する)。
+        modes = ("default", "auto", "bypassPermissions", "acceptEdits", "dontAsk", "plan")
+        for mode in modes:
+            r = handle(_make_envelope("tree >| .env", self.tmp, mode=mode))
+            self.assertEqual(
+                _decision(r), "deny",
+                msg=f"tree >| .env with mode={mode} should deny but got {_decision(r)!r}",
+            )
 
     def test_ls_redirect_to_nonsensitive_allow(self):
         # 書込み先が非機密なら従来通り allow (0.12.0 の調査ワンライナー意図を維持)
@@ -2429,6 +2434,125 @@ class TestMetadataRedirectTarget(BaseBash):
         # 従来通り operand scan で .env を捕まえて deny (regression なし確認)。
         r = handle(_make_envelope("grep foo README.md > .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
+
+
+class TestClobberRedirectSplit(BaseBash):
+    """0.25.0: splitter の ``>`` 演算子最長一致読み (``>>`` / ``>|``)。
+
+    0.24.0 までは ``_split_command_on_operators`` が ``>|`` の ``|`` を pipe と
+    して区切り、redirect target が「機密パスだけの segment」に割れて書込み
+    リダイレクト判定 (``_sensitive_redirect_target`` / operand scan / 救済 scan)
+    に届かず、機密パスへの clobber 上書きが **全 mode allow** で素通りしていた
+    (`>` / `>>` / `n>` / `&>` の通常形は deny なのに、noclobber を明示的に
+    無視するより強い形だけが緩いという非対称)。bash は演算子を最長一致で読む
+    (bash 3.2 / 5.3 実測: ``echo x >| f`` は f を truncate する 1 コマンド、
+    ``>>|`` は ``>>`` + ``|`` の syntax error) ので splitter を同じ字句に揃えた。
+    """
+
+    def test_splitter_keeps_clobber_target_in_segment(self):
+        # `>|` は 1 演算子。target を同一 segment に保つ (spaced / fused / fd 付き)。
+        for cmd in ("ls -la >| .env", "ls >|.env", "ls 2>| .env", "ls 12>|.env"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), [cmd])
+
+    def test_splitter_pipe_and_logical_or_still_split(self):
+        # 通常の pipe / `||` の分割は不変。`>||` は bash と同じく `>|` + `|`
+        # (`||` と誤認して 2 文字消費しない)。`>>|` は `>>` + `|` (pipe) で、
+        # 2 つ目の `>` から `>|` を合成しない。
+        cases = {
+            "cat .env | wc -l": ["cat .env", "wc -l"],
+            "ls || cat .env": ["ls", "cat .env"],
+            "ls >|| cat .env": ["ls >|", "cat .env"],
+            "ls >>| .env": ["ls >>", ".env"],
+            "ls >| .env | wc -l": ["ls >| .env", "wc -l"],
+        }
+        for cmd, segs in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), segs)
+
+    def test_splitter_quoted_or_escaped_clobber_is_not_an_operator(self):
+        # クォート内の `>|` は data (区切らない・結合の対象でもない)。
+        # エスケープ済み `\>` の直後の `|` は bash 的に pipe (実測: `echo \>| cat`
+        # は `>` を cat に流す) なので従来どおり区切る。
+        self.assertEqual(
+            _split_command_on_operators("echo '>|' x"), ["echo '>|' x"],
+        )
+        self.assertEqual(
+            _split_command_on_operators("echo \\>| cat .env"),
+            ["echo \\>", "cat .env"],
+        )
+
+    def test_metadata_clobber_to_sensitive_deny_all_forms(self):
+        # metadata-only ∩ safe_read (ls / stat / wc) の機密 path clobber は
+        # `ls > .env` と同じ metadata_redirect_deny 経路で deny。
+        for cmd in (
+            "ls -la >| .env",
+            "stat x >| .env",
+            "wc -l f >| .env",
+            "ls >|.env",
+            "ls 2>| .env",
+            "ls 2>|.env",
+        ):
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} mode={mode} should deny but got {_decision(r)!r}",
+                    )
+
+    def test_content_reader_clobber_to_sensitive_deny(self):
+        # cat / grep (safe_read・非 metadata) は operand scan の redirect target
+        # 候補として `.env` を拾って deny (`grep foo > .env` と同じ経路)。
+        for cmd in ("cat f >| .env", "grep foo README.md >| .env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+                )
+
+    def test_variable_prefixed_clobber_reaches_rescue_scan(self):
+        # hard-stop segment でも救済 scan (0.25.0) が同一 segment 内の clobber
+        # target を拾う (0.24.0 までは分割で target が別 segment に消えていた)。
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("cat $X >| .env", self.tmp, mode=mode))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"mode={mode} should deny but got {_decision(r)!r}",
+                )
+
+    def test_clobber_to_nonsensitive_matches_plain_redirect(self):
+        # 書込み先が非機密なら `>` と同じ扱い: metadata-only は allow、
+        # safe_read 外 (echo) は residual metachar の ask_or_allow。
+        r = handle(_make_envelope("ls >| /tmp/listing.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("ls >| /dev/null", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("echo x >| out.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("echo x >| out.txt", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_echo_clobber_to_sensitive_stays_residual_ask(self):
+        # safe_read 外の first_token は `echo KEY=val > .env` と同じ residual
+        # metachar 経路 (default=ask / auto=allow)。clobber で緩めも締めもしない。
+        r = handle(_make_envelope("echo KEY=val >| .env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("echo KEY=val >| .env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_syntax_error_forms_do_not_lose_protection(self):
+        # `>||` / `>>|` は bash では syntax error で実行されない形。分割後の
+        # 後続 segment の機密 operand deny は維持される (allow 側へ緩まない)。
+        for cmd in ("ls >|| cat .env", "ls >>| f && cat .env"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "deny",
+                    msg=f"{cmd!r} should deny but got {_decision(r)!r}",
+                )
 
 
 class TestRecommendedRemedyAllow(BaseBash):

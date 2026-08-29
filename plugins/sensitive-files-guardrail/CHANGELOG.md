@@ -22,13 +22,15 @@ commit 52113a1 で完了)。
 
 ## 0.25.0
 
-Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ、model:fable lane)。
-「静的解析不能ではないものを解析不能扱いしていた」分類の是正 3 件と、sed の
-option script が positional 枠を消費しない誤検知 1 件。緩和方針 (判断困難は
-auto で allow) の縮小ではなく、**リテラルで見えている機密 operand の見逃し**と
-**クォート内 literal データの演算子誤認**の解消。
+Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ) + 隔離内レビュー
+指摘の反映 3 件 (clobber 形リダイレクトの取りこぼし / 到達不能コードの撤去 /
+開示の精緻化)。「静的解析不能ではないものを解析不能扱いしていた」分類の是正
+3 件と、sed の option script が positional 枠を消費しない誤検知 1 件、
+`>|` clobber の segment 分割誤りによる書込み判定漏れ 1 件。緩和方針 (判断困難
+は auto で allow) の縮小ではなく、**リテラルで見えている機密 operand の
+見逃し**と**クォート内 literal データの演算子誤認**の解消。
 
-- **判定境界 (deny / allow / ask) の変化** (4 件):
+- **判定境界 (deny / allow / ask) の変化** (5 件):
   1. **hard-stop segment のリテラル operand 救済 scan** — 単純変数展開
      (`$NAME` / `${NAME}`) を「不明な 1 文字列」placeholder に置換して
      hard-stop が消える segment は通常の operand scan を再実行し、**deny だけ
@@ -64,14 +66,36 @@ auto で allow) の縮小ではなく、**リテラルで見えている機密 o
      ファイル名を `sed_dynamic:<cmd>` の ask に倒していた誤検知が **allow** に
      (`sed -f script.sed f` の `sed_script_file` ask と、option script 内の
      動的コマンド検出は従来どおり)
-- 旧版 (main) と本 branch で同一コーパス (テスト由来 + 手書き変種 1,199
-  コマンド × default / auto = **2,398 verdict**) を流した diff は 144 件 =
-  deny 増 88 / deny 減 6 / ask → allow 50 で、**すべて上記 4 件に分類でき
-  説明不能ゼロ**。deny 増 88 件は全件「literal を直書きした同型コマンドが
-  現行版で deny になる形」(置換後の token 列に既存判定を適用しただけ) で、
-  deny 減 6 件は全件 `ls '>.env'` 族 (redirect が存在しないのに redirect
-  扱いしていた誤検知)
-- テスト件数: redact 1,063 → **1,093** / check 94 (変更なし、計 1,187)
+  5. **`>|` clobber 上書きを `>` と同じ書込みリダイレクトとして分割**
+     (隔離内レビュー指摘) — splitter が `>` 演算子を bash と同じ最長一致で
+     読む (`>>` / `>|` は 2 文字で 1 演算子)。0.24.0 までは `>|` の `|` を
+     pipe として区切り、target が「機密パスだけの segment」に割れて書込み
+     判定に届かず、機密パスへの clobber 上書き (noclobber を明示的に無視する
+     破壊的 truncate) が first_token を問わず**全 mode allow** で素通りして
+     いた (`>` / `>>` / `n>` / `&>` は deny なのに、より意図的に強い形だけが
+     緩い非対称)。`ls -la >| .env` / `stat x >| .env` / `wc -l f >| .env` /
+     `cat f >| .env` / fused `ls >|.env` / fd 番号付き `ls 2>| .env` は
+     allow → **deny**、`cat $X >| .env` は救済 scan が同一 segment 内の
+     target を拾えるようになり ask / allow → **deny**。非機密 target は `>`
+     形と同じ扱いに揃い `ls >| /dev/null` / `grep foo f >| /tmp/out` は
+     ask → **allow** (0.24.0 までは分割の後半 segment が opaque ask になって
+     いた)。safe-read 外の first_token (`echo KEY=val >| .env`) は `>` 形と
+     同じ residual metachar の ask / allow 維持。クォート内・エスケープ済みの
+     `>|` は data のまま。`>>|` は bash と同じく `>>` + pipe として割る
+     (syntax error 形)。`&>|` (bash では `&>` + `|` の syntax error) だけは
+     `>|` を結合して deny 側に倒れるが、実行不能な形なので保護に影響しない
+- 旧版 (main) と本 branch で同一コーパス (テスト由来 + 手書き変種 1,257
+  コマンド × default / auto = **2,514 verdict**) を流した diff は 205 件 =
+  deny 増 140 / deny 減 8 / ask → allow 57 で、**すべて上記 5 件に分類でき
+  説明不能ゼロ**。うち 144 件は隔離内レビュー前 (1〜4 のみの時点、コーパス
+  1,199 コマンド) の diff と同一で、レビュー後の増分 61 件の内訳は 52 =
+  clobber 書込みの deny 化 (5 の主目的)、4 = 非機密 target の clobber を `>`
+  形と同扱いにした緩和、5 = 既存変更 (2) の同族が新規コーパス文字列
+  (`echo '>|' x` / `ls '>|.env'` 等) に現れたもの。deny 増は全件「literal を
+  直書きした同型コマンドが現行版で deny になる形」に帰着し、deny 減は
+  `ls '>.env'` 族 (redirect が存在しないのに redirect 扱いしていた誤検知) と
+  その clobber 版 `ls '>|.env'` のみ
+- テスト件数: redact 1,063 → **1,102** / check 94 (変更なし、計 1,196)
 
 ### 1. hard-stop リテラル救済 scan (`handlers/bash/segmentation.py` + `bash_handler.py`)
 
@@ -84,8 +108,17 @@ deny 以外は捨てる。first token に placeholder が残る形 (`$PAGER .env
 placeholder は `${…}` に置換して表示し、path 形の除外案内 (`!<相対パス>`) は
 変数部分が確定しないため抑止する (basename 形の案内のみ)。placeholder の
 綴りは既定 patterns / 一般的なユーザー pattern の literal 部と衝突しない形を
-選んだ (衝突すると変数 operand が常に deny になるため。既知の残余リスク:
-`*unexpanded*` のような pattern を書くユーザーには誤爆する)。
+選んだ (衝突すると変数 operand が常に deny になるため)。
+
+**既知の残余リスク (placeholder 衝突)**: `*unexpanded*` のように placeholder
+文字列 `__sfg_unexpanded__` へ一致する custom pattern を書いているユーザーには
+誤 deny になる (`cat $VAR` / `cat $DIR/$FILE` のような変数だけの operand も
+deny)。この誤 deny は **全 mode で terminal** — 本 plugin の deny は
+bypassPermissions を含む全 mode で block する設計 (`make_deny` 固定) のため、
+通常の hard-stop 摩擦 (default で ask、auto で allow) と違って **mode 変更に
+よる回避手段が無い**。回避するには該当 custom pattern 自体を削除・変更する
+しかない。既定 patterns はいずれも placeholder に一致しないため、custom
+pattern を書いていない環境では発火しない。
 
 ### 2. residual metachar の quote-aware 化 (`handlers/bash/redirects.py`)
 
@@ -95,11 +128,14 @@ placeholder は `${…}` に置換して表示し、path 形の除外案内 (`!<
 クォート外の metachar の集合を返す。`_analyze_segment` は (a) 集合が空で
 なければ従来どおり residual ask、(b) `>` が無ければ書込みリダイレクトは
 存在し得ないので metadata-only 経路の `_sensitive_redirect_target` を skip
-する (`ls '>.env'` の誤 deny 解消)。token ベースの
-`_segment_has_residual_metachar` は raw segment を渡せない旧 caller 向けの
-後方互換 fallback として残した。エスケープ済み (`\>`) は bash 的に literal
+する (`ls '>.env'` の誤 deny 解消)。エスケープ済み (`\>`) は bash 的に literal
 なので数えない (`echo \> x` は `> x` を出力するだけでファイルを作らない —
-bash 5 実測)。
+bash 5 実測)。token ベースの旧判定 `_segment_has_residual_metachar` と
+`_analyze_segment` の `live_metachars=None` fallback 分岐は当初「後方互換」と
+して残したが、隔離内レビューで **production から到達不能** (全 call site が
+quote-aware の結果を渡す) と確認したため撤去した — quote-blind な旧関数が
+残っていると将来の保守者が「こちらが本体」と誤読するため。`live_metachars`
+は必須引数になった。
 
 ### 3. ダブルクォート内 hard-stop の精緻化 (`handlers/bash/segmentation.py`)
 
@@ -120,13 +156,30 @@ hard-stop char はクォート内の不活性 char のみ) を docstring ごと�
 `p` もファイル)。機密 operand の deny は operand scan 側 (sed spec の
 pattern_opts) が先に返すため保護は落ちない。
 
+### 5. clobber 形リダイレクトの segment 分割 (`handlers/bash/segmentation.py`)
+
+`_split_command_on_operators` が plain な `>` の直後の `>` / `|` を同一演算子
+として 2 文字消費する (bash の最長一致字句と同じ。bash 3.2 / 5.3 実測で
+`>|` / `2>|` / fused `>|target` が有効な clobber redirect、`>>|` / `&>|` /
+`>||` は syntax error であることを確認)。書込み判定側の gate
+(`may_write_redirect` / `_WRITE_REDIRECT_RE` / `_find_path_candidates` の
+redirect 分類) は 0.25.0 の実装が最初から `>|` を扱えており、**変更は splitter
+の分割のみ** — target が同一 segment に残りさえすれば既存 gate がそのまま
+deny / allow を決める。パイプ (`|`) と論理和 (`||`) の分割は不変
+(`ls >|| cat .env` は bash と同じく `ls >|` + `cat .env` に割れ、後続 segment
+の deny は維持)。
+
 ### 検証
 
-- 4 件とも修正前に失敗する回帰テストを追加してから修正 (negative control:
+- 1〜4 は修正前に失敗する回帰テストを追加してから修正 (negative control:
   修正 5 ファイルを stash して新テスト 22 件を実行 → 49 failures + 1 error を
-  確認 → pop)
-- 旧版コーパス diff (上記 2,398 verdict) の分類は集計 key を TAB 区切りで
-  実施 (コマンド本文に `|` が現れるため `|` 区切りは使わない)
+  確認 → pop)。5 (隔離内レビュー後) も同様に splitter 修正だけを stash して
+  新テスト 10 件を実行 → 24 failures を確認 → pop
+- 旧版コーパス diff (上記 2,514 verdict) の分類は集計 key を TAB 区切りで
+  実施 (コマンド本文に `|` が現れるため `|` 区切りは使わない)。隔離内レビュー
+  後の再実行ではコーパスに clobber 変種 50 件 (fd 番号付き / fused / クォート
+  内 / エスケープ / `>||` `>>|` `&>|` との区別 / 非機密 target / 変数同居) を
+  追加した
 
 ## 0.24.0
 

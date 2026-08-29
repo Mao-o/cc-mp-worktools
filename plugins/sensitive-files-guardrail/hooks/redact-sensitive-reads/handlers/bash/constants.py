@@ -18,7 +18,8 @@ _SOURCE_CMDS = frozenset({"source", "."})
 
 # 0.12.0: read-only first_token allow-list。
 # 「副作用なしの見る・数える系」だけを集める。これらが segment の first_token に
-# 出現したときは ``_segment_has_residual_metachar`` (= ``>`` ``&`` 等の剥がし残り)
+# 出現したときは residual metachar (= ``>`` ``&`` 等の剥がし残り、0.25.0 から
+# ``_live_operator_metachars`` の quote-aware 判定)
 # / ``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` による ask 経路を **スキップして
 # operand scan に直行** する (ask_or_allow ではなく operand scan 結果のみで決定)。
 #

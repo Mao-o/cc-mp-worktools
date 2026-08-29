@@ -161,8 +161,9 @@ Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
 `_SAFE_READ_FIRST_TOKENS` (副作用なしの read-only コマンド: `ls cat head tail
 nl tac bat less more view wc file stat du df tree grep egrep fgrep rg ag ack
 od xxd hexdump`) を `handlers/bash/constants.py` に定義。第一トークンがこの
-セットに該当する segment は、`_segment_has_residual_metachar` の ask 経路を
-**スキップ** して operand scan に直行する。
+セットに該当する segment は、residual metachar (0.25.0 から
+`_live_operator_metachars` の quote-aware 判定) の ask 経路を **スキップ** して
+operand scan に直行する。
 
 導入背景: 0.11.0 までの実測ログで `bash_classify` の ask 発火の **約 80%** が
 `segment_residual_metachar_lenient` (= `>` 出力リダイレクトや `&` background
@@ -208,7 +209,8 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
   数え続けるため `cat <(echo \(\)) < .env` は挙動不変
 - **`\r` はクォート内でも hard-stop** — CR は展開ではなく端末表示偽装の guard
 
-**0.25.0 (判定境界バッチ、2026-08 精査)**: quote-aware 化を 3 点仕上げた。
+**0.25.0 (判定境界バッチ、2026-08 精査)**: quote-aware 化を 3 点仕上げ、
+隔離内レビューで発覚した splitter の clobber 取りこぼし (4 点目) を塞いだ。
 
 1. **ダブルクォート内は「展開が生きる char (`$` バッククォート =
    `_DQ_LIVE_HARD_STOPS`) のみ」hard-stop** にする。Bash はダブルクォート内で
@@ -255,19 +257,41 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
    緩める方向に働くことはない。placeholder (`__sfg_unexpanded__`) は既定 /
    一般的な pattern の literal 部と衝突しない綴りを選び、deny reason では
    `${…}` に置換して表示、path 形の除外案内は抑止する (変数部分が確定しない
-   rule を案内しないため)。
+   rule を案内しないため)。既知の残余リスク: placeholder に一致する custom
+   pattern (`*unexpanded*` 等) を書いているユーザーには変数だけの operand
+   (`cat $VAR`) まで誤 deny になり、deny は全 mode terminal (`make_deny` 固定)
+   のため **mode 変更で回避できない** — 該当 custom pattern の削除・変更が
+   唯一の回避手段 (既定 patterns は一致しないので out-of-box では発火しない。
+   `CHANGELOG.md` 0.25.0 の開示参照)。
 
    救済 scan の deny は「literal を直書きした同型コマンドが deny になる場合」
    に限って発火する (置換後の token 列に既存の判定をそのまま適用するだけ) ため、
    個々の deny の妥当性は literal 側の既存ポリシーに帰着する。旧版との同一
-   コーパス diff (1,199 コマンド × 2 mode = 2,398 verdict、変更 144 件) で
+   コーパス diff (1,257 コマンド × 2 mode = 2,514 verdict、変更 205 件) で
    説明不能ゼロを確認した (`CHANGELOG.md` 0.25.0)。
+
+4. **splitter が `>` 演算子を bash と同じ最長一致で読む** (`>>` append /
+   `>|` clobber は 2 文字で 1 演算子)。0.24.0 までは `>|` の `|` を pipe と
+   して区切っていたため、redirect target が「機密パスだけの segment」に割れ、
+   機密パスへの clobber 上書き (`ls -la >| .env` — noclobber を明示的に無視
+   する破壊的 truncate) が書込みリダイレクト判定
+   (`_sensitive_redirect_target` / operand scan / 救済 scan) に届かず
+   first_token を問わず**全 mode allow** で素通りしていた (通常の `>` / `>>` /
+   `n>` / `&>` は deny なのに、より意図的に強い形だけが緩い非対称)。spaced /
+   fused / fd 番号付き (`2>|` / `12>|`) の全形が `>` 形と同じ verdict に揃う。
+   `>>` を先に消費するのも同じ最長一致の一部 (`>>|` は bash では `>>` + `|`
+   の syntax error 形で、2 つ目の `>` から `>|` を合成しない。bash 3.2 / 5.3
+   実測)。`&>|` だけは bash の字句 (`&>` + `|` = syntax error) と異なり `>|`
+   を結合するが、実行不能な形が deny 側に倒れるだけで保護は落ちない。gate 側
+   (`may_write_redirect` / `_WRITE_REDIRECT_RE`) は 0.25.0 の実装が最初から
+   `>|` を扱えており、修正は splitter の分割のみ。
 
 **splitter と hard-stop は 1 つの lexer (`_lex`) を共有する** (PR #38 review R7
 で統一)。`_lex` が行継続 `\<newline>` を除去し (クォート外とダブルクォート内。
 シングルクォート内とコメント内は literal)、各文字に quote / escape / comment の
 字句状態を付けた列を作る。分割 (`&&` `||` `;` `|` 改行、および単独 `&` =
-非同期リスト。`2>&1` `&>` の `&` は除く) と hard-stop 判定はその列だけを見る
+非同期リスト。`2>&1` `&>` の `&` と、`>|` clobber の `|` (0.25.0 — `>` 演算子
+は `>>` / `>|` を最長一致で読む) は除く) と hard-stop 判定はその列だけを見る
 ので、`ls &\` ⏎ `& cat .env` のように継続をまたいで合成される演算子も正しく
 区切れる。字句規則を直すときは `_lex` だけを直す。以下は統一前に個別に
 見つかった desync の記録。
@@ -1011,12 +1035,10 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
     十分」の思想)。ただし **metadata-only ∩ safe_read コマンド**
     (`ls` / `stat` / `wc` 等) の `ls > .env` 形だけは 0.14.0 で metadata-only
     shortcut を入れた結果 regression したため、`_sensitive_redirect_target` で
-    deny を復活させている (Codex P2)
-15. **`>|` clobber override redirect は未対応** — `tree >| .env` の `>|` は
-    `|` が segment 分割で pipe として割られ `tree >` と `.env` に分離するため、
-    機密 redirect target を検出できず allow に倒る。`>|` を意図的に書くのは
-    `noclobber` を理解した上級者で「うっかり」ではない (思想 1 射程外) ため
-    既知限界とする。`>` / `>>` / `n>` / `&>` の通常 redirect は検出する
+    deny を復活させている (Codex P2)。検出対象の書込み redirect は `>` / `>>`
+    / `n>` / `&>` / `>|` の全形 (`>|` clobber は 0.25.0 まで `|` が segment
+    分割で pipe として割られ検出できない既知限界だったが、splitter の最長一致
+    読みで解消し `>` と同扱いになった)
 
 ## Edit/Write hook の発火経路 (2026-04-18 実機観測)
 

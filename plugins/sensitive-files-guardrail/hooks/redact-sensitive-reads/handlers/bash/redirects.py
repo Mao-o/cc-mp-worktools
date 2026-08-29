@@ -4,8 +4,10 @@
 (``2>/dev/null`` / ``2>&1`` / ``&>/dev/null`` 等) と、剥離後の残留 metachar
 (``>`` ``&`` ``|`` ``<``) 検出のみに責任を限定する。0.25.0 から残留 metachar
 判定は raw segment を ``segmentation._lex`` で quote-aware に走査する
-(``_live_operator_metachars``)。token ベースの
-``_segment_has_residual_metachar`` は後方互換 fallback として残す。
+(``_live_operator_metachars``)。0.24.0 までの token ベース判定
+(``_segment_has_residual_metachar``) は shlex でクォートが剥がれた後の token
+しか見えず、クォート内の literal データを演算子と誤認していたため撤去した
+(呼び出し元は全て ``_live_operator_metachars`` の結果を渡す)。
 
 0.3.4〜0.6.x で持っていた ``<`` 入力リダイレクト target 抽出用の
 character-level quote-aware parser (``_scan_input_redirect_targets_with_form`` /
@@ -62,23 +64,6 @@ def _strip_safe_redirects(tokens: list[str]) -> list[str]:
         out.append(tok)
         i += 1
     return out
-
-
-def _segment_has_residual_metachar(tokens: list[str]) -> bool:
-    """``_strip_safe_redirects`` 後もセグメントに残っている ``>`` ``&`` ``|`` ``<``
-    を持つトークンがあるか。
-
-    0.25.0: **quote-blind な後方互換 fallback**。shlex 後の token はクォートが
-    剥がれているため、``git commit -m 'a & b'`` の ``&`` (literal データ) と
-    ``echo x > f`` の ``>`` (演算子) を区別できない。``_analyze_segment`` は
-    raw segment を quote-aware に走査する ``_live_operator_metachars`` の結果を
-    受け取ったときはそちらを使う。この関数は raw segment を渡せない旧 caller /
-    テスト向けに残している。
-    """
-    for t in tokens:
-        if any(c in _SEGMENT_RESIDUAL_METACHARS for c in t):
-            return True
-    return False
 
 
 def _live_operator_metachars(segment: str) -> frozenset[str]:

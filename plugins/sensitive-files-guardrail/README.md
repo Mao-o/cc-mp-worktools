@@ -255,7 +255,10 @@ note: key material is never parsed or returned. only block labels and counts are
 > `cp` / `mv` (複製で漏洩面が広がる)、`git show` / `git diff` / `git add` は
 > 従来通り deny 固定。`echo KEY=val > .env` のような書込み形は residual metachar
 > の ask 経路が先に効くため緩まない。metadata-only ∩ safe_read コマンドの
-> `ls > .env` 系 redirect 書込みも deny (破壊的書込み)。
+> `ls > .env` 系 redirect 書込みも deny (破壊的書込み。`>|` clobber 上書きを
+> 含む — 0.25.0 で splitter が `>|` を 1 演算子として読むようになり、`|` の
+> 分割で target が別 segment に割れて全 mode allow に素通りしていた
+> 取りこぼしを解消)。
 
 > **0.19.0 で次善策コマンドを metadata-only に追加**: 両 hook
 > の reason が「tracked なら `git rm --cached <path>` で untrack」「`chmod 600 .env`」
@@ -453,7 +456,7 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (1,093 tests, 0.25.0 時点)
+# redact-sensitive-reads (1,102 tests, 0.25.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
 # check-sensitive-files (94 tests, 0.25.0 時点)

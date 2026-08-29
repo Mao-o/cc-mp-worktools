@@ -510,6 +510,18 @@ def _split_command_on_operators(command: str) -> list[str]:
     潰れ ``ls`` の metadata-only 経路で素通りしていた)。``2>&1`` ``&>`` の
     ``&`` はリダイレクトの一部なので区切らない。
 
+    ``>`` から始まる演算子は bash と同じく**最長一致**で読む (0.25.0):
+    ``>>`` (append) と ``>|`` (clobber 上書き) は 2 文字で 1 演算子。特に
+    ``>|`` の ``|`` は pipe ではないので区切らない (bash 3.2 / 5.3 実測:
+    ``ls -la >| .env`` は .env を truncate する 1 コマンド)。0.24.0 までは
+    この ``|`` で分割して redirect target が「機密パスだけの segment」に割れ、
+    書込みリダイレクト判定 (``_sensitive_redirect_target`` / operand scan) に
+    届かないまま全 mode allow で素通りしていた。``>>`` を先に消費するのも同じ
+    最長一致の一部: ``>>|`` は bash では ``>>`` + ``|`` (pipe) の syntax error
+    形であり、2 つ目の ``>`` から ``>|`` を合成してはならない。``&>|`` だけは
+    bash の字句 (``&>`` + ``|`` = syntax error) と異なり ``>|`` を結合するが、
+    実行不能な形が deny 側 (機密 target 検出) に倒れるだけで保護は落ちない。
+
     Bash コメントは segment から落とす (Bash が解釈しない文字列を shlex に
     渡さない)。改行は区切りとして残す。``\\r`` 入りのコメントだけは丸ごと
     segment に残し、``_has_hard_stop`` の表示偽装 guard に到達させる。
@@ -565,6 +577,17 @@ def _split_command_on_operators(command: str) -> list[str]:
                     buf = []
                     i += 1
                     continue
+            # ``>`` 演算子の最長一致読み (0.25.0): ``>>`` (append) / ``>|``
+            # (clobber) は 2 文字まとめて消費する。``>|`` の ``|`` を pipe と
+            # して区切ると redirect target が別 segment に割れ、機密パスへの
+            # clobber 上書きが書込みリダイレクト判定に届かず素通りする。
+            if c == ">" and i + 1 < n and lx[i + 1][1] == _ST_PLAIN and (
+                lx[i + 1][0] in ">|"
+            ):
+                buf.append(c)
+                buf.append(lx[i + 1][0])
+                i += 2
+                continue
         buf.append(c)
         i += 1
     if buf:

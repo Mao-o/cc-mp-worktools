@@ -149,7 +149,6 @@ from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
     _live_operator_metachars,
     _redirect_write_targets,
-    _segment_has_residual_metachar,
     _strip_safe_redirects,
 )
 from handlers.bash.segmentation import (  # noqa: F401
@@ -537,7 +536,7 @@ def _analyze_segment(
     *,
     dotglob: bool = False,
     root: str | None = None,
-    live_metachars: frozenset[str] | None = None,
+    live_metachars: frozenset[str],
 ) -> dict:
     """1 セグメント分の token 列を判定して hook 出力 dict を返す。
 
@@ -553,8 +552,8 @@ def _analyze_segment(
     コマンド単位で決める。
 
     0.12.0: ``first_token`` が ``_SAFE_READ_FIRST_TOKENS`` (副作用なしの見る・
-    数える系 allow-list) に該当する場合、``_segment_has_residual_metachar`` の
-    ask 経路を **スキップ** して operand scan に直行する。`grep foo > /tmp/x` /
+    数える系 allow-list) に該当する場合、residual metachar の ask 経路を
+    **スキップ** して operand scan に直行する。`grep foo > /tmp/x` /
     `ls > listing.txt` 等の調査用ワンライナーを ask に倒さないため。機密 path
     redirect (例: ``grep foo > .env``) は operand scan で deny 固定なので
     safety net が残る。``_OPAQUE_WRAPPERS`` / ``_SHELL_KEYWORDS`` とは disjoint
@@ -569,8 +568,9 @@ def _analyze_segment(
     ``live_metachars`` (0.25.0): raw segment の quote-aware 走査
     (``_live_operator_metachars``) で得た「演算子になり得る residual metachar」
     の集合。呼び出し側 (``handle`` / ``_hard_stop_literal_scan``) が segment
-    文字列から計算して渡す。None のときは 0.24.0 までの token ベース判定
-    (quote-blind) に fallback する。役割は 2 つ:
+    文字列から計算して**必ず渡す** (0.24.0 までの token ベース判定は quote-blind
+    でクォート内の literal データを演算子と誤認していたため撤去済み。この引数を
+    省略できる経路は無い)。役割は 2 つ:
 
     - residual metachar の ask 判定 (クォート内の ``|`` ``&`` ``>`` ``<`` は
       literal データなので ask に倒さない)
@@ -593,12 +593,8 @@ def _analyze_segment(
             envelope,
         )
 
-    if live_metachars is None:
-        has_residual = _segment_has_residual_metachar(tokens)
-        may_write_redirect = True
-    else:
-        has_residual = bool(live_metachars)
-        may_write_redirect = ">" in live_metachars
+    has_residual = bool(live_metachars)
+    may_write_redirect = ">" in live_metachars
 
     if not is_safe_read and has_residual:
         L.log_info("bash_classify", "segment_residual_metachar_lenient")
