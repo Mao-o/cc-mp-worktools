@@ -63,6 +63,10 @@ SETUP_HINT = (
     "gh auth status で現在値を確認可。"
     'GHE 別指定: {"github": {"github.com":"USER","ghe.corp.com":"USER"}}'
 )
+# builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
+# hostname は任意の文字列を許すため DICT_ALLOWED_KEYS は宣言しない
+# (builder 側は getattr の既定値 None を「キー制限なし」と解釈する)。
+ACCEPTS_DICT = True
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
 

@@ -56,6 +56,9 @@ SETUP_HINT = (
     'AWS 最小例: {"aws": "123456789012"}。'
     "aws sts get-caller-identity --query Account で現在値を確認可"
 )
+# builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
+# aws の期待値は Account ID の文字列のみ (verify() も isinstance str のみ受理)。
+ACCEPTS_DICT = False
 
 _ROLE_ARN_ACCOUNT_RE = re.compile(r"^arn:aws[\w-]*:iam::(\d{12}):")
 

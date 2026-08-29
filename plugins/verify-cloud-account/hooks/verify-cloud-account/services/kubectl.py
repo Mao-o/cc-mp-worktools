@@ -58,6 +58,9 @@ SETUP_HINT = (
     'kubectl 最小例: {"kubectl": "my-context-name"}。'
     "kubectl config current-context で現在値を確認可"
 )
+# builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
+# kubectl の期待値は context 名の文字列のみ (verify() も isinstance str のみ受理)。
+ACCEPTS_DICT = False
 
 
 def _run_current_context(env=None, kubeconfig=None) -> tuple[str | None, str | None]:

@@ -80,6 +80,11 @@ SETUP_HINT = (
     "gcloud config get-value project で現在値を確認可。"
     'account 併用: {"gcloud": {"project":"p","account":"me@example.com"}}'
 )
+# builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
+# gcloud の dict 形は project/account の固定キーのみ (verify() が読むキーもこの
+# 2 つだけ)。
+ACCEPTS_DICT = True
+DICT_ALLOWED_KEYS = frozenset({"project", "account"})
 
 
 def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None]:

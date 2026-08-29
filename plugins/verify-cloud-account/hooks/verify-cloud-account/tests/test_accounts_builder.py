@@ -712,6 +712,658 @@ class TestGitignore(BaseBuilder):
         self.assertIn(".claude/verify-cloud-account/accounts.local.json", content)
 
 
+class TestParseValue(unittest.TestCase):
+    """`_parse_value` の direct unit tests (内部バックログ: --value の入力検証)."""
+
+    def test_json_dict_parsed(self):
+        self.assertEqual(
+            builder._parse_value('{"project":"p","account":"a"}'),
+            {"project": "p", "account": "a"},
+        )
+
+    def test_plain_string_stays_string(self):
+        self.assertEqual(builder._parse_value("Mao-o"), "Mao-o")
+
+    def test_invalid_json_stays_string(self):
+        self.assertEqual(builder._parse_value("not-json{"), "not-json{")
+
+    def test_numeric_string_json_stays_string(self):
+        """数字だけの username ("12345") が int に化けない (gcloud/github の
+        verify() は isinstance str を要求するため、int 化すると永久不一致になる)."""
+        value = builder._parse_value("12345")
+        self.assertEqual(value, "12345")
+        self.assertIsInstance(value, str)
+
+    def test_json_bool_stays_string(self):
+        value = builder._parse_value("true")
+        self.assertEqual(value, "true")
+        self.assertIsInstance(value, str)
+
+    def test_json_list_stays_string(self):
+        value = builder._parse_value('["a","b"]')
+        self.assertEqual(value, '["a","b"]')
+        self.assertIsInstance(value, str)
+
+    def test_json_quoted_string_stays_original_raw(self):
+        """JSON として parse すると素の文字列になる形 ('"a"') も、dict では
+        ないため生の raw 文字列 (クォート込み) のまま返す。"""
+        value = builder._parse_value('"a"')
+        self.assertEqual(value, '"a"')
+
+
+class TestValidateEntryShape(unittest.TestCase):
+    """`_validate_entry_shape` の direct unit tests (内部バックログ: 書込前
+    スキーマ検証)。services.github / gcloud / aws を実サービスとして使う。"""
+
+    def setUp(self):
+        from services import aws, gcloud, github  # noqa: E402 (test-local import)
+        self.github = github
+        self.gcloud = gcloud
+        self.aws = aws
+
+    def test_str_value_always_ok(self):
+        self.assertIsNone(builder._validate_entry_shape(self.aws, "123456789012"))
+        self.assertIsNone(builder._validate_entry_shape(self.github, "Mao-o"))
+
+    def test_dict_ok_for_service_that_accepts_dict(self):
+        self.assertIsNone(
+            builder._validate_entry_shape(
+                self.github, {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+            )
+        )
+
+    def test_dict_rejected_for_scalar_only_service(self):
+        reason = builder._validate_entry_shape(self.aws, {"foo": "bar"})
+        self.assertIsNotNone(reason)
+        self.assertIn("オブジェクト形式", reason)
+
+    def test_empty_dict_rejected(self):
+        reason = builder._validate_entry_shape(self.github, {})
+        self.assertIsNotNone(reason)
+        self.assertIn("空です", reason)
+
+    def test_non_string_dict_value_rejected(self):
+        reason = builder._validate_entry_shape(self.gcloud, {"project": 111})
+        self.assertIsNotNone(reason)
+
+    def test_unknown_dict_key_rejected_when_strict(self):
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"region": "us-central1"}, strict_keys=True
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("未対応", reason)
+
+    def test_unknown_dict_key_allowed_when_not_strict(self):
+        """migrate (strict_keys=False) は gcloud.verify() 同様に未知キーを
+        黙って無視するだけで拒否しない。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": "p", "region": "us-central1"}, strict_keys=False
+        )
+        self.assertIsNone(reason)
+
+    def test_known_dict_key_still_type_checked_when_not_strict(self):
+        """strict_keys=False でも型不正 (非文字列値) は常に検証する。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": 111}, strict_keys=False
+        )
+        self.assertIsNotNone(reason)
+
+    def test_wrong_top_level_type_rejected(self):
+        for bad in ([1, 2], 111, None, True):
+            with self.subTest(bad=bad):
+                reason = builder._validate_entry_shape(self.github, bad)
+                self.assertIsNotNone(reason)
+
+
+class TestInitValueValidation(BaseBuilder):
+    """init --value の JSON 解釈と書込前スキーマ検証 (内部バックログ)。"""
+
+    def test_value_json_dict_parsed_and_written_as_dict(self):
+        code, _out, _err = self._run(
+            [
+                "init", "--service", "gcloud",
+                "--value", '{"project":"p","account":"a"}', "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"gcloud": {"project": "p", "account": "a"}})
+
+    def test_value_non_dict_json_kept_as_string(self):
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "12345", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "12345"})
+        self.assertIsInstance(data["github"], str)
+
+    def test_value_invalid_json_kept_as_string(self):
+        code, _out, _err = self._run(
+            ["init", "--service", "github", "--value", "not-json{", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "not-json{"})
+
+    def test_rejects_unsupported_dict_shape_for_scalar_only_service(self):
+        code, _out, err = self._run(
+            ["init", "--service", "aws", "--value", '{"foo":"bar"}', "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("オブジェクト形式", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_rejects_unknown_dict_key_for_gcloud(self):
+        code, _out, err = self._run(
+            [
+                "init", "--service", "gcloud",
+                "--value", '{"region":"us-central1"}', "--commit",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("未対応", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_rejects_non_string_dict_value(self):
+        code, _out, err = self._run(
+            [
+                "init", "--service", "gcloud",
+                "--value", '{"project": 111}', "--commit",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(self._new_path().exists())
+
+    def test_skipped_message_points_to_set_subcommand(self):
+        """内部バックログ: skipped 分岐の案内文言が `set` サブコマンドを指す
+        (旧文言 'a future switch subcommand' は削除済み)."""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "existing-user"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "new-user", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("skipped", out)
+        self.assertIn("set --service github", out)
+        self.assertNotIn("future switch subcommand", out)
+
+
+class TestSet(BaseBuilder):
+    """`set` サブコマンド (内部バックログ: builder に期待値の update が無い)。"""
+
+    def test_adds_new_key(self):
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("+ add", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})
+
+    def test_overwrites_existing_scalar_with_different_value(self):
+        """set の核心: init が拒否する『既存と異なる値への更新』を実行できる。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "old-user"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "new-user", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("+ new", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "new-user"})
+
+    def test_dry_run_does_not_write(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "old-user"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "new-user", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("(dry-run", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "old-user"})
+
+    def test_unchanged_when_same_value(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "same-user"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "same-user", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("= unchanged", out)
+
+    def test_preserves_other_keys(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "old-user", "aws": "111"}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(
+            ["set", "--service", "github", "--value", "new-user", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "new-user", "aws": "111"})
+
+    def test_from_cli_uses_suggestion(self):
+        with mock.patch(
+            "services.github.suggest_accounts_entry", return_value="auto-user"
+        ):
+            code, _out, _err = self._run(
+                ["set", "--service", "github", "--from-cli", "--commit"]
+            )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "auto-user"})
+
+    def test_from_cli_returns_none_errors(self):
+        with mock.patch(
+            "services.github.suggest_accounts_entry", return_value=None
+        ):
+            code, _out, err = self._run(
+                ["set", "--service", "github", "--from-cli", "--commit"]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("CLI から取得できませんでした", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_value_and_from_cli_are_mutually_exclusive(self):
+        code, _out, _err = self._run(
+            [
+                "set", "--service", "github", "--value", "u",
+                "--from-cli", "--commit",
+            ]
+        )
+        self.assertEqual(code, 2)
+
+    def test_requires_value_or_from_cli(self):
+        code, _out, _err = self._run(["set", "--service", "github", "--commit"])
+        self.assertEqual(code, 2)
+
+    def test_host_creates_new_dict(self):
+        code, _out, _err = self._run(
+            [
+                "set", "--service", "github", "--host", "github.com",
+                "--value", "Mao-o", "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"github.com": "Mao-o"}})
+
+    def test_host_merges_into_existing_dict(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(
+            [
+                "set", "--service", "github", "--host", "ghe.example.com",
+                "--value", "mao-corp", "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(
+            data,
+            {"github": {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}},
+        )
+
+    def test_host_overwrites_existing_host_key_only(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps(
+                {"github": {"github.com": "A", "ghe.example.com": "B"}}
+            ),
+            encoding="utf-8",
+        )
+        code, _out, _err = self._run(
+            [
+                "set", "--service", "github", "--host", "github.com",
+                "--value", "C", "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(
+            data, {"github": {"github.com": "C", "ghe.example.com": "B"}}
+        )
+
+    def test_host_rejected_when_existing_is_scalar(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--host", "github.com",
+                "--value", "other", "--commit",
+            ]
+        )
+        self.assertEqual(code, 1)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})  # 変更されない
+        self.assertIn("既存値は文字列です", err)
+
+    def test_host_rejected_for_scalar_only_service(self):
+        code, _out, err = self._run(
+            [
+                "set", "--service", "aws", "--host", "foo",
+                "--value", "111", "--commit",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--host", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_rejects_invalid_shape(self):
+        code, _out, err = self._run(
+            ["set", "--service", "aws", "--value", '{"foo":"bar"}', "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(self._new_path().exists())
+
+    def test_rejects_when_legacy_path_exists(self):
+        self._deprecated_path().write_text(
+            json.dumps({"github": "old-user"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["set", "--service", "github", "--value", "u", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_hides_values_by_default_and_show_values_reveals(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "old-secret"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            [
+                "set", "--service", "github", "--value", "new-secret",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("old-secret", out)
+        self.assertNotIn("new-secret", out)
+
+        code, out, _err = self._run(
+            [
+                "set", "--service", "github", "--value", "new-secret",
+                "--dry-run", "--show-values",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("old-secret", out)
+        self.assertIn("new-secret", out)
+
+
+class TestRemove(BaseBuilder):
+    """`remove` サブコマンド (内部バックログ: builder に期待値の削除が無い)。"""
+
+    def test_removes_whole_key(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o", "aws": "111"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["remove", "--service", "github", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("- remove", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"aws": "111"})
+        self.assertNotIn("github", data)
+
+    def test_noop_when_key_absent(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(json.dumps({"aws": "111"}), encoding="utf-8")
+        code, out, _err = self._run(
+            ["remove", "--service", "github", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("何もしません", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"aws": "111"})  # 変更なし
+
+    def test_noop_when_file_absent(self):
+        code, out, _err = self._run(
+            ["remove", "--service", "github", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("何もしません", out)
+        self.assertFalse(self._new_path().exists())  # 空ファイルすら作らない
+
+    def test_dry_run_does_not_write(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["remove", "--service", "github", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("(dry-run", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})
+
+    def test_removes_one_host_keeps_dict_for_remaining_hosts(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps(
+                {"github": {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}}
+            ),
+            encoding="utf-8",
+        )
+        code, _out, _err = self._run(
+            [
+                "remove", "--service", "github", "--host", "ghe.example.com",
+                "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"github.com": "Mao-o"}})
+
+    def test_removes_last_host_deletes_whole_key_not_empty_dict(self):
+        """最重要ケース: 最後の host/alias を消したら空 dict `{}` を残さず、
+        キー自体を丸ごと削除する。空 dict は github/firebase/gcloud の
+        verify() が『オブジェクトが空です』で permanent deny するため。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"github.com": "Mao-o"}, "aws": "111"}),
+            encoding="utf-8",
+        )
+        code, out, _err = self._run(
+            [
+                "remove", "--service", "github", "--host", "github.com",
+                "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("キー全体を削除", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"aws": "111"})
+        self.assertNotIn("github", data)  # {} ではなくキー自体が無い
+
+    def test_host_noop_when_host_absent(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            [
+                "remove", "--service", "github", "--host", "nonexistent.example.com",
+                "--commit",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("何もしません", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"github.com": "Mao-o"}})
+
+    def test_host_rejected_when_existing_is_scalar(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["remove", "--service", "github", "--host", "github.com", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("オブジェクトではありません", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})  # 変更されない
+
+    def test_host_rejected_for_scalar_only_service(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(json.dumps({"aws": "111"}), encoding="utf-8")
+        code, _out, err = self._run(
+            ["remove", "--service", "aws", "--host", "foo", "--commit"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--host", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"aws": "111"})  # 変更されない
+
+    def test_rejects_when_legacy_path_exists(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"aws": "111"}), encoding="utf-8"
+        )
+        code, _out, err = self._run(
+            ["remove", "--service", "github", "--commit"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})  # 変更されない
+
+    def test_hides_values_by_default_and_show_values_reveals(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "secret-user"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["remove", "--service", "github", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("secret-user", out)
+
+        code, out, _err = self._run(
+            ["remove", "--service", "github", "--dry-run", "--show-values"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("secret-user", out)
+
+
+class TestMigrateValueSemantics(BaseBuilder):
+    """migrate の意味論的等価比較 + 追加値スキーマ検証 (内部バックログ:
+    型不正/等価値を扱えない不具合の修正)。"""
+
+    def test_semantically_equal_scalar_new_and_dict_old_not_conflict(self):
+        """new=scalar "Mao-o" / old=dict {"github.com":"Mao-o"} は意味的に
+        等価 → conflict にせず new (scalar) 側を維持する。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("衝突", out)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})
+
+    def test_semantically_equal_dict_new_and_scalar_old_not_conflict(self):
+        """対称ケース: new=dict {"github.com":"Mao-o"} / old=scalar "Mao-o"
+        も意味的に等価 → conflict にせず new (dict) 側を維持する。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": {"github.com": "Mao-o"}}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": {"github.com": "Mao-o"}})
+
+    def test_semantically_different_values_still_conflict(self):
+        """既存 R9 回帰確認: 意味的にも異なる値は従来どおり conflict。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"github": {"github.com": "other-user"}}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+
+    def test_rejects_invalid_shape_from_old_path(self):
+        """旧パスの新規追加キーが list 等の不正型 → 書込前に exit 1
+        (dispatcher の deny まで遅延させない)。"""
+        self._deprecated_path().write_text(
+            json.dumps({"github": ["a", "b"]}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("不正です", err)
+        self.assertFalse(self._new_path().exists())
+
+    def test_does_not_block_on_preexisting_new_tier_shape_unrelated_to_migration(self):
+        """new 側に (verify() は許容するが builder の strict チェックなら弾く)
+        未知キー入り dict が既にあっても、migrate はそれを検証しない —
+        migrate が実際に書き込むのは additions だけであり、無関係な既存データを
+        理由に統合作業全体を deny してはならない。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"gcloud": {"project": "p", "region": "us-central1"}}),
+            encoding="utf-8",
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"aws": "111"}), encoding="utf-8"
+        )
+        code, _out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(
+            data,
+            {"gcloud": {"project": "p", "region": "us-central1"}, "aws": "111"},
+        )
+
+    def test_addition_with_unknown_dict_key_from_old_path_is_allowed(self):
+        """migrate は追加分についても未知キーそのものは拒否しない
+        (strict_keys=False) — verify() が黙って無視するだけの形を、migrate に
+        限って手動編集必須の壁に変えないため。"""
+        self._deprecated_path().write_text(
+            json.dumps({"gcloud": {"project": "p", "region": "us-central1"}}),
+            encoding="utf-8",
+        )
+        code, _out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(
+            data, {"gcloud": {"project": "p", "region": "us-central1"}}
+        )
+
+
 class TestEntriesEqual(unittest.TestCase):
     """`_entries_equal` の direct unit tests (Codex P2 / R1 対応)."""
 

@@ -1468,6 +1468,28 @@ class TestServiceContextContract(unittest.TestCase):
                     self.assertTrue(name.startswith("-"), name)
                     self.assertTrue(key and not key.startswith("-"), key)
 
+    def test_all_services_declare_accepts_dict(self):
+        """builder (scripts/accounts_builder.py) の書込前スキーマ検証が読む
+        契約: 全 service が ACCEPTS_DICT を明示宣言する (getattr の暗黙
+        デフォルトに頼らない = 新 service 追加時の宣言漏れを検出できる)。"""
+        for svc in self.SERVICES:
+            with self.subTest(svc=svc.__name__):
+                self.assertIn("ACCEPTS_DICT", vars(svc))
+                self.assertIsInstance(svc.ACCEPTS_DICT, bool)
+
+    def test_dict_allowed_keys_only_declared_when_accepts_dict(self):
+        """DICT_ALLOWED_KEYS は ACCEPTS_DICT=True の service だけが宣言してよい
+        (aws/kubectl は scalar 専用なのでキー制限自体が無意味)。宣言する場合は
+        frozenset[str] (builder 側は None を「キー制限なし」と解釈する)。"""
+        for svc in self.SERVICES:
+            with self.subTest(svc=svc.__name__):
+                allowed_keys = getattr(svc, "DICT_ALLOWED_KEYS", None)
+                if allowed_keys is None:
+                    continue
+                self.assertTrue(svc.ACCEPTS_DICT)
+                self.assertIsInstance(allowed_keys, frozenset)
+                self.assertTrue(all(isinstance(k, str) for k in allowed_keys))
+
 
 class TestFirebaseCliNameForms(unittest.TestCase):
     """npm 経由の正当な CLI 名の形を全判定で受け付ける。

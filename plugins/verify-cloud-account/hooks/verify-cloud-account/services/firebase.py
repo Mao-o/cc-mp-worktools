@@ -79,6 +79,10 @@ SETUP_HINT = (
     "firebase use で現在値を確認可。"
     '複数 alias: {"firebase": {"default":"proj-dev","prod":"proj-prod"}}'
 )
+# builder (scripts/accounts_builder.py) の書込前スキーマ検証が参照する契約。
+# alias 名は任意の文字列を許すため DICT_ALLOWED_KEYS は宣言しない
+# (builder 側は getattr の既定値 None を「キー制限なし」と解釈する)。
+ACCEPTS_DICT = True
 TIMEOUT_REASON = (
     "Firebase: firebase use がタイムアウトしました。"
     "再試行するか、ネットワーク接続を確認してください。"
