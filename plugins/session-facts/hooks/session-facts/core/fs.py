@@ -5,7 +5,7 @@ import os
 from fnmatch import fnmatch
 from itertools import islice
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 
 def read_text(path: Path, limit: int = 120_000) -> str:
@@ -118,36 +118,50 @@ def _is_candidate_dir(entry: "os.DirEntry[str]", skip: set) -> bool:
         return False
 
 
-def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
-    """True when any of ``markers`` (root-relative paths, e.g. from
-    core/constants.py's PROJECT_MARKERS) exists directly under ``root``.
+def scan_project_markers(root: Path, markers: Iterable[str]) -> Tuple[bool, bool]:
+    """``(マーカーが見つかったか, 走査を完了できたか)`` を返す。
 
-    A marker containing a glob metacharacter (``*`` or ``?``, e.g.
-    ``*.csproj`` for a stack with no fixed manifest filename) is matched via
-    ``Path.glob()`` instead of a literal ``exists()`` check.
+    literal なマーカーは ``exists()`` で直接見るので列挙は起きない。glob
+    マーカーだけは列挙が要るが、``root.glob()`` を 1 パターンずつ回すと
+    マッチしないときに毎回ルートを全列挙する (パターン数ぶんの全列挙)。
+    マーカー無しの巨大なフラットディレクトリ -- まさにこの gate が抑止したい
+    対象 -- で hook の実行時間上限を食い潰しうるので、列挙は 1 回・件数上限
+    つきにし、その 1 パスで全パターンを突き合わせる。
+
+    上限で打ち切った場合は 2 つ目の戻り値が ``False`` になる。**打ち切りは
+    「マーカーが無い」の根拠にならない** ので、呼び出し側はそれを区別する
+    こと (区別せずに「無い」と扱うと、ルートのファイル数が多い実在の
+    プロジェクトで facts が丸ごと消える)。
     """
     globs = []
     for marker in markers:
         if "*" in marker or "?" in marker:
             globs.append(marker)
         elif (root / marker).exists():
-            return True
+            return True, True
     if not globs:
-        return False
-    # glob マーカーは `root.glob()` を 1 パターンずつ回すと、マッチしない
-    # ときに毎回ルートを全列挙する (パターン数ぶんの全列挙になる)。マーカー
-    # 無しの巨大なフラットディレクトリ -- まさにこの gate が抑止したい対象 --
-    # で hook の実行時間上限を食い潰しうるので、列挙は 1 回・件数上限つきに
-    # し、その 1 パスで全パターンを突き合わせる。
+        return False, True
     try:
         with os.scandir(root) as it:
+            seen = 0
             for entry in islice(it, MAX_NESTED_SCAN_ENTRIES):
-                name = entry.name
-                if any(fnmatch(name, pattern) for pattern in globs):
-                    return True
+                seen += 1
+                if any(fnmatch(entry.name, pattern) for pattern in globs):
+                    return True, True
     except OSError:
-        return False
-    return False
+        return False, True
+    # ちょうど上限件数だったときは「まだ続きがあるかもしれない」と扱う
+    # (安全側: 打ち切り扱いにすると gate は skip せず後続の走査に委ねる)。
+    return False, seen < MAX_NESTED_SCAN_ENTRIES
+
+
+def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
+    """``scan_project_markers()`` の真偽値だけを見る簡易版。
+
+    打ち切りと「本当に無い」を区別しないので、**その区別が要る gate では
+    使わないこと** (``scan_project_markers()`` を直接使う)。
+    """
+    return scan_project_markers(root, markers)[0]
 
 
 def walk_files(

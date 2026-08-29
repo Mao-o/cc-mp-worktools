@@ -1196,3 +1196,55 @@ class EnvTemplateMarkerTest(unittest.TestCase):
 
         self.assertNotIn(".env", PROJECT_MARKERS)
 
+
+class CappedMarkerScanTest(unittest.TestCase):
+    """PR #67 (Codex P2): ルート直下の列挙を件数上限で打ち切った場合、
+    「マーカーが無い」とは断定できない。断定して skip すると、ルートの
+    ファイル数が多い実在のプロジェクトで facts が丸ごと消える。
+    """
+
+    def test_glob_marker_after_the_cap_is_not_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from core.fs import MAX_NESTED_SCAN_ENTRIES
+
+            root = Path(tmp)
+            for i in range(MAX_NESTED_SCAN_ENTRIES + 200):
+                (root / f"f{i:05d}.txt").write_text("x")
+            # 上限より後ろに glob マーカーが来る配置。
+            (root / "zz_main.tf").write_text("resource {}\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found; facts skipped", out)
+
+    def test_capped_scan_is_reported_as_incomplete(self):
+        from core.fs import MAX_NESTED_SCAN_ENTRIES, scan_project_markers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for i in range(MAX_NESTED_SCAN_ENTRIES + 50):
+                (root / f"f{i:05d}.txt").write_text("x")
+            found, complete = scan_project_markers(root, ("*.tf",))
+            self.assertFalse(found)
+            self.assertFalse(complete)
+
+    def test_small_root_scan_is_reported_as_complete(self):
+        from core.fs import scan_project_markers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.txt").write_text("x")
+            found, complete = scan_project_markers(root, ("*.tf",))
+            self.assertFalse(found)
+            self.assertTrue(complete)
+
+    def test_home_is_not_rescued_by_an_incomplete_scan(self):
+        # ホームは gate の存在理由そのものなので救済の対象外。
+        from core.fs import MAX_NESTED_SCAN_ENTRIES
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            for i in range(MAX_NESTED_SCAN_ENTRIES + 50):
+                (home / f"f{i:05d}.txt").write_text("x")
+            with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                self.assertFalse(_has_relevant_project_markers(home))
+

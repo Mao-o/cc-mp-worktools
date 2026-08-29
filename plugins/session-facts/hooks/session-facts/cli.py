@@ -26,6 +26,7 @@ from core.constants import (
 )
 from core.context import AnalysisConfig, RepoContext
 from core.fs import (
+    scan_project_markers,
     has_nested_project_markers,
     has_project_markers,
     read_text,
@@ -274,7 +275,15 @@ def _has_relevant_project_markers(root: Path) -> bool:
     sharing it here keeps the exception defined in one place instead of
     reimplementing an "is root $HOME" check against this gate too.
     """
-    if has_project_markers(root, _NON_MISE_PROJECT_MARKERS):
+    found, complete = scan_project_markers(root, _NON_MISE_PROJECT_MARKERS)
+    if found:
+        return True
+    if not complete and not is_home_dir(root):
+        # ルート直下の列挙を件数上限で打ち切った場合、「マーカーが無い」とは
+        # 断定できない。ここで skip すると、ルートのファイル数が多い実在の
+        # プロジェクトで facts が丸ごと消える (この gate が避けたい失敗方向)。
+        # 後続の走査自体に件数上限があるので、判断を委ねる方が安全。
+        # ホームは gate の存在理由そのものなので、この救済からは外す。
         return True
     if not is_home_dir(root) and has_project_markers(
         root, GLOBAL_ONLY_AT_HOME_MARKERS
