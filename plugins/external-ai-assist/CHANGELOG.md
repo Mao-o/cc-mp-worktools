@@ -9,7 +9,9 @@ version 据え置きで main に入った後続 commit はその version の節�
 
 **Stop / PreToolUse(ExitPlanMode) の hook 出力形式を見直した batch (2026-08 内部
 バックログ精査)。挙動 (Claude が指摘を読んで継続する) は変えず表示形式のみ変更する
-ので minor bump。**
+ので minor bump。**(4. で post-implementation-review の既定表示形式が Claude Code の
+実行版数に応じた自動選択に発展したが、「Claude が指摘を読んで継続する」という効果は
+どちらの表示形式でも変わらないという前提は一貫している)
 
 ### 1. post-implementation-review: Stop の既定を `decision: "block"` から `hookSpecificOutput.additionalContext` に変更
 

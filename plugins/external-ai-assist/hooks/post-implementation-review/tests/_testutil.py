@@ -60,7 +60,9 @@ NEUTRAL_EXCLUSION_ENV = {
 # (かつ実機の `claude` を起動しかねない — 禁止事項)。値は下限 2.1.163 より十分大きい
 # "9.9.9" を使い、既定を「常に additionalContext 対応」に固定する。auto の block
 # フォールバックを明示的にテストしたいケースは、各テストが `_claude_code_version` を
-# 直接 mock する (`test_version_detect.py` / `test_throttle_flow.py::TestOutputMode`)。
+# 直接 mock する (`test_throttle_flow.py::TestVersionAwareMode`)。版数検出そのもの
+# (env var / EXECPATH / subprocess の 3 段) の単体テストは `test_version_detect.py`
+# (こちらは `_claude_code_version` を mock せず `subprocess.run` を mock する)。
 PINNED_VERSION_ENV = {"CLAUDE_CODE_VERSION": "9.9.9"}
 
 
