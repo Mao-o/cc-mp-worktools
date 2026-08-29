@@ -40,6 +40,23 @@ def main() -> int:
         checked += 1
         claude_version = json.loads(claude_manifest.read_text(encoding="utf-8")).get("version")
         codex_version = json.loads(codex_manifest.read_text(encoding="utf-8")).get("version")
+        # 両方が version を欠くと None == None で一致扱いになり、「どちらにも
+        # version が無い」という不備そのものを素通しする。Claude 側の validate は
+        # version 欠落を warning にとどめるため、ここで落とさないと CI は green の
+        # まま version 未設定の plugin が通る。比較の前に値の妥当性を検査する。
+        invalid = [
+            label
+            for label, value in (("claude", claude_version), ("codex", codex_version))
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if invalid:
+            failures.append(
+                f"{plugin_dir.name}: version が未設定または文字列でない "
+                f"({' / '.join(invalid)} 側。"
+                f"claude={claude_version!r}, codex={codex_version!r})"
+            )
+            continue
+
         if claude_version != codex_version:
             failures.append(
                 f"{plugin_dir.name}: version 不一致 "
@@ -47,7 +64,7 @@ def main() -> int:
             )
 
     if failures:
-        print("Codex manifest の version 不一致を検出しました:", file=sys.stderr)
+        print("Codex manifest の version に問題を検出しました:", file=sys.stderr)
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
