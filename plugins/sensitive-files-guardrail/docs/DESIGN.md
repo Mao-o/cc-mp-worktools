@@ -950,14 +950,85 @@ deny のまま (`_render_existing` が例外・失敗・空文字のいずれを
 
 reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 
-- `edit_deny` は minimal info **以外**を先に組んでから残り byte を計算し、その
-  範囲に収まる行数だけ minimal info を載せる。入り切らない分は
-  `... (N more lines)` に畳み、`</DATA>` の閉じタグは必ず残す
+折り畳みの実体は `core.messages._fit_data_block` で、**Read / Bash / Edit の
+3 経路すべてが同じ関数を通る** (0.26.0 で配線を揃えた。それ以前は `edit_deny`
+だけが使い、Read には同等の機構が無く、Bash は除外案内だけを守って `<DATA>`
+ブロック本体は盲目 byte cut に晒していた)。
+
+| 経路 | 入口 | 予算 |
+|---|---|---|
+| Read | `core.messages.fit_read_reason` | reason 全体が `<DATA>` 1 ブロックなので 3KB をそのまま渡す |
+| Bash | `core.messages._fold_data_block` (`_join_with_exclude_hint` から) | 3KB − 除外案内 − 固定行 (`note:` / `matched_operand:` 等) |
+| Edit / Write | `core.messages._edit_existing_info_lines` (`edit_deny` から) | 3KB − tail (`suggested_keys` / `suggestion_alt` / 除外案内) |
+
+- 先頭から行を採用し、入り切らない分は
+  `  ... (N more lines; use Read tool with the absolute path for the rest)`
+  に畳む。`</DATA>` の閉じタグは必ず残す (包装が壊れると `escape_data_tag` の
+  外殻破壊防御が意味を失うため)。次アクションの誘導は Bash / Edit にだけ付け、
+  Read 自身には付けない (Read の中で Read を勧めるのは自己参照で無意味)
+- 単位ラベルは既定が `lines`。**keys-only scan のブロックだけ `keys`**
+  (`format:` 行の marker で判定)。1 行 = 1 鍵なので、行数ではなく鍵数で
+  言える (件数の数え方は次項)
+- **件数は「落とした行数」ではなく「実際に見えていない件数」**。
+  `entries: N` を見出し領域から読めるブロック (keys-only) では
+  `N − 残った明細行数` を出す。折り畳みは preview 上限
+  (`keyonly_scan.PREVIEW_CAP` = 60) の **さらに内側**で効くので、行数ベースだと
+  preview 段階で隠れた分を数え落とす (500 鍵で `... (37 more keys)` と出て
+  477 件不可視を隠していた)。逆に行数ベースは明細行以外 (`scanned_bytes:` /
+  見出し / note) も数えるため、きつい折り畳みでは鍵数を**過大**にも言う
+  (`entries: 5` と `... (9 more keys)` が同居)。`entries:` を読めない /
+  総数と明細行が噛み合わないブロックだけ従来の行数ベースに戻す。
+  **母数は keys-only scan の抽出上限 (`MAX_KEYS` = 500)** — それを超える鍵を
+  持つファイルでは `entries:` 自体が頭打ちになる (件数はブロック内で
+  self-consistent だが、ファイル全体の鍵数ではない)
+- preview 上限の告知は header 行に置き、**上限表現** (`keys (in order, max 60
+  shown):`) で書く。`first 60 shown` のような断定形は、そのあとの折り畳みで
+  60 行未満になった瞬間に嘘になる。文言は **byte 数も設計の一部** —
+  件数が「隠れている鍵数」になって 1〜2 byte 太ったぶんを header 側で返して
+  いる (`up to 60 shown` に戻すとコーパス 1,623 件中 6 件で鍵行が 1 行減る)
+- 省略マーカーの**予約幅**は「落とした行数」の桁で取り、実際に出す件数が
+  その幅に収まらないときだけ畳み直す。総数 (最大 500) の桁で常に予約すると、
+  桁が増えたぶんだけ収まっていた鍵行が落ちる (掃引実測 30,720 点中 122 点)。
+  畳み直しは予約幅が単調増加するので必ず止まる (実測は最大 2 周)
+- 閉じタグの直前が per-format の `note:` 行 (「実値は無い」の免責事項) なら、
+  それも固定 tail として保護を試みる。ただし note を守ると **明細行 (key 行)
+  が 0 行になる** 入力では note を諦めてもう一度畳む 2 段構え。
+  **判定は「1 行も採用できないか」ではなく「明細行が 0 になるか」**である —
+  `<DATA>` ブロックには header 3 行と `format:` / `entries:` の見出しが必ず
+  入るので、前者では「見出しと省略マーカーだけ」の状態を検出できない
+  (0.26.0 の初版がこの取り違えでフォールバックを発火させ損ねていた)。
+  明細行の判定は `_count_detail_lines` が **2 space インデント**の規約で行う
+  (per-format renderer はすべてエントリ 1 件を 2 space インデントの 1 行として
+  出す。省略マーカーは同じインデントを持つので prefix で除外する)。
+  note 保護を外しても明細行が増えないブロック (`(no entries)` /
+  `(no keys matched)` など明細行を持ちえない形) では note を残す — 得るものが
+  無いのに免責事項だけ落とすのは純損失なため
+- フォールバックしても **`<DATA>` header の `NOTE: ... Real values are NOT in
+  context.` と `format:` 行は残る** (header 3 行が入らなければ何も返さない
+  実装なので構造的に保証される)。手放すのは per-format の補足説明のほうで、
+  「実値は context に無い」という開示そのものではない
+- note と省略マーカーの next action は固定費なので、**予算が元々きつい
+  Edit / Write の minimal info では表示 key 行が 0.25.0 より減る**ことがある
+  (コーパス 1,623 件中 366 件で 1〜9 行減。減るのは Edit / Write のみで、
+  **0 行まで落ちる組み合わせは無い**)。免責事項と閉じタグを優先した意図的な
+  トレードオフで、264 件は逆に増える
 - したがって **E6 の追加によって末尾の除外案内が truncate されることはない**
 - 取得失敗時は黙って省略せず `minimal info: unavailable (<理由>)` + next action
   に降りる (0.16.0 の silent degradation 対策と同じ方針)
 - `suggested_keys` だけで予算を使い切る極端な入力では minimal info を丸ごと
   省略し、残りは E6 以前と同じく `core.output._truncate` が引き取る
+
+**畳める粒度は「行」なので、埋め込む側は 1 行に情報を詰め込みすぎない。**
+0.26.0 の初版は `format_keyonly` が全鍵名を `keys: A, B, C, ...` の 1 行に
+並べており、その 1 行が残予算に入らないと行ごと落ちて、予算を 1KB 以上
+余らせたまま鍵名 0 個になっていた (盲目 cut の頃は「途中で切れた 1 行」として
+数十個見えていたので、折り畳みの導入が情報を減らす退行になっていた)。現在は
+1 鍵 1 行で出す (`redaction/keyonly_scan.py`)。
+
+> `read_partial` / `search` の builder (`core.messages` の grep 系) は
+> `dotenv_info["keys"]` を `<DATA>` 包装なしで直接展開するため、この折り畳みは
+> 効かず `core.output._truncate` の盲目 cut のままである (既知の未対応。
+> 判定には影響しない)。
 
 `ask_or_deny`: `permission_mode == "bypassPermissions"` なら `deny`、それ以外は
 `ask`。**機密検出済み** のケースは `ask` を挟まず常に `deny` 固定 (うっかり

@@ -8,6 +8,7 @@ MultiEdit は CLI 非搭載のため 0.6.0 で test を撤去。
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -556,6 +557,94 @@ class TestEditDenyKindBranches(BaseEdit):
         self.assertIn("client_id", reason)
         self.assertNotIn("xyz", reason)
 
+    # -- overwrite: 既存キーの値更新 vs 新規追加 (0.26.0) ------------------
+
+    def test_overwrite_pure_value_update_is_not_labeled_as_addition(self):
+        """既存 TOKEN の値だけを差し替える Edit は「追加予定」と言わない。
+
+        ticket 再現そのもの: 既存 ``TOKEN=abcdefghij`` を ``TOKEN=zzz`` に
+        Edit すると、旧実装は minimal info で「TOKEN は既存キー」と示しつつ
+        suggested_keys / suggestion_alt では同じ TOKEN を「追加予定」と言う
+        自己矛盾があった。
+        """
+        self._write_existing(".env", "TOKEN=abcdefghijklmnop\n")
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "TOKEN=zzz\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        # 既存キーとして表示される (minimal info)
+        self.assertIn("1. TOKEN", reason)
+        # suggested_keys には出るが「追加予定」ではなく「更新」と説明する
+        self.assertIn("suggested_keys:", reason)
+        self.assertIn("  TOKEN=", reason)
+        self.assertIn("既存キーの値の更新", reason)
+        self.assertNotIn("追加予定のキー名", reason)
+
+    def test_overwrite_envrc_value_update_is_not_labeled_as_addition(self):
+        """ticket のもう 1 つの再現例 (.envrc の AWS_PROFILE 更新)。"""
+        self._write_existing(".envrc", "AWS_PROFILE=old-profile\n")
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".envrc"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "AWS_PROFILE=new-profile\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertIn("既存キーの値の更新", reason)
+        self.assertNotIn("追加予定のキー名", reason)
+
+    def test_overwrite_new_key_addition_keeps_addition_wording(self):
+        """既存キーと無関係な**新規**キー追加は従来どおり「追加予定」のまま。
+
+        「更新」文面への切替が overwrite 全般に広がっていないことの対照。
+        """
+        self._write_existing(".env", "TOKEN=abcdefghijklmnop\n")
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "BRAND_NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertIn("追加予定のキー名", reason)
+        self.assertNotIn("既存キーの値の更新", reason)
+
+    def test_overwrite_mixed_new_and_existing_keeps_default_wording(self):
+        """新規キーと既存キー更新が混在するときは「更新」と言い切らない。
+
+        全件が既存キーのときだけ「更新」文面にする設計 (advisor 指摘の
+        「上記が全部更新なのか一部だけなのか」を安全側で判定できないケース)。
+        新規分については「追加予定」の説明が事実として正しいままなので、
+        従来文面を維持する。
+        """
+        self._write_existing(".env", "TOKEN=abcdefghijklmnop\n")
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "TOKEN=zzz\nBRAND_NEW_KEY=1\n"
+        reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertIn("追加予定のキー名", reason)
+        self.assertNotIn("既存キーの値の更新", reason)
+
+    def test_overwrite_render_failure_keeps_default_wording_not_update(self):
+        """既存キー集合が取得できない (render 失敗) ときは「更新」と断定しない。
+
+        判定できないことを「更新ではない」と誤って断定するより、従来の
+        「追加予定」文面を維持する方が安全側 (誤って「更新なので追記不要」と
+        言い切って本当に新規キーだった場合の見落としを避ける)。
+        """
+        self._write_existing(".env", "TOKEN=abcdefghijklmnop\n")
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "TOKEN=zzz\n"
+        from handlers import edit_handler
+
+        with mock.patch.object(
+            edit_handler, "render_for_bash",
+            return_value=(None, None, "open_failed", ""),
+        ):
+            reason = _reason(handle(envelope, tool_label="Edit"))
+        self.assertIn("追加予定のキー名", reason)
+        self.assertNotIn("既存キーの値の更新", reason)
+
     # -- symlink / special -----------------------------------------------
 
     def test_symlink_branch_asks_to_confirm_target(self):
@@ -692,6 +781,13 @@ class TestOverwriteMinimalInfoFailure(BaseEdit):
         return handle(envelope, tool_label="Edit")
 
     def test_render_failure_reports_unavailable_with_next_action(self):
+        """0.26.0: status 別のラベル + render 失敗専用の next action。
+
+        旧文言「Read tool に絶対パスを渡してください (Read も block されますが
+        同じ minimal info が返ります)」は 2 重に事実と違った: Read も同じ理由
+        で失敗するので情報は増えず、しかも verdict は (bypass 以外) block では
+        なく ask になる。新文言はどちらも主張しない。
+        """
         from handlers import edit_handler
 
         with mock.patch.object(
@@ -702,15 +798,46 @@ class TestOverwriteMinimalInfoFailure(BaseEdit):
         reason = _reason(r)
         self.assertEqual(_decision(r), "deny")
         self.assertIn(
-            "minimal info: unavailable (既存ファイルの読み取り / 解析に失敗)",
+            "minimal info: unavailable (安全な open に失敗した (権限 / symlink 検知))",
             reason,
         )
-        self.assertIn("Read tool に", reason)
+        self.assertIn("同じ理由で失敗し、情報は返りません", reason)
+        self.assertIn("ファイルの権限・実体を確認してください", reason)
+        # 旧文言の事実誤認 (block / 同じ minimal info が返る) を主張しない
+        self.assertNotIn("Read tool に", reason)
+        self.assertNotIn("block されますが", reason)
         # 除外案内は従来どおり残る
         self.assertIn("patterns.local.txt", reason)
 
+    def test_render_failure_status_selects_matching_label(self):
+        """0.26.0: status ごとに異なるラベルが出る (1 種類に潰れない)。"""
+        from handlers import edit_handler
+
+        cases = {
+            "unresolved": "既存ファイルが見つからない",
+            "not_regular": "通常ファイルではない",
+            "stat_failed": "ファイル状態の確認に失敗した",
+            "redact_failed": "内容の解析に失敗した",
+            "normalize_failed": "パスの正規化に失敗した",
+        }
+        for status, expect in cases.items():
+            with self.subTest(status=status):
+                with mock.patch.object(
+                    edit_handler, "render_for_bash",
+                    return_value=(None, None, status, ""),
+                ):
+                    reason = _reason(self._run())
+                self.assertIn(expect, reason)
+                # render 失敗系は一律で新しい next action を使う
+                self.assertIn("同じ理由で失敗し、情報は返りません", reason)
+
     def test_render_exception_still_denies(self):
-        """``render_for_bash`` が例外を投げても deny のまま (verdict 不変)。"""
+        """``render_for_bash`` が例外を投げても deny のまま (verdict 不変)。
+
+        status が取れない (例外) ケースは既知の kind に該当しないため、
+        従来どおりの汎用ラベルにフォールバックしつつ、next action だけは
+        0.26.0 の修正後 (render 失敗系) の文言になる。
+        """
         from handlers import edit_handler
         from core import logging as L
 
@@ -720,8 +847,13 @@ class TestOverwriteMinimalInfoFailure(BaseEdit):
         ):
             with mock.patch.object(L, "log_error") as mock_log:
                 r = self._run()
+        reason = _reason(r)
         self.assertEqual(_decision(r), "deny")
-        self.assertIn("minimal info: unavailable", _reason(r))
+        self.assertIn(
+            "minimal info: unavailable (既存ファイルの読み取り / 解析に失敗)",
+            reason,
+        )
+        self.assertIn("同じ理由で失敗し、情報は返りません", reason)
         mock_log.assert_any_call(
             "edit_existing_render_failed", "RuntimeError",
         )
@@ -775,8 +907,14 @@ class TestOverwriteReasonByteBudget(BaseEdit):
             len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
         )
         # 予算内に畳んだ痕跡と、壊れていない <DATA> 包装
-        self.assertRegex(reason, r"  \.\.\. \(\d+ more lines\)")
+        self.assertRegex(reason, r"  \.\.\. \(\d+ more lines")
+        # 畳んだ場合でも Read tool への誘導が付く (Read なら exclude
+        # hint 等の固定行を持たないぶん、より多くの key 行を確認できる)
+        self.assertIn("use Read tool with the absolute path", reason)
         self.assertIn("</DATA>", reason)
+        # 折り畳んでも末尾の per-format note (「実値は無い」の免責事項)
+        # を優先して保護する (0.26.0 以前は閉じタグだけ保護し note を失っていた)
+        self.assertIn("real values are not in context", reason)
         # 末尾の除外案内が生き残る = output._truncate は発火していない
         self.assertIn("patterns.local.txt", reason)
         self.assertIn("`!.env`", reason)
@@ -950,7 +1088,7 @@ class TestOverwriteReadIsBounded(BaseEdit):
 
         with_render = _decision(handle(envelope, tool_label="Edit"))
         with mock.patch.object(
-            edit_handler, "_render_existing", return_value="",
+            edit_handler, "_render_existing", return_value=("", None, ""),
         ):
             without_render = _decision(handle(envelope, tool_label="Edit"))
         self.assertEqual(with_render, "deny")
@@ -1016,6 +1154,65 @@ class TestScanStreamBound(unittest.TestCase):
         # BytesIO 自体のコピー分があるので厳密比較はしない。レコード長に比例
         # (8 倍) していないことだけを見る。
         self.assertLess(large, small * 4)
+
+
+class TestUpdateWordingKeepsMinimalInfo(BaseEdit):
+    """0.26.0 隔離内レビュー P2-1: 「更新」文面で minimal info を押し出さない。
+
+    ``edit_deny`` は tail (``suggestion_alt`` を含む) を先に組んでから残りを
+    minimal info の予算に回す。0.26.0 で新設した「既存キーの値の更新」文面が
+    383 byte (既定文言の約 2.9 倍) あったため、鍵数の多い dotenv では
+    minimal info セクションが **丸ごと** 消えていた (``minimal info:
+    unavailable`` すら出ない = silent degradation)。レビューの corpus 実測で
+    1,623 件中 30 件が該当。
+    """
+
+    def test_many_key_value_update_still_carries_minimal_info(self):
+        keys = [f"SERVICE_API_KEY_{i:03d}" for i in range(100)]
+        (Path(self.tmp) / ".env").write_text(
+            "".join(f"{k}=sk_live_{'x' * 32}{i:03d}\n" for i, k in enumerate(keys))
+        )
+        envelope = _make_envelope(
+            "Edit", str(Path(self.tmp) / ".env"), self.tmp,
+        )
+        envelope["tool_input"]["new_string"] = "\n".join(
+            f"{k}=new{i}" for i, k in enumerate(keys[:40])
+        )
+        resp = handle(envelope, tool_label="Edit")
+        self.assertEqual(_decision(resp), "deny")
+        reason = _reason(resp)
+        # 「更新」文面に切り替わっている (退行はこの分岐でのみ起きる)
+        self.assertIn("既存キーの値の更新", reason)
+        # minimal info セクションが <DATA> 包装ごと残る
+        self.assertIn("minimal info (Read", reason)
+        self.assertIn("</DATA>", reason)
+        self.assertIn("entries: 100", reason)
+        # **鍵名が実際に見えている**こと (0.26.0 レビュー P3-4)。
+        #
+        # 0.26.0 の初版はここで **表示鍵行 0 行** (`entries: 100` と折り畳み
+        # マーカーだけ) だった。note 保護の固定費に押されたのに
+        # ``_fit_data_block`` のフォールバックが「1 行も採用できない」条件で
+        # 書かれていて発火しなかったため。0.25.0 は同じケースで 2 行出して
+        # いたので、折り畳みの導入が情報を減らす退行になっていた。
+        #
+        # 鍵名は ``suggested_keys`` にも列挙されるので、素の ``assertIn`` では
+        # **DATA ブロックの外**を拾って空振りする。明細行の**形**
+        # (2 space インデント + 連番) で確かめる。
+        data_block = re.search(r"<DATA .*?</DATA>", reason, re.S)
+        self.assertIsNotNone(data_block)
+        detail_lines = re.findall(
+            r"^  (?!\.\.\.)\S.*$", data_block.group(0), re.M,
+        )
+        self.assertGreaterEqual(
+            len(detail_lines), 1,
+            "minimal info の <DATA> ブロックに明細行 (鍵名) が 1 行も無い",
+        )
+        self.assertRegex(detail_lines[0], r"^  1\. SERVICE_API_KEY_000\b")
+        # 予算と末尾の除外案内は従来どおり
+        self.assertLessEqual(
+            len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+        )
+        self.assertIn("patterns.local.txt", reason)
 
 
 if __name__ == "__main__":

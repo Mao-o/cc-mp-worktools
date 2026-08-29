@@ -183,7 +183,7 @@ class TestDotenvPemBlockTracking(unittest.TestCase):
         大きい .env で以降のキーが消える。marker 判定は
         ``pem.opens_pem_block`` / ``closes_pem_block`` に集約してある。
         """
-        # 32KB 超にしつつ、キー数は format_keyonly の preview_cap (60) 未満に
+        # 32KB 超にしつつ、キー数は keyonly_scan.PREVIEW_CAP (60) 未満に
         # 収める (長い値で嵩を稼ぐ)。cap を超えると後半のキーが表示から
         # 落ちるだけで、抽出自体の成否と区別できなくなるため。
         pad = "".join(f"PAD{i}=" + "x" * 2000 + "\n" for i in range(20))

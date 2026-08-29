@@ -166,19 +166,111 @@ def scan_file(path: Path, max_bytes: int = 1024 * 1024) -> tuple[list[str], int]
         return [], 0
 
 
-def format_keyonly(keys: list[str], total_bytes: int, fmt_hint: str = "unknown") -> str:
+# ``format:`` 行に必ず入る keys-only scan の marker。``core.messages`` は
+# 折り畳み時の省略単位を「行」ではなく「鍵」と表示するためにこの文字列を
+# sniff する (``core`` → ``redaction`` の依存を作らないよう定数の実体は
+# core 側にも置き、``tests/test_messages.py`` の assumption test で突合する)。
+KEYONLY_SCAN_MARKER = "keys-only scan"
+
+# reason に載せる鍵名の上限 (LLM コンテキスト圧迫防止)。``MAX_KEYS`` は
+# スキャンそのものの上限で、こちらは表示側の上限。
+PREVIEW_CAP = 60
+
+# keys-only scan に降りた理由 → ``format:`` 行に載せるラベル (0.26.0)。
+# 旧実装は理由を問わず一律 "large" と表示しており、43 byte の壊れた JSON でも
+# 「(large, keys-only scan)」と出て小ファイルなのに「大きすぎる」と誤った事実を
+# 伝えていた (バグ報告そのものが LLM に伝わらなくなる)。``format_opaque`` 経由で
+# 呼ばれる際に理由を引き渡し、事実どおりのラベルに分岐する。
+_KEYONLY_REASON_LABELS: dict[str, str] = {
+    "large": "large",
+    "parse_failed": "parse failed",
+    "toml_unsupported": "unsupported",
+}
+
+
+def _keyonly_note(reason: str, fmt_hint: str) -> str:
+    """理由別の ``note:`` 行本文を返す (常に「値は読んでいない」で終える)。"""
+    if reason == "parse_failed":
+        return (
+            f"note: {fmt_hint.upper()} parse failed — file may be malformed."
+            " values never read."
+        )
+    if reason == "toml_unsupported":
+        return (
+            "note: TOML structure needs Python 3.11+ (tomllib unavailable)."
+            " values never read."
+        )
+    return "note: file too large for full parse. values never read."
+
+
+def format_keyonly(
+    keys: list[str],
+    total_bytes: int,
+    fmt_hint: str = "unknown",
+    reason: str = "large",
+) -> str:
+    """streaming 鍵名抽出の結果を reason 用に整形する。
+
+    Args:
+        keys: 抽出済み鍵名リスト。
+        total_bytes: スキャンした byte 数。
+        fmt_hint: ``format:`` 行に出す format 名。
+        reason: keys-only scan に降りた理由 (``large`` / ``parse_failed`` /
+            ``toml_unsupported``)。未知値は ``large`` 相当 (旧来の表示) に
+            フォールバックする。``format:`` 行のラベルと末尾 ``note:`` の
+            文面の両方を切り替える。
+
+    ### 鍵名は **1 鍵 1 行** で出す (0.26.0 隔離内レビュー P1-1)
+
+    0.26.0 の初版までは全鍵名を ``keys: A, B, C, ...`` の **1 行**に並べて
+    いた。``core.messages._fit_data_block_core`` は **行単位でしか畳めない**
+    ため、この 1 行が残予算に入らないと行ごと落ち、予算が 1KB 以上余って
+    いるのに鍵名が 0 個という状態になっていた (>32KB ファイルと json/toml の
+    parse 失敗が該当。長い鍵名 200 個の ``.env`` を Read すると 3,072 byte 中
+    2,753 byte を使い残して鍵名 0 個)。0.25.0 は盲目 byte cut だったので
+    「途中で切れた 1 行」として数十個は見えており、**折り畳みの導入で情報が
+    減る**退行になっていた。
+
+    行の粒度を内容の粒度 (= 1 鍵) に揃えることで、既存の折り畳み機構が
+    そのまま効く。盲目 cut にフォールバックする経路でも、鍵名が早い行に
+    分かれて並ぶため「0 個」ではなく「途中まで」になる。
+
+    preview 上限の告知は末尾行ではなく **header 行**に置く。末尾行は畳んだ
+    ときに真っ先に落ちるうえ、omit marker の件数と二重になって「いくつ
+    落ちたか」が読めなくなるため。総数は ``entries:`` が持つ。
+
+    ### header は「上限」として、かつ **短く** 書く (0.26.0 外部レビュー R1)
+
+    文言は ``max N shown`` — **``first N shown`` と書いてはいけない**。
+    この header 行は preview 上限を告げるが、そのあとに
+    ``core.messages._fit_data_block`` が予算で **さらに** 畳むため、実際に
+    残る鍵行は N 未満になりうる (500 鍵で 60 行の preview のうち 23 行しか
+    残らない実測例がある)。断定形だと折り畳み後に header だけが「60 個
+    見せている」と嘘をつく。上限表現なら畳まれても真のまま。
+    実際に何個隠れているかは省略マーカーが ``entries:`` 基準で言う
+    (``core.messages._omit_marker`` / ``_entries_total``)。
+
+    ``up to N shown`` (旧 ``first N shown`` と同じ byte 数) ではなく
+    **2 byte 短い ``max``** を選んでいるのは、同じ R1 対応で省略マーカーの
+    件数が「落とした行数」から「隠れている鍵数」に変わり、桁が増えて 1〜2
+    byte 太るため。この 2 byte を header 側で返さないと、きつい予算では
+    **鍵行が 1 行落ちる** (コーパス 1,623 件で 6 件が退行、``max`` なら 0 件で
+    3 件は逆に増える)。文言を長くするときは同じ計測をやり直すこと。
+    """
+    label = _KEYONLY_REASON_LABELS.get(reason, "large")
     lines = [
-        f"format: {fmt_hint} (large, keys-only scan)",
+        f"format: {fmt_hint} ({label}, {KEYONLY_SCAN_MARKER})",
         f"entries: {len(keys)}",
         f"scanned_bytes: {total_bytes}",
     ]
     if not keys:
         lines.append("(no keys matched)")
-        return "\n".join(lines)
-    preview_cap = 60
-    shown = keys[:preview_cap]
-    lines.append("keys: " + ", ".join(shown))
-    if len(keys) > preview_cap:
-        lines.append(f"... ({len(keys) - preview_cap} more)")
-    lines.append("note: file too large for full parse. values never read.")
+    else:
+        shown = keys[:PREVIEW_CAP]
+        if len(keys) > PREVIEW_CAP:
+            lines.append(f"keys (in order, max {len(shown)} shown):")
+        else:
+            lines.append("keys (in order):")
+        lines.extend(f"  {i}. {k}" for i, k in enumerate(shown, 1))
+    lines.append(_keyonly_note(reason, fmt_hint))
     return "\n".join(lines)

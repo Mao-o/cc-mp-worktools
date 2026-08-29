@@ -105,7 +105,7 @@ def _extract_dotenv_keys(envelope: dict, tool_label: str, basename: str) -> list
     return [k["name"] for k in info.get("keys", [])]
 
 
-def _render_existing(path: Path, cwd: str) -> str:
+def _render_existing(path: Path, cwd: str) -> tuple[str, dict | None, str]:
     """上書き対象の既存ファイルを Read 同等 minimal info にする (E6, 0.20.0)。
 
     ``redaction.file_render.render_for_bash`` を再利用する。渡すのは normalize
@@ -117,13 +117,27 @@ def _render_existing(path: Path, cwd: str) -> str:
     ``core.messages.edit_deny`` が unavailable 行に降りるだけ。
     ``render_for_bash`` は内部で例外を握り潰す実装だが、将来の変更で例外が
     漏れても verdict が動かないよう、ここでも捕捉して空文字を返す。
+
+    Returns:
+        ``(reason, dotenv_info, status)`` — ``render_for_bash`` の 4 戻り値の
+        うち ``resolved_base`` (project root 再解決専用、絶対パス入力のここ
+        では常に空になる) を除いた 3 つ。0.26.0 より前は ``reason``
+        以外の 3 つを丸ごと捨てていたため、失敗理由が
+        ``core.messages.edit_deny`` に一切伝わらず、unavailable の理由ラベル
+        と next action が常に同一の (render 失敗時は事実に反する) 文言に
+        潰れていた。``dotenv_info`` は既存キー集合の判定にも使う。
     """
     try:
-        reason, _info, _status, _base = render_for_bash(str(path), cwd)
+        reason, info, status, _base = render_for_bash(str(path), cwd)
     except Exception as e:  # noqa: BLE001 (verdict 不変を優先した意図的な捕捉)
         L.log_error("edit_existing_render_failed", type(e).__name__)
-        return ""
-    return reason or ""
+        return "", None, ""
+    if status:
+        # ``handlers.bash_handler`` の
+        # ``log_info("bash_render_failed", render_status)`` と同じ計測基盤に
+        # 乗せる (0.26.0)。空文字 (成功) はログしない — 失敗分布の計測が目的。
+        L.log_info("edit_render_failed", status)
+    return reason or "", info, status
 
 
 def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
@@ -205,10 +219,24 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
         # 既存上書き: Read 同等 minimal info で「今そのファイルに何が入って
         # いるか」(鍵名まで) を返す。deny は既に確定しているので、この情報は
         # reason の情報量だけを増やす。
+        existing_render, existing_info, existing_status = _render_existing(
+            path, cwd,
+        )
+        # 既存キー名の集合。dotenv かつ render 成功時のみ非 None。
+        # 非 dotenv / render 失敗 / 32KB 超 (streaming scan は構造化 info を
+        # 返さない) では空集合のままにし、``edit_deny`` 側で「更新」と
+        # 誤って言い切らない (docstring 参照)。
+        existing_keys = (
+            frozenset(k["name"] for k in existing_info["keys"])
+            if existing_info
+            else frozenset()
+        )
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
             kind="overwrite", is_dotenv=is_dotenv,
-            existing_render=_render_existing(path, cwd),
+            existing_render=existing_render,
+            existing_render_status=existing_status,
+            existing_keys=existing_keys,
             relpath=relpath,
         ))
 

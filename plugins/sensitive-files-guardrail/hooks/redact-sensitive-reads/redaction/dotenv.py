@@ -305,24 +305,29 @@ def format_dotenv(info: dict) -> str:
     """
     lines = ["format: dotenv", f"entries: {info['entries']}"]
     if info["entries"] == 0:
+        # 0.26.0 隔離内レビュー P3-1: 早期 return で末尾 note を落とさない。
+        # ``format_keyonly`` の空 keys 分岐で直したのと同一の欠陥クラス。
+        # note は「実値は context に無い」という免責の開示なので、内容が空でも
+        # 出す (silent degradation 対策と同じ方針)。折り畳み側の note 保護も
+        # 「最終行が ``note:``」を前提にしているため、形を揃える意味もある。
         lines.append("(no entries)")
-        return "\n".join(lines)
-    lines.append("keys (in order):")
-    for i, k in enumerate(info["keys"], 1):
-        type_part = f"<type={k['type']}"
-        if "prefix" in k:
-            type_part += f' prefix="{k["prefix"]}"'
-        type_part += ">"
+    else:
+        lines.append("keys (in order):")
+        for i, k in enumerate(info["keys"], 1):
+            type_part = f"<type={k['type']}"
+            if "prefix" in k:
+                type_part += f' prefix="{k["prefix"]}"'
+            type_part += ">"
 
-        status_part = "  ".join(k["status"])
+            status_part = "  ".join(k["status"])
 
-        line = f"  {i}. {k['name']}  {type_part}  {status_part}"
-        if "placeholder" in k:
-            line += f'  matched="{k["placeholder"]}"'
-        # <empty> のときだけ length を出さない (常に 0 で意味なし)
-        if "<empty>" not in k["status"]:
-            line += f"  length={k['length']}"
-        lines.append(line)
+            line = f"  {i}. {k['name']}  {type_part}  {status_part}"
+            if "placeholder" in k:
+                line += f'  matched="{k["placeholder"]}"'
+            # <empty> のときだけ length を出さない (常に 0 で意味なし)
+            if "<empty>" not in k["status"]:
+                line += f"  length={k['length']}"
+            lines.append(line)
 
     lines.append(
         "note: real values are not in context. only key names, type, prefix,"

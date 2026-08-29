@@ -115,6 +115,16 @@ def _join_with_exclude_hint(
     レシピを既定として案内する (``_exclude_hint`` 参照)。
 
     ``_truncate`` 自体は最終防御としてそのまま残す (ここを通らない経路もあるため)。
+
+    0.26.0: 予算超過時、``lines`` に埋め込まれた ``<DATA>``...``</DATA>``
+    1 要素 (``_append_minimal_info`` が ``file_render`` をまるごと 1 行として
+    追加したもの) を検出できれば ``_fit_data_block`` でその部分だけを折り畳む
+    (``_fold_data_block``)。それ以外の固定行 (``note:`` / ``matched_operand:``
+    等) には手を付けない。従来は ``lines`` 全体を末尾から盲目 byte cut して
+    おり、``</DATA>`` 閉じタグや per-format の末尾 note (「実値は無い」の
+    免責事項) を key 行の途中でちぎっていた (90 key の ``.env`` で実測)。
+    埋め込みが無い、または折り畳んでも収まらない場合は従来どおりの盲目 cut に
+    フォールバックする (安全側の最終防御は維持)。
     """
     hint = f"suggestion: {_exclude_hint(basename, literal_name, relpath)}"
     tail = "\n" + hint
@@ -128,17 +138,91 @@ def _join_with_exclude_hint(
 
     encoded = body.encode("utf-8")
     if len(encoded) > budget:
-        marker = "\n...[truncated]"
-        keep = budget - len(marker.encode("utf-8"))
-        if keep <= 0:
-            return hint
-        cut = encoded[:keep]
-        # UTF-8 の途中で切らない
-        while cut and (cut[-1] & 0xC0) == 0x80:
-            cut = cut[:-1]
-        body = cut.decode("utf-8", errors="ignore") + marker
+        folded = _fold_data_block(lines, budget)
+        if folded is not None:
+            body = folded
+        else:
+            marker = "\n...[truncated]"
+            keep = budget - len(marker.encode("utf-8"))
+            if keep <= 0:
+                return hint
+            cut = encoded[:keep]
+            # UTF-8 の途中で切らない
+            while cut and (cut[-1] & 0xC0) == 0x80:
+                cut = cut[:-1]
+            body = cut.decode("utf-8", errors="ignore") + marker
 
     return body + tail
+
+
+def _fold_data_block(lines: list[str], budget: int) -> str | None:
+    """埋め込み ``<DATA>``...``</DATA>`` 要素を検出できれば折り畳む (0.26.0)。
+
+    ``lines`` の中に (``_append_minimal_info`` が足した) ``file_render`` 丸ごと
+    1 要素として ``<DATA ...>`` で始まり ``</DATA>`` で終わる文字列があれば、
+    その要素だけを ``_fit_data_block`` で ``budget`` に収める。それ以外の行
+    (固定長の note: / matched_operand: 等) の byte 数を先に引いてから
+    ``_fit_data_block`` へ渡すことで、閉じタグと末尾 note を保護したまま
+    key 行だけを畳める。
+
+    見つからない、または折り畳んでも ``budget`` に収まらない場合は ``None``
+    (呼出側が旧来の盲目 byte cut にフォールバックする)。
+    """
+    data_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith("<DATA ") and line.endswith(_DATA_CLOSING_TAG):
+            data_idx = i
+            break
+    if data_idx is None:
+        return None
+
+    before = lines[:data_idx]
+    after = lines[data_idx + 1:]
+    fixed_cost = sum(_line_cost(x) for x in before + after)
+    fitted = _fit_data_block(
+        lines[data_idx], budget - fixed_cost, next_action=_OMIT_ACTION_USE_READ,
+    )
+    if not fitted:
+        return None
+    candidate = "\n".join(before + ["\n".join(fitted)] + after)
+    if len(candidate.encode("utf-8")) > budget:
+        # 概算 (行ごとの ``_line_cost``) の誤差が悪い方に転んだ極端なケース。
+        # 折り畳みを諦めて呼出側の盲目 cut に委ねる (安全側)。
+        return None
+    return candidate
+
+
+def fit_read_reason(reason: str, budget: int = MAX_REASON_BYTES) -> str:
+    """Read handler 専用: ``<DATA>`` 包装済み reason を budget 以内に折り畳む
+    (0.26.0)。
+
+    Read の reason は ``engine.redact`` / ``engine.redact_large_file`` の
+    出力そのもの (``<DATA>...</DATA>`` の 1 ブロックが reason 全体) で、
+    Bash/Edit と違って周囲に他の固定行を持たない。したがって ``_fit_data_block``
+    に budget をそのまま渡せばよい。
+
+    予算超過時、以前は ``core.output._truncate`` の盲目 byte cut だけに
+    頼っており、90 key の ``.env`` を Read すると ``</DATA>`` 閉じタグと
+    「実値は無い」の末尾 note が key 行の途中で失われていた (Bash 側 0.23.0
+    の除外案内保護と同型の欠落が、Read には全く存在しなかった)。
+
+    ``next_action`` を付けない (空文字既定): Bash/Edit の呼出元には「Read
+    tool でこの絶対パスを読めば続きが見える」が真だが、**この関数自体が
+    Read の reason を組んでいる**ため、Read の中で Read を勧めるのは
+    自己参照で無意味 (かつ事実として何も増えない)。
+
+    折り畳んでも中身ゼロ (header 3 行のみ) になるほど極端なケース
+    (basename が極端に長い等) では折り畳みを諦め、**入力をそのまま返す**。
+    最終的に ``core.output.make_deny`` の ``_truncate`` が最終防御として
+    働くので、verdict や「何かしらの reason が返る」保証は崩れない —
+    変わるのは折り畳みで得られたはずの追加の情報量だけ。
+    """
+    if len(reason.encode("utf-8")) <= budget:
+        return reason
+    fitted = _fit_data_block(reason, budget)
+    if not fitted:
+        return reason
+    return "\n".join(fitted)
 
 
 def _basename_of(operand: str) -> str:
@@ -1069,7 +1153,7 @@ _EDIT_DENY_NOTE: dict[str, str] = {
     # 「書き換え」にし、tool 差は ``_EDIT_OVERWRITE_TOOL_CLAUSE`` 側で言う。
     "overwrite": (
         "{tool_label}: 既存の機密ファイル ({basename}) を書き換えようとしたため "
-        "block しました (既存の値の喪失と機密流出を防ぐため)。"
+        "block しました (意図しない値の破壊と機密流出を防ぐため)。"
     ),
     "symlink": (
         "{tool_label}: symlink 経由で機密パターン一致のファイル ({basename}) に"
@@ -1138,21 +1222,70 @@ _EDIT_SUGGESTION_ALT_DEFAULT = (
     "追加予定のキー名を `.env.example` に追記すると、"
     "差分把握がしやすくなります (値は後で個別設定)。"
 )
+# overwrite かつ new_keys の全件が既存キー集合に含まれる (= 純粋な値の更新で
+# 新規追加が無い) ときの suggestion_alt (0.26.0)。
+#
+# _EDIT_SUGGESTION_ALT_DEFAULT をそのまま使うと、上の ``suggested_keys:`` に
+# 既存キー (例: 既存 TOKEN の値を差し替えただけ) が並んでいるのに
+# 「追加予定のキー名」と説明する自己矛盾になる (同じ reason の minimal info
+# セクションで「既存キーとして表示」しているのと矛盾)。suggested_keys の
+# 2 セクション化はしない (変更範囲を最小にする判断、NOTES 参照) 代わりに、
+# alt 側で **上の一覧が更新であって追加ではない**ことを明示的に言い直す。
+#
+# **長さは既定文言と同程度に保つ** (0.26.0 隔離内レビュー P2-1)。``edit_deny``
+# は tail (この文言を含む) を先に組んでから残りを minimal info の予算に回す
+# ため、ここが長いと minimal info セクションが丸ごと消える
+# (``minimal info: unavailable`` すら出ない)。初版は 383 byte あり、corpus
+# 1,623 件中 30 件で実際に消えていた。「値の更新はユーザーに直接依頼するか
+# 1Password CLI 経由で」の一文は ``_EDIT_OVERWRITE_*_CLAUSE`` 側の
+# suggestion と重複するので落とす。上限は
+# ``tests/test_messages.py::TestEditSuggestionAltUpdateBudget`` が固定する。
+_EDIT_SUGGESTION_ALT_UPDATE = (
+    "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
+    "（`.env.example` への追記は不要）。"
+)
 
 # 上書き対象の既存ファイルを Read 同等 minimal info として載せるときのラベル。
 _EDIT_EXISTING_LABEL = "minimal info (Read 同等 / 上書き対象の既存ファイル):"
 
-# minimal info を出せなかったときの理由ラベル。Bash 側の
-# ``_MINIMAL_INFO_UNAVAILABLE`` を流用しない理由: あちらの next action は
-# 「Read tool に **絶対パス** を渡す (先行 cd で cwd がずれる)」という Bash 固有
-# の事情を前提にしており、file_path が最初から絶対パスで確定している Edit/Write
-# では誤った説明になる。Edit 側で取れる next action は失敗理由によらず同じ
-# (Read tool で同じ絶対パスを読む) ため、理由ラベルだけ差し替える。
+# minimal info を出せなかったときの理由ラベル。ラベル文言は Bash 側の
+# ``_MINIMAL_INFO_UNAVAILABLE`` と意味が同じ status を共有する (実体は
+# ``render_for_bash`` を再利用しているため)。next action だけは Edit 専用に
+# する: Bash 側の「Read tool に **絶対パス** を渡す」は先行 cd で cwd が
+# ずれる Bash 固有の事情が前提で、file_path が最初から絶対パスで確定している
+# Edit/Write では的外れ。
+#
+# 0.26.0 より前は理由を問わず単一ラベル + 単一 next action
+# (``_EDIT_EXISTING_NEXT_ACTION``) を返していたが、これは render 失敗時には
+# 二重に事実と違った: (1) Read も ``ask_or_deny`` (非 bypass では ask) に
+# 倒れるので verdict は "block" ではない、(2) render 失敗時の Read は同じ
+# 理由で **1 行も** minimal info を返さない。budget 分岐
+# (``_EDIT_EXISTING_UNAVAILABLE_BUDGET``、情報自体は取得できている) だけは
+# Read 誘導が正しいので、次アクションを 2 系統に分ける。
 _EDIT_EXISTING_UNAVAILABLE_RENDER = "既存ファイルの読み取り / 解析に失敗"
 _EDIT_EXISTING_UNAVAILABLE_BUDGET = "reason の byte 予算に収まらないため省略"
+
+# status 別の理由ラベル (0.26.0)。keys は ``redaction.file_render.render_for_bash``
+# / ``core.messages._MINIMAL_INFO_UNAVAILABLE`` と同じ slug。未知 / 空文字は
+# ``_EDIT_EXISTING_UNAVAILABLE_RENDER`` (旧来の汎用ラベル) にフォールバックする。
+_EDIT_EXISTING_UNAVAILABLE_LABELS: dict[str, str] = {
+    "unresolved": "既存ファイルが見つからない (削除 / 移動された可能性)",
+    "not_regular": "通常ファイルではない (symlink / 特殊ファイル)",
+    "stat_failed": "ファイル状態の確認に失敗した (権限 / IO)",
+    "open_failed": "安全な open に失敗した (権限 / symlink 検知)",
+    "redact_failed": "内容の解析に失敗した (想定外の形式)",
+    "normalize_failed": "パスの正規化に失敗した",
+}
+
 _EDIT_EXISTING_NEXT_ACTION = (
     "既存のキー構成を確認したい場合は、同じ **絶対パス** を Read tool に"
     "渡してください (Read も block されますが同じ minimal info が返ります)。"
+)
+# render 失敗 (権限 / IO / 形式不明等) 時の next action。budget 分岐と違い、
+# Read への切替を勧めない — 同じファイルを同じ理由で読むので情報は増えない。
+_EDIT_EXISTING_RENDER_FAILED_ACTION = (
+    "同じ絶対パスを Read tool で読んでも同じ理由で失敗し、情報は返りません。"
+    "ファイルの権限・実体を確認してください。"
 )
 
 # ``redaction.engine.build_reason`` が組む ``<DATA>`` 包装の閉じタグと
@@ -1166,24 +1299,217 @@ def _line_cost(line: str) -> int:
     return len(line.encode("utf-8")) + 1
 
 
-def _omit_marker(n: int) -> str:
-    return f"  ... ({n} more lines)"
+# omit marker に付ける next action の英語文言 (0.26.0)。DATA block の
+# 中身は英語で統一されている (``build_reason`` / ``format_dotenv`` 等) ため
+# ここも英語にする。Read tool は「同じ絶対パスなら Bash/Edit より広い予算
+# (exclude hint 等の固定行を持たない) で折り畳まれる」ため、Bash/Edit の
+# 呼出元から見ると実際に情報が増える提案になる。Read 自身の呼出元
+# (``fit_read_reason``) だけは渡さない — 自己参照 (Read の中で Read を
+# 勧める) になり事実として無意味なため。
+_OMIT_ACTION_USE_READ = "use Read tool with the absolute path for the rest"
+
+# 省略マーカーの単位ラベル (0.26.0)。既定は「行」。keys-only scan のブロックは
+# 1 行 = 1 鍵なので「鍵」と言い換える — ``... (2 more lines)`` では「鍵名を
+# 何個落としたか」が読み手に伝わらないため。
+_OMIT_UNIT_LINES = "lines"
+_OMIT_UNIT_KEYS = "keys"
+
+# ``redaction.keyonly_scan.KEYONLY_SCAN_MARKER`` と同じ文字列。``core`` から
+# ``redaction`` を import すると依存が逆流する (``redaction.file_render`` が
+# ``core.safepath`` を使っている) ため、実体は両側に置き
+# ``tests/test_messages.py`` の assumption test で突合する。
+_KEYONLY_SCAN_MARKER = "keys-only scan"
+
+# ``<DATA>`` ブロック内で **明細行 (1 エントリ 1 行)** に使われるインデント。
+# per-format の renderer (``format_dotenv`` / ``format_keyonly`` /
+# ``format_jsonlike`` / ``_format_yaml`` / ``format_pem``) はすべて、エントリ
+# 1 件を 2 space インデントの 1 行として出す規約になっている。見出し行
+# (``format:`` / ``entries:`` / ``keys (in order):``) と末尾 ``note:`` は
+# インデントしない。``_count_detail_lines`` はこの規約で明細行を数える
+# (``tests/test_messages.py`` の assumption test が生成側と突合する)。
+_DATA_DETAIL_INDENT = "  "
+
+# 省略マーカーの固定 prefix。``_omit_marker`` の出力もこれで始まる (明細行と
+# 同じインデントなので、明細行を数えるときは prefix で除外する)。
+_OMIT_MARKER_PREFIX = f"{_DATA_DETAIL_INDENT}... ("
 
 
-def _fit_data_block(block: str, budget: int) -> list[str]:
+def _omit_marker(
+    n: int, next_action: str = "", unit: str = _OMIT_UNIT_LINES
+) -> str:
+    suffix = f"; {next_action}" if next_action else ""
+    return f"{_OMIT_MARKER_PREFIX}{n} more {unit}{suffix})"
+
+
+def _count_detail_lines(lines: list[str]) -> int:
+    """``<DATA>`` ブロックの行列から**明細行**の数を返す。
+
+    明細行 = 見出し行 (``build_reason`` の header 3 行 + ``format:`` /
+    ``entries:`` / ``keys (in order):`` 等) でも末尾 ``note:`` でも省略
+    マーカーでもない、実際のエントリ 1 件を表す行。``_DATA_DETAIL_INDENT``
+    の規約で判定する。
+
+    header 3 行を index で読み飛ばす前提は ``_omit_unit_for`` の
+    ``format:`` 行 sniff と同じ (``_DATA_HEADER_LINES``)。
+    """
+    return sum(
+        1
+        for line in lines[_DATA_HEADER_LINES:]
+        if line.startswith(_DATA_DETAIL_INDENT)
+        and not line.startswith(_OMIT_MARKER_PREFIX)
+    )
+
+
+def _omit_unit_for(block: str) -> str:
+    """``<DATA>`` ブロックの ``format:`` 行から省略単位ラベルを決める。
+
+    ``build_reason`` の header 3 行の直後が本文の 1 行目 (``format:``) である
+    ことに依存する (``_DATA_HEADER_LINES`` と同じ前提。
+    ``TestDataBlockAssumptions`` が生成側と突合している)。
+    """
+    for line in block.split("\n", _DATA_HEADER_LINES + 1)[
+        : _DATA_HEADER_LINES + 1
+    ]:
+        if line.startswith("format:") and _KEYONLY_SCAN_MARKER in line:
+            return _OMIT_UNIT_KEYS
+    return _OMIT_UNIT_LINES
+
+
+# per-format renderer が本文 2 行目に必ず置く総数の行 (``entries: N``)。
+# ``format:`` 行の直後という位置も ``TestDataBlockAssumptions`` で生成側と
+# 突合する。
+_DATA_ENTRIES_PREFIX = "entries: "
+
+
+def _entries_total(block: str) -> int | None:
+    """``<DATA>`` ブロックの見出しから ``entries: N`` の総数を読む。
+
+    省略マーカーに「実際に見えていない件数」を出すために使う (0.26.0 外部
+    レビュー R1)。``format:`` 行の sniff (``_omit_unit_for``) と同じ header
+    領域だけを見る — 明細行に ``entries:`` が現れることはないが、走査範囲を
+    見出しに限れば将来 renderer が変わっても誤検出しない。
+
+    Returns:
+        読めた総数。行が無い / 整数でない場合は ``None`` (呼出側は従来の
+        「落とした行数」に fallback する)。
+    """
+    for line in block.split("\n", _DATA_HEADER_LINES + 2)[
+        : _DATA_HEADER_LINES + 2
+    ]:
+        if line.startswith(_DATA_ENTRIES_PREFIX):
+            try:
+                return int(line[len(_DATA_ENTRIES_PREFIX):].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _omit_count(omitted: int, kept: list[str], total: int | None) -> int:
+    """省略マーカーに出す件数を決める。
+
+    既定は ``omitted`` (= 落とした**行数**)。``total`` (``entries:``) を
+    読めた場合は **総数 − 残した明細行数** = 「実際に見えていない件数」を出す。
+
+    行数ベースが不足する理由 (0.26.0 外部レビュー R1): 折り畳みは preview
+    上限 (``keyonly_scan.PREVIEW_CAP``) の **さらに内側**で効くため、
+    「60 行の preview のうち 37 行を落とした」しか言えず、preview 段階で
+    隠れた 440 件が数から消える (500 鍵で ``... (37 more keys)`` と出て
+    477 件不可視を隠していた)。
+
+    逆向きの誤りもある: ``omitted`` は明細行以外 (``scanned_bytes:`` /
+    ``keys (...)`` 見出し / note 保護を外した 2 段目の ``note:``) も数えるので、
+    きつい折り畳みでは鍵数を **過大**に言う (掃引実測: 5 鍵のファイルで
+    ``entries: 5`` と ``... (9 more keys)`` が同居。最大 +4)。``total`` が
+    読めるブロックでは ``entries:`` と明細行の対応が renderer 側で保証されて
+    いる (``TestDataBlockAssumptions``) ので ``hidden`` が厳密解であり、
+    過小にも過大にもならない。
+
+    ``hidden <= 0`` は「総数より多くの明細行が残っている」= 前提が崩れた
+    ブロックなので、従来値 (``omitted``) に戻す。0 を出して「隠れているものは
+    無い」と言い切るより、行数ベースの概数のほうが安全側 (省略マーカー自体が
+    「何かは落ちた」の signal であり、0 と併記すると矛盾する)。
+    """
+    if total is None:
+        return omitted
+    hidden = total - _count_detail_lines(kept)
+    return hidden if hidden > 0 else omitted
+
+
+def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]:
     """``<DATA>`` 包装済み minimal info を ``budget`` byte 以内の行列に収める。
 
     先頭から行を採用し、入り切らない分は ``  ... (N more lines)`` に畳む。
     閉じタグ ``</DATA>`` は必ず残す (包装が壊れると ``escape_data_tag`` の
-    外殻破壊防御が意味を失うため)。header 3 行しか入らない場合は「中身ゼロの
-    包装」になるだけなので空リストを返し、呼出側の unavailable 分岐に降ろす。
+    外殻破壊防御が意味を失うため)。
+
+    0.26.0 から、閉じタグの直前が per-format の ``note:`` 行 (「実値は
+    無い」等の免責事項。``format_dotenv`` / ``format_jsonlike`` /
+    ``format_opaque`` は全て末尾をこの規約で終える) なら、それも閉じタグと
+    同格の固定 tail として保護を試みる。ただし note を保護すると
+    **明細行 (``_count_detail_lines``) が 0 行に後退する**場合は、
+    **note を諦めて閉じタグだけを保護する従来動作にフォールバック**し、
+    浮いた予算を明細行に回す。情報を今までより減らしてしまっては本末転倒
+    なため、2 段構えにしている。
+
+    フォールバックの判定は「1 行も採用できないか」ではなく
+    **「明細行が 0 になるか」**である。``<DATA>`` ブロックには header 3 行と
+    ``format:`` / ``entries:`` の見出しが常に入るので、前者の条件では
+    「見出しと省略マーカーだけで中身ゼロ」の状態を検出できない
+    (0.26.0 の初版はこの取り違えで、Edit / Write の minimal info で
+    0.25.0 なら見えていた key 行が 0 行に落ちていた)。
+
+    保護を外しても明細行が増えないブロック (明細行を持ちえない
+    ``(no entries)`` / ``(no keys matched)`` / JSON の root が配列やスカラー、
+    など) では note 保護つきの結果を返す — 得るものが無いのに免責事項だけ
+    落とすのは純損失なため。閉じタグと省略マーカーはどちらの段でも残る。
+
+    省略マーカーの件数は、``entries:`` を読める keys-only ブロックでは
+    **総数 − 残した明細行数** (``_omit_count``)。折り畳みは preview 上限
+    (``keyonly_scan.PREVIEW_CAP``) の内側で効くので、落とした**行数**では
+    preview 段階で隠れた分を数え落とす (0.26.0 外部レビュー R1)。
 
     Args:
         block: ``redaction.file_render.render_for_bash`` の 1 番目の戻り値。
         budget: この block に使ってよい byte 数 (各行の改行 1 byte を含む)。
+        next_action: 省略マーカーに付ける追加の action (``_omit_marker`` 参照)。
+            空文字なら付けない。
 
     Returns:
         採用した行のリスト。1 行も採用できなければ空リスト。
+    """
+    unit = _omit_unit_for(block)
+    # 総数は keys-only のときだけ使う (省略マーカーの単位が「鍵」= 明細行と
+    # 1:1 対応する形のときにしか「総数 − 残した明細行数」が意味を持たない。
+    # dotenv 等は preview 上限が無いので落とした行数と一致する)。
+    total = _entries_total(block) if unit == _OMIT_UNIT_KEYS else None
+    fitted = _fit_data_block_core(
+        block, budget, protect_note=True, next_action=next_action, unit=unit,
+        total=total,
+    )
+    if _count_detail_lines(fitted):
+        return fitted
+    relaxed = _fit_data_block_core(
+        block, budget, protect_note=False, next_action=next_action, unit=unit,
+        total=total,
+    )
+    if _count_detail_lines(relaxed) > _count_detail_lines(fitted):
+        return relaxed
+    return fitted if fitted else relaxed
+
+
+def _fit_data_block_core(
+    block: str,
+    budget: int,
+    *,
+    protect_note: bool,
+    next_action: str = "",
+    unit: str = _OMIT_UNIT_LINES,
+    total: int | None = None,
+) -> list[str]:
+    """``_fit_data_block`` の実装本体 (note 保護の有無を切替可能にしたもの)。
+
+    ``total`` は ``entries:`` の総数 (``_entries_total``)。渡すと省略マーカーの
+    件数が「総数 − 残した明細行数」になる (``_omit_count``)。
     """
     lines = block.split("\n")
     closing: list[str] = []
@@ -1191,28 +1517,40 @@ def _fit_data_block(block: str, budget: int) -> list[str]:
     if lines and lines[-1] == _DATA_CLOSING_TAG:
         closing = [lines[-1]]
         body = lines[:-1]
+        if protect_note and body and body[-1].startswith("note:"):
+            closing = [body[-1]] + closing
+            body = body[:-1]
     closing_cost = sum(_line_cost(x) for x in closing)
-    # 省略マーカーの上限幅 (件数が最大のとき = 最長) で予約する。実際に出る
-    # マーカーはこれ以下なので、予約しておけば予算超過は起きない。
-    marker_reserve = _line_cost(_omit_marker(len(body)))
+    # 省略マーカーの幅は件数の桁数で変わる。まず「落とした行数」の上限
+    # (``len(body)``) で予約し、実際に出す件数がその予約に収まらなければ
+    # 予約を広げて畳み直す。``total`` (最大 ``keyonly_scan.MAX_KEYS``) で
+    # 常に予約すると桁が増えたぶん (例: 67 → 500 で +1 byte) だけ、収まって
+    # いたはずの明細行を 1 行落とす — 掃引実測で 183 点。
+    # 停止性: 予約 cost は毎周 **狭義単調増加**し、件数は
+    # ``max(len(body), total)`` に有界なので必ず止まる (実測は最大 2 周)。
+    marker_reserve = _line_cost(_omit_marker(len(body), next_action, unit))
+    while True:
+        kept: list[str] = []
+        used = 0
+        for i, line in enumerate(body):
+            cost = _line_cost(line)
+            has_rest = i < len(body) - 1
+            need = cost + closing_cost + (marker_reserve if has_rest else 0)
+            if used + need > budget:
+                break
+            used += cost
+            kept.append(line)
 
-    kept: list[str] = []
-    used = 0
-    for i, line in enumerate(body):
-        cost = _line_cost(line)
-        has_rest = i < len(body) - 1
-        need = cost + closing_cost + (marker_reserve if has_rest else 0)
-        if used + need > budget:
-            break
-        used += cost
-        kept.append(line)
-
-    if len(kept) <= _DATA_HEADER_LINES:
-        return []
-    omitted = len(body) - len(kept)
-    if omitted:
-        kept.append(_omit_marker(omitted))
-    return kept + closing
+        if len(kept) <= _DATA_HEADER_LINES:
+            return []
+        omitted = len(body) - len(kept)
+        if not omitted:
+            return kept + closing
+        marker = _omit_marker(_omit_count(omitted, kept, total), next_action, unit)
+        if _line_cost(marker) <= marker_reserve:
+            kept.append(marker)
+            return kept + closing
+        marker_reserve = _line_cost(marker)
 
 
 def _edit_kind_suggestion(kind: str, is_dotenv: bool, tool_label: str) -> str:
@@ -1237,6 +1575,7 @@ def _edit_kind_suggestion(kind: str, is_dotenv: bool, tool_label: str) -> str:
 def _edit_existing_info_lines(
     existing_render: str,
     budget: int,
+    status: str = "",
 ) -> list[str]:
     """``overwrite`` の minimal info セクションを予算内で組む。
 
@@ -1244,20 +1583,34 @@ def _edit_existing_info_lines(
     + next action の 2 行に降りる (0.16.0 の silent degradation 対策と同じ方針)。
     その 2 行すら入らない場合だけセクション全体を落とす — 末尾の除外案内
     (``suggestion: ... patterns.local.txt ...``) を残す方を優先するため。
+
+    ``status`` (0.26.0): ``existing_render`` が空 (= render 失敗) の
+    ときだけ効く。``handlers.edit_handler._render_existing`` が転送する
+    ``render_for_bash`` の失敗 kind で、理由ラベルを status 別にし、
+    next action を「render 失敗」と「budget 超過 (情報自体は取得できている)」の
+    2 系統に分ける。旧実装は理由を問わず単一ラベル + Read 誘導の next action
+    だった (render 失敗時は Read も同じ理由で必ず失敗するため誤誘導だった)。
     """
-    unavailable_reason = _EDIT_EXISTING_UNAVAILABLE_RENDER
     if existing_render:
         fitted = _fit_data_block(
-            existing_render, budget - _line_cost(_EDIT_EXISTING_LABEL)
+            existing_render, budget - _line_cost(_EDIT_EXISTING_LABEL),
+            next_action=_OMIT_ACTION_USE_READ,
         )
         if fitted:
             return [_EDIT_EXISTING_LABEL] + fitted
-        unavailable_reason = _EDIT_EXISTING_UNAVAILABLE_BUDGET
+        fallback = [
+            f"minimal info: unavailable ({_EDIT_EXISTING_UNAVAILABLE_BUDGET})",
+            f"suggestion: {_EDIT_EXISTING_NEXT_ACTION}",
+        ]
+    else:
+        label = _EDIT_EXISTING_UNAVAILABLE_LABELS.get(
+            status, _EDIT_EXISTING_UNAVAILABLE_RENDER
+        )
+        fallback = [
+            f"minimal info: unavailable ({label})",
+            f"suggestion: {_EDIT_EXISTING_RENDER_FAILED_ACTION}",
+        ]
 
-    fallback = [
-        f"minimal info: unavailable ({unavailable_reason})",
-        f"suggestion: {_EDIT_EXISTING_NEXT_ACTION}",
-    ]
     if sum(_line_cost(x) for x in fallback) > budget:
         return []
     return fallback
@@ -1272,6 +1625,8 @@ def edit_deny(
     kind: EditDenyKind,
     is_dotenv: bool = False,
     existing_render: str = "",
+    existing_render_status: str = "",
+    existing_keys: frozenset[str] = frozenset(),
     max_suggested_keys: int = 30,
     relpath: str = "",
 ) -> str:
@@ -1303,7 +1658,9 @@ def edit_deny(
         basename: 書き込み先ファイルの basename。``basename:`` 行と除外 hint で
             ``!<basename>`` に展開される。
         new_keys: dotenv parse で抽出された新規キー名リスト (順序維持)。
-            非 dotenv では空リストか None を渡す。
+            非 dotenv では空リストか None を渡す。``overwrite`` かつ全件が
+            ``existing_keys`` に含まれる場合は「更新」文面に切り替わる
+            (0.26.0)。
         extra_note: ``extra_note:`` 行に入れる補足。kind で表現しきれない文脈を
             呼出側が足すための拡張点 (0.20.0 時点で handler は使わない)。
         kind: 書き込み先の状態 (``new`` / ``overwrite`` / ``symlink`` /
@@ -1315,6 +1672,17 @@ def edit_deny(
         existing_render: ``kind == "overwrite"`` のとき、上書き対象の既存
             ファイルを ``redaction.file_render.render_for_bash`` に通した
             ``<DATA>`` 包装文字列。空なら unavailable 行に降りる。
+        existing_render_status: ``existing_render`` が空のときの失敗理由
+            (``render_for_bash`` の status slug、0.26.0)。unavailable
+            行の理由ラベルと next action を status 別に分岐するために使う。
+            ``existing_render`` が非空なら無視される。
+        existing_keys: ``kind == "overwrite"`` のとき、上書き対象ファイルの
+            既存キー名集合 (dotenv のみ、0.26.0)。``new_keys`` の
+            **全件**がこの集合に含まれる場合、``suggested_keys`` は新規追加
+            ではなく値の更新だと分かるので ``suggestion_alt`` の文面を
+            切り替える。取得できない (非 dotenv / render 失敗) ときは空集合を
+            渡す — 判定できないので従来の「追加予定」文面のままにする
+            (誤って「更新」と言い切らない安全側)。
         max_suggested_keys: ``new_keys`` の上限 (3KB 制約のため切り詰める)。
         relpath: 書き込み先の project root 相対 path (0.24.0)。root 配下に
             解決できたときだけ handler が渡し、除外案内を path 形
@@ -1335,11 +1703,19 @@ def edit_deny(
             tail.append(f"  {k}=")
         if remaining > 0:
             tail.append(f"  ... ({remaining} more)")
-        alt = (
-            _EDIT_SUGGESTION_ALT_NEW
-            if kind == "new"
-            else _EDIT_SUGGESTION_ALT_DEFAULT
-        )
+        if kind == "new":
+            alt = _EDIT_SUGGESTION_ALT_NEW
+        elif (
+            kind == "overwrite"
+            and existing_keys
+            and set(new_keys) <= existing_keys
+        ):
+            # 全件が既存キー = 純粋な値の更新で新規追加が無い。
+            # 部分一致 (新規キーと既存キーが混在) は「追加予定」側の説明が
+            # 少なくとも新規分には正しいままなので、従来文面を維持する。
+            alt = _EDIT_SUGGESTION_ALT_UPDATE
+        else:
+            alt = _EDIT_SUGGESTION_ALT_DEFAULT
         tail.append(f"suggestion_alt: {alt}")
 
     if extra_note:
@@ -1364,7 +1740,7 @@ def edit_deny(
     if kind == "overwrite":
         used = len("\n".join(head + tail).encode("utf-8")) + hint_len
         info = _edit_existing_info_lines(
-            existing_render, MAX_REASON_BYTES - used
+            existing_render, MAX_REASON_BYTES - used, existing_render_status,
         )
 
     return _join_with_exclude_hint(

@@ -695,5 +695,235 @@ class TestDotenvInlineComment(unittest.TestCase):
         self.assertNotIn("ship it", reason)
 
 
+class TestKeyonlyFallbackReason(unittest.TestCase):
+    """keys-only scan フォールバックの理由別ラベル (0.26.0)。
+
+    旧実装は理由を問わず ``format: <fmt> (large, keys-only scan)`` と表示して
+    いたため、43 byte の壊れた JSON でも「大きすぎる」と事実に反する説明が
+    出ていた。json/toml のパース失敗・tomllib 不在を区別し、事実どおりの
+    ラベルと note を出す。
+    """
+
+    def test_broken_small_json_reports_parse_failed_not_large(self):
+        text = "{not valid json"
+        reason = _redact_text("credentials.json", text)
+        self.assertIn("format: json (parse failed, keys-only scan)", reason)
+        self.assertNotIn("(large,", reason)
+        self.assertIn("JSON parse failed", reason)
+        self.assertIn("file may be malformed", reason)
+        # 43 byte 級の小ファイルで「too large」という事実に反する語を出さない
+        self.assertNotIn("too large", reason)
+
+    def test_broken_small_json_with_zero_keys_still_gets_note(self):
+        """entries: 0 (鍵が一切マッチしない) でも note を省略しない。
+
+        旧実装は ``format_keyonly`` の空 keys 分岐が note 追加より前に
+        return していたため、この形だけ理由も no next-action も無い reason に
+        なっていた (silent degradation と同型の欠落)。
+        """
+        text = "{not valid json"
+        reason = _redact_text("credentials.json", text)
+        self.assertIn("entries: 0", reason)
+        self.assertIn("(no keys matched)", reason)
+        self.assertIn("JSON parse failed", reason)
+
+    def test_broken_small_toml_reports_parse_failed(self):
+        text = "key = [1, 2"  # 閉じ括弧が無い不正 TOML
+        reason = _redact_text("secrets.local.toml", text)
+        self.assertIn("format: toml (parse failed, keys-only scan)", reason)
+        self.assertNotIn("(large,", reason)
+        self.assertIn("TOML parse failed", reason)
+        self.assertNotIn("too large", reason)
+
+    def test_tomllib_unavailable_reports_unsupported_not_large(self):
+        """tomllib 不在 (Python < 3.11 相当) は「壊れている」ではなく「未対応」。
+
+        妥当な TOML を渡しても、tomllib 自体が無ければパースを試みる前に
+        RuntimeError で降りる。これを parse_failed と混同しないこと。
+        """
+        from unittest import mock
+
+        from redaction import tomllike
+
+        text = "key = 1\n"  # 正常な TOML (パース自体は成功しうる内容)
+        with mock.patch.object(tomllike, "tomllib", None):
+            reason = _redact_text("secrets.local.toml", text)
+        self.assertIn("format: toml (unsupported, keys-only scan)", reason)
+        self.assertNotIn("(large,", reason)
+        self.assertNotIn("parse failed", reason)
+        self.assertIn("Python 3.11+", reason)
+
+    def test_format_keyonly_reason_labels_direct(self):
+        from redaction.keyonly_scan import format_keyonly
+
+        large = format_keyonly(["A"], 100, fmt_hint="opaque")
+        self.assertIn("(large, keys-only scan)", large)
+        self.assertIn("file too large for full parse", large)
+
+        parse_failed = format_keyonly(
+            ["A"], 43, fmt_hint="json", reason="parse_failed",
+        )
+        self.assertIn("(parse failed, keys-only scan)", parse_failed)
+        self.assertIn("JSON parse failed", parse_failed)
+
+        unsupported = format_keyonly(
+            [], 47, fmt_hint="toml", reason="toml_unsupported",
+        )
+        self.assertIn("(unsupported, keys-only scan)", unsupported)
+        self.assertIn("Python 3.11+", unsupported)
+
+        # 未知の reason は旧来の "large" 相当にフォールバックする (安全側)
+        unknown = format_keyonly(["A"], 10, fmt_hint="opaque", reason="???")
+        self.assertIn("(large, keys-only scan)", unknown)
+
+    def test_format_opaque_default_reason_is_large(self):
+        """``format_opaque`` の既定は従来どおり (yaml / 純粋 opaque への影響なし)。"""
+        from redaction.opaque import format_opaque
+
+        info = {"format": "opaque", "keys": ["A"], "scanned_bytes": 10}
+        self.assertIn("(large, keys-only scan)", format_opaque(info))
+        self.assertIn(
+            "(parse failed, keys-only scan)",
+            format_opaque(info, reason="parse_failed"),
+        )
+
+
+class TestKeyonlyLineGranularity(unittest.TestCase):
+    """keys-only scan は鍵名を **1 鍵 1 行** で出す (0.26.0 隔離内レビュー P1-1)。
+
+    旧実装は全鍵名を ``keys: A, B, C, ...`` の **1 行**に並べていた。
+    ``core.messages._fit_data_block_core`` は行単位でしか畳めないため、
+    この 1 行が残予算に入らないと**行ごと落ち**、予算が 1KB 以上余っている
+    のに鍵名が 0 個という状態になっていた (>32KB ファイル / json・toml の
+    parse 失敗経路が該当)。行の粒度と内容の粒度を揃えることで、既存の
+    折り畳み機構がそのまま効くようにする。
+    """
+
+    def test_each_key_gets_its_own_line(self):
+        from redaction.keyonly_scan import format_keyonly
+
+        keys = [f"SERVICE_API_KEY_{i:03d}" for i in range(10)]
+        out = format_keyonly(keys, 1000, fmt_hint="opaque")
+        key_lines = [ln for ln in out.split("\n") if ln.startswith("  ")]
+        self.assertEqual(len(key_lines), len(keys))
+        for key, line in zip(keys, key_lines):
+            self.assertIn(key, line)
+        # 旧実装の「1 行に複数鍵」形が残っていないこと
+        self.assertNotIn(", ".join(keys[:2]), out)
+
+    def test_preview_cap_is_reported_in_the_header_line(self):
+        """preview 上限は維持しつつ、超過の告知を **末尾行ではなく header** に置く。
+
+        末尾行 (`... (N more)`) だと折り畳みで真っ先に落ちるうえ、omit marker の
+        件数と二重になって読み手が「いくつ落ちたか」を数えられない。
+        """
+        from redaction.keyonly_scan import PREVIEW_CAP, format_keyonly
+
+        keys = [f"KEY_{i:04d}" for i in range(PREVIEW_CAP + 40)]
+        out = format_keyonly(keys, 1000, fmt_hint="opaque")
+        lines = out.split("\n")
+        key_lines = [ln for ln in lines if ln.startswith("  ")]
+        self.assertEqual(len(key_lines), PREVIEW_CAP)
+        # 総数は entries: が持つ (header 側で重複して数を主張しない)
+        self.assertIn(f"entries: {len(keys)}", out)
+        header = next(ln for ln in lines if ln.startswith("keys"))
+        self.assertIn(f"max {PREVIEW_CAP} shown", header)
+        # 末尾は必ず note (折り畳みの note 保護が効く形を維持する)
+        self.assertTrue(lines[-1].startswith("note:"), lines[-1])
+
+    def test_preview_header_is_an_upper_bound_not_a_claim(self):
+        """header は **上限** として書く (0.26.0 外部レビュー R1)。
+
+        header の後段で ``core.messages._fit_data_block`` が予算でさらに畳む
+        ため、``first N shown`` のような断定形は折り畳み後に嘘になる
+        (500 鍵で「60 個表示」と言いながら実際は 23 行しか残らない)。
+        """
+        from redaction.keyonly_scan import PREVIEW_CAP, format_keyonly
+
+        keys = [f"KEY_{i:04d}" for i in range(PREVIEW_CAP * 3)]
+        header = next(
+            ln
+            for ln in format_keyonly(keys, 1000, fmt_hint="opaque").split("\n")
+            if ln.startswith("keys")
+        )
+        self.assertNotIn("first", header)
+        for word in ("max", "up to", "at most"):
+            if word in header:
+                break
+        else:  # pragma: no cover - 失敗時のメッセージ用
+            self.fail(f"header が上限表現になっていない: {header!r}")
+
+    def test_all_keys_shown_header_has_no_partial_wording(self):
+        from redaction.keyonly_scan import format_keyonly
+
+        out = format_keyonly(["A", "B"], 10, fmt_hint="opaque")
+        header = next(ln for ln in out.split("\n") if ln.startswith("keys"))
+        self.assertNotIn("first", header)
+        self.assertNotIn("max", header)
+
+
+class TestTomlRecursionErrorLabel(unittest.TestCase):
+    """深いネストの TOML を「tomllib 未搭載」と誤表示しない (0.26.0 レビュー P2-2)。
+
+    ``RecursionError`` は ``RuntimeError`` のサブクラスなので、
+    ``engine.redact`` の ``except RuntimeError`` (= tomllib 未搭載の検知) が
+    先に捕まえ、Python 3.11+ の環境で「Python 3.11+ が必要」という事実に
+    反する note が出ていた。json 分岐が ``except (ValueError, RecursionError)``
+    を明示しているのと同じ理由で、toml 側にも明示が要る。
+    """
+
+    def test_deeply_nested_toml_reports_parse_failed(self):
+        text = "a = " + "[" * 500 + "]" * 500 + "\n"
+        reason = _redact_text("deep.secret.toml", text)
+        self.assertIn("parse failed", reason)
+        self.assertNotIn("Python 3.11+", reason)
+        self.assertNotIn("tomllib unavailable", reason)
+
+    def test_recursion_error_from_parser_is_not_labeled_unsupported(self):
+        """深さの閾値に依存しない決定的な版 (parser が RecursionError を投げる形)。"""
+        from unittest import mock
+
+        from redaction import engine
+
+        with mock.patch.object(
+            engine, "redact_toml", side_effect=RecursionError("too deep")
+        ):
+            reason = _redact_text("secrets.local.toml", "key = 1\n")
+        self.assertIn("(parse failed, keys-only scan)", reason)
+        self.assertNotIn("Python 3.11+", reason)
+
+    def test_missing_tomllib_still_reports_unsupported(self):
+        """RecursionError を分けても tomllib 不在の分岐は従来どおり残る。"""
+        from unittest import mock
+
+        from redaction import tomllike
+
+        with mock.patch.object(tomllike, "tomllib", None):
+            reason = _redact_text("secrets.local.toml", "key = 1\n")
+        self.assertIn("(unsupported, keys-only scan)", reason)
+        self.assertIn("Python 3.11+", reason)
+
+
+class TestDotenvEmptyKeepsNote(unittest.TestCase):
+    """``entries: 0`` の dotenv でも末尾 note を落とさない (0.26.0 レビュー P3-1)。
+
+    ``format_keyonly`` の空 keys 分岐で直したのと同一の欠陥クラスの取り残し。
+    note は「実値は context に無い」という免責の開示なので、内容が空でも
+    出す (silent degradation 対策と同じ方針)。
+    """
+
+    def test_empty_dotenv_still_has_trailing_note(self):
+        reason = _redact_text(".env", "")
+        self.assertIn("entries: 0", reason)
+        self.assertIn("(no entries)", reason)
+        self.assertIn("real values are not in context", reason)
+
+    def test_format_dotenv_zero_entries_ends_with_note(self):
+        from redaction.dotenv import format_dotenv
+
+        out = format_dotenv({"format": "dotenv", "entries": 0, "keys": []})
+        self.assertTrue(out.split("\n")[-1].startswith("note:"), out)
+
+
 if __name__ == "__main__":
     unittest.main()
