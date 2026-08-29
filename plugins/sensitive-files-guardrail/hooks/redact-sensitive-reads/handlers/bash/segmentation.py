@@ -14,10 +14,10 @@
 1. ``_split_command_on_operators`` (segment 分割)
 2. ``_has_hard_stop`` (静的解析不能 char の検出)
 3. ``_expansion_chars`` (単純変数展開の placeholder 置換、0.25.0。この 1 つの
-   char 列から救済 scan の 3 つの読みを作る: ``_expansion_readings`` が語数の
+   char 列から救済 scan の読みを作る: ``_expansion_readings`` が語数の
    2 通り、``_expansion_option_readings`` が「bare expansion word がオプション
-   トークンになる」読み。``_replace_simple_expansions`` は「1 語読み」の
-   ラッパ)
+   トークンになる」読みを **arity ごと**に。``_replace_simple_expansions`` は
+   「1 語読み」のラッパ)
 4. ``redirects._live_operator_metachars`` (residual metachar の quote-aware 判定、
    0.25.0。0.24.0 までの ``_segment_has_residual_metachar`` は shlex 後の token
    しか見えず、クォート内の ``|`` ``&`` ``>`` を演算子と誤認していた)
@@ -499,7 +499,7 @@ def _drop_vanishing_words(chars: list[tuple[str, str, bool]]) -> str | None:
 
 
 def _option_word_readings(
-    chars: list[tuple[str, str, bool]], option: str, *, limit: int,
+    chars: list[tuple[str, str, bool]], options: list[str], *, limit: int,
 ) -> list[str] | None:
     """**bare expansion word がオプショントークンに展開される読み** を返す (0.25.0)。
 
@@ -507,36 +507,63 @@ def _option_word_readings(
     後続の語はそのオプションの **値** として consume され、operand の役割が
     変わる: ``X=-e`` のとき ``grep -e KEY $X .env`` は ``grep -e KEY -e .env``
     として実行され、``.env`` は第 2 の検索 pattern になる (grep は stdin から
-    読むのでファイルは開かれない、Codex R2 P2)。
+    読むのでファイルは開かれない、Codex R2 P2)。値を 2 つ取る option
+    (``jq --arg NAME VALUE``) なら 2 語先まで consume する。
 
-    語全体が展開である語 (``bare_expansion``) 1 つにつき 1 つの読みを作り、
-    その語を ``option`` に置き換える。**どの語を置き換えるかを総当りする**ので、
-    「機密 operand より前にある語」だけが役割を変える、という絞り込みは
-    ``_analyze_segment`` の再実行で自動的に成立する (operand より後ろの語を
-    置き換えた読みは operand の役割を変えないので deny のまま残る)。
+    ``(bare expansion word) × (options)`` の全組合せで読みを作る。``options``
+    は **arity ごとの代表** (``operand_lexer._option_reading_tokens``) なので、
+    読みの数は語数と arity 種類数だけで決まり、option 数には比例しない
+    (正確な式は Returns を参照)。
+
+    **どの語を置き換えるかを総当りする**ので、「機密 operand より前にある語」
+    だけが役割を変える、という絞り込みは ``_analyze_segment`` の再実行で自動的
+    に成立する (operand より後ろの語を置き換えた読みは operand の役割を変え
+    ないので deny のまま残る)。距離も自動で効く: ``W`` が operand の d 語前に
+    あるとき、operand を値として飲み込めるのは arity >= d の読みだけ。
+
+    **他の bare expansion word は「値を取らない flag」に置く** (``options`` の
+    先頭 = arity 0 の代表)。これも 1 つの実在しうる読みであり、こう置くことで
+    読みの族が **最も緩い側** になる: operand が候補から外れる経路は
+    「(a) どれかの語が option になって operand を値として飲む」か
+    「(b) operand より前の positional が全部消えて operand が第 1 positional
+    (pattern 枠 / ``git`` のサブコマンド位置) に落ちる」の 2 つで、(b) は
+    「他の語が全部 flag」のときに最大化されるため。複数語が**同時に**役割を
+    変える組合せを別に作らなくてよいのはこの背景のおかげ (組合せは語数の指数に
+    なるので作れない)。
 
     Args:
         chars: ``_expansion_chars`` が返した char 列。
-        option: 置き換えに使うオプショントークン (呼び出し側がコマンドの spec
-            から選ぶ。``operand_lexer._option_value_token``)。
-        limit: bare expansion word の上限。超える segment は ``None`` を返し、
-            呼び出し側は ``_analyze_segment`` を N 回走らせずに諦める
-            (hook の 2 秒 timeout 予算を守るための保険。摩擦側に倒れる)。
+        options: 置き換えに使うオプショントークンの列 (arity ごとに 1 つ)。
+            **先頭は arity 0 (値を取らない flag) の代表**であること — 対象外の
+            bare expansion word の背景に使う。
+        limit: **読みの総数** の上限 (式は Returns)。超える segment は
+            ``None`` を返し、呼び出し側は ``_analyze_segment`` を N 回走らせずに
+            諦める (hook の 2 秒 timeout 予算を守るための保険。摩擦側に倒れる)。
 
     Returns:
-        読みの列 (bare expansion word が無ければ空 list)。語数が上限を超えたら
-        ``None``。
+        読みの列 (bare expansion word が無ければ空 list)。読みの総数が上限を
+        超えたら ``None``。
+
+        総数は **語数 × (arity 種類数 - 1) + 1**。arity 0 (flag) を対象語に
+        当てた読みはどの語を選んでも「全部 flag」の同一文字列になるので 1 つに
+        畳まれる (``cat $A $B $C .env`` のように arity 0 しか代表が無い
+        コマンドは、語がいくつあっても読みは 1 つ)。
     """
     words = _split_expansion_words(chars)
     targets = [i for i, (_, _, bare) in enumerate(words) if bare]
-    if not targets:
+    if not targets or not options:
         return []
-    if len(targets) > limit:
+    background, others = options[0], options[1:]
+    if len(targets) * len(others) + 1 > limit:
         return None
-    return [
-        " ".join(option if k == i else w for k, (w, _, _) in enumerate(words))
-        for i in targets
-    ]
+    base = [background if bare else w for w, _, bare in words]
+    readings = [" ".join(base)]
+    for i in targets:
+        for option in others:
+            row = list(base)
+            row[i] = option
+            readings.append(" ".join(row))
+    return readings
 
 
 def _expansion_chars(segment: str) -> list[tuple[str, str, bool]] | None:
@@ -641,17 +668,18 @@ def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
 
 
 def _expansion_option_readings(
-    segment: str, option: str, *, limit: int,
+    segment: str, options: list[str], *, limit: int,
 ) -> list[str] | None:
     """``_expansion_chars`` → ``_option_word_readings`` の薄いラッパ (読み 3)。
 
-    置換対象の展開が無ければ空 list (= 読み 3 は存在しない)。bare expansion
-    word が ``limit`` を超えたら ``None`` (呼び出し側は救済 scan を諦める)。
+    置換対象の展開が無ければ空 list (= 読み 3 は存在しない)。読みの総数
+    (語数 × ``options`` 数) が ``limit`` を超えたら ``None`` (呼び出し側は救済
+    scan を諦める)。
     """
     out = _expansion_chars(segment)
     if out is None:
         return []
-    return _option_word_readings(out, option, limit=limit)
+    return _option_word_readings(out, options, limit=limit)
 
 
 def _replace_simple_expansions(segment: str) -> str | None:

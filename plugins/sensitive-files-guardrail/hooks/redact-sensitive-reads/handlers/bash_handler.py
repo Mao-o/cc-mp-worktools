@@ -145,7 +145,7 @@ from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
     _has_glob,
-    _option_value_token,
+    _option_reading_tokens,
 )
 from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
@@ -774,23 +774,27 @@ def _scan_expansion_reading(
     return result if _decision_of(result) == "deny" else None
 
 
-# 読み 3 を作る bare expansion word の上限 (0.25.0)。1 語につき
-# ``_analyze_segment`` が 1 回走り、その中で segment 全長の lex (``_has_hard_stop``
-# / ``_live_operator_metachars``) と ``shlex.split`` を通るので、語数 × segment 長
-# で効いてくる。超えたら救済 scan 自体を諦める = 従来の ``ask_or_allow`` (摩擦側)。
+# 読み 3 の **読みの総数** の上限 (0.25.0)。総数は
+# ``bare expansion word 数 × (arity 種類数 - 1) + 1``
+# (``segmentation._option_word_readings`` の Returns 参照)。読み 1 つにつき
+# ``_analyze_segment`` が 1 回走り、その中で segment 全長の lex
+# (``_has_hard_stop`` / ``_live_operator_metachars``) と ``shlex.split`` を通る
+# ので、読みの数 × segment 長で効いてくる。超えたら救済 scan 自体を諦める =
+# 従来の ``ask_or_allow`` (摩擦側)。
 #
 # 実測 (segment 長 64KB = ``_MAX_SEGMENT_CHARS`` 上限、spec 持ちコマンド):
-#     読み 3 なし  201ms      上限 4   540ms      上限 8   877ms
-# (救済 scan 自体が走らない変数なしの同長コマンドは 90ms)
+#     読み 3 なし  201ms      上限 4   571ms      上限 6   741ms
+#     上限 8   912ms      (変数なしで救済 scan 自体が走らない同長は 93ms)
 #
 # hook の timeout は 2 秒で、超過時は**出力が破棄され decision が消える**
 # (無音 fail-open) ため、上限は「予算の 1/4 に収まる」側で決める。コーパス
-# (1,413 コマンド) の実測分布は bare expansion word が 0 個 73 / 1 個 92 /
-# 2 個 3 segment で、**実在する形の最大は 2** — 4 はその 2 倍の余裕。
+# (1,488 コマンド / 展開を含む 228 segment) の実測分布は読みの総数が
+# 0 が 74 / 1 が 37 / 2 が 75 / 3 が 37 / 4 が 1 / 5 が 3 / 10 が 1 segment
+# (5 以上は上限を試すために足した病的形のみ)。
 _MAX_OPTION_READINGS = 4
 
 
-def _option_reading_agrees(
+def _option_reading_disagreement(
     seg: str,
     one_word: str,
     envelope: dict,
@@ -798,7 +802,7 @@ def _option_reading_agrees(
     *,
     dotglob: bool = False,
     root: str | None = None,
-) -> bool:
+) -> str | None:
     """**読み 3** (bare expansion word がオプショントークンになる) でも deny か。
 
     変数は ``-e`` のような **値を取るオプション** にも展開されうる。そうなると
@@ -810,36 +814,67 @@ def _option_reading_agrees(
 
     手順:
 
-    1. コマンドの spec から「分離形で non-path の値を 1 つ取る」option を借りる
-       (``_option_value_token``)。無ければ **読み 3 は成立しない** ので True
-       (``cat`` / ``head`` のように値を取る option を持たない・spec が無い
-       コマンドは deny 維持)
-    2. bare expansion word 1 つにつき 1 つの読みを作り (``_expansion_option_
-       readings``)、**その全部が deny** のときだけ True
+    1. コマンドの spec から **arity ごとの代表 option** を借りる
+       (``_option_reading_tokens``)。値を取らない flag (arity 0) は spec の
+       有無に依らず必ず含まれるので、この読みは**常に 1 つ以上**作られる
+    2. ``(bare expansion word) × (arity 代表)`` の全組合せで読みを作り
+       (``_expansion_option_readings``)、**その全部が deny** のときだけ deny を
+       採用してよい (対象外の bare expansion word は arity 0 の flag に置く。
+       ``segmentation._option_word_readings`` 参照)
+
+    読みを **オプションごとではなく arity ごと**に作るのが要点 (0.25.0 R5)。
+    オプション数は数十あるが arity の種類は 3〜4 で頭打ちなので、読みの数は
+    語数に比例するだけで組合せ爆発しない。値の型 (path / non-path) や option の
+    同一性で反例を絞ることはしない — 絞ると ``jq --arg NAME VALUE`` のような
+    2 語 consume の形が読みから漏れ、``jq . $X NAME .env`` が誤 deny になる。
 
     語ごとに読みを分けるので「機密 operand より **前** にある語だけが役割を
     変える」という絞り込みは ``_analyze_segment`` の再実行で自動的に成立する
     (operand より後ろの語を置き換えた読みは deny のまま残り、``$X/.env`` の
     ように語の内部に展開がある形はそもそも bare expansion word ではないので
     読み 3 を 1 つも作らない = 本 PR の動機ケースは影響を受けない)。
+
+    **完全性 (どの読みを作れば足りるか)**: operand O が候補から外れる経路は
+    2 つしかない。
+
+    (a) どれかの語が option になって O を値として飲む — これには O の d 語前に
+    arity >= d の option トークンが要り、展開は自分の位置より後ろに語を
+    挿し込めないので「O の d 語前の bare expansion word が arity >= d の
+    option に化ける」読みだけが該当する。
+
+    (b) O より前の positional が全部消えて O が第 1 positional (pattern 枠 /
+    ``git`` のサブコマンド位置) に落ちる — これは他の語が全部 flag のときに
+    最大化され、``_option_word_readings`` の背景 (対象外の語を flag に置く) が
+    その読みを常に含む。
+
+    よって ``語 × arity`` の総当りで尽き、複数語が同時に化ける組合せを別途
+    作る必要はない。残る穴は spec が宣言していない arity (``command_specs``
+    の被覆) と、上限超過で評価を諦めた場合だけ (どちらも過剰 deny = 摩擦側)。
+
+    Returns:
+        救済 deny を落とす理由の診断ラベル。全ての読みで deny なら ``None``
+        (= deny を採用してよい)。ラベルは 2 種類あり、分布を別々に測れる:
+
+        - ``hard_stop_literal_option_ambiguous``: 読みが食い違った (本来の判定)
+        - ``hard_stop_literal_option_budget``: 読みの数が上限を超えて評価を
+          諦めた (性能側の保険。判定していないので同じ扱いにはしない)
     """
     tokens = _tokenize_reading(one_word)
     if tokens is None:
-        return True
-    option = _option_value_token(tokens)
-    if option is None:
-        return True
+        return None
+    options = _option_reading_tokens(tokens)
     option_readings = _expansion_option_readings(
-        seg, option, limit=_MAX_OPTION_READINGS
+        seg, options, limit=_MAX_OPTION_READINGS
     )
     if option_readings is None:
-        return False
-    return all(
+        return "hard_stop_literal_option_budget"
+    agrees = all(
         _scan_expansion_reading(
             reading, envelope, rules, dotglob=dotglob, root=root, quiet=True
         ) is not None
         for reading in option_readings
     )
+    return None if agrees else "hard_stop_literal_option_ambiguous"
 
 
 def _hard_stop_literal_scan(
@@ -897,7 +932,9 @@ def _hard_stop_literal_scan(
        オプション** にも展開されうる。``X=-e`` のとき ``grep -e KEY $X .env``
        は ``grep -e KEY -e .env`` として実行され、``.env`` は第 2 の検索
        pattern になる。**クォートは word splitting を止めるだけでオプション
-       解釈は止めない**ので、読み 2 と違い ``"$X"`` も対象
+       解釈は止めない**ので、読み 2 と違い ``"$X"`` も対象。読みは
+       **arity (consume する語数) ごと**に作る: 値を取らない flag (arity 0) /
+       1 語 consume / 2 語 consume (``jq --arg NAME VALUE``) …
        (``hard_stop_literal_option_ambiguous``)
 
     3 つとも ``_analyze_segment`` を走らせるだけで満たす (**コマンドを列挙し
@@ -908,14 +945,17 @@ def _hard_stop_literal_scan(
     - ``cat $PWD/.env`` 型 (**語の内部**に展開がある形) は語数も役割も変わら
       ないので **影響なし** — 読み 2 / 読み 3 のどちらも作られない
     - ``cat $OPTS .env`` / ``cat $X >| .env`` / ``head $OPTS .env`` は
-      **deny 維持** (``cat`` / ``head`` は spec が無く「値を取る option」を
-      知らないので読み 3 が成立しない。``cat`` は実際に値を取る option を
-      持たないので正しい)
+      **deny 維持** (``cat`` / ``head`` は spec が無いので読み 3 は arity 0 =
+      flag だけ。flag に化けても ``.env`` は path 候補のまま。``cat`` は実際に
+      値を取る option を持たないので正しい)
     - ``grep $PAT .env`` / ``sed $SCRIPT .env`` / ``awk $PROG .env`` /
       ``jq $F .env`` / ``rg $PAT .env`` は読み 2 で ask_or_allow に戻る
     - ``grep "$PAT" .env`` / ``sed "$SCRIPT" .env`` などのクォート形と、
       ``grep -e KEY $X .env`` / ``git log $OPT .env`` / ``tar -cf out.tar $X
       .env`` のように読み 2 を通過していた形は読み 3 で ask_or_allow に戻る
+    - ``jq . $X NAME .env`` (2 語 consume の option に化ける形) / ``grep "$PAT"
+      other .env`` (pattern 枠を閉じない option に化ける形) / ``git $SUB .env``
+      (flag に化けてサブコマンド位置がずれる形) も読み 3 で ask_or_allow
     """
     if len(seg) > _MAX_SEGMENT_CHARS:
         return None
@@ -933,10 +973,11 @@ def _hard_stop_literal_scan(
     ) is None:
         L.log_info("bash_classify", "hard_stop_literal_ambiguous")
         return None
-    if not _option_reading_agrees(
+    option_label = _option_reading_disagreement(
         seg, one_word, envelope, rules, dotglob=dotglob, root=root
-    ):
-        L.log_info("bash_classify", "hard_stop_literal_option_ambiguous")
+    )
+    if option_label is not None:
+        L.log_info("bash_classify", option_label)
         return None
     L.log_info("bash_classify", "hard_stop_literal_deny")
     hook = result.get("hookSpecificOutput")

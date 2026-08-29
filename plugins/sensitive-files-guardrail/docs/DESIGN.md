@@ -302,21 +302,50 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
    判定は `_analyze_segment` を各読みで走らせるだけで、**コマンドを列挙し
    直さない** — 第 1 positional が pattern / program かは `command_specs.
    _CmdSpec.pattern_slot`、option が値を取るかは同 `values` が既に知っている
-   ので、読みの違いはそのまま候補集合の違いになる。読み 3 の反例に使う
-   オプションも `operand_lexer._option_value_token` が spec から「分離形で
-   non-path の値を 1 つ取る」ものを 1 つ借りるだけ。読みは bare expansion word
-   1 つにつき 1 つ作るので、「機密 operand より**前**にある語だけが役割を
-   変える」という絞り込みは再実行の結果として自動的に成立する。
+   ので、読みの違いはそのまま候補集合の違いになる。
+
+   読み 3 は **arity (分離形で consume する語数) ごと**に作る
+   (`operand_lexer._option_reading_tokens`)。値を取らない flag (arity 0) は
+   spec の有無に依らず必ず 1 つ、あとは spec が宣言する arity ごとに代表を
+   1 つずつ借りる (`jq --arg NAME VALUE` の arity 2 まで)。`git` は option 表を
+   2 つ持つ (global option 区間 / サブコマンド) ので両方から借りる。読みの数は
+   「bare expansion word 数 × (arity 種類数 - 1) + 1」で、**option 数には
+   比例しない** (arity の種類は 3〜4 で頭打ち)。代表は「値が全て non-path」
+   かつ「`pattern_opts` でない」ものを優先する — この 2 条件を満たす option は
+   同 arity の他の option を支配する (path の値は候補に残り、pattern_opt は
+   pattern 枠を閉じて候補を**増やす**ので、どちらも反例として弱い)。
+
+   対象外の bare expansion word は **背景として flag に置く**。これも実在
+   しうる読みで、こう置くと読みの族が最も緩い側になる (下記 (b) が最大化
+   される)。複数語が同時に役割を変える組合せを別に列挙しなくて済むのはこの
+   背景のおかげ (組合せは語数の指数になるので作れない)。
+
+   **なぜ語 × arity で尽きるか**: operand `O` が候補から外れる経路は 2 つ
+   しかない。(a) どれかの語が option になって `O` を値として飲む —
+   これには `O` の d 語前に arity >= d の option トークンが要り、展開は自分の
+   位置より後ろに語を挿し込めないので「`O` の d 語前の bare expansion word が
+   arity >= d の option に化ける」読みだけが該当する。(b) `O` より前の
+   positional が全部消えて `O` が第 1 positional (pattern 枠 / `git` の
+   サブコマンド位置) に落ちる — これは他の語が全部 flag のときに最大化され、
+   背景の flag がその読みを常に含む。よって語ごと × arity ごとの総当りで尽きる。
+   「機密 operand より**前**にある語だけが役割を変える」という絞り込みも
+   再実行の結果として自動的に成立する。
 
    ask_or_allow に戻る形: `grep $PAT .env` / `sed $SCRIPT .env` /
    `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` / `git log -n $N .env`
    (読み 2)、`grep "$PAT" .env` / `sed "$SCRIPT" .env` / `grep -e KEY $X .env` /
-   `git log $OPT .env` / `tar -cf out.tar $X .env` (読み 3)。
+   `git log $OPT .env` / `tar -cf out.tar $X .env` / `jq . $X NAME .env`
+   (arity 2 の option に化ける形) / `grep "$PAT" other .env` (pattern 枠を
+   閉じない option に化ける形) / `git $OPT log .env` (global option 区間の語が
+   `-C` に化けてサブコマンド位置がずれる形) (読み 3)。
    deny 維持: 語**内**に展開がある形 (`cat $PWD/.env` / `grep -e KEY $D/.env`
    — bare expansion word が無いので読み 3 を 1 つも作らない)、値を取る
    オプションを持たないコマンド (`cat $OPTS .env` / `cat $X >| .env` /
-   `head $OPTS .env`)、値が path のオプションしか噛まない形 (`grep -f $F .env`)、
-   bare expansion word が機密 operand より後ろにある形 (`grep -e KEY .env $X`)。
+   `head $OPTS .env` — arity 0 の読みは作るが flag に化けても後続語の役割は
+   変わらない)、値が path のオプションしか噛まない形 (`grep -f $F .env`)、
+   bare expansion word が機密 operand より後ろにある形 (`grep -e KEY .env $X`)、
+   距離が spec の宣言 arity を超える形 (`jq . "$X" NAME other .env` /
+   `git log "$OPT" other .env`)。
 
    読み 2 / 読み 3 はどちらも `command_specs` の被覆に依存する境界を持つ
    (spec 未登録のコマンドは deny 維持 = 過剰 deny 側に倒れる)。

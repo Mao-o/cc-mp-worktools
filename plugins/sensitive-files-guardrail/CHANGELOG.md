@@ -157,7 +157,12 @@ positional 枠を消費しない誤検知 1 件、`>|` clobber の segment 分�
   足したケース (spec を持つコマンド × 語内展開 / 値を取る option を持たない
   コマンド × bare expansion word / 値が path の option / 機密 operand より
   後ろの bare expansion word) — **説明不能ゼロ**。既存 key の verdict drift も 0
-- テスト件数: redact 1,063 → **1,117** / check 94 (変更なし、計 1,211)
+- 外部レビュー R3 の 1 件 (§8、読みの arity 一般化) でも同じ denominator で
+  測り直し、救済 scan 由来の deny は **84 verdict / 42 コマンドのまま不変**
+  (row 単位で verdict / label とも完全一致 = 一般化による既存 deny の損失ゼロ)。
+  コーパスは **1,488 コマンド / 2,976 verdict** に拡張し、main との差 316 件で
+  **説明不能ゼロ**
+- テスト件数: redact 1,063 → **1,119** / check 94 (変更なし、計 1,213)
 
 ### 1. hard-stop リテラル救済 scan (`handlers/bash/segmentation.py` + `bash_handler.py`)
 
@@ -310,29 +315,83 @@ R1 で入れた「両読み一致ゲート」(§6-1) には**第 3 の読みが�
   オプション解釈は止めないため (`grep -e KEY "$X" .env` も同じ)、R1 で
   「クォート形は必ず 1 語だから deny 維持」としていた形は緩和側に動く
 - **判定に使う知識は `command_specs` に既にあるものだけ**。
-  `operand_lexer._option_value_token` がコマンドの spec から「分離形で
-  non-path の値を 1 つ取る」option を宣言順に 1 つ借り、それを反例の代表値に
-  する (値が path の option は候補に残るので deny を崩さない、`=n` の密着形
-  のみの option は次の語を consume しない、`jq --arg NAME VALUE` のような 2 語
-  consume は必要以上に飲むので選ばない)。spec が無いコマンドは `None` = 読み 3
-  が成立せず deny 維持 (境界の開示は §6-1 に追記)
-- bare expansion word 1 つにつき 1 読みを作り**全てが deny のときだけ** deny を
+  `operand_lexer._option_reading_tokens` がコマンドの spec から **arity ごとに
+  代表 option を 1 つ**借り、それを反例に使う (§8 で一般化。当初は「分離形で
+  non-path の値を 1 つ取る」option 1 つだけだった)。spec が無いコマンドは
+  arity 0 (値を取らない flag) の読みだけになり deny 維持 (境界の開示は §6-1)
+- bare expansion word 1 つにつき読みを作り**全てが deny のときだけ** deny を
   採用する。語ごとに読みを分けるので「機密 operand より**前**にある語だけが
   役割を変える」という絞り込みは `_analyze_segment` の再実行で自動的に成立する
-  (operand より後ろの語を置き換えた読みは deny のまま残る)。bare expansion word
-  が 4 個を超える segment は読みを作らず救済 scan を諦める (hook の 2 秒
-  timeout 予算を守る保険。摩擦側に倒れる)。上限は実測で決めた: segment 長の
-  上限 (64KB) では 1 読みあたり約 85ms かかり、上限 4 で **540ms** / 上限 8 で
-  877ms (読み 3 なしの同長コマンドは 201ms)。timeout 超過時は**出力ごと破棄
-  されて decision が消える**無音 fail-open になるため、予算の 1/4 に収まる側で
-  決めた。コーパス 1,413 コマンドの実測分布は bare expansion word が 0 個 73 /
-  1 個 92 / 2 個 3 segment で**実在する形の最大は 2**、4 はその 2 倍の余裕
+  (operand より後ろの語を置き換えた読みは deny のまま残る)。読みの総数が上限
+  (4) を超える segment は読みを作らず救済 scan を諦める (hook の 2 秒 timeout
+  予算を守る保険。摩擦側に倒れる。上限の実測は §8)
 
-**既知の限界 (いずれも過剰 deny = 摩擦方向)**: 反例は spec 宣言順の 1 つだけを
-試すので、「別の option に展開されたときだけ役割が変わる」病的な形は捕まらない
-(`grep $X PAT .env` は `-e` では deny 維持、`-A` なら pattern 枠が開いたまま)。
-読み 2 と読み 3 の**組合せ** (ある語が消え別の語がオプションになる) も評価
-しない。どちらも「本来 ask にすべきものが deny のまま」であって保護は落ちない。
+### 8. 外部レビュー R3 の 1 件 — 読みを arity ごとに一般化 (クラスごと解消)
+
+§7 の実装は反例オプションを「分離形で non-path の値を **1 つ** 取るもの」に
+絞る filter を持っていた。値を 2 つ取るオプション (`jq --arg NAME VALUE`) は
+skip されるため、`jq . $X NAME .env` が全 mode で誤 deny になっていた
+(`X=--arg` なら `NAME` と `.env` がオプションの 2 値として消費され、jq は
+stdin から読む = ファイルは開かれない)。§7 の「反例は spec 宣言順の 1 option
+だけ」という開示も同じ不完全さの別の面で、**個別対応では同型の指摘が繰り返す**
+ため規則ごと一般化した。
+
+- **読みは option ごとではなく arity ごとに作る**
+  (`operand_lexer._option_reading_tokens`)。オプション数は数十あるが arity の
+  種類は 3〜4 で頭打ちなので、読みの数は「bare expansion word 数 × arity 種類
+  数」で組合せ爆発しない。**値の型 (path / non-path) で反例を絞る filter と、
+  spec 宣言順の 1 option だけを試す制限は撤去した**
+- **arity 0 (値を取らない flag) の読みを常に作る**。spec の無いコマンドでも
+  作る (`git $SUB .env` は `$SUB` が flag なら `.env` がサブコマンド位置に
+  ずれてファイルは開かれない)。`cat $OPTS .env` のように flag に化けても後続語
+  の役割が変わらない形は deny 維持
+- **対象外の bare expansion word は背景として flag に置く**。これも実在しうる
+  読みで、こう置くと読みの族が最も緩い側になる (operand が候補から外れる経路
+  は「どれかの語が option になって operand を飲む」か「operand より前の
+  positional が全部消えて operand が第 1 positional = pattern 枠 / `git` の
+  サブコマンド位置に落ちる」の 2 つで、後者は他の語が全部 flag のときに最大)。
+  **複数語が同時に役割を変える組合せ**を別に列挙しなくて済むのはこの背景の
+  おかげ (組合せは語数の指数になるので作れない)。`git $A $B log .env`
+  (`A` が flag で `B=-C` なら `log` が値として消費され `.env` がサブコマンド
+  位置に落ちる) はこれで覆う
+- **`git` は option 表を 2 つ持つ** (global option 区間 =
+  `_GIT_GLOBAL_VALUE_OPTS` / サブコマンド = `_SPECS["git <sub>"]`) ので、
+  arity 代表も両方から借りる。借りないと `git $OPT log .env` (`OPT=-C` なら
+  `log` が値として消費され `.env` がサブコマンド位置に落ちる = ファイルは
+  開かれない) の読みが作れない
+- **同じ arity の代表は「値が全て non-path」かつ「`pattern_opts` でない」もの
+  を優先**する。この 2 条件を満たす option は同 arity の他を支配する (path の
+  値は候補に残り、pattern_opt は pattern 枠を閉じて候補を**増やす**ので、
+  どちらも反例として弱い)。`-e` (pattern_opt) だけを反例にしていた §7 では
+  `grep "$PAT" other .env` が誤 deny だった (`PAT=--include` なら `other` が
+  値として消費され `.env` が検索 pattern になる)。全 spec が arity ごとに
+  この「支配的」option を宣言していることはテストで固定した
+  (`test_spec_table_has_dominant_option_per_arity`)
+- **語 × arity の総当りで尽きる根拠**: operand `O` が option の値として
+  consume されるには `O` の d 語前に arity >= d の option トークンが要る。
+  展開は自分の位置より後ろに語を挿し込めないので、`O` を飲み込めるのは「`O`
+  の d 語前の bare expansion word が arity >= d の option に化ける」読みだけ
+  (語が複数語に word splitting される形も、`O` との距離は変わらないので同じ
+  読みに帰着する。語が増える方向は positional が増える = deny 側)
+- 上限は **読みの総数** 4 (§7 は「語数」4)。総数は
+  **語数 × (arity 種類数 - 1) + 1** — arity 0 を対象語に当てた読みはどの語を
+  選んでも「全部 flag」の同一文字列になるので 1 つに畳まれる (`cat` のように
+  arity 0 しか代表が無いコマンドは語がいくつあっても読みは 1 つ)。
+  segment 長の上限 (64KB) での実測は上限 4 で **571ms** / 6 で 741ms /
+  8 で 912ms (読み 3 なしの同長コマンドは 201ms、救済 scan 自体が走らない
+  変数なしは 93ms)。timeout 超過時は**出力ごと破棄されて decision が消える**
+  無音 fail-open のため、§7 が採った動作点 (540ms) を維持する 4 に据え置いた
+  (3 に下げると `grep -e K $A $B $C .env` の評価を落として摩擦が増え、6 に
+  上げると予算の 37% を使う)
+- 診断ラベルを分離: 読みが食い違ったときの
+  `hard_stop_literal_option_ambiguous` と、読みの数が上限を超えて**評価せずに
+  諦めた** `hard_stop_literal_option_budget` を別に数える (前者は判定結果、
+  後者は性能側の保険なので分布を混ぜない)
+
+**残る境界 (いずれも過剰 deny = 摩擦方向)**: spec が宣言していない arity
+(例: jq の宣言 arity は最大 2 なので `jq . "$X" NAME other .env` は deny 維持)、
+spec 自体が無いコマンド、上限超過による諦め。いずれも「本来 ask にすべきものが
+deny のまま」であって保護は落ちない。
 
 ### 検証
 
@@ -350,6 +409,30 @@ R1 で入れた「両読み一致ゲート」(§6-1) には**第 3 の読みが�
   pop。13 failures は全て `handle()` を通す挙動レベルの assertion (新ヘルパを
   名前で import する unit テスト 2 件だけが ImportError になるため、失敗件数が
   意味を持つよう挙動レベルのテストを主にした)
+- 8 も同じ 3 ファイルを stash して該当テストクラスを実行 → **10 failures +
+  4 errors** を確認 → pop。10 failures が negative control 本体で、全て
+  `handle()` を通す挙動レベル: arity 2 (`jq . "$X" NAME .env` /
+  `jq . $X NAME .env`)、pattern 枠を閉じない option (`grep "$PAT" other .env` /
+  `grep $PAT other .env` / `rg "$PAT" other .env`)、`git` の global option 区間
+  (`git $OPT log .env` / `git "$OPT" log .env` / `git $OPT show HEAD:.env` /
+  `git $OPT log -- .env` / `git $A $B log .env`)。4 errors はヘルパの API 変更に
+  よる ImportError で、控除して数える。修正前も後も deny のままであるべき
+  guard (`cat $OPTS .env` / `grep -f $F .env` / 動機ケース群) は failures に
+  含まれない = control が実際に効いていることの確認になる
+- 8 のコーパス検証は 2 段構え。(a) §7 の denominator (1,344 コマンド /
+  2,688 verdict) で救済 scan 由来の deny を測り直し **84 verdict / 42 コマンド
+  で不変**、全 bucket 件数も verdict/label とも row 単位で完全一致 (arity 一般
+  化による既存 deny の損失ゼロ)。(b) コーパスを **1,488 コマンド /
+  2,976 verdict** に拡張 (arity 2 の option 形 / 値が path の option 形 /
+  pattern 枠を閉じない option 形 / flag に化ける形 / `git` の global option
+  区間形 / 距離が arity を超える形 / 上限超過形 = 60 件を追加) して main と
+  比較 → 316 件変化・**UNCLASSIFIED 0**。
+  §7 から §8 への変化は 46 verdict (23 コマンド) で**全て deny → ask/allow の
+  一方向** (逆方向ゼロ): 22 コマンドは新たに覆った誤 deny
+  (`hard_stop_literal_option_ambiguous`)、1 コマンドは上限超過による諦め
+  (`hard_stop_literal_option_budget`。`jq . $A $B NAME .env` = 読み 5 つ)。
+  動機ケース (`cat $PWD/.env` / `grep -e KEY $D/.env` 系) は 1 件も
+  失われていない
 - 旧版コーパス diff (上記 2,688 verdict) の分類は集計 key を TAB 区切りで
   実施 (コマンド本文に `|` が現れるため `|` 区切りは使わない)。隔離内レビュー
   後の再実行ではコーパスに clobber 変種 50 件 (fd 番号付き / fused / クォート

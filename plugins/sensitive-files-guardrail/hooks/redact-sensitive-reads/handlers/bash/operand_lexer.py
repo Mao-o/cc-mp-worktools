@@ -46,7 +46,6 @@ from fnmatch import fnmatchcase
 
 from handlers.bash.command_specs import (
     _SPECS,
-    _VALUE_NON_PATH,
     _VALUE_PATH,
     _CmdSpec,
     _split_kinds,
@@ -297,42 +296,91 @@ def _command_spec(tokens: list[str]) -> tuple[_CmdSpec | None, int, int]:
     return _SPECS.get(first), 1, 1
 
 
-def _option_value_token(tokens: list[str]) -> str | None:
-    """このコマンドで「分離形で non-path の値を 1 つ取る」option を 1 つ返す。
+# 「展開が値を取らない flag に化ける」読み (arity 0) に使う合成 option トークン
+# (0.25.0)。どの spec の long option とも完全一致・prefix 一致しない綴りにする
+# (一致すると値を consume してしまい arity 0 の読みでなくなる)。``--`` でも
+# ``-`` でもなく ``=`` も短形の密着値も持たないので、``_lex_args`` では
+# 「値を取らない未知の long option」= ``_K_OPT`` 1 個に落ちる。
+_FLAG_OPTION_TOKEN = "--sfg-flag"
 
-    救済 scan の **読み 3** (変数がオプショントークンに展開される、0.25.0
-    Codex R2 P2) が使う代表値。変数が値を取る option に展開されると後続の語は
-    その値として consume され、operand の役割が変わる — その反例を 1 つ作れれば
-    「役割は不変」が崩れるので、spec が知っている option を 1 つ借りるだけで
-    足りる。**コマンドを列挙し直さない**のがこの関数の要点で、判定に使う知識は
-    ``command_specs`` に既にあるものだけ。
+# ``git`` の **global option 区間** (サブコマンドより前) 用の代表 (0.25.0)。
+# git は option 表を 2 つ持つ (global = ``_GIT_GLOBAL_VALUE_OPTS`` /
+# サブコマンド = ``_SPECS["git <sub>"]``) ので、arity 代表も両方から借りないと
+# ``git $OPT log .env`` (``OPT=-C`` なら ``log`` が値として消費され ``.env`` が
+# サブコマンド位置に落ちる = ファイルは開かれない) の読みが作れない。
+_GIT_GLOBAL_VALUE_REPRESENTATIVE = "-C"
 
-    選ぶ条件 (誤って広く選ぶと救済 deny を落としすぎるため狭く取る):
 
-    - **分離形で値を取る** (``_ATTACHED_ONLY`` の ``=n`` は次の語を consume
-      しないので反例にならない)
-    - **値がちょうど 1 つ** かつ **non-path** (``_VALUE_NON_PATH``)。path の値
-      (``grep -f FILE``) は候補に残るので deny を崩さない。``jq --arg NAME
-      VALUE`` のような 2 語 consume は必要以上に語を飲むので選ばない
-    - spec 内の **宣言順で最初** の 1 つ (決定的にするため)
+def _option_reading_tokens(tokens: list[str]) -> list[str]:
+    """このコマンドで「展開がオプションに化ける読み」に使う代表 option を返す。
 
-    spec が無いコマンド (``cat`` / ``head`` / ``cp`` …) は ``None``。
-    ``cat`` は実際に値を取る option を持たないので読み 3 自体が成立しない
-    (deny 維持が正しい)。spec 未登録のコマンドについては「値を取る option を
-    知らない」= 読み 3 を作れないので deny 維持側に倒れる — ``head -n $N .env``
-    が deny で ``git log -n $N .env`` が ask になる既存の非対称
-    (spec 被覆に依存する境界) と同じ失敗方向 (過剰 deny = 摩擦)。
+    救済 scan の **読み 3** (0.25.0) が使う反例。変数が値を取る option に展開
+    されると後続の語はその値として consume され、operand の役割が変わる。
+    ``jq . $X NAME .env`` は ``X=--arg`` なら ``NAME`` と ``.env`` が option の
+    2 値として消費され、jq は stdin から読む — ファイルは開かれない。
+
+    返すのは **arity (分離形で consume する語数) ごとに 1 つの代表**:
+
+    - ``arity 0`` = ``_FLAG_OPTION_TOKEN`` (値を取らない flag)。spec の有無に
+      依らず**常に**含める。語が flag に化けると positional 列から抜けるので、
+      第 1 positional の意味 (grep 系 / jq / awk / sed の pattern 枠) や
+      ``git`` のサブコマンド位置がずれる
+    - ``arity n >= 1`` = spec が **分離形** (``_ATTACHED_ONLY`` の ``=n`` は次の
+      語を consume しないので除く) で n 語の値を取ると宣言している option から
+      1 つ
+
+    **オプションごとではなく arity ごと**に読みを作るのが要点。オプション数は
+    数十あるが arity の種類は 3〜4 で頭打ちなので、読みの数が組合せ爆発しない。
+
+    同じ arity の代表は ``(値に path 種別が含まれる数, pattern_opts か,
+    宣言順)`` の最小で選ぶ。この順序で最小の option は同 arity の他のどの
+    option よりも **operand を候補から外しやすい**:
+
+    - 値が ``n`` (non-path) なら consume された語は候補から外れる。``p`` は
+      候補に残る (= deny を崩さない) ので、``n`` の方が強い反例
+    - ``pattern_opts`` の option は pattern 枠を閉じる = 第 1 positional を
+      path 候補に**増やす**ので、pattern_opt でない方が強い反例
+
+    全 spec で「all-``n`` かつ pattern_opt でない」option が arity ごとに存在
+    することは test (``test_spec_table_has_dominant_option_per_arity``) で
+    固定してある。存在する限りこの代表は同 arity の全 option を **支配** する
+    ので、option ごとに読みを作る必要はない。
+
+    spec が無いコマンド (``cat`` / ``head`` / ``cp`` …) は arity 0 の読みだけ。
+    ``cat`` は実際に値を取る option を持たないので、これは
+    「``cat $OPTS .env`` は deny 維持」と一致する (flag に化けても ``.env`` は
+    path 候補のまま)。spec 未登録のコマンドは「値を取る option を知らない」ので
+    その分だけ deny 維持側に倒れる — ``head -n $N .env`` が deny で
+    ``git log -n $N .env`` が ask になる既存の非対称 (spec 被覆に依存する境界)
+    と同じ失敗方向 (過剰 deny = 摩擦)。
     """
+    out = [_FLAG_OPTION_TOKEN]
     if not tokens:
-        return None
+        return out
+    if tokens[0] == "git":
+        # global option 区間の語が化ける読み。この代表は区間の外
+        # (サブコマンドより後ろ) の語にも当てるが、``_git_subcommand_index`` は
+        # 区間の外の ``-C`` を値なし option として読むので operand の役割は
+        # 変わらず、余分な読みが deny を崩すことはない
+        out.append(_GIT_GLOBAL_VALUE_REPRESENTATIVE)
     spec, _, _ = _command_spec(tokens)
     if spec is None:
-        return None
-    for name, kinds in spec.values.items():
-        attached_only, kinds = _split_kinds(kinds)
-        if not attached_only and kinds == _VALUE_NON_PATH:
-            return name
-    return None
+        return out
+    best: dict[int, tuple[tuple[int, int, int], str]] = {}
+    for order, (name, raw_kinds) in enumerate(spec.values.items()):
+        attached_only, kinds = _split_kinds(raw_kinds)
+        if attached_only or not kinds:
+            continue
+        rank = (
+            kinds.count(_VALUE_PATH),
+            1 if name in spec.pattern_opts else 0,
+            order,
+        )
+        current = best.get(len(kinds))
+        if current is None or rank < current[0]:
+            best[len(kinds)] = (rank, name)
+    out.extend(name for _, (_, name) in sorted(best.items()))
+    return out
 
 
 def _find_path_candidates(tokens: list[str]) -> list[str]:

@@ -3182,10 +3182,11 @@ class TestOptionTokenExpansionReading(BaseBash):
     **クォートは word splitting を止めるだけでオプション解釈は止めない**ので、
     読み 2 (語ごと消える読み) と違ってクォート形も対象になる。
 
-    適用範囲は「語全体が展開である語 (bare expansion word) が存在し、かつ
-    コマンドの spec が『分離形で non-path の値を 1 つ取る』option を知って
-    いる」場合だけ。コマンドを新たに列挙せず ``command_specs`` の既存知識を
-    使う。
+    読みは **arity (分離形で consume する語数) ごと**に作る (0.25.0 R5)。
+    ``jq --arg NAME VALUE`` のような 2 語 consume の形まで含めるため、
+    「値 1 つ・non-path・宣言順で最初の 1 option」という R4 の絞り込みは撤去
+    した。値を取らない flag (arity 0) は spec の有無に依らず必ず読みを作る。
+    コマンドを新たに列挙せず ``command_specs`` の既存知識だけを使う点は不変。
     """
 
     # 読み 3 で役割が変わりうる → 従来どおり ask (default) / allow (auto)。
@@ -3201,6 +3202,33 @@ class TestOptionTokenExpansionReading(BaseBash):
         "diff $OPT .env other.txt",
         "tar -cf out.tar $X .env",
         "grep -e K $A $B .env",      # bare expansion word が複数
+        # --- R5 (Codex R3 P2): 値を 2 つ取る option に化ける形 ---
+        # ``X=--arg`` なら ``NAME`` と ``.env`` が option の 2 値として消費され、
+        # jq は stdin から読む (ファイルは開かれない)。値 1 つの option しか
+        # 試さない実装ではこの読みが作れず誤 deny になっていた
+        'jq . "$X" NAME .env',
+        "jq . $X NAME .env",
+        'jq "$X" NAME .env',
+        'jq -r "$X" NAME .env',
+        # --- R5: pattern 枠を閉じない option に化ける形 ---
+        # ``PAT=--include`` なら ``other`` が値として消費され ``.env`` が検索
+        # pattern になる。``-e`` (pattern_opt) だけを反例にすると pattern 枠が
+        # 閉じて ``.env`` が FILE のままになり誤 deny になっていた
+        'grep "$PAT" other .env',
+        "grep $PAT other .env",
+        'rg "$PAT" other .env',
+        'ag "$PAT" other .env',
+        # --- R5: git の global option 区間 (option 表が 2 つある) ---
+        # ``OPT=-C`` なら ``log`` が値として消費され ``.env`` がサブコマンド
+        # 位置に落ちる (git は「.env というサブコマンドは無い」と言って終わる)
+        "git $OPT log .env",
+        'git "$OPT" log .env',
+        "git $OPT show HEAD:.env",
+        "git $OPT log -- .env",
+        # 複数語が同時に役割を変える形 (先頭が flag、次が値を取る global option)。
+        # 対象外の bare expansion word を背景の flag に置く設計で覆われる
+        "git $A $B log .env",
+        'jq "$A" "$B" .env',
     )
 
     # 読み 3 が成立しない / 役割が変わらない → deny 維持。
@@ -3222,10 +3250,13 @@ class TestOptionTokenExpansionReading(BaseBash):
         "git show HEAD:$D/.env",
         "head -n 3 ${DIR}/.env",
         "cp $SRC/.env /tmp/x",
-        # spec が「値を取る option」を知らない / 実際に持たないコマンド
+        # spec が「値を取る option」を知らない / 実際に持たないコマンド。
+        # R5 で arity 0 (値を取らない flag) の読みは必ず作るようになったが、
+        # flag に化けても後続語の役割は変わらないので deny のまま
         "cat $OPTS .env",
         'cat "$OPTS" .env',
         "cat $X .env",
+        'cat "$X" .env',
         "head $OPTS .env",
         "head -n $N .env",
         "base64 $D/.env",
@@ -3234,6 +3265,20 @@ class TestOptionTokenExpansionReading(BaseBash):
         # bare expansion word が機密 operand より **後ろ** にある
         "grep -e KEY .env $X",
         "tar -cf out.tar .env $X",
+        # --- R5: 距離が spec の宣言 arity を超える形 (deny 維持) ---
+        # 展開は自分の位置より後ろに語を挿し込めないので、operand を値として
+        # 飲み込むには「operand の d 語前に arity >= d の option」が要る。
+        # jq の宣言 arity は最大 2 なので 3 語前からは届かない
+        'jq . "$X" NAME other .env',
+        # git log は pattern 枠を持たず、宣言 arity は 1 だけ
+        'git log "$OPT" other .env',
+        "diff $OPT other .env",
+        # git の global option 区間より **後ろ** の語 (サブコマンド確定後) は
+        # 区間の代表 (`-C`) に化けても operand の役割を変えない
+        "git log $OPT -- .env",
+        "cat $A $B .env",
+        "cat $A $B $C .env",
+        "tar -cf out.tar .env $A $B",
     )
 
     def test_option_token_reading_disagrees_keeps_ask_or_allow(self):
@@ -3268,69 +3313,173 @@ class TestOptionTokenExpansionReading(BaseBash):
         self.assertIn("hard_stop_literal_option_ambiguous", labels)
         self.assertNotIn("hard_stop_literal_deny", labels)
 
-    def test_many_bare_expansion_words_falls_back_to_ask(self):
-        # 読み 3 は bare expansion word 1 つにつき 1 回 operand scan を回すので
-        # 上限 (`_MAX_OPTION_READINGS`) を設けている。超えたら救済 scan を
-        # 諦める (摩擦側 = ask)。上限は hook の 2 秒 timeout 予算からの逆算で、
-        # 実在する形の最大 (コーパス実測で 2 語) の 2 倍。
+    def test_many_readings_falls_back_to_ask(self):
+        # 読み 3 は「bare expansion word 数 × arity 種類数」だけ operand scan を
+        # 回すので、**読みの総数**に上限 (`_MAX_OPTION_READINGS`) を設けている。
+        # 超えたら救済 scan を諦める (摩擦側 = ask)。上限は hook の 2 秒 timeout
+        # 予算からの逆算 (コーパス実測の最大は 4 読み)。
+        from handlers.bash.operand_lexer import _option_reading_tokens
         from handlers.bash_handler import _MAX_OPTION_READINGS
-        n = _MAX_OPTION_READINGS + 1
-        bare = " ".join(f"${chr(ord('A') + i)}" for i in range(n))
-        cmd = f"grep -e K {bare} .env"
-        self.assertEqual(_decision(handle(_make_envelope(cmd, self.tmp))), "ask")
+
+        # 読みの総数 = 語数 × (代表数 - 1) + 1 (arity 0 の読みは全語で 1 つに
+        # 畳まれる)。上限を跨ぐ語数をその式から逆算する
+        arities = len(_option_reading_tokens(["grep", "x"]))  # flag + arity 1
+        self.assertGreater(arities, 1)
+        at_limit = (_MAX_OPTION_READINGS - 1) // (arities - 1)
+        over = at_limit + 1
+
+        def bare_words(n: int) -> str:
+            return " ".join(f"${chr(ord('A') + i)}" for i in range(n))
+
+        # 読みの総数が上限を **超える** 語数 → 評価せず諦めて ask。
+        # 「読みが食い違った」のではなく「測っていない」ので別ラベルで数える
+        cmd = f"grep -e K {bare_words(over)} .env"
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            self.assertEqual(_decision(handle(_make_envelope(cmd, self.tmp))), "ask")
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_option_budget", labels)
+        self.assertNotIn("hard_stop_literal_option_ambiguous", labels)
+
         # 上限ちょうどなら読みを作る (諦めるのは超過時だけ)。この形も読み 3 で
         # 役割が変わるので結論は ask だが、経路が違う (専用ラベルで区別)。
-        at_limit = " ".join(f"${chr(ord('A') + i)}"
-                            for i in range(_MAX_OPTION_READINGS))
+        self.assertGreaterEqual(at_limit, 1)
         with mock.patch("handlers.bash_handler.L.log_info") as spy:
-            handle(_make_envelope(f"grep -e K {at_limit} .env", self.tmp))
+            handle(_make_envelope(
+                f"grep -e K {bare_words(at_limit)} .env", self.tmp))
         labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
         self.assertIn("hard_stop_literal_option_ambiguous", labels)
 
-    def test_option_value_token_unit(self):
-        from handlers.bash.operand_lexer import _option_value_token
-        # 分離形で non-path の値を 1 つ取る option を spec 宣言順で 1 つ借りる
-        self.assertEqual(_option_value_token(["grep", "x"]), "-e")
-        self.assertEqual(_option_value_token(["git", "log", "x"]), "-S")
-        self.assertEqual(_option_value_token(["tar", "x"]), "--exclude")
-        # 値 2 つ (``jq --arg NAME VALUE``) は選ばず 1 語 consume の option を選ぶ
-        self.assertEqual(_option_value_token(["jq", "x"]), "--indent")
-        # spec が無いコマンド → 読み 3 は成立しない
-        self.assertIsNone(_option_value_token(["cat", "x"]))
-        self.assertIsNone(_option_value_token(["head", "x"]))
-        self.assertIsNone(_option_value_token([]))
+    def test_option_reading_tokens_unit(self):
+        from handlers.bash.operand_lexer import (
+            _FLAG_OPTION_TOKEN,
+            _option_reading_tokens,
+        )
+        f = _FLAG_OPTION_TOKEN
+        # arity ごとに代表を 1 つ。arity 0 (値を取らない flag) は spec の有無に
+        # 依らず必ず入る。代表は「値が全て non-path」かつ「pattern_opt でない」
+        # ものを優先する (同 arity の他の option を支配するため)
+        self.assertEqual(_option_reading_tokens(["grep", "x"]), [f, "--include"])
+        self.assertEqual(_option_reading_tokens(["tar", "x"]), [f, "--exclude"])
+        # git は option 表が 2 つ (global / サブコマンド) あるので両方から借りる
+        self.assertEqual(_option_reading_tokens(["git", "log", "x"]), [f, "-C", "-S"])
+        self.assertEqual(_option_reading_tokens(["git", "x"]), [f, "-C"])
+        from handlers.bash.constants import _GIT_GLOBAL_VALUE_OPTS
+        from handlers.bash.operand_lexer import _GIT_GLOBAL_VALUE_REPRESENTATIVE
+        self.assertIn(_GIT_GLOBAL_VALUE_REPRESENTATIVE, _GIT_GLOBAL_VALUE_OPTS)
+        # 値 2 つの option (``jq --arg NAME VALUE``) も arity 2 の代表として入る
+        self.assertEqual(_option_reading_tokens(["jq", "x"]), [f, "--indent", "--arg"])
+        # spec が無いコマンド → arity 0 の読みだけ
+        self.assertEqual(_option_reading_tokens(["cat", "x"]), [f])
+        self.assertEqual(_option_reading_tokens(["head", "x"]), [f])
+        self.assertEqual(_option_reading_tokens([]), [f])
+
+    def test_flag_option_token_is_inert_for_every_spec(self):
+        # arity 0 の合成トークンは「値を取らない未知の long option」として
+        # 解釈されなければならない。どれかの spec の long option と完全一致 /
+        # prefix 一致すると値を consume してしまい arity 0 の読みでなくなる。
+        from handlers.bash.command_specs import _SPECS
+        from handlers.bash.operand_lexer import (
+            _FLAG_OPTION_TOKEN,
+            _find_path_candidates,
+            _resolve_long_option,
+        )
+        for name, spec in _SPECS.items():
+            with self.subTest(cmd=name):
+                self.assertIsNone(
+                    _resolve_long_option(_FLAG_OPTION_TOKEN, spec.values))
+                self.assertNotIn(_FLAG_OPTION_TOKEN, spec.pattern_opts)
+        # spec の無いコマンドでも候補にならない (`-X<value>` 密着形と誤読しない)
+        self.assertEqual(
+            _find_path_candidates(["cat", _FLAG_OPTION_TOKEN, "README.md"]),
+            ["README.md"],
+        )
+
+    def test_spec_table_has_dominant_option_per_arity(self):
+        """spec は arity ごとに「値が全て non-path」かつ「pattern_opt でない」
+        option を宣言している。
+
+        この不変が成り立つ限り、arity ごとに代表を **1 つ** 選べば同 arity の
+        他の option を支配する (``p`` の値は候補に残り、pattern_opt は pattern
+        枠を閉じて候補を増やすので、どちらも deny を崩さない = 反例として弱い)。
+        崩れると「代表では ask にならないが他の option なら ask になる」形が
+        生まれるので、spec を足すときはここで気付けるようにしておく。
+
+        同時に「複数語が同時に flag に化ける組合せ」の読みが不要な根拠でもある
+        (pattern 枠に operand を落とす読みは、operand の直前語を arity >= 1 の
+        代表に置き換えた単語ごとの読みが必ず作るため)。
+        """
+        from handlers.bash.command_specs import _SPECS, _VALUE_NON_PATH, _split_kinds
+        for name, spec in _SPECS.items():
+            arities: dict[int, list[str]] = {}
+            for opt, raw in spec.values.items():
+                attached_only, kinds = _split_kinds(raw)
+                if attached_only or not kinds:
+                    continue
+                arities.setdefault(len(kinds), []).append(opt)
+            for arity, opts in arities.items():
+                with self.subTest(cmd=name, arity=arity):
+                    dominant = [
+                        o for o in opts
+                        if _split_kinds(spec.values[o])[1]
+                        == _VALUE_NON_PATH * arity
+                        and o not in spec.pattern_opts
+                    ]
+                    self.assertTrue(
+                        dominant,
+                        msg=(f"{name} の arity {arity} に「全 non-path かつ "
+                             f"pattern_opt でない」option が無い: {opts}"),
+                    )
 
     def test_expansion_option_readings_unit(self):
         from handlers.bash.segmentation import (
             _EXPANSION_PLACEHOLDER,
             _expansion_option_readings,
         )
-        p = _EXPANSION_PLACEHOLDER
-        # bare expansion word 1 つにつき 1 読み。クォート形も対象
+        opts = ["-0", "-1", "-2"]  # arity 代表の並び (先頭 = arity 0 の flag)
+        # 読みは (bare expansion word) × (arity 代表) の全組合せ。クォート形も対象
         self.assertEqual(
-            _expansion_option_readings("grep -e KEY $X .env", "-e", limit=8),
-            ["grep -e KEY -e .env"],
+            _expansion_option_readings("grep -e KEY $X .env", opts[:1], limit=8),
+            ["grep -e KEY -0 .env"],
         )
         self.assertEqual(
-            _expansion_option_readings('grep "$PAT" .env', "-e", limit=8),
-            ["grep -e .env"],
+            _expansion_option_readings("grep -e KEY $X .env", opts, limit=8),
+            ["grep -e KEY -0 .env", "grep -e KEY -1 .env", "grep -e KEY -2 .env"],
         )
         self.assertEqual(
-            _expansion_option_readings("grep -e K $A $B .env", "-e", limit=8),
-            [f"grep -e K -e {p} .env", f"grep -e K {p} -e .env"],
+            _expansion_option_readings('grep "$PAT" .env', opts[:2], limit=8),
+            ["grep -0 .env", "grep -1 .env"],
+        )
+        # 対象外の bare expansion word は **背景の flag** (opts[0]) に置く。
+        # 「全部 flag」の読みはどの対象からも同じ文字列になるので 1 つに畳む
+        self.assertEqual(
+            _expansion_option_readings("grep -e K $A $B .env", opts[:2], limit=8),
+            ["grep -e K -0 -0 .env", "grep -e K -1 -0 .env", "grep -e K -0 -1 .env"],
         )
         # 語の内部に展開がある形は bare expansion word ではない (動機ケース)
         self.assertEqual(
-            _expansion_option_readings("cat $PWD/.env", "-e", limit=8), []
+            _expansion_option_readings("cat $PWD/.env", opts, limit=8), []
         )
         self.assertEqual(
-            _expansion_option_readings('cat "$PWD"/.env', "-e", limit=8), []
+            _expansion_option_readings('cat "$PWD"/.env', opts, limit=8), []
         )
         # 置換対象が無ければ空
-        self.assertEqual(_expansion_option_readings("cat .env", "-e", limit=8), [])
-        # 上限超過は None (呼び出し側は救済 scan を諦める)
+        self.assertEqual(_expansion_option_readings("cat .env", opts, limit=8), [])
+        # arity 0 の代表しか無いコマンドは、語がいくつあっても読みは 1 つ
+        # (どの語を対象にしても「全部 flag」の同一文字列になるため)
+        self.assertEqual(
+            _expansion_option_readings("cat $A $B $C .env", opts[:1], limit=2),
+            ["cat -0 -0 -0 .env"],
+        )
+        # 上限は **読みの総数** = 語数 × (代表数 - 1) + 1。超過は None
+        # (救済 scan を諦める)
         self.assertIsNone(
-            _expansion_option_readings("grep -e K $A $B .env", "-e", limit=1)
+            _expansion_option_readings("grep -e K $A $B .env", opts[:2], limit=2)
+        )
+        self.assertIsNotNone(
+            _expansion_option_readings("grep -e K $A $B .env", opts[:2], limit=3)
+        )
+        self.assertIsNone(
+            _expansion_option_readings("grep -e K $A .env", opts, limit=2)
         )
 
 
