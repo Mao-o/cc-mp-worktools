@@ -67,6 +67,17 @@ class TestFormatMultiplier(unittest.TestCase):
         self.assertEqual(message._format_multiplier(1.5), "1.5")
         self.assertEqual(message._format_multiplier(1.6), "1.6")
 
+    def test_small_value_preserves_significant_digits(self):
+        # P2-2 回帰: 固定小数点2桁 (`.2f`) 表示だと 0.004 は "0.00" に潰れ、
+        # 末尾ゼロ除去処理を経て "0.0" になっていた。judge は 0.004 を
+        # そのまま実効閾値の計算に使っているため、表示が実態と食い違う。
+        self.assertEqual(message._format_multiplier(0.004), "0.004")
+
+    def test_near_neutral_value_preserves_significant_digits(self):
+        # P2-2 回帰: 1.004 も同じ理由で "1.00" → "1.0" に潰れ、中立値 1.0 と
+        # 見分けがつかなくなっていた。
+        self.assertEqual(message._format_multiplier(1.004), "1.004")
+
 
 class TestSignalCountZeroFallback(unittest.TestCase):
     """宣言的コードの推測は実際に緩和が適用されたときだけ表示する。"""
@@ -173,6 +184,23 @@ class TestScaleNote(unittest.TestCase):
         text = message.build(Path("foo_test.py"), "python", "test", v, _metrics())
         self.assertIn("(全体 0.5倍)", text)
         self.assertIn("(test: 閾値 1.6倍)", text)
+
+    def test_scale_note_preserves_significant_digits_for_small_scale(self):
+        # P2-2 回帰: 0.004 は固定2桁表示だと "0.00" → "0.0" に潰れ、judge が
+        # 実際に使っている極小の倍率と食い違って見えていた。
+        v = _verdict(tier="warn", scale=0.004)
+        text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
+        self.assertIn("(全体 0.004倍)", text)
+        self.assertNotIn("(全体 0.0倍)", text)
+
+    def test_scale_note_preserves_significant_digits_near_neutral(self):
+        # P2-2 回帰: 1.004 は固定2桁表示だと中立値 1.0 と区別がつかない
+        # "(全体 1.0倍)" になり、「倍率をかけている」という主張自体が
+        # 読み取れなくなっていた。
+        v = _verdict(tier="warn", scale=1.004)
+        text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
+        self.assertIn("(全体 1.004倍)", text)
+        self.assertNotIn("(全体 1.0倍)", text)
 
 
 class TestPartialThresholds(unittest.TestCase):

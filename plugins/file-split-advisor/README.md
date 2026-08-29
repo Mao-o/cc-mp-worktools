@@ -115,7 +115,7 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 | `FILE_SPLIT_ADVISOR_MAX_EMITS` | `20` | セッション内の最大 emit 回数 |
 | `FILE_SPLIT_ADVISOR_CWD_ONLY` | (未設定) | `1`/`true`/`yes`/`on` で `cwd` 外のファイルを skip する。既定 off — `--add-dir` で cwd 外を正当に編集する運用を壊さないための opt-in |
 | `FILE_SPLIT_ADVISOR_IGNORE` | (未設定) | 判定対象から除外する glob (カンマ区切り、fnmatch)。ファイル名・フルパスの両方に対して判定する |
-| `FILE_SPLIT_ADVISOR_SCALE` | `1.0` | 全閾値 (note/review/warn/strong) に一律で掛ける倍率。0 以下・数値に変換できない値・`nan`/`inf` 等の非有限値に加え、他の係数 (言語/role/宣言的緩和) と組み合わせた結果が非有限になるほど巨大な値 (例: `1e308`) も既定 (1.0) にフォールバックする |
+| `FILE_SPLIT_ADVISOR_SCALE` | `1.0` | 全閾値 (note/review/warn/strong) に一律で掛ける倍率。0 以下・数値に変換できない値・`nan`/`inf` 等の非有限値に加え、他の係数 (言語/role/宣言的緩和) と組み合わせた結果が非有限になるほど巨大な値 (例: `1e308`) も既定 (1.0) にフォールバックする。メモの目安に表示される倍率 (`(全体 N倍)`) は設定値をそのまま反映し、固定桁数への丸めは行わない (`0.004` は `0.004倍`、`1.004` は `1.004倍` と表示され、いずれも中立値 `1.0倍` と区別できる) |
 
 `FILE_SPLIT_ADVISOR_IGNORE` に加え、`~/.claude/file-split-advisor/ignore.local.txt`
 (1 行 1 glob、`#` 始まりはコメント、空行は無視) があれば読み込んで併用する
