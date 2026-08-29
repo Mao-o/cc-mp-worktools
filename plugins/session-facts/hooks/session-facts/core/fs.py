@@ -29,8 +29,19 @@ def safe_iterdir(path: Path) -> List[Path]:
 
 def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
     """True when any of ``markers`` (root-relative paths, e.g. from
-    core/constants.py's PROJECT_MARKERS) exists directly under ``root``."""
-    return any((root / marker).exists() for marker in markers)
+    core/constants.py's PROJECT_MARKERS) exists directly under ``root``.
+
+    A marker containing a glob metacharacter (``*`` or ``?``, e.g.
+    ``*.csproj`` for a stack with no fixed manifest filename) is matched via
+    ``Path.glob()`` instead of a literal ``exists()`` check.
+    """
+    for marker in markers:
+        if "*" in marker or "?" in marker:
+            if any(root.glob(marker)):
+                return True
+        elif (root / marker).exists():
+            return True
+    return False
 
 
 def walk_files(

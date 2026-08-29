@@ -22,6 +22,7 @@ from unittest import mock
 import _testutil  # noqa: F401  (sys.path 整備)
 
 from cli import main
+from core.fs import has_project_markers
 from core.git import git_ls_files
 
 
@@ -135,6 +136,40 @@ class MainSurvivesHostileEncodingTest(unittest.TestCase):
             decoded = raw.getvalue().decode("utf-8")
             self.assertIn("## Structure", decoded)
             self.assertIn("dirA", decoded)
+
+
+class HasProjectMarkersGlobTest(unittest.TestCase):
+    """internal backlog P2-1: two PROJECT_MARKERS entries (*.csproj, *.tf)
+    have no fixed filename, so has_project_markers() must also support
+    glob patterns, not just a literal exists() check."""
+
+    def test_glob_marker_matches_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MyApp.csproj").write_text("<Project />\n")
+            self.assertTrue(has_project_markers(root, ["*.csproj"]))
+
+    def test_glob_marker_does_not_match_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            self.assertFalse(has_project_markers(root, ["*.csproj", "*.tf"]))
+
+    def test_literal_marker_still_uses_exists_check(self):
+        # A non-glob entry must keep working exactly as before (a literal
+        # relative-path exists() check, not accidentally glob-matched).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "go.mod").write_text("module x\n")
+            self.assertTrue(has_project_markers(root, ["go.mod"]))
+            self.assertFalse(has_project_markers(root, ["Cargo.toml"]))
+
+    def test_directory_marker_matches_via_exists(self):
+        # detectors/prisma.py checks a bare "prisma" directory, not a file.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "prisma").mkdir()
+            self.assertTrue(has_project_markers(root, ["prisma"]))
 
 
 if __name__ == "__main__":

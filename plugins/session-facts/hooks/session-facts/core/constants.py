@@ -169,13 +169,31 @@ DEFAULT_MAX_OUTPUT_CHARS = 8000
 # the ## Scripts section on its own; cap each command's displayed length.
 MAX_SCRIPT_COMMAND_CHARS = 120
 
-# cli.py: root-level files that mark a directory as "a project" worth the
-# (potentially expensive, filesystem-walking) non-git analysis at all.
-# Deliberately broad -- one entry per stack this plugin's own detectors
-# already recognise -- because a false negative here (a real, marker-having
-# project mistaken for a bare directory) silently drops facts for a
-# legitimate repo, which is worse than occasionally still walking a
-# marker-light edge case.
+# cli.py: root-level files/dirs that mark a directory as "a project" worth
+# the (potentially expensive, filesystem-walking) non-git analysis at all.
+# A false negative here (a real project mistaken for a bare directory)
+# silently drops facts for a legitimate repo, which is worse than
+# occasionally still walking a marker-light edge case -- so both tiers
+# below deliberately err toward inclusion, not toward a tight, provable
+# scope.
+#
+# Tier 1: every static file/dir that one of this plugin's own detectors/
+# or collectors/ already keys off of directly (mechanically grepped for
+# ``.exists()`` checks against a literal name), so a stack this plugin
+# already recognises is never skipped by the gate. A handful of entries
+# predate that discipline and match no current detector at all
+# (Pipfile/setup.cfg/setup.py/requirements.txt -- detectors/python_stack.py
+# only reads pyproject.toml or a whole-tree .py-file-ratio heuristic that a
+# marker *filename* fundamentally cannot express); they are kept for the
+# same false-negative-avoidance reason, not removed for consistency.
+#
+# Tier 2: common project roots for stacks this plugin has no detector for
+# at all yet (C/C++, Swift, Elixir, Scala, .NET, Terraform). Still worth a
+# walk: the generic collectors (Structure, Test Snapshot, Scripts, ...)
+# produce useful output even without a "stack:" line naming the language.
+# Two of these are glob patterns (matched via has_project_markers()'s
+# Path.glob() branch, not a literal exists() check) since the manifest
+# filename is project-specific, not fixed.
 PROJECT_MARKERS = (
     "package.json",
     "pyproject.toml",
@@ -204,6 +222,47 @@ PROJECT_MARKERS = (
     "marketplace.json",
     ".claude-plugin/plugin.json",
     ".claude-plugin/marketplace.json",
+    # detectors/docker.py
+    "Dockerfile",
+    *COMPOSE_FILE_CANDIDATES,
+    # detectors/mise.py, via core/runtime.py's has_mise()/_MISE_CONFIG_NAMES
+    ".mise.toml",
+    "mise.toml",
+    ".config/mise/config.toml",
+    ".tool-versions",
+    # detectors/nextjs.py
+    *NEXT_CONFIG_CANDIDATES,
+    # detectors/node_typescript.py
+    "tsconfig.json",
+    "tsconfig.base.json",
+    # detectors/prisma.py (directory, not a file -- exists() doesn't care)
+    "prisma",
+    # detectors/python_stack.py
+    "uv.lock",
+    "uv.toml",
+    "poetry.lock",
+    # detectors/react_vite.py
+    "vite.config.ts",
+    "vite.config.js",
+    # detectors/taskrunner.py
+    "nx.json",
+    # detectors/testing.py
+    "pnpm-workspace.yaml",
+    "turbo.json",
+    "playwright.config.ts",
+    "cypress.config.ts",
+    # collectors/repo_notes.py's firebase-integration note wording
+    "firebase.json",
+    ".firebaserc",
+    # Tier 2 (see module comment above)
+    "CMakeLists.txt",
+    "Package.swift",
+    "mix.exs",
+    "build.sbt",
+    "Cargo.lock",
+    "Gemfile.lock",
+    "*.csproj",
+    "*.tf",
 )
 
 # hub_files collector (core/imports.py + collectors/hub_files.py): scanning
