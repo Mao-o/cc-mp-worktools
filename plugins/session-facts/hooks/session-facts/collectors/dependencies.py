@@ -125,6 +125,47 @@ def parse_setup_cfg_requires(text: str) -> List[Tuple[str, str]]:
     return parse_requirements("\n".join(block))
 
 
+def parse_setup_cfg_extras_require(text: str) -> List[Tuple[str, str]]:
+    """Parse every extra's requirement list under
+    ``[options.extras_require]`` from a setup.cfg blob, flattened into one
+    combined (name, version) list.
+
+    Mirrors :func:`parse_setup_cfg_requires`'s state machine, but that
+    section can define many keys (``test =``, ``docs =``, ...), each
+    opening its own (possibly multi-line) value -- so here a new
+    unindented ``key = ...`` line starts a fresh capture instead of ending
+    the section (the original only ever tracks the single
+    ``install_requires`` key, so any later unindented line safely means
+    "done"). Used only by :func:`is_python_dependency_declared` -- a
+    test/dev extra like pytest is not a "major" runtime dependency, so
+    :func:`_collect_major_dependencies` intentionally keeps ignoring this
+    section (existing, tested behaviour -- see
+    ``tests/test_dependencies.py::ParseSetupCfgTest``).
+    """
+    block: List[str] = []
+    in_section = False
+    for line in text.splitlines():
+        if line.startswith("["):
+            in_section = line.strip() == "[options.extras_require]"
+            continue
+        if not in_section:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line[:1].isspace():
+            block.append(stripped)
+            continue
+        # Unindented, non-empty line inside the section: a new "<extra> ="
+        # key opening its own value (inline and/or indented continuation).
+        _key, sep, inline = line.partition("=")
+        if sep:
+            inline = inline.strip()
+            if inline:
+                block.append(inline)
+    return parse_requirements("\n".join(block))
+
+
 def parse_pubspec_deps(text: str) -> List[Tuple[str, str]]:
     """Parse top-level dependencies / dev_dependencies from pubspec.yaml.
 
@@ -417,7 +458,14 @@ def is_python_dependency_declared(ctx: RepoContext, name: str) -> bool:
     when pyproject.toml exists and mentions pytest, so a project declaring
     it solely via requirements*.txt / Pipfile / setup.cfg was invisible to
     that check even though this module's own parsers already read those
-    files.
+    files. The setup.cfg check also looks at
+    :func:`parse_setup_cfg_extras_require` (``[options.extras_require]``,
+    e.g. a ``test = pytest`` extra) in addition to
+    :func:`parse_setup_cfg_requires` (``[options] install_requires``) --
+    unlike ``_collect_major_dependencies()``, this question ("is the
+    package available at all, for the purpose of picking a test runner")
+    does not care whether the declaration is an optional extra or a core
+    runtime dependency.
     """
     target = name.lower()
     root = ctx.root
@@ -445,9 +493,15 @@ def is_python_dependency_declared(ctx: RepoContext, name: str) -> bool:
             return True
 
     for rel in _tracked_with_basename(ctx, "setup.cfg")[:_MAX_DEP_FILES]:
+        text = read_text(root / rel)
         if any(
             dep_name.lower() == target
-            for dep_name, _v in parse_setup_cfg_requires(read_text(root / rel))
+            for dep_name, _v in parse_setup_cfg_requires(text)
+        ):
+            return True
+        if any(
+            dep_name.lower() == target
+            for dep_name, _v in parse_setup_cfg_extras_require(text)
         ):
             return True
 

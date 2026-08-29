@@ -19,6 +19,7 @@ from collectors.dependencies import (
     parse_poetry_deps,
     parse_pubspec_deps,
     parse_requirements,
+    parse_setup_cfg_extras_require,
     parse_setup_cfg_requires,
 )
 from core.context import AnalysisConfig, RepoContext
@@ -95,6 +96,47 @@ dev =
         self.assertEqual(result["sqlalchemy"], "1.4")
         # pytest is under extras_require, not install_requires -> excluded
         self.assertNotIn("pytest", result)
+
+
+class ParseSetupCfgExtrasRequireTest(unittest.TestCase):
+    """Isolated-review P2-c (PR #67 round 2): parse_setup_cfg_requires()
+    only ever reads [options] install_requires (by design -- extras are not
+    "major" runtime dependencies, see ParseSetupCfgTest above), so a
+    project declaring pytest solely as a setup.cfg test extra (a common
+    convention: ``[options.extras_require] test = pytest``) was invisible
+    to is_python_dependency_declared(), which fell back to suggesting
+    unittest discovery for root-level pytest-style tests and collected
+    zero. parse_setup_cfg_extras_require() answers "is X declared as *any*
+    extra" instead."""
+
+    def test_multiline_multiple_extras(self):
+        text = """\
+[options]
+install_requires =
+    flask>=2.0
+
+[options.extras_require]
+test =
+    pytest
+    pytest-cov
+docs =
+    sphinx
+"""
+        result = dict(parse_setup_cfg_extras_require(text))
+        self.assertEqual(result["pytest"], "")
+        self.assertIn("pytest-cov", result)
+        self.assertIn("sphinx", result)
+        # install_requires is a different section -> not folded in here
+        self.assertNotIn("flask", result)
+
+    def test_inline_extra_value(self):
+        text = "[options.extras_require]\ntest = pytest>=6.0\n"
+        result = dict(parse_setup_cfg_extras_require(text))
+        self.assertEqual(result["pytest"], "6.0")
+
+    def test_no_extras_require_section_returns_empty(self):
+        text = "[options]\ninstall_requires =\n    flask\n"
+        self.assertEqual(parse_setup_cfg_extras_require(text), [])
 
 
 class ParsePubspecTest(unittest.TestCase):
@@ -265,6 +307,28 @@ class IsPythonDependencyDeclaredTest(unittest.TestCase):
                 "setup.cfg": "[options]\ninstall_requires =\n    pytest\n",
             })
             self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_declared_in_setup_cfg_extras_require(self):
+        # Isolated-review P2-c (PR #67 round 2): the common
+        # `[options.extras_require] test = pytest` convention -- previously
+        # invisible because only install_requires was parsed.
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "setup.cfg": "[options.extras_require]\ntest =\n    pytest\n",
+            })
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+
+    def test_setup_cfg_extras_require_alone_does_not_affect_major_deps(self):
+        # _collect_major_dependencies() must keep excluding extras (existing
+        # behaviour -- ParseSetupCfgTest.test_multiline_install_requires):
+        # is_python_dependency_declared() answering "yes" for the extras-only
+        # case must not be achieved by changing what counts as a major dep.
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, {
+                "setup.cfg": "[options.extras_require]\ntest =\n    pytest\n",
+            })
+            self.assertTrue(is_python_dependency_declared(ctx, "pytest"))
+            self.assertEqual(_collect_major_dependencies(ctx, max_items=8), [])
 
     def test_declared_in_pyproject_pep621(self):
         with tempfile.TemporaryDirectory() as tmp:

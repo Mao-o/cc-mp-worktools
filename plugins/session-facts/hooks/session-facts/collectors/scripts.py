@@ -92,20 +92,103 @@ def _has_compose_file(root: Path) -> bool:
     return any((root / f).exists() for f in COMPOSE_FILE_CANDIDATES)
 
 
+_PYTEST_STYLE_NAME_RE = re.compile(r"^(test_.+|.+_test)\.py$")
+
+# A base-class list containing a literal "TestCase" (``unittest.TestCase``,
+# a bare ``TestCase`` import, or a project's own ``...TestCase`` helper
+# base) -- the shape unittest's TestLoader can actually collect. Matches
+# multi-line class headers too (``[^)]`` includes newlines).
+_UNITTEST_CLASS_RE = re.compile(r"class\s+\w+\s*\([^)]*TestCase\b")
+
+
+def _looks_like_unittest_test(text: str) -> bool:
+    """True when ``text`` defines at least one class whose base-class list
+    contains a literal ``TestCase``.
+
+    A module of bare ``def test_x():`` functions (pytest's convention, not
+    unittest's) is *not* discoverable by ``unittest discover``: its
+    TestLoader walks ``TestCase`` subclasses, never bare module-level
+    functions (verified empirically: a ``tests/test_a.py`` containing only
+    ``def test_a(): assert True`` yields "Ran 0 tests" under
+    ``python3 -m unittest discover tests``). This is a regex on the class
+    header, not a full parse, so it will not follow indirect inheritance
+    through an import alias -- a false negative there only costs a missed
+    (safe) suggestion, never a wrong one.
+    """
+    return bool(_UNITTEST_CLASS_RE.search(text))
+
+
 def _has_root_unittest_tests(ctx: RepoContext) -> bool:
     """True when a root-level ``tests/`` directory contains at least one
-    ``test_*.py`` file -- the exact layout ``python3 -m unittest discover
-    tests`` needs (discovery starts at ``tests`` relative to the invocation
-    root). A test file living under ``spec/``/``e2e/`` or nested inside a
-    subproject (e.g. ``hooks/x/tests/``) does not satisfy this -- discover
-    would find nothing there.
+    ``test_*.py`` file that ``python3 -m unittest discover tests`` can both
+    import and actually collect a test from.
+
+    Three positive conditions, each verified empirically against a real
+    interpreter, must hold together:
+
+    1. The file's own name matches ``test_*.py`` (discover's default
+       ``-p``/``--pattern``). A file living under ``spec/``/``e2e/`` or
+       nested inside a subproject (e.g. ``hooks/x/tests/``) never reaches
+       this scan at all -- its first path segment is not ``tests``.
+    2. It is importable from the top-level ``tests/`` directory: either it
+       sits directly under ``tests/`` (the start directory itself is only
+       walked, never imported -- a direct child needs no ``__init__.py``
+       anywhere), or every directory strictly between ``tests/`` and the
+       file has its own tracked ``__init__.py`` (each intermediate package
+       needs one, but ``tests/`` itself still does not -- verified across
+       one- and two-level nesting). A ``test_*.py`` sitting in a non-package
+       subdirectory of ``tests/`` (no ``__init__.py`` there) does not
+       satisfy this -- discover reports "Ran 0 tests" for it.
+    3. Its content defines a ``unittest.TestCase`` subclass (see
+       :func:`_looks_like_unittest_test`) -- a module of bare pytest-style
+       functions satisfies 1 and 2 but is collected as zero tests by
+       unittest's TestLoader.
     """
+    tracked = set(ctx.tracked_files)
     for path_str in ctx.tracked_files:
         parts = Path(path_str).parts
-        if len(parts) >= 2 and parts[0] == "tests":
-            name = parts[-1]
-            if name.startswith("test_") and name.endswith(".py"):
-                return True
+        if len(parts) < 2 or parts[0] != "tests":
+            continue
+        name = parts[-1]
+        if not (name.startswith("test_") and name.endswith(".py")):
+            continue
+        if len(parts) > 2:
+            # Every directory strictly between "tests" (parts[0], excluded)
+            # and the file (parts[-1], excluded) must itself be a tracked
+            # package for `discover` to import it.
+            importable = all(
+                "/".join(parts[: depth + 1] + ("__init__.py",)) in tracked
+                for depth in range(1, len(parts) - 1)
+            )
+            if not importable:
+                continue
+        if _looks_like_unittest_test(read_text(ctx.root / path_str)):
+            return True
+    return False
+
+
+def _has_python_test_files(ctx: RepoContext) -> bool:
+    """True when at least one tracked Python file matches pytest's own
+    default collection name pattern (``test_*.py`` / ``*_test.py`` --
+    pytest's ``python_files`` default), independent of directory.
+
+    Deliberately filename-based rather than reused from either signal
+    already in this module:
+
+    - ``core.util.is_test_path()`` (via ``test_snapshot['test_files']``) is
+      directory-marker based -- any file sitting under a dir named
+      tests/spec/e2e/... counts, including a bare ``conftest.py`` or
+      ``__init__.py`` that defines no test at all, which would make an
+      otherwise test-less ``tests/`` scaffold look like "has Python tests".
+    - ``test_snapshot['test_files']`` is also summed across *every*
+      language via ``CODE_EXTENSIONS``, so a TypeScript-only test suite in
+      a mixed-language repo leaves that count non-zero with zero Python
+      test files (isolated-review P2-a, PR #67 round 2).
+    """
+    for path_str in ctx.tracked_files:
+        p = Path(path_str)
+        if p.suffix.lower() == ".py" and _PYTEST_STYLE_NAME_RE.match(p.name):
+            return True
     return False
 
 
@@ -115,17 +198,24 @@ def _test_tool_name(ctx: RepoContext) -> Optional[str]:
     declared in requirements*.txt / Pipfile / setup.cfg (python_stack.py's
     stack entry only ever comes from a pyproject.toml substring match, so a
     project declaring pytest solely via one of those other files would
-    otherwise be invisible here); the literal ``unittest discover tests``
-    invocation when neither holds but a root-level ``tests/`` directory
-    grounds it (see :func:`_has_root_unittest_tests`); ``None`` when there
-    is no test_files signal at all, or when nothing grounds either command
-    -- callers must suggest nothing rather than guess a command that would
-    fail.
+    otherwise be invisible here) -- AND ONLY when at least one tracked file
+    actually looks like a Python test module (see
+    :func:`_has_python_test_files`; a mixed-language repo can have
+    ``test_snapshot['test_files'] > 0`` from other languages alone while
+    having zero Python tests, in which case a bare pytest dependency must
+    not be enough to suggest ``pytest``). The literal ``unittest discover
+    tests`` invocation when neither holds but a root-level ``tests/``
+    directory grounds it (see :func:`_has_root_unittest_tests`); ``None``
+    when there is no test_files signal at all, or when nothing grounds
+    either command -- callers must suggest nothing rather than guess a
+    command that would fail.
     """
     test_snapshot = ctx.results.get("test_snapshot") or {}
     if not test_snapshot.get("test_files"):
         return None
-    if "pytest" in ctx.stack or is_python_dependency_declared(ctx, "pytest"):
+    if _has_python_test_files(ctx) and (
+        "pytest" in ctx.stack or is_python_dependency_declared(ctx, "pytest")
+    ):
         return "pytest"
     if _has_root_unittest_tests(ctx):
         return "unittest discover tests"
