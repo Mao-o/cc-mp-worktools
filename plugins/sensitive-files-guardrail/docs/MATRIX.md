@@ -252,6 +252,15 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `shopt -s dotglob; cat *`, `GLOBIGNORE=x; cat *`, `setopt globdots; cat *` (0.22.0: 同一コマンド内で dotglob 系を有効化すると `*` は dotfile にも展開されるので fnmatch の意味論に戻す) |
 | `cat $PWD/.env`, `cat ${PWD}/.env`, `cat "$PWD/.env"`, `REPO=. ; cat $REPO/.env`, `grep KEY $CFG/.env`, `head -n 3 ${DIR}/.env`, `cat $HOME/keys/server.pem`, `cat $X/id_rsa`, `cp $SRC/.env /tmp/x`, `cat $D/.env*`, `shopt -s dotglob; cat $D/*` (0.25.0: 単純変数展開を placeholder に置換した救済 scan。展開結果に依らず basename が機密 pattern に一致する形だけ deny) |
 | `cat $OPTS .env`, `cat $X .env`, `head -n $N .env`, `tar -cf out.tar $X .env`, `grep "$PAT" .env`, `grep -e KEY $X .env`, `grep -f $F .env` (0.25.0: 変数と同居していても literal operand は救済 scan が拾う。**語が消える読みでも機密ファイル operand になる形に限る** — 下の ask / allow 表を参照) |
+
+> **spec 被覆に依存する境界 (0.25.0 の開示)**: 語が消える読みの解釈は
+> `command_specs` に依存する。`head -n $N .env` は deny、`git log -n $N .env` は
+> ask — 違いは `-n` が値を取る option として登録されているかだけで、実 bash では
+> `head -n .env` も (invalid number で) ファイルを開かない。spec 未登録の
+> コマンドは 0 語読みでも positional 扱いになり、literal 形 (`head -n .env` は
+> 0.24.0 以前から deny) と同じ結論に落ちる = **未登録側は保守的に倒れる**。
+> 後から `head` の spec を足すとこの verdict は ask に変わる (spec の被覆は
+> 「deny を外す側」なので漏れ = 現状維持という 0.22.0 の原則どおり)。
 | `awk "{print}" .env`, `sed "s/(=)/X/" .env`, `git ls-files --format="%(objectname)" .env` (0.25.0: ダブルクォート内の `{` `(` は不活性。単一クォート形と同じ deny 経路に到達) |
 | `mv 'a|b' .env` (0.25.0: クォート内 `\|` は演算子ではないので residual ask にならず、literal 機密 operand の deny に到達) |
 

@@ -127,7 +127,7 @@ positional 枠を消費しない誤検知 1 件、`>|` clobber の segment 分�
   `git commit -m 'a & b' 2>"&1"` の 1 件のみで、これは上記 2 (クォート内 `&` は
   データ) と安全リダイレクト剥離の組合せが効いた同族。旧 205 件のうち消えたのは
   `grep $PAT .env` の 2 verdict だけで、**残り 203 件は verdict 不変**
-- テスト件数: redact 1,063 → **1,110** / check 94 (変更なし、計 1,204)
+- テスト件数: redact 1,063 → **1,111** / check 94 (変更なし、計 1,205)
 
 ### 1. hard-stop リテラル救済 scan (`handlers/bash/segmentation.py` + `bash_handler.py`)
 
@@ -227,7 +227,21 @@ deny / allow を決める。パイプ (`|`) と論理和 (`||`) の分割は不�
    空文字列になると Bash の word splitting で語ごと消える。`grep $PAT .env` /
    `sed $SCRIPT .env` / `awk $PROG .env` は 0 語読みでは `.env` が
    pattern / program 枠に落ちて**ファイルとして読まれない**ため、誤 deny に
-   なっていた。両読み一致を deny の条件にして解消 (詳細は §1)
+   なっていた。両読み一致を deny の条件にして解消 (詳細は §1)。
+   **開示 (spec 被覆に依存する境界)**: 0 語読みの解釈は operand scan の
+   `command_specs` に依存するため、`head -n $N .env` は **deny**、
+   `git log -n $N .env` は **ask** になる。違いは `-n` が値を取る option として
+   登録されているかだけで、実 bash では `head -n .env` も (invalid number で)
+   ファイルを開かない。spec 未登録のコマンドは 0 語読みでも positional 扱いに
+   なり、literal 形 (`head -n .env` は 0.24.0 以前から deny) と同じ結論に落ちる
+   — つまり**未登録側は保守的に倒れる**が、後から `head` の spec を足すと
+   この verdict は ask に変わる。spec の被覆は「deny を外す側」なので漏れ =
+   現状維持という 0.22.0 の原則どおりで、非対称そのものは意図的
+   - 確認 pass (0 語読み) の診断ログは捨てる (`_muted_logging`)。verdict を
+     決めるためだけの再実行なので、`bash_classify` の分類ラベルと
+     `bash_render_failed` / `bash_render_project_root` の counter を二重計上
+     させない (採用するのは 1 語読み側の結論なので、確認 pass のラベルは
+     「実際に採用した読み」を指さない)
 2. **安全リダイレクト target のクォート変種が剥離されない** — quote-aware 化
    (§2) が「word 全体が非クォート」を剥離条件にしていたため、
    `git commit -m x 2>"/dev/null"` が live な `>` を見て allow → ask に退行して

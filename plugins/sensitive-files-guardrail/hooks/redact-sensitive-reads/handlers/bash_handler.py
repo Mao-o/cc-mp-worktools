@@ -93,6 +93,7 @@ autonomous モードで ``ask_or_allow`` を広く使うため「policy が無�
 """
 from __future__ import annotations
 
+import contextlib
 import shlex
 
 from core import logging as L
@@ -684,6 +685,35 @@ def _decision_of(result: dict) -> str | None:
 _PLACEHOLDER_DISPLAY = "${…}"
 
 
+@contextlib.contextmanager
+def _muted_logging():
+    """このブロックの中の診断ログを捨てる (0.25.0)。
+
+    救済 scan の**確認 pass** (0 語読み) 専用。確認 pass は verdict を決めるため
+    だけに ``_analyze_segment`` をもう一度走らせるので、そのログを残すと
+
+    - ``bash_classify`` の分類ラベルが 1 コマンドにつき 2 回出る (``cat $OPTS
+      .env`` で ``match:cat`` が重複)。しかもラベルが指すのは **実際に採用した
+      読みとは限らない** ので、後から分類分布を見る人を誤らせる
+    - ``bash_render_failed`` / ``bash_render_project_root`` (minimal info を
+      出せなかった原因の分布を測る counter) が二重計上される
+
+    という 2 つの計測汚染が起きる。採用する結論は 1 語読み側のものなので、
+    確認 pass 側のログは捨てるのが正しい。
+
+    ``L`` は module オブジェクトなので属性を差し替えて戻す。hook は
+    シングルスレッドの短命プロセスで、``mock.patch`` を外側に置いたテストとも
+    保存 / 復元で正しく入れ子になる。
+    """
+    info, error = L.log_info, L.log_error
+    L.log_info = lambda *a, **k: None
+    L.log_error = lambda *a, **k: None
+    try:
+        yield
+    finally:
+        L.log_info, L.log_error = info, error
+
+
 def _scan_expansion_reading(
     reading: str,
     envelope: dict,
@@ -691,6 +721,7 @@ def _scan_expansion_reading(
     *,
     dotglob: bool = False,
     root: str | None = None,
+    quiet: bool = False,
 ) -> dict | None:
     """placeholder 置換後の 1 つの読みを通常の operand scan にかける (0.25.0)。
 
@@ -705,6 +736,8 @@ def _scan_expansion_reading(
     - first token に placeholder が残る (``$PAGER .env`` — 未知コマンドの実行は
       ``/bin/cat .env`` の opaque ask と同格に扱う)
     - ``_analyze_segment`` の結論が deny でない
+
+    ``quiet=True`` (確認 pass) では診断ログを捨てる (``_muted_logging``)。
     """
     if _has_hard_stop(reading):
         return None
@@ -715,14 +748,15 @@ def _scan_expansion_reading(
     tokens = _strip_safe_redirects(tokens)
     if not tokens or _EXPANSION_PLACEHOLDER in tokens[0]:
         return None
-    result = _analyze_segment(
-        tokens,
-        envelope,
-        rules,
-        dotglob=dotglob,
-        root=root,
-        live_metachars=_live_operator_metachars(reading),
-    )
+    with _muted_logging() if quiet else contextlib.nullcontext():
+        result = _analyze_segment(
+            tokens,
+            envelope,
+            rules,
+            dotglob=dotglob,
+            root=root,
+            live_metachars=_live_operator_metachars(reading),
+        )
     return result if _decision_of(result) == "deny" else None
 
 
@@ -802,7 +836,7 @@ def _hard_stop_literal_scan(
     if result is None:
         return None
     if zero_word is not None and _scan_expansion_reading(
-        zero_word, envelope, rules, dotglob=dotglob, root=root
+        zero_word, envelope, rules, dotglob=dotglob, root=root, quiet=True
     ) is None:
         L.log_info("bash_classify", "hard_stop_literal_ambiguous")
         return None

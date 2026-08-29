@@ -3120,6 +3120,22 @@ class TestVanishingExpansionWordReading(BaseBash):
         self.assertIn("hard_stop_literal_ambiguous", labels)
         self.assertNotIn("hard_stop_literal_deny", labels)
 
+    def test_confirmation_pass_does_not_double_count_diagnostics(self):
+        # 確認 pass (0 語読み) は verdict を決めるためだけの再実行なので、
+        # 分類ラベルと render counter を二重計上してはいけない
+        # (`bash_render_failed` は「minimal info を出せなかった原因の分布」を
+        # 測る counter で、倍になると計測が壊れる)。
+        for cmd in ("cat $OPTS .env", "cat $X .env", "cat $X >| .env"):
+            with self.subTest(cmd=cmd):
+                with mock.patch("handlers.bash_handler.L.log_info") as spy:
+                    r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "deny")
+                labels = [c.args[1] for c in spy.call_args_list]
+                self.assertEqual(
+                    len(labels), len(set(labels)),
+                    msg=f"{cmd!r} logged duplicate labels: {labels}",
+                )
+
     def test_expansion_readings_unit(self):
         from handlers.bash.segmentation import (
             _EXPANSION_PLACEHOLDER,
