@@ -51,8 +51,12 @@ fallback 読み込みされ移行警告が出ますが (新旧どちらも存在
 採用し旧パスは無視される)、次のコマンドで新パスに移してください:
 
 ```bash
-mv ~/.claude/sensitive-files-guard/patterns.local.txt ~/.claude/sensitive-files-guardrail/patterns.local.txt
+mkdir -p ~/.claude/sensitive-files-guardrail
+mv -n ~/.claude/sensitive-files-guard/patterns.local.txt ~/.claude/sensitive-files-guardrail/patterns.local.txt
 ```
+
+新パスに既にファイルがある場合、`-n` により上書きせず何もしません。
+新パス側が権威なので、旧パスにしか無い行が必要なときだけ手で追記してください。
 
 plugin README にパス設定の詳細があります
 ([plugins/sensitive-files-guardrail/README.md](plugins/sensitive-files-guardrail/README.md))。
