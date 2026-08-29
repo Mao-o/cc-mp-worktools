@@ -75,13 +75,29 @@ class Verdict:
     should_emit: bool
     signals: tuple[str, ...]
     thresholds: dict[str, float]
+    applied_multipliers: dict[str, float]
 
 
-def _effective_thresholds(language: str, role: str, metrics: Metrics) -> dict[str, float]:
-    multiplier = LANGUAGE_MULTIPLIER.get(language, 1.0) * ROLE_MULTIPLIER.get(role, 1.0)
-    if metrics.control_flow_density < DECLARATIVE_THRESHOLD:
-        multiplier *= DECLARATIVE_RELAXATION
-    return {tier: base * multiplier for tier, base in BASE_THRESHOLDS.items()}
+def _effective_thresholds(
+    language: str, role: str, metrics: Metrics
+) -> tuple[dict[str, float], dict[str, float]]:
+    """実効閾値と、その根拠になった個別係数 (``applied_multipliers``) を返す。
+
+    ``applied_multipliers`` は message.py が「なぜこの閾値になったか」を
+    メモに明示するために使う (language は常に、declarative は実際に緩和が
+    効いたときだけ 1.0 でない値になる)。role はここでは記録するが、
+    message.py 側は既存の role_note 表示と役割が重複するため breakdown には
+    含めない (test 係数の可視化は role_note に残す)。
+    """
+    is_declarative = metrics.control_flow_density < DECLARATIVE_THRESHOLD
+    multipliers = {
+        "language": LANGUAGE_MULTIPLIER.get(language, 1.0),
+        "role": ROLE_MULTIPLIER.get(role, 1.0),
+        "declarative": DECLARATIVE_RELAXATION if is_declarative else 1.0,
+    }
+    combined = multipliers["language"] * multipliers["role"] * multipliers["declarative"]
+    thresholds = {tier: base * combined for tier, base in BASE_THRESHOLDS.items()}
+    return thresholds, multipliers
 
 
 def _compute_tier(line_count: int, thresholds: dict[str, float]) -> str:
@@ -124,7 +140,7 @@ def judge(metrics: Metrics, language: str, role: str) -> Verdict:
     (言語/role/宣言的緩和)、(2) note tier の昇格判定、(3) review tier の昇格判定
     の 3 箇所で行数評価の解像度を上げる役割を持つ。
     """
-    thresholds = _effective_thresholds(language, role, metrics)
+    thresholds, multipliers = _effective_thresholds(language, role, metrics)
     tier = _compute_tier(metrics.line_count, thresholds)
     signals = _collect_signals(metrics, role)
 
@@ -137,4 +153,10 @@ def judge(metrics: Metrics, language: str, role: str) -> Verdict:
     else:
         should_emit = False
 
-    return Verdict(tier=tier, should_emit=should_emit, signals=signals, thresholds=thresholds)
+    return Verdict(
+        tier=tier,
+        should_emit=should_emit,
+        signals=signals,
+        thresholds=thresholds,
+        applied_multipliers=multipliers,
+    )

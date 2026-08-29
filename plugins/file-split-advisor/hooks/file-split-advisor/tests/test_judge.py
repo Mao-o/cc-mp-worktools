@@ -58,6 +58,34 @@ class TestEffectiveThresholds(unittest.TestCase):
         self.assertAlmostEqual(v.thresholds["review"], 300 * 1.0)
 
 
+class TestAppliedMultipliers(unittest.TestCase):
+    """yaf.13: message.py が「なぜこの閾値か」を説明するための内訳。"""
+
+    def test_language_and_role_recorded_even_when_neutral(self):
+        m = _metrics(line_count=0, control_flow_density=0.1)  # not declarative
+        v = judge.judge(m, "python", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["language"], 1.0)
+        self.assertAlmostEqual(v.applied_multipliers["role"], 1.0)
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+
+    def test_non_neutral_language_and_role_recorded(self):
+        m = _metrics(line_count=0, control_flow_density=0.1)
+        v = judge.judge(m, "java", "test")
+        self.assertAlmostEqual(v.applied_multipliers["language"], 1.5)
+        self.assertAlmostEqual(v.applied_multipliers["role"], 1.6)
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+
+    def test_declarative_multiplier_recorded_when_applied(self):
+        m = _metrics(line_count=0, control_flow_density=0.01)  # < 0.02
+        v = judge.judge(m, "typescript", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.6)
+
+    def test_declarative_multiplier_is_neutral_when_not_applied(self):
+        m = _metrics(line_count=0, control_flow_density=0.3)  # high density, not declarative
+        v = judge.judge(m, "typescript", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+
+
 class TestTierBoundaries(unittest.TestCase):
     """半開区間: note <= x < review, review <= x < warn, ... (係数 1.0 相当の言語/role で確認)。"""
 
