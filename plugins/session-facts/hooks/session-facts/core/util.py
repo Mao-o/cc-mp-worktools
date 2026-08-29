@@ -81,7 +81,16 @@ def filter_to_cwd(tracked_files, cwd_relative):
     return [p for p in tracked_files if p.startswith(prefix)]
 
 
-def aggregate_paths(paths: Sequence[str]) -> List[str]:
+def _build_pattern(group: List[List[str]], length: int) -> List[str]:
+    """Position-wise glob pattern for a group of equal-length path segments."""
+    pattern = []
+    for i in range(length):
+        values = {segs[i] for segs in group}
+        pattern.append(next(iter(values)) if len(values) == 1 else "*")
+    return pattern
+
+
+def aggregate_paths(paths: Sequence[str], max_listed: int = 4) -> List[str]:
     """Collapse sibling directory paths to a glob-style pattern.
 
     Paths that share the same number of segments are folded together by
@@ -95,6 +104,19 @@ def aggregate_paths(paths: Sequence[str]) -> List[str]:
     collapses to a single ``plugins/*/hooks/*/tests`` line. A single path (or a
     length-group with a single member) is returned verbatim — no abstraction is
     applied when there is nothing to aggregate.
+
+    When a length-group's naive pattern would be fully wildcarded (every
+    position differs, e.g. ``*/*`` from ``api/tests`` + ``web/__tests__`` +
+    ``sdks/spec``), no literal segment survives anywhere and the pattern
+    carries zero localization info. In that case the group is re-split by
+    its leading directory instead: subsets that DO share a leading directory
+    still collapse to a useful pattern (e.g. ``packages/*/tests``), and the
+    remainder — paths whose leading directory is unique within the group —
+    are listed verbatim, capped at ``max_listed`` entries plus an
+    ``... (+N more)`` line so an unbounded pile of unrelated one-off paths
+    can't flood the output. A pattern that keeps at least one literal
+    segment (e.g. ``*/tests`` or ``*/*/tests``) is left aggregated as-is —
+    it still localizes some part of the path.
     """
     unique = sorted(dict.fromkeys(paths))
     if len(unique) <= 1:
@@ -111,9 +133,28 @@ def aggregate_paths(paths: Sequence[str]) -> List[str]:
         if len(group) == 1:
             out.append("/".join(group[0]))
             continue
-        pattern = []
-        for i in range(length):
-            values = {segs[i] for segs in group}
-            pattern.append(next(iter(values)) if len(values) == 1 else "*")
-        out.append("/".join(pattern))
+        pattern = _build_pattern(group, length)
+        if any(seg != "*" for seg in pattern):
+            out.append("/".join(pattern))
+            continue
+
+        # Fully wildcarded: re-split by leading directory so any genuinely
+        # shared prefix still collapses, and cap the rest instead of
+        # emitting the useless all-"*" line.
+        by_prefix: dict = {}
+        for segs in group:
+            by_prefix.setdefault(segs[0], []).append(segs)
+        leftovers: List[str] = []
+        for prefix in sorted(by_prefix):
+            sub = by_prefix[prefix]
+            if len(sub) == 1:
+                leftovers.append("/".join(sub[0]))
+            else:
+                out.append("/".join(_build_pattern(sub, length)))
+        if leftovers:
+            if len(leftovers) > max_listed:
+                out.extend(leftovers[:max_listed])
+                out.append(f"... (+{len(leftovers) - max_listed} more)")
+            else:
+                out.extend(leftovers)
     return out
