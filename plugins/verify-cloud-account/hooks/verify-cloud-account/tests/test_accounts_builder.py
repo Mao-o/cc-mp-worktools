@@ -801,10 +801,32 @@ class TestValidateEntryShape(unittest.TestCase):
         )
         self.assertIsNone(reason)
 
-    def test_known_dict_key_still_type_checked_when_not_strict(self):
-        """strict_keys=False でも型不正 (非文字列値) は常に検証する。"""
+    def test_all_values_bad_still_rejected_when_not_strict(self):
+        """strict_keys=False でも、dict 内の**全キー**が不正 (使える値が
+        1 つも無い) なら拒否する — firebase/gcloud の verify() も
+        「使える値が 1 つも無ければ拒否」なので、ここは strict_keys に
+        関わらず一致する。"""
         reason = builder._validate_entry_shape(
             self.gcloud, {"project": 111}, strict_keys=False
+        )
+        self.assertIsNotNone(reason)
+
+    def test_one_bad_value_among_good_ones_tolerated_when_not_strict(self):
+        """内部バックログ (advisor レビュー): firebase.verify() は
+        `{"default":"proj-dev","old":null}` のような**部分的に不正**な dict
+        を、"old" を無視して "default" だけで成立させる (dict 内に使える値が
+        1 つでも残っていれば良い)。migrate (strict_keys=False) がこれより
+        厳しいと、verify() が許容する形を migrate だけが拒否する退行になる。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": "p", "account": 111}, strict_keys=False
+        )
+        self.assertIsNone(reason)
+
+    def test_one_bad_value_among_good_ones_still_rejected_when_strict(self):
+        """init/set (strict_keys=True) は authoring 時の即時フィードバックを
+        優先し、部分的な不正値でも rejectする (migrate だけの leniency)。"""
+        reason = builder._validate_entry_shape(
+            self.gcloud, {"project": "p", "account": 111}, strict_keys=True
         )
         self.assertIsNotNone(reason)
 
@@ -813,6 +835,88 @@ class TestValidateEntryShape(unittest.TestCase):
             with self.subTest(bad=bad):
                 reason = builder._validate_entry_shape(self.github, bad)
                 self.assertIsNotNone(reason)
+
+
+class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
+    """`_migrate_keep_new_without_loss` の direct unit tests (内部バックログ:
+    advisor レビューで検出した multi-host/multi-alias の情報欠落の修正)。"""
+
+    def test_identical_values(self):
+        self.assertTrue(builder._migrate_keep_new_without_loss("a", "a"))
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss({"x": 1}, {"x": 1})
+        )
+
+    def test_single_host_dict_old_matches_new_scalar(self):
+        """ticket の実例: old が単一 host/alias の dict で new (scalar) と
+        同じ値 → 情報は失われないので True。"""
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                "Mao-o", {"github.com": "Mao-o"}
+            )
+        )
+
+    def test_multi_host_dict_old_with_extra_value_is_lossy(self):
+        """最重要の回帰防止: old が multi-host dict で new (scalar) に
+        無い値を持つ場合は False (conflict のまま、silent data loss を防ぐ)。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                "Mao-o", {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+            )
+        )
+
+    def test_multi_host_dict_old_with_all_same_value_is_not_lossy(self):
+        """old の全 value が new (scalar) と同じなら、複数キーでも情報は
+        失われない (どのキーも同じ事実を指しているだけ) → True。"""
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                "Mao-o", {"github.com": "Mao-o", "ghe.example.com": "Mao-o"}
+            )
+        )
+
+    def test_dict_new_superset_of_scalar_old(self):
+        """対称ケース: new (dict) が old (scalar) の値を含んでいれば
+        new はスーパーセットなので情報は失われない → True。"""
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                {"github.com": "Mao-o"}, "Mao-o"
+            )
+        )
+
+    def test_dict_new_missing_scalar_old_value_is_lossy(self):
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                {"github.com": "other"}, "Mao-o"
+            )
+        )
+
+    def test_dict_dict_new_has_all_old_keys_is_not_lossy(self):
+        self.assertTrue(
+            builder._migrate_keep_new_without_loss(
+                {"project": "p", "account": "a", "extra": "z"},
+                {"project": "p", "account": "a"},
+            )
+        )
+
+    def test_dict_dict_new_missing_old_key_is_lossy(self):
+        """dict-dict でも同じクラスの欠落を防ぐ: old の "account" が new に
+        無ければ False (silent drop を許さない)。"""
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                {"project": "p"}, {"project": "p", "account": "a"}
+            )
+        )
+
+    def test_dict_dict_differing_value_is_lossy(self):
+        self.assertFalse(
+            builder._migrate_keep_new_without_loss(
+                {"project": "p", "account": "a"},
+                {"project": "p", "account": "b"},
+            )
+        )
+
+    def test_unequal_scalars(self):
+        self.assertFalse(builder._migrate_keep_new_without_loss("a", "b"))
 
 
 class TestInitValueValidation(BaseBuilder):
@@ -1315,6 +1419,64 @@ class TestMigrateValueSemantics(BaseBuilder):
         code, _out, err = self._run(["migrate", "--commit"])
         self.assertEqual(code, 1)
         self.assertIn("衝突", err)
+
+    def test_multi_host_dict_not_silently_collapsed_into_new_scalar(self):
+        """advisor レビューで検出した最重要の退行: new=scalar "Mao-o" /
+        old={"github.com":"Mao-o","ghe.example.com":"mao-corp"} (multi-host)
+        は、github.com だけが一致しても ghe.example.com の情報を失うため
+        conflict のままにする (silent data loss を許さない)。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o"}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps(
+                {"github": {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}}
+            ),
+            encoding="utf-8",
+        )
+        code, _out, err = self._run(["migrate", "--commit", "--show-values"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+        self.assertIn("mao-corp", err)  # 失われかけた情報が見える
+        # new 側 (書込先) は失敗時点で unchanged のまま (書き込まれない)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"github": "Mao-o"})
+
+    def test_dict_dict_new_missing_old_key_is_conflict_not_silently_dropped(self):
+        """dict-dict でも同じクラスの情報欠落を防ぐ: new={"project":"p"} /
+        old={"project":"p","account":"a"} は project は一致するが account の
+        情報が new に無いため conflict のままにする (old の account を黙って
+        捨てない)。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"gcloud": {"project": "p"}}), encoding="utf-8"
+        )
+        self._deprecated_path().write_text(
+            json.dumps({"gcloud": {"project": "p", "account": "a"}}),
+            encoding="utf-8",
+        )
+        code, _out, err = self._run(["migrate", "--commit", "--show-values"])
+        self.assertEqual(code, 1)
+        self.assertIn("衝突", err)
+        # new 側 (書込先) は失敗時点で unchanged のまま (書き込まれない)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"gcloud": {"project": "p"}})
+
+    def test_addition_with_one_bad_value_among_good_ones_is_tolerated(self):
+        """内部バックログ (advisor レビュー): firebase.verify() は dict 内に
+        使える値 (str かつ非空) が 1 つでも残っていれば動く
+        (`{"default":"proj-dev","old":null}` の "old" は黙って無視される)。
+        migrate の追加分検証がこれより厳しくなると、verify() が許容する形を
+        migrate だけが拒否する退行になるため、tolerate されることを確認する。"""
+        self._deprecated_path().write_text(
+            json.dumps({"firebase": {"default": "proj-dev", "old": None}}),
+            encoding="utf-8",
+        )
+        code, _out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        data = json.loads(self._new_path().read_text(encoding="utf-8"))
+        self.assertEqual(data, {"firebase": {"default": "proj-dev", "old": None}})
 
     def test_rejects_invalid_shape_from_old_path(self):
         """旧パスの新規追加キーが list 等の不正型 → 書込前に exit 1

@@ -6,7 +6,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 `accounts-show` `accounts-migrate`) が対話フローを提供し、Claude は skill
 経由で builder を呼ぶ。
 
-設計判断 (D1〜D7):
+設計判断 (D1〜D9):
 
 - **D1**: builder が唯一の正規経路。書込パスの固定、JSON フォーマットの
   一貫化、既存キーの温存、CLI 現在値との突合、旧パス統合を一元管理する。
@@ -24,9 +24,30 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 - **D7**: `init` / `set` / `migrate` は書込前に `_validate_entry_shape()` で
   値の形 (str または service ごとの許容 dict 形) を検証し、不正なら exit 1。
   `migrate` は取り込み元 (旧パス) の値だけを検証対象にし、かつ dict の未知
-  キーは許容する (`strict_keys=False`) — `verify()` 自体が寛容な形を migrate
-  でだけ厳格化すると、migrate が触ってすらいない既存データが理由で無関係な
-  統合作業まで exit 1 になる退行を生むため。
+  キーと個々の値の不正 (dict 内に使える値が 1 つでも残っていれば良い) の
+  両方を許容する (`strict_keys=False`) — `verify()` 自体が寛容な形を migrate
+  でだけ厳格化すると、migrate が触ってすらいない既存データや、verify() が
+  実際には許容する部分的に壊れたデータが理由で、無関係な統合作業まで
+  exit 1 になる退行を生むため。
+- **D8**: `migrate` の衝突判定は `_migrate_keep_new_without_loss()` で
+  「new 側を採用しても old 側の情報を失わないか」だけを見る。既存の
+  `_entries_equal()` (show/verify 用、CLI 実測値が期待値を満たすかの非対称な
+  述語) をそのまま流用すると、new=scalar "Mao-o" / old=multi-host dict
+  `{"github.com":"Mao-o","ghe.example.com":"mao-corp"}` のような入力で
+  `next(iter(old.values()))` (= 最初の host の値) だけを見て一致と判定し、
+  `ghe.example.com` の値を conflict 検出も警告もなく消してしまう
+  (advisor レビューで検出)。migrate は「意味的に同じアカウントか」ではなく
+  「情報を捨てて良いか」を判定する必要があるため、別関数として実装した。
+- **D9**: `_validate_entry_shape()` の dict 内の値チェックは、`strict_keys`
+  (D7) の他に「dict 全体で有効な値が 1 つも無いときだけ拒否する」形にした。
+  github.verify() は dict 内の全キーを厳格に要求するが、gcloud/firebase の
+  verify() は使える値が 1 つでも残っていれば動く (例:
+  `{"default":"proj-dev","old":null}` は firebase.verify() が "old" を
+  無視して成立させる)。migrate だけに github 相当の厳格さを適用すると、
+  gcloud/firebase では起きない退行を生むため、全 service に同じ leniency を
+  適用する (github の multi-host dict で 1 キーだけ不正な場合、理論上は
+  migrate がそれを素通しし得るが、本 plugin の一貫方針「誤 deny は allow
+  方向に倒す」を優先した)。
 """
 from __future__ import annotations
 
@@ -201,13 +222,26 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
     限らないため呼ばない。不正なら理由文字列、OK なら None を返す。
 
     strict_keys=False (migrate が旧パスから取り込む既存データ向け) では dict の
-    **未知キー**を許容する — gcloud.verify() 等は宣言外のキーを黙って無視する
-    だけで拒否しないため、migrate でだけ厳格化すると verify() では通っていた
-    形を後から書けなくする退行になる (migrate が触っていない新パス側の
-    既存エントリまで巻き込んで書込全体を deny すると、この plugin が解消しよう
-    としている「手動 JSON 編集の要求」を復活させてしまう)。型不正
-    (list/int/None 等) と空 dict は verify() 自体が拒否するため strict_keys に
-    関わらず常に検証する。
+    **未知キー**と**個々の値の不正**の両方を緩める — gcloud.verify() は宣言外
+    キーを黙って無視するだけで拒否しないし、gcloud/firebase の verify() は
+    「使える値が dict 内に 1 つでも残っていれば全体としては動く」形の寛容さを
+    持つ (firebase: `isinstance(v, str) and v` を満たす値だけを filter して
+    1 つも無ければ拒否、gcloud: project/account が両方 falsy なら拒否・
+    片方が truthy で型不正なら拒否だが falsy な方は黙って無視)。migrate でだけ
+    厳格化すると verify() では通っていた形 (例: `{"default":"proj-dev",
+    "old":null}` は firebase.verify() が "old" を無視して "default" だけで
+    成立させる) を後から書けなくする退行になる (migrate が触っていない新パス側
+    の既存エントリまで巻き込んで書込全体を deny すると、この plugin が解消
+    しようとしている「手動 JSON 編集の要求」を復活させてしまう)。
+    このため strict_keys=False では「dict 全体で有効な値が 1 つも無い」ときだけ
+    拒否する (個々のキーの不正では即 reject しない)。github.verify() は実際には
+    dict 内の**全キー**を厳格に要求する (1 つでも不正なら拒否) ため、
+    migrate がこの leniency を github に適用すると理論上は github.verify() が
+    後で拒否する形をわずかに素通しし得るが、gcloud/firebase 側の退行 (無関係な
+    統合作業まで exit 1 にする) を避けることを優先した (本 plugin の一貫方針
+    「誤 deny は allow 方向に倒す」)。
+    型不正 (list/int/None 等トップレベルの型) と空 dict は verify() 自体が
+    拒否するため strict_keys に関わらず常に検証する。
     """
     if isinstance(value, str):
         return None
@@ -220,6 +254,7 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
         if not value:
             return f"{service.ACCOUNT_KEY}: オブジェクトが空です。"
         allowed_keys = getattr(service, "DICT_ALLOWED_KEYS", None)
+        good_values = 0
         for k, v in value.items():
             if not isinstance(k, str):
                 return (
@@ -231,11 +266,19 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                     f"{service.ACCOUNT_KEY}: オブジェクトのキー '{k}' は未対応です"
                     f" (許容: {', '.join(sorted(allowed_keys))})。"
                 )
-            if not isinstance(v, str) or not v:
+            if isinstance(v, str) and v:
+                good_values += 1
+                continue
+            if strict_keys:
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値は空でない文字列で"
                     f"ある必要があります (キー '{k}')。"
                 )
+            # strict_keys=False: このキーの値は不正だが、verify() 自体が
+            # 個々のキーの不正より「使える値が 1 つも無いか」を見る service が
+            # あるため、ここでは即 reject せず good_values のカウントに任せる。
+        if not strict_keys and good_values == 0:
+            return f"{service.ACCOUNT_KEY}: 有効な値を持つキーがありません。"
         return None
     return (
         f"{service.ACCOUNT_KEY}: 値は文字列またはオブジェクトで指定してください "
@@ -624,6 +667,41 @@ def _entries_equal(expected: Any, current: Any) -> bool:
     return False
 
 
+def _migrate_keep_new_without_loss(new_val: Any, old_val: Any) -> bool:
+    """migrate で new_val (書込先に残る側) を採用しても old_val の情報を
+    失わないときだけ True を返す (True なら conflict にせず new を維持)。
+
+    `_entries_equal` は「CLI 実測値 (current) が accounts.local.json の期待値
+    (expected) を満たすか」を判定する述語で、意図的に非対称 (dict の余剰
+    キーを無視する) — アカウント一致の判定としては正しいが、ここで必要な
+    「old 側の値を切り捨てて良いか」の判定にそのまま使うと**情報が失われる
+    方向**に倒れる。実例 (内部バックログ: advisor レビューで検出):
+    new="Mao-o" (scalar) / old={"github.com":"Mao-o","ghe.example.com":
+    "mao-corp"} (multi-host dict) で `_entries_equal("Mao-o", old)` は
+    `next(iter(old.values()))` (= "Mao-o") だけを見て True を返すため、
+    `ghe.example.com` の値がconflict 検出も警告もなく消えていた。
+
+    ここでは「old の持つ情報が new に全て含まれているか」だけを見る
+    (どちらの型が expected/current かという役割を持たない対称寄りの判定)。
+    old が new に無い情報を 1 つでも持っていれば False (conflict のまま)。
+    """
+    if new_val == old_val:
+        return True
+    if isinstance(new_val, str) and isinstance(old_val, dict):
+        # old (dict) の全 value が new (scalar) と同じ値でなければ、
+        # new 側に無い情報 (別の値を持つ host/alias) が old にあるということ。
+        return all(v == new_val for v in old_val.values())
+    if isinstance(new_val, dict) and isinstance(old_val, str):
+        # old (scalar) の値が new (dict) のどこかに残っていれば、new は old の
+        # スーパーセットなので情報は失われない。
+        return any(v == old_val for v in new_val.values())
+    if isinstance(new_val, dict) and isinstance(old_val, dict):
+        # old の全キーが new に同じ値で存在するかどうかだけを見る
+        # (new 側の余剰キーは old 由来ではないのでここでは無関係)。
+        return all(new_val.get(k) == v for k, v in old_val.items())
+    return False
+
+
 def _cmd_show(
     args: argparse.Namespace,
     stdout: IO[str],
@@ -746,15 +824,16 @@ def _cmd_migrate(
             if key not in merged:
                 merged[key] = value
                 additions.append((key, value, kind))
-            elif not _entries_equal(merged[key], value):
-                # _entries_equal は「意味的に同じアカウント」を判定する既存の
-                # show/verify 用の関数だが、ここでは新旧どちらも accounts.local.json
-                # の**設定値**である (CLI 実測値ではない) ため、new 側 (merged[key])
-                # を expected、old 側 (value) を current として渡す。例:
-                # new="Mao-o" (scalar) / old={"github.com":"Mao-o"} (dict) は
-                # 意味的に同一アカウントなので conflict にせず new 側を維持する
-                # (内部バックログ: 意味的に等価な新旧値も値衝突として手動解決を
-                # 要求していた不具合の修正)。
+            elif not _migrate_keep_new_without_loss(merged[key], value):
+                # new="Mao-o" (scalar) / old={"github.com":"Mao-o"} (dict、
+                # 単一 host) のように、old の情報が new に全て含まれる場合だけ
+                # conflict にせず new 側を維持する (内部バックログ: 意味的に
+                # 等価な新旧値も値衝突として手動解決を要求していた不具合の修正)。
+                # `_entries_equal` (show/verify 用、CLI 実測値との一致判定) は
+                # 非対称 (dict の余剰キーを無視する) なので流用せず、
+                # `_migrate_keep_new_without_loss` で情報欠落の有無を直接見る —
+                # old が multi-host/multi-alias dict で new (scalar) に無い
+                # 値を持つ場合は、conflict のまま手動解決に落とす。
                 conflicts.append((key, merged[key], value, kind))
 
     if conflicts:

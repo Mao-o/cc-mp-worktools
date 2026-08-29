@@ -38,18 +38,31 @@
    検証し、不正なら書き込まずに exit 1 にする。各 service は
    `ACCEPTS_DICT` (dict 形を受け付けるか) と、`gcloud` のみ
    `DICT_ALLOWED_KEYS = frozenset({"project","account"})` (許容キー) を宣言
-   する。`init`/`set` は未知キーも拒否する厳格モードだが、**`migrate` は
-   旧パスから取り込む値 (additions) だけを対象にし、かつ未知キーは許容する**
-   (`strict_keys=False`) — `gcloud.verify()` 等は宣言外のキーを黙って無視
-   するだけで拒否しないため、migrate でだけ厳格化すると verify() では通って
-   いた形を後から書けなくする退行になる。migrate が触っていない新パス側の
-   既存エントリは検証対象にしない (無関係な統合作業まで exit 1 にしないため)。
-4. **migrate の衝突判定を意味論的比較に変更** — 新旧で `merged[key] != value`
-   という値そのものの不一致だけを見ていたため、scalar `"Mao-o"` と dict
-   `{"github.com":"Mao-o"}` のように**意味的には同じアカウント**を指す新旧値
-   まで値衝突として手動解決を要求していた。`show` / `verify` で既に使って
-   いる `_entries_equal` (dict/scalar 混在の同値判定) を流用し、意味的に
-   等価なら衝突にせず new 側を維持する。
+   する。`init`/`set` は未知キーも個々の値の不正も即座に拒否する厳格モード
+   だが、**`migrate` は旧パスから取り込む値 (additions) だけを対象にし、
+   未知キーと「dict 内に使える値が 1 つでも残っていれば良い」の両方を
+   許容する** (`strict_keys=False`) — `gcloud.verify()` は宣言外のキーを
+   黙って無視するだけで拒否しないし、`gcloud`/`firebase` の `verify()` は
+   `{"default":"proj-dev","old":null}` のような部分的に壊れた dict も
+   使える値が 1 つ残っていれば成立させる。migrate でだけ厳格化すると
+   verify() では通っていた形を後から書けなくする退行になる。migrate が
+   触っていない新パス側の既存エントリは検証対象にしない (無関係な統合作業
+   まで exit 1 にしないため)。
+4. **migrate の衝突判定を情報欠落の有無で判定する専用の比較関数に変更** —
+   新旧で `merged[key] != value` という値そのものの不一致だけを見ていた
+   ため、scalar `"Mao-o"` と dict `{"github.com":"Mao-o"}` のように
+   **意味的には同じアカウント**を指す新旧値まで値衝突として手動解決を
+   要求していた。当初 `show`/`verify` 用の `_entries_equal` (CLI 実測値が
+   期待値を満たすかの非対称な述語) を流用したが、独立レビューで
+   **multi-host/multi-alias dict が絡むと情報が黙って失われる**ことが
+   判明した — 例: new=scalar `"Mao-o"` / old=dict
+   `{"github.com":"Mao-o","ghe.example.com":"mao-corp"}` は、
+   `_entries_equal` が最初の host の値だけを見て一致と判定し、
+   `ghe.example.com` の値を conflict 検出も警告もなく消してしまう。
+   `_migrate_keep_new_without_loss` を新設し、「new 側を採用しても old 側の
+   情報を失わないか」だけを見る専用の比較にした。dict-dict でも同じ考え方
+   (old の全キーが new に含まれているか) を適用し、new が old のサブセット
+   になるケースも conflict のまま手動解決に落とす。
 
 ### 既知の制限 (新規)
 
