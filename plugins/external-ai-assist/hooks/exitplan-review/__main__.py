@@ -155,8 +155,8 @@ def plan_hash(text: str) -> str:
 
 
 # マーカーに記録するプラン (hash) の最大件数。長いセッションで多数の異なるプランを
-# 出しても $TMPDIR のマーカーファイルが際限なく肥大化しないための安全弁
-# (bd_092a232e-zh5.10)。超過分は古い順 (挿入順) に捨てる。
+# 出しても $TMPDIR のマーカーファイルが際限なく肥大化しないための安全弁。
+# 超過分は古い順 (挿入順) に捨てる。
 MAX_PLAN_ENTRIES = 50
 
 # 予約 (reserve_slot が結果を知る前に +1 する仮の枠) が確定 (confirm_slot) も
@@ -226,8 +226,7 @@ def _reclaim_stale_reservations(marker: dict, now: float) -> None:
     kill されるとどちらも呼ばれず、仮予約が残ったままになる。
     RESERVATION_TTL_SEC (両レビュアーの timeout 上限 + 猶予) を過ぎても
     `reserved_at` が残っているエントリは、レビューはとうに終わっているはずなのに
-    確定も解放もされていない = kill されたとみなしてロールバックする
-    (bd_092a232e-zh5.10)。
+    確定も解放もされていない = kill されたとみなしてロールバックする。
     """
     for hash_key, entry in list(marker["plans"].items()):
         reserved_at = entry.get("reserved_at")
@@ -264,8 +263,8 @@ def reserve_slot(
 ) -> tuple[bool, str | None]:
     """ロック下で原子的にスロットを確保し `(確保できたか, 利用者向け通知)` を返す。
 
-    0.7.0 でマーカーを JSON 化し、上限を**プラン (hash) 単位**にした
-    (bd_092a232e-zh5.10)。0.6.0 までは単一の (hash, count) しか持てず、count は
+    0.7.0 でマーカーを JSON 化し、上限を**プラン (hash) 単位**にした。
+    0.6.0 までは単一の (hash, count) しか持てず、count は
     block のたびに +1 されプランが変わっても戻らなかった。長いセッションで
     無関係な別プランの block が積み重なると、以後**すべての**プランが
     レビュー無しで通ってしまっていた。
@@ -351,8 +350,7 @@ def release_slot(marker_file: str, reserved_hash: str) -> None:
 
 
 def confirm_slot(marker_file: str, reserved_hash: str) -> None:
-    """指摘ありで block / 所見注入 (MODE_CONTEXT) を確定した時に呼ぶ
-    (bd_092a232e-zh5.10)。
+    """指摘ありで block / 所見注入 (MODE_CONTEXT) を確定した時に呼ぶ。
 
     count は消費したまま (差し戻し済みとして永続) にしつつ `reserved_at` だけ
     None に戻し、TTL 回収の対象から外す。**これを呼ばないと、正当に確定した
@@ -371,8 +369,8 @@ def confirm_slot(marker_file: str, reserved_hash: str) -> None:
 
 
 def _gc_stale_markers(now: float | None = None) -> None:
-    """plan-review-markers/*.marker と plan-review-*.txt を mtime TTL で掃除する
-    (bd_092a232e-zh5.10)。post-implementation-review/stategc.py と同じ mtime TTL
+    """plan-review-markers/*.marker と plan-review-*.txt を mtime TTL で掃除する。
+    post-implementation-review/stategc.py と同じ mtime TTL
     GC の考え方を踏襲するが、実装はこの hook 内で完結させる (hook 固有の状態機械は
     共通化しない方針)。
     """
@@ -565,7 +563,7 @@ def main() -> None:
 
     reason = build_reason(results)
     # 指摘ありで確定 (block / 所見注入) するので、この予約は「kill された仮予約」
-    # ではないと印を付ける (bd_092a232e-zh5.10)。呼び忘れると RESERVATION_TTL_SEC
+    # ではないと印を付ける。呼び忘れると RESERVATION_TTL_SEC
     # 経過後に正当な block まで TTL 回収でロールバックされてしまう。
     confirm_slot(marker_file, current_hash)
     _save_review_copy(session_id, reason)

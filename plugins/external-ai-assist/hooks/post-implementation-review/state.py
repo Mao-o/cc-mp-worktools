@@ -174,8 +174,8 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
     同時に TTL 超過の in-flight を pending へ回収する (kill されたレビューの取りこぼし
     防止)。pending が空なら None を返す — 呼び出し側はレビューを走らせないこと。
 
-    **state ファイルが一度も無いセッションは開かずに None を返す**
-    (bd_092a232e-zh5.11)。`_locked_state` は `flock.locked_file` を経由し `a+` で
+    **state ファイルが一度も無いセッションは開かずに None を返す**。
+    `_locked_state` は `flock.locked_file` を経由し `a+` で
     開くため、呼ぶだけで空の state ファイルが生成され、かつ末尾で必ず書き戻す
     (`_locked_state` の docstring参照)。編集 0 件のターンでも Stop は毎回
     `claim_pending()` を呼ぶため、これが $TMPDIR に「編集ゼロの空 state」を
@@ -257,7 +257,7 @@ def reviewed_hashes(session_id: str) -> dict[str, str]:
 def pending_count(session_id: str) -> int:
     """claim せずに pending 件数だけ読む (cooldown 判定で「黙って skip」を避けるため)。
 
-    state ファイルが一度も無ければ 0 (開かない。bd_092a232e-zh5.11 — claim_pending
+    state ファイルが一度も無ければ 0 (開かない — claim_pending
     と同じ「呼ぶだけでファイルが生成される」問題への対処)。
     """
     if not os.path.exists(_state_path(session_id)):
@@ -272,7 +272,7 @@ def pending_count(session_id: str) -> int:
 def last_review_at(session_id: str) -> float:
     """直近で cursor を実際に走らせ終えた時刻 (epoch 秒)。未実施なら 0。
 
-    state ファイルが一度も無ければ 0 (開かない。bd_092a232e-zh5.11)。
+    state ファイルが一度も無ければ 0 (開かない)。
     """
     if not os.path.exists(_state_path(session_id)):
         return 0.0

@@ -305,7 +305,7 @@ class TestNormalExitCleanup(SubprocTestCase):
     def test_normal_exit_without_leftovers_is_not_delayed(self):
         """残存メンバーが無い正常終了では、追加の停止処理を一切行わない。
 
-        bd_092a232e-zh5.31: wall-clock (elapsed 時間 < GRACE) で「待っていない」を
+        wall-clock (elapsed 時間 < GRACE) で「待っていない」を
         測ると、プロセス起動自体のオーバヘッドが閾値に近い環境で flaky になる
         (実測 0.511 秒で fail。5 回中 3 回の flake率。**変更前の commit でも
         再現する構造的な欠陥**であり、この PR の変更とは無関係)。

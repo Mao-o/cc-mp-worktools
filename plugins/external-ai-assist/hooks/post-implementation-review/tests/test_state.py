@@ -71,7 +71,7 @@ class TestPending(StateTestCase):
 
 
 class TestNoOpAvoidsFileCreation(StateTestCase):
-    """bd_092a232e-zh5.11: 何もしていないセッションで state ファイルを生成しない。
+    """何もしていないセッションで state ファイルを生成しない。
 
     `_locked_state` は `flock.locked_file` (`a+` open) を経由するため、呼ぶだけで
     空ファイルが生成され、末尾で必ず書き戻す。読み取り専用の意図の呼び出しでも

@@ -154,8 +154,8 @@ class HookTestCase(unittest.TestCase):
     def marker(self, session_id: str) -> tuple[str, int]:
         """(last, 全プラン合算 count)。マーカー未作成なら ("", 0)。
 
-        0.7.0 でマーカーが JSON (プラン単位の {hash: count}) になった
-        (bd_092a232e-zh5.10)。「特定 1 プランの count」を見たいテストは
+        0.7.0 でマーカーが JSON (プラン単位の {hash: count}) になった。
+        「特定 1 プランの count」を見たいテストは
         `marker_count_for()` を使うこと。合算は「何も予約が残っていない」
         ことを確認する用途 (clean/失敗後の後始末確認) に使う。
         """

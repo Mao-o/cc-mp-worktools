@@ -1,6 +1,6 @@
 """マーカーの状態機械 (JSON 化・仮予約の TTL 回収・エントリ cap・GC) の単体テスト。
 
-bd_092a232e-zh5.10。block/clean の判定は test_sentinel_flow.py、env var の解釈は
+block/clean の判定は test_sentinel_flow.py、env var の解釈は
 test_settings_flow.py が担当する。ここはマーカーファイルそのものの構造と
 TTL/cap/GC の境界を直接検証する。
 """

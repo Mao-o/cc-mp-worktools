@@ -258,7 +258,7 @@ class TestStatusSnapshot(GitScanTestCase):
 
 
 class TestStatusSnapshotFailure(GitScanTestCase):
-    """bd_092a232e-zh5.7: 失敗/不完全は {} ではなく None (比較不能) を返す。"""
+    """失敗/不完全は {} ではなく None (比較不能) を返す。"""
 
     def test_git_failure_returns_none(self):
         with mock.patch.object(gitscan, "_git", return_value=None):

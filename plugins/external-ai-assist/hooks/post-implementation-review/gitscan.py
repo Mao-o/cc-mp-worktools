@@ -212,7 +212,7 @@ def status_snapshot(root: str) -> dict[str, list] | None:
     変更なのでレビュー対象にしてはならず、末尾 `/` のエントリは捨てる。
 
     **失敗 (timeout / 非 0 終了) と、収まりきらない (`MAX_SNAPSHOT_ENTRIES` 超過で
-    不完全) 場合は `None` を返す** (bd_092a232e-zh5.7)。以前はどちらも `{}` を
+    不完全) 場合は `None` を返す**。以前はどちらも `{}` を
     返しており、呼び出し側 (`__main__._record_bash_changes`) の
     `changed_between(pre, post)` が「空」と「取得できた全件消えた」を区別できず、
     片方が失敗したもう片方の全エントリ (他セッション・他人の変更を含む) を

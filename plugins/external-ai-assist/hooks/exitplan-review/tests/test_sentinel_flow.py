@@ -81,7 +81,7 @@ class TestMarkerStateMachine(HookTestCase):
         self.assertEqual(self.cursor_calls, [], "同一 hash は再レビューしない")
 
     def test_block_limit_is_enforced(self):
-        """bd_092a232e-zh5.10: 上限はプラン (hash) 単位。別プランには波及しない。
+        """上限はプラン (hash) 単位。別プランには波及しない。
 
         0.6.0 までは単一のセッション累積カウンタだったため、別プランの block でも
         この上限が消費され、以後すべてのプランがレビュー無しで通っていた。

@@ -145,7 +145,7 @@ def build_reason(cursor_output: str) -> str:
 
 
 def handle_pre_tool(payload: dict) -> None:
-    """bd_092a232e-zh5.11: 無効化 / cursor 不在なら git も state も一切触らない。
+    """無効化 / cursor 不在なら git も state も一切触らない。
 
     以前は `bash_tracking_enabled()` しか見ておらず、`EXTERNAL_AI_POST_REVIEW=0`
     や cursor 未インストールの環境でも Bash のたびに `git status` が走っていた。
@@ -168,14 +168,14 @@ def handle_pre_tool(payload: dict) -> None:
         # git status 失敗 (timeout / 非 0 終了) / MAX_SNAPSHOT_ENTRIES 超過で不完全。
         # null を書いて後で pop 側に判定させるより、そもそも書かない方が
         # $TMPDIR に残骸を増やさない (pop_bash_snapshot はファイル無しでも None を
-        # 返すので、後続の属性付け断念という効果は変わらない。bd_092a232e-zh5.7)
+        # 返すので、後続の属性付け断念という効果は変わらない)
         log("Bash 前: git status 失敗のため snapshot を保存しない (属性付けを断念)")
         return
     state.save_bash_snapshot(session_id, tool_use_id, snapshot)
 
 
 def handle_post_tool(payload: dict) -> None:
-    """bd_092a232e-zh5.11: 無効化 / cursor 不在なら git も state も一切触らない
+    """無効化 / cursor 不在なら git も state も一切触らない
     (handle_pre_tool と同じ理由)。"""
     if not review_enabled() or not cursor.is_available():
         return
@@ -211,7 +211,7 @@ def _edited_paths(tool_input: dict, cwd: str) -> list[str]:
 def _record_bash_changes(payload: dict, session_id: str, cwd: str) -> None:
     """Bash 実行前後の status スナップショット差分を pending に積む。
 
-    bd_092a232e-zh5.7: pre / post どちらかの `git status` が失敗 (timeout / 非 0
+    pre / post どちらかの `git status` が失敗 (timeout / 非 0
     終了 / MAX_SNAPSHOT_ENTRIES 超過で不完全) なら、比較そのものを諦める。
     以前は失敗時に `status_snapshot` が `{}` を返しており、`changed_between({}, post)`
     が post 側の全エントリ (他セッション・他人の変更を含む) を「変化あり」として

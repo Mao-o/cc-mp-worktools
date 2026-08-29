@@ -218,7 +218,7 @@ class TestBashAttribution(HookTestCase):
 
 
 class TestBashSnapshotFailure(HookTestCase):
-    """bd_092a232e-zh5.7: git status 失敗時に空/不完全な snapshot を {} として保存し、
+    """git status 失敗時に空/不完全な snapshot を {} として保存し、
     作業ツリー全体を誤ってこのセッションの変更と帰属させないこと。"""
 
     def _bash_payload(self, session_id: str, tool_use_id: str) -> dict:
@@ -712,7 +712,7 @@ class TestByteBudgetFlow(HookTestCase):
 
 
 class TestDisabledOrUnavailableSkipsGitAndState(HookTestCase):
-    """bd_092a232e-zh5.11: 無効化 / cursor 不在なら pre-tool・post-tool の先頭で
+    """無効化 / cursor 不在なら pre-tool・post-tool の先頭で
     即 return し、git status も state 書込も一切行わない。"""
 
     def _state_dir(self) -> str:
@@ -763,7 +763,7 @@ class TestDisabledOrUnavailableSkipsGitAndState(HookTestCase):
 
 
 class TestNoOpStopCreatesNoStateFile(HookTestCase):
-    """bd_092a232e-zh5.11: 編集 0 件のターンの Stop で state ファイルが新規生成
+    """編集 0 件のターンの Stop で state ファイルが新規生成
     されない (claim_pending が state ファイル皆無のセッションを開かない)。"""
 
     def test_no_op_stop_creates_no_state_file(self):

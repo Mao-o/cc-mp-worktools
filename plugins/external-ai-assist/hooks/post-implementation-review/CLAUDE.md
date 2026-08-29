@@ -72,7 +72,7 @@ post-implementation-review/
 水準。支配項は git ではなく Python のインタプリタ起動 (`python3 -c pass` だけで
 8.7 ms)。`EXTERNAL_AI_POST_REVIEW=0` または cursor 未インストールの環境では
 `handle_pre_tool` / `handle_post_tool` が先頭で即 return し、この git 呼び出し自体
-発生しない (bd_092a232e-zh5.11)。
+発生しない。
 
 極端に大きい作業ツリーで重い場合は `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING=0` で
 切れる (その場合 `sed -i` 等の Bash 経由の変更は拾えなくなる)。
