@@ -209,6 +209,17 @@ class TestLoadIgnoreGlobs(unittest.TestCase):
         expected = Path.home() / ".claude" / "file-split-advisor" / "ignore.local.txt"
         self.assertEqual(source._default_ignore_file(), expected)
 
+    def test_invalid_utf8_file_is_ignored_not_raised(self):
+        # P2-2: UnicodeDecodeError は OSError のサブクラスではないため、
+        # 修正前は except OSError だけでは捕まらず main() まで伝播していた。
+        # ユーザーが書ける ~/.claude/file-split-advisor/ignore.local.txt が
+        # 非UTF-8 だと plugin 全体が全プロジェクトで無言停止する経路 (fail-open
+        # の約束が破れる)。env 側の patterns は生き残ることを確認する。
+        path = Path(self.tmp) / "ignore.local.txt"
+        path.write_bytes(b"\xff\xfe*.min.py\n")
+        patterns = source.load_ignore_globs("*.foo", path)
+        self.assertEqual(patterns, ("*.foo",))
+
 
 class TestMatchesIgnoreGlob(unittest.TestCase):
     def test_matches_by_filename(self):

@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -261,6 +262,78 @@ class TestIgnoreGlobEnvVar(BaseMainTest):
             with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_IGNORE": "unrelated_*.py"}):
                 out, _ = _run_main(self._envelope(path))
         self.assertEqual(out, "")
+
+
+class TestIgnoreFileInvalidUtf8E2E(unittest.TestCase):
+    """P2-2 回帰: 非UTF-8の ignore.local.txt で plugin 全体が無言停止しないこと。
+
+    ``_run_main`` (in-process, ``entry.main()`` を直接呼ぶ) は
+    ``if __name__ == "__main__":`` の fail-open ラッパー (末尾の
+    ``except Exception`` で exit 0 にしつつ stderr に fatal を出す経路) を
+    経由しない (``importlib`` でロードしたモジュールの ``__name__`` は
+    ``"__main__"`` にならないため)。レビューが実際に踏んだ経路を再現する
+    には実プロセスとして起動する必要があるため、ここだけ subprocess を使う。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_invalid_utf8_ignore_file_does_not_silence_hook(self):
+        home = Path(self.tmp) / "home"
+        ignore_dir = home / ".claude" / "file-split-advisor"
+        ignore_dir.mkdir(parents=True)
+        (ignore_dir / "ignore.local.txt").write_bytes(b"\xff\xfe*.min.py\n")
+
+        project = Path(self.tmp) / "project"
+        project.mkdir()
+        target = project / "checkout_flow.py"
+        target.write_text(_python_lines(900))  # strong tier, 初回 Write で必ず emit
+
+        envelope = json.dumps(
+            {
+                "session_id": "sess-e2e-p2-2",
+                "cwd": str(project),
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(target)},
+            }
+        )
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        for key in (
+            "FILE_SPLIT_ADVISOR_DISABLED",
+            "FILE_SPLIT_ADVISOR_IGNORE",
+            "FILE_SPLIT_ADVISOR_SCALE",
+            "FILE_SPLIT_ADVISOR_CWD_ONLY",
+        ):
+            env.pop(key, None)
+
+        result = subprocess.run(
+            [sys.executable, str(_ENTRY_PATH)],
+            input=envelope,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        # HOME override が効いていることの前提チェック: これが崩れると
+        # Path.home() が実ホームを指し、ignore.local.txt が「存在しない」
+        # 扱いになって修正前でも本テストが (誤った理由で) 通ってしまう。
+        self.assertEqual(
+            result.returncode, 0, f"stderr={result.stderr!r}"
+        )
+        self.assertNotIn("fatal", result.stderr, f"stderr={result.stderr!r}")
+        self.assertNotEqual(result.stdout, "", "無出力 (fail-silent) だった")
+        payload = json.loads(result.stdout)
+        self.assertIn(
+            "静的解析メモ",
+            payload["hookSpecificOutput"]["additionalContext"],
+        )
 
 
 class TestScaleEnvVar(BaseMainTest):

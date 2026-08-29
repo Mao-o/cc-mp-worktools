@@ -196,7 +196,14 @@ def load_ignore_globs(env_value: str, ignore_file: Path | None = None) -> tuple[
     path = ignore_file if ignore_file is not None else _default_ignore_file()
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError は OSError のサブクラスではないため、
+        # ``except OSError`` だけでは捕まらず main() まで伝播していた
+        # (P2-2)。ignore.local.txt は ~/.claude/ 配下のユーザーグローバル
+        # 設定であり、これが非UTF-8だと全プロジェクトで plugin が無言停止する
+        # (fail-open の約束が破れる)。in-repo 先例:
+        # sensitive-files-guardrail/hooks/check-sensitive-files/stop_ack.py
+        # の ``_looks_like_state_file`` も同じ組み合わせを使っている。
         text = ""
     patterns.extend(_parse_ignore_globs(text))
     return tuple(patterns)
