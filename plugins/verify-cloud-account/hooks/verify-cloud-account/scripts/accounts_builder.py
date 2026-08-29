@@ -261,10 +261,16 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                     f"{service.ACCOUNT_KEY}: オブジェクトのキーは文字列である"
                     "必要があります。"
                 )
-            if not k:
+            if not k.strip():
+                # 空文字だけでなく空白のみの文字列も弾く。github.verify() 等は
+                # dict のキーをそのまま hostname/alias として照合するため、
+                # 空白のみのキーも実在の CLI 値と一致し得ず永久 deny になる
+                # (`--host ''` と同じ失敗形。`set --value` で dict を直接渡す
+                # 経路や migrate の取り込みは `--host` の CLI guard を経由しない
+                # ためここで弾く必要がある)。
                 return (
-                    f"{service.ACCOUNT_KEY}: オブジェクトのキーに空文字は"
-                    "使えません。"
+                    f"{service.ACCOUNT_KEY}: オブジェクトのキーに空文字・"
+                    "空白のみの文字列は使えません。"
                 )
             if strict_keys and allowed_keys is not None and k not in allowed_keys:
                 return (

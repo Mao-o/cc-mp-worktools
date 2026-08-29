@@ -16,10 +16,12 @@
    [--dry-run|--commit]` は既存キーを削除する。どちらも `--host` で dict 値
    (GitHub の hostname / Firebase の alias 等) の特定キーだけを追加・上書き・
    削除できる。**最後の 1 つの host/alias を remove すると、空 dict `{}` を
-   残さずキー自体を削除する** — 空 dict は github/firebase/gcloud の
-   `verify()` が「オブジェクトが空です」で permanent deny する形のため、
-   残すと『オブジェクトが空です』の deny になり案内が不明瞭になる (未記載の
-   「キーがありません」設定誘導のほうが分かりやすい)。dict を受け付けない service
+   残さずキー自体を削除する** — 空 dict のままだと github/firebase/gcloud の
+   `verify()` が「オブジェクトが空です」で permanent deny するが、この deny
+   文面は次に何をすべきか分からない。未記載にしておけば dispatcher が
+   「キーがありません。対象サービスのアカウントを追加してください」で deny
+   するため、設定を促す案内としてこちらのほうが分かりやすい。dict を
+   受け付けない service
    (aws/kubectl) への `--host` 指定は早期にエラーにする。書込パス固定
    (D2)・値隠蔽 (D3)・mtime 更新による cache 無効化・CLAUDE.md/`.gitignore`
    の自動同梱は init/migrate と同じ経路を流用する。

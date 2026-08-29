@@ -852,6 +852,24 @@ class TestValidateEntryShape(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("空文字", reason)
 
+    def test_whitespace_only_key_rejected_when_strict(self):
+        """空白のみのキーは空文字と同じ失敗形 (github.verify() が実在しない
+        host/alias として永久 deny する) なので、strict/lenient 問わず弾く。
+        `--host` の CLI guard (空文字ガード) を経由しない `--value` 直接指定や
+        migrate の取り込みでもここで弾かれる。"""
+        reason = builder._validate_entry_shape(
+            self.github, {"   ": "Mao-o"}, strict_keys=True
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("空文字", reason)
+
+    def test_whitespace_only_key_rejected_when_not_strict(self):
+        reason = builder._validate_entry_shape(
+            self.github, {"   ": "Mao-o"}, strict_keys=False
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("空文字", reason)
+
 
 class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
     """`_migrate_keep_new_without_loss` の direct unit tests (内部バックログ:
@@ -1237,6 +1255,22 @@ class TestSet(BaseBuilder):
         )
         self.assertEqual(code, 1)
         self.assertFalse(self._new_path().exists())
+
+    def test_rejects_whitespace_only_dict_key_via_value(self):
+        """`--host` の空文字ガードは `--host` 経由の書込にしか効かない。
+        `--value` で dict を直接渡す経路は別なので、`_validate_entry_shape`
+        側でも空白のみのキーを弾けていることを end-to-end で確認する
+        (弾けないと `{"github.com のつもりが空白": "..."}` が書き込まれ、
+        github.verify() が実在しない host として永久 deny する)。"""
+        code, _out, err = self._run(
+            [
+                "set", "--service", "github", "--value", '{"   ":"USER"}',
+                "--commit",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(self._new_path().exists())
+        self.assertIn("空文字", err)
 
     def test_rejects_when_legacy_path_exists(self):
         self._deprecated_path().write_text(
