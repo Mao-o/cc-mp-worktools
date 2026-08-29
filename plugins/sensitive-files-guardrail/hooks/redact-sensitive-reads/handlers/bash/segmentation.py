@@ -13,8 +13,11 @@
 
 1. ``_split_command_on_operators`` (segment 分割)
 2. ``_has_hard_stop`` (静的解析不能 char の検出)
-3. ``_expansion_readings`` (単純変数展開の placeholder 置換、0.25.0。
-   ``_replace_simple_expansions`` はその「1 語読み」を返すラッパ)
+3. ``_expansion_chars`` (単純変数展開の placeholder 置換、0.25.0。この 1 つの
+   char 列から救済 scan の 3 つの読みを作る: ``_expansion_readings`` が語数の
+   2 通り、``_expansion_option_readings`` が「bare expansion word がオプション
+   トークンになる」読み。``_replace_simple_expansions`` は「1 語読み」の
+   ラッパ)
 4. ``redirects._live_operator_metachars`` (residual metachar の quote-aware 判定、
    0.25.0。0.24.0 までの ``_segment_has_residual_metachar`` は shlex 後の token
    しか見えず、クォート内の ``|`` ``&`` ``>`` を演算子と誤認していた)
@@ -412,6 +415,62 @@ _EXPANSION_PLACEHOLDER = "__sfg_unexpanded__"
 _SIMPLE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _split_expansion_words(
+    chars: list[tuple[str, str, bool]],
+) -> list[tuple[str, bool, bool]]:
+    """placeholder 置換後の char 列を word に切り、2 つの性質を付ける (0.25.0)。
+
+    Args:
+        chars: ``(文字, 字句状態, その文字が展開由来か)`` の列。
+
+    Returns:
+        ``(word 文字列, vanishes, bare_expansion)`` の列。
+
+        - ``vanishes``: **クォート外の展開だけ**で構成される word。Bash の word
+          splitting では、非クォートの変数展開が空文字列になると **その語ごと
+          消える** (``_drop_vanishing_words`` = 読み 2)
+        - ``bare_expansion``: **クォート区切り文字を除くと展開だけ**で構成される
+          word。この語は丸ごと 1 つの値になるので、その値が ``-`` 始まりなら
+          **オプショントークン**として解釈される (``_option_word_readings`` =
+          読み 3)。クォートは word splitting を止めるだけでオプション解釈は
+          止めない (``grep -e K "$X" .env`` で ``X=-e`` なら ``.env`` は第 2 の
+          検索 pattern) ため、``vanishes`` と違ってクォートの有無を問わない
+          (``vanishes`` ⊂ ``bare_expansion``)
+
+    word 区切りは **クォート外の空白** のみ (クォート内の空白は語の一部)。
+    """
+    words: list[tuple[str, bool, bool]] = []
+    buf: list[str] = []
+    vanishes = True
+    all_expansion = True
+    any_expansion = False
+
+    def flush() -> None:
+        words.append(("".join(buf), vanishes, all_expansion and any_expansion))
+
+    for c, st, from_expansion in chars:
+        if st == _ST_PLAIN and c in " \t\n":
+            if buf:
+                flush()
+            buf = []
+            vanishes = True
+            all_expansion = True
+            any_expansion = False
+            continue
+        buf.append(c)
+        if from_expansion:
+            any_expansion = True
+        elif st == _ST_PLAIN and c in "'\"":
+            pass  # クォート区切り自体は「展開以外の成分」に数えない
+        else:
+            all_expansion = False
+        if not (from_expansion and st == _ST_PLAIN):
+            vanishes = False
+    if buf:
+        flush()
+    return words
+
+
 def _drop_vanishing_words(chars: list[tuple[str, str, bool]]) -> str | None:
     """**クォート外の展開だけで構成される word** を落とした読みを返す (0.25.0)。
 
@@ -433,45 +492,61 @@ def _drop_vanishing_words(chars: list[tuple[str, str, bool]]) -> str | None:
         消えうる word を落とした読み。そういう word が 1 つも無ければ ``None``
         (= 語数が変わる読みは存在しない)。
     """
-    words: list[tuple[str, bool]] = []
-    buf: list[str] = []
-    vanishes = True
-    for c, st, from_expansion in chars:
-        if st == _ST_PLAIN and c in " \t\n":
-            if buf:
-                words.append(("".join(buf), vanishes))
-            buf = []
-            vanishes = True
-            continue
-        buf.append(c)
-        if not (from_expansion and st == _ST_PLAIN):
-            vanishes = False
-    if buf:
-        words.append(("".join(buf), vanishes))
-    if not any(v for _, v in words):
+    words = _split_expansion_words(chars)
+    if not any(v for _, v, _ in words):
         return None
-    return " ".join(w for w, v in words if not v)
+    return " ".join(w for w, v, _ in words if not v)
 
 
-def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
-    """単純変数展開を placeholder に置換した **2 通りの読み** を返す (0.25.0)。
+def _option_word_readings(
+    chars: list[tuple[str, str, bool]], option: str, *, limit: int,
+) -> list[str] | None:
+    """**bare expansion word がオプショントークンに展開される読み** を返す (0.25.0)。
 
-    ``_replace_simple_expansions`` は「展開は必ず 1 語になる」前提の読みしか
-    作らないが、非クォートの展開は空になると語ごと消えて **後続 operand の
-    引数位置がずれる** (Codex R1 P2)。``grep $PAT .env`` は 1 語読みでは
-    ``.env`` が FILE、0 語読みでは ``.env`` が検索 pattern (ファイルは読まれ
-    ない) で、意味が食い違う。救済 scan の呼び出し側 (``bash_handler.
-    _hard_stop_literal_scan``) は **両方の読みで deny になるときだけ** deny を
-    採用し、食い違えば従来どおり ``ask_or_allow`` に落とす。
+    変数は ``-e`` のような **値を取るオプション** にも展開されうる。そうなると
+    後続の語はそのオプションの **値** として consume され、operand の役割が
+    変わる: ``X=-e`` のとき ``grep -e KEY $X .env`` は ``grep -e KEY -e .env``
+    として実行され、``.env`` は第 2 の検索 pattern になる (grep は stdin から
+    読むのでファイルは開かれない、Codex R2 P2)。
+
+    語全体が展開である語 (``bare_expansion``) 1 つにつき 1 つの読みを作り、
+    その語を ``option`` に置き換える。**どの語を置き換えるかを総当りする**ので、
+    「機密 operand より前にある語」だけが役割を変える、という絞り込みは
+    ``_analyze_segment`` の再実行で自動的に成立する (operand より後ろの語を
+    置き換えた読みは operand の役割を変えないので deny のまま残る)。
+
+    Args:
+        chars: ``_expansion_chars`` が返した char 列。
+        option: 置き換えに使うオプショントークン (呼び出し側がコマンドの spec
+            から選ぶ。``operand_lexer._option_value_token``)。
+        limit: bare expansion word の上限。超える segment は ``None`` を返し、
+            呼び出し側は ``_analyze_segment`` を N 回走らせずに諦める
+            (hook の 2 秒 timeout 予算を守るための保険。摩擦側に倒れる)。
 
     Returns:
-        ``(1 語読み, 0 語読み)``。0 語読みは消えうる word が無ければ ``None``
-        (その場合 1 語読みだけを見ればよい)。置換対象の展開が 1 つも無ければ
-        関数全体が ``None``。
+        読みの列 (bare expansion word が無ければ空 list)。語数が上限を超えたら
+        ``None``。
+    """
+    words = _split_expansion_words(chars)
+    targets = [i for i, (_, _, bare) in enumerate(words) if bare]
+    if not targets:
+        return []
+    if len(targets) > limit:
+        return None
+    return [
+        " ".join(option if k == i else w for k, (w, _, _) in enumerate(words))
+        for i in targets
+    ]
 
-    既知の限界: placeholder 文字列そのもの (``__sfg_unexpanded__``) を literal
-    で書いた語は 0 語読みで消える扱いになる。ずれる方向は「読みが食い違う →
-    ask_or_allow」= 救済 scan を諦める側だけなので、保護は落ちない。
+
+def _expansion_chars(segment: str) -> list[tuple[str, str, bool]] | None:
+    """live な単純変数展開を placeholder に置換した char 列を返す (0.25.0)。
+
+    ``(文字, 字句状態, その文字が展開由来か)`` の列。読み 1 / 読み 2 / 読み 3
+    (``_expansion_readings`` / ``_option_word_readings``) はいずれもこの 1 つの
+    列から作る。置換対象の展開が 1 つも無ければ ``None``。
+
+    置換位置の規則は ``_replace_simple_expansions`` の docstring を参照。
     """
     lx = _lex(segment)
     out: list[tuple[str, str, bool]] = []
@@ -532,9 +607,51 @@ def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
             continue
         out.append((c, st, False))
         i += 1
-    if not replaced:
+    return out if replaced else None
+
+
+def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
+    """単純変数展開を placeholder に置換した **語数に関する 2 通りの読み** を返す。
+
+    ``_replace_simple_expansions`` は「展開は必ず 1 語になる」前提の読みしか
+    作らないが、非クォートの展開は空になると語ごと消えて **後続 operand の
+    引数位置がずれる** (0.25.0、Codex R1 P2)。``grep $PAT .env`` は 1 語読みでは
+    ``.env`` が FILE、0 語読みでは ``.env`` が検索 pattern (ファイルは読まれ
+    ない) で、意味が食い違う。救済 scan の呼び出し側 (``bash_handler.
+    _hard_stop_literal_scan``) は **両方の読みで deny になるときだけ** deny を
+    採用し、食い違えば従来どおり ``ask_or_allow`` に落とす。
+
+    語数が変わらない読みでも **役割** が変わる第 3 の読み (展開がオプション
+    トークンになる) は ``_option_word_readings`` 側。呼び出し側はコマンドの
+    spec を見てその読みも要るかどうかを決める。
+
+    Returns:
+        ``(1 語読み, 0 語読み)``。0 語読みは消えうる word が無ければ ``None``
+        (その場合 1 語読みだけを見ればよい)。置換対象の展開が 1 つも無ければ
+        関数全体が ``None``。
+
+    既知の限界: placeholder 文字列そのもの (``__sfg_unexpanded__``) を literal
+    で書いた語は 0 語読みで消える扱いになる。ずれる方向は「読みが食い違う →
+    ask_or_allow」= 救済 scan を諦める側だけなので、保護は落ちない。
+    """
+    out = _expansion_chars(segment)
+    if out is None:
         return None
     return "".join(ch for ch, _, _ in out), _drop_vanishing_words(out)
+
+
+def _expansion_option_readings(
+    segment: str, option: str, *, limit: int,
+) -> list[str] | None:
+    """``_expansion_chars`` → ``_option_word_readings`` の薄いラッパ (読み 3)。
+
+    置換対象の展開が無ければ空 list (= 読み 3 は存在しない)。bare expansion
+    word が ``limit`` を超えたら ``None`` (呼び出し側は救済 scan を諦める)。
+    """
+    out = _expansion_chars(segment)
+    if out is None:
+        return []
+    return _option_word_readings(out, option, limit=limit)
 
 
 def _replace_simple_expansions(segment: str) -> str | None:

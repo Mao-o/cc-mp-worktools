@@ -145,6 +145,7 @@ from handlers.bash.operand_lexer import (  # noqa: F401
     _find_path_candidates,
     _glob_operand_is_dotenv_match,
     _has_glob,
+    _option_value_token,
 )
 from handlers.bash.redirects import (  # noqa: F401
     _is_safe_redirect_token,
@@ -154,6 +155,7 @@ from handlers.bash.redirects import (  # noqa: F401
 )
 from handlers.bash.segmentation import (  # noqa: F401
     _EXPANSION_PLACEHOLDER,
+    _expansion_option_readings,
     _expansion_readings,
     _has_hard_stop,
     _has_quoted_hard_stop,
@@ -714,6 +716,28 @@ def _muted_logging():
         L.log_info, L.log_error = info, error
 
 
+def _tokenize_reading(reading: str) -> list[str] | None:
+    """placeholder 置換後の 1 つの読みを token 列にする (0.25.0)。
+
+    ``None`` を返す条件 (= その読みからは救済 deny を採れない):
+
+    - 置換後も hard-stop char が残る (``$(cmd)`` / ``${X:-…}`` / ``<`` 等)
+    - shlex 失敗 / 空 token
+    - first token に placeholder が残る (``$PAGER .env`` — 未知コマンドの実行は
+      ``/bin/cat .env`` の opaque ask と同格に扱う)
+    """
+    if _has_hard_stop(reading):
+        return None
+    try:
+        tokens = shlex.split(reading, comments=False, posix=True)
+    except ValueError:
+        return None
+    tokens = _strip_safe_redirects(tokens)
+    if not tokens or _EXPANSION_PLACEHOLDER in tokens[0]:
+        return None
+    return tokens
+
+
 def _scan_expansion_reading(
     reading: str,
     envelope: dict,
@@ -725,28 +749,17 @@ def _scan_expansion_reading(
 ) -> dict | None:
     """placeholder 置換後の 1 つの読みを通常の operand scan にかける (0.25.0)。
 
-    ``_hard_stop_literal_scan`` が「1 語読み」と「0 語読み」の両方に同じ手順を
-    当てるためのヘルパ。**deny のときだけ結果を返し、それ以外は ``None``**
-    (救済 scan は緩和方向には一切使わない)。
+    ``_hard_stop_literal_scan`` が 3 つの読み (1 語 / 0 語 / オプショントークン)
+    すべてに同じ手順を当てるためのヘルパ。**deny のときだけ結果を返し、それ以外
+    は ``None``** (救済 scan は緩和方向には一切使わない)。
 
-    ``None`` を返す条件は読みごとに独立:
-
-    - 置換後も hard-stop char が残る (``$(cmd)`` / ``${X:-…}`` / ``<`` 等)
-    - shlex 失敗 / 空 token
-    - first token に placeholder が残る (``$PAGER .env`` — 未知コマンドの実行は
-      ``/bin/cat .env`` の opaque ask と同格に扱う)
-    - ``_analyze_segment`` の結論が deny でない
+    ``None`` を返す条件は読みごとに独立: ``_tokenize_reading`` が ``None`` /
+    ``_analyze_segment`` の結論が deny でない。
 
     ``quiet=True`` (確認 pass) では診断ログを捨てる (``_muted_logging``)。
     """
-    if _has_hard_stop(reading):
-        return None
-    try:
-        tokens = shlex.split(reading, comments=False, posix=True)
-    except ValueError:
-        return None
-    tokens = _strip_safe_redirects(tokens)
-    if not tokens or _EXPANSION_PLACEHOLDER in tokens[0]:
+    tokens = _tokenize_reading(reading)
+    if tokens is None:
         return None
     with _muted_logging() if quiet else contextlib.nullcontext():
         result = _analyze_segment(
@@ -758,6 +771,65 @@ def _scan_expansion_reading(
             live_metachars=_live_operator_metachars(reading),
         )
     return result if _decision_of(result) == "deny" else None
+
+
+# 読み 3 を作る bare expansion word の上限 (0.25.0)。1 語につき
+# ``_analyze_segment`` が 1 回走るので、``$A $B $C …`` のような病的な segment で
+# 予算 (hook の 2 秒 timeout) を使い切らないための保険。超えたら救済 scan 自体を
+# 諦める = 従来の ``ask_or_allow`` (摩擦側)。
+_MAX_OPTION_READINGS = 8
+
+
+def _option_reading_agrees(
+    seg: str,
+    one_word: str,
+    envelope: dict,
+    rules: list[tuple[str, bool]],
+    *,
+    dotglob: bool = False,
+    root: str | None = None,
+) -> bool:
+    """**読み 3** (bare expansion word がオプショントークンになる) でも deny か。
+
+    変数は ``-e`` のような **値を取るオプション** にも展開されうる。そうなると
+    後続の語はその値として consume され、operand の役割が変わる: ``X=-e`` の
+    とき ``grep -e KEY $X .env`` は ``grep -e KEY -e .env`` として実行され、
+    ``.env`` は第 2 の検索 pattern (ファイルは開かれず入力は stdin) になる
+    (0.25.0、Codex R2 P2)。読み 1 / 読み 2 はどちらも ``.env`` を FILE と
+    分類するので、この読みが無いと誤 deny のままになる。
+
+    手順:
+
+    1. コマンドの spec から「分離形で non-path の値を 1 つ取る」option を借りる
+       (``_option_value_token``)。無ければ **読み 3 は成立しない** ので True
+       (``cat`` / ``head`` のように値を取る option を持たない・spec が無い
+       コマンドは deny 維持)
+    2. bare expansion word 1 つにつき 1 つの読みを作り (``_expansion_option_
+       readings``)、**その全部が deny** のときだけ True
+
+    語ごとに読みを分けるので「機密 operand より **前** にある語だけが役割を
+    変える」という絞り込みは ``_analyze_segment`` の再実行で自動的に成立する
+    (operand より後ろの語を置き換えた読みは deny のまま残り、``$X/.env`` の
+    ように語の内部に展開がある形はそもそも bare expansion word ではないので
+    読み 3 を 1 つも作らない = 本 PR の動機ケースは影響を受けない)。
+    """
+    tokens = _tokenize_reading(one_word)
+    if tokens is None:
+        return True
+    option = _option_value_token(tokens)
+    if option is None:
+        return True
+    option_readings = _expansion_option_readings(
+        seg, option, limit=_MAX_OPTION_READINGS
+    )
+    if option_readings is None:
+        return False
+    return all(
+        _scan_expansion_reading(
+            reading, envelope, rules, dotglob=dotglob, root=root, quiet=True
+        ) is not None
+        for reading in option_readings
+    )
 
 
 def _hard_stop_literal_scan(
@@ -800,29 +872,40 @@ def _hard_stop_literal_scan(
     採用した deny の reason に含まれる placeholder は表示用の ``${…}`` に
     置き換える (除外案内の path 形は ``_operand_relpath`` 側で抑止済み)。
 
-    **語数が変わる読みとの一致条件 (0.25.0、Codex R1 P2)**: 非クォートの変数
-    展開は空文字列になると **語ごと消える** (bash の word splitting)。
-    ``grep $PAT .env`` は ``PAT`` が空なら ``grep .env`` になり、``.env`` は
-    FILE ではなく **検索 pattern** として解釈されて入力は stdin から来る
-    (= ファイルは読まれない)。placeholder を「必ず 1 語ある」前提で置くと
-    この読みを潰して誤 deny になる (``sed`` / ``awk`` の program 枠も同型)。
-    そこで deny を採用してよいのは **「展開が 1 語になる」読みと「展開が
-    消える」読みの両方が deny になるとき** だけにし、食い違えば従来どおり
-    ``ask_or_allow`` に落とす (``hard_stop_literal_ambiguous``)。
+    **全読み一致ゲート (0.25.0、Codex R1 P2 / R2 P2)**: deny を採用してよいのは
+    **機密 operand の役割が次の 3 つの読みすべてで不変**のときだけ。食い違えば
+    従来どおり ``ask_or_allow`` に落とす。
 
-    この条件は ``_analyze_segment`` を両方の読みで走らせるだけで満たす
-    (コマンドを列挙し直さない)。第 1 positional の意味 (pattern / program /
-    path) は ``command_specs._CmdSpec.pattern_slot``、option の値の消費は
-    ``values`` が既に知っているので、読みの違いはそのまま候補集合の違いに
-    なる。守られること:
+    1. **展開が 1 語になる読み** (placeholder 置換そのもの)
+    2. **展開が語ごと消える読み** — 非クォートの変数展開は空文字列になると語
+       ごと消える (bash の word splitting)。``grep $PAT .env`` は ``PAT`` が空
+       なら ``grep .env`` になり、``.env`` は FILE ではなく **検索 pattern**
+       として解釈されて入力は stdin から来る (= ファイルは読まれない)。
+       ``sed`` / ``awk`` の program 枠も同型 (``hard_stop_literal_ambiguous``)
+    3. **展開がオプショントークンになる読み** (``_option_reading_agrees``) —
+       語全体が展開である語 (bare expansion word) は ``-e`` のような **値を取る
+       オプション** にも展開されうる。``X=-e`` のとき ``grep -e KEY $X .env``
+       は ``grep -e KEY -e .env`` として実行され、``.env`` は第 2 の検索
+       pattern になる。**クォートは word splitting を止めるだけでオプション
+       解釈は止めない**ので、読み 2 と違い ``"$X"`` も対象
+       (``hard_stop_literal_option_ambiguous``)
 
-    - ``cat $OPTS .env`` / ``cat $X >| .env`` は **deny 維持** (``cat`` は
-      positional を全てファイルに取るのでどちらの読みでも ``.env`` は FILE)
-    - ``cat $PWD/.env`` 型 (語の内部に展開がある形) は語数が変わらないので
-      **影響なし**
-    - ``grep "$PAT" .env`` のようなクォート形は必ず 1 語なので **deny 維持**
+    3 つとも ``_analyze_segment`` を走らせるだけで満たす (**コマンドを列挙し
+    直さない**)。第 1 positional の意味 (pattern / program / path) は
+    ``command_specs._CmdSpec.pattern_slot``、option の値の消費は ``values`` が
+    既に知っているので、読みの違いはそのまま候補集合の違いになる。守られること:
+
+    - ``cat $PWD/.env`` 型 (**語の内部**に展開がある形) は語数も役割も変わら
+      ないので **影響なし** — 読み 2 / 読み 3 のどちらも作られない
+    - ``cat $OPTS .env`` / ``cat $X >| .env`` / ``head $OPTS .env`` は
+      **deny 維持** (``cat`` / ``head`` は spec が無く「値を取る option」を
+      知らないので読み 3 が成立しない。``cat`` は実際に値を取る option を
+      持たないので正しい)
     - ``grep $PAT .env`` / ``sed $SCRIPT .env`` / ``awk $PROG .env`` /
-      ``jq $F .env`` / ``rg $PAT .env`` は ask_or_allow に戻る
+      ``jq $F .env`` / ``rg $PAT .env`` は読み 2 で ask_or_allow に戻る
+    - ``grep "$PAT" .env`` / ``sed "$SCRIPT" .env`` などのクォート形と、
+      ``grep -e KEY $X .env`` / ``git log $OPT .env`` / ``tar -cf out.tar $X
+      .env`` のように読み 2 を通過していた形は読み 3 で ask_or_allow に戻る
     """
     if len(seg) > _MAX_SEGMENT_CHARS:
         return None
@@ -839,6 +922,11 @@ def _hard_stop_literal_scan(
         zero_word, envelope, rules, dotglob=dotglob, root=root, quiet=True
     ) is None:
         L.log_info("bash_classify", "hard_stop_literal_ambiguous")
+        return None
+    if not _option_reading_agrees(
+        seg, one_word, envelope, rules, dotglob=dotglob, root=root
+    ):
+        L.log_info("bash_classify", "hard_stop_literal_option_ambiguous")
         return None
     L.log_info("bash_classify", "hard_stop_literal_deny")
     hook = result.get("hookSpecificOutput")

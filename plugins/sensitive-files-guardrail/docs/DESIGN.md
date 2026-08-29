@@ -278,25 +278,49 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
    救済 scan の deny は「literal を直書きした同型コマンドが deny になる場合」
    に限って発火する (置換後の token 列に既存の判定をそのまま適用するだけ) ため、
    個々の deny の妥当性は literal 側の既存ポリシーに帰着する。旧版との同一
-   コーパス diff (1,344 コマンド × 2 mode = 2,688 verdict、変更 246 件) で
+   コーパス diff (1,413 コマンド × 2 mode = 2,826 verdict、変更 280 件) で
    説明不能ゼロを確認した (`CHANGELOG.md` 0.25.0)。
 
-   **語数が変わる読みとの一致条件**: 非クォートの変数展開は空文字列になると
-   Bash の word splitting で**語ごと消える**。`grep $PAT .env` は `PAT` が空
-   なら `grep .env` になり、`.env` は FILE ではなく**検索 pattern** として
-   解釈されて入力は stdin から来る (= ファイルは読まれない)。placeholder を
-   「必ず 1 語ある」前提で置くとこの読みを潰して誤 deny になるため、救済 scan
-   が deny を採用してよいのは **「展開が 1 語になる」読みと「展開が消える」
-   読みの両方で機密ファイル operand に分類されるときだけ**とし、食い違えば
-   従来どおり `ask_or_allow` に落とす (`hard_stop_literal_ambiguous`)。判定は
-   `_analyze_segment` を両方の読みで走らせるだけで、コマンドを列挙し直さない
-   — 第 1 positional が pattern / program かは `command_specs._CmdSpec.
-   pattern_slot`、option が値を取るかは同 `values` が既に知っているので、
-   読みの違いはそのまま候補集合の違いになる。`grep $PAT .env` /
-   `sed $SCRIPT .env` / `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` /
-   `git log -n $N .env` は ask_or_allow、語内に展開がある形 (`cat $PWD/.env`)
-   とクォート形 (`grep "$PAT" .env`)、positional を全てファイルに取るコマンド
-   (`cat $OPTS .env` / `cat $X >| .env`) は deny 維持。
+   **全読み一致ゲート**: 変数の展開結果によって機密 operand の**役割**が変わる
+   形があるため、救済 scan が deny を採用してよいのは次の 3 つの読みすべてで
+   「機密ファイル operand」に分類されるときだけとし、食い違えば従来どおり
+   `ask_or_allow` に落とす。
+
+   1. **展開が 1 語になる読み** (placeholder 置換そのもの)
+   2. **展開が語ごと消える読み** (`hard_stop_literal_ambiguous`) — 非クォート
+      の変数展開は空文字列になると Bash の word splitting で**語ごと消える**。
+      `grep $PAT .env` は `PAT` が空なら `grep .env` になり、`.env` は FILE
+      ではなく**検索 pattern** として解釈されて入力は stdin から来る
+      (= ファイルは読まれない)
+   3. **展開がオプショントークンになる読み**
+      (`hard_stop_literal_option_ambiguous`) — 語全体が展開である語 (bare
+      expansion word) は `-e` のような**値を取るオプション**にも展開されうる。
+      `X=-e` のとき `grep -e KEY $X .env` は `grep -e KEY -e .env` として実行
+      され、`.env` は第 2 の検索 pattern になる。**クォートは word splitting を
+      止めるだけでオプション解釈は止めない**ので、読み 2 と違いクォート形も対象
+
+   判定は `_analyze_segment` を各読みで走らせるだけで、**コマンドを列挙し
+   直さない** — 第 1 positional が pattern / program かは `command_specs.
+   _CmdSpec.pattern_slot`、option が値を取るかは同 `values` が既に知っている
+   ので、読みの違いはそのまま候補集合の違いになる。読み 3 の反例に使う
+   オプションも `operand_lexer._option_value_token` が spec から「分離形で
+   non-path の値を 1 つ取る」ものを 1 つ借りるだけ。読みは bare expansion word
+   1 つにつき 1 つ作るので、「機密 operand より**前**にある語だけが役割を
+   変える」という絞り込みは再実行の結果として自動的に成立する。
+
+   ask_or_allow に戻る形: `grep $PAT .env` / `sed $SCRIPT .env` /
+   `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` / `git log -n $N .env`
+   (読み 2)、`grep "$PAT" .env` / `sed "$SCRIPT" .env` / `grep -e KEY $X .env` /
+   `git log $OPT .env` / `tar -cf out.tar $X .env` (読み 3)。
+   deny 維持: 語**内**に展開がある形 (`cat $PWD/.env` / `grep -e KEY $D/.env`
+   — bare expansion word が無いので読み 3 を 1 つも作らない)、値を取る
+   オプションを持たないコマンド (`cat $OPTS .env` / `cat $X >| .env` /
+   `head $OPTS .env`)、値が path のオプションしか噛まない形 (`grep -f $F .env`)、
+   bare expansion word が機密 operand より後ろにある形 (`grep -e KEY .env $X`)。
+
+   読み 2 / 読み 3 はどちらも `command_specs` の被覆に依存する境界を持つ
+   (spec 未登録のコマンドは deny 維持 = 過剰 deny 側に倒れる)。
+   `CHANGELOG.md` 0.25.0 の開示を参照。
 
 4. **splitter が `>` 演算子を bash と同じ最長一致で読む** (`>>` append /
    `>|` clobber は 2 文字で 1 演算子)。0.24.0 までは `>|` の `|` を pipe と
@@ -999,7 +1023,9 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
    理由で解析を放棄していた形は「静的解析不能」から外れる — `cat $PWD/.env`
    のように展開結果に依らず basename が確定する形は deny に届く (リテラル
    operand 救済 scan、上の 0.25.0 節)。展開結果が判定を左右する形
-   (`cat $X` / `cat $X.env`) とコマンド置換・複合展開は従来どおり本項の扱い。
+   (`cat $X` / `cat $X.env`)、展開結果によって operand の役割が変わりうる形
+   (`grep $PAT .env` の語消失 / `grep -e KEY $X .env` のオプショントークン)、
+   コマンド置換・複合展開は従来どおり本項の扱い。
 3. **`<` 入力リダイレクトは ask_or_allow 扱い (0.7.0、0.11.0 で segment 単位
    再評価)** — 0.3.4〜0.6.x では character-level quote-aware parser で
    `cat < .env` / `cat<.env` / `cat 0<.env` / `cat < ".env"` などから target

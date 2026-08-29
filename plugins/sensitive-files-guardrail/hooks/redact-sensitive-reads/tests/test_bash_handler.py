@@ -3074,10 +3074,12 @@ class TestVanishingExpansionWordReading(BaseBash):
     )
 
     # 両読みで機密 operand が確定する → deny 維持。
+    # (``grep "$PAT" .env`` / ``grep -e KEY $X .env`` は語数の 2 読みでは
+    #  deny だが、読み 3 = オプショントークン展開で ask に戻る。
+    #  ``TestOptionTokenExpansionReading`` 側で扱う)
     STILL_DENY = (
-        'grep "$PAT" .env',         # クォート形は空でも必ず 1 語
         "grep '$PAT' .env",         # シングルクォートは展開しない = literal 1 語
-        "grep -e KEY $X .env",      # pattern_opts があれば positional は全て file
+        "grep -f $F .env",          # -f の値は path なのでどの展開でも .env は FILE
         "cat $OPTS .env",           # cat は positional を全てファイルに取る
         "cat $X .env",
         "cat $X >| .env",           # clobber target は語が消えても残る
@@ -3159,6 +3161,157 @@ class TestVanishingExpansionWordReading(BaseBash):
         )
         # 置換対象が無ければ None
         self.assertIsNone(_expansion_readings("grep KEY .env"))
+
+
+class TestOptionTokenExpansionReading(BaseBash):
+    """0.25.0 (Codex R2 P2): 変数はオプショントークンにも展開される。
+
+    語数が変わらなくても **役割** は変わりうる。``X=-e`` のとき
+    ``grep -e KEY $X .env`` は ``grep -e KEY -e .env`` として実行され、``.env``
+    は第 2 の検索 pattern になる (grep は stdin から読むのでファイルは開かれ
+    ない)。語数の 2 読みはどちらも ``.env`` を FILE と分類するので、この読みを
+    足さないと誤 deny のままになる。
+
+    **クォートは word splitting を止めるだけでオプション解釈は止めない**ので、
+    読み 2 (語ごと消える読み) と違ってクォート形も対象になる。
+
+    適用範囲は「語全体が展開である語 (bare expansion word) が存在し、かつ
+    コマンドの spec が『分離形で non-path の値を 1 つ取る』option を知って
+    いる」場合だけ。コマンドを新たに列挙せず ``command_specs`` の既存知識を
+    使う。
+    """
+
+    # 読み 3 で役割が変わりうる → 従来どおり ask (default) / allow (auto)。
+    AMBIGUOUS = (
+        "grep -e KEY $X .env",       # Codex R2 P2 の指摘そのもの
+        'grep -e KEY "$X" .env',     # クォートしてもオプションとしては解釈される
+        'grep "$PAT" .env',          # R3 でクォート形として deny 維持していた形
+        'sed "$SCRIPT" .env',
+        'awk "$PROG" .env',
+        'jq "$F" .env',
+        'rg "$PAT" .env',
+        "git log $OPT .env",         # git はサブコマンド単位の spec
+        "diff $OPT .env other.txt",
+        "tar -cf out.tar $X .env",
+        "grep -e K $A $B .env",      # bare expansion word が複数
+    )
+
+    # 読み 3 が成立しない / 役割が変わらない → deny 維持。
+    STILL_DENY = (
+        # 語の**内部**に展開がある形 (本 PR の動機ケース)。bare expansion word が
+        # 無いので読み 3 を 1 つも作らない。spec の有無と無関係であることを
+        # 示すため、spec を持つコマンド (grep / awk / sed / diff / git) を含める
+        "cat $PWD/.env",
+        'cat "$PWD/.env"',
+        'cat "$PWD"/.env',
+        "cat ${PWD}/.env",
+        "cat $A$B/.env",
+        "cat $HOME/keys/server.pem",
+        "grep KEY $D/.env",
+        "grep -e KEY $D/.env",
+        "awk '{print}' $D/.env",
+        "sed -n 1,5p $D/.env",
+        "diff $A/.env $B/.env",
+        "git show HEAD:$D/.env",
+        "head -n 3 ${DIR}/.env",
+        "cp $SRC/.env /tmp/x",
+        # spec が「値を取る option」を知らない / 実際に持たないコマンド
+        "cat $OPTS .env",
+        'cat "$OPTS" .env',
+        "cat $X .env",
+        "head $OPTS .env",
+        "head -n $N .env",
+        "base64 $D/.env",
+        # 値が path の option しか噛まない (どの展開でも .env は FILE)
+        "grep -f $F .env",
+        # bare expansion word が機密 operand より **後ろ** にある
+        "grep -e KEY .env $X",
+        "tar -cf out.tar .env $X",
+    )
+
+    def test_option_token_reading_disagrees_keeps_ask_or_allow(self):
+        for cmd in self.AMBIGUOUS:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_all_readings_sensitive_still_denies(self):
+        for cmd in self.STILL_DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_option_ambiguous_reading_is_logged_as_such(self):
+        # 読み 2 の食い違い (hard_stop_literal_ambiguous) と区別できる専用ラベル。
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope("grep -e KEY $X .env", self.tmp))
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_option_ambiguous", labels)
+        self.assertNotIn("hard_stop_literal_deny", labels)
+
+    def test_many_bare_expansion_words_falls_back_to_ask(self):
+        # 読み 3 は bare expansion word 1 つにつき 1 回 operand scan を回すので
+        # 上限を設けている。超えたら救済 scan を諦める (摩擦側 = ask)。
+        cmd = "grep -e K $A $B $C $D $E $F $G $H $I .env"
+        self.assertEqual(_decision(handle(_make_envelope(cmd, self.tmp))), "ask")
+
+    def test_option_value_token_unit(self):
+        from handlers.bash.operand_lexer import _option_value_token
+        # 分離形で non-path の値を 1 つ取る option を spec 宣言順で 1 つ借りる
+        self.assertEqual(_option_value_token(["grep", "x"]), "-e")
+        self.assertEqual(_option_value_token(["git", "log", "x"]), "-S")
+        self.assertEqual(_option_value_token(["tar", "x"]), "--exclude")
+        # 値 2 つ (``jq --arg NAME VALUE``) は選ばず 1 語 consume の option を選ぶ
+        self.assertEqual(_option_value_token(["jq", "x"]), "--indent")
+        # spec が無いコマンド → 読み 3 は成立しない
+        self.assertIsNone(_option_value_token(["cat", "x"]))
+        self.assertIsNone(_option_value_token(["head", "x"]))
+        self.assertIsNone(_option_value_token([]))
+
+    def test_expansion_option_readings_unit(self):
+        from handlers.bash.segmentation import (
+            _EXPANSION_PLACEHOLDER,
+            _expansion_option_readings,
+        )
+        p = _EXPANSION_PLACEHOLDER
+        # bare expansion word 1 つにつき 1 読み。クォート形も対象
+        self.assertEqual(
+            _expansion_option_readings("grep -e KEY $X .env", "-e", limit=8),
+            ["grep -e KEY -e .env"],
+        )
+        self.assertEqual(
+            _expansion_option_readings('grep "$PAT" .env', "-e", limit=8),
+            ["grep -e .env"],
+        )
+        self.assertEqual(
+            _expansion_option_readings("grep -e K $A $B .env", "-e", limit=8),
+            [f"grep -e K -e {p} .env", f"grep -e K {p} -e .env"],
+        )
+        # 語の内部に展開がある形は bare expansion word ではない (動機ケース)
+        self.assertEqual(
+            _expansion_option_readings("cat $PWD/.env", "-e", limit=8), []
+        )
+        self.assertEqual(
+            _expansion_option_readings('cat "$PWD"/.env', "-e", limit=8), []
+        )
+        # 置換対象が無ければ空
+        self.assertEqual(_expansion_option_readings("cat .env", "-e", limit=8), [])
+        # 上限超過は None (呼び出し側は救済 scan を諦める)
+        self.assertIsNone(
+            _expansion_option_readings("grep -e K $A $B .env", "-e", limit=1)
+        )
 
 
 class TestQuoteAwareResidualMetachar(BaseBash):

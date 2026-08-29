@@ -202,16 +202,32 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > していた。spaced / fused / fd 番号付き (`2>\|` / `12>\|`) の全形が `>` 形と
 > 同じ deny / ask / allow に揃う (下の redirect 各表)。
 >
-> 救済 scan (1) には **語数が変わる読みとの一致条件** がある: 非クォートの
-> 変数展開は空文字列になると語ごと消える (bash の word splitting)。
-> `grep $PAT .env` は `PAT` が空なら `grep .env` になり、`.env` は FILE では
-> なく**検索 pattern** として解釈される (入力は stdin) ため、ファイルは読まれ
-> ない。そこで deny を採用するのは **「展開が 1 語になる」読みと「展開が消える」
-> 読みの両方が deny のときだけ**にし、食い違えば従来どおり ask / allow に倒す。
-> `grep $PAT .env` / `sed $SCRIPT .env` / `awk $PROG .env` / `jq $F .env` /
-> `rg $PAT .env` / `git log -n $N .env` は ask / allow、クォート形
-> (`grep "$PAT" .env`) と positional を全てファイルに取るコマンド
-> (`cat $OPTS .env`) は deny。第 1 positional の意味 (pattern / program / path)
+> 救済 scan (1) には **全読み一致ゲート** がある: 変数の展開結果によって機密
+> operand の**役割**が変わる形があるため、deny を採用するのは次の 3 つの読み
+> すべてで「機密ファイル operand」に分類されるときだけにし、食い違えば従来
+> どおり ask / allow に倒す。
+>
+> - **読み 1 (展開が 1 語になる)**
+> - **読み 2 (展開が語ごと消える)** — 非クォートの変数展開は空文字列になると
+>   語ごと消える (bash の word splitting)。`grep $PAT .env` は `PAT` が空なら
+>   `grep .env` になり、`.env` は FILE ではなく**検索 pattern** として解釈
+>   される (入力は stdin) ため、ファイルは読まれない。`grep $PAT .env` /
+>   `sed $SCRIPT .env` / `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` /
+>   `git log -n $N .env` は ask / allow
+> - **読み 3 (展開がオプショントークンになる)** — 語全体が展開である語 (bare
+>   expansion word) は `-e` のような**値を取るオプション**にも展開されうる。
+>   `X=-e` のとき `grep -e KEY $X .env` は `grep -e KEY -e .env` として実行
+>   され、`.env` は第 2 の検索 pattern になる。**クォートは word splitting を
+>   止めるだけでオプション解釈は止めない**ので、読み 2 と違いクォート形も対象:
+>   `grep "$PAT" .env` / `sed "$SCRIPT" .env` / `awk "$PROG" .env` /
+>   `jq "$F" .env` / `rg "$PAT" .env` / `grep -e KEY $X .env` /
+>   `git log $OPT .env` / `tar -cf out.tar $X .env` は ask / allow
+>
+> deny 維持: 語**内**に展開がある形 (`cat $PWD/.env` / `grep -e KEY $D/.env`)、
+> 値を取るオプションを持たないコマンド (`cat $OPTS .env` / `head $OPTS .env`)、
+> 値が path のオプションしか噛まない形 (`grep -f $F .env`)、bare expansion word
+> が機密 operand より後ろにある形 (`grep -e KEY .env $X`)。
+> 第 1 positional の意味 (pattern / program / path)
 > と option の値の消費は operand scan の既存 spec が知っているので、
 > コマンドを列挙し直さずに両方の読みを評価する。
 >
@@ -251,14 +267,19 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `grep foo README.md >.env` (0.22.0: 密着形 redirect の書込み先。分離形 `> .env` は従来から deny) |
 | `shopt -s dotglob; cat *`, `GLOBIGNORE=x; cat *`, `setopt globdots; cat *` (0.22.0: 同一コマンド内で dotglob 系を有効化すると `*` は dotfile にも展開されるので fnmatch の意味論に戻す) |
 | `cat $PWD/.env`, `cat ${PWD}/.env`, `cat "$PWD/.env"`, `REPO=. ; cat $REPO/.env`, `grep KEY $CFG/.env`, `head -n 3 ${DIR}/.env`, `cat $HOME/keys/server.pem`, `cat $X/id_rsa`, `cp $SRC/.env /tmp/x`, `cat $D/.env*`, `shopt -s dotglob; cat $D/*` (0.25.0: 単純変数展開を placeholder に置換した救済 scan。展開結果に依らず basename が機密 pattern に一致する形だけ deny) |
-| `cat $OPTS .env`, `cat $X .env`, `head -n $N .env`, `tar -cf out.tar $X .env`, `grep "$PAT" .env`, `grep -e KEY $X .env`, `grep -f $F .env` (0.25.0: 変数と同居していても literal operand は救済 scan が拾う。**語が消える読みでも機密ファイル operand になる形に限る** — 下の ask / allow 表を参照) |
+| `cat $OPTS .env`, `cat "$OPTS" .env`, `cat $X .env`, `head $OPTS .env`, `head -n $N .env`, `grep -f $F .env`, `grep -e KEY .env $X`, `tar -cf out.tar .env $X`, `git log $OPT -- .env`, `zip $OPT out.zip .env` (0.25.0: 変数と同居していても literal operand は救済 scan が拾う。**3 つの読みすべてで機密ファイル operand になる形に限る** — 下の ask / allow 表を参照。`git log $OPT -- .env` は `$OPT` が値を取るオプションに展開されると `--` の方が値として消費されるので `.env` は pathspec のまま) |
 
-> **spec 被覆に依存する境界 (0.25.0 の開示)**: 語が消える読みの解釈は
-> `command_specs` に依存する。`head -n $N .env` は deny、`git log -n $N .env` は
-> ask — 違いは `-n` が値を取る option として登録されているかだけで、実 bash では
+> **spec 被覆に依存する境界 (0.25.0 の開示)**: 語が消える読み (読み 2) と
+> オプショントークンの読み (読み 3) の解釈はどちらも `command_specs` に依存
+> する。`head -n $N .env` は deny、`git log -n $N .env` は ask — 違いは `-n` が
+> 値を取る option として登録されているかだけで、実 bash では
 > `head -n .env` も (invalid number で) ファイルを開かない。spec 未登録の
 > コマンドは 0 語読みでも positional 扱いになり、literal 形 (`head -n .env` は
 > 0.24.0 以前から deny) と同じ結論に落ちる = **未登録側は保守的に倒れる**。
+> 読み 3 も同じで、spec の無いコマンド (`cat $OPTS .env` / `head $OPTS .env`)
+> では「値を取る option」を知らないため読み 3 が成立せず deny 維持になる
+> (`cat` は実際に値を取る option を持たないので正しい結論だが、spec 未登録で
+> 実際には持つコマンドでは過剰 deny = 摩擦側に倒れる)。
 > 後から `head` の spec を足すとこの verdict は ask に変わる (spec の被覆は
 > 「deny を外す側」なので漏れ = 現状維持という 0.22.0 の原則どおり)。
 | `awk "{print}" .env`, `sed "s/(=)/X/" .env`, `git ls-files --format="%(objectname)" .env` (0.25.0: ダブルクォート内の `{` `(` は不活性。単一クォート形と同じ deny 経路に到達) |
@@ -288,7 +309,8 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `git commit -m 'fix: a & b'`, `git commit -m 'a & b' 2>&1`, `echo 'a\|b'`, `echo "a > b"`, `tar -cf out.tar 'weird\|name'`, `jq '.a \| .b' cfg.json`, `git log --grep='a&b' --oneline`, `echo \> x` (0.25.0: クォート内・エスケープ済みの metachar は literal データ。residual ask に倒さない) |
 | `git diff "HEAD@{1}"`, `git stash apply "stash@{0}"`, `awk "{print}" notes.txt`, `sed "s/(=)/X/" notes.txt`, `echo "{a,b}"`, `echo "a<b"`, `cat "file(1).txt"`, `git commit -m "fix (parser) & cleanup"` (0.25.0: ダブルクォート内の `(` `)` `{` `}` `<` は不活性。0.18.0 のシングルクォート形と同じ扱い) |
 | `sed -e 's/a/b/' report.txt`, `sed -e p e.txt`, `sed --expression=p e.txt`, `sed -ne p e.txt`, `sed -e p -- e.txt` (0.25.0: `-e` / `--expression` / `-f` があれば positional は全て入力ファイル。script として再解析しない) |
-| `grep $PAT .env`, `sed $SCRIPT .env`, `awk $PROG .env`, `jq $F .env`, `rg $PAT .env`, `ag $PAT .env`, `git grep $PAT .env`, `grep $PAT .env README.md`, `git log -n $N .env` (0.25.0: 非クォートの変数展開が空になると語ごと消え、`.env` が pattern / program / option 値の枠に落ちてファイルとして読まれない。1 語読みと 0 語読みが食い違うので救済 scan の deny を採用しない) |
+| `grep $PAT .env`, `sed $SCRIPT .env`, `awk $PROG .env`, `jq $F .env`, `rg $PAT .env`, `ag $PAT .env`, `git grep $PAT .env`, `grep $PAT .env README.md`, `git log -n $N .env` (0.25.0 読み 2: 非クォートの変数展開が空になると語ごと消え、`.env` が pattern / program / option 値の枠に落ちてファイルとして読まれない。1 語読みと 0 語読みが食い違うので救済 scan の deny を採用しない) |
+| `grep "$PAT" .env`, `sed "$SCRIPT" .env`, `awk "$PROG" .env`, `jq "$F" .env`, `rg "$PAT" .env`, `grep -e KEY $X .env`, `grep -e KEY "$X" .env`, `git log $OPT .env`, `git diff $OPT .env`, `diff $OPT .env other.txt`, `tar -cf out.tar $X .env`, `rsync $OPT .env /tmp/x`, `ag $OPT .env`, `ack --match KEY $X .env`, `git grep -e KEY $X .env` (0.25.0 読み 3: 語全体が展開である語は値を取るオプションにも展開されうる。`X=-e` なら `grep -e KEY $X .env` は `grep -e KEY -e .env` として実行され `.env` は第 2 の検索 pattern。**クォートしてもオプションとしては解釈される**ので読み 2 と違いクォート形も対象) |
 | `git commit -m x 2>"/dev/null"`, `make build 2>'/dev/null'`, `make build 2> "/dev/null"`, `make build 2>&"1"`, `make build 2>"&1"`, `make build &>"/dev/null"` (0.25.0: bash は target をクォート除去してから使うので無クォート形と同じ安全リダイレクト。演算子の live 性だけを剥離条件にする) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)

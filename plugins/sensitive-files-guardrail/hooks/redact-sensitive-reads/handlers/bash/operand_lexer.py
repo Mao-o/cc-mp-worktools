@@ -46,6 +46,7 @@ from fnmatch import fnmatchcase
 
 from handlers.bash.command_specs import (
     _SPECS,
+    _VALUE_NON_PATH,
     _VALUE_PATH,
     _CmdSpec,
     _split_kinds,
@@ -294,6 +295,44 @@ def _command_spec(tokens: list[str]) -> tuple[_CmdSpec | None, int, int]:
             return None, 1, 1
         return _SPECS.get(f"git {tokens[j]}"), j, j + 1
     return _SPECS.get(first), 1, 1
+
+
+def _option_value_token(tokens: list[str]) -> str | None:
+    """このコマンドで「分離形で non-path の値を 1 つ取る」option を 1 つ返す。
+
+    救済 scan の **読み 3** (変数がオプショントークンに展開される、0.25.0
+    Codex R2 P2) が使う代表値。変数が値を取る option に展開されると後続の語は
+    その値として consume され、operand の役割が変わる — その反例を 1 つ作れれば
+    「役割は不変」が崩れるので、spec が知っている option を 1 つ借りるだけで
+    足りる。**コマンドを列挙し直さない**のがこの関数の要点で、判定に使う知識は
+    ``command_specs`` に既にあるものだけ。
+
+    選ぶ条件 (誤って広く選ぶと救済 deny を落としすぎるため狭く取る):
+
+    - **分離形で値を取る** (``_ATTACHED_ONLY`` の ``=n`` は次の語を consume
+      しないので反例にならない)
+    - **値がちょうど 1 つ** かつ **non-path** (``_VALUE_NON_PATH``)。path の値
+      (``grep -f FILE``) は候補に残るので deny を崩さない。``jq --arg NAME
+      VALUE`` のような 2 語 consume は必要以上に語を飲むので選ばない
+    - spec 内の **宣言順で最初** の 1 つ (決定的にするため)
+
+    spec が無いコマンド (``cat`` / ``head`` / ``cp`` …) は ``None``。
+    ``cat`` は実際に値を取る option を持たないので読み 3 自体が成立しない
+    (deny 維持が正しい)。spec 未登録のコマンドについては「値を取る option を
+    知らない」= 読み 3 を作れないので deny 維持側に倒れる — ``head -n $N .env``
+    が deny で ``git log -n $N .env`` が ask になる既存の非対称
+    (spec 被覆に依存する境界) と同じ失敗方向 (過剰 deny = 摩擦)。
+    """
+    if not tokens:
+        return None
+    spec, _, _ = _command_spec(tokens)
+    if spec is None:
+        return None
+    for name, kinds in spec.values.items():
+        attached_only, kinds = _split_kinds(kinds)
+        if not attached_only and kinds == _VALUE_NON_PATH:
+            return name
+    return None
 
 
 def _find_path_candidates(tokens: list[str]) -> list[str]:
