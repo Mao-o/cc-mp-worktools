@@ -175,14 +175,17 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 
 ```markdown
 ## Project Facts
+- repo_root: /path/to/analyzed/dir
 - git_repo: false
 - no project markers found; facts skipped
+- more: run `python3 <invoked_as> --force-walk` to force the full analysis anyway
 ```
 
 `$HOME` や `Desktop` など、質問目的でコーディング用途以外のディレクトリから
 起動したときに、無関係なファイル/ディレクトリ名から作られる無意味な
 facts (Structure・Test Snapshot 等 100 行超) が注入されるのを避けるため。
-従来どおりフル解析したい場合は `--force-walk` を付ける。
+解析対象ディレクトリ (`repo_root`) と、従来どおりフル解析したい場合の
+`--force-walk` フラグは、この最小ヘッダー自身にも常に記載される。
 
 git repo (`.git` 検出済み) の場合はこの判定自体が働かない — project marker
 の有無に関わらず常にフル解析する (git ls-files ベースの解析は元々軽量なため)。
@@ -196,10 +199,12 @@ Claude Code の `SessionStart` hook が plain stdout / `additionalContext` と�
 そのまま注入される側に倒す。
 
 上限を超える場合は優先度の低いセクションから段階的に削る:
-`## Structure` の末尾行 → `## Scripts` → `## Env Keys` →
-`## Repo-Specific Notes` の順で、削った場合は末尾に `... (truncated)` を
-付ける。`## Test Snapshot` / `## Service Entry Points` / `## Likely Commands`
-はこの段階的削減の対象外 (agent が自力で再構成しにくい情報のため)。
+`## Subtree` / `## Structure` の末尾行 (cwd スコープ時は構造セクションが
+depth=1 に自己縮小し本体が `## Subtree` に移るため、両方が対象) →
+`## Scripts` → `## Env Keys` → `## Repo-Specific Notes` の順で、削った
+場合は末尾に `... (truncated)` を付ける。`## Test Snapshot` /
+`## Service Entry Points` / `## Likely Commands` はこの段階的削減の対象外
+(agent が自力で再構成しにくい情報のため)。
 
 `--emit subagent-json` は JSON エンベロープ・エスケープ分だけ `--max-output-chars`
 の外側にバイト数が増える。ハーネス側の 10,000 文字上限がペイロード全体

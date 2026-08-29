@@ -48,7 +48,7 @@ skill ディレクトリから見た相対パス `../../hooks/session-facts` も
 1. ユーザーが対象 repo / cwd を指定している場合は、そのディレクトリで実行する。
 2. 指定がない場合は現在の作業ディレクトリを対象にする。
 3. 出力された Markdown を要約しすぎず、必要な範囲だけ会話に貼る。
-4. 大きい repo では `--max-tree-lines`、`--max-service-entries`、`--max-script-entries` などで出力量を抑える。
+4. 大きい repo では `--max-tree-lines`、`--max-service-entries`、`--max-script-entries` などで出力量を抑える。ただし出力全体には既定 8,000 文字の自動上限 (`--max-output-chars`) が既にかかっており、超過分は優先度の低いセクションから段階的に削られる — 通常はこれらのフラグを手で調整しなくても上限を超えない。
 
 ## 主要オプション
 
@@ -61,6 +61,8 @@ skill ディレクトリから見た相対パス `../../hooks/session-facts` も
 - `--max-service-entries <n>`: service entry の最大件数。
 - `--max-script-entries <n>`: scripts 表示の最大件数。
 - `--max-env-keys <n>`: env key 表示の最大件数。
+- `--max-output-chars <n>`: 出力全体の文字数上限 (既定 8,000)。超過時は Structure/Subtree の末尾行 → Scripts → Env Keys → Repo-Specific Notes の順で段階的に削り、削った場合は末尾に `... (truncated)` を付ける。
+- `--force-walk`: 非 git かつ project marker (`core/constants.py` の `PROJECT_MARKERS`) が無いディレクトリでも、従来どおりフルの走査解析を強制する。既定では該当ディレクトリは最小ヘッダーのみを返す。
 
 ## 注意
 
