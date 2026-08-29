@@ -3060,6 +3060,9 @@ class TestVanishingExpansionWordReading(BaseBash):
     deny** のときだけ deny を採用する。第 1 positional の意味は
     ``command_specs._CmdSpec.pattern_slot``、option の値の消費は ``values`` が
     既に知っているので、コマンドを列挙し直さずに両方の読みを評価できる。
+
+    本クラスは**語数の 2 読み**だけを扱う。第 3 の読み (展開がオプション
+    トークンになる) は ``TestOptionTokenExpansionReading`` 側。
     """
 
     # 両読みが食い違う → 従来どおり ask (default) / allow (auto)。
@@ -3123,11 +3126,15 @@ class TestVanishingExpansionWordReading(BaseBash):
         self.assertNotIn("hard_stop_literal_deny", labels)
 
     def test_confirmation_pass_does_not_double_count_diagnostics(self):
-        # 確認 pass (0 語読み) は verdict を決めるためだけの再実行なので、
-        # 分類ラベルと render counter を二重計上してはいけない
-        # (`bash_render_failed` は「minimal info を出せなかった原因の分布」を
-        # 測る counter で、倍になると計測が壊れる)。
-        for cmd in ("cat $OPTS .env", "cat $X .env", "cat $X >| .env"):
+        # 確認 pass (読み 2 = 0 語読み / 読み 3 = オプショントークン読み) は
+        # verdict を決めるためだけの再実行なので、分類ラベルと render counter を
+        # 二重計上してはいけない (`bash_render_failed` は「minimal info を
+        # 出せなかった原因の分布」を測る counter で、倍増すると計測が壊れる)。
+        # `grep -e KEY .env $X` は deny を採用しつつ**読み 3 も走る**形
+        # (bare expansion word が機密 operand の後ろ) なので、読み 3 側の
+        # `quiet=True` もここで固定される。
+        for cmd in ("cat $OPTS .env", "cat $X .env", "cat $X >| .env",
+                    "grep -e KEY .env $X"):
             with self.subTest(cmd=cmd):
                 with mock.patch("handlers.bash_handler.L.log_info") as spy:
                     r = handle(_make_envelope(cmd, self.tmp))
@@ -3263,9 +3270,22 @@ class TestOptionTokenExpansionReading(BaseBash):
 
     def test_many_bare_expansion_words_falls_back_to_ask(self):
         # 読み 3 は bare expansion word 1 つにつき 1 回 operand scan を回すので
-        # 上限を設けている。超えたら救済 scan を諦める (摩擦側 = ask)。
-        cmd = "grep -e K $A $B $C $D $E $F $G $H $I .env"
+        # 上限 (`_MAX_OPTION_READINGS`) を設けている。超えたら救済 scan を
+        # 諦める (摩擦側 = ask)。上限は hook の 2 秒 timeout 予算からの逆算で、
+        # 実在する形の最大 (コーパス実測で 2 語) の 2 倍。
+        from handlers.bash_handler import _MAX_OPTION_READINGS
+        n = _MAX_OPTION_READINGS + 1
+        bare = " ".join(f"${chr(ord('A') + i)}" for i in range(n))
+        cmd = f"grep -e K {bare} .env"
         self.assertEqual(_decision(handle(_make_envelope(cmd, self.tmp))), "ask")
+        # 上限ちょうどなら読みを作る (諦めるのは超過時だけ)。この形も読み 3 で
+        # 役割が変わるので結論は ask だが、経路が違う (専用ラベルで区別)。
+        at_limit = " ".join(f"${chr(ord('A') + i)}"
+                            for i in range(_MAX_OPTION_READINGS))
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope(f"grep -e K {at_limit} .env", self.tmp))
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_option_ambiguous", labels)
 
     def test_option_value_token_unit(self):
         from handlers.bash.operand_lexer import _option_value_token

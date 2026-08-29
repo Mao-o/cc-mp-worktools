@@ -618,7 +618,7 @@ def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
     引数位置がずれる** (0.25.0、Codex R1 P2)。``grep $PAT .env`` は 1 語読みでは
     ``.env`` が FILE、0 語読みでは ``.env`` が検索 pattern (ファイルは読まれ
     ない) で、意味が食い違う。救済 scan の呼び出し側 (``bash_handler.
-    _hard_stop_literal_scan``) は **両方の読みで deny になるときだけ** deny を
+    _hard_stop_literal_scan``) は **全ての読みで deny になるときだけ** deny を
     採用し、食い違えば従来どおり ``ask_or_allow`` に落とす。
 
     語数が変わらない読みでも **役割** が変わる第 3 の読み (展開がオプション

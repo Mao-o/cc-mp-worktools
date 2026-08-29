@@ -691,10 +691,11 @@ _PLACEHOLDER_DISPLAY = "${…}"
 def _muted_logging():
     """このブロックの中の診断ログを捨てる (0.25.0)。
 
-    救済 scan の**確認 pass** (0 語読み) 専用。確認 pass は verdict を決めるため
-    だけに ``_analyze_segment`` をもう一度走らせるので、そのログを残すと
+    救済 scan の**確認 pass** (読み 2 = 0 語読み / 読み 3 = オプショントークン
+    読み) 専用。確認 pass は verdict を決めるためだけに ``_analyze_segment`` を
+    もう一度走らせるので、そのログを残すと
 
-    - ``bash_classify`` の分類ラベルが 1 コマンドにつき 2 回出る (``cat $OPTS
+    - ``bash_classify`` の分類ラベルが 1 コマンドにつき複数回出る (``cat $OPTS
       .env`` で ``match:cat`` が重複)。しかもラベルが指すのは **実際に採用した
       読みとは限らない** ので、後から分類分布を見る人を誤らせる
     - ``bash_render_failed`` / ``bash_render_project_root`` (minimal info を
@@ -774,10 +775,19 @@ def _scan_expansion_reading(
 
 
 # 読み 3 を作る bare expansion word の上限 (0.25.0)。1 語につき
-# ``_analyze_segment`` が 1 回走るので、``$A $B $C …`` のような病的な segment で
-# 予算 (hook の 2 秒 timeout) を使い切らないための保険。超えたら救済 scan 自体を
-# 諦める = 従来の ``ask_or_allow`` (摩擦側)。
-_MAX_OPTION_READINGS = 8
+# ``_analyze_segment`` が 1 回走り、その中で segment 全長の lex (``_has_hard_stop``
+# / ``_live_operator_metachars``) と ``shlex.split`` を通るので、語数 × segment 長
+# で効いてくる。超えたら救済 scan 自体を諦める = 従来の ``ask_or_allow`` (摩擦側)。
+#
+# 実測 (segment 長 64KB = ``_MAX_SEGMENT_CHARS`` 上限、spec 持ちコマンド):
+#     読み 3 なし  201ms      上限 4   540ms      上限 8   877ms
+# (救済 scan 自体が走らない変数なしの同長コマンドは 90ms)
+#
+# hook の timeout は 2 秒で、超過時は**出力が破棄され decision が消える**
+# (無音 fail-open) ため、上限は「予算の 1/4 に収まる」側で決める。コーパス
+# (1,413 コマンド) の実測分布は bare expansion word が 0 個 73 / 1 個 92 /
+# 2 個 3 segment で、**実在する形の最大は 2** — 4 はその 2 倍の余裕。
+_MAX_OPTION_READINGS = 4
 
 
 def _option_reading_agrees(

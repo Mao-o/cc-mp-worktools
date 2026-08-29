@@ -229,7 +229,8 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > が機密 operand より後ろにある形 (`grep -e KEY .env $X`)。
 > 第 1 positional の意味 (pattern / program / path)
 > と option の値の消費は operand scan の既存 spec が知っているので、
-> コマンドを列挙し直さずに両方の読みを評価する。
+> コマンドを列挙し直さずに 3 つの読みを評価する (読み 3 の反例に使う
+> オプションも spec から 1 つ借りるだけ)。
 >
 > 安全リダイレクト (`2>/dev/null` / `2>&1` 等) の判定は **演算子の live 性と
 > target の quote removal を分離** する。bash は target をクォート除去してから
