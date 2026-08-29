@@ -10,8 +10,8 @@
   `~/.claude/file-split-advisor/ignore.local.txt` (1 行 1 glob、`#` コメント、
   空行無視のシンプルな gitignore 風フォーマット) を追加。両方を統合してファイル
   名・フルパスの両方に対して判定し、一致したファイルは判定対象から除外する
-- `FILE_SPLIT_ADVISOR_SCALE` (全閾値への一律倍率、既定 `1.0`) を追加。0 以下や
-  数値に変換できない値は既定にフォールバックする
+- `FILE_SPLIT_ADVISOR_SCALE` (全閾値への一律倍率、既定 `1.0`) を追加。0 以下・
+  数値に変換できない値・`nan`/`inf` 等の非有限値は既定にフォールバックする
 
 ### 一時ディレクトリ配下・cwd 外ファイルの誤発火を修正
 
@@ -21,7 +21,11 @@ Claude が分析用ダンプや handoff メモ等の一時ファイルを scratc
 `/private/tmp` / `/var/folders` 配下のファイルを、`cwd` の内側にない限り常時
 skip するようにした (opt-out 機構なし)。あわせて `FILE_SPLIT_ADVISOR_CWD_ONLY`
 (既定 off) を追加し、有効化すると `cwd` 外のファイルを全般 skip できる
-(`--add-dir` 運用を壊さないよう既定は off)。
+(`--add-dir` 運用を壊さないよう既定は off)。containment 判定は
+`os.path.realpath()` で正規化した上で行う (macOS では `/tmp`/`/var` が
+`/private/tmp`/`/private/var` への symlink であり、正規化しないと表記揺れで
+「一時ファイルが skip されない」「cwd 内側のファイルが誤って skip される」の
+両方向に壊れていた)。
 
 ### メモの根拠表示を正確にする
 
@@ -32,6 +36,10 @@ skip するようにした (opt-out 機構なし)。あわせて `FILE_SPLIT_ADV
   の形でメモに明示するようにした (`judge.Verdict.applied_multipliers` を追加)
 - メモの「目安」行数表示が review/warn 固定で、note/strong 判定時には無関係な
   数値だけが出ていたのを、判定 tier + 隣接 tier を動的に表示するよう修正
+- `FILE_SPLIT_ADVISOR_SCALE` != 1.0 のとき、目安の倍率が printed 係数から
+  導出できなかったのを修正。role_note と同じ形の専用表示
+  (`(全体 2.0倍)`) を breakdown の直後に追記する (`judge.Verdict.scale` を追加。
+  `applied_multipliers` には含めない設計判断は維持)
 
 ### stderr 汚染を修正
 
@@ -39,6 +47,39 @@ skip するようにした (opt-out 機構なし)。あわせて `FILE_SPLIT_ADV
 (`"\d"` 等) を含む Python ソースに対して Python 3.12+ で `SyntaxWarning` を
 毎回 stderr に出していた (実測: 260 行中 236 行に該当パターンを含むファイルで
 約 76KB)。`warnings.catch_warnings()` で抑制した。
+
+### レビューで見つかった追加の不具合を修正
+
+上記の設定手段追加・temp-dir skip・メモ表示修正の初版に対するレビューで
+見つかった不具合。
+
+- **非UTF-8の `ignore.local.txt` で plugin が全プロジェクトで無言停止する
+  不具合を修正**。`UnicodeDecodeError` は `OSError` のサブクラスではないため
+  `except OSError` だけでは捕まらず、この設定ファイルが読めないと
+  (`~/.claude/` 配下のユーザーグローバル設定のため) 全プロジェクトの
+  全 Write/Edit で plugin が無言で死んでいた。`except (OSError,
+  UnicodeDecodeError)` に修正
+- **`FILE_SPLIT_ADVISOR_SCALE` に `nan`/`inf`/`1e400` を渡すと plugin が
+  無言で無効化される不具合を修正**。これらは `float()` 変換に成功し
+  `value <= 0` も素通りするため、非有限な倍率が実効閾値に乗算されて
+  全ファイルが判定不能になっていた。`math.isfinite()` によるチェックを追加
+- **`__main__.py` の表示パス相対化が macOS の `/tmp`/`/var` symlink による
+  表記揺れで絶対パス表示にフォールバックする問題を修正** (実害は表示のみ)。
+  temp-dir skip と同じ realpath 正規化 (`source.relative_to_cwd`) を使うよう
+  に統一した
+- **テストが `FILE_SPLIT_ADVISOR_*` の環境変数 5 つを遮断していなかったのを
+  修正**。これらを export した端末/CI ではテストの green の意味が変わって
+  いた
+- メモの「検出された構造シグナル: なし」表示から、将来 `judge` 側の
+  thresholds が部分的になったときの防御ガードが抜けていたのを復元
+  (現状は到達不能だが fail-open で表示ごと消えるのを防ぐ)
+- 除外 glob (`FILE_SPLIT_ADVISOR_IGNORE` / `ignore.local.txt`) の fnmatch が
+  完全一致 (anchored) であり、相対パス形のパターン (`migrations/*`) が
+  絶対パスに決してマッチしないことを README に明記 (`*/migrations/*` の形が
+  必要)
+- `$TMPDIR` を深さ・cwd との関係を検証せず root として無条件採用する既知の
+  限界を README に追記 (稀な設定ミス時にのみ顕在化するため、既定の skip
+  判定の入力自体を変える対応は見送った)
 
 ### ドキュメント修正
 
