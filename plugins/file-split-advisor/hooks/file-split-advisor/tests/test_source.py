@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,12 +76,22 @@ class TestIsUnderTempDir(unittest.TestCase):
         # 判定するため誤検知しない)。
         self.assertFalse(source.is_under_temp_dir(Path("/tmpfoo/bar.py")))
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "/var -> /private/var の symlink は macOS 固有。Linux では /var が"
+        " 実ディレクトリなので /var/folders は正規化されず、この形は一時領域に"
+        " ならない (roots に literal で載っているのは /tmp /private/tmp"
+        " /var/folders の 3 つだけ)。判定ロジック自体は下の"
+        " TestRealpathAliasNormalization が realpath を mock して"
+        " ホスト非依存に固定している。",
+    )
     def test_realpath_resolved_var_folders_form_is_also_temp(self):
         # P1 face A: macOS では /var が /private/var の symlink (`ls -ld /var`
         # で確認できる)。$TMPDIR (mkdtemp 等) は resolved 形
         # (/private/var/folders/...) で渡ってくることがあるが、正規化前は
         # roots に /var/folders しか列挙しておらず検出できなかった。
-        # 実機 (macOS) の実際の symlink 解決で確認する (mock を使わない)。
+        # 実機 (macOS) の実際の symlink 解決で確認する (mock を使わない) —
+        # そのため実行は macOS に限定する。
         self.assertTrue(
             source.is_under_temp_dir(Path("/private/var/folders/xx/yyyy/T/foo.py"))
         )
