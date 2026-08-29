@@ -242,7 +242,16 @@ def _reclaim_stale_reservations(marker: dict, now: float) -> None:
 
 
 def _evict_overflow_plans(marker: dict) -> None:
-    """エントリ数が MAX_PLAN_ENTRIES を超えたら古い順 (挿入順) に捨てる。"""
+    """エントリ数が MAX_PLAN_ENTRIES を超えたら古い順 (挿入順) に捨てる。
+
+    `marker["last"]` が指す hash がここで捨てられても `last` 自体は書き換えない
+    (= dangling を許容する)。安全な理由: 唯一の参照元である reserve_slot の
+    重複判定が `marker["last"] == current_hash and current_hash in marker["plans"]`
+    と AND 条件になっており、`plans` に無い hash を `last` が指していても
+    dedup 判定は素通り (False) するだけで実害が無いため。`_reclaim_stale_reservations`
+    が `last` を明示的にクリアしているのとは非対称だが、そちらは「参照先が生きたまま
+    無効化する」経路なので扱いが異なる。
+    """
     plans = marker["plans"]
     if len(plans) <= MAX_PLAN_ENTRIES:
         return
