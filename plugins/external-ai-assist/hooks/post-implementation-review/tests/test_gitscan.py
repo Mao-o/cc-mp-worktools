@@ -160,6 +160,20 @@ class TestWorktreeRoot(GitScanTestCase):
         self.assertIsNone(gitscan.worktree_root(outside))
 
 
+class TestHeadSha(GitScanTestCase):
+    def test_returns_current_head(self):
+        sha = gitscan.head_sha(self.repo)
+        self.assertIsNotNone(sha)
+        expected = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(sha, expected)
+
+    def test_no_commits_returns_none(self):
+        fresh = os.path.join(self._tmp.name, "fresh-repo")
+        os.makedirs(fresh)
+        git(fresh, "init", "-q")
+        self.assertIsNone(gitscan.head_sha(fresh))
+
+
 class TestToRelative(GitScanTestCase):
     def test_inside_path(self):
         target = os.path.join(self.repo, "pkg", "mod.py")
@@ -322,6 +336,43 @@ class TestPathDiff(GitScanTestCase):
     def test_unchanged_tracked_file_is_empty(self):
         diff = gitscan.path_diff(self.repo, "seed.txt", untracked=False, has_head=True)
         self.assertEqual(diff, "")
+
+    def test_base_sha_shows_diff_that_current_head_would_hide(self):
+        """bd_092a232e-zh5.16: 記録した古い SHA を基点にすると、その後 commit されて
+        現行 HEAD 基準では空になる diff も見える。"""
+        old_head = gitscan.head_sha(self.repo)
+        write(self.repo, "new.py", "brand new\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "mid-turn commit")
+
+        # 現行 HEAD 基準では既に commit 済みなので空
+        self.assertEqual(
+            gitscan.path_diff(self.repo, "new.py", untracked=False, has_head=True), ""
+        )
+        # 記録済みの古い SHA を渡せば commit 前後をまたいだ差分が見える
+        diff = gitscan.path_diff(
+            self.repo, "new.py", untracked=False, has_head=True, base_sha=old_head
+        )
+        self.assertIn("+brand new", diff)
+
+    def test_invalid_base_sha_falls_back_to_head(self):
+        """記録済み SHA が到達不能 (rebase/GC 等) でも現行 HEAD にフォールバックする。"""
+        write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
+        diff = gitscan.path_diff(
+            self.repo,
+            "seed.txt",
+            untracked=False,
+            has_head=True,
+            base_sha="0" * 40,  # 存在しない SHA
+        )
+        self.assertIn("+BETA", diff)
+
+    def test_none_base_sha_behaves_as_before(self):
+        write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
+        diff = gitscan.path_diff(
+            self.repo, "seed.txt", untracked=False, has_head=True, base_sha=None
+        )
+        self.assertIn("+BETA", diff)
 
     def test_repo_without_head_uses_staged_diff(self):
         fresh = os.path.join(self._tmp.name, "fresh-repo")

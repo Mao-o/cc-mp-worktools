@@ -217,6 +217,59 @@ class TestBashAttribution(HookTestCase):
         self.assertEqual(self.pending(SESSION_A), [])
 
 
+class TestCommitMidTurnStillReviewed(HookTestCase):
+    """bd_092a232e-zh5.16: 同一ターン内で `git commit` した変更も、HEAD 基準 diff が
+    空になって消えてしまわず、レビューされること。"""
+
+    def test_edit_then_commit_same_turn_is_still_reviewed(self):
+        self.edit(SESSION_A, "a.py", "v1 content\n")
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "mid-turn commit")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "v1 content")
+
+    def test_bash_created_then_committed_same_turn_is_still_reviewed(self):
+        def mutate():
+            _testutil.write(self.repo, "generated.py", "made by bash\n")
+
+        self.bash(SESSION_A, "tu_gen", mutate)
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "mid-turn commit (bash)")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("generated.py", "made by bash")
+
+    def test_modification_then_commit_same_turn_is_still_reviewed(self):
+        """既存の tracked ファイルを編集後に commit するケース (新規追加ではなく変更)。"""
+        self.edit(SESSION_A, "seed.txt", "alpha\nBETA\ngamma\n")
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "mid-turn commit (modify)")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("seed.txt", "BETA")
+
+    def test_deferred_carry_over_keeps_original_head_across_turns(self):
+        """予算超過で繰り越したファイルは、繰り越し後に別ファイルを commit しても
+        元の (繰り越された時点で記録された) HEAD を基点にし続けること。"""
+        self.entry.MAX_REVIEW_PATHS = 1
+        self.edit(SESSION_A, "a.py", "from a\n")
+        self.edit(SESSION_A, "b.py", "from b\n")  # 上限超過で overflow → 繰り越し
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+        self.assertEqual(
+            [os.path.basename(p) for p in self.pending(SESSION_A)], ["b.py"]
+        )
+
+        # 繰り越された b.py を、次のレビューが走る前に commit してしまう
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "commit b.py before its own review")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("b.py", "from b")
+
+
 class TestBashSnapshotFailure(HookTestCase):
     """bd_092a232e-zh5.7: git status 失敗時に空/不完全な snapshot を {} として保存し、
     作業ツリー全体を誤ってこのセッションの変更と帰属させないこと。"""

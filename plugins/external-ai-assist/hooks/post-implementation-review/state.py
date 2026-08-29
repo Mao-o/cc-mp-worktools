@@ -143,7 +143,20 @@ def _locked_state(session_id: str):
         flock.rewrite(f, json.dumps(state, ensure_ascii=False))
 
 
-def record_pending(session_id: str, paths: list[str]) -> int:
+def _pending_head(value) -> str | None:
+    """pending エントリ (新形式 dict {"at":.., "head":..} または旧形式の bare
+    timestamp) から記録済み HEAD SHA を取り出す。旧形式には無いので None
+    (Stop 側は現行 HEAD にフォールバックする。bd_092a232e-zh5.16)。
+    """
+    if isinstance(value, dict):
+        head = value.get("head")
+        return head if isinstance(head, str) and head else None
+    return None
+
+
+def record_pending(
+    session_id: str, paths: list[str], heads: dict[str, str | None] | None = None
+) -> int:
     """PostToolUse から呼ぶ。このセッションが変更した絶対パスを pending に積む。
 
     作業ツリー内かどうかの判定はここでは行わない。git を叩かずに済ませて
@@ -152,15 +165,24 @@ def record_pending(session_id: str, paths: list[str]) -> int:
     順序 (dict の挿入順) がレビュー順になる。上限超過は **末尾 (新しい方) から** 落とす:
     先頭は前回 Stop が繰り越した (pending に戻した) パスで、ここを落とすと予算超過で
     繰り越されたファイルが大量編集のターンで黙って消える。
+
+    `heads` は各パスの「pending に入った時点の HEAD SHA」(bd_092a232e-zh5.16。
+    絶対パス→SHA。指定の無いパスは None = Stop 側で現行 HEAD にフォールバック)。
+    既に pending に居るパスの記録は上書きしない (`setdefault`) — 最初にこの
+    ウィンドウへ入った時点の HEAD を保つ。carry-over (`__main__._run_review` の
+    繰り越し) は元 claim が持っていた heads をそのまま渡すこと。ここで新しい
+    HEAD へ差し替えると、繰り越すたびに基点が現行 HEAD に近づいていき
+    「commit 済みで diff が消える」バグを再導入してしまう。
     """
     if not paths:
         return 0
+    heads = heads or {}
     try:
         with _locked_state(session_id) as state:
             pending = state["pending"]
             now = time.time()
             for p in paths:
-                pending.setdefault(p, now)
+                pending.setdefault(p, {"at": now, "head": heads.get(p)})
             for newest in list(pending)[MAX_PENDING_PATHS:]:
                 del pending[newest]
             return len(pending)
@@ -182,6 +204,10 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
     セッション数だけ溜め込んでいた実測 (19 セッション分) の主因だった。
     ファイルが既に存在するセッションは今までどおり開いて処理する
     (TTL 回収や claim が必要な可能性があるため)。
+
+    **返り値の tuple 形状は変えていない** (呼び出し側の 2-tuple unpack を壊さない
+    ため)。pending 記録時点の HEAD (bd_092a232e-zh5.16) は in-flight エントリに
+    `heads` として同居させ、`claim_heads()` で別途取得する。
     """
     if not os.path.exists(_state_path(session_id)):
         return None
@@ -193,20 +219,43 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
                     del state["in_flight"][cid]
                     continue
                 if now - float(entry.get("at") or 0) > IN_FLIGHT_TTL_SEC:
+                    reclaimed_heads = entry.get("heads") or {}
                     for p in entry.get("paths") or []:
-                        state["pending"].setdefault(p, now)
+                        state["pending"].setdefault(
+                            p, {"at": now, "head": reclaimed_heads.get(p)}
+                        )
                     del state["in_flight"][cid]
 
             if not state["pending"]:
                 return None
 
-            paths = list(state["pending"].keys())
+            pending = state["pending"]
+            paths = list(pending.keys())
+            heads = {p: _pending_head(pending[p]) for p in paths}
             claim_id = uuid.uuid4().hex
-            state["in_flight"][claim_id] = {"at": now, "paths": paths}
+            state["in_flight"][claim_id] = {"at": now, "paths": paths, "heads": heads}
             state["pending"] = {}
             return claim_id, paths
     except OSError:
         return None
+
+
+def claim_heads(session_id: str, claim_id: str) -> dict[str, str | None]:
+    """`claim_pending()` が確保した claim の pending-記録時 HEAD SHA を取得する。
+
+    2-tuple の返り値を変えずに済ませるため、heads は in-flight エントリに
+    同居させて別途読み出す (bd_092a232e-zh5.16)。claim_id が見つからない
+    (既に complete/restore 済み等) 場合は空 dict。
+    """
+    try:
+        with _locked_state(session_id) as state:
+            entry = state["in_flight"].get(claim_id)
+            if not isinstance(entry, dict):
+                return {}
+            heads = entry.get("heads")
+            return dict(heads) if isinstance(heads, dict) else {}
+    except OSError:
+        return {}
 
 
 def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> None:
@@ -229,19 +278,29 @@ def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> No
         pass
 
 
-def restore_claim(session_id: str, claim_id: str, paths: list[str]) -> None:
+def restore_claim(
+    session_id: str,
+    claim_id: str,
+    paths: list[str],
+    heads: dict[str, str | None] | None = None,
+) -> None:
     """cursor.review() が失敗した時に呼ぶ。渡したパスだけを pending へ戻す。
 
     claim entry ごと削除するので、レビューに載せなかったパス (作業ツリー外・diff 空・
     前回と同一 hash) は復元されずそのまま消える。これが「REVIEW_CLEAN の後に同じ
     ファイルを再レビューしない」と「cursor 失敗の後に再レビューする」を両立させる。
+
+    `heads` は claim 時点の記録 (`claim_heads()` で取得したもの。
+    bd_092a232e-zh5.16)。省略時は全パス None (SHA なし = 現行 HEAD にフォールバック)
+    として戻す。
     """
+    heads = heads or {}
     try:
         with _locked_state(session_id) as state:
             state["in_flight"].pop(claim_id, None)
             now = time.time()
             for p in paths:
-                state["pending"].setdefault(p, now)
+                state["pending"].setdefault(p, {"at": now, "head": heads.get(p)})
     except OSError:
         pass
 

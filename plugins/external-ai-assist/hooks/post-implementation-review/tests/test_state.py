@@ -102,6 +102,73 @@ class TestNoOpAvoidsFileCreation(StateTestCase):
         self.assertEqual(claim[1], ["/repo/a.py"])
 
 
+class TestHeadTracking(StateTestCase):
+    """bd_092a232e-zh5.16: pending 記録時点の HEAD SHA が claim / restore / TTL 回収
+    を通じて保たれること。"""
+
+    def test_recorded_head_is_retrievable_after_claim(self):
+        state.record_pending(SESSION, ["/repo/a.py"], {"/repo/a.py": "deadbeef"})
+        claim_id, paths = state.claim_pending(SESSION)
+        self.assertEqual(paths, ["/repo/a.py"])
+        self.assertEqual(state.claim_heads(SESSION, claim_id), {"/repo/a.py": "deadbeef"})
+
+    def test_missing_head_defaults_to_none(self):
+        state.record_pending(SESSION, ["/repo/a.py"])  # heads 省略
+        claim_id, _ = state.claim_pending(SESSION)
+        self.assertEqual(state.claim_heads(SESSION, claim_id), {"/repo/a.py": None})
+
+    def test_setdefault_keeps_first_recorded_head(self):
+        """既に pending に居るパスは後から来た head で上書きされない。"""
+        state.record_pending(SESSION, ["/repo/a.py"], {"/repo/a.py": "first-sha"})
+        state.record_pending(SESSION, ["/repo/a.py"], {"/repo/a.py": "second-sha"})
+        claim_id, _ = state.claim_pending(SESSION)
+        self.assertEqual(state.claim_heads(SESSION, claim_id), {"/repo/a.py": "first-sha"})
+
+    def test_restore_claim_preserves_given_heads(self):
+        state.record_pending(SESSION, ["/repo/a.py"], {"/repo/a.py": "deadbeef"})
+        claim_id, paths = state.claim_pending(SESSION)
+        heads = state.claim_heads(SESSION, claim_id)
+        state.restore_claim(SESSION, claim_id, paths, heads)
+
+        new_claim_id, _ = state.claim_pending(SESSION)
+        self.assertEqual(
+            state.claim_heads(SESSION, new_claim_id), {"/repo/a.py": "deadbeef"}
+        )
+
+    def test_restore_claim_without_heads_defaults_to_none(self):
+        """heads を渡さない既存呼び出し (3 引数) は今までどおり動く。"""
+        state.record_pending(SESSION, ["/repo/a.py"], {"/repo/a.py": "deadbeef"})
+        claim_id, paths = state.claim_pending(SESSION)
+        state.restore_claim(SESSION, claim_id, paths)  # heads 省略
+
+        new_claim_id, _ = state.claim_pending(SESSION)
+        self.assertEqual(state.claim_heads(SESSION, new_claim_id), {"/repo/a.py": None})
+
+    def test_ttl_reclaim_preserves_original_heads(self):
+        """kill された in-flight を TTL 経過後に回収する際も heads を保つこと。"""
+        state.record_pending(SESSION, ["/repo/a.py"], {"/repo/a.py": "deadbeef"})
+        claim_id, _ = state.claim_pending(SESSION)
+
+        path = os.path.join(state.state_root(), "state", f"{SESSION}.json")
+        with open(path) as f:
+            data = json.load(f)
+        for entry in data["in_flight"].values():
+            entry["at"] = time.time() - state.IN_FLIGHT_TTL_SEC - 60
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+        new_claim = state.claim_pending(SESSION)
+        self.assertIsNotNone(new_claim)
+        new_claim_id, paths = new_claim
+        self.assertEqual(paths, ["/repo/a.py"])
+        self.assertEqual(
+            state.claim_heads(SESSION, new_claim_id), {"/repo/a.py": "deadbeef"}
+        )
+
+    def test_claim_heads_unknown_claim_id_is_empty(self):
+        self.assertEqual(state.claim_heads(SESSION, "no-such-claim"), {})
+
+
 class TestClaimLifecycle(StateTestCase):
     def test_complete_clears_in_flight_and_records_hashes(self):
         state.record_pending(SESSION, ["/repo/a.py"])

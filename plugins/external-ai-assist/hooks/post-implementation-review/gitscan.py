@@ -102,6 +102,19 @@ def head_exists(root: str) -> bool:
     return res is not None and res.returncode == 0
 
 
+def head_sha(root: str) -> str | None:
+    """現在の HEAD の commit SHA (コミットが無ければ None)。
+
+    bd_092a232e-zh5.16: pending 記録時点の HEAD を残しておくために使う
+    (`__main__.record_pending` 呼び出し元)。
+    """
+    res = _git(root, ["rev-parse", "HEAD"], timeout=REV_PARSE_TIMEOUT_SEC)
+    if res is None or res.returncode != 0:
+        return None
+    sha = _decode(res.stdout).strip()
+    return sha or None
+
+
 def to_relative(root: str, path: str) -> str | None:
     """絶対パスを作業ツリー相対に変換する。ツリー外なら None。
 
@@ -293,17 +306,34 @@ def untracked_among(root: str, rels: list[str]) -> set[str]:
     return {p for p in _decode(res.stdout).split("\0") if p}
 
 
-def path_diff(root: str, rel: str, untracked: bool, has_head: bool) -> str:
+def path_diff(
+    root: str, rel: str, untracked: bool, has_head: bool, base_sha: str | None = None
+) -> str:
     """1 パス分の diff テキストを返す。差分なし / 取得失敗なら空文字。
 
     `--no-color` は必須: `color.ui=always` / `color.diff=always` の環境では ANSI が混ざり、
     レビュアーに渡す本文が汚れるうえ hash もバイト予算も狂う。
+
+    `base_sha` は bd_092a232e-zh5.16 向け: pending にこのパスを記録した時点の HEAD。
+    素の `"HEAD"` (現行 HEAD) だけを基点にすると、Claude が同一ターン内で編集後に
+    `git commit` した場合、Stop 時点では HEAD がその commit を含んでしまい
+    `git diff HEAD -- path` が空になって一度もレビューされずに消える。`base_sha` が
+    与えられればまずそれで diff を試み、成功すればそれを返す (追加の git 呼び出しは
+    無い)。`base_sha` が無効/到達不能 (rebase・GC・repo 再作成等) で diff 自体が
+    失敗した場合だけ、従来どおり現行 `"HEAD"` (無ければ `--cached`) にフォールバック
+    する。
     """
     if untracked:
         # untracked は HEAD 側に対応物が無いので /dev/null と比較する。
         # --no-index は差分ありで exit 1 を返すため returncode は見ない。
         res = _git(root, ["diff", "--no-color", "--no-index", "--", os.devnull, rel])
         return _decode(res.stdout) if res is not None else ""
+
+    if base_sha:
+        res = _git(root, ["diff", "--no-color", base_sha, "--", rel])
+        if res is not None and res.returncode == 0:
+            return _decode(res.stdout)
+        # base_sha が無効/到達不能 → 現行 HEAD にフォールバック (下へ続く)
 
     # 初回コミット前の repo には HEAD が無いので staged 差分で代替する
     base = "HEAD" if has_head else "--cached"
