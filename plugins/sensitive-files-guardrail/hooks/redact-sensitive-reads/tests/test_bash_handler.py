@@ -3046,6 +3046,105 @@ class TestHardStopLiteralOperandScan(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
+class TestVanishingExpansionWordReading(BaseBash):
+    """0.25.0 (Codex R1 P2): 空展開しうる非クォート変数は引数位置をずらす。
+
+    Bash の word splitting では、非クォートの変数展開が空文字列になると **語
+    ごと消える**。``grep $PAT .env`` は ``PAT`` が空なら ``grep .env`` になり、
+    ``.env`` は FILE ではなく **検索 pattern** として解釈されて入力は stdin から
+    来る (``Usage: grep [OPTION]... PATTERNS [FILE]...``) — つまりファイルは
+    読まれない。placeholder を「必ず 1 語ある」前提で置くと、この読みを潰して
+    誤 deny になっていた。
+
+    救済 scan は「展開が 1 語になる」読みと「展開が消える」読みの **両方が
+    deny** のときだけ deny を採用する。第 1 positional の意味は
+    ``command_specs._CmdSpec.pattern_slot``、option の値の消費は ``values`` が
+    既に知っているので、コマンドを列挙し直さずに両方の読みを評価できる。
+    """
+
+    # 両読みが食い違う → 従来どおり ask (default) / allow (auto)。
+    AMBIGUOUS = (
+        "grep $PAT .env",           # 空展開なら .env は pattern
+        "sed $SCRIPT .env",         # sed の script 枠
+        "awk $PROG .env",           # awk の program 枠
+        "jq $F .env",               # jq の filter 枠 (spec 駆動である証拠)
+        "rg $PAT .env",             # ripgrep も同じ pattern 枠
+        "grep $PAT .env README.md",  # 読みごとに deny 対象の operand が変わる
+        "git log -n $N .env",       # 空展開なら .env が -n の値 (pattern 枠以外)
+    )
+
+    # 両読みで機密 operand が確定する → deny 維持。
+    STILL_DENY = (
+        'grep "$PAT" .env',         # クォート形は空でも必ず 1 語
+        "grep '$PAT' .env",         # シングルクォートは展開しない = literal 1 語
+        "grep -e KEY $X .env",      # pattern_opts があれば positional は全て file
+        "cat $OPTS .env",           # cat は positional を全てファイルに取る
+        "cat $X .env",
+        "cat $X >| .env",           # clobber target は語が消えても残る
+        "grep KEY $CFG >| .env",
+        "cat $PWD/.env",            # 語内の展開は語数を変えない
+        'cat "$PWD/.env"',
+        "cat $HOME/keys/server.pem",
+    )
+
+    def test_word_vanishing_readings_disagree_keeps_ask_or_allow(self):
+        for cmd in self.AMBIGUOUS:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+                r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+                self.assertTrue(
+                    output.is_allow(r),
+                    msg=f"{cmd!r} (auto) should allow but got {_decision(r)!r}",
+                )
+
+    def test_both_readings_sensitive_still_denies(self):
+        for cmd in self.STILL_DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_ambiguous_reading_is_logged_as_such(self):
+        # 「救済 scan が deny を見つけたが読みが食い違った」を診断できるように
+        # 専用ラベルを残す (hard_stop_literal_deny とは別物)。
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope("grep $PAT .env", self.tmp))
+        labels = [c.args[1] for c in spy.call_args_list if c.args[0] == "bash_classify"]
+        self.assertIn("hard_stop_literal_ambiguous", labels)
+        self.assertNotIn("hard_stop_literal_deny", labels)
+
+    def test_expansion_readings_unit(self):
+        from handlers.bash.segmentation import (
+            _EXPANSION_PLACEHOLDER,
+            _expansion_readings,
+        )
+        p = _EXPANSION_PLACEHOLDER
+        # 語まるごとが非クォート展開 → 0 語読みが存在する
+        self.assertEqual(
+            _expansion_readings("grep $PAT .env"),
+            (f"grep {p} .env", "grep .env"),
+        )
+        # 非クォート展開が複数並ぶだけの語も全部空なら消える
+        self.assertEqual(
+            _expansion_readings("grep $A$B .env"),
+            (f"grep {p}{p} .env", "grep .env"),
+        )
+        # 語内にリテラルがある / クォートされている → 語数は変わらない
+        self.assertEqual(_expansion_readings("cat $PWD/.env"), (f"cat {p}/.env", None))
+        self.assertEqual(
+            _expansion_readings('grep "$PAT" .env'), (f'grep "{p}" .env', None)
+        )
+        # 置換対象が無ければ None
+        self.assertIsNone(_expansion_readings("grep KEY .env"))
+
+
 class TestQuoteAwareResidualMetachar(BaseBash):
     """0.25.0 (2026-08 精査): residual metachar 判定の quote-aware 化。
 
@@ -3136,6 +3235,102 @@ class TestQuoteAwareResidualMetachar(BaseBash):
         # クォート内 ``>`` とクォート外 ``>`` の同居は live 側だけ数える
         self.assertEqual(
             _live_operator_metachars("echo 'a>b' > out.txt"), frozenset(">")
+        )
+
+
+class TestQuotedSafeRedirectTarget(BaseBash):
+    """0.25.0 (Codex R1 P2): 安全リダイレクトの target がクォートされている形。
+
+    Bash は target を quote removal してから使うので、``2>"/dev/null"`` は
+    ``2>/dev/null`` と同じリダイレクトになる。0.24.0 の quote-aware 化は「word
+    全体が非クォートであること」を剥離の条件にしていたため、target をクォート
+    すると剥離されず、後段が live な ``>`` を見て ``git commit -m x
+    2>"/dev/null"`` のような日常形を allow → ask に退行させていた。演算子の
+    判定 (クォート外・非エスケープ) と target の quote removal を分離して解消。
+    """
+
+    ALLOW = (
+        'git commit -m x 2>"/dev/null"',
+        "git commit -m x 2>'/dev/null'",
+        'git commit -m x 2> "/dev/null"',   # 分離形 + quoted target
+        'make build 2>"/dev/null"',
+        'make build &>"/dev/null"',
+        'make build 2>&"1"',                # fd 複製のクォート変種
+        'make build 2>"&1"',
+        'make build > "/dev/stdout"',
+        "echo '2>/dev/null'",               # リダイレクト表記そのものがデータ
+        'echo "2>/dev/null"',
+    )
+
+    KEEP_ASK = (
+        'make build 2>"/tmp/log"',          # 安全 target ではない
+        'echo KEY=val > ".env"',            # クォートしても書込み先は live
+        'tar -cf out.tar src > "log.txt"',
+    )
+
+    STILL_DENY = (
+        'ls > ".env"',                      # 分離形 + quoted 機密 target
+        'ls >".env"',                       # fused + quoted
+        'ls -la >| ".env"',                 # clobber (0.25.0 の修正) + quoted
+        'ls -la >|".env"',
+        'stat x >| ".env"',
+    )
+
+    def test_quoted_safe_redirect_targets_stay_allow(self):
+        for cmd in self.ALLOW:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} ({mode}) should allow but got {_decision(r)!r}",
+                    )
+
+    def test_quoted_non_safe_target_keeps_residual_ask(self):
+        for cmd in self.KEEP_ASK:
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(
+                    _decision(r), "ask",
+                    msg=f"{cmd!r} (default) should ask but got {_decision(r)!r}",
+                )
+
+    def test_quoted_sensitive_redirect_target_still_denies(self):
+        for cmd in self.STILL_DENY:
+            for mode in ("default", "auto"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{cmd!r} ({mode}) should deny but got {_decision(r)!r}",
+                    )
+
+    def test_quoted_redirect_unit(self):
+        from handlers.bash.redirects import _live_operator_metachars, _quote_removed
+        from handlers.bash.segmentation import _ST_DOUBLE, _ST_PLAIN
+        # 演算子部が live なら target のクォートは剥がして安全判定
+        for seg in (
+            'git commit -m x 2>"/dev/null"',
+            "git commit -m x 2>'/dev/null'",
+            'git commit -m x 2> "/dev/null"',
+            'echo x 2>&"1"',
+            'echo x 2>"&1"',
+            'echo x &>"/dev/null"',
+        ):
+            with self.subTest(seg=seg):
+                self.assertEqual(_live_operator_metachars(seg), frozenset())
+        # 演算子部までクォート内 = データなので演算子ではない (剥離もしない)
+        self.assertEqual(
+            _live_operator_metachars('echo "2>" /dev/null > out.txt'), frozenset(">")
+        )
+        # 安全 target 以外は live なまま / clobber は安全リダイレクトに数えない
+        self.assertEqual(_live_operator_metachars('echo x 2>"/dev/nul"'), frozenset(">"))
+        self.assertEqual(
+            _live_operator_metachars('ls -la >| ".env"'), frozenset({">", "|"})
+        )
+        # quote removal 単体
+        self.assertEqual(
+            _quote_removed([('"', _ST_PLAIN), ("a", _ST_DOUBLE), ('"', _ST_PLAIN)]), "a"
         )
 
 

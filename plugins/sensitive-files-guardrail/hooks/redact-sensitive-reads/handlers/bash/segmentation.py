@@ -13,7 +13,8 @@
 
 1. ``_split_command_on_operators`` (segment 分割)
 2. ``_has_hard_stop`` (静的解析不能 char の検出)
-3. ``_replace_simple_expansions`` (単純変数展開の placeholder 置換、0.25.0)
+3. ``_expansion_readings`` (単純変数展開の placeholder 置換、0.25.0。
+   ``_replace_simple_expansions`` はその「1 語読み」を返すラッパ)
 4. ``redirects._live_operator_metachars`` (residual metachar の quote-aware 判定、
    0.25.0。0.24.0 までの ``_segment_has_residual_metachar`` は shlex 後の token
    しか見えず、クォート内の ``|`` ``&`` ``>`` を演算子と誤認していた)
@@ -411,6 +412,131 @@ _EXPANSION_PLACEHOLDER = "__sfg_unexpanded__"
 _SIMPLE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _drop_vanishing_words(chars: list[tuple[str, str, bool]]) -> str | None:
+    """**クォート外の展開だけで構成される word** を落とした読みを返す (0.25.0)。
+
+    Bash の word splitting では、非クォートの変数展開が空文字列になると
+    **その語ごと消える**。``grep $PAT .env`` は ``PAT`` が空なら ``grep .env``
+    になり、``.env`` は FILE ではなく **検索 pattern** として解釈される
+    (``Usage: grep [OPTION]... PATTERNS [FILE]...``、入力は stdin)。
+    ``$A$B`` のように非クォート展開が複数並ぶだけの語も、全部が空なら消える。
+
+    消えない形:
+
+    - 語の中にリテラル成分がある (``$X/.env`` → 空でも ``/.env`` の 1 語)
+    - クォートされた展開 (``"$X"`` → 空でも「空文字列の 1 語」として残る)
+
+    Args:
+        chars: ``(文字, 字句状態, その文字が非クォート展開由来か)`` の列。
+
+    Returns:
+        消えうる word を落とした読み。そういう word が 1 つも無ければ ``None``
+        (= 語数が変わる読みは存在しない)。
+    """
+    words: list[tuple[str, bool]] = []
+    buf: list[str] = []
+    vanishes = True
+    for c, st, from_expansion in chars:
+        if st == _ST_PLAIN and c in " \t\n":
+            if buf:
+                words.append(("".join(buf), vanishes))
+            buf = []
+            vanishes = True
+            continue
+        buf.append(c)
+        if not (from_expansion and st == _ST_PLAIN):
+            vanishes = False
+    if buf:
+        words.append(("".join(buf), vanishes))
+    if not any(v for _, v in words):
+        return None
+    return " ".join(w for w, v in words if not v)
+
+
+def _expansion_readings(segment: str) -> tuple[str, str | None] | None:
+    """単純変数展開を placeholder に置換した **2 通りの読み** を返す (0.25.0)。
+
+    ``_replace_simple_expansions`` は「展開は必ず 1 語になる」前提の読みしか
+    作らないが、非クォートの展開は空になると語ごと消えて **後続 operand の
+    引数位置がずれる** (Codex R1 P2)。``grep $PAT .env`` は 1 語読みでは
+    ``.env`` が FILE、0 語読みでは ``.env`` が検索 pattern (ファイルは読まれ
+    ない) で、意味が食い違う。救済 scan の呼び出し側 (``bash_handler.
+    _hard_stop_literal_scan``) は **両方の読みで deny になるときだけ** deny を
+    採用し、食い違えば従来どおり ``ask_or_allow`` に落とす。
+
+    Returns:
+        ``(1 語読み, 0 語読み)``。0 語読みは消えうる word が無ければ ``None``
+        (その場合 1 語読みだけを見ればよい)。置換対象の展開が 1 つも無ければ
+        関数全体が ``None``。
+
+    既知の限界: placeholder 文字列そのもの (``__sfg_unexpanded__``) を literal
+    で書いた語は 0 語読みで消える扱いになる。ずれる方向は「読みが食い違う →
+    ask_or_allow」= 救済 scan を諦める側だけなので、保護は落ちない。
+    """
+    lx = _lex(segment)
+    out: list[tuple[str, str, bool]] = []
+    replaced = False
+    i = 0
+    n = len(lx)
+
+    def emit_placeholder(state: str) -> None:
+        for ch in _EXPANSION_PLACEHOLDER:
+            out.append((ch, state, True))
+
+    while i < n:
+        c, st = lx[i]
+        if c != "$" or st not in (_ST_PLAIN, _ST_DOUBLE):
+            out.append((c, st, False))
+            i += 1
+            continue
+        if st == _ST_DOUBLE:
+            # ダブルクォート内の ``\$`` (奇数個の直前バックスラッシュ) は literal
+            bs = 0
+            j = i - 1
+            while j >= 0 and lx[j] == ("\\", _ST_DOUBLE):
+                bs += 1
+                j -= 1
+            if bs % 2 == 1:
+                out.append((c, st, False))
+                i += 1
+                continue
+        # ``${NAME}`` 形
+        if i + 1 < n and lx[i + 1][0] == "{":
+            j = i + 2
+            name_chars: list[str] = []
+            while j < n and lx[j][0] != "}":
+                name_chars.append(lx[j][0])
+                j += 1
+            name = "".join(name_chars)
+            if j < n and name and _SIMPLE_NAME_RE.fullmatch(name):
+                emit_placeholder(st)
+                replaced = True
+                i = j + 1
+                continue
+            out.append((c, st, False))
+            i += 1
+            continue
+        # ``$NAME`` 形 (最長一致)
+        j = i + 1
+        name_chars = []
+        while j < n and lx[j][1] == st and (
+            lx[j][0].isalnum() or lx[j][0] == "_"
+        ):
+            name_chars.append(lx[j][0])
+            j += 1
+        name = "".join(name_chars)
+        if name and _SIMPLE_NAME_RE.fullmatch(name):
+            emit_placeholder(st)
+            replaced = True
+            i = j
+            continue
+        out.append((c, st, False))
+        i += 1
+    if not replaced:
+        return None
+    return "".join(ch for ch, _, _ in out), _drop_vanishing_words(out)
+
+
 def _replace_simple_expansions(segment: str) -> str | None:
     """live な単純変数展開 (``$NAME`` / ``${NAME}``) を placeholder に置換する。
 
@@ -437,66 +563,15 @@ def _replace_simple_expansions(segment: str) -> str | None:
     なら救済 scan を断念する (従来どおり ask_or_allow) ので、複合形が残る
     segment の挙動は変わらない。
 
+    ``_expansion_readings`` の「1 語読み」だけを取り出す薄いラッパ。語数が変わる
+    読み (非クォート展開が空になって語ごと消える形) が要るときは
+    ``_expansion_readings`` を直接使うこと。
+
     Returns:
         置換後の segment 文字列。置換対象が 1 つも無ければ ``None``。
     """
-    lx = _lex(segment)
-    out: list[str] = []
-    replaced = False
-    i = 0
-    n = len(lx)
-    while i < n:
-        c, st = lx[i]
-        if c != "$" or st not in (_ST_PLAIN, _ST_DOUBLE):
-            out.append(c)
-            i += 1
-            continue
-        if st == _ST_DOUBLE:
-            # ダブルクォート内の ``\$`` (奇数個の直前バックスラッシュ) は literal
-            bs = 0
-            j = i - 1
-            while j >= 0 and lx[j] == ("\\", _ST_DOUBLE):
-                bs += 1
-                j -= 1
-            if bs % 2 == 1:
-                out.append(c)
-                i += 1
-                continue
-        # ``${NAME}`` 形
-        if i + 1 < n and lx[i + 1][0] == "{":
-            j = i + 2
-            name_chars: list[str] = []
-            while j < n and lx[j][0] != "}":
-                name_chars.append(lx[j][0])
-                j += 1
-            name = "".join(name_chars)
-            if j < n and name and _SIMPLE_NAME_RE.fullmatch(name):
-                out.append(_EXPANSION_PLACEHOLDER)
-                replaced = True
-                i = j + 1
-                continue
-            out.append(c)
-            i += 1
-            continue
-        # ``$NAME`` 形 (最長一致)
-        j = i + 1
-        name_chars = []
-        while j < n and lx[j][1] == st and (
-            lx[j][0].isalnum() or lx[j][0] == "_"
-        ):
-            name_chars.append(lx[j][0])
-            j += 1
-        name = "".join(name_chars)
-        if name and _SIMPLE_NAME_RE.fullmatch(name):
-            out.append(_EXPANSION_PLACEHOLDER)
-            replaced = True
-            i = j
-            continue
-        out.append(c)
-        i += 1
-    if not replaced:
-        return None
-    return "".join(out)
+    readings = _expansion_readings(segment)
+    return None if readings is None else readings[0]
 
 
 def _split_command_on_operators(command: str) -> list[str]:

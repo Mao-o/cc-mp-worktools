@@ -234,12 +234,23 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
    ベース判定 (shlex がクォートを剥がした後) は `git commit -m 'a & b'` の
    `&` (literal データ) と `echo x > f` の `>` (演算子) を区別できず、実ログ
    429 件 (0.5%) の日常コマンドを ask に倒していた。安全リダイレクトは word
-   単位 (全文字クォート外のときのみ) で除外する。副次効果 2 つ: (a)
-   `mv 'a|b' .env` は residual ask に隠れていた literal 機密 operand が
-   見えるようになり deny (無クォートの `mv ab .env` と一貫)、(b) `ls '>.env'`
-   のクォート済み operand を fused redirect と誤認して deny していた
-   metadata-only 経路の誤検知が解消 (live に `>` が無ければ
-   `_sensitive_redirect_target` を呼ばない)。
+   単位で除外するが、**演算子の live 性 (クォート外・非エスケープ) と target の
+   quote removal は分離する** (`_is_safe_redirect_word` / `_quote_removed`)。
+   bash は target をクォート除去してから使うので `2>"/dev/null"` /
+   `2>'/dev/null'` / `2>&"1"` / `2> "/dev/null"` は無クォート形と同じ安全
+   リダイレクトで、「word 全体が非クォート」を条件にすると
+   `git commit -m x 2>"/dev/null"` / `make build 2>"/dev/null"` が live な `>`
+   を見て ask に倒れる (Codex R1 P2)。逆に演算子部までクォート内の形
+   (`echo '2>/dev/null'` / `echo "2>" /dev/null`) は演算子ではないデータなので
+   剥離しない — `_lex` はクォート / エスケープの区切り文字自体も word に残す
+   ため、word のクォート外の接頭部にだけ演算子を照合すればこの区別が付く。
+   副次効果 2 つ: (a) `mv 'a|b' .env` は residual ask に隠れていた literal
+   機密 operand が見えるようになり deny (無クォートの `mv ab .env` と一貫)、
+   (b) `ls '>.env'` のクォート済み operand を fused redirect と誤認して deny
+   していた metadata-only 経路の誤検知が解消 (live に `>` が無ければ
+   `_sensitive_redirect_target` を呼ばない)。機密 target への書込み
+   (`ls > ".env"` / `ls -la >| ".env"`) は target をクォートしても deny のまま
+   (`>|` clobber は安全リダイレクトの演算子形に含めない)。
 
 3. **hard-stop segment のリテラル operand 救済 scan**
    (`bash_handler._hard_stop_literal_scan`)。単純変数展開 (`$NAME` /
@@ -267,8 +278,25 @@ opaque 判定より前で ask に倒れる) が閉じ、awk / sed の最頻形�
    救済 scan の deny は「literal を直書きした同型コマンドが deny になる場合」
    に限って発火する (置換後の token 列に既存の判定をそのまま適用するだけ) ため、
    個々の deny の妥当性は literal 側の既存ポリシーに帰着する。旧版との同一
-   コーパス diff (1,257 コマンド × 2 mode = 2,514 verdict、変更 205 件) で
+   コーパス diff (1,344 コマンド × 2 mode = 2,688 verdict、変更 246 件) で
    説明不能ゼロを確認した (`CHANGELOG.md` 0.25.0)。
+
+   **語数が変わる読みとの一致条件**: 非クォートの変数展開は空文字列になると
+   Bash の word splitting で**語ごと消える**。`grep $PAT .env` は `PAT` が空
+   なら `grep .env` になり、`.env` は FILE ではなく**検索 pattern** として
+   解釈されて入力は stdin から来る (= ファイルは読まれない)。placeholder を
+   「必ず 1 語ある」前提で置くとこの読みを潰して誤 deny になるため、救済 scan
+   が deny を採用してよいのは **「展開が 1 語になる」読みと「展開が消える」
+   読みの両方で機密ファイル operand に分類されるときだけ**とし、食い違えば
+   従来どおり `ask_or_allow` に落とす (`hard_stop_literal_ambiguous`)。判定は
+   `_analyze_segment` を両方の読みで走らせるだけで、コマンドを列挙し直さない
+   — 第 1 positional が pattern / program かは `command_specs._CmdSpec.
+   pattern_slot`、option が値を取るかは同 `values` が既に知っているので、
+   読みの違いはそのまま候補集合の違いになる。`grep $PAT .env` /
+   `sed $SCRIPT .env` / `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` /
+   `git log -n $N .env` は ask_or_allow、語内に展開がある形 (`cat $PWD/.env`)
+   とクォート形 (`grep "$PAT" .env`)、positional を全てファイルに取るコマンド
+   (`cat $OPTS .env` / `cat $X >| .env`) は deny 維持。
 
 4. **splitter が `>` 演算子を bash と同じ最長一致で読む** (`>>` append /
    `>|` clobber は 2 文字で 1 演算子)。0.24.0 までは `>|` の `|` を pipe と

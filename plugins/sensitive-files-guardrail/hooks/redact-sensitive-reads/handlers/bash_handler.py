@@ -153,6 +153,7 @@ from handlers.bash.redirects import (  # noqa: F401
 )
 from handlers.bash.segmentation import (  # noqa: F401
     _EXPANSION_PLACEHOLDER,
+    _expansion_readings,
     _has_hard_stop,
     _has_quoted_hard_stop,
     _replace_simple_expansions,
@@ -683,6 +684,48 @@ def _decision_of(result: dict) -> str | None:
 _PLACEHOLDER_DISPLAY = "${…}"
 
 
+def _scan_expansion_reading(
+    reading: str,
+    envelope: dict,
+    rules: list[tuple[str, bool]],
+    *,
+    dotglob: bool = False,
+    root: str | None = None,
+) -> dict | None:
+    """placeholder 置換後の 1 つの読みを通常の operand scan にかける (0.25.0)。
+
+    ``_hard_stop_literal_scan`` が「1 語読み」と「0 語読み」の両方に同じ手順を
+    当てるためのヘルパ。**deny のときだけ結果を返し、それ以外は ``None``**
+    (救済 scan は緩和方向には一切使わない)。
+
+    ``None`` を返す条件は読みごとに独立:
+
+    - 置換後も hard-stop char が残る (``$(cmd)`` / ``${X:-…}`` / ``<`` 等)
+    - shlex 失敗 / 空 token
+    - first token に placeholder が残る (``$PAGER .env`` — 未知コマンドの実行は
+      ``/bin/cat .env`` の opaque ask と同格に扱う)
+    - ``_analyze_segment`` の結論が deny でない
+    """
+    if _has_hard_stop(reading):
+        return None
+    try:
+        tokens = shlex.split(reading, comments=False, posix=True)
+    except ValueError:
+        return None
+    tokens = _strip_safe_redirects(tokens)
+    if not tokens or _EXPANSION_PLACEHOLDER in tokens[0]:
+        return None
+    result = _analyze_segment(
+        tokens,
+        envelope,
+        rules,
+        dotglob=dotglob,
+        root=root,
+        live_metachars=_live_operator_metachars(reading),
+    )
+    return result if _decision_of(result) == "deny" else None
+
+
 def _hard_stop_literal_scan(
     seg: str,
     envelope: dict,
@@ -722,28 +765,46 @@ def _hard_stop_literal_scan(
 
     採用した deny の reason に含まれる placeholder は表示用の ``${…}`` に
     置き換える (除外案内の path 形は ``_operand_relpath`` 側で抑止済み)。
+
+    **語数が変わる読みとの一致条件 (0.25.0、Codex R1 P2)**: 非クォートの変数
+    展開は空文字列になると **語ごと消える** (bash の word splitting)。
+    ``grep $PAT .env`` は ``PAT`` が空なら ``grep .env`` になり、``.env`` は
+    FILE ではなく **検索 pattern** として解釈されて入力は stdin から来る
+    (= ファイルは読まれない)。placeholder を「必ず 1 語ある」前提で置くと
+    この読みを潰して誤 deny になる (``sed`` / ``awk`` の program 枠も同型)。
+    そこで deny を採用してよいのは **「展開が 1 語になる」読みと「展開が
+    消える」読みの両方が deny になるとき** だけにし、食い違えば従来どおり
+    ``ask_or_allow`` に落とす (``hard_stop_literal_ambiguous``)。
+
+    この条件は ``_analyze_segment`` を両方の読みで走らせるだけで満たす
+    (コマンドを列挙し直さない)。第 1 positional の意味 (pattern / program /
+    path) は ``command_specs._CmdSpec.pattern_slot``、option の値の消費は
+    ``values`` が既に知っているので、読みの違いはそのまま候補集合の違いに
+    なる。守られること:
+
+    - ``cat $OPTS .env`` / ``cat $X >| .env`` は **deny 維持** (``cat`` は
+      positional を全てファイルに取るのでどちらの読みでも ``.env`` は FILE)
+    - ``cat $PWD/.env`` 型 (語の内部に展開がある形) は語数が変わらないので
+      **影響なし**
+    - ``grep "$PAT" .env`` のようなクォート形は必ず 1 語なので **deny 維持**
+    - ``grep $PAT .env`` / ``sed $SCRIPT .env`` / ``awk $PROG .env`` /
+      ``jq $F .env`` / ``rg $PAT .env`` は ask_or_allow に戻る
     """
     if len(seg) > _MAX_SEGMENT_CHARS:
         return None
-    transformed = _replace_simple_expansions(seg)
-    if transformed is None or _has_hard_stop(transformed):
+    readings = _expansion_readings(seg)
+    if readings is None:
         return None
-    try:
-        tokens = shlex.split(transformed, comments=False, posix=True)
-    except ValueError:
-        return None
-    tokens = _strip_safe_redirects(tokens)
-    if not tokens or _EXPANSION_PLACEHOLDER in tokens[0]:
-        return None
-    result = _analyze_segment(
-        tokens,
-        envelope,
-        rules,
-        dotglob=dotglob,
-        root=root,
-        live_metachars=_live_operator_metachars(transformed),
+    one_word, zero_word = readings
+    result = _scan_expansion_reading(
+        one_word, envelope, rules, dotglob=dotglob, root=root
     )
-    if _decision_of(result) != "deny":
+    if result is None:
+        return None
+    if zero_word is not None and _scan_expansion_reading(
+        zero_word, envelope, rules, dotglob=dotglob, root=root
+    ) is None:
+        L.log_info("bash_classify", "hard_stop_literal_ambiguous")
         return None
     L.log_info("bash_classify", "hard_stop_literal_deny")
     hook = result.get("hookSpecificOutput")

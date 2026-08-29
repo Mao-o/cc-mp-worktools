@@ -24,11 +24,13 @@ commit 52113a1 で完了)。
 
 Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ) + 隔離内レビュー
 指摘の反映 3 件 (clobber 形リダイレクトの取りこぼし / 到達不能コードの撤去 /
-開示の精緻化)。「静的解析不能ではないものを解析不能扱いしていた」分類の是正
-3 件と、sed の option script が positional 枠を消費しない誤検知 1 件、
-`>|` clobber の segment 分割誤りによる書込み判定漏れ 1 件。緩和方針 (判断困難
-は auto で allow) の縮小ではなく、**リテラルで見えている機密 operand の
-見逃し**と**クォート内 literal データの演算子誤認**の解消。
+開示の精緻化) + 外部レビュー指摘の反映 2 件 (空展開しうる非クォート変数が
+引数位置をずらす / 安全リダイレクト target のクォート変種)。「静的解析不能では
+ないものを解析不能扱いしていた」分類の是正 3 件と、sed の option script が
+positional 枠を消費しない誤検知 1 件、`>|` clobber の segment 分割誤りによる
+書込み判定漏れ 1 件。緩和方針 (判断困難は auto で allow) の縮小ではなく、
+**リテラルで見えている機密 operand の見逃し**と**クォート内 literal データの
+演算子誤認**の解消。
 
 - **判定境界 (deny / allow / ask) の変化** (5 件):
   1. **hard-stop segment のリテラル operand 救済 scan** — 単純変数展開
@@ -40,7 +42,22 @@ Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ) + �
      auto mode では無言 allow だった)。変数の展開結果に依らず basename が
      確定する形だけが対象で、`cat $X` / `cat $X.env` / `cat $(pwd)/.env` /
      `${X:-…}` / `$PAGER .env` は従来どおり ask / allow (deny 以外の結論は
-     捨てるので、この scan が verdict を緩めることはない)
+     捨てるので、この scan が verdict を緩めることはない)。**語数が変わる読み
+     との一致条件** (外部レビュー R1 P2): 非クォートの変数展開は空文字列に
+     なると Bash の word splitting で**語ごと消える**。`grep $PAT .env` は
+     `PAT` が空なら `grep .env` になり、`.env` は FILE ではなく**検索
+     pattern** として解釈されて入力は stdin から来る (= ファイルは読まれ
+     ない)。そこで deny を採用するのは **「展開が 1 語になる」読みと「展開が
+     消える」読みの両方で機密ファイル operand に分類されるときだけ**にし、
+     食い違えば従来どおり ask_or_allow に落とす。`grep $PAT .env` /
+     `sed $SCRIPT .env` / `awk $PROG .env` / `jq $F .env` / `rg $PAT .env` /
+     `git log -n $N .env` は ask / allow、クォート形 (`grep "$PAT" .env`) と
+     positional を全てファイルに取るコマンド (`cat $OPTS .env` /
+     `cat $X >| .env`)、語内に展開がある形 (`cat $PWD/.env`) は deny 維持。
+     判定は `_analyze_segment` を両方の読みで走らせるだけで、コマンドを
+     列挙し直さない (第 1 positional が pattern / program かは
+     `command_specs._CmdSpec.pattern_slot`、option が値を取るかは同 `values`
+     が既に知っている)
   2. **residual metachar (`>` `&` `|` `<`) の quote-aware 化** — 演算子に
      なり得るのはクォート外・非エスケープの文字だけ (raw segment を共有 lexer
      で走査)。`git commit -m 'fix: a & b'` / `echo 'a|b'` / `jq '.a | .b'
@@ -48,7 +65,17 @@ Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ) + �
      0.5% の誤 ask)。`mv 'a|b' .env` は隠れていた機密 operand が見えるように
      なり **deny** (無クォート形と一貫)。`ls '>.env'` / `ls \>.env` は
      クォート済み operand を fused redirect と誤認していた **deny → allow**。
-     無クォートの `echo KEY=val > .env` / `ls >.env` は従来どおり
+     無クォートの `echo KEY=val > .env` / `ls >.env` は従来どおり。
+     安全リダイレクトの剥離は **演算子の live 性と target の quote removal を
+     分離**する (外部レビュー R1 P2): bash は target をクォート除去してから
+     使うので `git commit -m x 2>"/dev/null"` / `make build 2>'/dev/null'` /
+     `make build 2> "/dev/null"` / `make build 2>&"1"` / `make build 2>"&1"` /
+     `make build &>"/dev/null"` は無クォート形と同じ **allow**。「word 全体が
+     非クォート」を条件にしていた実装ではこれらが剥離されず live な `>` を見て
+     ask に倒れていた。演算子部までクォート内の形 (`echo '2>/dev/null'` /
+     `echo "2>" /dev/null`) はデータのまま、機密 target への書込み
+     (`ls > ".env"` / `ls -la >| ".env"` / `stat x >| '.env'`) は target を
+     クォートしても **deny** 維持
   3. **ダブルクォート内の不活性 char (`(` `)` `{` `}` `<`) を hard-stop に
      しない** (`$` バッククォートは展開が生きるので維持) — `git ls-files
      --format="%(objectname)" .env` が単一クォート形と同じ **deny** に揃い、
@@ -84,26 +111,36 @@ Bash 判定境界の 4 件バッチ (2026-08 精査の内部バックログ) + �
      `>|` は data のまま。`>>|` は bash と同じく `>>` + pipe として割る
      (syntax error 形)。`&>|` (bash では `&>` + `|` の syntax error) だけは
      `>|` を結合して deny 側に倒れるが、実行不能な形なので保護に影響しない
-- 旧版 (main) と本 branch で同一コーパス (テスト由来 + 手書き変種 1,257
-  コマンド × default / auto = **2,514 verdict**) を流した diff は 205 件 =
-  deny 増 140 / deny 減 8 / ask → allow 57 で、**すべて上記 5 件に分類でき
-  説明不能ゼロ**。うち 144 件は隔離内レビュー前 (1〜4 のみの時点、コーパス
-  1,199 コマンド) の diff と同一で、レビュー後の増分 61 件の内訳は 52 =
-  clobber 書込みの deny 化 (5 の主目的)、4 = 非機密 target の clobber を `>`
-  形と同扱いにした緩和、5 = 既存変更 (2) の同族が新規コーパス文字列
-  (`echo '>|' x` / `ls '>|.env'` 等) に現れたもの。deny 増は全件「literal を
-  直書きした同型コマンドが現行版で deny になる形」に帰着し、deny 減は
-  `ls '>.env'` 族 (redirect が存在しないのに redirect 扱いしていた誤検知) と
-  その clobber 版 `ls '>|.env'` のみ
-- テスト件数: redact 1,063 → **1,102** / check 94 (変更なし、計 1,196)
+- 旧版 (main) と本 branch で同一コーパス (テスト由来 + 手書き変種 1,344
+  コマンド × default / auto = **2,688 verdict**) を流した diff は 246 件 =
+  deny 増 178 / deny 減 8 / ask → allow 60 で、**すべて上記 5 件に分類でき
+  説明不能ゼロ**。deny 増は全件「literal を直書きした同型コマンドが現行版で
+  deny になる形」に帰着し、deny 減は `ls '>.env'` 族 (redirect が存在しないの
+  に redirect 扱いしていた誤検知) とその clobber 版 `ls '>|.env'` のみ
+- 外部レビュー R1 の 2 件を反映した際、**コーパスを 1,257 → 1,344 コマンドに
+  拡張して main / 修正前 / 修正後の 3 版を突合**した。修正前は main との diff
+  が 302 件で、修正により **57 件が main の verdict に戻った** (42 = 語が消える
+  読みを潰していた誤 deny: `grep $PAT .env` 系 / `ag` / `ack` / `git grep` /
+  `sed -n $SCRIPT` / `git log -n $N`、15 = 安全リダイレクト target のクォート
+  変種を剥離できず ask に倒れていた形: `git commit -m x 2>"/dev/null"` /
+  `make build 2>&"1"` 系)。修正で新たに main と食い違うのは
+  `git commit -m 'a & b' 2>"&1"` の 1 件のみで、これは上記 2 (クォート内 `&` は
+  データ) と安全リダイレクト剥離の組合せが効いた同族。旧 205 件のうち消えたのは
+  `grep $PAT .env` の 2 verdict だけで、**残り 203 件は verdict 不変**
+- テスト件数: redact 1,063 → **1,110** / check 94 (変更なし、計 1,204)
 
 ### 1. hard-stop リテラル救済 scan (`handlers/bash/segmentation.py` + `bash_handler.py`)
 
-`_replace_simple_expansions` が live な単純変数展開 (クォート外とダブル
+`_expansion_readings` が live な単純変数展開 (クォート外とダブル
 クォート内。シングルクォート内・`\$`・heredoc 本文は literal なので対象外) を
-placeholder `__sfg_unexpanded__` に置換する。`_hard_stop_literal_scan` は置換後
-に `_has_hard_stop` が消えたときだけ shlex → `_analyze_segment` を再実行し、
-deny 以外は捨てる。first token に placeholder が残る形 (`$PAGER .env`) は
+placeholder `__sfg_unexpanded__` に置換し、**2 通りの読み**を返す:
+「展開が 1 語になる」読み (`_replace_simple_expansions` はこちらを返す薄い
+ラッパ) と、「クォート外の展開だけで構成される word が消える」読み
+(`_drop_vanishing_words`)。`_hard_stop_literal_scan` は置換後に
+`_has_hard_stop` が消えたときだけ shlex → `_analyze_segment` を再実行し
+(`_scan_expansion_reading`)、**両方の読みが deny のときだけ** deny を採用する。
+食い違えば `hard_stop_literal_ambiguous` をログして従来の hard-stop ask に
+落とす。deny 以外は捨てる。first token に placeholder が残る形 (`$PAGER .env`) は
 `/bin/cat .env` の opaque ask と同格に扱い救済しない。deny reason の
 placeholder は `${…}` に置換して表示し、path 形の除外案内 (`!<相対パス>`) は
 変数部分が確定しないため抑止する (basename 形の案内のみ)。placeholder の
@@ -123,9 +160,20 @@ pattern を書いていない環境では発火しない。
 ### 2. residual metachar の quote-aware 化 (`handlers/bash/redirects.py`)
 
 `_live_operator_metachars(segment)` が raw segment を `_lex` で word 分割し
-(クォート外の空白のみが word 境界)、全文字クォート外の word に限り安全
-リダイレクト (`2>/dev/null` / `2>&1` / `>` + `/dev/null`) を除外した上で、
-クォート外の metachar の集合を返す。`_analyze_segment` は (a) 集合が空で
+(クォート外の空白のみが word 境界)、安全リダイレクト (`2>/dev/null` / `2>&1` /
+`>` + `/dev/null`) の word を除外した上で、クォート外の metachar の集合を返す。
+除外の判定は **演算子部と target 部を分ける** (`_is_safe_redirect_word` /
+`_quote_removed`): 演算子 (`_SAFE_REDIRECT_OP_RE` = fd 番号 / `&` + `>`) は
+word の**クォート外の接頭部**にだけ照合し、target は quote removal してから
+安全 target と突き合わせる。bash は target をクォート除去してから使うので
+`2>"/dev/null"` は `2>/dev/null` と同じ挙動になる一方、演算子部までクォート内
+の `echo '2>/dev/null'` はデータであってリダイレクトではない — `_lex` が
+クォート / エスケープの区切り文字自体も word に残すので、接頭部を先に切る形に
+すればこの区別が構造的に付く (別途の到達不能な guard を置かない)。演算子の
+文法 (`>>` / `>|` を含まない) は `constants` のフラグメント
+`_SAFE_REDIRECT_OP` / `_SAFE_REDIRECT_TARGET` が唯一の定義で、1 token 形の
+`_SAFE_REDIRECT_RE` もそこから合成する (regex を 2 本手書きすると drift する
+ため)。`_analyze_segment` は (a) 集合が空で
 なければ従来どおり residual ask、(b) `>` が無ければ書込みリダイレクトは
 存在し得ないので metadata-only 経路の `_sensitive_redirect_target` を skip
 する (`ls '>.env'` の誤 deny 解消)。エスケープ済み (`\>`) は bash 的に literal
@@ -145,7 +193,7 @@ quote-aware の結果を渡す) と確認したため撤去した — quote-blin
 `_has_quoted_hard_stop` の前提条件 (`_has_hard_stop` False の segment に残る
 hard-stop char はクォート内の不活性 char のみ) を docstring ごと更新。
 `_lex` を見る scanner は 4 つ (`_split_command_on_operators` /
-`_has_hard_stop` / `_replace_simple_expansions` / `_live_operator_metachars`)
+`_has_hard_stop` / `_expansion_readings` / `_live_operator_metachars`)
 になり、module docstring に列挙した。
 
 ### 4. sed option script の positional 枠 (`handlers/bash/interpreters.py`)
@@ -169,17 +217,43 @@ deny / allow を決める。パイプ (`|`) と論理和 (`||`) の分割は不�
 (`ls >|| cat .env` は bash と同じく `ls >|` + `cat .env` に割れ、後続 segment
 の deny は維持)。
 
+### 6. 外部レビュー R1 の 2 件 (`segmentation.py` + `bash_handler.py` / `constants.py` + `redirects.py`)
+
+どちらも **過剰 deny / 過剰 ask 方向**の誤り (保護が消える方向ではない) だが、
+本 plugin は過去に false positive の摩擦が離脱原因になった実績があるため反映した。
+
+1. **空展開しうる非クォート変数が引数位置をずらす** — 救済 scan (§1) の
+   placeholder 置換は「展開は必ず 1 語になる」前提だったが、非クォートの展開が
+   空文字列になると Bash の word splitting で語ごと消える。`grep $PAT .env` /
+   `sed $SCRIPT .env` / `awk $PROG .env` は 0 語読みでは `.env` が
+   pattern / program 枠に落ちて**ファイルとして読まれない**ため、誤 deny に
+   なっていた。両読み一致を deny の条件にして解消 (詳細は §1)
+2. **安全リダイレクト target のクォート変種が剥離されない** — quote-aware 化
+   (§2) が「word 全体が非クォート」を剥離条件にしていたため、
+   `git commit -m x 2>"/dev/null"` が live な `>` を見て allow → ask に退行して
+   いた。演算子の live 性と target の quote removal を分離して解消 (詳細は §2)
+
 ### 検証
 
 - 1〜4 は修正前に失敗する回帰テストを追加してから修正 (negative control:
   修正 5 ファイルを stash して新テスト 22 件を実行 → 49 failures + 1 error を
   確認 → pop)。5 (隔離内レビュー後) も同様に splitter 修正だけを stash して
-  新テスト 10 件を実行 → 24 failures を確認 → pop
-- 旧版コーパス diff (上記 2,514 verdict) の分類は集計 key を TAB 区切りで
+  新テスト 10 件を実行 → 24 failures を確認 → pop。6 も同様で、修正 1 は
+  `segmentation.py` + `bash_handler.py` を同時に stash して新テスト 4 件を実行
+  → 8 failures + 1 error (新ヘルパの ImportError)、修正 2 は `constants.py` +
+  `redirects.py` を同時に stash して新テスト 4 件を実行 → 8 failures + 1 error
+  を確認 → pop (1 ファイルだけ stash すると ImportError で全件 error になり
+  failure 件数が意味を失うため、fix ごとに関係ファイルをまとめて stash する)
+- 旧版コーパス diff (上記 2,688 verdict) の分類は集計 key を TAB 区切りで
   実施 (コマンド本文に `|` が現れるため `|` 区切りは使わない)。隔離内レビュー
   後の再実行ではコーパスに clobber 変種 50 件 (fd 番号付き / fused / クォート
   内 / エスケープ / `>||` `>>|` `&>|` との区別 / 非機密 target / 変数同居) を
-  追加した
+  追加し、外部レビュー反映時にはさらに 87 件 (pattern / program 枠を持つ
+  コマンド × 非クォート変数 × 機密パス、同・クォート変数、安全リダイレクト
+  target のクォート変種 = fd 付き / fd 複製 / clobber との組合せ) を追加した。
+  **この 2 クラスは拡張前のコーパスに 1 件も無く、diff では検出できなかった**
+  (旧 205 件に allow → ask の bucket が無かったのはそのため) — 拡張後は
+  修正前 branch に対して 57 件の退行として現れることを確認済み
 
 ## 0.24.0
 

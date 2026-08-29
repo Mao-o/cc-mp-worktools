@@ -201,8 +201,28 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > する破壊的 truncate) が first_token を問わず**全 mode allow** で素通り
 > していた。spaced / fused / fd 番号付き (`2>\|` / `12>\|`) の全形が `>` 形と
 > 同じ deny / ask / allow に揃う (下の redirect 各表)。
-> 旧版 (main) との同一コーパス diff (1,257 コマンド × default / auto =
-> 2,514 verdict): 変更 205 件 = deny 増 140 / deny 減 8 / ask → allow 57、
+>
+> 救済 scan (1) には **語数が変わる読みとの一致条件** がある: 非クォートの
+> 変数展開は空文字列になると語ごと消える (bash の word splitting)。
+> `grep $PAT .env` は `PAT` が空なら `grep .env` になり、`.env` は FILE では
+> なく**検索 pattern** として解釈される (入力は stdin) ため、ファイルは読まれ
+> ない。そこで deny を採用するのは **「展開が 1 語になる」読みと「展開が消える」
+> 読みの両方が deny のときだけ**にし、食い違えば従来どおり ask / allow に倒す。
+> `grep $PAT .env` / `sed $SCRIPT .env` / `awk $PROG .env` / `jq $F .env` /
+> `rg $PAT .env` / `git log -n $N .env` は ask / allow、クォート形
+> (`grep "$PAT" .env`) と positional を全てファイルに取るコマンド
+> (`cat $OPTS .env`) は deny。第 1 positional の意味 (pattern / program / path)
+> と option の値の消費は operand scan の既存 spec が知っているので、
+> コマンドを列挙し直さずに両方の読みを評価する。
+>
+> 安全リダイレクト (`2>/dev/null` / `2>&1` 等) の判定は **演算子の live 性と
+> target の quote removal を分離** する。bash は target をクォート除去してから
+> 使うので `2>"/dev/null"` / `2>'/dev/null'` / `2>&"1"` / `2> "/dev/null"` は
+> 無クォート形と同じ安全リダイレクト。演算子部までクォート内の形
+> (`echo '2>/dev/null'`) は従来どおりデータとして扱う。
+>
+> 旧版 (main) との同一コーパス diff (1,344 コマンド × default / auto =
+> 2,688 verdict): 変更 246 件 = deny 増 178 / deny 減 8 / ask → allow 60、
 > **説明不能ゼロ** (全件が上記 (1)〜(5) に分類)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
@@ -231,7 +251,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `grep foo README.md >.env` (0.22.0: 密着形 redirect の書込み先。分離形 `> .env` は従来から deny) |
 | `shopt -s dotglob; cat *`, `GLOBIGNORE=x; cat *`, `setopt globdots; cat *` (0.22.0: 同一コマンド内で dotglob 系を有効化すると `*` は dotfile にも展開されるので fnmatch の意味論に戻す) |
 | `cat $PWD/.env`, `cat ${PWD}/.env`, `cat "$PWD/.env"`, `REPO=. ; cat $REPO/.env`, `grep KEY $CFG/.env`, `head -n 3 ${DIR}/.env`, `cat $HOME/keys/server.pem`, `cat $X/id_rsa`, `cp $SRC/.env /tmp/x`, `cat $D/.env*`, `shopt -s dotglob; cat $D/*` (0.25.0: 単純変数展開を placeholder に置換した救済 scan。展開結果に依らず basename が機密 pattern に一致する形だけ deny) |
-| `cat $OPTS .env`, `grep $PAT .env` (0.25.0: 変数と同居していても literal operand は救済 scan が拾う) |
+| `cat $OPTS .env`, `cat $X .env`, `head -n $N .env`, `tar -cf out.tar $X .env`, `grep "$PAT" .env`, `grep -e KEY $X .env`, `grep -f $F .env` (0.25.0: 変数と同居していても literal operand は救済 scan が拾う。**語が消える読みでも機密ファイル operand になる形に限る** — 下の ask / allow 表を参照) |
 | `awk "{print}" .env`, `sed "s/(=)/X/" .env`, `git ls-files --format="%(objectname)" .env` (0.25.0: ダブルクォート内の `{` `(` は不活性。単一クォート形と同じ deny 経路に到達) |
 | `mv 'a|b' .env` (0.25.0: クォート内 `\|` は演算子ではないので residual ask にならず、literal 機密 operand の deny に到達) |
 
@@ -259,6 +279,8 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `git commit -m 'fix: a & b'`, `git commit -m 'a & b' 2>&1`, `echo 'a\|b'`, `echo "a > b"`, `tar -cf out.tar 'weird\|name'`, `jq '.a \| .b' cfg.json`, `git log --grep='a&b' --oneline`, `echo \> x` (0.25.0: クォート内・エスケープ済みの metachar は literal データ。residual ask に倒さない) |
 | `git diff "HEAD@{1}"`, `git stash apply "stash@{0}"`, `awk "{print}" notes.txt`, `sed "s/(=)/X/" notes.txt`, `echo "{a,b}"`, `echo "a<b"`, `cat "file(1).txt"`, `git commit -m "fix (parser) & cleanup"` (0.25.0: ダブルクォート内の `(` `)` `{` `}` `<` は不活性。0.18.0 のシングルクォート形と同じ扱い) |
 | `sed -e 's/a/b/' report.txt`, `sed -e p e.txt`, `sed --expression=p e.txt`, `sed -ne p e.txt`, `sed -e p -- e.txt` (0.25.0: `-e` / `--expression` / `-f` があれば positional は全て入力ファイル。script として再解析しない) |
+| `grep $PAT .env`, `sed $SCRIPT .env`, `awk $PROG .env`, `jq $F .env`, `rg $PAT .env`, `ag $PAT .env`, `git grep $PAT .env`, `grep $PAT .env README.md`, `git log -n $N .env` (0.25.0: 非クォートの変数展開が空になると語ごと消え、`.env` が pattern / program / option 値の枠に落ちてファイルとして読まれない。1 語読みと 0 語読みが食い違うので救済 scan の deny を採用しない) |
+| `git commit -m x 2>"/dev/null"`, `make build 2>'/dev/null'`, `make build 2> "/dev/null"`, `make build 2>&"1"`, `make build 2>"&1"`, `make build &>"/dev/null"` (0.25.0: bash は target をクォート除去してから使うので無クォート形と同じ安全リダイレクト。演算子の live 性だけを剥離条件にする) |
 
 ## Bash handler — read-only first_token allow-list (0.12.0 新設, 全 mode で allow)
 
@@ -354,6 +376,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls '>.env'`, `ls \>.env` (0.25.0: クォート / エスケープ済みの `>` は redirect ではなく「`>.env` という名前のファイル」の operand。0.24.0 までは fused redirect と誤認して deny) | allow | allow | allow | allow | allow |
 | `ls >\| .env`, `tree >\| .env`, `stat x >\| .env`, `wc -l f >\| .env`, `ls >\|.env`, `ls 2>\| .env`, `ls 12>\|.env` (0.25.0: `>\|` clobber 上書きは noclobber を明示的に無視する破壊的 truncate。metadata-only ∩ safe_read の first_token 全般で `>` 形と同じ deny。0.24.0 までは `\|` が segment 分割で pipe として割られ全 mode allow に素通り) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `ls > ".env"`, `ls >".env"`, `ls -la >\| ".env"`, `ls -la >\|".env"`, `stat x >\| '.env'`, `ls 2>\| ".env"` (0.25.0: target のクォートは quote removal されるだけで書込み先は変わらない。安全 target の剥離が quote-aware になっても機密 target の deny は維持) | **deny** | **deny** | **deny** | **deny** | **deny** |
 
 > **metadata-only ∩ safe_read の redirect 書込み (Codex P2, 0.14.0)**: `ls` /
 > `stat` / `wc` / `file` / `du` / `df` / `tree` は metadata-only かつ safe_read の
