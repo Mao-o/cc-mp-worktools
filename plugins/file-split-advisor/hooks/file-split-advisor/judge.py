@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from metrics import Metrics
@@ -104,11 +105,49 @@ def _effective_thresholds(
         "role": ROLE_MULTIPLIER.get(role, 1.0),
         "declarative": DECLARATIVE_RELAXATION if is_declarative else 1.0,
     }
+    # scale は呼び出し側 (__main__.py::_get_scale) が is_scale_safe() で検査済み
+    # という前提で受け取る (P2-1)。ここで未検査の巨大な scale (例: 1e308) を
+    # 直接渡すと combined ひいては thresholds が float の表現範囲を超えて inf
+    # に飽和し、line_count >= inf が常に False になって tier が恒久的に "ok"
+    # に留まる (advisor の無言の無効化)。judge() 自体はこの入力の安全性を
+    # 検証しない — language/role と同じく、健全性の担保は呼び出し側の責務。
     combined = (
         multipliers["language"] * multipliers["role"] * multipliers["declarative"] * scale
     )
     thresholds = {tier: base * combined for tier, base in BASE_THRESHOLDS.items()}
     return thresholds, multipliers
+
+
+def is_scale_safe(scale: float) -> bool:
+    """``scale`` を最悪ケースの言語/role/宣言的係数と組み合わせても、実効閾値が
+    ``float`` の表現範囲に収まるかを検査する (P2-1)。
+
+    ``scale`` 単体が有限であっても (例: ``FILE_SPLIT_ADVISOR_SCALE=1e308``)、
+    ``_effective_thresholds`` が言語/role/宣言的緩和の係数と掛け合わせた結果は
+    ``float`` の表現範囲を超えて ``inf`` になりうる。``inf`` になった閾値は
+    ``line_count >= inf`` が常に False を返すため、tier が恒久的に ``ok`` に
+    留まり advisor が無言で無効化される (文書化されているフォールバックが
+    効かない状態)。
+
+    呼び出し側 (``__main__.py::_get_scale``) は、ここで False が返った scale を
+    「使えない値」として扱い、nan/inf と同じフォールバック経路 (既定 1.0 に
+    戻す) に載せる。
+
+    この検査は実際の言語/role/宣言的緩和の値によらず、**既知の最悪ケースの
+    組み合わせ** (``LANGUAGE_MULTIPLIER``/``ROLE_MULTIPLIER`` の最大値 ×
+    ``DECLARATIVE_RELAXATION``) で行う。意図的に保守的な判定であり、実際には
+    ``python``/``normal`` のような軽い係数のファイルなら安全な scale でも、
+    この判定では「安全でない」とみなされ拒否されることがある。ファイルごとに
+    個別の安全マージンを計算する設計も可能だが、そうすると同じ
+    ``FILE_SPLIT_ADVISOR_SCALE`` 値が言語/role によって「効くファイルと無視
+    されるファイル」に分かれてしまい、ユーザーから見て挙動が一貫しなくなる。
+    全ファイルに対して一律に安全な単一の scale 範囲にすることを優先した。
+    """
+    worst_case_multiplier = (
+        max(LANGUAGE_MULTIPLIER.values()) * max(ROLE_MULTIPLIER.values()) * DECLARATIVE_RELAXATION
+    )
+    worst_case_threshold = max(BASE_THRESHOLDS.values()) * worst_case_multiplier * scale
+    return math.isfinite(worst_case_threshold)
 
 
 def _compute_tier(line_count: int, thresholds: dict[str, float]) -> str:

@@ -52,6 +52,13 @@ def _get_scale() -> float:
     別途行わないと素通りする (P2-3)。非有限な scale は実効閾値を
     nan/inf にし、``line_count >= threshold`` が常に False になって全ファイル
     が無言になる (plugin の実質的な無効化)。
+
+    ``scale`` 単体は有限でも (例: ``1e308``)、``judge._effective_thresholds``
+    が言語/role/宣言的緩和の係数と掛け合わせる実効閾値は ``float`` の表現範囲を
+    超えて ``inf`` になりうる (P2-1)。``judge.is_scale_safe()`` でこれも検査し、
+    同じフォールバック経路 (既定 1.0 に戻す) に載せる — 「使えない倍率は既定値
+    に戻る」というフォールバックの約束を、単体の有限性だけでなく組み合わせ後の
+    結果についても徹底する。
     """
     raw = os.environ.get("FILE_SPLIT_ADVISOR_SCALE", "").strip()
     if not raw:
@@ -61,6 +68,8 @@ def _get_scale() -> float:
     except ValueError:
         return DEFAULT_SCALE
     if not math.isfinite(value) or value <= 0:
+        return DEFAULT_SCALE
+    if not judge.is_scale_safe(value):
         return DEFAULT_SCALE
     return value
 

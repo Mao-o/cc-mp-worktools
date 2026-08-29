@@ -439,6 +439,17 @@ class TestScaleEnvVar(BaseMainTest):
             out, _ = _run_main(self._envelope(path))
         self.assertIn("判定: warn", self._context(out))
 
+    def test_huge_finite_scale_falls_back_to_default(self):
+        # P2-1: "1e308" は math.isfinite() を通過する (inf ではない) ため、
+        # 修正前は nan/inf フォールバックをすり抜けていた。言語/role/宣言的
+        # 緩和の係数と掛け合わさると実効閾値が inf に飽和し、550 行のような
+        # 通常サイズのファイルでも tier=ok (無言) に留まり advisor が
+        # 無効化されていた。
+        path = self._write("checkout_flow.py", _python_lines(550))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_SCALE": "1e308"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: warn", self._context(out))
+
     def test_scale_note_shown_in_memo_when_scale_applied(self):
         # P2-1 回帰 (レビュー PROBE 3 の再現): SCALE=2.0 のとき、目安に出る
         # 倍率の根拠 (全体 2.0倍) が明示され、printed 係数だけから実効閾値

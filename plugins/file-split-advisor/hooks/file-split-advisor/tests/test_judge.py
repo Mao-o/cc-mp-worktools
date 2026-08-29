@@ -121,6 +121,33 @@ class TestScale(unittest.TestCase):
         self.assertAlmostEqual(v.scale, 1.0)
 
 
+class TestScaleSafety(unittest.TestCase):
+    """P2-1 回帰: 巨大だが有限な scale (``math.isfinite`` は通る) は、言語/role/
+    宣言的緩和の係数と掛け合わさると実効閾値が ``inf`` に飽和しうる。
+    ``is_scale_safe()`` は既知の最悪ケース係数でこれを事前検出する。
+    """
+
+    def test_huge_finite_scale_is_unsafe(self):
+        # Codex 指摘の再現値そのもの。
+        self.assertFalse(judge.is_scale_safe(1e308))
+
+    def test_neutral_scale_is_safe(self):
+        self.assertTrue(judge.is_scale_safe(1.0))
+
+    def test_moderate_scale_is_safe(self):
+        self.assertTrue(judge.is_scale_safe(2.0))
+
+    def test_huge_scale_actually_saturates_thresholds_to_inf(self):
+        # is_scale_safe() が検出する「壊れ方」そのものを直接確認する: 1e308 を
+        # judge.judge() にそのまま渡すと (ガード無しの経路を再現)、実効閾値が
+        # inf になり line_count がどれだけ大きくても tier は ok に留まる
+        # (advisor の無言の無効化)。
+        m = _metrics(line_count=10_000_000)
+        v = judge.judge(m, "python", "normal", scale=1e308)
+        self.assertEqual(v.thresholds["strong"], float("inf"))
+        self.assertEqual(v.tier, "ok")
+
+
 class TestTierBoundaries(unittest.TestCase):
     """半開区間: note <= x < review, review <= x < warn, ... (係数 1.0 相当の言語/role で確認)。"""
 
