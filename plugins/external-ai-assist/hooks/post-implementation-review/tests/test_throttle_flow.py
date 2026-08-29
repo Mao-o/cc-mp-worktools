@@ -364,6 +364,23 @@ class TestOutputMode(HookTestCase):
         self.edit(SESSION, "a.py", "v1\n")
         self.assertNotBlocked(self.stop(SESSION, "REVIEW_CLEAN"))
 
+    def test_default_mode_notice_does_not_claim_claude_was_asked(self):
+        """回帰: 既定 (additionalContext) は CLI 2.1.163 未満で無視されうるため、
+        systemMessage は「Claude に対応を依頼しました」と断定しない (内部バックログの指摘)。
+        """
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertNotIn("依頼しました", data["systemMessage"])
+
+    def test_block_mode_notice_claims_claude_was_asked(self):
+        """回帰: MODE=block はハーネスが継続を保証するので、
+        systemMessage で「Claude に対応を依頼しました」と言い切ってよい。
+        """
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION, "a.py", "v1\n")
+        data = json.loads(self.stop(SESSION, FINDINGS))
+        self.assertIn("依頼しました", data["systemMessage"])
+
 
 if __name__ == "__main__":
     unittest.main()

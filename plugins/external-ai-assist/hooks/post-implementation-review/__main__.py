@@ -507,9 +507,14 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     reason = build_reason(result)
     state.complete_claim(session_id, claim_id, batch.hashes)
     _save_review_copy(session_id, reason)
-    notices.insert(0, f"{summary} → 指摘あり (Claude に対応を依頼しました)")
+    # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。MODE=block は
+    # ハーネスが継続を保証するので「依頼しました」は真だが、既定 (additionalContext)
+    # は CLI 2.1.163 未満で無視されうる。その場合ここで「依頼しました」と言い切ると、
+    # 指摘が Claude に届かないまま利用者にだけ「依頼した」と誤って伝えることになる。
     if get_mode() == MODE_BLOCK:
+        notices.insert(0, f"{summary} → 指摘あり (Claude に対応を依頼しました)")
         return _with_notices({"decision": "block", "reason": reason}, notices)
+    notices.insert(0, f"{summary} → 指摘あり (レビュー結果を Claude の文脈に渡しました)")
     return _with_notices(
         {
             "hookSpecificOutput": {

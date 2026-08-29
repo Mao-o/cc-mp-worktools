@@ -177,8 +177,7 @@ class TestContextMode(HookTestCase):
         (0.8.0 から hookSpecificOutput.permissionDecision: "deny" 形式。
         deprecated だった top-level decision:block は使わない — 検証は assertBlocked に集約)。
         """
-        data = self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS))
-        self.assertEqual(data["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, FINDINGS))
 
     def test_default_mode_does_not_use_deprecated_top_level_fields(self):
         """0.8.0 移行の固定: 公式 docs (`PreToolUse decision control`) は

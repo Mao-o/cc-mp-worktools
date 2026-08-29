@@ -149,7 +149,7 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 - 除外・繰り越し・切り詰めが起きたターンは、対象ファイル名と理由を `systemMessage` と
   stderr に出す (ファイルの内容は出さない)
 - **レビューを走らせたターンは所要時間と結果を `systemMessage` で表示** (0.6.0)。
-  `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (Claude に対応を依頼しました)`。
+  `[post-implementation-review] 差分レビュー完了 (3分41秒, 4 ファイル) → 指摘あり (レビュー結果を Claude の文脈に渡しました)`。
   編集 0 件のターンは従来どおり無出力
 - **指摘ありは既定で `hookSpecificOutput.additionalContext` (hookEventName: `Stop`) で返す**
   (0.8.0)。公式 docs は「`decision: "block"` と同じループ保護
@@ -295,9 +295,10 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 1 回分の待ちは変わらない。
 
 **env を上限まで伸ばした場合の絶対上限**: `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` の上限は
-`1500` 秒 (25分)。kill 猶予 (最大 3 × 5 秒 = 15秒) を足した `hooks.json` 側のハード
-上限が `1560` 秒 (26分) で、これを超えるとハーネスが後始末 (枠を戻す等) の前に hook
-プロセスを kill する。**既定の `EXTERNAL_AI_REVIEW_MAX=2` で同一プランを無修正のまま
+`1500` 秒 (25分)。これに kill 猶予 (最大 3 × 5 秒 = 15秒) を足した 1515 秒でも収まる
+よう、`hooks.json` 側のハード上限は `1560` 秒 (26分) に設定されている。これを超えると
+ハーネスが後始末 (枠を戻す等) の前に hook プロセスを kill する。**既定の
+`EXTERNAL_AI_REVIEW_MAX=2` で同一プランを無修正のまま
 2 回連続提出すると、timeout を上限まで伸ばした環境では最大 26分 × 2 ≈ 52分待つ**
 (既定の `EXTERNAL_AI_PLAN_REVIEW_TIMEOUT=600` (10分) のままなら 20分)。
 
@@ -313,7 +314,7 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 | `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
 | `EXTERNAL_AI_POST_REVIEW_CODE_ONLY` | `0` | `1` でコード以外 (`.md` / `.txt` / `.csv` / `.pdf` / 画像等。一覧は上の除外規則) を外部に送らない。**「docs だけの変更でレビューを走らせたくない」用途はこれで足りる** |
 | `EXTERNAL_AI_POST_REVIEW_MAX` | — | **v0.3.0 で撤廃** (レビュー回数の予算)。`0` を無効化スイッチとして使っていた環境のため、`0` のときだけ後方互換で無効化として解釈する (経緯は `CHANGELOG.md` の 0.3.0 Deprecated 節) |
-| `EXTERNAL_AI_POST_REVIEW_MODE` | `context` | 指摘ありの返し方。既定は `hookSpecificOutput.additionalContext` (hook error に見せない、0.8.0)。`block` で 0.7.0 までの `decision: "block"` に戻す |
+| `EXTERNAL_AI_POST_REVIEW_MODE` | `context` | 指摘ありの返し方。既定は `hookSpecificOutput.additionalContext` (hook error に見せない、0.8.0)。`block` で 0.7.0 までの `decision: "block"` に戻す (`EXTERNAL_AI_PLAN_REVIEW_MODE` と違い、こちらは**表示形式だけ**の切り替えで、Claude が指摘を読んで継続する点は両モードとも同じ) |
 
 **見送り (`MIN_LINES` / `COOLDOWN_SEC`) は pending を消費しない**。見送った変更は捨てられず、
 次に走るレビューへまとめて載る。

@@ -1,6 +1,6 @@
 """explore-parallel の cursor 起動引数と結果注入を PATH 先頭の偽 cursor で固定する。
 
-zh5.2: Explore の裏で走る cursor agent は読み取り専用 (`--mode plan`) でなければならない。
+内部バックログの指摘: Explore の裏で走る cursor agent は読み取り専用 (`--mode plan`) でなければならない。
 0.4.0 までは `-p` 単独 (cursor-agent の help では書込・shell 実行可能) で起動していた。
 """
 import json

@@ -31,8 +31,12 @@ version 据え置きで main に入った後続 commit はその version の節�
   ループ保護 (`stop_hook_active` / 8 連続上限) はハーネス側の同一機構なので Claude の
   動作は変わらず、表示だけが変わる
 - **実機確認 (nested `claude -p`, CLI 2.1.251, 2026-08-30)**: `additionalContext` を
-  返した次の Stop payload が `stop_hook_active: true` で再度発火し、注入した文言への
-  言及が `last_assistant_message` に現れることを確認した (継続が実際に起きている)
+  返した次の Stop payload が `stop_hook_active: true` で再度発火することを確認した
+  (継続が実際に起きている)。確認は 2 段階で行った: 1 段目は injection 文言で試し、
+  Claude が「フック出力経由の注入」と見なして拒否したため、これだけでは指摘への
+  関与の証拠にならなかった。2 段目で `build_reason()` と同じ形の現実的な指摘文に
+  差し替えたところ、Claude は指摘を 1 件ずつ評価し理由を添えて明示的にスキップする
+  応答をした (`decision: "block"` の `reason` と同様に指摘へ関与することを確認済み)
 - **公式 changelog 記載の対応下限は CLI 2.1.163 (2026-06-04)**: 「Hooks: Stop and
   SubagentStop hooks can now return `hookSpecificOutput.additionalContext` to give
   Claude feedback and keep the turn going without being labeled a hook error」
@@ -60,7 +64,7 @@ version 据え置きで main に入った後続 commit はその version の節�
   は Claude に見える (docs: "For `"deny"`, shown to Claude") ので、指摘を読んで再度
   `ExitPlanMode` を呼ぶという既存の挙動は変わらない
 - **`MODE=context` はこの移行と無関係**。`permissionDecision` を意図的に省く設計
-  (`"allow"` は承認ゲートを飛ばし、`"defer"` は `additionalContext` を無視するため)
+  (`"defer"` は `additionalContext` を無視し、省略形は docs に明示が無いため)
   は変えていない
 - **PostToolUse / Stop の top-level `decision` / `reason` は現行フォーマットのまま**
   (docs 逐語: "Other events like PostToolUse and Stop continue to use top-level

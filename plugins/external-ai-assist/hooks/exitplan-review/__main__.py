@@ -41,10 +41,11 @@ the tool result." 逐語) を使う。ブロックしないぶん「差し戻し
 
 **`permissionDecision` は意図的に省く**。3 択のうち省略以外は採れない:
 
-- `"allow"` は **ExitPlanMode の承認ゲートそのものを飛ばす**。この tool は「プランを
-  利用者に見せて承認を取る」ための tool なので、hook が allow を返すと利用者が
-  プランを見ないまま実装に入る。DX 改善のために承認を奪うのは本末転倒
-  (docs が `"allow"` に `updatedInput` との組を要求しているのもこの経路)
+- `"allow"` は `updatedInput` とペアで使って初めて効果を持ち、単体では
+  この tool の承認ゲートを飛ばさない (docs が `"allow"` に `updatedInput`
+  との組を要求しているのもこの経路)。ペアにすれば飛ばせてしまうため、
+  プランを利用者に見せないまま実装に入らせないよう、そもそも `"allow"`
+  自体を返さない
 - `"defer"` は docs に "Ignored when `permissionDecision` is `\"defer\"`" とあり、
   肝心の `additionalContext` が無視されるので目的を果たさない
 - 省略すれば通常の承認フローが残ったまま所見だけが文脈に入る
@@ -597,8 +598,9 @@ def main() -> None:
 
     if mode == MODE_CONTEXT:
         # 差し戻さず所見だけ渡す。`permissionDecision` を **意図的に省く**:
-        # `"allow"` は ExitPlanMode の承認ゲートを飛ばして利用者がプランを見ないまま
-        # 実装に入ってしまい、`"defer"` は additionalContext が無視される (docs 逐語)。
+        # `"allow"` は `updatedInput` とペアで使わない限り承認ゲートを飛ばさないが、
+        # ペアにすれば飛ばせてしまい利用者がプランを見ないまま実装に入ってしまう。
+        # `"defer"` は additionalContext が無視される (docs 逐語)。
         # 省略形自体は docs に明示が無いので既定にはしない (詳細はモジュール docstring)。
         output = {
             "hookSpecificOutput": {

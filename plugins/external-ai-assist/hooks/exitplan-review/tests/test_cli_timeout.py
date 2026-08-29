@@ -1,6 +1,6 @@
 """cursor / codex ラッパを PATH 先頭の偽 CLI で検証する (argv / stdin / timeout / 失敗系)。
 
-zh5.15: timeout 時に process group ごと停止し、stdout を継承した孫を取り残さない。
+内部バックログの指摘: timeout 時に process group ごと停止し、stdout を継承した孫を取り残さない。
 """
 import json
 import os

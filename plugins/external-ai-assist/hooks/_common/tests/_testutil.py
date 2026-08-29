@@ -17,7 +17,7 @@ if str(_HOOKS_DIR) not in sys.path:
 
 PLUGIN_ROOT = _HOOKS_DIR.parent
 
-# 2026-08-20 の Stop hook 実出力相当 (zh5.1): 前置き 1 文 + フェンス付き sentinel
+# 2026-08-20 の Stop hook 実出力相当 (内部バックログの指摘): 前置き 1 文 + フェンス付き sentinel
 FENCED_CLEAN_WITH_PREAMBLE = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```\n"
 FENCED_CLEAN = "```\nREVIEW_CLEAN\n```"
 
