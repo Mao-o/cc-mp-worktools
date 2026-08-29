@@ -8,6 +8,7 @@ state.py に分離。何が起きても exit 0 (fail-open) を徹底する。
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ import source  # noqa: E402
 import state  # noqa: E402
 
 DEFAULT_MAX_EMITS = 20
+DEFAULT_SCALE = 1.0
 
 
 def _is_truthy(value: str) -> bool:
@@ -39,6 +41,41 @@ def _get_max_emits() -> int:
         return max(0, int(raw))
     except ValueError:
         return DEFAULT_MAX_EMITS
+
+
+def _get_scale() -> float:
+    """``FILE_SPLIT_ADVISOR_SCALE``: 全閾値 (note/review/warn/strong) に掛ける倍率。
+
+    未設定・数値変換失敗・0 以下・非有限値 (``nan``/``inf``/``1e400`` 等) は
+    すべて既定 (1.0) にフォールバックする。``nan``/``inf`` は ``float()`` の
+    変換自体は成功し ``value <= 0`` も False を返すため、有限性チェックを
+    別途行わないと素通りする (P2-3)。非有限な scale は実効閾値を
+    nan/inf にし、``line_count >= threshold`` が常に False になって全ファイル
+    が無言になる (plugin の実質的な無効化)。
+
+    ``scale`` 単体は有限でも (例: ``1e308``)、``judge._effective_thresholds``
+    が言語/role/宣言的緩和の係数と掛け合わせる実効閾値は ``float`` の表現範囲を
+    超えて ``inf`` になりうる (P2-1)。``judge.is_scale_safe()`` でこれも検査し、
+    同じフォールバック経路 (既定 1.0 に戻す) に載せる — 「使えない倍率は既定値
+    に戻る」というフォールバックの約束を、単体の有限性だけでなく組み合わせ後の
+    結果についても徹底する。
+    """
+    raw = os.environ.get("FILE_SPLIT_ADVISOR_SCALE", "").strip()
+    if not raw:
+        return DEFAULT_SCALE
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_SCALE
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_SCALE
+    if not judge.is_scale_safe(value):
+        return DEFAULT_SCALE
+    return value
+
+
+def _get_ignore_patterns() -> tuple[str, ...]:
+    return source.load_ignore_globs(os.environ.get("FILE_SPLIT_ADVISOR_IGNORE", ""))
 
 
 def main() -> None:
@@ -67,6 +104,24 @@ def main() -> None:
 
     path = source.resolve_path(file_path, cwd)
 
+    # 一時領域 (scratchpad 等) 配下のファイルは常時 skip (cwd 自体がそこに
+    # 無い限り)。Claude が分析用ダンプ・handoff メモをそこに書く運用があり、
+    # プロジェクト外のファイルにまで分割助言を出すのは有用でないため。
+    if source.should_skip_temp_dir(path, cwd):
+        return
+
+    # FILE_SPLIT_ADVISOR_CWD_ONLY=1 の opt-in (既定 off): --add-dir で cwd 外を
+    # 正当に編集する運用を壊さないよう、既定では cwd 外でも通常どおり判定する。
+    if _is_truthy(os.environ.get("FILE_SPLIT_ADVISOR_CWD_ONLY", "")) and source.is_outside_cwd(
+        path, cwd
+    ):
+        return
+
+    # FILE_SPLIT_ADVISOR_IGNORE (カンマ区切り glob) + ~/.claude/file-split-advisor/
+    # ignore.local.txt (gitignore 風 glob) に一致するファイルを skip する。
+    if source.matches_ignore_glob(path, _get_ignore_patterns()):
+        return
+
     if source.should_skip_by_name(path):
         return
 
@@ -86,7 +141,7 @@ def main() -> None:
     role = "test" if language.is_test_path(path) else "normal"
 
     file_metrics = metrics_mod.compute(loaded, lang, path)
-    verdict = judge.judge(file_metrics, lang, role)
+    verdict = judge.judge(file_metrics, lang, role, scale=_get_scale())
 
     # tier が ok でも state を更新する: 記録した行数を最新に保たないと、縮んで
     # ok まで戻ったファイルが古い行数と比較され、その後の成長を誤って抑制する。
@@ -103,12 +158,11 @@ def main() -> None:
     ):
         return
 
-    display_path = path
-    if cwd:
-        try:
-            display_path = path.relative_to(cwd)
-        except ValueError:
-            display_path = path
+    # P1 と同じ realpath 正規化 (source.relative_to_cwd) を使う。素の
+    # path.relative_to(cwd) だと macOS の /tmp・/var symlink による表記揺れで
+    # ValueError になり、cwd 内側のファイルまで絶対パス表示にフォールバック
+    # していた (P3-3)。
+    display_path = source.relative_to_cwd(path, cwd)
 
     text = message.build(display_path, lang, role, verdict, file_metrics)
     output = {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -144,9 +145,17 @@ def count_defs_python(text: str) -> int | None:
     """AST で FunctionDef/AsyncFunctionDef/ClassDef を再帰的にカウント。
 
     構文解析できない場合は None (呼び出し側が generic regex にフォールバックする)。
+
+    ``ast.parse`` は無効なエスケープシーケンス (``"\\d"`` 等) を含む文字列
+    リテラルに対して Python 3.12+ で ``SyntaxWarning`` を stderr に出す。この
+    hook は毎回の Write/Edit で呼ばれる (debounce で emit が抑制される場合も
+    判定自体は毎回走る) ため、抑制しないと編集のたびに stderr が汚れる。判定
+    結果には影響しないため ``catch_warnings`` で無条件に抑制する。
     """
     try:
-        tree = ast.parse(text)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
     except (SyntaxError, RecursionError, ValueError):
         return None
     count = 0

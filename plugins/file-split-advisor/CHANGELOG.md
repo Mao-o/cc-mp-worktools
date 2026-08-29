@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.3.0
+
+内部バックログの精査で見つかった 6 件の不具合・改善をまとめてリリース。
+
+### 設定手段を追加 (合わないプロジェクトで plugin 無効化しか選べない問題への対応)
+
+- `FILE_SPLIT_ADVISOR_IGNORE` (カンマ区切り glob、fnmatch) と、永続設定として
+  `~/.claude/file-split-advisor/ignore.local.txt` (1 行 1 glob、`#` コメント、
+  空行無視のシンプルな gitignore 風フォーマット) を追加。両方を統合してファイル
+  名・フルパスの両方に対して判定し、一致したファイルは判定対象から除外する
+- `FILE_SPLIT_ADVISOR_SCALE` (全閾値への一律倍率、既定 `1.0`) を追加。0 以下・
+  数値に変換できない値・`nan`/`inf` 等の非有限値は既定にフォールバックする
+
+### 一時ディレクトリ配下・cwd 外ファイルの誤発火を修正
+
+Claude が分析用ダンプや handoff メモ等の一時ファイルを scratchpad
+(`$TMPDIR` 配下) に書く運用で、プロジェクト外のこれらのファイルにまで絶対パス
+付きの分割助言 memo が emit されることを確認した。`$TMPDIR` / `/tmp` /
+`/private/tmp` / `/var/folders` 配下のファイルを、`cwd` の内側にない限り常時
+skip するようにした (opt-out 機構なし)。あわせて `FILE_SPLIT_ADVISOR_CWD_ONLY`
+(既定 off) を追加し、有効化すると `cwd` 外のファイルを全般 skip できる
+(`--add-dir` 運用を壊さないよう既定は off)。containment 判定は
+`os.path.realpath()` で正規化した上で行う (macOS では `/tmp`/`/var` が
+`/private/tmp`/`/private/var` への symlink であり、正規化しないと表記揺れで
+「一時ファイルが skip されない」「cwd 内側のファイルが誤って skip される」の
+両方向に壊れていた)。
+
+### メモの根拠表示を正確にする
+
+- シグナル 0 件のときに常に「宣言的なコードの可能性があります」と表示していた
+  のを、実際に宣言的緩和 (`control_flow_density < 0.02`) が適用されたときだけ
+  表示するよう修正 (制御フロー密度の高いファイルにも誤表示されていた)
+- 実効閾値の根拠になった係数 (言語・宣言的緩和) を「言語 係数 (× 宣言的 係数)」
+  の形でメモに明示するようにした (`judge.Verdict.applied_multipliers` を追加)
+- メモの「目安」行数表示が review/warn 固定で、note/strong 判定時には無関係な
+  数値だけが出ていたのを、判定 tier + 隣接 tier を動的に表示するよう修正
+- `FILE_SPLIT_ADVISOR_SCALE` != 1.0 のとき、目安の倍率が printed 係数から
+  導出できなかったのを修正。role_note と同じ形の専用表示
+  (`(全体 2.0倍)`) を breakdown の直後に追記する (`judge.Verdict.scale` を追加。
+  `applied_multipliers` には含めない設計判断は維持)
+
+### stderr 汚染を修正
+
+`count_defs_python` の `ast.parse` が、無効なエスケープシーケンス
+(`"\d"` 等) を含む Python ソースに対して Python 3.12+ で `SyntaxWarning` を
+毎回 stderr に出していた (実測: 260 行中 236 行に該当パターンを含むファイルで
+約 76KB)。`warnings.catch_warnings()` で抑制した。
+
+### レビューで見つかった追加の不具合を修正
+
+上記の設定手段追加・temp-dir skip・メモ表示修正の初版に対するレビューで
+見つかった不具合。
+
+- **非UTF-8の `ignore.local.txt` で plugin が全プロジェクトで無言停止する
+  不具合を修正**。`UnicodeDecodeError` は `OSError` のサブクラスではないため
+  `except OSError` だけでは捕まらず、この設定ファイルが読めないと
+  (`~/.claude/` 配下のユーザーグローバル設定のため) 全プロジェクトの
+  全 Write/Edit で plugin が無言で死んでいた。`except (OSError,
+  UnicodeDecodeError)` に修正
+- **`FILE_SPLIT_ADVISOR_SCALE` に `nan`/`inf`/`1e400` を渡すと plugin が
+  無言で無効化される不具合を修正**。これらは `float()` 変換に成功し
+  `value <= 0` も素通りするため、非有限な倍率が実効閾値に乗算されて
+  全ファイルが判定不能になっていた。`math.isfinite()` によるチェックを追加
+- **`__main__.py` の表示パス相対化が macOS の `/tmp`/`/var` symlink による
+  表記揺れで絶対パス表示にフォールバックする問題を修正** (実害は表示のみ)。
+  temp-dir skip と同じ realpath 正規化 (`source.relative_to_cwd`) を使うよう
+  に統一した
+- **テストが `FILE_SPLIT_ADVISOR_*` の環境変数 5 つを遮断していなかったのを
+  修正**。これらを export した端末/CI ではテストの green の意味が変わって
+  いた
+- メモの「検出された構造シグナル: なし」表示から、将来 `judge` 側の
+  thresholds が部分的になったときの防御ガードが抜けていたのを復元
+  (現状は到達不能だが fail-open で表示ごと消えるのを防ぐ)
+- 除外 glob (`FILE_SPLIT_ADVISOR_IGNORE` / `ignore.local.txt`) の fnmatch が
+  完全一致 (anchored) であり、相対パス形のパターン (`migrations/*`) が
+  絶対パスに決してマッチしないことを README に明記 (`*/migrations/*` の形が
+  必要)
+- `$TMPDIR` を深さ・cwd との関係を検証せず root として無条件採用する既知の
+  限界を README に追記 (稀な設定ミス時にのみ顕在化するため、既定の skip
+  判定の入力自体を変える対応は見送った)
+
+### 2巡目のレビューで見つかった追加の不具合を修正
+
+- **`FILE_SPLIT_ADVISOR_SCALE` に `1e308` のような巨大だが有限な値を渡すと
+  plugin が無言で無効化される不具合を修正**。前項の `math.isfinite()` に
+  よる非有限値チェックは通過するが、言語/role/宣言的緩和の係数と掛け合わ
+  せた実効閾値が `float` の表現範囲を超えて `inf` に飽和し、同じ「無言の
+  無効化」が起きていた。既知の最悪ケース係数で判定する
+  `judge.is_scale_safe()` を追加し、同じフォールバック経路 (既定 1.0) に
+  載せた
+- **倍率の表示が固定小数点2桁への丸めで実設定を誤って伝える不具合を修正**。
+  `0.004` は `0.0倍`、`1.004` は中立値と同じ `1.0倍` と表示されており、
+  「表示された係数から実効閾値を導出できる」という主張が壊れていた。
+  `str()`/`repr()` の最短往復表現を使うよう修正し、丸めによる情報損失が
+  原理的に起きないようにした
+- **メモの「目安」行数表示が `round()` の偶数丸めで実際の境界と1ずれる
+  不具合を修正**。判定は `line_count >= threshold` の半開区間で行数は
+  整数なので、最初に到達する行数は常に `ceil(threshold)`。`round()` は
+  閾値がちょうど `.5` のとき (例: 基準 150 に javascriptreact の言語係数
+  1.15 を掛けた 172.5) 偶数丸めで 1 小さい値を表示していた。倍率機能に
+  限らず、role 係数や言語係数の掛け算が二進浮動小数点の丸め誤差で整数から
+  わずかにずれる既定経路 (SCALE 未設定) でも同じ不正確さがあったため、
+  あわせて修正した
+
+### ドキュメント修正
+
+- README に Python 3.11+ の互換性表記を追加
+- README に test 判定パターン (ディレクトリ名/ファイル名) の一覧を追加
+- 「Kotlin はメソッド宣言にキーワードを伴わないため `def_count` が機能しない」
+  という誤った記述を訂正。Kotlin は `fun` キーワードを伴うが、判定の正規表現が
+  認識するのは Go 想定の `func` のみで一致しないだけであり、Rust の `fn` も
+  同様に拾えないことを明記した
+
 ## 0.2.2
 
 0.2.1 で入れたファイル末尾の補正が、**末尾以外を置換した編集にも誤ってかかって

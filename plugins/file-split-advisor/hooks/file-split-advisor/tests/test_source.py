@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,18 @@ from unittest import mock
 import _testutil  # noqa: F401
 
 import source
+
+
+def _fake_macos_realpath(path: str) -> str:
+    """macOS の ``/tmp`` / ``/var`` symlink (実体は ``/private/tmp`` /
+    ``/private/var``) だけを模した ``os.path.realpath`` の fake。それ以外の
+    パスは無変換で返す。実機 (macOS) の挙動を決定論的に再現し、CI/実行環境の
+    違いに左右されないテストにするため (P1)。
+    """
+    for prefix in ("/tmp", "/var"):
+        if path == prefix or path.startswith(prefix + "/"):
+            return "/private" + path
+    return path
 
 
 class TestResolvePath(unittest.TestCase):
@@ -24,6 +37,298 @@ class TestResolvePath(unittest.TestCase):
     def test_relative_path_without_cwd(self):
         result = source.resolve_path("foo.py", "")
         self.assertEqual(result, Path("foo.py"))
+
+
+class TestIsUnderTempDir(unittest.TestCase):
+    def test_slash_tmp_is_temp(self):
+        self.assertTrue(source.is_under_temp_dir(Path("/tmp/foo.py")))
+
+    def test_private_tmp_is_temp(self):
+        self.assertTrue(source.is_under_temp_dir(Path("/private/tmp/scratchpad/foo.py")))
+
+    def test_var_folders_is_temp(self):
+        self.assertTrue(source.is_under_temp_dir(Path("/var/folders/xx/yyyy/T/foo.py")))
+
+    def test_tmpdir_env_root_is_temp(self):
+        with mock.patch.dict(os.environ, {"TMPDIR": "/custom/tmp-root"}):
+            self.assertTrue(source.is_under_temp_dir(Path("/custom/tmp-root/sub/foo.py")))
+
+    def test_shallow_tmpdir_env_is_taken_verbatim(self):
+        """P3-2 (characterization test, バグ修正ではない): ``$TMPDIR`` は深さや
+        ``cwd`` との関係を検証せず root として無条件に採用する。既知の限界として
+        README に明記済み — 浅い値 (``/Users`` 等) や実際にはプロジェクトの祖先
+        ディレクトリにあたる値が設定されていると、無関係な兄弟ディレクトリの
+        ファイルまで「一時領域」扱いになる。この特性は稀な設定ミス時にしか
+        顕在化しないため、修正では既定の skip 判定表 (``is_under_temp_dir`` の
+        シグネチャ) 自体を変えるほどの対応はせず、現状の挙動をここに固定して
+        将来の変更を意図的なものにする。
+        """
+        with mock.patch.dict(os.environ, {"TMPDIR": "/Users"}):
+            self.assertTrue(
+                source.is_under_temp_dir(Path("/Users/example/dev/proj/a.py"))
+            )
+
+    def test_project_path_is_not_temp(self):
+        self.assertFalse(source.is_under_temp_dir(Path("/repo/src/foo.py")))
+
+    def test_similar_prefix_is_not_falsely_matched(self):
+        # "/tmpfoo" は "/tmp" 配下ではない (前方一致ではなくパスセグメント単位で
+        # 判定するため誤検知しない)。
+        self.assertFalse(source.is_under_temp_dir(Path("/tmpfoo/bar.py")))
+
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "/var -> /private/var の symlink は macOS 固有。Linux では /var が"
+        " 実ディレクトリなので /var/folders は正規化されず、この形は一時領域に"
+        " ならない (roots に literal で載っているのは /tmp /private/tmp"
+        " /var/folders の 3 つだけ)。判定ロジック自体は下の"
+        " TestRealpathAliasNormalization が realpath を mock して"
+        " ホスト非依存に固定している。",
+    )
+    def test_realpath_resolved_var_folders_form_is_also_temp(self):
+        # P1 face A: macOS では /var が /private/var の symlink (`ls -ld /var`
+        # で確認できる)。$TMPDIR (mkdtemp 等) は resolved 形
+        # (/private/var/folders/...) で渡ってくることがあるが、正規化前は
+        # roots に /var/folders しか列挙しておらず検出できなかった。
+        # 実機 (macOS) の実際の symlink 解決で確認する (mock を使わない) —
+        # そのため実行は macOS に限定する。
+        self.assertTrue(
+            source.is_under_temp_dir(Path("/private/var/folders/xx/yyyy/T/foo.py"))
+        )
+
+
+class TestRealpathAliasNormalization(unittest.TestCase):
+    """P1: macOS の ``/tmp``/``/var`` symlink による表記揺れを realpath 正規化で
+    吸収する。``os.path.realpath`` を fake に差し替え、ホスト環境の実際の
+    symlink 構成に依存しない決定論的なテストにする。
+    """
+
+    def test_face_a_unresolved_root_matches_resolved_path_form(self):
+        # face A: path が resolved 形 (/private/var/folders/...) で来ても、
+        # 正規化前の roots (/var/folders) にしか一致していなかった経路。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertTrue(
+                source.is_under_temp_dir(Path("/private/var/folders/xx/T/foo.py"))
+            )
+
+    def test_face_b_cwd_resolved_path_unresolved_still_not_skipped(self):
+        # face B: cwd が resolved 形 (/private/tmp/proj) で渡り、file_path が
+        # unresolved 形 (/tmp/proj/foo.py) のとき、正規化前は
+        # path.is_relative_to(Path(cwd)) が False になり「cwd の外の別の
+        # 一時ディレクトリ」と誤判定して skip していた (本来は skip しては
+        # いけない cwd 内のファイル)。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertFalse(
+                source.should_skip_temp_dir(
+                    Path("/tmp/proj/checkout_flow.py"), "/private/tmp/proj"
+                )
+            )
+
+    def test_face_b_reverse_alias_direction_still_not_skipped(self):
+        # 逆方向: path が resolved 形、cwd が unresolved 形。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertFalse(
+                source.should_skip_temp_dir(
+                    Path("/private/tmp/proj/checkout_flow.py"), "/tmp/proj"
+                )
+            )
+
+    def test_is_outside_cwd_not_confused_by_alias(self):
+        # FILE_SPLIT_ADVISOR_CWD_ONLY=1 用の is_outside_cwd も同じ alias で
+        # 「cwd の外」と誤判定してはいけない。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertFalse(
+                source.is_outside_cwd(Path("/tmp/proj/foo.py"), "/private/tmp/proj")
+            )
+
+
+class TestShouldSkipTempDir(unittest.TestCase):
+    def test_temp_path_skipped_when_cwd_is_real_project(self):
+        self.assertTrue(
+            source.should_skip_temp_dir(Path("/private/tmp/scratch/foo.py"), "/repo")
+        )
+
+    def test_temp_path_not_skipped_when_path_is_inside_temp_cwd(self):
+        # session 全体が一時領域内 (ephemeral project) で、path がその cwd の
+        # 内側にあるときは skip しない。
+        self.assertFalse(
+            source.should_skip_temp_dir(
+                Path("/private/tmp/proj/foo.py"), "/private/tmp/proj"
+            )
+        )
+
+    def test_sibling_temp_dir_outside_cwd_is_still_skipped(self):
+        # cwd 自体は一時領域配下でも、path が cwd の外にある別の一時ディレクトリ
+        # (兄弟プロジェクト) なら skip する。「cwd が一時領域かどうか」ではなく
+        # 「path が cwd の内側かどうか」で判定する。
+        self.assertTrue(
+            source.should_skip_temp_dir(
+                Path("/private/tmp/projB/foo.py"), "/private/tmp/projA"
+            )
+        )
+
+    def test_non_temp_path_never_skipped(self):
+        self.assertFalse(source.should_skip_temp_dir(Path("/repo/src/foo.py"), "/repo"))
+
+    def test_empty_cwd_does_not_prevent_skip(self):
+        self.assertTrue(source.should_skip_temp_dir(Path("/tmp/foo.py"), ""))
+
+
+class TestIsOutsideCwd(unittest.TestCase):
+    def test_path_inside_cwd_is_not_outside(self):
+        self.assertFalse(source.is_outside_cwd(Path("/repo/src/foo.py"), "/repo"))
+
+    def test_path_outside_cwd_is_outside(self):
+        self.assertTrue(source.is_outside_cwd(Path("/other/foo.py"), "/repo"))
+
+    def test_empty_cwd_never_outside(self):
+        self.assertFalse(source.is_outside_cwd(Path("/other/foo.py"), ""))
+
+
+class TestRelativeToCwd(unittest.TestCase):
+    """P3-3: 表示用パス相対化。P1 と同じ realpath 正規化を使い、
+    ``__main__.py`` の ``path.relative_to(cwd)`` が macOS の ``/tmp``/``/var``
+    alias で ValueError になり絶対パス表示にフォールバックしていた問題を
+    解消する。
+    """
+
+    def test_relative_path_returned_when_inside_cwd(self):
+        self.assertEqual(
+            source.relative_to_cwd(Path("/repo/src/foo.py"), "/repo"),
+            Path("src/foo.py"),
+        )
+
+    def test_absolute_path_returned_when_outside_cwd(self):
+        self.assertEqual(
+            source.relative_to_cwd(Path("/other/foo.py"), "/repo"),
+            Path("/other/foo.py"),
+        )
+
+    def test_empty_cwd_returns_path_unchanged(self):
+        self.assertEqual(
+            source.relative_to_cwd(Path("/repo/foo.py"), ""), Path("/repo/foo.py")
+        )
+
+    def test_realpath_alias_mismatch_still_relativizes(self):
+        # P3-3 本体: cwd が resolved 形、path が unresolved 形でも
+        # (逆方向も同様) ValueError にならず正しく相対化できる。
+        with mock.patch("os.path.realpath", side_effect=_fake_macos_realpath):
+            self.assertEqual(
+                source.relative_to_cwd(
+                    Path("/tmp/project/foo.py"), "/private/tmp/project"
+                ),
+                Path("foo.py"),
+            )
+            self.assertEqual(
+                source.relative_to_cwd(
+                    Path("/private/tmp/project/foo.py"), "/tmp/project"
+                ),
+                Path("foo.py"),
+            )
+
+
+class TestParseIgnoreGlobs(unittest.TestCase):
+    def test_skips_blank_and_comment_lines(self):
+        # サンプル pattern は実際に (絶対パスに対して) マッチする書き方を使う
+        # (P3-1: 以前は "migrations/*" という anchored fnmatch では決して
+        # マッチしない書き方が例として使われていた)。
+        text = "\n".join(["# comment", "", "*.generated.py", "  ", "*/migrations/*"])
+        self.assertEqual(
+            source._parse_ignore_globs(text), ("*.generated.py", "*/migrations/*")
+        )
+
+    def test_empty_text_yields_no_patterns(self):
+        self.assertEqual(source._parse_ignore_globs(""), ())
+
+    def test_strips_surrounding_whitespace(self):
+        self.assertEqual(source._parse_ignore_globs("  test_*.py  \n"), ("test_*.py",))
+
+
+class TestLoadIgnoreGlobs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_ignore_file(self, content: str) -> Path:
+        path = Path(self.tmp) / "ignore.local.txt"
+        path.write_text(content)
+        return path
+
+    def test_merges_env_and_file(self):
+        # P3-1: "*/legacy/*" (実際にマッチする書き方) をサンプルに使う。
+        ignore_file = self._write_ignore_file("*/legacy/*\n# comment\n")
+        patterns = source.load_ignore_globs("*.min.py, foo_*.py", ignore_file)
+        self.assertEqual(patterns, ("*.min.py", "foo_*.py", "*/legacy/*"))
+
+    def test_missing_file_is_ignored(self):
+        patterns = source.load_ignore_globs("*.foo", Path(self.tmp) / "does-not-exist.txt")
+        self.assertEqual(patterns, ("*.foo",))
+
+    def test_empty_env_value_and_no_file(self):
+        patterns = source.load_ignore_globs("", Path(self.tmp) / "does-not-exist.txt")
+        self.assertEqual(patterns, ())
+
+    def test_env_value_with_only_whitespace_entries_ignored(self):
+        patterns = source.load_ignore_globs(" , ,", Path(self.tmp) / "does-not-exist.txt")
+        self.assertEqual(patterns, ())
+
+    def test_default_ignore_file_path(self):
+        expected = Path.home() / ".claude" / "file-split-advisor" / "ignore.local.txt"
+        self.assertEqual(source._default_ignore_file(), expected)
+
+    def test_invalid_utf8_file_is_ignored_not_raised(self):
+        # P2-2: UnicodeDecodeError は OSError のサブクラスではないため、
+        # 修正前は except OSError だけでは捕まらず main() まで伝播していた。
+        # ユーザーが書ける ~/.claude/file-split-advisor/ignore.local.txt が
+        # 非UTF-8 だと plugin 全体が全プロジェクトで無言停止する経路 (fail-open
+        # の約束が破れる)。env 側の patterns は生き残ることを確認する。
+        path = Path(self.tmp) / "ignore.local.txt"
+        path.write_bytes(b"\xff\xfe*.min.py\n")
+        patterns = source.load_ignore_globs("*.foo", path)
+        self.assertEqual(patterns, ("*.foo",))
+
+
+class TestMatchesIgnoreGlob(unittest.TestCase):
+    def test_matches_by_filename(self):
+        self.assertTrue(source.matches_ignore_glob(Path("/repo/test_foo.py"), ("test_*.py",)))
+
+    def test_matches_by_full_path(self):
+        self.assertTrue(
+            source.matches_ignore_glob(
+                Path("/repo/migrations/0001_init.py"), ("*/migrations/*",)
+            )
+        )
+
+    def test_no_match(self):
+        self.assertFalse(
+            source.matches_ignore_glob(Path("/repo/handler.py"), ("test_*.py",))
+        )
+
+    def test_empty_patterns_never_match(self):
+        self.assertFalse(source.matches_ignore_glob(Path("/repo/handler.py"), ()))
+
+    def test_relative_style_pattern_never_matches_absolute_path(self):
+        # P3-1 (characterization test): fnmatch は完全一致 (anchored) であり、
+        # 相対パス形に見えるパターン ("migrations/*") は絶対パスの途中にしか
+        # 現れない文字列には決してマッチしない。ディレクトリを狙うには
+        # "*/migrations/*" のように先頭に "*" を置く必要がある (README に明記)。
+        # これは既存の (意図した) 挙動を固定するテストであり、バグ修正では
+        # ない。
+        self.assertFalse(
+            source.matches_ignore_glob(
+                Path("/repo/migrations/0001_init.py"), ("migrations/*",)
+            )
+        )
+        self.assertTrue(
+            source.matches_ignore_glob(
+                Path("/repo/migrations/0001_init.py"), ("*/migrations/*",)
+            )
+        )
 
 
 class TestShouldSkipByName(unittest.TestCase):

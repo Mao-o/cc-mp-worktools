@@ -58,6 +58,96 @@ class TestEffectiveThresholds(unittest.TestCase):
         self.assertAlmostEqual(v.thresholds["review"], 300 * 1.0)
 
 
+class TestAppliedMultipliers(unittest.TestCase):
+    """message.py が「なぜこの閾値か」を説明するための内訳。"""
+
+    def test_language_and_role_recorded_even_when_neutral(self):
+        m = _metrics(line_count=0, control_flow_density=0.1)  # not declarative
+        v = judge.judge(m, "python", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["language"], 1.0)
+        self.assertAlmostEqual(v.applied_multipliers["role"], 1.0)
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+
+    def test_non_neutral_language_and_role_recorded(self):
+        m = _metrics(line_count=0, control_flow_density=0.1)
+        v = judge.judge(m, "java", "test")
+        self.assertAlmostEqual(v.applied_multipliers["language"], 1.5)
+        self.assertAlmostEqual(v.applied_multipliers["role"], 1.6)
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+
+    def test_declarative_multiplier_recorded_when_applied(self):
+        m = _metrics(line_count=0, control_flow_density=0.01)  # < 0.02
+        v = judge.judge(m, "typescript", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.6)
+
+    def test_declarative_multiplier_is_neutral_when_not_applied(self):
+        m = _metrics(line_count=0, control_flow_density=0.3)  # high density, not declarative
+        v = judge.judge(m, "typescript", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+
+
+class TestScale(unittest.TestCase):
+    """FILE_SPLIT_ADVISOR_SCALE (全閾値への一律倍率)。"""
+
+    def test_default_scale_is_neutral(self):
+        v = judge.judge(_metrics(line_count=0), "python", "normal")
+        self.assertAlmostEqual(v.thresholds["review"], 300)
+
+    def test_scale_multiplies_all_thresholds(self):
+        v = judge.judge(_metrics(line_count=0), "python", "normal", scale=2.0)
+        self.assertAlmostEqual(v.thresholds["note"], 300)
+        self.assertAlmostEqual(v.thresholds["review"], 600)
+        self.assertAlmostEqual(v.thresholds["warn"], 1000)
+        self.assertAlmostEqual(v.thresholds["strong"], 1600)
+
+    def test_scale_combines_with_language_and_role_multipliers(self):
+        # java (1.5) x test (1.6) x scale (0.5) = 1.2
+        v = judge.judge(_metrics(line_count=0), "java", "test", scale=0.5)
+        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 1.6 * 0.5)
+
+    def test_scale_not_recorded_in_applied_multipliers(self):
+        # scale はグローバル config であり per-file の推論シグナルではないため、
+        # message.py の breakdown 表示対象である applied_multipliers には
+        # 含めない (実効閾値の計算にだけ反映する)。ただし表示から完全に
+        # 消してよいわけではない (P2-1): 別フィールド Verdict.scale として
+        # 保持し、message.py 側の専用 parenthetical 表示に使う。
+        v = judge.judge(_metrics(line_count=0), "python", "normal", scale=2.0)
+        self.assertNotIn("scale", v.applied_multipliers)
+        self.assertAlmostEqual(v.applied_multipliers["language"], 1.0)
+        self.assertAlmostEqual(v.scale, 2.0)
+
+    def test_default_scale_is_recorded_on_verdict(self):
+        v = judge.judge(_metrics(line_count=0), "python", "normal")
+        self.assertAlmostEqual(v.scale, 1.0)
+
+
+class TestScaleSafety(unittest.TestCase):
+    """P2-1 回帰: 巨大だが有限な scale (``math.isfinite`` は通る) は、言語/role/
+    宣言的緩和の係数と掛け合わさると実効閾値が ``inf`` に飽和しうる。
+    ``is_scale_safe()`` は既知の最悪ケース係数でこれを事前検出する。
+    """
+
+    def test_huge_finite_scale_is_unsafe(self):
+        # Codex 指摘の再現値そのもの。
+        self.assertFalse(judge.is_scale_safe(1e308))
+
+    def test_neutral_scale_is_safe(self):
+        self.assertTrue(judge.is_scale_safe(1.0))
+
+    def test_moderate_scale_is_safe(self):
+        self.assertTrue(judge.is_scale_safe(2.0))
+
+    def test_huge_scale_actually_saturates_thresholds_to_inf(self):
+        # is_scale_safe() が検出する「壊れ方」そのものを直接確認する: 1e308 を
+        # judge.judge() にそのまま渡すと (ガード無しの経路を再現)、実効閾値が
+        # inf になり line_count がどれだけ大きくても tier は ok に留まる
+        # (advisor の無言の無効化)。
+        m = _metrics(line_count=10_000_000)
+        v = judge.judge(m, "python", "normal", scale=1e308)
+        self.assertEqual(v.thresholds["strong"], float("inf"))
+        self.assertEqual(v.tier, "ok")
+
+
 class TestTierBoundaries(unittest.TestCase):
     """半開区間: note <= x < review, review <= x < warn, ... (係数 1.0 相当の言語/role で確認)。"""
 

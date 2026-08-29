@@ -21,11 +21,11 @@
   解析のみ
 - **`line_count` が `note` 閾値未満のファイルの責務混在検出は範囲外**。構造
   シグナルが何個点火していても、行数が小さければ emit しない
-- **閾値のローカル上書き機構 (`config.local.json` 等) は v1 に含まない**。
-  `sensitive-files-guardrail/patterns.local.txt` の運用実績から保守コストは
-  分かっているが、v1 は誰にも使われておらず何をチューニングしたいかの実証
-  データがない (YAGNI)。追加するなら全閾値上書きより path-ignore リストの方が
-  需要を見積もりやすいと想定している
+- **`config.local.json` 的な、tier ごと・言語ごとの個別閾値上書きは 0.3.0 でも
+  含まない**。0.3.0 で `FILE_SPLIT_ADVISOR_IGNORE`/`ignore.local.txt`
+  (path-ignore) と `FILE_SPLIT_ADVISOR_SCALE` (全閾値一律倍率) を追加した
+  (詳細は「拡張ポイント」節参照) が、これは「対象を除外する」「感度を一律に
+  調整する」の 2 手段であり、tier/言語単位の individual な閾値上書きではない
 
 ## ディレクトリ構成
 
@@ -64,7 +64,13 @@ flowchart TD
     B -- yes --> C{FILE_SPLIT_ADVISOR_DISABLED?}
     C -- yes --> Z
     C -- no --> D[source.resolve_path]
-    D --> E{should_skip_by_name?<br/>lockfile/minified/generated}
+    D --> T{should_skip_temp_dir?<br/>一時領域配下 かつ cwd の外}
+    T -- yes --> Z
+    T -- no --> W{CWD_ONLY かつ<br/>is_outside_cwd?}
+    W -- yes --> Z
+    W -- no --> IG{IGNORE glob /<br/>ignore.local.txt に一致?}
+    IG -- yes --> Z
+    IG -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated}
     E -- yes --> Z
     E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
     N -- no --> Z
@@ -74,7 +80,7 @@ flowchart TD
     G -- yes --> Z
     G -- no --> H[language 判定<br/>detect_language / is_test_path]
     H --> I[metrics.compute<br/>line_count/def_count/import多様性/制御フロー密度/vague filename]
-    I --> J[judge.judge<br/>effective_thresholds → tier → signals → should_emit]
+    I --> J[judge.judge<br/>effective_thresholds (SCALE 反映) → tier → signals → should_emit]
     J --> P[change.classify_growth<br/>Edit の行数差 → grew/not_grew/unknown]
     P --> K[state.try_reserve_emit<br/>行数記録 + 成長判定 + debounce + emit上限を単一ロック区間で]
     K -- False --> Z
@@ -157,6 +163,70 @@ auth)」とカテゴリ名を列挙するには件数だけでは足りない。
 2 つの出力例 (いずれも role=="normal" 相当) では表示に現れない。未使用の死んだ
 引数にしないため、`role == "test"` のときだけ見出し行に `(test: 閾値 1.6倍)`
 を追記する形で使っている。`role=="normal"` の出力は計画の例と完全一致する。
+
+0.3.0 で `judge.Verdict.applied_multipliers` (language/role/declarative の実際の
+係数) を追加し、`message._multiplier_breakdown` が「言語 係数 (× 宣言的 係数)」
+を見出し行に追記するようになったが、`role` はここに含めない。上記の role_note
+と重複表示になるため、role 係数の可視化は role_note 側に残している。
+
+### `Verdict.scale` は `applied_multipliers` と別枠で保持する (0.3.0 レビュー対応)
+
+`FILE_SPLIT_ADVISOR_SCALE` (全閾値への一律倍率) は当初、実効閾値の計算にだけ
+反映し表示には一切出していなかった。これは「宣言的 ×1.6 が理由不明のまま
+表示される」(yaf.13) を修正した同じリリースで、SCALE についても同じ欠陥
+(倍率 1.0 以外のとき「目安」の数値が printed 係数から導出できない) を
+自己再導入していたバグで、レビューで指摘された。`scale` は judge の設計判断
+どおり `applied_multipliers` には含めない (グローバル config であり per-file
+の推論シグナルではないため) が、`Verdict.scale` という別フィールドで保持し、
+`message.build` が role_note と同じ形の専用 parenthetical
+(`(全体 2.0倍)`) を breakdown の直後に追記する。judge 側の実効閾値計算・
+tier/emit 判定ロジックは変更していない (表示だけの修正)。
+
+### 目安の表示 tier は判定 tier + 隣接 tier (0.3.0)
+
+`message.build` の「目安」表示は以前 review/warn 固定だったため、note/strong
+判定時には無関係な review/warn の数値だけが表示され、実際の判定根拠になった
+閾値が示されないことがあった (`message.py:14` 相当の不正確さ)。`_display_tiers`
+が判定 tier に応じて動的に 2 tier を選ぶ (strong のときだけ「1 つ下 + 自身」、
+それ以外は「自身 + 1 つ上」)。judge 側の tier/emit 判定ロジックは変更していない
+(表示だけの修正)。
+
+### `Verdict.applied_multipliers` に signal_count==0 の推測文言の条件を持たせた (0.3.0)
+
+`message.build` は signal_count==0 (行数のみが emit 根拠) のとき、以前は常に
+「宣言的なコードの可能性があります」と表示していたが、実際に宣言的緩和
+(`control_flow_density < DECLARATIVE_THRESHOLD`) が適用されていないファイル
+(分岐の多いハンドラ等) にも同じ文言が付く不正確さがあった。
+`verdict.applied_multipliers["declarative"]` (1.0 なら未適用) で判定するように
+修正した。judge 側は `_effective_thresholds` が内部で計算済みの
+`is_declarative` を `applied_multipliers` として外部に公開するだけで、
+判定ロジック自体 (`_collect_signals` の独自計算) は変更していない。
+
+## 一時ディレクトリ・cwd 外の skip (`source.py`, 0.3.0)
+
+### `should_skip_temp_dir` は「cwd 自体が一時領域か」ではなく「path が cwd の内側か」で決める
+
+一時領域 (scratchpad 等) 配下のファイルは、実測で `/private/tmp/…/scratchpad/`
+配下に絶対パス付きの分割助言が emit されることを確認した (Claude が分析用ダンプ
+や handoff メモを scratchpad に書く運用)。これを常時 skip する機構を追加する際、
+「`cwd` 自体が一時領域配下なら丸ごと除外する」設計も検討したが、この場合
+`cwd=/private/tmp/projA` で `path=/private/tmp/projB/foo.py` (cwd の外にある
+**別の**一時ディレクトリ) まで免除されてしまい、対象外にしたい「本来プロジェクト
+外のファイル」を見逃す。最終的に `is_under_temp_dir(path) and not
+path.is_relative_to(cwd)` (path が cwd の内側なら skip しない) に絞った。
+
+**この設計は既存テストスイートとの互換性の鍵でもある**: `tempfile.mkdtemp()`
+は本 repo の開発機 (macOS) で `/var/folders/...` 配下を返すため、`tests/` 配下の
+全フィクスチャ (`cwd == self.tmp`、`self.tmp` 配下にファイルを書く) は実質的に
+「一時領域配下で cwd もそこにある」状態になる。`path.is_relative_to(cwd)` が
+常に True になるこのケースを skip しない設計にしたことで、既存 141 テストへの
+影響ゼロで機能追加できた (`cwd` 自体が一時領域かどうかだけで免除する設計だと
+同じ結果になるが、上記の兄弟ディレクトリ誤判定を残したままになる)。
+
+`FILE_SPLIT_ADVISOR_CWD_ONLY` (opt-in, 既定 off) 用のテストはこの常時 on の
+temp-dir skip と条件が重なるため、`source._temp_dir_roots` を空にモックして
+温存領域スキップ自体を無効化し、CWD_ONLY 単体の挙動を分離して確認している
+(`tests/test_main.py::TestCwdOnlyOptIn`)。
 
 ## debounce (`state.py`)
 
@@ -251,9 +321,17 @@ echo '{"session_id":"smoke","cwd":"'"$PWD"'","tool_name":"Write",
 
 ## 拡張ポイント
 
-- **path-ignore リスト**: 「このパスは無視する」という需要が見えたら
-  `source.should_skip_by_name` の並びに追加するのが次の一手候補 (config.local
-  的な全閾値上書きより先に検討する)
+- **path-ignore リスト (0.3.0 で実装済み)**: `source.load_ignore_globs` /
+  `source.matches_ignore_glob` が `FILE_SPLIT_ADVISOR_IGNORE` (カンマ区切り
+  glob) と `~/.claude/file-split-advisor/ignore.local.txt` (gitignore 風、
+  1 行 1 glob) を統合する。fnmatch ベースの素朴な glob のみで、否定 (`!`) 等の
+  完全な .gitignore 構文は実装していない。`__main__.py` は
+  `source.should_skip_by_name` より前でこの判定を行う
+- **全閾値の一律倍率 (0.3.0 で実装済み)**: `FILE_SPLIT_ADVISOR_SCALE` を
+  `judge.judge(..., scale=...)` に渡す。tier/言語ごとの個別上書きではなく
+  グローバルな倍率のみ。`judge.Verdict.applied_multipliers` には含めない
+  (per-file の推論シグナルではなくグローバル config のため、message.py の
+  breakdown 表示対象外)
 - **新しい import カテゴリ / キーワード**: `metrics.py::IMPORT_CATEGORY_KEYWORDS`
   に追記する。カテゴリ自体を増やす場合は `judge.py::IMPORT_DIVERSITY_SIGNAL_THRESHOLD`
   (現状 7 カテゴリ中 4 種) も見直す
