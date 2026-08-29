@@ -893,3 +893,44 @@ class StdoutNewlineBudgetTest(unittest.TestCase):
                 main(["--root", str(root), "--max-output-chars", "60"])
             self.assertLessEqual(len(buf.getvalue()), 60)
 
+
+class HomeNestedDiscoveryTest(unittest.TestCase):
+    """PR #67 (Codex P2): ホームディレクトリは「配下のどこかにプロジェクトが
+    ある」のが常態なので、入れ子探索を許すと必ず 1 件見つかり gate が素通りする。
+    この gate が存在する理由そのものなので、ホームでは探索しない。
+    """
+
+    def test_home_with_nested_projects_still_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "dev" / "proj").mkdir(parents=True)
+            (home / "dev" / "proj" / "package.json").write_text("{}\n")
+            with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                self.assertFalse(_has_relevant_project_markers(home))
+
+    def test_non_home_with_nested_projects_still_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            ws = Path(tmp) / "workspace"
+            (ws / "web").mkdir(parents=True)
+            (ws / "web" / "package.json").write_text("{}\n")
+            with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                self.assertTrue(_has_relevant_project_markers(ws))
+
+
+class ZeroBudgetEmitsNothingTest(unittest.TestCase):
+    """PR #67 (Codex P2): 上限 0 のとき print() が改行 1 文字を出し、
+    「出力全体が上限以内」という約束を上限ちょうどで破っていた。
+    """
+
+    def test_zero_budget_writes_no_characters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text("{}\n")
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", new=buf):
+                rc = main(["--root", str(root), "--max-output-chars", "0"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(buf.getvalue(), "")
+

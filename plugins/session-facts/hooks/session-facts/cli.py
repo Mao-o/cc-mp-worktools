@@ -275,6 +275,11 @@ def _has_relevant_project_markers(root: Path) -> bool:
         return True
     if mise_config_path(root) is not None:
         return True
+    if is_home_dir(root):
+        # ホームディレクトリは「配下のどこかにプロジェクトがある」のが常態
+        # なので、入れ子探索を許すと必ず 1 件見つかり gate が素通りする。
+        # この gate が存在する理由そのものなので、ここでは探索しない。
+        return False
     # ルート直下にマニフェストを置かないワークスペース (サブディレクトリ側に
     # だけマニフェストがある構成) を取りこぼさない。深さと訪問ディレクトリ数を
     # 限定しているので、gate が避けたい「無関係な巨大ディレクトリの全走査」に
@@ -554,6 +559,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "additionalContext": output,
             }
         }, ensure_ascii=False))
-    else:
+    elif output:
         print(output)
+    else:
+        # 上限 0 のとき print() は改行 1 文字を出してしまい、「出力全体が
+        # 上限以内」という約束を上限ちょうどで破る。何も出さない。
+        pass
     return 0
