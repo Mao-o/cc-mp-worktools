@@ -853,3 +853,43 @@ class NestedWorkspaceMarkerTest(unittest.TestCase):
             out = _run_cli(["--root", str(root)])
             self.assertIn("no project markers found; facts skipped", out)
 
+
+class LockfileOnlyMarkerTest(unittest.TestCase):
+    """PR #67 (Codex P2): lockfile だけを持つディレクトリでも package manager・
+    構造・ソース・テストの収集は動くので、gate で落とすと facts が無意味に消える。
+    """
+
+    def test_package_lock_only_project_passes_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package-lock.json").write_text('{"lockfileVersion": 3}\n')
+            (root / "index.js").write_text("console.log(1)\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found; facts skipped", out)
+
+    def test_every_lockfile_pm_detects_is_a_marker(self):
+        # pm.py が認識する lockfile と gate のマーカー一覧がずれないことを固定する
+        # (ずれると「検出はできるのに gate で落ちる」構成が生まれる)。
+        import re
+        from core.constants import PROJECT_MARKERS
+
+        pm_src = (Path(__file__).resolve().parent.parent / "core" / "pm.py").read_text()
+        detected = set(re.findall(r'root / "([^"]+\.lock[^"]*|[^"]*lock[^"]*)"', pm_src))
+        missing = {name for name in detected if name not in PROJECT_MARKERS}
+        self.assertEqual(missing, set(), f"gate に無い lockfile: {sorted(missing)}")
+
+
+class StdoutNewlineBudgetTest(unittest.TestCase):
+    """PR #67 (Codex P2): plain stdout 経路は print() が末尾に改行を 1 文字
+    足すため、上限ちょうどを指定した呼び出しが必ず 1 文字超えていた。
+    """
+
+    def test_emitted_bytes_including_newline_fit_the_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text("{}\n")
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", new=buf):
+                main(["--root", str(root), "--max-output-chars", "60"])
+            self.assertLessEqual(len(buf.getvalue()), 60)
+

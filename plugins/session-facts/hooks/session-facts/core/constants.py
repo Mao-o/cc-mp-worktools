@@ -251,6 +251,17 @@ PROJECT_MARKERS = (
     # detectors/prisma.py (directory, not a file -- exists() doesn't care)
     "prisma",
     # detectors/python_stack.py
+    # core/pm.py::detect_package_manager() が認識する lockfile 一式。
+    # lockfile だけを持つディレクトリ (マニフェストが消えている / 生成物だけ
+    # 配布されている構成) でも package manager・構造・ソース・テストの収集は
+    # 動くので、gate で落とすと facts が無意味に消える。
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "uv.toml",
     "uv.lock",
     "uv.toml",
     "poetry.lock",

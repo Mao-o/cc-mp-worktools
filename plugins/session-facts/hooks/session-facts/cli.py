@@ -503,7 +503,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_env_keys=args.max_env_keys,
         max_notes=args.max_notes,
         max_major_deps=args.max_major_deps,
-        max_output_chars=args.max_output_chars,
+        # plain stdout 経路は print() が末尾に改行を 1 文字足すため、その分を
+        # 予約する。予約しないと、外部ハーネスの上限ちょうどを指定した呼び出しが
+        # 必ず 1 文字超える。JSON 経路は改行が payload の外なので予約しない。
+        max_output_chars=(
+            args.max_output_chars
+            if args.emit == "subagent-json"
+            else max(0, args.max_output_chars - 1)
+        ),
         include_domain_types=args.include_domain_types,
         max_domain_types=args.max_domain_types,
         include_hub_files=args.include_hub_files,
