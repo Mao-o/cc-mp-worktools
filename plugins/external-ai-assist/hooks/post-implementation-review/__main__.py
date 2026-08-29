@@ -145,6 +145,15 @@ def build_reason(cursor_output: str) -> str:
 
 
 def handle_pre_tool(payload: dict) -> None:
+    """bd_092a232e-zh5.11: 無効化 / cursor 不在なら git も state も一切触らない。
+
+    以前は `bash_tracking_enabled()` しか見ておらず、`EXTERNAL_AI_POST_REVIEW=0`
+    や cursor 未インストールの環境でも Bash のたびに `git status` が走っていた。
+    Stop 側の `review_enabled()` / `cursor.is_available()` と同じ条件をここでも
+    先頭で評価し、無効時は git 呼び出しも state 書込も発生させない。
+    """
+    if not review_enabled() or not cursor.is_available():
+        return
     if payload.get("tool_name") != "Bash" or not bash_tracking_enabled():
         return
     session_id = payload.get("session_id") or ""
@@ -154,10 +163,22 @@ def handle_pre_tool(payload: dict) -> None:
     root = gitscan.worktree_root(payload.get("cwd") or os.getcwd())
     if not root:
         return
-    state.save_bash_snapshot(session_id, tool_use_id, gitscan.status_snapshot(root))
+    snapshot = gitscan.status_snapshot(root)
+    if snapshot is None:
+        # git status 失敗 (timeout / 非 0 終了) / MAX_SNAPSHOT_ENTRIES 超過で不完全。
+        # null を書いて後で pop 側に判定させるより、そもそも書かない方が
+        # $TMPDIR に残骸を増やさない (pop_bash_snapshot はファイル無しでも None を
+        # 返すので、後続の属性付け断念という効果は変わらない。bd_092a232e-zh5.7)
+        log("Bash 前: git status 失敗のため snapshot を保存しない (属性付けを断念)")
+        return
+    state.save_bash_snapshot(session_id, tool_use_id, snapshot)
 
 
 def handle_post_tool(payload: dict) -> None:
+    """bd_092a232e-zh5.11: 無効化 / cursor 不在なら git も state も一切触らない
+    (handle_pre_tool と同じ理由)。"""
+    if not review_enabled() or not cursor.is_available():
+        return
     session_id = payload.get("session_id") or ""
     if not session_id:
         return
@@ -188,7 +209,14 @@ def _edited_paths(tool_input: dict, cwd: str) -> list[str]:
 
 
 def _record_bash_changes(payload: dict, session_id: str, cwd: str) -> None:
-    """Bash 実行前後の status スナップショット差分を pending に積む。"""
+    """Bash 実行前後の status スナップショット差分を pending に積む。
+
+    bd_092a232e-zh5.7: pre / post どちらかの `git status` が失敗 (timeout / 非 0
+    終了 / MAX_SNAPSHOT_ENTRIES 超過で不完全) なら、比較そのものを諦める。
+    以前は失敗時に `status_snapshot` が `{}` を返しており、`changed_between({}, post)`
+    が post 側の全エントリ (他セッション・他人の変更を含む) を「変化あり」として
+    pending に積んでいた (逆に post 失敗時は pre 側の全件が対象になる)。
+    """
     if not bash_tracking_enabled():
         return
     tool_use_id = payload.get("tool_use_id") or ""
@@ -196,11 +224,16 @@ def _record_bash_changes(payload: dict, session_id: str, cwd: str) -> None:
         return
     pre = state.pop_bash_snapshot(session_id, tool_use_id)
     if pre is None:
-        return  # PreToolUse が動かなかった (git 外・timeout) → 属性付けを諦める
+        log("Bash 後: pre スナップショットが無い (git 外/取得失敗/未実行) ため属性付けを断念")
+        return
     root = gitscan.worktree_root(cwd)
     if not root:
         return
-    changed = gitscan.changed_between(pre, gitscan.status_snapshot(root))
+    post = gitscan.status_snapshot(root)
+    if post is None:
+        log("Bash 後: post の git status が失敗したため属性付けを断念")
+        return
+    changed = gitscan.changed_between(pre, post)
     if changed:
         state.record_pending(session_id, [os.path.join(root, rel) for rel in changed])
 

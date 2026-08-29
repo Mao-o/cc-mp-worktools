@@ -68,8 +68,11 @@ post-implementation-review/
 
 `-uall` でも ignore されたディレクトリは git が subtree ごと skip するため、
 実ファイル数ではなく「ignore されていない木の大きさ」で決まる。**Bash 1 回あたり
-約 70 ms** で、既定 ON のままで問題ない水準。支配項は git ではなく Python の
-インタプリタ起動 (`python3 -c pass` だけで 8.7 ms)。
+約 70 ms (機能が有効かつ cursor 導入済みの場合のみ)** で、既定 ON のままで問題ない
+水準。支配項は git ではなく Python のインタプリタ起動 (`python3 -c pass` だけで
+8.7 ms)。`EXTERNAL_AI_POST_REVIEW=0` または cursor 未インストールの環境では
+`handle_pre_tool` / `handle_post_tool` が先頭で即 return し、この git 呼び出し自体
+発生しない (bd_092a232e-zh5.11)。
 
 極端に大きい作業ツリーで重い場合は `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING=0` で
 切れる (その場合 `sed -i` 等の Bash 経由の変更は拾えなくなる)。

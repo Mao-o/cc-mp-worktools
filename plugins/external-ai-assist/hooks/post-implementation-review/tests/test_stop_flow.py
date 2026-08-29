@@ -217,6 +217,61 @@ class TestBashAttribution(HookTestCase):
         self.assertEqual(self.pending(SESSION_A), [])
 
 
+class TestBashSnapshotFailure(HookTestCase):
+    """bd_092a232e-zh5.7: git status 失敗時に空/不完全な snapshot を {} として保存し、
+    作業ツリー全体を誤ってこのセッションの変更と帰属させないこと。"""
+
+    def _bash_payload(self, session_id: str, tool_use_id: str) -> dict:
+        return {
+            "session_id": session_id,
+            "cwd": self.repo,
+            "tool_name": "Bash",
+            "tool_use_id": tool_use_id,
+            "tool_input": {"command": "mutate"},
+        }
+
+    def test_pre_snapshot_failure_does_not_attribute_unrelated_dirty_files(self):
+        # このセッションの Bash が起こしたのではない「他の変更」を用意しておく
+        _testutil.write(self.repo, "unrelated.txt", "someone else's change\n")
+        payload = self._bash_payload(SESSION_A, "tu_fail_pre")
+
+        with mock.patch.object(self.gitscan, "status_snapshot", return_value=None):
+            self.run_hook("pre-tool", payload)  # git status 失敗 (timeout 等) を模す
+
+        self.run_hook("post-tool", payload)  # post 側は通常どおり動く想定
+
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [],
+            "pre スナップショット失敗時に作業ツリー全体を pending に積んではいけない",
+        )
+
+    def test_post_snapshot_failure_does_not_attribute_unrelated_dirty_files(self):
+        _testutil.write(self.repo, "unrelated.txt", "someone else's change\n")
+        payload = self._bash_payload(SESSION_A, "tu_fail_post")
+
+        self.run_hook("pre-tool", payload)  # pre 側は通常どおり成功させる
+
+        with mock.patch.object(self.gitscan, "status_snapshot", return_value=None):
+            self.run_hook("post-tool", payload)  # git status 失敗 (timeout 等) を模す
+
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [],
+            "post スナップショット失敗時に pre 全件を pending に積んではいけない",
+        )
+
+    def test_pre_snapshot_failure_writes_no_snapshot_file(self):
+        """失敗時は null を書くのではなく、そもそもファイルを作らない (残骸を増やさない)。"""
+        payload = self._bash_payload(SESSION_A, "tu_fail_pre2")
+        with mock.patch.object(self.gitscan, "status_snapshot", return_value=None):
+            self.run_hook("pre-tool", payload)
+        snapshot_dir = os.path.join(self.tmpdir, "post-implementation-review", "bashsnap")
+        self.assertFalse(
+            os.path.exists(snapshot_dir), "snapshot 失敗時にファイルを作ってはいけない"
+        )
+
+
 class TestOverflowCarryOver(HookTestCase):
     """1 回のレビュー上限を超えたパスを黙って捨てず、次ターンでレビューする。"""
 
@@ -654,6 +709,78 @@ class TestByteBudgetFlow(HookTestCase):
         )
         with open(state_path) as f:
             self.assertEqual(json.load(f)["reviewed"], {}, "失敗時は hash を記録しない")
+
+
+class TestDisabledOrUnavailableSkipsGitAndState(HookTestCase):
+    """bd_092a232e-zh5.11: 無効化 / cursor 不在なら pre-tool・post-tool の先頭で
+    即 return し、git status も state 書込も一切行わない。"""
+
+    def _state_dir(self) -> str:
+        return os.path.join(self.tmpdir, "post-implementation-review", "state")
+
+    def _bashsnap_dir(self) -> str:
+        return os.path.join(self.tmpdir, "post-implementation-review", "bashsnap")
+
+    def test_disabled_pre_tool_writes_no_bash_snapshot(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"
+        self.run_hook(
+            "pre-tool",
+            {
+                "session_id": SESSION_A,
+                "cwd": self.repo,
+                "tool_name": "Bash",
+                "tool_use_id": "tu_x",
+                "tool_input": {"command": "echo hi"},
+            },
+        )
+        self.assertFalse(os.path.exists(self._bashsnap_dir()))
+
+    def test_disabled_post_tool_records_no_pending(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.assertFalse(os.path.exists(self._state_dir()))
+
+    def test_cursor_unavailable_skips_pre_and_post_tool(self):
+        with mock.patch.object(self.cursor, "is_available", return_value=False):
+            self.run_hook(
+                "pre-tool",
+                {
+                    "session_id": SESSION_A,
+                    "cwd": self.repo,
+                    "tool_name": "Bash",
+                    "tool_use_id": "tu_x",
+                    "tool_input": {"command": "echo hi"},
+                },
+            )
+            self.edit(SESSION_A, "a.txt", "v1\n")
+        self.assertFalse(os.path.exists(self._state_dir()))
+        self.assertFalse(os.path.exists(self._bashsnap_dir()))
+
+    def test_enabled_and_available_still_writes_state(self):
+        """回帰: 有効時は従来どおり state を書く (早期 return が常時 skip になっていない)。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.assertIn(os.path.join(self.repo, "a.txt"), self.pending(SESSION_A))
+
+
+class TestNoOpStopCreatesNoStateFile(HookTestCase):
+    """bd_092a232e-zh5.11: 編集 0 件のターンの Stop で state ファイルが新規生成
+    されない (claim_pending が state ファイル皆無のセッションを開かない)。"""
+
+    def test_no_op_stop_creates_no_state_file(self):
+        state_path = os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{SESSION_A}.json"
+        )
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        self.assertFalse(os.path.exists(state_path))
+
+    def test_state_file_is_created_once_something_is_pending(self):
+        """回帰: 実際に何かが起きたセッションでは今までどおり state を書く。"""
+        state_path = os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{SESSION_A}.json"
+        )
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.assertTrue(os.path.exists(state_path))
 
 
 class TestGuards(HookTestCase):

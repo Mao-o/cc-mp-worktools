@@ -191,7 +191,7 @@ def _add_link(root: str, links: dict[str, str], rel: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def status_snapshot(root: str) -> dict[str, list]:
+def status_snapshot(root: str) -> dict[str, list] | None:
     """dirty / untracked なパス -> [status_code, size, mtime_ns] を返す。
 
     **行の集合ではなく (code, size, mtime_ns) のタプルを記録するのが要点**。
@@ -205,6 +205,15 @@ def status_snapshot(root: str) -> dict[str, list]:
     ただし `-uall` でも**入れ子の git リポジトリは展開されず `dir/` のまま**返る
     (別の worktree を `.claude/worktrees/` 配下に作った場合など)。中身は別リポジトリの
     変更なのでレビュー対象にしてはならず、末尾 `/` のエントリは捨てる。
+
+    **失敗 (timeout / 非 0 終了) と、収まりきらない (`MAX_SNAPSHOT_ENTRIES` 超過で
+    不完全) 場合は `None` を返す** (bd_092a232e-zh5.7)。以前はどちらも `{}` を
+    返しており、呼び出し側 (`__main__._record_bash_changes`) の
+    `changed_between(pre, post)` が「空」と「取得できた全件消えた」を区別できず、
+    片方が失敗したもう片方の全エントリ (他セッション・他人の変更を含む) を
+    "変化あり" として pending に積んでいた。不完全な部分集合も同じ理由で危険:
+    pre/post で切り詰めの境界 (どのエントリまで拾えたか) がずれると、実際は
+    変化していないパスが「片方にしか無い」ことになり誤検出する。
     """
     res = _git(
         root,
@@ -212,19 +221,19 @@ def status_snapshot(root: str) -> dict[str, list]:
         timeout=STATUS_TIMEOUT_SEC,
     )
     if res is None or res.returncode != 0:
-        return {}
+        return None
 
     snapshot: dict[str, list] = {}
     for code, rel in _parse_porcelain_z(_decode(res.stdout)):
         if rel.endswith("/"):
             continue
+        if len(snapshot) >= MAX_SNAPSHOT_ENTRIES:
+            return None  # 収まりきらない (不完全) → 比較不能として諦める
         try:
             st = os.stat(os.path.join(root, rel))
             snapshot[rel] = [code, st.st_size, st.st_mtime_ns]
         except OSError:
             snapshot[rel] = [code, -1, -1]
-        if len(snapshot) >= MAX_SNAPSHOT_ENTRIES:
-            break
     return snapshot
 
 
