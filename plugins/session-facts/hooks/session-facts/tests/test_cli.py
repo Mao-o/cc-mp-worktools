@@ -264,6 +264,19 @@ class OutputBudgetTest(unittest.TestCase):
         self.assertEqual(result, "\n\n".join([self.HEADER] + sections))
         self.assertNotIn("truncated", result)
 
+    def test_exactly_at_max_chars_returned_unchanged(self):
+        """internal backlog P3-7: test_under_budget_returned_unchanged's
+        max_chars=1000 against a ~50-char input is comfortably, trivially
+        under budget and would pass even if the `<=` boundary check in
+        _enforce_output_budget's early return were subtly wrong (e.g. off
+        by one). This exercises the boundary itself: max_chars set to
+        exactly the joined length, not just far above it."""
+        sections = ["## Test Snapshot\n- code_files: 3"]
+        full = "\n\n".join([self.HEADER] + sections)
+        result = _enforce_output_budget(self.HEADER, sections, max_chars=len(full))
+        self.assertEqual(result, full)
+        self.assertNotIn("truncated", result)
+
     def test_structure_tail_is_trimmed_first_leaving_other_sections_intact(self):
         structure = "\n".join(
             ["## Structure (dirs only, depth=3)"] + [f"├── dir{i}/" for i in range(60)]
@@ -301,10 +314,16 @@ class OutputBudgetTest(unittest.TestCase):
         self.assertNotIn("## Repo-Specific Notes", result)
         self.assertIn("## Test Snapshot", result)  # protected, survives
 
-    def test_never_silently_drops_protected_sections_hard_cuts_instead(self):
-        # Budget so tight even the protected sections alone don't fit -- the
-        # cascade must not drop them; it hard-cuts the joined string instead
-        # (the max_chars contract holds either way).
+    def test_hard_cut_safety_net_holds_even_below_header_length(self):
+        # internal backlog P3-7: this test was previously named
+        # test_never_silently_drops_protected_sections_hard_cuts_instead,
+        # but max_chars=30 is smaller than self.HEADER alone (~40 chars),
+        # so nothing -- not even the header, let alone a protected section
+        # -- can actually "survive" here; the only real invariant a budget
+        # this pathological can demonstrate is the max_chars contract
+        # itself. See test_protected_sections_are_hard_cut_not_dropped
+        # below for a properly-sized budget that lets a protected section
+        # genuinely survive (truncated, not silently dropped whole).
         sections = [
             "## Scripts\n- test: jest",
             "## Test Snapshot\n- code_files: 3\n- test_files: 1",
@@ -313,6 +332,28 @@ class OutputBudgetTest(unittest.TestCase):
         ]
         result = _enforce_output_budget(self.HEADER, sections, max_chars=30)
         self.assertLessEqual(len(result), 30)
+
+    def test_protected_sections_are_hard_cut_not_dropped(self):
+        """internal backlog P3-7: with a budget sized to hold the header
+        plus a little of the first protected section (but not all of it,
+        once the expendable ## Scripts is dropped), the protected section
+        must actually be present -- truncated mid-body, not vanished
+        whole. This is the "hard-cuts instead" claim the old test's name
+        made but never checked."""
+        sections = [
+            "## Scripts\n- test: jest",
+            "## Test Snapshot\n- code_files: 3\n- test_files: 1",
+            "## Service Entry Points\n- src/api.py",
+            "## Likely Commands\n- npm test",
+        ]
+        max_chars = len(self.HEADER) + 20
+        result = _enforce_output_budget(self.HEADER, sections, max_chars)
+        self.assertLessEqual(len(result), max_chars)
+        self.assertNotIn("## Scripts", result)  # expendable: fully dropped
+        self.assertIn("## Test Snapshot", result)  # protected: at least started
+        # Confirms this is a genuine hard cut mid-body, not a clean
+        # whole-section drop that happened to leave the header behind.
+        self.assertNotIn("test_files: 1", result)
 
     def test_result_never_exceeds_max_chars_even_for_pathological_budgets(self):
         # Including budgets smaller than the "... (truncated)" marker itself
@@ -323,6 +364,52 @@ class OutputBudgetTest(unittest.TestCase):
                     self.HEADER, ["## Scripts\n- a: b"], max_chars
                 )
                 self.assertLessEqual(len(result), max_chars)
+
+    def test_subtree_is_trimmed_when_structure_alone_is_not_enough(self):
+        """internal backlog P2-2: in cwd-scoped mode, ``## Structure``
+        self-shrinks to a small top-level overview and the real bulk moves
+        to ``## Subtree`` -- the cascade used to only know how to shrink
+        ``## Structure``, leaving Subtree (often the larger section)
+        completely untouched by the deliberate trim mechanism."""
+        structure = "## Structure (dirs only, depth=1)\n├── plugins/\n├── skills/"
+        subtree = "\n".join(
+            ["## Subtree (cwd: plugins/foo, dirs only, depth=3)"]
+            + [f"├── mod{i}/" for i in range(40)]
+        )
+        scripts = "## Scripts\n- test: pytest"
+        sections = [structure, subtree, scripts]
+        full_len = len("\n\n".join([self.HEADER] + sections))
+        max_chars = len(self.HEADER) + len(structure) + len(scripts) + 80
+        self.assertLess(max_chars, full_len)
+
+        result = _enforce_output_budget(self.HEADER, sections, max_chars)
+        self.assertLessEqual(len(result), max_chars)
+        # The small, valuable cross-module overview survives in full ...
+        self.assertIn(structure, result)
+        # ... while Subtree -- the actual bulk -- is the one shrunk.
+        self.assertLess(result.count("├── mod"), 40)
+        self.assertIn("## Scripts\n- test: pytest", result)
+
+    def test_cascade_does_not_drop_more_sections_than_max_chars_requires(self):
+        """internal backlog P3-5: every step used to target
+        max_chars - len(marker) instead of max_chars itself, so the
+        cascade could drop an *additional* whole section purely to reserve
+        room for the "... (truncated)" marker, even though dropping just
+        the first one already satisfied max_chars. Env Keys must survive
+        here: dropping Scripts alone is already enough."""
+        header = "H" * 10
+        protected = "## Test Snapshot\n- " + "a" * 30
+        scripts = "## Scripts\n- " + "s" * 20
+        env_keys = "## Env Keys\n- " + "e" * 20
+        sections = [protected, scripts, env_keys]
+        # Big enough that dropping Scripts alone clears max_chars; small
+        # enough that the old max_chars-17 target would also drop Env Keys.
+        max_chars = len("\n\n".join([header, protected, env_keys]))
+
+        result = _enforce_output_budget(header, sections, max_chars)
+        self.assertLessEqual(len(result), max_chars)
+        self.assertNotIn("## Scripts", result)
+        self.assertIn("## Env Keys", result)  # must survive
 
 
 class HugePackageJsonWithinBudgetTest(unittest.TestCase):
@@ -361,14 +448,52 @@ class ProjectMarkerGateTest(unittest.TestCase):
             (root / "notes.txt").write_text("shopping list\n")
             (root / "Photos").mkdir()
             out = _run_cli(["--root", str(root)])
-            self.assertEqual(
-                out.strip(),
-                "## Project Facts\n"
-                "- git_repo: false\n"
-                "- no project markers found; facts skipped",
-            )
+            # internal backlog P2-4: the minimal header must also name the
+            # analyzed directory and hint at the escape hatch (--force-walk)
+            # -- without either, an agent stuck here has no way to tell
+            # whether this was the right directory or how to get past it.
+            # main() resolves --root (symlinks included, e.g. macOS's
+            # /var -> /private/var) before it ever reaches summarize_repo(),
+            # so the expected value must be resolved the same way.
+            self.assertIn(f"- repo_root: {root.resolve()}", out)
+            self.assertIn("- git_repo: false", out)
+            self.assertIn("- no project markers found; facts skipped", out)
+            self.assertIn("--force-walk", out)
             self.assertNotIn("## Structure", out)
             self.assertNotIn("## Test Snapshot", out)
+
+    def test_minimal_header_hint_is_runnable_with_python3_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            fake_invoked_as = str(root / "hooks" / "session-facts")
+            with mock.patch.object(sys, "argv", [fake_invoked_as]):
+                out = _run_cli(["--root", str(root)])
+            self.assertIn(
+                f"- more: run `python3 {fake_invoked_as} --force-walk` "
+                "to force the full analysis anyway",
+                out,
+            )
+
+    def test_minimal_header_hint_quotes_paths_containing_spaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            spaced = str(root / "plugin root" / "session-facts")
+            with mock.patch.object(sys, "argv", [spaced]):
+                out = _run_cli(["--root", str(root)])
+            self.assertIn(f"`python3 {shlex.quote(spaced)} --force-walk`", out)
+            self.assertNotIn(f"`python3 {spaced} --force-walk`", out)
+
+    def test_minimal_header_fallback_wording_when_invoked_as_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("x\n")
+            out = summarize_repo(root, AnalysisConfig(), is_git=False, invoked_as=None)
+            self.assertIn(
+                "- more: pass --force-walk to force the full analysis anyway", out
+            )
+            self.assertNotIn("run `", out)
 
     def test_non_git_with_marker_gets_full_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -403,6 +528,64 @@ class ProjectMarkerGateTest(unittest.TestCase):
                 "no project markers found",
                 payload["hookSpecificOutput"]["additionalContext"],
             )
+
+
+class ProjectMarkerCoverageTest(unittest.TestCase):
+    """internal backlog P2-1: PROJECT_MARKERS used to list only ~27 files,
+    missing markers for stacks this plugin's own detectors/collectors
+    already recognise (review evidence: Dockerfile-only, uv.lock-only,
+    nx.json-only, ... repos were all silently SKIPPED by the marker gate
+    even though the matching detector would have fired). Each case below
+    reproduces one such previously-SKIPPED fixture as a single-marker,
+    non-git directory and confirms the gate no longer skips it.
+
+    Setup is a (path, is_dir) pair so the fixture can be either a file
+    (most markers) or a bare directory (detectors/prisma.py's "prisma").
+    """
+
+    NEW_MARKER_FIXTURES = [
+        ("Dockerfile", False),
+        ("docker-compose.yml", False),
+        (".mise.toml", False),
+        (".tool-versions", False),
+        ("next.config.js", False),
+        ("tsconfig.json", False),
+        ("prisma", True),
+        ("uv.lock", False),
+        ("poetry.lock", False),
+        ("vite.config.ts", False),
+        ("nx.json", False),
+        ("pnpm-workspace.yaml", False),
+        ("turbo.json", False),
+        ("playwright.config.ts", False),
+        ("cypress.config.ts", False),
+        ("firebase.json", False),
+        (".firebaserc", False),
+        # Tier 2: common project roots with no detector in this plugin yet.
+        ("CMakeLists.txt", False),
+        ("Package.swift", False),
+        ("mix.exs", False),
+        ("build.sbt", False),
+        ("Cargo.lock", False),
+        ("Gemfile.lock", False),
+        ("App.csproj", False),  # *.csproj glob marker
+        ("main.tf", False),  # *.tf glob marker
+    ]
+
+    def test_each_new_marker_alone_avoids_the_minimal_header(self):
+        for name, is_dir in self.NEW_MARKER_FIXTURES:
+            with self.subTest(marker=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    if is_dir:
+                        (root / name).mkdir()
+                    else:
+                        (root / name).write_text("x\n")
+                    out = _run_cli(["--root", str(root)])
+                    self.assertNotIn(
+                        "no project markers found", out, f"marker {name!r} was not recognised"
+                    )
+                    self.assertIn("## Project Facts", out)
 
 
 if __name__ == "__main__":
