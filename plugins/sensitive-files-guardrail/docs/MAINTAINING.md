@@ -132,7 +132,8 @@ flowchart TD
 - operand scan の候補抽出 (`_find_path_candidates`) は 0.22.0 からコマンド別の
   option 知識 (`command_specs.py`) で、grep 系 / jq / awk / sed の第 1 positional
   (pattern / script) と値が path ではない option の値を候補から外す。spec の
-  無いコマンド・option は従来規則。機密判定は basename のみ (`parts=False`)
+  無いコマンド・option は従来規則。機密判定は basename と root 相対の path 形
+  rule (`parts=False` — 親 dir 名は見ない。0.24.0)
 - metadata-only のうち `find` は `-exec` / `-delete` 等を含まない形のみ、
   `file` / `wc` / `du` / `tree` は `-f` / `--files0-from` 等のリスト読込
   option が無い形のみ、`git ls-files` は `-s` / `--stage` / `--format` 無しの形

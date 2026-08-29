@@ -8,11 +8,12 @@ matcher / patterns のロジックは ``_shared`` パッケージに一元化さ
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-from _shared.matcher import is_sensitive
+from _shared.matcher import is_sensitive, root_relative
 from _shared.patterns import (
     _parse_patterns_text,
     _resolve_local_patterns_path,
@@ -142,9 +143,32 @@ def _ls_tracked(cwd: str) -> list[str]:
     return _run_git(["ls-files"], cwd)
 
 
+def root_offset(cwd: str, root: str | None) -> str | None:
+    """``cwd`` の project root からの相対 prefix を返す (0.24.0)。
+
+    - ``cwd`` が root 自身 → ``""``
+    - root 配下のサブディレクトリ → ``"sub/dir"`` (POSIX 区切り、末尾 ``/`` 無し)
+    - root 不明 (None) / ``cwd`` が root 配下でない → None
+
+    ``git ls-files`` は cwd 相対で出力するため、path 形 rule と比較する root
+    相対 path は ``<offset>/<path>`` で組み立てる。None のときは path 形 rule を
+    評価しない (0.23.0 までと同じ挙動)。``git rev-parse --show-prefix`` を使わ
+    ないのは、基準を git toplevel ではなく ``[project:]`` の key
+    (``resolve_project_root``) に揃えるため — monorepo で両者が違うとき、Stop
+    が出したレシピが Read / Edit / Bash で効かなくなる。
+    """
+    if not root or not cwd:
+        return None
+    if os.path.normpath(cwd) == os.path.normpath(root):
+        return ""
+    return root_relative(cwd, root)
+
+
 def find_sensitive_files(
     cwd: str,
     rules: list[tuple[str, bool]],
+    *,
+    root: str | None = None,
 ) -> list[dict]:
     """git 管理下の tracked + untracked ファイルから機密パターン一致を抽出する。
 
@@ -152,6 +176,15 @@ def find_sensitive_files(
       Step 6 で submodule 内 tracked も検査対象に追加 (``--recurse-submodules``)。
     - untracked: ``git ls-files --others --exclude-standard`` を使うため
       ``.gitignore`` 済みは既に除外されている。submodule 内 untracked は範囲外。
+
+    ``root`` (0.24.0): path 形 rule の基準 (``resolve_project_root(cwd)``)。
+    ``cwd`` が root 配下なら各 path を **root 相対** (``root_offset`` + cwd 相対
+    path) に組み立てて ``is_sensitive`` に渡す。したがって親 dir 名の評価
+    (parts) も root 相対で行われ、サブディレクトリで発火したときも root で
+    発火したときと同じ verdict になる (0.23.0 までは cwd 相対だったため、cwd と
+    root の間のディレクトリ名は見ていなかった)。root 不明 / 配下でなければ
+    従来どおり cwd 相対のまま評価する。戻り値の ``path`` は表示と stop-ack の
+    ため **cwd 相対のまま**。
 
     Returns:
         ``[{"path": "relative/path", "status": "tracked" | "untracked"}, ...]``
@@ -162,14 +195,20 @@ def find_sensitive_files(
     tracked = _ls_tracked(cwd)
     untracked = _run_git(["ls-files", "--others", "--exclude-standard"], cwd)
 
+    offset = root_offset(cwd, root)
+    match_root = root if offset is not None else None
+
+    def _subject(filepath: str) -> str:
+        return f"{offset}/{filepath}" if offset else filepath
+
     results: list[dict] = []
 
     for filepath in tracked:
-        if is_sensitive(filepath, rules):
+        if is_sensitive(_subject(filepath), rules, root=match_root):
             results.append({"path": filepath, "status": "tracked"})
 
     for filepath in untracked:
-        if is_sensitive(filepath, rules):
+        if is_sensitive(_subject(filepath), rules, root=match_root):
             results.append({"path": filepath, "status": "untracked"})
 
     return results

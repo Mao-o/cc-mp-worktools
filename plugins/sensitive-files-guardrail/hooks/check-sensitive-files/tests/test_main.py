@@ -313,12 +313,14 @@ class TestMainSessionAck(BaseMainTest):
         self.assertEqual(_run_main(root_env2)[1], "")
 
     def test_subdirectory_reason_keeps_cwd_relative_paths(self):
-        # 表示は従来通り cwd 相対 (`git rm --cached <path>` を cwd で実行できる)
+        # 表示は従来通り cwd 相対 (`git rm --cached <path>` を cwd で実行できる)。
+        # 0.24.0: 恒久除外レシピだけは root 相対 (path 形は root 基準で効くため)
         sub = self._track_in_sub()
         out = _run_main({"cwd": str(sub), "session_id": "sess-disp"})[1]
         reason = json.loads(out)["reason"]
         self.assertIn("  - .env", reason)
-        self.assertNotIn("sub/.env", reason)
+        self.assertNotIn("  - sub/.env", reason)
+        self.assertIn("!sub/.env", reason)
 
     def test_root_file_found_after_moving_from_sub_reblocks(self):
         # sub で block した集合に root 直下の .env は含まれない → root に戻ると

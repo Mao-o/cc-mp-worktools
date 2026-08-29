@@ -154,7 +154,8 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > dotenv 判定を **shell の意味論** に — 裸の `*` / `?env` / `[.]env` / `*.envrc` は
 > dotfile に展開されないので deny → **ask / allow**、`*/.env` は `sub/.env` に
 > 展開されるので ask / allow → **deny**。(4) Bash operand の機密判定は
-> **basename のみ** (parts 一致を使わない) — `cat .env/bin/activate` は deny →
+> **basename のみ** (parts 一致を使わない。0.24.0 からは root 相対の path 形 rule
+> も評価するが、親 dir 名は引き続き見ない) — `cat .env/bin/activate` は deny →
 > **allow**。(5) **heredoc 本文を segment 分割から外す** — `cat > x.py <<'PY'` の
 > 本文 `n = kb * 1024` が deny を起こさない (演算子行は `<` で従来どおり ask /
 > allow)。改善側で deny になるのは `grep foo README.md >.env` (密着 redirect の
@@ -210,7 +211,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `grep '(=)' notes.txt`, `awk '{print $1}' notes.txt`, `echo '$(cat .env)'` (0.18.0: hard-stop quote-aware 化の副次効果で ask → allow。シングルクォート内は展開されない) |
 | `grep .env README.md`, `grep -rn '.env' src/`, `grep -v '.env' out.txt`, `rg -n id_rsa .`, `ag '.env' .`, `jq '.env' package.json`, `git grep -n '.env' -- src/`, `grep -e .env README.md` (0.22.0: 第 1 positional は pattern、`-e` の値は pattern) |
 | `git log -S.env --oneline`, `git log --grep=.env`, `git log --grep -x.env`, `git log --author=.env`, `git log --format=.env`, `grep -rn TODO --exclude='.env'`, `grep -rn TODO --exclude-dir=.env`, `grep -rn TODO --include='*.env'`, `rg TODO -g '*.env'`, `tar --exclude='.env' -czf out.tgz src`, `rsync -a --exclude='.env' src/ dst/`, `zip -r out.zip src -x '.env'`, `jq --arg k .env '.[$k]' cfg.json`, `diff -I .env a b` (0.22.0: 値が path ではない option の値) |
-| `sed -n 's/.env/X/p' notes.txt`, `awk '/.env/ {print}' notes.txt`, `cat .env/bin/activate`, `source .env/bin/activate` (0.22.0: script は path ではない / Bash operand は basename のみで判定) |
+| `sed -n 's/.env/X/p' notes.txt`, `awk '/.env/ {print}' notes.txt`, `cat .env/bin/activate`, `source .env/bin/activate` (0.22.0: script は path ではない / Bash operand は親 dir 名を見ない。0.24.0 の path 形 rule は root 相対で評価するが既定 patterns には無い) |
 | `cat *`, `git add *`, `cp * /tmp/dest/`, `cat ?env`, `cat [.]env`, `cat *.envrc` → **ask / allow** (0.22.0: shell の `*` / `?` / bracket 式は dotfile に展開されない。deny から他の不確定 glob と同じ ask_or_allow へ) |
 | `cat > x.py <<'PY'` + 本文 `n = kb * 1024` + `PY` → **ask / allow** (0.22.0: heredoc 本文は segment にしない。演算子行は `<` で hard-stop) |
 

@@ -272,9 +272,11 @@ note: key material is never parsed or returned. only block labels and counts are
 では、operand が機密パターンに literal 一致すれば実際の用途を問わず deny される
 (0.14.0 で `echo .env` / `ls .env` 等の metadata-only 系は allow に解消済み)。
 恒久的に許可したい場合は `patterns.local.txt` の
-`[project:<プロジェクトの絶対パス>]` セクション配下に `!<basename>` を追加する
-(全プロジェクト共通にしたい場合のみヘッダー無しの行。0.19.0 から deny reason の
-hint もこの形を案内する。[docs/PATTERNS.md](./docs/PATTERNS.md))。
+`[project:<プロジェクトの絶対パス>]` セクション配下に `!<root 相対パス>`
+(承認した 1 ファイルだけ、0.24.0) または `!<basename>` (同名すべて) を追加する
+(全プロジェクト共通にしたい場合のみヘッダー無しの行。deny reason の hint は
+path 形を既定に、basename 形を併記して案内する。
+[docs/PATTERNS.md](./docs/PATTERNS.md))。
 
 > **0.8.0 で glob 候補列挙を撤廃**: 0.3.2〜0.7.x では `cat *.json` を既定 rules の
 > `credentials*.json` と交差させて deny に倒していたが、思想 1 (うっかり露出予防、
@@ -336,8 +338,12 @@ block の理由は書き込み先の状態で 4 分岐する (0.20.0)。**判定
   **tracked** も検査対象。submodule 内の **untracked** は現状範囲外
 
 block reason には tracked / untracked を別セクションで列挙し、それぞれ対応手順
-と恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` セクション + `!<basename>` 行。
-`$CLAUDE_PROJECT_DIR` は実際の絶対パスに置き換える) を添える (0.19.0)。
+と恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` セクション + `!<root 相対パス>`
+行。`$CLAUDE_PROJECT_DIR` は実際の絶対パスに置き換える) を添える (0.19.0)。
+0.24.0 からレシピは承認した 1 ファイルだけを外す **path 形** が既定で、同名すべてを
+外す basename 形 (`!<basename>`) は明示的な選択として併記する。表示の file 一覧は
+cwd 相対のまま、レシピは project root 相対 (サブディレクトリで発火しても
+`!sub/.env`)。
 
 **session 単位の once-only (0.19.0)**: 同一セッションで同じファイル集合を報告済み
 なら、以降の `Stop` は block しない (「意図的に管理対象とする」と承認した tracked
@@ -369,6 +375,16 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 > `mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guardrail/patterns.local.txt" ~/.claude/sensitive-files-guardrail/patterns.local.txt` する。
 
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
+
+> **path 形 rule (0.24.0)**: `/` を含む行 (`!config/prod.pem` / `!fixtures/` /
+> `secrets/**`) は basename ではなく **プロジェクト root からの相対 path 全体**と
+> gitignore 準拠の意味論 (`*` は `/` を跨がない、`**` は跨ぐ、先頭 `/` は root
+> アンカー、末尾 `/` はディレクトリ) で比較する。承認した 1 ファイルだけを
+> 除外できるのはこの形 (root 直下のファイルは `!/.env` のように先頭 `/` を付ける —
+> 付けないと basename 形になる)。root は `[project:]` セクションと同じ解決
+> (`$CLAUDE_PROJECT_DIR` → `.git` 上方探索) で、root を解決できない場所では
+> 一致しない。`/` を含まない行は従来どおり basename 形 (同名すべて)。詳細は
+> [docs/PATTERNS.md](./docs/PATTERNS.md) の「rule の形で比較対象が決まる」節。
 
 > **プロジェクトスコープの rule (0.15.0)**: 同じファイル内に
 > `[project:/abs/path/to/project]` セクションを書くと、そのプロジェクトで
