@@ -424,6 +424,30 @@ class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
         # vendor 直下のファイルは vendor (deep ではない) が返ること
         self.assertEqual(in_submodule("vendor/README.md", paths), "vendor")
 
+    def test_symlinked_submodule_cycle_terminates_without_recursion_error(self):
+        """壊れた/悪意ある submodule 構成が symlink で祖先を指す場合の防御
+        (``_visited``) が実際に無限再帰を止めること。
+
+        ``vendor/deep`` の checkout を ``vendor`` 自身への symlink に差し
+        替える (git の index 上は ``deep`` が gitlink のまま変わらない)。
+        ``os.path.realpath(vendor/deep)`` は ``os.path.realpath(vendor)``
+        と一致し、``vendor`` は先行する再帰で既に visited 済みのため、
+        ``submodule_paths`` はここで安全に止まる (RecursionError にならず、
+        余分な要素も混入しない)。
+        """
+        import shutil
+
+        if not self._try_add_nested_submodules(init_nested=True):
+            self.skipTest("git submodule add unsupported in this env")
+        vendor_dir = self.repo / "vendor"
+        deep_dir = vendor_dir / "deep"
+        shutil.rmtree(deep_dir)
+        os.symlink(str(vendor_dir), str(deep_dir))
+        paths = submodule_paths(str(self.repo))
+        # 循環を検出して安全に止まり、素直な結果だけを返す (無限再帰も
+        # 「vendor/deep/./」のような不正な要素の混入もしない)。
+        self.assertEqual(paths, {"vendor", "vendor/deep"})
+
     def test_nested_submodule_tracked_env_detected_when_initialized(self):
         # 検出側 (--recurse-submodules) はネストも元々拾える前提の確認
         # (P2-1 は「案内先」のバグであり「検出漏れ」ではない)。

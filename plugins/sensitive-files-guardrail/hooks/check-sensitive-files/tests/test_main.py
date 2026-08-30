@@ -733,12 +733,14 @@ class TestBuildReasonByteBudget(unittest.TestCase):
         ファイル列挙を 0 件に潰さないこと。
 
         修正前は distinct submodule dir を全件連結しており、この行が
-        `skeleton` (= 固定部分扱い) に入るため予算の外側で無制限に伸び、
-        300 件で「ファイル列挙が 0 件に潰れる」(固定部分だけで
-        `MAX_REASON_BYTES` を使い切る) 実測があった。
+        `skeleton` (= 固定部分扱い) に入るため予算の外側で無制限に伸びた。
+        n=700 は「修正前コード (commit 7a38366) で実際に shown_files が
+        厳密に 0 になる」ことを事前に実測して選んだ値 (n=300 では 162 件
+        残ってしまい、0 件潰れの再現にならず assertGreater が空振りする) —
+        こうしておかないと後段の assertGreater が何も検出しない飾りになる。
         """
         entry = _load_entry()
-        n = 300
+        n = 700
         tracked = [f"submod{i}/.env" for i in range(n)]
         submodule_by_path = {p: p.split("/")[0] for p in tracked}
         reason = entry._build_reason(
@@ -748,17 +750,22 @@ class TestBuildReasonByteBudget(unittest.TestCase):
             root_offset_="",
             submodule_by_path=submodule_by_path,
         )
-        # submodule 案内は先頭 10 件 + 省略件数マーカーに畳まれる
+        # submodule 案内は先頭 10 件 + 省略件数マーカーに畳まれる (修正前は
+        # マーカーが存在せず distinct dir 全件が生で連結されていた)
         self.assertIn(f"({n - 10} more)", reason)
         shown_guidance_dirs = re.findall(r"`(submod\d+)`", reason)
         self.assertLessEqual(len(shown_guidance_dirs), 10)
-        # tracked ファイル列挙は 0 件に潰れない (修正前はここが 0 件だった)
+        # tracked ファイル列挙が 0 件に潰れない主張の実測: 修正前コード
+        # (commit 7a38366) にこの n=700 と同じ入力を通すと shown_files=0
+        # (固定部分だけで MAX_REASON_BYTES=9,216 を使い切るため)。
         shown_files = re.findall(r"\n  - submod\d+/\.env", reason)
         self.assertGreater(len(shown_files), 0)
-        # skeleton (ファイル列挙以外) が固定サイズという docstring の前提が
-        # 成立していること — dirs_display を畳んだ結果、反例の再現に使った
-        # 実測値 (300 件で 9,241 byte) を大きく下回る
-        self.assertLess(len(reason.encode("utf-8")), 9_241)
+        # 上記 2 つの表層チェックより、この 1 行が実際の回帰検出力を持つ:
+        # dirs_display を畳んだ結果、修正前コードで同じ入力が生成した
+        # reason (11,477 byte、実測) を大きく下回り、10,000 字の枠にも
+        # 収まる。畳まなければ dirs_display だけで数千 byte 規模になり、
+        # この境界を割ることはできない。
+        self.assertLess(len(reason.encode("utf-8")), 10_000)
 
     def test_tail_survives_even_when_fixed_part_alone_exceeds_budget(self):
         # MAX_REASON_BYTES を極端に小さくし、固定 tail だけで予算を超える

@@ -222,11 +222,20 @@ def submodule_paths(
     ``os.path.isdir`` だけの旧チェックより安全に「対象なし」を返せる。
     ``FileNotFoundError`` (存在しない cwd で git を呼んで ``_run_git_raw`` が
     ``git_unavailable`` を誤検知する経路) も併せて防げる。)
-    ``_visited`` は実パスの循環 (壊れた/悪意ある ``.gitmodules`` が symlink
-    等で祖先を指す防御的ケース) を検出し無限再帰を止めるための集合 —
-    fail-open のこの hook が再帰エラーで丸ごと落ちないため。呼出コストが
-    あるため、tracked な機密ファイルが 1 件も無いときは呼ばないこと
-    (呼出側の責務)。
+    ``_visited`` は実パスの循環 (壊れた/悪意ある構成が symlink 等で祖先を
+    指す防御的ケース、``TestNestedSubmoduleGuidancePaths
+    .test_symlinked_submodule_cycle_terminates_without_recursion_error`` で
+    再現・確認済み) を検出して安全に打ち切るための集合。この guard が無い
+    場合の実際の挙動は OS / git のシンボリックリンク解決に依存し、
+    macOS + git 2.50.1 の実測では symlink の循環が ELOOP 相当で早期に
+    黙って解決不能になり (Python の再帰エラーには達しない)、代わりに
+    ``vendor/deep/deep/deep/...`` のような**存在しない submodule を指す
+    誤ったディレクトリ名**が結果に混入した (無駄な git 呼出も約 16 回分
+    発生)。bind mount 等シンボリックリンクを経由しない循環では OS 側の
+    ループ検出が効かず深い Python 再帰になりうるため、実装をどちらか一方の
+    失敗モードに依存させず ``_visited`` で経路によらず確実に止める。
+    呼出コストがあるため、tracked な機密ファイルが 1 件も無いときは
+    呼ばないこと (呼出側の責務)。
     """
     visited = _visited if _visited is not None else set()
     real_cwd = os.path.realpath(cwd)
