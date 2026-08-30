@@ -299,6 +299,71 @@ class FirebaseDetectorTest(unittest.TestCase):
                 _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
             )
 
+    # --- legacy VCS "#egg=" requirement lines: the line starts with "git+"
+    # (or an editable "-e" flag), not a package-name token, so the ordinary
+    # _DEP_NAME_RE-anchored extraction reads "git" off the scheme, or the
+    # whole line is skipped outright as an option line ("-e ..."). The old,
+    # pre-tomllib substring search still caught these via a bare
+    # "firebase-admin" match anywhere in the manifest text; the structured
+    # per-line parser reopened this as a narrow regression until the
+    # "#egg=" fragment extraction below was added. ---
+
+    def test_requirements_legacy_vcs_egg_fragment_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "git+https://example.com/x/firebase-admin.git#egg=firebase-admin\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
+            )
+
+    def test_requirements_editable_legacy_vcs_egg_fragment_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "-e git+https://example.com/x/firebase-admin.git#egg=firebase-admin\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
+            )
+
+    def test_requirements_legacy_vcs_egg_fragment_similar_name_is_not_detected(self):
+        # Guards against reopening the substring hole through the back door:
+        # the egg value itself must still match "firebase-admin" exactly,
+        # not merely contain it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "git+https://example.com/x/something.git#egg=not-firebase-admin\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["requirements.txt"]), [])
+
+    def test_requirements_legacy_vcs_egg_fragment_extras_and_marker_is_detected(self):
+        # The egg name stops at the first "[" (extras) or "&" (a following
+        # URL-query-style fragment, e.g. "&subdirectory=..."); also doubles
+        # as underscore-variant normalization coverage.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "git+https://example.com/x/firebase_admin.git"
+                "#egg=firebase_admin[extra]&subdirectory=x\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
+            )
+
+    def test_requirements_commented_out_egg_fragment_is_not_detected(self):
+        # A line that is itself a full comment (starts with "#") must not
+        # be treated as an active dependency just because its text happens
+        # to contain "#egg=" further along.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "# git+https://example.com/x/firebase-admin.git#egg=firebase-admin\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["requirements.txt"]), [])
+
     # --- malformed / pathological pyproject.toml must fold into "no
     # Python signal", not crash the detector or hide unrelated signals ---
 

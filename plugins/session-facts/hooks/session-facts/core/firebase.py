@@ -47,8 +47,28 @@ _FIREBASE_CORE_PUBSPEC_RE = re.compile(r"(?m)^\s*firebase_core\s*:")
 # a requirements.txt line, or a pyproject.toml dependency array element).
 # Stops at whitespace, "[extras]", a version specifier ("=="/">="/...), an
 # environment marker (";"), or a direct URL reference ("@ url") -- whatever
-# follows is never part of the name.
+# follows is never part of the name. Does NOT match a legacy VCS requirement
+# line (e.g. "git+https://.../pkg.git#egg=pkg"): that starts with the URL
+# scheme, not a name token, so this regex reads only "git" off it -- see
+# _EGG_NAME_RE/_egg_name_from_line() below, which _dep_names_from_requirements()
+# checks first for exactly this shape.
 _DEP_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+# The "#egg=name" fragment of a legacy VCS requirement line (pip's older,
+# still-seen-in-the-wild convention for naming a direct URL/VCS requirement,
+# e.g. "git+https://example.com/x/pkg.git#egg=pkg" or, with an editable
+# install, "-e git+https://.../pkg.git#egg=pkg"). The captured value stops
+# at the first "[" (an extras marker, e.g. "#egg=pkg[extra]"), "&" (a
+# following URL-query-style fragment, e.g. "#egg=pkg&subdirectory=sub"), or
+# whitespace -- whichever comes first -- so none of those trail into the
+# name. The "(?<!\s)" guard mirrors pip's own COMMENT_RE
+# (`re.compile(r"(^|\s+)#.*$")`): a "#" preceded by whitespace starts a real
+# trailing comment there, not a URL fragment, so e.g.
+# "pkg==1.0  # see #egg=other" must still resolve to "pkg", not "other". A
+# "#" at the very start of a line is the other half of pip's rule (handled
+# by the whole-line "#"-prefix check in _dep_names_from_requirements(), not
+# by this regex).
+_EGG_NAME_RE = re.compile(r"(?<!\s)#egg=([^&\[\s]+)")
 
 _MAX_REQUIREMENTS_SCAN = 6
 _MAX_PUBSPEC_SCAN = 12
@@ -99,6 +119,20 @@ def _dep_name_from_spec(spec: str) -> str:
     return _normalize_dep_name(match.group(1)) if match else ""
 
 
+def _egg_name_from_line(line: str) -> str:
+    """Return the normalized ``#egg=`` fragment name from one line, if any.
+
+    ``line`` is a single requirements.txt line, already right-stripped but
+    otherwise as written (in particular, NOT yet split on "#" -- doing that
+    first would delete the very fragment this reads). Returns "" when no
+    ``#egg=`` fragment is present, so the caller can fall back to the
+    ordinary name extraction. See ``_EGG_NAME_RE`` above for what the
+    captured value stops at and why.
+    """
+    match = _EGG_NAME_RE.search(line)
+    return _normalize_dep_name(match.group(1)) if match else ""
+
+
 def _dep_names_from_pep508_array(items: object) -> Iterable[str]:
     """Yield normalized names from a TOML array of PEP 508 requirement strings.
 
@@ -123,11 +157,26 @@ def _dep_names_from_pep508_array(items: object) -> Iterable[str]:
 def _dep_names_from_requirements(text: str) -> Iterable[str]:
     """Yield normalized package names declared in a requirements.txt-style file.
 
-    Strips an inline trailing ``#`` comment before parsing each line; skips
-    blank lines and option lines (``-r other.txt``, ``-e .``,
-    ``--hash=...``) outright, since their first token is a flag, not a name.
+    Skips blank lines and lines that are themselves a full comment (first
+    non-whitespace character is "#") outright. Otherwise checks each line
+    for a legacy VCS ``#egg=name`` fragment first (see
+    ``_egg_name_from_line()``) -- a requirement given as a direct VCS URL
+    (``git+https://.../pkg.git#egg=pkg``, optionally with a leading ``-e``
+    for an editable install) starts with the URL scheme or the ``-e`` flag,
+    not a name token, so it has no other way to be read. When no ``#egg=``
+    fragment is present, strips an inline trailing ``#`` comment and skips
+    option lines (``-r other.txt``, ``-e .``, ``--hash=...``) outright,
+    since their first token is a flag, not a name, before falling back to
+    the ordinary leading-token extraction.
     """
     for raw_line in text.splitlines():
+        stripped_raw = raw_line.strip()
+        if not stripped_raw or stripped_raw.startswith("#"):
+            continue
+        egg_name = _egg_name_from_line(stripped_raw)
+        if egg_name:
+            yield egg_name
+            continue
         line = raw_line.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
