@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import tempfile
@@ -110,6 +111,48 @@ class TestRepoContext(BaseWithTmpRepo):
 
     def test_non_git_dir_is_none(self):
         self.assertIsNone(repo_context(self.tmp))
+
+
+class TestGitFailureVisibility(BaseWithTmpRepo):
+    """内部バックログ: git 呼出自体の失敗 (git 未インストール / 応答なし) を
+    「機密ファイルなし」(cwd が git 管理外、または単に該当ファイルが無い) と
+    区別して stderr に報告する。fail-open の挙動 (呼出元は空リストのまま扱う)
+    自体は変えない。
+    """
+
+    def test_file_not_found_reports_git_unavailable(self):
+        with mock.patch(
+            "checker.subprocess.run", side_effect=FileNotFoundError("no git")
+        ), mock.patch("sys.stderr", new_callable=io.StringIO) as fake_err:
+            result = is_git_repo(self.tmp)
+        self.assertFalse(result)
+        self.assertIn(
+            "git_unavailable: FileNotFoundError", fake_err.getvalue()
+        )
+
+    def test_timeout_reports_git_unavailable(self):
+        with mock.patch(
+            "checker.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10),
+        ), mock.patch("sys.stderr", new_callable=io.StringIO) as fake_err:
+            result = repo_context(str(self.repo))
+        self.assertIsNone(result)
+        self.assertIn("git_unavailable: TimeoutExpired", fake_err.getvalue())
+
+    def test_non_repo_cwd_stays_silent(self):
+        # 「cwd が git 管理外」は git 呼出の失敗ではなく正常系。誤って
+        # git_unavailable を出してはいけない (可視性を足すだけで判定に
+        # 影響しないことの回帰確認)。
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as fake_err:
+            result = repo_context(self.tmp)
+        self.assertIsNone(result)
+        self.assertNotIn("git_unavailable", fake_err.getvalue())
+
+    def test_successful_call_stays_silent(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as fake_err:
+            result = repo_context(str(self.repo))
+        self.assertIsNotNone(result)
+        self.assertNotIn("git_unavailable", fake_err.getvalue())
 
 
 class TestFindSensitiveFiles(BaseWithTmpRepo):

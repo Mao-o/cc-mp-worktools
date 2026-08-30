@@ -79,21 +79,65 @@ def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
     )
 
 
-def _run_git(args: list[str], cwd: str) -> list[str]:
-    """git コマンドを実行してファイル一覧を返す。失敗時は空リスト。"""
+def _run_git_raw(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str] | None":
+    """git を実行して ``CompletedProcess`` を返す。呼出自体の失敗は ``None``。
+
+    ``_run_git`` / ``_run_git_nul`` の共通土台 (内部バックログ)。git_unavailable
+    の stderr 報告をここに一元化する。
+
+    ``FileNotFoundError`` (git 実行ファイルが無い) / ``TimeoutExpired``
+    (プロセスが応答しない) は git **呼出そのもの**の失敗であり、区別できないと
+    「機密ファイルなし」(= 対象が git リポジトリでない等、git 自体は起動できたが
+    非ゼロで終了した場合。これは正常系) と同じ沈黙に落ちて検査が実行されな
+    かったことに気づけない。patterns_unavailable と同じ形式で stderr に 1 回
+    報告する。fail-open の挙動 (呼出元は引き続き空リストとして扱う) 自体は
+    変えない — 可視性を足すだけで判定境界には触れない。
+
+    既知の残課題: ``PermissionError`` (git はあるが実行権限がない) は
+    ``OSError`` の subclass だがこの ``except`` 節では捕捉しない (意図的 —
+    ``FileNotFoundError`` / ``TimeoutExpired`` 以外の ``OSError`` まで広げると
+    予期しない例外を fail-open に倒す範囲が広がり、判定表を変えない、という
+    本件のスコープを超える)。
+    """
     try:
-        result = subprocess.run(
+        return subprocess.run(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return []
-        return [line for line in result.stdout.splitlines() if line.strip()]
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        sys.stderr.write(
+            f"[check-sensitive-files] git_unavailable: {type(e).__name__}\n"
+        )
+        return None
+
+
+def _run_git(args: list[str], cwd: str) -> list[str]:
+    """git コマンドを実行して行 (改行区切り) のリストを返す。失敗時は空リスト。
+
+    ``returncode != 0`` (対象が git リポジトリでない等) は正常系として黙って
+    ``[]`` を返す。呼出自体の失敗の扱いは ``_run_git_raw`` を参照。
+    """
+    result = _run_git_raw(args, cwd)
+    if result is None or result.returncode != 0:
         return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _run_git_nul(args: list[str], cwd: str) -> list[str]:
+    """git コマンドを実行して NUL 区切り (``-z``) の要素リストを返す。
+
+    ``git ls-files -z`` は non-ASCII / 特殊文字を含む path が
+    ``core.quotePath`` によって 8 進エスケープの引用符付き文字列に変換される
+    (改行区切りだと誤ってその形のまま 1 要素として返ってしまう) のを避ける
+    標準的な使い方 (``submodule_paths`` が使用)。
+    """
+    result = _run_git_raw(args, cwd)
+    if result is None or result.returncode != 0:
+        return []
+    return [item for item in result.stdout.split("\0") if item]
 
 
 def is_git_repo(cwd: str) -> bool:
@@ -141,6 +185,42 @@ def _ls_tracked(cwd: str) -> list[str]:
         return result
     # fallback: --recurse-submodules 非対応の古い git、または repo が本当に空の場合
     return _run_git(["ls-files"], cwd)
+
+
+def submodule_paths(cwd: str) -> set[str]:
+    """cwd から見える直下の submodule mount path 一覧 (cwd 相対) を返す
+    (内部バックログ)。
+
+    ``git ls-files --stage`` は submodule を gitlink (mode ``160000``) の
+    1 entry として返す。tracked な機密ファイルがこの prefix 配下にあれば、
+    親 repo からの ``git rm --cached <path>`` は**そのファイルには効かない**
+    (submodule は別の git index を持つため) — Stop hook の案内をそこだけ
+    分岐する判定に使う (``in_submodule`` 参照)。呼出コストがあるため、
+    tracked な機密ファイルが 1 件も無いときは呼ばないこと (呼出側の責務)。
+    """
+    entries = _run_git_nul(["ls-files", "--stage", "-z"], cwd)
+    paths: set[str] = set()
+    for entry in entries:
+        # 形式: "<mode> <object> <stage>\t<path>" (gitlink は mode 160000)
+        meta, sep, path = entry.partition("\t")
+        if not sep or not path:
+            continue
+        mode = meta.split(" ", 1)[0] if meta else ""
+        if mode == "160000":
+            paths.add(path)
+    return paths
+
+
+def in_submodule(path: str, submod_paths: set[str]) -> str | None:
+    """``path`` (cwd 相対) がどの submodule 配下にあるかを返す (無ければ None)。
+
+    完全一致 (通常は起きないが gitlink 自体を指すケース) と、``<submodule>/``
+    prefix 一致 (submodule 配下のファイル) の両方を見る。
+    """
+    for sp in submod_paths:
+        if path == sp or path.startswith(sp + "/"):
+            return sp
+    return None
 
 
 def root_offset(cwd: str, root: str | None) -> str | None:

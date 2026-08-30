@@ -6,7 +6,7 @@ tracked / untracked の両方を検査し、``.gitignore`` 済みでも **tracke
 ``stop_hook_active=true`` でスキップするため、**block が見えたら必ず対応する**
 必要がある。
 
-0.19.0 (bd_092a232e-snw.2): **session 単位の once-only 化**。報告済みの
+0.19.0 (内部バックログ): **session 単位の once-only 化**。報告済みの
 (status, path) 集合を ``stop_ack`` で HOME 側に記録し、次の Stop で集合が
 増えていなければ exit 0 にする。「意図的に管理対象とする」と承認された tracked
 ファイル (Next.js 慣例の ``.env`` / committed CA 証明書 / direnv の ``.envrc``
@@ -50,9 +50,11 @@ from _shared.patterns import (  # noqa: E402
 )
 from checker import (  # noqa: E402
     find_sensitive_files,
+    in_submodule,
     load_patterns,
     repo_context,
     root_offset,
+    submodule_paths,
 )
 from stop_ack import (  # noqa: E402
     digest_entries,
@@ -69,6 +71,45 @@ def _warn_stop_ack(detail: str) -> None:
     detail は ``load:<ExcName>`` / ``save:<ExcName>`` の固定形 (パスを含まない)。
     """
     sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
+
+
+# block reason の byte 予算 (内部バックログ)。公式 hooks reference が明記する
+# 「hook の stdout 文字列は 10,000 文字が上限」に対する安全マージン。byte 数を
+# 上限にすると (multibyte 文字は 1 文字が複数 byte を消費するため) 文字数の
+# 上限より常に厳しい側になり、本当に 10,000 文字を超えないことが保証される。
+# core/output.py (read 側 hook) の MAX_REASON_BYTES + _truncate と同じ発想だが、
+# あちらは末尾を単純 truncate するのに対し、こちらは**固定 tail
+# (AskUserQuestion 案内 + 恒久除外レシピ) を必ず残し、ファイル列挙だけを畳む**
+# (固定 tail が末尾にあり、素の truncate だと真っ先に失われるため)。
+MAX_REASON_BYTES = 9 * 1024
+
+# ファイル列挙が予算を超えて畳まれたときに追記する行のテンプレート。この行
+# 自体は budget 計算の対象外 (常に表示する — 何件省略したかを黙って伝えずに
+# 消すと「検査は実行されたが報告が消えた」ことに気づけないため)。
+_OMITTED_FILES_TEMPLATE = "  ... ({n} more files; see git status)"
+
+
+def _enumerate_with_budget(
+    paths: list[str], budget: int
+) -> tuple[list[str], int, int]:
+    """``  - path`` 形式の列挙行を ``budget`` (byte) の範囲で組み立てる。
+
+    先頭から順に収まる分だけ行にし、溢れた時点で打ち切る。戻り値は
+    ``(組み立てた行, 表示できなかった件数, 残り byte 予算)``。残り予算は
+    呼出側が次のリスト (untracked) と共有するために返す。
+
+    1 行あたりのコストは ``UTF-8 byte 数 + 1`` (``"\\n".join`` で他の行と
+    結合するときの区切り文字分)。
+    """
+    lines: list[str] = []
+    for i, path in enumerate(paths):
+        line = f"  - {path}"
+        cost = len(line.encode("utf-8")) + 1
+        if cost > budget:
+            return lines, len(paths) - i, budget
+        lines.append(line)
+        budget -= cost
+    return lines, 0, budget
 
 
 def _recipe_names(paths: list[str], root_offset_: str | None) -> list[str] | None:
@@ -95,6 +136,7 @@ def _build_reason(
     untracked: list[str],
     session_scoped: bool,
     root_offset_: str | None = None,
+    submodule_by_path: dict[str, str] | None = None,
 ) -> str:
     """block reason (LLM 向け plain text) を組み立てる。
 
@@ -107,35 +149,72 @@ def _build_reason(
     (``checker.root_offset``)。None 以外ならレシピを **path 形** (承認した
     1 ファイルだけ) で出し、basename 形 (同名すべて) を明示的な選択として
     併記する。None なら従来どおり basename 形だけを出す。
+
+    ``submodule_by_path`` (内部バックログ): ``tracked`` の要素のうち submodule
+    配下にあるものを ``{path: submodule 相対パス}`` で渡す。空でなければ
+    tracked セクションの案内 (`git rm --cached`) が **親 repo からは効かない**
+    submodule のディレクトリ一覧を追記する — 親 repo の index には submodule
+    自体への gitlink エントリしかなく、配下の個別ファイルは submodule 自身の
+    index が持つため。
+
+    byte 予算 (内部バックログ, ``MAX_REASON_BYTES``): tracked / untracked の
+    ファイル列挙 (``  - path`` 行) 以外は全て**固定サイズ** (件数に依存しない
+    — 恒久除外レシピは ``exclude_recipe_lines`` が既に 20 件で畳んでいる) な
+    ので、まず固定部分 (このメソッド内では ``head`` / ``*_header`` /
+    ``*_guidance`` / ``tail``) を組み立ててその byte 数を求め、残り予算を
+    ファイル列挙に充てる。列挙が溢れたら ``_OMITTED_FILES_TEMPLATE`` で件数
+    を明示する (黙って消さない)。tail 自体を切り詰めることは**しない** —
+    固定部分だけで予算を超える病的なケース (極端に長いファイル名が多数など)
+    では reason が ``MAX_REASON_BYTES`` を超えることを許容する (AskUserQuestion
+    の案内や恒久除外レシピを失う方が実害が大きいため)。
     """
-    sections: list[str] = ["【セキュリティ確認】", ""]
+    head = ["【セキュリティ確認】", ""]
+
+    tracked_header = (
+        "【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:"
+        if tracked
+        else None
+    )
+    tracked_guidance: list[str] = []
     if tracked:
-        sections.append(
-            "【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:"
-        )
-        for path in tracked:
-            sections.append(f"  - {path}")
-        sections.append(
+        tracked_guidance.append(
             "対応: `.gitignore` に追加した上で `git rm --cached <path>` を実行して"
             "ください (index から外すだけで実ファイルは残ります)。"
         )
-        sections.append("")
-    if untracked:
-        sections.append(
-            "【untracked】以下のファイルは機密パターンに一致し、まだ `.gitignore` 未登録です:"
+        submodule_dirs = sorted(
+            {
+                submodule_by_path[p]
+                for p in tracked
+                if submodule_by_path and p in submodule_by_path
+            }
         )
-        for path in untracked:
-            sections.append(f"  - {path}")
-        sections.append(
+        if submodule_dirs:
+            dirs_display = ", ".join(f"`{d}`" for d in submodule_dirs)
+            tracked_guidance.append(
+                "ただし上記のうち submodule 配下のファイルには、このコマンドが"
+                "**親 repo からは効きません** (submodule は別の git index を"
+                "持つため)。該当 submodule のディレクトリに `cd` してから、その"
+                "ディレクトリ内での相対パスで `git rm --cached` の実行と "
+                "`.gitignore` への追加を行ってください: " + dirs_display
+            )
+
+    untracked_header = (
+        "【untracked】以下のファイルは機密パターンに一致し、まだ `.gitignore` 未登録です:"
+        if untracked
+        else None
+    )
+    untracked_guidance: list[str] = []
+    if untracked:
+        untracked_guidance.append(
             "対応: `.gitignore` に追加するか、意図的に管理対象とするか確認してください。"
         )
-        sections.append("")
-    sections.append(
-        "AskUserQuestion ツールで各ファイルについてユーザーに確認してください:"
-    )
-    sections.append("  選択肢1: 「.gitignore に追加」 (Recommended)")
-    sections.append("  選択肢2: 「意図的に管理対象とする」")
-    sections.append("")
+
+    tail: list[str] = [
+        "AskUserQuestion ツールで各ファイルについてユーザーに確認してください:",
+        "  選択肢1: 「.gitignore に追加」 (Recommended)",
+        "  選択肢2: 「意図的に管理対象とする」",
+        "",
+    ]
     paths = [*tracked, *untracked]
     basenames = [os.path.basename(p) for p in paths]
     path_names = _recipe_names(paths, root_offset_)
@@ -148,7 +227,7 @@ def _build_reason(
             " path 形は組み立てられない):"
         )
         recipe = exclude_recipe_lines(basenames)
-    sections.append(
+    tail.append(
         "【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を"
         f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を追記します"
         f" ({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
@@ -156,22 +235,58 @@ def _build_reason(
         + intro
     )
     for line in recipe:
-        sections.append(f"  {line}")
+        tail.append(f"  {line}")
     if path_names is not None:
         # basename 形は「同名すべて」を承知の上での明示的な選択として併記する
         alts = " / ".join(
             f"`{line}`" if line.startswith("!") else line
             for line in exclude_recipe_lines(basenames)[1:]
         )
-        sections.append(
-            f"同名ファイルをすべて外したい場合だけ basename 形にする: {alts}"
-        )
+        tail.append(f"同名ファイルをすべて外したい場合だけ basename 形にする: {alts}")
     if session_scoped:
-        sections.append("")
-        sections.append(
+        tail.append("")
+        tail.append(
             "このセッションでは同じファイル集合について再度 block しません"
             " (新たな機密ファイルが増えたときのみ再通知)。"
         )
+
+    # 固定部分 (ファイル列挙を除く) の byte 数を求め、残りをファイル列挙に回す。
+    skeleton: list[str] = [*head]
+    if tracked_header:
+        skeleton.append(tracked_header)
+        skeleton.extend(tracked_guidance)
+        skeleton.append("")
+    if untracked_header:
+        skeleton.append(untracked_header)
+        skeleton.extend(untracked_guidance)
+        skeleton.append("")
+    skeleton.extend(tail)
+    fixed_bytes = len("\n".join(skeleton).encode("utf-8"))
+    remaining = max(0, MAX_REASON_BYTES - fixed_bytes)
+
+    tracked_lines, tracked_omitted, remaining = _enumerate_with_budget(
+        tracked, remaining
+    )
+    untracked_lines, untracked_omitted, remaining = _enumerate_with_budget(
+        untracked, remaining
+    )
+
+    sections: list[str] = [*head]
+    if tracked_header:
+        sections.append(tracked_header)
+        sections.extend(tracked_lines)
+        if tracked_omitted:
+            sections.append(_OMITTED_FILES_TEMPLATE.format(n=tracked_omitted))
+        sections.extend(tracked_guidance)
+        sections.append("")
+    if untracked_header:
+        sections.append(untracked_header)
+        sections.extend(untracked_lines)
+        if untracked_omitted:
+            sections.append(_OMITTED_FILES_TEMPLATE.format(n=untracked_omitted))
+        sections.extend(untracked_guidance)
+        sections.append("")
+    sections.extend(tail)
     return "\n".join(sections)
 
 
@@ -228,11 +343,25 @@ def main() -> int:
 
     tracked = [f["path"] for f in sensitive if f["status"] == "tracked"]
     untracked = [f["path"] for f in sensitive if f["status"] == "untracked"]
+
+    # submodule 内 tracked の案内分岐 (内部バックログ)。tracked が空なら
+    # 追加の git 呼出をしない (repo_context 系と同じ「不要な呼出を増やさない」
+    # 方針)。
+    submodule_by_path: dict[str, str] = {}
+    if tracked:
+        submods = submodule_paths(cwd)
+        if submods:
+            for path in tracked:
+                sm = in_submodule(path, submods)
+                if sm is not None:
+                    submodule_by_path[path] = sm
+
     reason = _build_reason(
         tracked,
         untracked,
         session_scoped=session_id is not None,
         root_offset_=root_offset(cwd, root),
+        submodule_by_path=submodule_by_path,
     )
 
     if session_id is not None:

@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -193,8 +194,75 @@ class TestMainFailOpen(BaseMainTest):
         self.assertIn("patterns_unavailable", err)
 
 
+class TestSubmoduleGuidance(BaseMainTest):
+    """内部バックログ: submodule 内 tracked ファイルに対する案内分岐。
+
+    親 repo からの `git rm --cached` は submodule 配下のファイルには効かない
+    (submodule は別の git index を持つため)。恒久除外レシピ以外に脱出路が
+    無いまま毎ターン同じ block を受け続けるのを避けるため、submodule 配下の
+    ファイルを検出したときは案内文を分岐し、submodule ディレクトリ内で対処
+    する旨を追記する。
+    """
+
+    def _add_submodule(self) -> bool:
+        (self.repo / "README.md").write_text("# super\n")
+        _git(["add", "README.md"], str(self.repo))
+        _git(["commit", "-m", "init"], str(self.repo))
+        subrepo = Path(self.tmp) / "subrepo"
+        subrepo.mkdir()
+        _init_repo(str(subrepo))
+        (subrepo / ".env").write_text("SUB_SECRET=v\n")
+        _git(["add", ".env"], str(subrepo))
+        _git(["commit", "-m", "add env"], str(subrepo))
+        try:
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{subrepo}", "submod",
+                ],
+                cwd=str(self.repo),
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            return False
+        _git(["commit", "-m", "add submod"], str(self.repo))
+        return True
+
+    def test_submodule_tracked_file_gets_branching_guidance(self):
+        if not self._add_submodule():
+            self.skipTest("git submodule add unsupported in this env")
+        rc, out, _ = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("submod/.env", reason)
+        self.assertIn("親 repo からは効きません", reason)
+        self.assertIn("`submod`", reason)
+
+    def test_non_submodule_tracked_file_has_no_branching_guidance(self):
+        (self.repo / ".env").write_text("KEY=v\n")
+        _git(["add", ".env"], str(self.repo))
+        _git(["commit", "-m", "add env"], str(self.repo))
+        rc, out, _ = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        reason = json.loads(out)["reason"]
+        self.assertIn(".env", reason)
+        self.assertNotIn("親 repo からは効きません", reason)
+
+    def test_untracked_only_has_no_branching_guidance(self):
+        # tracked が空 (untracked のみ) のときは submodule 判定自体を行わない
+        (self.repo / ".env").write_text("KEY=v\n")
+        rc, out, _ = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        reason = json.loads(out)["reason"]
+        self.assertIn("【untracked】", reason)
+        self.assertNotIn("親 repo からは効きません", reason)
+
+
 class TestMainSessionAck(BaseMainTest):
-    """0.19.0 (bd_092a232e-snw.2): session 単位の once-only 化。
+    """0.19.0 (内部バックログ): session 単位の once-only 化。
 
     同一 session で同じ (status, path) 集合なら 2 回目以降は exit 0。新しい
     ファイルが増えた / status が変わったときだけ再 block。session_id が無い /
@@ -490,6 +558,118 @@ class TestMainSessionAck(BaseMainTest):
         }
         self.assertEqual(_run_main(env)[1], "")
         self.assertFalse(self._state_dir().exists())
+
+
+# 0.26.0 (予算導入前) の ``_build_reason(tracked=[".env"],
+# untracked=[".env.production"], session_scoped=False, root_offset_="")`` の
+# 出力を ``git archive main`` 経由で採取したもの (内部バックログ)。
+# byte 予算のための restructure が既存の見た目 (セクション順・空行位置) を
+# 変えていないことのピン留め — substring 突合だけでは「順序が入れ替わった」
+# 類の退行を検出できないため。
+_EXPECTED_SMALL_REASON = '【セキュリティ確認】\n\n【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:\n  - .env\n対応: `.gitignore` に追加した上で `git rm --cached <path>` を実行してください (index から外すだけで実ファイルは残ります)。\n\n【untracked】以下のファイルは機密パターンに一致し、まだ `.gitignore` 未登録です:\n  - .env.production\n対応: `.gitignore` に追加するか、意図的に管理対象とするか確認してください。\n\nAskUserQuestion ツールで各ファイルについてユーザーに確認してください:\n  選択肢1: 「.gitignore に追加」 (Recommended)\n  選択肢2: 「意図的に管理対象とする」\n\n【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を得た上で `~/.claude/sensitive-files-guardrail/patterns.local.txt` に次を追記します ($CLAUDE_PROJECT_DIR は展開されないので、プロジェクト root の絶対パスを literal に書く (例: [project:/abs/path/to/repo])。全プロジェクト共通にしたい場合のみヘッダー無しの行に書く)。影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ** (root 配下のみ)。basename 形 (`!<名前>`) は同じ名前のファイルが**すべて**対象で、**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、basename 形は**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。追記内容 (path 形 — 承認した 1 ファイルだけを外す):\n  [project:$CLAUDE_PROJECT_DIR]\n  !/.env\n  !/.env.production\n同名ファイルをすべて外したい場合だけ basename 形にする: `!.env` / `!.env.production`'
+
+
+class TestBuildReasonByteBudget(unittest.TestCase):
+    """内部バックログ: block reason の byte 予算。
+
+    公式 hooks reference が明記する「hook の stdout 文字列は 10,000 文字が
+    上限」に対する安全マージン (``MAX_REASON_BYTES``)。固定 tail
+    (AskUserQuestion 案内 + 恒久除外レシピ) を先に確保し、ファイル列挙
+    (``  - path`` 行) だけを畳む。tail 自体は truncate しない。
+    """
+
+    def test_byte_identical_to_pre_budget_output_for_small_input(self):
+        entry = _load_entry()
+        reason = entry._build_reason(
+            tracked=[".env"],
+            untracked=[".env.production"],
+            session_scoped=False,
+            root_offset_="",
+        )
+        self.assertEqual(reason, _EXPECTED_SMALL_REASON)
+
+    def test_small_input_has_no_collapse_marker(self):
+        entry = _load_entry()
+        reason = entry._build_reason(
+            tracked=[".env"],
+            untracked=[".env.production"],
+            session_scoped=False,
+            root_offset_="",
+        )
+        self.assertNotIn("more files", reason)
+        self.assertLess(len(reason.encode("utf-8")), entry.MAX_REASON_BYTES)
+
+    def test_large_untracked_list_collapses_but_keeps_tail(self):
+        entry = _load_entry()
+        many = [f"secrets/key{i}.pem" for i in range(2000)]
+        reason = entry._build_reason(
+            tracked=[],
+            untracked=many,
+            session_scoped=False,
+            root_offset_="",
+        )
+        self.assertIn("more files; see git status", reason)
+        # tail (AskUserQuestion / 恒久除外レシピ) は畳まれず必ず残る
+        self.assertIn("AskUserQuestion ツールで各ファイルについて", reason)
+        self.assertIn("【恒久除外】", reason)
+        self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
+        # 折り畳みマーカー自体の分だけ予算を超えることはあるが、無制限には
+        # 膨らまない (マーカーは短い固定形なので数百 byte の余裕で十分)。
+        self.assertLess(
+            len(reason.encode("utf-8")), entry.MAX_REASON_BYTES + 200
+        )
+
+    def test_collapse_count_matches_omitted_files(self):
+        entry = _load_entry()
+        many = [f"secrets/key{i}.pem" for i in range(2000)]
+        reason = entry._build_reason(
+            tracked=[],
+            untracked=many,
+            session_scoped=False,
+            root_offset_="",
+        )
+        shown = len(re.findall(r"\n  - secrets/key\d+\.pem", reason))
+        m = re.search(r"\.\.\. \((\d+) more files; see git status\)", reason)
+        self.assertIsNotNone(m)
+        omitted = int(m.group(1))
+        self.assertEqual(shown + omitted, len(many))
+        self.assertGreater(shown, 0)  # 予算が完全にゼロになっていないこと
+        self.assertGreater(omitted, 0)  # このケースは実際に溢れていること
+
+    def test_both_lists_collapse_independently_when_both_huge(self):
+        entry = _load_entry()
+        tracked_many = [f"t/key{i}.pem" for i in range(1500)]
+        untracked_many = [f"u/key{i}.pem" for i in range(1500)]
+        reason = entry._build_reason(
+            tracked=tracked_many,
+            untracked=untracked_many,
+            session_scoped=False,
+            root_offset_="",
+        )
+        # tracked が先に予算を使うため、untracked 側は 0 件表示 (全件省略)
+        # になりうるが、いずれにせよ両セクションで省略件数が明示される。
+        self.assertEqual(
+            reason.count("more files; see git status"), 2, msg=reason[-400:]
+        )
+
+    def test_tail_survives_even_when_fixed_part_alone_exceeds_budget(self):
+        # MAX_REASON_BYTES を極端に小さくし、固定 tail だけで予算を超える
+        # 病的ケースを強制する。tail (AskUserQuestion / 恒久除外レシピ /
+        # session 注記) は truncate されず必ず残り、reason 全体が予算を
+        # 超えることを許容する (次善のトレードオフ、と docstring に明記済み)。
+        entry = _load_entry()
+        with mock.patch.object(entry, "MAX_REASON_BYTES", 50):
+            reason = entry._build_reason(
+                tracked=["a.env", "b.env", "c.env"],
+                untracked=[],
+                session_scoped=True,
+                root_offset_="",
+            )
+        self.assertGreater(len(reason.encode("utf-8")), 50)
+        self.assertIn("AskUserQuestion ツールで各ファイルについて", reason)
+        self.assertIn("【恒久除外】", reason)
+        self.assertIn("再度 block しません", reason)
+        self.assertIn("more files; see git status", reason)
 
 
 if __name__ == "__main__":
