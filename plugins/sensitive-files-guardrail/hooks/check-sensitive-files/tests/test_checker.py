@@ -424,6 +424,23 @@ class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
         # vendor 直下のファイルは vendor (deep ではない) が返ること
         self.assertEqual(in_submodule("vendor/README.md", paths), "vendor")
 
+    def test_in_submodule_excludes_exact_match_gitlink_itself(self):
+        """P2-3 回帰 (外部レビュー R3, checker.py:273): submodule の gitlink
+        自身 (``path`` が submodule path と完全一致) は submodule 配下では
+        なく**親 repo の index が持つエントリ**。未初期化 submodule では
+        ``git ls-files --recurse-submodules`` が再帰できず、gitlink の path
+        をそのまま tracked entry として返すため、submodule のマウント名が
+        機密パターンに一致すると (例: ``.env``) この完全一致が発生する。
+        gitlink の実体は親 index にあるので `git rm --cached` は親から
+        直接効き、submodule 配下扱い (空の未初期化ディレクトリへの `cd` 案内)
+        にしてはならない。
+        """
+        self.assertIsNone(in_submodule(".env", {".env"}))
+        # 兄弟 submodule (prefix ではない別名) にも誤って一致しないこと
+        self.assertIsNone(in_submodule(".env", {".env", "vendor"}))
+        # prefix 一致 (submodule 配下の実ファイル) は従来どおり検出すること
+        self.assertEqual(in_submodule(".env/leaf.txt", {".env"}), ".env")
+
     def test_symlinked_submodule_cycle_terminates_without_recursion_error(self):
         """壊れた/悪意ある submodule 構成が symlink で祖先を指す場合の防御
         (``_visited``) が実際に無限再帰を止めること。

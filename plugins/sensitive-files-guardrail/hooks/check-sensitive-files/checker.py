@@ -262,15 +262,26 @@ def submodule_paths(
 def in_submodule(path: str, submod_paths: set[str]) -> str | None:
     """``path`` (cwd 相対) がどの submodule 配下にあるかを返す (無ければ None)。
 
-    完全一致 (通常は起きないが gitlink 自体を指すケース) と、``<submodule>/``
-    prefix 一致 (submodule 配下のファイル) の両方を見る。ネストした
-    submodule (例: ``vendor`` と ``vendor/deep`` の両方が submodule として
-    ``submod_paths`` に入っている) では**最長一致**を返す — そのファイルを
-    実際に持つ git index は常に一番深い submodule のものだから (P2-1)。
+    ``<submodule>/`` prefix 一致 (submodule 配下のファイル) だけを見る。
+    ネストした submodule (例: ``vendor`` と ``vendor/deep`` の両方が
+    submodule として ``submod_paths`` に入っている) では**最長一致**を返す
+    — そのファイルを実際に持つ git index は常に一番深い submodule の
+    ものだから (P2-1)。
+
+    ``path`` が submodule path と**完全一致**する場合 (= gitlink そのもの)
+    は意図的に対象外とする (P2-3, 外部レビュー R3)。未初期化 submodule
+    (working copy が無い) では ``git ls-files --recurse-submodules`` が
+    配下に再帰できず、gitlink の path 自体を通常の tracked entry として
+    返す。この entry の実体は**親 repo の index が持つ gitlink**であり、
+    submodule 自身の index には何も無い (未初期化なら index 自体が存在
+    しない)。submodule のマウント名が機密パターンに一致すると (例:
+    ``.env``) この完全一致が発生し、`git rm --cached` が親から直接効く
+    にも関わらず「親では実行不可能、submodule ディレクトリに `cd` せよ」
+    という実行不能な案内 (空の未初期化ディレクトリを指す) を出してしまって
+    いた。gitlink は常に親 index 由来なので、完全一致は「submodule 配下
+    ではない」= 通常の親 repo 向け案内のままにする。
     """
-    matches = [
-        sp for sp in submod_paths if path == sp or path.startswith(sp + "/")
-    ]
+    matches = [sp for sp in submod_paths if path.startswith(sp + "/")]
     if not matches:
         return None
     return max(matches, key=len)

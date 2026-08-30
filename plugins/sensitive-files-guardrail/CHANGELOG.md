@@ -23,10 +23,11 @@ commit 52113a1 で完了)。
 ## 0.27.0
 
 内部バックログの精査で発見した不具合 7 件を 2 クラスタで修正 (離脱率低減 /
-可視性改善 / ログ衛生) + 外部レビュー指摘の反映 4 件 (R1: 項目 1 の予算単位と
+可視性改善 / ログ衛生) + 外部レビュー指摘の反映 5 件 (R1: 項目 1 の予算単位と
 項目 7 のローテーション直列化 / R2: 項目 8 の出力エンコーディングと項目 1 の
-レシピ行の予算化)。**判定境界 (deny / allow / ask / block するか)
-の変化: なし。** テスト件数: redact 1185 → **1210**、check 94 → **131**。
+レシピ行の予算化 / R3: 項目 3 の submodule gitlink 完全一致誤判定)。
+**判定境界 (deny / allow / ask / block するか) の変化: なし。**
+テスト件数: redact 1185 → **1210**、check 94 → **133**。
 
 ### Stop hook (check-sensitive-files)
 
@@ -108,6 +109,13 @@ commit 52113a1 で完了)。
    案内が列挙する submodule ディレクトリ一覧を先頭 10 件 + 省略件数に
    畳み、distinct 件数に比例して block reason が肥大しないようにした
    (300 件で reason が byte 予算を超えファイル列挙が潰れる実測があった)。
+   さらに、submodule のマウント名自体が機密パターンに一致し (例: `.env`)
+   かつ未初期化 (gitlink のみで working copy が無い) だと `git ls-files
+   --recurse-submodules` が配下に再帰できず gitlink の path 自体を通常の
+   tracked entry として返すため、`in_submodule` がこの完全一致を誤って
+   「submodule 配下」と判定し、親から直接効く `git rm --cached` の代わりに
+   空の未初期化ディレクトリへの `cd` を指示する実行不能な案内を出す不具合を
+   修正した (外部レビュー R3 P2)。
 
 ### ログ (redact-sensitive-reads)
 

@@ -260,6 +260,66 @@ class TestSubmoduleGuidance(BaseMainTest):
         self.assertIn("【untracked】", reason)
         self.assertNotIn("親 repo からは効きません", reason)
 
+    def _add_uninitialized_gitlink_submodule(self, mount_name: str) -> bool:
+        """``mount_name`` (機密パターンに一致する名前) で submodule を登録した
+        直後に ``deinit`` し、gitlink だけが親 index に残る未初期化状態を
+        作る。``git clone`` を ``--recurse-submodules`` 無しで行った直後や
+        ``submodule update --init`` 前と同じ ``git ls-files`` 出力になる
+        (P2-3 回帰用)。
+        """
+        (self.repo / "README.md").write_text("# super\n")
+        _git(["add", "README.md"], str(self.repo))
+        _git(["commit", "-m", "init"], str(self.repo))
+        subrepo = Path(self.tmp) / "subrepo-uninit"
+        subrepo.mkdir()
+        _init_repo(str(subrepo))
+        (subrepo / "leaf.txt").write_text("LEAF_SECRET=v\n")
+        _git(["add", "leaf.txt"], str(subrepo))
+        _git(["commit", "-m", "add leaf"], str(subrepo))
+        try:
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{subrepo}", mount_name,
+                ],
+                cwd=str(self.repo),
+                check=True,
+                capture_output=True,
+            )
+            _git(["commit", "-m", "add submodule"], str(self.repo))
+            subprocess.run(
+                ["git", "submodule", "deinit", "-f", mount_name],
+                cwd=str(self.repo),
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            return False
+        return True
+
+    def test_uninitialized_gitlink_named_like_pattern_has_no_branching_guidance(
+        self,
+    ):
+        """P2-3 回帰 (外部レビュー R3): submodule のマウント名自体が機密
+        パターンに一致し (``.env``)、かつ未初期化 (gitlink のみで working
+        copy が無い) だと、``git ls-files --recurse-submodules`` は再帰
+        できず gitlink の path をそのまま tracked entry として返す。この
+        path は**親 repo の index が持つ gitlink そのもの**であり
+        `git rm --cached` は親から直接効く。修正前は完全一致を「submodule
+        配下」と誤判定し、空の (未初期化) submodule ディレクトリへの `cd`
+        を指示する実行不能な案内を追記していた。
+        """
+        if not self._add_uninitialized_gitlink_submodule(".env"):
+            self.skipTest("git submodule add unsupported in this env")
+        rc, out, _ = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn(".env", reason)
+        self.assertIn("git rm --cached", reason)
+        self.assertNotIn("親 repo からは効きません", reason)
+
     def _add_nested_submodule(self) -> bool:
         """repo -> vendor -> vendor/deep の 2 段ネスト submodule を構成する
         (P2-1 回帰)。``vendor/deep/.env`` は vendor 自身の index ではなく
