@@ -678,6 +678,17 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     carried = batch.deferred + overflow
     if carried:
         state.record_pending(session_id, carried)
+        # 繰り越したパスはまだ基点フォールバックの判定を一度も受けていない
+        # (overflow は _collect_diffs に渡る前に弾かれ、deferred は時間・
+        # バイト予算で診断済み diff ごと持ち越すだけなので commit 済み判定を
+        # 経ていない)。ここで基点を進めてしまうと、そのパスが同一ターン内で
+        # commit 済みだった場合に次ターンの old_base がちょうど今回の HEAD と
+        # 同値になり、`_complete_and_advance_base` を restore_claim 経路で
+        # 迂回したのと同じ理由 (0 commit の範囲が手元由来の証明を自明に満たす
+        # 一方、diff_since も自明に空になる) で黙って消える。このターンの
+        # complete_claim では基点を進めない — carried が空になるまで基点は
+        # 現在の old_base のまま据え置く (advisor 指摘)。
+        new_head = None
     if batch.unretrievable:
         # HEAD 基準の diff が空で、基点フォールバックでも証明できず
         # 救えなかったパス。pending には戻さない (証明できない状況が変わらない

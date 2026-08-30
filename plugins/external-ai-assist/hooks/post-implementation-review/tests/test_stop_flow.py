@@ -955,6 +955,35 @@ class TestSameTurnCommitBaseFallback(HookTestCase):
         self.assertReviewed("a.py", "print(1)")
         self.assertEqual(self.pending(SESSION_A), [])
 
+    def test_overflow_after_same_turn_commit_is_not_silently_dropped(self):
+        """回帰 (0.9.0 fix): `MAX_REVIEW_PATHS` 超過で overflow として pending に
+        戻された (= 消費されていない) パスが同一ターン内 commit 済みだった場合も、
+        次ターンの基点フォールバックで拾われる。
+
+        overflow は `_resolve_paths` (`_collect_diffs` より前) で弾かれるため、
+        基点フォールバックの判定を一度も経ていない。`carried` (deferred + overflow)
+        が非空のターンで基点を進めてしまうと、cursor 失敗時の restore_claim と
+        同じ理由で次ターンの `old_base == HEAD` になり黙って消える。
+        """
+        self._establish_base()
+        self.entry.MAX_REVIEW_PATHS = 1
+        self.edit(SESSION_A, "a.py", "print('a')\n")
+        self.edit(SESSION_A, "late.py", "print('late')\n")
+        _testutil.git(self.repo, "add", "late.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+        self.assertIn(os.path.join(self.repo, "late.py"), self.pending(SESSION_A))
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("late.py", "print('late')")
+        self.assertEqual(self.pending(SESSION_A), [])
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertNotIn(
+            "取得できませんでした", message, "復元できるはずが「取得不能」報告に落ちている"
+        )
+
     def test_pull_bringing_foreign_commit_is_not_restored_but_reported(self):
         """証明できないケース (ff pull で他人の commit が混ざる) — 復元しない。"""
         bare, branch = self._add_bare_origin()

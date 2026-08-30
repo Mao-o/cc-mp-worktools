@@ -226,9 +226,11 @@ HEAD 基準には副作用がある: pending に積んだ後、Stop までの間
 
 **確定した設計 (基点は Stop 側で記録する)**:
 
-1. Stop の最後 (`_run_review` の冒頭。既に git を呼ぶタイミングなので追加コストは
-   `git rev-parse HEAD` 1 回分のみ) に、そのときの HEAD を `state.set_base_sha` で
-   記録する。次の Stop の基点になる
+1. `_run_review` の冒頭 (既に git を呼ぶタイミングなので追加コストは
+   `git rev-parse HEAD` 1 回分のみ) でそのときの HEAD を読んでおくが、
+   `state.set_base_sha` で**実際に書き込むのはこのレビューが消費された時だけ**
+   (詳細は 4 番)。読む (`old_base = state.get_base_sha`) タイミングと
+   書く (`new_head` を基点として確定する) タイミングを分けているのが要点
 2. HEAD 基準 diff が空だった tracked パスについて、基点があれば**手元由来の証明**を行う:
    `git rev-list --count <base>..HEAD` と `--not --remotes` 付きの同カウントを比較し、
    一致すれば (= その範囲の commit が全てリモートに存在せず手元だけで作られたもの)
@@ -243,17 +245,32 @@ HEAD 基準には副作用がある: pending に積んだ後、Stop までの間
    `--not --remotes` の対象から外れて手元由来と証明できなくなるため)。「直して
    push まで」を 1 ターンでやると、復元ではなく通知止まりになるのは意図した
    保守的な向き — 送信範囲を広げる方向には倒さない
-4. cursor 失敗 / `EXTERNAL_AI_POST_REVIEW_MIN_LINES` 見送りで pending に戻した
-   (= レビューを消費していない) ターンでは `state.base_sha` を進めない
-   (`__main__._complete_and_advance_base` に一本化。`complete_claim` の 3 箇所
-   だけを通る)。ここを無条件に進めてしまうと、次の Stop で `old_base == HEAD`
-   になり `old_base..HEAD` が自明に 0 commit (= 手元由来の証明が自明に True)
-   になる一方 `diff_since(base=HEAD)` も自明に空 diff になって、`unretrievable`
-   にも積まれず黙って消える — このドキュメントが書いている「消えていたバグ」を
-   1 ターン遅れで再現してしまう (advisor 指摘、regression テストは
+4. 基点を進めてよいのは、そのターンで claim した全パスの決着が付いた場合だけ。
+   具体的には 2 通りのケースで進めない:
+   - cursor 失敗 / `EXTERNAL_AI_POST_REVIEW_MIN_LINES` 見送りで `restore_claim`
+     される (= claim 全体をレビュー消費していない) ターン。`complete_claim` の
+     呼び出しを `__main__._complete_and_advance_base` に一本化し、この 3 箇所
+     (差分無し / REVIEW_CLEAN / 指摘あり) だけが基点を進める
+   - `carried` (`batch.deferred` の時間・バイト予算超過 + `overflow` の
+     `MAX_REVIEW_PATHS` 超過) が非空、つまり claim した一部パスを
+     `record_pending` で pending に戻したターン。戻したパスは overflow なら
+     `_collect_diffs` に一度も渡っておらず、deferred でも基点フォールバックの
+     判定を経ていないため、次ターンでもこのターンと同じ `old_base` で判定させる
+     必要がある
+
+   どちらも無視して基点を無条件に進めると、そのターンに pending へ戻した
+   (= 消費していない) パスが同一ターン内 commit 済みだった場合、次の Stop で
+   `old_base == HEAD` になり `old_base..HEAD` が自明に 0 commit
+   (= 手元由来の証明が自明に True) になる一方 `diff_since(base=HEAD)` も
+   自明に空 diff になって、`unretrievable` にも積まれず黙って消える —
+   このドキュメントが書いている「消えていたバグ」を 1 ターン遅れで再現して
+   しまう (レビュー指摘。regression テストは
    `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
    test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
-   `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn`)
+   `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn` /
+   `test_overflow_after_same_turn_commit_is_not_silently_dropped`)。
+   `unretrievable` はこの制約の対象外 (証明できず捨てる決着済みのパスなので
+   基点を止める理由にならない)
 5. 判定は `gitscan.is_local_only_range` / `gitscan.diff_since`、実装は
    `__main__._collect_diffs` の `local_only()` / `empty_at_head` 分岐、実測は
    `tests/test_gitscan.py::TestIsLocalOnlyRange` (自分の commit のみ / merge で

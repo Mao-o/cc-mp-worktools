@@ -43,10 +43,15 @@ version 据え置きで main に入った後続 commit はその version の節�
   次ターン、という並びで `old_base` が直前ターンの HEAD と同値になり、
   0 commit の範囲が手元由来の証明を自明に満たしてしまう一方で基点まで遡った diff
   も自明に空になり、本項が解消したはずの「黙って消える」を 1 ターン遅れで
-  再現してしまっていた。regression は
+  再現してしまっていた。同じ理由で、`MAX_REVIEW_PATHS` 超過 (overflow) や
+  時間・バイト予算超過 (deferred) で claim の一部だけを pending に戻した
+  (`carried` が非空の) ターンでも基点を進めない — overflow は基点フォールバックの
+  判定を一度も経ずに pending へ戻るため、進めてしまうと同じ経路で黙って消える。
+  regression は
   `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
   test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
-  `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn`
+  `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn` /
+  `test_overflow_after_same_turn_commit_is_not_silently_dropped`
 - commit に加えて同じターンで push まで済ませた場合も「証明できない」側になる
   (push 済みの commit は `refs/remotes/origin/*` から到達可能になり `--not
   --remotes` の対象から外れるため)。復元ではなく通知止まりになるのは意図した
