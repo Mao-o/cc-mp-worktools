@@ -653,7 +653,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     # → 手元由来の証明が自明に True → しかし `diff_since(root, path, old_base)`
     # も base=HEAD なので自明に空 diff → 空 diff は「証明できたので復元」経路を
     # 通ってしまい、`unretrievable` にも積まれず黙って消える
-    # (advisor 指摘。regression テスト:
+    # (マージ前レビューの指摘。regression テスト:
     # `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
     # test_cursor_failure_after_same_turn_commit_is_retried_next_turn`)。
     old_base = state.get_base_sha(session_id)
@@ -687,7 +687,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
         # 迂回したのと同じ理由 (0 commit の範囲が手元由来の証明を自明に満たす
         # 一方、diff_since も自明に空になる) で黙って消える。このターンの
         # complete_claim では基点を進めない — carried が空になるまで基点は
-        # 現在の old_base のまま据え置く (advisor 指摘)。
+        # 現在の old_base のまま据え置く (マージ前レビューの指摘)。
         new_head = None
     if batch.unretrievable:
         # HEAD 基準の diff が空で、基点フォールバックでも証明できず

@@ -264,7 +264,7 @@ HEAD 基準には副作用がある: pending に積んだ後、Stop までの間
    (= 手元由来の証明が自明に True) になる一方 `diff_since(base=HEAD)` も
    自明に空 diff になって、`unretrievable` にも積まれず黙って消える —
    このドキュメントが書いている「消えていたバグ」を 1 ターン遅れで再現して
-   しまう (advisor 指摘。regression テストは
+   しまう (マージ前レビューの指摘。regression テストは
    `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
    test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
    `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn` /

@@ -123,7 +123,7 @@ class TestStaleReservationReclaim(MarkerStateTestCase):
 class TestEndToEndConfirmSlot(HookTestCase):
     """confirm_slot が実際の block / context 経路で呼ばれること。
 
-    advisor 指摘の「最も疑わしいバグ」: 呼び忘れると、正当に確定した block でも
+    マージ前レビューの指摘の「最も疑わしいバグ」: 呼び忘れると、正当に確定した block でも
     RESERVATION_TTL_SEC 経過後に「kill された仮予約」と誤認されて count が
     静かにロールバックされ、上限が実質緩んでしまう。
     """
