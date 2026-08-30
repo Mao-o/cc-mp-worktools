@@ -143,7 +143,7 @@ detector が同じ repo にヒットしてよい)。
 | `deno.py` | `deno` | `deno.json(c)` |
 | `nextjs.py` | `nextjs` | 依存に `next`、または `next.config.*` |
 | `react_vite.py` | `react`, `vite` | 依存に `react`、`vite.config.(ts\|js)` |
-| `firebase.py` | `firebase`, `firebase-functions` | `firebase.json`/`.firebaserc`、npm の `firebase`/`firebase-admin`/`firebase-functions`/`@firebase/*`、Python の `firebase-admin`/`firebase-functions` (pyproject.toml / requirements*.txt。依存名の完全一致で判定)、Flutter の `firebase_core` (pubspec.yaml) |
+| `firebase.py` | `firebase`, `firebase-functions` | `firebase.json`/`.firebaserc`、npm の `firebase`/`firebase-admin`/`firebase-functions`/`@firebase/*`、Python の `firebase-admin`/`firebase-functions` (pyproject.toml / requirements*.txt。依存名の完全一致で判定)、Flutter の `firebase_core` (pubspec.yaml の `dependencies`/`dev_dependencies`/`dependency_overrides` 直下のみ判定。`flutter:` 等の無関係なセクションや深いネストにある同名キーは対象外) |
 | `prisma.py` | `prisma` | 依存に `prisma`/`@prisma/client`、または `prisma/` ディレクトリ |
 | `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`uv.toml`/`poetry.lock`、pyproject 内の framework 名 |
 | `testing.py` | `zod`, `vitest`, `jest`, `playwright`, `cypress`, `monorepo` | 各種依存 / config file、`pnpm-workspace.yaml`・`turbo.json` |

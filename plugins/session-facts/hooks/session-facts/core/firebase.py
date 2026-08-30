@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
-from typing import Iterable, List, Set, TYPE_CHECKING
+from typing import Iterable, List, Optional, Set, TYPE_CHECKING
 
 from core.fs import read_text
 
@@ -38,10 +38,34 @@ _FIREBASE_JS_DEPENDENCY_NAMES = ("firebase", "firebase-admin", "firebase-functio
 # and their caller, _has_firebase_python_dependency().
 _FIREBASE_PY_DEPENDENCY_NAMES = frozenset({"firebase-admin", "firebase-functions"})
 
-# Anchored on YAML key syntax (like detectors/flutter.py's own regexes) so a
-# match requires an actual pubspec dependency entry, not an incidental
-# "firebase_core" substring in a comment or string elsewhere in the file.
-_FIREBASE_CORE_PUBSPEC_RE = re.compile(r"(?m)^\s*firebase_core\s*:")
+# The pubspec.yaml top-level (column-0) YAML sections that actually declare
+# a dependency. A "firebase_core:" key anywhere else -- an unrelated
+# top-level section (e.g. a custom_tool: or the flutter: config block), or
+# nested one level too deep under one of these three -- is not a real
+# dependency declaration; see _has_pubspec_firebase_core_dependency() below
+# for how the scan is scoped to just this set.
+_PUBSPEC_DEPENDENCY_SECTIONS = ("dependencies", "dev_dependencies", "dependency_overrides")
+
+# A bare pubspec.yaml section header at column 0: one of the three names
+# above, a colon, and nothing else on the line except optional whitespace or
+# a trailing comment. Deliberately does NOT match a flow-style variant such
+# as "dependencies: { firebase_core: ^2.0.0 }" -- see
+# _has_pubspec_firebase_core_dependency() below for why that's intentional.
+_PUBSPEC_SECTION_HEADER_RE = re.compile(
+    r"^(" + "|".join(_PUBSPEC_DEPENDENCY_SECTIONS) + r"):\s*(?:#.*)?$"
+)
+
+# A YAML mapping entry one level under a pubspec.yaml section: leading
+# whitespace, then a bare key token, then ":". Matched against the raw (not
+# left-stripped) line so group(1)'s length is the line's actual indent
+# width -- see _has_pubspec_firebase_core_dependency() below. The leading
+# character class accepts tabs as well as spaces so a tab-indented entry
+# still matches at all (a spaces-only class would fail to match from
+# position 0 on such a line) and group(1)'s length stays consistent with
+# the column-0 check in that function, which measures indent the same way
+# (real pubspec.yaml files only ever use spaces, since YAML disallows tab
+# indentation, but neither side crashes or misbehaves if one doesn't).
+_PUBSPEC_SECTION_ENTRY_RE = re.compile(r"^([ \t]+)([A-Za-z0-9_]+)\s*:")
 
 # The leading package-name token of a PEP 508 requirement string (e.g. from
 # a requirements.txt line, or a pyproject.toml dependency array element).
@@ -292,10 +316,81 @@ def _has_firebase_python_dependency(ctx: "RepoContext") -> bool:
     return False
 
 
+def _has_pubspec_firebase_core_dependency(text: str) -> bool:
+    """True when ``firebase_core`` is a direct entry of one pubspec.yaml's
+    ``dependencies``, ``dev_dependencies``, or ``dependency_overrides``
+    section.
+
+    Replaces a prior file-wide regex (``^\\s*firebase_core\\s*:``) that
+    matched that key syntax on any line of the file, independent of which
+    YAML section -- or whether any real section at all -- it fell under.
+    That let an unrelated top-level block (e.g. a custom_tool: config, or
+    the flutter: section that most Flutter pubspecs already have) with its
+    own same-named key falsely tag the repo as Firebase; the old regex
+    matched such a key regardless of nesting depth or enclosing section, so
+    the same false match happened even one level deeper (e.g. a
+    "dependencies:" key nested under flutter:, rather than at column 0).
+
+    Deliberately mirrors collectors/dependencies.py's parse_pubspec_deps()
+    shape (indent-0 section keys; the first child line's indent width as
+    the section's dependency-entry depth; blank/comment lines skipped)
+    rather than importing it: that function does not track
+    dependency_overrides (it only needs dependencies/dev_dependencies for
+    the summary it builds), and in this codebase core/ modules are not
+    imported by collectors/detectors -- not the other way around (see this
+    module's own callers, detectors/firebase.py and
+    collectors/repo_notes.py) -- so importing a collector from here would
+    invert that layering.
+
+    Narrower than a real YAML parser in one deliberate way: only a bare
+    block-style header (``dependencies:`` alone on its line, optionally
+    with a trailing comment -- see _PUBSPEC_SECTION_HEADER_RE) opens one of
+    the three sections. A flow-style mapping (``dependencies: {
+    firebase_core: ^2.0.0 }``, single- or multi-line) is valid YAML but not
+    real-world pubspec.yaml style; its header line has more after the colon
+    than that regex allows, so it never opens a section and none of its
+    keys -- inline or on subsequent lines -- are ever scanned. This folds
+    to "not detected", the same as a missing section entirely, rather than
+    raising.
+    """
+    section: Optional[str] = None
+    dep_indent: Optional[int] = None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        # Strips both spaces and tabs (not just " ") so a tab-indented line
+        # measures as *some* indent rather than being misread as column 0,
+        # which would incorrectly end whichever section is open.
+        indent = len(raw) - len(raw.lstrip(" \t"))
+        if indent == 0:
+            # A fresh column-0 line always starts (or ends) a section,
+            # whatever it is -- reset even when it's some other top-level
+            # key (or a section name written in a shape the header regex
+            # doesn't recognize, e.g. flow-style) so it can't be mistaken
+            # for still being inside the previous one.
+            m = _PUBSPEC_SECTION_HEADER_RE.match(raw)
+            section = m.group(1) if m else None
+            dep_indent = None
+            continue
+        if section is None:
+            continue
+        match = _PUBSPEC_SECTION_ENTRY_RE.match(raw)
+        if not match:
+            continue
+        this_indent = len(match.group(1))
+        if dep_indent is None:
+            dep_indent = this_indent
+        if this_indent != dep_indent:
+            continue  # nested config under a sibling dependency, e.g. path:/git:
+        if match.group(2).lower() == "firebase_core":
+            return True
+    return False
+
+
 def _has_firebase_flutter_dependency(ctx: "RepoContext") -> bool:
     pubspec_paths = [p for p in ctx.tracked_files if Path(p).name == "pubspec.yaml"]
     for rel in pubspec_paths[:_MAX_PUBSPEC_SCAN]:
-        if _FIREBASE_CORE_PUBSPEC_RE.search(read_text(ctx.root / rel)):
+        if _has_pubspec_firebase_core_dependency(read_text(ctx.root / rel)):
             return True
     return False
 
@@ -322,7 +417,10 @@ def has_firebase(ctx: "RepoContext") -> bool:
     pyproject.toml's common dependency-declaration tables (PEP 621, Poetry,
     PEP 735, and the uv/PDM/Hatch dev-dependency tables -- see
     _pyproject_dependency_names()) or any tracked requirements*.txt;
-    firebase_core in any tracked pubspec.yaml.
+    firebase_core declared as a direct dependencies/dev_dependencies/
+    dependency_overrides entry in any tracked pubspec.yaml -- not merely a
+    firebase_core-shaped key appearing anywhere in the file (see
+    _has_pubspec_firebase_core_dependency()).
 
     The Python-dependency check used to be a raw substring search over the
     whole pyproject.toml/requirements.txt text

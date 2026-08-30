@@ -411,6 +411,149 @@ class FirebaseDetectorTest(unittest.TestCase):
             )
             self.assertEqual(_detect(root, tracked_files=["pubspec.yaml"]), [])
 
+    def test_dev_dependencies_pubspec_firebase_core_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\ndev_dependencies:\n  firebase_core: ^2.0.0\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["pubspec.yaml"]), ["firebase"]
+            )
+
+    def test_dependency_overrides_pubspec_firebase_core_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  http: ^1.0.0\n"
+                "dependency_overrides:\n"
+                "  firebase_core: ^2.0.0\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["pubspec.yaml"]), ["firebase"]
+            )
+
+    # --- internal backlog: the pre-fix regex (``^\s*firebase_core\s*:``,
+    # multiline) matched "firebase_core:" key syntax on any line of the
+    # file, independent of which YAML section -- or whether any real
+    # section -- it fell under. Reproduced empirically against the pre-fix
+    # core/firebase.py: both cases below returned ["firebase"] (must be []).
+    # (A single-line flow-style variant of the same idea, e.g.
+    # ``custom_tool: { firebase_core: disabled }``, was checked too and does
+    # NOT reproduce under the old regex -- "firebase_core" there is not at
+    # the start of a line, so ``^\s*firebase_core`` never matched it. The
+    # block-style shapes below are the actual reproduction.)
+
+    def test_firebase_core_under_unrelated_top_level_section_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  http: ^1.0.0\n"
+                "custom_tool:\n"
+                "  firebase_core: disabled\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["pubspec.yaml"]), [])
+
+    def test_firebase_core_inside_flutter_section_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  http: ^1.0.0\n"
+                "flutter:\n"
+                "  firebase_core: something\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["pubspec.yaml"]), [])
+
+    def test_firebase_core_nested_under_sibling_dependency_is_not_detected(self):
+        # "firebase_core" appears only as a path *value* substring, one
+        # indent level deeper than dependencies:'s direct children (it is
+        # config for the sibling "some_pkg" dependency, not a dependency
+        # name).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  some_pkg:\n"
+                "    path: ../firebase_core\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["pubspec.yaml"]), [])
+
+    def test_firebase_core_dependencies_key_nested_under_unrelated_section_is_not_detected(self):
+        # A "dependencies:" key only starts a real pubspec section at
+        # column 0; the same key name nested under an unrelated top-level
+        # section (flutter:) is that section's own config, not a dependency
+        # manifest section, and must not be scanned as one.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "flutter:\n"
+                "  dependencies:\n"
+                "    firebase_core: ^2.0.0\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["pubspec.yaml"]), [])
+
+    def test_commented_out_firebase_core_pubspec_entry_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  # firebase_core: ^2.0.0\n"
+                "  http: ^1.0.0\n"
+            )
+            self.assertEqual(_detect(root, tracked_files=["pubspec.yaml"]), [])
+
+    def test_firebase_core_after_sibling_nested_block_is_still_detected(self):
+        # A sibling dependency's own nested multi-line config (git:/url:,
+        # deeper than the section's dependency-entry indent) must not shift
+        # what that indent is for a later, real sibling at the original
+        # depth.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  some_pkg:\n"
+                "    git:\n"
+                "      url: https://example.com/x/some_pkg.git\n"
+                "  firebase_core: ^2.0.0\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["pubspec.yaml"]), ["firebase"]
+            )
+
+    def test_mixed_tab_and_space_indentation_across_sections_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_text(
+                "name: app\n"
+                "dependencies:\n"
+                "  http: ^1.0.0\n"
+                "dev_dependencies:\n"
+                "\tfirebase_core: ^2.0.0\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["pubspec.yaml"]), ["firebase"]
+            )
+
+    def test_crlf_line_endings_pubspec_firebase_core_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pubspec.yaml").write_bytes(
+                b"name: app\r\ndependencies:\r\n  firebase_core: ^2.0.0\r\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["pubspec.yaml"]), ["firebase"]
+            )
+
 
 class HasFirebaseMemoizationTest(unittest.TestCase):
     """has_firebase() runs on every hook invocation from two call sites
