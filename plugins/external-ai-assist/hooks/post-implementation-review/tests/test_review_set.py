@@ -452,11 +452,16 @@ class TestTimeoutBudgets(ReviewSetTestCase):
 
         timeouts = self._hook_timeouts()
         git_worst = (
-            gitscan.REV_PARSE_TIMEOUT_SEC * 2
+            gitscan.REV_PARSE_TIMEOUT_SEC * 3  # worktree_root + head_exists + current_head
             + gitscan.LS_FILES_TIMEOUT_SEC  # symlink 一覧 (symlink_map)
             + gitscan.LS_FILES_TIMEOUT_SEC  # untracked 判定 (untracked_among)
             + self.entry.COLLECT_BUDGET_SEC
-            + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
+            # 予算判定後に走る最後の 1 パス。HEAD 基準 diff が空だった場合、
+            # 基点フォールバック (diff_since) も試すため最大 2 回
+            + gitscan.PATH_DIFF_TIMEOUT_SEC * 2
+            # is_local_only_range の rev-list --count 2 回 (base_sha があり HEAD
+            # 基準 diff が空のパスが 1 件でもあればこの Stop 内で高々 1 回だけ計算)
+            + gitscan.REV_LIST_TIMEOUT_SEC * 2
         )
         # cursor の timeout 後に process group を止める経路 (SIGTERM 待ち / SIGKILL 待ち /
         # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない。

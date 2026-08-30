@@ -134,12 +134,20 @@ exit 0 + {"decision": "block", "reason": ..., "systemMessage": ...}:
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# Windows 非対応 (`_common.flock` / `state.py` が `fcntl` に依存)。他モジュールの import
+# (`_common` 系・`state`) で ImportError が起きる前に判定して抜ける。ここより後ろで
+# import すると、Windows では毎ツール呼出で hook error 通知が出てしまう
+# (対応状況は README の「前提」節を参照)。
+if os.name != "posix":
+    sys.exit(0)
+
 import hashlib
 import json
-import os
 import re
 import subprocess
-import sys
 import time
 
 # hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
@@ -148,7 +156,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import hooklog, notify, sentinel, settings  # noqa: E402
+from _common import flock, hooklog, notify, sentinel, settings  # noqa: E402
 
 import cursor  # noqa: E402
 import exclusion  # noqa: E402
@@ -614,6 +622,15 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     """
     notices: list[str] = []
 
+    # 基点フォールバックの「前回の基点」を読んでから、今回の HEAD で
+    # 上書きする (次の Stop の基点になる)。順序が重要 — 先に上書きすると、今回
+    # 自身が作った HEAD を「前回の基点」として誤って使ってしまう。current_head
+    # が None (HEAD 不在 = 初回 commit 前) の場合は上書きしない (前回の値を温存)。
+    old_base = state.get_base_sha(session_id)
+    new_head = gitscan.current_head(root)
+    if new_head:
+        state.set_base_sha(session_id, new_head)
+
     rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
     if excluded:
         # 除外は恒久: pending にも reviewed にも残さない。ファイル名は出すが内容は出さない
@@ -627,12 +644,21 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
             "次ターンに繰り越し: " + _list_names(_rel_names(root, overflow))
         )
 
-    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
+    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id), old_base)
     # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
     # 積む: 予算超過 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順
     carried = batch.deferred + overflow
     if carried:
         state.record_pending(session_id, carried)
+    if batch.unretrievable:
+        # HEAD 基準の diff が空で、基点フォールバックでも証明できず
+        # 救えなかったパス。pending には戻さない (証明できない状況が変わらない
+        # 限り毎ターン同じ結果になるだけなので、繰り返し報告しない)。
+        notices.append(
+            f"{len(batch.unretrievable)} ファイルは差分が空で取得できませんでした "
+            "(commit 済みの可能性。内容は送信していません): "
+            + _list_names(_rel_names(root, batch.unretrievable))
+        )
     if batch.deferred_time:
         notices.append(
             f"{len(batch.deferred_time)} ファイルは git diff の時間予算超過により"
@@ -675,7 +701,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     diff_text = "\n".join(batch.sections)
     log(f"Cursor によるレビューを実行 ({len(batch.submitted)} ファイル, {len(diff_text)} chars)")
     started = time.monotonic()
-    result = cursor.review(diff_text)
+    result = cursor.review(diff_text, cwd=root)
     elapsed = time.monotonic() - started
     state.mark_review_done(session_id)
     summary = f"差分レビュー完了 ({notify.format_elapsed(elapsed)}, {len(batch.submitted)} ファイル)"
@@ -863,6 +889,7 @@ class ReviewBatch:
         self.deferred_time: list[str] = []  # 時間予算で未処理 (絶対パス)
         self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
+        self.unretrievable: list[str] = []  # HEAD 基準が空で基点でも救えなかった絶対パス
 
     @property
     def deferred(self) -> list[str]:
@@ -870,12 +897,36 @@ class ReviewBatch:
         return self.deferred_size + self.deferred_time
 
 
-def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> ReviewBatch:
+def _collect_diffs(
+    root: str,
+    rels: list[str],
+    reviewed: dict[str, str],
+    base_sha: str | None = None,
+) -> ReviewBatch:
     """パスごとに diff を取り、予算に収まるものだけを ReviewBatch に積む。
 
     前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
-    済み) も載せない。どちらも submitted に入らないので、cursor 失敗時にも復元されず
-    そのまま消える。
+    済み) も (基点フォールバックで救えない限り) 載せない。どちらも submitted に
+    入らないので、cursor 失敗時にも復元されずそのまま消える。
+
+    **HEAD 基準の diff が空のパスへの基点フォールバック**: tracked かつ
+    HEAD が存在するパスの HEAD 基準 diff が空なのは、(a) 単に何も変わっていない
+    (revert 済み等)、または (b) このセッションが同一ターン内で commit し、
+    ファイルが既に HEAD と一致している (元のバグ) のどちらかで、この時点では
+    区別できない。`base_sha` (前回 Stop が記録した HEAD) がある場合だけ:
+
+    1. `gitscan.is_local_only_range(root, base_sha)` で `base_sha..HEAD` の
+       全 commit が手元由来 (どのリモートにも存在しない) と証明できたときだけ
+       `gitscan.diff_since(root, rel, base_sha)` を試す。証明できなければ
+       (pull 等で他人の commit が混ざっている) 試さない — 送信範囲が広がる
+       方向には倒さない
+    2. それでも空なら「本当に何も変わっていない」と確定するので黙って捨てる
+       (base_sha が無い場合と同じ経路)
+    3. 基点フォールバックでも救えず、かつそのパスが実際に存在する (phantom な
+       pending エントリではない) なら `batch.unretrievable` に積む —
+       黙って消費せず、利用者にレビューされなかったことを可視化するため
+       (`_run_review` が通知にする)。`base_sha` 自体が無い (このセッションの
+       初回 Stop) 場合も「証明できない」の一種としてここに含める
 
     **予算はファイル単位で当てる**:
 
@@ -886,9 +937,9 @@ def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> Revi
       予算が残っていれば送る (first-fit)
 
     COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred_time として返す。
-    Stop 全体の hook timeout (690s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
-    git に使える時間は約 75s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
-    頭を押さえる。deferred は捨てずに pending へ戻す。
+    Stop 全体の hook timeout (700s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
+    git に使える時間は限られる (`gitscan.py` モジュール docstring の予算表を参照)。
+    経過時間で頭を押さえる。deferred は捨てずに pending へ戻す。
     """
     untracked = gitscan.untracked_among(root, rels)
     has_head = gitscan.head_exists(root)
@@ -897,13 +948,40 @@ def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> Revi
     used = 0
     deadline = time.monotonic() + COLLECT_BUDGET_SEC
 
+    # is_local_only_range は base_sha..HEAD 全体に対する判定 (パスごとに変わらない)
+    # なので、必要になった最初の 1 回だけ計算してこの Stop 内で使い回す。
+    local_only_cache: dict[str, bool] = {}
+
+    def local_only() -> bool:
+        if base_sha is None:
+            return False
+        if base_sha not in local_only_cache:
+            local_only_cache[base_sha] = gitscan.is_local_only_range(root, base_sha)
+        return local_only_cache[base_sha]
+
     for index, rel in enumerate(rels):
         if time.monotonic() > deadline:
             batch.deferred_time = [os.path.join(root, r) for r in rels[index:]]
             break
 
-        text = gitscan.path_diff(root, rel, rel in untracked, has_head)
+        is_untracked = rel in untracked
+        text = gitscan.path_diff(root, rel, is_untracked, has_head)
+        # HEAD 基準で空 = 「本当に無変更」と「同一ターン内 commit で HEAD と
+        # 一致した」のどちらかで、この時点では区別できない (docstring 参照)。
+        empty_at_head = not is_untracked and has_head and not text.strip()
+        if empty_at_head and base_sha is not None and local_only():
+            text = gitscan.diff_since(root, rel, base_sha)
+
         if not text.strip():
+            if (
+                empty_at_head
+                and os.path.exists(os.path.join(root, rel))
+                and (base_sha is None or not local_only())
+            ):
+                # 証明できない (基点が無い、または他人の commit が混ざっている)
+                # ため取得を諦める。パスが実在する (phantom な pending エントリ
+                # ではない) ときだけ「取得できなかった」と可視化する
+                batch.unretrievable.append(os.path.join(root, rel))
             continue
         abs_path = os.path.join(root, rel)
         digest = diff_hash(text)  # hash は切り詰め前の全文で取る
@@ -956,9 +1034,7 @@ def _truncate_section(text: str, limit: int) -> str:
 def _save_review_copy(session_id: str, reason: str) -> None:
     path = state.review_copy_path(session_id)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(reason)
+        flock.write_private(path, reason)
         log(f"レビュー完了 → {path}")
     except OSError:
         log("参照コピーの保存に失敗")

@@ -23,10 +23,11 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 - **POSIX 環境のみ** (Linux / macOS)。**Windows 非対応**: `exitplan-review` と
   `post-implementation-review` は状態ファイルの排他に `fcntl.flock`、外部 CLI の停止に
   `os.killpg` (プロセスグループ単位の SIGTERM/SIGKILL) を使い、どちらも POSIX 専用
-  API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は起動直後の
-  import で例外になる (`main()` を囲む try/except より前で失敗するため fail-open
-  しない)。`explore-parallel` はこの 2 つに依存しない軽量な実装 (`os.kill` ベース) だが
-  Windows での動作は未検証
+  API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は `__main__.py`
+  冒頭で `os.name != "posix"` を判定し、`fcntl` に依存する他モジュールを import する
+  前に exit 0 で抜ける (0.9.0)。0.8.0 以前はこの判定が無く、Windows では起動直後の
+  import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
+  この 2 つに依存しない軽量な実装 (`os.kill` ベース) だが Windows での動作は未検証
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
   3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
@@ -118,9 +119,19 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 作業ツリー全体の `git diff HEAD` は使わない。同一ディレクトリで複数セッションが動くと、一行も編集して
 いないセッションが隣のセッションの編集を 5〜10 分かけてレビューしてしまうため。
 
-> **既知の制限**: 変更を記録してから Stop までの間にそのファイルを commit すると、差分が空になり
-> レビューされないまま消費される。基点を過去の commit にずらす方式は「そのパスを通過した全ての変更」を
-> 拾ってしまい、他者が書いた行を外部へ送ることになるため採っていない。
+> **同一ターン内で commit した変更の扱い (0.9.0)**: 変更を記録してから Stop までの間に
+> そのファイルを commit すると、HEAD 基準の diff は空になる。0.8.0 以前はこの時点で
+> 黙って消費し、レビューされないまま消えていた。0.9.0 は Stop のたびに HEAD を
+> 「基点」として記録し、次の Stop で HEAD 基準の diff が空だったパスについて
+> `git rev-list --count <基点>..HEAD` と `--not --remotes` 付きの同カウントを比較する
+> (**手元由来の証明**)。**両者が一致する (= その範囲の commit が全てリモートに
+> 存在せず、手元だけで作られたもの) ときだけ**基点まで遡った diff を送る。
+> 一致しない (pull / merge で他人の commit が混ざっている) 場合や、そもそも基点が
+> 無い (このセッションの最初の Stop) 場合は**復元しない** — 他者が書いた行を外部
+> AI CLI へ送ってしまう方向 (送信範囲が広がる方向) には倒さない。復元できなかった
+> パスは黙って消費せず、`systemMessage` に「差分が空で取得できませんでした
+> (commit 済みの可能性)」として列挙し、次ターンに繰り返し報告しないよう pending
+> からは外す。
 
 変更パスの収集経路は 2 つ:
 
@@ -322,10 +333,11 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 次に走るレビューへまとめて載る。
 
 **1 回あたりの絶対上限**: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` の上限は `600` 秒 (10分)。
-これに kill 猶予 (最大 15秒)、git 予算 (最大 59秒)、`MODE=auto` が版数検出で
+これに kill 猶予 (最大 15秒)、git 予算 (最大 72秒。0.9.0 で基点フォールバックの
+rev-list/diff 呼び出し分が加わり 59 秒から増加)、`MODE=auto` が版数検出で
 `claude --version` の subprocess にフォールバックした場合の追加分 (最大 3秒) を
-足した合計 677秒でも収まるよう、`hooks.json` 側の Stop timeout は `690` 秒
-(約11分30秒) に設定されている。
+足した合計 690秒でも収まるよう、`hooks.json` 側の Stop timeout は `700` 秒
+(約11分40秒) に設定されている。
 exitplan-review と違って同一内容の再提出を縛る回数上限は無く、**編集のあったターンの
 Stop ごとに毎回この上限まで待ちうる** (総待ち時間はターン数に比例し上限なし。詳細は
 後述の「コストの目安」)。

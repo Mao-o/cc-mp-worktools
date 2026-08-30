@@ -160,6 +160,157 @@ class TestWorktreeRoot(GitScanTestCase):
         self.assertIsNone(gitscan.worktree_root(outside))
 
 
+class TestCurrentHead(GitScanTestCase):
+    def test_returns_head_sha(self):
+        sha = gitscan.current_head(self.repo)
+        self.assertEqual(sha, git(self.repo, "rev-parse", "HEAD").stdout.strip())
+
+    def test_no_head_returns_none(self):
+        fresh = os.path.join(self._tmp.name, "fresh-repo")
+        os.makedirs(fresh)
+        git(fresh, "init", "-q")
+        self.assertIsNone(gitscan.current_head(fresh))
+
+
+class TestIsLocalOnlyRange(GitScanTestCase):
+    """「手元由来の証明」の 4 通りの実測表。
+
+    ticket note に記載の測定値 (range / local カウント) をそのまま固定する:
+
+    | ケース                              | range | local | 判定         |
+    |-------------------------------------|-------|-------|--------------|
+    | 自分が編集して commit しただけ      | 1     | 1     | 復元してよい |
+    | そのあと merge で他人の commit が…  | 3     | 2     | 復元しない   |
+    | 編集のみ (commit なし)              | 0     | 0     | 復元してよい |
+    | fast-forward pull のみ (他人の…)    | 1     | 0     | 復元しない   |
+    """
+
+    def _add_bare_origin(self) -> tuple[str, str]:
+        """self.repo に bare origin を追加し、現在の HEAD を push する。(bare path, branch)。"""
+        bare = os.path.join(self._tmp.name, "origin.git")
+        git(self._tmp.name, "init", "--bare", "-q", "origin.git")
+        git(self.repo, "remote", "add", "origin", bare)
+        branch = git(self.repo, "branch", "--show-current").stdout.strip()
+        git(self.repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+        # clone 時に正しいブランチが checkout されるよう、bare 側の HEAD symref を揃える
+        git(bare, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        return bare, branch
+
+    def _push_foreign_commit(self, bare: str, branch: str) -> None:
+        """別クローンから commit して origin に push する (self.repo 自体は触らない —
+        「他人の commit」を用意するため)。self.repo からの fetch は呼び出し側で行う。"""
+        clone = os.path.join(self._tmp.name, "clone")
+        git(self._tmp.name, "clone", "-q", bare, "clone")
+        git(clone, "config", "user.email", "other@example.com")
+        git(clone, "config", "user.name", "other")
+        write(clone, "foreign.txt", "from someone else\n")
+        git(clone, "add", "-A")
+        git(clone, "commit", "-qm", "foreign change")
+        git(clone, "push", "-q", "origin", branch)
+
+    def test_self_commit_only_is_local(self):
+        """自分が編集して commit しただけ: range=1, local=1 -> 手元由来。"""
+        base = gitscan.current_head(self.repo)
+        write(self.repo, "a.py", "print(1)\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "self change")
+
+        self.assertEqual(gitscan._rev_list_count(self.repo, [f"{base}..HEAD"]), 1)
+        self.assertEqual(
+            gitscan._rev_list_count(self.repo, [f"{base}..HEAD", "--not", "--remotes"]), 1
+        )
+        self.assertTrue(gitscan.is_local_only_range(self.repo, base))
+
+    def test_merge_bringing_foreign_commit_is_not_local(self):
+        """自分の commit の後、merge で他人の commit も取り込む: range=3, local=2 -> 不可。"""
+        bare, branch = self._add_bare_origin()
+        base = gitscan.current_head(self.repo)
+
+        write(self.repo, "a.py", "print(1)\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "self change")
+
+        self._push_foreign_commit(bare, branch)
+        git(self.repo, "fetch", "-q", "origin")
+        git(self.repo, "merge", "-q", "--no-edit", f"origin/{branch}")
+
+        self.assertEqual(gitscan._rev_list_count(self.repo, [f"{base}..HEAD"]), 3)
+        self.assertEqual(
+            gitscan._rev_list_count(self.repo, [f"{base}..HEAD", "--not", "--remotes"]), 2
+        )
+        self.assertFalse(gitscan.is_local_only_range(self.repo, base))
+
+    def test_edit_only_without_commit_is_trivially_local(self):
+        """編集のみ (commit なし): range=0, local=0 -> 手元由来 (判定不要なほど自明)。"""
+        base = gitscan.current_head(self.repo)
+        write(self.repo, "a.py", "print(1)\n")  # commit しない
+
+        self.assertEqual(gitscan._rev_list_count(self.repo, [f"{base}..HEAD"]), 0)
+        self.assertEqual(
+            gitscan._rev_list_count(self.repo, [f"{base}..HEAD", "--not", "--remotes"]), 0
+        )
+        self.assertTrue(gitscan.is_local_only_range(self.repo, base))
+
+    def test_fast_forward_pull_only_is_not_local(self):
+        """fast-forward pull のみ (他人の commit だけ): range=1, local=0 -> 不可。"""
+        bare, branch = self._add_bare_origin()
+        base = gitscan.current_head(self.repo)
+
+        self._push_foreign_commit(bare, branch)
+        git(self.repo, "fetch", "-q", "origin")
+        git(self.repo, "merge", "-q", "--ff-only", f"origin/{branch}")
+
+        self.assertEqual(gitscan._rev_list_count(self.repo, [f"{base}..HEAD"]), 1)
+        self.assertEqual(
+            gitscan._rev_list_count(self.repo, [f"{base}..HEAD", "--not", "--remotes"]), 0
+        )
+        self.assertFalse(gitscan.is_local_only_range(self.repo, base))
+
+    def test_invalid_base_fails_closed(self):
+        """base が存在しない SHA (壊れた/到達不能) なら False (送信範囲を広げない)。"""
+        self.assertFalse(
+            gitscan.is_local_only_range(self.repo, "0" * 40)
+        )
+
+    def test_git_failure_fails_closed(self):
+        with mock.patch.object(gitscan, "_git", return_value=None):
+            self.assertFalse(gitscan.is_local_only_range(self.repo, "HEAD"))
+
+
+class TestDiffSince(GitScanTestCase):
+    def test_diff_since_base_shows_committed_change(self):
+        """基点フォールバック本体: 同一ターン内 commit で HEAD 基準が
+        空になっても、古い基点からは diff が見える。"""
+        base = gitscan.current_head(self.repo)
+        write(self.repo, "a.py", "print(1)\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "self change")
+
+        # HEAD 基準では既に commit 済みなので空
+        self.assertEqual(
+            gitscan.path_diff(self.repo, "a.py", untracked=False, has_head=True), ""
+        )
+        # 基点 (commit 前の HEAD) からは見える
+        diff = gitscan.diff_since(self.repo, "a.py", base)
+        self.assertIn("+print(1)", diff)
+
+    def test_no_actual_change_since_base_is_empty(self):
+        base = gitscan.current_head(self.repo)
+        self.assertEqual(gitscan.diff_since(self.repo, "seed.txt", base), "")
+
+    def test_committed_deletion_is_visible_from_base(self):
+        """commit 済みの削除も基点からは見える (対象ファイルが今は存在しなくても)。"""
+        base = gitscan.current_head(self.repo)
+        git(self.repo, "rm", "-q", "seed.txt")
+        git(self.repo, "commit", "-qm", "remove seed")
+
+        self.assertEqual(
+            gitscan.path_diff(self.repo, "seed.txt", untracked=False, has_head=True), ""
+        )
+        diff = gitscan.diff_since(self.repo, "seed.txt", base)
+        self.assertIn("-alpha", diff)
+
+
 class TestToRelative(GitScanTestCase):
     def test_inside_path(self):
         target = os.path.join(self.repo, "pkg", "mod.py")

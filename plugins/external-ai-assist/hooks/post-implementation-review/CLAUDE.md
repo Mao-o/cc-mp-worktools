@@ -144,7 +144,11 @@ docstring と README を参照。判定には実体 (realpath 相対。git に�
 Bash 経由の変更で、`git status` は実体名 (`ordinary/data.json`) しか返さないため lexical 名が
 claim に現れない (Codex R2 P1)。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
-rev-parse 2×2 + ls-files (symlink) 10 + ls-files (untracked) 10 + diff 30 + 5 = 59s。
+rev-parse 2秒×3 (worktree_root + head_exists + current_head) + ls-files (symlink) 10秒
++ ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒×2
+(基点フォールバックで最大 2 回 git diff を呼ぶため) + rev-list 3秒×2 (基点があるときの
+手元由来の証明) = 72s (0.9.0 で 59s から増加。詳細は `gitscan.py` モジュール docstring の
+予算表)。
 
 **予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
 切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。
@@ -209,6 +213,41 @@ turn 1 と turn 7 で同じファイルを編集すると turn 1 の hunk が tu
 ファイル全体の変更文脈を渡すため) した上で、**パス単位の diff hash** で重複を潰す:
 そのパスの diff が前回レビュー時と 1 バイトも変わっていなければレビューに載せない。
 
+### 同一ターン内 commit で HEAD 基準が空になる問題への対応 (0.9.0)
+
+HEAD 基準には副作用がある: pending に積んだ後、Stop までの間にそのパスを commit
+すると `git diff HEAD -- <path>` が空になり、0.8.0 以前は黙って消費されて一度も
+レビューされないまま消えていた。
+
+**基点を「pending 記録時点の HEAD」にずらす素朴な案は採らない。** `git diff <base> --
+<path>` は「base 時点の内容」対「現在のディスク上の内容」の比較なので、base 以降に
+そのパスを**通過した全変更**を拾う。他人の commit が pull で入っただけでも成立し、
+この plugin は差分を外部 AI CLI に送るため送信範囲が広がってしまう。
+
+**確定した設計 (基点は Stop 側で記録する)**:
+
+1. Stop の最後 (`_run_review` の冒頭。既に git を呼ぶタイミングなので追加コストは
+   `git rev-parse HEAD` 1 回分のみ) に、そのときの HEAD を `state.set_base_sha` で
+   記録する。次の Stop の基点になる
+2. HEAD 基準 diff が空だった tracked パスについて、基点があれば**手元由来の証明**を行う:
+   `git rev-list --count <base>..HEAD` と `--not --remotes` 付きの同カウントを比較し、
+   一致すれば (= その範囲の commit が全てリモートに存在せず手元だけで作られたもの)
+   `git diff <base> -- <path>` を使ってよい
+3. 基点が無い (このセッションの最初の Stop) / 証明できない (pull・merge で他人の
+   commit が混ざっている) 場合は**復元しない**。ただしパスが実在するなら
+   `systemMessage` に「差分が空で取得できませんでした」として列挙し、pending からは
+   外す (黙って消費しない。ただし証明できない旨を伝えるだけで、commit されたと
+   断定はしない — 実際には revert のみで commit が無かった可能性もあるため)
+4. 判定は `gitscan.is_local_only_range` / `gitscan.diff_since`、実装は
+   `__main__._collect_diffs` の `local_only()` / `empty_at_head` 分岐、実測は
+   `tests/test_gitscan.py::TestIsLocalOnlyRange` (自分の commit のみ / merge で
+   他人の commit が混入 / 編集のみ commit なし / fast-forward pull のみ、の 4 通り)
+
+**失敗方向は明確: 送信範囲が広がる側には倒さない。** 証明できないときは復元せず、
+レビューされなかった事実を可視化する。「黙って消える」を「取得できなかったと報告
+される」に変えるのが本対応の主眼で、基点まで遡った diff の復元は証明できた範囲での
+おまけ。
+
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 
 推測で組むと壊れる箇所なので、nested `claude -p --plugin-dir` で payload を実測した。
@@ -234,7 +273,7 @@ turn 1 と turn 7 で同じファイルを編集すると turn 1 の hunk が tu
 
 ```
 $TMPDIR/post-implementation-review/
-├── state/<session_id>.json                  pending / in_flight / reviewed
+├── state/<session_id>.json                  pending / in_flight / reviewed / base_sha
 ├── bashsnap/<session>__<tool_use_id>.json   Bash 実行前のスナップショット
 ├── locks/cursor-<cwd hash>.lock             cursor 直列化ロック
 └── reviews/<session_id>.txt                 レビュー結果の参照コピー
@@ -349,8 +388,9 @@ reference (`Stop decision control` 節) 逐語:
 - 版数を理由に auto 解決が `block` に倒れたときだけ `systemMessage` に付記文を足す
   (どの版数だったか、または「不明」)。明示 `MODE=block` では付記文を混ぜない
 - Stop の待ち時間の絶対上限が 674 秒 → 677 秒に変化 (`claude --version` の timeout
-  3秒が worst case に加わる。690秒の hook timeout には収まる。
-  `tests/test_review_set.py::TestTimeoutBudgets` 参照)
+  3秒が worst case に加わる。当時の 690秒の hook timeout には収まっていた。
+  0.9.0 で基点フォールバック分の git 予算が増えたため現在は 690 秒 → hook timeout
+  700 秒。`tests/test_review_set.py::TestTimeoutBudgets` 参照)
 - テストは実機の `claude` を起動しない。既存テストを含む全体が
   `tests/_testutil.py::PINNED_VERSION_ENV` (`CLAUDE_CODE_VERSION` を対応版数に固定) の
   下で走るため、実行環境の実際の Claude Code 版数に依存しない
@@ -383,6 +423,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
+| 同一ターン内 commit で HEAD 基準が空になっても、手元由来と証明できれば復元し、できなければ黙って消費せず通知する (0.9.0) | `TestSameTurnCommitBaseFallback` (手元由来の証明の 4 通りは `test_gitscan.py::TestIsLocalOnlyRange`) |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |

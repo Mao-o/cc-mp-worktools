@@ -5,6 +5,94 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.9.0
+
+**2026-08 内部バックログ精査の第 2 弾 (誤 block / 外部送信制御 / 長時間 block の
+離脱率低減)。挙動変更を含むため minor bump。**
+
+### 1. post-implementation-review: 同一ターン内で commit した変更が黙って消えるのを解消
+
+`state.py` は pending 記録時に git を呼ばない設計 (PostToolUse を軽く保つため) の
+ため、変更を pending に積んでから Stop までの間にそのパスを commit すると
+`git diff HEAD -- <path>` が空になり、0.8.0 以前は一度もレビューされないまま
+黙って消費されていた。
+
+基点を「pending 記録時点の HEAD」にずらす素朴な案は採らなかった: `git diff <base>
+-- <path>` は base 以降にそのパスを通過した**全ての変更**を拾ってしまうため、
+他人の commit が pull で入っただけでも成立し、この plugin が差分を送る外部 AI CLI
+への送信範囲が広がる。
+
+- **基点は Stop 側で記録する** (`state.set_base_sha` / `get_base_sha`)。Stop は
+  既に git を呼んでいるため、`gitscan.current_head` の追加コストはほぼゼロ
+- HEAD 基準 diff が空だった tracked パスは、基点があれば
+  `gitscan.is_local_only_range` で `<基点>..HEAD` の全 commit が「手元由来」
+  (どのリモート追跡ブランチにも存在しない) と証明できたときだけ、
+  `gitscan.diff_since` で基点まで遡った diff を使う
+- 基点が無い (このセッションの最初の Stop) / 証明できない (pull・merge で他人の
+  commit が混ざっている) 場合は**復元しない** (送信範囲が広がる方向には倒さない)。
+  ただしパスを黙って消費せず、そのパスが実在するなら `systemMessage` に
+  「差分が空で取得できませんでした (commit 済みの可能性)」として列挙し、次ターン
+  以降に繰り返し報告しないよう pending からは外す
+- 4 通りの実測 (自分の commit のみ / merge で他人の commit が混入 / 編集のみ commit
+  なし / fast-forward pull のみ) を使い捨て git repo で固定し
+  `tests/test_gitscan.py::TestIsLocalOnlyRange` とした。判定を入れなければ merge の
+  ケースで基点差分に他人が触ったファイルが実際に混ざることも確認済み
+- Stop の git 予算が増えたため (`gitscan.current_head` の rev-parse 1 回 +
+  `is_local_only_range` の rev-list 2 回 + 基点フォールバックで最大 2 回になる
+  path diff)、`hooks.json` の Stop timeout を `690` → `700` 秒に変更
+  (`tests/test_review_set.py::TestTimeoutBudgets` 参照)
+- 詳細な設計判断 (却下した案・失敗方向の明示) は `hooks/post-implementation-review/CLAUDE.md`
+  の「同一ターン内 commit で HEAD 基準が空になる問題への対応」節を参照
+
+### 2. Windows で `fcntl` の import 失敗により毎ツール呼出で hook error 通知が出る問題を修正
+
+`_common/flock.py` (排他ロック) と `post-implementation-review/state.py` は
+`fcntl` を直接 import しており、Windows には存在しないモジュールのため、
+`exitplan-review` と `post-implementation-review` は起動直後の import 例外で
+毎ツール呼出のたびに hook error 通知が出ていた (README の「前提」節には以前から
+この制限を明記していたが、実際にクラッシュを防ぐ判定は無かった)。
+
+- 両 hook の `__main__.py` 冒頭に `os.name != "posix"` の判定を追加し、`fcntl` に
+  依存する他モジュールを import する前に exit 0 で抜けるようにした
+- `explore-parallel` はこの 2 つに依存しない実装のため対象外 (Windows での動作は
+  引き続き未検証)
+
+### 3. cursor/codex を hook プロセスの cwd ではなくリポジトリ root で起動するよう修正
+
+`post-implementation-review/cursor.py` と `exitplan-review/{cursor,codex}.py` は
+起動 cwd を指定しておらず、外部 CLI は hook プロセス自身の cwd (Claude Code の
+起動ディレクトリ) で起動されていた。Claude Code をリポジトリのサブディレクトリで
+起動したセッションでは、差分のパス (`gitscan.py` が返す worktree root 相対) と
+cursor/codex のワークスペースが食い違い、参照・探索が外れる。
+
+- `post-implementation-review`: `cursor.review()` に `cwd` キーワード引数を追加し、
+  `_run_review` が解決済みの worktree root を渡す
+- `exitplan-review`: 新設した `_common/gitroot.py` (`worktree_root`。
+  `post-implementation-review/gitscan.py` の同名関数はここへ委譲するよう統合) で
+  payload の cwd から root を解決し、`cursor.review()` / `codex.review()` に渡す
+- git 外 (`worktree_root` が None) の場合は `cwd=None` のままとし、レビュアー自身の
+  既定 (hook プロセスの cwd) に委ねる (挙動不変)
+
+### 4. 共有 `$TMPDIR` で state / レビュー結果ファイルが他ユーザーから読める問題を修正
+
+state ファイル・Bash スナップショット・レビュー結果の参照コピーは絶対パス一覧や
+レビュー本文 (コード抜粋) を含むが、既定 umask のまま作成されていたため、
+macOS の `$TMPDIR` はユーザー専用ディレクトリで実害が無い一方、Linux の共有
+`/tmp` では他ユーザーから読めた (`-rw-r--r--` を実機で確認)。
+
+- `_common/flock.py`: 新規作成するディレクトリを 0o700、ファイルを 0o600 で
+  作るよう変更 (`locked_file` / 新設 `write_private`)。`os.makedirs(mode=...)` が
+  最後の階層にしか mode を適用しない仕様のため、多階層パスの中間ディレクトリも
+  1 階層ずつ 0o700 で作る `_makedirs_private` を追加
+- 旧版が既定 umask で作った**既存**ディレクトリは、`stategc.gc_stale()`
+  (post-implementation-review、Stop 契機) と `_gc_stale_markers()`
+  (exitplan-review、ExitPlanMode 契機) から新設 `flock.harden_dir` を呼び、
+  periodic GC のたびに 0o700 へ締め直す (retrofit)。共有 `/tmp` で他ユーザー
+  所有のディレクトリを掴んだ場合の chmod 失敗は fail-open で無視する
+- 既存ファイルの権限までは retrofit しない (親ディレクトリが 0o700 になれば
+  他ユーザーは traversal 自体ができず、ファイル単体の mode に関わらず読めなく
+  なるため)
+
 ## 0.8.0
 
 **Stop / PreToolUse(ExitPlanMode) の hook 出力形式を見直した batch (2026-08 内部

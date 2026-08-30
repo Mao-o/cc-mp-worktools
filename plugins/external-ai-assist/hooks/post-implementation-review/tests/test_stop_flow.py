@@ -824,5 +824,136 @@ class TestGuards(HookTestCase):
             self.assertReviewed("a.txt")
 
 
+class TestReviewCopyPermissions(HookTestCase):
+    """内部バックログ: レビュー結果の参照コピー (コード抜粋を含む) が共有 $TMPDIR で
+    他ユーザーから読めないこと。"""
+
+    def test_review_copy_file_is_created_with_0600(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        output = self.stop(SESSION_A, "1. **直接影響** — 何か壊れる")
+        self.assertBlocked(output)
+        path = self.state.review_copy_path(SESSION_A)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
+class TestCursorLaunchCwd(HookTestCase):
+    """cursor はリポジトリ root (payload の cwd ではなく worktree_root) で起動すること。
+
+    差分のパス (gitscan が返す worktree root 相対) と cursor のワークスペースが
+    食い違うと、サブディレクトリで Claude Code を起動したセッションで cursor 側の
+    参照・探索が外れる (内部バックログ)。
+    """
+
+    def test_review_is_invoked_with_worktree_root_as_cwd(self):
+        self.edit(SESSION_A, "a.py", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+        self.assertEqual(self.review_cwds, [self.repo])
+
+
+class TestSameTurnCommitBaseFallback(HookTestCase):
+    """同一ターン内で commit した変更が HEAD 基準の diff で空になっても、
+
+    - 手元由来 (pull 等で他人の commit が混ざっていない) と証明できれば
+      基点まで遡って復元する
+    - 証明できなければ復元せず、`systemMessage` で「取得できなかった」と
+      可視化する (黙って消費しない)
+    - どちらの場合も、そのパスが pending に残り続けて毎ターン繰り返し
+      報告されることはない
+
+    4 ケースの実測表 (range/local カウント) 自体は
+    `test_gitscan.py::TestIsLocalOnlyRange` で個別に固定済み。ここでは
+    Stop の一連の流れ (state.base_sha の読み書き → 通知 → pending 消費) を
+    確認する。
+    """
+
+    def _add_bare_origin(self) -> tuple[str, str]:
+        bare = os.path.join(self._tmp.name, "origin.git")
+        _testutil.git(self._tmp.name, "init", "--bare", "-q", "origin.git")
+        _testutil.git(self.repo, "remote", "add", "origin", bare)
+        branch = _testutil.git(self.repo, "branch", "--show-current").stdout.strip()
+        _testutil.git(self.repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+        _testutil.git(bare, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        return bare, branch
+
+    def _push_foreign_commit(self, bare: str, branch: str) -> None:
+        clone = os.path.join(self._tmp.name, "clone")
+        _testutil.git(self._tmp.name, "clone", "-q", bare, "clone")
+        _testutil.git(clone, "config", "user.email", "other@example.com")
+        _testutil.git(clone, "config", "user.name", "other")
+        _testutil.write(clone, "foreign.txt", "from someone else\n")
+        _testutil.git(clone, "add", "-A")
+        _testutil.git(clone, "commit", "-qm", "foreign change")
+        _testutil.git(clone, "push", "-q", "origin", branch)
+
+    def _establish_base(self) -> None:
+        """base_sha を確立する (何かを編集してレビューを 1 回走らせるだけの前段)。"""
+        self.edit(SESSION_A, "warmup.txt", "hello\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("warmup.txt")
+
+    def test_self_commit_within_turn_is_reviewed_via_base_fallback(self):
+        """手元由来と証明できるケース (自分の commit のみ) — 復元して送る。"""
+        self._establish_base()
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "print(1)")
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_pull_bringing_foreign_commit_is_not_restored_but_reported(self):
+        """証明できないケース (ff pull で他人の commit が混ざる) — 復元しない。"""
+        bare, branch = self._add_bare_origin()
+        self._establish_base()
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+        self._push_foreign_commit(bare, branch)
+        _testutil.git(self.repo, "fetch", "-q", "origin")
+        _testutil.git(self.repo, "merge", "-q", "--no-edit", f"origin/{branch}")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertNotIn("print(1)", message, "通知には内容を出さない")
+        self.assertEqual(
+            self.pending(SESSION_A), [], "証明できなかったパスが pending に残り続けないこと"
+        )
+
+    def test_first_ever_stop_with_committed_change_is_reported_not_restored(self):
+        """基点が無い最初の Stop (このセッションの初回レビュー) でも、commit 済みで
+        空になったパスを黙って消費しない。"""
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("a.py", message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_edit_without_commit_is_unaffected(self):
+        """回帰: commit を挟まない通常編集は基点フォールバックの対象にすらならず、
+        従来どおりそのままレビューされる。"""
+        self._establish_base()
+        self.edit(SESSION_A, "a.py", "print(1)\n")  # commit しない
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "print(1)")
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertNotIn("取得できませんでした", message)
+
+    def test_base_sha_is_recorded_after_first_review(self):
+        self.assertIsNone(self.state.get_base_sha(SESSION_A))
+        self._establish_base()
+        self.assertEqual(self.state.get_base_sha(SESSION_A), self.gitscan.current_head(self.repo))
+
+
 if __name__ == "__main__":
     unittest.main()

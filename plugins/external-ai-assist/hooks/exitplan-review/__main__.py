@@ -97,10 +97,18 @@ exit 0 + {"hookSpecificOutput": {..., "additionalContext": ...}}: MODE=context �
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import sys
+
+# Windows 非対応 (`_common.flock` が `fcntl` に依存)。他モジュールの import
+# (`_common.flock`) で ImportError が起きる前に判定して抜ける。ここより後ろで
+# import すると、Windows では毎回 hook error 通知が出てしまう
+# (対応状況は README の「前提」節を参照)。
+if os.name != "posix":
+    sys.exit(0)
+
+import hashlib
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -110,7 +118,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import flock, hooklog, notify, sentinel, settings  # noqa: E402
+from _common import flock, gitroot, hooklog, notify, sentinel, settings  # noqa: E402
 
 import codex  # noqa: E402
 import cursor  # noqa: E402
@@ -401,10 +409,17 @@ def _gc_stale_markers(now: float | None = None) -> None:
     post-implementation-review/stategc.py と同じ mtime TTL
     GC の考え方を踏襲するが、実装はこの hook 内で完結させる (hook 固有の状態機械は
     共通化しない方針)。
+
+    あわせて marker_dir の権限を retrofit する (内部バックログ)。0.8.x 以前は
+    ディレクトリを既定 umask で作っていたため、旧バージョンからアップグレードした
+    環境では既存ディレクトリが 0o700 になっていない。新規作成分は `_common.flock`
+    側 (`_makedirs_private`) が締めるので、ここでは「既に存在する」ディレクトリの
+    締め直しだけを行う。
     """
     now = time.time() if now is None else now
     tmp_root = os.environ.get("TMPDIR", "/tmp")
     marker_dir = os.path.join(tmp_root, "plan-review-markers")
+    flock.harden_dir(marker_dir)
     candidates: list[str] = []
     if os.path.isdir(marker_dir):
         try:
@@ -428,11 +443,16 @@ def _gc_stale_markers(now: float | None = None) -> None:
             continue
 
 
-def run_reviewers(plan_text: str, active: list) -> tuple[dict[str, str], dict[str, str]]:
+def run_reviewers(
+    plan_text: str, active: list, *, cwd: str | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
     """レビュアーを並列実行し `(指摘のある結果, レビュアーごとの状態)` を返す。
 
     状態は利用者向けの要約 (`systemMessage`) 用で、レビュー本文は入れない
     (`_common/notify.py` の方針)。
+
+    `cwd` は git 作業ツリーの root (`main()` が payload の cwd から解決)。git 外
+    (None) ならレビュアー自身の既定 (hook プロセスの cwd) に委ねる。
 
     全体 timeout は置かない。各レビュアーは自前の timeout で必ず返り、かつ
     `ThreadPoolExecutor` の with 終端は全 future の完了を待つため、`as_completed` に
@@ -444,7 +464,7 @@ def run_reviewers(plan_text: str, active: list) -> tuple[dict[str, str], dict[st
     results: dict[str, str] = {}
     statuses: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
-        future_map = {pool.submit(r.review, plan_text): r for r in active}
+        future_map = {pool.submit(r.review, plan_text, cwd=cwd): r for r in active}
         for future in as_completed(future_map):
             reviewer = future_map[future]
             try:
@@ -578,8 +598,9 @@ def main() -> None:
 
     mode = get_mode()
     log(f"レビュー実行 (mode={mode}): {', '.join(r.NAME for r in active)}")
+    root = gitroot.worktree_root(payload.get("cwd") or os.getcwd())
     started = time.monotonic()
-    results, statuses = run_reviewers(plan_stripped, active)
+    results, statuses = run_reviewers(plan_stripped, active, cwd=root)
     elapsed = time.monotonic() - started
 
     if not results:
@@ -633,8 +654,7 @@ def _save_review_copy(session_id: str, reason: str) -> None:
         f"plan-review-{session_id[:8]}.txt",
     )
     try:
-        with open(review_file, "w") as f:
-            f.write(reason)
+        flock.write_private(review_file, reason)
         log(f"レビュー結果を保存 → {review_file}")
     except OSError:
         log("参照コピーの保存に失敗")

@@ -45,8 +45,14 @@ def timeout_sec() -> float:
     return settings.duration(ENV_TIMEOUT, TIMEOUT_SEC, MAX_TIMEOUT_SEC)
 
 
-def review(diff_text: str) -> str | None:
-    """Cursor で差分をレビューし、整形済み結果を返す。失敗時は None。"""
+def review(diff_text: str, *, cwd: str | None = None) -> str | None:
+    """Cursor で差分をレビューし、整形済み結果を返す。失敗時は None。
+
+    `cwd` は git 作業ツリーの root を渡すこと (`__main__._run_review` が渡す)。
+    未指定 (None) だと cursor は hook プロセス自身の cwd で起動され、Claude Code を
+    サブディレクトリで起動したセッションでは diff のパス (worktree root 相対) と
+    cursor のワークスペースが食い違い、cursor 側の参照・探索が外れる (内部バックログ)。
+    """
     try:
         template = _PROMPT_FILE.read_text(encoding="utf-8")
     except OSError:
@@ -58,5 +64,6 @@ def review(diff_text: str) -> str | None:
     return subproc.run_for_output(
         cursorcli.readonly_argv(full_prompt),
         timeout_sec=timeout_sec(),
+        cwd=cwd,
         max_output_chars=MAX_OUTPUT_BYTES,
     )

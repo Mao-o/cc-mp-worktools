@@ -31,6 +31,8 @@ from __future__ import annotations
 import os
 import subprocess
 
+from _common import gitroot
+
 # 内部 timeout は hooks.json の hook timeout に**収まる**ように決める。超えると
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
@@ -39,17 +41,23 @@ import subprocess
 #   post-tool / Bash (hook 10s): worktree_root (REV_PARSE_TIMEOUT_SEC × 1) +
 #     status_snapshot (STATUS_TIMEOUT_SEC × 1) = 最悪 7s
 #   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s)
-#   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
-#     REV_PARSE_TIMEOUT_SEC × 2 (worktree_root + head_exists)
+#   stop (hook 700s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 85s):
+#     REV_PARSE_TIMEOUT_SEC × 3 (worktree_root + head_exists + current_head。
+#       基点記録の追加で 1 回増えた)
 #     + LS_FILES_TIMEOUT_SEC × 2 (symlink_map + untracked_among)
-#     + COLLECT_BUDGET_SEC 30 + PATH_DIFF_TIMEOUT_SEC × 1 (予算判定後に走る
-#       最後の 1 パス) = 59s
+#     + COLLECT_BUDGET_SEC 30 + PATH_DIFF_TIMEOUT_SEC × 2 (予算判定後に走る
+#       最後の 1 パスが、HEAD 基準 diff が空だったときの基点フォールバック
+#       diff_since も試すため最大 2 回 git diff を呼ぶ)
+#     + REV_LIST_TIMEOUT_SEC × 2 (is_local_only_range の rev-list --count 2 回。
+#       基点があり HEAD 基準 diff が空のパスが 1 件でもあれば毎 Stop 高々 1 回
+#       だけ計算しキャッシュする) = 72s
 #   実際の予算計算とテストは tests/test_review_set.py::TestTimeoutBudgets を参照。
 #   ここでの数値は目安のコメントに過ぎず、乖離したらテストの方を正とする。
 REV_PARSE_TIMEOUT_SEC = 2
 STATUS_TIMEOUT_SEC = 5
 LS_FILES_TIMEOUT_SEC = 10
 PATH_DIFF_TIMEOUT_SEC = 5
+REV_LIST_TIMEOUT_SEC = 3
 
 MAX_SNAPSHOT_ENTRIES = 5000
 
@@ -92,22 +100,68 @@ def _decode(raw: bytes | None) -> str:
 def worktree_root(cwd: str) -> str | None:
     """cwd を含む git 作業ツリーの root を realpath で返す。git 外なら None。
 
-    realpath を通すのは必須。macOS では `/tmp` が `/private/tmp` の symlink で、
-    hook payload の cwd と `git rev-parse --show-toplevel` の出力で表記が割れる。
-    素の startswith 比較だと全パスが「作業ツリー外」に落ちる。
+    実装は `_common.gitroot` に一本化している (exitplan-review も cursor/codex の
+    起動 cwd を解決するのに同じロジックが要るため。macOS の `/tmp` ->
+    `/private/tmp` symlink 対応などの詳細はそちら参照)。
     """
-    if not cwd:
-        return None
-    res = _git(cwd, ["rev-parse", "--show-toplevel"], timeout=REV_PARSE_TIMEOUT_SEC)
-    if res is None or res.returncode != 0:
-        return None
-    top = _decode(res.stdout).strip()
-    return os.path.realpath(top) if top else None
+    return gitroot.worktree_root(cwd)
 
 
 def head_exists(root: str) -> bool:
     res = _git(root, ["rev-parse", "--verify", "HEAD"], timeout=REV_PARSE_TIMEOUT_SEC)
     return res is not None and res.returncode == 0
+
+
+def current_head(root: str) -> str | None:
+    """HEAD の commit SHA。HEAD が無い (初回 commit 前) / 失敗なら None。
+
+    `state.set_base_sha` が Stop のたびに記録する「次ターンの基点」を作るための呼び出し。
+    """
+    res = _git(root, ["rev-parse", "HEAD"], timeout=REV_PARSE_TIMEOUT_SEC)
+    if res is None or res.returncode != 0:
+        return None
+    sha = _decode(res.stdout).strip()
+    return sha or None
+
+
+def _rev_list_count(root: str, args: list[str]) -> int | None:
+    res = _git(root, ["rev-list", "--count", *args], timeout=REV_LIST_TIMEOUT_SEC)
+    if res is None or res.returncode != 0:
+        return None
+    try:
+        return int(_decode(res.stdout).strip())
+    except ValueError:
+        return None
+
+
+def is_local_only_range(root: str, base: str) -> bool:
+    """`<base>..HEAD` の全 commit が「手元由来」(どのリモート追跡ブランチにも
+    存在しない) かを判定する (「手元由来の証明」)。
+
+    `<base>..HEAD` の commit 数 (全体) と、そこから `--not --remotes` で
+    「いずれかのリモート追跡ブランチに存在する commit」を除いた数 (手元由来分) を
+    比較する。一致すれば、その範囲の commit は全て手元だけで作られたもの
+    (fetch/pull/merge でリモート由来の commit が混ざっていない)。
+
+    - `base == HEAD` (新しい commit が無い) なら範囲は 0 commit で自明に一致 → True
+    - リモートが 1 つも登録されていなくても `--not --remotes` は「除外対象なし」
+      として扱われるだけなので、この判定は壊れない (全 commit が手元由来という
+      結論になる。実際そのとおり — 参照できるリモートが無ければ pull で他人の
+      commit が混ざりようがない)
+
+    git コマンドが失敗する場合 (base が無効・到達不能・timeout 等) は **False**
+    を返す (fail-closed: 送信範囲が広がる側には倒さない。呼び出し側は False を
+    「証明できない」として扱い、基点フォールバックの diff を使わない)。
+    """
+    total = _rev_list_count(root, [f"{base}..HEAD"])
+    if total is None:
+        return False
+    if total == 0:
+        return True
+    local = _rev_list_count(root, [f"{base}..HEAD", "--not", "--remotes"])
+    if local is None:
+        return False
+    return local == total
 
 
 def to_relative(root: str, path: str) -> str | None:
@@ -315,7 +369,22 @@ def path_diff(root: str, rel: str, untracked: bool, has_head: bool) -> str:
 
     # 初回コミット前の repo には HEAD が無いので staged 差分で代替する
     base = "HEAD" if has_head else "--cached"
-    res = _git(root, ["diff", "--no-color", base, "--", rel])
+    return diff_since(root, rel, base)
+
+
+def diff_since(root: str, rel: str, ref: str) -> str:
+    """ref (commit-ish、または `--cached`) から現在のディスク上の内容までの
+    1 パス分 diff を返す。差分なし / 取得失敗なら空文字。
+
+    `path_diff` の tracked 分岐 (`HEAD` / `--cached` 基準) が使うほか、基点フォールバックが
+    `git diff <base_sha> -- <path>` を取るのにも使う。
+
+    **呼び出し側は `is_local_only_range(root, ref)` で `ref..HEAD` の全 commit が
+    手元由来であることを証明してからこれを呼ぶこと** — 証明なしに使うと、
+    pull 等で入った他人の commit のぶんまで一緒に拾って外部 AI CLI へ送ってしまう
+    (送信範囲が広がる方向の失敗。この関数自体は ref の由来を検証しない)。
+    """
+    res = _git(root, ["diff", "--no-color", ref, "--", rel])
     if res is None or res.returncode != 0:
         return ""
     return _decode(res.stdout)

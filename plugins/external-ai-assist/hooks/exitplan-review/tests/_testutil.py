@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,6 +47,19 @@ FINDINGS = (
     "2. **既存コードとの衝突候補** — services/auth.py に同名の関数がある"
 )
 PLAN = "## 目的\n\nログイン API を追加する\n\n## 手順\n\n1. ルータ追加\n2. テスト追加\n"
+
+
+# 開発者の ~/.gitconfig (color.ui=always 等) でテストが揺れないよう、git にグローバル/
+# システム設定を読ませない (post-implementation-review/tests/_testutil.py と同じ配慮)。
+HERMETIC_GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def init_repo(path: str) -> str:
+    """空の git repo を作る (cursor/codex の起動 cwd 検証用)。realpath を返す。"""
+    os.makedirs(path, exist_ok=True)
+    env = {**os.environ, **HERMETIC_GIT_ENV}
+    subprocess.run(["git", "init", "-q"], cwd=path, env=env, check=True)
+    return os.path.realpath(path)
 
 
 def load_entry():
@@ -110,17 +124,26 @@ class HookTestCase(unittest.TestCase):
         plan: str,
         cursor_result: str | None,
         codex_result: str | None,
+        cwd: str | None = None,
     ) -> str:
-        """ExitPlanMode hook を 1 回起動する。両レビュアーの `review()` 戻り値を差し替える。"""
+        """ExitPlanMode hook を 1 回起動する。両レビュアーの `review()` 戻り値を差し替える。
+
+        `cwd` (payload の cwd) は既定で `self.tmpdir` (git 作業ツリーではない)。
+        cursor/codex の起動 cwd を検証したいテストは実 git repo のパスを渡す。
+        """
         cursor_calls: list[str] = []
         codex_calls: list[str] = []
+        cursor_cwds: list[str | None] = []
+        codex_cwds: list[str | None] = []
 
-        def fake_cursor(plan_text: str):
+        def fake_cursor(plan_text: str, *, cwd: str | None = None):
             cursor_calls.append(plan_text)
+            cursor_cwds.append(cwd)
             return cursor_result
 
-        def fake_codex(plan_text: str):
+        def fake_codex(plan_text: str, *, cwd: str | None = None):
             codex_calls.append(plan_text)
+            codex_cwds.append(cwd)
             return codex_result
 
         with mock.patch.object(self.cursor, "review", side_effect=fake_cursor), mock.patch.object(
@@ -131,11 +154,13 @@ class HookTestCase(unittest.TestCase):
                     "session_id": session_id,
                     "tool_name": "ExitPlanMode",
                     "tool_input": {"plan": plan},
-                    "cwd": self.tmpdir,
+                    "cwd": cwd if cwd is not None else self.tmpdir,
                 }
             )
         self.cursor_calls = cursor_calls
         self.codex_calls = codex_calls
+        self.cursor_cwds = cursor_cwds
+        self.codex_cwds = codex_cwds
         return output
 
     # -- 状態の読み出し ----------------------------------------------------
