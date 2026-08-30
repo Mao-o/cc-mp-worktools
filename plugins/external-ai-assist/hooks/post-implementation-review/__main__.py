@@ -642,9 +642,9 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     if carried:
         state.record_pending(session_id, carried)
     if batch.unretrievable:
-        # HEAD 基準の diff が空だったパス。復元は試みない (モジュール docstring
-        # 「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending には
-        # 戻さない (状況が変わらない限り毎ターン同じ結果になるだけなので、
+        # HEAD 基準の diff が空だったパス。復元は試みない (`_collect_diffs` の
+        # docstring「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending
+        # には戻さない (状況が変わらない限り毎ターン同じ結果になるだけなので、
         # 繰り返し報告しない)。
         notices.append(
             f"{len(batch.unretrievable)} ファイルは差分が空で取得できませんでした "
