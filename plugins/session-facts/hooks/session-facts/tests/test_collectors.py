@@ -8,6 +8,8 @@ from pathlib import Path
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
+from collectors.cwd_subtree import CwdSubtreeCollector
+from collectors.nextjs_facts import NextjsFactsCollector
 from collectors.repo_notes import RepoNotesCollector
 from collectors.structure import StructureCollector
 from collectors.tests import TestsCollector
@@ -127,6 +129,159 @@ class TestsCollectorAggregationTest(unittest.TestCase):
             self.assertIsNotNone(out)
             test_dir_lines = [ln for ln in out.splitlines() if ln.startswith("- test_dir:")]
             self.assertEqual(test_dir_lines, ["- test_dir: app/tests"])
+
+
+class RepoNotesRouterMixNoteTest(unittest.TestCase):
+    """core.util.has_app_router()/has_pages_router() consolidation: this note
+    and nextjs_facts.py's app_router/pages_router lines used to each
+    re-derive the same app/-vs-pages/ boolean independently. Previously
+    untested."""
+
+    def test_app_and_pages_both_present_fires_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "pages").mkdir()
+            ctx = _ctx(root, ["app/layout.tsx", "pages/index.tsx"])
+            out = RepoNotesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("app/ and pages/ both exist", out)
+
+    def test_src_app_and_src_pages_both_present_fires_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "app").mkdir(parents=True)
+            (root / "src" / "pages").mkdir(parents=True)
+            ctx = _ctx(root, ["src/app/layout.tsx", "src/pages/index.tsx"])
+            out = RepoNotesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("app/ and pages/ both exist", out)
+
+    def test_app_only_does_not_fire_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            ctx = _ctx(root, ["app/layout.tsx"])
+            out = RepoNotesCollector().collect(ctx)
+            self.assertTrue(out is None or "app/ and pages/ both exist" not in out)
+
+
+class RepoNotesFirebaseSignalTest(unittest.TestCase):
+    """core.firebase.has_firebase() consolidation: this note used to have its
+    own broader-than-the-detector check (config file, npm deps, pyproject)
+    but still missed tracked requirements*.txt files. A bare "firebase"
+    substring in a path, with no real signal backing it, must not fire."""
+
+    def test_firebase_json_with_enough_paths_fires_moderate_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "firebase.json").write_text("{}")
+            tracked = [f"functions/firebase{i}.ts" for i in range(3)]
+            ctx = _ctx(root, tracked)
+            out = RepoNotesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("firebase integration appears moderate", out)
+
+    def test_python_requirements_only_firebase_signal_fires_note(self):
+        # internal backlog: previously this note only checked pyproject.toml
+        # for Python firebase-admin, missing requirements.txt entirely.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text("firebase-admin==6.5.0\n")
+            tracked = ["requirements.txt"] + [f"app/firebase_{i}.py" for i in range(3)]
+            ctx = _ctx(root, tracked)
+            out = RepoNotesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("firebase integration appears moderate", out)
+
+    def test_firebase_named_paths_without_any_real_signal_do_not_fire(self):
+        # fb_count is only a path-name heuristic for how deep the
+        # integration is; has_firebase() must gate whether it fires at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [f"src/firebase{i}.ts" for i in range(6)]
+            ctx = _ctx(root, tracked)
+            out = RepoNotesCollector().collect(ctx)
+            self.assertIsNone(out)
+
+
+class NextjsFactsRouterTest(unittest.TestCase):
+    """core.util.has_app_router()/has_pages_router() consolidation.
+    Previously untested."""
+
+    def test_app_router_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            ctx = _ctx(root, ["app/layout.tsx"])
+            ctx.stack.append("nextjs")
+            out = NextjsFactsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("- app_router: yes", out)
+            self.assertNotIn("- pages_router: yes", out)
+
+    def test_pages_router_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pages").mkdir()
+            ctx = _ctx(root, ["pages/index.tsx"])
+            ctx.stack.append("nextjs")
+            out = NextjsFactsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("- pages_router: yes", out)
+            self.assertNotIn("- app_router: yes", out)
+
+    def test_src_app_router_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "app").mkdir(parents=True)
+            ctx = _ctx(root, ["src/app/layout.tsx"])
+            ctx.stack.append("nextjs")
+            out = NextjsFactsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("- app_router: yes", out)
+
+    def test_neither_router_dir_present_and_no_other_signal_emits_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _ctx(root, [])
+            ctx.stack.append("nextjs")
+            out = NextjsFactsCollector().collect(ctx)
+            self.assertIsNone(out)
+
+
+class CwdSubtreeFilterTest(unittest.TestCase):
+    """core.util.filter_to_cwd() consolidation: collect() now filters
+    through the shared helper (which returns root-relative paths, like its
+    other callers services.py/tests.py need) then strips the cwd prefix
+    locally, since the tree must be rooted at cwd. Previously untested."""
+
+    def test_subtree_lists_only_cwd_files_with_prefix_stripped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sub = root / "plugins" / "verify-cloud-account"
+            sub.mkdir(parents=True)
+            tracked = [
+                "plugins/verify-cloud-account/hooks/x/core/a.py",
+                "plugins/verify-cloud-account/hooks/x/services/b.py",
+                "plugins/other-plugin/hooks/y/c.py",
+            ]
+            ctx = _ctx(root, tracked, cwd=sub)
+            out = CwdSubtreeCollector().collect(ctx)
+            self.assertEqual(
+                out,
+                "## Subtree (cwd: plugins/verify-cloud-account, dirs only, depth=5)\n"
+                "└── hooks/x/\n"
+                "    ├── core/\n"
+                "    └── services/",
+            )
+
+    def test_no_cwd_scope_emits_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _ctx(root, ["src/a.py"], cwd=None)
+            self.assertFalse(CwdSubtreeCollector().should_run(ctx))
+            self.assertIsNone(CwdSubtreeCollector().collect(ctx))
 
 
 if __name__ == "__main__":

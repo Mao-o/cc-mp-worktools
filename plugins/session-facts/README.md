@@ -28,6 +28,39 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-do
   `hookSpecificOutput.additionalContext` JSON に包んで注入する。subagent には
   gitStatus が注入されないため、こちらの recent_commits は維持する。
 
+### 独自 agent への拡張
+
+同梱の `SubagentStart` hook は `matcher: "Explore"` / `matcher: "Plan"` の 2 つに固定
+されている。他のカスタム subagent (`.claude/agents/` 配下に自作したもの) の起動時にも
+同じ facts 注入を効かせたい場合、公式の `matcher` はビルトイン名だけでなくカスタム
+subagent の frontmatter `name` フィールドの値にもマッチできる (ファイル名ではない)。
+`~/.claude/settings.json` (または project の `.claude/settings.json`) に自分で
+同じコマンドを登録すればよい。例えば `name: MyAgent` という agent なら:
+
+```json
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "MyAgent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/plugins/session-facts/hooks/session-facts --format markdown --include-domain-types --emit subagent-json",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`${CLAUDE_PLUGIN_ROOT}` は plugin 同梱の hooks.json 内でこの plugin 用に解決される
+変数なので、settings.json に直接書く場合は展開に頼らず絶対パスを使う (自動注入された
+`- more:` 行に出る `invoked_as` の絶対パスがそのまま使える)。`--emit subagent-json` は
+SubagentStart で plain stdout がモデルに届かないための必須フラグ (前述の理由を参照)。
+
 ## インストール
 
 ```bash
@@ -99,11 +132,34 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 
 ### 検出できるスタック / 依存
 
-- **JS/TS**: package.json (deps / scripts / package manager)
-- **Python**: pyproject.toml / **requirements*.txt / Pipfile / setup.cfg** の主要依存
-- **Flutter/Dart**: pubspec.yaml (`stack: flutter, dart` + firebase_core / riverpod 等)
-- **Go**: go.mod
-- **タスクランナー**: Makefile の conventional target (`make test` 等) を Likely Commands へ
+`detectors/` の各ファイルが `ctx.stack` にタグを追加する (priority 昇順で実行、複数
+detector が同じ repo にヒットしてよい)。
+
+| 判定ファイル | stack タグ | 判定条件 |
+|---|---|---|
+| `mise.py` | `mise` | mise config (`.mise.toml` / `mise.toml` / `.config/mise/config.toml` / `.tool-versions` (asdf 形式も mise が解釈する)。`$HOME` 直下の XDG グローバル設定は除外) |
+| `node_typescript.py` | `node`, `typescript` | `package.json`、`tsconfig(.base).json`、または依存に `typescript` |
+| `claude_plugin.py` | `claude-code-marketplace`, `claude-code-plugin`, `hooks`/`skills`/`agents`/`commands` | `marketplace.json` / `.claude-plugin/marketplace.json` / `.claude-plugin/plugin.json` + 各サブディレクトリの存在 |
+| `deno.py` | `deno` | `deno.json(c)` |
+| `nextjs.py` | `nextjs` | 依存に `next`、または `next.config.*` |
+| `react_vite.py` | `react`, `vite` | 依存に `react`、`vite.config.(ts\|js)` |
+| `firebase.py` | `firebase`, `firebase-functions` | `firebase.json`/`.firebaserc`、npm の `firebase`/`firebase-admin`/`firebase-functions`/`@firebase/*`、Python の `firebase-admin`/`firebase-functions` (pyproject.toml / requirements*.txt。依存名の完全一致で判定)、Flutter の `firebase_core` (pubspec.yaml の `dependencies`/`dev_dependencies`/`dependency_overrides` 直下のみ判定。`flutter:` 等の無関係なセクションや深いネストにある同名キーは対象外) |
+| `prisma.py` | `prisma` | 依存に `prisma`/`@prisma/client`、または `prisma/` ディレクトリ |
+| `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`uv.toml`/`poetry.lock`、pyproject 内の framework 名 |
+| `testing.py` | `zod`, `vitest`, `jest`, `playwright`, `cypress`, `monorepo` | 各種依存 / config file、`pnpm-workspace.yaml`・`turbo.json` |
+| `go_stack.py` | `go` | `go.mod` |
+| `java_stack.py` | `java`, `gradle`, `maven` | `gradlew`/`build.gradle(.kts)`、`pom.xml` |
+| `rust_stack.py` | `rust` | `Cargo.toml` |
+| `ruby_stack.py` | `ruby` | `Gemfile` |
+| `taskrunner.py` | `makefile`, `justfile`, `taskfile`, `nx` | `Makefile`、`Justfile`/`justfile`、`Taskfile.y(a)ml`、`nx.json` |
+| `flutter.py` | `flutter`, `dart` | `pubspec.yaml` (`sdk: flutter` または `flutter:` セクション。それ以外の pubspec は `dart` のみ) |
+| `php_stack.py` | `php` | `composer.json` |
+| `docker.py` | `docker` | `Dockerfile` / `docker-compose.y(a)ml` / `compose.y(a)ml` |
+
+依存の中身 (バージョン付き一覧) は上記のスタックタグとは別に `major_dependencies` /
+`## Repo-Specific Notes` 側で収集する。Python は `pyproject.toml` /
+`requirements*.txt` / `Pipfile` / `setup.cfg` の主要依存を横断的に見る。Makefile の
+conventional target (`make test` 等) は `## Likely Commands` へ反映される。
 
 ### cwd != repo_root のとき (monorepo / サブプロジェクト構成)
 
@@ -139,8 +195,11 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 
 ## CLI オプション
 
-本体の `__main__.py` は以下の引数を受け付ける (hook から呼ぶときは `--format markdown
---include-domain-types` のみ指定)。
+本体の `__main__.py` は以下の引数を受け付ける。hook から呼ぶときの実際のコマンドは
+冒頭の表と「ベースコマンド」を参照 (Claude Code 向け `hooks/hooks.json` は、共通の
+`--format markdown --include-domain-types` に加えて timing ごとに
+`--no-recent-commits` または `--emit subagent-json` を付ける)。Codex 向け
+`hooks/codex-hooks.json` はこのベースコマンドをそのまま (追加フラグ無しで) 使う。
 
 | オプション | デフォルト | 内容 |
 |---|---|---|
@@ -178,7 +237,7 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 - repo_root: /path/to/analyzed/dir
 - git_repo: false
 - no project markers found; facts skipped
-- more: run `python3 <invoked_as> --force-walk` to force the full analysis anyway
+- more: run `python3 <invoked_as> --root /path/to/analyzed/dir --force-walk` to force the full analysis anyway
 ```
 
 `$HOME` や `Desktop` など、質問目的でコーディング用途以外のディレクトリから

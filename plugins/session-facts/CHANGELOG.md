@@ -1,5 +1,180 @@
 # Changelog
 
+## 0.9.0
+
+**Firebase 判定の一本化 / Domain Types の代表性改善 / README 同期 (v0.9)**。
+2026-08 精査バックログの続き。
+
+### 不具合修正
+
+1. **FirebaseDetector が firebase.json/.firebaserc・firebase-admin・Python/Flutter
+   依存を見ておらず、Cloud Functions 専用 repo や Python バックエンドで
+   `firebase` スタックタグが常に欠落していた問題を修正**
+   (`detectors/firebase.py`, `core/firebase.py` 新規,
+   `collectors/repo_notes.py`) — 従来は root package.json の
+   `firebase`/`@firebase/*` のみを見ており、`collectors/repo_notes.py` 側は
+   別途もう少し広い条件 (firebase.json 存在・firebase-admin・pyproject の
+   firebase-admin) を独自に持っていて 2 実装が乖離していた (実測: root に
+   firebase.json、functions/ に firebase-functions を置くモノレポで
+   `stack` から firebase が丸ごと欠落するのに `## Repo-Specific Notes` 側
+   は検出していた)。判定を `core/firebase.py::has_firebase(ctx)` に一本化
+   し、firebase.json/.firebaserc の存在、npm の
+   firebase-admin/firebase-functions/@firebase/*、Python の firebase-admin
+   (pyproject.toml に加えて requirements*.txt も走査)、Flutter の
+   firebase_core (pubspec.yaml) を検出条件に追加した。stack タグは
+   `firebase` に加え、root package.json に `firebase-functions` が直接
+   依存として入っている場合は `firebase-functions` も区別して付与する
+   (Cloud Functions 専用リポジトリと判別できるように)。`has_firebase()` は
+   detector・collector の両方から 1 回の解析につき呼ばれるため
+   `ctx.results` にメモ化し、Python 依存の requirements*.txt 走査 (最大 6
+   ファイル) が二重に走らないようにした。**Python 側の判定は当初
+   pyproject.toml/requirements*.txt 全文に対する部分一致だったため、
+   `name = "firebase-admin-helper"` のような無関係な記述や
+   `not-firebase-admin` のような類似パッケージ名でも `firebase` タグが
+   誤って付いていた。pyproject.toml は `tomllib` (0.6.0 では環境間の
+   挙動差を避けるため見送っていたが、本プロジェクトが Python 3.11+ を
+   前提にしたことで見送り理由が解消) で構造的に解析し、`[project]
+   dependencies`・`[project.optional-dependencies]` 各グループ・
+   `[tool.poetry.dependencies]`・レガシー
+   `[tool.poetry.dev-dependencies]`・`[tool.poetry.group.*.dependencies]`・
+   PEP 735 `[dependency-groups]` 各グループに加え、`[tool.uv]` の
+   `dev-dependencies`・`[tool.pdm.dev-dependencies]` 各グループ・
+   `[tool.hatch.envs.*]` の `dependencies`/`extra-dependencies` を対象に
+   宣言済み依存名を集める。requirements*.txt 側は各行から PEP 508 の
+   名前部分のみを抽出する (`#` コメント・`-r`/`-e`/`--` オプション行・
+   `;` marker・`[extras]`・バージョン指定子・`@ url` を除去)。両方とも
+   名前を PEP 503 正規化 (小文字化 + `-`/`_`/`.` の連続を `-` に統一) した
+   上で `firebase-admin`/`firebase-functions` と完全一致するかで判定する
+   (npm 側の `ctx.all_deps` は元々 dict のキー一致であり同種の穴は無い
+   ことを確認済み)。TOML の parse 失敗 (壊れた構文、深いネストによる
+   `RecursionError` 含む) は例外を握りつぶし「検出しない」に倒す**。
+   **requirements*.txt のレガシー VCS 形式
+   (`git+https://.../pkg.git#egg=pkg`、`-e` 付き editable 行も含む) は
+   名前トークンが `#egg=` fragment にしかなく上記の行頭抽出では拾えず
+   検出漏れになっていた (旧来の全文部分一致ではこの断片ごと拾えていたため、
+   ここは退行) ため、`#egg=` の値 (`&`/`[` の手前まで) を通常の抽出より
+   優先して名前として採用するよう追加修正した**。
+   **Flutter 側 (pubspec.yaml) の判定もファイル全体に対する `firebase_core:`
+   行の正規表現一致だったため、`dependencies` 配下かどうかを区別せず、
+   無関係な top-level セクション (独自ツール設定や `flutter:` セクションなど)
+   直下や、その配下のさらに深いネストにある同名キーにも誤ってマッチして
+   いた (実測: 無関係な top-level セクション `custom_tool:`/`flutter:` の
+   直下、および `flutter:` 配下にネストした `dependencies:` の子、の
+   いずれに `firebase_core:` キーを置いても `firebase` タグが誤って付く
+   ことを確認)。pubspec.yaml の
+   `dependencies`/`dev_dependencies`/`dependency_overrides` セクション直下
+   (セクション最初の子行のインデント幅を基準とする 1 階層のみ) にある
+   `firebase_core:` キーだけを対象にするよう走査範囲を限定した (フロー形式
+   `dependencies: { firebase_core: ... }` のインライン依存宣言は対象外の
+   まま非検出に倒す)**
+2. **出力に埋め込むコマンドヒントのうち `--help` を指す方が解析対象
+   ディレクトリを引数に含んでおらず、別ディレクトリからコピー実行すると
+   ヘッダーに表示されているディレクトリとは異なる (実行したエージェントの
+   cwd の) 結果が返る問題を修正** (`renderer.py`) — `--force-walk` を指す
+   ヒント側は既に別リリースで `--root` 込みに直っていたが、`--help` を
+   指すヒントは同じ構造のまま残っていた。ヒント生成を
+   `renderer.py::build_rerun_hint()` に一本化し、両方のヒントが解析対象の
+   `--root` を必ず含むようにした (このヒントの実行可能性の修正はこれで
+   3 度目 — 過去に「python3 プレフィックス欠落」「パス未クォート」を
+   それぞれ直している。1 箇所に集約したことで今後の同種の欠落は 1 回の
+   修正で両方に効く)。**外部レビュー追加指摘**: この `--help` ヒントは
+   サブディレクトリを `--root` に指定して解析した場合でも埋め込む値が
+   `ctx.root` (git top level) のままで、ヒントをコピー実行するとリポジトリ
+   全体が再解析され元の cwd スコープ (`## Subtree` や絞り込み) を黙って
+   失っていたため、埋め込む値を解析した元のパス (`ctx.cwd` がリポジトリ内
+   ならそれ、スコープ付きパスが無い場合のみ `ctx.root`) に変更した
+   (`core/context.py::RepoContext.rerun_root` 新設)
+
+### 改善
+
+3. **Domain Types が候補ファイルを先頭から順に走査し件数上限に達した時点で
+   打ち切るため、型定義が集中している 1 ファイルにだけ表示が偏っていた
+   問題を修正** (`collectors/domain_types.py`) — ファイルあたりの表示上限
+   (3 件) を設け、候補ファイル群をラウンドロビンで走査して複数モジュールから
+   集めるようにした (>= 5 件の cluster ゲート自体は表示上限と独立に判定
+   するため、1 ファイルだけで genuine な cluster を持つリポジトリの検出は
+   後退しない)。`.d.ts`・`vendor/`・`generated/`・`*.generated.*`・
+   `*.pb.*` を候補から除外 (外部 SDK の型宣言や生成コードが枠を占有していた
+   実例あり)。出力を `- <path>: A, B, C` のファイル単位にまとめ、同じ件数
+   でも行数を削減した。**表示上限により、以前は 1 ファイルから
+   `--max-domain-types` 件フルに出ていたケースでも、他に候補が乏しい
+   リポジトリでは合計の表示件数がそれより少なくなることがある**
+   (複数モジュールにまたがる代表性を優先するトレードオフ)。この collector
+   は hooks.json で `--include-domain-types` が常時付与されており事実上
+   opt-in ではないため、候補ファイル数にも上限 (20 ファイル) を設けて
+   1 回の hook 呼び出しあたりの走査コストを抑えている。**この 20 ファイル
+   の上限は走査コストにのみ効く soft cap であり、>= 5 件の cluster ゲートが
+   未充足の間は 20 ファイルを超えても走査を続ける (ゲートが先に満たされた
+   場合だけ、それ以降の候補ファイルを開かずに打ち切る)** — 事前に候補
+   リストそのものを 20 件へ切り詰めていた版では、モノレポで genuine な
+   型定義ディレクトリが `git ls-files` 順で 20 番目より後ろに来ると
+   `## Domain Types` セクションが丸ごと出力されなくなる問題があった。
+   **ただしこの soft cap はゲート充足時にしか新規ファイルのオープンを
+   止めないため、domain-path には一致するが型宣言が少なく >= 5 の
+   cluster ゲートが最後まで満たされない repo では、候補ファイルを毎回の
+   hook 呼び出しで全件オープンしてしまい走査コストの上限が実質無かった。
+   ゲートの充足有無に関わらず打ち切る hard cap
+   (`_MAX_SCANNED_FILES` = 開いたファイル数で 200) を追加し、この裾ケースの
+   走査コストにも上限を設けた** (200 は 1 回の hook 呼び出しで許容できる
+   I/O の目安として設定。20 の soft cap より十分大きいため、soft cap を
+   超えてから見つかる genuine cluster の検出は後退しない)
+
+### ドキュメント
+
+4. **README の CLI オプション表・検出スタック一覧・SubagentStart 拡張手順が
+   実装と乖離していた問題を修正** (`README.md`) — 「検出できるスタック /
+   依存」節が JS/TS・Python・Flutter・Go・Makefile のみの記載で、
+   detectors/ 配下の rust/ruby/php/java/deno/docker/claude_plugin/prisma
+   を含む全 18 detector を網羅していなかったため、`detectors/` 一覧表
+   (判定ファイル・stack タグ・判定条件) に置き換えた。「hook から呼ぶときは
+   `--format markdown --include-domain-types` のみ指定」という記載は
+   実際の hooks.json (`--no-recent-commits` / `--emit subagent-json` が
+   timing ごとに付く) と矛盾していたため、冒頭の正しい表を参照する記述に
+   修正した。SubagentStart は hooks.json で `Explore`/`Plan` に固定されて
+   いるが、公式の `matcher` はカスタム subagent の frontmatter `name` にも
+   マッチするため、独自 agent へ同じ facts 注入を広げる settings.json の
+   例を追加した。なお CLI オプション表自体は `--include-hub-files`/
+   `--max-hub-files` を含めて既に最新化されていたため (この点は差分なし)、
+   `--help` の全フラグが README に含まれることを検証するテストを追加して
+   再発を防止した (`cli.py` の引数パーサ構築を `build_parser()` に切り出し、
+   `tests/test_cli.py` から parser を直接検査できるようにした)
+
+### 保守
+
+5. **未使用のヘルパー関数と重複ロジックを整理**
+   (`core/git.py`, `core/context.py`, `collectors/scripts.py`,
+   `core/util.py`, `collectors/repo_notes.py`, `collectors/nextjs_facts.py`,
+   `collectors/cwd_subtree.py`) — 参照ゼロを確認したうえで、`core/git.py`
+   の `git_root`/`is_git_repo` (呼び出し側はどちらも `git_root_or_none` を
+   使用)、`core/context.py` の Python 3.8 未満向け `typing_extensions`
+   fallback import (3.11+ 方針のため不要)、`collectors/scripts.py` の
+   1 行ラッパー `_detect_package_manager` を削除した。app/pages ルータ判定
+   が `collectors/repo_notes.py` と `collectors/nextjs_facts.py` に、cwd
+   フィルタが `collectors/cwd_subtree.py` と既存の
+   `core/util.py::filter_to_cwd()` に、それぞれ重複していたのを
+   `core/util.py::has_app_router()`/`has_pages_router()` と
+   `filter_to_cwd()` の呼び出しに統一した (`cwd_subtree.py` はツリーを
+   cwd 基点で描画する必要があるため、共有フィルタの結果からさらに prefix
+   を剥がす箇所だけは独自のまま残した)
+
+テスト 326 件 (新規 69 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
+テストとメモ化テスト (`tests/test_detectors.py` 新設)、Python 依存判定の
+exact-match テスト (`name = "firebase-admin-helper"` / `not-firebase-admin`
+等の誤検出 2 例、npm 側に同種の穴が無いことの確認、PEP 621/Poetry (レガシー
+dev-dependencies・group 含む)/PEP 735/uv/PDM/Hatch 各テーブルの正検出、
+requirements*.txt の extras・marker・アンダースコア表記・コメント/オプション行、
+壊れた TOML と深いネスト (`RecursionError`) でクラッシュしないこと)、
+`collectors/domain_types.py` のラウンドロビン分散・cluster ゲートと表示上限
+の独立性・除外パターン・候補ファイル数上限 (gate 充足後のみ打ち切る soft cap
+であることの境界値、および gate の充足有無に関わらず打ち切る hard cap
+との境界値) のテスト、
+`collectors/repo_notes.py`/`collectors/nextjs_facts.py`/
+`collectors/cwd_subtree.py` の router/firebase/subtree フィルタ (従来
+カバレッジが無かった箇所)、`- more:` ヒントの `--root` 込み再検証と実
+サブプロセスでの実行可能性チェック、README の CLI オプション表同期チェック
+(表の行だけを対象にし、他節のサンプルコマンドや説明文中の同名フラグを
+誤って合格させないよう範囲を厳密化)。
+
 ## 0.8.0
 
 **出力サイズ上限 / 非プロジェクトディレクトリ抑止 / test_dir 集約修正

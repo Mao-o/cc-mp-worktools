@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
-
-try:
-    from typing import TypedDict
-except ImportError:
-    from typing_extensions import TypedDict
+from typing import Dict, List, Optional, TypedDict
 
 from .constants import (
     DEFAULT_MAX_CONFIG_HINTS,
@@ -50,6 +45,9 @@ class ResultsDict(TypedDict, total=False):
     major_dependencies: List[str]
     runtime: RuntimeInfo
     test_snapshot: TestSnapshot
+    # Memoization slot for core.firebase.has_firebase(), set by whichever of
+    # detectors/firebase.py / collectors/repo_notes.py runs first.
+    has_firebase: bool
 
 
 @dataclass
@@ -112,6 +110,28 @@ class RepoContext:
         if rel_str in ("", "."):
             return None
         return rel_str
+
+    @property
+    def rerun_root(self) -> Path:
+        """The path a rerun hint's ``--root`` should embed: cwd when it
+        names root itself or a subdirectory of root, else root (cwd
+        unset, or -- defensively, since the real hook invocation never
+        constructs this case -- outside root).
+
+        root is the git top-level, but a run started against a
+        subdirectory (cwd) must keep that same scope when its printed
+        hint (see renderer.build_rerun_hint()) is copied and rerun.
+        Embedding root unconditionally would silently re-analyze the
+        whole repository on rerun and drop whatever cwd-scoped context
+        (``## Subtree``, test filtering, ...) the original run had.
+        """
+        if self.cwd is None:
+            return self.root
+        try:
+            self.cwd.resolve().relative_to(self.root.resolve())
+        except ValueError:
+            return self.root
+        return self.cwd
 
     @property
     def package_json(self) -> dict:

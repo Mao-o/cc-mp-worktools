@@ -8,7 +8,11 @@ from core.fs import read_text
 
 # A TOML scalar (``"3.12"``), array (``["3.12", "3.11"]``), or inline table
 # (``{version = "3.12", ...}``) value, used to pull a version out of mise/poetry
-# entries without a TOML parser (tomllib is intentionally avoided — see CLAUDE.md).
+# entries via a small value-shape regex instead of a full TOML parse -- this
+# module only ever needs to read one already-located value at a time, not a
+# structural parse of the whole file. Not a project-wide "no tomllib" rule:
+# core/firebase.py's Python-dependency check does use tomllib, where parsing
+# several whole tables structurally is what's actually needed.
 _QUOTED_RE = re.compile(r"""["']([^"']*)["']""")
 _INLINE_VERSION_RE = re.compile(r"""\bversion\s*=\s*["']([^"']*)["']""")
 # A bare ``key = value`` assignment line inside a TOML table.

@@ -158,7 +158,17 @@ def parse_pubspec_deps(text: str) -> List[Tuple[str, str]]:
     return out
 
 
-# --- pyproject.toml table parsing (no tomllib; regex per CLAUDE.md house style) ---
+# --- pyproject.toml table parsing (regex-based, not tomllib) ---
+#
+# This is a deliberate per-module choice, not a project-wide "no tomllib"
+# rule: core/firebase.py's Python-dependency check does use tomllib (see
+# its _pyproject_dependency_names()). This module keeps its own
+# regex/manual-slicing parser instead because it also needs version
+# strings out of poetry's various value shapes (plain string, inline
+# table, array) via core/runtime.py's first_version() -- tomllib would
+# still hand back those same shapes to unwrap, so switching parsers here
+# wouldn't remove that step, only add a second parsing path to keep in
+# sync with this one.
 
 
 def _slice_toml_table(text: str, table: str) -> str:

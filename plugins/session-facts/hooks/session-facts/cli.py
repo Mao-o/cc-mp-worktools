@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -37,7 +36,7 @@ from core.pm import detect_package_manager
 from core.runtime import MISE_CONFIG_NAMES, is_home_dir, mise_config_path
 from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
-from renderer import render_header
+from renderer import build_rerun_hint, build_root_arg, render_header
 
 # PROJECT_MARKERS minus the mise config names: those three are checked via
 # mise_config_path() in _has_relevant_project_markers() below instead of a
@@ -232,11 +231,19 @@ def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
     directory nor the existence of a flag to force a full scan is
     otherwise discoverable from this output alone, points at --force-walk
     so an agent that actually needed the full analysis here isn't stuck
-    with no way out. Mirrors renderer._render_more_hint()'s
-    invoked_as/shlex.quote handling: invoked_as is sys.argv[0], the
-    *directory* the interpreter was pointed at for a real hook run, so the
-    printed command keeps the ``python3 `` prefix and quotes the path in
-    case the plugin is installed under a directory containing spaces.
+    with no way out. Uses renderer.build_rerun_hint() for the command
+    string (see its docstring for why --root is always included and both
+    paths are shell-quoted) so this hint and _render_more_hint()'s share
+    one implementation.
+
+    Unlike _render_more_hint(), this passes root itself rather than a
+    RepoContext.rerun_root -- there is no separate cwd to prefer here.
+    This function only ever runs from summarize_repo()'s non-git marker
+    gate, where main()'s git-root probe returned None (is_git=False) and
+    it therefore fell back to root = resolved -- the same path it passes
+    as cwd. So root here already is the same path rerun_root would
+    resolve to; a git repo's root/cwd split (the case rerun_root exists
+    for) cannot arise on this non-git path.
     """
     lines = [
         "## Project Facts",
@@ -244,17 +251,11 @@ def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
         "- git_repo: false",
         "- no project markers found; facts skipped",
     ]
-    # ヒントには解析対象 root を必ず含める。`--root` を明示して別ディレクトリ
-    # から起動された場合、root を落としたヒントをそのまま実行すると
-    # `Path.cwd()` が解析され、ヘッダーに出している repo_root とは別の
-    # ディレクトリの結果が返る (復帰経路として機能しない)。
-    root_arg = f"--root {shlex.quote(str(root))}"
-    if invoked_as:
-        lines.append(
-            f"- more: run `python3 {shlex.quote(invoked_as)} {root_arg} "
-            "--force-walk` to force the full analysis anyway"
-        )
+    cmd = build_rerun_hint(invoked_as, root, "--force-walk")
+    if cmd:
+        lines.append(f"- more: run `{cmd}` to force the full analysis anyway")
     else:
+        root_arg = build_root_arg(root)
         lines.append(
             f"- more: pass `{root_arg} --force-walk` to force the full "
             "analysis anyway"
@@ -390,7 +391,15 @@ def _non_negative_int(raw: str) -> int:
     return value
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI's argparse parser.
+
+    Split out from parse_args() so tests (and anything else that needs the
+    full flag list, not just one parsed Namespace) can introspect the parser
+    itself -- e.g. tests/test_cli.py checks every registered flag is
+    documented in README.md's CLI options table, which drifted out of sync
+    with this list before (internal backlog).
+    """
     parser = argparse.ArgumentParser(
         description="Generate a compact session-start facts bundle for coding agents."
     )
@@ -504,7 +513,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "JSON envelope ('subagent-json')."
         ),
     )
-    return parser.parse_args(argv)
+    return parser
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

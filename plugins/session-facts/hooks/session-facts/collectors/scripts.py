@@ -73,10 +73,6 @@ def _collect_scripts(ctx: RepoContext, max_items: int) -> List[Dict[str, str]]:
     return [{"name": name, "command": command} for _score, name, command in scored[:max_items]]
 
 
-def _detect_package_manager(ctx: RepoContext) -> Optional[str]:
-    return ctx.results.get("package_manager")
-
-
 def _runner_prefix(ctx: RepoContext) -> Optional[str]:
     """Local-tool command prefix from the detected runtime, or None.
 
@@ -117,7 +113,7 @@ def _make_commands(ctx: RepoContext, max_items: int) -> List[str]:
 
 def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     scripts = _collect_scripts(ctx, max_items=50)
-    pm = _detect_package_manager(ctx)
+    pm = ctx.results.get("package_manager")
     stack = set(ctx.stack)
     commands: List[str] = []
 

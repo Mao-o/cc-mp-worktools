@@ -41,7 +41,7 @@ python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-ty
 
 skill ディレクトリから見た相対パス `../../hooks/session-facts` も使えますが、これは**この `SKILL.md` 自身の絶対パス (`<plugin-root>/skills/session-facts/`) が分かっている場合限定**のフォールバックです — パスが分からない状態では起点にできないため、優先順位は「環境変数 → `- more:` 行の絶対パス → この相対パス」の順にしてください。いずれの場合も**作業ディレクトリは解析対象 repo** にしてください (ツール自身は `--root` か cwd で対象を決めます)。
 
-自動注入された `## Project Facts` の `- more:` 行には、実際に呼ばれたパス込みで `python3 <invoked_as> --help` が書かれています。それをそのまま実行すればオプション全量が確認できます (`<invoked_as>` はディレクトリを指すことがあり、`python3` を付けないと実行できません)。
+自動注入された `## Project Facts` の `- more:` 行には、実際に呼ばれたパスと解析対象ディレクトリ込みで `python3 <invoked_as> --root <analyzed-root> --help` が書かれています。それをそのまま実行すればオプション全量が確認できます (`<invoked_as>` はディレクトリを指すことがあり、`python3` を付けないと実行できません。`--root` は別ディレクトリから実行してもこのヘッダーが解析した対象を指すよう常に含まれます)。
 
 ## 使い方
 

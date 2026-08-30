@@ -16,23 +16,11 @@ def run(cmd: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def git_root(start: Path) -> Path:
-    cp = run(["git", "rev-parse", "--show-toplevel"], start)
-    if cp.returncode == 0 and cp.stdout.strip():
-        return Path(cp.stdout.strip())
-    return start.resolve()
-
-
 def git_root_or_none(start: Path) -> "Optional[Path]":
     cp = run(["git", "rev-parse", "--show-toplevel"], start)
     if cp.returncode == 0 and cp.stdout.strip():
         return Path(cp.stdout.strip())
     return None
-
-
-def is_git_repo(root: Path) -> bool:
-    cp = run(["git", "rev-parse", "--is-inside-work-tree"], root)
-    return cp.returncode == 0 and cp.stdout.strip() == "true"
 
 
 def git_ls_files(root: Path) -> List[str]:
