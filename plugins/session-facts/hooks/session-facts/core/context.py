@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
-
-try:
-    from typing import TypedDict
-except ImportError:
-    from typing_extensions import TypedDict
+from typing import Dict, List, Optional, TypedDict
 
 from .constants import (
     DEFAULT_MAX_CONFIG_HINTS,
@@ -50,6 +45,9 @@ class ResultsDict(TypedDict, total=False):
     major_dependencies: List[str]
     runtime: RuntimeInfo
     test_snapshot: TestSnapshot
+    # Memoization slot for core.firebase.has_firebase(), set by whichever of
+    # detectors/firebase.py / collectors/repo_notes.py runs first.
+    has_firebase: bool
 
 
 @dataclass

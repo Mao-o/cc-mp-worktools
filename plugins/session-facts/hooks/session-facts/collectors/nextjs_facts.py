@@ -6,7 +6,7 @@ from typing import List, Optional
 from core.constants import NEXT_CONFIG_CANDIDATES
 from core.context import RepoContext
 from core.fs import read_text
-from core.util import normalize_version
+from core.util import has_app_router, has_pages_router, normalize_version
 
 
 class NextjsFactsCollector:
@@ -25,11 +25,9 @@ class NextjsFactsCollector:
         if version:
             lines.append(f"- next_version: {normalize_version(str(version))}")
 
-        app_router = (root / "app").is_dir() or (root / "src" / "app").is_dir()
-        pages_router = (root / "pages").is_dir() or (root / "src" / "pages").is_dir()
-        if app_router:
+        if has_app_router(root):
             lines.append("- app_router: yes")
-        if pages_router:
+        if has_pages_router(root):
             lines.append("- pages_router: yes")
 
         config_text = ""

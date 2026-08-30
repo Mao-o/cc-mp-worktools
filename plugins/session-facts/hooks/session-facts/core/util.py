@@ -94,6 +94,24 @@ def is_code_file(path_str: str) -> bool:
     return Path(path_str).suffix.lower() in CODE_EXTENSIONS and not is_test_path(path_str)
 
 
+def has_app_router(root: Path) -> bool:
+    """True when an ``app/`` (or ``src/app/``) directory exists.
+
+    Shared by collectors/nextjs_facts.py (``- app_router: yes``) and
+    collectors/repo_notes.py (the "router style may be mixed" note), which
+    each used to compute this exact boolean inline independently -- two
+    copies of the same check with no shared source of truth. See
+    has_pages_router() for its counterpart.
+    """
+    return (root / "app").is_dir() or (root / "src" / "app").is_dir()
+
+
+def has_pages_router(root: Path) -> bool:
+    """True when a ``pages/`` (or ``src/pages/``) directory exists. See
+    has_app_router()."""
+    return (root / "pages").is_dir() or (root / "src" / "pages").is_dir()
+
+
 def filter_to_cwd(tracked_files, cwd_relative):
     if not cwd_relative:
         return list(tracked_files)

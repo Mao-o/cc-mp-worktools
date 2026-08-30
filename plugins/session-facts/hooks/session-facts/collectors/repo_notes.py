@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 from core.context import RepoContext
+from core.firebase import has_firebase
+from core.util import has_app_router, has_pages_router
 
 
 class RepoNotesCollector:
@@ -42,9 +43,7 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
     if has_features and has_components:
         add("features/ and components/ both exist; feature modules and shared UI appear separated")
 
-    has_app = (root / "app").is_dir() or (root / "src" / "app").is_dir()
-    has_pages = (root / "pages").is_dir() or (root / "src" / "pages").is_dir()
-    if has_app and has_pages:
+    if has_app_router(root) and has_pages_router(root):
         add("app/ and pages/ both exist; router style may be mixed or transitional")
 
     script_names = list((ctx.package_json.get("scripts") or {}).keys())
@@ -73,24 +72,14 @@ def _collect_repo_specific_notes(ctx: RepoContext, max_items: int) -> List[str]:
         for i, lp in enumerate(lowered)
         if "/firebase/" in lp or "firebase" in lp.rsplit("/", 1)[-1]
     ]
-    has_firebase_config = (root / "firebase.json").exists() or (root / ".firebaserc").exists()
-    deps = ctx.all_deps
-    firebase_in_deps = (
-        "firebase" in deps
-        or "firebase-admin" in deps
-        or "firebase-functions" in deps
-        or any(name.startswith("@firebase/") for name in deps)
-    )
-    pyproject_lower = ctx.pyproject_toml.lower()
-    firebase_in_pyproject = "firebase-admin" in pyproject_lower or "firebase_admin" in pyproject_lower
-    firebase_real = has_firebase_config or firebase_in_deps or firebase_in_pyproject
     fb_count = len(firebase_paths)
-    if firebase_real and fb_count >= 6:
-        add("firebase integration appears substantial")
-    elif firebase_real and fb_count >= 3:
-        add("firebase integration appears moderate")
-    elif firebase_real and fb_count >= 1:
-        add("firebase integration appears minimal")
+    if has_firebase(ctx):
+        if fb_count >= 6:
+            add("firebase integration appears substantial")
+        elif fb_count >= 3:
+            add("firebase integration appears moderate")
+        elif fb_count >= 1:
+            add("firebase integration appears minimal")
 
     api_paths = [
         tracked_files[i]
