@@ -1,0 +1,273 @@
+name: llms-docs upstream canary
+
+# llms-docs (plugins/llms-docs) はサードパーティの llms.txt / llms-full.txt を
+# パースしている。上流のレイアウトが変わってもユニットテストは fixture ベース
+# なので気付けない (実例: CHANGELOG の ai-sdk 0 件バグは利用時まで発覚しなかった)。
+# このワークフローは一時 cache dir で実際に上流へアクセスし、件数・join rate・
+# 代表クエリの hit を実測して異常があれば issue を自動起票する "live smoke" 用。
+# 通常の pull_request/push 検証 (validate.yml) とは目的が異なるため別ファイルに分離。
+
+on:
+  schedule:
+    # validate.yml の週次 canary (毎週月曜 06:00 UTC) と時間帯・曜日をずらし、
+    # 上流サイトへのアクセスが同時間帯に重ならないようにする。
+    - cron: '0 16 * * 4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: llms-docs-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      # llms-docs の README 記載どおり 3.11+ 必須 (PEP 604 記法を定義時に評価)。
+      # validate.yml のユニットテスト実行と同じ 3.12 に揃える。
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 一時 cache dir (runner.temp 配下、job 終了で破棄される) を
+      # LLMS_DOCS_CACHE_DIR で指定し、常に実際の上流から取得させる
+      # (README: 既定は $XDG_CACHE_HOME/llms-docs や ~/.cache/llms-docs だが
+      # LLMS_DOCS_CACHE_DIR はこの plugin 自身の完全上書き用エスケープハッチ)。
+      #
+      # 閾値は 2026-08-30 に手元で fetch-index/search を実行して実測した値の
+      # およそ 50〜70% を下限にしている (実測: code 202 / platform 688 /
+      # ai-sdk 571 / firebase 7162 件)。join rate は _common.py
+      # check_join_rate() 自体が warn/fail の境界に使っている 0.8 をそのまま
+      # 採用 (この値は成長する件数ではなく比率なので実測による再校正は不要)。
+      - name: Run live smoke checks against upstream llms.txt sources
+        env:
+          LLMS_DOCS_CACHE_DIR: ${{ runner.temp }}/llms-docs-canary-cache
+          CANARY_RESULT_PATH: ${{ runner.temp }}/llms-docs-canary-result.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+
+          SCRIPTS = "plugins/llms-docs/scripts"
+          PYTHON = sys.executable
+          RESULT_PATH = os.environ["CANARY_RESULT_PATH"]
+
+
+          def run_once(args):
+              try:
+                  proc = subprocess.run(
+                      [PYTHON, *args], capture_output=True, text=True, timeout=60
+                  )
+                  return proc.returncode, proc.stdout, proc.stderr
+              except subprocess.TimeoutExpired as e:
+                  return 124, "", f"Error: command timed out after 60s: {e}"
+              except OSError as e:
+                  return 127, "", f"Error: failed to launch command: {e}"
+
+
+          def run_with_retry(args, label):
+              # ネットワークの一時失敗と上流フォーマット変化を区別するため、
+              # 失敗したら1回だけ再試行してから最終判定する。
+              code, out, err = run_once(args)
+              if code != 0:
+                  print(f"[{label}] first attempt failed (exit {code}); retrying once in 10s...", file=sys.stderr)
+                  time.sleep(10)
+                  code, out, err = run_once(args)
+              return code, out, err
+
+
+          def classify_failure(err):
+              if "format may have changed" in err or "join rate" in err:
+                  return "structural"
+              return "fetch"
+
+
+          checks = []
+
+
+          def record(name, ok, detail, kind=None):
+              checks.append({"name": name, "ok": ok, "kind": kind, "detail": detail})
+              marker = "notice" if ok else "error"
+              status = "PASS" if ok else f"FAIL ({kind})"
+              print(f"::{marker}::[{name}] {status}: {detail}")
+
+
+          def run_check(name, args, extract):
+              try:
+                  code, out, err = run_with_retry(args, name)
+                  if code != 0:
+                      record(name, False, f"command failed after retry (exit {code}): {err.strip()[-300:]}", classify_failure(err))
+                      return
+                  ok, detail, kind = extract(out, err)
+                  record(name, ok, detail, kind)
+              except Exception as e:  # noqa: BLE001 - a bug here must not crash the whole canary
+                  record(name, False, f"canary script raised {type(e).__name__}: {e}", "structural")
+
+
+          # entries >= floor (fetch-index; live-fetches the lightweight llms.txt index)
+          ENTRIES_CHECKS = [
+              ("code entries", [f"{SCRIPTS}/parse-claude-docs.py", "fetch-index", "--source", "code", "--max-age", "0"],
+               re.compile(r"\((\d+) pages total"), 100),
+              ("platform entries", [f"{SCRIPTS}/parse-claude-docs.py", "fetch-index", "--source", "platform", "--max-age", "0"],
+               re.compile(r"\((\d+) pages total"), 400),
+              ("ai-sdk entries", [f"{SCRIPTS}/parse-ai-sdk.py", "fetch-index", "--max-age", "0"],
+               re.compile(r"\((\d+) documents total"), 400),
+              ("firebase entries", [f"{SCRIPTS}/parse-firebase.py", "fetch-index", "--max-age", "0", "--limit", "1"],
+               re.compile(r"of (\d+) pages shown"), 5000),
+          ]
+
+          for name, args, pattern, floor in ENTRIES_CHECKS:
+              def extract(out, err, pattern=pattern, floor=floor):
+                  m = pattern.search(out)
+                  if not m:
+                      return False, f"expected count pattern {pattern.pattern!r} not found in output", "structural"
+                  n = int(m.group(1))
+                  ok = n >= floor
+                  return ok, f"{n} entries (floor {floor})", (None if ok else "threshold")
+              run_check(name, args, extract)
+
+          # code/platform: index<->full-text join rate >= 0.8 (only claude-docs
+          # joins two separate upstream files; ai-sdk/firebase have no such join).
+          # `search` is the only subcommand that exercises check_join_rate(), and
+          # it prints nothing when the ratio is healthy (>=0.8) - only a WARNING
+          # (0.5-0.8) or a hard Error+exit 2 (<0.5) - so "no join-rate message and
+          # exit 0" is itself the passing signal. The same call's stdout doubles
+          # as the representative-query ("hooks") hit check for the code source.
+          JOIN_QUERY = "hooks"
+          for source, floor_hits in (("code", 1), ("platform", None)):
+              name = f"{source} join-rate+query"
+              args = [f"{SCRIPTS}/parse-claude-docs.py", "search", JOIN_QUERY, "--source", source, "--max-age", "0"]
+
+              def extract(out, err, floor_hits=floor_hits):
+                  if "join rate" in err:
+                      return False, f"join-rate warning/error below the 0.8 floor: {err.strip()}", "threshold"
+                  if floor_hits is not None:
+                      hits = sum(int(x) for x in re.findall(r"\((\d+) body hits, showing", out))
+                      ok = hits >= floor_hits
+                      return ok, f"join rate healthy; {hits} body hits for {JOIN_QUERY!r} (floor {floor_hits})", (None if ok else "threshold")
+                  return True, "join rate healthy (no warning/error emitted)", None
+              run_check(name, args, extract)
+
+          # representative query hit >= 1 (ai-sdk / firebase; code's "hooks" is
+          # already covered by the join-rate+query check above)
+          QUERY_CHECKS = [
+              ("ai-sdk streamText hit", [f"{SCRIPTS}/parse-ai-sdk.py", "search", "streamText", "--max-age", "0"]),
+              ("firebase Firestore hit", [f"{SCRIPTS}/parse-firebase.py", "search", "Firestore", "--top-n", "3", "--max-age", "0"]),
+          ]
+          for name, args in QUERY_CHECKS:
+              def extract(out, err):
+                  hits = sum(int(x) for x in re.findall(r"\((\d+) body hits, showing", out))
+                  ok = hits >= 1
+                  return ok, f"{hits} body hits (floor 1)", (None if ok else "threshold")
+              run_check(name, args, extract)
+
+          failed = [c for c in checks if not c["ok"]]
+          summary_lines = ["| Check | Result | Detail |", "|---|---|---|"]
+          for c in checks:
+              result = "PASS" if c["ok"] else f"FAIL ({c['kind']})"
+              detail = c["detail"].replace("|", "\\|").replace("\n", " ")
+              summary_lines.append(f"| {c['name']} | {result} | {detail} |")
+
+          with open(RESULT_PATH, "w") as f:
+              json.dump({"checks": checks, "failed": len(failed) > 0}, f, indent=2)
+
+          print("\n".join(summary_lines))
+
+          if failed:
+              print(f"\n{len(failed)} check(s) failed.", file=sys.stderr)
+              sys.exit(1)
+          print("\nAll checks passed.")
+          PY
+
+      # 直前のステップが失敗した場合のみ実行。同じタイトルの open issue が
+      # 既にあれば新規作成せずコメント追記する (毎週重複起票しないため)。
+      - name: Report failures as a tracking issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANARY_RESULT_PATH: ${{ runner.temp }}/llms-docs-canary-result.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          RESULT_PATH = os.environ["CANARY_RESULT_PATH"]
+          TITLE = "llms-docs canary: upstream llms.txt drift detected"
+
+          server_url = os.environ.get("GITHUB_SERVER_URL", "")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          run_url = f"{server_url}/{repo}/actions/runs/{run_id}"
+
+          try:
+              with open(RESULT_PATH) as f:
+                  data = json.load(f)
+              checks = data.get("checks", [])
+          except (OSError, ValueError):
+              checks = None
+
+          if not checks:
+              body = (
+                  "Weekly live smoke test for llms-docs upstream sources did not "
+                  "produce a normal result (the check step likely crashed before "
+                  "recording individual checks).\n\n"
+                  f"See the run log for details: {run_url}"
+              )
+          else:
+              lines = [
+                  "Weekly live smoke test detected a problem with one or more "
+                  "llms-docs upstream sources (`.github/workflows/llms-docs-canary.yml`).",
+                  "",
+                  "| Check | Result | Detail |",
+                  "|---|---|---|",
+              ]
+              for c in checks:
+                  result = "PASS" if c.get("ok") else f"FAIL ({c.get('kind') or 'unknown'})"
+                  detail = str(c.get("detail", "")).replace("|", "\\|").replace("\n", " ")
+                  lines.append(f"| {c.get('name')} | {result} | {detail} |")
+              lines += ["", f"Run: {run_url}"]
+              body = "\n".join(lines)
+
+          body_path = os.path.join(os.environ["RUNNER_TEMP"], "llms-docs-canary-issue-body.md")
+          with open(body_path, "w") as f:
+              f.write(body)
+
+          list_proc = subprocess.run(
+              ["gh", "issue", "list", "--repo", repo, "--state", "open", "--json", "number,title", "--limit", "100"],
+              capture_output=True, text=True,
+          )
+          if list_proc.returncode != 0:
+              print(f"WARNING: gh issue list failed (exit {list_proc.returncode}): {list_proc.stderr}", file=sys.stderr)
+              existing = []
+          else:
+              existing = json.loads(list_proc.stdout or "[]")
+
+          match = next((i for i in existing if i.get("title") == TITLE), None)
+
+          if match:
+              number = str(match["number"])
+              print(f"Existing open issue #{number} found; appending a comment.")
+              subprocess.run(
+                  ["gh", "issue", "comment", number, "--repo", repo, "--body-file", body_path],
+                  check=True,
+              )
+          else:
+              print("No existing open issue found; creating a new one.")
+              subprocess.run(
+                  ["gh", "issue", "create", "--repo", repo, "--title", TITLE, "--body-file", body_path],
+                  check=True,
+              )
+          PY
