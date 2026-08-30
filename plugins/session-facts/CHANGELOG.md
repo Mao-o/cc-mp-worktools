@@ -27,7 +27,27 @@
    (Cloud Functions 専用リポジトリと判別できるように)。`has_firebase()` は
    detector・collector の両方から 1 回の解析につき呼ばれるため
    `ctx.results` にメモ化し、Python 依存の requirements*.txt 走査 (最大 6
-   ファイル) が二重に走らないようにした
+   ファイル) が二重に走らないようにした。**Python 側の判定は当初
+   pyproject.toml/requirements*.txt 全文に対する部分一致だったため、
+   `name = "firebase-admin-helper"` のような無関係な記述や
+   `not-firebase-admin` のような類似パッケージ名でも `firebase` タグが
+   誤って付いていた。pyproject.toml は `tomllib` (0.6.0 では環境間の
+   挙動差を避けるため見送っていたが、本プロジェクトが Python 3.11+ を
+   前提にしたことで見送り理由が解消) で構造的に解析し、`[project]
+   dependencies`・`[project.optional-dependencies]` 各グループ・
+   `[tool.poetry.dependencies]`・レガシー
+   `[tool.poetry.dev-dependencies]`・`[tool.poetry.group.*.dependencies]`・
+   PEP 735 `[dependency-groups]` 各グループに加え、`[tool.uv]` の
+   `dev-dependencies`・`[tool.pdm.dev-dependencies]` 各グループ・
+   `[tool.hatch.envs.*]` の `dependencies`/`extra-dependencies` を対象に
+   宣言済み依存名を集める。requirements*.txt 側は各行から PEP 508 の
+   名前部分のみを抽出する (`#` コメント・`-r`/`-e`/`--` オプション行・
+   `;` marker・`[extras]`・バージョン指定子・`@ url` を除去)。両方とも
+   名前を PEP 503 正規化 (小文字化 + `-`/`_`/`.` の連続を `-` に統一) した
+   上で `firebase-admin`/`firebase-functions` と完全一致するかで判定する
+   (npm 側の `ctx.all_deps` は元々 dict のキー一致であり同種の穴は無い
+   ことを確認済み)。TOML の parse 失敗 (壊れた構文、深いネストによる
+   `RecursionError` 含む) は例外を握りつぶし「検出しない」に倒す**
 2. **出力に埋め込むコマンドヒントのうち `--help` を指す方が解析対象
    ディレクトリを引数に含んでおらず、別ディレクトリからコピー実行すると
    ヘッダーに表示されているディレクトリとは異なる (実行したエージェントの
@@ -112,8 +132,13 @@
    cwd 基点で描画する必要があるため、共有フィルタの結果からさらに prefix
    を剥がす箇所だけは独自のまま残した)
 
-テスト 305 件 (新規 48 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
-テストとメモ化テスト (`tests/test_detectors.py` 新設)、
+テスト 326 件 (新規 69 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
+テストとメモ化テスト (`tests/test_detectors.py` 新設)、Python 依存判定の
+exact-match テスト (`name = "firebase-admin-helper"` / `not-firebase-admin`
+等の誤検出 2 例、npm 側に同種の穴が無いことの確認、PEP 621/Poetry (レガシー
+dev-dependencies・group 含む)/PEP 735/uv/PDM/Hatch 各テーブルの正検出、
+requirements*.txt の extras・marker・アンダースコア表記・コメント/オプション行、
+壊れた TOML と深いネスト (`RecursionError`) でクラッシュしないこと)、
 `collectors/domain_types.py` のラウンドロビン分散・cluster ゲートと表示上限
 の独立性・除外パターン・候補ファイル数上限 (gate 充足後のみ打ち切る soft cap
 であることの境界値、および gate の充足有無に関わらず打ち切る hard cap

@@ -124,6 +124,208 @@ class FirebaseDetectorTest(unittest.TestCase):
                 _detect(root, tracked_files=["requirements-prod.txt"]), ["firebase"]
             )
 
+    # --- exact dependency-name match, not substring: a manifest merely
+    # containing "firebase-admin"/"firebase-functions" as a substring
+    # (unrelated package name, comment, tool-config mention, ...) must not
+    # tag the repo as Firebase. core/firebase.py's Python-dependency check
+    # used to be a raw substring search over the whole
+    # pyproject.toml/requirements.txt text. ---
+
+    def test_pyproject_name_field_substring_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "firebase-admin-helper"\nversion = "0.1.0"\n'
+            )
+            self.assertEqual(_detect(root), [])
+
+    def test_pyproject_mypy_override_mention_is_not_detected(self):
+        # A tool config referencing the *import path* of a package the
+        # project doesn't actually declare as a dependency must not count.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.mypy]\n'
+                '[[tool.mypy.overrides]]\n'
+                'module = "firebase_admin.*"\n'
+                'ignore_missing_imports = true\n'
+            )
+            self.assertEqual(_detect(root), [])
+
+    def test_requirements_similar_package_name_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text("not-firebase-admin==1.0.0\n")
+            self.assertEqual(_detect(root, tracked_files=["requirements.txt"]), [])
+
+    def test_npm_similar_package_name_is_not_detected(self):
+        # ctx.all_deps (core/context.py) is a dict keyed by the exact
+        # package.json dependency name, so this side never had the
+        # analogous substring hole; locks that in.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps({"dependencies": {"firebase-admin-helper": "^1.0.0"}})
+            )
+            self.assertEqual(_detect(root), [])
+
+    # --- exact-match coverage across the common Python
+    # dependency-declaration tables (PEP 621 / Poetry / PEP 735 / uv / PDM
+    # / Hatch) -- each of these was a true positive under the old substring
+    # search, so each must remain one under the new exact-name parser. ---
+
+    def test_pyproject_optional_dependencies_group_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[project.optional-dependencies]\nadmin = ["firebase-admin>=6.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_poetry_dependencies_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.poetry.dependencies]\npython = "^3.11"\nfirebase-admin = "^6.0"\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_poetry_legacy_dev_dependencies_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.poetry.dev-dependencies]\nfirebase-admin = "^6.0"\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_poetry_group_dependencies_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.poetry.group.dev.dependencies]\nfirebase-admin = "^6.0"\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_dependency_groups_pep735_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[dependency-groups]\ntest = ["firebase-admin>=6.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_dependency_groups_include_group_ref_is_skipped_not_crashed(self):
+        # PEP 735 lets a group include another via {include-group = "..."};
+        # resolving that reference is out of scope, but it must not crash --
+        # the other, literal string entry in the same array is still read.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[dependency-groups]\n'
+                'base = ["pytest"]\n'
+                'test = [{include-group = "base"}, "firebase-admin"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_uv_dev_dependencies_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.uv]\ndev-dependencies = ["firebase-admin>=6.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_pdm_dev_dependencies_group_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.pdm.dev-dependencies]\ntest = ["firebase-admin>=6.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_hatch_env_dependencies_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[tool.hatch.envs.default]\ndependencies = ["firebase-admin>=6.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_python_firebase_functions_dependency_is_detected(self):
+        # firebase-functions is also a real PyPI package (the Python Cloud
+        # Functions runtime); it earns the general "firebase" tag the same
+        # as firebase-admin, but not the npm-scoped "firebase-functions" tag
+        # (has_firebase_functions() stays root-package.json-only by design).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["firebase-functions>=0.1.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_case_and_dot_variant_name_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["Firebase.Admin>=6.0"]\n'
+            )
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_requirements_extras_specifier_and_marker_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                'firebase-admin[async]==6.5.0; python_version >= "3.9"\n'
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
+            )
+
+    def test_requirements_underscore_variant_name_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text("firebase_admin==6.5.0\n")
+            self.assertEqual(
+                _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
+            )
+
+    def test_requirements_comment_and_option_lines_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "# a comment\n-r other.txt\nfirebase-admin==6.5.0  # needed\n"
+            )
+            self.assertEqual(
+                _detect(root, tracked_files=["requirements.txt"]), ["firebase"]
+            )
+
+    # --- malformed / pathological pyproject.toml must fold into "no
+    # Python signal", not crash the detector or hide unrelated signals ---
+
+    def test_pyproject_malformed_toml_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text('[project\nname = "x"\n')
+            self.assertEqual(_detect(root), [])
+
+    def test_pyproject_malformed_toml_does_not_hide_other_firebase_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text('[project\nname = "x"\n')
+            (root / "firebase.json").write_text("{}")
+            self.assertEqual(_detect(root), ["firebase"])
+
+    def test_pyproject_pathological_nesting_does_not_crash(self):
+        # tomllib itself raises RecursionError (not TOMLDecodeError) on
+        # sufficiently deep nesting -- confirmed empirically against this
+        # Python's tomllib. Must still fold into "not detected", not raise.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            depth = 3000
+            text = "[project]\ndependencies = [" + "[" * depth + "]" * depth + "]\n"
+            (root / "pyproject.toml").write_text(text)
+            self.assertEqual(_detect(root), [])
+
     # --- condition 4: Flutter pubspec.yaml firebase_core ---
 
     def test_flutter_pubspec_firebase_core_is_detected(self):
