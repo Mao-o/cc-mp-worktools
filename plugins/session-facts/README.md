@@ -196,8 +196,10 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 ## CLI オプション
 
 本体の `__main__.py` は以下の引数を受け付ける。hook から呼ぶときの実際のコマンドは
-冒頭の表と「ベースコマンド」を参照 (共通の `--format markdown --include-domain-types`
-に加えて、timing ごとに `--no-recent-commits` または `--emit subagent-json` が付く)。
+冒頭の表と「ベースコマンド」を参照 (Claude Code 向け `hooks/hooks.json` は、共通の
+`--format markdown --include-domain-types` に加えて timing ごとに
+`--no-recent-commits` または `--emit subagent-json` を付ける)。Codex 向け
+`hooks/codex-hooks.json` はこのベースコマンドをそのまま (追加フラグ無しで) 使う。
 
 | オプション | デフォルト | 内容 |
 |---|---|---|
