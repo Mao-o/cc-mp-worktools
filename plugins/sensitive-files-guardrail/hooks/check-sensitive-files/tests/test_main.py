@@ -636,15 +636,30 @@ class TestMainSessionAck(BaseMainTest):
 _EXPECTED_SMALL_REASON = '【セキュリティ確認】\n\n【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:\n  - .env\n対応: `.gitignore` に追加した上で `git rm --cached <path>` を実行してください (index から外すだけで実ファイルは残ります)。\n\n【untracked】以下のファイルは機密パターンに一致し、まだ `.gitignore` 未登録です:\n  - .env.production\n対応: `.gitignore` に追加するか、意図的に管理対象とするか確認してください。\n\nAskUserQuestion ツールで各ファイルについてユーザーに確認してください:\n  選択肢1: 「.gitignore に追加」 (Recommended)\n  選択肢2: 「意図的に管理対象とする」\n\n【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を得た上で `~/.claude/sensitive-files-guardrail/patterns.local.txt` に次を追記します ($CLAUDE_PROJECT_DIR は展開されないので、プロジェクト root の絶対パスを literal に書く (例: [project:/abs/path/to/repo])。全プロジェクト共通にしたい場合のみヘッダー無しの行に書く)。影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ** (root 配下のみ)。basename 形 (`!<名前>`) は同じ名前のファイルが**すべて**対象で、**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、basename 形は**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。追記内容 (path 形 — 承認した 1 ファイルだけを外す):\n  [project:$CLAUDE_PROJECT_DIR]\n  !/.env\n  !/.env.production\n同名ファイルをすべて外したい場合だけ basename 形にする: `!.env` / `!.env.production`'
 
 
-class TestBuildReasonByteBudget(unittest.TestCase):
-    """内部バックログ: block reason の byte 予算。
+def _stdout_chars(entry, reason: str) -> int:
+    """hook が実際に stdout に出す JSON の文字数 (外部レビュー R1 P2-A)。
+
+    予算の単位は reason の生 byte ではなく**この値**。``_serialize`` は
+    ``main()`` が print に渡すのと同じ関数なので、直列化方法がずれない。
+    """
+    return len(entry._serialize(reason))
+
+
+class TestBuildReasonOutputCharBudget(unittest.TestCase):
+    """内部バックログ + 外部レビュー R1 P2-A: stdout JSON の文字数予算。
 
     公式 hooks reference は ``additionalContext`` / ``systemMessage`` /
     素の stdout を 10,000 文字上限と明記するが、Stop hook の ``reason`` は
     この列挙に含まれていない。名指しされていない以上、保守的にこの値を
-    安全マージンとして採用した (``MAX_REASON_BYTES``)。固定 tail
+    安全マージンとして採用した (``MAX_OUTPUT_CHARS``)。固定 tail
     (AskUserQuestion 案内 + 恒久除外レシピ) を先に確保し、ファイル列挙
     (``  - path`` 行) だけを畳む。tail 自体は truncate しない。
+
+    0.27.0 当初は reason の生 UTF-8 byte で予算化していたが、``json.dumps``
+    のエスケープを無視していたため ``\\`` / ``"`` を多く含むファイル名で
+    枠を破った (``TestSerializedJsonBudget`` が回帰テスト)。ここの assert も
+    すべて「直列化後の文字数」に揃えてある — byte 値は proxy でしかなく、
+    docs が上限を課しているのは文字数の方であるため。
     """
 
     def test_byte_identical_to_pre_budget_output_for_small_input(self):
@@ -666,7 +681,7 @@ class TestBuildReasonByteBudget(unittest.TestCase):
             root_offset_="",
         )
         self.assertNotIn("more files", reason)
-        self.assertLess(len(reason.encode("utf-8")), entry.MAX_REASON_BYTES)
+        self.assertLess(_stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS)
 
     def test_large_untracked_list_collapses_but_keeps_tail(self):
         entry = _load_entry()
@@ -683,10 +698,12 @@ class TestBuildReasonByteBudget(unittest.TestCase):
         self.assertIn("【恒久除外】", reason)
         self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
         # 折り畳みマーカー自体の分だけ予算を超えることはあるが、無制限には
-        # 膨らまない (マーカーは短い固定形なので数百 byte の余裕で十分)。
+        # 膨らまない (マーカーは短い固定形なので数百文字の余裕で十分)。
+        # そして最終的な stdout は docs の 10,000 文字上限を割らない。
         self.assertLess(
-            len(reason.encode("utf-8")), entry.MAX_REASON_BYTES + 200
+            _stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS + 200
         )
+        self.assertLess(_stdout_chars(entry, reason), 10_000)
 
     def test_collapse_count_matches_omitted_files(self):
         entry = _load_entry()
@@ -757,34 +774,197 @@ class TestBuildReasonByteBudget(unittest.TestCase):
         self.assertLessEqual(len(shown_guidance_dirs), 10)
         # tracked ファイル列挙が 0 件に潰れない主張の実測: 修正前コード
         # (commit 7a38366) にこの n=700 と同じ入力を通すと shown_files=0
-        # (固定部分だけで MAX_REASON_BYTES=9,216 を使い切るため)。
+        # (固定部分だけで当時の byte 予算 9,216 を使い切るため。予算は
+        # その後 MAX_OUTPUT_CHARS = 直列化後の文字数へ移行した)。
         shown_files = re.findall(r"\n  - submod\d+/\.env", reason)
         self.assertGreater(len(shown_files), 0)
         # 上記 2 つの表層チェックより、この 1 行が実際の回帰検出力を持つ:
         # dirs_display を畳んだ結果、修正前コードで同じ入力が生成した
         # reason (11,477 byte、実測) を大きく下回り、10,000 字の枠にも
-        # 収まる。畳まなければ dirs_display だけで数千 byte 規模になり、
+        # 収まる。畳まなければ dirs_display だけで数千文字規模になり、
         # この境界を割ることはできない。
-        self.assertLess(len(reason.encode("utf-8")), 10_000)
+        # 測る単位は stdout JSON の文字数 (外部レビュー R1 P2-A で byte から
+        # 移行。この入力は ASCII path + 日本語 skeleton なので、byte で見ると
+        # 予算に対して過大請求になり境界の意味がぼやける)。
+        self.assertLess(_stdout_chars(entry, reason), 10_000)
 
     def test_tail_survives_even_when_fixed_part_alone_exceeds_budget(self):
-        # MAX_REASON_BYTES を極端に小さくし、固定 tail だけで予算を超える
+        # MAX_OUTPUT_CHARS を極端に小さくし、固定 tail だけで予算を超える
         # 病的ケースを強制する。tail (AskUserQuestion / 恒久除外レシピ /
-        # session 注記) は truncate されず必ず残り、reason 全体が予算を
+        # session 注記) は truncate されず必ず残り、出力全体が予算を
         # 超えることを許容する (次善のトレードオフ、と docstring に明記済み)。
         entry = _load_entry()
-        with mock.patch.object(entry, "MAX_REASON_BYTES", 50):
+        with mock.patch.object(entry, "MAX_OUTPUT_CHARS", 50):
             reason = entry._build_reason(
                 tracked=["a.env", "b.env", "c.env"],
                 untracked=[],
                 session_scoped=True,
                 root_offset_="",
             )
-        self.assertGreater(len(reason.encode("utf-8")), 50)
+        self.assertGreater(_stdout_chars(entry, reason), 50)
         self.assertIn("AskUserQuestion ツールで各ファイルについて", reason)
         self.assertIn("【恒久除外】", reason)
         self.assertIn("再度 block しません", reason)
         self.assertIn("more files; see git status", reason)
+
+
+def _escape_heavy_names(k: int, n: int) -> list[str]:
+    """``\\`` と ``"`` だけで構成した POSIX 有効ファイル名を ``n`` 件返す。
+
+    POSIX のファイル名に使えない byte は ``/`` と NUL だけなので、``\\`` も
+    ``"`` も正当な名前である (git も追跡できる)。``json.dumps`` はこの 2 種を
+    それぞれ 2 文字にエスケープするため、生 byte 数と直列化後の文字数が最大
+    2 倍近く乖離する — P2-A が破っていたのはまさにこの入力クラス。
+    """
+    stem = ("\\" * (k // 2)) + ('"' * (k - k // 2))
+    return [f"{stem}{i}.pem" for i in range(n)]
+
+
+class TestSerializedJsonBudget(unittest.TestCase):
+    """外部レビュー R1 P2-A 回帰: 予算は直列化後の文字数で計る。
+
+    修正前は ``len(line.encode("utf-8")) + 1`` で予算化しており、``json.dumps``
+    のエスケープ (``\\`` / ``"`` / 制御文字が 2 文字、改行が ``\\`` + ``n``) と
+    wrapper の文字数を無視していた。結果として「reason は予算内なのに実際に
+    stdout へ出る JSON は 10,000 文字超」が成立してしまい、ハーネスが出力を
+    ファイルへ退避して preview に差し替える (= block 内容が Claude に届かない)
+    恐れがあった。
+    """
+
+    def test_escape_heavy_filenames_stay_under_docs_limit(self):
+        """``\\`` / ``"`` を多く含むファイル名 (修正前に枠を破った入力)。
+
+        修正前コード (commit e6ac2ba) にこの同じ入力を通すと
+        **reason 9,253 byte / stdout JSON 13,088 文字** (実測) で、byte 予算
+        (9,216) は満たすのに 10,000 文字の枠を 3 千文字超過していた。修正後は
+        同じ入力が 9,218 文字 (表示 147 件) に収まる。
+        """
+        entry = _load_entry()
+        names = _escape_heavy_names(16, 4000)
+        reason = entry._build_reason(
+            tracked=[],
+            untracked=names,
+            session_scoped=False,
+            root_offset_="",
+        )
+        self.assertLess(_stdout_chars(entry, reason), 10_000)
+        self.assertLess(_stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS + 200)
+        # 非空振りの担保: この入力は実際に溢れており、かつ実例が 0 件に
+        # 潰れてもいない (予算がゼロになる形での「合格」ではない)。
+        self.assertIn("more files; see git status", reason)
+        self.assertGreater(reason.count("\n  - "), 0)
+        # 生 byte で見ると予算内に「見えて」しまうことの明示 (この乖離こそが
+        # 修正前の誤り。byte を assert の基準に戻さないための杭)。
+        self.assertLess(len(reason.encode("utf-8")), entry.MAX_OUTPUT_CHARS)
+
+    def test_escape_heavy_filenames_in_both_sections(self):
+        entry = _load_entry()
+        names = _escape_heavy_names(16, 4000)
+        reason = entry._build_reason(
+            tracked=names[:2000],
+            untracked=names[2000:],
+            session_scoped=True,
+            root_offset_="",
+        )
+        self.assertLess(_stdout_chars(entry, reason), 10_000)
+        self.assertEqual(reason.count("more files; see git status"), 2)
+
+    def test_non_ascii_filenames_stay_under_docs_limit(self):
+        """非 ASCII (日本語) ファイル名の床テスト。
+
+        **開示**: この入力は修正前コードでも枠を破っていない (実測 5,365
+        文字)。``ensure_ascii=False`` なので日本語は 1 文字 = 1 文字だが
+        UTF-8 では 3 byte あり、byte 予算はむしろ**過大請求**していたため
+        (安全側に外れていた)。したがってこれは「修正前に落ちる回帰テスト」
+        ではなく、文字数予算へ移行したあとも枠を割らないことを固定する床
+        テストである。移行によって表示件数は増える (実測 reason 5,126 →
+        8,822 文字 / 表示件数が約 3 倍) が、これは byte 予算の過大請求が
+        解消された結果で意図した改善。
+        """
+        entry = _load_entry()
+        names = [f"機密/設定ファイル{i}.env" for i in range(3000)]
+        reason = entry._build_reason(
+            tracked=[],
+            untracked=names,
+            session_scoped=False,
+            root_offset_="",
+        )
+        self.assertLess(_stdout_chars(entry, reason), 10_000)
+        self.assertIn("more files; see git status", reason)
+        self.assertGreater(reason.count("\n  - "), 0)
+        # docs の上限を「文字数」と解釈した帰結の明示: 非 ASCII だけの reason
+        # は UTF-8 byte では 10,000 を超えうる (定数コメントで開示済みの前提)。
+        self.assertGreater(len(reason.encode("utf-8")), 10_000)
+
+    def test_json_chars_matches_actual_serialization(self):
+        """``_json_chars`` が ``json.dumps`` の実挙動と一致すること。
+
+        手計算 (``count("\\\\") + count('"')`` 等) に置き換えられると制御文字
+        や改行を取りこぼす。``json.dumps`` に数えさせている構造を固定する。
+        """
+        entry = _load_entry()
+        for s in (
+            "",
+            "plain",
+            'a"b',
+            "a\\b",
+            "a\nb",
+            "a\tb",
+            "a\x00b",
+            "a\x1fb",
+            "日本語",
+            '  - \\\\\\"""x.pem',
+        ):
+            with self.subTest(s=s):
+                self.assertEqual(
+                    entry._json_chars(s),
+                    len(json.dumps(s, ensure_ascii=False)) - 2,
+                )
+
+    def test_wrapper_plus_reason_equals_actual_stdout_length(self):
+        """予算の分解 (wrapper + reason) が実出力長と厳密に一致すること。
+
+        ``_WRAPPER_CHARS`` は空 reason の直列化長 (reason を囲む引用符込み)、
+        ``_json_chars`` は引用符を除いた長さ。両者の和が ``_serialize`` の
+        長さに一致しないと予算が静かにずれる。
+        """
+        entry = _load_entry()
+        for reason in ("", "短い", 'a"b\\c\nd', "\n".join(f"  - x{i}" for i in range(50))):
+            with self.subTest(reason=reason[:20]):
+                self.assertEqual(
+                    entry._WRAPPER_CHARS + entry._json_chars(reason),
+                    len(entry._serialize(reason)),
+                )
+
+    def test_main_stdout_uses_the_measured_serializer(self):
+        """``main()`` の実出力が予算計測と同じ ``_serialize`` を通ること。
+
+        片方だけ ``ensure_ascii`` を変える / 直接 ``json.dumps`` に戻す、と
+        いった変更で「計った値と出す値が違う」状態に戻らないようにする杭。
+        """
+        entry = _load_entry()
+        with tempfile.TemporaryDirectory() as tmp:
+            _init_repo(tmp)
+            Path(tmp, ".env").write_text("K=v\n")
+            captured: dict[str, str] = {}
+            real_serialize = entry._serialize
+
+            def _spy(reason: str) -> str:
+                captured["reason"] = reason
+                return real_serialize(reason)
+
+            with mock.patch.object(entry, "_serialize", _spy):
+                old_stdin, old_stdout = sys.stdin, sys.stdout
+                try:
+                    sys.stdin = io.StringIO(json.dumps({"cwd": tmp}))
+                    sys.stdout = io.StringIO()
+                    entry.main()
+                    out = sys.stdout.getvalue()
+                finally:
+                    sys.stdin, sys.stdout = old_stdin, old_stdout
+        self.assertIn("reason", captured)
+        self.assertEqual(out, real_serialize(captured["reason"]) + "\n")
+        self.assertEqual(json.loads(out)["decision"], "block")
 
 
 if __name__ == "__main__":

@@ -73,29 +73,63 @@ def _warn_stop_ack(detail: str) -> None:
     sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
 
 
-# block reason の byte 予算 (内部バックログ)。公式 hooks reference (Hook
-# input and output / JSON output) は `additionalContext` / `systemMessage` /
-# 素の stdout の 3 つを名指しして「10,000 文字が上限、超過時はファイルに
-# 退避され preview + ファイルパスに置換される」と明記するが、Stop hook の
-# `reason` (`permissionDecisionReason` 相当) はこの列挙に含まれておらず、
-# 同じ上限が適用されるかどうかは docs から確定できない。名指しされていない
-# 以上、保守的にこの値を安全マージンとして採用した (適用されなくても外れる
-# だけで、適用されるなら安全側に倒れる)。byte 数を上限にすると (multibyte
-# 文字は 1 文字が複数 byte を消費するため) この
-# reason 文字列自体の文字数は必ず 9,216 未満に収まる。ただし実際に stdout に
-# 出るのは `json.dumps({"decision": ..., "reason": reason})` で、JSON
-# エンコードで改行 (``\n``) が 2 文字 (``\`` + ``n``) に膨らむ分と wrapper
-# 自体の文字数が上乗せされる。9,216 という値はこの上乗せ分 (数百文字程度)
-# を吸収するための余裕であり、「reason の文字数」と「実際の stdout の文字数」
-# を厳密には区別していない — 実測 (250 ファイルのネストしたパス、改行
-# 約 260 個) では reason 8,292 文字 + JSON オーバーヘッド 300 文字弱で
-# 10,000 文字の枠に十分収まることを確認済みだが、改行が非常に多く 1 行が
-# 短い病的な入力では余裕が目減りする。
+def _serialize(reason: str) -> str:
+    """stdout に出す JSON を組み立てる。
+
+    予算計算 (``_json_chars`` / ``_WRAPPER_CHARS``) と実際の出力で **必ず同じ
+    直列化** を使うための 1 箇所化 (``ensure_ascii`` を片方だけ変えると予算が
+    静かに外れるため)。
+    """
+    return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
+
+
+def _json_chars(s: str) -> int:
+    """``s`` を JSON 文字列として直列化したときの文字数 (両端の引用符を除く)。
+
+    ``\\`` / ``"`` / 制御文字 (改行を含む) は 2 文字に、それ以外の制御文字は
+    ``\\uXXXX`` の 6 文字にエスケープされる。``ensure_ascii=False`` なので
+    非 ASCII は 1 文字のまま。手計算せず ``json.dumps`` に数えさせることで、
+    エスケープ規則の取りこぼしを構造的に防ぐ。
+    """
+    return len(json.dumps(s, ensure_ascii=False)) - 2
+
+
+# 空 reason での直列化長 = wrapper 自体の文字数。reason を囲む 2 つの引用符を
+# 含むので、引用符を除いた ``_json_chars`` の値とちょうど足し合わさる。
+_WRAPPER_CHARS = len(_serialize(""))
+
+# stdout に出る JSON 全体の**文字数**予算 (内部バックログ + 外部レビュー R1)。
+# 公式 hooks reference (Hook input and output / JSON output) は
+# `additionalContext` / `systemMessage` / 素の stdout の 3 つを名指しして
+# 「10,000 文字が上限、超過時はファイルに退避され preview + ファイルパスに
+# 置換される」と明記するが、Stop hook の `reason` (`permissionDecisionReason`
+# 相当) はこの列挙に含まれておらず、同じ上限が適用されるかどうかは docs から
+# 確定できない。名指しされていない以上、保守的にこの値を安全マージンとして
+# 採用した (適用されなくても外れるだけで、適用されるなら安全側に倒れる)。
+#
+# **単位は「直列化後の文字数」** (byte ではない)。0.27.0 当初は reason の生
+# UTF-8 byte 数で予算化していたが、`json.dumps` のエスケープを無視していた:
+# `\` / `"` / 制御文字は 1 文字が 2 文字に膨らむため、これらを多く含む POSIX
+# 有効ファイル名では「reason 9,253 byte なのに stdout JSON は 13,088 文字」と
+# いう逆転が起き 10,000 文字の枠を破っていた (実測)。逆に非 ASCII は
+# `ensure_ascii=False` なので 1 文字のままだが 3 byte あり、byte 予算では
+# 過大請求 (= 必要以上にファイル列挙を畳む) になっていた。どちらも直列化後の
+# 文字数で計れば正しく揃う。
+#
+# 上限は 10,000 文字だが 9,216 (9 * 1024) を予算にして 784 文字の余裕を残す:
+# 折り畳みマーカー (`_OMITTED_FILES_TEMPLATE`) は予算の外側で必ず追記される
+# ほか、`print` が付ける改行など計上していない端数があるため。
+#
+# 裏が取れていない前提 (開示): docs の「10,000 characters」を文字数どおりに
+# 解釈している。ハーネス側が実は byte で数えている可能性は docs からは否定
+# できず、その場合 reason が非 ASCII ばかりだと UTF-8 で最大 3 倍 (約 27KB)
+# になりうる。一次情報 (docs の文言) を採用し、実測できるまでこの解釈で運用する。
+#
 # core/output.py (read 側 hook) の MAX_REASON_BYTES + _truncate と同じ発想だが、
 # あちらは末尾を単純 truncate するのに対し、こちらは**固定 tail
 # (AskUserQuestion 案内 + 恒久除外レシピ) を必ず残し、ファイル列挙だけを畳む**
 # (固定 tail が末尾にあり、素の truncate だと真っ先に失われるため)。
-MAX_REASON_BYTES = 9 * 1024
+MAX_OUTPUT_CHARS = 9 * 1024
 
 # ファイル列挙が予算を超えて畳まれたときに追記する行のテンプレート。この行
 # 自体は budget 計算の対象外 (常に表示する — 何件省略したかを黙って伝えずに
@@ -106,19 +140,21 @@ _OMITTED_FILES_TEMPLATE = "  ... ({n} more files; see git status)"
 def _enumerate_with_budget(
     paths: list[str], budget: int
 ) -> tuple[list[str], int, int]:
-    """``  - path`` 形式の列挙行を ``budget`` (byte) の範囲で組み立てる。
+    """``  - path`` 形式の列挙行を ``budget`` (文字) の範囲で組み立てる。
 
     先頭から順に収まる分だけ行にし、溢れた時点で打ち切る。戻り値は
-    ``(組み立てた行, 表示できなかった件数, 残り byte 予算)``。残り予算は
+    ``(組み立てた行, 表示できなかった件数, 残り文字予算)``。残り予算は
     呼出側が次のリスト (untracked) と共有するために返す。
 
-    1 行あたりのコストは ``UTF-8 byte 数 + 1`` (``"\\n".join`` で他の行と
-    結合するときの区切り文字分)。
+    1 行あたりのコストは **JSON 直列化後の文字数 + 2** — ``"\\n".join`` の
+    区切り文字 1 個が JSON では ``\\`` + ``n`` の 2 文字になるため。行本体の
+    エスケープ量は ``_json_chars`` が ``json.dumps`` に数えさせる (``\\`` や
+    ``"`` を含むファイル名は生 byte 数の約 2 倍を消費する)。
     """
     lines: list[str] = []
     for i, path in enumerate(paths):
         line = f"  - {path}"
-        cost = len(line.encode("utf-8")) + 1
+        cost = _json_chars(line) + 2
         if cost > budget:
             return lines, len(paths) - i, budget
         lines.append(line)
@@ -171,22 +207,23 @@ def _build_reason(
     自体への gitlink エントリしかなく、配下の個別ファイルは submodule 自身の
     index が持つため。
 
-    byte 予算 (内部バックログ, ``MAX_REASON_BYTES``): tracked / untracked の
+    文字数予算 (内部バックログ, ``MAX_OUTPUT_CHARS``): tracked / untracked の
     ファイル列挙 (``  - path`` 行) 以外は全て**固定サイズ** (件数に依存しない
     — 恒久除外レシピは ``exclude_recipe_lines`` が既に 20 件で畳んでおり、
     submodule 案内の ``dirs_display`` も同じ発想で 10 件で畳んでいる。
     どちらも欠くと distinct 件数に比例して skeleton 自体が伸び、この不変条件が
     崩れる — P2-2 で submodule 案内が無制限だった実例あり) なので、まず固定
     部分 (このメソッド内では ``head`` / ``*_header`` /
-    ``*_guidance`` / ``tail``) を組み立ててその byte 数を求め、残り予算を
+    ``*_guidance`` / ``tail``) を組み立ててその**直列化後の文字数**を求め、
+    wrapper 分 (``_WRAPPER_CHARS``) と合わせて引いた残りを
     ファイル列挙に充てる。tracked / untracked の両方に該当があるときは
     残り予算を半分ずつに分け (tracked が使い切らなかった分だけ untracked に
     回す) — 先着順にすると片方 (実装上は先に処理する tracked) が予算を
     独占し、もう片方が実例 0 件のまま "... more files" だけになりうるため。
     列挙が溢れたら ``_OMITTED_FILES_TEMPLATE`` で件数を明示する (黙って
     消さない)。tail 自体を切り詰めることは**しない** — 固定部分だけで予算を
-    超える病的なケース (極端に長いファイル名が多数など) では reason が
-    ``MAX_REASON_BYTES`` を超えることを許容する (AskUserQuestion の案内や
+    超える病的なケース (極端に長いファイル名が多数など) では出力が
+    ``MAX_OUTPUT_CHARS`` を超えることを許容する (AskUserQuestion の案内や
     恒久除外レシピを失う方が実害が大きいため)。
     """
     head = ["【セキュリティ確認】", ""]
@@ -292,8 +329,10 @@ def _build_reason(
         skeleton.extend(untracked_guidance)
         skeleton.append("")
     skeleton.extend(tail)
-    fixed_bytes = len("\n".join(skeleton).encode("utf-8"))
-    remaining = max(0, MAX_REASON_BYTES - fixed_bytes)
+    # 予算は「実際に stdout に出る JSON の文字数」で計る (外部レビュー R1)。
+    # 固定部分の直列化長 + wrapper を差し引いた残りをファイル列挙に回す。
+    fixed_chars = _json_chars("\n".join(skeleton))
+    remaining = max(0, MAX_OUTPUT_CHARS - _WRAPPER_CHARS - fixed_chars)
 
     # tracked と untracked の両方に該当があるときは、先着順 (tracked が先に
     # 全予算を使い切る) にすると untracked が 0 件表示になりうる —
@@ -408,8 +447,7 @@ def main() -> int:
     if session_id is not None:
         save_acked(session_id, acked | digests, warn=_warn_stop_ack)
 
-    output = {"decision": "block", "reason": reason}
-    print(json.dumps(output, ensure_ascii=False))
+    print(_serialize(reason))
     return 0
 
 
