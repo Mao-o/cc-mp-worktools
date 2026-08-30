@@ -136,7 +136,7 @@ _DELEGATING_TOKENS = (
 
 # bash_classify ログに first token をそのまま出してよい既知語彙の和集合
 # (内部バックログ)。``_QUOTE_RELAX_FIRST_TOKENS`` (quote 緩和の可否という別目的の
-# 判定セット) に、ログでは区別を保つ価値がある 3 集合を足し戻す:
+# 判定セット) に、ログでは区別を保つ価値がある 4 集合を足し戻す:
 # ``_PAGER_LIKE`` (less / ack 等、quote 緩和では意図的に除外されているだけで
 # コマンド名としては既知)、``_OPAQUE_WRAPPERS`` (bash / python3 等)、
 # ``_SHELL_KEYWORDS`` (if / while 等)、``_SHELL_DELEGATORS`` (ssh / docker 等)。

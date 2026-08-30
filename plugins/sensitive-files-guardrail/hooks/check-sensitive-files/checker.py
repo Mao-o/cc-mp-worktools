@@ -89,9 +89,12 @@ def _run_git_raw(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str]
     (プロセスが応答しない) は git **呼出そのもの**の失敗であり、区別できないと
     「機密ファイルなし」(= 対象が git リポジトリでない等、git 自体は起動できたが
     非ゼロで終了した場合。これは正常系) と同じ沈黙に落ちて検査が実行されな
-    かったことに気づけない。patterns_unavailable と同じ形式で stderr に 1 回
-    報告する。fail-open の挙動 (呼出元は引き続き空リストとして扱う) 自体は
-    変えない — 可視性を足すだけで判定境界には触れない。
+    かったことに気づけない。patterns_unavailable と同じ形式で、この関数の
+    呼出ごとに stderr へ 1 行報告する (呼出全体を通して「1 回」ではない —
+    1 回の Stop hook 実行で `rev-parse` / `ls-files` 系 / (P2-1 以降は)
+    submodule のネスト段数ぶん、複数回 git を呼びうるため、失敗が複数箇所で
+    起きれば複数行になる)。fail-open の挙動 (呼出元は引き続き空リストとして
+    扱う) 自体は変えない — 可視性を足すだけで判定境界には触れない。
 
     既知の残課題: ``PermissionError`` (git はあるが実行権限がない) は
     ``OSError`` の subclass だがこの ``except`` 節では捕捉しない (意図的 —

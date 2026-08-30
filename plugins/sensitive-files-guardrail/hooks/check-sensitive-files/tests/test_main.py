@@ -639,8 +639,10 @@ _EXPECTED_SMALL_REASON = '【セキュリティ確認】\n\n【tracked】以下�
 class TestBuildReasonByteBudget(unittest.TestCase):
     """内部バックログ: block reason の byte 予算。
 
-    公式 hooks reference が明記する「hook の stdout 文字列は 10,000 文字が
-    上限」に対する安全マージン (``MAX_REASON_BYTES``)。固定 tail
+    公式 hooks reference は ``additionalContext`` / ``systemMessage`` /
+    素の stdout を 10,000 文字上限と明記するが、Stop hook の ``reason`` は
+    この列挙に含まれていない。名指しされていない以上、保守的にこの値を
+    安全マージンとして採用した (``MAX_REASON_BYTES``)。固定 tail
     (AskUserQuestion 案内 + 恒久除外レシピ) を先に確保し、ファイル列挙
     (``  - path`` 行) だけを畳む。tail 自体は truncate しない。
     """

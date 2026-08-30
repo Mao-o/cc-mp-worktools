@@ -24,13 +24,16 @@ commit 52113a1 で完了)。
 
 内部バックログの精査で発見した不具合 7 件を 2 クラスタで修正 (離脱率低減 /
 可視性改善 / ログ衛生)。**判定境界 (deny / allow / ask / block するか) の変化:
-なし。** テスト件数: redact 1185 → **1203**、check 94 → **107**。
+なし。** テスト件数: redact 1185 → **1203**、check 94 → **112**。
 
 ### Stop hook (check-sensitive-files)
 
-1. **block reason に byte 予算を追加し、ファイル数が多いと 10,000 字上限
-   (公式 hooks reference) を超えて AskUserQuestion の案内と恒久除外レシピが
-   黙って失われる不具合を修正**。固定 tail (AskUserQuestion 案内 + 恒久除外
+1. **block reason に byte 予算を追加し、ファイル数が多いと際限なく伸びて
+   AskUserQuestion の案内と恒久除外レシピが黙って失われる不具合を修正**。
+   予算 (`MAX_REASON_BYTES`) は 10,000 字 (公式 hooks reference が
+   `additionalContext` / `systemMessage` / stdout に明記する上限。Stop hook
+   の `reason` はこの列挙に含まれないが、保守的に同じ値を安全マージンとして
+   採用した) に対する安全マージン。固定 tail (AskUserQuestion 案内 + 恒久除外
    レシピ、`MAX_REASON_BYTES`) を先に確保し、残り予算をファイル列挙
    (`  - path` 行) に充て、溢れた分は `... (N more files; see git status)` に
    畳む。tail 自体は truncate しない (固定部分だけで予算を超える極端なケース
@@ -43,8 +46,13 @@ commit 52113a1 で完了)。
 2. **git 呼出自体の失敗 (git 未インストール / 応答なし) が「機密ファイル
    なし」と区別できず stderr にも出ない不具合を修正**。`FileNotFoundError` /
    `TimeoutExpired` を patterns_unavailable と同じ形式で stderr に報告する
-   (`git_unavailable: <理由種別>`)。「対象が git リポジトリでない」等の
-   非ゼロ終了は従来通り正常系として黙る。fail-open の挙動自体は変えない。
+   (`git_unavailable: <理由種別>`、失敗した git 呼出ごとに 1 行)。「対象が
+   git リポジトリでない」等の非ゼロ終了は従来通り正常系として黙る。
+   fail-open の挙動自体は変えない。なおこの hook は常に exit 0 で終わるため、
+   公式 docs の記述どおりこの stderr は debug log にのみ記録され
+   (`claude --debug` で確認できる)、利用者にも Claude 自身にも通常は見えない
+   — 既存の `patterns_unavailable` と同じ扱いで、可視性の対象は運用者の
+   トラブルシュートに限られる。
 3. **submodule 内 tracked ファイルに対し、Stop hook 自身が案内する
    `git rm --cached` が親 repo からは実行不可能で脱出路が無い不具合を
    修正**。submodule 配下のファイルを検出したときは、該当 submodule
@@ -66,7 +74,11 @@ commit 52113a1 で完了)。
    terminator 不一致の heredoc は行分割 fallback に落ちて first token が
    任意文字列としてログに混入していた (実ログで確認)。first token を渡す
    7 箇所を、既知語彙 (allowlist) に含まれるときだけそのまま出し、それ以外は
-   `other` に畳むようにした。
+   `other` に畳むようにした。実ログ (707k 行) の分布実測では `other` へ
+   畳まれるのは `match:` 分類の 4.65% (`glob_match:` は 0.37%) で、失われる
+   のは `tar` / `rsync` / `curl` / `gpg` など**正当なコマンド名のみ**
+   (この経路で heredoc 識別子の漏洩は 1 件も無かった) — トレードオフは本項の
+   意図した範囲内で、追加の対応は不要と判断した。
 5. **`_quoted_hard_stop_reason` の診断文字列 3 形が空白を含み、ログの
    detail 文字種ホワイトリストを通らず `_BAD` に置換され分類が丸ごと消える
    不具合を修正**。空白区切りを `:` 連結の identifier 形に変更 (合わせて
@@ -87,6 +99,24 @@ commit 52113a1 で完了)。
    ログ呼出側だけで静的に判定できない。判定を成立させるには判定ロジック
    本体 (`handle` / `_analyze_segment`) 側でログを遅延させる設計変更が
    必要で、本バッチの「判定境界に触れない」制約の範囲を超えるため見送った。
+
+### 保守ドキュメント / テスト整備
+
+- `docs/MAINTAINING.md` のログ節を上記 6・7 の実装に合わせて更新
+  (`SFG_LOG_PATH` による上書きと 5MB / 1 世代ローテーションを追記し、
+  「`LOG_PATH` は import 時に確定するため `HOME` 差し替えが効かない」という
+  旧記述を `_testutil` / `conftest.py` の bootstrap による保護に合わせて
+  更新。「unittest が実ログを汚染する」既知課題の記述も解消済みとして整理)。
+- `_shared` パッケージへ依存しながら `_testutil` を import していなかった
+  redact-sensitive-reads の 6 テストファイル
+  (`test_exclude_hint_budget` / `test_exclude_hint_never_truncated` /
+  `test_exclude_scope_disclosure` / `test_segment_size_guard` /
+  `test_matcher_pattern_cache` / `test_pem`) に import を追加し、
+  `unittest discover -p <pattern>` での単独実行でも sys.path とログ隔離の
+  保護が効くようにした (`ModuleNotFoundError: No module named '_shared'`
+  で単独実行が失敗していた)。
+- README.md のログ節に `SFG_LOG_PATH` と 1 世代ローテーションを追記し、
+  テスト件数の表記 (0.25.0 時点の値) を現状 (0.27.0 時点) に更新した。
 
 ## 0.26.0
 

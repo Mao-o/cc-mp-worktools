@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import unittest
 
+from _testutil import FIXTURES  # noqa: F401
+
 from core.messages import _exclude_hint
 
 # 実測境界 1,375 byte から可変部分の余地を引いた固定文言の上限

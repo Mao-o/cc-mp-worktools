@@ -73,9 +73,15 @@ def _warn_stop_ack(detail: str) -> None:
     sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
 
 
-# block reason の byte 予算 (内部バックログ)。公式 hooks reference が明記する
-# 「hook の stdout 文字列は 10,000 文字が上限」に対する安全マージン。byte 数を
-# 上限にすると (multibyte 文字は 1 文字が複数 byte を消費するため) この
+# block reason の byte 予算 (内部バックログ)。公式 hooks reference (Hook
+# input and output / JSON output) は `additionalContext` / `systemMessage` /
+# 素の stdout の 3 つを名指しして「10,000 文字が上限、超過時はファイルに
+# 退避され preview + ファイルパスに置換される」と明記するが、Stop hook の
+# `reason` (`permissionDecisionReason` 相当) はこの列挙に含まれておらず、
+# 同じ上限が適用されるかどうかは docs から確定できない。名指しされていない
+# 以上、保守的にこの値を安全マージンとして採用した (適用されなくても外れる
+# だけで、適用されるなら安全側に倒れる)。byte 数を上限にすると (multibyte
+# 文字は 1 文字が複数 byte を消費するため) この
 # reason 文字列自体の文字数は必ず 9,216 未満に収まる。ただし実際に stdout に
 # 出るのは `json.dumps({"decision": ..., "reason": reason})` で、JSON
 # エンコードで改行 (``\n``) が 2 文字 (``\`` + ``n``) に膨らむ分と wrapper
