@@ -6,7 +6,11 @@
 """
 from __future__ import annotations
 
+import collections
+import multiprocessing as mp
 import os
+import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +19,31 @@ from unittest import mock
 from _testutil import FIXTURES  # noqa: F401
 
 from core import logging as L
+
+
+def _rotation_stress_worker(
+    log_path: str, max_bytes: int, tag: str, start, lines: int
+) -> None:
+    """ローテーション並行テストの子プロセス本体 (module level に置く必要がある)。
+
+    macOS の ``multiprocessing`` 既定は **spawn** で、子は ``core.logging`` を
+    **再 import** する。したがって親側の ``mock.patch.object(L, "LOG_PATH", ...)``
+    / ``MAX_LOG_BYTES`` は子に伝播しない — 子自身が import 後に設定し直す。
+    あわせて ``SFG_LOG_PATH`` も渡す: 属性設定が何らかの理由で効かなくても
+    実ログ (``~/.claude/logs/redact-hook.log``) には絶対に書かないための二重化
+    (実ログは 5MB 閾値を超えているため、1 行でも書くと本番ログがローテーション
+    してしまう)。
+    """
+    os.environ["SFG_LOG_PATH"] = log_path
+    from core import logging as CL
+
+    CL.LOG_PATH = Path(log_path)
+    CL.MAX_LOG_BYTES = max_bytes
+    # timeout を付けないと、import 段階で落ちた兄弟プロセスがいたときに残りが
+    # 待ち続け、失敗が「join の 180 秒ハング」として現れて原因が見えなくなる。
+    start.wait(timeout=60)
+    for i in range(lines):
+        CL.log_info("classify", f"{tag}_{i}")
 
 
 class TestSanitizeDetail(unittest.TestCase):
@@ -214,11 +243,159 @@ class TestLogRotation(unittest.TestCase):
         # rename 失敗 (権限 / 別プロセスが保持中 等) でもログ機構が hook 本体の
         # 判定を止めてはいけない (fail-open のログ契約)。
         self.log_path.write_text("X" * 1000)
-        with mock.patch("os.replace", side_effect=OSError("boom")):
+        with mock.patch("os.replace", side_effect=OSError("boom")) as m_replace:
             try:
                 L.log_info("classify", "still_attempted")
             except OSError:
                 self.fail("log_info must swallow rotation failures")
+        # lock 導入 (外部レビュー R1 P2-B) 後にこのテストが空振りしないことの
+        # 担保: lock 取得や再 stat の段階で早期 return していると os.replace に
+        # 到達せず「失敗を握りつぶした」ことを何も検証しなくなる。
+        self.assertEqual(m_replace.call_count, 1)
+        self.assertIn("still_attempted", self.log_path.read_text())
+
+    def test_no_rotation_at_all_when_fcntl_is_unavailable(self):
+        # Windows など fcntl の無い環境では直列化できないので、ローテーション
+        # 自体を行わない (ログを失う方向ではなく、伸び続ける方に倒す)。
+        self.log_path.write_text("KEEP_ME\n" * 40)
+        with mock.patch.object(L, "fcntl", None):
+            with mock.patch("os.replace") as m_replace:
+                L.log_info("classify", "no_rotation")
+        self.assertEqual(m_replace.call_count, 0)
+        self.assertFalse(self.rotated_path.exists())
+        body = self.log_path.read_text()
+        self.assertIn("KEEP_ME", body)
+        self.assertIn("no_rotation", body)
+
+
+@unittest.skipIf(L.fcntl is None, "fcntl の無い環境ではローテーションを行わない")
+class TestLogRotationSerialization(unittest.TestCase):
+    """外部レビュー R1 P2-B: ローテーションのプロセス間直列化。
+
+    修正前は stat と ``os.replace`` の間に他プロセスが割り込めた。先行プロセス
+    が rename して新ログに 1 行書いた後で後続プロセスが replace すると、``.1``
+    が「1 行だけの新ログ」で上書きされ、前世代が丸ごと失われる。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sfg-rotlock-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.log_path = Path(self.tmp) / "redact-hook.log"
+        self.rotated_path = Path(str(self.log_path) + ".1")
+        self.lock_path = Path(str(self.log_path) + ".lock")
+
+    def _patch_module(self, max_bytes: int) -> None:
+        for patcher in (
+            mock.patch.object(L, "LOG_PATH", self.log_path),
+            mock.patch.object(L, "MAX_LOG_BYTES", max_bytes),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_rotation_skipped_while_lock_is_held_elsewhere(self):
+        """lock を別ハンドルが保持していたらローテーションを skip し、追記は続く。
+
+        ``flock`` は open file description 単位なので、同一プロセスでも別途
+        ``os.open`` したハンドルの排他ロックは競合する (= 他プロセス相当)。
+        """
+        self._patch_module(200)
+        self.log_path.write_text("OLD_GENERATION\n" * 40)
+        holder = os.open(str(self.lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+        self.addCleanup(os.close, holder)
+        L.fcntl.flock(holder, L.fcntl.LOCK_EX)
+
+        L.log_info("classify", "while_locked")
+
+        # 担当を譲ったのでローテーションは起きない
+        self.assertFalse(self.rotated_path.exists())
+        # 追記そのものは壊れない (ログを落とさない)
+        body = self.log_path.read_text()
+        self.assertIn("OLD_GENERATION", body)
+        self.assertIn("while_locked", body)
+
+    def test_no_replace_when_file_changed_between_stat_and_lock(self):
+        """lock 取得までの間に他プロセスが rename 済みなら replace しない。
+
+        ``flock`` の side effect で「先行プロセスがローテーションを完了し新ログ
+        に 1 行書いた」状態を作る。修正前はここで無条件に ``os.replace`` して
+        ``.1`` を 1 行の新ログで潰していた。
+        """
+        self._patch_module(200)
+        real_replace = os.replace
+        real_flock = L.fcntl.flock
+        self.log_path.write_text("OLD_GENERATION\n" * 40)
+        original_body = self.log_path.read_text()
+
+        def _flock_then_someone_else_rotates(fd, operation):
+            real_flock(fd, operation)
+            real_replace(str(self.log_path), str(self.rotated_path))
+            self.log_path.write_text("NEW_GENERATION\n")
+
+        with mock.patch.object(
+            L.fcntl, "flock", side_effect=_flock_then_someone_else_rotates
+        ):
+            with mock.patch("os.replace", wraps=real_replace) as m_replace:
+                L.log_info("classify", "after_swap")
+
+        # inode が変わっているので replace には進まない
+        self.assertEqual(m_replace.call_count, 0)
+        # 前世代 (.1) は無傷
+        self.assertEqual(self.rotated_path.read_text(), original_body)
+        body = self.log_path.read_text()
+        self.assertIn("NEW_GENERATION", body)
+        self.assertIn("after_swap", body)
+
+    def test_concurrent_writers_keep_the_previous_generation_intact(self):
+        """N プロセス同時書込みで ``.1`` が前世代を保持し、1 行も失われないこと。
+
+        閾値 (100,000 byte) と行数を「ローテーションがちょうど 1 回だけ起きる」
+        よう調整してある — 1 世代しか保持しない設計上、2 回目のローテーションが
+        起きると「全行が 1 回ずつ存在する」は**仕様として**成り立たなくなり、
+        バグでないものを追いかけることになるため。
+
+        修正前コード (commit e6ac2ba) では同型の負荷で ``.1`` が 41 byte
+        (1 行) に潰れた: 40 ラウンド中 36〜40 ラウンドで前世代が消失し、
+        24〜40 ラウンドで marker 行そのものが失われた (scratch 実測)。
+        """
+        n_proc = 4
+        lines = 200
+        max_bytes = 100_000
+        prefill_lines = 8_000
+        self.log_path.write_text(
+            "".join(f"PREFILL_{i:05d}\n" for i in range(prefill_lines))
+        )
+        self.assertGreater(self.log_path.stat().st_size, max_bytes)
+
+        ctx = mp.get_context("spawn")
+        start = ctx.Barrier(n_proc)
+        procs = [
+            ctx.Process(
+                target=_rotation_stress_worker,
+                args=(str(self.log_path), max_bytes, f"w{i}", start, lines),
+            )
+            for i in range(n_proc)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=180)
+            self.assertEqual(p.exitcode, 0, msg=f"worker exitcode={p.exitcode}")
+
+        self.assertTrue(self.rotated_path.exists(), "1 回はローテーションが起きる")
+        rotated = self.rotated_path.read_text(errors="replace")
+        current = self.log_path.read_text(errors="replace")
+
+        # (a) 前世代が 1 行に潰れず、prefill 世代を丸ごと保持している
+        self.assertEqual(rotated.count("PREFILL_"), prefill_lines)
+        self.assertGreaterEqual(self.rotated_path.stat().st_size, max_bytes)
+
+        # (b) 全行が log と .1 のどこかにちょうど 1 回ずつ存在する
+        seen = collections.Counter(re.findall(r"w\d+_\d+", current + rotated))
+        expected = {
+            f"w{i}_{j}" for i in range(n_proc) for j in range(lines)
+        }
+        self.assertEqual(set(seen), expected)
+        self.assertEqual([m for m, c in seen.items() if c != 1], [])
 
 
 if __name__ == "__main__":

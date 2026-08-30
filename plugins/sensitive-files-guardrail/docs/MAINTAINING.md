@@ -164,7 +164,15 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   解決する)。書込み前に byte 数を確認し、既定 5MB (`MAX_LOG_BYTES`) を
   超えていたら `redact-hook.log.1` へ 1 世代ローテーションする (0.27.0)。
   保持されるのは直近世代のみで、2 回目のローテーションは `.1` を上書きする
-  (蓄積されない)。Stop hook はファイルログを持たず stderr のみ
+  (蓄積されない)。ローテーションはサイドカー lock ファイル
+  `<log>.lock` の `flock(LOCK_EX | LOCK_NB)` で**プロセス間直列化**して
+  あり、lock 内で再 stat して inode とサイズを確認してから `os.replace`
+  する (lock を取れなければローテーションを譲って追記だけ行う)。直列化が
+  無いと、並行する hook プロセスが揃って閾値超過を観測し、後続の
+  `os.replace` が `.1` を「1 行だけの新ログ」で上書きして前世代を丸ごと
+  失う (外部レビュー R1 P2-B。実測で `.1` が 8,000 行 → 0 行になった)。
+  `fcntl` の無い環境ではローテーション自体を行わない (ログを失う方向に
+  倒さない)。Stop hook はファイルログを持たず stderr のみ
 - Stop hook の once-only state (`~/.claude/sensitive-files-guardrail/stop-ack/`)
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・

@@ -877,9 +877,10 @@ class TestSerializedJsonBudget(unittest.TestCase):
         UTF-8 では 3 byte あり、byte 予算はむしろ**過大請求**していたため
         (安全側に外れていた)。したがってこれは「修正前に落ちる回帰テスト」
         ではなく、文字数予算へ移行したあとも枠を割らないことを固定する床
-        テストである。移行によって表示件数は増える (実測 reason 5,126 →
-        8,822 文字 / 表示件数が約 3 倍) が、これは byte 予算の過大請求が
-        解消された結果で意図した改善。
+        テストである。移行によって表示件数は増える (この入力で実測 171 →
+        347 件 = 約 2.0 倍) が、これは byte 予算の過大請求が解消された結果で
+        意図した改善。参考: 同じ移行で ASCII path は 300 → 319 件 (ほぼ横ばい)、
+        エスケープの多い名前は 233 → 147 件 (正しく高く請求されるため減る)。
         """
         entry = _load_entry()
         names = [f"機密/設定ファイル{i}.env" for i in range(3000)]
@@ -936,6 +937,14 @@ class TestSerializedJsonBudget(unittest.TestCase):
                     len(entry._serialize(reason)),
                 )
 
+
+class TestSerializedJsonBudgetE2E(BaseMainTest):
+    """``main()`` を実際に通す側の検証 (HOME は ``BaseMainTest`` が tmp に隔離)。
+
+    HOME を隔離しないと開発者の実 ``patterns.local.txt`` を読んでしまい、そこに
+    ``!.env`` があるマシンでだけ block が起きず落ちる (環境依存の flaky)。
+    """
+
     def test_main_stdout_uses_the_measured_serializer(self):
         """``main()`` の実出力が予算計測と同じ ``_serialize`` を通ること。
 
@@ -943,25 +952,23 @@ class TestSerializedJsonBudget(unittest.TestCase):
         いった変更で「計った値と出す値が違う」状態に戻らないようにする杭。
         """
         entry = _load_entry()
-        with tempfile.TemporaryDirectory() as tmp:
-            _init_repo(tmp)
-            Path(tmp, ".env").write_text("K=v\n")
-            captured: dict[str, str] = {}
-            real_serialize = entry._serialize
+        (self.repo / ".env").write_text("K=v\n")
+        captured: dict[str, str] = {}
+        real_serialize = entry._serialize
 
-            def _spy(reason: str) -> str:
-                captured["reason"] = reason
-                return real_serialize(reason)
+        def _spy(reason: str) -> str:
+            captured["reason"] = reason
+            return real_serialize(reason)
 
-            with mock.patch.object(entry, "_serialize", _spy):
-                old_stdin, old_stdout = sys.stdin, sys.stdout
-                try:
-                    sys.stdin = io.StringIO(json.dumps({"cwd": tmp}))
-                    sys.stdout = io.StringIO()
-                    entry.main()
-                    out = sys.stdout.getvalue()
-                finally:
-                    sys.stdin, sys.stdout = old_stdin, old_stdout
+        with mock.patch.object(entry, "_serialize", _spy):
+            old_stdin, old_stdout = sys.stdin, sys.stdout
+            try:
+                sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+                sys.stdout = io.StringIO()
+                entry.main()
+                out = sys.stdout.getvalue()
+            finally:
+                sys.stdin, sys.stdout = old_stdin, old_stdout
         self.assertIn("reason", captured)
         self.assertEqual(out, real_serialize(captured["reason"]) + "\n")
         self.assertEqual(json.loads(out)["decision"], "block")
