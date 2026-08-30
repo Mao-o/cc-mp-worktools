@@ -79,21 +79,68 @@ def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
     )
 
 
-def _run_git(args: list[str], cwd: str) -> list[str]:
-    """git コマンドを実行してファイル一覧を返す。失敗時は空リスト。"""
+def _run_git_raw(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str] | None":
+    """git を実行して ``CompletedProcess`` を返す。呼出自体の失敗は ``None``。
+
+    ``_run_git`` / ``_run_git_nul`` の共通土台 (内部バックログ)。git_unavailable
+    の stderr 報告をここに一元化する。
+
+    ``FileNotFoundError`` (git 実行ファイルが無い) / ``TimeoutExpired``
+    (プロセスが応答しない) は git **呼出そのもの**の失敗であり、区別できないと
+    「機密ファイルなし」(= 対象が git リポジトリでない等、git 自体は起動できたが
+    非ゼロで終了した場合。これは正常系) と同じ沈黙に落ちて検査が実行されな
+    かったことに気づけない。patterns_unavailable と同じ形式で、この関数の
+    呼出ごとに stderr へ 1 行報告する (呼出全体を通して「1 回」ではない —
+    1 回の Stop hook 実行で `rev-parse` / `ls-files` 系 / (P2-1 以降は)
+    submodule のネスト段数ぶん、複数回 git を呼びうるため、失敗が複数箇所で
+    起きれば複数行になる)。fail-open の挙動 (呼出元は引き続き空リストとして
+    扱う) 自体は変えない — 可視性を足すだけで判定境界には触れない。
+
+    既知の残課題: ``PermissionError`` (git はあるが実行権限がない) は
+    ``OSError`` の subclass だがこの ``except`` 節では捕捉しない (意図的 —
+    ``FileNotFoundError`` / ``TimeoutExpired`` 以外の ``OSError`` まで広げると
+    予期しない例外を fail-open に倒す範囲が広がり、判定表を変えない、という
+    本件のスコープを超える)。
+    """
     try:
-        result = subprocess.run(
+        return subprocess.run(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return []
-        return [line for line in result.stdout.splitlines() if line.strip()]
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        sys.stderr.write(
+            f"[check-sensitive-files] git_unavailable: {type(e).__name__}\n"
+        )
+        return None
+
+
+def _run_git(args: list[str], cwd: str) -> list[str]:
+    """git コマンドを実行して行 (改行区切り) のリストを返す。失敗時は空リスト。
+
+    ``returncode != 0`` (対象が git リポジトリでない等) は正常系として黙って
+    ``[]`` を返す。呼出自体の失敗の扱いは ``_run_git_raw`` を参照。
+    """
+    result = _run_git_raw(args, cwd)
+    if result is None or result.returncode != 0:
         return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _run_git_nul(args: list[str], cwd: str) -> list[str]:
+    """git コマンドを実行して NUL 区切り (``-z``) の要素リストを返す。
+
+    ``git ls-files -z`` は non-ASCII / 特殊文字を含む path が
+    ``core.quotePath`` によって 8 進エスケープの引用符付き文字列に変換される
+    (改行区切りだと誤ってその形のまま 1 要素として返ってしまう) のを避ける
+    標準的な使い方 (``submodule_paths`` が使用)。
+    """
+    result = _run_git_raw(args, cwd)
+    if result is None or result.returncode != 0:
+        return []
+    return [item for item in result.stdout.split("\0") if item]
 
 
 def is_git_repo(cwd: str) -> bool:
@@ -141,6 +188,103 @@ def _ls_tracked(cwd: str) -> list[str]:
         return result
     # fallback: --recurse-submodules 非対応の古い git、または repo が本当に空の場合
     return _run_git(["ls-files"], cwd)
+
+
+def submodule_paths(
+    cwd: str, _prefix: str = "", _visited: set[str] | None = None
+) -> set[str]:
+    """cwd から見える submodule mount path 一覧 (cwd 相対、ネスト込み) を返す
+    (内部バックログ、P2-1 で手動再帰化)。
+
+    ``git ls-files --stage`` は **直下**の submodule だけを gitlink
+    (mode ``160000``) の 1 entry として返し、submodule 配下の submodule
+    (ネスト) までは辿らない。``--recurse-submodules`` を ``--stage`` に
+    足しても gitlink は返らない (git 2.50.1 実測)。tracked な機密ファイルが
+    ネストした submodule 配下にあると、親 repo からの
+    ``git rm --cached <path>`` は**そのファイルには効かない**
+    (submodule は別の git index を持つため) にも関わらず、案内が外側の
+    (実際には効かない) submodule ディレクトリを指してしまう — 各 submodule
+    ディレクトリで ``git ls-files --stage`` を手動再帰して埋める。
+    ``in_submodule`` はこの結果から最長一致 (= 最も深い submodule) を返す。
+
+    再帰先ディレクトリ (``os.path.join(cwd, path)``) が実際に checkout 済みの
+    submodule でなければ再帰しない。``git submodule add`` はネストした
+    submodule の working copy までは自動で ``update --init`` しないため、
+    ``git clone`` を ``--recurse-submodules`` 無しで行った直後などでは
+    ディレクトリ自体は (gitlink 用の空の placeholder として) 存在するが
+    ``.git`` を持たない — このとき ``git`` をそこで実行すると、cwd 自身が
+    親の gitlink 位置と一致することから親の index にある同じ gitlink を
+    ``./`` という自己参照パスで返してしまい (実測: git 2.50.1)、
+    ``full + "./"`` のような不正な要素が集合に混入する。存在確認だけでは
+    この placeholder ディレクトリを弾けない (``os.path.isdir`` は true を
+    返す) ため、``.git`` の有無で「実際に checkout 済みか」を判定する。
+    (``.git`` が無ければ独立した index も working copy も無いので、再帰しても
+    ``os.path.isdir`` だけの旧チェックより安全に「対象なし」を返せる。
+    ``FileNotFoundError`` (存在しない cwd で git を呼んで ``_run_git_raw`` が
+    ``git_unavailable`` を誤検知する経路) も併せて防げる。)
+    ``_visited`` は実パスの循環 (壊れた/悪意ある構成が symlink 等で祖先を
+    指す防御的ケース、``TestNestedSubmoduleGuidancePaths
+    .test_symlinked_submodule_cycle_terminates_without_recursion_error`` で
+    再現・確認済み) を検出して安全に打ち切るための集合。この guard が無い
+    場合の実際の挙動は OS / git のシンボリックリンク解決に依存し、
+    macOS + git 2.50.1 の実測では symlink の循環が ELOOP 相当で早期に
+    黙って解決不能になり (Python の再帰エラーには達しない)、代わりに
+    ``vendor/deep/deep/deep/...`` のような**存在しない submodule を指す
+    誤ったディレクトリ名**が結果に混入した (無駄な git 呼出も約 16 回分
+    発生)。bind mount 等シンボリックリンクを経由しない循環では OS 側の
+    ループ検出が効かず深い Python 再帰になりうるため、実装をどちらか一方の
+    失敗モードに依存させず ``_visited`` で経路によらず確実に止める。
+    呼出コストがあるため、tracked な機密ファイルが 1 件も無いときは
+    呼ばないこと (呼出側の責務)。
+    """
+    visited = _visited if _visited is not None else set()
+    real_cwd = os.path.realpath(cwd)
+    if real_cwd in visited:
+        return set()
+    visited.add(real_cwd)
+
+    paths: set[str] = set()
+    for entry in _run_git_nul(["ls-files", "--stage", "-z"], cwd):
+        # 形式: "<mode> <object> <stage>\t<path>" (gitlink は mode 160000)
+        meta, sep, path = entry.partition("\t")
+        if not sep or not path:
+            continue
+        if (meta.split(" ", 1)[0] if meta else "") != "160000":
+            continue
+        full = _prefix + path
+        paths.add(full)
+        sub_cwd = os.path.join(cwd, path)
+        if os.path.exists(os.path.join(sub_cwd, ".git")):
+            paths.update(submodule_paths(sub_cwd, full + "/", visited))
+    return paths
+
+
+def in_submodule(path: str, submod_paths: set[str]) -> str | None:
+    """``path`` (cwd 相対) がどの submodule 配下にあるかを返す (無ければ None)。
+
+    ``<submodule>/`` prefix 一致 (submodule 配下のファイル) だけを見る。
+    ネストした submodule (例: ``vendor`` と ``vendor/deep`` の両方が
+    submodule として ``submod_paths`` に入っている) では**最長一致**を返す
+    — そのファイルを実際に持つ git index は常に一番深い submodule の
+    ものだから (P2-1)。
+
+    ``path`` が submodule path と**完全一致**する場合 (= gitlink そのもの)
+    は意図的に対象外とする (P2-3, 外部レビュー R3)。未初期化 submodule
+    (working copy が無い) では ``git ls-files --recurse-submodules`` が
+    配下に再帰できず、gitlink の path 自体を通常の tracked entry として
+    返す。この entry の実体は**親 repo の index が持つ gitlink**であり、
+    submodule 自身の index には何も無い (未初期化なら index 自体が存在
+    しない)。submodule のマウント名が機密パターンに一致すると (例:
+    ``.env``) この完全一致が発生し、`git rm --cached` が親から直接効く
+    にも関わらず「親では実行不可能、submodule ディレクトリに `cd` せよ」
+    という実行不能な案内 (空の未初期化ディレクトリを指す) を出してしまって
+    いた。gitlink は常に親 index 由来なので、完全一致は「submodule 配下
+    ではない」= 通常の親 repo 向け案内のままにする。
+    """
+    matches = [sp for sp in submod_paths if path.startswith(sp + "/")]
+    if not matches:
+        return None
+    return max(matches, key=len)
 
 
 def root_offset(cwd: str, root: str | None) -> str | None:

@@ -49,6 +49,7 @@ from handlers.bash.constants import (
     _METADATA_ONLY_FIRST_TOKENS,
     _OPAQUE_WRAPPERS,
     _SAFE_READ_FIRST_TOKENS,
+    _SHELL_KEYWORDS,
 )
 
 _AWK_FIRST_TOKENS = frozenset({"awk", "gawk", "mawk", "nawk"})
@@ -132,6 +133,31 @@ _DELEGATING_TOKENS = (
     _OPAQUE_WRAPPERS | _AWK_FIRST_TOKENS | _SED_FIRST_TOKENS
     | _SHELL_DELEGATORS | _FIND_EXEC_ACTIONS
 )
+
+# bash_classify ログに first token をそのまま出してよい既知語彙の和集合
+# (内部バックログ)。``_QUOTE_RELAX_FIRST_TOKENS`` (quote 緩和の可否という別目的の
+# 判定セット) に、ログでは区別を保つ価値がある 4 集合を足し戻す:
+# ``_PAGER_LIKE`` (less / ack 等、quote 緩和では意図的に除外されているだけで
+# コマンド名としては既知)、``_OPAQUE_WRAPPERS`` (bash / python3 等)、
+# ``_SHELL_KEYWORDS`` (if / while 等)、``_SHELL_DELEGATORS`` (ssh / docker 等)。
+# 実ログの分布実測 (2026-08) でこれらは高頻度の正当な値であることを確認済み。
+_LOG_KNOWN_FIRST_TOKENS = (
+    _QUOTE_RELAX_FIRST_TOKENS | _PAGER_LIKE | _OPAQUE_WRAPPERS
+    | _SHELL_KEYWORDS | _SHELL_DELEGATORS
+)
+
+
+def _safe_log_first_token(token: str) -> str:
+    """bash_classify ログに渡す first token を安全化する (内部バックログ)。
+
+    heredoc 本文が擬似セグメントとして解析されたとき、その先頭語 (env var 名や
+    秘密のキー名になりうる) がログにそのまま残る問題への対処。
+    ``_LOG_KNOWN_FIRST_TOKENS`` に含まれるときだけ ``token`` をそのまま返し、
+    それ以外は ``"other"`` に畳む (allowlist ヒットの計測目的は保たれ、任意の
+    文字列はログに入らない)。既に既知集合の membership test を通過済みの
+    呼出箇所では実質 no-op (常に token 自身を返す)。
+    """
+    return token if token in _LOG_KNOWN_FIRST_TOKENS else "other"
 
 
 def _is_script_file_opt(t: str) -> bool:
@@ -504,25 +530,40 @@ def _quoted_hard_stop_reason(tokens: list[str]) -> str | None:
     後退にはならない。逆にクォート内 hard-stop が無い segment には適用しない
     (``grep -r python3 .`` のような普通のコマンドを ask に倒さないため)。
 
+    診断文字列は identifier 形 (空白なし、``:`` 連結) で、可変部分は既知語彙
+    (``_LOG_KNOWN_FIRST_TOKENS`` / ``_GIT_INERT_SUBCOMMANDS``) の外なら常に
+    ``"other"`` に畳む (内部バックログ: 空白を含む形は ``core.logging`` の
+    detail 文字種ホワイトリストを通らず分類ごと ``_BAD`` に消えていた。first
+    token をそのまま埋め込む形は heredoc 本文の識別子が verbatim で残る漏れ
+    だった)。
+
     Returns:
-        ``"not_inert:<first>"`` (first token が inert allow-list 外) /
-        ``"delegate:git -c"`` (git の ``-c`` / ``--config-env`` 付き) /
-        ``"delegate:git <sub>"`` (inert でない / 未知の git サブコマンド) /
-        ``"delegate:<first> <option>"`` (外部プログラムを受け取る option) /
-        ``"delegate:<token>"`` (first token 以外への委譲)、緩和してよければ ``None``。
+        ``"not_inert:<first-or-other>"`` (first token が inert allow-list 外。
+        既知語彙ならそのまま、未知なら ``other``) /
+        ``"delegate:git:-c"`` (git の ``-c`` / ``--config-env`` 付き) /
+        ``"delegate:git:other"`` (inert でない / 未知の git サブコマンド。
+        ``sub`` は定義上つねに ``_GIT_INERT_SUBCOMMANDS`` の外なので固定文字列) /
+        ``"delegate:<first>:<option>"`` (外部プログラムを受け取る option。
+        ``first`` はここに到達した時点で ``_QUOTE_RELAX_FIRST_TOKENS`` 内、
+        ``option`` は ``_DELEGATING_OPTIONS`` の固定値なのでどちらも安全) /
+        ``"delegate:<token>"`` (first token 以外への委譲。``_DELEGATING_TOKENS``
+        の既知語彙のみ)、緩和してよければ ``None``。
     """
     if not tokens:
         return None
     first = tokens[0].rsplit("/", 1)[-1]
     if first not in _QUOTE_RELAX_FIRST_TOKENS:
-        return f"not_inert:{first}"
+        return f"not_inert:{_safe_log_first_token(first)}"
     if first == "git":
         _, has_config, sub = _git_global_options(tokens)
         if has_config:
-            return "delegate:git -c"
+            return "delegate:git:-c"
         if sub is None or sub not in _GIT_INERT_SUBCOMMANDS:
-            return f"delegate:git {sub or '?'}"
+            # sub はこの分岐に来た時点で定義上つねに _GIT_INERT_SUBCOMMANDS の
+            # 外 (None も含む) なので、値を埋め込んでも常に未知語になる。
+            # not_inert:{first} と同型の理由で固定文字列にする。
+            return "delegate:git:other"
     for prefix in _DELEGATING_OPTIONS.get(first, ()):
         if any(t.startswith(prefix) for t in tokens[1:]):
-            return f"delegate:{first} {prefix}"
+            return f"delegate:{first}:{prefix}"
     return _delegated_interpreter(tokens)

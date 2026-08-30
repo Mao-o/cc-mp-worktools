@@ -13,6 +13,8 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 
+from _testutil import FIXTURES  # noqa: F401
+
 from redaction.engine import redact, redact_large_file
 from redaction.keyonly_scan import scan_keys
 from redaction.pem import _MAX_BLOCKS as MAX_BLOCKS

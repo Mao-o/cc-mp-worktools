@@ -23,15 +23,23 @@ if _PKG_DIR not in sys.path:
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
+from _shared.streams import write_stdout  # noqa: E402
 from core import logging as L  # noqa: E402
 from core import messages as M  # noqa: E402
 from core import output  # noqa: E402
 
 
 def _emit(response: dict) -> None:
-    """hook 出力を stdout に書いて exit 0。"""
+    """hook 出力を stdout に書いて exit 0。
+
+    ``print`` / ``sys.stdout.write`` ではなく ``write_stdout`` (UTF-8 bytes を
+    バイナリ層へ書く) を通す。deny reason の大半は日本語なので、
+    ``PYTHONIOENCODING=ascii`` 等の非 UTF-8 stdout では書込みが
+    ``UnicodeEncodeError`` になり、hook が exit 1 で落ちて判定が届かず
+    **tool 呼出が素通りする** (fail-open。外部レビュー R2 P2-A)。
+    """
     try:
-        sys.stdout.write(json.dumps(response, ensure_ascii=False))
+        write_stdout(json.dumps(response, ensure_ascii=False))
     except (BrokenPipeError, OSError):
         pass
 

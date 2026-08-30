@@ -157,13 +157,26 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
 | 展開後の絶対パス / basename | `classify()` 結果 (regular / symlink / special) |
 | Bash command 文字列 | `bash_classify` の固定 slug (`match:<first_token>` 等) |
 
-- ログ先は `~/.claude/logs/redact-hook.log` (plugin cache が消えても残るよう
-  `$HOME` 側に固定)。Stop hook はファイルログを持たず stderr のみ
+- ログ先は既定で `~/.claude/logs/redact-hook.log` (plugin cache が消えても
+  残るよう `$HOME` 側に固定)。`SFG_LOG_PATH` 環境変数を設定するとその値で
+  上書きできる (0.27.0、テスト実行が実ログを汚染しないための差し替え口。
+  `core/logging.py::_resolve_log_path` がモジュール import 時に 1 回だけ
+  解決する)。書込み前に byte 数を確認し、既定 5MB (`MAX_LOG_BYTES`) を
+  超えていたら `redact-hook.log.1` へ 1 世代ローテーションする (0.27.0)。
+  保持されるのは直近世代のみで、2 回目のローテーションは `.1` を上書きする
+  (蓄積されない)。ローテーションはサイドカー lock ファイル
+  `<log>.lock` の `flock(LOCK_EX | LOCK_NB)` で**プロセス間直列化**して
+  あり、lock 内で再 stat して inode とサイズを確認してから `os.replace`
+  する (lock を取れなければローテーションを譲って追記だけ行う)。直列化が
+  無いと、並行する hook プロセスが揃って閾値超過を観測し、後続の
+  `os.replace` が `.1` を「1 行だけの新ログ」で上書きして前世代を丸ごと
+  失う (外部レビュー R1 P2-B。実測で `.1` が 8,000 行 → 0 行になった)。
+  `fcntl` の無い環境ではローテーション自体を行わない (ログを失う方向に
+  倒さない)。Stop hook はファイルログを持たず stderr のみ
 - Stop hook の once-only state (`~/.claude/sensitive-files-guardrail/stop-ack/`)
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
   basename までに留める (`docs/DESIGN.md` の設計原則 2)
-- 既知課題: unittest が実ログに書き込み計測値を汚染する (内部バックログで追跡中)
 
 ## テスト実行
 
@@ -214,12 +227,27 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   は `Path.home()` を**関数内**で解決するため env 差し替えが効く
   (`_shared/patterns.py::_resolve_local_patterns_path` /
   `check-sensitive-files/stop_ack.py::resolve_state_dir`)。一方
-  `core/logging.py::LOG_PATH` は **import 時**に `Path.home()` で確定するので、
-  後から `HOME` を差し替えても向き先は変わらない。tmpdir に逃がしているのは
-  `mock.patch.object(L, "LOG_PATH", ...)` を使う `test_logging.py` だけで、
-  それ以外のテストは実 `~/.claude/logs/redact-hook.log` に書きうる
-  (「ログ規則」節の既知課題と同じ根。新しいテストでログ書込を伴う経路を叩くなら
-  `LOG_PATH` 自体を patch すること)
+  `core/logging.py::LOG_PATH` は **import 時**に確定するので、後から `HOME`
+  を差し替えても向き先は変わらない — ただし 0.27.0 からは `HOME` 自体では
+  なく専用の `SFG_LOG_PATH` 環境変数で上書きでき、`tests/_testutil.py`
+  (unittest) / `tests/conftest.py` (pytest) が**プロセス起動時に 1 回だけ**
+  tmpdir を指す値を設定するため、``core`` 配下を import する全テストが
+  自動的に tmpdir へ逃げる (個別テストが `mock.patch.object(L, "LOG_PATH",
+  ...)` する必要はもう無い。`test_logging.py` は既定パス解決ロジック自体を
+  検証するために引き続きこの patch を使う)。この保護は「`_testutil` を
+  他のどの hook パッケージ import よりも先に import する」慣例に依存する
+  ため、`unittest discover` (アルファベット順に import) では効くが、
+  `-p <pattern>` で個別ファイルだけを対象にする実行では対象ファイル自身が
+  `_testutil` を import していないと効かない — 全 30 テストファイルが
+  `from _testutil import FIXTURES` (または副作用目的の `import _testutil`)
+  を持つのはこのため
+- 新しいテストで既定 `LOG_PATH` を検証したい (`SFG_LOG_PATH` の上書きを外し
+  たい) 場合は、実行前に `os.environ.pop("SFG_LOG_PATH", ...)` するのではなく
+  `mock.patch.object(L, "LOG_PATH", ...)` で対象を tmpdir に固定すること —
+  `SFG_LOG_PATH` を外すと解決先が実 `~/.claude/logs/redact-hook.log` に戻り、
+  実行時のログ書込みが本物の運用ログを汚染する (実際に起きた事故: mutation
+  検証で `SFG_LOG_PATH` 参照を外した scratch コピーを実 `HOME` のまま実行し、
+  5MB ローテーション閾値を超えていた実ログが `.1` に退避された)
 - marketplace の CI (`.github/workflows/validate.yml`) も同じ
   `python3 -m unittest discover tests` を、同じくサブシェルで `cd` する形で
   `plugins/*/hooks/*/tests` の親を列挙して実行する (CI 側は失敗したスイートを

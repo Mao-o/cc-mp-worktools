@@ -139,6 +139,7 @@ from handlers.bash.interpreters import (  # noqa: F401
     _inline_shell_delegation,
     _program_dynamic_construct,
     _quoted_hard_stop_reason,
+    _safe_log_first_token,
 )
 from handlers.bash.operand_lexer import (  # noqa: F401
     _command_enables_dotglob,
@@ -608,7 +609,9 @@ def _analyze_segment(
         )
 
     if first in _SHELL_KEYWORDS:
-        L.log_info("bash_classify", f"shell_keyword_lenient:{first}")
+        L.log_info(
+            "bash_classify", f"shell_keyword_lenient:{_safe_log_first_token(first)}"
+        )
         return output.ask_or_allow(
             M.bash_lenient("shell_keyword", detail=first),
             envelope,
@@ -637,15 +640,22 @@ def _analyze_segment(
             else None
         )
         if redirect_target is not None:
-            L.log_info("bash_classify", f"metadata_redirect_deny:{first}")
+            L.log_info(
+                "bash_classify",
+                f"metadata_redirect_deny:{_safe_log_first_token(first)}",
+            )
             return _build_deny_response(
                 tokens, redirect_target, envelope, root=root
             )
-        L.log_info("bash_classify", f"metadata_only_allow:{first}")
+        L.log_info(
+            "bash_classify", f"metadata_only_allow:{_safe_log_first_token(first)}"
+        )
         return output.make_allow()
 
     if is_safe_read:
-        L.log_info("bash_classify", f"safe_read_allowlist:{first}")
+        L.log_info(
+            "bash_classify", f"safe_read_allowlist:{_safe_log_first_token(first)}"
+        )
 
     paths = _find_path_candidates(tokens)
     pending_glob_ask: dict | None = None
@@ -654,7 +664,9 @@ def _analyze_segment(
             continue
         if _has_glob(p):
             if _glob_operand_is_dotenv_match(p, dotglob=dotglob):
-                L.log_info("bash_classify", f"glob_match:{first}")
+                L.log_info(
+                    "bash_classify", f"glob_match:{_safe_log_first_token(first)}"
+                )
                 return _build_deny_response(tokens, p, envelope, root=root)
             if pending_glob_ask is None:
                 L.log_info("bash_classify", "glob_uncertain_lenient")
@@ -665,7 +677,9 @@ def _analyze_segment(
             continue
         try:
             if _operand_is_sensitive(p, envelope.get("cwd", ""), rules, root=root):
-                L.log_info("bash_classify", f"match:{first}")
+                L.log_info(
+                    "bash_classify", f"match:{_safe_log_first_token(first)}"
+                )
                 return _build_deny_response(tokens, p, envelope, root=root)
         except (ValueError, OSError):
             return output.ask_or_allow(

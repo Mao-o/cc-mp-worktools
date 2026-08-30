@@ -138,6 +138,131 @@ class TestRenderFailureLogging(BaseBash):
             self.assertEqual(_sanitize_detail(d), d)
 
 
+class TestFirstTokenLogSafety(BaseBash):
+    """内部バックログ: ``bash_classify`` ログに first token が verbatim で
+    残らないこと (heredoc 本文の識別子・秘密のキー名が漏れる不具合)。
+
+    0.22.0 は正しく終端された heredoc の本文を segment 分割から除外して
+    いるため、実際に漏れるのは (a) heredoc terminator が本文と一致しない
+    (未終端 / typo) ときの行分割 fallback、(b) heredoc を伴わない多行コマンド
+    文字列そのもの、の 2 経路 (どちらも ``\\n`` が segment の区切りである
+    ことに由来する)。
+    """
+
+    def _captured(self, cmd: str, cwd: str) -> list[tuple]:
+        with mock.patch("handlers.bash_handler.L.log_info") as spy:
+            handle(_make_envelope(cmd, cwd))
+        return [c.args for c in spy.call_args_list]
+
+    def test_multiline_command_does_not_leak_identifier_into_log(self):
+        # heredoc すら使わない最小形: 改行だけで first token が任意文字列になる。
+        cmd = "AWS_SECRET_ACCESS_KEY = 'wJalr$EXAMPLEKEY'"
+        calls = self._captured(cmd, self.tmp)
+        details = [c[1] for c in calls if c[0] == "bash_classify"]
+        self.assertIn("hard_stop_quoted:not_inert:other", details)
+        for d in details:
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", d)
+            self.assertNotIn("SECRET", d)
+
+    def test_unterminated_heredoc_does_not_leak_identifier_into_log(self):
+        # terminator が来る前にコマンド文字列が終わる (未終端) heredoc は
+        # 行分割 fallback に落ちる (segmentation.py の既知の安全側フォール
+        # バック — 本物の未終端 heredoc を丸ごと本文として飲み込むと、続く
+        # 実コマンドが解析されず auto で素通りするため)。
+        cmd = "cat > cfg.py <<'PY'\nAWS_SECRET_ACCESS_KEY = 'wJalr$EXAMPLEKEY'\n"
+        calls = self._captured(cmd, self.tmp)
+        for _category, detail in calls:
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", detail)
+
+    def test_known_command_first_token_survives_unchanged(self):
+        # 既知コマンド (allowlist ヒット) はそのままログに残る (計測目的を保つ)。
+        calls = self._captured("cat notes.txt", self.tmp)
+        details = [c[1] for c in calls if c[0] == "bash_classify"]
+        self.assertIn("safe_read_allowlist:cat", details)
+
+
+class TestSafeLogFirstToken(unittest.TestCase):
+    """``_safe_log_first_token`` の allowlist 判定 (内部バックログ)。"""
+
+    def test_known_tokens_pass_through_unchanged(self):
+        from handlers.bash.interpreters import _safe_log_first_token
+
+        for tok in ("cat", "git", "docker", "less", "if", "sed", "bash", "ag"):
+            with self.subTest(tok=tok):
+                self.assertEqual(_safe_log_first_token(tok), tok)
+
+    def test_unknown_tokens_collapse_to_other(self):
+        from handlers.bash.interpreters import _safe_log_first_token
+
+        for tok in ("AWS_SECRET_ACCESS_KEY", "logout_row", "BEGIN", "curl", ""):
+            with self.subTest(tok=tok):
+                self.assertEqual(_safe_log_first_token(tok), "other")
+
+
+class TestQuotedHardStopReasonIsIdentifierShaped(unittest.TestCase):
+    """``_quoted_hard_stop_reason`` の診断文字列が空白なし・既知語彙限定に
+    なること (内部バックログ)。3 形とも ``core.logging._sanitize_detail`` を
+    通り、二度と ``_BAD`` に丸ごと潰れないことも合わせて確認する。
+    """
+
+    def test_not_inert_unknown_collapses(self):
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        reason = _quoted_hard_stop_reason(["AWS_SECRET_ACCESS_KEY", "=", "x"])
+        self.assertEqual(reason, "not_inert:other")
+
+    def test_not_inert_known_delegator_survives(self):
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        reason = _quoted_hard_stop_reason(["docker", "run", "img"])
+        self.assertEqual(reason, "not_inert:docker")
+
+    def test_git_dash_c_has_no_space(self):
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        reason = _quoted_hard_stop_reason(["git", "-c", "alias.x=!true", "x"])
+        self.assertEqual(reason, "delegate:git:-c")
+
+    def test_git_unknown_subcommand_collapses_without_leaking(self):
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        reason = _quoted_hard_stop_reason(["git", "totally-unknown-subcmd"])
+        self.assertEqual(reason, "delegate:git:other")
+        self.assertNotIn("totally-unknown-subcmd", reason)
+
+    def test_git_no_subcommand_also_collapses(self):
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        self.assertEqual(_quoted_hard_stop_reason(["git"]), "delegate:git:other")
+
+    def test_delegating_option_prefix_has_no_space(self):
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        reason = _quoted_hard_stop_reason(["rg", "--pre", "x", "f"])
+        self.assertEqual(reason, "delegate:rg:--pre")
+
+    def test_all_returned_reasons_pass_detail_sanitizer(self):
+        from core.logging import _sanitize_detail
+        from handlers.bash.interpreters import _quoted_hard_stop_reason
+
+        samples = [
+            ["AWS_SECRET_ACCESS_KEY", "=", "x"],
+            ["docker", "run", "img"],
+            ["git", "-c", "alias.x=!true", "x"],
+            ["git", "totally-unknown-subcmd"],
+            ["git"],
+            ["rg", "--pre", "x", "f"],
+            ["ag", "--pager", "x", "f"],
+            ["find", ".", "-exec", "sh", "-c", "x", ";"],
+        ]
+        for tokens in samples:
+            reason = _quoted_hard_stop_reason(tokens)
+            if reason is not None:
+                with self.subTest(tokens=tokens, reason=reason):
+                    self.assertEqual(_sanitize_detail(reason), reason)
+                    self.assertNotIn(" ", reason)
+
+
 class TestAllow(BaseBash):
     def test_echo_allowed(self):
         r = handle(_make_envelope("echo foo", self.tmp))
@@ -402,7 +527,7 @@ class TestShellKeywordLenient(BaseBash):
 class TestAwkSedOperandScan(BaseBash):
     """0.17.0: awk / sed は opaque を外れ operand scan に到達する。
 
-    背景 (bd_092a232e-5pn): opaque のままだと ``sed -n 1,5p .env`` が autonomous
+    背景 (内部バックログ): opaque のままだと ``sed -n 1,5p .env`` が autonomous
     で素通りし、DESIGN.md の確信 deny 条件 (機密 operand 確定 × 内容出力) と
     実装が食い違っていた。opaque の基準は「operand が静的に file path と判らない」
     ことであり、script 引数の後ろが素直に file operand である awk / sed は
@@ -2556,7 +2681,7 @@ class TestClobberRedirectSplit(BaseBash):
 
 
 class TestRecommendedRemedyAllow(BaseBash):
-    """0.19.0 (bd_092a232e-snw.3): 両 hook の reason が推奨する次善策を自分で deny
+    """0.19.0 (内部バックログ): 両 hook の reason が推奨する次善策を自分で deny
     していた自己矛盾の解消。
 
     ``git rm --cached`` (index からの除去のみ) と ``chmod`` / ``chown`` / ``chgrp``

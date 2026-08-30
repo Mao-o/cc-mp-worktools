@@ -20,6 +20,192 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.27.0
+
+内部バックログの精査で発見した不具合 7 件を 2 クラスタで修正 (離脱率低減 /
+可視性改善 / ログ衛生) + 外部レビュー指摘の反映 5 件 (R1: 項目 1 の予算単位と
+項目 7 のローテーション直列化 / R2: 項目 8 の出力エンコーディングと項目 1 の
+レシピ行の予算化 / R3: 項目 3 の submodule gitlink 完全一致誤判定)。
+**判定境界 (deny / allow / ask / block するか) の変化: なし。**
+テスト件数: redact 1185 → **1210**、check 94 → **133**。
+
+### Stop hook (check-sensitive-files)
+
+1. **block reason に出力予算を追加し、ファイル数が多いと際限なく伸びて
+   AskUserQuestion の案内と恒久除外レシピが黙って失われる不具合を修正**。
+   予算 (`MAX_OUTPUT_CHARS`) は 10,000 字 (公式 hooks reference が
+   `additionalContext` / `systemMessage` / stdout に明記する上限。Stop hook
+   の `reason` はこの列挙に含まれないが、保守的に同じ値を安全マージンとして
+   採用した) に対する安全マージン。**静的な案内文だけを先に確保**し、残り
+   予算を path 由来の可変長部分に配分する。溢れた分は
+   `... (N more files; see git status)` (ファイル列挙) / `... (N more)`
+   (レシピ行) に畳む。静的案内は truncate しない (静的部分だけで予算を超える
+   極端なケースでは出力が予算を超えることを許容する — 案内を失う方が実害が
+   大きいため)。tracked / untracked の両方に該当があるときは残り予算を
+   半分ずつに分ける (先着順だと処理順が先の tracked が予算を独占し、untracked が
+   実例 0 件のまま "... more files" だけになる退行があったため)。
+   再現コーパス (250 件のネストしたパス、旧実装で 16,268 字) で案内・レシピ
+   とも残ることを確認。
+   **予算の対象は「path 由来の行すべて」** (外部レビュー R2 P2-B で「固定
+   tail」から移行)。当初は恒久除外レシピの `!` 行と basename 形の併記を
+   固定 tail に含めて予算の外に置いていたが、中身はファイル path 由来で
+   可変長のため、3.5KB のネストしたパス 3 本で**ファイル列挙の予算を 0 に
+   絞っても直列化後 11,580 字**に達し 10,000 字の枠を破っていた (実測。
+   予算という仕組み自体が効かない入力クラスだった)。現在は
+   (a) ファイル列挙 (b) レシピの `!` 行 (c) basename 形の併記
+   (d) submodule ディレクトリ一覧 の 4 箇所すべてを可変長として扱い、
+   予算の外に残るのは定数から組み立てた案内文だけにした。配分の優先順位は
+   **静的案内 > レシピ行 (残り予算の半分まで) > ファイル列挙 (残り)**。
+   `[project:...]` ヘッダーは畳まない (消えると生き残った `!` 行の追記先
+   セクションが分からなくなるため)。1 本の path だけで予算を超える場合は
+   その行を「path が長すぎるため省略 (N 文字)」に置換する。折り畳み
+   マーカー自体のコストも予算の内側で確保するようにし、**直列化後の出力が
+   `MAX_OUTPUT_CHARS` 以下であることが入力に依らず成立**するようにした
+   (件数 × path 長 × basename 長 × root_offset × セクション配分の格子で
+   総当たり検証)。(d) は件数 10 件で畳んでいたが 1 本の長さが無制限だった
+   ため文字数上限も追加した。
+   **素の出力が丸ごと予算に収まる入力は畳まない** (頭打ちを外して必要分を
+   配分する) ため、通常の長さの入力では出力はバイト単位で従来どおり。
+   これは自己レビューの旧版比較 (merge 済み実装と同じコーパスを流して出力を
+   突き合わせる) で見つけた退行への対処 — 併記行だけが折り畳みマーカー分を
+   無条件に確保しており、全件収まる入力でも表示が減っていた (120 文字の
+   basename 20 件で 20 → 11 件)。上限だけを見る格子テストでは減る方向を
+   原理的に検出できないため、床テストとして固定した。
+   同コーパス 945 ケースの旧版比較では、上限超過 0 件・説明不能な差分 0 件
+   (差分は「マーカー費用を予算内に取り込んだ分」と「レシピを半分で頭打ちに
+   してファイル列挙へ再配分した分」の 2 因子に還元できる)。
+   **予算の単位は「実際に stdout へ出る JSON の文字数」** (外部レビュー R1
+   P2-A で reason の生 UTF-8 byte から移行)。byte で計ると `json.dumps` の
+   エスケープを無視するため、`\` や `"` を多く含む POSIX 有効ファイル名では
+   「reason 9,253 byte (予算内) なのに stdout JSON は 13,088 文字」という
+   逆転が起き、10,000 字の枠を破っていた (実測。修正後は同じ入力が 9,218
+   文字に収まる)。逆に非 ASCII のパスは 1 文字 3 byte のため byte 予算では
+   過大請求になっており、文字数へ移行したことで**表示件数が約 2 倍に増える**
+   (日本語パス 3,000 件のコーパスで 171 → 347 件を実測。ASCII path は
+   300 → 319 件でほぼ横ばい、エスケープの多い名前は 233 → 147 件と正しく
+   高く請求されるため減る。判定は変わらず、見える実例の数だけが動く)。
+   固定部と 1 行あたりのコストは
+   いずれも `json.dumps` に数えさせ、`main()` の出力と同じ `_serialize` を
+   使う (計った値と出す値がずれないようにするため)。
+2. **git 呼出自体の失敗 (git 未インストール / 応答なし) が「機密ファイル
+   なし」と区別できず stderr にも出ない不具合を修正**。`FileNotFoundError` /
+   `TimeoutExpired` を patterns_unavailable と同じ形式で stderr に報告する
+   (`git_unavailable: <理由種別>`、失敗した git 呼出ごとに 1 行)。「対象が
+   git リポジトリでない」等の非ゼロ終了は従来通り正常系として黙る。
+   fail-open の挙動自体は変えない。なおこの hook は常に exit 0 で終わるため、
+   公式 docs の記述どおりこの stderr は debug log にのみ記録され
+   (`claude --debug` で確認できる)、利用者にも Claude 自身にも通常は見えない
+   — 既存の `patterns_unavailable` と同じ扱いで、可視性の対象は運用者の
+   トラブルシュートに限られる。
+3. **submodule 内 tracked ファイルに対し、Stop hook 自身が案内する
+   `git rm --cached` が親 repo からは実行不可能で脱出路が無い不具合を
+   修正**。submodule 配下のファイルを検出したときは、該当 submodule
+   ディレクトリ内で対処する旨と手順を案内に追記する。ネストした
+   submodule (submodule の中にさらに submodule) では `git ls-files
+   --stage` が直下の gitlink しか返さないため、案内が外側の (親 repo の
+   index には該当ファイルが無く実際には効かない) ディレクトリを指して
+   しまう不具合があり、各 submodule ディレクトリで手動再帰して解消した
+   (`in_submodule` は最長一致 = 最も深い submodule を返す)。あわせて
+   案内が列挙する submodule ディレクトリ一覧を先頭 10 件 + 省略件数に
+   畳み、distinct 件数に比例して block reason が肥大しないようにした
+   (300 件で reason が byte 予算を超えファイル列挙が潰れる実測があった)。
+   さらに、submodule のマウント名自体が機密パターンに一致し (例: `.env`)
+   かつ未初期化 (gitlink のみで working copy が無い) だと `git ls-files
+   --recurse-submodules` が配下に再帰できず gitlink の path 自体を通常の
+   tracked entry として返すため、`in_submodule` がこの完全一致を誤って
+   「submodule 配下」と判定し、親から直接効く `git rm --cached` の代わりに
+   空の未初期化ディレクトリへの `cd` を指示する実行不能な案内を出す不具合を
+   修正した (外部レビュー R3 P2)。
+
+### ログ (redact-sensitive-reads)
+
+4. **heredoc 本文の識別子 (env var 名・秘密のキー名になりうる) が
+   `bash_classify` ログに verbatim で残る不具合を修正**。正しく終端された
+   heredoc は 0.22.0 で既に segment 分割から除外されているが、未終端 /
+   terminator 不一致の heredoc は行分割 fallback に落ちて first token が
+   任意文字列としてログに混入していた (実ログで確認)。first token を渡す
+   7 箇所を、既知語彙 (allowlist) に含まれるときだけそのまま出し、それ以外は
+   `other` に畳むようにした。実ログ (707k 行) の分布実測では `other` へ
+   畳まれるのは `match:` 分類の 4.65% (`glob_match:` は 0.37%) で、失われる
+   のは `tar` / `rsync` / `curl` / `gpg` など**正当なコマンド名のみ**
+   (この経路で heredoc 識別子の漏洩は 1 件も無かった) — トレードオフは本項の
+   意図した範囲内で、追加の対応は不要と判断した。
+5. **`_quoted_hard_stop_reason` の診断文字列 3 形が空白を含み、ログの
+   detail 文字種ホワイトリストを通らず `_BAD` に置換され分類が丸ごと消える
+   不具合を修正**。空白区切りを `:` 連結の identifier 形に変更 (合わせて
+   `git` サブコマンド名の埋め込みも既知集合限定にし、上記 4 と同じ漏洩経路を
+   閉じた)。
+6. **unittest 実行が実ログ `~/.claude/logs/redact-hook.log` に書き込み、
+   運用ログの計測値を汚染する不具合を修正**。`SFG_LOG_PATH` 環境変数で
+   ログ書込み先を差し替えられるようにし、テスト側 (`tests/_testutil.py` /
+   `tests/conftest.py`) がプロセス起動時に一度だけ tmpdir を指す値を設定
+   する。実ログのローテーション・再ベースライン化は運用作業のため対象外。
+7. **`redact-hook.log` がローテーションなしで増え続ける問題に対処**。
+   書込み前に byte 数を確認し、閾値 (既定 5MB) 超なら `redact-hook.log.1`
+   へ 1 世代ローテーションする。ローテーションはサイドカー lock ファイル
+   `<log>.lock` の `flock(LOCK_EX | LOCK_NB)` で**プロセス間直列化**し、
+   lock 内で再 stat して inode とサイズが最初の観測と同じであることを確認
+   してから `os.replace` する (外部レビュー R1 P2-B)。直列化が無いと、
+   parallel tool call で並行する 2 つの hook プロセスが揃って閾値超過を
+   観測し、先行プロセスが rename して新ログに 1 行書いた後に後続プロセスが
+   `.1` をその 1 行の新ログで上書きして前世代を丸ごと失う (実測: 8,000 行の
+   前世代が 0 行になり、書き込んだ行自体も欠落した)。lock を取れなかった
+   プロセスは待たずにローテーションを譲り、そのまま追記する。`fcntl` の無い
+   環境ではローテーション自体を行わない (直列化できないまま rename すると
+   ログを失う方向に倒れるため、ファイルが伸びる方を選ぶ)。lock ファイルは
+   削除しない (削除と再作成の競合で直列化そのものが壊れるため)。
+   **allow 経路の INFO を既定で抑制する側の
+   変更は見送った** — `bash_classify` の分類は `ask_or_allow` 経由で
+   `permission_mode` によって ask/allow のどちらにも動的に解決され、かつ
+   複数 segment のコマンドでは後続 segment の deny が既にログ済みの ask を
+   上書きしうるため、「ログ時点でこの呼出が最終的に allow だったか」を
+   ログ呼出側だけで静的に判定できない。判定を成立させるには判定ロジック
+   本体 (`handle` / `_analyze_segment`) 側でログを遅延させる設計変更が
+   必要で、本バッチの「判定境界に触れない」制約の範囲を超えるため見送った。
+
+### 両 hook 共通 (出力エンコーディング)
+
+8. **stdout が非 UTF-8 のとき、判定 JSON を書けずに hook が異常終了し保護が
+   消える不具合を修正** (外部レビュー R2 P2-A)。`print` /
+   `sys.stdout.write` は `sys.stdout` の encoding に従うため、
+   `PYTHONIOENCODING=ascii` のような環境で hook が起動されると、日本語を
+   含む reason で `UnicodeEncodeError` が送出される (`sys.stdout` の error
+   handler は `strict`)。両 hook ともこれを捕まえないので **exit 1 /
+   stdout 0 byte** になり、PreToolUse (redact-sensitive-reads) では判定が
+   届かず **tool 呼出が素通り** (deny したかった Bash / Edit / Write が
+   実行される)、Stop (check-sensitive-files) では **block が出ず機密
+   ファイルが報告されない** — どちらも保護が静かに消える方向の失敗
+   (いずれも実測で再現)。直列化済みの文字列を UTF-8 bytes にして
+   `sys.stdout.buffer` へ明示的に書く共通ヘルパー (`_shared/streams.py`) を
+   追加し、両 hook の出力経路をこれに揃えた。`buffer` を持たないストリーム
+   (テストの `StringIO` 差し替え等) はテキスト書込みにフォールバックする。
+   `ensure_ascii=True` で ASCII に逃がす案は**採らなかった** — 日本語 1
+   文字が `\uXXXX` の 6 文字に膨らみ、Stop hook の出力予算 (項目 1) を
+   固定の日本語案内だけで食い潰すため。encode の `errors` は `replace`
+   固定 (hook 入力 JSON は `\udXXX` の lone surrogate を正当に含みうるので、
+   strict だと同じ fail-open に逆戻りする)。
+   **stderr 側は対処不要**と実測で確認した — CPython の `sys.stderr` は
+   既定で `errors='backslashreplace'` を使い (`PYTHONIOENCODING=ascii`
+   下でも同様)、非 ASCII の警告文で例外を送出しない。
+
+### 保守ドキュメント / テスト整備
+
+- `docs/MAINTAINING.md` のログ節を上記 6・7 の実装に合わせて更新
+  (`SFG_LOG_PATH` による上書きと 5MB / 1 世代ローテーションを追記し、
+  「`LOG_PATH` は import 時に確定するため `HOME` 差し替えが効かない」という
+  旧記述を `_testutil` / `conftest.py` の bootstrap による保護に合わせて
+  更新。「unittest が実ログを汚染する」既知課題の記述も解消済みとして整理)。
+- `_shared` パッケージへ依存しながら `_testutil` を import していなかった
+  redact-sensitive-reads の 6 テストファイル
+  (`test_exclude_hint_budget` / `test_exclude_hint_never_truncated` /
+  `test_exclude_scope_disclosure` / `test_segment_size_guard` /
+  `test_matcher_pattern_cache` / `test_pem`) に import を追加し、
+  `unittest discover -p <pattern>` での単独実行でも sys.path とログ隔離の
+  保護が効くようにした (`ModuleNotFoundError: No module named '_shared'`
+  で単独実行が失敗していた)。
+- README.md のログ節に `SFG_LOG_PATH` と 1 世代ローテーションを追記し、
+  テスト件数の表記 (0.25.0 時点の値) を現状 (0.27.0 時点) に更新した。
+
 ## 0.26.0
 
 deny reason の**レンダリング領域** (文言・情報量) の不具合 5 件を修正 (内部

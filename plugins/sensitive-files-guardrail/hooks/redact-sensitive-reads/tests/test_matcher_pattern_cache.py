@@ -15,6 +15,8 @@ import time
 import unittest
 from fnmatch import fnmatchcase
 
+from _testutil import FIXTURES  # noqa: F401
+
 from _shared.matcher import (
     _PATTERN_CACHE,
     _compiled,

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import unittest
 
+from _testutil import FIXTURES  # noqa: F401
+
 from core.messages import bash_deny, edit_deny
 from core.output import MAX_REASON_BYTES
 

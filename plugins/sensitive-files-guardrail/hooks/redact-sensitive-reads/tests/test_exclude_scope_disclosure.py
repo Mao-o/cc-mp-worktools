@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import unittest
 
+from _testutil import FIXTURES  # noqa: F401
+
 from _shared.patterns import EXCLUDE_SCOPE_WARNING
 from core.messages import _exclude_hint
 

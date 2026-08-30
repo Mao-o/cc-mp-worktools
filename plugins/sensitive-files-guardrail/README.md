@@ -352,6 +352,12 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 cwd 相対のまま、レシピは project root 相対 (サブディレクトリで発火しても
 `!sub/.env`)。
 
+block reason には**出力の文字数上限**がある (0.27.0)。該当ファイルが多い / パスが
+長いときは、ファイル一覧が `... (N more files; see git status)`、除外レシピが
+`... (N more)` に畳まれる (省略件数は必ず表示される)。AskUserQuestion の案内・
+除外レシピの追記先 (`[project:...]` ヘッダー)・影響範囲の説明といった**静的な
+案内文は畳まれない**。
+
 **session 単位の once-only (0.19.0)**: 同一セッションで同じファイル集合を報告済み
 なら、以降の `Stop` は block しない (「意図的に管理対象とする」と承認した tracked
 `.env` / committed 証明書で毎ターン block が出続けるのを止めるため)。新しい機密
@@ -456,10 +462,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (1,111 tests, 0.25.0 時点)
+# redact-sensitive-reads (1,210 tests, 0.27.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (94 tests, 0.25.0 時点)
+# check-sensitive-files (133 tests, 0.27.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -468,9 +474,15 @@ validate / リリース手順 / CLI 再実測 Runbook などの保守者向け�
 
 ## ログ
 
-`redact-sensitive-reads` の動作ログは `~/.claude/logs/redact-hook.log` に
-書かれる (plugin cache が消えても残るよう `$HOME` 側に固定)。ログには鍵名・
-パス・値を一切書かない (エラー種別・classify 結果のみ)。
+`redact-sensitive-reads` の動作ログは既定で `~/.claude/logs/redact-hook.log`
+に書かれる (plugin cache が消えても残るよう `$HOME` 側に固定)。ログには鍵名・
+パス・値を一切書かない (エラー種別・classify 結果のみ)。`SFG_LOG_PATH` 環境
+変数を設定するとログ書込み先をその値で上書きできる (主にテスト実行時の隔離
+用途)。既定 5MB を超えると `redact-hook.log.1` へ 1 世代ローテーションする
+(直近世代のみ保持、2 回目以降のローテーションは `.1` を上書き)。ローテーションは
+サイドカー lock ファイル `redact-hook.log.lock` の `flock` でプロセス間排他して
+おり、並行する hook プロセスが同時にローテーションして前世代を消すことはない
+(lock を取れなかったプロセスは待たずにローテーションを譲り、そのまま追記する)。
 
 ## 互換性
 

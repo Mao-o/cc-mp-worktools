@@ -699,5 +699,109 @@ class TestE2EKeyonlyKeepsKeyNames(unittest.TestCase):
         self._assert_keys_survive(reason, 10)
 
 
+class TestAsciiStdoutEncoding(unittest.TestCase):
+    """外部レビュー R2 P2-A 回帰: stdout が非 UTF-8 でも判定を必ず出す。
+
+    ``_emit`` は ``sys.stdout.write`` を使っていたため、``PYTHONIOENCODING=ascii``
+    のように stdout が非 UTF-8 で hook が起動されると、日本語を含む deny reason
+    (``M.bash_deny`` など、この hook の主要文面はほぼ全て日本語) で
+    ``UnicodeEncodeError`` が送出された。``_emit`` の ``except`` は
+    ``(BrokenPipeError, OSError)`` しか捕まえず ``UnicodeEncodeError`` は
+    ``ValueError`` 系なので素通りし、**exit 1 / stdout 0 byte** になる (実測)。
+    PreToolUse hook がこうなると判定が届かず **tool 呼出がそのまま通る**
+    (fail-open) — deny したかった Bash / Read / Edit が実行されてしまう。
+
+    このクラスが唯一の防波堤である点に注意: 他の E2E は ``sys.stdout`` を
+    ``StringIO`` に差し替えるため ``encoding`` も ``buffer`` も持たず、この失敗
+    モードを**構造的に再現できない** (修正後はフォールバック経路を通る)。
+    子プロセスは ``_testutil`` の bootstrap を継承しないので、``HOME`` と
+    ``SFG_LOG_PATH`` を明示して実 HOME / 実ログを汚さない。
+    """
+
+    ASCII_ENV = {"PYTHONIOENCODING": "ascii", "LC_ALL": "C"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        (Path(self.tmp) / ".env").write_text("SECRET=1\n")
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+
+    def _run(self, tool: str, envelope: dict, env_extra: dict):
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["SFG_LOG_PATH"] = str(self.home / "redact-hook.log")
+        env.update(env_extra)
+        return subprocess.run(
+            [sys.executable, str(_ENTRY_PATH), "--tool", tool],
+            input=json.dumps(envelope).encode("utf-8"),
+            capture_output=True,
+            env=env,
+        )
+
+    def _bash_envelope(self):
+        return {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env"},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+
+    def test_bash_deny_survives_ascii_stdout(self):
+        proc = self._run("bash", self._bash_envelope(), self.ASCII_ENV)
+        self.assertEqual(
+            proc.returncode, 0, msg=proc.stderr.decode("utf-8", "replace")
+        )
+        self.assertTrue(proc.stdout, msg="stdout が空 = deny が届かず fail-open")
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(
+            payload["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        # 日本語の reason が欠落せずそのまま届いていること
+        self.assertIn(
+            "機密", payload["hookSpecificOutput"]["permissionDecisionReason"]
+        )
+
+    def test_ascii_and_utf8_stdout_are_byte_identical(self):
+        """encoding が変わっても出力が同一 = 情報が落ちていないこと。"""
+        utf8 = self._run("bash", self._bash_envelope(), {"PYTHONIOENCODING": "utf-8"})
+        ascii_ = self._run("bash", self._bash_envelope(), self.ASCII_ENV)
+        self.assertEqual(utf8.returncode, 0)
+        self.assertEqual(utf8.stdout, ascii_.stdout)
+
+    def test_edit_deny_survives_ascii_stdout(self):
+        """Bash 以外の handler も同じ経路 (``_emit``) で落ちていたこと。
+
+        Edit / Write の deny reason は冒頭の note と 2 本の suggestion が日本語
+        なので、Bash と同様に修正前は exit 1 になる (実測)。
+
+        **開示**: Read の deny reason は現状ほぼ英語 (``<DATA>`` サニタイズ結果 +
+        英文 note) のため、同じ環境でも修正前から exit 0 で通ってしまい回帰
+        テストにならない。したがって非 Bash 経路の代表として Edit を使う。
+        """
+        envelope = {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(Path(self.tmp) / ".env"),
+                "old_string": "SECRET=1",
+                "new_string": "SECRET=2",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        proc = self._run("edit", envelope, self.ASCII_ENV)
+        self.assertEqual(
+            proc.returncode, 0, msg=proc.stderr.decode("utf-8", "replace")
+        )
+        self.assertTrue(proc.stdout, msg="stdout が空 = deny が届かず fail-open")
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(
+            payload["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn(
+            "機密", payload["hookSpecificOutput"]["permissionDecisionReason"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

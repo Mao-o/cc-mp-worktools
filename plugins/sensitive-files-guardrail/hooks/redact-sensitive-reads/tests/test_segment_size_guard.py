@@ -13,6 +13,8 @@ from __future__ import annotations
 import time
 import unittest
 
+from _testutil import FIXTURES  # noqa: F401
+
 from handlers import bash_handler
 from handlers.bash_handler import _MAX_COMMAND_CHARS, handle
 
