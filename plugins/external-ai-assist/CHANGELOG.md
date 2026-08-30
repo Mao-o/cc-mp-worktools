@@ -37,6 +37,20 @@ version 据え置きで main に入った後続 commit はその version の節�
   なし / fast-forward pull のみ) を使い捨て git repo で固定し
   `tests/test_gitscan.py::TestIsLocalOnlyRange` とした。判定を入れなければ merge の
   ケースで基点差分に他人が触ったファイルが実際に混ざることも確認済み
+- **基点の書き込みは「レビューが実際に消費された」3 箇所 (`_complete_and_advance_base`
+  経由) に限定し、cursor 失敗 / `MIN_LINES` 見送りで pending に戻す経路では進めない**。
+  レビュー結果が確定する前に無条件で基点を進める版では、復元 → cursor 失敗 →
+  次ターン、という並びで `old_base` が直前ターンの HEAD と同値になり、
+  0 commit の範囲が手元由来の証明を自明に満たしてしまう一方で基点まで遡った diff
+  も自明に空になり、本項が解消したはずの「黙って消える」を 1 ターン遅れで
+  再現してしまっていた。regression は
+  `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
+  test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
+  `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn`
+- commit に加えて同じターンで push まで済ませた場合も「証明できない」側になる
+  (push 済みの commit は `refs/remotes/origin/*` から到達可能になり `--not
+  --remotes` の対象から外れるため)。復元ではなく通知止まりになるのは意図した
+  保守的な向き
 - Stop の git 予算が増えたため (`gitscan.current_head` の rev-parse 1 回 +
   `is_local_only_range` の rev-list 2 回 + 基点フォールバックで最大 2 回になる
   path diff)、`hooks.json` の Stop timeout を `690` → `700` 秒に変更

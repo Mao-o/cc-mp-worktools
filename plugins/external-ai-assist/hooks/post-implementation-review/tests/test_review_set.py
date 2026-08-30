@@ -282,12 +282,20 @@ class TestCollectDiffs(ReviewSetTestCase):
         self.assertEqual(batch.submitted, [os.path.join(self.repo, "seed.txt")])
 
     def test_empty_diff_is_not_submitted(self):
-        """commit 済み / revert 済みのパスはレビューにも復元対象にも入れない。"""
+        """commit 済み / revert 済みのパスはレビューにも復元対象にも入れない。
+
+        `base_sha` 省略時 (既定 None) は基点フォールバックの対象外だが、
+        黙って消えるわけではない — 基点が無い旨を `unretrievable` に積んで
+        呼び出し側 (`_run_review`) が通知することを、ここで意図的な挙動として
+        固定する (0.9.0。以前はここが未検証で、たまたま埋まっていても
+        誰も気づけなかった)。
+        """
         batch = self.entry._collect_diffs(self.repo, ["seed.txt"], {})
         self.assertEqual(batch.sections, [])
         self.assertEqual(batch.submitted, [])
         self.assertEqual(batch.hashes, {})
         self.assertEqual(batch.deferred, [])
+        self.assertEqual(batch.unretrievable, [os.path.join(self.repo, "seed.txt")])
 
     def test_untracked_and_tracked_are_both_collected(self):
         write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")

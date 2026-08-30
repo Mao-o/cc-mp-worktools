@@ -610,6 +610,22 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         )
 
 
+def _complete_and_advance_base(
+    session_id: str, claim_id: str, hashes: dict, new_head: str | None
+) -> None:
+    """`complete_claim` でレビュー消費を確定し、可能なら基点も今回の HEAD へ進める。
+
+    `restore_claim` の経路 (cursor 失敗 / MIN_LINES 見送り / `_review_claim` の
+    例外ハンドラ) では絶対に呼ばないこと。理由は `_run_review` 冒頭のコメント参照
+    — 消費されなかったレビューで基点を進めると、次ターンの基点フォールバックが
+    「進みすぎた基点」を見て復元可能な範囲を自明に 0 コミットにしてしまい、
+    元のバグ (commit 済みパスが黙って消える) を 1 ターン遅れで再現する。
+    """
+    state.complete_claim(session_id, claim_id, hashes)
+    if new_head:
+        state.set_base_sha(session_id, new_head)
+
+
 def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -> dict:
     """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
 
@@ -622,14 +638,26 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     """
     notices: list[str] = []
 
-    # 基点フォールバックの「前回の基点」を読んでから、今回の HEAD で
-    # 上書きする (次の Stop の基点になる)。順序が重要 — 先に上書きすると、今回
-    # 自身が作った HEAD を「前回の基点」として誤って使ってしまう。current_head
-    # が None (HEAD 不在 = 初回 commit 前) の場合は上書きしない (前回の値を温存)。
+    # 基点フォールバックの「前回の基点」を読む。今回の HEAD (new_head) を
+    # 基点として書き込むのは、このレビューが実際に消費された
+    # (`_complete_and_advance_base` 経由で complete_claim される) 時点だけに
+    # 限定する。cursor 失敗 / MIN_LINES 見送り / 例外で restore_claim される
+    # 経路 (= このターンの pending は減らず、claimed は丸ごと次回に持ち越す)
+    # では書き込まない。
+    #
+    # ここを無条件にしてしまうと (0.9.0 実装当初の版がそうだった)、次のバグを
+    # 1 ターン遅れで再現する: commit 済みで HEAD 基準 diff が空になったパスを
+    # 基点フォールバックで復元して送ったが cursor が失敗し pending に戻った
+    # 場合、base_sha は既に今回の HEAD まで進んでしまっている。次の Stop では
+    # old_base がその HEAD と同値になり、`old_base..HEAD` の範囲は 0 commit
+    # → 手元由来の証明が自明に True → しかし `diff_since(root, path, old_base)`
+    # も base=HEAD なので自明に空 diff → 空 diff は「証明できたので復元」経路を
+    # 通ってしまい、`unretrievable` にも積まれず黙って消える
+    # (advisor 指摘。regression テスト:
+    # `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
+    # test_cursor_failure_after_same_turn_commit_is_retried_next_turn`)。
     old_base = state.get_base_sha(session_id)
     new_head = gitscan.current_head(root)
-    if new_head:
-        state.set_base_sha(session_id, new_head)
 
     rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
     if excluded:
@@ -681,7 +709,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
 
     if not batch.sections:
         log("レビュー対象の差分が無い (空 diff / 前回と同一 / 除外のみ) ため skip")
-        state.complete_claim(session_id, claim_id, {})
+        _complete_and_advance_base(session_id, claim_id, {}, new_head)
         return _with_notices({}, notices)
 
     # しきい値は「実際に送る diff」で測る (除外・繰り越し後の量が課金に対応するため)
@@ -714,12 +742,12 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
 
     if is_clean_review(result):
         log("Cursor: REVIEW_CLEAN (block しない、レビュー済みとして確定)")
-        state.complete_claim(session_id, claim_id, batch.hashes)
+        _complete_and_advance_base(session_id, claim_id, batch.hashes, new_head)
         notices.insert(0, f"{summary} → 指摘なし")
         return _with_notices({}, notices)
 
     reason = build_reason(result)
-    state.complete_claim(session_id, claim_id, batch.hashes)
+    _complete_and_advance_base(session_id, claim_id, batch.hashes, new_head)
     _save_review_copy(session_id, reason)
     # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。block (明示、または
     # auto 解決で版数非対応と判定した場合) はハーネスが継続を保証するので「依頼しました」

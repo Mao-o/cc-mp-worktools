@@ -237,8 +237,24 @@ HEAD 基準には副作用がある: pending に積んだ後、Stop までの間
    commit が混ざっている) 場合は**復元しない**。ただしパスが実在するなら
    `systemMessage` に「差分が空で取得できませんでした」として列挙し、pending からは
    外す (黙って消費しない。ただし証明できない旨を伝えるだけで、commit されたと
-   断定はしない — 実際には revert のみで commit が無かった可能性もあるため)
-4. 判定は `gitscan.is_local_only_range` / `gitscan.diff_since`、実装は
+   断定はしない — 実際には revert のみで commit が無かった可能性もあるため)。
+   **同一ターン内で commit してさらに push まで済ませた場合もこちらに該当する**
+   (push した時点でその commit は `refs/remotes/origin/*` から到達可能になり、
+   `--not --remotes` の対象から外れて手元由来と証明できなくなるため)。「直して
+   push まで」を 1 ターンでやると、復元ではなく通知止まりになるのは意図した
+   保守的な向き — 送信範囲を広げる方向には倒さない
+4. cursor 失敗 / `EXTERNAL_AI_POST_REVIEW_MIN_LINES` 見送りで pending に戻した
+   (= レビューを消費していない) ターンでは `state.base_sha` を進めない
+   (`__main__._complete_and_advance_base` に一本化。`complete_claim` の 3 箇所
+   だけを通る)。ここを無条件に進めてしまうと、次の Stop で `old_base == HEAD`
+   になり `old_base..HEAD` が自明に 0 commit (= 手元由来の証明が自明に True)
+   になる一方 `diff_since(base=HEAD)` も自明に空 diff になって、`unretrievable`
+   にも積まれず黙って消える — このドキュメントが書いている「消えていたバグ」を
+   1 ターン遅れで再現してしまう (advisor 指摘、regression テストは
+   `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
+   test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
+   `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn`)
+5. 判定は `gitscan.is_local_only_range` / `gitscan.diff_since`、実装は
    `__main__._collect_diffs` の `local_only()` / `empty_at_head` 分岐、実測は
    `tests/test_gitscan.py::TestIsLocalOnlyRange` (自分の commit のみ / merge で
    他人の commit が混入 / 編集のみ commit なし / fast-forward pull のみ、の 4 通り)

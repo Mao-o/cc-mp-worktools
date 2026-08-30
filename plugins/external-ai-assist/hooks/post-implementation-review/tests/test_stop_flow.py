@@ -904,6 +904,57 @@ class TestSameTurnCommitBaseFallback(HookTestCase):
         self.assertReviewed("a.py", "print(1)")
         self.assertEqual(self.pending(SESSION_A), [])
 
+    def test_cursor_failure_after_same_turn_commit_is_retried_next_turn(self):
+        """回帰 (0.9.0 fix): 基点フォールバックで復元した diff を送った直後に
+        cursor が失敗しても、次ターンで同じ基点フォールバックが再び効いて
+        レビューされる。
+
+        `_run_review` が `base_sha` を「レビューが実際に消費された時点」ではなく
+        無条件に今回の HEAD へ進めていた版では、この cursor 失敗 (restore_claim)
+        の直後に base_sha だけが進んでしまい、次ターンでは
+        `old_base == HEAD` になる。そうなると `old_base..HEAD` は 0 commit で
+        手元由来の証明が自明に True になる一方、`diff_since(root, path, HEAD)`
+        も自明に空 diff になり、`unretrievable` にも積まれず黙って消える —
+        元のバグ (chunk B: 同一ターン内 commit の黙殺) を 1 ターン遅れで
+        再現してしまっていた。
+        """
+        self._establish_base()
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        self.stop(SESSION_A, None)  # cursor 失敗 → 消費されず pending に戻る
+        self.assertIn(os.path.join(self.repo, "a.py"), self.pending(SESSION_A))
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "print(1)")
+        self.assertEqual(self.pending(SESSION_A), [])
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertNotIn(
+            "取得できませんでした", message, "再試行できるはずが「取得不能」報告に落ちている"
+        )
+
+    def test_min_lines_gate_after_same_turn_commit_is_retried_next_turn(self):
+        """回帰 (0.9.0 fix): 基点フォールバックで復元した diff が MIN_LINES 見送りで
+        pending に戻っても (cursor 失敗と同じ restore_claim 経路)、次ターンの
+        基点フォールバックは壊れない。"""
+        self._establish_base()
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        os.environ["EXTERNAL_AI_POST_REVIEW_MIN_LINES"] = "50"
+        self.assertNotBlocked(self.stop(SESSION_A, "REVIEW_CLEAN"))
+        self.assertNotReviewed()
+        self.assertIn(os.path.join(self.repo, "a.py"), self.pending(SESSION_A))
+
+        del os.environ["EXTERNAL_AI_POST_REVIEW_MIN_LINES"]
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "print(1)")
+        self.assertEqual(self.pending(SESSION_A), [])
+
     def test_pull_bringing_foreign_commit_is_not_restored_but_reported(self):
         """証明できないケース (ff pull で他人の commit が混ざる) — 復元しない。"""
         bare, branch = self._add_bare_origin()
