@@ -112,6 +112,28 @@ class RepoContext:
         return rel_str
 
     @property
+    def rerun_root(self) -> Path:
+        """The path a rerun hint's ``--root`` should embed: cwd when it
+        names root itself or a subdirectory of root, else root (cwd
+        unset, or -- defensively, since the real hook invocation never
+        constructs this case -- outside root).
+
+        root is the git top-level, but a run started against a
+        subdirectory (cwd) must keep that same scope when its printed
+        hint (see renderer.build_rerun_hint()) is copied and rerun.
+        Embedding root unconditionally would silently re-analyze the
+        whole repository on rerun and drop whatever cwd-scoped context
+        (``## Subtree``, test filtering, ...) the original run had.
+        """
+        if self.cwd is None:
+            return self.root
+        try:
+            self.cwd.resolve().relative_to(self.root.resolve())
+        except ValueError:
+            return self.root
+        return self.cwd
+
+    @property
     def package_json(self) -> dict:
         if self._pkg_json is None:
             from .fs import load_json

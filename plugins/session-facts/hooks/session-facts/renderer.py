@@ -104,8 +104,15 @@ def _render_more_hint(ctx: RepoContext) -> str:
     other way to name a runnable path, since ${CLAUDE_PLUGIN_ROOT} is
     resolved by the hook, not present in what gets injected. See
     build_rerun_hint() for why --root is included and shell-quoted.
+
+    The embedded --root is ctx.rerun_root, not ctx.root outright: ctx.root
+    is the git top-level, but when this run was scoped to a subdirectory
+    (ctx.cwd), the hint must reproduce that same scope on rerun -- see
+    RepoContext.rerun_root's docstring for why rebuilding from ctx.root
+    alone silently re-analyzes the whole repository instead (Codex review
+    P2).
     """
-    cmd = build_rerun_hint(ctx.invoked_as, ctx.root, "--help")
+    cmd = build_rerun_hint(ctx.invoked_as, ctx.rerun_root, "--help")
     if cmd:
         return f"- more: this is the default view; run `{cmd}` for additional opt-in analyses"
     return "- more: this is the default view; the session-facts skill has additional opt-in analyses (see --help)"

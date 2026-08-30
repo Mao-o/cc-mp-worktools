@@ -235,6 +235,15 @@ def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
     string (see its docstring for why --root is always included and both
     paths are shell-quoted) so this hint and _render_more_hint()'s share
     one implementation.
+
+    Unlike _render_more_hint(), this passes root itself rather than a
+    RepoContext.rerun_root -- there is no separate cwd to prefer here.
+    This function only ever runs from summarize_repo()'s non-git marker
+    gate, where main()'s git-root probe returned None (is_git=False) and
+    it therefore fell back to root = resolved -- the same path it passes
+    as cwd. So root here already is the same path rerun_root would
+    resolve to; a git repo's root/cwd split (the case rerun_root exists
+    for) cannot arise on this non-git path.
     """
     lines = [
         "## Project Facts",

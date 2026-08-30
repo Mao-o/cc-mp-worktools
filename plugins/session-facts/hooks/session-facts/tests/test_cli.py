@@ -147,11 +147,33 @@ class MoreHintInvokedAsTest(unittest.TestCase):
         # internal backlog: the printed `--help` hint used to omit --root,
         # so copying it (or extending it with another opt-in flag, e.g.
         # --include-domain-types) from a different cwd than the analyzed
-        # directory silently analyzed Path.cwd() instead of the repo_root
-        # named in this same header. --root is invoked with a subdirectory
-        # here specifically to prove the hint echoes back the *resolved
-        # git root* (what summarize_repo() actually analyzed), not the
-        # literal --root argument or the process cwd.
+        # directory silently analyzed Path.cwd() instead of anything named
+        # in this same header. --root is passed directly here (cwd ==
+        # root, no subdirectory) to isolate that concern from the
+        # subdirectory-scoping one covered by
+        # test_hint_command_names_analyzed_subdirectory_not_repo_root
+        # below: the hint must always carry an explicit --root, never rely
+        # on the reader's own process cwd.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            fake_invoked_as = str(root / "hooks" / "session-facts")
+            with mock.patch.object(sys, "argv", [fake_invoked_as]):
+                out = _run_cli(["--root", str(root)])
+            self.assertIn(f"- repo_root: {root.resolve()}", out)
+            self.assertIn(
+                f"--root {shlex.quote(str(root.resolve()))} --help", out
+            )
+
+    def test_hint_command_names_analyzed_subdirectory_not_repo_root(self):
+        # Codex review round 2 (P2): when --root points at a subdirectory
+        # of a git repo, ctx.root is the git top-level while ctx.cwd
+        # retains the originally analyzed subdirectory. Rebuilding this
+        # hint from ctx.root reran a copied (or --help-swapped-for-a-real-
+        # flag) command against the whole repo, silently losing the
+        # subdirectory scope -- and with it whatever cwd-scoped context
+        # (## Subtree, test filtering, ...) the original run had. The
+        # hint must echo the subdirectory that was actually analyzed
+        # (RepoContext.rerun_root), not the wider repo_root.
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_repo(tmp)
             subdir = root / "sub"
@@ -159,11 +181,31 @@ class MoreHintInvokedAsTest(unittest.TestCase):
             fake_invoked_as = str(root / "hooks" / "session-facts")
             with mock.patch.object(sys, "argv", [fake_invoked_as]):
                 out = _run_cli(["--root", str(subdir)])
+            # repo_root still names the git top-level -- unaffected by this fix.
             self.assertIn(f"- repo_root: {root.resolve()}", out)
+            # ...but the rerun hint's --root must be the subdirectory, not
+            # the repo root, so copying it preserves the original scope.
+            self.assertIn(
+                f"--root {shlex.quote(str(subdir.resolve()))} --help", out
+            )
+            self.assertNotIn(
+                f"--root {shlex.quote(str(root.resolve()))} --help", out
+            )
+
+    def test_hint_command_names_directory_for_non_git_full_analysis(self):
+        # Companion to the subdirectory case above: a non-git directory has
+        # no repo-root/cwd split at all (root == cwd by construction in
+        # main()), so RepoContext.rerun_root must resolve to that same
+        # directory here too, not fall back to some other value.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name": "x"}')
+            fake_invoked_as = str(root / "hooks" / "session-facts")
+            with mock.patch.object(sys, "argv", [fake_invoked_as]):
+                out = _run_cli(["--root", str(root)])
             self.assertIn(
                 f"--root {shlex.quote(str(root.resolve()))} --help", out
             )
-            self.assertNotIn(str(subdir), out)
 
     def test_fallback_wording_when_invoked_as_is_none(self):
         # summarize_repo() called as a library (invoked_as=None, e.g. not
@@ -215,6 +257,34 @@ class HintCommandIsActuallyExecutableTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("usage:", result.stdout.lower())
+
+    def test_help_hint_from_a_subdirectory_reruns_the_same_subdirectory(self):
+        # Codex review round 2 (P2): confirm -- by actually executing the
+        # rerun, not just matching the hint's string -- that a hint built
+        # from a subdirectory analysis reproduces that same subdirectory
+        # scope. Swap the hint's --help for no extra flag (the default
+        # action) so the rerun's own output reveals what it analyzed: a
+        # `- cwd: sub (subdirectory of repo_root)` line only appears when
+        # the rerun's --root is still the subdirectory, not the repo root
+        # (cwd == root would omit that line entirely -- see
+        # RepoContext.cwd_relative).
+        plugin_dir = str(Path(__file__).resolve().parent.parent)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            subdir = root / "sub"
+            subdir.mkdir()
+            with mock.patch.object(sys, "argv", [plugin_dir]):
+                out = _run_cli(["--root", str(subdir)])
+            hint_line = next(ln for ln in out.splitlines() if ln.startswith("- more:"))
+            command = hint_line.split("run `", 1)[1].split("`", 1)[0]
+            tokens = shlex.split(command)
+            self.assertEqual(tokens[-1], "--help")
+            rerun_tokens = tokens[:-1]  # drop --help to run the real analysis
+            result = subprocess.run(
+                rerun_tokens, capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("- cwd: sub (subdirectory of repo_root)", result.stdout)
 
 
 class ExceptionIsolationTest(unittest.TestCase):
