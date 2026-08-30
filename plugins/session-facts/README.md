@@ -137,21 +137,21 @@ detector が同じ repo にヒットしてよい)。
 
 | 判定ファイル | stack タグ | 判定条件 |
 |---|---|---|
-| `mise.py` | `mise` | mise config (`.mise.toml` / `mise.toml` / `.config/mise/config.toml`。`$HOME` 直下の XDG グローバル設定は除外) |
+| `mise.py` | `mise` | mise config (`.mise.toml` / `mise.toml` / `.config/mise/config.toml` / `.tool-versions` (asdf 形式も mise が解釈する)。`$HOME` 直下の XDG グローバル設定は除外) |
 | `node_typescript.py` | `node`, `typescript` | `package.json`、`tsconfig(.base).json`、または依存に `typescript` |
-| `claude_plugin.py` | `claude-code-marketplace`, `claude-code-plugin`, `hooks`/`skills`/`agents`/`commands` | `marketplace.json` / `.claude-plugin/plugin.json` + 各サブディレクトリの存在 |
+| `claude_plugin.py` | `claude-code-marketplace`, `claude-code-plugin`, `hooks`/`skills`/`agents`/`commands` | `marketplace.json` / `.claude-plugin/marketplace.json` / `.claude-plugin/plugin.json` + 各サブディレクトリの存在 |
 | `deno.py` | `deno` | `deno.json(c)` |
 | `nextjs.py` | `nextjs` | 依存に `next`、または `next.config.*` |
 | `react_vite.py` | `react`, `vite` | 依存に `react`、`vite.config.(ts\|js)` |
 | `firebase.py` | `firebase`, `firebase-functions` | `firebase.json`/`.firebaserc`、npm の `firebase`/`firebase-admin`/`firebase-functions`/`@firebase/*`、Python の `firebase-admin` (pyproject.toml / requirements*.txt)、Flutter の `firebase_core` (pubspec.yaml) |
 | `prisma.py` | `prisma` | 依存に `prisma`/`@prisma/client`、または `prisma/` ディレクトリ |
-| `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`poetry.lock`、pyproject 内の framework 名 |
+| `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`uv.toml`/`poetry.lock`、pyproject 内の framework 名 |
 | `testing.py` | `zod`, `vitest`, `jest`, `playwright`, `cypress`, `monorepo` | 各種依存 / config file、`pnpm-workspace.yaml`・`turbo.json` |
 | `go_stack.py` | `go` | `go.mod` |
 | `java_stack.py` | `java`, `gradle`, `maven` | `gradlew`/`build.gradle(.kts)`、`pom.xml` |
 | `rust_stack.py` | `rust` | `Cargo.toml` |
 | `ruby_stack.py` | `ruby` | `Gemfile` |
-| `taskrunner.py` | `makefile`, `justfile`, `taskfile`, `nx` | `Makefile`、`Justfile`、`Taskfile.y(a)ml`、`nx.json` |
+| `taskrunner.py` | `makefile`, `justfile`, `taskfile`, `nx` | `Makefile`、`Justfile`/`justfile`、`Taskfile.y(a)ml`、`nx.json` |
 | `flutter.py` | `flutter`, `dart` | `pubspec.yaml` (`sdk: flutter` または `flutter:` セクション。それ以外の pubspec は `dart` のみ) |
 | `php_stack.py` | `php` | `composer.json` |
 | `docker.py` | `docker` | `Dockerfile` / `docker-compose.y(a)ml` / `compose.y(a)ml` |

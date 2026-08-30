@@ -72,6 +72,17 @@ _MIN_DOMAIN_TYPES = 5
 # large scan, mirroring the caps collectors/dependencies.py
 # (_MAX_DEP_FILES) and detectors/flutter.py (_MAX_PUBSPEC_SCAN) already use
 # for the same kind of "read N candidate files" work.
+#
+# This is a soft cap on scan cost, not a hard truncation of the candidate
+# list: candidates past this index are only skipped once the >= 5
+# (_MIN_DOMAIN_TYPES) cluster gate has already been satisfied. While the
+# gate is still undecided, scanning continues past this index so a genuine
+# cluster is never hidden purely by where it happens to fall in
+# git-ls-files order (monorepos commonly have their real domain types under
+# a directory that sorts after 20+ barrel/index files, e.g. packages/ after
+# apps/). Internal backlog: an earlier version truncated the candidate list
+# itself before opening any file, which made the whole ## Domain Types
+# section silently disappear for repos with >= 21 matching candidates.
 _MAX_CANDIDATE_FILES = 20
 
 # Per-file cap on how many names any single file contributes to the
@@ -138,7 +149,7 @@ def _maybe_collect_domain_types(
         and any(token in f"/{p.lower()}" for token in _DOMAIN_PATH_TOKENS)
         and not is_test_path(p)
         and not _is_excluded_candidate(p)
-    ][:_MAX_CANDIDATE_FILES]
+    ]
     if not candidate_paths:
         return []
 
@@ -167,6 +178,10 @@ def _maybe_collect_domain_types(
         for i in range(n):
             if finished[i]:
                 continue
+            if i >= _MAX_CANDIDATE_FILES and gate_total >= _MIN_DOMAIN_TYPES:
+                # Gate already satisfied -- stop opening new candidate files
+                # past the soft cap; files below the cap keep taking turns.
+                break
             name = None
             for candidate in iterators[i]:
                 if candidate not in seen:

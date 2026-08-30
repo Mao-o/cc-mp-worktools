@@ -41,6 +41,20 @@ def render_header(ctx: RepoContext) -> str:
     return "\n".join(lines)
 
 
+def build_root_arg(root: Path) -> str:
+    """Build the shell-quoted ``--root <path>`` fragment shared by every
+    rerun-style hint.
+
+    Single place for this fragment too: build_rerun_hint() below uses it,
+    and so does cli.py's ``_minimal_header()`` fallback branch for when
+    invoked_as is unavailable and build_rerun_hint() returns None -- that
+    branch used to rebuild the same ``--root {shlex.quote(...)}`` expression
+    independently, which is exactly the kind of duplicate the hint
+    consolidation below already fixed once for the rest of the command.
+    """
+    return f"--root {shlex.quote(str(root))}"
+
+
 def build_rerun_hint(invoked_as: Optional[str], root: Path, extra: str) -> Optional[str]:
     """Build a copy-pasteable ``python3 <invoked_as> --root <root> <extra>``
     command, or None when invoked_as is unavailable (e.g. summarize_repo()
@@ -76,7 +90,7 @@ def build_rerun_hint(invoked_as: Optional[str], root: Path, extra: str) -> Optio
     """
     if not invoked_as:
         return None
-    root_arg = f"--root {shlex.quote(str(root))}"
+    root_arg = build_root_arg(root)
     return f"python3 {shlex.quote(invoked_as)} {root_arg} {extra}".rstrip()
 
 

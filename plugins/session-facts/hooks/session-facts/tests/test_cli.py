@@ -1311,6 +1311,33 @@ class CappedMarkerScanTest(unittest.TestCase):
                 self.assertFalse(_has_relevant_project_markers(home))
 
 
+def _cli_options_table_text(readme_text):
+    """Return just the CLI options table's rows: the pipe-delimited lines
+    starting at the "| オプション | ..." header, up to the first line after
+    it that is not itself a table row.
+
+    A section- or file-wide substring search lets a flag's *other* mentions
+    stand in for its table row: --root also appears in this section's
+    non-project-directory sample output and in a "非 git かつ `--root`
+    直下に..." prose sentence, so a naive ``flag not in readme_text`` (or
+    even a check scoped to the whole "## CLI オプション" section) stays
+    green after the table row documenting --root is deleted. Scoping to the
+    table's own pipe-delimited rows closes that gap.
+    """
+    after_heading = readme_text.split("## CLI オプション", 1)[1]
+    table_lines = []
+    in_table = False
+    for line in after_heading.splitlines():
+        if line.startswith("| オプション"):
+            in_table = True
+        if in_table:
+            if line.startswith("|"):
+                table_lines.append(line)
+            else:
+                break
+    return "\n".join(table_lines)
+
+
 class HelpFlagsDocumentedInReadmeTest(unittest.TestCase):
     """internal backlog: README.md's CLI options table drifted out of sync
     with the actual flag list (missing --include-hub-files/--max-hub-files
@@ -1330,8 +1357,14 @@ class HelpFlagsDocumentedInReadmeTest(unittest.TestCase):
 
         readme_path = Path(__file__).resolve().parents[3] / "README.md"
         readme_text = readme_path.read_text(encoding="utf-8")
-        missing = sorted(flag for flag in flags if flag not in readme_text)
+        table = _cli_options_table_text(readme_text)
+        # Matched with surrounding backticks (the table's own formatting),
+        # not a bare substring: see _cli_options_table_text's docstring for
+        # why a bare substring match is not enough.
+        missing = sorted(flag for flag in flags if f"`{flag}`" not in table)
         self.assertEqual(
-            missing, [], f"flags missing from {readme_path}: {missing}"
+            missing,
+            [],
+            f"flags missing from the CLI options table in {readme_path}: {missing}",
         )
 

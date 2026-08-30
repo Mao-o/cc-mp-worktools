@@ -57,7 +57,13 @@
    (複数モジュールにまたがる代表性を優先するトレードオフ)。この collector
    は hooks.json で `--include-domain-types` が常時付与されており事実上
    opt-in ではないため、候補ファイル数にも上限 (20 ファイル) を設けて
-   1 回の hook 呼び出しあたりの走査コストを抑えた
+   1 回の hook 呼び出しあたりの走査コストを抑えている。**この上限は
+   走査コストにのみ効く soft cap であり、>= 5 件の cluster ゲートが
+   未充足の間は 20 ファイルを超えても走査を続ける (ゲートが先に満たされた
+   場合だけ、それ以降の候補ファイルを開かずに打ち切る)** — 事前に候補
+   リストそのものを 20 件へ切り詰めていた版では、モノレポで genuine な
+   型定義ディレクトリが `git ls-files` 順で 20 番目より後ろに来ると
+   `## Domain Types` セクションが丸ごと出力されなくなる問題があった
 
 ### ドキュメント
 
@@ -97,14 +103,17 @@
    cwd 基点で描画する必要があるため、共有フィルタの結果からさらに prefix
    を剥がす箇所だけは独自のまま残した)
 
-テスト 300 件 (新規 42 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
+テスト 303 件 (新規 46 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
 テストとメモ化テスト (`tests/test_detectors.py` 新設)、
 `collectors/domain_types.py` のラウンドロビン分散・cluster ゲートと表示上限
-の独立性・除外パターン・候補ファイル数上限のテスト、
+の独立性・除外パターン・候補ファイル数上限 (gate 充足後のみ打ち切る soft cap
+であることの境界値) のテスト、
 `collectors/repo_notes.py`/`collectors/nextjs_facts.py`/
 `collectors/cwd_subtree.py` の router/firebase/subtree フィルタ (従来
 カバレッジが無かった箇所)、`- more:` ヒントの `--root` 込み再検証と実
-サブプロセスでの実行可能性チェック、README の CLI オプション表同期チェック)。
+サブプロセスでの実行可能性チェック、README の CLI オプション表同期チェック
+(表の行だけを対象にし、他節のサンプルコマンドや説明文中の同名フラグを
+誤って合格させないよう範囲を厳密化)。
 
 ## 0.8.0
 

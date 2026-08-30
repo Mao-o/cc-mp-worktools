@@ -274,12 +274,17 @@ class DomainTypesCandidateFileCapTest(unittest.TestCase):
     """internal backlog: this collector runs on every SessionStart/
     SubagentStart (hooks.json passes --include-domain-types unconditionally),
     so unbounded candidate scanning is a per-hook-call cost, not opt-in
-    cost. _MAX_CANDIDATE_FILES bounds it, mirroring the existing
-    _MAX_DEP_FILES/_MAX_PUBSPEC_SCAN caps elsewhere -- deliberately at the
-    cost of missing a real cluster placed after enough non-contributing
-    candidates."""
+    cost. _MAX_CANDIDATE_FILES bounds *scan cost* once the >= 5 cluster gate
+    has already been satisfied -- it must never silently drop a genuine
+    cluster that happens to sit past the cap in tracked-file order.
+    Monorepos commonly have their real domain types under a directory that
+    sorts after 20+ barrel/index files (e.g. packages/ after apps/), so an
+    earlier version that truncated the candidate list itself before opening
+    any file made the whole section disappear for exactly the repos this
+    collector exists to help with; that regression is what the tests below
+    guard against."""
 
-    def test_real_cluster_past_the_candidate_cap_is_missed(self):
+    def test_real_cluster_past_the_candidate_cap_is_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             files = {
                 f"src/models/dud{i:02d}.ts": "export interface Props {}\n"
@@ -287,10 +292,45 @@ class DomainTypesCandidateFileCapTest(unittest.TestCase):
             }
             files["src/models/zzz_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
             ctx = _ctx(tmp, files)
-            # Sorted tracked-file order puts zzz_real.ts at position 26,
-            # past the 20-file cap -- this is the documented trade-off, not
-            # a bug: confirms the cap actually bounds the scan.
-            self.assertIsNone(DomainTypesCollector().collect(ctx))
+            # Tracked-file order puts zzz_real.ts at position 26, past the
+            # 20-file cap. The cap only bounds scan cost once the gate is
+            # already satisfied, and 25 stop-name-only duds never satisfy
+            # it, so the scan must continue past the cap and find the
+            # cluster -- unlike the old hard-truncation behavior this
+            # replaced.
+            out = DomainTypesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("Alpha", out)
+
+    def test_candidate_count_one_past_the_cap_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {
+                f"src/models/dud{i:02d}.ts": "export interface Props {}\n"
+                for i in range(20)  # exactly _MAX_CANDIDATE_FILES duds
+            }
+            files["src/models/zzz_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
+            ctx = _ctx(tmp, files)
+            # 21 total candidates, real cluster at position 21 -- the exact
+            # boundary the soft-cap fix targets (20 candidates was already
+            # fine; 21 is where the old hard truncation first dropped the
+            # section entirely).
+            out = DomainTypesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("Alpha", out)
+
+    def test_candidate_count_exactly_at_the_cap_is_unaffected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {
+                f"src/models/dud{i:02d}.ts": "export interface Props {}\n"
+                for i in range(19)
+            }
+            files["src/models/zzz_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
+            ctx = _ctx(tmp, files)
+            # Exactly 20 candidates (19 duds + 1 real): already worked
+            # before the soft-cap fix, and must keep working identically.
+            out = DomainTypesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("Alpha", out)
 
     def test_cluster_within_the_candidate_cap_is_found(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,6 +343,39 @@ class DomainTypesCandidateFileCapTest(unittest.TestCase):
             out = DomainTypesCollector().collect(ctx)
             self.assertIsNotNone(out)
             self.assertIn("Alpha", out)
+
+    def test_break_only_fires_once_the_gate_is_already_satisfied(self):
+        # None of the other tests in this class pin the soft-cap break
+        # itself: they all have gate_total stuck at 0 for the whole
+        # 0..19 stretch (every one of the first 20 candidates is a
+        # stop-name-only dud), so "gate_total >= _MIN_DOMAIN_TYPES" is
+        # never true when index 20 is reached and the break's own
+        # condition never decides the outcome -- commenting the break out
+        # entirely still leaves every other test in this file green.
+        #
+        # This fixture puts the gate_total in between: 6 files under the
+        # cap each contribute exactly one distinct type name (gate_total
+        # reaches 5, then 6, within the first 20 candidates), and index 20
+        # is a 21st file with its own distinct type. With the break,
+        # gate_total (6) already clears _MIN_DOMAIN_TYPES (5) by the time
+        # index 20 is reached, so that file is never opened and its type
+        # must not appear. Without the break, it would be opened (6 is
+        # still under the default max_items=10 collect_target) and its
+        # type would appear.
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {}
+            for i, name in enumerate(
+                ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Theta")
+            ):
+                files[f"src/models/real{i:02d}.ts"] = f"export interface {name} {{}}\n"
+            for i in range(14):  # pad to exactly 20 candidates (6 + 14)
+                files[f"src/models/dud{i:02d}.ts"] = "export interface Props {}\n"
+            files["src/models/zzz_past_cap.ts"] = "export interface Zeta {}\n"
+            ctx = _ctx(tmp, files)
+            out = DomainTypesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("Alpha", out)
+            self.assertNotIn("Zeta", out)
 
 
 if __name__ == "__main__":

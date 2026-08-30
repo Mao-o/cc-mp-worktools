@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -37,7 +36,7 @@ from core.pm import detect_package_manager
 from core.runtime import MISE_CONFIG_NAMES, is_home_dir, mise_config_path
 from core.util import truncate_purpose
 from registry import discover_custom_plugins, discover_plugins
-from renderer import build_rerun_hint, render_header
+from renderer import build_rerun_hint, build_root_arg, render_header
 
 # PROJECT_MARKERS minus the mise config names: those three are checked via
 # mise_config_path() in _has_relevant_project_markers() below instead of a
@@ -247,7 +246,7 @@ def _minimal_header(root: Path, invoked_as: Optional[str]) -> str:
     if cmd:
         lines.append(f"- more: run `{cmd}` to force the full analysis anyway")
     else:
-        root_arg = f"--root {shlex.quote(str(root))}"
+        root_arg = build_root_arg(root)
         lines.append(
             f"- more: pass `{root_arg} --force-walk` to force the full "
             "analysis anyway"
