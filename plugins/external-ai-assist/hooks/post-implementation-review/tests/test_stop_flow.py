@@ -851,20 +851,24 @@ class TestCursorLaunchCwd(HookTestCase):
         self.assertEqual(self.review_cwds, [self.repo])
 
 
-class TestSameTurnCommitBaseFallback(HookTestCase):
-    """同一ターン内で commit した変更が HEAD 基準の diff で空になっても、
+class TestSameTurnCommitNotification(HookTestCase):
+    """HEAD 基準の diff が空になったパス (同一ターン内 commit 等) は、復元を
+    試みず `systemMessage` で「取得できなかった」と通知する (黙って消費しない)。
 
-    - 手元由来 (pull 等で他人の commit が混ざっていない) と証明できれば
-      基点まで遡って復元する
-    - 証明できなければ復元せず、`systemMessage` で「取得できなかった」と
-      可視化する (黙って消費しない)
-    - どちらの場合も、そのパスが pending に残り続けて毎ターン繰り返し
-      報告されることはない
+    以前 (0.9.0 導入時) は、前回 Stop が記録した HEAD を基点に
+    `git rev-list --not --remotes` で「手元由来」(どのリモートにも存在しない)
+    と証明できれば、基点まで遡った diff を復元して送る経路があった。この証明は
+    「リモート由来でない」ことしか示しておらず「このセッションが書いた」ことは
+    示していない。同一 worktree を共有する別のローカルの書き手 (別セッション・
+    人間の手動 commit) が push せずに同じパスへ commit すると、その内容が
+    丸ごと外部へ送信されてしまうことがマージ前レビューで実演された
+    (`test_other_local_writer_commit_is_not_leaked` が回帰テスト)。pull/merge
+    経由の混入は元から遮断できていたが (`test_pull_bringing_foreign_commit_is_reported`)、
+    これは別ベクトルだった。
 
-    4 ケースの実測表 (range/local カウント) 自体は
-    `test_gitscan.py::TestIsLocalOnlyRange` で個別に固定済み。ここでは
-    Stop の一連の流れ (state.base_sha の読み書き → 通知 → pending 消費) を
-    確認する。
+    安全な復元には編集時点の内容退避が要り、「PostToolUse を軽く保つ」という
+    既存の設計と衝突するため、復元機構そのものを撤去し、常に「取得できない」と
+    報告するだけにする (送信範囲が広がる方向には倒さない)。
     """
 
     def _add_bare_origin(self) -> tuple[str, str]:
@@ -886,108 +890,65 @@ class TestSameTurnCommitBaseFallback(HookTestCase):
         _testutil.git(clone, "commit", "-qm", "foreign change")
         _testutil.git(clone, "push", "-q", "origin", branch)
 
-    def _establish_base(self) -> None:
-        """base_sha を確立する (何かを編集してレビューを 1 回走らせるだけの前段)。"""
+    def _establish_history(self) -> None:
+        """レビュー履歴が既にあるセッションでも結果が変わらないことを示すための
+        前段 (何かを 1 回レビューさせておくだけ)。"""
         self.edit(SESSION_A, "warmup.txt", "hello\n")
         self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertReviewed("warmup.txt")
 
-    def test_self_commit_within_turn_is_reviewed_via_base_fallback(self):
-        """手元由来と証明できるケース (自分の commit のみ) — 復元して送る。"""
-        self._establish_base()
+    def test_same_turn_commit_is_reported_not_reviewed(self):
+        """同一ターン内で commit した変更は、レビューされる代わりに
+        「取得できませんでした」と報告される (復元しない)。"""
+        self._establish_history()
 
         self.edit(SESSION_A, "a.py", "print(1)\n")
         _testutil.git(self.repo, "add", "a.py")
         _testutil.git(self.repo, "commit", "-qm", "self commit")
-
-        self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "print(1)")
-        self.assertEqual(self.pending(SESSION_A), [])
-
-    def test_cursor_failure_after_same_turn_commit_is_retried_next_turn(self):
-        """回帰 (0.9.0 fix): 基点フォールバックで復元した diff を送った直後に
-        cursor が失敗しても、次ターンで同じ基点フォールバックが再び効いて
-        レビューされる。
-
-        `_run_review` が `base_sha` を「レビューが実際に消費された時点」ではなく
-        無条件に今回の HEAD へ進めていた版では、この cursor 失敗 (restore_claim)
-        の直後に base_sha だけが進んでしまい、次ターンでは
-        `old_base == HEAD` になる。そうなると `old_base..HEAD` は 0 commit で
-        手元由来の証明が自明に True になる一方、`diff_since(root, path, HEAD)`
-        も自明に空 diff になり、`unretrievable` にも積まれず黙って消える —
-        元のバグ (chunk B: 同一ターン内 commit の黙殺) を 1 ターン遅れで
-        再現してしまっていた。
-        """
-        self._establish_base()
-
-        self.edit(SESSION_A, "a.py", "print(1)\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-
-        self.stop(SESSION_A, None)  # cursor 失敗 → 消費されず pending に戻る
-        self.assertIn(os.path.join(self.repo, "a.py"), self.pending(SESSION_A))
 
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "print(1)")
-        self.assertEqual(self.pending(SESSION_A), [])
-        message = json.loads(output)["systemMessage"] if output else ""
-        self.assertNotIn(
-            "取得できませんでした", message, "再試行できるはずが「取得不能」報告に落ちている"
-        )
-
-    def test_min_lines_gate_after_same_turn_commit_is_retried_next_turn(self):
-        """回帰 (0.9.0 fix): 基点フォールバックで復元した diff が MIN_LINES 見送りで
-        pending に戻っても (cursor 失敗と同じ restore_claim 経路)、次ターンの
-        基点フォールバックは壊れない。"""
-        self._establish_base()
-
-        self.edit(SESSION_A, "a.py", "print(1)\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-
-        os.environ["EXTERNAL_AI_POST_REVIEW_MIN_LINES"] = "50"
-        self.assertNotBlocked(self.stop(SESSION_A, "REVIEW_CLEAN"))
         self.assertNotReviewed()
-        self.assertIn(os.path.join(self.repo, "a.py"), self.pending(SESSION_A))
-
-        del os.environ["EXTERNAL_AI_POST_REVIEW_MIN_LINES"]
-        self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "print(1)")
-        self.assertEqual(self.pending(SESSION_A), [])
-
-    def test_overflow_after_same_turn_commit_is_not_silently_dropped(self):
-        """回帰 (0.9.0 fix): `MAX_REVIEW_PATHS` 超過で overflow として pending に
-        戻された (= 消費されていない) パスが同一ターン内 commit 済みだった場合も、
-        次ターンの基点フォールバックで拾われる。
-
-        overflow は `_resolve_paths` (`_collect_diffs` より前) で弾かれるため、
-        基点フォールバックの判定を一度も経ていない。`carried` (deferred + overflow)
-        が非空のターンで基点を進めてしまうと、cursor 失敗時の restore_claim と
-        同じ理由で次ターンの `old_base == HEAD` になり黙って消える。
-        """
-        self._establish_base()
-        self.entry.MAX_REVIEW_PATHS = 1
-        self.edit(SESSION_A, "a.py", "print('a')\n")
-        self.edit(SESSION_A, "late.py", "print('late')\n")
-        _testutil.git(self.repo, "add", "late.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-
-        self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py")
-        self.assertIn(os.path.join(self.repo, "late.py"), self.pending(SESSION_A))
-
-        output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("late.py", "print('late')")
-        self.assertEqual(self.pending(SESSION_A), [])
         message = json.loads(output)["systemMessage"] if output else ""
-        self.assertNotIn(
-            "取得できませんでした", message, "復元できるはずが「取得不能」報告に落ちている"
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertNotIn("print(1)", message, "通知には内容を出さない")
+        self.assertEqual(
+            self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
         )
 
-    def test_pull_bringing_foreign_commit_is_not_restored_but_reported(self):
-        """証明できないケース (ff pull で他人の commit が混ざる) — 復元しない。"""
+    def test_other_local_writer_commit_is_not_leaked(self):
+        """regression: マージ前レビューで実演された脆弱性。別のローカルの書き手
+        (このセッションの hook を経由しない、別セッション・人間の手動 commit を
+        模す) が push せずに同じパスへ commit した内容を、外部 AI CLI へ送らない
+        こと。
+
+        `_establish_history()` で先にレビューを 1 回走らせておくのは、旧
+        (基点フォールバック) コードが `base_sha` を確立していない最初の Stop
+        では復元を試みる余地が無く、この回帰の再現にならないため。
+        """
+        self._establish_history()
+
+        self.edit(SESSION_A, "a.py", "print('session A')\n")
+        # このセッションの hook を経由しない、別の書き手による直接 commit。
+        # push していないので、旧コードの `is_local_only_range` では
+        # 「手元由来」と判定され、基点まで遡った diff の復元経路に入って
+        # `diff_since` がこの内容を拾って送ってしまっていた。
+        _testutil.write(self.repo, "a.py", "print('someone else entirely')\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "another local writer's commit")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertNotIn("someone else entirely", message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_pull_bringing_foreign_commit_is_reported(self):
+        """pull/merge で他人の commit が混ざった場合も同じ経路で報告のみ
+        (この既知のベクトルは旧コードでも安全に扱えていた)。"""
         bare, branch = self._add_bare_origin()
-        self._establish_base()
+        self._establish_history()
 
         self.edit(SESSION_A, "a.py", "print(1)\n")
         _testutil.git(self.repo, "add", "a.py")
@@ -1003,12 +964,12 @@ class TestSameTurnCommitBaseFallback(HookTestCase):
         self.assertIn("a.py", message)
         self.assertNotIn("print(1)", message, "通知には内容を出さない")
         self.assertEqual(
-            self.pending(SESSION_A), [], "証明できなかったパスが pending に残り続けないこと"
+            self.pending(SESSION_A), [], "報告済みのパスが pending に残り続けないこと"
         )
 
-    def test_first_ever_stop_with_committed_change_is_reported_not_restored(self):
-        """基点が無い最初の Stop (このセッションの初回レビュー) でも、commit 済みで
-        空になったパスを黙って消費しない。"""
+    def test_first_ever_stop_with_committed_change_is_reported(self):
+        """セッション初回の Stop でも、commit 済みで空になったパスを
+        黙って消費しない。"""
         self.edit(SESSION_A, "a.py", "print(1)\n")
         _testutil.git(self.repo, "add", "a.py")
         _testutil.git(self.repo, "commit", "-qm", "self commit")
@@ -1020,19 +981,12 @@ class TestSameTurnCommitBaseFallback(HookTestCase):
         self.assertEqual(self.pending(SESSION_A), [])
 
     def test_edit_without_commit_is_unaffected(self):
-        """回帰: commit を挟まない通常編集は基点フォールバックの対象にすらならず、
-        従来どおりそのままレビューされる。"""
-        self._establish_base()
+        """回帰: commit を挟まない通常編集は影響を受けず、従来どおりレビューされる。"""
         self.edit(SESSION_A, "a.py", "print(1)\n")  # commit しない
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertReviewed("a.py", "print(1)")
         message = json.loads(output)["systemMessage"] if output else ""
         self.assertNotIn("取得できませんでした", message)
-
-    def test_base_sha_is_recorded_after_first_review(self):
-        self.assertIsNone(self.state.get_base_sha(SESSION_A))
-        self._establish_base()
-        self.assertEqual(self.state.get_base_sha(SESSION_A), self.gitscan.current_head(self.repo))
 
 
 if __name__ == "__main__":

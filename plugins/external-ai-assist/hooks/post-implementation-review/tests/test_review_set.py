@@ -284,11 +284,10 @@ class TestCollectDiffs(ReviewSetTestCase):
     def test_empty_diff_is_not_submitted(self):
         """commit 済み / revert 済みのパスはレビューにも復元対象にも入れない。
 
-        `base_sha` 省略時 (既定 None) は基点フォールバックの対象外だが、
-        黙って消えるわけではない — 基点が無い旨を `unretrievable` に積んで
-        呼び出し側 (`_run_review`) が通知することを、ここで意図的な挙動として
-        固定する (0.9.0。以前はここが未検証で、たまたま埋まっていても
-        誰も気づけなかった)。
+        HEAD 基準 diff が空の tracked パスは復元を試みず、黙って消えるわけでもない
+        — `unretrievable` に積んで呼び出し側 (`_run_review`) が通知することを、
+        ここで意図的な挙動として固定する (以前はここが未検証で、たまたま埋まって
+        いても誰も気づけなかった)。
         """
         batch = self.entry._collect_diffs(self.repo, ["seed.txt"], {})
         self.assertEqual(batch.sections, [])
@@ -460,16 +459,11 @@ class TestTimeoutBudgets(ReviewSetTestCase):
 
         timeouts = self._hook_timeouts()
         git_worst = (
-            gitscan.REV_PARSE_TIMEOUT_SEC * 3  # worktree_root + head_exists + current_head
+            gitscan.REV_PARSE_TIMEOUT_SEC * 2  # worktree_root + head_exists
             + gitscan.LS_FILES_TIMEOUT_SEC  # symlink 一覧 (symlink_map)
             + gitscan.LS_FILES_TIMEOUT_SEC  # untracked 判定 (untracked_among)
             + self.entry.COLLECT_BUDGET_SEC
-            # 予算判定後に走る最後の 1 パス。HEAD 基準 diff が空だった場合、
-            # 基点フォールバック (diff_since) も試すため最大 2 回
-            + gitscan.PATH_DIFF_TIMEOUT_SEC * 2
-            # is_local_only_range の rev-list --count 2 回 (base_sha があり HEAD
-            # 基準 diff が空のパスが 1 件でもあればこの Stop 内で高々 1 回だけ計算)
-            + gitscan.REV_LIST_TIMEOUT_SEC * 2
+            + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
         )
         # cursor の timeout 後に process group を止める経路 (SIGTERM 待ち / SIGKILL 待ち /
         # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない。

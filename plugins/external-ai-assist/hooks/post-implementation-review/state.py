@@ -110,7 +110,6 @@ def _empty_state() -> dict:
         "in_flight": {},
         "reviewed": {},
         "last_review_at": 0.0,
-        "base_sha": None,
     }
 
 
@@ -131,9 +130,6 @@ def _normalize(raw) -> dict:
     stamp = raw.get("last_review_at")
     if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
         state["last_review_at"] = float(stamp)
-    base_sha = raw.get("base_sha")
-    if isinstance(base_sha, str) and base_sha:
-        state["base_sha"] = base_sha
     return state
 
 
@@ -303,39 +299,6 @@ def mark_review_done(session_id: str) -> None:
     try:
         with _locked_state(session_id) as state:
             state["last_review_at"] = time.time()
-    except OSError:
-        pass
-
-
-def get_base_sha(session_id: str) -> str | None:
-    """前回 Stop が記録した基点 HEAD SHA。無ければ None (基点未確立、または初回)。
-
-    `_run_review` が「同一ターン内 commit で HEAD 基準 diff が空になった」パスの
-    フォールバック判定に使う (内部バックログ)。**この値を読んでから
-    `set_base_sha` で上書きする順序を守ること** — 先に上書きすると、今回の Stop
-    自身が作った新しい HEAD を「前回の基点」として誤って使ってしまう。
-
-    state ファイルが一度も無ければ None (開かない — `last_review_at` と同じ配慮)。
-    """
-    if not os.path.exists(_state_path(session_id)):
-        return None
-    try:
-        with _locked_state(session_id) as state:
-            return state.get("base_sha")
-    except OSError:
-        return None
-
-
-def set_base_sha(session_id: str, sha: str) -> None:
-    """Stop の処理開始時点の HEAD を記録する (次の Stop の基点になる)。
-
-    Stop は既に `gitscan.worktree_root` 等で git を呼んでいるため、
-    `gitscan.current_head` の追加コストはほぼゼロ。呼び出し側 (`_run_review`) は
-    `get_base_sha` で**前回の**値を読んでから、この関数で今回の HEAD に更新する。
-    """
-    try:
-        with _locked_state(session_id) as state:
-            state["base_sha"] = sha
     except OSError:
         pass
 

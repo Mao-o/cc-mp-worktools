@@ -93,10 +93,6 @@ class TestNoOpAvoidsFileCreation(StateTestCase):
         self.assertEqual(state.last_review_at(SESSION), 0.0)
         self.assertFalse(os.path.exists(self._state_path()))
 
-    def test_get_base_sha_on_untouched_session_creates_no_file(self):
-        self.assertIsNone(state.get_base_sha(SESSION))
-        self.assertFalse(os.path.exists(self._state_path()))
-
     def test_claim_pending_still_works_once_file_exists(self):
         """回帰: 既に state ファイルがあるセッションは今までどおり claim できる。"""
         state.record_pending(SESSION, ["/repo/a.py"])
@@ -182,32 +178,6 @@ class TestCorruptState(StateTestCase):
 
         state.record_pending(SESSION, ["/repo/a.py"])
         self.assertEqual(list(self.read_state()["pending"]), ["/repo/a.py"])
-
-
-class TestBaseSha(StateTestCase):
-    """同一ターン内 commit 対応の基点 SHA 記録 (`get_base_sha` / `set_base_sha`)。"""
-
-    def test_round_trip(self):
-        self.assertIsNone(state.get_base_sha(SESSION))
-        state.set_base_sha(SESSION, "deadbeef")
-        self.assertEqual(state.get_base_sha(SESSION), "deadbeef")
-
-    def test_overwrite_replaces_previous_value(self):
-        state.set_base_sha(SESSION, "old-sha")
-        state.set_base_sha(SESSION, "new-sha")
-        self.assertEqual(state.get_base_sha(SESSION), "new-sha")
-
-    def test_survives_alongside_other_state_mutations(self):
-        """`_normalize` が `base_sha` を引き継ぎ損ねると、pending の読み書きのたびに
-        None に戻ってしまう (last_review_at で実際にあった不具合パターンの回帰)。"""
-        state.set_base_sha(SESSION, "deadbeef")
-        state.record_pending(SESSION, ["/repo/a.py"])
-        state.claim_pending(SESSION)
-        self.assertEqual(state.get_base_sha(SESSION), "deadbeef")
-
-    def test_sessions_do_not_share_base_sha(self):
-        state.set_base_sha("sess-a", "sha-a")
-        self.assertIsNone(state.get_base_sha("sess-b"))
 
 
 class TestBashSnapshot(StateTestCase):

@@ -144,11 +144,9 @@ docstring と README を参照。判定には実体 (realpath 相対。git に�
 Bash 経由の変更で、`git status` は実体名 (`ordinary/data.json`) しか返さないため lexical 名が
 claim に現れない (Codex R2 P1)。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
-rev-parse 2秒×3 (worktree_root + head_exists + current_head) + ls-files (symlink) 10秒
-+ ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒×2
-(基点フォールバックで最大 2 回 git diff を呼ぶため) + rev-list 3秒×2 (基点があるときの
-手元由来の証明) = 72s (0.9.0 で 59s から増加。詳細は `gitscan.py` モジュール docstring の
-予算表)。
+rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
++ ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
+= 59s (詳細は `gitscan.py` モジュール docstring の予算表)。
 
 **予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
 切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。
@@ -213,7 +211,7 @@ turn 1 と turn 7 で同じファイルを編集すると turn 1 の hunk が tu
 ファイル全体の変更文脈を渡すため) した上で、**パス単位の diff hash** で重複を潰す:
 そのパスの diff が前回レビュー時と 1 バイトも変わっていなければレビューに載せない。
 
-### 同一ターン内 commit で HEAD 基準が空になる問題への対応 (0.9.0)
+### HEAD 基準が空になったパスは復元せず通知する
 
 HEAD 基準には副作用がある: pending に積んだ後、Stop までの間にそのパスを commit
 すると `git diff HEAD -- <path>` が空になり、0.8.0 以前は黙って消費されて一度も
@@ -224,62 +222,37 @@ HEAD 基準には副作用がある: pending に積んだ後、Stop までの間
 そのパスを**通過した全変更**を拾う。他人の commit が pull で入っただけでも成立し、
 この plugin は差分を外部 AI CLI に送るため送信範囲が広がってしまう。
 
-**確定した設計 (基点は Stop 側で記録する)**:
+0.9.0 は一度、この基点を Stop 側で記録し、`git rev-list --count <base>..HEAD` と
+`--not --remotes` 付きの同カウントを比較する「手元由来の証明」(その範囲の commit が
+全てリモートに存在せず手元だけで作られたものか) が通ったときだけ基点まで遡った
+diff を復元する経路を実装した。**この証明は「リモート由来でない」ことしか示して
+おらず、「このセッションが書いた」ことは示していない。** 同一 worktree を共有する
+別のローカルの書き手 (別セッション・人間の手動 commit) が push せずに同じパスへ
+commit すると、その内容が丸ごと外部へ送信されてしまう — pull/merge 経由の混入は
+正しく遮断できていたが、これは別ベクトルであり、マージ前レビューで実際に送信
+されることが実演されたため復元経路そのものを撤去した。
 
-1. `_run_review` の冒頭 (既に git を呼ぶタイミングなので追加コストは
-   `git rev-parse HEAD` 1 回分のみ) でそのときの HEAD を読んでおくが、
-   `state.set_base_sha` で**実際に書き込むのはこのレビューが消費された時だけ**
-   (詳細は 4 番)。読む (`old_base = state.get_base_sha`) タイミングと
-   書く (`new_head` を基点として確定する) タイミングを分けているのが要点
-2. HEAD 基準 diff が空だった tracked パスについて、基点があれば**手元由来の証明**を行う:
-   `git rev-list --count <base>..HEAD` と `--not --remotes` 付きの同カウントを比較し、
-   一致すれば (= その範囲の commit が全てリモートに存在せず手元だけで作られたもの)
-   `git diff <base> -- <path>` を使ってよい
-3. 基点が無い (このセッションの最初の Stop) / 証明できない (pull・merge で他人の
-   commit が混ざっている) 場合は**復元しない**。ただしパスが実在するなら
-   `systemMessage` に「差分が空で取得できませんでした」として列挙し、pending からは
-   外す (黙って消費しない。ただし証明できない旨を伝えるだけで、commit されたと
-   断定はしない — 実際には revert のみで commit が無かった可能性もあるため)。
-   **同一ターン内で commit してさらに push まで済ませた場合もこちらに該当する**
-   (push した時点でその commit は `refs/remotes/origin/*` から到達可能になり、
-   `--not --remotes` の対象から外れて手元由来と証明できなくなるため)。「直して
-   push まで」を 1 ターンでやると、復元ではなく通知止まりになるのは意図した
-   保守的な向き — 送信範囲を広げる方向には倒さない
-4. 基点を進めてよいのは、そのターンで claim した全パスの決着が付いた場合だけ。
-   具体的には 2 通りのケースで進めない:
-   - cursor 失敗 / `EXTERNAL_AI_POST_REVIEW_MIN_LINES` 見送りで `restore_claim`
-     される (= claim 全体をレビュー消費していない) ターン。`complete_claim` の
-     呼び出しを `__main__._complete_and_advance_base` に一本化し、この 3 箇所
-     (差分無し / REVIEW_CLEAN / 指摘あり) だけが基点を進める
-   - `carried` (`batch.deferred` の時間・バイト予算超過 + `overflow` の
-     `MAX_REVIEW_PATHS` 超過) が非空、つまり claim した一部パスを
-     `record_pending` で pending に戻したターン。戻したパスは overflow なら
-     `_collect_diffs` に一度も渡っておらず、deferred でも基点フォールバックの
-     判定を経ていないため、次ターンでもこのターンと同じ `old_base` で判定させる
-     必要がある
+**確定した設計 (復元せず、常に通知する)**:
 
-   どちらも無視して基点を無条件に進めると、そのターンに pending へ戻した
-   (= 消費していない) パスが同一ターン内 commit 済みだった場合、次の Stop で
-   `old_base == HEAD` になり `old_base..HEAD` が自明に 0 commit
-   (= 手元由来の証明が自明に True) になる一方 `diff_since(base=HEAD)` も
-   自明に空 diff になって、`unretrievable` にも積まれず黙って消える —
-   このドキュメントが書いている「消えていたバグ」を 1 ターン遅れで再現して
-   しまう (マージ前レビューの指摘。regression テストは
-   `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
-   test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
-   `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn` /
-   `test_overflow_after_same_turn_commit_is_not_silently_dropped`)。
-   `unretrievable` はこの制約の対象外 (証明できず捨てる決着済みのパスなので
-   基点を止める理由にならない)
-5. 判定は `gitscan.is_local_only_range` / `gitscan.diff_since`、実装は
-   `__main__._collect_diffs` の `local_only()` / `empty_at_head` 分岐、実測は
-   `tests/test_gitscan.py::TestIsLocalOnlyRange` (自分の commit のみ / merge で
-   他人の commit が混入 / 編集のみ commit なし / fast-forward pull のみ、の 4 通り)
+- HEAD 基準 diff が空だった tracked パスは、そのパスが実際に存在する (phantom な
+  pending エントリではない) なら `batch.unretrievable` に積む。空になった理由
+  (同一ターン内 commit・別の書き手の commit・pull/merge・単に無変更) は区別しない
+  — 区別しても「復元してよいか」の判断には使わないため
+- `_run_review` は `batch.unretrievable` を `systemMessage` に
+  「差分が空で取得できませんでした (commit 済みの可能性。内容は送信していません)」
+  として列挙し、pending からは外す (黙って消費しない。ただし取得できなかった旨を
+  伝えるだけで、commit されたと断定はしない — 実際には revert のみで commit が
+  無かった可能性もあるため)
+- 安全な復元には編集時点の内容退避 (PostToolUse の時点でファイル内容を退避し、
+  Stop 時にそれと比較する) が要るが、これは「PostToolUse を軽く保つ」という既存の
+  設計意図と衝突するため、この batch では見送る
 
-**失敗方向は明確: 送信範囲が広がる側には倒さない。** 証明できないときは復元せず、
-レビューされなかった事実を可視化する。「黙って消える」を「取得できなかったと報告
-される」に変えるのが本対応の主眼で、基点まで遡った diff の復元は証明できた範囲での
-おまけ。
+**失敗方向は明確: 送信範囲が広がる側には倒さない。** 復元できないときは常に
+「取得できなかった」と可視化するだけにする。「黙って消える」を「取得できな
+かったと報告される」に変えるのが本対応の主眼で、基点まで遡った復元は撤去した
+(設計の変遷は `CHANGELOG.md` の該当節を参照)。regression テストは
+`tests/test_stop_flow.py::TestSameTurnCommitNotification`
+(`test_other_local_writer_commit_is_not_leaked` が今回撤去した脆弱性の再現)。
 
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 
@@ -301,12 +274,17 @@ HEAD 基準には副作用がある: pending に積んだ後、Stop までの間
 - **transcript 解析 (ステートレス)** — 状態ファイルもロックも不要だが、再現できる境界が
   「直前の user メッセージ以降」で要件と別物。持ち越し分を永久にレビューできない。
   加えて transcript の JSONL 形状は非公式でフォーマット変更に弱い
+- **`git rev-list --not --remotes` による「手元由来の証明」を通った基点まで
+  diff を遡って復元する** — 「リモートに存在しない」ことしか示せず「このセッション
+  が書いた」ことは示せないため、同一 worktree の別のローカルの書き手が push せずに
+  commit した内容まで復元して送ってしまう (詳細は「HEAD 基準が空になったパスは
+  復元せず通知する」節)
 
 ## $TMPDIR のレイアウトと GC
 
 ```
 $TMPDIR/post-implementation-review/
-├── state/<session_id>.json                  pending / in_flight / reviewed / base_sha
+├── state/<session_id>.json                  pending / in_flight / reviewed
 ├── bashsnap/<session>__<tool_use_id>.json   Bash 実行前のスナップショット
 ├── locks/cursor-<cwd hash>.lock             cursor 直列化ロック
 └── reviews/<session_id>.txt                 レビュー結果の参照コピー
@@ -421,9 +399,8 @@ reference (`Stop decision control` 節) 逐語:
 - 版数を理由に auto 解決が `block` に倒れたときだけ `systemMessage` に付記文を足す
   (どの版数だったか、または「不明」)。明示 `MODE=block` では付記文を混ぜない
 - Stop の待ち時間の絶対上限が 674 秒 → 677 秒に変化 (`claude --version` の timeout
-  3秒が worst case に加わる。当時の 690秒の hook timeout には収まっていた。
-  0.9.0 で基点フォールバック分の git 予算が増えたため現在は 690 秒 → hook timeout
-  700 秒。`tests/test_review_set.py::TestTimeoutBudgets` 参照)
+  3秒が worst case に加わる。690秒の hook timeout には収まっている。
+  `tests/test_review_set.py::TestTimeoutBudgets` 参照)
 - テストは実機の `claude` を起動しない。既存テストを含む全体が
   `tests/_testutil.py::PINNED_VERSION_ENV` (`CLAUDE_CODE_VERSION` を対応版数に固定) の
   下で走るため、実行環境の実際の Claude Code 版数に依存しない
@@ -456,7 +433,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
-| 同一ターン内 commit で HEAD 基準が空になっても、手元由来と証明できれば復元し、できなければ黙って消費せず通知する (0.9.0) | `TestSameTurnCommitBaseFallback` (手元由来の証明の 4 通りは `test_gitscan.py::TestIsLocalOnlyRange`) |
+| HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`) |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |

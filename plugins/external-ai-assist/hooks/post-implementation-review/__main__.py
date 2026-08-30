@@ -610,22 +610,6 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         )
 
 
-def _complete_and_advance_base(
-    session_id: str, claim_id: str, hashes: dict, new_head: str | None
-) -> None:
-    """`complete_claim` でレビュー消費を確定し、可能なら基点も今回の HEAD へ進める。
-
-    `restore_claim` の経路 (cursor 失敗 / MIN_LINES 見送り / `_review_claim` の
-    例外ハンドラ) では絶対に呼ばないこと。理由は `_run_review` 冒頭のコメント参照
-    — 消費されなかったレビューで基点を進めると、次ターンの基点フォールバックが
-    「進みすぎた基点」を見て復元可能な範囲を自明に 0 コミットにしてしまい、
-    元のバグ (commit 済みパスが黙って消える) を 1 ターン遅れで再現する。
-    """
-    state.complete_claim(session_id, claim_id, hashes)
-    if new_head:
-        state.set_base_sha(session_id, new_head)
-
-
 def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -> dict:
     """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
 
@@ -637,27 +621,6 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     ここから送出された例外は `_review_claim` が拾って claim を復元する。
     """
     notices: list[str] = []
-
-    # 基点フォールバックの「前回の基点」を読む。今回の HEAD (new_head) を
-    # 基点として書き込むのは、このレビューが実際に消費された
-    # (`_complete_and_advance_base` 経由で complete_claim される) 時点だけに
-    # 限定する。cursor 失敗 / MIN_LINES 見送り / 例外で restore_claim される
-    # 経路 (= このターンの pending は減らず、claimed は丸ごと次回に持ち越す)
-    # では書き込まない。
-    #
-    # ここを無条件にしてしまうと (0.9.0 実装当初の版がそうだった)、次のバグを
-    # 1 ターン遅れで再現する: commit 済みで HEAD 基準 diff が空になったパスを
-    # 基点フォールバックで復元して送ったが cursor が失敗し pending に戻った
-    # 場合、base_sha は既に今回の HEAD まで進んでしまっている。次の Stop では
-    # old_base がその HEAD と同値になり、`old_base..HEAD` の範囲は 0 commit
-    # → 手元由来の証明が自明に True → しかし `diff_since(root, path, old_base)`
-    # も base=HEAD なので自明に空 diff → 空 diff は「証明できたので復元」経路を
-    # 通ってしまい、`unretrievable` にも積まれず黙って消える
-    # (マージ前レビューの指摘。regression テスト:
-    # `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
-    # test_cursor_failure_after_same_turn_commit_is_retried_next_turn`)。
-    old_base = state.get_base_sha(session_id)
-    new_head = gitscan.current_head(root)
 
     rels, overflow, excluded = _resolve_paths(root, claimed, exclusion.load_policy())
     if excluded:
@@ -672,27 +635,17 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
             "次ターンに繰り越し: " + _list_names(_rel_names(root, overflow))
         )
 
-    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id), old_base)
+    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
     # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
     # 積む: 予算超過 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順
     carried = batch.deferred + overflow
     if carried:
         state.record_pending(session_id, carried)
-        # 繰り越したパスはまだ基点フォールバックの判定を一度も受けていない
-        # (overflow は _collect_diffs に渡る前に弾かれ、deferred は時間・
-        # バイト予算で診断済み diff ごと持ち越すだけなので commit 済み判定を
-        # 経ていない)。ここで基点を進めてしまうと、そのパスが同一ターン内で
-        # commit 済みだった場合に次ターンの old_base がちょうど今回の HEAD と
-        # 同値になり、`_complete_and_advance_base` を restore_claim 経路で
-        # 迂回したのと同じ理由 (0 commit の範囲が手元由来の証明を自明に満たす
-        # 一方、diff_since も自明に空になる) で黙って消える。このターンの
-        # complete_claim では基点を進めない — carried が空になるまで基点は
-        # 現在の old_base のまま据え置く (マージ前レビューの指摘)。
-        new_head = None
     if batch.unretrievable:
-        # HEAD 基準の diff が空で、基点フォールバックでも証明できず
-        # 救えなかったパス。pending には戻さない (証明できない状況が変わらない
-        # 限り毎ターン同じ結果になるだけなので、繰り返し報告しない)。
+        # HEAD 基準の diff が空だったパス。復元は試みない (モジュール docstring
+        # 「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending には
+        # 戻さない (状況が変わらない限り毎ターン同じ結果になるだけなので、
+        # 繰り返し報告しない)。
         notices.append(
             f"{len(batch.unretrievable)} ファイルは差分が空で取得できませんでした "
             "(commit 済みの可能性。内容は送信していません): "
@@ -720,7 +673,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
 
     if not batch.sections:
         log("レビュー対象の差分が無い (空 diff / 前回と同一 / 除外のみ) ため skip")
-        _complete_and_advance_base(session_id, claim_id, {}, new_head)
+        state.complete_claim(session_id, claim_id, {})
         return _with_notices({}, notices)
 
     # しきい値は「実際に送る diff」で測る (除外・繰り越し後の量が課金に対応するため)
@@ -753,12 +706,12 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
 
     if is_clean_review(result):
         log("Cursor: REVIEW_CLEAN (block しない、レビュー済みとして確定)")
-        _complete_and_advance_base(session_id, claim_id, batch.hashes, new_head)
+        state.complete_claim(session_id, claim_id, batch.hashes)
         notices.insert(0, f"{summary} → 指摘なし")
         return _with_notices({}, notices)
 
     reason = build_reason(result)
-    _complete_and_advance_base(session_id, claim_id, batch.hashes, new_head)
+    state.complete_claim(session_id, claim_id, batch.hashes)
     _save_review_copy(session_id, reason)
     # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。block (明示、または
     # auto 解決で版数非対応と判定した場合) はハーネスが継続を保証するので「依頼しました」
@@ -928,7 +881,7 @@ class ReviewBatch:
         self.deferred_time: list[str] = []  # 時間予算で未処理 (絶対パス)
         self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
-        self.unretrievable: list[str] = []  # HEAD 基準が空で基点でも救えなかった絶対パス
+        self.unretrievable: list[str] = []  # HEAD 基準の diff が空だった絶対パス (復元は試みない)
 
     @property
     def deferred(self) -> list[str]:
@@ -940,32 +893,32 @@ def _collect_diffs(
     root: str,
     rels: list[str],
     reviewed: dict[str, str],
-    base_sha: str | None = None,
 ) -> ReviewBatch:
     """パスごとに diff を取り、予算に収まるものだけを ReviewBatch に積む。
 
-    前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
-    済み) も (基点フォールバックで救えない限り) 載せない。どちらも submitted に
-    入らないので、cursor 失敗時にも復元されずそのまま消える。
+    前回レビュー時と同一 hash のパスは載せない。差分が空のパスも載せない。
+    どちらも submitted に入らないので、cursor 失敗時にも復元されずそのまま消える。
 
-    **HEAD 基準の diff が空のパスへの基点フォールバック**: tracked かつ
-    HEAD が存在するパスの HEAD 基準 diff が空なのは、(a) 単に何も変わっていない
-    (revert 済み等)、または (b) このセッションが同一ターン内で commit し、
-    ファイルが既に HEAD と一致している (元のバグ) のどちらかで、この時点では
-    区別できない。`base_sha` (前回 Stop が記録した HEAD) がある場合だけ:
+    **HEAD 基準の diff が空のパスは復元を試みない。** tracked かつ HEAD が存在する
+    パスの HEAD 基準 diff が空なのは、(a) 単に何も変わっていない (revert 済み等)、
+    または (b) このセッションが同一ターン内で commit し、ファイルが既に HEAD と
+    一致している、のどちらかで、この時点では区別できない。過去に「前回 Stop の
+    HEAD」を基点まで遡って (b) を復元する経路を試したが、`<基点>..HEAD` が
+    「どのリモートにも存在しない」ことしか検証できず「このセッションが書いた」
+    ことまでは検証できないため、同一 worktree を共有する別のローカルの書き手
+    (別セッション・人間の手動 commit) が push せずに同じパスへ commit した内容も
+    復元して送ってしまうことがマージ前レビューで実演された (pull 由来の混入は
+    別途遮断できていたが、これは別ベクトルだった)。安全な復元には編集時点の
+    内容退避が要り、「PostToolUse を軽く保つ」という設計と衝突するため、
+    ここでは復元せず**常に黙って捨てず通知する**方針にしている (送信範囲が
+    広がる方向には倒さない。設計の変遷は CHANGELOG.md / CLAUDE.md を参照):
 
-    1. `gitscan.is_local_only_range(root, base_sha)` で `base_sha..HEAD` の
-       全 commit が手元由来 (どのリモートにも存在しない) と証明できたときだけ
-       `gitscan.diff_since(root, rel, base_sha)` を試す。証明できなければ
-       (pull 等で他人の commit が混ざっている) 試さない — 送信範囲が広がる
-       方向には倒さない
-    2. それでも空なら「本当に何も変わっていない」と確定するので黙って捨てる
-       (base_sha が無い場合と同じ経路)
-    3. 基点フォールバックでも救えず、かつそのパスが実際に存在する (phantom な
-       pending エントリではない) なら `batch.unretrievable` に積む —
-       黙って消費せず、利用者にレビューされなかったことを可視化するため
-       (`_run_review` が通知にする)。`base_sha` 自体が無い (このセッションの
-       初回 Stop) 場合も「証明できない」の一種としてここに含める
+    - 差分が空で、かつそのパスが tracked (untracked ではない)・HEAD が存在する・
+      実際に存在する (phantom な pending エントリではない) の全てを満たすなら
+      `batch.unretrievable` に積む — 黙って消費せず、利用者にレビューされな
+      かったことを可視化するため (`_run_review` が通知にする)
+    - それ以外の空 diff (untracked で中身が空、HEAD が無い等の元から復元しようが
+      ないケース) は黙って捨てる
 
     **予算はファイル単位で当てる**:
 
@@ -976,7 +929,7 @@ def _collect_diffs(
       予算が残っていれば送る (first-fit)
 
     COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred_time として返す。
-    Stop 全体の hook timeout (700s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
+    Stop 全体の hook timeout (690s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
     git に使える時間は限られる (`gitscan.py` モジュール docstring の予算表を参照)。
     経過時間で頭を押さえる。deferred は捨てずに pending へ戻す。
     """
@@ -986,17 +939,6 @@ def _collect_diffs(
     batch = ReviewBatch()
     used = 0
     deadline = time.monotonic() + COLLECT_BUDGET_SEC
-
-    # is_local_only_range は base_sha..HEAD 全体に対する判定 (パスごとに変わらない)
-    # なので、必要になった最初の 1 回だけ計算してこの Stop 内で使い回す。
-    local_only_cache: dict[str, bool] = {}
-
-    def local_only() -> bool:
-        if base_sha is None:
-            return False
-        if base_sha not in local_only_cache:
-            local_only_cache[base_sha] = gitscan.is_local_only_range(root, base_sha)
-        return local_only_cache[base_sha]
 
     for index, rel in enumerate(rels):
         if time.monotonic() > deadline:
@@ -1008,18 +950,11 @@ def _collect_diffs(
         # HEAD 基準で空 = 「本当に無変更」と「同一ターン内 commit で HEAD と
         # 一致した」のどちらかで、この時点では区別できない (docstring 参照)。
         empty_at_head = not is_untracked and has_head and not text.strip()
-        if empty_at_head and base_sha is not None and local_only():
-            text = gitscan.diff_since(root, rel, base_sha)
 
         if not text.strip():
-            if (
-                empty_at_head
-                and os.path.exists(os.path.join(root, rel))
-                and (base_sha is None or not local_only())
-            ):
-                # 証明できない (基点が無い、または他人の commit が混ざっている)
-                # ため取得を諦める。パスが実在する (phantom な pending エントリ
-                # ではない) ときだけ「取得できなかった」と可視化する
+            if empty_at_head and os.path.exists(os.path.join(root, rel)):
+                # パスが実在する (phantom な pending エントリではない) ときだけ
+                # 「取得できなかった」と可視化する。復元は試みない (docstring 参照)。
                 batch.unretrievable.append(os.path.join(root, rel))
             continue
         abs_path = os.path.join(root, rel)

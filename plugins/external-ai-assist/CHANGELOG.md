@@ -17,51 +17,29 @@ version 据え置きで main に入った後続 commit はその version の節�
 `git diff HEAD -- <path>` が空になり、0.8.0 以前は一度もレビューされないまま
 黙って消費されていた。
 
-基点を「pending 記録時点の HEAD」にずらす素朴な案は採らなかった: `git diff <base>
--- <path>` は base 以降にそのパスを通過した**全ての変更**を拾ってしまうため、
-他人の commit が pull で入っただけでも成立し、この plugin が差分を送る外部 AI CLI
-への送信範囲が広がる。
+基点を「pending 記録時点の HEAD」にずらして遡って diff を復元する案は採らない:
+`git diff <base> -- <path>` は base 以降にそのパスを通過した**全ての変更**を
+拾ってしまう。他人の commit が pull で入っただけでも成立し、この plugin が
+差分を送る外部 AI CLI への送信範囲が広がる。同種の懸念に対し、`git rev-list
+--not --remotes` で「その範囲の commit がどのリモートにも存在しない」ことを
+証明できた場合だけ復元する案も検証したが、この証明は「リモート由来でない」
+ことしか示せず「このセッションが書いた」ことは示せない。同一 worktree を
+共有する別のローカルの書き手 (別セッション・人間の手動 commit) が push せずに
+同じパスへ commit した内容まで復元して送ってしまうことが判明したため、
+この案も採用しない。
 
-- **基点は Stop 側で記録する** (`state.set_base_sha` / `get_base_sha`)。Stop は
-  既に git を呼んでいるため、`gitscan.current_head` の追加コストはほぼゼロ
-- HEAD 基準 diff が空だった tracked パスは、基点があれば
-  `gitscan.is_local_only_range` で `<基点>..HEAD` の全 commit が「手元由来」
-  (どのリモート追跡ブランチにも存在しない) と証明できたときだけ、
-  `gitscan.diff_since` で基点まで遡った diff を使う
-- 基点が無い (このセッションの最初の Stop) / 証明できない (pull・merge で他人の
-  commit が混ざっている) 場合は**復元しない** (送信範囲が広がる方向には倒さない)。
-  ただしパスを黙って消費せず、そのパスが実在するなら `systemMessage` に
+- HEAD 基準の diff が空になった tracked パスは**復元を試みない**。空になった
+  理由 (同一ターン内 commit・別の書き手の commit・pull/merge・単に無変更) は
+  区別せず、常に同じ扱いにする
+- パスを黙って消費せず、そのパスが実在するなら `systemMessage` に
   「差分が空で取得できませんでした (commit 済みの可能性)」として列挙し、次ターン
   以降に繰り返し報告しないよう pending からは外す
-- 4 通りの実測 (自分の commit のみ / merge で他人の commit が混入 / 編集のみ commit
-  なし / fast-forward pull のみ) を使い捨て git repo で固定し
-  `tests/test_gitscan.py::TestIsLocalOnlyRange` とした。判定を入れなければ merge の
-  ケースで基点差分に他人が触ったファイルが実際に混ざることも確認済み
-- **基点の書き込みは「レビューが実際に消費された」3 箇所 (`_complete_and_advance_base`
-  経由) に限定し、cursor 失敗 / `MIN_LINES` 見送りで pending に戻す経路では進めない**。
-  レビュー結果が確定する前に無条件で基点を進める版では、復元 → cursor 失敗 →
-  次ターン、という並びで `old_base` が直前ターンの HEAD と同値になり、
-  0 commit の範囲が手元由来の証明を自明に満たしてしまう一方で基点まで遡った diff
-  も自明に空になり、本項が解消したはずの「黙って消える」を 1 ターン遅れで
-  再現してしまっていた。同じ理由で、`MAX_REVIEW_PATHS` 超過 (overflow) や
-  時間・バイト予算超過 (deferred) で claim の一部だけを pending に戻した
-  (`carried` が非空の) ターンでも基点を進めない — overflow は基点フォールバックの
-  判定を一度も経ずに pending へ戻るため、進めてしまうと同じ経路で黙って消える。
-  regression は
-  `tests/test_stop_flow.py::TestSameTurnCommitBaseFallback::
-  test_cursor_failure_after_same_turn_commit_is_retried_next_turn` /
-  `test_min_lines_gate_after_same_turn_commit_is_retried_next_turn` /
-  `test_overflow_after_same_turn_commit_is_not_silently_dropped`
-- commit に加えて同じターンで push まで済ませた場合も「証明できない」側になる
-  (push 済みの commit は `refs/remotes/origin/*` から到達可能になり `--not
-  --remotes` の対象から外れるため)。復元ではなく通知止まりになるのは意図した
-  保守的な向き
-- Stop の git 予算が増えたため (`gitscan.current_head` の rev-parse 1 回 +
-  `is_local_only_range` の rev-list 2 回 + 基点フォールバックで最大 2 回になる
-  path diff)、`hooks.json` の Stop timeout を `690` → `700` 秒に変更
-  (`tests/test_review_set.py::TestTimeoutBudgets` 参照)
-- 詳細な設計判断 (却下した案・失敗方向の明示) は `hooks/post-implementation-review/CLAUDE.md`
-  の「同一ターン内 commit で HEAD 基準が空になる問題への対応」節を参照
+- 安全な復元には編集時点の内容退避 (PostToolUse の時点でファイル内容を保存し、
+  Stop 時に比較する) が要るが、「PostToolUse を軽く保つ」という既存の設計と
+  衝突するため見送る。**送信範囲が広がる方向には倒さない**方針を優先する
+- 詳細な設計判断の変遷は `hooks/post-implementation-review/CLAUDE.md` の
+  「HEAD 基準が空になったパスは復元せず通知する」節、および「却下した設計案」
+  節を参照
 
 ### 2. Windows で `fcntl` の import 失敗により毎ツール呼出で hook error 通知が出る問題を修正
 
