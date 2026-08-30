@@ -147,5 +147,79 @@ class TestLogFileSanitize(unittest.TestCase):
         self.assertNotIn("/Users/testuser/secret/path", log)
 
 
+class TestLogPathOverride(unittest.TestCase):
+    """``SFG_LOG_PATH`` による ``LOG_PATH`` の差し替え (内部バックログ)。
+
+    unittest 実行が実ログ (``~/.claude/logs/redact-hook.log``) を汚染して
+    計測値を誤らせる問題への対処。
+    """
+
+    def test_env_override_used_when_set(self):
+        with mock.patch.dict(os.environ, {"SFG_LOG_PATH": "/tmp/sfg-test-xyz/x.log"}):
+            self.assertEqual(L._resolve_log_path(), Path("/tmp/sfg-test-xyz/x.log"))
+
+    def test_default_when_env_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SFG_LOG_PATH", None)
+            self.assertEqual(
+                L._resolve_log_path(),
+                Path.home() / ".claude" / "logs" / "redact-hook.log",
+            )
+
+    def test_testutil_bootstrap_sets_env_var_before_any_test_runs(self):
+        # このテストファイル自身が (他の全テストファイルと同じ慣例で)
+        # 冒頭で ``from _testutil import FIXTURES`` している。_testutil は
+        # プロセス起動時 (unittest discover の collection phase) に一度だけ
+        # SFG_LOG_PATH を設定するため、どのテストが実行される時点でも既に
+        # 設定済みのはず (core/logging.py の docstring 参照)。
+        self.assertIn("SFG_LOG_PATH", os.environ)
+
+
+class TestLogRotation(unittest.TestCase):
+    """ログファイルの 1 世代ローテーション (内部バックログ)。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self._cleanup)
+        self.log_path = Path(self.tmp) / "redact-hook.log"
+        self.rotated_path = Path(str(self.log_path) + ".1")
+        self._log_path_patch = mock.patch.object(L, "LOG_PATH", self.log_path)
+        self._log_path_patch.start()
+        self.addCleanup(self._log_path_patch.stop)
+        self._max_bytes_patch = mock.patch.object(L, "MAX_LOG_BYTES", 200)
+        self._max_bytes_patch.start()
+        self.addCleanup(self._max_bytes_patch.stop)
+
+    def _cleanup(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_rotation_when_under_threshold(self):
+        L.log_info("classify", "small")
+        self.assertFalse(self.rotated_path.exists())
+
+    def test_rotates_when_over_threshold_before_next_write(self):
+        # 閾値 (200 byte) を直接超えさせておき、次の書込みが rename を起こす
+        # ことを確認する (open **前** に st_size を見る、という提案どおり)。
+        self.log_path.write_text("PRE_ROTATION_MARKER\n" * 20)
+        self.assertGreater(self.log_path.stat().st_size, 200)
+        L.log_info("classify", "after_rotation")
+        self.assertTrue(self.rotated_path.exists())
+        self.assertIn("PRE_ROTATION_MARKER", self.rotated_path.read_text())
+        current = self.log_path.read_text()
+        self.assertIn("after_rotation", current)
+        self.assertNotIn("PRE_ROTATION_MARKER", current)
+
+    def test_rotation_failure_does_not_raise(self):
+        # rename 失敗 (権限 / 別プロセスが保持中 等) でもログ機構が hook 本体の
+        # 判定を止めてはいけない (fail-open のログ契約)。
+        self.log_path.write_text("X" * 1000)
+        with mock.patch("os.replace", side_effect=OSError("boom")):
+            try:
+                L.log_info("classify", "still_attempted")
+            except OSError:
+                self.fail("log_info must swallow rotation failures")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,63 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.27.0
+
+内部バックログの精査で発見した不具合 7 件を 2 クラスタで修正 (離脱率低減 /
+可視性改善 / ログ衛生)。**判定境界 (deny / allow / ask / block するか) の変化:
+なし。** テスト件数: redact 1185 → **1203**、check 94 → **107**。
+
+### Stop hook (check-sensitive-files)
+
+1. **block reason に byte 予算を追加し、ファイル数が多いと 10,000 字上限
+   (公式 hooks reference) を超えて AskUserQuestion の案内と恒久除外レシピが
+   黙って失われる不具合を修正**。固定 tail (AskUserQuestion 案内 + 恒久除外
+   レシピ、`MAX_REASON_BYTES`) を先に確保し、残り予算をファイル列挙
+   (`  - path` 行) に充て、溢れた分は `... (N more files; see git status)` に
+   畳む。tail 自体は truncate しない (固定部分だけで予算を超える極端なケース
+   では reason が予算を超えることを許容する — 案内を失う方が実害が大きい
+   ため)。再現コーパス (250 件のネストしたパス、旧実装で 16,268 字) で
+   8,292 字に収まり案内・レシピとも残ることを確認。
+2. **git 呼出自体の失敗 (git 未インストール / 応答なし) が「機密ファイル
+   なし」と区別できず stderr にも出ない不具合を修正**。`FileNotFoundError` /
+   `TimeoutExpired` を patterns_unavailable と同じ形式で stderr に報告する
+   (`git_unavailable: <理由種別>`)。「対象が git リポジトリでない」等の
+   非ゼロ終了は従来通り正常系として黙る。fail-open の挙動自体は変えない。
+3. **submodule 内 tracked ファイルに対し、Stop hook 自身が案内する
+   `git rm --cached` が親 repo からは実行不可能で脱出路が無い不具合を
+   修正**。submodule 配下のファイルを検出したときは、該当 submodule
+   ディレクトリ内で対処する旨と手順を案内に追記する。
+
+### ログ (redact-sensitive-reads)
+
+4. **heredoc 本文の識別子 (env var 名・秘密のキー名になりうる) が
+   `bash_classify` ログに verbatim で残る不具合を修正**。正しく終端された
+   heredoc は 0.22.0 で既に segment 分割から除外されているが、未終端 /
+   terminator 不一致の heredoc は行分割 fallback に落ちて first token が
+   任意文字列としてログに混入していた (実ログで確認)。first token を渡す
+   7 箇所を、既知語彙 (allowlist) に含まれるときだけそのまま出し、それ以外は
+   `other` に畳むようにした。
+5. **`_quoted_hard_stop_reason` の診断文字列 3 形が空白を含み、ログの
+   detail 文字種ホワイトリストを通らず `_BAD` に置換され分類が丸ごと消える
+   不具合を修正**。空白区切りを `:` 連結の identifier 形に変更 (合わせて
+   `git` サブコマンド名の埋め込みも既知集合限定にし、上記 4 と同じ漏洩経路を
+   閉じた)。
+6. **unittest 実行が実ログ `~/.claude/logs/redact-hook.log` に書き込み、
+   運用ログの計測値を汚染する不具合を修正**。`SFG_LOG_PATH` 環境変数で
+   ログ書込み先を差し替えられるようにし、テスト側 (`tests/_testutil.py` /
+   `tests/conftest.py`) がプロセス起動時に一度だけ tmpdir を指す値を設定
+   する。実ログのローテーション・再ベースライン化は運用作業のため対象外。
+7. **`redact-hook.log` がローテーションなしで増え続ける問題に対処**。
+   書込み前に byte 数を確認し、閾値 (既定 5MB) 超なら `redact-hook.log.1`
+   へ 1 世代ローテーションする。**allow 経路の INFO を既定で抑制する側の
+   変更は見送った** — `bash_classify` の分類は `ask_or_allow` 経由で
+   `permission_mode` によって ask/allow のどちらにも動的に解決され、かつ
+   複数 segment のコマンドでは後続 segment の deny が既にログ済みの ask を
+   上書きしうるため、「ログ時点でこの呼出が最終的に allow だったか」を
+   ログ呼出側だけで静的に判定できない。判定を成立させるには判定ロジック
+   本体 (`handle` / `_analyze_segment`) 側でログを遅延させる設計変更が
+   必要で、本バッチの「判定境界に触れない」制約の範囲を超えるため見送った。
+
 ## 0.26.0
 
 deny reason の**レンダリング領域** (文言・情報量) の不具合 5 件を修正 (内部
