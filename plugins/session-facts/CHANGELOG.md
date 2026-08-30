@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.9.0
+
+**Firebase 判定の一本化 / Domain Types の代表性改善 / README 同期 (v0.9)**。
+2026-08 精査バックログの続き。
+
+### 不具合修正
+
+1. **FirebaseDetector が firebase.json/.firebaserc・firebase-admin・Python/Flutter
+   依存を見ておらず、Cloud Functions 専用 repo や Python バックエンドで
+   `firebase` スタックタグが常に欠落していた問題を修正**
+   (`detectors/firebase.py`, `core/firebase.py` 新規,
+   `collectors/repo_notes.py`) — 従来は root package.json の
+   `firebase`/`@firebase/*` のみを見ており、`collectors/repo_notes.py` 側は
+   別途もう少し広い条件 (firebase.json 存在・firebase-admin・pyproject の
+   firebase-admin) を独自に持っていて 2 実装が乖離していた (実測: root に
+   firebase.json、functions/ に firebase-functions を置くモノレポで
+   `stack` から firebase が丸ごと欠落するのに `## Repo-Specific Notes` 側
+   は検出していた)。判定を `core/firebase.py::has_firebase(ctx)` に一本化
+   し、firebase.json/.firebaserc の存在、npm の
+   firebase-admin/firebase-functions/@firebase/*、Python の firebase-admin
+   (pyproject.toml に加えて requirements*.txt も走査)、Flutter の
+   firebase_core (pubspec.yaml) を検出条件に追加した。stack タグは
+   `firebase` に加え、root package.json に `firebase-functions` が直接
+   依存として入っている場合は `firebase-functions` も区別して付与する
+   (Cloud Functions 専用リポジトリと判別できるように)。`has_firebase()` は
+   detector・collector の両方から 1 回の解析につき呼ばれるため
+   `ctx.results` にメモ化し、Python 依存の requirements*.txt 走査 (最大 6
+   ファイル) が二重に走らないようにした
+2. **出力に埋め込むコマンドヒントのうち `--help` を指す方が解析対象
+   ディレクトリを引数に含んでおらず、別ディレクトリからコピー実行すると
+   ヘッダーに表示されているディレクトリとは異なる (実行したエージェントの
+   cwd の) 結果が返る問題を修正** (`renderer.py`) — `--force-walk` を指す
+   ヒント側は既に別リリースで `--root` 込みに直っていたが、`--help` を
+   指すヒントは同じ構造のまま残っていた。ヒント生成を
+   `renderer.py::build_rerun_hint()` に一本化し、両方のヒントが解析対象の
+   `--root` を必ず含むようにした (このヒントの実行可能性の修正はこれで
+   3 度目 — 過去に「python3 プレフィックス欠落」「パス未クォート」を
+   それぞれ直している。1 箇所に集約したことで今後の同種の欠落は 1 回の
+   修正で両方に効く)
+
+### 改善
+
+3. **Domain Types が候補ファイルを先頭から順に走査し件数上限に達した時点で
+   打ち切るため、型定義が集中している 1 ファイルにだけ表示が偏っていた
+   問題を修正** (`collectors/domain_types.py`) — ファイルあたりの表示上限
+   (3 件) を設け、候補ファイル群をラウンドロビンで走査して複数モジュールから
+   集めるようにした (>= 5 件の cluster ゲート自体は表示上限と独立に判定
+   するため、1 ファイルだけで genuine な cluster を持つリポジトリの検出は
+   後退しない)。`.d.ts`・`vendor/`・`generated/`・`*.generated.*`・
+   `*.pb.*` を候補から除外 (外部 SDK の型宣言や生成コードが枠を占有していた
+   実例あり)。出力を `- <path>: A, B, C` のファイル単位にまとめ、同じ件数
+   でも行数を削減した。**表示上限により、以前は 1 ファイルから
+   `--max-domain-types` 件フルに出ていたケースでも、他に候補が乏しい
+   リポジトリでは合計の表示件数がそれより少なくなることがある**
+   (複数モジュールにまたがる代表性を優先するトレードオフ)。この collector
+   は hooks.json で `--include-domain-types` が常時付与されており事実上
+   opt-in ではないため、候補ファイル数にも上限 (20 ファイル) を設けて
+   1 回の hook 呼び出しあたりの走査コストを抑えた
+
+### ドキュメント
+
+4. **README の CLI オプション表・検出スタック一覧・SubagentStart 拡張手順が
+   実装と乖離していた問題を修正** (`README.md`) — 「検出できるスタック /
+   依存」節が JS/TS・Python・Flutter・Go・Makefile のみの記載で、
+   detectors/ 配下の rust/ruby/php/java/deno/docker/claude_plugin/prisma
+   を含む全 18 detector を網羅していなかったため、`detectors/` 一覧表
+   (判定ファイル・stack タグ・判定条件) に置き換えた。「hook から呼ぶときは
+   `--format markdown --include-domain-types` のみ指定」という記載は
+   実際の hooks.json (`--no-recent-commits` / `--emit subagent-json` が
+   timing ごとに付く) と矛盾していたため、冒頭の正しい表を参照する記述に
+   修正した。SubagentStart は hooks.json で `Explore`/`Plan` に固定されて
+   いるが、公式の `matcher` はカスタム subagent の frontmatter `name` にも
+   マッチするため、独自 agent へ同じ facts 注入を広げる settings.json の
+   例を追加した。なお CLI オプション表自体は `--include-hub-files`/
+   `--max-hub-files` を含めて既に最新化されていたため (この点は差分なし)、
+   `--help` の全フラグが README に含まれることを検証するテストを追加して
+   再発を防止した (`cli.py` の引数パーサ構築を `build_parser()` に切り出し、
+   `tests/test_cli.py` から parser を直接検査できるようにした)
+
+### 保守
+
+5. **未使用のヘルパー関数と重複ロジックを整理**
+   (`core/git.py`, `core/context.py`, `collectors/scripts.py`,
+   `core/util.py`, `collectors/repo_notes.py`, `collectors/nextjs_facts.py`,
+   `collectors/cwd_subtree.py`) — 参照ゼロを確認したうえで、`core/git.py`
+   の `git_root`/`is_git_repo` (呼び出し側はどちらも `git_root_or_none` を
+   使用)、`core/context.py` の Python 3.8 未満向け `typing_extensions`
+   fallback import (3.11+ 方針のため不要)、`collectors/scripts.py` の
+   1 行ラッパー `_detect_package_manager` を削除した。app/pages ルータ判定
+   が `collectors/repo_notes.py` と `collectors/nextjs_facts.py` に、cwd
+   フィルタが `collectors/cwd_subtree.py` と既存の
+   `core/util.py::filter_to_cwd()` に、それぞれ重複していたのを
+   `core/util.py::has_app_router()`/`has_pages_router()` と
+   `filter_to_cwd()` の呼び出しに統一した (`cwd_subtree.py` はツリーを
+   cwd 基点で描画する必要があるため、共有フィルタの結果からさらに prefix
+   を剥がす箇所だけは独自のまま残した)
+
+テスト 300 件 (新規 42 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
+テストとメモ化テスト (`tests/test_detectors.py` 新設)、
+`collectors/domain_types.py` のラウンドロビン分散・cluster ゲートと表示上限
+の独立性・除外パターン・候補ファイル数上限のテスト、
+`collectors/repo_notes.py`/`collectors/nextjs_facts.py`/
+`collectors/cwd_subtree.py` の router/firebase/subtree フィルタ (従来
+カバレッジが無かった箇所)、`- more:` ヒントの `--root` 込み再検証と実
+サブプロセスでの実行可能性チェック、README の CLI オプション表同期チェック)。
+
 ## 0.8.0
 
 **出力サイズ上限 / 非プロジェクトディレクトリ抑止 / test_dir 集約修正

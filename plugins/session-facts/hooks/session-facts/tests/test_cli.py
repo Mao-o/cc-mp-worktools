@@ -23,6 +23,7 @@ import _testutil  # noqa: F401  (sys.path 整備)
 from cli import (
     _enforce_output_budget,
     _has_relevant_project_markers,
+    build_parser,
     main,
     parse_args,
     summarize_repo,
@@ -123,7 +124,8 @@ class MoreHintInvokedAsTest(unittest.TestCase):
             with mock.patch.object(sys, "argv", [fake_invoked_as]):
                 out = _run_cli(["--root", str(root)])
             self.assertIn(
-                f"- more: this is the default view; run `python3 {fake_invoked_as} --help` "
+                f"- more: this is the default view; run `python3 {fake_invoked_as} "
+                f"--root {shlex.quote(str(root.resolve()))} --help` "
                 "for additional opt-in analyses",
                 out,
             )
@@ -137,8 +139,31 @@ class MoreHintInvokedAsTest(unittest.TestCase):
             spaced = str(root / "plugin root" / "session-facts")
             with mock.patch.object(sys, "argv", [spaced]):
                 out = _run_cli(["--root", str(root)])
-            self.assertIn(f"`python3 {shlex.quote(spaced)} --help`", out)
-            self.assertNotIn(f"`python3 {spaced} --help`", out)
+            root_arg = f"--root {shlex.quote(str(root.resolve()))}"
+            self.assertIn(f"`python3 {shlex.quote(spaced)} {root_arg} --help`", out)
+            self.assertNotIn(f"`python3 {spaced} {root_arg} --help`", out)
+
+    def test_hint_command_names_analyzed_root_not_readers_cwd(self):
+        # internal backlog: the printed `--help` hint used to omit --root,
+        # so copying it (or extending it with another opt-in flag, e.g.
+        # --include-domain-types) from a different cwd than the analyzed
+        # directory silently analyzed Path.cwd() instead of the repo_root
+        # named in this same header. --root is invoked with a subdirectory
+        # here specifically to prove the hint echoes back the *resolved
+        # git root* (what summarize_repo() actually analyzed), not the
+        # literal --root argument or the process cwd.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            subdir = root / "sub"
+            subdir.mkdir()
+            fake_invoked_as = str(root / "hooks" / "session-facts")
+            with mock.patch.object(sys, "argv", [fake_invoked_as]):
+                out = _run_cli(["--root", str(subdir)])
+            self.assertIn(f"- repo_root: {root.resolve()}", out)
+            self.assertIn(
+                f"--root {shlex.quote(str(root.resolve()))} --help", out
+            )
+            self.assertNotIn(str(subdir), out)
 
     def test_fallback_wording_when_invoked_as_is_none(self):
         # summarize_repo() called as a library (invoked_as=None, e.g. not
@@ -153,6 +178,43 @@ class MoreHintInvokedAsTest(unittest.TestCase):
                 out,
             )
             self.assertNotIn("run `", out)
+
+    def test_root_then_help_argument_order_is_accepted(self):
+        # A string assertion that the hint *contains* "--root ... --help"
+        # cannot catch parse_args() rejecting that argument order (or
+        # --help's own position) -- this checks the parser itself accepts
+        # exactly what the hint prints, independent of shell/subprocess cost.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                parse_args(["--root", "/tmp", "--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+
+class HintCommandIsActuallyExecutableTest(unittest.TestCase):
+    """Runs the printed `- more:` hint as a real subprocess against the
+    plugin's own hooks/session-facts directory -- the way an agent copying
+    it verbatim would -- rather than only asserting on its string content.
+
+    This hint's executability has been fixed twice before (a missing
+    `python3 ` prefix, then an unquoted path); a string assertion pins the
+    text but cannot catch a third such regression, since a typo in how the
+    command is assembled could still produce a string that "looks right" but
+    fails to run (wrong flag order, a stray quote, etc.)."""
+
+    def test_help_hint_from_a_real_run_executes_successfully(self):
+        plugin_dir = str(Path(__file__).resolve().parent.parent)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_repo(tmp)
+            with mock.patch.object(sys, "argv", [plugin_dir]):
+                out = _run_cli(["--root", str(root)])
+            hint_line = next(ln for ln in out.splitlines() if ln.startswith("- more:"))
+            command = hint_line.split("run `", 1)[1].split("`", 1)[0]
+            result = subprocess.run(
+                shlex.split(command), capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("usage:", result.stdout.lower())
 
 
 class ExceptionIsolationTest(unittest.TestCase):
@@ -1247,4 +1309,29 @@ class CappedMarkerScanTest(unittest.TestCase):
                 (home / f"f{i:05d}.txt").write_text("x")
             with mock.patch.object(Path, "home", staticmethod(lambda: home)):
                 self.assertFalse(_has_relevant_project_markers(home))
+
+
+class HelpFlagsDocumentedInReadmeTest(unittest.TestCase):
+    """internal backlog: README.md's CLI options table drifted out of sync
+    with the actual flag list (missing --include-hub-files/--max-hub-files
+    at the time this was filed). Introspects the real parser via
+    build_parser() -- not a hand-maintained flag list here that could itself
+    drift -- so a new flag added to cli.py without a README update fails
+    this test instead of silently going undocumented."""
+
+    def test_every_flag_appears_in_the_cli_options_table(self):
+        parser = build_parser()
+        flags = set()
+        for action in parser._actions:
+            flags.update(action.option_strings)
+        flags.discard("-h")
+        flags.discard("--help")
+        self.assertTrue(flags, "sanity check: parser reported no flags at all")
+
+        readme_path = Path(__file__).resolve().parents[3] / "README.md"
+        readme_text = readme_path.read_text(encoding="utf-8")
+        missing = sorted(flag for flag in flags if flag not in readme_text)
+        self.assertEqual(
+            missing, [], f"flags missing from {readme_path}: {missing}"
+        )
 

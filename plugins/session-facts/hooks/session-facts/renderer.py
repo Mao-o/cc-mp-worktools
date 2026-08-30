@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import shlex
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 from core.context import RepoContext
 from core.runtime import runner_prefix
@@ -40,15 +41,24 @@ def render_header(ctx: RepoContext) -> str:
     return "\n".join(lines)
 
 
-def _render_more_hint(ctx: RepoContext) -> str:
-    """Point at --help for the full opt-in option list.
+def build_rerun_hint(invoked_as: Optional[str], root: Path, extra: str) -> Optional[str]:
+    """Build a copy-pasteable ``python3 <invoked_as> --root <root> <extra>``
+    command, or None when invoked_as is unavailable (e.g. summarize_repo()
+    called as a library rather than via the CLI's real sys.argv[0]).
 
-    --help (argparse, free) is the single source of truth for what flags
-    exist; duplicating flag names here or in SKILL.md's description would
-    drift as options are added. When invoked_as is available (real hook
-    runs), the hint is a copy-pasteable command — the injected text has no
-    other way to name a runnable path, since ${CLAUDE_PLUGIN_ROOT} is
-    resolved by the hook, not present in what gets injected.
+    Single place for every rerun-style hint in the output (the ``--help``
+    pointer below and the gate-skipped minimal header's ``--force-walk``
+    pointer in cli.py) to build its command, so the fix below only has to
+    happen once. ``--root`` is always included: the real hook invocation's
+    argv has no directory positional (it's an implicit ``python3 <dir>``,
+    unlike the test harness's argv), so a hint that omits ``--root``
+    defaults to the *reader's* cwd when copied and run/extended — which
+    differs from the directory named in this header whenever the run was
+    started with an explicit ``--root`` (or from a different cwd), and
+    silently analyzes the wrong directory instead. This is the third fix to
+    this hint-building code (previously: missing ``python3 `` prefix, then
+    missing shell-quoting); centralizing it here is meant to keep a fourth
+    hint from reintroducing the same gap independently.
 
     invoked_as is sys.argv[0], which for the real hook invocation
     (``python3 <dir>``) is the *directory* the interpreter was pointed at,
@@ -58,17 +68,32 @@ def _render_more_hint(ctx: RepoContext) -> str:
     the string a little redundant when invoked_as already looks like a
     script path.
 
-    The path is shell-quoted: the plugin can be installed under a directory
-    containing spaces, and an unquoted path makes the interpreter open only
-    the first segment. shlex.quote leaves ordinary paths untouched, so the
-    common case reads the same as before.
+    Both paths are shell-quoted: the plugin (or the analyzed repo) can be
+    installed/located under a directory containing spaces, and an unquoted
+    path makes the interpreter/argparse split it into multiple arguments.
+    shlex.quote leaves ordinary paths untouched, so the common case reads
+    the same as before.
     """
-    if ctx.invoked_as:
-        return (
-            f"- more: this is the default view; run "
-            f"`python3 {shlex.quote(ctx.invoked_as)} --help` "
-            "for additional opt-in analyses"
-        )
+    if not invoked_as:
+        return None
+    root_arg = f"--root {shlex.quote(str(root))}"
+    return f"python3 {shlex.quote(invoked_as)} {root_arg} {extra}".rstrip()
+
+
+def _render_more_hint(ctx: RepoContext) -> str:
+    """Point at --help for the full opt-in option list.
+
+    --help (argparse, free) is the single source of truth for what flags
+    exist; duplicating flag names here or in SKILL.md's description would
+    drift as options are added. When invoked_as is available (real hook
+    runs), the hint is a copy-pasteable command — the injected text has no
+    other way to name a runnable path, since ${CLAUDE_PLUGIN_ROOT} is
+    resolved by the hook, not present in what gets injected. See
+    build_rerun_hint() for why --root is included and shell-quoted.
+    """
+    cmd = build_rerun_hint(ctx.invoked_as, ctx.root, "--help")
+    if cmd:
+        return f"- more: this is the default view; run `{cmd}` for additional opt-in analyses"
     return "- more: this is the default view; the session-facts skill has additional opt-in analyses (see --help)"
 
 
