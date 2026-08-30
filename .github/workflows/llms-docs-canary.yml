@@ -279,7 +279,10 @@ jobs:
       # を落とすと暗黙の success() 判定でこのステップ自体が skip されるため
       # 必ず両方書く。タイトルは失敗の内訳 (すべて fetch 由来かどうか) で分け、
       # それぞれ独立に同じタイトルの open issue へ重複排除する (毎週重複起票
-      # しないため)。
+      # しないため)。dedupe の候補取得は `gh issue list --search` でタイトル
+      # 文字列に絞ってから Python 側で完全一致を確認する (Codex R2 P2:
+      # `--limit` の固定件数だけに頼ると open issue 数がその件数を超えた
+      # 環境で追跡 issue がページ外に落ち、重複排除が効かなくなる)。
       - name: Report failures as a tracking issue
         if: failure() && steps.smoke.outcome == 'failure'
         env:
@@ -347,8 +350,22 @@ jobs:
           with open(body_path, "w") as f:
               f.write(body)
 
+          # --limit の固定件数だけで一覧を取ると、open issue がその件数を
+          # 超えている環境ではこの canary の追跡 issue がページ外に落ち、
+          # match が常に空になって毎週同じタイトルの issue を新規作成して
+          # しまう (Codex R2 P2)。--search (in:title) でタイトル文字列により
+          # 候補を絞り込んでから取得する。ただし GitHub 側の --search は
+          # トークン化された部分一致検索であって完全一致ではないため、類似
+          # タイトルが候補に混ざる余地がある。確定判定は従来どおり下の Python
+          # 側の完全一致 (match) で行う。--limit 100 は絞り込み後の保険として
+          # そのまま残す (正しさはもう --search の絞り込み + Python 側の
+          # 完全一致が担保するため、この値自体は重要ではない)。
+          search_query = f'"{TITLE}" in:title'
           list_proc = subprocess.run(
-              ["gh", "issue", "list", "--repo", repo, "--state", "open", "--json", "number,title", "--limit", "100"],
+              [
+                  "gh", "issue", "list", "--repo", repo, "--state", "open",
+                  "--search", search_query, "--json", "number,title", "--limit", "100",
+              ],
               capture_output=True, text=True,
           )
           if list_proc.returncode != 0:
