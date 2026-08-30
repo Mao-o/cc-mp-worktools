@@ -48,7 +48,15 @@ commit 52113a1 で完了)。
 3. **submodule 内 tracked ファイルに対し、Stop hook 自身が案内する
    `git rm --cached` が親 repo からは実行不可能で脱出路が無い不具合を
    修正**。submodule 配下のファイルを検出したときは、該当 submodule
-   ディレクトリ内で対処する旨と手順を案内に追記する。
+   ディレクトリ内で対処する旨と手順を案内に追記する。ネストした
+   submodule (submodule の中にさらに submodule) では `git ls-files
+   --stage` が直下の gitlink しか返さないため、案内が外側の (親 repo の
+   index には該当ファイルが無く実際には効かない) ディレクトリを指して
+   しまう不具合があり、各 submodule ディレクトリで手動再帰して解消した
+   (`in_submodule` は最長一致 = 最も深い submodule を返す)。あわせて
+   案内が列挙する submodule ディレクトリ一覧を先頭 10 件 + 省略件数に
+   畳み、distinct 件数に比例して block reason が肥大しないようにした
+   (300 件で reason が byte 予算を超えファイル列挙が潰れる実測があった)。
 
 ### ログ (redact-sensitive-reads)
 

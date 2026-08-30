@@ -187,27 +187,63 @@ def _ls_tracked(cwd: str) -> list[str]:
     return _run_git(["ls-files"], cwd)
 
 
-def submodule_paths(cwd: str) -> set[str]:
-    """cwd から見える直下の submodule mount path 一覧 (cwd 相対) を返す
-    (内部バックログ)。
+def submodule_paths(
+    cwd: str, _prefix: str = "", _visited: set[str] | None = None
+) -> set[str]:
+    """cwd から見える submodule mount path 一覧 (cwd 相対、ネスト込み) を返す
+    (内部バックログ、P2-1 で手動再帰化)。
 
-    ``git ls-files --stage`` は submodule を gitlink (mode ``160000``) の
-    1 entry として返す。tracked な機密ファイルがこの prefix 配下にあれば、
-    親 repo からの ``git rm --cached <path>`` は**そのファイルには効かない**
-    (submodule は別の git index を持つため) — Stop hook の案内をそこだけ
-    分岐する判定に使う (``in_submodule`` 参照)。呼出コストがあるため、
-    tracked な機密ファイルが 1 件も無いときは呼ばないこと (呼出側の責務)。
+    ``git ls-files --stage`` は **直下**の submodule だけを gitlink
+    (mode ``160000``) の 1 entry として返し、submodule 配下の submodule
+    (ネスト) までは辿らない。``--recurse-submodules`` を ``--stage`` に
+    足しても gitlink は返らない (git 2.50.1 実測)。tracked な機密ファイルが
+    ネストした submodule 配下にあると、親 repo からの
+    ``git rm --cached <path>`` は**そのファイルには効かない**
+    (submodule は別の git index を持つため) にも関わらず、案内が外側の
+    (実際には効かない) submodule ディレクトリを指してしまう — 各 submodule
+    ディレクトリで ``git ls-files --stage`` を手動再帰して埋める。
+    ``in_submodule`` はこの結果から最長一致 (= 最も深い submodule) を返す。
+
+    再帰先ディレクトリ (``os.path.join(cwd, path)``) が実際に checkout 済みの
+    submodule でなければ再帰しない。``git submodule add`` はネストした
+    submodule の working copy までは自動で ``update --init`` しないため、
+    ``git clone`` を ``--recurse-submodules`` 無しで行った直後などでは
+    ディレクトリ自体は (gitlink 用の空の placeholder として) 存在するが
+    ``.git`` を持たない — このとき ``git`` をそこで実行すると、cwd 自身が
+    親の gitlink 位置と一致することから親の index にある同じ gitlink を
+    ``./`` という自己参照パスで返してしまい (実測: git 2.50.1)、
+    ``full + "./"`` のような不正な要素が集合に混入する。存在確認だけでは
+    この placeholder ディレクトリを弾けない (``os.path.isdir`` は true を
+    返す) ため、``.git`` の有無で「実際に checkout 済みか」を判定する。
+    (``.git`` が無ければ独立した index も working copy も無いので、再帰しても
+    ``os.path.isdir`` だけの旧チェックより安全に「対象なし」を返せる。
+    ``FileNotFoundError`` (存在しない cwd で git を呼んで ``_run_git_raw`` が
+    ``git_unavailable`` を誤検知する経路) も併せて防げる。)
+    ``_visited`` は実パスの循環 (壊れた/悪意ある ``.gitmodules`` が symlink
+    等で祖先を指す防御的ケース) を検出し無限再帰を止めるための集合 —
+    fail-open のこの hook が再帰エラーで丸ごと落ちないため。呼出コストが
+    あるため、tracked な機密ファイルが 1 件も無いときは呼ばないこと
+    (呼出側の責務)。
     """
-    entries = _run_git_nul(["ls-files", "--stage", "-z"], cwd)
+    visited = _visited if _visited is not None else set()
+    real_cwd = os.path.realpath(cwd)
+    if real_cwd in visited:
+        return set()
+    visited.add(real_cwd)
+
     paths: set[str] = set()
-    for entry in entries:
+    for entry in _run_git_nul(["ls-files", "--stage", "-z"], cwd):
         # 形式: "<mode> <object> <stage>\t<path>" (gitlink は mode 160000)
         meta, sep, path = entry.partition("\t")
         if not sep or not path:
             continue
-        mode = meta.split(" ", 1)[0] if meta else ""
-        if mode == "160000":
-            paths.add(path)
+        if (meta.split(" ", 1)[0] if meta else "") != "160000":
+            continue
+        full = _prefix + path
+        paths.add(full)
+        sub_cwd = os.path.join(cwd, path)
+        if os.path.exists(os.path.join(sub_cwd, ".git")):
+            paths.update(submodule_paths(sub_cwd, full + "/", visited))
     return paths
 
 
@@ -215,12 +251,17 @@ def in_submodule(path: str, submod_paths: set[str]) -> str | None:
     """``path`` (cwd 相対) がどの submodule 配下にあるかを返す (無ければ None)。
 
     完全一致 (通常は起きないが gitlink 自体を指すケース) と、``<submodule>/``
-    prefix 一致 (submodule 配下のファイル) の両方を見る。
+    prefix 一致 (submodule 配下のファイル) の両方を見る。ネストした
+    submodule (例: ``vendor`` と ``vendor/deep`` の両方が submodule として
+    ``submod_paths`` に入っている) では**最長一致**を返す — そのファイルを
+    実際に持つ git index は常に一番深い submodule のものだから (P2-1)。
     """
-    for sp in submod_paths:
-        if path == sp or path.startswith(sp + "/"):
-            return sp
-    return None
+    matches = [
+        sp for sp in submod_paths if path == sp or path.startswith(sp + "/")
+    ]
+    if not matches:
+        return None
+    return max(matches, key=len)
 
 
 def root_offset(cwd: str, root: str | None) -> str | None:

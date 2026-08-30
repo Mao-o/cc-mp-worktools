@@ -18,9 +18,11 @@ import _testutil  # noqa: F401
 from checker import (  # noqa: E402
     _parse_patterns_text,
     find_sensitive_files,
+    in_submodule,
     is_git_repo,
     load_patterns,
     repo_context,
+    submodule_paths,
 )
 
 
@@ -342,6 +344,95 @@ class TestSubmoduleScan(BaseWithTmpRepo):
         result = find_sensitive_files(str(self.repo), rules)
         paths = {r["path"] for r in result}
         self.assertNotIn("submod/.env.untracked", paths)
+
+
+class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
+    """P2-1 回帰: ネストした submodule (repo -> vendor -> vendor/deep) で
+    ``submodule_paths`` / ``in_submodule`` が実際に `git rm --cached` の効く
+    ディレクトリ (= 最も深い submodule) を返すこと。
+
+    修正前は ``git ls-files --stage -z`` を cwd 直下でしか呼ばないため
+    ``vendor/deep`` (孫 submodule) が集合に入らず、``in_submodule`` は
+    ``vendor/deep/.env`` に対して ``vendor`` (親 repo からの `git rm --cached`
+    が効かない、実際には無意味な案内) を返していた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.leaf = Path(self.tmp) / "leafrepo"
+        self.leaf.mkdir()
+        _init_repo(str(self.leaf))
+        (self.leaf / ".env").write_text("LEAF_SECRET=v\n")
+        _git(["add", ".env"], str(self.leaf))
+        _git(["commit", "-m", "add env"], str(self.leaf))
+
+        self.mid = Path(self.tmp) / "midrepo"
+        self.mid.mkdir()
+        _init_repo(str(self.mid))
+        (self.mid / "README.md").write_text("# mid\n")
+        _git(["add", "README.md"], str(self.mid))
+        _git(["commit", "-m", "init"], str(self.mid))
+
+    def _try_add_nested_submodules(self, init_nested: bool = False) -> bool:
+        """midrepo に leafrepo を `deep` として、repo に midrepo を `vendor`
+        として登録する。``init_nested`` なら ``submodule update --init
+        --recursive`` まで行い ``vendor/deep/.env`` を実ファイルとして展開する
+        (gitlink だけなら ``submodule_paths`` の検証に十分で init 不要)。
+        """
+        try:
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{self.leaf}", "deep",
+                ],
+                cwd=str(self.mid), check=True, capture_output=True,
+            )
+            _git(["commit", "-m", "add deep submodule"], str(self.mid))
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{self.mid}", "vendor",
+                ],
+                cwd=str(self.repo), check=True, capture_output=True,
+            )
+            _git(["commit", "-m", "add vendor submodule"], str(self.repo))
+            if init_nested:
+                subprocess.run(
+                    [
+                        "git", "-c", "protocol.file.allow=always",
+                        "submodule", "update", "--init", "--recursive",
+                    ],
+                    cwd=str(self.repo), check=True, capture_output=True,
+                )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def test_submodule_paths_includes_nested_gitlink(self):
+        if not self._try_add_nested_submodules():
+            self.skipTest("git submodule add unsupported in this env")
+        paths = submodule_paths(str(self.repo))
+        self.assertEqual(paths, {"vendor", "vendor/deep"})
+
+    def test_in_submodule_returns_longest_match_for_nested_file(self):
+        if not self._try_add_nested_submodules():
+            self.skipTest("git submodule add unsupported in this env")
+        paths = submodule_paths(str(self.repo))
+        self.assertEqual(
+            in_submodule("vendor/deep/.env", paths), "vendor/deep"
+        )
+        # vendor 直下のファイルは vendor (deep ではない) が返ること
+        self.assertEqual(in_submodule("vendor/README.md", paths), "vendor")
+
+    def test_nested_submodule_tracked_env_detected_when_initialized(self):
+        # 検出側 (--recurse-submodules) はネストも元々拾える前提の確認
+        # (P2-1 は「案内先」のバグであり「検出漏れ」ではない)。
+        if not self._try_add_nested_submodules(init_nested=True):
+            self.skipTest("git submodule add unsupported in this env")
+        rules = load_patterns(self.patterns_file)
+        result = find_sensitive_files(str(self.repo), rules)
+        paths = {r["path"] for r in result}
+        self.assertIn("vendor/deep/.env", paths)
 
 
 class TestParsePatternsText(unittest.TestCase):

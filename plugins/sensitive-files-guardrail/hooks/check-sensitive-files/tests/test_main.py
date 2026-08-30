@@ -260,6 +260,73 @@ class TestSubmoduleGuidance(BaseMainTest):
         self.assertIn("【untracked】", reason)
         self.assertNotIn("親 repo からは効きません", reason)
 
+    def _add_nested_submodule(self) -> bool:
+        """repo -> vendor -> vendor/deep の 2 段ネスト submodule を構成する
+        (P2-1 回帰)。``vendor/deep/.env`` は vendor 自身の index ではなく
+        deep 自身の index が持つため、親 repo からの `git rm --cached` は
+        `vendor` にも `vendor/deep` にも効かない。案内は最も深い
+        `vendor/deep` を指す必要がある。
+        """
+        (self.repo / "README.md").write_text("# super\n")
+        _git(["add", "README.md"], str(self.repo))
+        _git(["commit", "-m", "init"], str(self.repo))
+
+        leaf = Path(self.tmp) / "leafrepo"
+        leaf.mkdir()
+        _init_repo(str(leaf))
+        (leaf / ".env").write_text("LEAF_SECRET=v\n")
+        _git(["add", ".env"], str(leaf))
+        _git(["commit", "-m", "add env"], str(leaf))
+
+        mid = Path(self.tmp) / "midrepo"
+        mid.mkdir()
+        _init_repo(str(mid))
+        (mid / "README.md").write_text("# mid\n")
+        _git(["add", "README.md"], str(mid))
+        _git(["commit", "-m", "init"], str(mid))
+        try:
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{leaf}", "deep",
+                ],
+                cwd=str(mid), check=True, capture_output=True,
+            )
+            _git(["commit", "-m", "add deep submodule"], str(mid))
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "add", f"file://{mid}", "vendor",
+                ],
+                cwd=str(self.repo), check=True, capture_output=True,
+            )
+            _git(["commit", "-m", "add vendor submodule"], str(self.repo))
+            subprocess.run(
+                [
+                    "git", "-c", "protocol.file.allow=always",
+                    "submodule", "update", "--init", "--recursive",
+                ],
+                cwd=str(self.repo), check=True, capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            return False
+        return True
+
+    def test_nested_submodule_guidance_points_to_deepest_dir(self):
+        if not self._add_nested_submodule():
+            self.skipTest("git submodule add unsupported in this env")
+        rc, out, _ = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("vendor/deep/.env", reason)
+        # 修正前は外側の `vendor` (親 repo の index には無い gitlink
+        # ディレクトリなので `git rm --cached` が効かない) を誤って案内して
+        # いた。最も深い `vendor/deep` を指すことを固定する (P2-1)。
+        self.assertIn("行ってください: `vendor/deep`", reason)
+        self.assertNotIn("行ってください: `vendor`", reason)
+
 
 class TestMainSessionAck(BaseMainTest):
     """0.19.0 (内部バックログ): session 単位の once-only 化。
@@ -657,6 +724,39 @@ class TestBuildReasonByteBudget(unittest.TestCase):
         untracked_shown = re.findall(r"\n  - u/key\d+\.pem", reason)
         self.assertGreater(len(tracked_shown), 0)
         self.assertGreater(len(untracked_shown), 0)
+
+    def test_submodule_dirs_display_collapses_and_keeps_file_enumeration(self):
+        """P2-2 回帰: submodule 案内行 (dirs_display) は distinct dir 数に
+        比例して伸びる代わりに先頭 10 件 + 省略件数へ畳まれ、tracked
+        ファイル列挙を 0 件に潰さないこと。
+
+        修正前は distinct submodule dir を全件連結しており、この行が
+        `skeleton` (= 固定部分扱い) に入るため予算の外側で無制限に伸び、
+        300 件で「ファイル列挙が 0 件に潰れる」(固定部分だけで
+        `MAX_REASON_BYTES` を使い切る) 実測があった。
+        """
+        entry = _load_entry()
+        n = 300
+        tracked = [f"submod{i}/.env" for i in range(n)]
+        submodule_by_path = {p: p.split("/")[0] for p in tracked}
+        reason = entry._build_reason(
+            tracked=tracked,
+            untracked=[],
+            session_scoped=False,
+            root_offset_="",
+            submodule_by_path=submodule_by_path,
+        )
+        # submodule 案内は先頭 10 件 + 省略件数マーカーに畳まれる
+        self.assertIn(f"({n - 10} more)", reason)
+        shown_guidance_dirs = re.findall(r"`(submod\d+)`", reason)
+        self.assertLessEqual(len(shown_guidance_dirs), 10)
+        # tracked ファイル列挙は 0 件に潰れない (修正前はここが 0 件だった)
+        shown_files = re.findall(r"\n  - submod\d+/\.env", reason)
+        self.assertGreater(len(shown_files), 0)
+        # skeleton (ファイル列挙以外) が固定サイズという docstring の前提が
+        # 成立していること — dirs_display を畳んだ結果、反例の再現に使った
+        # 実測値 (300 件で 9,241 byte) を大きく下回る
+        self.assertLess(len(reason.encode("utf-8")), 9_241)
 
     def test_tail_survives_even_when_fixed_part_alone_exceeds_budget(self):
         # MAX_REASON_BYTES を極端に小さくし、固定 tail だけで予算を超える

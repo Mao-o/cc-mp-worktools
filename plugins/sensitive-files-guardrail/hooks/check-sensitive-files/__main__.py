@@ -167,8 +167,11 @@ def _build_reason(
 
     byte 予算 (内部バックログ, ``MAX_REASON_BYTES``): tracked / untracked の
     ファイル列挙 (``  - path`` 行) 以外は全て**固定サイズ** (件数に依存しない
-    — 恒久除外レシピは ``exclude_recipe_lines`` が既に 20 件で畳んでいる) な
-    ので、まず固定部分 (このメソッド内では ``head`` / ``*_header`` /
+    — 恒久除外レシピは ``exclude_recipe_lines`` が既に 20 件で畳んでおり、
+    submodule 案内の ``dirs_display`` も同じ発想で 10 件で畳んでいる。
+    どちらも欠くと distinct 件数に比例して skeleton 自体が伸び、この不変条件が
+    崩れる — P2-2 で submodule 案内が無制限だった実例あり) なので、まず固定
+    部分 (このメソッド内では ``head`` / ``*_header`` /
     ``*_guidance`` / ``tail``) を組み立ててその byte 数を求め、残り予算を
     ファイル列挙に充てる。tracked / untracked の両方に該当があるときは
     残り予算を半分ずつに分け (tracked が使い切らなかった分だけ untracked に
@@ -201,7 +204,17 @@ def _build_reason(
             }
         )
         if submodule_dirs:
-            dirs_display = ", ".join(f"`{d}`" for d in submodule_dirs)
+            # distinct dir 数に比例して伸びると、この行は skeleton (= 固定部分
+            # 扱いで budget 計算の外側) にあるため無制限に肥大しファイル列挙を
+            # 圧迫する (P2-2, 300 dir で reason が 9,241 byte に達しファイル
+            # 列挙が潰れる実測あり)。exclude_recipe_lines と同じ発想で先頭 10
+            # 件 + 省略件数に畳み、skeleton を実質固定サイズに保つ。
+            shown_dirs = submodule_dirs[:10]
+            dirs_display = ", ".join(f"`{d}`" for d in shown_dirs)
+            if len(submodule_dirs) > len(shown_dirs):
+                dirs_display += (
+                    f" ... ({len(submodule_dirs) - len(shown_dirs)} more)"
+                )
             tracked_guidance.append(
                 "ただし上記のうち submodule 配下のファイルには、このコマンドが"
                 "**親 repo からは効きません** (submodule は別の git index を"
