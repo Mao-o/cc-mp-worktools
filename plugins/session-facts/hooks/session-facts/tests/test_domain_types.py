@@ -378,5 +378,57 @@ class DomainTypesCandidateFileCapTest(unittest.TestCase):
             self.assertNotIn("Zeta", out)
 
 
+class DomainTypesScannedFileHardCapTest(unittest.TestCase):
+    """internal backlog: the soft cap (_MAX_CANDIDATE_FILES) only stops
+    opening new candidate files once the >= 5 cluster gate is already
+    satisfied. A repo whose domain-path matches never cluster to >= 5
+    qualifying names never satisfies that condition, so the soft cap alone
+    left this walk unbounded -- every matching candidate got opened on
+    every SessionStart/SubagentStart hook call. _MAX_SCANNED_FILES adds a
+    second, gate-independent cap on total files opened; the tests below
+    confirm it closes that gap without narrowing the soft-cap fix it sits
+    alongside (a genuine cluster between the two caps must still be
+    found)."""
+
+    def test_cluster_past_the_scanned_file_hard_cap_is_missed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {}
+            for i in range(229):
+                files[f"src/models/dud{i:03d}.ts"] = "export interface Props {}\n"
+            files["src/models/mid_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
+            for i in range(229, 250):
+                files[f"src/models/dud{i:03d}.ts"] = "export interface Props {}\n"
+            ctx = _ctx(tmp, files)
+            # 250 stop-name-only duds + 1 real (5-type) file. Dict/tracked-
+            # file insertion order puts the real file at index 229 --
+            # position 230 -- past the 200-file hard cap
+            # (_MAX_SCANNED_FILES). None of the 229 duds before it ever
+            # satisfy the >= 5 gate (Props is a stop name, contributing 0
+            # qualifying names each), so unlike the soft-cap-only version
+            # this scan never gets a chance to open the real file: the
+            # hard cap stops opening new candidates at file 200, well
+            # short of index 229.
+            out = DomainTypesCollector().collect(ctx)
+            self.assertIsNone(out)
+
+    def test_cluster_between_the_soft_and_hard_cap_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {}
+            for i in range(149):
+                files[f"src/models/dud{i:03d}.ts"] = "export interface Props {}\n"
+            files["src/models/mid_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
+            ctx = _ctx(tmp, files)
+            # 149 stop-name-only duds + 1 real (5-type) file at index 149 --
+            # position 150. Past the 20-file soft cap
+            # (_MAX_CANDIDATE_FILES) but well short of the 200-file hard
+            # cap (_MAX_SCANNED_FILES): the gate is never satisfied by the
+            # duds alone, so the soft cap's own gate-satisfied condition
+            # never fires and scanning must continue past both index 20
+            # and index 149 to find this cluster.
+            out = DomainTypesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("Alpha", out)
+
+
 if __name__ == "__main__":
     unittest.main()

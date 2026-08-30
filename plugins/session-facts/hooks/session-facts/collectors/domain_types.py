@@ -76,14 +76,27 @@ _MIN_DOMAIN_TYPES = 5
 # This is a soft cap on scan cost, not a hard truncation of the candidate
 # list: candidates past this index are only skipped once the >= 5
 # (_MIN_DOMAIN_TYPES) cluster gate has already been satisfied. While the
-# gate is still undecided, scanning continues past this index so a genuine
-# cluster is never hidden purely by where it happens to fall in
+# gate is still undecided, scanning continues past this index (bounded
+# overall by _MAX_SCANNED_FILES below, independent of gate status) so a
+# genuine cluster is never hidden purely by where it happens to fall in
 # git-ls-files order (monorepos commonly have their real domain types under
 # a directory that sorts after 20+ barrel/index files, e.g. packages/ after
 # apps/). Internal backlog: an earlier version truncated the candidate list
 # itself before opening any file, which made the whole ## Domain Types
 # section silently disappear for repos with >= 21 matching candidates.
 _MAX_CANDIDATE_FILES = 20
+
+# Hard cap on how many candidate files get opened (read_text'd) in total,
+# independent of the _MIN_DOMAIN_TYPES gate above. The soft cap only stops
+# opening *new* files once the gate is already satisfied; a repo whose
+# domain-path matches never cluster to >= 5 qualifying names never
+# satisfies that condition, so without this cap the soft cap alone leaves
+# the walk unbounded and every matching candidate gets opened on every
+# SessionStart/SubagentStart hook call. 200 is a scan-cost ceiling this
+# hook can absorb per invocation -- well above the soft cap's own 20-file
+# threshold, so a genuine cluster that only clears the soft cap late is
+# still found. Counted in files actually opened, not len(candidate_paths).
+_MAX_SCANNED_FILES = 200
 
 # Per-file cap on how many names any single file contributes to the
 # *displayed* result (internal backlog: representativeness). Round-robin
@@ -178,6 +191,12 @@ def _maybe_collect_domain_types(
         for i in range(n):
             if finished[i]:
                 continue
+            if i >= _MAX_SCANNED_FILES:
+                # Hard cap: stop opening new candidate files entirely, even
+                # though the gate below may still be unsatisfied -- see
+                # _MAX_SCANNED_FILES for why the soft cap alone cannot
+                # bound this case.
+                break
             if i >= _MAX_CANDIDATE_FILES and gate_total >= _MIN_DOMAIN_TYPES:
                 # Gate already satisfied -- stop opening new candidate files
                 # past the soft cap; files below the cap keep taking turns.

@@ -57,13 +57,22 @@
    (複数モジュールにまたがる代表性を優先するトレードオフ)。この collector
    は hooks.json で `--include-domain-types` が常時付与されており事実上
    opt-in ではないため、候補ファイル数にも上限 (20 ファイル) を設けて
-   1 回の hook 呼び出しあたりの走査コストを抑えている。**この上限は
-   走査コストにのみ効く soft cap であり、>= 5 件の cluster ゲートが
+   1 回の hook 呼び出しあたりの走査コストを抑えている。**この 20 ファイル
+   の上限は走査コストにのみ効く soft cap であり、>= 5 件の cluster ゲートが
    未充足の間は 20 ファイルを超えても走査を続ける (ゲートが先に満たされた
    場合だけ、それ以降の候補ファイルを開かずに打ち切る)** — 事前に候補
    リストそのものを 20 件へ切り詰めていた版では、モノレポで genuine な
    型定義ディレクトリが `git ls-files` 順で 20 番目より後ろに来ると
-   `## Domain Types` セクションが丸ごと出力されなくなる問題があった
+   `## Domain Types` セクションが丸ごと出力されなくなる問題があった。
+   **ただしこの soft cap はゲート充足時にしか新規ファイルのオープンを
+   止めないため、domain-path には一致するが型宣言が少なく >= 5 の
+   cluster ゲートが最後まで満たされない repo では、候補ファイルを毎回の
+   hook 呼び出しで全件オープンしてしまい走査コストの上限が実質無かった。
+   ゲートの充足有無に関わらず打ち切る hard cap
+   (`_MAX_SCANNED_FILES` = 開いたファイル数で 200) を追加し、この裾ケースの
+   走査コストにも上限を設けた** (200 は 1 回の hook 呼び出しで許容できる
+   I/O の目安として設定。20 の soft cap より十分大きいため、soft cap を
+   超えてから見つかる genuine cluster の検出は後退しない)
 
 ### ドキュメント
 
@@ -103,11 +112,12 @@
    cwd 基点で描画する必要があるため、共有フィルタの結果からさらに prefix
    を剥がす箇所だけは独自のまま残した)
 
-テスト 303 件 (新規 46 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
+テスト 305 件 (新規 48 件: `core/firebase.py`/`FirebaseDetector` の検出条件別
 テストとメモ化テスト (`tests/test_detectors.py` 新設)、
 `collectors/domain_types.py` のラウンドロビン分散・cluster ゲートと表示上限
 の独立性・除外パターン・候補ファイル数上限 (gate 充足後のみ打ち切る soft cap
-であることの境界値) のテスト、
+であることの境界値、および gate の充足有無に関わらず打ち切る hard cap
+との境界値) のテスト、
 `collectors/repo_notes.py`/`collectors/nextjs_facts.py`/
 `collectors/cwd_subtree.py` の router/firebase/subtree フィルタ (従来
 カバレッジが無かった箇所)、`- more:` ヒントの `--root` 込み再検証と実
