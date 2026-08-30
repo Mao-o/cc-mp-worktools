@@ -837,7 +837,7 @@ class TestReviewCopyPermissions(HookTestCase):
 
 
 class TestUnsafeStateDir(HookTestCase):
-    """advisor 指摘: 共有 $TMPDIR で他ユーザーが先回りして状態ディレクトリを
+    """共有 $TMPDIR で他ユーザーが先回りして状態ディレクトリを
     作った場合、使わずにレビューを拒否する (`_common/flock.py` の
     `ensure_private_root`)。"""
 
@@ -914,7 +914,7 @@ class TestUnsafeStateDir(HookTestCase):
         self.assertReviewed("a.py")
 
     def test_disabled_switch_suppresses_notice_even_with_hostile_dir(self):
-        """regression (advisor 指摘): 機能を無効化している利用者には、状態
+        """regression (マージ前レビューの指摘): 機能を無効化している利用者には、状態
         ディレクトリが安全でなくても通知を出さない。`ensure_private_root` の
         検査を `review_enabled()` / `cursor.is_available()` より**前**に置くと、
         この機能を使っていない利用者にまで毎ターン無関係な通知が出てしまう。"""
@@ -929,7 +929,7 @@ class TestUnsafeStateDir(HookTestCase):
         self.assertEqual(output, "", "無効化中は無出力のはず (通知も出さない)")
 
     def test_cursor_unavailable_suppresses_notice_even_with_hostile_dir(self):
-        """regression (advisor 指摘): cursor 未インストール環境も同様に無出力。"""
+        """regression (マージ前レビューの指摘): cursor 未インストール環境も同様に無出力。"""
         root = self._state_root()
         os.makedirs(root)
         os.chmod(root, 0o777)
@@ -1094,7 +1094,7 @@ class TestSameTurnCommitNotification(HookTestCase):
         self.assertNotIn("取得できませんでした", message)
 
     def test_committed_deletion_is_reported_not_silently_dropped(self):
-        """regression (advisor 指摘): 追跡ファイルの削除が同一ターン内で commit
+        """regression (マージ前レビューの指摘): 追跡ファイルの削除が同一ターン内で commit
         されると、HEAD 基準の diff だけでなくディスク上のパスも消える。旧コードは
         `os.path.exists` も条件にしていたため、この場合だけ通知対象から漏れて
         黙って消費されていた (通知もレビューもされないまま claim が完了する)。

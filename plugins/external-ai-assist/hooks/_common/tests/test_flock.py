@@ -139,7 +139,7 @@ class TestPrivatePermissions(unittest.TestCase):
 
 
 class TestEnsurePrivateRoot(unittest.TestCase):
-    """advisor 指摘: 事前に作られた状態ディレクトリを無条件に信用しない。
+    """事前に作られた状態ディレクトリを無条件に信用しない。
 
     `ensure_private_root` は hook が所有する最上位ディレクトリ (`state_root()` /
     exitplan-review の `marker_dir` 相当) 専用の検査で、`$TMPDIR` 自体のような
@@ -169,7 +169,7 @@ class TestEnsurePrivateRoot(unittest.TestCase):
     def test_accepts_self_owned_dir_with_read_only_group_other_bits(self):
         """所有者は自分で、group/other に読み取り/実行はあっても**書込は無い**
         (旧版が既定 umask で作った 0o755 等) 場合は、`ensure_private_root` の
-        判定基準 (advisor 指摘の 2 条件: 所有者相違 / group・other 書込可) に
+        判定基準 (マージ前レビューの指摘の 2 条件: 所有者相違 / group・other 書込可) に
         当てはまらないため受け入れる。書込ビットが無ければ他ユーザーは
         ディレクトリ配下のファイルを列挙・削除・差し替えできない
         (この関数が防ぎたい脅威そのものが成立しない) ため、0o700 への締め直しは
@@ -181,7 +181,7 @@ class TestEnsurePrivateRoot(unittest.TestCase):
         self.assertEqual(self._mode(path), 0o755, "書込ビットが無ければ変更しない")
 
     def test_rejects_self_owned_dir_with_world_write_bit_but_self_heals_next_call(self):
-        """regression (advisor 指摘): 自分が所有者でも、group/other に書込権が
+        """regression (マージ前レビューの指摘): 自分が所有者でも、group/other に書込権が
         ある状態で**見つかった**なら今回は使わない — 緩かった間に他ユーザーが
         中身を書き換えられた可能性を、その場で締め直せても否定できないため。
         (`os.mkdir(mode=...)` は umask でマスクされうるため、ここでは `os.chmod`

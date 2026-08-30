@@ -405,7 +405,7 @@ def _private_root_ok() -> bool:
     """状態ディレクトリ (`state.state_root()`) が安全に使えるかを確認する。
 
     共有 `$TMPDIR` では他ユーザーが先回りして所有者違い/誰でも書けるディレクトリを
-    作れる (advisor 指摘)。安全でなければ False を返し、呼び出し側は state の
+    作れる (マージ前レビューの指摘)。安全でなければ False を返し、呼び出し側は state の
     読み書きを一切行わない — この plugin は差分を外部 AI CLI に送るので、状態を
     信用できない環境では動かないほうが安全 (`_common/flock.py` の
     `ensure_private_root` docstring 参照)。
@@ -435,7 +435,7 @@ def handle_pre_tool(payload: dict) -> None:
         return
     if payload.get("tool_name") != "Bash" or not bash_tracking_enabled():
         return
-    # `bash_tracking_enabled()` の**後**に置く (advisor 指摘): 前に置くと、
+    # `bash_tracking_enabled()` の**後**に置く (マージ前レビューの指摘): 前に置くと、
     # Bash 追跡だけを個別に無効化した利用者の Bash 呼び出しでも毎回
     # `os.mkdir`/`chmod` を試みてしまう (この判定より後段の git 呼び出しと
     # 同じく、opt-out した経路には触れない)。
@@ -549,10 +549,10 @@ def handle_stop(payload: dict) -> None:
 
     # `stategc.gc_stale()` (直後) は state_root() 配下を列挙・削除・chmod するので、
     # その**前**に安全性を確認する。ここで検出できなければ GC も以降のレビューも
-    # 一切行わない (advisor 指摘: 攻撃者所有のディレクトリを信用してしまう経路)。
+    # 一切行わない (攻撃者所有のディレクトリを信用してしまう経路)。
     # **無効化 / cursor 未インストールの判定より後に置く**: 前に置くと、この機能を
     # 使っていない利用者にまで「レビューをスキップしました」通知が毎ターン出て
-    # しまう (advisor 指摘。handle_pre_tool / handle_post_tool と同じ理由で、
+    # しまう (マージ前レビューの指摘。handle_pre_tool / handle_post_tool と同じ理由で、
     # 機能 off のときは state に一切触れないのが既存の設計方針)。pre-tool /
     # post-tool 側でも同じ検査をしている (`_private_root_ok`) が、そちらは無出力で
     # state を書かないだけなので、利用者への 1 行通知はここに一本化する
@@ -967,7 +967,7 @@ def _collect_diffs(
     - 差分が空で、かつそのパスが tracked (untracked ではない)・HEAD が存在する、
       の両方を満たすなら `batch.unretrievable` に積む — 黙って消費せず、利用者に
       レビューされなかったことを可視化するため (`_run_review` が通知にする)。
-      **ディスク上の存在は問わない** (advisor 指摘): 追跡ファイルの削除が
+      **ディスク上の存在は問わない** (マージ前レビューの指摘): 追跡ファイルの削除が
       同一ターン内で commit されると、HEAD・ディスクの両方からパスが消え、
       `git diff HEAD -- rel` は「両側に無い」ため空になる。以前はここで
       `os.path.exists` も条件にしており、この削除のケースだけ通知対象から
@@ -1020,7 +1020,7 @@ def _collect_diffs(
 
         if not text.strip():
             if empty_at_head:
-                # ディスク上の存在は問わない (advisor 指摘)。以前は
+                # ディスク上の存在は問わない (マージ前レビューの指摘)。以前は
                 # `os.path.exists` も条件にしていたため、削除+同一ターン内
                 # commit のケース (ディスクからも消える) だけ通知対象から漏れて
                 # 黙って消費されていた。実体の無い pending エントリとの区別は

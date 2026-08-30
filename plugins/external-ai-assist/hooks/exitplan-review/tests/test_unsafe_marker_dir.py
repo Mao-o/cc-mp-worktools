@@ -1,4 +1,4 @@
-"""advisor 指摘: 共有 $TMPDIR で他ユーザーが先回りして marker ディレクトリを
+"""共有 $TMPDIR で他ユーザーが先回りして marker ディレクトリを
 作った場合、使わずにプランレビューを拒否すること。
 
 `_common/flock.py` の `ensure_private_root` は post-implementation-review の
@@ -65,7 +65,7 @@ class TestUnsafeMarkerDir(HookTestCase):
         self.assertEqual(len(self.codex_calls), 1)
 
     def test_disabled_switch_suppresses_notice_even_with_hostile_dir(self):
-        """regression (advisor 指摘): 機能を無効化している利用者には、marker_dir
+        """regression (マージ前レビューの指摘): 機能を無効化している利用者には、marker_dir
         が安全でなくても通知を出さない。`ensure_private_root` の検査を
         `review_enabled()` 等より前に置くと、この機能を使っていない利用者にまで
         毎回無関係な通知が出てしまう。"""

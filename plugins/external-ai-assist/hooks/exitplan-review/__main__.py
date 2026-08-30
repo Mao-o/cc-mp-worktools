@@ -428,7 +428,7 @@ def _gc_stale_markers(now: float | None = None) -> None:
     **この retrofit だけでは不十分**: chmod 失敗 (所有者違い) を fail-open で
     無視するだけなので、攻撃者所有のディレクトリを掴んだ場合はここを通っても
     安全にならない。`main()` はこの関数を呼ぶ**前**に `flock.ensure_private_root`
-    で検査し、通らなければ GC もレビューも行わずに抜ける (advisor 指摘)。
+    で検査し、通らなければ GC もレビューも行わずに抜ける (マージ前レビューの指摘)。
     """
     now = time.time() if now is None else now
     tmp_root = os.environ.get("TMPDIR", "/tmp")
@@ -600,10 +600,10 @@ def main() -> None:
     # `_gc_stale_markers()` (直後) は marker_dir 配下を列挙・削除・chmod するので、
     # その**前**に安全性を確認する。共有 $TMPDIR では他ユーザーが先回りして
     # 所有者違い/誰でも書けるディレクトリを作れるため、通らなければ GC も
-    # レビューも一切行わない (advisor 指摘。post-implementation-review と共通の
+    # レビューも一切行わない (マージ前レビューの指摘。post-implementation-review と共通の
     # `flock.ensure_private_root`)。**無効化 / レビュアー無しの判定より後に
     # 置く**: 前に置くと、この機能を使っていない利用者にまで無関係な通知が
-    # 出てしまう (advisor 指摘)。
+    # 出てしまう (マージ前レビューの指摘)。
     try:
         flock.ensure_private_root(_marker_dir())
     except flock.UnsafeStateDirError:
