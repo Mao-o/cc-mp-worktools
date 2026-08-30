@@ -90,6 +90,86 @@ macOS の `$TMPDIR` はユーザー専用ディレクトリで実害が無い一
   他ユーザーは traversal 自体ができず、ファイル単体の mode に関わらず読めなく
   なるため)
 
+### 5. 事前に作られた状態ディレクトリを無条件に信用していた問題を修正 (advisor 指摘)
+
+共有 `$TMPDIR` では、hook がまだ一度も動いていない環境で他ユーザーが先回りして
+状態ディレクトリ (`state_root()` / exitplan-review の `marker_dir`) を作れる。
+`_makedirs_private` は「既に存在する」だけで受け入れて早期 return しており、
+後段の `harden_dir` による締め直しが所有者違いで失敗してもその失敗を無視して
+いた。結果、攻撃者が所有する誰でも書けるディレクトリを作られると、配下の
+0o600 ファイルをディレクトリの書込権限で列挙・削除・差し替えでき、この plugin
+がファイル単体を 0o600 にした意味が失われていた。
+
+- `_common/flock.py`: hook が所有する最上位ディレクトリ (1 階層) だけを対象に
+  検査する `ensure_private_root` を新設。新規作成なら無条件に安全、既存なら
+  所有者 (実効ユーザー一致) と権限 (group/other 書込不可) を検査し、
+  **どちらも満たさなければ、その場で締め直しが成功したかに関わらずこの回は
+  使用を拒否する** (`UnsafeStateDirError`)。「見つかった時点で緩かった」という
+  事実自体が、緩かった間に他ユーザーが中身を書き換えた可能性を否定できない
+  ため。締め直し自体は次回以降のために試みるので、自己所有で chmod が効く
+  環境なら 1 回のスキップだけで自己修復する。symlink には chmod を呼ばない
+  (symlink を状態ディレクトリとして掴まされた場合、既定で symlink を辿る
+  `os.chmod` を無条件に呼ぶと symlink 先の権限を変えてしまうため)
+- **`_makedirs_private` 自体は変更しない**: この再帰は必ず `$TMPDIR` 自身
+  (典型的には root 所有・group/other 書込可な sticky-bit 共有ディレクトリ) まで
+  遡るため、既存ディレクトリの検査をここに混ぜると `$TMPDIR` 自体を弾いて
+  hook の初回起動が壊れる。検査は hook が所有するちょうど 1 階層に絞った
+  `ensure_private_root` の責務にした
+- post-implementation-review: `handle_pre_tool` / `handle_post_tool` /
+  `handle_stop` それぞれで、`review_enabled()` / `cursor.is_available()`
+  (`handle_pre_tool` はさらに `bash_tracking_enabled()`) の**後**・
+  `stategc.gc_stale()` (`handle_stop` のみ) の**前**に呼ぶ。前者より前に
+  置くと、機能を使っていない利用者にまで毎ツール呼び出し/毎ターン無関係な
+  `os.mkdir`/`chmod` の試行や通知が発生してしまう (advisor 指摘)。この結果
+  `handle_stop` は **`stategc.gc_stale()` を無効化中 / cursor 未インストール中は
+  呼ばなくなった** (以前は先頭で無条件に呼んでいた) — 無効化中に GC が
+  止まるのは pre-tool/post-tool が既にその間 state を一切書かないのと整合的
+  だが、無効化前に溜まった残骸は再度有効化するまで掃除されない副作用がある。
+  `pre-tool` / `post-tool` は安全でなければ state を書き込まず log のみ
+  (ツール呼び出しごとにエラーに見える通知は出さない)。`handle_stop` は
+  利用者向けに `systemMessage` で 1 行 (「状態ディレクトリ...の所有者/権限が
+  信頼できないため、このターンはレビューをスキップしました」) 通知する
+- exitplan-review: `main()` で `active` (レビュアー選択が空でない) の判定の
+  **後**・`_gc_stale_markers()` の**前**に `marker_dir` を検査する。post-implementation-review
+  と同じ理由 (機能を使っていない利用者への無関係な通知を防ぐ) で、この結果
+  `_gc_stale_markers()` は以前より**大きく後ろ**にずれた: `tool_name ==
+  "ExitPlanMode"` の判定直後という無条件の位置から、`session_id` 存在・
+  `tool_input` が dict・`plan` が非空文字列・`review_enabled()` /
+  `EXTERNAL_AI_REVIEW_MAX<=0` の無効化判定・`selected_reviewers()` の
+  `active` 非空、の**全てを通過した後**でしか呼ばれなくなった。つまり
+  plan が空・`tool_input` が不正といった早期 exit でも GC が走らなくなる
+  (post-implementation-review 側は enable/cursor の 2 判定だけ後ろにずれた
+  のに対し、exitplan-review は判定が多い分ずれ幅も大きい)。拒否されたら
+  それまでに溜まった notices (未知のレビュアー名の警告等) と合わせて 1 行
+  通知してレビューを行わない
+- テスト: `_common/tests/test_flock.py::TestEnsurePrivateRoot` (新規作成・
+  自己所有での retrofit・所有者違い・symlink・通常ファイルの衝突を単体で検証)、
+  `post-implementation-review/tests/test_stop_flow.py::TestUnsafeStateDir`、
+  `exitplan-review/tests/test_unsafe_marker_dir.py` (いずれも
+  world-writable ディレクトリを人工的に作って拒否を確認する end-to-end)
+
+### 6. 追跡ファイルの削除が同一ターン内で commit されると通知からも漏れていた問題を修正 (advisor 指摘)
+
+上記 1. の「HEAD 基準の diff が空のパスは復元せず通知する」対応は、そのパスが
+**ディスク上に実在する**ことも通知の条件にしていた。追跡ファイルの削除が
+同一ターン内で commit されると、HEAD 基準の diff が空になるだけでなく削除に
+よってディスク上からもパスが消えるため、この条件だけ満たせず、通知対象からも
+pending からも漏れて黙って claim が完了していた (commit 済みの変更が一度も
+レビューされないまま消える、という 1. が解消したはずのバグを削除のケースだけ
+再現していた)。
+
+- `post-implementation-review/__main__.py::_collect_diffs`: `batch.unretrievable`
+  への追加条件からディスク上の実在チェックを外した。追跡 (untracked ではない)・
+  HEAD が存在する・HEAD 基準の diff が空、の 3 条件のみで通知対象にする
+- 一度も commit されていないファイル (作成後、同一ターン内で削除して一度も
+  commit しなかった一時ファイル等) との区別は諦めた: どちらも「HEAD 上に
+  存在しない」状態になった時点で `git cat-file -e HEAD:<path>` が両方とも
+  失敗し、この hook の git 予算に収まる cheap な状態確認だけでは区別できない
+  (履歴全体を辿れば区別できるが、予算超過になる)。雑音低減より正当な削除を
+  落とさないことを優先し、区別を諦めて常に通知する
+- テスト: `tests/test_stop_flow.py::TestSameTurnCommitNotification::
+  test_committed_deletion_is_reported_not_silently_dropped`
+
 ## 0.8.0
 
 **Stop / PreToolUse(ExitPlanMode) の hook 出力形式を見直した batch (2026-08 内部

@@ -404,6 +404,15 @@ def confirm_slot(marker_file: str, reserved_hash: str) -> None:
         log(f"マーカー read/write 失敗: {e}")
 
 
+def _marker_dir() -> str:
+    """hook が所有する marker 保存用ディレクトリ (`$TMPDIR/plan-review-markers`)。
+
+    `flock.ensure_private_root` の対象になる「hook が所有するちょうど 1 階層」
+    (`_common/flock.py` モジュール docstring 参照)。`$TMPDIR` 自体はここに含めない。
+    """
+    return os.path.join(os.environ.get("TMPDIR", "/tmp"), "plan-review-markers")
+
+
 def _gc_stale_markers(now: float | None = None) -> None:
     """plan-review-markers/*.marker と plan-review-*.txt を mtime TTL で掃除する。
     post-implementation-review/stategc.py と同じ mtime TTL
@@ -415,10 +424,15 @@ def _gc_stale_markers(now: float | None = None) -> None:
     環境では既存ディレクトリが 0o700 になっていない。新規作成分は `_common.flock`
     側 (`_makedirs_private`) が締めるので、ここでは「既に存在する」ディレクトリの
     締め直しだけを行う。
+
+    **この retrofit だけでは不十分**: chmod 失敗 (所有者違い) を fail-open で
+    無視するだけなので、攻撃者所有のディレクトリを掴んだ場合はここを通っても
+    安全にならない。`main()` はこの関数を呼ぶ**前**に `flock.ensure_private_root`
+    で検査し、通らなければ GC もレビューも行わずに抜ける (advisor 指摘)。
     """
     now = time.time() if now is None else now
     tmp_root = os.environ.get("TMPDIR", "/tmp")
-    marker_dir = os.path.join(tmp_root, "plan-review-markers")
+    marker_dir = _marker_dir()
     flock.harden_dir(marker_dir)
     candidates: list[str] = []
     if os.path.isdir(marker_dir):
@@ -546,8 +560,6 @@ def main() -> None:
     if payload.get("tool_name") != "ExitPlanMode":
         sys.exit(0)
 
-    _gc_stale_markers()
-
     session_id = payload.get("session_id", "")
     if not session_id:
         log("session_id が空")
@@ -585,8 +597,26 @@ def main() -> None:
         emit({}, notices)
         sys.exit(0)
 
-    marker_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), "plan-review-markers")
-    marker_file = os.path.join(marker_dir, f"{session_id}.exitplan.marker")
+    # `_gc_stale_markers()` (直後) は marker_dir 配下を列挙・削除・chmod するので、
+    # その**前**に安全性を確認する。共有 $TMPDIR では他ユーザーが先回りして
+    # 所有者違い/誰でも書けるディレクトリを作れるため、通らなければ GC も
+    # レビューも一切行わない (advisor 指摘。post-implementation-review と共通の
+    # `flock.ensure_private_root`)。**無効化 / レビュアー無しの判定より後に
+    # 置く**: 前に置くと、この機能を使っていない利用者にまで無関係な通知が
+    # 出てしまう (advisor 指摘)。
+    try:
+        flock.ensure_private_root(_marker_dir())
+    except flock.UnsafeStateDirError:
+        notices.append(
+            "状態ディレクトリ (共有一時領域) の所有者/権限が信頼できないため、"
+            "プランレビューをスキップしました"
+        )
+        emit({}, notices)
+        sys.exit(0)
+
+    _gc_stale_markers()
+
+    marker_file = os.path.join(_marker_dir(), f"{session_id}.exitplan.marker")
     current_hash = plan_hash(plan_stripped)
 
     reserved, slot_notice = reserve_slot(marker_file, current_hash, max_reviews)

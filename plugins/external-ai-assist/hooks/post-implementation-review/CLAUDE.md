@@ -234,10 +234,18 @@ commit すると、その内容が丸ごと外部へ送信されてしまう —
 
 **確定した設計 (復元せず、常に通知する)**:
 
-- HEAD 基準 diff が空だった tracked パスは、そのパスが実際に存在する (phantom な
-  pending エントリではない) なら `batch.unretrievable` に積む。空になった理由
+- HEAD 基準 diff が空だった tracked パスは `batch.unretrievable` に積む
+  (**ディスク上に実在するかは問わない**、advisor 指摘)。空になった理由
   (同一ターン内 commit・別の書き手の commit・pull/merge・単に無変更) は区別しない
   — 区別しても「復元してよいか」の判断には使わないため
+  - 以前はここに「そのパスが実際に存在する (phantom な pending エントリでは
+    ない)」という条件も加えていたが、これだと**追跡ファイルの削除が同一ターン内で
+    commit されたケース** (HEAD にもディスクにもパスが無くなる) が通知対象から
+    漏れて黙って消費されていた。一度も commit されていない phantom エントリ
+    (作成後に同一ターン内で削除して commit しなかった一時ファイル等) との区別は
+    cheap な git 状態だけでは付かない (`git cat-file -e HEAD:<path>` は削除
+    commit 後どちらのケースでも失敗する) ため、区別を諦めて常に通知する側を
+    選んだ (正当な削除の見落としの方が実害が大きいため)
 - `_run_review` は `batch.unretrievable` を `systemMessage` に
   「差分が空で取得できませんでした (commit 済みの可能性。内容は送信していません)」
   として列挙し、pending からは外す (黙って消費しない。ただし取得できなかった旨を
@@ -252,7 +260,9 @@ commit すると、その内容が丸ごと外部へ送信されてしまう —
 かったと報告される」に変えるのが本対応の主眼で、基点まで遡った復元は撤去した
 (設計の変遷は `CHANGELOG.md` の該当節を参照)。regression テストは
 `tests/test_stop_flow.py::TestSameTurnCommitNotification`
-(`test_other_local_writer_commit_is_not_leaked` が今回撤去した脆弱性の再現)。
+(`test_other_local_writer_commit_is_not_leaked` が今回撤去した脆弱性の再現、
+`test_committed_deletion_is_reported_not_silently_dropped` が
+「ディスク上に実在するか」を条件にしていた頃の見落としの再現)。
 
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 

@@ -94,6 +94,11 @@ docs 上 deprecated なため移行した)。
   上限 + 300 秒) 経過後に回収し、記録エントリ数は 50 件を超えたら古い順に捨てる。
   マーカーファイルおよび `$TMPDIR/plan-review-*.txt` (0.6.0 以前の形式を含む) は
   mtime 48 時間で GC する
+- **共有 `$TMPDIR` で他ユーザーが先回りして `plan-review-markers/` を作った場合は
+  使わずにプランレビューをスキップする** (所有者相違、または group/other に
+  書込権がある場合。締め直しても今回は使わず、次回以降のために試みるだけ)。
+  `systemMessage` で 1 行だけ理由を通知する (`_common/flock.py` の
+  `ensure_private_root`。post-implementation-review と共通)
 - レビュー結果は `$TMPDIR/plan-review-<session_id の先頭 8 文字>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
 - **完了時に所要時間と結果を `systemMessage` で表示** (0.6.0)。
@@ -132,7 +137,11 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 > 外部 AI CLI へ送られてしまうことがマージ前レビューで実演されたため、復元経路
 > そのものを撤去した。安全な復元には編集時点の内容退避が要り、既存の設計
 > (PostToolUse を軽く保つ) と衝突するため見送っている — **送信範囲が広がる方向
-> には倒さない**方針を優先する。
+> には倒さない**方針を優先する。**追跡ファイルの削除が同一ターン内で commit
+> された場合も同じ扱い**: HEAD 基準の diff が空になるだけでなくディスク上からも
+> パスが消えるが、この場合も (ディスク上に無くても) 通知対象にする — 一度も
+> commit されていない一時ファイルとの区別は諦め、正当な削除の見落としを優先して
+> 防ぐ。
 
 変更パスの収集経路は 2 つ:
 
@@ -178,6 +187,12 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 - レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id の先頭 16 文字>.txt`
   にも保存
 - 状態ファイルは 48 時間で GC (旧 `$TMPDIR/post-review-markers/` の残骸も掃除する)
+- **共有 `$TMPDIR` で他ユーザーが先回りして `post-implementation-review/` を
+  作った場合は使わずにレビューをスキップする** (所有者相違、または group/other
+  に書込権がある場合。締め直しても今回は使わず、次回以降のために試みるだけ)。
+  PreToolUse/PostToolUse は無出力で state を書き込まないだけ (毎ツール呼び出し
+  でエラーに見える通知は出さない)、Stop は `systemMessage` で 1 行だけ理由を
+  通知する
 
 プロンプトは `hooks/post-implementation-review/prompts/post-implementation-cursor.md` に外部化され、出力は 5 項目 (直接影響 / 間接影響 / 未検証ケース / 追加テスト / マージ前確認) に固定。
 

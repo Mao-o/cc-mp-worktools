@@ -836,6 +836,111 @@ class TestReviewCopyPermissions(HookTestCase):
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
 
+class TestUnsafeStateDir(HookTestCase):
+    """advisor 指摘: 共有 $TMPDIR で他ユーザーが先回りして状態ディレクトリを
+    作った場合、使わずにレビューを拒否する (`_common/flock.py` の
+    `ensure_private_root`)。"""
+
+    def _state_root(self) -> str:
+        return os.path.join(self.tmpdir, "post-implementation-review")
+
+    def test_world_writable_state_root_is_refused(self):
+        """regression: 状態ディレクトリが (pending 記録後 Stop までの間に) 誰でも
+        書けるディレクトリへ変わっていても、黙って受け入れずレビューを拒否し、
+        その旨を 1 行通知する。
+
+        `self.edit()` を**先に**呼んで通常どおり pending へ記録させてから
+        ディレクトリを緩める順序にしている: `handle_post_tool` も
+        `ensure_private_root` を呼ぶため (`_private_root_ok`)、先に緩めてから
+        `self.edit()` を呼ぶと PostToolUse の時点で締め直され (自分所有なので
+        chmod は成功する)、Stop 側の検査を確かめる前に安全な状態へ戻ってしまう。
+        `os.mkdir(mode=...)` は umask でマスクされうるため、`os.chmod` で
+        明示的に 0o777 にする (verifying-changes-empirically の負テスト作法)。
+        """
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        abs_path = os.path.join(self.repo, "a.py")
+        self.assertIn(abs_path, self.pending(SESSION_A))
+
+        root = self._state_root()
+        os.chmod(root, 0o777)
+        self.assertEqual(
+            os.stat(root).st_mode & 0o777, 0o777, "umask でマスクされていないこと"
+        )
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("状態ディレクトリ", message)
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [abs_path],
+            "claim せずに抜けるので pending は消費されず残ること",
+        )
+
+    def test_post_tool_does_not_write_into_unsafe_root(self):
+        """PostToolUse 単体でも安全でなければ state を書き込まない。Stop 側だけ
+        ガードすると、その前の PostToolUse (edit) が既に攻撃者のディレクトリへ
+        書き込んでしまう。"""
+        root = self._state_root()
+        os.makedirs(root)
+        os.chmod(root, 0o777)
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+
+        self.assertFalse(
+            os.path.exists(os.path.join(root, "state")),
+            "安全でないディレクトリの配下に state/ を作ってしまった",
+        )
+
+    def test_dir_owned_by_other_user_is_refused(self):
+        """所有者違いは締め直しようがないため、恒久的に拒否し続ける。"""
+        root = self._state_root()
+        os.makedirs(root, exist_ok=True)
+        os.chmod(root, 0o700)
+
+        with mock.patch("os.geteuid", return_value=os.geteuid() + 12345):
+            self.edit(SESSION_A, "a.py", "print(1)\n")
+            output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("状態ディレクトリ", message)
+
+    def test_safe_root_is_unaffected(self):
+        """回帰: 通常時 (新規作成 / 既に 0o700・自分所有) は従来どおりレビューが走る。"""
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+
+    def test_disabled_switch_suppresses_notice_even_with_hostile_dir(self):
+        """regression (advisor 指摘): 機能を無効化している利用者には、状態
+        ディレクトリが安全でなくても通知を出さない。`ensure_private_root` の
+        検査を `review_enabled()` / `cursor.is_available()` より**前**に置くと、
+        この機能を使っていない利用者にまで毎ターン無関係な通知が出てしまう。"""
+        root = self._state_root()
+        os.makedirs(root)
+        os.chmod(root, 0o777)
+
+        os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        self.assertEqual(output, "", "無効化中は無出力のはず (通知も出さない)")
+
+    def test_cursor_unavailable_suppresses_notice_even_with_hostile_dir(self):
+        """regression (advisor 指摘): cursor 未インストール環境も同様に無出力。"""
+        root = self._state_root()
+        os.makedirs(root)
+        os.chmod(root, 0o777)
+
+        with mock.patch.object(self.cursor, "is_available", return_value=False):
+            output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        self.assertEqual(output, "", "cursor 未インストール中は無出力のはず (通知も出さない)")
+
+
 class TestCursorLaunchCwd(HookTestCase):
     """cursor はリポジトリ root (payload の cwd ではなく worktree_root) で起動すること。
 
@@ -987,6 +1092,43 @@ class TestSameTurnCommitNotification(HookTestCase):
         self.assertReviewed("a.py", "print(1)")
         message = json.loads(output)["systemMessage"] if output else ""
         self.assertNotIn("取得できませんでした", message)
+
+    def test_committed_deletion_is_reported_not_silently_dropped(self):
+        """regression (advisor 指摘): 追跡ファイルの削除が同一ターン内で commit
+        されると、HEAD 基準の diff だけでなくディスク上のパスも消える。旧コードは
+        `os.path.exists` も条件にしていたため、この場合だけ通知対象から漏れて
+        黙って消費されていた (通知もレビューもされないまま claim が完了する)。
+
+        `a.py` を先に tracked にしておくのは、削除が「意味のある変更」になる
+        ため (untracked のまま消しても HEAD 基準 diff は最初から空)。削除は
+        `os.remove` + `self.bash()` (Bash 相当: pre/post の git status 差分で検出)
+        で pending に積み、その後 `git add -A` + `git commit` を直接呼んで
+        **同一ターン内** (次の Stop より前) に削除を commit する (Bash を経由した
+        commit そのものはテストの都合上 hook を経由せず直接 git を叩く —
+        test_same_turn_commit_is_reported_not_reviewed と同じ簡略化)。
+        """
+        _testutil.write(self.repo, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "add a.py")
+
+        def mutate():
+            os.remove(os.path.join(self.repo, "a.py"))
+
+        self.bash(SESSION_A, "tu_del_a", mutate)
+        self.assertIn(os.path.join(self.repo, "a.py"), self.pending(SESSION_A))
+
+        # 同一ターン内で削除を commit する (docstring 参照)。
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "remove a.py")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertEqual(
+            self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
+        )
 
 
 if __name__ == "__main__":
