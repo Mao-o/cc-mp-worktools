@@ -646,11 +646,17 @@ class TestBuildReasonByteBudget(unittest.TestCase):
             session_scoped=False,
             root_offset_="",
         )
-        # tracked が先に予算を使うため、untracked 側は 0 件表示 (全件省略)
-        # になりうるが、いずれにせよ両セクションで省略件数が明示される。
+        # 両セクションで省略件数が明示される。
         self.assertEqual(
             reason.count("more files; see git status"), 2, msg=reason[-400:]
         )
+        # tracked (処理順で先) が予算を独占して untracked を 0 件表示に
+        # 追い込んでいないこと (untracked は .gitignore 追加だけで対処できる
+        # ので、tracked の分量に関わらず実例が見えるべき)。
+        tracked_shown = re.findall(r"\n  - t/key\d+\.pem", reason)
+        untracked_shown = re.findall(r"\n  - u/key\d+\.pem", reason)
+        self.assertGreater(len(tracked_shown), 0)
+        self.assertGreater(len(untracked_shown), 0)
 
     def test_tail_survives_even_when_fixed_part_alone_exceeds_budget(self):
         # MAX_REASON_BYTES を極端に小さくし、固定 tail だけで予算を超える

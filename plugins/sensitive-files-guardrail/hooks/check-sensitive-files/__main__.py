@@ -75,8 +75,16 @@ def _warn_stop_ack(detail: str) -> None:
 
 # block reason の byte 予算 (内部バックログ)。公式 hooks reference が明記する
 # 「hook の stdout 文字列は 10,000 文字が上限」に対する安全マージン。byte 数を
-# 上限にすると (multibyte 文字は 1 文字が複数 byte を消費するため) 文字数の
-# 上限より常に厳しい側になり、本当に 10,000 文字を超えないことが保証される。
+# 上限にすると (multibyte 文字は 1 文字が複数 byte を消費するため) この
+# reason 文字列自体の文字数は必ず 9,216 未満に収まる。ただし実際に stdout に
+# 出るのは `json.dumps({"decision": ..., "reason": reason})` で、JSON
+# エンコードで改行 (``\n``) が 2 文字 (``\`` + ``n``) に膨らむ分と wrapper
+# 自体の文字数が上乗せされる。9,216 という値はこの上乗せ分 (数百文字程度)
+# を吸収するための余裕であり、「reason の文字数」と「実際の stdout の文字数」
+# を厳密には区別していない — 実測 (250 ファイルのネストしたパス、改行
+# 約 260 個) では reason 8,292 文字 + JSON オーバーヘッド 300 文字弱で
+# 10,000 文字の枠に十分収まることを確認済みだが、改行が非常に多く 1 行が
+# 短い病的な入力では余裕が目減りする。
 # core/output.py (read 側 hook) の MAX_REASON_BYTES + _truncate と同じ発想だが、
 # あちらは末尾を単純 truncate するのに対し、こちらは**固定 tail
 # (AskUserQuestion 案内 + 恒久除外レシピ) を必ず残し、ファイル列挙だけを畳む**
@@ -162,11 +170,15 @@ def _build_reason(
     — 恒久除外レシピは ``exclude_recipe_lines`` が既に 20 件で畳んでいる) な
     ので、まず固定部分 (このメソッド内では ``head`` / ``*_header`` /
     ``*_guidance`` / ``tail``) を組み立ててその byte 数を求め、残り予算を
-    ファイル列挙に充てる。列挙が溢れたら ``_OMITTED_FILES_TEMPLATE`` で件数
-    を明示する (黙って消さない)。tail 自体を切り詰めることは**しない** —
-    固定部分だけで予算を超える病的なケース (極端に長いファイル名が多数など)
-    では reason が ``MAX_REASON_BYTES`` を超えることを許容する (AskUserQuestion
-    の案内や恒久除外レシピを失う方が実害が大きいため)。
+    ファイル列挙に充てる。tracked / untracked の両方に該当があるときは
+    残り予算を半分ずつに分け (tracked が使い切らなかった分だけ untracked に
+    回す) — 先着順にすると片方 (実装上は先に処理する tracked) が予算を
+    独占し、もう片方が実例 0 件のまま "... more files" だけになりうるため。
+    列挙が溢れたら ``_OMITTED_FILES_TEMPLATE`` で件数を明示する (黙って
+    消さない)。tail 自体を切り詰めることは**しない** — 固定部分だけで予算を
+    超える病的なケース (極端に長いファイル名が多数など) では reason が
+    ``MAX_REASON_BYTES`` を超えることを許容する (AskUserQuestion の案内や
+    恒久除外レシピを失う方が実害が大きいため)。
     """
     head = ["【セキュリティ確認】", ""]
 
@@ -264,11 +276,21 @@ def _build_reason(
     fixed_bytes = len("\n".join(skeleton).encode("utf-8"))
     remaining = max(0, MAX_REASON_BYTES - fixed_bytes)
 
-    tracked_lines, tracked_omitted, remaining = _enumerate_with_budget(
-        tracked, remaining
+    # tracked と untracked の両方に該当があるときは、先着順 (tracked が先に
+    # 全予算を使い切る) にすると untracked が 0 件表示になりうる —
+    # untracked は「.gitignore に追加するだけ」で対処できる分、tracked
+    # (`git rm --cached` が要る) と同じくらい実例を見せる価値がある。
+    # 予算を半分ずつに分け、tracked が使い切らなかった分だけ untracked に
+    # 回す (どちらか一方しか無ければ従来どおり全予算を使う)。
+    if tracked and untracked:
+        tracked_budget = remaining // 2
+    else:
+        tracked_budget = remaining
+    tracked_lines, tracked_omitted, tracked_leftover = _enumerate_with_budget(
+        tracked, tracked_budget
     )
-    untracked_lines, untracked_omitted, remaining = _enumerate_with_budget(
-        untracked, remaining
+    untracked_lines, untracked_omitted, _ = _enumerate_with_budget(
+        untracked, remaining - tracked_budget + tracked_leftover
     )
 
     sections: list[str] = [*head]
