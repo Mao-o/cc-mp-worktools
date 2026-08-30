@@ -87,12 +87,6 @@ jobs:
                   return 127, "", f"Error: failed to launch command: {e}"
 
 
-          def classify_failure(err):
-              if "format may have changed" in err or "join rate" in err:
-                  return "structural"
-              return "fetch"
-
-
           # fetch_url() の stale-serve fallback (_common.py _handle_fetch_failure)
           # は "WARNING: fetch failed ..." を、parse-firebase.py の per-page skip
           # (cmd_search / cmd_search_content 内で raise_on_error=True の
@@ -120,9 +114,59 @@ jobs:
               "The upstream format may have changed",
           )
 
+          # classify_failure() が非ゼロ終了を fetch と判定してよい根拠はソース上
+          # これだけ (Codex R3 P2)。_common.py の sys.exit 呼び出しを全数確認:
+          #   - fetch 由来の非ゼロ終了は fetch_url() → _handle_fetch_failure()
+          #     の「キャッシュが無く raise_on_error=False」分岐だけで、捕捉した
+          #     例外の型 (URLError/OSError/HTTPException/EOFError/zlib.error/
+          #     ValueError) によらず常に固定文言
+          #     "Error: Failed to fetch {url}: {error}" を出して exit 1 する。
+          #   - die() 系ヘルパー (query must not be empty / page_ref required /
+          #     ambiguous heading・slug / index out of range など) は fetch と
+          #     無関係。assert_parsed()/check_join_rate() の exit 2 は上の
+          #     "format may have changed"/"join rate" 判定で先に structural に
+          #     分類される。
+          #   - parse-ai-sdk.py / parse-claude-docs.py / parse-firebase.py は
+          #     自前の sys.exit を持たない (全て _common.py のヘルパー経由・
+          #     argparse 自身の exit 2・非捕捉例外の既定 exit 1 のいずれか)。
+          # exit 124 (run_once() 自身の 60s subprocess timeout) だけは文言に
+          # 頼らず終了コードで直接 fetch 扱いにする — この行を出すのは canary
+          # 自身の run_once() であって上流パーサではないため。FETCH_FAILURE_
+          # MARKERS / STRUCTURAL_WARNING_MARKERS (exit 0 専用) とは別枠にする
+          # のは、"WARNING: fetch failed"/"(skip: fetch failed" が exit 0 継続
+          # を伴う警告であり、それ自体は非ゼロ終了の原因を説明しないため (同じ
+          # stderr に残っていても、実際の原因は上の structural 判定か下の
+          # "Error: Failed to fetch" 判定のどちらかで決まる)。
+          FETCH_EXIT_MARKERS = (
+              "Error: Failed to fetch",
+          )
+
 
           def _any_marker(text, markers):
               return any(m in text for m in markers)
+
+
+          def classify_failure(code, err):
+              # 優先順位は check_output_markers() と揃える: 構造警告/join-rate
+              # を最優先で structural とし (再試行しても同じ結果になる決定論的
+              # な劣化を見逃さないため)、次に exit 124 と FETCH_EXIT_MARKERS
+              # だけを fetch とする。どちらにも当たらない非ゼロ終了は既定で
+              # structural に倒す (Codex R3 P2: 修正前はここが既定 "fetch"
+              # だったため、未捕捉例外や CLI 非互換変更まで transient 扱いで
+              # リトライされ、"transient?" という甘いタイトルで起票されていた
+              # — この canary が本来検出すべきパーサ/ツールの退行を取り逃がす
+              # 誤分類だった)。戻り値の第2要素 *recognized* は「既知の根拠
+              # (構造警告文言・fetch マーカー・exit 124) に基づく分類か」を
+              # 示す。既定分岐で structural に倒しただけなら False とし、
+              # run_check() 側で detail に "unrecognized failure" と明記させる
+              # — 同じ FAIL (structural) でも「上流フォーマット変化と文言で
+              # 確認できた」場合と「fetch とは判定できなかっただけ」の場合を
+              # operator が見分けられるようにするため (Codex R3 P2 決定事項)。
+              if "format may have changed" in err or "join rate" in err:
+                  return "structural", True
+              if code == 124 or _any_marker(err, FETCH_EXIT_MARKERS):
+                  return "fetch", True
+              return "structural", False
 
 
           def run_with_retry(args, label):
@@ -135,7 +179,7 @@ jobs:
               # 再試行しない (真の上流フォーマット変化なら再試行しても同じ結果)。
               code, out, err = run_once(args)
               if code != 0:
-                  should_retry = classify_failure(err) == "fetch"
+                  should_retry = classify_failure(code, err)[0] == "fetch"
                   reason = f"first attempt failed (exit {code})"
               else:
                   should_retry = _any_marker(err, FETCH_FAILURE_MARKERS)
@@ -175,7 +219,12 @@ jobs:
               try:
                   code, out, err = run_with_retry(args, name)
                   if code != 0:
-                      record(name, False, f"command failed after retry (exit {code}): {err.strip()[-300:]}", classify_failure(err))
+                      kind, recognized = classify_failure(code, err)
+                      if recognized:
+                          detail = f"command failed after retry (exit {code}): {err.strip()[-300:]}"
+                      else:
+                          detail = f"unrecognized failure (exit {code}): {err.strip()[-300:]}"
+                      record(name, False, detail, kind)
                       return
                   ok, detail, kind = extract(out, err)
                   record(name, ok, detail, kind)
