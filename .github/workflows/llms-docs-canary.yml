@@ -45,9 +45,11 @@ jobs:
       # ハッチ)。ただし fetch_url() はライブ取得自体が失敗しても exit させず
       # WARNING を出して同ジョブ内で既に書かれたキャッシュへ黙って fallback する
       # (stale-serve) ため、cache dir を空にするだけでは「常に実際の上流から
-      # 取得できた」保証にはならない — 各チェックの stderr に
-      # "WARNING: fetch failed" が出ていれば下の Python 側で FAIL (fetch)
-      # 扱いにする。
+      # 取得できた」保証にはならない。parse-firebase.py の一部ページ fetch 失敗
+      # (per-page skip) も同様に exit 0 のまま stderr にだけ残る。どちらも
+      # code != 0 を経由しないため、下の Python 側は stderr のマーカー文字列
+      # (FETCH_FAILURE_MARKERS) を見て1回だけ再試行し、なお残れば FAIL (fetch)
+      # 扱いにする (Codex R1 P2)。
       #
       # 閾値は 2026-08-30 に手元で fetch-index/search を実行して実測した値の
       # およそ 50〜70% を下限にしている (実測: code 202 / platform 688 /
@@ -91,27 +93,71 @@ jobs:
               return "fetch"
 
 
+          # fetch_url() の stale-serve fallback (_common.py _handle_fetch_failure)
+          # は "WARNING: fetch failed ..." を、parse-firebase.py の per-page skip
+          # (cmd_search / cmd_search_content 内で raise_on_error=True の
+          # FetchError を捕捉する経路 — まだキャッシュが無く stale-serve もできない
+          # 1ページ分の失敗) は "(skip: fetch failed ..." を、それぞれ exit 0 の
+          # まま stderr に残す (Codex R1 P2 #1)。retry の要否判定が `code != 0`
+          # だけを見ていると、どちらも再試行されずに素通りする — stale-serve は
+          # 再試行なしで即 FAIL (fetch) 化され、firebase の部分的失敗は残り候補に
+          # ヒットがあれば threshold FAIL や PASS にすら化けてしまう。
+          FETCH_FAILURE_MARKERS = (
+              "WARNING: fetch failed",
+              "(skip: fetch failed",
+          )
+
+          # parse-ai-sdk.py の frontmatter タイトル欠落率チェック
+          # (_warn_if_untitled_ratio_high) も exit 0 のまま件数を保持して警告だけ
+          # 出す (Codex R1 P2 #2)。他パーサに同種の exit 0 構造警告は無いことを
+          # 2026-08-31 にソースで確認済み (parse-claude-docs.py に自前の WARNING
+          # は無し、parse-firebase.py の自前 WARNING は --page-ref 省略時の性能
+          # 注意のみ)。件数が floor 以上でもこの警告が出ていれば構造的な劣化と
+          # して扱う — この文字列は check_join_rate() の 0.5〜0.8 の soft
+          # WARNING (_common.py) には含まれないので join-rate+query 側の
+          # 既存の "join rate" in err 判定 (kind=threshold) と衝突しない。
+          STRUCTURAL_WARNING_MARKERS = (
+              "The upstream format may have changed",
+          )
+
+
+          def _any_marker(text, markers):
+              return any(m in text for m in markers)
+
+
           def run_with_retry(args, label):
               # ネットワークの一時的な失敗 (fetch) だけ1回再試行する。exit 2
               # (assert_parsed / check_join_rate による構造変化・閾値割れ) は
               # 再実行しても同じ結果になる決定論的な失敗なので retry しない。
+              # exit 0 のまま FETCH_FAILURE_MARKERS が stderr に残るケース
+              # (stale-serve / firebase per-page skip) も同じ理由で1回だけ
+              # 再試行の対象に含める。STRUCTURAL_WARNING_MARKERS は exit 0 でも
+              # 再試行しない (真の上流フォーマット変化なら再試行しても同じ結果)。
               code, out, err = run_once(args)
-              if code != 0 and classify_failure(err) == "fetch":
-                  print(f"[{label}] first attempt failed (exit {code}); retrying once in 10s...", file=sys.stderr)
+              if code != 0:
+                  should_retry = classify_failure(err) == "fetch"
+                  reason = f"first attempt failed (exit {code})"
+              else:
+                  should_retry = _any_marker(err, FETCH_FAILURE_MARKERS)
+                  reason = "first attempt exited 0 but left a fetch-failure marker on stderr"
+              if should_retry:
+                  print(f"[{label}] {reason}; retrying once in 10s...", file=sys.stderr)
                   time.sleep(10)
                   code, out, err = run_once(args)
               return code, out, err
 
 
-          def check_stale_serve(err):
-              # fetch_url() はライブ取得が失敗しても exit させず WARNING だけ出し、
-              # 同ジョブ内で既に書かれたキャッシュへ黙って fallback する (例:
-              # fetch-index が書いたキャッシュを、直後の search 呼び出し中の
-              # 一時的なネットワーク断が再利用する)。exit 0 のまま「実は今回は
-              # 上流に触れていない」状態を素通りさせないよう、各 extract() の
-              # 冒頭でこれを検査する。
-              if "WARNING: fetch failed" in err:
-                  return False, f"stale cache served after a live fetch failure: {err.strip()[-300:]}", "fetch"
+          def check_output_markers(err):
+              # run_with_retry() が返す最終 (再試行があればその後の) stderr を
+              # 検査する。各 extract() の冒頭、件数・hit 数の閾値判定より前に
+              # 呼び、「今回のライブ取得・解析がそもそも信頼できるか」を先に
+              # 確定させる。両方のマーカーが同時に出ていても structural を優先
+              # する (classify_failure() と同じ優先順位: 再試行不能な劣化を
+              # 見逃さないため)。
+              if _any_marker(err, STRUCTURAL_WARNING_MARKERS):
+                  return False, f"parser reported a structural warning on stderr: {err.strip()[-300:]}", "structural"
+              if _any_marker(err, FETCH_FAILURE_MARKERS):
+                  return False, f"fetch failure marker still present after retry: {err.strip()[-300:]}", "fetch"
               return None
 
 
@@ -151,9 +197,9 @@ jobs:
 
           for name, args, pattern, floor in ENTRIES_CHECKS:
               def extract(out, err, pattern=pattern, floor=floor):
-                  stale = check_stale_serve(err)
-                  if stale is not None:
-                      return stale
+                  marker = check_output_markers(err)
+                  if marker is not None:
+                      return marker
                   m = pattern.search(out)
                   if not m:
                       return False, f"expected count pattern {pattern.pattern!r} not found in output", "structural"
@@ -179,9 +225,9 @@ jobs:
               args = [f"{SCRIPTS}/parse-claude-docs.py", "search", JOIN_QUERY, "--source", source, "--max-age", "0"]
 
               def extract(out, err, floor_hits=floor_hits):
-                  stale = check_stale_serve(err)
-                  if stale is not None:
-                      return stale
+                  marker = check_output_markers(err)
+                  if marker is not None:
+                      return marker
                   if "join rate" in err:
                       return False, f"join-rate warning/error below the 0.8 floor: {err.strip()}", "threshold"
                   if floor_hits is not None:
@@ -201,9 +247,9 @@ jobs:
           ]
           for name, args in QUERY_CHECKS:
               def extract(out, err):
-                  stale = check_stale_serve(err)
-                  if stale is not None:
-                      return stale
+                  marker = check_output_markers(err)
+                  if marker is not None:
+                      return marker
                   hits = sum(int(x) for x in re.findall(r"\((\d+) body hits, showing", out))
                   ok = hits >= 1
                   return ok, f"{hits} body hits (floor 1)", (None if ok else "threshold")
