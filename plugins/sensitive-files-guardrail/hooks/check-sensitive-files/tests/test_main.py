@@ -651,9 +651,11 @@ class TestBuildReasonOutputCharBudget(unittest.TestCase):
     公式 hooks reference は ``additionalContext`` / ``systemMessage`` /
     素の stdout を 10,000 文字上限と明記するが、Stop hook の ``reason`` は
     この列挙に含まれていない。名指しされていない以上、保守的にこの値を
-    安全マージンとして採用した (``MAX_OUTPUT_CHARS``)。固定 tail
-    (AskUserQuestion 案内 + 恒久除外レシピ) を先に確保し、ファイル列挙
-    (``  - path`` 行) だけを畳む。tail 自体は truncate しない。
+    安全マージンとして採用した (``MAX_OUTPUT_CHARS``)。**静的な案内文**を
+    先に確保し、path 由来の可変長部分 (ファイル列挙・恒久除外レシピの ``!``
+    行・basename 形の併記・submodule ディレクトリ一覧) を畳む。静的案内は
+    truncate しない (レシピ行を予算対象に移した経緯は R2 P2-B /
+    ``TestRecipeLinesInBudget``)。
 
     0.27.0 当初は reason の生 UTF-8 byte で予算化していたが、``json.dumps``
     のエスケープを無視していたため ``\\`` / ``"`` を多く含むファイル名で
@@ -788,11 +790,14 @@ class TestBuildReasonOutputCharBudget(unittest.TestCase):
         # 予算に対して過大請求になり境界の意味がぼやける)。
         self.assertLess(_stdout_chars(entry, reason), 10_000)
 
-    def test_tail_survives_even_when_fixed_part_alone_exceeds_budget(self):
-        # MAX_OUTPUT_CHARS を極端に小さくし、固定 tail だけで予算を超える
-        # 病的ケースを強制する。tail (AskUserQuestion / 恒久除外レシピ /
-        # session 注記) は truncate されず必ず残り、出力全体が予算を
-        # 超えることを許容する (次善のトレードオフ、と docstring に明記済み)。
+    def test_static_guidance_survives_when_budget_alone_is_impossible(self):
+        # MAX_OUTPUT_CHARS を極端に小さくし、静的案内だけで予算を超える
+        # 病的ケースを強制する。静的案内 (AskUserQuestion / 【恒久除外】の
+        # 見出しと影響範囲 / session 注記) は truncate されず必ず残り、出力
+        # 全体が予算を超えることを許容する (案内を失う方が実害が大きい)。
+        # path 由来の行 (レシピの `!` 行やファイル列挙) はこの状況では畳まれる
+        # — 実運用では静的部分が予算の 1/4 程度に収まるため到達しない
+        # (`test_static_part_plus_worst_case_markers_fits_budget` が前提を固定)。
         entry = _load_entry()
         with mock.patch.object(entry, "MAX_OUTPUT_CHARS", 50):
             reason = entry._build_reason(
@@ -972,6 +977,276 @@ class TestSerializedJsonBudgetE2E(BaseMainTest):
         self.assertIn("reason", captured)
         self.assertEqual(out, real_serialize(captured["reason"]) + "\n")
         self.assertEqual(json.loads(out)["decision"], "block")
+
+
+def _long_nested_paths(count: int, length: int) -> list[str]:
+    """深いネストで ``length`` 文字前後になる path を ``count`` 件返す。
+
+    1 セグメントは 60 文字 (多くのファイルシステムの NAME_MAX 255 以内) に
+    留め、長さは**深さ**で稼ぐ — 実在しうる形にしておかないと「非現実的な
+    入力でしか起きない」と誤読される。``git ls-files`` はこの形の path を
+    普通に返す。
+    """
+    seg = "d" * 60
+    body = "/".join([seg] * (length // 61 + 1))[:length]
+    return [f"seg{i}/{body}/.env" for i in range(count)]
+
+
+_RECIPE_MARKER_RE = re.compile(r"^  \.\.\. \((\d+) more\)$", re.M)
+
+
+class TestRecipeLinesInBudget(unittest.TestCase):
+    """外部レビュー R2 P2-B 回帰: path 由来の行はすべて予算の対象。
+
+    修正前は恒久除外レシピの ``!`` 行と basename 形の併記を「固定 tail」と
+    して予算の外に置いていた。中身は path 由来で**可変長**なので、長い path
+    が数本あるだけで枠を破る (3.5KB の path 3 本で 11,580 文字を実測。列挙
+    予算を 0 に絞っても解消しない)。現在は静的な案内文だけが予算の外にある。
+    """
+
+    def _reason(self, entry, **kwargs) -> str:
+        base = dict(
+            tracked=[], untracked=[], session_scoped=True, root_offset_=""
+        )
+        base.update(kwargs)
+        return entry._build_reason(**base)
+
+    def test_long_recipe_paths_stay_under_budget(self):
+        """3.5KB のネストした path 3 本 — 修正前に 11,580 文字だった入力。
+
+        修正前コード (commit 1f92fd9) にこの入力を通すと直列化後 11,580 文字
+        で、``MAX_OUTPUT_CHARS`` (9,216) も docs の 10,000 文字も超える。
+        レシピ行が予算の外にあったため、ファイル列挙を 0 件に絞っても縮まら
+        なかった (= 予算という仕組み自体が効かない入力クラス)。
+        """
+        entry = _load_entry()
+        reason = self._reason(entry, tracked=_long_nested_paths(3, 3500))
+        self.assertLessEqual(
+            _stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS
+        )
+        # 空振り防止: この入力は実際に畳まれている
+        self.assertIsNotNone(_RECIPE_MARKER_RE.search(reason))
+        # 静的案内は残る (畳むのは path 由来の行だけ)
+        self.assertIn("AskUserQuestion ツールで各ファイルについて", reason)
+        self.assertIn("【恒久除外】", reason)
+        self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
+        self.assertIn("再度 block しません", reason)
+
+    def test_single_recipe_line_over_budget_becomes_length_note(self):
+        """1 本の path だけで予算を超えるとき、長さを示す 1 行に置換する。"""
+        entry = _load_entry()
+        reason = self._reason(entry, tracked=_long_nested_paths(2, 12000))
+        self.assertLessEqual(
+            _stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS
+        )
+        self.assertIn("path が長すぎるため省略", reason)
+        # 追記先セクションが分からなくなる事故を防ぐため、ヘッダーは残す
+        self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
+
+    def test_normal_case_keeps_every_recipe_line(self):
+        """通常の長さなら従来どおりレシピが全件出る (畳まない)。"""
+        entry = _load_entry()
+        names = [f"config/app{i}/.env" for i in range(20)]
+        reason = self._reason(entry, tracked=names)
+        for name in names:
+            self.assertIn(f"  !{name}\n", reason)
+        self.assertIsNone(_RECIPE_MARKER_RE.search(reason))
+
+    def test_recipe_marker_reports_a_single_truthful_count(self):
+        """limit 由来と予算由来のマーカーが二重に出ない。
+
+        ``exclude_recipe_lines`` は limit=20 で ``... (N more)`` を付ける。
+        予算でさらに畳んだとき、その古い件数を残すと 2 つのマーカーが別々の
+        数を主張して読み手がどちらも信用できなくなる。マーカーは 1 本、件数は
+        「重複除去後の全件 − 表示できた件数」。
+        """
+        entry = _load_entry()
+        names = [f"seg{i}/" + ("d" * 60 + "/") * 13 + ".env" for i in range(25)]
+        reason = self._reason(entry, tracked=names)
+        markers = _RECIPE_MARKER_RE.findall(reason)
+        self.assertEqual(len(markers), 1, msg=reason[-600:])
+        shown = len(re.findall(r"^  !seg\d+/", reason, re.M))
+        self.assertEqual(shown + int(markers[0]), len(names))
+        self.assertGreater(shown, 0)  # 予算がゼロに潰れていないこと
+        self.assertGreater(int(markers[0]), 0)  # 実際に溢れていること
+
+    def test_metachar_heavy_recipe_names_stay_under_budget(self):
+        """``escape_glob`` 展開 × JSON エスケープの二重膨張でも枠を割らない。
+
+        ``*`` / ``?`` / ``[`` は ``escape_glob`` が literal 化して長さが増え、
+        ``\\`` / ``"`` は ``json.dumps`` が 2 文字に膨らませる。0.27.0 の
+        byte → 文字数移行が潰したのと同じ誤算クラスが、新たに予算対象に
+        なったレシピ行でも起きないことを固定する。
+        """
+        entry = _load_entry()
+        stem = '*?[\\"' * 400
+        names = [f"d{i}/{stem}.env" for i in range(6)]
+        reason = self._reason(entry, tracked=names)
+        self.assertLessEqual(
+            _stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS
+        )
+        self.assertIn("【恒久除外】", reason)
+
+    def test_long_submodule_dirs_stay_under_budget(self):
+        """submodule 案内のディレクトリ一覧も path 由来 (件数 10 では足りない)。
+
+        修正前は先頭 10 件へ畳むだけで 1 本の長さが無制限だったため、3KB の
+        submodule dir が 10 本並ぶと静的部分だけで 30,000 文字規模になり、
+        「静的部分は固定サイズ」という予算の前提が崩れていた。
+        """
+        entry = _load_entry()
+        dirs = _long_nested_paths(12, 3000)
+        tracked = [f"{d}/.env" for d in dirs]
+        reason = self._reason(
+            entry,
+            tracked=tracked,
+            submodule_by_path={p: p.rsplit("/", 1)[0] for p in tracked},
+        )
+        self.assertLessEqual(
+            _stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS
+        )
+        self.assertIn("AskUserQuestion ツールで各ファイルについて", reason)
+
+    def test_static_part_plus_worst_case_markers_fits_budget(self):
+        """不変条件の前提: 静的部分 + 最悪ケースのマーカー < 予算。
+
+        「path 由来の行を全部畳めば必ず予算内」は、定数から成る静的部分が
+        予算より十分小さいことに依存する。案内文を増やしてこの前提が崩れたら
+        ここで落ちる (黙って予算超過に戻らないための杭)。
+        """
+        entry = _load_entry()
+        reason = self._reason(
+            entry,
+            tracked=[".env"],
+            untracked=[".env.production"],
+            submodule_by_path={".env": "sub"},
+        )
+        worst_markers = sum(
+            entry._json_chars(t) + 2
+            for t in (
+                entry._OMITTED_FILES_TEMPLATE.format(n=10**6),
+                entry._OMITTED_FILES_TEMPLATE.format(n=10**6),
+                entry._OMITTED_RECIPE_TEMPLATE.format(n=10**6),
+                entry._LONG_RECIPE_TEMPLATE.format(n=10**6),
+            )
+        )
+        self.assertLess(
+            _stdout_chars(entry, reason) + worst_markers,
+            entry.MAX_OUTPUT_CHARS,
+        )
+
+    def test_output_never_exceeds_budget_over_grid(self):
+        """不変条件の総当たり: 件数 × path 長 × basename 長 × root_offset
+        × セクション配分のどの組でも直列化後が予算以下。
+
+        軸を分けているのは、可変長の site が 4 つあり互いに独立に伸びるため:
+        path 深さ (レシピ行) / basename 長 (併記行) / 件数 (ファイル列挙) /
+        ``root_offset_=None`` (併記行の無い別形の tail)。1 軸だけの格子では
+        2 site が素通りする。
+        """
+        entry = _load_entry()
+        for count in (1, 3, 21):
+            for path_len in (10, 1000, 3500, 12000):
+                for base_len in (5, 250):
+                    for root_off in ("", "sub/dir", None):
+                        for split in ("tracked", "untracked", "both"):
+                            with self.subTest(
+                                count=count,
+                                path_len=path_len,
+                                base_len=base_len,
+                                root_off=root_off,
+                                split=split,
+                            ):
+                                base = "b" * base_len
+                                names = [
+                                    p.replace("/.env", f"/{base}{i}.env")
+                                    for i, p in enumerate(
+                                        _long_nested_paths(count, path_len)
+                                    )
+                                ]
+                                if split == "tracked":
+                                    tr, un = names, []
+                                elif split == "untracked":
+                                    tr, un = [], names
+                                else:
+                                    half = len(names) // 2 or 1
+                                    tr, un = names[:half], names[half:]
+                                reason = entry._build_reason(
+                                    tracked=tr,
+                                    untracked=un,
+                                    session_scoped=True,
+                                    root_offset_=root_off,
+                                )
+                                self.assertLessEqual(
+                                    _stdout_chars(entry, reason),
+                                    entry.MAX_OUTPUT_CHARS,
+                                )
+                                # 静的案内は畳まれない
+                                self.assertIn("【恒久除外】", reason)
+
+
+class TestAsciiStdoutEncoding(BaseMainTest):
+    """外部レビュー R2 P2-A 回帰: stdout が非 UTF-8 でも判定を必ず出す。
+
+    修正前は ``print`` が ``sys.stdout`` の encoding に従っていたため、
+    ``PYTHONIOENCODING=ascii`` で hook が起動されると reason の日本語で
+    ``UnicodeEncodeError`` が送出され **exit 1 / stdout 0 byte** になった
+    (実測)。Stop hook としては block が 1 件も報告されない = 機密ファイルが
+    素通りする。
+
+    in-process の ``StringIO`` 差し替えでは ``encoding`` も ``buffer`` も
+    持たないため、この失敗モードは**構造的に再現できない**。したがって
+    subprocess で実際に環境変数を与えるこのクラスが唯一の防波堤になる。
+    子プロセスは ``_testutil`` の bootstrap を継承しないので、``HOME`` を
+    テスト用 tmp に明示して実 HOME (stop-ack の保存先) を汚さない。
+    """
+
+    ASCII_ENV = {"PYTHONIOENCODING": "ascii", "LC_ALL": "C"}
+
+    def _run_hook(self, env_extra: dict) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["HOME"] = str(self.home_dir)
+        env["XDG_CONFIG_HOME"] = str(self.xdg_dir)
+        env.update(env_extra)
+        return subprocess.run(
+            [sys.executable, str(_ENTRY_PATH)],
+            input=json.dumps({"cwd": str(self.repo)}).encode("utf-8"),
+            capture_output=True,
+            env=env,
+        )
+
+    def test_ascii_stdout_still_emits_block_decision(self):
+        (self.repo / ".env").write_text("K=v\n")
+        proc = self._run_hook(self.ASCII_ENV)
+        self.assertEqual(
+            proc.returncode, 0, msg=proc.stderr.decode("utf-8", "replace")
+        )
+        self.assertTrue(proc.stdout, msg="stdout が空 = block が届いていない")
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("【セキュリティ確認】", payload["reason"])
+        self.assertIn(".env", payload["reason"])
+
+    def test_ascii_stdout_bytes_go_through_the_measured_serializer(self):
+        """出力バイト列が ``_serialize(reason) + "\\n"`` と厳密に一致すること。
+
+        予算を計った直列化と実際に書いたバイト列を結び付ける杭 (encoding を
+        変える修正で片方だけ ``ensure_ascii`` に倒れると、予算計算が静かに
+        外れる — 0.27.0 で ``_serialize`` を 1 箇所化したのと同じ理由)。
+        """
+        (self.repo / ".env").write_text("K=v\n")
+        entry = _load_entry()
+        proc = self._run_hook(self.ASCII_ENV)
+        text = proc.stdout.decode("utf-8")
+        self.assertEqual(text, entry._serialize(json.loads(text)["reason"]) + "\n")
+
+    def test_ascii_and_utf8_stdout_are_byte_identical(self):
+        """encoding が変わっても出力が同一 = 情報が落ちていないこと。"""
+        (self.repo / ".env").write_text("K=v\n")
+        utf8 = self._run_hook({"PYTHONIOENCODING": "utf-8"})
+        ascii_ = self._run_hook(self.ASCII_ENV)
+        self.assertEqual(utf8.returncode, 0)
+        self.assertEqual(utf8.stdout, ascii_.stdout)
 
 
 if __name__ == "__main__":

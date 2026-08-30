@@ -352,6 +352,12 @@ block reason には tracked / untracked を別セクションで列挙し、そ�
 cwd 相対のまま、レシピは project root 相対 (サブディレクトリで発火しても
 `!sub/.env`)。
 
+block reason には**出力の文字数上限**がある (0.27.0)。該当ファイルが多い / パスが
+長いときは、ファイル一覧が `... (N more files; see git status)`、除外レシピが
+`... (N more)` に畳まれる (省略件数は必ず表示される)。AskUserQuestion の案内・
+除外レシピの追記先 (`[project:...]` ヘッダー)・影響範囲の説明といった**静的な
+案内文は畳まれない**。
+
 **session 単位の once-only (0.19.0)**: 同一セッションで同じファイル集合を報告済み
 なら、以降の `Stop` は block しない (「意図的に管理対象とする」と承認した tracked
 `.env` / committed 証明書で毎ターン block が出続けるのを止めるため)。新しい機密
