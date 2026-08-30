@@ -118,7 +118,7 @@ jobs:
           # entries >= floor (fetch-index; live-fetches the lightweight llms.txt index)
           ENTRIES_CHECKS = [
               ("code entries", [f"{SCRIPTS}/parse-claude-docs.py", "fetch-index", "--source", "code", "--max-age", "0"],
-               re.compile(r"\((\d+) pages total"), 100),
+               re.compile(r"\((\d+) pages total"), 120),
               ("platform entries", [f"{SCRIPTS}/parse-claude-docs.py", "fetch-index", "--source", "platform", "--max-age", "0"],
                re.compile(r"\((\d+) pages total"), 400),
               ("ai-sdk entries", [f"{SCRIPTS}/parse-ai-sdk.py", "fetch-index", "--max-age", "0"],
