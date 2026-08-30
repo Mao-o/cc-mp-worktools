@@ -11,6 +11,8 @@ on:
   schedule:
     # validate.yml の週次 canary (毎週月曜 06:00 UTC) と時間帯・曜日をずらし、
     # 上流サイトへのアクセスが同時間帯に重ならないようにする。
+    # 注意: public repo の scheduled workflow は default branch でのみ実行され、
+    # そのリポジトリで60日間アクティビティが無いと GitHub 側で自動的に無効化される。
     - cron: '0 16 * * 4'
   workflow_dispatch:
 
@@ -37,9 +39,15 @@ jobs:
           python-version: '3.12'
 
       # 一時 cache dir (runner.temp 配下、job 終了で破棄される) を
-      # LLMS_DOCS_CACHE_DIR で指定し、常に実際の上流から取得させる
-      # (README: 既定は $XDG_CACHE_HOME/llms-docs や ~/.cache/llms-docs だが
-      # LLMS_DOCS_CACHE_DIR はこの plugin 自身の完全上書き用エスケープハッチ)。
+      # LLMS_DOCS_CACHE_DIR で指定し、`--max-age 0` で毎回フレッシュな取得を
+      # 試みる (README: 既定は $XDG_CACHE_HOME/llms-docs や ~/.cache/llms-docs
+      # だが LLMS_DOCS_CACHE_DIR はこの plugin 自身の完全上書き用エスケープ
+      # ハッチ)。ただし fetch_url() はライブ取得自体が失敗しても exit させず
+      # WARNING を出して同ジョブ内で既に書かれたキャッシュへ黙って fallback する
+      # (stale-serve) ため、cache dir を空にするだけでは「常に実際の上流から
+      # 取得できた」保証にはならない — 各チェックの stderr に
+      # "WARNING: fetch failed" が出ていれば下の Python 側で FAIL (fetch)
+      # 扱いにする。
       #
       # 閾値は 2026-08-30 に手元で fetch-index/search を実行して実測した値の
       # およそ 50〜70% を下限にしている (実測: code 202 / platform 688 /
@@ -47,6 +55,7 @@ jobs:
       # check_join_rate() 自体が warn/fail の境界に使っている 0.8 をそのまま
       # 採用 (この値は成長する件数ではなく比率なので実測による再校正は不要)。
       - name: Run live smoke checks against upstream llms.txt sources
+        id: smoke
         env:
           LLMS_DOCS_CACHE_DIR: ${{ runner.temp }}/llms-docs-canary-cache
           CANARY_RESULT_PATH: ${{ runner.temp }}/llms-docs-canary-result.json
@@ -76,21 +85,34 @@ jobs:
                   return 127, "", f"Error: failed to launch command: {e}"
 
 
+          def classify_failure(err):
+              if "format may have changed" in err or "join rate" in err:
+                  return "structural"
+              return "fetch"
+
+
           def run_with_retry(args, label):
-              # ネットワークの一時失敗と上流フォーマット変化を区別するため、
-              # 失敗したら1回だけ再試行してから最終判定する。
+              # ネットワークの一時的な失敗 (fetch) だけ1回再試行する。exit 2
+              # (assert_parsed / check_join_rate による構造変化・閾値割れ) は
+              # 再実行しても同じ結果になる決定論的な失敗なので retry しない。
               code, out, err = run_once(args)
-              if code != 0:
+              if code != 0 and classify_failure(err) == "fetch":
                   print(f"[{label}] first attempt failed (exit {code}); retrying once in 10s...", file=sys.stderr)
                   time.sleep(10)
                   code, out, err = run_once(args)
               return code, out, err
 
 
-          def classify_failure(err):
-              if "format may have changed" in err or "join rate" in err:
-                  return "structural"
-              return "fetch"
+          def check_stale_serve(err):
+              # fetch_url() はライブ取得が失敗しても exit させず WARNING だけ出し、
+              # 同ジョブ内で既に書かれたキャッシュへ黙って fallback する (例:
+              # fetch-index が書いたキャッシュを、直後の search 呼び出し中の
+              # 一時的なネットワーク断が再利用する)。exit 0 のまま「実は今回は
+              # 上流に触れていない」状態を素通りさせないよう、各 extract() の
+              # 冒頭でこれを検査する。
+              if "WARNING: fetch failed" in err:
+                  return False, f"stale cache served after a live fetch failure: {err.strip()[-300:]}", "fetch"
+              return None
 
 
           checks = []
@@ -129,6 +151,9 @@ jobs:
 
           for name, args, pattern, floor in ENTRIES_CHECKS:
               def extract(out, err, pattern=pattern, floor=floor):
+                  stale = check_stale_serve(err)
+                  if stale is not None:
+                      return stale
                   m = pattern.search(out)
                   if not m:
                       return False, f"expected count pattern {pattern.pattern!r} not found in output", "structural"
@@ -140,23 +165,32 @@ jobs:
           # code/platform: index<->full-text join rate >= 0.8 (only claude-docs
           # joins two separate upstream files; ai-sdk/firebase have no such join).
           # `search` is the only subcommand that exercises check_join_rate(), and
-          # it prints nothing when the ratio is healthy (>=0.8) - only a WARNING
-          # (0.5-0.8) or a hard Error+exit 2 (<0.5) - so "no join-rate message and
-          # exit 0" is itself the passing signal. The same call's stdout doubles
-          # as the representative-query ("hooks") hit check for the code source.
+          # it prints a WARNING (0.5-0.8) or a hard Error+exit 2 (<0.5) when the
+          # ratio is unhealthy - checked below via stderr for both sources. For
+          # code, the same call's stdout doubles as the representative-query
+          # ("hooks") hit check. platform has no representative-query floor in
+          # the ticket, so instead of trusting "no join-rate message" alone
+          # (proven vacuous by a fixture: healthy join rate + zero actual search
+          # results still prints nothing to stderr), it also positively asserts
+          # search's own "(N pages from ...)" summary line has N >= 1.
           JOIN_QUERY = "hooks"
           for source, floor_hits in (("code", 1), ("platform", None)):
               name = f"{source} join-rate+query"
               args = [f"{SCRIPTS}/parse-claude-docs.py", "search", JOIN_QUERY, "--source", source, "--max-age", "0"]
 
               def extract(out, err, floor_hits=floor_hits):
+                  stale = check_stale_serve(err)
+                  if stale is not None:
+                      return stale
                   if "join rate" in err:
                       return False, f"join-rate warning/error below the 0.8 floor: {err.strip()}", "threshold"
                   if floor_hits is not None:
                       hits = sum(int(x) for x in re.findall(r"\((\d+) body hits, showing", out))
                       ok = hits >= floor_hits
                       return ok, f"join rate healthy; {hits} body hits for {JOIN_QUERY!r} (floor {floor_hits})", (None if ok else "threshold")
-                  return True, "join rate healthy (no warning/error emitted)", None
+                  pages = sum(int(x) for x in re.findall(r"\((\d+) pages from ", out))
+                  ok = pages >= 1
+                  return ok, f"join rate healthy; {pages} pages found for {JOIN_QUERY!r} (floor 1)", (None if ok else "threshold")
               run_check(name, args, extract)
 
           # representative query hit >= 1 (ai-sdk / firebase; code's "hooks" is
@@ -167,6 +201,9 @@ jobs:
           ]
           for name, args in QUERY_CHECKS:
               def extract(out, err):
+                  stale = check_stale_serve(err)
+                  if stale is not None:
+                      return stale
                   hits = sum(int(x) for x in re.findall(r"\((\d+) body hits, showing", out))
                   ok = hits >= 1
                   return ok, f"{hits} body hits (floor 1)", (None if ok else "threshold")
@@ -190,10 +227,15 @@ jobs:
           print("\nAll checks passed.")
           PY
 
-      # 直前のステップが失敗した場合のみ実行。同じタイトルの open issue が
-      # 既にあれば新規作成せずコメント追記する (毎週重複起票しないため)。
+      # 直前 (id: smoke) の live smoke checks ステップが失敗した場合のみ実行
+      # (checkout/setup-python 等、smoke より前の失敗では起票しない — その場合
+      # steps.smoke.outcome は未設定で 'failure' と一致しない)。`failure() &&`
+      # を落とすと暗黙の success() 判定でこのステップ自体が skip されるため
+      # 必ず両方書く。タイトルは失敗の内訳 (すべて fetch 由来かどうか) で分け、
+      # それぞれ独立に同じタイトルの open issue へ重複排除する (毎週重複起票
+      # しないため)。
       - name: Report failures as a tracking issue
-        if: failure()
+        if: failure() && steps.smoke.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           CANARY_RESULT_PATH: ${{ runner.temp }}/llms-docs-canary-result.json
@@ -205,7 +247,8 @@ jobs:
           import sys
 
           RESULT_PATH = os.environ["CANARY_RESULT_PATH"]
-          TITLE = "llms-docs canary: upstream llms.txt drift detected"
+          TITLE_DRIFT = "llms-docs canary: upstream llms.txt drift detected"
+          TITLE_FETCH = "llms-docs canary: upstream fetch failures (transient?)"
 
           server_url = os.environ.get("GITHUB_SERVER_URL", "")
           repo = os.environ["GITHUB_REPOSITORY"]
@@ -220,6 +263,10 @@ jobs:
               checks = None
 
           if not checks:
+              # No per-check data to classify by (the check step crashed before
+              # recording anything) - that's itself worth surfacing loudly
+              # rather than filing it as "probably transient".
+              TITLE = TITLE_DRIFT
               body = (
                   "Weekly live smoke test for llms-docs upstream sources did not "
                   "produce a normal result (the check step likely crashed before "
@@ -227,6 +274,15 @@ jobs:
                   f"See the run log for details: {run_url}"
               )
           else:
+              failed_checks = [c for c in checks if not c.get("ok")]
+              # Only use the softer "transient?" title when every failure is a
+              # fetch-layer failure; any structural/threshold failure mixed in
+              # falls back to the drift title (and so does an empty
+              # failed_checks, which this step reaching this point shouldn't
+              # produce now that it only runs on an actual smoke-step failure).
+              TITLE = TITLE_FETCH if failed_checks and all(
+                  c.get("kind") == "fetch" for c in failed_checks
+              ) else TITLE_DRIFT
               lines = [
                   "Weekly live smoke test detected a problem with one or more "
                   "llms-docs upstream sources (`.github/workflows/llms-docs-canary.yml`).",
@@ -253,7 +309,11 @@ jobs:
               print(f"WARNING: gh issue list failed (exit {list_proc.returncode}): {list_proc.stderr}", file=sys.stderr)
               existing = []
           else:
-              existing = json.loads(list_proc.stdout or "[]")
+              try:
+                  existing = json.loads(list_proc.stdout or "[]")
+              except ValueError as e:
+                  print(f"WARNING: gh issue list returned unparseable JSON ({e}); treating as no existing issue", file=sys.stderr)
+                  existing = []
 
           match = next((i for i in existing if i.get("title") == TITLE), None)
 
