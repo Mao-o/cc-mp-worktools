@@ -440,6 +440,14 @@ class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
         self.assertIsNone(in_submodule(".env", {".env", "vendor"}))
         # prefix 一致 (submodule 配下の実ファイル) は従来どおり検出すること
         self.assertEqual(in_submodule(".env/leaf.txt", {".env"}), ".env")
+        # ネストした未初期化 submodule (vendor は初期化済み、vendor/deep は
+        # 未初期化) でも同じ完全一致が起きる。gitlink "vendor/deep" は
+        # vendor/deep 自身の index ではなく vendor の index が持つため、
+        # 完全一致を除外した上で prefix 一致に回すと正しく "vendor" (深い方
+        # ではなく実際の所有者) に解決されることを固定する
+        self.assertEqual(
+            in_submodule("vendor/deep", {"vendor", "vendor/deep"}), "vendor"
+        )
 
     def test_symlinked_submodule_cycle_terminates_without_recursion_error(self):
         """壊れた/悪意ある submodule 構成が symlink で祖先を指す場合の防御
