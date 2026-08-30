@@ -165,6 +165,10 @@ _LONG_RECIPE_TEMPLATE = "  ... (先頭の除外行は path が長すぎるため
 # でも切ることで静的部分を実際に固定サイズに保つ。
 _SUBMODULE_DIRS_MAX_CHARS = 400
 
+# 「予算を気にせず素のまま組み立てたときの長さ」を測るための実質無限大。
+# ``MAX_OUTPUT_CHARS`` より確実に大きければよい (畳み判定を通さないための番兵)。
+_UNBOUNDED = 1 << 30
+
 
 def _distinct(names: list[str]) -> list[str]:
     """``exclude_recipe_lines`` と**同じ規則**で重複除去した一覧を返す。
@@ -254,6 +258,24 @@ def _recipe_with_budget(
     return [*kept, marker], used + reserve
 
 
+def _fit_alts(rules: list[str], budget: int) -> list[str]:
+    """basename 形の項目 (```!a```) を ``budget`` に収まる分だけ返す。
+
+    区切りは ``" / "`` の 3 文字 (2 件目以降)。行ではなく 1 行の**中身**なので、
+    ``_fit_lines`` のような改行分 (+2) は乗らない。
+    """
+    items: list[str] = []
+    used = 0
+    for rule in rules:
+        item = f"`{rule}`"
+        cost = _json_chars(item) + (3 if items else 0)
+        if used + cost > budget:
+            break
+        items.append(item)
+        used += cost
+    return items
+
+
 def _alts_with_budget(rules: list[str], total: int, budget: int) -> str:
     """basename 形の併記文字列 (```!a` / `!b```) を ``budget`` に収める。
 
@@ -262,20 +284,18 @@ def _alts_with_budget(rules: list[str], total: int, budget: int) -> str:
     (「同名ファイルをすべて外したい場合だけ〜」) は静的側にあるため、1 件も
     入らないときも空文字列は返さず ``... (N more)`` を返す (行が尻切れに
     なるのを防ぐ)。
+
+    ``_enumerate_with_budget`` / ``_recipe_with_budget`` と同じ二段構え:
+    まず素の予算で詰めてみて、**全件入るならマーカー分を確保しない**。
+    無条件に確保すると、全件収まる入力でも枠が狭まって畳まれる (= 予算導入
+    前より表示が減る) 退行になる。実測: 200 文字の basename 20 件で旧実装が
+    全件出していた入力が 0 件に潰れた。
     """
-    marker = f"... ({total} more)"
-    reserve = _json_chars(marker) + 3  # マーカー本体 + " / " 区切り
-    items: list[str] = []
-    used = 0
-    for rule in rules:
-        item = f"`{rule}`"
-        cost = _json_chars(item) + (3 if items else 0)
-        if used + cost > max(0, budget - reserve):
-            break
-        items.append(item)
-        used += cost
+    items = _fit_alts(rules, budget)
     if len(items) == total:
         return " / ".join(items)
+    reserve = _json_chars(f"... ({total} more)") + 3  # マーカー + " / " 区切り
+    items = _fit_alts(rules, max(0, budget - reserve))
     tail = f"... ({total - len(items)} more)"
     return " / ".join([*items, tail]) if items else tail
 
@@ -521,7 +541,29 @@ def _build_reason(
     # レシピ (`!` 行 + basename 併記) を先に配分する。半分で頭打ちにするのは、
     # 長大な path のレシピが予算を独占してファイル列挙が 0 件になるのを防ぐ
     # ため。使い切らなかった分はファイル列挙へ回る。
-    recipe_budget = remaining // 2
+    #
+    # ただし**素の出力が丸ごと予算に収まるなら頭打ちを外す**: 半分で切ると、
+    # 予算導入前なら全件出ていた入力 (長い basename が 20 件 + 短い path など)
+    # で併記が畳まれ、表示が減る退行になる (実測)。必要量が全部収まると
+    # 分かっているときは必要分だけ渡し、残りをファイル列挙に回す。
+    recipe_need = sum(_json_chars(ln) + 2 for ln in recipe_rules)
+    if recipe_total > len(recipe_rules):
+        recipe_need += (
+            _json_chars(
+                _OMITTED_RECIPE_TEMPLATE.format(n=recipe_total - len(recipe_rules))
+            )
+            + 2
+        )
+    alts_need = (
+        _json_chars(_alts_with_budget(alts_rules, alts_total, _UNBOUNDED))
+        if path_names is not None
+        else 0
+    )
+    enum_need = sum(_json_chars(f"  - {p}") + 2 for p in paths)
+    if recipe_need + alts_need + enum_need <= remaining:
+        recipe_budget = recipe_need + alts_need
+    else:
+        recipe_budget = remaining // 2
     recipe_lines, recipe_used = _recipe_with_budget(
         recipe_rules, recipe_total, recipe_budget
     )

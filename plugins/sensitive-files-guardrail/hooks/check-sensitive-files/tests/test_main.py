@@ -1052,6 +1052,38 @@ class TestRecipeLinesInBudget(unittest.TestCase):
             self.assertIn(f"  !{name}\n", reason)
         self.assertIsNone(_RECIPE_MARKER_RE.search(reason))
 
+    def test_fitting_input_is_not_narrowed_by_the_new_budget(self):
+        """予算に丸ごと収まる入力は、予算を導入した側で狭めないこと。
+
+        自己レビューの旧版比較 (merge 済み実装と本 branch に同じコーパスを
+        流して出力を突き合わせる) で見つかった退行の回帰テスト。basename 形の
+        併記だけが折り畳みマーカー分を**無条件に**確保していたため、全件
+        収まる入力でも枠が足りなくなり表示が減っていた (120 文字の basename
+        20 件 + 短い path で 20 件 → 11 件、200 文字なら 0 件に潰れた)。
+
+        「上限を超えない」ことだけを見る格子テストでは**原理的に検出できない**
+        (減る方向は常に上限を満たすため)。旧版との出力ペア比較でしか分から
+        ない型なので、境界値を床として固定する。
+        """
+        entry = _load_entry()
+        names = [f"d/{'b' * 120}{i}.env" for i in range(20)]
+        reason = self._reason(entry, tracked=names)
+        # この入力は予算に収まる (= 畳む理由が無い)
+        self.assertLessEqual(
+            _stdout_chars(entry, reason), entry.MAX_OUTPUT_CHARS
+        )
+        alts_line = next(
+            ln
+            for ln in reason.split("\n")
+            if ln.startswith("同名ファイルをすべて外したい")
+        )
+        self.assertEqual(alts_line.count("`!"), len(names), msg=alts_line[:200])
+        self.assertNotIn("more)", alts_line)
+        # レシピ行とファイル列挙も全件
+        self.assertEqual(len(re.findall(r"^  !", reason, re.M)), len(names))
+        self.assertEqual(len(re.findall(r"^  - ", reason, re.M)), len(names))
+        self.assertIsNone(_RECIPE_MARKER_RE.search(reason))
+
     def test_recipe_marker_reports_a_single_truthful_count(self):
         """limit 由来と予算由来のマーカーが二重に出ない。
 
