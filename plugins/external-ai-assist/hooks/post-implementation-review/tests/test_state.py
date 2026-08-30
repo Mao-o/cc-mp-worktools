@@ -189,6 +189,12 @@ class TestBashSnapshot(StateTestCase):
     def test_missing_snapshot_returns_none(self):
         self.assertIsNone(state.pop_bash_snapshot(SESSION, "nope"))
 
+    def test_snapshot_file_is_created_with_0600(self):
+        """内部バックログ: 共有 $TMPDIR で他ユーザーから絶対パス一覧が読めないこと。"""
+        state.save_bash_snapshot(SESSION, "tu_mode", {"a.py": ["M", 1, 2]})
+        path = state._bash_snapshot_path(SESSION, "tu_mode")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
 
 class TestCursorLock(StateTestCase):
     def test_same_worktree_is_exclusive(self):
@@ -292,6 +298,18 @@ class TestGc(StateTestCase):
 
     def test_gc_on_missing_root_is_noop(self):
         self.assertEqual(stategc.gc_stale(), 0)
+
+    def test_gc_hardens_preexisting_loose_state_root(self):
+        """内部バックログ: 旧版が既定 umask (0o755 相当) で作った state_root を
+        Stop 契機 (gc_stale) で 0o700 に締め直すこと。"""
+        root = state.state_root()
+        os.makedirs(root, mode=0o755, exist_ok=True)
+        os.chmod(root, 0o755)  # makedirs の mode は umask で削られうるため明示
+        self.assertEqual(os.stat(root).st_mode & 0o777, 0o755)
+
+        stategc.gc_stale()
+
+        self.assertEqual(os.stat(root).st_mode & 0o777, 0o700)
 
     def test_held_lock_file_survives_gc(self):
         """GC がロック保持中のファイルを消すと inode が分岐して排他が壊れる。"""

@@ -5,6 +5,171 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.9.0
+
+**2026-08 内部バックログ精査の第 2 弾 (誤 block / 外部送信制御 / 長時間 block の
+離脱率低減)。挙動変更を含むため minor bump。**
+
+### 1. post-implementation-review: 同一ターン内で commit した変更が黙って消えるのを解消
+
+`state.py` は pending 記録時に git を呼ばない設計 (PostToolUse を軽く保つため) の
+ため、変更を pending に積んでから Stop までの間にそのパスを commit すると
+`git diff HEAD -- <path>` が空になり、0.8.0 以前は一度もレビューされないまま
+黙って消費されていた。
+
+基点を「pending 記録時点の HEAD」にずらして遡って diff を復元する案は採らない:
+`git diff <base> -- <path>` は base 以降にそのパスを通過した**全ての変更**を
+拾ってしまう。他人の commit が pull で入っただけでも成立し、この plugin が
+差分を送る外部 AI CLI への送信範囲が広がる。同種の懸念に対し、`git rev-list
+--not --remotes` で「その範囲の commit がどのリモートにも存在しない」ことを
+証明できた場合だけ復元する案も検証したが、この証明は「リモート由来でない」
+ことしか示せず「このセッションが書いた」ことは示せない。同一 worktree を
+共有する別のローカルの書き手 (別セッション・人間の手動 commit) が push せずに
+同じパスへ commit した内容まで復元して送ってしまうことが判明したため、
+この案も採用しない。
+
+- HEAD 基準の diff が空になった tracked パスは**復元を試みない**。空になった
+  理由 (同一ターン内 commit・別の書き手の commit・pull/merge・単に無変更) は
+  区別せず、常に同じ扱いにする
+- パスを黙って消費せず、そのパスが実在するなら `systemMessage` に
+  「差分が空で取得できませんでした (commit 済みの可能性)」として列挙し、次ターン
+  以降に繰り返し報告しないよう pending からは外す
+- 安全な復元には編集時点の内容退避 (PostToolUse の時点でファイル内容を保存し、
+  Stop 時に比較する) が要るが、「PostToolUse を軽く保つ」という既存の設計と
+  衝突するため見送る。**送信範囲が広がる方向には倒さない**方針を優先する
+- 詳細な設計判断の変遷は `hooks/post-implementation-review/CLAUDE.md` の
+  「HEAD 基準が空になったパスは復元せず通知する」節、および「却下した設計案」
+  節を参照
+
+### 2. Windows で `fcntl` の import 失敗により毎ツール呼出で hook error 通知が出る問題を修正
+
+`_common/flock.py` (排他ロック) と `post-implementation-review/state.py` は
+`fcntl` を直接 import しており、Windows には存在しないモジュールのため、
+`exitplan-review` と `post-implementation-review` は起動直後の import 例外で
+毎ツール呼出のたびに hook error 通知が出ていた (README の「前提」節には以前から
+この制限を明記していたが、実際にクラッシュを防ぐ判定は無かった)。
+
+- 両 hook の `__main__.py` 冒頭に `os.name != "posix"` の判定を追加し、`fcntl` に
+  依存する他モジュールを import する前に exit 0 で抜けるようにした
+- `explore-parallel` はこの 2 つに依存しない実装のため対象外 (Windows での動作は
+  引き続き未検証)
+
+### 3. cursor/codex を hook プロセスの cwd ではなくリポジトリ root で起動するよう修正
+
+`post-implementation-review/cursor.py` と `exitplan-review/{cursor,codex}.py` は
+起動 cwd を指定しておらず、外部 CLI は hook プロセス自身の cwd (Claude Code の
+起動ディレクトリ) で起動されていた。Claude Code をリポジトリのサブディレクトリで
+起動したセッションでは、差分のパス (`gitscan.py` が返す worktree root 相対) と
+cursor/codex のワークスペースが食い違い、参照・探索が外れる。
+
+- `post-implementation-review`: `cursor.review()` に `cwd` キーワード引数を追加し、
+  `_run_review` が解決済みの worktree root を渡す
+- `exitplan-review`: 新設した `_common/gitroot.py` (`worktree_root`。
+  `post-implementation-review/gitscan.py` の同名関数はここへ委譲するよう統合) で
+  payload の cwd から root を解決し、`cursor.review()` / `codex.review()` に渡す
+- git 外 (`worktree_root` が None) の場合は `cwd=None` のままとし、レビュアー自身の
+  既定 (hook プロセスの cwd) に委ねる (挙動不変)
+
+### 4. 共有 `$TMPDIR` で state / レビュー結果ファイルが他ユーザーから読める問題を修正
+
+state ファイル・Bash スナップショット・レビュー結果の参照コピーは絶対パス一覧や
+レビュー本文 (コード抜粋) を含むが、既定 umask のまま作成されていたため、
+macOS の `$TMPDIR` はユーザー専用ディレクトリで実害が無い一方、Linux の共有
+`/tmp` では他ユーザーから読めた (`-rw-r--r--` を実機で確認)。
+
+- `_common/flock.py`: 新規作成するディレクトリを 0o700、ファイルを 0o600 で
+  作るよう変更 (`locked_file` / 新設 `write_private`)。`os.makedirs(mode=...)` が
+  最後の階層にしか mode を適用しない仕様のため、多階層パスの中間ディレクトリも
+  1 階層ずつ 0o700 で作る `_makedirs_private` を追加
+- 旧版が既定 umask で作った**既存**ディレクトリは、`stategc.gc_stale()`
+  (post-implementation-review、Stop 契機) と `_gc_stale_markers()`
+  (exitplan-review、ExitPlanMode 契機) から新設 `flock.harden_dir` を呼び、
+  periodic GC のたびに 0o700 へ締め直す (retrofit)。共有 `/tmp` で他ユーザー
+  所有のディレクトリを掴んだ場合の chmod 失敗は fail-open で無視する
+- 既存ファイルの権限までは retrofit しない (親ディレクトリが 0o700 になれば
+  他ユーザーは traversal 自体ができず、ファイル単体の mode に関わらず読めなく
+  なるため)
+
+### 5. 事前に作られた状態ディレクトリを無条件に信用していた問題を修正 (マージ前レビューの指摘)
+
+共有 `$TMPDIR` では、hook がまだ一度も動いていない環境で他ユーザーが先回りして
+状態ディレクトリ (`state_root()` / exitplan-review の `marker_dir`) を作れる。
+`_makedirs_private` は「既に存在する」だけで受け入れて早期 return しており、
+後段の `harden_dir` による締め直しが所有者違いで失敗してもその失敗を無視して
+いた。結果、攻撃者が所有する誰でも書けるディレクトリを作られると、配下の
+0o600 ファイルをディレクトリの書込権限で列挙・削除・差し替えでき、この plugin
+がファイル単体を 0o600 にした意味が失われていた。
+
+- `_common/flock.py`: hook が所有する最上位ディレクトリ (1 階層) だけを対象に
+  検査する `ensure_private_root` を新設。新規作成なら無条件に安全、既存なら
+  所有者 (実効ユーザー一致) と権限 (group/other 書込不可) を検査し、
+  **どちらも満たさなければ、その場で締め直しが成功したかに関わらずこの回は
+  使用を拒否する** (`UnsafeStateDirError`)。「見つかった時点で緩かった」という
+  事実自体が、緩かった間に他ユーザーが中身を書き換えた可能性を否定できない
+  ため。締め直し自体は次回以降のために試みるので、自己所有で chmod が効く
+  環境なら 1 回のスキップだけで自己修復する。symlink には chmod を呼ばない
+  (symlink を状態ディレクトリとして掴まされた場合、既定で symlink を辿る
+  `os.chmod` を無条件に呼ぶと symlink 先の権限を変えてしまうため)
+- **`_makedirs_private` 自体は変更しない**: この再帰は必ず `$TMPDIR` 自身
+  (典型的には root 所有・group/other 書込可な sticky-bit 共有ディレクトリ) まで
+  遡るため、既存ディレクトリの検査をここに混ぜると `$TMPDIR` 自体を弾いて
+  hook の初回起動が壊れる。検査は hook が所有するちょうど 1 階層に絞った
+  `ensure_private_root` の責務にした
+- post-implementation-review: `handle_pre_tool` / `handle_post_tool` /
+  `handle_stop` それぞれで、`review_enabled()` / `cursor.is_available()`
+  (`handle_pre_tool` はさらに `bash_tracking_enabled()`) の**後**・
+  `stategc.gc_stale()` (`handle_stop` のみ) の**前**に呼ぶ。前者より前に
+  置くと、機能を使っていない利用者にまで毎ツール呼び出し/毎ターン無関係な
+  `os.mkdir`/`chmod` の試行や通知が発生してしまう (マージ前レビューの指摘)。この結果
+  `handle_stop` は **`stategc.gc_stale()` を無効化中 / cursor 未インストール中は
+  呼ばなくなった** (以前は先頭で無条件に呼んでいた) — 無効化中に GC が
+  止まるのは pre-tool/post-tool が既にその間 state を一切書かないのと整合的
+  だが、無効化前に溜まった残骸は再度有効化するまで掃除されない副作用がある。
+  `pre-tool` / `post-tool` は安全でなければ state を書き込まず log のみ
+  (ツール呼び出しごとにエラーに見える通知は出さない)。`handle_stop` は
+  利用者向けに `systemMessage` で 1 行 (「状態ディレクトリ...の所有者/権限が
+  信頼できないため、このターンはレビューをスキップしました」) 通知する
+- exitplan-review: `main()` で `active` (レビュアー選択が空でない) の判定の
+  **後**・`_gc_stale_markers()` の**前**に `marker_dir` を検査する。post-implementation-review
+  と同じ理由 (機能を使っていない利用者への無関係な通知を防ぐ) で、この結果
+  `_gc_stale_markers()` は以前より**大きく後ろ**にずれた: `tool_name ==
+  "ExitPlanMode"` の判定直後という無条件の位置から、`session_id` 存在・
+  `tool_input` が dict・`plan` が非空文字列・`review_enabled()` /
+  `EXTERNAL_AI_REVIEW_MAX<=0` の無効化判定・`selected_reviewers()` の
+  `active` 非空、の**全てを通過した後**でしか呼ばれなくなった。つまり
+  plan が空・`tool_input` が不正といった早期 exit でも GC が走らなくなる
+  (post-implementation-review 側は enable/cursor の 2 判定だけ後ろにずれた
+  のに対し、exitplan-review は判定が多い分ずれ幅も大きい)。拒否されたら
+  それまでに溜まった notices (未知のレビュアー名の警告等) と合わせて 1 行
+  通知してレビューを行わない
+- テスト: `_common/tests/test_flock.py::TestEnsurePrivateRoot` (新規作成・
+  自己所有での retrofit・所有者違い・symlink・通常ファイルの衝突を単体で検証)、
+  `post-implementation-review/tests/test_stop_flow.py::TestUnsafeStateDir`、
+  `exitplan-review/tests/test_unsafe_marker_dir.py` (いずれも
+  world-writable ディレクトリを人工的に作って拒否を確認する end-to-end)
+
+### 6. 追跡ファイルの削除が同一ターン内で commit されると通知からも漏れていた問題を修正 (マージ前レビューの指摘)
+
+上記 1. の「HEAD 基準の diff が空のパスは復元せず通知する」対応は、そのパスが
+**ディスク上に実在する**ことも通知の条件にしていた。追跡ファイルの削除が
+同一ターン内で commit されると、HEAD 基準の diff が空になるだけでなく削除に
+よってディスク上からもパスが消えるため、この条件だけ満たせず、通知対象からも
+pending からも漏れて黙って claim が完了していた (commit 済みの変更が一度も
+レビューされないまま消える、という 1. が解消したはずのバグを削除のケースだけ
+再現していた)。
+
+- `post-implementation-review/__main__.py::_collect_diffs`: `batch.unretrievable`
+  への追加条件からディスク上の実在チェックを外した。追跡 (untracked ではない)・
+  HEAD が存在する・HEAD 基準の diff が空、の 3 条件のみで通知対象にする
+- 一度も commit されていないファイル (作成後、同一ターン内で削除して一度も
+  commit しなかった一時ファイル等) との区別は諦めた: どちらも「HEAD 上に
+  存在しない」状態になった時点で `git cat-file -e HEAD:<path>` が両方とも
+  失敗し、この hook の git 予算に収まる cheap な状態確認だけでは区別できない
+  (履歴全体を辿れば区別できるが、予算超過になる)。雑音低減より正当な削除を
+  落とさないことを優先し、区別を諦めて常に通知する
+- テスト: `tests/test_stop_flow.py::TestSameTurnCommitNotification::
+  test_committed_deletion_is_reported_not_silently_dropped`
+
 ## 0.8.0
 
 **Stop / PreToolUse(ExitPlanMode) の hook 出力形式を見直した batch (2026-08 内部

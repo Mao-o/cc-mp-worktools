@@ -144,7 +144,9 @@ docstring と README を参照。判定には実体 (realpath 相対。git に�
 Bash 経由の変更で、`git status` は実体名 (`ordinary/data.json`) しか返さないため lexical 名が
 claim に現れない (Codex R2 P1)。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
-rev-parse 2×2 + ls-files (symlink) 10 + ls-files (untracked) 10 + diff 30 + 5 = 59s。
+rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
++ ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
+= 59s (詳細は `gitscan.py` モジュール docstring の予算表)。
 
 **予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
 切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。
@@ -209,6 +211,59 @@ turn 1 と turn 7 で同じファイルを編集すると turn 1 の hunk が tu
 ファイル全体の変更文脈を渡すため) した上で、**パス単位の diff hash** で重複を潰す:
 そのパスの diff が前回レビュー時と 1 バイトも変わっていなければレビューに載せない。
 
+### HEAD 基準が空になったパスは復元せず通知する
+
+HEAD 基準には副作用がある: pending に積んだ後、Stop までの間にそのパスを commit
+すると `git diff HEAD -- <path>` が空になり、0.8.0 以前は黙って消費されて一度も
+レビューされないまま消えていた。
+
+**基点を「pending 記録時点の HEAD」にずらす素朴な案は採らない。** `git diff <base> --
+<path>` は「base 時点の内容」対「現在のディスク上の内容」の比較なので、base 以降に
+そのパスを**通過した全変更**を拾う。他人の commit が pull で入っただけでも成立し、
+この plugin は差分を外部 AI CLI に送るため送信範囲が広がってしまう。
+
+0.9.0 は一度、この基点を Stop 側で記録し、`git rev-list --count <base>..HEAD` と
+`--not --remotes` 付きの同カウントを比較する「手元由来の証明」(その範囲の commit が
+全てリモートに存在せず手元だけで作られたものか) が通ったときだけ基点まで遡った
+diff を復元する経路を実装した。**この証明は「リモート由来でない」ことしか示して
+おらず、「このセッションが書いた」ことは示していない。** 同一 worktree を共有する
+別のローカルの書き手 (別セッション・人間の手動 commit) が push せずに同じパスへ
+commit すると、その内容が丸ごと外部へ送信されてしまう — pull/merge 経由の混入は
+正しく遮断できていたが、これは別ベクトルであり、マージ前レビューで実際に送信
+されることが実演されたため復元経路そのものを撤去した。
+
+**確定した設計 (復元せず、常に通知する)**:
+
+- HEAD 基準 diff が空だった tracked パスは `batch.unretrievable` に積む
+  (**ディスク上に実在するかは問わない**、マージ前レビューの指摘)。空になった理由
+  (同一ターン内 commit・別の書き手の commit・pull/merge・単に無変更) は区別しない
+  — 区別しても「復元してよいか」の判断には使わないため
+  - 以前はここに「そのパスが実際に存在する (phantom な pending エントリでは
+    ない)」という条件も加えていたが、これだと**追跡ファイルの削除が同一ターン内で
+    commit されたケース** (HEAD にもディスクにもパスが無くなる) が通知対象から
+    漏れて黙って消費されていた。一度も commit されていない phantom エントリ
+    (作成後に同一ターン内で削除して commit しなかった一時ファイル等) との区別は
+    cheap な git 状態だけでは付かない (`git cat-file -e HEAD:<path>` は削除
+    commit 後どちらのケースでも失敗する) ため、区別を諦めて常に通知する側を
+    選んだ (正当な削除の見落としの方が実害が大きいため)
+- `_run_review` は `batch.unretrievable` を `systemMessage` に
+  「差分が空で取得できませんでした (commit 済みの可能性。内容は送信していません)」
+  として列挙し、pending からは外す (黙って消費しない。ただし取得できなかった旨を
+  伝えるだけで、commit されたと断定はしない — 実際には revert のみで commit が
+  無かった可能性もあるため)
+- 安全な復元には編集時点の内容退避 (PostToolUse の時点でファイル内容を退避し、
+  Stop 時にそれと比較する) が要るが、これは「PostToolUse を軽く保つ」という既存の
+  設計意図と衝突するため、この batch では見送る
+
+**失敗方向は明確: 送信範囲が広がる側には倒さない。** 復元できないときは常に
+「取得できなかった」と可視化するだけにする。「黙って消える」を「取得できな
+かったと報告される」に変えるのが本対応の主眼で、基点まで遡った復元は撤去した
+(設計の変遷は `CHANGELOG.md` の該当節を参照)。regression テストは
+`tests/test_stop_flow.py::TestSameTurnCommitNotification`
+(`test_other_local_writer_commit_is_not_leaked` が今回撤去した脆弱性の再現、
+`test_committed_deletion_is_reported_not_silently_dropped` が
+「ディスク上に実在するか」を条件にしていた頃の見落としの再現)。
+
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 
 推測で組むと壊れる箇所なので、nested `claude -p --plugin-dir` で payload を実測した。
@@ -229,6 +284,11 @@ turn 1 と turn 7 で同じファイルを編集すると turn 1 の hunk が tu
 - **transcript 解析 (ステートレス)** — 状態ファイルもロックも不要だが、再現できる境界が
   「直前の user メッセージ以降」で要件と別物。持ち越し分を永久にレビューできない。
   加えて transcript の JSONL 形状は非公式でフォーマット変更に弱い
+- **`git rev-list --not --remotes` による「手元由来の証明」を通った基点まで
+  diff を遡って復元する** — 「リモートに存在しない」ことしか示せず「このセッション
+  が書いた」ことは示せないため、同一 worktree の別のローカルの書き手が push せずに
+  commit した内容まで復元して送ってしまう (詳細は「HEAD 基準が空になったパスは
+  復元せず通知する」節)
 
 ## $TMPDIR のレイアウトと GC
 
@@ -349,7 +409,7 @@ reference (`Stop decision control` 節) 逐語:
 - 版数を理由に auto 解決が `block` に倒れたときだけ `systemMessage` に付記文を足す
   (どの版数だったか、または「不明」)。明示 `MODE=block` では付記文を混ぜない
 - Stop の待ち時間の絶対上限が 674 秒 → 677 秒に変化 (`claude --version` の timeout
-  3秒が worst case に加わる。690秒の hook timeout には収まる。
+  3秒が worst case に加わる。690秒の hook timeout には収まっている。
   `tests/test_review_set.py::TestTimeoutBudgets` 参照)
 - テストは実機の `claude` を起動しない。既存テストを含む全体が
   `tests/_testutil.py::PINNED_VERSION_ENV` (`CLAUDE_CODE_VERSION` を対応版数に固定) の
@@ -383,6 +443,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
+| HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`) |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |

@@ -38,8 +38,14 @@ def timeout_sec() -> float:
     return settings.duration(ENV_TIMEOUT, TIMEOUT_SEC, MAX_TIMEOUT_SEC)
 
 
-def review(plan_text: str) -> str | None:
-    """Codex でプランをレビューし、整形済み結果を返す。失敗時は None。"""
+def review(plan_text: str, *, cwd: str | None = None) -> str | None:
+    """Codex でプランをレビューし、整形済み結果を返す。失敗時は None。
+
+    `cwd` は git 作業ツリーの root を渡すこと (`__main__.main` が payload の cwd から
+    解決して渡す)。未指定 (None) だと codex は hook プロセス自身の cwd で起動され、
+    Claude Code をサブディレクトリで起動したセッションではリポジトリ全体を見ずに
+    レビューすることになる (内部バックログ)。
+    """
     try:
         prompt = _PROMPT_FILE.read_text(encoding="utf-8")
     except OSError:
@@ -49,5 +55,6 @@ def review(plan_text: str) -> str | None:
         [BINARY, "exec", "-s", "read-only", "--ephemeral", prompt],
         timeout_sec=timeout_sec(),
         input_text=plan_text,
+        cwd=cwd,
         max_output_chars=MAX_OUTPUT_BYTES,
     )

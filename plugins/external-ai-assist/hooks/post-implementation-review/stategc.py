@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import time
 
+from _common import flock
+
 from state import BASH_SNAPSHOT_TTL_SEC, STATE_TTL_SEC, _tmp_root, state_root
 
 # 旧実装 (v0.2.0 以前) が残した一時ファイル。
@@ -23,7 +25,14 @@ def gc_stale(now: float | None = None) -> int:
     """TTL 超過の状態ファイル・スナップショット・レビュー結果を削除し、件数を返す。
 
     Stop でのみ呼ぶ (PostToolUse ごとに走らせるほどの緊急性はない)。
+
+    あわせて `state_root()` の権限を retrofit する (内部バックログ)。0.8.x 以前は
+    ディレクトリを既定 umask で作っていたため、旧バージョンからアップグレードした
+    環境では既存ディレクトリが 0o700 になっていない。新規作成分は
+    `_common.flock` 側 (`_makedirs_private`) が締めるので、ここでは
+    「既に存在する」ディレクトリの締め直しだけを行う。
     """
+    flock.harden_dir(state_root())
     now = time.time() if now is None else now
     removed = 0
     for path, ttl in _gc_candidates():

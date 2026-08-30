@@ -168,9 +168,11 @@ class HookTestCase(unittest.TestCase):
     def stop(self, session_id: str, review_result: str | None) -> str:
         """Stop hook を 1 回起動する。cursor.review() の戻り値を差し替える。"""
         calls: list[str] = []
+        cwds: list[str | None] = []
 
-        def fake_review(diff_text: str):
+        def fake_review(diff_text: str, *, cwd: str | None = None):
             calls.append(diff_text)
+            cwds.append(cwd)
             return review_result
 
         with mock.patch.object(self.cursor, "review", side_effect=fake_review):
@@ -179,6 +181,7 @@ class HookTestCase(unittest.TestCase):
                 {"session_id": session_id, "cwd": self.repo, "stop_hook_active": False},
             )
         self.review_calls = calls
+        self.review_cwds = cwds
         return output
 
     def stop_raising(self, session_id: str, error: Exception) -> str:

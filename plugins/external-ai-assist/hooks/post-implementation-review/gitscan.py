@@ -31,6 +31,8 @@ from __future__ import annotations
 import os
 import subprocess
 
+from _common import gitroot
+
 # 内部 timeout は hooks.json の hook timeout に**収まる**ように決める。超えると
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
@@ -92,17 +94,11 @@ def _decode(raw: bytes | None) -> str:
 def worktree_root(cwd: str) -> str | None:
     """cwd を含む git 作業ツリーの root を realpath で返す。git 外なら None。
 
-    realpath を通すのは必須。macOS では `/tmp` が `/private/tmp` の symlink で、
-    hook payload の cwd と `git rev-parse --show-toplevel` の出力で表記が割れる。
-    素の startswith 比較だと全パスが「作業ツリー外」に落ちる。
+    実装は `_common.gitroot` に一本化している (exitplan-review も cursor/codex の
+    起動 cwd を解決するのに同じロジックが要るため。macOS の `/tmp` ->
+    `/private/tmp` symlink 対応などの詳細はそちら参照)。
     """
-    if not cwd:
-        return None
-    res = _git(cwd, ["rev-parse", "--show-toplevel"], timeout=REV_PARSE_TIMEOUT_SEC)
-    if res is None or res.returncode != 0:
-        return None
-    top = _decode(res.stdout).strip()
-    return os.path.realpath(top) if top else None
+    return gitroot.worktree_root(cwd)
 
 
 def head_exists(root: str) -> bool:

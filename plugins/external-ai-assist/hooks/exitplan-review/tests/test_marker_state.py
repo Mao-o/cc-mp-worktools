@@ -123,7 +123,7 @@ class TestStaleReservationReclaim(MarkerStateTestCase):
 class TestEndToEndConfirmSlot(HookTestCase):
     """confirm_slot が実際の block / context 経路で呼ばれること。
 
-    advisor 指摘の「最も疑わしいバグ」: 呼び忘れると、正当に確定した block でも
+    マージ前レビューの指摘の「最も疑わしいバグ」: 呼び忘れると、正当に確定した block でも
     RESERVATION_TTL_SEC 経過後に「kill された仮予約」と誤認されて count が
     静かにロールバックされ、上限が実質緩んでしまう。
     """
@@ -202,6 +202,28 @@ class TestMarkerGc(MarkerStateTestCase):
 
     def test_gc_on_missing_dirs_is_noop(self):
         self.entry._gc_stale_markers()  # 例外を出さないことのみ確認
+
+    def test_gc_hardens_preexisting_loose_marker_dir(self):
+        """内部バックログ: 旧版が既定 umask (0o755 相当) で作った plan-review-markers/ を
+        ExitPlanMode 呼出契機 (_gc_stale_markers) で 0o700 に締め直すこと。"""
+        marker_dir = os.path.join(self.tmpdir, "plan-review-markers")
+        os.makedirs(marker_dir, exist_ok=True)
+        os.chmod(marker_dir, 0o755)
+        self.assertEqual(os.stat(marker_dir).st_mode & 0o777, 0o755)
+
+        self.entry._gc_stale_markers()
+
+        self.assertEqual(os.stat(marker_dir).st_mode & 0o777, 0o700)
+
+
+class TestReviewCopyPermissions(HookTestCase):
+    """内部バックログ: レビュー結果の参照コピー (`plan-review-<session>.txt`、プラン内容の
+    抜粋を含む) が共有 $TMPDIR で他ユーザーから読めないこと。"""
+
+    def test_review_copy_file_is_created_with_0600(self):
+        self.assertBlocked(self.exitplan(SESSION, PLAN, FINDINGS, "REVIEW_CLEAN"))
+        path = os.path.join(self.tmpdir, f"plan-review-{SESSION[:8]}.txt")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

@@ -824,5 +824,312 @@ class TestGuards(HookTestCase):
             self.assertReviewed("a.txt")
 
 
+class TestReviewCopyPermissions(HookTestCase):
+    """内部バックログ: レビュー結果の参照コピー (コード抜粋を含む) が共有 $TMPDIR で
+    他ユーザーから読めないこと。"""
+
+    def test_review_copy_file_is_created_with_0600(self):
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        output = self.stop(SESSION_A, "1. **直接影響** — 何か壊れる")
+        self.assertBlocked(output)
+        path = self.state.review_copy_path(SESSION_A)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
+class TestUnsafeStateDir(HookTestCase):
+    """共有 $TMPDIR で他ユーザーが先回りして状態ディレクトリを
+    作った場合、使わずにレビューを拒否する (`_common/flock.py` の
+    `ensure_private_root`)。"""
+
+    def _state_root(self) -> str:
+        return os.path.join(self.tmpdir, "post-implementation-review")
+
+    def test_world_writable_state_root_is_refused(self):
+        """regression: 状態ディレクトリが (pending 記録後 Stop までの間に) 誰でも
+        書けるディレクトリへ変わっていても、黙って受け入れずレビューを拒否し、
+        その旨を 1 行通知する。
+
+        `self.edit()` を**先に**呼んで通常どおり pending へ記録させてから
+        ディレクトリを緩める順序にしている: `handle_post_tool` も
+        `ensure_private_root` を呼ぶため (`_private_root_ok`)、先に緩めてから
+        `self.edit()` を呼ぶと PostToolUse の時点で締め直され (自分所有なので
+        chmod は成功する)、Stop 側の検査を確かめる前に安全な状態へ戻ってしまう。
+        `os.mkdir(mode=...)` は umask でマスクされうるため、`os.chmod` で
+        明示的に 0o777 にする (verifying-changes-empirically の負テスト作法)。
+        """
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        abs_path = os.path.join(self.repo, "a.py")
+        self.assertIn(abs_path, self.pending(SESSION_A))
+
+        root = self._state_root()
+        os.chmod(root, 0o777)
+        self.assertEqual(
+            os.stat(root).st_mode & 0o777, 0o777, "umask でマスクされていないこと"
+        )
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("状態ディレクトリ", message)
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [abs_path],
+            "claim せずに抜けるので pending は消費されず残ること",
+        )
+
+    def test_post_tool_does_not_write_into_unsafe_root(self):
+        """PostToolUse 単体でも安全でなければ state を書き込まない。Stop 側だけ
+        ガードすると、その前の PostToolUse (edit) が既に攻撃者のディレクトリへ
+        書き込んでしまう。"""
+        root = self._state_root()
+        os.makedirs(root)
+        os.chmod(root, 0o777)
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+
+        self.assertFalse(
+            os.path.exists(os.path.join(root, "state")),
+            "安全でないディレクトリの配下に state/ を作ってしまった",
+        )
+
+    def test_dir_owned_by_other_user_is_refused(self):
+        """所有者違いは締め直しようがないため、恒久的に拒否し続ける。"""
+        root = self._state_root()
+        os.makedirs(root, exist_ok=True)
+        os.chmod(root, 0o700)
+
+        with mock.patch("os.geteuid", return_value=os.geteuid() + 12345):
+            self.edit(SESSION_A, "a.py", "print(1)\n")
+            output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("状態ディレクトリ", message)
+
+    def test_safe_root_is_unaffected(self):
+        """回帰: 通常時 (新規作成 / 既に 0o700・自分所有) は従来どおりレビューが走る。"""
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+
+    def test_disabled_switch_suppresses_notice_even_with_hostile_dir(self):
+        """regression (マージ前レビューの指摘): 機能を無効化している利用者には、状態
+        ディレクトリが安全でなくても通知を出さない。`ensure_private_root` の
+        検査を `review_enabled()` / `cursor.is_available()` より**前**に置くと、
+        この機能を使っていない利用者にまで毎ターン無関係な通知が出てしまう。"""
+        root = self._state_root()
+        os.makedirs(root)
+        os.chmod(root, 0o777)
+
+        os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        self.assertEqual(output, "", "無効化中は無出力のはず (通知も出さない)")
+
+    def test_cursor_unavailable_suppresses_notice_even_with_hostile_dir(self):
+        """regression (マージ前レビューの指摘): cursor 未インストール環境も同様に無出力。"""
+        root = self._state_root()
+        os.makedirs(root)
+        os.chmod(root, 0o777)
+
+        with mock.patch.object(self.cursor, "is_available", return_value=False):
+            output = self.stop(SESSION_A, "REVIEW_CLEAN")
+
+        self.assertNotReviewed()
+        self.assertEqual(output, "", "cursor 未インストール中は無出力のはず (通知も出さない)")
+
+
+class TestCursorLaunchCwd(HookTestCase):
+    """cursor はリポジトリ root (payload の cwd ではなく worktree_root) で起動すること。
+
+    差分のパス (gitscan が返す worktree root 相対) と cursor のワークスペースが
+    食い違うと、サブディレクトリで Claude Code を起動したセッションで cursor 側の
+    参照・探索が外れる (内部バックログ)。
+    """
+
+    def test_review_is_invoked_with_worktree_root_as_cwd(self):
+        self.edit(SESSION_A, "a.py", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py")
+        self.assertEqual(self.review_cwds, [self.repo])
+
+
+class TestSameTurnCommitNotification(HookTestCase):
+    """HEAD 基準の diff が空になったパス (同一ターン内 commit 等) は、復元を
+    試みず `systemMessage` で「取得できなかった」と通知する (黙って消費しない)。
+
+    以前 (0.9.0 導入時) は、前回 Stop が記録した HEAD を基点に
+    `git rev-list --not --remotes` で「手元由来」(どのリモートにも存在しない)
+    と証明できれば、基点まで遡った diff を復元して送る経路があった。この証明は
+    「リモート由来でない」ことしか示しておらず「このセッションが書いた」ことは
+    示していない。同一 worktree を共有する別のローカルの書き手 (別セッション・
+    人間の手動 commit) が push せずに同じパスへ commit すると、その内容が
+    丸ごと外部へ送信されてしまうことがマージ前レビューで実演された
+    (`test_other_local_writer_commit_is_not_leaked` が回帰テスト)。pull/merge
+    経由の混入は元から遮断できていたが (`test_pull_bringing_foreign_commit_is_reported`)、
+    これは別ベクトルだった。
+
+    安全な復元には編集時点の内容退避が要り、「PostToolUse を軽く保つ」という
+    既存の設計と衝突するため、復元機構そのものを撤去し、常に「取得できない」と
+    報告するだけにする (送信範囲が広がる方向には倒さない)。
+    """
+
+    def _add_bare_origin(self) -> tuple[str, str]:
+        bare = os.path.join(self._tmp.name, "origin.git")
+        _testutil.git(self._tmp.name, "init", "--bare", "-q", "origin.git")
+        _testutil.git(self.repo, "remote", "add", "origin", bare)
+        branch = _testutil.git(self.repo, "branch", "--show-current").stdout.strip()
+        _testutil.git(self.repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+        _testutil.git(bare, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        return bare, branch
+
+    def _push_foreign_commit(self, bare: str, branch: str) -> None:
+        clone = os.path.join(self._tmp.name, "clone")
+        _testutil.git(self._tmp.name, "clone", "-q", bare, "clone")
+        _testutil.git(clone, "config", "user.email", "other@example.com")
+        _testutil.git(clone, "config", "user.name", "other")
+        _testutil.write(clone, "foreign.txt", "from someone else\n")
+        _testutil.git(clone, "add", "-A")
+        _testutil.git(clone, "commit", "-qm", "foreign change")
+        _testutil.git(clone, "push", "-q", "origin", branch)
+
+    def _establish_history(self) -> None:
+        """レビュー履歴が既にあるセッションでも結果が変わらないことを示すための
+        前段 (何かを 1 回レビューさせておくだけ)。"""
+        self.edit(SESSION_A, "warmup.txt", "hello\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("warmup.txt")
+
+    def test_same_turn_commit_is_reported_not_reviewed(self):
+        """同一ターン内で commit した変更は、レビューされる代わりに
+        「取得できませんでした」と報告される (復元しない)。"""
+        self._establish_history()
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertNotIn("print(1)", message, "通知には内容を出さない")
+        self.assertEqual(
+            self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
+        )
+
+    def test_other_local_writer_commit_is_not_leaked(self):
+        """regression: マージ前レビューで実演された脆弱性。別のローカルの書き手
+        (このセッションの hook を経由しない、別セッション・人間の手動 commit を
+        模す) が push せずに同じパスへ commit した内容を、外部 AI CLI へ送らない
+        こと。
+
+        `_establish_history()` で先にレビューを 1 回走らせておくのは、旧
+        (基点フォールバック) コードが `base_sha` を確立していない最初の Stop
+        では復元を試みる余地が無く、この回帰の再現にならないため。
+        """
+        self._establish_history()
+
+        self.edit(SESSION_A, "a.py", "print('session A')\n")
+        # このセッションの hook を経由しない、別の書き手による直接 commit。
+        # push していないので、旧コードの `is_local_only_range` では
+        # 「手元由来」と判定され、基点まで遡った diff の復元経路に入って
+        # `diff_since` がこの内容を拾って送ってしまっていた。
+        _testutil.write(self.repo, "a.py", "print('someone else entirely')\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "another local writer's commit")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertNotIn("someone else entirely", message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_pull_bringing_foreign_commit_is_reported(self):
+        """pull/merge で他人の commit が混ざった場合も同じ経路で報告のみ
+        (この既知のベクトルは旧コードでも安全に扱えていた)。"""
+        bare, branch = self._add_bare_origin()
+        self._establish_history()
+
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+        self._push_foreign_commit(bare, branch)
+        _testutil.git(self.repo, "fetch", "-q", "origin")
+        _testutil.git(self.repo, "merge", "-q", "--no-edit", f"origin/{branch}")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertNotIn("print(1)", message, "通知には内容を出さない")
+        self.assertEqual(
+            self.pending(SESSION_A), [], "報告済みのパスが pending に残り続けないこと"
+        )
+
+    def test_first_ever_stop_with_committed_change_is_reported(self):
+        """セッション初回の Stop でも、commit 済みで空になったパスを
+        黙って消費しない。"""
+        self.edit(SESSION_A, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "self commit")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("a.py", message)
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_edit_without_commit_is_unaffected(self):
+        """回帰: commit を挟まない通常編集は影響を受けず、従来どおりレビューされる。"""
+        self.edit(SESSION_A, "a.py", "print(1)\n")  # commit しない
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.py", "print(1)")
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertNotIn("取得できませんでした", message)
+
+    def test_committed_deletion_is_reported_not_silently_dropped(self):
+        """regression (マージ前レビューの指摘): 追跡ファイルの削除が同一ターン内で commit
+        されると、HEAD 基準の diff だけでなくディスク上のパスも消える。旧コードは
+        `os.path.exists` も条件にしていたため、この場合だけ通知対象から漏れて
+        黙って消費されていた (通知もレビューもされないまま claim が完了する)。
+
+        `a.py` を先に tracked にしておくのは、削除が「意味のある変更」になる
+        ため (untracked のまま消しても HEAD 基準 diff は最初から空)。削除は
+        `os.remove` + `self.bash()` (Bash 相当: pre/post の git status 差分で検出)
+        で pending に積み、その後 `git add -A` + `git commit` を直接呼んで
+        **同一ターン内** (次の Stop より前) に削除を commit する (Bash を経由した
+        commit そのものはテストの都合上 hook を経由せず直接 git を叩く —
+        test_same_turn_commit_is_reported_not_reviewed と同じ簡略化)。
+        """
+        _testutil.write(self.repo, "a.py", "print(1)\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "add a.py")
+
+        def mutate():
+            os.remove(os.path.join(self.repo, "a.py"))
+
+        self.bash(SESSION_A, "tu_del_a", mutate)
+        self.assertIn(os.path.join(self.repo, "a.py"), self.pending(SESSION_A))
+
+        # 同一ターン内で削除を commit する (docstring 参照)。
+        _testutil.git(self.repo, "add", "-A")
+        _testutil.git(self.repo, "commit", "-qm", "remove a.py")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertEqual(
+            self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

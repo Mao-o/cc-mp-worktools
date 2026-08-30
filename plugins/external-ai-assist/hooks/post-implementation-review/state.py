@@ -104,7 +104,13 @@ def review_copy_path(session_id: str) -> str:
 
 
 def _empty_state() -> dict:
-    return {"v": 1, "pending": {}, "in_flight": {}, "reviewed": {}, "last_review_at": 0.0}
+    return {
+        "v": 1,
+        "pending": {},
+        "in_flight": {},
+        "reviewed": {},
+        "last_review_at": 0.0,
+    }
 
 
 def _normalize(raw) -> dict:
@@ -305,9 +311,7 @@ def mark_review_done(session_id: str) -> None:
 def save_bash_snapshot(session_id: str, tool_use_id: str, snapshot: dict) -> None:
     path = _bash_snapshot_path(session_id, tool_use_id)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(snapshot, f)
+        flock.write_private(path, json.dumps(snapshot))
     except OSError:
         pass
 

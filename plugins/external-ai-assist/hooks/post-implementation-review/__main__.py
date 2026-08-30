@@ -134,12 +134,20 @@ exit 0 + {"decision": "block", "reason": ..., "systemMessage": ...}:
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# Windows 非対応 (`_common.flock` / `state.py` が `fcntl` に依存)。他モジュールの import
+# (`_common` 系・`state`) で ImportError が起きる前に判定して抜ける。ここより後ろで
+# import すると、Windows では毎ツール呼出で hook error 通知が出てしまう
+# (対応状況は README の「前提」節を参照)。
+if os.name != "posix":
+    sys.exit(0)
+
 import hashlib
 import json
-import os
 import re
 import subprocess
-import sys
 import time
 
 # hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
@@ -148,7 +156,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import hooklog, notify, sentinel, settings  # noqa: E402
+from _common import flock, hooklog, notify, sentinel, settings  # noqa: E402
 
 import cursor  # noqa: E402
 import exclusion  # noqa: E402
@@ -393,6 +401,28 @@ def build_reason(cursor_output: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def _private_root_ok() -> bool:
+    """状態ディレクトリ (`state.state_root()`) が安全に使えるかを確認する。
+
+    共有 `$TMPDIR` では他ユーザーが先回りして所有者違い/誰でも書けるディレクトリを
+    作れる (マージ前レビューの指摘)。安全でなければ False を返し、呼び出し側は state の
+    読み書きを一切行わない — この plugin は差分を外部 AI CLI に送るので、状態を
+    信用できない環境では動かないほうが安全 (`_common/flock.py` の
+    `ensure_private_root` docstring 参照)。
+
+    ここでは log のみで `systemMessage` は出さない: `pre-tool` / `post-tool` は
+    ツール呼び出しのたびに発火するため、ここで通知すると「毎回エラーに見える」
+    形になってしまう。利用者への 1 行通知は `handle_stop` 側の同じ検査に
+    一本化する (ターンに 1 回だけ発火する)。
+    """
+    try:
+        flock.ensure_private_root(state.state_root())
+        return True
+    except flock.UnsafeStateDirError:
+        log("状態ディレクトリを安全に使えないため、この呼び出しでは state を書き込まない")
+        return False
+
+
 def handle_pre_tool(payload: dict) -> None:
     """無効化 / cursor 不在なら git も state も一切触らない。
 
@@ -404,6 +434,12 @@ def handle_pre_tool(payload: dict) -> None:
     if not review_enabled() or not cursor.is_available():
         return
     if payload.get("tool_name") != "Bash" or not bash_tracking_enabled():
+        return
+    # `bash_tracking_enabled()` の**後**に置く (マージ前レビューの指摘): 前に置くと、
+    # Bash 追跡だけを個別に無効化した利用者の Bash 呼び出しでも毎回
+    # `os.mkdir`/`chmod` を試みてしまう (この判定より後段の git 呼び出しと
+    # 同じく、opt-out した経路には触れない)。
+    if not _private_root_ok():
         return
     session_id = payload.get("session_id") or ""
     tool_use_id = payload.get("tool_use_id") or ""
@@ -427,6 +463,8 @@ def handle_post_tool(payload: dict) -> None:
     """無効化 / cursor 不在なら git も state も一切触らない
     (handle_pre_tool と同じ理由)。"""
     if not review_enabled() or not cursor.is_available():
+        return
+    if not _private_root_ok():
         return
     session_id = payload.get("session_id") or ""
     if not session_id:
@@ -502,14 +540,35 @@ def handle_stop(payload: dict) -> None:
         log("session_id が空")
         return
 
-    stategc.gc_stale()
-
     if not review_enabled():
         log("EXTERNAL_AI_POST_REVIEW=0 によりレビュー無効化")
         return
     if not cursor.is_available():
         log("cursor 未インストール")
         return
+
+    # `stategc.gc_stale()` (直後) は state_root() 配下を列挙・削除・chmod するので、
+    # その**前**に安全性を確認する。ここで検出できなければ GC も以降のレビューも
+    # 一切行わない (攻撃者所有のディレクトリを信用してしまう経路)。
+    # **無効化 / cursor 未インストールの判定より後に置く**: 前に置くと、この機能を
+    # 使っていない利用者にまで「レビューをスキップしました」通知が毎ターン出て
+    # しまう (マージ前レビューの指摘。handle_pre_tool / handle_post_tool と同じ理由で、
+    # 機能 off のときは state に一切触れないのが既存の設計方針)。pre-tool /
+    # post-tool 側でも同じ検査をしている (`_private_root_ok`) が、そちらは無出力で
+    # state を書かないだけなので、利用者への 1 行通知はここに一本化する
+    # (ターンに 1 回だけ発火する)。
+    try:
+        flock.ensure_private_root(state.state_root())
+    except flock.UnsafeStateDirError:
+        msg = (
+            "状態ディレクトリ (共有一時領域) の所有者/権限が信頼できないため、"
+            "このターンはレビューをスキップしました"
+        )
+        log(msg)
+        json.dump(_with_notices({}, [msg]), sys.stdout, ensure_ascii=False)
+        return
+
+    stategc.gc_stale()
 
     cwd = payload.get("cwd") or os.getcwd()
     root = gitscan.worktree_root(cwd)
@@ -633,6 +692,16 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     carried = batch.deferred + overflow
     if carried:
         state.record_pending(session_id, carried)
+    if batch.unretrievable:
+        # HEAD 基準の diff が空だったパス。復元は試みない (`_collect_diffs` の
+        # docstring「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending
+        # には戻さない (状況が変わらない限り毎ターン同じ結果になるだけなので、
+        # 繰り返し報告しない)。
+        notices.append(
+            f"{len(batch.unretrievable)} ファイルは差分が空で取得できませんでした "
+            "(commit 済みの可能性。内容は送信していません): "
+            + _list_names(_rel_names(root, batch.unretrievable))
+        )
     if batch.deferred_time:
         notices.append(
             f"{len(batch.deferred_time)} ファイルは git diff の時間予算超過により"
@@ -675,7 +744,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     diff_text = "\n".join(batch.sections)
     log(f"Cursor によるレビューを実行 ({len(batch.submitted)} ファイル, {len(diff_text)} chars)")
     started = time.monotonic()
-    result = cursor.review(diff_text)
+    result = cursor.review(diff_text, cwd=root)
     elapsed = time.monotonic() - started
     state.mark_review_done(session_id)
     summary = f"差分レビュー完了 ({notify.format_elapsed(elapsed)}, {len(batch.submitted)} ファイル)"
@@ -863,6 +932,7 @@ class ReviewBatch:
         self.deferred_time: list[str] = []  # 時間予算で未処理 (絶対パス)
         self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
+        self.unretrievable: list[str] = []  # HEAD 基準の diff が空だった絶対パス (復元は試みない)
 
     @property
     def deferred(self) -> list[str]:
@@ -870,12 +940,50 @@ class ReviewBatch:
         return self.deferred_size + self.deferred_time
 
 
-def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> ReviewBatch:
+def _collect_diffs(
+    root: str,
+    rels: list[str],
+    reviewed: dict[str, str],
+) -> ReviewBatch:
     """パスごとに diff を取り、予算に収まるものだけを ReviewBatch に積む。
 
-    前回レビュー時と同一 hash のパスは載せない。差分が空のパス (commit 済み・revert
-    済み) も載せない。どちらも submitted に入らないので、cursor 失敗時にも復元されず
-    そのまま消える。
+    前回レビュー時と同一 hash のパスは載せない。差分が空のパスも載せない。
+    どちらも submitted に入らないので、cursor 失敗時にも復元されずそのまま消える。
+
+    **HEAD 基準の diff が空のパスは復元を試みない。** tracked かつ HEAD が存在する
+    パスの HEAD 基準 diff が空なのは、(a) 単に何も変わっていない (revert 済み等)、
+    または (b) このセッションが同一ターン内で commit し、ファイルが既に HEAD と
+    一致している、のどちらかで、この時点では区別できない。過去に「前回 Stop の
+    HEAD」を基点まで遡って (b) を復元する経路を試したが、`<基点>..HEAD` が
+    「どのリモートにも存在しない」ことしか検証できず「このセッションが書いた」
+    ことまでは検証できないため、同一 worktree を共有する別のローカルの書き手
+    (別セッション・人間の手動 commit) が push せずに同じパスへ commit した内容も
+    復元して送ってしまうことがマージ前レビューで実演された (pull 由来の混入は
+    別途遮断できていたが、これは別ベクトルだった)。安全な復元には編集時点の
+    内容退避が要り、「PostToolUse を軽く保つ」という設計と衝突するため、
+    ここでは復元せず**常に黙って捨てず通知する**方針にしている (送信範囲が
+    広がる方向には倒さない。設計の変遷は CHANGELOG.md / CLAUDE.md を参照):
+
+    - 差分が空で、かつそのパスが tracked (untracked ではない)・HEAD が存在する、
+      の両方を満たすなら `batch.unretrievable` に積む — 黙って消費せず、利用者に
+      レビューされなかったことを可視化するため (`_run_review` が通知にする)。
+      **ディスク上の存在は問わない** (マージ前レビューの指摘): 追跡ファイルの削除が
+      同一ターン内で commit されると、HEAD・ディスクの両方からパスが消え、
+      `git diff HEAD -- rel` は「両側に無い」ため空になる。以前はここで
+      `os.path.exists` も条件にしており、この削除のケースだけ通知対象から
+      漏れて黙って消費されていた
+    - それ以外の空 diff (untracked で中身が空、HEAD が無い等の元から復元しようが
+      ないケース) は黙って捨てる
+
+    **「実体の無い pending エントリ」との区別は諦めている**: 一度も commit
+    されていないファイル (このセッションが作成後、同一ターン内で削除して
+    一度も commit しなかった一時ファイル等) も、tracked かつ HEAD 存在なら
+    ここに積まれうる。しかし commit 済みの delete と未 commit の phantom は
+    どちらも「HEAD 上に存在しない」状態になった時点で `git cat-file -e
+    HEAD:rel` が両方とも失敗し、cheap な git 状態だけでは区別できない
+    (履歴全体を辿れば区別できるが、この hook の git 予算 [`gitscan.py` 参照]
+    には収まらない)。正当な削除の見落としの方が実害が大きいため、雑音低減より
+    「全部通知する」側を優先する。
 
     **予算はファイル単位で当てる**:
 
@@ -887,8 +995,8 @@ def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> Revi
 
     COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred_time として返す。
     Stop 全体の hook timeout (690s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
-    git に使える時間は約 75s しかない。1 パス 5s × 60 パスでは足が出るので、経過時間で
-    頭を押さえる。deferred は捨てずに pending へ戻す。
+    git に使える時間は限られる (`gitscan.py` モジュール docstring の予算表を参照)。
+    経過時間で頭を押さえる。deferred は捨てずに pending へ戻す。
     """
     untracked = gitscan.untracked_among(root, rels)
     has_head = gitscan.head_exists(root)
@@ -902,8 +1010,23 @@ def _collect_diffs(root: str, rels: list[str], reviewed: dict[str, str]) -> Revi
             batch.deferred_time = [os.path.join(root, r) for r in rels[index:]]
             break
 
-        text = gitscan.path_diff(root, rel, rel in untracked, has_head)
+        is_untracked = rel in untracked
+        text = gitscan.path_diff(root, rel, is_untracked, has_head)
+        # HEAD 基準で空 = 「本当に無変更」「同一ターン内 commit で HEAD と一致
+        # した」「追跡ファイルの削除が同一ターン内で commit された (HEAD にも
+        # ディスクにもパスが無い)」のいずれかで、この時点では区別できない
+        # (docstring 参照)。
+        empty_at_head = not is_untracked and has_head and not text.strip()
+
         if not text.strip():
+            if empty_at_head:
+                # ディスク上の存在は問わない (マージ前レビューの指摘)。以前は
+                # `os.path.exists` も条件にしていたため、削除+同一ターン内
+                # commit のケース (ディスクからも消える) だけ通知対象から漏れて
+                # 黙って消費されていた。実体の無い pending エントリとの区別は
+                # cheap な git 状態だけでは付かない (docstring 参照) ので、
+                # 雑音低減より正当な削除を落とさないことを優先する。
+                batch.unretrievable.append(os.path.join(root, rel))
             continue
         abs_path = os.path.join(root, rel)
         digest = diff_hash(text)  # hash は切り詰め前の全文で取る
@@ -956,9 +1079,7 @@ def _truncate_section(text: str, limit: int) -> str:
 def _save_review_copy(session_id: str, reason: str) -> None:
     path = state.review_copy_path(session_id)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(reason)
+        flock.write_private(path, reason)
         log(f"レビュー完了 → {path}")
     except OSError:
         log("参照コピーの保存に失敗")

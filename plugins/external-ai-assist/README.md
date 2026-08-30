@@ -23,10 +23,11 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 - **POSIX 環境のみ** (Linux / macOS)。**Windows 非対応**: `exitplan-review` と
   `post-implementation-review` は状態ファイルの排他に `fcntl.flock`、外部 CLI の停止に
   `os.killpg` (プロセスグループ単位の SIGTERM/SIGKILL) を使い、どちらも POSIX 専用
-  API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は起動直後の
-  import で例外になる (`main()` を囲む try/except より前で失敗するため fail-open
-  しない)。`explore-parallel` はこの 2 つに依存しない軽量な実装 (`os.kill` ベース) だが
-  Windows での動作は未検証
+  API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は `__main__.py`
+  冒頭で `os.name != "posix"` を判定し、`fcntl` に依存する他モジュールを import する
+  前に exit 0 で抜ける (0.9.0)。0.8.0 以前はこの判定が無く、Windows では起動直後の
+  import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
+  この 2 つに依存しない軽量な実装 (`os.kill` ベース) だが Windows での動作は未検証
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
   3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
@@ -93,6 +94,11 @@ docs 上 deprecated なため移行した)。
   上限 + 300 秒) 経過後に回収し、記録エントリ数は 50 件を超えたら古い順に捨てる。
   マーカーファイルおよび `$TMPDIR/plan-review-*.txt` (0.6.0 以前の形式を含む) は
   mtime 48 時間で GC する
+- **共有 `$TMPDIR` で他ユーザーが先回りして `plan-review-markers/` を作った場合は
+  使わずにプランレビューをスキップする** (所有者相違、または group/other に
+  書込権がある場合。締め直しても今回は使わず、次回以降のために試みるだけ)。
+  `systemMessage` で 1 行だけ理由を通知する (`_common/flock.py` の
+  `ensure_private_root`。post-implementation-review と共通)
 - レビュー結果は `$TMPDIR/plan-review-<session_id の先頭 8 文字>.txt` にも保存
 - 両方のレビュアーが失敗した場合は fail-open (exit 0)
 - **完了時に所要時間と結果を `systemMessage` で表示** (0.6.0)。
@@ -118,9 +124,24 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 作業ツリー全体の `git diff HEAD` は使わない。同一ディレクトリで複数セッションが動くと、一行も編集して
 いないセッションが隣のセッションの編集を 5〜10 分かけてレビューしてしまうため。
 
-> **既知の制限**: 変更を記録してから Stop までの間にそのファイルを commit すると、差分が空になり
-> レビューされないまま消費される。基点を過去の commit にずらす方式は「そのパスを通過した全ての変更」を
-> 拾ってしまい、他者が書いた行を外部へ送ることになるため採っていない。
+> **同一ターン内で commit した変更の扱い**: 変更を記録してから Stop までの間に
+> そのファイルを commit すると、HEAD 基準の diff は空になる。この場合、**復元は
+> 試みず**、`systemMessage` に「差分が空で取得できませんでした (commit 済みの
+> 可能性)」として列挙し、次ターンに繰り返し報告しないよう pending からは外す
+> (黙って消費しない)。過去に、前回 Stop が記録した HEAD を基点として遡り
+> `git rev-list --not --remotes` で「手元由来」(どのリモートにも存在しない) と
+> 証明できれば diff を復元して送る経路を試したことがあるが、この証明は
+> 「リモート由来でない」ことしか示しておらず「このセッションが書いた」ことは
+> 示していない。同一 worktree を共有する別のローカルの書き手 (別セッション・
+> 人間の手動 commit) が push せずに同じパスへ commit すると、その内容が丸ごと
+> 外部 AI CLI へ送られてしまうことがマージ前レビューで実演されたため、復元経路
+> そのものを撤去した。安全な復元には編集時点の内容退避が要り、既存の設計
+> (PostToolUse を軽く保つ) と衝突するため見送っている — **送信範囲が広がる方向
+> には倒さない**方針を優先する。**追跡ファイルの削除が同一ターン内で commit
+> された場合も同じ扱い**: HEAD 基準の diff が空になるだけでなくディスク上からも
+> パスが消えるが、この場合も (ディスク上に無くても) 通知対象にする — 一度も
+> commit されていない一時ファイルとの区別は諦め、正当な削除の見落としを優先して
+> 防ぐ。
 
 変更パスの収集経路は 2 つ:
 
@@ -166,6 +187,12 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 - レビュー結果は `$TMPDIR/post-implementation-review/reviews/<session_id の先頭 16 文字>.txt`
   にも保存
 - 状態ファイルは 48 時間で GC (旧 `$TMPDIR/post-review-markers/` の残骸も掃除する)
+- **共有 `$TMPDIR` で他ユーザーが先回りして `post-implementation-review/` を
+  作った場合は使わずにレビューをスキップする** (所有者相違、または group/other
+  に書込権がある場合。締め直しても今回は使わず、次回以降のために試みるだけ)。
+  PreToolUse/PostToolUse は無出力で state を書き込まないだけ (毎ツール呼び出し
+  でエラーに見える通知は出さない)、Stop は `systemMessage` で 1 行だけ理由を
+  通知する
 
 プロンプトは `hooks/post-implementation-review/prompts/post-implementation-cursor.md` に外部化され、出力は 5 項目 (直接影響 / 間接影響 / 未検証ケース / 追加テスト / マージ前確認) に固定。
 
@@ -325,7 +352,7 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 これに kill 猶予 (最大 15秒)、git 予算 (最大 59秒)、`MODE=auto` が版数検出で
 `claude --version` の subprocess にフォールバックした場合の追加分 (最大 3秒) を
 足した合計 677秒でも収まるよう、`hooks.json` 側の Stop timeout は `690` 秒
-(約11分30秒) に設定されている。
+(11分30秒) に設定されている。
 exitplan-review と違って同一内容の再提出を縛る回数上限は無く、**編集のあったターンの
 Stop ごとに毎回この上限まで待ちうる** (総待ち時間はターン数に比例し上限なし。詳細は
 後述の「コストの目安」)。

@@ -282,12 +282,19 @@ class TestCollectDiffs(ReviewSetTestCase):
         self.assertEqual(batch.submitted, [os.path.join(self.repo, "seed.txt")])
 
     def test_empty_diff_is_not_submitted(self):
-        """commit 済み / revert 済みのパスはレビューにも復元対象にも入れない。"""
+        """commit 済み / revert 済みのパスはレビューにも復元対象にも入れない。
+
+        HEAD 基準 diff が空の tracked パスは復元を試みず、黙って消えるわけでもない
+        — `unretrievable` に積んで呼び出し側 (`_run_review`) が通知することを、
+        ここで意図的な挙動として固定する (以前はここが未検証で、たまたま埋まって
+        いても誰も気づけなかった)。
+        """
         batch = self.entry._collect_diffs(self.repo, ["seed.txt"], {})
         self.assertEqual(batch.sections, [])
         self.assertEqual(batch.submitted, [])
         self.assertEqual(batch.hashes, {})
         self.assertEqual(batch.deferred, [])
+        self.assertEqual(batch.unretrievable, [os.path.join(self.repo, "seed.txt")])
 
     def test_untracked_and_tracked_are_both_collected(self):
         write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
@@ -452,7 +459,7 @@ class TestTimeoutBudgets(ReviewSetTestCase):
 
         timeouts = self._hook_timeouts()
         git_worst = (
-            gitscan.REV_PARSE_TIMEOUT_SEC * 2
+            gitscan.REV_PARSE_TIMEOUT_SEC * 2  # worktree_root + head_exists
             + gitscan.LS_FILES_TIMEOUT_SEC  # symlink 一覧 (symlink_map)
             + gitscan.LS_FILES_TIMEOUT_SEC  # untracked 判定 (untracked_among)
             + self.entry.COLLECT_BUDGET_SEC
