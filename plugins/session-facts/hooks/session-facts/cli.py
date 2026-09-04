@@ -406,9 +406,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Path inside the git repository")
     parser.add_argument(
         "--format",
-        choices=("markdown", "json", "human"),
+        choices=("markdown",),
         default="markdown",
-        help="Output format. 'markdown' is what hooks inject into agent context.",
+        help=(
+            "Output format. 'markdown' is what hooks inject into agent context "
+            "(the only value accepted; for a machine-readable envelope use "
+            "--emit subagent-json instead)."
+        ),
     )
     parser.add_argument(
         "--tree-depth",

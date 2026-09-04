@@ -878,6 +878,34 @@ class MaxOutputCharsValidationTest(unittest.TestCase):
         self.assertEqual(args.max_output_chars, 0)
 
 
+class FormatChoicesTest(unittest.TestCase):
+    """internal backlog: --format は json/human が argparse の choices に
+    定義されているだけで、値を参照する dispatch 経路が無く出力は常に
+    markdown 固定だった (dead option)。json/human を choices から外し
+    markdown のみ受理するよう縮小した。既存の hooks.json / codex-hooks.json /
+    SKILL.md は元々 `--format markdown` のみを使っているため、この変更で
+    壊れる呼び出しは無い。
+    """
+
+    def test_format_markdown_is_still_accepted(self):
+        args = parse_args(["--root", ".", "--format", "markdown"])
+        self.assertEqual(args.format, "markdown")
+
+    def test_format_omitted_defaults_to_markdown(self):
+        args = parse_args(["--root", "."])
+        self.assertEqual(args.format, "markdown")
+
+    def test_format_json_is_rejected_by_argparse(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(["--root", ".", "--format", "json"])
+
+    def test_format_human_is_rejected_by_argparse(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(["--root", ".", "--format", "human"])
+
+
 class ExceptionFallbackBudgetTest(unittest.TestCase):
     """PR #67 round 6 (Codex P2): summarize_repo() が予期せず落ちたときの
     フォールバックが上限適用を通っておらず、`--max-output-chars` が出力全体の

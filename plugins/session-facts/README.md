@@ -209,7 +209,7 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | オプション | デフォルト | 内容 |
 |---|---|---|
 | `--root` | `Path.cwd()` | 解析対象のリポジトリ内パス (git root 自動解決) |
-| `--format` | `markdown` | `markdown` / `json` / `human` |
+| `--format` | `markdown` | `markdown` のみ (唯一の受理値。機械可読な出力が要る場合は `--emit subagent-json` を使う) |
 | `--tree-depth` | (auto) | 固定深さを強制する override。未指定なら動的に自動選択 |
 | `--min-tree-depth` | 1 | 動的選択の下限 |
 | `--max-tree-depth` | 5 | 動的選択の上限 |
