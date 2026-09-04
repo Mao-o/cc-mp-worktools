@@ -663,6 +663,20 @@ class ProjectMarkerGateTest(unittest.TestCase):
             self.assertNotIn("no project markers found", out)
             self.assertIn("## Project Facts", out)
 
+    def test_non_git_with_fsproj_marker_gets_full_analysis(self):
+        # merge-review finding (round 3): a non-git, solutionless F# repo
+        # (no *.sln, just an *.fsproj) used to die at the marker gate
+        # before *.fsproj was added to PROJECT_MARKERS -- this is the
+        # end-to-end path the finding named explicitly ("outside Git it
+        # can also be rejected by the marker gate"), not just the
+        # detector-level check covered elsewhere.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.fsproj").write_text('<Project Sdk="Microsoft.NET.Sdk"></Project>\n')
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found", out)
+            self.assertIn("## Project Facts", out)
+
     def test_force_walk_restores_full_analysis_without_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

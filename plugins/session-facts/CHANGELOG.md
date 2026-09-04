@@ -125,7 +125,16 @@
    かったため、3 箇所に `*.fsproj`/`*.vbproj` を追加し、
    `CODE_EXTENSIONS` にも `.fs`/`.fsx`/`.vb` を追加して Test Snapshot /
    Service Entry Points が対象ソースを読み飛ばさないようにした。
-   README の `.NET` marker 説明も同期。7 件追加 (494 -> 501)
+   README の `.NET` marker 説明も同期。指摘 (b) は「non-git かつ marker gate
+   経由でも弾かれうる」ことも指摘しており、`PROJECT_MARKERS` への追加だけ
+   だと glob 判定側 (`core/fs.py::scan_project_markers()`) が実際に
+   `*.fsproj`/`*.vbproj` を glob パターンとして拾うかは別問題のため、
+   detector 単体テストとは別に non-git な marker gate 経由の end-to-end
+   テスト (`tests/test_cli.py`) と `has_project_markers()` の glob テスト
+   (`tests/test_fs.py`) を追加して閉じた。指摘 (a) の回帰テストは
+   本修正直前バージョンの `collectors/scripts.py` を隔離コピーへ差し替えて
+   実際に fail することを確認済み (ロジックの手動再実装ではなく実コード)。
+   9 件追加 (494 -> 503)
 
 ## 0.9.0
 

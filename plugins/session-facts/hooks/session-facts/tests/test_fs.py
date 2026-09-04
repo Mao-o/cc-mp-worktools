@@ -149,6 +149,21 @@ class HasProjectMarkersGlobTest(unittest.TestCase):
             (root / "MyApp.csproj").write_text("<Project />\n")
             self.assertTrue(has_project_markers(root, ["*.csproj"]))
 
+    def test_fsproj_vbproj_glob_markers_match(self):
+        # merge-review finding (round 3): PROJECT_MARKERS gained *.fsproj/
+        # *.vbproj alongside *.csproj/*.sln, but the glob branch itself
+        # (the "*" in marker check above) is generic -- this pins that a
+        # solutionless F#/VB.NET repo's marker actually reaches it, not
+        # just that the pattern string was added to the tuple.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.fsproj").write_text("<Project />\n")
+            self.assertTrue(has_project_markers(root, ["*.fsproj"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.vbproj").write_text("<Project />\n")
+            self.assertTrue(has_project_markers(root, ["*.vbproj"]))
+
     def test_glob_marker_does_not_match_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
