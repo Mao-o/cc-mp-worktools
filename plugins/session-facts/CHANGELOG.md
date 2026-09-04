@@ -136,6 +136,57 @@
    本修正直前バージョンの `collectors/scripts.py` を隔離コピーへ差し替えて
    実際に fail することを確認済み (ロジックの手動再実装ではなく実コード)。
    9 件追加 (494 -> 503)
+8. **マージ前レビューの指摘 2 件を修正**
+   (`core/constants.py`, `core/fs.py`, `detectors/swift_stack.py`,
+   `collectors/scripts.py`, `README.md`, `tests/test_fs.py`,
+   `tests/test_new_stack_detectors.py`, `tests/test_scripts.py`,
+   `tests/test_cli.py`) —
+   (a) 上記 7 で `.fs`/`.fsx`/`.vb` を `CODE_EXTENSIONS` に追加した際、F# の
+   signature file 拡張子 `.fsi` (同名 `.fs` の公開宣言を分離する慣習的な
+   ペア) が抜けており、`.fsi` にしか無い公開宣言が Test Snapshot /
+   Service Entry Points から見えなくなっていた。`.fsi` を追加し、
+   `ExtensionRegistrationTest` に固定した。
+   (b) `Package.swift` の無い Xcode-only な Swift app (`App.xcodeproj`/
+   `App.xcworkspace` + `.swift` ソースのみ) が `detectors/swift_stack.py`
+   でも `PROJECT_MARKERS` でも一切認識されず、non-git root では marker
+   gate で facts が丸ごと消え、git root でも `stack: swift` が出ない
+   非対称があった。`*.xcodeproj`/`*.xcworkspace` はどちらも Xcode の
+   バンドル形式でディレクトリだが、`core/fs.py::scan_project_markers()`
+   の glob 判定はエントリ名のみで file/dir を区別しないため gate 側は
+   ディレクトリでもそのまま動くことを実測で確認済み (marker gate 自体への
+   追加コード変更は不要、`PROJECT_MARKERS` へのタプル追加のみ)。detector
+   側は `Path.glob()` で判定 (同じ理由で file/dir 区別不要)。
+   `## Likely Commands` の `swift build`/`swift test` は SwiftPM 専用の
+   コマンドで、Xcode-only project には scheme 指定が要る `xcodebuild` の
+   代わりにはならないため、`"swift" in stack` だけでなく `Package.swift`
+   の実在 (`package_manager == "swift"`、または直接の exists() チェック)
+   も条件に加えて絞り込んだ。README の Swift 行・Likely Commands 節にも
+   この非対称を明記した。
+   **修正中に副作用を追加検出**: `*.xcodeproj`/`*.xcworkspace` を
+   `PROJECT_MARKERS` に足すと、git 管理外の Xcode-only root がこれまで
+   拒否されていた marker gate を素通りし、`core/fs.py::walk_files()`
+   (非 git 経路のファイル走査) が bundle 内部
+   (`project.pbxproj`/`xcuserdata/`/`xcshareddata/xcschemes/` 等、
+   ソースではなくビルドメタデータ) まで丸ごと拾ってしまい、`##
+   Structure` が本来のソースツリーを差し置いてこのノイズで埋まる回帰を
+   実機確認で発見した (git root は `.gitignore` が大半を除外するため
+   影響が薄いが、非 git root にはそれが無い)。`SKIP_DIRS` は完全一致の
+   ディレクトリ名集合で、bundle のディレクトリ名は stem がプロジェクト
+   固有 (拡張子のみ固定) のため表現できず、`walk_files()` に
+   `.xcodeproj`/`.xcworkspace` 接尾辞での descend 抑止を追加して閉じた
+   (dotdir 抑止と同じく `skip_dirs` 引数を介さない無条件ロジック)。
+   回帰テストは (1) `App.xcodeproj` のみの fixture で `stack: swift` が
+   修正前は空リストになること、(2) 同 fixture で `## Likely Commands` に
+   swift コマンドが出ないこと、(3) `.fsi` が `CODE_EXTENSIONS` に無いこと、
+   (4) `.fsi` ファイルが Test Snapshot の `code_files` から漏れること、
+   (5) `App.xcodeproj`/`App.xcworkspace` が non-git marker gate で修正前は
+   「no project markers found」になること、(6) `walk_files()` が bundle
+   内部のファイルを拾ってしまうこと、(7) 実際の `## Structure` に
+   bundle 内部が出てしまうこと、の 7 点が修正前に fail することを、
+   本修正直前バージョンの `core/constants.py`/`detectors/swift_stack.py`/
+   `collectors/scripts.py`/`core/fs.py` を隔離コピーへ差し替えて確認済み。
+   `Package.swift` 単体の既存挙動は変更前後で同一であることも同じ隔離
+   コピーで確認済み (2 件は元々 pass)。10 件追加 (503 -> 513)
 
 ## 0.9.0
 

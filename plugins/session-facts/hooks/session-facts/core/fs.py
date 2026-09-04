@@ -164,6 +164,21 @@ def has_project_markers(root: Path, markers: Iterable[str]) -> bool:
     return scan_project_markers(root, markers)[0]
 
 
+# core/constants.py::PROJECT_MARKERS' *.xcodeproj/*.xcworkspace entries let
+# a non-git root built around an Xcode-only Swift app pass the marker gate
+# and reach this function directly -- unlike a git root, where .gitignore
+# already keeps most of an Xcode bundle's internals out of `git ls-files`.
+# SKIP_DIRS can't express these: the bundle's *stem* is project-specific
+# (only the suffix is fixed), so this is a suffix check, applied
+# unconditionally like the dotdir rule below rather than threaded through
+# the caller-supplied `skip_dirs` parameter. Without it, an Xcode project's
+# build metadata (project.pbxproj, xcuserdata/, xcshareddata/xcschemes/) --
+# not source, and no CODE_EXTENSIONS entry reads any of it -- would flood
+# ## Structure with noise, crowding out the app's actual source tree
+# (merge-review finding).
+_BUNDLE_DIR_SUFFIXES = (".xcodeproj", ".xcworkspace")
+
+
 def walk_files(
     root: Path,
     skip_dirs: Iterable[str],
@@ -177,7 +192,12 @@ def walk_files(
         if respect_subgit and dirpath != root_str and ".git" in dirnames:
             dirnames[:] = []
         else:
-            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in skip
+                and not d.startswith(".")
+                and not d.endswith(_BUNDLE_DIR_SUFFIXES)
+            ]
         for name in filenames:
             if name.startswith("."):
                 continue

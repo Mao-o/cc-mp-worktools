@@ -779,6 +779,30 @@ class MinimalHeaderOutputBudgetTest(unittest.TestCase):
             self.assertIn("--force-walk", out)
 
 
+class XcodeOnlyNonGitStructureTest(unittest.TestCase):
+    """merge-review finding: adding *.xcodeproj/*.xcworkspace to
+    PROJECT_MARKERS lets a non-git Xcode-only root pass the marker gate and
+    reach walk_files() directly (a git root's `git ls-files` already keeps
+    most of this out via .gitignore). Without core/fs.py::walk_files()'s
+    matching suffix-based skip, the bundle's own metadata directories would
+    show up in ## Structure alongside -- and crowd out -- the app's actual
+    source tree."""
+
+    def test_xcodeproj_internals_do_not_appear_in_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App").mkdir()
+            (root / "App" / "App.swift").write_text("struct App {}\n")
+            bundle = root / "App.xcodeproj"
+            (bundle / "project.xcworkspace" / "xcshareddata").mkdir(parents=True)
+            (bundle / "project.pbxproj").write_text("// pbxproj\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertIn("stack: swift", out)
+            self.assertIn("App/", out)
+            self.assertNotIn("xcodeproj", out)
+            self.assertNotIn("xcworkspace", out)
+
+
 class ProjectMarkerCoverageTest(unittest.TestCase):
     """internal backlog P2-1: PROJECT_MARKERS used to list only ~27 files,
     missing markers for stacks this plugin's own detectors/collectors
@@ -825,6 +849,15 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
         ("App.csproj", False),  # *.csproj glob marker
         ("App.sln", False),  # *.sln glob marker
         ("main.tf", False),  # *.tf glob marker
+        # *.xcodeproj/*.xcworkspace glob markers: Xcode's bundle format is
+        # a directory, not a file -- unlike every other glob marker fixture
+        # above, so `is_dir=True` here also exercises
+        # scan_project_markers()'s glob branch against a directory name
+        # (merge-review finding: an Xcode-only Swift app with no
+        # Package.swift had no matching marker and was rejected outright by
+        # this gate on a non-git root).
+        ("App.xcodeproj", True),
+        ("App.xcworkspace", True),
     ]
 
     def test_each_new_marker_alone_avoids_the_minimal_header(self):

@@ -12,6 +12,7 @@ from collectors.scripts import ScriptsCollector, _likely_commands
 from core.context import AnalysisConfig, RepoContext
 from core.pm import detect_package_manager
 from detectors.dotnet_stack import DotnetStackDetector
+from detectors.swift_stack import SwiftStackDetector
 
 
 def _ctx(pm=None, runtime=None, stack=()) -> RepoContext:
@@ -173,6 +174,47 @@ class NewStackLikelyCommandsTest(unittest.TestCase):
                 cmds = _likely_commands(ctx, max_items=16)
                 for expected_cmd in expected:
                     self.assertIn(expected_cmd, cmds)
+
+    def test_xcode_only_project_suggests_no_swift_command(self):
+        # merge-review finding: detectors/swift_stack.py now also reports
+        # "stack: swift" for an Xcode-only app (*.xcodeproj/*.xcworkspace,
+        # no Package.swift) -- see SwiftStackDetectorTest in
+        # tests/test_new_stack_detectors.py. "swift" in stack alone must NOT
+        # be enough to suggest `swift build`/`swift test`: those are SwiftPM
+        # commands, and `xcodebuild` (the Xcode-only equivalent) needs an
+        # explicit -scheme this collector cannot safely infer.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcodeproj").mkdir()
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.results["package_manager"] = detect_package_manager(ctx)
+            self.assertIsNone(ctx.results["package_manager"])
+            ctx.stack = SwiftStackDetector().detect(ctx)
+            self.assertEqual(ctx.stack, ["swift"])
+
+            cmds = _likely_commands(ctx, max_items=16)
+            self.assertNotIn("swift build", cmds)
+            self.assertNotIn("swift test", cmds)
+
+    def test_package_swift_project_still_suggests_swift_commands(self):
+        # Companion to the Xcode-only case above, exercised through the same
+        # real-filesystem detector + package_manager pipeline (rather than
+        # the synthetic _ctx() helper used elsewhere in this file) so the
+        # two cases are guarded by tests built the same way.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Package.swift").write_text(
+                "// swift-tools-version:5.9\nimport PackageDescription\n"
+            )
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.results["package_manager"] = detect_package_manager(ctx)
+            self.assertEqual(ctx.results["package_manager"], "swift")
+            ctx.stack = SwiftStackDetector().detect(ctx)
+            self.assertEqual(ctx.stack, ["swift"])
+
+            cmds = _likely_commands(ctx, max_items=16)
+            self.assertIn("swift build", cmds)
+            self.assertIn("swift test", cmds)
 
 
 class ScriptCommandLengthCapTest(unittest.TestCase):

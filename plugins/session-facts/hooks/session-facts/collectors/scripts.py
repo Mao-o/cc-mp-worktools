@@ -175,7 +175,18 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
         priority_commands.extend(["sbt test", "sbt compile"])
     if "elixir" in stack:
         priority_commands.append("mix test")
-    if "swift" in stack:
+    # Unlike the other three, "swift" in stack alone is NOT enough: since
+    # detectors/swift_stack.py also reports "swift" for an Xcode-only
+    # project (*.xcodeproj/*.xcworkspace, no Package.swift), these two
+    # SwiftPM commands must additionally require Package.swift itself --
+    # `pm == "swift"` covers the common case cheaply (core/pm.py only ever
+    # sets it off Package.swift), and the direct exists() check covers a
+    # root where Package.swift coexists with a higher-priority manifest
+    # (e.g. package-lock.json) that made some other value the primary pm,
+    # mirroring the dotnet/npm-coexistence handling below (merge-review
+    # finding). Xcode-only projects get no command here: xcodebuild needs
+    # an explicit -scheme this collector cannot safely infer.
+    if "swift" in stack and (pm == "swift" or (ctx.root / "Package.swift").exists()):
         priority_commands.extend(["swift build", "swift test"])
     if "dotnet" in stack:
         priority_commands.append("dotnet test")

@@ -63,6 +63,34 @@ class SwiftStackDetectorTest(unittest.TestCase):
             (root / "Package.swift").write_text("// swift-tools-version:5.9\n")
             self.assertEqual(detect_package_manager(_ctx(root)), "swift")
 
+    def test_xcodeproj_alone_is_detected(self):
+        # merge-review finding: an Xcode-only app (no Package.swift) has no
+        # SwiftPM manifest at all, but *.xcodeproj is still Swift's own
+        # project marker -- without this, such a repo got no "stack: swift"
+        # and (via PROJECT_MARKERS) was rejected outright by the non-git
+        # marker gate.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcodeproj").mkdir()
+            self.assertEqual(_detect(SwiftStackDetector(), root), ["swift"])
+
+    def test_xcworkspace_alone_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcworkspace").mkdir()
+            self.assertEqual(_detect(SwiftStackDetector(), root), ["swift"])
+
+    def test_xcodeproj_is_not_the_package_manager(self):
+        # Xcode-only projects have no SwiftPM manifest to run `swift build`/
+        # `swift test` against, so core/pm.py must not report "swift" here
+        # (collectors/scripts.py relies on this to withhold those two
+        # commands -- see tests/test_scripts.py::
+        # NewStackLikelyCommandsTest.test_xcode_only_project_suggests_no_swift_command).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcodeproj").mkdir()
+            self.assertIsNone(detect_package_manager(_ctx(root)))
+
 
 class DotnetStackDetectorTest(unittest.TestCase):
     def test_no_signal_is_not_detected(self):
@@ -223,6 +251,34 @@ class ExtensionRegistrationTest(unittest.TestCase):
         # Elixir's/CMake's above, one stack later.
         for ext in (".fs", ".fsx", ".vb"):
             self.assertIn(ext, CODE_EXTENSIONS)
+
+    def test_fsharp_signature_file_extension_is_registered(self):
+        # merge-review finding (round 4): the fix above registered .fs/.fsx
+        # but missed .fsi, F#'s signature-file suffix -- an .fsi-heavy
+        # project (public API declarations split out from their .fs
+        # implementation) undercounted Test Snapshot/Service Entry Points
+        # the same way the original Elixir/CMake gap did.
+        self.assertIn(".fsi", CODE_EXTENSIONS)
+
+    def test_fsharp_test_snapshot_counts_signature_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "App.fsproj",
+                "Library.fsi",
+                "Library.fs",
+                "Tests/LibraryTests.fs",
+            ]
+            for name in tracked:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = TestsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            # Library.fsi + Library.fs are both counted as code_files.
+            self.assertIn("code_files: 2", out)
+            self.assertIn("test_files: 1", out)
 
     def test_fsharp_test_snapshot_counts_solutionless_layout(self):
         # A conventional solutionless F# repo: an .fsproj at the root, no

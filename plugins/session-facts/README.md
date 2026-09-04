@@ -148,7 +148,7 @@ detector が同じ repo にヒットしてよい)。
 | `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`uv.toml`/`poetry.lock`、pyproject 内の framework 名 |
 | `testing.py` | `zod`, `vitest`, `jest`, `playwright`, `cypress`, `monorepo` | 各種依存 / config file、`pnpm-workspace.yaml`・`turbo.json` |
 | `go_stack.py` | `go` | `go.mod` |
-| `swift_stack.py` | `swift` | `Package.swift` |
+| `swift_stack.py` | `swift` | `Package.swift`、または `*.xcodeproj`/`*.xcworkspace` (Package.swift の無い Xcode-only project) |
 | `java_stack.py` | `java`, `gradle`, `maven` | `gradlew`/`build.gradle(.kts)`、`pom.xml` |
 | `scala_stack.py` | `scala` | `build.sbt` |
 | `rust_stack.py` | `rust` | `Cargo.toml` |
@@ -168,7 +168,11 @@ conventional target (`make test` 等) は `## Likely Commands` へ反映され�
 `scala`/`elixir`/`swift`/`dotnet` の Likely Commands (`sbt test` 等) は他スタック
 と異なり検出された `ctx.stack` を根拠にする (repo 直下の primary package manager
 が別スタック、例えば `package-lock.json` と `App.sln` の同居で npm になっていても
-`dotnet test` は出る)。
+`dotnet test` は出る)。ただし `swift` はその中でも例外で、`ctx.stack` に `swift`
+があるだけでは `swift build`/`swift test` を出さない -- `Package.swift` が実在する
+ときだけ出す。`*.xcodeproj`/`*.xcworkspace` のみの Xcode-only project (SwiftPM の
+package manifest が無い) はこの条件を満たさないため、Likely Commands に何も足さ
+ない (`xcodebuild` は `-scheme` の明示指定が要り、安全に推定できないため)。
 
 ### cwd != repo_root のとき (monorepo / サブプロジェクト構成)
 

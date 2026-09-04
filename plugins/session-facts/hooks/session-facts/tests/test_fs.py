@@ -295,6 +295,37 @@ class WalkFilesTest(unittest.TestCase):
         sig = inspect.signature(walk_files)
         self.assertEqual(sig.parameters["limit"].default, 5000)
 
+    def test_xcodeproj_bundle_internals_are_not_walked(self):
+        # merge-review finding: *.xcodeproj/*.xcworkspace becoming a
+        # PROJECT_MARKERS entry means a non-git Xcode-only root now passes
+        # the marker gate and reaches walk_files directly. The bundle's
+        # stem is project-specific ("App" here), so SKIP_DIRS (exact-name
+        # matching) cannot express it -- this pins the suffix-based skip
+        # instead, and that no files under the bundle leak into the result.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App" / "App.swift").parent.mkdir(parents=True)
+            (root / "App" / "App.swift").write_text("struct App {}\n")
+            bundle = root / "App.xcodeproj"
+            (bundle / "project.xcworkspace" / "xcshareddata").mkdir(parents=True)
+            (bundle / "project.pbxproj").write_text("// pbxproj\n")
+            (bundle / "project.xcworkspace" / "contents.xcworkspacedata").write_text(
+                "<Workspace/>\n"
+            )
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(found, ["App/App.swift"])
+
+    def test_xcworkspace_bundle_internals_are_not_walked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App" / "App.swift").parent.mkdir(parents=True)
+            (root / "App" / "App.swift").write_text("struct App {}\n")
+            bundle = root / "App.xcworkspace"
+            bundle.mkdir()
+            (bundle / "contents.xcworkspacedata").write_text("<Workspace/>\n")
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(found, ["App/App.swift"])
+
 
 if __name__ == "__main__":
     unittest.main()

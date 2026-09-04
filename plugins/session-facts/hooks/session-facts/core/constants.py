@@ -49,6 +49,12 @@ CODE_EXTENSIONS = {
     # Service Entry Points even after "stack: dotnet" was reported
     # (merge-review finding, same shape as Elixir's/CMake's above).
     ".fs", ".fsx", ".vb",
+    # .fsi is F#'s signature-file suffix (a public-declaration counterpart
+    # to .fs, conventionally paired 1:1 with a same-named .fs implementation
+    # file) -- omitting it from the set above undercounts an F# project's
+    # own sources and can hide public service declarations that only live
+    # in the .fsi file (merge-review finding, round 2).
+    ".fsi",
 }
 
 TEST_PATH_MARKERS = {
@@ -208,24 +214,30 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # same false-negative-avoidance reason, not removed for consistency.
 #
 # Tier 2: common project roots. Most of these now have a matching detector
-# (CMakeLists.txt/cmake_stack.py, Package.swift/swift_stack.py,
-# mix.exs/elixir_stack.py, build.sbt/scala_stack.py, *.csproj+*.sln/
-# dotnet_stack.py) and so also satisfy the Tier 1 rationale above; they stay
-# listed here rather than being moved, since this tuple is a flat list with
-# no enforced Tier 1/Tier 2 split. Cargo.lock/Gemfile.lock are lockfile-only
-# fallbacks for rust_stack.py/ruby_stack.py (which key off Cargo.toml/
-# Gemfile), not markers for a still-undetected stack. Terraform (*.tf) is
-# the one entry left with no detector at all in this plugin. Still worth a
-# walk either way: the generic collectors (Structure, Test Snapshot,
-# Scripts, ...) produce useful output even without a "stack:" line naming
-# the language.
+# (CMakeLists.txt/cmake_stack.py, Package.swift or *.xcodeproj/*.xcworkspace
+# /swift_stack.py, mix.exs/elixir_stack.py, build.sbt/scala_stack.py,
+# *.csproj+*.sln/dotnet_stack.py) and so also satisfy the Tier 1 rationale
+# above; they stay listed here rather than being moved, since this tuple is
+# a flat list with no enforced Tier 1/Tier 2 split. Cargo.lock/Gemfile.lock
+# are lockfile-only fallbacks for rust_stack.py/ruby_stack.py (which key off
+# Cargo.toml/Gemfile), not markers for a still-undetected stack. Terraform
+# (*.tf) is the one entry left with no detector at all in this plugin. Still
+# worth a walk either way: the generic collectors (Structure, Test
+# Snapshot, Scripts, ...) produce useful output even without a "stack:"
+# line naming the language.
 # Some of these are glob patterns (matched via has_project_markers()'s
 # Path.glob() branch, not a literal exists() check): *.csproj/*.fsproj/
-# *.vbproj/*.sln/*.tf since the manifest filename is project-specific, not
-# fixed, and requirements*.txt to mirror collectors/dependencies.py's
-# _tracked_requirements(), which already recognises any
-# requirements-prefixed/.txt-suffixed basename (e.g. requirements-dev.txt)
-# -- not just the exact "requirements.txt" name.
+# *.vbproj/*.sln/*.tf/*.xcodeproj/*.xcworkspace since the manifest filename
+# is project-specific, not fixed, and requirements*.txt to mirror
+# collectors/dependencies.py's _tracked_requirements(), which already
+# recognises any requirements-prefixed/.txt-suffixed basename (e.g.
+# requirements-dev.txt) -- not just the exact "requirements.txt" name.
+# *.xcodeproj/*.xcworkspace are directories (Xcode's bundle format), not
+# files, but scan_project_markers()'s glob branch matches on entry name only
+# (no file/dir type filter), so no special-casing is needed here for that
+# (merge-review finding: an Xcode-only Swift app with no Package.swift had
+# no matching marker at all and was rejected by this gate on a non-git
+# root).
 # `$HOME` 直下ではユーザー全体の既定を意味し、そのディレクトリが
 # プロジェクトであることを示さないマーカー (mise config と同じ扱い)。
 GLOBAL_ONLY_AT_HOME_MARKERS = (
@@ -333,6 +345,8 @@ PROJECT_MARKERS = (
     "*.vbproj",
     "*.sln",
     "*.tf",
+    "*.xcodeproj",
+    "*.xcworkspace",
 )
 
 # hub_files collector (core/imports.py + collectors/hub_files.py): scanning
