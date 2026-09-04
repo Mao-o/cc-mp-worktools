@@ -796,7 +796,12 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
         ("cypress.config.ts", False),
         ("firebase.json", False),
         (".firebaserc", False),
-        # Tier 2: common project roots with no detector in this plugin yet.
+        # Tier 2: common project roots. CMakeLists.txt/Package.swift/
+        # mix.exs/build.sbt/*.csproj/*.sln now also have a matching detector
+        # (cmake_stack/swift_stack/elixir_stack/scala_stack/dotnet_stack);
+        # Cargo.lock/Gemfile.lock are lockfile-only fallbacks for
+        # rust_stack.py/ruby_stack.py, and *.tf (Terraform) is the one
+        # entry left with no detector at all in this plugin.
         ("CMakeLists.txt", False),
         ("Package.swift", False),
         ("mix.exs", False),
@@ -804,6 +809,7 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
         ("Cargo.lock", False),
         ("Gemfile.lock", False),
         ("App.csproj", False),  # *.csproj glob marker
+        ("App.sln", False),  # *.sln glob marker
         ("main.tf", False),  # *.tf glob marker
     ]
 

@@ -146,6 +146,14 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
         commands.extend(["cargo test", "cargo build"])
     elif pm == "composer":
         commands.append("composer install")
+    elif pm == "sbt":
+        commands.extend(["sbt test", "sbt compile"])
+    elif pm == "mix":
+        commands.append("mix test")
+    elif pm == "swift":
+        commands.extend(["swift build", "swift test"])
+    elif pm == "dotnet":
+        commands.append("dotnet test")
 
     # Bare-Python repos (.py-heavy, no PM lockfile/pyproject) get no pytest line
     # from the chain above. Only surface one when a concrete runner (venv/mise)

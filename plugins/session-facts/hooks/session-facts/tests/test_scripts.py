@@ -65,6 +65,44 @@ class LikelyCommandsRuntimeTest(unittest.TestCase):
         self.assertFalse(any("pytest" in c for c in cmds))
 
 
+class NewStackLikelyCommandsTest(unittest.TestCase):
+    """internal backlog: swift/dotnet/scala/elixir detectors added a
+    package_manager value with no corresponding _likely_commands branch,
+    so a repo with only e.g. build.sbt would get a "stack: scala" header
+    but no Likely Commands hint at all."""
+
+    def test_sbt_pm_suggests_sbt_test_and_compile(self):
+        ctx = _ctx(pm="sbt", stack=["scala"])
+        cmds = _likely_commands(ctx, max_items=16)
+        self.assertIn("sbt test", cmds)
+        self.assertIn("sbt compile", cmds)
+
+    def test_mix_pm_suggests_mix_test(self):
+        ctx = _ctx(pm="mix", stack=["elixir"])
+        cmds = _likely_commands(ctx, max_items=16)
+        self.assertIn("mix test", cmds)
+
+    def test_swift_pm_suggests_swift_build_and_test(self):
+        ctx = _ctx(pm="swift", stack=["swift"])
+        cmds = _likely_commands(ctx, max_items=16)
+        self.assertIn("swift build", cmds)
+        self.assertIn("swift test", cmds)
+
+    def test_dotnet_pm_suggests_dotnet_test(self):
+        ctx = _ctx(pm="dotnet", stack=["dotnet"])
+        cmds = _likely_commands(ctx, max_items=16)
+        self.assertIn("dotnet test", cmds)
+
+    def test_cmake_stack_alone_suggests_no_command(self):
+        # cmake is deliberately not a package_manager value (see
+        # tests/test_new_stack_detectors.py::CmakeStackDetectorTest); a
+        # cmake-only repo gets a "stack: cmake" header but no guessed build
+        # invocation.
+        ctx = _ctx(pm=None, stack=["cmake"])
+        cmds = _likely_commands(ctx, max_items=16)
+        self.assertFalse(any("cmake" in c for c in cmds))
+
+
 class ScriptCommandLengthCapTest(unittest.TestCase):
     """internal backlog: a single overly-long script command (some
     generators produce one-liners several hundred chars wide, e.g. the

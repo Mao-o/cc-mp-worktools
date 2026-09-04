@@ -31,6 +31,8 @@ def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
         return "gradle"
     if (root / "pom.xml").exists():
         return "maven"
+    if (root / "build.sbt").exists():
+        return "sbt"
     # Other
     if (root / "go.mod").exists():
         return "go"
@@ -38,4 +40,23 @@ def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
         return "cargo"
     if (root / "composer.json").exists():
         return "composer"
+    if (root / "mix.exs").exists():
+        return "mix"
+    if (root / "Package.swift").exists():
+        return "swift"
+    if _has_dotnet_project(root):
+        return "dotnet"
     return None
+
+
+def _has_dotnet_project(root) -> bool:
+    """Root-level ``*.csproj``/``*.sln`` (detectors/dotnet_stack.py duplicates
+    this same check, matching the existing gradle-check duplication between
+    this module and detectors/java_stack.py -- pm.py and the stack detector
+    each own their check rather than sharing a helper across the layer
+    boundary).
+    """
+    try:
+        return any(p.suffix in (".csproj", ".sln") for p in root.iterdir() if p.is_file())
+    except OSError:
+        return False

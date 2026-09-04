@@ -188,16 +188,25 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # marker *filename* fundamentally cannot express); they are kept for the
 # same false-negative-avoidance reason, not removed for consistency.
 #
-# Tier 2: common project roots for stacks this plugin has no detector for
-# at all yet (C/C++, Swift, Elixir, Scala, .NET, Terraform). Still worth a
-# walk: the generic collectors (Structure, Test Snapshot, Scripts, ...)
-# produce useful output even without a "stack:" line naming the language.
-# Three of these are glob patterns (matched via has_project_markers()'s
-# Path.glob() branch, not a literal exists() check): *.csproj/*.tf since the
-# manifest filename is project-specific, not fixed, and requirements*.txt to
-# mirror collectors/dependencies.py's _tracked_requirements(), which already
-# recognises any requirements-prefixed/.txt-suffixed basename (e.g.
-# requirements-dev.txt) -- not just the exact "requirements.txt" name.
+# Tier 2: common project roots. Most of these now have a matching detector
+# (CMakeLists.txt/cmake_stack.py, Package.swift/swift_stack.py,
+# mix.exs/elixir_stack.py, build.sbt/scala_stack.py, *.csproj+*.sln/
+# dotnet_stack.py) and so also satisfy the Tier 1 rationale above; they stay
+# listed here rather than being moved, since this tuple is a flat list with
+# no enforced Tier 1/Tier 2 split. Cargo.lock/Gemfile.lock are lockfile-only
+# fallbacks for rust_stack.py/ruby_stack.py (which key off Cargo.toml/
+# Gemfile), not markers for a still-undetected stack. Terraform (*.tf) is
+# the one entry left with no detector at all in this plugin. Still worth a
+# walk either way: the generic collectors (Structure, Test Snapshot,
+# Scripts, ...) produce useful output even without a "stack:" line naming
+# the language.
+# Four of these are glob patterns (matched via has_project_markers()'s
+# Path.glob() branch, not a literal exists() check): *.csproj/*.sln/*.tf
+# since the manifest filename is project-specific, not fixed, and
+# requirements*.txt to mirror collectors/dependencies.py's
+# _tracked_requirements(), which already recognises any
+# requirements-prefixed/.txt-suffixed basename (e.g. requirements-dev.txt)
+# -- not just the exact "requirements.txt" name.
 # `$HOME` 直下ではユーザー全体の既定を意味し、そのディレクトリが
 # プロジェクトであることを示さないマーカー (mise config と同じ扱い)。
 GLOBAL_ONLY_AT_HOME_MARKERS = (
@@ -301,6 +310,7 @@ PROJECT_MARKERS = (
     "Cargo.lock",
     "Gemfile.lock",
     "*.csproj",
+    "*.sln",
     "*.tf",
 )
 
