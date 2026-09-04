@@ -671,7 +671,7 @@ def _analyze_segment(
             if pending_glob_ask is None:
                 L.log_info("bash_classify", "glob_uncertain_lenient")
                 pending_glob_ask = output.ask_or_allow(
-                    M.bash_lenient("opaque_prefix"),
+                    M.bash_lenient("glob_uncertain"),
                     envelope,
                 )
             continue

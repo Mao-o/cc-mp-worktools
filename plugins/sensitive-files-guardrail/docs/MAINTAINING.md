@@ -251,8 +251,11 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 - marketplace の CI (`.github/workflows/validate.yml`) も同じ
   `python3 -m unittest discover tests` を、同じくサブシェルで `cd` する形で
   `plugins/*/hooks/*/tests` の親を列挙して実行する (CI 側は失敗したスイートを
-  集計して job を fail させる)。Python は 3.12 に固定。要件は **3.11+** で、
-  3.11 未満では `tomllib` 不在で TOML 系テストが fail する
+  集計して job を fail させる)。Python は 3.12 に固定。plugin 自体の動作要件は
+  **3.11+**。`tomllib` に依存する TOML 系テストの一部は、3.11 未満の
+  interpreter でこのスイートを走らせた場合に備えて `skipUnless` により自動
+  skip する (`tests/test_redaction_minimal.py` の `_TOMLLIB_AVAILABLE`) ため
+  fail しない
 - テストを追加するときは既存の書式 (mode 5 列の envelope fixture、`_make_envelope`
   / `_decision` ヘルパ) に合わせ、判定境界を変える変更は MATRIX.md の行と対にする
 
@@ -481,9 +484,11 @@ step 8 で判断する**。ここまでの step が与えるのは mode 文字�
 
 ### 7. behavioral probe — 新 mode が autonomous か分類する (未実施)
 
-> **この手順は未実施。** 「Step 0-c 実測結果」節と同じ扱いで、記載はしてあるが
-> 実機での実行と結果の記録はまだ行っていない。**手順として成立するか自体も実機で
-> 確かめていない** (下の「未確定」を参照)。ここに実測結果らしきものを書かないこと。
+> **この手順は未実施。** 記載はしてあるが実機での実行と結果の記録はまだ
+> 行っていない (`Step 0-c 実測結果` 節とは異なり、この項目は公式ドキュメントで
+> 代替確認できる性質のものではなく実機実測が必須)。**手順として成立するか
+> 自体も実機で確かめていない** (下の「未確定」を参照)。ここに実測結果らしき
+> ものを書かないこと。
 
 step 8 の収録判断は「その mode が autonomous 実行モードか」に依存するが、これは
 **envelope の中身からは決まらない**。envelope は `permission_mode` の文字列を教える
@@ -677,29 +682,41 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
 6. commit (`feat|fix|docs(sensitive-files-guardrail): … (vX.Y.Z)`) → push →
    PR → Codex review → merge。tag は必要に応じて付ける
 
-## Step 0-c 実測結果 (将来更新予定)
+## Step 0-c 実測結果 (確定)
 
-Step 0-c (outer timeout 発火時の Claude Code 挙動実測) は未実施。暫定方針として
-Case A (timeout kill → allow / fail-open の最悪ケース想定) で Windows (SIGALRM
-非対応) を hook 冒頭で deny exit にしている (`__main__._is_unsupported_platform`)。
+Step 0-c (`hooks.json` の `timeout` 発火時の Claude Code 挙動) は、実機実測
+ではなく公式ドキュメント (code.claude.com/docs/en/hooks の "Timeouts" 節、
+2026-09 逐語確認) で確定した:
 
-実測後、以下のいずれかに方針確定:
+> Apart from a command hook you run with `async: true`, Claude Code cancels
+> a `command`, `http`, or `mcp_tool` hook that reaches its `timeout`,
+> discarding the hook's output, so on most events a timed-out hook renders
+> no decision. [...] A timed-out `command`, `http`, or `mcp_tool` hook
+> doesn't block the tool call. The call continues through the normal
+> permission flow, so don't count on a stalled hook to act as a gate.
 
-- **Case A 確定**: Windows 非対応を README の既知制限に明記継続
-- **Case B 確定**: timeout kill → deny で Claude Code が継続するなら、Windows
-  でも hang = 自動 deny となり安全。`_is_unsupported_platform` ガードを解除可能
+**Case A 確定** (timeout kill → discard → allow / fail-open)。しかも
+**Windows 固有ではなく全 OS 共通** — `timeout: 2` は Claude Code (CLI) 側が
+外側から強制するもので、OS を問わず同じ経路で hook の出力が discard される。
+本 plugin は Windows を `signal.SIGALRM` の有無 (`__main__._is_unsupported_platform`)
+で判定して hook 冒頭から deny exit しているが、これは上記の CLI 側 outer
+timeout とは**別の仕組み** (公式ドキュメントに `SIGALRM` への言及は無い)。
+Windows で deny exit する既定方針そのものの見直しは本節の対象外 (別議論)。
 
-実測手順:
+以下の実測手順は、公式ドキュメントで答えが確定したため**不要になった**
+(実行しないこと):
 
-1. `hooks.json` の `timeout: 2` の hook に `time.sleep(5)` を仕込む
-2. `claude --plugin-dir .` で起動して Read を実行
-3. timeout kill 後、Claude Code が allow / ask / deny のどれを返すか観察
-4. 結果を [DESIGN.md](./DESIGN.md) と本節に追記
+1. ~~`hooks.json` の `timeout: 2` の hook に `time.sleep(5)` を仕込む~~
+2. ~~`claude --plugin-dir .` で起動して Read を実行~~
+3. ~~timeout kill 後、Claude Code が allow / ask / deny のどれを返すか観察~~
 
 ## 依存関係
 
-- **Python 3.11+** (標準ライブラリのみ、`pip install` 不要。`tomllib` は 3.11+
-  標準で、未満では TOML の構造付き minimal info が opaque に劣化する)
+- **Python 3.11+** (標準ライブラリのみ、`pip install` 不要。`tomllib` は
+  3.11+ 標準で、未満の interpreter で動かした場合は TOML の構造付き
+  minimal info が opaque な keys-only scan に劣化する。fail-open には
+  ならず、hook 起動時に `python_version_degraded` を 1 回ログする)
 - **Git 1.7+** (`git ls-files --recurse-submodules`)
 - **Claude Code CLI 2.1.100+** (`permission_mode: auto` は 2.1.83+ で追加)
-- macOS / Linux。Windows は上記 Step 0-c の確定まで fail-closed で deny
+- macOS / Linux。Windows は `signal.SIGALRM` 非対応のため fail-closed で deny
+  (Step 0-c の outer timeout 挙動自体は確定済み、上記節参照)

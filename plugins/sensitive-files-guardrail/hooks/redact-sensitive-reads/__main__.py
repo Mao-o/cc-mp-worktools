@@ -90,20 +90,43 @@ def _dispatch(tool: str, envelope: dict) -> dict:
 
 
 def _is_unsupported_platform() -> bool:
-    """Step 0-c 暫定: SIGALRM 非対応 (Windows 等) は現状非対応として扱う。
+    """SIGALRM 非対応 (Windows 等) は現状非対応として扱う。
 
-    outer timeout 発火時に Claude Code が allow (fail-open) を返す可能性があり、
-    その場合 hook が hang したまま機密が漏れる最悪パスがあり得る。Step 0-c の
-    実測結果が確定するまで安全側 (deny) で倒す。
+    ここでの判定は `hasattr(signal, "SIGALRM")` だけを見る platform gate
+    であり、alarm や signal handler は一切設置しない (0.6.0 で内部
+    soft-timeout を撤去済み — `redaction/engine.py` 冒頭コメント参照)。
+
+    outer timeout (`hooks.json` の `timeout`) 発火時、Claude Code はこの
+    hook を discard し allow で継続する (fail-open。公式ドキュメントで確定
+    済み、Step 0-c — docs/DESIGN.md 参照)。この fail-open は Windows 固有
+    ではなく全 OS 共通で、本 plugin には Unix 側にもそれを能動的に防ぐ内部
+    タイムアウト機構は存在しない。それでも Windows だけを hook 冒頭から
+    deny で倒しているのは、`signal.SIGALRM` の有無を Windows 判定の proxy
+    に使っているためで、hang したまま機密が漏れる最悪パスを保守的に避ける
+    という方針上の選択にすぎない。
     """
     import signal as _signal
     return not hasattr(_signal, "SIGALRM")
+
+
+def _warn_if_python_degraded() -> None:
+    """Python 3.11 未満では TOML の構造付き minimal info が opaque に劣化する
+    (`redaction/tomllike.py`)。fail-open にはしない (hook 自体は継続) が、
+    サイレント劣化にしないためログにだけ残す (内部バックログ)。
+    """
+    if sys.version_info < (3, 11):
+        L.log_info(
+            "python_version_degraded",
+            f"{sys.version_info[0]}.{sys.version_info[1]}",
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     if _is_unsupported_platform():
         _emit(output.make_deny(M.unsupported_platform()))
         return 0
+
+    _warn_if_python_degraded()
 
     try:
         args = _parse_args(argv if argv is not None else sys.argv[1:])

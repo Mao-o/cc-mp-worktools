@@ -7,6 +7,7 @@ text を wrap して渡す (``_redact_text`` ヘルパ)。
 """
 from __future__ import annotations
 
+import sys
 import unittest
 from io import BytesIO
 
@@ -18,6 +19,13 @@ from redaction.jsonlike import redact_jsonlike
 from redaction.keyonly_scan import scan_keys
 from redaction.opaque import redact_opaque
 from redaction.tomllike import redact_toml
+
+# tomllib (redaction/tomllike.py が使う) は Python 3.11+ の標準ライブラリ。
+# 未満の環境では TOML の構造付き minimal info が opaque にフォールバックする
+# 意図した劣化 (engine.py の `except RuntimeError` 分岐、内部バックログ)
+# なので、tomllib の成功パスだけを直接検証するテストはここでスキップする。
+_TOMLLIB_AVAILABLE = sys.version_info >= (3, 11)
+_TOMLLIB_SKIP_REASON = "tomllib requires Python 3.11+"
 
 
 def _redact_text(basename: str, text: str, truncated: bool = False) -> str:
@@ -103,6 +111,7 @@ class TestTomlRedaction(unittest.TestCase):
     def setUp(self):
         self.text = (FIXTURES / "sample.toml").read_text()
 
+    @unittest.skipUnless(_TOMLLIB_AVAILABLE, _TOMLLIB_SKIP_REASON)
     def test_parse_ok(self):
         info = redact_toml(self.text)
         self.assertEqual(info["format"], "toml")
@@ -188,6 +197,7 @@ class TestJsonStatus(unittest.TestCase):
         self.assertIn('matched="your_*_here"', reason)
 
 
+@unittest.skipUnless(_TOMLLIB_AVAILABLE, _TOMLLIB_SKIP_REASON)
 class TestTomlStatus(unittest.TestCase):
     """0.14.0 (E5) で toml の str 値にも status / length / placeholder を付与。"""
 
@@ -727,6 +737,7 @@ class TestKeyonlyFallbackReason(unittest.TestCase):
         self.assertIn("(no keys matched)", reason)
         self.assertIn("JSON parse failed", reason)
 
+    @unittest.skipUnless(_TOMLLIB_AVAILABLE, _TOMLLIB_SKIP_REASON)
     def test_broken_small_toml_reports_parse_failed(self):
         text = "key = [1, 2"  # 閉じ括弧が無い不正 TOML
         reason = _redact_text("secrets.local.toml", text)
@@ -872,6 +883,7 @@ class TestTomlRecursionErrorLabel(unittest.TestCase):
     を明示しているのと同じ理由で、toml 側にも明示が要る。
     """
 
+    @unittest.skipUnless(_TOMLLIB_AVAILABLE, _TOMLLIB_SKIP_REASON)
     def test_deeply_nested_toml_reports_parse_failed(self):
         text = "a = " + "[" * 500 + "]" * 500 + "\n"
         reason = _redact_text("deep.secret.toml", text)

@@ -68,6 +68,21 @@ class TestClassify(_BaseTmp):
         os.mkfifo(fifo)
         self.assertEqual(classify(fifo), "special")
 
+    def test_directory_is_not_special(self):
+        """内部バックログ: ディレクトリは S_ISREG でないだけで FIFO/socket/
+        device (special) とは別物。専用の分類値を返す。"""
+        d = Path(self.tmp) / "subdir"
+        d.mkdir()
+        self.assertEqual(classify(d), "directory")
+
+    def test_symlink_to_directory_is_symlink_not_directory(self):
+        """symlink 判定 (lstat) が S_ISDIR 判定より先に効くこと。"""
+        target = Path(self.tmp) / "realdir"
+        target.mkdir()
+        link = Path(self.tmp) / "linkdir"
+        os.symlink(target, link)
+        self.assertEqual(classify(link), "symlink")
+
 
 class TestOpenRegular(_BaseTmp):
     """fd ベースの open_regular。O_NOFOLLOW でうっかり symlink を防ぐ前提

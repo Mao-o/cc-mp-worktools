@@ -31,7 +31,7 @@ dotenv の場合は ``redact_dotenv`` の info dict も併せて返す (E4: grep
 | ``normalize_failed`` | ``normalize`` が ``ValueError`` / ``OSError`` |
 | ``stat_failed`` | ``classify`` が例外 or ``"error"`` (権限 / IO) |
 | ``unresolved`` | ``classify`` == ``"missing"`` (どの基準でも解決できない) |
-| ``not_regular`` | ``classify`` == ``"symlink"`` / ``"special"`` |
+| ``not_regular`` | ``classify`` == ``"symlink"`` / ``"directory"`` / ``"special"`` |
 | ``open_failed`` | ``open_regular`` が ``OSError`` (``ELOOP`` 等) |
 | ``redact_failed`` | 読み込み / redact 中の内部例外 |
 
@@ -85,9 +85,17 @@ from redaction.engine import (  # noqa: F401  (private symbol intentional reuse)
 
 
 # ``classify`` の戻り値 → failure_kind。``"regular"`` のみ成功。
+#
+# 内部バックログ: ``classify`` が 0.28.0 で ``directory`` を ``special`` から
+# 分離した (S_ISDIR を明示分岐)。ディレクトリは元々「非通常ファイル」として
+# ``not_regular`` に分類されていたので、ここも合わせて ``not_regular`` に
+# マップする — 更新しないと ``.get(cls, "stat_failed")`` の既定にフォール
+# バックし、ディレクトリを「ファイル状態の確認に失敗した (権限 / IO)」と
+# 誤表示する regression になる。
 _CLASSIFY_FAILURE_KIND: dict[str, str] = {
     "missing": "unresolved",
     "symlink": "not_regular",
+    "directory": "not_regular",
     "special": "not_regular",
     "error": "stat_failed",
 }

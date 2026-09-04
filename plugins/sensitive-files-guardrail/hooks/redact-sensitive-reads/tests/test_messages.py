@@ -809,6 +809,15 @@ class TestReadAsk(unittest.TestCase):
         self.assertNotIn("続行しますか", msg)
         self.assertIn("再試行", msg)
 
+    def test_directory(self):
+        """内部バックログ: ディレクトリは special (FIFO/socket/device) とは
+        別の専用文言を持つこと。"""
+        msg = M.read_ask("directory")
+        self.assertIn("ディレクトリ", msg)
+        self.assertNotIn("FIFO", msg)
+        self.assertNotIn("続行しますか", msg)
+        self.assertIn("再試行", msg)
+
     def test_io_error(self):
         msg = M.read_ask("io_error")
         self.assertIn("権限", msg)
@@ -868,6 +877,16 @@ class TestBashLenient(unittest.TestCase):
         msg = M.bash_lenient("opaque_prefix")
         self.assertIn("wrapper", msg)
         self.assertIn(self.LENIENT_SUFFIX, msg)
+
+    def test_glob_uncertain(self):
+        """内部バックログ: glob operand の不確定 ask が opaque_prefix (wrapper /
+        インタプリタ文言) を誤流用していた。専用 kind で文言を分ける。"""
+        msg = M.bash_lenient("glob_uncertain")
+        self.assertIn("glob", msg)
+        self.assertIn(self.LENIENT_SUFFIX, msg)
+        # 誤流用していた opaque_prefix 側の文言が紛れ込んでいないこと
+        self.assertNotIn("wrapper", msg)
+        self.assertNotIn("インタプリタ", msg)
 
     def test_residual_metachar(self):
         msg = M.bash_lenient("residual_metachar")
@@ -982,14 +1001,14 @@ class TestDenyPlainText(unittest.TestCase):
 
     def test_ask_messages_remain_plain_text(self):
         # 0.6.x 以前から ask 系は plain text。0.7.0 でも継続。
-        for kind in ("symlink", "special", "io_error"):
+        for kind in ("symlink", "special", "directory", "io_error"):
             msg = M.read_ask(kind)
             self.assertNotIn("<GUARDRAIL_DENY", msg)
         for kind in ("normalize_failed", "io_error", "parent_not_directory"):
             msg = M.edit_pause(kind, tool_label="Edit")
             self.assertNotIn("<GUARDRAIL_DENY", msg)
         for kind in ("hard_stop", "opaque_prefix", "shell_keyword",
-                     "program_dynamic"):
+                     "program_dynamic", "glob_uncertain"):
             msg = M.bash_lenient(kind)
             self.assertNotIn("<GUARDRAIL_DENY", msg)
 
@@ -1001,8 +1020,8 @@ class TestVocabularyConsistency(unittest.TestCase):
         # bash_deny
         msg = M.bash_deny(first_token="cat", operand=".env")
         self.assertIn("block しました", msg)
-        # edit_deny — E6 の 4 分岐すべてが語彙ルールを守ること
-        for kind in ("new", "overwrite", "symlink", "special"):
+        # edit_deny — E6 の分岐すべてが語彙ルールを守ること
+        for kind in ("new", "overwrite", "symlink", "special", "directory"):
             with self.subTest(kind=kind):
                 msg2 = M.edit_deny("Write", ".env", kind=kind)
                 self.assertIn("block しました", msg2)
@@ -1011,8 +1030,8 @@ class TestVocabularyConsistency(unittest.TestCase):
         self.assertIn("block しました", msg3)
 
     def test_ask_or_deny_uses_retry(self):
-        for kind in ("symlink", "special", "io_error", "normalize_failed",
-                     "open_failed"):
+        for kind in ("symlink", "special", "directory", "io_error",
+                     "normalize_failed", "open_failed"):
             msg = M.read_ask(kind)
             self.assertIn(
                 "再試行", msg,
@@ -1029,6 +1048,7 @@ class TestVocabularyConsistency(unittest.TestCase):
         for kind in (
             "hard_stop", "opaque_prefix", "residual_metachar",
             "tokenize_failed", "normalize_failed", "program_dynamic",
+            "glob_uncertain",
         ):
             msg = M.bash_lenient(kind)
             self.assertIn(

@@ -859,6 +859,17 @@ class TestGlobDotenvDeny(BaseBash):
         r = handle(_make_envelope("cat *.envrc", self.tmp, mode="auto"))
         self.assertTrue(output.is_allow(r))
 
+    def test_uncertain_glob_reason_mentions_glob_not_wrapper(self):
+        """内部バックログ: 不確定 glob の ask 理由文が opaque_prefix (wrapper /
+        インタプリタ) を誤流用していた。専用文言 (glob) に分離済みであること。
+        """
+        r = handle(_make_envelope("cat *.json", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        reason = _reason(r)
+        self.assertIn("glob", reason)
+        self.assertNotIn("wrapper", reason)
+        self.assertNotIn("インタプリタ", reason)
+
     def test_envrc_star_deny(self):
         r = handle(_make_envelope("cat .envrc*", self.tmp))
         self.assertEqual(_decision(r), "deny")

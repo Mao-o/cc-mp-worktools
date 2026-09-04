@@ -44,6 +44,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | 機密 + 通常ファイル | **deny** + minimal info (鍵名・型・prefix・status・length) | **deny** | **deny** | **deny** | **deny** |
 | 機密 + symlink | ask | ask | ask | ask | **deny** |
 | 機密 + 特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | **deny** |
+| 機密 + directory (`.env` がディレクトリの構成、内部バックログ) | ask | ask | ask | ask | **deny** |
 | 機密 + 読み取り失敗 (権限/IO) | ask | ask | ask | ask | **deny** |
 | redaction engine 内部例外 | ask | ask | ask | ask | **deny** |
 | patterns.txt 読込失敗 | ask + stderr | ask | ask | ask | **deny** + stderr |
@@ -501,11 +502,13 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `.env.example` / `config.template` を Edit/Write | allow | allow | allow | allow | allow |
 | path 最終要素が symlink (機密一致) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | path 最終要素が special (FIFO/socket/device) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| path 最終要素が directory (`.env` がディレクトリの構成、内部バックログ) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | 親ディレクトリが symlink / 特殊 / 不在 | ask | ask | ask | ask | **deny** |
 | patterns.txt / normalize / stat 失敗 | ask | ask | ask | ask | **deny** |
 
 > 0.20.0 (E6) で deny reason の**文面**を書き込み先の状態
-> (新規 / 既存上書き / symlink / special) で 4 分岐したが、**上表の判定は
+> (新規 / 既存上書き / symlink / special) で 4 分岐、内部バックログで
+> directory を special から分離し 5 分岐にしたが、**上表の判定は
 > 1 セルも変わっていない**。文面の内訳は
 > [DESIGN.md](./DESIGN.md#状況別の-deny-文面-0200-e6) を参照。
 

@@ -204,6 +204,11 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
             tool_label, basename, new_keys,
             kind="symlink", is_dotenv=is_dotenv, relpath=relpath,
         ))
+    if cls == "directory":
+        return output.make_deny(M.edit_deny(
+            tool_label, basename, new_keys,
+            kind="directory", is_dotenv=is_dotenv, relpath=relpath,
+        ))
     if cls == "special":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,

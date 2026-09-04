@@ -57,6 +57,8 @@ def handle(envelope: dict) -> dict:
 
     if cls == "symlink":
         return output.ask_or_deny(M.read_ask("symlink"), envelope)
+    if cls == "directory":
+        return output.ask_or_deny(M.read_ask("directory"), envelope)
     if cls == "special":
         return output.ask_or_deny(M.read_ask("special"), envelope)
     if cls == "missing":

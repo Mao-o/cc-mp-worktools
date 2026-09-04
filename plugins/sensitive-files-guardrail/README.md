@@ -437,6 +437,11 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 4. **Windows は現状 fail-closed で deny exit** — SIGALRM 非対応のため
 5. **`!` プレフィックス (Claude Code bash mode) は対象外** — ユーザー明示操作で
    `! cat .env` を実行した場合は stdout が transcript に追加される (hook 介在外)
+6. **Grep / Glob は対象外** — `hooks/hooks.json` の PreToolUse matcher は
+   `Read` / `Bash` / `Edit` / `Write` のみで、`Grep` / `Glob` には発火しない。
+   補うには Claude Code 本体の `permissions.deny` に `Read(<path>)` ルールを
+   追加する (公式仕様上 best-effort で Grep / Glob にも適用される。
+   `Glob(...)` という形の path rule は認識されず無視されるため注意)
 
 ## Fail-closed vs fail-open
 
@@ -462,10 +467,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (1,210 tests, 0.27.0 時点)
+# redact-sensitive-reads (1,219 tests, 0.28.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (133 tests, 0.27.0 時点)
+# check-sensitive-files (133 tests, 0.28.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -487,6 +492,10 @@ validate / リリース手順 / CLI 再実測 Runbook などの保守者向け�
 ## 互換性
 
 - Claude Code CLI 2.1.100+ 想定
-- Python 3.11+ 想定 (標準ライブラリのみ、`pip install` 不要)
+- Python 3.11+ 想定 (標準ライブラリのみ、`pip install` 不要)。3.11 未満の
+  環境で動かした場合、TOML ファイルの reason は opaque な keys-only scan に
+  フォールバックし、`format: toml (unsupported, keys-only scan)` と
+  `Python 3.11+` を明記した note が付く (fail-open にはならず、hook 起動時にも
+  ログへ 1 回記録する — サイレント劣化ではない)
 - Git 1.7+ (submodule scan 用)
 - macOS / Linux 対応、Windows 非対応 (現状 fail-closed で deny)
