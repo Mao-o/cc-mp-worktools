@@ -119,7 +119,11 @@ class NewStackLikelyCommandsTest(unittest.TestCase):
             root = Path(tmp)
             (root / "package-lock.json").write_text("{}")
             (root / "package.json").write_text('{"scripts": {"build": "webpack"}}')
-            (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
+            (root / "App.sln").write_text(
+                "Microsoft Visual Studio Solution File\n"
+                'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", '
+                '"App.csproj", "{GUID}"\nEndProject\n'
+            )
             ctx = RepoContext(root=root, config=AnalysisConfig())
             ctx.results["package_manager"] = detect_package_manager(ctx)
             self.assertEqual(ctx.results["package_manager"], "npm")
@@ -146,7 +150,11 @@ class NewStackLikelyCommandsTest(unittest.TestCase):
                 '{"scripts": %s}'
                 % str(npm_scripts).replace("'", '"')
             )
-            (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
+            (root / "App.sln").write_text(
+                "Microsoft Visual Studio Solution File\n"
+                'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", '
+                '"App.csproj", "{GUID}"\nEndProject\n'
+            )
             ctx = RepoContext(root=root, config=AnalysisConfig())
             ctx.results["package_manager"] = detect_package_manager(ctx)
             self.assertEqual(ctx.results["package_manager"], "npm")

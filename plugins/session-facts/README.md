@@ -154,7 +154,7 @@ detector が同じ repo にヒットしてよい)。
 | `rust_stack.py` | `rust` | `Cargo.toml` |
 | `elixir_stack.py` | `elixir` | `mix.exs` |
 | `ruby_stack.py` | `ruby` | `Gemfile` |
-| `dotnet_stack.py` | `dotnet` | ルート直下の `*.csproj`/`*.fsproj`/`*.vbproj`/`*.sln`/`*.slnx` |
+| `dotnet_stack.py` | `dotnet` | ルート直下の `*.csproj`/`*.fsproj`/`*.vbproj`、または `*.sln`/`*.slnx`（solution のみの root は本文に managed project 参照 `*.csproj`/`*.fsproj`/`*.vbproj` があるときだけ dotnet。`*.vcxproj` のみの C++ 専用 solution は対象外） |
 | `taskrunner.py` | `makefile`, `justfile`, `taskfile`, `nx` | `Makefile`、`Justfile`/`justfile`、`Taskfile.y(a)ml`、`nx.json` |
 | `flutter.py` | `flutter`, `dart` | `pubspec.yaml` (`sdk: flutter` または `flutter:` セクション。それ以外の pubspec は `dart` のみ) |
 | `php_stack.py` | `php` | `composer.json` |

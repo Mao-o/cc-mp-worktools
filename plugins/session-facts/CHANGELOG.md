@@ -250,6 +250,32 @@
      `CODE_EXTENSIONS` に既登録で変更なし。
    9 件追加 (513 -> 522)
 
+10. **マージ前レビューの指摘 1 件を修正 (solution のみの root が member
+    project の中身を見ずに dotnet 判定されていた問題)**
+    (`core/dotnet.py` 新規, `detectors/dotnet_stack.py`, `core/pm.py`,
+    `README.md`, `tests/test_new_stack_detectors.py`, `tests/test_pm.py`,
+    `tests/test_scripts.py`) — root 直下の `*.sln`/`*.slnx` は、それ単体
+    では .NET の証拠にならない。Visual Studio の solution は native C++
+    project (`*.vcxproj`) のみで構成できるため、C++ 専用 solution の
+    root でも `stack: dotnet`/`package_manager: dotnet` が付き
+    `dotnet test` まで提案されてしまっていた (`*.vcxproj` のみを参照する
+    `.sln` 固定 fixture で修正前に実際に `["dotnet"]`/`"dotnet"` を
+    返すことを確認してから修正)。root 直下に `*.csproj`/`*.fsproj`/
+    `*.vbproj` があれば従来通り即 dotnet とし、solution ファイルしか
+    無い場合だけ solution 本文を読み、managed project の参照
+    (`*.csproj`/`*.fsproj`/`*.vbproj` いずれかの拡張子文字列、大小文字
+    区別なし) を含むときのみ dotnet と判定するようにした。classic
+    `.sln` の `Project(...) = "Name", "path\App.csproj", ...` 行、
+    `.slnx` の `<Project Path="src/App.csproj" />` 要素のどちらも同じ
+    部分文字列一致で拾える。solution が読めない/空の場合は dotnet と
+    判定しない (fail-closed)。この判定はこれまで
+    `detectors/dotnet_stack.py`/`core/pm.py` に別々に手書きされ重複して
+    いたが、`core/dotnet.py::has_dotnet_project()` に一本化し両方から
+    呼ぶようにした (2 箇所が独立にドリフトする方が、gradle の単純
+    `exists()` 重複より実害が大きいと判断したため — gradle 側は
+    `core/pm.py`/`detectors/java_stack.py` のまま変更なし)。
+    3 件追加 (522 -> 525)
+
 ## 0.9.0
 
 **Firebase 判定の一本化 / Domain Types の代表性改善 / README 同期 (v0.9)**。

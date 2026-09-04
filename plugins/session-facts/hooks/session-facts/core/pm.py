@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Optional, TYPE_CHECKING
 
+from core.dotnet import has_dotnet_project
+
 if TYPE_CHECKING:
     from core.context import RepoContext
 
@@ -44,27 +46,14 @@ def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
         return "mix"
     if (root / "Package.swift").exists():
         return "swift"
-    if _has_dotnet_project(root):
+    # has_dotnet_project() is the single source of truth shared with
+    # detectors/dotnet_stack.py (unlike the gradle exists() check just
+    # above, which stays duplicated between this module and
+    # detectors/java_stack.py -- that one is a single trivial exists() call
+    # on each side, with no parsing logic worth protecting behind a shared
+    # helper; the dotnet check now has to inspect solution file contents,
+    # see core/dotnet.py, so a drift between two hand-rolled copies would
+    # be much easier to introduce and much harder to notice).
+    if has_dotnet_project(root):
         return "dotnet"
     return None
-
-
-def _has_dotnet_project(root) -> bool:
-    """Root-level ``*.csproj``/``*.fsproj``/``*.vbproj``/``*.sln``/``*.slnx``
-    (detectors/dotnet_stack.py duplicates this same check, matching the
-    existing gradle-check duplication between this module and
-    detectors/java_stack.py -- pm.py and the stack detector each own their
-    check rather than sharing a helper across the layer boundary). F#/VB.NET
-    project files are included alongside C#'s so a solutionless F#/VB.NET
-    repo is recognized too, not just C# (merge-review finding). ``.slnx`` is
-    the newer XML solution format dotnet/VS read the same way as ``.sln``
-    (merge-review finding, round 5).
-    """
-    try:
-        return any(
-            p.suffix in (".csproj", ".fsproj", ".vbproj", ".sln", ".slnx")
-            for p in root.iterdir()
-            if p.is_file()
-        )
-    except OSError:
-        return False

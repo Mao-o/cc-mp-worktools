@@ -143,7 +143,11 @@ class DotnetStackDetectorTest(unittest.TestCase):
     def test_root_sln_is_detected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
+            (root / "App.sln").write_text(
+                'Microsoft Visual Studio Solution File\n'
+                'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", '
+                '"App.csproj", "{GUID}"\nEndProject\n'
+            )
             self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
 
     def test_root_slnx_is_detected(self):
@@ -152,7 +156,31 @@ class DotnetStackDetectorTest(unittest.TestCase):
         # all -- only the classic .sln suffix was checked.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "App.slnx").write_text("<Solution />\n")
+            (root / "App.slnx").write_text(
+                '<Solution><Project Path="App.csproj" /></Solution>\n'
+            )
+            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+
+    def test_root_sln_referencing_only_vcxproj_is_not_detected(self):
+        # merge-review finding (round 6): a root-level .sln is not proof of
+        # .NET on its own -- a Visual Studio solution can hold only native
+        # C++ projects (*.vcxproj). Only a solution that actually
+        # references a managed (.csproj/.fsproj/.vbproj) project counts.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.sln").write_text(
+                'Microsoft Visual Studio Solution File\n'
+                'Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "App", '
+                '"App.vcxproj", "{GUID}"\nEndProject\n'
+            )
+            self.assertEqual(_detect(DotnetStackDetector(), root), [])
+
+    def test_root_slnx_referencing_fsproj_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.slnx").write_text(
+                '<Solution><Project Path="src/App.fsproj" /></Solution>\n'
+            )
             self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
 
     def test_root_fsproj_is_detected(self):
@@ -214,8 +242,24 @@ class DotnetStackDetectorTest(unittest.TestCase):
     def test_slnx_is_the_package_manager(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "App.slnx").write_text("<Solution />\n")
+            (root / "App.slnx").write_text(
+                '<Solution><Project Path="App.csproj" /></Solution>\n'
+            )
             self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
+
+    def test_vcxproj_only_solution_is_not_the_package_manager(self):
+        # merge-review finding (round 6): same vcxproj-only-solution gap as
+        # DotnetStackDetectorTest above, exercised through
+        # detect_package_manager() -- core/pm.py shares has_dotnet_project()
+        # with the detector, so this pins that both call sites agree.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.sln").write_text(
+                'Microsoft Visual Studio Solution File\n'
+                'Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "App", '
+                '"App.vcxproj", "{GUID}"\nEndProject\n'
+            )
+            self.assertIsNone(detect_package_manager(_ctx(root)))
 
 
 class ScalaStackDetectorTest(unittest.TestCase):
@@ -373,6 +417,12 @@ class ExtensionRegistrationTest(unittest.TestCase):
             for name in tracked:
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text("")
+            # The solution's own text must reference a managed project
+            # (round 6 fix) -- an empty/vcxproj-only solution is no longer
+            # enough on its own.
+            (root / "App.slnx").write_text(
+                '<Solution><Project Path="src/App/App.csproj" /></Solution>\n'
+            )
             self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
 
             ctx = RepoContext(root=root, config=AnalysisConfig())

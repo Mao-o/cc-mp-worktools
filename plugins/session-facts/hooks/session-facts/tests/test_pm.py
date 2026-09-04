@@ -186,7 +186,13 @@ class OtherPriorityTest(unittest.TestCase):
     def test_dotnet_is_the_last_resort_before_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "App.sln").write_text("")
+            # The solution must reference a managed project (round 6 fix,
+            # see test_new_stack_detectors.py's vcxproj-only case) -- an
+            # empty .sln is no longer enough on its own.
+            (root / "App.sln").write_text(
+                'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", '
+                '"App.csproj", "{GUID}"\nEndProject\n'
+            )
             self.assertEqual(_pm(root), "dotnet")
 
     def test_cmake_alone_detects_no_package_manager(self):
