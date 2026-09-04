@@ -129,6 +129,34 @@ class NewStackLikelyCommandsTest(unittest.TestCase):
             self.assertIn("npm run build", cmds)
             self.assertIn("dotnet test", cmds)
 
+    def test_dotnet_command_survives_truncation_with_many_npm_scripts(self):
+        # merge-review finding (round 2): the previous fix above only
+        # covers the *presence* of the dotnet branch, not truncation. When
+        # the co-located npm project exposes at least max_script_entries
+        # scripts, every one of them is appended (as "npm run <name>")
+        # before the scala/elixir/swift/dotnet block runs, so the trailing
+        # `deduped[:max_items]` slice used to cut "dotnet test" off the end
+        # even though it was correctly appended to `commands`.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package-lock.json").write_text("{}")
+            npm_scripts = {f"script{i}": f"echo {i}" for i in range(16)}
+            (root / "package.json").write_text(
+                '{"scripts": %s}'
+                % str(npm_scripts).replace("'", '"')
+            )
+            (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.results["package_manager"] = detect_package_manager(ctx)
+            self.assertEqual(ctx.results["package_manager"], "npm")
+            ctx.stack = DotnetStackDetector().detect(ctx)
+            self.assertEqual(ctx.stack, ["dotnet"])
+
+            max_items = AnalysisConfig().max_script_entries
+            self.assertEqual(max_items, 16)  # same default the cap in scripts.py uses
+            cmds = _likely_commands(ctx, max_items=max_items)
+            self.assertIn("dotnet test", cmds)
+
     def test_existing_stacks_output_is_unchanged_when_pm_and_stack_agree(self):
         # Guards against the refactor (moving scala/elixir/swift/dotnet off
         # the pm-exclusive elif chain onto stack membership) silently

@@ -104,6 +104,28 @@
    (`if "dotnet" in stack:` 等、複数スタック共存時はそれぞれ加算) に
    差し替え、既存スタック (node/python/go/java 等) の分岐は変更していない。
    回帰テストは修正前に落ちることを確認済み。2 件追加 (492 -> 494)
+7. **マージ前レビューの指摘 2 件を修正**
+   (`collectors/scripts.py`, `detectors/dotnet_stack.py`, `core/pm.py`,
+   `core/constants.py`, `README.md`, `tests/test_scripts.py`,
+   `tests/test_new_stack_detectors.py`) —
+   (a) 上記 6(b) の修正後も `## Likely Commands` の `_likely_commands()` は
+   PM 由来のコマンド (npm scripts 等) を先に積み、Scala/Elixir/Swift/.NET
+   由来のコマンドをその後ろに積んでから `deduped[:max_items]` で切り詰めて
+   いたため、co-located な npm プロジェクトが `max_script_entries`
+   (既定 16) 件以上の scripts を持つ root では `dotnet test` 等が切り詰め
+   で再び消える回帰が残っていた。スタック由来コマンドを
+   `priority_commands` という別リストに積み、最終結合を
+   `priority_commands + commands` (スタック未検出時は空リストの結合=
+   無変化) にして切り詰め前に優先配置するよう修正。回帰テストは
+   npm scripts 16 件 + `App.sln` の fixture で `dotnet test` が
+   修正前に落ちることを確認済み。
+   (b) `DotnetStackDetector`/`core/pm.py`/`PROJECT_MARKERS` が
+   `*.csproj`/`*.sln` しか見ておらず、ソリューションを持たない F#
+   (`*.fsproj`)/VB.NET (`*.vbproj`) 単体の repo が dotnet と認識されな
+   かったため、3 箇所に `*.fsproj`/`*.vbproj` を追加し、
+   `CODE_EXTENSIONS` にも `.fs`/`.fsx`/`.vb` を追加して Test Snapshot /
+   Service Entry Points が対象ソースを読み飛ばさないようにした。
+   README の `.NET` marker 説明も同期。7 件追加 (494 -> 501)
 
 ## 0.9.0
 

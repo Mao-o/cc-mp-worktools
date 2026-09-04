@@ -116,6 +116,15 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     pm = ctx.results.get("package_manager")
     stack = set(ctx.stack)
     commands: List[str] = []
+    # Reserved for the scala/elixir/swift/dotnet block below: merged in
+    # *ahead* of `commands` (see the final concat before dedup) so these
+    # stack-derived commands cannot be pushed out of the `deduped[:max_items]`
+    # slice by an unrelated, unbounded source further up the list (e.g. 16+
+    # npm scripts when npm is the primary pm alongside a co-detected .NET
+    # solution -- merge-review finding). Empty when none of those four
+    # stacks are present, so repos that don't hit this branch see the exact
+    # same `commands` order/content as before this reservation existed.
+    priority_commands: List[str] = []
 
     # PM-based commands
     prefix = {
@@ -158,15 +167,18 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     # DotnetStackDetector) did fire (merge-review finding). Left as
     # additive `if` (not `elif`) so multiple co-detected stacks each get
     # their command; existing stacks above are untouched to avoid changing
-    # their output.
+    # their output. Appended to `priority_commands`, not `commands` --
+    # see that list's declaration above for why (second merge-review
+    # finding: these commands must survive truncation even when the
+    # co-detected primary pm alone already fills max_items).
     if "scala" in stack:
-        commands.extend(["sbt test", "sbt compile"])
+        priority_commands.extend(["sbt test", "sbt compile"])
     if "elixir" in stack:
-        commands.append("mix test")
+        priority_commands.append("mix test")
     if "swift" in stack:
-        commands.extend(["swift build", "swift test"])
+        priority_commands.extend(["swift build", "swift test"])
     if "dotnet" in stack:
-        commands.append("dotnet test")
+        priority_commands.append("dotnet test")
 
     # Bare-Python repos (.py-heavy, no PM lockfile/pyproject) get no pytest line
     # from the chain above. Only surface one when a concrete runner (venv/mise)
@@ -196,9 +208,15 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     if "docker" in stack:
         commands.append("docker compose up")
 
+    # priority_commands first: when empty (the common case -- none of
+    # scala/elixir/swift/dotnet detected) this is a no-op concat and the
+    # resulting order/content is identical to `commands` alone, i.e. the
+    # pre-reservation behavior.
+    ordered = priority_commands + commands
+
     deduped: List[str] = []
     seen: Set[str] = set()
-    for cmd in commands:
+    for cmd in ordered:
         if cmd not in seen:
             seen.add(cmd)
             deduped.append(cmd)

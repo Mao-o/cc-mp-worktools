@@ -43,6 +43,12 @@ CODE_EXTENSIONS = {
     # C++ suffixes (merge-review finding: the initial set only covered
     # .cc/.cpp/.h/.hpp and silently dropped these).
     ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx", ".hh",
+    # detectors/dotnet_stack.py now also recognizes *.fsproj/*.vbproj (F#/
+    # VB.NET), not just *.csproj/*.sln -- without these two, an F#/VB.NET
+    # repo's own .fs/.fsx/.vb sources were invisible to Test Snapshot/
+    # Service Entry Points even after "stack: dotnet" was reported
+    # (merge-review finding, same shape as Elixir's/CMake's above).
+    ".fs", ".fsx", ".vb",
 }
 
 TEST_PATH_MARKERS = {
@@ -213,10 +219,10 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # walk either way: the generic collectors (Structure, Test Snapshot,
 # Scripts, ...) produce useful output even without a "stack:" line naming
 # the language.
-# Four of these are glob patterns (matched via has_project_markers()'s
-# Path.glob() branch, not a literal exists() check): *.csproj/*.sln/*.tf
-# since the manifest filename is project-specific, not fixed, and
-# requirements*.txt to mirror collectors/dependencies.py's
+# Some of these are glob patterns (matched via has_project_markers()'s
+# Path.glob() branch, not a literal exists() check): *.csproj/*.fsproj/
+# *.vbproj/*.sln/*.tf since the manifest filename is project-specific, not
+# fixed, and requirements*.txt to mirror collectors/dependencies.py's
 # _tracked_requirements(), which already recognises any
 # requirements-prefixed/.txt-suffixed basename (e.g. requirements-dev.txt)
 # -- not just the exact "requirements.txt" name.
@@ -323,6 +329,8 @@ PROJECT_MARKERS = (
     "Cargo.lock",
     "Gemfile.lock",
     "*.csproj",
+    "*.fsproj",
+    "*.vbproj",
     "*.sln",
     "*.tf",
 )

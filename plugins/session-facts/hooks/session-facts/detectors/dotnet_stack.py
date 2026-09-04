@@ -5,13 +5,20 @@ from typing import List
 
 from core.context import RepoContext
 
-_DOTNET_PROJECT_SUFFIXES = (".csproj", ".sln")
+# .csproj/.fsproj/.vbproj are the C#/F#/VB.NET project-file suffixes MSBuild
+# recognizes; .sln covers a multi-project solution regardless of which of
+# those languages its member projects use. Without .fsproj/.vbproj a
+# solutionless F# or VB.NET repo (a conventional layout for small/single-
+# project .NET repos) was never recognized as dotnet at all -- this
+# detector is presented as ".NET support", not "C#-only support"
+# (merge-review finding).
+_DOTNET_PROJECT_SUFFIXES = (".csproj", ".fsproj", ".vbproj", ".sln")
 
 
 def _has_dotnet_project(root: Path) -> bool:
-    """Root-level ``*.csproj``/``*.sln`` (core/pm.py duplicates this same
-    check, matching the existing gradle-check duplication between that
-    module and this one)."""
+    """Root-level ``*.csproj``/``*.fsproj``/``*.vbproj``/``*.sln``
+    (core/pm.py duplicates this same check, matching the existing
+    gradle-check duplication between that module and this one)."""
     try:
         return any(p.suffix in _DOTNET_PROJECT_SUFFIXES for p in root.iterdir() if p.is_file())
     except OSError:

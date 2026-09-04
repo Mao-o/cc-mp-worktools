@@ -83,6 +83,26 @@ class DotnetStackDetectorTest(unittest.TestCase):
             (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
             self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
 
+    def test_root_fsproj_is_detected(self):
+        # merge-review finding: a solutionless F# repo (no .sln, just an
+        # F# project file) was never recognized as dotnet at all -- only
+        # .csproj/.sln were checked.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.fsproj").write_text(
+                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
+            )
+            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+
+    def test_root_vbproj_is_detected(self):
+        # Same gap, VB.NET side.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.vbproj").write_text(
+                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
+            )
+            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+
     def test_nested_csproj_is_not_detected(self):
         # Root-level check only, matching the majority convention among
         # this plugin's other single-marker detectors (go/rust/ruby/php/
@@ -99,6 +119,22 @@ class DotnetStackDetectorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "App.csproj").write_text(
+                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
+            )
+            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
+
+    def test_fsproj_is_the_package_manager(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.fsproj").write_text(
+                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
+            )
+            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
+
+    def test_vbproj_is_the_package_manager(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.vbproj").write_text(
                 '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
             )
             self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
@@ -179,6 +215,42 @@ class ExtensionRegistrationTest(unittest.TestCase):
     def test_cmake_c_family_extensions_are_registered(self):
         for ext in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx", ".hh"):
             self.assertIn(ext, CODE_EXTENSIONS)
+
+    def test_dotnet_fsharp_vb_extensions_are_registered(self):
+        # merge-review finding (round 2): dotnet_stack.py now also detects
+        # *.fsproj/*.vbproj repos, but F#'s/VB.NET's own source suffixes
+        # (.fs/.fsx/.vb) were not in CODE_EXTENSIONS -- same gap as
+        # Elixir's/CMake's above, one stack later.
+        for ext in (".fs", ".fsx", ".vb"):
+            self.assertIn(ext, CODE_EXTENSIONS)
+
+    def test_fsharp_test_snapshot_counts_solutionless_layout(self):
+        # A conventional solutionless F# repo: an .fsproj at the root, no
+        # .sln. Before dotnet_stack.py recognized *.fsproj and
+        # CODE_EXTENSIONS registered .fs/.fsx, this repo got neither a
+        # "stack: dotnet" header line nor any Test Snapshot counts.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "App.fsproj",
+                "Program.fs",
+                "Library.fs",
+                "Tests/ProgramTests.fs",
+            ]
+            for name in tracked:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("")
+            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = TestsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            # App.fsproj itself is not a registered source suffix (a build
+            # manifest, not source, mirroring CMakeLists.txt's treatment
+            # above), so code_files only counts Program.fs/Library.fs.
+            self.assertIn("code_files: 2", out)
+            self.assertIn("test_files: 1", out)
 
     def test_elixir_test_snapshot_counts_conventional_mix_layout(self):
         # A conventional Mix project: lib/*.ex sources, test/*_test.exs
