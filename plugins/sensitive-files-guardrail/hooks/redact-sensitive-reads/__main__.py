@@ -92,13 +92,18 @@ def _dispatch(tool: str, envelope: dict) -> dict:
 def _is_unsupported_platform() -> bool:
     """SIGALRM 非対応 (Windows 等) は現状非対応として扱う。
 
+    ここでの判定は `hasattr(signal, "SIGALRM")` だけを見る platform gate
+    であり、alarm や signal handler は一切設置しない (0.6.0 で内部
+    soft-timeout を撤去済み — `redaction/engine.py` 冒頭コメント参照)。
+
     outer timeout (`hooks.json` の `timeout`) 発火時、Claude Code はこの
     hook を discard し allow で継続する (fail-open。公式ドキュメントで確定
     済み、Step 0-c — docs/DESIGN.md 参照)。この fail-open は Windows 固有
-    ではなく全 OS 共通だが、本 plugin は Windows でだけ `signal.SIGALRM` に
-    よる内部 soft timeout (処理が長引く前に能動的に deny/ask を返す仕組み)
-    が使えないため、hang したまま機密が漏れる最悪パスを避けるべく hook
-    冒頭から deny で倒す。
+    ではなく全 OS 共通で、本 plugin には Unix 側にもそれを能動的に防ぐ内部
+    タイムアウト機構は存在しない。それでも Windows だけを hook 冒頭から
+    deny で倒しているのは、`signal.SIGALRM` の有無を Windows 判定の proxy
+    に使っているためで、hang したまま機密が漏れる最悪パスを保守的に避ける
+    という方針上の選択にすぎない。
     """
     import signal as _signal
     return not hasattr(_signal, "SIGALRM")

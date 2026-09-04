@@ -37,7 +37,12 @@ redact 1210 → **1219**、check 133 (変更なし)。
    `__main__.py` のコメントを実測不要の確定情報に書き換え、過去の実測手順
    (hook に `time.sleep(5)` を仕込んで観察する) は不要になった旨を明記した。
    Windows を fail-closed で deny exit する既定方針自体は変更していない
-   (別議論)。
+   (別議論)。あわせて、マージ前レビューの指摘を受け `_is_unsupported_platform`
+   まわりの記述 (`__main__.py` docstring / DESIGN.md) が「Unix 側には
+   SIGALRM ベースの内部 soft timeout が能動的に deny/ask を返す」かのように
+   誤って読める文言だったのを是正し、実体どおり「SIGALRM 定数の有無を見る
+   だけの platform gate (内部タイムアウト機構は撤去済みで存在しない)」と
+   記述した。
 2. **Grep / Glob が本 plugin の hook 対象外であることを公開 docs に明記**。
    `hooks.json` の PreToolUse matcher は Read / Bash / Edit / Write のみで、
    Claude Code ビルトインの Grep / Glob には発火しない。README / DESIGN.md の

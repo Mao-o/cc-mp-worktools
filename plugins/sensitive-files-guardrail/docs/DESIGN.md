@@ -1271,11 +1271,15 @@ operand glob (`*` / `?` / `[`) の判定は数世代を経ている:
 超えれば macOS / Linux でも同じ経路で hook の出力が discard され fail-open
 になる。
 
-本 plugin が Windows 判定に使う `signal.SIGALRM` ベースの内部 soft timeout
-(`_is_unsupported_platform`) は、上記の CLI 側 outer timeout とは**別の
-仕組み**であり、公式ドキュメントに `SIGALRM` への言及は無い (全文検索で
-0 件)。Windows で hook 冒頭から deny exit する既定方針そのものの見直しは
-本節の対象外 (別議論)。
+本 plugin が Windows 判定に使う `_is_unsupported_platform` は
+`signal.SIGALRM` の**有無を見るだけの platform gate**であり、alarm も
+signal handler も設置しない (0.6.0 で内部 soft-timeout は撤去済み —
+`redaction/engine.py` 冒頭コメント参照)。上記の CLI 側 outer timeout とは
+別の仕組みで、公式ドキュメントに `SIGALRM` への言及も無い (全文検索で
+0 件)。つまり Unix 側にも fail-open を能動的に防ぐ内部タイムアウトは
+存在せず、Windows で hook 冒頭から deny exit しているのは SIGALRM の有無を
+Windows 判定の proxy に使った保守的な既定方針にすぎない。この方針自体の
+見直しは本節の対象外 (別議論)。
 
 過去の実測手順 (`hooks.json` の hook に `time.sleep(5)` を仕込んで観察する。
 [MAINTAINING.md](./MAINTAINING.md#step-0-c-実測結果-確定) 参照) は、公式
