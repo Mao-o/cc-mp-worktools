@@ -107,7 +107,8 @@
 7. **マージ前レビューの指摘 2 件を修正**
    (`collectors/scripts.py`, `detectors/dotnet_stack.py`, `core/pm.py`,
    `core/constants.py`, `README.md`, `tests/test_scripts.py`,
-   `tests/test_new_stack_detectors.py`) —
+   `tests/test_new_stack_detectors.py`, `tests/test_fs.py`,
+   `tests/test_cli.py`) —
    (a) 上記 6(b) の修正後も `## Likely Commands` の `_likely_commands()` は
    PM 由来のコマンド (npm scripts 等) を先に積み、Scala/Elixir/Swift/.NET
    由来のコマンドをその後ろに積んでから `deduped[:max_items]` で切り詰めて
