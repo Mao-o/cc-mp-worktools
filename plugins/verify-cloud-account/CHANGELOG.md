@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.1
+
+**切替を案内する deny 文面に「切替コマンドは単独で実行すること」の注記を追加**
+(`core/dispatcher.py`)。判定表 (allow/deny/warn) は変更していない。
+
+### 変更内容
+
+1. **注記の追加** — 不一致 deny が案内する切替コマンド (`gh auth switch` /
+   `gcloud config set` / `firebase use` / `kubectl config use-context`) は単独なら
+   self-remediation として検証なしで通るが、切替後に実行したいコマンドと同じ
+   コマンド行に連結すると、連結先が切替**前**の状態で検証されて再び deny される。
+   案内どおりに打ったつもりで二度 deny を踏む往復が実運用で観測されたため、
+   切替案内 (`切り替え:`) を含む deny にだけ注記を末尾に足す。ログイン案内や
+   設定ファイルの型不正など切替を案内しない deny には付けない。
+2. **回帰テスト 4 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) —
+   注記が付く / 連結形でも付く / 切替案内なしでは付かない / 注記本文が
+   remediation contract の案内コマンド抽出に拾われない。
+
 ## 0.11.0
 
 **2026-08 精査バックログ (内部バックログ) の残 6 件を消化**: `gh` 旧バージョン対応、

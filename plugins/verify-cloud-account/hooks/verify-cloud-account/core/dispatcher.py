@@ -20,6 +20,20 @@ _MIGRATE_HINT = (
 )
 
 
+# 各 service の verify() が不一致時に付ける切替案内の共通接頭辞。これを含む deny
+# にだけ下の注記を足す (ログイン案内や型不正の deny には不要)。
+_SWITCH_HINT_MARKER = "切り替え:"
+
+# 切替コマンドは単独 (self-remediation) なら検証なしで通るが、切替後に実行したい
+# コマンドと同じ Bash に連結すると、連結先が切替**前**の状態で検証されて deny に
+# なる (_all_self_remediation は全セグメントが切替であることを要求する)。案内どおり
+# に打ったのに再び deny される往復を防ぐため、切替を案内する deny には必ず添える。
+_SWITCH_STANDALONE_NOTE = (
+    "※ 切替コマンドは単独で実行してください。切替後に実行したいコマンドと同じ"
+    "コマンド行に連結すると、連結先が切替前の状態で検証されて再び deny されます。"
+    "切替が完了してから元のコマンドを実行してください。"
+)
+
 def _match_service(candidate: str):
     """候補セグメントにマッチする最初のサービスを返す。"""
     for svc in SERVICES:
@@ -407,6 +421,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
         # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
         body = "\n\n".join(dict.fromkeys(errors))
+        if _SWITCH_HINT_MARKER in body:
+            body = body + "\n\n" + _SWITCH_STANDALONE_NOTE
         if ancestor_note:
             body = ancestor_note + "\n\n" + body
         if note:

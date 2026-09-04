@@ -820,6 +820,63 @@ class TestInfoCommandsReadonly(BaseWithTmpProject):
         self.assertIsNone(dispatch("firebase --version", str(self.project_dir)))
 
 
+class TestSwitchStandaloneNote(BaseWithTmpProject):
+    """切替を案内する deny には「単独で実行せよ」の注記が付く。
+
+    案内された切替を、切替後に実行したいコマンドと連結して打つと連結先が
+    切替前の状態で検証されて再び deny される。注記が無いと案内どおりに打った
+    つもりの往復が起きる (マージ前レビューの指摘ではなく実運用で観測)。
+    """
+
+    _MISMATCH = (
+        "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+        " — 切り替え: gh auth switch --hostname github.com --user Mao-o"
+    )
+
+    def _reason(self, command: str, verify_value: str) -> str:
+        with mock.patch("services.github.verify", return_value=verify_value):
+            result = dispatch(command, str(self.project_dir))
+        self.assertIsNotNone(result)
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_switch_hint_deny_carries_standalone_note(self):
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason("gh pr create", self._MISMATCH)
+        self.assertIn("切替コマンドは単独で実行してください", reason)
+        # 注記は検出コマンド行の後、末尾側に 1 回だけ
+        self.assertEqual(reason.count("切替コマンドは単独で実行してください"), 1)
+        self.assertLess(reason.index("(検出コマンド:"), reason.index("切替コマンドは単独"))
+
+    def test_chained_switch_and_write_is_denied_with_note(self):
+        """案内どおりの切替を write と連結した形: 切替は self-remediation だが
+        連結先が切替前の状態で検証され deny。その deny にも注記が付く。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh auth switch --hostname github.com --user Mao-o && gh pr create",
+            self._MISMATCH,
+        )
+        self.assertIn("切替コマンドは単独で実行してください", reason)
+        self.assertRegex(reason, r"\(検出コマンド: .*gh pr create\)")
+
+    def test_note_absent_when_no_switch_hint(self):
+        """ログイン案内 (切替案内なし) の deny には注記を付けない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            "GitHub [github.com]: このホストにログインしていません — "
+            "gh auth login --hostname github.com --skip-ssh-key を実行してください。",
+        )
+        self.assertNotIn("切替コマンドは単独で実行してください", reason)
+
+    def test_note_is_not_extracted_as_guided_command(self):
+        """注記本文が remediation contract の案内コマンド抽出に拾われない
+        (拾われると allow 経路の無いコマンドとして contract テストが落ちる)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason("gh pr create", self._MISMATCH)
+        cmds = _guided_commands(reason)
+        self.assertEqual(cmds, ["gh auth switch --hostname github.com --user Mao-o"])
+
+
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
     """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
     したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
