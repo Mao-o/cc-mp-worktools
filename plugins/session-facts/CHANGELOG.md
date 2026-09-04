@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.10.0
+
+**言語サポート拡張 (Swift/.NET/Scala/Elixir/CMake) / dead option 整理 /
+テスト実行体験・カバレッジ改善 (v0.10)**。2026-08 精査バックログの続き。
+
+### 改善
+
+1. **Swift/.NET/Scala/Elixir/CMake の detector が無く、該当スタックの
+   repo では出力が Structure のみに退化していた問題を修正**
+   (`detectors/swift_stack.py`, `detectors/dotnet_stack.py`,
+   `detectors/scala_stack.py`, `detectors/elixir_stack.py`,
+   `detectors/cmake_stack.py` 新規, `core/pm.py`, `collectors/scripts.py`,
+   `core/constants.py`, `README.md`) — `CODE_EXTENSIONS` は既に
+   `.swift`/`.cs`/`.scala` を数えており Test Snapshot には反映されるのに
+   stack タグも Likely Commands も出ない非対称な状態だった。
+   `Package.swift`/`*.csproj`+`*.sln`/`build.sbt`/`mix.exs`/
+   `CMakeLists.txt` を判定条件に、`swift`/`dotnet`/`scala`/`elixir`/`cmake`
+   の stack タグを追加し、`core/pm.py` にも `swift`/`dotnet`/`sbt`/`mix`
+   package_manager 値を追加して `## Likely Commands` に `swift build`/
+   `swift test`、`dotnet test`、`sbt test`/`sbt compile`、`mix test` を
+   提案するようにした。**cmake だけは package_manager 化も Likely Commands
+   への提案もしていない**: ビルドディレクトリ・generator の慣習
+   (in-source か out-of-source か、CMake のバージョンによる差異) が
+   標準化されておらず、単一のコマンドを安全に提案できないと判断したため
+   (stack タグのみ付与)。`PROJECT_MARKERS` には `*.sln` が抜けていたため
+   追加した (`*.csproj` は既存だが `*.sln` 単体のリポジトリが marker gate
+   で落ちる非対称が残っていた)。`README.md` の検出スタック一覧を同期した
+
+### 保守
+
+2. **`--format` フラグの `json`/`human` が argparse の choices に定義される
+   だけで値を参照する dispatch 経路が無く、指定しても常に markdown 固定
+   だった dead option を整理** (`cli.py`, `README.md`,
+   `skills/session-facts/SKILL.md`) — 同梱の `hooks/hooks.json` /
+   `hooks/codex-hooks.json` / `SKILL.md` は元々 `--format markdown` のみを
+   使っており、この変更で壊れる呼び出しは無い。choices を `("markdown",)`
+   のみに縮小し、`--format json`/`--format human` は argparse エラーで
+   明示的に拒否するようにした (機械可読な出力が必要な場合は既存の
+   `--emit subagent-json` を使う旨を `--help` と README/SKILL.md に明記)
+3. **共有テストヘルパー (`tests/_testutil.py`) がトップレベル名で
+   import されているため、`python3 -m unittest discover tests` 以外の
+   実行経路 (単体テスト指定・pytest) で `ModuleNotFoundError` になり
+   1 件だけデバッグしたい場面で原因を誤認しやすかった問題を修正**
+   (`tests/__init__.py`) — ディレクトリ探索は探索先自体を sys.path に
+   追加するため通っていたが、`python3 -m unittest tests.test_cli` のような
+   モジュールパス指定や `pytest` はテストディレクトリ自体を sys.path に
+   追加しないため落ちていた。`tests/__init__.py` (元々空) が自分自身の
+   ディレクトリを sys.path に足すようにし、呼び出し側 (ディレクトリ探索を
+   使う機械ゲート・CI) を一切変えずに 3 経路すべてで解決するようにした
+4. **services/env_keys/nextjs_facts/pm(優先順位)/walk_files(nested .git 含む)/
+   主要 detector 群 (node_typescript, nextjs, python_stack, java_stack,
+   docker, claude_plugin, deno, react_vite, testing, prisma, taskrunner)
+   にユニットテストが無かった問題を修正**
+   (`tests/test_services.py`, `tests/test_env_keys.py`,
+   `tests/test_nextjs_facts.py`, `tests/test_pm.py`,
+   `tests/test_main_detectors.py` 新規, `tests/test_fs.py`,
+   `tests/test_cli.py` に `--format` の argparse エラーテストを追加) —
+   flutter/mise/firebase 以外の detector と、services/env_keys/
+   nextjs_facts/pm.py の優先順位表/walk_files の SKIP_DIRS・nested .git
+   境界・件数上限が未検証だった (`--format` の argparse エラー・`- more:`
+   ヒント・`custom/` 読込失敗の隔離は既存の `tests/test_cli.py`/
+   `tests/test_registry.py` で既にカバー済みと判明したため、それぞれ
+   本バッチの一部として追加/現状追認のみ行った)。合計 143 件のテストを
+   追加 (344 -> 487)
+
 ## 0.9.0
 
 **Firebase 判定の一本化 / Domain Types の代表性改善 / README 同期 (v0.9)**。
