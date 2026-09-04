@@ -165,6 +165,10 @@ detector が同じ repo にヒットしてよい)。
 `## Repo-Specific Notes` 側で収集する。Python は `pyproject.toml` /
 `requirements*.txt` / `Pipfile` / `setup.cfg` の主要依存を横断的に見る。Makefile の
 conventional target (`make test` 等) は `## Likely Commands` へ反映される。
+`scala`/`elixir`/`swift`/`dotnet` の Likely Commands (`sbt test` 等) は他スタック
+と異なり検出された `ctx.stack` を根拠にする (repo 直下の primary package manager
+が別スタック、例えば `package-lock.json` と `App.sln` の同居で npm になっていても
+`dotnet test` は出る)。
 
 ### cwd != repo_root のとき (monorepo / サブプロジェクト構成)
 

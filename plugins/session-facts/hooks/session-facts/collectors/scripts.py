@@ -146,13 +146,26 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
         commands.extend(["cargo test", "cargo build"])
     elif pm == "composer":
         commands.append("composer install")
-    elif pm == "sbt":
+
+    # Stack-based commands for scala/elixir/swift/dotnet: unlike the
+    # pm-exclusive chain above, these are keyed off the *detected stack*
+    # rather than the single "primary" package_manager value core/pm.py
+    # picks. core/pm.py only ever returns one PM, so a root that also has a
+    # higher-priority manifest for another stack (e.g. package-lock.json
+    # next to App.sln) would pick "npm" as pm and silently never reach a
+    # "sbt"/"mix"/"swift"/"dotnet" branch even though the matching stack
+    # detector (ScalaStackDetector/ElixirStackDetector/SwiftStackDetector/
+    # DotnetStackDetector) did fire (merge-review finding). Left as
+    # additive `if` (not `elif`) so multiple co-detected stacks each get
+    # their command; existing stacks above are untouched to avoid changing
+    # their output.
+    if "scala" in stack:
         commands.extend(["sbt test", "sbt compile"])
-    elif pm == "mix":
+    if "elixir" in stack:
         commands.append("mix test")
-    elif pm == "swift":
+    if "swift" in stack:
         commands.extend(["swift build", "swift test"])
-    elif pm == "dotnet":
+    if "dotnet" in stack:
         commands.append("dotnet test")
 
     # Bare-Python repos (.py-heavy, no PM lockfile/pyproject) get no pytest line

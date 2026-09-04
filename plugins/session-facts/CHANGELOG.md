@@ -88,6 +88,22 @@
    拾うこと (`lib/app.ex` のような bare 配置は `lib` 自体が
    SERVICE_DIR_MARKERS に無いため本修正後も対象外のまま) を固定。
    5 件追加 (487 -> 492)
+6. **マージ前レビューの指摘 2 件を修正**
+   (`core/constants.py`, `collectors/scripts.py`, `README.md`,
+   `tests/test_new_stack_detectors.py`, `tests/test_scripts.py`) —
+   (a) 上記 5 の `CODE_EXTENSIONS` 追加が C/C++ の `.cc`/`.cpp`/`.h`/`.hpp`
+   のみで、CMake プロジェクトで同様によく使われる `.cxx`/`.hxx`/`.hh` が
+   抜けていたため追加し、`ExtensionRegistrationTest` に固定した。
+   (b) `collectors/scripts.py` の `## Likely Commands` で Scala/Elixir/
+   Swift/.NET (`sbt`/`mix`/`swift`/`dotnet`) の提案が `pm ==` の
+   `elif` チェーンにぶら下がっていたため、`core/pm.py` が返す primary
+   package manager が別スタックに奪われる root (例: `package-lock.json`
+   と `App.sln` が同居し pm が `npm` になる) では `DotnetStackDetector`
+   が `stack: dotnet` を報告していても `dotnet test` が一切出なかった。
+   今回追加した 4 スタックの分岐のみ `pm` 判定から `ctx.stack` 判定
+   (`if "dotnet" in stack:` 等、複数スタック共存時はそれぞれ加算) に
+   差し替え、既存スタック (node/python/go/java 等) の分岐は変更していない。
+   回帰テストは修正前に落ちることを確認済み。2 件追加 (492 -> 494)
 
 ## 0.9.0
 

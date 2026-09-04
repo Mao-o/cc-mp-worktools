@@ -39,8 +39,10 @@ CODE_EXTENSIONS = {
     # alone -- CMakeLists.txt itself is a build script, not a source file,
     # so the actual sources a CMake project's Test Snapshot/Service Entry
     # Points need to see are the C/C++ files it builds. Same gap as
-    # Elixir's, one level removed.
-    ".c", ".cc", ".cpp", ".h", ".hpp",
+    # Elixir's, one level removed. .cxx/.hxx/.hh are also conventional
+    # C++ suffixes (merge-review finding: the initial set only covered
+    # .cc/.cpp/.h/.hpp and silently dropped these).
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx", ".hh",
 }
 
 TEST_PATH_MARKERS = {

@@ -6,7 +6,8 @@ Swift/.NET/Scala source extensions (``.swift``/``.cs``/``.scala``) were
 already registered in ``core/constants.py::CODE_EXTENSIONS`` before their
 detectors existed, so those three stacks got a working Test Snapshot /
 Service Entry Points for free. Elixir (``.ex``/``.exs``) and CMake's
-underlying C/C++ sources (``.c``/``.cc``/``.cpp``/``.h``/``.hpp``) were not
+underlying C/C++ sources (``.c``/``.cc``/``.cpp``/``.h``/``.hpp``, plus the
+``.cxx``/``.hxx``/``.hh`` suffixes a later merge-review pass added) were not
 registered -- a merge-review finding caught this for Elixir specifically
 (``stack: elixir`` and ``mix test`` would be reported while the repo's own
 ``lib/*.ex`` and ``test/*_test.exs`` were silently dropped from Test
@@ -176,7 +177,7 @@ class ExtensionRegistrationTest(unittest.TestCase):
             self.assertIn(ext, CODE_EXTENSIONS)
 
     def test_cmake_c_family_extensions_are_registered(self):
-        for ext in (".c", ".cc", ".cpp", ".h", ".hpp"):
+        for ext in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx", ".hh"):
             self.assertIn(ext, CODE_EXTENSIONS)
 
     def test_elixir_test_snapshot_counts_conventional_mix_layout(self):

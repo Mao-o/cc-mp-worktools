@@ -10,6 +10,8 @@ import _testutil  # noqa: F401  (sys.path 整備)
 
 from collectors.scripts import ScriptsCollector, _likely_commands
 from core.context import AnalysisConfig, RepoContext
+from core.pm import detect_package_manager
+from detectors.dotnet_stack import DotnetStackDetector
 
 
 def _ctx(pm=None, runtime=None, stack=()) -> RepoContext:
@@ -101,6 +103,48 @@ class NewStackLikelyCommandsTest(unittest.TestCase):
         ctx = _ctx(pm=None, stack=["cmake"])
         cmds = _likely_commands(ctx, max_items=16)
         self.assertFalse(any("cmake" in c for c in cmds))
+
+    def test_dotnet_command_survives_when_npm_is_the_primary_pm(self):
+        # merge-review finding: a root with both a higher-priority JS
+        # manifest (package-lock.json) and a .NET solution (App.sln) has
+        # core/pm.py pick "npm" as the single primary package_manager (see
+        # tests/test_pm.py::JsTsPriorityTest), but DotnetStackDetector still
+        # reports "dotnet" in ctx.stack independently of that choice.
+        # Before this fix, the dotnet branch lived in the pm-exclusive
+        # elif chain below the npm `if prefix:` branch and could never run
+        # once npm claimed pm, so "dotnet test" never appeared even though
+        # the repo also has an App.sln at its root.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package-lock.json").write_text("{}")
+            (root / "package.json").write_text('{"scripts": {"build": "webpack"}}')
+            (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.results["package_manager"] = detect_package_manager(ctx)
+            self.assertEqual(ctx.results["package_manager"], "npm")
+            ctx.stack = DotnetStackDetector().detect(ctx)
+            self.assertEqual(ctx.stack, ["dotnet"])
+
+            cmds = _likely_commands(ctx, max_items=16)
+            self.assertIn("npm run build", cmds)
+            self.assertIn("dotnet test", cmds)
+
+    def test_existing_stacks_output_is_unchanged_when_pm_and_stack_agree(self):
+        # Guards against the refactor (moving scala/elixir/swift/dotnet off
+        # the pm-exclusive elif chain onto stack membership) silently
+        # changing output for repos where pm and the newly-added stack
+        # detector agree, which is still the common case.
+        for pm, stack, expected in (
+            ("sbt", ["scala"], ["sbt test", "sbt compile"]),
+            ("mix", ["elixir"], ["mix test"]),
+            ("swift", ["swift"], ["swift build", "swift test"]),
+            ("dotnet", ["dotnet"], ["dotnet test"]),
+        ):
+            with self.subTest(pm=pm):
+                ctx = _ctx(pm=pm, stack=stack)
+                cmds = _likely_commands(ctx, max_items=16)
+                for expected_cmd in expected:
+                    self.assertIn(expected_cmd, cmds)
 
 
 class ScriptCommandLengthCapTest(unittest.TestCase):
