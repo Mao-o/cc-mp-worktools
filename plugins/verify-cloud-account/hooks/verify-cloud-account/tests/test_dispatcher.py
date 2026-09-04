@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -192,6 +193,25 @@ class TestPathMigration(BaseWithTmpProject):
         reason = out["permissionDecisionReason"]
         self.assertIn("GitHub 不一致", reason)
         self.assertIn("migrate", reason)
+
+    def test_deprecation_warn_suppressed_on_second_call_within_ttl(self):
+        """内部バックログ: `_should_emit_deprecation_warn` (1 日 1 回制限) の直接
+        テストが無かった空白を埋める。TMPDIR を専用ディレクトリに差し替えて
+        (= `isolated_cache`) 他テストのフラグファイルと混線しないようにした上で、
+        同一プロジェクトへの 2 回目の dispatch は warn を出さない (= None) ことを
+        固定する (alert fatigue 防止)。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with self.isolated_cache(), mock.patch(
+            "services.github.verify", return_value=None
+        ):
+            first = dispatch("gh pr list", str(self.project_dir))
+            self.assertIsNotNone(first)
+            self.assertIn("additionalContext", first["hookSpecificOutput"])
+
+            # 2 回目 (同じ TMPDIR = 同じフラグファイル) は 1 日以内なので抑制され、
+            # additionalContext を持つ結果を返さない (= None)。
+            second = dispatch("gh pr list", str(self.project_dir))
+            self.assertIsNone(second)
 
     def test_new_and_deprecated_both_exist_denies(self):
         """新旧両方存在 → fail-closed で deny (D4)。"""
@@ -2044,6 +2064,98 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
                     calls = sum(m.call_count for m in mocks)
                 self.assertIsNone(result, f"検証されてしまう: {command!r}")
                 self.assertEqual(calls, 0, f"verify が呼ばれた: {command!r}")
+
+
+class TestDebugTrace(BaseWithTmpProject):
+    """内部バックログ: `VERIFY_CLOUD_ACCOUNT_DEBUG=1` で分解結果 (segments /
+    matched service / readonly / cache hit / verify 所要 ms / 決定) を stderr に
+    1 行 JSON で出す。判定表 (allow/deny/warn) 自体には影響しない観測専用機能。"""
+
+    def setUp(self):
+        super().setUp()
+        self._debug_patcher = mock.patch.dict(
+            os.environ, {"VERIFY_CLOUD_ACCOUNT_DEBUG": "1"}
+        )
+        self._debug_patcher.start()
+        self.addCleanup(self._debug_patcher.stop)
+
+    def test_disabled_by_default_emits_nothing(self):
+        """既定 (env 変数無し) では stderr に何も書かない (回帰防止)。"""
+        self._debug_patcher.stop()
+        try:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VERIFY_CLOUD_ACCOUNT_DEBUG", None)
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    dispatch("git status", str(self.project_dir))
+                self.assertEqual(buf.getvalue(), "")
+        finally:
+            self._debug_patcher.start()
+
+    def test_trace_readonly_segment_and_allow_decision(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = dispatch("gh auth status", str(self.project_dir))
+        self.assertIsNone(result)
+        trace = json.loads(buf.getvalue())
+        self.assertEqual(len(trace["segments"]), 1)
+        seg = trace["segments"][0]
+        self.assertEqual(seg["service"], "github")
+        self.assertTrue(seg["readonly"])
+        self.assertEqual(trace["decision"], "allow")
+        self.assertIsInstance(trace["elapsed_ms"], (int, float))
+
+    def test_trace_deny_decision_and_non_readonly_segment(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        trace = json.loads(buf.getvalue())
+        self.assertEqual(trace["decision"], "deny")
+        self.assertFalse(trace["segments"][0]["readonly"])
+
+    def test_trace_records_cache_hit_without_verify_ms(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assert_cache_published("gh pr list", v)  # warm-up (未 trace)
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                result = dispatch("gh pr list", str(self.project_dir))
+            self.assertIsNone(result)
+            self.assertEqual(v.call_count, 1, "2 回目は cache hit で verify は呼ばれない")
+        trace = json.loads(buf.getvalue())
+        self.assertTrue(trace["cache_hit"].get("github"))
+        self.assertNotIn("github", trace["verify_ms"])
+
+    def test_trace_records_verify_ms_on_cache_miss(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                result = dispatch("gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+        trace = json.loads(buf.getvalue())
+        self.assertIn("github", trace["verify_ms"])
+        self.assertIsInstance(trace["verify_ms"]["github"], (int, float))
+        self.assertNotIn("github", trace["cache_hit"])
+
+    def test_trace_does_not_affect_decision(self):
+        """trace 収集の有無で判定結果 (allow/deny) が変わらないことを固定する。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with_debug = dispatch("gh pr list", str(self.project_dir))
+        self._debug_patcher.stop()
+        try:
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                 mock.patch("services.github.verify", return_value=None):
+                os.environ.pop("VERIFY_CLOUD_ACCOUNT_DEBUG", None)
+                with self.isolated_cache():
+                    without_debug = dispatch("gh pr list", str(self.project_dir))
+        finally:
+            self._debug_patcher.start()
+        self.assertEqual(with_debug, without_debug)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.11.0
+
+**2026-08 精査バックログ (内部バックログ) の残 6 件を消化**: `gh` 旧バージョン対応、
+内部エラーの無音 fail-open解消とデバッグトレース、他 plugin 名を書かない
+signpost への一般化、dead code 整理、テスト空白の穴埋め、単体テスト指定の DX 不具合修正。
+判定表 (allow/deny/warn) 自体を変更する項目は無い。
+
+### 変更内容
+
+1. **`gh auth status` の旧バージョン (gh < 2.40) 出力に対応** (`services/github.py`)
+   — 複数アカウント対応の `Active account: true/false` marker が無い単一アカウント
+   形式 (`✓ Logged in to github.com as Mao-o`) を `parse_active_accounts` が
+   fallback で解釈するようにした。marker 行が一切無い出力でのみ fallback するため、
+   新形式の判定には影響しない。あわせて、`Logged in to` はあるのにどちらの形式にも
+   一致しない (未知の将来フォーマット等) 場合のメッセージを「gh の出力を解釈できま
+   せん (`gh --version` を確認、2.40 以上を推奨)」に変更し、本当に未ログインの場合
+   (`Logged in to` が出力に無い) の案内と区別した。README に前提バージョンを明記。
+2. **内部エラーの無音 fail-open を解消し、`VERIFY_CLOUD_ACCOUNT_DEBUG=1` でデバッグ
+   トレースを追加** (`__main__.py` / `core/dispatcher.py`) — `dispatch()` 内の
+   未捕捉例外は従来 exit 1 (JSON 無し) になり、公式仕様上は non-blocking error
+   として無音で action が進行するだけだった。`__main__.py` で例外を捕捉し、
+   `additionalContext` で `[verify-cloud-account] 内部エラーのため検証をスキップ
+   しました: <型>: <メッセージ>` を明示し、同じ理由を stderr にも出す。
+   加えて `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ、分解結果 (segments / matched
+   service / readonly / cache hit / verify 所要 ms / 決定) を stderr に 1 行
+   JSON で出す (判定表そのものには影響しない観測専用)。
+3. **生成される signpost (`CLAUDE.md`) から他 plugin 名を除去** — builder
+   (`init`/`set`/`remove`/`migrate` の `--commit`) が生成する `CLAUDE.md` と、
+   その元になるテンプレート (`scripts/templates/project_claude.md`)、README、
+   builder 内コメントが特定のセキュリティ系 hook plugin 名を名指ししていた。
+   plugin 間疎結合方針 (D9) に反し、他 plugin 非導入環境では事実に反する記述に
+   なる (`Claude は直接編集できません` という断定も環境依存で不正確だった) ため、
+   「セキュリティ系 hook が有効な環境では直接アクセスが拒否されることがある」
+   という一般化した表現に置き換えた。既存の生成済み `CLAUDE.md` は上書きしない
+   (テンプレート変更は新規生成分のみに反映)。
+4. **dead code の整理** (`services/github.py` / `scripts/accounts_builder.py`)
+   — 呼び出し元の無い `_cli_error_reason()` と、旧名 alias
+   `_parse_active_accounts` を削除 (対応する後方互換テストも削除)。
+   `accounts_builder.py` の migrate 表示ロジックで、`source_kind` を
+   誤った値 (`k` = key 自身) で代入した直後に正しい値 (`kk` = source kind) で
+   上書きしていた冗長な 2 行を 1 行に整理 (`additions` は key ごとに高々 1 エントリ
+   のため、常に上書き後の値が使われており実害は無かった)。
+   なお `services/kubectl.py` の旧 `_context_override` (0.9.0 で共通スキャナに
+   統合済み) は本 batch 着手前に既に削除済みだったため対象外。
+5. **テスト空白の穴埋め** — `TestAws` / `TestGcloud` / `TestKubectl` の `verify()`
+   レベルに `subprocess.TimeoutExpired` テストを追加 (github / firebase には
+   既存)。`gh auth status` の非アクティブ host (`Active account: false`) / ログイン
+   失敗 host / 旧バージョン単一アカウント形式の fixture テストを追加。
+   `_should_emit_deprecation_warn` (1 日 1 回の抑制) の直接テストを追加。
+6. **テストを 1 件だけ指定して実行できない DX 不具合を修正**
+   (`tests/__init__.py`) — 各テストファイルの `import _testutil` (トップレベル、
+   `core`/`hooks` を sys.path に通す副作用専用) は、ディレクトリ探索
+   (`python3 -m unittest discover tests`、探索先自体を検索パスに入れる) では
+   解決できるが、クラス/メソッド単位の指定 (`python3 -m unittest
+   tests.test_x.Class.method` / `pytest tests/test_x.py::Class::method`、
+   `tests/` 自体は検索パスに入らない) では `ModuleNotFoundError` になっていた。
+   `tests/__init__.py` が自身のディレクトリを sys.path に足すことで、呼び出し形式
+   によらず解決できるようにした (呼び出し側 = 機械ゲート / CI / README のテスト
+   実行手順は無変更)。README に単体指定の例を追記。
+
+### テスト
+
+727 → 749 件 (+22)。うち 3 件はテスト実行そのもの (単体指定 3 形式) をサブ
+プロセスで検証する回帰テスト。
+
 ## 0.10.0
 
 **builder (`scripts/accounts_builder.py`) に既存値の更新・削除と、書込前の

@@ -563,7 +563,10 @@ class TestProjectClaudeMd(BaseBuilder):
         self.assertIn("accounts-init", content)
         self.assertIn("accounts-show", content)
         self.assertIn("accounts-migrate", content)
-        self.assertIn("sensitive-files-guardrail", content)
+        # 他 plugin を名指ししない (D9 疎結合方針 / 内部バックログ): 生成される
+        # signpost は特定のセキュリティ系 hook 名ではなく一般化した表現を使う。
+        self.assertIn("セキュリティ系 hook", content)
+        self.assertNotIn("sensitive-files-guardrail", content)
         self.assertIn("created:", out)
 
     def test_init_commit_preserves_existing_claude_md(self):

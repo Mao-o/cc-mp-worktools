@@ -36,6 +36,48 @@ GH_MULTI_HOST = (
     "  - Active account: true\n"
 )
 
+# gh 2.40+ で同一 host に複数アカウントが紐付き、非アクティブなものは
+# `Active account: false` になる (内部バックログ: 旧テストは全 fixture が
+# Active account: true のみだった)。
+GH_INACTIVE_SECOND_ACCOUNT = (
+    "github.com\n"
+    "  ✓ Logged in to github.com account Mao-o (keyring)\n"
+    "  - Active account: true\n"
+    "  ✓ Logged in to github.com account other-user (keyring)\n"
+    "  - Active account: false\n"
+)
+
+# `GITHUB_TOKEN` 等で無効な token を渡すとログイン失敗した host ブロックが出る
+# (gh 2.98 実測形式に準拠。`Active account:` 行も `Logged in to` 行も無い)。
+GH_FAILED_HOST = (
+    "github.com\n"
+    "  X Failed to log in to github.com using token (GITHUB_TOKEN)\n"
+    "  - The token in GITHUB_TOKEN is invalid.\n"
+)
+
+# gh < 2.40 (複数アカウント対応前) の単一アカウント形式。`Active account:` marker
+# が無く、host あたり常に 1 アカウントのみ (内部バックログ)。
+GH_LEGACY_SINGLE_HOST = (
+    "github.com\n"
+    "  ✓ Logged in to github.com as Mao-o (keyring)\n"
+    "  ✓ Git operations for github.com configured to use ssh protocol.\n"
+    "  ✓ Token: gho_************************************\n"
+    "  ✓ Token scopes: repo, read:org\n"
+)
+
+GH_LEGACY_MULTI_HOST = (
+    "github.com\n"
+    "  ✓ Logged in to github.com as Mao-o (keyring)\n"
+    "  ✓ Token: gho_************************************\n"
+    "ghe.example.com\n"
+    "  ✓ Logged in to ghe.example.com as mao-corp (keyring)\n"
+    "  ✓ Token: ghp_************************************\n"
+)
+
+# `Logged in to` はあるが両方の正規表現 (`account` / `as`) のどちらにも
+# 一致しない未知フォーマット (将来の gh 出力変更を想定した契約テスト用)。
+GH_UNPARSEABLE = "github.com\n  Logged in to github.com (Mao-o)\n"
+
 
 class TestGithub(unittest.TestCase):
     def test_string_match(self):
@@ -117,6 +159,63 @@ class TestGithub(unittest.TestCase):
             err = github.verify({}, "/p")
         self.assertIsNotNone(err)
         self.assertIn("空", err)
+
+
+class TestGithubAuthStatusParsing(unittest.TestCase):
+    """内部バックログ: gh < 2.40 (単一アカウント形式) の parse fallback と、
+    非アクティブ / ログイン失敗 host の除外、解釈不能フォーマットの案内文面。"""
+
+    def test_inactive_second_account_excluded(self):
+        """同一 host に 2 アカウントあり、非アクティブ側は拾わない。"""
+        result = github.parse_active_accounts(GH_INACTIVE_SECOND_ACCOUNT)
+        self.assertEqual(result, {"github.com": "Mao-o"})
+
+    def test_failed_login_host_excluded(self):
+        """ログインに失敗した host ブロックは active に含めない (クラッシュもしない)。"""
+        result = github.parse_active_accounts(GH_FAILED_HOST)
+        self.assertEqual(result, {})
+
+    def test_legacy_single_host_format(self):
+        """gh < 2.40: `Active account:` marker が無い単一アカウント形式。"""
+        result = github.parse_active_accounts(GH_LEGACY_SINGLE_HOST)
+        self.assertEqual(result, {"github.com": "Mao-o"})
+
+    def test_legacy_multi_host_format(self):
+        result = github.parse_active_accounts(GH_LEGACY_MULTI_HOST)
+        self.assertEqual(
+            result, {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+        )
+
+    def test_legacy_format_verify_matches(self):
+        """旧形式でも verify() が通常どおり照合できる (fallback の end-to-end 確認)。"""
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_LEGACY_SINGLE_HOST)):
+            self.assertIsNone(github.verify("Mao-o", "/p"))
+
+    def test_legacy_format_verify_mismatch(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_LEGACY_SINGLE_HOST)):
+            err = github.verify("other-user", "/p")
+        self.assertIn("不一致", err)
+
+    def test_unparseable_output_gives_version_hint(self):
+        """`Logged in to` はあるのにどちらの形式にも一致しない場合、
+        「未ログイン」ではなく「解釈できません」+ gh --version 案内にする。"""
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_UNPARSEABLE)):
+            err = github.verify("Mao-o", "/p")
+        self.assertIn("解釈できません", err)
+        self.assertIn("gh --version", err)
+        self.assertNotIn("gh auth login", err)
+
+    def test_truly_logged_out_keeps_login_guidance(self):
+        """`Logged in to` が一切無い (本当に未ログイン) は従来どおり login 案内。"""
+        with mock.patch(
+            "subprocess.run",
+            return_value=_fake_run(
+                stderr="You are not logged into any GitHub hosts.\n", returncode=1
+            ),
+        ):
+            err = github.verify("Mao-o", "/p")
+        self.assertIn("gh auth login --skip-ssh-key", err)
+        self.assertNotIn("解釈できません", err)
 
 
 class TestFirebase(unittest.TestCase):
@@ -1233,6 +1332,32 @@ class TestCliExecErrors(unittest.TestCase):
             err = kubectl.verify("prod-ctx", "/p")
         self.assertIsInstance(err, str)
         self.assertIn("実行できません", err)
+
+
+class TestTimeoutErrors(unittest.TestCase):
+    """内部バックログ: `verify()` レベルの `subprocess.TimeoutExpired` テストの
+    空白 (github / firebase には既存、aws / gcloud / kubectl には無かった) を埋める。
+    timeout は fail-closed (deny) で専用メッセージを返すべき。"""
+
+    _TIMEOUT = subprocess.TimeoutExpired(cmd=[], timeout=10)
+
+    def test_aws(self):
+        with mock.patch("subprocess.run", side_effect=self._TIMEOUT):
+            err = aws.verify("123456789012", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("タイムアウト", err)
+
+    def test_gcloud(self):
+        with mock.patch("subprocess.run", side_effect=self._TIMEOUT):
+            err = gcloud.verify("my-proj", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("タイムアウト", err)
+
+    def test_kubectl(self):
+        with mock.patch("subprocess.run", side_effect=self._TIMEOUT):
+            err = kubectl.verify("prod-ctx", "/p")
+        self.assertIsInstance(err, str)
+        self.assertIn("タイムアウト", err)
 
 
 class TestEnvPropagation(unittest.TestCase):

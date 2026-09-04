@@ -84,18 +84,36 @@ DICT_VALUE_CHECK = "all"
 # 利用者が両側を見て選ぶ (test_services.py の lock テストで再宣言を防ぐ)。
 
 _LOGGED_IN_RE = re.compile(r"Logged in to (\S+) account (\S+)")
+# gh < 2.40 の単一アカウント形式: `✓ Logged in to github.com as Mao-o (keyring)`。
+# 2.40 で複数アカウント対応 (`Active account: true/false` marker) が入る前は
+# host 1 つにつきアカウント 1 つのみで、marker 行自体が存在しない。
+_LOGGED_IN_LEGACY_RE = re.compile(r"Logged in to (\S+) as (\S+)")
 
 
 def parse_active_accounts(output_text: str) -> dict[str, str]:
     """gh auth status の出力から {hostname: active_account} を返す。
 
-    各 `Active account: true` について、直前の `Active account: true` より後の
-    範囲を逆順にスキャンして最初の `Logged in to <host> account <user>` を採用する。
-    これにより複数 host がある場合も各 host のアクティブアカウントが正しく
-    ペア化される。
+    gh 2.40+ (複数アカウント対応): 各 `Active account: true` について、直前の
+    `Active account: true` より後の範囲を逆順にスキャンして最初の
+    `Logged in to <host> account <user>` を採用する。これにより複数 host が
+    ある場合も各 host のアクティブアカウントが正しくペア化される。
+
+    gh < 2.40 (単一アカウント形式): `Active account:` marker 行そのものが
+    出力に存在しない。この場合は `Logged in to <host> as <user>` 形式を
+    host ごとに 1 件ずつ拾う fallback を使う (旧形式は host あたり常に
+    1 アカウントのみなので曖昧さは無い)。
     """
-    result: dict[str, str] = {}
     lines = output_text.splitlines()
+    if not any("Active account:" in line for line in lines):
+        result: dict[str, str] = {}
+        for line in lines:
+            m = _LOGGED_IN_LEGACY_RE.search(line)
+            if m:
+                host, user = m.group(1), m.group(2)
+                result.setdefault(host, user)
+        return result
+
+    result = {}
     last_active_idx = -1
     for i, line in enumerate(lines):
         if "Active account: true" not in line:
@@ -109,9 +127,6 @@ def parse_active_accounts(output_text: str) -> dict[str, str]:
                 break
         last_active_idx = i
     return result
-
-
-_parse_active_accounts = parse_active_accounts
 
 
 def _run_gh_auth_status(env=None) -> tuple[str, str | None]:
@@ -139,12 +154,28 @@ def _run_gh_auth_status(env=None) -> tuple[str, str | None]:
 
 
 def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]:
-    """gh auth status を実行し (active_accounts, error_reason) を返す。"""
+    """gh auth status を実行し (active_accounts, error_reason) を返す。
+
+    `active` が空になる理由を 2 つに区別する:
+    - 出力に `Logged in to` が一切現れない → 本当に未ログイン
+      (`gh auth status` は未ログイン時 stderr に "You are not logged into any
+      GitHub hosts." のような案内を出すだけで host ブロックを持たない)
+    - `Logged in to` はあるのに `parse_active_accounts` がどの host にも
+      アカウントを対応付けられない → gh の出力形式を解釈できない (未知の
+      将来フォーマット等)。gh 2.40 未満は `Active account:` marker を持たない
+      旧形式に `parse_active_accounts` 自体が fallback するため、ここに来るのは
+      それでも解釈できない場合のみ。
+    """
     combined, err = _run_gh_auth_status(env)
     if err:
         return None, err
     active = parse_active_accounts(combined)
     if not active:
+        if "Logged in to" in combined:
+            return None, (
+                "GitHub: gh auth status の出力を解釈できません。"
+                "gh --version を確認してください (2.40 以上を推奨)。"
+            )
         return None, (
             "GitHub: アクティブアカウントを取得できません。"
             "gh auth login --skip-ssh-key を実行してください "
@@ -154,17 +185,10 @@ def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]
     return active, None
 
 
-def _cli_error_reason() -> str | None:
-    """CLI エラーまたは未ログイン時の理由を返す (正常取得時は None)。"""
-    _active, err = _fetch_active_accounts()
-    return err
-
-
 def get_active_account(project_dir: str) -> dict[str, str] | None:
     """現在のアクティブ GitHub アカウントを {hostname: user} の dict で返す。
 
-    取得不可・未ログインの場合は None。詳細な理由は `_cli_error_reason()` で
-    取得できる。
+    取得不可・未ログインの場合は None。
     """
     active, _err = _fetch_active_accounts()
     return active
