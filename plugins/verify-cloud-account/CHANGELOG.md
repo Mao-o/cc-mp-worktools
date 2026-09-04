@@ -59,11 +59,26 @@ signpost への一般化、dead code 整理、テスト空白の穴埋め、単�
    `tests/__init__.py` が自身のディレクトリを sys.path に足すことで、呼び出し形式
    によらず解決できるようにした (呼び出し側 = 機械ゲート / CI / README のテスト
    実行手順は無変更)。README に単体指定の例を追記。
+7. **マージ前レビューの指摘: デバッグトレースの stderr 書き込み失敗で計算済みの
+   判定を落とす不具合を修正** (`core/dispatcher.py` / `__main__.py`) — 上記 2.
+   で追加した trace の `print(..., file=sys.stderr)` が失敗時に捕捉していたのは
+   `TypeError` / `ValueError` のみで、stderr が閉じている・書き込み不能なとき
+   (`BrokenPipeError` 等の `OSError`) は捕捉されず `dispatch()` の外まで例外が
+   伝播していた。これにより計算済みの判定 (deny を含む) が呼び出し元に返らないまま
+   失われ、`__main__.py` の内部エラー回復経路 (fail-open) に落ちて
+   `additionalContext` の warn に化けていた。さらに `__main__.py` 側の回復経路
+   自身も同じ stderr へ書き込もうとしており、それが失敗すると stdout への判定
+   JSON 出力が一切行われないまま異常終了していた。trace と回復経路のどちらも
+   stderr への書き込み失敗を `OSError` ごと捕捉して黙って捨て、stdout への判定
+   出力を必ず優先する順序に修正した。trace は decision-neutral な診断出力に
+   すぎず、判定表 (allow/deny/warn) 自体は無変更。
 
 ### テスト
 
-727 → 749 件 (+22)。うち 3 件はテスト実行そのもの (単体指定 3 形式) をサブ
-プロセスで検証する回帰テスト。
+727 → 752 件 (+25)。うち 3 件はテスト実行そのもの (単体指定 3 形式) をサブ
+プロセスで検証する回帰テスト、別の 3 件は上記 7. の stderr 書き込み失敗
+(`dispatch()` レベル / `__main__.py` 回復経路レベル / 実プロセスの broken pipe
+での E2E) を固定する回帰テスト。
 
 ## 0.10.0
 

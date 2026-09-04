@@ -34,8 +34,14 @@ def main() -> None:
             "[verify-cloud-account] 内部エラーのため検証をスキップしました: "
             f"{type(e).__name__}: {e}"
         )
-        print(msg, file=sys.stderr)
         result = output.warn(msg)
+        try:
+            print(msg, file=sys.stderr)
+        except OSError:
+            # stderr が閉じている/書き込み不能 (BrokenPipeError 等) でも、この
+            # 回復経路自体が例外を吐いて stdout への判定 JSON 出力を妨げては
+            # ならない (マージ前レビューの指摘)。診断出力の失敗は判定に影響しない。
+            pass
     if result is not None:
         json.dump(result, sys.stdout)
 

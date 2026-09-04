@@ -2140,6 +2140,26 @@ class TestDebugTrace(BaseWithTmpProject):
         self.assertIsInstance(trace["verify_ms"]["github"], (int, float))
         self.assertNotIn("github", trace["cache_hit"])
 
+    def test_trace_stderr_write_failure_does_not_lose_decision(self):
+        """マージ前レビューの指摘: stderr が書き込み不能 (BrokenPipeError 等の
+        OSError) でも、trace 出力の失敗で計算済みの decision (deny) を
+        呼び出し元に返さないまま落とさない。trace は decision-neutral の
+        はずが、この例外が dispatch() の外まで伝播すると計算済みの result が
+        失われていた (修正前は本テストが RuntimeError/OSError で失敗する)。"""
+
+        class _BrokenStderr:
+            def write(self, s):
+                raise OSError("stderr is closed")
+
+            def flush(self):
+                pass
+
+        with contextlib.redirect_stderr(_BrokenStderr()):
+            result = dispatch("gh pr list", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
     def test_trace_does_not_affect_decision(self):
         """trace 収集の有無で判定結果 (allow/deny) が変わらないことを固定する。"""
         self._write_accounts({"github": "Mao-o"})

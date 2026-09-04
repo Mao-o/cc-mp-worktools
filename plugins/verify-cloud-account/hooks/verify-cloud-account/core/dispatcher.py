@@ -465,8 +465,11 @@ def dispatch(command: str, cwd: str) -> dict | None:
     trace["decision"] = _trace_decision(result)
     try:
         print(json.dumps(trace, ensure_ascii=False, sort_keys=True), file=sys.stderr)
-    except (TypeError, ValueError):
-        # trace に JSON 化できない値が紛れても、デバッグ出力の失敗で hook 本体の
-        # 判定結果を握りつぶさない。
+    except (TypeError, ValueError, OSError):
+        # trace に JSON 化できない値が紛れても、stderr が閉じている/書き込み不能
+        # (BrokenPipeError 等の OSError) でも、デバッグ出力の失敗で hook 本体の
+        # 判定結果を握りつぶさない (マージ前レビューの指摘: trace は
+        # decision-neutral のはずが、この例外が dispatch() の外まで伝播すると
+        # 計算済みの result が呼び出し元に返らず失われていた)。
         pass
     return result

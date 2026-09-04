@@ -84,6 +84,37 @@ class TestMainEntry(unittest.TestCase):
         res = self._run("git status")
         self.assertEqual((res.returncode, res.stdout), (0, ""), res.stderr)
 
+    def test_debug_trace_with_closed_stderr_still_emits_deny_on_stdout(self):
+        """マージ前レビューの指摘: 実プロセスで stderr の読み手が居ない
+        (broken pipe) 状態で `VERIFY_CLOUD_ACCOUNT_DEBUG=1` の trace 出力が
+        失敗しても、計算済みの deny が stdout にそのまま出ることを固定する。
+        修正前は trace の print() が BrokenPipeError を投げて dispatch() の
+        外まで伝播し、fail-open 経路の 2 段目の stderr 書き込みも同じ理由で
+        失敗して stdout に何も出ないまま子プロセスが終了していた。"""
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr create"},
+            "cwd": str(self.project),
+        }
+        r, w = os.pipe()
+        os.close(r)  # 読み手不在にする = 子プロセスの stderr write は EPIPE
+        env = {**self.env, "VERIFY_CLOUD_ACCOUNT_DEBUG": "1"}
+        try:
+            res = subprocess.run(
+                [sys.executable, str(_PKG_DIR)],
+                input=json.dumps(payload),
+                stdout=subprocess.PIPE,
+                stderr=w,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+        finally:
+            os.close(w)
+        out = json.loads(res.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
     def test_invalid_json_is_silent(self):
         res = subprocess.run(
             [sys.executable, str(_PKG_DIR)],
@@ -124,6 +155,37 @@ class TestMainInternalErrorFailOpen(unittest.TestCase):
         self.assertNotIn("permissionDecision", out)
         self.assertIn("内部エラーのため検証をスキップしました", stderr.getvalue())
         self.assertIn("RuntimeError", stderr.getvalue())
+
+    def test_recovery_path_stderr_failure_still_emits_stdout_json(self):
+        """マージ前レビューの指摘: 回復経路 (fail-open) 自身の stderr 書き込みが
+        失敗 (OSError/BrokenPipeError) しても、stdout への判定 JSON 出力は
+        必ず行われる。修正前は print() が例外を投げて main() 全体が異常終了し、
+        stdout に何も出ないまま終了していた。"""
+
+        class _BrokenStderr:
+            def write(self, s):
+                raise OSError("stderr is closed")
+
+            def flush(self):
+                pass
+
+        module = _load_entry_module()
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr create"},
+            "cwd": "/tmp",
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(module, "dispatch", side_effect=RuntimeError("boom")):
+            with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                 mock.patch.object(sys, "stdout", stdout), \
+                 mock.patch.object(sys, "stderr", _BrokenStderr()):
+                module.main()
+        out = json.loads(stdout.getvalue())["hookSpecificOutput"]
+        self.assertIn("additionalContext", out)
+        self.assertIn("内部エラーのため検証をスキップしました", out["additionalContext"])
+        self.assertNotIn("permissionDecision", out)
 
     def test_no_exception_does_not_write_stderr(self):
         """正常系 (DEBUG 無効) では stderr に何も書かない (回帰防止)。"""
