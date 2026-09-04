@@ -20,6 +20,56 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.28.0
+
+内部バックログの精査で発見した課題 5 件を修正 (docs 2 件・Python バージョン
+対応 1 件・理由文の誤流用 2 件)。**判定境界 (deny / allow / ask / block する
+か) の変化: なし** (理由文の文言・分類の粒度のみ変更)。テスト件数:
+redact 1210 → **1219**、check 133 (変更なし)。
+
+### docs
+
+1. **Step 0-c (`hooks.json` の `timeout` 発火時の挙動) を「未実測」から
+   「確定」に更新**。公式ドキュメント (code.claude.com/docs/en/hooks の
+   "Timeouts" 節) の逐語により、command hook の timeout は **全 OS 共通で
+   fail-open** (Claude Code が hook の出力を discard し、tool call は通常の
+   permission flow を継続する) と判明した。DESIGN.md / MAINTAINING.md /
+   `__main__.py` のコメントを実測不要の確定情報に書き換え、過去の実測手順
+   (hook に `time.sleep(5)` を仕込んで観察する) は不要になった旨を明記した。
+   Windows を fail-closed で deny exit する既定方針自体は変更していない
+   (別議論)。
+2. **Grep / Glob が本 plugin の hook 対象外であることを公開 docs に明記**。
+   `hooks.json` の PreToolUse matcher は Read / Bash / Edit / Write のみで、
+   Claude Code ビルトインの Grep / Glob には発火しない。README / DESIGN.md の
+   既知制限に項目を追加し、緩和策として Claude Code 本体の `permissions.deny`
+   に `Read(path)` ルールを追加する案内 (best-effort で Grep/Glob にも
+   適用されることと、`Glob(...)` という形の path rule 自体は consult されず
+   無視される注意点) を添えた。
+
+### Python バージョン対応
+
+3. **README / MAINTAINING の Python 要件を「3.9+ で動作 (TOML の構造付き
+   minimal info のみ 3.11+ 要)」に訂正**。従来「3.11+」とだけ書いており、
+   3.9 / 3.10 でも動く実態と食い違っていた。`tomllib` の成功パスだけを直接
+   検証する TOML 系テスト 4 件は 3.11 未満の環境で不要に fail していたため
+   `skipUnless` でガードし (fail ではなく skip)、hook 起動時に劣化を 1 回
+   ログする `python_version_degraded` を追加してサイレント劣化にしないよう
+   にした。
+
+### 理由文の誤流用 2 件
+
+4. **glob operand の不確定 ask が opaque_prefix (wrapper / インタプリタ) の
+   文言を誤流用していた不具合を修正**。`cat *.json` 等の判定不能な glob
+   operand には専用の `glob_uncertain` kind を新設し、「glob を含み静的判定
+   できない」旨の文言に分離した。verdict (ask / allow) は変更なし。
+5. **ディレクトリを special (FIFO / socket / device) と誤表示していた不具合
+   を修正**。`.env` がディレクトリの構成 (`python -m venv .env` 等) は実在
+   するが、`core.safepath.classify` は directory を S_ISREG でない側に畳んで
+   special と同一視していた。`directory` を専用の分類値として分離し、
+   Read / Edit / Write の reason 文言を「ディレクトリです。パス指定の誤り
+   (末尾要素の取り違え) の可能性があります」に変更した。verdict (deny / ask)
+   は変更なし。
+
 ## 0.27.0
 
 内部バックログの精査で発見した不具合 7 件を 2 クラスタで修正 (離脱率低減 /

@@ -24,7 +24,9 @@ import stat
 from pathlib import Path
 from typing import Literal
 
-Classification = Literal["regular", "symlink", "special", "missing", "error"]
+Classification = Literal[
+    "regular", "symlink", "directory", "special", "missing", "error",
+]
 
 
 def normalize(raw: str, cwd: str) -> Path:
@@ -35,7 +37,17 @@ def normalize(raw: str, cwd: str) -> Path:
 
 
 def classify(path: Path) -> Classification:
-    """`lstat` で分類。一切 follow しない。"""
+    """`lstat` で分類。一切 follow しない。
+
+    ``directory`` は 0.4.2 (最初の classify 実装) から 0.27.0 まで
+    ``S_ISREG`` でない側に畳まれて ``special`` (「FIFO / socket / device」の
+    文面) と誤って同一視されていた (内部バックログ)。``python -m venv .env``
+    等で `.env` がディレクトリになる構成は実在するため、S_ISDIR を
+    S_ISREG チェックより先に明示分岐する。verdict (deny/ask) 自体は
+    従来の special 経路と同じルートに合流するので変わらない —
+    ``handlers/read_handler.py`` / ``handlers/edit_handler.py`` 側の
+    kind 分岐だけが増える。
+    """
     try:
         st = path.lstat()
     except FileNotFoundError:
@@ -45,6 +57,8 @@ def classify(path: Path) -> Classification:
     mode = st.st_mode
     if stat.S_ISLNK(mode):
         return "symlink"
+    if stat.S_ISDIR(mode):
+        return "directory"
     if not stat.S_ISREG(mode):
         return "special"
     return "regular"

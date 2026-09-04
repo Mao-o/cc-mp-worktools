@@ -154,6 +154,27 @@ class TestE2EReadHandler(unittest.TestCase):
             result["hookSpecificOutput"]["permissionDecision"], "ask"
         )
 
+    def test_read_directory_ask_names_it_a_directory(self):
+        """内部バックログ: ``.env`` がディレクトリの構成 (``python -m venv .env``
+        等) は現実にある。従来は special (FIFO/socket/device) と誤表示して
+        いた。verdict (ask/deny) 自体は special と同じ経路のまま変わらない。
+        """
+        envdir = Path(self.tmp) / ".env"
+        envdir.mkdir()
+        envelope = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": ".env"},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        result = _run_main(envelope, ["--tool", "read"])
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "ask"
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("ディレクトリ", reason)
+        self.assertNotIn("FIFO", reason)
+
     def test_read_missing_file_allow(self):
         envelope = {
             "tool_name": "Read",
@@ -801,6 +822,28 @@ class TestAsciiStdoutEncoding(unittest.TestCase):
         self.assertIn(
             "機密", payload["hookSpecificOutput"]["permissionDecisionReason"]
         )
+
+
+class TestPythonVersionDegradedWarning(unittest.TestCase):
+    """3.11 未満で python_version_degraded を 1 回 log_info すること (内部バックログ)。
+
+    TOML の構造付き minimal info は 3.11+ の ``tomllib`` が無いと opaque に
+    劣化する (``redaction/tomllike.py``)。劣化そのものは既存の
+    ``toml_unsupported`` fallback で reason に出るが、hook 起動側でもログに
+    残してサイレント劣化にしない。
+    """
+
+    def test_logs_once_below_311(self):
+        with mock.patch.object(entry.sys, "version_info", (3, 9, 6, "final", 0)):
+            with mock.patch.object(entry.L, "log_info") as mock_log:
+                entry._warn_if_python_degraded()
+        mock_log.assert_called_once_with("python_version_degraded", "3.9")
+
+    def test_no_log_at_or_above_311(self):
+        with mock.patch.object(entry.sys, "version_info", (3, 11, 0, "final", 0)):
+            with mock.patch.object(entry.L, "log_info") as mock_log:
+                entry._warn_if_python_degraded()
+        mock_log.assert_not_called()
 
 
 if __name__ == "__main__":

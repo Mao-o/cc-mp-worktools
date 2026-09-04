@@ -1137,7 +1137,7 @@ def bash_deny(
 # 後段 hook が存在せず overengineering だったため 0.7.0 で撤去した。本引数は
 # その再導入ではなく、思想 2 (block 時は意図を汲んだメッセージを返す) 側の
 # 拡張で、値は reason 文字列の分岐にのみ使われる。
-EditDenyKind = Literal["new", "overwrite", "symlink", "special"]
+EditDenyKind = Literal["new", "overwrite", "symlink", "special", "directory"]
 
 # kind → ``note:`` 行の本文テンプレート (``tool_label`` / ``basename`` を埋める)。
 # 全 kind が語彙ルールどおり「block しました」で終わること
@@ -1163,6 +1163,10 @@ _EDIT_DENY_NOTE: dict[str, str] = {
         "{tool_label}: 非通常ファイル (FIFO / socket / device) である "
         "{basename} への書き込みを block しました。"
     ),
+    "directory": (
+        "{tool_label}: {basename} はディレクトリです。パス指定の誤り "
+        "(末尾要素の取り違え) の可能性があるため書き込みを block しました。"
+    ),
 }
 
 # kind → ``suggestion:`` 行 (除外 hint の手前に置く状況別の代替案)。
@@ -1179,6 +1183,10 @@ _EDIT_DENY_SUGGESTION: dict[str, str] = {
     "special": (
         "FIFO / socket / device への書き込みは意図しない副作用を招きます。"
         "通常ファイルを対象にするか、パス指定の誤りが無いか確認してください。"
+    ),
+    "directory": (
+        "書き込み先のパスが正しいか確認してください "
+        "(意図したファイルの親ディレクトリを指定していないか等)。"
     ),
 }
 
@@ -1664,9 +1672,10 @@ def edit_deny(
         extra_note: ``extra_note:`` 行に入れる補足。kind で表現しきれない文脈を
             呼出側が足すための拡張点 (0.20.0 時点で handler は使わない)。
         kind: 書き込み先の状態 (``new`` / ``overwrite`` / ``symlink`` /
-            ``special``)。文面の分岐にのみ使い、判定 (deny/ask/allow) には
-            影響しない。**必須キーワード** — 既定値を置くと呼び忘れたときに
-            「新規作成です」と誤った説明を返してしまうため。
+            ``special`` / ``directory``)。文面の分岐にのみ使い、判定
+            (deny/ask/allow) には影響しない。**必須キーワード** —
+            既定値を置くと呼び忘れたときに「新規作成です」と誤った説明を
+            返してしまうため。
         is_dotenv: 対象 basename が dotenv 系か。``overwrite`` の代替案を
             dotenv-cli merge にするかの判定に使う。
         existing_render: ``kind == "overwrite"`` のとき、上書き対象の既存
@@ -1781,6 +1790,7 @@ def policy_unavailable(severity: PolicySeverity, tool_label: str = "") -> str:
 ReadAskKind = Literal[
     "symlink",
     "special",
+    "directory",
     "io_error",
     "normalize_failed",
     "redaction_failed",
@@ -1803,6 +1813,12 @@ def read_ask(kind: ReadAskKind) -> str:
         return (
             "非通常ファイル (FIFO / socket / device) が機密パターンに一致します。"
             "意図的な参照か確認してから再試行してください。"
+        )
+    if kind == "directory":
+        return (
+            "指定された path はディレクトリです。パス指定の誤り "
+            "(末尾要素の取り違え) の可能性があるため確認してから"
+            "再試行してください。"
         )
     if kind == "io_error":
         return (
@@ -1869,6 +1885,7 @@ BashLenientKind = Literal[
     "segment_too_large",
     "normalize_failed",
     "program_dynamic",
+    "glob_uncertain",
 ]
 
 # autonomous モードに関する固定 suffix。permission_mode が auto / bypass の
@@ -1896,6 +1913,12 @@ def bash_lenient(kind: BashLenientKind, detail: str = "") -> str:
         head = (
             "Bash コマンドが静的解析対象外の wrapper / インタプリタ / 任意 path "
             "実行で始まっています。"
+        )
+    elif kind == "glob_uncertain":
+        head = (
+            "Bash コマンドの operand に glob (`*` / `?` / `[` 等) が含まれており、"
+            "機密パターンと交差しうるため静的に判定できません。"
+            "リテラル path に書き換えるか確認してください。"
         )
     elif kind == "segment_too_large":
         head = (

@@ -629,6 +629,7 @@ deny/allow/ask 一覧は [MATRIX.md](./MATRIX.md) を参照。
 | パターン非該当 | no-op |
 | 機密 + 通常ファイル成功 | `deny` + minimal info を `permissionDecisionReason` |
 | 機密 + symlink | `ask_or_deny` |
+| 機密 + directory (`.env` がディレクトリの構成、内部バックログ) | `ask_or_deny` |
 | 機密 + 特殊ファイル (FIFO/socket/device) | `ask_or_deny` |
 | 機密 + 読み取り失敗 (権限/IO) | `ask_or_deny` (fail-closed) |
 | redaction engine 内部例外 | `ask_or_deny` (fail-closed) |
@@ -755,7 +756,7 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 
 1. `normalize(operand, cwd)` で path を解決 (失敗 → status `normalize_failed`)
 2. `classify(path)` で regular ファイルか確認
-   (`missing` → `unresolved` / `symlink` `special` → `not_regular` /
+   (`missing` → `unresolved` / `symlink` `directory` `special` → `not_regular` /
    `error` および lstat 例外 → `stat_failed`)
 3. `open_regular(path)` で fd と size を取得 (`O_NOFOLLOW`、失敗 → `open_failed`)
 4. format 判定 (`_detect_format`):
@@ -867,7 +868,7 @@ exclude で個別対処できる。glob で dotenv stem と一致しないもの
 | ケース | 判定 |
 |---|---|
 | 機密 path への新規/既存 書き込み (通常ファイル) | **`deny` 固定** + dotenv ならキー名を reason に添える |
-| 機密 path + symlink / special | **`deny` 固定** + 状況別の代替案 |
+| 機密 path + symlink / directory / special | **`deny` 固定** + 状況別の代替案 |
 | `.env.example` 等テンプレ除外 | allow |
 | 親ディレクトリが symlink / 特殊 / 不在 | `ask_or_deny` (判定不能、fail-closed) |
 | patterns.txt 読込失敗 / normalize 失敗 / stat 失敗 | `ask_or_deny` (fail-closed) |
@@ -881,7 +882,8 @@ deny reason のキー名ガイド:
 #### 状況別の deny 文面 (0.20.0, E6)
 
 `core.safepath.classify` の結果を `core.messages.edit_deny(kind=...)` に渡し、
-**文面だけ** を 4 分岐する。0.19.1 までは `missing` (新規作成) と `regular`
+**文面だけ** を分岐する (0.20.0 時点で 4 分岐、内部バックログで `directory` を
+`special` から切り出し 5 分岐)。0.19.1 までは `missing` (新規作成) と `regular`
 (既存上書き) が同一文面に落ち、`symlink` / `special` は `extra_note` 1 行の
 違いしか無かった。
 
@@ -890,6 +892,7 @@ deny reason のキー名ガイド:
 | `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき) |
 | `regular` | `overwrite` | **書き換え対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用) の案内 |
 | `symlink` | `symlink` | 実体側が書き換わる旨と symlink 運用の確認 |
+| `directory` | `directory` | ディレクトリである旨とパス指定の誤り (末尾要素の取り違え) の確認。0.19.1〜0.27.0 は `special` に畳まれ「FIFO / socket / device」と誤表示していた (内部バックログ) |
 | `special` | `special` | FIFO / socket / device である旨と通常ファイル指定の確認 |
 
 **判定 (deny / ask / allow) は 0.19.1 から一切変わらない。** 変わるのは reason
@@ -912,8 +915,8 @@ format 軸は tool に依存しない (dotenv → dotenv-cli の merge / それ�
 差分適用 (patch))。`overwrite` の `note:` は tool 中立の「書き換え」にしてある —
 「上書き」と書くと Edit では事実と違うため。
 
-tool 軸を持つのは `overwrite` だけ。`new` / `symlink` / `special` の事情は
-Edit と Write で同じなので文面も同じになる (テストで固定)。
+tool 軸を持つのは `overwrite` だけ。`new` / `symlink` / `directory` / `special`
+の事情は Edit と Write で同じなので文面も同じになる (テストで固定)。
 
 情報面は変わる — `overwrite` では **モデルが要求していない既存ファイルの
 minimal info** が reason に載る (`redaction.file_render.render_for_bash` の
@@ -928,8 +931,8 @@ E6 で Edit/Write の deny 経路は **対象ファイルを 1 回 open + parse 
 `open_regular` (`O_NOFOLLOW`) 経由なので FIFO / symlink を掴む経路は無い。
 
 ただし **情報提供のための描画が hook 自体を落としてはいけない**。hook は 2 秒
-timeout で、outer timeout の挙動は fail-open の可能性がある (「Step 0-c」節) ため、
-描画のコストが無制限だと deny がバイパスに化けうる。
+timeout で、outer timeout は fail-open と判明している (公式ドキュメントで
+確定。「Step 0-c」節) ため、描画のコストが無制限だと deny がバイパスに化けうる。
 
 32KB 超では `redaction.keyonly_scan.scan_stream` に到達する。0.19.1 までは
 `readline()` で読み、上限を **行の切れ目でしか** 見ていなかったため、改行を
@@ -1171,7 +1174,9 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 9. **`<DATA untrusted>` モデル解釈保証なし** — 包装 + sanitize + DATA タグ
    エスケープで多段防御するが、モデルが敵対的文脈として扱う保証は無い
 10. **Windows は fail-closed で deny exit** — SIGALRM 非対応のため hook 冒頭で
-    deny exit する (Step 0-c 実測結果確定前の暫定方針)
+    deny exit する。Step 0-c (outer timeout の挙動) は公式ドキュメントで
+    fail-open と確定済み (下記「Step 0-c 実測」節)。この既定方針自体の
+    見直しは別議論とする
 11. **submodule 内 untracked は非対象** — `git ls-files --recurse-submodules` は
     tracked のみ。untracked を submodule 内まで拾う git native オプションは無い
 12. **Git バージョン依存** — `--recurse-submodules` は git 1.7+ が必要
@@ -1193,6 +1198,18 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
     / `n>` / `&>` / `>|` の全形 (`>|` clobber は 0.25.0 まで `|` が segment
     分割で pipe として割られ検出できない既知限界だったが、splitter の最長一致
     読みで解消し `>` と同扱いになった)
+15. **Grep / Glob は対象外 (hook 非介在)** — `hooks/hooks.json` の PreToolUse
+    matcher は `Read` / `Bash` / `Edit` / `Write` の 4 つのみ (実装確認) で、
+    Claude Code ビルトインの `Grep` / `Glob` tool には発火しない。これらは
+    静的解析・redaction を経由せず機密ファイルの内容をそのまま返しうる。
+    緩和は本 plugin の外側 (Claude Code 本体) にある — 公式仕様上、
+    `permissions.deny` の `Read(path)` ルールは best-effort で Grep / Glob
+    にも適用される (Grep/Glob は `path` 引数が解決するディレクトリに対して
+    適用)。ただし `Read` deny は `NotebookEdit` を対象外とするため、それも
+    塞ぎたい場合は別途 `Edit(path)` deny が要る。逆に `Glob(...)` という
+    形の path rule 自体は Claude Code に**認識されず** (受理はされるが
+    consult されず起動時 warning のみ) 効果が無いので、必ず `Read(...)` /
+    `Edit(...)` の形で書くこと。
 
 ## Edit/Write hook の発火経路 (2026-04-18 実機観測)
 
@@ -1234,11 +1251,32 @@ operand glob (`*` / `?` / `[`) の判定は数世代を経ている:
   すべて ``ask_or_allow`` (default=ask, autonomous=allow) に格下げ。思想 1
   (うっかり露出予防、敵対的防御は非目的) に整合させた結果。
 
-## Step 0-c 実測 (将来更新予定)
+## Step 0-c 実測 (確定)
 
-プラン v3 の Step 0-c (outer timeout 発火時の Claude 挙動実測) は未実施。
-暫定方針として Case A (timeout kill → allow/fail-open の最悪ケース想定) で
-Windows (SIGALRM 非対応) を hook 冒頭で deny exit にしている。
+プラン v3 の Step 0-c (`hooks.json` の `timeout` 発火時に Claude Code が
+どう振る舞うか) は、公式ドキュメント (code.claude.com/docs/en/hooks の
+"Timeouts" 節、2026-09 逐語確認) により実機実測なしで確定した:
 
-実測手順は [MAINTAINING.md](./MAINTAINING.md#step-0-c-実測結果-将来更新予定) の
-「Step 0-c 実測結果」セクション参照。
+> Apart from a command hook you run with `async: true`, Claude Code cancels
+> a `command`, `http`, or `mcp_tool` hook that reaches its `timeout`,
+> discarding the hook's output, so on most events a timed-out hook renders
+> no decision. [...] A timed-out `command`, `http`, or `mcp_tool` hook
+> doesn't block the tool call. The call continues through the normal
+> permission flow, so don't count on a stalled hook to act as a gate.
+
+**Case A (timeout kill → allow / fail-open) で確定。** 本 plugin の hook は
+`hooks.json` で `"type": "command"` を使うため該当する。かつ、この挙動は
+**Windows 固有ではなく全 OS 共通** — `timeout: 2` は Claude Code (CLI) 側が
+外側から強制するもので、shlex cliff / fnmatch cliff 経由で処理が 2 秒を
+超えれば macOS / Linux でも同じ経路で hook の出力が discard され fail-open
+になる。
+
+本 plugin が Windows 判定に使う `signal.SIGALRM` ベースの内部 soft timeout
+(`_is_unsupported_platform`) は、上記の CLI 側 outer timeout とは**別の
+仕組み**であり、公式ドキュメントに `SIGALRM` への言及は無い (全文検索で
+0 件)。Windows で hook 冒頭から deny exit する既定方針そのものの見直しは
+本節の対象外 (別議論)。
+
+過去の実測手順 (`hooks.json` の hook に `time.sleep(5)` を仕込んで観察する。
+[MAINTAINING.md](./MAINTAINING.md#step-0-c-実測結果-確定) 参照) は、公式
+ドキュメントで答えが確定したため不要になった。

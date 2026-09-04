@@ -678,6 +678,22 @@ class TestEditDenyKindBranches(BaseEdit):
         self.assertNotIn("上書き対象の既存ファイル", reason)
         self.assertNotIn("symlink 先が意図した参照か", reason)
 
+    def test_directory_branch_names_it_a_directory_not_special(self):
+        """内部バックログ: ``.env`` がディレクトリ (``python -m venv .env`` 等の
+        現実の構成) は従来 special (FIFO/socket/device) と誤表示していた。
+        verdict (deny) 自体は special と同じ経路のまま変わらない。
+        """
+        envdir = Path(self.tmp) / ".env"
+        envdir.mkdir()
+        envelope = _make_envelope("Write", str(envdir), self.tmp)
+        envelope["tool_input"]["content"] = "NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn("ディレクトリです", reason)
+        self.assertNotIn("FIFO", reason)
+        self.assertNotIn("上書き対象の既存ファイル", reason)
+
 
 class TestOverwriteToolAxis(BaseEdit):
     """``overwrite`` の代替案は **tool 軸 × format 軸**で決まる (PR #47 Codex P2)。
