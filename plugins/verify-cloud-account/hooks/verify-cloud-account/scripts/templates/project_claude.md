@@ -1,16 +1,19 @@
 # verify-cloud-account / accounts.local.json (Claude 向け案内)
 
-このディレクトリ配下の `accounts.local.json` は **`*.local.json` パターン**に
-マッチするため、`sensitive-files-guardrail` 等のセキュリティ系フックで Claude
-からの `Read` / `Write` / `Edit` および `cat` 経由の参照が deny される設計
-です (機密ファイル流出防止のため意図的)。Claude (LLM) は **直接編集できま
-せん**。
+このディレクトリ配下の `accounts.local.json` は verify-cloud-account の設定
+ファイルです。**編集は builder スクリプト経由 (Bash) が正規経路**です
+(書込パス固定・フォーマット統一のため)。
+
+`*.local.json` のような機密ファイルパターンへの直接アクセスを制限するセキュリティ
+系 hook が有効な環境では、Claude (LLM) からの `Read` / `Write` / `Edit` および
+`cat` 経由の参照が拒否されることがあります。その場合も builder 経由であれば
+同じ正規経路で操作できます (Bash の operand に機密ファイルの path を直接含めない
+呼び出し方のため、多くのフックの制約を通過します)。
 
 ## 編集の正規経路
 
-verify-cloud-account plugin の **builder スクリプト経由 (Bash)** が唯一の
-正規経路です。Bash の operand に `accounts.local.json` のような機密 path を
-含めない呼び出し方なので、上記フック制約を通過します。
+verify-cloud-account plugin の **builder スクリプト経由 (Bash) が唯一の
+正規経路**です。
 
 ### Agent Skill (推奨)
 
@@ -56,8 +59,9 @@ builder は **dispatcher (hook) が実際に読むファイル**を対象にし�
 ## やってはいけないこと
 
 - `Read` / `Edit` / `Write` で `accounts.local.json` を直接操作する
-- `cat .claude/verify-cloud-account/accounts.local.json` を実行する
-  (`sensitive-files-guardrail` が Bash operand を deny する)
+- `cat .claude/verify-cloud-account/accounts.local.json` のように機密ファイルの
+  path を Bash operand に直接含めて実行する (セキュリティ系 hook が有効な環境では
+  deny されます)
 - `.claude/accounts.local.json` (旧パス) と
   `.claude/verify-cloud-account/accounts.local.json` (新パス) の **両方** を
   作る (verify-cloud-account dispatcher が複数パス検出時に fail-closed で

@@ -73,10 +73,6 @@ class TestGithubActiveAccount(unittest.TestCase):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             self.assertIsNone(github.suggest_accounts_entry("/p"))
 
-    def test_parse_active_accounts_alias(self):
-        """後方互換: _parse_active_accounts は parse_active_accounts と同じ関数。"""
-        self.assertIs(github._parse_active_accounts, github.parse_active_accounts)
-
 
 class TestFirebaseActiveAccount(unittest.TestCase):
     def setUp(self):

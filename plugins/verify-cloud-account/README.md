@@ -52,10 +52,11 @@ deny する (`/verify-cloud-account:accounts-migrate` で統合)。
 
 builder の `init --commit` / `migrate --commit` は同ディレクトリに
 `CLAUDE.md` (Claude 向け signpost) も自動生成する (v0.3.1 から)。
-sensitive-files-guardrail 等で `accounts.local.json` への直接アクセスが deny
-された Claude (LLM) が、同ディレクトリの CLAUDE.md を覗くだけで builder
-経由の正規経路に辿り着けるようにするための案内ファイル。既存 CLAUDE.md
-は上書きされず、削除しても plugin 本体の動作には影響しない。
+`*.local.json` のような機密ファイルパターンへの直接アクセスを制限する
+セキュリティ系 hook が有効な環境で、Claude (LLM) からの直接アクセスが deny
+された場合でも、同ディレクトリの CLAUDE.md を覗くだけで builder 経由の正規
+経路に辿り着けるようにするための案内ファイル。既存 CLAUDE.md は上書きされず、
+削除しても plugin 本体の動作には影響しない。
 
 ## accounts.local.json の形式
 
@@ -566,7 +567,10 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 
 - `gh auth status` / `firebase use` / `aws sts` / `gcloud config` /
   `kubectl config` の**出力フォーマット**に依存している。CLI 本体の
-  major update で壊れる可能性あり
+  major update で壊れる可能性あり。`gh auth status` は **gh 2.40 以上を推奨**
+  (2.40 で複数アカウント対応の `Active account: true/false` marker が追加され、
+  それ以前の単一アカウント形式にも fallback で対応するが、どちらの形式にも
+  一致しない出力は「解釈できません」で deny する。`gh --version` で確認可)
 - `bash -c '...'` / `eval` 内に埋め込まれた CLI 呼び出しは静的解析できず検証
   対象外 (透過 wrapper のリストに `bash` は含めていない)
 - `gh auth <sub> --hostname <host>` / `--user <user>` のように**操作対象の
@@ -636,6 +640,33 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 hook の出力を確認するには `claude --verbose` でセッションを起動する
 (hook の stdout/stderr がターミナルに表示される)。
 
+### デバッグトレース (`VERIFY_CLOUD_ACCOUNT_DEBUG=1`)
+
+hook 実行時に環境変数 `VERIFY_CLOUD_ACCOUNT_DEBUG=1` を立てると、コマンドの
+分解結果を stderr に 1 行 JSON で出す (`claude --verbose` で確認可能)。
+
+```json
+{"segments": [{"segment": "gh pr list", "service": "github", "readonly": false}],
+ "cache_hit": {}, "verify_ms": {"github": 12.3}, "elapsed_ms": 13.1, "decision": "deny"}
+```
+
+- `segments`: 抽出した各セグメントと、マッチした service / readonly 判定
+- `cache_hit`: 成功 cache を使って verify を省略した service
+- `verify_ms`: 実際に `verify()` を呼んだ service とその所要時間 (ms)
+- `decision`: 最終的な判定 (`allow` / `deny` / `warn`)
+
+判定表 (allow/deny/warn) 自体には一切影響しない観測専用の出力。
+
+### 内部エラー時の fail-open
+
+`dispatch()` 内で未捕捉の例外が起きた場合、従来は exit 1 (JSON 無し) になり
+公式仕様上は non-blocking error として **無音で action が進行する** (fail-open
+だが理由が分からない) だけだった。現在は例外を捕捉し、
+`additionalContext` で `[verify-cloud-account] 内部エラーのため検証をスキップ
+しました: <例外の型>: <メッセージ>` を明示し、同じ理由を stderr にも出す
+(`claude --verbose` で確認可能)。いずれの場合も action 自体は fail-open で
+進行する (実行を止めない)。
+
 詳細な設計背景は CLAUDE.local.md (開発者向け、リポジトリ未同梱) を参照。
 
 ## 互換性
@@ -650,6 +681,15 @@ python3 -m unittest discover tests
 ```
 
 標準ライブラリのみで動く (pytest / pip install 不要)。
+
+クラス単位・メソッド単位で 1 件だけ指定して実行することもできる:
+
+```bash
+python3 -m unittest tests.test_services.TestAws.test_match -v
+python3 -m unittest tests.test_dispatcher.TestRouting -v
+# pytest がインストールされていれば node id 指定も可能
+pytest tests/test_services.py::TestAws::test_match -q
+```
 
 ## ライセンス
 

@@ -143,8 +143,8 @@ _SERVICE_BY_KEY = {svc.ACCOUNT_KEY: svc for svc in SERVICES}
 _VALUE_HIDDEN_MARK = "(value hidden. use --show-values to reveal)"
 
 # accounts.local.json と同じディレクトリに同梱する Claude 向け案内ファイル。
-# sensitive-files-guardrail 等で *.local.json への直接アクセスが deny される事情と
-# builder 経由の正規経路を Claude (LLM) に signpost する。
+# *.local.json のような機密ファイルパターンへの直接アクセスを制限するセキュリティ
+# 系 hook が有効な環境向けに、builder 経由の正規経路を Claude (LLM) に signpost する。
 _PROJECT_CLAUDE_MD_FILENAME = "CLAUDE.md"
 _PROJECT_CLAUDE_MD_TEMPLATE = _HERE / "templates" / "project_claude.md"
 
@@ -405,9 +405,10 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     - dispatcher 等が読みに来るパスではないため、ここで失敗しても plugin 本体
       の動作に影響しない
 
-    plugin 同士の疎結合を保つための signpost: sensitive-files-guardrail が
-    `*.local.json` への直接アクセスを deny する事情と、builder 経由の正規経路
-    (Agent Skill / Bash) を Claude (LLM) に伝える。
+    plugin 同士の疎結合を保つための signpost: `*.local.json` への直接アクセスを
+    制限するセキュリティ系 hook が有効な環境がある事情と、builder 経由の正規経路
+    (Agent Skill / Bash) を Claude (LLM) に伝える。特定の plugin 名は書かない
+    (D9 疎結合方針 / 内部バックログ)。
     """
     target_dir = target.path.parent
     md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
@@ -1385,10 +1386,13 @@ def _cmd_migrate(
         if in_new:
             _print_change_line("= unchanged", key, merged[key], args.show_values, stdout)
         else:
-            source_kind = next((k for k, v, kk in additions if k == key), "old")
-            matching = [(v, kk) for (k2, v, kk) in additions if k2 == key]
-            if matching:
-                source_kind = matching[0][1]
+            # additions は kind (deprecated/legacy) を先に処理した順で積むため、
+            # 同じ key が 2 度追加されることは無い (2 巡目は `key not in merged`
+            # が False になり conflict 分岐に落ちる) — key ごとに source kind は
+            # 高々 1 つ。旧実装は `k` (= key 自身) を代入する行と、直後に正しい
+            # `kk` (source kind) で上書きする行の 2 行に分かれていた冗長 (内部
+            # バックログ)。
+            source_kind = next((kk for k2, v, kk in additions if k2 == key), "old")
             _print_change_line(
                 f"+ merged from {source_kind}",
                 key,

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -131,7 +132,9 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
     )
 
 
-def _analyze_command(command: str) -> tuple[list[tuple], list]:
+def _analyze_command(
+    command: str, trace: dict | None = None
+) -> tuple[list[tuple], list]:
     """コマンドを分解し (targets, switching) を返す。
 
     targets は検証対象 (non-readonly) の (svc, cands, inline_env) リスト。cands の
@@ -153,6 +156,10 @@ def _analyze_command(command: str) -> tuple[list[tuple], list]:
     ことの両方で使う。inline_env はコマンド行頭のインライン環境変数
     (`AWS_PROFILE=prod aws ...` の `{"AWS_PROFILE": "prod"}`) で、検証 subprocess
     に渡しコマンド実行時と同条件で検証する。
+
+    trace: `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ非 None。各セグメントの
+    (segment, service, readonly) を `trace["segments"]` に追記する
+    (判定表そのものには影響しない、観測専用)。
     """
     order: list = []
     cand_map: dict = {}
@@ -162,6 +169,15 @@ def _analyze_command(command: str) -> tuple[list[tuple], list]:
         # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
         # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
         forms = _candidate_forms(cand, svc)
+        is_ro = svc is not None and _is_readonly(forms, svc)
+        if trace is not None:
+            trace["segments"].append(
+                {
+                    "segment": cand,
+                    "service": _service_name(svc) if svc is not None else None,
+                    "readonly": is_ro,
+                }
+            )
         # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
         # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
         # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
@@ -169,7 +185,7 @@ def _analyze_command(command: str) -> tuple[list[tuple], list]:
         for other in SERVICES:
             if other not in switching and _is_state_changing(forms, other):
                 switching.append(other)
-        if svc is None or _is_readonly(forms, svc):
+        if svc is None or is_ro:
             continue
         # コンテキスト option (`aws --profile other ...`) は inline env と同じく
         # 「検証すべき対象」を変えるので grouping key に含める。含めないと
@@ -264,12 +280,14 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     return "\n".join(lines)
 
 
-def dispatch(command: str, cwd: str) -> dict | None:
+def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
+    """`dispatch()` の実処理。`trace` は `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ
+    非 None で、判定表そのものには影響しない (観測専用)。"""
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
     if not project_dir:
         return None
 
-    targets, switching = _analyze_command(command)
+    targets, switching = _analyze_command(command, trace)
     # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
     # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
     # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
@@ -356,13 +374,20 @@ def dispatch(command: str, cwd: str) -> dict | None:
         if not switching_here and cache.get_success(
             svc_name, project_dir, entry, accounts_mtime, inline_env, ctx
         ):
+            if trace is not None:
+                trace["cache_hit"][svc_name] = True
             continue
 
         # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
         # inline_env が空なら env=None (= 親環境継承) のままにする。空 dict を
         # subprocess.run(env={}) に渡すと環境変数が一切無い状態になり危険なため。
         proc_env = {**os.environ, **inline_env} if inline_env else None
+        _verify_start = time.monotonic() if trace is not None else None
         err = svc.verify(entry, project_dir, env=proc_env, context=ctx)
+        if trace is not None:
+            trace["verify_ms"][svc_name] = round(
+                (time.monotonic() - _verify_start) * 1000, 2
+            )
         if err:
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
@@ -400,3 +425,51 @@ def dispatch(command: str, cwd: str) -> dict | None:
         return output.warn(body)
 
     return None
+
+
+_DEBUG_ENV_VAR = "VERIFY_CLOUD_ACCOUNT_DEBUG"
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get(_DEBUG_ENV_VAR) == "1"
+
+
+def _trace_decision(result: dict | None) -> str:
+    """`result` から決定を 1 語で表す (デバッグ trace 専用、判定表には使わない)。"""
+    if result is None:
+        return "allow"
+    hook_output = result.get("hookSpecificOutput", {}) if isinstance(result, dict) else {}
+    if hook_output.get("permissionDecision") == "deny":
+        return "deny"
+    if "additionalContext" in hook_output:
+        return "warn"
+    return "unknown"
+
+
+def dispatch(command: str, cwd: str) -> dict | None:
+    """PreToolUse エントリポイント。
+
+    `VERIFY_CLOUD_ACCOUNT_DEBUG=1` のときのみ、分解結果 (segments / matched
+    service / readonly / cache hit / verify 所要 ms / 決定) を stderr に 1 行
+    JSON で出す (内部バックログ: 例外時の無音 fail-open に加えて、正常系でも
+    どのセグメントがどう判定されたか事後に追えなかった問題への対応)。
+    出力先は stderr のみで、この trace 自体は allow/deny の判定に一切影響しない。
+    """
+    if not _debug_enabled():
+        return _dispatch_impl(command, cwd, None)
+
+    trace: dict = {"segments": [], "cache_hit": {}, "verify_ms": {}}
+    start = time.monotonic()
+    result = _dispatch_impl(command, cwd, trace)
+    trace["elapsed_ms"] = round((time.monotonic() - start) * 1000, 2)
+    trace["decision"] = _trace_decision(result)
+    try:
+        print(json.dumps(trace, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    except (TypeError, ValueError, OSError):
+        # trace に JSON 化できない値が紛れても、stderr が閉じている/書き込み不能
+        # (BrokenPipeError 等の OSError) でも、デバッグ出力の失敗で hook 本体の
+        # 判定結果を握りつぶさない (マージ前レビューの指摘: trace は
+        # decision-neutral のはずが、この例外が dispatch() の外まで伝播すると
+        # 計算済みの result が呼び出し元に返らず失われていた)。
+        pass
+    return result
