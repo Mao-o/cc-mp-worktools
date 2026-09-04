@@ -164,6 +164,15 @@ class HasProjectMarkersGlobTest(unittest.TestCase):
             (root / "App.vbproj").write_text("<Project />\n")
             self.assertTrue(has_project_markers(root, ["*.vbproj"]))
 
+    def test_slnx_glob_marker_matches(self):
+        # merge-review finding (round 5): PROJECT_MARKERS gained *.slnx
+        # (the newer XML solution format) alongside *.sln -- same pin as
+        # the *.fsproj/*.vbproj case above, for the glob branch itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.slnx").write_text("<Solution />\n")
+            self.assertTrue(has_project_markers(root, ["*.slnx"]))
+
     def test_glob_marker_does_not_match_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

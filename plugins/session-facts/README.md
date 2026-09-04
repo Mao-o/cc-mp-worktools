@@ -148,13 +148,13 @@ detector が同じ repo にヒットしてよい)。
 | `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`uv.toml`/`poetry.lock`、pyproject 内の framework 名 |
 | `testing.py` | `zod`, `vitest`, `jest`, `playwright`, `cypress`, `monorepo` | 各種依存 / config file、`pnpm-workspace.yaml`・`turbo.json` |
 | `go_stack.py` | `go` | `go.mod` |
-| `swift_stack.py` | `swift` | `Package.swift`、または `*.xcodeproj`/`*.xcworkspace` (Package.swift の無い Xcode-only project) |
+| `swift_stack.py` | `swift` | `Package.swift`、または `*.xcodeproj`/`*.xcworkspace` + tracked な `.swift` ファイルが 1 件以上 (Package.swift の無い Xcode-only project。`.swift` が無い Objective-C 専用 project は Xcode bundle があっても `swift` にならない) |
 | `java_stack.py` | `java`, `gradle`, `maven` | `gradlew`/`build.gradle(.kts)`、`pom.xml` |
 | `scala_stack.py` | `scala` | `build.sbt` |
 | `rust_stack.py` | `rust` | `Cargo.toml` |
 | `elixir_stack.py` | `elixir` | `mix.exs` |
 | `ruby_stack.py` | `ruby` | `Gemfile` |
-| `dotnet_stack.py` | `dotnet` | ルート直下の `*.csproj`/`*.fsproj`/`*.vbproj`/`*.sln` |
+| `dotnet_stack.py` | `dotnet` | ルート直下の `*.csproj`/`*.fsproj`/`*.vbproj`/`*.sln`/`*.slnx` |
 | `taskrunner.py` | `makefile`, `justfile`, `taskfile`, `nx` | `Makefile`、`Justfile`/`justfile`、`Taskfile.y(a)ml`、`nx.json` |
 | `flutter.py` | `flutter`, `dart` | `pubspec.yaml` (`sdk: flutter` または `flutter:` セクション。それ以外の pubspec は `dart` のみ) |
 | `php_stack.py` | `php` | `composer.json` |

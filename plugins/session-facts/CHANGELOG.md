@@ -187,6 +187,68 @@
    `collectors/scripts.py`/`core/fs.py` を隔離コピーへ差し替えて確認済み。
    `Package.swift` 単体の既存挙動は変更前後で同一であることも同じ隔離
    コピーで確認済み (2 件は元々 pass)。10 件追加 (503 -> 513)
+9. **マージ前レビューの指摘 2 件を修正 + 新設 5 stack の標準ファイル形式棚卸し**
+   (`detectors/swift_stack.py`, `detectors/dotnet_stack.py`, `core/pm.py`,
+   `core/constants.py`, `README.md`, `tests/test_new_stack_detectors.py`,
+   `tests/test_scripts.py`, `tests/test_fs.py`, `tests/test_cli.py`) —
+   (a) `detectors/swift_stack.py` の Xcode-only 分岐 (`*.xcodeproj`/
+   `*.xcworkspace` の存在のみで `stack: swift` を付ける経路) は Xcode
+   project/workspace 自体が Swift 専用ではないため、`.m`/`.mm` のみの
+   legacy Objective-C project でも Xcode bundle さえあれば誤って `swift`
+   と判定していた。tracked files (`ctx.tracked_files`) に `.swift` が
+   1 件以上あることをこの分岐の追加要件にし、`Package.swift` 分岐は
+   変更していない。Objective-C 専用 fixture (`.m`/`.mm` のみ、tracked
+   files が空のケースも含む) で修正前に実際に `["swift"]` を返してしまう
+   ことを確認してから修正。
+   (b) `detectors/dotnet_stack.py`/`core/pm.py`/`PROJECT_MARKERS` が
+   `*.sln` (classic 形式) のみを見ており、.NET SDK 9+/Visual Studio
+   17.10+ が生成する新しい XML ベースの solution 形式 `*.slnx` を認識
+   できなかった (member `*.csproj`/`*.fsproj`/`*.vbproj` がサブディレクトリ
+   にあり root に `*.slnx` のみのレイアウトが `dotnet` と判定されず、
+   `dotnet test` の提案も出ない)。3 箇所すべてに `*.slnx` を追加し、
+   `*.fsproj`/`*.vbproj` 追加時 (上記 7(b)) と同じ形で detector 単体・
+   `core/fs.py::has_project_markers()` の glob マッチ・non-git marker gate
+   経由の end-to-end の 3 層でテストを固定した。
+   あわせて、新設 5 stack (swift/dotnet/scala/elixir/cmake) それぞれについて
+   「公式ツールチェーンが生成・認識する標準的な project/manifest/solution
+   形式とソース拡張子」の棚卸しを行った。採否 (理由付き):
+   - **採用**: dotnet `*.slnx` (上記 (b))。scala `.sc` (`CODE_EXTENSIONS` の
+     み) -- Scala のスクリプト/worksheet 拡張子 (`scala script.sc`、
+     Ammonite、scala-cli) で、`.scala` 単体では拾えないソースが Test
+     Snapshot/Service Entry Points から漏れていた同型の穴。
+     `detectors/scala_stack.py`/`core/pm.py`/`PROJECT_MARKERS` へは
+     意図的に**追加していない** (次項参照)。
+   - **除外 (理由付き)**: dotnet `*.slnf` (solution filter) はそれ単体では
+     成立せず常に既存の `.sln` を参照する副次ファイルであり、それ自体が
+     project/solution ファイルではない。dotnet `Directory.Build.props` も
+     同様に、配下の project 群に設定を暗黙 import させる共有プロパティ
+     ファイルであって project/solution ファイルそのものではない。
+     `detectors/dotnet_stack.py`/`core/pm.py` は go/rust/ruby/php/java の
+     各 detector と同じ「root 直下のみを見る」規約 (`test_nested_csproj_is_
+     not_detected` で固定済み) を採っており、この規約は
+     `PROJECT_MARKERS` の nested search 有無とは独立した stack タグ側の
+     設計判断のため、いずれもこの規約に照らして「project/solution
+     ファイルそのものではない」ことを理由に見送った (marker gate 側の
+     nested search 到達可否は、この決定とは別の話であり根拠にしていない)。
+     scala `build.sc` (Mill のビルドファイル) は `detectors/scala_stack.py`
+     に追加すると `collectors/scripts.py` の既存 `if "scala" in stack:`
+     分岐が無条件で `sbt test`/`sbt compile` を提案するため、sbt を
+     使わない Mill 専用 project に対して**誤ったコマンド**を提案して
+     しまう (未検出ではなく誤検出という質的に異なる害のため、
+     `scripts.py` 側の build-tool 分岐追加を伴わない今回のスコープでは
+     見送り、拡張子の `.sc` のみ登録するに留めた)。elixir `.heex`
+     (Phoenix テンプレート) は `CODE_EXTENSIONS` が他スタックでも
+     テンプレート/マークアップ形式 (`.html`/`.erb` 等) を含めていない
+     線引きに合わせ除外。cmake `CMakePresets.json` は CMake の仕様上
+     常に同じディレクトリの `CMakeLists.txt` とセットでしか機能せず、
+     既存の `CMakeLists.txt` の直接チェックで既にカバーされるため
+     追加の gate 効果が無い。cmake 由来での `.m`/`.mm` (Objective-C)
+     追加は根拠が薄いため見送り (指摘 (a) の Swift 側修正と対称の判断)。
+     swift は `Package.swift`/`*.xcodeproj`/`*.xcworkspace` が既に登録済み
+     で `Package.resolved` は lock file のため marker 化不要と判断し、
+     既存のまま変更なし。dotnet の `.fs`/`.fsi`/`.fsx`/`.vb`/`.cs` は
+     `CODE_EXTENSIONS` に既登録で変更なし。
+   9 件追加 (513 -> 522)
 
 ## 0.9.0
 

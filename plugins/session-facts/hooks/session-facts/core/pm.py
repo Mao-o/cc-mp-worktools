@@ -50,17 +50,19 @@ def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
 
 
 def _has_dotnet_project(root) -> bool:
-    """Root-level ``*.csproj``/``*.fsproj``/``*.vbproj``/``*.sln``
+    """Root-level ``*.csproj``/``*.fsproj``/``*.vbproj``/``*.sln``/``*.slnx``
     (detectors/dotnet_stack.py duplicates this same check, matching the
     existing gradle-check duplication between this module and
     detectors/java_stack.py -- pm.py and the stack detector each own their
     check rather than sharing a helper across the layer boundary). F#/VB.NET
     project files are included alongside C#'s so a solutionless F#/VB.NET
-    repo is recognized too, not just C# (merge-review finding).
+    repo is recognized too, not just C# (merge-review finding). ``.slnx`` is
+    the newer XML solution format dotnet/VS read the same way as ``.sln``
+    (merge-review finding, round 5).
     """
     try:
         return any(
-            p.suffix in (".csproj", ".fsproj", ".vbproj", ".sln")
+            p.suffix in (".csproj", ".fsproj", ".vbproj", ".sln", ".slnx")
             for p in root.iterdir()
             if p.is_file()
         )

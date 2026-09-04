@@ -20,7 +20,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
@@ -36,12 +36,15 @@ from detectors.scala_stack import ScalaStackDetector
 from detectors.swift_stack import SwiftStackDetector
 
 
-def _ctx(root: Path) -> RepoContext:
-    return RepoContext(root=root, config=AnalysisConfig())
+def _ctx(root: Path, tracked: Optional[List[str]] = None) -> RepoContext:
+    ctx = RepoContext(root=root, config=AnalysisConfig())
+    if tracked is not None:
+        ctx.tracked_files = tracked
+    return ctx
 
 
-def _detect(detector, root: Path) -> List[str]:
-    return detector.detect(_ctx(root))
+def _detect(detector, root: Path, tracked: Optional[List[str]] = None) -> List[str]:
+    return detector.detect(_ctx(root, tracked))
 
 
 class SwiftStackDetectorTest(unittest.TestCase):
@@ -68,17 +71,49 @@ class SwiftStackDetectorTest(unittest.TestCase):
         # SwiftPM manifest at all, but *.xcodeproj is still Swift's own
         # project marker -- without this, such a repo got no "stack: swift"
         # and (via PROJECT_MARKERS) was rejected outright by the non-git
-        # marker gate.
+        # marker gate. A tracked .swift file is required alongside the
+        # bundle (see ObjcOnlyXcodeProjectTest below) -- this fixture
+        # supplies one so it still reports "swift".
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "App.xcodeproj").mkdir()
-            self.assertEqual(_detect(SwiftStackDetector(), root), ["swift"])
+            tracked = ["App/AppDelegate.swift"]
+            self.assertEqual(_detect(SwiftStackDetector(), root, tracked), ["swift"])
 
     def test_xcworkspace_alone_is_detected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "App.xcworkspace").mkdir()
-            self.assertEqual(_detect(SwiftStackDetector(), root), ["swift"])
+            tracked = ["App/AppDelegate.swift"]
+            self.assertEqual(_detect(SwiftStackDetector(), root, tracked), ["swift"])
+
+    def test_xcodeproj_without_any_swift_source_is_not_detected(self):
+        # merge-review finding (round 5): *.xcodeproj/*.xcworkspace are not
+        # Swift-specific -- a legacy Objective-C-only app (.m/.mm sources,
+        # no .swift anywhere) still ships an Xcode project/workspace, and
+        # the bundle-presence check alone wrongly tagged it "stack: swift".
+        # Require at least one tracked .swift file as positive evidence
+        # before applying the Swift tag to the Xcode-only branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcodeproj").mkdir()
+            tracked = ["App/AppDelegate.m", "App/Helper.mm"]
+            self.assertEqual(_detect(SwiftStackDetector(), root, tracked), [])
+
+    def test_xcworkspace_without_any_swift_source_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcworkspace").mkdir()
+            tracked = ["App/AppDelegate.m"]
+            self.assertEqual(_detect(SwiftStackDetector(), root, tracked), [])
+
+    def test_xcodeproj_with_no_tracked_files_at_all_is_not_detected(self):
+        # Same gap, degenerate case: no tracked files recorded at all (the
+        # bundle directory itself carries no source signal).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.xcodeproj").mkdir()
+            self.assertEqual(_detect(SwiftStackDetector(), root), [])
 
     def test_xcodeproj_is_not_the_package_manager(self):
         # Xcode-only projects have no SwiftPM manifest to run `swift build`/
@@ -109,6 +144,15 @@ class DotnetStackDetectorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "App.sln").write_text("Microsoft Visual Studio Solution File\n")
+            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+
+    def test_root_slnx_is_detected(self):
+        # merge-review finding (round 5): .slnx (the newer XML-based
+        # solution format, .NET SDK 9+/VS 17.10+) was not recognized at
+        # all -- only the classic .sln suffix was checked.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.slnx").write_text("<Solution />\n")
             self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
 
     def test_root_fsproj_is_detected(self):
@@ -165,6 +209,12 @@ class DotnetStackDetectorTest(unittest.TestCase):
             (root / "App.vbproj").write_text(
                 '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
             )
+            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
+
+    def test_slnx_is_the_package_manager(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.slnx").write_text("<Solution />\n")
             self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
 
 
@@ -305,6 +355,58 @@ class ExtensionRegistrationTest(unittest.TestCase):
             # App.fsproj itself is not a registered source suffix (a build
             # manifest, not source, mirroring CMakeLists.txt's treatment
             # above), so code_files only counts Program.fs/Library.fs.
+            self.assertIn("code_files: 2", out)
+            self.assertIn("test_files: 1", out)
+
+    def test_dotnet_test_snapshot_counts_slnx_solution_layout(self):
+        # merge-review finding (round 5): a repo whose only root-level
+        # solution file is the newer .slnx format (member .csproj files in
+        # subdirectories) is exactly the ".sln-equivalent" case
+        # dotnet_stack.py's suffix tuple already exists to cover.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "App.slnx",
+                "src/App/Program.cs",
+                "Tests/ProgramTests.cs",
+            ]
+            for name in tracked:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("")
+            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = TestsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("code_files: 1", out)
+            self.assertIn("test_files: 1", out)
+
+    def test_scala_script_extension_is_registered(self):
+        # merge-review round-5 stack-extension inventory: .sc is Scala's
+        # script/worksheet suffix (`scala script.sc`, Ammonite, scala-cli
+        # scripts) -- .scala alone covers ordinary sources but silently
+        # dropped .sc scripts from Test Snapshot/Service Entry Points, the
+        # same shape as every other CODE_EXTENSIONS gap above.
+        self.assertIn(".sc", CODE_EXTENSIONS)
+
+    def test_scala_test_snapshot_counts_sc_scripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "build.sbt",
+                "scripts/Migrate.sc",
+                "src/main/scala/App.scala",
+                "src/test/scala/AppTest.scala",
+            ]
+            for name in tracked:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("")
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = TestsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            # Migrate.sc + App.scala are both counted as code_files.
             self.assertIn("code_files: 2", out)
             self.assertIn("test_files: 1", out)
 

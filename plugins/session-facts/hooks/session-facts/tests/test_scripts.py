@@ -187,6 +187,12 @@ class NewStackLikelyCommandsTest(unittest.TestCase):
             root = Path(tmp)
             (root / "App.xcodeproj").mkdir()
             ctx = RepoContext(root=root, config=AnalysisConfig())
+            # detectors/swift_stack.py's Xcode-only branch now also
+            # requires a tracked .swift file as positive evidence
+            # (merge-review finding, round 5) -- supply one so this fixture
+            # still exercises the "swift" stack + no-swift-command path it
+            # is meant to guard.
+            ctx.tracked_files = ["App/AppDelegate.swift"]
             ctx.results["package_manager"] = detect_package_manager(ctx)
             self.assertIsNone(ctx.results["package_manager"])
             ctx.stack = SwiftStackDetector().detect(ctx)

@@ -20,6 +20,10 @@ def _has_xcode_project(root: Path) -> bool:
         return False
 
 
+def _has_tracked_swift_source(tracked_files: List[str]) -> bool:
+    return any(f.endswith(".swift") for f in tracked_files)
+
+
 class SwiftStackDetector:
     name = "swift_stack"
     priority = 65
@@ -40,7 +44,18 @@ class SwiftStackDetector:
         # itself (directly, or via package_manager == "swift", which
         # core/pm.py sets off Package.swift alone) before adding those
         # commands.
-        if (ctx.root / "Package.swift").exists() or _has_xcode_project(ctx.root):
+        if (ctx.root / "Package.swift").exists():
+            return ["swift"]
+        # *.xcodeproj/*.xcworkspace are not Swift-specific -- a legacy
+        # Objective-C-only app (.m/.mm sources, no .swift anywhere) still
+        # ships an Xcode project/workspace. Bundle presence alone used to
+        # be enough to tag "stack: swift" (merge-review finding, round 5),
+        # so require at least one tracked .swift file as positive evidence
+        # before applying the tag on this branch. ctx.tracked_files is
+        # populated (via git ls-files or walk_files) before detectors run,
+        # matching this plugin's convention of reading tracked_files rather
+        # than walking the filesystem directly (see module CLAUDE.md).
+        if _has_xcode_project(ctx.root) and _has_tracked_swift_source(ctx.tracked_files):
             return ["swift"]
         return []
 

@@ -848,6 +848,7 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
         ("Gemfile.lock", False),
         ("App.csproj", False),  # *.csproj glob marker
         ("App.sln", False),  # *.sln glob marker
+        ("App.slnx", False),  # *.slnx glob marker (merge-review, round 5)
         ("main.tf", False),  # *.tf glob marker
         # *.xcodeproj/*.xcworkspace glob markers: Xcode's bundle format is
         # a directory, not a file -- unlike every other glob marker fixture
