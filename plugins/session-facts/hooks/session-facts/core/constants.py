@@ -30,6 +30,17 @@ CODE_EXTENSIONS = {
     ".py", ".go", ".rs", ".rb", ".php", ".java", ".kt",
     ".swift", ".cs", ".scala", ".lua", ".sh", ".bash",
     ".dart",
+    # detectors/elixir_stack.py reports "stack: elixir" off mix.exs alone;
+    # without these, a conventional Mix project's own lib/*.ex sources and
+    # test/*_test.exs tests are silently dropped from Test Snapshot and
+    # Service Entry Points (merge-review finding).
+    ".ex", ".exs",
+    # detectors/cmake_stack.py reports "stack: cmake" off CMakeLists.txt
+    # alone -- CMakeLists.txt itself is a build script, not a source file,
+    # so the actual sources a CMake project's Test Snapshot/Service Entry
+    # Points need to see are the C/C++ files it builds. Same gap as
+    # Elixir's, one level removed.
+    ".c", ".cc", ".cpp", ".h", ".hpp",
 }
 
 TEST_PATH_MARKERS = {

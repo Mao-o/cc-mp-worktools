@@ -1,8 +1,19 @@
 """Minimal fixture tests for the Swift/.NET/Scala/Elixir/CMake detectors
 (internal backlog: repos in these stacks had no detector at all, so header
-output degraded to Structure-only with no "stack:" line or Likely Commands,
-despite CODE_EXTENSIONS already counting their source files in Test
-Snapshot -- an asymmetric state)."""
+output degraded to Structure-only with no "stack:" line or Likely Commands).
+
+Swift/.NET/Scala source extensions (``.swift``/``.cs``/``.scala``) were
+already registered in ``core/constants.py::CODE_EXTENSIONS`` before their
+detectors existed, so those three stacks got a working Test Snapshot /
+Service Entry Points for free. Elixir (``.ex``/``.exs``) and CMake's
+underlying C/C++ sources (``.c``/``.cc``/``.cpp``/``.h``/``.hpp``) were not
+registered -- a merge-review finding caught this for Elixir specifically
+(``stack: elixir`` and ``mix test`` would be reported while the repo's own
+``lib/*.ex`` and ``test/*_test.exs`` were silently dropped from Test
+Snapshot / Service Entry Points); the same gap existed for CMake's C/C++
+sources and is closed alongside it. ``ExtensionRegistrationTest`` below
+pins that both are now covered.
+"""
 from __future__ import annotations
 
 import tempfile
@@ -12,6 +23,9 @@ from typing import List
 
 import _testutil  # noqa: F401  (sys.path 整備)
 
+from collectors.services import ServicesCollector
+from collectors.tests import TestsCollector
+from core.constants import CODE_EXTENSIONS
 from core.context import AnalysisConfig, RepoContext
 from core.pm import detect_package_manager
 from detectors.cmake_stack import CmakeStackDetector
@@ -148,6 +162,87 @@ class CmakeStackDetectorTest(unittest.TestCase):
             root = Path(tmp)
             (root / "CMakeLists.txt").write_text("project(app)\n")
             self.assertIsNone(detect_package_manager(_ctx(root)))
+
+
+class ExtensionRegistrationTest(unittest.TestCase):
+    """Guards the merge-review finding: a stack detector reporting
+    ``stack: <x>`` is not enough on its own -- CODE_EXTENSIONS must also
+    list that stack's source suffixes, or Test Snapshot / Service Entry
+    Points silently drop every file the detector's own stack claims to
+    cover."""
+
+    def test_elixir_extensions_are_registered(self):
+        for ext in (".ex", ".exs"):
+            self.assertIn(ext, CODE_EXTENSIONS)
+
+    def test_cmake_c_family_extensions_are_registered(self):
+        for ext in (".c", ".cc", ".cpp", ".h", ".hpp"):
+            self.assertIn(ext, CODE_EXTENSIONS)
+
+    def test_elixir_test_snapshot_counts_conventional_mix_layout(self):
+        # A conventional Mix project: lib/*.ex sources, test/*_test.exs
+        # tests. Before CODE_EXTENSIONS registered .ex/.exs, every one of
+        # these files was invisible to the Test Snapshot collector even
+        # though the elixir detector had already reported "stack: elixir"
+        # and "mix test" for the very same repo.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "mix.exs",
+                "lib/app.ex",
+                "lib/app/worker.ex",
+                "test/app_test.exs",
+                "test/app/worker_test.exs",
+            ]
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = TestsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            # mix.exs itself is also a registered .exs file, so code_files
+            # includes it alongside the two lib/*.ex sources.
+            self.assertIn("code_files: 3", out)
+            self.assertIn("test_files: 2", out)
+
+    def test_cmake_test_snapshot_counts_conventional_c_layout(self):
+        # A conventional CMake project: C/C++ sources/headers plus a
+        # tests/ dir of *_test.cpp files. cmake_stack.py has no source
+        # extensions of its own (CMakeLists.txt drives a build, it is not
+        # a source file), so this is the same gap as Elixir's, just one
+        # level removed: the language CMake builds, not CMake itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "CMakeLists.txt",
+                "src/app.cpp",
+                "src/app.h",
+                "tests/app_test.cpp",
+            ]
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = TestsCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("code_files: 2", out)
+            self.assertIn("test_files: 1", out)
+
+    def test_elixir_service_entry_points_surfaces_ex_files(self):
+        # The review also named collectors/services.py: an .ex file under a
+        # SERVICE_DIR_MARKERS-matching directory (e.g. lib/app/services/)
+        # scores like any other language and should be surfaced. A bare
+        # lib/app.ex still won't surface -- "lib" itself is not a
+        # SERVICE_DIR_MARKERS entry, which this fix does not change.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [
+                "mix.exs",
+                "lib/app.ex",
+                "lib/app/services/mailer.ex",
+            ]
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.tracked_files = tracked
+            out = ServicesCollector().collect(ctx)
+            self.assertIsNotNone(out)
+            self.assertIn("lib/app/services/mailer.ex", out)
+            self.assertNotIn("lib/app.ex", out)
 
 
 if __name__ == "__main__":

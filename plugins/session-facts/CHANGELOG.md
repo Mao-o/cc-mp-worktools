@@ -64,6 +64,30 @@
    `tests/test_registry.py` で既にカバー済みと判明したため、それぞれ
    本バッチの一部として追加/現状追認のみ行った)。合計 143 件のテストを
    追加 (344 -> 487)
+5. **新設した Elixir/CMake detector が `stack: elixir`/`stack: cmake` や
+   `mix test` を報告する一方、`CODE_EXTENSIONS` に `.ex`/`.exs`
+   (および CMake が実際にビルドする C/C++ の `.c`/`.cc`/`.cpp`/`.h`/
+   `.hpp`) が未登録のままで、Test Snapshot / Service Entry Points が
+   対象言語のソース・テストファイルを黙って読み飛ばしていた問題を修正**
+   (`core/constants.py`, `tests/test_new_stack_detectors.py`) —
+   マージ前レビューの指摘。Swift/.NET/Scala は `.swift`/`.cs`/`.scala`
+   が既に登録済みだったため上記 1 の対称性は破れていなかったが、Elixir
+   は新規追加した拡張子が無く、`lib/*.ex`/`test/*_test.exs` が
+   Test Snapshot に一切現れない状態だった。同じ構造の穴が CMake 側
+   (CMakeLists.txt 自体はビルド定義でありソースではないため、実ソース
+   である C/C++) にも無いか確認し、同様に登録した。`CODE_EXTENSIONS`
+   への拡張子追加のみで既存 collector のロジックは変更していないため
+   他スタックの出力には影響しない (`CODE_EXTENSIONS` の参照元は
+   `collectors/services.py`/`collectors/tests.py` の 2 箇所のみで、
+   `python_stack.py` のファイル比率判定や `hub_files.py` の走査は
+   それぞれ独立した拡張子集合を使っており本変更の影響を受けないことを
+   確認済み)。回帰テスト (`ExtensionRegistrationTest`) を追加し、
+   Elixir/CMake それぞれの Test Snapshot が固定レイアウトで正しく
+   ファイルを数えること、Elixir の Service Entry Points が
+   `lib/app/services/*.ex` のような SERVICE_DIR_MARKERS 配下のファイルを
+   拾うこと (`lib/app.ex` のような bare 配置は `lib` 自体が
+   SERVICE_DIR_MARKERS に無いため本修正後も対象外のまま) を固定。
+   5 件追加 (487 -> 492)
 
 ## 0.9.0
 
