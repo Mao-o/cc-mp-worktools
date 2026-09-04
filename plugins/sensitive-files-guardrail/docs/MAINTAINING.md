@@ -252,9 +252,10 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   `python3 -m unittest discover tests` を、同じくサブシェルで `cd` する形で
   `plugins/*/hooks/*/tests` の親を列挙して実行する (CI 側は失敗したスイートを
   集計して job を fail させる)。Python は 3.12 に固定。plugin 自体の動作要件は
-  **3.9+** (TOML の構造付き minimal info だけ 3.11+ 要)。`tomllib` に依存する
-  TOML 系テストの一部は 3.11 未満で `skipUnless` により自動 skip される
-  (`tests/test_redaction_minimal.py` の `_TOMLLIB_AVAILABLE`) ため fail しない
+  **3.11+**。`tomllib` に依存する TOML 系テストの一部は、3.11 未満の
+  interpreter でこのスイートを走らせた場合に備えて `skipUnless` により自動
+  skip する (`tests/test_redaction_minimal.py` の `_TOMLLIB_AVAILABLE`) ため
+  fail しない
 - テストを追加するときは既存の書式 (mode 5 列の envelope fixture、`_make_envelope`
   / `_decision` ヘルパ) に合わせ、判定境界を変える変更は MATRIX.md の行と対にする
 
@@ -711,9 +712,9 @@ Windows で deny exit する既定方針そのものの見直しは本節の対�
 
 ## 依存関係
 
-- **Python 3.9+ で動作** (標準ライブラリのみ、`pip install` 不要)。
-  **TOML の構造付き minimal info だけ 3.11+ 要** — `tomllib` が標準に
-  無い 3.9 / 3.10 では opaque な keys-only scan に劣化する (fail-open には
+- **Python 3.11+** (標準ライブラリのみ、`pip install` 不要。`tomllib` は
+  3.11+ 標準で、未満の interpreter で動かした場合は TOML の構造付き
+  minimal info が opaque な keys-only scan に劣化する。fail-open には
   ならず、hook 起動時に `python_version_degraded` を 1 回ログする)
 - **Git 1.7+** (`git ls-files --recurse-submodules`)
 - **Claude Code CLI 2.1.100+** (`permission_mode: auto` は 2.1.83+ で追加)

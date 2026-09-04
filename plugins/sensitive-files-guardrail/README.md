@@ -459,8 +459,7 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
   agent) は非目的
 - 完全な情報遮断ではない。basename と鍵名は LLM に見える
 - TOCTOU race は完全には防げない
-- Python 3.9+ (TOML の構造付き minimal info のみ 3.11+ 要) / Git 1.7+ /
-  macOS / Linux 対応 (Windows 非対応)
+- Python 3.11+ / Git 1.7+ / macOS / Linux 対応 (Windows 非対応)
 
 ## テスト
 
@@ -493,12 +492,10 @@ validate / リリース手順 / CLI 再実測 Runbook などの保守者向け�
 ## 互換性
 
 - Claude Code CLI 2.1.100+ 想定
-- **Python 3.9+ で動作** (標準ライブラリのみ、`pip install` 不要)。ただし
-  **TOML の構造付き minimal info は 3.11+ が必要** (`tomllib` が標準に
-  無いため)。3.9 / 3.10 では TOML ファイルの reason が opaque な
-  keys-only scan にフォールバックし、`format: toml (unsupported,
-  keys-only scan)` と `Python 3.11+` を明記した note が付く (fail-open
-  にはならず、hook 起動時にもログへ 1 回記録する — サイレント劣化ではない)。
-  他フォーマット (dotenv / json / yaml) の判定には影響しない
+- Python 3.11+ 想定 (標準ライブラリのみ、`pip install` 不要)。3.11 未満の
+  環境で動かした場合、TOML ファイルの reason は opaque な keys-only scan に
+  フォールバックし、`format: toml (unsupported, keys-only scan)` と
+  `Python 3.11+` を明記した note が付く (fail-open にはならず、hook 起動時にも
+  ログへ 1 回記録する — サイレント劣化ではない)
 - Git 1.7+ (submodule scan 用)
 - macOS / Linux 対応、Windows 非対応 (現状 fail-closed で deny)

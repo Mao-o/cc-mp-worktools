@@ -48,13 +48,13 @@ redact 1210 → **1219**、check 133 (変更なし)。
 
 ### Python バージョン対応
 
-3. **README / MAINTAINING の Python 要件を「3.9+ で動作 (TOML の構造付き
-   minimal info のみ 3.11+ 要)」に訂正**。従来「3.11+」とだけ書いており、
-   3.9 / 3.10 でも動く実態と食い違っていた。`tomllib` の成功パスだけを直接
-   検証する TOML 系テスト 4 件は 3.11 未満の環境で不要に fail していたため
+3. **動作要件は Python 3.11+ のまま (方針変更なし)。3.11 未満の interpreter
+   で誤って動かした場合の劣化をサイレントにしないよう整備した**。
+   `tomllib` の成功パスだけを直接検証する TOML 系テスト 4 件は、3.11 未満の
+   interpreter でこのスイートを走らせた場合に不要に fail していたため
    `skipUnless` でガードし (fail ではなく skip)、hook 起動時に劣化を 1 回
-   ログする `python_version_degraded` を追加してサイレント劣化にしないよう
-   にした。
+   ログする `python_version_degraded` を追加した。README / MAINTAINING の
+   TOML 劣化の説明文もこの整理に合わせて明確化した。
 
 ### 理由文の誤流用 2 件
 
