@@ -914,7 +914,10 @@ def _print_search_results(results: list[dict], *, label_source: bool) -> None:
             print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
             for s in hits["results"]:
                 kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                url_anchor = section_url_anchor(r["url"], s["heading_path"])
+                # index の raw URL (.md 付き fetch 形) ではなく Source: 行と同じ正規形に
+                # anchor を付ける。raw 形に #fragment を付けても解決しない
+                # (マージ前レビューの指摘)。表示用の URL: 行は従来どおり raw のまま
+                url_anchor = section_url_anchor(normalize_doc_url(r["url"]), s["heading_path"])
                 print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
