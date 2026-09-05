@@ -73,6 +73,30 @@ class TestFindingsBlock(HookTestCase):
         self.assertIn("## Codex レビュー", data["reason"])
 
 
+class TestBuildReasonOrder(HookTestCase):
+    """build_reason は REVIEWERS の固定順 (cursor→codex) でセクションを組み立てる。
+
+    実行時の完了順 (`run_reviewers` の `as_completed`) は非決定的なので、
+    `results` dict の挿入順を REVIEWERS と逆にしても出力順が変わらないことを
+    直接検証する (build_reason が `results.items()` の順に依存する実装へ
+    回帰していないかを見る)。
+    """
+
+    def test_section_order_follows_reviewers_not_dict_insertion_order(self):
+        results = {"codex": "codex 側の指摘", "cursor": "cursor 側の指摘"}
+        reason = self.entry.build_reason(results)
+        self.assertLess(
+            reason.index("## Cursor レビュー"),
+            reason.index("## Codex レビュー"),
+            "results の挿入順 (codex が先) に出力順が引きずられている",
+        )
+
+    def test_missing_reviewer_is_simply_omitted(self):
+        reason = self.entry.build_reason({"codex": "codex 側の指摘のみ"})
+        self.assertNotIn("## Cursor レビュー", reason)
+        self.assertIn("## Codex レビュー", reason)
+
+
 class TestMarkerStateMachine(HookTestCase):
     def test_same_plan_is_not_reviewed_twice_after_block(self):
         self.exitplan(SESSION, PLAN, FINDINGS, "REVIEW_CLEAN")

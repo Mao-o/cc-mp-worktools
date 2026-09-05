@@ -125,6 +125,11 @@ python3 -m unittest discover tests     # 偽 cursor (PATH 先頭の bash script)
 戻らないこと) と、post が結果を `additionalContext` に注入して pid / 結果ファイルを掃除する
 ことを検証する。cursor 本体は起動しない。
 
+`tests/test_early_returns.py` は `tool_use_id` / `prompt` 空・アナライザ
+`is_available()=False` の no-op を、`tests/test_result_handling.py` は timeout →
+SIGTERM・8000 バイト超の出力切詰・pid ファイル欠落時の fallback を境界ケースとして
+固定する。いずれも `cursor` 本体は起動しない。
+
 手動で確認するときは標準入力に hook input JSON を流し込む (**必ず `TMPDIR` を一時ディレクトリに
 差し替えること** — 本番の結果ファイルと混ざる):
 

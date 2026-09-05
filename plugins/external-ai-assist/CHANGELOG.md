@@ -5,6 +5,33 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.9.1
+
+**内部バックログの「テストが無い」指摘への対応 (テスト追加のみ、挙動変更なし。patch bump)。**
+
+調査の結果、exitplan-review / explore-parallel とも既存の `tests/` (それぞれ 81 件・
+8 件) が指摘項目の大半を既にカバーしていることが判明した。残っていた具体的な gap
+のみを追加する:
+
+- exitplan-review: `release_slot` が別プランに `last` を追い越された後も
+  そちらを巻き込んでクリアしないこと、`build_reason` が完了順ではなく
+  `REVIEWERS` の固定順 (cursor→codex) でセクションを組み立てること、
+  同一プランへの `reserve_slot` を 5 スレッドで並行呼び出ししても勝者が
+  1 件だけであること (`_common.flock` の排他が効いていることの直接検証) を追加
+- explore-parallel: `tool_use_id` / `prompt` が空のときの no-op、アナライザが
+  `is_available()=False` のときの no-op、待機が timeout したときの
+  SIGTERM + 出力なし、8000 バイト超の出力切詰、pid ファイルが欠落していても
+  結果ファイルがあれば返す fallback、をそれぞれ追加
+
+追加した各テストは、対応する実装行を意図的に壊した状態 (mutation) で先に
+落ちることを確認してから採用した。
+
+**別途判明した設計上の欠落 (本 batch では未対応)**: explore-parallel には
+exitplan-review / post-implementation-review が持つような周期的な孤立ファイル
+GC が無い (`post()` 正常完了時の後始末のみ)。内部バックログの記載は GC の
+存在を前提にテストを求めていたが、実装自体が無いため今回はテスト対象から
+外した。GC の要否・TTL 設計は別課題として扱う。
+
 ## 0.9.0
 
 **2026-08 内部バックログ精査の第 2 弾 (誤 block / 外部送信制御 / 長時間 block の
