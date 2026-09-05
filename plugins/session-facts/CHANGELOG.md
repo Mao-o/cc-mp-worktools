@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.11.0
+
+**出力品質の一括改善 (2026-08 精査バックログ joa.1 / .5 / .6 / .7 / .13 / .14 / .18 /
+.27 / .28 / .30)**。実 repo 7 件 (dify / sashida-qa-monorepo / affiliate01 /
+everything-claude-code / worktools / lyrica / kighs) で修正前後の出力を比較して調整した。
+
+### 改善
+
+1. **Service Entry Points を 2 段 tier に再設計** (joa.1, `collectors/services.py`,
+   `core/constants.py`) — 従来はディレクトリ名と名前トークンの加点だけで、テストパスの
+   除外も無かった (dify では `api/services/errors/app.py` が先頭、`api/app.py` は 193 位。
+   sashida では `__tests__/*.test.ts` が並んだ)。tier 1 (manifest が指すエントリ /
+   `main.py` `__main__.py` `route.ts` 等のエントリ名 / `routes` `controllers` `handlers`
+   と **top-level でない** `api/` 配下) を先に、tier 2 (`services` / `repositories` 等) は
+   4 枠を確保して後に並べる。テストパス、`errors` / `types` / `models` / `components` /
+   `static` / `config` 系ディレクトリ、dot-dir、`page.tsx` / `__init__.py` は候補外。
+   同一ディレクトリは 4 件まで。dify: `api/app.py` / `api/controllers/*/app.py` +
+   `api/repositories/*`。sashida: `apps/*/src/main.tsx` / `functions/src/index.ts` /
+   `functions/src/api/**`。worktools: 8 plugin の `__main__.py` が先頭
+2. **Structure ツリーのノイズ削減** (joa.7, `core/tree.py`, `core/constants.py`) —
+   `DEFAULT_MAX_TREE_LINES` 100 → 60。`.github` / `.claude` / `.idea` / `tests` /
+   `__tests__` 等 (`SKIP_TREE_CHILDREN`) は子を展開せず `…` で示し、root より下の
+   dot-dir は出さない。1 ディレクトリの子は 10 件まで (`MAX_TREE_CHILDREN`、超過は
+   `… (+N more dirs)`)。root 直下は上限を掛けない (dify の `web/` が隠れた事故から)。
+   dify 87 → 49 行、sashida 88 → 45 行、worktools 56 → 45 行
+3. **Likely Commands から Scripts の機械展開を外す** (joa.6, `collectors/scripts.py`) —
+   `npm run <全 script>` の列挙で `## Scripts` と同じ 16 行が二重に出ていた。昇格するのは
+   `dev` / `test` / `build` / `lint` / `typecheck` / `start` / `check` の最大 4 件。
+   `## Scripts` の見出しに実行形 (`run: npm run <name>`) を示す。sashida 16+16 行 → 16+2 行
+4. **Likely Commands の各コマンドに根拠条件** (joa.14 / joa.28 / joa.30,
+   `collectors/scripts.py`, `core/pytest_config.py` 新規) — `docker compose up` は
+   compose ファイルがあるときだけ (Dockerfile のみは `docker build .`)、`mise install` は
+   mise config があるときだけ (`.tool-versions` のみは `asdf install`)。Python のテスト
+   実行はテストファイル (pytest の `python_files`。pytest.ini / pyproject / tox.ini /
+   setup.cfg の上書きを読む) と pytest の宣言 (manifest / requirements / pytest 設定)
+   の両方があるときだけ。宣言が無ければ `python -m unittest discover -s <最浅の
+   テストディレクトリ>` (同深度に複数あれば `-s` 無し)。everything-claude-code の
+   `mise install` (asdf repo) → `asdf install`
+5. **purpose 推定の優先順と README 解析** (joa.13, `cli.py`, `core/util.py`) —
+   root の package.json → pyproject `[project]` / `[tool.poetry]` → pubspec / Cargo /
+   composer → README。README は HTML ブロック (`<p align=center>` 〜 `</p>`) 内・
+   `<a href` を含む行・記号/絵文字で始まる行を飛ばす。あわせて `truncate_purpose` の
+   文末判定を「`.` は直後が空白か末尾のときだけ」に変更 (`Node.js` / `v2.0` で切れて
+   `This is the Node.` になっていた)。dify: `📌 Introducing Dify Workflow ...` →
+   `Dify is an open-source platform for developing LLM applications.`
+6. **Repo-Specific Notes に根拠を埋め込む** (joa.18, `collectors/repo_notes.py`) —
+   `api-related files are concentrated; inspect API layer early` を
+   `api layer: functions/src/api/ (55 files)` に。top-level の `api/` は Structure で
+   見えているので出さない。features/components は最大のディレクトリとファイル数を示し、
+   firebase / integration-test の note にも件数を付ける
+7. **test_dir 集約の退化判定を「先頭セグメントがワイルドカード」に** (joa.27,
+   `core/util.py`) — `*/*/*/*/__tests__` のような位置情報の無い行が sashida で 2 本
+   出ていた。先頭が literal のパターンだけ集約し、それ以外は先頭ディレクトリで再分割。
+   あわせて `- test_dir:` 行は 5 本まで (超過は `… (+N more)`)
+8. **SessionStart の matcher を `startup|clear|compact` に** (joa.5, `hooks/hooks.json`,
+   `README.md`) — `resume` / `fork` では transcript に最初の注入が残っており二重化する
+   だけだった。公式 hooks リファレンス (Matcher patterns / SessionStart 表) で
+   matcher が source 値の完全一致リストとして評価されることを確認済み
+9. **workspace manifest の発見** (joa.2 の基盤、`core/context.py`) —
+   `ctx.workspace_dirs` / `package_json_manifests()` / `pyproject_manifests()` を追加
+   (tracked files から深さ 3 以内・12 件まで)。この版では Service Entry Points の
+   manifest エントリと purpose 推定が利用する。stack / 依存 / env の workspace 対応は次版
+
+### テスト
+
+`test_tree_noise.py` / `test_purpose.py` / `test_pytest_config.py` /
+`test_workspace_manifests.py` を新設し、services / scripts / collectors / path
+aggregation の既存テストを新仕様に更新。
+
 ## 0.10.0
 
 **言語サポート拡張 (Swift/.NET/Scala/Elixir/CMake) / dead option 整理 /

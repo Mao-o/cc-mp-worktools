@@ -8,6 +8,12 @@ from core.context import RepoContext, TestSnapshot
 from core.util import aggregate_paths, filter_to_cwd, is_code_file, is_test_path
 
 
+# Rendered ``- test_dir:`` lines after aggregation. A deep monorepo yields
+# one aggregated pattern per depth (``src/*/__tests__``, ``src/*/*/__tests__``,
+# ...) and five of those say no more than two do.
+MAX_TEST_DIR_LINES = 5
+
+
 class TestsCollector:
     name = "tests"
     section_title = "## Test Snapshot"
@@ -48,8 +54,11 @@ def _render_snapshot(title: str, snapshot: TestSnapshot) -> Optional[str]:
     for key in ordered_keys:
         if key in snapshot:
             lines.append(f"- {key}: {snapshot[key]}")
-    for test_dir in aggregate_paths(snapshot.get("test_dirs", [])):
+    test_dirs = aggregate_paths(snapshot.get("test_dirs", []))
+    for test_dir in test_dirs[:MAX_TEST_DIR_LINES]:
         lines.append(f"- test_dir: {test_dir}")
+    if len(test_dirs) > MAX_TEST_DIR_LINES:
+        lines.append(f"- test_dir: … (+{len(test_dirs) - MAX_TEST_DIR_LINES} more)")
     return "\n".join(lines) if len(lines) > 1 else None
 
 

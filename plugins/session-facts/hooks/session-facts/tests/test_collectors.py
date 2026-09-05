@@ -60,13 +60,24 @@ class StructureSubtreeTest(unittest.TestCase):
 
 
 class RepoNotesApiThresholdTest(unittest.TestCase):
-    def _api_note_present(self, n_api_files: int) -> bool:
+    def _api_note_present(self, n_api_files: int, prefix: str = "src/api") -> bool:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            tracked = [f"src/api/handler{i:03d}.py" for i in range(n_api_files)]
+            tracked = [f"{prefix}/handler{i:03d}.py" for i in range(n_api_files)]
             ctx = _ctx(root, tracked)
             out = RepoNotesCollector().collect(ctx)
-            return bool(out) and "api-related files are concentrated" in out
+            return bool(out) and "api layer:" in out
+
+    def test_note_names_the_directory_and_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [f"functions/src/api/h{i:03d}.ts" for i in range(41)]
+            out = RepoNotesCollector().collect(_ctx(root, tracked))
+            self.assertIn("api layer: functions/src/api/ (41 files)", out)
+
+    def test_top_level_api_dir_is_not_noted(self):
+        # A top-level api/ is already visible in ## Structure (joa.18).
+        self.assertFalse(self._api_note_present(200, prefix="api"))
 
     def test_below_threshold_no_note(self):
         # patentai-mini / session-facts scale: should NOT fire.
@@ -116,6 +127,18 @@ class TestsCollectorAggregationTest(unittest.TestCase):
             ctx = _ctx(root, tracked)
             out = TestsCollector().collect(ctx)
             self.assertIsNone(out)
+
+    def test_test_dir_lines_are_capped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = [f"m{i}/src/tests/test_x.py" for i in range(8)]
+            tracked += [f"m{i}/src/deep/tests/test_y.py" for i in range(8)]
+            tracked += [f"m{i}/src/deep/er/tests/test_z.py" for i in range(8)]
+            tracked += [f"m{i}/src/deep/er/est/tests/test_w.py" for i in range(8)]
+            out = TestsCollector().collect(_ctx(root, tracked))
+            test_dir_lines = [ln for ln in out.splitlines() if ln.startswith("- test_dir:")]
+            self.assertLessEqual(len(test_dir_lines), 6)
+            self.assertTrue(test_dir_lines[-1].startswith("- test_dir: … (+"))
 
     def test_single_test_dir_is_not_abstracted(self):
         with tempfile.TemporaryDirectory() as tmp:

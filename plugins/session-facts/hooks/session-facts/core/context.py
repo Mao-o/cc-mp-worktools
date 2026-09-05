@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 from .constants import (
+    MAX_WORKSPACE_MANIFESTS,
+    MAX_WORKSPACE_MANIFEST_DEPTH,
+    SKIP_DIRS,
+    WORKSPACE_MANIFEST_NAMES,
     DEFAULT_MAX_CONFIG_HINTS,
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
@@ -96,6 +100,9 @@ class RepoContext:
     _pkg_json: Optional[dict] = field(default=None, init=False, repr=False)
     _all_deps: Optional[Dict[str, str]] = field(default=None, init=False, repr=False)
     _pyproject_toml: Optional[str] = field(default=None, init=False, repr=False)
+    _workspace_dirs: Optional[List[str]] = field(default=None, init=False, repr=False)
+    _pkg_manifests: Optional[List[Tuple[str, dict]]] = field(default=None, init=False, repr=False)
+    _pyproject_manifests: Optional[List[Tuple[str, str]]] = field(default=None, init=False, repr=False)
 
     @property
     def cwd_relative(self) -> Optional[str]:
@@ -157,3 +164,66 @@ class RepoContext:
             path = self.root / "pyproject.toml"
             self._pyproject_toml = read_text(path) if path.exists() else ""
         return self._pyproject_toml
+
+    # --- workspace (sub-project) manifests -------------------------------
+    #
+    # Monorepos and "api/ + web/" layouts keep their manifests below the
+    # root (internal backlog joa.2). The tracked-file list already names
+    # every manifest, so discovery is a filter over it, not a walk: no
+    # node_modules, no vendored copies, bounded depth and count.
+
+    @property
+    def workspace_dirs(self) -> List[str]:
+        """Directories (relative, POSIX) holding a package.json or
+        pyproject.toml below the root, shallowest first. Excludes the root
+        itself and anything under SKIP_DIRS."""
+        if self._workspace_dirs is None:
+            found: List[str] = []
+            seen = set()
+            for path in self.tracked_files:
+                parts = path.split("/")
+                if len(parts) < 2 or parts[-1] not in WORKSPACE_MANIFEST_NAMES:
+                    continue
+                if len(parts) - 1 > MAX_WORKSPACE_MANIFEST_DEPTH:
+                    continue
+                if any(part in SKIP_DIRS for part in parts[:-1]):
+                    continue
+                rel_dir = "/".join(parts[:-1])
+                if rel_dir not in seen:
+                    seen.add(rel_dir)
+                    found.append(rel_dir)
+            found.sort(key=lambda d: (d.count("/"), d))
+            self._workspace_dirs = found[:MAX_WORKSPACE_MANIFESTS]
+        return self._workspace_dirs
+
+    def package_json_manifests(self) -> List[Tuple[str, dict]]:
+        """``[(rel_dir, parsed package.json)]`` for the root ("" when
+        present) followed by each workspace dir that has one."""
+        if self._pkg_manifests is None:
+            from .fs import load_json
+            out: List[Tuple[str, dict]] = []
+            if self.package_json:
+                out.append(("", self.package_json))
+            for rel_dir in self.workspace_dirs:
+                data = load_json(self.root / rel_dir / "package.json")
+                if isinstance(data, dict):
+                    out.append((rel_dir, data))
+            self._pkg_manifests = out
+        return self._pkg_manifests
+
+    def pyproject_manifests(self) -> List[Tuple[str, str]]:
+        """``[(rel_dir, pyproject text)]`` for the root ("" when present)
+        followed by each workspace dir that has one."""
+        if self._pyproject_manifests is None:
+            from .fs import read_text
+            out: List[Tuple[str, str]] = []
+            if self.pyproject_toml:
+                out.append(("", self.pyproject_toml))
+            for rel_dir in self.workspace_dirs:
+                path = self.root / rel_dir / "pyproject.toml"
+                if path.exists():
+                    text = read_text(path)
+                    if text:
+                        out.append((rel_dir, text))
+            self._pyproject_manifests = out
+        return self._pyproject_manifests

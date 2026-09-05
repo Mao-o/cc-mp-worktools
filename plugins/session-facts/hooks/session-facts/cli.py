@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -28,6 +29,7 @@ from core.fs import (
     scan_project_markers,
     has_nested_project_markers,
     has_project_markers,
+    load_json,
     read_text,
     walk_files,
 )
@@ -63,29 +65,106 @@ def _iter_readme_body_lines(text: str):
         yield raw
 
 
-def _infer_purpose(ctx: RepoContext) -> Optional[str]:
-    pkg = ctx.package_json
-    description = pkg.get("description")
+# Lines that are layout rather than prose. A line whose first character is
+# a symbol or emoji (badge rows, "📌 Introducing ..." banners, bullet art)
+# is skipped as well: real descriptions start with a letter or digit.
+_README_SKIP_PREFIXES = ("```", "---", "***", "![", "[!", ">", "|", "<", "-", "*", "+")
+_HTML_BLOCK_OPEN = re.compile(r"<(p|div|h[1-6]|table|ul|ol|details|summary|picture|a)\b", re.I)
+_HTML_BLOCK_CLOSE = re.compile(r"</(p|div|h[1-6]|table|ul|ol|details|summary|picture|a)>", re.I)
+_README_MIN_CHARS = 12
+
+
+def _readme_purpose_line(text: str) -> Optional[str]:
+    """First prose line of a README: skips HTML blocks (``<p align=center>``
+    … ``</p>``), link/badge lines, headings and symbol-led lines
+    (internal backlog joa.13: dify's README opens with a ``<p>`` banner
+    whose ``<a>`` text used to be taken as the purpose)."""
+    html_depth = 0
+    for raw in _iter_readme_body_lines(text):
+        line = raw.strip()
+        if not line:
+            continue
+        opens = len(_HTML_BLOCK_OPEN.findall(line))
+        closes = len(_HTML_BLOCK_CLOSE.findall(line))
+        if html_depth > 0 or opens > closes:
+            html_depth = max(0, html_depth + opens - closes)
+            continue
+        if line.startswith("#"):
+            continue
+        if line.startswith(_README_SKIP_PREFIXES):
+            continue
+        if "<a " in line.lower() or "href=" in line.lower():
+            continue
+        if not line[0].isalnum():
+            continue
+        if len(line) < _README_MIN_CHARS:
+            continue
+        return line
+    return None
+
+
+def _manifest_description(ctx: RepoContext) -> Optional[str]:
+    """Description from a root manifest, in priority order: package.json ->
+    pyproject ``[project]`` / ``[tool.poetry]`` -> pubspec / Cargo.toml /
+    composer.json."""
+    # Root manifests only: a workspace package's description ("the Node.js
+    # SDK for ...") describes that package, not the repository.
+    description = ctx.package_json.get("description")
     if isinstance(description, str) and description.strip():
+        return description
+    if ctx.pyproject_toml:
+        description = _toml_project_description(ctx.pyproject_toml)
+        if description:
+            return description
+    for name in ("pubspec.yaml", "Cargo.toml", "composer.json"):
+        path = ctx.root / name
+        if not path.exists():
+            continue
+        if name == "composer.json":
+            data = load_json(path) or {}
+            description = data.get("description")
+            if isinstance(description, str) and description.strip():
+                return description
+            continue
+        description = _toml_project_description(read_text(path, limit=20_000), top_level=True)
+        if description:
+            return description
+    return None
+
+
+_DESCRIPTION_LINE = re.compile(r"""^\s*description\s*[:=]\s*["']?(.+?)["']?\s*$""")
+
+
+def _toml_project_description(text: str, top_level: bool = False) -> Optional[str]:
+    """``description`` from ``[project]`` / ``[tool.poetry]`` / ``[package]``
+    (Cargo) tables, or -- for YAML-ish files like pubspec -- from a
+    top-level ``description:`` line."""
+    in_table = top_level
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_table = line in ("[project]", "[tool.poetry]", "[package]")
+            continue
+        if in_table and line.startswith("description"):
+            m = _DESCRIPTION_LINE.match(line)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+    return None
+
+
+def _infer_purpose(ctx: RepoContext) -> Optional[str]:
+    description = _manifest_description(ctx)
+    if description:
         return truncate_purpose(description)
 
     for readme_name in ("README.md", "README", "readme.md"):
         path = ctx.root / readme_name
         if not path.exists():
             continue
-        text = read_text(path, limit=20_000)
-        for raw in _iter_readme_body_lines(text):
-            line = raw.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                line = line.lstrip("#").strip()
-                if line:
-                    continue
-            if line.startswith(("```", "---", "***", "![", "[!", ">", "|", "<")):
-                continue
-            if len(line) < 12:
-                continue
+        line = _readme_purpose_line(read_text(path, limit=20_000))
+        if line:
             return truncate_purpose(line)
     # A bare directory name restates repo_root and trains readers to skip the
     # field, so omit purpose entirely rather than fall back to it.

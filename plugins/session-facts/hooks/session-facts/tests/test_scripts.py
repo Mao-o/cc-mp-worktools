@@ -15,13 +15,19 @@ from detectors.dotnet_stack import DotnetStackDetector
 from detectors.swift_stack import SwiftStackDetector
 
 
-def _ctx(pm=None, runtime=None, stack=()) -> RepoContext:
+def _ctx(pm=None, runtime=None, stack=(), tests=True, pytest=True) -> RepoContext:
+    """A python-ish repo context. ``tests``/``pytest`` control the two
+    pieces of evidence the test-runner suggestion needs (joa.14): a test
+    file matching pytest's naming rule, and pytest declared in a manifest."""
     ctx = RepoContext(root=Path("/repo"), config=AnalysisConfig())
     if pm is not None:
         ctx.results["package_manager"] = pm
     if runtime is not None:
         ctx.results["runtime"] = runtime
     ctx.stack = list(stack)
+    if tests:
+        ctx.tracked_files = ["src/app.py", "tests/test_app.py"]
+    ctx._pyproject_toml = "[project]\ndependencies = [\"pytest\"]\n" if pytest else "[project]\n"
     return ctx
 
 
@@ -66,6 +72,90 @@ class LikelyCommandsRuntimeTest(unittest.TestCase):
         ctx = _ctx(pm=None, stack=["python"])
         cmds = _likely_commands(ctx, max_items=16)
         self.assertFalse(any("pytest" in c for c in cmds))
+
+
+class LikelyCommandsEvidenceTest(unittest.TestCase):
+    """Each suggested command names the file that grounds it (joa.14 /
+    joa.28 / joa.30): no test files -> no test command; tests but no
+    pytest -> unittest; compose file vs Dockerfile; mise config vs
+    .tool-versions."""
+
+    def test_no_test_files_means_no_test_command(self):
+        ctx = _ctx(pm="uv", tests=False)
+        self.assertFalse(any("pytest" in c or "unittest" in c for c in _likely_commands(ctx, 16)))
+
+    def test_tests_without_pytest_declared_suggest_unittest(self):
+        ctx = _ctx(pm="python", pytest=False)
+        cmds = _likely_commands(ctx, 16)
+        self.assertIn("python -m unittest discover -s tests", cmds)
+        self.assertFalse(any("pytest" in c for c in cmds))
+
+    def test_unittest_uses_shallowest_unique_test_dir(self):
+        ctx = _ctx(pm="python", pytest=False)
+        ctx.tracked_files = ["pkg/a.py", "src/pkg/tests/test_a.py", "src/pkg/tests/sub/test_b.py"]
+        self.assertIn("python -m unittest discover -s src/pkg/tests", _likely_commands(ctx, 16))
+
+    def test_unittest_omits_dir_when_tests_are_spread(self):
+        ctx = _ctx(pm="python", pytest=False)
+        ctx.tracked_files = ["plugins/a/tests/test_a.py", "plugins/b/tests/test_b.py"]
+        self.assertIn("python -m unittest discover", _likely_commands(ctx, 16))
+
+    def test_custom_python_files_pattern_is_honoured(self):
+        # pyproject overrides python_files: check_*.py counts, test_*.py
+        # does not exist here, so only the override grounds the command.
+        ctx = _ctx(pm="python")
+        ctx._pyproject_toml = (
+            "[project]\ndependencies = [\"pytest\"]\n"
+            "[tool.pytest.ini_options]\npython_files = [\"check_*.py\"]\n"
+        )
+        ctx.tracked_files = ["src/app.py", "tests/check_app.py"]
+        self.assertIn("python -m pytest", _likely_commands(ctx, 16))
+        ctx.tracked_files = ["src/app.py", "tests/test_app.py"]
+        self.assertFalse(any("pytest" in c for c in _likely_commands(ctx, 16)))
+
+    def test_docker_and_mise_commands_need_their_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = RepoContext(root=root, config=AnalysisConfig())
+            ctx.stack = ["docker", "mise"]
+            (root / "Dockerfile").write_text("FROM scratch\n")
+            (root / ".tool-versions").write_text("nodejs 20\n")
+            cmds = _likely_commands(ctx, 16)
+            self.assertIn("docker build .", cmds)
+            self.assertNotIn("docker compose up", cmds)
+            self.assertIn("asdf install", cmds)
+            self.assertNotIn("mise install", cmds)
+            (root / "compose.yaml").write_text("services: {}\n")
+            (root / "mise.toml").write_text("[tools]\nnode = '20'\n")
+            cmds = _likely_commands(ctx, 16)
+            self.assertIn("docker compose up", cmds)
+            self.assertIn("mise install", cmds)
+
+
+class LikelyCommandsScriptPromotionTest(unittest.TestCase):
+    """## Likely Commands no longer mirrors the whole ## Scripts table
+    (joa.6): only dev/test/build/lint/typecheck/start/check are promoted,
+    at most four, and ## Scripts says how to run them."""
+
+    def _npm_ctx(self, scripts):
+        ctx = RepoContext(root=Path("/repo"), config=AnalysisConfig())
+        ctx.results["package_manager"] = "npm"
+        ctx._pkg_json = {"scripts": scripts}
+        return ctx
+
+    def test_only_conventional_scripts_are_promoted(self):
+        ctx = self._npm_ctx({
+            "seed:all": "x", "emulator": "y", "test": "z", "dev": "d", "lint": "l",
+            "build": "b", "typecheck": "t", "start": "s",
+        })
+        cmds = _likely_commands(ctx, 16)
+        self.assertEqual(cmds, ["npm run dev", "npm run test", "npm run build", "npm run lint"])
+
+    def test_scripts_section_names_the_runner(self):
+        ctx = self._npm_ctx({"test": "vitest"})
+        out = ScriptsCollector().collect(ctx)
+        self.assertTrue(out.startswith("## Scripts (run: npm run <name>)"))
+        self.assertIn("- test: vitest", out)
 
 
 class NewStackLikelyCommandsTest(unittest.TestCase):
