@@ -2,7 +2,7 @@
 
 Covers ``split_documents`` fixtures named in the 2026-08 audit (H1 inside a
 code fence must not split; Platform's duplicate-H1 pattern must merge;
-``Source:``/``URL:`` extraction) plus CLI-level tests for the upstream
+``Source:``/``URL:`` extraction; Platform's YAML-frontmatter layout) plus CLI-level tests for the upstream
 format-change detection and the search-fallback fix — using pre-seeded
 cache-dir fixtures so no network access is needed (``fetch_url`` short-
 circuits when the cache file already exists and is younger than
@@ -922,6 +922,170 @@ class ContentSubsectionHintBeforeAndAfterTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn("Top-level sections", out)
         self.assertNotIn("Next:", out)
+
+
+class FrontmatterSplitDocumentsTest(unittest.TestCase):
+    """platform.claude.com switched llms-full.txt (2026-08) from ``# Title``
+    + ``URL:`` pages to YAML-frontmatter pages (``---`` / ``title:`` /
+    ``url:`` / ``description:`` / ``---``) with no H1 of their own. The H1
+    splitter then shredded 699 pages into ~300 URL-less chunks and the
+    index↔full-text join fell to 0% (internal backlog 2wd.30)."""
+
+    FM_CORPUS = [
+        "# Anthropic Developer Documentation - Full Content\n",
+        "\n",
+        "## Docs home\n",
+        "\n",
+        "---\n",
+        "title: Documentation\n",
+        "url: https://platform.example.com/docs/en/home\n",
+        "description: Claude API Documentation\n",
+        "---\n",
+        "\n",
+        "Welcome.\n",
+        "\n",
+        "## Messages\n",
+        "\n",
+        "### First steps\n",
+        "\n",
+        "---\n",
+        "title: \"Tutorial: Build an agent\"\n",
+        "url: https://platform.example.com/docs/en/get-started\n",
+        "description: Make your first API call.\n",
+        "---\n",
+        "\n",
+        "## Prerequisites\n",
+        "\n",
+        "Some text with a horizontal rule below.\n",
+        "\n",
+        "---\n",
+        "\n",
+        "# not a page boundary (unfenced python comment)\n",
+        "client = Anthropic()\n",
+        "\n",
+        "## Next steps\n",
+        "\n",
+        "Read on.\n",
+    ]
+
+    def test_frontmatter_pages_split_with_title_and_url(self):
+        docs = parse_claude_docs.split_documents(self.FM_CORPUS)
+        self.assertEqual(
+            [d["title"] for d in docs],
+            ["Documentation", "Tutorial: Build an agent"],
+        )
+        self.assertEqual(
+            [d["source_url"] for d in docs],
+            ["https://platform.example.com/docs/en/home",
+             "https://platform.example.com/docs/en/get-started"],
+        )
+
+    def test_frontmatter_block_and_preamble_excluded_from_body(self):
+        docs = parse_claude_docs.split_documents(self.FM_CORPUS)
+        body0 = "".join(docs[0]["body_lines"])
+        self.assertIn("Welcome.", body0)
+        self.assertNotIn("title:", body0)
+        self.assertNotIn("Docs home", body0)
+        self.assertEqual(docs[0]["line_start"], 4)
+
+    def test_trailing_nav_group_headings_are_trimmed(self):
+        docs = parse_claude_docs.split_documents(self.FM_CORPUS)
+        body0 = "".join(docs[0]["body_lines"])
+        self.assertNotIn("## Messages", body0)
+        self.assertNotIn("### First steps", body0)
+        # A heading followed by real text is content, not navigation.
+        body1 = "".join(docs[1]["body_lines"])
+        self.assertIn("## Next steps\n\nRead on.", body1)
+
+    def test_hr_and_unfenced_h1_inside_body_are_not_boundaries(self):
+        docs = parse_claude_docs.split_documents(self.FM_CORPUS)
+        body1 = "".join(docs[1]["body_lines"])
+        self.assertIn("horizontal rule below.\n\n---\n", body1)
+        self.assertIn("# not a page boundary", body1)
+        self.assertEqual(len(docs), 2)
+
+    def test_h1_corpus_with_frontmatter_example_stays_in_h1_mode(self):
+        lines = [
+            "# Skills\n",
+            "Source: https://example.com/skills\n",
+            "\n",
+            "A SKILL.md starts with frontmatter:\n",
+            "\n",
+            "---\n",
+            "title: Example\n",
+            "url: https://example.com/not-a-page\n",
+            "---\n",
+            "\n",
+            "# Hooks\n",
+            "Source: https://example.com/hooks\n",
+            "body\n",
+        ]
+        docs = parse_claude_docs.split_documents(lines)
+        self.assertEqual([d["title"] for d in docs], ["Skills", "Hooks"])
+        self.assertEqual(docs[0]["source_url"], "https://example.com/skills")
+
+    def test_frontmatter_without_url_is_not_a_boundary(self):
+        lines = [
+            "---\n",
+            "title: Documentation\n",
+            "url: https://platform.example.com/docs/en/home\n",
+            "---\n",
+            "body\n",
+            "---\n",
+            "title: just a yaml sample\n",
+            "name: foo\n",
+            "---\n",
+            "more body\n",
+        ]
+        docs = parse_claude_docs.split_documents(lines)
+        self.assertEqual(len(docs), 1)
+        self.assertIn("more body", "".join(docs[0]["body_lines"]))
+
+
+class FrontmatterPlatformSearchJoinTest(unittest.TestCase):
+    """End-to-end: a frontmatter-layout platform cache must join to its
+    llms.txt index (previously exit 2 'join rate is 0%')."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "claude-platform-llms.txt").write_text(
+            "- [Documentation](https://platform.example.com/docs/en/home.md)\n"
+            "- [Tool use](https://platform.example.com/docs/en/tool-use.md) - Define tools\n",
+            encoding="utf-8",
+        )
+        Path(self.tmp, "claude-platform-llms-full.txt").write_text(
+            "# Anthropic Developer Documentation - Full Content\n\n"
+            "---\ntitle: Documentation\n"
+            "url: https://platform.example.com/docs/en/home\n"
+            "description: Home\n---\n\nWelcome.\n\n"
+            "### Tools\n\n"
+            "---\ntitle: Tool use\n"
+            "url: https://platform.example.com/docs/en/tool-use\n"
+            "description: Define tools\n---\n\n"
+            "## Defining tools\n\nEach tool has an input_schema.\n",
+            encoding="utf-8",
+        )
+
+    def test_search_joins_and_finds_body_hit(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "input_schema",
+            "--source", "platform", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("join rate", err)
+        self.assertIn("Tool use", out)
+        self.assertIn("input_schema", out)
+
+    def test_sections_lists_only_real_headings(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "sections", "1",
+            "--source", "platform", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn('"Tool use"', out)
+        self.assertIn("[L2] Defining tools", out)
+        self.assertNotIn("Tools\n", out.split("====")[-1].replace("[L2] Defining tools", ""))
 
 
 if __name__ == "__main__":
