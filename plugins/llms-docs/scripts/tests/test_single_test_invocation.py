@@ -12,7 +12,7 @@
 サブプロセスで実際に単体指定を実行し、修正が退行しないことを確認する。
 """
 
-import shutil
+import importlib.util
 import subprocess
 import sys
 import unittest
@@ -53,8 +53,12 @@ class TestSingleTestInvocation(unittest.TestCase):
     def test_pytest_single_node_id_if_available(self):
         """pytest が入っている環境でのみ確認する (標準ライブラリのみの方針上、
         pytest 自体は本 plugin の実行要件ではないため未インストールは skip)。"""
-        if shutil.which("pytest") is None:
-            self.skipTest("pytest not installed")
+        # PATH 上の pytest 実行ファイルではなく、テストを走らせている interpreter
+        # (sys.executable) が pytest を import できるかで判定する。clean な venv が
+        # グローバルの pytest を PATH から継承していると which は成功するが
+        # `-m pytest` は No module named pytest で落ちる (マージ前レビューの指摘)
+        if importlib.util.find_spec("pytest") is None:
+            self.skipTest("pytest not importable from this interpreter")
         res = subprocess.run(
             [sys.executable, "-m", "pytest",
              "scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_form",
