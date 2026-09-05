@@ -675,6 +675,7 @@ class TestMaxEmitsEnvVar(BaseMainTest):
         # _get_max_emits() は ``max(0, int(raw))`` で負値を 0 にクランプする。
         path = self._write("checkout_flow.py", _python_lines(900))
         with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_MAX_EMITS": "-1"}):
+            self.assertEqual(_load_entry()._get_max_emits(), 0)  # クランプを直接固定
             out, _ = _run_main(self._envelope(path))
         self.assertEqual(out, "")
 

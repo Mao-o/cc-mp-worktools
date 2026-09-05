@@ -229,8 +229,8 @@ class TestFormatSignal(unittest.TestCase):
         self.assertEqual(message._format_signal("def_count", m), "定義数 27")
 
     def test_control_flow_density_shown_as_rounded_percentage(self):
-        m = _metrics(control_flow_density=0.264)
-        self.assertEqual(message._format_signal("control_flow_density", m), "制御フロー密度 26%")
+        m = _metrics(control_flow_density=0.268)
+        self.assertEqual(message._format_signal("control_flow_density", m), "制御フロー密度 27%")
 
     def test_unknown_signal_key_falls_back_to_the_raw_key(self):
         # judge.py が現在 emit する signal key (import_diversity/vague_filename/
