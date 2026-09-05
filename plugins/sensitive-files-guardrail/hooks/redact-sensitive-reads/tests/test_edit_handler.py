@@ -379,6 +379,36 @@ class TestDenyReasonSuggestions(BaseEdit):
         self.assertNotIn(".env.example", reason)
         self.assertNotIn("dotenv-cli", reason)
 
+    def test_named_envrc_script_new_file_falls_back_to_env_example(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal ``.envrc`` では
+        ないため direnv 前提の ``.envrc.example`` 案内 (literal ``.envrc``
+        固定文言) は実態と合わない。厳格化後は既定 (``.env.example`` /
+        dotenv-cli) 文言にフォールバックする。判定 (deny) 自体は変わらない。
+        """
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / "foo.envrc"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "export AWS_ACCESS_KEY=x\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
+
+    def test_uppercase_envrc_new_file_falls_back_to_env_example(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
+        別ファイル扱いになるため、direnv 前提の案内は出さない
+        (マージ前レビューの指摘 (P2))。"""
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".ENVRC"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "export AWS_ACCESS_KEY=x\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
+
     def test_empty_content_no_keys(self):
         envelope = _make_envelope(
             "Write", str(Path(self.tmp) / ".env"), self.tmp,

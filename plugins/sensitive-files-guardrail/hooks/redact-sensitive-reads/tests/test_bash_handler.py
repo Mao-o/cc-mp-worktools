@@ -338,6 +338,35 @@ class TestDenyFixed(BaseBash):
         self.assertNotIn("dotenv-cli", reason)
         self.assertIn("direnv", reason)
 
+    def test_source_named_envrc_script_does_not_suggest_auto_load(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal ``.envrc`` では
+        ないため direnv が自動発見・自動 load しない。旧実装
+        (``is_envrc_basename`` の ``lower().endswith(".envrc")``) は
+        ``foo.envrc`` も True と誤判定し、「direnv 側の hook 経由で自動
+        読込してください」と実態と合わない案内をしていた。厳格化後は既定
+        (dotenv-cli を含む) 文言にフォールバックする。判定 (deny) 自体は
+        変わらない。
+        """
+        r = handle(_make_envelope("source foo.envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("direnv 側の hook", reason)
+        self.assertNotIn("自動 load", reason)
+        self.assertIn("dotenv-cli", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_dot_uppercase_envrc_does_not_suggest_auto_load(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
+        別ファイル扱いになるため、direnv の自動 load 対象ではない
+        (マージ前レビューの指摘 (P2))。"""
+        r = handle(_make_envelope(". .ENVRC", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("direnv 側の hook", reason)
+        self.assertNotIn("自動 load", reason)
+        self.assertIn("dotenv-cli", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
     def test_head_with_options_dotenv(self):
         r = handle(_make_envelope("head -n 1 .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
@@ -739,6 +768,39 @@ class TestUnknownCommandOperand(BaseBash):
         reason = _reason(r)
         self.assertNotIn(".env.example", reason)
         self.assertIn(".envrc.example", reason)
+
+    def test_cp_named_envrc_script_falls_back_to_env_example(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal ``.envrc`` では
+        ないので、実際には別名の ``foo.envrc.example`` テンプレートを勧める
+        べきところ、旧実装は文言固定で ``cp .envrc.example .envrc`` (literal
+        ``.envrc`` 前提) を案内していた。厳格化後は既定 (``.env.example``)
+        文言にフォールバックする。判定 (deny) 自体は変わらない。
+        """
+        r = handle(_make_envelope("cp foo.envrc foo.envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_mv_named_envrc_script_falls_back_to_env_example(self):
+        r = handle(_make_envelope("mv foo.envrc foo.envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_cp_uppercase_envrc_falls_back_to_env_example(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
+        別ファイル扱いになるため、``.envrc.example`` テンプレート案内
+        (literal ``.envrc`` 前提) は出さない (マージ前レビューの指摘 (P2))。"""
+        r = handle(_make_envelope("cp .ENVRC ENVRC.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))

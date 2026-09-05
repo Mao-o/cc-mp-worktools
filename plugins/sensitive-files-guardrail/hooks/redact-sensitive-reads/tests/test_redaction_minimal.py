@@ -14,7 +14,7 @@ from io import BytesIO
 from _testutil import FIXTURES
 
 from redaction.dotenv import redact_dotenv
-from redaction.engine import redact
+from redaction.engine import is_envrc_basename, redact
 from redaction.jsonlike import redact_jsonlike
 from redaction.keyonly_scan import scan_keys
 from redaction.opaque import redact_opaque
@@ -379,6 +379,39 @@ class TestDetectFormatRegression(unittest.TestCase):
         self.assertIn("format: dotenv", reason)
         reason2 = _redact_text("prod.envrc", "export FOO=bar\n")
         self.assertIn("format: dotenv", reason2)
+
+
+class TestIsEnvrcBasenameRegression(unittest.TestCase):
+    """``is_envrc_basename`` は literal ``.envrc`` だけを True にすること
+    (マージ前レビューの指摘 (P2))。
+
+    direnv が ``direnv allow`` 後の hook で自動発見・自動 load するのは、
+    大文字小文字も一致する literal ``.envrc`` だけ。``foo.envrc`` のような
+    命名付きスクリプトや、大文字小文字を区別する FS 上の ``.ENVRC`` は
+    direnv の対象外なので、呼出側 (bash_handler / edit_handler) が
+    「direnv hook で自動読込してください」「``.envrc.example`` から
+    `cp .envrc.example .envrc`」と案内すると実態と合わない。
+
+    ``_detect_format`` (dotenv 判定、parse 用途) は non-literal な
+    ``*.envrc`` も dotenv 扱いのままで良い (``test_envrc_is_dotenv`` が
+    そのまま固定している) — 本テストが対象にするのは助言文面の分岐専用の
+    ``is_envrc_basename`` のみ。判定境界 (deny/allow) には影響しない。
+    """
+
+    def test_literal_envrc_is_true(self):
+        self.assertTrue(is_envrc_basename(".envrc"))
+
+    def test_named_envrc_script_is_false(self):
+        """``foo.envrc`` は direnv が自動発見しないので False。"""
+        self.assertFalse(is_envrc_basename("foo.envrc"))
+
+    def test_uppercase_envrc_is_false(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc``
+        と別ファイル扱いになるので False。"""
+        self.assertFalse(is_envrc_basename(".ENVRC"))
+
+    def test_mixed_case_envrc_is_false(self):
+        self.assertFalse(is_envrc_basename(".EnvRC"))
 
 
 class TestDotenvTypeExpansion(unittest.TestCase):

@@ -61,7 +61,8 @@ def _detect_format(basename: str) -> str:
 
 
 def is_envrc_basename(basename: str) -> bool:
-    """``.envrc`` (direnv) かどうかを返す (助言文面の分岐専用、0.29.0)。
+    """basename が **literal** ``.envrc`` (direnv が自動発見する厳密なファイル名)
+    かどうかを返す (助言文面の分岐専用、0.29.0)。
 
     ``_detect_format`` は parse 用途で ``.envrc`` を ``"dotenv"`` に含めて
     正しい (``KEY=value`` 行のスーパーセットとして dotenv パーサをそのまま
@@ -71,11 +72,23 @@ def is_envrc_basename(basename: str) -> bool:
     で除外済み)。この違いは助言文面 (``core.messages``) 側だけが必要とする
     ので、判定境界 (``_detect_format`` の戻り値) には触れず補助関数として
     独立させる。
+
+    マージ前レビューの指摘 (P2): 0.29.1 までは ``lower().endswith(".envrc")``
+    で判定していたため、``foo.envrc`` のような命名付きスクリプトや、大文字小文字を
+    区別する FS 上の ``.ENVRC`` でも True になっていた。direnv が
+    ``direnv allow`` 後に hook 経由で自動発見・自動 load するのは、大文字小文字も
+    一致する **literal ``.envrc``** だけ (``foo.envrc`` は direnv の対象外、
+    ``.ENVRC`` は大文字小文字を区別する FS では別ファイル扱いで direnv が
+    見つけられない)。そのため呼出側が「direnv hook で自動読込してください」
+    (``source``/``.`` 経路) や「``.envrc.example`` から `cp .envrc.example .envrc`」
+    (``cp``/``mv`` 経路。target が実際には ``foo.envrc`` でも文言は固定で
+    literal ``.envrc`` を指していた) を案内すると、対象が literal でない場合に
+    実態と合わない案内になる。判定を exact match に厳格化し、非 literal な
+    ``*.envrc`` operand は False を返して呼出側を default (dotenv 系の既定文言)
+    に fall back させる。判定境界 (``is_sensitive`` の deny/allow) には一切
+    影響しない — この関数は助言文面の分岐にのみ使われる。
     """
-    # マージ前レビューの指摘 (P3): 前半の `lower == ".envrc"` は
-    # `lower.endswith(".envrc")` に包含される冗長な分岐だったため削除。
-    lower = basename.lower()
-    return lower.endswith(".envrc")
+    return basename == ".envrc"
 
 
 def build_reason(

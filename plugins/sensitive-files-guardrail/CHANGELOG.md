@@ -23,9 +23,10 @@ commit 52113a1 で完了)。
 ## 0.29.1
 
 内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`
-経路の `.envrc` 案内) を修正。**判定境界 (deny / allow / ask / block するか)
+経路の `.envrc` 案内) + マージ前レビューの指摘 1 件 (`is_envrc_basename` の
+literal 判定漏れ) を修正。**判定境界 (deny / allow / ask / block するか)
 の変化: なし** (助言文言の修正・テスト追加のみ)。テスト件数:
-redact 1240 → **1252**、check 135 (変化なし)。
+redact 1240 → 1252 → **1263**、check 135 (変化なし)。
 
 1. **Bash の `cp` / `mv` (move category) が `.envrc` (direnv) にも
    `.env.example` 派生 (Next.js 慣例) の案内を出していた不具合を修正**。
@@ -42,6 +43,22 @@ redact 1240 → **1252**、check 135 (変化なし)。
    呼ばず、呼出側 (`bash_handler._build_deny_response`) が行って結果を
    `is_envrc` として渡す**。edit_handler / edit_deny と同じ分担にし、
    `core.messages` が redaction 層に依存しない既存方針を保った。
+4. **マージ前レビューの指摘: `is_envrc_basename` が `foo.envrc` のような
+   命名付きスクリプトや、大文字小文字を区別する FS 上の `.ENVRC` でも
+   True を返していた不具合を修正**。`.envrc` は direnv 側の hook
+   (`direnv allow` 後の自動 load) 経由で自動発見されるが、direnv が探すのは
+   大文字小文字も一致する literal `.envrc` だけで、`foo.envrc` や
+   `.ENVRC` は対象外。旧実装 (`lower().endswith(".envrc")`) はこの区別をせず、
+   `source foo.envrc` に「direnv hook で自動読込してください」、
+   `cp foo.envrc ...` に literal `.envrc.example` → `.envrc` の案内 (実際の
+   basename と異なる名前を勧める) を返していた。`is_envrc_basename` を
+   `basename == ".envrc"` の exact match に厳格化し、非 literal な `*.envrc`
+   operand は bash_handler / edit_handler 共通の既定 (`.env.example` /
+   dotenv-cli) 文言にフォールバックする形に統一した (edit 経路も同じ関数を
+   共有するため同時に直る)。**判定境界 (deny/allow) には影響しない**、
+   助言文面のみの修正。テスト: 修正前コードで新規回帰テスト (`foo.envrc` /
+   `.ENVRC` / 大文字小文字混在の 3 パターン × move/load/新規作成の各経路)
+   がすべて失敗することを確認済み (負テスト)。
 
 ## 0.29.0
 
