@@ -26,10 +26,13 @@
    `--title '切り替え:'` のような文字列で誤発火する (いずれもマージ前レビューの指摘)。
    注記の文面は「案内された形のまま単独で実行 / 元のコマンドを連結しない」とし、案内文
    自身が連結している `firebase login && firebase use <x>` (許可される形) と矛盾しない。
-3. **回帰テスト 10 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
+   AWS は remediation がインライン env (`AWS_PROFILE=<p>` を元のコマンドの行頭に付ける)
+   で「単独で実行」が成り立たないため、service 側が `REMEDIATION_NOTE` で専用文面を
+   宣言し dispatcher はそれを優先する (マージ前レビューの指摘)。
+3. **回帰テスト 12 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
    contract の強化 — 不一致 / 未設定 / ログイン案内に注記が付く、連結形でも付く、
    型不正・インストール案内には付かない、user 入力の文言では発火しない、注記本文が
-   案内コマンド抽出に拾われない、案内文自身の連結形 (`firebase login && firebase use`) は allow されつつ注記の文面と矛盾しない、診断文では発火しない、全 service が `REMEDIATION_PATTERNS` を宣言している。既存の remediation contract テストに「verify() 由来の deny
+   案内コマンド抽出に拾われない、案内文自身の連結形 (`firebase login && firebase use`) は allow されつつ注記の文面と矛盾しない、診断文では発火しない、全 service が `REMEDIATION_PATTERNS` を宣言している、AWS は専用注記を出し複数 service 同時 deny でも各注記は 1 回。既存の remediation contract テストに「verify() 由来の deny
    が案内コマンドを含むなら注記が必ず付く」を追加し、文言契約の取りこぼしを
    全 service 横断で機械検出する。
 

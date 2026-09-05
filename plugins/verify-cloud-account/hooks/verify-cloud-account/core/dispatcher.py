@@ -38,7 +38,8 @@ def _guides_remediation(err: str, service) -> bool:
 # 案内文が自ら連結している形も通る) が、**元のコマンド (検出コマンド) を同じ Bash に
 # 連結する**と、そちらが切替前の状態で検証されて deny になる (_all_self_remediation は
 # 全セグメントが切替であることを要求する)。案内どおりに打ったのに再び deny される往復を
-# 防ぐため、remediation を案内する deny には必ず添える。
+# 防ぐため、remediation を案内する deny には必ず添える。service が REMEDIATION_NOTE を
+# 宣言していればそれを優先する (AWS: インライン env は単独実行するものではない)。
 _REMEDIATION_STANDALONE_NOTE = (
     "※ 案内した切替 / ログインコマンドは案内された形のまま単独で実行してください。"
     "元のコマンド (検出コマンド) を同じコマンド行に連結すると、そちらが切替前の状態で"
@@ -366,7 +367,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         accounts_mtime = 0.0
 
     errors: list[str] = []
-    needs_standalone_note = False
+    remediation_notes: list[str] = []  # 出現順・重複なし
     for svc, cands, inline_env, ctx in targets:
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
@@ -416,7 +417,10 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             )
         if err:
             # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
-            needs_standalone_note = needs_standalone_note or _guides_remediation(err, svc)
+            if _guides_remediation(err, svc):
+                note_text = getattr(svc, "REMEDIATION_NOTE", _REMEDIATION_STANDALONE_NOTE)
+                if note_text not in remediation_notes:
+                    remediation_notes.append(note_text)
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
             errors.append(
@@ -435,8 +439,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
         # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
         body = "\n\n".join(dict.fromkeys(errors))
-        if needs_standalone_note:
-            body = body + "\n\n" + _REMEDIATION_STANDALONE_NOTE
+        for note_text in remediation_notes:
+            body = body + "\n\n" + note_text
         if ancestor_note:
             body = ancestor_note + "\n\n" + body
         if note:

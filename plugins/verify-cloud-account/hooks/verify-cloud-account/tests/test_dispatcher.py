@@ -969,6 +969,37 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         v.assert_not_called()
 
 
+    def test_aws_uses_service_specific_note(self):
+        """AWS の remediation はインライン env (元のコマンドに付ける) なので、汎用の
+        「単独で実行」注記ではなく AWS 専用文面を出す (マージ前レビューの指摘)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch(
+            "services.aws.verify",
+            return_value="AWS アカウント不一致: 現在=999999999999, 期待=123456789012\n"
+            "切り替え手順 (環境に応じて選択):\n"
+            "  AWS_PROFILE=prod aws ...  # 行頭インライン指定\n"
+            "  aws sso login --profile prod  # SSO 再ログイン",
+        ):
+            result = dispatch("aws s3 cp a s3://b", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて", reason)
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_mixed_services_emit_each_note_once(self):
+        """gh と aws が同時に不一致なら、汎用注記と AWS 注記がそれぞれ 1 回ずつ。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.github.verify", return_value=self._MISMATCH), mock.patch(
+            "services.aws.verify",
+            return_value="AWS アカウント不一致: 現在=9, 期待=1\n  AWS_PROFILE=prod aws ...",
+        ):
+            result = dispatch(
+                "gh pr create && aws s3 cp a s3://b", str(self.project_dir)
+            )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertEqual(reason.count("案内された形のまま単独で実行してください"), 1)
+        self.assertEqual(reason.count("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて"), 1)
+
+
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
     """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
     したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
@@ -1379,8 +1410,10 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         # _REMEDIATION_MARKERS が各 service の案内文を取りこぼしていないことを
         # ここで機械的に確認する)。accounts 未設定 deny は verify 前に返るので対象外。
         if "(検出コマンド:" in reason:
-            self.assertIn(
-                "案内された形のまま単独で実行してください", reason
+            self.assertTrue(
+                "案内された形のまま単独で実行してください" in reason
+                or "AWS_PROFILE=<profile> は元のコマンドの行頭に付けて" in reason,
+                f"remediation note missing:\n{reason}",
             )
         for cmd in cmds:
             with self.subTest(guided=cmd):
