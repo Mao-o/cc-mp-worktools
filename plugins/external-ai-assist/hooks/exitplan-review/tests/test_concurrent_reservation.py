@@ -28,7 +28,7 @@ class TestConcurrentReserveSlot(HookTestCase):
         current_hash = self.entry.plan_hash("racing plan")
         max_reviews = 10
 
-        barrier = threading.Barrier(5)
+        barrier = threading.Barrier(16)
         results: list[bool] = []
         results_lock = threading.Lock()
 
@@ -38,14 +38,14 @@ class TestConcurrentReserveSlot(HookTestCase):
             with results_lock:
                 results.append(reserved)
 
-        threads = [threading.Thread(target=worker) for _ in range(5)]
+        threads = [threading.Thread(target=worker) for _ in range(16)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=5)
             self.assertFalse(t.is_alive(), "reserve_slot がデッドロックしている")
 
-        self.assertEqual(len(results), 5, "スレッドが完走していない")
+        self.assertEqual(len(results), 16, "スレッドが完走していない")
         self.assertEqual(
             results.count(True), 1, "同一プランへの並行 reserve_slot が複数成功している"
         )

@@ -14,17 +14,22 @@ from _testutil import HookTestCase, explore_payload
 
 class TestEmptyToolUseId(HookTestCase):
     def test_pre_is_noop_when_tool_use_id_is_empty(self):
-        argv_file = self.fake_cursor()
+        self.fake_cursor()
         output = self.run_hook("pre", explore_payload(""))
 
         self.assertEqual(output, "")
-        self.assertFalse(os.path.exists(argv_file), "tool_use_id が空なのに cursor が起動した")
+        # argv ファイルは偽 cursor が非同期に書くため、同期的に書かれる pid ファイルで判定する
+        _, pid_file = self.state.paths(self.cursor.NAME, "")
+        self.assertFalse(pid_file.exists(), "tool_use_id が空なのに cursor が起動した")
 
     def test_post_is_noop_when_tool_use_id_is_empty(self):
         self.fake_cursor()
+        result_file, _ = self.state.paths(self.cursor.NAME, "")
+        result_file.write_text("leftover")
         output = self.run_hook("post", explore_payload(""))
 
         self.assertEqual(output, "")
+        self.assertTrue(result_file.exists(), "tool_use_id が空なのに post() が走った")
 
 
 class TestEmptyPrompt(HookTestCase):

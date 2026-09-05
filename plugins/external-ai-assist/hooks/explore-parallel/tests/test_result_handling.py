@@ -51,7 +51,7 @@ class TestReviewerTimeout(HookTestCase):
     def _write_hanging_cursor(self) -> None:
         path = os.path.join(self.bin, "cursor")
         with open(path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/bash\nsleep 30\n")
+            f.write("#!/bin/bash\nexec sleep 30\n")
         os.chmod(path, 0o755)
 
     def _alive(self, pid: int) -> bool:
