@@ -775,7 +775,10 @@ def cmd_search_content(args):
         print(f"    ({hits['total_matches']} hits in this page, showing {shown}){mode_note}")
         for r in hits["results"]:
             kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            url_anchor = section_url_anchor(doc["source_url"], r["heading_path"])
+            # Anchor from the leaf title, not heading_path — a heading whose
+            # own title contains "/" (e.g. "## CI/CD") would otherwise be
+            # misread as a nested breadcrumb (マージ前レビューの指摘)
+            url_anchor = section_url_anchor(doc["source_url"], r["title"])
             print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{url_anchor}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
@@ -917,7 +920,10 @@ def _print_search_results(results: list[dict], *, label_source: bool) -> None:
                 # index の raw URL (.md 付き fetch 形) ではなく Source: 行と同じ正規形に
                 # anchor を付ける。raw 形に #fragment を付けても解決しない
                 # (マージ前レビューの指摘)。表示用の URL: 行は従来どおり raw のまま
-                url_anchor = section_url_anchor(normalize_doc_url(r["url"]), s["heading_path"])
+                # title (leaf heading) を渡す — heading_path の rsplit だと見出し
+                # 自体に "/" を含む場合 (例: "## CI/CD") に誤った anchor になる
+                # (マージ前レビューの指摘)
+                url_anchor = section_url_anchor(normalize_doc_url(r["url"]), s["title"])
                 print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")

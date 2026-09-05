@@ -143,6 +143,57 @@ class SectionUrlAnchorIntegrationTest(unittest.TestCase):
         self.assertNotIn("query-limit.md.txt#limits", out)
 
 
+class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
+    """Regression (merge-review finding): a leaf heading whose own title
+    contains "/" (e.g. "### Read / write data" nested under a parent, so
+    heading_path is "Reference/Read / write data") must anchor on the whole
+    leaf title, not get truncated to the text after the last "/" in
+    heading_path."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "firebase-llms.txt").write_text(
+            "- [Firestore Query Limits](https://firebase.google.com/docs/firestore/query-limit.md.txt): Limits on queries\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(self.tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/firestore/query-limit.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Firestore Query Limits\n\n"
+            "## Reference\n\n"
+            "### Read / write data\n"
+            "Reads and writes per query limit.\n",
+            encoding="utf-8",
+        )
+
+    def test_search_content_anchor_uses_full_leaf_title(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search-content", "query",
+            "--page-ref", "0", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "[https://firebase.google.com/docs/firestore/query-limit#read-write-data]",
+            out,
+        )
+        self.assertNotIn("#write-data]", out)
+
+    def test_search_anchor_uses_full_leaf_title(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search", "query",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "[https://firebase.google.com/docs/firestore/query-limit#read-write-data]",
+            out,
+        )
+        self.assertNotIn("#write-data]", out)
+
+
 class SearchContentMaxSnippetCharsTest(unittest.TestCase):
     """search-content used to have no --max-snippet-chars at all (unlike
     search) — every snippet was printed in full, however long. Confirms the

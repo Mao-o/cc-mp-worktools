@@ -179,6 +179,46 @@ class SectionUrlAnchorIntegrationTest(unittest.TestCase):
         self.assertIn("[https://example.com/hooks#pretooluse]", out)
 
 
+class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
+    """Regression (merge-review finding): a leaf heading whose own title
+    contains "/" (e.g. "## CI/CD" nested under a parent, so heading_path is
+    "Reference/CI/CD") must anchor on the whole leaf title, not get
+    truncated to the text after the last "/" in heading_path."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "- [Hooks](https://example.com/hooks.md): Configure hook matchers\n",
+            "# Hooks\n"
+            "Source: https://example.com/hooks\n"
+            "\n"
+            "## Reference\n"
+            "\n"
+            "### CI/CD\n"
+            "Run hook matchers in a CI/CD pipeline.\n",
+        )
+
+    def test_search_content_anchor_uses_full_leaf_title(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-content", "matchers",
+            "--page-ref", "hooks", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[https://example.com/hooks#cicd]", out)
+        self.assertNotIn("#cd]", out)
+
+    def test_search_anchor_uses_full_leaf_title(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "matchers",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[https://example.com/hooks#cicd]", out)
+        self.assertNotIn("#cd]", out)
+
+
 class CmdSearchFallbackDoesNotDropIndexMatchesTest(unittest.TestCase):
     """A page correctly ranked by title, but with zero literal body hits,
     must still appear (as "index match only") — the fallback must APPEND

@@ -13,13 +13,15 @@ anchor が無く、ページ URL もエントリ単位にしか出ないため�
 
 - `_common.py` に `heading_anchor_slug()` (見出しタイトルから GitHub/Mintlify 互換の
   best-effort slug を生成: 小文字化・空白→ハイフン・記号除去) と `section_url_anchor()`
-  (URL + heading_path の末尾セグメントから `  [<url>#<slug>]` を組み立て) を追加。
+  (URL + 葉見出しタイトルから `  [<url>#<slug>]` を組み立て。当初は heading_path の
+  末尾セグメントを rsplit で復元していたが、見出し自体に `/` を含む場合に誤るため
+  下記「追い修正」で葉タイトルを直接受け取る形に変更済み) を追加。
   claude-docs / firebase の `search` / `search-content` 計 4 箇所の `Section:` 行に適用。
   `→` ではなく角括弧にしたのは、同じ結果行の直下でスニペットの1行ヒットマーカーとして
   既に `→` を使っており、1 文字に 2 つの意味を持たせないため (`[partial match]` /
   `[before first heading]` の既存アノテーション規約に合わせた)
-- anchor は heading_path の**末尾セグメントのみ**から生成する (実際にページに描画される
-  見出しはそれ単体であり、内部の breadcrumb 表示である heading_path 全体ではないため)。
+- anchor は実際にページに描画される見出しそのもの (内部の breadcrumb 表示である
+  heading_path 全体ではなく、その葉ノードの見出しタイトル) から生成する。
   同名見出しがページ内に複数ある場合の GitHub/Mintlify 側の `-1`/`-2` 連番までは
   再現しない best-effort であることを 3 SKILL.md に明記
 - **firebase は index の生 URL (`.../query-limit.md.txt`、`URL:` 行に表示される raw
@@ -35,6 +37,27 @@ anchor が無く、ページ URL もエントリ単位にしか出ないため�
 回帰テスト 16 件追加 (`test_common.py`: `heading_anchor_slug`/`section_url_anchor` の
 fixture テスト 12 件、`test_parse_claude_docs.py`/`test_parse_firebase.py`: `search`/
 `search-content` の CLI 統合テスト計 4 件)。
+
+#### 追い修正: 見出しタイトル自体に `/` を含む場合に anchor が誤る問題 (マージ前レビューの指摘)
+
+上記の初回実装は `section_url_anchor(url, heading_path)` が `heading_path.rsplit("/", 1)[-1]`
+で葉見出しを復元していたため、見出しタイトル自体が `/` を含む場合 (`## CI/CD` →
+`#cd`、`## Read / write data` → `#write-data`) に breadcrumb の区切りと誤認し、
+先頭部分を欠落させた anchor を生成していた。
+
+`extract_sections()` が元々保持していた葉タイトル (`title` フィールド、`heading_path`
+とは別に見出しテキストそのものを保持) を検索結果 (`_build_section_results()` の
+戻り値) にも追加し、`section_url_anchor()` は `heading_path` ではなく `title` を
+受け取る形に変更 (rsplit を撤去)。呼び出し側 4 箇所 (claude-docs の `search-content`/
+`search`、firebase の `search-content`/`search`) を `r["heading_path"]` → `r["title"]`
+に修正。表示用の `Section:` 行の heading_path 表示は変更していない。
+
+回帰テスト 6 件追加 (`test_common.py`: `search_content_in_body` の結果が `title`
+フィールドを持つことを固定する fixture テスト 2 件、`test_parse_claude_docs.py`/
+`test_parse_firebase.py`: `/` を含む見出しでの `search`/`search-content` CLI 統合
+テスト計 4 件)。あわせて既存の `SectionUrlAnchorTest` (`test_common.py`) を新しい
+引数契約 (`heading_path` ではなく葉タイトルを渡す) に合わせて更新し、breadcrumb
+分割を検証していたケースを本件の回帰ケースに差し替えた。224 → 230 tests。
 
 ### テストを 1 件だけ指定して実行できない問題を修正 (共有ヘルパーが解決されない)
 
@@ -59,8 +82,8 @@ README にクラス単位・メソッド単位で 1 件だけ指定する実行�
 
 ### 検証
 
-`claude plugin validate plugins/llms-docs` warning 0。224 tests, all green
-(前回 205 + 上記 19)。
+`claude plugin validate plugins/llms-docs` warning 0。230 tests, all green
+(前回 205 + 上記 19 + 追い修正分 6)。
 - `search` サブコマンドの Section 行 anchor は、index の raw URL (`.md` 付き fetch 形) ではなく
   `Source:` 行と同じ正規形 (`normalize_doc_url`) に付ける。raw 形に `#fragment` を付けても
   ページ上で解決しないため (マージ前レビューの指摘)。表示用の `URL:` 行は従来どおり

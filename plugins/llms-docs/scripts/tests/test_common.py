@@ -483,23 +483,34 @@ class HeadingAnchorSlugTest(unittest.TestCase):
 
 class SectionUrlAnchorTest(unittest.TestCase):
     def test_appends_url_and_slug_from_leaf_heading(self):
+        # section_url_anchor takes the section's own leaf title directly
+        # (not heading_path, the ancestor breadcrumb) — the caller is
+        # responsible for resolving which heading to anchor to.
         self.assertEqual(
             _common.section_url_anchor(
-                "https://code.claude.com/docs/hooks", "Hook events/PreToolUse"
+                "https://code.claude.com/docs/hooks", "PreToolUse"
             ),
             "  [https://code.claude.com/docs/hooks#pretooluse]",
         )
 
-    def test_uses_only_the_leaf_segment_of_a_nested_path(self):
-        # The anchor is the leaf heading actually rendered on the page —
-        # the full breadcrumb path is this tool's internal display, not
-        # something that appears in the page as one combined string.
-        result = _common.section_url_anchor("https://example.com/p", "A/B/C")
-        self.assertTrue(result.endswith("#c]"))
+    def test_title_containing_slash_is_not_split_as_a_breadcrumb(self):
+        # Regression (merge-review finding): a leaf heading whose own title
+        # legitimately contains "/" (e.g. "## CI/CD") must not be treated
+        # as a multi-segment heading_path and truncated to the text after
+        # the last "/". Passing the title directly — instead of deriving it
+        # from heading_path via rsplit("/", 1) — sidesteps that ambiguity.
+        self.assertEqual(
+            _common.section_url_anchor("https://example.com/p", "CI/CD"),
+            "  [https://example.com/p#cicd]",
+        )
+        self.assertEqual(
+            _common.section_url_anchor("https://example.com/p", "Read / write data"),
+            "  [https://example.com/p#read-write-data]",
+        )
 
     def test_no_url_means_no_suffix(self):
-        self.assertEqual(_common.section_url_anchor("", "Hooks/Configuration"), "")
-        self.assertEqual(_common.section_url_anchor(None, "Hooks/Configuration"), "")
+        self.assertEqual(_common.section_url_anchor("", "Configuration"), "")
+        self.assertEqual(_common.section_url_anchor(None, "Configuration"), "")
 
     def test_top_sentinel_has_no_anchor(self):
         self.assertEqual(_common.section_url_anchor("https://example.com/p", "(top)"), "")
@@ -538,6 +549,22 @@ class SearchContentInBodyTest(unittest.TestCase):
         result = _common.search_content_in_body(body, "keyword", max_matches_per_doc=2)
         self.assertEqual(len(result["results"]), 2)
         self.assertEqual(len(result["overflow_sections"]), 3)
+
+    def test_result_carries_title_separate_from_heading_path(self):
+        # "title" is the leaf heading text a caller should pass to
+        # section_url_anchor — kept as its own field so callers never need
+        # to derive it from heading_path by splitting on "/" (which breaks
+        # when the heading's own title contains one, e.g. "## CI/CD").
+        body = ["## CI/CD\n", "pipeline keyword\n"]
+        result = _common.search_content_in_body(body, "pipeline")
+        self.assertEqual(result["results"][0]["heading_path"], "CI/CD")
+        self.assertEqual(result["results"][0]["title"], "CI/CD")
+
+    def test_top_sentinel_result_has_matching_title(self):
+        body = ["preamble keyword text\n", "## Section A\n", "alpha\n"]
+        result = _common.search_content_in_body(body, "preamble")
+        self.assertEqual(result["results"][0]["heading_path"], "(top)")
+        self.assertEqual(result["results"][0]["title"], "(top)")
 
 
 class AssertParsedTest(unittest.TestCase):

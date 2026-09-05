@@ -97,6 +97,7 @@ title + description でスコアリングして上位 5 件（`--top-n N` で変
 各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの
 GitHub/Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい —
 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。
+見出しタイトル自体に `/` を含む場合 (例: `## Read / write data`) も正しく slug 化される。
 
 初回は top N 件分の HTTP fetch が走るため数秒～十数秒かかる。2 回目以降は cache hit で高速。
 

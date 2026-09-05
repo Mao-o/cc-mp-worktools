@@ -463,8 +463,11 @@ def cmd_search_content(args):
             kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
             # Anchor into the human-facing page, not the raw .md.txt fetch
             # URL shown above as "URL:" — a #fragment on the plaintext
-            # response resolves to nothing.
-            url_anchor = section_url_anchor(_entry_url_for_match(entry["url"]), r["heading_path"])
+            # response resolves to nothing. Pass the leaf title, not
+            # heading_path — a heading whose own title contains "/" (e.g.
+            # "## CI/CD") would otherwise be misread as a nested breadcrumb
+            # (マージ前レビューの指摘)
+            url_anchor = section_url_anchor(_entry_url_for_match(entry["url"]), r["title"])
             print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{url_anchor}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
@@ -561,8 +564,11 @@ def cmd_search(args):
                 kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
                 # Anchor into the human-facing page, not the raw .md.txt
                 # fetch URL shown above as "URL:" — a #fragment on the
-                # plaintext response resolves to nothing.
-                url_anchor = section_url_anchor(_entry_url_for_match(r["url"]), s["heading_path"])
+                # plaintext response resolves to nothing. Pass the leaf
+                # title, not heading_path — a heading whose own title
+                # contains "/" (e.g. "## CI/CD") would otherwise be
+                # misread as a nested breadcrumb (マージ前レビューの指摘)
+                url_anchor = section_url_anchor(_entry_url_for_match(r["url"]), s["title"])
                 print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")

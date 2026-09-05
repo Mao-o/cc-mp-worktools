@@ -975,7 +975,7 @@ def heading_anchor_slug(title: str) -> str:
     return re.sub(r"\s+", "-", s).strip("-")
 
 
-def section_url_anchor(url: str, heading_path: str) -> str:
+def section_url_anchor(url: str, title: str) -> str:
     """``  [<url>#<anchor>]`` suffix for a ``Section:`` search result line.
 
     Bracketed to match this tool's existing annotation convention on these
@@ -983,14 +983,21 @@ def section_url_anchor(url: str, heading_path: str) -> str:
     ``[before first heading]``) rather than reusing ``→``, which the
     snippet lines directly below already use as the per-line hit marker.
 
+    *title* must be the section's own leaf heading title (a section dict's
+    ``"title"`` field, or the ``"(top)"`` sentinel) — **not**
+    ``heading_path``. ``heading_path`` is this tool's internal breadcrumb
+    (ancestor titles joined with ``"/"``) and is not safe to derive the
+    leaf from by splitting on ``"/"``: a heading whose own title legitimately
+    contains a slash (e.g. ``## CI/CD``, ``## Read / write data``) would
+    have that slash misread as a breadcrumb separator, truncating the
+    anchor to only the text after the last ``"/"`` (merge-review finding —
+    see CHANGELOG). Passing the leaf title directly sidesteps that
+    ambiguity entirely since there is nothing left to split.
+
     Returns ``""`` (no suffix) when there's no page *url* to anchor into,
-    when *heading_path* is the ``"(top)"`` sentinel (body text above the
-    first heading has no heading element to anchor to), or when the leaf
-    heading title normalizes to an empty slug. The anchor is derived from
-    only the leaf segment of *heading_path* (the text after the last
-    ``"/"``) since that's the actual heading rendered on the page —
-    ``heading_path`` itself is this tool's internal breadcrumb, not
-    something that appears in the page as one combined string.
+    when *title* is the ``"(top)"`` sentinel (body text above the first
+    heading has no heading element to anchor to), or when the title
+    normalizes to an empty slug.
 
     *url* must already be the human-facing page URL (not e.g. Firebase's
     raw ``.md.txt`` fetch URL) — a ``#fragment`` on a plaintext response
@@ -998,10 +1005,9 @@ def section_url_anchor(url: str, heading_path: str) -> str:
     ``parse-*.py`` already has its own notion of "the real page URL" for
     its source).
     """
-    if not url or heading_path == "(top)":
+    if not url or title == "(top)":
         return ""
-    leaf = heading_path.rsplit("/", 1)[-1]
-    slug = heading_anchor_slug(leaf)
+    slug = heading_anchor_slug(title)
     if not slug:
         return ""
     return f"  [{url}#{slug}]"
@@ -1047,8 +1053,15 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             cut = len(snippet) - max_snippet_chars
             snippet = snippet[:max_snippet_chars] + f"\n  ... ({cut} chars truncated)"
 
+        # "title" is the section's own leaf heading text (or "(top)"),
+        # kept separate from "heading_path" (the ancestor breadcrumb) so
+        # anchor generation never has to split heading_path on "/" — a
+        # heading whose own title contains a slash (e.g. "## CI/CD") would
+        # otherwise be misread as a nested breadcrumb (merge-review finding).
+        title = sections[si]["title"] if si is not None else "(top)"
         results.append({
             "heading_path": heading_path,
+            "title": title,
             "line_offset": hit_line_numbers[0],
             "snippet": snippet,
             "matched_keywords": sorted(all_matched),
