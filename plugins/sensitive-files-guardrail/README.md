@@ -75,7 +75,7 @@ keys (in order):
   2. JWT_SECRET    <type=jwt prefix="ey">  <set>  length=287
   3. STRIPE_KEY    <type=stripe_secret prefix="sk_live_">  <set>  length=68
   4. TOKEN         <type=str>  <set>  <looks_truncated>  length=20
-  5. PLACEHOLDER   <type=str>  <placeholder>  matched="your_jwt_secret_here"  length=24
+  5. PLACEHOLDER   <type=str>  <placeholder>  matched="your_*_here"  length=24
   6. EMPTY_KEY     <type=str>  <empty>
 note: real values are not in context. only key names, type, prefix,
 length, status tags, and placeholder hints are returned.
@@ -92,8 +92,8 @@ length, status tags, and placeholder hints are returned.
   `<looks_truncated>`: 値の品質状態 (複数併記可)。「JWT なのに 4 文字」
   「placeholder のまま」「末尾 truncated」等を検知してデバッグの次の
   作業を判断できる
-- `length=<N>`: 値のバイト長 (生長さ)。「秘密鍵が短すぎる」「ダンプ混入で
-  4096 超」等の異常検知に有用
+- `length=<N>`: 値の文字数 (生の値。bucket せずそのまま)。「秘密鍵が短すぎる」
+  「ダンプ混入で 4096 超」等の異常検知に有用
 - `matched="..."`: placeholder 一致時の辞書 literal / pattern label
 
 > 思想 2 (block 時は意図を汲んだメッセージを返す) を 0.9.0 で実装。「機密
@@ -310,8 +310,8 @@ block の理由は書き込み先の状態で 4 分岐する (0.20.0)。**判定
 
 | 書き込み先 | 案内 |
 |---|---|
-| 新規作成 | 同じキー名で `.env.example` を作り値を空にする (実値は手動入力かシークレット管理ツール経由) |
-| 既存ファイルの書き換え | **既存ファイルの minimal info** (キー名・型・値の状態) + `dotenv-cli` の merge で既存値を保つ案内 |
+| 新規作成 | 同じキー名で `.env.example` を作り値を空にする (実値は手動入力かシークレット管理ツール経由)。`.envrc` は `.envrc.example` |
+| 既存ファイルの書き換え | **既存ファイルの minimal info** (キー名・型・値の状態) + `dotenv-cli` の merge で既存値を保つ案内。`.envrc` は direnv 前提の案内 (dotenv-cli merge の対象外) |
 | symlink 経由 | 実体側が書き換わる旨と、コピーではなく symlink を維持する運用の確認 |
 | FIFO / socket / device | 通常ファイルを対象にするか、パス指定の誤りの確認 |
 

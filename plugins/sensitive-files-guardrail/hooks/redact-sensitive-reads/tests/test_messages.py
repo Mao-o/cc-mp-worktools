@@ -47,6 +47,15 @@ class TestExcludeHintBasename(unittest.TestCase):
         self.assertNotIn(str(Path.home()), out)
         self.assertNotIn(os.getcwd(), out)
 
+    def test_exclude_hint_without_relpath_does_not_overclaim_root_unresolved(self):
+        """relpath が空のとき、文言は「root 相対 path を確定できない」に限定し、
+        「root を解決できない」と一律に断定しない (0.24.0 の不正確な文言を修正、
+        内部バックログ)。relpath が空になるのは root 不明のほかに path が root
+        配下でない / glob operand / コロンを含む pathspec でも起きるため。"""
+        out = M._exclude_hint(".env", relpath="")
+        self.assertIn("root 相対 path を確定できないため path 形は案内できません", out)
+        self.assertNotIn("root を解決できないため", out)
+
     def test_exclude_hint_without_basename_also_guides_project_section(self):
         out = M._exclude_hint("")
         self.assertIn("`[project:$CLAUDE_PROJECT_DIR]`", out)
@@ -1415,6 +1424,112 @@ class TestEditSuggestionAltUpdateBudget(unittest.TestCase):
             default_len + 32,
             "suggestion_alt (update) が既定文言より大幅に長い。"
             " minimal info セクションを押し出す (レビュー実測: corpus 30 件)",
+        )
+
+
+class TestEnvrcClauseByteBudget(unittest.TestCase):
+    """マージ前レビューの指摘 (P2): ``.envrc`` 専用の 3 clause が既定文言より
+    大幅に長く、``suggested_keys`` / minimal info と同じ byte 予算を奪い合う
+    回帰があった。``_EDIT_SUGGESTION_ALT_UPDATE_ENVRC`` (ファイル名だけ差し替え、
+    既定文言比 +2 byte) と同じ水準まで削ったことを固定する。
+
+    ``TestEditSuggestionAltUpdateBudget`` と同じ発想 (**既定文言との差**を
+    upper bound にする) だが、こちらは envrc 版 3 種すべてを一括で見る。
+    """
+
+    def test_envrc_clauses_are_within_15_bytes_of_their_default(self):
+        pairs = [
+            (
+                "_EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV",
+                "_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC",
+            ),
+            ("_EDIT_SUGGESTION_ALT_NEW", "_EDIT_SUGGESTION_ALT_NEW_ENVRC"),
+            (
+                "_EDIT_SUGGESTION_ALT_DEFAULT",
+                "_EDIT_SUGGESTION_ALT_DEFAULT_ENVRC",
+            ),
+        ]
+        for default_name, envrc_name in pairs:
+            with self.subTest(envrc_name=envrc_name):
+                default_len = len(
+                    getattr(M, default_name).encode("utf-8")
+                )
+                envrc_len = len(getattr(M, envrc_name).encode("utf-8"))
+                self.assertLessEqual(
+                    envrc_len,
+                    default_len + 15,
+                    f"{envrc_name} が {default_name} より 15 byte を超えて"
+                    " 長い。suggested_keys / minimal info の表示行数を"
+                    " 圧迫する回帰の再発 (レビュー実測: n=15 で 13→11 行、"
+                    " n=30 で 10→7 行)",
+                )
+
+
+class TestEnvrcOverwriteKeyLineParity(unittest.TestCase):
+    """マージ前レビューの指摘 (P2) の end-to-end 回帰版。
+
+    ``.env`` と ``.envrc`` に同一鍵数・同一パディングの overwrite deny を
+    組ませ、``suggestion``/``suggestion_alt`` の固定文言差が minimal info
+    (上書き対象の既存キー一覧) の表示行数に影響しない (差が 1 行以内) ことを
+    固定する。``test_overwrite_budget_exhausted_by_keys_omits_section`` /
+    ``test_bash_handler.TestLargeDotenvReasonByteBudget`` と同じ「固定文言と
+    可変長セクションが同じ byte 予算を奪い合う」設計に対する回帰テスト。
+
+    修正前 (``.envrc`` 専用 clause に説明文が入っていた版) では n=15 で
+    15→13 行、n=30 で 10→8 行まで差が開くことを手元で確認済み。
+    """
+
+    @staticmethod
+    def _build(basename: str, n: int) -> tuple[int, str]:
+        is_envrc = basename == ".envrc"
+        # existing キーと new キーを別名にして、render 側 (minimal info) の
+        # 表示行数だけを数えられるようにする。
+        existing_keys = [f"K{i:03d}" + "X" * 9 for i in range(n)]
+        new_keys = [f"N{i:03d}" + "Y" * 9 for i in range(n)]
+        render_lines = [
+            '<DATA untrusted="true" source="redact-hook" guard="g">',
+            "NOTE: x",
+            f"file: {basename}",
+        ]
+        for i, k in enumerate(existing_keys):
+            render_lines.append(f"  {i}. {k}  <type=str>  <set>  length=20")
+        render_lines.append("</DATA>")
+        render = "\n".join(render_lines)
+        msg = M.edit_deny(
+            "Write", basename, new_keys=new_keys, kind="overwrite",
+            existing_render=render, existing_keys=frozenset(),
+            is_dotenv=True, is_envrc=is_envrc,
+        )
+        shown = sum(1 for k in existing_keys if f". {k}  " in msg)
+        return shown, msg
+
+    def test_env_and_envrc_show_same_key_lines_within_one(self):
+        env_shown_by_n: dict[int, int] = {}
+        for n in (15, 30):
+            with self.subTest(n=n):
+                env_shown, env_msg = self._build(".env", n)
+                envrc_shown, envrc_msg = self._build(".envrc", n)
+                env_shown_by_n[n] = env_shown
+                self.assertLessEqual(
+                    len(env_msg.encode("utf-8")), output.MAX_REASON_BYTES
+                )
+                self.assertLessEqual(
+                    len(envrc_msg.encode("utf-8")), output.MAX_REASON_BYTES
+                )
+                self.assertLessEqual(
+                    abs(env_shown - envrc_shown),
+                    1,
+                    f"n={n}: .env は {env_shown} 行、.envrc は {envrc_shown} 行"
+                    " 表示された (同一鍵数・同一パディングなので差は 1 行以内"
+                    " のはず)",
+                )
+        # n=30 は byte 予算で実際に頭打ちになる (全 30 行は入らない) 前提を
+        # 固定する。ここが崩れて両方 30 行フルに表示されるようになると、上の
+        # 差分チェックは「両方とも全部見えている」だけの空振りで通ってしまう。
+        self.assertLess(
+            env_shown_by_n[30],
+            30,
+            "n=30 で予算頭打ちが起きていない (回帰検知の前提が崩れている)",
         )
 
 

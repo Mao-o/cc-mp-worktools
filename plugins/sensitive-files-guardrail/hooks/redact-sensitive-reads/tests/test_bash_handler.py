@@ -2464,6 +2464,39 @@ class TestMetadataOnlyAllow(BaseBash):
                 msg=f"{cmd!r} should allow but got {_decision(r)!r}",
             )
 
+    def test_reads_file_content_unit(self):
+        """``_reads_file_content`` の pure helper 直接テスト (内部バックログ)。
+
+        上記は ``handle()`` 経由の間接検証。ここでは分離形 / 短縮形の値結合
+        (``-f.env``) / 長形の値結合 (``--files-from=.env``) をヘルパー単体で
+        直接固定する。
+        """
+        from handlers.bash_handler import _reads_file_content
+
+        # 短縮形の値結合 (fused): file -f.env
+        self.assertTrue(_reads_file_content("file", ["file", "-f.env"]))
+        # 分離形: file -f .env
+        self.assertTrue(_reads_file_content("file", ["file", "-f", ".env"]))
+        # 長形の値結合: file --files-from=.env
+        self.assertTrue(
+            _reads_file_content("file", ["file", "--files-from=.env"])
+        )
+        # content-reading オプション無し → False
+        self.assertFalse(_reads_file_content("file", ["file", "notes.txt"]))
+        # wc / du / tree もそれぞれの固有オプションで True
+        self.assertTrue(
+            _reads_file_content("wc", ["wc", "--files0-from=.env"])
+        )
+        self.assertFalse(_reads_file_content("wc", ["wc", "-l", "file.txt"]))
+        self.assertTrue(
+            _reads_file_content("du", ["du", "--files0-from=.env"])
+        )
+        self.assertTrue(
+            _reads_file_content("tree", ["tree", "--fromfile", ".env"])
+        )
+        # マップに無い first_token は常に False (``-f.env`` の形自体は無関係)
+        self.assertFalse(_reads_file_content("ls", ["ls", "-f.env"]))
+
     def test_find_redirect_still_ask(self):
         # find は _SAFE_READ_FIRST_TOKENS 外なので `>` 含みは residual ask 維持
         r = handle(_make_envelope("find . -name .env > /tmp/x", self.tmp))
@@ -3712,6 +3745,52 @@ class TestQuoteAwareResidualMetachar(BaseBash):
         )
 
 
+class TestRedirectWriteTargetsUnit(unittest.TestCase):
+    """``_redirect_write_targets`` の pure helper 直接テスト (内部バックログ)。
+
+    従来は ``handle()`` 経由の間接検証のみで、fused 形 / fd 複製除外を
+    直接固定していなかった。
+    """
+
+    def test_fused_form_extracts_target(self):
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets([">.env"]), [".env"])
+
+    def test_bare_form_extracts_next_token_as_target(self):
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets([">", ".env"]), [".env"])
+
+    def test_fd_duplication_is_excluded(self):
+        # ``>&1`` は target が ``&1`` になる fd 複製で、書込み先ではないので除外。
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets([">&1"]), [])
+        self.assertEqual(
+            _redirect_write_targets([">&1", "cat", ">.env"]), [".env"]
+        )
+
+    def test_fd_numbered_fused_form_extracts_target(self):
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets(["2>.env"]), [".env"])
+
+    def test_append_and_clobber_fused_forms_extract_target(self):
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets([">>.env"]), [".env"])
+        self.assertEqual(_redirect_write_targets([">|.env"]), [".env"])
+
+    def test_both_output_redirect_fused_form_extracts_target(self):
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets(["&>.env"]), [".env"])
+
+    def test_input_redirect_is_not_a_write_target(self):
+        # ``<`` は入力リダイレクトで書込み対象ではない (hard-stop 側で処理)。
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets(["<.env"]), [])
+
+    def test_non_redirect_tokens_are_ignored(self):
+        from handlers.bash.redirects import _redirect_write_targets
+        self.assertEqual(_redirect_write_targets(["ls", ">.env"]), [".env"])
+
+
 class TestQuotedSafeRedirectTarget(BaseBash):
     """0.25.0 (Codex R1 P2): 安全リダイレクトの target がクォートされている形。
 
@@ -3964,6 +4043,51 @@ class TestSedOptionScriptConsumesPositionalSlot(BaseBash):
         self.assertEqual(_sed_scripts(["-f", "s.sed", "data.txt"]), ([], True))
         # option script が無ければ従来どおり最初の positional が script
         self.assertEqual(_sed_scripts(["p", "file.txt"]), (["p"], False))
+
+
+class TestLargeDotenvReasonByteBudget(BaseBash):
+    """大 dotenv (32KB 未満、通常の ``redact()`` 経路) が Bash 側の 3KB reason
+
+    予算を超えるときの折り畳み回帰 (内部バックログ)。``_fold_data_block``
+    (``core/messages.py``) が担う経路で、>32KB の keys-only scan 経路
+    (``TestE2EKeyonlyKeepsKeyNames``) とは別物。Read 側は
+    ``TestFitReadReason`` (``fit_read_reason``) で同型のケースを直接テスト
+    済みだが、Bash 側 (``_fold_data_block`` → ``_join_with_exclude_hint``)
+    には同等の回帰テストが無かった。
+    """
+
+    def test_cat_large_dotenv_fits_budget_and_keeps_exclude_hint(self):
+        n = 90
+        text = "".join(
+            f"KEY_{i:03d}=value_{i:03d}_padding_padding\n" for i in range(n)
+        )
+        path = os.path.join(self.tmp, ".env")
+        with open(path, "w") as f:
+            f.write(text)
+        # 32KB 未満 (keys-only scan ではなく通常の redact() 経路) の前提を固定
+        self.assertLess(os.path.getsize(path), 32 * 1024)
+
+        r = handle(_make_envelope("cat .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+        # 閉じタグと折り畳みマーカーが両方残る (盲目 byte cut ではなく
+        # _fold_data_block を通った痕跡)
+        self.assertIn("</DATA>", reason)
+        self.assertRegex(reason, r"\.\.\. \(\d+ more lines")
+        # 除外案内は折り畳みの影響を受けず全文残る (0.23.0 の保護)
+        self.assertIn("patterns.local.txt", reason)
+        self.assertIn("承認なしに自分で追加しないこと", reason)
+        # 値は 1 文字も出ない
+        self.assertNotIn("padding_padding", reason)
+        # 折り畳まれても一部の鍵名は残る
+        keys = [f"KEY_{i:03d}" for i in range(n)]
+        visible = sum(1 for k in keys if k in reason)
+        self.assertGreater(visible, 0, "鍵名が 1 個も残っていない")
+        self.assertLess(
+            visible, n, "全鍵が残っている (32KB 未満なので折り畳みが発生する前提が崩れている)"
+        )
 
 
 if __name__ == "__main__":

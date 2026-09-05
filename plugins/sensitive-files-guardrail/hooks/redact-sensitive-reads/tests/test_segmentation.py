@@ -130,6 +130,52 @@ class TestHeredocBodyIsNotASegment(unittest.TestCase):
             self.assertTrue(_has_hard_stop(seg))
 
 
+class TestSplitOnOperatorsQuoteBackslashParity(unittest.TestCase):
+    """``_split_command_on_operators`` のダブルクォート内バックスラッシュ
+
+    偶奇テスト (内部バックログ)。ダブルクォート直前のバックスラッシュ数が
+    偶数ならバックスラッシュ同士が打ち消し合い quote は閉じる (演算子は
+    quote 外 = 分割対象)。奇数なら直前の quote 自体がエスケープされ閉じない
+    (演算子は quote 内側 = 分割しない)。既存の ``TestHeredocBodyIsNotASegment``
+    は heredoc 専用で、この quote 状態遷移そのものは直接固定していなかった。
+    """
+
+    def test_even_backslashes_close_the_quote_and_split(self):
+        # `"a\\"` の `\\` (2 個 = 偶数) は互いを打ち消し、closing quote は
+        # 正しく閉じる。`&&` は quote 外なので分割される。
+        cmd = 'echo "a\\\\" && cat .env'
+        self.assertEqual(
+            _split_command_on_operators(cmd),
+            ['echo "a\\\\"', "cat .env"],
+        )
+
+    def test_odd_backslashes_escape_the_quote_and_do_not_split(self):
+        # `"a\"` の `\` (1 個 = 奇数) は直後の quote をエスケープし、quote は
+        # 閉じない。したがって `&&` も末尾の `"` も同じ (まだ開いた) quote の
+        # 内側にあり、1 segment のまま。
+        cmd = 'echo "a\\" && cat .env"'
+        self.assertEqual(
+            _split_command_on_operators(cmd),
+            ['echo "a\\" && cat .env"'],
+        )
+
+    def test_four_backslashes_close_the_quote_and_split(self):
+        # 4 個 (偶数) でも同じ規則 — 1 個特有の挙動ではないことを確認。
+        cmd = 'echo "a\\\\\\\\" && cat .env'
+        self.assertEqual(
+            _split_command_on_operators(cmd),
+            ['echo "a\\\\\\\\"', "cat .env"],
+        )
+
+    def test_three_backslashes_escape_the_quote_and_do_not_split(self):
+        # 3 個 (奇数) でも同じ規則。
+        cmd = 'echo "a\\\\\\" && cat .env"'
+        self.assertEqual(
+            _split_command_on_operators(cmd),
+            ['echo "a\\\\\\" && cat .env"'],
+        )
+
+
 class TestHeredocVerdict(unittest.TestCase):
     """heredoc 込みのコマンドの verdict (default / auto)。"""
 

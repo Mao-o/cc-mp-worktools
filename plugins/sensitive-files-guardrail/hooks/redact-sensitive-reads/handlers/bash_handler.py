@@ -123,13 +123,11 @@ from handlers.bash.constants import (  # noqa: F401
     _METADATA_ONLY_FIRST_TOKENS,
     _OPAQUE_WRAPPERS,
     _REDIRECT_OP_TOKENS,
-    _SAFE_READ_CMDS,
     _SAFE_READ_FIRST_TOKENS,
     _SAFE_REDIRECT_RE,
     _SAFE_REDIRECT_TARGETS,
     _SEGMENT_RESIDUAL_METACHARS,
     _SHELL_KEYWORDS,
-    _SOURCE_CMDS,
 )
 from handlers.bash.grep_extract import (  # noqa: F401
     extract_grep_keys,

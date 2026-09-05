@@ -646,8 +646,8 @@ deny/allow/ask 一覧は [MATRIX.md](./MATRIX.md) を参照。
 | `prefix="..."` | 識別子型のみ、公開済み prefix を表示 (Q3 採用) | `<type=stripe_secret prefix="sk_live_">` |
 | `<set>` / `<empty>` / `<placeholder>` | 値の有無・placeholder 一致 | `<set>` |
 | `<short>` / `<long>` / `<looks_truncated>` | 型整合性・truncation ヒント (複数併記可) | `<set> <short>` |
-| `length=<N>` | 値のバイト長 (Q2 採用、bucket せず生長さ) | `length=68` |
-| `matched="..."` | placeholder 一致時の辞書 literal / pattern label | `matched="your_jwt_secret_here"` |
+| `length=<N>` | 値の文字数 (実装は `len(v)`。Q2 採用、bucket せず生の値) | `length=68` |
+| `matched="..."` | placeholder 一致時の辞書 literal / pattern label | `matched="your_*_here"` |
 
 **型推定 (0.9.0 拡張)**: `str` / `bool` / `null` / `num` / `jwt` (既存) +
 `url` / `email` / `uuid` / `aws_access_key` (AKIA / ASIA) / `stripe_secret`
@@ -661,7 +661,7 @@ deny/allow/ask 一覧は [MATRIX.md](./MATRIX.md) を参照。
 
 **short の閾値**: jwt < 30 / aws_access_key < 16 / stripe_* < 25 /
 github_pat < 30 / openai_key < 20 / url < 8 / uuid < 36 / email < 6。
-**long の閾値**: 4096 byte 超 (デバッグダンプ混入の検知)。
+**long の閾値**: 4096 文字超 (実装は `len(v)`。デバッグダンプ混入の検知)。
 
 **placeholder 判定**: `redaction/placeholders.py::looks_placeholder` が
 PLACEHOLDER_LITERALS (21 個) と PLACEHOLDER_PATTERNS (5 個 regex) で判定。
@@ -686,7 +686,7 @@ length を付与する:
 | `<empty>` | 空文字列 `""` (length=0、length 列は表示しない) |
 | `<placeholder>` | `placeholders.py::looks_placeholder` 一致 (`matched="..."` 併記) |
 | `<set>` | 上記以外で値あり |
-| `<long>` | 4096 byte 超 (dotenv と同じ閾値、ダンプ混入の検知) |
+| `<long>` | 4096 文字超 (dotenv と同じ閾値、ダンプ混入の検知) |
 | `<looks_truncated>` | 末尾が `...` / `<truncated>` / バックスラッシュ |
 
 - bool / num / null / array / object には **status を出さない** (構造側は値を
@@ -889,8 +889,8 @@ deny reason のキー名ガイド:
 
 | `classify` | `kind` | 追加で出す情報 |
 |---|---|---|
-| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき) |
-| `regular` | `overwrite` | **書き換え対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用) の案内 |
+| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき。`.envrc` は `.envrc.example`、0.29.0) |
+| `regular` | `overwrite` | **書き換え対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用、`.envrc` は direnv 前提の案内) の案内 |
 | `symlink` | `symlink` | 実体側が書き換わる旨と symlink 運用の確認 |
 | `directory` | `directory` | ディレクトリである旨とパス指定の誤り (末尾要素の取り違え) の確認。0.19.1〜0.27.0 は `special` に畳まれ「FIFO / socket / device」と誤表示していた (内部バックログ) |
 | `special` | `special` | FIFO / socket / device である旨と通常ファイル指定の確認 |
@@ -911,9 +911,13 @@ clause の連結**で作る (`_edit_kind_suggestion`)。手書きの文面を組
 | `Edit` | 対象を絞った置換 | ファイル全体は失われないが機密ファイルへの書き込みは block 固定 |
 | 未確定 (`Edit/Write`) | — | tool 中立 (既存の機密ファイルへの書き込みは block 固定) |
 
-format 軸は tool に依存しない (dotenv → dotenv-cli の merge / それ以外 →
-差分適用 (patch))。`overwrite` の `note:` は tool 中立の「書き換え」にしてある —
-「上書き」と書くと Edit では事実と違うため。
+format 軸は tool に依存しない (dotenv → dotenv-cli の merge / `.envrc` →
+direnv 前提の案内 (`.envrc.example`) / それ以外 → 差分適用 (patch)、3 値。
+0.29.0 で `.envrc` を切り出すまでは `.envrc` も dotenv 側の文面を使っており、
+dotenv-cli merge / `.env.example` という Next.js 慣例を shell script である
+`.envrc` に誤って案内していた、内部バックログ)。`overwrite` の `note:` は
+tool 中立の「書き換え」にしてある — 「上書き」と書くと Edit では事実と違う
+ため。
 
 tool 軸を持つのは `overwrite` だけ。`new` / `symlink` / `directory` / `special`
 の事情は Edit と Write で同じなので文面も同じになる (テストで固定)。

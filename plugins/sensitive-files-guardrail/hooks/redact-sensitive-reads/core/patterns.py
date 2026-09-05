@@ -66,9 +66,6 @@ def _warn_header(token: str) -> None:
     L.log_error("local_patterns_header_invalid", token)
 
 
-_warn_local_oserror = _warn_local  # 後方互換 alias
-
-
 def load_patterns(
     patterns_file: Path | None = None,
     cwd: str = "",

@@ -54,7 +54,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > `uuid` / `aws_access_key` / `stripe_secret` / `stripe_pk` / `github_pat` /
 > `openai_key` を追加)、識別子型 prefix (`sk_live_` / `AKIA` / `ghp_` 等)、
 > value status (`<set>` / `<empty>` / `<placeholder>` / `<short>` / `<long>` /
-> `<looks_truncated>`)、生バイト長 (`length=N`)、placeholder 一致ラベル
+> `<looks_truncated>`)、生の文字数 (`length=N`)、placeholder 一致ラベル
 > (`matched="..."`) を追加。実値そのものは引き続き出さない。詳細は
 > [DESIGN.md](./DESIGN.md#dotenv-minimal-info-の拡張-090-e1--e2)。
 >

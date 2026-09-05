@@ -13,7 +13,7 @@ placeholder ヒント。破棄: 値そのもの、コメント、空行、先頭
   テーション判断に有用。Q3 (REVIEW_TASKS_2026-05-06.md) 採用方針
 - value status: ``<set>`` / ``<empty>`` / ``<placeholder>`` / ``<short>`` /
   ``<long>`` / ``<looks_truncated>`` の組み合わせを併記
-- ``length=<N>``: 値のバイト長 (Q2 採用、bucket せず生長さ)。
+- ``length=<N>``: 値の文字数 (実装は ``len(v)``。Q2 採用、bucket せず生の値)。
   ``<empty>`` のときだけ length を出さない
 - ``matched="..."``: placeholder 一致時に辞書 literal / pattern label を表示
 """
@@ -93,7 +93,7 @@ _MIN_LENGTH_BY_TYPE: dict[str, int] = {
     "email": 6,
 }
 
-# 4096 byte 超は ``<long>`` (デバッグダンプ混入のヒント)。
+# 4096 文字超 (len(v)) は ``<long>`` (デバッグダンプ混入のヒント)。
 _MAX_LENGTH_GENERIC = 4096
 
 
@@ -164,17 +164,17 @@ def _classify_status(
     type_class: str,
     placeholder_label: str | None,
 ) -> tuple[list[str], int]:
-    """前処理済みの値 ``v`` から status タグ群と length (バイト長) を返す。
+    """前処理済みの値 ``v`` から status タグ群と length (文字数) を返す。
 
     status タグは複数併記可:
     - ``<empty>``: 値なし (``KEY=`` または ``""`` / 空白のみ)。単独で返す
     - ``<placeholder>``: placeholder 一致 (``<set>`` の代わりに併記)
     - ``<set>``: それ以外で値あり
     - ``<short>``: 型から想定される最低長を下回る
-    - ``<long>``: 4096 byte 超
+    - ``<long>``: 4096 文字超
     - ``<looks_truncated>``: 末尾が ``...`` / ``<truncated>`` / バックスラッシュ
 
-    length は ``<empty>`` のとき 0、それ以外は前処理後の値のバイト長。
+    length は ``<empty>`` のとき 0、それ以外は前処理後の値の文字数 (``len(v)``)。
     """
     if v == "":
         return (["<empty>"], 0)
@@ -298,7 +298,7 @@ def format_dotenv(info: dict) -> str:
           2. JWT_SECRET    <type=jwt prefix="ey">  <set>  length=287
           3. STRIPE_KEY    <type=stripe_secret prefix="sk_live_">  <set>  length=68
           4. TOKEN         <type=str>  <set>  <looks_truncated>  length=20
-          5. PLACEHOLDER   <type=str>  <placeholder>  matched="your_jwt_secret_here"  length=24
+          5. PLACEHOLDER   <type=str>  <placeholder>  matched="your_*_here"  length=24
           6. EMPTY_KEY     <type=str>  <empty>
         note: real values are not in context. only key names, type, prefix,
               length, status tags, and placeholder hints are returned.
