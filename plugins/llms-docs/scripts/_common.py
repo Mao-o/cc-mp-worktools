@@ -971,7 +971,10 @@ def _strip_heading_markup(title: str) -> str:
     s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)        # link -> text
     s = re.sub(r"<[^>]+>", "", s)                          # html tags
     s = html.unescape(s)
-    s = re.sub(r"[`*_~]+", lambda m: "" if m.group(0) != "_" else "_", s)  # emphasis / code markers
+    # 強調の区切りとして使われた `_` だけを剥がす (単語境界に接する `_..._` の組)。
+    # `snake_case_name` のような識別子内の `_` は見出しの実テキストなので残す
+    s = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)", r"\2", s)
+    s = re.sub(r"[`*~]+", "", s)                          # code / bold / strike markers
     return s.strip()
 
 

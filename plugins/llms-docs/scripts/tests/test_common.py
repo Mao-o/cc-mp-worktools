@@ -503,6 +503,16 @@ class HeadingAnchorSlugMarkupTest(unittest.TestCase):
                          "using-query-and-claudesdkclient")
         self.assertEqual(_common.heading_anchor_slug("snake_case_name stays"), "snake_case_name-stays")
 
+    def test_underscore_emphasis_delimiters_are_removed(self):
+        """`_word_` の下線は強調区切りなので slug から除く。識別子内の `_` は残す
+        (マージ前レビューの指摘)。"""
+        self.assertEqual(_common.heading_anchor_slug("_Config_ options"), "config-options")
+        self.assertEqual(_common.heading_anchor_slug("Use __strong__ words"), "use-strong-words")
+        self.assertEqual(
+            _common.heading_anchor_slug("_Config_ for snake_case_name", style="devsite"),
+            "config_for_snake_case_name",
+        )
+
 
 class HeadingAnchorSlugDevsiteStyleTest(unittest.TestCase):
     """firebase.google.com is Google DevSite, not GitHub/Mintlify — DevSite
