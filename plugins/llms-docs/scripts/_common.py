@@ -1397,6 +1397,54 @@ def check_join_rate(label: str, joinable: int, total: int, *,
 
 
 # ---------------------------------------------------------------------------
+# Search ranking (shared by the ``search`` subcommand of all three scripts)
+# ---------------------------------------------------------------------------
+
+# Pages whose body text reliably overwhelms keyword searches (release notes,
+# changelogs) get pushed below higher-signal pages in search results.
+DEPRIORITIZE_PAGE_PATTERNS = ("changelog", "release-notes", "release notes")
+
+
+def is_low_priority(title: str) -> bool:
+    """True if *title* names a changelog / release-notes style page."""
+    t = (title or "").lower()
+    return any(p in t for p in DEPRIORITIZE_PAGE_PATTERNS)
+
+
+def add_include_changelog_priority_arg(parser) -> None:
+    """Add ``--include-changelog-priority`` (opt out of the deprioritise)."""
+    parser.add_argument(
+        "--include-changelog-priority", action="store_true",
+        help="Do not deprioritize Changelog / release-notes pages",
+    )
+
+
+def search_rank_key(result: dict, *, include_changelog_priority: bool = False) -> tuple:
+    """Sort key for ``search`` results, identical across all three scripts.
+
+    Order: changelog-style pages last (unless *include_changelog_priority*),
+    then most body hits, then highest index score, then lowest ``doc_idx``
+    (stable, deterministic tie-break). Body hits outrank the index score
+    because the index score only reflects title/description keywords while
+    body hits reflect how much of the page is actually about the query —
+    a page that merely names the term in its title but never discusses it
+    should not outrank a page whose body covers it (internal backlog qwk).
+
+    *result* needs ``title``, ``doc_idx``, ``body_hits["total_matches"]``
+    and optionally ``index_score`` (``None`` for body-only fallback rows).
+    """
+    bucket = 0 if include_changelog_priority else (
+        1 if is_low_priority(result.get("title", "")) else 0
+    )
+    return (
+        bucket,
+        -result["body_hits"]["total_matches"],
+        -(result.get("index_score") or 0),
+        result["doc_idx"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Metadata header (used by ``cmd_content``)
 # ---------------------------------------------------------------------------
 

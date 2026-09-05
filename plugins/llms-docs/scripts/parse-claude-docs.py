@@ -28,6 +28,7 @@ from _common import (
     FenceTracker,
     add_cache_dir_arg,
     add_heading_path_arg,
+    add_include_changelog_priority_arg,
     add_max_age_arg,
     add_max_chars_arg,
     add_max_snippet_chars_arg,
@@ -42,6 +43,7 @@ from _common import (
     fetch_url,
     format_heading_path_for_display,
     full_corpus_body_search,
+    is_low_priority,
     load_lines,
     next_hint,
     normalize_doc_url,
@@ -50,6 +52,7 @@ from _common import (
     print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    search_rank_key,
     section_url_anchor,
     truncate_content,
 )
@@ -91,14 +94,9 @@ def _source_hint_args(args) -> tuple:
         return ()
     return ("--source", args.source)
 
-# Pages whose body text reliably overwhelms keyword searches (release notes,
-# changelogs) get pushed below higher-signal pages in search results.
-DEPRIORITIZE_PAGE_PATTERNS = ("changelog", "release-notes", "release notes")
-
-
-def _is_low_priority(title: str) -> bool:
-    t = (title or "").lower()
-    return any(p in t for p in DEPRIORITIZE_PAGE_PATTERNS)
+# Changelog / release-notes deprioritisation lives in ``_common`` so all
+# three scripts rank identically (``is_low_priority`` / ``search_rank_key``).
+_is_low_priority = is_low_priority
 
 
 # ---------------------------------------------------------------------------
@@ -1027,16 +1025,10 @@ def _search_one_source(args, source_key: str) -> list[dict]:
                 "body_only": True,
             })
 
-    # Phase 4: rank, applying changelog deprioritise unless opted out
-    def _sort_key(r):
-        return (
-            (0 if args.include_changelog_priority else
-             1 if _is_low_priority(r["title"]) else 0),
-            -(r["index_score"] or 0),
-            -r["body_hits"]["total_matches"],
-            r["doc_idx"],
-        )
-    results.sort(key=_sort_key)
+    # Phase 4: rank with the shared key (changelog bucket, body hits, index
+    # score, doc_idx) — identical to ai-sdk / firebase.
+    results.sort(key=lambda r: search_rank_key(
+        r, include_changelog_priority=args.include_changelog_priority))
     return results
 
 
@@ -1244,10 +1236,7 @@ def main():
     p_search_body.add_argument("--max-hits", type=int, default=5,
                                help="Max hits to display per page (default: 5)")
     add_max_snippet_chars_arg(p_search_body)
-    p_search_body.add_argument(
-        "--include-changelog-priority", action="store_true",
-        help="Do not deprioritize Changelog / release-notes pages",
-    )
+    add_include_changelog_priority_arg(p_search_body)
     p_search_body.set_defaults(func=cmd_search_content)
 
     # search (smart: llms.txt ranking + URL-joined body drill-in)
@@ -1279,10 +1268,7 @@ def main():
     p_search.add_argument("--context", type=int, default=2,
                           help="Context lines around each hit (default: 2)")
     add_max_snippet_chars_arg(p_search)
-    p_search.add_argument(
-        "--include-changelog-priority", action="store_true",
-        help="Do not deprioritize Changelog / release-notes pages",
-    )
+    add_include_changelog_priority_arg(p_search)
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

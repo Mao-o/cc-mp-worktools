@@ -34,6 +34,7 @@ from _common import (
     FetchError,
     add_cache_dir_arg,
     add_heading_path_arg,
+    add_include_changelog_priority_arg,
     add_max_age_arg,
     add_max_chars_arg,
     add_max_snippet_chars_arg,
@@ -53,6 +54,7 @@ from _common import (
     print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    search_rank_key,
     section_url_anchor,
     truncate_content,
 )
@@ -550,11 +552,8 @@ def cmd_search(args):
             "body_hits": body_hits,
         })
 
-    results.sort(key=lambda r: (
-        -r["body_hits"]["total_matches"],
-        -r["index_score"],
-        r["doc_idx"],
-    ))
+    results.sort(key=lambda r: search_rank_key(
+        r, include_changelog_priority=args.include_changelog_priority))
 
     for r in results:
         hits = r["body_hits"]
@@ -695,6 +694,7 @@ def main():
     p_search.add_argument("--context", type=int, default=2,
                           help="Context lines around each hit (default: 2)")
     add_max_snippet_chars_arg(p_search)
+    add_include_changelog_priority_arg(p_search)
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

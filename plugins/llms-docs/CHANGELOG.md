@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.24.0] - 2026-09-06
+
+### `search` のランキング順を 3 script で統一 (qwk)
+
+**ユーザー可視の並び順変更。** これまで claude-docs は (changelog 除外, index_score, body hits)、
+ai-sdk / firebase は (body hits, index_score) で、changelog 除外は claude-docs にしか無かった。
+`_common.search_rank_key()` に一本化し、3 script とも
+**(changelog / release-notes バケット → 本文 hits 数 → index score → doc_idx)** で並べる。
+
+- claude-docs: index_score と body hits の優先順位を入れ替えた。title に語を含むだけの
+  ページより、本文でその話題を扱うページが上に来る (例: "prompt caching" で
+  「Tool use with prompt caching」(index 20) が hits の多い本命ページの下へ)。候補集合
+  (`--top-n`) は不変で、順序だけが変わる
+- ai-sdk / firebase: `--include-changelog-priority` フラグを新設し、changelog /
+  release-notes 系タイトルを既定で末尾に回す (`is_low_priority` を `_common` に移設)
+- `search-content` は変更なし (claude-docs は従来から同じバケット + hits 順、ai-sdk /
+  firebase は fetch 順にストリーム表示する設計のため対象外)
+- 検証: 同一 live snapshot で main と比較。claude-docs 7 クエリ中 6 件で順序のみ変化
+  (候補集合は同一)、ai-sdk 5 クエリ・firebase 5 クエリは順序不変 (firebase 1 件で候補が
+  入れ替わったのは page fetch の成否差で、ランキング変更由来ではない)
+- テスト: `search_rank_key` の単体 5 件 + ai-sdk CLI 2 件を追加 (263 tests)。
+  SKILL.md 3 本に並び順とフラグを明記
+
 ## [0.23.1] - 2026-09-06
 
 ### 解析層の P3 バグ 3 件をまとめて修正 (2wd.27 / 2wd.28 / 2wd.16)

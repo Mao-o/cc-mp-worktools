@@ -551,5 +551,39 @@ class SectionsHeadingPathTest(unittest.TestCase):
         self.assertNotIn("--cache-dir", out)
 
 
+class SearchRankingTest(unittest.TestCase):
+    """ai-sdk ``search`` uses the shared ranking: changelog-style docs sink
+    below a doc with fewer hits, and ``--include-changelog-priority`` lifts
+    them back (the flag previously existed only in claude-docs)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "---\ntitle: Changelog\ndescription: streamText updates\n---\n\n# Changelog\n\n"
+            "## 5.0\nstreamText a\nstreamText b\nstreamText c\nstreamText d\n\n"
+            "---\ntitle: streamText\ndescription: streamText reference\n---\n\n# streamText\n\n"
+            "## Usage\nstreamText once.\n",
+        )
+
+    def _titles(self, *extra):
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "search", "streamText", "--cache-dir", self.tmp, *extra,
+        ])
+        self.assertEqual(code, 0, err)
+        return [l for l in out.splitlines() if l.startswith("[")]
+
+    def test_changelog_sinks_by_default(self):
+        titles = self._titles()
+        self.assertEqual(len(titles), 2)
+        self.assertIn("streamText", titles[0])
+        self.assertIn("Changelog", titles[1])
+
+    def test_flag_restores_hit_order(self):
+        titles = self._titles("--include-changelog-priority")
+        self.assertIn("Changelog", titles[0])
+
+
 if __name__ == "__main__":
     unittest.main()

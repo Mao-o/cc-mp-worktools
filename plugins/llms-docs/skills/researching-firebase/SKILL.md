@@ -162,7 +162,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits |
+| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits。並び順は本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除) |
 | `search-index` | `<query> [--limit N]` | title/description でキーワード検索（候補だけ取得） |
 | `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
 | `fetch-index` | `[--offset N] [--limit N]` | page index を paginated 表示（default --limit 100、フォールバック用） |
