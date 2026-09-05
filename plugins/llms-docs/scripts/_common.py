@@ -955,6 +955,58 @@ def format_heading_path_for_display(heading_path: str) -> str:
     return heading_path
 
 
+def heading_anchor_slug(title: str) -> str:
+    """Best-effort GitHub/Mintlify-compatible anchor slug for one heading title.
+
+    Applies the same three transforms both platforms use for auto-generated
+    heading ids: lowercase, strip characters that aren't a letter/digit/
+    underscore/hyphen/space, then collapse whitespace runs to a single
+    hyphen. This does **not** replicate every platform edge case — most
+    notably neither platform's numeric ``-1``/``-2`` suffix for a page with
+    two identically-titled headings is applied here, since that requires
+    knowing every other heading on the page rather than just this one
+    title. Callers display the result as a best-effort anchor, not a
+    guarantee that it matches the live page exactly.
+
+    Returns ``""`` if *title* normalizes to nothing (e.g. an all-symbol
+    heading) — callers should treat that as "no anchor available".
+    """
+    s = re.sub(r"[^\w\s-]", "", title.strip().lower())
+    return re.sub(r"\s+", "-", s).strip("-")
+
+
+def section_url_anchor(url: str, heading_path: str) -> str:
+    """``  [<url>#<anchor>]`` suffix for a ``Section:`` search result line.
+
+    Bracketed to match this tool's existing annotation convention on these
+    same result lines (``[partial match]``, the ``"(top)"`` suffix's
+    ``[before first heading]``) rather than reusing ``→``, which the
+    snippet lines directly below already use as the per-line hit marker.
+
+    Returns ``""`` (no suffix) when there's no page *url* to anchor into,
+    when *heading_path* is the ``"(top)"`` sentinel (body text above the
+    first heading has no heading element to anchor to), or when the leaf
+    heading title normalizes to an empty slug. The anchor is derived from
+    only the leaf segment of *heading_path* (the text after the last
+    ``"/"``) since that's the actual heading rendered on the page —
+    ``heading_path`` itself is this tool's internal breadcrumb, not
+    something that appears in the page as one combined string.
+
+    *url* must already be the human-facing page URL (not e.g. Firebase's
+    raw ``.md.txt`` fetch URL) — a ``#fragment`` on a plaintext response
+    resolves to nothing. Canonicalizing that is the caller's job (each
+    ``parse-*.py`` already has its own notion of "the real page URL" for
+    its source).
+    """
+    if not url or heading_path == "(top)":
+        return ""
+    leaf = heading_path.rsplit("/", 1)[-1]
+    slug = heading_anchor_slug(leaf)
+    if not slug:
+        return ""
+    return f"  [{url}#{slug}]"
+
+
 def _build_section_results(section_hits, sections, body_lines, keywords,
                            min_coverage, context_lines, max_snippet_chars):
     """Build result list from sections matching >= *min_coverage* keywords."""

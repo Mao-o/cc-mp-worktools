@@ -83,6 +83,66 @@ class FirebaseCliTest(unittest.TestCase):
         self.assertIn("search-content", out)
 
 
+class SectionUrlAnchorIntegrationTest(unittest.TestCase):
+    """'Section:' lines in search / search-content must carry a
+    '[<url>#<anchor>]' suffix derived from the leaf heading, per the 2026-08
+    audit's design principle that search results include a source URL +
+    anchor. The anchor must point at the human-facing page
+    (".../query-limit", no ".md.txt") rather than the raw markdown fetch URL
+    shown on the "URL:" line above it — a #fragment on a plaintext response
+    resolves to nothing, so the two URLs are intentionally different here."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "firebase-llms.txt").write_text(
+            "- [Firestore Query Limits](https://firebase.google.com/docs/firestore/query-limit.md.txt): Limits on queries\n",
+            encoding="utf-8",
+        )
+        pages_dir = Path(self.tmp) / "firebase-docs"
+        pages_dir.mkdir()
+        url = "https://firebase.google.com/docs/firestore/query-limit.md.txt"
+        filename = parse_firebase._url_to_cache_filename(url)
+        (pages_dir / filename).write_text(
+            "# Firestore Query Limits\n\n## Limits\nMax 100 zzzonlyinbody results per query.\n",
+            encoding="utf-8",
+        )
+
+    def test_search_content_section_line_has_url_anchor(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search-content", "zzzonlyinbody",
+            "--page-ref", "0", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "Section: Limits  (x1)  "
+            "[https://firebase.google.com/docs/firestore/query-limit#limits]",
+            out,
+        )
+        # The raw fetch URL (still correct on the "URL:" line) must not leak
+        # into the anchor — a #fragment on the plaintext .md.txt response
+        # would resolve to nothing.
+        self.assertNotIn("query-limit.md.txt#limits", out)
+
+    def test_search_section_line_has_url_anchor(self):
+        # 'query' matches the fixture title ("Firestore Query Limits", for
+        # index ranking) *and* the body line under '## Limits' ("...per
+        # query."), so 'search' both candidates the page via the index and
+        # finds a body hit to attach a Section: line to — unlike
+        # 'zzzonlyinbody', which is body-only and firebase's 'search' does
+        # not fall back to a full-corpus body scan for (see module docstring).
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "search", "query",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "[https://firebase.google.com/docs/firestore/query-limit#limits]",
+            out,
+        )
+        self.assertNotIn("query-limit.md.txt#limits", out)
+
+
 class SearchContentMaxSnippetCharsTest(unittest.TestCase):
     """search-content used to have no --max-snippet-chars at all (unlike
     search) — every snippet was printed in full, however long. Confirms the

@@ -452,6 +452,62 @@ class FormatHeadingPathForDisplayTest(unittest.TestCase):
         )
 
 
+class HeadingAnchorSlugTest(unittest.TestCase):
+    def test_lowercases(self):
+        self.assertEqual(_common.heading_anchor_slug("PreToolUse"), "pretooluse")
+
+    def test_whitespace_becomes_hyphen(self):
+        self.assertEqual(_common.heading_anchor_slug("Hook events"), "hook-events")
+
+    def test_symbols_are_stripped(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Client (Advanced)!"), "client-advanced"
+        )
+        self.assertEqual(_common.heading_anchor_slug("What's New?"), "whats-new")
+
+    def test_existing_hyphens_are_preserved(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Multi-Word-Title"), "multi-word-title"
+        )
+
+    def test_multiple_spaces_collapse_to_one_hyphen(self):
+        self.assertEqual(_common.heading_anchor_slug("Foo   Bar"), "foo-bar")
+
+    def test_leading_trailing_whitespace_and_symbols_are_trimmed(self):
+        self.assertEqual(_common.heading_anchor_slug("  Step 1: Setup  "), "step-1-setup")
+
+    def test_all_symbol_heading_normalizes_to_empty(self):
+        self.assertEqual(_common.heading_anchor_slug("---"), "")
+        self.assertEqual(_common.heading_anchor_slug("???"), "")
+
+
+class SectionUrlAnchorTest(unittest.TestCase):
+    def test_appends_url_and_slug_from_leaf_heading(self):
+        self.assertEqual(
+            _common.section_url_anchor(
+                "https://code.claude.com/docs/hooks", "Hook events/PreToolUse"
+            ),
+            "  [https://code.claude.com/docs/hooks#pretooluse]",
+        )
+
+    def test_uses_only_the_leaf_segment_of_a_nested_path(self):
+        # The anchor is the leaf heading actually rendered on the page —
+        # the full breadcrumb path is this tool's internal display, not
+        # something that appears in the page as one combined string.
+        result = _common.section_url_anchor("https://example.com/p", "A/B/C")
+        self.assertTrue(result.endswith("#c]"))
+
+    def test_no_url_means_no_suffix(self):
+        self.assertEqual(_common.section_url_anchor("", "Hooks/Configuration"), "")
+        self.assertEqual(_common.section_url_anchor(None, "Hooks/Configuration"), "")
+
+    def test_top_sentinel_has_no_anchor(self):
+        self.assertEqual(_common.section_url_anchor("https://example.com/p", "(top)"), "")
+
+    def test_all_symbol_leaf_heading_produces_no_suffix(self):
+        self.assertEqual(_common.section_url_anchor("https://example.com/p", "???"), "")
+
+
 class SearchContentInBodyTest(unittest.TestCase):
     def _body(self):
         return [

@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.3.6"
+  version: "3.3.7"
 ---
 
 # AI SDK ドキュメント調査
@@ -180,7 +180,10 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 調査の性質に応じて柔軟に構成してよい。固定セクションは強制しない — 複数 API の比較では表組み、複数引用の比較では blockquote が読みやすい。最低限満たすべき要素:
 
 - **発見事項**: 何が分かったか (見出し名は任意)
-- **引用元**: 使用したドキュメントの URL またはタイトル + セクション (verbatim 引用は必ず出典を併記)
+- **引用元**: 使用したドキュメントの URL またはタイトル + セクション (verbatim 引用は必ず出典を併記)。
+  AI SDK の llms-full.txt には URL 自体が無いため (`page_ref の指定方法` 参照)、`search`/`search-content`
+  の `Section:` 行に `URL#anchor` は付かない (claude-docs / firebase と異なり対象外) — 引用元は
+  タイトル + heading_path で表す
 - **コード例**: ドキュメントから直接引用したもののみ (該当する場合)
 - **注意事項**: 制約・バージョン要件・既知の罠 (該当する場合)
 

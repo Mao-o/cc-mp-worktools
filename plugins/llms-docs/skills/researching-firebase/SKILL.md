@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.1.6"
+  version: "2.1.7"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -94,6 +94,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search "<キーワー�
 title + description でスコアリングして上位 5 件（`--top-n N` で変更可）を選び、
 各候補ページを on-demand fetch して本文を keyword 検索、heading_path + スニペットを返す。
 結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
+各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの
+GitHub/Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい —
+同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。
 
 初回は top N 件分の HTTP fetch が走るため数秒～十数秒かかる。2 回目以降は cache hit で高速。
 

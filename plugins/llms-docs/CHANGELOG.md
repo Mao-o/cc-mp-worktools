@@ -2,6 +2,66 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.23.0] - 2026-09-05
+
+### 検索結果の `Section:` 行に `URL#anchor` を付与 (claude-docs / firebase)
+
+2026-08 精査で指摘された設計原則 (検索結果は「ソース URL + anchor」を含めるべき) の
+未充足を解消。`search` / `search-content` の `Section:` 行は heading_path のみで
+anchor が無く、ページ URL もエントリ単位にしか出ないため、引用元を「URL + セクション」
+で答える側が anchor を自作して誤る余地があった。
+
+- `_common.py` に `heading_anchor_slug()` (見出しタイトルから GitHub/Mintlify 互換の
+  best-effort slug を生成: 小文字化・空白→ハイフン・記号除去) と `section_url_anchor()`
+  (URL + heading_path の末尾セグメントから `  [<url>#<slug>]` を組み立て) を追加。
+  claude-docs / firebase の `search` / `search-content` 計 4 箇所の `Section:` 行に適用。
+  `→` ではなく角括弧にしたのは、同じ結果行の直下でスニペットの1行ヒットマーカーとして
+  既に `→` を使っており、1 文字に 2 つの意味を持たせないため (`[partial match]` /
+  `[before first heading]` の既存アノテーション規約に合わせた)
+- anchor は heading_path の**末尾セグメントのみ**から生成する (実際にページに描画される
+  見出しはそれ単体であり、内部の breadcrumb 表示である heading_path 全体ではないため)。
+  同名見出しがページ内に複数ある場合の GitHub/Mintlify 側の `-1`/`-2` 連番までは
+  再現しない best-effort であることを 3 SKILL.md に明記
+- **firebase は index の生 URL (`.../query-limit.md.txt`、`URL:` 行に表示される raw
+  markdown fetch URL) ではなく、`_entry_url_for_match()` (既存の page_ref 一致判定
+  ヘルパーを流用) で正規化した人間向けページ URL (`.../query-limit`) を anchor の
+  base にする**。プレーンテキスト応答に `#fragment` を付けても解決しないため、
+  誤った URL を組み立てて配布しないよう修正前に実機確認した (自己レビューで発見)
+- **ai-sdk は対象外**: llms-full.txt に URL 自体が無く anchor を組み立てられないため
+  (`researching-ai-sdk` SKILL.md に明記)。解析層 (`split_documents` / URL 抽出) には
+  一切手を入れていない — 既存の `doc["source_url"]` / `entry["url"]` を出力整形で
+  使っているだけ
+
+回帰テスト 16 件追加 (`test_common.py`: `heading_anchor_slug`/`section_url_anchor` の
+fixture テスト 12 件、`test_parse_claude_docs.py`/`test_parse_firebase.py`: `search`/
+`search-content` の CLI 統合テスト計 4 件)。
+
+### テストを 1 件だけ指定して実行できない問題を修正 (共有ヘルパーが解決されない)
+
+`scripts/tests/` 配下の共有ヘルパー `_loader` をトップレベル import (副作用専用) で
+読み込んでいたため、`python3 -m unittest discover scripts/tests` (ディレクトリ探索)
+は通るが、`python3 -m unittest scripts.tests.test_x.Class.method` や
+`pytest scripts/tests/test_x.py::Class::method` (モジュールパス指定) は
+`ModuleNotFoundError: No module named '_loader'` になっていた (内部バックログで
+6 plugin 横断の共通症状として追跡)。
+
+`scripts/tests/__init__.py` (既存は空) に `scripts/tests/` を sys.path へ追加する
+初期化コードを追加。呼び出し側 (CI / README の実行手順) は一切変更していない。
+README にクラス単位・メソッド単位で 1 件だけ指定する実行例を追記。
+
+回帰テスト 3 件追加 (`test_single_test_invocation.py`: unittest 単体クラス/メソッド指定
++ pytest node id 指定をサブプロセスで実際に実行し確認)。
+
+### plugin manifest の description を日本語に統一
+
+6 plugin 中 llms-docs だけ英語のままだった `plugin.json` の `description` を、
+`marketplace.json` 側の既存エントリと同じ日本語表記に統一した。
+
+### 検証
+
+`claude plugin validate plugins/llms-docs` warning 0。224 tests, all green
+(前回 205 + 上記 19)。
+
 ## [0.22.1] - 2026-08-28
 
 ### 新規追加した --file が follow-up hint から脱落し別ドキュメントを指す事故を修正 (0.22.0 の追いコミット)

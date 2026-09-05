@@ -136,6 +136,47 @@ class CmdSearchFallbackTest(unittest.TestCase):
         self.assertNotIn("body-only", out)
 
 
+class SectionUrlAnchorIntegrationTest(unittest.TestCase):
+    """'Section:' lines in search / search-content must carry a '<url>#<anchor>'
+    suffix derived from the leaf heading, per the 2026-08 audit's design
+    principle that search results include a source URL + anchor."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+            "# Hooks\n"
+            "Source: https://example.com/hooks\n"
+            "\n"
+            "## Hook events\n"
+            "\n"
+            "### PreToolUse\n"
+            "Runs before a tool call. Configure hook matchers here.\n",
+        )
+
+    def test_search_content_section_line_has_url_anchor(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-content", "matchers",
+            "--page-ref", "hooks", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "Section: Hook events/PreToolUse  (x1)  "
+            "[https://example.com/hooks#pretooluse]",
+            out,
+        )
+
+    def test_search_section_line_has_url_anchor(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search", "matchers",
+            "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[https://example.com/hooks#pretooluse]", out)
+
+
 class CmdSearchFallbackDoesNotDropIndexMatchesTest(unittest.TestCase):
     """A page correctly ranked by title, but with zero literal body hits,
     must still appear (as "index match only") — the fallback must APPEND

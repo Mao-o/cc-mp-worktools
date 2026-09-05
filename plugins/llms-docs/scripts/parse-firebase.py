@@ -53,6 +53,7 @@ from _common import (
     print_subsection_hints,
     search_content_in_body,
     search_index_entries,
+    section_url_anchor,
     truncate_content,
 )
 
@@ -460,7 +461,11 @@ def cmd_search_content(args):
         print(f"    ({hits['total_matches']} hits in this page, showing {shown}){mode_note}")
         for r in hits["results"]:
             kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}")
+            # Anchor into the human-facing page, not the raw .md.txt fetch
+            # URL shown above as "URL:" — a #fragment on the plaintext
+            # response resolves to nothing.
+            url_anchor = section_url_anchor(_entry_url_for_match(entry["url"]), r["heading_path"])
+            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{url_anchor}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
             print()
@@ -554,7 +559,11 @@ def cmd_search(args):
             print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
             for s in hits["results"]:
                 kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}")
+                # Anchor into the human-facing page, not the raw .md.txt
+                # fetch URL shown above as "URL:" — a #fragment on the
+                # plaintext response resolves to nothing.
+                url_anchor = section_url_anchor(_entry_url_for_match(r["url"]), s["heading_path"])
+                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
                 print()
