@@ -820,6 +820,189 @@ class TestInfoCommandsReadonly(BaseWithTmpProject):
         self.assertIsNone(dispatch("firebase --version", str(self.project_dir)))
 
 
+class TestSwitchStandaloneNote(BaseWithTmpProject):
+    """切替を案内する deny には「単独で実行せよ」の注記が付く。
+
+    案内された切替を、切替後に実行したいコマンドと連結して打つと連結先が
+    切替前の状態で検証されて再び deny される。注記が無いと案内どおりに打った
+    つもりの往復が起きる (マージ前レビューの指摘ではなく実運用で観測)。
+    """
+
+    _MISMATCH = (
+        "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+        " — 切り替え: gh auth switch --hostname github.com --user Mao-o"
+    )
+
+    def _reason(self, command: str, verify_value: str) -> str:
+        with mock.patch("services.github.verify", return_value=verify_value):
+            result = dispatch(command, str(self.project_dir))
+        self.assertIsNotNone(result)
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_switch_hint_deny_carries_standalone_note(self):
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason("gh pr create", self._MISMATCH)
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        # 注記は検出コマンド行の後、末尾側に 1 回だけ
+        self.assertEqual(reason.count("案内された形のまま単独で実行してください"), 1)
+        self.assertLess(reason.index("(検出コマンド:"), reason.index("案内された形のまま"))
+
+    def test_chained_switch_and_write_is_denied_with_note(self):
+        """案内どおりの切替を write と連結した形: 切替は self-remediation だが
+        連結先が切替前の状態で検証され deny。その deny にも注記が付く。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh auth switch --hostname github.com --user Mao-o && gh pr create",
+            self._MISMATCH,
+        )
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        self.assertRegex(reason, r"\(検出コマンド: .*gh pr create\)")
+
+    def test_login_guidance_carries_note(self):
+        """ログイン案内も remediation コマンド (readonly) で、連結すると同じ往復に
+        なるため注記を付ける。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            "GitHub [github.com]: このホストにログインしていません — "
+            "gh auth login --hostname github.com --skip-ssh-key を実行してください。",
+        )
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_absent_for_config_shape_error(self):
+        """設定ファイルの型不正 (remediation コマンドの案内なし) には注記を付けない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
+            "指定してください (現在: int)。",
+        )
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_is_not_extracted_as_guided_command(self):
+        """注記本文が remediation contract の案内コマンド抽出に拾われない
+        (拾われると allow 経路の無いコマンドとして contract テストが落ちる)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason("gh pr create", self._MISMATCH)
+        cmds = _guided_commands(reason)
+        self.assertEqual(cmds, ["gh auth switch --hostname github.com --user Mao-o"])
+
+
+    def test_unset_state_guidance_carries_note(self):
+        """未設定系 (「<cmd> を実行してください」) の案内にも注記が付く。"""
+        self._write_accounts({"gcloud": {"project": "my-proj"}})
+        with mock.patch(
+            "services.gcloud.verify",
+            return_value="GCP: アクティブプロジェクトが設定されていません。"
+            "gcloud config set project my-proj を実行してください。",
+        ):
+            result = dispatch("gcloud run deploy x", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+
+    def test_user_controlled_marker_text_does_not_trigger_note(self):
+        """検出コマンド (user 入力) に文言契約の語が含まれても、verify() の出力が
+        remediation を案内していなければ注記は付かない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create --title '切り替え: を実行してください'",
+            'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
+            "指定してください (現在: int)。",
+        )
+        self.assertIn("切り替え: を実行してください", reason)  # 検出コマンド行に残る
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+
+    def test_install_advice_does_not_trigger_note(self):
+        """CLI 未インストール案内 (`brew install gh を実行してください`) は cloud CLI の
+        切替 / ログインではないので注記を付けない (マージ前レビューの指摘)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。",
+        )
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_every_service_declares_remediation_patterns(self):
+        """全 service が REMEDIATION_PATTERNS を持ち、空でなく、コンパイルできる。"""
+        import re as _re
+        from services import ALL
+        for svc in ALL:
+            with self.subTest(service=svc.ACCOUNT_KEY):
+                pats = getattr(svc, "REMEDIATION_PATTERNS", None)
+                self.assertIsInstance(pats, tuple)
+                self.assertTrue(pats)
+                for p in pats:
+                    _re.compile(p)
+
+    def test_probe_name_only_diagnostic_does_not_trigger_note(self):
+        """コマンド名だけの診断文 (`firebase use がタイムアウトしました`) は案内ではない
+        (マージ前レビューの指摘)。"""
+        self._write_accounts({"firebase": "my-proj"})
+        with mock.patch(
+            "services.firebase.verify",
+            return_value="Firebase: firebase use がタイムアウトしました。"
+            "再試行するか、ネットワーク接続を確認してください。",
+        ):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_allows_guided_chain_and_forbids_appending_original(self):
+        """firebase の案内 `firebase login && firebase use <x>` 自体は許可される連結。
+        注記はそれを禁じず、元のコマンドの連結だけを禁じる文面であること。"""
+        self._write_accounts({"firebase": "my-proj"})
+        with mock.patch(
+            "services.firebase.verify",
+            return_value="Firebase: 現在のプロジェクトを取得できません。"
+            "firebase login && firebase use my-proj を実行してください。",
+        ):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        self.assertIn("元のコマンド (検出コマンド) を同じコマンド行に連結すると", reason)
+        # 案内された連結形は実際に allow される (readonly login + self-remediation use)
+        with mock.patch("services.firebase.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch("firebase login && firebase use my-proj", str(self.project_dir))
+            )
+        v.assert_not_called()
+
+
+    def test_aws_uses_service_specific_note(self):
+        """AWS の remediation はインライン env (元のコマンドに付ける) なので、汎用の
+        「単独で実行」注記ではなく AWS 専用文面を出す (マージ前レビューの指摘)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch(
+            "services.aws.verify",
+            return_value="AWS アカウント不一致: 現在=999999999999, 期待=123456789012\n"
+            "切り替え手順 (環境に応じて選択):\n"
+            "  AWS_PROFILE=prod aws ...  # 行頭インライン指定\n"
+            "  aws sso login --profile prod  # SSO 再ログイン",
+        ):
+            result = dispatch("aws s3 cp a s3://b", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて", reason)
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+        # 注記は案内本文が出し分けるコマンド名 (aws configure 等) を固定で書かない
+        # (不一致時は configure を案内しないため食い違う。マージ前レビューの指摘)
+        self.assertNotIn("aws configure", reason.split("※", 1)[1])
+
+    def test_mixed_services_emit_each_note_once(self):
+        """gh と aws が同時に不一致なら、汎用注記と AWS 注記がそれぞれ 1 回ずつ。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.github.verify", return_value=self._MISMATCH), mock.patch(
+            "services.aws.verify",
+            return_value="AWS アカウント不一致: 現在=9, 期待=1\n  AWS_PROFILE=prod aws ...",
+        ):
+            result = dispatch(
+                "gh pr create && aws s3 cp a s3://b", str(self.project_dir)
+            )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertEqual(reason.count("案内された形のまま単独で実行してください"), 1)
+        self.assertEqual(reason.count("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて"), 1)
+
+
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
     """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
     したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
@@ -1225,6 +1408,16 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
     def _assert_guidance_is_allowed(self, reason: str, run_mock) -> list[str]:
         cmds = _guided_commands(reason)
         self.assertTrue(cmds, f"no command extracted from:\n{reason}")
+        # verify() 由来の deny (検出コマンド行を持つ) が案内コマンドを含むなら
+        # 「単独で実行せよ」の注記が必ず付く (dispatcher の文言契約
+        # _REMEDIATION_MARKERS が各 service の案内文を取りこぼしていないことを
+        # ここで機械的に確認する)。accounts 未設定 deny は verify 前に返るので対象外。
+        if "(検出コマンド:" in reason:
+            self.assertTrue(
+                "案内された形のまま単独で実行してください" in reason
+                or "AWS_PROFILE=<profile> は元のコマンドの行頭に付けて" in reason,
+                f"remediation note missing:\n{reason}",
+            )
         for cmd in cmds:
             with self.subTest(guided=cmd):
                 if cmd.startswith("AWS_PROFILE="):

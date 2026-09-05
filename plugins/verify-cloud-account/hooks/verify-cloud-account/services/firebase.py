@@ -74,6 +74,12 @@ GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interacti
 # 該当が無ければ project ID そのものとして使う (requireProject)。
 CONTEXT_OPTIONS = {"--project": "project", "-P": "project"}
 ACCOUNT_KEY = "firebase"
+
+# deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。
+# dispatcher は verify() の返り値にこれが一致するときだけ「単独で実行せよ」の注記を
+# 付ける。コマンド名だけの言及 (「firebase use がタイムアウトしました」等の診断文) や
+# インストール案内・設定ファイルの型不正には一致させない。
+REMEDIATION_PATTERNS = (r"firebase use\s+[A-Za-z0-9_.<>-]+", r"firebase login\b")
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
     "firebase use で現在値を確認可。"
