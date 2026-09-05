@@ -965,7 +965,11 @@ def _strip_heading_markup(title: str) -> str:
     into the slug as ``hookshttpsexamplecomhooks``), HTML tags are dropped,
     entities are decoded (``&amp;`` -> ``&``, which the slug filter then
     removes like any other symbol), and emphasis / code markers are removed
-    while their content is kept. Merge-review finding.
+    while their content is kept. Handled forms (everything else is best-
+    effort and documented as such in the skills): inline / reference-style
+    links, images, footnote markers, HTML tags, HTML entities, code spans
+    (contents kept verbatim), `*`/`~` markers and word-boundary `_`
+    emphasis. Merge-review findings.
     """
     # コードスパンの中身は逐語 (レンダリングでもそのまま表示される) なので、
     # `<name>` のような角括弧を HTML タグ除去から守る。先に取り出して
@@ -978,7 +982,9 @@ def _strip_heading_markup(title: str) -> str:
 
     s = re.sub(r"`([^`]*)`", _stash, title)
     s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)       # image -> alt
-    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)        # link -> text
+    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)        # inline link -> text
+    s = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", s)      # reference link [text][ref] / [text][] -> text
+    s = re.sub(r"\[\^[^\]]*\]", "", s)                     # footnote marker [^1]
     s = re.sub(r"<[^>]+>", "", s)                          # html tags
     s = html.unescape(s)
     s = re.sub(r"\x00(\d+)\x00", lambda m: code_spans[int(m.group(1))], s)

@@ -503,6 +503,15 @@ class HeadingAnchorSlugMarkupTest(unittest.TestCase):
                          "using-query-and-claudesdkclient")
         self.assertEqual(_common.heading_anchor_slug("snake_case_name stays"), "snake_case_name-stays")
 
+    def test_reference_style_links_and_footnotes(self):
+        """参照形式リンク `[text][ref]` / `[text][]` は text に、脚注 `[^1]` は除く
+        (マージ前レビューの指摘)。"""
+        self.assertEqual(_common.heading_anchor_slug("[Hooks][hooks-docs]"), "hooks")
+        self.assertEqual(_common.heading_anchor_slug("See [Hooks][] now[^1]"), "see-hooks-now")
+        self.assertEqual(
+            _common.heading_anchor_slug("[Set a document][ref]", style="devsite"), "set_a_document"
+        )
+
     def test_angle_brackets_inside_code_span_are_kept_as_text(self):
         """コードスパン内の `<name>` は逐語表示されるので HTML タグとして削らない
         (マージ前レビューの指摘)。スパン外の実タグは従来どおり削る。"""
