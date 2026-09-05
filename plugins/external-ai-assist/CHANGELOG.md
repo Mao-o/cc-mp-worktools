@@ -7,7 +7,8 @@ version 据え置きで main に入った後続 commit はその version の節�
 
 ## 0.9.1
 
-**内部バックログの「テストが無い」指摘への対応 (テスト追加のみ、挙動変更なし。patch bump)。**
+**内部バックログの「テストが無い」指摘への対応 (テスト追加が中心。ただしマージ前
+レビューで見つかった 1 件は実装のバグ修正を伴う。patch bump)。**
 
 調査の結果、exitplan-review / explore-parallel とも既存の `tests/` (それぞれ 81 件・
 8 件) が指摘項目の大半を既にカバーしていることが判明した。残っていた具体的な gap
@@ -25,6 +26,16 @@ version 据え置きで main に入った後続 commit はその version の節�
 
 追加した各テストは、対応する実装行を意図的に壊した状態 (mutation) で先に
 落ちることを確認してから採用した。
+
+**マージ前レビューの指摘 (追加修正)**: explore-parallel の post フェーズは
+`is_available()` が False (CLI が PATH から消えた等) だと `analyzer.post()` 自体を
+呼ばずに skip していた。pre で既に analyzer を起動済みの場合、この skip は pid
+ファイルと稼働中プロセスを孤児にしてしまう (`__main__.py` の「post は起動済み
+analyzer を必ず reap する」という不変条件に違反していた)。`is_available()` は
+pre (起動可否) のゲートに限定し、post では常に `analyzer.post()` を呼んで reap
+するよう修正した。`tests/test_early_returns.py` を「pre 成功 (偽 cursor あり) →
+cursor が PATH から消える → post」という遷移で検証するよう書き換え、pid / 結果
+ファイルが残らないことを確認する。
 
 **別途判明した設計上の欠落 (本 batch では未対応)**: explore-parallel には
 exitplan-review / post-implementation-review が持つような周期的な孤立ファイル

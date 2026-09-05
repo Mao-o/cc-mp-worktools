@@ -82,8 +82,10 @@ def _main() -> None:
     elif args.phase == "post":
         sections = []
         for analyzer in ANALYZERS:
-            if not analyzer.is_available():
-                continue
+            # is_available() は pre (起動するかどうか) だけのゲート。post では見ない —
+            # pre 成功後に CLI が PATH から消えても、起動済みプロセスの pid / 結果ファイルは
+            # 実体として残っており、reap は起動可否と無関係に必要 (マージ前レビューの指摘)。
+            # 何も起動していなければ analyzer.post() 自体が no-op で返る (pid/結果ファイル無し)。
             try:
                 result = analyzer.post(tool_use_id)
             except Exception as e:
