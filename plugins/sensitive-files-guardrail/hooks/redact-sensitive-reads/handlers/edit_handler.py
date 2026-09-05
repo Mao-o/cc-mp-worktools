@@ -19,7 +19,9 @@ ask の柔軟性より、確実な block を優先する設計判断。
 
 dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込みを block
 する際、``tool_input`` から追加予定のキー名を抽出して reason に添える。
-ユーザーが「どのキーを ``.env.example`` に移せばよいか」を見てすぐ代替行動できる。
+ユーザーが「どのキーを ``.env.example`` に移せばよいか」を見てすぐ代替行動できる
+(``.envrc`` は direnv の shell script なので ``.envrc.example`` を案内する。
+0.29.0、``engine.is_envrc_basename`` 参照)。
 
 ### 状況別の deny 文面 (E6, 0.20.0)
 
@@ -29,8 +31,8 @@ dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込み
 
 | ``classify`` | ``kind`` | 文面 |
 |---|---|---|
-| ``missing`` | ``new`` | 同じキー名で ``.env.example`` を作る案内 (dotenv かつ追加キーありのとき) |
-| ``regular`` | ``overwrite`` | **既存ファイルの Read 同等 minimal info** + dotenv-cli merge の案内 |
+| ``missing`` | ``new`` | 同じキー名で ``.env.example`` を作る案内 (dotenv かつ追加キーありのとき。``.envrc`` は ``.envrc.example``) |
+| ``regular`` | ``overwrite`` | **既存ファイルの Read 同等 minimal info** + dotenv-cli merge の案内 (``.envrc`` は direnv 前提の案内) |
 | ``symlink`` | ``symlink`` | 実体側が書き換わる旨と symlink 運用の確認 |
 | ``special`` | ``special`` | FIFO / socket / device への書き込みである旨 |
 
@@ -62,7 +64,7 @@ from _shared.patterns import resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import classify, is_regular_directory, normalize
 from redaction.dotenv import redact_dotenv
-from redaction.engine import _detect_format
+from redaction.engine import _detect_format, is_envrc_basename
 from redaction.file_render import render_for_bash
 
 
@@ -198,6 +200,11 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     new_keys = _extract_dotenv_keys(envelope, tool_label, basename)
 
     is_dotenv = _detect_format(basename) == "dotenv"
+    # .envrc (direnv) は _detect_format 上は dotenv 系に含まれる (KEY=value
+    # 行のスーパーセットとして parse できるため) が、テンプレート慣習は
+    # .env.example ではなく .envrc.example なので助言文面だけ別軸で分ける
+    # (内部バックログ、engine.is_envrc_basename 参照)。
+    is_envrc = is_envrc_basename(basename)
 
     if cls == "symlink":
         return output.make_deny(M.edit_deny(
@@ -238,7 +245,7 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
         )
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            kind="overwrite", is_dotenv=is_dotenv,
+            kind="overwrite", is_dotenv=is_dotenv, is_envrc=is_envrc,
             existing_render=existing_render,
             existing_render_status=existing_status,
             existing_keys=existing_keys,
@@ -247,6 +254,7 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
 
     # missing (新規作成) も deny 固定
     return output.make_deny(M.edit_deny(
-        tool_label, basename, new_keys, kind="new", is_dotenv=is_dotenv,
+        tool_label, basename, new_keys, kind="new",
+        is_dotenv=is_dotenv, is_envrc=is_envrc,
         relpath=relpath,
     ))

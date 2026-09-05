@@ -17,6 +17,13 @@ Phase 0 実測結果 (要点は `docs/DESIGN.md` の Phase 0 節と `docs/MAINTA
 
 ## 既知の必須キー (Phase 0 実測)
 
+**既知の列挙漏れ**: 公式ドキュメントが明記する `tool_use_id` (PreToolUse
+固有) / `prompt_id` (CLI v2.1.196+) / `effort` が下記の共通キー列挙と
+fixture 実体のどちらにも無い。plugin のロジックはどれも参照していないため
+機能的な実害は無いが、この README が「Phase 0 実測を元にした唯一の参照」と
+いう位置づけである以上ずれている。実値の採取は次回 Runbook 実施時 (CLI
+バージョンアップ時の再実測) に合わせて行う (内部バックログ)。
+
 共通:
 - `hook_event_name`: "PreToolUse"
 - `tool_name`: "Read" | "Bash" | "Edit" | "Write" | ...
@@ -52,7 +59,7 @@ Phase 0 実測結果 (要点は `docs/DESIGN.md` の Phase 0 節と `docs/MAINTA
     (step 7 は現時点で未実施)
   - **既知のドリフト (0.19.1 時点)**: CLI 2.1.241 の `--permission-mode` は
     **`manual`** も受け付けるが、上記 6 値にも `_KNOWN_PERMISSION_MODES` にも
-    含まれていない。envelope 実値の採取と定数更新は未実施 (`bd_092a232e-snw.28`)。
+    含まれていない。envelope 実値の採取と定数更新は未実施 (内部バックログ)。
     経緯と突合手順は `docs/MAINTAINING.md` の Runbook / Worked example を参照。
 
 tool_input の内訳:

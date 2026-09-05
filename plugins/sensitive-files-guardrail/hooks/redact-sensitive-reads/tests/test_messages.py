@@ -47,6 +47,15 @@ class TestExcludeHintBasename(unittest.TestCase):
         self.assertNotIn(str(Path.home()), out)
         self.assertNotIn(os.getcwd(), out)
 
+    def test_exclude_hint_without_relpath_does_not_overclaim_root_unresolved(self):
+        """relpath が空のとき、文言は「root 相対 path を確定できない」に限定し、
+        「root を解決できない」と一律に断定しない (0.24.0 の不正確な文言を修正、
+        内部バックログ)。relpath が空になるのは root 不明のほかに path が root
+        配下でない / glob operand / コロンを含む pathspec でも起きるため。"""
+        out = M._exclude_hint(".env", relpath="")
+        self.assertIn("root 相対 path を確定できないため path 形は案内できません", out)
+        self.assertNotIn("root を解決できないため", out)
+
     def test_exclude_hint_without_basename_also_guides_project_section(self):
         out = M._exclude_hint("")
         self.assertIn("`[project:$CLAUDE_PROJECT_DIR]`", out)

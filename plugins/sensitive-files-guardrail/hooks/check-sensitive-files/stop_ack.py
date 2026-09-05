@@ -1,4 +1,4 @@
-"""Stop hook の session 単位 once-only 化 (0.19.0, bd_092a232e-snw.2)。
+"""Stop hook の session 単位 once-only 化 (0.19.0, 内部バックログ)。
 
 Stop hook は ``stop_hook_active`` しか見ず「報告済みかどうか」の状態を持たなかった
 ため、tracked 機密ファイルを「意図的に管理対象とする」と承認しても、次ターン

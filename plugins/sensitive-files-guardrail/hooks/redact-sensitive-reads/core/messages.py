@@ -311,7 +311,11 @@ def _exclude_hint(
     else:
         target = entry
         # 短く保つ (byte 予算。理由の詳細は docs/PATTERNS.md に任せる)
-        alt = "(root を解決できないため path 形は案内できません。)" if basename else ""
+        alt = (
+            "(root 相対 path を確定できないため path 形は案内できません。)"
+            if basename
+            else ""
+        )
     return (
         "恒久的に許可したい場合は、ユーザーの承認を得た上で "
         f"`{_LOCAL_PATTERNS_PATH}` の `{PROJECT_SECTION_HEADER_HINT}` "
@@ -1220,15 +1224,32 @@ _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER = (
     "既存値を保ったまま項目を足すなら、差分適用 (patch) での反映を"
     "検討してください。"
 )
+# .envrc (direnv) は dotenv-cli merge / .env.example の対象ではない (直接 shell
+# script、テンプレート慣習も .envrc.example) ため専用の clause を持つ
+# (0.29.0、engine.is_envrc_basename で判定。内部バックログ)。
+_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC = (
+    "既存値を保ったまま項目を足すなら、.envrc は direnv の shell script なので "
+    "`.envrc.example` を用意し、値は direnv 側で与えてください。"
+)
 
 # ``suggestion_alt:`` (new_keys があるときだけ出る) の kind 別文面。
 _EDIT_SUGGESTION_ALT_NEW = (
     "同じキー名で `.env.example` を作成し、値は空にしてください。"
     "実値は手動入力か 1Password CLI 等のシークレット管理ツール経由で設定します。"
 )
+_EDIT_SUGGESTION_ALT_NEW_ENVRC = (
+    ".envrc は direnv の shell script です。同じ変数名で `.envrc.example` を"
+    "作成し、値は空にしてください。実値は direnv 側や 1Password CLI 等の"
+    "シークレット管理ツール経由で設定します。"
+)
 _EDIT_SUGGESTION_ALT_DEFAULT = (
     "追加予定のキー名を `.env.example` に追記すると、"
     "差分把握がしやすくなります (値は後で個別設定)。"
+)
+_EDIT_SUGGESTION_ALT_DEFAULT_ENVRC = (
+    ".envrc は direnv の shell script です。追加予定の変数名を "
+    "`.envrc.example` に追記すると、差分把握がしやすくなります "
+    "(値は後で個別設定)。"
 )
 # overwrite かつ new_keys の全件が既存キー集合に含まれる (= 純粋な値の更新で
 # 新規追加が無い) ときの suggestion_alt (0.26.0)。
@@ -1251,6 +1272,12 @@ _EDIT_SUGGESTION_ALT_DEFAULT = (
 _EDIT_SUGGESTION_ALT_UPDATE = (
     "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
     "（`.env.example` への追記は不要）。"
+)
+# .envrc 版 (0.29.0)。ファイル名だけ .envrc.example に差し替え、長さは
+# 既定文言とほぼ同じに保つ (上記の budget 制約と同じ理由)。
+_EDIT_SUGGESTION_ALT_UPDATE_ENVRC = (
+    "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
+    "（`.envrc.example` への追記は不要）。"
 )
 
 # 上書き対象の既存ファイルを Read 同等 minimal info として載せるときのラベル。
@@ -1561,22 +1588,30 @@ def _fit_data_block_core(
         marker_reserve = _line_cost(marker)
 
 
-def _edit_kind_suggestion(kind: str, is_dotenv: bool, tool_label: str) -> str:
+def _edit_kind_suggestion(
+    kind: str, is_dotenv: bool, tool_label: str, is_envrc: bool = False
+) -> str:
     """kind 別 ``suggestion:`` 行の本文を返す (無ければ空文字)。
 
     ``overwrite`` だけ **tool 軸 × format 軸**の連結。それ以外の kind は tool に
     依存しない (新規作成 / symlink / 特殊ファイルの事情は Edit と Write で同じ)。
+
+    format 軸は dotenv / envrc / other の 3 値 (0.29.0)。``is_envrc`` は
+    ``is_dotenv`` が True のときだけ意味を持つ (``.envrc`` は
+    ``_detect_format`` 上 dotenv 系に含まれるため、is_dotenv=False かつ
+    is_envrc=True にはならない)。
     """
     if kind != "overwrite":
         return _EDIT_DENY_SUGGESTION.get(kind, "")
     tool_clause = _EDIT_OVERWRITE_TOOL_CLAUSE.get(
         tool_label, _EDIT_OVERWRITE_TOOL_CLAUSE_DEFAULT
     )
-    format_clause = (
-        _EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV
-        if is_dotenv
-        else _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER
-    )
+    if is_envrc:
+        format_clause = _EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC
+    elif is_dotenv:
+        format_clause = _EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV
+    else:
+        format_clause = _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER
     return f"{tool_clause}{format_clause}"
 
 
@@ -1632,6 +1667,7 @@ def edit_deny(
     *,
     kind: EditDenyKind,
     is_dotenv: bool = False,
+    is_envrc: bool = False,
     existing_render: str = "",
     existing_render_status: str = "",
     existing_keys: frozenset[str] = frozenset(),
@@ -1678,6 +1714,11 @@ def edit_deny(
             返してしまうため。
         is_dotenv: 対象 basename が dotenv 系か。``overwrite`` の代替案を
             dotenv-cli merge にするかの判定に使う。
+        is_envrc: 対象 basename が ``.envrc`` (direnv) か (0.29.0)。
+            ``is_dotenv`` (``.envrc`` は dotenv 系に含まれる) と直交ではなく
+            **その特化**: True のときは dotenv-cli merge / `.env.example`
+            系の助言の代わりに `.envrc.example` / direnv 前提の助言を返す
+            (``engine.is_envrc_basename`` 参照)。
         existing_render: ``kind == "overwrite"`` のとき、上書き対象の既存
             ファイルを ``redaction.file_render.render_for_bash`` に通した
             ``<DATA>`` 包装文字列。空なら unavailable 行に降りる。
@@ -1713,7 +1754,7 @@ def edit_deny(
         if remaining > 0:
             tail.append(f"  ... ({remaining} more)")
         if kind == "new":
-            alt = _EDIT_SUGGESTION_ALT_NEW
+            alt = _EDIT_SUGGESTION_ALT_NEW_ENVRC if is_envrc else _EDIT_SUGGESTION_ALT_NEW
         elif (
             kind == "overwrite"
             and existing_keys
@@ -1722,15 +1763,15 @@ def edit_deny(
             # 全件が既存キー = 純粋な値の更新で新規追加が無い。
             # 部分一致 (新規キーと既存キーが混在) は「追加予定」側の説明が
             # 少なくとも新規分には正しいままなので、従来文面を維持する。
-            alt = _EDIT_SUGGESTION_ALT_UPDATE
+            alt = _EDIT_SUGGESTION_ALT_UPDATE_ENVRC if is_envrc else _EDIT_SUGGESTION_ALT_UPDATE
         else:
-            alt = _EDIT_SUGGESTION_ALT_DEFAULT
+            alt = _EDIT_SUGGESTION_ALT_DEFAULT_ENVRC if is_envrc else _EDIT_SUGGESTION_ALT_DEFAULT
         tail.append(f"suggestion_alt: {alt}")
 
     if extra_note:
         tail.append(f"extra_note: {extra_note}")
 
-    kind_suggestion = _edit_kind_suggestion(kind, is_dotenv, tool_label)
+    kind_suggestion = _edit_kind_suggestion(kind, is_dotenv, tool_label, is_envrc)
     if kind_suggestion:
         tail.append(f"suggestion: {kind_suggestion}")
 

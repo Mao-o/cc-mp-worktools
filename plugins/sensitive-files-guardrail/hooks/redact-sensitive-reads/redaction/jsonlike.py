@@ -48,8 +48,8 @@ def _classify_str_status(v: str) -> tuple[list[str], int, str | None]:
         - 空文字列の場合: (["<empty>"], 0, None)
         - placeholder 一致: (["<placeholder>", ...], length, label)
         - それ以外: (["<set>", ...], length, None)
-        - ``<long>`` (4096 byte 超) と ``<looks_truncated>`` (末尾が ``...`` /
-          ``<truncated>`` / バックスラッシュ) は併記しうる
+        - ``<long>`` (4096 文字超、``len(v)``) と ``<looks_truncated>`` (末尾が
+          ``...`` / ``<truncated>`` / バックスラッシュ) は併記しうる
     """
     if v == "":
         return (["<empty>"], 0, None)

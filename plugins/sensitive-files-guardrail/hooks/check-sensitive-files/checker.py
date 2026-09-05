@@ -60,9 +60,6 @@ def _warn_header(token: str) -> None:
     )
 
 
-_warn_local_oserror = _warn_local  # 後方互換 alias
-
-
 def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
     """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
 

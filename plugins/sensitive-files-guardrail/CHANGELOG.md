@@ -20,6 +20,90 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.28.1
+
+内部バックログの精査で発見した課題 6 件を修正 (テスト整備 2 件・保守性 2 件・
+文言修正 2 件)。**判定境界 (deny / allow / ask / block するか) の変化:
+なし** (助言文言の追加・テスト追加・dead code 削除のみ)。テスト件数:
+redact 1219 → **1237**、check 133 → **135**。
+
+### テスト整備
+
+1. **テストをクラス単位・メソッド単位で 1 件だけ指定して実行できない
+   (`python -m unittest tests.<module>` が `ModuleNotFoundError: _testutil`
+   で落ちる) 不具合を修正**。テストディレクトリ配下の共有ヘルパー
+   (`_testutil.py`) がテストパッケージ内の bare import 前提だったため、
+   `unittest discover` (ディレクトリ探索) や `pytest` では検索パスにディレクトリ
+   自体が入り問題にならないが、モジュールパス直接指定では入らず解決できな
+   かった。`check-sensitive-files/tests/__init__.py` /
+   `redact-sensitive-reads/tests/__init__.py` (既存の空ファイル) に
+   sys.path 整備を追加し、3 経路 (discover / 単体指定 / pytest) すべてで
+   解決するようにした。
+2. **pure helper と Stop hook の直接テストを追加**。従来は `handle()` 経由の
+   間接検証のみだった `_split_command_on_operators` (ダブルクォート内
+   バックスラッシュ偶奇)・`_redirect_write_targets` (fused 形 / `>&1` fd 複製
+   除外)・`_reads_file_content` (`-f.env` 短縮形の値結合) に直接 unit test を
+   追加した。あわせて Stop 側の `_ls_tracked` (`--recurse-submodules` 非対応の
+   古い git への fallback) と、Bash 側の大 dotenv (32KB 未満、通常の
+   `redact()` 経路) が 3KB reason 予算を超えるときの折り畳み
+   (`_fold_data_block`) の直接回帰テストを追加した (Read 側は `fit_read_reason`
+   で、Edit 側は 0.20.0 で既にテスト済みだった)。**Stop hook の timeout
+   (`_run_git_raw` の `TimeoutExpired` 処理) と block reason の文言は、着手
+   時点で既に直接テスト済みだったため追加作業は不要だった** (内部バックログの
+   audit 時点からテストが増えていた)。
+   - **重要な既知の欠陥を発見 (未修正、別途追跡)**: `_ls_tracked` /
+     `find_sensitive_files` の untracked 列挙は `git ls-files` を `-z` 無しで
+     呼んでおり、git の既定 (`core.quotePath=true`) では非 ASCII ファイル名が
+     `"\346\227\245..."` のような 8 進エスケープ + 二重引用符の文字列に
+     変換される。この変換後の文字列に対してパターン照合するため、**非 ASCII
+     名の tracked / untracked な機密ファイルが Stop hook の検出を完全にすり
+     抜ける** (実測: 日本語ファイル名の tracked `.env` が `find_sensitive_files`
+     から 0 件になることを確認)。`submodule_paths` 等が使う `_run_git_nul`
+     (`-z` 付き) は影響を受けない。判定ロジックの変更を伴う修正が必要なため、
+     本バッチのスコープ (テスト追加) を超えると判断し、実装は保留した。
+
+### 保守性
+
+3. **dead code 3 種を削除**。`handlers/bash/constants.py` の
+   `_SAFE_READ_CMDS` / `_SOURCE_CMDS` (ドキュメント目的のみと明記されつつ
+   `bash_handler.py` で無条件に re-export されていた) と、
+   `redact-sensitive-reads/core/patterns.py` / `check-sensitive-files/checker.py`
+   それぞれにあった `_warn_local_oserror` 後方互換 alias (定義以外の参照ゼロ)
+   を削除した。あわせて `core/output.py` の docstring が opaque wrapper の例に
+   `awk` / `sed` を挙げていたが、この 2 つは 0.17.0 で「mutate」カテゴリ
+   (`make_deny` 固定) に移動済みだったため、現行の `_OPAQUE_WRAPPERS` の実例
+   (`xargs` / `env` 等) に差し替えた。
+4. **`.envrc` (direnv) 向けの書込み助言が `.env` (Next.js 慣例) 決め打ちだった
+   不具合を修正**。`.envrc` は `_detect_format` 上 dotenv 系に含まれる (parse
+   用途としては正しい) が、direnv の shell script であって dotenv-cli の
+   merge や `.env.example` テンプレートの対象ではない。`engine.is_envrc_basename`
+   を新設し、Edit/Write の deny 助言 (新規作成 / 上書き / 既存キー更新の 3 分岐)
+   だけを `.envrc.example` / direnv 前提の文言に分離した。`_detect_format` 自体
+   (parse 用途の format 判定) は変更していない。
+
+### 文言修正
+
+5. **除外案内の「root を解決できないため path 形は案内できません」が不正確
+   だった問題を修正**。`relpath` が空になるのは root 不明のほかに (a) path が
+   root 配下でない (b) glob operand (c) コロンを含む pathspec / URI でも
+   起きるため、文言を「root 相対 path を確定できないため path 形は案内できま
+   せん」に変更した (byte 予算の上限 1,300 byte 内に収まることを確認済み)。
+6. **docs / CHANGELOG の記述ずれ 4 件を修正**。(1) `length=<N>` の単位が
+   実装 (`len(v)` = 文字数) と食い違い「バイト長」と誤記していた箇所
+   (README / DESIGN.md / MATRIX.md / dotenv.py / jsonlike.py) を修正し、
+   多バイト文字での回帰テストを追加。(2) `matched="your_jwt_secret_here"` の
+   出力例が実際には到達不能 (`PLACEHOLDER_PATTERNS` の正規表現一致で
+   `matched="your_*_here"` になる) だったため差し替え。(3) 0.20.0 の
+   「minimal info を省略しない」という説明が、2 行の fallback すら予算に
+   収まらない極端なケースではセクション全体を無言で落とす例外
+   (`_edit_existing_info_lines` の docstring には明記済み) を CHANGELOG 本文が
+   欠いていたため追記。(4) `tests/fixtures/envelopes/README.md` が公式ドキュメント
+   の `tool_use_id` / `prompt_id` / `effort` を列挙から欠いていた既知の
+   ギャップを明記 (実値の採取は次回 Runbook 実施時に行う)。あわせて
+   `claude plugin validate` の「warning 0」記述に、plugin root 直下に
+   `CLAUDE.local.md` を置いたローカル環境限定の warning (cc-marketplaces 全体の
+   規約でありこの plugin 固有ではない) の注記を追加した。
+
 ## 0.28.0
 
 内部バックログの精査で発見した課題 5 件を修正 (docs 2 件・Python バージョン
@@ -1477,6 +1561,11 @@ minimal info を載せる (`_fit_data_block`)。
 - 内容行が 1 行も入らない / 取得に失敗した場合は黙って省略せず
   `minimal info: unavailable (<理由>)` + next action に降りる (0.16.0 の silent
   degradation 対策と同じ方針)
+  - ただしこの 2 行の fallback すら予算に入らない極端なケースでは、セクション
+    全体を無言で落とす (末尾の除外案内 `suggestion: ... patterns.local.txt ...`
+    を残す方を優先するため)。`_edit_existing_info_lines` のこの例外は関数
+    docstring に明記されているが本節には無かったため、ここに追記する (内部
+    バックログ)
 - `suggested_keys` だけで予算を使い切る極端な入力では minimal info を丸ごと
   省略し、残りは E6 以前と同じく `core.output._truncate` が引き取る
 
@@ -1505,6 +1594,10 @@ minimal info を載せる (`_fit_data_block`)。
 ### 5. 検証
 
 - 両 suite green (redact 862 / check 79)。`claude plugin validate` warning 0
+  (fresh clone / CI 相当。plugin root 直下に gitignore 済みの
+  `CLAUDE.local.md` を置いたメンテナのローカル環境で `claude plugin validate`
+  を**直接そのディレクトリ指定で**実行すると別途 warning が出るが、この配置は
+  cc-marketplaces 全体の規約でありこの plugin 固有の問題ではないため対象外)
 - **verdict 不変の機械確認**: tool 2 (Edit/Write) × target 5 (`.env` / `.envrc` /
   `credentials.json` / `.env.example` / `README.md`) × 最終要素 5 状態 (missing /
   regular / symlink / special (FIFO) / stat error) × 親 3 状態 (通常 dir /
@@ -1579,6 +1672,7 @@ Write で文面が一致することもテストで固定した。
 #### 6-3. 再検証
 
 - 両 suite green (redact 862 / check 79 = 941)、`claude plugin validate` warning 0
+  (上記「5. 検証」と同じ限定付き — fresh clone / CI 相当)
 - **1800 セルの verdict 格子を再取得し、`origin/main` と diff ゼロを再確認**。
   「描画を省略する経路」が verdict に影響しないことも個別テストで固定
 

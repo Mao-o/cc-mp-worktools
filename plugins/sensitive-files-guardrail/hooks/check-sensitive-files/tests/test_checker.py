@@ -16,6 +16,7 @@ from unittest import mock
 import _testutil  # noqa: F401
 
 from checker import (  # noqa: E402
+    _ls_tracked,
     _parse_patterns_text,
     find_sensitive_files,
     in_submodule,
@@ -155,6 +156,38 @@ class TestGitFailureVisibility(BaseWithTmpRepo):
             result = repo_context(str(self.repo))
         self.assertIsNotNone(result)
         self.assertNotIn("git_unavailable", fake_err.getvalue())
+
+
+class TestLsTrackedFallback(BaseWithTmpRepo):
+    """``_ls_tracked`` の ``--recurse-submodules`` 非対応 (古い git) fallback。
+
+    ``--recurse-submodules`` が認識されない古い git では、そのフラグ付きの
+    呼出は空リストを返す。``_ls_tracked`` はこのとき素の ``ls-files`` に
+    フォールバックする (内部バックログ、従来は直接テスト無し)。
+    """
+
+    def test_falls_back_to_plain_ls_files_when_recurse_flag_returns_empty(self):
+        self._write(".env", "KEY=1\n")
+        self._track(".env")
+        with mock.patch(
+            "checker._run_git", side_effect=[[], [".env"]]
+        ) as mocked:
+            result = _ls_tracked(str(self.repo))
+        self.assertEqual(result, [".env"])
+        self.assertEqual(mocked.call_count, 2)
+        first_args = mocked.call_args_list[0].args[0]
+        second_args = mocked.call_args_list[1].args[0]
+        self.assertIn("--recurse-submodules", first_args)
+        self.assertNotIn("--recurse-submodules", second_args)
+
+    def test_does_not_fall_back_when_recurse_flag_succeeds(self):
+        # フラグ付きの 1 回目で結果が返れば、2 回目 (fallback) は呼ばれない。
+        with mock.patch(
+            "checker._run_git", side_effect=[[".env"]]
+        ) as mocked:
+            result = _ls_tracked(str(self.repo))
+        self.assertEqual(result, [".env"])
+        self.assertEqual(mocked.call_count, 1)
 
 
 class TestFindSensitiveFiles(BaseWithTmpRepo):
