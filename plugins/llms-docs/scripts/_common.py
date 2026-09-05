@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import html
 import http.client
 import json
 import os
@@ -955,6 +956,130 @@ def format_heading_path_for_display(heading_path: str) -> str:
     return heading_path
 
 
+def _strip_heading_markup(title: str) -> str:
+    """Reduce a raw Markdown heading to its rendered text before slugging.
+
+    Both GitHub and DevSite derive the heading id from the *rendered* text,
+    so inline markup must go first: image alt / link text replace the whole
+    ``![alt](src)`` / ``[text](dest)`` construct (otherwise the URL leaks
+    into the slug as ``hookshttpsexamplecomhooks``), HTML tags are dropped,
+    entities are decoded (``&amp;`` -> ``&``, which the slug filter then
+    removes like any other symbol), and emphasis / code markers are removed
+    while their content is kept. Handled forms (everything else is best-
+    effort and documented as such in the skills): inline / reference-style
+    links, images, footnote markers, HTML tags, HTML entities, code spans
+    (contents kept verbatim), `*`/`~` markers and word-boundary `_`
+    emphasis. Merge-review findings.
+    """
+    # コードスパンの中身は逐語 (レンダリングでもそのまま表示される) なので、
+    # `<name>` のような角括弧を HTML タグ除去から守る。先に取り出して
+    # プレースホルダに置き、タグ除去・実体参照デコードの後で戻す
+    code_spans: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        code_spans.append(m.group(1))
+        return f"\x00{len(code_spans) - 1}\x00"
+
+    s = re.sub(r"`([^`]*)`", _stash, title)
+    s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)       # image -> alt
+    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)        # inline link -> text
+    s = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", s)      # reference link [text][ref] / [text][] -> text
+    s = re.sub(r"\[\^[^\]]*\]", "", s)                     # footnote marker [^1]
+    s = re.sub(r"<[^>]+>", "", s)                          # html tags
+    s = html.unescape(s)
+    # 強調の区切りとして使われた `_` だけを剥がす (単語境界に接する `_..._` の組)。
+    # `snake_case_name` のような識別子内の `_` は見出しの実テキストなので残す
+    s = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)", r"\2", s)
+    s = re.sub(r"[`*~]+", "", s)                          # bold / strike markers
+    # コードスパンの中身は全ての記号除去の **後** に戻す (`__init__` の `_` や `*` を
+    # 強調記号と誤認して剥がさない。マージ前レビューの指摘)
+    s = re.sub(r"\x00(\d+)\x00", lambda m: code_spans[int(m.group(1))], s)
+    return s.strip()
+
+
+def heading_anchor_slug(title: str, style: str = "github") -> str:
+    """Best-effort anchor slug for one heading title.
+
+    Two platform families generate heading ids differently, so *style*
+    selects which one to reproduce:
+
+    - ``"github"`` (default, also matches Mintlify): lowercase, strip
+      characters that aren't a letter/digit/underscore/hyphen/space, then
+      collapse whitespace runs to a single hyphen. Used by GitHub-flavored
+      Markdown renderers and Mintlify docs (e.g. code.claude.com,
+      platform.claude.com).
+    - ``"devsite"``: Google DevSite (firebase.google.com) joins words with
+      an underscore instead of a hyphen. Live-verified on
+      https://firebase.google.com/docs/firestore/manage-data/add-data —
+      the "Set a document" heading renders as ``id="set_a_document"`` and
+      "Add a document" as ``id="add_a_document"``; this tool's prior
+      GitHub-style slug (``#set-a-document``) does not resolve on that
+      page. Same character strip as ``"github"``, then whitespace runs
+      collapse to a single underscore (not hyphen) and the result is
+      stripped of leading/trailing underscores.
+
+    Neither style replicates every platform edge case — most notably
+    neither reproduces the numeric ``-1``/``-2`` (or DevSite's own)
+    duplicate-heading suffix a page gets when two headings share a title,
+    since that requires knowing every other heading on the page rather
+    than just this one title, nor a page's custom-id override (Mintlify's
+    ``{#custom-id}`` syntax has a DevSite equivalent too). Callers display
+    the result as a best-effort anchor, not a guarantee that it matches
+    the live page exactly.
+
+    Returns ``""`` if *title* normalizes to nothing (e.g. an all-symbol
+    heading) — callers should treat that as "no anchor available".
+    """
+    s = _strip_heading_markup(title).lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    if style == "devsite":
+        return re.sub(r"\s+", "_", s).strip("_")
+    return re.sub(r"\s+", "-", s).strip("-")
+
+
+def section_url_anchor(url: str, title: str, style: str = "github") -> str:
+    """``  [<url>#<anchor>]`` suffix for a ``Section:`` search result line.
+
+    Bracketed to match this tool's existing annotation convention on these
+    same result lines (``[partial match]``, the ``"(top)"`` suffix's
+    ``[before first heading]``) rather than reusing ``→``, which the
+    snippet lines directly below already use as the per-line hit marker.
+
+    *title* must be the section's own leaf heading title (a section dict's
+    ``"title"`` field, or the ``"(top)"`` sentinel) — **not**
+    ``heading_path``. ``heading_path`` is this tool's internal breadcrumb
+    (ancestor titles joined with ``"/"``) and is not safe to derive the
+    leaf from by splitting on ``"/"``: a heading whose own title legitimately
+    contains a slash (e.g. ``## CI/CD``, ``## Read / write data``) would
+    have that slash misread as a breadcrumb separator, truncating the
+    anchor to only the text after the last ``"/"`` (merge-review finding —
+    see CHANGELOG). Passing the leaf title directly sidesteps that
+    ambiguity entirely since there is nothing left to split.
+
+    *style* is forwarded to ``heading_anchor_slug`` — pass ``"devsite"``
+    for Firebase (Google DevSite heading ids join words with ``_``, not
+    ``-``; see that function's docstring). Callers on Mintlify-family
+    sources (claude-docs) leave it at the ``"github"`` default.
+
+    Returns ``""`` (no suffix) when there's no page *url* to anchor into,
+    when *title* is the ``"(top)"`` sentinel (body text above the first
+    heading has no heading element to anchor to), or when the title
+    normalizes to an empty slug.
+
+    *url* must already be the human-facing page URL (not e.g. Firebase's
+    raw ``.md.txt`` fetch URL) — a ``#fragment`` on a plaintext response
+    resolves to nothing. Canonicalizing that is the caller's job (each
+    ``parse-*.py`` already has its own notion of "the real page URL" for
+    its source).
+    """
+    if not url or title == "(top)":
+        return ""
+    slug = heading_anchor_slug(title, style=style)
+    if not slug:
+        return ""
+    return f"  [{url}#{slug}]"
+
+
 def _build_section_results(section_hits, sections, body_lines, keywords,
                            min_coverage, context_lines, max_snippet_chars):
     """Build result list from sections matching >= *min_coverage* keywords."""
@@ -995,8 +1120,15 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             cut = len(snippet) - max_snippet_chars
             snippet = snippet[:max_snippet_chars] + f"\n  ... ({cut} chars truncated)"
 
+        # "title" is the section's own leaf heading text (or "(top)"),
+        # kept separate from "heading_path" (the ancestor breadcrumb) so
+        # anchor generation never has to split heading_path on "/" — a
+        # heading whose own title contains a slash (e.g. "## CI/CD") would
+        # otherwise be misread as a nested breadcrumb (merge-review finding).
+        title = sections[si]["title"] if si is not None else "(top)"
         results.append({
             "heading_path": heading_path,
+            "title": title,
             "line_offset": hit_line_numbers[0],
             "snippet": snippet,
             "matched_keywords": sorted(all_matched),

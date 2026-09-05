@@ -452,6 +452,177 @@ class FormatHeadingPathForDisplayTest(unittest.TestCase):
         )
 
 
+class HeadingAnchorSlugTest(unittest.TestCase):
+    def test_lowercases(self):
+        self.assertEqual(_common.heading_anchor_slug("PreToolUse"), "pretooluse")
+
+    def test_whitespace_becomes_hyphen(self):
+        self.assertEqual(_common.heading_anchor_slug("Hook events"), "hook-events")
+
+    def test_symbols_are_stripped(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Client (Advanced)!"), "client-advanced"
+        )
+        self.assertEqual(_common.heading_anchor_slug("What's New?"), "whats-new")
+
+    def test_existing_hyphens_are_preserved(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Multi-Word-Title"), "multi-word-title"
+        )
+
+    def test_multiple_spaces_collapse_to_one_hyphen(self):
+        self.assertEqual(_common.heading_anchor_slug("Foo   Bar"), "foo-bar")
+
+    def test_leading_trailing_whitespace_and_symbols_are_trimmed(self):
+        self.assertEqual(_common.heading_anchor_slug("  Step 1: Setup  "), "step-1-setup")
+
+    def test_all_symbol_heading_normalizes_to_empty(self):
+        self.assertEqual(_common.heading_anchor_slug("---"), "")
+        self.assertEqual(_common.heading_anchor_slug("???"), "")
+
+
+class HeadingAnchorSlugMarkupTest(unittest.TestCase):
+    """見出しに inline Markdown が含まれるとき、レンダリング後のテキストから slug を作る
+    (マージ前レビューの指摘: link 先 URL が slug に混入していた)。"""
+
+    def test_link_destination_is_dropped(self):
+        self.assertEqual(_common.heading_anchor_slug("[Hooks](https://example.com/hooks)"), "hooks")
+        self.assertEqual(
+            _common.heading_anchor_slug("See [the guide](https://x.y/z) now", style="devsite"),
+            "see_the_guide_now",
+        )
+
+    def test_image_alt_is_kept(self):
+        self.assertEqual(_common.heading_anchor_slug("![Logo](img/logo.png) Setup"), "logo-setup")
+
+    def test_html_tags_and_entities(self):
+        self.assertEqual(_common.heading_anchor_slug("Tom &amp; Jerry <sup>beta</sup>"), "tom-jerry-beta")
+
+    def test_emphasis_and_code_markers_are_removed_content_kept(self):
+        self.assertEqual(_common.heading_anchor_slug("Using `query()` and **ClaudeSDKClient**"),
+                         "using-query-and-claudesdkclient")
+        self.assertEqual(_common.heading_anchor_slug("snake_case_name stays"), "snake_case_name-stays")
+
+    def test_code_span_contents_keep_underscores_and_asterisks(self):
+        """コードスパンの中身は逐語: `__init__` の `_` や `*args` の `*` を強調記号として
+        剥がさない (マージ前レビューの指摘)。"""
+        self.assertEqual(_common.heading_anchor_slug("The `__init__` method"), "the-__init__-method")
+        self.assertEqual(
+            _common.heading_anchor_slug("Using `*args` in `snake_case_fn`", style="devsite"),
+            "using_args_in_snake_case_fn",
+        )
+
+    def test_reference_style_links_and_footnotes(self):
+        """参照形式リンク `[text][ref]` / `[text][]` は text に、脚注 `[^1]` は除く
+        (マージ前レビューの指摘)。"""
+        self.assertEqual(_common.heading_anchor_slug("[Hooks][hooks-docs]"), "hooks")
+        self.assertEqual(_common.heading_anchor_slug("See [Hooks][] now[^1]"), "see-hooks-now")
+        self.assertEqual(
+            _common.heading_anchor_slug("[Set a document][ref]", style="devsite"), "set_a_document"
+        )
+
+    def test_angle_brackets_inside_code_span_are_kept_as_text(self):
+        """コードスパン内の `<name>` は逐語表示されるので HTML タグとして削らない
+        (マージ前レビューの指摘)。スパン外の実タグは従来どおり削る。"""
+        self.assertEqual(_common.heading_anchor_slug("Set `<name>` value"), "set-name-value")
+        self.assertEqual(
+            _common.heading_anchor_slug("Run `firebase use <alias>` <sup>beta</sup>", style="devsite"),
+            "run_firebase_use_alias_beta",
+        )
+
+    def test_underscore_emphasis_delimiters_are_removed(self):
+        """`_word_` の下線は強調区切りなので slug から除く。識別子内の `_` は残す
+        (マージ前レビューの指摘)。"""
+        self.assertEqual(_common.heading_anchor_slug("_Config_ options"), "config-options")
+        self.assertEqual(_common.heading_anchor_slug("Use __strong__ words"), "use-strong-words")
+        self.assertEqual(
+            _common.heading_anchor_slug("_Config_ for snake_case_name", style="devsite"),
+            "config_for_snake_case_name",
+        )
+
+
+class HeadingAnchorSlugDevsiteStyleTest(unittest.TestCase):
+    """firebase.google.com is Google DevSite, not GitHub/Mintlify — DevSite
+    joins heading-id words with "_", not "-". Live-verified on
+    https://firebase.google.com/docs/firestore/manage-data/add-data: the
+    "Set a document" heading renders as id="set_a_document" (not the
+    default style's "set-a-document", which does not resolve on that page)
+    (マージ前レビューの指摘)."""
+
+    def test_whitespace_becomes_underscore(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Set a document", style="devsite"),
+            "set_a_document",
+        )
+
+    def test_words_with_no_separator_are_unaffected(self):
+        # A heading with an internal "/" and no spaces around it collapses
+        # to a single run with nothing to join — same result in both
+        # styles, since there's no whitespace to turn into a separator.
+        self.assertEqual(_common.heading_anchor_slug("CI/CD", style="devsite"), "cicd")
+
+    def test_slash_surrounded_by_spaces_becomes_single_underscore(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Read / write data", style="devsite"),
+            "read_write_data",
+        )
+
+    def test_default_style_is_unchanged_by_devsite_addition(self):
+        # Default (github) behavior must stay byte-identical after adding
+        # the style parameter — no default-arg regression.
+        self.assertEqual(_common.heading_anchor_slug("Set a document"), "set-a-document")
+
+
+class SectionUrlAnchorTest(unittest.TestCase):
+    def test_appends_url_and_slug_from_leaf_heading(self):
+        # section_url_anchor takes the section's own leaf title directly
+        # (not heading_path, the ancestor breadcrumb) — the caller is
+        # responsible for resolving which heading to anchor to.
+        self.assertEqual(
+            _common.section_url_anchor(
+                "https://code.claude.com/docs/hooks", "PreToolUse"
+            ),
+            "  [https://code.claude.com/docs/hooks#pretooluse]",
+        )
+
+    def test_title_containing_slash_is_not_split_as_a_breadcrumb(self):
+        # Regression (merge-review finding): a leaf heading whose own title
+        # legitimately contains "/" (e.g. "## CI/CD") must not be treated
+        # as a multi-segment heading_path and truncated to the text after
+        # the last "/". Passing the title directly — instead of deriving it
+        # from heading_path via rsplit("/", 1) — sidesteps that ambiguity.
+        self.assertEqual(
+            _common.section_url_anchor("https://example.com/p", "CI/CD"),
+            "  [https://example.com/p#cicd]",
+        )
+        self.assertEqual(
+            _common.section_url_anchor("https://example.com/p", "Read / write data"),
+            "  [https://example.com/p#read-write-data]",
+        )
+
+    def test_no_url_means_no_suffix(self):
+        self.assertEqual(_common.section_url_anchor("", "Configuration"), "")
+        self.assertEqual(_common.section_url_anchor(None, "Configuration"), "")
+
+    def test_top_sentinel_has_no_anchor(self):
+        self.assertEqual(_common.section_url_anchor("https://example.com/p", "(top)"), "")
+
+    def test_all_symbol_leaf_heading_produces_no_suffix(self):
+        self.assertEqual(_common.section_url_anchor("https://example.com/p", "???"), "")
+
+    def test_style_is_forwarded_to_heading_anchor_slug(self):
+        # Firebase callers pass style="devsite" — confirm section_url_anchor
+        # threads it through rather than always using the github default.
+        self.assertEqual(
+            _common.section_url_anchor(
+                "https://firebase.google.com/docs/firestore/manage-data/add-data",
+                "Set a document",
+                style="devsite",
+            ),
+            "  [https://firebase.google.com/docs/firestore/manage-data/add-data#set_a_document]",
+        )
+
+
 class SearchContentInBodyTest(unittest.TestCase):
     def _body(self):
         return [
@@ -482,6 +653,22 @@ class SearchContentInBodyTest(unittest.TestCase):
         result = _common.search_content_in_body(body, "keyword", max_matches_per_doc=2)
         self.assertEqual(len(result["results"]), 2)
         self.assertEqual(len(result["overflow_sections"]), 3)
+
+    def test_result_carries_title_separate_from_heading_path(self):
+        # "title" is the leaf heading text a caller should pass to
+        # section_url_anchor — kept as its own field so callers never need
+        # to derive it from heading_path by splitting on "/" (which breaks
+        # when the heading's own title contains one, e.g. "## CI/CD").
+        body = ["## CI/CD\n", "pipeline keyword\n"]
+        result = _common.search_content_in_body(body, "pipeline")
+        self.assertEqual(result["results"][0]["heading_path"], "CI/CD")
+        self.assertEqual(result["results"][0]["title"], "CI/CD")
+
+    def test_top_sentinel_result_has_matching_title(self):
+        body = ["preamble keyword text\n", "## Section A\n", "alpha\n"]
+        result = _common.search_content_in_body(body, "preamble")
+        self.assertEqual(result["results"][0]["heading_path"], "(top)")
+        self.assertEqual(result["results"][0]["title"], "(top)")
 
 
 class AssertParsedTest(unittest.TestCase):

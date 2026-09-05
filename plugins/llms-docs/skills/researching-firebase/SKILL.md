@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.1.6"
+  version: "2.1.7"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -94,6 +94,16 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search "<キーワー�
 title + description でスコアリングして上位 5 件（`--top-n N` で変更可）を選び、
 各候補ページを on-demand fetch して本文を keyword 検索、heading_path + スニペットを返す。
 結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
+各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの
+slug)。firebase.google.com は GitHub/Mintlify ではなく Google DevSite であり、見出し ID の
+単語結合が `-` ではなく `_` (アンダースコア) である点に注意 — 実機確認済み
+(`.../firestore/manage-data/add-data` の見出し「Set a document」は `id="set_a_document"`)。
+引用元を答えるときはこの URL#anchor をそのまま使ってよいが、同名見出しがページ内に複数ある
+場合の DevSite 側の重複回避サフィックスや、見出しへの独自 ID 指定までは再現しない
+best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## Read / write data`)
+も正しく slug 化される (`#read_write_data`)。
+
+**anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る (DevSite 規則: 小文字化・記号除去・空白を `_` で結合)。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
 
 初回は top N 件分の HTTP fetch が走るため数秒～十数秒かかる。2 回目以降は cache hit で高速。
 

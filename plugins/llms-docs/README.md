@@ -63,6 +63,24 @@ python3 plugins/llms-docs/scripts/parse-claude-docs.py fetch-index
 python3 plugins/llms-docs/scripts/parse-firebase.py fetch-index --limit 10
 ```
 
+## 回帰テストスイート
+
+```bash
+cd plugins/llms-docs
+python3 -m unittest discover scripts/tests
+```
+
+標準ライブラリのみで動く (pytest / pip install 不要)。
+
+クラス単位・メソッド単位で 1 件だけ指定して実行することもできる:
+
+```bash
+python3 -m unittest scripts.tests.test_common.ParseLlmsIndexTest -v
+python3 -m unittest scripts.tests.test_common.ParseLlmsIndexTest.test_colon_description_form -v
+# pytest がインストールされていれば node id 指定も可能
+pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_form -q
+```
+
 ## キャッシュ
 
 既定のキャッシュディレクトリは `~/.cache/llms-docs` (`$XDG_CACHE_HOME/llms-docs` があればそちら、`$LLMS_DOCS_CACHE_DIR` で完全上書き可)。`--cache-dir` で個別指定も可能。

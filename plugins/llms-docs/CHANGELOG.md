@@ -2,6 +2,123 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.23.0] - 2026-09-05
+
+### 検索結果の `Section:` 行に `URL#anchor` を付与 (claude-docs / firebase)
+
+2026-08 精査で指摘された設計原則 (検索結果は「ソース URL + anchor」を含めるべき) の
+未充足を解消。`search` / `search-content` の `Section:` 行は heading_path のみで
+anchor が無く、ページ URL もエントリ単位にしか出ないため、引用元を「URL + セクション」
+で答える側が anchor を自作して誤る余地があった。
+
+- `_common.py` に `heading_anchor_slug()` (見出しタイトルから GitHub/Mintlify 互換の
+  best-effort slug を生成: 小文字化・空白→ハイフン・記号除去) と `section_url_anchor()`
+  (URL + 葉見出しタイトルから `  [<url>#<slug>]` を組み立て。当初は heading_path の
+  末尾セグメントを rsplit で復元していたが、見出し自体に `/` を含む場合に誤るため
+  下記「追い修正」で葉タイトルを直接受け取る形に変更済み) を追加。
+  claude-docs / firebase の `search` / `search-content` 計 4 箇所の `Section:` 行に適用。
+  `→` ではなく角括弧にしたのは、同じ結果行の直下でスニペットの1行ヒットマーカーとして
+  既に `→` を使っており、1 文字に 2 つの意味を持たせないため (`[partial match]` /
+  `[before first heading]` の既存アノテーション規約に合わせた)
+- anchor は実際にページに描画される見出しそのもの (内部の breadcrumb 表示である
+  heading_path 全体ではなく、その葉ノードの見出しタイトル) から生成する。
+  同名見出しがページ内に複数ある場合の GitHub/Mintlify 側の `-1`/`-2` 連番までは
+  再現しない best-effort であることを 3 SKILL.md に明記
+- **firebase は index の生 URL (`.../query-limit.md.txt`、`URL:` 行に表示される raw
+  markdown fetch URL) ではなく、`_entry_url_for_match()` (既存の page_ref 一致判定
+  ヘルパーを流用) で正規化した人間向けページ URL (`.../query-limit`) を anchor の
+  base にする**。プレーンテキスト応答に `#fragment` を付けても解決しないため、
+  誤った URL を組み立てて配布しないよう修正前に実機確認した (自己レビューで発見)
+- **ai-sdk は対象外**: llms-full.txt に URL 自体が無く anchor を組み立てられないため
+  (`researching-ai-sdk` SKILL.md に明記)。解析層 (`split_documents` / URL 抽出) には
+  一切手を入れていない — 既存の `doc["source_url"]` / `entry["url"]` を出力整形で
+  使っているだけ
+
+回帰テスト 16 件追加 (`test_common.py`: `heading_anchor_slug`/`section_url_anchor` の
+fixture テスト 12 件、`test_parse_claude_docs.py`/`test_parse_firebase.py`: `search`/
+`search-content` の CLI 統合テスト計 4 件)。
+
+#### 追い修正: 見出しタイトル自体に `/` を含む場合に anchor が誤る問題 (マージ前レビューの指摘)
+
+上記の初回実装は `section_url_anchor(url, heading_path)` が `heading_path.rsplit("/", 1)[-1]`
+で葉見出しを復元していたため、見出しタイトル自体が `/` を含む場合 (`## CI/CD` →
+`#cd`、`## Read / write data` → `#write-data`) に breadcrumb の区切りと誤認し、
+先頭部分を欠落させた anchor を生成していた。
+
+`extract_sections()` が元々保持していた葉タイトル (`title` フィールド、`heading_path`
+とは別に見出しテキストそのものを保持) を検索結果 (`_build_section_results()` の
+戻り値) にも追加し、`section_url_anchor()` は `heading_path` ではなく `title` を
+受け取る形に変更 (rsplit を撤去)。呼び出し側 4 箇所 (claude-docs の `search-content`/
+`search`、firebase の `search-content`/`search`) を `r["heading_path"]` → `r["title"]`
+に修正。表示用の `Section:` 行の heading_path 表示は変更していない。
+
+回帰テスト 6 件追加 (`test_common.py`: `search_content_in_body` の結果が `title`
+フィールドを持つことを固定する fixture テスト 2 件、`test_parse_claude_docs.py`/
+`test_parse_firebase.py`: `/` を含む見出しでの `search`/`search-content` CLI 統合
+テスト計 4 件)。あわせて既存の `SectionUrlAnchorTest` (`test_common.py`) を新しい
+引数契約 (`heading_path` ではなく葉タイトルを渡す) に合わせて更新し、breadcrumb
+分割を検証していたケースを本件の回帰ケースに差し替えた。224 → 230 tests。
+
+#### 追い修正: firebase の anchor が DevSite の実際の見出し ID と一致しない問題 (マージ前レビューの指摘)
+
+`heading_anchor_slug()` は GitHub/Mintlify 流 (小文字化・記号除去・空白→ハイフン) の
+1 規則しか実装しておらず、claude-docs (Mintlify) には合うが、firebase.google.com は
+Google DevSite であり見出し ID の単語結合が `-` ではなく `_` (アンダースコア) である
+ため、firebase の anchor は生成できても実際のページ上で解決しなかった。実機確認:
+`https://firebase.google.com/docs/firestore/manage-data/add-data` の見出し
+「Set a document」は `id="set_a_document"`、「Add a document」は `id="add_a_document"` —
+修正前の実装が生成する `#set-a-document` はページ上で解決しない。
+
+`heading_anchor_slug()` / `section_url_anchor()` に `style` 引数を追加し
+(`"github"` が既定、既存の出力は不変)、`style="devsite"` は 小文字化 → 記号除去 →
+空白連続を `_` 1 つに → 前後の `_` を strip、という規則にした。`parse-firebase.py`
+の呼び出し 2 箇所 (`search-content`/`search`) を `style="devsite"` に変更、
+`parse-claude-docs.py` の呼び出しは既定 (`"github"`) のまま変更していない。
+DevSite が付ける重複回避サフィックス (`-1`/`-2` 相当) や見出しへの独自 ID 指定
+(`{#custom-id}` 相当) までは再現しない best-effort である点は変わらず、
+`researching-firebase/SKILL.md` の anchor 説明もこの規則に合わせて更新した。
+
+`test_common.py` に `style="devsite"` の fixture テスト 5 件を追加 (`heading_anchor_slug`
+4 件 + `section_url_anchor` の style 伝播 1 件)。`test_parse_firebase.py` の既存 CLI
+統合テスト 2 件 (`SectionUrlAnchorSlashInTitleIntegrationTest`) は件数を増やさず、
+期待値をハイフン結合からアンダースコア結合に更新 (修正前コードでは失敗することを確認
+済み)。230 → 235 tests。
+
+### テストを 1 件だけ指定して実行できない問題を修正 (共有ヘルパーが解決されない)
+
+`scripts/tests/` 配下の共有ヘルパー `_loader` をトップレベル import (副作用専用) で
+読み込んでいたため、`python3 -m unittest discover scripts/tests` (ディレクトリ探索)
+は通るが、`python3 -m unittest scripts.tests.test_x.Class.method` や
+`pytest scripts/tests/test_x.py::Class::method` (モジュールパス指定) は
+`ModuleNotFoundError: No module named '_loader'` になっていた (内部バックログで
+6 plugin 横断の共通症状として追跡)。
+
+`scripts/tests/__init__.py` (既存は空) に `scripts/tests/` を sys.path へ追加する
+初期化コードを追加。呼び出し側 (CI / README の実行手順) は一切変更していない。
+README にクラス単位・メソッド単位で 1 件だけ指定する実行例を追記。
+
+回帰テスト 3 件追加 (`test_single_test_invocation.py`: unittest 単体クラス/メソッド指定
++ pytest node id 指定をサブプロセスで実際に実行し確認)。
+
+### plugin manifest の description を日本語に統一
+
+6 plugin 中 llms-docs だけ英語のままだった `plugin.json` の `description` を、
+`marketplace.json` 側の既存エントリと同じ日本語表記に統一した。
+
+### 検証
+
+`claude plugin validate plugins/llms-docs` warning 0。230 tests, all green
+(前回 205 + 上記 19 + 追い修正分 6)。
+- `search` サブコマンドの Section 行 anchor は、index の raw URL (`.md` 付き fetch 形) ではなく
+  `Source:` 行と同じ正規形 (`normalize_doc_url`) に付ける。raw 形に `#fragment` を付けても
+  ページ上で解決しないため (マージ前レビューの指摘)。表示用の `URL:` 行は従来どおり
+- anchor の slug は見出しの **レンダリング後テキスト** から作る: `[text](url)` は text、
+  `![alt](src)` は alt に置き換え、HTML タグ除去・実体参照のデコード・強調/コード記号の
+  除去を先に行う。生の Markdown をそのまま slug 化すると link 先 URL が混入していた
+  (マージ前レビューの指摘)
+- 参照形式リンク (`[text][ref]` / `[text][]`) と脚注マーカー (`[^1]`) も slug 前に正規化する。
+  正規化する記法の一覧と「それ以外は best-effort」を各 SKILL.md に明記 (マージ前レビューの指摘)
+
 ## [0.22.2] - 2026-09-05
 
 ### platform source の検索停止を修正 — 上流 llms-full.txt の YAML frontmatter 区切りに追従 (2wd.30)
