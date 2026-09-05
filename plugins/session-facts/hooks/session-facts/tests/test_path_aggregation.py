@@ -50,10 +50,14 @@ class AggregatePathsTest(unittest.TestCase):
         paths = ["a/b/tests", "c/d/tests", "lone/deep/path/tests"]
         result = aggregate_paths(paths)
         self.assertIn("lone/deep/path/tests", result)
-        self.assertIn("*/*/tests", result)
+        # a/b + c/d share no leading directory -> listed verbatim, not "*/*/tests"
+        self.assertIn("a/b/tests", result)
+        self.assertIn("c/d/tests", result)
+        self.assertNotIn("*/*/tests", result)
 
-    def test_dify_five_test_dirs_within_three_lines(self):
-        # Acceptance: 5 test_dirs collapse to at most 3 lines.
+    def test_dify_five_test_dirs_within_four_lines(self):
+        # Acceptance: api/web/worker share no leading dir and are listed
+        # verbatim (a "*/tests" line would not say where), sdk/* collapses.
         paths = [
             "api/tests",
             "web/tests",
@@ -62,7 +66,9 @@ class AggregatePathsTest(unittest.TestCase):
             "sdk/nodejs/tests",
         ]
         result = aggregate_paths(paths)
-        self.assertLessEqual(len(result), 3)
+        self.assertEqual(
+            sorted(result), ["api/tests", "sdk/*/tests", "web/tests", "worker/tests"]
+        )
 
     def test_fully_wildcarded_pattern_lists_originals_instead(self):
         # internal backlog: aggregate_paths used to collapse this group to a
@@ -113,13 +119,23 @@ class AggregatePathsTest(unittest.TestCase):
         for line in result[:-1]:
             self.assertRegex(line, r"^pkg\d+/\*$")
 
-    def test_pattern_with_surviving_literal_segment_is_not_touched(self):
-        # A pattern that keeps at least one literal segment (here "tests" at
-        # the tail) still localizes part of the path, so it is NOT treated
-        # as degenerate even though the leading segment is a wildcard.
+    def test_leading_wildcard_with_literal_tail_is_degenerate(self):
+        # joa.27: "*/tests" only repeats the test-dir marker; it does not
+        # say where the tests live, so the paths are listed instead.
         paths = ["api/tests", "web/tests", "worker/tests"]
         result = aggregate_paths(paths)
-        self.assertEqual(result, ["*/tests"])
+        self.assertEqual(sorted(result), ["api/tests", "web/tests", "worker/tests"])
+
+    def test_leading_wildcard_deep_marker_is_degenerate(self):
+        # The sashida shape: "*/*/*/*/__tests__" said nothing.
+        paths = ["apps/web/src/pages/__tests__", "functions/src/api/v2/__tests__"]
+        result = aggregate_paths(paths)
+        self.assertNotIn("*/*/*/*/__tests__", result)
+        self.assertEqual(len(result), 2)
+
+    def test_leading_literal_pattern_is_kept(self):
+        paths = ["pkg/a/x/tests", "pkg/b/y/tests"]
+        self.assertEqual(aggregate_paths(paths), ["pkg/*/*/tests"])
 
 
 if __name__ == "__main__":

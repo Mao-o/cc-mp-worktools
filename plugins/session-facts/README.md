@@ -77,13 +77,22 @@ SubagentStart で plain stdout がモデルに届かないための必須フラ�
 claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 ```
 
+## SessionStart の発火条件
+
+同梱 `hooks/hooks.json` の SessionStart は `"matcher": "startup|clear|compact"` で、
+`resume` / `fork` (`--resume` / `--continue` / `/resume` / `/fork`) では発火しない。
+再開されたセッションには最初の注入が transcript に残っており、同じ 80〜180 行を
+もう一度注入しても二重化するだけのため。`compact` は文脈が失われた後の再注入として
+有用なので残す。Codex 向け `hooks/codex-hooks.json` は Codex 側の source 値の違いに
+合わせて `startup|resume` のままにしている。
+
 ## 挙動
 
 起動時に以下のパイプラインを実行し、Markdown 文字列を stdout に出力する。
 
 1. `git ls-files` (fallback: filesystem walk) で tracked files 一覧を取得
 2. パッケージマネージャ検出 (mise / pnpm / bun / npm 等)
-3. Purpose 推定 (package.json `description` → README 先頭行。どちらも無ければ field ごと省略)
+3. Purpose 推定 (root の package.json `description` → pyproject `[project]` / `[tool.poetry]` `description` → pubspec / Cargo.toml / composer.json `description` → README の最初の散文行。HTML ブロック・バッジ/リンク行・記号や絵文字で始まる行は飛ばす。どれも無ければ field ごと省略)
 4. **Detector** 群 (priority 昇順) を走らせて stack 情報を蓄積
 5. **Collector** 群 (priority 昇順) を走らせて各セクションの Markdown を生成
 6. ヘッダーと各セクションを結合して出力
@@ -109,6 +118,7 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 
 ## Service Entry Points
 - apps/web/src/api/users/route.ts
+- apps/web/src/services/userService.ts
 
 ## Test Snapshot
 - code_files: 38
@@ -119,12 +129,50 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 
 各 Collector が出すセクション粒度は `--max-*` 引数で制限可能。
 
+### Service Entry Points の選び方
+
+2 段の tier で選ぶ (`collectors/services.py`)。**tier 1 = リクエスト/プロセスが入る場所**:
+manifest が指すエントリ (package.json `main` / `bin`, pyproject `[project.scripts]`)、
+エントリ名 (`main.py` / `__main__.py` / `app.py` / `server.ts` / `main.tsx` /
+Next.js の `route.ts` 等。`src/index.ts` のような浅い `index.*` も含む)、
+`routes` / `controllers` / `handlers` / `endpoints` 配下、および **top-level でない**
+`api/` 配下。**tier 2 = その裏のサービス層**: `services` / `repositories` /
+`usecases` / `adapters` / `gateways` 配下、`*_service` / `*_client` / `*Repository`
+のような名前。tier 1 を先に並べ、tier 2 は最低 4 枠を確保して両方が見えるようにする。
+テストパス、`errors` / `types` / `models` / `components` / `static` / `config` /
+`utils` などのディレクトリ、`page.tsx` / `layout.tsx` / `__init__.py`、dot-dir 配下は
+候補にしない。同じディレクトリからは 4 件までにして偏りを抑える。
+
+### Scripts と Likely Commands の分担
+
+`## Scripts` は package.json `scripts` の一覧 (名前: コマンド) で、見出しに実行形
+(`run: npm run <name>` 等) を示す。`## Likely Commands` はそれを丸ごと繰り返さず、
+慣習的な入口 (`dev` / `test` / `build` / `lint` / `typecheck` / `start` / `check`) を
+最大 4 件だけ昇格させ、残りは stack 由来のコマンド (`make test`, `flutter test`,
+`docker compose up` 等) に充てる。
+
+stack 由来のコマンドは**根拠になるファイルがあるときだけ**出す:
+`docker compose up` は compose ファイルがあるとき (Dockerfile のみなら `docker build .`)、
+`mise install` は mise config があるとき (`.tool-versions` のみなら `asdf install`)、
+Python のテスト実行は pytest の `python_files` 規則 (pytest.ini / pyproject /
+tox.ini / setup.cfg の上書きを読む) に合うファイルがあり、かつ pytest が manifest /
+requirements / pytest 設定のどれかで宣言されているとき。宣言が無ければ標準ライブラリの
+`python -m unittest discover -s <最浅のテストディレクトリ>` を出す (テストが複数の同深度
+ディレクトリに散っている場合は `-s` を付けない)。
+
 ### ツリー描画の挙動
 
-- **深さは行数に応じて自動調整** (depth 1〜5)。`--max-tree-lines` を超えない範囲で
-  最も深い depth を採用し、薄い repo では深く、巨大 repo では浅く出る。採用 depth は
+- **深さは行数に応じて自動調整** (depth 1〜5)。`--max-tree-lines` (既定 60) を超えない
+  範囲で最も深い depth を採用し、薄い repo では深く、巨大 repo では浅く出る。採用 depth は
   見出しの `depth=N` に反映される
 - **子が 1 つだけの中間ディレクトリは `a/b/c/` に圧縮** して 1 行にまとめる
+- **ツール/テスト系ディレクトリは子を展開しない** (`core/constants.py` の
+  `SKIP_TREE_CHILDREN`: `.github` / `.claude` / `.idea` / `.vscode` / `tests` /
+  `__tests__` 等)。子があったことは末尾の `…` で示す (`.github/…`)。root より下の
+  dot-dir (`api/.idea` 等) は行ごと出さない
+- **1 ディレクトリの子は 10 件まで** (`MAX_TREE_CHILDREN`)。超えた分は
+  `… (+N more dirs)` の 1 行にまとめる。root 直下だけは上限を掛けない (top-level
+  ディレクトリを隠すとモジュールが丸ごと見えなくなるため)
 - **進行情報** (`branch` / `recent_commits`) は git repo のとき自動付与。デフォルト
   ブランチ (main/master) で upstream と差分が無いときは `branch` 行を省略する。
   同梱 hooks.json の `SessionStart` は `--no-recent-commits` により recent_commits を
@@ -221,7 +269,7 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--tree-depth` | (auto) | 固定深さを強制する override。未指定なら動的に自動選択 |
 | `--min-tree-depth` | 1 | 動的選択の下限 |
 | `--max-tree-depth` | 5 | 動的選択の上限 |
-| `--max-tree-lines` | (定数) | ツリーの最大行数 (この行数を超えない最深 depth を採用) |
+| `--max-tree-lines` | 60 | ツリーの最大行数 (この行数を超えない最深 depth を採用) |
 | `--max-service-entries` | (定数) | Service entry 最大数 |
 | `--max-script-entries` | (定数) | scripts セクション最大数 |
 | `--max-env-keys` | (定数) | env キー最大数 |

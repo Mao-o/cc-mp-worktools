@@ -17,7 +17,10 @@ _MD_INLINE_CODE = re.compile(r"`([^`]+)`")
 _MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _HTML_TAG = re.compile(r"<[^<>\n]+>")
 _HTML_ENTITY = re.compile(r"&[a-zA-Z]+;|&#\d+;")
-_SENTENCE_END = re.compile(r"[。．\.!?！？]")
+# A Latin period ends a sentence only when followed by whitespace or the end
+# of the text, so "Node.js" / "v2.0" / "e.g." do not cut the purpose short
+# ("This is the Node." was a real output, internal backlog joa.13).
+_SENTENCE_END = re.compile(r"[。．！？]|[.!?](?=\s|$)")
 
 
 def strip_markdown_inline(text: str) -> str:
@@ -143,21 +146,27 @@ def aggregate_paths(paths: Sequence[str], max_listed: int = 4) -> List[str]:
     length-group with a single member) is returned verbatim — no abstraction is
     applied when there is nothing to aggregate.
 
-    When a length-group's naive pattern would be fully wildcarded (every
-    position differs, e.g. ``*/*`` from ``api/tests`` + ``web/__tests__`` +
-    ``sdks/spec``), no literal segment survives anywhere and the pattern
-    carries zero localization info. In that case the group is re-split by
-    its leading directory instead: subsets that DO share a leading directory
-    still collapse to a useful pattern (e.g. ``packages/*/tests``), and the
+    When a length-group's naive pattern starts with a wildcard (the leading
+    directory differs across the group, e.g. ``*/*`` from ``api/tests`` +
+    ``web/__tests__`` + ``sdks/spec``, or ``*/*/*/*/__tests__``), the
+    pattern does not say *where in the repo* these directories live — a
+    trailing literal alone (``__tests__``) is the test-dir marker itself,
+    not a location. In that case the group is re-split by its leading
+    directory instead: subsets that DO share a leading directory still
+    collapse to a useful pattern (e.g. ``packages/*/tests``), and the
     remainder — paths whose leading directory is unique within the group —
     are listed verbatim. The re-split's TOTAL output for this group
     (collapsed patterns and verbatim leftovers combined) is capped at
     ``max_listed`` entries plus an ``... (+N more)`` line, so neither an
     unbounded pile of unrelated one-off paths NOR a monorepo with many
     same-shaped packages (one collapsed pattern line each) can flood the
-    output. A pattern that keeps at least one literal segment (e.g.
-    ``*/tests`` or ``*/*/tests``) is left aggregated as-is — it still
-    localizes some part of the path.
+    output. A pattern whose leading segment is literal (``pkg/*/tests``,
+    ``a/*/*/tests``) is left aggregated as-is — it localizes the path.
+
+    Rule history (internal backlog joa.27): v0.8.0 fired only on the
+    fully-wildcarded form, which let ``*/*/*/*/__tests__`` through on real
+    monorepos; the leading-segment reading is the one that matches what
+    the line is for (telling the reader where tests are).
     """
     unique = sorted(dict.fromkeys(paths))
     if len(unique) <= 1:
@@ -175,13 +184,13 @@ def aggregate_paths(paths: Sequence[str], max_listed: int = 4) -> List[str]:
             out.append("/".join(group[0]))
             continue
         pattern = _build_pattern(group, length)
-        if any(seg != "*" for seg in pattern):
+        if pattern[0] != "*":
             out.append("/".join(pattern))
             continue
 
-        # Fully wildcarded: re-split by leading directory so any genuinely
+        # Leading wildcard: re-split by leading directory so any genuinely
         # shared prefix still collapses, and cap the rest instead of
-        # emitting the useless all-"*" line.
+        # emitting a line that does not locate anything.
         by_prefix: dict = {}
         for segs in group:
             by_prefix.setdefault(segs[0], []).append(segs)

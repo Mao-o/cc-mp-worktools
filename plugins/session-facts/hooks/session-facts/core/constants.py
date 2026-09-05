@@ -84,6 +84,19 @@ COMPOSE_FILE_CANDIDATES = (
     "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
 )
 
+# collectors/services.py scoring tiers (internal backlog joa.1). Route/
+# controller/handler directories are where requests enter the code, so
+# they rank above the service/repository layer; ``api`` / ``client`` are
+# too common as *top-level* names (``api/`` is the whole backend in many
+# repos) to score on their own and only count together with a name token.
+SERVICE_ROUTE_DIR_MARKERS = [
+    "routes",
+    "routers",
+    "controllers",
+    "handlers",
+    "endpoints",
+    "resolvers",
+]
 SERVICE_DIR_MARKERS = [
     "services",
     "service",
@@ -91,14 +104,28 @@ SERVICE_DIR_MARKERS = [
     "usecase",
     "repositories",
     "repository",
-    "clients",
-    "client",
     "adapters",
     "adapter",
     "gateways",
     "gateway",
-    "api",
 ]
+SERVICE_AMBIGUOUS_DIR_MARKERS = [
+    "api",
+    "clients",
+    "client",
+]
+# Directories whose files are never entry points even when they sit under
+# a service marker (``services/errors/app.py`` was the top hit on dify).
+SERVICE_NOISE_DIR_MARKERS = {
+    "errors", "error", "exceptions", "types", "typings", "mocks", "__mocks__",
+    "fixtures", "migrations", "generated", "__generated__", "stubs", "schemas",
+    # data shapes and UI, not entry points
+    "models", "entities", "dto", "dtos", "constants", "components", "ui",
+    "widgets", "screens", "styles", "themes", "config", "configs", "utils",
+    "helpers",
+    # static assets / served files / translations
+    "static", "public", "htdocs", "assets", "i18n", "i18n-config", "locales",
+}
 
 SCRIPT_PRIORITY_PATTERNS = [
     r"^dev$",
@@ -185,7 +212,25 @@ NEXT_CONFIG_CANDIDATES = ["next.config.js", "next.config.mjs", "next.config.ts"]
 # the deepest rendering that fits DEFAULT_MAX_TREE_LINES wins.
 MIN_TREE_DEPTH = 1
 MAX_TREE_DEPTH = 5
-DEFAULT_MAX_TREE_LINES = 100
+# 100 -> 60: at 100 the dynamic depth search always grew the tree to the
+# cap (87-98 lines on real repos, 900-1,200 tokens per session), mostly
+# with tool/config dot-dirs and test leaves (internal backlog joa.7).
+DEFAULT_MAX_TREE_LINES = 60
+
+# core/tree.py: directories rendered as a single line with their children
+# hidden. Editor/CI/agent-harness config trees and test leaves say nothing
+# about the code's shape (Test Snapshot already names the test dirs), yet
+# they were 20-40% of every rendered tree.
+# core/tree.py: children listed per directory before "… (+N more dirs)".
+MAX_TREE_CHILDREN = 10
+
+SKIP_TREE_CHILDREN = {
+    ".github", ".claude", ".claude-plugin", ".codex", ".codex-plugin",
+    ".cursor", ".idea", ".vscode", ".devcontainer", ".agents", ".kiro",
+    ".opencode", ".husky", ".storybook", ".beads", ".gemini", ".windsurf",
+    "__tests__", "tests", "test", "spec", "specs", "__mocks__",
+    "node_modules", "dist", "build", "coverage",
+}
 MAX_PURPOSE_CHARS = 140
 DEFAULT_MAX_SERVICE_ENTRIES = 12
 DEFAULT_MAX_SCRIPT_ENTRIES = 16
@@ -374,4 +419,11 @@ PROJECT_MARKERS = (
 # bound worst-case cost on very large repos, and require multiple distinct
 # referrers before a file is surfaced as noise-free signal.
 HUB_FILES_MAX_SCAN = 3000
+
+# core/context.py workspace discovery (internal backlog joa.2): manifests
+# below the root that mark sub-projects. Depth is counted in directory
+# levels below the root (``apps/web/package.json`` is depth 2).
+WORKSPACE_MANIFEST_NAMES = ("package.json", "pyproject.toml")
+MAX_WORKSPACE_MANIFEST_DEPTH = 3
+MAX_WORKSPACE_MANIFESTS = 12
 HUB_FILES_MIN_REFS = 2

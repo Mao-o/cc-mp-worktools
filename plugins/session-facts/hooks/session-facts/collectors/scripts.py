@@ -4,15 +4,35 @@ import re
 from typing import Dict, List, Optional, Set, Tuple
 
 from core.constants import (
+    COMPOSE_FILE_CANDIDATES,
     MAKE_TARGET_PRIORITY_PATTERNS,
     MAX_SCRIPT_COMMAND_CHARS,
     SCRIPT_PRIORITY_PATTERNS,
+    TEST_PATH_MARKERS,
 )
 from core.context import RepoContext
 from core.fs import read_text
 from core.makefile import extract_targets
-from core.runtime import runner_prefix
+from core.pytest_config import matches_python_files, python_files_patterns
+from core.runtime import mise_config_path, runner_prefix
 from core.util import collapse_space, truncate_text
+
+# The package-manager prefix for ``<pm> <script>``; scripts of a repo whose
+# pm is not listed here are not expanded into commands at all.
+_PM_RUN_PREFIX = {
+    "pnpm": "pnpm",
+    "npm": "npm run",
+    "yarn": "yarn",
+    "bun": "bun run",
+}
+
+# Only these script names are promoted from ## Scripts into ## Likely
+# Commands (internal backlog joa.6): the conventional day-one entry
+# points. Everything else is already listed once under ## Scripts, and
+# repeating the whole table as ``npm run <name>`` lines was pure
+# duplication (16 + 16 lines on real repos).
+_PROMOTED_SCRIPT_NAMES = ("dev", "test", "build", "lint", "typecheck", "start", "check")
+_MAX_PROMOTED_SCRIPTS = 4
 
 
 class ScriptsCollector:
@@ -29,7 +49,9 @@ class ScriptsCollector:
         scripts = _collect_scripts(ctx, max_items)
         if not scripts:
             return None
-        lines = [self.section_title]
+        prefix = _PM_RUN_PREFIX.get(ctx.results.get("package_manager") or "")
+        title = f"{self.section_title} (run: {prefix} <name>)" if prefix else self.section_title
+        lines = [title]
         for item in scripts:
             lines.append(f"- {item['name']}: {item['command']}")
         return "\n".join(lines)
@@ -111,40 +133,113 @@ def _make_commands(ctx: RepoContext, max_items: int) -> List[str]:
     return commands or ["make"]
 
 
+# --- Python test-runner evidence (internal backlog joa.14 / joa.28 / joa.30)
+#
+# A test command is only suggested when the repo gives two pieces of
+# evidence: test files exist (by pytest's own ``python_files`` rule, read
+# from the project's config when it overrides the default), and the runner
+# is declared somewhere the project controls (pytest in a manifest /
+# requirements file / a pytest config file). Files that match the naming
+# rule but no declared runner get the standard-library ``unittest``
+# suggestion instead, anchored at the shallowest literal test directory.
+
+
+def _pytest_declared(ctx: RepoContext) -> bool:
+    root = ctx.root
+    for _rel, text in ctx.pyproject_manifests():
+        if "pytest" in text.lower():
+            return True
+    if (root / "pytest.ini").exists():
+        return True
+    for name in ("tox.ini", "setup.cfg"):
+        path = root / name
+        if path.exists() and "pytest" in read_text(path).lower():
+            return True
+    for path in ctx.tracked_files:
+        base = path.rsplit("/", 1)[-1]
+        if base.startswith("requirements") and base.endswith(".txt"):
+            if "pytest" in read_text(root / path).lower():
+                return True
+    return False
+
+
+def _python_test_files(ctx: RepoContext) -> List[str]:
+    patterns = python_files_patterns(ctx.root, ctx.pyproject_toml)
+    return [
+        p for p in ctx.tracked_files
+        if p.endswith(".py") and matches_python_files(p, patterns)
+    ]
+
+
+def _shallowest_test_dir(test_files: List[str]) -> Optional[str]:
+    """The shallowest directory named like a test dir that holds test
+    files, when it is unique at its depth (``tests``, ``src/tests``); None
+    when tests are spread across several same-depth directories (a
+    monorepo's ``plugins/*/tests``), where no single ``-s`` target exists."""
+    dirs: Dict[int, Set[str]] = {}
+    for path in test_files:
+        parts = path.split("/")
+        for i, part in enumerate(parts[:-1]):
+            if part.lower() in TEST_PATH_MARKERS:
+                dirs.setdefault(i, set()).add("/".join(parts[: i + 1]))
+                break
+    for depth in sorted(dirs):
+        if len(dirs[depth]) == 1:
+            return next(iter(dirs[depth]))
+        return None
+    return None
+
+
+def _python_test_commands(ctx: RepoContext, pm: Optional[str], stack: Set[str]) -> List[str]:
+    if "python" not in stack and pm not in ("uv", "poetry", "python"):
+        return []
+    test_files = _python_test_files(ctx)
+    if not test_files:
+        return []
+    if _pytest_declared(ctx):
+        if pm == "uv":
+            return ["uv run pytest"]
+        if pm == "poetry":
+            return ["poetry run pytest"]
+        prefix = _runner_prefix(ctx)
+        if pm == "python" or prefix:
+            return [f"{prefix or ''}python -m pytest"]
+        return []
+    # No pytest anywhere: the files are runnable with the standard library.
+    prefix = _runner_prefix(ctx)
+    if pm is None and not prefix:
+        # Bare-Python repo with no known interpreter wrapper; the global
+        # ``python`` may not be the one the repo uses (pre-existing rule).
+        return []
+    test_dir = _shallowest_test_dir(test_files)
+    cmd = f"{prefix or ''}python -m unittest discover"
+    if test_dir:
+        cmd += f" -s {test_dir}"
+    return [cmd]
+
+
 def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     scripts = _collect_scripts(ctx, max_items=50)
     pm = ctx.results.get("package_manager")
     stack = set(ctx.stack)
+    root = ctx.root
     commands: List[str] = []
     # Reserved for the scala/elixir/swift/dotnet block below: merged in
     # *ahead* of `commands` (see the final concat before dedup) so these
     # stack-derived commands cannot be pushed out of the `deduped[:max_items]`
-    # slice by an unrelated, unbounded source further up the list (e.g. 16+
-    # npm scripts when npm is the primary pm alongside a co-detected .NET
-    # solution -- merge-review finding). Empty when none of those four
-    # stacks are present, so repos that don't hit this branch see the exact
-    # same `commands` order/content as before this reservation existed.
+    # slice by an unrelated source further up the list.
     priority_commands: List[str] = []
 
-    # PM-based commands
-    prefix = {
-        "pnpm": "pnpm",
-        "npm": "npm run",
-        "yarn": "yarn",
-        "bun": "bun run",
-    }.get(pm or "")
+    # PM-based commands: only the conventional entry-point scripts are
+    # promoted here; the full table is ## Scripts' job (joa.6).
+    prefix = _PM_RUN_PREFIX.get(pm or "")
     if prefix:
-        for item in scripts:
-            commands.append(f"{prefix} {item['name']}")
+        by_name = {item["name"]: item for item in scripts}
+        promoted = [name for name in _PROMOTED_SCRIPT_NAMES if name in by_name]
+        for name in promoted[:_MAX_PROMOTED_SCRIPTS]:
+            commands.append(f"{prefix} {name}")
     elif pm == "deno":
         commands.extend(["deno task dev", "deno test"])
-    elif pm == "uv":
-        commands.append("uv run pytest")
-    elif pm == "poetry":
-        commands.append("poetry run pytest")
-    elif pm == "python":
-        prefix = _runner_prefix(ctx)
-        commands.append(f"{prefix}python -m pytest" if prefix else "python -m pytest")
     elif pm == "gradle":
         commands.extend(["./gradlew build", "./gradlew test"])
     elif pm == "maven":
@@ -156,48 +251,24 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     elif pm == "composer":
         commands.append("composer install")
 
-    # Stack-based commands for scala/elixir/swift/dotnet: unlike the
-    # pm-exclusive chain above, these are keyed off the *detected stack*
-    # rather than the single "primary" package_manager value core/pm.py
-    # picks. core/pm.py only ever returns one PM, so a root that also has a
-    # higher-priority manifest for another stack (e.g. package-lock.json
-    # next to App.sln) would pick "npm" as pm and silently never reach a
-    # "sbt"/"mix"/"swift"/"dotnet" branch even though the matching stack
-    # detector (ScalaStackDetector/ElixirStackDetector/SwiftStackDetector/
-    # DotnetStackDetector) did fire (merge-review finding). Left as
-    # additive `if` (not `elif`) so multiple co-detected stacks each get
-    # their command; existing stacks above are untouched to avoid changing
-    # their output. Appended to `priority_commands`, not `commands` --
-    # see that list's declaration above for why (second merge-review
-    # finding: these commands must survive truncation even when the
-    # co-detected primary pm alone already fills max_items).
+    commands.extend(_python_test_commands(ctx, pm, stack))
+
+    # Stack-based commands for scala/elixir/swift/dotnet: keyed off the
+    # detected stack rather than the single primary package_manager, so a
+    # root that also has a higher-priority manifest for another stack
+    # (package-lock.json next to App.sln) still gets them.
     if "scala" in stack:
         priority_commands.extend(["sbt test", "sbt compile"])
     if "elixir" in stack:
         priority_commands.append("mix test")
-    # Unlike the other three, "swift" in stack alone is NOT enough: since
-    # detectors/swift_stack.py also reports "swift" for an Xcode-only
-    # project (*.xcodeproj/*.xcworkspace, no Package.swift), these two
-    # SwiftPM commands must additionally require Package.swift itself --
-    # `pm == "swift"` covers the common case cheaply (core/pm.py only ever
-    # sets it off Package.swift), and the direct exists() check covers a
-    # root where Package.swift coexists with a higher-priority manifest
-    # (e.g. package-lock.json) that made some other value the primary pm,
-    # mirroring the dotnet/npm-coexistence handling below (merge-review
-    # finding). Xcode-only projects get no command here: xcodebuild needs
-    # an explicit -scheme this collector cannot safely infer.
-    if "swift" in stack and (pm == "swift" or (ctx.root / "Package.swift").exists()):
+    # "swift" in stack alone is NOT enough: detectors/swift_stack.py also
+    # reports "swift" for an Xcode-only project (*.xcodeproj, no
+    # Package.swift), and xcodebuild needs a -scheme this collector cannot
+    # infer, so the SwiftPM commands require Package.swift itself.
+    if "swift" in stack and (pm == "swift" or (root / "Package.swift").exists()):
         priority_commands.extend(["swift build", "swift test"])
     if "dotnet" in stack:
         priority_commands.append("dotnet test")
-
-    # Bare-Python repos (.py-heavy, no PM lockfile/pyproject) get no pytest line
-    # from the chain above. Only surface one when a concrete runner (venv/mise)
-    # is known, so we never suggest a global ``python`` the repo may not use.
-    if pm is None and "python" in stack:
-        prefix = _runner_prefix(ctx)
-        if prefix:
-            commands.append(f"{prefix}python -m pytest")
 
     # Flutter/Dart toolchain
     if "flutter" in stack:
@@ -205,7 +276,11 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     elif "dart" in stack:
         commands.extend(["dart pub get", "dart test"])
 
-    # Stack-based additions (task runners, tools)
+    # Stack-based additions (task runners, tools). Each command names the
+    # file that grounds it (joa.14): ``docker compose up`` needs a compose
+    # file (a Dockerfile alone grounds only ``docker build .``), and
+    # ``mise install`` needs a mise config (a bare ``.tool-versions`` is
+    # asdf's format, so suggest asdf's command for it).
     if "makefile" in stack:
         commands.extend(_make_commands(ctx, max_items))
     if "justfile" in stack:
@@ -215,14 +290,16 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     if "nx" in stack:
         commands.append("nx run-many --target=build")
     if "mise" in stack:
-        commands.append("mise install")
+        if mise_config_path(root) is not None:
+            commands.append("mise install")
+        elif (root / ".tool-versions").exists():
+            commands.append("asdf install")
     if "docker" in stack:
-        commands.append("docker compose up")
+        if any((root / name).exists() for name in COMPOSE_FILE_CANDIDATES):
+            commands.append("docker compose up")
+        elif (root / "Dockerfile").exists():
+            commands.append("docker build .")
 
-    # priority_commands first: when empty (the common case -- none of
-    # scala/elixir/swift/dotnet detected) this is a no-op concat and the
-    # resulting order/content is identical to `commands` alone, i.e. the
-    # pre-reservation behavior.
     ordered = priority_commands + commands
 
     deduped: List[str] = []
