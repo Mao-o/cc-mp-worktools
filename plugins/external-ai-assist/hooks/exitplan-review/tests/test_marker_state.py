@@ -157,6 +157,43 @@ class TestEndToEndConfirmSlot(HookTestCase):
         )
 
 
+class TestReleaseDoesNotClobberOvertakenLast(MarkerStateTestCase):
+    """release_slot は「自分 (reserved_hash) が今も last のときだけ」last をクリアする。
+
+    reserve(A) → reserve(B) (B が last を上書き) → release(A) という順序でも、
+    A の release が B の last を巻き込んで消してはいけない
+    (`marker["last"] == reserved_hash` の等値チェックがこれを保証している契約)。
+    """
+
+    def test_release_of_overtaken_plan_keeps_current_last(self):
+        marker_file = self.marker_file(SESSION)
+        hash_a = self.entry.plan_hash("plan-a")
+        hash_b = self.entry.plan_hash("plan-b")
+
+        reserved_a, _ = self.entry.reserve_slot(marker_file, hash_a, 5)
+        self.assertTrue(reserved_a)
+        reserved_b, _ = self.entry.reserve_slot(marker_file, hash_b, 5)
+        self.assertTrue(reserved_b)
+        self.assertEqual(self.read_marker(SESSION)["last"], hash_b, "B の reserve で last が更新されていない")
+
+        self.entry.release_slot(marker_file, hash_a)
+
+        data = self.read_marker(SESSION)
+        self.assertEqual(data["last"], hash_b, "A の release が B の last を消してしまっている")
+        self.assertNotIn(hash_a, data["plans"], "release されたのに A のエントリが残っている")
+        self.assertIn(hash_b, data["plans"], "無関係な B のエントリまで消えている")
+
+    def test_release_of_current_last_clears_it(self):
+        """対照ケース: 自分が last のままなら release でちゃんとクリアされること。"""
+        marker_file = self.marker_file(SESSION)
+        hash_a = self.entry.plan_hash("plan-a")
+        self.entry.reserve_slot(marker_file, hash_a, 5)
+
+        self.entry.release_slot(marker_file, hash_a)
+
+        self.assertEqual(self.read_marker(SESSION)["last"], "")
+
+
 class TestPlanEntryCap(MarkerStateTestCase):
     def test_cap_limits_total_plan_entries(self):
         marker_file = self.marker_file(SESSION)
