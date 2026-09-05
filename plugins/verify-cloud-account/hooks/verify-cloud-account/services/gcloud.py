@@ -75,6 +75,11 @@ CONTEXT_OPTIONS = {
     "--configuration": "configuration",
 }
 ACCOUNT_KEY = "gcloud"
+
+# deny 文面で案内する remediation コマンドの語幹。dispatcher は verify() の返り値に
+# これが含まれるときだけ「単独で実行せよ」の注記を付ける (インストール案内や
+# 設定ファイルの型不正など、別の cloud CLI 操作を案内しない deny には付けない)。
+REMEDIATION_STEMS = ("gcloud config set",)
 SETUP_HINT = (
     'GCP 最小例: {"gcloud": "my-project-id"}。'
     "gcloud config get-value project で現在値を確認可。"

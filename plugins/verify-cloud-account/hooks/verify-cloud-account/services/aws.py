@@ -52,6 +52,11 @@ GLOBAL_FLAGS = frozenset({
 # 「検証は既定 / 実行は other」の false-allow になるため、検証もその profile で行う。
 CONTEXT_OPTIONS = {"--profile": "profile"}
 ACCOUNT_KEY = "aws"
+
+# deny 文面で案内する remediation コマンドの語幹。dispatcher は verify() の返り値に
+# これが含まれるときだけ「単独で実行せよ」の注記を付ける (インストール案内や
+# 設定ファイルの型不正など、別の cloud CLI 操作を案内しない deny には付けない)。
+REMEDIATION_STEMS = ("AWS_PROFILE=", "aws sso login", "aws configure")
 SETUP_HINT = (
     'AWS 最小例: {"aws": "123456789012"}。'
     "aws sts get-caller-identity --query Account で現在値を確認可"

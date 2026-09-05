@@ -74,6 +74,11 @@ GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interacti
 # 該当が無ければ project ID そのものとして使う (requireProject)。
 CONTEXT_OPTIONS = {"--project": "project", "-P": "project"}
 ACCOUNT_KEY = "firebase"
+
+# deny 文面で案内する remediation コマンドの語幹。dispatcher は verify() の返り値に
+# これが含まれるときだけ「単独で実行せよ」の注記を付ける (インストール案内や
+# 設定ファイルの型不正など、別の cloud CLI 操作を案内しない deny には付けない)。
+REMEDIATION_STEMS = ("firebase use", "firebase login")
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
     "firebase use で現在値を確認可。"

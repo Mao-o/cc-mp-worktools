@@ -913,6 +913,26 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
 
 
+    def test_install_advice_does_not_trigger_note(self):
+        """CLI 未インストール案内 (`brew install gh を実行してください`) は cloud CLI の
+        切替 / ログインではないので注記を付けない (マージ前レビューの指摘)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。",
+        )
+        self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+
+    def test_every_service_declares_remediation_stems(self):
+        """全 service が REMEDIATION_STEMS を持ち、空でない (dispatcher の判定契約)。"""
+        from services import ALL
+        for svc in ALL:
+            with self.subTest(service=svc.ACCOUNT_KEY):
+                stems = getattr(svc, "REMEDIATION_STEMS", None)
+                self.assertIsInstance(stems, tuple)
+                self.assertTrue(stems)
+
+
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
     """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
     したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の

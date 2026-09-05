@@ -20,19 +20,16 @@ _MIGRATE_HINT = (
 )
 
 
-# 各 service の verify() が remediation コマンドを案内するときの文言契約。
-# 不一致は「 — 切り替え: <cmd>」、未設定 / 未ログインは「<cmd> を実行してください」、
-# firebase の dict 未設定は「以下のいずれかで切り替えてください」、AWS は
-# 「切り替え手順 (環境に応じて選択):」。この判定は
-# verify() が返した文字列 **だけ** に掛ける (検出コマンドや user 入力を含む合成後の
-# 本文には掛けない — `--title '切り替え:'` のような user 文字列で誤発火する)。
-# 契約の維持は tests の TestRemediationGuidanceContract が「案内コマンドを含む
-# deny には必ず注記が付く」ことで機械的に確認する。
-_REMEDIATION_MARKERS = ("切り替え:", "切り替え手順", "を実行してください", "切り替えてください")
-
-
-def _guides_remediation(err: str) -> bool:
-    return any(m in err for m in _REMEDIATION_MARKERS)
+# 注記の要否は、verify() が返した文字列に **その service が案内する remediation
+# コマンドの語幹** (services/<svc>.py の REMEDIATION_STEMS) が含まれるかで決める。
+# 文言 (「〜を実行してください」等) で判定すると `brew install gh を実行してください`
+# のようなインストール案内まで拾う。検出コマンド (user 入力) を合成した後の本文にも
+# 掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は tests の
+# TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が付く」
+# ことで機械的に確認する。
+def _guides_remediation(err: str, service) -> bool:
+    stems = getattr(service, "REMEDIATION_STEMS", ())
+    return any(stem in err for stem in stems)
 
 
 # 案内した remediation コマンド (切替 / ログイン) は単独なら通る (切替は
@@ -417,7 +414,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             )
         if err:
             # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
-            needs_standalone_note = needs_standalone_note or _guides_remediation(err)
+            needs_standalone_note = needs_standalone_note or _guides_remediation(err, svc)
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
             errors.append(

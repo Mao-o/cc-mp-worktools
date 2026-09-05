@@ -16,15 +16,17 @@
    観測されたため、remediation を案内する deny の末尾にだけ注記を足す。
    設定ファイルの型不正や `--project` フラグ不一致など、別コマンドの実行を
    案内しない deny には付けない。
-2. **判定は verify() の出力だけで行う** — 各 service の案内文言契約
-   (`切り替え:` / `切り替え手順` / `を実行してください` / `切り替えてください`)
-   を、検出コマンド (user 入力) を合成する前の文字列に掛ける。合成後の本文で
-   判定すると `--title '切り替え:'` のような user 文字列で誤発火する
-   (マージ前レビューの指摘)。
-3. **回帰テスト 6 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
+2. **判定は service 宣言の remediation コマンド語幹で行う** — 各 service が
+   `REMEDIATION_STEMS` (例: `gh auth switch` / `gh auth login` / `gcloud config set` /
+   `firebase use` / `kubectl config use-context` / `AWS_PROFILE=`) を宣言し、dispatcher は
+   verify() の返り値にその語幹が含まれるときだけ注記を付ける。「〜を実行してください」
+   のような文言で判定すると `brew install gh を実行してください` (インストール案内) まで
+   拾い、検出コマンド (user 入力) を合成した後の本文で判定すると `--title '切り替え:'`
+   のような文字列で誤発火する (いずれもマージ前レビューの指摘)。
+3. **回帰テスト 8 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
    contract の強化 — 不一致 / 未設定 / ログイン案内に注記が付く、連結形でも付く、
-   型不正には付かない、user 入力の文言では発火しない、注記本文が案内コマンド
-   抽出に拾われない。既存の remediation contract テストに「verify() 由来の deny
+   型不正・インストール案内には付かない、user 入力の文言では発火しない、注記本文が
+   案内コマンド抽出に拾われない、全 service が `REMEDIATION_STEMS` を宣言している。既存の remediation contract テストに「verify() 由来の deny
    が案内コマンドを含むなら注記が必ず付く」を追加し、文言契約の取りこぼしを
    全 service 横断で機械検出する。
 
