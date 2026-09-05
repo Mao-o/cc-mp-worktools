@@ -23,16 +23,17 @@ commit 52113a1 で完了)。
 ## 0.29.1
 
 内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`
-経路の `.envrc` 案内) + マージ前レビューの指摘 1 件 (`is_envrc_basename` の
-literal 判定漏れ) を修正。**判定境界 (deny / allow / ask / block するか)
-の変化: なし** (助言文言の修正・テスト追加のみ)。テスト件数:
-redact 1240 → 1252 → **1263**、check 135 (変化なし)。
+経路の `.envrc` 案内) + マージ前レビューの指摘 2 件 (`is_envrc_basename` の
+判定境界と、助言文面のテンプレート導出方法) を修正。**判定境界 (deny / allow
+/ ask / block するか) の変化: なし** (助言文言の修正・テスト追加のみ)。
+テスト件数: redact 1240 → 1252 → 1263 → **1272**、check 135 (変化なし)。
 
 1. **Bash の `cp` / `mv` (move category) が `.envrc` (direnv) にも
    `.env.example` 派生 (Next.js 慣例) の案内を出していた不具合を修正**。
    0.29.0 で edit_handler (Edit/Write) 側は対応済みだったが、Bash 経由の
    同種操作には同じ穴が残っていた。`_bash_deny_move` に `is_envrc` を渡し、
-   `.envrc` では `.envrc.example` 派生の案内に差し替えた。
+   `.envrc` では basename から動的に派生した `<basename>.example` 派生の
+   案内に差し替えた。
 2. **同クラスの sweep で `source` / `.` (load category) の案内も修正**。
    `.envrc` を load しようとしたときの案内が dotenv-cli (静的 `KEY=value`
    パーサ) を勧めていたが、`.envrc` は条件分岐や `use flake` を書ける shell
@@ -43,22 +44,45 @@ redact 1240 → 1252 → **1263**、check 135 (変化なし)。
    呼ばず、呼出側 (`bash_handler._build_deny_response`) が行って結果を
    `is_envrc` として渡す**。edit_handler / edit_deny と同じ分担にし、
    `core.messages` が redaction 層に依存しない既存方針を保った。
-4. **マージ前レビューの指摘: `is_envrc_basename` が `foo.envrc` のような
-   命名付きスクリプトや、大文字小文字を区別する FS 上の `.ENVRC` でも
-   True を返していた不具合を修正**。`.envrc` は direnv 側の hook
-   (`direnv allow` 後の自動 load) 経由で自動発見されるが、direnv が探すのは
-   大文字小文字も一致する literal `.envrc` だけで、`foo.envrc` や
-   `.ENVRC` は対象外。旧実装 (`lower().endswith(".envrc")`) はこの区別をせず、
-   `source foo.envrc` に「direnv hook で自動読込してください」、
-   `cp foo.envrc ...` に literal `.envrc.example` → `.envrc` の案内 (実際の
-   basename と異なる名前を勧める) を返していた。`is_envrc_basename` を
-   `basename == ".envrc"` の exact match に厳格化し、非 literal な `*.envrc`
-   operand は bash_handler / edit_handler 共通の既定 (`.env.example` /
-   dotenv-cli) 文言にフォールバックする形に統一した (edit 経路も同じ関数を
-   共有するため同時に直る)。**判定境界 (deny/allow) には影響しない**、
-   助言文面のみの修正。テスト: 修正前コードで新規回帰テスト (`foo.envrc` /
-   `.ENVRC` / 大文字小文字混在の 3 パターン × move/load/新規作成の各経路)
-   がすべて失敗することを確認済み (負テスト)。
+4. **マージ前レビューの指摘 (1 件目): `is_envrc_basename` が `foo.envrc`
+   のような命名付きスクリプトや、大文字小文字を区別する FS 上の `.ENVRC`
+   でも True を返す一方、direnv が実際に自動発見・自動 load するのは
+   大文字小文字も一致する literal `.envrc` だけだった不具合を修正**。
+   `foo.envrc` / `.ENVRC` は direnv の対象外なので、`.envrc` **family**
+   (`*.envrc`、大文字小文字問わず) 全体を「direnv が自動発見するかどうか」
+   だけで判定する単一の predicate は実態と合わなかった。
+5. **上記 4 の修正の隠れた回帰を修正 (マージ前レビューの指摘、2 件目)**。
+   4 の初版は `is_envrc_basename` を literal `.envrc` の exact match に
+   厳格化し、非 literal な `*.envrc` operand は bash_handler / edit_handler
+   共通の既定 (dotenv-cli 推奨 / `.env.example`) 文言にそのままフォール
+   バックさせていた。これは別方向の実態不一致を生んだ: `.envrc` は
+   条件分岐や `use flake` を書ける shell script で dotenv-cli の静的
+   `KEY=value` パーサとは性質が合わないのに `source foo.envrc` に
+   dotenv-cli を勧め、`cp foo.envrc x` や Edit/Write の overwrite に
+   無関係な `.env.example` を勧めていた。
+   - **predicate を 2 つに分離**: `is_envrc_basename` を family 全体
+     (`*.envrc`、case-insensitive) の判定に戻し、「direnv が実際に自動
+     発見・自動 load するか」(literal `.envrc` のみ) を新設した
+     `is_direnv_literal` に切り出した。
+   - **load (`source`/`.`)**: family なら dotenv-cli を出さず shell 形式
+     の助言にする。literal ならさらに direnv hook 経由の自動読込を案内し、
+     family だが非 literal (`foo.envrc` / `.ENVRC`) なら「direnv の自動
+     発見対象外」に留め、自動読込は案内しない。
+   - **move (`cp`/`mv`) と Edit/Write**: テンプレート案内を実際の basename
+     から動的に派生させる (`<basename>.example`)。`.envrc` →
+     `.envrc.example`、`foo.envrc` → `foo.envrc.example`、`.ENVRC` →
+     `.ENVRC.example`。literal かどうかは問わない (name の対応関係が保たれ
+     れば十分)。
+   - **判定境界 (deny/allow) には一切影響しない**。助言文面の分岐条件と
+     テンプレート組み立て方法のみの修正。
+   テスト: `foo.envrc` / `.ENVRC` / literal `.envrc` × move / load / edit の
+   既存回帰テストを新しい契約に更新し、`source foo.envrc` に dotenv-cli /
+   direnv 自動読込のいずれも出ないこと、`cp foo.envrc x` に
+   `foo.envrc.example` が出ること、`source .envrc` には direnv 自動読込が
+   出ることを追加で固定した。修正前コード (4 の literal-only 版) に対して
+   新規・更新テストが失敗することを確認済み (負テスト)。deny reason の
+   byte 上限 (`MAX_REASON_BYTES` = 3072) 内に収まることも実測した (最大
+   実測値: `source foo.envrc` で 2067 byte)。
 
 ## 0.29.0
 

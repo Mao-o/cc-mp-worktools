@@ -287,20 +287,40 @@ class TestLoad(unittest.TestCase):
         self.assertIn("shell に load", msg)
         self.assertIn("first_token: .", msg)
 
-    def test_source_envrc_true_does_not_suggest_dotenv_cli(self):
-        """0.29.1: ``is_envrc=True`` のとき dotenv-cli を案内しない。
+    def test_source_envrc_literal_suggests_direnv_auto_load(self):
+        """マージ前レビューの指摘: ``is_envrc=True`` かつ ``is_direnv_literal=True`` (literal
+        ``.envrc``) のときだけ dotenv-cli を案内せず、direnv hook 経由の
+        自動読込を案内する。
 
         ``.envrc`` は条件分岐や `use flake` を書ける shell script で、
         dotenv-cli の静的 ``KEY=value`` パーサとは性質が合わない
         (_bash_deny_move と同じ class の問題、内部バックログ)。判定
-        (``engine.is_envrc_basename``) 自体は呼出側の責務なので、ここでは
-        ``is_envrc`` を明示的に渡した場合の文面選択だけを確認する。
+        (``engine.is_envrc_basename`` / ``engine.is_direnv_literal``) 自体は
+        呼出側の責務なので、ここではフラグを明示的に渡した場合の文面選択だけを
+        確認する。
         """
         msg = M.bash_deny(first_token="source", operand=".envrc",
                           command="source .envrc",
-                          file_render=_DUMMY_FILE_RENDER, is_envrc=True)
+                          file_render=_DUMMY_FILE_RENDER, is_envrc=True,
+                          is_direnv_literal=True)
         self.assertNotIn("dotenv-cli", msg)
         self.assertIn("direnv", msg)
+        self.assertIn("経由で読み込んでください", msg)
+        self.assertIn("1Password CLI", msg)
+
+    def test_source_envrc_family_non_literal_does_not_suggest_auto_load(self):
+        """マージ前レビューの指摘 (P2): ``is_envrc=True`` だが
+        ``is_direnv_literal`` を渡さない (= 非 literal な family、例:
+        ``foo.envrc`` / ``.ENVRC``) ときは dotenv-cli も direnv hook 経由の
+        自動読込も案内しない。family であることだけを理由に shell 形式の
+        助言に倒すが、literal ``.envrc`` 前提の自動読込までは勧めない。
+        """
+        msg = M.bash_deny(first_token="source", operand="foo.envrc",
+                          command="source foo.envrc",
+                          file_render=_DUMMY_FILE_RENDER, is_envrc=True)
+        self.assertNotIn("dotenv-cli", msg)
+        self.assertNotIn("自動 load", msg)
+        self.assertNotIn("経由で読み込んでください", msg)
         self.assertIn("1Password CLI", msg)
 
     def test_load_is_envrc_defaults_to_false(self):
@@ -350,6 +370,25 @@ class TestMove(unittest.TestCase):
         self.assertNotIn(".env.example", msg)
         self.assertIn(".envrc.example", msg)
 
+    def test_cp_named_envrc_script_derives_example_from_basename(self):
+        """マージ前レビューの指摘 (P2): テンプレート案内は実際の
+        basename から動的に派生する (``<basename>.example``)。``foo.envrc``
+        は literal ``.envrc`` ではないが family (``*.envrc``) ではあるので、
+        ``foo.envrc.example`` を案内し、無関係な ``.env.example`` は出さない。
+        """
+        msg = M.bash_deny(first_token="cp", operand="foo.envrc",
+                          command="cp foo.envrc foo.envrc.bak", is_envrc=True)
+        self.assertNotIn(".env.example", msg)
+        self.assertIn("foo.envrc.example", msg)
+
+    def test_mv_uppercase_envrc_derives_example_from_basename(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` でも、basename の大文字
+        小文字をそのまま保った ``.ENVRC.example`` を案内する。"""
+        msg = M.bash_deny(first_token="mv", operand=".ENVRC",
+                          command="mv .ENVRC ENVRC.bak", is_envrc=True)
+        self.assertNotIn(".env.example", msg)
+        self.assertIn(".ENVRC.example", msg)
+
     def test_is_envrc_defaults_to_false(self):
         """``is_envrc`` を渡さない既存呼び出しは従来どおり .env 版のまま。"""
         msg = M.bash_deny(first_token="cp", operand=".envrc",
@@ -359,11 +398,15 @@ class TestMove(unittest.TestCase):
 
 
 class TestBashMoveEnvrcSuggestionByteBudget(unittest.TestCase):
-    """0.29.1: ``.envrc`` 専用の format clause が既定 (.env) 文言と同水準の
-    byte 数であることを固定する。``test_messages.TestEnvrcClauseByteBudget``
+    """0.29.1: ``.envrc`` family 専用の format clause が既定 (.env) 文言と
+    同水準の byte 数であることを固定する。``test_messages.TestEnvrcClauseByteBudget``
     (edit_deny 側) と同じ発想 — 既定文言との差を upper bound にする。move の
     deny reason は minimal info を持たないため行数への波及は無いが、同じ
     discipline (内部バックログの提案) をここでも守る。
+
+    マージ前レビューの指摘: ``_bash_move_suggestion_format_envrc`` は basename を動的に
+    埋め込む関数 (``_bash_move_suggestion_format_envrc``) になったため、
+    literal ``.envrc`` (旧定数と同じ basename 長) で呼び出して測る。
     """
 
     def test_envrc_format_clause_is_within_15_bytes_of_default(self):
@@ -371,12 +414,12 @@ class TestBashMoveEnvrcSuggestionByteBudget(unittest.TestCase):
             M._BASH_MOVE_SUGGESTION_FORMAT_DOTENV.encode("utf-8")
         )
         envrc_len = len(
-            M._BASH_MOVE_SUGGESTION_FORMAT_ENVRC.encode("utf-8")
+            M._bash_move_suggestion_format_envrc(".envrc").encode("utf-8")
         )
         self.assertLessEqual(
             envrc_len,
             default_len + 15,
-            "_BASH_MOVE_SUGGESTION_FORMAT_ENVRC が既定文言より 15 byte を"
+            "_bash_move_suggestion_format_envrc が既定文言より 15 byte を"
             " 超えて長い。",
         )
 
@@ -396,6 +439,21 @@ class TestBashLoadEnvrcSuggestionByteBudget(unittest.TestCase):
             default_len + 15,
             "_BASH_LOAD_SUGGESTION_FORMAT_ENVRC が既定文言より 15 byte を"
             " 超えて長い。",
+        )
+
+    def test_envrc_family_format_clause_is_within_15_bytes_of_default(self):
+        """マージ前レビューの指摘: family だが非 literal な operand 用の clause も同水準。"""
+        default_len = len(
+            M._BASH_LOAD_SUGGESTION_FORMAT_DOTENV.encode("utf-8")
+        )
+        family_len = len(
+            M._BASH_LOAD_SUGGESTION_FORMAT_ENVRC_FAMILY.encode("utf-8")
+        )
+        self.assertLessEqual(
+            family_len,
+            default_len + 15,
+            "_BASH_LOAD_SUGGESTION_FORMAT_ENVRC_FAMILY が既定文言より"
+            " 15 byte を超えて長い。",
         )
 
 

@@ -1428,41 +1428,48 @@ class TestEditSuggestionAltUpdateBudget(unittest.TestCase):
 
 
 class TestEnvrcClauseByteBudget(unittest.TestCase):
-    """マージ前レビューの指摘 (P2): ``.envrc`` 専用の 3 clause が既定文言より
-    大幅に長く、``suggested_keys`` / minimal info と同じ byte 予算を奪い合う
-    回帰があった。``_EDIT_SUGGESTION_ALT_UPDATE_ENVRC`` (ファイル名だけ差し替え、
-    既定文言比 +2 byte) と同じ水準まで削ったことを固定する。
+    """マージ前レビューの指摘 (P2): ``.envrc`` family 専用の 3 clause が既定
+    文言より大幅に長く、``suggested_keys`` / minimal info と同じ byte 予算を
+    奪い合う回帰があった。``_edit_suggestion_alt_update_envrc`` (ファイル名
+    だけ差し替え、既定文言比 +2 byte) と同じ水準まで削ったことを固定する。
 
     ``TestEditSuggestionAltUpdateBudget`` と同じ発想 (**既定文言との差**を
-    upper bound にする) だが、こちらは envrc 版 3 種すべてを一括で見る。
+    upper bound にする) だが、こちらは envrc family 版 3 種すべてを一括で見る。
+
+    マージ前レビューの指摘: 各 clause は basename を動的に埋め込む関数になったため、
+    literal ``.envrc`` と非 literal な ``foo.envrc`` の両方の basename で
+    測り、どちらも budget 内であることを確認する (basename が長いほど
+    example 文字列も長くなるため、実運用で典型的な長さの operand で担保する)。
     """
 
     def test_envrc_clauses_are_within_15_bytes_of_their_default(self):
         pairs = [
             (
                 "_EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV",
-                "_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC",
+                M._edit_overwrite_format_clause_envrc,
             ),
-            ("_EDIT_SUGGESTION_ALT_NEW", "_EDIT_SUGGESTION_ALT_NEW_ENVRC"),
+            ("_EDIT_SUGGESTION_ALT_NEW", M._edit_suggestion_alt_new_envrc),
             (
                 "_EDIT_SUGGESTION_ALT_DEFAULT",
-                "_EDIT_SUGGESTION_ALT_DEFAULT_ENVRC",
+                M._edit_suggestion_alt_default_envrc,
             ),
         ]
-        for default_name, envrc_name in pairs:
-            with self.subTest(envrc_name=envrc_name):
-                default_len = len(
-                    getattr(M, default_name).encode("utf-8")
-                )
-                envrc_len = len(getattr(M, envrc_name).encode("utf-8"))
-                self.assertLessEqual(
-                    envrc_len,
-                    default_len + 15,
-                    f"{envrc_name} が {default_name} より 15 byte を超えて"
-                    " 長い。suggested_keys / minimal info の表示行数を"
-                    " 圧迫する回帰の再発 (レビュー実測: n=15 で 13→11 行、"
-                    " n=30 で 10→7 行)",
-                )
+        for basename in (".envrc", "foo.envrc"):
+            example = f"{basename}.example"
+            for default_name, envrc_fn in pairs:
+                with self.subTest(basename=basename, envrc_fn=envrc_fn.__name__):
+                    default_len = len(
+                        getattr(M, default_name).encode("utf-8")
+                    )
+                    envrc_len = len(envrc_fn(example).encode("utf-8"))
+                    self.assertLessEqual(
+                        envrc_len,
+                        default_len + 15,
+                        f"{envrc_fn.__name__}({example!r}) が {default_name}"
+                        " より 15 byte を超えて長い。suggested_keys /"
+                        " minimal info の表示行数を圧迫する回帰の再発"
+                        " (レビュー実測: n=15 で 13→11 行、n=30 で 10→7 行)",
+                    )
 
 
 class TestEnvrcOverwriteKeyLineParity(unittest.TestCase):
@@ -1481,7 +1488,7 @@ class TestEnvrcOverwriteKeyLineParity(unittest.TestCase):
 
     @staticmethod
     def _build(basename: str, n: int) -> tuple[int, str]:
-        is_envrc = basename == ".envrc"
+        is_envrc = basename.lower().endswith(".envrc")
         # existing キーと new キーを別名にして、render 側 (minimal info) の
         # 表示行数だけを数えられるようにする。
         existing_keys = [f"K{i:03d}" + "X" * 9 for i in range(n)]

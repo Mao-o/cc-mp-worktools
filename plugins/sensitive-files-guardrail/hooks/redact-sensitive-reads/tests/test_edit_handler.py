@@ -379,11 +379,14 @@ class TestDenyReasonSuggestions(BaseEdit):
         self.assertNotIn(".env.example", reason)
         self.assertNotIn("dotenv-cli", reason)
 
-    def test_named_envrc_script_new_file_falls_back_to_env_example(self):
-        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal ``.envrc`` では
-        ないため direnv 前提の ``.envrc.example`` 案内 (literal ``.envrc``
-        固定文言) は実態と合わない。厳格化後は既定 (``.env.example`` /
-        dotenv-cli) 文言にフォールバックする。判定 (deny) 自体は変わらない。
+    def test_named_envrc_script_new_file_derives_example_from_basename(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal
+        ``.envrc`` ではないが ``.envrc`` family (``*.envrc``) ではあるので、
+        無関係な ``.env.example`` ではなく実際の basename から動的に派生した
+        ``foo.envrc.example`` を案内する。0.29.1 は family 判定自体を literal
+        に厳格化してこのケースを ``.env.example`` (dotenv 系の既定文言) に
+        フォールバックさせていたが、これは別方向の実態不一致だった。判定
+        (deny) 自体は変わらない。
         """
         envelope = _make_envelope(
             "Write", str(Path(self.tmp) / "foo.envrc"), self.tmp,
@@ -392,12 +395,13 @@ class TestDenyReasonSuggestions(BaseEdit):
         r = handle(envelope, tool_label="Write")
         reason = _reason(r)
         self.assertEqual(_decision(r), "deny")
-        self.assertNotIn(".envrc.example", reason)
-        self.assertIn(".env.example", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn("foo.envrc.example", reason)
 
-    def test_uppercase_envrc_new_file_falls_back_to_env_example(self):
+    def test_uppercase_envrc_new_file_derives_example_from_basename(self):
         """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
-        別ファイル扱いになるため、direnv 前提の案内は出さない
+        別ファイル扱いになるが、family (``*.envrc``) ではあるので、basename
+        の大文字小文字をそのまま保った ``.ENVRC.example`` を案内する
         (マージ前レビューの指摘 (P2))。"""
         envelope = _make_envelope(
             "Write", str(Path(self.tmp) / ".ENVRC"), self.tmp,
@@ -406,8 +410,8 @@ class TestDenyReasonSuggestions(BaseEdit):
         r = handle(envelope, tool_label="Write")
         reason = _reason(r)
         self.assertEqual(_decision(r), "deny")
-        self.assertNotIn(".envrc.example", reason)
-        self.assertIn(".env.example", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".ENVRC.example", reason)
 
     def test_empty_content_no_keys(self):
         envelope = _make_envelope(

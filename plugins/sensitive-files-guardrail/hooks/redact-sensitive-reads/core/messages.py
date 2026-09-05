@@ -771,12 +771,23 @@ def _bash_deny_mutate(
 
 
 # ``load`` の suggestion 前半 (format 軸)。既定は「direnv か dotenv-cli を
-# 使え」だが、operand 自体が ``.envrc`` のときは的外れになる: (a) 「direnv を
-# 使え」が対象ファイルそのものを勧める同語反復になる (b) dotenv-cli は
-# 静的な ``KEY=value`` 用パーサで、条件分岐や `use flake` を書ける .envrc の
-# shell script という性質と合わない (_bash_deny_move と同じ class の問題、
-# 0.29.1、内部バックログ)。byte 数は既定文言と揃えている
-# (``TestBashLoadEnvrcSuggestionByteBudget`` 参照)。
+# 使え」だが、operand が ``.envrc`` ファミリ (``*.envrc``、大文字小文字問わず)
+# のときは的外れになる: (a) 「direnv を使え」が対象ファイルそのものを勧める
+# 同語反復になる (b) dotenv-cli は静的な ``KEY=value`` 用パーサで、条件分岐や
+# `use flake` を書ける .envrc の shell script という性質と合わない
+# (_bash_deny_move と同じ class の問題、0.29.1、内部バックログ)。
+#
+# family の中でも、direnv が実際に自動発見・自動 load するのは **literal
+# ``.envrc``** だけ (マージ前レビューの指摘)。``foo.envrc`` /
+# ``.ENVRC`` のような非 literal な family には direnv hook 経由の自動読込を
+# 案内すると実態と合わないため、3 分岐にする:
+#
+# - 非 family (``.env`` 等): 既定 (direnv / dotenv-cli)
+# - family だが非 literal (``foo.envrc`` / ``.ENVRC``): shell script 扱いに
+#   留め、direnv 自動発見の対象外である旨だけ伝える (自動読込は勧めない)
+# - literal ``.envrc``: 上記に加えて direnv hook 経由の自動読込を案内する
+#
+# byte 数は既定文言と揃えている (``TestBashLoadEnvrcSuggestionByteBudget`` 参照)。
 _BASH_LOAD_SUGGESTION_FORMAT_DOTENV = (
     "環境変数として読み込みたいなら direnv (`.envrc`) や"
     " dotenv-cli の利用を推奨します。"
@@ -784,6 +795,10 @@ _BASH_LOAD_SUGGESTION_FORMAT_DOTENV = (
 _BASH_LOAD_SUGGESTION_FORMAT_ENVRC = (
     "`.envrc` は direnv 側の hook (`direnv allow` 後の自動 load) 経由で"
     "読み込んでください。"
+)
+_BASH_LOAD_SUGGESTION_FORMAT_ENVRC_FAMILY = (
+    "shell script のため direnv 対象外 (`.envrc` のみ自動発見)。"
+    "明示的に実行してください。"
 )
 
 
@@ -799,12 +814,15 @@ def _bash_deny_load(
     resolved_base: str,
     relpath: str = "",
     is_envrc: bool = False,
+    is_direnv_literal: bool = False,
 ) -> str:
     """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。
 
-    ``.envrc`` では前半の代替案だけ direnv hook 前提の文面に差し替える
-    (0.29.1)。``is_envrc`` は ``_bash_deny_move`` と同じく呼出側
-    (``bash_handler``) が判定して渡す。
+    前半の代替案は 3 分岐 (マージ前レビューの指摘): ``is_envrc``
+    (family) が False なら既定、True かつ ``is_direnv_literal`` が False なら
+    「family だが direnv の自動発見対象外」、True かつ True なら literal
+    ``.envrc`` 前提の direnv hook 案内。両フラグとも呼出側 (``bash_handler``)
+    が判定して渡す (``_bash_deny_move`` と同じ分担)。
     """
     basename = _basename_of(operand)
     note = (
@@ -815,11 +833,12 @@ def _bash_deny_load(
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
     _append_minimal_info(lines, file_render, render_status, resolved_base)
-    format_clause = (
-        _BASH_LOAD_SUGGESTION_FORMAT_ENVRC
-        if is_envrc
-        else _BASH_LOAD_SUGGESTION_FORMAT_DOTENV
-    )
+    if is_direnv_literal:
+        format_clause = _BASH_LOAD_SUGGESTION_FORMAT_ENVRC
+    elif is_envrc:
+        format_clause = _BASH_LOAD_SUGGESTION_FORMAT_ENVRC_FAMILY
+    else:
+        format_clause = _BASH_LOAD_SUGGESTION_FORMAT_DOTENV
     lines.append(
         f"suggestion: {format_clause}"
         " 1Password CLI / pass / git-secret 経由の secret 読込でも代替できます。"
@@ -827,22 +846,41 @@ def _bash_deny_load(
     return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
-# ``move`` の suggestion 後半 (format 軸)。``.envrc`` (direnv) は
-# .env.example 派生の対象ではない (テンプレート慣習は .envrc.example) ため、
-# edit_deny 側 (``_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC`` 等) と同じ理由で
-# 専用文面を持つ (0.29.1、内部バックログ)。``core.messages`` は redaction 層に
-# 依存しない方針を保つため、判定 (``engine.is_envrc_basename``) は
+# ``move`` の suggestion 後半 (format 軸)。``.envrc`` ファミリ (``*.envrc``、
+# 大文字小文字問わず。direnv 用 shell script) は .env.example 派生の対象では
+# ない (テンプレート慣習は ``<basename>.example``) ため、edit_deny 側
+# (``_edit_overwrite_format_clause_envrc`` 等) と同じ理由で専用文面を持つ
+# (0.29.1、内部バックログ)。``core.messages`` は redaction 層に依存しない
+# 方針を保つため、判定 (``engine.is_envrc_basename``) は
 # ``bash_handler._build_deny_response`` 側で行い、結果だけ ``is_envrc`` として
 # 受け取る (edit_deny / edit_handler と同じ分担)。
+#
+# マージ前レビューの指摘 (P2): 直前の 0.29.1 内 fix は文言を固定文字列
+# (``.envrc.example`` / ``.envrc``) にしていたため、``foo.envrc`` のような
+# 非 literal な family operand でも同じ literal ``.envrc`` 前提の文言が出て
+# いた。テンプレート案内を実際の basename から動的に派生させる
+# (``<basename>.example``、literal かどうかは問わない — cp/mv の代替案は
+# 名前の対応関係が保たれれば十分)。
 # byte 数は既定文言と揃えている (``TestBashMoveEnvrcSuggestionByteBudget`` 参照)。
 _BASH_MOVE_SUGGESTION_FORMAT_DOTENV = (
     " `.env.example` 派生で運用するなら `cp .env.example .env.local` の"
     "方向で代替できます。"
 )
-_BASH_MOVE_SUGGESTION_FORMAT_ENVRC = (
-    " `.envrc.example` 派生で運用するなら `cp .envrc.example .envrc` の"
-    "方向で代替できます。"
-)
+
+
+def _bash_move_suggestion_format_envrc(basename: str) -> str:
+    """``.envrc`` family (``*.envrc``) 用の move suggestion 後半を basename から
+    動的に組み立てる (マージ前レビューの指摘)。
+
+    ``.envrc`` → ``.envrc.example``、``foo.envrc`` → ``foo.envrc.example``、
+    ``.ENVRC`` → ``.ENVRC.example`` のように、実際の operand の大文字小文字・
+    命名をそのまま保つ。
+    """
+    example = f"{basename}.example"
+    return (
+        f" `{example}` 派生で運用するなら `cp {example} {basename}` の"
+        "方向で代替できます。"
+    )
 
 
 def _bash_deny_move(
@@ -860,8 +898,9 @@ def _bash_deny_move(
 ) -> str:
     """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。
 
-    ``.envrc`` (direnv) では後半の代替案だけ ``.envrc.example`` 版に差し替える
-    (0.29.1)。前半 (secrets manager 推奨) は format に依らないので共通のまま。
+    ``.envrc`` family では後半の代替案だけ basename から動的に派生した
+    ``<basename>.example`` 版に差し替える (0.29.1、マージ前レビューの指摘で basename 派生化)。
+    前半 (secrets manager 推奨) は format に依らないので共通のまま。
     ``is_envrc`` は呼出側 (``bash_deny`` 経由で ``bash_handler``) が判定して
     渡す — 判定関数を自前で呼ばない。
     """
@@ -874,7 +913,7 @@ def _bash_deny_move(
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
     format_clause = (
-        _BASH_MOVE_SUGGESTION_FORMAT_ENVRC
+        _bash_move_suggestion_format_envrc(basename)
         if is_envrc
         else _BASH_MOVE_SUGGESTION_FORMAT_DOTENV
     )
@@ -1145,6 +1184,7 @@ def bash_deny(
     resolved_base: str = "",
     relpath: str = "",
     is_envrc: bool = False,
+    is_direnv_literal: bool = False,
 ) -> str:
     """Bash 操作の deny reason を plain text で構築する (0.10.0 で category dispatch)。
 
@@ -1173,12 +1213,19 @@ def bash_deny(
             root 配下に解決できたときだけ handler が渡し、除外案内を path 形
             (``!<relpath>``、1 ファイルだけ) にする。glob / VCS pathspec /
             root 外は空文字 (basename 形のみ案内)。
-        is_envrc: operand の basename が ``.envrc`` (direnv) か (0.29.1)。
+        is_envrc: operand の basename が ``.envrc`` **family** (``*.envrc``、
+            大文字小文字問わず) か (0.29.1、マージ前レビューの指摘で family 判定に復元)。
             ``move`` (``_bash_deny_move``) / ``load`` (``_bash_deny_load``)
             category だけが使う。判定は ``engine.is_envrc_basename`` で
             呼出側 (``bash_handler``) が行い、結果だけをここに渡す —
             ``core.messages`` は redaction 層を import しない方針を保つ
             (edit_deny / edit_handler と同じ分担)。
+        is_direnv_literal: operand の basename が **literal** ``.envrc`` か
+            (マージ前レビューの指摘で新設)。``load`` category だけが使う — direnv が実際に
+            自動発見・自動 load するのは literal ``.envrc`` のみなので、
+            family (``is_envrc``) の中でもこのフラグが True のときだけ
+            direnv hook 経由の自動読込を案内する。判定は
+            ``engine.is_direnv_literal`` で呼出側が行う。
     """
     category = _category_for_first_token(first_token)
     builder = _BASH_DENY_BUILDERS[category]
@@ -1195,6 +1242,8 @@ def bash_deny(
     )
     if category in ("move", "load"):
         kwargs["is_envrc"] = is_envrc
+    if category == "load":
+        kwargs["is_direnv_literal"] = is_direnv_literal
     return builder(**kwargs)
 
 
@@ -1289,13 +1338,13 @@ _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER = (
     "既存値を保ったまま項目を足すなら、差分適用 (patch) での反映を"
     "検討してください。"
 )
-# .envrc (direnv) は dotenv-cli merge / .env.example の対象ではない (直接 shell
-# script、テンプレート慣習も .envrc.example) ため専用の clause を持つ
-# (0.29.0、engine.is_envrc_basename で判定。内部バックログ)。
+# .envrc family (``*.envrc``、direnv 用 shell script) は dotenv-cli merge /
+# .env.example の対象ではない (テンプレート慣習は ``<basename>.example``) ため
+# 専用の clause を持つ (0.29.0、engine.is_envrc_basename で判定。内部バックログ)。
 #
-# マージ前レビューの指摘 (P2): 初版は ".envrc は direnv の shell script です" の
-# 説明文を毎回埋め込んでいたため、この 3 clause (本定数 /
-# ``_EDIT_SUGGESTION_ALT_NEW_ENVRC`` / ``_EDIT_SUGGESTION_ALT_DEFAULT_ENVRC``)
+# マージ前レビューの指摘 (P2、0.29.1): 初版は ".envrc は direnv の shell
+# script です" の説明文を毎回埋め込んでいたため、この 3 clause (本関数 /
+# ``_edit_suggestion_alt_new_envrc`` / ``_edit_suggestion_alt_default_envrc``)
 # が既定文言 (.env 側の同役割の定数) より 36〜46 byte 長くなっていた。
 # ``edit_deny`` は tail (この clause を含む) を先に組んでから残りを minimal
 # info (上書き対象の既存キー一覧) の予算に回すため、固定文言が長いぶん同じ
@@ -1303,37 +1352,52 @@ _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER = (
 # (レビュー指摘時の実測: n=15 で 13→11 行、n=30 で 10→7 行。本 fix 時の手元
 # 再現 (鍵名 13 文字・値 20 文字の同一パディング) では n=15 で 15→13 行、
 # n=30 で 10→8 行 — パディング差で絶対数は変わるが「.envrc の方が少ない」
-# 傾向は同じ)。説明文を削り `.envrc.example` を直接案内する形にして、
-# 既定文言比 +15 byte 以内に収めた (``_EDIT_SUGGESTION_ALT_UPDATE_ENVRC`` が
+# 傾向は同じ)。説明文を削り `<basename>.example` を直接案内する形にして、
+# 既定文言比 +15 byte 以内に収めた (``_edit_suggestion_alt_update_envrc`` が
 # 既にこの形 — ファイル名だけ差し替えている — なので同じパターンに揃えた)。
+#
+# マージ前レビューの指摘 (P2): 直前の 0.29.1 内 fix は文言を固定文字列
+# (``.envrc.example``) にしていたため、``foo.envrc`` のような非 literal な
+# family basename に対しても無関係な literal ``.envrc.example`` を案内して
+# いた。テンプレート案内を実際の basename から動的に派生させる関数に変更する
+# (``example = f"{basename}.example"``)。
 # ``tests/test_messages.py::TestEnvrcClauseByteBudget`` /
 # ``TestEnvrcOverwriteKeyLineParity`` が回帰を固定する。
-_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC = (
-    "既存値を保ったまま項目を足すなら、`.envrc.example` を用意し、"
-    "値は direnv 側で与えてください。"
-)
+def _edit_overwrite_format_clause_envrc(example: str) -> str:
+    return (
+        f"既存値を保ったまま項目を足すなら、`{example}` を用意し、"
+        "値は direnv 側で与えてください。"
+    )
+
 
 # ``suggestion_alt:`` (new_keys があるときだけ出る) の kind 別文面。
 _EDIT_SUGGESTION_ALT_NEW = (
     "同じキー名で `.env.example` を作成し、値は空にしてください。"
     "実値は手動入力か 1Password CLI 等のシークレット管理ツール経由で設定します。"
 )
-# .envrc 版。説明文を削り既定文言比 +15 byte 以内に収めた経緯は
-# ``_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC`` 直前のコメント参照。
-_EDIT_SUGGESTION_ALT_NEW_ENVRC = (
-    "同じ変数名で `.envrc.example` を作成し、値は空にしてください。"
-    "実値は direnv 側や 1Password CLI 等のシークレット管理ツール経由で"
-    "設定します。"
-)
+# .envrc family 版 (basename 派生、マージ前レビューの指摘)。説明文を削り既定文言比 +15 byte
+# 以内に収めた経緯は ``_edit_overwrite_format_clause_envrc`` 直前のコメント参照。
+def _edit_suggestion_alt_new_envrc(example: str) -> str:
+    return (
+        f"同じ変数名で `{example}` を作成し、値は空にしてください。"
+        "実値は direnv 側や 1Password CLI 等のシークレット管理ツール経由で"
+        "設定します。"
+    )
+
+
 _EDIT_SUGGESTION_ALT_DEFAULT = (
     "追加予定のキー名を `.env.example` に追記すると、"
     "差分把握がしやすくなります (値は後で個別設定)。"
 )
-# .envrc 版。同上 (説明文を削り既定文言比 +15 byte 以内に収めた)。
-_EDIT_SUGGESTION_ALT_DEFAULT_ENVRC = (
-    "追加予定の変数名を `.envrc.example` に追記すると、"
-    "差分把握がしやすくなります (値は後で個別設定)。"
-)
+# .envrc family 版 (basename 派生、マージ前レビューの指摘)。同上 (説明文を削り既定文言比
+# +15 byte 以内に収めた)。
+def _edit_suggestion_alt_default_envrc(example: str) -> str:
+    return (
+        f"追加予定の変数名を `{example}` に追記すると、"
+        "差分把握がしやすくなります (値は後で個別設定)。"
+    )
+
+
 # overwrite かつ new_keys の全件が既存キー集合に含まれる (= 純粋な値の更新で
 # 新規追加が無い) ときの suggestion_alt (0.26.0)。
 #
@@ -1356,12 +1420,15 @@ _EDIT_SUGGESTION_ALT_UPDATE = (
     "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
     "（`.env.example` への追記は不要）。"
 )
-# .envrc 版 (0.29.0)。ファイル名だけ .envrc.example に差し替え、長さは
-# 既定文言とほぼ同じに保つ (上記の budget 制約と同じ理由)。
-_EDIT_SUGGESTION_ALT_UPDATE_ENVRC = (
-    "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
-    "（`.envrc.example` への追記は不要）。"
-)
+# .envrc family 版 (0.29.0、マージ前レビューの指摘で basename 派生化)。ファイル名を
+# ``<basename>.example`` に差し替え、長さは既定文言とほぼ同じに保つ
+# (上記の budget 制約と同じ理由)。
+def _edit_suggestion_alt_update_envrc(example: str) -> str:
+    return (
+        "上記の suggested_keys は新規追加ではなく **既存キーの値の更新**です"
+        f"（`{example}` への追記は不要）。"
+    )
+
 
 # 上書き対象の既存ファイルを Read 同等 minimal info として載せるときのラベル。
 _EDIT_EXISTING_LABEL = "minimal info (Read 同等 / 上書き対象の既存ファイル):"
@@ -1672,7 +1739,11 @@ def _fit_data_block_core(
 
 
 def _edit_kind_suggestion(
-    kind: str, is_dotenv: bool, tool_label: str, is_envrc: bool = False
+    kind: str,
+    is_dotenv: bool,
+    tool_label: str,
+    is_envrc: bool = False,
+    basename: str = "",
 ) -> str:
     """kind 別 ``suggestion:`` 行の本文を返す (無ければ空文字)。
 
@@ -1682,7 +1753,10 @@ def _edit_kind_suggestion(
     format 軸は dotenv / envrc / other の 3 値 (0.29.0)。``is_envrc`` は
     ``is_dotenv`` が True のときだけ意味を持つ (``.envrc`` は
     ``_detect_format`` 上 dotenv 系に含まれるため、is_dotenv=False かつ
-    is_envrc=True にはならない)。
+    is_envrc=True にはならない)。``is_envrc`` は family 全体 (``*.envrc``、
+    大文字小文字問わず) を指す (マージ前レビューの指摘)。``basename`` はテンプレート案内
+    (``<basename>.example``) を動的に組み立てるために使う — ``is_envrc``
+    が True のときだけ参照する。
     """
     if kind != "overwrite":
         return _EDIT_DENY_SUGGESTION.get(kind, "")
@@ -1690,7 +1764,7 @@ def _edit_kind_suggestion(
         tool_label, _EDIT_OVERWRITE_TOOL_CLAUSE_DEFAULT
     )
     if is_envrc:
-        format_clause = _EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC
+        format_clause = _edit_overwrite_format_clause_envrc(f"{basename}.example")
     elif is_dotenv:
         format_clause = _EDIT_OVERWRITE_FORMAT_CLAUSE_DOTENV
     else:
@@ -1797,10 +1871,12 @@ def edit_deny(
             返してしまうため。
         is_dotenv: 対象 basename が dotenv 系か。``overwrite`` の代替案を
             dotenv-cli merge にするかの判定に使う。
-        is_envrc: 対象 basename が ``.envrc`` (direnv) か (0.29.0)。
+        is_envrc: 対象 basename が ``.envrc`` **family** (``*.envrc``、大文字
+            小文字問わず) か (0.29.0、マージ前レビューの指摘で family 判定に復元)。
             ``is_dotenv`` (``.envrc`` は dotenv 系に含まれる) と直交ではなく
             **その特化**: True のときは dotenv-cli merge / `.env.example`
-            系の助言の代わりに `.envrc.example` / direnv 前提の助言を返す
+            系の助言の代わりに、``basename`` から動的に組み立てた
+            `<basename>.example` / direnv 前提の助言を返す
             (``engine.is_envrc_basename`` 参照)。
         existing_render: ``kind == "overwrite"`` のとき、上書き対象の既存
             ファイルを ``redaction.file_render.render_for_bash`` に通した
@@ -1836,8 +1912,13 @@ def edit_deny(
             tail.append(f"  {k}=")
         if remaining > 0:
             tail.append(f"  ... ({remaining} more)")
+        envrc_example = f"{basename}.example"
         if kind == "new":
-            alt = _EDIT_SUGGESTION_ALT_NEW_ENVRC if is_envrc else _EDIT_SUGGESTION_ALT_NEW
+            alt = (
+                _edit_suggestion_alt_new_envrc(envrc_example)
+                if is_envrc
+                else _EDIT_SUGGESTION_ALT_NEW
+            )
         elif (
             kind == "overwrite"
             and existing_keys
@@ -1846,15 +1927,25 @@ def edit_deny(
             # 全件が既存キー = 純粋な値の更新で新規追加が無い。
             # 部分一致 (新規キーと既存キーが混在) は「追加予定」側の説明が
             # 少なくとも新規分には正しいままなので、従来文面を維持する。
-            alt = _EDIT_SUGGESTION_ALT_UPDATE_ENVRC if is_envrc else _EDIT_SUGGESTION_ALT_UPDATE
+            alt = (
+                _edit_suggestion_alt_update_envrc(envrc_example)
+                if is_envrc
+                else _EDIT_SUGGESTION_ALT_UPDATE
+            )
         else:
-            alt = _EDIT_SUGGESTION_ALT_DEFAULT_ENVRC if is_envrc else _EDIT_SUGGESTION_ALT_DEFAULT
+            alt = (
+                _edit_suggestion_alt_default_envrc(envrc_example)
+                if is_envrc
+                else _EDIT_SUGGESTION_ALT_DEFAULT
+            )
         tail.append(f"suggestion_alt: {alt}")
 
     if extra_note:
         tail.append(f"extra_note: {extra_note}")
 
-    kind_suggestion = _edit_kind_suggestion(kind, is_dotenv, tool_label, is_envrc)
+    kind_suggestion = _edit_kind_suggestion(
+        kind, is_dotenv, tool_label, is_envrc, basename
+    )
     if kind_suggestion:
         tail.append(f"suggestion: {kind_suggestion}")
 

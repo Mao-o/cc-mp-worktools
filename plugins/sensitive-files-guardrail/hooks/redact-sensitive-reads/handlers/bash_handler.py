@@ -162,6 +162,7 @@ from handlers.bash.segmentation import (  # noqa: F401
     _replace_simple_expansions,
     _split_command_on_operators,
 )
+from redaction.engine import is_direnv_literal as is_direnv_literal_basename
 from redaction.engine import is_envrc_basename
 from redaction.file_render import render_for_bash
 
@@ -501,7 +502,16 @@ def _build_deny_response(
     # 不要で ``os.path.basename`` で足りる。判定関数をここで呼ぶのは
     # edit_handler と同じ分担 (``core.messages`` に redaction 層への依存を
     # 持ち込まない)。他 category では ``bash_deny`` 側が値を無視する。
-    is_envrc = is_envrc_basename(os.path.basename(operand))
+    #
+    # ``is_envrc`` (family、``*.envrc`` 大文字小文字問わず) と
+    # ``is_direnv_literal`` (literal ``.envrc`` のみ) は別軸
+    # (マージ前レビューの指摘)。``load`` category だけが後者も使う —
+    # direnv が実際に自動発見・自動 load するのは literal ``.envrc`` のみ
+    # なので、family の中でも direnv hook 前提の案内を出してよいかどうかを
+    # 区別する。
+    operand_basename = os.path.basename(operand)
+    is_envrc = is_envrc_basename(operand_basename)
+    is_direnv_literal = is_direnv_literal_basename(operand_basename)
     return output.make_deny(
         M.bash_deny(
             first_token=first,
@@ -514,6 +524,7 @@ def _build_deny_response(
             resolved_base=resolved_base,
             relpath=_operand_relpath(operand, cwd, root),
             is_envrc=is_envrc,
+            is_direnv_literal=is_direnv_literal,
         )
     )
 

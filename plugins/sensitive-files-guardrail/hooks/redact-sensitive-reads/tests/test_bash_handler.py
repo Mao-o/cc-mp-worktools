@@ -324,12 +324,19 @@ class TestDenyFixed(BaseBash):
         ``KEY=value`` パーサとは性質が合わない。_bash_deny_move の envrc 修正
         と同じ配線 (bash_handler が判定・伝達) を load category にも適用した
         ことを end-to-end で固定する。
+
+        マージ前レビューの指摘 (P2): literal ``.envrc`` は
+        family かつ literal なので、dotenv-cli を出さないことに加えて
+        direnv hook 経由の自動読込を案内することも固定する
+        (``source foo.envrc`` は family だが非 literal なので案内しない —
+        ``test_source_named_envrc_script_does_not_suggest_auto_load`` 参照)。
         """
         r = handle(_make_envelope("source .envrc", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
         self.assertNotIn("dotenv-cli", reason)
         self.assertIn("direnv", reason)
+        self.assertIn("経由で読み込んでください", reason)
 
     def test_dot_envrc_reason_does_not_suggest_dotenv_cli(self):
         r = handle(_make_envelope(". .envrc", self.tmp))
@@ -339,32 +346,37 @@ class TestDenyFixed(BaseBash):
         self.assertIn("direnv", reason)
 
     def test_source_named_envrc_script_does_not_suggest_auto_load(self):
-        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal ``.envrc`` では
-        ないため direnv が自動発見・自動 load しない。旧実装
-        (``is_envrc_basename`` の ``lower().endswith(".envrc")``) は
-        ``foo.envrc`` も True と誤判定し、「direnv 側の hook 経由で自動
-        読込してください」と実態と合わない案内をしていた。厳格化後は既定
-        (dotenv-cli を含む) 文言にフォールバックする。判定 (deny) 自体は
-        変わらない。
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal
+        ``.envrc`` ではないため direnv が自動発見・自動 load しない。0.29.1 は
+        本ケースを is_envrc=False (非 family) 扱いにして dotenv-cli を含む
+        既定文言にフォールバックしていたが、これは別方向の実態不一致
+        (``.envrc`` は条件分岐や `use flake` を書ける shell script で、
+        dotenv-cli の静的パーサとは性質が合わない) だった。今回の修正は
+        family (is_envrc=True) と literal (is_direnv_literal) を分離し、
+        family だが非 literal なら「dotenv-cli も direnv 自動読込も案内し
+        ない」shell script 前提の文面にする。判定 (deny) 自体は変わらない。
         """
         r = handle(_make_envelope("source foo.envrc", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
         self.assertNotIn("direnv 側の hook", reason)
         self.assertNotIn("自動 load", reason)
-        self.assertIn("dotenv-cli", reason)
+        self.assertNotIn("経由で読み込んでください", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
     def test_dot_uppercase_envrc_does_not_suggest_auto_load(self):
         """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
         別ファイル扱いになるため、direnv の自動 load 対象ではない
-        (マージ前レビューの指摘 (P2))。"""
+        (マージ前レビューの指摘 (P2))。family (``*.envrc``) ではあるので
+        dotenv-cli も案内しない (マージ前レビューの指摘)。"""
         r = handle(_make_envelope(". .ENVRC", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
         self.assertNotIn("direnv 側の hook", reason)
         self.assertNotIn("自動 load", reason)
-        self.assertIn("dotenv-cli", reason)
+        self.assertNotIn("経由で読み込んでください", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
     def test_head_with_options_dotenv(self):
@@ -769,37 +781,40 @@ class TestUnknownCommandOperand(BaseBash):
         self.assertNotIn(".env.example", reason)
         self.assertIn(".envrc.example", reason)
 
-    def test_cp_named_envrc_script_falls_back_to_env_example(self):
-        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal ``.envrc`` では
-        ないので、実際には別名の ``foo.envrc.example`` テンプレートを勧める
-        べきところ、旧実装は文言固定で ``cp .envrc.example .envrc`` (literal
-        ``.envrc`` 前提) を案内していた。厳格化後は既定 (``.env.example``)
-        文言にフォールバックする。判定 (deny) 自体は変わらない。
+    def test_cp_named_envrc_script_derives_example_from_basename(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は
+        literal ``.envrc`` ではないが ``.envrc`` family (``*.envrc``) では
+        あるので、無関係な ``.env.example`` ではなく実際の basename から
+        動的に派生した ``foo.envrc.example`` を案内する。0.29.1 は
+        family 判定自体を literal に厳格化してこのケースを ``.env.example``
+        (dotenv 系の既定文言) にフォールバックさせていたが、これは別方向の
+        実態不一致だった。判定 (deny) 自体は変わらない。
         """
         r = handle(_make_envelope("cp foo.envrc foo.envrc.bak", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
-        self.assertNotIn(".envrc.example", reason)
-        self.assertIn(".env.example", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn("foo.envrc.example", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
-    def test_mv_named_envrc_script_falls_back_to_env_example(self):
+    def test_mv_named_envrc_script_derives_example_from_basename(self):
         r = handle(_make_envelope("mv foo.envrc foo.envrc.bak", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
-        self.assertNotIn(".envrc.example", reason)
-        self.assertIn(".env.example", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn("foo.envrc.example", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
-    def test_cp_uppercase_envrc_falls_back_to_env_example(self):
+    def test_cp_uppercase_envrc_derives_example_from_basename(self):
         """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
-        別ファイル扱いになるため、``.envrc.example`` テンプレート案内
-        (literal ``.envrc`` 前提) は出さない (マージ前レビューの指摘 (P2))。"""
+        別ファイル扱いになるが、family (``*.envrc``) ではあるので、basename の
+        大文字小文字をそのまま保った ``.ENVRC.example`` を案内する
+        (マージ前レビューの指摘 (P2))。"""
         r = handle(_make_envelope("cp .ENVRC ENVRC.bak", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
-        self.assertNotIn(".envrc.example", reason)
-        self.assertIn(".env.example", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".ENVRC.example", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
     def test_grep_non_sensitive_allow(self):

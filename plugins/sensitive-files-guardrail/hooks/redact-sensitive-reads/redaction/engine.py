@@ -61,32 +61,55 @@ def _detect_format(basename: str) -> str:
 
 
 def is_envrc_basename(basename: str) -> bool:
-    """basename が **literal** ``.envrc`` (direnv が自動発見する厳密なファイル名)
+    """basename が ``.envrc`` **ファミリ** (``*.envrc``、大文字小文字を区別しない)
     かどうかを返す (助言文面の分岐専用、0.29.0)。
 
     ``_detect_format`` は parse 用途で ``.envrc`` を ``"dotenv"`` に含めて
     正しい (``KEY=value`` 行のスーパーセットとして dotenv パーサをそのまま
     再利用できるため)。ただし ``.envrc`` は direnv 用の **shell script** であり、
     Next.js 慣例の dotenv-cli merge や ``.env.example`` テンプレートの対象では
-    ない (テンプレート慣習は ``.envrc.example``、既定 patterns の ``!*.example``
-    で除外済み)。この違いは助言文面 (``core.messages``) 側だけが必要とする
-    ので、判定境界 (``_detect_format`` の戻り値) には触れず補助関数として
-    独立させる。
+    ない (テンプレート慣習は ``<basename>.example``、既定 patterns の
+    ``!*.example`` で除外済み)。この違いは助言文面 (``core.messages``) 側だけが
+    必要とするので、判定境界 (``_detect_format`` の戻り値) には触れず補助関数
+    として独立させる。
 
-    マージ前レビューの指摘 (P2): 0.29.1 までは ``lower().endswith(".envrc")``
-    で判定していたため、``foo.envrc`` のような命名付きスクリプトや、大文字小文字を
-    区別する FS 上の ``.ENVRC`` でも True になっていた。direnv が
-    ``direnv allow`` 後に hook 経由で自動発見・自動 load するのは、大文字小文字も
-    一致する **literal ``.envrc``** だけ (``foo.envrc`` は direnv の対象外、
-    ``.ENVRC`` は大文字小文字を区別する FS では別ファイル扱いで direnv が
-    見つけられない)。そのため呼出側が「direnv hook で自動読込してください」
-    (``source``/``.`` 経路) や「``.envrc.example`` から `cp .envrc.example .envrc`」
-    (``cp``/``mv`` 経路。target が実際には ``foo.envrc`` でも文言は固定で
-    literal ``.envrc`` を指していた) を案内すると、対象が literal でない場合に
-    実態と合わない案内になる。判定を exact match に厳格化し、非 literal な
-    ``*.envrc`` operand は False を返して呼出側を default (dotenv 系の既定文言)
-    に fall back させる。判定境界 (``is_sensitive`` の deny/allow) には一切
-    影響しない — この関数は助言文面の分岐にのみ使われる。
+    マージ前レビューの指摘 (P2): 直前の 0.29.1 内 fix は本関数を literal ``.envrc``
+    の exact match に厳格化し、``foo.envrc`` / ``.ENVRC`` を False にしていた。
+    しかしこれは family 全体を「dotenv 系の既定文言 (dotenv-cli 推奨) に
+    フォールバック」させてしまい、``source foo.envrc`` に dotenv-cli を勧める
+    (``.envrc`` は条件分岐や `use flake` を書ける shell script で
+    dotenv-cli の静的パーサとは性質が合わない) / ``cp foo.envrc x`` や
+    Edit/Write の overwrite に無関係な ``.env.example`` を勧める、という
+    別方向の実態不一致を生んでいた。
+
+    判定を **family 全体** (``*.envrc``、case-insensitive) に戻し、
+    「direnv が自動発見・自動 load するかどうか」(literal ``.envrc`` のみ) は
+    別の補助関数 :func:`is_direnv_literal` に切り出した。呼出側は:
+
+    - dotenv-cli を勧めるかどうか / shell script として扱うかどうか →
+      本関数 (family) で分岐
+    - direnv hook 経由の自動読込を案内してよいかどうか →
+      :func:`is_direnv_literal` (literal) で分岐
+
+    の 2 軸を組み合わせて使う (``core.messages._bash_deny_load`` 参照)。
+    判定境界 (``is_sensitive`` の deny/allow) には一切影響しない —
+    この関数は助言文面の分岐にのみ使われる。
+    """
+    return basename.lower().endswith(".envrc")
+
+
+def is_direnv_literal(basename: str) -> bool:
+    """basename が **literal** ``.envrc`` (direnv が自動発見する厳密なファイル名)
+    かどうかを返す (助言文面の分岐専用、0.29.1、マージ前レビューの指摘で新設)。
+
+    direnv が ``direnv allow`` 後の hook で自動発見・自動 load するのは、
+    大文字小文字も一致する literal ``.envrc`` だけ (``foo.envrc`` は direnv の
+    対象外、``.ENVRC`` は大文字小文字を区別する FS では別ファイル扱いで
+    direnv が見つけられない)。:func:`is_envrc_basename` (family 全体) とは
+    独立した軸で、direnv hook 経由の自動読込を案内してよいかどうかにのみ
+    使う (``cp``/``mv`` のテンプレート案内は family 全体で ``<basename>.example``
+    を動的に組み立てるため、この関数を必要としない — ``core.messages``
+    参照)。判定境界には一切影響しない。
     """
     return basename == ".envrc"
 
