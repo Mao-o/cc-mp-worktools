@@ -61,6 +61,9 @@ README にクラス単位・メソッド単位で 1 件だけ指定する実行�
 
 `claude plugin validate plugins/llms-docs` warning 0。224 tests, all green
 (前回 205 + 上記 19)。
+- `search` サブコマンドの Section 行 anchor は、index の raw URL (`.md` 付き fetch 形) ではなく
+  `Source:` 行と同じ正規形 (`normalize_doc_url`) に付ける。raw 形に `#fragment` を付けても
+  ページ上で解決しないため (マージ前レビューの指摘)。表示用の `URL:` 行は従来どおり
 
 ## [0.22.1] - 2026-08-28
 

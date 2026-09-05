@@ -146,7 +146,9 @@ class SectionUrlAnchorIntegrationTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         _write_fixture(
             self.tmp,
-            "- [Hooks](https://example.com/hooks): Configure hook matchers\n",
+            # index は実 llms.txt と同じ .md 付き fetch URL、Source: 行は .md なし
+            # (この差が anchor を raw URL に付ける退行を検出する)
+            "- [Hooks](https://example.com/hooks.md): Configure hook matchers\n",
             "# Hooks\n"
             "Source: https://example.com/hooks\n"
             "\n"
