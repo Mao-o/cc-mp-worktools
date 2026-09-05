@@ -893,5 +893,45 @@ class CorpusHintArgsTest(unittest.TestCase):
         self.assertEqual(_common.corpus_hint_args(args), ())
 
 
+class SearchRankKeyTest(unittest.TestCase):
+    """One ranking for the ``search`` subcommand of all three scripts
+    (internal backlog qwk): changelog-style pages last, then body hits,
+    then index score, then doc_idx."""
+
+    @staticmethod
+    def _r(idx, title, hits, score):
+        return {"doc_idx": idx, "title": title, "index_score": score,
+                "body_hits": {"total_matches": hits}}
+
+    def test_body_hits_outrank_index_score(self):
+        rows = [self._r(0, "Named in title", 1, 20), self._r(1, "Covers it", 9, 2)]
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [1, 0])
+
+    def test_index_score_then_doc_idx_break_ties(self):
+        rows = [self._r(5, "b", 3, 2), self._r(2, "a", 3, 2), self._r(9, "c", 3, 7)]
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [9, 2, 5])
+
+    def test_changelog_pages_sort_last_unless_opted_in(self):
+        rows = [self._r(0, "Changelog", 50, 30), self._r(1, "Release notes", 40, 30),
+                self._r(2, "Hooks", 1, 1)]
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [2, 0, 1])
+        rows.sort(key=lambda r: _common.search_rank_key(r, include_changelog_priority=True))
+        self.assertEqual([r["doc_idx"] for r in rows], [0, 1, 2])
+
+    def test_body_only_fallback_rows_have_no_index_score(self):
+        rows = [self._r(0, "x", 2, None), self._r(1, "y", 2, 0)]
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [0, 1])
+
+    def test_is_low_priority_patterns(self):
+        for t in ("Changelog", "Release Notes", "release-notes 2026", "Firebase release notes"):
+            self.assertTrue(_common.is_low_priority(t), t)
+        for t in ("Hooks", "Manage rollouts and releases", ""):
+            self.assertFalse(_common.is_low_priority(t), t)
+
+
 if __name__ == "__main__":
     unittest.main()

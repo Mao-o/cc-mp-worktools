@@ -112,7 +112,7 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits |
+| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除) |
 | `search-index` | `<query> [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
 | `search-content` | `<query> [--file F] [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
 | `fetch-index` | `[--file F] [--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
