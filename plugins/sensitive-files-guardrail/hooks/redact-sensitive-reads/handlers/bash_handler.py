@@ -94,6 +94,7 @@ autonomous モードで ``ask_or_allow`` を広く使うため「policy が無�
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 
 from core import logging as L
@@ -161,6 +162,8 @@ from handlers.bash.segmentation import (  # noqa: F401
     _replace_simple_expansions,
     _split_command_on_operators,
 )
+from redaction.engine import is_direnv_literal as is_direnv_literal_basename
+from redaction.engine import is_envrc_basename
 from redaction.file_render import render_for_bash
 
 
@@ -493,6 +496,35 @@ def _build_deny_response(
         # 値は一切含まない (ログ規則: docs/MAINTAINING.md「ログ規則」節)。
         L.log_info("bash_render_failed", render_status)
     grep_keys = extract_grep_keys(tokens) if is_grep_command(first) else None
+    # move (cp/mv) / load (source/.) の deny reason だけが使う (0.29.1、
+    # 内部バックログ)。これらの operand は VCS pathspec (``HEAD:.env``) を
+    # 取らないため、``core.messages`` 側の pathspec 対応 basename 抽出は
+    # 不要で ``os.path.basename`` で足りる。判定関数をここで呼ぶのは
+    # edit_handler と同じ分担 (``core.messages`` に redaction 層への依存を
+    # 持ち込まない)。他 category では ``bash_deny`` 側が値を無視する。
+    #
+    # ``is_envrc`` (family、``*.envrc`` 大文字小文字問わず) と
+    # ``is_direnv_literal`` (literal ``.envrc`` のみ) は別軸
+    # (マージ前レビューの指摘)。``load`` category だけが後者も使う —
+    # direnv が実際に自動発見・自動 load するのは literal ``.envrc`` のみ
+    # なので、family の中でも direnv hook 前提の案内を出してよいかどうかを
+    # 区別する。
+    #
+    # glob operand (マージ前レビューの指摘): ``*.envrc`` は dotglob /
+    # GLOBIGNORE 有効時に ``.envrc`` へ展開されうるため deny 対象になるが、
+    # basename には glob 文字がそのまま残る。``is_envrc_basename`` は
+    # suffix 一致だけを見るので ``"*.envrc".lower().endswith(".envrc")`` が
+    # True になり、対象を確定できない ``cp *.envrc.example *.envrc`` という
+    # 無意味な案内が出ていた。docs/DESIGN.md の load/move 節が既定として
+    # 定めるとおり「glob operand は既定文言のまま」にするため、glob を含む
+    # operand は両判定関数を評価せず False に固定する。
+    operand_basename = os.path.basename(operand)
+    if _has_glob(operand):
+        is_envrc = False
+        is_direnv_literal = False
+    else:
+        is_envrc = is_envrc_basename(operand_basename)
+        is_direnv_literal = is_direnv_literal_basename(operand_basename)
     return output.make_deny(
         M.bash_deny(
             first_token=first,
@@ -504,6 +536,8 @@ def _build_deny_response(
             render_status=render_status,
             resolved_base=resolved_base,
             relpath=_operand_relpath(operand, cwd, root),
+            is_envrc=is_envrc,
+            is_direnv_literal=is_direnv_literal,
         )
     )
 

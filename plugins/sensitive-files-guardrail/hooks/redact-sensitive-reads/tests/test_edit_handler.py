@@ -379,6 +379,40 @@ class TestDenyReasonSuggestions(BaseEdit):
         self.assertNotIn(".env.example", reason)
         self.assertNotIn("dotenv-cli", reason)
 
+    def test_named_envrc_script_new_file_derives_example_from_basename(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal
+        ``.envrc`` ではないが ``.envrc`` family (``*.envrc``) ではあるので、
+        無関係な ``.env.example`` ではなく実際の basename から動的に派生した
+        ``foo.envrc.example`` を案内する。0.29.1 は family 判定自体を literal
+        に厳格化してこのケースを ``.env.example`` (dotenv 系の既定文言) に
+        フォールバックさせていたが、これは別方向の実態不一致だった。判定
+        (deny) 自体は変わらない。
+        """
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / "foo.envrc"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "export AWS_ACCESS_KEY=x\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn(".env.example", reason)
+        self.assertIn("foo.envrc.example", reason)
+
+    def test_uppercase_envrc_new_file_derives_example_from_basename(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
+        別ファイル扱いになるが、family (``*.envrc``) ではあるので、basename
+        の大文字小文字をそのまま保った ``.ENVRC.example`` を案内する
+        (マージ前レビューの指摘 (P2))。"""
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".ENVRC"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "export AWS_ACCESS_KEY=x\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".ENVRC.example", reason)
+
     def test_empty_content_no_keys(self):
         envelope = _make_envelope(
             "Write", str(Path(self.tmp) / ".env"), self.tmp,

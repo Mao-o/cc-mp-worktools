@@ -744,8 +744,8 @@ yaml は構造未パースのため status 系は全て出さず、key 名と件
 | `read_partial` | `head` / `tail` | 「先頭/末尾 N 行確認」note + 鍵 list の N 件 (head=先頭、tail=末尾)。`-n N` / `-N` (BSD) / `--lines=N` から N を抽出 |
 | `search` | `grep` / `rg` / `ag` / `ack` / `egrep` / `fgrep` | 「検索」note + `matched_pattern_keys: [...]` / `nomatch_pattern_keys: [...]` (E4 で抽出した env-var 名と dotenv の照合結果)。pattern 抽出 / 照合とも失敗時は全鍵 list (minimal info) に降りる |
 | `mutate` | `awk` / `sed` | 「加工」note + minimal info + patch / diff 適用推奨。**0.17.0 で到達可能になった** (それ以前は `_OPAQUE_WRAPPERS` 判定が先行して handler からは到達しない dead branch だった) |
-| `load` | `source` / `.` | 「shell load」note + minimal info + direnv (.envrc) / dotenv-cli / 1Password CLI 推奨 |
-| `move` | `cp` / `mv` | 「コピー / 移動」note + 1Password CLI / pass / git-secret + .env.example 派生推奨 |
+| `load` | `source` / `.` | 「shell load」note + minimal info + direnv (.envrc) / dotenv-cli / 1Password CLI 推奨。basename が `.envrc` **family** (`*.envrc`、大文字小文字問わず、`engine.is_envrc_basename`) なら dotenv-cli を出さず shell script 前提の文面にする (0.29.1)。family の中でも **literal** `.envrc` (`engine.is_direnv_literal`) のときだけ direnv hook 経由の自動読込を案内し、`foo.envrc` / `.ENVRC` のような非 literal な family は「direnv の自動発見対象外」に留めて自動読込は案内しない (マージ前レビューの指摘、2 段階の判定に分離)。非 literal family の旧文言は「明示的に実行してください」と、今まさに block した `source`/`.` の実行そのものを勧める自己矛盾があったため削除し、隔離された安全な代替 (1Password CLI 等) だけを残した (マージ前レビューの指摘)。glob operand (`.envrc*` 等) は対象が確定しないため既定文言のまま (`bash_handler._build_deny_response` が operand の glob 文字を検知して `is_envrc` / `is_direnv_literal` を評価せず False に固定する。マージ前レビューの指摘: 以前は operand 文字列をそのまま basename 判定に渡していたため `*.envrc` のような glob operand でも suffix 一致で True になっていた) |
+| `move` | `cp` / `mv` | 「コピー / 移動」note + 1Password CLI / pass / git-secret + `.env.example` 派生推奨。basename が `.envrc` family (`*.envrc`、大文字小文字問わず) なら、実際の basename から動的に組み立てた `<basename>.example` 派生の案内に差し替える (`.envrc` → `.envrc.example`、`foo.envrc` → `foo.envrc.example`、`.ENVRC` → `.ENVRC.example`、0.29.1。マージ前レビューの指摘でテンプレート導出を basename 派生に変更 — literal かどうかは問わない)。案内文中の `cp <example> <basename>` は copy-paste 実行を想定した実コマンド文字列なので、basename に空白や `;` 等の shell メタ文字が含まれても壊れない/注入にならないよう `shlex.quote` で両ファイル名を quote してから組み立てる (マージ前レビューの指摘。ファイル名の言及部分の `` `<example>` `` 自体は表示用でコマンドではないため raw のまま)。glob operand は既定文言のまま (`bash_handler._build_deny_response` が operand の glob 文字を検知して `is_envrc` を False に固定する。上記 load と同じ修正、マージ前レビューの指摘) |
 | `history` | `git` (全 subcommand) | **0.19.0 で subcommand 別**: 閲覧系 (`show` / `diff` / `log` / `cat-file` 等) は「commit / 差分閲覧」note + 「tracked なら漏洩済みの可能性」+ `git rm --cached <basename>` + rotate 推奨。操作系 (`add` / `rm` / `mv` / `restore` / `checkout` / `reset` / `stash` / `clean` / `update-index` / `apply` / `commit` = `_GIT_OPERATE_SUBCOMMANDS`) は「index / 作業ツリーへの操作」note + subcommand 別の代替案 (`rm` は allow される `--cached` 形を案内し、deny された理由は断定しない)。subcommand は `command` 全体から `_git_subcommand_of` で推定 (複合コマンドは operand を含む `git` window を優先、`-C` / `-c` / `--git-dir` 等の global option は読み飛ばし。`bash_deny` の signature は変えない)。VCS pathspec の `:` 後尾から basename 抽出 |
 | `transfer` | `curl` / `wget` / `scp` / `rsync` | 「転送」note + Vault / SOPS / 1Password CLI 推奨 |
 | `archive` | `tar` / `zip` / `gzip` | 「アーカイブ」note + `--exclude=<basename>` / `-x <basename>` 推奨 |
@@ -889,8 +889,8 @@ deny reason のキー名ガイド:
 
 | `classify` | `kind` | 追加で出す情報 |
 |---|---|---|
-| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき。`.envrc` は `.envrc.example`、0.29.0) |
-| `regular` | `overwrite` | **書き換え対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用、`.envrc` は direnv 前提の案内) の案内 |
+| `missing` | `new` | 同じキー名で `.env.example` を作り値を空にする案内 (dotenv かつ追加キーありのとき。`.envrc` family は basename から動的に派生した `<basename>.example`、0.29.0、0.29.1 で basename 派生化) |
+| `regular` | `overwrite` | **書き換え対象の既存ファイルの Read 同等 minimal info** + dotenv-cli merge (dotenv 以外は差分適用、`.envrc` family は direnv 前提の案内) の案内 |
 | `symlink` | `symlink` | 実体側が書き換わる旨と symlink 運用の確認 |
 | `directory` | `directory` | ディレクトリである旨とパス指定の誤り (末尾要素の取り違え) の確認。0.19.1〜0.27.0 は `special` に畳まれ「FIFO / socket / device」と誤表示していた (内部バックログ) |
 | `special` | `special` | FIFO / socket / device である旨と通常ファイル指定の確認 |
@@ -911,13 +911,17 @@ clause の連結**で作る (`_edit_kind_suggestion`)。手書きの文面を組
 | `Edit` | 対象を絞った置換 | ファイル全体は失われないが機密ファイルへの書き込みは block 固定 |
 | 未確定 (`Edit/Write`) | — | tool 中立 (既存の機密ファイルへの書き込みは block 固定) |
 
-format 軸は tool に依存しない (dotenv → dotenv-cli の merge / `.envrc` →
-direnv 前提の案内 (`.envrc.example`) / それ以外 → 差分適用 (patch)、3 値。
-0.29.0 で `.envrc` を切り出すまでは `.envrc` も dotenv 側の文面を使っており、
-dotenv-cli merge / `.env.example` という Next.js 慣例を shell script である
-`.envrc` に誤って案内していた、内部バックログ)。`overwrite` の `note:` は
-tool 中立の「書き換え」にしてある — 「上書き」と書くと Edit では事実と違う
-ため。
+format 軸は tool に依存しない (dotenv → dotenv-cli の merge / `.envrc` family
+(`*.envrc`、大文字小文字問わず) → direnv 前提の案内 (basename から動的に
+派生した `<basename>.example`) / それ以外 → 差分適用 (patch)、3 値。0.29.0 で
+`.envrc` を切り出すまでは `.envrc` も dotenv 側の文面を使っており、dotenv-cli
+merge / `.env.example` という Next.js 慣例を shell script である `.envrc` に
+誤って案内していた、内部バックログ。0.29.1 でテンプレート案内を固定文字列
+`.envrc.example` から実際の basename 派生に変更 — マージ前レビューの指摘で
+`foo.envrc` のような非 literal な family basename にも `.envrc.example`
+(literal `.envrc` 前提) を誤案内していたことが判明したため)。`overwrite` の
+`note:` は tool 中立の「書き換え」にしてある — 「上書き」と書くと Edit では
+事実と違うため。
 
 tool 軸を持つのは `overwrite` だけ。`new` / `symlink` / `directory` / `special`
 の事情は Edit と Write で同じなので文面も同じになる (テストで固定)。
