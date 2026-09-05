@@ -2,21 +2,31 @@
 
 ## 0.11.1
 
-**切替を案内する deny 文面に「切替コマンドは単独で実行すること」の注記を追加**
-(`core/dispatcher.py`)。判定表 (allow/deny/warn) は変更していない。
+**remediation コマンドを案内する deny 文面に「案内したコマンドは単独で実行すること」
+の注記を追加** (`core/dispatcher.py`)。判定表 (allow/deny/warn) は変更していない。
 
 ### 変更内容
 
-1. **注記の追加** — 不一致 deny が案内する切替コマンド (`gh auth switch` /
-   `gcloud config set` / `firebase use` / `kubectl config use-context`) は単独なら
-   self-remediation として検証なしで通るが、切替後に実行したいコマンドと同じ
-   コマンド行に連結すると、連結先が切替**前**の状態で検証されて再び deny される。
-   案内どおりに打ったつもりで二度 deny を踏む往復が実運用で観測されたため、
-   切替案内 (`切り替え:`) を含む deny にだけ注記を末尾に足す。ログイン案内や
-   設定ファイルの型不正など切替を案内しない deny には付けない。
-2. **回帰テスト 4 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) —
-   注記が付く / 連結形でも付く / 切替案内なしでは付かない / 注記本文が
-   remediation contract の案内コマンド抽出に拾われない。
+1. **注記の追加** — 不一致 / 未設定 / 未ログインの deny が案内する remediation
+   コマンド (`gh auth switch` / `gh auth login` / `gcloud config set` /
+   `firebase use` / `kubectl config use-context` / AWS の切り替え手順) は単独なら
+   通る (切替は self-remediation、ログインは readonly) が、その後に実行したい
+   コマンドと同じコマンド行に連結すると、連結先が切替**前**の状態で検証されて
+   再び deny される。案内どおりに打ったつもりで二度 deny を踏む往復が実運用で
+   観測されたため、remediation を案内する deny の末尾にだけ注記を足す。
+   設定ファイルの型不正や `--project` フラグ不一致など、別コマンドの実行を
+   案内しない deny には付けない。
+2. **判定は verify() の出力だけで行う** — 各 service の案内文言契約
+   (`切り替え:` / `切り替え手順` / `を実行してください` / `切り替えてください`)
+   を、検出コマンド (user 入力) を合成する前の文字列に掛ける。合成後の本文で
+   判定すると `--title '切り替え:'` のような user 文字列で誤発火する
+   (マージ前レビューの指摘)。
+3. **回帰テスト 6 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
+   contract の強化 — 不一致 / 未設定 / ログイン案内に注記が付く、連結形でも付く、
+   型不正には付かない、user 入力の文言では発火しない、注記本文が案内コマンド
+   抽出に拾われない。既存の remediation contract テストに「verify() 由来の deny
+   が案内コマンドを含むなら注記が必ず付く」を追加し、文言契約の取りこぼしを
+   全 service 横断で機械検出する。
 
 ## 0.11.0
 

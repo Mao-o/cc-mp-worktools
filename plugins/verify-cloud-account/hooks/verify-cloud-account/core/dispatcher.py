@@ -20,18 +20,30 @@ _MIGRATE_HINT = (
 )
 
 
-# 各 service の verify() が不一致時に付ける切替案内の共通接頭辞。これを含む deny
-# にだけ下の注記を足す (ログイン案内や型不正の deny には不要)。
-_SWITCH_HINT_MARKER = "切り替え:"
+# 各 service の verify() が remediation コマンドを案内するときの文言契約。
+# 不一致は「 — 切り替え: <cmd>」、未設定 / 未ログインは「<cmd> を実行してください」、
+# firebase の dict 未設定は「以下のいずれかで切り替えてください」、AWS は
+# 「切り替え手順 (環境に応じて選択):」。この判定は
+# verify() が返した文字列 **だけ** に掛ける (検出コマンドや user 入力を含む合成後の
+# 本文には掛けない — `--title '切り替え:'` のような user 文字列で誤発火する)。
+# 契約の維持は tests の TestRemediationGuidanceContract が「案内コマンドを含む
+# deny には必ず注記が付く」ことで機械的に確認する。
+_REMEDIATION_MARKERS = ("切り替え:", "切り替え手順", "を実行してください", "切り替えてください")
 
-# 切替コマンドは単独 (self-remediation) なら検証なしで通るが、切替後に実行したい
-# コマンドと同じ Bash に連結すると、連結先が切替**前**の状態で検証されて deny に
-# なる (_all_self_remediation は全セグメントが切替であることを要求する)。案内どおり
-# に打ったのに再び deny される往復を防ぐため、切替を案内する deny には必ず添える。
-_SWITCH_STANDALONE_NOTE = (
-    "※ 切替コマンドは単独で実行してください。切替後に実行したいコマンドと同じ"
-    "コマンド行に連結すると、連結先が切替前の状態で検証されて再び deny されます。"
-    "切替が完了してから元のコマンドを実行してください。"
+
+def _guides_remediation(err: str) -> bool:
+    return any(m in err for m in _REMEDIATION_MARKERS)
+
+
+# 案内した remediation コマンド (切替 / ログイン) は単独なら通る (切替は
+# self-remediation、ログインは readonly) が、その後に実行したいコマンドと同じ Bash
+# に連結すると、連結先が実行**前**の状態で検証されて deny になる
+# (_all_self_remediation は全セグメントが切替であることを要求する)。案内どおりに
+# 打ったのに再び deny される往復を防ぐため、remediation を案内する deny には必ず添える。
+_REMEDIATION_STANDALONE_NOTE = (
+    "※ 案内したコマンド (切替 / ログイン) は単独で実行してください。その後に実行したい"
+    "コマンドと同じコマンド行に連結すると、連結先が切替前の状態で検証されて再び deny "
+    "されます。切替が完了してから元のコマンドを実行してください。"
 )
 
 def _match_service(candidate: str):
@@ -355,6 +367,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         accounts_mtime = 0.0
 
     errors: list[str] = []
+    needs_standalone_note = False
     for svc, cands, inline_env, ctx in targets:
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
@@ -403,6 +416,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 (time.monotonic() - _verify_start) * 1000, 2
             )
         if err:
+            # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
+            needs_standalone_note = needs_standalone_note or _guides_remediation(err)
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
             errors.append(
@@ -421,8 +436,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
         # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
         body = "\n\n".join(dict.fromkeys(errors))
-        if _SWITCH_HINT_MARKER in body:
-            body = body + "\n\n" + _SWITCH_STANDALONE_NOTE
+        if needs_standalone_note:
+            body = body + "\n\n" + _REMEDIATION_STANDALONE_NOTE
         if ancestor_note:
             body = ancestor_note + "\n\n" + body
         if note:

@@ -842,10 +842,10 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
     def test_switch_hint_deny_carries_standalone_note(self):
         self._write_accounts({"github": "Mao-o"})
         reason = self._reason("gh pr create", self._MISMATCH)
-        self.assertIn("切替コマンドは単独で実行してください", reason)
+        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
         # 注記は検出コマンド行の後、末尾側に 1 回だけ
-        self.assertEqual(reason.count("切替コマンドは単独で実行してください"), 1)
-        self.assertLess(reason.index("(検出コマンド:"), reason.index("切替コマンドは単独"))
+        self.assertEqual(reason.count("案内したコマンド (切替 / ログイン) は単独で実行してください"), 1)
+        self.assertLess(reason.index("(検出コマンド:"), reason.index("案内したコマンド"))
 
     def test_chained_switch_and_write_is_denied_with_note(self):
         """案内どおりの切替を write と連結した形: 切替は self-remediation だが
@@ -855,18 +855,29 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
             "gh auth switch --hostname github.com --user Mao-o && gh pr create",
             self._MISMATCH,
         )
-        self.assertIn("切替コマンドは単独で実行してください", reason)
+        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
         self.assertRegex(reason, r"\(検出コマンド: .*gh pr create\)")
 
-    def test_note_absent_when_no_switch_hint(self):
-        """ログイン案内 (切替案内なし) の deny には注記を付けない。"""
+    def test_login_guidance_carries_note(self):
+        """ログイン案内も remediation コマンド (readonly) で、連結すると同じ往復に
+        なるため注記を付ける。"""
         self._write_accounts({"github": "Mao-o"})
         reason = self._reason(
             "gh pr create",
             "GitHub [github.com]: このホストにログインしていません — "
             "gh auth login --hostname github.com --skip-ssh-key を実行してください。",
         )
-        self.assertNotIn("切替コマンドは単独で実行してください", reason)
+        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+
+    def test_note_absent_for_config_shape_error(self):
+        """設定ファイルの型不正 (remediation コマンドの案内なし) には注記を付けない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
+            "指定してください (現在: int)。",
+        )
+        self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
 
     def test_note_is_not_extracted_as_guided_command(self):
         """注記本文が remediation contract の案内コマンド抽出に拾われない
@@ -875,6 +886,31 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         reason = self._reason("gh pr create", self._MISMATCH)
         cmds = _guided_commands(reason)
         self.assertEqual(cmds, ["gh auth switch --hostname github.com --user Mao-o"])
+
+
+    def test_unset_state_guidance_carries_note(self):
+        """未設定系 (「<cmd> を実行してください」) の案内にも注記が付く。"""
+        self._write_accounts({"gcloud": {"project": "my-proj"}})
+        with mock.patch(
+            "services.gcloud.verify",
+            return_value="GCP: アクティブプロジェクトが設定されていません。"
+            "gcloud config set project my-proj を実行してください。",
+        ):
+            result = dispatch("gcloud run deploy x", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+
+    def test_user_controlled_marker_text_does_not_trigger_note(self):
+        """検出コマンド (user 入力) に文言契約の語が含まれても、verify() の出力が
+        remediation を案内していなければ注記は付かない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create --title '切り替え: を実行してください'",
+            'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
+            "指定してください (現在: int)。",
+        )
+        self.assertIn("切り替え: を実行してください", reason)  # 検出コマンド行に残る
+        self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
 
 
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
@@ -1282,6 +1318,14 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
     def _assert_guidance_is_allowed(self, reason: str, run_mock) -> list[str]:
         cmds = _guided_commands(reason)
         self.assertTrue(cmds, f"no command extracted from:\n{reason}")
+        # verify() 由来の deny (検出コマンド行を持つ) が案内コマンドを含むなら
+        # 「単独で実行せよ」の注記が必ず付く (dispatcher の文言契約
+        # _REMEDIATION_MARKERS が各 service の案内文を取りこぼしていないことを
+        # ここで機械的に確認する)。accounts 未設定 deny は verify 前に返るので対象外。
+        if "(検出コマンド:" in reason:
+            self.assertIn(
+                "案内したコマンド (切替 / ログイン) は単独で実行してください", reason
+            )
         for cmd in cmds:
             with self.subTest(guided=cmd):
                 if cmd.startswith("AWS_PROFILE="):
