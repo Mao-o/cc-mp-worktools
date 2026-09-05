@@ -967,10 +967,21 @@ def _strip_heading_markup(title: str) -> str:
     removes like any other symbol), and emphasis / code markers are removed
     while their content is kept. Merge-review finding.
     """
-    s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", title)   # image -> alt
+    # コードスパンの中身は逐語 (レンダリングでもそのまま表示される) なので、
+    # `<name>` のような角括弧を HTML タグ除去から守る。先に取り出して
+    # プレースホルダに置き、タグ除去・実体参照デコードの後で戻す
+    code_spans: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        code_spans.append(m.group(1))
+        return f"\x00{len(code_spans) - 1}\x00"
+
+    s = re.sub(r"`([^`]*)`", _stash, title)
+    s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)       # image -> alt
     s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)        # link -> text
     s = re.sub(r"<[^>]+>", "", s)                          # html tags
     s = html.unescape(s)
+    s = re.sub(r"\x00(\d+)\x00", lambda m: code_spans[int(m.group(1))], s)
     # 強調の区切りとして使われた `_` だけを剥がす (単語境界に接する `_..._` の組)。
     # `snake_case_name` のような識別子内の `_` は見出しの実テキストなので残す
     s = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)", r"\2", s)

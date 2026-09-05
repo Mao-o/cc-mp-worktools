@@ -503,6 +503,15 @@ class HeadingAnchorSlugMarkupTest(unittest.TestCase):
                          "using-query-and-claudesdkclient")
         self.assertEqual(_common.heading_anchor_slug("snake_case_name stays"), "snake_case_name-stays")
 
+    def test_angle_brackets_inside_code_span_are_kept_as_text(self):
+        """コードスパン内の `<name>` は逐語表示されるので HTML タグとして削らない
+        (マージ前レビューの指摘)。スパン外の実タグは従来どおり削る。"""
+        self.assertEqual(_common.heading_anchor_slug("Set `<name>` value"), "set-name-value")
+        self.assertEqual(
+            _common.heading_anchor_slug("Run `firebase use <alias>` <sup>beta</sup>", style="devsite"),
+            "run_firebase_use_alias_beta",
+        )
+
     def test_underscore_emphasis_delimiters_are_removed(self):
         """`_word_` の下線は強調区切りなので slug から除く。識別子内の `_` は残す
         (マージ前レビューの指摘)。"""
