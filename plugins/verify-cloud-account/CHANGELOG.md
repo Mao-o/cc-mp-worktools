@@ -16,17 +16,20 @@
    観測されたため、remediation を案内する deny の末尾にだけ注記を足す。
    設定ファイルの型不正や `--project` フラグ不一致など、別コマンドの実行を
    案内しない deny には付けない。
-2. **判定は service 宣言の remediation コマンド語幹で行う** — 各 service が
-   `REMEDIATION_STEMS` (例: `gh auth switch` / `gh auth login` / `gcloud config set` /
-   `firebase use` / `kubectl config use-context` / `AWS_PROFILE=`) を宣言し、dispatcher は
-   verify() の返り値にその語幹が含まれるときだけ注記を付ける。「〜を実行してください」
-   のような文言で判定すると `brew install gh を実行してください` (インストール案内) まで
-   拾い、検出コマンド (user 入力) を合成した後の本文で判定すると `--title '切り替え:'`
-   のような文字列で誤発火する (いずれもマージ前レビューの指摘)。
-3. **回帰テスト 8 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
+2. **判定は service 宣言の remediation コマンド実形で行う** — 各 service が
+   `REMEDIATION_PATTERNS` (引数付きの実コマンド形の正規表現。例: `gh auth switch --…` /
+   `gcloud config set project <x>` / `firebase use <x>` / `kubectl config use-context <x>` /
+   `AWS_PROFILE=<p>`) を宣言し、dispatcher は verify() の返り値にそれが一致するときだけ
+   注記を付ける。文言 (「〜を実行してください」) で判定するとインストール案内
+   (`brew install gh …`) を、語幹 (`firebase use`) で判定すると診断文 (`firebase use が
+   タイムアウトしました`) を拾い、検出コマンド (user 入力) を合成した後の本文で判定すると
+   `--title '切り替え:'` のような文字列で誤発火する (いずれもマージ前レビューの指摘)。
+   注記の文面は「案内された形のまま単独で実行 / 元のコマンドを連結しない」とし、案内文
+   自身が連結している `firebase login && firebase use <x>` (許可される形) と矛盾しない。
+3. **回帰テスト 10 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
    contract の強化 — 不一致 / 未設定 / ログイン案内に注記が付く、連結形でも付く、
    型不正・インストール案内には付かない、user 入力の文言では発火しない、注記本文が
-   案内コマンド抽出に拾われない、全 service が `REMEDIATION_STEMS` を宣言している。既存の remediation contract テストに「verify() 由来の deny
+   案内コマンド抽出に拾われない、案内文自身の連結形 (`firebase login && firebase use`) は allow されつつ注記の文面と矛盾しない、診断文では発火しない、全 service が `REMEDIATION_PATTERNS` を宣言している。既存の remediation contract テストに「verify() 由来の deny
    が案内コマンドを含むなら注記が必ず付く」を追加し、文言契約の取りこぼしを
    全 service 横断で機械検出する。
 

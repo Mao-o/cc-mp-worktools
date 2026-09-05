@@ -842,10 +842,10 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
     def test_switch_hint_deny_carries_standalone_note(self):
         self._write_accounts({"github": "Mao-o"})
         reason = self._reason("gh pr create", self._MISMATCH)
-        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertIn("案内された形のまま単独で実行してください", reason)
         # 注記は検出コマンド行の後、末尾側に 1 回だけ
-        self.assertEqual(reason.count("案内したコマンド (切替 / ログイン) は単独で実行してください"), 1)
-        self.assertLess(reason.index("(検出コマンド:"), reason.index("案内したコマンド"))
+        self.assertEqual(reason.count("案内された形のまま単独で実行してください"), 1)
+        self.assertLess(reason.index("(検出コマンド:"), reason.index("案内された形のまま"))
 
     def test_chained_switch_and_write_is_denied_with_note(self):
         """案内どおりの切替を write と連結した形: 切替は self-remediation だが
@@ -855,7 +855,7 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
             "gh auth switch --hostname github.com --user Mao-o && gh pr create",
             self._MISMATCH,
         )
-        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertIn("案内された形のまま単独で実行してください", reason)
         self.assertRegex(reason, r"\(検出コマンド: .*gh pr create\)")
 
     def test_login_guidance_carries_note(self):
@@ -867,7 +867,7 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
             "GitHub [github.com]: このホストにログインしていません — "
             "gh auth login --hostname github.com --skip-ssh-key を実行してください。",
         )
-        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertIn("案内された形のまま単独で実行してください", reason)
 
     def test_note_absent_for_config_shape_error(self):
         """設定ファイルの型不正 (remediation コマンドの案内なし) には注記を付けない。"""
@@ -877,7 +877,7 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
             'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
             "指定してください (現在: int)。",
         )
-        self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
 
     def test_note_is_not_extracted_as_guided_command(self):
         """注記本文が remediation contract の案内コマンド抽出に拾われない
@@ -898,7 +898,7 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         ):
             result = dispatch("gcloud run deploy x", str(self.project_dir))
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertIn("案内された形のまま単独で実行してください", reason)
 
     def test_user_controlled_marker_text_does_not_trigger_note(self):
         """検出コマンド (user 入力) に文言契約の語が含まれても、verify() の出力が
@@ -910,7 +910,7 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
             "指定してください (現在: int)。",
         )
         self.assertIn("切り替え: を実行してください", reason)  # 検出コマンド行に残る
-        self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
 
 
     def test_install_advice_does_not_trigger_note(self):
@@ -921,16 +921,52 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
             "gh pr create",
             "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。",
         )
-        self.assertNotIn("案内したコマンド (切替 / ログイン) は単独で実行してください", reason)
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
 
-    def test_every_service_declares_remediation_stems(self):
-        """全 service が REMEDIATION_STEMS を持ち、空でない (dispatcher の判定契約)。"""
+    def test_every_service_declares_remediation_patterns(self):
+        """全 service が REMEDIATION_PATTERNS を持ち、空でなく、コンパイルできる。"""
+        import re as _re
         from services import ALL
         for svc in ALL:
             with self.subTest(service=svc.ACCOUNT_KEY):
-                stems = getattr(svc, "REMEDIATION_STEMS", None)
-                self.assertIsInstance(stems, tuple)
-                self.assertTrue(stems)
+                pats = getattr(svc, "REMEDIATION_PATTERNS", None)
+                self.assertIsInstance(pats, tuple)
+                self.assertTrue(pats)
+                for p in pats:
+                    _re.compile(p)
+
+    def test_probe_name_only_diagnostic_does_not_trigger_note(self):
+        """コマンド名だけの診断文 (`firebase use がタイムアウトしました`) は案内ではない
+        (マージ前レビューの指摘)。"""
+        self._write_accounts({"firebase": "my-proj"})
+        with mock.patch(
+            "services.firebase.verify",
+            return_value="Firebase: firebase use がタイムアウトしました。"
+            "再試行するか、ネットワーク接続を確認してください。",
+        ):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_allows_guided_chain_and_forbids_appending_original(self):
+        """firebase の案内 `firebase login && firebase use <x>` 自体は許可される連結。
+        注記はそれを禁じず、元のコマンドの連結だけを禁じる文面であること。"""
+        self._write_accounts({"firebase": "my-proj"})
+        with mock.patch(
+            "services.firebase.verify",
+            return_value="Firebase: 現在のプロジェクトを取得できません。"
+            "firebase login && firebase use my-proj を実行してください。",
+        ):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        self.assertIn("元のコマンド (検出コマンド) を同じコマンド行に連結すると", reason)
+        # 案内された連結形は実際に allow される (readonly login + self-remediation use)
+        with mock.patch("services.firebase.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch("firebase login && firebase use my-proj", str(self.project_dir))
+            )
+        v.assert_not_called()
 
 
 class TestAccountSwitchInvalidation(BaseWithTmpProject):
@@ -1344,7 +1380,7 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         # ここで機械的に確認する)。accounts 未設定 deny は verify 前に返るので対象外。
         if "(検出コマンド:" in reason:
             self.assertIn(
-                "案内したコマンド (切替 / ログイン) は単独で実行してください", reason
+                "案内された形のまま単独で実行してください", reason
             )
         for cmd in cmds:
             with self.subTest(guided=cmd):

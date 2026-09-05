@@ -21,26 +21,28 @@ _MIGRATE_HINT = (
 
 
 # 注記の要否は、verify() が返した文字列に **その service が案内する remediation
-# コマンドの語幹** (services/<svc>.py の REMEDIATION_STEMS) が含まれるかで決める。
-# 文言 (「〜を実行してください」等) で判定すると `brew install gh を実行してください`
-# のようなインストール案内まで拾う。検出コマンド (user 入力) を合成した後の本文にも
-# 掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は tests の
-# TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が付く」
-# ことで機械的に確認する。
+# コマンドの実形** (services/<svc>.py の REMEDIATION_PATTERNS、引数付き) が一致するかで
+# 決める。文言 (「〜を実行してください」等) や語幹 (「firebase use」) で判定すると
+# `brew install gh を実行してください` (インストール案内) や
+# `firebase use がタイムアウトしました` (診断文) まで拾う。検出コマンド (user 入力) を
+# 合成した後の本文にも掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は
+# tests の TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が
+# 付く」ことで機械的に確認する。
 def _guides_remediation(err: str, service) -> bool:
-    stems = getattr(service, "REMEDIATION_STEMS", ())
-    return any(stem in err for stem in stems)
+    patterns = getattr(service, "REMEDIATION_PATTERNS", ())
+    return any(re.search(p, err) for p in patterns)
 
 
-# 案内した remediation コマンド (切替 / ログイン) は単独なら通る (切替は
-# self-remediation、ログインは readonly) が、その後に実行したいコマンドと同じ Bash
-# に連結すると、連結先が実行**前**の状態で検証されて deny になる
-# (_all_self_remediation は全セグメントが切替であることを要求する)。案内どおりに
-# 打ったのに再び deny される往復を防ぐため、remediation を案内する deny には必ず添える。
+# 案内した remediation コマンド (切替 / ログイン) は案内された形のままなら通る (切替は
+# self-remediation、ログインは readonly。`firebase login && firebase use <x>` のように
+# 案内文が自ら連結している形も通る) が、**元のコマンド (検出コマンド) を同じ Bash に
+# 連結する**と、そちらが切替前の状態で検証されて deny になる (_all_self_remediation は
+# 全セグメントが切替であることを要求する)。案内どおりに打ったのに再び deny される往復を
+# 防ぐため、remediation を案内する deny には必ず添える。
 _REMEDIATION_STANDALONE_NOTE = (
-    "※ 案内したコマンド (切替 / ログイン) は単独で実行してください。その後に実行したい"
-    "コマンドと同じコマンド行に連結すると、連結先が切替前の状態で検証されて再び deny "
-    "されます。切替が完了してから元のコマンドを実行してください。"
+    "※ 案内した切替 / ログインコマンドは案内された形のまま単独で実行してください。"
+    "元のコマンド (検出コマンド) を同じコマンド行に連結すると、そちらが切替前の状態で"
+    "検証されて再び deny されます。切替が完了してから元のコマンドを実行してください。"
 )
 
 def _match_service(candidate: str):

@@ -285,10 +285,10 @@ deny される remediation loop を防ぐため、**accounts.local.json の期�
 - `firebase use <期待 alias または project ID>`
 - `kubectl config use-context <期待コンテキスト>`
 
-**案内された切替 / ログインコマンドは単独で実行すること。** その後に実行したいコマンド
-と同じコマンド行に連結すると (`gh auth switch ... && gh pr create` 等)、連結先が切替**前**
-の状態で検証されて再び deny される。remediation を案内する deny 文面にはこの注記が付く
-(v0.11.1)。
+**案内された切替 / ログインコマンドは案内された形のまま単独で実行すること。** 元のコマンド
+を同じコマンド行に連結すると (`gh auth switch ... && gh pr create` 等)、そちらが切替**前**
+の状態で検証されて再び deny される (案内文自身が連結している `firebase login && firebase
+use <x>` は許可される形)。remediation を案内する deny 文面にはこの注記が付く (v0.11.1)。
 
 期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。切替コマンド
 (self-remediation を含む) を検出した時点で当該 service の成功 cache を破棄し、

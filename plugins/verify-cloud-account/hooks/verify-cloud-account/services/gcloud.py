@@ -76,10 +76,11 @@ CONTEXT_OPTIONS = {
 }
 ACCOUNT_KEY = "gcloud"
 
-# deny 文面で案内する remediation コマンドの語幹。dispatcher は verify() の返り値に
-# これが含まれるときだけ「単独で実行せよ」の注記を付ける (インストール案内や
-# 設定ファイルの型不正など、別の cloud CLI 操作を案内しない deny には付けない)。
-REMEDIATION_STEMS = ("gcloud config set",)
+# deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。
+# dispatcher は verify() の返り値にこれが一致するときだけ「単独で実行せよ」の注記を
+# 付ける。コマンド名だけの言及 (「firebase use がタイムアウトしました」等の診断文) や
+# インストール案内・設定ファイルの型不正には一致させない。
+REMEDIATION_PATTERNS = (r"gcloud config set (?:project|account)\s+\S",)
 SETUP_HINT = (
     'GCP 最小例: {"gcloud": "my-project-id"}。'
     "gcloud config get-value project で現在値を確認可。"
