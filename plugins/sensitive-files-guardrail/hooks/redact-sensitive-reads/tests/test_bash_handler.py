@@ -317,6 +317,27 @@ class TestDenyFixed(BaseBash):
         r = handle(_make_envelope(". .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
+    def test_source_envrc_reason_does_not_suggest_dotenv_cli(self):
+        """0.29.1: source .envrc は dotenv-cli を案内しない (内部バックログ)。
+
+        .envrc は direnv 用の shell script で、dotenv-cli の静的
+        ``KEY=value`` パーサとは性質が合わない。_bash_deny_move の envrc 修正
+        と同じ配線 (bash_handler が判定・伝達) を load category にも適用した
+        ことを end-to-end で固定する。
+        """
+        r = handle(_make_envelope("source .envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertIn("direnv", reason)
+
+    def test_dot_envrc_reason_does_not_suggest_dotenv_cli(self):
+        r = handle(_make_envelope(". .envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertIn("direnv", reason)
+
     def test_head_with_options_dotenv(self):
         r = handle(_make_envelope("head -n 1 .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
@@ -684,6 +705,40 @@ class TestUnknownCommandOperand(BaseBash):
     def test_mv_sensitive(self):
         r = handle(_make_envelope("mv .env .env.old", self.tmp))
         self.assertEqual(_decision(r), "deny")
+
+    def test_cp_envrc_reason_does_not_suggest_env_example(self):
+        """0.29.1: cp .envrc は .env.example 派生を案内しない (内部バックログ)。
+
+        修正前は ``bash_handler`` が ``is_envrc`` を判定・伝達しておらず、
+        ``core.messages.bash_deny`` の既定値 (``False``) がそのまま使われて
+        Next.js 慣例の ``.env.example`` を案内していた。edit_handler と同じ
+        分担 (handler が判定し、messages は結果を受け取るだけ) で配線した
+        ことを end-to-end で固定する (messages 層だけの単体テストでは
+        ``bash_handler`` 側の配線漏れを検出できないため)。
+        """
+        r = handle(_make_envelope("cp .envrc envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".envrc.example", reason)
+
+    def test_mv_envrc_reason_does_not_suggest_env_example(self):
+        r = handle(_make_envelope("mv .envrc envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".envrc.example", reason)
+
+    def test_cp_envrc_via_subdir_reason_still_detected(self):
+        """operand がディレクトリ付きでも basename 判定 (os.path.basename) が
+        効くことを確認する (``config/.envrc`` のようなケース)。"""
+        r = handle(_make_envelope(
+            "cp config/.envrc config/envrc.bak", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".envrc.example", reason)
 
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))

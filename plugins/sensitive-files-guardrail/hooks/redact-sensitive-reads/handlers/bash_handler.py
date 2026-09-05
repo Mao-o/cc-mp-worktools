@@ -94,6 +94,7 @@ autonomous モードで ``ask_or_allow`` を広く使うため「policy が無�
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 
 from core import logging as L
@@ -161,6 +162,7 @@ from handlers.bash.segmentation import (  # noqa: F401
     _replace_simple_expansions,
     _split_command_on_operators,
 )
+from redaction.engine import is_envrc_basename
 from redaction.file_render import render_for_bash
 
 
@@ -493,6 +495,13 @@ def _build_deny_response(
         # 値は一切含まない (ログ規則: docs/MAINTAINING.md「ログ規則」節)。
         L.log_info("bash_render_failed", render_status)
     grep_keys = extract_grep_keys(tokens) if is_grep_command(first) else None
+    # move (cp/mv) / load (source/.) の deny reason だけが使う (0.29.1、
+    # 内部バックログ)。これらの operand は VCS pathspec (``HEAD:.env``) を
+    # 取らないため、``core.messages`` 側の pathspec 対応 basename 抽出は
+    # 不要で ``os.path.basename`` で足りる。判定関数をここで呼ぶのは
+    # edit_handler と同じ分担 (``core.messages`` に redaction 層への依存を
+    # 持ち込まない)。他 category では ``bash_deny`` 側が値を無視する。
+    is_envrc = is_envrc_basename(os.path.basename(operand))
     return output.make_deny(
         M.bash_deny(
             first_token=first,
@@ -504,6 +513,7 @@ def _build_deny_response(
             render_status=render_status,
             resolved_base=resolved_base,
             relpath=_operand_relpath(operand, cwd, root),
+            is_envrc=is_envrc,
         )
     )
 

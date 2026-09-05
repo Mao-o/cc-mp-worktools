@@ -770,6 +770,23 @@ def _bash_deny_mutate(
     return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
 
+# ``load`` の suggestion 前半 (format 軸)。既定は「direnv か dotenv-cli を
+# 使え」だが、operand 自体が ``.envrc`` のときは的外れになる: (a) 「direnv を
+# 使え」が対象ファイルそのものを勧める同語反復になる (b) dotenv-cli は
+# 静的な ``KEY=value`` 用パーサで、条件分岐や `use flake` を書ける .envrc の
+# shell script という性質と合わない (_bash_deny_move と同じ class の問題、
+# 0.29.1、内部バックログ)。byte 数は既定文言と揃えている
+# (``TestBashLoadEnvrcSuggestionByteBudget`` 参照)。
+_BASH_LOAD_SUGGESTION_FORMAT_DOTENV = (
+    "環境変数として読み込みたいなら direnv (`.envrc`) や"
+    " dotenv-cli の利用を推奨します。"
+)
+_BASH_LOAD_SUGGESTION_FORMAT_ENVRC = (
+    "`.envrc` は direnv 側の hook (`direnv allow` 後の自動 load) 経由で"
+    "読み込んでください。"
+)
+
+
 def _bash_deny_load(
     *,
     first_token: str,
@@ -781,8 +798,14 @@ def _bash_deny_load(
     render_status: str,
     resolved_base: str,
     relpath: str = "",
+    is_envrc: bool = False,
 ) -> str:
-    """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。"""
+    """``source`` / ``.`` の deny reason。direnv / dotenv-cli を推奨。
+
+    ``.envrc`` では前半の代替案だけ direnv hook 前提の文面に差し替える
+    (0.29.1)。``is_envrc`` は ``_bash_deny_move`` と同じく呼出側
+    (``bash_handler``) が判定して渡す。
+    """
     basename = _basename_of(operand)
     note = (
         f"Bash コマンド ({first_token}) で機密ファイル ({operand}) を"
@@ -792,12 +815,34 @@ def _bash_deny_load(
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
     _append_minimal_info(lines, file_render, render_status, resolved_base)
+    format_clause = (
+        _BASH_LOAD_SUGGESTION_FORMAT_ENVRC
+        if is_envrc
+        else _BASH_LOAD_SUGGESTION_FORMAT_DOTENV
+    )
     lines.append(
-        "suggestion: 環境変数として読み込みたいなら direnv (`.envrc`) や"
-        " dotenv-cli の利用を推奨します。"
+        f"suggestion: {format_clause}"
         " 1Password CLI / pass / git-secret 経由の secret 読込でも代替できます。"
     )
     return _join_with_exclude_hint(lines, basename, relpath=relpath)
+
+
+# ``move`` の suggestion 後半 (format 軸)。``.envrc`` (direnv) は
+# .env.example 派生の対象ではない (テンプレート慣習は .envrc.example) ため、
+# edit_deny 側 (``_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC`` 等) と同じ理由で
+# 専用文面を持つ (0.29.1、内部バックログ)。``core.messages`` は redaction 層に
+# 依存しない方針を保つため、判定 (``engine.is_envrc_basename``) は
+# ``bash_handler._build_deny_response`` 側で行い、結果だけ ``is_envrc`` として
+# 受け取る (edit_deny / edit_handler と同じ分担)。
+# byte 数は既定文言と揃えている (``TestBashMoveEnvrcSuggestionByteBudget`` 参照)。
+_BASH_MOVE_SUGGESTION_FORMAT_DOTENV = (
+    " `.env.example` 派生で運用するなら `cp .env.example .env.local` の"
+    "方向で代替できます。"
+)
+_BASH_MOVE_SUGGESTION_FORMAT_ENVRC = (
+    " `.envrc.example` 派生で運用するなら `cp .envrc.example .envrc` の"
+    "方向で代替できます。"
+)
 
 
 def _bash_deny_move(
@@ -811,8 +856,15 @@ def _bash_deny_move(
     render_status: str,
     resolved_base: str,
     relpath: str = "",
+    is_envrc: bool = False,
 ) -> str:
-    """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。"""
+    """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。
+
+    ``.envrc`` (direnv) では後半の代替案だけ ``.envrc.example`` 版に差し替える
+    (0.29.1)。前半 (secrets manager 推奨) は format に依らないので共通のまま。
+    ``is_envrc`` は呼出側 (``bash_deny`` 経由で ``bash_handler``) が判定して
+    渡す — 判定関数を自前で呼ばない。
+    """
     basename = _basename_of(operand)
     note = (
         f"Bash コマンド ({first_token}) で機密ファイル ({operand}) を"
@@ -821,11 +873,14 @@ def _bash_deny_move(
     )
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
+    format_clause = (
+        _BASH_MOVE_SUGGESTION_FORMAT_ENVRC
+        if is_envrc
+        else _BASH_MOVE_SUGGESTION_FORMAT_DOTENV
+    )
     lines.append(
         "suggestion: バックアップが目的なら 1Password CLI / pass / git-secret"
-        " 等の secrets manager を推奨します。"
-        " `.env.example` 派生で運用するなら `cp .env.example .env.local` の"
-        "方向で代替できます。"
+        " 等の secrets manager を推奨します。" + format_clause
     )
     return _join_with_exclude_hint(lines, basename, relpath=relpath)
 
@@ -1089,6 +1144,7 @@ def bash_deny(
     render_status: str = "",
     resolved_base: str = "",
     relpath: str = "",
+    is_envrc: bool = False,
 ) -> str:
     """Bash 操作の deny reason を plain text で構築する (0.10.0 で category dispatch)。
 
@@ -1117,10 +1173,16 @@ def bash_deny(
             root 配下に解決できたときだけ handler が渡し、除外案内を path 形
             (``!<relpath>``、1 ファイルだけ) にする。glob / VCS pathspec /
             root 外は空文字 (basename 形のみ案内)。
+        is_envrc: operand の basename が ``.envrc`` (direnv) か (0.29.1)。
+            ``move`` (``_bash_deny_move``) / ``load`` (``_bash_deny_load``)
+            category だけが使う。判定は ``engine.is_envrc_basename`` で
+            呼出側 (``bash_handler``) が行い、結果だけをここに渡す —
+            ``core.messages`` は redaction 層を import しない方針を保つ
+            (edit_deny / edit_handler と同じ分担)。
     """
     category = _category_for_first_token(first_token)
     builder = _BASH_DENY_BUILDERS[category]
-    return builder(
+    kwargs: dict[str, object] = dict(
         first_token=first_token,
         operand=operand,
         command=command,
@@ -1131,6 +1193,9 @@ def bash_deny(
         resolved_base=resolved_base,
         relpath=relpath,
     )
+    if category in ("move", "load"):
+        kwargs["is_envrc"] = is_envrc
+    return builder(**kwargs)
 
 
 # -- E6: Edit / Write の状況別 deny 文面 (0.20.0) --------------------------

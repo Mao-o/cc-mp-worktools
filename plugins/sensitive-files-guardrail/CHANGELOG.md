@@ -20,6 +20,29 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.29.1
+
+内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`
+経路の `.envrc` 案内) を修正。**判定境界 (deny / allow / ask / block するか)
+の変化: なし** (助言文言の修正・テスト追加のみ)。テスト件数:
+redact 1240 → **1252**、check 135 (変化なし)。
+
+1. **Bash の `cp` / `mv` (move category) が `.envrc` (direnv) にも
+   `.env.example` 派生 (Next.js 慣例) の案内を出していた不具合を修正**。
+   0.29.0 で edit_handler (Edit/Write) 側は対応済みだったが、Bash 経由の
+   同種操作には同じ穴が残っていた。`_bash_deny_move` に `is_envrc` を渡し、
+   `.envrc` では `.envrc.example` 派生の案内に差し替えた。
+2. **同クラスの sweep で `source` / `.` (load category) の案内も修正**。
+   `.envrc` を load しようとしたときの案内が dotenv-cli (静的 `KEY=value`
+   パーサ) を勧めていたが、`.envrc` は条件分岐や `use flake` を書ける shell
+   script でありパーサの前提と合わない。`.envrc` では direnv の hook 経由での
+   読込を案内する文言に差し替えた (dotenv-cli の案内を落とし、direnv の案内は
+   維持)。
+3. **設計判断: 判定 (`engine.is_envrc_basename`) は `core.messages` 自身では
+   呼ばず、呼出側 (`bash_handler._build_deny_response`) が行って結果を
+   `is_envrc` として渡す**。edit_handler / edit_deny と同じ分担にし、
+   `core.messages` が redaction 層に依存しない既存方針を保った。
+
 ## 0.29.0
 
 内部バックログの精査で発見した課題 6 件 + マージ前レビューの指摘 2 件を修正
