@@ -987,11 +987,13 @@ def _strip_heading_markup(title: str) -> str:
     s = re.sub(r"\[\^[^\]]*\]", "", s)                     # footnote marker [^1]
     s = re.sub(r"<[^>]+>", "", s)                          # html tags
     s = html.unescape(s)
-    s = re.sub(r"\x00(\d+)\x00", lambda m: code_spans[int(m.group(1))], s)
     # 強調の区切りとして使われた `_` だけを剥がす (単語境界に接する `_..._` の組)。
     # `snake_case_name` のような識別子内の `_` は見出しの実テキストなので残す
     s = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)", r"\2", s)
-    s = re.sub(r"[`*~]+", "", s)                          # code / bold / strike markers
+    s = re.sub(r"[`*~]+", "", s)                          # bold / strike markers
+    # コードスパンの中身は全ての記号除去の **後** に戻す (`__init__` の `_` や `*` を
+    # 強調記号と誤認して剥がさない。マージ前レビューの指摘)
+    s = re.sub(r"\x00(\d+)\x00", lambda m: code_spans[int(m.group(1))], s)
     return s.strip()
 
 

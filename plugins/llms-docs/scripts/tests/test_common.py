@@ -503,6 +503,15 @@ class HeadingAnchorSlugMarkupTest(unittest.TestCase):
                          "using-query-and-claudesdkclient")
         self.assertEqual(_common.heading_anchor_slug("snake_case_name stays"), "snake_case_name-stays")
 
+    def test_code_span_contents_keep_underscores_and_asterisks(self):
+        """コードスパンの中身は逐語: `__init__` の `_` や `*args` の `*` を強調記号として
+        剥がさない (マージ前レビューの指摘)。"""
+        self.assertEqual(_common.heading_anchor_slug("The `__init__` method"), "the-__init__-method")
+        self.assertEqual(
+            _common.heading_anchor_slug("Using `*args` in `snake_case_fn`", style="devsite"),
+            "using_args_in_snake_case_fn",
+        )
+
     def test_reference_style_links_and_footnotes(self):
         """参照形式リンク `[text][ref]` / `[text][]` は text に、脚注 `[^1]` は除く
         (マージ前レビューの指摘)。"""
