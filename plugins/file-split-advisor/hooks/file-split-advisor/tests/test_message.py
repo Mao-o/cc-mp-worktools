@@ -240,13 +240,23 @@ class TestFormatSignal(unittest.TestCase):
         # は辞書にも無いため、キー文字列がそのまま返ることを固定する。
         self.assertEqual(message._format_signal("future_signal", _metrics()), "future_signal")
 
-    def test_signal_fallback_labels_dict_has_no_orphaned_entries(self):
+    def test_fallback_labels_dict_covers_the_four_known_signal_keys(self):
         # _SIGNAL_FALLBACK_LABELS の各キーは _format_signal の明示分岐で
-        # 先取りされるため、辞書自体は現状 dead code だが、意図せず既存キーの
-        # ラベルが分岐の文言と乖離しないことだけは確認しておく。
-        for key in message._SIGNAL_FALLBACK_LABELS:
-            with self.subTest(key=key):
-                self.assertNotEqual(message._format_signal(key, _metrics()), key)
+        # 先取りされるため、辞書経由の値は現状のコードパスでは一切使われない
+        # (dead code)。``_format_signal`` を経由すると常に明示分岐の結果に
+        # なり辞書の内容自体はテストできないため、辞書のキー/値をここで
+        # 直接固定する。将来 judge.py が新しい signal key を追加し、
+        # ``_format_signal`` 側の対応分岐を書き忘れたときに、この辞書だけが
+        # 頼りになる。
+        self.assertEqual(
+            message._SIGNAL_FALLBACK_LABELS,
+            {
+                "import_diversity": "import カテゴリ多様性",
+                "vague_filename": "命名が抽象的",
+                "def_count": "定義数過多",
+                "control_flow_density": "制御フロー密度高",
+            },
+        )
 
 
 class TestRoleNoteAbsentForNormalRole(unittest.TestCase):

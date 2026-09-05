@@ -820,6 +820,13 @@ class TestSubprocessPackageDirE2E(unittest.TestCase):
         env = dict(os.environ)
         for key in _ISOLATED_ENV_KEYS:
             env.pop(key, None)
+        # TestIgnoreFileInvalidUtf8E2E と同じ理由で HOME も差し替える: 実プロセス
+        # なので BaseMainTest の `_default_ignore_file` mock は効かず、HOME を
+        # 固定しないと開発機の実 ~/.claude/file-split-advisor/ignore.local.txt
+        # (存在すれば) を読みに行き、内容次第で環境依存の green/red になる。
+        home = Path(self.tmp) / "home"
+        home.mkdir(exist_ok=True)
+        env["HOME"] = str(home)
         env["TMPDIR"] = self.tmp
         pkg_dir = _ENTRY_PATH.parent
         return subprocess.run(

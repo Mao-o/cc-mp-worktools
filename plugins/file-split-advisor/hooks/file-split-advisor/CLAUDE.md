@@ -307,6 +307,15 @@ python3 -m unittest discover tests
 `tests/_testutil.py` が plugin dir を sys.path に挿入する (unittest discover
 経由)。`tests/conftest.py` は pytest 実行時の同型セーフティネット。
 
+クラス単位・メソッド単位の単体指定 (`python3 -m unittest
+tests.test_x.Class.method` / `pytest tests/test_x.py::Class::method`) では、
+ディレクトリ探索と違って `tests/` ディレクトリ自体が sys.path に入らないため、
+`_testutil` の解決に `tests/__init__.py` が自身のディレクトリを sys.path に
+足す処理も必要になる (0.3.1、内部バックログ)。ディレクトリ探索/単体指定/pytest
+の3経路とも `tests/__init__.py` 経由で解決されるため、`_testutil.py`/
+`conftest.py` はどちらも変更していない。単体指定の実行例は
+[../../README.md](../../README.md) のテスト節を参照。
+
 ## 手動スモークテスト
 
 ```bash
