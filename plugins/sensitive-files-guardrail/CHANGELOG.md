@@ -20,7 +20,7 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
-## 0.28.1
+## 0.29.0
 
 内部バックログの精査で発見した課題 6 件を修正 (テスト整備 2 件・保守性 2 件・
 文言修正 2 件)。**判定境界 (deny / allow / ask / block するか) の変化:
@@ -51,16 +51,6 @@ redact 1219 → **1237**、check 133 → **135**。
    (`_run_git_raw` の `TimeoutExpired` 処理) と block reason の文言は、着手
    時点で既に直接テスト済みだったため追加作業は不要だった** (内部バックログの
    audit 時点からテストが増えていた)。
-   - **重要な既知の欠陥を発見 (未修正、別途追跡)**: `_ls_tracked` /
-     `find_sensitive_files` の untracked 列挙は `git ls-files` を `-z` 無しで
-     呼んでおり、git の既定 (`core.quotePath=true`) では非 ASCII ファイル名が
-     `"\346\227\245..."` のような 8 進エスケープ + 二重引用符の文字列に
-     変換される。この変換後の文字列に対してパターン照合するため、**非 ASCII
-     名の tracked / untracked な機密ファイルが Stop hook の検出を完全にすり
-     抜ける** (実測: 日本語ファイル名の tracked `.env` が `find_sensitive_files`
-     から 0 件になることを確認)。`submodule_paths` 等が使う `_run_git_nul`
-     (`-z` 付き) は影響を受けない。判定ロジックの変更を伴う修正が必要なため、
-     本バッチのスコープ (テスト追加) を超えると判断し、実装は保留した。
 
 ### 保守性
 
