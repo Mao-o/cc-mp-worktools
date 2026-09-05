@@ -103,6 +103,8 @@ slug)。firebase.google.com は GitHub/Mintlify ではなく Google DevSite で�
 best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## Read / write data`)
 も正しく slug 化される (`#read_write_data`)。
 
+**anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る (DevSite 規則: 小文字化・記号除去・空白を `_` で結合)。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
+
 初回は top N 件分の HTTP fetch が走るため数秒～十数秒かかる。2 回目以降は cache hit で高速。
 
 ### Step 2: 必要なセクションの本文を取得
