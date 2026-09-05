@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.3.1
+
+内部バックログの精査で見つかったテスト不足 2 件を修正。挙動変更は最小限
+(非dict payload の防御ガード 1 箇所のみ)。
+
+### `message.py` / `__main__.py` のテストを追加
+
+- `message._format_signal` の 4 分岐 (import カテゴリ多様性・命名が抽象的・
+  定義数・制御フロー密度) と、未知シグナルキーに対するフォールバック文言を
+  直接固定するテストを追加
+- `role` 引数が `"normal"` のとき role 注記 (`(test: 閾値 1.6倍)`) が
+  出ないことを直接確認するテストを追加
+- `FILE_SPLIT_ADVISOR_MAX_EMITS` の不正値 (`abc`)・`0`・負値・有効値超過時の
+  抑制挙動を確認するテストを追加
+- cwd 外ファイルのメモ見出しが絶対パス表示にフォールバックすることを
+  `__main__` 経由の e2e で確認するテストを追加 (単体レベルでは
+  `source.relative_to_cwd` を既にカバー済みだった)
+- payload や `tool_input` が dict でない (list/str/number/null) ときに
+  クラッシュしないことを確認するテストを追加。従来は `payload.get(...)` が
+  `AttributeError` になり、fail-open ラッパー経由で exit 0 にはなるものの
+  stderr に `fatal: 'list' object has no attribute 'get'` 等のログが出ていた。
+  `__main__.py` に `isinstance(payload, dict)` の早期 return ガードを追加し、
+  他の想定外 envelope と同じ「無出力で skip」に揃えた
+- CRLF 改行・非UTF-8 (latin-1) バイト列を含むソースでも `source.load_text`
+  がクラッシュせず行数が正しく数えられることを確認するテストを追加
+- `subprocess.run([sys.executable, <pkg_dir>])` (README の手動スモークテスト
+  手順と同じ起動形) で実プロセスとして起動し、正常系が exit 0・stdout に
+  JSON・stderr 空になることと、非dict payload でも fatal ログが出ないことを
+  確認する e2e テストを追加
+
+### テストの単体指定ができない DX 課題を修正
+
+`tests/` ディレクトリ配下の各テストファイルが行うトップレベル `import
+_testutil` は、ディレクトリ探索 (`python3 -m unittest discover tests`) では
+探索先自体が検索パスに入るため解決できていたが、クラス単位・メソッド単位の
+単体指定 (`python3 -m unittest tests.test_x.Class.method` /
+`pytest tests/test_x.py::Class::method`) では `tests/` ディレクトリ自体が
+sys.path に入らず `ModuleNotFoundError` になっていた (pytest 経由では
+スイート全体の collection が失敗する形でも顕在化していた)。`tests/__init__.py`
+(既存は空ファイル) に `tests/` を自身の sys.path に足す処理を追加し、
+呼び出し形式によらず解決されるようにした (呼び出し側の起動形は不変。同型の
+課題を先に解決した `verify-cloud-account` と同じ解法)。README にクラス
+単位・メソッド単位・pytest node id 指定の実行例を追記した。
+
 ## 0.3.0
 
 内部バックログの精査で見つかった 6 件の不具合・改善をまとめてリリース。
