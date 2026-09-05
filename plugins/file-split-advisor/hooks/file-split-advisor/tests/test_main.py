@@ -654,5 +654,220 @@ class TestGrowthGate(BaseMainTest):
         self.assertIn("判定: strong", self._context(out))
 
 
+class TestMaxEmitsEnvVar(BaseMainTest):
+    """FILE_SPLIT_ADVISOR_MAX_EMITS: 不正値は既定 (20) にフォールバックし、
+    有効値はセッションあたりの emit 回数上限として働く (``state.py`` の
+    ``__emit_count__`` はパス横断でセッション単位に積算される)。"""
+
+    def test_invalid_value_falls_back_to_default(self):
+        path = self._write("checkout_flow.py", _python_lines(900))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_MAX_EMITS": "abc"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertIn("判定: strong", self._context(out))
+
+    def test_zero_suppresses_all_emits(self):
+        path = self._write("checkout_flow.py", _python_lines(900))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_MAX_EMITS": "0"}):
+            out, _ = _run_main(self._envelope(path))
+        self.assertEqual(out, "")
+
+    def test_negative_value_is_clamped_to_zero_and_suppresses_emits(self):
+        # _get_max_emits() は ``max(0, int(raw))`` で負値を 0 にクランプする。
+        path = self._write("checkout_flow.py", _python_lines(900))
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_MAX_EMITS": "-1"}):
+            self.assertEqual(_load_entry()._get_max_emits(), 0)  # クランプを直接固定
+            out, _ = _run_main(self._envelope(path))
+        self.assertEqual(out, "")
+
+    def test_positive_limit_suppresses_after_reaching_the_cap(self):
+        # MAX_EMITS=2: 同一セッション内で異なるファイルへの emit を 2 回まで
+        # 許可し、3 回目は上限で抑制される (emit_count はパスをまたいで積算)。
+        with mock.patch.dict(os.environ, {"FILE_SPLIT_ADVISOR_MAX_EMITS": "2"}):
+            for i in range(2):
+                path = self._write(f"file{i}.py", _python_lines(900))
+                out, _ = _run_main(self._envelope(path, session_id="sess-cap"))
+                self.assertIn("判定: strong", self._context(out))
+            path3 = self._write("file3.py", _python_lines(900))
+            out3, _ = _run_main(self._envelope(path3, session_id="sess-cap"))
+            self.assertEqual(out3, "")
+
+
+class TestDisplayPathOutsideCwd(BaseMainTest):
+    """source.relative_to_cwd (P3-3) が __main__ 経由でも効くことを固定する:
+    cwd 内側なら相対パス、cwd 外なら絶対パスがメモの見出し行に出る。
+
+    常時 on の temp-dir skip と条件が重なる (self.tmp が OS の一時領域配下)
+    ため、TestCwdOnlyOptIn と同様に _temp_dir_roots を空にして無効化する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._no_temp_roots_patcher = mock.patch.object(
+            source, "_temp_dir_roots", return_value=()
+        )
+        self._no_temp_roots_patcher.start()
+        self.addCleanup(self._no_temp_roots_patcher.stop)
+
+    def test_absolute_path_shown_in_memo_when_outside_cwd(self):
+        path = self._write("checkout_flow.py", _python_lines(900))
+        envelope = self._envelope(path)
+        envelope["cwd"] = "/Users/example/other-project"
+        out, _ = _run_main(envelope)
+        text = self._context(out)
+        self.assertIn(str(path), text)
+
+    def test_relative_path_shown_in_memo_when_inside_cwd(self):
+        # 対比: cwd の内側なら相対パス表示になり、絶対パスは出ない。
+        path = self._write("checkout_flow.py", _python_lines(900))
+        out, _ = _run_main(self._envelope(path))
+        text = self._context(out)
+        self.assertIn("checkout_flow.py", text)
+        self.assertNotIn(str(path), text)
+
+
+class TestNonDictPayloadShapes(BaseMainTest):
+    """内部バックログ: payload や tool_input が dict でない (list/str/number/
+    null) とき、JSON デコード自体は valid なので ``json.load`` は例外にならず、
+    以前は ``payload.get(...)`` で AttributeError になっていた (実測: stderr に
+    ``fatal: 'list' object has no attribute 'get'``)。``_run_main_raw`` は
+    ``if __name__ == "__main__":`` の fail-open ラッパーを経由せず ``entry.main()``
+    を直接呼ぶため、ガードが無いとここで例外が伝播しテスト自体が ERROR になる
+    (「無出力」との違いを機械的に検出できる)。"""
+
+    def test_top_level_list_payload_no_crash(self):
+        out, _ = _run_main_raw("[]")
+        self.assertEqual(out, "")
+
+    def test_top_level_string_payload_no_crash(self):
+        out, _ = _run_main_raw('"just a string"')
+        self.assertEqual(out, "")
+
+    def test_top_level_number_payload_no_crash(self):
+        out, _ = _run_main_raw("42")
+        self.assertEqual(out, "")
+
+    def test_top_level_null_payload_no_crash(self):
+        out, _ = _run_main_raw("null")
+        self.assertEqual(out, "")
+
+    def test_tool_input_as_list_no_crash(self):
+        envelope = self._envelope(Path(self.tmp) / "x.py")
+        envelope["tool_input"] = []
+        out, _ = _run_main(envelope)
+        self.assertEqual(out, "")
+
+    def test_tool_input_as_string_no_crash(self):
+        envelope = self._envelope(Path(self.tmp) / "x.py")
+        envelope["tool_input"] = "not-a-dict"
+        out, _ = _run_main(envelope)
+        self.assertEqual(out, "")
+
+
+class TestNonUtf8AndCrlfContent(BaseMainTest):
+    """source.load_text は ``encoding="utf-8", errors="ignore"`` で読む。CRLF
+    改行や非UTF-8 (latin-1) バイト列でもクラッシュせず、行数が妥当に (二重
+    カウントや無出力にならず) 数えられることを __main__ 経由で固定する。"""
+
+    def test_crlf_line_endings_are_not_double_counted(self):
+        # str.splitlines() は "\r\n" を 1 個の改行として扱うため、LF のみの
+        # ファイルと行数が変わらないはずである。
+        body = _python_lines(900)
+        crlf_body = body.replace("\n", "\r\n")
+        path = Path(self.tmp) / "checkout_flow.py"
+        path.write_bytes(crlf_body.encode("utf-8"))
+        out, _ = _run_main(self._envelope(path))
+        text = self._context(out)
+        self.assertIn("行数: 900", text)
+        self.assertIn("判定: strong", text)
+
+    def test_latin1_bytes_do_not_crash_and_lines_are_counted(self):
+        # 非UTF-8 (latin-1) の高位バイト (例: "café" の "é" = 0xE9 単体) は
+        # utf-8 として不正な並びになるため errors="ignore" で読み飛ばされるが、
+        # 改行 (0x0A) は utf-8 上も常に正当なので行数自体は保たれる。
+        lines = []
+        for i in range(900):
+            if i % 10 == 0:
+                lines.append(f"if x == {i}:  # café note")
+            else:
+                lines.append(f"    y{i} = {i}")
+        raw = ("\n".join(lines) + "\n").encode("latin-1")
+        path = Path(self.tmp) / "checkout_flow.py"
+        path.write_bytes(raw)
+        out, _ = _run_main(self._envelope(path))
+        text = self._context(out)
+        self.assertIn("行数: 900", text)
+        self.assertIn("判定: strong", text)
+
+
+class TestSubprocessPackageDirE2E(unittest.TestCase):
+    """README の手動スモークテスト手順 (``python3 .``) と同じ起動形:
+    ``python3 <pkg_dir>`` で ``__main__.py`` が ``__name__ == "__main__"`` の
+    fail-open ラッパー経由で実行されることを実プロセスで確認する。
+    ``_run_main`` (importlib 経由) はこのラッパーを経由しないため、実際に
+    レビューで踏まれた形 (非dict payload での fatal ログ) はここでしか
+    再現できない。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, stdin_text: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        for key in _ISOLATED_ENV_KEYS:
+            env.pop(key, None)
+        # TestIgnoreFileInvalidUtf8E2E と同じ理由で HOME も差し替える: 実プロセス
+        # なので BaseMainTest の `_default_ignore_file` mock は効かず、HOME を
+        # 固定しないと開発機の実 ~/.claude/file-split-advisor/ignore.local.txt
+        # (存在すれば) を読みに行き、内容次第で環境依存の green/red になる。
+        home = Path(self.tmp) / "home"
+        home.mkdir(exist_ok=True)
+        env["HOME"] = str(home)
+        env["TMPDIR"] = self.tmp
+        pkg_dir = _ENTRY_PATH.parent
+        return subprocess.run(
+            [sys.executable, str(pkg_dir)],
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+
+    def test_normal_invocation_exit_zero_stdout_json_stderr_empty(self):
+        project = Path(self.tmp) / "project"
+        project.mkdir()
+        target = project / "checkout_flow.py"
+        target.write_text(_python_lines(900))
+        envelope = json.dumps(
+            {
+                "session_id": "sess-pkgdir-1",
+                "cwd": str(project),
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(target)},
+            }
+        )
+        result = self._run(envelope)
+        self.assertEqual(result.returncode, 0, f"stderr={result.stderr!r}")
+        self.assertEqual(result.stderr, "")
+        self.assertNotEqual(result.stdout, "")
+        payload = json.loads(result.stdout)
+        self.assertIn(
+            "静的解析メモ", payload["hookSpecificOutput"]["additionalContext"]
+        )
+
+    def test_non_dict_payload_invocation_exit_zero_no_fatal_stderr(self):
+        # 修正前の実測: stderr に "fatal: 'list' object has no attribute 'get'"。
+        result = self._run("[]")
+        self.assertEqual(result.returncode, 0, f"stderr={result.stderr!r}")
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("fatal", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

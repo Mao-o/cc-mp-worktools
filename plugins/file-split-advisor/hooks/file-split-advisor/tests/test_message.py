@@ -204,6 +204,72 @@ class TestScaleNote(unittest.TestCase):
         self.assertNotIn("(全体 1.0倍)", text)
 
 
+class TestFormatSignal(unittest.TestCase):
+    """内部バックログ: ``_format_signal`` の 4 分岐 + 未知キーのフォールバックを
+    直接固定する。従来は ``message.build`` 経由の間接テスト (``TestSignalCountZeroFallback``
+    など) しかなく、各シグナル文面そのもの (件数・パーセンテージの整形) は
+    どのテストにも現れていなかった。"""
+
+    def test_import_diversity_lists_category_names_and_count(self):
+        m = _metrics(import_category_count=5, import_categories=("network", "db", "ui"))
+        self.assertEqual(
+            message._format_signal("import_diversity", m),
+            "import カテゴリ多様性 5種 (network, db, ui)",
+        )
+
+    def test_vague_filename_returns_fixed_explanation(self):
+        m = _metrics(vague_filename=True)
+        self.assertEqual(
+            message._format_signal("vague_filename", m),
+            "命名が抽象的 (utils/common/helper 等の総称語のみ)",
+        )
+
+    def test_def_count_shows_the_actual_count(self):
+        m = _metrics(def_count=27)
+        self.assertEqual(message._format_signal("def_count", m), "定義数 27")
+
+    def test_control_flow_density_shown_as_rounded_percentage(self):
+        m = _metrics(control_flow_density=0.268)
+        self.assertEqual(message._format_signal("control_flow_density", m), "制御フロー密度 27%")
+
+    def test_unknown_signal_key_falls_back_to_the_raw_key(self):
+        # judge.py が現在 emit する signal key (import_diversity/vague_filename/
+        # def_count/control_flow_density) は上の 4 分岐で全て処理されるため、
+        # ``_SIGNAL_FALLBACK_LABELS`` への到達は現状のコードパスでは起きない
+        # (将来 judge 側が新しい signal key を追加したときの防御)。未登録キー
+        # は辞書にも無いため、キー文字列がそのまま返ることを固定する。
+        self.assertEqual(message._format_signal("future_signal", _metrics()), "future_signal")
+
+    def test_fallback_labels_dict_covers_the_four_known_signal_keys(self):
+        # _SIGNAL_FALLBACK_LABELS の各キーは _format_signal の明示分岐で
+        # 先取りされるため、辞書経由の値は現状のコードパスでは一切使われない
+        # (dead code)。``_format_signal`` を経由すると常に明示分岐の結果に
+        # なり辞書の内容自体はテストできないため、辞書のキー/値をここで
+        # 直接固定する。将来 judge.py が新しい signal key を追加し、
+        # ``_format_signal`` 側の対応分岐を書き忘れたときに、この辞書だけが
+        # 頼りになる。
+        self.assertEqual(
+            message._SIGNAL_FALLBACK_LABELS,
+            {
+                "import_diversity": "import カテゴリ多様性",
+                "vague_filename": "命名が抽象的",
+                "def_count": "定義数過多",
+                "control_flow_density": "制御フロー密度高",
+            },
+        )
+
+
+class TestRoleNoteAbsentForNormalRole(unittest.TestCase):
+    """role_note ("(test: 閾値 1.6倍)") は role=="test" のときだけ表示される。
+    既存テストは test ロールでの表示は確認済みだが、normal ロールで出ない
+    ことを直接確認するテストが無かった。"""
+
+    def test_normal_role_omits_role_note(self):
+        v = _verdict(applied_multipliers={"language": 1.0, "role": 1.0, "declarative": 1.0})
+        text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
+        self.assertNotIn("閾値 1.6倍", text)
+
+
 class TestPartialThresholds(unittest.TestCase):
     """P3-5 回帰: 0.1.0 は ``if tier in verdict.thresholds`` という防御ガードを
     持っていたが、0.3.0 の ``_display_tiers`` 導入で無条件の

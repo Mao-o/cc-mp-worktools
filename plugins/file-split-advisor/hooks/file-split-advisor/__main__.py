@@ -84,6 +84,14 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         return
 
+    # stdin の JSON はトップレベルが object (dict) である前提だが、これを検査
+    # せず ``payload.get(...)`` を呼ぶと list/str/number/null が渡ったとき
+    # AttributeError で例外になる (fail-open ラッパー経由でも exit 0 にはなるが
+    # stderr に fatal ログが出る)。envelope の形が想定と違うだけで通知しない
+    # 通常の skip 経路に合わせ、ここで早期 return する (内部バックログ)。
+    if not isinstance(payload, dict):
+        return
+
     if payload.get("tool_name") not in ("Write", "Edit"):
         return
 

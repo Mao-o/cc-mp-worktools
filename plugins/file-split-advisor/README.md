@@ -206,6 +206,15 @@ cd hooks/file-split-advisor
 python3 -m unittest discover tests
 ```
 
+クラス単位・メソッド単位で 1 件だけ指定して実行することもできる:
+
+```bash
+python3 -m unittest tests.test_message.TestFormatMultiplier.test_integral_value_gets_one_decimal -v
+python3 -m unittest tests.test_judge.TestTierBoundaries -v
+# pytest がインストールされていれば node id 指定も可能
+pytest tests/test_message.py::TestFormatMultiplier::test_integral_value_gets_one_decimal -q
+```
+
 ## ライセンス
 
 MIT
