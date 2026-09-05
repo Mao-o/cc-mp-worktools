@@ -62,9 +62,11 @@ REMEDIATION_PATTERNS = (r"AWS_PROFILE=\S", r"aws sso login\b", r"aws configure\b
 # 付けて初めて意味を持つインライン env で、単独で実行するものではない。汎用の
 # 「案内された形のまま単独で実行」注記は誤誘導になるため、AWS 専用の文面を宣言する
 # (dispatcher は REMEDIATION_NOTE があればそれを使う)。
+# 文面に個別コマンド名 (aws configure 等) を書かない: 案内本文が状況に応じて出し分ける
+# (不一致時は configure を案内しない) ため、注記側で固定すると案内と食い違う。
 REMEDIATION_NOTE = (
     "※ AWS_PROFILE=<profile> は元のコマンドの行頭に付けて実行してください (単独では"
-    "意味がありません)。aws sso login / aws configure は単独で実行し、完了してから"
+    "意味がありません)。上で案内したその他のコマンドは単独で実行し、完了してから"
     "元のコマンドを実行してください (元のコマンドと同じコマンド行に連結すると、そちらが"
     "切替前の状態で検証されて再び deny されます)。"
 )

@@ -984,6 +984,9 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて", reason)
         self.assertNotIn("案内された形のまま単独で実行してください", reason)
+        # 注記は案内本文が出し分けるコマンド名 (aws configure 等) を固定で書かない
+        # (不一致時は configure を案内しないため食い違う。マージ前レビューの指摘)
+        self.assertNotIn("aws configure", reason.split("※", 1)[1])
 
     def test_mixed_services_emit_each_note_once(self):
         """gh と aws が同時に不一致なら、汎用注記と AWS 注記がそれぞれ 1 回ずつ。"""
