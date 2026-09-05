@@ -134,22 +134,41 @@ def split_documents(lines: list[str]) -> list[dict]:
     return docs
 
 
-def _looks_like_frontmatter_start(lines: list[str], pos: int) -> bool:
-    """Heuristic: does ``---`` at *pos* start a frontmatter block?
+_FM_KEY_RE = re.compile(r"^[A-Za-z_][\w-]*\s*:")
+_FM_LIST_RE = re.compile(r"^\s*- ")
+_FM_CONTINUATION_RE = re.compile(r"^\s+\S")
+_FM_LOOKAHEAD = 30
 
-    We check if there's a closing ``---`` within the next 30 lines that
-    contains at least one ``key: value`` pattern between them.
+
+def _looks_like_frontmatter_start(lines: list[str], pos: int) -> bool:
+    """Does the ``---`` at *pos* open a frontmatter block?
+
+    Requires a closing ``---`` within ``_FM_LOOKAHEAD`` lines, a ``title:``
+    key in between, and *every* line in between to be YAML-shaped — a
+    ``key: value`` line, a ``- item`` list line, an indented continuation,
+    or blank. A body horizontal rule followed by prose that merely starts
+    with ``Note:`` / ``Example:`` used to pass the old "any key: value in
+    the next 30 lines" check and split one page into two (internal
+    backlog 2wd.16); prose lines are not YAML-shaped, so they now veto.
     """
     if not _is_frontmatter_delimiter(lines[pos]):
         return False
     n = len(lines)
-    limit = min(pos + 30, n)
-    has_kv = False
+    limit = min(pos + _FM_LOOKAHEAD, n)
+    has_title = False
     for j in range(pos + 1, limit):
-        if _is_frontmatter_delimiter(lines[j]):
-            return has_kv
-        if re.match(r"^[a-zA-Z_][\w-]*\s*:", lines[j]):
-            has_kv = True
+        line = lines[j]
+        if _is_frontmatter_delimiter(line):
+            return has_title
+        if not line.strip():
+            continue
+        if _FM_KEY_RE.match(line):
+            if line.startswith("title:"):
+                has_title = True
+            continue
+        if _FM_LIST_RE.match(line) or _FM_CONTINUATION_RE.match(line):
+            continue
+        return False
     return False
 
 

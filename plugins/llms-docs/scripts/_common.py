@@ -32,23 +32,34 @@ import zlib
 # ---------------------------------------------------------------------------
 
 class FenceTracker:
-    """Tracks whether the current line is inside a fenced code block."""
+    """Tracks whether the current line is inside a fenced code block.
+
+    Recognises both CommonMark fence styles — backtick (```` ``` ````) and
+    tilde (``~~~``). Per the spec a fence is closed only by a run of the
+    *same* character at least as long as the opener, so a ``~~~`` inside a
+    backtick block (or vice versa) is content, not a closer.
+    """
 
     def __init__(self):
         self.in_fence = False
         self._fence_len = 0
+        self._fence_char = ""
 
     def update(self, line: str) -> bool:
         """Update state for *line* and return True if inside a fence AFTER update."""
         stripped = line.lstrip()
-        if stripped.startswith("```"):
-            backtick_count = len(stripped) - len(stripped.lstrip("`"))
-            if not self.in_fence:
-                self.in_fence = True
-                self._fence_len = backtick_count
-            elif backtick_count >= self._fence_len:
-                self.in_fence = False
-                self._fence_len = 0
+        for ch in ("`", "~"):
+            if stripped.startswith(ch * 3):
+                run = len(stripped) - len(stripped.lstrip(ch))
+                if not self.in_fence:
+                    self.in_fence = True
+                    self._fence_len = run
+                    self._fence_char = ch
+                elif ch == self._fence_char and run >= self._fence_len:
+                    self.in_fence = False
+                    self._fence_len = 0
+                    self._fence_char = ""
+                break
         return self.in_fence
 
 
@@ -762,6 +773,25 @@ def load_lines(path: str):
 # Core: keyword search over index entries and body content
 # ---------------------------------------------------------------------------
 
+# ``-ses`` plurals whose root really ends in a hard consonant + ``es``
+# (alias → aliases, status → statuses). Everything else ending in ``-ses`` is
+# treated as a silent-e root + ``s`` (case → cases, response → responses).
+_HARD_SES_PLURALS = frozenset({
+    "aliases", "statuses", "viruses", "buses", "gases", "bonuses", "lenses",
+    "canvases", "campuses", "censuses", "atlases", "biases", "minuses",
+    "pluses", "corpuses", "focuses", "cactuses", "irises", "abuses",
+})
+# ``-ches`` plurals whose root is a silent-e word (cache → caches); the
+# default for ``-ches`` is hard consonant + ``es`` (match → matches).
+_SILENT_E_CHES_PLURALS = frozenset({
+    "caches", "niches", "headaches", "mustaches", "avalanches",
+})
+# The singular forms of ``_HARD_SES_PLURALS`` end in ``s`` themselves
+# (alias, status); the generic trailing-``s`` strip would turn them into
+# "alia"/"statu" and break the plural↔singular fold in the other direction.
+_HARD_SES_SINGULARS = frozenset(p[:-2] for p in _HARD_SES_PLURALS)
+
+
 def _norm(tok: str) -> str:
     """Lowercase, strip ``-``/``_`` separators, and apply a light plural-to-
     singular stem so ``score_entry`` treats e.g. ``"skills"``/``"Skill"``,
@@ -771,11 +801,27 @@ def _norm(tok: str) -> str:
     Not a real stemmer (no Porter/Snowball) — just enough to fold the common
     English plural suffixes and hyphen/underscore spelling variants that show
     up across the doc corpora. Order matters: the multi-character sibilant
-    endings (``-ses``/``-xes``/``-zes``/``-ches``/``-shes``, e.g. "boxes" →
-    "box") are checked *before* the generic single-``s`` strip, because
-    stripping only the trailing ``s`` from those would leave a dangling
-    ``e`` (e.g. "boxes" → "boxe"). Words already ending in ``ss`` (e.g.
-    "process") are left untouched to avoid mangling a non-plural word.
+    endings are checked *before* the generic single-``s`` strip, because
+    stripping only the trailing ``s`` from e.g. "boxes" would leave a
+    dangling ``e`` ("boxe"). Words already ending in ``ss`` (e.g. "process")
+    are left untouched to avoid mangling a non-plural word.
+
+    The sibilant endings are ambiguous on the surface: "matches" is
+    match + es but "caches" is cache + s, "classes" is class + es but
+    "cases" is case + s. The rules below pick the reading that dominates
+    tech-doc vocabulary per ending (measured over the claude-docs / ai-sdk
+    corpora, internal backlog 2wd.28), with tiny exception lists for the
+    frequent counter-examples:
+
+    * ``-sses`` / ``-zzes`` → strip ``es`` (class, process, address, quiz)
+    * ``-ses`` → strip ``s`` (case, response, database, release, use) unless
+      in ``_HARD_SES_PLURALS`` (alias, status → strip ``es``)
+    * ``-zes`` → strip ``s`` (size, resize, freeze)
+    * ``-ches`` → strip ``es`` (match, batch, search) unless in
+      ``_SILENT_E_CHES_PLURALS`` (cache → strip ``s``)
+    * ``-xes`` / ``-shes`` → strip ``es`` (box, index, prefix, hash, flush)
+    * the singulars behind ``_HARD_SES_PLURALS`` (alias, status) are left
+      as-is instead of losing their final ``s``
 
     A token with an uppercase letter NOT in the first position, mixed
     with at least one lowercase letter elsewhere, in its ORIGINAL spelling
@@ -802,8 +848,19 @@ def _norm(tok: str) -> str:
         return t
     if t.endswith("ies") and len(t) > 4:
         return t[:-3] + "y"
-    if t.endswith(("ses", "xes", "zes", "ches", "shes")) and len(t) > 4:
-        return t[:-2]
+    if len(t) > 4:
+        if t.endswith(("sses", "zzes")):
+            return t[:-2]
+        if t.endswith("ses"):
+            return t[:-2] if t in _HARD_SES_PLURALS else t[:-1]
+        if t.endswith("zes"):
+            return t[:-1]
+        if t.endswith("ches"):
+            return t[:-1] if t in _SILENT_E_CHES_PLURALS else t[:-2]
+        if t.endswith(("xes", "shes")):
+            return t[:-2]
+    if t in _HARD_SES_SINGULARS:
+        return t
     if t.endswith("s") and not t.endswith("ss") and len(t) > 2:
         return t[:-1]
     return t
