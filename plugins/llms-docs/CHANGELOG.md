@@ -2,7 +2,6 @@
 
 All notable changes to this plugin will be documented here.
 
-<<<<<<< HEAD
 ## [0.23.0] - 2026-09-05
 
 ### 検索結果の `Section:` 行に `URL#anchor` を付与 (claude-docs / firebase)
@@ -119,7 +118,7 @@ README にクラス単位・メソッド単位で 1 件だけ指定する実行�
   (マージ前レビューの指摘)
 - 参照形式リンク (`[text][ref]` / `[text][]`) と脚注マーカー (`[^1]`) も slug 前に正規化する。
   正規化する記法の一覧と「それ以外は best-effort」を各 SKILL.md に明記 (マージ前レビューの指摘)
-=======
+
 ## [0.22.2] - 2026-09-05
 
 ### platform source の検索停止を修正 — 上流 llms-full.txt の YAML frontmatter 区切りに追従 (2wd.30)
@@ -144,7 +143,6 @@ index↔full-text の join rate が 0% (0/699) になり、`search --source plat
   exit 0 を確認
 - 回帰テスト 8 件追加 (splitter 単体 6 + platform fixture の CLI 2)。213 tests, all green
 - SKILL.md の platform 規模表記を実測値 (~699p / 40MB) に更新
->>>>>>> origin/main
 
 ## [0.22.1] - 2026-08-28
 
