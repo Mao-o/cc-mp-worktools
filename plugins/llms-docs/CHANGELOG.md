@@ -2,6 +2,34 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.23.1] - 2026-09-06
+
+### 解析層の P3 バグ 3 件をまとめて修正 (2wd.27 / 2wd.28 / 2wd.16)
+
+いずれも characterization test で「既知の制限」として pin されていたもの。修正前に
+同一 live snapshot (code / platform / ai-sdk、2026-09-05〜06 取得) で旧新の全 doc の
+sections dump を比較し、3 corpus とも**完全一致** (fence / 境界判定の変更は実データの
+区切り・見出し収集に影響しない) を確認したうえで pin を仕様テストに置き換えた。
+
+- **FenceTracker が tilde fence (`~~~`) を認識する** (2wd.27)。CommonMark どおり
+  「同じ文字で開始長以上の run」だけが閉じる (backtick fence 内の `~~~`、その逆は本文扱い)。
+  3 corpus + firebase サンプルページに `~~~` は 0 行
+- **`_norm()` の sibilant 複数形規則を語尾ごとに読み替え** (2wd.28)。`-ses` / `-zes` は
+  silent-e 語根 + `s` (response / case / database / release / size)、`-sses` / `-zzes` /
+  `-ches` / `-xes` / `-shes` は硬子音 + `es` (class / match / box / hash) を既定にし、
+  頻出の反例 (`aliases` / `statuses` → 硬子音、`caches` → silent-e) を小さな例外表で扱う。
+  例外表の単数形 (alias / status) は末尾 `s` を落とさない。3 corpus + index の語彙
+  18,155 トークンに対する旧新 diff は 15 語で、13 語が非語→正しい単数形 (responses×64 /
+  cases×42 / databases×21 ...)、2 語は旧新とも非語 (hypotheses / docses)。検索出力の
+  比較では `caches` クエリのみ変化: 旧版は非語 `cach` が `caching` に偶然部分一致して
+  無関係ページ 2 件を拾っていたが、新版は `cache` で本命ページだけを返す
+- **ai-sdk の frontmatter 開始判定を厳格化** (2wd.16)。`---` 〜 `---` 間の全行が
+  YAML 形状 (`key: value` / `- item` / インデント継続 / 空行) かつ `title:` を含む場合
+  だけ境界にする。本文の水平線 + `Note:` 散文で doc が割れる偽境界を排除。live ai-sdk
+  corpus は修正前後とも 576 docs / untitled 0 で sections dump 一致
+- テスト: characterization 3 件を仕様テストに置換し、fence 文字種・長さ・入れ子、
+  複数形 fold の双方向、frontmatter の list / 継続行を含む fixture を追加 (256 tests)
+
 ## [0.23.0] - 2026-09-05
 
 ### 検索結果の `Section:` 行に `URL#anchor` を付与 (claude-docs / firebase)

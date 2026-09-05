@@ -54,18 +54,13 @@ class SplitDocumentsTest(unittest.TestCase):
         self.assertEqual(len(docs), 1)
         self.assertIn("## After", "".join(docs[0]["body_lines"]))
 
-    def test_kv_like_prose_around_hr_causes_false_split_known_limitation(self):
-        """Characterization test, not a spec assertion.
-
-        A body ``---`` horizontal rule followed by prose that happens to
-        look like ``Key: value`` (e.g. ``Note: ...``) within 30 lines of a
-        second ``---`` is misdetected by ``_looks_like_frontmatter_start``
-        as a new frontmatter block, splitting one logical document into
-        two. This is the known ai-sdk "false split" limitation (tracked
-        separately in the internal backlog as a P3 parser fix, out of
-        scope for this batch) — this test only pins the current behavior
-        so a future fix changes it deliberately.
-        """
+    def test_hr_followed_by_kv_like_prose_is_not_a_boundary(self):
+        """A body ``---`` horizontal rule followed by prose that happens to
+        start with ``Note:`` must not open a new document: every line
+        between the delimiters has to be YAML-shaped and one must be
+        ``title:`` (internal backlog 2wd.16). The live ai-sdk corpus has 0
+        untitled docs before and after, and the sections dump is
+        identical."""
         lines = [
             "---\n",
             "title: streamText\n",
@@ -83,8 +78,36 @@ class SplitDocumentsTest(unittest.TestCase):
             "after\n",
         ]
         docs = parse_ai_sdk.split_documents(lines)
+        self.assertEqual(len(docs), 1)
+        self.assertIn("Options continued", "".join(docs[0]["body_lines"]))
+
+    def test_hr_around_yaml_shaped_lines_without_title_is_not_a_boundary(self):
+        lines = [
+            "---\n", "title: A\n", "---\n", "body\n",
+            "---\n", "key: value\n", "other: thing\n", "---\n", "more\n",
+        ]
+        docs = parse_ai_sdk.split_documents(lines)
+        self.assertEqual(len(docs), 1)
+        self.assertIn("more", "".join(docs[0]["body_lines"]))
+
+    def test_real_frontmatter_with_list_and_continuation_lines_splits(self):
+        lines = [
+            "---\n", "title: A\n", "---\n", "body A\n",
+            "---\n",
+            "title: B\n",
+            "description: >\n",
+            "  a folded\n",
+            "  description\n",
+            "tags:\n",
+            "  - one\n",
+            "  - two\n",
+            "\n",
+            "---\n",
+            "body B\n",
+        ]
+        docs = parse_ai_sdk.split_documents(lines)
         self.assertEqual(len(docs), 2)
-        self.assertNotIn("Options continued", "".join(docs[0]["body_lines"]))
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(docs[1]["frontmatter_lines"])["title"], "B")
 
     def test_no_documents_when_no_frontmatter_delimiters_present(self):
         lines = ["no frontmatter delimiters anywhere in this file\n"]
@@ -286,7 +309,7 @@ class UntitledRatioWarningTest(unittest.TestCase):
         _write_fixture(
             tmp,
             "---\ntitle: Doc1\n---\n\n# Doc1\n\nbody\n"
-            "---\nno_title_field: true\n---\n\n# Doc2\n\nbody\n",
+            "---\ntitle:\ndescription: no title value\n---\n\n# Doc2\n\nbody\n",
         )
         code, out, err = _loader.run_cli(parse_ai_sdk, [
             "parse-ai-sdk.py", "fetch-index", "--cache-dir", tmp,
@@ -301,7 +324,7 @@ class UntitledRatioWarningTest(unittest.TestCase):
         docs_text = "".join(
             f"---\ntitle: Doc{i}\n---\n\n# Doc{i}\n\nbody\n" for i in range(9)
         )
-        docs_text += "---\nno_title_field: true\n---\n\n# Doc9\n\nbody\n"
+        docs_text += "---\ntitle:\ndescription: no title value\n---\n\n# Doc9\n\nbody\n"
         _write_fixture(tmp, docs_text)
         code, out, err = _loader.run_cli(parse_ai_sdk, [
             "parse-ai-sdk.py", "fetch-index", "--cache-dir", tmp,

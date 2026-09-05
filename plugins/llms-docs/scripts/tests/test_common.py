@@ -83,21 +83,11 @@ class ExtractSectionsTest(unittest.TestCase):
         self.assertEqual([s["heading_path"] for s in sections], ["Top", "Top/Deep"])
         self.assertEqual(sections[1]["level"], 4)
 
-    def test_tilde_fence_is_not_recognized_known_limitation(self):
-        """Characterization test, not a spec assertion.
-
-        ``FenceTracker`` only recognizes backtick fences (```` ``` ````); a
-        CommonMark tilde fence (``~~~``) is not tracked, so a heading-shaped
-        line inside one is still collected as a real section. Discovered
-        while building this fixture suite — not covered by any existing
-        backlog item, and deliberately not fixed here: widening
-        ``FenceTracker`` changes document-boundary detection for all three
-        sources (affects ``split_documents`` in claude-docs / ai-sdk too,
-        not just this function) and needs a real-corpus before/after diff
-        per this repo's regression discipline, not just a synthetic
-        fixture. This test pins the current (imperfect) behavior so a
-        future deliberate fix changes it on purpose.
-        """
+    def test_tilde_fence_hides_heading_shaped_lines(self):
+        """CommonMark tilde fences (``~~~``) are code blocks too; a heading-
+        shaped line inside one is not a section (internal backlog 2wd.27).
+        Zero ``~~~`` lines exist in the live claude-docs / ai-sdk corpora,
+        so the real-corpus before/after sections dump is identical."""
         body = [
             "## Real\n",
             "~~~\n",
@@ -106,10 +96,27 @@ class ExtractSectionsTest(unittest.TestCase):
             "## Also Real\n",
         ]
         sections = _common.extract_sections(body, min_level=2)
-        self.assertEqual(
-            [s["title"] for s in sections], ["Real", "Not a heading", "Also Real"]
-        )
+        self.assertEqual([s["title"] for s in sections], ["Real", "Also Real"])
 
+    def test_fence_closes_only_with_same_char_and_length(self):
+        body = [
+            "~~~\n",
+            "```\n",            # backticks inside a tilde fence: content
+            "## Still fenced\n",
+            "~~\n",             # too short to close
+            "## Still fenced 2\n",
+            "~~~~\n",           # longer run of the opener char closes
+            "## Real\n",
+            "````\n",
+            "~~~\n",            # tildes inside a backtick fence: content
+            "## Fenced again\n",
+            "```\n",            # shorter than the 4-backtick opener
+            "## Fenced again 2\n",
+            "````\n",
+            "## Real 2\n",
+        ]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Real", "Real 2"])
 
 class ExtractContentTest(unittest.TestCase):
     def test_extends_to_close_unclosed_code_fence(self):
@@ -334,36 +341,41 @@ class NormalizationStemmingTest(unittest.TestCase):
         self.assertEqual(_common.score_entry("Hooks", "", ["HOOKS"]), 10)
         self.assertEqual(_common.score_entry("Skill", "", ["SKILLS"]), 10)
 
-    def test_silent_e_plural_is_overstemmed_known_limitation(self):
-        """Characterization test, not a spec assertion.
+    def test_silent_e_plurals_fold_to_their_singular(self):
+        """``-ses`` / ``-zes`` plurals are read as silent-e root + ``s``
+        (internal backlog 2wd.28): "Responses" must match "response"."""
+        for plural, singular in [
+            ("Responses", "response"), ("Releases", "release"),
+            ("Databases", "database"), ("Cases", "case"), ("Sizes", "size"),
+            ("Caches", "cache"), ("Uses", "use"),
+        ]:
+            with self.subTest(plural=plural):
+                self.assertEqual(_common.score_entry(plural, "", [singular]), 10)
+                self.assertEqual(_common.score_entry(singular, "", [plural]), 10)
 
-        The sibilant-suffix branch (``ses``/``xes``/``zes``/``ches``/``shes``
-        -> strip 2 chars) exists so hard-consonant plurals like "matches"
-        fold to "match". But a plural formed from a silent-e root —
-        "response" -> "Responses", "release" -> "Releases", "database" ->
-        "Databases", "cache" -> "Caches" — ends in the exact same letters
-        ("...ches", "...ses") as those hard-consonant plurals, and this
-        branch strips it the same way, producing "respons"/"releas"/
-        "databas"/"cach" instead of the singular. The singular keyword
-        keeps its final "e", so a previously working substring match now
-        scores 0.
+    def test_hard_consonant_plurals_still_fold(self):
+        """The hard-consonant + ``es`` readings that the old rule handled
+        keep working, including the listed ``-ses`` exceptions."""
+        for plural, singular in [
+            ("Matches", "match"), ("Batches", "batch"), ("Searches", "search"),
+            ("Boxes", "box"), ("Indexes", "index"), ("Prefixes", "prefix"),
+            ("Hashes", "hash"), ("Classes", "class"), ("Processes", "process"),
+            ("Addresses", "address"),
+            ("Aliases", "alias"), ("Statuses", "status"),
+        ]:
+            with self.subTest(plural=plural):
+                self.assertEqual(_common.score_entry(plural, "", [singular]), 10)
+                self.assertEqual(_common.score_entry(singular, "", [plural]), 10)
 
-        Not fixable by a smarter suffix rule: "caches" and "matches" are
-        surface-identical from "...ches" onward (confirmed for "xes"/
-        "zes"/"ses" too: axes/axe vs axes/axis, mazes/maze vs gazes/gaze-
-        adjacent hard forms, gases/gas vs cases/case) — distinguishing them
-        needs a root word list or a real stemmer, not a character-suffix
-        check, and per this repo's regression discipline that needs a
-        real-corpus before/after diff, not a synthetic fixture. Tracked in
-        the internal backlog, not covered by any existing item before this.
-        This test pins the current (imperfect) behavior so a future
-        deliberate fix changes it on purpose.
-        """
-        self.assertEqual(_common.score_entry("Responses", "", ["response"]), 0)
-        self.assertEqual(_common.score_entry("Releases", "", ["release"]), 0)
-        self.assertEqual(_common.score_entry("Databases", "", ["database"]), 0)
-        self.assertEqual(_common.score_entry("Caches", "", ["cache"]), 0)
-
+    def test_norm_examples(self):
+        for tok, expected in [
+            ("responses", "response"), ("matches", "match"), ("caches", "cache"),
+            ("classes", "class"), ("aliases", "alias"), ("sizes", "size"),
+            ("hashes", "hash"), ("uses", "use"), ("status", "status"),
+            ("process", "process"), ("iOS", "ios"),
+        ]:
+            with self.subTest(tok=tok):
+                self.assertEqual(_common._norm(tok), expected)
 
 class ScoreEntryEmptyNormalizedKeywordTest(unittest.TestCase):
     """A keyword consisting only of characters _norm() strips (separators
