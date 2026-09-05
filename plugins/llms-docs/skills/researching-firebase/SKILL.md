@@ -95,9 +95,13 @@ title + description でスコアリングして上位 5 件（`--top-n N` で変
 各候補ページを on-demand fetch して本文を keyword 検索、heading_path + スニペットを返す。
 結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
 各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの
-GitHub/Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい —
-同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。
-見出しタイトル自体に `/` を含む場合 (例: `## Read / write data`) も正しく slug 化される。
+slug)。firebase.google.com は GitHub/Mintlify ではなく Google DevSite であり、見出し ID の
+単語結合が `-` ではなく `_` (アンダースコア) である点に注意 — 実機確認済み
+(`.../firestore/manage-data/add-data` の見出し「Set a document」は `id="set_a_document"`)。
+引用元を答えるときはこの URL#anchor をそのまま使ってよいが、同名見出しがページ内に複数ある
+場合の DevSite 側の重複回避サフィックスや、見出しへの独自 ID 指定までは再現しない
+best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## Read / write data`)
+も正しく slug 化される (`#read_write_data`)。
 
 初回は top N 件分の HTTP fetch が走るため数秒～十数秒かかる。2 回目以降は cache hit で高速。
 

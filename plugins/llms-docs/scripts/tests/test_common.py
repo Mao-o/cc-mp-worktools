@@ -481,6 +481,38 @@ class HeadingAnchorSlugTest(unittest.TestCase):
         self.assertEqual(_common.heading_anchor_slug("???"), "")
 
 
+class HeadingAnchorSlugDevsiteStyleTest(unittest.TestCase):
+    """firebase.google.com is Google DevSite, not GitHub/Mintlify — DevSite
+    joins heading-id words with "_", not "-". Live-verified on
+    https://firebase.google.com/docs/firestore/manage-data/add-data: the
+    "Set a document" heading renders as id="set_a_document" (not the
+    default style's "set-a-document", which does not resolve on that page)
+    (マージ前レビューの指摘)."""
+
+    def test_whitespace_becomes_underscore(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Set a document", style="devsite"),
+            "set_a_document",
+        )
+
+    def test_words_with_no_separator_are_unaffected(self):
+        # A heading with an internal "/" and no spaces around it collapses
+        # to a single run with nothing to join — same result in both
+        # styles, since there's no whitespace to turn into a separator.
+        self.assertEqual(_common.heading_anchor_slug("CI/CD", style="devsite"), "cicd")
+
+    def test_slash_surrounded_by_spaces_becomes_single_underscore(self):
+        self.assertEqual(
+            _common.heading_anchor_slug("Read / write data", style="devsite"),
+            "read_write_data",
+        )
+
+    def test_default_style_is_unchanged_by_devsite_addition(self):
+        # Default (github) behavior must stay byte-identical after adding
+        # the style parameter — no default-arg regression.
+        self.assertEqual(_common.heading_anchor_slug("Set a document"), "set-a-document")
+
+
 class SectionUrlAnchorTest(unittest.TestCase):
     def test_appends_url_and_slug_from_leaf_heading(self):
         # section_url_anchor takes the section's own leaf title directly
@@ -517,6 +549,18 @@ class SectionUrlAnchorTest(unittest.TestCase):
 
     def test_all_symbol_leaf_heading_produces_no_suffix(self):
         self.assertEqual(_common.section_url_anchor("https://example.com/p", "???"), "")
+
+    def test_style_is_forwarded_to_heading_anchor_slug(self):
+        # Firebase callers pass style="devsite" — confirm section_url_anchor
+        # threads it through rather than always using the github default.
+        self.assertEqual(
+            _common.section_url_anchor(
+                "https://firebase.google.com/docs/firestore/manage-data/add-data",
+                "Set a document",
+                style="devsite",
+            ),
+            "  [https://firebase.google.com/docs/firestore/manage-data/add-data#set_a_document]",
+        )
 
 
 class SearchContentInBodyTest(unittest.TestCase):

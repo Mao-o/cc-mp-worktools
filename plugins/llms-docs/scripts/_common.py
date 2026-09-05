@@ -955,27 +955,46 @@ def format_heading_path_for_display(heading_path: str) -> str:
     return heading_path
 
 
-def heading_anchor_slug(title: str) -> str:
-    """Best-effort GitHub/Mintlify-compatible anchor slug for one heading title.
+def heading_anchor_slug(title: str, style: str = "github") -> str:
+    """Best-effort anchor slug for one heading title.
 
-    Applies the same three transforms both platforms use for auto-generated
-    heading ids: lowercase, strip characters that aren't a letter/digit/
-    underscore/hyphen/space, then collapse whitespace runs to a single
-    hyphen. This does **not** replicate every platform edge case — most
-    notably neither platform's numeric ``-1``/``-2`` suffix for a page with
-    two identically-titled headings is applied here, since that requires
-    knowing every other heading on the page rather than just this one
-    title. Callers display the result as a best-effort anchor, not a
-    guarantee that it matches the live page exactly.
+    Two platform families generate heading ids differently, so *style*
+    selects which one to reproduce:
+
+    - ``"github"`` (default, also matches Mintlify): lowercase, strip
+      characters that aren't a letter/digit/underscore/hyphen/space, then
+      collapse whitespace runs to a single hyphen. Used by GitHub-flavored
+      Markdown renderers and Mintlify docs (e.g. code.claude.com,
+      platform.claude.com).
+    - ``"devsite"``: Google DevSite (firebase.google.com) joins words with
+      an underscore instead of a hyphen. Live-verified on
+      https://firebase.google.com/docs/firestore/manage-data/add-data —
+      the "Set a document" heading renders as ``id="set_a_document"`` and
+      "Add a document" as ``id="add_a_document"``; this tool's prior
+      GitHub-style slug (``#set-a-document``) does not resolve on that
+      page. Same character strip as ``"github"``, then whitespace runs
+      collapse to a single underscore (not hyphen) and the result is
+      stripped of leading/trailing underscores.
+
+    Neither style replicates every platform edge case — most notably
+    neither reproduces the numeric ``-1``/``-2`` (or DevSite's own)
+    duplicate-heading suffix a page gets when two headings share a title,
+    since that requires knowing every other heading on the page rather
+    than just this one title, nor a page's custom-id override (Mintlify's
+    ``{#custom-id}`` syntax has a DevSite equivalent too). Callers display
+    the result as a best-effort anchor, not a guarantee that it matches
+    the live page exactly.
 
     Returns ``""`` if *title* normalizes to nothing (e.g. an all-symbol
     heading) — callers should treat that as "no anchor available".
     """
     s = re.sub(r"[^\w\s-]", "", title.strip().lower())
+    if style == "devsite":
+        return re.sub(r"\s+", "_", s).strip("_")
     return re.sub(r"\s+", "-", s).strip("-")
 
 
-def section_url_anchor(url: str, title: str) -> str:
+def section_url_anchor(url: str, title: str, style: str = "github") -> str:
     """``  [<url>#<anchor>]`` suffix for a ``Section:`` search result line.
 
     Bracketed to match this tool's existing annotation convention on these
@@ -994,6 +1013,11 @@ def section_url_anchor(url: str, title: str) -> str:
     see CHANGELOG). Passing the leaf title directly sidesteps that
     ambiguity entirely since there is nothing left to split.
 
+    *style* is forwarded to ``heading_anchor_slug`` — pass ``"devsite"``
+    for Firebase (Google DevSite heading ids join words with ``_``, not
+    ``-``; see that function's docstring). Callers on Mintlify-family
+    sources (claude-docs) leave it at the ``"github"`` default.
+
     Returns ``""`` (no suffix) when there's no page *url* to anchor into,
     when *title* is the ``"(top)"`` sentinel (body text above the first
     heading has no heading element to anchor to), or when the title
@@ -1007,7 +1031,7 @@ def section_url_anchor(url: str, title: str) -> str:
     """
     if not url or title == "(top)":
         return ""
-    slug = heading_anchor_slug(title)
+    slug = heading_anchor_slug(title, style=style)
     if not slug:
         return ""
     return f"  [{url}#{slug}]"

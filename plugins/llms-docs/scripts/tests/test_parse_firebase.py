@@ -175,11 +175,13 @@ class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
             "--page-ref", "0", "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
+        # "_" join, not "-": firebase.google.com is Google DevSite, which
+        # joins heading-id words with "_" (マージ前レビューの指摘).
         self.assertIn(
-            "[https://firebase.google.com/docs/firestore/query-limit#read-write-data]",
+            "[https://firebase.google.com/docs/firestore/query-limit#read_write_data]",
             out,
         )
-        self.assertNotIn("#write-data]", out)
+        self.assertNotIn("#write_data]", out)
 
     def test_search_anchor_uses_full_leaf_title(self):
         code, out, err = _loader.run_cli(parse_firebase, [
@@ -188,10 +190,10 @@ class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
         ])
         self.assertEqual(code, 0, err)
         self.assertIn(
-            "[https://firebase.google.com/docs/firestore/query-limit#read-write-data]",
+            "[https://firebase.google.com/docs/firestore/query-limit#read_write_data]",
             out,
         )
-        self.assertNotIn("#write-data]", out)
+        self.assertNotIn("#write_data]", out)
 
 
 class SearchContentMaxSnippetCharsTest(unittest.TestCase):

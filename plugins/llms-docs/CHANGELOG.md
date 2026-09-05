@@ -59,6 +59,31 @@ fixture テスト 12 件、`test_parse_claude_docs.py`/`test_parse_firebase.py`:
 引数契約 (`heading_path` ではなく葉タイトルを渡す) に合わせて更新し、breadcrumb
 分割を検証していたケースを本件の回帰ケースに差し替えた。224 → 230 tests。
 
+#### 追い修正: firebase の anchor が DevSite の実際の見出し ID と一致しない問題 (マージ前レビューの指摘)
+
+`heading_anchor_slug()` は GitHub/Mintlify 流 (小文字化・記号除去・空白→ハイフン) の
+1 規則しか実装しておらず、claude-docs (Mintlify) には合うが、firebase.google.com は
+Google DevSite であり見出し ID の単語結合が `-` ではなく `_` (アンダースコア) である
+ため、firebase の anchor は生成できても実際のページ上で解決しなかった。実機確認:
+`https://firebase.google.com/docs/firestore/manage-data/add-data` の見出し
+「Set a document」は `id="set_a_document"`、「Add a document」は `id="add_a_document"` —
+修正前の実装が生成する `#set-a-document` はページ上で解決しない。
+
+`heading_anchor_slug()` / `section_url_anchor()` に `style` 引数を追加し
+(`"github"` が既定、既存の出力は不変)、`style="devsite"` は 小文字化 → 記号除去 →
+空白連続を `_` 1 つに → 前後の `_` を strip、という規則にした。`parse-firebase.py`
+の呼び出し 2 箇所 (`search-content`/`search`) を `style="devsite"` に変更、
+`parse-claude-docs.py` の呼び出しは既定 (`"github"`) のまま変更していない。
+DevSite が付ける重複回避サフィックス (`-1`/`-2` 相当) や見出しへの独自 ID 指定
+(`{#custom-id}` 相当) までは再現しない best-effort である点は変わらず、
+`researching-firebase/SKILL.md` の anchor 説明もこの規則に合わせて更新した。
+
+`test_common.py` に `style="devsite"` の fixture テスト 5 件を追加 (`heading_anchor_slug`
+4 件 + `section_url_anchor` の style 伝播 1 件)。`test_parse_firebase.py` の既存 CLI
+統合テスト 2 件 (`SectionUrlAnchorSlashInTitleIntegrationTest`) は件数を増やさず、
+期待値をハイフン結合からアンダースコア結合に更新 (修正前コードでは失敗することを確認
+済み)。230 → 235 tests。
+
 ### テストを 1 件だけ指定して実行できない問題を修正 (共有ヘルパーが解決されない)
 
 `scripts/tests/` 配下の共有ヘルパー `_loader` をトップレベル import (副作用専用) で

@@ -466,8 +466,12 @@ def cmd_search_content(args):
             # response resolves to nothing. Pass the leaf title, not
             # heading_path — a heading whose own title contains "/" (e.g.
             # "## CI/CD") would otherwise be misread as a nested breadcrumb
-            # (マージ前レビューの指摘)
-            url_anchor = section_url_anchor(_entry_url_for_match(entry["url"]), r["title"])
+            # (マージ前レビューの指摘)。style="devsite": firebase.google.com
+            # is Google DevSite, which joins heading-id words with "_", not
+            # GitHub/Mintlify's "-" (マージ前レビューの指摘)
+            url_anchor = section_url_anchor(
+                _entry_url_for_match(entry["url"]), r["title"], style="devsite"
+            )
             print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{url_anchor}")
             for snippet_line in r["snippet"].splitlines():
                 print(f"      {snippet_line}")
@@ -567,8 +571,13 @@ def cmd_search(args):
                 # plaintext response resolves to nothing. Pass the leaf
                 # title, not heading_path — a heading whose own title
                 # contains "/" (e.g. "## CI/CD") would otherwise be
-                # misread as a nested breadcrumb (マージ前レビューの指摘)
-                url_anchor = section_url_anchor(_entry_url_for_match(r["url"]), s["title"])
+                # misread as a nested breadcrumb (マージ前レビューの指摘)。
+                # style="devsite": firebase.google.com is Google DevSite,
+                # which joins heading-id words with "_", not GitHub/
+                # Mintlify's "-" (マージ前レビューの指摘)
+                url_anchor = section_url_anchor(
+                    _entry_url_for_match(r["url"]), s["title"], style="devsite"
+                )
                 print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
                 for snippet_line in s["snippet"].splitlines():
                     print(f"      {snippet_line}")
