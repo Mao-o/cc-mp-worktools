@@ -209,17 +209,17 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     if cls == "symlink":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            kind="symlink", is_dotenv=is_dotenv, relpath=relpath,
+            kind="symlink", is_dotenv=is_dotenv, is_envrc=is_envrc, relpath=relpath,
         ))
     if cls == "directory":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            kind="directory", is_dotenv=is_dotenv, relpath=relpath,
+            kind="directory", is_dotenv=is_dotenv, is_envrc=is_envrc, relpath=relpath,
         ))
     if cls == "special":
         return output.make_deny(M.edit_deny(
             tool_label, basename, new_keys,
-            kind="special", is_dotenv=is_dotenv, relpath=relpath,
+            kind="special", is_dotenv=is_dotenv, is_envrc=is_envrc, relpath=relpath,
         ))
     if cls == "error":
         return output.ask_or_deny(

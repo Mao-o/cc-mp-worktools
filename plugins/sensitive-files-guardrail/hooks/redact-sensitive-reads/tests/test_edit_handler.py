@@ -332,6 +332,21 @@ class TestDenyReasonSuggestions(BaseEdit):
         self.assertIn("AWS_ACCESS_KEY", reason)
         self.assertIn("AWS_REGION", reason)
 
+    def test_envrc_symlink_target_also_gets_direnv_advice(self):
+        """symlink / directory / special 分岐も is_envrc を受け取り、.envrc への
+        Next.js 前提案内を出さない (マージ前レビューの指摘)。symlink 経路で確認。"""
+        real = Path(self.tmp) / "real-envrc"
+        real.write_text("export AWS_ACCESS_KEY=x\n")
+        link = Path(self.tmp) / ".envrc"
+        link.symlink_to(real)
+        envelope = _make_envelope("Write", str(link), self.tmp)
+        envelope["tool_input"]["content"] = "export AWS_SECRET_KEY=y\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn(".env.example", reason)
+        self.assertNotIn("dotenv-cli", reason)
+
     def test_envrc_new_file_suggests_envrc_example_not_env_example(self):
         """.envrc (direnv) の新規作成は .envrc.example を案内し、Next.js 慣例の
         .env.example / dotenv-cli merge は案内しない (内部バックログ、

@@ -118,6 +118,8 @@ redact 1219 → **1239**、check 133 → **135**。
    `lower == ".envrc" or lower.endswith(".envrc")` は前半が後半に完全に
    包含されるため `lower.endswith(".envrc")` の 1 条件に一本化した
    (判定結果は不変、既存テストで確認済み)。
+- `.envrc` フラグを symlink / directory / special の deny 分岐にも渡す。これらの経路では
+  依然 `.env.example` を案内していた (マージ前レビューの指摘)。symlink 経路の回帰テストを追加
 
 ## 0.28.0
 
