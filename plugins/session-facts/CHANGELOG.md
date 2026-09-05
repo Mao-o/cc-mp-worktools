@@ -1,5 +1,281 @@
 # Changelog
 
+## 0.10.0
+
+**言語サポート拡張 (Swift/.NET/Scala/Elixir/CMake) / dead option 整理 /
+テスト実行体験・カバレッジ改善 (v0.10)**。2026-08 精査バックログの続き。
+
+### 改善
+
+1. **Swift/.NET/Scala/Elixir/CMake の detector が無く、該当スタックの
+   repo では出力が Structure のみに退化していた問題を修正**
+   (`detectors/swift_stack.py`, `detectors/dotnet_stack.py`,
+   `detectors/scala_stack.py`, `detectors/elixir_stack.py`,
+   `detectors/cmake_stack.py` 新規, `core/pm.py`, `collectors/scripts.py`,
+   `core/constants.py`, `README.md`) — `CODE_EXTENSIONS` は既に
+   `.swift`/`.cs`/`.scala` を数えており Test Snapshot には反映されるのに
+   stack タグも Likely Commands も出ない非対称な状態だった。
+   `Package.swift`/`*.csproj`+`*.sln`/`build.sbt`/`mix.exs`/
+   `CMakeLists.txt` を判定条件に、`swift`/`dotnet`/`scala`/`elixir`/`cmake`
+   の stack タグを追加し、`core/pm.py` にも `swift`/`dotnet`/`sbt`/`mix`
+   package_manager 値を追加して `## Likely Commands` に `swift build`/
+   `swift test`、`dotnet test`、`sbt test`/`sbt compile`、`mix test` を
+   提案するようにした。**cmake だけは package_manager 化も Likely Commands
+   への提案もしていない**: ビルドディレクトリ・generator の慣習
+   (in-source か out-of-source か、CMake のバージョンによる差異) が
+   標準化されておらず、単一のコマンドを安全に提案できないと判断したため
+   (stack タグのみ付与)。`PROJECT_MARKERS` には `*.sln` が抜けていたため
+   追加した (`*.csproj` は既存だが `*.sln` 単体のリポジトリが marker gate
+   で落ちる非対称が残っていた)。`README.md` の検出スタック一覧を同期した
+
+### 保守
+
+2. **`--format` フラグの `json`/`human` が argparse の choices に定義される
+   だけで値を参照する dispatch 経路が無く、指定しても常に markdown 固定
+   だった dead option を整理** (`cli.py`, `README.md`,
+   `skills/session-facts/SKILL.md`) — 同梱の `hooks/hooks.json` /
+   `hooks/codex-hooks.json` / `SKILL.md` は元々 `--format markdown` のみを
+   使っており、この変更で壊れる呼び出しは無い。choices を `("markdown",)`
+   のみに縮小し、`--format json`/`--format human` は argparse エラーで
+   明示的に拒否するようにした (機械可読な出力が必要な場合は既存の
+   `--emit subagent-json` を使う旨を `--help` と README/SKILL.md に明記)
+3. **共有テストヘルパー (`tests/_testutil.py`) がトップレベル名で
+   import されているため、`python3 -m unittest discover tests` 以外の
+   実行経路 (単体テスト指定・pytest) で `ModuleNotFoundError` になり
+   1 件だけデバッグしたい場面で原因を誤認しやすかった問題を修正**
+   (`tests/__init__.py`) — ディレクトリ探索は探索先自体を sys.path に
+   追加するため通っていたが、`python3 -m unittest tests.test_cli` のような
+   モジュールパス指定や `pytest` はテストディレクトリ自体を sys.path に
+   追加しないため落ちていた。`tests/__init__.py` (元々空) が自分自身の
+   ディレクトリを sys.path に足すようにし、呼び出し側 (ディレクトリ探索を
+   使う機械ゲート・CI) を一切変えずに 3 経路すべてで解決するようにした
+4. **services/env_keys/nextjs_facts/pm(優先順位)/walk_files(nested .git 含む)/
+   主要 detector 群 (node_typescript, nextjs, python_stack, java_stack,
+   docker, claude_plugin, deno, react_vite, testing, prisma, taskrunner)
+   にユニットテストが無かった問題を修正**
+   (`tests/test_services.py`, `tests/test_env_keys.py`,
+   `tests/test_nextjs_facts.py`, `tests/test_pm.py`,
+   `tests/test_main_detectors.py` 新規, `tests/test_fs.py`,
+   `tests/test_cli.py` に `--format` の argparse エラーテストを追加) —
+   flutter/mise/firebase 以外の detector と、services/env_keys/
+   nextjs_facts/pm.py の優先順位表/walk_files の SKIP_DIRS・nested .git
+   境界・件数上限が未検証だった (`--format` の argparse エラー・`- more:`
+   ヒント・`custom/` 読込失敗の隔離は既存の `tests/test_cli.py`/
+   `tests/test_registry.py` で既にカバー済みと判明したため、それぞれ
+   本バッチの一部として追加/現状追認のみ行った)。合計 143 件のテストを
+   追加 (344 -> 487)
+5. **新設した Elixir/CMake detector が `stack: elixir`/`stack: cmake` や
+   `mix test` を報告する一方、`CODE_EXTENSIONS` に `.ex`/`.exs`
+   (および CMake が実際にビルドする C/C++ の `.c`/`.cc`/`.cpp`/`.h`/
+   `.hpp`) が未登録のままで、Test Snapshot / Service Entry Points が
+   対象言語のソース・テストファイルを黙って読み飛ばしていた問題を修正**
+   (`core/constants.py`, `tests/test_new_stack_detectors.py`) —
+   マージ前レビューの指摘。Swift/.NET/Scala は `.swift`/`.cs`/`.scala`
+   が既に登録済みだったため上記 1 の対称性は破れていなかったが、Elixir
+   は新規追加した拡張子が無く、`lib/*.ex`/`test/*_test.exs` が
+   Test Snapshot に一切現れない状態だった。同じ構造の穴が CMake 側
+   (CMakeLists.txt 自体はビルド定義でありソースではないため、実ソース
+   である C/C++) にも無いか確認し、同様に登録した。`CODE_EXTENSIONS`
+   への拡張子追加のみで既存 collector のロジックは変更していないため
+   他スタックの出力には影響しない (`CODE_EXTENSIONS` の参照元は
+   `collectors/services.py`/`collectors/tests.py` の 2 箇所のみで、
+   `python_stack.py` のファイル比率判定や `hub_files.py` の走査は
+   それぞれ独立した拡張子集合を使っており本変更の影響を受けないことを
+   確認済み)。回帰テスト (`ExtensionRegistrationTest`) を追加し、
+   Elixir/CMake それぞれの Test Snapshot が固定レイアウトで正しく
+   ファイルを数えること、Elixir の Service Entry Points が
+   `lib/app/services/*.ex` のような SERVICE_DIR_MARKERS 配下のファイルを
+   拾うこと (`lib/app.ex` のような bare 配置は `lib` 自体が
+   SERVICE_DIR_MARKERS に無いため本修正後も対象外のまま) を固定。
+   5 件追加 (487 -> 492)
+6. **マージ前レビューの指摘 2 件を修正**
+   (`core/constants.py`, `collectors/scripts.py`, `README.md`,
+   `tests/test_new_stack_detectors.py`, `tests/test_scripts.py`) —
+   (a) 上記 5 の `CODE_EXTENSIONS` 追加が C/C++ の `.cc`/`.cpp`/`.h`/`.hpp`
+   のみで、CMake プロジェクトで同様によく使われる `.cxx`/`.hxx`/`.hh` が
+   抜けていたため追加し、`ExtensionRegistrationTest` に固定した。
+   (b) `collectors/scripts.py` の `## Likely Commands` で Scala/Elixir/
+   Swift/.NET (`sbt`/`mix`/`swift`/`dotnet`) の提案が `pm ==` の
+   `elif` チェーンにぶら下がっていたため、`core/pm.py` が返す primary
+   package manager が別スタックに奪われる root (例: `package-lock.json`
+   と `App.sln` が同居し pm が `npm` になる) では `DotnetStackDetector`
+   が `stack: dotnet` を報告していても `dotnet test` が一切出なかった。
+   今回追加した 4 スタックの分岐のみ `pm` 判定から `ctx.stack` 判定
+   (`if "dotnet" in stack:` 等、複数スタック共存時はそれぞれ加算) に
+   差し替え、既存スタック (node/python/go/java 等) の分岐は変更していない。
+   回帰テストは修正前に落ちることを確認済み。2 件追加 (492 -> 494)
+7. **マージ前レビューの指摘 2 件を修正**
+   (`collectors/scripts.py`, `detectors/dotnet_stack.py`, `core/pm.py`,
+   `core/constants.py`, `README.md`, `tests/test_scripts.py`,
+   `tests/test_new_stack_detectors.py`, `tests/test_fs.py`,
+   `tests/test_cli.py`) —
+   (a) 上記 6(b) の修正後も `## Likely Commands` の `_likely_commands()` は
+   PM 由来のコマンド (npm scripts 等) を先に積み、Scala/Elixir/Swift/.NET
+   由来のコマンドをその後ろに積んでから `deduped[:max_items]` で切り詰めて
+   いたため、co-located な npm プロジェクトが `max_script_entries`
+   (既定 16) 件以上の scripts を持つ root では `dotnet test` 等が切り詰め
+   で再び消える回帰が残っていた。スタック由来コマンドを
+   `priority_commands` という別リストに積み、最終結合を
+   `priority_commands + commands` (スタック未検出時は空リストの結合=
+   無変化) にして切り詰め前に優先配置するよう修正。回帰テストは
+   npm scripts 16 件 + `App.sln` の fixture で `dotnet test` が
+   修正前に落ちることを確認済み。
+   (b) `DotnetStackDetector`/`core/pm.py`/`PROJECT_MARKERS` が
+   `*.csproj`/`*.sln` しか見ておらず、ソリューションを持たない F#
+   (`*.fsproj`)/VB.NET (`*.vbproj`) 単体の repo が dotnet と認識されな
+   かったため、3 箇所に `*.fsproj`/`*.vbproj` を追加し、
+   `CODE_EXTENSIONS` にも `.fs`/`.fsx`/`.vb` を追加して Test Snapshot /
+   Service Entry Points が対象ソースを読み飛ばさないようにした。
+   README の `.NET` marker 説明も同期。指摘 (b) は「non-git かつ marker gate
+   経由でも弾かれうる」ことも指摘しており、`PROJECT_MARKERS` への追加だけ
+   だと glob 判定側 (`core/fs.py::scan_project_markers()`) が実際に
+   `*.fsproj`/`*.vbproj` を glob パターンとして拾うかは別問題のため、
+   detector 単体テストとは別に non-git な marker gate 経由の end-to-end
+   テスト (`tests/test_cli.py`) と `has_project_markers()` の glob テスト
+   (`tests/test_fs.py`) を追加して閉じた。指摘 (a) の回帰テストは
+   本修正直前バージョンの `collectors/scripts.py` を隔離コピーへ差し替えて
+   実際に fail することを確認済み (ロジックの手動再実装ではなく実コード)。
+   9 件追加 (494 -> 503)
+8. **マージ前レビューの指摘 2 件を修正**
+   (`core/constants.py`, `core/fs.py`, `detectors/swift_stack.py`,
+   `collectors/scripts.py`, `README.md`, `tests/test_fs.py`,
+   `tests/test_new_stack_detectors.py`, `tests/test_scripts.py`,
+   `tests/test_cli.py`) —
+   (a) 上記 7 で `.fs`/`.fsx`/`.vb` を `CODE_EXTENSIONS` に追加した際、F# の
+   signature file 拡張子 `.fsi` (同名 `.fs` の公開宣言を分離する慣習的な
+   ペア) が抜けており、`.fsi` にしか無い公開宣言が Test Snapshot /
+   Service Entry Points から見えなくなっていた。`.fsi` を追加し、
+   `ExtensionRegistrationTest` に固定した。
+   (b) `Package.swift` の無い Xcode-only な Swift app (`App.xcodeproj`/
+   `App.xcworkspace` + `.swift` ソースのみ) が `detectors/swift_stack.py`
+   でも `PROJECT_MARKERS` でも一切認識されず、non-git root では marker
+   gate で facts が丸ごと消え、git root でも `stack: swift` が出ない
+   非対称があった。`*.xcodeproj`/`*.xcworkspace` はどちらも Xcode の
+   バンドル形式でディレクトリだが、`core/fs.py::scan_project_markers()`
+   の glob 判定はエントリ名のみで file/dir を区別しないため gate 側は
+   ディレクトリでもそのまま動くことを実測で確認済み (marker gate 自体への
+   追加コード変更は不要、`PROJECT_MARKERS` へのタプル追加のみ)。detector
+   側は `Path.glob()` で判定 (同じ理由で file/dir 区別不要)。
+   `## Likely Commands` の `swift build`/`swift test` は SwiftPM 専用の
+   コマンドで、Xcode-only project には scheme 指定が要る `xcodebuild` の
+   代わりにはならないため、`"swift" in stack` だけでなく `Package.swift`
+   の実在 (`package_manager == "swift"`、または直接の exists() チェック)
+   も条件に加えて絞り込んだ。README の Swift 行・Likely Commands 節にも
+   この非対称を明記した。
+   **修正中に副作用を追加検出**: `*.xcodeproj`/`*.xcworkspace` を
+   `PROJECT_MARKERS` に足すと、git 管理外の Xcode-only root がこれまで
+   拒否されていた marker gate を素通りし、`core/fs.py::walk_files()`
+   (非 git 経路のファイル走査) が bundle 内部
+   (`project.pbxproj`/`xcuserdata/`/`xcshareddata/xcschemes/` 等、
+   ソースではなくビルドメタデータ) まで丸ごと拾ってしまい、`##
+   Structure` が本来のソースツリーを差し置いてこのノイズで埋まる回帰を
+   実機確認で発見した (git root は `.gitignore` が大半を除外するため
+   影響が薄いが、非 git root にはそれが無い)。`SKIP_DIRS` は完全一致の
+   ディレクトリ名集合で、bundle のディレクトリ名は stem がプロジェクト
+   固有 (拡張子のみ固定) のため表現できず、`walk_files()` に
+   `.xcodeproj`/`.xcworkspace` 接尾辞での descend 抑止を追加して閉じた
+   (dotdir 抑止と同じく `skip_dirs` 引数を介さない無条件ロジック)。
+   回帰テストは (1) `App.xcodeproj` のみの fixture で `stack: swift` が
+   修正前は空リストになること、(2) 同 fixture で `## Likely Commands` に
+   swift コマンドが出ないこと、(3) `.fsi` が `CODE_EXTENSIONS` に無いこと、
+   (4) `.fsi` ファイルが Test Snapshot の `code_files` から漏れること、
+   (5) `App.xcodeproj`/`App.xcworkspace` が non-git marker gate で修正前は
+   「no project markers found」になること、(6) `walk_files()` が bundle
+   内部のファイルを拾ってしまうこと、(7) 実際の `## Structure` に
+   bundle 内部が出てしまうこと、の 7 点が修正前に fail することを、
+   本修正直前バージョンの `core/constants.py`/`detectors/swift_stack.py`/
+   `collectors/scripts.py`/`core/fs.py` を隔離コピーへ差し替えて確認済み。
+   `Package.swift` 単体の既存挙動は変更前後で同一であることも同じ隔離
+   コピーで確認済み (2 件は元々 pass)。10 件追加 (503 -> 513)
+9. **マージ前レビューの指摘 2 件を修正 + 新設 5 stack の標準ファイル形式棚卸し**
+   (`detectors/swift_stack.py`, `detectors/dotnet_stack.py`, `core/pm.py`,
+   `core/constants.py`, `README.md`, `tests/test_new_stack_detectors.py`,
+   `tests/test_scripts.py`, `tests/test_fs.py`, `tests/test_cli.py`) —
+   (a) `detectors/swift_stack.py` の Xcode-only 分岐 (`*.xcodeproj`/
+   `*.xcworkspace` の存在のみで `stack: swift` を付ける経路) は Xcode
+   project/workspace 自体が Swift 専用ではないため、`.m`/`.mm` のみの
+   legacy Objective-C project でも Xcode bundle さえあれば誤って `swift`
+   と判定していた。tracked files (`ctx.tracked_files`) に `.swift` が
+   1 件以上あることをこの分岐の追加要件にし、`Package.swift` 分岐は
+   変更していない。Objective-C 専用 fixture (`.m`/`.mm` のみ、tracked
+   files が空のケースも含む) で修正前に実際に `["swift"]` を返してしまう
+   ことを確認してから修正。
+   (b) `detectors/dotnet_stack.py`/`core/pm.py`/`PROJECT_MARKERS` が
+   `*.sln` (classic 形式) のみを見ており、.NET SDK 9+/Visual Studio
+   17.10+ が生成する新しい XML ベースの solution 形式 `*.slnx` を認識
+   できなかった (member `*.csproj`/`*.fsproj`/`*.vbproj` がサブディレクトリ
+   にあり root に `*.slnx` のみのレイアウトが `dotnet` と判定されず、
+   `dotnet test` の提案も出ない)。3 箇所すべてに `*.slnx` を追加し、
+   `*.fsproj`/`*.vbproj` 追加時 (上記 7(b)) と同じ形で detector 単体・
+   `core/fs.py::has_project_markers()` の glob マッチ・non-git marker gate
+   経由の end-to-end の 3 層でテストを固定した。
+   あわせて、新設 5 stack (swift/dotnet/scala/elixir/cmake) それぞれについて
+   「公式ツールチェーンが生成・認識する標準的な project/manifest/solution
+   形式とソース拡張子」の棚卸しを行った。採否 (理由付き):
+   - **採用**: dotnet `*.slnx` (上記 (b))。scala `.sc` (`CODE_EXTENSIONS` の
+     み) -- Scala のスクリプト/worksheet 拡張子 (`scala script.sc`、
+     Ammonite、scala-cli) で、`.scala` 単体では拾えないソースが Test
+     Snapshot/Service Entry Points から漏れていた同型の穴。
+     `detectors/scala_stack.py`/`core/pm.py`/`PROJECT_MARKERS` へは
+     意図的に**追加していない** (次項参照)。
+   - **除外 (理由付き)**: dotnet `*.slnf` (solution filter) はそれ単体では
+     成立せず常に既存の `.sln` を参照する副次ファイルであり、それ自体が
+     project/solution ファイルではない。dotnet `Directory.Build.props` も
+     同様に、配下の project 群に設定を暗黙 import させる共有プロパティ
+     ファイルであって project/solution ファイルそのものではない。
+     `detectors/dotnet_stack.py`/`core/pm.py` は go/rust/ruby/php/java の
+     各 detector と同じ「root 直下のみを見る」規約 (`test_nested_csproj_is_
+     not_detected` で固定済み) を採っており、この規約は
+     `PROJECT_MARKERS` の nested search 有無とは独立した stack タグ側の
+     設計判断のため、いずれもこの規約に照らして「project/solution
+     ファイルそのものではない」ことを理由に見送った (marker gate 側の
+     nested search 到達可否は、この決定とは別の話であり根拠にしていない)。
+     scala `build.sc` (Mill のビルドファイル) は `detectors/scala_stack.py`
+     に追加すると `collectors/scripts.py` の既存 `if "scala" in stack:`
+     分岐が無条件で `sbt test`/`sbt compile` を提案するため、sbt を
+     使わない Mill 専用 project に対して**誤ったコマンド**を提案して
+     しまう (未検出ではなく誤検出という質的に異なる害のため、
+     `scripts.py` 側の build-tool 分岐追加を伴わない今回のスコープでは
+     見送り、拡張子の `.sc` のみ登録するに留めた)。elixir `.heex`
+     (Phoenix テンプレート) は `CODE_EXTENSIONS` が他スタックでも
+     テンプレート/マークアップ形式 (`.html`/`.erb` 等) を含めていない
+     線引きに合わせ除外。cmake `CMakePresets.json` は CMake の仕様上
+     常に同じディレクトリの `CMakeLists.txt` とセットでしか機能せず、
+     既存の `CMakeLists.txt` の直接チェックで既にカバーされるため
+     追加の gate 効果が無い。cmake 由来での `.m`/`.mm` (Objective-C)
+     追加は根拠が薄いため見送り (指摘 (a) の Swift 側修正と対称の判断)。
+     swift は `Package.swift`/`*.xcodeproj`/`*.xcworkspace` が既に登録済み
+     で `Package.resolved` は lock file のため marker 化不要と判断し、
+     既存のまま変更なし。dotnet の `.fs`/`.fsi`/`.fsx`/`.vb`/`.cs` は
+     `CODE_EXTENSIONS` に既登録で変更なし。
+   9 件追加 (513 -> 522)
+
+10. **マージ前レビューの指摘 1 件を修正 (solution のみの root が member
+    project の中身を見ずに dotnet 判定されていた問題)**
+    (`core/dotnet.py` 新規, `detectors/dotnet_stack.py`, `core/pm.py`,
+    `README.md`, `tests/test_new_stack_detectors.py`, `tests/test_pm.py`,
+    `tests/test_scripts.py`) — root 直下の `*.sln`/`*.slnx` は、それ単体
+    では .NET の証拠にならない。Visual Studio の solution は native C++
+    project (`*.vcxproj`) のみで構成できるため、C++ 専用 solution の
+    root でも `stack: dotnet`/`package_manager: dotnet` が付き
+    `dotnet test` まで提案されてしまっていた (`*.vcxproj` のみを参照する
+    `.sln` 固定 fixture で修正前に実際に `["dotnet"]`/`"dotnet"` を
+    返すことを確認してから修正)。root 直下に `*.csproj`/`*.fsproj`/
+    `*.vbproj` があれば従来通り即 dotnet とし、solution ファイルしか
+    無い場合だけ solution 本文を読み、managed project の参照
+    (`*.csproj`/`*.fsproj`/`*.vbproj` いずれかの拡張子文字列、大小文字
+    区別なし) を含むときのみ dotnet と判定するようにした。classic
+    `.sln` の `Project(...) = "Name", "path\App.csproj", ...` 行、
+    `.slnx` の `<Project Path="src/App.csproj" />` 要素のどちらも同じ
+    部分文字列一致で拾える。solution が読めない/空の場合は dotnet と
+    判定しない (fail-closed)。この判定はこれまで
+    `detectors/dotnet_stack.py`/`core/pm.py` に別々に手書きされ重複して
+    いたが、`core/dotnet.py::has_dotnet_project()` に一本化し両方から
+    呼ぶようにした (2 箇所が独立にドリフトする方が、gradle の単純
+    `exists()` 重複より実害が大きいと判断したため — gradle 側は
+    `core/pm.py`/`detectors/java_stack.py` のまま変更なし)。
+    3 件追加 (522 -> 525)
+
 ## 0.9.0
 
 **Firebase 判定の一本化 / Domain Types の代表性改善 / README 同期 (v0.9)**。

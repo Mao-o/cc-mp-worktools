@@ -5,7 +5,8 @@ Supports two documentation sources:
   - code     : code.claude.com/docs      (Claude Code)
   - platform : platform.claude.com/docs  (Claude Developer Platform)
 
-Parses the concatenated H1-delimited Markdown pages and provides
+Parses the concatenated Markdown pages (H1-delimited, or YAML-frontmatter-
+delimited as platform.claude.com emits since 2026-08) and provides
 subcommands for progressive (layered) access:
 
   fetch-index     — Fetch (if uncached) and print page index (from llms.txt)
@@ -101,8 +102,28 @@ def _is_low_priority(title: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Document splitting (H1 boundaries)
+# Document splitting (H1 boundaries / YAML frontmatter boundaries)
 # ---------------------------------------------------------------------------
+#
+# Two upstream page layouts are supported and auto-detected per file:
+#
+# * **H1 layout** (Claude Code, and Platform until 2026-08): every page
+#   starts with ``# Title`` followed by a ``Source:``/``URL:`` line.
+# * **Frontmatter layout** (Platform since 2026-08): every page starts with
+#   a YAML block ``---`` / ``title: ...`` / ``url: https://...`` /
+#   ``description: ...`` / ``---`` and the body has no H1 of its own. The
+#   raw ``# `` lines that do appear are mostly comments in unfenced code
+#   samples, so splitting on H1 shreds 699 pages into ~300 unrelated chunks
+#   with no URL — the index↔full-text join drops to 0% and every
+#   ``search`` on the source fails (internal backlog 2wd.30).
+#
+# ``split_documents`` runs both splitters and keeps whichever yields more
+# URL-bearing pages (tie → H1, the historical layout). Counting *joinable*
+# pages rather than raw delimiter hits keeps the choice robust against a
+# frontmatter *example* inside an H1-layout corpus (a handful of blocks vs.
+# hundreds of ``Source:`` pages) and against the unfenced ``# comment``
+# noise inside a frontmatter-layout corpus (hundreds of H1s, none with a
+# URL).
 
 def _is_h1(line: str) -> re.Match | None:
     """Return match if *line* is an H1 heading (``# Title``)."""
@@ -118,21 +139,12 @@ def _extract_source_url(body_lines: list[str], limit: int = 10) -> str:
     return ""
 
 
-def split_documents(lines: list[str]) -> list[dict]:
+def _split_documents_h1(lines: list[str]) -> list[dict]:
     """Split *lines* into page documents delimited by H1 headings.
 
-    Handles both Claude Code format (single H1) and Platform format
-    (duplicate H1 with URL: line between them) by merging consecutive
+    Handles both the single-H1 form and the older Platform duplicate-H1
+    form (URL: line between two identical H1s) by merging consecutive
     documents with the same title when the first one is very short.
-
-    Returns a list of dicts:
-        {
-            "title": str,
-            "source_url": str,
-            "body_lines": [...],     # lines after H1 until next H1
-            "line_start": int,       # 0-based index into *lines*
-            "line_end": int,
-        }
     """
     raw_docs: list[dict] = []
     fence = FenceTracker()
@@ -203,6 +215,132 @@ def split_documents(lines: list[str]) -> list[dict]:
         i += 1
 
     return docs
+
+
+# A frontmatter block must open with ``---`` immediately followed by
+# ``title:`` and carry a ``url: https://...`` line before its closing
+# ``---``. Requiring the URL (not just any ``---``) keeps Markdown horizontal
+# rules and SKILL.md-style ``name:``/``description:`` examples in page bodies
+# from being mistaken for page boundaries.
+_FRONTMATTER_TITLE_RE = re.compile(r"^title:\s*(.*?)\s*$")
+_FRONTMATTER_URL_RE = re.compile(r"^url:\s*(https?://\S+)\s*$")
+_FRONTMATTER_MAX_LINES = 20
+
+
+def _frontmatter_block_at(lines: list[str], i: int) -> tuple[str, str, int] | None:
+    """Return ``(title, url, end_idx)`` if a page frontmatter block opens at
+    ``lines[i]``; *end_idx* is the index just past the closing ``---``.
+
+    Detection deliberately ignores fence state: unfenced code samples make
+    the fence tracker unreliable inside frontmatter-layout corpora, and the
+    ``---``/``title:``/``url: https://`` triplet is specific enough on its
+    own.
+    """
+    if lines[i].rstrip("\r\n") != "---":
+        return None
+    if i + 1 >= len(lines) or not lines[i + 1].startswith("title:"):
+        return None
+    title = ""
+    url = ""
+    for j in range(i + 1, min(i + 1 + _FRONTMATTER_MAX_LINES, len(lines))):
+        stripped = lines[j].rstrip("\r\n")
+        if stripped == "---":
+            if not url:
+                return None
+            return title, url, j + 1
+        m = _FRONTMATTER_TITLE_RE.match(stripped)
+        if m and not title:
+            title = m.group(1)
+            # YAML quoting (``title: "Tutorial: Build ..."``) — unwrap one
+            # layer of matching quotes.
+            if len(title) >= 2 and title[0] == title[-1] and title[0] in "\"'":
+                title = title[1:-1]
+            continue
+        m = _FRONTMATTER_URL_RE.match(stripped)
+        if m and not url:
+            url = m.group(1)
+    return None
+
+
+def _strip_trailing_nav_headings(body: list[str]) -> list[str]:
+    """Drop heading-only lines dangling at the end of *body*.
+
+    In the frontmatter layout the upstream generator emits its navigation
+    group labels (``## Messages`` / ``### First steps``) *between* pages, so
+    they land at the tail of the preceding page's body. A heading with no
+    text under it carries no content and would otherwise surface as a bogus
+    section in ``sections``/``content``.
+    """
+    end = len(body)
+    while end > 0:
+        k = end - 1
+        while k >= 0 and not body[k].strip():
+            k -= 1
+        if k >= 0 and re.match(r"^#{1,6} ", body[k]):
+            end = k
+            continue
+        break
+    return body[:end]
+
+
+def _split_documents_frontmatter(lines: list[str]) -> list[dict]:
+    """Split *lines* into page documents delimited by YAML frontmatter
+    blocks. Content before the first block (file preamble) is dropped; the
+    frontmatter itself is excluded from ``body_lines``."""
+    docs: list[dict] = []
+    i = 0
+    n = len(lines)
+    current: dict | None = None
+    while i < n:
+        block = _frontmatter_block_at(lines, i)
+        if block is None:
+            i += 1
+            continue
+        title, url, body_start = block
+        if current is not None:
+            body = _strip_trailing_nav_headings(lines[current["_body_start"]:i])
+            current["body_lines"] = body
+            current["line_end"] = current["_body_start"] + len(body)
+            del current["_body_start"]
+            docs.append(current)
+        current = {
+            "title": title,
+            "source_url": url,
+            "line_start": i,
+            "_body_start": body_start,
+        }
+        i = body_start
+    if current is not None:
+        body = _strip_trailing_nav_headings(lines[current["_body_start"]:])
+        current["body_lines"] = body
+        current["line_end"] = current["_body_start"] + len(body)
+        del current["_body_start"]
+        docs.append(current)
+    return docs
+
+
+def _count_url_bearing(docs: list[dict]) -> int:
+    return sum(1 for d in docs if d["source_url"])
+
+
+def split_documents(lines: list[str]) -> list[dict]:
+    """Split *lines* into page documents, auto-detecting the page layout
+    (H1 + ``Source:`` line, or YAML frontmatter with ``url:``).
+
+    Returns a list of dicts:
+        {
+            "title": str,
+            "source_url": str,
+            "body_lines": [...],     # page body (delimiter itself excluded)
+            "line_start": int,       # 0-based index into *lines*
+            "line_end": int,
+        }
+    """
+    h1_docs = _split_documents_h1(lines)
+    fm_docs = _split_documents_frontmatter(lines)
+    if fm_docs and _count_url_bearing(fm_docs) > _count_url_bearing(h1_docs):
+        return fm_docs
+    return h1_docs
 
 
 def _split_documents_checked(lines: list[str], path: str) -> list[dict]:

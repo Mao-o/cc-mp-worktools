@@ -22,7 +22,7 @@ from unittest import mock
 import _testutil  # noqa: F401  (sys.path 整備)
 
 from cli import main
-from core.fs import has_project_markers
+from core.fs import has_project_markers, walk_files
 from core.git import git_ls_files
 
 
@@ -149,6 +149,30 @@ class HasProjectMarkersGlobTest(unittest.TestCase):
             (root / "MyApp.csproj").write_text("<Project />\n")
             self.assertTrue(has_project_markers(root, ["*.csproj"]))
 
+    def test_fsproj_vbproj_glob_markers_match(self):
+        # merge-review finding (round 3): PROJECT_MARKERS gained *.fsproj/
+        # *.vbproj alongside *.csproj/*.sln, but the glob branch itself
+        # (the "*" in marker check above) is generic -- this pins that a
+        # solutionless F#/VB.NET repo's marker actually reaches it, not
+        # just that the pattern string was added to the tuple.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.fsproj").write_text("<Project />\n")
+            self.assertTrue(has_project_markers(root, ["*.fsproj"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.vbproj").write_text("<Project />\n")
+            self.assertTrue(has_project_markers(root, ["*.vbproj"]))
+
+    def test_slnx_glob_marker_matches(self):
+        # merge-review finding (round 5): PROJECT_MARKERS gained *.slnx
+        # (the newer XML solution format) alongside *.sln -- same pin as
+        # the *.fsproj/*.vbproj case above, for the glob branch itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.slnx").write_text("<Solution />\n")
+            self.assertTrue(has_project_markers(root, ["*.slnx"]))
+
     def test_glob_marker_does_not_match_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -170,6 +194,146 @@ class HasProjectMarkersGlobTest(unittest.TestCase):
             root = Path(tmp)
             (root / "prisma").mkdir()
             self.assertTrue(has_project_markers(root, ["prisma"]))
+
+
+class WalkFilesTest(unittest.TestCase):
+    """core/fs.py::walk_files() (the non-git file-walk fallback, used when
+    the marker gate lets a non-git directory through) had zero test
+    coverage: SKIP_DIRS filtering, dotfile/dotdir filtering, the
+    respect_subgit nested-.git boundary (lines ~176-180), and the result
+    limit were all unverified."""
+
+    def test_finds_files_in_root_and_subdirectories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("1\n")
+            (root / "src").mkdir()
+            (root / "src" / "b.py").write_text("2\n")
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(set(found), {"a.py", "src/b.py"})
+
+    def test_skip_dirs_are_not_descended_into(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("1\n")
+            (root / "node_modules").mkdir()
+            (root / "node_modules" / "pkg.js").write_text("2\n")
+            found = walk_files(root, skip_dirs=("node_modules",))
+            self.assertEqual(found, ["app.py"])
+
+    def test_dotdirs_are_skipped_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("1\n")
+            (root / ".hidden_dir").mkdir()
+            (root / ".hidden_dir" / "x.py").write_text("2\n")
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(found, ["app.py"])
+
+    def test_dotfiles_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("1\n")
+            (root / ".env").write_text("SECRET=1\n")
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(found, ["app.py"])
+
+    def test_nested_git_stops_descent_but_keeps_its_own_top_level_files(self):
+        # respect_subgit=True (the default): a subdirectory that itself
+        # contains a nested ".git" is treated as a sub-repo boundary --
+        # os.walk still yields that directory's own top-level files, but
+        # its dirnames are cleared so nothing beneath it (including files
+        # further down, or the .git dir itself) is walked.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "top.py").write_text("1\n")
+            nested = root / "vendor" / "sub_repo"
+            nested.mkdir(parents=True)
+            (nested / ".git").mkdir()
+            (nested / "README.md").write_text("nested repo\n")
+            deeper = nested / "src"
+            deeper.mkdir()
+            (deeper / "inner.py").write_text("2\n")
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(
+                set(found), {"top.py", "vendor/sub_repo/README.md"}
+            )
+            self.assertNotIn("vendor/sub_repo/src/inner.py", found)
+
+    def test_respect_subgit_false_walks_past_the_nested_git_boundary(self):
+        # With respect_subgit=False, a nested ".git" is filtered out only
+        # by the ordinary dot-prefix rule (like any other dotdir) -- the
+        # rest of the sub-repo's tree (other subdirectories) is still
+        # walked, unlike the True (default) case above.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "vendor" / "sub_repo"
+            nested.mkdir(parents=True)
+            (nested / ".git").mkdir()
+            deeper = nested / "src"
+            deeper.mkdir()
+            (deeper / "inner.py").write_text("2\n")
+            found = walk_files(root, skip_dirs=(), respect_subgit=False)
+            self.assertEqual(found, ["vendor/sub_repo/src/inner.py"])
+
+    def test_root_level_git_dir_is_always_skipped_regardless_of_respect_subgit(self):
+        # dirpath == root_str for the root itself, so the nested-.git
+        # special case never applies there -- root's own .git is filtered
+        # by the plain dot-prefix rule either way.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            (root / ".git" / "config").write_text("x\n")
+            (root / "app.py").write_text("1\n")
+            self.assertEqual(walk_files(root, skip_dirs=()), ["app.py"])
+            self.assertEqual(
+                walk_files(root, skip_dirs=(), respect_subgit=False), ["app.py"]
+            )
+
+    def test_limit_stops_at_the_requested_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for i in range(10):
+                (root / f"f{i}.py").write_text("1\n")
+            found = walk_files(root, skip_dirs=(), limit=3)
+            self.assertEqual(len(found), 3)
+
+    def test_default_limit_is_5000(self):
+        import inspect
+
+        sig = inspect.signature(walk_files)
+        self.assertEqual(sig.parameters["limit"].default, 5000)
+
+    def test_xcodeproj_bundle_internals_are_not_walked(self):
+        # merge-review finding: *.xcodeproj/*.xcworkspace becoming a
+        # PROJECT_MARKERS entry means a non-git Xcode-only root now passes
+        # the marker gate and reaches walk_files directly. The bundle's
+        # stem is project-specific ("App" here), so SKIP_DIRS (exact-name
+        # matching) cannot express it -- this pins the suffix-based skip
+        # instead, and that no files under the bundle leak into the result.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App" / "App.swift").parent.mkdir(parents=True)
+            (root / "App" / "App.swift").write_text("struct App {}\n")
+            bundle = root / "App.xcodeproj"
+            (bundle / "project.xcworkspace" / "xcshareddata").mkdir(parents=True)
+            (bundle / "project.pbxproj").write_text("// pbxproj\n")
+            (bundle / "project.xcworkspace" / "contents.xcworkspacedata").write_text(
+                "<Workspace/>\n"
+            )
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(found, ["App/App.swift"])
+
+    def test_xcworkspace_bundle_internals_are_not_walked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App" / "App.swift").parent.mkdir(parents=True)
+            (root / "App" / "App.swift").write_text("struct App {}\n")
+            bundle = root / "App.xcworkspace"
+            bundle.mkdir()
+            (bundle / "contents.xcworkspacedata").write_text("<Workspace/>\n")
+            found = walk_files(root, skip_dirs=())
+            self.assertEqual(found, ["App/App.swift"])
 
 
 if __name__ == "__main__":

@@ -600,6 +600,15 @@ class TestDotenvStatus(unittest.TestCase):
         e = self._entry('K="hello"\n')
         self.assertEqual(e["length"], 5)
 
+    def test_length_is_character_count_not_byte_count(self):
+        """``length=<N>`` は ``len(v)`` (文字数)。UTF-8 バイト長ではないこと
+        を多バイト文字で固定する (docs/DESIGN.md がバイト長と誤記していた
+        問題の回帰テスト、内部バックログ)。"""
+        e = self._entry("K=あいうえお\n")
+        self.assertEqual(e["length"], 5)  # UTF-8 では 15 byte
+        e = self._entry("K=😀😀\n")
+        self.assertEqual(e["length"], 2)  # UTF-8 では 8 byte (絵文字は 4 byte/文字)
+
     def test_set_with_short_combination(self):
         # url + 短い → set + short
         e = self._entry("K=a://x\n")

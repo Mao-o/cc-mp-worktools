@@ -60,6 +60,24 @@ def _detect_format(basename: str) -> str:
     return "opaque"
 
 
+def is_envrc_basename(basename: str) -> bool:
+    """``.envrc`` (direnv) かどうかを返す (助言文面の分岐専用、0.29.0)。
+
+    ``_detect_format`` は parse 用途で ``.envrc`` を ``"dotenv"`` に含めて
+    正しい (``KEY=value`` 行のスーパーセットとして dotenv パーサをそのまま
+    再利用できるため)。ただし ``.envrc`` は direnv 用の **shell script** であり、
+    Next.js 慣例の dotenv-cli merge や ``.env.example`` テンプレートの対象では
+    ない (テンプレート慣習は ``.envrc.example``、既定 patterns の ``!*.example``
+    で除外済み)。この違いは助言文面 (``core.messages``) 側だけが必要とする
+    ので、判定境界 (``_detect_format`` の戻り値) には触れず補助関数として
+    独立させる。
+    """
+    # マージ前レビューの指摘 (P3): 前半の `lower == ".envrc"` は
+    # `lower.endswith(".envrc")` に包含される冗長な分岐だったため削除。
+    lower = basename.lower()
+    return lower.endswith(".envrc")
+
+
 def build_reason(
     basename: str,
     format_name: str,

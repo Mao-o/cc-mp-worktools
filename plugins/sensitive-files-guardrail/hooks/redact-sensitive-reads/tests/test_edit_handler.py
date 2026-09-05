@@ -332,6 +332,53 @@ class TestDenyReasonSuggestions(BaseEdit):
         self.assertIn("AWS_ACCESS_KEY", reason)
         self.assertIn("AWS_REGION", reason)
 
+    def test_envrc_symlink_target_also_gets_direnv_advice(self):
+        """symlink / directory / special 分岐も is_envrc を受け取り、.envrc への
+        Next.js 前提案内を出さない (マージ前レビューの指摘)。symlink 経路で確認。"""
+        real = Path(self.tmp) / "real-envrc"
+        real.write_text("export AWS_ACCESS_KEY=x\n")
+        link = Path(self.tmp) / ".envrc"
+        link.symlink_to(real)
+        envelope = _make_envelope("Write", str(link), self.tmp)
+        envelope["tool_input"]["content"] = "export AWS_SECRET_KEY=y\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertNotIn(".env.example", reason)
+        self.assertNotIn("dotenv-cli", reason)
+
+    def test_envrc_new_file_suggests_envrc_example_not_env_example(self):
+        """.envrc (direnv) の新規作成は .envrc.example を案内し、Next.js 慣例の
+        .env.example / dotenv-cli merge は案内しない (内部バックログ、
+        .envrc は shell script であって dotenv-cli の merge 対象ではない)。"""
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".envrc"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "export AWS_ACCESS_KEY=x\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn(".envrc.example", reason)
+        self.assertIn("direnv", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertNotIn("dotenv-cli", reason)
+
+    def test_envrc_overwrite_suggests_envrc_example_not_dotenv_cli(self):
+        """既存 .envrc の上書きも dotenv-cli merge ではなく .envrc.example /
+        direnv 前提の助言にすること。"""
+        (Path(self.tmp) / ".envrc").write_text("export FOO=bar\n")
+        envelope = _make_envelope(
+            "Write", str(Path(self.tmp) / ".envrc"), self.tmp,
+        )
+        envelope["tool_input"]["content"] = "export FOO=baz\nexport NEW_KEY=1\n"
+        r = handle(envelope, tool_label="Write")
+        reason = _reason(r)
+        self.assertEqual(_decision(r), "deny")
+        self.assertIn(".envrc.example", reason)
+        self.assertIn("direnv", reason)
+        self.assertNotIn(".env.example", reason)
+        self.assertNotIn("dotenv-cli", reason)
+
     def test_empty_content_no_keys(self):
         envelope = _make_envelope(
             "Write", str(Path(self.tmp) / ".env"), self.tmp,
@@ -582,7 +629,12 @@ class TestEditDenyKindBranches(BaseEdit):
         self.assertNotIn("追加予定のキー名", reason)
 
     def test_overwrite_envrc_value_update_is_not_labeled_as_addition(self):
-        """ticket のもう 1 つの再現例 (.envrc の AWS_PROFILE 更新)。"""
+        """ticket のもう 1 つの再現例 (.envrc の AWS_PROFILE 更新)。
+
+        あわせて「更新」文面が Next.js 慣例の `.env.example` を決め打ちで
+        言及しないこと (`.envrc.example` を言うこと) も固定する (内部
+        バックログ、.envrc は dotenv-cli merge の対象ではない)。
+        """
         self._write_existing(".envrc", "AWS_PROFILE=old-profile\n")
         envelope = _make_envelope(
             "Edit", str(Path(self.tmp) / ".envrc"), self.tmp,
@@ -591,6 +643,8 @@ class TestEditDenyKindBranches(BaseEdit):
         reason = _reason(handle(envelope, tool_label="Edit"))
         self.assertIn("既存キーの値の更新", reason)
         self.assertNotIn("追加予定のキー名", reason)
+        self.assertIn(".envrc.example", reason)
+        self.assertNotIn(".env.example", reason)
 
     def test_overwrite_new_key_addition_keeps_addition_wording(self):
         """既存キーと無関係な**新規**キー追加は従来どおり「追加予定」のまま。

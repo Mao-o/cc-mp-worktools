@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Optional, TYPE_CHECKING
 
+from core.dotnet import has_dotnet_project
+
 if TYPE_CHECKING:
     from core.context import RepoContext
 
@@ -31,6 +33,8 @@ def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
         return "gradle"
     if (root / "pom.xml").exists():
         return "maven"
+    if (root / "build.sbt").exists():
+        return "sbt"
     # Other
     if (root / "go.mod").exists():
         return "go"
@@ -38,4 +42,18 @@ def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
         return "cargo"
     if (root / "composer.json").exists():
         return "composer"
+    if (root / "mix.exs").exists():
+        return "mix"
+    if (root / "Package.swift").exists():
+        return "swift"
+    # has_dotnet_project() is the single source of truth shared with
+    # detectors/dotnet_stack.py (unlike the gradle exists() check just
+    # above, which stays duplicated between this module and
+    # detectors/java_stack.py -- that one is a single trivial exists() call
+    # on each side, with no parsing logic worth protecting behind a shared
+    # helper; the dotnet check now has to inspect solution file contents,
+    # see core/dotnet.py, so a drift between two hand-rolled copies would
+    # be much easier to introduce and much harder to notice).
+    if has_dotnet_project(root):
+        return "dotnet"
     return None

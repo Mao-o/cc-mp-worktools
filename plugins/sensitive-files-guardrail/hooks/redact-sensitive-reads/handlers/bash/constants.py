@@ -7,14 +7,11 @@ from __future__ import annotations
 
 import re
 
-# 0.3.1 以降、通常コマンドと未知コマンドを区別せず全て同じ operand 判定に通す
-# ため、このセットは **ドキュメント目的** でのみ保持している。処理ロジックからは
-# 参照しない。
-_SAFE_READ_CMDS = frozenset({
-    "cat", "less", "more", "head", "tail", "bat", "view",
-    "nl", "tac",
-})
-_SOURCE_CMDS = frozenset({"source", "."})
+# 0.3.1 以降、通常コマンドと未知コマンドを区別せず全て同じ operand 判定に通すため、
+# 「読み取り系コマンド一覧」「source 系コマンド一覧」という発想の定数は不要になった。
+# 実際の拡張点は下の _SAFE_READ_FIRST_TOKENS / _METADATA_ONLY_FIRST_TOKENS /
+# _OPAQUE_WRAPPERS の 3 つ (内部バックログ、0.29.0 で dead symbol
+# _SAFE_READ_CMDS / _SOURCE_CMDS を削除。両方とも定義以外に参照ゼロだった)。
 
 # 0.12.0: read-only first_token allow-list。
 # 「副作用なしの見る・数える系」だけを集める。これらが segment の first_token に

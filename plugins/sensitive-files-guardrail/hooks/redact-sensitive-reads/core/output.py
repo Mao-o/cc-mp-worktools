@@ -14,8 +14,12 @@ systemMessage トップレベルは届かないため使用しない。
 - ``ask_or_allow``: 判定不能だが、autonomous 実行 (auto /
   bypassPermissions) では日常コマンドを止めない方を優先するケース。Bash
   handler の opaque wrapper (``bash -c``, ``eval``, ``python3 -c``, ``sudo``,
-  ``awk``, ``sed`` 等) や hard-stop metachar、shell keyword、abs/rel path exec、
-  residual metachar、shlex/normalize 失敗で使う。default = ask、
+  ``xargs``, ``env`` 等、``handlers.bash.constants._OPAQUE_WRAPPERS``) や
+  hard-stop metachar、shell keyword、abs/rel path exec、residual metachar、
+  shlex/normalize 失敗で使う。``awk`` / ``sed`` は 0.17.0 で opaque wrapper
+  から「mutate」カテゴリ (実行不可、``make_deny`` 固定) に移動済み — 本節の
+  旧い列挙が古いバージョンのまま残っていたので更新した (内部バックログ)。
+  default = ask、
   auto/bypass = allow。acceptEdits / dontAsk は明示的に非 lenient
   (ask 維持)。機密確定は使わず ``make_deny`` 固定。
 

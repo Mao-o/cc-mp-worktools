@@ -20,6 +20,32 @@ _MIGRATE_HINT = (
 )
 
 
+# 注記の要否は、verify() が返した文字列に **その service が案内する remediation
+# コマンドの実形** (services/<svc>.py の REMEDIATION_PATTERNS、引数付き) が一致するかで
+# 決める。文言 (「〜を実行してください」等) や語幹 (「firebase use」) で判定すると
+# `brew install gh を実行してください` (インストール案内) や
+# `firebase use がタイムアウトしました` (診断文) まで拾う。検出コマンド (user 入力) を
+# 合成した後の本文にも掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は
+# tests の TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が
+# 付く」ことで機械的に確認する。
+def _guides_remediation(err: str, service) -> bool:
+    patterns = getattr(service, "REMEDIATION_PATTERNS", ())
+    return any(re.search(p, err) for p in patterns)
+
+
+# 案内した remediation コマンド (切替 / ログイン) は案内された形のままなら通る (切替は
+# self-remediation、ログインは readonly。`firebase login && firebase use <x>` のように
+# 案内文が自ら連結している形も通る) が、**元のコマンド (検出コマンド) を同じ Bash に
+# 連結する**と、そちらが切替前の状態で検証されて deny になる (_all_self_remediation は
+# 全セグメントが切替であることを要求する)。案内どおりに打ったのに再び deny される往復を
+# 防ぐため、remediation を案内する deny には必ず添える。service が REMEDIATION_NOTE を
+# 宣言していればそれを優先する (AWS: インライン env は単独実行するものではない)。
+_REMEDIATION_STANDALONE_NOTE = (
+    "※ 案内した切替 / ログインコマンドは案内された形のまま単独で実行してください。"
+    "元のコマンド (検出コマンド) を同じコマンド行に連結すると、そちらが切替前の状態で"
+    "検証されて再び deny されます。切替が完了してから元のコマンドを実行してください。"
+)
+
 def _match_service(candidate: str):
     """候補セグメントにマッチする最初のサービスを返す。"""
     for svc in SERVICES:
@@ -341,6 +367,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         accounts_mtime = 0.0
 
     errors: list[str] = []
+    remediation_notes: list[str] = []  # 出現順・重複なし
     for svc, cands, inline_env, ctx in targets:
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
@@ -389,6 +416,11 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 (time.monotonic() - _verify_start) * 1000, 2
             )
         if err:
+            # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
+            if _guides_remediation(err, svc):
+                note_text = getattr(svc, "REMEDIATION_NOTE", _REMEDIATION_STANDALONE_NOTE)
+                if note_text not in remediation_notes:
+                    remediation_notes.append(note_text)
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
             errors.append(
@@ -407,6 +439,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
         # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
         body = "\n\n".join(dict.fromkeys(errors))
+        for note_text in remediation_notes:
+            body = body + "\n\n" + note_text
         if ancestor_note:
             body = ancestor_note + "\n\n" + body
         if note:

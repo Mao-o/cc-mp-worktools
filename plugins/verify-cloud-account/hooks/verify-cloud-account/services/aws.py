@@ -52,6 +52,24 @@ GLOBAL_FLAGS = frozenset({
 # 「検証は既定 / 実行は other」の false-allow になるため、検証もその profile で行う。
 CONTEXT_OPTIONS = {"--profile": "profile"}
 ACCOUNT_KEY = "aws"
+
+# deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。
+# dispatcher は verify() の返り値にこれが一致するときだけ「単独で実行せよ」の注記を
+# 付ける。コマンド名だけの言及 (「firebase use がタイムアウトしました」等の診断文) や
+# インストール案内・設定ファイルの型不正には一致させない。
+REMEDIATION_PATTERNS = (r"AWS_PROFILE=\S", r"aws sso login\b", r"aws configure\b")
+# AWS の remediation は他 service と形が違う: `AWS_PROFILE=<p>` は元のコマンドの行頭に
+# 付けて初めて意味を持つインライン env で、単独で実行するものではない。汎用の
+# 「案内された形のまま単独で実行」注記は誤誘導になるため、AWS 専用の文面を宣言する
+# (dispatcher は REMEDIATION_NOTE があればそれを使う)。
+# 文面に個別コマンド名 (aws configure 等) を書かない: 案内本文が状況に応じて出し分ける
+# (不一致時は configure を案内しない) ため、注記側で固定すると案内と食い違う。
+REMEDIATION_NOTE = (
+    "※ AWS_PROFILE=<profile> は元のコマンドの行頭に付けて実行してください (単独では"
+    "意味がありません)。上で案内したその他のコマンドは単独で実行し、完了してから"
+    "元のコマンドを実行してください (元のコマンドと同じコマンド行に連結すると、そちらが"
+    "切替前の状態で検証されて再び deny されます)。"
+)
 SETUP_HINT = (
     'AWS 最小例: {"aws": "123456789012"}。'
     "aws sts get-caller-identity --query Account で現在値を確認可"

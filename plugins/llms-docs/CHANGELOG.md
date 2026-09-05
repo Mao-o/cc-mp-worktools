@@ -2,6 +2,7 @@
 
 All notable changes to this plugin will be documented here.
 
+<<<<<<< HEAD
 ## [0.23.0] - 2026-09-05
 
 ### 検索結果の `Section:` 行に `URL#anchor` を付与 (claude-docs / firebase)
@@ -118,6 +119,32 @@ README にクラス単位・メソッド単位で 1 件だけ指定する実行�
   (マージ前レビューの指摘)
 - 参照形式リンク (`[text][ref]` / `[text][]`) と脚注マーカー (`[^1]`) も slug 前に正規化する。
   正規化する記法の一覧と「それ以外は best-effort」を各 SKILL.md に明記 (マージ前レビューの指摘)
+=======
+## [0.22.2] - 2026-09-05
+
+### platform source の検索停止を修正 — 上流 llms-full.txt の YAML frontmatter 区切りに追従 (2wd.30)
+
+2026-08 以降 platform.claude.com の llms-full.txt は各ページが `# Title` + `URL:` ではなく
+YAML frontmatter (`---` / `title:` / `url:` / `description:` / `---`) で始まり、本文に H1 を
+持たない。H1 区切りの `split_documents` はこれを ~300 個の URL 無し断片に裂いていたため
+index↔full-text の join rate が 0% (0/699) になり、`search --source platform` と
+`--source both` が exit 2 で常に失敗していた (`search-content` / `sections` は動くが
+`sections` は URL 無し・見出し 0 件の断片を返す状態)。
+
+- `split_documents` に frontmatter 区切りの splitter を追加し、H1 splitter と両方走らせて
+  **source URL を持つページが多い方を採用** する自動判定にした (同数なら従来の H1)。
+  source 名でのハードコードではなく joinable 件数で選ぶため、H1 コーパス内の frontmatter
+  例示や、frontmatter コーパス内の未フェンス `# comment` (H1 に見える) に引きずられない
+- frontmatter 区切りでは、上流がページ間に挟むナビ用の見出し (`## Messages` /
+  `### First steps` 等、本文を持たない末尾見出し) を前ページの body から取り除く
+  (56 ページで `sections` に偽の見出しが出ていた)
+- DoD (旧新コーパス diff): 同一 live snapshot (2026-09-05 取得) を旧版と修正版に流し、
+  code source は doc 一覧・`fetch-index` / `search` / `search-content` / `sections` /
+  `content` の出力が完全一致、platform source は 699/699 join (0% → 100%) で全コマンド
+  exit 0 を確認
+- 回帰テスト 8 件追加 (splitter 単体 6 + platform fixture の CLI 2)。213 tests, all green
+- SKILL.md の platform 規模表記を実測値 (~699p / 40MB) に更新
+>>>>>>> origin/main
 
 ## [0.22.1] - 2026-08-28
 

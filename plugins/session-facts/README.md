@@ -148,18 +148,31 @@ detector が同じ repo にヒットしてよい)。
 | `python_stack.py` | `python`, `uv`, `poetry`, `fastapi`, `django`, `flask`, `pytest` | `pyproject.toml` の有無 (無ければ `.py` ファイル比率で代替判定)、`uv.lock`/`uv.toml`/`poetry.lock`、pyproject 内の framework 名 |
 | `testing.py` | `zod`, `vitest`, `jest`, `playwright`, `cypress`, `monorepo` | 各種依存 / config file、`pnpm-workspace.yaml`・`turbo.json` |
 | `go_stack.py` | `go` | `go.mod` |
+| `swift_stack.py` | `swift` | `Package.swift`、または `*.xcodeproj`/`*.xcworkspace` + tracked な `.swift` ファイルが 1 件以上 (Package.swift の無い Xcode-only project。`.swift` が無い Objective-C 専用 project は Xcode bundle があっても `swift` にならない) |
 | `java_stack.py` | `java`, `gradle`, `maven` | `gradlew`/`build.gradle(.kts)`、`pom.xml` |
+| `scala_stack.py` | `scala` | `build.sbt` |
 | `rust_stack.py` | `rust` | `Cargo.toml` |
+| `elixir_stack.py` | `elixir` | `mix.exs` |
 | `ruby_stack.py` | `ruby` | `Gemfile` |
+| `dotnet_stack.py` | `dotnet` | ルート直下の `*.csproj`/`*.fsproj`/`*.vbproj`、または `*.sln`/`*.slnx`（solution のみの root は本文に managed project 参照 `*.csproj`/`*.fsproj`/`*.vbproj` があるときだけ dotnet。`*.vcxproj` のみの C++ 専用 solution は対象外） |
 | `taskrunner.py` | `makefile`, `justfile`, `taskfile`, `nx` | `Makefile`、`Justfile`/`justfile`、`Taskfile.y(a)ml`、`nx.json` |
 | `flutter.py` | `flutter`, `dart` | `pubspec.yaml` (`sdk: flutter` または `flutter:` セクション。それ以外の pubspec は `dart` のみ) |
 | `php_stack.py` | `php` | `composer.json` |
+| `cmake_stack.py` | `cmake` | `CMakeLists.txt` (パッケージマネージャ扱いはせず Likely Commands への提案も無し。ビルドディレクトリ/generator の慣習が定まらないため) |
 | `docker.py` | `docker` | `Dockerfile` / `docker-compose.y(a)ml` / `compose.y(a)ml` |
 
 依存の中身 (バージョン付き一覧) は上記のスタックタグとは別に `major_dependencies` /
 `## Repo-Specific Notes` 側で収集する。Python は `pyproject.toml` /
 `requirements*.txt` / `Pipfile` / `setup.cfg` の主要依存を横断的に見る。Makefile の
 conventional target (`make test` 等) は `## Likely Commands` へ反映される。
+`scala`/`elixir`/`swift`/`dotnet` の Likely Commands (`sbt test` 等) は他スタック
+と異なり検出された `ctx.stack` を根拠にする (repo 直下の primary package manager
+が別スタック、例えば `package-lock.json` と `App.sln` の同居で npm になっていても
+`dotnet test` は出る)。ただし `swift` はその中でも例外で、`ctx.stack` に `swift`
+があるだけでは `swift build`/`swift test` を出さない -- `Package.swift` が実在する
+ときだけ出す。`*.xcodeproj`/`*.xcworkspace` のみの Xcode-only project (SwiftPM の
+package manifest が無い) はこの条件を満たさないため、Likely Commands に何も足さ
+ない (`xcodebuild` は `-scheme` の明示指定が要り、安全に推定できないため)。
 
 ### cwd != repo_root のとき (monorepo / サブプロジェクト構成)
 
@@ -204,7 +217,7 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | オプション | デフォルト | 内容 |
 |---|---|---|
 | `--root` | `Path.cwd()` | 解析対象のリポジトリ内パス (git root 自動解決) |
-| `--format` | `markdown` | `markdown` / `json` / `human` |
+| `--format` | `markdown` | `markdown` のみ (唯一の受理値。機械可読な出力が要る場合は `--emit subagent-json` を使う) |
 | `--tree-depth` | (auto) | 固定深さを強制する override。未指定なら動的に自動選択 |
 | `--min-tree-depth` | 1 | 動的選択の下限 |
 | `--max-tree-depth` | 5 | 動的選択の上限 |

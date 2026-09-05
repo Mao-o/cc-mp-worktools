@@ -58,6 +58,12 @@ READONLY = [
 # `gh auth refresh --scopes ...` 成功後に古い成功 cache が TTL 分残ってしまう。
 STATE_CHANGING = [r"^gh\s+auth\s+(switch|login|logout|refresh)\b"]
 ACCOUNT_KEY = "github"
+
+# deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。
+# dispatcher は verify() の返り値にこれが一致するときだけ「単独で実行せよ」の注記を
+# 付ける。コマンド名だけの言及 (「firebase use がタイムアウトしました」等の診断文) や
+# インストール案内・設定ファイルの型不正には一致させない。
+REMEDIATION_PATTERNS = (r"gh auth switch\s+--", r"gh auth login\b")
 SETUP_HINT = (
     'GitHub 最小例: {"github": "YOUR_USERNAME"}。'
     "gh auth status で現在値を確認可。"
