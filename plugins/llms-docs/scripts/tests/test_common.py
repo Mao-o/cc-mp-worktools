@@ -481,6 +481,29 @@ class HeadingAnchorSlugTest(unittest.TestCase):
         self.assertEqual(_common.heading_anchor_slug("???"), "")
 
 
+class HeadingAnchorSlugMarkupTest(unittest.TestCase):
+    """見出しに inline Markdown が含まれるとき、レンダリング後のテキストから slug を作る
+    (マージ前レビューの指摘: link 先 URL が slug に混入していた)。"""
+
+    def test_link_destination_is_dropped(self):
+        self.assertEqual(heading_anchor_slug("[Hooks](https://example.com/hooks)"), "hooks")
+        self.assertEqual(
+            heading_anchor_slug("See [the guide](https://x.y/z) now", style="devsite"),
+            "see_the_guide_now",
+        )
+
+    def test_image_alt_is_kept(self):
+        self.assertEqual(heading_anchor_slug("![Logo](img/logo.png) Setup"), "logo-setup")
+
+    def test_html_tags_and_entities(self):
+        self.assertEqual(heading_anchor_slug("Tom &amp; Jerry <sup>beta</sup>"), "tom-jerry-beta")
+
+    def test_emphasis_and_code_markers_are_removed_content_kept(self):
+        self.assertEqual(heading_anchor_slug("Using `query()` and **ClaudeSDKClient**"),
+                         "using-query-and-claudesdkclient")
+        self.assertEqual(heading_anchor_slug("snake_case_name stays"), "snake_case_name-stays")
+
+
 class HeadingAnchorSlugDevsiteStyleTest(unittest.TestCase):
     """firebase.google.com is Google DevSite, not GitHub/Mintlify — DevSite
     joins heading-id words with "_", not "-". Live-verified on

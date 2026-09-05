@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import html
 import http.client
 import json
 import os
@@ -955,6 +956,25 @@ def format_heading_path_for_display(heading_path: str) -> str:
     return heading_path
 
 
+def _strip_heading_markup(title: str) -> str:
+    """Reduce a raw Markdown heading to its rendered text before slugging.
+
+    Both GitHub and DevSite derive the heading id from the *rendered* text,
+    so inline markup must go first: image alt / link text replace the whole
+    ``![alt](src)`` / ``[text](dest)`` construct (otherwise the URL leaks
+    into the slug as ``hookshttpsexamplecomhooks``), HTML tags are dropped,
+    entities are decoded (``&amp;`` -> ``&``, which the slug filter then
+    removes like any other symbol), and emphasis / code markers are removed
+    while their content is kept. Merge-review finding.
+    """
+    s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", title)   # image -> alt
+    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)        # link -> text
+    s = re.sub(r"<[^>]+>", "", s)                          # html tags
+    s = html.unescape(s)
+    s = re.sub(r"[`*_~]+", lambda m: "" if m.group(0) != "_" else "_", s)  # emphasis / code markers
+    return s.strip()
+
+
 def heading_anchor_slug(title: str, style: str = "github") -> str:
     """Best-effort anchor slug for one heading title.
 
@@ -988,7 +1008,8 @@ def heading_anchor_slug(title: str, style: str = "github") -> str:
     Returns ``""`` if *title* normalizes to nothing (e.g. an all-symbol
     heading) — callers should treat that as "no anchor available".
     """
-    s = re.sub(r"[^\w\s-]", "", title.strip().lower())
+    s = _strip_heading_markup(title).lower()
+    s = re.sub(r"[^\w\s-]", "", s)
     if style == "devsite":
         return re.sub(r"\s+", "_", s).strip("_")
     return re.sub(r"\s+", "-", s).strip("-")

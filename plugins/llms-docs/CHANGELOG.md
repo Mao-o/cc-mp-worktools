@@ -112,6 +112,10 @@ README にクラス単位・メソッド単位で 1 件だけ指定する実行�
 - `search` サブコマンドの Section 行 anchor は、index の raw URL (`.md` 付き fetch 形) ではなく
   `Source:` 行と同じ正規形 (`normalize_doc_url`) に付ける。raw 形に `#fragment` を付けても
   ページ上で解決しないため (マージ前レビューの指摘)。表示用の `URL:` 行は従来どおり
+- anchor の slug は見出しの **レンダリング後テキスト** から作る: `[text](url)` は text、
+  `![alt](src)` は alt に置き換え、HTML タグ除去・実体参照のデコード・強調/コード記号の
+  除去を先に行う。生の Markdown をそのまま slug 化すると link 先 URL が混入していた
+  (マージ前レビューの指摘)
 
 ## [0.22.1] - 2026-08-28
 
