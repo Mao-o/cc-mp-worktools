@@ -1227,9 +1227,25 @@ _EDIT_OVERWRITE_FORMAT_CLAUSE_OTHER = (
 # .envrc (direnv) は dotenv-cli merge / .env.example の対象ではない (直接 shell
 # script、テンプレート慣習も .envrc.example) ため専用の clause を持つ
 # (0.29.0、engine.is_envrc_basename で判定。内部バックログ)。
+#
+# マージ前レビューの指摘 (P2): 初版は ".envrc は direnv の shell script です" の
+# 説明文を毎回埋め込んでいたため、この 3 clause (本定数 /
+# ``_EDIT_SUGGESTION_ALT_NEW_ENVRC`` / ``_EDIT_SUGGESTION_ALT_DEFAULT_ENVRC``)
+# が既定文言 (.env 側の同役割の定数) より 36〜46 byte 長くなっていた。
+# ``edit_deny`` は tail (この clause を含む) を先に組んでから残りを minimal
+# info (上書き対象の既存キー一覧) の予算に回すため、固定文言が長いぶん同じ
+# 条件でも .envrc の方が表示される鍵行が少なくなる回帰があった
+# (レビュー指摘時の実測: n=15 で 13→11 行、n=30 で 10→7 行。本 fix 時の手元
+# 再現 (鍵名 13 文字・値 20 文字の同一パディング) では n=15 で 15→13 行、
+# n=30 で 10→8 行 — パディング差で絶対数は変わるが「.envrc の方が少ない」
+# 傾向は同じ)。説明文を削り `.envrc.example` を直接案内する形にして、
+# 既定文言比 +15 byte 以内に収めた (``_EDIT_SUGGESTION_ALT_UPDATE_ENVRC`` が
+# 既にこの形 — ファイル名だけ差し替えている — なので同じパターンに揃えた)。
+# ``tests/test_messages.py::TestEnvrcClauseByteBudget`` /
+# ``TestEnvrcOverwriteKeyLineParity`` が回帰を固定する。
 _EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC = (
-    "既存値を保ったまま項目を足すなら、.envrc は direnv の shell script なので "
-    "`.envrc.example` を用意し、値は direnv 側で与えてください。"
+    "既存値を保ったまま項目を足すなら、`.envrc.example` を用意し、"
+    "値は direnv 側で与えてください。"
 )
 
 # ``suggestion_alt:`` (new_keys があるときだけ出る) の kind 別文面。
@@ -1237,19 +1253,21 @@ _EDIT_SUGGESTION_ALT_NEW = (
     "同じキー名で `.env.example` を作成し、値は空にしてください。"
     "実値は手動入力か 1Password CLI 等のシークレット管理ツール経由で設定します。"
 )
+# .envrc 版。説明文を削り既定文言比 +15 byte 以内に収めた経緯は
+# ``_EDIT_OVERWRITE_FORMAT_CLAUSE_ENVRC`` 直前のコメント参照。
 _EDIT_SUGGESTION_ALT_NEW_ENVRC = (
-    ".envrc は direnv の shell script です。同じ変数名で `.envrc.example` を"
-    "作成し、値は空にしてください。実値は direnv 側や 1Password CLI 等の"
-    "シークレット管理ツール経由で設定します。"
+    "同じ変数名で `.envrc.example` を作成し、値は空にしてください。"
+    "実値は direnv 側や 1Password CLI 等のシークレット管理ツール経由で"
+    "設定します。"
 )
 _EDIT_SUGGESTION_ALT_DEFAULT = (
     "追加予定のキー名を `.env.example` に追記すると、"
     "差分把握がしやすくなります (値は後で個別設定)。"
 )
+# .envrc 版。同上 (説明文を削り既定文言比 +15 byte 以内に収めた)。
 _EDIT_SUGGESTION_ALT_DEFAULT_ENVRC = (
-    ".envrc は direnv の shell script です。追加予定の変数名を "
-    "`.envrc.example` に追記すると、差分把握がしやすくなります "
-    "(値は後で個別設定)。"
+    "追加予定の変数名を `.envrc.example` に追記すると、"
+    "差分把握がしやすくなります (値は後で個別設定)。"
 )
 # overwrite かつ new_keys の全件が既存キー集合に含まれる (= 純粋な値の更新で
 # 新規追加が無い) ときの suggestion_alt (0.26.0)。

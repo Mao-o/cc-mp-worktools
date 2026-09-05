@@ -22,10 +22,11 @@ commit 52113a1 で完了)。
 
 ## 0.29.0
 
-内部バックログの精査で発見した課題 6 件を修正 (テスト整備 2 件・保守性 2 件・
-文言修正 2 件)。**判定境界 (deny / allow / ask / block するか) の変化:
-なし** (助言文言の追加・テスト追加・dead code 削除のみ)。テスト件数:
-redact 1219 → **1237**、check 133 → **135**。
+内部バックログの精査で発見した課題 6 件 + マージ前レビューの指摘 2 件を修正
+(テスト整備 2 件・保守性 2 件・文言修正 2 件・マージ前レビュー対応 2 件)。
+**判定境界 (deny / allow / ask / block するか) の変化: なし** (助言文言の
+追加・修正・テスト追加・dead code 削除のみ)。テスト件数:
+redact 1219 → **1239**、check 133 → **135**。
 
 ### テスト整備
 
@@ -93,6 +94,30 @@ redact 1219 → **1237**、check 133 → **135**。
    `claude plugin validate` の「warning 0」記述に、plugin root 直下に
    `CLAUDE.local.md` を置いたローカル環境限定の warning (cc-marketplaces 全体の
    規約でありこの plugin 固有ではない) の注記を追加した。
+
+### マージ前レビュー対応
+
+7. **上記 4 (`.envrc` 向け助言) の隠れた回帰を修正**。新設した `.envrc` 専用の
+   3 clause (overwrite の format 助言 / 新規作成時の代替案 / 更新でない追加時の
+   代替案) が、いずれも「`.envrc` は direnv の shell script です」という説明文
+   を毎回埋め込んでいたため既定文言 (`.env` 側の同役割の定数) より 36〜46 byte
+   長かった。`edit_deny` は固定文言 (`suggestion` / `suggestion_alt`) を先に
+   確保してから残り byte を minimal info (上書き対象の既存キー一覧) に回す
+   設計のため、同一条件でも `.envrc` の方が表示される鍵行が `.env` より少なく
+   なる回帰があった (マージ前レビューでの実測: n=15 で 13→11 行、n=30 で
+   10→7 行。本 fix 時に手元で再現した条件 (鍵名 13 文字・値 20 文字の同一
+   パディング) では n=15 で 15→13 行、n=30 で 10→8 行 — パディング差で絶対数
+   は変わるが「.envrc の方が少ない」傾向は同一)。説明文を削り
+   `.envrc.example` を直接案内する形にして、既に同じパターンで実装済みだった
+   `_EDIT_SUGGESTION_ALT_UPDATE_ENVRC` (既定文言比 +2 byte) と同水準
+   (既定文言比 +15 byte 以内) に揃えた。回帰は
+   `tests/test_messages.py::TestEnvrcClauseByteBudget` (文言の byte 差の固定)
+   と `TestEnvrcOverwriteKeyLineParity` (同一鍵数・同一パディングでの表示行数
+   一致、修正前に落ちることを確認済み) で固定した。
+8. **`redaction/engine.py` の `is_envrc_basename` の冗長な条件分岐を削除**。
+   `lower == ".envrc" or lower.endswith(".envrc")` は前半が後半に完全に
+   包含されるため `lower.endswith(".envrc")` の 1 条件に一本化した
+   (判定結果は不変、既存テストで確認済み)。
 
 ## 0.28.0
 

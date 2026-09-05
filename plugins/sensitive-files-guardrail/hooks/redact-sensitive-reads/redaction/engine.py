@@ -72,8 +72,10 @@ def is_envrc_basename(basename: str) -> bool:
     ので、判定境界 (``_detect_format`` の戻り値) には触れず補助関数として
     独立させる。
     """
+    # マージ前レビューの指摘 (P3): 前半の `lower == ".envrc"` は
+    # `lower.endswith(".envrc")` に包含される冗長な分岐だったため削除。
     lower = basename.lower()
-    return lower == ".envrc" or lower.endswith(".envrc")
+    return lower.endswith(".envrc")
 
 
 def build_reason(
