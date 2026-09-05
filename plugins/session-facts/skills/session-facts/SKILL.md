@@ -53,7 +53,7 @@ skill ディレクトリから見た相対パス `../../hooks/session-facts` も
 ## 主要オプション
 
 - `--root <path>`: 解析対象 path。git root は自動解決される。
-- `--format markdown`: 通常形式。
+- `--format markdown`: 通常形式 (`markdown` が唯一の受理値。機械可読な出力が要る場合は `--emit subagent-json` を使う)。
 - `--include-domain-types`: TypeScript / Python などのドメイン型検出を含める。
 - `--include-hub-files`: 他の tracked file から最も import/require されているファイルを被参照数順にランキング表示する (import 文の正規表現スキャン、AST不使用)。リファクタ前に「どのファイルが中心的か」を把握したいときに有効。`--max-hub-files <n>` で件数上限を調整。
 - `--no-recent-commits`: recent commits を省略する。

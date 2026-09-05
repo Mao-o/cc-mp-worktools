@@ -30,6 +30,46 @@ CODE_EXTENSIONS = {
     ".py", ".go", ".rs", ".rb", ".php", ".java", ".kt",
     ".swift", ".cs", ".scala", ".lua", ".sh", ".bash",
     ".dart",
+    # detectors/elixir_stack.py reports "stack: elixir" off mix.exs alone;
+    # without these, a conventional Mix project's own lib/*.ex sources and
+    # test/*_test.exs tests are silently dropped from Test Snapshot and
+    # Service Entry Points (merge-review finding).
+    ".ex", ".exs",
+    # detectors/cmake_stack.py reports "stack: cmake" off CMakeLists.txt
+    # alone -- CMakeLists.txt itself is a build script, not a source file,
+    # so the actual sources a CMake project's Test Snapshot/Service Entry
+    # Points need to see are the C/C++ files it builds. Same gap as
+    # Elixir's, one level removed. .cxx/.hxx/.hh are also conventional
+    # C++ suffixes (merge-review finding: the initial set only covered
+    # .cc/.cpp/.h/.hpp and silently dropped these).
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx", ".hh",
+    # detectors/dotnet_stack.py now also recognizes *.fsproj/*.vbproj (F#/
+    # VB.NET), not just *.csproj/*.sln -- without these two, an F#/VB.NET
+    # repo's own .fs/.fsx/.vb sources were invisible to Test Snapshot/
+    # Service Entry Points even after "stack: dotnet" was reported
+    # (merge-review finding, same shape as Elixir's/CMake's above).
+    ".fs", ".fsx", ".vb",
+    # .fsi is F#'s signature-file suffix (a public-declaration counterpart
+    # to .fs, conventionally paired 1:1 with a same-named .fs implementation
+    # file) -- omitting it from the set above undercounts an F# project's
+    # own sources and can hide public service declarations that only live
+    # in the .fsi file (merge-review finding, round 2).
+    ".fsi",
+    # .sc is Scala's script/worksheet suffix (`scala script.sc`, Ammonite,
+    # scala-cli scripts) -- .scala alone already covers ordinary sources,
+    # but a project mixing in .sc scripts had them silently dropped from
+    # Test Snapshot/Service Entry Points the same way Elixir's/CMake's/
+    # dotnet's gaps above did (merge-review round-5 stack-extension
+    # inventory). Registered here only: detectors/scala_stack.py and
+    # core/pm.py are deliberately NOT extended to recognize the Mill build
+    # tool's own build.sc as a second "scala" stack trigger, since
+    # collectors/scripts.py's existing `if "scala" in stack` branch
+    # unconditionally suggests `sbt test`/`sbt compile` -- wiring build.sc
+    # into the same stack tag would make it suggest sbt commands for a
+    # Mill-only project, which is a wrong
+    # command, not merely a missing one. This extension-only registration
+    # carries no such risk (it only affects file counting).
+    ".sc",
 }
 
 TEST_PATH_MARKERS = {
@@ -188,16 +228,31 @@ MAX_SCRIPT_COMMAND_CHARS = 120
 # marker *filename* fundamentally cannot express); they are kept for the
 # same false-negative-avoidance reason, not removed for consistency.
 #
-# Tier 2: common project roots for stacks this plugin has no detector for
-# at all yet (C/C++, Swift, Elixir, Scala, .NET, Terraform). Still worth a
-# walk: the generic collectors (Structure, Test Snapshot, Scripts, ...)
-# produce useful output even without a "stack:" line naming the language.
-# Three of these are glob patterns (matched via has_project_markers()'s
-# Path.glob() branch, not a literal exists() check): *.csproj/*.tf since the
-# manifest filename is project-specific, not fixed, and requirements*.txt to
-# mirror collectors/dependencies.py's _tracked_requirements(), which already
+# Tier 2: common project roots. Most of these now have a matching detector
+# (CMakeLists.txt/cmake_stack.py, Package.swift or *.xcodeproj/*.xcworkspace
+# /swift_stack.py, mix.exs/elixir_stack.py, build.sbt/scala_stack.py,
+# *.csproj+*.sln+*.slnx/dotnet_stack.py) and so also satisfy the Tier 1
+# rationale above; they stay listed here rather than being moved, since this
+# tuple is a flat list with no enforced Tier 1/Tier 2 split. Cargo.lock/Gemfile.lock
+# are lockfile-only fallbacks for rust_stack.py/ruby_stack.py (which key off
+# Cargo.toml/Gemfile), not markers for a still-undetected stack. Terraform
+# (*.tf) is the one entry left with no detector at all in this plugin. Still
+# worth a walk either way: the generic collectors (Structure, Test
+# Snapshot, Scripts, ...) produce useful output even without a "stack:"
+# line naming the language.
+# Some of these are glob patterns (matched via has_project_markers()'s
+# Path.glob() branch, not a literal exists() check): *.csproj/*.fsproj/
+# *.vbproj/*.sln/*.slnx/*.tf/*.xcodeproj/*.xcworkspace since the manifest
+# filename is project-specific, not fixed, and requirements*.txt to mirror
+# collectors/dependencies.py's _tracked_requirements(), which already
 # recognises any requirements-prefixed/.txt-suffixed basename (e.g.
 # requirements-dev.txt) -- not just the exact "requirements.txt" name.
+# *.xcodeproj/*.xcworkspace are directories (Xcode's bundle format), not
+# files, but scan_project_markers()'s glob branch matches on entry name only
+# (no file/dir type filter), so no special-casing is needed here for that
+# (merge-review finding: an Xcode-only Swift app with no Package.swift had
+# no matching marker at all and was rejected by this gate on a non-git
+# root).
 # `$HOME` 直下ではユーザー全体の既定を意味し、そのディレクトリが
 # プロジェクトであることを示さないマーカー (mise config と同じ扱い)。
 GLOBAL_ONLY_AT_HOME_MARKERS = (
@@ -301,7 +356,17 @@ PROJECT_MARKERS = (
     "Cargo.lock",
     "Gemfile.lock",
     "*.csproj",
+    "*.fsproj",
+    "*.vbproj",
+    "*.sln",
+    # .slnx is the newer XML solution format (.NET SDK 9+/VS 17.10+),
+    # read the same way as *.sln by dotnet/msbuild/VS (merge-review
+    # finding, round 5). See detectors/dotnet_stack.py/core/pm.py, which
+    # gained the matching *.slnx check alongside this marker.
+    "*.slnx",
     "*.tf",
+    "*.xcodeproj",
+    "*.xcworkspace",
 )
 
 # hub_files collector (core/imports.py + collectors/hub_files.py): scanning

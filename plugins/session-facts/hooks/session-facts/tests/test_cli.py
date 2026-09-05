@@ -663,6 +663,20 @@ class ProjectMarkerGateTest(unittest.TestCase):
             self.assertNotIn("no project markers found", out)
             self.assertIn("## Project Facts", out)
 
+    def test_non_git_with_fsproj_marker_gets_full_analysis(self):
+        # merge-review finding (round 3): a non-git, solutionless F# repo
+        # (no *.sln, just an *.fsproj) used to die at the marker gate
+        # before *.fsproj was added to PROJECT_MARKERS -- this is the
+        # end-to-end path the finding named explicitly ("outside Git it
+        # can also be rejected by the marker gate"), not just the
+        # detector-level check covered elsewhere.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App.fsproj").write_text('<Project Sdk="Microsoft.NET.Sdk"></Project>\n')
+            out = _run_cli(["--root", str(root)])
+            self.assertNotIn("no project markers found", out)
+            self.assertIn("## Project Facts", out)
+
     def test_force_walk_restores_full_analysis_without_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -765,6 +779,30 @@ class MinimalHeaderOutputBudgetTest(unittest.TestCase):
             self.assertIn("--force-walk", out)
 
 
+class XcodeOnlyNonGitStructureTest(unittest.TestCase):
+    """merge-review finding: adding *.xcodeproj/*.xcworkspace to
+    PROJECT_MARKERS lets a non-git Xcode-only root pass the marker gate and
+    reach walk_files() directly (a git root's `git ls-files` already keeps
+    most of this out via .gitignore). Without core/fs.py::walk_files()'s
+    matching suffix-based skip, the bundle's own metadata directories would
+    show up in ## Structure alongside -- and crowd out -- the app's actual
+    source tree."""
+
+    def test_xcodeproj_internals_do_not_appear_in_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App").mkdir()
+            (root / "App" / "App.swift").write_text("struct App {}\n")
+            bundle = root / "App.xcodeproj"
+            (bundle / "project.xcworkspace" / "xcshareddata").mkdir(parents=True)
+            (bundle / "project.pbxproj").write_text("// pbxproj\n")
+            out = _run_cli(["--root", str(root)])
+            self.assertIn("stack: swift", out)
+            self.assertIn("App/", out)
+            self.assertNotIn("xcodeproj", out)
+            self.assertNotIn("xcworkspace", out)
+
+
 class ProjectMarkerCoverageTest(unittest.TestCase):
     """internal backlog P2-1: PROJECT_MARKERS used to list only ~27 files,
     missing markers for stacks this plugin's own detectors/collectors
@@ -796,7 +834,12 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
         ("cypress.config.ts", False),
         ("firebase.json", False),
         (".firebaserc", False),
-        # Tier 2: common project roots with no detector in this plugin yet.
+        # Tier 2: common project roots. CMakeLists.txt/Package.swift/
+        # mix.exs/build.sbt/*.csproj/*.sln now also have a matching detector
+        # (cmake_stack/swift_stack/elixir_stack/scala_stack/dotnet_stack);
+        # Cargo.lock/Gemfile.lock are lockfile-only fallbacks for
+        # rust_stack.py/ruby_stack.py, and *.tf (Terraform) is the one
+        # entry left with no detector at all in this plugin.
         ("CMakeLists.txt", False),
         ("Package.swift", False),
         ("mix.exs", False),
@@ -804,7 +847,18 @@ class ProjectMarkerCoverageTest(unittest.TestCase):
         ("Cargo.lock", False),
         ("Gemfile.lock", False),
         ("App.csproj", False),  # *.csproj glob marker
+        ("App.sln", False),  # *.sln glob marker
+        ("App.slnx", False),  # *.slnx glob marker (merge-review, round 5)
         ("main.tf", False),  # *.tf glob marker
+        # *.xcodeproj/*.xcworkspace glob markers: Xcode's bundle format is
+        # a directory, not a file -- unlike every other glob marker fixture
+        # above, so `is_dir=True` here also exercises
+        # scan_project_markers()'s glob branch against a directory name
+        # (merge-review finding: an Xcode-only Swift app with no
+        # Package.swift had no matching marker and was rejected outright by
+        # this gate on a non-git root).
+        ("App.xcodeproj", True),
+        ("App.xcworkspace", True),
     ]
 
     def test_each_new_marker_alone_avoids_the_minimal_header(self):
@@ -870,6 +924,34 @@ class MaxOutputCharsValidationTest(unittest.TestCase):
     def test_zero_budget_is_still_accepted(self):
         args = parse_args(["--root", ".", "--max-output-chars", "0"])
         self.assertEqual(args.max_output_chars, 0)
+
+
+class FormatChoicesTest(unittest.TestCase):
+    """internal backlog: --format は json/human が argparse の choices に
+    定義されているだけで、値を参照する dispatch 経路が無く出力は常に
+    markdown 固定だった (dead option)。json/human を choices から外し
+    markdown のみ受理するよう縮小した。既存の hooks.json / codex-hooks.json /
+    SKILL.md は元々 `--format markdown` のみを使っているため、この変更で
+    壊れる呼び出しは無い。
+    """
+
+    def test_format_markdown_is_still_accepted(self):
+        args = parse_args(["--root", ".", "--format", "markdown"])
+        self.assertEqual(args.format, "markdown")
+
+    def test_format_omitted_defaults_to_markdown(self):
+        args = parse_args(["--root", "."])
+        self.assertEqual(args.format, "markdown")
+
+    def test_format_json_is_rejected_by_argparse(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(["--root", ".", "--format", "json"])
+
+    def test_format_human_is_rejected_by_argparse(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(["--root", ".", "--format", "human"])
 
 
 class ExceptionFallbackBudgetTest(unittest.TestCase):

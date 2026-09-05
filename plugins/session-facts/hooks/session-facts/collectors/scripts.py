@@ -116,6 +116,15 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     pm = ctx.results.get("package_manager")
     stack = set(ctx.stack)
     commands: List[str] = []
+    # Reserved for the scala/elixir/swift/dotnet block below: merged in
+    # *ahead* of `commands` (see the final concat before dedup) so these
+    # stack-derived commands cannot be pushed out of the `deduped[:max_items]`
+    # slice by an unrelated, unbounded source further up the list (e.g. 16+
+    # npm scripts when npm is the primary pm alongside a co-detected .NET
+    # solution -- merge-review finding). Empty when none of those four
+    # stacks are present, so repos that don't hit this branch see the exact
+    # same `commands` order/content as before this reservation existed.
+    priority_commands: List[str] = []
 
     # PM-based commands
     prefix = {
@@ -147,6 +156,41 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     elif pm == "composer":
         commands.append("composer install")
 
+    # Stack-based commands for scala/elixir/swift/dotnet: unlike the
+    # pm-exclusive chain above, these are keyed off the *detected stack*
+    # rather than the single "primary" package_manager value core/pm.py
+    # picks. core/pm.py only ever returns one PM, so a root that also has a
+    # higher-priority manifest for another stack (e.g. package-lock.json
+    # next to App.sln) would pick "npm" as pm and silently never reach a
+    # "sbt"/"mix"/"swift"/"dotnet" branch even though the matching stack
+    # detector (ScalaStackDetector/ElixirStackDetector/SwiftStackDetector/
+    # DotnetStackDetector) did fire (merge-review finding). Left as
+    # additive `if` (not `elif`) so multiple co-detected stacks each get
+    # their command; existing stacks above are untouched to avoid changing
+    # their output. Appended to `priority_commands`, not `commands` --
+    # see that list's declaration above for why (second merge-review
+    # finding: these commands must survive truncation even when the
+    # co-detected primary pm alone already fills max_items).
+    if "scala" in stack:
+        priority_commands.extend(["sbt test", "sbt compile"])
+    if "elixir" in stack:
+        priority_commands.append("mix test")
+    # Unlike the other three, "swift" in stack alone is NOT enough: since
+    # detectors/swift_stack.py also reports "swift" for an Xcode-only
+    # project (*.xcodeproj/*.xcworkspace, no Package.swift), these two
+    # SwiftPM commands must additionally require Package.swift itself --
+    # `pm == "swift"` covers the common case cheaply (core/pm.py only ever
+    # sets it off Package.swift), and the direct exists() check covers a
+    # root where Package.swift coexists with a higher-priority manifest
+    # (e.g. package-lock.json) that made some other value the primary pm,
+    # mirroring the dotnet/npm-coexistence handling below (merge-review
+    # finding). Xcode-only projects get no command here: xcodebuild needs
+    # an explicit -scheme this collector cannot safely infer.
+    if "swift" in stack and (pm == "swift" or (ctx.root / "Package.swift").exists()):
+        priority_commands.extend(["swift build", "swift test"])
+    if "dotnet" in stack:
+        priority_commands.append("dotnet test")
+
     # Bare-Python repos (.py-heavy, no PM lockfile/pyproject) get no pytest line
     # from the chain above. Only surface one when a concrete runner (venv/mise)
     # is known, so we never suggest a global ``python`` the repo may not use.
@@ -175,9 +219,15 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
     if "docker" in stack:
         commands.append("docker compose up")
 
+    # priority_commands first: when empty (the common case -- none of
+    # scala/elixir/swift/dotnet detected) this is a no-op concat and the
+    # resulting order/content is identical to `commands` alone, i.e. the
+    # pre-reservation behavior.
+    ordered = priority_commands + commands
+
     deduped: List[str] = []
     seen: Set[str] = set()
-    for cmd in commands:
+    for cmd in ordered:
         if cmd not in seen:
             seen.add(cmd)
             deduped.append(cmd)
