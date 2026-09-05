@@ -30,6 +30,7 @@ import _testutil  # noqa: F401
 
 from core import paths  # noqa: E402
 from scripts import accounts_builder as builder  # noqa: E402
+from services import github  # noqa: E402
 
 
 def _fake_run(stdout: str = "", stderr: str = "", returncode: int = 0):
@@ -853,7 +854,7 @@ class TestValidateEntryShape(unittest.TestCase):
         self.assertIsNotNone(reason)
 
     def test_one_bad_value_among_good_ones_tolerated_when_not_strict(self):
-        """内部バックログ (advisor レビュー): firebase.verify() は
+        """内部バックログ (マージ前レビュー): firebase.verify() は
         `{"default":"proj-dev","old":null}` のような**部分的に不正**な dict
         を、"old" を無視して "default" だけで成立させる (dict 内に使える値が
         1 つでも残っていれば良い)。migrate (strict_keys=False) がこれより
@@ -1334,7 +1335,7 @@ class TestBuilderAcceptedShapesPassVerify(unittest.TestCase):
 
 class TestMigrateKeepNewWithoutLoss(unittest.TestCase):
     """`_migrate_keep_new_without_loss` の direct unit tests (内部バックログ:
-    advisor レビューで検出した multi-host/multi-alias の情報欠落の修正 +
+    マージ前レビューで検出した multi-host/multi-alias の情報欠落の修正 +
     Codex R1 P1: scalar↔dict 比較に host 意味論を持たせた D11)。"""
 
     def setUp(self):
@@ -2388,7 +2389,7 @@ class TestMigrateValueSemantics(BaseBuilder):
         self.assertIn("衝突", err)
 
     def test_multi_host_dict_not_silently_collapsed_into_new_scalar(self):
-        """advisor レビューで検出した最重要の退行: new=scalar "Mao-o" /
+        """マージ前レビューで検出した最重要の退行: new=scalar "Mao-o" /
         old={"github.com":"Mao-o","ghe.example.com":"mao-corp"} (multi-host)
         は、github.com だけが一致しても ghe.example.com の情報を失うため
         conflict のままにする (silent data loss を許さない)。"""
@@ -2453,7 +2454,7 @@ class TestMigrateValueSemantics(BaseBuilder):
         self.assertEqual(data, {"github": {"github.com": "USER"}})
 
     def test_addition_with_one_bad_value_among_good_ones_is_tolerated(self):
-        """内部バックログ (advisor レビュー): firebase.verify() は dict 内に
+        """内部バックログ (マージ前レビュー): firebase.verify() は dict 内に
         使える値 (str かつ非空) が 1 つでも残っていれば動く
         (`{"default":"proj-dev","old":null}` の "old" は黙って無視される)。
         migrate の追加分検証がこれより厳しくなると、verify() が許容する形を
@@ -2670,6 +2671,59 @@ class TestEntriesEqual(unittest.TestCase):
     def test_unequal_otherwise(self):
         self.assertFalse(builder._entries_equal("a", "b"))
         self.assertFalse(builder._entries_equal(None, "a"))
+
+
+class TestEntriesEqualDelegatesToService(unittest.TestCase):
+    """`_entries_equal` は service の `matches()` に委譲する (内部バックログ)。
+
+    show ([match]/[mismatch]) と hook (verify) が別実装で判定していたため、
+    gh が GHE を先に列挙する環境で show=[mismatch] / hook=allow の乖離が
+    出ていた。service 側の 1 実装を両方が使うことで構造的に塞ぐ。
+    """
+
+    def test_github_scalar_uses_github_com_even_if_listed_last(self):
+        current = {"ghe.example.com": "mao-corp", "github.com": "Mao-o"}
+        # service を渡さない汎用近似は「最初の host」を見るので False になる
+        self.assertFalse(builder._entries_equal("Mao-o", current))
+        # service (github) を渡すと verify と同じ規則で True
+        self.assertTrue(builder._entries_equal("Mao-o", current, github))
+
+    def test_github_scalar_does_not_match_ghe_user(self):
+        current = {"ghe.example.com": "mao-corp", "github.com": "Mao-o"}
+        self.assertFalse(builder._entries_equal("mao-corp", current, github))
+
+    def test_show_and_verify_agree(self):
+        """show の判定 (_entries_equal) と hook の判定 (verify) が全ケースで一致。
+
+        「同じ規則を 2 箇所に実装しない」契約そのものを固定する。verify は
+        deny 理由の文字列、show は bool を返すので、`verify() is None` と
+        `_entries_equal() is True` の同値性で突き合わせる。
+        """
+        cases = [
+            ("Mao-o", {"github.com": "Mao-o"}),
+            ("Mao-o", {"ghe.example.com": "mao-corp", "github.com": "Mao-o"}),
+            ("mao-corp", {"ghe.example.com": "mao-corp", "github.com": "Mao-o"}),
+            ("mao-corp", {"ghe.example.com": "mao-corp"}),
+            ("Mao-o", {"ghe.example.com": "mao-corp"}),
+            ({"github.com": "Mao-o"}, {"github.com": "Mao-o", "ghe.x": "c"}),
+            ({"ghe.x": "c"}, {"github.com": "Mao-o", "ghe.x": "c"}),
+            ({"ghe.x": "other"}, {"github.com": "Mao-o", "ghe.x": "c"}),
+            ({"absent.example.com": "u"}, {"github.com": "Mao-o"}),
+            ({}, {"github.com": "Mao-o"}),
+            (12345, {"github.com": "Mao-o"}),
+        ]
+        for expected, active in cases:
+            with self.subTest(expected=expected, active=active):
+                with mock.patch(
+                    "services.github._fetch_active_accounts",
+                    return_value=(dict(active), None),
+                ):
+                    verify_ok = github.verify(expected, "/p") is None
+                self.assertEqual(
+                    builder._entries_equal(expected, active, github),
+                    verify_ok,
+                    "show ([match]) と hook (verify) の判定が食い違っている",
+                )
 
 
 class TestInheritedAncestorFile(BaseBuilder):

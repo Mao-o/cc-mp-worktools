@@ -63,8 +63,40 @@ def discover_all_accounts_files(project_dir: str) -> list[tuple[str, Path]]:
 # 親ディレクトリ遡及の最大階層数。`project_dir` 自身を含めてこの段数まで
 # 探索する。git worktree が `<repo>/.worktrees/<branch>/<subdir>/...` の
 # ように深く配置されていても十分到達できる範囲を取りつつ、上方暴走を
-# 防ぐためのガード値。
+# 防ぐためのガード値。**階層数だけでは上限にならない** (下記の境界も参照)。
 ANCESTOR_SEARCH_MAX_LEVELS = 10
+
+
+def _is_repo_toplevel(directory: Path) -> bool:
+    """`directory` が git repo の toplevel (= `.git` **ディレクトリ**を持つ) か。
+
+    linked worktree / submodule は `.git` が **ファイル** (gitdir ポインタ) に
+    なるため False を返す。worktree から親 repo の設定を継承する運用
+    (`<repo>/.worktrees/<branch>` が cwd) を残すために、ファイル形では遡及を
+    止めず親 repo の toplevel まで上らせる。
+    """
+    try:
+        return (directory / ".git").is_dir()
+    except OSError:
+        return False
+
+
+def _home_dir() -> Path | None:
+    """`$HOME` の絶対パス (取得不能なら None)。"""
+    try:
+        return Path.home().resolve()
+    except (RuntimeError, OSError):
+        return None
+
+
+def _crosses_home(candidate: Path, home: Path | None) -> bool:
+    """`candidate` へ上ると `$HOME` かその上 (`/Users`, `/` 等) に入るなら True。"""
+    if home is None:
+        return False
+    try:
+        return home == candidate or home.is_relative_to(candidate)
+    except (OSError, ValueError):
+        return False
 
 
 def discover_accounts_files_with_ancestors(
@@ -84,8 +116,27 @@ def discover_accounts_files_with_ancestors(
       - cwd 階層に何か 1 つでも見つかれば、そこで採用判定する
         (親階層は見ない、cwd 優先)
       - 同一階層に複数 tier が同居する場合は呼び出し側で fail-closed (D4)
+      - **git repo の toplevel (`.git` ディレクトリを持つ階層) を越えない** —
+        その階層自身は探すが、その親へは上らない
+      - **`$HOME` およびその上 (`/Users`, `/` 等) へは上らない**
       - 何も見つからずに `Path.parent == Path` (ルート) に到達したら諦める
       - `max_levels` で安全側の上限を設ける
+
+    探索開始階層 (`project_dir` 自身) は上の 2 つの境界に関係なく必ず探す
+    (`$HOME` 直下や repo toplevel をプロジェクトにしている場合を落とさない)。
+
+    境界を足した理由 (内部バックログ): 従来は階層数だけが上限だったため、
+    `/Users/<u>/dev/<org>/<repo>` のような配置では 5 階層で `$HOME` に届き、
+    **無関係な `~/.claude/accounts.json` を継承して検証していた**。しかも
+    verify 成功時は継承注釈が出ない (silent) ため気付けない。落とす方向
+    (見つからず deny) は fail-closed なので安全側だが、`$HOME` にグローバル
+    既定を置きたい場合はこの遡及ではなく専用の経路を使うべき、という切り分け。
+
+    linked worktree が repo の**外**に置かれている場合 (`.git` ファイルの
+    gitdir が別の場所を指す形) は、従来も親 repo に届いていない
+    (遡及はファイルシステムの親方向にしか進まないため)。ここでも gitdir は
+    追わない — 新たな探索経路を増やすと「見つかる場所が増える」= allow 側に
+    倒れるため、本件の趣旨 (拾いすぎを止める) と逆方向になる。
 
     Args:
         project_dir: 検索を開始するディレクトリ (絶対パス推奨)。
@@ -101,12 +152,17 @@ def discover_accounts_files_with_ancestors(
         current = Path(project_dir).resolve()
     except OSError:
         return [], None
+    home = _home_dir()
     for _ in range(max_levels):
         found = discover_all_accounts_files(str(current))
         if found:
             return found, current
+        if _is_repo_toplevel(current):
+            break
         parent = current.parent
         if parent == current:
+            break
+        if _crosses_home(parent, home):
             break
         current = parent
     return [], None

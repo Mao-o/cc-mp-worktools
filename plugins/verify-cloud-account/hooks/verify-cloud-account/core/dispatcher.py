@@ -10,14 +10,34 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import cache, cli_options, output, paths
+from core import budget, cache, cli_options, output, paths
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
+_BUILDER_PATH = (
+    "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py"
+)
+
 _MIGRATE_HINT = (
     "旧パスから統合するには builder の migrate サブコマンドを使用してください: "
-    "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py migrate --commit"
+    + _BUILDER_PATH
+    + " migrate --commit"
 )
+
+
+# **キーが未記載の service は allow ではなく deny する** (fail-closed)。「使っている
+# service なのにキーが無い」は「検証しなくてよい」ではなく「期待値を宣言し忘れて
+# いる」状態で、素通しするとこの plugin が防ぐはずの事故 (別アカウントでの write)
+# がそのまま通る。README とこの deny 文面はかつて「未記載のサービスは検証対象外
+# (= allow)」と逆を約束しており、実装 (deny) と食い違っていた (内部バックログ)。
+# 実装側を正として文面を揃え、あわせてキー追加の具体コマンドを載せる。
+#
+# 案内が `init` ではなく `set` なのは、キー未記載 deny が「accounts.local.json は
+# 見つかっている」ときにしか出ないため。そのファイルが親から継承されている場合
+# `init` は「継承中の設定を覆い隠す」として exit 2 で拒否する (builder `_cmd_init`)
+# が、`set` は継承元を直接編集するのでどちらの階層でも通る。
+def _missing_key_hint(account_key: str) -> str:
+    return f"追加: {_BUILDER_PATH} set --service {account_key} --from-cli --commit"
 
 
 # 注記の要否は、verify() が返した文字列に **その service が案内する remediation
@@ -339,7 +359,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         hint_block = "\n".join(h for h in hints if h)
         msg = (
             ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
-            "(使用するサービスのみ記述すれば OK。未記載のサービスは検証対象外)\n"
+            "(使用する service のキーは全て必要です。キーの無い service の"
+            "コマンドも deny されます)\n"
             "初期化: /verify-cloud-account:accounts-init"
         )
         if hint_block:
@@ -373,7 +394,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         if entry is None or entry == "":
             errors.append(
                 f'{accounts_path} に "{svc.ACCOUNT_KEY}" キーがありません。'
-                "対象サービスのアカウントを追加してください。"
+                "期待値が無いと照合できないため deny します。\n"
+                + _missing_key_hint(svc.ACCOUNT_KEY)
             )
             continue
 

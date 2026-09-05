@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+from core import budget
+
 # `\b` だとハイフン付き別コマンドまで gcloud として拾うため、空白または終端が
 # 続く形だけに限定する。
 PATTERNS = [r"^gcloud(?=\s|$)"]
@@ -120,7 +122,7 @@ def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None
             argv,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=budget.call_timeout(10),
             env=env,
         )
     except FileNotFoundError:

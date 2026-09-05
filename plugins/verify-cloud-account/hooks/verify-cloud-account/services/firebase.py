@@ -34,6 +34,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from core import budget
+
 # CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
 # 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
 # - `npx firebase-tools deploy` → wrapper 剥がし後 `firebase-tools deploy`
@@ -127,7 +129,7 @@ def _from_cli(project_dir: str, env=None) -> tuple[str, str | None]:
             ["firebase", "use"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=budget.call_timeout(10),
             env=env,
             cwd=_project_root(project_dir),
         )

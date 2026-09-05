@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from core import budget
+
 # `\b` はハイフンも語境界扱いするため `aws-vault exec prod -- aws s3 rm` のような
 # **別コマンド**まで aws として拾ってしまう (aws-vault は hook の既定 profile で
 # sts を実行するので、未設定なら永久 deny、既定が期待値なら実行 profile が別でも
@@ -107,7 +109,7 @@ def _run_sts_get_caller_identity(env=None, profile=None) -> tuple[str | None, st
             argv,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=budget.call_timeout(15),
             env=env,
         )
     except FileNotFoundError:

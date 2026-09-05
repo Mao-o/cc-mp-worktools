@@ -62,7 +62,7 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 
 ```json
 {
-  "github":   "Mao-o",
+  "github":   "your-github-user",
   "firebase": "my-project-id",
   "aws":      "123456789012",
   "gcloud":   "my-gcp-project",
@@ -70,7 +70,23 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 }
 ```
 
-必要なキーだけ書けばよい。未記載のサービスコマンドは検証対象外 (= allow)。
+**そのプロジェクトで使う service のキーは全て書く必要がある** (fail-closed)。
+キーが無い service のコマンドは「検証対象外 (= allow)」ではなく **deny** される。
+期待値が宣言されていない状態で通すと、この plugin が防ぐはずの「別アカウントでの
+書き込み」をそのまま素通しすることになるため。そのプロジェクトで一度も CLI を
+叩かない service はキーを書かなくてよい (発火しないので deny も起きない)。
+
+キーが無いまま対象コマンドを叩くと、deny 文面にキー追加コマンドが出る:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  set --service github --from-cli --commit
+```
+
+`init` ではなく `set` を案内するのは、accounts.local.json を親から継承している
+階層では `init` が「継承中の設定を覆い隠す」として exit 2 で拒否されるのに対し、
+`set` は継承元を直接編集してどちらの階層でも通るため
+(→ [builder も同じ解決を使う](#builder-も同じ解決を使う))。
 
 ### `.gitignore`
 
@@ -491,6 +507,11 @@ worktree 内に同名ファイルを置く必要は無い。
 - cwd 階層に何かあれば親は見ない (cwd 優先)
 - 同一階層に複数 tier が同居する場合は従来どおり fail-closed deny (D4)
 - 安全側上限として `max_levels=10` (`core/paths.py`)
+- **停止条件 (v0.12.0)**: 次の境界を越えて上らない。境界の階層自身は探索する
+  - **git repo の toplevel** (`.git` **ディレクトリ**を持つ階層)。linked worktree
+    は `.git` が gitdir を書いたファイルなので停止条件にならず、worktree から
+    親 repo の設定を継承する上記の運用はそのまま
+  - **`$HOME` およびその上** (`/Users`, `/` 等)
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -517,11 +538,14 @@ service が一斉に未設定 (deny)** になる。
 
 **書込範囲についての注意**: 解決は最大 10 階層まで親を遡る
 (`ANCESTOR_SEARCH_MAX_LEVELS`)。つまり accounts.local.json を持たないプロジェクトで
-`set` を実行すると、10 階層以内の祖先 (ホームディレクトリを含む) にファイルがあれば
-**そちらが編集対象になる**。これは「hook が読むファイルを編集する」という意図どおりの
-挙動だが、builder の書込範囲は cwd 配下に限られない。対象は出力先頭の `対象:` 行に
-必ず出るので、commit 前に確認すること (この階層専用の設定にしたい場合は `--path`)。
+`set` を実行すると、遡及範囲内の祖先にファイルがあれば **そちらが編集対象になる**。
+これは「hook が読むファイルを編集する」という意図どおりの挙動だが、builder の書込
+範囲は cwd 配下に限られない。対象は出力先頭の `対象:` 行に必ず出るので、commit 前に
+確認すること (この階層専用の設定にしたい場合は `--path`)。
 `.gitignore` への追記も同じ階層に対して行われる。
+v0.12.0 以降は遡及自体が git repo の toplevel と `$HOME` で止まるため、
+git repo 内で作業している限り **repo の外が編集対象になることはない**
+(repo 外で作業する場合も `$HOME` 自身とその上には出ない)。
 
 ## パフォーマンス (短期キャッシュ)
 

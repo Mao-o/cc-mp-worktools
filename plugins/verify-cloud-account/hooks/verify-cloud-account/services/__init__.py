@@ -48,6 +48,21 @@
                                         動的な照合をするため、どの静的 hostname とも
                                         等価にならない
      - verify(expected, project_dir) -> str | None  検証関数 (None=成功, 文字列=エラー理由)
+     - matches(expected, current) -> bool
+                                    (任意) 「CLI 実測値 current が期待値
+                                    expected を満たすか」の述語。verify() と
+                                    **同じ規則**を bool で返す実装を 1 つだけ
+                                    置き、verify() 側もそれを使うこと。builder
+                                    (`scripts/accounts_builder.py` の show) が
+                                    [match]/[mismatch] の判定に使い、未宣言なら
+                                    builder の汎用近似 (`_entries_equal`) に
+                                    落ちる。**照合先が動的に決まる service は
+                                    必ず宣言する** — github は「github.com が
+                                    active ならそれ、無ければ最初の host」と
+                                    照合するため、汎用近似 (最初の host) では
+                                    show と hook の verdict がずれる。任意入力
+                                    (accounts.local.json の生値) を受けるので
+                                    例外を投げないこと
      - get_active_account(project_dir) -> str | dict | None  現在のアクティブ値
      - suggest_accounts_entry(project_dir) -> str | dict | None  builder 書込用 suggestion
          (scalar/dict の形状は service 側の判断。取得不可は None)

@@ -12,6 +12,8 @@ import re
 import shlex
 import subprocess
 
+from core import budget
+
 # `\b` だと `gh-ost --help` のようなハイフン付き別コマンドまで拾うため、
 # 空白または終端が続く形だけに限定する。
 PATTERNS = [r"^gh(?=\s|$)"]
@@ -146,7 +148,7 @@ def _run_gh_auth_status(env=None) -> tuple[str, str | None]:
             ["gh", "auth", "status"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=budget.call_timeout(10),
             env=env,
         )
     except FileNotFoundError:
@@ -215,6 +217,48 @@ def suggest_accounts_entry(project_dir: str) -> str | dict | None:
     return dict(active)
 
 
+def scalar_target_host(active: dict[str, str]) -> str:
+    """str 期待値をどの host と照合するかを返す (`active` は非空前提)。
+
+    複数ホストにログイン中でも GHE 側のアカウントで誤 deny しないよう
+    **github.com を優先**し、無ければ最初の host を使う。gh の列挙順は
+    設定ファイルの順序に依存する (GHE が先に来ることがある) ため、
+    「最初の host」だけを見ると照合先が環境依存になる。
+
+    `verify()` と `matches()` (builder の show が使う) の**唯一の実装**。
+    以前は builder 側が「最初の host」を別実装で持っており、GHE が先に
+    列挙される環境で show が [mismatch]、hook は allow という乖離が出ていた
+    (内部バックログ)。
+    """
+    return "github.com" if "github.com" in active else next(iter(active))
+
+
+def matches(expected, current) -> bool:
+    """CLI 実測値 `current` が期待値 `expected` を満たすかを bool で返す。
+
+    `verify()` と同じ規則の述語版。verify() は deny 理由の文面を組み立てる
+    責務があるため戻り値が str だが、**判定規則そのものは service 側に一本化**
+    して builder (`scripts/accounts_builder.py` の show) と共有する。任意入力
+    (accounts.local.json の生値) を受けるため例外は投げない。
+    """
+    if isinstance(expected, str):
+        if isinstance(current, str):
+            return current == expected
+        if isinstance(current, dict) and current:
+            return current.get(scalar_target_host(current)) == expected
+        return False
+    if isinstance(expected, dict):
+        # 空 dict は verify() が「オブジェクトが空です」で deny する形なので
+        # match ではない。非空なら宣言された全 host が期待どおりであること。
+        if not expected or not isinstance(current, dict):
+            return False
+        return all(
+            isinstance(want, str) and current.get(host) == want
+            for host, want in expected.items()
+        )
+    return False
+
+
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     """context: 他 service と揃えた interface。gh では**使わない**。
 
@@ -261,12 +305,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
         )
 
-    # str 形式では github.com を優先照合。複数 host がある場合に
-    # GHE のアカウントで誤 deny しないようにする。
-    if "github.com" in active:
-        host = "github.com"
-    else:
-        host = next(iter(active))
+    # str 形式では github.com を優先照合 (照合先の決定は scalar_target_host に
+    # 一本化 — builder の show も同じ関数経由で同じ verdict を出す)。
+    host = scalar_target_host(active)
     current = active[host]
 
     if current != expected:

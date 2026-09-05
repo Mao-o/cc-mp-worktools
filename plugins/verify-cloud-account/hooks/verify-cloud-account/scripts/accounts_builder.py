@@ -43,7 +43,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   `{"github.com":"USER","ghe.example.com":"example-org"}` のような入力で
   `next(iter(old.values()))` (= 最初の host の値) だけを見て一致と判定し、
   `ghe.example.com` の値を conflict 検出も警告もなく消してしまう
-  (advisor レビューで検出)。migrate は「意味的に同じアカウントか」ではなく
+  (マージ前レビューで検出)。migrate は「意味的に同じアカウントか」ではなく
   「情報を捨てて良いか」を判定する必要があるため、別関数として実装した。
 - **D9**: `_validate_entry_shape()` の dict 内の値チェックは、`strict_keys`
   (D7) の他に「dict 全体で有効な値が 1 つも無いときだけ拒否する」形にした。
@@ -1077,15 +1077,25 @@ def _cmd_remove(
     return 0
 
 
-def _entries_equal(expected: Any, current: Any) -> bool:
+def _entries_equal(expected: Any, current: Any, service: Any = None) -> bool:
+    """CLI 実測値 `current` が accounts.local.json の期待値 `expected` を満たすか。
+
+    service が `matches(expected, current)` を公開していれば**そちらに委譲する**。
+    show ([match]/[mismatch]) と hook (verify) の判定を service 側の 1 実装に
+    寄せるため。以前は下の汎用分岐が github の意味論を別実装で持っており、
+    GHE が先に列挙される環境 ({"ghe.example.com": ..., "github.com": ...}) で
+    show が [mismatch]、hook は allow という乖離が出ていた (内部バックログ)。
+    `matches()` を持たない service は従来どおり汎用判定を使う。
+    """
+    matches = getattr(service, "matches", None)
+    if matches is not None:
+        return bool(matches(expected, current))
     if expected == current:
         return True
     if isinstance(expected, str) and isinstance(current, dict):
-        # services/github.py::verify と整合: scalar expected の場合は
-        # multi-host current の最初のホスト (= next(iter(active.values())))
-        # のみと比較する。show と verify (実 hook) で挙動を一致させ、
-        # multi-host で show が [match] と表示するのに hook 側で deny される
-        # 乖離を防ぐ。
+        # `matches()` を持たない service 向けの汎用近似: scalar expected は
+        # multi-host current の最初の値と比較する。**service 固有の照合規則が
+        # ある場合は `matches()` を公開すること** (github は公開済み)。
         return next(iter(current.values()), None) == expected
     if isinstance(expected, dict) and isinstance(current, str):
         # Firebase の alias map (例: {"default":"p1","prod":"p2"}) に対し、
@@ -1105,7 +1115,7 @@ def _migrate_keep_new_without_loss(service, new_val: Any, old_val: Any) -> bool:
     (expected) を満たすか」を判定する述語で、意図的に非対称 (dict の余剰
     キーを無視する) — アカウント一致の判定としては正しいが、ここで必要な
     「old 側の値を切り捨てて良いか」の判定にそのまま使うと**情報が失われる
-    方向**に倒れる。実例 (内部バックログ: advisor レビューで検出):
+    方向**に倒れる。実例 (内部バックログ: マージ前レビューで検出):
     new="USER" (scalar) / old={"github.com":"USER","ghe.example.com":
     "example-org"} (multi-host dict) で `_entries_equal("USER", old)` は
     `next(iter(old.values()))` (= "USER") だけを見て True を返すため、
@@ -1243,7 +1253,7 @@ def _cmd_show(
                 detail = f" (CLI error: {e})"
             if current is None:
                 status_marker = "[CLI unavailable or not logged in]"
-            elif _entries_equal(expected, current):
+            elif _entries_equal(expected, current, svc):
                 status_marker = "[match]"
             else:
                 status_marker = "[mismatch]"
