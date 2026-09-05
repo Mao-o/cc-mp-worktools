@@ -59,7 +59,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "
 | ソース | `--source` | ドキュメント | 規模 |
 |--------|-----------|-------------|------|
 | Claude Code | `code` (デフォルト) | code.claude.com/docs | ~64p / 1.4MB |
-| Claude Developer Platform | `platform` | platform.claude.com/docs | ~617p / 23.8MB |
+| Claude Developer Platform | `platform` | platform.claude.com/docs | ~699p / 40MB |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`
 
