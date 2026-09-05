@@ -13,6 +13,45 @@ Claude Code の `Explore` サブエージェントはリポジトリのコード
 pre フェーズで並走起動 → Explore 本体と同時に調査進行 → post フェーズで結果待ち受けして注入、
 という非同期パターンにより Explore 本体の応答遅延を最小化している。
 
+## post は `async` hook (0.10.0)
+
+Agent ツールは **subagent が背景に移った時点で戻る**。公式 docs (`PreToolUse input` の
+Agent 表) 逐語:
+
+> `status` ... `"completed"` for foreground subagents, `"async_launched"` for background
+> subagents. As of v2.1.198, subagents run in the background by default, so an omitted
+> `run_in_background` also produces `"async_launched"`
+>
+> For background subagents, the tool returns when the task moves to the background
+
+つまり PostToolUse(Agent) は Explore の**完了時ではなく起動直後**に発火する。0.9.1 までの
+post は同期 hook のまま最大 `TIMEOUT_SEC` (60) 秒ポーリングしていたので、「並走して待ち
+時間を隠す」設計と裏腹に、Explore が走り出した直後に親を 60 秒止めていた。
+
+hooks.json で post を `"async": true` にして解消する (docs `Run hooks in the background`):
+
+> set `"async": true` to run the hook in the background while Claude continues working.
+>
+> After the background process exits, Claude Code delivers the `additionalContext` and
+> `systemMessage` fields from the hook's JSON response to Claude on the next conversation
+> turn. Unlike a synchronous hook's `systemMessage`, neither field is shown to you.
+
+**発火条件 (イベント / matcher) は変えていない**。変わるのは「親をブロックするか」と
+「結果が届くのが次ターンになるか」の 2 点だけ。
+
+- `tool_response.status` を読んで待機を出し分ける案は採らなかった。async 化すると
+  foreground / background のどちらでも親は止まらないので、分岐しても挙動が変わらない
+- **`timeout` は async 化後は効かない** (docs: "Once an async hook is running in the
+  background, Claude Code doesn't enforce `timeout` on it")。hooks.json の `90` は
+  「起動から background に移るまで」にしか掛からないが、意図の記録として残してある。
+  待機の実上限は `cursor.TIMEOUT_SEC` 側
+- **`claude -p` (headless) では teardown で kill される** (docs: outcome `cancelled`)。
+  その場合 post の後始末に到達しないので、残骸は次回起動時の TTL GC が拾う。README の
+  「headless では `EXTERNAL_AI_*=0` を推奨」はこの意味でも有効
+- **背景 subagent の完了時に PostToolUse(Agent) が再発火するかは公式 docs に記述が無い**
+  (肯定も否定もされていない)。再発火しない前提なので、cursor の解析予算は起動から
+  `TIMEOUT_SEC` 秒で、Explore の実行時間には連動しない
+
 ## 無効化 (`EXTERNAL_AI_EXPLORE_PARALLEL=0`, 0.6.0)
 
 0.5.0 まではスイッチが皆無で、`cursor` を PATH から外す以外に止める手段が無かった。
@@ -29,9 +68,9 @@ cursor と pid / 結果ファイルが孤児になる — 無効化した瞬間�
 ```
 explore-parallel/
 ├── CLAUDE.md           このドキュメント
-├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す
-├── state.py            tool_use_id ベースの一時ファイルパス管理 ($TMPDIR/explore-parallel/)
-├── cursor.py           cursor agent の pre(読み取り専用で起動) / post(待機+結果取得)
+├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す + 残骸 GC
+├── state.py            tool_use_id ベースの一時ファイルパス管理 + TTL 判定 ($TMPDIR/explore-parallel/)
+├── cursor.py           cursor agent の pre(読み取り専用で起動) / post(待機+結果取得) / 停止
 └── tests/              起動引数 (--mode plan) と結果注入の unittest (偽 cursor)
 ```
 
@@ -56,6 +95,7 @@ sys.path に載せて解決する (plugin root 内の相対配置なので cache
    | `is_available()` | `() -> bool` | CLI 存在確認等の事前チェック |
    | `pre(tool_use_id, prompt)` | `(str, str) -> None` | バックグラウンド起動 |
    | `post(tool_use_id)` | `(str) -> str \| None` | 待機 + 結果取得。整形済み文字列 or None |
+   | `reap_orphan(pid_file)` | `(Path) -> None` | TTL 超過の残骸を停止 (GC から呼ばれる) |
 
 2. `__main__.py` に 2 行追加:
    ```python
@@ -80,6 +120,46 @@ cursor と Gemini では待機方式や結果の整形方法が異なる可能�
 複数アナライザが同時実行されてもファイル名で衝突しない設計。
 post 実行後は `cleanup()` で PID/結果ファイルを削除する。
 
+### 残骸の TTL GC (0.10.0)
+
+`post()` の後始末に到達しない経路がある — Agent ツールの失敗、ユーザー中断、セッション
+終了、`async` hook が `claude -p` の teardown で kill される場合。0.9.1 まではこれらで
+pid / 結果ファイルが無期限に残り、バックグラウンドの cursor も自然完了まで走り続けて
+いた (課金)。
+
+- `state.stale_entries()` が `ORPHAN_TTL_SEC` (900 秒) を超えた残骸を拾い、
+  `__main__.gc_orphans()` が **pre / post の両方**で掃除する
+- 経過時間は **pid ファイルの mtime (= 起動時刻)** で測る。結果ファイルの mtime は
+  analyzer が書くたびに更新されるので、それを基準にすると「走り続けている孤児ほど
+  新しく見えて残る」逆転が起きる
+- **現在の tool_use_id は除外**する (TTL があるので通常は掛からないが、今起動した
+  ばかりのプロセスを GC が撃つ経路を構造的に潰す)
+- `GC_BUDGET_SEC` (2.0 秒) で打ち切る。pre の hook timeout は 5 秒しかないため、
+  残骸が大量にあっても起動を遅らせない。取りこぼしは次回の GC が拾う
+
+`PostToolUseFailure(Agent)` を hooks.json に足して即時掃除する案は**採っていない**。
+イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」
+の変更にあたる。TTL GC が同じ失敗モードを発火条件を変えずに覆うので、まずこちらで足りる。
+
+### 停止は process group ごと + PID 同一性の確認 (0.10.0)
+
+`pre` は `start_new_session=True` で起動する (pgid == pid) のに、0.9.1 までの停止は
+`os.kill(pid, SIGTERM)` で**グループリーダーだけ**だった。cursor-agent (node) が生成した
+孫プロセスが取り残されて走り続ける。`cursor.terminate()` で `os.killpg` に統一し、
+SIGTERM → 猶予 (`KILL_GRACE_SEC`) → SIGKILL のエスカレーションを入れた
+(review 系 2 hook の `_common/subproc.kill_process_group` と同じ考え方)。
+
+signal を送る前に `ps -ww -o command=` で cmdline を取り、`cursorcli.readonly_argv` から
+導出した署名 (`agent --trust --print --mode plan`) と突合する。pid ファイルは TTL 超過まで
+残りうるので、その間に pid が別プロセスへ再利用されていることがあるため。
+
+- **argv[0] (実行ファイル名) は照合しない**。`cursor` は実体へ `exec` するシムのことが
+  あり、その場合 ps が返すのは実体側の名前になる。引数は `exec "$REAL" "$@"` で保たれる
+  ので、名前ではなくフラグの組み合わせで見る。名前まで要求すると「シム環境では一切
+  kill できない」= ガードではなく停止処理の無効化になる
+- **判定できないときは送らない側に倒す**。無関係なプロセスに SIGTERM を送る事故のほうが、
+  cursor を 1 つ取り残すより重い
+
 ### tool_use_id の重要性
 
 pre と post は**同じ `tool_use_id`** で呼ばれることが前提。これで別の Explore 実行との
@@ -101,7 +181,8 @@ pre と post は**同じ `tool_use_id`** で呼ばれることが前提。これ
   "hooks": [{
     "type": "command",
     "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase post",
-    "timeout": 90
+    "timeout": 90,
+    "async": true
   }]
 }]
 ```
@@ -110,8 +191,12 @@ pre と post は**同じ `tool_use_id`** で呼ばれることが前提。これ
 インストール後は `~/.claude/plugins/cache/<plugin>/` 配下に展開される。
 
 - **timeout は秒単位**（Claude Code の仕様。ミリ秒ではない）
-- **pre の timeout**: バックグラウンド起動で即 return するので短くて OK（5 秒）
-- **post の timeout**: アナライザ待機があるため長め（90 秒 = cursor の TIMEOUT_SEC=60 + 余裕 30）
+- **pre の timeout**: バックグラウンド起動で即 return するので短くて OK（5 秒）。
+  pre は `async` にしない — Agent ツールが走り出す前にアナライザを起動する必要があり、
+  async にすると「並走」の起点が Agent ツールの実行と競争になる。Claude に返す出力も
+  持たないので async にする利点が無い（`tests/test_hook_registration.py`）
+- **post の timeout**: 90 秒（= cursor の TIMEOUT_SEC=60 + 余裕 30）。ただし `async: true`
+  なので実際には強制されない（上記「post は `async` hook」節）。意図の記録として残す
 
 ## テスト
 
@@ -132,6 +217,18 @@ python3 -m unittest discover tests     # 偽 cursor (PATH 先頭の bash script)
 ゲートに限定され、post の後始末とは無関係) を固定する。`tests/test_result_handling.py`
 は timeout → SIGTERM・8000 バイト超の出力切詰・pid ファイル欠落時の fallback を
 境界ケースとして固定する。いずれも `cursor` 本体は起動しない。
+
+`tests/test_orphan_gc.py` は 0.10.0 で入れた停止・GC の契約を固定する: 停止が
+process group ごとであること (孫を取り残さない)、analyzer と一致しない pid には
+signal を送らないこと (PID 再利用ガード)、TTL 判定が pid ファイルの mtime を見ること、
+現在の tool_use_id を除外すること、GC が pre / post の両方で走ること。
+`tests/test_hook_registration.py` は hooks.json 側の登録形 (post は `async`、pre は同期、
+発火条件は据置) を固定する。
+
+**偽 cursor は `exec` しない** (`sleep 30 &` + `wait` で argv を保つ)。`exec sleep 30`
+だとプロセスイメージごと差し替わって argv が失われ、PID 再利用ガードから見て
+「無関係なプロセス」と区別が付かなくなる。実物の cursor はシムでも `exec "$REAL" "$@"`
+で引数を保つので、argv を保ったまま待つ形が忠実な模倣。
 
 手動で確認するときは標準入力に hook input JSON を流し込む (**必ず `TMPDIR` を一時ディレクトリに
 差し替えること** — 本番の結果ファイルと混ざる):

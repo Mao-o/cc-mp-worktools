@@ -212,7 +212,15 @@ class TestReviewerArgvAndStdin(FakeCliTestCase):
         self.assertIn("## レビュー対象プラン", args[5])
         self.assertIn("PLAN-BODY", args[5])
 
-    def test_codex_gets_prompt_as_argument_and_plan_on_stdin(self):
+    def test_codex_sends_prompt_and_plan_together_on_stdin(self):
+        """0.10.0 の契約: プロンプトもプランも stdin 一本 (`codex exec … -`)。
+
+        0.9.1 までは「プロンプトを引数 + プランを stdin」で、codex の
+        「引数と piped stdin を併用すると stdin が block として追記される」挙動に
+        依存していた。その挙動が無い版ではプランが黙って落ち、プラン本文を見ていない
+        レビュー結果で差し戻されていた (内部バックログ)。argv にプロンプト本文が
+        残っていないこと自体が回帰の検出条件なので、長さも固定する。
+        """
         argv_file = os.path.join(self.tmpdir, "codex.argv")
         stdin_file = os.path.join(self.tmpdir, "codex.stdin")
         self.fake(
@@ -224,11 +232,18 @@ class TestReviewerArgvAndStdin(FakeCliTestCase):
         self.assertEqual(self.codex.review("PLAN-BODY"), "REVIEW_CLEAN")
 
         args = self._read_argv(argv_file)
-        self.assertEqual(args[:4], ["exec", "-s", "read-only", "--ephemeral"])
-        self.assertEqual(len(args), 5)
-        self.assertIn("Planning Review — Codex", args[4])
+        self.assertEqual(args, ["exec", "-s", "read-only", "--ephemeral", "-"])
+
         with open(stdin_file) as f:
-            self.assertEqual(f.read(), "PLAN-BODY")
+            sent = f.read()
+        self.assertIn("Planning Review — Codex", sent)
+        self.assertIn("## レビュー対象プラン", sent)
+        self.assertIn("PLAN-BODY", sent)
+        self.assertLess(
+            sent.index("Planning Review — Codex"),
+            sent.index("PLAN-BODY"),
+            "プランがテンプレートより前に来ている (連結順が逆)",
+        )
 
     def test_nonzero_exit_is_none(self):
         self.fake("cursor", "printf 'boom'\nexit 2\n")

@@ -386,5 +386,64 @@ class TestRunForOutput(SubprocTestCase):
         self.assertFalse(subproc.cli_available("no-such-cli-for-external-ai-assist"))
 
 
+class TestPidIdentity(SubprocTestCase):
+    """`pid_command` / `group_is_stopped` — pid だけを記録して後から止める経路の土台。
+
+    `Popen` を持たず pid ファイルだけを頼りに停止する呼び出し側 (explore-parallel) は、
+    記録した pid が別プロセスへ再利用されていないかを cmdline で確かめる必要がある。
+    """
+
+    def _spawn(self, marker: str) -> subprocess.Popen:
+        cli = write_script(self.dir, f"marked-{marker}", "sleep 30\n")
+        proc = subprocess.Popen(
+            [cli, marker],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(self._reap, proc)
+        return proc
+
+    def _reap(self, proc: subprocess.Popen) -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=3)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    def test_pid_command_returns_the_full_argv(self):
+        proc = self._spawn("sentinel-argv")
+
+        cmdline = subproc.pid_command(proc.pid)
+
+        self.assertIsNotNone(cmdline, "ps から cmdline を取得できていない")
+        self.assertIn("sentinel-argv", cmdline, "引数まで含めた argv が返っていない")
+
+    def test_pid_command_is_none_for_a_dead_pid(self):
+        proc = self._spawn("sentinel-dead")
+        pid = proc.pid
+        self._reap(proc)
+
+        self.assertIsNone(subproc.pid_command(pid))
+
+    def test_group_is_stopped_tracks_live_members(self):
+        proc = self._spawn("sentinel-group")
+
+        self.assertFalse(
+            subproc.group_is_stopped(proc.pid), "生きたメンバーが居るのに停止扱い"
+        )
+
+        self._reap(proc)
+        self.assertTrue(wait_until_dead(proc.pid), "プロセスが終了していない")
+        self.assertTrue(subproc.group_is_stopped(proc.pid))
+
+
 if __name__ == "__main__":
     unittest.main()

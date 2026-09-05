@@ -75,9 +75,12 @@ class TestAnalyzerUnavailable(HookTestCase):
         起動済みの analyzer (pid ファイルが指す稼働中プロセス) を reap し、
         pid / 結果ファイルを掃除する。
         """
+        # `exec` しない (argv を保つ) — 0.10.0 の PID 再利用ガードは cmdline で
+        # 同一性を確認するため、`exec sleep 30` だと「無関係なプロセス」に化ける。
+        # 詳細は test_result_handling.py の `_write_hanging_cursor`。
         cursor_path = os.path.join(self.bin, "cursor")
         with open(cursor_path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/bash\nexec sleep 30\n")
+            f.write("#!/bin/bash\nsleep 30 &\nwait\n")
         os.chmod(cursor_path, 0o755)
 
         with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(

@@ -39,7 +39,8 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase post",
-            "timeout": 90
+            "timeout": 90,
+            "async": true
           }
         ]
       },

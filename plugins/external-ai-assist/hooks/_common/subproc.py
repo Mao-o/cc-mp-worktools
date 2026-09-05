@@ -262,6 +262,46 @@ def pid_is_zombie(pid: int) -> bool | None:
     return res.stdout.strip().startswith("Z")
 
 
+def pid_command(pid: int) -> str | None:
+    """pid のコマンドライン (`ps -o command=`) を返す。取得できなければ None。
+
+    PID 再利用の検出に使う。`Popen` を持たず pid だけを記録して後から停止する経路
+    (explore-parallel の pid ファイル) では、記録した pid が既に別のプロセスに
+    割り当て直されていることがあり、そのまま signal を送ると無関係なプロセスを撃つ。
+
+    `-o command=` は POSIX の `args` 相当で、Linux (procps) / macOS (BSD) の双方で
+    argv 全体を返す。`comm` は macOS が実行パス・Linux が実行ファイル名を返して
+    形式が揃わないので使わない。
+
+    `-ww` (幅無制限) を先に試す。macOS の `ps` は既定で端末幅に合わせて argv を
+    切り詰めるため、付けないと長いプロンプトを渡した起動で署名の後半が落ちる。
+    `-ww` を解さない `ps` のために、失敗したら付けずに 1 回だけ再試行する。
+    """
+    for argv in (
+        ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+        ["ps", "-o", "command=", "-p", str(pid)],
+    ):
+        try:
+            res = subprocess.run(
+                argv, capture_output=True, text=True, timeout=_PS_TIMEOUT_SEC
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode == 0:
+            return res.stdout.strip() or None
+    return None
+
+
+def group_is_stopped(pgid: int) -> bool:
+    """process group に「止めるべきメンバー」が居ないか (empty / zombie-only)。
+
+    `_group_state` の判定をそのまま公開する薄いラッパ。`killpg(pgid, 0)` だけでは
+    zombie を「走行中」と誤判定して猶予いっぱい待つため、外部からもこの判定を
+    使えるようにしてある。判定不能 (unknown) は False = 「まだ居る」に倒す。
+    """
+    return _group_state(pgid) in ("empty", "zombie-only")
+
+
 def _group_state(pgid: int) -> str:
     """process group の状態: "empty" / "live" / "zombie-only" / "unknown"。
 
