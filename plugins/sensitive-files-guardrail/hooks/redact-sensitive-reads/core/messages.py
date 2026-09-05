@@ -796,9 +796,12 @@ _BASH_LOAD_SUGGESTION_FORMAT_ENVRC = (
     "`.envrc` は direnv 側の hook (`direnv allow` 後の自動 load) 経由で"
     "読み込んでください。"
 )
+# マージ前レビューの指摘: 旧版は末尾に「明示的に実行してください。」を付けて
+# いたが、これは今まさに deny した ``source`` / ``.`` そのものを実行しろという
+# 自己矛盾の案内だった。文言を削り、隔離された安全な代替 (1Password CLI 等、
+# 後段の共通 suggestion に既にある) だけを残す。
 _BASH_LOAD_SUGGESTION_FORMAT_ENVRC_FAMILY = (
     "shell script のため direnv 対象外 (`.envrc` のみ自動発見)。"
-    "明示的に実行してください。"
 )
 
 
@@ -875,10 +878,21 @@ def _bash_move_suggestion_format_envrc(basename: str) -> str:
     ``.envrc`` → ``.envrc.example``、``foo.envrc`` → ``foo.envrc.example``、
     ``.ENVRC`` → ``.ENVRC.example`` のように、実際の operand の大文字小文字・
     命名をそのまま保つ。
+
+    マージ前レビューの指摘 (P2): ``cp <example> <basename>`` は copy-paste
+    実行を想定した実コマンド文字列なので、basename に空白や shell メタ文字
+    (``foo bar.envrc`` / ``x;echo PWN.envrc`` 等) が含まれると壊れる、または
+    コマンド注入になる。表示用の先頭 ``` `{example}` ``` (ファイル名の言及、
+    コマンドではない) は raw のまま保ちつつ、``cp`` に続く 2 引数だけ
+    ``shlex.quote`` で quote してから組み立てる。特殊文字が無ければ
+    ``shlex.quote`` は入力をそのまま返すため、既定の basename
+    (``.envrc`` 等) では見た目もテストの byte 予算も変わらない。
     """
     example = f"{basename}.example"
+    quoted_example = shlex.quote(example)
+    quoted_basename = shlex.quote(basename)
     return (
-        f" `{example}` 派生で運用するなら `cp {example} {basename}` の"
+        f" `{example}` 派生で運用するなら `cp {quoted_example} {quoted_basename}` の"
         "方向で代替できます。"
     )
 

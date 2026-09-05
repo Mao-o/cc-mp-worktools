@@ -509,9 +509,22 @@ def _build_deny_response(
     # direnv が実際に自動発見・自動 load するのは literal ``.envrc`` のみ
     # なので、family の中でも direnv hook 前提の案内を出してよいかどうかを
     # 区別する。
+    #
+    # glob operand (マージ前レビューの指摘): ``*.envrc`` は dotglob /
+    # GLOBIGNORE 有効時に ``.envrc`` へ展開されうるため deny 対象になるが、
+    # basename には glob 文字がそのまま残る。``is_envrc_basename`` は
+    # suffix 一致だけを見るので ``"*.envrc".lower().endswith(".envrc")`` が
+    # True になり、対象を確定できない ``cp *.envrc.example *.envrc`` という
+    # 無意味な案内が出ていた。docs/DESIGN.md の load/move 節が既定として
+    # 定めるとおり「glob operand は既定文言のまま」にするため、glob を含む
+    # operand は両判定関数を評価せず False に固定する。
     operand_basename = os.path.basename(operand)
-    is_envrc = is_envrc_basename(operand_basename)
-    is_direnv_literal = is_direnv_literal_basename(operand_basename)
+    if _has_glob(operand):
+        is_envrc = False
+        is_direnv_literal = False
+    else:
+        is_envrc = is_envrc_basename(operand_basename)
+        is_direnv_literal = is_direnv_literal_basename(operand_basename)
     return output.make_deny(
         M.bash_deny(
             first_token=first,

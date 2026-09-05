@@ -323,6 +323,19 @@ class TestLoad(unittest.TestCase):
         self.assertNotIn("経由で読み込んでください", msg)
         self.assertIn("1Password CLI", msg)
 
+    def test_source_envrc_family_non_literal_does_not_suggest_explicit_exec(self):
+        """マージ前レビューの指摘 (P2): family だが非 literal
+        (``foo.envrc`` / ``.ENVRC``) の load clause が「明示的に実行して
+        ください」と、今まさに deny した ``source`` / ``.`` の実行そのものを
+        勧める自己矛盾の案内を出していた。文言を削り、隔離された安全な代替
+        (1Password CLI 等、既存の既定文言) だけを残すことを確認する。
+        """
+        msg = M.bash_deny(first_token="source", operand="foo.envrc",
+                          command="source foo.envrc",
+                          file_render=_DUMMY_FILE_RENDER, is_envrc=True)
+        self.assertNotIn("明示的に実行", msg)
+        self.assertIn("1Password CLI", msg)
+
     def test_load_is_envrc_defaults_to_false(self):
         msg = M.bash_deny(first_token="source", operand=".envrc",
                           command="source .envrc",
@@ -395,6 +408,36 @@ class TestMove(unittest.TestCase):
                           command="cp .envrc envrc.bak")
         self.assertIn(".env.example", msg)
         self.assertNotIn(".envrc.example", msg)
+
+    def test_cp_envrc_basename_with_space_is_quoted_in_command(self):
+        """マージ前レビューの指摘 (P2): 案内する ``cp <example> <basename>``
+        は copy-paste 実行を想定した実コマンド文字列なので、basename に
+        空白を含むと素朴な補間では 2 引数に割れて壊れる
+        (``cp foo bar.envrc.example foo bar.envrc`` は 4 引数の cp になる)。
+        ``shlex.quote`` で両ファイル名が quote されることを確認する。
+        """
+        msg = M.bash_deny(first_token="cp", operand="foo bar.envrc",
+                          command="cp 'foo bar.envrc' backup/",
+                          is_envrc=True)
+        self.assertIn(
+            "cp 'foo bar.envrc.example' 'foo bar.envrc'", msg
+        )
+
+    def test_mv_envrc_basename_with_semicolon_is_quoted_in_command(self):
+        """basename に ``;`` を含む場合、素朴な補間だと案内した ``cp`` 文字列を
+        そのまま実行するとコマンド注入になる (``x;echo PWN.envrc`` 等)。
+        ``shlex.quote`` で quote され、注入形の生文字列が出力に含まれない
+        ことを確認する。
+        """
+        msg = M.bash_deny(first_token="mv", operand="x;echo PWN.envrc",
+                          command="mv 'x;echo PWN.envrc' backup/",
+                          is_envrc=True)
+        self.assertIn(
+            "cp 'x;echo PWN.envrc.example' 'x;echo PWN.envrc'", msg
+        )
+        self.assertNotIn(
+            "cp x;echo PWN.envrc.example x;echo PWN.envrc", msg
+        )
 
 
 class TestBashMoveEnvrcSuggestionByteBudget(unittest.TestCase):

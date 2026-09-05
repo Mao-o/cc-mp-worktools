@@ -365,6 +365,19 @@ class TestDenyFixed(BaseBash):
         self.assertNotIn("経由で読み込んでください", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
 
+    def test_source_named_envrc_script_does_not_suggest_explicit_exec(self):
+        """マージ前レビューの指摘 (P2): family だが非 literal な load 対象
+        (``foo.envrc``) の deny reason が「明示的に実行してください」と、
+        今まさに block した ``source`` の実行そのものを勧める自己矛盾の
+        案内を出していた。end-to-end (``handle()`` 経由) でも文言が消えて
+        いることを固定する (message 単体テストは
+        ``test_bash_reason_templates.TestLoad`` 側)。
+        """
+        r = handle(_make_envelope("source foo.envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("明示的に実行", reason)
+
     def test_dot_uppercase_envrc_does_not_suggest_auto_load(self):
         """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
         別ファイル扱いになるため、direnv の自動 load 対象ではない
@@ -816,6 +829,25 @@ class TestUnknownCommandOperand(BaseBash):
         self.assertNotIn(".env.example", reason)
         self.assertIn(".ENVRC.example", reason)
         self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_cp_glob_envrc_with_dotglob_keeps_default_wording(self):
+        """マージ前レビューの指摘 (P2): dotglob 有効時は ``*.envrc`` が
+        ``.envrc`` へ展開されうるため glob operand のまま deny されるが
+        (``TestGlobDotenvDeny`` 参照)、operand 文字列 ``*.envrc`` を
+        そのまま basename 判定にかけると
+        ``"*.envrc".lower().endswith(".envrc")`` が True になり、対象を
+        確定できない ``cp *.envrc.example *.envrc`` という無意味な案内が
+        出ていた。glob operand は既定文言のまま (docs/DESIGN.md の
+        load/move 節) にする — is_envrc / is_direnv_literal は評価せず
+        False に固定し、.env 側の既定 suggestion にフォールバックする。
+        """
+        r = handle(_make_envelope(
+            "shopt -s dotglob; cp *.envrc backup/", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
 
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))

@@ -23,10 +23,12 @@ commit 52113a1 で完了)。
 ## 0.29.1
 
 内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`
-経路の `.envrc` 案内) + マージ前レビューの指摘 2 件 (`is_envrc_basename` の
-判定境界と、助言文面のテンプレート導出方法) を修正。**判定境界 (deny / allow
-/ ask / block するか) の変化: なし** (助言文言の修正・テスト追加のみ)。
-テスト件数: redact 1240 → 1252 → 1263 → **1272**、check 135 (変化なし)。
+経路の `.envrc` 案内) + マージ前レビューの指摘 5 件 (`is_envrc_basename` の
+判定境界、助言文面のテンプレート導出方法、glob operand の判定漏れ、load
+clause の自己矛盾な案内、move clause のコマンド注入耐性) を修正。**判定境界
+(deny / allow / ask / block するか) の変化: なし** (助言文言の修正・テスト
+追加のみ)。テスト件数: redact 1240 → 1252 → 1263 → 1272 → **1277**、check 135
+(変化なし)。
 
 1. **Bash の `cp` / `mv` (move category) が `.envrc` (direnv) にも
    `.env.example` 派生 (Next.js 慣例) の案内を出していた不具合を修正**。
@@ -83,6 +85,36 @@ commit 52113a1 で完了)。
    新規・更新テストが失敗することを確認済み (負テスト)。deny reason の
    byte 上限 (`MAX_REASON_BYTES` = 3072) 内に収まることも実測した (最大
    実測値: `source foo.envrc` で 2067 byte)。
+6. **マージ前レビューの指摘 3 件 (上記 4/5 の追加検証で発覚)**。
+   - **glob operand の判定漏れ**: `cp *.envrc backup/` のように dotglob /
+     `GLOBIGNORE` 有効時に glob operand が `.envrc` へ展開されうる
+     ケースで deny 自体は正しく効いていたが、`is_envrc_basename` /
+     `is_direnv_literal` に operand 文字列 `*.envrc` をそのまま渡していた
+     ため `"*.envrc".lower().endswith(".envrc")` が True になり、対象を
+     確定できない `cp *.envrc.example *.envrc` という無意味な案内が出て
+     いた。glob operand は既定文言のまま (`docs/DESIGN.md` の load/move 節
+     が元々定めていた仕様) にするため、`bash_handler._build_deny_response`
+     で operand が glob を含むときは両判定関数を評価せず False に固定した。
+   - **load clause の自己矛盾な案内**: family だが非 literal
+     (`foo.envrc` / `.ENVRC`) を `source` / `.` した場合の suggestion が
+     「明示的に実行してください」と、今まさに block した操作そのものを
+     勧めていた。この一文を削り、隔離された安全な代替 (1Password CLI /
+     pass / git-secret、既存の既定文言) だけを残した。
+   - **move clause のコマンド注入耐性**: `cp <basename>.example <basename>`
+     の案内はコピー & ペーストでの実行を想定した実コマンド文字列だが、
+     basename を raw 補間していたため空白 (`foo bar.envrc`) で 2 引数に
+     割れて壊れる、`;` (`x;echo PWN.envrc`) を含むとコマンド注入になる、
+     という問題があった。`shlex.quote` で両ファイル名を quote してから
+     組み立てるよう修正した (特殊文字が無ければ `shlex.quote` は入力を
+     そのまま返すため、既定の basename では見た目・byte 予算とも変化なし)。
+     同種の basename 派生文字列をコマンドとして提示している箇所を
+     `core.messages` 全体で棚卸ししたが、実コマンド文字列を組み立てて
+     いたのはこの 1 箇所のみだった (edit 側の `<basename>.example` clause
+     群はファイル名の言及のみでコマンドを組み立てていないため対象外)。
+   3 件とも判定境界には影響しない (助言文言の修正のみ)。各修正について
+   修正前コードに対して新規テストが失敗することを確認済み (負テスト)。
+   deny reason の byte 上限内に収まることも実測した (worst-case:
+   basename に単一引用符を 40 個含む move clause で 2319 byte)。
 
 ## 0.29.0
 
