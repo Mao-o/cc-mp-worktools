@@ -135,6 +135,8 @@ def reap_orphan(pid_file: Path) -> None:
         pid = int(pid_file.read_text().strip())
     except (ValueError, OSError):
         return
+    if pid <= 0:
+        return
     if not _is_running(pid):
         return
     if terminate(pid):

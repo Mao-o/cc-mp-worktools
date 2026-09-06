@@ -29,8 +29,9 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
   import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
   `fcntl` に依存しない (import 時には落ちない) が、0.10.0 で停止処理を `os.killpg` +
   `ps` (PID 同一性の確認) に変えたため POSIX 前提になった。Windows では同一性を確認
-  できず**停止をあきらめる側に倒れる** (Claude Code 本体は止めないが、起動した Cursor
-  Agent が残る)。Windows での動作は引き続き未検証
+  できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
+  `os.kill(pid, 0)` は Windows では TerminateProcess になるため挙動が異なる。Windows
+  での動作は引き続き未検証
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
   3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に

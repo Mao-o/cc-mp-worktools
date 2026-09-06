@@ -43,7 +43,7 @@ hooks.json で post を `"async": true` にして解消する (docs `Run hooks i
   foreground / background のどちらでも親は止まらないので、分岐しても挙動が変わらない
 - **`timeout` は async 化後は効かない** (docs: "Once an async hook is running in the
   background, Claude Code doesn't enforce `timeout` on it")。hooks.json の `90` は
-  「起動から background に移るまで」にしか掛からないが、意図の記録として残してある。
+  async 化後は強制されない (docs 逐語)。意図の記録として残してある。
   待機の実上限は `cursor.TIMEOUT_SEC` 側
 - **セッションが idle だと配信は次のユーザー操作まで待つ** (docs: "Hook output is
   delivered on the next conversation turn. If the session is idle, the response waits

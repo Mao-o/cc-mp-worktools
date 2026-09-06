@@ -312,6 +312,20 @@ class TestStaleEntries(HookTestCase):
 class TestGcOrphans(OrphanTestCase):
     """`__main__.gc_orphans` が残骸を消し、走っている孤児を止めること。"""
 
+    def test_gc_stops_at_the_budget_and_leaves_the_rest_for_next_time(self):
+        # 予算 0 なら 1 件も処理せず、予算があれば全件処理する。この対で
+        # 予算打ち切りの break が実在することを固定する (main 側レビューの指摘)。
+        for i in range(3):
+            r, p = self.state.paths(self.cursor.NAME, f"tu-budget-{i}")
+            r.write_text("x")
+            p.write_text("999999")
+            past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+            os.utime(p, (past, past))
+            os.utime(r, (past, past))
+        with mock.patch.object(self.state, "GC_BUDGET_SEC", 0.0):
+            self.assertEqual(self.entry.gc_orphans(), 0, "予算 0 でも掃除している")
+        self.assertEqual(self.entry.gc_orphans(), 3)
+
     def test_gc_removes_stale_files(self):
         result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-gc")
         result_file.write_text("x")
