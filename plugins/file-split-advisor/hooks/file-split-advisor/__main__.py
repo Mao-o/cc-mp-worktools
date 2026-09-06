@@ -130,7 +130,7 @@ def main() -> None:
     if source.matches_ignore_glob(path, _get_ignore_patterns()):
         return
 
-    if source.should_skip_by_name(path):
+    if source.should_skip_by_name(path, cwd):
         return
 
     # 拡張子 allowlist。Markdown / JSON / YAML / CSV 等の非コードファイルを
@@ -142,11 +142,15 @@ def main() -> None:
     if loaded is None:
         return
 
-    if language.is_generated_by_content(loaded.lines[:5]):
+    if language.is_generated_by_content(
+        loaded.lines[: language.GENERATED_MARKER_SCAN_LINES]
+    ):
         return
 
     lang = language.detect_language(path)
-    role = "test" if language.is_test_path(path) else "normal"
+    # cwd を渡すと test ディレクトリ判定が cwd からの相対部分に限定される
+    # (プロジェクトの外にある祖先ディレクトリ名を巻き込まない)。
+    role = "test" if language.is_test_path(path, cwd) else "normal"
 
     file_metrics = metrics_mod.compute(loaded, lang, path)
     verdict = judge.judge(file_metrics, lang, role, scale=_get_scale())

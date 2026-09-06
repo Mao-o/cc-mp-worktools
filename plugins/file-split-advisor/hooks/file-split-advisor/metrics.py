@@ -15,14 +15,55 @@ from pathlib import Path
 
 from language import is_vague_filename
 
-_DEF_KEYWORDS_RE = re.compile(r"^\s*(def|class|function|func|interface|struct|enum)\b")
+# 定義宣言の行頭キーワード。ES modules の主流形 (`export function` /
+# `export default function` / `async function`)、Rust (`pub fn` / `impl` /
+# `trait`)、Kotlin (`fun` / `object`)、TypeScript/Go (`type`) を含む。
+_DEF_KEYWORDS_RE = re.compile(
+    r"^\s*"
+    r"(?:export\s+(?:default\s+)?)?"
+    r"(?:declare\s+)?"
+    r"(?:abstract\s+)?"
+    r"(?:pub(?:\([^)]*\))?\s+)?"  # Rust: pub / pub(crate)
+    r"(?:async\s+)?"
+    r"(?:def|class|function|func|fn|fun|interface|struct|enum|trait|impl|type|object)\b"
+)
+
+# `const foo = (a, b) => {` 形のアロー関数。**矢印が右辺の最上位**であること
+# を要求する — `=` と `=>` の間に許すのは仮引数リスト (括弧で囲まれた 1 組、
+# 入れ子なし) か識別子 1 個だけ。これを緩めると
+# `const total = arr.reduce((acc, x) => acc + x, 0)` のような「アロー関数を
+# 引数に取る呼び出し」まで定義として数え、def_count がコーパス全体で膨らむ。
+_ARROW_DEF_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*(?::[^=]*)?=\s*"
+    r"(?:async\s+)?(?:\([^()]*\)|\w+)\s*=>"
+)
 
 _CONTROL_FLOW_RE = re.compile(r"\b(if|for|while|switch|case|catch|except)\b")
 
+# 行頭に来る import 文の形。**大文字小文字を区別する** — IGNORECASE だと
+# docstring や行頭の英文 ("Use the following helper ..." / "Import the module
+# ...") が import 行として数えられる。代わりに、大文字で始まるのが正規の
+# 綴りである PowerShell の `Import-Module` だけ明示的に列挙する。
 _IMPORT_HINT_RE = re.compile(
-    r"^\s*(import\b|from\b.*\bimport\b|require\(|use\s|#include\b)",
-    re.IGNORECASE,
+    r"^\s*("
+    r"import\b"
+    r"|from\b.*\bimport\b"
+    r"|using\b"  # C# / PowerShell (using namespace ...)
+    r"|use\s"  # Rust / PHP
+    r"|require_relative\b|require\b"  # Ruby
+    r"|Import-Module\b"  # PowerShell
+    r"|#include\b"
+    r")"
 )
+
+# 行頭とは限らない CommonJS の require 呼び出し
+# (``const fs = require('fs')`` / ``import x = require('y')``)。
+_REQUIRE_CALL_RE = re.compile(r"\brequire\s*\(")
+
+# ``import (`` / ``from x import (`` のような括弧付き import ブロックの継続行を
+# 何行まで追うか。閉じ括弧を見失ったときにファイル全体を import 扱いしない
+# ための安全弁。
+_IMPORT_BLOCK_MAX_LINES = 100
 
 # import 文を分類する 7 カテゴリのキーワード辞書。「うっかり露出予防」と同種の
 # ヒューリスティックであり、完全な import resolver ではない (既知の限界)。
@@ -39,6 +80,10 @@ IMPORT_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "okhttp",
         "retrofit",
         "websocket",
+        "websockets",
+        "httpx",
+        "aiohttp",
+        "urllib3",
         "net/http",
         "reqwest",
     ),
@@ -115,6 +160,8 @@ IMPORT_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "glob",
         "'fs'",
         '"fs"',
+        "node:fs",
+        "fs/promises",
     ),
 }
 
@@ -166,12 +213,45 @@ def count_defs_python(text: str) -> int | None:
 
 
 def _count_defs_generic(lines: list[str]) -> int:
-    """行頭キーワード正規表現による近似カウント (Java/C#/Kotlin のメソッド宣言は拾えない)。"""
-    return sum(1 for line in lines if _DEF_KEYWORDS_RE.match(line))
+    """行頭キーワード + アロー関数代入による近似カウント。
+
+    Java/C# のメソッド宣言はアクセス修飾子と戻り値型から始まりキーワードを
+    伴わないため、依然として拾えない (既知の限界)。
+    """
+    return sum(
+        1
+        for line in lines
+        if _DEF_KEYWORDS_RE.match(line) or _ARROW_DEF_RE.match(line)
+    )
+
+
+def _iter_import_lines(lines: list[str]):
+    """import 行を列挙する (括弧付き import ブロックの継続行を含む)。
+
+    Go の ``import ( ... )`` や Python の ``from x import ( ... )`` は、実際の
+    モジュール名が継続行に書かれる。開き括弧で終わる import 行を見たら、
+    対応する閉じ括弧までを import 行として扱う簡易ステートを持つ。
+    閉じ括弧を見失ったときのために ``_IMPORT_BLOCK_MAX_LINES`` で打ち切る。
+    """
+    block_remaining = 0
+    for line in lines:
+        stripped = line.strip()
+        if block_remaining > 0:
+            block_remaining -= 1
+            if stripped.startswith(")"):
+                block_remaining = 0
+                continue
+            if stripped:
+                yield line
+            continue
+        if _IMPORT_HINT_RE.match(line) or _REQUIRE_CALL_RE.search(line):
+            yield line
+            if stripped.endswith("("):
+                block_remaining = _IMPORT_BLOCK_MAX_LINES
 
 
 def _count_import_categories(lines: list[str]) -> tuple[int, tuple[str, ...]]:
-    import_lines = [line for line in lines if _IMPORT_HINT_RE.match(line)]
+    import_lines = list(_iter_import_lines(lines))
     if not import_lines:
         return 0, ()
     matched: set[str] = set()
