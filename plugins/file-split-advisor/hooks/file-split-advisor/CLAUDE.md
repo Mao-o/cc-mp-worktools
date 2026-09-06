@@ -70,13 +70,13 @@ flowchart TD
     W -- yes --> Z
     W -- no --> IG{IGNORE glob /<br/>ignore.local.txt に一致?}
     IG -- yes --> Z
-    IG -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated}
+    IG -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated/第三者ディレクトリ}
     E -- yes --> Z
     E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
     N -- no --> Z
     N -- yes --> F[source.load_text<br/>symlink/2MB/20000行の安全弁]
     F -- None --> Z
-    F -- LoadedFile --> G{先頭5行に<br/>generated marker?}
+    F -- LoadedFile --> G{先頭20行に<br/>generated marker?}
     G -- yes --> Z
     G -- no --> H[language 判定<br/>detect_language / is_test_path]
     H --> I[metrics.compute<br/>line_count/def_count/import多様性/制御フロー密度/vague filename]
@@ -173,7 +173,7 @@ auth)」とカテゴリ名を列挙するには件数だけでは足りない。
 
 `FILE_SPLIT_ADVISOR_SCALE` (全閾値への一律倍率) は当初、実効閾値の計算にだけ
 反映し表示には一切出していなかった。これは「宣言的 ×1.6 が理由不明のまま
-表示される」(yaf.13) を修正した同じリリースで、SCALE についても同じ欠陥
+表示される」(内部バックログ) を修正した同じリリースで、SCALE についても同じ欠陥
 (倍率 1.0 以外のとき「目安」の数値が printed 係数から導出できない) を
 自己再導入していたバグで、レビューで指摘された。`scale` は judge の設計判断
 どおり `applied_multipliers` には含めない (グローバル config であり per-file
@@ -201,6 +201,65 @@ tier/emit 判定ロジックは変更していない (表示だけの修正)。
 修正した。judge 側は `_effective_thresholds` が内部で計算済みの
 `is_declarative` を `applied_multipliers` として外部に公開するだけで、
 判定ロジック自体 (`_collect_signals` の独自計算) は変更していない。
+
+### 解析層の精度改善 (0.4.0) — 判定表は変えず、入力の抽出だけを直す
+
+0.4.0 は test 判定 / 早期 skip / import 抽出 / 定義数 / 制御フロー密度の
+**抽出精度**だけを変えた。`BASE_THRESHOLDS`・`LANGUAGE_MULTIPLIER`・
+`ROLE_MULTIPLIER`・`DECLARATIVE_THRESHOLD`・各シグナル閾値・emit 判定行列は
+一切触っていない。閾値を動かすと「精度が上がったのか閾値が緩んだのか」を
+コーパス差分から切り分けられなくなるため。
+
+#### ディレクトリ名判定は `cwd` からの相対部分だけを見る
+
+`language.relevant_dir_parts` を新設し、`is_test_path` と
+`source.should_skip_by_name` の両方が使う。全祖先を見ると、プロジェクトの
+置き場所 (`~/work/test/myapp/`、`~/src/vendor/app/`) がそのまま判定に混入する。
+相対化できないとき (cwd 外・cwd 未指定) は**従来どおり全 parts を返す** —
+失敗方向を「従来と同じ」に固定し、macOS の `/tmp` symlink 等の表記揺れで
+判定が静かに変わらないようにするため。`language.py` は純粋関数層なので
+realpath 正規化は行わない (`source.py` 側の containment 判定とは別系統)。
+
+#### 制御フロー密度は分子だけをマスクする
+
+コメント・文字列リテラルを潰したテキストで**ヒット行だけ**を数え、分母
+(非空行数) は元のテキストのまま。分母からコメントを除くと全ファイルの密度が
+一斉に動き、「1 行あたりどれだけ分岐が詰まっているか」という指標の意味自体が
+変わる。誤検出の除去 (分子側) に限定した。
+
+マスクは `mask_comments_and_strings` が全文に対する 1 回の `re.sub` で行い、
+マッチ部分を同じ長さの空白 (改行はそのまま) に置換する。長さと改行位置が
+保たれるので行数・行の対応が変わらず、複数行文字列やブロックコメントも
+1 パスで潰せる。万一行数がずれたらマスクせず元の行で数える安全弁を置いた。
+
+**測定が正確になった副作用**: 文字列リテラルに英文を大量に持つファイル
+(i18n の文言テーブル、フィクスチャ文字列の多い大きなテストファイル) は
+実測密度が下がり、`DECLARATIVE_THRESHOLD` (0.02) を下回って宣言的緩和
+(×1.6) が効くようになる。その結果 tier が 1 段下がって emit が消えるものが
+ある (実測: 本 repo の 873 行/976 行のテストファイル 2 件)。**これは閾値を
+動かした結果ではなく、従来はコメント・文字列の中の英単語で密度が水増しされて
+いたために緩和が効いていなかった**もの。閾値そのものが現実の密度分布に
+合っているかは別の課題として残す (このリリースでは触らない)。
+
+#### 制御フローのキーワードは言語で絞る
+
+`match` / `select` / `when` は他言語では普通のメソッド名・関数名として頻出
+する (`str.match(...)`、`select(state)`)。汎用集合に入れると誤検出が増える
+ため `detect_language` の結果で分ける。Python の `match` はさらに文頭限定
+(soft keyword であり `re.match(...)` と綴りが同じ)。Rust の `match` は
+`let x = match y {` のように行中に来るのが普通なので行内一致のまま。
+
+#### 定義数はプロパティ名を除外する
+
+`type` / `enum` / `class` は TypeScript のオブジェクトリテラル・インタフェース
+のプロパティ名として頻出する。キーワード直後の `:` / `?:` を否定先読みで
+弾く。実コーパスでこれを入れないと、宣言の少ないデータ定義ファイルで
+def_count が 1 → 37 に膨らむ例を観測した。
+
+アロー関数は**矢印が右辺の最上位**であることを要求する (`=` と `=>` の間に
+許すのは括弧 1 組の仮引数リストか識別子 1 個だけ)。緩めると
+`arr.reduce((a, x) => a + x, 0)` のような「アロー関数を引数に取る呼び出し」
+まで定義として数える。
 
 ## 一時ディレクトリ・cwd 外の skip (`source.py`, 0.3.0)
 

@@ -363,6 +363,77 @@ class TestShouldSkipByName(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(source.should_skip_by_name(Path(f"/repo/{name}")))
 
+    def test_extended_lockfiles_skipped(self):
+        # 0.4.0 で `*.lock` の汎用 glob に置き換えた分。個別列挙では
+        # エコシステムが増えるたびに取りこぼしていた。
+        for name in (
+            "uv.lock",
+            "Gemfile.lock",
+            "bun.lock",
+            "deno.lock",
+            "pubspec.lock",
+            "Podfile.lock",
+            "flake.lock",
+            "mix.lock",
+            "pdm.lock",
+            "npm-shrinkwrap.json",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(source.should_skip_by_name(Path(f"/repo/{name}")))
+
+    def test_extended_generated_patterns_skipped(self):
+        for name in (
+            "schema.generated.ts",
+            "foo.gen.go",
+            "foo_gen.go",
+            "foo.pb.ts",
+            "foo_pb.js",
+            "foo_pb.ts",
+            "foo.pb.dart",
+            "foo.d.ts",
+            "foo.snap",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(source.should_skip_by_name(Path(f"/repo/{name}")))
+
+    def test_gen_suffix_outside_go_not_skipped(self):
+        # `_gen` は Go 以外だと生成スクリプト本体 (data_gen.py) と衝突するため
+        # 意図的に Go に限定している。
+        self.assertFalse(source.should_skip_by_name(Path("/repo/data_gen.py")))
+        self.assertFalse(source.should_skip_by_name(Path("/repo/data_gen.ts")))
+
+    def test_third_party_dir_names_skipped(self):
+        for rel in (
+            "node_modules/pkg/index.js",
+            "vendor/lib/mod.go",
+            ".venv/lib/python3.12/site-packages/x/y.py",
+            "venv/lib/x.py",
+            "src/__snapshots__/foo.ts",
+            "src/generated/api.ts",
+        ):
+            with self.subTest(rel=rel):
+                self.assertTrue(source.should_skip_by_name(Path(f"/repo/{rel}"), "/repo"))
+
+    def test_migration_dirs_not_skipped(self):
+        # マイグレーションは手書きが多く (alembic/env.py 等)、`versions` は
+        # 一般語なのでディレクトリ名 skip には入れない。
+        for rel in (
+            "alembic/env.py",
+            "db/migrations/0001_init.py",
+            "app/versions/v1.py",
+            "dist/index.js",
+            "build/main.py",
+        ):
+            with self.subTest(rel=rel):
+                self.assertFalse(source.should_skip_by_name(Path(f"/repo/{rel}"), "/repo"))
+
+    def test_skip_dir_name_outside_cwd_is_ignored(self):
+        # cwd の外にあるだけの `vendor` で、その配下のソース全体が黙って
+        # skip されないこと。
+        path = Path("/home/alice/vendor/app/src/main.ts")
+        self.assertTrue(source.should_skip_by_name(path))  # cwd 未指定なら従来どおり
+        self.assertFalse(source.should_skip_by_name(path, "/home/alice/vendor/app"))
+
     def test_normal_file_not_skipped(self):
         self.assertFalse(source.should_skip_by_name(Path("/repo/handler.py")))
         self.assertFalse(source.should_skip_by_name(Path("/repo/lockpicking.py")))

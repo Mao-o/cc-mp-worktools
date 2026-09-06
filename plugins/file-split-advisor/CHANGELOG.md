@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.4.0
+
+内部バックログの精査で見つかった解析層 (判定・抽出・カウント) の不具合 5 件を
+まとめて修正。**閾値テーブルと emit 判定行列は一切変更していない** — 変えたのは
+判定に渡す入力の抽出精度だけ。
+
+### test 判定の取りこぼしを修正
+
+- ファイル名パターンを拡張した。旧版は `test_*.py` / `*_test.py` /
+  `*.test.tsx?` / `*.spec.tsx?` / `*Test.java` / `*_test.go` のみで、
+  `app.test.js` / `app.spec.jsx` / `user_spec.rb` / `FooTests.cs` /
+  `FooTest.kt` / `foo_test.dart` / `conftest.py` 等がすべて `normal` 扱いに
+  なり、テストファイルに通常ファイルの閾値 (1/1.6 倍の厳しさ) が当たっていた
+- パターンは**大文字小文字を区別する**。区別しないと `Latest.cs` /
+  `Manifest.kt` のような通常のファイル名まで test 扱いになる
+- ディレクトリ名による test 判定を **`cwd` から見た相対部分**に限定した。
+  旧版は全祖先を見ていたため、プロジェクトの置き場所がたまたま
+  `~/work/test/myapp/` のような場合に配下の全ソースが test 扱いになっていた。
+  `cwd` の外にあるファイルは従来どおり全階層を見る (フォールバック方向を
+  「従来と同じ」に固定)
+
+### 早期 skip の網羅性を改善
+
+- lockfile を `*.lock` の汎用 glob に置き換えた (`uv.lock` / `bun.lock` /
+  `deno.lock` / `pubspec.lock` / `Podfile.lock` / `flake.lock` / `mix.lock` /
+  `pdm.lock` 等が個別列挙から漏れていた)。`npm-shrinkwrap.json` も追加
+- generated ファイル名パターンに `*.generated.*` / `*.gen.*` / `*_gen.go` /
+  `*.pb.*` / `*_pb.js` / `*_pb.ts` / `*.d.ts` / `*.snap` を追加。接尾辞 `_gen`
+  は言語をまたぐと生成スクリプト本体 (`data_gen.py`) と衝突するため Go に限定
+- 第三者コード・生成物のディレクトリ (`node_modules` / `vendor` / `venv` /
+  `.venv` / `site-packages` / `__pycache__` / `__snapshots__` / `generated`)
+  による skip を追加。test 判定と同じく `cwd` からの相対部分だけを見る。
+  `dist` / `build` / `migrations` / `alembic` / `versions` は手書きのソースが
+  入ることが普通にあるため**入れていない**
+- 内容マーカーの走査幅を先頭 5 行から 20 行に拡大し、`auto generated` /
+  `automatically generated` / `generated file` / `Revision ID:` を追加した。
+  10〜15 行のライセンスヘッダの後に生成物注記を置く生成器 (OpenAPI Generator
+  等) や Alembic のマイグレーションを取りこぼしていた
+
+### import 抽出の精度を改善
+
+- CommonJS の `const fs = require('fs')` (行頭とは限らない)、C# / PowerShell の
+  `using`、Ruby の `require` / `require_relative`、PowerShell の `Import-Module`
+  を認識するようにした
+- Go の `import ( … )` と Python の `from x import ( … )` の**継続行**を
+  import 行として扱う簡易ステートを追加した (実際のモジュール名は継続行に
+  書かれるため、旧版はブロック形式の import を 1 件も分類できなかった)。
+  閉じ括弧を見失ったときのために追跡は 100 行で打ち切る
+- 正規表現の `IGNORECASE` を外した。旧版は docstring の英文
+  (`Use the following …` / `Import the module …`) を import 行として数えて
+  いた。大文字始まりが正規の綴りである `Import-Module` だけ明示的に列挙する
+- カテゴリ辞書に `node:fs` / `fs/promises` / `httpx` / `aiohttp` /
+  `websockets` / `urllib3` / `boto3` を追加
+
+### 定義数カウントの取りこぼしを修正
+
+- ES modules の主流形 (`export function` / `export default function` /
+  `async function` / `export class` / `export interface`)、Rust
+  (`pub fn` / `pub(crate) fn` / `fn` / `impl` / `trait`)、Kotlin
+  (`fun` / `object`)、TypeScript/Go の `type` を認識するようにした。
+  旧版はいずれも 0 と数えており、ES modules と Rust/Kotlin では `def_count`
+  シグナルが事実上機能していなかった
+- `const foo = (a, b) => …` 形のアロー関数代入を加算する。**矢印が右辺の
+  最上位**であることを要求し、`arr.reduce((a, x) => a + x, 0)` のような
+  「アロー関数を引数に取る呼び出し」は数えない
+- オブジェクトリテラル/インタフェースのプロパティ名 (`type:` / `enum?:` /
+  `class:` / `def:`) を除外した。これは旧版から存在した誤カウントで、
+  実コーパスでは 1 ファイルあたり最大 13 件の水増しを観測した
+
+### 制御フロー密度の算出を修正
+
+- 言語固有の分岐・繰り返し・例外構文を数えるようにした: Python `elif` `try`
+  `match` (文頭のみ) / Ruby `elsif` `unless` `until` `rescue` / Rust `match`
+  `loop` / Kotlin `when` / Go `select`。言語で絞るのは、`match` や `select` が
+  他言語では普通のメソッド名・関数名 (`str.match(...)`) として頻出するため。
+  Python の `match` を文頭限定にしているのは `re.match(...)` と綴りが同じため
+- **行コメント・ブロックコメント・文字列リテラルの中を数えないようにした**。
+  旧版は `# if you need this` や `x = 'for example'` を制御フロー行として
+  数えていた。分母 (非空行数) は元のテキストのまま — 分母からコメントを除くと
+  指標の意味自体が変わるため、誤検出の除去 (分子側) に限定している
+
+### 変更前後のコーパス比較 (旧版と同じ入力を両方で流した結果)
+
+| コーパス | ファイル数 | emit 件数 | 消えた emit | 増えた emit |
+|---|---|---|---|---|
+| 本 repo の `plugins/` (Python) | 347 | 34 → 32 | 2 | 0 |
+| 実プロジェクトの JS/TS 等 | 8,426 | 981 → 989 | 12 | 20 |
+| 多言語の合成 fixture | 99 | 6 → 4 | 3 | 1 |
+| `node_modules` 標本 | 400 | 23 → 0 | 23 | 0 |
+
+消えた emit の内訳はすべて説明がつく:
+
+- 32 件は第三者ディレクトリ (`node_modules` / `.venv` / `site-packages`) の
+  ファイルで、新設したディレクトリ skip の意図どおり
+- 3 件はコメント/文字列の中の英単語だけで制御フロー密度が高く見えていた
+  fixture (誤検出の解消)
+- 5 件は文字列リテラルに英文を多く持つファイル (i18n の文言テーブル、
+  フィクスチャ文字列の多い大きなテストファイル、ビルド成果物) で、実測密度が
+  下がった結果、既存の宣言的緩和 (×1.6) が効くようになり tier が 1 段下がった。
+  **閾値は変更していない** — 従来はコメント・文字列の中の英単語で密度が
+  水増しされていたために緩和が効いていなかった
+
+増えた 21 件はいずれも `def_count` または制御フロー密度のシグナルが正しく
+点火するようになったもの。import カテゴリが消えたファイルは 0 件、定義数が
+減ったファイルは 53 件でいずれも `def:` 等のプロパティ名の誤カウント解消。
+
 ## 0.3.1
 
 内部バックログの精査で見つかったテスト不足 2 件を修正。挙動変更は最小限
