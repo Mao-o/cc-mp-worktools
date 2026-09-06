@@ -40,6 +40,25 @@ def _missing_key_hint(account_key: str) -> str:
     return f"追加: {_BUILDER_PATH} set --service {account_key} --from-cli --commit"
 
 
+# **予算切れも deny に倒す** (fail-closed)。hook は hooks.json の timeout を超えると
+# Claude Code 側で打ち切られ、出力が破棄されて tool call がそのまま進む
+# (公式仕様上の fail-open)。複合コマンド (`gh ... && aws ... && gcloud ...`) は
+# service ごとに直列で verify するため、subprocess timeout の合計だけを見ていると
+# hook timeout を超えうる — CLI 未検出も CLI timeout も deny に倒しているのに、
+# ここだけ無音で通ることになる (内部バックログ)。予算を使い切った service は
+# CLI を呼ばずにこの deny へ集約し、必ず hook timeout 内に JSON を返す。
+def _budget_expired_error(account_key: str) -> str:
+    return (
+        f'"{account_key}" の検証を開始できませんでした: '
+        f"1 コマンド分の検証時間 (予算 {budget.TOTAL_BUDGET_SECONDS:.0f} 秒) を"
+        "使い切っています。\n"
+        "未検証のまま通すと hook 自体が時間切れになり、検証結果が破棄されたまま"
+        "コマンドが実行されるため deny します。\n"
+        "対処: コマンドをサービスごとに分けて実行するか、応答が遅い CLI "
+        "(ネットワーク待ち / 未ログイン) を解消してから再試行してください。"
+    )
+
+
 # 注記の要否は、verify() が返した文字列に **その service が案内する remediation
 # コマンドの実形** (services/<svc>.py の REMEDIATION_PATTERNS、引数付き) が一致するかで
 # 決める。文言 (「〜を実行してください」等) や語幹 (「firebase use」) で判定すると
@@ -427,6 +446,13 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 trace["cache_hit"][svc_name] = True
             continue
 
+        # 予算切れの判定は **CLI を起動する直前** に置く。cache hit と
+        # self-remediation は subprocess を起動しないので、予算が尽きていても
+        # そのまま通してよい (上の continue で先に抜けている)。
+        if budget.expired():
+            errors.append(_budget_expired_error(svc.ACCOUNT_KEY))
+            continue
+
         # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
         # inline_env が空なら env=None (= 親環境継承) のままにする。空 dict を
         # subprocess.run(env={}) に渡すと環境変数が一切無い状態になり危険なため。
@@ -510,7 +536,21 @@ def dispatch(command: str, cwd: str) -> dict | None:
     JSON で出す (内部バックログ: 例外時の無音 fail-open に加えて、正常系でも
     どのセグメントがどう判定されたか事後に追えなかった問題への対応)。
     出力先は stderr のみで、この trace 自体は allow/deny の判定に一切影響しない。
+
+    hook 1 回分の実時間予算 (`core/budget.py`) はここで張り、`finally` で必ず
+    解除する。解除しないと、同一プロセスで dispatch を繰り返す経路 (テスト) や
+    hook timeout の制約が無い経路 (builder) に締切が残り、既定の subprocess
+    timeout が黙って縮む。
     """
+    budget.start()
+    try:
+        return _dispatch_with_trace(command, cwd)
+    finally:
+        budget.clear()
+
+
+def _dispatch_with_trace(command: str, cwd: str) -> dict | None:
+    """`dispatch()` の本体 (予算の張り替えを含まない)。"""
     if not _debug_enabled():
         return _dispatch_impl(command, cwd, None)
 

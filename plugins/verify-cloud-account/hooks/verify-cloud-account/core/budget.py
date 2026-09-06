@@ -47,10 +47,14 @@ MAX_CALLS_PER_VERIFY = 2
 _deadline: float | None = None
 
 
-def start(total: float = TOTAL_BUDGET_SECONDS) -> None:
-    """総予算の締切を「今から `total` 秒後」に設定する (再呼び出しで上書き)。"""
+def start(total: float | None = None) -> None:
+    """総予算の締切を「今から `total` 秒後」に設定する (再呼び出しで上書き)。
+
+    `total` 省略時は `TOTAL_BUDGET_SECONDS` を **呼び出し時に**参照する
+    (既定引数に束縛しない — テストが定数を差し替えて予算切れを再現できるように)。
+    """
     global _deadline
-    _deadline = time.monotonic() + total
+    _deadline = time.monotonic() + (TOTAL_BUDGET_SECONDS if total is None else total)
 
 
 def clear() -> None:
@@ -95,12 +99,13 @@ def call_timeout(default: float) -> float:
     return max(MIN_CALL_TIMEOUT_SECONDS, min(default, remaining_sec))
 
 
-def worst_case_seconds(total: float = TOTAL_BUDGET_SECONDS) -> float:
-    """総予算 `total` のときに hook が消費しうる実時間の上限 (秒)。
+def worst_case_seconds(total: float | None = None) -> float:
+    """総予算 `total` (省略時 `TOTAL_BUDGET_SECONDS`) で消費しうる実時間の上限 (秒)。
 
     予算切れの判定は verify の**手前**でしか行わないため、締切直前に始まった
     verify の分だけ超過する。1 回の verify が行う subprocess 呼び出しは最大
     `MAX_CALLS_PER_VERIFY` 回で、各呼び出しの timeout は
     `MIN_CALL_TIMEOUT_SECONDS` まで丸められる。
     """
-    return total + MAX_CALLS_PER_VERIFY * MIN_CALL_TIMEOUT_SECONDS
+    base = TOTAL_BUDGET_SECONDS if total is None else total
+    return base + MAX_CALLS_PER_VERIFY * MIN_CALL_TIMEOUT_SECONDS

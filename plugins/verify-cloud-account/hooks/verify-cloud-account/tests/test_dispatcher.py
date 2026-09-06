@@ -14,6 +14,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
+from core import budget  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 from services import ALL as ALL_SERVICES  # noqa: E402
 
@@ -582,6 +583,121 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
         text = readme.read_text(encoding="utf-8")
         self.assertNotIn("未記載のサービスコマンドは検証対象外", text)
         self.assertIn("使う service のキーは全て書く必要がある", text)
+
+
+class TestBudgetExhaustionIsFailClosed(BaseWithTmpProject):
+    """hook の実時間予算を使い切った service は CLI を呼ばず deny に集約する。
+
+    内部バックログ: 複合コマンド (`gh ... && aws ... && gcloud ...`) は service
+    ごとに直列で verify するため、subprocess timeout の合計が hook timeout を
+    超えうる。hook が timeout すると出力が破棄されて tool call がそのまま進む
+    (公式仕様上の fail-open) ので、CLI 未検出・CLI timeout を deny に倒している
+    判定表に穴が空く。予算切れも deny に倒して塞ぐ。
+
+    実時間は測らない (flaky になるうえ「その回はたまたま間に合った」以上のことを
+    言わない)。予算計算の単体固定は `tests/test_budget.py`、ここでは dispatcher
+    がその計算をどう使うか (配線) を固定する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        budget.clear()
+        self.addCleanup(budget.clear)
+
+    def _deny_reason(self, result) -> str:
+        self.assertIsNotNone(result, "予算切れは deny されるべき")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        return out["permissionDecisionReason"]
+
+    def test_expired_budget_denies_without_invoking_verify(self):
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch.object(budget, "TOTAL_BUDGET_SECONDS", 0.0), \
+             mock.patch("services.github.verify") as mock_verify:
+            reason = self._deny_reason(
+                dispatch("gh pr create", str(self.project_dir))
+            )
+        mock_verify.assert_not_called()
+        self.assertIn('"github"', reason)
+        self.assertIn("予算", reason)
+
+    def test_dispatch_arms_the_budget_for_verify(self):
+        """verify() は予算が張られた状態で呼ばれる (= subprocess timeout が縮む)。
+
+        配線が無いと `budget.remaining()` は None のままで、各 service は
+        フルの timeout を使い続ける。
+        """
+        self._write_accounts({"github": "expected-user"})
+        seen: list[float | None] = []
+
+        def _record(*_args, **_kwargs):
+            seen.append(budget.remaining())
+            return None
+
+        with mock.patch("services.github.verify", side_effect=_record):
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(len(seen), 1)
+        self.assertIsNotNone(seen[0], "dispatch が予算を張っていない")
+        self.assertLessEqual(seen[0], budget.TOTAL_BUDGET_SECONDS)
+
+    def test_budget_is_released_after_dispatch(self):
+        """予算を解除しないと builder / 後続 dispatch の timeout が黙って縮む。"""
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch("services.github.verify", return_value=None):
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNone(budget.remaining())
+
+    def test_budget_is_released_even_when_dispatch_raises(self):
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch("services.github.verify", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNone(budget.remaining())
+
+    def test_only_the_service_that_ran_out_is_denied(self):
+        """先に検証できた service の結果は残し、予算切れの service だけ deny。
+
+        `expired()` を service ごとに評価する配線を固定する (最初の 1 回だけ
+        見て全体を打ち切る実装だと、検証できたはずの service まで巻き込む)。
+        """
+        self._write_accounts({"github": "expected-user", "gcloud": "my-proj"})
+        with mock.patch.object(budget, "expired", side_effect=[False, True]), \
+             mock.patch("services.github.verify", return_value=None) as gh_verify, \
+             mock.patch("services.gcloud.verify") as gcloud_verify:
+            reason = self._deny_reason(
+                dispatch(
+                    "gh pr create && gcloud run deploy", str(self.project_dir)
+                )
+            )
+        gh_verify.assert_called_once()
+        gcloud_verify.assert_not_called()
+        self.assertIn('"gcloud"', reason)
+        self.assertNotIn('"github"', reason)
+
+    def test_self_remediation_is_not_denied_by_expired_budget(self):
+        """CLI を起動しない経路 (自己修復の切替) は予算切れでも通す。
+
+        予算切れの判定を CLI 起動の直前より手前に置くと、時間を使わない
+        allow まで巻き込んで remediation loop になる。
+        """
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch.object(budget, "TOTAL_BUDGET_SECONDS", 0.0), \
+             mock.patch("services.github.verify") as mock_verify:
+            result = dispatch(
+                "gh auth switch --user expected-user", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+    def test_missing_key_takes_precedence_over_expired_budget(self):
+        """キー未記載は CLI を呼ばずに判定できるので、予算に関係なく従来の文面。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch.object(budget, "TOTAL_BUDGET_SECONDS", 0.0):
+            reason = self._deny_reason(
+                dispatch("gh pr create", str(self.project_dir))
+            )
+        self.assertIn('"github" キーがありません', reason)
+        self.assertNotIn("予算", reason)
 
 
 class TestAncestorLookup(unittest.TestCase):
