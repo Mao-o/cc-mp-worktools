@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from core.context import RepoContext
 from core.runtime import runner_prefix
+from core.workspaces import render_workspaces_line
 
 
 def render_header(ctx: RepoContext) -> str:
@@ -19,7 +20,13 @@ def render_header(ctx: RepoContext) -> str:
     lines.append(f"- repo_root: {ctx.root}")
     cwd_rel = ctx.cwd_relative
     if cwd_rel:
-        lines.append(f"- cwd: {cwd_rel} (subdirectory of repo_root)")
+        manifest_rel = ctx.manifest_rel
+        if manifest_rel:
+            lines.append(
+                f"- cwd: {cwd_rel} (subdirectory of repo_root; manifests scoped to workspace {manifest_rel}/)"
+            )
+        else:
+            lines.append(f"- cwd: {cwd_rel} (subdirectory of repo_root)")
     if ctx.results.get("is_git_repo") is False:
         lines.append("- git_repo: false (using filesystem walk)")
 
@@ -28,6 +35,12 @@ def render_header(ctx: RepoContext) -> str:
         lines.append(f"- package_manager: {pm}")
     if ctx.stack:
         lines.append(f"- stack: {', '.join(ctx.stack)}")
+    workspaces = ctx.results.get("workspaces") or []
+    ws_line = render_workspaces_line(workspaces, len(ctx.workspace_dirs))
+    if ws_line:
+        lines.append(ws_line)
+    if ctx.results.get("tracked_files_truncated"):
+        lines.append(f"- tracked_files: {len(ctx.tracked_files)}+ (truncated; counts below are lower bounds)")
 
     lines.extend(_render_runtime(ctx))
 

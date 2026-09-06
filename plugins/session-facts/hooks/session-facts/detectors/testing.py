@@ -18,11 +18,16 @@ class TestingDetector:
             found.append("vitest")
         if "jest" in deps:
             found.append("jest")
-        if "@playwright/test" in deps or (ctx.root / "playwright.config.ts").exists():
+        if "@playwright/test" in deps or ctx.find_in_manifest_dirs("playwright.config.ts") is not None:
             found.append("playwright")
-        if "cypress" in deps or (ctx.root / "cypress.config.ts").exists():
+        if "cypress" in deps or ctx.find_in_manifest_dirs("cypress.config.ts") is not None:
             found.append("cypress")
-        if (ctx.root / "pnpm-workspace.yaml").exists() or (ctx.root / "turbo.json").exists():
+        root = ctx.root
+        if (
+            (root / "pnpm-workspace.yaml").exists()
+            or (root / "turbo.json").exists()
+            or len(ctx.workspace_dirs) >= 2
+        ):
             found.append("monorepo")
         return found
 

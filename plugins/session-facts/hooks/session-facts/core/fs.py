@@ -40,7 +40,21 @@ def has_nested_project_markers(
     max_depth: int = 2,
     max_dirs: int = 64,
 ) -> bool:
-    """True when any of ``markers`` exists in a bounded subtree under ``root``.
+    """``scan_nested_project_markers()`` の真偽値だけを見る簡易版。"""
+    return scan_nested_project_markers(root, markers, skip_dirs, max_depth, max_dirs)[0]
+
+
+def scan_nested_project_markers(
+    root: Path,
+    markers: Iterable[str],
+    skip_dirs: Iterable[str] = (),
+    max_depth: int = 2,
+    max_dirs: int = 64,
+) -> Tuple[bool, bool]:
+    """``(マーカーが見つかったか, 走査を完了できたか)`` を返す。
+
+    2 つ目が ``False`` のとき (訪問予算・列挙上限で打ち切った、または列挙が
+    OSError で失敗した)、「マーカーが無い」とは断定できない (joa.31)。
 
     ルート直下にマニフェストを置かないワークスペース (例: ``web/`` と ``api/``
     にそれぞれのマニフェストがあり、ルートには何も無い構成) を「非プロジェクト」
@@ -56,13 +70,20 @@ def has_nested_project_markers(
     skip = set(skip_dirs)
     queue = [(root, 0)]
     visited = 0
+    complete = True
     while queue:
         current, depth = queue.pop(0)
         if depth > 0:
             visited += 1
-            if has_project_markers(current, markers):
-                return True
-        if depth >= max_depth or visited >= max_dirs:
+            found, sub_complete = scan_project_markers(current, markers)
+            if found:
+                return True, True
+            if not sub_complete:
+                complete = False
+        if depth >= max_depth:
+            continue
+        if visited >= max_dirs:
+            complete = False
             continue
         # ディレクトリ全体を列挙・ソートしてから打ち切ると、子が数十万ある
         # ディレクトリでメモリと時間を食い、この関数が主張する上限が意味を
@@ -71,6 +92,7 @@ def has_nested_project_markers(
         # 走査を避けたい相手はまさに巨大なディレクトリなので許容する。
         remaining = max_dirs - visited - len(queue)
         if remaining <= 0:
+            complete = False
             continue
         try:
             # `os.scandir()` を直接使う。`Path.iterdir()` は CPython では
@@ -86,14 +108,24 @@ def has_nested_project_markers(
             # サブプロジェクトは見つからないことがある (走査を強制する
             # オプションが escape hatch)。
             with os.scandir(current) as it:
+                seen = 0
                 for entry in islice(it, MAX_NESTED_SCAN_ENTRIES):
+                    seen += 1
                     if _is_candidate_dir(entry, skip):
                         queue.append((Path(entry.path), depth + 1))
                         if len(queue) + visited >= max_dirs:
+                            complete = False
                             break
+                if seen >= MAX_NESTED_SCAN_ENTRIES:
+                    # ちょうど上限件数のときも「続きがあるかもしれない」側に
+                    # 倒す (scan_project_markers と同じ規約)。
+                    complete = False
         except OSError:
+            # 権限などで列挙できないディレクトリは「見られなかった」であって
+            # 「マーカーが無い」ではない。
+            complete = False
             continue
-    return False
+    return False, complete
 
 
 def _is_candidate_dir(entry: "os.DirEntry[str]", skip: set) -> bool:

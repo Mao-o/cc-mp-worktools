@@ -444,9 +444,8 @@ def has_firebase(ctx: "RepoContext") -> bool:
     cached = ctx.results.get("has_firebase")
     if cached is not None:
         return cached
-    root = ctx.root
     result = (
-        any((root / name).exists() for name in _FIREBASE_CONFIG_FILES)
+        ctx.find_in_manifest_dirs(*_FIREBASE_CONFIG_FILES) is not None
         or _has_firebase_js_dependency(ctx)
         or _has_firebase_python_dependency(ctx)
         or _has_firebase_flutter_dependency(ctx)

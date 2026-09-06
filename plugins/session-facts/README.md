@@ -103,7 +103,8 @@ claude --plugin-dir /path/to/cc-mp-worktools/plugins/session-facts
 ## Project Facts
 - purpose: a monorepo of web apps and shared packages
 - repo_root: /absolute/path/to/repo
-- stack: typescript, next, python
+- stack: typescript, next, python, monorepo
+- workspaces: apps/web (pnpm: nextjs, react), packages/core (python: fastapi)
 - major_dependencies: next@15.1, react@19.0, firebase@11.0
 - branch: feat/login (ahead 3, behind 1 vs origin/main)
 - recent_commits:
@@ -211,7 +212,11 @@ detector が同じ repo にヒットしてよい)。
 
 依存の中身 (バージョン付き一覧) は上記のスタックタグとは別に `major_dependencies` /
 `## Repo-Specific Notes` 側で収集する。Python は `pyproject.toml` /
-`requirements*.txt` / `Pipfile` / `setup.cfg` の主要依存を横断的に見る。Makefile の
+`requirements*.txt` / `Pipfile` / `setup.cfg` の主要依存を横断的に見る。Go は
+`go.mod` (単行 / ブロック `require`、`// indirect` 除外、`/vN` 接尾辞除去)、Ruby は
+`Gemfile` の `gem` 行、PHP は `composer.json` の `require` / `require-dev` を読む。
+manifest は root → workspace の順に見るので、`api/` (Python) + `web/` (JS) の構成では
+api の依存が先に並ぶ。Makefile の
 conventional target (`make test` 等) は `## Likely Commands` へ反映される。
 `scala`/`elixir`/`swift`/`dotnet` の Likely Commands (`sbt test` 等) は他スタック
 と異なり検出された `ctx.stack` を根拠にする (repo 直下の primary package manager
@@ -230,6 +235,9 @@ package manifest が無い) はこの条件を満たさないため、Likely Com
 
 1. ヘッダーに `- cwd: <relative path> (subdirectory of repo_root)` 行
 2. `## Subtree (cwd: <relative path>, dirs only, depth=N)` ブロックを `## Structure` の直後に挿入
+3. cwd が workspace (下記) の中なら、`package_manager` / `## Scripts` / `## Env Keys` /
+   Likely Commands の script 昇格をその workspace の manifest で出す。cwd 行は
+   `(subdirectory of repo_root; manifests scoped to workspace <dir>/)` になる
 
 subtree モードでは repo 全体の `## Structure` は **top-level ディレクトリ名のみ
 (depth=1)** に圧縮され、詳細は cwd 配下の `## Subtree` 側に寄せる (横断作業の地図と
@@ -253,6 +261,31 @@ subtree モードでは repo 全体の `## Structure` は **top-level ディレ�
 cwd == repo_root のときはどちらも出力されず、従来挙動と完全に一致する。
 `Service Entry Points` などの既存ブロックは引き続きリポジトリ全体スコープで生成され、
 横断的な作業のニーズも維持される。
+
+### workspace (root 直下に manifest が無い構成)
+
+`package.json` / `pyproject.toml` が root ではなくサブディレクトリにある構成 (`api/` +
+`web/`、pnpm workspace の `apps/*`、SDK 同梱の `sdks/*` 等) では、tracked files から
+深さ 3 以内・12 件までの manifest ディレクトリを **workspace** として拾い
+(`core/context.py::workspace_dirs`、dot-dir と `SKIP_DIRS` 配下は除外):
+
+- **stack** / `major_dependencies` / firebase 判定は全 workspace の manifest を合算する
+  (`ctx.all_deps` は root → workspace の順の union、pyproject は全件のテキストを見る)。
+  config file 由来の detector (`next.config.*` / `Dockerfile` / `go.mod` /
+  `Cargo.toml` 等) も root と各 workspace を探す
+- ヘッダーに `- workspaces: api (uv: python, fastapi), web (pnpm: nextjs, react)` 行を
+  足す (最大 8 件、pm と主要タグ。`core/workspaces.py`)。2 件以上あれば stack に
+  `monorepo` が付く
+- `## Env Keys` は root と全 workspace の `.env.example` 系を合算 (subtree モードでは
+  cwd の workspace を先頭に)
+- `## Next.js Facts` は Next.js が置かれた workspace の config / `app/` を読み、
+  `- app_dir: web/` を示す
+- Likely Commands に `cd <dir> && <cmd>` 形式で各 workspace の `test` / `dev` script と
+  Python テスト実行 (`uv run pytest` 等、その workspace 配下にテストファイルがあるとき)
+  を最大 4 workspace × 2 件足す (subtree モードでは出さない)
+
+purpose 推定だけは root の manifest / README のみを見る (workspace の description は
+そのパッケージの説明であって repo の説明ではないため)。
 
 ## CLI オプション
 
@@ -280,6 +313,7 @@ cwd == repo_root のときはどちらも出力されず、従来挙動と完全
 | `--max-domain-types` | 10 | ドメイン型最大数 |
 | `--include-hub-files` | false | Hub Files Collector を有効化 (被参照数ランキング) |
 | `--max-hub-files` | 8 | Hub Files 最大数 |
+| `--max-hub-scan` | 3,000 | Hub Files が本文を読む候補ファイル数の上限。超えるとセクションは `- skipped: N candidate files > --max-hub-scan M` の 1 行になる |
 | `--no-recent-commits` | false | `recent_commits` 行を抑制 (gitStatus を注入する main セッション向け) |
 | `--force-walk` | false | 非 git かつ project marker が無いディレクトリでもフルの走査解析を強制 (下記「非プロジェクトディレクトリ」参照) |
 | `--emit` | `stdout` | 出力エンベロープ。`subagent-json` で SubagentStart 用 `hookSpecificOutput` JSON に包む |

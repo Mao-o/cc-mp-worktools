@@ -10,7 +10,7 @@ class DenoDetector:
     priority = 12
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "deno.json").exists() or (ctx.root / "deno.jsonc").exists():
+        if ctx.find_in_manifest_dirs("deno.json", "deno.jsonc") is not None:
             return ["deno"]
         return []
 

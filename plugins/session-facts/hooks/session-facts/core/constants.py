@@ -420,6 +420,12 @@ PROJECT_MARKERS = (
 # referrers before a file is surfaced as noise-free signal.
 HUB_FILES_MAX_SCAN = 3000
 
+# cli.py: hard cap on the tracked-file list every collector iterates over.
+# 100k paths is far beyond any repo this hook is meant for; past it the
+# per-path Path() work across a dozen collectors approaches the hook's
+# 15 s timeout (internal backlog joa.25). The header says when it applied.
+MAX_TRACKED_FILES = 100_000
+
 # core/context.py workspace discovery (internal backlog joa.2): manifests
 # below the root that mark sub-projects. Depth is counted in directory
 # levels below the root (``apps/web/package.json`` is depth 2).

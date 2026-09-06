@@ -13,6 +13,7 @@ from .constants import (
     DEFAULT_MAX_DOMAIN_TYPES,
     DEFAULT_MAX_ENV_KEYS,
     DEFAULT_MAX_HUB_FILES,
+    HUB_FILES_MAX_SCAN,
     DEFAULT_MAX_MAJOR_DEPS,
     DEFAULT_MAX_NOTES,
     DEFAULT_MAX_OUTPUT_CHARS,
@@ -52,6 +53,10 @@ class ResultsDict(TypedDict, total=False):
     # Memoization slot for core.firebase.has_firebase(), set by whichever of
     # detectors/firebase.py / collectors/repo_notes.py runs first.
     has_firebase: bool
+    # core/workspaces.py summaries for the header (joa.2).
+    workspaces: List[Dict[str, object]]
+    # True when the tracked-file list hit MAX_TRACKED_FILES (joa.25).
+    tracked_files_truncated: bool
 
 
 @dataclass
@@ -72,6 +77,7 @@ class AnalysisConfig:
     max_config_hints: int = DEFAULT_MAX_CONFIG_HINTS
     include_hub_files: bool = False
     max_hub_files: int = DEFAULT_MAX_HUB_FILES
+    max_hub_scan: int = HUB_FILES_MAX_SCAN
     # SessionStart passes False: the harness already injects recent commits
     # there (gitStatus), while subagents receive no git context at all.
     include_recent_commits: bool = True
@@ -140,30 +146,87 @@ class RepoContext:
             return self.root
         return self.cwd
 
+    # --- manifest scoping -------------------------------------------------
+    #
+    # ``package_json`` / ``pyproject_toml`` / ``detect_package_manager`` read
+    # the manifest directory this run is scoped to: in subtree mode (cwd
+    # inside a workspace such as ``api/`` or ``apps/web/``) that is the
+    # workspace's own manifest, otherwise the repo root (joa.2 part 2).
+    # ``root_package_json`` is the root manifest unconditionally, for the
+    # few readers (purpose) that describe the repository as a whole.
+
+    @property
+    def manifest_rel(self) -> str:
+        """Relative dir of the manifest this run is scoped to ("" = root)."""
+        cwd_rel = self.cwd_relative
+        if not cwd_rel:
+            return ""
+        best = ""
+        for rel_dir in self.workspace_dirs:
+            if cwd_rel == rel_dir or cwd_rel.startswith(rel_dir + "/"):
+                if len(rel_dir) > len(best):
+                    best = rel_dir
+        return best
+
+    @property
+    def manifest_root(self) -> Path:
+        rel = self.manifest_rel
+        return self.root / rel if rel else self.root
+
+    @property
+    def manifest_dirs(self) -> List[str]:
+        """Root ("") followed by every workspace dir."""
+        return [""] + list(self.workspace_dirs)
+
+    def find_in_manifest_dirs(self, *names: str) -> Optional[str]:
+        """The first manifest dir ("" = root) where any of ``names`` exists,
+        or None. Lets a detector keyed off a config file (``next.config.js``,
+        ``Dockerfile``, ``go.mod``) fire for a sub-project too."""
+        for rel_dir in self.manifest_dirs:
+            base = self.root / rel_dir if rel_dir else self.root
+            for name in names:
+                if (base / name).exists():
+                    return rel_dir
+        return None
+
+    @property
+    def root_package_json(self) -> dict:
+        from .fs import load_json
+        return load_json(self.root / "package.json") or {}
+
     @property
     def package_json(self) -> dict:
         if self._pkg_json is None:
             from .fs import load_json
-            self._pkg_json = load_json(self.root / "package.json") or {}
+            self._pkg_json = load_json(self.manifest_root / "package.json") or {}
         return self._pkg_json
 
     @property
     def all_deps(self) -> Dict[str, str]:
+        """npm dependencies across the root and every workspace manifest
+        (root first, so its version wins on a name clash)."""
         if self._all_deps is None:
             self._all_deps = {}
-            for section in ("dependencies", "devDependencies", "peerDependencies"):
-                d = self.package_json.get(section)
-                if isinstance(d, dict):
-                    self._all_deps.update(d)
+            for _rel, pkg in self.package_json_manifests():
+                for section in ("dependencies", "devDependencies", "peerDependencies"):
+                    d = pkg.get(section)
+                    if isinstance(d, dict):
+                        for name, version in d.items():
+                            self._all_deps.setdefault(name, version)
         return self._all_deps
 
     @property
     def pyproject_toml(self) -> str:
         if self._pyproject_toml is None:
             from .fs import read_text
-            path = self.root / "pyproject.toml"
+            path = self.manifest_root / "pyproject.toml"
             self._pyproject_toml = read_text(path) if path.exists() else ""
         return self._pyproject_toml
+
+    @property
+    def all_pyproject_text(self) -> str:
+        """Every tracked pyproject.toml joined, for keyword-style detection."""
+        return "\n".join(text for _rel, text in self.pyproject_manifests())
 
     # --- workspace (sub-project) manifests -------------------------------
     #
@@ -186,7 +249,7 @@ class RepoContext:
                     continue
                 if len(parts) - 1 > MAX_WORKSPACE_MANIFEST_DEPTH:
                     continue
-                if any(part in SKIP_DIRS for part in parts[:-1]):
+                if any(part in SKIP_DIRS or part.startswith(".") for part in parts[:-1]):
                     continue
                 rel_dir = "/".join(parts[:-1])
                 if rel_dir not in seen:
@@ -202,8 +265,9 @@ class RepoContext:
         if self._pkg_manifests is None:
             from .fs import load_json
             out: List[Tuple[str, dict]] = []
-            if self.package_json:
-                out.append(("", self.package_json))
+            root_pkg = self.root_package_json
+            if root_pkg:
+                out.append(("", root_pkg))
             for rel_dir in self.workspace_dirs:
                 data = load_json(self.root / rel_dir / "package.json")
                 if isinstance(data, dict):
@@ -217,8 +281,11 @@ class RepoContext:
         if self._pyproject_manifests is None:
             from .fs import read_text
             out: List[Tuple[str, str]] = []
-            if self.pyproject_toml:
-                out.append(("", self.pyproject_toml))
+            root_path = self.root / "pyproject.toml"
+            if root_path.exists():
+                text = read_text(root_path)
+                if text:
+                    out.append(("", text))
             for rel_dir in self.workspace_dirs:
                 path = self.root / rel_dir / "pyproject.toml"
                 if path.exists():

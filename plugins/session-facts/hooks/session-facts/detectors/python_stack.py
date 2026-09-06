@@ -10,7 +10,9 @@ class PythonStackDetector:
     priority = 50
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        pyproject = ctx.pyproject_toml
+        # Every tracked pyproject.toml counts (root or workspace, joa.2):
+        # dify keeps its only pyproject under api/.
+        pyproject = ctx.all_pyproject_text
         found: List[str] = []
         if pyproject:
             found.append("python")
@@ -21,18 +23,19 @@ class PythonStackDetector:
                 found.append("python")
         if not found:
             return []
-        if (ctx.root / "uv.lock").exists() or (ctx.root / "uv.toml").exists():
+        if ctx.find_in_manifest_dirs("uv.lock", "uv.toml") is not None:
             found.append("uv")
-        if (ctx.root / "poetry.lock").exists():
+        if ctx.find_in_manifest_dirs("poetry.lock") is not None:
             found.append("poetry")
         if pyproject:
+            lowered = pyproject.lower()
             for fw, label in (
                 ("fastapi", "fastapi"),
                 ("django", "django"),
                 ("flask", "flask"),
                 ("pytest", "pytest"),
             ):
-                if fw in pyproject.lower():
+                if fw in lowered:
                     found.append(label)
         return found
 

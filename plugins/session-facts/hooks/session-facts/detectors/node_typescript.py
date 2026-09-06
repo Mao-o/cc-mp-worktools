@@ -11,11 +11,13 @@ class NodeTypescriptDetector:
 
     def detect(self, ctx: RepoContext) -> List[str]:
         found: List[str] = []
-        if (ctx.root / "package.json").exists():
+        # Any tracked package.json (root or workspace) makes this a Node
+        # repo; a monorepo whose root holds only pnpm-workspace.yaml and
+        # whose apps live under apps/* used to get no "node" tag (joa.2).
+        if ctx.find_in_manifest_dirs("package.json") is not None:
             found.append("node")
         if (
-            (ctx.root / "tsconfig.json").exists()
-            or (ctx.root / "tsconfig.base.json").exists()
+            ctx.find_in_manifest_dirs("tsconfig.json", "tsconfig.base.json") is not None
             or "typescript" in ctx.all_deps
         ):
             found.append("typescript")

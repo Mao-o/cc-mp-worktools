@@ -13,10 +13,7 @@ class ReactViteDetector:
         found: List[str] = []
         if "react" in ctx.all_deps:
             found.append("react")
-        if any(
-            (ctx.root / name).exists()
-            for name in ("vite.config.ts", "vite.config.js")
-        ):
+        if ctx.find_in_manifest_dirs("vite.config.ts", "vite.config.js") is not None:
             found.append("vite")
         return found
 

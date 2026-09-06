@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from core.dotnet import has_dotnet_project
@@ -9,7 +10,12 @@ if TYPE_CHECKING:
 
 
 def detect_package_manager(ctx: "RepoContext") -> Optional[str]:
-    root = ctx.root
+    """Package manager of the manifest directory this run is scoped to:
+    the workspace containing cwd in subtree mode, else the repo root."""
+    return detect_package_manager_at(ctx.manifest_root)
+
+
+def detect_package_manager_at(root: Path) -> Optional[str]:
     # JS/TS
     if (root / "pnpm-lock.yaml").exists() or (root / "pnpm-workspace.yaml").exists():
         return "pnpm"
