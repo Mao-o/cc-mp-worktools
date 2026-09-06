@@ -80,13 +80,19 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
-  set --service github --from-cli --commit
+  set --service github --from-cli --dry-run
 ```
 
 `init` ではなく `set` を案内するのは、accounts.local.json を親から継承している
 階層では `init` が「継承中の設定を覆い隠す」として exit 2 で拒否されるのに対し、
 `set` は継承元を直接編集してどちらの階層でも通るため
 (→ [builder も同じ解決を使う](#builder-も同じ解決を使う))。
+
+`--commit` ではなく `--dry-run` を案内するのは、`--from-cli` が
+**現在ログイン中のアカウント**を期待値として提案するため。間違ったアカウントに
+入ったまま commit すると、この plugin が防ぐはずの状態をそのまま正解として
+焼き付けてしまう。提案値が意図したアカウントであることを確認してから
+`--commit` に変えること。
 
 ### `.gitignore`
 

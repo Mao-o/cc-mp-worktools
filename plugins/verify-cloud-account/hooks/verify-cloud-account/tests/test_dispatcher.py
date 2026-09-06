@@ -559,8 +559,22 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
         self._write_accounts({"aws": "123456789012"})
         reason = self._deny_reason("gh pr list")
         self.assertIn("accounts_builder.py set --service github", reason)
-        self.assertIn("--from-cli --commit", reason)
+        self.assertIn("--from-cli", reason)
         self.assertNotIn("accounts_builder.py init --service", reason)
+
+    def test_missing_key_deny_does_not_hand_over_a_one_shot_commit(self):
+        """`--from-cli --commit` の一発コマンドを案内しない。
+
+        `--from-cli` は「今ログインしているアカウント」を期待値として提案する。
+        間違ったアカウントに入ったまま commit すると、この plugin が防ぐはずの
+        状態をそのまま正解として焼き付けてしまう。deny を消したい相手に一発で
+        通る形を渡すと必ずそう使われるので、dry-run + 確認の 2 段で案内する。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        reason = self._deny_reason("gh pr list")
+        self.assertIn("--from-cli --dry-run", reason)
+        self.assertNotIn("--from-cli --commit", reason)
+        self.assertIn("確認してから", reason)
 
     def test_missing_key_deny_does_not_promise_allow(self):
         """「検証対象外」= allow の約束を deny 文面に残さない。"""

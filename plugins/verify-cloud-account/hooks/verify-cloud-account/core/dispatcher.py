@@ -36,8 +36,17 @@ _MIGRATE_HINT = (
 # 見つかっている」ときにしか出ないため。そのファイルが親から継承されている場合
 # `init` は「継承中の設定を覆い隠す」として exit 2 で拒否する (builder `_cmd_init`)
 # が、`set` は継承元を直接編集するのでどちらの階層でも通る。
+#
+# **`--commit` を直接案内しない。** `--from-cli` は「今ログインしているアカウント」を
+# 期待値として提案するので、間違ったアカウントに入ったまま commit すると、この plugin
+# が防ぐはずの状態をそのまま正解として焼き付けてしまう。deny を消すのが目的の相手に
+# 一発で通る呪文を渡すと必ずそう使われるため、`--dry-run` + 確認の 2 段にする。
 def _missing_key_hint(account_key: str) -> str:
-    return f"追加: {_BUILDER_PATH} set --service {account_key} --from-cli --commit"
+    return (
+        f"追加: {_BUILDER_PATH} set --service {account_key} --from-cli --dry-run\n"
+        "(--from-cli は現在ログイン中のアカウントを提案します。意図したアカウントか"
+        "確認してから --dry-run を --commit に変えてください)"
+    )
 
 
 # **予算切れも deny に倒す** (fail-closed)。hook は hooks.json の timeout を超えると
