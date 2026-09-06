@@ -413,6 +413,50 @@ class TestShow(BaseBuilder):
         self.assertEqual(code, 0)
         self.assertIn("[mismatch]", out)
 
+    def test_show_match_when_ghe_listed_first(self):
+        """内部バックログ: gh が GHE を先に列挙する環境で show が [mismatch] を
+        出す一方 hook (verify) は allow していた。show は service の `matches()`
+        経由で verify と同じ verdict を出す。
+
+        `_entries_equal` 単体ではなく **`show` の呼び出し経路**を通す
+        (単体だけだと `_cmd_show` が service を渡し忘れても green のままになる)。
+        """
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "expected-user"}), encoding="utf-8"
+        )
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={
+                "ghe.example.com": "corp-user",
+                "github.com": "expected-user",
+            },
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[match]", out)
+        self.assertNotIn("[mismatch]", out)
+
+    def test_show_mismatch_when_only_ghe_host_matches(self):
+        """逆方向: GHE 側のユーザー名は scalar 期待値に一致しない。
+
+        照合先が「最初の host」に戻ると、この期待値が誤って [match] になる。
+        """
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "corp-user"}), encoding="utf-8"
+        )
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={
+                "ghe.example.com": "corp-user",
+                "github.com": "expected-user",
+            },
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[mismatch]", out)
+
     def test_show_mismatch_dict_expected_str_current_outside_map(self):
         """alias map のいずれの value にも一致しない scalar current → [mismatch]."""
         self.new_dir.mkdir(parents=True)

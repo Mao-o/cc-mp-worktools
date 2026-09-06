@@ -47,7 +47,7 @@ _WRAPPERS_THREE = {("mise", "exec", "--")}
 # 「env 挙動を必ず分類せよ」と促す checklist、(2) テストが
 # 「`_WRAPPERS_*` の全要素がこの dict のキーに存在する」ことを assert して
 # 未分類 wrapper の混入を検出する guard、の 2 つ。分類の根拠と将来 wrapper
-# 追加時のチェックリストは CLAUDE.local.md の D16 ノート参照。
+# 追加時のチェックリストは `docs/wrapper-env-audit.md` (D16) を正本とする。
 #
 # クラス:
 #   "passthrough" — 継承 env を素通しする。pre-wrapper env を収集・伝播してよい

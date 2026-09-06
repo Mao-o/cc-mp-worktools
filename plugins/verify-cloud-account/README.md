@@ -421,8 +421,8 @@ subprocess には反映されず deny される。
 ```json
 {
   "github": {
-    "github.com":        "Mao-o",
-    "ghe.company.com":   "mao-corp"
+    "github.com":        "your-github-user",
+    "ghe.example.com":   "your-corp-user"
   }
 }
 ```
@@ -592,6 +592,31 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 従来 (〜0.7.3) は `gh pr list` (検証成功・cache 書込) → `gh auth switch --user other`
 → `gh pr create` が 30 秒以内なら cache hit で別アカウントの write が通っていた。
 
+### 検証時間の予算 (v0.12.0)
+
+hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code 側で打ち切られ、
+**出力が破棄されてコマンドがそのまま実行される** (公式仕様上の fail-open)。
+一方で各 CLI 呼び出しの timeout は 1 コマンドあたりの上限でしかなく、
+`gh ... && aws ... && gcloud ...` のような複合コマンドはサービスごとに直列で
+検証するため、合計は hook timeout を超えうる。CLI 未検出も CLI timeout も deny に
+倒しているのに、ここだけ無音で通ると判定表に穴が空く。
+
+そこで hook 1 回分に **総予算 15 秒** (`core/budget.py`) を置く。
+
+- 各 CLI 呼び出しの timeout は「既定値」と「残り予算」の小さい方
+  (下限 1 秒 — 0 秒 timeout は必ず失敗する無意味な呼び出しになるため)
+- 予算を使い切った時点で、まだ検証していないサービスは **CLI を呼ばずに deny**
+  (「検証時間の予算を使い切った」旨と対処を表示)
+- cache hit と self-remediation (期待値への切替) は CLI を起動しないので、
+  予算切れでもそのまま通る
+- 予算切れの判定は検証の**手前**でしか行えないため、締切直前に始まった検証の分だけ
+  超過しうる (上限 2 秒)。`15 + 2 < 20` が成り立つことはテストが `hooks.json` を
+  読んで機械的に照合する
+
+実運用で予算切れに当たるのは「複数サービスの CLI がどれも応答しない」場合に限られる。
+その場合はコマンドをサービスごとに分けるか、遅い CLI (未ログイン・ネットワーク待ち)
+を解消してから再試行する。
+
 ## 既知の制限
 
 - `gh auth status` / `firebase use` / `aws sts` / `gcloud config` /
@@ -696,7 +721,7 @@ hook 実行時に環境変数 `VERIFY_CLOUD_ACCOUNT_DEBUG=1` を立てると、�
 (`claude --verbose` で確認可能)。いずれの場合も action 自体は fail-open で
 進行する (実行を止めない)。
 
-詳細な設計背景は CLAUDE.local.md (開発者向け、リポジトリ未同梱) を参照。
+詳細な設計背景・拡張手順は [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) を参照。
 
 ## 互換性
 

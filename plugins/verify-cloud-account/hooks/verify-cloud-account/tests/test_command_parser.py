@@ -558,14 +558,14 @@ class TestWrapperEnvClassificationGuard(unittest.TestCase):
     `_WRAPPERS_SINGLE` / `_WRAPPERS_TWO` / `_WRAPPERS_THREE` に wrapper を追加
     したのに `_WRAPPER_ENV_CLASS` に分類を足し忘れると、その wrapper の env 挙動
     (継承 env を素通すか / scrub・reset するか) が未検証のまま伝播経路に入り、
-    過去 (D11 round1-3 / 8zr) と同じ「検証 env ≠ 実行 env」の whack-a-mole を
-    再発させる。このテストが両者の同期を機械的に保証する。
+    過去 (D11 round1-3 と、その後の内部バックログ) と同じ「検証 env ≠ 実行 env」の
+    whack-a-mole を再発させる。このテストが両者の同期を機械的に保証する。
 
     新しい wrapper を追加するときは:
       1. `_WRAPPERS_*` に追加
       2. `_WRAPPER_ENV_CLASS` に "passthrough" / "conditional_scrub" を追加
       3. conditional_scrub なら scrub 補正ロジック + 回帰テストを追加
-      4. CLAUDE.local.md の D16 表とチェックリストを更新
+      4. `docs/wrapper-env-audit.md` の D16 表とチェックリストを更新
     """
 
     def _all_wrapper_keys(self):
@@ -584,7 +584,8 @@ class TestWrapperEnvClassificationGuard(unittest.TestCase):
             unclassified,
             set(),
             "未分類の透過 wrapper があります。_WRAPPER_ENV_CLASS に "
-            "'passthrough' / 'conditional_scrub' を追加し、CLAUDE.local.md の "
+            "'passthrough' / 'conditional_scrub' を追加し、"
+            "docs/wrapper-env-audit.md の "
             f"D16 表を更新してください: {sorted(map(str, unclassified))}",
         )
 

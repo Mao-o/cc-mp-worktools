@@ -47,7 +47,34 @@
                                         ならそれ、無ければ最初の active host」という
                                         動的な照合をするため、どの静的 hostname とも
                                         等価にならない
-     - verify(expected, project_dir) -> str | None  検証関数 (None=成功, 文字列=エラー理由)
+     - REMEDIATION_PATTERNS: tuple[str, ...]
+                                    verify() が deny 理由で案内する remediation
+                                    コマンドの**実形** (引数付きの正規表現。例:
+                                    `gh auth switch --`)。dispatcher はこれが
+                                    deny 文面に一致したときだけ「案内した
+                                    コマンドは単独で実行せよ」の注記を足す。
+                                    文言や語幹で判定するとインストール案内や
+                                    診断文まで拾うため実形で宣言する。
+                                    **全 service 必須** (契約テストが強制)
+     - REMEDIATION_NOTE: str        (任意) 上の注記の文面を service 固有に
+                                    差し替える。aws だけ remediation がインライン
+                                    env (`AWS_PROFILE=<p>` を元のコマンド行頭に
+                                    付ける) で「単独で実行」が成り立たないため
+     - is_self_remediation(candidate, expected) -> bool
+                                    (任意) 「候補セグメントが**期待値へ向かう**
+                                    切替コマンドか」。dispatcher は全セグメントが
+                                    これに該当するとき検証をスキップする
+                                    (deny が案内した切替コマンド自身が deny
+                                    される self-remediation loop を防ぐ)。
+                                    期待値以外への切替では False を返すこと
+     - verify(expected, project_dir, env=None, context=None) -> str | None
+                                    検証関数 (None=成功, 文字列=エラー理由)。
+                                    env はインライン環境変数をマージ済みの完全 env
+                                    (None=親環境継承)、context は候補コマンドの
+                                    context option (`--profile` / `--project` 等)。
+                                    subprocess の timeout は直値ではなく
+                                    `core.budget.call_timeout(<既定>)` を通すこと
+                                    (hook 全体の実時間予算で頭打ちにするため)
      - matches(expected, current) -> bool
                                     (任意) 「CLI 実測値 current が期待値
                                     expected を満たすか」の述語。verify() と
