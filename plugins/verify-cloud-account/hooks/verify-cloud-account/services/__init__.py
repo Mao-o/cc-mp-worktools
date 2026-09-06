@@ -16,6 +16,16 @@
                                     (`aws --profile prod sso login`)。dispatcher が
                                     剥がした形でも READONLY / STATE_CHANGING /
                                     self-remediation を判定する (core/cli_options.py)
+     - CONTEXT_OPTIONS: dict[str, str]
+                                    (任意) 「どのアカウントと照合するか」を
+                                    その実行だけ差し替える option → context キー名
+                                    の対応 (`{"--profile": "profile"}` 等)。
+                                    dispatcher が行全体から拾って verify() の
+                                    `context` に渡し、cache キーにも含める。
+                                    未宣言なら context は常に空 dict。
+                                    **アクティブアカウントを変えない option は
+                                    宣言しない** (github の `--hostname` は
+                                    リモートを指定するだけなので非宣言)
      - ACCOUNT_KEY: str             accounts.local.json 上のキー名
      - SETUP_HINT: str              accounts.local.json 未設定時の案内文
      - ACCEPTS_DICT: bool           期待値に dict 形を許すか (全 service 必須)
