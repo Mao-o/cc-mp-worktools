@@ -5,6 +5,111 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.10.0
+
+**内部バックログの精査分 3 件 (explore-parallel の待機タイミング / 残骸の掃除、
+exitplan-review の codex への受け渡し)。挙動変更を含むため minor bump。**
+
+### explore-parallel: post を `async` hook にした (待ち時間の隠蔽が成立していなかった)
+
+Agent ツールは **subagent が背景に移った時点で戻る**。公式 docs (`PreToolUse input` の
+Agent 表) 逐語:
+
+> `status` ... `"completed"` for foreground subagents, `"async_launched"` for background
+> subagents. As of v2.1.198, subagents run in the background by default, so an omitted
+> `run_in_background` also produces `"async_launched"`
+>
+> For background subagents, the tool returns when the task moves to the background
+
+つまり `PostToolUse(Agent)` は Explore の完了時ではなく**起動直後**に発火する。0.9.1 まで
+の post は同期 hook のまま最大 `TIMEOUT_SEC` (60) 秒ポーリングしていたので、「並走して
+待ち時間を隠す」という設計と裏腹に、Explore が走り出した直後に親を 60 秒止めていた。
+
+`hooks.json` で post を `"async": true` にして解消した (docs `Run hooks in the background`:
+"set `\"async\": true` to run the hook in the background while Claude continues working"、
+"After the background process exits, Claude Code delivers the `additionalContext` and
+`systemMessage` fields from the hook's JSON response to Claude on the next conversation
+turn")。**発火条件 (イベント / matcher) は変えていない** — 変わるのは「親をブロックするか」
+と「結果が届くのが次ターンになるか」の 2 点だけ。
+
+- `tool_response.status` を読んで待機を出し分ける案は採らなかった。async 化すると
+  foreground / background のどちらでも親は止まらないので、分岐しても挙動が変わらない
+- `timeout` は async 化後は強制されない (docs 逐語)。`hooks.json` の `90` は意図の記録として
+  残し、待機の実上限は `cursor.TIMEOUT_SEC` 側に持つ
+- **実発火 (次ターンに `additionalContext` が本当に届くか) はハーネスでしか確認できない**。
+  本リリースでは `tests/test_hook_registration.py` で登録形 (post は async / pre は同期 /
+  発火条件は据置) を契約として固定するに留めている
+
+### explore-parallel: 孤児 analyzer の停止と残骸の TTL GC
+
+`post()` の後始末に到達しない経路がある — Agent ツールの失敗、ユーザー中断、セッション
+終了、`async` hook が `claude -p` の teardown で kill される場合 (docs: outcome
+`cancelled`)。0.9.1 まではこれらで `$TMPDIR/explore-parallel/` の pid / 結果ファイルが
+無期限に残り、バックグラウンドの Cursor Agent も自然完了まで走り続けていた (課金)。
+
+- `state.stale_entries()` が `ORPHAN_TTL_SEC` (900 秒) 超の残骸を拾い、
+  `__main__.gc_orphans()` が **pre / post の両方**で掃除する。経過時間は **pid ファイルの
+  mtime (= 起動時刻)** で測る — 結果ファイルの mtime は analyzer が書くたびに更新されるので、
+  それを基準にすると「走り続けている孤児ほど新しく見えて残る」逆転が起きる
+- 現在の `tool_use_id` は除外し、`GC_BUDGET_SEC` (2.0 秒) で打ち切る (pre の hook timeout
+  5 秒を壊さない)。取りこぼしは次回の GC が拾う
+- **停止は process group ごと** (`os.killpg`、SIGTERM → 猶予 → SIGKILL)。`pre` は
+  `start_new_session=True` で起動している (pgid == pid) のに、0.9.1 までは
+  `os.kill(pid, SIGTERM)` で**グループリーダーだけ**を止めており、cursor-agent (node) の
+  孫プロセスが取り残されていた
+- signal を送る前に `ps -ww -o command=` の cmdline を起動 argv の署名と突合する
+  (pid ファイルは TTL 超過まで残るため、その間に pid が別プロセスへ再利用されうる)。
+  **判定できないときは送らない側に倒す**。実行ファイル名は照合しない — `cursor` は実体へ
+  `exec` するシムのことがあり、名前まで要求すると「シム環境では一切 kill できない」=
+  ガードではなく停止処理の無効化になる
+- `PostToolUseFailure(Agent)` を `hooks.json` に足して即時掃除する案は**採っていない**。
+  イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」の
+  変更にあたる。TTL GC が同じ失敗モードを発火条件を変えずに覆う
+
+停止処理が POSIX 依存 (`os.killpg` / `ps`) になったため、README の Windows 非対応の記述を
+更新した (Windows では同一性を確認できず、停止をあきらめる側に倒れる)。
+
+### exitplan-review: codex への受け渡しを stdin 一本化
+
+0.9.1 まではプロンプトを引数、プラン本文を stdin に分けており、`codex` の「引数のプロンプト
+と piped stdin を併用すると stdin が block として追記される」挙動に依存していた。この併用
+挙動が無い版では **stdin が無視されてプラン本文抜きでレビューが走る** — 結果は当然 clean に
+ならないので、利用者から見ると「プランを見ていないレビューで差し戻された」ことになる。
+しかも失敗が静かなので気付けない。
+
+テンプレートとプランを連結して `codex exec -s read-only --ephemeral -` に一本化し、版依存を
+外した。`-` を解さない版では引数が足りず非 0 終了 → `subproc.run_for_output` が None →
+**fail-open** (レビューなしで通す) に倒れる。レビュアーの失敗は fail-open という既存の契約と
+同じ側で、静かな誤差し戻しより軽い。長いプランを argv に載せなくなるので引数長の上限に
+当たるリスクも消える。
+
+あわせてプロンプト 3 本 (`planning-codex.md` / `planning-cursor.md` /
+`post-implementation-cursor.md`) の「`<stdin>` に記載された…」を実際の渡し方に合わせて
+「末尾の『## レビュー対象…』節にある…」へ直した。codex 側は今回の変更に伴う追随だが、
+**cursor 側 2 本は元から誤記**だった — cursor には最初からプロンプト末尾に埋め込んで
+argv で渡しており、stdin は使っていない。同じ 1 文が 3 ファイルに複製されていたので
+まとめて直している。
+
+**README に「検証済み codex バージョン」は書いていない**。本リリースでは codex を実際に
+起動していないため、実測していない版数を書けない。
+
+### 対応不要と判断した項目
+
+- **exitplan-review の `decision: "block"` → `permissionDecision: "deny"` 移行**: 記載の
+  欠陥は既に存在しない。0.8.0 で `hookSpecificOutput.permissionDecision` へ移行済みで、
+  公式 docs の現行仕様 (「PreToolUse previously used top-level `decision` and `reason`
+  fields, but these are deprecated for this event」) と一致していることを逐語で再確認した
+- **`cursor` の存在確認 (`which(cursor)`) が IDE ランチャーや未ログインを誤検出する件**:
+  未着手。再現に実機の PATH 事情 (シムと IDE ランチャーの衝突) と `cursor-agent --version`
+  の応答が必要で、外部 AI CLI を起動しない本リリースの制約下では再現も回帰テストも
+  書けない。検出順 (`cursor-agent` → `agent` → `cursor`) と TTL キャッシュの設計も
+  実測なしには選べないため、実測できる場で扱う
+
+追加した各テストは、対応する実装行を意図的に壊した状態 (mutation) で先に落ちることを
+確認してから採用した (10 パターン)。うち 2 件は当初 mutation を素通りしていた —
+犠牲プロセスが test プロセスの直接の子で、SIGTERM を受けても zombie として残り
+`os.kill(pid, 0)` が成功し続けるため。`Popen.poll()` で reap して判定するよう直した。
+
 ## 0.9.1
 
 **内部バックログの「テストが無い」指摘への対応 (テスト追加が中心。ただしマージ前

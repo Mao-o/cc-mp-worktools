@@ -8,8 +8,10 @@ pid / 結果ファイルが無期限に残っていた (内部バックログ)�
 いずれも `cursor` 本体は起動せず、PATH 先頭の偽 cursor (bash script) で検証する。
 """
 import os
+import shlex
 import signal
 import subprocess
+import sys
 import time
 import unittest
 from unittest import mock
@@ -60,8 +62,8 @@ class OrphanTestCase(HookTestCase):
         self._grace.stop()
         super().tearDown()
 
-    def spawn_unrelated(self) -> int:
-        """analyzer ではない生存プロセス (自前の process group) を起動して pid を返す。"""
+    def spawn_unrelated(self) -> subprocess.Popen:
+        """analyzer ではない生存プロセス (自前の process group) を起動して返す。"""
         proc = subprocess.Popen(
             ["sleep", "30"],
             stdout=subprocess.DEVNULL,
@@ -70,7 +72,21 @@ class OrphanTestCase(HookTestCase):
         )
         self._procs.append(proc)
         self._extra_pids.append(proc.pid)
-        return proc.pid
+        return proc
+
+    def assert_unharmed(self, proc: subprocess.Popen, msg: str) -> None:
+        """`proc` に signal が届いていないこと。
+
+        **`os.kill(pid, 0)` では判定できない**。この犠牲プロセスは test プロセスの
+        直接の子なので、SIGTERM を受けても誰も `wait` しないうちは zombie として残り、
+        `os.kill(pid, 0)` は成功し続ける。「撃たれたのに生きている」と読めてしまい、
+        ガードを外す mutation を素通りさせる (実際に mutation で空振りを観測した)。
+        親である test プロセス自身が `poll()` すれば reap して終了を検出できる。
+        """
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNone(proc.poll(), msg)
 
     def fake_cursor_with_grandchild(self) -> str:
         """孫 `sleep 30` に stdout を継承させたまま待つ偽 cursor。孫 pid の記録先を返す。"""
@@ -81,6 +97,33 @@ class OrphanTestCase(HookTestCase):
                 "#!/bin/bash\n"
                 "sleep 30 &\n"
                 f"echo $! > {gc_pid_file}\n"
+                "wait\n"
+            )
+        os.chmod(path, 0o755)
+        return gc_pid_file
+
+    def fake_cursor_with_stubborn_grandchild(self) -> str:
+        """SIGTERM を**無視する**孫を持つ偽 cursor。孫 pid の記録先を返す。
+
+        `terminate()` の SIGTERM → 猶予 → SIGKILL のエスカレーションを確かめる用。
+        cursor-agent (node) が TERM を受けても終了処理から抜けられない状況の代役。
+
+        孫は **SIG_IGN を設定し終えてから** pid ファイルを書く。`sleep &` + `echo $!` だと
+        ハンドラ設置前に SIGTERM が届きうるので、既定動作で死んだのか SIGKILL で死んだのか
+        区別が付かず、エスカレーションを外す mutation を素通りさせる。
+        """
+        gc_pid_file = os.path.join(self.tmpdir, "cursor-stubborn.pid")
+        script = (
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"open({gc_pid_file!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(30)\n"
+        )
+        path = os.path.join(self.bin, "cursor")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/bash\n"
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} &\n"
                 "wait\n"
             )
         os.chmod(path, 0o755)
@@ -128,6 +171,33 @@ class TestGroupKill(OrphanTestCase):
             "孫プロセスが取り残されている (リーダーだけ SIGTERM している)",
         )
 
+    def test_a_group_that_ignores_sigterm_is_escalated_to_sigkill(self):
+        """SIGTERM で止まらない相手には SIGKILL まで上げる (猶予後)。
+
+        猶予だけ待って諦めると、TERM を握るタイプの analyzer が丸ごと生き残る
+        (課金・CPU のリークは post が来た経路でも起きる)。
+        """
+        gc_pid_file = self.fake_cursor_with_stubborn_grandchild()
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.run_hook("pre", explore_payload("tu-stubborn"))
+            _, pid_file = self.state.paths(self.cursor.NAME, "tu-stubborn")
+            self._children.append(int(pid_file.read_text().strip()))
+            stubborn = self.read_grandchild(gc_pid_file)
+            self.assertTrue(_alive(stubborn), "SIGTERM を無視する孫が起動していない")
+
+            self.run_hook("post", explore_payload("tu-stubborn"))
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(stubborn):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(stubborn),
+            "SIGTERM を無視する相手に SIGKILL までエスカレートしていない",
+        )
+
 
 class TestPidReuseGuard(OrphanTestCase):
     """pid ファイルが指す先が analyzer でなければ signal を送らない。
@@ -140,7 +210,7 @@ class TestPidReuseGuard(OrphanTestCase):
     def test_post_does_not_signal_a_reused_pid(self):
         victim = self.spawn_unrelated()
         result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-reuse")
-        pid_file.write_text(str(victim))
+        pid_file.write_text(str(victim.pid))
         result_file.write_text("stale")
 
         with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
@@ -148,25 +218,27 @@ class TestPidReuseGuard(OrphanTestCase):
         ):
             self.cursor.post("tu-reuse")
 
-        time.sleep(0.2)
-        self.assertTrue(_alive(victim), "analyzer ではない pid に signal を送っている")
+        self.assert_unharmed(victim, "analyzer ではない pid に signal を送っている")
         self.assertFalse(pid_file.exists(), "pid ファイルは掃除されるべき")
 
     def test_reap_orphan_does_not_signal_a_reused_pid(self):
         victim = self.spawn_unrelated()
         _, pid_file = self.state.paths(self.cursor.NAME, "tu-reuse-gc")
-        pid_file.write_text(str(victim))
+        pid_file.write_text(str(victim.pid))
 
         self.cursor.reap_orphan(pid_file)
 
-        time.sleep(0.2)
-        self.assertTrue(_alive(victim), "GC が analyzer ではない pid に signal を送っている")
+        self.assert_unharmed(
+            victim, "GC が analyzer ではない pid に signal を送っている"
+        )
 
     def test_terminate_reports_that_it_did_not_signal(self):
         victim = self.spawn_unrelated()
-        self.assertFalse(
-            self.cursor.terminate(victim), "同一性を確認できない pid で True を返している"
-        )
+
+        sent = self.cursor.terminate(victim.pid)
+
+        self.assertFalse(sent, "同一性を確認できない pid で True を返している")
+        self.assert_unharmed(victim, "戻り値は False なのに signal を送っている")
 
 
 class TestStaleEntries(HookTestCase):

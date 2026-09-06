@@ -45,6 +45,12 @@ hooks.json で post を `"async": true` にして解消する (docs `Run hooks i
   background, Claude Code doesn't enforce `timeout` on it")。hooks.json の `90` は
   「起動から background に移るまで」にしか掛からないが、意図の記録として残してある。
   待機の実上限は `cursor.TIMEOUT_SEC` 側
+- **セッションが idle だと配信は次のユーザー操作まで待つ** (docs: "Hook output is
+  delivered on the next conversation turn. If the session is idle, the response waits
+  until the next user interaction")。この hook は Explore の起動直後に走るので、通常は
+  親がまだ Explore 結果を処理している最中に届く。docs には code 2 で即時起床する
+  `asyncRewake` もあるが、そちらは `timeout` が強制されるうえ「起こす」ほどの緊急性が
+  無いので採らない
 - **`claude -p` (headless) では teardown で kill される** (docs: outcome `cancelled`)。
   その場合 post の後始末に到達しないので、残骸は次回起動時の TTL GC が拾う。README の
   「headless では `EXTERNAL_AI_*=0` を推奨」はこの意味でも有効
