@@ -18,6 +18,14 @@ from language import is_vague_filename
 # 定義宣言の行頭キーワード。ES modules の主流形 (`export function` /
 # `export default function` / `async function`)、Rust (`pub fn` / `impl` /
 # `trait`)、Kotlin (`fun` / `object`)、TypeScript/Go (`type`) を含む。
+#
+# 末尾の否定先読みは「オブジェクトリテラル/インタフェースのプロパティ名」を
+# 除外する。`type` / `enum` / `class` は TypeScript の
+# ``{ type: string; enum?: string[] }`` のようなプロパティ名として頻出し、
+# これを数えると宣言の少ないデータ定義ファイルで def_count が水増しされる
+# (実コーパスで 1 → 37 に膨らむ fixture を観測した)。宣言側は必ず
+# ``type Foo = ...`` のように識別子が続くため、直後の ``:`` / ``?:`` だけを
+# 弾けば分離できる。
 _DEF_KEYWORDS_RE = re.compile(
     r"^\s*"
     r"(?:export\s+(?:default\s+)?)?"
@@ -25,7 +33,8 @@ _DEF_KEYWORDS_RE = re.compile(
     r"(?:abstract\s+)?"
     r"(?:pub(?:\([^)]*\))?\s+)?"  # Rust: pub / pub(crate)
     r"(?:async\s+)?"
-    r"(?:def|class|function|func|fn|fun|interface|struct|enum|trait|impl|type|object)\b"
+    r"(?:def|class|function|func|fn|fun|interface|struct|enum|trait|impl|type|object)"
+    r"\b(?!\s*\??\s*:)"
 )
 
 # `const foo = (a, b) => {` 形のアロー関数。**矢印が右辺の最上位**であること
@@ -38,7 +47,192 @@ _ARROW_DEF_RE = re.compile(
     r"(?:async\s+)?(?:\([^()]*\)|\w+)\s*=>"
 )
 
-_CONTROL_FLOW_RE = re.compile(r"\b(if|for|while|switch|case|catch|except)\b")
+# 制御フロー密度に数える語。どの言語でも同じ綴りが同じ意味で使われる基本集合。
+_BASE_CONTROL_FLOW_KEYWORDS = (
+    "if",
+    "for",
+    "while",
+    "switch",
+    "case",
+    "catch",
+    "except",
+)
+
+# 言語固有の分岐・繰り返し・例外構文。汎用集合に入れると別言語で誤検出する
+# (JavaScript の ``str.match(...)``、Go 以外での ``select``) ため、
+# ``detect_language`` の結果で絞る。未登録の言語は基本集合のみ。
+_LANGUAGE_CONTROL_FLOW_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "python": ("elif", "try"),
+    # ``elsif`` はチケット記載の 3 語には無いが ``elif`` と同じ位置づけの語で、
+    # 落とすと Ruby の if/elsif 連鎖だけが数えられない歪みが残る。
+    "ruby": ("elsif", "unless", "until", "rescue"),
+    "rust": ("match", "loop"),
+    "kotlin": ("when",),
+    "go": ("select",),
+}
+
+# 文の先頭でだけ数える語。Python の ``match`` は soft keyword で、
+# ``re.match(...)`` / ``m.match(...)`` という呼び出し形が同じ綴りで頻出する
+# ため、行内一致にすると正規表現を使うだけのファイルが高密度に見える。
+# Rust の ``match`` は ``let x = match y {`` のように行中に来るのが普通なので
+# そちらは行内一致のまま残す。
+_LANGUAGE_CONTROL_FLOW_STATEMENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "python": ("match",),
+}
+
+_CONTROL_FLOW_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _control_flow_re(language: str) -> re.Pattern:
+    cached = _CONTROL_FLOW_RE_CACHE.get(language)
+    if cached is not None:
+        return cached
+    words = _BASE_CONTROL_FLOW_KEYWORDS + _LANGUAGE_CONTROL_FLOW_KEYWORDS.get(language, ())
+    alternatives = [r"\b(?:" + "|".join(words) + r")\b"]
+    statement_words = _LANGUAGE_CONTROL_FLOW_STATEMENT_KEYWORDS.get(language, ())
+    if statement_words:
+        alternatives.append(r"^\s*(?:" + "|".join(statement_words) + r")\b")
+    compiled = re.compile("|".join(alternatives), re.MULTILINE)
+    _CONTROL_FLOW_RE_CACHE[language] = compiled
+    return compiled
+
+
+# 行コメント記号。``#`` を C 系に適用すると ``#if`` / ``#include`` のような
+# プリプロセッサ指令まで消えるため、言語ごとに分ける。
+_SLASH_COMMENT_LANGUAGES = frozenset(
+    {
+        "javascript",
+        "typescript",
+        "javascriptreact",
+        "typescriptreact",
+        "java",
+        "csharp",
+        "kotlin",
+        "dart",
+        "go",
+        "rust",
+        "php",
+        "swift",
+        "c",
+        "cpp",
+        "objectivec",
+        "scala",
+        "groovy",
+        "zig",
+        "vue",
+        "svelte",
+    }
+)
+
+_HASH_COMMENT_LANGUAGES = frozenset(
+    {
+        "python",
+        "ruby",
+        "shell",
+        "perl",
+        "r",
+        "elixir",
+        "julia",
+        "nim",
+        "powershell",
+        "php",  # `//` と `#` の両方が行コメント
+    }
+)
+
+_OTHER_LINE_COMMENTS: dict[str, tuple[str, ...]] = {
+    "lua": ("--",),
+    "haskell": ("--",),
+    "clojure": (";",),
+    "erlang": ("%",),
+}
+
+# ``/* ... */`` を持つ言語 (= `//` 行コメントを持つ言語と同じ集合)。
+_BLOCK_COMMENT_LANGUAGES = _SLASH_COMMENT_LANGUAGES
+
+# 三重引用符の複数行文字列を持つ言語。
+_TRIPLE_QUOTE_LANGUAGES = frozenset({"python", "elixir"})
+
+# 文字列リテラルの引用符。既定は ``'`` と ``"``。
+#   - rust: ``'`` はライフタイム注釈 (``&'a str``) で使われ、文字列として
+#     扱うと閉じ引用符を探して行末まで飲み込む。``"`` のみに絞る
+#   - JS/TS 系と Go: テンプレートリテラル / raw string のバッククォートを足す
+_DEFAULT_STRING_DELIMITERS = ("'", '"')
+_STRING_DELIMITERS: dict[str, tuple[str, ...]] = {
+    "rust": ('"',),
+    "javascript": ("'", '"', "`"),
+    "typescript": ("'", '"', "`"),
+    "javascriptreact": ("'", '"', "`"),
+    "typescriptreact": ("'", '"', "`"),
+    "vue": ("'", '"', "`"),
+    "svelte": ("'", '"', "`"),
+    "go": ("'", '"', "`"),
+}
+
+_NOISE_RE_CACHE: dict[str, re.Pattern | None] = {}
+
+
+def _line_comment_prefixes(language: str) -> tuple[str, ...]:
+    prefixes: list[str] = []
+    if language in _SLASH_COMMENT_LANGUAGES:
+        prefixes.append("//")
+    if language in _HASH_COMMENT_LANGUAGES:
+        prefixes.append("#")
+    prefixes.extend(_OTHER_LINE_COMMENTS.get(language, ()))
+    return tuple(prefixes)
+
+
+def _noise_re(language: str) -> re.Pattern | None:
+    """コメント・文字列リテラルにマッチする正規表現 (言語別、なければ None)。
+
+    交替の順序が意味を持つ: 複数行のもの → 単一行の文字列 → 行コメント。
+    正規表現は左から順に位置を進めるため、文字列の中の ``//`` は文字列側の
+    交替に先に飲まれ、コメントの中の引用符はコメント側に飲まれる。
+    """
+    if language in _NOISE_RE_CACHE:
+        return _NOISE_RE_CACHE[language]
+
+    parts: list[str] = []
+    if language in _TRIPLE_QUOTE_LANGUAGES:
+        for delim in ('"""', "'''"):
+            escaped = re.escape(delim)
+            # 閉じられていない三重引用符は「そこから先すべて」を文字列とみなす。
+            parts.append(rf"{escaped}[\s\S]*?{escaped}|{escaped}[\s\S]*")
+    if language in _BLOCK_COMMENT_LANGUAGES:
+        parts.append(r"/\*[\s\S]*?\*/|/\*[\s\S]*")
+    for delim in _STRING_DELIMITERS.get(language, _DEFAULT_STRING_DELIMITERS):
+        escaped = re.escape(delim)
+        # 改行を含まない = 閉じ忘れの引用符が次行以降を巻き込まない。
+        parts.append(rf"{escaped}(?:\\.|[^{escaped}\\\n])*{escaped}?")
+    for prefix in _line_comment_prefixes(language):
+        parts.append(re.escape(prefix) + r"[^\n]*")
+
+    compiled = re.compile("|".join(parts)) if parts else None
+    _NOISE_RE_CACHE[language] = compiled
+    return compiled
+
+
+def _blank_noise(match: re.Match) -> str:
+    """マッチ部分を同じ長さの空白に置き換える (改行だけ残す)。
+
+    長さと改行位置を保つことで、置換後のテキストを ``splitlines()`` しても
+    元のテキストと行数・行の対応が変わらない。
+    """
+    return "".join("\n" if ch == "\n" else " " for ch in match.group())
+
+
+def mask_comments_and_strings(text: str, language: str) -> str:
+    """コメント・文字列リテラルを空白に潰したテキストを返す。
+
+    既知の限界: ``<!-- -->`` (vue/svelte のテンプレート)、Ruby の
+    ``=begin/=end``、JavaScript の正規表現リテラル中の引用符は扱わない。
+    いずれも「本来コードである部分まで潰す」方向の誤りに倒れるため、
+    制御フロー密度は過小評価側に寄る (= 通知が減る側 = advisory hook の
+    fail-open 方向)。
+    """
+    pattern = _noise_re(language)
+    if pattern is None:
+        return text
+    return pattern.sub(_blank_noise, text)
 
 # 行頭に来る import 文の形。**大文字小文字を区別する** — IGNORECASE だと
 # docstring や行頭の英文 ("Use the following helper ..." / "Import the module
@@ -84,6 +278,10 @@ IMPORT_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "httpx",
         "aiohttp",
         "urllib3",
+        # AWS SDK。S3 (ストレージ) / DynamoDB (DB) にも使われるため排他的な
+        # 分類ではないが、実体はどれも HTTP API クライアントなので network に
+        # 寄せる。
+        "boto3",
         "net/http",
         "reqwest",
     ),
@@ -265,11 +463,40 @@ def _count_import_categories(lines: list[str]) -> tuple[int, tuple[str, ...]]:
     return len(ordered), ordered
 
 
-def _control_flow_density(lines: list[str]) -> float:
+def _control_flow_density(lines: list[str], language: str, text: str = "") -> float:
+    """制御フローを含む行の割合。
+
+    **分母は元テキストの非空行**のまま (コメント行も 1 行として数える)。
+    **分子だけ**をコメント・文字列リテラルを潰したテキストで数える。分母から
+    コメントを除くと全ファイルの密度が一斉に動くうえ、「1 行あたりどれだけ
+    分岐が詰まっているか」という指標の意味が変わるため、誤検出の除去
+    (分子側) に限定している。
+
+    ``text`` を渡さない呼び出しでは行単位のマスクにフォールバックする
+    (複数行文字列・ブロックコメントは潰せない)。
+    """
     non_empty = [line for line in lines if line.strip()]
     if not non_empty:
         return 0.0
-    hits = sum(1 for line in non_empty if _CONTROL_FLOW_RE.search(line))
+
+    masked_lines = lines
+    if text:
+        candidate = mask_comments_and_strings(text, language).splitlines()
+        # マスクは長さと改行位置を保つので通常は行数が一致する。万一ずれたら
+        # (改ページ文字が文字列内にある等) マスクせず元の行で数える。
+        if len(candidate) == len(lines):
+            masked_lines = candidate
+    else:
+        masked_lines = [
+            mask_comments_and_strings(line, language) for line in lines
+        ]
+
+    pattern = _control_flow_re(language)
+    hits = sum(
+        1
+        for original, masked in zip(lines, masked_lines)
+        if original.strip() and pattern.search(masked)
+    )
     return hits / len(non_empty)
 
 
@@ -299,6 +526,6 @@ def compute(loaded, language: str, path: Path) -> Metrics:
         def_count=def_count,
         import_category_count=category_count,
         import_categories=category_names,
-        control_flow_density=_control_flow_density(lines),
+        control_flow_density=_control_flow_density(lines, language, loaded.text),
         vague_filename=is_vague_filename(path),
     )

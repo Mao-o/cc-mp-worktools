@@ -93,6 +93,91 @@ class TestCountDefsGeneric(unittest.TestCase):
         self.assertEqual(result.def_count, 6)
 
 
+class TestCountDefsGenericExtended(unittest.TestCase):
+    """0.4.0 で追加した定義形。旧版はいずれも 0 と数えていた。"""
+
+    def _defs(self, text: str, language: str, name: str) -> int:
+        return metrics.compute(_loaded(text), language, Path(f"/repo/{name}")).def_count
+
+    def test_es_module_forms(self):
+        text = (
+            "export function a() {}\n"
+            "export default function b() {}\n"
+            "async function c() {}\n"
+            "export async function d() {}\n"
+            "export class E {}\n"
+            "export interface F {}\n"
+            "type G = { x: number };\n"
+            "export type H = G;\n"
+            "declare function i(): void;\n"
+        )
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 9)
+
+    def test_arrow_function_assignment(self):
+        text = (
+            "const a = (x) => x;\n"
+            "export const b = async (x) => x;\n"
+            "let c = x => x;\n"
+            "var d = () => {};\n"
+            "const e: Handler = (req, res) => {};\n"
+        )
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 5)
+
+    def test_arrow_as_callback_argument_not_counted(self):
+        # `=` の右辺最上位が矢印であることを要求しないと、アロー関数を引数に
+        # 取る呼び出しまで定義として数えてしまう。
+        text = (
+            "const total = arr.reduce((acc, x) => acc + x, 0);\n"
+            "const found = list.find((item) => item.id === id);\n"
+            "const wrapped = wrap(() => run());\n"
+        )
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 0)
+
+    def test_rust_and_kotlin_forms(self):
+        rust = (
+            "pub fn a() {}\n"
+            "fn b() {}\n"
+            "pub(crate) fn c() {}\n"
+            "impl Trait for S {}\n"
+            "trait T {}\n"
+            "pub struct S {}\n"
+        )
+        self.assertEqual(self._defs(rust, "rust", "foo.rs"), 6)
+        kotlin = "fun a() {}\nobject B {}\nabstract class C {}\n"
+        self.assertEqual(self._defs(kotlin, "kotlin", "Foo.kt"), 3)
+
+    def test_object_literal_property_names_not_counted(self):
+        # `type` / `enum` / `class` はオブジェクトリテラル・インタフェースの
+        # プロパティ名として頻出する。数えると宣言の少ないデータ定義ファイルで
+        # def_count が水増しされる (実コーパスで観測)。
+        text = (
+            "export const actions = [\n"
+            "  { type: 'a', enum: 1, class: 'x' },\n"
+            "  { type: 'b', enum: 2, class: 'y' },\n"
+            "];\n"
+            "interface Shape {\n"
+            "  type: string;\n"
+            "  enum?: string[];\n"
+            "}\n"
+        )
+        # `export const actions = [` はアロー関数ではないので 0、
+        # `interface Shape {` のみが定義。
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 1)
+
+    def test_original_keywords_still_counted(self):
+        # 旧版が数えていた形を落としていないこと (床テスト)。
+        text = (
+            "function foo() {}\n"
+            "class Bar {}\n"
+            "interface Baz {}\n"
+            "struct Qux {}\n"
+            "enum Quux {}\n"
+            "func corge() {}\n"
+            "def grault():\n"
+        )
+        self.assertEqual(self._defs(text, "go", "foo.go"), 7)
+
+
 class TestImportCategories(unittest.TestCase):
     def test_multiple_categories_detected(self):
         text = "\n".join(
@@ -122,6 +207,166 @@ class TestImportCategories(unittest.TestCase):
         self.assertIn("auth", result.import_categories)
 
 
+class TestImportExtractionExtended(unittest.TestCase):
+    """0.4.0 で追加した import 形。旧版はいずれも 0 カテゴリだった。"""
+
+    def _cats(self, text: str, language: str, name: str) -> set[str]:
+        return set(
+            metrics.compute(_loaded(text), language, Path(f"/repo/{name}")).import_categories
+        )
+
+    def test_commonjs_require(self):
+        text = (
+            "const fs = require('fs');\n"
+            "const http = require('http');\n"
+            "const winston = require('winston');\n"
+            "const jwt = require('jsonwebtoken');\n"
+        )
+        self.assertEqual(
+            self._cats(text, "javascript", "svc.js"),
+            {"network", "logging", "auth", "filesystem"},
+        )
+
+    def test_go_import_block_continuation_lines(self):
+        text = (
+            "package main\n"
+            "\n"
+            "import (\n"
+            '\t"net/http"\n'
+            '\t"database/sql"\n'
+            '\t"log"\n'
+            ")\n"
+            "\n"
+            "func main() {}\n"
+        )
+        self.assertEqual(self._cats(text, "go", "main.go"), {"network", "db"})
+
+    def test_python_parenthesized_import_block(self):
+        text = "from mypkg import (\n    requests,\n    logging,\n)\n"
+        self.assertEqual(
+            self._cats(text, "python", "foo.py"), {"network", "logging"}
+        )
+
+    def test_csharp_using(self):
+        text = "using System.Net.Http;\nusing Serilog.Core;\n"
+        self.assertIn("network", self._cats(text, "csharp", "Svc.cs"))
+
+    def test_ruby_require_forms(self):
+        text = "require 'net/http'\nrequire 'redis'\nrequire_relative 'auth/session'\n"
+        self.assertEqual(
+            self._cats(text, "ruby", "svc.rb"), {"network", "db", "auth"}
+        )
+
+    def test_powershell_import_module_is_recognized(self):
+        # 大文字始まりが正規の綴りである唯一の import 形。IGNORECASE を外した
+        # 分をここで明示的に補っている (カテゴリ辞書に載る語かどうかとは別)。
+        lines = ["Import-Module Az.Accounts", "Import-Module Pester"]
+        self.assertEqual(list(metrics._iter_import_lines(lines)), lines)
+
+    def test_uppercase_prose_is_not_an_import_line(self):
+        lines = ["Use the following helper", "Import the module first", "IF YOU NEED IT"]
+        self.assertEqual(list(metrics._iter_import_lines(lines)), [])
+
+    def test_modern_python_http_clients(self):
+        text = "import httpx\nimport aiohttp\nimport websockets\nimport urllib3\nimport boto3\n"
+        self.assertIn("network", self._cats(text, "python", "svc.py"))
+
+    def test_node_fs_specifiers(self):
+        text = "import fs from 'node:fs';\nimport fsp from 'fs/promises';\n"
+        self.assertIn("filesystem", self._cats(text, "typescript", "svc.ts"))
+
+    def test_prose_lines_not_treated_as_imports(self):
+        # 旧版は IGNORECASE だったため、docstring の英文が import 行として
+        # 数えられていた。
+        text = (
+            '"""Module docs.\n'
+            "\n"
+            "Use the following helper when you need it.\n"
+            "Import the module before calling it.\n"
+            '"""\n'
+            "x = 1\n"
+        )
+        self.assertEqual(self._cats(text, "python", "foo.py"), set())
+
+    def test_unterminated_import_block_is_bounded(self):
+        # 閉じ括弧を見失っても、ファイル全体を import 行として扱わない。
+        # 打ち切り幅より後ろにある `requests` は import 行として拾われない。
+        # 行位置は定数から導出せず固定する (定数を緩める mutation を検出できる
+        # ようにするため)。
+        self.assertLess(metrics._IMPORT_BLOCK_MAX_LINES, 400)
+        body = [f"\tline{i}" for i in range(500)]
+        body[400] = "\trequests,"
+        text = "import (\n" + "\n".join(body) + "\n"
+        result = metrics.compute(_loaded(text), "go", Path("/repo/main.go"))
+        self.assertEqual(result.import_categories, ())
+
+    def test_import_block_within_bound_is_scanned(self):
+        # 打ち切り幅の内側は継続行として拾う (床テスト。上の境界テストが
+        # 「そもそも継続行を読んでいない」ことで通ってしまうのを防ぐ)。
+        text = "import (\n\trequests,\n)\n"
+        result = metrics.compute(_loaded(text), "go", Path("/repo/main.go"))
+        self.assertEqual(result.import_categories, ("network",))
+
+    def test_original_import_forms_still_recognized(self):
+        # 旧版が import 行として拾えていた形を落としていないこと (床テスト)。
+        # カテゴリ辞書に載る語かどうかとは独立に、行の認識だけを固定する。
+        lines = [
+            "import requests",
+            "from django.contrib.auth import authenticate",
+            "use std::fs;",
+            "#include <stdio.h>",
+            "require('fs')",
+        ]
+        self.assertEqual(list(metrics._iter_import_lines(lines)), lines)
+
+
+class TestMaskCommentsAndStrings(unittest.TestCase):
+    def test_python_line_comment_and_string(self):
+        masked = metrics.mask_comments_and_strings(
+            "x = 'for example'  # if you need this\n", "python"
+        )
+        self.assertNotIn("for", masked)
+        self.assertNotIn("if", masked)
+        self.assertIn("x =", masked)
+
+    def test_python_triple_quoted_block(self):
+        text = '"""\nif for while\n"""\nx = 1\n'
+        masked = metrics.mask_comments_and_strings(text, "python")
+        self.assertNotIn("while", masked)
+        self.assertIn("x = 1", masked)
+
+    def test_c_family_block_comment(self):
+        text = "/*\n * if for while\n */\nconst a = 1;\n"
+        masked = metrics.mask_comments_and_strings(text, "javascript")
+        self.assertNotIn("while", masked)
+        self.assertIn("const a = 1;", masked)
+
+    def test_url_inside_string_is_not_a_comment(self):
+        masked = metrics.mask_comments_and_strings(
+            'const u = "http://x"; if (u) {}\n', "javascript"
+        )
+        self.assertIn("if (u)", masked)
+
+    def test_line_count_is_preserved(self):
+        text = '"""\na\nb\n"""\nx = 1\n'
+        masked = metrics.mask_comments_and_strings(text, "python")
+        self.assertEqual(len(masked.splitlines()), len(text.splitlines()))
+
+    def test_hash_is_not_a_comment_in_c(self):
+        # C 系で `#` を行コメント扱いすると `#if` / `#include` が消える。
+        masked = metrics.mask_comments_and_strings("#if defined(X)\n", "c")
+        self.assertIn("#if", masked)
+
+    def test_rust_lifetime_is_not_a_string(self):
+        # rust で `'` を文字列開始として扱うと、閉じ引用符を持たない
+        # ライフタイム注釈 (`&'static`) が行末までを飲み込んで制御フローが消える。
+        masked = metrics.mask_comments_and_strings(
+            'let x: &\'static str = "y"; if x.is_empty() {}\n', "rust"
+        )
+        self.assertIn("if", masked)
+        self.assertNotIn('"y"', masked)
+
+
 class TestControlFlowDensity(unittest.TestCase):
     def test_known_ratio(self):
         text = "\n".join(
@@ -143,6 +388,110 @@ class TestControlFlowDensity(unittest.TestCase):
         result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
         # non-empty lines: "if x:" と "    pass" の 2 行、うち 1 行が control-flow
         self.assertAlmostEqual(result.control_flow_density, 1 / 2)
+
+
+class TestControlFlowLanguageKeywords(unittest.TestCase):
+    """0.4.0: 言語固有の分岐・繰り返し・例外構文を数える (旧版はいずれも 0)。"""
+
+    def _density(self, text: str, language: str, name: str) -> float:
+        return metrics.compute(
+            _loaded(text), language, Path(f"/repo/{name}")
+        ).control_flow_density
+
+    def test_python_elif_try_match(self):
+        text = "if a:\n    pass\nelif b:\n    pass\ntry:\n    pass\nmatch c:\n    pass\n"
+        # 8 行中 4 行 (if / elif / try / match)
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 4 / 8)
+
+    def test_python_re_match_call_is_not_control_flow(self):
+        # `match` は soft keyword。行内一致にすると re.match を使うだけの
+        # ファイルが高密度に見える。
+        text = "import re\nm = re.match(P, s)\nn = p.match(s)\n"
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+
+    def test_ruby_keywords(self):
+        text = "x = 1 unless y\nuntil done\nend\nbegin\nrescue => e\nend\nelsif z\n"
+        # unless / until / rescue / elsif の 4 行
+        self.assertAlmostEqual(self._density(text, "ruby", "foo.rb"), 4 / 7)
+
+    def test_rust_match_and_loop(self):
+        text = "let v = match x {\n};\nloop {\n}\n"
+        self.assertAlmostEqual(self._density(text, "rust", "foo.rs"), 2 / 4)
+
+    def test_kotlin_when(self):
+        text = "val r = when (x) {\n}\n"
+        self.assertAlmostEqual(self._density(text, "kotlin", "Foo.kt"), 1 / 2)
+
+    def test_go_select(self):
+        text = "select {\ncase <-ch:\n}\n"
+        self.assertAlmostEqual(self._density(text, "go", "foo.go"), 2 / 3)
+
+    def test_language_keywords_do_not_leak_across_languages(self):
+        # JavaScript の `str.match(...)` / `select` を制御フローとして
+        # 数えないこと (言語別集合にしている理由)。
+        text = "const m = s.match(re);\nconst q = select(state);\nconst w = when(x);\n"
+        self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.0)
+
+    def test_base_keywords_still_counted_for_unknown_language(self):
+        # 未登録言語でも基本集合は従来どおり数える (床テスト)。
+        text = "if (x) {\nfor (;;) {\nswitch (y) {\nz = 1\n"
+        self.assertAlmostEqual(self._density(text, "generic", "foo.xyz"), 3 / 4)
+
+
+class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
+    def _density(self, text: str, language: str, name: str) -> float:
+        return metrics.compute(
+            _loaded(text), language, Path(f"/repo/{name}")
+        ).control_flow_density
+
+    def test_python_comment_keywords_not_counted(self):
+        text = "# if you need this, for each item\nx = 1\n"
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+
+    def test_python_string_keywords_not_counted(self):
+        text = "MSG = 'for example, if this then switch'\ny = 2\n"
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+
+    def test_python_docstring_prose_not_counted(self):
+        text = '"""\nif you need this, while working, for each item\n"""\nx = 1\n'
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+
+    def test_js_block_comment_not_counted(self):
+        text = "/*\n * if for while switch\n */\nconst a = 1;\n"
+        self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.0)
+
+    def test_comment_lines_stay_in_denominator(self):
+        # 分子だけをマスクし、分母は元テキストの非空行のまま。
+        text = "# if you need this\nif x:\n    pass\n"
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 1 / 3)
+
+    def test_code_after_inline_comment_marker_in_string_is_kept(self):
+        text = 'URL = "http://x/#frag"\nif URL:\n    pass\n'
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 1 / 3)
+
+    def test_c_preprocessor_conditional_still_counted(self):
+        # C 系で `#` を行コメント扱いすると `#if` が消える。
+        text = "#if defined(X)\nint a;\n#endif\n"
+        self.assertAlmostEqual(self._density(text, "c", "foo.c"), 1 / 3)
+
+    def test_without_text_falls_back_to_per_line_masking(self):
+        # 全文を渡さない呼び出しでは行単位のマスクになる。行コメントは消えるが、
+        # 複数行文字列は行をまたぐため消えない (既知の限界)。
+        lines = ["# if you need this", "if x:", "    pass"]
+        self.assertAlmostEqual(
+            metrics._control_flow_density(lines, "python", ""), 1 / 3
+        )
+        docstring_lines = ['"""', "if you need this", '"""', "x = 1"]
+        self.assertAlmostEqual(
+            metrics._control_flow_density(docstring_lines, "python", ""), 1 / 4
+        )
+        # 全文を渡せば複数行文字列も潰れる。
+        self.assertAlmostEqual(
+            metrics._control_flow_density(
+                docstring_lines, "python", "\n".join(docstring_lines) + "\n"
+            ),
+            0.0,
+        )
 
 
 if __name__ == "__main__":
