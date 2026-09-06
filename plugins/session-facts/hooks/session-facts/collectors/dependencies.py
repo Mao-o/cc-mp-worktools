@@ -315,6 +315,73 @@ def parse_poetry_deps(text: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str,
     return runtime, dev
 
 
+_GO_MAJOR_SUFFIX = re.compile(r"/v\d+$")
+_GEM_RE = re.compile(r"""^\s*gem\s+["']([^"']+)["'](?:\s*,\s*["']([^"']*)["'])?""")
+
+
+def parse_go_mod(text: str) -> List[Tuple[str, str]]:
+    """``[(module leaf, version)]`` for direct requirements in a go.mod.
+
+    Handles single-line ``require github.com/x/y v1``, block ``require (`` ...
+    ``)`` entries, drops ``// indirect`` lines, and strips a ``/vN`` major
+    suffix so ``github.com/labstack/echo/v4`` yields ``echo`` (internal
+    backlog joa.15: the old parser only saw 2-token lines, so single-line
+    requires were skipped and ``/v4`` became the leaf).
+    """
+    out: List[Tuple[str, str]] = []
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip() if "// indirect" not in raw else ""
+        if not line:
+            continue
+        if line.startswith("require ("):
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        parts = line.split()
+        if parts[0] == "require" and len(parts) == 3:
+            parts = parts[1:]
+        elif not in_block:
+            continue
+        if len(parts) != 2 or not parts[1].startswith("v"):
+            continue
+        module, version = parts
+        module = _GO_MAJOR_SUFFIX.sub("", module)
+        out.append((module.rsplit("/", 1)[-1], version))
+    return out
+
+
+def parse_gemfile(text: str) -> List[Tuple[str, str]]:
+    """``[(gem, version)]`` from ``gem 'name', '~> 1.2'`` lines."""
+    out: List[Tuple[str, str]] = []
+    for raw in text.splitlines():
+        m = _GEM_RE.match(raw)
+        if m:
+            out.append((m.group(1), m.group(2) or ""))
+    return out
+
+
+def parse_composer_require(text: str) -> List[Tuple[str, str]]:
+    """``[(package, version)]`` from composer.json ``require`` /
+    ``require-dev`` objects."""
+    import json
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    out: List[Tuple[str, str]] = []
+    for key in ("require", "require-dev"):
+        section = data.get(key) if isinstance(data, dict) else None
+        if isinstance(section, dict):
+            for name, version in section.items():
+                if name == "php" or name.startswith("ext-"):
+                    continue
+                out.append((name, str(version)))
+    return out
+
+
 def _is_dev_requirements(rel: str) -> bool:
     """True when a requirements file's name / parent dir marks it as dev/test."""
     p = Path(rel)
@@ -347,30 +414,37 @@ def _collect_major_dependencies(ctx: RepoContext, max_items: int) -> List[str]:
         # Python names are normalised to lowercase (PEP 503) for display.
         collected[key] = (key, version, tier)
 
-    # --- JS/TS (package.json) — allow-list only (unchanged) ---
-    pkg = ctx.package_json
-    for section in ("dependencies", "devDependencies", "peerDependencies"):
-        deps = pkg.get(section)
-        if not isinstance(deps, dict):
-            continue
-        for name, version in deps.items():
-            if name in IMPORTANT_DEPENDENCIES:
-                put(name, str(version), 0)
-
-    # --- Python (hybrid), sources in priority order: pyproject > Pipfile >
-    #     requirements > setup.cfg. allow-list deps lead; direct runtime deps
-    #     (e.g. kaggle) fill remaining slots; dev tooling sinks to the bottom. ---
-    pyproject = ctx.pyproject_toml
-    if pyproject:
-        for name, version in parse_pep621_deps(pyproject):
-            consider_python(name, version, dev=False)
-        for name, version in parse_pep621_optional_deps(pyproject):
-            consider_python(name, version, dev=True)
-        poetry_runtime, poetry_dev = parse_poetry_deps(pyproject)
-        for name, version in poetry_runtime:
-            consider_python(name, version, dev=False)
-        for name, version in poetry_dev:
-            consider_python(name, version, dev=True)
+    # --- package.json (allow-list only) and pyproject.toml (hybrid), walked
+    #     in manifest-directory order (root, then workspaces shallowest
+    #     first) so a repo whose backend is api/ and frontend web/ lists the
+    #     api's deps before the web's within a tier, instead of every JS dep
+    #     crowding out every Python one (joa.2). Python sources in priority
+    #     order: pyproject > Pipfile > requirements > setup.cfg; allow-list
+    #     deps lead, direct runtime deps fill remaining slots, dev tooling
+    #     sinks to the bottom. ---
+    pkg_by_dir = dict(ctx.package_json_manifests())
+    py_by_dir = dict(ctx.pyproject_manifests())
+    for rel in ctx.manifest_dirs[:_MAX_DEP_FILES]:
+        pkg = pkg_by_dir.get(rel)
+        if pkg:
+            for section in ("dependencies", "devDependencies", "peerDependencies"):
+                deps = pkg.get(section)
+                if not isinstance(deps, dict):
+                    continue
+                for name, version in deps.items():
+                    if name in IMPORTANT_DEPENDENCIES:
+                        put(name, str(version), 0)
+        pyproject = py_by_dir.get(rel)
+        if pyproject:
+            for name, version in parse_pep621_deps(pyproject):
+                consider_python(name, version, dev=False)
+            for name, version in parse_pep621_optional_deps(pyproject):
+                consider_python(name, version, dev=True)
+            poetry_runtime, poetry_dev = parse_poetry_deps(pyproject)
+            for name, version in poetry_runtime:
+                consider_python(name, version, dev=False)
+            for name, version in poetry_dev:
+                consider_python(name, version, dev=True)
 
     for rel in _tracked_with_basename(ctx, "Pipfile")[:_MAX_DEP_FILES]:
         grouped = parse_pipfile_grouped(read_text(root / rel))
@@ -395,14 +469,20 @@ def _collect_major_dependencies(ctx: RepoContext, max_items: int) -> List[str]:
                 put(name, version, 0)
 
     # --- Go (go.mod) — allow-list only ---
-    go_mod = read_text(root / "go.mod") if (root / "go.mod").exists() else ""
-    for line in go_mod.splitlines():
-        parts = line.strip().split()
-        if len(parts) == 2:
-            mod, version = parts
-            leaf = mod.rsplit("/", 1)[-1]
+    for rel in _tracked_with_basename(ctx, "go.mod")[:_MAX_DEP_FILES]:
+        for leaf, version in parse_go_mod(read_text(root / rel)):
             if leaf in IMPORTANT_DEPENDENCIES:
                 put(leaf, version, 0)
+
+    # --- Ruby (Gemfile) / PHP (composer.json) — allow-list only ---
+    for rel in _tracked_with_basename(ctx, "Gemfile")[:_MAX_DEP_FILES]:
+        for name, version in parse_gemfile(read_text(root / rel)):
+            if name in IMPORTANT_DEPENDENCIES:
+                put(name, version, 0)
+    for rel in _tracked_with_basename(ctx, "composer.json")[:_MAX_DEP_FILES]:
+        for name, version in parse_composer_require(read_text(root / rel)):
+            if name in IMPORTANT_DEPENDENCIES:
+                put(name, version, 0)
 
     # Cap is applied AFTER the stable tier sort, so an allow-list (tier-0) match
     # collected late in source order is never crowded out by an earlier tier-1

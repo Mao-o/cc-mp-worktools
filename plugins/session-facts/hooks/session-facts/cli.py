@@ -19,6 +19,8 @@ from core.constants import (
     DEFAULT_MAX_SCRIPT_ENTRIES,
     DEFAULT_MAX_SERVICE_ENTRIES,
     DEFAULT_MAX_TREE_LINES,
+    HUB_FILES_MAX_SCAN,
+    MAX_TRACKED_FILES,
     MAX_TREE_DEPTH,
     MIN_TREE_DEPTH,
     PROJECT_MARKERS,
@@ -27,7 +29,7 @@ from core.constants import (
 from core.context import AnalysisConfig, RepoContext
 from core.fs import (
     scan_project_markers,
-    has_nested_project_markers,
+    scan_nested_project_markers,
     has_project_markers,
     load_json,
     read_text,
@@ -37,6 +39,7 @@ from core.git import git_ls_files, git_root_or_none
 from core.pm import detect_package_manager
 from core.runtime import MISE_CONFIG_NAMES, is_home_dir, mise_config_path
 from core.util import truncate_purpose
+from core.workspaces import summarize_workspaces
 from registry import discover_custom_plugins, discover_plugins
 from renderer import build_rerun_hint, build_root_arg, render_header
 
@@ -109,11 +112,12 @@ def _manifest_description(ctx: RepoContext) -> Optional[str]:
     composer.json."""
     # Root manifests only: a workspace package's description ("the Node.js
     # SDK for ...") describes that package, not the repository.
-    description = ctx.package_json.get("description")
+    description = ctx.root_package_json.get("description")
     if isinstance(description, str) and description.strip():
         return description
-    if ctx.pyproject_toml:
-        description = _toml_project_description(ctx.pyproject_toml)
+    root_pyproject = ctx.root / "pyproject.toml"
+    if root_pyproject.exists():
+        description = _toml_project_description(read_text(root_pyproject, limit=20_000))
         if description:
             return description
     for name in ("pubspec.yaml", "Cargo.toml", "composer.json"):
@@ -384,7 +388,13 @@ def _has_relevant_project_markers(root: Path) -> bool:
     # だけマニフェストがある構成) を取りこぼさない。深さと訪問ディレクトリ数を
     # 限定しているので、gate が避けたい「無関係な巨大ディレクトリの全走査」に
     # はならない。
-    return has_nested_project_markers(root, PROJECT_MARKERS, SKIP_DIRS)
+    found, complete = scan_nested_project_markers(root, PROJECT_MARKERS, SKIP_DIRS)
+    if found:
+        return True
+    # 打ち切った / 権限エラーで見られなかった場合は「マーカーが無い」と断定
+    # できない (joa.31)。ルート直下の走査と同じく、非ホームなら後続の走査に
+    # 委ねる側に倒す。
+    return not complete
 
 
 def summarize_repo(
@@ -410,8 +420,15 @@ def summarize_repo(
         # a small custom --max-output-chars otherwise).
         return _enforce_output_budget(_minimal_header(root, invoked_as), [], config.max_output_chars)
     ctx = RepoContext(root=root, config=config, cwd=cwd, invoked_as=invoked_as)
-    ctx.tracked_files = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
+    tracked = git_ls_files(root) if is_git else walk_files(root, SKIP_DIRS)
+    if len(tracked) > MAX_TRACKED_FILES:
+        # joa.25: keep the hook inside its timeout on million-file repos;
+        # the header notes the cut so counts read as lower bounds.
+        tracked = tracked[:MAX_TRACKED_FILES]
+        ctx.results["tracked_files_truncated"] = True
+    ctx.tracked_files = tracked
     ctx.results["is_git_repo"] = is_git
+    ctx.results["workspaces"] = summarize_workspaces(ctx)
 
     purpose = _infer_purpose(ctx)
     if purpose:
@@ -568,6 +585,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max entries in the Hub Files section.",
     )
     parser.add_argument(
+        "--max-hub-scan", type=int, default=HUB_FILES_MAX_SCAN,
+        help=(
+            "Max candidate files the Hub Files scan will read before it "
+            "skips itself (the section then says so instead of vanishing)."
+        ),
+    )
+    parser.add_argument(
         "--no-recent-commits",
         action="store_true",
         help=(
@@ -636,6 +660,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_domain_types=args.max_domain_types,
         include_hub_files=args.include_hub_files,
         max_hub_files=args.max_hub_files,
+        max_hub_scan=args.max_hub_scan,
         include_recent_commits=not args.no_recent_commits,
     )
     resolved = args.root.resolve()

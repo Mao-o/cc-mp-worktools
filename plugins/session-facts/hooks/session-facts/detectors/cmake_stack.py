@@ -10,7 +10,7 @@ class CmakeStackDetector:
     priority = 91
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "CMakeLists.txt").exists():
+        if ctx.find_in_manifest_dirs("CMakeLists.txt") is not None:
             return ["cmake"]
         return []
 

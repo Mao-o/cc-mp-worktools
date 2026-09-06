@@ -11,9 +11,7 @@ class NextjsDetector:
     priority = 20
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if "next" in ctx.all_deps or any(
-            (ctx.root / f).exists() for f in NEXT_CONFIG_CANDIDATES
-        ):
+        if "next" in ctx.all_deps or ctx.find_in_manifest_dirs(*NEXT_CONFIG_CANDIDATES) is not None:
             return ["nextjs"]
         return []
 

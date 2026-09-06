@@ -10,7 +10,7 @@ class RustStackDetector:
     priority = 70
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "Cargo.toml").exists():
+        if ctx.find_in_manifest_dirs("Cargo.toml") is not None:
             return ["rust"]
         return []
 

@@ -10,7 +10,7 @@ class GoStackDetector:
     priority = 60
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "go.mod").exists():
+        if ctx.find_in_manifest_dirs("go.mod") is not None:
             return ["go"]
         return []
 

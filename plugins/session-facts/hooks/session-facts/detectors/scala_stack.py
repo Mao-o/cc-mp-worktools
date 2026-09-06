@@ -10,7 +10,7 @@ class ScalaStackDetector:
     priority = 57
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "build.sbt").exists():
+        if ctx.find_in_manifest_dirs("build.sbt") is not None:
             return ["scala"]
         return []
 

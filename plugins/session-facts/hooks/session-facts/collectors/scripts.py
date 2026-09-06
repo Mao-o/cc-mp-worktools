@@ -146,6 +146,8 @@ def _make_commands(ctx: RepoContext, max_items: int) -> List[str]:
 
 def _pytest_declared(ctx: RepoContext) -> bool:
     root = ctx.root
+    if "pytest" in ctx.pyproject_toml.lower():
+        return True
     for _rel, text in ctx.pyproject_manifests():
         if "pytest" in text.lower():
             return True
@@ -216,6 +218,47 @@ def _python_test_commands(ctx: RepoContext, pm: Optional[str], stack: Set[str]) 
     if test_dir:
         cmd += f" -s {test_dir}"
     return [cmd]
+
+
+# Per-workspace commands (joa.2): a repo whose manifests live below the
+# root (dify: api/pyproject + web/package.json) used to get no test or dev
+# command at all. Each workspace contributes its promoted scripts / test
+# runner as ``cd <dir> && <cmd>``. Skipped in subtree mode, where the
+# scoped manifest already drives the main list.
+_MAX_WORKSPACES_FOR_COMMANDS = 4
+_MAX_COMMANDS_PER_WORKSPACE = 2
+_WORKSPACE_SCRIPT_NAMES = ("test", "dev")
+
+
+def _workspace_commands(ctx: RepoContext) -> List[str]:
+    if ctx.manifest_rel or not ctx.workspace_dirs:
+        return []
+    out: List[str] = []
+    pkg_by_dir = dict(ctx.package_json_manifests())
+    py_by_dir = dict(ctx.pyproject_manifests())
+    for ws in (ctx.results.get("workspaces") or [])[:_MAX_WORKSPACES_FOR_COMMANDS]:
+        rel = str(ws["dir"])
+        pm = ws.get("pm")
+        cmds: List[str] = []
+        prefix = _PM_RUN_PREFIX.get(str(pm or ""))
+        scripts = (pkg_by_dir.get(rel) or {}).get("scripts") or {}
+        if prefix and isinstance(scripts, dict):
+            for name in _WORKSPACE_SCRIPT_NAMES:
+                if name in scripts:
+                    cmds.append(f"{prefix} {name}")
+        if rel in py_by_dir and any(
+            p.startswith(rel + "/") and matches_python_files(p, python_files_patterns(ctx.root / rel, py_by_dir[rel]))
+            for p in ctx.tracked_files if p.endswith(".py")
+        ):
+            if pm == "uv":
+                cmds.append("uv run pytest")
+            elif pm == "poetry":
+                cmds.append("poetry run pytest")
+            elif "pytest" in py_by_dir[rel].lower():
+                cmds.append("python -m pytest")
+        for cmd in cmds[:_MAX_COMMANDS_PER_WORKSPACE]:
+            out.append(f"cd {rel} && {cmd}")
+    return out
 
 
 def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
@@ -299,6 +342,8 @@ def _likely_commands(ctx: RepoContext, max_items: int) -> List[str]:
             commands.append("docker compose up")
         elif (root / "Dockerfile").exists():
             commands.append("docker build .")
+
+    commands.extend(_workspace_commands(ctx))
 
     ordered = priority_commands + commands
 

@@ -10,7 +10,7 @@ class ElixirStackDetector:
     priority = 75
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "mix.exs").exists():
+        if ctx.find_in_manifest_dirs("mix.exs") is not None:
             return ["elixir"]
         return []
 

@@ -44,10 +44,17 @@ class HubFilesCollector:
             for p in ctx.tracked_files
             if Path(p).suffix.lower() in _SCANNABLE_EXTENSIONS and not is_test_path(p)
         ]
-        # Perf guard: a full-body scan of every code file risks blowing the
-        # hook's timeout on very large repos. Skip rather than degrade silently.
-        if not candidates or len(candidates) > HUB_FILES_MAX_SCAN:
+        if not candidates:
             return None
+        # Perf guard: a full-body scan of every code file risks blowing the
+        # hook's timeout on very large repos. Say so instead of vanishing
+        # (joa.25: --include-hub-files used to print nothing, with no reason).
+        max_scan = ctx.config.max_hub_scan
+        if len(candidates) > max_scan:
+            return (
+                f"{self.section_title}\n- skipped: {len(candidates)} candidate files > "
+                f"--max-hub-scan {max_scan}"
+            )
 
         tracked = set(ctx.tracked_files)
         counts: Counter = Counter()

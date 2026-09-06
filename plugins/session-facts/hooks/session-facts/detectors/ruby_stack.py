@@ -10,7 +10,7 @@ class RubyStackDetector:
     priority = 80
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "Gemfile").exists():
+        if ctx.find_in_manifest_dirs("Gemfile") is not None:
             return ["ruby"]
         return []
 

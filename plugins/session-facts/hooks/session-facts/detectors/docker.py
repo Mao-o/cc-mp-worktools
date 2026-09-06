@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
+from core.constants import COMPOSE_FILE_CANDIDATES
 from core.context import RepoContext
 
 
@@ -10,11 +11,7 @@ class DockerDetector:
     priority = 95
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        root = ctx.root
-        if any(
-            (root / f).exists()
-            for f in ("Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
-        ):
+        if ctx.find_in_manifest_dirs("Dockerfile", *COMPOSE_FILE_CANDIDATES) is not None:
             return ["docker"]
         return []
 

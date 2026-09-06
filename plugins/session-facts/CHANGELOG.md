@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.12.0
+
+**monorepo / workspace 対応と巨大 repo の境界処理 (joa.2 / .15 / .25 / .31)**。
+0.11.0 で導入した workspace manifest の発見を、検出・依存・env・コマンドの全経路に広げた。
+
+### 改善
+
+1. **root 直下に manifest が無い構成で stack / 依存 / env が欠落していた問題を修正**
+   (joa.2, `core/context.py`, `core/workspaces.py` 新規, `detectors/*`,
+   `collectors/dependencies.py` / `env_keys.py` / `nextjs_facts.py` / `scripts.py`,
+   `renderer.py`, `core/firebase.py`) — dify (`api/pyproject` + `web/package.json`) は
+   `stack: python, makefile` だけで next / react / typescript / docker と
+   `major_dependencies` が出なかった。`ctx.all_deps` を全 package.json の union、
+   pyproject は全件のテキスト、config file 由来の detector は root と各 workspace を
+   探すようにした。ヘッダーに `- workspaces: api (uv: python, flask), web (pnpm: node,
+   nextjs, react, typescript), ...` 行 (最大 8 件) を足し、2 workspace 以上で
+   `monorepo` タグ。`## Env Keys` は全 workspace 合算、`## Next.js Facts` は Next.js の
+   workspace を読んで `- app_dir:` を示す。Likely Commands に `cd api && uv run pytest` /
+   `cd web && pnpm test` 形式で各 workspace の `test` / `dev` を最大 4 × 2 件。
+   dify の stack: `node, typescript, nextjs, react, zod, jest, monorepo, python, uv,
+   flask, pytest, makefile, docker`
+2. **subtree モード (cwd が workspace の中) では manifest をその workspace に scope**
+   (joa.2 (2)) — `package_manager` / `## Scripts` / `## Env Keys` の先頭 / script 昇格が
+   cwd の manifest で出る。cwd 行は `(subdirectory of repo_root; manifests scoped to
+   workspace api/)`。purpose だけは root の manifest / README のまま
+   (`ctx.root_package_json`)。`cd <dir> &&` 形式の workspace コマンドは subtree モードでは
+   出さない (scope 済みの manifest が本体のリストを担う)
+3. **go.mod パーサ修正 + Gemfile / composer.json パーサ追加** (joa.15,
+   `collectors/dependencies.py`) — 単行 `require github.com/x/y v1` が無視され、
+   `github.com/labstack/echo/v4` の leaf が `v4` になっていた。`// indirect` を除外し
+   `/vN` を落とす。`IMPORTANT_DEPENDENCIES` の `rails` / `rspec` / `laravel/framework` は
+   これまで到達不能だったが、`gem 'rails', '~> 7.1'` と composer `require` を読んで
+   有効化した。依存は manifest ディレクトリ順 (root → workspace) に集めるので、
+   `api/` (Python) + `web/` (JS) では api の依存が先に並ぶ
+4. **入れ子 marker 走査の「打ち切り」と「見られなかった」を区別** (joa.31, `core/fs.py`,
+   `cli.py`) — `scan_nested_project_markers()` が `(found, complete)` を返し、訪問予算 /
+   列挙上限 (ちょうど上限も含む) / `OSError` のいずれでも `complete=False`。gate は
+   非ホームなら不完全を救済側 (フル解析) に倒す。順序非依存のテストで固定
+5. **巨大 repo の上限** (joa.25, `cli.py`, `core/constants.py`, `collectors/hub_files.py`,
+   `renderer.py`) — tracked files を `MAX_TRACKED_FILES` (100,000) で打ち切り、ヘッダーに
+   `- tracked_files: 100000+ (truncated; counts below are lower bounds)`。Hub Files は
+   候補が上限を超えると黙って消える代わりに `- skipped: N candidate files > --max-hub-scan
+   M` の 1 行を出し、上限を `--max-hub-scan` で変えられるようにした
+
+### テスト
+
+`test_workspaces.py` (dify 型 fixture で stack / workspaces 行 / env / Next.js facts /
+workspace コマンド / subtree scope) / `test_dependency_parsers.py` /
+`test_scan_boundaries.py` を新設 (587 tests)。
+
 ## 0.11.0
 
 **出力品質の一括改善 (2026-08 精査バックログ joa.1 / .5 / .6 / .7 / .13 / .14 / .18 /

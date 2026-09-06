@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import List, Optional, Set
 
 from core.constants import ENV_FILE_CANDIDATES
@@ -18,13 +19,34 @@ class EnvKeysCollector:
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
         max_items = ctx.config.max_env_keys
-        keys = _collect_env_keys(ctx.root, max_items)
+        # The scoped manifest dir first (subtree mode), then the root, then
+        # every other workspace: a monorepo's env template usually lives in
+        # the app that reads it, not at the root (joa.2).
+        dirs: List[Path] = []
+        for rel in [ctx.manifest_rel, ""] + list(ctx.workspace_dirs):
+            base = ctx.root / rel if rel else ctx.root
+            if base not in dirs:
+                dirs.append(base)
+        keys = _collect_env_keys_from_dirs(dirs, max_items)
         if not keys:
             return None
         lines = [self.section_title]
         for key in keys:
             lines.append(f"- {key}")
         return "\n".join(lines)
+
+
+def _collect_env_keys_from_dirs(dirs: List[Path], max_items: int) -> List[str]:
+    keys: List[str] = []
+    seen: Set[str] = set()
+    for base in dirs:
+        for key in _collect_env_keys(base, max_items):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+                if len(keys) >= max_items:
+                    return keys
+    return keys
 
 
 def _collect_env_keys(root, max_items: int) -> List[str]:

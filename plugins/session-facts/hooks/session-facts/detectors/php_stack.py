@@ -10,7 +10,7 @@ class PhpStackDetector:
     priority = 90
 
     def detect(self, ctx: RepoContext) -> List[str]:
-        if (ctx.root / "composer.json").exists():
+        if ctx.find_in_manifest_dirs("composer.json") is not None:
             return ["php"]
         return []
 

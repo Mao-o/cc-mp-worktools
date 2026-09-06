@@ -19,7 +19,12 @@ class NextjsFactsCollector:
 
     def collect(self, ctx: RepoContext) -> Optional[str]:
         lines: List[str] = [self.section_title]
-        root = ctx.root
+        # The Next.js app may be a workspace (apps/web); read its own
+        # config and router dirs, not the repo root's.
+        rel = ctx.find_in_manifest_dirs(*NEXT_CONFIG_CANDIDATES)
+        root = ctx.root / rel if rel else ctx.root
+        if rel:
+            lines.append(f"- app_dir: {rel}/")
 
         version = ctx.all_deps.get("next")
         if version:
@@ -35,7 +40,7 @@ class NextjsFactsCollector:
             path = root / candidate
             if path.exists():
                 config_text = read_text(path, limit=50_000)
-                lines.append(f"- config_file: {candidate}")
+                lines.append(f"- config_file: {rel + '/' if rel else ''}{candidate}")
                 break
 
         hints: List[str] = []
