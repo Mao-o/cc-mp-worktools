@@ -104,6 +104,9 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
     ときに探索が superproject へ続き、**未設定の submodule で状態変更コマンドが
     repo 境界で fail-closed せずに allow される**。linked worktree だけを通し、
     submodule と判読不能な内容は境界として止める。
+
+    種別は gitdir の**末尾 2 要素** (`worktrees/<name>` / `modules/<name>`) で
+    決まり、common directory の名前には依存しない。
     """
 
     def setUp(self):
@@ -185,6 +188,37 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         )
         self.assertEqual(self._resolved_dir(worktree), self.repo)
 
+    def test_bare_repo_linked_worktree_still_inherits(self):
+        """bare repository から作った worktree (common dir が `<name>.git`)。
+
+        `git --git-dir=/path/repo.git worktree add ...` の gitdir は
+        `/path/repo.git/worktrees/<name>` で、パス中に `.git` という**要素**が
+        現れない。`.git` を要求すると正当な worktree が境界に落ち、外側
+        workspace の accounts.local.json を継承できなくなる
+        (マージ前レビューの指摘)。
+        """
+        worktree = self._child_with_dot_git_file(
+            "wt", f"gitdir: {self.tmp}/store/repo.git/worktrees/wt\n"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo)
+
+    def test_separate_git_dir_linked_worktree_still_inherits(self):
+        """`--separate-git-dir` で初期化した repo から作った worktree。
+
+        common dir が `.git` と無関係な名前 (`/custom/gitdir`) になる。
+        """
+        worktree = self._child_with_dot_git_file(
+            "wt", f"gitdir: {self.tmp}/custom/gitdir/worktrees/wt\n"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo)
+
+    def test_bare_repo_submodule_is_still_a_boundary(self):
+        """common dir 名に依存しないのは submodule 側も同じ。"""
+        sub = self._child_with_dot_git_file(
+            "sub", f"gitdir: {self.tmp}/custom/gitdir/modules/sub\n"
+        )
+        self.assertIsNone(self._resolved_dir(sub))
+
     # --- (c) 判読できない `.git` ファイルは停止側 (fail-closed) --------------
 
     def test_empty_dot_git_file_is_boundary(self):
@@ -196,7 +230,11 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         self.assertIsNone(self._resolved_dir(child))
 
     def test_gitdir_without_dot_git_component_is_boundary(self):
-        """`--separate-git-dir` 形 (実 gitdir が `.git` の外) も境界扱い。"""
+        """common dir を直接指す形 (`--separate-git-dir` の main worktree) は境界。
+
+        `worktrees/` / `modules/` レイアウトでない = repo 本体の toplevel なので
+        止めてよい。linked worktree だけが `<common>/worktrees/<name>` になる。
+        """
         child = self._child_with_dot_git_file(
             "odd", f"gitdir: {self.tmp}/elsewhere/store\n"
         )

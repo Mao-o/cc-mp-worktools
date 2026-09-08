@@ -84,9 +84,9 @@ service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ�
 停止条件に次の 2 つを足した (**境界の階層自身は探索する**):
 
 - **git repo の境界** — `.git` **ディレクトリ**を持つ階層 (通常の toplevel) と、
-  `.git` **ファイル**が submodule の gitdir (`.git/modules/<name>`) を指す階層
+  `.git` **ファイル**が submodule の gitdir (`<common>/modules/<name>`) を指す階層
   (submodule root)。`.git` ファイルが linked worktree の gitdir
-  (`.git/worktrees/<name>`) を指す場合だけは境界にせず、worktree から親 repo の
+  (`<common>/worktrees/<name>`) を指す場合だけは境界にせず、worktree から親 repo の
   設定を継承する従来の運用はそのまま
 - **`$HOME` およびその上** (`/Users`, `/` 等)
 
@@ -99,6 +99,18 @@ service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ�
 superproject へ続いていた**。superproject に active な CLI と一致する
 accounts.local.json があると、未設定の submodule での状態変更コマンドが repo 境界で
 fail-closed せず allow される。
+
+種別の判定は gitdir の**末尾 2 要素**だけを見る (`worktrees/<name>` なら worktree、
+`modules/<name>` なら submodule)。これもマージ前レビューの指摘によるもので、当初は
+パス中に `.git` という要素があることを厳密に要求していたため、**bare repository
+(`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
+(`/custom/gitdir/worktrees/<name>`) から作った linked worktree が判読不能扱いに
+なり、外側 workspace の設定を継承できず設定済みの状態変更コマンドが deny されて
+いた**。git の common directory の名前は `.git` とは限らないため、レイアウト
+(`worktrees/` / `modules/`) だけで識別する。入れ子の扱い
+(`modules/a/modules/b` は境界、`modules/sub/worktrees/wt` は通過) は変わらない。
+`--separate-git-dir` repo の **main** worktree は gitdir が common directory を
+直接指すため、従来どおり境界 (repo toplevel) として扱う。
 
 **互換性 (非互換の変更)**: 次の 3 つの配置は継承されなくなる (未設定として deny):
 (1) ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて全プロジェクト

@@ -89,16 +89,24 @@ def _split_path_components(raw: str) -> list[str]:
 def _classify_gitdir_pointer(text: str) -> str:
     """`.git` ファイルの内容を "worktree" / "submodule" / "unknown" に分類する。
 
-    git の実 gitdir は `<repo>/.git` 以下が `modules/<name>` と
-    `worktrees/<name>` の繰り返しになる:
+    git が `.git` ファイルに書く gitdir は、**common directory からの相対で**
+    `worktrees/<name>` / `modules/<name>` という末尾を持つ:
 
-      - linked worktree : `<repo>/.git/worktrees/<name>`
-      - submodule       : `<super>/.git/modules/<name>`
-      - submodule の worktree: `<super>/.git/modules/<name>/worktrees/<name>`
+      - linked worktree : `<common>/worktrees/<name>`
+      - submodule       : `<common>/modules/<name>`
+      - submodule の worktree: `<common>/modules/<name>/worktrees/<name>`
 
-    最後に現れたキーワードが種別を決める。この形に当てはまらないもの
-    (`--separate-git-dir` で `.git` の外を指す形、prefix 違い、読めない内容)
-    は **"unknown"** とし、呼び出し側で停止側 (fail-closed) に倒す。
+    判定は **末尾 2 要素だけ**を見る。common directory の名前は `.git` とは
+    限らない — bare repository (`<name>.git`) や `--separate-git-dir` で
+    初期化した repo から作った linked worktree は `repo.git/worktrees/<name>` /
+    `/custom/gitdir/worktrees/<name>` のようになり、パス中に `.git` という
+    要素が現れない。`.git` という名前を要求すると、これらの正当な linked
+    worktree が "unknown" = 境界に落ち、外側 workspace の accounts.local.json
+    を継承できなくなる (マージ前レビューの指摘)。
+
+    末尾 2 要素が上記いずれでもないもの (repo 本体の gitdir を直接指す
+    `--separate-git-dir` の main worktree、prefix 違い、読めない内容) は
+    **"unknown"** とし、呼び出し側で停止側 (fail-closed) に倒す。
     """
     gitdir = None
     for line in text.splitlines():
@@ -112,24 +120,16 @@ def _classify_gitdir_pointer(text: str) -> str:
         return "unknown"
 
     parts = _split_path_components(gitdir)
-    try:
-        anchor = len(parts) - 1 - parts[::-1].index(".git")
-    except ValueError:
+    if len(parts) < 2:
         return "unknown"
-    rest = parts[anchor + 1:]
-    if not rest or len(rest) % 2 != 0:
-        return "unknown"
-
-    kind = "unknown"
-    for index in range(0, len(rest), 2):
-        keyword = rest[index]
-        if keyword == "worktrees":
-            kind = "worktree"
-        elif keyword == "modules":
-            kind = "submodule"
-        else:
-            return "unknown"
-    return kind
+    # 末尾は `<keyword>/<name>`。入れ子 (`modules/a/modules/b` は submodule、
+    # `modules/sub/worktrees/wt` は worktree) も最後の keyword で決まる。
+    keyword = parts[-2]
+    if keyword == "worktrees":
+        return "worktree"
+    if keyword == "modules":
+        return "submodule"
+    return "unknown"
 
 
 def _is_repo_boundary(directory: Path) -> bool:
@@ -137,12 +137,13 @@ def _is_repo_boundary(directory: Path) -> bool:
 
     - `.git` が **ディレクトリ** → 通常の repo toplevel → 境界
     - `.git` が **ファイル** (gitdir ポインタ) → 内容で分岐する
-      - linked worktree (`.git/worktrees/<name>`) → **境界ではない**。worktree
-        から親 repo の設定を継承する運用 (`<repo>/.worktrees/<branch>` が cwd)
-        を残すため、従来どおり親 repo の toplevel まで上らせる
-      - submodule (`.git/modules/<name>`) → **境界**。submodule root は独立した
-        repo の境界であり、superproject の accounts.local.json を継承させると
-        未設定の submodule で状態変更コマンドが素通りする
+      - linked worktree (gitdir が `<common>/worktrees/<name>`) → **境界では
+        ない**。worktree から親 repo の設定を継承する運用
+        (`<repo>/.worktrees/<branch>` が cwd) を残すため、従来どおり親 repo の
+        toplevel まで上らせる
+      - submodule (gitdir が `<common>/modules/<name>`) → **境界**。submodule
+        root は独立した repo の境界であり、superproject の accounts.local.json
+        を継承させると未設定の submodule で状態変更コマンドが素通りする
       - 判読できない内容 → **境界** (fail-closed)。継承先が増える方向へ倒すと
         deny すべき場面を allow してしまうため、分からない場合は止める
     - `.git` が無い → 境界ではない
@@ -205,9 +206,9 @@ def discover_accounts_files_with_ancestors(
       - 同一階層に複数 tier が同居する場合は呼び出し側で fail-closed (D4)
       - **git repo の境界を越えない** — `.git` ディレクトリを持つ階層
         (通常の toplevel) と、`.git` ファイルが submodule の gitdir
-        (`.git/modules/<name>`) を指す階層 (submodule root)。その階層自身は
+        (`<common>/modules/<name>`) を指す階層 (submodule root)。その階層自身は
         探すが、その親へは上らない。linked worktree
-        (`.git/worktrees/<name>`) だけは境界にせず親 repo まで上らせる
+        (`<common>/worktrees/<name>`) だけは境界にせず親 repo まで上らせる
       - **`$HOME` およびその上 (`/Users`, `/` 等) へは上らない**
       - 何も見つからずに `Path.parent == Path` (ルート) に到達したら諦める
       - `max_levels` で安全側の上限を設ける
@@ -228,7 +229,12 @@ def discover_accounts_files_with_ancestors(
     accounts.local.json があると、**未設定の submodule で状態変更コマンドが
     repo 境界で fail-closed せずに allow される**。`.git` ファイルの内容
     (`gitdir:` の指す先の形) で linked worktree と submodule を区別し、
-    判読できない場合は停止側に倒す。
+    判読できない場合は停止側に倒す。種別は gitdir の**末尾 2 要素**
+    (`worktrees/<name>` か `modules/<name>` か) で決め、common directory の
+    名前が `.git` であることには依存しない — bare repository や
+    `--separate-git-dir` から作った linked worktree はパス中に `.git` 要素を
+    持たないため、その名前を要求すると正当な worktree が境界に落ちてしまう
+    (マージ前レビューの指摘)。
 
     gitdir は**分類にしか使わず、探索先としては辿らない**。linked worktree が
     repo の**外**に置かれている場合 (gitdir が別の場所を指す形) に親 repo へ

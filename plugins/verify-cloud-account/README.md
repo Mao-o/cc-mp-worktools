@@ -515,13 +515,18 @@ worktree 内に同名ファイルを置く必要は無い。
 - 安全側上限として `max_levels=10` (`core/paths.py`)
 - **停止条件 (v0.12.0)**: 次の境界を越えて上らない。境界の階層自身は探索する
   - **git repo の toplevel** (`.git` **ディレクトリ**を持つ階層)
-  - **submodule の root** (`.git` が `.git/modules/<name>` を指すファイルの階層)。
-    submodule も独立した repo の境界なので、superproject の設定は継承しない
+  - **submodule の root** (`.git` が `<common>/modules/<name>` を指すファイルの
+    階層)。submodule も独立した repo の境界なので、superproject の設定は継承しない
   - **`.git` がファイルで、内容を判読できない階層** (`gitdir:` が読めない /
     上記いずれの形でもない)。分からない場合は止める側 (fail-closed) に倒す
   - **`$HOME` およびその上** (`/Users`, `/` 等)
-  - **linked worktree だけは境界にしない** (`.git` が `.git/worktrees/<name>` を
-    指すファイル)。worktree から親 repo の設定を継承する上記の運用はそのまま
+  - **linked worktree だけは境界にしない** (`.git` が `<common>/worktrees/<name>`
+    を指すファイル)。worktree から親 repo の設定を継承する上記の運用はそのまま。
+    `<common>` は git の common directory で、その名前は `.git` とは限らない —
+    bare repository (`repo.git/worktrees/<name>`) や `--separate-git-dir` で
+    初期化した repo (`/custom/gitdir/worktrees/<name>`) から作った worktree も
+    同じく通過する (判定は末尾の `worktrees/<name>` / `modules/<name>` で行い、
+    common directory の名前には依存しない)
   - 判定は `.git` の読み取りだけで行う (git コマンドは実行しない)。`gitdir:` の
     指す先は**種別の判定にしか使わず、探索先としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、

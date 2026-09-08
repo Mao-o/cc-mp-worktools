@@ -214,12 +214,25 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
   継承する (しかも verify 成功時は継承注釈が出ないので気付けない)
 - **git repo の境界は `.git` の種別で決める** (`_is_repo_boundary`)。`.git`
   ディレクトリ = toplevel は境界。`.git` ファイル (gitdir ポインタ) は内容で分岐し、
-  `.git/worktrees/<name>` を指す linked worktree **だけ**が境界にならず親 repo まで
-  上れる。`.git/modules/<name>` を指す submodule root は境界 — ファイル形を一律に
-  通過扱いにすると submodule から superproject の設定を継承し、**未設定の submodule
-  で状態変更コマンドが repo 境界で fail-closed せず allow される**。判読できない
-  `.git` ファイル (prefix 違い / `--separate-git-dir` 形 / 読み取り失敗) も境界に
-  倒す。「継承先が増える方向」は allow 側なので、分からないときは止める
+  `<common>/worktrees/<name>` を指す linked worktree **だけ**が境界にならず親 repo
+  まで上れる。`<common>/modules/<name>` を指す submodule root は境界 — ファイル形を
+  一律に通過扱いにすると submodule から superproject の設定を継承し、**未設定の
+  submodule で状態変更コマンドが repo 境界で fail-closed せず allow される**。
+  判読できない `.git` ファイル (prefix 違い / common directory を直接指す形 /
+  読み取り失敗) も境界に倒す。「継承先が増える方向」は allow 側なので、分からない
+  ときは止める
+- **linked worktree の判別は gitdir の末尾 2 要素だけで行う** — `worktrees/<name>`
+  なら worktree、`modules/<name>` なら submodule。`<common>` (git の common
+  directory) の名前が `.git` であることに依存しない。bare repository から作った
+  worktree は `repo.git/worktrees/<name>`、`--separate-git-dir` で初期化した repo
+  から作った worktree は `/custom/gitdir/worktrees/<name>` になり、**パス中に
+  `.git` という要素が現れない**。`.git` を厳密に要求すると、これらの正当な
+  worktree が unknown = 境界に落ち、外側 workspace の accounts.local.json を
+  継承できず設定済みの状態変更コマンドが deny される (マージ前レビューの指摘)。
+  末尾で判定しても入れ子は従来どおり — `modules/a/modules/b` は境界、
+  `modules/sub/worktrees/wt` は通過。`--separate-git-dir` repo の **main**
+  worktree は gitdir が common directory を直接指す (`worktrees/` が付かない)
+  ため、これまでどおり境界 = repo toplevel として扱われる
 - 判定は `.git` の**読み取りのみ**で行う (git コマンドは呼ばない)。gitdir は種別の
   分類にしか使わず**探索先としては辿らない** — 探索経路を増やすと「見つかる場所が
   増える」= allow 側に倒れる。区切りは `/` と `\` の両方を受けて OS 非依存に分解する
