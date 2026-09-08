@@ -235,10 +235,80 @@ class TestPidReuseGuard(OrphanTestCase):
     def test_terminate_reports_that_it_did_not_signal(self):
         victim = self.spawn_unrelated()
 
-        sent = self.cursor.terminate(victim.pid)
+        sent = self.cursor.terminate(victim.pid, time.time())
 
         self.assertFalse(sent, "同一性を確認できない pid で True を返している")
         self.assert_unharmed(victim, "戻り値は False なのに signal を送っている")
+
+
+class TestStartTimeGuard(OrphanTestCase):
+    """署名が一致しても、pid ファイルより後に起動したプロセスには signal を送らない。
+
+    署名 (`agent --trust --print --mode plan`) は本 plugin の review 系 hook が起動する
+    cursor とも一致する。TTL 超過まで残った pid ファイルの pid がそれらに再利用されて
+    いると、署名照合だけでは素通りして無関係なレビューを `killpg` で撃つ。`pre` は Popen
+    直後に pid ファイルを書くので、自分の analyzer なら開始時刻は必ず mtime 以前になる。
+
+    2 つのテストは **同じフィクスチャで pid ファイルの mtime だけが違う**。開始時刻の
+    照合を外すと negative 側だけが落ちる (署名照合の副作用ではないことが分かる)。
+    """
+
+    def _launch_analyzer(self, tool_use_id: str) -> tuple[int, int, object]:
+        """偽 cursor を `pre` 経由で起動し、(leader pid, 孫 pid, pid ファイル) を返す。
+
+        孫の生死で判定する。leader は test プロセスの直接の子なので、SIGTERM を受けても
+        誰も `wait` しないうちは zombie として残り `os.kill(pid, 0)` が成功し続ける
+        (「撃たれたのに生きている」と読めてしまう)。孫は leader の子なので、leader が
+        死ねば init に引き取られて確実に reap される。孫は leader と同じ process group に
+        居るので、`killpg` が飛べば必ず巻き込まれる。
+        """
+        gc_pid_file = self.fake_cursor_with_grandchild()
+        self.run_hook("pre", explore_payload(tool_use_id))
+        _, pid_file = self.state.paths(self.cursor.NAME, tool_use_id)
+        leader = int(pid_file.read_text().strip())
+        self._children.append(leader)
+        grandchild = self.read_grandchild(gc_pid_file)
+        self.assertTrue(_alive(grandchild), "偽 cursor の孫が起動していない")
+        return leader, grandchild, pid_file
+
+    def test_terminate_skips_a_process_started_after_the_pid_file(self):
+        """再利用された pid の形: プロセスの開始時刻が pid ファイルの mtime より後。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-start-after")
+        # pid ファイルだけを過去へずらす = 「この pid は 15 分前に記録された。いま走って
+        # いるのはその後で起動した別プロセス」という再利用の状況。
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+
+        sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertFalse(sent, "pid ファイルより後に起動したプロセスに送っている")
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(
+            _alive(grandchild), "送らないと報告したのに process group を撃っている"
+        )
+
+    def test_terminate_signals_an_analyzer_started_before_the_pid_file(self):
+        """正常経路: 開始時刻が mtime 以前なら今までどおり process group ごと停止する。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-start-before")
+
+        sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertTrue(sent, "自分が起動した analyzer なのに停止をあきらめている")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(_alive(grandchild), "孫プロセスが取り残されている")
+
+    def test_terminate_skips_when_the_pid_file_mtime_is_unavailable(self):
+        """mtime が取れない (pid ファイルが消えている) ときも送らない側。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-start-nomtime")
+        pid_file.unlink()
+
+        sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertFalse(sent, "起動時刻が不明なのに signal を送っている")
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(_alive(grandchild), "起動時刻が不明なのに撃っている")
 
 
 class TestStaleEntries(HookTestCase):
@@ -339,6 +409,14 @@ class TestGcOrphans(OrphanTestCase):
         self.assertFalse(pid_file.exists())
 
     def test_gc_terminates_a_still_running_orphan_group(self):
+        """**TTL を縮めて待つ**。pid ファイルの mtime を過去へずらしてはいけない。
+
+        本番の孤児は「pid ファイルの mtime と同時刻に起動して TTL を超えて生き残った」
+        プロセス。mtime だけを過去へずらすと、走っているのは mtime より後に起動した
+        プロセスということになり、`cursor` の PID 同一性判定 (再利用ガード) から見て
+        別プロセスと区別が付かない — 再利用の状況を作って「停止できること」を主張する
+        フィクスチャになってしまう。TTL 側を縮めれば時系列は本番と同じまま短縮できる。
+        """
         gc_pid_file = self.fake_cursor_with_grandchild()
         self.run_hook("pre", explore_payload("tu-gc-live"))
         result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-gc-live")
@@ -346,10 +424,12 @@ class TestGcOrphans(OrphanTestCase):
         self._children.append(leader)
         grandchild = self.read_grandchild(gc_pid_file)
 
-        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
-        os.utime(pid_file, (past, past))
-
-        self.assertEqual(self.entry.gc_orphans(), 1)
+        ttl = 0.2
+        with mock.patch.object(self.state, "ORPHAN_TTL_SEC", ttl):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not self.state.stale_entries():
+                time.sleep(ttl / 2)
+            self.assertEqual(self.entry.gc_orphans(), 1)
 
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline and (_alive(leader) or _alive(grandchild)):

@@ -292,6 +292,59 @@ def pid_command(pid: int) -> str | None:
     return None
 
 
+def parse_etime(text: str) -> float | None:
+    """`ps -o etime=` の経過時間表記を秒に変換する。解析できなければ None。
+
+    形式は POSIX の `[[DD-]HH:]MM:SS` (例: `05`→未満、`01:23`, `10:11:12`, `3-04:05:06`)。
+    秒未満は ps 側で切り捨てられるので、戻り値も切り捨て済みの整数秒相当になる。
+    """
+    text = text.strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        head, _, text = text.partition("-")
+        try:
+            days = int(head)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    if not 1 <= len(parts) <= 3:
+        return None
+    total = 0
+    for part in parts:
+        if not part.isdigit():
+            return None
+        total = total * 60 + int(part)
+    return float(days * 86400 + total)
+
+
+def pid_elapsed_sec(pid: int) -> float | None:
+    """pid の経過時間 (プロセス開始からの秒数) を返す。取得できなければ None。
+
+    `pid_command` と組で「記録した pid が本当にその時起動したプロセスか」を判定する。
+    cmdline の署名だけでは、同じ argv で起動する別用途のプロセス (本 plugin では
+    review 系 hook が起動する cursor) に pid が再利用されたときに区別できない。
+    `now - elapsed` が記録時刻 (pid ファイルの mtime) より後なら別プロセスと判る。
+
+    `etimes` (秒の直値) は procps 拡張で macOS の `ps` には存在しない
+    (`ps: etimes: keyword not found`)。`lstart` は表記が locale 依存なので、
+    POSIX の `etime` を解析する。
+    """
+    try:
+        res = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    return parse_etime(res.stdout)
+
+
 def group_is_stopped(pgid: int) -> bool:
     """process group に「止めるべきメンバー」が居ないか (empty / zombie-only)。
 

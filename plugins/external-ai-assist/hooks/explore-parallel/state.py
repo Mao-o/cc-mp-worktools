@@ -48,7 +48,7 @@ def cleanup(*files: Path) -> None:
 
 
 def stale_entries(
-    ttl_sec: float = ORPHAN_TTL_SEC,
+    ttl_sec: float | None = None,
     *,
     exclude_tool_use_id: str = "",
     now: float | None = None,
@@ -62,7 +62,13 @@ def stale_entries(
 
     `exclude_tool_use_id` には実行中の tool_use_id を渡す。TTL があるので通常は
     掛からないが、自分が今起動したばかりのプロセスを GC が撃つ経路を構造的に潰す。
+
+    `ttl_sec` 省略時は `ORPHAN_TTL_SEC` を**呼び出しのたびに**読む (既定引数に束縛
+    しない)。テストが TTL を短縮して「本当に走っている孤児」を扱えるようにするため。
+    pid ファイルの mtime を過去へずらす方式では、プロセスの開始時刻が mtime より後に
+    なり `cursor` 側の PID 同一性判定 (再利用ガード) から見て別プロセスに見えてしまう。
     """
+    ttl_sec = ORPHAN_TTL_SEC if ttl_sec is None else ttl_sec
     now = time.time() if now is None else now
     try:
         names = os.listdir(BASE_DIR)

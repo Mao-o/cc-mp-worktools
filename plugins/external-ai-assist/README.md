@@ -28,8 +28,8 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
   前に exit 0 で抜ける (0.9.0)。0.8.0 以前はこの判定が無く、Windows では起動直後の
   import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
   `fcntl` に依存しない (import 時には落ちない) が、0.10.0 で停止処理を `os.killpg` +
-  `ps` (PID 同一性の確認) に変えたため POSIX 前提になった。Windows では同一性を確認
-  できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
+  `ps` (cmdline の署名と開始時刻による PID 同一性の確認) に変えたため POSIX 前提に
+  なった。Windows では同一性を確認できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
   `os.kill(pid, 0)` は Windows では TerminateProcess になるため挙動が異なる。Windows
   での動作は引き続き未検証
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
@@ -79,8 +79,9 @@ post は同期のまま最大 60 秒ポーリングしており、「並走で�
 `claude -p` の teardown では post の後始末に到達しないため、`$TMPDIR/explore-parallel/` に
 pid / 結果ファイルが残り Cursor Agent も走り続けていた (課金)。pre / post の双方で
 15 分超の残骸を走査し、プロセスを停止してファイルを消す。停止は process group ごと
-(SIGTERM → 猶予 → SIGKILL) で、signal を送る前に `ps` の cmdline で pid の同一性を
-確認する (**確認できなければ送らない** — 無関係なプロセスを撃つほうが重い)。
+(SIGTERM → 猶予 → SIGKILL) で、signal を送る前に `ps` の **cmdline の署名とプロセスの
+開始時刻**で pid の同一性を確認する (**確認できなければ送らない** — 無関係なプロセスを
+撃つほうが重い)。
 
 ### exitplan-review (クロスレビュー)
 
@@ -290,8 +291,10 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
    (SIGTERM → 猶予 → SIGKILL) し、同じグループに居る孫プロセス (stdout を継承した
    helper 等) を取り残さない。killpg は reap 前の子にだけ送る (pid 再利用の誤送信防止)。
    pid ファイル経由で後から止める `explore-parallel` は `Popen` を持たないので、代わりに
-   `ps` の cmdline を起動 argv と突合して同一性を確かめる (0.10.0)。**どちらの経路でも、
-   同一性を確認できないときは signal を送らない** — 無関係なプロセスを撃つ事故のほうが、
+   `ps` の cmdline を起動 argv と突合し、さらに `ps -o etime=` の開始時刻が pid ファイルの
+   mtime 以前であることも要求して同一性を確かめる (0.10.0)。argv の署名だけでは、同じ
+   起動形の別 hook (レビュー系) に pid が再利用されたときに区別が付かない。**どちらの経路
+   でも、同一性を確認できないときは signal を送らない** — 無関係なプロセスを撃つ事故のほうが、
    外部 CLI を 1 つ取り残すより重い。kill 猶予は hooks.json の hook timeout に
    織り込んである (各 tests が式で固定)
 9. **外部 AI は読み取り専用で起動する** — cursor は `--mode plan`、codex は

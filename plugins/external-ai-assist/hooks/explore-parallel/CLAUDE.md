@@ -155,16 +155,33 @@ pid / 結果ファイルが無期限に残り、バックグラウンドの curs
 SIGTERM → 猶予 (`KILL_GRACE_SEC`) → SIGKILL のエスカレーションを入れた
 (review 系 2 hook の `_common/subproc.kill_process_group` と同じ考え方)。
 
-signal を送る前に `ps -ww -o command=` で cmdline を取り、`cursorcli.readonly_argv` から
-導出した署名 (`agent --trust --print --mode plan`) と突合する。pid ファイルは TTL 超過まで
-残りうるので、その間に pid が別プロセスへ再利用されていることがあるため。
+signal を送る前に **cmdline の署名とプロセスの開始時刻の 2 段**で pid の同一性を確認する。
+pid ファイルは TTL 超過まで残りうるので、その間に pid が別プロセスへ再利用されている
+ことがあるため。
 
+1. `ps -ww -o command=` で cmdline を取り、`cursorcli.readonly_argv` から導出した署名
+   (`agent --trust --print --mode plan`) と突合する
+2. `ps -o etime=` で開始時刻を取り、**pid ファイルの mtime (= 起動時刻) 以前**であることを
+   要求する (`_START_SKEW_SEC` = 5 秒の余裕付き)
+
+- **署名だけでは足りない** (マージ前レビューの指摘)。同じ `readonly_argv` で cursor を
+  起動する hook が本 plugin 内に他にもある (exitplan-review / post-implementation-review)。
+  TTL 超過まで残った pid ファイルの pid がそれらに再利用されていると、署名照合を素通りして
+  無関係なレビューを `killpg` で撃つ。`pre` は Popen 直後に pid ファイルを書くので、自分の
+  analyzer なら開始時刻は必ず mtime 以前になる。再利用された pid は mtime より後に起動して
+  いるので弾ける
+- **`etime` を使う理由**。`etimes` (秒の直値) は procps 拡張で macOS の `ps` には無い
+  (`ps: etimes: keyword not found`)。`lstart` は表記が locale 依存。POSIX の `etime`
+  (`[[DD-]HH:]MM:SS`) を `_common/subproc.parse_etime` で秒に直す。秒未満は ps が切り捨てる
+  ので開始時刻が最大 1 秒ぶん後ろにずれて見える — `_START_SKEW_SEC` はこのずれと
+  ファイルシステムの時刻粒度のぶんの余裕
 - **argv[0] (実行ファイル名) は照合しない**。`cursor` は実体へ `exec` するシムのことが
   あり、その場合 ps が返すのは実体側の名前になる。引数は `exec "$REAL" "$@"` で保たれる
   ので、名前ではなくフラグの組み合わせで見る。名前まで要求すると「シム環境では一切
   kill できない」= ガードではなく停止処理の無効化になる
-- **判定できないときは送らない側に倒す**。無関係なプロセスに SIGTERM を送る事故のほうが、
-  cursor を 1 つ取り残すより重い
+- **判定できないときは送らない側に倒す** (`ps` が使えない・出力が解析できない・mtime が
+  取れない、のいずれも)。無関係なプロセスに SIGTERM を送る事故のほうが、cursor を 1 つ
+  取り残すより重い
 
 ### tool_use_id の重要性
 
@@ -226,8 +243,16 @@ python3 -m unittest discover tests     # 偽 cursor (PATH 先頭の bash script)
 
 `tests/test_orphan_gc.py` は 0.10.0 で入れた停止・GC の契約を固定する: 停止が
 process group ごとであること (孫を取り残さない)、analyzer と一致しない pid には
-signal を送らないこと (PID 再利用ガード)、TTL 判定が pid ファイルの mtime を見ること、
-現在の tool_use_id を除外すること、GC が pre / post の両方で走ること。
+signal を送らないこと (PID 再利用ガード)、**署名が一致しても pid ファイルより後に起動した
+プロセスには送らないこと** (`TestStartTimeGuard`)、TTL 判定が pid ファイルの mtime を
+見ること、現在の tool_use_id を除外すること、GC が pre / post の両方で走ること。
+
+**「走っている孤児を止める」テストは pid ファイルの mtime を過去へずらして作らない**。
+本番の孤児は mtime と同時刻に起動して TTL を超えて生き残ったプロセスなので、mtime だけを
+ずらすと「mtime より後に起動した = 再利用された pid」の形になり、開始時刻の照合から見て
+別プロセスと区別が付かない (自分で作った再利用の状況を「停止できること」の根拠にしてしまう)。
+`state.ORPHAN_TTL_SEC` を縮めて待てば時系列は本番と同じまま短縮できる (`stale_entries` は
+TTL を既定引数に束縛せず呼び出しのたびに読む)。
 `tests/test_hook_registration.py` は hooks.json 側の登録形 (post は `async`、pre は同期、
 発火条件は据置) を固定する。
 

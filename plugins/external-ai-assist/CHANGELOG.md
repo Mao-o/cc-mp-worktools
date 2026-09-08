@@ -62,6 +62,14 @@ turn")。**発火条件 (イベント / matcher) は変えていない** — 変
   **判定できないときは送らない側に倒す**。実行ファイル名は照合しない — `cursor` は実体へ
   `exec` するシムのことがあり、名前まで要求すると「シム環境では一切 kill できない」=
   ガードではなく停止処理の無効化になる
+- **マージ前レビューの指摘**: 署名 (`agent --trust --print --mode plan`) だけでは足りない。
+  同じ argv で cursor を起動する hook が本 plugin 内に他にもあり (exitplan-review /
+  post-implementation-review)、TTL 超過まで残った pid ファイルの pid がそれらに再利用
+  されていると署名照合を素通りして無関係なレビューを `killpg` で撃つ。`ps -o etime=`
+  (POSIX。`etimes` は procps 拡張で macOS に無く、`lstart` は locale 依存) で
+  **プロセスの開始時刻**も取り、pid ファイルの mtime (= 起動時刻) 以前であることを要求する
+  ように直した。`pre` は Popen 直後に pid ファイルを書くので自分の analyzer なら必ず
+  満たす。`ps` が取れない・解析できない・mtime が取れない場合はいずれも送らない側
 - `PostToolUseFailure(Agent)` を `hooks.json` に足して即時掃除する案は**採っていない**。
   イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」の
   変更にあたる。TTL GC が同じ失敗モードを発火条件を変えずに覆う

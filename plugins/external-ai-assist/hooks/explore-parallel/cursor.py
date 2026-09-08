@@ -6,7 +6,8 @@ review 系 2 hook と同じ `_common.cursorcli.readonly_argv` (調査用途で�
 
 停止は **process group ごと** (`killpg`) 行う。`pre` は `start_new_session=True` で起動する
 ので pgid == pid で、リーダーだけを止めると cursor-agent (node) の孫プロセスが残る。
-signal を送る前に cmdline で pid の同一性を確認する (PID 再利用対策)。
+signal を送る前に **cmdline の署名と開始時刻**の両方で pid の同一性を確認する
+(PID 再利用対策)。
 """
 from __future__ import annotations
 
@@ -43,6 +44,14 @@ log = hooklog.make_logger(f"explore-parallel/{NAME}")
 #: 要求すると「シム環境では一切 kill できない」= ガードではなく停止処理の無効化になる。
 #: 署名は argv の先頭側にあるため、ps が末尾を切り詰めても落ちない。
 _SIGNATURE_TOKENS = tuple(t for t in cursorcli.readonly_argv("")[1:] if t)
+
+#: プロセスの開始時刻が pid ファイルの mtime (= 起動時刻) より後に見えても許す幅 (秒)。
+#:
+#: `pre` は Popen した直後に pid ファイルを書くので、正しい analyzer の開始時刻は
+#: 常に mtime 以前になる。ただし `ps -o etime=` は秒未満を切り捨てるため開始時刻が
+#: 最大 1 秒ぶん後ろにずれて見え、mtime 側にもファイルシステムの時刻粒度がある。
+#: 誤って「別プロセス」と判定して停止をあきらめないよう、数秒の余裕を持たせる。
+_START_SKEW_SEC = 5.0
 
 _PROMPT_TEMPLATE = (
     "以下のタスクについて、cursor のセマンティック検索(意味ベースのコード検索)を活かした"
@@ -94,6 +103,8 @@ def post(tool_use_id: str) -> str | None:
             pid = int(pid_file.read_text().strip())
         except (ValueError, OSError):
             pid = None
+        # mtime は待機の前に読む (掃除後には取れない)。取れなければ停止をあきらめる側。
+        started_at = _started_at(pid_file)
 
         if pid:
             waited = 0
@@ -102,7 +113,7 @@ def post(tool_use_id: str) -> str | None:
                 waited += POLL_INTERVAL_SEC
 
             if _is_running(pid):
-                if terminate(pid):
+                if terminate(pid, started_at):
                     log(f"timeout ({TIMEOUT_SEC}s) — killed")
 
         cleanup(pid_file)
@@ -139,11 +150,11 @@ def reap_orphan(pid_file: Path) -> None:
         return
     if not _is_running(pid):
         return
-    if terminate(pid):
+    if terminate(pid, _started_at(pid_file)):
         log(f"孤児 analyzer (pid {pid}) を停止")
 
 
-def terminate(pid: int) -> bool:
+def terminate(pid: int, started_at: float | None) -> bool:
     """analyzer の process group を停止する (SIGTERM → 猶予 → SIGKILL)。停止を試みたら True。
 
     `pre` は `start_new_session=True` で起動しているので **pgid == pid**。0.9.1 までは
@@ -151,12 +162,15 @@ def terminate(pid: int) -> bool:
     生成した孫プロセスが取り残されて走り続けていた (課金・CPU のリーク)。`_common.subproc`
     が review 系 2 hook で使っている `killpg` と同じ考え方に揃える。
 
-    signal を送る前に **pid が本当に自分が起動した analyzer か** を cmdline で確認する。
-    pid ファイルは TTL 超過まで残りうるので、その間に pid が別プロセスへ再利用されている
-    ことがある。**判定できないときは送らない側に倒す** — 無関係なプロセスに SIGTERM を
-    送る事故のほうが、cursor を 1 つ取り残すより重い。
+    signal を送る前に **pid が本当に自分が起動した analyzer か** を cmdline の署名と
+    プロセスの開始時刻で確認する。pid ファイルは TTL 超過まで残りうるので、その間に pid が
+    別プロセスへ再利用されていることがある。**判定できないときは送らない側に倒す** —
+    無関係なプロセスに SIGTERM を送る事故のほうが、cursor を 1 つ取り残すより重い。
+
+    `started_at` には **pid ファイルの mtime (= 起動時刻)** を渡す (`_started_at`)。
+    None (mtime が取れない) は送らない側。
     """
-    if not _is_analyzer(pid):
+    if not _is_analyzer(pid, started_at):
         log(f"pid {pid} は起動した analyzer と一致しない — signal を送らない")
         return False
 
@@ -182,16 +196,47 @@ def _group_exists(pgid: int) -> bool:
         return False
 
 
-def _is_analyzer(pid: int) -> bool:
-    """pid の cmdline が `cursorcli.readonly_argv` の起動形と一致するか。
+def _started_at(pid_file: Path) -> float | None:
+    """pid ファイルの mtime (= analyzer の起動時刻)。取れなければ None。"""
+    try:
+        return pid_file.stat().st_mtime
+    except OSError:
+        return None
 
-    判定不能 (ps が使えない・出力が空) は False = 送らない側。
+
+def _is_analyzer(pid: int, started_at: float | None) -> bool:
+    """pid が「その時起動した自分の analyzer」か。
+
+    2 段で見る:
+
+    1. cmdline が `cursorcli.readonly_argv` の起動形と一致するか
+    2. プロセスの開始時刻が `started_at` (pid ファイルの mtime) 以前か
+
+    署名だけでは足りない。同じ `readonly_argv` で cursor を起動する hook が本 plugin 内に
+    他にもあり (プラン / 実装後のレビュー)、TTL 超過まで残った pid ファイルの pid が
+    それらに再利用されていると、署名照合を素通りして無関係なレビューを `killpg` で撃つ。
+    `pre` は Popen 直後に pid ファイルを書くので、自分の analyzer なら開始時刻は必ず
+    mtime 以前になる。再利用された pid は mtime より後に起動しているので弾ける。
+
+    判定不能 (ps が使えない・出力が空・mtime が取れない) はいずれも False = 送らない側。
     """
     cmdline = subproc.pid_command(pid)
     if not cmdline:
         return False
     tokens = cmdline.split()
-    return all(t in tokens for t in _SIGNATURE_TOKENS)
+    if not all(t in tokens for t in _SIGNATURE_TOKENS):
+        return False
+    return _started_before(pid, started_at)
+
+
+def _started_before(pid: int, started_at: float | None) -> bool:
+    """pid の開始時刻が `started_at` (+ 許容ずれ) 以前か。判定不能は False。"""
+    if started_at is None:
+        return False
+    elapsed = subproc.pid_elapsed_sec(pid)
+    if elapsed is None:
+        return False
+    return (time.time() - elapsed) <= started_at + _START_SKEW_SEC
 
 
 def _signal_group(pid: int, sig: signal.Signals) -> None:

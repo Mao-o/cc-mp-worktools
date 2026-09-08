@@ -444,6 +444,39 @@ class TestPidIdentity(SubprocTestCase):
         self.assertTrue(wait_until_dead(proc.pid), "プロセスが終了していない")
         self.assertTrue(subproc.group_is_stopped(proc.pid))
 
+    def test_pid_elapsed_sec_is_small_for_a_fresh_process(self):
+        """起動直後の経過時間は小さい (cmdline 署名に開始時刻を足す判定の土台)。"""
+        proc = self._spawn("sentinel-etime")
+
+        elapsed = subproc.pid_elapsed_sec(proc.pid)
+
+        self.assertIsNotNone(elapsed, "ps から経過時間を取得できていない")
+        self.assertLess(elapsed, 60, "起動直後なのに経過時間が大きすぎる")
+
+    def test_pid_elapsed_sec_is_none_for_a_dead_pid(self):
+        proc = self._spawn("sentinel-etime-dead")
+        pid = proc.pid
+        self._reap(proc)
+
+        self.assertIsNone(subproc.pid_elapsed_sec(pid))
+
+    def test_parse_etime_handles_every_posix_field_width(self):
+        """`[[DD-]HH:]MM:SS`。Linux / macOS とも桁数が経過時間で変わる。"""
+        cases = {
+            "00:01\n": 1.0,
+            "01:23": 83.0,
+            "10:11:12": 36672.0,
+            "3-04:05:06": 3 * 86400 + 14706.0,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(subproc.parse_etime(text), expected)
+
+    def test_parse_etime_rejects_unparseable_output(self):
+        for text in ("", "   ", "not-a-time", "??:??", "a-01:02"):
+            with self.subTest(text=text):
+                self.assertIsNone(subproc.parse_etime(text))
+
 
 if __name__ == "__main__":
     unittest.main()
