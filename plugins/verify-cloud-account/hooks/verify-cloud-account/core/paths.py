@@ -129,8 +129,8 @@ def discover_accounts_files_with_ancestors(
     `/Users/<u>/dev/<org>/<repo>` のような配置では 5 階層で `$HOME` に届き、
     **無関係な `~/.claude/accounts.json` を継承して検証していた**。しかも
     verify 成功時は継承注釈が出ない (silent) ため気付けない。落とす方向
-    (見つからず deny) は fail-closed なので安全側だが、`$HOME` にグローバル
-    既定を置きたい場合はこの遡及ではなく専用の経路を使うべき、という切り分け。
+    (見つからず deny) は fail-closed なので安全側。`$HOME` や repo より上に
+    グローバル既定を置く用途の専用経路は現時点では無い (別途検討)。
 
     linked worktree が repo の**外**に置かれている場合 (`.git` ファイルの
     gitdir が別の場所を指す形) は、従来も親 repo に届いていない

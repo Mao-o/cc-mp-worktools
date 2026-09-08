@@ -116,6 +116,13 @@ class TestAncestorStopsAtHome(BaseAncestorBoundary):
         self._write_legacy(self.home)
         self.assertIsNone(self._resolved_dir(self.project))
 
+    def test_does_not_inherit_from_above_home_when_project_is_outside_home(self):
+        """`$HOME` の外にある project から、`$HOME` より上の階層を拾わない。"""
+        outside = self.tmp / "other" / "proj"
+        outside.mkdir(parents=True)
+        self._write_new(self.tmp)
+        self.assertIsNone(self._resolved_dir(outside))
+
     def test_intermediate_dir_below_home_is_still_searched(self):
         """`$HOME` 未満の中間ディレクトリからの継承は従来どおり有効。"""
         self._write_new(self.home / "dev")

@@ -47,7 +47,9 @@ fail-open)。一方で個々の subprocess timeout は 1 コマンドあたり�
   非 daemon スレッドでインタプリタ終了時に join されるため、ハングした subprocess を
   抱えたまま予算切れを返してもプロセスが終了できず、結局 hook timeout に落ちる
 
-実運用で予算切れに当たるのは「複数サービスの CLI がどれも応答しない」場合に限られる。
+実運用で予算切れに当たるのは、先行するサービスの CLI が遅く予算を消費した場合。後続
+サービスの timeout は残予算に合わせて短縮され、その deny は各サービスの timeout 文面で
+出る (再試行すると検証済みサービスは cache hit する)。
 
 ### 3. `accounts-show` の `[match]` 判定を hook (verify) と一本化
 
@@ -86,10 +88,13 @@ service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ�
   設定を継承する従来の運用はそのまま
 - **`$HOME` およびその上** (`/Users`, `/` 等)
 
-**互換性**: ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて
-全プロジェクトの既定にしていた場合、この階層は継承されなくなる (未設定として deny)。
-その用途はグローバル既定の専用経路で扱うべきという切り分けで、落ちる方向は
-fail-closed のため安全側。
+**互換性 (非互換の変更)**: 次の 2 つの配置は継承されなくなる (未設定として deny):
+(1) ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて全プロジェクト
+の既定にしていた場合、(2) **repo の toplevel より上** (例: 複数 repo を束ねる親ディレクトリ)
+に置いて配下の repo に継承させていた場合。落ちる方向は fail-closed のため安全側。移行は、
+各 repo の toplevel に `accounts_builder.py set --service <svc> --from-cli --dry-run` →
+`--commit` で複製するか、`--path` で明示する。グローバル既定の専用経路は現時点では無い
+(別途検討)。
 
 ### テスト
 
@@ -147,7 +152,7 @@ signpost への一般化、dead code 整理、テスト空白の穴埋め、単�
 
 1. **`gh auth status` の旧バージョン (gh < 2.40) 出力に対応** (`services/github.py`)
    — 複数アカウント対応の `Active account: true/false` marker が無い単一アカウント
-   形式 (`✓ Logged in to github.com as Mao-o`) を `parse_active_accounts` が
+   形式 (`✓ Logged in to github.com as your-github-user`) を `parse_active_accounts` が
    fallback で解釈するようにした。marker 行が一切無い出力でのみ fallback するため、
    新形式の判定には影響しない。あわせて、`Logged in to` はあるのにどちらの形式にも
    一致しない (未知の将来フォーマット等) 場合のメッセージを「gh の出力を解釈できま

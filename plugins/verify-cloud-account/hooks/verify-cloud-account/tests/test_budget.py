@@ -79,7 +79,9 @@ class TestBudgetPrimitives(BudgetTestCase):
         self.assertEqual(
             budget.call_timeout(10), budget.MIN_CALL_TIMEOUT_SECONDS
         )
+        self.assertGreater(budget.MIN_CALL_TIMEOUT_SECONDS, 0.0)
         budget.start(-100.0)
+        self.assertGreater(budget.call_timeout(10), 0.0)
         self.assertEqual(
             budget.call_timeout(10), budget.MIN_CALL_TIMEOUT_SECONDS
         )

@@ -138,7 +138,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 # dict 値 (GHE の hostname / Firebase の alias 等) の特定キーだけを追加・上書き
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
-  set --service github --host ghe.example.com --value mao-corp --commit
+  set --service github --host ghe.example.com --value your-corp-user --commit
 
 # キー全体を削除
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
@@ -518,6 +518,9 @@ worktree 内に同名ファイルを置く必要は無い。
     は `.git` が gitdir を書いたファイルなので停止条件にならず、worktree から
     親 repo の設定を継承する上記の運用はそのまま
   - **`$HOME` およびその上** (`/Users`, `/` 等)
+  - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ) や `$HOME`
+    に置いた設定は継承されなくなる (未設定として deny)。各 repo の toplevel に複製するか
+    `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -621,9 +624,11 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   超過しうる (上限 2 秒)。`15 + 2 < 20` が成り立つことはテストが `hooks.json` を
   読んで機械的に照合する
 
-実運用で予算切れに当たるのは「複数サービスの CLI がどれも応答しない」場合に限られる。
-その場合はコマンドをサービスごとに分けるか、遅い CLI (未ログイン・ネットワーク待ち)
-を解消してから再試行する。
+実運用で予算切れに当たるのは、先行するサービスの CLI が遅く予算を消費した場合。後続
+サービスの timeout は残予算に合わせて短縮され、その deny は各サービスの timeout 文面で
+出る (再試行すると検証済みサービスは cache hit する)。
+それでも切れるならコマンドをサービスごとに分けるか、遅い CLI (未ログイン・ネットワーク
+待ち) を解消してから再試行する。
 
 ## 既知の制限
 
