@@ -1,5 +1,194 @@
 # Changelog
 
+## 0.12.0
+
+内部バックログの精査分 5 件。**判定表 (allow/deny/warn) に 2 つの変更がある** —
+hook の実時間予算切れを deny に足したこと (穴だった fail-open を塞ぐ) と、
+親ディレクトリ遡及の停止条件を足したこと (拾いすぎを止める) の 2 点。
+
+### 1. キー未記載サービスの扱いを実装 (deny) に合わせて明文化
+
+実装は「使う service のキーが `accounts.local.json` に無ければ deny」だったのに、
+README と未設定 deny の文面は「未記載のサービスは検証対象外 (= allow)」と**逆を
+約束**していた。AWS 専用プロジェクトで `gh pr list` を叩くと
+`"github" キーがありません` で止まるのに、README を読んだ人は allow されると
+思っている、という食い違い。
+
+**実装 (deny) を正として文面を揃えた。** 期待値が宣言されていない状態で通すと、
+この plugin が防ぐはずの「別アカウントでの書き込み」をそのまま素通しするため。
+あわせてキー未記載 deny に**キー追加の具体コマンド**を載せた。案内が `init` では
+なく `set` なのは、この deny が「`accounts.local.json` は見つかっている」ときにしか
+出ず、そのファイルが親から継承されている場合 `init` は「継承中の設定を覆い隠す」
+として拒否するため (`set` は継承元を直接編集するのでどちらの階層でも通る)。
+
+案内は **`--dry-run` + 確認の 2 段**にした。`--from-cli` は「今ログインしている
+アカウント」を期待値として提案するので、`--commit` の一発コマンドを渡すと、
+間違ったアカウントに入ったまま**この plugin が防ぐはずの状態を正解として焼き付ける**
+使い方を誘発する。deny を消すのが目的の相手に一発で通る形を渡さない。
+
+判定 (deny) 自体は従来どおりで、変わったのは README と deny の文面のみ。
+
+### 2. hook 1 回分の実時間予算を導入 (`core/budget.py`)
+
+hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code 側で
+打ち切られ、**出力が破棄されてコマンドがそのまま実行される** (公式仕様上の
+fail-open)。一方で個々の subprocess timeout は 1 コマンドあたりの上限でしかなく、
+`gh ... && aws ... && gcloud ...` のような複合コマンドはサービスごとに直列で
+検証するため合計が hook timeout を超えうる。CLI 未検出も CLI timeout も deny に
+倒しているのに、ここだけ無音で通るのは判定表の穴だった。
+
+- hook 1 回に**総予算 15 秒**を置き、各 CLI 呼び出しの timeout を「既定値」と
+  「残り予算」の小さい方に丸める (下限 1 秒 — 0 秒 timeout は必ず失敗する
+  無意味な呼び出しになるため)
+- 予算を使い切ったサービスは **CLI を呼ばずに deny**。判定は CLI 起動の直前に
+  置いたので、cache hit と自己修復の切替 (時間を使わない経路) は従来どおり通る
+- 「予算 + 超過見積り < hook timeout」はテストが `hooks.json` を読んで機械照合する
+- **並列化 (ThreadPoolExecutor) は採らなかった**。`concurrent.futures` の worker は
+  非 daemon スレッドでインタプリタ終了時に join されるため、ハングした subprocess を
+  抱えたまま予算切れを返してもプロセスが終了できず、結局 hook timeout に落ちる
+
+実運用で予算切れに当たるのは、先行するサービスの CLI が遅く予算を消費した場合。後続
+サービスの timeout は残予算に合わせて短縮され、その deny は各サービスの timeout 文面で
+出る (再試行すると検証済みサービスは cache hit する)。
+
+### 3. `accounts-show` の `[match]` 判定を hook (verify) と一本化
+
+`gh` が GitHub Enterprise を先に列挙する環境
+(`{"ghe.example.com": ..., "github.com": ...}`) で、show は「最初の host」と照合して
+`[mismatch]`、hook は `github.com` を優先照合して allow、という乖離が出ていた。
+**同じ規則を 2 箇所に実装していたことが原因**なので、service 側に
+`matches(expected, current) -> bool` を公開して `verify()` と builder の両方が
+同じ 1 実装を使う形にした。`matches()` を持たない service は従来どおり builder の
+汎用判定に落ちる (`services/__init__.py` の契約に追記)。
+
+### 4. 実装者ガイドを `docs/DEVELOPMENT.md` として同梱
+
+service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ規則・キャッシュの
+キー構成・hook 登録の注意点・設計判断の履歴 (D1〜D20)・リリース手順が、追跡され
+ないローカルファイルにしか無く、clone した人にも worktree で作業している本人にも
+辿れなかった。README と監査記録のリンク先も差し替えた。
+
+**同じ内容が二重管理で陳腐化しないよう、「コードが正本のもの (属性一覧・件数・
+定数値・分類表) はガイドに複製しない」方針にした** — 実際、移設元では
+テスト件数・ディレクトリツリー・キャッシュキーの構成要素がいずれも古くなっていた。
+配布ファイルが未同梱ファイルや内部トラッカーの ID を参照していないことは、
+`tests/test_docs.py` が機械的に検査する。
+
+### 5. 親ディレクトリ遡及に停止条件を追加
+
+`accounts.local.json` の親遡及は最大 10 階層という**階層数だけ**が上限だったため、
+`<home>/dev/<org>/<repo>` のような配置では 5 階層でホームディレクトリに届き、
+**無関係な `~/.claude/accounts.json` を継承して検証していた**。しかも verify 成功時は
+継承注釈が出ない (silent) ので気付けない。
+
+停止条件に次の 2 つを足した (**境界の階層自身は探索する**):
+
+- **git repo の境界** — `.git` **ディレクトリ**を持つ階層 (通常の toplevel) と、
+  `.git` **ファイル**が submodule の gitdir (`<common>/modules/<name>`) を指す階層
+  (submodule root)。`.git` ファイルが linked worktree の gitdir
+  (`<common>/worktrees/<name>`) を指す場合だけは境界にせず、worktree から親 repo の
+  設定を継承する従来の運用はそのまま (ただし `<common>` が祖先の repo のもので
+  あることを確かめる。下記)
+- **`$HOME` およびその上** (`/Users`, `/` 等)
+
+`.git` ファイルの判定は**内容の読み取りだけ**で行う (git コマンドは実行しない)。
+`gitdir:` の指す先は種別の判定にしか使わず、探索先としては辿らない。読めない・
+上記いずれの形でもない `.git` ファイルは**境界扱い** (fail-closed) にする。
+
+マージ前レビューの指摘で submodule を境界に加えた。当初は `.git` がファイルなら
+一律に通過扱いだったため、**submodule をプロジェクトとして起動すると探索が
+superproject へ続いていた**。superproject に active な CLI と一致する
+accounts.local.json があると、未設定の submodule での状態変更コマンドが repo 境界で
+fail-closed せず allow される。
+
+種別の予備判定は gitdir の**末尾 2 要素**を見る (`worktrees/<name>` なら worktree、
+`modules/<name>` なら submodule)。これもマージ前レビューの指摘によるもので、当初は
+パス中に `.git` という要素があることを厳密に要求していたため、**bare repository
+(`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
+(`/custom/gitdir/worktrees/<name>`) から作った linked worktree が判読不能扱いに
+なり、その repo の設定を継承できず設定済みの状態変更コマンドが deny されていた**。
+git の common directory の名前は `.git` とは限らないため、レイアウト
+(`worktrees/` / `modules/`) だけで識別する。入れ子の扱い
+(`modules/a/modules/b` は境界、`modules/sub/worktrees/wt` は通過) は変わらない。
+`--separate-git-dir` repo の **main** worktree は gitdir が common directory を
+直接指すため、従来どおり境界 (repo toplevel) として扱う。
+
+ただし**末尾の形だけで linked worktree を確定させると逆方向に穴が開く**ため、
+gitdir 側のメタデータで裏付けを取る形にした (マージ前レビューの指摘)。
+`--separate-git-dir` で初期化した独立 repo の gitdir が偶然 `worktrees/<name>` で
+終わる場合 (`/store/worktrees/repo` など)、その main checkout が linked worktree と
+誤分類される。accounts.local.json を持つ workspace の配下に (間に `.git` を挟まず)
+置かれていると所属確認も通ってしまい、**独立 repo の root を越えて外側の設定を
+継承**し、そのアカウントが active session と一致すれば未設定の repo で状態変更
+コマンドが allow される。判定条件は「gitdir が実在するディレクトリであること」
+「git が置く `commondir` (common directory へのパス) が読めること」「同じく
+`gitdir` (作業ツリーの `.git` への back-pointer) があり、resolve した先が
+**いま読んでいる `<dir>/.git` と一致**すること」の 3 つで、1 つでも欠ければ独立
+repo 扱い = 境界にする。common directory も `commondir` の内容から求める
+(末尾 2 要素を落とす推定より、git 自身が書いた値のほうが信頼できる)。
+git コマンドを呼ばない方針は変えていない (読むのは `.git` と gitdir 内の
+メタファイルだけ)。
+
+`gitdir:` の値がドライブ文字 (`C:/...`) や UNC (`//server/...`) の絶対パスの場合に
+**相対として `.git` のある階層へ繋がない**ようにした (マージ前レビューの指摘)。
+繋ぐと別の common directory と比較することになり、正当な linked worktree を境界と
+誤判定して継承が切れる。
+
+さらに、linked worktree を通過させるのは **gitdir の common directory
+(`<common>/worktrees/<name>` の `<common>`) が、この後探索する祖先の repo のものと
+一致する場合だけ**にした (マージ前レビューの指摘)。正当な linked worktree は
+無関係な repo の中にも置けるため (repo A の `repo-a/vendor/b-wt` に repo B の
+worktree を追加する形)、形だけで通すと探索が repo B を離れて **repo A の
+accounts.local.json を継承**する。repo A の期待アカウントが active session と
+一致すれば、未設定の repo B worktree で状態変更コマンドが allow されてしまう。
+所属の確認は探索と同じ方向 (ファイルシステムの親方向) へ同じ停止条件で走査し、
+最初に見付かった祖先の `.git` (ディレクトリ / gitdir ポインタ) を
+`Path.resolve()` で正規化して common directory 同士で突き合わせる。一致しない
+場合と、祖先の `.git` を判読できず比較できない場合は **worktree root を境界**に
+する (fail-closed)。祖先に repo が 1 つも無い配置 (workspace 直下に worktree を
+並べる形) は継承元を取り違えようがないため従来どおり上る。
+
+**互換性 (非互換の変更)**: 次の 4 つの配置は継承されなくなる (未設定として deny):
+(1) ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて全プロジェクト
+の既定にしていた場合、(2) **repo の toplevel より上** (例: 複数 repo を束ねる親ディレクトリ)
+に置いて配下の repo に継承させていた場合、(3) **superproject に置いて submodule に継承**
+させていた場合、(4) **別の repo の中に置いた linked worktree から、その外側 repo
+(またはその配下のディレクトリ) の設定を継承**させていた場合。落ちる方向は
+fail-closed のため安全側。移行は、
+各 repo の toplevel に `accounts_builder.py set --service <svc> --from-cli --dry-run` →
+`--commit` で複製するか、`--path` で明示する。グローバル既定の専用経路は現時点では無い
+(別途検討)。
+
+### テスト
+
+全 suite green。追加は予算 (`tests/test_budget.py`)・パス解決の境界
+(`tests/test_paths.py`)・配布ファイルの参照検査 (`tests/test_docs.py`) の 3 ファイルと、
+dispatcher / builder / services への回帰テスト。追加したテストは**対応する実装行を
+壊す mutation で先に落ちることを確認**してから採用した (予算配線 10 種・境界と照合
+規則 8 種・docs 参照 4 種)。その過程で「`show` が service を渡し忘れても suite が
+green のままになる」抜けが見つかり、`show` の呼び出し経路を通すテストを足した。
+
+`.git` ファイルの種別判定 (submodule / linked worktree / 判読不能) にも
+`tests/test_paths.py` で回帰テストを足し、**修正前のコードでは submodule 形と
+判読不能形が落ち、linked worktree 形は通る**ことを使い捨てコピーで確認してから
+採用した。
+
+linked worktree の所属確認にも同じ手順で回帰テストを足した。**修正前のコードでは
+「無関係な repo の中に置いた worktree がその repo (および配下のディレクトリ) を
+継承する」形と「祖先の `.git` が判読できない形」が落ち、自分の repo の中・外に
+置いた worktree、submodule の worktree、bare / `--separate-git-dir` repo の
+worktree、入れ子 worktree はいずれも通る**ことを使い捨てコピーで確認している。
+
+linked worktree のメタデータ検証も同様に、**修正前のコードでは「gitdir が偶然
+`worktrees/<name>` で終わる `--separate-git-dir` の main checkout」「`commondir`
+の無い gitdir」「gitdir がディレクトリでない形」「back-pointer が別の worktree を
+指す形」「`commondir` が絶対パスで末尾からの推定と食い違う形」が落ち、実物の
+`git worktree add` が作る構造 (`<common>/worktrees/<name>/{commondir,gitdir,HEAD}`)
+は通る**ことを使い捨てコピーで確認した。worktree 系の既存テストの fixture は、
+実物と同じメタデータを置く形に更新している。あわせて、実際の linked worktree
+(gitdir が `<repo>/.git/worktrees/<name>`) が本体 checkout の設定を従来どおり
+継承することを実機でも確認した。
+
 ## 0.11.1
 
 **remediation コマンドを案内する deny 文面に「案内したコマンドは単独で実行すること」
@@ -47,7 +236,7 @@ signpost への一般化、dead code 整理、テスト空白の穴埋め、単�
 
 1. **`gh auth status` の旧バージョン (gh < 2.40) 出力に対応** (`services/github.py`)
    — 複数アカウント対応の `Active account: true/false` marker が無い単一アカウント
-   形式 (`✓ Logged in to github.com as Mao-o`) を `parse_active_accounts` が
+   形式 (`✓ Logged in to github.com as your-github-user`) を `parse_active_accounts` が
    fallback で解釈するようにした。marker 行が一切無い出力でのみ fallback するため、
    新形式の判定には影響しない。あわせて、`Logged in to` はあるのにどちらの形式にも
    一致しない (未知の将来フォーマット等) 場合のメッセージを「gh の出力を解釈できま
@@ -924,10 +1113,10 @@ configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時�
 
 **D11 インライン env 伝播の透過 wrapper 挙動を監査・体系化 (ドキュメント + 回帰テスト)**:
 v0.7.0 (D11) で導入した「行頭インライン env を検証 subprocess に伝播する」設計が、
-PR #33 の Codex レビュー 3 round + 8zr で連続して env 関連 edge case
+PR #33 の Codex レビュー 3 round + その後の内部バックログで連続して env 関連 edge case
 (複合コマンド bypass / 透過 wrapper 跨ぎの override 漏れ / sudo の env scrub 未考慮)
 を生んだことを受け、**透過 wrapper × env 挙動を全数監査し、再発防止の guard を
-入れた**。コード挙動の変更は無し (8zr の sudo 修正で現リストは健全と判定)、
+入れた**。コード挙動の変更は無し (直前の sudo 修正で現リストは健全と判定)、
 分類の固定化と将来 wrapper 追加時のガードのみ追加。
 
 ### 変更内容
@@ -962,7 +1151,7 @@ PR #33 の Codex レビュー 3 round + 8zr で連続して env 関連 edge case
 
 ### 監査結論
 
-8zr の `sudo` scrub 補正により**現行 wrapper リストの env 挙動はすべて正しく分類・
+`sudo` の scrub 補正により**現行 wrapper リストの env 挙動はすべて正しく分類・
 処理されている**。`sudo` が唯一の env scrub wrapper、`env -i`/`-u`/`--` が唯一の
 env reset 形式で、どちらも対応済み。残る passthrough wrapper は実機で env 素通しを
 確認した。過剰な再設計 (全 wrapper allow-list 化等) は誤 deny を増やすため不採用とし、
@@ -1043,7 +1232,7 @@ scrub するため root のデフォルト環境 (prod 無し) で実行され�
 4. **検出セグメントの併記** (`core/dispatcher.py`) — verify 失敗の deny に
    `(検出コマンド: ...)` を付け、複合コマンドのどのセグメントが検証を起動した
    かを明示して診断性を改善
-5. **direnv / CLAUDE_ENV_FILE の制限を明文化** (README + CLAUDE.local.md) —
+5. **direnv / CLAUDE_ENV_FILE の制限を明文化** (README + 実装者ガイド) —
    公式仕様 (hooks.md) で `CLAUDE_ENV_FILE` は PreToolUse hook に渡らない
    (SessionStart / Setup / CwdChanged / FileChanged のみ) ため、`.envrc` /
    direnv 経由の env は検証 subprocess に届かない。これは harness 仕様起因で

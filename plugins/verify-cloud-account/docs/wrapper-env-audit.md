@@ -7,8 +7,8 @@
 `tests/test_command_parser.py` の `TestWrapperEnvClassificationGuard` /
 `TestWrapperEnvPropagationContract` に対応する。
 
-実装者ガイド本体は `CLAUDE.local.md` (gitignore 済みのため worktree には来ない)。
-本ファイルは公開 repo に追跡される監査記録。
+実装者ガイド本体は [DEVELOPMENT.md](./DEVELOPMENT.md)。本ファイルは D16 の監査記録
+(透過 wrapper の分類表・実機根拠・wrapper 追加時のチェックリスト) の正本。
 
 ## 背景: なぜ監査したか
 
@@ -19,7 +19,7 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 
 - round1: 複合コマンドの per-service 集約で後段 profile を検証せず誤 allow (c542c18)
 - round2: 透過 wrapper 跨ぎの env override 漏れ (c731faf, inner-wins)
-- round3 / 8zr: `sudo` が `-E` 無しに継承 env を **scrub** する挙動を未考慮
+- round3 とその後の内部バックログ: `sudo` が `-E` 無しに継承 env を **scrub** する挙動を未考慮
   → 「検証は prod / 実行は別アカウント」の false-allow (cd13724, `_sudo_preserves_env`)
 
 懸念は **whack-a-mole 化** — wrapper を足すたびに env 挙動の穴が出るのではないか。
@@ -31,7 +31,7 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 
 | wrapper | 実行時の env 挙動 | parser の扱い | 伝播可否 | 根拠 |
 |---|---|---|---|---|
-| `sudo` (preserve 無し) | 継承 env を **scrub** (root の安全環境にリセット) | pre-sudo env を **破棄** (8zr) | **不可** → 破棄 | 実機: `PROBE=x sudo env` に PROBE 出ない (sudoers env_reset 既定) |
+| `sudo` (preserve 無し) | 継承 env を **scrub** (root の安全環境にリセット) | pre-sudo env を **破棄** | **不可** → 破棄 | 実機: `PROBE=x sudo env` に PROBE 出ない (sudoers env_reset 既定) |
 | `sudo -E` / `--preserve-env` / `--preserve-env=LIST` | 継承 env を保持 (LIST 形式は一部) | pre-sudo env を収集 | 可 | `_sudo_preserves_env` が flag 領域を走査 |
 | `time` (shell keyword / `/usr/bin/time`) | 透過 (子プロセスは env 継承) | pre-wrapper env を収集 | 可 | 実機: `PROBE=x time env` / `/usr/bin/time env` に PROBE 出る |
 | `nohup` | 透過 (SIGHUP 無視のみ、env は継承) | 収集 | 可 | 実機確認 |
@@ -91,7 +91,7 @@ option 表を取り違えた場合の劣化方向は**片側だけ**である点
 
 `sudo` のみ。`-E` / `--preserve-env` / `--preserve-env=LIST` があれば継承 env を
 保持するので伝播してよいが、無ければ scrub するので **pre-sudo env を破棄する**
-(8zr の `_normalize_segment` 補正)。`--preserve-env=LIST` のリスト内容や sudoers の
+(`_normalize_segment` の補正)。`--preserve-env=LIST` のリスト内容や sudoers の
 `env_keep` / `env_reset` まで静的には不可知なので、**preserve 指定があれば保守的に
 伝播を許す** (保持しすぎ方向は誤 deny を増やすだけで安全側)。
 
@@ -123,7 +123,7 @@ env を伝播しない方向に倒したとき:
 
 ## 結論: 現リストは健全。再設計は不要
 
-8zr の `sudo` scrub 補正で、現行 wrapper リストの env 挙動はすべて正しく分類・処理
+`sudo` の scrub 補正で、現行 wrapper リストの env 挙動はすべて正しく分類・処理
 されている。**sudo が唯一の conditional_scrub であり、env -i/-u/-- が唯一の reset
 形式で、どちらも対応済み**。残る passthrough wrapper は実機で env 素通しを確認済み。
 

@@ -78,6 +78,17 @@ GH_LEGACY_MULTI_HOST = (
 # 一致しない未知フォーマット (将来の gh 出力変更を想定した契約テスト用)。
 GH_UNPARSEABLE = "github.com\n  Logged in to github.com (Mao-o)\n"
 
+# gh の列挙順は設定ファイル依存で、GHE が先に来ることがある (内部バックログ)。
+# scalar 期待値の照合先が「最初の host」だと、この順序だけで verdict が変わる。
+GH_MULTI_HOST_GHE_FIRST = (
+    "ghe.example.com\n"
+    "  ✓ Logged in to ghe.example.com account mao-corp\n"
+    "  - Active account: true\n"
+    "github.com\n"
+    "  ✓ Logged in to github.com account Mao-o\n"
+    "  - Active account: true\n"
+)
+
 
 class TestGithub(unittest.TestCase):
     def test_string_match(self):
@@ -159,6 +170,68 @@ class TestGithub(unittest.TestCase):
             err = github.verify({}, "/p")
         self.assertIsNotNone(err)
         self.assertIn("空", err)
+
+    def test_string_match_when_ghe_listed_first(self):
+        """gh が GHE を先に列挙しても scalar 期待値は github.com と照合する。
+
+        内部バックログ: 照合先が「最初の host」だと gh の列挙順 (設定ファイル
+        依存) で verdict が変わる。`scalar_target_host` に一本化した規則を
+        パーサ込みの経路で固定する。
+        """
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout=GH_MULTI_HOST_GHE_FIRST)
+        ):
+            self.assertIsNone(github.verify("Mao-o", "/p"))
+
+    def test_string_mismatch_when_ghe_listed_first(self):
+        """GHE 側のユーザー名は scalar 期待値に一致しない (照合先は github.com)。"""
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout=GH_MULTI_HOST_GHE_FIRST)
+        ):
+            err = github.verify("mao-corp", "/p")
+        self.assertIsNotNone(err)
+        self.assertIn("github.com", err)
+
+
+class TestGithubScalarTargetHost(unittest.TestCase):
+    """`scalar_target_host` / `matches` の direct unit tests (内部バックログ)。"""
+
+    def test_prefers_github_com_regardless_of_order(self):
+        self.assertEqual(
+            github.scalar_target_host({"github.com": "a", "ghe.example.com": "b"}),
+            "github.com",
+        )
+        self.assertEqual(
+            github.scalar_target_host({"ghe.example.com": "b", "github.com": "a"}),
+            "github.com",
+        )
+
+    def test_falls_back_to_first_host_without_github_com(self):
+        self.assertEqual(
+            github.scalar_target_host({"ghe.example.com": "b", "ghe2.example.com": "c"}),
+            "ghe.example.com",
+        )
+
+    def test_matches_scalar_uses_github_com(self):
+        active = {"ghe.example.com": "mao-corp", "github.com": "Mao-o"}
+        self.assertTrue(github.matches("Mao-o", active))
+        self.assertFalse(github.matches("mao-corp", active))
+
+    def test_matches_dict_requires_every_declared_host(self):
+        active = {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}
+        self.assertTrue(github.matches({"github.com": "Mao-o"}, active))
+        self.assertTrue(github.matches(dict(active), active))
+        self.assertFalse(github.matches({"ghe.example.com": "other"}, active))
+        self.assertFalse(github.matches({"missing.example.com": "x"}, active))
+
+    def test_matches_rejects_unusable_shapes(self):
+        """空 dict / 非文字列は verify() が deny する形なので match ではない。"""
+        active = {"github.com": "Mao-o"}
+        self.assertFalse(github.matches({}, active))
+        self.assertFalse(github.matches({"github.com": 123}, active))
+        self.assertFalse(github.matches(123, active))
+        self.assertFalse(github.matches("Mao-o", {}))
+        self.assertFalse(github.matches("Mao-o", None))
 
 
 class TestGithubAuthStatusParsing(unittest.TestCase):

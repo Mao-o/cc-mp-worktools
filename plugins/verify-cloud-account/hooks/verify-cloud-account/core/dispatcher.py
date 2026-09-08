@@ -10,14 +10,62 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import cache, cli_options, output, paths
+from core import budget, cache, cli_options, output, paths
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
+_BUILDER_PATH = (
+    "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py"
+)
+
 _MIGRATE_HINT = (
     "旧パスから統合するには builder の migrate サブコマンドを使用してください: "
-    "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py migrate --commit"
+    + _BUILDER_PATH
+    + " migrate --commit"
 )
+
+
+# **キーが未記載の service は allow ではなく deny する** (fail-closed)。「使っている
+# service なのにキーが無い」は「検証しなくてよい」ではなく「期待値を宣言し忘れて
+# いる」状態で、素通しするとこの plugin が防ぐはずの事故 (別アカウントでの write)
+# がそのまま通る。README とこの deny 文面はかつて「未記載のサービスは検証対象外
+# (= allow)」と逆を約束しており、実装 (deny) と食い違っていた (内部バックログ)。
+# 実装側を正として文面を揃え、あわせてキー追加の具体コマンドを載せる。
+#
+# 案内が `init` ではなく `set` なのは、キー未記載 deny が「accounts.local.json は
+# 見つかっている」ときにしか出ないため。そのファイルが親から継承されている場合
+# `init` は「継承中の設定を覆い隠す」として exit 2 で拒否する (builder `_cmd_init`)
+# が、`set` は継承元を直接編集するのでどちらの階層でも通る。
+#
+# **`--commit` を直接案内しない。** `--from-cli` は「今ログインしているアカウント」を
+# 期待値として提案するので、間違ったアカウントに入ったまま commit すると、この plugin
+# が防ぐはずの状態をそのまま正解として焼き付けてしまう。deny を消すのが目的の相手に
+# 一発で通る呪文を渡すと必ずそう使われるため、`--dry-run` + 確認の 2 段にする。
+def _missing_key_hint(account_key: str) -> str:
+    return (
+        f"追加: {_BUILDER_PATH} set --service {account_key} --from-cli --dry-run\n"
+        "(--from-cli は現在ログイン中のアカウントを提案します。意図したアカウントか"
+        "確認してから --dry-run を --commit に変えてください)"
+    )
+
+
+# **予算切れも deny に倒す** (fail-closed)。hook は hooks.json の timeout を超えると
+# Claude Code 側で打ち切られ、出力が破棄されて tool call がそのまま進む
+# (公式仕様上の fail-open)。複合コマンド (`gh ... && aws ... && gcloud ...`) は
+# service ごとに直列で verify するため、subprocess timeout の合計だけを見ていると
+# hook timeout を超えうる — CLI 未検出も CLI timeout も deny に倒しているのに、
+# ここだけ無音で通ることになる (内部バックログ)。予算を使い切った service は
+# CLI を呼ばずにこの deny へ集約し、必ず hook timeout 内に JSON を返す。
+def _budget_expired_error(account_key: str) -> str:
+    return (
+        f'"{account_key}" の検証を開始できませんでした: '
+        f"1 コマンド分の検証時間 (予算 {budget.TOTAL_BUDGET_SECONDS:.0f} 秒) を"
+        "使い切っています。\n"
+        "未検証のまま通すと hook 自体が時間切れになり、検証結果が破棄されたまま"
+        "コマンドが実行されるため deny します。\n"
+        "対処: コマンドをサービスごとに分けて実行するか、応答が遅い CLI "
+        "(ネットワーク待ち / 未ログイン) を解消してから再試行してください。"
+    )
 
 
 # 注記の要否は、verify() が返した文字列に **その service が案内する remediation
@@ -339,7 +387,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         hint_block = "\n".join(h for h in hints if h)
         msg = (
             ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
-            "(使用するサービスのみ記述すれば OK。未記載のサービスは検証対象外)\n"
+            "(使用する service のキーは全て必要です。キーの無い service の"
+            "コマンドも deny されます)\n"
             "初期化: /verify-cloud-account:accounts-init"
         )
         if hint_block:
@@ -373,7 +422,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         if entry is None or entry == "":
             errors.append(
                 f'{accounts_path} に "{svc.ACCOUNT_KEY}" キーがありません。'
-                "対象サービスのアカウントを追加してください。"
+                "期待値が無いと照合できないため deny します。\n"
+                + _missing_key_hint(svc.ACCOUNT_KEY)
             )
             continue
 
@@ -403,6 +453,13 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         ):
             if trace is not None:
                 trace["cache_hit"][svc_name] = True
+            continue
+
+        # 予算切れの判定は **CLI を起動する直前** に置く。cache hit と
+        # self-remediation は subprocess を起動しないので、予算が尽きていても
+        # そのまま通してよい (上の continue で先に抜けている)。
+        if budget.expired():
+            errors.append(_budget_expired_error(svc.ACCOUNT_KEY))
             continue
 
         # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
@@ -488,7 +545,21 @@ def dispatch(command: str, cwd: str) -> dict | None:
     JSON で出す (内部バックログ: 例外時の無音 fail-open に加えて、正常系でも
     どのセグメントがどう判定されたか事後に追えなかった問題への対応)。
     出力先は stderr のみで、この trace 自体は allow/deny の判定に一切影響しない。
+
+    hook 1 回分の実時間予算 (`core/budget.py`) はここで張り、`finally` で必ず
+    解除する。解除しないと、同一プロセスで dispatch を繰り返す経路 (テスト) や
+    hook timeout の制約が無い経路 (builder) に締切が残り、既定の subprocess
+    timeout が黙って縮む。
     """
+    budget.start()
+    try:
+        return _dispatch_with_trace(command, cwd)
+    finally:
+        budget.clear()
+
+
+def _dispatch_with_trace(command: str, cwd: str) -> dict | None:
+    """`dispatch()` の本体 (予算の張り替えを含まない)。"""
     if not _debug_enabled():
         return _dispatch_impl(command, cwd, None)
 

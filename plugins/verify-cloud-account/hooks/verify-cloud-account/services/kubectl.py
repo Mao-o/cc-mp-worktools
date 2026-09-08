@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+from core import budget
+
 # `\b` だと `kubectl-foo` のような plugin バイナリまで kubectl として拾うため、
 # 空白または終端が続く形だけに限定する。
 PATTERNS = [r"^kubectl(?=\s|$)"]
@@ -87,7 +89,7 @@ def _run_current_context(env=None, kubeconfig=None) -> tuple[str | None, str | N
             argv,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=budget.call_timeout(10),
             env=env,
         )
     except FileNotFoundError:

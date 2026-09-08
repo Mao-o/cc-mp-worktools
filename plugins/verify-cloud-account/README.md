@@ -62,7 +62,7 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 
 ```json
 {
-  "github":   "Mao-o",
+  "github":   "your-github-user",
   "firebase": "my-project-id",
   "aws":      "123456789012",
   "gcloud":   "my-gcp-project",
@@ -70,7 +70,29 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 }
 ```
 
-必要なキーだけ書けばよい。未記載のサービスコマンドは検証対象外 (= allow)。
+**そのプロジェクトで使う service のキーは全て書く必要がある** (fail-closed)。
+キーが無い service のコマンドは「検証対象外 (= allow)」ではなく **deny** される。
+期待値が宣言されていない状態で通すと、この plugin が防ぐはずの「別アカウントでの
+書き込み」をそのまま素通しすることになるため。そのプロジェクトで一度も CLI を
+叩かない service はキーを書かなくてよい (発火しないので deny も起きない)。
+
+キーが無いまま対象コマンドを叩くと、deny 文面にキー追加コマンドが出る:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+  set --service github --from-cli --dry-run
+```
+
+`init` ではなく `set` を案内するのは、accounts.local.json を親から継承している
+階層では `init` が「継承中の設定を覆い隠す」として exit 2 で拒否されるのに対し、
+`set` は継承元を直接編集してどちらの階層でも通るため
+(→ [builder も同じ解決を使う](#builder-も同じ解決を使う))。
+
+`--commit` ではなく `--dry-run` を案内するのは、`--from-cli` が
+**現在ログイン中のアカウント**を期待値として提案するため。間違ったアカウントに
+入ったまま commit すると、この plugin が防ぐはずの状態をそのまま正解として
+焼き付けてしまう。提案値が意図したアカウントであることを確認してから
+`--commit` に変えること。
 
 ### `.gitignore`
 
@@ -116,7 +138,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 # dict 値 (GHE の hostname / Firebase の alias 等) の特定キーだけを追加・上書き
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
-  set --service github --host ghe.example.com --value mao-corp --commit
+  set --service github --host ghe.example.com --value your-corp-user --commit
 
 # キー全体を削除
 python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
@@ -405,8 +427,8 @@ subprocess には反映されず deny される。
 ```json
 {
   "github": {
-    "github.com":        "Mao-o",
-    "ghe.company.com":   "mao-corp"
+    "github.com":        "your-github-user",
+    "ghe.example.com":   "your-corp-user"
   }
 }
 ```
@@ -491,6 +513,41 @@ worktree 内に同名ファイルを置く必要は無い。
 - cwd 階層に何かあれば親は見ない (cwd 優先)
 - 同一階層に複数 tier が同居する場合は従来どおり fail-closed deny (D4)
 - 安全側上限として `max_levels=10` (`core/paths.py`)
+- **停止条件 (v0.12.0)**: 次の境界を越えて上らない。境界の階層自身は探索する
+  - **git repo の toplevel** (`.git` **ディレクトリ**を持つ階層)
+  - **submodule の root** (`.git` が `<common>/modules/<name>` を指すファイルの
+    階層)。submodule も独立した repo の境界なので、superproject の設定は継承しない
+  - **`.git` がファイルで、内容を判読できない階層** (`gitdir:` が読めない /
+    上記いずれの形でもない)。分からない場合は止める側 (fail-closed) に倒す
+  - **`$HOME` およびその上** (`/Users`, `/` 等)
+  - **linked worktree は「その worktree を持つ repo の側」にだけ上る**
+    (`.git` が `<common>/worktrees/<name>` を指すファイル)。worktree から
+    親 repo の設定を継承する上記の運用はそのまま。`<common>` は git の
+    common directory で、その名前は `.git` とは限らない — bare repository
+    (`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
+    (`/custom/gitdir/worktrees/<name>`) から作った worktree も同じく通過する
+    (common directory の名前には依存しない)。
+    **linked worktree かどうかは gitdir 側のメタデータで確かめる** — gitdir が
+    実在するディレクトリで、git が置く `commondir` (common directory への
+    パス) と `gitdir` (作業ツリーの `.git` への back-pointer) があり、
+    back-pointer がいま読んでいる `.git` を指すこと。パスの末尾が
+    `worktrees/<name>` でも、`--separate-git-dir` の gitdir が偶然その形の
+    場合 (`/store/worktrees/repo` など) は独立した repo の main checkout なので
+    境界にする。`<common>` は `commondir` の内容から求める。
+    **通過するのは `<common>` が祖先側の repo のものと一致する場合だけ** —
+    linked worktree は無関係な repo の中にも置けるため (repo A の中に
+    repo B の worktree を追加する形)、形だけで通すと **repo A の設定を継承**
+    してしまう。祖先の repo が別物、または祖先の `.git` を判読できない場合は
+    worktree root で止める。祖先に repo が 1 つも無い場合 (workspace 直下に
+    worktree を並べる配置) は従来どおり上る
+  - 判定は `.git` と gitdir 内メタファイルの読み取りだけで行う (git コマンドは
+    実行しない)。`gitdir:` の指す先は**種別と所属の判定にしか使わず、探索先
+    としては辿らない**
+  - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
+    submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
+    (未設定として deny)。**別の repo の中に置いた linked worktree から、その
+    外側 repo の設定を継承していた場合も同じ** (worktree root で止まる)。
+    各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -517,11 +574,17 @@ service が一斉に未設定 (deny)** になる。
 
 **書込範囲についての注意**: 解決は最大 10 階層まで親を遡る
 (`ANCESTOR_SEARCH_MAX_LEVELS`)。つまり accounts.local.json を持たないプロジェクトで
-`set` を実行すると、10 階層以内の祖先 (ホームディレクトリを含む) にファイルがあれば
-**そちらが編集対象になる**。これは「hook が読むファイルを編集する」という意図どおりの
-挙動だが、builder の書込範囲は cwd 配下に限られない。対象は出力先頭の `対象:` 行に
-必ず出るので、commit 前に確認すること (この階層専用の設定にしたい場合は `--path`)。
+`set` を実行すると、遡及範囲内の祖先にファイルがあれば **そちらが編集対象になる**。
+これは「hook が読むファイルを編集する」という意図どおりの挙動だが、builder の書込
+範囲は cwd 配下に限られない。対象は出力先頭の `対象:` 行に必ず出るので、commit 前に
+確認すること (この階層専用の設定にしたい場合は `--path`)。
 `.gitignore` への追記も同じ階層に対して行われる。
+v0.12.0 以降は遡及自体が git repo の境界 (toplevel / submodule root) と `$HOME`
+で止まるため、**その repo の外や `$HOME` 以上が編集対象になることはない**
+(submodule で作業していれば superproject 側も対象外)。linked worktree を repo の
+外に置いている場合は、**その worktree を持たない別の repo の中にあれば worktree
+root 自身**が、外側に repo が無ければ `$HOME` が境界になる (遡及はファイルシステム
+の親方向にしか進まないため、`.git` ファイルの gitdir 先は辿らない)。
 
 ## パフォーマンス (短期キャッシュ)
 
@@ -567,6 +630,33 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 
 従来 (〜0.7.3) は `gh pr list` (検証成功・cache 書込) → `gh auth switch --user other`
 → `gh pr create` が 30 秒以内なら cache hit で別アカウントの write が通っていた。
+
+### 検証時間の予算 (v0.12.0)
+
+hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code 側で打ち切られ、
+**出力が破棄されてコマンドがそのまま実行される** (公式仕様上の fail-open)。
+一方で各 CLI 呼び出しの timeout は 1 コマンドあたりの上限でしかなく、
+`gh ... && aws ... && gcloud ...` のような複合コマンドはサービスごとに直列で
+検証するため、合計は hook timeout を超えうる。CLI 未検出も CLI timeout も deny に
+倒しているのに、ここだけ無音で通ると判定表に穴が空く。
+
+そこで hook 1 回分に **総予算 15 秒** (`core/budget.py`) を置く。
+
+- 各 CLI 呼び出しの timeout は「既定値」と「残り予算」の小さい方
+  (下限 1 秒 — 0 秒 timeout は必ず失敗する無意味な呼び出しになるため)
+- 予算を使い切った時点で、まだ検証していないサービスは **CLI を呼ばずに deny**
+  (「検証時間の予算を使い切った」旨と対処を表示)
+- cache hit と self-remediation (期待値への切替) は CLI を起動しないので、
+  予算切れでもそのまま通る
+- 予算切れの判定は検証の**手前**でしか行えないため、締切直前に始まった検証の分だけ
+  超過しうる (上限 2 秒)。`15 + 2 < 20` が成り立つことはテストが `hooks.json` を
+  読んで機械的に照合する
+
+実運用で予算切れに当たるのは、先行するサービスの CLI が遅く予算を消費した場合。後続
+サービスの timeout は残予算に合わせて短縮され、その deny は各サービスの timeout 文面で
+出る (再試行すると検証済みサービスは cache hit する)。
+それでも切れるならコマンドをサービスごとに分けるか、遅い CLI (未ログイン・ネットワーク
+待ち) を解消してから再試行する。
 
 ## 既知の制限
 
@@ -672,7 +762,7 @@ hook 実行時に環境変数 `VERIFY_CLOUD_ACCOUNT_DEBUG=1` を立てると、�
 (`claude --verbose` で確認可能)。いずれの場合も action 自体は fail-open で
 進行する (実行を止めない)。
 
-詳細な設計背景は CLAUDE.local.md (開発者向け、リポジトリ未同梱) を参照。
+詳細な設計背景・拡張手順は [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) を参照。
 
 ## 互換性
 
