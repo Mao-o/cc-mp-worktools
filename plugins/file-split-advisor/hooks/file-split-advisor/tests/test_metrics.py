@@ -327,6 +327,22 @@ class TestImportExtractionExtended(unittest.TestCase):
             ["using System.Net.Http;"],
         )
 
+    def test_cpp_using_alias_is_not_an_import(self):
+        # C++ の型エイリアス `using Client = http::Client;` は import ではない
+        # (マージ前レビューの指摘)。`using` の import 判定は C# に限る。
+        lines = [
+            "using Client = http::Client;",
+            "using Store = sql::Store;",
+            "using namespace std;",
+            "#include <vector>",
+        ]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "cpp")), ["#include <vector>"]
+        )
+        self.assertEqual(
+            self._cats("\n".join(lines) + "\n", "cpp", "svc.cpp"), set()
+        )
+
     def test_using_declaration_is_not_an_import(self):
         # C# 8 の `using var conn = ...` と TypeScript 5.2 の
         # `using resource = ...` は**宣言**であって import ではない

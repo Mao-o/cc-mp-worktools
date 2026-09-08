@@ -322,7 +322,6 @@ _IMPORT_HINT_RE = re.compile(
     # 3 は C# の using エイリアス (``using Alias = Namespace.Type;``) と字面が
     # 重なるため、``=`` の右辺が名前空間修飾された型名 (呼び出しを含まない)
     # かどうかで分ける。右辺に ``(`` があれば式 = 宣言とみなして除外する。
-    r"|using\b(?!\s*\()(?!\s+var\b)(?!\s+\w+\s*=[^;\n]*\()"
     r"|use\s"  # Rust / PHP
     r"|require_relative\b|require\b"  # Ruby
     r"|Import-Module\b"  # PowerShell
@@ -337,6 +336,17 @@ _IMPORT_HINT_RE = re.compile(
 # 常に素の識別子で、``.`` に続く同じ綴りは別物のメソッドである
 # (マージ前レビューの指摘)。
 _REQUIRE_CALL_RE = re.compile(r"(?<![\w$.])require\s*\(")
+
+# ``using`` を import として見る言語。C# の ``using Namespace;`` /
+# ``using static`` / ``using Alias = Namespace.Type;`` に限る。全言語に
+# 適用すると C++ の型エイリアス (``using Client = http::Client;``) を
+# import 行として分類し、名前空間の語で import_diversity を水増ししていた
+# (マージ前レビューの指摘)。using 文 (``using (``) と using 宣言
+# (``using var`` / ``using x = expr()``) は従来どおり除外する。
+_USING_IMPORT_RE = re.compile(
+    r"^\s*using\b(?!\s*\()(?!\s+var\b)(?!\s+\w+\s*=[^;\n]*\()"
+)
+_USING_IMPORT_LANGUAGES = frozenset({"csharp"})
 
 # ``require(`` を import として見る言語。CommonJS を持つ JS/TS 系に限る
 # — 全言語に適用すると Python の ``schema.require(requests)`` のような
@@ -558,6 +568,7 @@ def _iter_import_lines(lines: list[str], language: str):
     """
     block_remaining = 0
     require_call_is_import = language in _REQUIRE_CALL_LANGUAGES
+    using_is_import = language in _USING_IMPORT_LANGUAGES
     for line in lines:
         stripped = line.strip()
         if block_remaining > 0:
@@ -570,8 +581,10 @@ def _iter_import_lines(lines: list[str], language: str):
             if _strip_trailing_comment(stripped, language).endswith(")"):
                 block_remaining = 0
             continue
-        if _IMPORT_HINT_RE.match(line) or (
-            require_call_is_import and _REQUIRE_CALL_RE.search(line)
+        if (
+            _IMPORT_HINT_RE.match(line)
+            or (require_call_is_import and _REQUIRE_CALL_RE.search(line))
+            or (using_is_import and _USING_IMPORT_RE.match(line))
         ):
             yield line
             if _strip_trailing_comment(stripped, language).endswith("("):
