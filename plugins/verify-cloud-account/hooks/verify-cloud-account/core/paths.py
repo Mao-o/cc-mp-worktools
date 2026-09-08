@@ -11,6 +11,7 @@ assertion で basename が "accounts.local.json" であることを保証する
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ACCOUNTS_FILE_NEW = Path(".claude") / "verify-cloud-account" / "accounts.local.json"
@@ -107,14 +108,28 @@ def _resolve_gitdir_value(directory: Path, raw: str, parts: list[str]) -> Path |
     """
     if not parts:
         return None
+    normalized = raw.replace("\\", "/")
     try:
-        if raw.replace("\\", "/").startswith("/"):
+        if _is_windows_absolute(normalized):
+            # ドライブ文字 (`C:/...`) / UNC (`//server/share/...`) は絶対パス。
+            # 相対として directory に繋ぐと別の common dir と比較してしまい、
+            # 正当な linked worktree を境界と誤判定する (マージ前レビューの指摘)。
+            target = Path(normalized)
+        elif normalized.startswith("/"):
             target = Path("/", *parts)
         else:
             target = directory.joinpath(*parts)
         return target.resolve()
     except (OSError, ValueError):
         return None
+
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:/")
+
+
+def _is_windows_absolute(normalized: str) -> bool:
+    """`/` 区切りに正規化済みの文字列が Windows の絶対パスかを返す。"""
+    return bool(_WINDOWS_DRIVE_RE.match(normalized)) or normalized.startswith("//")
 
 
 def _classify_gitdir_parts(parts: list[str]) -> str:

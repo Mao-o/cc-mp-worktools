@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -474,3 +475,30 @@ class TestAncestorSearchUnchangedBehaviour(BaseAncestorBoundary):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWindowsAbsoluteGitdir(unittest.TestCase):
+    """ドライブ文字 / UNC の gitdir は相対として directory に繋がない。"""
+
+    def _resolve(self, raw: str) -> Path | None:
+        from core import paths
+
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        target = paths._resolve_gitdir_value(directory, raw, paths._split_path_components(raw))
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertFalse(
+            str(target).startswith(str(directory.resolve())),
+            f"絶対パスを {directory} に繋いでいる: {target}",
+        )
+        return target
+
+    def test_drive_letter_path_is_not_joined_onto_directory(self):
+        self._resolve("C:/repo/.git/worktrees/wt")
+
+    def test_backslash_drive_letter_path_is_not_joined_onto_directory(self):
+        self._resolve("C:\\repo\\.git\\worktrees\\wt")
+
+    def test_unc_path_is_not_joined_onto_directory(self):
+        self._resolve("//server/share/repo/.git/worktrees/wt")
