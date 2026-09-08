@@ -81,7 +81,12 @@ pid / 結果ファイルが残り Cursor Agent も走り続けていた (課金)
 15 分超の残骸を走査し、プロセスを停止してファイルを消す。停止は process group ごと
 (SIGTERM → 猶予 → SIGKILL) で、signal を送る前に `ps` の **cmdline の署名とプロセスの
 開始時刻**で pid の同一性を確認する (**確認できなければ送らない** — 無関係なプロセスを
-撃つほうが重い)。
+撃つほうが重い)。グループリーダー (cursor 本体) が先に死んでいても、同じ process group に
+生きたメンバーが残っていれば同一性を確認したうえで停止する。
+
+**掃除は停止を確認できたときだけ**行う (post / GC で共通)。同一性を確認できない・signal を
+送出できない場合は pid / 結果ファイルを対で残し、次回の GC に委ねる — pid ファイルはその
+孤児を追える唯一の記録なので、消すと走り続ける Cursor を二度と追えなくなる。
 
 ### exitplan-review (クロスレビュー)
 
@@ -295,8 +300,9 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
    mtime 以前であることも要求して同一性を確かめる (0.10.0)。argv の署名だけでは、同じ
    起動形の別 hook (レビュー系) に pid が再利用されたときに区別が付かない。**どちらの経路
    でも、同一性を確認できないときは signal を送らない** — 無関係なプロセスを撃つ事故のほうが、
-   外部 CLI を 1 つ取り残すより重い。kill 猶予は hooks.json の hook timeout に
-   織り込んである (各 tests が式で固定)
+   外部 CLI を 1 つ取り残すより重い。**送らなかった / 送れなかったことは戻り値で伝え**、
+   呼び出し側は追跡用の記録 (pid ファイル) を消さずに次回へ委ねる。kill 猶予は hooks.json の
+   hook timeout に織り込んである (各 tests が式で固定)
 9. **外部 AI は読み取り専用で起動する** — cursor は `--mode plan`、codex は
    `exec -s read-only --ephemeral`。調査 (explore-parallel) もレビューも外部 AI に作業ツリーを
    書き換えさせない。cursor の起動 argv は `hooks/_common/cursorcli.readonly_argv` に一本化し、

@@ -100,8 +100,24 @@ sys.path に載せて解決する (plugin root 内の相対配置なので cache
    | `NAME` | `str` | 識別子（英数字。state ファイル名に使用） |
    | `is_available()` | `() -> bool` | CLI 存在確認等の事前チェック |
    | `pre(tool_use_id, prompt)` | `(str, str) -> None` | バックグラウンド起動 |
-   | `post(tool_use_id)` | `(str) -> str \| None` | 待機 + 結果取得。整形済み文字列 or None |
+   | `post(tool_use_id)` | `(str) -> str \| None` | 待機 + 結果取得。整形済み文字列 or None。**停止を確認できたときだけ** pid / 結果ファイルを掃除する |
    | `reap_orphan(pid_file)` | `(Path) -> str` | TTL 超過の残骸を停止し、停止の確度 (`state.REAP_*`) を返す (GC から呼ばれる) |
+
+   **掃除の契約は post と GC で同じ**。停止を確認できた (`REAP_STOPPED` /
+   `REAP_SIGNALED` 相当) ときだけ pid / 結果ファイルを対で消し、確認できないときは
+   対で残す:
+
+   | 状況 | post | `reap_orphan` の戻り値 | pid / 結果ファイル |
+   |---|---|---|---|
+   | 走っていない / group にも生存メンバーが居ない | 掃除する | `REAP_STOPPED` | 消す |
+   | 停止 signal を送出できた (group が空だった場合を含む) | 掃除する | `REAP_SIGNALED` | 消す |
+   | まだ走っているが同一性を確認できない | **残す** | `REAP_UNCONFIRMED` | 残す |
+   | 同一性は確認できたが signal を送出できない (EPERM 等) | **残す** | `REAP_UNCONFIRMED` | 残す |
+   | `reap_orphan()` 自体が例外で落ちた | — | (`gc_orphans` が未確定扱い) | 残す |
+
+   pid ファイルは**その孤児を追える唯一の記録**なので、確認できていない状態で消すと
+   以後どの経路も再試行できない。結果ファイルを道連れにしないのは、孤児がまだ書いて
+   いる最中でありうるうえ、pid だけ残しても対になる出力が失われるため。
 
 2. `__main__.py` に 2 行追加:
    ```python
@@ -154,6 +170,13 @@ pid / 結果ファイルが無期限に残り、バックグラウンドの curs
   最中でありうるうえ、pid だけ残しても対になる出力が失われる。
   analyzer が登録から外れた名前 / pid ファイルの無い結果だけの残骸は、そもそも止める
   対象を追えない (残しても次回できることが増えない) ので従来どおり掃除する
+- **`post()` の掃除も同じ契約に揃えてある** (マージ前レビューの指摘)。timeout 時に
+  analyzer がまだ走っていて `terminate()` が False を返す経路 (同一性を確認できない /
+  signal を送出できない) でも、以前は無条件に pid ファイルを消し、続けて結果ファイルも
+  消していた。GC が拾える唯一の記録を post が消してしまうと、走り続ける cursor を
+  もう誰も追えない。**未確定なら post も両ファイルを残す** (上の契約表)。結果の読み取り
+  自体は best-effort で続ける — 掃除しないだけで、その後にファイルを見るのは中身を
+  読まない GC だけなので二重注入にはならない
 
 `PostToolUseFailure(Agent)` を hooks.json に足して即時掃除する案は**採っていない**。
 イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」
@@ -194,6 +217,38 @@ pid ファイルは TTL 超過まで残りうるので、その間に pid が別
 - **判定できないときは送らない側に倒す** (`ps` が使えない・出力が解析できない・mtime が
   取れない、のいずれも)。無関係なプロセスに SIGTERM を送る事故のほうが、cursor を 1 つ
   取り残すより重い
+
+#### リーダーが先に死んだ group (マージ前レビューの指摘)
+
+`pre` が作った独立 process group には、cursor 本体 (グループリーダー) が exit / crash
+した後も孫が残って走り続けることがある。リーダーの生死だけを見て「停止済み」と報告すると、
+GC が pid 記録を消した時点で group を撃つ機会が永久に失われる。`reap_orphan()` は
+リーダーが居なければ `_reap_leaderless_group()` で group 側を見る。
+
+リーダーの cmdline はもう読めないので、同一性は次の 2 つで確認する:
+
+1. group に**生きた (非 zombie) メンバーが居る**こと。pgid の番号はメンバー (zombie
+   含む) が残っている限り新しい pid として再割当てされない (`_common/subproc` の kill
+   経路と同じ前提) ので、生存メンバーが居る group は起動時に作った group とみなせる
+2. 生きたメンバーの**開始時刻がいずれも pid ファイルの mtime (= 起動時刻) より前でない**
+   こと。メンバーは analyzer の子孫なので、起動時刻以降に生まれているはず。
+   `ps -A -o pid=,pgid=,stat=,etime=` を 1 回呼んでメンバー単位で見る
+
+判定不能 (`ps` が使えない・開始時刻を読めるメンバーが居ない・mtime が取れない) はすべて
+`REAP_UNCONFIRMED` = 送らない側。**限界**: group が一度完全に空になってから pgid の番号が
+再利用され、その新しいリーダーも既に死んでいる、という二重の偶然までは弾けない
+(リーダーが生きている経路と違って cmdline を照合できないため)。2. で「記録より前から
+居る group」は落とせる。
+
+#### signal を送出できたかを返す (マージ前レビューの指摘)
+
+`os.killpg` が `PermissionError` / その他の `OSError` を投げた場合、停止 signal は届いて
+いない。0.10.0 の途中まではこれを握りつぶしたうえで `terminate()` が無条件に True を
+返しており、**TERM も KILL も送れていないのに `REAP_SIGNALED` として pid 記録が消えて
+いた**。`_signal_group()` が送出可否を返し、`_stop_group()` は TERM / KILL の**どちらも
+送出できなければ False** を返す。`ProcessLookupError` (group にメンバーが居ない) は
+「止めるものが無い」= 目的達成なので True 側。TERM が通って KILL だけ失敗した場合も
+True (停止 signal は届いており、group が残っていれば次回の GC が同じ手順で再試行できる)
 
 ### tool_use_id の重要性
 
@@ -259,6 +314,14 @@ signal を送らないこと (PID 再利用ガード)、**署名が一致して�
 プロセスには送らないこと** (`TestStartTimeGuard`)、**停止を確認できなかった孤児は pid /
 結果ファイルを残して次回の GC が再試行すること**、TTL 判定が pid ファイルの mtime を
 見ること、現在の tool_use_id を除外すること、GC が pre / post の両方で走ること。
+加えて **`post()` も未確定なら両ファイルを残すこと** (`TestPostRetention`)、
+**リーダーが先に死んだ group を停止すること / 記録より前から居る group には送らないこと**
+(`TestLeaderlessGroup`)、**signal を送出できなければ `terminate()` が False を返すこと**
+(`TestSignalDelivery`)。
+
+停止側のテストは「送るべき形」と「送ってはいけない形」を**同じフィクスチャの差分**で
+組んである (mtime だけ違う / `killpg` だけ EPERM にする)。片方だけが落ちることで、
+ガードの効果が署名照合や group 判定の副作用ではないと分かる。
 
 **生死判定のヘルパー (`_alive`) は zombie を死んだ扱いにする** (`_common/subproc.pid_is_zombie`
 を使う。`TestAliveHelper` が zombie を人工的に作って固定している)。`os.kill(pid, 0)` だけだと、

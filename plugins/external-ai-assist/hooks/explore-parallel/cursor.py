@@ -7,7 +7,12 @@ review 系 2 hook と同じ `_common.cursorcli.readonly_argv` (調査用途で�
 停止は **process group ごと** (`killpg`) 行う。`pre` は `start_new_session=True` で起動する
 ので pgid == pid で、リーダーだけを止めると cursor-agent (node) の孫プロセスが残る。
 signal を送る前に **cmdline の署名と開始時刻**の両方で pid の同一性を確認する
-(PID 再利用対策)。
+(PID 再利用対策)。リーダーが先に死んだ後も group に孫が残ることがあるので、その場合は
+**group の生存メンバー**を見て停止する。
+
+停止できたかどうかは呼び出し側に返す。`post()` も GC (`reap_orphan`) も、**停止を確認
+できなかったときは pid / 結果ファイルを残す** — pid ファイルはその孤児を追える唯一の記録
+なので、確認できていない状態で消すと以後どの経路も再試行できない。
 """
 from __future__ import annotations
 
@@ -32,6 +37,9 @@ KILL_GRACE_SEC = 2.0
 
 #: 停止待ちの probe 間隔 (秒)。
 KILL_POLL_SEC = 0.05
+
+#: group のメンバー一覧を取る `ps` の実行上限 (秒)。`_common.subproc` の ps 呼び出しと同じ値。
+_PS_TIMEOUT_SEC = 2.0
 
 log = hooklog.make_logger(f"explore-parallel/{NAME}")
 
@@ -95,8 +103,21 @@ def pre(tool_use_id: str, prompt: str) -> None:
 
 
 def post(tool_use_id: str) -> str | None:
-    """cursor agent を最大 TIMEOUT_SEC 秒待ち、結果を整形して返す。"""
+    """cursor agent を最大 TIMEOUT_SEC 秒待ち、結果を整形して返す。
+
+    **timeout 後に停止を確認できなかったときは pid / 結果ファイルを残す**
+    (マージ前レビューの指摘)。`terminate()` は同一性を確認できない (`ps` が一時的に
+    使えない・cmdline が切り詰められた・pid ファイルの mtime が読めない) 場合や、
+    signal を送出できなかった場合に False を返す。そこで無条件に掃除すると、まだ走って
+    いる analyzer を追える唯一の記録である pid ファイルが消え、`__main__.gc_orphans()`
+    も再試行できなくなる (ハングした cursor が走り続けて課金され続ける)。GC 側と同じく
+    **pid / 結果ファイルを対で残し**、TTL 超過後の GC に委ねる。
+
+    結果の読み取り自体は best-effort で続ける (書きかけでも読めたぶんは返す)。掃除しない
+    だけなので、次に読む主体は GC (中身を見ずに消す) しか居らず二重注入にはならない。
+    """
     result_file, pid_file = paths(NAME, tool_use_id)
+    unconfirmed = False
 
     if pid_file.is_file():
         try:
@@ -115,8 +136,15 @@ def post(tool_use_id: str) -> str | None:
             if _is_running(pid):
                 if terminate(pid, started_at):
                     log(f"timeout ({TIMEOUT_SEC}s) — killed")
+                else:
+                    unconfirmed = True
+                    log(
+                        f"timeout ({TIMEOUT_SEC}s) — 停止を確認できない。"
+                        "pid / 結果ファイルを残して GC に委ねる"
+                    )
 
-        cleanup(pid_file)
+        if not unconfirmed:
+            cleanup(pid_file)
 
     if not result_file.is_file():
         return None
@@ -127,7 +155,8 @@ def post(tool_use_id: str) -> str | None:
     except OSError:
         data = ""
     finally:
-        cleanup(result_file)
+        if not unconfirmed:
+            cleanup(result_file)
 
     if not data:
         return None
@@ -146,12 +175,16 @@ def reap_orphan(pid_file: Path) -> str:
 
     - `REAP_STOPPED`: 走っていない / pid 記録が壊れていて止める対象を特定できない
     - `REAP_SIGNALED`: 停止 signal の送出を実際に試みた
-    - `REAP_UNCONFIRMED`: **まだ走っているのに** 同一性を確認できず signal を送っていない
+    - `REAP_UNCONFIRMED`: **まだ走っている** (リーダー or group のメンバー) のに、
+      同一性を確認できない / signal を送出できなかった
 
     呼び出し側 (`__main__.gc_orphans`) は `REAP_UNCONFIRMED` のとき pid ファイルを残す。
     ここで戻り値を持たせるまでは「停止できなくても無条件に掃除」していたため、`ps` が
     一時的に使えない・cmdline が切り詰められた等で同一性を確認できなかった孤児は、
     唯一の追跡手段である pid 記録ごと消えて二度と GC の対象にならなかった。
+
+    **リーダーが死んでいても終わりではない** (マージ前レビューの指摘)。`pre` が作った
+    独立 process group には孫が残りうるので、`_reap_leaderless_group` で group 側を見る。
     """
     try:
         pid = int(pid_file.read_text().strip())
@@ -159,16 +192,57 @@ def reap_orphan(pid_file: Path) -> str:
         return REAP_STOPPED
     if pid <= 0:
         return REAP_STOPPED
-    if not _is_running(pid):
-        return REAP_STOPPED
-    if not terminate(pid, _started_at(pid_file)):
+    started_at = _started_at(pid_file)
+    if _is_running(pid):
+        if not terminate(pid, started_at):
+            return REAP_UNCONFIRMED
+        log(f"孤児 analyzer (pid {pid}) を停止")
+        return REAP_SIGNALED
+    return _reap_leaderless_group(pid, started_at)
+
+
+def _reap_leaderless_group(pgid: int, started_at: float | None) -> str:
+    """リーダーが exit / crash した後も残っている process group を停止する。
+
+    `pre` は `start_new_session=True` で起動するので pgid == リーダーの pid。リーダーが
+    先に死んでも、cursor-agent (node) の孫は同じ group に残って走り続けることがある。
+    リーダーだけを見て `REAP_STOPPED` を返すと、GC が pid 記録を消した時点で group を
+    撃つ機会が永久に失われる (課金が続く)。
+
+    リーダーの cmdline はもう読めないので、同一性は 2 つで見る:
+
+    1. group に**生きた (非 zombie) メンバーが居る**こと。pgid の番号はメンバー
+       (zombie 含む) が残っている限り新しい pid として再割当てされない
+       (`_common.subproc` の kill 経路と同じ前提) ので、生存メンバーが居る group は
+       起動時に作った group とみなせる
+    2. 生きたメンバーの**開始時刻がいずれも記録した起動時刻より前でない**こと。
+       メンバーは analyzer の子孫なので、起動時刻 (pid ファイルの mtime) 以降に
+       生まれているはず
+
+    判定不能 (`ps` が使えない・開始時刻を読めるメンバーが居ない・mtime が取れない) は
+    いずれも `REAP_UNCONFIRMED` = 送らない側に倒し、記録を残して次回の GC に委ねる。
+
+    **限界**: group が一度完全に空になってから pgid の番号が再利用され、その新しい
+    リーダーも既に死んでいる、という二重の偶然までは弾けない (リーダーが生きている経路と
+    違って cmdline を照合できないため)。2. で「記録より前から居る group」は落とせる。
+    """
+    if subproc.group_is_stopped(pgid):
+        return REAP_STOPPED  # メンバーが居ない / zombie だけ = 止めるものが無い
+    if not _group_is_analyzer(pgid, started_at):
+        log(f"pgid {pgid} の残存 group を analyzer と確認できない — signal を送らない")
         return REAP_UNCONFIRMED
-    log(f"孤児 analyzer (pid {pid}) を停止")
+    if not _stop_group(pgid):
+        return REAP_UNCONFIRMED
+    log(f"孤児 analyzer の残存 group (pgid {pgid}) を停止")
     return REAP_SIGNALED
 
 
 def terminate(pid: int, started_at: float | None) -> bool:
-    """analyzer の process group を停止する (SIGTERM → 猶予 → SIGKILL)。停止を試みたら True。
+    """analyzer の process group を停止する (SIGTERM → 猶予 → SIGKILL)。
+
+    戻り値は **停止 signal を実際に送出できたか** (または送出前に group が空になって
+    いたか)。同一性を確認できないとき、および TERM も KILL も送出できなかったときは
+    False で、呼び出し側は「停止未確定」として pid / 結果ファイルを残す。
 
     `pre` は `start_new_session=True` で起動しているので **pgid == pid**。0.9.1 までは
     `os.kill(pid, SIGTERM)` でグループリーダーだけを止めており、cursor-agent (node) が
@@ -186,17 +260,30 @@ def terminate(pid: int, started_at: float | None) -> bool:
     if not _is_analyzer(pid, started_at):
         log(f"pid {pid} は起動した analyzer と一致しない — signal を送らない")
         return False
+    return _stop_group(pid)
 
-    _signal_group(pid, signal.SIGTERM)
+
+def _stop_group(pgid: int) -> bool:
+    """process group に SIGTERM → 猶予 → SIGKILL を送る。**送出できたら True**。
+
+    0.10.0 の途中までは `os.killpg` の例外を握りつぶしたうえで無条件に True を返して
+    いたため、TERM も KILL も送れていない (権限が無い等) のに呼び出し側が
+    `REAP_SIGNALED` と読み、まだ走っている group の pid 記録を消していた
+    (マージ前レビューの指摘)。どちらも送出できなければ False を返す。
+
+    TERM が通って KILL だけ送出に失敗した場合は True。停止 signal は届いており、
+    group が残っていれば次回の GC が同じ手順で再試行できる。
+    """
+    sent = _signal_group(pgid, signal.SIGTERM)
     deadline = time.monotonic() + KILL_GRACE_SEC
     # 猶予中の probe は安い `killpg(pgid, 0)` で回す (リーダーだけでなく孫も数える)。
     # zombie が残る環境ではここが空にならないので、猶予後に zombie を除いた判定
     # (`group_is_stopped`) を 1 回だけ通してから SIGKILL に切り替える。
-    while time.monotonic() < deadline and _group_exists(pid):
+    while time.monotonic() < deadline and _group_exists(pgid):
         time.sleep(KILL_POLL_SEC)
-    if not subproc.group_is_stopped(pid):
-        _signal_group(pid, signal.SIGKILL)
-    return True
+    if not subproc.group_is_stopped(pgid):
+        sent = _signal_group(pgid, signal.SIGKILL) or sent
+    return sent
 
 
 def _group_exists(pgid: int) -> bool:
@@ -242,6 +329,62 @@ def _is_analyzer(pid: int, started_at: float | None) -> bool:
     return _started_before(pid, started_at)
 
 
+def _group_is_analyzer(pgid: int, started_at: float | None) -> bool:
+    """リーダー亡き後の残存 group が「その時起動した自分の analyzer」の残りか。
+
+    メンバーは analyzer の子孫なので、**開始時刻は記録した起動時刻 (pid ファイルの
+    mtime) 以降**になる。それより前から居るメンバーが 1 つでもあれば、pgid の番号が
+    別の group に使われている (= 撃ってはいけない)。判定不能はすべて False。
+    """
+    if started_at is None:
+        return False
+    starts = _live_group_start_times(pgid)
+    if not starts:
+        # None (`ps` が使えない) / 空 (開始時刻を読めるメンバーが居ない) — どちらも
+        # 「メンバーが自分の子孫だと確認できていない」ので送らない側
+        return False
+    return all(s >= started_at - _START_SKEW_SEC for s in starts)
+
+
+def _live_group_start_times(pgid: int) -> list[float] | None:
+    """pgid に属する非 zombie メンバーの開始時刻 (epoch 秒) 一覧。取得できなければ None。
+
+    メンバー**単位**の開始時刻が要るので、`subproc` の group 生死判定 (bool) ではなく
+    `ps` を 1 回呼んで pid / pgid / stat / etime をまとめて取る。`/proc` からも開始時刻は
+    出せるが clock tick と boot 時刻の換算が要るうえ、`ps` が無い環境では結局どの
+    メンバーの開始時刻も読めない (= 未確定側に倒れる) ので ps 一本にしてある。
+
+    `etime` を解析できなかったメンバーは一覧に含めない (走査中に exit した等)。
+    """
+    try:
+        res = subprocess.run(
+            ["ps", "-A", "-o", "pid=,pgid=,stat=,etime="],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    now = time.time()
+    starts: list[float] = []
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            member_pgid = int(parts[1])
+        except ValueError:
+            continue
+        if member_pgid != pgid or parts[2].startswith("Z"):
+            continue
+        elapsed = subproc.parse_etime(parts[3])
+        if elapsed is not None:
+            starts.append(now - elapsed)
+    return starts
+
+
 def _started_before(pid: int, started_at: float | None) -> bool:
     """pid の開始時刻が `started_at` (+ 許容ずれ) 以前か。判定不能は False。"""
     if started_at is None:
@@ -252,12 +395,22 @@ def _started_before(pid: int, started_at: float | None) -> bool:
     return (time.time() - elapsed) <= started_at + _START_SKEW_SEC
 
 
-def _signal_group(pid: int, sig: signal.Signals) -> None:
-    """pgid == pid の process group にまとめて signal を送る。"""
+def _signal_group(pid: int, sig: signal.Signals) -> bool:
+    """pgid == pid の process group にまとめて signal を送る。**送出できたら True**。
+
+    - 送出成功 → True
+    - `ProcessLookupError` (group にメンバーが居ない) → True。止めるものが無い =
+      目的は達成されている
+    - `PermissionError` / その他の `OSError` → **False**。送れていないので、呼び出し側は
+      停止未確定として扱う
+    """
     try:
         os.killpg(pid, sig)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+        return True
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
 
 
 def _is_running(pid: int) -> bool:
