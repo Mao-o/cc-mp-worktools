@@ -101,7 +101,7 @@ sys.path に載せて解決する (plugin root 内の相対配置なので cache
    | `is_available()` | `() -> bool` | CLI 存在確認等の事前チェック |
    | `pre(tool_use_id, prompt)` | `(str, str) -> None` | バックグラウンド起動 |
    | `post(tool_use_id)` | `(str) -> str \| None` | 待機 + 結果取得。整形済み文字列 or None |
-   | `reap_orphan(pid_file)` | `(Path) -> None` | TTL 超過の残骸を停止 (GC から呼ばれる) |
+   | `reap_orphan(pid_file)` | `(Path) -> str` | TTL 超過の残骸を停止し、停止の確度 (`state.REAP_*`) を返す (GC から呼ばれる) |
 
 2. `__main__.py` に 2 行追加:
    ```python
@@ -142,6 +142,18 @@ pid / 結果ファイルが無期限に残り、バックグラウンドの curs
   ばかりのプロセスを GC が撃つ経路を構造的に潰す)
 - `GC_BUDGET_SEC` (2.0 秒) で打ち切る。pre の hook timeout は 5 秒しかないため、
   残骸が大量にあっても起動を遅らせない。取りこぼしは次回の GC が拾う
+- **停止を確認できないときは pid ファイルを残す** (マージ前レビューの指摘)。
+  `reap_orphan()` は停止の確度を `state.REAP_*` で返し、`gc_orphans()` は
+  `REAP_STOPPED` (走っていない / pid 記録が壊れている) と `REAP_SIGNALED`
+  (停止 signal の送出を実際に試みた) のときだけ掃除する。`REAP_UNCONFIRMED`
+  (まだ走っているのに `ps` が一時的に使えない・cmdline が切り詰められた等で同一性を
+  確認できず signal を送っていない) と `reap_orphan()` 自体が例外で落ちた場合は、
+  pid / 結果ファイルを残して次回の GC に委ねる。pid ファイルは**その孤児を追える唯一の
+  記録**なので、確認できていない状態で消すと以後どの GC も再試行できず、ハングした
+  cursor が走り続けて課金され続ける。結果ファイルも一緒に残す — 孤児がまだ書いている
+  最中でありうるうえ、pid だけ残しても対になる出力が失われる。
+  analyzer が登録から外れた名前 / pid ファイルの無い結果だけの残骸は、そもそも止める
+  対象を追えない (残しても次回できることが増えない) ので従来どおり掃除する
 
 `PostToolUseFailure(Agent)` を hooks.json に足して即時掃除する案は**採っていない**。
 イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」
@@ -244,8 +256,14 @@ python3 -m unittest discover tests     # 偽 cursor (PATH 先頭の bash script)
 `tests/test_orphan_gc.py` は 0.10.0 で入れた停止・GC の契約を固定する: 停止が
 process group ごとであること (孫を取り残さない)、analyzer と一致しない pid には
 signal を送らないこと (PID 再利用ガード)、**署名が一致しても pid ファイルより後に起動した
-プロセスには送らないこと** (`TestStartTimeGuard`)、TTL 判定が pid ファイルの mtime を
+プロセスには送らないこと** (`TestStartTimeGuard`)、**停止を確認できなかった孤児は pid /
+結果ファイルを残して次回の GC が再試行すること**、TTL 判定が pid ファイルの mtime を
 見ること、現在の tool_use_id を除外すること、GC が pre / post の両方で走ること。
+
+**生死判定のヘルパー (`_alive`) は zombie を死んだ扱いにする** (`_common/subproc.pid_is_zombie`
+を使う。`TestAliveHelper` が zombie を人工的に作って固定している)。`os.kill(pid, 0)` だけだと、
+PID 1 が孤児を reap しないコンテナで kill 済みの孫が zombie として残った場合に成功し続け、
+停止が正しく効いているのに group 停止系のテストが待ち時間ののちに落ちる。
 
 **「走っている孤児を止める」テストは pid ファイルの mtime を過去へずらして作らない**。
 本番の孤児は mtime と同時刻に起動して TTL を超えて生き残ったプロセスなので、mtime だけを

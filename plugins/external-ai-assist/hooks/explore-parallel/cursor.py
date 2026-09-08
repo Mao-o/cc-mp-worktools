@@ -20,7 +20,7 @@ from pathlib import Path
 
 from _common import cursorcli, hooklog, subproc
 
-from state import cleanup, paths
+from state import REAP_SIGNALED, REAP_STOPPED, REAP_UNCONFIRMED, cleanup, paths
 
 NAME = cursorcli.NAME
 TIMEOUT_SEC = 60
@@ -135,23 +135,36 @@ def post(tool_use_id: str) -> str | None:
     return _CONTEXT_HEADER + data
 
 
-def reap_orphan(pid_file: Path) -> None:
-    """TTL 超過の pid ファイルが指す analyzer を停止する (残骸 GC 用)。
+def reap_orphan(pid_file: Path) -> str:
+    """TTL 超過の pid ファイルが指す analyzer を停止し、**停止の確度**を返す (残骸 GC 用)。
 
     post が来なかった経路 (Agent ツールの失敗・ユーザー中断・セッション終了、および
     `async` hook が `claude -p` の teardown で kill された場合) では停止も掃除も
     走らないため、`state.stale_entries` が拾った残骸をここで止める。
+
+    戻り値は `state.REAP_*` (マージ前レビューの指摘):
+
+    - `REAP_STOPPED`: 走っていない / pid 記録が壊れていて止める対象を特定できない
+    - `REAP_SIGNALED`: 停止 signal の送出を実際に試みた
+    - `REAP_UNCONFIRMED`: **まだ走っているのに** 同一性を確認できず signal を送っていない
+
+    呼び出し側 (`__main__.gc_orphans`) は `REAP_UNCONFIRMED` のとき pid ファイルを残す。
+    ここで戻り値を持たせるまでは「停止できなくても無条件に掃除」していたため、`ps` が
+    一時的に使えない・cmdline が切り詰められた等で同一性を確認できなかった孤児は、
+    唯一の追跡手段である pid 記録ごと消えて二度と GC の対象にならなかった。
     """
     try:
         pid = int(pid_file.read_text().strip())
     except (ValueError, OSError):
-        return
+        return REAP_STOPPED
     if pid <= 0:
-        return
+        return REAP_STOPPED
     if not _is_running(pid):
-        return
-    if terminate(pid, _started_at(pid_file)):
-        log(f"孤児 analyzer (pid {pid}) を停止")
+        return REAP_STOPPED
+    if not terminate(pid, _started_at(pid_file)):
+        return REAP_UNCONFIRMED
+    log(f"孤児 analyzer (pid {pid}) を停止")
+    return REAP_SIGNALED
 
 
 def terminate(pid: int, started_at: float | None) -> bool:

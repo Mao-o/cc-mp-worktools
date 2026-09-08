@@ -19,13 +19,24 @@ from unittest import mock
 import _testutil  # noqa: F401  (sys.path 整備)
 from _testutil import HookTestCase, explore_payload
 
+from _common import subproc  # noqa: E402  (_testutil の sys.path 挿入後に import する)
+
 
 def _alive(pid: int) -> bool:
+    """pid が「まだ走っている」か。**zombie は死んだ扱い**。
+
+    `os.kill(pid, 0)` だけでは足りない。PID 1 が孤児を reap しないコンテナでは、kill に
+    成功した孫がそのまま zombie として残り `os.kill(pid, 0)` が成功し続けるため、停止でき
+    ているのに「生存」と報告して group 停止系のテストが待ち時間ののちに落ちる。
+    `_common.subproc.pid_is_zombie` (timeout テストが同じ理由で使っている) で除外する。
+
+    判定不能 (`None`。/proc も ps も使えない) は `os.kill` の結果に従う = 生存側に倒す。
+    """
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError):
         return False
+    return subproc.pid_is_zombie(pid) is not True
 
 
 class OrphanTestCase(HookTestCase):
@@ -143,6 +154,45 @@ class OrphanTestCase(HookTestCase):
                 pass
             time.sleep(0.02)
         self.fail("偽 cursor の孫 pid が記録されなかった")
+
+
+class TestAliveHelper(OrphanTestCase):
+    """テストヘルパー `_alive` の契約: **zombie は死んだ扱い**。
+
+    PID 1 が孤児を reap しないコンテナでは、kill に成功した孫が zombie として残り
+    `os.kill(pid, 0)` が成功し続ける。ヘルパーがそれを「生存」と報告すると、group 停止が
+    正しく効いているのに待ち時間ののちに落ちる (下の停止系テストが偽陽性で失敗する)。
+    """
+
+    def test_a_zombie_is_not_reported_as_alive(self):
+        proc = subprocess.Popen(
+            ["sleep", "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self._procs.append(proc)  # tearDown の wait で reap する
+        if subproc.pid_is_zombie(proc.pid) is None:
+            self.skipTest("zombie を判定できない環境 (/proc も ps も使えない)")
+
+        # 親 (= このテストプロセス) が wait しない限り zombie のまま残る。
+        # `proc.poll()` は reap してしまうので触らない。
+        proc.kill()
+        deadline = time.monotonic() + 3
+        while (
+            time.monotonic() < deadline and subproc.pid_is_zombie(proc.pid) is not True
+        ):
+            time.sleep(0.02)
+        self.assertIs(
+            subproc.pid_is_zombie(proc.pid),
+            True,
+            "zombie を作れていない (フィクスチャが成立していない)",
+        )
+        try:
+            os.kill(proc.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            self.fail("zombie に os.kill(pid, 0) が失敗した (前提が成立していない)")
+
+        self.assertFalse(_alive(proc.pid), "zombie を生存と報告している")
+
+        proc.wait(timeout=3)
 
 
 class TestGroupKill(OrphanTestCase):
@@ -437,6 +487,61 @@ class TestGcOrphans(OrphanTestCase):
         self.assertFalse(_alive(grandchild), "孤児の孫プロセスが残っている")
         self.assertFalse(result_file.exists())
         self.assertFalse(pid_file.exists())
+
+    def test_gc_keeps_the_records_when_the_stop_is_unconfirmed(self):
+        """停止を確認できなかった孤児は pid / 結果ファイルを残し、次回の GC が再試行する。
+
+        pid ファイルは**その孤児を追える唯一の記録**。`ps` が一時的に使えない・cmdline が
+        切り詰められた等で同一性を確認できなかったときに無条件で消すと、以後どの GC も
+        再試行できず、ハングした cursor が走り続けて課金され続ける。
+
+        フィクスチャは「署名の一致しない生存プロセスが pid ファイルに記録されている」形
+        (= `terminate()` が送らない側に倒れる形) で、`reap_orphan` の
+        `REAP_UNCONFIRMED` を実際に通す。
+        """
+        victim = self.spawn_unrelated()
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-unconfirmed")
+        result_file.write_text("孤児がまだ書いている途中")
+        pid_file.write_text(str(victim.pid))
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        with mock.patch.object(
+            self.cursor, "reap_orphan", wraps=self.cursor.reap_orphan
+        ) as reap:
+            self.assertEqual(
+                self.entry.gc_orphans(), 0, "停止を確認できていないのに掃除を数えている"
+            )
+            self.assertTrue(
+                pid_file.exists(), "停止を確認できていないのに pid 記録を消している"
+            )
+            self.assertTrue(
+                result_file.exists(), "pid 記録を残しながら結果ファイルだけ消している"
+            )
+
+            self.assertEqual(self.entry.gc_orphans(), 0)
+            self.assertEqual(reap.call_count, 2, "次回の GC が再試行していない")
+
+        self.assert_unharmed(victim, "同一性を確認できない pid に signal を送っている")
+
+    def test_gc_keeps_the_records_when_reaping_raises(self):
+        """`reap_orphan` が例外で落ちた場合も未確定扱い (記録を残す)。"""
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-reap-raises")
+        result_file.write_text("x")
+        pid_file.write_text("999999")
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        with mock.patch.object(
+            self.cursor, "reap_orphan", side_effect=OSError("ps が使えない")
+        ):
+            self.assertEqual(self.entry.gc_orphans(), 0)
+
+        self.assertTrue(pid_file.exists(), "停止に失敗した孤児の pid 記録を消している")
+        self.assertTrue(result_file.exists())
+        self.assertEqual(self.entry.gc_orphans(), 1, "次回の GC が掃除できていない")
 
     def test_gc_runs_in_both_phases(self):
         """pre / post のどちらから入っても GC が走る (post が来ない経路の受け皿)。"""

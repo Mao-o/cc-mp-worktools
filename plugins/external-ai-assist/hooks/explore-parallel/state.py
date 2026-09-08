@@ -29,6 +29,15 @@ ORPHAN_TTL_SEC = 900
 #: 残骸が大量にあっても起動を遅らせない。取りこぼしは次回の GC が拾う。
 GC_BUDGET_SEC = 2.0
 
+#: analyzer の `reap_orphan()` が返す停止の確度。GC が「掃除してよいか」を決めるのに使う。
+#:
+#: pid ファイルは**その孤児を追える唯一の記録**なので、停止を確認できていない状態で消すと
+#: 次回以降の GC が再試行できなくなる (走り続ける cursor が課金され続ける)。
+#: 確認できた場合だけ消し、`REAP_UNCONFIRMED` は残して次回の GC に委ねる。
+REAP_STOPPED = "stopped"  #: 走っていない (または pid 記録が壊れていて止める対象が無い)
+REAP_SIGNALED = "signaled"  #: 停止 signal の送出を実際に試みた
+REAP_UNCONFIRMED = "unconfirmed"  #: まだ走っているが同一性を確認できない / 停止を試みられない
+
 
 def paths(name: str, tool_use_id: str) -> tuple[Path, Path]:
     """(result_file, pid_file) のタプルを返す。親ディレクトリも作成する。"""

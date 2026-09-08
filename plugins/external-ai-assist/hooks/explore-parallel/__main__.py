@@ -82,7 +82,14 @@ def gc_orphans(current_tool_use_id: str = "") -> int:
     `analyzer.post()` の後始末に到達しないため、次に hook が動いたときに拾うしかない。
 
     現在の tool_use_id は除外する。停止は analyzer 側 (`reap_orphan`) に委ね、ここは
-    「どれが残骸か」と「予算内で打ち切る」だけを見る。
+    「どれが残骸か」「予算内で打ち切る」「掃除してよいか」を見る。
+
+    **掃除は停止を確認できたときだけ行う** (マージ前レビューの指摘)。pid ファイルは
+    その孤児を追える唯一の記録なので、`reap_orphan` が停止を確認できなかった
+    (`state.REAP_UNCONFIRMED`) / 例外で落ちたのに消してしまうと、以後どの GC も再試行
+    できず、ハングした cursor が走り続けて課金され続ける。未確定なら pid / 結果ファイルを
+    そのまま残し、次回の GC に委ねる (結果ファイルも消さない — 孤児がまだ書いている
+    最中でありうるうえ、pid だけ残しても対になる出力が失われる)。
     """
     by_name = {a.NAME: a for a in ANALYZERS}
     deadline = time.monotonic() + state.GC_BUDGET_SEC
@@ -98,11 +105,18 @@ def gc_orphans(current_tool_use_id: str = "") -> int:
             log(f"GC を予算 ({state.GC_BUDGET_SEC}s) で打ち切り — 残りは次回")
             break
         analyzer = by_name.get(name)
+        # analyzer が居ない (登録から外れた名前) / pid ファイルが無い (結果だけの残骸) は
+        # そもそも止める対象を追えないので、残しても次回できることが増えない → 掃除する
+        outcome = state.REAP_STOPPED
         if analyzer is not None and pid_file.is_file():
             try:
-                analyzer.reap_orphan(pid_file)
+                outcome = analyzer.reap_orphan(pid_file)
             except Exception as e:
                 log(f"{name}: 孤児の停止に失敗: {e}")
+                outcome = state.REAP_UNCONFIRMED
+        if outcome == state.REAP_UNCONFIRMED:
+            log(f"{name}: 孤児の停止を確認できない — 記録を残して次回の GC に委ねる")
+            continue
         state.cleanup(result_file, pid_file)
         removed += 1
     return removed
