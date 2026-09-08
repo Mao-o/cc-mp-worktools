@@ -1,6 +1,8 @@
 """metrics.py: テキスト → 数値メトリクスのテスト。"""
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
 import warnings
 from dataclasses import dataclass
@@ -130,6 +132,29 @@ class TestCountDefsGenericExtended(unittest.TestCase):
             "const total = arr.reduce((acc, x) => acc + x, 0);\n"
             "const found = list.find((item) => item.id === id);\n"
             "const wrapped = wrap(() => run());\n"
+        )
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 0)
+
+    def test_arrow_function_with_a_return_type_annotation(self):
+        # `=>` の直前に戻り型注釈があるアロー関数。TypeScript では主流の書き方
+        # なのに旧版はパラメータ括弧の直後に `=>` を要求していたため 1 件も
+        # 数えていなかった (マージ前レビューの指摘)。
+        text = (
+            "const parse = (x: Input): Output => x;\n"
+            "export const load = async (id: string): Promise<Row | null> => null;\n"
+            "const pick = (rows: Row[]): Record<string, number> => ({});\n"
+            "const identity = <T,>(x: T): T => x;\n"
+        )
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 4)
+
+    def test_return_type_annotation_does_not_widen_the_arrow_rule(self):
+        # 戻り型注釈を許しても、アロー関数を引数に取る呼び出し・三項演算子・
+        # オブジェクトリテラルのプロパティは数えない (床テスト)。
+        text = (
+            "const total = arr.reduce((acc: number, x: number): number => acc + x, 0);\n"
+            "const label = cond ? (a) : (b);\n"
+            "const m = new Map<string, number>();\n"
+            "const cb = { onDone: (x: T): void => run(x) };\n"
         )
         self.assertEqual(self._defs(text, "typescript", "foo.ts"), 0)
 
@@ -302,6 +327,32 @@ class TestImportExtractionExtended(unittest.TestCase):
             ["using System.Net.Http;"],
         )
 
+    def test_using_declaration_is_not_an_import(self):
+        # C# 8 の `using var conn = ...` と TypeScript 5.2 の
+        # `using resource = ...` は**宣言**であって import ではない
+        # (マージ前レビューの指摘)。括弧付きの using 文と違い `(` が直後に
+        # 来ないため、旧版はどちらも import 行として分類していた。
+        lines = [
+            "using var conn = Redis.Connect(cs);",
+            "using resource = auth.acquire();",
+            "using System.Net.Http;",
+            "using static System.Math;",
+            "using HttpAlias = System.Net.Http;",
+        ]
+        # import 形 (名前空間 / static / エイリアス) は引き続き import 行。
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "csharp")), lines[2:]
+        )
+        # 宣言側の行から db / auth のカテゴリが立たない。
+        self.assertEqual(
+            self._cats("\n".join(lines) + "\n", "csharp", "Svc.cs"), {"network"}
+        )
+        # TypeScript のリソース宣言も同じ (言語をまたいで同じ綴りが使われる)。
+        self.assertEqual(
+            self._cats("using session = auth.open();\n", "typescript", "a.ts"),
+            set(),
+        )
+
     def test_import_block_closed_by_paren_on_a_content_line(self):
         # 閉じ括弧が独立行ではなく内容行の末尾にある形 (`    beta)`)。旧版は
         # ここでブロックが閉じず、後続の最大 100 行を import 行として分類して
@@ -346,6 +397,38 @@ class TestImportExtractionExtended(unittest.TestCase):
         ]
         self.assertEqual(
             self._cats("\n".join(go_lines) + "\n", "go", "main.go"), set()
+        )
+
+    def test_import_block_opened_by_paren_with_a_trailing_comment(self):
+        # 開き括弧の後に行末コメントがある形 (`from deps import (  # grouped`)。
+        # 旧版は `endswith("(")` を満たさず継続行をまったく走査せず、ブロック
+        # 形式の import からモジュール名が 1 件も分類されなかった
+        # (マージ前レビューの指摘)。
+        lines = [
+            "from deps import (  # grouped by layer",
+            "    requests,",
+            "    redis,",
+            ")",
+            "x = 1",
+        ]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "python")), lines[:3]
+        )
+        self.assertEqual(
+            self._cats("\n".join(lines) + "\n", "python", "foo.py"),
+            {"network", "db"},
+        )
+        # 行コメント記号は言語ごとに違う (Go は `//`)。
+        go_lines = [
+            "import (  // グループ分け",
+            '\t"net/http"',
+            '\t"database/sql"',
+            ")",
+            "func main() {}",
+        ]
+        self.assertEqual(
+            self._cats("\n".join(go_lines) + "\n", "go", "main.go"),
+            {"network", "db"},
         )
 
     def test_ruby_require_forms(self):
@@ -463,6 +546,46 @@ class TestMaskCommentsAndStrings(unittest.TestCase):
         self.assertIn("export const a = 1;", masked)
         # 行数は保つ (`_control_flow_density` の安全弁を無駄撃ちさせない)。
         self.assertEqual(len(masked.splitlines()), len(text.splitlines()))
+
+    def test_escaped_backtick_does_not_close_a_template_literal(self):
+        # ``\` `` はテンプレートリテラルの中のエスケープされたバッククォート。
+        # 閉じ区切りと誤認すると、本当の閉じ記号が「新しい未終端文字列の開始」
+        # になり、以降のコードが**全部**マスクされる (マージ前レビューの指摘)。
+        text = (
+            "const s = `use \\` here`;\n"
+            "if (rows.length) {\n"
+            "  for (const row of rows) switch (row.kind) {}\n"
+            "}\n"
+        )
+        masked = metrics.mask_comments_and_strings(text, "javascript")
+        self.assertNotIn("here", masked)  # 文字列本体は潰れている
+        self.assertIn("if (rows.length)", masked)  # 閉じた後の実コードは残る
+        self.assertIn("switch", masked)
+        self.assertEqual(len(masked.splitlines()), len(text.splitlines()))
+
+    def test_unterminated_multiline_string_with_backslashes_is_linear(self):
+        # エスケープ交替 (`\\.`) と通常文字の交替が同じ位置 (`\`) で開始できると、
+        # 閉じ記号を持たない長い文字列で組み合わせが指数爆発し、`re.sub` が
+        # 事実上停止する (minify 済み bundle で実測)。hook は毎回の Write/Edit
+        # で走るため、この停止はそのまま編集のハングになる。
+        #
+        # 別プロセスに時間予算を与えて固定する — 線形なら 1 ミリ秒未満、指数なら
+        # 返らないので、タイムアウトが「壊れた」を意味する。
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import metrics\n"
+            "text = 'const r = `' + 'a\\\\b' * 400\n"
+            "metrics.mask_comments_and_strings(text, 'javascript')\n"
+            "print('ok')\n" % str(Path(metrics.__file__).parent)
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "ok")
 
     def test_url_inside_string_is_not_a_comment(self):
         masked = metrics.mask_comments_and_strings(
@@ -631,6 +754,18 @@ class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
             "x := 1\n"
         )
         self.assertAlmostEqual(self._density(text, "go", "foo.go"), 0.0)
+
+    def test_code_after_an_escaped_backtick_is_still_counted(self):
+        # エスケープされたバッククォートを閉じ区切りと誤認すると、以降の行が
+        # まるごと文字列扱いになり制御フローが 0 になる (マージ前レビューの
+        # 指摘)。密度で固定する。
+        text = (
+            "const s = `use \\` here`;\n"
+            "if (a) {\n"
+            "  for (const x of a) {}\n"
+            "}\n"
+        )
+        self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.5)
 
     def test_comment_lines_stay_in_denominator(self):
         # 分子だけをマスクし、分母は元テキストの非空行のまま。

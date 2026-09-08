@@ -51,9 +51,22 @@ _DEF_KEYWORDS_RE = re.compile(
 # 入れ子なし) か識別子 1 個だけ。これを緩めると
 # `const total = arr.reduce((acc, x) => acc + x, 0)` のような「アロー関数を
 # 引数に取る呼び出し」まで定義として数え、def_count がコーパス全体で膨らむ。
+#
+# パラメータ括弧と `=>` の間には**戻り型注釈**を許す
+# (`const parse = (x: Input): Output => …`)。これを許さないと TypeScript で
+# 戻り型を書いたアロー関数が 1 件も数えられない (マージ前レビューの指摘)。
+# 注釈に許すのは `=` / 括弧 / 波括弧 / `;` を含まない字面だけ — `Promise<void>`
+# や `Record<string, number>` のようなジェネリックは通り、オブジェクト型
+# (`{ a: number }`) や関数型 (`(x) => y`) は通らない。曖昧な形を弾いて
+# 「数えない」側に倒す。先頭の `<T>` (ジェネリック仮引数) も同じ理由で
+# 入れ子なしの 1 組だけ許す。
 _ARROW_DEF_RE = re.compile(
     r"^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*(?::[^=]*)?=\s*"
-    r"(?:async\s+)?(?:\([^()]*\)|\w+)\s*=>"
+    r"(?:async\s+)?"
+    r"(?:<[^<>()]*>\s*)?"
+    r"(?:\([^()]*\)|\w+)"
+    r"(?:\s*:[^=(){};]*)?"
+    r"\s*=>"
 )
 
 # 制御フロー密度に数える語。どの言語でも同じ綴りが同じ意味で使われる基本集合。
@@ -236,8 +249,19 @@ def _noise_re(language: str) -> re.Pattern | None:
     multiline_delimiters += _MULTILINE_STRING_DELIMITERS.get(language, ())
     for delim in multiline_delimiters:
         escaped = re.escape(delim)
+        # 本体は「エスケープされた 1 文字」か「区切り記号でもバックスラッシュ
+        # でもない 1 文字」。前者を先に置くことで ``\` `` (テンプレートリテラル
+        # 内のエスケープされたバッククォート) を閉じ区切りと誤認しない — 誤認
+        # すると本当の閉じ記号が「新しい未終端文字列の開始」になり、以降の
+        # コードが全部マスクされる (マージ前レビューの指摘)。
+        #
+        # 後者から ``\`` を除くのは**必須**。両方の交替が同じ位置 (``\``) で
+        # 開始できると、閉じ記号を持たない長い文字列で交替の組み合わせが指数
+        # 爆発し、``re.sub`` が事実上停止する (minify 済み bundle で実測: 実
+        # コーパス走査が 1 ファイルで 3 分以上 CPU 100% のまま返らなくなった)。
+        body = rf"(?:\\[\s\S]|(?!{escaped})[^\\])"
         # 閉じられていない複数行文字列は「そこから先すべて」を文字列とみなす。
-        parts.append(rf"{escaped}[\s\S]*?{escaped}|{escaped}[\s\S]*")
+        parts.append(rf"{escaped}{body}*{escaped}|{escaped}{body}*")
     if language in _BLOCK_COMMENT_LANGUAGES:
         parts.append(r"/\*[\s\S]*?\*/|/\*[\s\S]*")
     for delim in _STRING_DELIMITERS.get(language, _DEFAULT_STRING_DELIMITERS):
@@ -269,6 +293,9 @@ def mask_comments_and_strings(text: str, language: str) -> str:
     三重引用符とバッククォート (テンプレートリテラル / Go の raw string) は
     改行を跨いで潰すため、対になる閉じ記号を持たない 1 個 (正規表現リテラルの
     中に現れたバッククォート等) があるとそこから先すべてを文字列とみなす。
+    改行を跨ぐ文字列でも ``\\`` に続く 1 文字は区切りとして扱わないため、
+    バックスラッシュをエスケープ記号として扱わない Go の raw string が
+    ``\\`` で終わる (``` `\\d+\\` ```) と閉じ記号を見失う。
     いずれも「本来コードである部分まで潰す」方向の誤りに倒れるため、
     制御フロー密度は過小評価側に寄る (= 通知が減る側 = advisory hook の
     fail-open 方向)。
@@ -286,11 +313,16 @@ _IMPORT_HINT_RE = re.compile(
     r"^\s*("
     r"import\b"
     r"|from\b.*\bimport\b"
-    # C# / PowerShell (using namespace ...)。``using (var conn = ...)`` /
-    # ``using (Stream s = ...)`` は同じ綴りの using **文** (リソース解放
-    # ブロック) で import ではないため、開き括弧が続く形を除外する
-    # (マージ前レビューの指摘)。宣言側は必ず名前空間名が続く。
-    r"|using\b(?!\s*\()"
+    # C# / PowerShell (using namespace ...)。同じ綴りで import ではない形を
+    # 3 つ除外する (いずれもマージ前レビューの指摘):
+    #   1. ``using (var conn = ...)`` — リソース解放ブロックの using **文**
+    #   2. ``using var connection = ...`` — C# 8 の using **宣言** (括弧なし)
+    #   3. ``using resource = getResource();`` — TypeScript 5.2 の明示的
+    #      リソース管理宣言
+    # 3 は C# の using エイリアス (``using Alias = Namespace.Type;``) と字面が
+    # 重なるため、``=`` の右辺が名前空間修飾された型名 (呼び出しを含まない)
+    # かどうかで分ける。右辺に ``(`` があれば式 = 宣言とみなして除外する。
+    r"|using\b(?!\s*\()(?!\s+var\b)(?!\s+\w+\s*=[^;\n]*\()"
     r"|use\s"  # Rust / PHP
     r"|require_relative\b|require\b"  # Ruby
     r"|Import-Module\b"  # PowerShell
@@ -518,6 +550,11 @@ def _iter_import_lines(lines: list[str], language: str):
     (マージ前レビューの指摘)。内容行末尾の判定では**行末コメントを無視する**
     — ``    last_name)  # noqa`` のように閉じ括弧の後にコメントが続く形で
     ブロックが閉じないままだった (マージ前レビューの指摘)。
+
+    **開き括弧の判定でも同じく行末コメントを無視する** —
+    ``from deps import (  # grouped`` / ``import (  // grouped`` は
+    ``endswith("(")`` を満たさず、継続行がまったく走査されずモジュール名が
+    1 件も分類されなかった (マージ前レビューの指摘)。
     """
     block_remaining = 0
     require_call_is_import = language in _REQUIRE_CALL_LANGUAGES
@@ -537,7 +574,7 @@ def _iter_import_lines(lines: list[str], language: str):
             require_call_is_import and _REQUIRE_CALL_RE.search(line)
         ):
             yield line
-            if stripped.endswith("("):
+            if _strip_trailing_comment(stripped, language).endswith("("):
                 block_remaining = _IMPORT_BLOCK_MAX_LINES
 
 
