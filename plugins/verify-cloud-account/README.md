@@ -520,18 +520,27 @@ worktree 内に同名ファイルを置く必要は無い。
   - **`.git` がファイルで、内容を判読できない階層** (`gitdir:` が読めない /
     上記いずれの形でもない)。分からない場合は止める側 (fail-closed) に倒す
   - **`$HOME` およびその上** (`/Users`, `/` 等)
-  - **linked worktree だけは境界にしない** (`.git` が `<common>/worktrees/<name>`
-    を指すファイル)。worktree から親 repo の設定を継承する上記の運用はそのまま。
-    `<common>` は git の common directory で、その名前は `.git` とは限らない —
-    bare repository (`repo.git/worktrees/<name>`) や `--separate-git-dir` で
-    初期化した repo (`/custom/gitdir/worktrees/<name>`) から作った worktree も
-    同じく通過する (判定は末尾の `worktrees/<name>` / `modules/<name>` で行い、
-    common directory の名前には依存しない)
+  - **linked worktree は「その worktree を持つ repo の側」にだけ上る**
+    (`.git` が `<common>/worktrees/<name>` を指すファイル)。worktree から
+    親 repo の設定を継承する上記の運用はそのまま。`<common>` は git の
+    common directory で、その名前は `.git` とは限らない — bare repository
+    (`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
+    (`/custom/gitdir/worktrees/<name>`) から作った worktree も同じく通過する
+    (判定は末尾の `worktrees/<name>` / `modules/<name>` で行い、common
+    directory の名前には依存しない)。
+    **通過するのは `<common>` が祖先側の repo のものと一致する場合だけ** —
+    linked worktree は無関係な repo の中にも置けるため (repo A の中に
+    repo B の worktree を追加する形)、形だけで通すと **repo A の設定を継承**
+    してしまう。祖先の repo が別物、または祖先の `.git` を判読できない場合は
+    worktree root で止める。祖先に repo が 1 つも無い場合 (workspace 直下に
+    worktree を並べる配置) は従来どおり上る
   - 判定は `.git` の読み取りだけで行う (git コマンドは実行しない)。`gitdir:` の
-    指す先は**種別の判定にしか使わず、探索先としては辿らない**
+    指す先は**種別と所属の判定にしか使わず、探索先としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
     submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
-    (未設定として deny)。各 repo の toplevel に複製するか `--path` で明示する
+    (未設定として deny)。**別の repo の中に置いた linked worktree から、その
+    外側 repo の設定を継承していた場合も同じ** (worktree root で止まる)。
+    各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -566,9 +575,9 @@ service が一斉に未設定 (deny)** になる。
 v0.12.0 以降は遡及自体が git repo の境界 (toplevel / submodule root) と `$HOME`
 で止まるため、**その repo の外や `$HOME` 以上が編集対象になることはない**
 (submodule で作業していれば superproject 側も対象外)。linked worktree を repo の
-外に置いている場合は、その worktree を含む repo があればその toplevel、無ければ
-`$HOME` が境界になる (遡及はファイルシステムの親方向にしか進まないため、`.git`
-ファイルの gitdir 先は辿らない)。
+外に置いている場合は、**その worktree を持たない別の repo の中にあれば worktree
+root 自身**が、外側に repo が無ければ `$HOME` が境界になる (遡及はファイルシステム
+の親方向にしか進まないため、`.git` ファイルの gitdir 先は辿らない)。
 
 ## パフォーマンス (短期キャッシュ)
 

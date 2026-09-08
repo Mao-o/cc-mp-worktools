@@ -227,15 +227,30 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
   worktree は `repo.git/worktrees/<name>`、`--separate-git-dir` で初期化した repo
   から作った worktree は `/custom/gitdir/worktrees/<name>` になり、**パス中に
   `.git` という要素が現れない**。`.git` を厳密に要求すると、これらの正当な
-  worktree が unknown = 境界に落ち、外側 workspace の accounts.local.json を
-  継承できず設定済みの状態変更コマンドが deny される (マージ前レビューの指摘)。
+  worktree が判読不能 = 境界に落ち、その repo の accounts.local.json を継承できず
+  設定済みの状態変更コマンドが deny される (マージ前レビューの指摘)。
   末尾で判定しても入れ子は従来どおり — `modules/a/modules/b` は境界、
   `modules/sub/worktrees/wt` は通過。`--separate-git-dir` repo の **main**
   worktree は gitdir が common directory を直接指す (`worktrees/` が付かない)
   ため、これまでどおり境界 = repo toplevel として扱われる
-- 判定は `.git` の**読み取りのみ**で行う (git コマンドは呼ばない)。gitdir は種別の
-  分類にしか使わず**探索先としては辿らない** — 探索経路を増やすと「見つかる場所が
-  増える」= allow 側に倒れる。区切りは `/` と `\` の両方を受けて OS 非依存に分解する
+- **linked worktree が通過するのは、gitdir の common dir が祖先の repo のものと
+  一致する場合だけ** (`_ancestor_repo_owns`)。形だけで通すと、無関係な repo A の
+  中に置かれた repo B の worktree (`repo-a/vendor/b-wt`) から探索が repo B を
+  離れ、**repo A の accounts.local.json を継承**する。repo A の期待アカウントが
+  active session と一致すれば、未設定の repo B worktree で状態変更コマンドが
+  allow される (マージ前レビューの指摘)。所属確認は探索と同じ方向 (親方向) へ
+  同じ停止条件 (`$HOME` / ルート / 階層数) で走査し、**最初に見付かった git
+  marker** で判定する — それより上は「その repo の中」であり、間の階層もその repo
+  に属するため。祖先の種別を確定できない場合は止める側に倒す。祖先に repo が
+  1 つも無い場合 (workspace 直下に worktree を並べる配置) は継承元を取り違え
+  ようがないため従来どおり上る。比較は「同じ repo に属するか」を common dir 同士で
+  見る形にしてあり、`.git` ディレクトリ / submodule / `--separate-git-dir` /
+  祖先自身が linked worktree のいずれでも同じ 1 実装で判定できる
+  (`_common_git_dir`)。パスは `Path.resolve()` で正規化してから比較する
+- 判定は `.git` の**読み取りのみ**で行う (git コマンドは呼ばない)。gitdir は種別と
+  所属の判定にしか使わず**探索先としては辿らない** — 探索経路を増やすと「見つかる
+  場所が増える」= allow 側に倒れる。区切りは `/` と `\` の両方を受けて OS 非依存に
+  分解する
 - **builder も dispatcher と同じ解決を使う** (3-tier lookup + 親遡及)。読む側と
   書く側で解決がずれると、継承中の worktree で `set` が子ファイルを作り、
   dispatcher の遡及がそこで止まって**継承していた他の service が一斉に未設定
@@ -449,8 +464,9 @@ wrapper 追加時に分類を機械的に強制する。完全な表・実機根
 **D19: 遡及の停止条件に境界を足す** — 上記「配置パスの解決」を参照。落とす方向
 (見つからず deny) は fail-closed なので安全側。`$HOME` や repo より上にグローバル
 既定を置く用途の専用経路は現時点では無い (別途検討)。`.git` ファイルは種別で
-分岐し、linked worktree だけ通して submodule と判読不能は境界にする
-(マージ前レビューの指摘)。
+分岐し、linked worktree だけ通して submodule と判読不能は境界にする。その
+linked worktree も、**gitdir の common dir が祖先の repo のものと一致すること**を
+確かめてから通す (いずれもマージ前レビューの指摘)。
 
 **D20: 予算切れは deny** — 上記「実時間の予算」を参照。
 

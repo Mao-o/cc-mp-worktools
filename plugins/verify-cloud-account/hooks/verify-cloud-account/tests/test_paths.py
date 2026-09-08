@@ -181,36 +181,69 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         )
         self.assertEqual(self._resolved_dir(worktree), self.repo)
 
-    def test_worktree_of_submodule_is_not_a_boundary(self):
-        """submodule の linked worktree は最後のキーワードが `worktrees`。"""
-        worktree = self._child_with_dot_git_file(
-            "wt", "gitdir: ../.git/modules/sub/worktrees/wt\n"
-        )
-        self.assertEqual(self._resolved_dir(worktree), self.repo)
+    def test_worktree_of_submodule_inherits_from_its_submodule_root(self):
+        """submodule の linked worktree は最後のキーワードが `worktrees`。
 
-    def test_bare_repo_linked_worktree_still_inherits(self):
+        通過先は **その worktree を持つ submodule** 側 (common dir が
+        `<super>/.git/modules/sub` で一致する階層)。
+        """
+        sub = self._child_with_dot_git_file(
+            "sub", f"gitdir: {self.repo}/.git/modules/sub\n"
+        )
+        self._write_new(sub, {"github": "sub"})
+        worktree = sub / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(
+            f"gitdir: {self.repo}/.git/modules/sub/worktrees/wt\n", encoding="utf-8"
+        )
+        self.assertEqual(self._resolved_dir(worktree), sub)
+
+    def test_worktree_of_submodule_does_not_inherit_superproject(self):
+        """submodule の worktree を superproject 直下に置いても継承しない。
+
+        common dir (`<super>/.git/modules/sub`) は superproject の git dir
+        (`<super>/.git`) と別物なので、所属を確立できず worktree root で止まる。
+        """
+        worktree = self._child_with_dot_git_file(
+            "wt", f"gitdir: {self.repo}/.git/modules/sub/worktrees/wt\n"
+        )
+        self.assertIsNone(self._resolved_dir(worktree))
+
+    def test_bare_repo_linked_worktree_inherits_from_owning_checkout(self):
         """bare repository から作った worktree (common dir が `<name>.git`)。
 
         `git --git-dir=/path/repo.git worktree add ...` の gitdir は
         `/path/repo.git/worktrees/<name>` で、パス中に `.git` という**要素**が
-        現れない。`.git` を要求すると正当な worktree が境界に落ち、外側
-        workspace の accounts.local.json を継承できなくなる
-        (マージ前レビューの指摘)。
-        """
-        worktree = self._child_with_dot_git_file(
-            "wt", f"gitdir: {self.tmp}/store/repo.git/worktrees/wt\n"
-        )
-        self.assertEqual(self._resolved_dir(worktree), self.repo)
+        現れない。`.git` を要求すると正当な worktree が境界に落ち、その repo の
+        accounts.local.json を継承できなくなる (マージ前レビューの指摘)。
 
-    def test_separate_git_dir_linked_worktree_still_inherits(self):
+        祖先側は同じ common dir を指す `.git` ファイルを持つ階層。
+        """
+        common = self.tmp / "store" / "repo.git"
+        host = self._child_with_dot_git_file("host", f"gitdir: {common}\n")
+        self._write_new(host, {"github": "host"})
+        worktree = host / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(
+            f"gitdir: {common}/worktrees/wt\n", encoding="utf-8"
+        )
+        self.assertEqual(self._resolved_dir(worktree), host)
+
+    def test_separate_git_dir_linked_worktree_inherits_from_owning_checkout(self):
         """`--separate-git-dir` で初期化した repo から作った worktree。
 
-        common dir が `.git` と無関係な名前 (`/custom/gitdir`) になる。
+        common dir が `.git` と無関係な名前 (`/custom/gitdir`) になる。main
+        worktree 側の `.git` ファイルは同じ common dir を直接指す。
         """
-        worktree = self._child_with_dot_git_file(
-            "wt", f"gitdir: {self.tmp}/custom/gitdir/worktrees/wt\n"
+        common = self.tmp / "custom" / "gitdir"
+        host = self._child_with_dot_git_file("host", f"gitdir: {common}\n")
+        self._write_new(host, {"github": "host"})
+        worktree = host / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(
+            f"gitdir: {common}/worktrees/wt\n", encoding="utf-8"
         )
-        self.assertEqual(self._resolved_dir(worktree), self.repo)
+        self.assertEqual(self._resolved_dir(worktree), host)
 
     def test_bare_repo_submodule_is_still_a_boundary(self):
         """common dir 名に依存しないのは submodule 側も同じ。"""
@@ -268,6 +301,109 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
 
         with mock.patch.object(Path, "open", fake_open):
             self.assertIsNone(self._resolved_dir(child))
+
+
+class TestLinkedWorktreeOwnership(BaseAncestorBoundary):
+    """linked worktree は「その worktree を持つ repo」の側にしか上らない。
+
+    正当な linked worktree は無関係な repo の中にも置ける (repo A の
+    `repo-a/vendor/b-wt` に repo B の worktree を追加する形)。gitdir の形だけで
+    通過させると探索が repo B を離れ、**repo A の accounts.local.json を継承**
+    する。repo A の期待アカウントが active session と一致すれば、未設定の
+    repo B worktree で状態変更コマンドが allow される (マージ前レビューの指摘)。
+
+    通過の条件は「gitdir の common dir が、この後探索する祖先 repo のものと
+    一致すること」。確立できなければ worktree root で止める (fail-closed)。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo_a = self.tmp / "repo-a"
+        self.repo_b = self.tmp / "repo-b"
+        for repo in (self.repo_a, self.repo_b):
+            (repo / ".git").mkdir(parents=True)
+
+    def _worktree(self, path: Path, gitdir: str) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        return path
+
+    # --- (a) 無関係な repo の中に置かれた worktree ---------------------------
+
+    def test_worktree_in_unrelated_repo_does_not_inherit_that_repo(self):
+        self._write_new(self.repo_a, {"github": "repo-a"})
+        worktree = self._worktree(
+            self.repo_a / "vendor" / "b-wt",
+            f"{self.repo_b}/.git/worktrees/b-wt",
+        )
+        self.assertIsNone(self._resolved_dir(worktree))
+
+    def test_worktree_in_unrelated_repo_does_not_inherit_intermediate_dir(self):
+        """外側 repo の中間ディレクトリ (repo ではない階層) も対象外。
+
+        worktree root で止めるため、`repo-a/vendor/` に置かれた設定にも届かない。
+        """
+        self._write_new(self.repo_a / "vendor", {"github": "vendor"})
+        worktree = self._worktree(
+            self.repo_a / "vendor" / "b-wt",
+            f"{self.repo_b}/.git/worktrees/b-wt",
+        )
+        self.assertIsNone(self._resolved_dir(worktree))
+
+    def test_worktree_root_itself_is_still_searched(self):
+        """境界は「越えない」だけ。worktree 自身の設定は従来どおり使う。"""
+        worktree = self._worktree(
+            self.repo_a / "vendor" / "b-wt",
+            f"{self.repo_b}/.git/worktrees/b-wt",
+        )
+        self._write_new(worktree, {"github": "b-wt"})
+        self.assertEqual(self._resolved_dir(worktree), worktree)
+
+    def test_ancestor_with_unreadable_dot_git_is_a_boundary(self):
+        """祖先の `.git` が判読できない = 所属を比較できない → 止める。"""
+        host = self.repo_a / "host"
+        host.mkdir()
+        (host / ".git").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        self._write_new(host, {"github": "host"})
+        worktree = self._worktree(
+            host / "wt", f"{self.tmp}/custom/gitdir/worktrees/wt"
+        )
+        self.assertIsNone(self._resolved_dir(worktree))
+
+    # --- (b) 自分の repo に属する worktree は従来どおり継承 ------------------
+
+    def test_worktree_inside_its_own_repo_inherits(self):
+        self._write_new(self.repo_b, {"github": "repo-b"})
+        worktree = self._worktree(
+            self.repo_b / ".worktrees" / "wt", f"{self.repo_b}/.git/worktrees/wt"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo_b)
+
+    def test_worktree_outside_its_repo_inherits_from_workspace(self):
+        """repo の外に置いた worktree (`git worktree add ../wt` の通常配置)。
+
+        祖先に repo が 1 つも無ければ継承元を取り違えようがないため、workspace
+        直下の設定を従来どおり継承する。
+        """
+        workspace = self.tmp / "ws"
+        repo = workspace / "repo"
+        (repo / ".git").mkdir(parents=True)
+        self._write_new(workspace, {"github": "ws"})
+        worktree = self._worktree(
+            workspace / "wt", f"{repo}/.git/worktrees/wt"
+        )
+        self.assertEqual(self._resolved_dir(worktree), workspace)
+
+    def test_nested_worktree_of_same_repo_inherits(self):
+        """祖先自身が linked worktree でも、同じ common dir なら通過する。"""
+        outer = self._worktree(
+            self.repo_b / ".worktrees" / "wt1", f"{self.repo_b}/.git/worktrees/wt1"
+        )
+        self._write_new(outer, {"github": "wt1"})
+        inner = self._worktree(
+            outer / "inner", f"{self.repo_b}/.git/worktrees/inner"
+        )
+        self.assertEqual(self._resolved_dir(inner), outer)
 
 
 class TestAncestorStopsAtHome(BaseAncestorBoundary):

@@ -87,7 +87,8 @@ service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ�
   `.git` **ファイル**が submodule の gitdir (`<common>/modules/<name>`) を指す階層
   (submodule root)。`.git` ファイルが linked worktree の gitdir
   (`<common>/worktrees/<name>`) を指す場合だけは境界にせず、worktree から親 repo の
-  設定を継承する従来の運用はそのまま
+  設定を継承する従来の運用はそのまま (ただし `<common>` が祖先の repo のもので
+  あることを確かめる。下記)
 - **`$HOME` およびその上** (`/Users`, `/` 等)
 
 `.git` ファイルの判定は**内容の読み取りだけ**で行う (git コマンドは実行しない)。
@@ -105,18 +106,34 @@ fail-closed せず allow される。
 パス中に `.git` という要素があることを厳密に要求していたため、**bare repository
 (`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
 (`/custom/gitdir/worktrees/<name>`) から作った linked worktree が判読不能扱いに
-なり、外側 workspace の設定を継承できず設定済みの状態変更コマンドが deny されて
-いた**。git の common directory の名前は `.git` とは限らないため、レイアウト
+なり、その repo の設定を継承できず設定済みの状態変更コマンドが deny されていた**。
+git の common directory の名前は `.git` とは限らないため、レイアウト
 (`worktrees/` / `modules/`) だけで識別する。入れ子の扱い
 (`modules/a/modules/b` は境界、`modules/sub/worktrees/wt` は通過) は変わらない。
 `--separate-git-dir` repo の **main** worktree は gitdir が common directory を
 直接指すため、従来どおり境界 (repo toplevel) として扱う。
 
-**互換性 (非互換の変更)**: 次の 3 つの配置は継承されなくなる (未設定として deny):
+さらに、linked worktree を通過させるのは **gitdir の common directory
+(`<common>/worktrees/<name>` の `<common>`) が、この後探索する祖先の repo のものと
+一致する場合だけ**にした (マージ前レビューの指摘)。正当な linked worktree は
+無関係な repo の中にも置けるため (repo A の `repo-a/vendor/b-wt` に repo B の
+worktree を追加する形)、形だけで通すと探索が repo B を離れて **repo A の
+accounts.local.json を継承**する。repo A の期待アカウントが active session と
+一致すれば、未設定の repo B worktree で状態変更コマンドが allow されてしまう。
+所属の確認は探索と同じ方向 (ファイルシステムの親方向) へ同じ停止条件で走査し、
+最初に見付かった祖先の `.git` (ディレクトリ / gitdir ポインタ) を
+`Path.resolve()` で正規化して common directory 同士で突き合わせる。一致しない
+場合と、祖先の `.git` を判読できず比較できない場合は **worktree root を境界**に
+する (fail-closed)。祖先に repo が 1 つも無い配置 (workspace 直下に worktree を
+並べる形) は継承元を取り違えようがないため従来どおり上る。
+
+**互換性 (非互換の変更)**: 次の 4 つの配置は継承されなくなる (未設定として deny):
 (1) ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて全プロジェクト
 の既定にしていた場合、(2) **repo の toplevel より上** (例: 複数 repo を束ねる親ディレクトリ)
 に置いて配下の repo に継承させていた場合、(3) **superproject に置いて submodule に継承**
-させていた場合。落ちる方向は fail-closed のため安全側。移行は、
+させていた場合、(4) **別の repo の中に置いた linked worktree から、その外側 repo
+(またはその配下のディレクトリ) の設定を継承**させていた場合。落ちる方向は
+fail-closed のため安全側。移行は、
 各 repo の toplevel に `accounts_builder.py set --service <svc> --from-cli --dry-run` →
 `--commit` で複製するか、`--path` で明示する。グローバル既定の専用経路は現時点では無い
 (別途検討)。
@@ -134,6 +151,12 @@ green のままになる」抜けが見つかり、`show` の呼び出し経路�
 `tests/test_paths.py` で回帰テストを足し、**修正前のコードでは submodule 形と
 判読不能形が落ち、linked worktree 形は通る**ことを使い捨てコピーで確認してから
 採用した。
+
+linked worktree の所属確認にも同じ手順で回帰テストを足した。**修正前のコードでは
+「無関係な repo の中に置いた worktree がその repo (および配下のディレクトリ) を
+継承する」形と「祖先の `.git` が判読できない形」が落ち、自分の repo の中・外に
+置いた worktree、submodule の worktree、bare / `--separate-git-dir` repo の
+worktree、入れ子 worktree はいずれも通る**ことを使い捨てコピーで確認している。
 
 ## 0.11.1
 

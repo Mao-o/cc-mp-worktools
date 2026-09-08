@@ -86,8 +86,39 @@ def _split_path_components(raw: str) -> list[str]:
     ]
 
 
-def _classify_gitdir_pointer(text: str) -> str:
-    """`.git` ファイルの内容を "worktree" / "submodule" / "unknown" に分類する。
+def _parse_gitdir_value(text: str) -> str | None:
+    """`.git` ファイルの内容から `gitdir:` の値を取り出す (無ければ None)。"""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith(_GITDIR_PREFIX):
+            value = stripped[len(_GITDIR_PREFIX):].strip()
+            return value or None
+        break
+    return None
+
+
+def _resolve_gitdir_value(directory: Path, raw: str, parts: list[str]) -> Path | None:
+    """gitdir の値を絶対パスへ正規化する (`.git` ファイルのある階層が基準)。
+
+    `Path.resolve()` を通すため、`..` と symlink を含んだ表記でも同じ実体が
+    同じパスに落ちる。区切りは `/` と `\\` の両方を受ける。
+    """
+    if not parts:
+        return None
+    try:
+        if raw.replace("\\", "/").startswith("/"):
+            target = Path("/", *parts)
+        else:
+            target = directory.joinpath(*parts)
+        return target.resolve()
+    except (OSError, ValueError):
+        return None
+
+
+def _classify_gitdir_parts(parts: list[str]) -> str:
+    """gitdir のパス要素を "worktree" / "submodule" / "plain" に分類する。
 
     git が `.git` ファイルに書く gitdir は、**common directory からの相対で**
     `worktrees/<name>` / `modules/<name>` という末尾を持つ:
@@ -101,27 +132,14 @@ def _classify_gitdir_pointer(text: str) -> str:
     初期化した repo から作った linked worktree は `repo.git/worktrees/<name>` /
     `/custom/gitdir/worktrees/<name>` のようになり、パス中に `.git` という
     要素が現れない。`.git` という名前を要求すると、これらの正当な linked
-    worktree が "unknown" = 境界に落ち、外側 workspace の accounts.local.json
-    を継承できなくなる (マージ前レビューの指摘)。
+    worktree が判読不能 = 境界に落ちる (マージ前レビューの指摘)。
 
-    末尾 2 要素が上記いずれでもないもの (repo 本体の gitdir を直接指す
-    `--separate-git-dir` の main worktree、prefix 違い、読めない内容) は
-    **"unknown"** とし、呼び出し側で停止側 (fail-closed) に倒す。
+    どちらの末尾でもないもの (repo 本体の gitdir を直接指す
+    `--separate-git-dir` の main worktree など) は "plain" — その階層自身は
+    独立した repo の root なので境界として扱う。
     """
-    gitdir = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.lower().startswith(_GITDIR_PREFIX):
-            gitdir = stripped[len(_GITDIR_PREFIX):].strip()
-        break
-    if not gitdir:
-        return "unknown"
-
-    parts = _split_path_components(gitdir)
     if len(parts) < 2:
-        return "unknown"
+        return "plain"
     # 末尾は `<keyword>/<name>`。入れ子 (`modules/a/modules/b` は submodule、
     # `modules/sub/worktrees/wt` は worktree) も最後の keyword で決まる。
     keyword = parts[-2]
@@ -129,18 +147,132 @@ def _classify_gitdir_pointer(text: str) -> str:
         return "worktree"
     if keyword == "modules":
         return "submodule"
-    return "unknown"
+    return "plain"
 
 
-def _is_repo_boundary(directory: Path) -> bool:
+def _inspect_dot_git(directory: Path) -> tuple[str, Path | None]:
+    """`<directory>/.git` を読んで (種別, gitdir の絶対パス) を返す。
+
+    種別:
+      - "none"       : `.git` が無い
+      - "dir"        : `.git` が **ディレクトリ** (通常の repo toplevel)
+      - "worktree"   : gitdir が `<common>/worktrees/<name>`
+      - "submodule"  : gitdir が `<common>/modules/<name>`
+      - "plain"      : gitdir が repo 本体の git directory を直接指す形
+      - "unreadable" : `.git` はあるが種別を確定できない
+
+    判定は `.git` の**読み取りだけ**で行う (git コマンドは呼ばない)。
+    """
+    dot_git = directory / ".git"
+    try:
+        if dot_git.is_dir():
+            try:
+                return "dir", dot_git.resolve()
+            except (OSError, ValueError):
+                return "unreadable", None
+        if not dot_git.is_file():
+            return "none", None
+    except OSError:
+        # 種別を確かめられない = 境界かどうか分からない → 停止側に倒す
+        return "unreadable", None
+
+    try:
+        with dot_git.open("rb") as handle:
+            raw = handle.read(_GITDIR_FILE_MAX_BYTES)
+    except OSError:
+        return "unreadable", None
+    value = _parse_gitdir_value(raw.decode("utf-8", errors="replace"))
+    if not value:
+        return "unreadable", None
+    parts = _split_path_components(value)
+    target = _resolve_gitdir_value(directory, value, parts)
+    if target is None:
+        return "unreadable", None
+    return _classify_gitdir_parts(parts), target
+
+
+def _common_git_dir(directory: Path) -> tuple[bool, Path | None]:
+    """`directory` が属する repo の **common git directory** を求める。
+
+    2 つのディレクトリが同じ repo に属するかは、この common directory が
+    一致するかで判定できる (linked worktree もその common directory で
+    親 repo と結び付く)。
+
+    Returns:
+        (has_marker, common):
+          - has_marker: `.git` が存在したか (種別不明でも True)
+          - common: 求まった common git directory。求まらなければ None
+    """
+    kind, target = _inspect_dot_git(directory)
+    if kind == "none":
+        return False, None
+    if kind == "dir":
+        return True, target
+    if kind == "worktree" and target is not None:
+        # `<common>/worktrees/<name>` → `<common>`
+        return True, target.parent.parent
+    if kind in ("submodule", "plain") and target is not None:
+        # submodule / repo 本体は gitdir 自身が common directory
+        return True, target
+    return True, None
+
+
+def _ancestor_repo_owns(
+    directory: Path,
+    common: Path,
+    *,
+    home: Path | None,
+    levels: int,
+) -> bool:
+    """`directory` の祖先側に、`common` を持つ repo があるか。
+
+    linked worktree の `.git` が指す先は「どの repo に属するか」しか教えて
+    くれない。**その repo が、この後探索する祖先ディレクトリのものであること**
+    を確かめないと、無関係な repo A の中に置かれた repo B の worktree から
+    repo A の accounts.local.json を継承してしまう (マージ前レビューの指摘)。
+
+    走査は探索と同じ方向 (ファイルシステムの親方向) にしか進まず、同じ停止
+    条件 (`$HOME` / ルート / 階層数) を使う。**最初に見付かった git marker**
+    で判定する — それより上は「その repo の中」であり、間の階層も含めて
+    その repo に属するため。
+
+    Returns:
+        True  : 最初に見付かった祖先 repo の common directory が一致した、
+                または探索範囲の祖先に repo が 1 つも無かった (外側 repo が
+                存在しないので継承元を取り違えようがない)
+        False : 一致しない repo が外側にある、または祖先の種別を確定できない
+                (比較できない = fail-closed)
+    """
+    current = directory
+    for _ in range(max(levels, 0)):
+        parent = current.parent
+        if parent == current:
+            break
+        if _crosses_home(parent, home):
+            break
+        current = parent
+        has_marker, ancestor_common = _common_git_dir(current)
+        if not has_marker:
+            continue
+        return ancestor_common is not None and ancestor_common == common
+    return True
+
+
+def _is_repo_boundary(
+    directory: Path,
+    *,
+    home: Path | None = None,
+    ancestor_levels: int = ANCESTOR_SEARCH_MAX_LEVELS,
+) -> bool:
     """`directory` が遡及を止めるべき repo 境界か。
 
     - `.git` が **ディレクトリ** → 通常の repo toplevel → 境界
     - `.git` が **ファイル** (gitdir ポインタ) → 内容で分岐する
-      - linked worktree (gitdir が `<common>/worktrees/<name>`) → **境界では
-        ない**。worktree から親 repo の設定を継承する運用
-        (`<repo>/.worktrees/<branch>` が cwd) を残すため、従来どおり親 repo の
-        toplevel まで上らせる
+      - linked worktree (gitdir が `<common>/worktrees/<name>`) → **`<common>`
+        を持つ repo が祖先側にある (または祖先に repo が無い) ときだけ境界に
+        しない**。worktree から親 repo の設定を継承する運用
+        (`<repo>/.worktrees/<branch>` が cwd) はそのまま通り、無関係な repo の
+        中に置かれた worktree はその root で止まる
       - submodule (gitdir が `<common>/modules/<name>`) → **境界**。submodule
         root は独立した repo の境界であり、superproject の accounts.local.json
         を継承させると未設定の submodule で状態変更コマンドが素通りする
@@ -149,24 +281,22 @@ def _is_repo_boundary(directory: Path) -> bool:
     - `.git` が無い → 境界ではない
 
     判定は `.git` の**読み取りだけ**で行う (git コマンドは呼ばない)。
-    """
-    dot_git = directory / ".git"
-    try:
-        if dot_git.is_dir():
-            return True
-        if not dot_git.is_file():
-            return False
-    except OSError:
-        # 種別を確かめられない = 境界かどうか分からない → 停止側に倒す
-        return True
 
-    try:
-        with dot_git.open("rb") as handle:
-            raw = handle.read(_GITDIR_FILE_MAX_BYTES)
-    except OSError:
+    Args:
+        directory: 判定対象の階層。
+        home: `$HOME` (祖先走査の停止条件に使う)。
+        ancestor_levels: この後探索されうる祖先の段数。linked worktree の
+            所属確認をこの範囲に限る。
+    """
+    kind, target = _inspect_dot_git(directory)
+    if kind == "none":
+        return False
+    if kind != "worktree" or target is None:
         return True
-    kind = _classify_gitdir_pointer(raw.decode("utf-8", errors="replace"))
-    return kind != "worktree"
+    common = target.parent.parent
+    return not _ancestor_repo_owns(
+        directory, common, home=home, levels=ancestor_levels
+    )
 
 
 def _home_dir() -> Path | None:
@@ -208,7 +338,8 @@ def discover_accounts_files_with_ancestors(
         (通常の toplevel) と、`.git` ファイルが submodule の gitdir
         (`<common>/modules/<name>`) を指す階層 (submodule root)。その階層自身は
         探すが、その親へは上らない。linked worktree
-        (`<common>/worktrees/<name>`) だけは境界にせず親 repo まで上らせる
+        (`<common>/worktrees/<name>`) は、`<common>` を持つ repo が祖先側に
+        あるとき (または祖先に repo が無いとき) だけ境界にせず上らせる
       - **`$HOME` およびその上 (`/Users`, `/` 等) へは上らない**
       - 何も見つからずに `Path.parent == Path` (ルート) に到達したら諦める
       - `max_levels` で安全側の上限を設ける
@@ -236,11 +367,23 @@ def discover_accounts_files_with_ancestors(
     持たないため、その名前を要求すると正当な worktree が境界に落ちてしまう
     (マージ前レビューの指摘)。
 
-    gitdir は**分類にしか使わず、探索先としては辿らない**。linked worktree が
-    repo の**外**に置かれている場合 (gitdir が別の場所を指す形) に親 repo へ
-    届かないのは従来どおり (遡及はファイルシステムの親方向にしか進まない)。
-    新たな探索経路を増やすと「見つかる場所が増える」= allow 側に倒れるため、
-    本件の趣旨 (拾いすぎを止める) と逆方向になる。
+    linked worktree の通過に**所属確認**を課した理由 (マージ前レビューの指摘):
+    正当な linked worktree は無関係な repo の中にも置ける (repo A の
+    `repo-A/vendor/b-wt` に repo B の worktree を追加する形)。gitdir の形だけで
+    通過させると、探索が repo B を離れて **repo A の accounts.local.json を
+    継承**し、repo A の期待アカウントが active session と一致すれば未設定の
+    repo B worktree で状態変更コマンドが allow される。そのため gitdir の
+    common directory (`<common>/worktrees/<name>` の `<common>`) が、この後
+    探索する祖先の repo のものであることを確かめ、確かめられなければ worktree
+    root を境界にする。祖先に repo が 1 つも無い場合は継承元を取り違えようが
+    ないので従来どおり上らせる (repo の外に置いた worktree が workspace 直下の
+    設定を継承する運用)。祖先の種別が判読できない場合は停止側に倒す。
+
+    gitdir は**所属の判定にしか使わず、探索先としては辿らない**。linked
+    worktree が repo の**外**に置かれている場合 (gitdir が別の場所を指す形) に
+    親 repo へ届かないのは従来どおり (遡及はファイルシステムの親方向にしか
+    進まない)。新たな探索経路を増やすと「見つかる場所が増える」= allow 側に
+    倒れるため、本件の趣旨 (拾いすぎを止める) と逆方向になる。
 
     Args:
         project_dir: 検索を開始するディレクトリ (絶対パス推奨)。
@@ -257,11 +400,15 @@ def discover_accounts_files_with_ancestors(
     except OSError:
         return [], None
     home = _home_dir()
-    for _ in range(max_levels):
+    for level in range(max_levels):
         found = discover_all_accounts_files(str(current))
         if found:
             return found, current
-        if _is_repo_boundary(current):
+        # この後まだ探索されうる祖先の段数 (linked worktree の所属確認の範囲)
+        remaining_ancestors = max_levels - level - 1
+        if _is_repo_boundary(
+            current, home=home, ancestor_levels=remaining_ancestors
+        ):
             break
         parent = current.parent
         if parent == current:
