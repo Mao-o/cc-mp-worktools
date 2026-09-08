@@ -245,6 +245,26 @@ class TestImportExtractionExtended(unittest.TestCase):
             {"network", "logging", "auth", "filesystem"},
         )
 
+    def test_require_call_is_an_import_only_in_the_js_family(self):
+        # 他言語の `require(` は同じ綴りの普通の関数・メソッド呼び出し。
+        # 言語で絞らないと import でない行が import として分類される
+        # (マージ前レビューの指摘)。素の識別子としての `require(` を含めて
+        # いるのは、メンバ呼び出しの除外だけでは塞げない形 (言語で絞らないと
+        # 通ってしまう形) を固定するため。
+        text = "cfg = require(requests)\nschema.require(redis)\nx = 1\n"
+        self.assertEqual(self._cats(text, "python", "schema.py"), set())
+
+    def test_member_require_call_is_not_a_commonjs_import(self):
+        # `loader.require('redis')` は CommonJS の require ではない
+        # (マージ前レビューの指摘)。
+        text = "loader.require('redis');\nconst x = 1;\n"
+        self.assertEqual(self._cats(text, "javascript", "svc.js"), set())
+        # 素の識別子としての require は従来どおり import 行 (床テスト)。
+        self.assertEqual(
+            self._cats("import fs = require('fs');\n", "typescript", "svc.ts"),
+            {"filesystem"},
+        )
+
     def test_go_import_block_continuation_lines(self):
         text = (
             "package main\n"
@@ -278,7 +298,8 @@ class TestImportExtractionExtended(unittest.TestCase):
             "using System.Net.Http;",
         ]
         self.assertEqual(
-            list(metrics._iter_import_lines(lines)), ["using System.Net.Http;"]
+            list(metrics._iter_import_lines(lines, "csharp")),
+            ["using System.Net.Http;"],
         )
 
     def test_import_block_closed_by_paren_on_a_content_line(self):
@@ -294,13 +315,38 @@ class TestImportExtractionExtended(unittest.TestCase):
             "session = redis.Redis()",
         ]
         self.assertEqual(
-            list(metrics._iter_import_lines(lines)),
+            list(metrics._iter_import_lines(lines, "python")),
             ["from mypkg import (", "    alpha,", "    beta)"],
         )
         # ブロックが閉じていれば、後続の `redis.Redis()` (import ではない)
         # から db カテゴリが立つこともない。
         text = "\n".join(lines) + "\n"
         self.assertEqual(self._cats(text, "python", "foo.py"), set())
+
+    def test_import_block_closed_by_paren_with_a_trailing_comment(self):
+        # 閉じ括弧の後に行末コメントがある形 (`    beta)  # noqa`)。旧版は
+        # `endswith(")")` を満たさずブロックが閉じないまま、後続の最大 100 行を
+        # import 行として分類していた (マージ前レビューの指摘)。
+        lines = [
+            "from mypkg import (",
+            "    alpha,",
+            "    beta)  # noqa: F401",
+            "",
+            "session = redis.Redis()",
+        ]
+        self.assertEqual(
+            self._cats("\n".join(lines) + "\n", "python", "foo.py"), set()
+        )
+        # 行コメント記号は言語ごとに違う (Go は `//`)。
+        go_lines = [
+            "import (",
+            '\t"log")  // 1 パッケージだけ残した',
+            "",
+            "var conn = redis.NewClient()",
+        ]
+        self.assertEqual(
+            self._cats("\n".join(go_lines) + "\n", "go", "main.go"), set()
+        )
 
     def test_ruby_require_forms(self):
         text = "require 'net/http'\nrequire 'redis'\nrequire_relative 'auth/session'\n"
@@ -312,11 +358,11 @@ class TestImportExtractionExtended(unittest.TestCase):
         # 大文字始まりが正規の綴りである唯一の import 形。IGNORECASE を外した
         # 分をここで明示的に補っている (カテゴリ辞書に載る語かどうかとは別)。
         lines = ["Import-Module Az.Accounts", "Import-Module Pester"]
-        self.assertEqual(list(metrics._iter_import_lines(lines)), lines)
+        self.assertEqual(list(metrics._iter_import_lines(lines, "powershell")), lines)
 
     def test_uppercase_prose_is_not_an_import_line(self):
         lines = ["Use the following helper", "Import the module first", "IF YOU NEED IT"]
-        self.assertEqual(list(metrics._iter_import_lines(lines)), [])
+        self.assertEqual(list(metrics._iter_import_lines(lines, "python")), [])
 
     def test_modern_python_http_clients(self):
         # 1 語 1 ケース。まとめて書くと 1 語でも network に載っていれば通って
@@ -376,7 +422,7 @@ class TestImportExtractionExtended(unittest.TestCase):
             "#include <stdio.h>",
             "require('fs')",
         ]
-        self.assertEqual(list(metrics._iter_import_lines(lines)), lines)
+        self.assertEqual(list(metrics._iter_import_lines(lines, "javascript")), lines)
 
 
 class TestMaskCommentsAndStrings(unittest.TestCase):
@@ -399,6 +445,24 @@ class TestMaskCommentsAndStrings(unittest.TestCase):
         masked = metrics.mask_comments_and_strings(text, "javascript")
         self.assertNotIn("while", masked)
         self.assertIn("const a = 1;", masked)
+
+    def test_js_template_literal_spans_lines(self):
+        # テンプレートリテラルは改行を跨ぐ。行内で閉じる前提のパターンだと
+        # マスクが最初の改行で止まり、本文の散文が制御フローとして残る
+        # (マージ前レビューの指摘)。
+        text = (
+            "const doc = `\n"
+            "if the value is missing, ask again\n"
+            "for each row, switch to the next page\n"
+            "`;\n"
+            "export const a = 1;\n"
+        )
+        masked = metrics.mask_comments_and_strings(text, "javascript")
+        self.assertNotIn("switch", masked)
+        self.assertNotIn("for each", masked)
+        self.assertIn("export const a = 1;", masked)
+        # 行数は保つ (`_control_flow_density` の安全弁を無駄撃ちさせない)。
+        self.assertEqual(len(masked.splitlines()), len(text.splitlines()))
 
     def test_url_inside_string_is_not_a_comment(self):
         masked = metrics.mask_comments_and_strings(
@@ -482,6 +546,24 @@ class TestControlFlowLanguageKeywords(unittest.TestCase):
         text = "match = re.match(P, s)\nmatch(x)\nmatch.group(0)\nmatch[0]\n"
         self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
 
+    def test_python_match_statement_with_parenthesized_subject(self):
+        # `match (value):` (subject を括弧で囲む) / `match (a, b):`
+        # (tuple subject) は正当な match 文。`(` を無条件に弾くと分子から
+        # 漏れる (マージ前レビューの指摘)。行末コメントはマスク後に空白に
+        # なるため `:` 終端の判定に影響しない。
+        for subject in (
+            "match (value):",
+            "match (a, b):",
+            "match(value):",
+            "match (value):  # 分岐",
+        ):
+            with self.subTest(subject=subject):
+                text = subject + "\n    pass\n"
+                self.assertAlmostEqual(self._density(text, "python", "foo.py"), 1 / 2)
+        # 引き続き数えない形 (床テスト): 代入・呼び出し・属性/添字アクセス。
+        text = "match = re.match(P, s)\nmatch(x)\nmatch.group(0)\nmatch[0]\n"
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+
     def test_ruby_keywords(self):
         text = "x = 1 unless y\nuntil done\nend\nbegin\nrescue => e\nend\nelsif z\n"
         # unless / until / rescue / elsif の 4 行
@@ -538,6 +620,17 @@ class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
     def test_js_block_comment_not_counted(self):
         text = "/*\n * if for while switch\n */\nconst a = 1;\n"
         self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.0)
+
+    def test_go_raw_string_spans_lines(self):
+        # Go の raw string (バッククォート) も改行を跨ぐ (マージ前レビューの指摘)。
+        text = (
+            "const q = `\n"
+            "if the row is missing\n"
+            "for each column\n"
+            "`\n"
+            "x := 1\n"
+        )
+        self.assertAlmostEqual(self._density(text, "go", "foo.go"), 0.0)
 
     def test_comment_lines_stay_in_denominator(self):
         # 分子だけをマスクし、分母は元テキストの非空行のまま。

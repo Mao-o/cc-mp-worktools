@@ -93,10 +93,19 @@ _LANGUAGE_CONTROL_FLOW_STATEMENT_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 # 文頭限定の語に付ける否定先読み。文頭でも ``match = re.match(...)`` (代入)
 # ・``match(x)`` (呼び出し) ・``match.group(0)`` ・``match[0]`` は制御フロー
-# ではなく、soft keyword を普通の変数名として使っているだけ。文としての
-# ``match x:`` は識別子か開き括弧付きの subject が続くので、直後の
-# ``=`` / ``(`` / ``.`` / ``[`` だけを弾けば分離できる (マージ前レビューの指摘)。
-_STATEMENT_KEYWORD_SUFFIX = r"(?!\s*[=(.\[])"
+# ではなく、soft keyword を普通の変数名として使っているだけなので弾く
+# (マージ前レビューの指摘)。
+#
+# ただし ``(`` を無条件に弾くと ``match (value):`` (subject を括弧で囲む形) と
+# ``match (a, b):`` (tuple subject) という正当な match 文まで落ちる。文なら
+# 行が ``:`` で終わるので、**行末が ``:`` のときだけ ``(`` を許す**
+# (マージ前レビューの指摘)。``match(x)`` のような呼び出しは行末が ``:`` に
+# ならないため引き続き除外される。行末コメントは呼び出し前にマスクされて
+# 空白になっているため ``[ \t]*$`` で足りる。
+_STATEMENT_KEYWORD_SUFFIX = (
+    r"(?!\s*[=.\[])"  # match = ... / match.group(0) / match[0]
+    r"(?:(?!\s*\()|(?=[^\n]*:[ \t]*$))"  # match(x) は呼び出し / match (x): は文
+)
 
 _CONTROL_FLOW_RE_CACHE: dict[str, re.Pattern] = {}
 
@@ -171,21 +180,30 @@ _BLOCK_COMMENT_LANGUAGES = _SLASH_COMMENT_LANGUAGES
 
 # 三重引用符の複数行文字列を持つ言語。
 _TRIPLE_QUOTE_LANGUAGES = frozenset({"python", "elixir"})
+_TRIPLE_QUOTE_DELIMITERS = ('"""', "'''")
 
-# 文字列リテラルの引用符。既定は ``'`` と ``"``。
+# **改行を跨ぐ**文字列リテラルの引用符。JS/TS のテンプレートリテラルと Go の
+# raw string はバッククォートで囲まれ、複数行に跨るのが普通の書き方
+# (SQL・HTML・GraphQL の埋め込み等)。行内で閉じる前提のパターンで扱うと
+# マスクが最初の改行で止まり、残りの本文にある ``if`` / ``for`` / ``while``
+# で始まる散文行が制御フローとして数えられていた (マージ前レビューの指摘)。
+# 三重引用符と同じ扱いにする。
+_MULTILINE_STRING_DELIMITERS: dict[str, tuple[str, ...]] = {
+    "javascript": ("`",),
+    "typescript": ("`",),
+    "javascriptreact": ("`",),
+    "typescriptreact": ("`",),
+    "vue": ("`",),
+    "svelte": ("`",),
+    "go": ("`",),
+}
+
+# 行内で閉じる文字列リテラルの引用符。既定は ``'`` と ``"``。
 #   - rust: ``'`` はライフタイム注釈 (``&'a str``) で使われ、文字列として
 #     扱うと閉じ引用符を探して行末まで飲み込む。``"`` のみに絞る
-#   - JS/TS 系と Go: テンプレートリテラル / raw string のバッククォートを足す
 _DEFAULT_STRING_DELIMITERS = ("'", '"')
 _STRING_DELIMITERS: dict[str, tuple[str, ...]] = {
     "rust": ('"',),
-    "javascript": ("'", '"', "`"),
-    "typescript": ("'", '"', "`"),
-    "javascriptreact": ("'", '"', "`"),
-    "typescriptreact": ("'", '"', "`"),
-    "vue": ("'", '"', "`"),
-    "svelte": ("'", '"', "`"),
-    "go": ("'", '"', "`"),
 }
 
 _NOISE_RE_CACHE: dict[str, re.Pattern | None] = {}
@@ -212,11 +230,14 @@ def _noise_re(language: str) -> re.Pattern | None:
         return _NOISE_RE_CACHE[language]
 
     parts: list[str] = []
+    multiline_delimiters: tuple[str, ...] = ()
     if language in _TRIPLE_QUOTE_LANGUAGES:
-        for delim in ('"""', "'''"):
-            escaped = re.escape(delim)
-            # 閉じられていない三重引用符は「そこから先すべて」を文字列とみなす。
-            parts.append(rf"{escaped}[\s\S]*?{escaped}|{escaped}[\s\S]*")
+        multiline_delimiters += _TRIPLE_QUOTE_DELIMITERS
+    multiline_delimiters += _MULTILINE_STRING_DELIMITERS.get(language, ())
+    for delim in multiline_delimiters:
+        escaped = re.escape(delim)
+        # 閉じられていない複数行文字列は「そこから先すべて」を文字列とみなす。
+        parts.append(rf"{escaped}[\s\S]*?{escaped}|{escaped}[\s\S]*")
     if language in _BLOCK_COMMENT_LANGUAGES:
         parts.append(r"/\*[\s\S]*?\*/|/\*[\s\S]*")
     for delim in _STRING_DELIMITERS.get(language, _DEFAULT_STRING_DELIMITERS):
@@ -245,6 +266,9 @@ def mask_comments_and_strings(text: str, language: str) -> str:
 
     既知の限界: ``<!-- -->`` (vue/svelte のテンプレート)、Ruby の
     ``=begin/=end``、JavaScript の正規表現リテラル中の引用符は扱わない。
+    三重引用符とバッククォート (テンプレートリテラル / Go の raw string) は
+    改行を跨いで潰すため、対になる閉じ記号を持たない 1 個 (正規表現リテラルの
+    中に現れたバッククォート等) があるとそこから先すべてを文字列とみなす。
     いずれも「本来コードである部分まで潰す」方向の誤りに倒れるため、
     制御フロー密度は過小評価側に寄る (= 通知が減る側 = advisory hook の
     fail-open 方向)。
@@ -276,7 +300,27 @@ _IMPORT_HINT_RE = re.compile(
 
 # 行頭とは限らない CommonJS の require 呼び出し
 # (``const fs = require('fs')`` / ``import x = require('y')``)。
-_REQUIRE_CALL_RE = re.compile(r"\brequire\s*\(")
+#
+# メンバ呼び出し (``loader.require('x')``) を除外する — CommonJS の require は
+# 常に素の識別子で、``.`` に続く同じ綴りは別物のメソッドである
+# (マージ前レビューの指摘)。
+_REQUIRE_CALL_RE = re.compile(r"(?<![\w$.])require\s*\(")
+
+# ``require(`` を import として見る言語。CommonJS を持つ JS/TS 系に限る
+# — 全言語に適用すると Python の ``schema.require(requests)`` のような
+# 同じ綴りのメソッド呼び出しまで import 行として分類していた
+# (マージ前レビューの指摘)。Ruby の ``require 'foo'`` は行頭形なので
+# ``_IMPORT_HINT_RE`` 側が拾う。
+_REQUIRE_CALL_LANGUAGES = frozenset(
+    {
+        "javascript",
+        "typescript",
+        "javascriptreact",
+        "typescriptreact",
+        "vue",
+        "svelte",
+    }
+)
 
 # ``import (`` / ``from x import (`` のような括弧付き import ブロックの継続行を
 # 何行まで追うか。閉じ括弧を見失ったときにファイル全体を import 扱いしない
@@ -447,7 +491,20 @@ def _count_defs_generic(lines: list[str]) -> int:
     )
 
 
-def _iter_import_lines(lines: list[str]):
+def _strip_trailing_comment(text: str, language: str) -> str:
+    """行コメント記号以降を落とす (import ブロックの閉じ括弧判定用の近似)。
+
+    引用符の中の ``#`` / ``//`` も落としうるが、用途が閉じ括弧の検出に限られる
+    ため、誤る方向は「ブロックを早く閉じる」= import 行を増やさない側に倒れる。
+    """
+    for prefix in _line_comment_prefixes(language):
+        index = text.find(prefix)
+        if index >= 0:
+            text = text[:index]
+    return text.rstrip()
+
+
+def _iter_import_lines(lines: list[str], language: str):
     """import 行を列挙する (括弧付き import ブロックの継続行を含む)。
 
     Go の ``import ( ... )`` や Python の ``from x import ( ... )`` は、実際の
@@ -458,9 +515,12 @@ def _iter_import_lines(lines: list[str]):
     閉じ括弧は**独立行 (``)``) と内容行の末尾 (``    b)``) の両方**で認識する。
     後者を見ていないと、``from x import (a, b)`` を折り返した実在の書き方で
     ブロックが閉じず、後続の最大 100 行が import 行として分類されていた
-    (マージ前レビューの指摘)。
+    (マージ前レビューの指摘)。内容行末尾の判定では**行末コメントを無視する**
+    — ``    last_name)  # noqa`` のように閉じ括弧の後にコメントが続く形で
+    ブロックが閉じないままだった (マージ前レビューの指摘)。
     """
     block_remaining = 0
+    require_call_is_import = language in _REQUIRE_CALL_LANGUAGES
     for line in lines:
         stripped = line.strip()
         if block_remaining > 0:
@@ -470,17 +530,21 @@ def _iter_import_lines(lines: list[str]):
                 continue
             if stripped:
                 yield line
-            if stripped.endswith(")"):
+            if _strip_trailing_comment(stripped, language).endswith(")"):
                 block_remaining = 0
             continue
-        if _IMPORT_HINT_RE.match(line) or _REQUIRE_CALL_RE.search(line):
+        if _IMPORT_HINT_RE.match(line) or (
+            require_call_is_import and _REQUIRE_CALL_RE.search(line)
+        ):
             yield line
             if stripped.endswith("("):
                 block_remaining = _IMPORT_BLOCK_MAX_LINES
 
 
-def _count_import_categories(lines: list[str]) -> tuple[int, tuple[str, ...]]:
-    import_lines = list(_iter_import_lines(lines))
+def _count_import_categories(
+    lines: list[str], language: str
+) -> tuple[int, tuple[str, ...]]:
+    import_lines = list(_iter_import_lines(lines, language))
     if not import_lines:
         return 0, ()
     matched: set[str] = set()
@@ -550,7 +614,7 @@ def compute(loaded, language: str, path: Path) -> Metrics:
     else:
         def_count = _count_defs_generic(lines)
 
-    category_count, category_names = _count_import_categories(lines)
+    category_count, category_names = _count_import_categories(lines, language)
 
     return Metrics(
         line_count=line_count,
