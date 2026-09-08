@@ -12,18 +12,27 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from language import relevant_dir_parts
+
+# 拡張子を持たない/`.lock` 以外の名前を持つ lockfile。`*.lock` に一致するもの
+# (Cargo.lock / poetry.lock / uv.lock / flake.lock ...) は
+# ``_LOCKFILE_GLOBS`` 側で汎用的に拾う。
+#
+# なお lockfile の大半は拡張子が ``EXTENSION_LANGUAGE`` に無いため、実際の
+# パイプラインでは後段の `language.is_code_path` でも落ちる。この gate は
+# 「名前だけで判る非ソースを、内容を読む前に落とす」という
+# ``should_skip_by_name`` 自身の契約を満たすための多層防御であり、
+# allowlist の内容に依存しない。
 _LOCKFILE_NAMES = frozenset(
     {
         "package-lock.json",
-        "yarn.lock",
+        "npm-shrinkwrap.json",
         "pnpm-lock.yaml",
-        "Cargo.lock",
-        "Pipfile.lock",
-        "poetry.lock",
         "go.sum",
-        "composer.lock",
     }
 )
+
+_LOCKFILE_GLOBS = ("*.lock",)
 
 _MINIFIED_SUFFIXES = (".min.js", ".min.css", ".map")
 
@@ -34,6 +43,43 @@ _GENERATED_NAME_PATTERNS = (
     "*.g.dart",
     "*.freezed.dart",
     "*_generated.*",
+    # 0.4.0 追加。いずれも「その名前であること自体が生成物を意味する」広く
+    # 使われた規約に限定する。接尾辞 `_gen` は言語をまたぐと通常ファイル
+    # (data_gen.py のような生成スクリプト本体) と衝突するため Go に限定した。
+    "*.generated.*",
+    "*.gen.*",
+    "*_gen.go",
+    "*.pb.*",
+    "*_pb.js",
+    "*_pb.ts",
+    # TypeScript の型宣言ファイル。生成物であることが多く、かつ宣言しか
+    # 持たないため「責務が混在しているか」という本 hook の問い自体が
+    # 当てはまらない (定義数シグナルだけが機械的に点火する)。
+    "*.d.ts",
+    # スナップショットテストの出力。拡張子が allowlist に無いので後段でも
+    # 落ちるが、lockfile と同じく「名前だけで判る非ソース」としてここで落とす。
+    "*.snap",
+)
+
+# ディレクトリ名だけで第三者コード/生成物と判る階層。ここに挙げるのは
+# 「その名前のディレクトリに手書きのソースが入ることが実質ない」ものだけ。
+#
+# 意図的に **入れていない** もの:
+#   - dist / build / out / target: ソースパッケージ名としても普通に使われる
+#     (Python の `build/` パッケージ、Java の `.../build/` 等)
+#   - migrations / alembic / versions: マイグレーションは手書きが多く
+#     (`alembic/env.py` は手書き)、`versions` は一般語
+_SKIP_DIR_NAMES = frozenset(
+    {
+        "node_modules",
+        "vendor",
+        ".venv",
+        "venv",
+        "site-packages",
+        "__pycache__",
+        "__snapshots__",
+        "generated",
+    }
 )
 
 
@@ -243,14 +289,25 @@ def matches_ignore_glob(path: Path, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def should_skip_by_name(path: Path) -> bool:
-    """lockfile / minified / generated-path パターンに一致するか (内容を見ない早期 skip)。"""
+def should_skip_by_name(path: Path, cwd: str = "") -> bool:
+    """lockfile / minified / generated / 第三者ディレクトリに一致するか。
+
+    内容を読む前の、名前だけによる早期 skip。``cwd`` は任意で、与えると
+    ディレクトリ名判定を ``cwd`` からの相対部分に限定する
+    (``language.relevant_dir_parts``)。プロジェクトの外にあるだけの
+    ディレクトリ名 — ``cwd`` が ``/home/alice/vendor/app`` のときの
+    ``vendor`` 等 — で配下のソース全体が黙って skip されるのを防ぐ。
+    """
     name = path.name
     if name in _LOCKFILE_NAMES:
+        return True
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in _LOCKFILE_GLOBS):
         return True
     if any(name.endswith(suffix) for suffix in _MINIFIED_SUFFIXES):
         return True
     if any(fnmatch.fnmatchcase(name, pattern) for pattern in _GENERATED_NAME_PATTERNS):
+        return True
+    if {part.lower() for part in relevant_dir_parts(path, cwd)} & _SKIP_DIR_NAMES:
         return True
     return False
 
