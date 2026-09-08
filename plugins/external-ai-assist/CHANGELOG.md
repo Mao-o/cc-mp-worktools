@@ -123,7 +123,27 @@ turn")。**発火条件 (イベント / matcher) は変えていない** — 変
   TERM / KILL の**どちらも送出できなければ False** (= 未確定) にした。
   `ProcessLookupError` (group にメンバーが居ない) は「止めるものが無い」= 目的達成なので
   True 側、TERM が通って KILL だけ失敗した場合も True (停止 signal は届いており、group が
-  残っていれば次回の GC が同じ手順で再試行できる)
+  残っていれば次回の GC が同じ手順で再試行できる)。**ただしこの「TERM が通れば True」は
+  group が生き残る穴を残していた** — 次項で判定そのものを差し替えている
+- **マージ前レビューの指摘**: その `_signal_group()` 化のあとも、**TERM の送出成功が
+  KILL の失敗と OR で残って**いた。group が SIGTERM を無視し、続く SIGKILL が
+  `PermissionError` 等の `OSError` で送出できなかった経路では、group が生きているのに
+  `_stop_group()` が True (= `REAP_SIGNALED`) を返し、やはり pid 記録が消えていた。
+  判定を「signal を送れたか」ではなく **「猶予後に group が止まったか、または SIGKILL まで
+  送出できたか」**に変えた。エスカレーションに失敗して group が残っていれば False =
+  停止未確定で、記録を残して次回の GC が同じ手順で再試行する
+- **マージ前レビューの指摘**: GC の予算 (`GC_BUDGET_SEC` 2 秒) をエントリ**間**でしか
+  見ていなかった。1 件の `reap_orphan()` は `/proc` の無い環境 (macOS 等) で `ps` を複数回
+  (各 2 秒 timeout) 呼び、さらに TERM の猶予 (2 秒) を待つため、**1 件だけで `hooks.json` の
+  同期 PreToolUse timeout (5 秒) を超えて hook 自体が kill され**うる。そうなると現在の
+  analyzer を起動できないうえ、記録は残るので次回もまた同じ孤児から処理して同じところで
+  死ぬ (同じ残骸に毎回当たり続ける)。残り予算 (deadline) を `reap_orphan()` →
+  `terminate()` / `_reap_leaderless_group()` → `_stop_group()` まで持ち回り、**`ps` の
+  timeout と TERM の猶予を残り予算で cap** するようにした (`_common/subproc` の生死・
+  同一性判定にも `timeout_sec` を足してある)。予算が尽きたら `REAP_UNCONFIRMED` で戻して
+  記録を残す — 判定不能側 = 掃除しない側に倒れるので、**予算超過で hook が死ぬ方向には
+  決して倒れない**。`post()` は `async` hook で harness の timeout が掛からないため、
+  従来どおり予算なしで回す
 - `PostToolUseFailure(Agent)` を `hooks.json` に足して即時掃除する案は**採っていない**。
   イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」の
   変更にあたる。TTL GC が同じ失敗モードを発火条件を変えずに覆う

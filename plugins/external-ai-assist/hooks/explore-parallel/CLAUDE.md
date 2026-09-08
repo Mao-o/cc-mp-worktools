@@ -115,6 +115,8 @@ sys.path に載せて解決する (plugin root 内の相対配置なので cache
    | まだ走っているが同一性を確認できない | **残す** | `REAP_UNCONFIRMED` | 残す |
    | リーダー亡き group の同一性を確認できない | **残す** | `REAP_UNCONFIRMED` | 残す |
    | 同一性は確認できたが signal を送出できない (EPERM 等) | **残す** | `REAP_UNCONFIRMED` | 残す |
+   | TERM を無視され SIGKILL も送出できない (group は生存) | **残す** | `REAP_UNCONFIRMED` | 残す |
+   | GC の残り予算が尽きた | — (post は予算なし) | `REAP_UNCONFIRMED` | 残す |
    | `reap_orphan()` 自体が例外で落ちた | — | (`gc_orphans` が未確定扱い) | 残す |
 
    **リーダーの生死判定 (`_is_running`) は zombie を「走っていない」側に数える**ので、
@@ -164,6 +166,18 @@ pid / 結果ファイルが無期限に残り、バックグラウンドの curs
   ばかりのプロセスを GC が撃つ経路を構造的に潰す)
 - `GC_BUDGET_SEC` (2.0 秒) で打ち切る。pre の hook timeout は 5 秒しかないため、
   残骸が大量にあっても起動を遅らせない。取りこぼしは次回の GC が拾う
+- **予算は reap の内部まで効かせる** (マージ前レビューの指摘)。以前は予算をエントリ
+  **間**でしか見ておらず、1 件の `reap_orphan()` が `/proc` の無い環境 (macOS 等) で
+  `ps` を複数回 (各 2 秒 timeout) 呼び、さらに TERM の猶予 (2 秒) を待つため、**1 件だけで
+  5 秒の hook timeout を超えて hook 自体が kill され**うる。そうなると現在の analyzer を
+  起動できないうえ、記録は残るので次回もまた同じ孤児から処理して同じところで死ぬ
+  (同じ残骸に毎回当たり続ける)。残り予算 (`deadline`) を `reap_orphan()` →
+  `terminate()` / `_reap_leaderless_group()` → `_stop_group()` まで持ち回り、
+  **`ps` の timeout と TERM の猶予を残り予算で cap** する
+  (`_common/subproc` の生死・同一性判定にも `timeout_sec` を足した)。予算が尽きたら
+  `REAP_UNCONFIRMED` で戻して記録を残す — 判定不能側 = 掃除しない側に倒れるので、
+  **予算超過で hook が死ぬ方向には決して倒れない**。`post()` は `async` hook で harness の
+  timeout が掛からないため、従来どおり予算なし (`deadline=None`) で回す
 - **停止を確認できないときは pid ファイルを残す** (マージ前レビューの指摘)。
   `reap_orphan()` は停止の確度を `state.REAP_*` で返し、`gc_orphans()` は
   `REAP_STOPPED` (走っていない / pid 記録が壊れている) と `REAP_SIGNALED`
@@ -271,15 +285,26 @@ group に孫が残っていてもそれが撃たれない。
 `os.kill` の結果に従う = 走行中側 (同一性を確認したうえで停止を試みる側)。
 テストヘルパー (`tests/test_orphan_gc.py` の `_alive`) と同じ契約。
 
-#### signal を送出できたかを返す (マージ前レビューの指摘)
+#### 停止に漕ぎ着けたかを返す (マージ前レビューの指摘)
 
 `os.killpg` が `PermissionError` / その他の `OSError` を投げた場合、停止 signal は届いて
 いない。0.10.0 の途中まではこれを握りつぶしたうえで `terminate()` が無条件に True を
 返しており、**TERM も KILL も送れていないのに `REAP_SIGNALED` として pid 記録が消えて
-いた**。`_signal_group()` が送出可否を返し、`_stop_group()` は TERM / KILL の**どちらも
-送出できなければ False** を返す。`ProcessLookupError` (group にメンバーが居ない) は
-「止めるものが無い」= 目的達成なので True 側。TERM が通って KILL だけ失敗した場合も
-True (停止 signal は届いており、group が残っていれば次回の GC が同じ手順で再試行できる)
+いた**。`_signal_group()` が送出可否を返すようにして直したが、それでも **TERM の送出成功が
+KILL の失敗と OR で残る**穴があった (マージ前レビュー 2 巡目) — group が SIGTERM を無視し、
+続く SIGKILL が `OSError` で送出できなかった経路が True のまま報告され、やはり生きている
+group の pid 記録が消えていた。
+
+`_stop_group()` の判定を「signal を送れたか」ではなく **「猶予後に group が止まったか、
+または SIGKILL まで送出できたか」**に変えてある:
+
+- 猶予後に group が停止していれば True (TERM で止まった / 元から空だった)
+- 止まっていなければ SIGKILL を送り、**送出できたときだけ** True (停止 signal は届いて
+  おり、group が残っていれば次回の GC が同じ手順で再試行できる)
+- SIGKILL を送出できず group がまだ生きていれば **False** = 停止未確定 (記録を残す)
+
+`_signal_group()` 単体の契約は据え置き: 送出成功と `ProcessLookupError` (group にメンバーが
+居ない = 止めるものが無い) が True、`PermissionError` / その他の `OSError` が False。
 
 ### tool_use_id の重要性
 
@@ -350,7 +375,13 @@ signal を送らないこと (PID 再利用ガード)、**署名が一致して�
 (`TestLeaderlessGroup`)、**`post()` も掃除の前に group 側を見ること**
 (`TestPostLeaderlessGroup`)、**zombie のリーダーを走行中と読まないこと**
 (`TestZombieLeader`)、**signal を送出できなければ `terminate()` が False を返すこと**
-(`TestSignalDelivery`)。
+(`TestSignalDelivery`)、**TERM を無視され SIGKILL の送出にも失敗したら停止未確定に
+なること** (`TestKillEscalationFailure`)、**残り予算が尽きたら待たずに未確定で戻り、
+`ps` の timeout と TERM の猶予が残り予算で cap されること** (`TestGcBudgetInsideReap`)。
+
+予算のテストは**経過時間**で主張する (`ps` が応答しない状況は PATH 先頭に `exec sleep`
+する偽 `ps` を `with` の中だけ置いて作る)。修正前のコードでは 1 エントリだけで 4〜5 秒
+掛かり、pre の hook timeout (5 秒) を実際に食い潰すことを確認してある。
 
 停止側のテストは「送るべき形」と「送ってはいけない形」を**同じフィクスチャの差分**で
 組んである (mtime だけ違う / `killpg` だけ EPERM にする)。片方だけが落ちることで、

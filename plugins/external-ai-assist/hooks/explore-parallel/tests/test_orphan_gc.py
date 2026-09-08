@@ -237,6 +237,47 @@ class OrphanTestCase(HookTestCase):
         self.assertTrue(_alive(grandchild), "偽 cursor の孫が起動していない")
         return leader, grandchild, pid_file
 
+    def _launch_stubborn_analyzer(self, tool_use_id: str) -> tuple[int, int, object]:
+        """**SIGTERM を無視する孫**を持つ偽 cursor を `pre` 経由で起動する。
+
+        戻り値は `_launch_analyzer` と同じ (リーダー pid, 孫 pid, pid ファイル)。孫は TERM
+        では止まらないので、停止経路が SIGKILL まで進んだかを孫の生死で判定できる。
+        """
+        gc_pid_file = self.fake_cursor_with_stubborn_grandchild()
+        self.run_hook("pre", explore_payload(tool_use_id))
+        _, pid_file = self.state.paths(self.cursor.NAME, tool_use_id)
+        leader = int(pid_file.read_text().strip())
+        self._children.append(leader)
+        stubborn = self.read_grandchild(gc_pid_file)
+        self.assertTrue(_alive(stubborn), "SIGTERM を無視する孫が起動していない")
+        return leader, stubborn, pid_file
+
+    def slow_ps(self, seconds: float = 3.0):
+        """PATH 先頭に **応答しない `ps`** を置く patch を返す (`with` の中だけ有効)。
+
+        `ps` が固まる / 極端に遅い環境の代役。`exec sleep` で自分自身を置き換えるので、
+        `subprocess.run` の timeout kill が直接の子 (= sleep) に届き、取り残しが出ない。
+        patch を `with` に限るのは、テスト側の生死判定 (`_alive`) まで巻き込まないため。
+        """
+        bin_dir = os.path.join(self.tmpdir, "slow-ps-bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        path = os.path.join(bin_dir, "ps")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"#!/bin/bash\nexec sleep {seconds}\n")
+        os.chmod(path, 0o755)
+        return mock.patch.dict(
+            os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}
+        )
+
+    def wait_until_stale(self, ttl_sec: float, timeout: float = 3.0) -> None:
+        """短縮した TTL を超えて残骸として認識されるまで待つ。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self.state.stale_entries():
+            time.sleep(ttl_sec / 4)
+        self.assertTrue(
+            self.state.stale_entries(), "TTL を超えた残骸として認識されていない"
+        )
+
     def read_grandchild(self, gc_pid_file: str) -> int:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -795,6 +836,73 @@ class TestSignalDelivery(OrphanTestCase):
             )
 
 
+class TestKillEscalationFailure(OrphanTestCase):
+    """**TERM は届いたが無視され、SIGKILL の送出に失敗した**経路は停止未確定。
+
+    `_stop_group()` は TERM の送出成功を `sent` に持ったまま KILL の失敗と OR していた
+    ため、この経路が「停止 signal を送った」= `REAP_SIGNALED` として報告されていた。
+    group は生きているのに pid 記録が消えるので、以後どの GC もその孤児に手が届かない
+    (ハングした cursor が走り続けて課金される)。判定を「signal を送れたか」ではなく
+    **「group が止まったか、または SIGKILL まで送出できたか」**に変える。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # 猶予は 2 回 (TERM 待ち) しか使わないので短くてよい。suite を待たせない
+        self._short_grace = mock.patch.object(self.cursor, "KILL_GRACE_SEC", 0.3)
+        self._short_grace.start()
+
+    def tearDown(self) -> None:
+        self._short_grace.stop()
+        super().tearDown()
+
+    def _kill_signal_fails(self):
+        """生死 probe (`sig=0`) と SIGTERM は通し、**SIGKILL だけ** OSError にする patch。
+
+        `PermissionError` に限らない (コンテナの seccomp / LSM が `EPERM` 以外を返す
+        こともある) ので、`_signal_group` が拾う側の基底例外で再現する。
+        """
+        real_killpg = os.killpg
+
+        def selective(pgid: int, sig: int):
+            if sig == signal.SIGKILL:
+                raise OSError("SIGKILL を送れない")
+            return real_killpg(pgid, sig)
+
+        return mock.patch.object(os, "killpg", side_effect=selective)
+
+    def test_stop_group_reports_false_when_the_kill_escalation_fails(self):
+        leader, stubborn, _ = self._launch_stubborn_analyzer("tu-kill-fails")
+
+        with self._kill_signal_fails():
+            stopped = self.cursor._stop_group(leader)
+
+        self.assertFalse(
+            stopped,
+            "SIGKILL を送出できず group も生きているのに停止できたと報告している",
+        )
+        self.assertTrue(
+            _alive(stubborn), "SIGKILL は送れていないのに group が止まっている"
+        )
+
+    def test_reap_is_unconfirmed_when_the_kill_escalation_fails(self):
+        """GC 側から見ると未確定 = pid / 結果ファイルを残して次回に委ねる。"""
+        leader, stubborn, pid_file = self._launch_stubborn_analyzer("tu-kill-fails-gc")
+        result_file, _ = self.state.paths(self.cursor.NAME, "tu-kill-fails-gc")
+
+        with self._kill_signal_fails():
+            outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_UNCONFIRMED,
+            "SIGKILL を送出できていないのに停止を試みたと報告している",
+        )
+        self.assertTrue(_alive(stubborn), "送れていないのに group が止まっている")
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+        self.assertTrue(result_file.exists(), "停止未確定なのに結果ファイルを消している")
+
+
 class TestStaleEntries(HookTestCase):
     """`state.stale_entries` の TTL 判定 (pid ファイルの mtime = 起動時刻で測る)。"""
 
@@ -1008,6 +1116,87 @@ class TestGcOrphans(OrphanTestCase):
         self.run_hook("pre", explore_payload("tu-x", subagent_type="general-purpose"))
 
         self.assertTrue(pid_file.exists(), "Explore 以外でも GC が走っている")
+
+
+class TestGcBudgetInsideReap(OrphanTestCase):
+    """GC の予算は **1 エントリの停止処理の内部**にも効く。
+
+    予算をエントリ**間**でしか見ていなかったため、1 件の `reap_orphan()` が `ps` の
+    timeout (`/proc` の無い環境では各 2 秒を複数回) と TERM の猶予 (2 秒) を積み上げ、
+    `hooks.json` の同期 PreToolUse timeout (5 秒) を超えて hook 自体が kill されうる。
+    そうなると現在の analyzer を起動できないうえ、次回もまた同じ孤児から処理して同じ
+    ところで死ぬ (同じ残骸に毎回当たり続ける)。**予算超過で hook が死ぬ方向には倒さない**。
+    """
+
+    def test_reap_returns_unconfirmed_as_soon_as_the_budget_is_gone(self):
+        """残り予算ゼロなら即 `REAP_UNCONFIRMED` (待たない・撃たない・記録は残す)。"""
+        leader, stubborn, pid_file = self._launch_stubborn_analyzer("tu-budget-gone")
+        result_file, _ = self.state.paths(self.cursor.NAME, "tu-budget-gone")
+
+        with mock.patch.object(self.cursor, "KILL_GRACE_SEC", 5.0):
+            started = time.monotonic()
+            outcome = self.cursor.reap_orphan(pid_file, deadline=time.monotonic())
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_UNCONFIRMED,
+            "予算切れで停止を試みられていないのに掃除してよいと報告している",
+        )
+        self.assertLess(elapsed, 0.5, f"残り予算ゼロなのに {elapsed:.2f}s 使っている")
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+        self.assertTrue(result_file.exists(), "停止未確定なのに結果ファイルを消している")
+        self.assertTrue(_alive(stubborn), "予算切れなのに signal を送っている")
+
+    def test_gc_caps_the_ps_timeout_with_the_remaining_budget(self):
+        """`ps` が固まる環境でも、GC 全体が予算を大きく超えない。
+
+        `/proc` の無い環境では生死判定も同一性判定も `ps` 頼りで、1 エントリで複数回
+        呼ぶ。既定の 2 秒 timeout をそのまま重ねると hook timeout (5 秒) を食い潰す。
+        同一性を確認できないので停止は未確定 = 記録を残す側に倒れる。
+        """
+        self._launch_analyzer("tu-slow-ps")
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-slow-ps")
+        budget, ttl = 0.4, 0.2
+
+        with mock.patch.object(
+            self.state, "ORPHAN_TTL_SEC", ttl
+        ), mock.patch.object(self.state, "GC_BUDGET_SEC", budget):
+            self.wait_until_stale(ttl)
+            with self.slow_ps():
+                started = time.monotonic()
+                removed = self.entry.gc_orphans()
+                elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed,
+            budget + 1.0,
+            f"`ps` の timeout を残り予算で cap していない ({elapsed:.2f}s 使っている)",
+        )
+        self.assertEqual(removed, 0, "同一性を確認できていないのに掃除している")
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+        self.assertTrue(result_file.exists(), "停止未確定なのに結果ファイルを消している")
+
+    def test_gc_caps_the_term_grace_with_the_remaining_budget(self):
+        """SIGTERM を無視する group が相手でも、猶予は残り予算で打ち切る。"""
+        self._launch_stubborn_analyzer("tu-grace-cap")
+        budget, ttl = 0.5, 0.2
+
+        with mock.patch.object(
+            self.state, "ORPHAN_TTL_SEC", ttl
+        ), mock.patch.object(
+            self.state, "GC_BUDGET_SEC", budget
+        ), mock.patch.object(self.cursor, "KILL_GRACE_SEC", 5.0):
+            self.wait_until_stale(ttl)
+            started = time.monotonic()
+            self.entry.gc_orphans()
+            elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed,
+            budget + 1.0,
+            f"TERM の猶予を残り予算で cap していない ({elapsed:.2f}s 使っている)",
+        )
 
 
 if __name__ == "__main__":

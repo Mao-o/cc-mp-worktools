@@ -84,6 +84,14 @@ def gc_orphans(current_tool_use_id: str = "") -> int:
     現在の tool_use_id は除外する。停止は analyzer 側 (`reap_orphan`) に委ね、ここは
     「どれが残骸か」「予算内で打ち切る」「掃除してよいか」を見る。
 
+    **予算 (`deadline`) は `reap_orphan` にも渡す** (マージ前レビューの指摘)。予算を
+    エントリ**間**でしか見ていなかったため、1 エントリの停止処理が `ps` の timeout
+    (macOS など `/proc` の無い環境では各 2 秒を複数回) と TERM の猶予 (2 秒) を積み上げ、
+    `hooks.json` の同期 PreToolUse timeout (5 秒) を超えて hook 自体が kill されうる。
+    そうなると現在の analyzer を起動できないうえ、次回もまた同じ孤児から処理して同じ
+    ところで死ぬ (同じ残骸に毎回当たり続ける)。analyzer 側は残り予算で `ps` の timeout と
+    猶予を cap し、尽きたら `REAP_UNCONFIRMED` = 記録を残す側に倒す。
+
     **掃除は停止を確認できたときだけ行う** (マージ前レビューの指摘)。pid ファイルは
     その孤児を追える唯一の記録なので、`reap_orphan` が停止を確認できなかった
     (`state.REAP_UNCONFIRMED`) / 例外で落ちたのに消してしまうと、以後どの GC も再試行
@@ -110,7 +118,7 @@ def gc_orphans(current_tool_use_id: str = "") -> int:
         outcome = state.REAP_STOPPED
         if analyzer is not None and pid_file.is_file():
             try:
-                outcome = analyzer.reap_orphan(pid_file)
+                outcome = analyzer.reap_orphan(pid_file, deadline=deadline)
             except Exception as e:
                 log(f"{name}: 孤児の停止に失敗: {e}")
                 outcome = state.REAP_UNCONFIRMED

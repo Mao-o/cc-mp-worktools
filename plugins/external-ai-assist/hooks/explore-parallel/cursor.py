@@ -20,6 +20,13 @@ signal を送る前に **cmdline の署名と開始時刻**の両方で pid の�
 停止できたかどうかは呼び出し側に返す。`post()` も GC (`reap_orphan`) も、**停止を確認
 できなかったときは pid / 結果ファイルを残す** — pid ファイルはその孤児を追える唯一の記録
 なので、確認できていない状態で消すと以後どの経路も再試行できない。
+
+GC 経路 (`reap_orphan`) は **残り予算 (`deadline`) を停止処理の内部まで持ち回る**。
+`ps` の timeout と TERM の猶予をその残りで cap し、尽きたら `REAP_UNCONFIRMED` で戻して
+記録を残す。GC は 5 秒の同期 PreToolUse hook の中で回るため、1 エントリの停止処理が
+`ps` (各 2 秒) と猶予 (2 秒) を積み上げると hook 自体が kill され、現在の analyzer を
+起動できないまま次回も同じ孤児で同じところに嵌まる。`post()` は async hook で
+harness の timeout が掛からないので予算なし (`deadline=None`) で回す。
 """
 from __future__ import annotations
 
@@ -45,7 +52,8 @@ KILL_GRACE_SEC = 2.0
 #: 停止待ちの probe 間隔 (秒)。
 KILL_POLL_SEC = 0.05
 
-#: group のメンバー一覧を取る `ps` の実行上限 (秒)。`_common.subproc` の ps 呼び出しと同じ値。
+#: 生死・同一性判定に使う `ps` の実行上限 (秒)。`_common.subproc` の ps 呼び出しと同じ値。
+#: GC 経路では `deadline` の残り予算がこれより短ければそちらが上限になる (`_ps_budget`)。
 _PS_TIMEOUT_SEC = 2.0
 
 log = hooklog.make_logger(f"explore-parallel/{NAME}")
@@ -186,7 +194,7 @@ def post(tool_use_id: str) -> str | None:
     return _CONTEXT_HEADER + data
 
 
-def reap_orphan(pid_file: Path) -> str:
+def reap_orphan(pid_file: Path, deadline: float | None = None) -> str:
     """TTL 超過の pid ファイルが指す analyzer を停止し、**停止の確度**を返す (残骸 GC 用)。
 
     post が来なかった経路 (Agent ツールの失敗・ユーザー中断・セッション終了、および
@@ -211,6 +219,14 @@ def reap_orphan(pid_file: Path) -> str:
     リーダーの生死は `_is_running` (**zombie は死んだ扱い**) で見る。zombie を走行中と
     読むと `terminate()` へ進み、`ps` が `<defunct>` しか返さないので同一性を確認できず、
     毎回 `REAP_UNCONFIRMED` を返して pid / 結果ファイルが永遠に残る。
+
+    **`deadline` は GC の残り予算** (time.monotonic 基準。None = 予算なし) で、
+    停止処理の内部まで持ち回る (マージ前レビューの指摘)。GC 側の予算チェックは
+    エントリ**間**にしか無かったため、1 エントリの停止処理が `ps` の timeout (各 2 秒を
+    複数回) と TERM の猶予 (2 秒) を積み上げ、`hooks.json` の同期 PreToolUse timeout
+    (5 秒) を超えて hook 自体が kill されうる — そうなると現在の analyzer を起動できず、
+    次回もまた同じ孤児から処理して同じところで死ぬ。予算が尽きたら
+    **`REAP_UNCONFIRMED` で戻して記録を残す** (掃除しない側 = 次回に再試行できる側)。
     """
     try:
         pid = int(pid_file.read_text().strip())
@@ -218,16 +234,21 @@ def reap_orphan(pid_file: Path) -> str:
         return REAP_STOPPED
     if pid <= 0:
         return REAP_STOPPED
+    if _out_of_budget(deadline):
+        log(f"GC の残り予算が尽きた (pid {pid}) — 未確定として記録を残す")
+        return REAP_UNCONFIRMED
     started_at = _started_at(pid_file)
-    if _is_running(pid):
-        if not terminate(pid, started_at):
+    if _is_running(pid, deadline):
+        if not terminate(pid, started_at, deadline):
             return REAP_UNCONFIRMED
         log(f"孤児 analyzer (pid {pid}) を停止")
         return REAP_SIGNALED
-    return _reap_leaderless_group(pid, started_at)
+    return _reap_leaderless_group(pid, started_at, deadline)
 
 
-def _reap_leaderless_group(pgid: int, started_at: float | None) -> str:
+def _reap_leaderless_group(
+    pgid: int, started_at: float | None, deadline: float | None = None
+) -> str:
     """リーダーが exit / crash した後も残っている process group を停止する。
 
     `pre` は `start_new_session=True` で起動するので pgid == リーダーの pid。リーダーが
@@ -245,30 +266,32 @@ def _reap_leaderless_group(pgid: int, started_at: float | None) -> str:
        メンバーは analyzer の子孫なので、起動時刻 (pid ファイルの mtime) 以降に
        生まれているはず
 
-    判定不能 (`ps` が使えない・開始時刻を読めるメンバーが居ない・mtime が取れない) は
-    いずれも `REAP_UNCONFIRMED` = 送らない側に倒し、記録を残して次回の GC に委ねる。
+    判定不能 (`ps` が使えない・開始時刻を読めるメンバーが居ない・mtime が取れない・
+    `deadline` の残り予算が尽きた) はいずれも `REAP_UNCONFIRMED` = 送らない側に倒し、
+    記録を残して次回の GC に委ねる。
 
     **限界**: group が一度完全に空になってから pgid の番号が再利用され、その新しい
     リーダーも既に死んでいる、という二重の偶然までは弾けない (リーダーが生きている経路と
     違って cmdline を照合できないため)。2. で「記録より前から居る group」は落とせる。
     """
-    if subproc.group_is_stopped(pgid):
+    if subproc.group_is_stopped(pgid, timeout_sec=_ps_budget(deadline)):
         return REAP_STOPPED  # メンバーが居ない / zombie だけ = 止めるものが無い
-    if not _group_is_analyzer(pgid, started_at):
+    if not _group_is_analyzer(pgid, started_at, deadline):
         log(f"pgid {pgid} の残存 group を analyzer と確認できない — signal を送らない")
         return REAP_UNCONFIRMED
-    if not _stop_group(pgid):
+    if not _stop_group(pgid, deadline):
         return REAP_UNCONFIRMED
     log(f"孤児 analyzer の残存 group (pgid {pgid}) を停止")
     return REAP_SIGNALED
 
 
-def terminate(pid: int, started_at: float | None) -> bool:
+def terminate(pid: int, started_at: float | None, deadline: float | None = None) -> bool:
     """analyzer の process group を停止する (SIGTERM → 猶予 → SIGKILL)。
 
-    戻り値は **停止 signal を実際に送出できたか** (または送出前に group が空になって
-    いたか)。同一性を確認できないとき、および TERM も KILL も送出できなかったときは
-    False で、呼び出し側は「停止未確定」として pid / 結果ファイルを残す。
+    戻り値は **停止に漕ぎ着けたか** (group が止まった / SIGKILL まで送出できた /
+    送出前に group が空になっていた)。同一性を確認できないとき、および group が
+    生きたまま SIGKILL を送出できなかったときは False で、呼び出し側は
+    「停止未確定」として pid / 結果ファイルを残す。
 
     `pre` は `start_new_session=True` で起動しているので **pgid == pid**。0.9.1 までは
     `os.kill(pid, SIGTERM)` でグループリーダーだけを止めており、cursor-agent (node) が
@@ -282,34 +305,48 @@ def terminate(pid: int, started_at: float | None) -> bool:
 
     `started_at` には **pid ファイルの mtime (= 起動時刻)** を渡す (`_started_at`)。
     None (mtime が取れない) は送らない側。
+
+    `deadline` (time.monotonic 基準。None = 予算なし) を渡すと、同一性確認の `ps` と
+    TERM の猶予をその残り予算で cap する (`reap_orphan` 参照)。予算切れは「判定不能」=
+    送らない側に倒れるので、hook timeout を食い潰す方向には決して倒れない。
     """
-    if not _is_analyzer(pid, started_at):
+    if not _is_analyzer(pid, started_at, deadline):
         log(f"pid {pid} は起動した analyzer と一致しない — signal を送らない")
         return False
-    return _stop_group(pid)
+    return _stop_group(pid, deadline)
 
 
-def _stop_group(pgid: int) -> bool:
-    """process group に SIGTERM → 猶予 → SIGKILL を送る。**送出できたら True**。
+def _stop_group(pgid: int, deadline: float | None = None) -> bool:
+    """process group に SIGTERM → 猶予 → SIGKILL を送る。**停止に漕ぎ着けたら True**。
 
-    0.10.0 の途中までは `os.killpg` の例外を握りつぶしたうえで無条件に True を返して
-    いたため、TERM も KILL も送れていない (権限が無い等) のに呼び出し側が
-    `REAP_SIGNALED` と読み、まだ走っている group の pid 記録を消していた
-    (マージ前レビューの指摘)。どちらも送出できなければ False を返す。
+    判定は「signal を送れたか」ではなく **「group が止まったか、または SIGKILL まで
+    送出できたか」**:
 
-    TERM が通って KILL だけ送出に失敗した場合は True。停止 signal は届いており、
-    group が残っていれば次回の GC が同じ手順で再試行できる。
+    - 猶予後に group が停止していれば True (TERM で止まった / 元から空だった)
+    - 止まっていなければ SIGKILL を送り、**送出できたときだけ** True
+    - SIGKILL を送出できず group がまだ生きていれば **False** (= 停止未確定)
+
+    0.10.0 の途中までは `os.killpg` の例外を握りつぶして無条件に True を返しており、
+    TERM も KILL も送れていない (権限が無い等) のに呼び出し側が `REAP_SIGNALED` と読み、
+    まだ走っている group の pid 記録を消していた。それを直した後も **TERM の送出成功が
+    OR で残る**ため、「TERM は届いたが無視され、SIGKILL が `PermissionError` 等で
+    送出できなかった」経路が True のまま報告されていた (マージ前レビューの指摘) —
+    group は生きているのに pid 記録が消え、以後どの GC もその孤児に手が届かない。
+
+    `deadline` (time.monotonic 基準) を渡すと **TERM の猶予と生死判定の `ps` を残り予算で
+    cap する**。GC は 5 秒の PreToolUse hook の中で回るため、猶予 2 秒 + `ps` 2 秒を
+    そのまま消費すると hook 自体が kill されて次の analyzer を起動できない。
     """
-    sent = _signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + KILL_GRACE_SEC
+    _signal_group(pgid, signal.SIGTERM)
+    grace_until = time.monotonic() + _remaining(deadline, KILL_GRACE_SEC)
     # 猶予中の probe は安い `killpg(pgid, 0)` で回す (リーダーだけでなく孫も数える)。
     # zombie が残る環境ではここが空にならないので、猶予後に zombie を除いた判定
     # (`group_is_stopped`) を 1 回だけ通してから SIGKILL に切り替える。
-    while time.monotonic() < deadline and _group_exists(pgid):
-        time.sleep(KILL_POLL_SEC)
-    if not subproc.group_is_stopped(pgid):
-        sent = _signal_group(pgid, signal.SIGKILL) or sent
-    return sent
+    while time.monotonic() < grace_until and _group_exists(pgid):
+        time.sleep(min(KILL_POLL_SEC, max(0.0, grace_until - time.monotonic())))
+    if subproc.group_is_stopped(pgid, timeout_sec=_ps_budget(deadline)):
+        return True
+    return _signal_group(pgid, signal.SIGKILL)
 
 
 def _group_exists(pgid: int) -> bool:
@@ -330,7 +367,31 @@ def _started_at(pid_file: Path) -> float | None:
         return None
 
 
-def _is_analyzer(pid: int, started_at: float | None) -> bool:
+def _remaining(deadline: float | None, cap: float) -> float:
+    """`deadline` (time.monotonic 基準) までの残り時間を `cap` で頭打ちにして返す。
+
+    `deadline` が None (予算なし = `post()` 経路。async hook なので harness の timeout が
+    掛からない) は `cap` をそのまま返す。残りが無ければ 0 以下を返し、呼び出し側は
+    「待たない / `ps` を起動しない」= 判定不能側に倒す。
+    """
+    if deadline is None:
+        return cap
+    return min(cap, deadline - time.monotonic())
+
+
+def _out_of_budget(deadline: float | None) -> bool:
+    """`deadline` に達しているか (None は予算なしなので常に False)。"""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _ps_budget(deadline: float | None) -> float:
+    """`ps` 1 回に許す秒数 (残り予算を既定の上限 `_PS_TIMEOUT_SEC` で頭打ちにする)。"""
+    return _remaining(deadline, _PS_TIMEOUT_SEC)
+
+
+def _is_analyzer(
+    pid: int, started_at: float | None, deadline: float | None = None
+) -> bool:
     """pid が「その時起動した自分の analyzer」か。
 
     2 段で見る:
@@ -344,18 +405,21 @@ def _is_analyzer(pid: int, started_at: float | None) -> bool:
     `pre` は Popen 直後に pid ファイルを書くので、自分の analyzer なら開始時刻は必ず
     mtime 以前になる。再利用された pid は mtime より後に起動しているので弾ける。
 
-    判定不能 (ps が使えない・出力が空・mtime が取れない) はいずれも False = 送らない側。
+    判定不能 (ps が使えない・出力が空・mtime が取れない・`deadline` の残り予算が尽きた)
+    はいずれも False = 送らない側。
     """
-    cmdline = subproc.pid_command(pid)
+    cmdline = subproc.pid_command(pid, timeout_sec=_ps_budget(deadline))
     if not cmdline:
         return False
     tokens = cmdline.split()
     if not all(t in tokens for t in _SIGNATURE_TOKENS):
         return False
-    return _started_before(pid, started_at)
+    return _started_before(pid, started_at, deadline)
 
 
-def _group_is_analyzer(pgid: int, started_at: float | None) -> bool:
+def _group_is_analyzer(
+    pgid: int, started_at: float | None, deadline: float | None = None
+) -> bool:
     """リーダー亡き後の残存 group が「その時起動した自分の analyzer」の残りか。
 
     メンバーは analyzer の子孫なので、**開始時刻は記録した起動時刻 (pid ファイルの
@@ -364,15 +428,17 @@ def _group_is_analyzer(pgid: int, started_at: float | None) -> bool:
     """
     if started_at is None:
         return False
-    starts = _live_group_start_times(pgid)
+    starts = _live_group_start_times(pgid, deadline)
     if not starts:
-        # None (`ps` が使えない) / 空 (開始時刻を読めるメンバーが居ない) — どちらも
-        # 「メンバーが自分の子孫だと確認できていない」ので送らない側
+        # None (`ps` が使えない / 残り予算が尽きた) / 空 (開始時刻を読めるメンバーが
+        # 居ない) — どちらも「メンバーが自分の子孫だと確認できていない」ので送らない側
         return False
     return all(s >= started_at - _START_SKEW_SEC for s in starts)
 
 
-def _live_group_start_times(pgid: int) -> list[float] | None:
+def _live_group_start_times(
+    pgid: int, deadline: float | None = None
+) -> list[float] | None:
     """pgid に属する非 zombie メンバーの開始時刻 (epoch 秒) 一覧。取得できなければ None。
 
     メンバー**単位**の開始時刻が要るので、`subproc` の group 生死判定 (bool) ではなく
@@ -381,13 +447,19 @@ def _live_group_start_times(pgid: int) -> list[float] | None:
     メンバーの開始時刻も読めない (= 未確定側に倒れる) ので ps 一本にしてある。
 
     `etime` を解析できなかったメンバーは一覧に含めない (走査中に exit した等)。
+
+    `deadline` を渡すと `ps` の timeout を残り予算で cap する。予算切れなら `ps` を
+    起動せず None (判定不能 = 送らない側)。
     """
+    timeout = _ps_budget(deadline)
+    if timeout <= 0:
+        return None
     try:
         res = subprocess.run(
             ["ps", "-A", "-o", "pid=,pgid=,stat=,etime="],
             capture_output=True,
             text=True,
-            timeout=_PS_TIMEOUT_SEC,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -411,11 +483,13 @@ def _live_group_start_times(pgid: int) -> list[float] | None:
     return starts
 
 
-def _started_before(pid: int, started_at: float | None) -> bool:
+def _started_before(
+    pid: int, started_at: float | None, deadline: float | None = None
+) -> bool:
     """pid の開始時刻が `started_at` (+ 許容ずれ) 以前か。判定不能は False。"""
     if started_at is None:
         return False
-    elapsed = subproc.pid_elapsed_sec(pid)
+    elapsed = subproc.pid_elapsed_sec(pid, timeout_sec=_ps_budget(deadline))
     if elapsed is None:
         return False
     return (time.time() - elapsed) <= started_at + _START_SKEW_SEC
@@ -439,7 +513,7 @@ def _signal_group(pid: int, sig: signal.Signals) -> bool:
         return False
 
 
-def _is_running(pid: int) -> bool:
+def _is_running(pid: int, deadline: float | None = None) -> bool:
     """pid が「止める対象として走っている」か。**zombie は走っていない扱い**。
 
     `os.kill(pid, 0)` だけでは足りない (マージ前レビューの指摘)。PID 1 が孤児を reap
@@ -450,12 +524,13 @@ def _is_running(pid: int) -> bool:
     GC が一生収束しない)。zombie は**停止済み**として group 側の判定
     (`_reap_leaderless_group`) に進める — 止めるべき孫が group に残っていればそこで撃てる。
 
-    判定不能 (`pid_is_zombie` が None = `/proc` も `ps` も使えない) は `os.kill` の結果に
-    従う = 走行中側に倒す (同一性を確認したうえで停止を試みる側)。
+    判定不能 (`pid_is_zombie` が None = `/proc` も `ps` も使えない・`deadline` の残り予算が
+    尽きた) は `os.kill` の結果に従う = 走行中側に倒す (同一性を確認したうえで停止を試みる
+    側。予算切れならその同一性確認が判定不能になり、記録を残して次回へ送られる)。
     テストヘルパー (`tests/test_orphan_gc.py` の `_alive`) と同じ契約。
     """
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
         return False
-    return subproc.pid_is_zombie(pid) is not True
+    return subproc.pid_is_zombie(pid, timeout_sec=_ps_budget(deadline)) is not True
