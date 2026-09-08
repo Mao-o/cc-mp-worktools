@@ -19,13 +19,22 @@ from language import is_vague_filename
 # `export default function` / `async function`)、Rust (`pub fn` / `impl` /
 # `trait`)、Kotlin (`fun` / `object`)、TypeScript/Go (`type`) を含む。
 #
-# 末尾の否定先読みは「オブジェクトリテラル/インタフェースのプロパティ名」を
-# 除外する。`type` / `enum` / `class` は TypeScript の
-# ``{ type: string; enum?: string[] }`` のようなプロパティ名として頻出し、
-# これを数えると宣言の少ないデータ定義ファイルで def_count が水増しされる
-# (実コーパスで 1 → 37 に膨らむ fixture を観測した)。宣言側は必ず
-# ``type Foo = ...`` のように識別子が続くため、直後の ``:`` / ``?:`` だけを
-# 弾けば分離できる。
+# 末尾の否定先読みは「宣言ではない位置に現れた同じ綴り」を 2 系統除外する。
+#
+# 1. ``:`` / ``?:`` — オブジェクトリテラル/インタフェースのプロパティ名。
+#    `type` / `enum` / `class` は TypeScript の
+#    ``{ type: string; enum?: string[] }`` のようなプロパティ名として頻出し、
+#    これを数えると宣言の少ないデータ定義ファイルで def_count が水増しされる
+#    (実コーパスで 1 → 37 に膨らむ fixture を観測した)
+# 2. ``.`` / ``(`` / ``[`` — 識別子として使われた行頭のキーワード。
+#    ``object.keys(x)`` (JS) / ``impl.run()`` / ``type(x)`` (Python の組み込み)
+#    / ``fun(x)`` はいずれも宣言ではないのに旧版は定義として数えていた
+#    (マージ前レビューの指摘)
+#
+# 宣言側は必ず ``type Foo = ...`` のように識別子が続くため、キーワード直後の
+# これらの記号だけを弾けば分離できる。Go の ``interface{}`` / ``struct{}``
+# (型リテラル) は ``{`` が続くのでこの否定先読みには掛からず、従来どおり
+# 数える。
 _DEF_KEYWORDS_RE = re.compile(
     r"^\s*"
     r"(?:export\s+(?:default\s+)?)?"
@@ -34,7 +43,7 @@ _DEF_KEYWORDS_RE = re.compile(
     r"(?:pub(?:\([^)]*\))?\s+)?"  # Rust: pub / pub(crate)
     r"(?:async\s+)?"
     r"(?:def|class|function|func|fn|fun|interface|struct|enum|trait|impl|type|object)"
-    r"\b(?!\s*\??\s*:)"
+    r"\b(?!\s*\??\s*:)(?!\s*[.(\[])"
 )
 
 # `const foo = (a, b) => {` 形のアロー関数。**矢印が右辺の最上位**であること
@@ -63,9 +72,11 @@ _BASE_CONTROL_FLOW_KEYWORDS = (
 # ``detect_language`` の結果で絞る。未登録の言語は基本集合のみ。
 _LANGUAGE_CONTROL_FLOW_KEYWORDS: dict[str, tuple[str, ...]] = {
     "python": ("elif", "try"),
-    # ``elsif`` はチケット記載の 3 語には無いが ``elif`` と同じ位置づけの語で、
-    # 落とすと Ruby の if/elsif 連鎖だけが数えられない歪みが残る。
-    "ruby": ("elsif", "unless", "until", "rescue"),
+    # ``elsif`` は ``elif`` と同じ位置づけの語で、落とすと Ruby の if/elsif
+    # 連鎖だけが数えられない歪みが残る。``when`` は Ruby の ``case`` 式の
+    # 分岐節で、``case`` だけ数えて ``when`` を落とすと分岐の本数が
+    # 数えられない (マージ前レビューの指摘)。
+    "ruby": ("elsif", "unless", "until", "rescue", "when"),
     "rust": ("match", "loop"),
     "kotlin": ("when",),
     "go": ("select",),
@@ -80,6 +91,13 @@ _LANGUAGE_CONTROL_FLOW_STATEMENT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "python": ("match",),
 }
 
+# 文頭限定の語に付ける否定先読み。文頭でも ``match = re.match(...)`` (代入)
+# ・``match(x)`` (呼び出し) ・``match.group(0)`` ・``match[0]`` は制御フロー
+# ではなく、soft keyword を普通の変数名として使っているだけ。文としての
+# ``match x:`` は識別子か開き括弧付きの subject が続くので、直後の
+# ``=`` / ``(`` / ``.`` / ``[`` だけを弾けば分離できる (マージ前レビューの指摘)。
+_STATEMENT_KEYWORD_SUFFIX = r"(?!\s*[=(.\[])"
+
 _CONTROL_FLOW_RE_CACHE: dict[str, re.Pattern] = {}
 
 
@@ -91,7 +109,9 @@ def _control_flow_re(language: str) -> re.Pattern:
     alternatives = [r"\b(?:" + "|".join(words) + r")\b"]
     statement_words = _LANGUAGE_CONTROL_FLOW_STATEMENT_KEYWORDS.get(language, ())
     if statement_words:
-        alternatives.append(r"^\s*(?:" + "|".join(statement_words) + r")\b")
+        alternatives.append(
+            r"^\s*(?:" + "|".join(statement_words) + r")\b" + _STATEMENT_KEYWORD_SUFFIX
+        )
     compiled = re.compile("|".join(alternatives), re.MULTILINE)
     _CONTROL_FLOW_RE_CACHE[language] = compiled
     return compiled
@@ -242,7 +262,11 @@ _IMPORT_HINT_RE = re.compile(
     r"^\s*("
     r"import\b"
     r"|from\b.*\bimport\b"
-    r"|using\b"  # C# / PowerShell (using namespace ...)
+    # C# / PowerShell (using namespace ...)。``using (var conn = ...)`` /
+    # ``using (Stream s = ...)`` は同じ綴りの using **文** (リソース解放
+    # ブロック) で import ではないため、開き括弧が続く形を除外する
+    # (マージ前レビューの指摘)。宣言側は必ず名前空間名が続く。
+    r"|using\b(?!\s*\()"
     r"|use\s"  # Rust / PHP
     r"|require_relative\b|require\b"  # Ruby
     r"|Import-Module\b"  # PowerShell
@@ -430,6 +454,11 @@ def _iter_import_lines(lines: list[str]):
     モジュール名が継続行に書かれる。開き括弧で終わる import 行を見たら、
     対応する閉じ括弧までを import 行として扱う簡易ステートを持つ。
     閉じ括弧を見失ったときのために ``_IMPORT_BLOCK_MAX_LINES`` で打ち切る。
+
+    閉じ括弧は**独立行 (``)``) と内容行の末尾 (``    b)``) の両方**で認識する。
+    後者を見ていないと、``from x import (a, b)`` を折り返した実在の書き方で
+    ブロックが閉じず、後続の最大 100 行が import 行として分類されていた
+    (マージ前レビューの指摘)。
     """
     block_remaining = 0
     for line in lines:
@@ -441,6 +470,8 @@ def _iter_import_lines(lines: list[str]):
                 continue
             if stripped:
                 yield line
+            if stripped.endswith(")"):
+                block_remaining = 0
             continue
         if _IMPORT_HINT_RE.match(line) or _REQUIRE_CALL_RE.search(line):
             yield line

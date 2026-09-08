@@ -431,7 +431,10 @@ class TestShouldSkipByName(unittest.TestCase):
         # cwd の外にあるだけの `vendor` で、その配下のソース全体が黙って
         # skip されないこと。
         path = Path("/home/alice/vendor/app/src/main.ts")
-        self.assertTrue(source.should_skip_by_name(path))  # cwd 未指定なら従来どおり
+        # cwd 未指定なら全祖先を見る (新挙動)。cwd を渡したときだけ相対部分に
+        # 絞られるため、cwd 無しのこの呼び方は `vendor` を祖先に見つけて skip
+        # する。
+        self.assertTrue(source.should_skip_by_name(path))
         self.assertFalse(source.should_skip_by_name(path, "/home/alice/vendor/app"))
 
     def test_normal_file_not_skipped(self):

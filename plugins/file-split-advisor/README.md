@@ -66,8 +66,16 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 - **ディレクトリ名** (大文字小文字を無視): `test` / `tests` / `__tests__` /
   `spec` / `specs` / `e2e`。**判定するのは `cwd` から見た相対パスの階層だけ**
   — プロジェクトの置き場所がたまたま `~/work/test/myapp/` のような場合に、
-  配下の全ソースが test 扱いになるのを防ぐ (`cwd` の外にあるファイルは
-  従来どおり全階層を見る)
+  配下の全ソースが test 扱いになるのを防ぐ (`cwd` の外にあるファイルと、
+  envelope に `cwd` が無い場合は全階層を見る)。
+
+  **制約**: この絞り込みは `cwd` 自身がテストディレクトリのときに逆向きに
+  働く。`cwd` を `/repo/tests` にして (テストディレクトリ直下で作業して)
+  その配下のファイルを編集すると、相対部分に `tests` が現れないため
+  role が `normal` になる。ファイル名パターン (`test_*.py` 等) に一致する
+  ファイルは引き続き `test` と判定されるため、影響を受けるのは
+  「テストディレクトリ配下にあるがファイル名が test 形式ではない」
+  ヘルパ等に限られる
 - **ファイル名パターン** (大文字小文字を区別する。区別しないと `Latest.cs` /
   `Manifest.kt` のような通常のファイル名まで test 扱いになる):
 
@@ -92,9 +100,11 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
 
 - 全言語共通: `if` / `for` / `while` / `switch` / `case` / `catch` / `except`
 - 言語別に追加: Python `elif` `try` `match` (文頭のみ) / Ruby `elsif` `unless`
-  `until` `rescue` / Rust `match` `loop` / Kotlin `when` / Go `select`。
+  `until` `rescue` `when` / Rust `match` `loop` / Kotlin `when` / Go `select`。
   言語で絞るのは、`match` や `select` が他言語では普通のメソッド名・関数名
-  (`str.match(...)`) として頻出するため
+  (`str.match(...)`) として頻出するため。Python の `match` は文頭でも
+  直後が `=` / `(` / `.` / `[` なら数えない (`match = re.match(...)` /
+  `match.group(0)` は soft keyword を変数名として使っているだけ)
 - **行コメント・ブロックコメント・文字列リテラルの中は数えない**。分母
   (非空行数) は元のテキストのまま — コメント行も 1 行として数える
 
@@ -153,8 +163,9 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
   `*.snap`)
 - **第三者コード・生成物のディレクトリ** (`node_modules` / `vendor` / `venv` /
   `.venv` / `site-packages` / `__pycache__` / `__snapshots__` / `generated`)。
-  test 判定と同じく **`cwd` から見た相対パスの階層だけ**を見る。`dist` /
-  `build` / `migrations` / `alembic` / `versions` は、手書きのソースが入る
+  test 判定と同じく **`cwd` から見た相対パスの階層だけ**を見る (`cwd` が
+  無い・`cwd` の外にあるファイルでは全階層を見る)。`dist` / `build` /
+  `migrations` / `alembic` / `versions` は、手書きのソースが入る
   ことが普通にあるため**入れていない**
 - **上の言語係数表に載っていない拡張子のファイル全般** — Markdown / JSON / YAML /
   TOML / CSV / XML / SVG / HTML / SQL / notebook / プレーンテキスト等。行数だけで
@@ -204,17 +215,31 @@ role 係数: `test=1.6` / `normal=1.0`。宣言的緩和は `control_flow_densit
   `async`。**関数/メソッド宣言がキーワードで始まらない Java/C# ではほぼ機能
   しない** — アクセス修飾子と戻り値型から始まるため。これらの言語では行数
   (Java/C# 1.5x 係数) と import カテゴリ多様性・制御フロー密度が主戦力になる。
-  オブジェクトリテラル/インタフェースのプロパティ名 (`type:` / `enum?:`) は
-  除外するが、キーワードを識別子として使う行 (シェルの `type foo` 等) は
-  誤って数えうる
+  オブジェクトリテラル/インタフェースのプロパティ名 (`type:` / `enum?:`) と、
+  キーワード直後が `.` / `(` / `[` の行 (`object.keys(x)` / `type(x)` /
+  `fn()` — 同じ綴りの識別子を使っているだけ) は除外する。代償として、行頭に
+  そのまま置かれた無名関数式 (`function(payload) {`) も数えなくなる
+  (実コーパス 8,426 ファイルで 2 行)。キーワードの後に識別子が続く行
+  (シェルの `type foo` 等) は依然として誤って数えうる
 - import カテゴリ分類はキーワード辞書によるヒューリスティックで、精密な import
   resolver ではない。括弧付きの import ブロック (Go の `import ( … )` /
-  Python の `from x import ( … )`) は継続行も import 行として扱うが、閉じ括弧を
-  見失ったときのために追跡は 100 行で打ち切る
-- 制御フロー密度のコメント/文字列除去は正規表現ベースで、`<!-- -->`
-  (vue/svelte のテンプレート)、Ruby の `=begin`/`=end`、JavaScript の正規表現
-  リテラル中の引用符は扱わない。いずれも「本来コードである部分まで潰す」方向
-  (= 密度を過小評価する = 通知が減る) に倒れる
+  Python の `from x import ( … )`) は継続行も import 行として扱う。閉じ括弧は
+  独立行 (`)`) と内容行の末尾 (`    b)`) の両方で認識し、見失ったときのために
+  追跡は 100 行で打ち切る
+- 制御フロー密度のコメント/文字列除去は正規表現ベースで、以下は扱わない。
+  いずれも「本来コードである部分まで潰す」か「コメント/文字列を潰し損ねる」
+  方向の誤りで、前者は密度を過小評価する (= 通知が減る) 側に倒れる
+  - `<!-- -->` (vue/svelte のテンプレート)、Ruby の `=begin`/`=end`
+  - JavaScript の正規表現リテラル中の引用符
+  - PowerShell の `<# … #>`、Haskell の `{- … -}`、Lua の `--[[ … ]]`
+    (いずれもブロックコメントを潰さないため、中の英単語が制御フローとして
+    数えられうる)
+  - tsx/jsx の JSX 本文に現れるアポストロフィ (`<p>don't</p>` の `'` が
+    文字列の開始とみなされ、行末までが文字列として潰される)
+- 内容による generated 判定は先頭 20 行の部分文字列一致なので、散文が
+  マーカーに一致すると誤って skip しうる (例: 冒頭のコメントに
+  「this generated file is …」と書かれた手書きファイル)。失敗方向は
+  「通知しない」側 (fail-open) なので許容している
 - 閾値の詳細な上書き (tier ごと・言語ごとの個別設定) はできない。
   `FILE_SPLIT_ADVISOR_SCALE` は全閾値に一律の倍率をかけるのみで、
   `config.local.json` 的なきめ細かい上書き機構ではない

@@ -164,6 +164,24 @@ class TestCountDefsGenericExtended(unittest.TestCase):
         # `interface Shape {` のみが定義。
         self.assertEqual(self._defs(text, "typescript", "foo.ts"), 1)
 
+    def test_keyword_used_as_identifier_not_counted(self):
+        # 行頭のキーワードでも、直後が `.` / `(` / `[` なら宣言ではなく
+        # 「同じ綴りの識別子」を使っているだけ (マージ前レビューの指摘)。
+        text = (
+            "object.keys(x);\n"
+            "impl.run();\n"
+            "type(x);\n"
+            "fun(x);\n"
+            "class[0].render();\n"
+        )
+        self.assertEqual(self._defs(text, "typescript", "foo.ts"), 0)
+
+    def test_go_type_literals_still_counted(self):
+        # `interface{}` / `struct{}` は `{` が続くので上の否定先読みに掛からず、
+        # 従来どおり数える (床テスト)。
+        text = "interface{}\nstruct{}\n"
+        self.assertEqual(self._defs(text, "go", "foo.go"), 2)
+
     def test_original_keywords_still_counted(self):
         # 旧版が数えていた形を落としていないこと (床テスト)。
         text = (
@@ -251,6 +269,39 @@ class TestImportExtractionExtended(unittest.TestCase):
         text = "using System.Net.Http;\nusing Serilog.Core;\n"
         self.assertIn("network", self._cats(text, "csharp", "Svc.cs"))
 
+    def test_csharp_using_statement_is_not_an_import(self):
+        # `using (var conn = ...)` はリソース解放ブロックの using **文** で
+        # import ではない (マージ前レビューの指摘)。宣言側だけを拾う。
+        lines = [
+            "using (var conn = new SqlConnection(cs))",
+            "using (Stream s = File.OpenRead(p))",
+            "using System.Net.Http;",
+        ]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines)), ["using System.Net.Http;"]
+        )
+
+    def test_import_block_closed_by_paren_on_a_content_line(self):
+        # 閉じ括弧が独立行ではなく内容行の末尾にある形 (`    beta)`)。旧版は
+        # ここでブロックが閉じず、後続の最大 100 行を import 行として分類して
+        # いた (マージ前レビューの指摘)。
+        lines = [
+            "from mypkg import (",
+            "    alpha,",
+            "    beta)",
+            "",
+            "engine = sqlalchemy.create_engine(DSN)",
+            "session = redis.Redis()",
+        ]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines)),
+            ["from mypkg import (", "    alpha,", "    beta)"],
+        )
+        # ブロックが閉じていれば、後続の `redis.Redis()` (import ではない)
+        # から db カテゴリが立つこともない。
+        text = "\n".join(lines) + "\n"
+        self.assertEqual(self._cats(text, "python", "foo.py"), set())
+
     def test_ruby_require_forms(self):
         text = "require 'net/http'\nrequire 'redis'\nrequire_relative 'auth/session'\n"
         self.assertEqual(
@@ -268,12 +319,20 @@ class TestImportExtractionExtended(unittest.TestCase):
         self.assertEqual(list(metrics._iter_import_lines(lines)), [])
 
     def test_modern_python_http_clients(self):
-        text = "import httpx\nimport aiohttp\nimport websockets\nimport urllib3\nimport boto3\n"
-        self.assertIn("network", self._cats(text, "python", "svc.py"))
+        # 1 語 1 ケース。まとめて書くと 1 語でも network に載っていれば通って
+        # しまい、残りの語が辞書から落ちても検出できない。
+        for module in ("httpx", "aiohttp", "websockets", "urllib3", "boto3"):
+            with self.subTest(module=module):
+                text = f"import {module}\n"
+                self.assertIn("network", self._cats(text, "python", "svc.py"))
 
     def test_node_fs_specifiers(self):
-        text = "import fs from 'node:fs';\nimport fsp from 'fs/promises';\n"
-        self.assertIn("filesystem", self._cats(text, "typescript", "svc.ts"))
+        for specifier in ("node:fs", "fs/promises"):
+            with self.subTest(specifier=specifier):
+                text = f"import fs from '{specifier}';\n"
+                self.assertIn(
+                    "filesystem", self._cats(text, "typescript", "svc.ts")
+                )
 
     def test_prose_lines_not_treated_as_imports(self):
         # 旧版は IGNORECASE だったため、docstring の英文が import 行として
@@ -352,6 +411,13 @@ class TestMaskCommentsAndStrings(unittest.TestCase):
         masked = metrics.mask_comments_and_strings(text, "python")
         self.assertEqual(len(masked.splitlines()), len(text.splitlines()))
 
+    def test_c_slash_line_comment_is_masked(self):
+        # C は `#` を行コメントにしない代わりに `//` を持つ。片方だけ設定して
+        # 他方を落とすと、C のコメント中の英単語が制御フローとして残る。
+        masked = metrics.mask_comments_and_strings("// if\nint a;\n", "c")
+        self.assertNotIn("if", masked)
+        self.assertIn("int a;", masked)
+
     def test_hash_is_not_a_comment_in_c(self):
         # C 系で `#` を行コメント扱いすると `#if` / `#include` が消える。
         masked = metrics.mask_comments_and_strings("#if defined(X)\n", "c")
@@ -409,10 +475,23 @@ class TestControlFlowLanguageKeywords(unittest.TestCase):
         text = "import re\nm = re.match(P, s)\nn = p.match(s)\n"
         self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
 
+    def test_python_match_as_a_variable_name_is_not_control_flow(self):
+        # 文頭でも `match = ...` (代入) / `match(...)` (呼び出し) /
+        # `match.group(0)` / `match[0]` は soft keyword を変数名として使って
+        # いるだけで制御フローではない (マージ前レビューの指摘)。
+        text = "match = re.match(P, s)\nmatch(x)\nmatch.group(0)\nmatch[0]\n"
+        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+
     def test_ruby_keywords(self):
         text = "x = 1 unless y\nuntil done\nend\nbegin\nrescue => e\nend\nelsif z\n"
         # unless / until / rescue / elsif の 4 行
         self.assertAlmostEqual(self._density(text, "ruby", "foo.rb"), 4 / 7)
+
+    def test_ruby_case_when(self):
+        # `case` だけ数えて `when` を落とすと、Ruby の case 式の分岐本数が
+        # 密度に現れない (マージ前レビューの指摘)。
+        text = "case x\nwhen 1\nwhen 2\nend\n"
+        self.assertAlmostEqual(self._density(text, "ruby", "foo.rb"), 3 / 4)
 
     def test_rust_match_and_loop(self):
         text = "let v = match x {\n};\nloop {\n}\n"
@@ -491,6 +570,23 @@ class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
                 docstring_lines, "python", "\n".join(docstring_lines) + "\n"
             ),
             0.0,
+        )
+
+    def test_masking_is_skipped_when_the_line_count_shifts(self):
+        # マスクは改行以外を同じ長さの空白に置き換えるため、`\x0c` (改ページ)
+        # のように `splitlines()` が行区切りとして扱う文字が文字列リテラルの
+        # 中にあると、マスク後だけ行数が減る。この安全弁 (行数がずれたら
+        # マスクせず元の行で数える) を固定する。
+        text = 'MSG = "if you need\x0c for each"\nif x:\n    pass\n'
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(
+            len(metrics.mask_comments_and_strings(text, "python").splitlines()), 3
+        )
+        # マスクが効いていれば `if x:` の 1 行だけ (1/4)。安全弁が働いて
+        # 元の行で数えるため、文字列の中の if / for も数えられて 3/4 になる。
+        self.assertAlmostEqual(
+            metrics._control_flow_density(lines, "python", text), 3 / 4
         )
 
 
