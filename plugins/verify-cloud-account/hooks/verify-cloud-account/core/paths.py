@@ -133,7 +133,7 @@ def _is_windows_absolute(normalized: str) -> bool:
 
 
 def _classify_gitdir_parts(parts: list[str]) -> str:
-    """gitdir のパス要素を "worktree" / "submodule" / "plain" に分類する。
+    """gitdir のパス要素を "worktree" / "submodule" / "plain" に**予備分類**する。
 
     git が `.git` ファイルに書く gitdir は、**common directory からの相対で**
     `worktrees/<name>` / `modules/<name>` という末尾を持つ:
@@ -152,6 +152,11 @@ def _classify_gitdir_parts(parts: list[str]) -> str:
     どちらの末尾でもないもの (repo 本体の gitdir を直接指す
     `--separate-git-dir` の main worktree など) は "plain" — その階層自身は
     独立した repo の root なので境界として扱う。
+
+    **"worktree" はここでは確定しない**。パスの末尾は偶然一致しうる
+    (`--separate-git-dir` で `/store/worktrees/repo` を gitdir にした独立 repo の
+    main checkout など) ため、`_linked_worktree_common()` が gitdir 側の
+    メタデータで裏付けを取る (マージ前レビューの指摘)。
     """
     if len(parts) < 2:
         return "plain"
@@ -165,18 +170,90 @@ def _classify_gitdir_parts(parts: list[str]) -> str:
     return "plain"
 
 
+# linked worktree の gitdir に git が書くメタファイル。
+#   - `commondir` : common directory への相対 (通常 `../..`) または絶対パス
+#   - `gitdir`    : この worktree の `.git` ファイルへの back-pointer
+_WORKTREE_COMMONDIR_FILE = "commondir"
+_WORKTREE_BACKPOINTER_FILE = "gitdir"
+# メタファイルは 1 行のパスだけなので、`.git` ファイルと同じ上限で足りる。
+_WORKTREE_META_MAX_BYTES = _GITDIR_FILE_MAX_BYTES
+
+
+def _read_worktree_meta(gitdir: Path, name: str) -> str | None:
+    """linked worktree の gitdir 内メタファイルを 1 行の値として読む。"""
+    try:
+        with (gitdir / name).open("rb") as handle:
+            raw = handle.read(_WORKTREE_META_MAX_BYTES)
+    except OSError:
+        return None
+    value = raw.decode("utf-8", errors="replace").strip()
+    return value or None
+
+
+def _linked_worktree_common(directory: Path, gitdir: Path) -> Path | None:
+    """`gitdir` が `directory` の linked worktree のものなら common dir を返す。
+
+    パスの末尾 (`worktrees/<name>`) だけでは linked worktree を確定できない。
+    `--separate-git-dir` で初期化した独立 repo の gitdir が偶然その形になる
+    (`/store/worktrees/repo` を gitdir にした main checkout など) と、その repo
+    の root を越えて祖先の設定を継承してしまう (マージ前レビューの指摘)。
+    そこで git が linked worktree の gitdir に**必ず置く**メタデータで裏を取る:
+
+      1. gitdir が実在するディレクトリであること
+      2. `<gitdir>/gitdir` (back-pointer) が、いま読んでいる `<directory>/.git`
+         を指すこと — 別の worktree を指すなら `directory` のものではない
+      3. `<gitdir>/commondir` が読め、common directory へ解決できること
+
+    common directory は **`commondir` の内容から**求める。末尾 2 要素を落として
+    推定する (`<common>/worktrees/<name>` → `<common>`) よりも、git 自身が書いた
+    値のほうが信頼できる。
+
+    Returns:
+        裏付けが取れたときだけ common directory の絶対パス。1 つでも満たさない
+        場合は None (呼び出し側は "plain" = 境界として扱う)。
+    """
+    try:
+        if not gitdir.is_dir():
+            return None
+    except OSError:
+        return None
+
+    back = _read_worktree_meta(gitdir, _WORKTREE_BACKPOINTER_FILE)
+    if not back:
+        return None
+    back_target = _resolve_gitdir_value(gitdir, back, _split_path_components(back))
+    if back_target is None:
+        return None
+    try:
+        expected = (directory / ".git").resolve()
+    except (OSError, ValueError):
+        return None
+    if back_target != expected:
+        return None
+
+    common = _read_worktree_meta(gitdir, _WORKTREE_COMMONDIR_FILE)
+    if not common:
+        return None
+    return _resolve_gitdir_value(gitdir, common, _split_path_components(common))
+
+
 def _inspect_dot_git(directory: Path) -> tuple[str, Path | None]:
-    """`<directory>/.git` を読んで (種別, gitdir の絶対パス) を返す。
+    """`<directory>/.git` を読んで (種別, common git directory) を返す。
 
     種別:
       - "none"       : `.git` が無い
       - "dir"        : `.git` が **ディレクトリ** (通常の repo toplevel)
-      - "worktree"   : gitdir が `<common>/worktrees/<name>`
+      - "worktree"   : gitdir が linked worktree のもの (メタデータで確認済み)
       - "submodule"  : gitdir が `<common>/modules/<name>`
       - "plain"      : gitdir が repo 本体の git directory を直接指す形
       - "unreadable" : `.git` はあるが種別を確定できない
 
-    判定は `.git` の**読み取りだけ**で行う (git コマンドは呼ばない)。
+    2 要素目は **その repo の common git directory** (種別が "none" /
+    "unreadable" のときと、求まらなかったときは None)。"worktree" では
+    `<gitdir>/commondir` の内容から解決した値、それ以外は gitdir 自身。
+
+    判定は `.git` と gitdir 内メタファイルの**読み取りだけ**で行う
+    (git コマンドは呼ばない)。
     """
     dot_git = directory / ".git"
     try:
@@ -203,7 +280,17 @@ def _inspect_dot_git(directory: Path) -> tuple[str, Path | None]:
     target = _resolve_gitdir_value(directory, value, parts)
     if target is None:
         return "unreadable", None
-    return _classify_gitdir_parts(parts), target
+
+    kind = _classify_gitdir_parts(parts)
+    if kind == "worktree":
+        # 末尾の形だけでは確定しない。gitdir 側のメタデータで裏を取る。
+        common = _linked_worktree_common(directory, target)
+        if common is not None:
+            return "worktree", common
+        # 裏付けが取れないものは独立した repo の gitdir 扱い = 境界。
+        return "plain", target
+    # submodule / repo 本体は gitdir 自身が common directory
+    return kind, target
 
 
 def _common_git_dir(directory: Path) -> tuple[bool, Path | None]:
@@ -218,18 +305,10 @@ def _common_git_dir(directory: Path) -> tuple[bool, Path | None]:
           - has_marker: `.git` が存在したか (種別不明でも True)
           - common: 求まった common git directory。求まらなければ None
     """
-    kind, target = _inspect_dot_git(directory)
+    kind, common = _inspect_dot_git(directory)
     if kind == "none":
         return False, None
-    if kind == "dir":
-        return True, target
-    if kind == "worktree" and target is not None:
-        # `<common>/worktrees/<name>` → `<common>`
-        return True, target.parent.parent
-    if kind in ("submodule", "plain") and target is not None:
-        # submodule / repo 本体は gitdir 自身が common directory
-        return True, target
-    return True, None
+    return True, common
 
 
 def _ancestor_repo_owns(
@@ -283,9 +362,9 @@ def _is_repo_boundary(
 
     - `.git` が **ディレクトリ** → 通常の repo toplevel → 境界
     - `.git` が **ファイル** (gitdir ポインタ) → 内容で分岐する
-      - linked worktree (gitdir が `<common>/worktrees/<name>`) → **`<common>`
-        を持つ repo が祖先側にある (または祖先に repo が無い) ときだけ境界に
-        しない**。worktree から親 repo の設定を継承する運用
+      - linked worktree (gitdir 側のメタデータで裏付けが取れたもの) →
+        **`<common>` を持つ repo が祖先側にある (または祖先に repo が無い)
+        ときだけ境界にしない**。worktree から親 repo の設定を継承する運用
         (`<repo>/.worktrees/<branch>` が cwd) はそのまま通り、無関係な repo の
         中に置かれた worktree はその root で止まる
       - submodule (gitdir が `<common>/modules/<name>`) → **境界**。submodule
@@ -295,7 +374,8 @@ def _is_repo_boundary(
         deny すべき場面を allow してしまうため、分からない場合は止める
     - `.git` が無い → 境界ではない
 
-    判定は `.git` の**読み取りだけ**で行う (git コマンドは呼ばない)。
+    判定は `.git` と gitdir 内メタファイルの**読み取りだけ**で行う
+    (git コマンドは呼ばない)。
 
     Args:
         directory: 判定対象の階層。
@@ -303,12 +383,11 @@ def _is_repo_boundary(
         ancestor_levels: この後探索されうる祖先の段数。linked worktree の
             所属確認をこの範囲に限る。
     """
-    kind, target = _inspect_dot_git(directory)
+    kind, common = _inspect_dot_git(directory)
     if kind == "none":
         return False
-    if kind != "worktree" or target is None:
+    if kind != "worktree" or common is None:
         return True
-    common = target.parent.parent
     return not _ancestor_repo_owns(
         directory, common, home=home, levels=ancestor_levels
     )
@@ -352,9 +431,9 @@ def discover_accounts_files_with_ancestors(
       - **git repo の境界を越えない** — `.git` ディレクトリを持つ階層
         (通常の toplevel) と、`.git` ファイルが submodule の gitdir
         (`<common>/modules/<name>`) を指す階層 (submodule root)。その階層自身は
-        探すが、その親へは上らない。linked worktree
-        (`<common>/worktrees/<name>`) は、`<common>` を持つ repo が祖先側に
-        あるとき (または祖先に repo が無いとき) だけ境界にせず上らせる
+        探すが、その親へは上らない。linked worktree (gitdir 側のメタデータで
+        裏付けが取れたもの) は、`<common>` を持つ repo が祖先側にあるとき
+        (または祖先に repo が無いとき) だけ境界にせず上らせる
       - **`$HOME` およびその上 (`/Users`, `/` 等) へは上らない**
       - 何も見つからずに `Path.parent == Path` (ルート) に到達したら諦める
       - `max_levels` で安全側の上限を設ける
@@ -376,11 +455,23 @@ def discover_accounts_files_with_ancestors(
     repo 境界で fail-closed せずに allow される**。`.git` ファイルの内容
     (`gitdir:` の指す先の形) で linked worktree と submodule を区別し、
     判読できない場合は停止側に倒す。種別は gitdir の**末尾 2 要素**
-    (`worktrees/<name>` か `modules/<name>` か) で決め、common directory の
+    (`worktrees/<name>` か `modules/<name>` か) で予備分類し、common directory の
     名前が `.git` であることには依存しない — bare repository や
     `--separate-git-dir` から作った linked worktree はパス中に `.git` 要素を
     持たないため、その名前を要求すると正当な worktree が境界に落ちてしまう
     (マージ前レビューの指摘)。
+
+    linked worktree は**末尾の形だけでは確定させず、gitdir 側のメタデータで
+    裏付けを取る** (マージ前レビューの指摘)。`--separate-git-dir` で初期化した
+    独立 repo の gitdir が偶然 `worktrees/<name>` の形になる
+    (`/store/worktrees/repo` など) と、その main checkout が worktree と誤分類
+    され、accounts.local.json を持つ workspace の配下に (間に `.git` を挟まず)
+    置かれていれば所属確認も通ってしまい、**独立 repo の root を越えて外側の
+    設定を継承**する。git が linked worktree の gitdir に必ず置く `commondir`
+    と `gitdir` (作業ツリーの `.git` への back-pointer) を読み、back-pointer が
+    いま読んでいる `.git` を指すことまで確かめる。common directory も
+    `commondir` の内容から求める (末尾 2 要素を落として推定するより、git 自身が
+    書いた値のほうが信頼できる)。1 つでも満たさなければ独立 repo 扱い = 境界。
 
     linked worktree の通過に**所属確認**を課した理由 (マージ前レビューの指摘):
     正当な linked worktree は無関係な repo の中にも置ける (repo A の

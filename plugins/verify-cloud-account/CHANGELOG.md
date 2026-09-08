@@ -101,7 +101,7 @@ superproject へ続いていた**。superproject に active な CLI と一致す
 accounts.local.json があると、未設定の submodule での状態変更コマンドが repo 境界で
 fail-closed せず allow される。
 
-種別の判定は gitdir の**末尾 2 要素**だけを見る (`worktrees/<name>` なら worktree、
+種別の予備判定は gitdir の**末尾 2 要素**を見る (`worktrees/<name>` なら worktree、
 `modules/<name>` なら submodule)。これもマージ前レビューの指摘によるもので、当初は
 パス中に `.git` という要素があることを厳密に要求していたため、**bare repository
 (`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
@@ -112,6 +112,27 @@ git の common directory の名前は `.git` とは限らないため、レイ�
 (`modules/a/modules/b` は境界、`modules/sub/worktrees/wt` は通過) は変わらない。
 `--separate-git-dir` repo の **main** worktree は gitdir が common directory を
 直接指すため、従来どおり境界 (repo toplevel) として扱う。
+
+ただし**末尾の形だけで linked worktree を確定させると逆方向に穴が開く**ため、
+gitdir 側のメタデータで裏付けを取る形にした (マージ前レビューの指摘)。
+`--separate-git-dir` で初期化した独立 repo の gitdir が偶然 `worktrees/<name>` で
+終わる場合 (`/store/worktrees/repo` など)、その main checkout が linked worktree と
+誤分類される。accounts.local.json を持つ workspace の配下に (間に `.git` を挟まず)
+置かれていると所属確認も通ってしまい、**独立 repo の root を越えて外側の設定を
+継承**し、そのアカウントが active session と一致すれば未設定の repo で状態変更
+コマンドが allow される。判定条件は「gitdir が実在するディレクトリであること」
+「git が置く `commondir` (common directory へのパス) が読めること」「同じく
+`gitdir` (作業ツリーの `.git` への back-pointer) があり、resolve した先が
+**いま読んでいる `<dir>/.git` と一致**すること」の 3 つで、1 つでも欠ければ独立
+repo 扱い = 境界にする。common directory も `commondir` の内容から求める
+(末尾 2 要素を落とす推定より、git 自身が書いた値のほうが信頼できる)。
+git コマンドを呼ばない方針は変えていない (読むのは `.git` と gitdir 内の
+メタファイルだけ)。
+
+`gitdir:` の値がドライブ文字 (`C:/...`) や UNC (`//server/...`) の絶対パスの場合に
+**相対として `.git` のある階層へ繋がない**ようにした (マージ前レビューの指摘)。
+繋ぐと別の common directory と比較することになり、正当な linked worktree を境界と
+誤判定して継承が切れる。
 
 さらに、linked worktree を通過させるのは **gitdir の common directory
 (`<common>/worktrees/<name>` の `<common>`) が、この後探索する祖先の repo のものと
@@ -157,6 +178,16 @@ linked worktree の所属確認にも同じ手順で回帰テストを足した�
 継承する」形と「祖先の `.git` が判読できない形」が落ち、自分の repo の中・外に
 置いた worktree、submodule の worktree、bare / `--separate-git-dir` repo の
 worktree、入れ子 worktree はいずれも通る**ことを使い捨てコピーで確認している。
+
+linked worktree のメタデータ検証も同様に、**修正前のコードでは「gitdir が偶然
+`worktrees/<name>` で終わる `--separate-git-dir` の main checkout」「`commondir`
+の無い gitdir」「gitdir がディレクトリでない形」「back-pointer が別の worktree を
+指す形」「`commondir` が絶対パスで末尾からの推定と食い違う形」が落ち、実物の
+`git worktree add` が作る構造 (`<common>/worktrees/<name>/{commondir,gitdir,HEAD}`)
+は通る**ことを使い捨てコピーで確認した。worktree 系の既存テストの fixture は、
+実物と同じメタデータを置く形に更新している。あわせて、実際の linked worktree
+(gitdir が `<repo>/.git/worktrees/<name>`) が本体 checkout の設定を従来どおり
+継承することを実機でも確認した。
 
 ## 0.11.1
 

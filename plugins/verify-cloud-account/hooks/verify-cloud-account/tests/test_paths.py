@@ -53,6 +53,20 @@ class BaseAncestorBoundary(unittest.TestCase):
         )
         return d / "accounts.json"
 
+    def _make_worktree_meta(self, gitdir: Path, back_pointer: Path) -> Path:
+        """`git worktree add` が gitdir 側に作る構造を再現する。
+
+        実物の `<common>/worktrees/<name>/` には `commondir` (common directory
+        への相対パス。通常 `../..`)、`gitdir` (作業ツリーの `.git` ファイルへの
+        back-pointer)、`HEAD` などが置かれる。linked worktree の判定はこの
+        メタデータで裏付けを取るため、fixture でも実物と同じ形を作る。
+        """
+        gitdir.mkdir(parents=True, exist_ok=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        (gitdir / "gitdir").write_text(f"{back_pointer}\n", encoding="utf-8")
+        (gitdir / "HEAD").write_text("ref: refs/heads/wt\n", encoding="utf-8")
+        return gitdir
+
     def _resolved_dir(self, start: Path):
         _found, resolved = paths.discover_accounts_files_with_ancestors(str(start))
         return resolved
@@ -89,6 +103,9 @@ class TestAncestorStopsAtRepoToplevel(BaseAncestorBoundary):
         worktree.mkdir(parents=True)
         (worktree / ".git").write_text(
             f"gitdir: {self.repo}/.git/worktrees/feature-x\n", encoding="utf-8"
+        )
+        self._make_worktree_meta(
+            self.repo / ".git" / "worktrees" / "feature-x", worktree / ".git"
         )
         self._write_new(self.repo)
         self.assertEqual(self._resolved_dir(worktree), self.repo)
@@ -168,17 +185,26 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         worktree = self._child_with_dot_git_file(
             "wt", f"gitdir: {self.repo}/.git/worktrees/wt\n"
         )
+        self._make_worktree_meta(
+            self.repo / ".git" / "worktrees" / "wt", worktree / ".git"
+        )
         self.assertEqual(self._resolved_dir(worktree), self.repo)
 
     def test_linked_worktree_with_relative_gitdir_still_inherits(self):
         worktree = self._child_with_dot_git_file(
             "wt", "gitdir: ../.git/worktrees/wt\n"
         )
+        self._make_worktree_meta(
+            self.repo / ".git" / "worktrees" / "wt", worktree / ".git"
+        )
         self.assertEqual(self._resolved_dir(worktree), self.repo)
 
     def test_linked_worktree_with_windows_separators_still_inherits(self):
         worktree = self._child_with_dot_git_file(
             "wt", "gitdir: ..\\.git\\worktrees\\wt\n"
+        )
+        self._make_worktree_meta(
+            self.repo / ".git" / "worktrees" / "wt", worktree / ".git"
         )
         self.assertEqual(self._resolved_dir(worktree), self.repo)
 
@@ -197,6 +223,10 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         (worktree / ".git").write_text(
             f"gitdir: {self.repo}/.git/modules/sub/worktrees/wt\n", encoding="utf-8"
         )
+        self._make_worktree_meta(
+            self.repo / ".git" / "modules" / "sub" / "worktrees" / "wt",
+            worktree / ".git",
+        )
         self.assertEqual(self._resolved_dir(worktree), sub)
 
     def test_worktree_of_submodule_does_not_inherit_superproject(self):
@@ -207,6 +237,10 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         """
         worktree = self._child_with_dot_git_file(
             "wt", f"gitdir: {self.repo}/.git/modules/sub/worktrees/wt\n"
+        )
+        self._make_worktree_meta(
+            self.repo / ".git" / "modules" / "sub" / "worktrees" / "wt",
+            worktree / ".git",
         )
         self.assertIsNone(self._resolved_dir(worktree))
 
@@ -228,6 +262,7 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         (worktree / ".git").write_text(
             f"gitdir: {common}/worktrees/wt\n", encoding="utf-8"
         )
+        self._make_worktree_meta(common / "worktrees" / "wt", worktree / ".git")
         self.assertEqual(self._resolved_dir(worktree), host)
 
     def test_separate_git_dir_linked_worktree_inherits_from_owning_checkout(self):
@@ -244,6 +279,7 @@ class TestDotGitFileIsClassified(BaseAncestorBoundary):
         (worktree / ".git").write_text(
             f"gitdir: {common}/worktrees/wt\n", encoding="utf-8"
         )
+        self._make_worktree_meta(common / "worktrees" / "wt", worktree / ".git")
         self.assertEqual(self._resolved_dir(worktree), host)
 
     def test_bare_repo_submodule_is_still_a_boundary(self):
@@ -325,8 +361,10 @@ class TestLinkedWorktreeOwnership(BaseAncestorBoundary):
             (repo / ".git").mkdir(parents=True)
 
     def _worktree(self, path: Path, gitdir: str) -> Path:
+        """作業ツリーと gitdir 側メタデータの両方を持つ linked worktree を作る。"""
         path.mkdir(parents=True, exist_ok=True)
         (path / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        self._make_worktree_meta(Path(gitdir), path / ".git")
         return path
 
     # --- (a) 無関係な repo の中に置かれた worktree ---------------------------
@@ -405,6 +443,123 @@ class TestLinkedWorktreeOwnership(BaseAncestorBoundary):
             outer / "inner", f"{self.repo_b}/.git/worktrees/inner"
         )
         self.assertEqual(self._resolved_dir(inner), outer)
+
+
+class TestLinkedWorktreeMetadataIsVerified(BaseAncestorBoundary):
+    """linked worktree は gitdir 側のメタデータで裏付けが取れたときだけ通過する。
+
+    gitdir の**末尾 2 要素**だけで判定すると、`--separate-git-dir` で初期化した
+    独立 repo の gitdir が偶然 `worktrees/<name>` で終わる場合
+    (`/store/worktrees/repo` など) にその main checkout を linked worktree と
+    誤分類する。その checkout が accounts.local.json を持つ workspace の配下に
+    あり、間に `.git` が無ければ所属確認 (`_ancestor_repo_owns`) も通るため、
+    **独立 repo の root を越えて外側の設定を継承**してしまう
+    (マージ前レビューの指摘)。
+
+    そこで git が linked worktree の gitdir に必ず置く `commondir` と `gitdir`
+    (作業ツリーの `.git` への back-pointer) を読み、back-pointer がいま読んで
+    いる `.git` を指すことまで確かめる。common directory も `commondir` の内容
+    から解決する。1 つでも満たさなければ独立 repo 扱い = 境界。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.workspace = self.tmp / "ws"
+        self.workspace.mkdir(parents=True)
+        # workspace 直下にだけ設定を置く = 境界を越えたら継承してしまう配置
+        self._write_new(self.workspace, {"github": "ws"})
+        self.store = self.tmp / "store"
+
+    def _repo_with_config(self) -> Path:
+        repo = self.workspace / "repo"
+        (repo / ".git").mkdir(parents=True)
+        self._write_new(repo, {"github": "repo"})
+        return repo
+
+    def _point_at(self, worktree: Path, gitdir: Path):
+        worktree.mkdir(parents=True, exist_ok=True)
+        (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+    # --- (a) メタデータが無ければ通さない ------------------------------------
+
+    def test_separate_git_dir_checkout_shaped_like_worktree_is_boundary(self):
+        """gitdir が偶然 `worktrees/<name>` で終わる独立 repo の main checkout。
+
+        `--separate-git-dir /store/worktrees/repo` で初期化すると gitdir の末尾が
+        linked worktree と同じ形になる。gitdir 自体は実在するが `commondir` /
+        back-pointer は無いため、メタデータを見れば独立 repo と分かる。
+        """
+        gitdir = self.store / "worktrees" / "repo"
+        gitdir.mkdir(parents=True)
+        (gitdir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        checkout = self.workspace / "repo"
+        self._point_at(checkout, gitdir)
+        self.assertIsNone(self._resolved_dir(checkout))
+
+    def test_missing_commondir_is_boundary(self):
+        """back-pointer はあるが `commondir` が無い gitdir は裏付け不足。"""
+        repo = self._repo_with_config()
+        worktree = repo / ".worktrees" / "wt"
+        gitdir = repo / ".git" / "worktrees" / "wt"
+        self._point_at(worktree, gitdir)
+        self._make_worktree_meta(gitdir, worktree / ".git")
+        (gitdir / "commondir").unlink()
+        self.assertIsNone(self._resolved_dir(worktree))
+
+    def test_gitdir_pointing_at_a_file_is_boundary(self):
+        """gitdir が実在するディレクトリでなければ linked worktree ではない。"""
+        repo = self._repo_with_config()
+        gitdir = repo / ".git" / "worktrees" / "wt"
+        gitdir.parent.mkdir(parents=True, exist_ok=True)
+        gitdir.write_text("not a directory\n", encoding="utf-8")
+        worktree = repo / ".worktrees" / "wt"
+        self._point_at(worktree, gitdir)
+        self.assertIsNone(self._resolved_dir(worktree))
+
+    # --- (b) 実物の `git worktree add` が作る構造は従来どおり通過 -------------
+
+    def test_real_worktree_layout_still_inherits(self):
+        """`<common>/worktrees/<name>/{commondir,gitdir,HEAD}` の形は通す。"""
+        repo = self._repo_with_config()
+        worktree = repo / ".worktrees" / "wt"
+        gitdir = repo / ".git" / "worktrees" / "wt"
+        self._point_at(worktree, gitdir)
+        self._make_worktree_meta(gitdir, worktree / ".git")
+        self.assertEqual(self._resolved_dir(worktree), repo)
+
+    def test_absolute_commondir_is_honoured(self):
+        """common dir は `commondir` の内容から求める (末尾からの推定ではない)。
+
+        git は相対で書けない配置では `commondir` に絶対パスを書く。gitdir を
+        repo の外に置いた形では、末尾 2 要素を落とす推定 (`<store>`) と実際の
+        common dir (`<repo>/.git`) が食い違うため、git 自身が書いた値を使う。
+        """
+        repo = self._repo_with_config()
+        gitdir = self.store / "worktrees" / "wt"
+        worktree = repo / ".worktrees" / "wt"
+        self._point_at(worktree, gitdir)
+        self._make_worktree_meta(gitdir, worktree / ".git")
+        (gitdir / "commondir").write_text(
+            f"{repo / '.git'}\n", encoding="utf-8"
+        )
+        self.assertEqual(self._resolved_dir(worktree), repo)
+
+    # --- (c) back-pointer が別の worktree を指すものは通さない ---------------
+
+    def test_back_pointer_to_another_worktree_is_boundary(self):
+        """他の worktree の `.git` を複製した階層は、その gitdir の持ち主でない。
+
+        back-pointer は `<other>/.git` を指したままなので、いま読んでいる
+        `.git` とは一致しない。形と `commondir` だけを見ると通ってしまう。
+        """
+        repo = self._repo_with_config()
+        other = repo / ".worktrees" / "other"
+        gitdir = repo / ".git" / "worktrees" / "other"
+        self._point_at(other, gitdir)
+        self._make_worktree_meta(gitdir, other / ".git")
+        impostor = repo / ".worktrees" / "impostor"
+        self._point_at(impostor, gitdir)
+        self.assertIsNone(self._resolved_dir(impostor))
 
 
 class TestAncestorStopsAtHome(BaseAncestorBoundary):

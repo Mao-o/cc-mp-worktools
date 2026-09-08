@@ -526,16 +526,23 @@ worktree 内に同名ファイルを置く必要は無い。
     common directory で、その名前は `.git` とは限らない — bare repository
     (`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
     (`/custom/gitdir/worktrees/<name>`) から作った worktree も同じく通過する
-    (判定は末尾の `worktrees/<name>` / `modules/<name>` で行い、common
-    directory の名前には依存しない)。
+    (common directory の名前には依存しない)。
+    **linked worktree かどうかは gitdir 側のメタデータで確かめる** — gitdir が
+    実在するディレクトリで、git が置く `commondir` (common directory への
+    パス) と `gitdir` (作業ツリーの `.git` への back-pointer) があり、
+    back-pointer がいま読んでいる `.git` を指すこと。パスの末尾が
+    `worktrees/<name>` でも、`--separate-git-dir` の gitdir が偶然その形の
+    場合 (`/store/worktrees/repo` など) は独立した repo の main checkout なので
+    境界にする。`<common>` は `commondir` の内容から求める。
     **通過するのは `<common>` が祖先側の repo のものと一致する場合だけ** —
     linked worktree は無関係な repo の中にも置けるため (repo A の中に
     repo B の worktree を追加する形)、形だけで通すと **repo A の設定を継承**
     してしまう。祖先の repo が別物、または祖先の `.git` を判読できない場合は
     worktree root で止める。祖先に repo が 1 つも無い場合 (workspace 直下に
     worktree を並べる配置) は従来どおり上る
-  - 判定は `.git` の読み取りだけで行う (git コマンドは実行しない)。`gitdir:` の
-    指す先は**種別と所属の判定にしか使わず、探索先としては辿らない**
+  - 判定は `.git` と gitdir 内メタファイルの読み取りだけで行う (git コマンドは
+    実行しない)。`gitdir:` の指す先は**種別と所属の判定にしか使わず、探索先
+    としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
     submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
     (未設定として deny)。**別の repo の中に置いた linked worktree から、その

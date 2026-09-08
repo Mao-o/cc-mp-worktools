@@ -221,15 +221,27 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
   判読できない `.git` ファイル (prefix 違い / common directory を直接指す形 /
   読み取り失敗) も境界に倒す。「継承先が増える方向」は allow 側なので、分からない
   ときは止める
-- **linked worktree の判別は gitdir の末尾 2 要素だけで行う** — `worktrees/<name>`
-  なら worktree、`modules/<name>` なら submodule。`<common>` (git の common
-  directory) の名前が `.git` であることに依存しない。bare repository から作った
-  worktree は `repo.git/worktrees/<name>`、`--separate-git-dir` で初期化した repo
-  から作った worktree は `/custom/gitdir/worktrees/<name>` になり、**パス中に
-  `.git` という要素が現れない**。`.git` を厳密に要求すると、これらの正当な
-  worktree が判読不能 = 境界に落ち、その repo の accounts.local.json を継承できず
-  設定済みの状態変更コマンドが deny される (マージ前レビューの指摘)。
-  末尾で判定しても入れ子は従来どおり — `modules/a/modules/b` は境界、
+- **linked worktree の判別は gitdir 側のメタデータで確かめる** — 末尾 2 要素
+  (`worktrees/<name>` / `modules/<name>`) は**予備分類**にとどめ、`<common>`
+  (git の common directory) の名前が `.git` であることには依存しない。bare
+  repository から作った worktree は `repo.git/worktrees/<name>`、
+  `--separate-git-dir` で初期化した repo から作った worktree は
+  `/custom/gitdir/worktrees/<name>` になり、**パス中に `.git` という要素が
+  現れない**。`.git` を厳密に要求すると、これらの正当な worktree が判読不能 =
+  境界に落ち、その repo の accounts.local.json を継承できず設定済みの状態変更
+  コマンドが deny される (マージ前レビューの指摘)。
+  一方で**末尾だけで確定させると逆方向に穴が開く** — `--separate-git-dir` で
+  初期化した独立 repo の gitdir が偶然 `worktrees/<name>` で終わる場合
+  (`/store/worktrees/repo` など) にその main checkout を worktree と誤分類し、
+  accounts.local.json を持つ workspace の配下に (間に `.git` を挟まず) 置かれて
+  いれば所属確認も通って**独立 repo の root を越えて継承**する
+  (マージ前レビューの指摘)。そこで `_linked_worktree_common()` が
+  「gitdir が実在するディレクトリ」「`<gitdir>/gitdir` (back-pointer) が
+  いま読んでいる `<directory>/.git` を指す」「`<gitdir>/commondir` が読める」の
+  3 つを確かめ、1 つでも欠ければ "plain" (境界) に落とす。**common directory は
+  `commondir` の内容から解決する** — 末尾 2 要素を落とす推定より、git 自身が
+  書いた値のほうが信頼できる (`_ancestor_repo_owns` の比較にもこちらを使う)。
+  予備分類の入れ子の扱いは従来どおり — `modules/a/modules/b` は境界、
   `modules/sub/worktrees/wt` は通過。`--separate-git-dir` repo の **main**
   worktree は gitdir が common directory を直接指す (`worktrees/` が付かない)
   ため、これまでどおり境界 = repo toplevel として扱われる
@@ -247,10 +259,12 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
   見る形にしてあり、`.git` ディレクトリ / submodule / `--separate-git-dir` /
   祖先自身が linked worktree のいずれでも同じ 1 実装で判定できる
   (`_common_git_dir`)。パスは `Path.resolve()` で正規化してから比較する
-- 判定は `.git` の**読み取りのみ**で行う (git コマンドは呼ばない)。gitdir は種別と
-  所属の判定にしか使わず**探索先としては辿らない** — 探索経路を増やすと「見つかる
-  場所が増える」= allow 側に倒れる。区切りは `/` と `\` の両方を受けて OS 非依存に
-  分解する
+- 判定は `.git` と gitdir 内メタファイル (`commondir` / `gitdir`) の**読み取りのみ**
+  で行う (git コマンドは呼ばない)。gitdir は種別と所属の判定にしか使わず**探索先
+  としては辿らない** — 探索経路を増やすと「見つかる場所が増える」= allow 側に
+  倒れる。区切りは `/` と `\` の両方を受けて OS 非依存に分解し、ドライブ文字
+  (`C:/...`) や UNC (`//server/...`) は絶対パスとして扱う (相対として繋ぐと
+  別の common dir と比較してしまう)
 - **builder も dispatcher と同じ解決を使う** (3-tier lookup + 親遡及)。読む側と
   書く側で解決がずれると、継承中の worktree で `set` が子ファイルを作り、
   dispatcher の遡及がそこで止まって**継承していた他の service が一斉に未設定
