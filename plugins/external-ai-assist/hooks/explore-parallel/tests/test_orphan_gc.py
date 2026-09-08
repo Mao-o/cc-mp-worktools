@@ -1,0 +1,1203 @@
+"""孤児 analyzer の停止 (process group / PID 再利用ガード) と残骸の TTL GC。
+
+0.9.1 までは `post()` が `os.kill(pid, SIGTERM)` でグループリーダーだけを止めており、
+cursor-agent が生成した孫プロセスが走り続けていた。また post が来ない経路
+(Agent ツールの失敗・中断・セッション終了・`async` hook の teardown kill) では
+pid / 結果ファイルが無期限に残っていた (内部バックログ)。
+
+いずれも `cursor` 本体は起動せず、PATH 先頭の偽 cursor (bash script) で検証する。
+"""
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+import unittest
+from unittest import mock
+
+import _testutil  # noqa: F401  (sys.path 整備)
+from _testutil import HookTestCase, explore_payload
+
+from _common import subproc  # noqa: E402  (_testutil の sys.path 挿入後に import する)
+
+
+def _alive(pid: int) -> bool:
+    """pid が「まだ走っている」か。**zombie は死んだ扱い**。
+
+    `os.kill(pid, 0)` だけでは足りない。PID 1 が孤児を reap しないコンテナでは、kill に
+    成功した孫がそのまま zombie として残り `os.kill(pid, 0)` が成功し続けるため、停止でき
+    ているのに「生存」と報告して group 停止系のテストが待ち時間ののちに落ちる。
+    `_common.subproc.pid_is_zombie` (timeout テストが同じ理由で使っている) で除外する。
+
+    判定不能 (`None`。/proc も ps も使えない) は `os.kill` の結果に従う = 生存側に倒す。
+    """
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return subproc.pid_is_zombie(pid) is not True
+
+
+class OrphanTestCase(HookTestCase):
+    """孫プロセス / 無関係プロセスを確実に回収する tearDown を足した基底クラス。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._extra_pids: list[int] = []
+        self._procs: list[subprocess.Popen] = []
+        self._grace = mock.patch.object(self.cursor, "KILL_GRACE_SEC", 1.0)
+        self._grace.start()
+
+    def tearDown(self) -> None:
+        """起動した孫・無関係プロセスを 1 つ残らず回収する (`sleep` の孤児を作らない)。"""
+        for pid in self._extra_pids:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for proc in self._procs:
+            try:
+                proc.wait(timeout=3)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pid in self._extra_pids:
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+        self._grace.stop()
+        super().tearDown()
+
+    def spawn_unrelated(self) -> subprocess.Popen:
+        """analyzer ではない生存プロセス (自前の process group) を起動して返す。"""
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._procs.append(proc)
+        self._extra_pids.append(proc.pid)
+        return proc
+
+    def assert_unharmed(self, proc: subprocess.Popen, msg: str) -> None:
+        """`proc` に signal が届いていないこと。
+
+        **`os.kill(pid, 0)` では判定できない**。この犠牲プロセスは test プロセスの
+        直接の子なので、SIGTERM を受けても誰も `wait` しないうちは zombie として残り、
+        `os.kill(pid, 0)` は成功し続ける。「撃たれたのに生きている」と読めてしまい、
+        ガードを外す mutation を素通りさせる (実際に mutation で空振りを観測した)。
+        親である test プロセス自身が `poll()` すれば reap して終了を検出できる。
+        """
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNone(proc.poll(), msg)
+
+    def fake_cursor_with_grandchild(self) -> str:
+        """孫 `sleep 30` に stdout を継承させたまま待つ偽 cursor。孫 pid の記録先を返す。"""
+        gc_pid_file = os.path.join(self.tmpdir, "cursor-grandchild.pid")
+        path = os.path.join(self.bin, "cursor")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/bash\n"
+                "sleep 30 &\n"
+                f"echo $! > {gc_pid_file}\n"
+                "wait\n"
+            )
+        os.chmod(path, 0o755)
+        return gc_pid_file
+
+    def fake_cursor_with_stubborn_grandchild(self) -> str:
+        """SIGTERM を**無視する**孫を持つ偽 cursor。孫 pid の記録先を返す。
+
+        `terminate()` の SIGTERM → 猶予 → SIGKILL のエスカレーションを確かめる用。
+        cursor-agent (node) が TERM を受けても終了処理から抜けられない状況の代役。
+
+        孫は **SIG_IGN を設定し終えてから** pid ファイルを書く。`sleep &` + `echo $!` だと
+        ハンドラ設置前に SIGTERM が届きうるので、既定動作で死んだのか SIGKILL で死んだのか
+        区別が付かず、エスカレーションを外す mutation を素通りさせる。
+        """
+        gc_pid_file = os.path.join(self.tmpdir, "cursor-stubborn.pid")
+        script = (
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"open({gc_pid_file!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(30)\n"
+        )
+        path = os.path.join(self.bin, "cursor")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/bash\n"
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} &\n"
+                "wait\n"
+            )
+        os.chmod(path, 0o755)
+        return gc_pid_file
+
+    def fake_cursor_that_exits_leaving_a_grandchild(self) -> str:
+        """孫 `sleep 30` を残して**自分だけ先に終了する**偽 cursor。孫 pid の記録先を返す。
+
+        リーダー (cursor 本体) が exit / crash した後も、`pre` が作った独立 process group に
+        孫が残って走り続ける形。非対話 bash は job control が off なので、背景ジョブは
+        リーダーと同じ process group に残る (テスト側で `os.getpgid` を確認している)。
+        """
+        gc_pid_file = os.path.join(self.tmpdir, "cursor-leaderless.pid")
+        path = os.path.join(self.bin, "cursor")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/bash\n"
+                "sleep 30 &\n"
+                f"echo $! > {shlex.quote(gc_pid_file)}\n"
+            )
+        os.chmod(path, 0o755)
+        return gc_pid_file
+
+    def spawn_leaderless_group(self) -> tuple[int, int]:
+        """analyzer ではない process group を作り、**リーダーを先に回収**する。
+
+        戻り値は (pgid, 生き残ったメンバーの pid)。リーダーは test プロセスの直接の子なので
+        `wait()` で reap しておく — zombie のままだと `os.kill(pid, 0)` が成功し続け、
+        「リーダーが生きている」経路に入ってしまいフィクスチャが成立しない。
+        """
+        marker = os.path.join(self.tmpdir, "victim-group.pid")
+        proc = subprocess.Popen(
+            ["bash", "-c", f"sleep 30 & echo $! > {shlex.quote(marker)}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._extra_pids.append(proc.pid)
+        proc.wait(timeout=5)
+        member = self.read_grandchild(marker)
+        return proc.pid, member
+
+    def spawn_zombie_leader_group(self) -> tuple[int, int]:
+        """リーダーが **zombie として残った** process group を作る。
+
+        戻り値は (pgid = zombie リーダーの pid, 生きているメンバーの pid)。PID 1 が孤児を
+        reap しないコンテナの再現で、リーダーは終了しているのに誰も `wait` しないため
+        `os.kill(pid, 0)` が成功し続ける。
+
+        `Popen` を保持したまま `poll()` / `wait()` を呼ばずに置く。参照を捨てると
+        `Popen.__del__` が `subprocess._active` へ積み、次の `Popen` 生成時の
+        `_cleanup()` が reap してしまい zombie を維持できない。
+        """
+        marker = os.path.join(self.tmpdir, "zombie-group.pid")
+        proc = subprocess.Popen(
+            ["bash", "-c", f"sleep 30 & echo $! > {shlex.quote(marker)}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._procs.append(proc)  # tearDown の wait で reap する
+        self._extra_pids.append(proc.pid)
+        member = self.read_grandchild(marker)
+        if subproc.pid_is_zombie(proc.pid) is None:
+            self.skipTest("zombie を判定できない環境 (/proc も ps も使えない)")
+        deadline = time.monotonic() + 3
+        while (
+            time.monotonic() < deadline and subproc.pid_is_zombie(proc.pid) is not True
+        ):
+            time.sleep(0.02)
+        self.assertIs(
+            subproc.pid_is_zombie(proc.pid),
+            True,
+            "zombie のリーダーを作れていない (フィクスチャが成立していない)",
+        )
+        try:
+            os.kill(proc.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            self.fail("zombie に os.kill(pid, 0) が失敗した (前提が成立していない)")
+        self.assertEqual(
+            os.getpgid(member), proc.pid, "メンバーがリーダーと同じ process group に居ない"
+        )
+        return proc.pid, member
+
+    def _launch_analyzer(self, tool_use_id: str) -> tuple[int, int, object]:
+        """偽 cursor を `pre` 経由で起動し、(リーダー pid, 孫 pid, pid ファイル) を返す。
+
+        孫の生死で判定する。リーダーは test プロセスの直接の子なので、SIGTERM を受けても
+        誰も `wait` しないうちは zombie として残り `os.kill(pid, 0)` が成功し続ける
+        (「撃たれたのに生きている」と読めてしまう)。孫はリーダーの子なので、リーダーが
+        死ねば init に引き取られて確実に reap される。孫はリーダーと同じ process group に
+        居るので、`killpg` が飛べば必ず巻き込まれる。
+        """
+        gc_pid_file = self.fake_cursor_with_grandchild()
+        self.run_hook("pre", explore_payload(tool_use_id))
+        _, pid_file = self.state.paths(self.cursor.NAME, tool_use_id)
+        leader = int(pid_file.read_text().strip())
+        self._children.append(leader)
+        grandchild = self.read_grandchild(gc_pid_file)
+        self.assertTrue(_alive(grandchild), "偽 cursor の孫が起動していない")
+        return leader, grandchild, pid_file
+
+    def _launch_stubborn_analyzer(self, tool_use_id: str) -> tuple[int, int, object]:
+        """**SIGTERM を無視する孫**を持つ偽 cursor を `pre` 経由で起動する。
+
+        戻り値は `_launch_analyzer` と同じ (リーダー pid, 孫 pid, pid ファイル)。孫は TERM
+        では止まらないので、停止経路が SIGKILL まで進んだかを孫の生死で判定できる。
+        """
+        gc_pid_file = self.fake_cursor_with_stubborn_grandchild()
+        self.run_hook("pre", explore_payload(tool_use_id))
+        _, pid_file = self.state.paths(self.cursor.NAME, tool_use_id)
+        leader = int(pid_file.read_text().strip())
+        self._children.append(leader)
+        stubborn = self.read_grandchild(gc_pid_file)
+        self.assertTrue(_alive(stubborn), "SIGTERM を無視する孫が起動していない")
+        return leader, stubborn, pid_file
+
+    def slow_ps(self, seconds: float = 3.0):
+        """PATH 先頭に **応答しない `ps`** を置く patch を返す (`with` の中だけ有効)。
+
+        `ps` が固まる / 極端に遅い環境の代役。`exec sleep` で自分自身を置き換えるので、
+        `subprocess.run` の timeout kill が直接の子 (= sleep) に届き、取り残しが出ない。
+        patch を `with` に限るのは、テスト側の生死判定 (`_alive`) まで巻き込まないため。
+        """
+        bin_dir = os.path.join(self.tmpdir, "slow-ps-bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        path = os.path.join(bin_dir, "ps")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"#!/bin/bash\nexec sleep {seconds}\n")
+        os.chmod(path, 0o755)
+        return mock.patch.dict(
+            os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}
+        )
+
+    def wait_until_stale(self, ttl_sec: float, timeout: float = 3.0) -> None:
+        """短縮した TTL を超えて残骸として認識されるまで待つ。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self.state.stale_entries():
+            time.sleep(ttl_sec / 4)
+        self.assertTrue(
+            self.state.stale_entries(), "TTL を超えた残骸として認識されていない"
+        )
+
+    def read_grandchild(self, gc_pid_file: str) -> int:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                with open(gc_pid_file, encoding="utf-8") as f:
+                    text = f.read().strip()
+                if text:
+                    pid = int(text)
+                    self._extra_pids.append(pid)
+                    return pid
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.02)
+        self.fail(f"子プロセスの pid が {gc_pid_file} に記録されなかった")
+
+
+class TestAliveHelper(OrphanTestCase):
+    """テストヘルパー `_alive` の契約: **zombie は死んだ扱い**。
+
+    PID 1 が孤児を reap しないコンテナでは、kill に成功した孫が zombie として残り
+    `os.kill(pid, 0)` が成功し続ける。ヘルパーがそれを「生存」と報告すると、group 停止が
+    正しく効いているのに待ち時間ののちに落ちる (下の停止系テストが偽陽性で失敗する)。
+    """
+
+    def test_a_zombie_is_not_reported_as_alive(self):
+        proc = subprocess.Popen(
+            ["sleep", "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self._procs.append(proc)  # tearDown の wait で reap する
+        if subproc.pid_is_zombie(proc.pid) is None:
+            self.skipTest("zombie を判定できない環境 (/proc も ps も使えない)")
+
+        # 親 (= このテストプロセス) が wait しない限り zombie のまま残る。
+        # `proc.poll()` は reap してしまうので触らない。
+        proc.kill()
+        deadline = time.monotonic() + 3
+        while (
+            time.monotonic() < deadline and subproc.pid_is_zombie(proc.pid) is not True
+        ):
+            time.sleep(0.02)
+        self.assertIs(
+            subproc.pid_is_zombie(proc.pid),
+            True,
+            "zombie を作れていない (フィクスチャが成立していない)",
+        )
+        try:
+            os.kill(proc.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            self.fail("zombie に os.kill(pid, 0) が失敗した (前提が成立していない)")
+
+        self.assertFalse(_alive(proc.pid), "zombie を生存と報告している")
+
+        proc.wait(timeout=3)
+
+
+class TestGroupKill(OrphanTestCase):
+    """停止は process group ごと (リーダーだけを止めて孫を取り残さない)。"""
+
+    def test_post_timeout_kills_the_whole_process_group(self):
+        gc_pid_file = self.fake_cursor_with_grandchild()
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.run_hook("pre", explore_payload("tu-group"))
+            _, pid_file = self.state.paths(self.cursor.NAME, "tu-group")
+            leader = int(pid_file.read_text().strip())
+            self._children.append(leader)
+            grandchild = self.read_grandchild(gc_pid_file)
+            self.assertTrue(_alive(grandchild), "偽 cursor の孫が起動していない")
+
+            self.run_hook("post", explore_payload("tu-group"))
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(grandchild),
+            "孫プロセスが取り残されている (リーダーだけ SIGTERM している)",
+        )
+
+    def test_a_group_that_ignores_sigterm_is_escalated_to_sigkill(self):
+        """SIGTERM で止まらない相手には SIGKILL まで上げる (猶予後)。
+
+        猶予だけ待って諦めると、TERM を握るタイプの analyzer が丸ごと生き残る
+        (課金・CPU のリークは post が来た経路でも起きる)。
+        """
+        gc_pid_file = self.fake_cursor_with_stubborn_grandchild()
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.run_hook("pre", explore_payload("tu-stubborn"))
+            _, pid_file = self.state.paths(self.cursor.NAME, "tu-stubborn")
+            self._children.append(int(pid_file.read_text().strip()))
+            stubborn = self.read_grandchild(gc_pid_file)
+            self.assertTrue(_alive(stubborn), "SIGTERM を無視する孫が起動していない")
+
+            self.run_hook("post", explore_payload("tu-stubborn"))
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(stubborn):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(stubborn),
+            "SIGTERM を無視する相手に SIGKILL までエスカレートしていない",
+        )
+
+
+class TestPidReuseGuard(OrphanTestCase):
+    """pid ファイルが指す先が analyzer でなければ signal を送らない。
+
+    pid ファイルは TTL 超過まで残りうるので、その間に pid が別プロセスへ再利用される
+    ことがある。**判定できないときは送らない側に倒す** — 無関係なプロセスを撃つ事故の
+    ほうが、cursor を 1 つ取り残すより重い。
+    """
+
+    def test_post_does_not_signal_a_reused_pid(self):
+        victim = self.spawn_unrelated()
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-reuse")
+        pid_file.write_text(str(victim.pid))
+        result_file.write_text("stale")
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.cursor.post("tu-reuse")
+
+        self.assert_unharmed(victim, "analyzer ではない pid に signal を送っている")
+        # 停止を確認できていないので記録は残る (契約は `TestPostRetention` が固定する)
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+
+    def test_reap_orphan_does_not_signal_a_reused_pid(self):
+        victim = self.spawn_unrelated()
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-reuse-gc")
+        pid_file.write_text(str(victim.pid))
+
+        self.cursor.reap_orphan(pid_file)
+
+        self.assert_unharmed(
+            victim, "GC が analyzer ではない pid に signal を送っている"
+        )
+
+    def test_terminate_reports_that_it_did_not_signal(self):
+        victim = self.spawn_unrelated()
+
+        sent = self.cursor.terminate(victim.pid, time.time())
+
+        self.assertFalse(sent, "同一性を確認できない pid で True を返している")
+        self.assert_unharmed(victim, "戻り値は False なのに signal を送っている")
+
+
+class TestStartTimeGuard(OrphanTestCase):
+    """署名が一致しても、pid ファイルより後に起動したプロセスには signal を送らない。
+
+    署名 (`agent --trust --print --mode plan`) は本 plugin の review 系 hook が起動する
+    cursor とも一致する。TTL 超過まで残った pid ファイルの pid がそれらに再利用されて
+    いると、署名照合だけでは素通りして無関係なレビューを `killpg` で撃つ。`pre` は Popen
+    直後に pid ファイルを書くので、自分の analyzer なら開始時刻は必ず mtime 以前になる。
+
+    2 つのテストは **同じフィクスチャで pid ファイルの mtime だけが違う**。開始時刻の
+    照合を外すと negative 側だけが落ちる (署名照合の副作用ではないことが分かる)。
+    """
+
+    def test_terminate_skips_a_process_started_after_the_pid_file(self):
+        """再利用された pid の形: プロセスの開始時刻が pid ファイルの mtime より後。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-start-after")
+        # pid ファイルだけを過去へずらす = 「この pid は 15 分前に記録された。いま走って
+        # いるのはその後で起動した別プロセス」という再利用の状況。
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+
+        sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertFalse(sent, "pid ファイルより後に起動したプロセスに送っている")
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(
+            _alive(grandchild), "送らないと報告したのに process group を撃っている"
+        )
+
+    def test_terminate_signals_an_analyzer_started_before_the_pid_file(self):
+        """正常経路: 開始時刻が mtime 以前なら今までどおり process group ごと停止する。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-start-before")
+
+        sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertTrue(sent, "自分が起動した analyzer なのに停止をあきらめている")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(_alive(grandchild), "孫プロセスが取り残されている")
+
+    def test_terminate_skips_when_the_pid_file_mtime_is_unavailable(self):
+        """mtime が取れない (pid ファイルが消えている) ときも送らない側。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-start-nomtime")
+        pid_file.unlink()
+
+        sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertFalse(sent, "起動時刻が不明なのに signal を送っている")
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(_alive(grandchild), "起動時刻が不明なのに撃っている")
+
+
+class TestPostRetention(OrphanTestCase):
+    """`post()` も停止未確定なら pid / 結果ファイルを残す (GC と同じ扱い)。
+
+    timeout 時に analyzer がまだ走っていて `terminate()` が False を返す経路
+    (`ps` が一時的に使えない / 出力を解析できない / pid ファイルの mtime が読めない /
+    signal を送出できない) では、停止できていないのに掃除に到達していた。pid ファイルは
+    その孤児を追える唯一の記録なので、消すと `gc_orphans()` も再試行できなくなる。
+    """
+
+    def test_post_keeps_both_files_when_the_stop_is_unconfirmed(self):
+        # 署名の一致しない生存プロセスを pid ファイルに記録した形 = `terminate()` が
+        # 送らない側に倒れる形。`reap_orphan` 側の未確定テストと同じフィクスチャ。
+        victim = self.spawn_unrelated()
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-post-unconfirmed")
+        pid_file.write_text(str(victim.pid))
+        result_file.write_text("孤児がまだ書いている途中")
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.cursor.post("tu-post-unconfirmed")
+
+        self.assert_unharmed(victim, "同一性を確認できない pid に signal を送っている")
+        self.assertTrue(
+            pid_file.exists(), "停止を確認できていないのに pid 記録を消している"
+        )
+        self.assertTrue(
+            result_file.exists(), "pid 記録を残しながら結果ファイルだけ消している"
+        )
+        self.assertEqual(
+            [name for name, _, _ in self.state.stale_entries(ttl_sec=0)],
+            [self.cursor.NAME],
+            "post 後の残骸を GC が追えない (記録が失われている)",
+        )
+
+    def test_post_cleans_up_when_the_analyzer_is_stopped(self):
+        """正常経路は従来どおり掃除する (未確定の扱いが常時発動していないこと)。"""
+        gc_pid_file = self.fake_cursor_with_grandchild()
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.run_hook("pre", explore_payload("tu-post-clean"))
+            result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-post-clean")
+            self._children.append(int(pid_file.read_text().strip()))
+            self.read_grandchild(gc_pid_file)
+
+            self.cursor.post("tu-post-clean")
+
+        self.assertFalse(pid_file.exists(), "停止できたのに pid ファイルが残っている")
+        self.assertFalse(result_file.exists(), "停止できたのに結果ファイルが残っている")
+
+
+class TestLeaderlessGroup(OrphanTestCase):
+    """リーダーが先に死んでも、同じ process group に残ったメンバーは停止する。
+
+    `pre` は `start_new_session=True` で起動する (pgid == リーダー pid)。cursor 本体が
+    exit / crash しても cursor-agent (node) の孫は group に残って走り続けることがある。
+    リーダーだけを見て `REAP_STOPPED` を返すと、GC が pid 記録を消した時点で group を
+    撃つ機会が永久に失われる (課金が続く)。
+    """
+
+    def test_reap_stops_a_group_whose_leader_already_exited(self):
+        gc_pid_file = self.fake_cursor_that_exits_leaving_a_grandchild()
+        self.run_hook("pre", explore_payload("tu-leaderless"))
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-leaderless")
+        grandchild = self.read_grandchild(gc_pid_file)
+        leader = self.reap_cursor("tu-leaderless")
+
+        self.assertFalse(_alive(leader), "リーダーがまだ生きている (フィクスチャ不成立)")
+        self.assertTrue(_alive(grandchild), "孫が起動していない (フィクスチャ不成立)")
+        self.assertEqual(
+            os.getpgid(grandchild), leader, "孫がリーダーと同じ process group に居ない"
+        )
+
+        outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_SIGNALED,
+            "リーダーが死んでいるだけで停止済みと報告している",
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(grandchild), "リーダー亡き後の group が撃たれず走り続けている"
+        )
+
+    def test_gc_cleans_up_after_stopping_a_leaderless_group(self):
+        """GC 経由でも同じ (停止できたので pid / 結果ファイルを掃除する)。"""
+        gc_pid_file = self.fake_cursor_that_exits_leaving_a_grandchild()
+        self.run_hook("pre", explore_payload("tu-leaderless-gc"))
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-leaderless-gc")
+        grandchild = self.read_grandchild(gc_pid_file)
+        self.reap_cursor("tu-leaderless-gc")
+
+        ttl = 0.2
+        with mock.patch.object(self.state, "ORPHAN_TTL_SEC", ttl):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not self.state.stale_entries():
+                time.sleep(ttl / 2)
+            self.assertEqual(self.entry.gc_orphans(), 1)
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(_alive(grandchild), "孤児の孫プロセスが残っている")
+        self.assertFalse(pid_file.exists())
+        self.assertFalse(result_file.exists())
+
+    def test_reap_does_not_signal_a_group_that_predates_the_record(self):
+        """記録した起動時刻より前から居る group は自分の子孫ではない — 送らない。
+
+        pgid の番号は group が完全に空になるまで再利用されないが、空になった後に別の
+        setsid プロセスが同じ番号を取ることはある。メンバーの開始時刻が pid ファイルの
+        mtime (= 起動時刻) より前なら、その group は自分の analyzer の残りではない。
+        """
+        pgid, member = self.spawn_leaderless_group()
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-leaderless-foreign")
+        pid_file.write_text(str(pgid))
+        # mtime を group の起動より後にする = 「この group は記録より前から居る」形。
+        # 待たずに時系列を作るため mtime を未来へ動かす (`_START_SKEW_SEC` を超える幅)。
+        future = time.time() + 60
+        os.utime(pid_file, (future, future))
+
+        outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(outcome, self.state.REAP_UNCONFIRMED)
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertFalse(
+            _alive(pgid), "リーダーが生きている (フィクスチャ不成立)"
+        )
+        self.assertTrue(
+            _alive(member), "同一性を確認できない group に signal を送っている"
+        )
+
+    def test_reap_does_not_signal_a_group_when_the_launch_time_is_unknown(self):
+        """pid ファイルの mtime が取れなければ、group が生きていても送らない側。"""
+        pgid, member = self.spawn_leaderless_group()
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-leaderless-nomtime")
+        pid_file.write_text(str(pgid))
+
+        with mock.patch.object(self.cursor, "_started_at", return_value=None):
+            outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(outcome, self.state.REAP_UNCONFIRMED)
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(_alive(member), "起動時刻が不明なのに group を撃っている")
+
+    def test_reap_reports_stopped_when_the_group_is_gone(self):
+        """リーダーも group も居なければ従来どおり停止扱い (掃除してよい)。"""
+        gc_pid_file = self.fake_cursor_that_exits_leaving_a_grandchild()
+        self.run_hook("pre", explore_payload("tu-leaderless-done"))
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-leaderless-done")
+        grandchild = self.read_grandchild(gc_pid_file)
+        self.reap_cursor("tu-leaderless-done")
+        os.kill(grandchild, signal.SIGKILL)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+
+        self.assertEqual(self.cursor.reap_orphan(pid_file), self.state.REAP_STOPPED)
+
+
+class TestPostLeaderlessGroup(OrphanTestCase):
+    """`post()` も掃除の前に group を見る (リーダーの生死だけで決めない)。
+
+    リーダーが post の完了前に exit / crash しても、`pre` が作った独立 process group には
+    孫が残りうる。リーダーが居ないだけで掃除に進むと、その group を追える唯一の記録
+    (pid = pgid) が消え、GC の leaderless-group 経路も以後手が届かない (課金が続く)。
+    """
+
+    def test_post_stops_a_group_whose_leader_already_exited(self):
+        gc_pid_file = self.fake_cursor_that_exits_leaving_a_grandchild()
+        self.run_hook("pre", explore_payload("tu-post-leaderless"))
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-post-leaderless")
+        grandchild = self.read_grandchild(gc_pid_file)
+        leader = self.reap_cursor("tu-post-leaderless")
+
+        self.assertFalse(_alive(leader), "リーダーがまだ生きている (フィクスチャ不成立)")
+        self.assertTrue(_alive(grandchild), "孫が起動していない (フィクスチャ不成立)")
+        self.assertEqual(
+            os.getpgid(grandchild), leader, "孫がリーダーと同じ process group に居ない"
+        )
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.cursor.post("tu-post-leaderless")
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(grandchild),
+            "post がリーダー亡き後の group を撃たず、孫が走り続けている",
+        )
+        self.assertFalse(pid_file.exists(), "停止できたのに pid ファイルが残っている")
+        self.assertFalse(result_file.exists(), "停止できたのに結果ファイルが残っている")
+
+    def test_post_keeps_the_records_when_a_leaderless_group_is_unconfirmed(self):
+        """同一性を確認できない group では両ファイルを残す (GC が再試行できる形)。
+
+        `TestLeaderlessGroup` の「記録より前から居る group」と同じフィクスチャを post から
+        通す。リーダーが死んでいる時点で掃除していた版では、まだ走っている group を追える
+        pid / pgid の記録がここで失われていた。
+        """
+        pgid, member = self.spawn_leaderless_group()
+        result_file, pid_file = self.state.paths(
+            self.cursor.NAME, "tu-post-foreign-group"
+        )
+        pid_file.write_text(str(pgid))
+        result_file.write_text("孤児がまだ書いている途中")
+        # mtime を group の起動より後にする = 「この group は記録より前から居る」形。
+        # 待たずに時系列を作るため mtime を未来へ動かす (`_START_SKEW_SEC` を超える幅)。
+        future = time.time() + 60
+        os.utime(pid_file, (future, future))
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.cursor.post("tu-post-foreign-group")
+
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(
+            _alive(member), "同一性を確認できない group に signal を送っている"
+        )
+        self.assertTrue(
+            pid_file.exists(), "停止を確認できていないのに pid 記録を消している"
+        )
+        self.assertTrue(
+            result_file.exists(), "pid 記録を残しながら結果ファイルだけ消している"
+        )
+
+
+class TestZombieLeader(OrphanTestCase):
+    """zombie のリーダーは「停止済み」として group 側の判定に進める。
+
+    PID 1 が孤児を reap しないコンテナでは、処理を終えたリーダーが zombie として残り
+    `os.kill(pid, 0)` が成功し続ける。走行中と読むと `terminate()` に進むが、zombie の
+    `ps` は `<defunct>` しか返さず署名を照合できないため、毎回 `REAP_UNCONFIRMED` に倒れる
+    — group に残った孫は撃たれず、pid / 結果ファイルも永遠に残る (GC が収束しない)。
+    """
+
+    def test_reap_stops_a_group_behind_a_zombie_leader(self):
+        pgid, member = self.spawn_zombie_leader_group()
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-zombie-leader")
+        pid_file.write_text(str(pgid))
+
+        outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_SIGNALED,
+            "zombie のリーダーを走行中と読んで group 側の判定に進んでいない",
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(member):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(member), "zombie のリーダーの裏に残ったメンバーが走り続けている"
+        )
+
+    def test_gc_cleans_up_a_record_whose_leader_is_a_zombie(self):
+        """メンバーが居なくなれば停止扱い = GC が記録を掃除できる (未確定を返し続けない)。"""
+        pgid, member = self.spawn_zombie_leader_group()
+        os.kill(member, signal.SIGKILL)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(member):
+            time.sleep(0.05)
+        self.assertFalse(_alive(member), "メンバーを止められていない (フィクスチャ不成立)")
+
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-zombie-only")
+        result_file.write_text("x")
+        pid_file.write_text(str(pgid))
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        self.assertEqual(
+            self.cursor.reap_orphan(pid_file),
+            self.state.REAP_STOPPED,
+            "zombie だけの group を止める対象と読んでいる",
+        )
+        self.assertEqual(
+            self.entry.gc_orphans(),
+            1,
+            "zombie のリーダーの記録を GC が永久に残している",
+        )
+        self.assertFalse(pid_file.exists())
+        self.assertFalse(result_file.exists())
+
+
+class TestSignalDelivery(OrphanTestCase):
+    """signal を送出できたかを戻り値に反映する (握りつぶして成功扱いにしない)。
+
+    `os.killpg` が `PermissionError` / `OSError` を投げた場合、停止 signal は届いていない。
+    それでも `terminate()` が True を返すと、GC が `REAP_SIGNALED` と読んで pid 記録を
+    消し、走り続ける group を二度と追えなくなる。
+    """
+
+    def _refuse_real_signals(self):
+        """`killpg(pgid, 0)` (生死 probe) だけ通し、実 signal は EPERM にする patch。"""
+        real_killpg = os.killpg
+
+        def refuse(pgid: int, sig: int):
+            if sig == 0:
+                return real_killpg(pgid, sig)
+            raise PermissionError(1, "Operation not permitted")
+
+        return mock.patch.object(os, "killpg", side_effect=refuse)
+
+    def test_terminate_reports_false_when_no_signal_can_be_sent(self):
+        leader, grandchild, pid_file = self._launch_analyzer("tu-eperm")
+
+        with self._refuse_real_signals():
+            sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
+
+        self.assertFalse(
+            sent, "TERM も KILL も送出できていないのに送ったと報告している"
+        )
+        self.assertTrue(
+            _alive(grandchild), "signal は送れていないのに group が止まっている"
+        )
+
+    def test_reap_orphan_is_unconfirmed_when_the_signal_fails(self):
+        """GC 側から見ると未確定 = 記録を残して次回に委ねる。"""
+        leader, grandchild, pid_file = self._launch_analyzer("tu-eperm-gc")
+
+        with self._refuse_real_signals():
+            outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(outcome, self.state.REAP_UNCONFIRMED)
+        self.assertTrue(_alive(grandchild), "送れていないのに止まっている")
+
+    def test_signal_group_reports_delivery_failure_and_empty_group(self):
+        victim = self.spawn_unrelated()
+
+        self.assertTrue(
+            self.cursor._signal_group(victim.pid, signal.SIGTERM),
+            "送出できたのに False を返している",
+        )
+        with mock.patch.object(os, "killpg", side_effect=PermissionError()):
+            self.assertFalse(
+                self.cursor._signal_group(victim.pid, signal.SIGTERM),
+                "送出できていないのに True を返している",
+            )
+        with mock.patch.object(os, "killpg", side_effect=ProcessLookupError()):
+            self.assertTrue(
+                self.cursor._signal_group(victim.pid, signal.SIGTERM),
+                "メンバーの居ない group は停止扱い (記録を残す必要が無い)",
+            )
+
+
+class TestKillEscalationFailure(OrphanTestCase):
+    """**TERM は届いたが無視され、SIGKILL の送出に失敗した**経路は停止未確定。
+
+    `_stop_group()` は TERM の送出成功を `sent` に持ったまま KILL の失敗と OR していた
+    ため、この経路が「停止 signal を送った」= `REAP_SIGNALED` として報告されていた。
+    group は生きているのに pid 記録が消えるので、以後どの GC もその孤児に手が届かない
+    (ハングした cursor が走り続けて課金される)。判定を「signal を送れたか」ではなく
+    **「group が止まったか、または SIGKILL まで送出できたか」**に変える。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # 猶予は 2 回 (TERM 待ち) しか使わないので短くてよい。suite を待たせない
+        self._short_grace = mock.patch.object(self.cursor, "KILL_GRACE_SEC", 0.3)
+        self._short_grace.start()
+
+    def tearDown(self) -> None:
+        self._short_grace.stop()
+        super().tearDown()
+
+    def _kill_signal_fails(self):
+        """生死 probe (`sig=0`) と SIGTERM は通し、**SIGKILL だけ** OSError にする patch。
+
+        `PermissionError` に限らない (コンテナの seccomp / LSM が `EPERM` 以外を返す
+        こともある) ので、`_signal_group` が拾う側の基底例外で再現する。
+        """
+        real_killpg = os.killpg
+
+        def selective(pgid: int, sig: int):
+            if sig == signal.SIGKILL:
+                raise OSError("SIGKILL を送れない")
+            return real_killpg(pgid, sig)
+
+        return mock.patch.object(os, "killpg", side_effect=selective)
+
+    def test_stop_group_reports_false_when_the_kill_escalation_fails(self):
+        leader, stubborn, _ = self._launch_stubborn_analyzer("tu-kill-fails")
+
+        with self._kill_signal_fails():
+            stopped = self.cursor._stop_group(leader)
+
+        self.assertFalse(
+            stopped,
+            "SIGKILL を送出できず group も生きているのに停止できたと報告している",
+        )
+        self.assertTrue(
+            _alive(stubborn), "SIGKILL は送れていないのに group が止まっている"
+        )
+
+    def test_reap_is_unconfirmed_when_the_kill_escalation_fails(self):
+        """GC 側から見ると未確定 = pid / 結果ファイルを残して次回に委ねる。"""
+        leader, stubborn, pid_file = self._launch_stubborn_analyzer("tu-kill-fails-gc")
+        result_file, _ = self.state.paths(self.cursor.NAME, "tu-kill-fails-gc")
+
+        with self._kill_signal_fails():
+            outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_UNCONFIRMED,
+            "SIGKILL を送出できていないのに停止を試みたと報告している",
+        )
+        self.assertTrue(_alive(stubborn), "送れていないのに group が止まっている")
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+        self.assertTrue(result_file.exists(), "停止未確定なのに結果ファイルを消している")
+
+
+class TestStaleEntries(HookTestCase):
+    """`state.stale_entries` の TTL 判定 (pid ファイルの mtime = 起動時刻で測る)。"""
+
+    def _age(self, path, seconds: float) -> None:
+        past = time.time() - seconds
+        os.utime(path, (past, past))
+
+    def test_fresh_entries_are_not_stale(self):
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-fresh")
+        result_file.write_text("x")
+        pid_file.write_text("1")
+
+        self.assertEqual(self.state.stale_entries(), [])
+
+    def test_entries_older_than_ttl_are_reported_once(self):
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-old")
+        result_file.write_text("x")
+        pid_file.write_text("1")
+        self._age(pid_file, self.state.ORPHAN_TTL_SEC + 60)
+        self._age(result_file, self.state.ORPHAN_TTL_SEC + 60)
+
+        entries = self.state.stale_entries()
+
+        self.assertEqual(entries, [(self.cursor.NAME, result_file, pid_file)])
+
+    def test_age_is_measured_on_the_pid_file_not_the_result_file(self):
+        """走り続けている孤児ほど結果ファイルの mtime が新しくなる。
+
+        結果ファイル基準にすると「止めたい対象ほど残る」逆転が起きるので、
+        起動時刻 (pid ファイルの mtime) で測る。
+        """
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-writing")
+        pid_file.write_text("1")
+        self._age(pid_file, self.state.ORPHAN_TTL_SEC + 60)
+        result_file.write_text("まだ書いている")  # mtime は今
+
+        self.assertEqual(
+            self.state.stale_entries(), [(self.cursor.NAME, result_file, pid_file)]
+        )
+
+    def test_current_tool_use_id_is_excluded(self):
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-current")
+        result_file.write_text("x")
+        pid_file.write_text("1")
+        self._age(pid_file, self.state.ORPHAN_TTL_SEC + 60)
+
+        self.assertEqual(
+            self.state.stale_entries(exclude_tool_use_id="tu-current"),
+            [],
+            "実行中の tool_use_id を GC 対象にしている",
+        )
+
+    def test_result_only_leftover_falls_back_to_its_own_mtime(self):
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-orphan-txt")
+        result_file.write_text("x")
+        self._age(result_file, self.state.ORPHAN_TTL_SEC + 60)
+
+        self.assertEqual(
+            self.state.stale_entries(), [(self.cursor.NAME, result_file, pid_file)]
+        )
+
+    def test_missing_base_dir_is_not_an_error(self):
+        """まだ一度も analyzer を起動していないセッションでも GC 走査が落ちないこと。"""
+        self.assertFalse(self.state.BASE_DIR.exists())
+
+        self.assertEqual(self.state.stale_entries(), [])
+
+
+class TestGcOrphans(OrphanTestCase):
+    """`__main__.gc_orphans` が残骸を消し、走っている孤児を止めること。"""
+
+    def test_gc_stops_at_the_budget_and_leaves_the_rest_for_next_time(self):
+        # 予算 0 なら 1 件も処理せず、予算があれば全件処理する。この対で
+        # 予算打ち切りの break が実在することを固定する (main 側レビューの指摘)。
+        for i in range(3):
+            r, p = self.state.paths(self.cursor.NAME, f"tu-budget-{i}")
+            r.write_text("x")
+            p.write_text("999999")
+            past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+            os.utime(p, (past, past))
+            os.utime(r, (past, past))
+        with mock.patch.object(self.state, "GC_BUDGET_SEC", 0.0):
+            self.assertEqual(self.entry.gc_orphans(), 0, "予算 0 でも掃除している")
+        self.assertEqual(self.entry.gc_orphans(), 3)
+
+    def test_gc_removes_stale_files(self):
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-gc")
+        result_file.write_text("x")
+        pid_file.write_text("999999")
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        self.assertEqual(self.entry.gc_orphans(), 1)
+        self.assertFalse(result_file.exists())
+        self.assertFalse(pid_file.exists())
+
+    def test_gc_terminates_a_still_running_orphan_group(self):
+        """**TTL を縮めて待つ**。pid ファイルの mtime を過去へずらしてはいけない。
+
+        本番の孤児は「pid ファイルの mtime と同時刻に起動して TTL を超えて生き残った」
+        プロセス。mtime だけを過去へずらすと、走っているのは mtime より後に起動した
+        プロセスということになり、`cursor` の PID 同一性判定 (再利用ガード) から見て
+        別プロセスと区別が付かない — 再利用の状況を作って「停止できること」を主張する
+        フィクスチャになってしまう。TTL 側を縮めれば時系列は本番と同じまま短縮できる。
+        """
+        gc_pid_file = self.fake_cursor_with_grandchild()
+        self.run_hook("pre", explore_payload("tu-gc-live"))
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-gc-live")
+        leader = int(pid_file.read_text().strip())
+        self._children.append(leader)
+        grandchild = self.read_grandchild(gc_pid_file)
+
+        ttl = 0.2
+        with mock.patch.object(self.state, "ORPHAN_TTL_SEC", ttl):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not self.state.stale_entries():
+                time.sleep(ttl / 2)
+            self.assertEqual(self.entry.gc_orphans(), 1)
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and (_alive(leader) or _alive(grandchild)):
+            time.sleep(0.05)
+        self.assertFalse(_alive(grandchild), "孤児の孫プロセスが残っている")
+        self.assertFalse(result_file.exists())
+        self.assertFalse(pid_file.exists())
+
+    def test_gc_keeps_the_records_when_the_stop_is_unconfirmed(self):
+        """停止を確認できなかった孤児は pid / 結果ファイルを残し、次回の GC が再試行する。
+
+        pid ファイルは**その孤児を追える唯一の記録**。`ps` が一時的に使えない・cmdline が
+        切り詰められた等で同一性を確認できなかったときに無条件で消すと、以後どの GC も
+        再試行できず、ハングした cursor が走り続けて課金され続ける。
+
+        フィクスチャは「署名の一致しない生存プロセスが pid ファイルに記録されている」形
+        (= `terminate()` が送らない側に倒れる形) で、`reap_orphan` の
+        `REAP_UNCONFIRMED` を実際に通す。
+        """
+        victim = self.spawn_unrelated()
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-unconfirmed")
+        result_file.write_text("孤児がまだ書いている途中")
+        pid_file.write_text(str(victim.pid))
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        with mock.patch.object(
+            self.cursor, "reap_orphan", wraps=self.cursor.reap_orphan
+        ) as reap:
+            self.assertEqual(
+                self.entry.gc_orphans(), 0, "停止を確認できていないのに掃除を数えている"
+            )
+            self.assertTrue(
+                pid_file.exists(), "停止を確認できていないのに pid 記録を消している"
+            )
+            self.assertTrue(
+                result_file.exists(), "pid 記録を残しながら結果ファイルだけ消している"
+            )
+
+            self.assertEqual(self.entry.gc_orphans(), 0)
+            self.assertEqual(reap.call_count, 2, "次回の GC が再試行していない")
+
+        self.assert_unharmed(victim, "同一性を確認できない pid に signal を送っている")
+
+    def test_gc_keeps_the_records_when_reaping_raises(self):
+        """`reap_orphan` が例外で落ちた場合も未確定扱い (記録を残す)。"""
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-reap-raises")
+        result_file.write_text("x")
+        pid_file.write_text("999999")
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        with mock.patch.object(
+            self.cursor, "reap_orphan", side_effect=OSError("ps が使えない")
+        ):
+            self.assertEqual(self.entry.gc_orphans(), 0)
+
+        self.assertTrue(pid_file.exists(), "停止に失敗した孤児の pid 記録を消している")
+        self.assertTrue(result_file.exists())
+        self.assertEqual(self.entry.gc_orphans(), 1, "次回の GC が掃除できていない")
+
+    def test_gc_runs_in_both_phases(self):
+        """pre / post のどちらから入っても GC が走る (post が来ない経路の受け皿)。"""
+        for phase, tool_use_id in (("pre", "tu-phase-pre"), ("post", "tu-phase-post")):
+            with self.subTest(phase=phase):
+                self.fake_cursor()
+                result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-leftover")
+                result_file.write_text("x")
+                pid_file.write_text("999999")
+                past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+                os.utime(pid_file, (past, past))
+                os.utime(result_file, (past, past))
+
+                self.run_hook(phase, explore_payload(tool_use_id))
+                if phase == "pre":
+                    self.reap_cursor(tool_use_id)
+
+                self.assertFalse(
+                    pid_file.exists(), f"{phase} フェーズで GC が走っていない"
+                )
+
+    def test_gc_is_skipped_for_non_explore_agents(self):
+        """Explore 以外の Agent 呼び出しでは何もしない (既存の早期 return を壊さない)。"""
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-other")
+        result_file.write_text("x")
+        pid_file.write_text("999999")
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+
+        self.run_hook("pre", explore_payload("tu-x", subagent_type="general-purpose"))
+
+        self.assertTrue(pid_file.exists(), "Explore 以外でも GC が走っている")
+
+
+class TestGcBudgetInsideReap(OrphanTestCase):
+    """GC の予算は **1 エントリの停止処理の内部**にも効く。
+
+    予算をエントリ**間**でしか見ていなかったため、1 件の `reap_orphan()` が `ps` の
+    timeout (`/proc` の無い環境では各 2 秒を複数回) と TERM の猶予 (2 秒) を積み上げ、
+    `hooks.json` の同期 PreToolUse timeout (5 秒) を超えて hook 自体が kill されうる。
+    そうなると現在の analyzer を起動できないうえ、次回もまた同じ孤児から処理して同じ
+    ところで死ぬ (同じ残骸に毎回当たり続ける)。**予算超過で hook が死ぬ方向には倒さない**。
+    """
+
+    def test_reap_returns_unconfirmed_as_soon_as_the_budget_is_gone(self):
+        """残り予算ゼロなら即 `REAP_UNCONFIRMED` (待たない・撃たない・記録は残す)。"""
+        leader, stubborn, pid_file = self._launch_stubborn_analyzer("tu-budget-gone")
+        result_file, _ = self.state.paths(self.cursor.NAME, "tu-budget-gone")
+
+        with mock.patch.object(self.cursor, "KILL_GRACE_SEC", 5.0):
+            started = time.monotonic()
+            outcome = self.cursor.reap_orphan(pid_file, deadline=time.monotonic())
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_UNCONFIRMED,
+            "予算切れで停止を試みられていないのに掃除してよいと報告している",
+        )
+        self.assertLess(elapsed, 0.5, f"残り予算ゼロなのに {elapsed:.2f}s 使っている")
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+        self.assertTrue(result_file.exists(), "停止未確定なのに結果ファイルを消している")
+        self.assertTrue(_alive(stubborn), "予算切れなのに signal を送っている")
+
+    def test_gc_caps_the_ps_timeout_with_the_remaining_budget(self):
+        """`ps` が固まる環境でも、GC 全体が予算を大きく超えない。
+
+        `/proc` の無い環境では生死判定も同一性判定も `ps` 頼りで、1 エントリで複数回
+        呼ぶ。既定の 2 秒 timeout をそのまま重ねると hook timeout (5 秒) を食い潰す。
+        同一性を確認できないので停止は未確定 = 記録を残す側に倒れる。
+        """
+        self._launch_analyzer("tu-slow-ps")
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-slow-ps")
+        budget, ttl = 0.4, 0.2
+
+        with mock.patch.object(
+            self.state, "ORPHAN_TTL_SEC", ttl
+        ), mock.patch.object(self.state, "GC_BUDGET_SEC", budget):
+            self.wait_until_stale(ttl)
+            with self.slow_ps():
+                started = time.monotonic()
+                removed = self.entry.gc_orphans()
+                elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed,
+            budget + 1.0,
+            f"`ps` の timeout を残り予算で cap していない ({elapsed:.2f}s 使っている)",
+        )
+        self.assertEqual(removed, 0, "同一性を確認できていないのに掃除している")
+        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
+        self.assertTrue(result_file.exists(), "停止未確定なのに結果ファイルを消している")
+
+    def test_gc_caps_the_term_grace_with_the_remaining_budget(self):
+        """SIGTERM を無視する group が相手でも、猶予は残り予算で打ち切る。"""
+        self._launch_stubborn_analyzer("tu-grace-cap")
+        budget, ttl = 0.5, 0.2
+
+        with mock.patch.object(
+            self.state, "ORPHAN_TTL_SEC", ttl
+        ), mock.patch.object(
+            self.state, "GC_BUDGET_SEC", budget
+        ), mock.patch.object(self.cursor, "KILL_GRACE_SEC", 5.0):
+            self.wait_until_stale(ttl)
+            started = time.monotonic()
+            self.entry.gc_orphans()
+            elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed,
+            budget + 1.0,
+            f"TERM の猶予を残り予算で cap していない ({elapsed:.2f}s 使っている)",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

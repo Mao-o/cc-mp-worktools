@@ -5,6 +5,216 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.10.0
+
+**内部バックログの精査分 3 件 (explore-parallel の待機タイミング / 残骸の掃除、
+exitplan-review の codex への受け渡し)。挙動変更を含むため minor bump。**
+
+### explore-parallel: post を `async` hook にした (待ち時間の隠蔽が成立していなかった)
+
+Agent ツールは **subagent が背景に移った時点で戻る**。公式 docs (`PreToolUse input` の
+Agent 表) 逐語:
+
+> `status` ... `"completed"` for foreground subagents, `"async_launched"` for background
+> subagents. As of v2.1.198, subagents run in the background by default, so an omitted
+> `run_in_background` also produces `"async_launched"`
+>
+> For background subagents, the tool returns when the task moves to the background
+
+つまり `PostToolUse(Agent)` は Explore の完了時ではなく**起動直後**に発火する。0.9.1 まで
+の post は同期 hook のまま最大 `TIMEOUT_SEC` (60) 秒ポーリングしていたので、「並走して
+待ち時間を隠す」という設計と裏腹に、Explore が走り出した直後に親を 60 秒止めていた。
+
+`hooks.json` で post を `"async": true` にして解消した (docs `Run hooks in the background`:
+"set `\"async\": true` to run the hook in the background while Claude continues working"、
+"After the background process exits, Claude Code delivers the `additionalContext` and
+`systemMessage` fields from the hook's JSON response to Claude on the next conversation
+turn")。**発火条件 (イベント / matcher) は変えていない** — 変わるのは「親をブロックするか」
+と「結果が届くのが次ターンになるか」の 2 点だけ。
+
+- `tool_response.status` を読んで待機を出し分ける案は採らなかった。async 化すると
+  foreground / background のどちらでも親は止まらないので、分岐しても挙動が変わらない
+- `timeout` は async 化後は強制されない (docs 逐語)。`hooks.json` の `90` は意図の記録として
+  残し、待機の実上限は `cursor.TIMEOUT_SEC` 側に持つ
+- **実発火 (次ターンに `additionalContext` が本当に届くか) はハーネスでしか確認できない**。
+  本リリースでは `tests/test_hook_registration.py` で登録形 (post は async / pre は同期 /
+  発火条件は据置) を契約として固定するに留めている
+
+### explore-parallel: 孤児 analyzer の停止と残骸の TTL GC
+
+`post()` の後始末に到達しない経路がある — Agent ツールの失敗、ユーザー中断、セッション
+終了、`async` hook が `claude -p` の teardown で kill される場合 (docs: outcome
+`cancelled`)。0.9.1 まではこれらで `$TMPDIR/explore-parallel/` の pid / 結果ファイルが
+無期限に残り、バックグラウンドの Cursor Agent も自然完了まで走り続けていた (課金)。
+
+- `state.stale_entries()` が `ORPHAN_TTL_SEC` (900 秒) 超の残骸を拾い、
+  `__main__.gc_orphans()` が **pre / post の両方**で掃除する。経過時間は **pid ファイルの
+  mtime (= 起動時刻)** で測る — 結果ファイルの mtime は analyzer が書くたびに更新されるので、
+  それを基準にすると「走り続けている孤児ほど新しく見えて残る」逆転が起きる
+- 現在の `tool_use_id` は除外し、`GC_BUDGET_SEC` (2.0 秒) で打ち切る (pre の hook timeout
+  5 秒を壊さない)。取りこぼしは次回の GC が拾う
+- **停止は process group ごと** (`os.killpg`、SIGTERM → 猶予 → SIGKILL)。`pre` は
+  `start_new_session=True` で起動している (pgid == pid) のに、0.9.1 までは
+  `os.kill(pid, SIGTERM)` で**グループリーダーだけ**を止めており、cursor-agent (node) の
+  孫プロセスが取り残されていた
+- signal を送る前に `ps -ww -o command=` の cmdline を起動 argv の署名と突合する
+  (pid ファイルは TTL 超過まで残るため、その間に pid が別プロセスへ再利用されうる)。
+  **判定できないときは送らない側に倒す**。実行ファイル名は照合しない — `cursor` は実体へ
+  `exec` するシムのことがあり、名前まで要求すると「シム環境では一切 kill できない」=
+  ガードではなく停止処理の無効化になる
+- **マージ前レビューの指摘**: 署名 (`agent --trust --print --mode plan`) だけでは足りない。
+  同じ argv で cursor を起動する hook が本 plugin 内に他にもあり (exitplan-review /
+  post-implementation-review)、TTL 超過まで残った pid ファイルの pid がそれらに再利用
+  されていると署名照合を素通りして無関係なレビューを `killpg` で撃つ。`ps -o etime=`
+  (POSIX。`etimes` は procps 拡張で macOS に無く、`lstart` は locale 依存) で
+  **プロセスの開始時刻**も取り、pid ファイルの mtime (= 起動時刻) 以前であることを要求する
+  ように直した。`pre` は Popen 直後に pid ファイルを書くので自分の analyzer なら必ず
+  満たす。`ps` が取れない・解析できない・mtime が取れない場合はいずれも送らない側
+- **マージ前レビューの指摘**: 停止を確認できなかった孤児まで無条件に掃除していた。
+  同一性の確認や signal が失敗する経路 (`ps` が一時的に使えない・cmdline が切り詰められた
+  ・signal が例外を投げた) では `reap_orphan()` が停止できずに戻るが、その直後の掃除が
+  **その孤児を追える唯一の記録である pid ファイル**を消してしまい、以後どの GC も再試行
+  できなくなる (ハングした Cursor が走り続けて課金され続ける)。`reap_orphan()` に停止の
+  確度を返させ (`state.REAP_STOPPED` / `REAP_SIGNALED` / `REAP_UNCONFIRMED`)、
+  **走っていないことを確認できたか、停止 signal の送出を実際に試みたときだけ**掃除する
+  ように直した。未確定 (および `reap_orphan()` 自体が例外で落ちた場合) は pid / 結果
+  ファイルを残して次回の GC に委ねる — 結果ファイルも残すのは、孤児がまだ書いている最中で
+  ありうるうえ、pid だけ残しても対になる出力が失われるため。analyzer が登録から外れた名前 /
+  pid ファイルの無い結果だけの残骸は、そもそも止める対象を追えないので従来どおり掃除する
+- **マージ前レビューの指摘**: その掃除の契約が `post()` 側に反映されていなかった。timeout
+  時に analyzer がまだ走っていて `terminate()` が False を返す経路 (同一性を確認できない /
+  signal を送出できない) でも無条件に pid ファイルを消し、続けて結果ファイルも消していた。
+  GC が拾える唯一の記録を post が消すと、走り続ける Cursor をもう誰も追えない。
+  **未確定なら post も両ファイルを残す**ように揃えた (結果の読み取り自体は best-effort で
+  続ける — 掃除しないだけで、その後にファイルを見るのは中身を読まない GC だけなので
+  二重注入にはならない)
+- **マージ前レビューの指摘**: リーダーが死んでいるだけで「停止済み」と報告していた。
+  `pre` が作った独立 process group には、cursor 本体 (グループリーダー) が exit / crash
+  した後も孫が残って走り続けることがある。リーダーだけを見て `REAP_STOPPED` を返すと、
+  GC が pid 記録を消した時点で group を撃つ機会が永久に失われる。リーダーが居ないときは
+  **group の生存メンバー**を見るようにした。リーダーの cmdline はもう読めないので、
+  同一性は「生きた (非 zombie) メンバーが居ること」(pgid の番号はメンバーが残っている
+  限り再割当てされない) と「メンバーの開始時刻がいずれも pid ファイルの mtime より前で
+  ないこと」(メンバーは analyzer の子孫なので起動時刻以降に生まれる) の 2 つで見る。
+  `ps -A -o pid=,pgid=,stat=,etime=` を 1 回呼んでメンバー単位で判定し、判定不能は
+  すべて未確定側。**限界**は「group が一度空になってから pgid の番号が再利用され、その
+  新しいリーダーも既に死んでいる」という二重の偶然を弾けないこと (CLAUDE.md に明記)
+- **マージ前レビューの指摘**: その group 側の判定を `post()` が通っていなかった。post は
+  リーダーの生死しか見ておらず、リーダーが post の完了前に exit / crash して独立 process
+  group に孫が残った場合、停止を試みないまま掃除に進んでいた。**その group を追える唯一の
+  記録 (pid = pgid) がそこで消える**ので、上で入れた leaderless-group GC も以後その孫に
+  手が届かない (走り続けて課金される)。post も cleanup の前に `_reap_leaderless_group` を
+  通し、生存メンバーが居れば停止を試み、未確定なら pid / 結果ファイルを対で残すようにした。
+  あわせて pid が正でないときは group 判定に入らないようにしている
+  (`killpg(0, sig)` は**呼び出し側自身の process group** = hook プロセスを撃つため)
+- **マージ前レビューの指摘**: 生存判定 (`os.kill(pid, 0)`) が zombie を「走行中」と読んで
+  いた。**PID 1 が孤児を reap しないコンテナ**では、処理を終えたリーダーが zombie として
+  group に残り `os.kill(pid, 0)` が成功し続ける。停止経路 (`terminate()`) に進んでも
+  zombie の `ps -o command=` は `<defunct>` しか返さず署名を照合できないため、**毎回
+  `REAP_UNCONFIRMED` に倒れて pid / 結果ファイルが永遠に残る** (孤児は既に居ないのに GC が
+  収束しない。group に孫が残っていてもそれが撃たれない)。production 側の生存判定でも
+  `_common/subproc.pid_is_zombie()` を使い (0.10.0 でテストヘルパー `_alive` だけ対応済み
+  だった)、**zombie は停止済み**として group 側の判定に進めるようにした。判定不能な環境
+  (`/proc` も `ps` も使えない) では従来どおり `os.kill` の結果に従う
+- **マージ前レビューの指摘**: `os.killpg` の失敗を握りつぶしたまま「停止を試みた」と
+  報告していた。`PermissionError` / その他の `OSError` では停止 signal が届いていない
+  のに `terminate()` が無条件に True を返すため、**TERM も KILL も送れていないのに
+  `REAP_SIGNALED` として pid 記録が消えていた**。`_signal_group()` に送出可否を返させ、
+  TERM / KILL の**どちらも送出できなければ False** (= 未確定) にした。
+  `ProcessLookupError` (group にメンバーが居ない) は「止めるものが無い」= 目的達成なので
+  True 側、TERM が通って KILL だけ失敗した場合も True (停止 signal は届いており、group が
+  残っていれば次回の GC が同じ手順で再試行できる)。**ただしこの「TERM が通れば True」は
+  group が生き残る穴を残していた** — 次項で判定そのものを差し替えている
+- **マージ前レビューの指摘**: その `_signal_group()` 化のあとも、**TERM の送出成功が
+  KILL の失敗と OR で残って**いた。group が SIGTERM を無視し、続く SIGKILL が
+  `PermissionError` 等の `OSError` で送出できなかった経路では、group が生きているのに
+  `_stop_group()` が True (= `REAP_SIGNALED`) を返し、やはり pid 記録が消えていた。
+  判定を「signal を送れたか」ではなく **「猶予後に group が止まったか、または SIGKILL まで
+  送出できたか」**に変えた。エスカレーションに失敗して group が残っていれば False =
+  停止未確定で、記録を残して次回の GC が同じ手順で再試行する
+- **マージ前レビューの指摘**: GC の予算 (`GC_BUDGET_SEC` 2 秒) をエントリ**間**でしか
+  見ていなかった。1 件の `reap_orphan()` は `/proc` の無い環境 (macOS 等) で `ps` を複数回
+  (各 2 秒 timeout) 呼び、さらに TERM の猶予 (2 秒) を待つため、**1 件だけで `hooks.json` の
+  同期 PreToolUse timeout (5 秒) を超えて hook 自体が kill され**うる。そうなると現在の
+  analyzer を起動できないうえ、記録は残るので次回もまた同じ孤児から処理して同じところで
+  死ぬ (同じ残骸に毎回当たり続ける)。残り予算 (deadline) を `reap_orphan()` →
+  `terminate()` / `_reap_leaderless_group()` → `_stop_group()` まで持ち回り、**`ps` の
+  timeout と TERM の猶予を残り予算で cap** するようにした (`_common/subproc` の生死・
+  同一性判定にも `timeout_sec` を足してある)。予算が尽きたら `REAP_UNCONFIRMED` で戻して
+  記録を残す — 判定不能側 = 掃除しない側に倒れるので、**予算超過で hook が死ぬ方向には
+  決して倒れない**。`post()` は `async` hook で harness の timeout が掛からないため、
+  従来どおり予算なしで回す
+- `PostToolUseFailure(Agent)` を `hooks.json` に足して即時掃除する案は**採っていない**。
+  イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」の
+  変更にあたる。TTL GC が同じ失敗モードを発火条件を変えずに覆う
+
+停止処理が POSIX 依存 (`os.killpg` / `ps`) になったため、README の Windows 非対応の記述を
+更新した (Windows では同一性を確認できず、停止をあきらめる側に倒れる)。
+
+### exitplan-review: codex への受け渡しを stdin 一本化
+
+0.9.1 まではプロンプトを引数、プラン本文を stdin に分けており、`codex` の「引数のプロンプト
+と piped stdin を併用すると stdin が block として追記される」挙動に依存していた。この併用
+挙動が無い版では **stdin が無視されてプラン本文抜きでレビューが走る** — 結果は当然 clean に
+ならないので、利用者から見ると「プランを見ていないレビューで差し戻された」ことになる。
+しかも失敗が静かなので気付けない。
+
+テンプレートとプランを連結して `codex exec -s read-only --ephemeral -` に一本化し、版依存を
+外した。`-` を解さない版では引数が足りず非 0 終了 → `subproc.run_for_output` が None →
+**fail-open** (レビューなしで通す) に倒れる。レビュアーの失敗は fail-open という既存の契約と
+同じ側で、静かな誤差し戻しより軽い。長いプランを argv に載せなくなるので引数長の上限に
+当たるリスクも消える。
+
+あわせてプロンプト 3 本 (`planning-codex.md` / `planning-cursor.md` /
+`post-implementation-cursor.md`) の「`<stdin>` に記載された…」を実際の渡し方に合わせて
+「末尾の『## レビュー対象…』節にある…」へ直した。codex 側は今回の変更に伴う追随だが、
+**cursor 側 2 本は元から誤記**だった — cursor には最初からプロンプト末尾に埋め込んで
+argv で渡しており、stdin は使っていない。同じ 1 文が 3 ファイルに複製されていたので
+まとめて直している。
+
+**README に「検証済み codex バージョン」は書いていない**。本リリースでは codex を実際に
+起動していないため、実測していない版数を書けない。
+
+### 対応不要と判断した項目
+
+- **exitplan-review の `decision: "block"` → `permissionDecision: "deny"` 移行**: 記載の
+  欠陥は既に存在しない。0.8.0 で `hookSpecificOutput.permissionDecision` へ移行済みで、
+  公式 docs の現行仕様 (「PreToolUse previously used top-level `decision` and `reason`
+  fields, but these are deprecated for this event」) と一致していることを逐語で再確認した
+- **`cursor` の存在確認 (`which(cursor)`) が IDE ランチャーや未ログインを誤検出する件**:
+  未着手。再現に実機の PATH 事情 (シムと IDE ランチャーの衝突) と `cursor-agent --version`
+  の応答が必要で、外部 AI CLI を起動しない本リリースの制約下では再現も回帰テストも
+  書けない。検出順 (`cursor-agent` → `agent` → `cursor`) と TTL キャッシュの設計も
+  実測なしには選べないため、実測できる場で扱う
+
+追加した各テストは、対応する実装行を意図的に壊した状態 (mutation) で先に落ちることを
+確認してから採用した (10 パターン)。うち 2 件は当初 mutation を素通りしていた —
+犠牲プロセスが test プロセスの直接の子で、SIGTERM を受けても zombie として残り
+`os.kill(pid, 0)` が成功し続けるため。`Popen.poll()` で reap して判定するよう直した。
+
+**マージ前レビューの指摘**: 同じ zombie の罠が `tests/test_orphan_gc.py` の生死判定ヘルパー
+(`_alive`) 側にも残っていた。PID 1 が孤児を reap しないコンテナでは、kill に成功した孫が
+zombie として残って `os.kill(pid, 0)` が成功し続けるため、group 停止が正しく効いているのに
+ヘルパーが「生存」と報告し、group 停止のテスト 4 件が待ち時間ののちに落ちる。`_common` の
+timeout テストが同じ理由で使っている `subproc.pid_is_zombie()` で zombie を除外するよう
+直した (判定不能な環境では従来どおり `os.kill` の結果に従う)。zombie を人工的に作って
+ヘルパーの契約を固定するテストを添えてある。
+
+上記 3 件 (post の掃除 / リーダー亡き group / signal の送出可否) の回帰テストは、修正前の
+`cursor.py` を使い捨てコピーに展開した状態で**先に落ちること**を確認してから採用した
+(`TestPostRetention` 1 件・`TestLeaderlessGroup` 4 件・`TestSignalDelivery` 3 件が失敗、
+うち「孤児の孫プロセスが残っている」「TERM も KILL も送出できていないのに送ったと報告して
+いる」は挙動そのものの失敗)。同じクラスの残り 2 件は修正前でも通る**正常経路側の対照**
+(停止できたら従来どおり掃除する / group ごと消えていれば停止扱い) で、修正が常時発動して
+いないことを示す。
+
+続く 2 件 (post の group 判定 / zombie のリーダー) の回帰テストも同じ手順で、修正前の
+`cursor.py` を使い捨てコピーに展開した状態で**先に落ちること**を確認してから採用した
+(`TestPostLeaderlessGroup` 2 件・`TestZombieLeader` 2 件がいずれも失敗)。失敗の内訳は
+「post がリーダー亡き後の group を撃たず、孫が走り続けている」「停止を確認できていないのに
+pid 記録を消している」と、zombie のリーダーに対して `REAP_SIGNALED` / `REAP_STOPPED` を
+返すべき場面で `REAP_UNCONFIRMED` が返ること 2 件。
+
 ## 0.9.1
 
 **内部バックログの「テストが無い」指摘への対応 (テスト追加が中心。ただしマージ前

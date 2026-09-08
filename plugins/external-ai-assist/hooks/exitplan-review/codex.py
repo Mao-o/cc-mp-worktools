@@ -1,6 +1,18 @@
 """Codex によるプランレビュー (要件・アーキ観点)。
 
-プロンプト (prompts/planning-codex.md) を引数、プラン本文を stdin で渡す。
+プロンプト (prompts/planning-codex.md) とプラン本文を連結し、**stdin 一本**で渡す
+(`codex exec … -`。`-` が stdin 指定)。
+
+0.9.1 まではプロンプトを引数、プラン本文を stdin に分けており、codex の
+「引数のプロンプトと piped stdin を併用すると stdin が block として追記される」挙動に
+依存していた。この併用挙動が無い版では **stdin が無視されてプラン本文抜きでレビューが
+走る** — 結果は当然 clean にならず、利用者から見ると「プランを見ていないレビューで
+差し戻された」ことになる。しかも失敗が静かなので気付けない。
+
+stdin 一本化でこの版依存を外す。`-` を解さない版では引数が足りず非 0 終了になり、
+`subproc.run_for_output` が None を返して **fail-open** (レビューなしで通す) に倒れる。
+レビュアーの失敗は fail-open という既存の契約と同じ側で、静かな誤差し戻しより軽い。
+引数長の上限に当たるリスクも同時に消える (長いプランを argv に載せない)。
 
 起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
 `_common` は `__main__.py` (テストでは `tests/_testutil.py`) が sys.path に載せる。
@@ -47,14 +59,15 @@ def review(plan_text: str, *, cwd: str | None = None) -> str | None:
     レビューすることになる (内部バックログ)。
     """
     try:
-        prompt = _PROMPT_FILE.read_text(encoding="utf-8")
+        template = _PROMPT_FILE.read_text(encoding="utf-8")
     except OSError:
         return None
 
+    full_prompt = f"{template}\n\n---\n\n## レビュー対象プラン\n\n{plan_text}"
     return subproc.run_for_output(
-        [BINARY, "exec", "-s", "read-only", "--ephemeral", prompt],
+        [BINARY, "exec", "-s", "read-only", "--ephemeral", "-"],
         timeout_sec=timeout_sec(),
-        input_text=plan_text,
+        input_text=full_prompt,
         cwd=cwd,
         max_output_chars=MAX_OUTPUT_BYTES,
     )

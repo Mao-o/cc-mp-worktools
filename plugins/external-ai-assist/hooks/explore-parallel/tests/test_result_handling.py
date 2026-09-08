@@ -49,9 +49,17 @@ class TestReviewerTimeout(HookTestCase):
     """post の待機が TIMEOUT_SEC を超えたら SIGTERM して None を返す。"""
 
     def _write_hanging_cursor(self) -> None:
+        """待ち続ける偽 cursor。**`exec` しない** (0.10.0)。
+
+        `exec sleep 30` はプロセスイメージごと差し替えるので argv が `sleep 30` になり、
+        「起動した analyzer とは無関係なプロセス」と区別が付かなくなる。0.10.0 で
+        signal 前に cmdline を照合する PID 再利用ガードを入れたため、この偽物は
+        (正しく) 停止対象から外れてしまう。実物の cursor はシムでも `exec "$REAL" "$@"`
+        で引数を保つので、argv を保ったまま待つ形が忠実な模倣。
+        """
         path = os.path.join(self.bin, "cursor")
         with open(path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/bash\nexec sleep 30\n")
+            f.write("#!/bin/bash\nsleep 30 &\nwait\n")
         os.chmod(path, 0o755)
 
     def _alive(self, pid: int) -> bool:

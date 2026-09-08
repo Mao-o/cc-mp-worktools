@@ -46,7 +46,8 @@ KILL_SETTLE_UNKNOWN_SEC = 0.5
 # グループが空になるのを待つときの probe 間隔 (秒)。
 _PROBE_INTERVAL_SEC = 0.05
 
-# 生死判定に使う ps の実行上限 (秒)。
+# 生死判定に使う ps の実行上限 (秒)。呼び出し側が残り予算 (`timeout_sec`) を渡した
+# 場合はそちらが上限になる (hook timeout を食い潰さないため。`_run_ps` 参照)。
 _PS_TIMEOUT_SEC = 2.0
 
 
@@ -213,22 +214,34 @@ def _live_members_via_proc(pgid: int) -> bool | None:
     return False
 
 
-def _live_members_via_ps(pgid: int) -> bool | None:
+def _run_ps(argv: Sequence[str], timeout_sec: float | None):
+    """`ps` を起動して CompletedProcess を返す。**起動失敗 / timeout / 予算切れは None**。
+
+    `timeout_sec` は呼び出し側の**残り予算**。None なら既定 (`_PS_TIMEOUT_SEC`)。
+    0 以下 (予算切れ) は ps を起動せずに None を返す — 起動して即 timeout させるより速く、
+    呼び出し側から見れば「判定不能」= 保守側 (signal を送らない) に倒れる点は同じ。
+
+    生死判定の呼び出し元には hook timeout がある (explore-parallel の GC は 5 秒の
+    PreToolUse 内で回る)。既定の 2 秒を複数回重ねると hook 自体が kill されるため、
+    残り予算を渡せるようにしてある。
+    """
+    timeout = _PS_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+    if timeout <= 0:
+        return None
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _live_members_via_ps(pgid: int, timeout_sec: float | None = None) -> bool | None:
     """`ps -A -o pid=,pgid=,stat=` (POSIX) で pgid に属する非 zombie プロセスが居るか。
 
     `ps -g` は BSD では process group、procps では session / 実効グループ名の選択に
     なるため使わず、pgid 列を自前で照合する。ps が無い / 失敗なら None。
     """
-    try:
-        res = subprocess.run(
-            ["ps", "-A", "-o", "pid=,pgid=,stat="],
-            capture_output=True,
-            text=True,
-            timeout=_PS_TIMEOUT_SEC,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if res.returncode != 0:
+    res = _run_ps(["ps", "-A", "-o", "pid=,pgid=,stat="], timeout_sec)
+    if res is None or res.returncode != 0:
         return None
     for line in res.stdout.splitlines():
         parts = line.split()
@@ -243,26 +256,113 @@ def _live_members_via_ps(pgid: int) -> bool | None:
     return False
 
 
-def pid_is_zombie(pid: int) -> bool | None:
-    """pid が zombie か (True) / 生きている・存在しない (False) / 判定不能 (None)。"""
+def pid_is_zombie(pid: int, *, timeout_sec: float | None = None) -> bool | None:
+    """pid が zombie か (True) / 生きている・存在しない (False) / 判定不能 (None)。
+
+    `timeout_sec` は `ps` 経路 (/proc の無い環境) の残り予算。省略時は既定。
+    """
     stat = _proc_stat(pid)
     if stat is not None:
         return stat[0] == "Z"
     if os.path.exists("/proc/self/stat"):
         return False  # /proc はあるのに entry が無い = 存在しない
-    try:
-        res = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=_PS_TIMEOUT_SEC,
-        )
-    except (OSError, subprocess.SubprocessError):
+    res = _run_ps(["ps", "-o", "stat=", "-p", str(pid)], timeout_sec)
+    if res is None:
         return None
     return res.stdout.strip().startswith("Z")
 
 
-def _group_state(pgid: int) -> str:
+def pid_command(pid: int, *, timeout_sec: float | None = None) -> str | None:
+    """pid のコマンドライン (`ps -o command=`) を返す。取得できなければ None。
+
+    PID 再利用の検出に使う。`Popen` を持たず pid だけを記録して後から停止する経路
+    (explore-parallel の pid ファイル) では、記録した pid が既に別のプロセスに
+    割り当て直されていることがあり、そのまま signal を送ると無関係なプロセスを撃つ。
+
+    `-o command=` は POSIX の `args` 相当で、Linux (procps) / macOS (BSD) の双方で
+    argv 全体を返す。`comm` は macOS が実行パス・Linux が実行ファイル名を返して
+    形式が揃わないので使わない。
+
+    `-ww` (幅無制限) を先に試す。macOS の `ps` は既定で端末幅に合わせて argv を
+    切り詰めるため、付けないと長いプロンプトを渡した起動で署名の後半が落ちる。
+    `-ww` を解さない `ps` のために、失敗したら付けずに 1 回だけ再試行する。
+
+    `timeout_sec` は **2 回の試行を合わせた**上限 (省略時は既定)。試行ごとに満額を
+    与えると、呼び出し側の残り予算を 2 倍に踏み越えてしまう。
+    """
+    budget = _PS_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+    deadline = time.monotonic() + budget
+    for argv in (
+        ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+        ["ps", "-o", "command=", "-p", str(pid)],
+    ):
+        res = _run_ps(argv, deadline - time.monotonic())
+        if res is None:
+            return None
+        if res.returncode == 0:
+            return res.stdout.strip() or None
+    return None
+
+
+def parse_etime(text: str) -> float | None:
+    """`ps -o etime=` の経過時間表記を秒に変換する。解析できなければ None。
+
+    形式は POSIX の `[[DD-]HH:]MM:SS` (例: `05`→未満、`01:23`, `10:11:12`, `3-04:05:06`)。
+    秒未満は ps 側で切り捨てられるので、戻り値も切り捨て済みの整数秒相当になる。
+    """
+    text = text.strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        head, _, text = text.partition("-")
+        try:
+            days = int(head)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    if not 1 <= len(parts) <= 3:
+        return None
+    total = 0
+    for part in parts:
+        if not part.isdigit():
+            return None
+        total = total * 60 + int(part)
+    return float(days * 86400 + total)
+
+
+def pid_elapsed_sec(pid: int, *, timeout_sec: float | None = None) -> float | None:
+    """pid の経過時間 (プロセス開始からの秒数) を返す。取得できなければ None。
+
+    `pid_command` と組で「記録した pid が本当にその時起動したプロセスか」を判定する。
+    cmdline の署名だけでは、同じ argv で起動する別用途のプロセス (本 plugin では
+    review 系 hook が起動する cursor) に pid が再利用されたときに区別できない。
+    `now - elapsed` が記録時刻 (pid ファイルの mtime) より後なら別プロセスと判る。
+
+    `etimes` (秒の直値) は procps 拡張で macOS の `ps` には存在しない
+    (`ps: etimes: keyword not found`)。`lstart` は表記が locale 依存なので、
+    POSIX の `etime` を解析する。
+    """
+    res = _run_ps(["ps", "-o", "etime=", "-p", str(pid)], timeout_sec)
+    if res is None or res.returncode != 0:
+        return None
+    return parse_etime(res.stdout)
+
+
+def group_is_stopped(pgid: int, *, timeout_sec: float | None = None) -> bool:
+    """process group に「止めるべきメンバー」が居ないか (empty / zombie-only)。
+
+    `_group_state` の判定をそのまま公開する薄いラッパ。`killpg(pgid, 0)` だけでは
+    zombie を「走行中」と誤判定して猶予いっぱい待つため、外部からもこの判定を
+    使えるようにしてある。判定不能 (unknown) は False = 「まだ居る」に倒す。
+
+    `timeout_sec` は `ps` 経路の残り予算 (省略時は既定)。予算切れは unknown 扱い
+    = False になるので、停止を確認できない側 (記録を残す側) に倒れる。
+    """
+    return _group_state(pgid, timeout_sec=timeout_sec) in ("empty", "zombie-only")
+
+
+def _group_state(pgid: int, *, timeout_sec: float | None = None) -> str:
     """process group の状態: "empty" / "live" / "zombie-only" / "unknown"。
 
     - empty: メンバーが居ない (`killpg(pgid, 0)` が ESRCH)
@@ -281,7 +381,7 @@ def _group_state(pgid: int) -> str:
         return "empty"
     live = _live_members_via_proc(pgid)
     if live is None:
-        live = _live_members_via_ps(pgid)
+        live = _live_members_via_ps(pgid, timeout_sec)
     if live is None:
         return "unknown"
     return "live" if live else "zombie-only"

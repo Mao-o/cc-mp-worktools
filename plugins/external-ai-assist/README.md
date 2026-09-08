@@ -27,12 +27,17 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
   冒頭で `os.name != "posix"` を判定し、`fcntl` に依存する他モジュールを import する
   前に exit 0 で抜ける (0.9.0)。0.8.0 以前はこの判定が無く、Windows では起動直後の
   import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
-  この 2 つに依存しない軽量な実装 (`os.kill` ベース) だが Windows での動作は未検証
+  `fcntl` に依存しない (import 時には落ちない) が、0.10.0 で停止処理を `os.killpg` +
+  `ps` (cmdline の署名と開始時刻による PID 同一性の確認) に変えたため POSIX 前提に
+  なった。Windows では同一性を確認できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
+  `os.kill(pid, 0)` は Windows では TerminateProcess になるため挙動が異なる。Windows
+  での動作は引き続き未検証
 - `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
   3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
   基づく。実機で書込が抑止されることは本 plugin 側では検証していない)
-- `codex` CLI: `exitplan-review` の要件・アーキ観点担当 (`codex exec -s read-only --ephemeral`)
+- `codex` CLI: `exitplan-review` の要件・アーキ観点担当
+  (`codex exec -s read-only --ephemeral -`。プロンプトとプランは stdin 一本で渡す)
 
 **どちらの CLI も未インストールでも Claude Code 本体の動作には影響しない** (fail-open)。
 片方だけインストールされていれば、その片方の観点だけでレビューが成立する。
@@ -62,6 +67,30 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 結果の回収 (post) は常に動く — 直前のターンで起動済みの Cursor Agent と一時ファイルを
 孤児にしないため。
 
+**post は `async` hook** (0.10.0)。Agent ツールは subagent が背景に移った時点で戻る
+(公式 docs: 背景 subagent では `tool_response.status` が `async_launched`) ので、
+`PostToolUse(Agent)` は Explore の完了時ではなく**起動直後**に発火する。0.9.1 までの
+post は同期のまま最大 60 秒ポーリングしており、「並走で待ち時間を隠す」はずが Explore の
+起動直後に親を止めていた。`hooks.json` で `"async": true` にして解消し、結果は次の
+会話ターンに `additionalContext` として届く。**発火条件 (イベント / matcher) は変えて
+いない**。
+
+**残骸は TTL GC で掃除する** (0.10.0)。Agent ツールの失敗・ユーザー中断・セッション終了・
+`claude -p` の teardown では post の後始末に到達しないため、`$TMPDIR/explore-parallel/` に
+pid / 結果ファイルが残り Cursor Agent も走り続けていた (課金)。pre / post の双方で
+15 分超の残骸を走査し、プロセスを停止してファイルを消す。停止は process group ごと
+(SIGTERM → 猶予 → SIGKILL) で、signal を送る前に `ps` の **cmdline の署名とプロセスの
+開始時刻**で pid の同一性を確認する (**確認できなければ送らない** — 無関係なプロセスを
+撃つほうが重い)。グループリーダー (cursor 本体) が先に死んでいても、同じ process group に
+生きたメンバーが残っていれば同一性を確認したうえで停止する。
+
+**掃除は停止を確認できたときだけ**行う (post / GC で共通)。同一性を確認できない・signal を
+送出できない・SIGKILL まで上げても group が残る場合は pid / 結果ファイルを対で残し、次回の
+GC に委ねる — pid ファイルはその孤児を追える唯一の記録なので、消すと走り続ける Cursor を
+二度と追えなくなる。GC は全体だけでなく **1 件の停止処理も残り予算で打ち切る** (`ps` の
+timeout と kill 猶予をその残りで cap する)。1 件で hook timeout を超えると hook 自体が
+kill され、現在の Cursor 並走を起動できないまま次回も同じ残骸で同じところに嵌まるため。
+
 ### exitplan-review (クロスレビュー)
 
 `ExitPlanMode` 呼び出し時に Cursor と Codex を **並列実行** し、両者の出力を統合して
@@ -75,6 +104,14 @@ docs 上 deprecated なため移行した)。
   - 要件取り違え・スコープ過不足・アーキ上の危険信号・非機能要件・早期固定すべき前提
 
 両者のプロンプトは `hooks/exitplan-review/prompts/planning-{cursor,codex}.md` に外部化されている。出力は 5 項目立ての箇条書きに固定され、ノイズが少ない。
+
+**プロンプトとプラン本文はどちらのレビュアーにも 1 本にまとめて渡す** (0.10.0)。
+0.9.1 までの Codex 側だけは「プロンプトを引数 + プラン本文を stdin」で、`codex` の
+「引数のプロンプトと piped stdin を併用すると stdin が block として追記される」挙動に
+依存していた。この併用挙動が無い版では**プラン本文が黙って落ちたままレビューが走り**、
+結果は当然 clean にならないので「プランを見ていない差し戻し」になる。連結して
+`codex exec … -` (stdin 一本) にすることで版依存を外した。`-` を解さない版では
+引数不足で非 0 終了 → fail-open (レビューなしで通す) に倒れる。
 
 - **`EXTERNAL_AI_REVIEW_MAX` は「指摘ありで返ってきた回数」の上限で、0.7.0 から
   プラン (hash) 単位**になった (既定 2 回、`0` で無効化)。指摘なし (`REVIEW_CLEAN`)
@@ -261,6 +298,13 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
 8. **外部 CLI は独自 process group で起動** — timeout 時は `os.killpg` でグループごと停止
    (SIGTERM → 猶予 → SIGKILL) し、同じグループに居る孫プロセス (stdout を継承した
    helper 等) を取り残さない。killpg は reap 前の子にだけ送る (pid 再利用の誤送信防止)。
+   pid ファイル経由で後から止める `explore-parallel` は `Popen` を持たないので、代わりに
+   `ps` の cmdline を起動 argv と突合し、さらに `ps -o etime=` の開始時刻が pid ファイルの
+   mtime 以前であることも要求して同一性を確かめる (0.10.0)。argv の署名だけでは、同じ
+   起動形の別 hook (レビュー系) に pid が再利用されたときに区別が付かない。**どちらの経路
+   でも、同一性を確認できないときは signal を送らない** — 無関係なプロセスを撃つ事故のほうが、
+   外部 CLI を 1 つ取り残すより重い。**送らなかった / 送れなかった / 止め切れなかったことは
+   戻り値で伝え**、呼び出し側は追跡用の記録 (pid ファイル) を消さずに次回へ委ねる。
    kill 猶予は hooks.json の hook timeout に織り込んである (各 tests が式で固定)
 9. **外部 AI は読み取り専用で起動する** — cursor は `--mode plan`、codex は
    `exec -s read-only --ephemeral`。調査 (explore-parallel) もレビューも外部 AI に作業ツリーを
@@ -413,8 +457,8 @@ external-ai-assist/
     │   └── tests/
     ├── explore-parallel/
     │   ├── __main__.py
-    │   ├── cursor.py                       ← 読み取り専用でバックグラウンド起動 + 待機
-    │   ├── state.py
+    │   ├── cursor.py                       ← 読み取り専用でバックグラウンド起動 + 待機 + 停止 (killpg)
+    │   ├── state.py                        ← 一時ファイルのパス管理 + 残骸の TTL 判定
     │   ├── CLAUDE.md
     │   └── tests/                          ← 起動引数 (--mode plan) と注入の unittest
     ├── exitplan-review/
