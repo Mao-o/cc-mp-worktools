@@ -83,15 +83,28 @@ service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ�
 
 停止条件に次の 2 つを足した (**境界の階層自身は探索する**):
 
-- **git repo の toplevel** (`.git` **ディレクトリ**を持つ階層)。linked worktree は
-  `.git` が gitdir を書いたファイルなので停止条件にならず、worktree から親 repo の
+- **git repo の境界** — `.git` **ディレクトリ**を持つ階層 (通常の toplevel) と、
+  `.git` **ファイル**が submodule の gitdir (`.git/modules/<name>`) を指す階層
+  (submodule root)。`.git` ファイルが linked worktree の gitdir
+  (`.git/worktrees/<name>`) を指す場合だけは境界にせず、worktree から親 repo の
   設定を継承する従来の運用はそのまま
 - **`$HOME` およびその上** (`/Users`, `/` 等)
 
-**互換性 (非互換の変更)**: 次の 2 つの配置は継承されなくなる (未設定として deny):
+`.git` ファイルの判定は**内容の読み取りだけ**で行う (git コマンドは実行しない)。
+`gitdir:` の指す先は種別の判定にしか使わず、探索先としては辿らない。読めない・
+上記いずれの形でもない `.git` ファイルは**境界扱い** (fail-closed) にする。
+
+マージ前レビューの指摘で submodule を境界に加えた。当初は `.git` がファイルなら
+一律に通過扱いだったため、**submodule をプロジェクトとして起動すると探索が
+superproject へ続いていた**。superproject に active な CLI と一致する
+accounts.local.json があると、未設定の submodule での状態変更コマンドが repo 境界で
+fail-closed せず allow される。
+
+**互換性 (非互換の変更)**: 次の 3 つの配置は継承されなくなる (未設定として deny):
 (1) ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて全プロジェクト
 の既定にしていた場合、(2) **repo の toplevel より上** (例: 複数 repo を束ねる親ディレクトリ)
-に置いて配下の repo に継承させていた場合。落ちる方向は fail-closed のため安全側。移行は、
+に置いて配下の repo に継承させていた場合、(3) **superproject に置いて submodule に継承**
+させていた場合。落ちる方向は fail-closed のため安全側。移行は、
 各 repo の toplevel に `accounts_builder.py set --service <svc> --from-cli --dry-run` →
 `--commit` で複製するか、`--path` で明示する。グローバル既定の専用経路は現時点では無い
 (別途検討)。
@@ -104,6 +117,11 @@ dispatcher / builder / services への回帰テスト。追加したテストは
 壊す mutation で先に落ちることを確認**してから採用した (予算配線 10 種・境界と照合
 規則 8 種・docs 参照 4 種)。その過程で「`show` が service を渡し忘れても suite が
 green のままになる」抜けが見つかり、`show` の呼び出し経路を通すテストを足した。
+
+`.git` ファイルの種別判定 (submodule / linked worktree / 判読不能) にも
+`tests/test_paths.py` で回帰テストを足し、**修正前のコードでは submodule 形と
+判読不能形が落ち、linked worktree 形は通る**ことを使い捨てコピーで確認してから
+採用した。
 
 ## 0.11.1
 

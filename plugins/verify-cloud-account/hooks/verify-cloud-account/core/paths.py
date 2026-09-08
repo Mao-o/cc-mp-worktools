@@ -67,18 +67,105 @@ def discover_all_accounts_files(project_dir: str) -> list[tuple[str, Path]]:
 ANCESTOR_SEARCH_MAX_LEVELS = 10
 
 
-def _is_repo_toplevel(directory: Path) -> bool:
-    """`directory` が git repo の toplevel (= `.git` **ディレクトリ**を持つ) か。
+# `.git` ファイル (gitdir ポインタ) を読むときの上限バイト数。git が書くのは
+# `gitdir: <path>` の 1 行だけなので、これを超える内容は判読対象にしない。
+_GITDIR_FILE_MAX_BYTES = 4096
+_GITDIR_PREFIX = "gitdir:"
 
-    linked worktree / submodule は `.git` が **ファイル** (gitdir ポインタ) に
-    なるため False を返す。worktree から親 repo の設定を継承する運用
-    (`<repo>/.worktrees/<branch>` が cwd) を残すために、ファイル形では遡及を
-    止めず親 repo の toplevel まで上らせる。
+
+def _split_path_components(raw: str) -> list[str]:
+    """gitdir の値を OS 非依存にパス要素へ分解する。
+
+    `.git` ファイルは POSIX 形式でも Windows 形式でも書かれうるため、`/` と
+    `\\` の両方を区切りとして扱い、空要素と `.` を落とす。
     """
+    return [
+        part
+        for part in raw.replace("\\", "/").split("/")
+        if part not in ("", ".")
+    ]
+
+
+def _classify_gitdir_pointer(text: str) -> str:
+    """`.git` ファイルの内容を "worktree" / "submodule" / "unknown" に分類する。
+
+    git の実 gitdir は `<repo>/.git` 以下が `modules/<name>` と
+    `worktrees/<name>` の繰り返しになる:
+
+      - linked worktree : `<repo>/.git/worktrees/<name>`
+      - submodule       : `<super>/.git/modules/<name>`
+      - submodule の worktree: `<super>/.git/modules/<name>/worktrees/<name>`
+
+    最後に現れたキーワードが種別を決める。この形に当てはまらないもの
+    (`--separate-git-dir` で `.git` の外を指す形、prefix 違い、読めない内容)
+    は **"unknown"** とし、呼び出し側で停止側 (fail-closed) に倒す。
+    """
+    gitdir = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith(_GITDIR_PREFIX):
+            gitdir = stripped[len(_GITDIR_PREFIX):].strip()
+        break
+    if not gitdir:
+        return "unknown"
+
+    parts = _split_path_components(gitdir)
     try:
-        return (directory / ".git").is_dir()
+        anchor = len(parts) - 1 - parts[::-1].index(".git")
+    except ValueError:
+        return "unknown"
+    rest = parts[anchor + 1:]
+    if not rest or len(rest) % 2 != 0:
+        return "unknown"
+
+    kind = "unknown"
+    for index in range(0, len(rest), 2):
+        keyword = rest[index]
+        if keyword == "worktrees":
+            kind = "worktree"
+        elif keyword == "modules":
+            kind = "submodule"
+        else:
+            return "unknown"
+    return kind
+
+
+def _is_repo_boundary(directory: Path) -> bool:
+    """`directory` が遡及を止めるべき repo 境界か。
+
+    - `.git` が **ディレクトリ** → 通常の repo toplevel → 境界
+    - `.git` が **ファイル** (gitdir ポインタ) → 内容で分岐する
+      - linked worktree (`.git/worktrees/<name>`) → **境界ではない**。worktree
+        から親 repo の設定を継承する運用 (`<repo>/.worktrees/<branch>` が cwd)
+        を残すため、従来どおり親 repo の toplevel まで上らせる
+      - submodule (`.git/modules/<name>`) → **境界**。submodule root は独立した
+        repo の境界であり、superproject の accounts.local.json を継承させると
+        未設定の submodule で状態変更コマンドが素通りする
+      - 判読できない内容 → **境界** (fail-closed)。継承先が増える方向へ倒すと
+        deny すべき場面を allow してしまうため、分からない場合は止める
+    - `.git` が無い → 境界ではない
+
+    判定は `.git` の**読み取りだけ**で行う (git コマンドは呼ばない)。
+    """
+    dot_git = directory / ".git"
+    try:
+        if dot_git.is_dir():
+            return True
+        if not dot_git.is_file():
+            return False
     except OSError:
-        return False
+        # 種別を確かめられない = 境界かどうか分からない → 停止側に倒す
+        return True
+
+    try:
+        with dot_git.open("rb") as handle:
+            raw = handle.read(_GITDIR_FILE_MAX_BYTES)
+    except OSError:
+        return True
+    kind = _classify_gitdir_pointer(raw.decode("utf-8", errors="replace"))
+    return kind != "worktree"
 
 
 def _home_dir() -> Path | None:
@@ -116,8 +203,11 @@ def discover_accounts_files_with_ancestors(
       - cwd 階層に何か 1 つでも見つかれば、そこで採用判定する
         (親階層は見ない、cwd 優先)
       - 同一階層に複数 tier が同居する場合は呼び出し側で fail-closed (D4)
-      - **git repo の toplevel (`.git` ディレクトリを持つ階層) を越えない** —
-        その階層自身は探すが、その親へは上らない
+      - **git repo の境界を越えない** — `.git` ディレクトリを持つ階層
+        (通常の toplevel) と、`.git` ファイルが submodule の gitdir
+        (`.git/modules/<name>`) を指す階層 (submodule root)。その階層自身は
+        探すが、その親へは上らない。linked worktree
+        (`.git/worktrees/<name>`) だけは境界にせず親 repo まで上らせる
       - **`$HOME` およびその上 (`/Users`, `/` 等) へは上らない**
       - 何も見つからずに `Path.parent == Path` (ルート) に到達したら諦める
       - `max_levels` で安全側の上限を設ける
@@ -132,11 +222,19 @@ def discover_accounts_files_with_ancestors(
     (見つからず deny) は fail-closed なので安全側。`$HOME` や repo より上に
     グローバル既定を置く用途の専用経路は現時点では無い (別途検討)。
 
-    linked worktree が repo の**外**に置かれている場合 (`.git` ファイルの
-    gitdir が別の場所を指す形) は、従来も親 repo に届いていない
-    (遡及はファイルシステムの親方向にしか進まないため)。ここでも gitdir は
-    追わない — 新たな探索経路を増やすと「見つかる場所が増える」= allow 側に
-    倒れるため、本件の趣旨 (拾いすぎを止める) と逆方向になる。
+    submodule を境界にした理由 (マージ前レビューの指摘): submodule root の
+    `.git` も**ファイル**のため、ファイル形を一律に通過扱いすると探索が
+    superproject へ続く。superproject 側に active な CLI と一致する
+    accounts.local.json があると、**未設定の submodule で状態変更コマンドが
+    repo 境界で fail-closed せずに allow される**。`.git` ファイルの内容
+    (`gitdir:` の指す先の形) で linked worktree と submodule を区別し、
+    判読できない場合は停止側に倒す。
+
+    gitdir は**分類にしか使わず、探索先としては辿らない**。linked worktree が
+    repo の**外**に置かれている場合 (gitdir が別の場所を指す形) に親 repo へ
+    届かないのは従来どおり (遡及はファイルシステムの親方向にしか進まない)。
+    新たな探索経路を増やすと「見つかる場所が増える」= allow 側に倒れるため、
+    本件の趣旨 (拾いすぎを止める) と逆方向になる。
 
     Args:
         project_dir: 検索を開始するディレクトリ (絶対パス推奨)。
@@ -157,7 +255,7 @@ def discover_accounts_files_with_ancestors(
         found = discover_all_accounts_files(str(current))
         if found:
             return found, current
-        if _is_repo_toplevel(current):
+        if _is_repo_boundary(current):
             break
         parent = current.parent
         if parent == current:

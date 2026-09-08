@@ -514,13 +514,19 @@ worktree 内に同名ファイルを置く必要は無い。
 - 同一階層に複数 tier が同居する場合は従来どおり fail-closed deny (D4)
 - 安全側上限として `max_levels=10` (`core/paths.py`)
 - **停止条件 (v0.12.0)**: 次の境界を越えて上らない。境界の階層自身は探索する
-  - **git repo の toplevel** (`.git` **ディレクトリ**を持つ階層)。linked worktree
-    は `.git` が gitdir を書いたファイルなので停止条件にならず、worktree から
-    親 repo の設定を継承する上記の運用はそのまま
+  - **git repo の toplevel** (`.git` **ディレクトリ**を持つ階層)
+  - **submodule の root** (`.git` が `.git/modules/<name>` を指すファイルの階層)。
+    submodule も独立した repo の境界なので、superproject の設定は継承しない
+  - **`.git` がファイルで、内容を判読できない階層** (`gitdir:` が読めない /
+    上記いずれの形でもない)。分からない場合は止める側 (fail-closed) に倒す
   - **`$HOME` およびその上** (`/Users`, `/` 等)
-  - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ) や `$HOME`
-    に置いた設定は継承されなくなる (未設定として deny)。各 repo の toplevel に複製するか
-    `--path` で明示する
+  - **linked worktree だけは境界にしない** (`.git` が `.git/worktrees/<name>` を
+    指すファイル)。worktree から親 repo の設定を継承する上記の運用はそのまま
+  - 判定は `.git` の読み取りだけで行う (git コマンドは実行しない)。`gitdir:` の
+    指す先は**種別の判定にしか使わず、探索先としては辿らない**
+  - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
+    submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
+    (未設定として deny)。各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -552,11 +558,12 @@ service が一斉に未設定 (deny)** になる。
 範囲は cwd 配下に限られない。対象は出力先頭の `対象:` 行に必ず出るので、commit 前に
 確認すること (この階層専用の設定にしたい場合は `--path`)。
 `.gitignore` への追記も同じ階層に対して行われる。
-v0.12.0 以降は遡及自体が git repo の toplevel と `$HOME` で止まるため、
-**その repo の外や `$HOME` 以上が編集対象になることはない**。linked worktree を
-repo の外に置いている場合は、その worktree を含む repo があればその toplevel、
-無ければ `$HOME` が境界になる (遡及はファイルシステムの親方向にしか進まないため、
-`.git` ファイルの gitdir 先は辿らない)。
+v0.12.0 以降は遡及自体が git repo の境界 (toplevel / submodule root) と `$HOME`
+で止まるため、**その repo の外や `$HOME` 以上が編集対象になることはない**
+(submodule で作業していれば superproject 側も対象外)。linked worktree を repo の
+外に置いている場合は、その worktree を含む repo があればその toplevel、無ければ
+`$HOME` が境界になる (遡及はファイルシステムの親方向にしか進まないため、`.git`
+ファイルの gitdir 先は辿らない)。
 
 ## パフォーマンス (短期キャッシュ)
 

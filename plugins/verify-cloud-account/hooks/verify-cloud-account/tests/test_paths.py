@@ -97,6 +97,141 @@ class TestAncestorStopsAtRepoToplevel(BaseAncestorBoundary):
         self.assertEqual(self._resolved_dir(self.repo), self.repo)
 
 
+class TestDotGitFileIsClassified(BaseAncestorBoundary):
+    """`.git` **ファイル**は種別で扱いが変わる (マージ前レビューの指摘)。
+
+    ファイル形を一律に通過扱いすると、submodule をプロジェクトとして起動した
+    ときに探索が superproject へ続き、**未設定の submodule で状態変更コマンドが
+    repo 境界で fail-closed せずに allow される**。linked worktree だけを通し、
+    submodule と判読不能な内容は境界として止める。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir(parents=True)
+        (self.repo / ".git").mkdir()
+        # superproject 側にだけ設定がある状態を作る
+        self._write_new(self.repo, {"github": "super"})
+
+    def _child_with_dot_git_file(self, name: str, content: str) -> Path:
+        child = self.repo / name
+        child.mkdir(parents=True, exist_ok=True)
+        (child / ".git").write_text(content, encoding="utf-8")
+        return child
+
+    # --- (a) submodule は境界 -------------------------------------------------
+
+    def test_submodule_does_not_inherit_superproject(self):
+        sub = self._child_with_dot_git_file("sub", "gitdir: ../.git/modules/sub\n")
+        self.assertIsNone(self._resolved_dir(sub))
+
+    def test_submodule_boundary_applies_from_subdirectory(self):
+        """submodule 配下の作業ディレクトリからでも submodule root で止まる。"""
+        sub = self._child_with_dot_git_file("sub", "gitdir: ../.git/modules/sub\n")
+        inner = sub / "src" / "pkg"
+        inner.mkdir(parents=True)
+        self.assertIsNone(self._resolved_dir(inner))
+
+    def test_submodule_root_itself_is_searched(self):
+        """境界は「越えない」だけで、その階層自身は探索対象。"""
+        sub = self._child_with_dot_git_file("sub", "gitdir: ../.git/modules/sub\n")
+        self._write_new(sub, {"github": "sub"})
+        self.assertEqual(self._resolved_dir(sub), sub)
+
+    def test_submodule_with_absolute_gitdir_is_boundary(self):
+        sub = self._child_with_dot_git_file(
+            "sub", f"gitdir: {self.repo}/.git/modules/sub\n"
+        )
+        self.assertIsNone(self._resolved_dir(sub))
+
+    def test_nested_submodule_is_boundary(self):
+        sub = self._child_with_dot_git_file(
+            "sub", "gitdir: ../../.git/modules/outer/modules/inner\n"
+        )
+        self.assertIsNone(self._resolved_dir(sub))
+
+    def test_submodule_with_windows_separators_is_boundary(self):
+        """区切りが `\\` でも判定は変わらない (OS 非依存に分解する)。"""
+        sub = self._child_with_dot_git_file(
+            "sub", "gitdir: ..\\.git\\modules\\sub\n"
+        )
+        self.assertIsNone(self._resolved_dir(sub))
+
+    # --- (b) linked worktree は従来どおり通過 --------------------------------
+
+    def test_linked_worktree_still_inherits(self):
+        worktree = self._child_with_dot_git_file(
+            "wt", f"gitdir: {self.repo}/.git/worktrees/wt\n"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo)
+
+    def test_linked_worktree_with_relative_gitdir_still_inherits(self):
+        worktree = self._child_with_dot_git_file(
+            "wt", "gitdir: ../.git/worktrees/wt\n"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo)
+
+    def test_linked_worktree_with_windows_separators_still_inherits(self):
+        worktree = self._child_with_dot_git_file(
+            "wt", "gitdir: ..\\.git\\worktrees\\wt\n"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo)
+
+    def test_worktree_of_submodule_is_not_a_boundary(self):
+        """submodule の linked worktree は最後のキーワードが `worktrees`。"""
+        worktree = self._child_with_dot_git_file(
+            "wt", "gitdir: ../.git/modules/sub/worktrees/wt\n"
+        )
+        self.assertEqual(self._resolved_dir(worktree), self.repo)
+
+    # --- (c) 判読できない `.git` ファイルは停止側 (fail-closed) --------------
+
+    def test_empty_dot_git_file_is_boundary(self):
+        child = self._child_with_dot_git_file("odd", "")
+        self.assertIsNone(self._resolved_dir(child))
+
+    def test_dot_git_file_without_gitdir_prefix_is_boundary(self):
+        child = self._child_with_dot_git_file("odd", "ref: refs/heads/main\n")
+        self.assertIsNone(self._resolved_dir(child))
+
+    def test_gitdir_without_dot_git_component_is_boundary(self):
+        """`--separate-git-dir` 形 (実 gitdir が `.git` の外) も境界扱い。"""
+        child = self._child_with_dot_git_file(
+            "odd", f"gitdir: {self.tmp}/elsewhere/store\n"
+        )
+        self.assertIsNone(self._resolved_dir(child))
+
+    def test_gitdir_with_unknown_keyword_is_boundary(self):
+        child = self._child_with_dot_git_file("odd", "gitdir: ../.git/objects/x\n")
+        self.assertIsNone(self._resolved_dir(child))
+
+    def test_gitdir_pointing_at_dot_git_itself_is_boundary(self):
+        child = self._child_with_dot_git_file("odd", "gitdir: ../.git\n")
+        self.assertIsNone(self._resolved_dir(child))
+
+    def test_binary_dot_git_file_is_boundary(self):
+        child = self.repo / "odd"
+        child.mkdir(parents=True, exist_ok=True)
+        (child / ".git").write_bytes(b"\xff\xfe\x00\x01")
+        self.assertIsNone(self._resolved_dir(child))
+
+    def test_unreadable_dot_git_file_is_boundary(self):
+        """内容を読めない場合も境界 (分からないなら止める)。"""
+        child = self._child_with_dot_git_file(
+            "wt", f"gitdir: {self.repo}/.git/worktrees/wt\n"
+        )
+        real_open = Path.open
+
+        def fake_open(self_path, *args, **kwargs):
+            if self_path.name == ".git":
+                raise OSError("unreadable")
+            return real_open(self_path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", fake_open):
+            self.assertIsNone(self._resolved_dir(child))
+
+
 class TestAncestorStopsAtHome(BaseAncestorBoundary):
     """`$HOME` およびその上へは上らない。"""
 

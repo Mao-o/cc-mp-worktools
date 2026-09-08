@@ -209,10 +209,20 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
   曖昧なまま検証を通すと、どの設定が効いているか不透明になる
 - **親遡及**は「worktree に accounts.local.json を複製せず親 repo の設定を継承する」
   ための経路。cwd 階層で 1 つでも見つかればそこで採用 (cwd 優先)
-- 遡及の停止条件は **階層数 + git repo の toplevel + `$HOME`**。階層数だけを上限に
+- 遡及の停止条件は **階層数 + git repo の境界 + `$HOME`**。階層数だけを上限に
   すると `<home>/dev/<org>/<repo>` のような配置で `$HOME` に届き、無関係な設定を
-  継承する (しかも verify 成功時は継承注釈が出ないので気付けない)。linked worktree
-  の `.git` は**ファイル**なので停止条件にならず、親 repo までは上れる
+  継承する (しかも verify 成功時は継承注釈が出ないので気付けない)
+- **git repo の境界は `.git` の種別で決める** (`_is_repo_boundary`)。`.git`
+  ディレクトリ = toplevel は境界。`.git` ファイル (gitdir ポインタ) は内容で分岐し、
+  `.git/worktrees/<name>` を指す linked worktree **だけ**が境界にならず親 repo まで
+  上れる。`.git/modules/<name>` を指す submodule root は境界 — ファイル形を一律に
+  通過扱いにすると submodule から superproject の設定を継承し、**未設定の submodule
+  で状態変更コマンドが repo 境界で fail-closed せず allow される**。判読できない
+  `.git` ファイル (prefix 違い / `--separate-git-dir` 形 / 読み取り失敗) も境界に
+  倒す。「継承先が増える方向」は allow 側なので、分からないときは止める
+- 判定は `.git` の**読み取りのみ**で行う (git コマンドは呼ばない)。gitdir は種別の
+  分類にしか使わず**探索先としては辿らない** — 探索経路を増やすと「見つかる場所が
+  増える」= allow 側に倒れる。区切りは `/` と `\` の両方を受けて OS 非依存に分解する
 - **builder も dispatcher と同じ解決を使う** (3-tier lookup + 親遡及)。読む側と
   書く側で解決がずれると、継承中の worktree で `set` が子ファイルを作り、
   dispatcher の遡及がそこで止まって**継承していた他の service が一斉に未設定
@@ -425,7 +435,9 @@ wrapper 追加時に分類を機械的に強制する。完全な表・実機根
 
 **D19: 遡及の停止条件に境界を足す** — 上記「配置パスの解決」を参照。落とす方向
 (見つからず deny) は fail-closed なので安全側。`$HOME` や repo より上にグローバル
-既定を置く用途の専用経路は現時点では無い (別途検討)。
+既定を置く用途の専用経路は現時点では無い (別途検討)。`.git` ファイルは種別で
+分岐し、linked worktree だけ通して submodule と判読不能は境界にする
+(マージ前レビューの指摘)。
 
 **D20: 予算切れは deny** — 上記「実時間の予算」を参照。
 
