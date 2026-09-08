@@ -111,9 +111,15 @@ sys.path に載せて解決する (plugin root 内の相対配置なので cache
    |---|---|---|---|
    | 走っていない / group にも生存メンバーが居ない | 掃除する | `REAP_STOPPED` | 消す |
    | 停止 signal を送出できた (group が空だった場合を含む) | 掃除する | `REAP_SIGNALED` | 消す |
+   | リーダーは死んだが group に生存メンバーが残っている | group を停止 → 掃除する | `REAP_SIGNALED` | 消す |
    | まだ走っているが同一性を確認できない | **残す** | `REAP_UNCONFIRMED` | 残す |
+   | リーダー亡き group の同一性を確認できない | **残す** | `REAP_UNCONFIRMED` | 残す |
    | 同一性は確認できたが signal を送出できない (EPERM 等) | **残す** | `REAP_UNCONFIRMED` | 残す |
    | `reap_orphan()` 自体が例外で落ちた | — | (`gc_orphans` が未確定扱い) | 残す |
+
+   **リーダーの生死判定 (`_is_running`) は zombie を「走っていない」側に数える**ので、
+   zombie のリーダーは上の表の下 2 行 (leaderless group) の経路に入る。group にも zombie
+   しか残っていなければ 1 行目 = 掃除してよい。
 
    pid ファイルは**その孤児を追える唯一の記録**なので、確認できていない状態で消すと
    以後どの経路も再試行できない。結果ファイルを道連れにしないのは、孤児がまだ書いて
@@ -177,6 +183,13 @@ pid / 結果ファイルが無期限に残り、バックグラウンドの curs
   もう誰も追えない。**未確定なら post も両ファイルを残す** (上の契約表)。結果の読み取り
   自体は best-effort で続ける — 掃除しないだけで、その後にファイルを見るのは中身を
   読まない GC だけなので二重注入にはならない
+- **`post()` は掃除の前に group 側の判定も通す** (マージ前レビューの指摘)。post は
+  リーダーの生死しか見ていなかったため、リーダーが post の完了前に exit / crash して
+  group に孫が残った場合、停止を試みないまま掃除に進んでいた。**その group を追える
+  唯一の記録 (pid = pgid) がそこで消える**ので、下の leaderless-group GC も以後その孫に
+  手が届かない。`reap_orphan` と同じ `_reap_leaderless_group` を通し、生存メンバーが
+  居れば停止を試み、未確定なら両ファイルを残す。pid が正でないときは group 判定に入らない
+  (`killpg(0, sig)` は**呼び出し側自身の process group** = hook プロセスを撃つため)
 
 `PostToolUseFailure(Agent)` を hooks.json に足して即時掃除する案は**採っていない**。
 イベント自体は実在するが、新しいイベントの登録は「どの hook がどの条件で発火するか」
@@ -223,7 +236,9 @@ pid ファイルは TTL 超過まで残りうるので、その間に pid が別
 `pre` が作った独立 process group には、cursor 本体 (グループリーダー) が exit / crash
 した後も孫が残って走り続けることがある。リーダーの生死だけを見て「停止済み」と報告すると、
 GC が pid 記録を消した時点で group を撃つ機会が永久に失われる。`reap_orphan()` は
-リーダーが居なければ `_reap_leaderless_group()` で group 側を見る。
+リーダーが居なければ `_reap_leaderless_group()` で group 側を見る。**`post()` も掃除の
+前に同じ経路を通る** — post だけリーダーの生死で判断していると、GC が拾う前に post が
+記録を消してしまい、leaderless-group の判定そのものに到達できない。
 
 リーダーの cmdline はもう読めないので、同一性は次の 2 つで確認する:
 
@@ -239,6 +254,22 @@ GC が pid 記録を消した時点で group を撃つ機会が永久に失わ�
 再利用され、その新しいリーダーも既に死んでいる、という二重の偶然までは弾けない
 (リーダーが生きている経路と違って cmdline を照合できないため)。2. で「記録より前から
 居る group」は落とせる。
+
+#### zombie のリーダーは「走っていない」側 (マージ前レビューの指摘)
+
+リーダーの生死を `os.kill(pid, 0)` だけで見ると、**PID 1 が孤児を reap しないコンテナ**で
+停止経路が永久に収束しない。処理を終えたリーダーは zombie として group に残り
+`os.kill(pid, 0)` が成功し続けるが、zombie の `ps -o command=` は `<defunct>` しか返さない
+ので署名を照合できず、`terminate()` は毎回「同一性を確認できない」= `REAP_UNCONFIRMED` に
+倒れる。結果として pid / 結果ファイルが永遠に残り (孤児は既に居ないのに GC が収束しない)、
+group に孫が残っていてもそれが撃たれない。
+
+`_is_running()` は `os.kill(pid, 0)` に `_common/subproc.pid_is_zombie()` を重ね、
+**zombie は停止済み**として group 側の判定 (`_reap_leaderless_group`) に進める。止めるべき
+孫が残っていればそこで撃てるし、group にも zombie しか居なければ `group_is_stopped()` が
+停止扱いにするので掃除できる。判定不能 (`/proc` も `ps` も使えない) は従来どおり
+`os.kill` の結果に従う = 走行中側 (同一性を確認したうえで停止を試みる側)。
+テストヘルパー (`tests/test_orphan_gc.py` の `_alive`) と同じ契約。
 
 #### signal を送出できたかを返す (マージ前レビューの指摘)
 
@@ -316,7 +347,9 @@ signal を送らないこと (PID 再利用ガード)、**署名が一致して�
 見ること、現在の tool_use_id を除外すること、GC が pre / post の両方で走ること。
 加えて **`post()` も未確定なら両ファイルを残すこと** (`TestPostRetention`)、
 **リーダーが先に死んだ group を停止すること / 記録より前から居る group には送らないこと**
-(`TestLeaderlessGroup`)、**signal を送出できなければ `terminate()` が False を返すこと**
+(`TestLeaderlessGroup`)、**`post()` も掃除の前に group 側を見ること**
+(`TestPostLeaderlessGroup`)、**zombie のリーダーを走行中と読まないこと**
+(`TestZombieLeader`)、**signal を送出できなければ `terminate()` が False を返すこと**
 (`TestSignalDelivery`)。
 
 停止側のテストは「送るべき形」と「送ってはいけない形」を**同じフィクスチャの差分**で
@@ -327,6 +360,11 @@ signal を送らないこと (PID 再利用ガード)、**署名が一致して�
 を使う。`TestAliveHelper` が zombie を人工的に作って固定している)。`os.kill(pid, 0)` だけだと、
 PID 1 が孤児を reap しないコンテナで kill 済みの孫が zombie として残った場合に成功し続け、
 停止が正しく効いているのに group 停止系のテストが待ち時間ののちに落ちる。
+**production 側 (`cursor._is_running`) も同じ契約**に揃えてある (上の「zombie のリーダー」節)
+— ヘルパーだけ直しても、実装が zombie を走行中と読んでいる限り GC は収束しない。
+zombie のリーダーを人工的に作るフィクスチャ (`spawn_zombie_leader_group`) は `Popen` を
+保持したまま `poll()` / `wait()` を呼ばない。参照を捨てると `Popen.__del__` が
+`subprocess._active` へ積み、次の `Popen` 生成時の `_cleanup()` が reap してしまう。
 
 **「走っている孤児を止める」テストは pid ファイルの mtime を過去へずらして作らない**。
 本番の孤児は mtime と同時刻に起動して TTL を超えて生き残ったプロセスなので、mtime だけを

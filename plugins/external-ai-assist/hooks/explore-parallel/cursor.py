@@ -8,7 +8,14 @@ review 系 2 hook と同じ `_common.cursorcli.readonly_argv` (調査用途で�
 ので pgid == pid で、リーダーだけを止めると cursor-agent (node) の孫プロセスが残る。
 signal を送る前に **cmdline の署名と開始時刻**の両方で pid の同一性を確認する
 (PID 再利用対策)。リーダーが先に死んだ後も group に孫が残ることがあるので、その場合は
-**group の生存メンバー**を見て停止する。
+**group の生存メンバー**を見て停止する。この group 側の判定は `post()` と GC
+(`reap_orphan`) の**両方**が通る — post はリーダーの生死しか見ていなかったため、
+リーダーが先に死んだ経路で孫を残したまま pid 記録を消していた。
+
+**zombie のリーダーは「走っていない」扱い**にする。PID 1 が孤児を reap しないコンテナでは
+処理を終えたリーダーが zombie として残り `os.kill(pid, 0)` が成功し続けるが、zombie の
+`ps` は cmdline を返さない (`<defunct>`) ので同一性を確認できず、停止経路が永久に
+未確定のまま回り続ける。zombie は停止済みとして group 側の判定に進める。
 
 停止できたかどうかは呼び出し側に返す。`post()` も GC (`reap_orphan`) も、**停止を確認
 できなかったときは pid / 結果ファイルを残す** — pid ファイルはその孤児を追える唯一の記録
@@ -113,6 +120,13 @@ def post(tool_use_id: str) -> str | None:
     も再試行できなくなる (ハングした cursor が走り続けて課金され続ける)。GC 側と同じく
     **pid / 結果ファイルを対で残し**、TTL 超過後の GC に委ねる。
 
+    **リーダーが走っていない場合も掃除の前に group を見る** (マージ前レビューの指摘)。
+    リーダーが post の完了前に exit / crash しても、`pre` が作った独立 process group には
+    孫が残りうる。リーダーの生死だけで「掃除してよい」と決めると、走り続ける group を
+    追える唯一の記録 (pid / pgid) をここで消してしまい、GC の leaderless-group 経路も
+    以後その group に手が届かない。`reap_orphan` と同じ `_reap_leaderless_group` を通し、
+    生存メンバーが居れば停止を試み、未確定なら両ファイルを残す。
+
     結果の読み取り自体は best-effort で続ける (書きかけでも読めたぶんは返す)。掃除しない
     だけなので、次に読む主体は GC (中身を見ずに消す) しか居らず二重注入にはならない。
     """
@@ -127,7 +141,9 @@ def post(tool_use_id: str) -> str | None:
         # mtime は待機の前に読む (掃除後には取れない)。取れなければ停止をあきらめる側。
         started_at = _started_at(pid_file)
 
-        if pid:
+        # pid <= 0 は group 判定の宛先にしない (`killpg(0, sig)` は**呼び出し側自身の
+        # process group** = hook プロセスを撃つ)。`reap_orphan` 側と同じガード。
+        if pid is not None and pid > 0:
             waited = 0
             while waited < TIMEOUT_SEC and _is_running(pid):
                 time.sleep(POLL_INTERVAL_SEC)
@@ -142,6 +158,12 @@ def post(tool_use_id: str) -> str | None:
                         f"timeout ({TIMEOUT_SEC}s) — 停止を確認できない。"
                         "pid / 結果ファイルを残して GC に委ねる"
                     )
+            elif _reap_leaderless_group(pid, started_at) == REAP_UNCONFIRMED:
+                unconfirmed = True
+                log(
+                    "リーダー亡き後の残存 group を停止できない。"
+                    "pid / 結果ファイルを残して GC に委ねる"
+                )
 
         if not unconfirmed:
             cleanup(pid_file)
@@ -185,6 +207,10 @@ def reap_orphan(pid_file: Path) -> str:
 
     **リーダーが死んでいても終わりではない** (マージ前レビューの指摘)。`pre` が作った
     独立 process group には孫が残りうるので、`_reap_leaderless_group` で group 側を見る。
+
+    リーダーの生死は `_is_running` (**zombie は死んだ扱い**) で見る。zombie を走行中と
+    読むと `terminate()` へ進み、`ps` が `<defunct>` しか返さないので同一性を確認できず、
+    毎回 `REAP_UNCONFIRMED` を返して pid / 結果ファイルが永遠に残る。
     """
     try:
         pid = int(pid_file.read_text().strip())
@@ -414,8 +440,22 @@ def _signal_group(pid: int, sig: signal.Signals) -> bool:
 
 
 def _is_running(pid: int) -> bool:
+    """pid が「止める対象として走っている」か。**zombie は走っていない扱い**。
+
+    `os.kill(pid, 0)` だけでは足りない (マージ前レビューの指摘)。PID 1 が孤児を reap
+    しないコンテナでは、処理を終えたリーダーが zombie として残り `os.kill(pid, 0)` が
+    成功し続ける。それを「走行中」と読むと停止経路 (`terminate`) に進むが、zombie の
+    `ps` は cmdline を返さない (`<defunct>`) ため同一性を確認できず、`post()` も GC も
+    毎回 `REAP_UNCONFIRMED` に倒れて pid / 結果ファイルが永遠に残る (孤児は既に居ないのに
+    GC が一生収束しない)。zombie は**停止済み**として group 側の判定
+    (`_reap_leaderless_group`) に進める — 止めるべき孫が group に残っていればそこで撃てる。
+
+    判定不能 (`pid_is_zombie` が None = `/proc` も `ps` も使えない) は `os.kill` の結果に
+    従う = 走行中側に倒す (同一性を確認したうえで停止を試みる側)。
+    テストヘルパー (`tests/test_orphan_gc.py` の `_alive`) と同じ契約。
+    """
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError):
         return False
+    return subproc.pid_is_zombie(pid) is not True

@@ -99,6 +99,23 @@ turn")。**発火条件 (イベント / matcher) は変えていない** — 変
   `ps -A -o pid=,pgid=,stat=,etime=` を 1 回呼んでメンバー単位で判定し、判定不能は
   すべて未確定側。**限界**は「group が一度空になってから pgid の番号が再利用され、その
   新しいリーダーも既に死んでいる」という二重の偶然を弾けないこと (CLAUDE.md に明記)
+- **マージ前レビューの指摘**: その group 側の判定を `post()` が通っていなかった。post は
+  リーダーの生死しか見ておらず、リーダーが post の完了前に exit / crash して独立 process
+  group に孫が残った場合、停止を試みないまま掃除に進んでいた。**その group を追える唯一の
+  記録 (pid = pgid) がそこで消える**ので、上で入れた leaderless-group GC も以後その孫に
+  手が届かない (走り続けて課金される)。post も cleanup の前に `_reap_leaderless_group` を
+  通し、生存メンバーが居れば停止を試み、未確定なら pid / 結果ファイルを対で残すようにした。
+  あわせて pid が正でないときは group 判定に入らないようにしている
+  (`killpg(0, sig)` は**呼び出し側自身の process group** = hook プロセスを撃つため)
+- **マージ前レビューの指摘**: 生存判定 (`os.kill(pid, 0)`) が zombie を「走行中」と読んで
+  いた。**PID 1 が孤児を reap しないコンテナ**では、処理を終えたリーダーが zombie として
+  group に残り `os.kill(pid, 0)` が成功し続ける。停止経路 (`terminate()`) に進んでも
+  zombie の `ps -o command=` は `<defunct>` しか返さず署名を照合できないため、**毎回
+  `REAP_UNCONFIRMED` に倒れて pid / 結果ファイルが永遠に残る** (孤児は既に居ないのに GC が
+  収束しない。group に孫が残っていてもそれが撃たれない)。production 側の生存判定でも
+  `_common/subproc.pid_is_zombie()` を使い (0.10.0 でテストヘルパー `_alive` だけ対応済み
+  だった)、**zombie は停止済み**として group 側の判定に進めるようにした。判定不能な環境
+  (`/proc` も `ps` も使えない) では従来どおり `os.kill` の結果に従う
 - **マージ前レビューの指摘**: `os.killpg` の失敗を握りつぶしたまま「停止を試みた」と
   報告していた。`PermissionError` / その他の `OSError` では停止 signal が届いていない
   のに `terminate()` が無条件に True を返すため、**TERM も KILL も送れていないのに
@@ -170,6 +187,13 @@ timeout テストが同じ理由で使っている `subproc.pid_is_zombie()` で
 いる」は挙動そのものの失敗)。同じクラスの残り 2 件は修正前でも通る**正常経路側の対照**
 (停止できたら従来どおり掃除する / group ごと消えていれば停止扱い) で、修正が常時発動して
 いないことを示す。
+
+続く 2 件 (post の group 判定 / zombie のリーダー) の回帰テストも同じ手順で、修正前の
+`cursor.py` を使い捨てコピーに展開した状態で**先に落ちること**を確認してから採用した
+(`TestPostLeaderlessGroup` 2 件・`TestZombieLeader` 2 件がいずれも失敗)。失敗の内訳は
+「post がリーダー亡き後の group を撃たず、孫が走り続けている」「停止を確認できていないのに
+pid 記録を消している」と、zombie のリーダーに対して `REAP_SIGNALED` / `REAP_STOPPED` を
+返すべき場面で `REAP_UNCONFIRMED` が返ること 2 件。
 
 ## 0.9.1
 

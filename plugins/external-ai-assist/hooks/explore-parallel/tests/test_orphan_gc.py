@@ -177,6 +177,48 @@ class OrphanTestCase(HookTestCase):
         member = self.read_grandchild(marker)
         return proc.pid, member
 
+    def spawn_zombie_leader_group(self) -> tuple[int, int]:
+        """リーダーが **zombie として残った** process group を作る。
+
+        戻り値は (pgid = zombie リーダーの pid, 生きているメンバーの pid)。PID 1 が孤児を
+        reap しないコンテナの再現で、リーダーは終了しているのに誰も `wait` しないため
+        `os.kill(pid, 0)` が成功し続ける。
+
+        `Popen` を保持したまま `poll()` / `wait()` を呼ばずに置く。参照を捨てると
+        `Popen.__del__` が `subprocess._active` へ積み、次の `Popen` 生成時の
+        `_cleanup()` が reap してしまい zombie を維持できない。
+        """
+        marker = os.path.join(self.tmpdir, "zombie-group.pid")
+        proc = subprocess.Popen(
+            ["bash", "-c", f"sleep 30 & echo $! > {shlex.quote(marker)}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._procs.append(proc)  # tearDown の wait で reap する
+        self._extra_pids.append(proc.pid)
+        member = self.read_grandchild(marker)
+        if subproc.pid_is_zombie(proc.pid) is None:
+            self.skipTest("zombie を判定できない環境 (/proc も ps も使えない)")
+        deadline = time.monotonic() + 3
+        while (
+            time.monotonic() < deadline and subproc.pid_is_zombie(proc.pid) is not True
+        ):
+            time.sleep(0.02)
+        self.assertIs(
+            subproc.pid_is_zombie(proc.pid),
+            True,
+            "zombie のリーダーを作れていない (フィクスチャが成立していない)",
+        )
+        try:
+            os.kill(proc.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            self.fail("zombie に os.kill(pid, 0) が失敗した (前提が成立していない)")
+        self.assertEqual(
+            os.getpgid(member), proc.pid, "メンバーがリーダーと同じ process group に居ない"
+        )
+        return proc.pid, member
+
     def _launch_analyzer(self, tool_use_id: str) -> tuple[int, int, object]:
         """偽 cursor を `pre` 経由で起動し、(リーダー pid, 孫 pid, pid ファイル) を返す。
 
@@ -561,6 +603,135 @@ class TestLeaderlessGroup(OrphanTestCase):
             time.sleep(0.05)
 
         self.assertEqual(self.cursor.reap_orphan(pid_file), self.state.REAP_STOPPED)
+
+
+class TestPostLeaderlessGroup(OrphanTestCase):
+    """`post()` も掃除の前に group を見る (リーダーの生死だけで決めない)。
+
+    リーダーが post の完了前に exit / crash しても、`pre` が作った独立 process group には
+    孫が残りうる。リーダーが居ないだけで掃除に進むと、その group を追える唯一の記録
+    (pid = pgid) が消え、GC の leaderless-group 経路も以後手が届かない (課金が続く)。
+    """
+
+    def test_post_stops_a_group_whose_leader_already_exited(self):
+        gc_pid_file = self.fake_cursor_that_exits_leaving_a_grandchild()
+        self.run_hook("pre", explore_payload("tu-post-leaderless"))
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-post-leaderless")
+        grandchild = self.read_grandchild(gc_pid_file)
+        leader = self.reap_cursor("tu-post-leaderless")
+
+        self.assertFalse(_alive(leader), "リーダーがまだ生きている (フィクスチャ不成立)")
+        self.assertTrue(_alive(grandchild), "孫が起動していない (フィクスチャ不成立)")
+        self.assertEqual(
+            os.getpgid(grandchild), leader, "孫がリーダーと同じ process group に居ない"
+        )
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.cursor.post("tu-post-leaderless")
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(grandchild),
+            "post がリーダー亡き後の group を撃たず、孫が走り続けている",
+        )
+        self.assertFalse(pid_file.exists(), "停止できたのに pid ファイルが残っている")
+        self.assertFalse(result_file.exists(), "停止できたのに結果ファイルが残っている")
+
+    def test_post_keeps_the_records_when_a_leaderless_group_is_unconfirmed(self):
+        """同一性を確認できない group では両ファイルを残す (GC が再試行できる形)。
+
+        `TestLeaderlessGroup` の「記録より前から居る group」と同じフィクスチャを post から
+        通す。リーダーが死んでいる時点で掃除していた版では、まだ走っている group を追える
+        pid / pgid の記録がここで失われていた。
+        """
+        pgid, member = self.spawn_leaderless_group()
+        result_file, pid_file = self.state.paths(
+            self.cursor.NAME, "tu-post-foreign-group"
+        )
+        pid_file.write_text(str(pgid))
+        result_file.write_text("孤児がまだ書いている途中")
+        # mtime を group の起動より後にする = 「この group は記録より前から居る」形。
+        # 待たずに時系列を作るため mtime を未来へ動かす (`_START_SKEW_SEC` を超える幅)。
+        future = time.time() + 60
+        os.utime(pid_file, (future, future))
+
+        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
+            self.cursor, "POLL_INTERVAL_SEC", 0.05
+        ):
+            self.cursor.post("tu-post-foreign-group")
+
+        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        self.assertTrue(
+            _alive(member), "同一性を確認できない group に signal を送っている"
+        )
+        self.assertTrue(
+            pid_file.exists(), "停止を確認できていないのに pid 記録を消している"
+        )
+        self.assertTrue(
+            result_file.exists(), "pid 記録を残しながら結果ファイルだけ消している"
+        )
+
+
+class TestZombieLeader(OrphanTestCase):
+    """zombie のリーダーは「停止済み」として group 側の判定に進める。
+
+    PID 1 が孤児を reap しないコンテナでは、処理を終えたリーダーが zombie として残り
+    `os.kill(pid, 0)` が成功し続ける。走行中と読むと `terminate()` に進むが、zombie の
+    `ps` は `<defunct>` しか返さず署名を照合できないため、毎回 `REAP_UNCONFIRMED` に倒れる
+    — group に残った孫は撃たれず、pid / 結果ファイルも永遠に残る (GC が収束しない)。
+    """
+
+    def test_reap_stops_a_group_behind_a_zombie_leader(self):
+        pgid, member = self.spawn_zombie_leader_group()
+        _, pid_file = self.state.paths(self.cursor.NAME, "tu-zombie-leader")
+        pid_file.write_text(str(pgid))
+
+        outcome = self.cursor.reap_orphan(pid_file)
+
+        self.assertEqual(
+            outcome,
+            self.state.REAP_SIGNALED,
+            "zombie のリーダーを走行中と読んで group 側の判定に進んでいない",
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(member):
+            time.sleep(0.05)
+        self.assertFalse(
+            _alive(member), "zombie のリーダーの裏に残ったメンバーが走り続けている"
+        )
+
+    def test_gc_cleans_up_a_record_whose_leader_is_a_zombie(self):
+        """メンバーが居なくなれば停止扱い = GC が記録を掃除できる (未確定を返し続けない)。"""
+        pgid, member = self.spawn_zombie_leader_group()
+        os.kill(member, signal.SIGKILL)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and _alive(member):
+            time.sleep(0.05)
+        self.assertFalse(_alive(member), "メンバーを止められていない (フィクスチャ不成立)")
+
+        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-zombie-only")
+        result_file.write_text("x")
+        pid_file.write_text(str(pgid))
+        past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
+        os.utime(pid_file, (past, past))
+        os.utime(result_file, (past, past))
+
+        self.assertEqual(
+            self.cursor.reap_orphan(pid_file),
+            self.state.REAP_STOPPED,
+            "zombie だけの group を止める対象と読んでいる",
+        )
+        self.assertEqual(
+            self.entry.gc_orphans(),
+            1,
+            "zombie のリーダーの記録を GC が永久に残している",
+        )
+        self.assertFalse(pid_file.exists())
+        self.assertFalse(result_file.exists())
 
 
 class TestSignalDelivery(OrphanTestCase):
