@@ -317,6 +317,81 @@ class TestDenyFixed(BaseBash):
         r = handle(_make_envelope(". .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
+    def test_source_envrc_reason_does_not_suggest_dotenv_cli(self):
+        """0.29.1: source .envrc は dotenv-cli を案内しない (内部バックログ)。
+
+        .envrc は direnv 用の shell script で、dotenv-cli の静的
+        ``KEY=value`` パーサとは性質が合わない。_bash_deny_move の envrc 修正
+        と同じ配線 (bash_handler が判定・伝達) を load category にも適用した
+        ことを end-to-end で固定する。
+
+        マージ前レビューの指摘 (P2): literal ``.envrc`` は
+        family かつ literal なので、dotenv-cli を出さないことに加えて
+        direnv hook 経由の自動読込を案内することも固定する
+        (``source foo.envrc`` は family だが非 literal なので案内しない —
+        ``test_source_named_envrc_script_does_not_suggest_auto_load`` 参照)。
+        """
+        r = handle(_make_envelope("source .envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertIn("direnv", reason)
+        self.assertIn("経由で読み込んでください", reason)
+
+    def test_dot_envrc_reason_does_not_suggest_dotenv_cli(self):
+        r = handle(_make_envelope(". .envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertIn("direnv", reason)
+
+    def test_source_named_envrc_script_does_not_suggest_auto_load(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は literal
+        ``.envrc`` ではないため direnv が自動発見・自動 load しない。0.29.1 は
+        本ケースを is_envrc=False (非 family) 扱いにして dotenv-cli を含む
+        既定文言にフォールバックしていたが、これは別方向の実態不一致
+        (``.envrc`` は条件分岐や `use flake` を書ける shell script で、
+        dotenv-cli の静的パーサとは性質が合わない) だった。今回の修正は
+        family (is_envrc=True) と literal (is_direnv_literal) を分離し、
+        family だが非 literal なら「dotenv-cli も direnv 自動読込も案内し
+        ない」shell script 前提の文面にする。判定 (deny) 自体は変わらない。
+        """
+        r = handle(_make_envelope("source foo.envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertNotIn("direnv 側の hook", reason)
+        self.assertNotIn("自動 load", reason)
+        self.assertNotIn("経由で読み込んでください", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_source_named_envrc_script_does_not_suggest_explicit_exec(self):
+        """マージ前レビューの指摘 (P2): family だが非 literal な load 対象
+        (``foo.envrc``) の deny reason が「明示的に実行してください」と、
+        今まさに block した ``source`` の実行そのものを勧める自己矛盾の
+        案内を出していた。end-to-end (``handle()`` 経由) でも文言が消えて
+        いることを固定する (message 単体テストは
+        ``test_bash_reason_templates.TestLoad`` 側)。
+        """
+        r = handle(_make_envelope("source foo.envrc", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("明示的に実行", reason)
+
+    def test_dot_uppercase_envrc_does_not_suggest_auto_load(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
+        別ファイル扱いになるため、direnv の自動 load 対象ではない
+        (マージ前レビューの指摘 (P2))。family (``*.envrc``) ではあるので
+        dotenv-cli も案内しない (マージ前レビューの指摘)。"""
+        r = handle(_make_envelope(". .ENVRC", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn("dotenv-cli", reason)
+        self.assertNotIn("direnv 側の hook", reason)
+        self.assertNotIn("自動 load", reason)
+        self.assertNotIn("経由で読み込んでください", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
     def test_head_with_options_dotenv(self):
         r = handle(_make_envelope("head -n 1 .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
@@ -684,6 +759,95 @@ class TestUnknownCommandOperand(BaseBash):
     def test_mv_sensitive(self):
         r = handle(_make_envelope("mv .env .env.old", self.tmp))
         self.assertEqual(_decision(r), "deny")
+
+    def test_cp_envrc_reason_does_not_suggest_env_example(self):
+        """0.29.1: cp .envrc は .env.example 派生を案内しない (内部バックログ)。
+
+        修正前は ``bash_handler`` が ``is_envrc`` を判定・伝達しておらず、
+        ``core.messages.bash_deny`` の既定値 (``False``) がそのまま使われて
+        Next.js 慣例の ``.env.example`` を案内していた。edit_handler と同じ
+        分担 (handler が判定し、messages は結果を受け取るだけ) で配線した
+        ことを end-to-end で固定する (messages 層だけの単体テストでは
+        ``bash_handler`` 側の配線漏れを検出できないため)。
+        """
+        r = handle(_make_envelope("cp .envrc envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".envrc.example", reason)
+
+    def test_mv_envrc_reason_does_not_suggest_env_example(self):
+        r = handle(_make_envelope("mv .envrc envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".envrc.example", reason)
+
+    def test_cp_envrc_via_subdir_reason_still_detected(self):
+        """operand がディレクトリ付きでも basename 判定 (os.path.basename) が
+        効くことを確認する (``config/.envrc`` のようなケース)。"""
+        r = handle(_make_envelope(
+            "cp config/.envrc config/envrc.bak", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".envrc.example", reason)
+
+    def test_cp_named_envrc_script_derives_example_from_basename(self):
+        """マージ前レビューの指摘 (P2): ``foo.envrc`` は
+        literal ``.envrc`` ではないが ``.envrc`` family (``*.envrc``) では
+        あるので、無関係な ``.env.example`` ではなく実際の basename から
+        動的に派生した ``foo.envrc.example`` を案内する。0.29.1 は
+        family 判定自体を literal に厳格化してこのケースを ``.env.example``
+        (dotenv 系の既定文言) にフォールバックさせていたが、これは別方向の
+        実態不一致だった。判定 (deny) 自体は変わらない。
+        """
+        r = handle(_make_envelope("cp foo.envrc foo.envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn("foo.envrc.example", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_mv_named_envrc_script_derives_example_from_basename(self):
+        r = handle(_make_envelope("mv foo.envrc foo.envrc.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn("foo.envrc.example", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_cp_uppercase_envrc_derives_example_from_basename(self):
+        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
+        別ファイル扱いになるが、family (``*.envrc``) ではあるので、basename の
+        大文字小文字をそのまま保った ``.ENVRC.example`` を案内する
+        (マージ前レビューの指摘 (P2))。"""
+        r = handle(_make_envelope("cp .ENVRC ENVRC.bak", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".env.example", reason)
+        self.assertIn(".ENVRC.example", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+
+    def test_cp_glob_envrc_with_dotglob_keeps_default_wording(self):
+        """マージ前レビューの指摘 (P2): dotglob 有効時は ``*.envrc`` が
+        ``.envrc`` へ展開されうるため glob operand のまま deny されるが
+        (``TestGlobDotenvDeny`` 参照)、operand 文字列 ``*.envrc`` を
+        そのまま basename 判定にかけると
+        ``"*.envrc".lower().endswith(".envrc")`` が True になり、対象を
+        確定できない ``cp *.envrc.example *.envrc`` という無意味な案内が
+        出ていた。glob operand は既定文言のまま (docs/DESIGN.md の
+        load/move 節) にする — is_envrc / is_direnv_literal は評価せず
+        False に固定し、.env 側の既定 suggestion にフォールバックする。
+        """
+        r = handle(_make_envelope(
+            "shopt -s dotglob; cp *.envrc backup/", self.tmp,
+        ))
+        self.assertEqual(_decision(r), "deny")
+        reason = _reason(r)
+        self.assertNotIn(".envrc.example", reason)
+        self.assertIn(".env.example", reason)
 
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))

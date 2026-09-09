@@ -17,11 +17,12 @@ ask の柔軟性より、確実な block を優先する設計判断。
 
 ### deny reason に追加キー名を埋め込む (0.2.0)
 
-dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込みを block
+dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``*.envrc``) への書き込みを block
 する際、``tool_input`` から追加予定のキー名を抽出して reason に添える。
 ユーザーが「どのキーを ``.env.example`` に移せばよいか」を見てすぐ代替行動できる
-(``.envrc`` は direnv の shell script なので ``.envrc.example`` を案内する。
-0.29.0、``engine.is_envrc_basename`` 参照)。
+(``.envrc`` family は direnv の shell script なので、実際の basename から
+動的に組み立てた ``<basename>.example`` を案内する。0.29.0、マージ前レビュー
+の指摘で basename 派生化、``engine.is_envrc_basename`` 参照)。
 
 ### 状況別の deny 文面 (E6, 0.20.0)
 
@@ -31,8 +32,8 @@ dotenv 系 (``.env`` / ``.env.*`` / ``foo.env`` / ``.envrc``) への書き込み
 
 | ``classify`` | ``kind`` | 文面 |
 |---|---|---|
-| ``missing`` | ``new`` | 同じキー名で ``.env.example`` を作る案内 (dotenv かつ追加キーありのとき。``.envrc`` は ``.envrc.example``) |
-| ``regular`` | ``overwrite`` | **既存ファイルの Read 同等 minimal info** + dotenv-cli merge の案内 (``.envrc`` は direnv 前提の案内) |
+| ``missing`` | ``new`` | 同じキー名で ``.env.example`` を作る案内 (dotenv かつ追加キーありのとき。``.envrc`` family は ``<basename>.example``) |
+| ``regular`` | ``overwrite`` | **既存ファイルの Read 同等 minimal info** + dotenv-cli merge の案内 (``.envrc`` family は direnv 前提の案内) |
 | ``symlink`` | ``symlink`` | 実体側が書き換わる旨と symlink 運用の確認 |
 | ``special`` | ``special`` | FIFO / socket / device への書き込みである旨 |
 
@@ -200,10 +201,11 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
     new_keys = _extract_dotenv_keys(envelope, tool_label, basename)
 
     is_dotenv = _detect_format(basename) == "dotenv"
-    # .envrc (direnv) は _detect_format 上は dotenv 系に含まれる (KEY=value
-    # 行のスーパーセットとして parse できるため) が、テンプレート慣習は
-    # .env.example ではなく .envrc.example なので助言文面だけ別軸で分ける
-    # (内部バックログ、engine.is_envrc_basename 参照)。
+    # .envrc family (``*.envrc``、大文字小文字問わず。direnv 用 shell script)
+    # は _detect_format 上は dotenv 系に含まれる (KEY=value 行のスーパー
+    # セットとして parse できるため) が、テンプレート慣習は .env.example
+    # ではなく basename から動的に組み立てた <basename>.example なので
+    # 助言文面だけ別軸で分ける (内部バックログ、engine.is_envrc_basename 参照)。
     is_envrc = is_envrc_basename(basename)
 
     if cls == "symlink":
