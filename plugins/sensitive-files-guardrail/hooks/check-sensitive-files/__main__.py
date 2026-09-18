@@ -50,6 +50,7 @@ from _shared.patterns import (  # noqa: E402
     path_rule_for,
     resolve_project_root,
 )
+from budget import Deadline  # noqa: E402
 from checker import (  # noqa: E402
     find_sensitive_files,
     in_submodule,
@@ -222,6 +223,18 @@ _SILENT_AFTER_ACK_NOTE = (
 _SHARED_RECIPE_NOTE = (
     "貢献者・CI と共有する除外は "
     f"`{PROJECT_PATTERNS_DISPLAY_PATH}` に commit できます。"
+)
+
+
+# block reason の冒頭に足す不完全通知 (機密ファイルが 1 件以上見つかっていて、
+# かつ時間予算の超過で検査を打ち切った場合。0.32.0、内部バックログ)。
+#
+# **予算超過時だけ付く条件付きの行**なので、通常時の文字数予算は消費しない
+# (静的案内の余裕は床テストの入力で 116 文字しかない — `_SHARED_RECIPE_NOTE` の
+# 注記を参照)。超過時は既に degraded なので、そこで予算を使うのは正しい配分。
+_BUDGET_INCOMPLETE_NOTE = (
+    "**注意: 時間予算の超過で検査を打ち切ったため、以下の一覧は不完全です**"
+    " (ほかにも機密ファイルがある可能性があります)。"
 )
 
 
@@ -405,8 +418,13 @@ def _build_reason(
     session_scoped: bool,
     root_offset_: str | None = None,
     submodule_by_path: dict[str, str] | None = None,
+    incomplete: bool = False,
 ) -> str:
     """block reason (LLM 向け plain text) を組み立てる。
+
+    ``incomplete`` (0.32.0、内部バックログ): 時間予算の超過で検査を打ち切った
+    場合に ``_BUDGET_INCOMPLETE_NOTE`` を冒頭に足す。予算超過時だけ付く条件付き
+    の行なので、通常時の文字数予算 (静的部分の余裕) は消費しない。
 
     tracked / untracked を別セクションで列挙し、AskUserQuestion の選択肢と
     恒久除外レシピ (``[project:$CLAUDE_PROJECT_DIR]`` + ``!<root 相対パス>``) を
@@ -458,6 +476,8 @@ def _build_reason(
     (テスト: 件数 × path 長 × basename 長 × root_offset の格子で総当たり)。
     """
     head = ["【セキュリティ確認】", ""]
+    if incomplete:
+        head = ["【セキュリティ確認】", "", _BUDGET_INCOMPLETE_NOTE, ""]
 
     tracked_header = (
         "【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:"
@@ -672,6 +692,47 @@ _INTERNAL_ERROR_MESSAGE = (
 _OUTPUT_STARTED = False
 
 
+# 時間予算を使い切って検査を打ち切ったが、報告する機密ファイルが 1 件も
+# 集まらなかったときの通知 (0.32.0、内部バックログ)。
+#
+# この状態を **黙って exit 0 にすると「機密なし」と区別が付かない** —
+# 元の指摘 (「TimeoutExpired は [] を返すため『機密なし』と区別できず stderr
+# にも出ない」) の本体はここ。0.30.0 の internal_error と同じ「止めないが必ず
+# 見せる」経路 (stderr + systemMessage) に揃える。block はしない (差し戻しても
+# 利用者に直せることが無く、0.14.0 の離脱を再生産する)。
+_BUDGET_INCOMPLETE_MESSAGE = (
+    "[sensitive-files-guardrail] Stop hook (check-sensitive-files) が時間予算"
+    "を超過したため検査を完了できませんでした。このターンは機密ファイルの"
+    " tracked / untracked 検査が**不完全**です (「機密なし」ではありません)。"
+    "巨大な repo や未 ignore の build / node_modules がある場合は "
+    "`.gitignore` に入れると高速化します。詳細は `claude --debug` のログ "
+    "(stderr の `git_budget_exceeded` / `git_unavailable` 行) を参照してください。"
+)
+
+def _budget_notice_or_zero(deadline: Deadline) -> int:
+    """予算超過で打ち切っていたら systemMessage で通知し、常に exit 0 を返す。
+
+    超過していなければ何も出さない (従来どおりの沈黙 = 「機密なし」)。
+    ``systemMessage`` 自体が書けない場合は 0.30.0 の internal_error 経路と同じ
+    理由で exit 1 にする (exit 0 + 空 stdout は完全無音になるため)。
+    """
+    global _OUTPUT_STARTED
+    if not deadline.exceeded:
+        return 0
+    sys.stderr.write("[check-sensitive-files] scan_incomplete: budget_exceeded\n")
+    try:
+        _OUTPUT_STARTED = True
+        write_stdout(
+            json.dumps(
+                {"systemMessage": _BUDGET_INCOMPLETE_MESSAGE}, ensure_ascii=False
+            )
+            + "\n"
+        )
+    except Exception:  # noqa: BLE001
+        return 1
+    return 0
+
+
 def main() -> int:
     """エントリポイント。``_main_impl`` を top-level で包み、想定外の例外を
     「可視の fail-open」に倒す (0.30.0、内部バックログ)。
@@ -716,6 +777,13 @@ def main() -> int:
 
 
 def _main_impl() -> int:
+    # hook 全体で共有する時間予算 (0.32.0、内部バックログ)。git 呼出とマッチング
+    # ループの両方がこの締切を見る。hooks.json の Stop timeout (15s) に到達すると
+    # Claude Code は hook を kill して出力を discard する = 報告が 1 byte も
+    # 出ない無音の fail-open になるため、少し手前で自分から打ち切って
+    # 「不完全だった」ことを必ず言う方に倒す (budget.py の docstring 参照)。
+    deadline = Deadline()
+
     try:
         hook_input = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, EOFError):
@@ -731,9 +799,9 @@ def _main_impl() -> int:
     if not cwd:
         return 0
     # repo root と cwd prefix を 1 回の rev-parse で得る (作業ツリー外なら None)
-    ctx = repo_context(cwd)
+    ctx = repo_context(cwd, deadline)
     if ctx is None:
-        return 0
+        return _budget_notice_or_zero(deadline)
     toplevel, prefix = ctx
 
     patterns_file = Path(__file__).resolve().parent / "patterns.txt"
@@ -751,9 +819,11 @@ def _main_impl() -> int:
     # path 形 rule の基準 root (= [project:] セクションの key、0.24.0)。git の
     # toplevel ではなく Read / Edit / Bash と同じ解決を使う (レシピの互換性)
     root = resolve_project_root(cwd)
-    sensitive = find_sensitive_files(cwd, rules, root=root)
+    sensitive = find_sensitive_files(cwd, rules, root=root, deadline=deadline)
     if not sensitive:
-        return 0
+        # 予算切れで打ち切っていた場合、「機密なし」との区別が付かないので
+        # 黙らず systemMessage で「このターンは検査が不完全」と伝える。
+        return _budget_notice_or_zero(deadline)
 
     # 0.19.0: session 単位の once-only。報告済み集合に新規が無ければ黙る。
     # session_id が無い / 不正なら state を使わず従来通り毎回 block する。
@@ -774,7 +844,7 @@ def _main_impl() -> int:
     # 方針)。
     submodule_by_path: dict[str, str] = {}
     if tracked:
-        submods = submodule_paths(cwd)
+        submods = submodule_paths(cwd, deadline=deadline)
         if submods:
             for path in tracked:
                 sm = in_submodule(path, submods)
@@ -787,6 +857,7 @@ def _main_impl() -> int:
         session_scoped=session_id is not None,
         root_offset_=root_offset(cwd, root),
         submodule_by_path=submodule_by_path,
+        incomplete=deadline.exceeded,
     )
 
     # ``print`` ではなく ``write_stdout`` (UTF-8 bytes をバイナリ層へ書く) を

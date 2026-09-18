@@ -400,6 +400,19 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 > (対処として無効) のに、次のターンからは黙る。実際に外れたかは
 > `git ls-files <path>` の出力が空になったことで確認する。
 
+**時間予算 (0.32.0)**: この hook には 15 秒の timeout があり、到達すると Claude
+Code は hook を kill して出力を **discard** する (= 機密ファイルの報告が 1 byte も
+出ない)。そのため hook 側で **12 秒の予算**を持ち、git 呼出とパターン照合の両方が
+この締切を共有する。超過したときは黙らず:
+
+- 検出 0 件で打ち切った場合 → `systemMessage` で「このターンは検査が**不完全**
+  です (「機密なし」ではありません)」と表示する (block はしない)
+- 1 件以上見つかっていた場合 → block reason の冒頭に「一覧は不完全です」を添える
+
+**大規模 repo で予算超過が出る場合**は、未 ignore のディレクトリ (`node_modules` /
+`build` / `dist` / キャッシュ類) を `.gitignore` に入れると `git ls-files --others`
+の列挙が大幅に速くなる。ネットワークファイルシステム上の repo でも起きやすい。
+
 ## パターン設定
 
 ユーザー個別のパターンは plugin を fork せずに patterns.local.txt に書ける:

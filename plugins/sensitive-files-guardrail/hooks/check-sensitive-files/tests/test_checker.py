@@ -158,6 +158,109 @@ class TestGitFailureVisibility(BaseWithTmpRepo):
         self.assertNotIn("git_unavailable", fake_err.getvalue())
 
 
+class TestSharedGitBudget(BaseWithTmpRepo):
+    """0.32.0 (内部バックログ): hook 全体で共有する時間予算。
+
+    従来は呼出単位の上限 (1 回 10s) しか無く、``rev-parse`` / ``ls-files`` 系 /
+    submodule のネスト段数ぶんを直列に呼ぶため合計が hook timeout (15s) を
+    容易に超えた。到達すると Claude Code は出力を discard するので、報告が
+    1 byte も出ない**無音の fail-open** になる。
+    """
+
+    def test_per_call_timeout_is_capped_by_remaining_budget(self):
+        from budget import Deadline
+        deadline = Deadline(total=3.0, per_call_cap=10.0)
+        with mock.patch("checker.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="true\n", stderr=""
+            )
+            is_git_repo(self.tmp, deadline)
+        # 残予算 (≈3s) が per-call cap (10s) より小さいので残予算側が使われる
+        self.assertLessEqual(run.call_args.kwargs["timeout"], 3.0)
+        self.assertGreater(run.call_args.kwargs["timeout"], 0)
+
+    def test_without_deadline_keeps_the_legacy_fixed_timeout(self):
+        """``deadline`` を渡さない呼出は従来どおり固定 10s (後方互換)。"""
+        with mock.patch("checker.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="true\n", stderr=""
+            )
+            is_git_repo(self.tmp)
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
+
+    def test_exhausted_budget_skips_the_call_and_reports(self):
+        """予算切れなら git を**呼ばず**、黙らず stderr に 1 行出す。"""
+        from budget import Deadline
+        deadline = Deadline(total=0.0)
+        with mock.patch("checker.subprocess.run") as run, mock.patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as fake_err:
+            result = is_git_repo(self.tmp, deadline)
+        run.assert_not_called()
+        self.assertFalse(result)
+        self.assertIn("git_budget_exceeded", fake_err.getvalue())
+        self.assertTrue(deadline.exceeded)
+
+    def test_call_timeout_marks_the_budget_as_exceeded(self):
+        """呼出が timeout したことも「打ち切った」として呼出側に伝える。"""
+        from budget import Deadline
+        deadline = Deadline(total=12.0)
+        with mock.patch(
+            "checker.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10),
+        ), mock.patch("sys.stderr", new_callable=io.StringIO):
+            is_git_repo(self.tmp, deadline)
+        self.assertTrue(deadline.exceeded)
+
+    def test_matching_loop_is_also_bounded(self):
+        """git 呼出だけでなく ``is_sensitive`` のループも締切を見る。
+
+        git だけ縛っても ``is_sensitive`` × ファイル数 × rule 数 のコストは
+        縛れず、hook timeout に到達すれば報告が丸ごと消える。
+        """
+        import checker
+        from budget import Deadline
+        names = [f"f{i:05d}.txt" for i in range(1500)] + [".env"]
+        rules = [("*.env", False), (".env", False)]
+        deadline = Deadline(total=12.0)
+        with mock.patch.object(checker, "_ls_tracked", return_value=names), \
+                mock.patch.object(checker, "_run_git_nul", return_value=[]), \
+                mock.patch.object(deadline, "expired", return_value=True):
+            found = checker.find_sensitive_files(
+                self.tmp, rules, deadline=deadline
+            )
+        # 締切に当たった時点で打ち切る (末尾の .env には到達しない)
+        self.assertEqual(found, [])
+        self.assertTrue(deadline.exceeded)
+
+    def test_matching_loop_completes_within_budget(self):
+        """予算内なら従来どおり全件走査する (打ち切りが誤発火しない)。"""
+        import checker
+        from budget import Deadline
+        names = [f"f{i:05d}.txt" for i in range(1500)] + [".env"]
+        rules = [(".env", False)]
+        deadline = Deadline(total=60.0)
+        with mock.patch.object(checker, "_ls_tracked", return_value=names), \
+                mock.patch.object(checker, "_run_git_nul", return_value=[]):
+            found = checker.find_sensitive_files(
+                self.tmp, rules, deadline=deadline
+            )
+        self.assertEqual(found, [{"path": ".env", "status": "tracked"}])
+        self.assertFalse(deadline.exceeded)
+
+    def test_deadline_slice_and_expired_contract(self):
+        from budget import MIN_USEFUL_SECONDS, Deadline
+        d = Deadline(total=5.0, per_call_cap=2.0)
+        self.assertFalse(d.expired())
+        self.assertEqual(d.slice(), 2.0)  # cap 側が小さい
+        self.assertFalse(d.exceeded)  # 照会だけでは立たない
+        spent = Deadline(total=MIN_USEFUL_SECONDS / 2)
+        self.assertTrue(spent.expired())
+        self.assertFalse(spent.exceeded, "expired() は exceeded を立てない")
+        self.assertIsNone(spent.slice())
+        self.assertTrue(spent.exceeded)
+
+
 class TestLsTrackedFallback(BaseWithTmpRepo):
     """``_ls_tracked`` の ``--recurse-submodules`` 非対応 (古い git) fallback。
 

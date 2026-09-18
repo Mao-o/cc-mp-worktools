@@ -194,6 +194,81 @@ class TestMainFailOpen(BaseMainTest):
         self.assertIn("patterns_unavailable", err)
 
 
+class TestMainBudgetExceededVisibility(BaseMainTest):
+    """0.32.0 (内部バックログ): 時間予算の超過を黙らない。
+
+    元の指摘の本体は「``TimeoutExpired`` は ``[]`` を返すため『機密なし』と
+    区別できず stderr にも出ない」。打ち切ったときは 0.30.0 の internal_error と
+    同じ「止めないが必ず見せる」経路 (stderr + ``systemMessage`` / block reason
+    の注記) に揃える。block するかどうか (判定) は変えない。
+    """
+
+    def _run_with_exhausted_budget(self) -> tuple[int, str, str]:
+        """予算 0 の ``Deadline`` を注入して ``main`` を走らせる。
+
+        実時間に依存させない (sleep で 12s 待つテストは書かない) ため、
+        ``_main_impl`` が使う ``Deadline`` ファクトリを差し替える。
+        """
+        from budget import Deadline as RealDeadline
+
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            with mock.patch.object(
+                entry, "Deadline", lambda *a, **k: RealDeadline(total=0.0)
+            ):
+                rc = entry.main()
+            return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_incomplete_scan_is_reported_instead_of_silence(self):
+        """機密ファイルが集まらないまま打ち切ったら systemMessage で伝える。"""
+        rc, out, err = self._run_with_exhausted_budget()
+        self.assertEqual(rc, 0)
+        self.assertIn("git_budget_exceeded", err)
+        self.assertIn("scan_incomplete: budget_exceeded", err)
+        payload = json.loads(out)
+        self.assertNotIn("decision", payload)  # block ではない
+        self.assertIn("不完全", payload["systemMessage"])
+        self.assertIn(".gitignore", payload["systemMessage"])
+
+    def test_normal_run_stays_silent(self):
+        """予算内で機密ファイルが無ければ従来どおり完全な沈黙。"""
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            rc = entry.main()
+            out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertNotIn("budget_exceeded", err)
+
+    def test_block_reason_discloses_incompleteness(self):
+        """機密ファイルが 1 件以上あった場合は block reason 側で開示する。"""
+        entry = _load_entry()
+        reason = entry._build_reason(
+            [".env"], [], session_scoped=True, root_offset_="",
+            submodule_by_path={}, incomplete=True,
+        )
+        self.assertIn("一覧は不完全です", reason)
+        self.assertIn("【セキュリティ確認】", reason)
+        # 通常時 (incomplete=False) には出ない = 予算を消費しない
+        normal = entry._build_reason(
+            [".env"], [], session_scoped=True, root_offset_="",
+            submodule_by_path={},
+        )
+        self.assertNotIn("一覧は不完全です", normal)
+
+
 class TestMainInternalError(BaseMainTest):
     """想定外の例外は「可視の fail-open」に倒す (0.30.0、内部バックログ)。
 

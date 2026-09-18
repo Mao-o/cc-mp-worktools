@@ -19,6 +19,7 @@ from _shared.patterns import (
     _resolve_local_patterns_path,
 )
 from _shared.patterns import load_patterns as _shared_load_patterns
+from budget import PER_CALL_CAP_SECONDS, Deadline
 
 
 def _warn_local(msg: str) -> None:
@@ -90,11 +91,24 @@ def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
     )
 
 
-def _run_git_raw(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str] | None":
+def _run_git_raw(
+    args: list[str], cwd: str, deadline: "Deadline | None" = None
+) -> "subprocess.CompletedProcess[str] | None":
     """git を実行して ``CompletedProcess`` を返す。呼出自体の失敗は ``None``。
 
     ``_run_git`` / ``_run_git_nul`` の共通土台 (内部バックログ)。git_unavailable
     の stderr 報告をここに一元化する。
+
+    ``deadline`` (0.32.0、内部バックログ): hook 全体で共有する時間予算
+    (``budget.Deadline``)。渡すと **1 回 10s の固定 timeout を「残予算と 10s の
+    小さい方」に置き換える**。予算切れなら git を**呼ばずに** ``None`` を返し
+    ``git_budget_exceeded`` を stderr に 1 行出す。
+
+    なぜ必要か: Stop hook の timeout は 15s で、到達すると Claude Code が hook を
+    kill して出力を discard する (= 報告が 1 byte も出ない無音の fail-open)。
+    1 回 10s の呼出を ``rev-parse`` / ``ls-files`` 系 / submodule のネスト段数ぶん
+    **直列**に行うため、呼出単位の上限だけでは合計 15s を容易に超える。
+    ``deadline`` を渡さない呼出は従来どおり固定 10s (テストと後方互換のため)。
 
     ``FileNotFoundError`` (git 実行ファイルが無い) / ``TimeoutExpired``
     (プロセスが応答しない) は git **呼出そのもの**の失敗であり、区別できないと
@@ -113,34 +127,49 @@ def _run_git_raw(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str]
     予期しない例外を fail-open に倒す範囲が広がり、判定表を変えない、という
     本件のスコープを超える)。
     """
+    timeout: float = PER_CALL_CAP_SECONDS
+    if deadline is not None:
+        slice_ = deadline.slice()
+        if slice_ is None:
+            sys.stderr.write("[check-sensitive-files] git_budget_exceeded\n")
+            return None
+        timeout = slice_
     try:
         return subprocess.run(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        if deadline is not None and isinstance(e, subprocess.TimeoutExpired):
+            # 打ち切りの原因が予算側だったことを呼出側が報告できるようにする
+            # (``[]`` を返すだけでは「機密なし」と区別できない)。
+            deadline.mark_exceeded()
         sys.stderr.write(
             f"[check-sensitive-files] git_unavailable: {type(e).__name__}\n"
         )
         return None
 
 
-def _run_git(args: list[str], cwd: str) -> list[str]:
+def _run_git(
+    args: list[str], cwd: str, deadline: "Deadline | None" = None
+) -> list[str]:
     """git コマンドを実行して行 (改行区切り) のリストを返す。失敗時は空リスト。
 
     ``returncode != 0`` (対象が git リポジトリでない等) は正常系として黙って
-    ``[]`` を返す。呼出自体の失敗の扱いは ``_run_git_raw`` を参照。
+    ``[]`` を返す。呼出自体の失敗と ``deadline`` の扱いは ``_run_git_raw`` を参照。
     """
-    result = _run_git_raw(args, cwd)
+    result = _run_git_raw(args, cwd, deadline)
     if result is None or result.returncode != 0:
         return []
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
-def _run_git_nul(args: list[str], cwd: str) -> list[str]:
+def _run_git_nul(
+    args: list[str], cwd: str, deadline: "Deadline | None" = None
+) -> list[str]:
     """git コマンドを実行して NUL 区切り (``-z``) の要素リストを返す。
 
     ``git ls-files -z`` は non-ASCII / 特殊文字を含む path が
@@ -152,19 +181,21 @@ def _run_git_nul(args: list[str], cwd: str) -> list[str]:
     2.50.1) なので ``-z`` は不要。ただし ``--show-toplevel`` は path を返すため、
     repo root のパスに改行を含む環境では誤 parse する既知の残課題がある。
     """
-    result = _run_git_raw(args, cwd)
+    result = _run_git_raw(args, cwd, deadline)
     if result is None or result.returncode != 0:
         return []
     return [item for item in result.stdout.split("\0") if item]
 
 
-def is_git_repo(cwd: str) -> bool:
+def is_git_repo(cwd: str, deadline: "Deadline | None" = None) -> bool:
     """cwd が git リポジトリ内かどうか"""
-    result = _run_git(["rev-parse", "--is-inside-work-tree"], cwd)
+    result = _run_git(["rev-parse", "--is-inside-work-tree"], cwd, deadline)
     return bool(result) and result[0] == "true"
 
 
-def repo_context(cwd: str) -> tuple[str, str] | None:
+def repo_context(
+    cwd: str, deadline: "Deadline | None" = None
+) -> tuple[str, str] | None:
     """cwd が git 作業ツリー内なら ``(toplevel, prefix)`` を返す (0.19.0)。
 
     - ``toplevel``: repo root の絶対パス (``git rev-parse --show-toplevel``)
@@ -179,7 +210,9 @@ def repo_context(cwd: str) -> tuple[str, str] | None:
     表示 (block reason) は従来通り cwd 相対のまま (``git rm --cached <path>`` を
     cwd でそのまま実行できる)。
     """
-    lines = _run_git(["rev-parse", "--show-toplevel", "--show-prefix"], cwd)
+    lines = _run_git(
+        ["rev-parse", "--show-toplevel", "--show-prefix"], cwd, deadline
+    )
     if not lines:
         return None
     toplevel = lines[0]
@@ -188,7 +221,7 @@ def repo_context(cwd: str) -> tuple[str, str] | None:
     return toplevel, prefix
 
 
-def _ls_tracked(cwd: str) -> list[str]:
+def _ls_tracked(cwd: str, deadline: "Deadline | None" = None) -> list[str]:
     """tracked ファイル一覧を取得する (submodule 内の tracked を含む)。
 
     ``git ls-files --recurse-submodules`` を使用。未対応の古い git ではフラグが
@@ -203,15 +236,18 @@ def _ls_tracked(cwd: str) -> list[str]:
     二重引用符 (``"\\346\\227\\245...env"``) で返り、pattern 照合に一致せず
     tracked な ``日本語.env`` を見逃していた (guard bypass、内部バックログ)。
     """
-    result = _run_git_nul(["ls-files", "-z", "--recurse-submodules"], cwd)
+    result = _run_git_nul(["ls-files", "-z", "--recurse-submodules"], cwd, deadline)
     if result:
         return result
     # fallback: --recurse-submodules 非対応の古い git、または repo が本当に空の場合
-    return _run_git_nul(["ls-files", "-z"], cwd)
+    return _run_git_nul(["ls-files", "-z"], cwd, deadline)
 
 
 def submodule_paths(
-    cwd: str, _prefix: str = "", _visited: set[str] | None = None
+    cwd: str,
+    _prefix: str = "",
+    _visited: set[str] | None = None,
+    deadline: "Deadline | None" = None,
 ) -> set[str]:
     """cwd から見える submodule mount path 一覧 (cwd 相対、ネスト込み) を返す
     (内部バックログ、P2-1 で手動再帰化)。
@@ -264,7 +300,7 @@ def submodule_paths(
     visited.add(real_cwd)
 
     paths: set[str] = set()
-    for entry in _run_git_nul(["ls-files", "--stage", "-z"], cwd):
+    for entry in _run_git_nul(["ls-files", "--stage", "-z"], cwd, deadline):
         # 形式: "<mode> <object> <stage>\t<path>" (gitlink は mode 160000)
         meta, sep, path = entry.partition("\t")
         if not sep or not path:
@@ -275,7 +311,9 @@ def submodule_paths(
         paths.add(full)
         sub_cwd = os.path.join(cwd, path)
         if os.path.exists(os.path.join(sub_cwd, ".git")):
-            paths.update(submodule_paths(sub_cwd, full + "/", visited))
+            paths.update(
+                submodule_paths(sub_cwd, full + "/", visited, deadline)
+            )
     return paths
 
 
@@ -328,11 +366,18 @@ def root_offset(cwd: str, root: str | None) -> str | None:
     return root_relative(cwd, root)
 
 
+# マッチングループで締切を確認する間隔 (ファイル件数)。毎件 ``time.monotonic``
+# を呼ぶのは無駄なので間引く。256 は「1 件あたり rule 数ぶんの fnmatch でも
+# 100ms 程度に収まる」見積りで、超過検出の粒度と計測コストの折衷。
+_DEADLINE_CHECK_EVERY = 256
+
+
 def find_sensitive_files(
     cwd: str,
     rules: list[tuple[str, bool]],
     *,
     root: str | None = None,
+    deadline: "Deadline | None" = None,
 ) -> list[dict]:
     """git 管理下の tracked + untracked ファイルから機密パターン一致を抽出する。
 
@@ -340,6 +385,14 @@ def find_sensitive_files(
       Step 6 で submodule 内 tracked も検査対象に追加 (``--recurse-submodules``)。
     - untracked: ``git ls-files --others --exclude-standard`` を使うため
       ``.gitignore`` 済みは既に除外されている。submodule 内 untracked は範囲外。
+
+    ``deadline`` (0.32.0、内部バックログ): hook 全体の時間予算。git 呼出に渡す
+    だけでなく **マッチングループ自体も** ``_DEADLINE_CHECK_EVERY`` 件ごとに
+    締切を見て打ち切る。git 呼出だけを縛っても
+    ``is_sensitive`` × ファイル数 × rule 数 のコストは縛れず、hook timeout
+    (15s) に到達すると Claude Code が出力を discard して**報告が 1 byte も
+    出ない**ため (無音の fail-open)。打ち切ったときは ``deadline.exceeded`` が
+    立つので、呼出側が「検査が不完全である」ことを必ず表示する。
 
     ``root`` (0.24.0): path 形 rule の基準 (``resolve_project_root(cwd)``)。
     ``cwd`` が root 配下なら各 path を **root 相対** (``root_offset`` + cwd 相対
@@ -356,9 +409,11 @@ def find_sensitive_files(
     if not rules:
         return []
 
-    tracked = _ls_tracked(cwd)
+    tracked = _ls_tracked(cwd, deadline)
     # ``-z``: tracked 側と同じ quotePath 対策 (非 ASCII / 空白入り名を素で受ける)
-    untracked = _run_git_nul(["ls-files", "-z", "--others", "--exclude-standard"], cwd)
+    untracked = _run_git_nul(
+        ["ls-files", "-z", "--others", "--exclude-standard"], cwd, deadline
+    )
 
     offset = root_offset(cwd, root)
     match_root = root if offset is not None else None
@@ -368,12 +423,22 @@ def find_sensitive_files(
 
     results: list[dict] = []
 
-    for filepath in tracked:
-        if is_sensitive(_subject(filepath), rules, root=match_root):
-            results.append({"path": filepath, "status": "tracked"})
+    def _scan(paths: list[str], status: str) -> None:
+        for i, filepath in enumerate(paths):
+            if (
+                deadline is not None
+                and i
+                and i % _DEADLINE_CHECK_EVERY == 0
+                and deadline.expired()
+            ):
+                # 打ち切り。``exceeded`` を立てて呼出側に「不完全」を伝える
+                # (黙って途中で止めると「機密なし」と区別できない)。
+                deadline.mark_exceeded()
+                return
+            if is_sensitive(_subject(filepath), rules, root=match_root):
+                results.append({"path": filepath, "status": status})
 
-    for filepath in untracked:
-        if is_sensitive(_subject(filepath), rules, root=match_root):
-            results.append({"path": filepath, "status": "untracked"})
+    _scan(tracked, "tracked")
+    _scan(untracked, "untracked")
 
     return results

@@ -50,6 +50,7 @@ sensitive-files-guardrail/
     │   └── patterns.py              load_patterns (3 tier: 既定 → repo 同梱 → user) / _parse_patterns_text / [project:] セクション (worktree は 2 候補) / 除外レシピ
     ├── check-sensitive-files/       # Stop hook
     │   ├── __main__.py
+    │   ├── budget.py                hook 全体で共有する時間予算 (0.32.0)
     │   ├── checker.py               git ls-files (tracked / untracked、--recurse-submodules)
     │   ├── stop_ack.py              session 単位の once-only state (0.19.0)
     │   ├── patterns.txt             # 両 hook で共有する既定パターン

@@ -534,6 +534,15 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
 | handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
+| 時間予算 (12s) 超過 + 検出 0 件 (0.32.0) | **exit 0 + stderr `git_budget_exceeded` / `scan_incomplete` + `systemMessage`** (block しない)。「機密なし」の沈黙と区別できないため必ず見せる |
+| 時間予算 (12s) 超過 + 検出 1 件以上 (0.32.0) | `decision: block` (従来どおり) + reason 冒頭に「一覧は不完全です」 |
+
+> 0.32.0 で hook 全体の時間予算 (12s、`budget.Deadline`) を導入した。hook timeout
+> (15s) に到達すると Claude Code は hook を kill して**出力を discard** する
+> (= 報告が 1 byte も出ない無音の fail-open) ため、少し手前で自分から打ち切って
+> 「不完全だった」ことを見せる方に倒した。git 呼出 (1 回の上限は残予算と 10s の
+> 小さい方) とパターン照合ループの両方が同じ締切を共有する。**block するか
+> しないかの判定は変えていない** — 変わるのは打ち切りを言うか黙るかだけ。
 
 > 0.31.0 で block reason に「**この block が次ターンから出なくなっても対処成功の
 > 証拠ではない**」旨と確認コマンド (`git ls-files <path>`) の開示を足したが、
