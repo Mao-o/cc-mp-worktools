@@ -73,10 +73,10 @@ flowchart TD
     IG -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated/第三者ディレクトリ}
     E -- yes --> Z
     E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
+    N -- yes --> F[source.load_text<br/>symlink/2MB/20000行の安全弁]
     N -- no --> SB{拡張子なし かつ<br/>dotfile でない?}
     SB -- no --> Z
     SB -- yes --> F
-    N -- yes --> F[source.load_text<br/>symlink/2MB/20000行の安全弁]
     F -- None --> Z
     F -- LoadedFile --> G{先頭20行に<br/>generated marker?}
     G -- yes --> Z
