@@ -373,7 +373,7 @@ class TestMove(unittest.TestCase):
         msg = M.bash_deny(first_token="cp", operand=".envrc",
                           command="cp .envrc envrc.bak", is_envrc=True)
         self.assertNotIn(".env.example", msg)
-        self.assertIn(".envrc.example", msg)
+        self.assertIn(M._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, msg)
         self.assertIn("1Password CLI", msg)
         self.assertIn("git-secret", msg)
 
@@ -381,63 +381,40 @@ class TestMove(unittest.TestCase):
         msg = M.bash_deny(first_token="mv", operand=".envrc",
                           command="mv .envrc envrc.bak", is_envrc=True)
         self.assertNotIn(".env.example", msg)
-        self.assertIn(".envrc.example", msg)
+        self.assertIn(M._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, msg)
 
-    def test_cp_named_envrc_script_derives_example_from_basename(self):
-        """マージ前レビューの指摘 (P2): テンプレート案内は実際の
-        basename から動的に派生する (``<basename>.example``)。``foo.envrc``
-        は literal ``.envrc`` ではないが family (``*.envrc``) ではあるので、
-        ``foo.envrc.example`` を案内し、無関係な ``.env.example`` は出さない。
+    def test_envrc_family_clause_is_fixed_for_every_basename(self):
+        """マージ前レビューの決定: テンプレート案内は basename から派生させず、
+        family 全体で **同一の固定文言** を出す。
+
+        0.29.1 の途中版は ``<basename>.example`` と ``cp`` コマンド文字列を
+        動的に組み立てていたが、生成物の表面 (quote / glob / operand の
+        ディレクトリ保持 / オプション終端) ごとに指摘が続いて収束しなかった
+        ため撤回した。literal ``.envrc`` / 非 literal family
+        (``foo.envrc`` / ``.ENVRC``) / shell メタ文字入り basename のいずれでも
+        同じ clause が出ること、``<basename>.example`` 形の派生文字列が
+        一切出ないこと (= 動的生成を再導入したら必ず落ちること) を固定する。
         """
-        msg = M.bash_deny(first_token="cp", operand="foo.envrc",
-                          command="cp foo.envrc foo.envrc.bak", is_envrc=True)
-        self.assertNotIn(".env.example", msg)
-        self.assertIn("foo.envrc.example", msg)
-
-    def test_mv_uppercase_envrc_derives_example_from_basename(self):
-        """大文字小文字を区別する FS 上の ``.ENVRC`` でも、basename の大文字
-        小文字をそのまま保った ``.ENVRC.example`` を案内する。"""
-        msg = M.bash_deny(first_token="mv", operand=".ENVRC",
-                          command="mv .ENVRC ENVRC.bak", is_envrc=True)
-        self.assertNotIn(".env.example", msg)
-        self.assertIn(".ENVRC.example", msg)
+        for basename in (".envrc", "foo.envrc", ".ENVRC",
+                         "foo bar.envrc", "x;echo PWN.envrc"):
+            for first_token in ("cp", "mv"):
+                with self.subTest(basename=basename, first_token=first_token):
+                    msg = M.bash_deny(
+                        first_token=first_token, operand=basename,
+                        command=f"{first_token} {basename!r} backup/",
+                        is_envrc=True,
+                    )
+                    self.assertIn(M._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, msg)
+                    # 動的派生の痕跡が無いこと (再導入したら落ちる)。
+                    self.assertNotIn(f"{basename}.example", msg)
+                    self.assertNotIn(".env.example", msg)
 
     def test_is_envrc_defaults_to_false(self):
         """``is_envrc`` を渡さない既存呼び出しは従来どおり .env 版のまま。"""
         msg = M.bash_deny(first_token="cp", operand=".envrc",
                           command="cp .envrc envrc.bak")
         self.assertIn(".env.example", msg)
-        self.assertNotIn(".envrc.example", msg)
-
-    def test_cp_envrc_basename_with_space_is_quoted_in_command(self):
-        """マージ前レビューの指摘 (P2): 案内する ``cp <example> <basename>``
-        は copy-paste 実行を想定した実コマンド文字列なので、basename に
-        空白を含むと素朴な補間では 2 引数に割れて壊れる
-        (``cp foo bar.envrc.example foo bar.envrc`` は 4 引数の cp になる)。
-        ``shlex.quote`` で両ファイル名が quote されることを確認する。
-        """
-        msg = M.bash_deny(first_token="cp", operand="foo bar.envrc",
-                          command="cp 'foo bar.envrc' backup/",
-                          is_envrc=True)
-        self.assertIn(
-            "cp 'foo bar.envrc.example' 'foo bar.envrc'", msg
-        )
-
-    def test_mv_envrc_basename_with_semicolon_is_quoted_in_command(self):
-        """basename に ``;`` を含む場合、素朴な補間だと案内した ``cp`` 文字列を
-        そのまま実行するとコマンド注入になる (``x;echo PWN.envrc`` 等)。
-        ``shlex.quote`` で quote され、注入形の生文字列が出力に含まれない
-        ことを確認する。
-        """
-        msg = M.bash_deny(first_token="mv", operand="x;echo PWN.envrc",
-                          command="mv 'x;echo PWN.envrc' backup/",
-                          is_envrc=True)
-        self.assertIn(
-            "cp 'x;echo PWN.envrc.example' 'x;echo PWN.envrc'", msg
-        )
-        self.assertNotIn(
-            "cp x;echo PWN.envrc.example x;echo PWN.envrc", msg
-        )
+        self.assertNotIn(M._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, msg)
 
 
 class TestBashMoveEnvrcSuggestionByteBudget(unittest.TestCase):
@@ -447,9 +424,7 @@ class TestBashMoveEnvrcSuggestionByteBudget(unittest.TestCase):
     deny reason は minimal info を持たないため行数への波及は無いが、同じ
     discipline (内部バックログの提案) をここでも守る。
 
-    マージ前レビューの指摘: ``_bash_move_suggestion_format_envrc`` は basename を動的に
-    埋め込む関数 (``_bash_move_suggestion_format_envrc``) になったため、
-    literal ``.envrc`` (旧定数と同じ basename 長) で呼び出して測る。
+    clause は basename に依存しない固定文言なので、定数をそのまま測る。
     """
 
     def test_envrc_format_clause_is_within_15_bytes_of_default(self):
@@ -457,12 +432,12 @@ class TestBashMoveEnvrcSuggestionByteBudget(unittest.TestCase):
             M._BASH_MOVE_SUGGESTION_FORMAT_DOTENV.encode("utf-8")
         )
         envrc_len = len(
-            M._bash_move_suggestion_format_envrc(".envrc").encode("utf-8")
+            M._BASH_MOVE_SUGGESTION_FORMAT_ENVRC.encode("utf-8")
         )
         self.assertLessEqual(
             envrc_len,
             default_len + 15,
-            "_bash_move_suggestion_format_envrc が既定文言より 15 byte を"
+            "_BASH_MOVE_SUGGESTION_FORMAT_ENVRC が既定文言より 15 byte を"
             " 超えて長い。",
         )
 

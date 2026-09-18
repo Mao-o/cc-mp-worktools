@@ -858,43 +858,22 @@ def _bash_deny_load(
 # ``bash_handler._build_deny_response`` 側で行い、結果だけ ``is_envrc`` として
 # 受け取る (edit_deny / edit_handler と同じ分担)。
 #
-# マージ前レビューの指摘 (P2): 直前の 0.29.1 内 fix は文言を固定文字列
-# (``.envrc.example`` / ``.envrc``) にしていたため、``foo.envrc`` のような
-# 非 literal な family operand でも同じ literal ``.envrc`` 前提の文言が出て
-# いた。テンプレート案内を実際の basename から動的に派生させる
-# (``<basename>.example``、literal かどうかは問わない — cp/mv の代替案は
-# 名前の対応関係が保たれれば十分)。
-# byte 数は既定文言と揃えている (``TestBashMoveEnvrcSuggestionByteBudget`` 参照)。
+# マージ前レビューの指摘: 0.29.1 の途中版はこの clause を basename から動的に
+# 派生させ (``<basename>.example`` + ``cp`` コマンド文字列) ていたが、生成物の
+# 表面 (quote / glob / operand のディレクトリ保持 / オプション終端) ごとに
+# 新しい指摘が出て収束しなかったため、**basename に依存しない固定文言に
+# 戻した**。テンプレート名の対応関係は operand 行 (``matched_operand:``) から
+# LLM が復元できるので、実コマンドを組み立てる必要はない。
+# byte 数は既定文言と揃えている (``TestBashMoveEnvrcSuggestionByteBudget``
+# 参照)。予算 (+15 byte) に収めるため、説明的な長い言い回しは採らない。
 _BASH_MOVE_SUGGESTION_FORMAT_DOTENV = (
     " `.env.example` 派生で運用するなら `cp .env.example .env.local` の"
     "方向で代替できます。"
 )
-
-
-def _bash_move_suggestion_format_envrc(basename: str) -> str:
-    """``.envrc`` family (``*.envrc``) 用の move suggestion 後半を basename から
-    動的に組み立てる (マージ前レビューの指摘)。
-
-    ``.envrc`` → ``.envrc.example``、``foo.envrc`` → ``foo.envrc.example``、
-    ``.ENVRC`` → ``.ENVRC.example`` のように、実際の operand の大文字小文字・
-    命名をそのまま保つ。
-
-    マージ前レビューの指摘 (P2): ``cp <example> <basename>`` は copy-paste
-    実行を想定した実コマンド文字列なので、basename に空白や shell メタ文字
-    (``foo bar.envrc`` / ``x;echo PWN.envrc`` 等) が含まれると壊れる、または
-    コマンド注入になる。表示用の先頭 ``` `{example}` ``` (ファイル名の言及、
-    コマンドではない) は raw のまま保ちつつ、``cp`` に続く 2 引数だけ
-    ``shlex.quote`` で quote してから組み立てる。特殊文字が無ければ
-    ``shlex.quote`` は入力をそのまま返すため、既定の basename
-    (``.envrc`` 等) では見た目もテストの byte 予算も変わらない。
-    """
-    example = f"{basename}.example"
-    quoted_example = shlex.quote(example)
-    quoted_basename = shlex.quote(basename)
-    return (
-        f" `{example}` 派生で運用するなら `cp {quoted_example} {quoted_basename}` の"
-        "方向で代替できます。"
-    )
+_BASH_MOVE_SUGGESTION_FORMAT_ENVRC = (
+    " `<元ファイル名>.example` 派生で運用するなら、そこから複製する"
+    "方向で代替できます。"
+)
 
 
 def _bash_deny_move(
@@ -912,11 +891,12 @@ def _bash_deny_move(
 ) -> str:
     """``cp`` / ``mv`` の deny reason。secrets manager / .env.example 派生を推奨。
 
-    ``.envrc`` family では後半の代替案だけ basename から動的に派生した
-    ``<basename>.example`` 版に差し替える (0.29.1、マージ前レビューの指摘で basename 派生化)。
-    前半 (secrets manager 推奨) は format に依らないので共通のまま。
-    ``is_envrc`` は呼出側 (``bash_deny`` 経由で ``bash_handler``) が判定して
-    渡す — 判定関数を自前で呼ばない。
+    ``.envrc`` family では後半の代替案だけ専用の固定文言
+    (``_BASH_MOVE_SUGGESTION_FORMAT_ENVRC``) に差し替える (0.29.1)。文言は
+    basename に依存しない (マージ前レビューで、生成コマンドの表面ごとに
+    指摘が続くため固定文言に戻した)。前半 (secrets manager 推奨) は format に
+    依らないので共通のまま。``is_envrc`` は呼出側 (``bash_deny`` 経由で
+    ``bash_handler``) が判定して渡す — 判定関数を自前で呼ばない。
     """
     basename = _basename_of(operand)
     note = (
@@ -927,7 +907,7 @@ def _bash_deny_move(
     lines: list[str] = [f"note: {note}"]
     lines.extend(_common_meta_lines(first_token, operand))
     format_clause = (
-        _bash_move_suggestion_format_envrc(basename)
+        _BASH_MOVE_SUGGESTION_FORMAT_ENVRC
         if is_envrc
         else _BASH_MOVE_SUGGESTION_FORMAT_DOTENV
     )

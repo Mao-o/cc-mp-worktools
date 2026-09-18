@@ -23,7 +23,7 @@ from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
 
-from core import output
+from core import messages, output
 from handlers.bash.segmentation import _split_command_on_operators
 from handlers.bash_handler import handle
 
@@ -774,14 +774,14 @@ class TestUnknownCommandOperand(BaseBash):
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
         self.assertNotIn(".env.example", reason)
-        self.assertIn(".envrc.example", reason)
+        self.assertIn(messages._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, reason)
 
     def test_mv_envrc_reason_does_not_suggest_env_example(self):
         r = handle(_make_envelope("mv .envrc envrc.bak", self.tmp))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
         self.assertNotIn(".env.example", reason)
-        self.assertIn(".envrc.example", reason)
+        self.assertIn(messages._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, reason)
 
     def test_cp_envrc_via_subdir_reason_still_detected(self):
         """operand がディレクトリ付きでも basename 判定 (os.path.basename) が
@@ -792,43 +792,37 @@ class TestUnknownCommandOperand(BaseBash):
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
         self.assertNotIn(".env.example", reason)
-        self.assertIn(".envrc.example", reason)
+        self.assertIn(messages._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, reason)
 
-    def test_cp_named_envrc_script_derives_example_from_basename(self):
-        """マージ前レビューの指摘 (P2): ``foo.envrc`` は
-        literal ``.envrc`` ではないが ``.envrc`` family (``*.envrc``) では
-        あるので、無関係な ``.env.example`` ではなく実際の basename から
-        動的に派生した ``foo.envrc.example`` を案内する。0.29.1 は
-        family 判定自体を literal に厳格化してこのケースを ``.env.example``
-        (dotenv 系の既定文言) にフォールバックさせていたが、これは別方向の
-        実態不一致だった。判定 (deny) 自体は変わらない。
+    def test_envrc_family_move_reason_uses_fixed_clause(self):
+        """マージ前レビューの決定: family (``*.envrc``) の move 案内は
+        basename から派生させず **同一の固定文言** を出す。
+
+        ``foo.envrc`` / ``.ENVRC`` は literal ``.envrc`` ではないが family
+        ではあるので、無関係な ``.env.example`` は出さず literal ``.envrc``
+        と同じ clause を出す。0.29.1 の途中版は ``<basename>.example`` +
+        ``cp`` コマンド文字列を動的に組み立てていたが、生成物の表面ごとに
+        指摘が続いて収束しなかったため撤回した。派生文字列が一切出ないこと
+        (= 再導入したら落ちること) を end-to-end で固定する。判定 (deny)
+        自体は変わらない。
         """
-        r = handle(_make_envelope("cp foo.envrc foo.envrc.bak", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-        reason = _reason(r)
-        self.assertNotIn(".env.example", reason)
-        self.assertIn("foo.envrc.example", reason)
-        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
-
-    def test_mv_named_envrc_script_derives_example_from_basename(self):
-        r = handle(_make_envelope("mv foo.envrc foo.envrc.bak", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-        reason = _reason(r)
-        self.assertNotIn(".env.example", reason)
-        self.assertIn("foo.envrc.example", reason)
-        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
-
-    def test_cp_uppercase_envrc_derives_example_from_basename(self):
-        """大文字小文字を区別する FS 上の ``.ENVRC`` は literal ``.envrc`` と
-        別ファイル扱いになるが、family (``*.envrc``) ではあるので、basename の
-        大文字小文字をそのまま保った ``.ENVRC.example`` を案内する
-        (マージ前レビューの指摘 (P2))。"""
-        r = handle(_make_envelope("cp .ENVRC ENVRC.bak", self.tmp))
-        self.assertEqual(_decision(r), "deny")
-        reason = _reason(r)
-        self.assertNotIn(".env.example", reason)
-        self.assertIn(".ENVRC.example", reason)
-        self.assertLessEqual(len(reason.encode("utf-8")), output.MAX_REASON_BYTES)
+        for command, basename in (
+            ("cp foo.envrc foo.envrc.bak", "foo.envrc"),
+            ("mv foo.envrc foo.envrc.bak", "foo.envrc"),
+            ("cp .ENVRC ENVRC.bak", ".ENVRC"),
+        ):
+            with self.subTest(command=command):
+                r = handle(_make_envelope(command, self.tmp))
+                self.assertEqual(_decision(r), "deny")
+                reason = _reason(r)
+                self.assertNotIn(".env.example", reason)
+                self.assertNotIn(f"{basename}.example", reason)
+                self.assertIn(
+                    messages._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, reason,
+                )
+                self.assertLessEqual(
+                    len(reason.encode("utf-8")), output.MAX_REASON_BYTES,
+                )
 
     def test_cp_glob_envrc_with_dotglob_keeps_default_wording(self):
         """マージ前レビューの指摘 (P2): dotglob 有効時は ``*.envrc`` が
@@ -836,18 +830,22 @@ class TestUnknownCommandOperand(BaseBash):
         (``TestGlobDotenvDeny`` 参照)、operand 文字列 ``*.envrc`` を
         そのまま basename 判定にかけると
         ``"*.envrc".lower().endswith(".envrc")`` が True になり、対象を
-        確定できない ``cp *.envrc.example *.envrc`` という無意味な案内が
-        出ていた。glob operand は既定文言のまま (docs/DESIGN.md の
-        load/move 節) にする — is_envrc / is_direnv_literal は評価せず
-        False に固定し、.env 側の既定 suggestion にフォールバックする。
+        確定できない案内が出ていた。glob operand は既定文言のまま
+        (docs/DESIGN.md の load/move 節) にする — is_envrc /
+        is_direnv_literal は評価せず False に固定し、.env 側の既定
+        suggestion にフォールバックする。
+
+        判定は clause 定数で行う (文言が固定化されて ``.envrc.example``
+        という部分文字列が全分岐から消えたため、substring 比較では
+        分岐の取り違えを検出できない)。
         """
         r = handle(_make_envelope(
             "shopt -s dotglob; cp *.envrc backup/", self.tmp,
         ))
         self.assertEqual(_decision(r), "deny")
         reason = _reason(r)
-        self.assertNotIn(".envrc.example", reason)
-        self.assertIn(".env.example", reason)
+        self.assertNotIn(messages._BASH_MOVE_SUGGESTION_FORMAT_ENVRC, reason)
+        self.assertIn(messages._BASH_MOVE_SUGGESTION_FORMAT_DOTENV, reason)
 
     def test_grep_non_sensitive_allow(self):
         r = handle(_make_envelope("grep foo README.md", self.tmp))

@@ -514,10 +514,10 @@ def _build_deny_response(
     # GLOBIGNORE 有効時に ``.envrc`` へ展開されうるため deny 対象になるが、
     # basename には glob 文字がそのまま残る。``is_envrc_basename`` は
     # suffix 一致だけを見るので ``"*.envrc".lower().endswith(".envrc")`` が
-    # True になり、対象を確定できない ``cp *.envrc.example *.envrc`` という
-    # 無意味な案内が出ていた。docs/DESIGN.md の load/move 節が既定として
-    # 定めるとおり「glob operand は既定文言のまま」にするため、glob を含む
-    # operand は両判定関数を評価せず False に固定する。
+    # True になり、対象ファイルが 1 つに確定していないのに ``.envrc`` 前提の
+    # 案内 (direnv hook / テンプレート派生) が出ていた。docs/DESIGN.md の
+    # load/move 節が既定として定めるとおり「glob operand は既定文言のまま」に
+    # するため、glob を含む operand は両判定関数を評価せず False に固定する。
     operand_basename = os.path.basename(operand)
     if _has_glob(operand):
         is_envrc = False
