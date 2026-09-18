@@ -52,7 +52,7 @@ post-implementation-review/
 | phase | hook | 役割 |
 |---|---|---|
 | `pre-tool` | `PreToolUse(Bash)` | Bash 実行前の `git status` スナップショットを `tool_use_id` キーで保存 |
-| `post-tool` | `PostToolUse(Write/Edit/NotebookEdit/Bash)` | 変更パスを `session_id` キーの `pending` に積む |
+| `post-tool` | `PostToolUse(Write/Edit/NotebookEdit/Bash)` | 変更パスを `session_id` キーの `pending` に積む (+ 編集直後の内容指紋を `digests` に記録。git は呼ばない) |
 | `stop` | `Stop` | `pending` を claim してレビュー、結果を配信 |
 
 ### なぜ Bash にも張るのか
@@ -211,7 +211,7 @@ turn 1 と turn 7 で同じファイルを編集すると turn 1 の hunk が tu
 ファイル全体の変更文脈を渡すため) した上で、**パス単位の diff hash** で重複を潰す:
 そのパスの diff が前回レビュー時と 1 バイトも変わっていなければレビューに載せない。
 
-### HEAD 基準が空になったパスは復元せず通知する
+### HEAD 基準が空になったパスは、内容指紋で証明できたときだけ復元する (0.11.0)
 
 HEAD 基準には副作用がある: pending に積んだ後、Stop までの間にそのパスを commit
 すると `git diff HEAD -- <path>` が空になり、0.8.0 以前は黙って消費されて一度も
@@ -230,14 +230,55 @@ diff を復元する経路を実装した。**この証明は「リモート由�
 別のローカルの書き手 (別セッション・人間の手動 commit) が push せずに同じパスへ
 commit すると、その内容が丸ごと外部へ送信されてしまう — pull/merge 経由の混入は
 正しく遮断できていたが、これは別ベクトルであり、マージ前レビューで実際に送信
-されることが実演されたため復元経路そのものを撤去した。
+されることが実演されたため 0.10.0 で復元経路そのものを撤去した (通知のみ)。
 
-**確定した設計 (復元せず、常に通知する)**:
+**0.11.0 の設計: 基点ではなく「内容」で帰属を証明する**
 
-- HEAD 基準 diff が空だった tracked パスは `batch.unretrievable` に積む
-  (**ディスク上に実在するかは問わない**、マージ前レビューの指摘)。空になった理由
-  (同一ターン内 commit・別の書き手の commit・pull/merge・単に無変更) は区別しない
-  — 区別しても「復元してよいか」の判断には使わないため
+| 段階 | どこで | 何をするか |
+|---|---|---|
+| 記録 | PostToolUse (`_content_digests` → `state.record_pending`) | 編集直後のディスク内容の指紋 (`sha256:<hex>`、存在しなければ `absent`) を state に書く。**git は呼ばない** (PostToolUse を軽く保つ設計を維持) |
+| 照合 | Stop (`_restore_committed_diff`) | Stop 時点のディスク内容の指紋が一致するときだけ復元する |
+| 基点 | Stop (`gitscan.last_commit_touching`) | そのパスを最後に変更した commit の (書き換え後の) 親 |
+| 通知 | `_run_review` | 復元したパスは「commit の差分をレビューに使用」、できなかったパスは従来どおり「差分が空で取得できませんでした」 |
+
+**なぜ指紋一致が帰属の証明になるか**: この分岐に入る条件は「HEAD 基準 diff が空」=
+ディスクと HEAD の内容が git から見て同一。そこで指紋 (= 編集直後に自分が書いた内容)
+とディスク内容が一致するなら、**HEAD に入っている内容は自分が書いた内容そのもの**に
+なる。別の書き手が同じパスへ別内容を commit した場合はディスク内容がその人のものに
+なるので一致しない (自分の commit の後に上書き commit された場合も同じ)。
+
+**内容そのものは保存しない** (指紋だけ)。Stop 側で必要なのは照合だけで、レビューに
+渡す diff は git から取れるため。内容を `$TMPDIR` に複製する案 (`gitscan.py`
+モジュール docstring の案 (a)) は、機密ファイルの内容が残る点と状態量の点で不利。
+
+**基点の決め方** (`git rev-list --parents -1 HEAD -- <path>` の**書き換え後**の親。
+2026-09-18 に使い捨て repo 5 形で実測):
+
+| 状況 | 親の数 | 基点 | 送る差分 |
+|---|---|---|---|
+| そのパスを変更した commit が前にもある | 1 (直前にそのパスを変更した commit) | その commit | 最後の commit がそのパスに行った変更のみ |
+| そのパスの履歴がこの commit で始まる (純粋な追加) | 0 | `/dev/null` | ファイル全文 (untracked 新規と同じ形) |
+| 削除が commit された | 1 | その commit | 削除の差分 |
+| pull/merge が混ざったが、そのパスは自分の commit だけが触った | 1 | 自分の commit の 1 つ前 | 自分の変更のみ (merge は simplification で消える) |
+| 衝突解決を伴う merge がそのパスの内容を決めている | 2 以上 | — | **復元しない** (どちらの親を基点にしてももう片方を巻き込む) |
+
+送信範囲は「commit が挟まらなかった場合に送っていた差分」と同じで、それ以上遡らない。
+
+**既知の狭さ (意図的)**: 1 ターンでそのパスを 2 回以上 commit した場合、復元されるのは
+最後の commit の差分だけ (それ以前の commit の内容は指紋では証明できない)。
+取りこぼす方向 = 送らない方向なので、そのまま受け入れている。
+
+**予算**: 復元は git を 2 回呼ぶので、`COLLECT_BUDGET_SEC` の残りが
+`RESTORE_RESERVE_SEC` (= `gitscan.RESTORE_TIMEOUT_SEC` × 2) 未満なら試みない。
+収集ループ全体の最悪ケースは従来どおり「`COLLECT_BUDGET_SEC` + 最後の 1 パスの
+`path_diff`」に収まる (`tests/test_review_set.py::TestTimeoutBudgets`)。
+PostToolUse 側の予算は 1 ファイル `SNAPSHOT_MAX_FILE_BYTES` (1MB)、1 回の呼び出し
+合計 `SNAPSHOT_BUDGET_BYTES` (8MB)。超えたパスは指紋なし = 復元しない。
+
+**復元できなかったパスの扱いは 0.10.0 と同じ**:
+
+- HEAD 基準 diff が空で復元もできなかった tracked パスは `batch.unretrievable` に積む
+  (**ディスク上に実在するかは問わない**、マージ前レビューの指摘)
   - 以前はここに「そのパスが実際に存在する (phantom な pending エントリでは
     ない)」という条件も加えていたが、これだと**追跡ファイルの削除が同一ターン内で
     commit されたケース** (HEAD にもディスクにもパスが無くなる) が通知対象から
@@ -245,24 +286,22 @@ commit すると、その内容が丸ごと外部へ送信されてしまう —
     (作成後に同一ターン内で削除して commit しなかった一時ファイル等) との区別は
     cheap な git 状態だけでは付かない (`git cat-file -e HEAD:<path>` は削除
     commit 後どちらのケースでも失敗する) ため、区別を諦めて常に通知する側を
-    選んだ (正当な削除の見落としの方が実害が大きいため)
+    選んだ (正当な削除の見落としの方が実害が大きいため)。0.11.0 では前者が
+    復元され、後者は基点が無い (`last_commit_touching` が None) ので通知だけが残る
 - `_run_review` は `batch.unretrievable` を `systemMessage` に
-  「差分が空で取得できませんでした (commit 済みの可能性。内容は送信していません)」
-  として列挙し、pending からは外す (黙って消費しない。ただし取得できなかった旨を
-  伝えるだけで、commit されたと断定はしない — 実際には revert のみで commit が
-  無かった可能性もあるため)
-- 安全な復元には編集時点の内容退避 (PostToolUse の時点でファイル内容を退避し、
-  Stop 時にそれと比較する) が要るが、これは「PostToolUse を軽く保つ」という既存の
-  設計意図と衝突するため、この batch では見送る
+  「差分が空で取得できませんでした (別の書き手の commit / 無変更の可能性。内容は
+  送信していません)」として列挙し、pending からは外す (黙って消費しない)
 
-**失敗方向は明確: 送信範囲が広がる側には倒さない。** 復元できないときは常に
-「取得できなかった」と可視化するだけにする。「黙って消える」を「取得できな
-かったと報告される」に変えるのが本対応の主眼で、基点まで遡った復元は撤去した
-(設計の変遷は `CHANGELOG.md` の該当節を参照)。regression テストは
-`tests/test_stop_flow.py::TestSameTurnCommitNotification`
-(`test_other_local_writer_commit_is_not_leaked` が今回撤去した脆弱性の再現、
-`test_committed_deletion_is_reported_not_silently_dropped` が
-「ディスク上に実在するか」を条件にしていた頃の見落としの再現)。
+**失敗方向は不変: 送信範囲が広がる側には倒さない。** 証明できない・基点を一意に
+決められない・予算が足りない・指紋が無い (0.10.0 以前の state ファイル) はすべて
+「復元しない」に倒れる。regression テストは
+`tests/test_stop_flow.py::TestSameTurnCommitRestore`
+(`test_other_local_writer_commit_is_not_leaked` /
+`test_other_local_writer_commit_after_ours_is_not_leaked` が 0.9.0 の脆弱性の再現、
+`test_committed_deletion_is_reviewed` が「ディスク上に実在するか」を条件にしていた
+頃の見落としの再現、`test_state_written_by_older_version_is_reported_not_restored`
+が指紋欠落時に証明なしで送らないことの固定)。単体は
+`tests/test_review_set.py::TestContentDigest` / `TestRestoreCommittedDiff`。
 
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 
@@ -287,14 +326,18 @@ commit すると、その内容が丸ごと外部へ送信されてしまう —
 - **`git rev-list --not --remotes` による「手元由来の証明」を通った基点まで
   diff を遡って復元する** — 「リモートに存在しない」ことしか示せず「このセッション
   が書いた」ことは示せないため、同一 worktree の別のローカルの書き手が push せずに
-  commit した内容まで復元して送ってしまう (詳細は「HEAD 基準が空になったパスは
-  復元せず通知する」節)
+  commit した内容まで復元して送ってしまう (0.11.0 は基点ではなく**内容**で帰属を
+  証明する形に置き換えた。詳細は「HEAD 基準が空になったパスは、内容指紋で
+  証明できたときだけ復元する」節)
+- **編集時点のファイル内容そのものを `$TMPDIR` に退避して比較する** — 復元の帰属
+  証明には指紋 (sha256) で足り、レビューに渡す diff は git から取れる。内容を
+  複製すると機密ファイルの中身が `$TMPDIR` に残り、状態量と GC 対象も増える
 
 ## $TMPDIR のレイアウトと GC
 
 ```
 $TMPDIR/post-implementation-review/
-├── state/<session_id>.json                  pending / in_flight / reviewed
+├── state/<session_id>.json                  pending / in_flight / reviewed / digests
 ├── bashsnap/<session>__<tool_use_id>.json   Bash 実行前のスナップショット
 ├── locks/cursor-<cwd hash>.lock             cursor 直列化ロック
 └── reviews/<session_id>.txt                 レビュー結果の参照コピー
@@ -443,7 +486,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
-| HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`) |
+| HEAD 基準の diff が空のパス (同一ターン内 commit 等) は、内容指紋で証明できたときだけ commit の差分で復元し、できなければ黙って消費せず通知する | `TestSameTurnCommitRestore` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked` / `test_other_local_writer_commit_after_ours_is_not_leaked`)。単体は `test_review_set.py::TestContentDigest` / `TestRestoreCommittedDiff` |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |

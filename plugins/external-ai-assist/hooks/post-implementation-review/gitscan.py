@@ -25,6 +25,14 @@ turn 7 で同じファイルを編集すると turn 1 の hunk が turn 7 でも
 変更文脈を受け取る。(a) が優位になるのは巨大ファイルを何十ターンも編集し続ける
 ケースだが、そこは 1 ファイルあたりの上限 (`__main__.MAX_FILE_DIFF_BYTES`) の切り詰めで
 頭打ちになる (切り詰めた場合も hash は全文で記録するので、変わらない限り再掲しない)。
+
+**0.11.0 が足したのは (a) の「内容キャッシュ」ではなく内容の指紋**: 同一ターン内で
+commit されたパスの差分を復元してよいか (= HEAD に入っている内容が自分の書いたもの
+かどうか) を判定するために、PostToolUse が編集直後の内容の sha256 だけを state に
+記録する (`__main__.content_digest`)。レビューに渡す diff は git から取るので内容の
+複製は要らず、(a) の「機密ファイルの内容が $TMPDIR に残る」不利も負わない。
+復元の基点は `last_commit_touching` + `diff_from_commit` で取る (判定は
+`__main__._restore_committed_diff`)。
 """
 from __future__ import annotations
 
@@ -52,6 +60,12 @@ REV_PARSE_TIMEOUT_SEC = 2
 STATUS_TIMEOUT_SEC = 5
 LS_FILES_TIMEOUT_SEC = 10
 PATH_DIFF_TIMEOUT_SEC = 5
+
+# 同一ターン内 commit の差分を復元する経路 (`last_commit_touching` + `diff_from_commit`)
+# の timeout。この 2 本は `__main__.COLLECT_BUDGET_SEC` の**残り予算に 2 回ぶんの余裕が
+# あるときだけ**呼ばれる (`__main__.RESTORE_RESERVE_SEC`) ので、上の予算表の最悪ケースは
+# 変わらない (収集ループ全体が `COLLECT_BUDGET_SEC` + 最後の 1 パス分で頭打ちのまま)。
+RESTORE_TIMEOUT_SEC = 5
 
 MAX_SNAPSHOT_ENTRIES = 5000
 
@@ -311,7 +325,46 @@ def path_diff(root: str, rel: str, untracked: bool, has_head: bool) -> str:
 
     # 初回コミット前の repo には HEAD が無いので staged 差分で代替する
     base = "HEAD" if has_head else "--cached"
-    res = _git(root, ["diff", "--no-color", base, "--", rel])
+    return _diff_from(root, base, rel, PATH_DIFF_TIMEOUT_SEC)
+
+
+def _diff_from(root: str, base: str, rel: str, timeout: int) -> str:
+    res = _git(root, ["diff", "--no-color", base, "--", rel], timeout=timeout)
     if res is None or res.returncode != 0:
         return ""
     return _decode(res.stdout)
+
+
+# --------------------------------------------------------------------------
+# 同一ターン内 commit の差分復元 (呼び出し側の判定は __main__._restore_committed_diff)
+# --------------------------------------------------------------------------
+
+
+def last_commit_touching(root: str, rel: str) -> tuple[str, list[str]] | None:
+    """HEAD から到達できる範囲で rel を最後に変更した commit と、その親 SHA 一覧を返す。
+
+    取得できない (一度も commit されていない / git 失敗 / timeout) なら None。
+
+    `rev-list` は既定の history simplification を使う。merge commit は「片方の親と
+    同じ内容」なら単純化されて親側の commit が返るため、**返り値の親が 1 つなら
+    「そのパスの内容を作った commit は 1 本道」**と読める。親が 2 つ以上 (= その
+    パスの内容が merge そのもので決まっている = 衝突解決を含む) のときは呼び出し側が
+    復元をあきらめる (どちらの親を基点にしても、もう片方の変更を巻き込む)。
+    """
+    res = _git(
+        root,
+        ["rev-list", "--parents", "-1", "HEAD", "--", rel],
+        timeout=RESTORE_TIMEOUT_SEC,
+    )
+    if res is None or res.returncode != 0:
+        return None
+    line = _decode(res.stdout).strip()
+    if not line:
+        return None
+    parts = line.split()
+    return parts[0], parts[1:]
+
+
+def diff_from_commit(root: str, base: str, rel: str) -> str:
+    """base (commit-ish) と作業ツリーの間の 1 パス分 diff。取得失敗なら空文字。"""
+    return _diff_from(root, base, rel, RESTORE_TIMEOUT_SEC)

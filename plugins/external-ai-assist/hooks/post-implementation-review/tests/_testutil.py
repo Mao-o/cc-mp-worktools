@@ -81,6 +81,11 @@ def git(repo: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def git_allow_fail(repo: str, *args: str) -> subprocess.CompletedProcess:
+    """非 0 終了を許す git 実行 (衝突する merge を意図的に起こすテスト用)。"""
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+
+
 def init_repo(path: str) -> str:
     """初期コミット済みの git repo を作る。realpath を返す (macOS の /tmp 対策)。"""
     os.makedirs(path, exist_ok=True)
