@@ -858,13 +858,13 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 ## 既知の制限
 
-- **QUERY tier の「読むだけ」はコマンド形で判定しているので、リモートの機密を読む
-  API も含まれる** (v0.14.0)。`aws \S+ (describe|list|get)-*` をまとめて QUERY に
-  しているため、`aws secretsmanager get-secret-value` / `aws ssm get-parameter
-  --with-decryption` のような**リモートの secret 読み出し**は、期待外アカウントでも
-  deny されず警告のみになる (v0.13.0 までは deny)。止めたいプロジェクトでは
-  [`"$readonly": "deny"`](#従来どおり-deny-させたいとき-readonly) を設定する。
-  service ごとに表を細分化する案は今後の課題
+- **QUERY tier の「読むだけ」はコマンド形で判定している** (v0.14.0)。`aws \S+
+  (describe|list|get)-*` をまとめて QUERY にしているため、表に無い「リモートの
+  機密を返す read」があれば期待外アカウントでも警告のみになる。既知の secret
+  読み出し (`aws secretsmanager get-secret-value` / `batch-get-secret-value`、
+  `aws ssm get-parameter*` の `--with-decryption` 付き、`aws kms decrypt`) は
+  DISCLOSING に置いて不一致 deny を維持している。それ以外で止めたいプロジェクトは
+  [`"$readonly": "deny"`](#従来どおり-deny-させたいとき-readonly) を設定する
 - **未知のオプションは「安全と証明できない」側に倒すので、判定は CLI の
   オプション表に追随しない**。`gh api` は安全なオプションの allow-list で
   読み取りを証明するため、新しいオプションが増えると (実際は読み取りでも)

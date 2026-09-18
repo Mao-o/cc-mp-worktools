@@ -59,6 +59,13 @@ DISCLOSING = [
         frozenset(),
     ),
     (r"^aws\s+sts\s+get-session-token(?=\s|$)", frozenset()),
+    # リモートの secret / 復号値そのものを出力する read (0.14.0)。`get-*` 形は
+    # 一括で QUERY だが、これらは期待外アカウントの secret を context に出す点で
+    # `gh auth status --show-token` と同クラスなので DISCLOSING に置く。
+    # QUERY の get-* より先に見るので不一致は deny になる。
+    (r"^aws\s+secretsmanager\s+(get-secret-value|batch-get-secret-value)(?=\s|$)", frozenset()),
+    (r"^aws\s+ssm\s+get-parameters?(-by-path)?\b.*\s--with-decryption(?=\s|$)", frozenset()),
+    (r"^aws\s+kms\s+decrypt(?=\s|$)", frozenset()),
 ]
 # リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
 QUERY = [

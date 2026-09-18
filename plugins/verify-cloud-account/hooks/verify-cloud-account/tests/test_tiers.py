@@ -112,10 +112,15 @@ _ROWS: list[tuple[str, str, str]] = [
     ("aws iam list-users", "aws", QUERY),
     ("aws s3api head-object --bucket b --key k", "aws", QUERY),
     ("aws sso list-accounts --access-token t", "aws", QUERY),
-    # **既知の緩和**: `get-*` 形の read はまとめて QUERY にしているため、
-    # リモートの secret を読む API も不一致で警告のみになる (README の既知の制限)。
-    # 表を service 単位で切り分ける案は別チケット。
-    ("aws secretsmanager get-secret-value --secret-id x", "aws", QUERY),
+    # リモートの secret / 復号値を出力する read は `get-*` 一括 QUERY より先に
+    # DISCLOSING で拾い、不一致は deny (0.14.0)。復号しない ssm get-parameter は QUERY。
+    ("aws secretsmanager get-secret-value --secret-id x", "aws", WRITE),
+    ("aws secretsmanager batch-get-secret-value --secret-id-list x", "aws", WRITE),
+    ("aws ssm get-parameter --name /x --with-decryption", "aws", WRITE),
+    ("aws ssm get-parameters-by-path --path /x --with-decryption", "aws", WRITE),
+    ("aws ssm get-parameter --name /x", "aws", QUERY),
+    ("aws kms decrypt --ciphertext-blob fileb://c", "aws", WRITE),
+    ("aws secretsmanager list-secrets", "aws", QUERY),
     ("gcloud compute instances list", "gcloud", QUERY),
     ("gcloud beta compute instances list", "gcloud", QUERY),
     ("gcloud projects describe my-proj", "gcloud", QUERY),

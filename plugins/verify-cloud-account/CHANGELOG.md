@@ -86,11 +86,11 @@ READONLY が「CLI 名からの前方一致 regex + option 無審査」だった
 
 ### 既知の制限 (新規)
 
-- QUERY は**コマンド形**で判定するため、`aws secretsmanager get-secret-value` /
-  `aws ssm get-parameter --with-decryption` のような**リモートの secret 読み出し**も
-  QUERY に入る (期待外アカウントでも警告のみで通る。0.13.0 までは deny)。
-  止めたいプロジェクトは `"$readonly": "deny"` を設定する。service ごとに表を
-  細分化する案は今後の課題
+- QUERY は**コマンド形**で判定するため、表に無い「リモートの機密を返す read」は
+  期待外アカウントでも警告のみになる。既知の secret 読み出し (`aws secretsmanager
+  get-secret-value` / `batch-get-secret-value`、`aws ssm get-parameter*` の
+  `--with-decryption` 付き、`aws kms decrypt`) は DISCLOSING に置き、0.13.0 までと
+  同じく不一致で deny する。それ以外で止めたいプロジェクトは `"$readonly": "deny"`
 - 未知の option は「安全と証明できない」側に倒すので、CLI に読み取り option が
   増えると (実際は読み取りでも) WRITE として検証される
 
