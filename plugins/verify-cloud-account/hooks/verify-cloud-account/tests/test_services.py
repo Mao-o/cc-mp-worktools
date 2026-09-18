@@ -1417,6 +1417,45 @@ class TestGithubSelfRemediation(unittest.TestCase):
             "gh auth switch --hostname ghe.example.com --user Mao-o", expected))
 
 
+class TestGithubChangesIdentity(unittest.TestCase):
+    """`gh auth refresh` は scope を足すだけでアクティブアカウントを変えないので、
+    連結規則の切替側に数えない。ただし `-u/--user` 付きは切替なので数える
+    (subcommand 単位で inert を宣言すると穴になる)。"""
+
+    def test_refresh_without_user_is_inert(self):
+        for candidate in (
+            "gh auth refresh",
+            "gh auth refresh -s project",
+            "gh auth refresh --scopes repo,project",
+            "gh auth refresh --hostname ghe.example.com",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(github.changes_identity(candidate, "Mao-o"))
+
+    def test_refresh_with_user_is_an_identity_change(self):
+        for candidate in (
+            "gh auth refresh -u other",
+            "gh auth refresh --user other",
+            "gh auth refresh --user=other",
+            "gh auth refresh -s project --user other",
+            # 期待値への切替でも「identity を変える形」ではある
+            # (期待値かどうかは is_self_remediation が別に判定する)。
+            "gh auth refresh --user Mao-o",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(github.changes_identity(candidate, "Mao-o"))
+
+    def test_switch_login_logout_are_identity_changes(self):
+        for candidate in (
+            "gh auth switch --user other",
+            "gh auth switch",
+            "gh auth login --skip-ssh-key",
+            "gh auth logout --hostname github.com",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(github.changes_identity(candidate, "Mao-o"))
+
+
 class TestGcloudSelfRemediation(unittest.TestCase):
     def test_set_project_to_expected_str(self):
         self.assertTrue(gcloud.is_self_remediation(
@@ -1440,13 +1479,97 @@ class TestGcloudSelfRemediation(unittest.TestCase):
         self.assertFalse(gcloud.is_self_remediation(
             "gcloud config set account other@example.com", expected))
 
-    def test_extra_flags_fall_through(self):
+    def test_decoration_flags_are_accepted(self):
+        """装飾 option (着地先を変えない) は剥がしてから照合する。案内形に
+        `--quiet` を足しただけで通常検証へ落ちると、連結規則の下では誤 deny に
+        直結する (v0.15.0 でこの述語が deny を抑止する唯一の出口になった)。"""
+        for candidate in (
+            "gcloud config set project my-proj --quiet",
+            "gcloud config set project my-proj -q",
+            "gcloud config set project my-proj --verbosity=debug",
+            "gcloud config set project my-proj --verbosity debug",
+            "gcloud config set project my-proj --format=json --quiet",
+            "gcloud config set project my-proj --no-user-output-enabled",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(gcloud.is_self_remediation(candidate, "my-proj"))
+
+    def test_options_that_move_the_landing_spot_fall_through(self):
+        """着地先を変える option は allow-list に入れない (blanket 許容にしない)。
+        `--configuration other` は非アクティブな configuration に書くので、
+        実行後もアクティブ project は期待値にならない。"""
+        for candidate in (
+            "gcloud config set project my-proj --configuration other",
+            "gcloud config set project my-proj --flags-file f.yaml",
+            "gcloud config set project my-proj --account other@example.com",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(gcloud.is_self_remediation(candidate, "my-proj"))
+
+    def test_unknown_option_falls_through(self):
         self.assertFalse(gcloud.is_self_remediation(
-            "gcloud config set project my-proj --quiet", "my-proj"))
+            "gcloud config set project my-proj --no-such-flag", "my-proj"))
+
+    def test_release_track_form_is_accepted(self):
+        self.assertTrue(gcloud.is_self_remediation(
+            "gcloud beta config set project my-proj", "my-proj"))
 
     def test_other_gcloud_command(self):
         self.assertFalse(gcloud.is_self_remediation(
             "gcloud run deploy", "my-proj"))
+
+
+class TestGcloudChangesIdentity(unittest.TestCase):
+    """`gcloud config set <key>` のうち identity を変えない key は連結規則の
+    切替側に数えない (数えると `gcloud config set compute/region x &&
+    gcloud run deploy` のような日常形に deny が生える)。"""
+
+    def test_inert_keys(self):
+        for candidate in (
+            "gcloud config set compute/region us-central1",
+            "gcloud config set compute/zone us-central1-a",
+            "gcloud config set disable_prompts true",
+            "gcloud config set core/disable_usage_reporting true",
+            "gcloud config set core/verbosity debug",
+            "gcloud config set run/region asia-northeast1",
+            "gcloud beta config set compute/region us-central1",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(gcloud.changes_identity(candidate, "my-proj"))
+
+    def test_identity_keys(self):
+        for candidate in (
+            "gcloud config set project other",
+            "gcloud config set core/project other",
+            "gcloud config set account other@example.com",
+            "gcloud config set core/account other@example.com",
+            "gcloud config set auth/impersonate_service_account sa@example.com",
+            # `container/cluster` は get-credentials の既定を変えて kubectl 側の
+            # identity に波及しうるので inert にしない。
+            "gcloud config set container/cluster other",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(gcloud.changes_identity(candidate, "my-proj"))
+
+    def test_inert_key_with_undeclared_option_is_not_inert(self):
+        """key が inert でも宣言外の option が付いていたら inert と言い切れない。"""
+        self.assertTrue(gcloud.changes_identity(
+            "gcloud config set compute/region x --configuration other", "my-proj"))
+
+    def test_inert_key_with_decoration_option_stays_inert(self):
+        self.assertFalse(gcloud.changes_identity(
+            "gcloud config set compute/region x --quiet", "my-proj"))
+
+    def test_non_config_set_state_changes_are_identity_changes(self):
+        for candidate in (
+            "gcloud config unset project",
+            "gcloud config configurations activate other",
+            "gcloud auth login",
+            "gcloud auth activate-service-account --key-file=sa.json",
+            "gcloud init",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(gcloud.changes_identity(candidate, "my-proj"))
 
 
 class TestFirebaseSelfRemediation(unittest.TestCase):
@@ -1466,6 +1589,29 @@ class TestFirebaseSelfRemediation(unittest.TestCase):
         self.assertFalse(firebase.is_self_remediation(
             "firebase use my-proj --add", "my-proj"))
 
+    def test_decoration_flags_are_accepted(self):
+        """装飾 option (対話 / 出力の制御) は剥がしてから照合する。"""
+        for candidate in (
+            "firebase use my-proj --non-interactive",
+            "firebase use my-proj --debug",
+            "firebase use my-proj --json --non-interactive",
+            "firebase-tools use my-proj --non-interactive",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(firebase.is_self_remediation(candidate, "my-proj"))
+
+    def test_options_that_move_the_landing_spot_fall_through(self):
+        """`--project` / `-P` は照合先を差し替え、`--config` は project の解決先
+        (firebase.json) を変えるので allow-list に入れない。"""
+        for candidate in (
+            "firebase use my-proj --project other",
+            "firebase use my-proj -P other",
+            "firebase use my-proj --config other/firebase.json",
+            "firebase use my-proj --token t",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(firebase.is_self_remediation(candidate, "my-proj"))
+
     def test_deploy_is_not_remediation(self):
         self.assertFalse(firebase.is_self_remediation("firebase deploy", "my-proj"))
 
@@ -1482,6 +1628,84 @@ class TestKubectlSelfRemediation(unittest.TestCase):
     def test_apply_is_not_remediation(self):
         self.assertFalse(kubectl.is_self_remediation(
             "kubectl apply -f x.yaml", "staging"))
+
+    def test_decoration_options_are_accepted(self):
+        """verbosity / timeout は着地先 (既定 kubeconfig の current-context) を
+        変えないので剥がしてから照合する。"""
+        for candidate in (
+            "kubectl config use-context staging --v=4",
+            "kubectl config use-context staging --v 4",
+            "kubectl config use-context staging -v 4",
+            "kubectl config use-context staging --request-timeout=5s",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(kubectl.is_self_remediation(candidate, "staging"))
+
+    def test_options_that_move_the_landing_spot_fall_through(self):
+        """`--kubeconfig` は別ファイルへ書き、`--context` は照合先を差し替えるので
+        allow-list に入れない (blanket 許容にしない)。"""
+        for candidate in (
+            "kubectl config use-context staging --kubeconfig=/tmp/kc",
+            "kubectl config use-context staging --kubeconfig /tmp/kc",
+            "kubectl config use-context staging --context other",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(kubectl.is_self_remediation(candidate, "staging"))
+
+
+class TestKubectlChangesIdentity(unittest.TestCase):
+    """`kubectl config set-context --current` (位置引数なし) だけを inert とする。
+    kubectl の期待値は current-context 名なので、この形は identity を変えない。"""
+
+    def test_set_context_current_is_inert(self):
+        for candidate in (
+            "kubectl config set-context --current",
+            "kubectl config set-context --current --namespace=foo",
+            "kubectl config set-context --current --namespace foo",
+            "kubectl config set-context --current -n foo",
+            "kubectl config set-context --namespace=foo --current",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(kubectl.changes_identity(candidate, "staging"))
+
+    def test_named_context_is_an_identity_change(self):
+        """位置引数で context 名を書く形は別 context の定義を書き換える。
+
+        `--current` と名前の併記は kubectl 側でエラーになる形だが、**位置引数が
+        残っていれば inert と主張しない**ことを固定しておく (`--current` の有無
+        だけで判定すると、名前付きの形が inert 側へ落ちる)。
+        """
+        for candidate in (
+            "kubectl config set-context other --namespace=foo",
+            "kubectl config set-context other",
+            "kubectl config set-context other --current --namespace=foo",
+            "kubectl config set-context --current other",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(kubectl.changes_identity(candidate, "staging"))
+
+    def test_credential_rebinding_is_an_identity_change(self):
+        """context 名を変えないまま identity が差し替わる形は inert にしない。"""
+        for candidate in (
+            "kubectl config set-credentials u --token=t",
+            "kubectl config set-cluster c --server=https://example",
+            "kubectl config set-context --current --user=other",
+            "kubectl config set-context --current --cluster=other",
+            "kubectl config set-context --current --kubeconfig=/tmp/kc",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(kubectl.changes_identity(candidate, "staging"))
+
+    def test_switches_and_cross_cli_forms_are_identity_changes(self):
+        for candidate in (
+            "kubectl config use-context other",
+            "kubectl config delete-context other",
+            "kubectx other",
+            "gcloud container clusters get-credentials c --region r",
+            "aws eks update-kubeconfig --name c",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(kubectl.changes_identity(candidate, "staging"))
 
 
 class TestAwsHasNoSelfRemediation(unittest.TestCase):
@@ -1868,6 +2092,71 @@ class TestServiceContextContract(unittest.TestCase):
         with mock.patch.object(gcloud, "_get", side_effect=fake_get):
             self.assertIsNone(gcloud.verify({"project": "my-project"}, "/p"))
         self.assertEqual(calls, ["project"])
+
+
+class TestChangesIdentityContract(unittest.TestCase):
+    """`changes_identity` の契約 (v0.15.0)。
+
+    連結規則の切替側を「identity を変える形」に絞るための任意宣言で、
+    **`STATE_CHANGING` からは外さない** (成功キャッシュの破棄は inert な形でも
+    必要。外すと `gcloud config set compute/region x` 後に古い成功が TTL 分残る)。
+    宣言と cache 破棄が同時に成立していることをここで固定する。
+    """
+
+    SERVICES = (aws, firebase, gcloud, github, kubectl)
+
+    # 各 service が inert (identity を変えない) と宣言する代表形。
+    INERT_FORMS = {
+        "github": ["gh auth refresh", "gh auth refresh -s project"],
+        "gcloud": [
+            "gcloud config set compute/region us-central1",
+            "gcloud config set disable_prompts true",
+        ],
+        "kubectl": [
+            "kubectl config set-context --current",
+            "kubectl config set-context --current --namespace=foo",
+        ],
+    }
+
+    def test_inert_forms_are_still_state_changing(self):
+        """inert 宣言した形が `STATE_CHANGING` に残っていること (cache 破棄の維持)。"""
+        for name, forms in self.INERT_FORMS.items():
+            svc = {s.__name__.rsplit(".", 1)[-1]: s for s in self.SERVICES}[name]
+            patterns = getattr(svc, "STATE_CHANGING", [])
+            for form in forms:
+                with self.subTest(service=name, form=form):
+                    self.assertTrue(
+                        any(re.search(p, form) for p in patterns),
+                        f"{form} が STATE_CHANGING から外れている (cache が破棄されない)",
+                    )
+                    self.assertFalse(svc.changes_identity(form, "x"))
+
+    def test_inert_table_covers_every_declaring_service(self):
+        """空振り防止: `changes_identity` を宣言した service は上の表に載っている
+        こと (新しい宣言が無検査で入るのを防ぐ)。"""
+        declaring = {
+            svc.__name__.rsplit(".", 1)[-1]
+            for svc in self.SERVICES
+            if "changes_identity" in vars(svc)
+        }
+        self.assertEqual(declaring, set(self.INERT_FORMS))
+
+    def test_undeclared_services_default_to_identity_changing(self):
+        """未宣言の service (aws / firebase) は dispatcher 側の既定 True に落ちる
+        = 従来どおり `STATE_CHANGING` 全体が切替側に数えられる。"""
+        for svc in (aws, firebase):
+            with self.subTest(svc=svc.__name__):
+                self.assertNotIn("changes_identity", vars(svc))
+
+    def test_declared_predicates_accept_any_expected_shape(self):
+        """任意入力 (accounts.local.json の生値) を受けるので例外を投げないこと。"""
+        for name in self.INERT_FORMS:
+            svc = {s.__name__.rsplit(".", 1)[-1]: s for s in self.SERVICES}[name]
+            for expected in ("x", {"a": "b"}, None, 5, [], {}):
+                with self.subTest(service=name, expected=expected):
+                    self.assertIsInstance(
+                        svc.changes_identity("some command", expected), bool
+                    )
 
 
 class TestFirebaseCliNameForms(unittest.TestCase):

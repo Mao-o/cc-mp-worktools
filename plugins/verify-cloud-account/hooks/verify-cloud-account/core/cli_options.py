@@ -12,7 +12,7 @@ option を剥がして `aws sso login` に正規化する (元の形も併せて
 `--help` / `--version` は含めない (剥がすと `aws --version` が `aws` になり
 readonly 判定から外れるため、元の形で判定させる)。
 
-このモジュールには**用途の違う 3 つの走査**がある。option トークンの分解規則
+このモジュールには**用途の違う 4 つの走査**がある。option トークンの分解規則
 (`--key=value` / 分離形 / 短縮連結 `-Pprod` / `--` 終端) は
 `_option_name_value` に一本化してあり、差は「どこで走査をやめるか」と
 「何を返すか」だけ:
@@ -20,6 +20,8 @@ readonly 判定から外れるため、元の形で判定させる)。
 - `strip_leading_options`: CLI 名直後の option 列だけを見て**正規化**する。
   未知の option は値を取るか判らないので**そこで打ち切り候補を変更しない**
   (保守的 = readonly / 切替判定に乗らず通常検証へ落ちる)
+- `strip_allowed_options`: **宣言した option だけ**を行全体から剥がす。
+  宣言外の option が 1 つでもあれば `None` を返す (= 呼び出し側は主張しない)
 - `find_context_options`: どのアカウントと照合するかを決める option
   (`--profile` / `--project` / `--context` 等) を**行全体**から拾う。
   これらはサブコマンドの後ろにも書けるため (`aws s3 ls --profile prod`)、
@@ -153,6 +155,73 @@ def strip_leading_options(
     if i == 1:
         return candidate, {}
     return shlex.join([tokens[0], *tokens[i:]]), opts
+
+
+def strip_allowed_options(
+    candidate: str,
+    flags: Collection[str],
+    with_value: Collection[str],
+) -> str | None:
+    """候補から**宣言した option だけ**を剥がした形を返す (宣言外があれば None)。
+
+    anchored な self-remediation pattern (`^kubectl\\s+config\\s+use-context\\s+
+    (\\S+)\\s*$`) を「位置引数 + 許容 option」の形にも当てるための正規化。
+    `strip_leading_options` との違いは 2 つだけ:
+
+    - 剥がす位置が CLI 名直後に限らない (**行全体**を走査する)。装飾 option は
+      subcommand の後ろにも書けるため (`kubectl config use-context x --v=4`)
+    - **宣言外の option に当たったら `None`** を返す。剥がせなかった形を返すと
+      呼び出し側が「装飾だけの形」と「着地先を変える option 付きの形」を
+      区別できなくなる。allow-list なので、証明できない形は主張しない
+
+    `--` 以降は option ではないので剥がさずそのまま残す (位置引数として残るため、
+    anchored pattern には当たらなくなる = 保守的)。値の欠けた option も `None`。
+
+    option を 1 つも剥がさなかったときは元の文字列をそのまま返す
+    (`strip_leading_options` と同じ規約。quote を保つ)。
+    """
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    kept: list[str] = [tokens[0]]
+    stripped = 0
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            kept.extend(tokens[i:])
+            break
+        if not tok.startswith("-") or tok == "-":
+            kept.append(tok)
+            i += 1
+            continue
+        name, _embedded, has_value = _option_name_value(tok, with_value)
+        if name in with_value:
+            if has_value:
+                stripped += 1
+                i += 1
+                continue
+            if i + 1 >= len(tokens):
+                # 値が欠けた option は解釈できない (次トークンを値として消費すると
+                # 位置引数を食う)。保守的に主張しない。
+                return None
+            stripped += 1
+            i += 2
+            continue
+        if name in flags:
+            # `--flag=false` のような値付き形も 1 トークンで剥がす。剥がす目的は
+            # 位置引数を露出させることなので、flag の実効値は結論に影響しない
+            # (`strip_leading_options` と同じ判断)。
+            stripped += 1
+            i += 1
+            continue
+        return None
+    if stripped == 0:
+        return candidate
+    return shlex.join(kept)
 
 
 def find_option_names(

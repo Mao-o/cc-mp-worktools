@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from core import budget
+from core import budget, cli_options
 
 # `\b` だと `kubectl-foo` のような plugin バイナリまで kubectl として拾うため、
 # 空白または終端が続く形だけに限定する。
@@ -56,7 +56,8 @@ QUERY = [
 ]
 # current-context (kubeconfig) を変えうるコマンド。dispatcher が検出すると kubectl の
 # 成功 cache を破棄する。`set-context --current --namespace=x` のように context 名を
-# 変えない操作も含むが、過剰な破棄は再検証 1 回のコストで済む。
+# 変えない操作も含むが、過剰な破棄は再検証 1 回のコストで済む。連結規則の切替側だけが
+# identity を変える形に絞る (下の `changes_identity`)。
 STATE_CHANGING = [
     r"^kubectl\s+config\s+(use-context|use|set-context|set-cluster|set-credentials"
     r"|set|unset|delete-context|delete-cluster|delete-user|rename-context)\b",
@@ -196,10 +197,80 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
 _USE_CONTEXT_RE = re.compile(r"^kubectl\s+config\s+use-context\s+(\S+)\s*$")
 
+# self-remediation 判定で**剥がしてよい** option の allow-list。基準は
+# 「`use-context` が書き込む先を変えないこと」。kubectl の global option は
+# ほとんどが着地先を変えてしまう (`--kubeconfig` は別ファイルへ書き、`--context`
+# はその実行の照合先を差し替える) ため、**残るのは verbosity / timeout だけ**。
+# 短い allow-list になるが、これが「着地先が verify() の見る場所
+# (既定 kubeconfig の current-context) と一致し続ける」と言える範囲。
+_DECORATION_FLAGS: frozenset[str] = frozenset()
+_DECORATION_OPTIONS_WITH_VALUE = frozenset({"--v", "-v", "--request-timeout"})
+
 
 def is_self_remediation(candidate: str, expected) -> bool:
-    """deny reason が案内する「期待コンテキストへの use-context」なら True。"""
-    m = _USE_CONTEXT_RE.match(candidate)
+    """deny reason が案内する「期待コンテキストへの use-context」なら True。
+
+    装飾 option (`--v=` / `--request-timeout=`) は剥がしてから照合し、**それ以外の
+    option が付いていたら保守的に False** (通常検証に落とす)。`--kubeconfig` /
+    `--context` は着地先そのものを変えるので剥がさない。
+    """
+    normalized = cli_options.strip_allowed_options(
+        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+    )
+    if normalized is None:
+        return False
+    m = _USE_CONTEXT_RE.match(normalized)
     if not m:
         return False
     return isinstance(expected, str) and m.group(1) == expected
+
+
+# inert と言える唯一の形。宣言 option を全部剥がした残りがこれと一致し、かつ
+# `--current` が書かれているときだけ「current-context 名を変えない」と主張する
+# (位置引数が残れば一致しない)。
+_INERT_SET_CONTEXT_RE = re.compile(r"^kubectl\s+config\s+set-context\s*$")
+# `set-context --current` に付いていても identity を変えないと言える option。
+# `--namespace` / `-n` は同じ context 内の既定 namespace を変えるだけ。
+# **`--user` / `--cluster` は入れない** — context 名を変えないまま認証情報 /
+# 接続先を差し替える = `set-credentials` と同じ「同名で別 identity」になる。
+# `--kubeconfig` も入れない (着地先が既定ファイルと言い切れない)。
+_INERT_SET_CONTEXT_FLAGS = frozenset({"--current"})
+_INERT_SET_CONTEXT_OPTIONS_WITH_VALUE = frozenset({"--namespace", "-n"})
+
+
+def changes_identity(candidate: str, expected) -> bool:
+    """このセグメントが「次の kubectl がどの context で動くか」を変えうるなら True。
+
+    `STATE_CHANGING` は**成功キャッシュの破棄**が目的なので `kubectl config` の
+    書込系と別 CLI 経由の kubeconfig 書換えを全部含めてある。一方連結規則
+    (`core/dispatcher.py` の `_unexpected_switch_before_write`) の切替側は
+    「identity が変わる形」だけに絞る必要があるため、inert な形をここで
+    **allow-list として列挙**する (宣言しない service は既定で True = 従来どおり)。
+
+    kubectl の期待値は **current-context 名**で、verify() は
+    `kubectl config current-context` の値だけを読む。inert と言えるのは
+    `kubectl config set-context --current [--namespace=x]` の形
+    (最頻出 idiom) だけ — current-context 名を変えないので、実行前の検証結果が
+    実行後の状態も記述する。
+
+    inert にしない形:
+
+    - `set-credentials` / `set-cluster` — context 名は変わらないまま identity が
+      差し替わる (同名で別 identity)
+    - `set-context <名前> ...` (位置引数あり) — 別 context の定義を書き換える
+    - `--user` / `--cluster` / `--kubeconfig` 等の宣言外 option 付き
+    """
+    # `--current` が**書かれていること**を先に要求する。剥がした後の形だけで見ると
+    # `set-context --namespace=foo` (名前も --current も無い不正形) が inert に
+    # 見えてしまう。
+    names = cli_options.find_option_names(candidate, GLOBAL_OPTIONS_WITH_VALUE)
+    if "--current" not in names:
+        return True
+    normalized = cli_options.strip_allowed_options(
+        candidate,
+        _INERT_SET_CONTEXT_FLAGS,
+        _INERT_SET_CONTEXT_OPTIONS_WITH_VALUE,
+    )
+    if normalized is None:
+        return True
+    return not _INERT_SET_CONTEXT_RE.match(normalized)

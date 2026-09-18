@@ -414,6 +414,30 @@ def _is_expected_switch(service, form: str, entry) -> bool:
         return False
 
 
+def _changes_identity(service, form: str, entry) -> bool:
+    """切替セグメントが「その service の identity を変えうる形」なら True。
+
+    **未宣言なら True** (= `STATE_CHANGING` 全体を切替として扱う従来どおりの挙動)。
+    `STATE_CHANGING` は成功 cache の破棄が目的なので「identity を変えない config
+    変更」も含んでいる (`kubectl config set-context --current --namespace=x` /
+    `gcloud config set compute/region x` / `gh auth refresh`)。cache 破棄は過剰でも
+    再検証 1 回で済むが、**連結規則では過剰が誤 deny になる** — 切替ですらない形に
+    「切替先不明の切替」として deny を生やしてしまう。そこで service 側が
+    `changes_identity(form, expected)` で inert な形を allow-list 宣言できるように
+    し、切替側の条件をそれで絞る。
+
+    判定中の例外は **True (= deny 側)**。`_is_expected_switch` の例外を False
+    (deny 側) に倒しているのと同じ向き — 「判らないから通す」を作らない。
+    """
+    fn = getattr(service, "changes_identity", None)
+    if fn is None:
+        return True
+    try:
+        return bool(fn(form, entry))
+    except Exception:
+        return True
+
+
 def _unexpected_switch_before_write(
     service, entry, segments: list[tuple]
 ) -> tuple[str, str] | None:
@@ -422,7 +446,8 @@ def _unexpected_switch_before_write(
     `segments` は `_analyze_command` が作る出現順のセグメント列。
 
     - **切替側**: その service の状態を変えるセグメント (別 CLI 経由の
-      `gcloud container clusters get-credentials` 等も含む) のうち、期待値へ
+      `gcloud container clusters get-credentials` 等も含む) のうち、
+      **identity を変えうる形** (`_changes_identity`) で、かつ期待値へ
       向かわないもの
     - **write 側**: その service の **WRITE tier** セグメントのうち、期待値への
       切替そのものではないもの
@@ -448,22 +473,50 @@ def _unexpected_switch_before_write(
             and not _is_expected_switch(service, form, entry)
         ):
             return pending[0], form
-        if service in changed and not _is_expected_switch(service, form, entry):
+        if (
+            service in changed
+            and _changes_identity(service, form, entry)
+            and not _is_expected_switch(service, form, entry)
+        ):
             pending.append(form)
     return None
 
 
+def _expected_display(entry) -> str:
+    """deny 文面に載せる期待値の表示形 (str はそのまま / dict は `key=値` の列)。
+
+    dict のキーの意味は service ごとに違う (github: host / gcloud:
+    project|account / firebase: alias) ので、意味を要約せず書かれたまま見せる。
+    値の解釈は service の verify() が持つ規則であって、ここで再現すると
+    2 箇所に規則が生える。str 以外の値は落とす (verify() も使わない)。
+
+    **`REMEDIATION_PATTERNS` に一致する形を作らないこと** — この文面は
+    `_guides_remediation` を通さない chain error なので、切替コマンドの実形を
+    書くと「案内されたコマンド」の契約 (単独実行の注記) を汚す。期待**値**だけを
+    載せる。
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        pairs = [f"{k}={v}" for k, v in entry.items() if isinstance(v, str) and v]
+        if pairs:
+            return ", ".join(pairs)
+    return ""
+
+
 def _switch_then_write_error(
-    account_key: str, switch_form: str, write_form: str
+    account_key: str, entry, switch_form: str, write_form: str
 ) -> str:
+    expected = _expected_display(entry)
+    target = f"期待値 ({expected}) へ" if expected else "期待値へ"
     return (
         f'"{account_key}" の切替と書込を同一コマンドに連結しています。'
-        "切替後の状態で write が実行されるため、切替を単独で実行してから"
-        "再度お試しください。\n"
+        "切替後の状態で write が実行されるため、"
+        f"{target}切り替える操作を単独で実行してから再度お試しください。\n"
         "(hook はコマンド実行前に 1 回だけ動くため、連結された write は切替前の"
         "状態で検証され、切替後のアカウントは検証できません。切替を単独で実行すれば"
         "成功キャッシュが破棄され、次の write が切替後の状態で検証されます)\n"
-        f"(検出コマンド: 切替={switch_form} / 書込={write_form})"
+        f"(検出コマンド: アカウント状態を変える操作={switch_form} / 書込={write_form})"
     )
 
 
@@ -708,7 +761,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # 従来どおり `_decide` / 上の early return が全体を弱める。
         chained = _unexpected_switch_before_write(svc, entry, segments)
         if chained is not None:
-            errors.append(_switch_then_write_error(svc.ACCOUNT_KEY, *chained))
+            errors.append(
+                _switch_then_write_error(svc.ACCOUNT_KEY, entry, *chained)
+            )
             continue
 
         if _all_self_remediation([norm for _orig, norm in cands], svc, entry):

@@ -1991,9 +1991,20 @@ class TestChainedSwitchAndWrite(BaseWithTmpProject):
         reason = self._assert_chain_denied(
             "gh auth switch --user other && gh pr create"
         )
-        self.assertIn("切替を単独で実行してから", reason)
+        # 案内は**期待値へ**切り替える形で書く。「切替を単独で実行せよ」だけだと
+        # 検出コマンド行 (`--user other`) を単独実行する読みになり、それは allow
+        # されるので 2 往復かかり、かつ gh の状態が期待外に移ったまま残る。
+        self.assertIn("期待値 (Mao-o) へ切り替える操作を単独で実行してから", reason)
         self.assertIn("gh auth switch --user other", reason)
         self.assertIn("gh pr create", reason)
+
+    def test_deny_reason_names_the_expected_value_for_dict_entries(self):
+        """dict 期待値は `key=値` の列で載せる (キーの意味は service ごとに違う)。"""
+        self._write_accounts({"github": {"github.com": "Mao-o"}})
+        reason = self._assert_chain_denied(
+            "gh auth switch --user other && gh pr create"
+        )
+        self.assertIn("期待値 (github.com=Mao-o) へ", reason)
 
     def test_separator_variants_are_denied(self):
         """`;` / 改行のような別の区切りでも同じ連結として扱う。"""
@@ -2153,6 +2164,106 @@ class TestChainedSwitchAndWrite(BaseWithTmpProject):
         self.assertIsNone(result)
         self.assertEqual(gh_v.call_count, 1)
         self.assertEqual(aws_v.call_count, 1)
+
+    # --- identity を変えない STATE_CHANGING は切替側に数えない (v0.15.0) ---
+
+    def test_inert_state_changes_do_not_create_a_chain_deny(self):
+        """`STATE_CHANGING` は cache 破棄が目的なので identity を変えない config
+        変更も含む。それを切替側に数えると、切替ですらない日常形 (kubectl の
+        namespace 切替 / gcloud の region 設定 / gh の scope 追加) に deny が生える。
+        """
+        self._write_accounts({
+            "github": "Mao-o", "gcloud": "my-proj", "kubectl": "ctx",
+        })
+        for command, service in (
+            ("kubectl config set-context --current --namespace=foo"
+             " && kubectl apply -f x.yaml", "kubectl"),
+            ("gcloud config set compute/region us-central1"
+             " && gcloud run deploy svc", "gcloud"),
+            ("gcloud config set disable_prompts true && gcloud run deploy svc",
+             "gcloud"),
+            ("gh auth refresh -s project && gh pr create", "github"),
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command, service)
+                self.assertIsNone(result, f"新規に deny された: {command}")
+
+    def test_identity_changing_lookalikes_are_still_denied(self):
+        """inert 宣言は form 単位。同じ subcommand でも identity が変わる形は deny。"""
+        self._write_accounts({
+            "github": "Mao-o", "gcloud": "my-proj", "kubectl": "ctx",
+        })
+        for command, service in (
+            # context 名は変わらないまま認証情報が差し替わる
+            ("kubectl config set-credentials u --token=t && kubectl apply -f x.yaml",
+             "kubectl"),
+            # 位置引数で別 context を書き換える形は inert ではない
+            ("kubectl config set-context other --namespace=foo"
+             " && kubectl apply -f x.yaml", "kubectl"),
+            ("gcloud config set core/account other && gcloud run deploy svc",
+             "gcloud"),
+            # key は inert でも宣言外 option が付いたら inert と言い切れない
+            ("gcloud config set compute/region x --configuration other"
+             " && gcloud run deploy svc", "gcloud"),
+            ("gh auth refresh -u other && gh pr create", "github"),
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command, service)
+
+    # --- 案内形 + 装飾 option は据え置き (v0.15.0) ---
+
+    def test_guided_switch_with_decoration_options_is_unchanged(self):
+        """案内された切替形に装飾 option を 1 つ足しただけで deny になってはいけない
+        (この述語が deny を抑止する唯一の出口なので、anchored の厳しさが誤 deny に
+        直結する)。"""
+        self._write_accounts({
+            "gcloud": "my-proj", "kubectl": "ctx", "firebase": "proj-dev",
+        })
+        for command, service in (
+            ("gcloud config set project my-proj --quiet && gcloud run deploy svc",
+             "gcloud"),
+            ("kubectl config use-context ctx --v=4 && kubectl apply -f y.yaml",
+             "kubectl"),
+            ("firebase use proj-dev --non-interactive && firebase deploy",
+             "firebase"),
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command, service)
+                self.assertIsNone(result, f"新規に deny された: {command}")
+
+    def test_switch_with_landing_spot_options_is_still_denied(self):
+        """着地先を変える option 付きは「期待値への切替」と言えないので deny 側に
+        残す (blanket な option 許容にしない)。"""
+        self._write_accounts({"gcloud": "my-proj", "kubectl": "ctx"})
+        for command, service in (
+            ("gcloud config set project my-proj --configuration other"
+             " && gcloud run deploy svc", "gcloud"),
+            ("kubectl config use-context ctx --kubeconfig=/tmp/kc"
+             " && kubectl apply -f y.yaml", "kubectl"),
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command, service)
+
+    # --- 例外は deny 側に倒す (床) ---
+
+    def test_self_remediation_exception_falls_to_deny(self):
+        """`_is_expected_switch` の `except Exception: return False` の床。
+        例外を True 側に倒す mutation をここで落とす (docstring / DEVELOPMENT.md が
+        「例外も deny 側に倒してある」と主張しているため)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.is_self_remediation", side_effect=RuntimeError
+        ):
+            self._assert_chain_denied("gh auth switch --user Mao-o && gh pr create")
+
+    def test_changes_identity_exception_falls_to_deny(self):
+        """`_changes_identity` の `except Exception: return True` の床。
+        inert 判定が壊れたときに「切替ではない」へ倒れると規則が消える。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.changes_identity", side_effect=RuntimeError
+        ):
+            self._assert_chain_denied("gh auth refresh -s project && gh pr create")
 
     # --- mode は従来どおり全体を弱める ---
 

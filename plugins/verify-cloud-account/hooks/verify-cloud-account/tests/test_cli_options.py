@@ -9,6 +9,7 @@ import _testutil  # noqa: F401
 from core.cli_options import (  # noqa: E402
     find_context_options,
     find_option_names,
+    strip_allowed_options,
     strip_leading_options,
 )
 
@@ -346,6 +347,86 @@ class TestFindOptionNames(unittest.TestCase):
         self.assertEqual(
             self._names('gh auth status --show-token "x', frozenset()),
             frozenset({"--show-token"}),
+        )
+
+
+class TestStripAllowedOptions(unittest.TestCase):
+    """anchored な self-remediation pattern を「位置引数 + 装飾 option」にも
+    当てるための正規化 (v0.15.0)。allow-list なので**宣言外は None**。"""
+
+    _FLAGS = frozenset({"--quiet", "-q"})
+    _WITH_VALUE = frozenset({"--verbosity", "--format"})
+
+    def _strip(self, candidate: str) -> str | None:
+        return strip_allowed_options(candidate, self._FLAGS, self._WITH_VALUE)
+
+    def test_no_options_returns_original_unchanged(self):
+        """1 つも剥がさなかったときは元の文字列をそのまま返す (quote を保つ)。"""
+        self.assertEqual(
+            self._strip("gcloud config set project 'my proj'"),
+            "gcloud config set project 'my proj'",
+        )
+
+    def test_trailing_flag_is_stripped(self):
+        self.assertEqual(
+            self._strip("gcloud config set project p --quiet"),
+            "gcloud config set project p",
+        )
+
+    def test_leading_and_middle_positions_are_stripped(self):
+        """CLI 名直後に限らず行全体から剥がす (装飾 option は後ろにも書ける)。"""
+        for candidate in (
+            "gcloud --quiet config set project p",
+            "gcloud config --quiet set project p",
+            "gcloud config set --quiet project p",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self._strip(candidate), "gcloud config set project p")
+
+    def test_value_forms(self):
+        for candidate in (
+            "gcloud config set project p --verbosity=debug",
+            "gcloud config set project p --verbosity debug",
+            "gcloud config set project p --format=json --quiet",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self._strip(candidate), "gcloud config set project p")
+
+    def test_short_attached_value_form(self):
+        self.assertEqual(
+            strip_allowed_options(
+                "kubectl config use-context ctx -nfoo",
+                frozenset(),
+                frozenset({"-n"}),
+            ),
+            "kubectl config use-context ctx",
+        )
+
+    def test_undeclared_option_returns_none(self):
+        self.assertIsNone(self._strip("gcloud config set project p --configuration o"))
+        self.assertIsNone(self._strip("gcloud config set project p --unknown"))
+
+    def test_missing_value_returns_none(self):
+        """値の欠けた option は解釈できない (次トークンを食うと位置引数が消える)。"""
+        self.assertIsNone(self._strip("gcloud config set project p --verbosity"))
+
+    def test_double_dash_terminator_is_kept_as_operands(self):
+        """`--` 以降は option ではないので残す = anchored pattern には当たらない。"""
+        self.assertEqual(
+            self._strip("gcloud config set project p --quiet -- extra"),
+            "gcloud config set project p -- extra",
+        )
+
+    def test_unbalanced_quote_returns_none(self):
+        self.assertIsNone(self._strip('gcloud config set project "p --quiet'))
+
+    def test_empty_candidate_returns_none(self):
+        self.assertIsNone(self._strip("   "))
+
+    def test_bare_dash_is_an_operand(self):
+        self.assertEqual(
+            self._strip("gcloud config set project - --quiet"),
+            "gcloud config set project -",
         )
 
 

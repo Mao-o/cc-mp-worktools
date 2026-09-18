@@ -2,13 +2,19 @@
 
 ## 0.15.0
 
-内部バックログの精査分 2 件。**判定表の変更は 1 行だけで、緩和は無い**:
+内部バックログの精査分 2 件 + マージ前レビューの反映。**判定表の変更は 2 方向だけ**:
 
-- **唯一の厳格化 = 期待外への切替 + 同 service の書込の連結。** 同一コマンド内で
-  「期待値以外への切替 (切替先が静的に判らない形を含む)」の後に「同じ service の
-  WRITE tier セグメント」が続く形を deny する
-- tier 分類 / self-remediation / `"$readonly"` / 検証モード / キャッシュの規則は
-  **一切変えていない**
+- **唯一の厳格化 = identity を変える切替 + 同 service の書込の連結。** 同一コマンド内で
+  「アカウント / プロジェクト / コンテキストを期待値以外に変える操作 (変え先が静的に
+  判らない形を含む)」の後に「同じ service の WRITE tier セグメント」が続く形を deny する。
+  **アカウントを変えない設定変更** (`kubectl config set-context --current
+  --namespace=x` / `gcloud config set compute/region x` / `gh auth refresh`) は
+  切替として数えない
+- **唯一の緩和 = 期待値への切替の受理形に装飾オプションを含める。**
+  `gcloud config set project <期待値> --quiet` のように出力 / 対話の制御だけを足した形も
+  「期待値への切替」として認識する (従来は完全一致のみ)。着地先を変えるオプション
+  (`--configuration` / `--kubeconfig` / `--config` 等) は対象外
+- tier 分類 / `"$readonly"` / 検証モード / キャッシュの規則は **一切変えていない**
 
 ### 1. 切替と書込を同一コマンドに連結した形を deny (判定表の追加)
 
@@ -26,14 +32,28 @@ hook は PreToolUse で**コマンド実行前に 1 回だけ**動くため、
 | **期待値以外**への切替 → 同 service の WRITE | **deny** (追加) |
 | 切替先が静的に判らない切替 → 同 service の WRITE (引数なしの `gh auth switch` / `--user $VAR` / login 系 / aws 全般) | **deny** (追加) |
 | **期待値**への切替 (self-remediation) → 同 service の WRITE | 従来どおり (切替前の状態で通常検証) |
+| **アカウントを変えない**設定変更 → 同 service の WRITE | 従来どおり (下記) |
 | 切替 → QUERY / READONLY | 従来どおり (deny しない) |
 | 切替 → **別 service** の WRITE / 書込 → 切替 | 従来どおり |
 
-- **対処は「切替を単独で実行してから書込を打つ」**。切替の検出時点で成功キャッシュを
-  破棄しているので、次の書込は切替後の状態で検証される (0.8.0 からの挙動)
+- **対処は「期待値へ切り替える操作を単独で実行してから書込を打つ」**。切替の検出時点で
+  成功キャッシュを破棄しているので、次の書込は切替後の状態で検証される (0.8.0 からの
+  挙動)。deny 文面には期待値そのものを載せる — 検出コマンドの切替先を単独実行しても、
+  それは期待外への切替なので書込は依然 deny になる
 - **deny は現在のアカウントに依らない**ので判定に CLI を呼ばない。確実に deny になる
   コマンドで検証時間の予算を使うと、同じコマンド行の他 service が予算切れ deny に
   落ち、最悪は hook timeout (出力が破棄されて無音で通る) に近づくため
+- **「アカウントを変えない設定変更」は切替として数えない。** 成功キャッシュの破棄は
+  これらでも行う (過剰でも再検証 1 回で済む) が、連結の deny は「次のコマンドがどの
+  アカウントで動くか」を変える形だけに限る。数えない形の allow-list:
+  `kubectl config set-context --current [--namespace=x]` /
+  `gcloud config set <非 identity key>` (`compute/region` / `compute/zone` /
+  `run/region` / `functions/region` / `disable_prompts` /
+  `core/disable_usage_reporting` / `core/verbosity` / `core/user_output_enabled` /
+  `core/disable_color`) / `gh auth refresh` (`--user` なし)。
+  同じ subcommand でも identity が変わる形 (`set-credentials` / `set-cluster` /
+  位置引数で context 名を書く `set-context` / `--user` 付きの `set-context --current` /
+  `config set project|account` / `gh auth refresh --user`) は従来どおり数える
 - 別 CLI が状態を書き換える形 (`gcloud container clusters get-credentials ... &&
   kubectl apply ...` / `aws eks update-kubeconfig ... && kubectl apply ...`) も同じ扱い
 - **書込側が期待値への切替なら deny しない** ので、deny 文面自身が案内する連結形
@@ -45,6 +65,32 @@ hook は PreToolUse で**コマンド実行前に 1 回だけ**動くため、
   hook からは不能なため、`aws sso login --profile prod && aws s3 cp ...` は常に deny
   (単独実行の `aws sso login` は従来どおり readonly で通る)。失敗方向としては
   「検証が消える」より「過剰に deny する」を選んだ
+- **この deny はコマンド行のセグメント分解に依存する。** 末尾の単独 `&`
+  (バックグラウンド実行) と `bash -c '...'` の内側は分解しないため、
+  `gh auth switch --user other & gh pr create` は検出されない (0.14.0 以前と同じ挙動。
+  README の既知の制限に明記した)
+
+### 1b. 期待値への切替の受理形に装飾オプションを含める (唯一の緩和)
+
+deny 文面が案内する切替形に `--quiet` を 1 つ足しただけで「期待値への切替」と
+認識されなくなっていた (gcloud / kubectl / firebase の判定が完全一致だったため。
+`gh` だけはトークン解析で耐えていた)。0.14.0 までは認識できなくても「通常検証に落ちる」
+= 現在値が合っていれば allow だったので表に出なかったが、上の連結規則で**同じ判定が
+deny を抑止する唯一の出口**になったため、案内どおり打った形が deny になる。
+
+受理する装飾オプション (着地先を変えないものだけの allow-list):
+`gcloud` = `--quiet` / `-q` / `--verbosity` / `--format` / `--no-user-output-enabled`、
+`kubectl` = `--v` / `--request-timeout`、
+`firebase` = `--non-interactive` / `--debug` / `--json`。
+
+- **着地先を変えるオプションは受理しない** (blanket なオプション許容にしない)。
+  `gcloud config set project <期待値> --configuration other` は非アクティブな
+  configuration に書き、`kubectl config use-context <期待値> --kubeconfig=/tmp/kc` は
+  別ファイルに書くため、実行後もアクティブな値は期待値にならない
+- **緩和はこの形の単独実行にも及ぶ。** 期待値への切替は検証をスキップするので、
+  `gcloud config set project <期待値> --quiet` を単独で実行したとき、現在値が期待値と
+  **不一致でも** deny されなくなる (0.14.0 は deny)。装飾なしの形が 0.8.0 から受けて
+  いる扱いと同じで、実行後の状態が期待値になることが静的に判る形に限られる
 
 ### 2. テスト基盤: pytest の有無判定を実行 interpreter の import 可否で行う
 
@@ -57,25 +103,43 @@ hook は PreToolUse で**コマンド実行前に 1 回だけ**動くため、
 
 ### テスト
 
-- 全 suite 1049 件 green (0.14.0 時点 1029 件から +20)
-- 新規: `tests/test_dispatcher.py` の `TestChainedSwitchAndWrite` (deny 側 9 形 +
-  据え置き側 7 形 + mode の合成 2 形 + キー未記載の優先)。**`verify` を成功で mock
+- 全 suite 1090 件 green (0.14.0 時点 1029 件から +61)
+- 新規: `tests/test_dispatcher.py` の `TestChainedSwitchAndWrite` 27 メソッド
+  (deny 側 / 据え置き側 / inert な設定変更 / 装飾 option 付きの案内形 /
+  例外経路の床 2 経路 / mode の合成 / キー未記載の優先)。**`verify` を成功で mock
   する** = 切替前は期待値と一致している状態で測る (0.14.0 で allow だった根拠を
   そのまま入力にしないと、deny を主張するテストが意味を持たない)
-- 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピーで
-  確認した (規則の削除 / 切替側の self-remediation 判定の削除 / 書込側の
-  self-remediation 除外の削除 / 書込側の tier 条件を QUERY まで緩める / 走査順の反転)。
-  **「規則をキャッシュ hit 判定の後ろへ移す」mutation は落ちない** — 切替を含む
+- 新規: `tests/test_services.py` の `changes_identity` 系 3 クラス +
+  `is_self_remediation` の option allow-list、`tests/test_cli_options.py` の
+  `TestStripAllowedOptions`
+- 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピー
+  (plugin ディレクトリ全体) で確認した。**16 件すべて failures のみ / errors 0**
+  (= テストが走った上で落ちている)。内訳: 規則の削除 / 書込側の self-remediation
+  除外の削除 / 書込側の tier 条件を QUERY まで緩める / `changes_identity` の宣言を
+  無視 / 常に inert 扱い / 例外経路を allow 側へ (2 経路) / inert key 集合に
+  `project` を足す / inert の option 審査を外す / `gh auth refresh` を subcommand
+  単位で inert に / kubectl inert の option 集合に `--user` を足す / 位置引数
+  チェックを外す / 許容 option の allow-list を blanket 許容に / 期待値表示を空へ /
+  deny 文面を旧文言へ戻す
+- **「規則をキャッシュ hit 判定の後ろへ移す」mutation は落ちない** — 切替を含む
   service はそもそもキャッシュを読まないため実バグを再現していない (記録のみ)
-- 既存テスト 2 件の期待値を更新した。どちらも「期待外 / 不明への切替 + write」の
+- 既存テスト 3 件の期待値を更新した。2 件は「期待外 / 不明への切替 + write」の
   連結を allow として固定していたもので、キャッシュを公開しないことの確認という
-  本来の意図は QUERY / 期待値への切替を使う形へ移した
-- **旧版との出力ペア比較で退行を測った** (0.14.0 と同じ手順)。0.14.0 側の
+  本来の意図は QUERY / 期待値への切替を使う形へ移した。1 件は
+  `gcloud config set project <期待値> --quiet` を「認識しない」側で固定していたもので、
+  上の緩和により「認識する」へ反転した (着地先を変える `--configuration` 付きで
+  固定し直した)
+- **旧版との出力ペア比較で厳格化の範囲を測った** (0.14.0 と同じ手順)。0.14.0 側の
   テスト / README / docs から抽出した 869 コマンドを「切替前は期待値と一致」および
   「不一致」の 2 シナリオで両版に流し、(判定, 検証された service) を突合:
   完全一致 1712 / 厳格化 13 (すべて連結形) / **緩和 0 / 説明不能 0**。
   判定は据え置きだが CLI 呼出が消えた 13 件は、同じ連結形の不一致シナリオ
   (CLI を呼ばずに deny する設計どおり)
+- **この測定は上の「唯一の緩和」を検出できない。** コーパスは 0.14.0 の
+  テスト / docs から抽出するため、緩和の対象 (装飾 option 付きの案内形。
+  0.14.0 では認識されない形なので docs に書かれていない) がそもそも母集団に無い。
+  緩和の範囲は測定ではなく設計から書いてある (上の「1b」)。
+  **「緩和 0」は母集団への主張であって、緩和が無いことの証明ではない**
 
 ## 0.14.0
 
