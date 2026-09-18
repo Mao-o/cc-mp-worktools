@@ -516,12 +516,36 @@ def _remedy_commands(text: str) -> list[str]:
 
 
 def _load_stop_entry():
+    """Stop hook のエントリを in-process で読み込む。
+
+    ``check-sensitive-files/__main__.py`` は **本番経路として** 自ディレクトリを
+    ``sys.path`` の先頭に挿入する (別プロセスで単独起動されるため、それ自体は
+    正しい)。ただし in-process で ``exec_module`` するとその挿入が
+    **このテストプロセス全体に残る** — 両 hook はどちらも ``tests`` パッケージを
+    持つので、以降 ``tests.*`` が Stop 側に解決される。
+
+    実害 (0.31.0 で修正、内部バックログ): ``tests/test_logging.py`` の並行
+    ローテーションテストは ``multiprocessing`` の spawn 子プロセスを使い、子は
+    target 関数を「モジュール名 + 関数名」で import し直す。``tests.test_logging``
+    が Stop 側に解決されて ``ModuleNotFoundError`` になり、テストが flaky に見えて
+    いた (``python3 -m unittest tests.test_e2e tests.test_logging`` で 100% 再現。
+    ``unittest discover`` はモジュールを ``tests.`` 無しの top-level 名で import
+    するため再現しない = 実行形態依存)。
+
+    hook 本体の import 経路は変えず (本番挙動なので)、**呼出側で ``sys.path`` を
+    元に戻す**。``exec_module`` 中に解決し終えた ``checker`` / ``stop_ack`` は
+    ``sys.modules`` に残るので、戻した後も ``mod.main()`` は動く。
+    """
     spec = importlib.util.spec_from_file_location(
         "check_entry_for_e2e", _STOP_ENTRY_PATH
     )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    saved_path = list(sys.path)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path[:] = saved_path
     return mod
 
 

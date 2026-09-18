@@ -20,6 +20,179 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.31.0
+
+block 時に返す minimal info の**誤情報** 3 件と、テスト隔離の欠陥 1 件を修正
+(内部バックログ 5 件 + マージ前レビューの指摘 11 件)。**判定境界の変化: なし** —
+deny / allow / ask / block のどの表も 1 セルも変わっていない。変わるのは reason に
+載る情報と表示タグだけ。
+**利用者影響**: (1) BOM 付き / UTF-16 の `.env` で今まで消えていた鍵名が出る、
+(2) `dev_` / `test_` / `staging_` / `local_` 接頭の**実トークン**が
+`<placeholder>` ではなく `<set>` と表示される、(3) Stop hook の block reason に
+「沈黙は対処成功の証拠ではない」開示が 1 段落増える。
+テスト件数: redact 1,272 → **1,323** / check 146 → **148**。
+
+### BOM / UTF-16 の `.env` を「空ファイル」と報告していた
+
+- 全経路が `raw.decode("utf-8", errors="replace")` の一択だったため、
+  **BOM 付き UTF-8** では残った U+FEFF に行頭 regex (`^\s*` / `^`) が一致せず
+  **先頭 1 鍵が黙って消え**、**UTF-16** では全バイトが U+FFFD になり
+  `entries: 0` / `(no entries)` = 生きた DB パスワード・JWT 秘密を含むファイルを
+  「空」とモデルに伝えていた (verdict は deny のままなので値は漏れない)
+- `redaction/decoding.py` を新設し、**BOM → BOM 無し UTF-16 → UTF-8** の順で
+  推定してからデコードする。UTF-32 の BOM は UTF-16 の BOM を接頭辞として含む
+  (`FF FE 00 00`) ので UTF-32 を先に判定する。BOM 無し UTF-16 は先頭 512 byte の
+  **NUL のパリティ偏り** (LE = 奇数 index / BE = 偶数 index) で判定し、密度では
+  なくパリティを見ることで NUL を多く含むだけのバイナリを巻き込まない。閾値の
+  根拠 (実測) は `redaction/decoding.py` の docstring と
+  [DESIGN.md](docs/DESIGN.md) を参照
+- パリティ条件だけでは **NUL がパリティ整列したバイナリ**を落とせなかった
+  (16bit PCM / ASN.1 DER の `02 02 00 xx` 形 TLV / `(0x?? 0x00)*`)。誤判定すると
+  `replaced` が False になるので取りこぼし note も出ず、代わりに
+  `note: decoded as utf-16-be ...` という**断定の偽情報**が出る。推定を受け入れる
+  前に、そのコーデックで先頭 512 byte を decode して**可読文字比率**が 0.90 以上
+  であることを確認する。閾値はテキスト側の最小 0.970 (制御文字混入 UTF-16) と
+  バイナリ側の最大 0.871 (ASN.1 DER 風) の間に置いた。**BOM がある場合は
+  この guard を掛けない** (明示的な宣言を内容で覆さない)
+- 適用箇所は inline 経路 (`engine.redact`) と Bash deny の minimal info
+  (`file_render`) の **両方**。片方だけ直すと Bash の deny reason だけが
+  鍵を取りこぼす
+- 推定できない形式 (BOM も NUL も無い latin-1 等) は従来どおり UTF-8 +
+  `errors="replace"` だが、**取りこぼしを 1 行の note で開示**する。BOM 無し
+  UTF-32 も検出しない (誤検出ではなく取りこぼし方向)
+- BOM 付き UTF-8 の note は「非 UTF-8」と書かない (実体は UTF-8 + BOM なので、
+  コーデック名 `utf-8-sig` をそのまま出すと事実に反する)
+- **32KB 以下の BOM 付き / UTF-16 の armored 鍵が `format: pem` に乗るようになった**
+  (0.30.0 では `opaque` の keys-only scan に落ちていた)。デコード層が入った副産物
+
+#### 32KB 超 (streaming) の対応範囲
+
+切れ目は「chunk 間の状態が要るか」で決まる:
+
+- **UTF-8 BOM は対応**。先頭 3 byte を落とすだけなので状態が不要
+  (`keyonly_scan.scan_stream` の最初の chunk で剥離)。剥離前は行頭 regex が
+  U+FEFF に一致せず **先頭 1 鍵だけが黙って消えて**いた — 0 件ではないので
+  下記の保険も出ず、開示のないまま欠落していた
+- **BOM 付き UTF-8 の armored 鍵 (単一 block) も対応**。PEM sniff が
+  デコード層を通るようになった。`pem._BEGIN_RE` は `^` 固定なので BOM が残ると
+  1 行目が一致せず、単一 block のファイルだけが `opaque` に落ちていた
+  (複数 block のバンドルは 2 本目以降の BEGIN が行頭に来るため偶然通っていた)
+- **BOM 無し UTF-16 / UTF-32 は据え置き**。chunk 境界を跨ぐ符号単位の状態が必要
+- **UTF-16 の armored 鍵は意図的に `pem` 経路へ回さない**。`scan_pem_markers` は
+  chunk を無条件 utf-8 としてデコードするため marker を 1 本も数えられず、
+  `blocks: 0` を**断定**してしまう。誤情報を消すための変更で別の誤情報を作らない
+  ように、keys-only scan に残して「鍵 0 件 + 保険の note」に倒した
+
+### `entries: 0` を「空ファイル」と言い切らない (保険)
+
+- 中身があるのに鍵が 1 件も拾えなかったときは、`(no entries)` /
+  `(no keys matched)` に「エンコーディングか format が違うかもしれない」旨を
+  添える。断定できない誤認を「不明」に落とす (dotenv / keys-only の両方)
+- 発火条件は**過剰に広げない**。どちらも「命題は真だが誘導が誤っている」形を避ける:
+  - dotenv は **parse 不能行数 > 0** で出す。「中身がある」(byte 数 > 0) だと
+    空白のみ / 全行コメントの `.env` まで巻き込む。理解できている行
+    (空行 / コメント / PEM marker / PEM 継続行) は数えない
+  - keys-only は **`reason == "large"`** のときだけ出す。json/toml の parse 失敗で
+    降りてきた場合は直後の `note: <FMT> parse failed — file may be malformed.` が
+    原因を特定して言っているので、重ねると確定している話を不確かに見せる
+
+### 予算超過時に免責 note が黙って落ちていた
+
+- `core.messages._fit_data_block_core` は `</DATA>` の**直前 1 行**だけを
+  `note:` 固定 tail として守っていた。0.31.0 でデコード注記を
+  `build_reason(..., extra_notes)` 経由で **body の後ろ**に足したため、注記が付く
+  入力クラス (BOM 付き / UTF-16 / 32KB 超) では per-format の免責 note
+  (「実値は context に無い」) が最終行でなくなり、reason が 3KB 予算を超えたときに
+  **黙って落ちていた** (0.30.0 以前は extras が実質 truncation 注記のみで到達
+  しなかった)。連続する `note:` 行を最大 4 本までまとめて固定 tail にする
+- 上限 4 は現状の最大本数 (0 件開示 + 免責 note + truncation 注記 + デコード注記)
+  そのものなので、note を 1 本増やすと保護が静かに外れる。最大本数を assert する
+  テストを置き、増やすときに上限の見直しを強制する
+
+### placeholder 正規表現が実クレデンシャルを `<placeholder>` と誤標識していた
+
+- `^(test|dev|local|staging)[_-]?\w*$` が広すぎ、`test_51H8xKq…` (Stripe テスト
+  キー) / `dev_a8f3c2e1b9d7` / `staging_9f8e7d6c5b4a3210` /
+  `local_dbpassword_x9f2` のような**実在するトークン**を軒並み placeholder と
+  判定していた。`<placeholder>` は `<set>` を置き換えるので、モデルには
+  「この鍵はまだ実値が入っていない (rotate / set 不要)」と伝わる = **見落としの
+  方向**。環境名**そのもの**の完全一致
+  (`^(test|dev|local|staging|development)$`) に絞った (`ENV=local` のような
+  本来の目的は維持)。`development` は完全一致形なので alternation に含めてある —
+  後続許容を外すのと一緒に落とすと `ENV=development` / `NODE_ENV=development` が
+  `<set>` に退行するうえ、完全一致では実トークンを拾う穴が開かない
+- `^<.*>$` も `<soap:Envelope>` / `<root attr="x">` のような XML/HTML の実値を
+  拾っていたため、「名前らしい短いトークン」(`^<[\w .\-]{0,40}>$`) に絞った。
+  `<html>` のような短いタグ名は原理的に区別できず残る (ヒューリスティックの限界)
+- 失敗方向を docstring と [DESIGN.md](docs/DESIGN.md) に明記した:
+  **疑わしければ placeholder と言わない**側に倒す
+
+### 「不完全な対処」後の沈黙を「対処成功」と取り違えさせない
+
+- Stop hook は報告済み集合を記録した後、同じ集合について次ターン以降 block を
+  出さない。この沈黙は「報告済みか」だけで決まり **対処が有効だったかは見ていない**
+  ため、tracked ファイルに `.gitignore` を追記しただけ (index からは外れないので
+  対処として無効) でも「直った」ように見えていた
+- block reason に「**block が出なくなっても対処が成功した証拠ではない**」ことと
+  確認コマンド (`git ls-files <path>` の出力が空になること) を明記した。
+  案内するコマンドが Bash hook を通ることは既存の e2e テスト
+  (reason から backtick コマンドを機械抽出して通す) が固定している
+- **ack 前に git で再確認して未解消なら ack しない**案は採らなかった: fire/skip の
+  境界を動かすうえ、毎ターン再 block する側に倒れると 0.14.0 の離脱 (同じ block が
+  出続ける) を再生産するため。0.23.0 の除外レシピの影響範囲開示と同じ
+  「黙った挙動を informed consent に変える」方針
+
+### テストの `sys.path` 汚染で並行ローテーションテストが flaky だった
+
+- 両 hook はどちらも `tests` パッケージを持つため、Stop 側のディレクトリが
+  `sys.path` の**先頭**に入るとプロセス全体で `tests` の解決先が入れ替わる。
+  `test_logging.py` の並行ローテーションテストは `multiprocessing` の spawn 子
+  プロセスを使い、子は target 関数を「モジュール名 + 関数名」で import し直すため
+  `tests.test_logging` が見つからず `ModuleNotFoundError` で落ちていた
+- 侵入経路は 2 つとも**テスト側**: (a) `checker` を import する 3 箇所の
+  `sys.path.insert(0, ...)` → `_testutil.checker_dir_on_path()` (末尾に足す) に
+  一本化、(b) Stop 側 `__main__.py` の in-process `exec_module` (本体が本番経路
+  として自ディレクトリを先頭に挿入する) → `tests/test_e2e.py::_load_stop_entry`
+  で前後に `sys.path` を保存・復元。**hook 本体の import 経路は変えていない**
+- `unittest discover` はモジュールを `tests.` 無しの top-level 名で import するので
+  この invocation では再現せず、`python3 -m unittest tests.test_e2e
+  tests.test_logging` のような dotted-module 実行でのみ 100% 再現する (= flaky に
+  見えていた)。不変条件 (`PathFinder.find_spec("tests", sys.path)` が自 hook 側を
+  指すこと) を `tests/test_shared_import.py` で固定した
+
+### テスト形状カバレッジ
+
+- BOM / UTF-16 のテストが 0 件だったため、3 パーサ (dotenv / yaml / keys-only) ×
+  5 エンコーディングのマトリクスを追加 (`tests/test_decoding.py`)。入力は
+  `fixtures/keys/` と同じ方針で**バイト列を commit せず** 1 本の UTF-8 ソースから
+  再エンコードする (`tests/fixtures/encodings/README.md`)
+- 初版は `engine.redact` 側だけをマトリクスで固定していたため、**Bash deny 側
+  (`file_render`) のデコードを 0.30.0 に戻す mutation が両 suite すべて green で
+  通り抜けた**。`render_for_bash` 経路のマトリクスを追加し、「片方だけ直すと
+  Bash の deny reason だけが鍵を取りこぼす」という修正理由そのものを保護した
+- keys-only 用のサンプルが dotenv サンプルの別名で、マトリクスが**同一入力を
+  2 回**通していた。`[section]` 見出し + `KEY : value` (コロン形) の別形状にして、
+  `keyonly_scan` 側の経路を実際に通す
+- 追加した全テストは、対応する実装行の mutation (デコード層の無効化 / BOM 判定順の
+  逆転 / パリティ支配条件の除去 / 可読比率 guard の除去と閾値 1.0 への引き上げ /
+  末尾 note 保護の 1 行化と上限の引き下げ / streaming の BOM 剥離の除去 /
+  PEM sniff の巻き戻しとコーデック gate の除去 / 開示行と gate 条件の巻き戻し /
+  regex の巻き戻し / keys-only の `:` 受理の除去 / `sys.path` 復元の削除) で
+  先に落ちることを確認済み。すべて `failures` で検出 (`errors` は 0 = import 崩れ
+  による空振りではない)
+- `tests/test_shared_import.py` が `importlib.machinery` を暗黙依存で使っていた
+  (`import importlib` だけでは submodule は読み込まれず、テストランナーが先に
+  import する副作用に乗っていた)。明示 import に直した — 実行形態を変えた瞬間に
+  `AttributeError` になる潜在的な壊れ方で、**テストランナー経由では mutation で
+  検出できない**ため記録として残す
+
+### 測っておいた影響 (許容)
+
+- Stop hook の静的案内が +163 文字になり、block reason の列挙予算が同量減る。
+  上限 (`MAX_OUTPUT_CHARS` = 9,216) は全ケースで未超過 (最大 9,170) だが、
+  長い path 90+90 文字 × 60 件のケースで列挙が 21 → 20 件に 1 件だけ減る。
+  沈黙の意味を開示する価値のほうが大きいと判断して許容した
+
 ## 0.30.0
 
 Stop hook (check-sensitive-files) の検出漏れ 1 件と無音 fail-open 1 件を修正

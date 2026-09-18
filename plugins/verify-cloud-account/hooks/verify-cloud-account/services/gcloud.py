@@ -7,12 +7,10 @@ accounts.local.json の "gcloud" は 2 形式を受け付ける:
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-from pathlib import Path
 
-from core import budget, cli_config
+from core import budget
 
 # `\b` だとハイフン付き別コマンドまで gcloud として拾うため、空白または終端が
 # 続く形だけに限定する。
@@ -140,122 +138,6 @@ def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None
     return value, None
 
 
-# gcloud の設定ファイルから現在値を読む経路 (CLI 実行の回避)。
-#
-# `gcloud config get-value <key>` は Python 製 CLI の起動込みで 1 回 〜1s かかり、
-# dict 期待値では project / account の 2 回走る。一方 gcloud はアクティブな
-# configuration 名を `<config_dir>/active_config` に、その中身を
-# `<config_dir>/configurations/config_<name>` の `[core]` セクションに書いている
-# (実測: account / project の 2 キーが `key = value` 形式)。
-#
-# **ローカル読取を使わない条件** (どれかに当たれば従来の CLI 実行に落ちる):
-# - 下の 2 つ以外の `CLOUDSDK_*` / `GOOGLE_CLOUD_PROJECT` 等が env にある
-#   (gcloud のプロパティは env でも上書きでき、優先順位を実測で確定できていない。
-#   **エミュレートを諦めて CLI に委ねる**方が、取り違えた値で allow するより安全)
-# - `HOME` が hook プロセスと違う (`cli_config.home_overridden`) — 実行される
-#   gcloud は別の設定ディレクトリ (`$HOME/.config/gcloud`) を読む
-# - configuration 名が gcloud の命名規則から外れる (パス要素の混入を防ぐ)
-# - 設定ファイルが読めない / INI として解釈できない
-_CONFIG_DIR_ENV_VAR = "CLOUDSDK_CONFIG"
-_ACTIVE_CONFIG_ENV_VAR = "CLOUDSDK_ACTIVE_CONFIG_NAME"
-# ローカル読取を続けてよい `CLOUDSDK_*` (どちらも「どのファイルを読むか」だけを
-# 決める構造的な変数で、値そのものを上書きしない)。
-_LOCAL_SAFE_ENV_VARS = frozenset({_CONFIG_DIR_ENV_VAR, _ACTIVE_CONFIG_ENV_VAR})
-_CLOUDSDK_ENV_PREFIX = "CLOUDSDK_"
-# `CLOUDSDK_*` 以外で project を上書きしうる env。
-_OTHER_OVERRIDE_ENV_VARS = frozenset(
-    {"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT"}
-)
-_ACTIVE_CONFIG_FILE = "active_config"
-_CONFIGURATIONS_DIR = "configurations"
-_CONFIG_FILE_PREFIX = "config_"
-_DEFAULT_CONFIG_NAME = "default"
-_CORE_SECTION = "core"
-# gcloud の configuration 名 (英字始まり + 英数字 / ハイフン)。`..` や `/` を
-# 含む値でファイルパスを組まないためのガード。
-_CONFIG_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
-
-
-def _config_dir(env) -> Path | None:
-    """gcloud の設定ディレクトリ (`CLOUDSDK_CONFIG` → `~/.config/gcloud`)。"""
-    explicit = env.get(_CONFIG_DIR_ENV_VAR)
-    if explicit:
-        return Path(explicit)
-    try:
-        home = Path.home()
-    except (RuntimeError, OSError):
-        return None
-    return home / ".config" / "gcloud"
-
-
-def _local_config_name(env, config_dir: Path, configuration=None) -> str | None:
-    """読むべき configuration 名 (`--configuration` → env → active_config → default)。"""
-    name = configuration or env.get(_ACTIVE_CONFIG_ENV_VAR)
-    if not name:
-        raw = cli_config.read_text(config_dir / _ACTIVE_CONFIG_FILE)
-        # active_config が無い環境では gcloud は "default" を使う。
-        name = raw.strip() if raw is not None else _DEFAULT_CONFIG_NAME
-        if not name:
-            name = _DEFAULT_CONFIG_NAME
-    if not _CONFIG_NAME_RE.match(name):
-        return None
-    return name
-
-
-def _local_core_properties(env=None, configuration=None) -> dict[str, str] | None:
-    """`[core]` の project / account をローカル設定から読む。決められないなら None。
-
-    env: インライン環境変数をマージ済みの完全 env (None なら hook プロセスの環境)。
-    検証 subprocess に渡すものと同じ env を見る (`CLOUDSDK_CONFIG=... gcloud ...`
-    の形もコマンド実行時と同条件で解決するため)。
-    """
-    e = os.environ if env is None else env
-    for name in e:
-        if name.startswith(_CLOUDSDK_ENV_PREFIX) and name not in _LOCAL_SAFE_ENV_VARS:
-            return None
-    if any(e.get(name) for name in _OTHER_OVERRIDE_ENV_VARS):
-        return None
-    if cli_config.home_overridden(e):
-        return None
-    config_dir = _config_dir(e)
-    if config_dir is None:
-        return None
-    name = _local_config_name(e, config_dir, configuration)
-    if name is None:
-        return None
-    text = cli_config.read_text(
-        config_dir / _CONFIGURATIONS_DIR / f"{_CONFIG_FILE_PREFIX}{name}"
-    )
-    if text is None:
-        return None
-    sections = cli_config.parse_ini_sections(text)
-    if sections is None:
-        return None
-    core = sections.get(_CORE_SECTION, {})
-    values = {}
-    for key in ("project", "account"):
-        value = core.get(key)
-        if isinstance(value, str) and value.strip():
-            values[key] = value.strip()
-    return values
-
-
-def _cli_value_getter(env, configuration):
-    """`gcloud config get-value <key>` から現在値を取る getter を返す。"""
-    def get(key: str) -> tuple[str | None, str | None]:
-        return _get(key, env, configuration)
-
-    return get
-
-
-def _local_value_getter(values: dict[str, str]):
-    """ローカル設定から読んだ値を返す getter (CLI と同じ `(value, error)` 形)。"""
-    def get(key: str) -> tuple[str | None, str | None]:
-        return values.get(key), None
-
-    return get
-
-
 def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str | None:
     """`--project` / `--account` の値を期待値と直接照合する (一致なら None)。
 
@@ -270,11 +152,10 @@ def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str |
     )
 
 
-def _check_project(expected: str, get_value, override=None) -> str | None:
-    """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
+def _check_project(expected: str, env=None, configuration=None, override=None) -> str | None:
     if override is not None:
         return _flag_mismatch("プロジェクト", "--project", override, expected)
-    current, err = get_value("project")
+    current, err = _get("project", env, configuration)
     if err:
         return err
     if current is None:
@@ -290,11 +171,10 @@ def _check_project(expected: str, get_value, override=None) -> str | None:
     return None
 
 
-def _check_account(expected: str, get_value, override=None) -> str | None:
-    """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
+def _check_account(expected: str, env=None, configuration=None, override=None) -> str | None:
     if override is not None:
         return _flag_mismatch("アカウント", "--account", override, expected)
-    current, err = get_value("account")
+    current, err = _get("account", env, configuration)
     if err:
         return err
     if current is None:
@@ -344,23 +224,6 @@ def suggest_accounts_entry(project_dir: str) -> str | dict | None:
     return entry or None
 
 
-def _expected_shape_error(expected) -> str | None:
-    """期待値そのものの形の不正 (現在値を取得しなくても決まる deny 理由)。"""
-    if isinstance(expected, dict):
-        if not expected.get("project") and not expected.get("account"):
-            return (
-                'GCP: accounts.local.json の "gcloud" オブジェクトに '
-                '"project" または "account" キーが必要です。'
-            )
-        return None
-    if not isinstance(expected, str):
-        return (
-            f'GCP: accounts.local.json の "gcloud" は文字列または '
-            f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
-        )
-    return None
-
-
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     """context: 候補コマンドのコンテキスト option。
 
@@ -369,38 +232,20 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     account の期待値がある限り account は従来どおりアクティブ値と照合する
     (project だけ見て早期 return すると account の false-allow を作ってしまう)。
     `--configuration` は上書きされなかったキーの現在値取得に引き渡す。
-
-    現在値は**まずローカル設定ファイルから読む** (`_local_core_properties`)。
-    ただしローカル読取で通せるのは **allow だけ**で、エラー (不一致 / 未設定) を
-    返しそうなときは必ず `gcloud config get-value` で取り直してから判断する
-    (`services/github.py` の verify() と同じ方針 — 誤読が deny を新造せず
-    「CLI を 1 回呼ぶ」コストに留まるようにするため。gcloud のプロパティは
-    installation 単位の設定など設定ファイル以外からも来るため、これが無いと
-    「ローカルでは未設定に見えるが gcloud は値を持っている」形で誤 deny する)。
     """
     ctx = context or {}
     configuration = ctx.get("configuration")
-
-    shape_error = _expected_shape_error(expected)
-    if shape_error:
-        return shape_error
-
-    local = _local_core_properties(env, configuration)
-    if local is not None:
-        if _verify_against(expected, ctx, _local_value_getter(local)) is None:
-            return None
-
-    return _verify_against(expected, ctx, _cli_value_getter(env, configuration))
-
-
-def _verify_against(expected, ctx: dict, get_value) -> str | None:
-    """期待値を現在値 getter と照合する (取得元は CLI / ローカル設定のどちらでも同じ)。"""
     project_override = ctx.get("project")
     account_override = ctx.get("account")
 
     if isinstance(expected, dict):
         project_want = expected.get("project")
         account_want = expected.get("account")
+        if not project_want and not account_want:
+            return (
+                'GCP: accounts.local.json の "gcloud" オブジェクトに '
+                '"project" または "account" キーが必要です。'
+            )
         errors: list[str] = []
         if project_want:
             if not isinstance(project_want, str):
@@ -409,7 +254,9 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
                     f"(現在: {type(project_want).__name__})。"
                 )
             else:
-                err = _check_project(project_want, get_value, project_override)
+                err = _check_project(
+                    project_want, env, configuration, project_override
+                )
                 if err:
                     errors.append(err)
         if account_want:
@@ -419,7 +266,9 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
                     f"(現在: {type(account_want).__name__})。"
                 )
             else:
-                err = _check_account(account_want, get_value, account_override)
+                err = _check_account(
+                    account_want, env, configuration, account_override
+                )
                 if err:
                     errors.append(err)
         if not errors:
@@ -429,10 +278,12 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
         return "GCP 検証エラー (複数):\n" + "\n".join(f"  - {e}" for e in errors)
 
     if not isinstance(expected, str):
-        # verify() は先に `_expected_shape_error()` で弾くので通常ここには来ない。
-        return _expected_shape_error(expected)
+        return (
+            f'GCP: accounts.local.json の "gcloud" は文字列または '
+            f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
+        )
 
-    return _check_project(expected, get_value, project_override)
+    return _check_project(expected, env, configuration, project_override)
 
 
 _CONFIG_SET_RE = re.compile(r"^gcloud\s+config\s+set\s+(project|account)\s+(\S+)\s*$")

@@ -1472,6 +1472,20 @@ _EDIT_EXISTING_RENDER_FAILED_ACTION = (
 _DATA_CLOSING_TAG = "</DATA>"
 _DATA_HEADER_LINES = 3
 
+# 固定 tail として守る末尾 ``note:`` 行の本数の上限 (0.31.0、内部バックログ)。
+#
+# 0.26.0 は「``</DATA>`` の直前 1 行」だけを固定 tail にしていた。
+# ``redaction.engine.build_reason`` の ``extra_notes`` (truncation 注記 /
+# デコード注記) は **body の後ろ**に並ぶため、注記が付く入力クラス
+# (BOM 付き / UTF-16 / 32KB 超) では per-format の免責 note が最終行では
+# なくなり、折り畳みで黙って落ちていた。連続する ``note:`` 行をまとめて守る。
+#
+# 上限 4 は現状の最大本数 = dotenv の 0 件開示 (``_UNPARSED_NOTE``) +
+# per-format の免責 note + truncation 注記 + デコード注記。5 本目を足す変更を
+# したら ``TestFitDataBlockMultipleTailNotes`` が落ちるので、そのとき上限も
+# 一緒に見直す (黙って保護が外れないようにテストで固定してある)。
+_MAX_TAIL_NOTES = 4
+
 
 def _line_cost(line: str) -> int:
     """``"\\n".join`` に 1 行足したときの増分 byte 数 (改行 1 byte 込み)。"""
@@ -1624,7 +1638,10 @@ def _fit_data_block(block: str, budget: int, next_action: str = "") -> list[str]
     0.26.0 から、閉じタグの直前が per-format の ``note:`` 行 (「実値は
     無い」等の免責事項。``format_dotenv`` / ``format_jsonlike`` /
     ``format_opaque`` は全て末尾をこの規約で終える) なら、それも閉じタグと
-    同格の固定 tail として保護を試みる。ただし note を保護すると
+    同格の固定 tail として保護を試みる。0.31.0 からは **連続する ``note:``
+    行を ``_MAX_TAIL_NOTES`` 本までまとめて**守る (``build_reason`` の
+    ``extra_notes`` が body の後ろに並ぶため、免責 note が最終行でない
+    入力クラスがある)。ただし note を保護すると
     **明細行 (``_count_detail_lines``) が 0 行に後退する**場合は、
     **note を諦めて閉じタグだけを保護する従来動作にフォールバック**し、
     浮いた予算を明細行に回す。情報を今までより減らしてしまっては本末転倒
@@ -1696,9 +1713,17 @@ def _fit_data_block_core(
     if lines and lines[-1] == _DATA_CLOSING_TAG:
         closing = [lines[-1]]
         body = lines[:-1]
-        if protect_note and body and body[-1].startswith("note:"):
-            closing = [body[-1]] + closing
-            body = body[:-1]
+        if protect_note:
+            # 末尾 note は 1 本とは限らない (0.31.0)。``build_reason`` の
+            # ``extra_notes`` が body の後ろに並ぶため、per-format の免責 note が
+            # 最終行でなくなる入力クラスがある (``_MAX_TAIL_NOTES`` の注記)。
+            while (
+                len(closing) <= _MAX_TAIL_NOTES
+                and body
+                and body[-1].startswith("note:")
+            ):
+                closing = [body[-1]] + closing
+                body = body[:-1]
     closing_cost = sum(_line_cost(x) for x in closing)
     # 省略マーカーの幅は件数の桁数で変わる。まず「落とした行数」の上限
     # (``len(body)``) で予約し、実際に出す件数がその予約に収まらなければ

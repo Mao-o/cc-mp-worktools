@@ -638,6 +638,72 @@ deny/allow/ask 一覧は [MATRIX.md](./MATRIX.md) を参照。
 | patterns.txt 読込失敗 | `ask_or_deny` + stderr 警告 |
 | サイズ 32KB 超 | keyonly_scan で streaming 鍵名抽出 |
 
+### 入力エンコーディングの推定 (0.31.0)
+
+`redaction/decoding.py::decode_text` が **32KB 以下の inline 経路**
+(`engine.redact` / `file_render`) のデコードを一元化する。0.30.0 までは全経路が
+`raw.decode("utf-8", errors="replace")` の一択で、**verdict は変わらないのに
+minimal info が事実と食い違う**状態だった:
+
+| 入力 | 0.30.0 の出力 | 原因 |
+|---|---|---|
+| BOM 付き UTF-8 (`utf-8-sig`) | **先頭 1 鍵が消える** (`entries` も 1 件少ない) | 残った U+FEFF は Cf カテゴリで `\s` に一致しないため、行頭 regex (`^\s*` / `^`) が先頭行だけ不一致 |
+| UTF-16 (BOM 有無どちらも) | `entries: 0` / `(no entries)` = **「空ファイル」と報告** | 全バイトが U+FFFD に置換される |
+| latin-1 等の非 UTF-8 1 byte 系 | `length` が歪む (`NAME=café` が length=4) | 置換文字の混入 |
+
+推定の順序は **BOM → BOM 無し UTF-16 → UTF-8**。
+
+- BOM は UTF-32 を UTF-16 より**先に**判定する (`FF FE 00 00` は `FF FE` を接頭辞
+  として含むため、逆順だと UTF-32 が UTF-16 として誤デコードされる)
+- BOM 無し UTF-16 は先頭 512 byte の **NUL のパリティ偏り**で判定する
+  (LE は奇数 index、BE は偶数 index が NUL になる)。密度ではなくパリティを見るのは
+  NUL が**両パリティに散る**バイナリ (ランダム / 圧縮データ) を巻き込まないため。
+  閾値は支配パリティの NUL 比率 0.30 以上 **かつ**反対側の 2 倍超。根拠 (実測):
+  ASCII のみの UTF-16 = 1.0 / 値を全部日本語にした UTF-16 = 0.507 /
+  UTF-8・latin-1 = 0.0 / ランダムバイト = 0.005 / NUL 塊を含むバイナリ = 0.505
+  だが支配条件で落ちる
+- **パリティ条件だけでは足りない**。NUL が**パリティ整列している**バイナリ
+  (16bit PCM / ASN.1 DER の `02 02 00 xx` 形 TLV / `(0x?? 0x00)*`) は支配条件を
+  通ってしまい、`replaced` が False になるので取りこぼし note も出ず、代わりに
+  `note: decoded as utf-16-be ...` という**断定の偽情報**が出ていた。推定を
+  受け入れる前に、そのコーデックで先頭 512 byte を decode して**可読文字比率**
+  (`isprintable()` / `\n` `\r` `\t`) が 0.90 以上であることを確認する。
+  閾値はテキスト側の最小 0.970 (制御文字混入 UTF-16) とバイナリ側の最大 0.871
+  (ASN.1 DER 風) の間に置いた。**BOM がある場合はこの guard を掛けない** —
+  明示的な宣言を内容で覆さない
+- **BOM 無し UTF-32 は検出しない** (パリティ支配条件が偽になる)。誤検出ではなく
+  取りこぼし方向なので、UTF-8 + 取りこぼし note に落ちる
+- 推定できなかった入力 (BOM も NUL も無い latin-1 等) は UTF-8 + `errors="replace"`
+  のままで、**取りこぼしを 1 行の note で開示**する (鍵名・長さが不正確かも
+  しれない旨)
+- **判定境界には影響しない**。deny / allow はパス名で決まり、本層は deny 済みの
+  reason に載せる情報の精度だけを上げる
+
+#### 32KB 超の streaming 経路 (対応範囲と据え置き)
+
+streaming 経路 (`engine.redact_large_file` → `keyonly_scan.scan_stream` /
+`pem.scan_pem_markers`) は chunk 単位の逐次デコードで、**符号単位の状態を chunk
+間で持ち回す作りになっていない**。対応の切れ目は「状態が要るか」で決まる:
+
+| 入力 | 扱い |
+|---|---|
+| UTF-8 BOM | **対応** (0.31.0)。先頭 3 byte を落とすだけで状態が不要。`scan_stream` の最初の chunk で剥離する。剥離前は行頭 regex が U+FEFF に一致せず**先頭 1 鍵だけが黙って消えて**いた (0 件ではないので下の保険も出ない = 開示のない欠落) |
+| UTF-8 BOM の armored 鍵 (単一 block) | **対応** (0.31.0)。PEM sniff がデコード層を通るようになり `format: pem` に乗る。`pem._BEGIN_RE` は `^` 固定なので、BOM が残ると 1 行目が一致しなかった (複数 block のバンドルは 2 本目以降の BEGIN が行頭に来るため偶然通っていた) |
+| BOM 無し UTF-16 / UTF-32 | **据え置き**。chunk 境界を跨ぐ符号単位の状態が必要。鍵は 1 件も拾えず、下の保険が出る |
+| UTF-16 の armored 鍵 | **意図的に pem 経路へ回さない**。`scan_pem_markers` は chunk を無条件 utf-8 としてデコードするため marker を 1 本も数えられず、`blocks: 0` を**断定**してしまう (誤情報を消すための変更で別の誤情報を作る)。keys-only scan に残して保険に委ねる (`engine._PEM_SNIFF_CODECS`) |
+
+**保険**: 走査したのに鍵が 1 件も拾えなかった場合は「エンコーディングか format が
+違うかもしれない」旨を出し、**誤認を断定ではなく「不明」に落とす**
+(`format_keyonly`)。ただし json/toml の **parse 失敗**で keys-only に降りた場合は
+出さない — 直後の `note: <FMT> parse failed` が原因を特定して言っているので、
+重ねると確定している話を不確かに見せる (保険は `reason == "large"` 限定)。
+
+`format_dotenv` の `entries: 0` 分岐 (32KB 以下) も同じ方針だが、条件は
+**parse 不能行数 > 0**。「中身がある」(byte 数 > 0) で出すと空白のみ / 全行
+コメントの `.env` まで巻き込み、命題は真でも「エンコーディングが違うかも」の
+部分が誤誘導になる。理解できている行 (空行 / コメント / PEM marker / PEM 継続行)
+は数えない。
+
 ### dotenv minimal info の拡張 (0.9.0, E1 + E2)
 
 `redaction/dotenv.py` で生成する minimal info に以下を追加 (実値は出さない):
@@ -666,8 +732,32 @@ github_pat < 30 / openai_key < 20 / url < 8 / uuid < 36 / email < 6。
 **long の閾値**: 4096 文字超 (実装は `len(v)`。デバッグダンプ混入の検知)。
 
 **placeholder 判定**: `redaction/placeholders.py::looks_placeholder` が
-PLACEHOLDER_LITERALS (21 個) と PLACEHOLDER_PATTERNS (5 個 regex) で判定。
-ユーザー拡張点 (placeholders.local.txt) は **作らない** (Q1 = 簡易版で開始)。
+PLACEHOLDER_LITERALS (固定 literal セット) と PLACEHOLDER_PATTERNS (regex 群) で
+判定。ユーザー拡張点 (placeholders.local.txt) は **作らない**
+(Q1 = 簡易版で開始)。
+
+**失敗方向 (0.31.0 で明示)**: この判定の誤りには 2 方向あり、重大度が違う。
+
+- **実値を placeholder と誤標識する**: `<placeholder>` は `<set>` を置き換える
+  ので、モデルには「この鍵はまだ実値が入っていない (rotate / set 不要)」と伝わる
+  = **見落としの方向**
+- **placeholder を `<set>` と表示する**: 「値がある」と読むだけで次の作業を
+  妨げない
+
+したがって**疑わしければ placeholder と言わない**側に倒す。0.31.0 でこの原則に
+沿って 2 つの regex を厳格化した (内部バックログ):
+
+| regex | 0.30.0 | 0.31.0 | 誤標識していた例 |
+|---|---|---|---|
+| 環境名 | `^(test\|dev\|local\|staging)[_-]?\w*$` | `^(test\|dev\|local\|staging\|development)$` (完全一致) | `test_51H8xKq…` (Stripe テストキー) / `dev_a8f3c2e1b9d7` / `staging_9f8e7d…` / `local_dbpassword_x9f2` |
+| 山括弧 | `^<.*>$` | `^<[\w .\-]{0,40}>$` (名前らしい短いトークンのみ) | `<soap:Envelope>` / `<root attr="x">` |
+
+本来の目的 (`ENV=local` のような値 / `<your-key>` のような雛形) は維持される。
+`development` は完全一致形なので alternation に含めてある — 後続許容を外すのと
+一緒に落とすと `NODE_ENV=development` が `<set>` に退行するうえ、完全一致では
+実トークンを拾う穴が開かない (`development` で終わる実クレデンシャルは無い)。
+`<html>` のような短いタグ名は原理的に区別できず残る (ヒューリスティックの限界)。
+**verdict (deny) は変わらない** — 表示タグだけの変更。
 
 ### json/toml/yaml の status 拡張 (0.14.0, E5)
 
@@ -1101,6 +1191,18 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 - state の読取 / 書込失敗は `warn` callback 経由で stderr に
   `stop_ack_unavailable: load:<Exc>` / `save:<Exc>` を 1 行出す (不在 = 初回は
   出さない)。判定は従来通り block
+- **沈黙の意味を開示する (0.31.0、内部バックログ)**: ack 後の沈黙は
+  「同じ集合を報告済み」でのみ決まり、**対処が有効だったかは見ていない**。
+  tracked ファイルに `.gitignore` を追記しただけ (index からは外れないので対処
+  として無効) でも次ターンから block が消えるため、「対処が成功した沈黙」と
+  区別が付かなかった (untracked 側でも `.gitignore` のパターンを書き損じれば
+  同型)。判定 (block するか) は変えず、`_SILENT_AFTER_ACK_NOTE` で
+  「**block が出なくなっても対処成功の証拠ではない**」ことと確認コマンド
+  (`git ls-files <path>` の出力が空になること) を reason に明記する。
+  **ack 前に git で再確認して未解消なら ack しない**案は採らなかった: fire/skip
+  の境界を動かすうえ、毎ターン再 block する側に倒れると 0.14.0 の離脱 (同じ
+  block が出続ける) を再生産するため。0.23.0 の除外レシピの影響範囲開示と同じ
+  「黙った過剰/過少を informed consent に変える」方針
 - block reason には恒久除外レシピ (`[project:$CLAUDE_PROJECT_DIR]` +
   `!<root 相対パス>` 行、`_shared.patterns.exclude_recipe_lines`。0.24.0 から
   path 形が既定で、basename 形 `!<basename>` は「同名すべて」の明示的な選択として

@@ -524,6 +524,181 @@ class TestFitDataBlockNoteProtection(unittest.TestCase):
         self.assertNotIn(";", joined.split("more lines")[1].split(")")[0])
 
 
+class TestFitDataBlockMultipleTailNotes(unittest.TestCase):
+    """0.31.0 隔離内レビュー P2-1: 末尾 ``note:`` は **1 本ではない**。
+
+    ``redaction.engine.build_reason`` の ``extra_notes`` (truncation 注記 /
+    デコード注記) は body の**後ろ**に並ぶため、per-format の免責 note
+    (「実値は context に無い」) は最終行でなくなる。0.26.0 の実装は
+    ``</DATA>`` の直前 1 行だけを固定 tail にしていたので、注記が付く入力
+    クラス (BOM 付き / UTF-16 / 32KB 超) では予算超過時に免責 note が黙って
+    落ちていた — 0.30.0 までは extras が実質 truncation のみで到達しなかった。
+
+    ``_MAX_TAIL_NOTES`` (= 4) は**現状の最大本数**そのものなので、note を
+    1 本増やす変更をすると保護が静かに外れる。最悪形を固定して落とす。
+    """
+
+    _DISCLAIMER = "real values are not in context"
+
+    @staticmethod
+    def _wide_dotenv_reason(enc: str, n: int = 40) -> str:
+        """``engine.redact`` が実際に組む「予算超過 × 非 UTF-8」のブロック。"""
+        from io import BytesIO
+
+        from redaction.engine import redact
+
+        text = "".join(
+            f"VERY_LONG_ENVIRONMENT_VARIABLE_NAME_NUMBER_{i:03d}"
+            f"=value_{i:03d}_padding_padding\n"
+            for i in range(n)
+        )
+        data = text.encode(enc)
+        return redact(BytesIO(data), ".env", len(data))
+
+    def test_disclaimer_survives_fold_in_every_encoding(self):
+        """免責 note が「デコード注記に入れ替わって落ちる」ことが無い。
+
+        明細行が残っている (= ``protect_note=False`` の 2 段目に落ちていない)
+        ことも同時に見る。落ちていれば「たまたま通った」でも pass するため。
+        """
+        budget = output.MAX_REASON_BYTES
+        for enc in ("utf-8", "utf-8-sig", "utf-16"):
+            with self.subTest(enc=enc):
+                block = self._wide_dotenv_reason(enc)
+                self.assertGreater(
+                    len(block.encode("utf-8")), budget,
+                    f"{enc}: 予算を超えていないので折り畳みが起きない",
+                )
+                fitted = M._fit_data_block(block, budget)
+                joined = "\n".join(fitted)
+                self.assertGreater(
+                    _detail_lines(fitted), 0,
+                    f"{enc}: 明細行が 0 (note 保護を諦めた 2 段目に落ちた)",
+                )
+                self.assertIn(
+                    self._DISCLAIMER, joined,
+                    f"{enc}: per-format の免責 note が折り畳みで落ちた",
+                )
+                self.assertEqual(fitted[-1], M._DATA_CLOSING_TAG)
+
+    @staticmethod
+    def _three_note_block() -> str:
+        """免責 note + truncation 注記 + デコード注記が並ぶ実物のブロック。"""
+        from io import BytesIO
+
+        from redaction.engine import redact
+
+        keys = "".join(
+            f"VERY_LONG_ENVIRONMENT_VARIABLE_NAME_NUMBER_{i:03d}"
+            f"=value_{i:03d}_padding_padding\n"
+            for i in range(40)
+        )
+        # utf-16 で 32KB を超えさせる (truncation 注記を出すため)。鍵行は
+        # 先頭に置くので head-only redaction でも全件拾われる。
+        text = keys + ("# " + "p" * 120 + "\n") * 140
+        data = text.encode("utf-16")
+        return redact(BytesIO(data), ".env", len(data))
+
+    def test_three_tail_notes_survive_fold(self):
+        """明細行がある状態で作れる最大 = 3 本 (免責 + truncation + デコード)。
+
+        ``_UNPARSED_NOTE`` が付く 4 本目は ``entries: 0`` の分岐でしか出ず、
+        その形は明細行を持たない (= 折り畳みが起きない)。したがって
+        「折り畳みながら守る」ことを実測できる最大本数はここ。
+        """
+        block = self._three_note_block()
+        # 入力が 32KB 超であること (truncation 注記の前提) を出力側で確認する。
+        self.assertIn("content was truncated", block)
+        notes = [x for x in block.split("\n") if x.startswith("note:")]
+        self.assertEqual(len(notes), 3, f"想定 3 本ではなく {len(notes)} 本: {notes}")
+
+        budget = output.MAX_REASON_BYTES
+        self.assertGreater(len(block.encode("utf-8")), budget)
+        fitted = M._fit_data_block(block, budget)
+        self.assertGreater(_detail_lines(fitted), 0, "明細行が 0 (2 段目に落ちた)")
+        self.assertEqual(fitted[-1], M._DATA_CLOSING_TAG)
+        self.assertEqual(
+            fitted[-1 - len(notes):-1], notes,
+            "折り畳みで末尾 note (免責 / truncation / デコード) が揃わなかった",
+        )
+
+    def test_multi_note_protection_never_costs_detail_lines(self):
+        """複数 note の保護でも「旧来なら見えていた明細行がゼロになる」帯が無い。
+
+        0.26.0 の既存の掃引テスト
+        (``test_never_zero_detail_lines_when_dropping_note_would_show_some``)
+        は **note 1 本**の fixture でしか回っていない。3 本守ると
+        ``closing_cost`` がおよそ 3 倍になり、まさにその掃引が守っている量が
+        動く。2 段構えのフォールバックが吸収するはずだが、それは主張であって
+        測定ではないので、同じ性質を 3 note のブロックでも掃引して固定する。
+        """
+        block = self._three_note_block()
+        for budget in range(0, 1200, 5):
+            with self.subTest(budget=budget):
+                legacy = M._fit_data_block_core(
+                    block, budget, protect_note=False,
+                )
+                current = M._fit_data_block(block, budget)
+                if legacy:
+                    self.assertTrue(
+                        current, f"budget={budget}: 旧アルゴリズムは非空なのに空",
+                    )
+                if _detail_lines(legacy):
+                    self.assertGreater(
+                        _detail_lines(current), 0,
+                        f"budget={budget}: note 保護を外せば明細行を出せるのに"
+                        " 見出しだけのブロックになった",
+                    )
+                if current:
+                    self.assertLessEqual(
+                        len("\n".join(current).encode("utf-8")), budget,
+                    )
+                    self.assertEqual(current[-1], M._DATA_CLOSING_TAG)
+
+    def test_worst_case_tail_is_within_the_protected_bound(self):
+        """現状の最大 = 連続 4 本。``_MAX_TAIL_NOTES`` と一致することを固定する。
+
+        内訳: dotenv の 0 件開示 + per-format の免責 note + truncation 注記 +
+        デコード注記。5 本目を足す変更をしたらここが落ちるので、そのとき
+        ``_MAX_TAIL_NOTES`` も一緒に見直す。
+        """
+        from io import BytesIO
+
+        from redaction.engine import MAX_INLINE_BYTES, redact
+
+        # 鍵行が 1 つも無い / 32KB 超 / 非 UTF-8 を同時に満たす入力。
+        raw = "résumé sans clé\n".encode("latin-1") * (MAX_INLINE_BYTES // 8)
+        block = redact(BytesIO(raw), ".env", len(raw))
+        tail = block.split("\n")[:-1]  # </DATA> を除く
+        run = 0
+        for line in reversed(tail):
+            if not line.startswith("note:"):
+                break
+            run += 1
+        self.assertEqual(
+            run, M._MAX_TAIL_NOTES,
+            f"末尾 note の連続本数が {run} 本 (上限 {M._MAX_TAIL_NOTES} 本)。"
+            " 増やすなら上限も一緒に上げる",
+        )
+
+    def test_all_tail_notes_are_protected_together(self):
+        """4 本すべてが固定 tail として残る budget 帯が実在すること。"""
+        from io import BytesIO
+
+        from redaction.engine import MAX_INLINE_BYTES, redact
+
+        raw = "résumé sans clé\n".encode("latin-1") * (MAX_INLINE_BYTES // 8)
+        block = redact(BytesIO(raw), ".env", len(raw))
+        notes = [x for x in block.split("\n") if x.startswith("note:")]
+        self.assertEqual(len(notes), M._MAX_TAIL_NOTES)
+        fitted = M._fit_data_block(block, output.MAX_REASON_BYTES)
+        self.assertEqual(fitted[-1], M._DATA_CLOSING_TAG)
+        self.assertEqual(
+            fitted[-1 - len(notes):-1], notes,
+            "末尾 note が固定 tail として揃って残っていない",
+        )
+
+
 class TestFitDataBlockAcrossFormats(unittest.TestCase):
     """0.26.0 で範囲補正した「dotenv / jsonlike / opaque の 3 形式すべてを対象に」
     を実データで固定する。

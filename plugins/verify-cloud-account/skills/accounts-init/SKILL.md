@@ -45,11 +45,6 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
   作る場合だけ `--path <file>` で明示する
 - stdout は既定で値を表示しない。明示の `--show-values` を付けたときだけ
   露出する (AskUserQuestion で承認を得てから切り替える)
-- **`"$mode"` (検証モード) は builder が値を書かない唯一のキー = 手編集する
-  前提のキー**。`init` / `set` / `remove` は既存の `"$mode"` を壊さず保持するが、
-  設定・変更のサブコマンドは持たない。プロジェクト単位で `warn` / `off` に
-  したいときは、ユーザーに「エディタで `"$mode": "warn"` を追記する」か
-  「環境変数 `VERIFY_CLOUD_ACCOUNT_MODE=warn` を使う」ことを案内する
 
 ## 前提
 

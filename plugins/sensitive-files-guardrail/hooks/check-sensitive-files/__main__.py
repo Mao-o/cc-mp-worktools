@@ -169,6 +169,38 @@ _SUBMODULE_DIRS_MAX_CHARS = 400
 # ``MAX_OUTPUT_CHARS`` より確実に大きければよい (畳み判定を通さないための番兵)。
 _UNBOUNDED = 1 << 30
 
+# session 単位 once-only (0.19.0) の注記。``session_id`` が取れたときだけ出す。
+_SESSION_SCOPE_NOTE = (
+    "このセッションでは同じファイル集合について再度 block しません"
+    " (新たな機密ファイルが増えたときのみ再通知)。"
+)
+
+# 「不完全な対処の後の沈黙」を「対処成功の沈黙」と取り違えさせないための開示
+# (0.31.0、内部バックログ)。
+#
+# 報告済み集合を記録した後は、同じ集合について次ターン以降 block が出ない
+# (`main` の ``digests <= acked`` で早期 return)。この沈黙は **再検査の結果では
+# ない** ので、対処が有効だったかどうかと無関係に訪れる。典型的な取り違えは
+# tracked ファイルに `.gitignore` を追記しただけのケース — index からは外れて
+# いないので対処として無効だが、次ターンから block が消えるため「直った」と
+# 見える。untracked 側でも `.gitignore` のパターンを書き損じれば同じことが起きる。
+#
+# 判定 (block するか) は変えない: ack 前に「対処が有効だったか」を git で再確認
+# する案は fire/skip の境界を動かすうえ、毎ターン再 block する側に倒れると
+# 0.14.0 の離脱 (同じ block が出続ける) を再生産する。**沈黙の意味を明示する**
+# ことで、黙った変化を informed な状態に変える (0.23.0 の除外レシピの影響範囲
+# 開示と同じ考え方)。
+#
+# 確認コマンドは metadata-only 経路で allow される形だけを案内する
+# (`git ls-files`。tests/test_e2e.py の推奨コマンド突合テストが Bash hook を
+# 実際に通して固定している)。
+_SILENT_AFTER_ACK_NOTE = (
+    "**次ターンから block が出なくなっても、対処が成功した証拠ではありません**"
+    " (hook は再検査ではなく「同じ集合を報告済みか」で黙ります)。"
+    "`.gitignore` への追記だけでは tracked は index に残るので、"
+    "`git ls-files <path>` の出力が空になったことで確認してください。"
+)
+
 
 def _distinct(names: list[str]) -> list[str]:
     """``exclude_recipe_lines`` と**同じ規則**で重複除去した一覧を返す。
@@ -356,7 +388,9 @@ def _build_reason(
     tracked / untracked を別セクションで列挙し、AskUserQuestion の選択肢と
     恒久除外レシピ (``[project:$CLAUDE_PROJECT_DIR]`` + ``!<root 相対パス>``) を
     添える。絶対パスは出さない (ヘッダーは環境変数名で示す)。``session_scoped``
-    なら「このセッションでは同じ集合を再 block しない」注記を付ける。
+    なら「このセッションでは同じ集合を再 block しない」注記 (0.19.0) と、
+    **その沈黙は対処の成否とは無関係である**という開示 (0.31.0、
+    ``_SILENT_AFTER_ACK_NOTE``) を付ける。
 
     ``root_offset_`` (0.24.0): cwd の project root からの相対 prefix
     (``checker.root_offset``)。None 以外ならレシピを **path 形** (承認した
@@ -487,10 +521,7 @@ def _build_reason(
         alts_total = len(_distinct(basenames))
     else:
         alts_rules, alts_total = [], 0
-    session_note = (
-        "このセッションでは同じファイル集合について再度 block しません"
-        " (新たな機密ファイルが増えたときのみ再通知)。"
-    )
+    session_note = _SESSION_SCOPE_NOTE + _SILENT_AFTER_ACK_NOTE
 
     def assemble(
         t_lines: list[str],

@@ -71,6 +71,7 @@ from pathlib import Path
 # ないため意図的に internal import する。
 from _shared.patterns import _resolve_project_key  # noqa: F401
 from core.safepath import classify, normalize, open_regular
+from redaction.decoding import decode_note, decode_text
 from redaction.dotenv import format_dotenv, redact_dotenv
 
 # engine.py の private symbol を internal import で再利用する。0.10.0 時点で
@@ -199,10 +200,16 @@ def _render_path(path: Path) -> tuple[str | None, dict | None, str]:
                 # するため。
                 f.seek(0)
                 raw = f.read(MAX_INLINE_BYTES + 1)
-                text = raw.decode("utf-8", errors="replace")
-                info = redact_dotenv(text)
+                # デコードは engine.redact と同じ層を通す (0.31.0)。ここだけ
+                # 無条件 utf-8 のままにすると、Bash deny の minimal info だけが
+                # BOM 付き / UTF-16 の ``.env`` で鍵を取りこぼす。
+                decoded = decode_text(raw)
+                info = redact_dotenv(decoded.text)
                 body = format_dotenv(info)
-                reason = build_reason(basename, fmt, body)
+                note = decode_note(decoded)
+                reason = build_reason(
+                    basename, fmt, body, [note] if note is not None else None
+                )
                 return (reason, info, "")
             # dotenv 以外は engine.redact を再利用 (json / toml / yaml / opaque)。
             f.seek(0)

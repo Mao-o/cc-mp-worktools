@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import codecs
 import io
 import re
 from pathlib import Path
@@ -82,12 +83,21 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
     ``sanitize_key`` の上限が 128 文字であることを踏まえれば通常入力では届かない
     (敵対的入力は非目的)。
 
+    ### エンコーディング (0.31.0)
+
+    chunk は個別に ``utf-8`` としてデコードする。**UTF-8 BOM だけは最初の
+    chunk で落とす** (chunk 間の状態を必要としない)。BOM 無し UTF-16 /
+    UTF-32 は chunk 境界を跨ぐ符号単位の状態が要るため**据え置き**で、
+    その場合は鍵が 1 件も拾えず ``format_keyonly`` の ``_UNPARSED_NOTE``
+    (「エンコーディングか format が違うかもしれない」) が保険として出る。
+
     Returns:
         (keys, total_bytes_read) — ``total_bytes_read <= max_bytes`` が常に成立。
     """
     keys_seen: set[str] = set()
     ordered: list[str] = []
     read_bytes = 0
+    first_chunk = True
     pending = bytearray()
     # scan_keys と同じ PEM ブロック追跡 (list で包むのは closure から書き換えるため)
     in_pem_block = [False]
@@ -120,6 +130,17 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
             if not chunk:
                 break
             read_bytes += len(chunk)
+            if first_chunk:
+                first_chunk = False
+                # UTF-8 BOM だけは chunk 間の状態を持たずに落とせる (先頭 3 byte
+                # を捨てるだけ) ので、streaming 経路でも対応する (0.31.0 隔離内
+                # レビュー P2-3)。BOM が残ると ``_KEY_RE`` の ``^\s*`` が U+FEFF
+                # に一致せず **先頭 1 鍵だけが黙って消える** — 0 件ではないので
+                # ``_UNPARSED_NOTE`` の保険も出ず、開示のないまま欠落する。
+                # ``read_bytes`` には加算済みのままにする (``scanned_bytes`` は
+                # 「読んだ byte 数」であり、BOM も実際に読んでいる)。
+                if chunk.startswith(codecs.BOM_UTF8):
+                    chunk = chunk[len(codecs.BOM_UTF8):]
             start = 0
             done = False
             while True:
@@ -175,6 +196,12 @@ KEYONLY_SCAN_MARKER = "keys-only scan"
 # reason に載せる鍵名の上限 (LLM コンテキスト圧迫防止)。``MAX_KEYS`` は
 # スキャンそのものの上限で、こちらは表示側の上限。
 PREVIEW_CAP = 60
+
+# 走査済みなのに 0 件だったときに添える 1 行 (0.31.0)。``redaction/dotenv.py``
+# の同趣旨の行と文面を揃える。
+_UNPARSED_NOTE = (
+    "note: scanned bytes but matched no keys (encoding or format may differ)."
+)
 
 # keys-only scan に降りた理由 → ``format:`` 行に載せるラベル (0.26.0)。
 # 旧実装は理由を問わず一律 "large" と表示しており、43 byte の壊れた JSON でも
@@ -265,6 +292,18 @@ def format_keyonly(
     ]
     if not keys:
         lines.append("(no keys matched)")
+        # 0.31.0: 走査したのに 1 件も拾えなかったときは「空」と言い切らない。
+        # streaming 経路 (>32KB) は chunk 単位で utf-8 デコードするため、BOM 無し
+        # UTF-16 のような入力では全行が化けて 0 件になる (``redaction/decoding.py``
+        # の「既知の適用範囲」)。誤認を断定ではなく「不明」に落とす。
+        #
+        # ``reason == "large"`` に限る (隔離内レビュー P3-3)。json/toml の parse
+        # 失敗で降りてきた場合は直後の ``_keyonly_note`` が
+        # 「``<FMT>`` parse failed — file may be malformed」と**原因を特定して**
+        # 言うので、「エンコーディングか format が違うかも」を重ねると原因が
+        # 二重になり、確定している話を不確かに見せてしまう。
+        if total_bytes > 0 and reason == "large":
+            lines.append(_UNPARSED_NOTE)
     else:
         shown = keys[:PREVIEW_CAP]
         if len(keys) > PREVIEW_CAP:
