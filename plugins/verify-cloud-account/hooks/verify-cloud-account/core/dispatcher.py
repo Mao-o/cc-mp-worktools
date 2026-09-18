@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import budget, cache, cli_options, output, paths
+from core import budget, cache, cli_options, mode, output, paths
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -172,17 +172,65 @@ def _service_name(service) -> str:
 
 def _find_accounts_file(
     project_dir: str,
-) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None]:
-    """accounts.local.json を 3-tier + 親ディレクトリ遡及で探す。
+) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None, str | None]:
+    """accounts.local.json を 3-tier + 親ディレクトリ遡及 + グローバル既定で探す。
 
-    実体は `core/paths.resolve_accounts_file()` — **builder
-    (`scripts/accounts_builder.py`) と同じ解決を共有する**ための薄い委譲。
+    実体は `core/paths.resolve_accounts_file_for_verification()` — プロジェクト側の
+    解決は **builder (`scripts/accounts_builder.py`) と同じ関数を共有する**。
     「hook が読むファイル」と「builder が書くファイル」が食い違うと、親から
     継承しているプロジェクトで builder が子ファイルを作り、その子ファイルで
     遡及が止まって継承分が全て未設定になる (詳細は paths 側の docstring)。
+    プロジェクト側で見つからないときだけ `$HOME` のグローバル既定に落ちる
+    (builder は書込先を決めるため、こちらの経路は使わない)。
     戻り値の意味も paths 側の docstring を参照。
     """
-    return paths.resolve_accounts_file(project_dir)
+    return paths.resolve_accounts_file_for_verification(project_dir)
+
+
+def _global_note(accounts_path: Path) -> str:
+    """グローバル既定を採用した場合の 1 行注釈 (deny / warn の前置き)。
+
+    プロジェクトに accounts.local.json が無いまま検証が動く唯一の経路なので、
+    「どのファイルの期待値で判定したか」を必ず添える。
+    """
+    return (
+        f"プロジェクトに accounts.local.json が無いため、グローバル既定 "
+        f"{accounts_path} を使用しています。"
+    )
+
+
+def _decide(effective_mode: str, body: str, notes: list[str]) -> dict:
+    """検証結果 (deny 相当の本文) を mode に応じた hook 出力へ変換する。
+
+    `enforce` は従来どおり deny、`warn` は `additionalContext` で通知のみ。
+    判定そのもの (何を問題とみなすか) は mode に依らず同じで、変わるのは
+    「止めるか / 伝えるだけか」だけ。
+    """
+    parts = [body] + [n for n in notes if n]
+    text = "\n\n".join(parts)
+    if effective_mode == mode.WARN:
+        return output.warn(mode.WARN_HEADER + "\n\n" + text)
+    return output.deny(text + "\n\n" + mode.DENY_HINT)
+
+
+def _notes_only(notes: list[str]) -> dict | None:
+    """`off` で検証しないときでも、モード解決の注意書きだけは届ける。
+
+    `VERIFY_CLOUD_ACCOUNT_MODE=of` (typo) のような不正値は enforce に倒しつつ
+    note を作るが、`"$mode": "off"` が同時にあると検証前に抜けるため、
+    従来はこの note が誰にも届かなかった = **env の綴り間違いが黙って無視される**。
+    結果 (通す) は利用者の意図どおりでも、env を直すまで「env で off にできて
+    いる」と誤解し続ける。deny は作らず通知だけ返す。
+
+    **dedup はしない**ので、不正値が立っている間は対象コマンドの度に出る
+    (実測: 同じ入力で 3 回連続とも通知)。warn モードの deny 相当の通知も cache
+    しない = 毎回出る仕様なので揃えてある。正しい値 (`off`) や未設定では
+    `None` に戻るため、鳴り続けるのは実際に設定が壊れている間だけ。
+    """
+    text = "\n\n".join(n for n in notes if n)
+    if not text:
+        return None
+    return output.warn(text)
 
 
 def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
@@ -373,14 +421,34 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if not targets:
         return None
 
-    accounts_path, kind, conflicts, resolved_dir = _find_accounts_file(project_dir)
-    ancestor_note = _ancestor_note(project_dir, resolved_dir)
+    # モードは env → accounts.local.json の "$mode" → enforce の順で決まる
+    # (`core/mode.py`)。env が off なら**ファイルを読む前に**抜ける — 検証しない
+    # のだから accounts.local.json の有無も CLI の状態も見る必要がない。
+    # cache の無効化 (上の switching ループ) より後に置くのは、off の間に実行された
+    # 切替が cache に残ると enforce へ戻した直後に古い成功で通ってしまうため。
+    env_mode, env_note = mode.from_env()
+    mode_notes = [env_note] if env_note else []
+    if env_mode == mode.OFF:
+        # `from_env()` は「mode」か「不正値 note」の片方しか返さないので、この経路の
+        # note は常に空 (= None を返す)。形を下の off と揃えておく。
+        return _notes_only(mode_notes)
+    # accounts.local.json を読む前に決まる deny (競合 / 未設定 / 壊れた JSON) は
+    # "$mode" が読めないため env だけで mode を決める。
+    pre_file_mode = mode.effective(env_mode, None)
+
+    accounts_path, kind, conflicts, resolved_dir, source = _find_accounts_file(
+        project_dir
+    )
+    if source == paths.SOURCE_GLOBAL and accounts_path is not None:
+        source_note = _global_note(accounts_path)
+    else:
+        source_note = _ancestor_note(project_dir, resolved_dir)
 
     if conflicts:
         body = _format_conflicts(conflicts)
-        if ancestor_note:
-            body = ancestor_note + "\n\n" + body
-        return output.deny(body)
+        if source_note:
+            body = source_note + "\n\n" + body
+        return _decide(pre_file_mode, body, mode_notes)
 
     if accounts_path is None:
         hints = [getattr(svc, "SETUP_HINT", "") for svc, *_rest in targets]
@@ -393,22 +461,48 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         )
         if hint_block:
             msg += "\n\n" + hint_block
-        return output.deny(msg)
+        # グローバル既定 (`$HOME/.claude/verify-cloud-account/accounts.local.json`) を
+        # 置けば全プロジェクトの既定として使えることも案内する。user scope で
+        # install した直後に「未設定のプロジェクトだけが deny される」状態から
+        # 抜ける出口が無かったため (内部バックログ)。
+        global_path = paths.global_accounts_file()
+        if global_path is not None:
+            msg += (
+                f"\n\n全プロジェクト共通の既定にするには {global_path} を"
+                "作成してください (プロジェクト側の設定が優先されます)。"
+            )
+        return _decide(pre_file_mode, msg, mode_notes)
 
     try:
         accounts = json.loads(accounts_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        return output.deny(
+        return _decide(
+            pre_file_mode,
             f"{accounts_path} の JSON が不正です: {e.msg} (行 {e.lineno})。"
-            "内容を確認・修正してください。"
+            "内容を確認・修正してください。",
+            mode_notes,
         )
     except OSError as e:
-        return output.deny(f"{accounts_path} の読み込みに失敗しました: {e}")
+        return _decide(
+            pre_file_mode,
+            f"{accounts_path} の読み込みに失敗しました: {e}",
+            mode_notes,
+        )
 
     if not isinstance(accounts, dict):
-        return output.deny(
-            f"{accounts_path} はオブジェクト ({{...}}) である必要があります。"
+        return _decide(
+            pre_file_mode,
+            f"{accounts_path} はオブジェクト ({{...}}) である必要があります。",
+            mode_notes,
         )
+
+    # ここで初めて "$mode" が読める (ファイルの形が確定した後)。
+    file_mode, file_note = mode.from_accounts(accounts)
+    if file_note:
+        mode_notes.append(file_note)
+    effective_mode = mode.effective(env_mode, file_mode)
+    if effective_mode == mode.OFF:
+        return _notes_only(mode_notes)
 
     try:
         accounts_mtime = accounts_path.stat().st_mtime
@@ -498,21 +592,21 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         body = "\n\n".join(dict.fromkeys(errors))
         for note_text in remediation_notes:
             body = body + "\n\n" + note_text
-        if ancestor_note:
-            body = ancestor_note + "\n\n" + body
+        if source_note:
+            body = source_note + "\n\n" + body
         if note:
             body = body + "\n\n" + note
-        return output.deny(body)
+        return _decide(effective_mode, body, mode_notes)
 
     # warn は deprecation note が出るときのみ発火させる。verify 成功時は
-    # ancestor_note 単独では warn を出さず silent (worktree で親採用は
-    # 通常運用なので毎回通知するとノイズになる)。
+    # source_note (親継承 / グローバル既定) 単独では warn を出さず silent
+    # (worktree で親採用は通常運用なので毎回通知するとノイズになる)。
     # alert fatigue 防止: warn (verify 成功時) は 1 日 1 回に制限する。
     # deny 内の note は常に表示 (実行阻止メッセージの一部のため)。
     if note and _should_emit_deprecation_warn(project_dir):
         body = note
-        if ancestor_note:
-            body = ancestor_note + "\n\n" + body
+        if source_note:
+            body = source_note + "\n\n" + body
         return output.warn(body)
 
     return None
