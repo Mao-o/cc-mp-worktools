@@ -32,6 +32,31 @@ from core import paths  # noqa: E402
 from scripts import accounts_builder as builder  # noqa: E402
 from services import github  # noqa: E402
 
+_ISOLATION = None
+_ISOLATION_ROOT = None
+
+
+def setUpModule():
+    """実環境の gh / gcloud 設定を読ませない。
+
+    verify() は CLI を起動する前にローカル設定ファイルを読むため、隔離しないと
+    「CLI 層を mock して verify() を呼ぶ」ハーネス (`_verify_with_active` /
+    show と verify の一致契約) が**開発者の `~/.config` 配下**で短絡し、mock に
+    到達しないまま allow になりうる。
+    """
+    global _ISOLATION, _ISOLATION_ROOT
+    _ISOLATION_ROOT = tempfile.mkdtemp()
+    _ISOLATION = _testutil.start_isolation(Path(_ISOLATION_ROOT))
+
+
+def tearDownModule():
+    if _ISOLATION is not None:
+        _ISOLATION.stop()
+    if _ISOLATION_ROOT is not None:
+        import shutil
+
+        shutil.rmtree(_ISOLATION_ROOT, ignore_errors=True)
+
 
 def _fake_run(stdout: str = "", stderr: str = "", returncode: int = 0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
@@ -352,6 +377,49 @@ class TestShow(BaseBuilder):
         code, out, _err = self._run(["show"])
         self.assertEqual(code, 0)
         self.assertIn("no accounts.local.json", out)
+
+    def test_global_default_path_is_editable_via_explicit_path(self):
+        """グローバル既定は `--path` で明示すれば編集できる。
+
+        builder は解決でグローバル既定へ**落ちない** (プロジェクト設定を作る
+        つもりの編集が全プロジェクトに効くのを防ぐため) ので、意図的に編集する
+        経路がこれしか無い。`$HOME` 配下でも 3-tier の形なので受理される。
+        """
+        self.assertEqual(
+            builder._split_tier_path(
+                Path("/fake-home/.claude/verify-cloud-account/accounts.local.json")
+            ),
+            ("new", Path("/fake-home")),
+        )
+
+    def test_show_labels_reserved_mode_key(self):
+        """予約キー `"$mode"` は service ではなく mode として表示する。
+
+        `[unknown service]` 扱いで値を隠すと、mode を設定したのに何が効いて
+        いるのか show から読めない。
+        """
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o", "$mode": "warn"}), encoding="utf-8"
+        )
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={"github.com": "Mao-o"},
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[mode]", out)
+        self.assertIn("warn", out)
+        self.assertNotIn("[unknown service]", out)
+
+    def test_show_flags_invalid_mode_value(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"$mode": "sometimes"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("不正な値", out)
 
     def test_show_match(self):
         self.new_dir.mkdir(parents=True)
@@ -3055,6 +3123,100 @@ class TestExplicitPathArgument(BaseBuilder):
         self.assertEqual(code, 1)
         self.assertIn("旧パス", err)
         self.assertFalse(self._new_path().exists())
+
+
+class TestGlobalDefaultIsDisclosed(BaseBuilder):
+    """builder と dispatcher でグローバル既定の見え方が食い違わないこと。
+
+    dispatcher はプロジェクト側で何も見つからないとき
+    `$HOME/.claude/verify-cloud-account/accounts.local.json` を読むが、builder は
+    そこへ落ちない (書込先がグローバルに化けないため)。この非対称を黙っていると:
+
+    - 書込方向: 無関係な service を 1 つ set しただけでプロジェクトファイルが
+      生まれ、グローバル既定の他キーが継承されず一斉に deny (shadowing)
+    - 読取方向: `show` が「未設定」と答えるのに hook はグローバル既定で検証中
+      = 不一致の原因調査という show の目的を裏切る
+
+    どちらもマージ前レビューの指摘。v0.12.0 で塞いだ親遡及の shadowing と同じ形が
+    1 段上で再発していた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp) / "fake_home"
+        (self.home / ".claude" / "verify-cloud-account").mkdir(parents=True)
+        patcher = mock.patch.object(
+            Path, "home", staticmethod(lambda: self.home)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_global(self, data: dict):
+        # 実パスは `paths.global_accounts_file()` (resolve 済み) と比較する。
+        path = paths.global_accounts_file()
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def _init_dry_run(self) -> str:
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        return out
+
+    def test_fresh_target_warns_and_names_the_global_keys(self):
+        path = self._write_global({"github": "global-user", "aws": "123456789012"})
+        out = self._init_dry_run()
+        self.assertIn(str(path), out)
+        self.assertIn("継承されません", out)
+        self.assertIn("2 キー", out)
+        self.assertIn("aws", out)
+
+    def test_no_warning_without_a_global_default(self):
+        """negative control: グローバル既定が無ければ警告は出ない。"""
+        out = self._init_dry_run()
+        self.assertNotIn("継承されません", out)
+
+    def test_no_warning_when_the_project_already_has_a_file(self):
+        """新規作成でないなら覆い隠さないので警告しない。"""
+        self._write_global({"github": "global-user"})
+        self.new_dir.mkdir(parents=True, exist_ok=True)
+        self._new_path().write_text('{"github": "old"}', encoding="utf-8")
+        code, out, _err = self._run(
+            ["set", "--service", "github", "--value", "Mao-o", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("継承されません", out)
+
+    def test_broken_global_json_still_warns(self):
+        """キーが読めなくても「継承されない」事実は伝える。"""
+        paths.global_accounts_file().write_text("{ broken", encoding="utf-8")
+        out = self._init_dry_run()
+        self.assertIn("継承されません", out)
+
+    def test_show_names_the_file_the_hook_verifies_with(self):
+        path = self._write_global({"$mode": "warn"})
+        code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("no accounts.local.json found", out)
+        self.assertIn(str(path), out)
+        self.assertIn("hook はこのファイルで検証します", out)
+        # show は何も作らないので shadowing 警告は出さない (read-only)。
+        self.assertNotIn("継承されません", out)
+
+    def test_show_without_global_default_keeps_the_plain_message(self):
+        """negative control: グローバル既定が無ければ従来の出力のまま。"""
+        code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("no accounts.local.json found", out)
+        self.assertNotIn("hook はこのファイルで検証します", out)
+
+    def test_global_default_path_is_editable_via_explicit_path(self):
+        """案内している `--path <global>` が実際に受理されること。"""
+        path = self._write_global({"$mode": "warn"})
+        code, out, err = self._run(["show", "--path", str(path)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("[mode]", out)
 
 
 if __name__ == "__main__":

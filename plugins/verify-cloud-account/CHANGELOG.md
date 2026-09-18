@@ -1,5 +1,129 @@
 # Changelog
 
+## 0.13.0
+
+内部バックログの精査分 2 件 (いずれも「使い始めてすぐ外したくなる」= 離脱率低減)。
+**deny / allow の判定表は変えていない**。変えたのは (1) 現在値をどこから取るか、
+(2) 検証をいつ走らせるか / 結果を deny として返すか、の 2 点。
+
+### 1. `gh` / `gcloud` の現在値をローカル設定ファイルから読む
+
+cache が無いとき (TTL 切れ / 初回) の現在値取得に、毎回 CLI を起動していた:
+
+- `gh auth status` は**全 host のトークンを API で検証**するためネットワーク往復が
+  入り (〜500ms)、オフラインでは失敗して「アクティブアカウントを取得できません」で
+  deny していた
+- `gcloud config get-value` は Python CLI の起動込みで 1 回 〜1s
+  (dict 期待値では project / account の 2 回)
+
+どちらもアクティブアカウントはローカルの設定ファイルに書かれている
+(`hosts.yml` の `<host>.user` / `configurations/config_<name>` の `[core]` の
+`project` / `account`) ので、そこから読む経路を足した (`core/cli_config.py` に
+最小 YAML / INI パーサを新設)。
+
+**ローカル読取で通せるのは allow だけで、エラー方向 (不一致 / 未ログイン / 未設定) は
+必ず CLI で取り直してから判断する。** 速くなるのは成功ケース (= 大多数) で、
+ローカル読取を誤っても **deny を新造しない** — 誤読のコストは「CLI を 1 回呼ぶ」
+だけに留まり、deny 文面と判定は従来どおり CLI の出力から作られる。
+
+env で値が上書きされうる場合は**エミュレートせず CLI に委ねる**
+(gh: `GH_TOKEN` 等のトークン env / `GH_HOST`。gcloud: `CLOUDSDK_CONFIG` と
+`CLOUDSDK_ACTIVE_CONFIG_NAME` 以外の `CLOUDSDK_*` / `GOOGLE_CLOUD_PROJECT` /
+`GCLOUD_PROJECT` / `GOOGLE_CLOUD_QUOTA_PROJECT`)。優先順位を推測で実装して
+取り違えた値で allow するより、遅くても gcloud / gh 自身に決めさせる方が安全。
+設定ファイルが「想定の形」でないときも同じく CLI に落ちる。
+
+**`HOME` が hook プロセスと違うときも CLI に委ねる** (両 service)。`HOME` は
+gh / gcloud のどちらも設定ディレクトリ解決に使うため、`HOME=/other gh pr create`
+の形では実行される CLI が別の設定ファイルを読む。hook 側のファイルで判断すると
+**違うアカウントで allow しうる** (ローカル読取の導入前は検証 subprocess にも
+同じ env を渡していたので不一致 deny だった) ため、bail 条件に加えた
+(マージ前レビューの指摘)。
+
+`aws` (sts 呼出が必須) / `firebase` / `kubectl` は従来どおり。cache の TTL
+(30 秒) も変えていない — 延長は「hook の外で起きた切替を見逃す窓」を広げるため、
+ローカル読取で 1 回あたりのコストが下がった今は必要性も薄い。
+
+残る挙動差: `hosts.yml` のアクティブアカウントの**トークンが失効している**場合、
+従来は `gh auth status` の失敗で deny だったものが allow になる (README 既知の
+制限に追記)。失効トークンでは write 自体が通らないため、別アカウントでの
+書き込みにはならない (実行した `gh` が認証エラーで失敗する)。
+
+### 2. 検証を止める / 弱める escape hatch
+
+従来、deny を一時的に止める手段は `/plugin disable` か `accounts.local.json` の
+書き換えしかなく、後者は「builder 経由でしか触らない」運用と衝突していた。
+user scope で install した直後は設定を置いていない**全プロジェクト**で
+`gh` / `aws` の deny が始まるため、離脱の直接要因になっていた。
+
+- **検証モード** (`core/mode.py`): `enforce` (既定) / `warn` (通知のみ) /
+  `off` (検証しない)。指定は環境変数 `VERIFY_CLOUD_ACCOUNT_MODE` か
+  `accounts.local.json` の予約キー `"$mode"` で、**env が優先**
+  (ファイルを書き換えずに外せることが escape hatch の要件)
+- **グローバル既定**: プロジェクト側 (3-tier + 親遡及) で何も見つからないときだけ
+  `~/.claude/verify-cloud-account/accounts.local.json` を読む。`"$mode": "warn"` を
+  ここに書けば **`accounts.local.json` を持たないプロジェクト**の既定にできる
+  (自前の設定があるプロジェクトはこのファイルを読まないので、そちらは
+  `VERIFY_CLOUD_ACCOUNT_MODE` かそのプロジェクトの `"$mode"` を使う)
+- deny 文面の末尾に mode の案内を 1 行添える。deny を消したい相手に
+  `set --from-cli --commit` を勧めると「間違ったアカウントを正解として焼き付ける」
+  使い方を誘発するため、**期待値に触らない出口**を先に見せる
+
+判定表は変えていない: 何を問題とみなすかは mode に依らず同じで、変わるのは
+「止めるか / 伝えるだけか / 見ないか」だけ。**既定 (env も `"$mode"` も無い) の
+挙動は従来と完全に同じ**。不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は
+enforce に倒し (fail-closed)、その旨を文面に添える (黙って戻すと「off にしたのに
+deny される」の原因が分からない)。
+
+細部の判断:
+
+- `off` の early return は**アカウント切替コマンドによる cache 破棄より後**に置く。
+  前に出すと off の間の切替が cache に残り、enforce へ戻した直後に古い成功で通る
+- グローバル既定は**固定パスの専用経路**で、親遡及は従来どおり `$HOME` を越えない
+  (遡及で上らせると「たまたま `$HOME` 配下にあるプロジェクトだけが継承する」
+  位置依存の挙動に戻る)。認めるのは現行パスのみで、
+  `~/.claude/accounts.local.json` / `~/.claude/accounts.json` (旧パス) は読まない
+  — 無関係な `~/.claude/accounts.json` の継承は v0.12.0 で塞いだ不具合そのもの
+- 同一階層の tier 競合 (fail-closed deny) はグローバル既定で救済しない
+- **builder はグローバル既定へ落ちない**。プロジェクト設定を作るつもりの編集が、
+  利用者の全プロジェクトに効くファイルを書き換えないようにするため。この非対称
+  (dispatcher は落ちる / builder は落ちない) を黙っていると、v0.12.0 で塞いだ
+  shadowing が 1 段上で再発する形になるため、**builder 側で必ず開示する**:
+  新規作成になるときは「グローバル既定 `<path>` の N キーは継承されません」と
+  警告し、`show` は「プロジェクトに無い」ときグローバル既定の存在と「hook は
+  このファイルで検証します」を出す (キー単位マージはしない)
+- `"$mode"` は**ファイルを読めたときだけ**効く。未設定 / JSON 破損 / 複数パス競合の
+  deny はファイルを読む前に確定するため、そこを弱められるのは
+  `VERIFY_CLOUD_ACCOUNT_MODE` のみ。また `off` で検証しない場合でも env の不正値は
+  `additionalContext` で通知する (`VERIFY_CLOUD_ACCOUNT_MODE=of` のような綴り間違いが
+  黙って無視されると、env が効いていると誤解したままになる)
+- `"$mode"` は **builder が値を書かない唯一のキー**。`init` / `set` / `remove` は
+  既存値を壊さず保持するが、設定・変更は手編集 (または env) で行う
+- `accounts-show` は `"$mode"` を `[mode]` として表示する (service ではないので
+  CLI 突合の対象外。値も機密ではないのでそのまま出す)
+
+### テスト
+
+- 全 suite 967 件 green (0.12.0 時点 858 件から +109)
+- 新規: `tests/test_cli_config.py` (最小 YAML / INI パーサ)、
+  `tests/test_mode.py` (モード解決)、`tests/test_testutil.py` (隔離そのものの
+  負テスト)、services / dispatcher / paths / builder への追加
+- **実環境からの隔離**を追加した (`tests/_testutil.start_isolation()`)。現在値の
+  取得元が `$HOME` / `~/.config` に広がったため、隔離しないと開発者の
+  `hosts.yml` / グローバル既定 / `VERIFY_CLOUD_ACCOUNT_MODE` がテストの verdict を
+  変える (実際に、開発者のアクティブアカウントが fixture の期待値と一致して
+  「CLI を呼ばずに allow」になり、CLI を mock したテストが壊れた)。
+  隔離の env 除去には**負テストを置いた** — 現在のマシンに `GH_TOKEN` 等が無いと
+  除去を消しても全 suite が green のまま通る (マージ前レビューの mutation で
+  survive を確認した唯一の箇所だった)
+- マージ前レビューで足したテストは、いずれも**対応する実装行を壊す mutation で
+  先に落ちる**ことを使い捨てコピーで確認した (HOME bail の除去 ×2 / 隔離の env
+  除去 / 隔離 env からの `HOME` 削除 / shadowing 警告の除去 / `show` の開示の除去 /
+  `off` の note 破棄 / グローバル既定をプロジェクト側にも効かせる改変 /
+  ローカル読取を CLI より優先させる改変 の 9 種)。負テスト自身が
+  assertion FAILURE として落ちるよう `assertIsNotNone(err)` を先に置いた
+  (従来は `TypeError` の ERROR で落ち、「走っていない」と読み違えやすかった)
+
 ## 0.12.0
 
 内部バックログの精査分 5 件。**判定表 (allow/deny/warn) に 2 つの変更がある** —

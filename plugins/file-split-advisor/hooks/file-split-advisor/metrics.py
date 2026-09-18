@@ -487,6 +487,33 @@ _CATEGORY_PATTERNS = _compile_category_patterns()
 
 
 @dataclass(frozen=True)
+class TopLevelDef:
+    """トップレベル定義 1 件の名前と占有行数。
+
+    ``span`` の意味は言語で異なる (0.5.0):
+
+    - Python: AST の ``end_lineno - lineno + 1`` (正確な行数)
+    - それ以外: **次のトップレベル定義の開始行までの距離** (概算)。パーサを
+      持たないため、定義の間にある空行・モジュールレベルの文も含まれる
+    """
+
+    name: str
+    start_line: int
+    span: int
+
+
+# メモに載せる「大きい定義」の候補として保持する上限。表示側 (message.py) は
+# さらに絞る。20,000 行 (source.load_text の安全弁) のファイルでも定義数が
+# 上限を超えることは実質ないが、生成物のような病的な入力で dataclass が
+# 肥大化しないための歯止め。
+TOP_LEVEL_DEF_CAP = 50
+
+# import カテゴリごとに保持する「一致した語」の上限 (メモの ``import クラスタ``
+# 表示用)。カテゴリ判定自体 (``import_category_count``) には影響しない。
+IMPORT_MODULE_SAMPLE_CAP = 6
+
+
+@dataclass(frozen=True)
 class Metrics:
     line_count: int
     def_count: int
@@ -494,6 +521,13 @@ class Metrics:
     import_categories: tuple[str, ...]
     control_flow_density: float
     vague_filename: bool
+    # 0.5.0 追加。**判定 (judge.py) には一切使わない** — メモに分割候補の境界を
+    # 示すための表示専用フィールド。既定値を持たせているのは、既存の呼び出し
+    # 側・テストが位置引数/キーワードで組み立てた Metrics をそのまま使える
+    # ようにするため。
+    top_level_defs: tuple[TopLevelDef, ...] = ()
+    # (カテゴリ名, 一致した語のタプル) の列。``import_categories`` と同じ順序。
+    import_modules: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def count_defs_python(text: str) -> int | None:
@@ -518,6 +552,84 @@ def count_defs_python(text: str) -> int | None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             count += 1
     return count
+
+
+def top_level_defs_python(text: str) -> tuple[TopLevelDef, ...] | None:
+    """AST のモジュール直下の定義を ``(name, start_line, span)`` で返す。
+
+    ``count_defs_python`` と違い **再帰しない** — メモに示したいのは「どの
+    定義群を切り出す候補があるか」であり、ネストした内部関数は分割単位に
+    ならないため。構文解析できない場合は ``None`` (呼び出し側が正規表現に
+    フォールバックする)。
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, RecursionError, ValueError):
+        return None
+    found: list[TopLevelDef] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        end = getattr(node, "end_lineno", None) or node.lineno
+        found.append(
+            TopLevelDef(name=node.name, start_line=node.lineno, span=end - node.lineno + 1)
+        )
+        if len(found) >= TOP_LEVEL_DEF_CAP:
+            break
+    return tuple(found)
+
+
+# ``_DEF_KEYWORDS_RE`` / ``_ARROW_DEF_RE`` に一致した行から定義名を取り出す。
+# キーワード直後の識別子 (``class UserService`` / ``fn parse_line``) と、
+# 代入形の左辺 (``const buildIndex = (x) => …``) の 2 形のみ。名前が取れない
+# 行 (無名関数式等) は候補にしない。
+_DEF_NAME_RE = re.compile(
+    r"\b(?:def|class|function|func|fn|fun|interface|struct|enum|trait|impl|type|object)"
+    r"\s+([A-Za-z_$][\w$]*)"
+)
+_ASSIGNED_DEF_NAME_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)")
+# 定義キーワードの直後に来るが名前ではない語。``export default class extends X``
+# のような無名定義で ``extends`` を名前として拾わないための除外集合
+# (マージ前レビューの指摘)。
+_NOT_A_DEF_NAME = frozenset(
+    {"extends", "implements", "default", "for", "in", "of", "static", "new"}
+)
+
+
+def _top_level_defs_generic(lines: list[str]) -> tuple[TopLevelDef, ...]:
+    """インデントの無い定義行から ``(name, start_line, span)`` を近似する。
+
+    ``span`` は**次のトップレベル定義の開始行までの距離**で、最後の定義は
+    ファイル末尾まで。パーサを持たない言語で「大きい定義」を並べるための
+    概算であり、定義の間にあるモジュールレベルの文も含まれる。
+    """
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        if not line[:1].strip():
+            # 行頭が空白 (ネストした定義) か空行。トップレベルのみ見る。
+            continue
+        if not (_DEF_KEYWORDS_RE.match(line) or _ARROW_DEF_RE.match(line)):
+            continue
+        match = _DEF_NAME_RE.search(line) or _ASSIGNED_DEF_NAME_RE.search(line)
+        if match is None or match.group(1) in _NOT_A_DEF_NAME:
+            continue
+        starts.append((match.group(1), index + 1))
+        # 上限より 1 件多く集める: 打ち切った最後の定義の ``span`` を「次の定義
+        # まで」で出すには、その次の開始行が必要になる (1 件多く見ないと最後の
+        # 定義だけファイル末尾までの長さになり、実際より大きく見える)。
+        if len(starts) > TOP_LEVEL_DEF_CAP:
+            break
+
+    total = len(lines)
+    found: list[TopLevelDef] = []
+    for position, (name, start_line) in enumerate(starts[:TOP_LEVEL_DEF_CAP]):
+        next_start = starts[position + 1][1] if position + 1 < len(starts) else total + 1
+        found.append(
+            TopLevelDef(name=name, start_line=start_line, span=max(1, next_start - start_line))
+        )
+    return tuple(found)
 
 
 def _count_defs_generic(lines: list[str]) -> int:
@@ -591,21 +703,56 @@ def _iter_import_lines(lines: list[str], language: str):
                 block_remaining = _IMPORT_BLOCK_MAX_LINES
 
 
-def _count_import_categories(
+def _clean_module_token(token: str) -> str:
+    """カテゴリ辞書に一致した字面を表示用に整える (引用符・行末記号を落とす)。
+
+    辞書には ``'fs'`` / ``"fs"`` のように引用符込みのキーワードがあるため。
+    """
+    return token.strip("'\"`,;()[]{}<>").strip()
+
+
+def _collect_import_categories(
     lines: list[str], language: str
-) -> tuple[int, tuple[str, ...]]:
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """import 行を走査し ``(カテゴリ名, 一致した語のタプル)`` を順序付きで返す。
+
+    一致した語は ``IMPORT_CATEGORY_KEYWORDS`` の字面 (``requests`` /
+    ``pathlib`` 等) をそのまま使う。多くは実際のモジュール名であり、メモの
+    ``import クラスタ`` 表示で「どの依存がそのカテゴリを立てたか」を示すのに
+    使う (0.5.0)。精密な import resolver ではないため、``http`` のような
+    モジュール名でない語が混じることもある。
+
+    カテゴリの集合と順序は 0.4.0 までと同一 — ``import_category_count`` /
+    ``import_categories`` の値は変わらない (シグナル判定への影響なし)。
+    """
     import_lines = list(_iter_import_lines(lines, language))
     if not import_lines:
-        return 0, ()
+        return ()
+    # カテゴリの有無 (``matched``) は語の採取 (``samples``) と**独立に**記録する。
+    # 表示用の整形 (``_clean_module_token``) の結果に関わらずカテゴリ集合が
+    # 0.4.0 までと同一になることを保証するため — ここが変わると
+    # ``import_category_count`` 経由で emit 判定が動いてしまう。
     matched: set[str] = set()
+    samples: dict[str, list[str]] = {}
     for line in import_lines:
         for category, pattern in _CATEGORY_PATTERNS.items():
-            if category in matched:
+            collected = samples.setdefault(category, [])
+            if category in matched and len(collected) >= IMPORT_MODULE_SAMPLE_CAP:
                 continue
-            if pattern.search(line):
+            for match in pattern.finditer(line):
                 matched.add(category)
-    ordered = tuple(category for category in IMPORT_CATEGORY_KEYWORDS if category in matched)
-    return len(ordered), ordered
+                token = _clean_module_token(match.group())
+                lowered = token.lower()
+                if not token or any(lowered == seen.lower() for seen in collected):
+                    continue
+                collected.append(token)
+                if len(collected) >= IMPORT_MODULE_SAMPLE_CAP:
+                    break
+    return tuple(
+        (category, tuple(samples.get(category, ())))
+        for category in IMPORT_CATEGORY_KEYWORDS
+        if category in matched
+    )
 
 
 def _control_flow_density(lines: list[str], language: str, text: str = "") -> float:
@@ -658,19 +805,25 @@ def compute(loaded, language: str, path: Path) -> Metrics:
             vague_filename=is_vague_filename(path),
         )
 
+    top_level: tuple[TopLevelDef, ...] | None = None
     if language == "python":
         exact = count_defs_python(loaded.text)
         def_count = exact if exact is not None else _count_defs_generic(lines)
+        top_level = top_level_defs_python(loaded.text)
     else:
         def_count = _count_defs_generic(lines)
+    if top_level is None:
+        top_level = _top_level_defs_generic(lines)
 
-    category_count, category_names = _count_import_categories(lines, language)
+    collected_imports = _collect_import_categories(lines, language)
 
     return Metrics(
         line_count=line_count,
         def_count=def_count,
-        import_category_count=category_count,
-        import_categories=category_names,
+        import_category_count=len(collected_imports),
+        import_categories=tuple(category for category, _ in collected_imports),
         control_flow_density=_control_flow_density(lines, language, loaded.text),
         vague_filename=is_vague_filename(path),
+        top_level_defs=top_level,
+        import_modules=collected_imports,
     )
