@@ -8,6 +8,8 @@ Bash コマンド実行の直前に、クラウド CLI
 `kubectl apply` 等を実行する事故を防ぐ。
 
 不一致なら `permissionDecision: deny` で停止し、切り替えコマンドを提示する。
+**止めるのは書込系だけ**で、リモートを読むだけのコマンド (`gh pr list` /
+`aws s3 ls` 等) は警告を添えて通す ([検証の 3 tier](#検証の-3-tier--v0140))。
 
 ## インストール
 
@@ -113,7 +115,7 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 
 | mode | 挙動 |
 |---|---|
-| `enforce` (既定) | 従来どおり。不一致・キー未記載・未設定・パス競合はすべて deny |
+| `enforce` (既定) | 不一致・キー未記載・未設定・パス競合を deny (リモート read だけの QUERY tier は警告して通す。[検証の 3 tier](#検証の-3-tier--v0140)) |
 | `warn` | 検証は走らせ、deny 相当の内容を `additionalContext` (Claude への通知) で伝えるだけ |
 | `off` | 検証そのものを行わない (CLI も起動しない) |
 
@@ -230,6 +232,68 @@ worktree などで親から継承している場合は親側のファイルが�
 
 ## 対象コマンドと検証スキップ
 
+### 検証の 3 tier — v0.14.0
+
+セグメントは 3 tier に分かれ、不一致 (および期待値の未設定) のときの扱いが変わる。
+
+| tier | 何が入るか | 不一致・未設定のとき |
+|---|---|---|
+| **READONLY** | ローカルの状態確認 / 情報系 / 認証取得系 (`gh auth status` / `firebase use` / `aws sso login` / `--version`) | 検証しない (常に通す) |
+| **QUERY** | リモートを**読むだけ** (`gh pr list` / `gh api` の GET / `aws s3 ls` / `aws ec2 describe-*` / `gcloud ... list` / `kubectl get` / `firebase projects:list`) | **通す** + `additionalContext` で「現在=X 期待=Y」を警告 |
+| **WRITE** (既定) | それ以外 (`gh pr create` / `firebase deploy` / `aws s3 rm` / `kubectl apply` / `gcloud run deploy`) | **deny** |
+
+さらに **認証情報を出力するコマンド / オプション (DISCLOSING)** は、READONLY /
+QUERY に当たっていても取り消して WRITE として扱う (= 不一致なら deny)。
+**この表が DISCLOSING の正本**で、「リモートの機密そのものを返す read」も含む:
+
+| サービス | DISCLOSING な形 |
+|---|---|
+| GitHub | `gh auth status --show-token` (`-t`) / `gh auth list --show-token` / `gh auth token` |
+| Kubernetes | `kubectl config view --raw` / `--flatten` / `kubectl cluster-info dump` / `kubectl get secret(s)` にオプション (`-o` / `--output` / `--template`) を付けた形 |
+| AWS | `aws configure get aws_secret_access_key` (`aws_session_token`) / `aws configure export-credentials` / `aws sts get-session-token` / `get-federation-token` / `aws secretsmanager get-secret-value` (`batch-get-secret-value`) / `aws ssm get-parameter*` の `--with-decryption` 付き / `aws kms decrypt` / `aws ecr get-login-password` (`ecr-public` も) / `aws eks get-token` / `aws codeartifact get-authorization-token` |
+| GCP | `gcloud auth print-access-token` / `print-identity-token` / `gcloud auth application-default print-access-token` |
+| Firebase | `firebase login:ci` (CI 用トークンを出力する) |
+
+- 一致していれば通るので、開示コマンドが恒久的に使えなくなるわけではない
+  (「**期待したアカウントで**認証情報を見る」ことだけが許される)
+- 値の真偽は見ない。`--show-token=false` のような明示 false も「書かれている」
+  として扱う (厳格側)
+- `kubectl config view --flatten` は `--raw` 無しでも token / `client-key-data` を
+  平文で出す (kubectl v1.34.1 で実測。オプション無し / `--minify` だけなら
+  `REDACTED` / `DATA+OMITTED`)。`--flatten` は「そのまま認証に使える kubeconfig を
+  作る」オプションなので、`--raw` と同格に扱う
+- Secret の `data` は base64 エンコードだけで実質平文なので、`kubectl get secret -o
+  yaml` は「リモートの secret を出力する read」として扱う。名前一覧
+  (`kubectl get secrets`) と `kubectl describe secret` は値を出さないので QUERY のまま
+
+**READONLY に載っている形でも、想定していないオプションが付いていたら QUERY に
+降格**する (= 検証は走るが、不一致でも止めない)。例: `gh auth status --json` /
+`aws configure import --csv ...`。「コマンド名が安全」ではなくオプションまで含めて
+安全と言える形だけを素通しする設計で、想定外のオプションは **deny せず警告に倒す**。
+
+#### 従来どおり deny させたいとき (`"$readonly"`)
+
+QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
+
+```json
+{
+  "$readonly": "deny",
+  "github": "your-github-user"
+}
+```
+
+- 既定は `"warn"` (通して警告)。`"deny"` で v0.13.0 までの挙動 (QUERY も WRITE 扱い)
+- `"$mode"` と同じ予約キーで、**builder は値を書かない** (エディタで手編集。現在値は
+  `/verify-cloud-account:accounts-show` が表示する)
+- `"$mode"` と同じく **`accounts.local.json` を読めたときだけ効く**。
+  [グローバル既定](#グローバル既定-v0130) に書いた場合は、自前の
+  `accounts.local.json` を持たないプロジェクトにだけ効く
+- 不正な値 (`"yes"` 等) は **`deny` として扱い** (fail-closed)、その旨を文面に添える
+
+**設定が壊れている / 曖昧なときは tier に関係なく deny** のまま: 複数パスに
+`accounts.local.json` がある (競合) / JSON が壊れている / 期待値の型が不正。
+「どの設定が効くか決まらない」状態では読むだけでも判定の土台が無いため。
+
 ### 発火するコマンド
 
 コマンドを**セグメントに分解して先頭が対象 CLI になる形**を照合する。以下の
@@ -299,10 +363,14 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
 
 「アカウント設定のための状態確認」でデッドロックしないよう、以下は素通し:
 
-- `gh auth status` / `gh auth list`
+**いずれも [DISCLOSING](#検証の-3-tier--v0140) なオプション / 形が付いた場合は
+素通しの対象外**になり、想定外のオプションが付いた場合は QUERY に降格する (v0.14.0)。
+
+- `gh auth status` / `gh auth list` (`--show-token` / `-t` 付きは除く)
 - `firebase use` (引数なし)
-- `firebase login` / `firebase logout` (`login:ci` / `login:add` / `login:use` 等の
-  サブコマンド含む) — project を変更しない認証操作。未ログインだと `firebase use`
+- `firebase login` / `firebase logout` (`login:add` / `login:use` 等の
+  サブコマンド含む。**CI トークンを出力する `login:ci` は除く**) — project を
+  変更しない認証操作。未ログインだと `firebase use`
   が認証必須で失敗して現在値を取れず、`firebase login` 自体が deny されるデッド
   ロックになるのを防ぐ (v0.7.3)
 - **認証取得系** (v0.8.0): `gh auth logout` / `setup-git`
@@ -331,10 +399,12 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
   remediation loop になっていた。これらは同時に「アカウント状態を変えうる
   コマンド」として成功 cache を破棄するため、直後の write は必ず再検証される
   (後述)
-- `aws sts get-caller-identity`
+- `aws sts get-caller-identity` / `aws configure get <非機密キー>`
+  (`aws configure get aws_secret_access_key` / `aws_session_token` は除く)
 - `gcloud auth list` / `gcloud config get-value project` / `... account`
-- `kubectl config current-context` / `... get-contexts` / `... view` /
-  `... get-clusters` / `... get-users` / `kubectl cluster-info`
+- `kubectl config current-context` / `... get-contexts` / `... view`
+  (`--raw` 付きは除く) / `... get-clusters` / `... get-users` /
+  `kubectl cluster-info` (`cluster-info dump` は除く)
 - **情報系コマンド** (各 CLI の `--version` / `--help` / `version` / `help`) —
   アカウント検証不要。診断で打つ `command aws --version` 等が誤って検証対象に
   なり deny されるのを防ぐ (v0.7.0)
@@ -796,6 +866,27 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 ## 既知の制限
 
+- **QUERY tier の「読むだけ」はコマンド形で判定している** (v0.14.0)。`aws \S+
+  (describe|list|get)-*` をまとめて QUERY にしているため、表に無い「リモートの
+  機密を返す read」があれば期待外アカウントでも警告のみになる。既知の形は
+  [DISCLOSING の表](#検証の-3-tier--v0140)に載せて不一致 deny を維持している。
+  それ以外で止めたいプロジェクトは
+  [`"$readonly": "deny"`](#従来どおり-deny-させたいとき-readonly) を設定する
+- **`kubectl get` のリソース指定を畳んだ形は Secret として検出できない**
+  (v0.14.0)。`kubectl get cm,secret -o yaml` のようなカンマ結合と
+  `kubectl get all -o yaml` は DISCLOSING に当たらず QUERY (警告のみ) になる。
+  Secret 単体を指定する形 (`secret` / `secrets` / `secret/<name>`、オプションの
+  前後どちらでも) は検出する
+- **gcloud の QUERY はサブコマンド位置の書込動詞で打ち切る** (v0.14.0)。
+  `gcloud functions deploy list` のように「`list` という名前のリソースへの書込」を
+  リモート read と誤読しないための停止条件で、代償として group 名が停止語と同じ
+  綴りの系統 (`gcloud deploy ...` = Cloud Deploy) は read でも QUERY にならず
+  WRITE 扱いになる (v0.13.0 までと同じ扱いがこの系統だけ残る = 緩和が届かない
+  だけで、新たな deny は生えない)
+- **未知のオプションは「安全と証明できない」側に倒すので、判定は CLI の
+  オプション表に追随しない**。`gh api` は安全なオプションの allow-list で
+  読み取りを証明するため、新しいオプションが増えると (実際は読み取りでも)
+  WRITE として検証される。誤 deny 側の失敗なので、気付いたら報告してほしい
 - `gh auth status` / `firebase use` / `aws sts` / `gcloud config` /
   `kubectl config` の**出力フォーマット**に依存している。CLI 本体の
   major update で壊れる可能性あり。`gh auth status` は **gh 2.40 以上を推奨**

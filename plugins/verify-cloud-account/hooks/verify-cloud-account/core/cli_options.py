@@ -12,9 +12,10 @@ option を剥がして `aws sso login` に正規化する (元の形も併せて
 `--help` / `--version` は含めない (剥がすと `aws --version` が `aws` になり
 readonly 判定から外れるため、元の形で判定させる)。
 
-このモジュールには**用途の違う 2 つの走査**がある。option トークンの分解規則
+このモジュールには**用途の違う 3 つの走査**がある。option トークンの分解規則
 (`--key=value` / 分離形 / 短縮連結 `-Pprod` / `--` 終端) は
-`_option_name_value` に一本化してあり、差は「どこで走査をやめるか」だけ:
+`_option_name_value` に一本化してあり、差は「どこで走査をやめるか」と
+「何を返すか」だけ:
 
 - `strip_leading_options`: CLI 名直後の option 列だけを見て**正規化**する。
   未知の option は値を取るか判らないので**そこで打ち切り候補を変更しない**
@@ -23,6 +24,8 @@ readonly 判定から外れるため、元の形で判定させる)。
   (`--profile` / `--project` / `--context` 等) を**行全体**から拾う。
   これらはサブコマンドの後ろにも書けるため (`aws s3 ls --profile prod`)、
   未知の `-x` は bool と見なして**走査を続ける**必要がある
+- `find_option_names`: 行全体に現れた option の**名前だけ**を集合で返す
+  (`core/tiers.py` の tier 判定用。値は見ない)
 """
 from __future__ import annotations
 
@@ -150,6 +153,59 @@ def strip_leading_options(
     if i == 1:
         return candidate, {}
     return shlex.join([tokens[0], *tokens[i:]]), opts
+
+
+def find_option_names(
+    candidate: str,
+    with_value: Collection[str],
+) -> frozenset[str]:
+    """候補の**全体**に現れた option の名前を集合で返す (値は返さない)。
+
+    tier 判定 (`core/tiers.py`) の材料。使い道は 2 つあり、どちらも
+    「option 名の集合」だけで決まる:
+
+    - **開示 option の検出**: `gh auth status --show-token` / `kubectl config view
+      --raw` のように、コマンド形は readonly でも option で認証情報リーダーに化ける形
+    - **未宣言 option の検出**: READONLY エントリが宣言した安全な option 集合に無い
+      名前が 1 つでもあれば「安全と証明できていない」と扱う
+
+    走査規則は `find_context_options` と同じ (未知 option は bool と見なして走査を
+    続ける / `with_value` の option は分離形なら値 token を消費する / `--` 以降は
+    見ない / 形式の分解は `_option_name_value`)。加えて 1 点だけ足す:
+
+    - **短縮の連結形 (`-at`) は 1 文字ずつにも展開する。** pflag / cobra は boolean
+      shorthand の連結を許すため (`gh auth status -at` = `--active --show-token`)、
+      連結形を 1 つの名前として扱うと開示 option を見落とす。値を取る短縮 option
+      (`with_value` にあるもの) は `_option_name_value` が先に (名前, 値) へ分解する
+      ので展開しない。展開の誤りは**厳格側** (未宣言の値付き連結形を過剰に option と
+      見なす = 検証が走る) に倒れる
+
+    値は解釈しない。`--show-token=false` のような明示 false も「その option が
+    書かれている」として名前を返す — 真偽で緩める実装にすると、
+    `--skip-ssh-key=false` で readonly をすり抜けた穴を逆向きに作り直すことになる。
+    """
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        tokens = candidate.split()
+    names: set[str] = set()
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if tok == "--":
+            break
+        if not tok.startswith("-") or tok == "-":
+            continue
+        name, _embedded, has_value = _option_name_value(tok, with_value)
+        names.add(name)
+        if not has_value and not tok.startswith("--") and len(tok) > 2:
+            names.update(f"-{ch}" for ch in tok[1:])
+        if name in with_value and not has_value:
+            if i >= len(tokens):
+                break
+            i += 1
+    return frozenset(names)
 
 
 def find_context_options(

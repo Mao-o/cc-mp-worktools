@@ -1116,6 +1116,9 @@ class TestAuthCommandPatterns(unittest.TestCase):
             # `init` の \b が別コマンドを巻き込まない
             (gcloud, "gcloud beta interactive", False),
             (firebase, "firebase login", True),
+            # **regex の層**では login:ci も READONLY に当たる。tier 判定では
+            # DISCLOSING が取り消して検証対象になる (tests/test_tiers.py が固定)。
+            # この行は「READONLY regex の形」を見るテストなので True のまま。
             (firebase, "firebase login:ci", True),
             (firebase, "firebase logout", True),
             (firebase, "firebase-tools login", True),
@@ -1213,6 +1216,81 @@ class TestGithubLoginKeyless(unittest.TestCase):
     def test_unbalanced_quote_falls_back_to_split(self):
         self.assertTrue(github.is_readonly('gh auth login --skip-ssh-key "x'))
         self.assertFalse(github.is_readonly('gh auth login --skip-ssh-key=false "x'))
+
+
+class TestGithubApiIsQuery(unittest.TestCase):
+    """github.is_query: `gh api` が読み取りだけと**証明できる**形か。
+
+    QUERY は判定表を緩める唯一の方向なので、危険な option を列挙する denylist では
+    なく **安全な option の allow-list** で証明する。denylist だと gh に option が
+    増えるたび黙って穴が開く。
+    """
+
+    def test_read_only_forms(self):
+        for cmd in (
+            "gh api repos/o/r",
+            "gh api -X GET repos/o/r",
+            "gh api --method GET repos/o/r",
+            "gh api --method=head repos/o/r",
+            "gh api repos/o/r --jq .name",
+            "gh api repos/o/r -q .name",
+            "gh api repos/o/r -t {{.name}}",
+            "gh api repos/o/r --paginate --silent --include",
+            "gh api repos/o/r -H Accept:application/vnd.github+json",
+            "gh api --hostname ghe.example.com repos/o/r",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(github.is_query(cmd))
+
+    def test_body_options_are_write(self):
+        for cmd in (
+            "gh api repos/o/r -f title=hi",
+            "gh api repos/o/r -F body=@b.txt",
+            "gh api repos/o/r --field a=b",
+            "gh api repos/o/r --raw-field a=b",
+            "gh api repos/o/r --input body.json",
+            "gh api graphql -f query=@q.graphql",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_query(cmd))
+
+    def test_non_read_methods_are_write(self):
+        for method in ("POST", "post", "PUT", "PATCH", "DELETE"):
+            for cmd in (f"gh api -X {method} repos/o/r", f"gh api --method={method} r"):
+                with self.subTest(cmd=cmd):
+                    self.assertFalse(github.is_query(cmd))
+
+    def test_unknown_or_ambiguous_options_are_not_proven(self):
+        for cmd in (
+            # 未知 option は将来の write option かもしれない
+            "gh api repos/o/r --brand-new-flag",
+            # 短縮の連結形は値と flag の切り分けが曖昧
+            "gh api -Xpost repos/o/r",
+            "gh api -iq repos/o/r",
+            # 値が欠けた option
+            "gh api repos/o/r -X",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_query(cmd))
+
+    def test_body_options_are_not_in_the_safe_allow_list(self):
+        """2 層 (allow-list と body option の除外) が矛盾しないことの機械チェック。
+
+        未知 option を弾く allow-list があるので body option の明示除外は**二重の
+        防御**で、外しても現在の判定は変わらない (mutation では検出されない)。
+        意味を持つのは「うっかり `-F` を safe 側に足した」ときだけなので、
+        その矛盾をここで禁じておく。
+        """
+        safe = github._API_SAFE_OPTIONS_WITH_VALUE | github._API_SAFE_FLAGS
+        self.assertEqual(safe & github._API_BODY_OPTIONS, frozenset())
+
+    def test_other_commands_are_not_api(self):
+        for cmd in ("gh pr create", "gh apixyz repos/o/r", "gh auth status"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(github.is_query(cmd))
+
+    def test_unbalanced_quote_is_not_proven(self):
+        self.assertFalse(github.is_query('gh api repos/o/r --jq "x'))
 
 
 class TestGcloud(unittest.TestCase):

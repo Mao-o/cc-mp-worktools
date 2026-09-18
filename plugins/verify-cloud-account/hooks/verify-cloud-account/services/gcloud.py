@@ -47,6 +47,44 @@ READONLY = [
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gcloud\s+(--version|--help|version|help)\b",
 ]
+# 認証情報を出力する形。READONLY / QUERY を取り消して WRITE 扱いにする。
+# どちらも READONLY には載っていない (= 現状も検証対象) が、**形そのものが開示**で
+# あることを宣言側に残す。READONLY の carve-out (`application-default` の
+# login / revoke / set-quota-project だけを許す negative list) を将来広げたときに
+# 素通しへ戻らないようにするため。
+DISCLOSING = [
+    (rf"^gcloud\s+{_TRACK}auth\s+print-(access|identity)-token(?=\s|$)", frozenset()),
+    (
+        rf"^gcloud\s+{_TRACK}auth\s+application-default\s+print-access-token(?=\s|$)",
+        frozenset(),
+    ),
+]
+# group token (`compute instances` 等) の繰り返しを止める語。**mutating verb を
+# 跨がせない**ための停止条件で、denylist ではない (未知の verb は従来どおり跨げるので
+# 誤 deny 側に穴を開けない)。跨がせると末尾の operand が read verb に見える形
+# —— `gcloud functions deploy list` (`list` という名前の function を deploy) や
+# `gcloud config set project list` —— で **write が QUERY に落ちて素通しする**。
+# `run` は入れない: `gcloud run services list` の `run` は group 名で、停止語に
+# すると正しい read が WRITE になる (`gcloud run deploy list` は 2 語目の `deploy`
+# で止まるので、`run` を入れなくても write 側に残る)。
+_MUTATING_SUB = (
+    r"create|delete|remove|update|patch|deploy|add|set|unset|import|export|revoke|"
+    r"disable|enable|reset|restart|stop|start|move|clone|attach|detach|abandon|"
+    r"destroy|undelete|replace|rollback|resize|drain|apply|call|publish|copy|cp|mv|"
+    r"rm|sign|activate|promote"
+)
+# リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
+# **サブコマンドの位置**にある `list` / `describe` / `get-iam-policy` だけを見る
+# (`gcloud ... --format=list` のような option の値や引用符の中に現れた同じ語を
+# 拾わないため)。CLI 名直後の global option は dispatcher が剥がした形で照合される。
+#
+# 既知の代償: group 名が停止語と同じ綴りの系統 (`gcloud deploy ...` = Cloud Deploy)
+# は read でも QUERY にならず WRITE 扱いになる。0.13.0 までと同じ扱いが 1 系統だけ
+# 残る形で、緩和が届かないだけなので誤 deny を新造しない (README の既知の制限)。
+QUERY = [
+    rf"^gcloud\s+{_TRACK}(?:(?!(?:{_MUTATING_SUB})(?=\s))[a-z][\w-]*\s+)*"
+    rf"(list|describe|get-iam-policy)(?=\s|$)",
+]
 # アクティブ project / account を変えうるコマンド。dispatcher が検出すると gcloud の
 # 成功 cache を破棄する。`configurations create` は既定で作成した configuration を
 # activate する。`init` は対話的に account / project を設定し直す。

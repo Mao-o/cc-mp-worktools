@@ -4,9 +4,38 @@
   1. services/<name>.py を作成し、以下を定義する:
      - PATTERNS: list[str]          コマンドマッチ用の正規表現
      - READONLY: list[str]          検証をスキップする読み取り専用コマンド
+                                    (tier = READONLY。ローカル / 情報系)
      - is_readonly(candidate) -> bool
                                     (任意) 正規表現で表せない readonly 判定
                                     (github: flag の実効 boolean を見る login 形)
+     - READONLY_SAFE_OPTIONS: dict[str, frozenset[str]]
+                                    (任意) READONLY の regex → 「その形で付いていても
+                                    安全」と言える option 名の集合。宣言した entry に
+                                    **宣言外の option** が付いていたら READONLY を
+                                    取り消して **QUERY に降格**する (deny ではなく
+                                    「検証は走らせる」= lenient 方針と整合)。
+                                    宣言の無い entry は従来どおり option 無審査。
+                                    キーは READONLY の要素と**同一の文字列**である
+                                    こと (名前付き定数にして 2 箇所に literal を
+                                    書かない。契約テストが一致を強制する)。
+                                    GLOBAL_OPTIONS_WITH_VALUE / GLOBAL_FLAGS /
+                                    CONTEXT_OPTIONS の名前は別途審査済みなので
+                                    宣言外として数えない (core/tiers.py)
+     - QUERY: list[str]             (任意) リモート read (資源を変更しない) の
+                                    正規表現。不一致でも deny せず
+                                    `additionalContext` の警告だけで通す (tier =
+                                    QUERY)。**判定表を緩める唯一の方向**なので、
+                                    「読むだけと証明できる形」だけを列挙する
+     - is_query(candidate) -> bool  (任意) 正規表現で表せない QUERY 判定
+                                    (github: option 次第で write になる `gh api`。
+                                    安全な option の allow-list で証明する)
+     - DISCLOSING: list[tuple[str, frozenset[str]]]
+                                    (任意) 認証情報を出力する (コマンド形 regex,
+                                    その形で開示に化ける option 名集合)。集合が空なら
+                                    **形そのものが開示** (`aws configure
+                                    export-credentials` 等)。一致すると READONLY /
+                                    QUERY を**取り消して WRITE 扱い**にする。
+                                    判定順は DISCLOSING → READONLY → QUERY → WRITE
      - STATE_CHANGING: list[str]    (任意) アカウント状態 (次のコマンドがどの
                                     アカウントで動くか) を変えうるコマンド。
                                     dispatcher が検出すると成功 cache を破棄し、

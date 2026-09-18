@@ -58,6 +58,21 @@ READONLY = [
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     rf"^{_CLI}\s+(--version|--help|version|help)\b",
 ]
+# 認証情報を出力する形。READONLY / QUERY を取り消して WRITE 扱いにする。
+# `login:ci` は CI 用の refresh token を stdout に出す (上の READONLY の
+# `(login|logout)(:\S+)?` に当たって素通ししていた)。**期待外アカウントの token を
+# 出しうる**ので検証対象に戻す。deny 文面が案内するのは `firebase login` (引数なし)
+# だけなので remediation loop にはならない。
+DISCLOSING = [
+    (rf"^{_CLI}\s+login:ci(?=\s|$)", frozenset()),
+]
+# リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
+# **`use` は入れない** — 引数なしの `firebase use` は既に READONLY で、引数付きの
+# `firebase use <alias>` はアクティブ project を切り替える STATE_CHANGING。
+# QUERY にすると「期待値以外への切替」が deny から warn + allow に緩むため。
+QUERY = [
+    rf"^{_CLI}\s+(projects:list|apps:list|functions:list|hosting:sites:list)(?=\s|$)",
+]
 # アクティブ project (configstore の activeProjects) や認証状態を変えうるコマンド。
 # dispatcher が検出すると firebase の成功 cache を破棄する。引数なしの `firebase use`
 # は表示のみ (READONLY) で対象外。`use --clear` / `--add` / `--unalias` は含む。

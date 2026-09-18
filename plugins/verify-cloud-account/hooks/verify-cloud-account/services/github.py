@@ -19,8 +19,12 @@ from core import budget, cli_config
 # `\b` だと `gh-ost --help` のようなハイフン付き別コマンドまで拾うため、
 # 空白または終端が続く形だけに限定する。
 PATTERNS = [r"^gh(?=\s|$)"]
+# option を審査する READONLY エントリは名前付き定数にする (READONLY_SAFE_OPTIONS /
+# DISCLOSING が同じ文字列をキーに参照するため。literal を 2 箇所に書くと、片方を
+# 直したときに宣言が黙って無効化される)。
+_RO_AUTH_STATUS = r"^gh\s+auth\s+(status|list)\b"
 READONLY = [
-    r"^gh\s+auth\s+(status|list)\b",
+    _RO_AUTH_STATUS,
     # 認証系の素通しは「コマンド名で括る」のではなく **リモートに何も書かないと
     # 証明できる形だけ** に絞る。名前で括ると、オプション次第で write に化ける形まで
     # 巻き込む (PR #43 Codex R2: `gh auth login` の SSH 鍵アップロード /
@@ -54,6 +58,31 @@ READONLY = [
     #     付いていれば readonly にしない (値を取る flag なので `=false` で無効化不可)
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
+]
+# `gh auth status` / `gh auth list` で「これが付いていても readonly」と言える option。
+# これ以外が付いていたら READONLY を取り消して QUERY に降格する (= 検証は走るが
+# 不一致でも止めない)。`--hostname` は照合先ではなく**表示対象の host** を絞るだけ
+# (CONTEXT_OPTIONS を宣言していない理由と同じ) なので安全側に数えられる。
+READONLY_SAFE_OPTIONS = {
+    _RO_AUTH_STATUS: frozenset({"--hostname", "-h", "--active", "-a"}),
+}
+# 認証情報を出力する形 / option。READONLY / QUERY を取り消して WRITE 扱いにする。
+# `--show-token` (`-t`) は期待外アカウントのトークンを平文で出すため、
+# 「READONLY のコマンド名に一致する」だけでは素通しさせない (内部バックログ)。
+# `gh auth token` は READONLY に無いので現状も検証対象だが、**形そのものが開示**
+# であることを宣言側に残す (将来 READONLY に足したときに素通しに戻らないように)。
+DISCLOSING = [
+    (_RO_AUTH_STATUS, frozenset({"--show-token", "-t"})),
+    (r"^gh\s+auth\s+token(?=\s|$)", frozenset()),
+]
+# リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
+# **列挙した形だけ**を QUERY にする — ここは判定表を緩める唯一の方向なので、
+# 「読むだけと証明できる形」に限る。`secret` / `variable` の `list` / `view` は
+# 名前とメタデータだけで値は出ない (値は create/set 側)。
+QUERY = [
+    r"^gh\s+(pr|issue|repo|release|run|workflow|search|gist|label|cache"
+    r"|secret|variable)\s+(list|view|status|checks|diff|download)(?=\s|$)",
+    r"^gh\s+(status|browse)(?=\s|$)",
 ]
 # アクティブアカウント (hosts.yml) や認証情報の権限を変えうるコマンド。dispatcher が
 # 検出すると github の成功 cache を破棄する。`switch` は期待値向きなら
@@ -554,6 +583,81 @@ def _login_is_keyless(candidate: str) -> bool:
 def is_readonly(candidate: str) -> bool:
     """正規表現 (READONLY) で表せない readonly 判定: 鍵操作を伴わない `gh auth login`。"""
     return _login_is_keyless(candidate)
+
+
+_API_RE = re.compile(r"^gh\s+api(?=\s|$)")
+# `gh api` の option (gh 2.9x `gh api --help`)。**安全側を列挙する allow-list**で、
+# 未知の option は「読むだけ」と証明できないので QUERY にしない。危険な option を
+# 列挙する denylist にすると、gh に option が増えるたび黙って穴が開く
+# (同型の穴が反復した経緯は内部バックログ)。
+_API_SAFE_OPTIONS_WITH_VALUE = frozenset({
+    "--cache", "--header", "-H", "--hostname", "-h", "--jq", "-q",
+    "--method", "-X", "--preview", "-p", "--template", "-t",
+})
+_API_SAFE_FLAGS = frozenset({
+    "--include", "-i", "--paginate", "--silent", "--slurp", "--verbose",
+})
+# body / field を送る option。GET でも「書く API を叩く」形に化けるため除外する。
+_API_BODY_OPTIONS = frozenset({"--field", "-F", "--raw-field", "-f", "--input"})
+_API_READ_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _api_is_read_only(candidate: str) -> bool:
+    """`gh api` が読み取りだけと**証明できる**形なら True。
+
+    3 条件をすべて満たす必要がある:
+
+    1. body / field を送る option (`-f` / `-F` / `--field` / `--raw-field` /
+       `--input`) が無い
+    2. `-X` / `--method` が無い、または値が `GET` / `HEAD`
+    3. 付いている option が**すべて** allow-list に載っている
+       (未知の option / 短縮の連結形 / 値の欠けた option は証明にならない)
+
+    `-t` はここでは `--template` で、`gh auth status` の `--show-token` とは
+    別物。DISCLOSING をコマンド形ごとに宣言しているのはこの衝突を避けるため。
+    """
+    if not _API_RE.search(candidate):
+        return False
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        return False
+    method = ""
+    i = 2  # `gh api` の後ろから
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if tok == "--":
+            break
+        if not tok.startswith("-") or tok == "-":
+            continue  # endpoint などの operand
+        name, eq, value = tok.partition("=")
+        if not eq and not name.startswith("--") and len(name) > 2:
+            # 短縮の連結形 (`-Xpost` / `-iq`) は値と flag の切り分けが曖昧なので
+            # 「読むだけ」と証明しない。
+            return False
+        if name in _API_BODY_OPTIONS:
+            return False
+        if name in _API_SAFE_OPTIONS_WITH_VALUE:
+            if eq:
+                resolved = value
+            elif i < len(tokens):
+                resolved = tokens[i]
+                i += 1
+            else:
+                return False
+            if name in ("--method", "-X"):
+                method = resolved.strip()
+            continue
+        if name in _API_SAFE_FLAGS:
+            continue
+        return False
+    return not method or method.upper() in _API_READ_METHODS
+
+
+def is_query(candidate: str) -> bool:
+    """正規表現 (QUERY) で表せない QUERY 判定: option 次第で write になる `gh api`。"""
+    return _api_is_read_only(candidate)
 
 
 _SWITCH_RE = re.compile(r"^gh\s+auth\s+switch\b")

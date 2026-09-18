@@ -8,6 +8,7 @@ import _testutil  # noqa: F401
 
 from core.cli_options import (  # noqa: E402
     find_context_options,
+    find_option_names,
     strip_leading_options,
 )
 
@@ -286,6 +287,66 @@ class TestContextValueRejection(unittest.TestCase):
                     ),
                     {"profile": value},
                 )
+
+
+class TestFindOptionNames(unittest.TestCase):
+    """tier 判定 (`core/tiers.py`) が使う option 名の集合。"""
+
+    def _names(self, cmd: str, with_value=WITH_VALUE):
+        return find_option_names(cmd, with_value)
+
+    def test_no_options(self):
+        self.assertEqual(self._names("gh auth status"), frozenset())
+
+    def test_separated_and_equals_forms(self):
+        self.assertEqual(
+            self._names("gh auth status --hostname ghe.example.com"),
+            frozenset({"--hostname"}),
+        )
+        self.assertEqual(
+            self._names("gh auth status --hostname=ghe.example.com"),
+            frozenset({"--hostname"}),
+        )
+
+    def test_value_of_a_known_option_is_not_an_option_name(self):
+        """値 token を消費するので、値が option 名に見えても拾わない。"""
+        self.assertEqual(
+            self._names("aws s3 ls --profile --debug"), frozenset({"--profile"})
+        )
+
+    def test_short_attached_value_is_split(self):
+        self.assertEqual(self._names("firebase -Pprod use"), frozenset({"-P"}))
+
+    def test_bundled_boolean_shorthand_is_expanded(self):
+        """`-at` は `--active --show-token` の連結形なので `-t` も見つける。"""
+        self.assertEqual(
+            self._names("gh auth status -at", frozenset()),
+            frozenset({"-at", "-a", "-t"}),
+        )
+
+    def test_explicit_false_still_counts_as_written(self):
+        self.assertEqual(
+            self._names("gh auth status --show-token=false", frozenset()),
+            frozenset({"--show-token"}),
+        )
+
+    def test_double_dash_terminates_the_scan(self):
+        self.assertEqual(
+            self._names("kubectl exec pod -- cmd --raw", frozenset()),
+            frozenset(),
+        )
+
+    def test_operands_and_bare_dash_are_skipped(self):
+        self.assertEqual(
+            self._names("kubectl apply -f - --raw", frozenset({"-f"})),
+            frozenset({"-f", "--raw"}),
+        )
+
+    def test_unbalanced_quote_falls_back_to_whitespace_split(self):
+        self.assertEqual(
+            self._names('gh auth status --show-token "x', frozenset()),
+            frozenset({"--show-token"}),
+        )
 
 
 if __name__ == "__main__":

@@ -134,7 +134,7 @@ _PKG_ROOT = _HERE.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core import mode, paths  # noqa: E402
+from core import mode, paths, tiers  # noqa: E402
 from services import ALL as SERVICES  # noqa: E402
 
 _SERVICE_NAMES = [svc.ACCOUNT_KEY for svc in SERVICES]
@@ -1331,6 +1331,20 @@ def _cmd_show(
         if key == mode.MODE_KEY:
             valid = isinstance(expected, str) and expected.strip().lower() in mode.VALID_MODES
             marker = "[mode]" if valid else "[mode: 不正な値 — enforce として扱われます]"
+            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            continue
+        # `"$readonly"` も同じ扱い (service ではない予約キー / 値は機密でない)。
+        # 有効/無効の判定は **dispatcher と同じ関数** (`tiers.policy_from_accounts`)
+        # に委ねる。ここで判定式を書き写すと、空文字 / `null` のような端の値で
+        # 「表示は deny・実際は warn」のように表示と挙動が食い違う。
+        if key == tiers.POLICY_KEY:
+            _policy, policy_note = tiers.policy_from_accounts({key: expected})
+            valid = policy_note is None
+            marker = (
+                "[readonly policy]"
+                if valid
+                else f"[readonly policy: 不正な値 — {tiers.POLICY_DENY} として扱われます]"
+            )
             print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
             continue
         svc = _SERVICE_BY_KEY.get(key)

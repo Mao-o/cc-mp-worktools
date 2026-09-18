@@ -13,6 +13,10 @@ from core import budget
 # sts を実行するので、未設定なら永久 deny、既定が期待値なら実行 profile が別でも
 # allow という二重の誤り)。空白または終端が続く形だけに限定する。
 PATTERNS = [r"^aws(?=\s|$)"]
+# option を審査する READONLY エントリは名前付き定数にする (READONLY_SAFE_OPTIONS が
+# 同じ文字列をキーに参照するため。literal を 2 箇所に書くと、片方を直したときに
+# 宣言が黙って無効化される)。
+_RO_CONFIGURE = r"^aws\s+configure(?!\s+export-credentials\b)\b"
 READONLY = [
     r"^aws\s+sts\s+get-caller-identity\b",
     # 認証取得系 (`aws sso login|logout` / `aws login|logout` / `aws configure ...`) は
@@ -24,10 +28,61 @@ READONLY = [
     # (STATE_CHANGING で成功 cache も破棄されるため) 次回 hook で再検証される。
     # `aws configure export-credentials` (認証情報を stdout に出す) だけは
     # `gh auth token` / `gcloud auth print-access-token` と同じく検証対象のまま。
-    r"^aws\s+(sso\s+(login|logout)|login|logout|configure(?!\s+export-credentials\b))\b",
+    #
+    # **認証取得系と `configure` を別エントリに分けてある** (挙動は分ける前と同じ)。
+    # `configure` 側だけ READONLY_SAFE_OPTIONS で option を審査したいため。認証取得系は
+    # 未ログインのデッドロックを解くためのエントリなので審査しない — 審査すると
+    # `aws sso login --profile p` (deny 文面が案内する形) が QUERY に降格して
+    # 検証予算を使い始める。
+    r"^aws\s+(sso\s+(login|logout)|login|logout)\b",
+    _RO_CONFIGURE,
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。診断で打つ
     # `command aws --version` 等が誤って検証対象になり deny されるのを防ぐ。
     r"^aws\s+(--version|--help|version|help)\b",
+]
+# `aws configure ...` で「これが付いていても readonly」と言える option。
+# 実質 global option (`--profile` / `--region` / `--output` 等) だけで、
+# それ以外が付いていたら READONLY を取り消して QUERY に降格する。
+READONLY_SAFE_OPTIONS = {_RO_CONFIGURE: frozenset()}
+# 認証情報を出力する形。READONLY / QUERY を取り消して WRITE 扱いにする。
+# - `configure export-credentials`: 無条件 (READONLY の lookahead と二重に塞ぐ)
+# - `configure get`: **operand が secret のときだけ**。`aws configure get region` は
+#   状態確認なので READONLY のまま残す。option の位置に依らず拾えるよう、
+#   `get` 以降のどこかに secret の変数名が現れる形で書く
+#   (`aws_access_key_id` は識別子なので**含めない** — 表を推測で広げない)
+# - `sts get-session-token`: 一時認証情報を stdout に出す (QUERY の
+#   `get-\S+` にも当たるので、DISCLOSING を先に見る順序がここで効く)
+DISCLOSING = [
+    (r"^aws\s+configure\s+export-credentials(?=\s|$)", frozenset()),
+    (
+        r"^aws\s+configure\s+get\b.*\b(aws_secret_access_key|aws_session_token)\b",
+        frozenset(),
+    ),
+    (r"^aws\s+sts\s+get-session-token(?=\s|$)", frozenset()),
+    # リモートの secret / 復号値そのものを出力する read (0.14.0)。`get-*` 形は
+    # 一括で QUERY だが、これらは期待外アカウントの secret を context に出す点で
+    # `gh auth status --show-token` と同クラスなので DISCLOSING に置く。
+    # QUERY の get-* より先に見るので不一致は deny になる。
+    (r"^aws\s+secretsmanager\s+(get-secret-value|batch-get-secret-value)(?=\s|$)", frozenset()),
+    (r"^aws\s+ssm\s+get-parameters?(-by-path)?\b.*\s--with-decryption(?=\s|$)", frozenset()),
+    (r"^aws\s+kms\s+decrypt(?=\s|$)", frozenset()),
+    # `sts get-session-token` と同じ**一時 credential 発行 API**。`get-*` 形は
+    # 一括で QUERY なので、兄弟 API を塞がないと片方だけ検証される非対称になる。
+    (r"^aws\s+sts\s+get-federation-token(?=\s|$)", frozenset()),
+    # 出力そのものが認証トークンの read。docker login 用パスワード /
+    # kubeconfig 用 bearer token / パッケージレジストリ用トークンを stdout に出す
+    # ので、`gh auth token` と同クラス (名前が `get-*` なので QUERY に落ちていた)。
+    (
+        r"^aws\s+(ecr(-public)?\s+get-login-password|eks\s+get-token"
+        r"|codeartifact\s+get-authorization-token)(?=\s|$)",
+        frozenset(),
+    ),
+]
+# リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
+QUERY = [
+    r"^aws\s+\S+\s+(describe|list|get)-\S+",
+    r"^aws\s+s3\s+ls(?=\s|$)",
+    r"^aws\s+s3api\s+(list|get|head)-\S+",
 ]
 # アカウント状態 (次の aws がどの認証情報で動くか) を変えうるコマンド。
 # dispatcher が検出すると aws の成功 cache を破棄する。表示系の

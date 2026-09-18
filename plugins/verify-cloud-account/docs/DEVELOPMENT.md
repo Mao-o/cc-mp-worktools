@@ -54,7 +54,8 @@ verify-cloud-account/
         │   ├── dispatcher.py       サービス振り分けと検証オーケストレーション
         │   ├── mode.py             検証モード (enforce / warn / off) の解決
         │   ├── output.py           deny / warn の hookSpecificOutput JSON ビルダー
-        │   └── paths.py            accounts.local.json の配置パス解決 (3-tier + 親遡及 + グローバル既定)
+        │   ├── paths.py            accounts.local.json の配置パス解決 (3-tier + 親遡及 + グローバル既定)
+        │   └── tiers.py            セグメントの tier 分類 (READONLY / QUERY / WRITE + DISCLOSING)
         ├── services/               サービスごとの CLI 呼び出しと照合
         ├── scripts/
         │   ├── accounts_builder.py accounts.local.json 専用 writer (init/show/set/remove/migrate)
@@ -146,6 +147,54 @@ builder の `show` は `[match]` / `[mismatch]` を出すのに bool が要る�
 - **マッチ順序**: `dispatcher._match_service` は `services.ALL` を先頭から評価し、
   最初にマッチしたサービスを採用する。2 つのサービスで PATTERNS が競合する設計は
   避ける (曖昧なコマンドは各サービス側で除外するのが正解)
+
+## tier 分類 (`core.tiers`) — v0.14.0
+
+セグメントは 3 tier に分かれ、`DISCLOSING` が modifier として tier を取り消す。
+**利用者向けの表は README の「対象コマンドと検証スキップ」が正本**で、ここには
+「なぜその構造か」だけ書く。
+
+| tier | 不一致時 | 例 |
+|---|---|---|
+| `READONLY` | 検証しない | `gh auth status` / `firebase use` (引数なし) |
+| `QUERY` | allow + `additionalContext` 警告 | `gh pr list` / `aws s3 ls` / `kubectl get` |
+| `WRITE` (既定) | deny | `gh pr create` / `firebase deploy` |
+| `DISCLOSING` (modifier) | READONLY / QUERY を取り消して WRITE | `gh auth status --show-token` |
+
+- **判定順は DISCLOSING → READONLY → QUERY → WRITE。** `aws sts get-session-token`
+  のように QUERY と DISCLOSING の両方に当たる形があるため、順序自体を
+  `tests/test_tiers.py` で固定する (順序を入れ替えると開示形が warn だけで通る)
+- **緩める方向は QUERY の 1 箇所だけ。** だから `QUERY` に載せるのは「読むだけと
+  証明できる形」に限る。regex で表せない形 (`gh api` は option 次第で write) は
+  service の `is_query()` が**安全な option の allow-list** で証明する。危険な
+  option の denylist にすると、CLI に option が増えるたび黙って穴が開く
+- **`READONLY_SAFE_OPTIONS` は「option の allow-list」。** READONLY に載せた形でも
+  宣言外の option が付いていたら QUERY に降格する (deny ではない)。「コマンド名が
+  安全」では不十分で、option 次第で内容 / 認証情報リーダーに化ける形が繰り返し
+  見つかっていたため (`--show-token` / `--raw` / `cluster-info dump`)
+- **降格を deny にしない**のは lenient 方針との整合。降格は「検証を走らせて結果を
+  伝える」だけなので、未知の option が付いた状態確認コマンドで新たな deny が
+  生えることはない
+- **認証取得系 (`gh auth login` / `aws sso login` / `gcloud auth login` /
+  `firebase login`) には `READONLY_SAFE_OPTIONS` を宣言しない。** あれらは
+  未ログインのデッドロックを解くためのエントリで、降格させると deny 文面が案内する
+  コマンド自身が検証予算を使い始める
+- **option の検出は `cli_options.find_option_names` に一本化する。** 分離形 / `=`
+  形 / 短縮連結 (`-at` は `-a -t`) / 値 token の消費を 1 箇所で扱う。値の真偽は
+  見ない (`--show-token=false` も「書かれている」と数える) — 真偽で緩めると
+  `--skip-ssh-key=false` ですり抜けた穴を逆向きに作り直すことになる
+
+### 何を deny のまま残すか
+
+QUERY が緩めるのは「アカウントが期待値と違う」「期待値のキーが無い」「未設定」
+「検証しきれなかった (予算切れ)」の 4 つだけ。**設定そのものが壊れている / 曖昧な
+状態 (複数パス競合 / JSON 不正 / 値の型不正) は tier に関係なく deny** のまま:
+「どの設定が効くか決まらない」状態では読むだけでも判定の土台が無く、かつ引数なしの
+状態確認コマンドは READONLY なのでデッドロックにもならない。
+
+`"$readonly": "deny"` (accounts.local.json の予約キー) で QUERY を WRITE と同じ扱い
+に戻せる。`"$mode"` と同じ制約が付く — ファイルを読めたときだけ参加し、グローバル
+既定に書いた場合は自前の accounts.local.json を持たないプロジェクトにしか効かない。
 
 ## コマンド分解 (`core.command_parser`)
 
@@ -608,6 +657,76 @@ write 自体が通らないため、別アカウントでの書き込みには�
 `Path.home()` と一致すること」を固定する。最後の 1 つは
 `cli_config.home_overridden()` の基準が実環境の `$HOME` にずれないための
 不変条件。
+
+### 0.14.0 (判定機構: tier 分類 + 開示 option の取り消し)
+
+**D24: READONLY を「安全と証明できた形の宣言」に組み替える**
+
+READONLY が「CLI 名からの前方一致 regex + option 無審査」だったため、allow-list に
+載せたコマンドが option 次第で write / 開示に化ける同型の穴が繰り返し出ていた
+(`gh auth login` の SSH 鍵アップロード → `--skip-ssh-key=false` →
+`gh auth refresh --scopes` → `gh auth status --show-token`)。都度パッチしても
+「次に何が化けるか」は列挙し切れないので、構造を変えた (上記「tier 分類」):
+
+- `DISCLOSING` で「認証情報を出力する形 / option」を宣言し、READONLY / QUERY を
+  取り消す (厳格化方向)
+- `READONLY_SAFE_OPTIONS` で「安全と言える option 集合」を宣言し、宣言外の option が
+  付いたら QUERY に降格する (= option の allow-list)
+
+**表は推測で広げない。** 「first_token が安全」では不十分という失敗の裏返しで、
+「たぶん危ない option」を思いつきで足すと今度は誤 deny 側に穴が空く。列挙は
+実際に観測された形 (ticket / レビュー指摘) に限り、未知は「未知として降格」で扱う。
+
+**D25: リモート read は deny せず警告で通す (唯一の緩和方向)**
+
+`gh pr list` / `aws s3 ls` のような**資源を変更しない**コマンドが不一致で deny され、
+回復手段として案内される `gh auth switch` はユーザー全体の CLI 状態を変える。
+読むためにそこまで要求するのは過剰で、離脱の直接要因になっていた。QUERY tier は
+検証は走らせたうえで `additionalContext` で「現在=X 期待=Y」を伝え、実行は止めない。
+
+- **警告の文面を新造しない。** `verify()` が返す deny 理由 (切替案内込み) をそのまま
+  本文に使い、前置きだけ差し替える。2 箇所に切替案内を持つと必ず片方が古くなる
+- **QUERY 不一致は cache しない** (従来どおり「成功のみ cache」なので自動的にそうなる)
+- **`"$readonly": "deny"`** で従来挙動に戻せる。mode との合成は「mode=warn/off は
+  全 tier を弱める / QUERY の warn は mode=enforce のときの挙動」
+
+**D26: 判定層を変えたら旧版との出力ペア比較で退行を測る**
+
+tier 分類は READONLY の regex を残したまま**実効 verdict**を変えるので、mutation
+では「旧版が拾えていた入力を落とした」型の退行を検出できない。merge 済みの旧版と
+新版で同じコーパス (テスト / README / 判定表に現れる約 810 コマンド) を流し、
+verdict の差を「意図した緩和 / 意図した厳格化 / 未宣言 option の降格 / 説明不能」に
+分類して、説明不能をゼロにしてから出した。**`verify → readonly` (検証が消える方向)
+は 0 件**であることが受け入れ条件。
+
+**ただしペア比較はコーパスに入っている形しか測れず、安全性の証明ではない。**
+「説明不能 0」はその母集団に対する主張にすぎず、コーパスに無い形 (行継続を含む
+複数行コマンドなど) の退行はレビューで初めて出た (D27)。外部レビュー / mutation と
+補完関係で使う。
+
+**D27: 候補文字列はシェルが実行する形に正規化してから判定表に当てる**
+
+判定表は 1 行のコマンドを前提にした regex なので、候補文字列に**改行が残ると
+一部のエントリだけが死ぬ**。行継続 (`\` + 改行) を畳まないまま当てると、
+
+```bash
+aws ssm get-parameter \
+  --name n --with-decryption
+```
+
+で `.*` を含む DISCLOSING (deny) が外れ、1 行目だけで一致する QUERY (警告のみ) に
+落ちた = 判定が緩む方向の死角。`split_on_operators` の opaque 領域処理で
+**quote 外の行継続を削除**して解消した (`core/command_parser.py`)。
+
+- **空白 1 個への置換ではなく削除**にする。置換すると語の途中で改行した形
+  (`aws configure exp` / 改行 / `ort-credentials`) が
+  `aws configure exp ort-credentials` に化け、READONLY の `configure` に当たって
+  実際に走る開示形が素通しする。削除ならシェルの結果と一致する
+- quote の内側は畳まない (引数の内容が変わる)。option 判定
+  (`cli_options.find_option_names`) は `shlex.split` を通すので元から影響を
+  受けていなかった — **同じ入力に対して regex 側と option 側で堅牢性が非対称**
+  だった形で、regex 側を合わせた
+- 判定表を足すときは「複数行で書かれた同じコマンド」を 1 形テストに入れる
 
 ## 既知の制限
 
