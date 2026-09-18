@@ -218,7 +218,13 @@ def _resolve_target(
 
     `--path` 未指定なら `core/paths.resolve_accounts_file()` と同じ探索
     (3-tier lookup + 親ディレクトリ遡及) を使い、dispatcher が読むのと同じ
-    ファイルを対象にする。builder が常に cwd 直下の新パスを対象にしていた
+    ファイルを対象にする。**グローバル既定
+    (`$HOME/.claude/verify-cloud-account/accounts.local.json`) への fallback は
+    含まない** — dispatcher 側だけの経路
+    (`resolve_accounts_file_for_verification`) で、builder がそこへ落ちると
+    「プロジェクト設定を作るつもりの編集」が利用者の全プロジェクトに効く
+    ファイルを書き換えてしまう。グローバル既定を編集したいときは `--path` で
+    明示する。builder が常に cwd 直下の新パスを対象にしていた
     従来の実装は、**祖先の accounts.local.json を継承している worktree /
     サブディレクトリで shadowing を起こしていた**: `set --commit` が編集した
     service だけを含む子ファイルを作り、dispatcher の遡及がその子ファイルで

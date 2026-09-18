@@ -378,6 +378,20 @@ class TestShow(BaseBuilder):
         self.assertEqual(code, 0)
         self.assertIn("no accounts.local.json", out)
 
+    def test_global_default_path_is_editable_via_explicit_path(self):
+        """グローバル既定は `--path` で明示すれば編集できる。
+
+        builder は解決でグローバル既定へ**落ちない** (プロジェクト設定を作る
+        つもりの編集が全プロジェクトに効くのを防ぐため) ので、意図的に編集する
+        経路がこれしか無い。`$HOME` 配下でも 3-tier の形なので受理される。
+        """
+        self.assertEqual(
+            builder._split_tier_path(
+                Path("/fake-home/.claude/verify-cloud-account/accounts.local.json")
+            ),
+            ("new", Path("/fake-home")),
+        )
+
     def test_show_labels_reserved_mode_key(self):
         """予約キー `"$mode"` は service ではなく mode として表示する。
 
