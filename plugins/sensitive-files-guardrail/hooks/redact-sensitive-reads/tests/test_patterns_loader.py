@@ -681,6 +681,58 @@ class TestProjectCommittedPatternsTier(BaseWithIsolatedHome):
         )
         self.assertEqual(seen, [P.PROJECT_PATTERNS_IN_USE])
 
+    def test_header_warning_fires_once_across_repo_and_user_tiers(self):
+        """書き損じヘッダーの警告は tier をまたいでも種別ごとに 1 回
+        (マージ前レビューの指摘)。
+
+        警告済み集合が ``_parse_local_patterns_text`` の呼出ローカルだったため、
+        repo 同梱 tier と user tier を別々にパースするようになった時点で
+        「種別ごとに 1 回」の契約 (同関数の docstring) が破れ、同じ書き損じが
+        両方にあると同一種別が 2 回 callback されていた。
+        """
+        from _shared import patterns as P
+        self._write_project("[project:$CLAUDE_PROJECT_DIR]\n!repo-only.pem\n")
+        self._write_preferred("[project:$CLAUDE_PROJECT_DIR]\n!user-only.pem\n")
+        seen: list[str] = []
+        rules = P.load_patterns(
+            self.default_file,
+            cwd=str(self.proj),
+            header_warn_callback=seen.append,
+        )
+        self.assertEqual(seen, [P.PROJECT_HEADER_WARN_PLACEHOLDER])
+        # 判定は変わらない (どちらのセクションも非 active のまま)
+        self.assertEqual(rules, [("*.pem", False), ("*.env", False)])
+
+    def test_header_warning_fires_once_with_legacy_user_tier(self):
+        """rename 前の旧 user tier (fallback 経路) でも同じ契約。"""
+        from _shared import patterns as P
+        self._write_project("[project:]\n!repo-only.pem\n")
+        self._write_legacy("[project:]\n!user-only.pem\n")
+        seen: list[str] = []
+        P.load_patterns(
+            self.default_file,
+            cwd=str(self.proj),
+            header_warn_callback=seen.append,
+        )
+        self.assertEqual(seen, [P.PROJECT_HEADER_WARN_EMPTY])
+
+    def test_distinct_header_kinds_still_warn_separately(self):
+        """種別が違えばそれぞれ 1 回ずつ出る (共有集合が過剰に抑制しないこと)。"""
+        from _shared import patterns as P
+        self._write_project("[project:]\n!repo-only.pem\n")
+        self._write_preferred("[project:$CLAUDE_PROJECT_DIR]\n!user-only.pem\n")
+        seen: list[str] = []
+        P.load_patterns(
+            self.default_file,
+            cwd=str(self.proj),
+            header_warn_callback=seen.append,
+        )
+        self.assertEqual(
+            sorted(seen),
+            sorted([P.PROJECT_HEADER_WARN_EMPTY,
+                    P.PROJECT_HEADER_WARN_PLACEHOLDER]),
+        )
+
     def test_worktree_reads_the_worktree_checkout(self):
         """worktree では worktree 側の checkout を読む (commit 済みなら同内容)。"""
         from _shared.patterns import _resolve_project_patterns_path

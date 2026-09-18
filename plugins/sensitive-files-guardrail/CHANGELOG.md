@@ -23,16 +23,24 @@ commit 52113a1 で完了)。
 ## 0.32.0
 
 rule の読み込み経路・deny reason の折り畳み・ログ量・Stop hook の時間予算を
-まとめて改善 (内部バックログ 6 件)。**判定境界の変化: 1 行の新設のみ** —
+まとめて改善 (内部バックログ 6 件 + マージ前レビューの指摘 9 件)。
+**判定表の変化: deny / allow / ask のセルは 1 行の新設のみ** —
 `__main__` の envelope 読み取りで **0 byte stdin が無音 allow から deny に変わる**
 (唯一の fail-open 分岐だった)。それ以外の deny / allow / ask / block の表は
-1 セルも変わっていない。
+1 セルも変わっていない (Stop 表には可視化の行が 4 行増えたが、block するか
+しないかの向きは既存行と同じ)。
+
+> **「判定表 1 行のみ」= 「結果が変わらない」ではない**: 判定表のセルは「どの
+> 状況でどちらに倒すか」の対応なので不変だが、repo 同梱 tier は **rule ソースの
+> 追加**である。このファイルを置いた repo では `!` 行でそれまで機密だった
+> ファイルが非機密になり、include 行でその逆も起きる = **verdict 自体が変わる**。
+> 判定表の不変性は「同じ rule なら同じ結果」の意味に留まる。
 **利用者影響**: (1) worktree セッションで `[project:]` の除外が効くようになる、
 (2) repo に commit して共有できる patterns tier が増える、(3) `head` / `tail` /
 `grep` の deny reason が予算超過時に閉じタグ・note を保てる、(4) `SFG_LOG_LEVEL`
 でログ量を減らせる (既定は現状維持)、(5) Stop hook が時間予算を超えたときに
 「検査が不完全」と表示する。
-テスト件数: redact 1,323 → **1,382** / check 148 → **159**。
+テスト件数: redact 1,323 → **1,387** / check 148 → **164**。
 
 ### `[project:]` セクションが worktree で効かず、`~` も展開されなかった
 
@@ -99,6 +107,12 @@ rule の読み込み経路・deny reason の折り畳み・ログ量・Stop hook
   header の免責 + 省略マーカー + 除外案内が全て残る。**判定は不変** (実ファイル
   300 鍵 + 全 5 mode の E2E で固定 — builder が例外を投げると catch-all が deny を
   ask に倒すため、文字列だけの単体テストでは塞げない)
+- **予算内に収まる入力でも出力は byte 一致ではない** (マージ前レビューの指摘):
+  既存の行 (`keys (先頭 N, 全 M 件):` の見出し / 各鍵行 / 免責 note) は byte 一致
+  だが、`<DATA ...>` の header 3 行と `</DATA>` の**計 4 行が増え**、免責 note が
+  ブロックの**内側** (閉じタグ直前) に移る。鍵名エコーは 20 件以下なら従来と
+  完全一致で、21 件から `... (N more)` に畳まれる。「出力が 1 文字も変わらない」
+  ではなく「**既存行は byte 一致 + 包装が付く**」が正確
 
 ### `redact-hook.log` が allow 経路の INFO で増え続けていた
 
@@ -158,6 +172,57 @@ rule の読み込み経路・deny reason の折り畳み・ログ量・Stop hook
   レビュー補正で「実際の律速は照合コストで根本原因は 0.23.0 で解消済み」と覆って
   いる。本変更は**どちらが律速かに依存しない防御**であり、名指しされた原因の
   修正ではない
+
+### マージ前レビューの指摘 (可視化 3 件 + 契約 1 件 + 開示)
+
+上の 6 件を入れた直後のレビューで、**同じリリース内で新しく足した経路が可視化を
+失っている**型が 2 つ見つかった (「黙って `[]` を返すな」を直した版が、別の機能で
+別の記録を黙らせていた)。
+
+- **Stop: 時間予算の超過 + 検出集合が全 ack 済みで完全無音だった** — 0.19.0 の
+  once-only (`digests <= acked` で exit 0) が予算を見ずに早期 return するため、
+  打ち切りで**部分集合しか拾えず、その部分集合が既に報告済みだった**ターンは
+  stdout / stderr とも空になり「完走して新規なし」の沈黙と 1 byte も区別できな
+  かった (未走査領域に新しい機密があっても可視化経路が全部飛ぶ)。
+  `_budget_notice_or_zero` を通して必ず見せる。判定表に 1 行追加 (block するか
+  しないかは変えない)
+- **repo 同梱 tier の記録が `SFG_LOG_LEVEL=WARNING` で消えていた** — repo の `!`
+  行で allow に倒れた呼出は最終判定が allow なので、遅延ログの leveling で
+  `project_patterns_in_use` が落ちる = **保護が外れたまさにその呼出の記録だけが
+  消える**。README / docs が残存リスクの緩和策として公表している記録なので、
+  `core/logging.py` に「**レベル固定で積む** (leveling 対象外)」マーク
+  (`log_info(..., always=True)`) を足して残す。書く位置と順序は他の INFO と同じ
+  (`log_error` のような即時書込・順序入替はしない)
+- **Stop: 空 stdin / 非 JSON / dict でない入力が完全無音だった** — fail-open
+  (exit 0、block しない) は方針どおり維持したまま、stderr に
+  `envelope_unreadable: <kind>` を 1 行出す (`empty` / `not_json` /
+  `not_an_object` / `EOFError`)。他の失敗経路 (`patterns_unavailable` /
+  `git_unavailable` / `internal_error` / `scan_incomplete`) が全て stderr に
+  1 行出すのとの非対称も解消。判定表に 1 行追加。
+  **`OSError` は breadcrumb で握らない** — 握ると stderr 1 行
+  (`claude --debug` のログにしか出ない) だけになり、従来 catch-all が出していた
+  `systemMessage` (UI に出る) を失う = breadcrumb を足した結果として可視性が
+  下がる。stdin が OS レベルで壊れている状況は `internal_error` 経路に回す
+- **書き損じヘッダーの警告が tier をまたいで 2 回出ていた** — 警告済み種別の集合が
+  パーサ呼出ローカルだったため、同じ typo が repo 同梱と user の両方にあると
+  「種別ごとに 1 回」という docstring の契約が破れていた。`load_patterns` が
+  1 つの集合を全 tier (repo 同梱 / user / rename 前の旧 user) に引き回す。判定は不変
+- **開示 (docs のみ、コードは変えない)**: repo 同梱 tier は `.claude/` を
+  `.gitignore` している repo では commit できず、**置いた本人の手元だけで効く**
+  (貢献者・CI では不在。しかも本人の手元では `project_patterns_in_use` が出るので
+  「効いている」と見える)。`git check-ignore` での確認と
+  `!.claude/sensitive-files-guardrail/` の negation を README / PATTERNS.md に明記
+  した。未 commit だと `git worktree add` が持ち込まないため worktree セッションで
+  tier が丸ごと消えること、repo 同梱ファイルでは `[project:]` ヘッダーが通常不要
+  (typo は全貢献者の全 Read / Bash / Edit / Write に警告 1 行を付ける) ことも追記。
+  **コード側で `[project:]` の全候補を探索する fallback は採らない** — 発火条件が
+  「main repo で untracked / ignored」= まさに「本人の手元だけで効く」状態であり、
+  貢献者と CI には依然何も見えないまま、本人が気付ける唯一の signal (worktree で
+  消える) を潰して divergence を深めるため
+- 同レビューで **submodule の worktree**
+  (`<super>/.git/modules/<name>/worktrees/<wt>`) も `_main_repo_root` が `None` に
+  なること (効いているのは `worktrees` 要素の guard ではなく commondir の解決先)
+  を実測で確認し、docstring と PATTERNS.md の条件一覧に足した
 
 ## 0.31.0
 

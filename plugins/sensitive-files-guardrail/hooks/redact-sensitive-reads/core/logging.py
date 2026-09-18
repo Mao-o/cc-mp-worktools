@@ -23,7 +23,8 @@ sanitize 対象外。
 0.32.0 (内部バックログ): ログ量そのものへの対策として、``begin_deferred`` /
 ``flush_deferred`` による **判定確定後の遅延 emit** と ``SFG_LOG_LEVEL``
 (``LOG_LEVEL``) を追加した。``SFG_LOG_LEVEL=WARNING`` にすると「最終判定が
-allow だった呼出の INFO」だけが落ち、deny / ask 経路の診断と ERROR は残る。
+allow だった呼出の INFO」だけが落ち、deny / ask 経路の診断と ERROR、および
+``log_info(..., always=True)`` でマークした記録 (leveling 対象外) は残る。
 **既定 (未設定) は INFO なので挙動は従来と完全に同一** (量対策は opt-in)。
 詳細は ``_resolve_log_level`` / ``flush_deferred`` の docstring。
 
@@ -108,11 +109,13 @@ def _resolve_log_level() -> int:
 LOG_LEVEL = _resolve_log_level()
 
 # 遅延バッファ。``None`` = 遅延無効 (即時書込 = 従来動作)。``list`` = 遅延中。
+# 要素は ``(行, leveling 対象外か)`` の対 — ``log_info(..., always=True)`` で
+# 積んだ行は ``flush_deferred`` の閾値判断を素通りして必ず書く (下記)。
 # hook はシングルスレッドの短命プロセスなのでモジュール変数で足りる。
 # 関数を差し替える方式にしないのは、``handlers.bash_handler._muted_logging``
 # が ``L.log_info`` / ``L.log_error`` を属性ごと保存・復元するため
 # (両方が関数差し替えだと入れ子で取り違える)。
-_pending: list[str] | None = None
+_pending: list[tuple[str, bool]] | None = None
 
 
 def begin_deferred() -> None:
@@ -131,15 +134,20 @@ def flush_deferred(decision: str | None) -> None:
     ``begin_deferred`` を呼んでいない / バッファが空なら何もしない。
     **必ず呼ぶこと** (呼ばないとバッファが捨てられる) — ``__main__`` は
     ``finally`` で呼ぶ。
+
+    ``log_info(..., always=True)`` で積んだ行は **leveling 対象外** なので、
+    閾値で落とす場合もその行だけは書く (0.32.0、マージ前レビューの指摘)。
+    走査は 1 回だけで、書く行の**相対順序は元のまま**保つ。
     """
     global _pending
     pending, _pending = _pending, None
     if not pending:
         return
     effective = _LEVEL_INFO if decision is None else _LEVEL_WARNING
-    if effective < LOG_LEVEL:
-        return
-    for line in pending:
+    drop_unmarked = effective < LOG_LEVEL
+    for line, always in pending:
+        if drop_unmarked and not always:
+            continue
         _append(line)
 
 # ログファイルの 1 世代ローテーション閾値 (内部バックログ)。この byte 数を
@@ -283,24 +291,36 @@ def log_error(category: str, detail: str = "") -> None:
     except OSError:
         pass
     if _pending:
-        for pending_line in _pending:
+        for pending_line, _always in _pending:
             _append(pending_line)
         _pending = []
     _append(line)
 
 
-def log_info(category: str, detail: str = "") -> None:
+def log_info(category: str, detail: str = "", *, always: bool = False) -> None:
     """INFO ログ (stderr には出さない)。detail は公開可情報のみ (L1 で sanitize)。
 
     遅延中 (``begin_deferred`` 済み) はバッファに積み、``flush_deferred`` が
     最終判定に応じて出すか決める (0.32.0)。遅延していない呼出は ``LOG_LEVEL``
     の閾値だけで判断する。
+
+    ``always=True`` は「**レベル固定で積む** (leveling 対象外)」マーク
+    (0.32.0、マージ前レビューの指摘)。``LOG_LEVEL`` / 最終判定に関わらず必ず
+    書くが、**書く位置は他の INFO と同じ** (遅延中なら flush 時) なので
+    ``log_error`` のような即時書込・順序入替は起こさない。
+
+    用途は「記録が消えると開示している緩和策が成立しなくなる」種類の記録だけ
+    に限る — 例: repo 同梱 patterns を読み込んだ事実
+    (``core.patterns._note_project_patterns``)。この記録は「repo の ``!`` 行が
+    保護を弱めても後から辿れる」ことを公表した緩和策なので、`allow` に倒れた
+    呼出 (= まさに除外が効いた呼出) で落ちると緩和策そのものが無くなる。
+    通常の診断 (``bash_classify`` 等) はマークしない — 量対策の目的が消える。
     """
     safe_detail = _sanitize_detail(detail)
     line = f"{_now()} INFO  {category} {safe_detail}\n".rstrip() + "\n"
     if _pending is not None:
-        _pending.append(line)
+        _pending.append((line, always))
         return
-    if _LEVEL_INFO < LOG_LEVEL:
+    if not always and _LEVEL_INFO < LOG_LEVEL:
         return
     _append(line)

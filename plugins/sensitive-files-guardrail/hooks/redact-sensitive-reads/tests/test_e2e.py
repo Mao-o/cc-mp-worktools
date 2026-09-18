@@ -777,6 +777,43 @@ class TestE2ELogLevelSuppressesAllowPathInfo(unittest.TestCase):
         self.assertIn("metadata_only_allow:ls", log)
         self.assertIn("match:cat", log)
 
+    def test_repo_tier_record_survives_warning_level(self):
+        """repo 同梱 tier の記録は leveling 対象外 (マージ前レビューの指摘)。
+
+        repo 同梱 ``!`` 行で allow に倒れた呼出は最終判定が allow なので、
+        既定の leveling では ``SFG_LOG_LEVEL=WARNING`` のときに
+        「**repo の除外で保護が外れた**まさにその呼出」の記録だけが消えていた。
+        この記録は README / docs が残存リスクの緩和策として公表しているもの
+        なので、量を絞った利用者から静かに失われてはいけない。
+        """
+        tier = Path(self.tmp) / ".claude" / "sensitive-files-guardrail"
+        tier.mkdir(parents=True)
+        (tier / "patterns.txt").write_text("!.env\n")
+        home = Path(self.tmp) / "home"  # user tier を実ホームから隔離する
+        home.mkdir()
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home)}
+        ):
+            result, log = self._run_bash("cat .env", entry.L._LEVEL_WARNING)
+        self.assertEqual(result, {}, "repo tier の ! 行で allow に倒れる前提")
+        self.assertIn("project_patterns_in_use", log)
+        # 通常の INFO は従来どおり落ちる (leveling そのものを無効化していない)
+        self.assertNotIn("bash_classify", log)
+
+    def test_repo_tier_record_is_present_at_default_level_too(self):
+        """既定 (INFO) でも当然残る = マークは「落とさない」方向にしか効かない。"""
+        tier = Path(self.tmp) / ".claude" / "sensitive-files-guardrail"
+        tier.mkdir(parents=True)
+        (tier / "patterns.txt").write_text("!.env\n")
+        home = Path(self.tmp) / "home"
+        home.mkdir()
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home)}
+        ):
+            _result, log = self._run_bash("cat .env", entry.L._LEVEL_INFO)
+        self.assertIn("project_patterns_in_use", log)
+        self.assertIn("bash_classify", log)
+
     def test_log_lines_carry_no_paths_or_values(self):
         """遅延化でログ規則 (path / 値 / basename を出さない) が崩れていない。"""
         _result, log = self._run_bash("cat .env", entry.L._LEVEL_INFO)

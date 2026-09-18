@@ -76,6 +76,24 @@ def _warn_stop_ack(detail: str) -> None:
     sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
 
 
+def _warn_envelope_unreadable(kind: str) -> None:
+    """hook input (stdin) が読めなかったことを stderr に 1 行記録する (0.32.0)。
+
+    Stop 側は従来どおり **fail-open** (exit 0 で block しない) — 応答を毎ターン
+    差し戻すと 0.14.0 の離脱を再生産するため、判定は変えない。ただし
+    ``exit 0`` + 空 stdout は hook の正常形なので、breadcrumb が無いと
+    「検査して何も無かった」と 1 byte も区別できない (この hook の他の失敗経路
+    ``patterns_unavailable`` / ``git_unavailable`` / ``internal_error`` /
+    ``scan_incomplete`` はいずれも stderr に 1 行出すので非対称でもあった)。
+
+    ``kind`` は ``empty`` / ``not_json`` / ``not_an_object`` / ``EOFError`` の
+    固定トークン (入力内容そのものは出さない — 壊れた stdin にも機密が含まれ
+    うるため)。``OSError`` は**この経路に来ない** — ``main`` の catch-all に
+    送出させて ``internal_error`` + ``systemMessage`` (UI に出る) を維持する。
+    """
+    sys.stderr.write(f"[check-sensitive-files] envelope_unreadable: {kind}\n")
+
+
 def _serialize(reason: str) -> str:
     """stdout に出す JSON を組み立てる。
 
@@ -785,10 +803,25 @@ def _main_impl() -> int:
     deadline = Deadline()
 
     try:
-        hook_input = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, EOFError):
+        raw = sys.stdin.read()
+    except EOFError as e:
+        # ``OSError`` は**捕まえない** (0.32.0、マージ前レビューの指摘)。ここで
+        # 握ると stderr 1 行 (= debug log にしか出ない) だけになり、従来
+        # ``main`` の catch-all が出していた ``systemMessage`` (UI に出る) を
+        # 失う = 可視性が下がる。stdin が OS レベルで壊れている状況は
+        # internal_error 経路の方が適切なので、そのまま送出させる。
+        _warn_envelope_unreadable(type(e).__name__)
+        return 0
+    if not raw:
+        _warn_envelope_unreadable("empty")
+        return 0
+    try:
+        hook_input = json.loads(raw)
+    except json.JSONDecodeError:
+        _warn_envelope_unreadable("not_json")
         return 0
     if not isinstance(hook_input, dict):
+        _warn_envelope_unreadable("not_an_object")
         return 0
 
     # 同一ターン内の 2 回目以降はブロックしない (ループ防止)
@@ -834,7 +867,11 @@ def _main_impl() -> int:
     if session_id is not None:
         acked = load_acked(session_id, warn=_warn_stop_ack)
         if digests <= acked:
-            return 0
+            # 予算切れで打ち切っていた場合、拾えたのは**部分集合**なので
+            # 「報告済みのものだけだった」と「未走査領域に新しい機密がある」を
+            # 区別できない。黙ると「完走して新規なし」の沈黙と 1 byte も
+            # 変わらなくなるため、必ず打ち切りを見せる (0.32.0)。
+            return _budget_notice_or_zero(deadline)
 
     tracked = [f["path"] for f in sensitive if f["status"] == "tracked"]
     untracked = [f["path"] for f in sensitive if f["status"] == "untracked"]

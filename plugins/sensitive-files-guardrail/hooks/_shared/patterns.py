@@ -255,6 +255,17 @@ def _resolve_project_patterns_path(cwd: str) -> Optional[Path]:
     基準は ``resolve_project_root`` (= ``[project:]`` セクションの第 1 候補)。
     worktree セッションでは worktree checkout 側のファイルを読む — commit 済み
     なら main repo と同じ内容が worktree にも存在するため。
+
+    **前提が崩れたときの挙動** (マージ前レビューの指摘): ファイルが未 commit
+    (untracked / ignored) だと ``git worktree add`` はそれを持ち込まないので、
+    **worktree セッションでは tier が丸ごと消える** (警告も出ない)。
+    ``[project:]`` セクションの一致判定 (``_project_section_keys``) が main repo
+    root を第 2 候補に足すのに対し、こちらは**第 1 候補のみを探索する**のは
+    意図したもの: 全候補を探すと「main repo で untracked のファイルが worktree
+    でも効く」= 作者の手元だけで効く状態を延命し、貢献者・CI では依然として
+    何も読めないまま、作者が気付ける唯一の signal (worktree で消える) を潰して
+    しまう。共有したいなら commit する (``git check-ignore`` で確認できる。
+    ``docs/PATTERNS.md`` の repo 同梱 tier の節を参照)。
     """
     root = resolve_project_root(cwd)
     if not root:
@@ -392,7 +403,11 @@ def _main_repo_root(dir_path: str) -> Optional[str]:
     - gitdir に ``worktrees`` 要素が無い (submodule の
       ``<super>/.git/modules/<name>`` を worktree と誤認しないため)
     - ``commondir`` が読めない / 共有 git dir の basename が ``.git`` でない
-      (bare repo の worktree には「main repo の working tree」が存在しない)
+      (bare repo の worktree には「main repo の working tree」が存在しない)。
+      **submodule の worktree** (``<super>/.git/modules/<name>/worktrees/<wt>``)
+      も同じ判定で None になる — commondir が
+      ``<super>/.git/modules/<name>`` を指し basename が ``.git`` でないため
+      (実測。``worktrees`` 要素 guard は素通りする)
     - 解決結果がディレクトリとして存在しない / ``$HOME`` 自身
       (``_resolve_project_key`` の「home はプロジェクトではない」規約に揃える)
 
@@ -549,6 +564,7 @@ def _parse_local_patterns_text(
     text: str,
     project_key: Union[str, Sequence[str], None],
     header_warn_callback: Optional[Callable[[str], None]] = None,
+    warned: Optional[set[str]] = None,
 ) -> list[tuple[str, bool]]:
     """patterns.local.txt を ``[project:<path>]`` セクション対応でパースする。
 
@@ -576,11 +592,18 @@ def _parse_local_patterns_text(
     で示すため、Bash の unquoted echo で空に展開される / quoted heredoc や Write
     で literal に残る、のどちらでも **黙って捨てられる** (どのプロジェクトにも
     一致しない) のを可視化する。判定自体は変えない (そのセクションは非 active)。
+
+    ``warned`` (0.32.0、マージ前レビューの指摘): 既に警告した種別の集合。
+    ``load_patterns`` が **tier 間で 1 つを共有**して渡す — repo 同梱 tier と
+    user tier を別々にパースするようになったため、同じ書き損じヘッダーが両方に
+    あると「種別ごとに 1 回」の契約が破れて同じ警告が 2 回出ていた。呼出側が
+    渡さなければ呼出ローカルの集合を作る (単体で呼ぶ既存の呼出・テスト互換)。
     """
     rules: list[tuple[str, bool]] = []
     keys = _normalize_project_keys(project_key)
     active = True  # 現在のセクションが出力対象か (共通行は常に active)
-    warned: set[str] = set()
+    if warned is None:
+        warned = set()
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -615,6 +638,7 @@ def _load_project_patterns(
     header_warn_callback: Optional[Callable[[str], None]],
     project_key: Union[str, Sequence[str], None],
     project_patterns_callback: Optional[Callable[[str], None]],
+    warned: Optional[set[str]] = None,
 ) -> list[tuple[str, bool]]:
     """repo 同梱 tier (``<root>/.claude/sensitive-files-guardrail/patterns.txt``)
     を読む (0.32.0)。
@@ -626,6 +650,9 @@ def _load_project_patterns(
     書式は user tier と完全に同じ (``_parse_local_patterns_text`` を共有) なので
     ``[project:...]`` セクションも書ける — repo 同梱なので通常は不要だが、
     monorepo でサブプロジェクトごとに書き分けたい場合に効く。
+
+    ``warned`` は ``load_patterns`` が tier 間で共有する「警告済み種別」の集合
+    (``_parse_local_patterns_text`` 参照)。
     """
     path = _resolve_project_patterns_path(cwd)
     if path is None:
@@ -638,7 +665,9 @@ def _load_project_patterns(
         if warn_callback is not None:
             warn_callback(type(e).__name__)
         return []
-    rules = _parse_local_patterns_text(text, project_key, header_warn_callback)
+    rules = _parse_local_patterns_text(
+        text, project_key, header_warn_callback, warned
+    )
     if rules and project_patterns_callback is not None:
         project_patterns_callback(PROJECT_PATTERNS_IN_USE)
     return rules
@@ -701,11 +730,15 @@ def load_patterns(
     """
     rules = _parse_patterns_text(patterns_file.read_text())
     project_key = _project_section_keys(cwd)
+    # 「書き損じヘッダーの警告は種別ごとに 1 回」を **tier をまたいで** 保つ
+    # (0.32.0、マージ前レビューの指摘)。tier ごとに別の集合を持つと、同じ
+    # 書き損じが repo 同梱と user の両方にあるときに同じ警告が 2 回出る。
+    warned: set[str] = set()
 
     rules.extend(
         _load_project_patterns(
             cwd, warn_callback, header_warn_callback, project_key,
-            project_patterns_callback,
+            project_patterns_callback, warned,
         )
     )
 
@@ -716,7 +749,7 @@ def load_patterns(
         # 新パスが無い → rename 前の旧パスを fallback で試す。
         return _load_legacy_local(
             rules, warn_callback, migrate_warn_callback, project_key,
-            header_warn_callback,
+            header_warn_callback, warned,
         )
     except OSError as e:
         if warn_callback is not None:
@@ -724,7 +757,9 @@ def load_patterns(
         return rules
 
     rules.extend(
-        _parse_local_patterns_text(local_text, project_key, header_warn_callback)
+        _parse_local_patterns_text(
+            local_text, project_key, header_warn_callback, warned
+        )
     )
     return rules
 
@@ -735,13 +770,15 @@ def _load_legacy_local(
     migrate_warn_callback: Optional[Callable[[str], None]],
     project_key: Union[str, Sequence[str], None] = None,
     header_warn_callback: Optional[Callable[[str], None]] = None,
+    warned: Optional[set[str]] = None,
 ) -> list[tuple[str, bool]]:
     """新パス不在時に rename 前の旧 patterns.local.txt を fallback 読み込みする。
 
     旧パスが存在すれば rules に連結し ``migrate_warn_callback`` で移行を促す。
     旧パス非存在は黙殺、FileNotFound 以外の OSError は ``warn_callback`` に委譲。
     いずれも既定 rules (+ 旧ローカル) を返す。``[project:...]`` セクション対応は
-    新パスと同じ (``_parse_local_patterns_text``)。
+    新パスと同じ (``_parse_local_patterns_text``)。``warned`` は repo 同梱 tier と
+    共有する「警告済み種別」の集合。
     """
     legacy_path = _resolve_legacy_local_patterns_path()
     try:
@@ -754,7 +791,9 @@ def _load_legacy_local(
         return rules
 
     rules.extend(
-        _parse_local_patterns_text(legacy_text, project_key, header_warn_callback)
+        _parse_local_patterns_text(
+            legacy_text, project_key, header_warn_callback, warned
+        )
     )
     if migrate_warn_callback is not None:
         migrate_warn_callback(LEGACY_LOCAL_PATTERNS_WARN)

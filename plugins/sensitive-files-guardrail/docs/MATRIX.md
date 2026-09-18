@@ -526,6 +526,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 
 | ケース | 全 mode (Stop は permission_mode を使わない) |
 |---|---|
+| stdin が空 / 非 JSON / dict でない (0.32.0) | **exit 0 + stderr `envelope_unreadable: <kind>`** (fail-open。Stop は block しない)。`<kind>` は `empty` / `not_json` / `not_an_object` / `EOFError`。`OSError` はこの経路に来ず下の catch-all (`internal_error` + `systemMessage`) に回る |
 | `stop_hook_active=true` | exit 0 (ループ防止) |
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
@@ -536,6 +537,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
 | 時間予算 (12s) 超過 + 検出 0 件 (0.32.0) | **exit 0 + stderr `git_budget_exceeded` / `scan_incomplete` + `systemMessage`** (block しない)。「機密なし」の沈黙と区別できないため必ず見せる |
 | 時間予算 (12s) 超過 + 検出 1 件以上 (0.32.0) | `decision: block` (従来どおり) + reason 冒頭に「一覧は不完全です」 |
+| 時間予算 (12s) 超過 + 検出集合 ⊆ 同一 session で報告済みの集合 (0.32.0) | **exit 0 + stderr `scan_incomplete` + `systemMessage`** (block しない)。拾えたのは部分集合なので、黙ると「完走して新規なし」の沈黙と区別できない |
 
 > 0.32.0 で hook 全体の時間予算 (12s、`budget.Deadline`) を導入した。hook timeout
 > (15s) に到達すると Claude Code は hook を kill して**出力を discard** する

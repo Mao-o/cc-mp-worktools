@@ -74,8 +74,15 @@ def _note_project_patterns(token: str) -> None:
     大半の Bash / Read 呼出で毎回 1 行出すと本来の warning が埋もれるため。
     repo 同梱ファイルは ``!`` 行で保護を弱めうる (clone してきた repo の除外が
     そのまま効く) ので、「なぜ block されないのか」を後から辿れるようにする。
+
+    ``always=True`` (レベル固定 = leveling 対象外) にしているのは、この記録が
+    **公表した緩和策**であって単なる診断ではないため (マージ前レビューの指摘)。
+    repo の ``!`` 行で allow に倒れた呼出は最終判定が allow なので、既定の
+    leveling では ``SFG_LOG_LEVEL=WARNING`` のときに**保護が外れたまさにその
+    呼出の記録だけが消える**。「なぜ block されないのか」を辿る手段が、
+    ログ量を絞った利用者から静かに失われることになる。
     """
-    L.log_info("project_patterns", token)
+    L.log_info("project_patterns", token, always=True)
 
 
 def load_patterns(

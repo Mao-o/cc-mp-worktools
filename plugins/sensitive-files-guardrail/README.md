@@ -435,7 +435,17 @@ repo に commit できる (0.32.0):
 > tier の強さは **`user 単位` > `repo 同梱` > `既定`** (clone してきた repo の
 > 除外をユーザーが自分のファイルで打ち消せる向き)。`!` 除外に加えて include 行も
 > 有効。第三者の repo を開くときはこのファイルも差分レビューの対象にすること
-> (`!` 行は保護を弱めうる。読み込み時に `project_patterns_in_use` を記録する)。
+> (`!` 行は保護を弱めうる。読み込み時に `project_patterns_in_use` を記録する —
+> この記録は `SFG_LOG_LEVEL` を上げても残る)。
+
+> **`.claude/` を `.gitignore` していると commit できない**: ignore された状態
+> では置いた本人の手元でだけ効き、**clone した貢献者と CI には存在しない**
+> (本人の手元では `project_patterns_in_use` が出るので「効いている」と見える)。
+> `git check-ignore -v .claude/sensitive-files-guardrail/patterns.txt` で確認し、
+> ignore されていれば `.gitignore` に `!.claude/sensitive-files-guardrail/` の
+> negation を足して commit する。未 commit のままだと `git worktree add` が
+> 持ち込まないため **worktree セッションでは tier が丸ごと消える** (無警告)。
+> 詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の同節。
 
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
 
@@ -554,6 +564,9 @@ allow 経路でも 1 行書くため増えやすい (実測 7.3MB / 12 万行)�
 `SFG_LOG_LEVEL=WARNING` を設定すると **最終判定が allow だった呼出の診断行だけ**
 が落ちる。deny / ask 経路の診断行とエラー行は level に関わらず必ず残る
 (`DEBUG` / `INFO` / `WARNING` / `ERROR` を受け付け、未設定・不正値は `INFO`)。
+repo 同梱 patterns を読み込んだ記録 (`project_patterns_in_use`) も level に
+関わらず残る — 「なぜ block されないのかを辿れる」と開示している緩和策なので、
+まさに除外が効いた (= allow に倒れた) 呼出で消えてはいけないため。
 
 > **既定 (未設定) は `INFO` で挙動は従来と完全に同一**。「この呼出は allow 経路か」
 > は記録時点では決まらない (autonomous モードでは `ask` が `allow` になり、同一

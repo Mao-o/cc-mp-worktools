@@ -252,6 +252,65 @@ class TestMainBudgetExceededVisibility(BaseMainTest):
         self.assertEqual(out, "")
         self.assertNotIn("budget_exceeded", err)
 
+    def _run_with_marked_exceeded(self, envelope: dict) -> tuple[int, str, str]:
+        """予算は残したまま「どこかで打ち切った」状態で ``main`` を走らせる。
+
+        ``total=0.0`` では git を 1 回も呼べず検出集合が**空**になるため
+        (上の 3 件が通る経路)、「部分集合は拾えた」セルには届かない。実際の
+        打ち切りは走査の途中で起きるので、通常予算のまま ``exceeded`` だけ
+        立てて「拾えた部分集合 + 打ち切り済み」を再現する。
+        """
+        from budget import Deadline as RealDeadline
+
+        def factory(*a, **k):
+            d = RealDeadline(*a, **k)
+            d.mark_exceeded()
+            return d
+
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps(envelope))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "Deadline", factory):
+                rc = entry.main()
+            return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_incomplete_scan_is_reported_even_when_all_hits_were_acked(self):
+        """打ち切り + 検出集合が全 ack 済みでも黙らない (マージ前レビューの指摘)。
+
+        0.19.0 の once-only (``digests <= acked`` で exit 0) が予算を見ずに
+        早期 return していたため、**部分集合しか拾えず、その部分集合が既に
+        報告済みだった**ターンは stdout / stderr とも空になり「完走して新規
+        なし」の沈黙と 1 byte も区別できなかった (未走査領域に新しい機密が
+        あっても可視化経路が全部飛ぶ)。
+        """
+        (self.repo / ".env").write_text("KEY=v\n")
+        env = {"cwd": str(self.repo), "session_id": "sess-budget-ack"}
+        # 1 回目 (予算内): block して digest を ack に保存する
+        _rc, out, _err = _run_main(env)
+        self.assertEqual(json.loads(out)["decision"], "block")
+        # 2 回目: 同じ集合 (= 全 ack 済み) + 打ち切り済み
+        rc, out, err = self._run_with_marked_exceeded(env)
+        self.assertEqual(rc, 0)
+        self.assertIn("scan_incomplete: budget_exceeded", err)
+        payload = json.loads(out)
+        self.assertNotIn("decision", payload)  # block はしない (判定は変えない)
+        self.assertIn("不完全", payload["systemMessage"])
+
+    def test_acked_and_complete_scan_stays_silent(self):
+        """対照: 予算内 + 全 ack 済みは従来どおり完全な沈黙 (once-only は維持)。"""
+        (self.repo / ".env").write_text("KEY=v\n")
+        env = {"cwd": str(self.repo), "session_id": "sess-acked-quiet"}
+        self.assertIn("block", _run_main(env)[1])
+        rc, out, err = _run_main(env)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertNotIn("scan_incomplete", err)
+
     def test_block_reason_discloses_incompleteness(self):
         """機密ファイルが 1 件以上あった場合は block reason 側で開示する。"""
         entry = _load_entry()
@@ -267,6 +326,80 @@ class TestMainBudgetExceededVisibility(BaseMainTest):
             submodule_by_path={},
         )
         self.assertNotIn("一覧は不完全です", normal)
+
+
+class TestMainEnvelopeUnreadable(BaseMainTest):
+    """0.32.0 (マージ前レビューの指摘): 読めない hook input に breadcrumb を出す。
+
+    空 stdin / 非 JSON / dict でない入力はいずれも ``exit 0`` + 空 stdout で、
+    これは hook の**正常形**と 1 byte も区別できなかった (完全無音)。Stop が
+    fail-open であること自体は設計方針 (block で毎ターン差し戻すと 0.14.0 の
+    離脱を再生産する) なので判定は変えず、stderr に 1 行だけ出す。この hook の
+    他の失敗経路 (``patterns_unavailable`` / ``git_unavailable`` /
+    ``internal_error`` / ``scan_incomplete``) が全て stderr に 1 行出すのとの
+    非対称も解消する。
+    """
+
+    def _run_raw(self, raw: str) -> tuple[int, str, str]:
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(raw)
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            rc = entry.main()
+            return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_each_kind_is_named_and_stays_fail_open(self):
+        for raw, kind in (
+            ("", "empty"),
+            ("garbage", "not_json"),
+            ("[1, 2]", "not_an_object"),
+            ('"a string"', "not_an_object"),
+        ):
+            with self.subTest(raw=raw):
+                rc, out, err = self._run_raw(raw)
+                self.assertEqual(rc, 0)  # fail-open は維持
+                self.assertEqual(out, "")  # block しない
+                self.assertEqual(
+                    err,
+                    f"[check-sensitive-files] envelope_unreadable: {kind}\n",
+                )
+
+    def test_os_error_keeps_the_visible_internal_error_path(self):
+        """stdin の ``OSError`` は breadcrumb で握らず catch-all に回す。
+
+        stderr 1 行だけにすると ``claude --debug`` のログにしか出ないため、
+        従来 ``main`` の catch-all が stdout に出していた ``systemMessage``
+        (UI に出る「このターンは検査されていない」) が消える = breadcrumb を
+        足した結果として**可視性が下がる**。
+        """
+        class _BoomStdin(io.StringIO):
+            def read(self, *a, **k):
+                raise OSError("mock stdin failure")
+
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = _BoomStdin()
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            rc = entry.main()
+            out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 0)
+        self.assertIn("internal_error: OSError", err)
+        self.assertNotIn("envelope_unreadable", err)
+        self.assertIn("検査が行われていません", json.loads(out)["systemMessage"])
+
+    def test_input_body_is_not_echoed(self):
+        """壊れた stdin にも機密が含まれうるので中身は出さない (固定トークンのみ)。"""
+        _rc, out, err = self._run_raw('{"cwd": "/tmp/secret-dir", "x"')
+        self.assertNotIn("secret-dir", err)
+        self.assertNotIn("secret-dir", out)
 
 
 class TestMainInternalError(BaseMainTest):

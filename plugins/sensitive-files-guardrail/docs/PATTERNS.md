@@ -236,6 +236,39 @@ mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guardrail/patterns.local.t
 書式は user 単位ファイルと完全に同じで、`[project:...]` を書くこともできる
 (monorepo でサブプロジェクトごとに書き分けたい場合)。
 
+> **ヘッダーを書くなら typo の代償が大きい**: `[project:]` が空 / `$NAME` の
+> literal だと、そのセクションはどのプロジェクトにも一致せず黙って捨てられる
+> ため、警告を 1 行出す仕組みになっている (上の「書き損じの警告」)。この
+> 警告は `SFG_LOG_LEVEL` では抑制できず **stderr にも出る**ので、commit された
+> ファイルに typo が 1 つあると**全貢献者の全 Read / Bash / Edit / Write**に
+> 1 行ずつ付く。このファイルでは通常ヘッダー不要なので、書かないのが安全。
+> 書くなら絶対パスを literal で書く。
+
+**`.claude/` を `.gitignore` している repo では commit できない (要確認)**:
+`.claude/` を丸ごと ignore するのは広く行われている慣習で、その状態ではこの
+ファイルは **置いた本人の手元でだけ効き、clone した貢献者と CI には存在しない**
+(しかも本人の手元では `project_patterns_in_use` が記録されるので「効いている」
+と見える)。tier の存在理由が消えるので、置く前に確認する:
+
+```bash
+git check-ignore -v .claude/sensitive-files-guardrail/patterns.txt
+```
+
+出力があれば ignore されている。`.gitignore` に negation を足して commit する:
+
+```
+.claude/
+!.claude/sensitive-files-guardrail/
+```
+
+commit されていない場合の副作用: `git worktree add` は untracked / ignored
+ファイルを持ち込まないため、**worktree セッション (`claude --worktree` /
+`--bg` / sub-agent の `isolation: worktree`) では tier が丸ごと消える**
+(警告は出ない)。読み込み位置は worktree checkout 側の第 1 候補のみで、main
+repo 側を探しに行かないのは意図的 — 探しに行くと「本人の手元だけで効く」状態が
+延命され、貢献者・CI では依然として何も読めないまま、気付ける唯一の signal が
+消えるため (`_resolve_project_patterns_path` の docstring)。
+
 **評価順 (tier)**: `既定 patterns.txt` → `repo 同梱` → `user 単位` の順に連結し、
 last-match-wins で後ろが強い = **`user > repo > 既定`**。repo 同梱を user より
 前に置くのは、clone してきた repo が持ち込んだ除外を、ユーザーが自分のファイルに
@@ -492,7 +525,9 @@ repo 同梱 tier のパス (`<root>/.claude/sensitive-files-guardrail/patterns.t
 基準は `resolve_project_root` (= `[project:]` の第 1 候補) なので、worktree では
 worktree checkout 側を読む (commit 済みなら main と同内容)。root 不明なら `None`
 = この tier を読まない。非存在は黙殺、`FileNotFound` 以外の `OSError` は
-`warn_callback` へ (user tier と同じ契約)。
+`warn_callback` へ (user tier と同じ契約)。**未 commit (untracked / ignored) だと
+worktree セッションでは tier が消える** — main repo 側を探しに行かないのは意図的
+(上の repo 同梱 tier の節)。
 
 ### `_project_section_keys(cwd) -> list[str]` (0.32.0)
 
@@ -509,7 +544,9 @@ worktree checkout 側を読む (commit 済みなら main と同内容)。root �
 `gitdir: <main>/.git/worktrees/<name>` を指し、その `commondir` が共有 git dir
 (`<main>/.git`) に解決し、その親がディレクトリとして存在する場合のみ。
 submodule (`gitdir: <super>/.git/modules/<name>`)・bare repo の worktree・
-`$HOME` 自身は `None`。`git` コマンドは呼ばない (PreToolUse の latency 目標)。
+**submodule の worktree** (`<super>/.git/modules/<name>/worktrees/<wt>` —
+commondir が `.git` でないディレクトリに解決する)・`$HOME` 自身は `None`。
+`git` コマンドは呼ばない (PreToolUse の latency 目標)。
 
 ### `_parse_local_patterns_text(text, project_key) -> list[tuple[str, bool]]` (0.15.0)
 

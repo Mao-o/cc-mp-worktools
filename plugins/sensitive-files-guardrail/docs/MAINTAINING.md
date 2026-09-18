@@ -185,7 +185,14 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   deny / ask → WARNING 相当。**行の label は `INFO ` のまま**なので既存の
   grep / 集計は壊れない (有効レベルは出すか否かの内部概念)。`log_error` は
   level に関わらず必ず書き、遅延中ならバッファを先に吐いて順序を保つ
-  (error 時は最終判定が未確定で leveling できないため、全部出す側に倒す)
+  (error 時は最終判定が未確定で leveling できないため、全部出す側に倒す)。
+  `log_info(..., always=True)` は「**レベル固定で積む** (leveling 対象外)」
+  マークで、`flush_deferred` の閾値判断を素通りして必ず書く (書く位置と順序は
+  他の INFO と同じ)。付けるのは「消えると**開示した緩和策が成立しなくなる**」
+  記録だけ — 現状は repo 同梱 patterns の読み込み記録
+  (`project_patterns_in_use`) の 1 箇所。通常の診断に付けると量対策の目的が
+  消えるので、追加時は「その記録が無いと docs のどの主張が嘘になるか」を
+  書けるかで判断する
 - Stop hook の once-only state (`~/.claude/sensitive-files-guardrail/stop-ack/`)
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
@@ -200,10 +207,10 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 "No such file or directory" になる (= 79 件の suite が黙って走らない)。
 
 ```bash
-# redact-sensitive-reads (0.32.0 時点 1,382 件)
+# redact-sensitive-reads (0.32.0 時点 1,387 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (0.32.0 時点 159 件、tmpdir に git repo を作って検査)
+# check-sensitive-files (0.32.0 時点 164 件、tmpdir に git repo を作って検査)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
