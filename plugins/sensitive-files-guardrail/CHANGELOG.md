@@ -20,13 +20,118 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.29.1
+
+内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`
+経路の `.envrc` 案内) + マージ前レビューの指摘 5 件 (`is_envrc_basename` の
+判定境界、助言文面のテンプレート導出方法、glob operand の判定漏れ、load
+clause の自己矛盾な案内、move clause での実コマンド生成の撤回) を修正。
+**判定境界 (deny / allow / ask / block するか) の変化: なし** (助言文言の
+修正・テスト追加のみ)。テスト件数: redact 1240 → **1272**、check 135
+(変化なし)。
+
+1. **Bash の `cp` / `mv` (move category) が `.envrc` (direnv) にも
+   `.env.example` 派生 (Next.js 慣例) の案内を出していた不具合を修正**。
+   0.29.0 で edit_handler (Edit/Write) 側は対応済みだったが、Bash 経由の
+   同種操作には同じ穴が残っていた。`_bash_deny_move` に `is_envrc` を渡し、
+   `.envrc` family では `<元ファイル名>.example` テンプレート派生を案内する
+   専用の固定文言に差し替えた (basename には依存しない。経緯は下記 6 を参照)。
+2. **同クラスの sweep で `source` / `.` (load category) の案内も修正**。
+   `.envrc` を load しようとしたときの案内が dotenv-cli (静的 `KEY=value`
+   パーサ) を勧めていたが、`.envrc` は条件分岐や `use flake` を書ける shell
+   script でありパーサの前提と合わない。`.envrc` では direnv の hook 経由での
+   読込を案内する文言に差し替えた (dotenv-cli の案内を落とし、direnv の案内は
+   維持)。
+3. **設計判断: 判定 (`engine.is_envrc_basename`) は `core.messages` 自身では
+   呼ばず、呼出側 (`bash_handler._build_deny_response`) が行って結果を
+   `is_envrc` として渡す**。edit_handler / edit_deny と同じ分担にし、
+   `core.messages` が redaction 層に依存しない既存方針を保った。
+4. **マージ前レビューの指摘 (1 件目): `is_envrc_basename` が `foo.envrc`
+   のような命名付きスクリプトや、大文字小文字を区別する FS 上の `.ENVRC`
+   でも True を返す一方、direnv が実際に自動発見・自動 load するのは
+   大文字小文字も一致する literal `.envrc` だけだった不具合を修正**。
+   `foo.envrc` / `.ENVRC` は direnv の対象外なので、`.envrc` **family**
+   (`*.envrc`、大文字小文字問わず) 全体を「direnv が自動発見するかどうか」
+   だけで判定する単一の predicate は実態と合わなかった。
+5. **上記 4 の修正の隠れた回帰を修正 (マージ前レビューの指摘、2 件目)**。
+   4 の初版は `is_envrc_basename` を literal `.envrc` の exact match に
+   厳格化し、非 literal な `*.envrc` operand は bash_handler / edit_handler
+   共通の既定 (dotenv-cli 推奨 / `.env.example`) 文言にそのままフォール
+   バックさせていた。これは別方向の実態不一致を生んだ: `.envrc` は
+   条件分岐や `use flake` を書ける shell script で dotenv-cli の静的
+   `KEY=value` パーサとは性質が合わないのに `source foo.envrc` に
+   dotenv-cli を勧め、`cp foo.envrc x` や Edit/Write の overwrite に
+   無関係な `.env.example` を勧めていた。
+   - **predicate を 2 つに分離**: `is_envrc_basename` を family 全体
+     (`*.envrc`、case-insensitive) の判定に戻し、「direnv が実際に自動
+     発見・自動 load するか」(literal `.envrc` のみ) を新設した
+     `is_direnv_literal` に切り出した。
+   - **load (`source`/`.`)**: family なら dotenv-cli を出さず shell 形式
+     の助言にする。literal ならさらに direnv hook 経由の自動読込を案内し、
+     family だが非 literal (`foo.envrc` / `.ENVRC`) なら「direnv の自動
+     発見対象外」に留め、自動読込は案内しない。
+   - **Edit/Write**: テンプレート案内を実際の basename から動的に派生させる
+     (`<basename>.example`)。`.envrc` → `.envrc.example`、`foo.envrc` →
+     `foo.envrc.example`、`.ENVRC` → `.ENVRC.example`。literal かどうかは
+     問わない (name の対応関係が保たれれば十分)。**Edit/Write 側はこの
+     basename 派生のまま** — 案内するのはファイル名の言及だけで、実行可能な
+     コマンド文字列を組み立てていないため。
+   - **move (`cp`/`mv`)**: 当初は Edit/Write と同じ basename 派生にしたが、
+     最終的に family 全体で同一の**固定文言**に戻した (下記 6 を参照)。
+   - **判定境界 (deny/allow) には一切影響しない**。助言文面の分岐条件と
+     テンプレート案内の文言のみの修正。
+   テスト: `foo.envrc` / `.ENVRC` / literal `.envrc` × move / load / edit の
+   既存回帰テストを新しい契約に更新し、`source foo.envrc` に dotenv-cli /
+   direnv 自動読込のいずれも出ないこと、`cp foo.envrc x` に `.env.example`
+   が出ず family 共通の clause が出ること、`source .envrc` には direnv
+   自動読込が出ることを追加で固定した。修正前コード (4 の literal-only 版)
+   に対して新規・更新テストが失敗することを確認済み (負テスト)。deny reason
+   の byte 上限 (`MAX_REASON_BYTES` = 3072) 内に収まることも実測した (最大
+   実測値: `source foo.envrc` で 2067 byte)。
+6. **マージ前レビューの指摘 3 件 (上記 4/5 の追加検証で発覚)**。
+   - **glob operand の判定漏れ**: `cp *.envrc backup/` のように dotglob /
+     `GLOBIGNORE` 有効時に glob operand が `.envrc` へ展開されうる
+     ケースで deny 自体は正しく効いていたが、`is_envrc_basename` /
+     `is_direnv_literal` に operand 文字列 `*.envrc` をそのまま渡していた
+     ため `"*.envrc".lower().endswith(".envrc")` が True になり、対象ファイル
+     が 1 つに確定していないのに `.envrc` 前提の案内 (direnv hook /
+     テンプレート派生) が出ていた。glob operand は既定文言のまま
+     (`docs/DESIGN.md` の load/move 節
+     が元々定めていた仕様) にするため、`bash_handler._build_deny_response`
+     で operand が glob を含むときは両判定関数を評価せず False に固定した。
+   - **load clause の自己矛盾な案内**: family だが非 literal
+     (`foo.envrc` / `.ENVRC`) を `source` / `.` した場合の suggestion が
+     「明示的に実行してください」と、今まさに block した操作そのものを
+     勧めていた。この一文を削り、隔離された安全な代替 (1Password CLI /
+     pass / git-secret、既存の既定文言) だけを残した。
+   - **move clause の実コマンド生成を撤回し固定文言に戻した**。5 で入れた
+     `cp <basename>.example <basename>` はコピー & ペーストでの実行を想定した
+     実コマンド文字列で、その表面ごとに次の指摘が続いた: basename を raw 補間
+     すると空白 (`foo bar.envrc`) で 2 引数に割れて壊れる / `;`
+     (`x;echo PWN.envrc`) を含むとコマンド注入になる / operand の
+     ディレクトリ部分が落ちる / `-` 始まりの basename でオプション終端が要る。
+     個別に潰す方向は収束しなかったため、**basename に依存しない固定文言**
+     (`_BASH_MOVE_SUGGESTION_FORMAT_ENVRC` = `<元ファイル名>.example`
+     テンプレートからの複製を勧める文面) に戻した。実ファイル名との対応は
+     同じ reason 内の `matched_operand:` 行から復元できるので、LLM 向けの
+     助言として実行可能なコマンドを生成する必要はない。`core.messages` 全体で
+     棚卸しした結果、実コマンド文字列を組み立てていたのはこの 1 箇所のみ
+     だった (edit 側の `<basename>.example` clause 群はファイル名の言及のみ
+     なので basename 派生のまま残す)。
+   3 件とも判定境界には影響しない (助言文言の修正のみ)。各修正について
+   修正前コードに対して新規テストが失敗することを確認済み (負テスト。move
+   clause については動的生成を一時的に復元して、更新後のテストが family
+   全 basename で落ちることを確認した)。deny reason の byte 上限内に収まる
+   ことも実測済み (固定文言は既定 (.env) 文言 +10 byte で、上限
+   `MAX_REASON_BYTES` = 3072 に対する余裕は入力非依存)。
+
 ## 0.29.0
 
 内部バックログの精査で発見した課題 6 件 + マージ前レビューの指摘 2 件を修正
 (テスト整備 2 件・保守性 2 件・文言修正 2 件・マージ前レビュー対応 2 件)。
 **判定境界 (deny / allow / ask / block するか) の変化: なし** (助言文言の
 追加・修正・テスト追加・dead code 削除のみ)。テスト件数:
-redact 1219 → **1239**、check 133 → **135**。
+redact 1219 → **1240**、check 133 → **135** (マージ前レビュー対応分を含む)。
 
 ### テスト整備
 
