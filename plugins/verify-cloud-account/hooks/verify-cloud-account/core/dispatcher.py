@@ -213,6 +213,26 @@ def _decide(effective_mode: str, body: str, notes: list[str]) -> dict:
     return output.deny(text + "\n\n" + mode.DENY_HINT)
 
 
+def _notes_only(notes: list[str]) -> dict | None:
+    """`off` で検証しないときでも、モード解決の注意書きだけは届ける。
+
+    `VERIFY_CLOUD_ACCOUNT_MODE=of` (typo) のような不正値は enforce に倒しつつ
+    note を作るが、`"$mode": "off"` が同時にあると検証前に抜けるため、
+    従来はこの note が誰にも届かなかった = **env の綴り間違いが黙って無視される**。
+    結果 (通す) は利用者の意図どおりでも、env を直すまで「env で off にできて
+    いる」と誤解し続ける。deny は作らず通知だけ返す。
+
+    **dedup はしない**ので、不正値が立っている間は対象コマンドの度に出る
+    (実測: 同じ入力で 3 回連続とも通知)。warn モードの deny 相当の通知も cache
+    しない = 毎回出る仕様なので揃えてある。正しい値 (`off`) や未設定では
+    `None` に戻るため、鳴り続けるのは実際に設定が壊れている間だけ。
+    """
+    text = "\n\n".join(n for n in notes if n)
+    if not text:
+        return None
+    return output.warn(text)
+
+
 def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
     """親ディレクトリの accounts.local.json を採用した場合の 1 行注釈。
 
@@ -409,7 +429,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     env_mode, env_note = mode.from_env()
     mode_notes = [env_note] if env_note else []
     if env_mode == mode.OFF:
-        return None
+        # `from_env()` は「mode」か「不正値 note」の片方しか返さないので、この経路の
+        # note は常に空 (= None を返す)。形を下の off と揃えておく。
+        return _notes_only(mode_notes)
     # accounts.local.json を読む前に決まる deny (競合 / 未設定 / 壊れた JSON) は
     # "$mode" が読めないため env だけで mode を決める。
     pre_file_mode = mode.effective(env_mode, None)
@@ -480,7 +502,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         mode_notes.append(file_note)
     effective_mode = mode.effective(env_mode, file_mode)
     if effective_mode == mode.OFF:
-        return None
+        return _notes_only(mode_notes)
 
     try:
         accounts_mtime = accounts_path.stat().st_mtime

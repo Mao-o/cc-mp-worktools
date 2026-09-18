@@ -125,12 +125,14 @@ class TestGithub(unittest.TestCase):
         )
         with mock.patch("subprocess.run", return_value=_fake_run(stdout=out)):
             err = github.verify("Mao-o", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("不一致", err)
         self.assertIn("Mao-o", err)
 
     def test_cli_not_found(self):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             err = github.verify("Mao-o", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("gh コマンドが見つかりません", err)
 
     def test_timeout(self):
@@ -139,11 +141,13 @@ class TestGithub(unittest.TestCase):
             side_effect=subprocess.TimeoutExpired(cmd=[], timeout=10),
         ):
             err = github.verify("Mao-o", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("タイムアウト", err)
 
     def test_empty_output(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="")):
             err = github.verify("Mao-o", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("アクティブアカウント", err)
 
     def test_dict_match_all_hosts(self):
@@ -169,6 +173,7 @@ class TestGithub(unittest.TestCase):
                 {"github.com": "Mao-o", "ghe.example.com": "mao-corp"},
                 "/p",
             )
+        self.assertIsNotNone(err)
         self.assertIn("ghe.example.com", err)
         self.assertIn("wrong-user", err)
 
@@ -178,12 +183,14 @@ class TestGithub(unittest.TestCase):
                 {"github.com": "Mao-o", "ghe.example.com": "mao-corp"},
                 "/p",
             )
+        self.assertIsNotNone(err)
         self.assertIn("ghe.example.com", err)
         self.assertIn("ログインしていません", err)
 
     def test_invalid_expected_type(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_GITHUB_COM_ONLY)):
             err = github.verify(12345, "/p")
+        self.assertIsNotNone(err)
         self.assertIn("文字列または", err)
 
     def test_dict_empty_object_fail_closed(self):
@@ -289,6 +296,7 @@ class TestGithubAuthStatusParsing(unittest.TestCase):
     def test_legacy_format_verify_mismatch(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_LEGACY_SINGLE_HOST)):
             err = github.verify("other-user", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("不一致", err)
 
     def test_unparseable_output_gives_version_hint(self):
@@ -296,6 +304,7 @@ class TestGithubAuthStatusParsing(unittest.TestCase):
         「未ログイン」ではなく「解釈できません」+ gh --version 案内にする。"""
         with mock.patch("subprocess.run", return_value=_fake_run(stdout=GH_UNPARSEABLE)):
             err = github.verify("Mao-o", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("解釈できません", err)
         self.assertIn("gh --version", err)
         self.assertNotIn("gh auth login", err)
@@ -309,6 +318,7 @@ class TestGithubAuthStatusParsing(unittest.TestCase):
             ),
         ):
             err = github.verify("Mao-o", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("gh auth login --skip-ssh-key", err)
         self.assertNotIn("解釈できません", err)
 
@@ -1213,16 +1223,19 @@ class TestGcloud(unittest.TestCase):
     def test_string_mismatch(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="other\n")):
             err = gcloud.verify("my-proj", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("不一致", err)
 
     def test_unset(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="(unset)\n")):
             err = gcloud.verify("my-proj", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("設定されていません", err)
 
     def test_cli_not_found(self):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             err = gcloud.verify("my-proj", "/p")
+        self.assertIsNotNone(err)
         self.assertIn("gcloud コマンドが見つかりません", err)
 
     def test_dict_both_match(self):
@@ -1246,6 +1259,7 @@ class TestGcloud(unittest.TestCase):
             err = gcloud.verify(
                 {"project": "my-proj", "account": "me@example.com"}, "/p"
             )
+        self.assertIsNotNone(err)
         self.assertIn("プロジェクト不一致", err)
 
     def test_dict_account_mismatch(self):
@@ -1257,10 +1271,12 @@ class TestGcloud(unittest.TestCase):
             err = gcloud.verify(
                 {"project": "my-proj", "account": "me@example.com"}, "/p"
             )
+        self.assertIsNotNone(err)
         self.assertIn("アカウント不一致", err)
 
     def test_dict_empty_object(self):
         err = gcloud.verify({}, "/p")
+        self.assertIsNotNone(err)
         self.assertIn("project", err)
 
 
@@ -1887,6 +1903,7 @@ class TestGithubLocalConfigRead(_LocalConfigBase):
         ) as run:
             err = github.verify("other-user", "/p", env=self.env)
         self.assertTrue(run.called, "エラー方向は CLI で取り直すこと")
+        self.assertIsNotNone(err)
         self.assertIn("不一致", err)
 
     def test_local_mismatch_is_confirmed_by_cli_before_deny(self):
@@ -1925,6 +1942,37 @@ class TestGithubLocalConfigRead(_LocalConfigBase):
         ) as run:
             self.assertIsNone(github.verify("active-user", "/p", env=env))
         self.assertTrue(run.called)
+
+    def test_home_override_falls_back_to_cli(self):
+        """`HOME=<other> gh ...` では hook 側の hosts.yml で allow しない。
+
+        `HOME` は gh の設定ディレクトリ解決に参加する (`$HOME/.config/gh`) ので、
+        インライン env で差し替えられた gh は**別の hosts.yml** を読む。ここで
+        hook 側のファイルを信じると、実行される gh とは違うアカウントで allow
+        してしまう (ローカル読取の導入前は検証 subprocess にも同じ env が渡り、
+        不一致として deny されていた = 退行にあたる)。
+        """
+        # hook 側の hosts.yml は期待値と一致している (= 唯一の bail 理由は HOME)。
+        env = dict(self.env, HOME=str(self.tmp / "other-home"))
+        with mock.patch(
+            "subprocess.run",
+            return_value=_fake_run(
+                stdout=GH_GITHUB_COM_ONLY.replace("Mao-o", "other-user")
+            ),
+        ) as run:
+            err = github.verify("active-user", "/p", env=env)
+        self.assertTrue(
+            run.called, "HOME が上書きされているのにローカル読取で済ませている"
+        )
+        self.assertIsNotNone(err, "CLI 側の現在値 (other-user) で判定していない")
+        self.assertIn("不一致", err)
+
+    def test_same_home_still_reads_locally(self):
+        """negative control: `HOME` が hook と同じなら明示されていても読み続ける。"""
+        env = dict(self.env, HOME=os.environ["HOME"])
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(github.verify("active-user", "/p", env=env))
+        self.assertFalse(run.called)
 
     def test_missing_hosts_yml_falls_back_to_cli(self):
         self.hosts.unlink()
@@ -2038,6 +2086,7 @@ class TestGcloudLocalConfigRead(_LocalConfigBase):
         ) as run:
             err = gcloud.verify("want-proj", "/p", env=self.env)
         self.assertTrue(run.called)
+        self.assertIsNotNone(err)
         self.assertIn("現在=cli-proj", err)
         self.assertNotIn("my-proj", err)
 
@@ -2086,6 +2135,31 @@ class TestGcloudLocalConfigRead(_LocalConfigBase):
                 ) as run:
                     self.assertIsNone(gcloud.verify("my-proj", "/p", env=env))
                 self.assertTrue(run.called, f"{name} があるのにローカル読取で済ませている")
+
+    def test_home_override_falls_back_to_cli(self):
+        """`HOME=<other> gcloud ...` では hook 側の設定ファイルで allow しない。
+
+        `HOME` は gcloud の設定ディレクトリ解決に参加する
+        (`$HOME/.config/gcloud`)。gh 側と同じ理由でローカル読取を諦める。
+        """
+        # hook 側の config_work は期待値と一致している (= 唯一の bail 理由は HOME)。
+        env = dict(self.env, HOME=str(self.tmp / "other-home"))
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="cli-proj\n")
+        ) as run:
+            err = gcloud.verify("my-proj", "/p", env=env)
+        self.assertTrue(
+            run.called, "HOME が上書きされているのにローカル読取で済ませている"
+        )
+        self.assertIsNotNone(err, "CLI 側の現在値 (cli-proj) で判定していない")
+        self.assertIn("現在=cli-proj", err)
+
+    def test_same_home_still_reads_locally(self):
+        """negative control: `HOME` が hook と同じなら明示されていても読み続ける。"""
+        env = dict(self.env, HOME=os.environ["HOME"])
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(gcloud.verify("my-proj", "/p", env=env))
+        self.assertFalse(run.called)
 
     def test_invalid_configuration_name_is_rejected(self):
         """パス要素を含む名前で設定ファイルのパスを組まない。

@@ -34,6 +34,10 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
   フォーマット統一のため、Claude は Read / Bash(cat) で直接読まない。
 - stdout は最初は値隠蔽で確認し、必要なら AskUserQuestion の承認を経て
   `--show-values` で再実行する。
+- `"$mode"` は `[mode]` 行として値ごと表示される (service ではないので CLI 突合
+  の対象外)。**`"$mode"` は builder が値を書かない唯一のキー = 手編集する前提の
+  キー**なので、変更したいと言われたら「エディタで直接書く」か「環境変数
+  `VERIFY_CLOUD_ACCOUNT_MODE`」を案内する (builder にサブコマンドは無い)。
 
 ## 引数
 
@@ -80,6 +84,13 @@ show は **hook (dispatcher) が実際に読むファイル**を表示する。c
 親側のファイルが出る。stdout 先頭の `対象: <パス>` 行に解決結果 (継承の有無を含む)
 が出るので、ユーザーに伝えること。特定のファイルを名指しで見たいときは
 `--path <file>` を付ける。
+
+プロジェクト側に無い場合、show は `no accounts.local.json found at <path>` に
+加えて**グローバル既定** (`~/.claude/verify-cloud-account/accounts.local.json`) の
+有無を出す。「存在します (hook はこのファイルで検証します)」が出たときは
+**未設定ではなくグローバル既定で検証されている**状態なので、そう伝えること。
+その中身と CLI 現在値を突き合わせるには、案内どおり `--path <グローバル既定>` を
+付けて再実行する。
 
 ## 複数パス競合時
 

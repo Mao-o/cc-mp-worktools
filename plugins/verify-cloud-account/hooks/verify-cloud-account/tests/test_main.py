@@ -48,23 +48,21 @@ class TestMainEntry(unittest.TestCase):
         # accounts.local.json) / CLI 設定 dir / モード env をここで隔離する。
         # 開発者が自分用のグローバル既定や VERIFY_CLOUD_ACCOUNT_MODE を持って
         # いると「未設定なら deny」のスモークが通らなくなる。
+        #
+        # `start_isolation()` は使えない (この `os.environ` ではなく**子プロセスの**
+        # env を組むため) が、除去規則は `_testutil.sanitized_env()` で共有する。
         self.fake_home = Path(self.tmp) / "home"
         self.fake_home.mkdir()
-        self.env = {
-            **os.environ,
-            **_testutil.cli_config_env(Path(self.tmp) / "cliconfig"),
-            "HOME": str(self.fake_home),
-            "TMPDIR": str(self.cache_tmp),
-            "CLAUDE_PROJECT_DIR": str(self.project),
-        }
-        for name in _testutil.LEAKY_ENV_VARS:
-            self.env.pop(name, None)
-        for name in [
-            n
-            for n in list(self.env)
-            if n.startswith("CLOUDSDK_") and n != "CLOUDSDK_CONFIG"
-        ]:
-            self.env.pop(name, None)
+        self.env = _testutil.sanitized_env(
+            {
+                **os.environ,
+                **_testutil.cli_config_env(
+                    Path(self.tmp) / "cliconfig", self.fake_home
+                ),
+                "TMPDIR": str(self.cache_tmp),
+                "CLAUDE_PROJECT_DIR": str(self.project),
+            }
+        )
 
     def _run(self, command: str) -> subprocess.CompletedProcess:
         payload = {

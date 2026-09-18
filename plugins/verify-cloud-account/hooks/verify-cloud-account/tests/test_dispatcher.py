@@ -832,6 +832,29 @@ class TestVerificationMode(BaseWithTmpProject):
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn('"$mode"', out["permissionDecisionReason"])
 
+    def test_invalid_env_value_is_reported_even_when_file_mode_is_off(self):
+        """`off` で抜けるときも env の綴り間違いは通知する。
+
+        `VERIFY_CLOUD_ACCOUNT_MODE=of` (typo) + `"$mode": "off"` は結果としては
+        利用者の意図どおり通るが、note を捨てると「env で off にできている」と
+        誤解したまま env が直らない (マージ前レビューの指摘)。deny は作らず
+        `additionalContext` だけを返す。
+        """
+        self._write_accounts({"github": "Mao-o", "$mode": "off"})
+        with self._with_mode("of"):
+            with mock.patch("services.github.verify") as verify:
+                out = dispatch("gh pr list", str(self.project_dir))
+        self.assertFalse(verify.called, "off なのに verify() を呼んでいる")
+        self.assertIsNotNone(out, "env の不正値が黙って捨てられている")
+        out = out["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("不正な値", out["additionalContext"])
+
+    def test_file_mode_off_without_env_note_stays_silent(self):
+        """negative control: 通知すべき note が無ければ何も返さない (従来どおり)。"""
+        self._write_accounts({"github": "Mao-o", "$mode": "off"})
+        self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+
     def test_mode_key_is_not_verified_as_a_service(self):
         """`"$mode"` は service キーとして扱わない (未記載 deny を誘発しない)。"""
         self._write_accounts({"github": "Mao-o", "$mode": "enforce"})
@@ -889,12 +912,28 @@ class TestGlobalDefaultAccounts(BaseWithTmpProject):
             self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
         self.assertEqual(verify.call_args[0][0], "project-user")
 
-    def test_global_mode_off_applies_to_every_project(self):
-        """グローバル既定に `"$mode"` を書けば全プロジェクトの既定になる。"""
+    def test_global_mode_off_applies_to_projects_without_own_config(self):
+        """グローバル既定の `"$mode"` は accounts.local.json を持たない側に効く。"""
         self._write_global({"$mode": "off"})
         with mock.patch("services.github.verify") as verify:
             self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
         self.assertFalse(verify.called)
+
+    def test_global_mode_off_does_not_apply_to_project_with_own_config(self):
+        """自前の accounts.local.json があるプロジェクトは global を一切読まない。
+
+        「グローバル既定に書けば全プロジェクトの既定になる」という書き方は
+        **設定済みで deny が出ている人には効かない**ので過大主張になる
+        (マージ前レビューの指摘)。docs の文面と実装を一致させたことを固定する。
+        """
+        self._write_global({"$mode": "off"})
+        self._write_accounts({"github": "project-user"})
+        with mock.patch("services.github.verify", return_value="不一致") as verify:
+            result = dispatch("gh pr list", str(self.project_dir))
+        self.assertTrue(verify.called, "global の off がプロジェクト側に漏れている")
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
 
     def test_unconfigured_deny_mentions_the_global_path(self):
         reason = dispatch("gh pr list", str(self.project_dir))[

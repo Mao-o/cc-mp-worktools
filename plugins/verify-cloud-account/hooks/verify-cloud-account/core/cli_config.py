@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import configparser
+import os
 from pathlib import Path
 
 # 設定ファイルの読み取り上限。gh の hosts.yml / gcloud の config_<name> はいずれも
@@ -31,6 +32,31 @@ MAX_FILE_BYTES = 256 * 1024
 _UNSUPPORTED_VALUE_HEADS = frozenset("|>&*!{}[]?%@`")
 
 _QUOTES = ("'", '"')
+
+HOME_ENV_VAR = "HOME"
+
+
+def home_overridden(env) -> bool:
+    """コマンド実行時の `HOME` が hook プロセスと違うなら True (= CLI に委ねる)。
+
+    `HOME` は **gh も gcloud も設定ディレクトリの解決に使う** env である
+    (gh: `GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `$HOME/.config/gh`、
+    gcloud: `CLOUDSDK_CONFIG` → `$HOME/.config/gcloud`)。`HOME=<other> gh ...` の
+    形でインライン指定されたコマンドは**別の設定ファイル**を読んで動くため、
+    hook プロセス側の設定ファイルを読んで一致と判断すると、実行される CLI とは
+    違うアカウントで allow しうる (ローカル読取の導入前は検証 subprocess にも
+    同じ env を渡していたため、この形は不一致として deny されていた)。
+
+    設定ディレクトリを `HOME` から組み直す方向 (env の追従) は採らない —
+    gh と gcloud で解決の分岐が違い、推測で実装して取り違えた値で allow する
+    より、このモジュールの一貫した方針どおり**エミュレートせず CLI に委ねる**
+    方が安全。コストは「CLI を 1 回呼ぶ」だけ。
+
+    `GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` が明示されていて `HOME` が効かない場合も
+    区別せず bail する (判断を単純に保つ側に倒す)。
+    """
+    value = env.get(HOME_ENV_VAR)
+    return bool(value) and value != os.environ.get(HOME_ENV_VAR)
 
 
 def read_text(path: Path) -> str | None:

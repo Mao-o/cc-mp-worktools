@@ -152,6 +152,8 @@ def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None
 # - 下の 2 つ以外の `CLOUDSDK_*` / `GOOGLE_CLOUD_PROJECT` 等が env にある
 #   (gcloud のプロパティは env でも上書きでき、優先順位を実測で確定できていない。
 #   **エミュレートを諦めて CLI に委ねる**方が、取り違えた値で allow するより安全)
+# - `HOME` が hook プロセスと違う (`cli_config.home_overridden`) — 実行される
+#   gcloud は別の設定ディレクトリ (`$HOME/.config/gcloud`) を読む
 # - configuration 名が gcloud の命名規則から外れる (パス要素の混入を防ぐ)
 # - 設定ファイルが読めない / INI として解釈できない
 _CONFIG_DIR_ENV_VAR = "CLOUDSDK_CONFIG"
@@ -212,6 +214,8 @@ def _local_core_properties(env=None, configuration=None) -> dict[str, str] | Non
         if name.startswith(_CLOUDSDK_ENV_PREFIX) and name not in _LOCAL_SAFE_ENV_VARS:
             return None
     if any(e.get(name) for name in _OTHER_OVERRIDE_ENV_VARS):
+        return None
+    if cli_config.home_overridden(e):
         return None
     config_dir = _config_dir(e)
     if config_dir is None:

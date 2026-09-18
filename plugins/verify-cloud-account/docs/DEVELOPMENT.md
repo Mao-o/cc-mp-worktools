@@ -546,6 +546,21 @@ env 上書きや設定ファイル外のプロパティを取りこぼしても�
 env の優先順位をエミュレートせず「触られていたら CLI に委ねる」に倒したのも同じ
 理由 (gh の token env / `GH_HOST`、gcloud の `CLOUDSDK_*` / `GOOGLE_CLOUD_PROJECT`)。
 
+**`HOME` も同じ扱い** (`cli_config.home_overridden()`)。`HOME` は gh / gcloud の
+どちらも設定ディレクトリ解決に使うため、`HOME=<other> gh ...` の形では実行される
+CLI が別のファイルを読む。ここだけは「エミュレートしない」が **false allow を
+作りうる**側だった (hook 側のファイルが期待値と一致すると CLI を呼ばずに allow =
+ローカル読取導入前は deny だった形の退行) ので、bail 条件として明示した
+(マージ前レビューの指摘)。`GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` が明示されていて
+`HOME` が効かない場合も区別せず bail する — 判断を単純に保つ側に倒し、代償は
+CLI 1 回。
+
+gh 側の env 列挙は**閉じた allowlist** なので、gcloud の prefix denylist と違い
+将来の追加を自動では拾えない。`_TOKEN_ENV_VARS` の隣に公式 env 一覧の URL と
+「増えたらここに足す」根拠を置いてあるが、**機械検出はできない** (gh の major
+update 時に読み直すのが唯一の担保)。閉じた列挙を `GH_*` 全面 bail に変える案は、
+`GH_PAGER` のような無害な変数で高速化が消えるため採らなかった。
+
 残った差分は「`hosts.yml` のアクティブアカウントのトークンが失効している」場合に
 従来 deny だったものが allow になること (README 既知の制限)。失効トークンでは
 write 自体が通らないため、別アカウントでの書き込みにはならない。
@@ -557,13 +572,42 @@ write 自体が通らないため、別アカウントでの書き込みには�
 いない全プロジェクトで deny が始まる」状態からの出口を作った。deny / allow の
 規則そのものには手を入れていない。
 
+適用範囲の書き方には注意が要る (マージ前レビューの指摘で 2 点直した):
+
+- グローバル既定の `"$mode"` が効くのは **`accounts.local.json` を持たない
+  プロジェクトだけ**。「全プロジェクトの既定」と書くと、設定済みで不一致 deny が
+  出ている人 (= まさに困っている母集団) に効くと読めてしまう
+- `"$mode"` は**ファイルを読めたときだけ**参加する。未設定 / JSON 破損 /
+  複数パス競合の deny は `pre_file_mode` (env のみ) で決まる
+
+**読む側と書く側で解決が食い違うと shadowing が起きる**という v0.12.0 の defect
+(親遡及) は、グローバル既定の導入で 1 段上に再発した: dispatcher は
+`resolve_accounts_file_for_verification()` でグローバル既定に落ちるが、builder は
+落ちない (書込先がグローバルに化けるのを防ぐため意図的)。設計としてはこのままで、
+**食い違いを黙らせない**方向で閉じた — 新規作成になるときは shadowing 警告を出し
+(`_global_default_note()`)、`show` は「プロジェクトに無い」ときグローバル既定の
+存在と「hook はこのファイルで検証します」を出す。キー単位マージにする案は判定表
+(どのキーが未設定か) への影響が大きいので採らない。
+
 **D23: ローカルを読む機能はテストの隔離を必ず伴う**
 
 現在値の取得元が実環境 (`$HOME` / `~/.config`) に広がると、CLI を mock した
 テストが開発者の設定で短絡する。実際に「開発者の `hosts.yml` のアクティブ
 アカウントが fixture の期待値と一致して CLI を呼ばずに allow」で既存テストが
 壊れた。`tests/_testutil.start_isolation()` を `setUpModule()` から呼ぶ規律に
-した (dispatcher / services / builder / main の 4 モジュール)。
+した (**3 モジュール**: `test_dispatcher.py` / `test_services.py` /
+`test_accounts_builder.py`)。`test_main.py` は子プロセスを起動するので
+`os.environ` ではなく**渡す env を組む**側だが、除去規則は共有する
+(`_testutil.sanitized_env()`) — prefix ループを各所で再実装すると
+`LEAKY_ENV_VARS` に足したときに一方だけ更新される。
+
+隔離そのものにも負テストを置く (`tests/test_testutil.py`)。現在のマシンに
+`GH_TOKEN` 等が無いと、pop ループを消しても全 suite が green のまま通る
+(実際にマージ前レビューの mutation で survive した)。sentinel を立てて
+「落ちること」「`stop()` で戻ること」「`os.environ["HOME"]` が patch 後の
+`Path.home()` と一致すること」を固定する。最後の 1 つは
+`cli_config.home_overridden()` の基準が実環境の `$HOME` にずれないための
+不変条件。
 
 ## 既知の制限
 

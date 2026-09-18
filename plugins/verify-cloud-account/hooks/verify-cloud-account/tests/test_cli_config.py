@@ -6,10 +6,12 @@ fixture は実機の形 (gh 2.9x の `hosts.yml` / gcloud の `configurations/co
 """
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _testutil  # noqa: F401
 
@@ -165,6 +167,32 @@ class TestReadText(unittest.TestCase):
         path = self.tmp / "bin.yml"
         path.write_bytes(b"\xff\xfe\x00")
         self.assertIsNone(cli_config.read_text(path))
+
+
+class TestHomeOverridden(unittest.TestCase):
+    """`HOME=<other> <cli> ...` を検出する述語 (ローカル読取の bail 条件)。
+
+    `HOME` は gh / gcloud の設定ディレクトリ解決に参加するため、実行時 env の
+    `HOME` が hook プロセスと違えば「読んでいるファイルが違う」= ローカル読取の
+    結果で allow してはいけない。
+    """
+
+    def test_env_without_home_is_not_overridden(self):
+        self.assertFalse(cli_config.home_overridden({}))
+        self.assertFalse(cli_config.home_overridden({"HOME": ""}))
+
+    def test_same_home_is_not_overridden(self):
+        with mock.patch.dict(os.environ, {"HOME": "/home/tester"}):
+            self.assertFalse(cli_config.home_overridden({"HOME": "/home/tester"}))
+
+    def test_different_home_is_overridden(self):
+        with mock.patch.dict(os.environ, {"HOME": "/home/tester"}):
+            self.assertTrue(cli_config.home_overridden({"HOME": "/home/other"}))
+
+    def test_home_set_while_process_has_none_is_overridden(self):
+        """hook プロセスに `HOME` が無い場合も、env で与えられたら委ねる側に倒す。"""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(cli_config.home_overridden({"HOME": "/home/other"}))
 
 
 if __name__ == "__main__":

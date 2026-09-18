@@ -41,22 +41,58 @@ LEAKY_ENV_VARS = (
 
 _CLOUDSDK_PREFIX = "CLOUDSDK_"
 
-
-def cli_config_env(root: Path) -> dict[str, str]:
-    """gh / gcloud のローカル設定 dir を `root` 配下 (= 存在しない) に向ける env。"""
-    return {
-        "GH_CONFIG_DIR": str(root / "gh"),
-        "XDG_CONFIG_HOME": str(root / "xdg"),
-        "CLOUDSDK_CONFIG": str(root / "gcloud"),
-    }
-
-
 # 隔離中の `$HOME`。**実在しない絶対パス**を使う:
 # - 実 HOME を読まない / 書かない
 # - fixture (tempfile 配下) と親子関係を持たないので、親遡及の停止条件
 #   (`core/paths._crosses_home`) を実 HOME のときと同じ形に保てる
 #   (tmp 配下に置くと共通の親で遡及が止まり、既存テストの前提が変わる)
 ISOLATED_HOME = Path("/nonexistent-home-verify-cloud-account")
+
+
+def cli_config_env(root: Path, home: Path = ISOLATED_HOME) -> dict[str, str]:
+    """gh / gcloud のローカル設定 dir を `root` 配下 (= 存在しない) に向ける env。
+
+    `HOME` も含める。`Path.home()` の patch だけでは `os.environ["HOME"]` が実
+    環境のまま残り、**「hook プロセスの HOME」の 2 つの読み方が食い違う**:
+    設定ディレクトリの解決は patch 後の `Path.home()` を見るのに、
+    `cli_config.home_overridden()` は `os.environ["HOME"]` と比べる。ここで
+    揃えておかないと、実 `os.environ` からコピーした env を渡すテスト
+    (`_LocalConfigBase._env()` / `test_main`) で「HOME 上書き」の判定が実
+    `$HOME` を基準に行われ、隔離の内側で実環境が判定に混ざる。
+    """
+    return {
+        "GH_CONFIG_DIR": str(root / "gh"),
+        "XDG_CONFIG_HOME": str(root / "xdg"),
+        "CLOUDSDK_CONFIG": str(root / "gcloud"),
+        "HOME": str(home),
+    }
+
+
+def _leaky_names(env) -> list[str]:
+    """`env` に含まれる「判定を変えうる env」の名前 (pop 対象)。
+
+    反復中に削除できるよう list を先に作る。
+    """
+    names = [name for name in LEAKY_ENV_VARS if name in env]
+    names += [
+        name
+        for name in env
+        if name.startswith(_CLOUDSDK_PREFIX) and name != "CLOUDSDK_CONFIG"
+    ]
+    return names
+
+
+def sanitized_env(base) -> dict[str, str]:
+    """`base` のコピーから判定を変えうる env を落とす (`base` は変更しない)。
+
+    子プロセスを起動するテスト (`test_main`) が `start_isolation()` と**同じ
+    除去規則**を使うための共有点。prefix ループを各所で再実装すると、
+    `LEAKY_ENV_VARS` に足したときに一方だけ更新される。
+    """
+    env = dict(base)
+    for name in _leaky_names(env):
+        env.pop(name, None)
+    return env
 
 
 class _Isolation:
@@ -76,18 +112,12 @@ def start_isolation(root: Path, home: Path = ISOLATED_HOME) -> _Isolation:
     (`addCleanup` / `tearDownModule` に登録すること)。
     """
     patchers = [
-        mock.patch.dict(os.environ, cli_config_env(Path(root))),
+        mock.patch.dict(os.environ, cli_config_env(Path(root), home)),
         mock.patch.object(Path, "home", staticmethod(lambda: home)),
     ]
     for patcher in patchers:
         patcher.start()
     # patch.dict は stop() で元の内容を復元するため、開始後の pop は安全。
-    for name in LEAKY_ENV_VARS:
-        os.environ.pop(name, None)
-    for name in [
-        n
-        for n in os.environ
-        if n.startswith(_CLOUDSDK_PREFIX) and n != "CLOUDSDK_CONFIG"
-    ]:
+    for name in _leaky_names(os.environ):
         os.environ.pop(name, None)
     return _Isolation(patchers, home)

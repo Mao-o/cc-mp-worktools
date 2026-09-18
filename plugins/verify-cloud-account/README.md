@@ -137,10 +137,21 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 
 - 解決順: `VERIFY_CLOUD_ACCOUNT_MODE` → `accounts.local.json` の `"$mode"` → `enforce`
 - `"$mode"` は予約キー (`$` 始まりなので service キーと衝突しない)。
-  [グローバル既定](#グローバル既定-v0130) のファイルに書けば全プロジェクトの既定になる
+  [グローバル既定](#グローバル既定-v0130) のファイルに書いた `"$mode"` が効くのは
+  **`accounts.local.json` を持たないプロジェクト**だけ。自前の設定があるプロジェクトは
+  グローバル既定を一切読まないので、そちらは `VERIFY_CLOUD_ACCOUNT_MODE` か
+  **そのプロジェクトの `"$mode"`** を使う
+- **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損 /
+  複数パス競合の deny はファイルを読む前に確定するため、そこを `warn` / `off` に
+  弱められるのは `VERIFY_CLOUD_ACCOUNT_MODE` のみ
+- `"$mode"` は **builder が値を書かない唯一のキー**。`init` / `set` / `remove` は
+  既存の `"$mode"` を壊さず保持するが、設定・変更は**エディタで手編集**する
+  (builder のサブコマンドは service キーだけを扱う)。現在値は
+  `/verify-cloud-account:accounts-show` が `[mode]` として表示する
 - 不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は **enforce として扱い**、
   deny 文面にその旨を添える (黙って無視すると「off にしたのに deny される」の
-  原因が分からなくなるため)
+  原因が分からなくなるため)。`off` で検証しない場合も、env の不正値は
+  `additionalContext` で通知する (綴り間違いが黙って無視されないように)
 - `off` でも**アカウント切替コマンドの検出による cache 破棄は行う**
   (off の間の切替が cache に残って、enforce に戻した直後に古い成功で通る事故を防ぐ)
 
@@ -639,7 +650,10 @@ root 自身**が、外側に repo が無ければ `$HOME` が境界になる (�
 
 - user scope で install した直後に「設定していない全プロジェクトで deny」に
   なる状態から抜けるための明示的な fallback。`"$mode": "warn"` をここに書けば
-  [warn モード](#検証モード-enforce--warn--off--v0130) を全プロジェクトの既定にできる
+  [warn モード](#検証モード-enforce--warn--off--v0130) を
+  **`accounts.local.json` を持たないプロジェクト**の既定にできる。
+  自前の設定があるプロジェクトはこのファイルを読まない (下の「常に優先」) ので、
+  そちらを弱めるには `VERIFY_CLOUD_ACCOUNT_MODE` かそのプロジェクトの `"$mode"` を使う
 - **プロジェクト側の設定が常に優先**。グローバル既定を採用したときは deny / warn に
   `プロジェクトに accounts.local.json が無いため、グローバル既定 <絶対パス> を
   使用しています` の 1 行注釈が付く (verify 成功時は silent)
@@ -654,6 +668,13 @@ root 自身**が、外側に repo が無ければ `$HOME` が境界になる (�
 - **builder はグローバル既定へ落ちない** (`init` / `set` / `remove` / `migrate`)。
   プロジェクト設定を作るつもりの編集が、利用者の全プロジェクトに効くファイルを
   書き換えてしまわないようにするため。グローバル既定は手で作るか `--path` で明示する
+- 上の帰結として、**グローバル既定で検証されているプロジェクトに
+  `accounts.local.json` を新規作成すると、グローバル既定のキーは継承されない**
+  (キー単位のマージはしない = 書かなかった service は未設定 = deny)。builder は
+  新規作成になるとき「グローバル既定 `<path>` の N キーは継承されません」と警告し、
+  `accounts-show` は「プロジェクトに無い」ときグローバル既定の存在と
+  「hook はこのファイルで検証します」を表示する。グローバル既定を直したいときは
+  `--path <グローバル既定のパス>` を付けて操作する
 
 ## パフォーマンス (短期キャッシュ)
 
@@ -701,6 +722,14 @@ Python CLI の起動込みで 1 回 〜1s (dict 期待値では project / accoun
   env にある (プロパティの優先順位をエミュレートせず gcloud 自身に決めさせる) /
   設定ファイルが読めない・INI として解釈できない / configuration 名が
   gcloud の命名規則から外れる
+- **両方共通: コマンド行頭の `HOME=...` が hook プロセスの `$HOME` と違う**
+  (`HOME=/other gh pr create` など)。`HOME` は gh / gcloud のどちらも設定
+  ディレクトリ解決に使うため、実行される CLI は**別の設定ファイル**を読む。
+  hook 側のファイルで判断すると違うアカウントで allow しうるので CLI に委ねる
+- GCP の `CLOUDSDK_*` 判定は **prefix 一致**なので、`CLOUDSDK_PYTHON` のように
+  値に無関係な変数が 1 つでも立っていると CLI 実行に戻る (安全側だが「速く
+  ならない」ように見える)。安全な変数の個別許可は、漏れが false allow になる
+  ため入れていない
 - `firebase` / `aws` / `kubectl` は従来どおり (aws は `sts` 呼出が必須、
   firebase / kubectl は既存の解決経路を変えていない)
 - builder (`accounts-show` / `--from-cli`) は**常に CLI** を使う
@@ -829,6 +858,18 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   ログイン中」と読めるため allow になる。従来 (`gh auth status` が API 検証で
   失敗 → deny) との差分だが、失効トークンでは書き込み自体ができないため
   **別アカウントでの書き込みにはならない** (実行した `gh` が認証エラーで失敗する)
+- 上と同じ理由で、**[ローカル読取](#ローカル設定ファイルからの現在値取得-v0130)
+  で一致した場合は CLI を起動しない**ため、CLI 側でしか分からない失敗も検出
+  されない。従来は deny だったものが allow になる例:
+  - `gh` / `gcloud` が PATH に無い (従来は「コマンドが見つかりません」で deny)
+  - `gh auth status` の出力を解釈できない (将来のフォーマット変更)
+  - **複数 host のうち一部の host だけトークンが失効している** (dict 形式の
+    期待値。従来はその host が `gh auth status` の一覧から落ちて per-host deny)
+
+  いずれも「検証をすり抜けた後、実行した CLI 自身が失敗する」形に留まる
+  (別アカウントでの書き込みにはならない)。CLI の存在や出力形式を hook 側で
+  確かめるには `VERIFY_CLOUD_ACCOUNT_MODE` とは別に毎回 CLI を起動する必要が
+  あり、ローカル読取の利点 (速度・オフライン耐性) を打ち消すため採っていない
 - `warn` / `off` [モード](#検証モード-enforce--warn--off--v0130) は検証を
   意図的に弱める設定。`off` の間は不一致でも通る (cache 破棄だけは継続する)
 

@@ -208,7 +208,18 @@ def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]
 #   なく env のトークンで動き、アカウント名は API 経由でしか分からない
 # - `GH_HOST` が立っている — gh 側の host 列挙がどう変わるかを実測で確定できて
 #   いないため、照合先がずれる可能性を避けて CLI に委ねる
+# - `HOME` が hook プロセスと違う (`cli_config.home_overridden`) — 実行される gh は
+#   別の設定ファイルを読む
 # - 設定ファイルが読めない / 最小 YAML サブセットで解釈できない
+#
+# **この列挙は閉じている = 漏れると黙って false allow 経路になる** (gcloud 側は
+# `CLOUDSDK_` prefix の denylist なので未知の変数でも自動 bail するが、gh 側は
+# 列挙した名前しか見ない)。列挙は公式の環境変数一覧
+# <https://cli.github.com/manual/gh_help_environment> と突合して決めた
+# (auth / host / 設定ディレクトリに効くのは下の 4 トークン env + `GH_HOST` +
+# `GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `HOME`、Windows の `AppData`)。
+# **gh に認証・host を変える env が増えたらここに足すこと** — 機械検出できない
+# ので、gh の major update 時に上記 URL を読み直すのが唯一の担保。
 _TOKEN_ENV_VARS = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -248,6 +259,8 @@ def _local_active_accounts(env=None) -> dict[str, str] | None:
     if any(e.get(name) for name in _TOKEN_ENV_VARS):
         return None
     if e.get(_HOST_ENV_VAR):
+        return None
+    if cli_config.home_overridden(e):
         return None
     config_dir = _config_dir(e)
     if config_dir is None:

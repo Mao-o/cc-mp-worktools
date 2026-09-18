@@ -20,13 +20,22 @@
 解決順 (先に決まったものが勝つ):
 
 1. 環境変数 `VERIFY_CLOUD_ACCOUNT_MODE` (settings.json の `env` / 起動時 env)
-2. accounts.local.json の予約キー `"$mode"` (プロジェクト単位。グローバル既定の
-   ファイルに書けば全プロジェクトの既定になる)
+2. accounts.local.json の予約キー `"$mode"` (プロジェクト単位)
 3. `enforce`
 
 env を上に置くのは、**ファイルを書き換えずに一時的に外せる**ことが escape hatch の
 要件だから。`"$mode"` を下に置くのは、プロジェクトの設定より「今のセッションの
 指示」を優先したいため。
+
+`"$mode"` の適用範囲には 2 つの前提がある (どちらも env には無い制約):
+
+- グローバル既定のファイルに書いた `"$mode"` が効くのは
+  **accounts.local.json を持たないプロジェクトだけ**。プロジェクト側で解決できた
+  ときは global を一切読まない (`core/paths.resolve_accounts_file_for_verification`)
+  ため、自前の設定を持つプロジェクトには効かない
+- `"$mode"` は**そのファイルを読めたときだけ**参加する。未設定 / JSON 破損 /
+  パス競合 (D4) の deny はファイルを読む前に確定するので、そこを弱められるのは
+  `VERIFY_CLOUD_ACCOUNT_MODE` のみ (`core/dispatcher.py` の `pre_file_mode`)
 
 不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は **enforce に倒す** (fail-closed)。
 ただし黙って無視すると「off にしたのに deny される」が理由不明になるため、

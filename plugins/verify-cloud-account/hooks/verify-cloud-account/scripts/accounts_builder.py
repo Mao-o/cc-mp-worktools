@@ -318,12 +318,65 @@ def _hook_reads_instead(target: _Target, project_dir: str) -> Path | None:
     return resolved.path
 
 
-def _target_note(target: _Target, project_dir: str) -> str:
+def _global_default_keys(global_path: Path) -> list[str]:
+    """グローバル既定ファイルのトップレベルキー (読めない / 壊れていれば空)。"""
+    try:
+        data = json.loads(global_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    return sorted(str(key) for key in data)
+
+
+def _global_default_note() -> str:
+    """グローバル既定が現に使われているときの警告 (新規作成になる場合のみ)。
+
+    dispatcher はプロジェクト側で何も見つからないとき
+    `$HOME/.claude/verify-cloud-account/accounts.local.json` を読む
+    (`paths.resolve_accounts_file_for_verification`)。builder はそこへ落ちない
+    ため、この状態で新規作成すると**グローバル既定を覆い隠す**: 解決は
+    「見つかった 1 ファイル」で終わり、key 単位のマージはしないので、
+    新しいファイルに書かなかった service は未設定 = deny になる。
+
+    これは v0.12.0 で塞いだ親遡及の shadowing (`_resolve_target` の docstring)
+    と同じ形が 1 段上 (グローバル) で再発したもの。黙って進むと「無関係な
+    service を 1 つ set したら別の service が急に deny された」になるため、
+    対象パスの表示と同じ場所で必ず言う。key 単位マージに設計変更するのは
+    判定表への影響が大きいので、ここでは警告に留める。
+    """
+    global_path = paths.global_accounts_file()
+    if global_path is None or not global_path.is_file():
+        return ""
+    keys = _global_default_keys(global_path)
+    if keys:
+        detail = f"その {len(keys)} キー ({', '.join(keys)})"
+    else:
+        detail = "その内容"
+    return (
+        f"警告: hook は現在グローバル既定 {global_path} で検証しています。"
+        f"このパスにファイルを作ると、{detail} は継承されません "
+        "(キー単位のマージはしません = 書かなかった service は未設定 = deny)。\n"
+        f"グローバル既定を編集するなら --path {global_path} を使い、"
+        "プロジェクト側に持つなら必要な値を先にコピーしてください。"
+    )
+
+
+def _target_note(
+    target: _Target,
+    project_dir: str,
+    *,
+    warn_shadowing: bool = True,
+) -> str:
     """出力の先頭に置く「どのファイルを対象にしたか」の 1 行 (+ 必要なら警告)。
 
     親から継承しているケースを利用者が見落とすと、意図せず親 repo の設定を
     書き換える / 書き換えたつもりが効かない、のどちらかが起きるため、
     dry-run と commit の両方で必ず表示する。
+
+    warn_shadowing: グローバル既定を覆い隠す警告を含めるか。読み取り専用の
+    `show` は何も作らないので False (代わりに show 自身が「hook は今どのファイルを
+    読むか」を出す)。
     """
     if target.origin == "ancestor":
         return f"対象: {target.path} (祖先ディレクトリ {target.anchor} から継承)"
@@ -339,7 +392,11 @@ def _target_note(target: _Target, project_dir: str) -> str:
             )
         return note
     if target.origin == "fresh":
-        return f"対象: {target.path} (新規作成)"
+        note = f"対象: {target.path} (新規作成)"
+        global_note = _global_default_note() if warn_shadowing else ""
+        if global_note:
+            note += "\n" + global_note
+        return note
     return f"対象: {target.path}"
 
 
@@ -1205,8 +1262,30 @@ def _cmd_show(
         found = paths.discover_all_accounts_files(str(target.anchor))
 
     if not found:
-        print(_target_note(target, project_dir), file=stdout)
+        print(
+            _target_note(target, project_dir, warn_shadowing=False), file=stdout
+        )
         print(f"no accounts.local.json found at {target.path}", file=stdout)
+        # 「project に無い」=「検証されていない」ではない。dispatcher はグローバル
+        # 既定に落ちるため、それを言わないと show が hook の実際の検証対象を
+        # 隠すことになる (show の目的は不一致の原因調査)。突合はそのファイルの
+        # 値で行う必要があるので `--path` で開き直す形を案内する。
+        global_path = paths.global_accounts_file()
+        if (
+            global_path is not None
+            and global_path.is_file()
+            and global_path != target.path
+        ):
+            print(
+                f"グローバル既定 {global_path} が存在します"
+                " (hook はこのファイルで検証します)。",
+                file=stdout,
+            )
+            print(
+                f"その内容と CLI 現在値を突合するには --path {global_path} を"
+                "付けて再実行してください。",
+                file=stdout,
+            )
         print(
             "run `accounts_builder.py init --service <name> --commit` to create one.",
             file=stdout,
@@ -1233,7 +1312,7 @@ def _cmd_show(
         print(f"error: {e}", file=stderr)
         return e.exit_code
 
-    print(_target_note(target, project_dir), file=stdout)
+    print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
     print(f"=== {path} ({kind}) ===", file=stdout)
     if not existing:
         print("(empty)", file=stdout)

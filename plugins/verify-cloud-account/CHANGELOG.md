@@ -33,6 +33,13 @@ env で値が上書きされうる場合は**エミュレートせず CLI に委
 取り違えた値で allow するより、遅くても gcloud / gh 自身に決めさせる方が安全。
 設定ファイルが「想定の形」でないときも同じく CLI に落ちる。
 
+**`HOME` が hook プロセスと違うときも CLI に委ねる** (両 service)。`HOME` は
+gh / gcloud のどちらも設定ディレクトリ解決に使うため、`HOME=/other gh pr create`
+の形では実行される CLI が別の設定ファイルを読む。hook 側のファイルで判断すると
+**違うアカウントで allow しうる** (ローカル読取の導入前は検証 subprocess にも
+同じ env を渡していたので不一致 deny だった) ため、bail 条件に加えた
+(マージ前レビューの指摘)。
+
 `aws` (sts 呼出が必須) / `firebase` / `kubectl` は従来どおり。cache の TTL
 (30 秒) も変えていない — 延長は「hook の外で起きた切替を見逃す窓」を広げるため、
 ローカル読取で 1 回あたりのコストが下がった今は必要性も薄い。
@@ -55,7 +62,9 @@ user scope で install した直後は設定を置いていない**全プロジ�
   (ファイルを書き換えずに外せることが escape hatch の要件)
 - **グローバル既定**: プロジェクト側 (3-tier + 親遡及) で何も見つからないときだけ
   `~/.claude/verify-cloud-account/accounts.local.json` を読む。`"$mode": "warn"` を
-  ここに書けば全プロジェクトの既定にできる
+  ここに書けば **`accounts.local.json` を持たないプロジェクト**の既定にできる
+  (自前の設定があるプロジェクトはこのファイルを読まないので、そちらは
+  `VERIFY_CLOUD_ACCOUNT_MODE` かそのプロジェクトの `"$mode"` を使う)
 - deny 文面の末尾に mode の案内を 1 行添える。deny を消したい相手に
   `set --from-cli --commit` を勧めると「間違ったアカウントを正解として焼き付ける」
   使い方を誘発するため、**期待値に触らない出口**を先に見せる
@@ -77,20 +86,43 @@ deny される」の原因が分からない)。
   — 無関係な `~/.claude/accounts.json` の継承は v0.12.0 で塞いだ不具合そのもの
 - 同一階層の tier 競合 (fail-closed deny) はグローバル既定で救済しない
 - **builder はグローバル既定へ落ちない**。プロジェクト設定を作るつもりの編集が、
-  利用者の全プロジェクトに効くファイルを書き換えないようにするため
+  利用者の全プロジェクトに効くファイルを書き換えないようにするため。この非対称
+  (dispatcher は落ちる / builder は落ちない) を黙っていると、v0.12.0 で塞いだ
+  shadowing が 1 段上で再発する形になるため、**builder 側で必ず開示する**:
+  新規作成になるときは「グローバル既定 `<path>` の N キーは継承されません」と
+  警告し、`show` は「プロジェクトに無い」ときグローバル既定の存在と「hook は
+  このファイルで検証します」を出す (キー単位マージはしない)
+- `"$mode"` は**ファイルを読めたときだけ**効く。未設定 / JSON 破損 / 複数パス競合の
+  deny はファイルを読む前に確定するため、そこを弱められるのは
+  `VERIFY_CLOUD_ACCOUNT_MODE` のみ。また `off` で検証しない場合でも env の不正値は
+  `additionalContext` で通知する (`VERIFY_CLOUD_ACCOUNT_MODE=of` のような綴り間違いが
+  黙って無視されると、env が効いていると誤解したままになる)
+- `"$mode"` は **builder が値を書かない唯一のキー**。`init` / `set` / `remove` は
+  既存値を壊さず保持するが、設定・変更は手編集 (または env) で行う
 - `accounts-show` は `"$mode"` を `[mode]` として表示する (service ではないので
   CLI 突合の対象外。値も機密ではないのでそのまま出す)
 
 ### テスト
 
-- 全 suite 944 件 green (0.12.0 時点 858 件から +86)
+- 全 suite 967 件 green (0.12.0 時点 858 件から +109)
 - 新規: `tests/test_cli_config.py` (最小 YAML / INI パーサ)、
-  `tests/test_mode.py` (モード解決)、services / dispatcher / paths への追加
+  `tests/test_mode.py` (モード解決)、`tests/test_testutil.py` (隔離そのものの
+  負テスト)、services / dispatcher / paths / builder への追加
 - **実環境からの隔離**を追加した (`tests/_testutil.start_isolation()`)。現在値の
   取得元が `$HOME` / `~/.config` に広がったため、隔離しないと開発者の
   `hosts.yml` / グローバル既定 / `VERIFY_CLOUD_ACCOUNT_MODE` がテストの verdict を
   変える (実際に、開発者のアクティブアカウントが fixture の期待値と一致して
-  「CLI を呼ばずに allow」になり、CLI を mock したテストが壊れた)
+  「CLI を呼ばずに allow」になり、CLI を mock したテストが壊れた)。
+  隔離の env 除去には**負テストを置いた** — 現在のマシンに `GH_TOKEN` 等が無いと
+  除去を消しても全 suite が green のまま通る (マージ前レビューの mutation で
+  survive を確認した唯一の箇所だった)
+- マージ前レビューで足したテストは、いずれも**対応する実装行を壊す mutation で
+  先に落ちる**ことを使い捨てコピーで確認した (HOME bail の除去 ×2 / 隔離の env
+  除去 / 隔離 env からの `HOME` 削除 / shadowing 警告の除去 / `show` の開示の除去 /
+  `off` の note 破棄 / グローバル既定をプロジェクト側にも効かせる改変 /
+  ローカル読取を CLI より優先させる改変 の 9 種)。負テスト自身が
+  assertion FAILURE として落ちるよう `assertIsNotNone(err)` を先に置いた
+  (従来は `TypeError` の ERROR で落ち、「走っていない」と読み違えやすかった)
 
 ## 0.12.0
 
