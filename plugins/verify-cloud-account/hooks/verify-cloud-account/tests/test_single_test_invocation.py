@@ -48,9 +48,16 @@ class TestSingleTestInvocation(unittest.TestCase):
 
     def test_pytest_single_node_id_if_available(self):
         """pytest が入っている環境でのみ確認する (標準ライブラリのみの方針上、
-        pytest 自体は本 plugin の実行要件ではないため未インストールは skip)。"""
-        if shutil_which("pytest") is None:
-            self.skipTest("pytest not installed")
+        pytest 自体は本 plugin の実行要件ではないため未インストールは skip)。
+
+        有無の判定は **実行 interpreter から import できるか** で行う。`PATH` 上の
+        実行ファイル (`shutil.which("pytest")`) を見ると、clean な venv が
+        グローバルの pytest 実行ファイルを `PATH` から継承している環境で判定が
+        成功し、下の `sys.executable -m pytest` が `No module named pytest` で
+        落ちる = 標準ライブラリだけで走るはずの suite が環境依存で赤になる。
+        """
+        if _pytest_importable() is None:
+            self.skipTest("pytest not importable by this interpreter")
         res = subprocess.run(
             [sys.executable, "-m", "pytest",
              "tests/test_services.py::TestAws::test_match", "-q"],
@@ -62,9 +69,20 @@ class TestSingleTestInvocation(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
 
-def shutil_which(cmd: str) -> str | None:
-    import shutil
-    return shutil.which(cmd)
+def _pytest_importable():
+    """この interpreter が pytest を import できるなら spec、できなければ None。
+
+    `find_spec` は import 自体は行わないので、pytest の import 副作用
+    (plugin 読込・conftest 探索) を持ち込まずに有無だけを見られる。
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("pytest")
+    except (ImportError, ValueError):
+        # 壊れた pytest が入っている環境 (親パッケージが import できない等) も
+        # 「使えない」= skip 側に倒す。
+        return None
 
 
 if __name__ == "__main__":
