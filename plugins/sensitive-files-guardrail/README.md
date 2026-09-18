@@ -412,7 +412,25 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 > 旧パスを使っていた場合は手動で
 > `mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guardrail/patterns.local.txt" ~/.claude/sensitive-files-guardrail/patterns.local.txt` する。
 
+**貢献者・CI と共有したい除外** (テスト fixture / サンプルのダミー鍵など) は
+repo に commit できる (0.32.0):
+
+- `<project root>/.claude/sensitive-files-guardrail/patterns.txt`
+
+> user 単位ファイルはホーム配下なので commit できず CI でも効かないため、
+> ダミー鍵を持つ repo では貢献者全員が毎セッション同じ block を踏んでいた。
+> tier の強さは **`user 単位` > `repo 同梱` > `既定`** (clone してきた repo の
+> 除外をユーザーが自分のファイルで打ち消せる向き)。`!` 除外に加えて include 行も
+> 有効。第三者の repo を開くときはこのファイルも差分レビューの対象にすること
+> (`!` 行は保護を弱めうる。読み込み時に `project_patterns_in_use` を記録する)。
+
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
+
+> **git worktree (0.32.0)**: `claude --worktree` / `--bg` / sub-agent の
+> `isolation: worktree` では `$CLAUDE_PROJECT_DIR` が worktree 自身のパスに
+> なるため、`[project:...]` セクションの一致判定は **worktree 自身 + main repo
+> root の 2 候補**を見る (main repo のパスで書いておけば worktree でも効く)。
+> `~` はヘッダーでも展開される。
 
 > **path 形 rule (0.24.0)**: `/` を含む行 (`!config/prod.pem` / `!fixtures/` /
 > `secrets/**`) は basename ではなく **プロジェクト root からの相対 path 全体**と

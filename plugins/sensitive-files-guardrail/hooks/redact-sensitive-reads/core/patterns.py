@@ -66,17 +66,30 @@ def _warn_header(token: str) -> None:
     L.log_error("local_patterns_header_invalid", token)
 
 
+def _note_project_patterns(token: str) -> None:
+    """project_patterns_callback — repo 同梱 patterns.txt を読み込んだことを
+    logfile に記録する (0.32.0)。
+
+    エラーではない (想定された tier) ので ``log_info``。stderr に出さないのは、
+    大半の Bash / Read 呼出で毎回 1 行出すと本来の warning が埋もれるため。
+    repo 同梱ファイルは ``!`` 行で保護を弱めうる (clone してきた repo の除外が
+    そのまま効く) ので、「なぜ block されないのか」を後から辿れるようにする。
+    """
+    L.log_info("project_patterns", token)
+
+
 def load_patterns(
     patterns_file: Path | None = None,
     cwd: str = "",
 ) -> list[tuple[str, bool]]:
-    """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
+    """既定 patterns.txt + repo 同梱 + ローカル patterns.local.txt を読んで
+    rules list を返す。
 
     Read 側は ``core.logging`` 経由で stderr + logfile に warning を出す。
     ローカル非存在は黙殺。既定 patterns.txt の読み取り失敗は例外として再送出。
     rename 前の旧 patterns.local.txt を fallback 読込した場合は移行 warning を出す。
-    ``cwd`` は ``[project:<path>]`` セクションの一致判定に使う
-    (``_shared.patterns.load_patterns`` 参照)。
+    ``cwd`` は ``[project:<path>]`` セクションの一致判定と repo 同梱 tier の
+    パス解決に使う (``_shared.patterns.load_patterns`` 参照)。
     """
     path = patterns_file or SHARED_PATTERNS
     return _shared_load_patterns(
@@ -85,4 +98,5 @@ def load_patterns(
         migrate_warn_callback=_warn_migrate,
         cwd=cwd,
         header_warn_callback=_warn_header,
+        project_patterns_callback=_note_project_patterns,
     )

@@ -43,6 +43,7 @@ if _hooks_dir not in sys.path:
 from _shared.streams import write_stdout  # noqa: E402
 from _shared.patterns import (  # noqa: E402
     LOCAL_PATTERNS_DISPLAY_PATH,
+    PROJECT_PATTERNS_DISPLAY_PATH,
     PROJECT_SECTION_PLACEHOLDER_NOTE,
     EXCLUDE_SCOPE_WARNING,
     exclude_recipe_lines,
@@ -199,6 +200,28 @@ _SILENT_AFTER_ACK_NOTE = (
     " (hook は再検査ではなく「同じ集合を報告済みか」で黙ります)。"
     "`.gitignore` への追記だけでは tracked は index に残るので、"
     "`git ls-files <path>` の出力が空になったことで確認してください。"
+)
+
+
+# repo 同梱 tier の案内 (0.32.0、内部バックログ)。テスト fixture / サンプルの
+# ダミー鍵は「貢献者全員が毎セッション同じ block を踏む」類のものなので、各自の
+# ホーム配下ではなく repo に commit する経路を示す (CI でも効く)。ヘッダー
+# (``[project:...]``) はこのファイルでは不要 — ファイル自体がその repo にしか
+# 無いため。優先順 (user > project > 既定) と include 行も書ける理由は
+# ``docs/PATTERNS.md``。
+#
+# **文言が極端に短いのは byte 予算の制約**。この案内は静的部分 (入力に依らず
+# 固定サイズ) なので ``MAX_OUTPUT_CHARS`` の予算から丸ごと引かれ、そのぶん
+# 可変部 (ファイル列挙・レシピ・basename 形の併記) の配分が減る。
+# ``TestRecipeLinesInBudget.test_fitting_input_is_not_narrowed_by_the_new_budget``
+# が固定している床入力 (123 文字 × 20 件) は素で 9,100 文字 = 予算まで **116
+# 文字**しか余裕が無く、それを超える静的追加はその入力の表示を狭める (実測。
+# 199 文字版では basename 形の併記が 20 件 → 9 件に減った)。案内を足すときは
+# この床テストで測り直すこと。詳細説明を reason に書き足さず docs に寄せている
+# のはこのため。
+_SHARED_RECIPE_NOTE = (
+    "貢献者・CI と共有する除外は "
+    f"`{PROJECT_PATTERNS_DISPLAY_PATH}` に commit できます。"
 )
 
 
@@ -503,6 +526,7 @@ def _build_reason(
         f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を追記します"
         f" ({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
         + EXCLUDE_SCOPE_WARNING.format(scope="同じ名前のファイル")
+        + _SHARED_RECIPE_NOTE
         + intro
     )
     # ``exclude_recipe_lines`` は [project:] ヘッダー + ``!`` 行 (limit=20) +

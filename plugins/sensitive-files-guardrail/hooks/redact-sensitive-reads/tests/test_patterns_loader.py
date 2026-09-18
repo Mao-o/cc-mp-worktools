@@ -385,6 +385,375 @@ class TestParseLocalPatternsText(unittest.TestCase):
         )
 
 
+def _make_worktree(tmp: Path, *, main: str = "main", name: str = "wt") -> tuple[Path, Path]:
+    """``git worktree add`` 相当のディレクトリ構成を作る (git は呼ばない)。
+
+    実測した実構成 (git 2.50.1) に合わせる:
+
+    - main repo: ``<main>/.git/`` (ディレクトリ)
+    - worktree の管理領域: ``<main>/.git/worktrees/<name>/commondir`` = ``../..``
+    - worktree の checkout: ``<main>/.claude/worktrees/<name>/.git`` (ファイル) が
+      ``gitdir: <main>/.git/worktrees/<name>`` を持つ
+
+    Returns:
+        ``(main_root, worktree_root)``
+    """
+    main_root = tmp / main
+    admin = main_root / ".git" / "worktrees" / name
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    wt_root = main_root / ".claude" / "worktrees" / name
+    wt_root.mkdir(parents=True)
+    (wt_root / ".git").write_text(f"gitdir: {admin}\n")
+    return main_root, wt_root
+
+
+class TestWorktreeProjectKeys(BaseWithIsolatedHome):
+    """0.32.0 (内部バックログ): worktree セッションで ``[project:<main repo>]``
+    セクションが効くこと。``claude --worktree`` / ``--bg`` / sub-agent の
+    ``isolation: worktree`` は別 checkout でセッションを開き
+    ``$CLAUDE_PROJECT_DIR`` も worktree 自身のパスになるため、0.15.0 の
+    プロジェクト固有除外が worktree 作業では黙って無効化されていた。"""
+
+    def setUp(self):
+        super().setUp()
+        self._project_env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self._project_env_patcher.start()
+        self.addCleanup(self._project_env_patcher.stop)
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+
+    def test_main_repo_root_resolved_from_worktree(self):
+        from _shared.patterns import _main_repo_root
+        main_root, wt_root = _make_worktree(Path(self.tmp))
+        self.assertEqual(_main_repo_root(str(wt_root)), str(main_root))
+
+    def test_section_keys_include_worktree_and_main_root(self):
+        from _shared.patterns import _project_section_keys
+        main_root, wt_root = _make_worktree(Path(self.tmp))
+        os.environ["CLAUDE_PROJECT_DIR"] = str(wt_root)
+        self.assertEqual(
+            _project_section_keys(str(wt_root)),
+            [str(wt_root), str(main_root)],
+        )
+
+    def test_section_keys_from_cwd_walk_up_inside_worktree(self):
+        """``CLAUDE_PROJECT_DIR`` が無い経路 (CLI 2.1.196 未満) でも効くこと。"""
+        from _shared.patterns import _project_section_keys
+        main_root, wt_root = _make_worktree(Path(self.tmp))
+        sub = wt_root / "packages" / "api"
+        sub.mkdir(parents=True)
+        self.assertEqual(
+            _project_section_keys(str(sub)), [str(wt_root), str(main_root)]
+        )
+
+    def test_normal_checkout_has_single_key(self):
+        from _shared.patterns import _project_section_keys
+        proj = Path(self.tmp) / "plain"
+        (proj / ".git").mkdir(parents=True)
+        self.assertEqual(_project_section_keys(str(proj)), [str(proj)])
+
+    def test_submodule_git_file_is_not_treated_as_worktree(self):
+        """submodule の ``.git`` もファイル (``gitdir: <super>/.git/modules/<name>``)
+        なので、worktree と誤認すると project key が superproject に差し替わり
+        読み込む rule が黙って変わる。
+
+        実構成では submodule の git dir に ``commondir`` が無いため構造上
+        弾かれる (``worktrees`` 要素の判定に到達しない)。その依存を明示する
+        ため下の synthetic テストで guard 自体の契約も別に固定する。"""
+        from _shared.patterns import _main_repo_root, _project_section_keys
+        super_root = Path(self.tmp) / "super"
+        (super_root / ".git" / "modules" / "sub").mkdir(parents=True)
+        sub = super_root / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text("gitdir: ../.git/modules/sub\n")
+        self.assertIsNone(_main_repo_root(str(sub)))
+        self.assertEqual(_project_section_keys(str(sub)), [str(sub)])
+
+    def test_non_worktree_gitdir_rejected_even_when_commondir_resolves(self):
+        """``worktrees`` 要素の guard 自体の契約 (defense-in-depth)。
+
+        **合成 fixture** — git は submodule の git dir に ``commondir`` を
+        作らないのでこの構成は現行 git では発生しない。guard が無いと
+        「``.git`` がファイル + commondir が ``<x>/.git`` に解決する」だけで
+        main repo root と見なしてしまうので、worktree 管理領域であることを
+        要求する条件をテストで固定しておく (git のレイアウト変更で
+        ``commondir`` が他の場所に現れても誤検出しない)。"""
+        from _shared.patterns import _main_repo_root
+        super_root = Path(self.tmp) / "super2"
+        modules = super_root / ".git" / "modules" / "sub"
+        modules.mkdir(parents=True)
+        (modules / "commondir").write_text("../..\n")
+        sub = super_root / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text(f"gitdir: {modules}\n")
+        self.assertIsNone(_main_repo_root(str(sub)))
+
+    def test_missing_commondir_yields_single_key(self):
+        from _shared.patterns import _main_repo_root
+        main_root, wt_root = _make_worktree(Path(self.tmp))
+        (main_root / ".git" / "worktrees" / "wt" / "commondir").unlink()
+        self.assertIsNone(_main_repo_root(str(wt_root)))
+
+    def test_bare_common_dir_is_rejected(self):
+        """bare repo の worktree には「main repo の working tree」が無い。"""
+        from _shared.patterns import _main_repo_root
+        bare = Path(self.tmp) / "repo.git"
+        admin = bare / "worktrees" / "wt"
+        admin.mkdir(parents=True)
+        (admin / "commondir").write_text("../..\n")
+        wt_root = Path(self.tmp) / "wt-of-bare"
+        wt_root.mkdir()
+        (wt_root / ".git").write_text(f"gitdir: {admin}\n")
+        self.assertIsNone(_main_repo_root(str(wt_root)))
+
+    def test_project_root_for_path_rules_stays_on_worktree(self):
+        """path 形 rule の基準 root は worktree のまま (main repo root にすると
+        worktree 配下のファイルが「root 配下でない」と判定され path 形 rule が
+        一切効かなくなる)。"""
+        from _shared.patterns import resolve_project_root
+        _main_root, wt_root = _make_worktree(Path(self.tmp))
+        os.environ["CLAUDE_PROJECT_DIR"] = str(wt_root)
+        self.assertEqual(resolve_project_root(str(wt_root)), str(wt_root))
+
+    def test_load_patterns_applies_main_repo_section_in_worktree(self):
+        """end-to-end: main repo のパスで書いたセクションが worktree で効く。"""
+        from core.patterns import load_patterns
+        main_root, wt_root = _make_worktree(Path(self.tmp))
+        os.environ["CLAUDE_PROJECT_DIR"] = str(wt_root)
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred(f"[project:{main_root}]\n!fixture.pem\n")
+        self.assertEqual(
+            load_patterns(default_file, cwd=str(wt_root)),
+            [("*.pem", False), ("fixture.pem", True)],
+        )
+
+    def test_load_patterns_still_matches_worktree_own_path(self):
+        """第 1 候補 (worktree 自身) の一致挙動は不変。"""
+        from core.patterns import load_patterns
+        _main_root, wt_root = _make_worktree(Path(self.tmp))
+        os.environ["CLAUDE_PROJECT_DIR"] = str(wt_root)
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred(f"[project:{wt_root}]\n!fixture.pem\n")
+        self.assertEqual(
+            load_patterns(default_file, cwd=str(wt_root)),
+            [("*.pem", False), ("fixture.pem", True)],
+        )
+
+    def test_unrelated_project_section_still_ignored_in_worktree(self):
+        from core.patterns import load_patterns
+        _main_root, wt_root = _make_worktree(Path(self.tmp))
+        os.environ["CLAUDE_PROJECT_DIR"] = str(wt_root)
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("[project:/elsewhere/repo]\n!fixture.pem\n")
+        self.assertEqual(
+            load_patterns(default_file, cwd=str(wt_root)),
+            [("*.pem", False)],
+        )
+
+
+class TestProjectCommittedPatternsTier(BaseWithIsolatedHome):
+    """0.32.0 (内部バックログ): repo 同梱 tier
+    (``<root>/.claude/sensitive-files-guardrail/patterns.txt``) を読む。
+
+    user 単位ファイルしか無かったため、テスト fixture / サンプルのダミー鍵を
+    持つ repo では貢献者全員が毎セッション block され、CI では除外が一切
+    効かなかった (各自がホーム配下に書くしかない)。"""
+
+    def setUp(self):
+        super().setUp()
+        self._project_env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self._project_env_patcher.start()
+        self.addCleanup(self._project_env_patcher.stop)
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        self.proj = Path(self.tmp) / "repo"
+        (self.proj / ".git").mkdir(parents=True)
+        os.environ["CLAUDE_PROJECT_DIR"] = str(self.proj)
+        self.default_file = _make_default_patterns_file(
+            Path(self.tmp), ["*.pem", "*.env"]
+        )
+
+    def _write_project(self, content: str) -> Path:
+        d = self.proj / ".claude" / "sensitive-files-guardrail"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "patterns.txt"
+        p.write_text(content)
+        return p
+
+    def _load(self):
+        from core.patterns import load_patterns
+        return load_patterns(self.default_file, cwd=str(self.proj))
+
+    def test_absent_project_file_changes_nothing(self):
+        self.assertEqual(self._load(), [("*.pem", False), ("*.env", False)])
+
+    def test_exclude_line_from_repo_file_is_applied(self):
+        self._write_project("!fixtures/synthetic.pem\n")
+        self.assertEqual(
+            self._load(),
+            [("*.pem", False), ("*.env", False), ("fixtures/synthetic.pem", True)],
+        )
+
+    def test_include_line_from_repo_file_is_applied(self):
+        """include 行も有効 (保護を足す方向にしか働かないため)。"""
+        self._write_project("*.secret\n")
+        self.assertEqual(
+            self._load(),
+            [("*.pem", False), ("*.env", False), ("*.secret", False)],
+        )
+
+    def test_user_tier_is_stronger_than_repo_tier(self):
+        """優先順 user > project: repo が持ち込んだ除外をユーザーが打ち消せる。"""
+        self._write_project("!fixtures/synthetic.pem\n")
+        self._write_preferred("fixtures/synthetic.pem\n")
+        rules = self._load()
+        self.assertEqual(
+            rules,
+            [
+                ("*.pem", False),
+                ("*.env", False),
+                ("fixtures/synthetic.pem", True),
+                ("fixtures/synthetic.pem", False),
+            ],
+        )
+        # last-match-wins なので user 側の include が勝つ
+        self.assertFalse(rules[-1][1])
+
+    def test_repo_tier_beats_default_tier(self):
+        """既定 patterns.txt より後に連結される (= repo の除外が既定に勝つ)。"""
+        from _shared.matcher import is_sensitive
+        self._write_project("!/.env\n")
+        rules = self._load()
+        self.assertFalse(is_sensitive(".env", rules, root=str(self.proj)))
+
+    def test_project_section_header_inside_repo_file_is_honored(self):
+        """書式は user tier と同じ (``[project:]`` も解釈する)。"""
+        self._write_project(f"[project:{self.proj}]\n!only-here.pem\n")
+        self.assertEqual(
+            self._load(),
+            [("*.pem", False), ("*.env", False), ("only-here.pem", True)],
+        )
+
+    def test_unresolvable_project_root_skips_tier(self):
+        from core.patterns import load_patterns
+        lone = Path(self.tmp) / "lonely"
+        lone.mkdir()
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        self.assertEqual(
+            load_patterns(self.default_file, cwd=str(lone)),
+            [("*.pem", False), ("*.env", False)],
+        )
+
+    def test_read_error_is_warned_and_tier_skipped(self):
+        """FileNotFound 以外の OSError は warn_callback に委ねて空を返す
+        (user tier と同じ契約)。"""
+        from _shared import patterns as P
+        self._write_project("!x.pem\n")
+        calls: list[str] = []
+
+        def boom(_self, *a, **k):
+            raise PermissionError("nope")
+
+        with mock.patch.object(Path, "read_text", boom):
+            rules = P._load_project_patterns(
+                str(self.proj), calls.append, None, [str(self.proj)], None
+            )
+        self.assertEqual(rules, [])
+        self.assertEqual(calls, ["PermissionError"])
+
+    def test_callback_fires_only_when_rules_were_read(self):
+        from _shared import patterns as P
+        seen: list[str] = []
+        # ファイル無し → 呼ばれない
+        P._load_project_patterns(
+            str(self.proj), None, None, [str(self.proj)], seen.append
+        )
+        self.assertEqual(seen, [])
+        # コメントだけ (rule 0 件) → 呼ばれない
+        self._write_project("# just a comment\n")
+        P._load_project_patterns(
+            str(self.proj), None, None, [str(self.proj)], seen.append
+        )
+        self.assertEqual(seen, [])
+        # rule あり → 固定トークンで 1 回
+        self._write_project("!x.pem\n")
+        P._load_project_patterns(
+            str(self.proj), None, None, [str(self.proj)], seen.append
+        )
+        self.assertEqual(seen, [P.PROJECT_PATTERNS_IN_USE])
+
+    def test_worktree_reads_the_worktree_checkout(self):
+        """worktree では worktree 側の checkout を読む (commit 済みなら同内容)。"""
+        from _shared.patterns import _resolve_project_patterns_path
+        _main_root, wt_root = _make_worktree(Path(self.tmp), main="wtmain")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(wt_root)
+        self.assertEqual(
+            _resolve_project_patterns_path(str(wt_root)),
+            wt_root / ".claude" / "sensitive-files-guardrail" / "patterns.txt",
+        )
+
+
+class TestProjectHeaderTildeExpansion(BaseWithIsolatedHome):
+    """0.32.0 (内部バックログ): ``[project:~/…]`` を ``expanduser`` で展開する。
+
+    展開前は ``$`` を含まないため ``_bad_header_token`` の警告にも掛からず、
+    完全に無音でそのセクションが捨てられていた。"""
+
+    def test_tilde_header_matches_expanded_path(self):
+        from _shared.patterns import _parse_local_patterns_text
+        proj = self.home_dir / "work" / "repo"
+        text = "[project:~/work/repo]\n!foo.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, str(proj)),
+            [("foo.pem", True)],
+        )
+
+    def test_tilde_header_does_not_match_unrelated_project(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "[project:~/work/repo]\n!foo.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, str(self.home_dir / "other")), []
+        )
+
+    def test_absolute_header_unchanged_by_expansion(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "[project:/work/repo]\n!foo.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, "/work/repo"), [("foo.pem", True)]
+        )
+
+
+class TestParseLocalPatternsMultipleKeys(unittest.TestCase):
+    """0.32.0: ``project_key`` に key 列を渡せる (worktree の 2 候補)。"""
+
+    def test_any_key_activates_section(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "!common.pem\n[project:/x]\n!only-x.pem\n[project:/y]\n!only-y.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, ["/y", "/x"]),
+            [("common.pem", True), ("only-x.pem", True), ("only-y.pem", True)],
+        )
+
+    def test_empty_sequence_behaves_like_none(self):
+        from _shared.patterns import _parse_local_patterns_text
+        text = "!common.pem\n[project:/x]\n!only-x.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, []), [("common.pem", True)]
+        )
+        self.assertEqual(
+            _parse_local_patterns_text(text, []),
+            _parse_local_patterns_text(text, None),
+        )
+
+    def test_empty_string_key_matches_nothing(self):
+        """``[project:]`` は ``_bad_header_token`` で弾かれるので、空 key が
+        空ヘッダーに一致することはない (念のため固定する)。"""
+        from _shared.patterns import _parse_local_patterns_text
+        text = "!common.pem\n[project:]\n!empty-header.pem\n"
+        self.assertEqual(
+            _parse_local_patterns_text(text, ""), [("common.pem", True)]
+        )
+
+
 class TestBadProjectHeaderWarn(BaseWithIsolatedHome):
     """0.19.0 (L2 review): ``[project:]`` ヘッダーが空 / 未展開 placeholder のとき
     黙って捨てず固定トークンで警告する。除外案内が ``$CLAUDE_PROJECT_DIR`` を
@@ -627,6 +996,34 @@ class TestCheckerLoaderContract(BaseWithIsolatedHome):
         core_rules = core_load(default_file)
         checker_rules = checker.load_patterns(default_file)
         self.assertEqual(core_rules, checker_rules)
+
+    def test_both_loaders_read_the_repo_committed_tier(self):
+        """0.32.0: repo 同梱 tier も両 hook で同じ rules になり、Stop 側は
+        固定トークンを stderr に出す (``claude --debug`` で追える可視化)。"""
+        import io
+        from contextlib import redirect_stderr
+
+        from core.patterns import load_patterns as core_load
+        checker = self._import_checker()
+
+        proj = Path(self.tmp) / "repo"
+        (proj / ".git").mkdir(parents=True)
+        shared = proj / ".claude" / "sensitive-files-guardrail"
+        shared.mkdir(parents=True)
+        (shared / "patterns.txt").write_text("!fixtures/synthetic.pem\n")
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(proj)}):
+            core_rules = core_load(default_file, cwd=str(proj))
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                checker_rules = checker.load_patterns(default_file, cwd=str(proj))
+
+        self.assertEqual(
+            core_rules, [("*.pem", False), ("fixtures/synthetic.pem", True)]
+        )
+        self.assertEqual(core_rules, checker_rules)
+        self.assertIn("project_patterns_in_use", buf.getvalue())
 
     def test_checker_legacy_fallback_loads_and_warns_stderr(self):
         """Stop 側 (checker) も旧パスを fallback ロードし stderr に移行 warning を出す。"""

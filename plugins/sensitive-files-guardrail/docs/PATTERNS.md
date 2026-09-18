@@ -1,7 +1,10 @@
 # パターン設定 (PATTERNS.md)
 
-`patterns.txt` (plugin 同梱) と `patterns.local.txt` (ユーザー個別) の両方が
-合流して rules を構成する。設計背景は [DESIGN.md](./DESIGN.md) 参照。
+3 つの tier が合流して rules を構成する (弱い順): `patterns.txt` (plugin 同梱の
+既定) → `<project root>/.claude/sensitive-files-guardrail/patterns.txt`
+(repo 同梱 / commit して共有、0.32.0) → `patterns.local.txt` (ユーザー個別)。
+last-match-wins なので後ろの tier が強い。設計背景は
+[DESIGN.md](./DESIGN.md) 参照。
 
 ## 既定 patterns.txt
 
@@ -132,8 +135,26 @@ EOF
 未設定なら hook 発火時の `cwd` から `.git` が見つかる階層まで遡って解決する
 (サブディレクトリで hook が発火しても monorepo のプロジェクト直下を見失わない)。
 `$HOME` 自体はプロジェクトとして扱わない。`[project:...]` のパスはこの解決結果
-と**文字列完全一致**する必要がある (末尾スラッシュは正規化されるが、シンボリック
-リンク解決や相対パスの `~` 展開はしない — 絶対パスをそのまま書く)。
+と**文字列完全一致**する必要がある (末尾スラッシュは正規化され、`~` は
+`expanduser` で展開される。シンボリックリンクは解決しない)。
+
+**git worktree (0.32.0)**: `claude --worktree` / `--bg` / sub-agent の
+`isolation: worktree` はいずれも別 checkout
+(`<repo>/.claude/worktrees/<name>` 等) でセッションを開き、
+`$CLAUDE_PROJECT_DIR` も **worktree 自身のパス**になる。そのため main repo の
+パスで書いたセクションが一致せず、承認済みの除外が worktree 作業では黙って
+無効化されていた。0.32.0 からセクションの一致判定は **worktree 自身 + main
+repo root の 2 候補**を見る (`.git` ファイルの `gitdir:` → `commondir` を辿って
+解決。`git` コマンドは呼ばない)。どちらのパスで書いても効くので、**main repo の
+パスで書いておけば worktree を作り直しても効き続ける** (worktree のパスは
+使い捨てなので推奨しない)。submodule の `.git` も同じ `gitdir:` 形式だが
+worktree ではないため候補には足さない (superproject の rule に差し替わらない)。
+
+一方 **path 形 rule の基準 root は worktree 自身のまま**で、main repo root には
+しない — worktree セッションが触るファイルは worktree 配下にあるので、基準を
+main repo root にすると「root 配下でない」と判定されて path 形 rule が一切
+効かなくなる。worktree は同じツリー構成を持つため、main repo root のセクションに
+書いた `!config/prod.pem` は worktree でも同じ相対 path で一致する。
 
 **reason からの誘導 (0.19.0 / 0.24.0)**: Read / Bash / Edit / Write の deny reason と
 Stop の block reason は、除外の恒久化として `[project:$CLAUDE_PROJECT_DIR]` ヘッダー +
@@ -170,13 +191,13 @@ standalone 形 (ヘッダー値が `$NAME` / `${NAME}` そのもの、または�
 `[project:...]` を後に書けば、プロジェクト側の rule が既定 + 共通ローカルより
 強くなる (= プロジェクトで個別に許可・再禁止できる)。
 
-**なぜ single file のままか**: セッションごとに承認した除外パターンが
-「このプロジェクトだけの話のつもりが、実は `~/.claude/` 配下のグローバル
-1 ファイルなので他の全プロジェクトにも無条件適用されていた」という実運用上の
-気付きに基づく。プロジェクト直下に別ファイルを置く方式 (`$CLAUDE_PROJECT_DIR
-/.claude/sensitive-files-guardrail/patterns.local.txt` 等) も検討したが、
-N プロジェクト = N ファイルに設定が分散して「自分が何を許可しているか」の
-一覧性が落ちるため、既存の単一ファイルにセクションを足す形を採用した。
+**なぜ user 単位ファイルは single file のままか**: セッションごとに承認した
+除外パターンが「このプロジェクトだけの話のつもりが、実は `~/.claude/` 配下の
+グローバル 1 ファイルなので他の全プロジェクトにも無条件適用されていた」という
+実運用上の気付きに基づく。**ユーザー個人の**設定をプロジェクトごとに別ファイル
+へ分ける方式は、N プロジェクト = N ファイルに分散して「自分が何を許可して
+いるか」の一覧性が落ちるため採らず、単一ファイルにセクションを足す形にした。
+repo に commit して**共有する**除外は目的が別 (下の節) なので別ファイルで扱う。
 
 ### 旧パスからの移行 (0.5.x → 0.6.0)
 
@@ -190,6 +211,50 @@ mkdir -p ~/.claude/sensitive-files-guardrail
 mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guardrail/patterns.local.txt" \
    ~/.claude/sensitive-files-guardrail/patterns.local.txt
 ```
+
+## repo 同梱 `patterns.txt` (commit して共有する tier、0.32.0)
+
+`<project root>/.claude/sensitive-files-guardrail/patterns.txt` を置くと、
+ユーザー単位ファイルに**加えて**読み込まれる。**このファイルは commit する**
+前提で、user 単位ファイルでは解決できなかった次の 3 つを解消する:
+
+- 貢献者間で**共有できない** (各自が手元で同じ除外を書き直すしかなかった)
+- **CI で効かない** (ホームに何も無い)
+- 新しく clone した人が同じ block を最初から踏む
+
+典型的な用途は、テスト fixture / サンプル / ドキュメント用の**ダミー鍵**を
+持つ repo。以前はこの手の repo で全員が毎セッション block されていた。
+
+```
+# <project root>/.claude/sensitive-files-guardrail/patterns.txt
+# ダミー鍵 (合成データ。実鍵ではない) を Stop / Read / Bash の対象外にする
+!/tests/fixtures/keys/synthetic_rsa.pem
+!/docs/examples/sample.env
+```
+
+`[project:...]` ヘッダーは**不要** (ファイル自体がその repo にしか無い)。
+書式は user 単位ファイルと完全に同じで、`[project:...]` を書くこともできる
+(monorepo でサブプロジェクトごとに書き分けたい場合)。
+
+**評価順 (tier)**: `既定 patterns.txt` → `repo 同梱` → `user 単位` の順に連結し、
+last-match-wins で後ろが強い = **`user > repo > 既定`**。repo 同梱を user より
+前に置くのは、clone してきた repo が持ち込んだ除外を、ユーザーが自分のファイルに
+include 行 (`!` なし) を書き足すだけで打ち消せるようにするため。逆順だと repo の
+除外がそのユーザーの明示的な意思より強くなる。
+
+**`!` 除外だけでなく include 行も有効にしてある理由**: 「repo 同梱は除外専用に
+絞るほうが安全」に見えるが、逆である。include 行は保護を**足す**方向にしか
+働かない (fail-toward-deny) 一方、`!` 除外は保護を**外す**方向に働く。除外だけを
+許して include を禁じると、**リスクのある側だけを許可して安全な側を禁じる**
+ことになるので、両方を有効にしている。
+
+**残存リスク (開示)**: repo 同梱ファイルは commit された内容がそのまま効くので、
+clone した repo が `!` 行で保護を弱めることが**あり得る** (共有を可能にする、
+という本 tier の目的の裏側)。緩和として (1) user 単位ファイルが常に上位なので
+個別に打ち消せる、(2) 読み込んだときに固定トークン `project_patterns_in_use` を
+記録する (Read / Bash 側は `~/.claude/logs/redact-hook.log`、Stop 側は stderr =
+`claude --debug` のログ) ので「なぜ block されないのか」を後から辿れる。
+第三者の repo を開くときは、このファイルの中身も差分レビューの対象にすること。
 
 ## 評価方式: last-match-wins (大文字小文字無視)
 
@@ -421,23 +486,54 @@ fallback の 2-tier) は 0.6.0 で撤去した。
 
 subprocess (`git rev-parse` 等) は呼ばない。
 
+### `_resolve_project_patterns_path(cwd) -> Path | None` (0.32.0)
+
+repo 同梱 tier のパス (`<root>/.claude/sensitive-files-guardrail/patterns.txt`)。
+基準は `resolve_project_root` (= `[project:]` の第 1 候補) なので、worktree では
+worktree checkout 側を読む (commit 済みなら main と同内容)。root 不明なら `None`
+= この tier を読まない。非存在は黙殺、`FileNotFound` 以外の `OSError` は
+`warn_callback` へ (user tier と同じ契約)。
+
+### `_project_section_keys(cwd) -> list[str]` (0.32.0)
+
+`[project:<key>]` セクションと突き合わせる key の**候補列**。第 1 候補は
+`_resolve_project_key` の結果 (従来と同じ値)。git worktree のときだけ
+`_main_repo_root` で解決した **main repo root** を第 2 候補として足す。
+どちらか 1 つに一致すればそのセクションは active。第 1 候補を残す (置き換え
+ではなく追加) のは、worktree 自身のパスをヘッダーに書いていた場合の既存の
+一致挙動を変えないため。
+
+### `_main_repo_root(dir) -> str | None` (0.32.0)
+
+`dir` が git worktree の root なら main repo root を返す。`.git` が**ファイル**で
+`gitdir: <main>/.git/worktrees/<name>` を指し、その `commondir` が共有 git dir
+(`<main>/.git`) に解決し、その親がディレクトリとして存在する場合のみ。
+submodule (`gitdir: <super>/.git/modules/<name>`)・bare repo の worktree・
+`$HOME` 自身は `None`。`git` コマンドは呼ばない (PreToolUse の latency 目標)。
+
 ### `_parse_local_patterns_text(text, project_key) -> list[tuple[str, bool]]` (0.15.0)
 
 `patterns.local.txt` 専用のパーサ。`_parse_patterns_text` と違い
 `[project:<path>]` セクションヘッダーを解釈する。ヘッダーより前の行は常に出力に
 含め (共通行)、ヘッダー以降は `project_key` と一致する場合だけそのセクションの
 行を出力に含める。**出現順を保持したまま**返す (グループ単位で並べ替えない)。
-`project_key` が `None` ならどのセクションにも一致せず、共通行のみを返す —
+`project_key` が `None` / 空ならどのセクションにも一致せず、共通行のみを返す —
 ヘッダーを含まない既存ファイルは `_parse_patterns_text` と完全に同じ結果になる。
+0.32.0 から `project_key` は単一 key でも key 列でもよい (worktree では 2 候補)。
+ヘッダーは比較前に `expanduser` + `normpath` で正規化する。
 
 ### `resolve_project_root(cwd) -> str | None` (0.24.0)
 
-path 形 rule の基準 root。値は `_resolve_project_key` と**同一** (別名で公開して
-いるのは、`[project:<key>]` の key とそのセクションに書いた path 形 rule の基準
-root が定義上同じものであることを示すため)。Read / Edit / Bash / Stop の 4 箇所が
-同じ root で matcher を呼ぶので、どの hook が出したレシピも他の hook で同じ
-1 ファイルに効く。Stop だけ git の toplevel を使うと、monorepo
+path 形 rule の基準 root。値は `_resolve_project_key` の結果そのもの (別名で
+公開しているのは、`[project:<key>]` の key とそのセクションに書いた path 形
+rule の基準 root が定義上同じものであることを示すため)。Read / Edit / Bash /
+Stop の 4 箇所が同じ root で matcher を呼ぶので、どの hook が出したレシピも
+他の hook で同じ 1 ファイルに効く。Stop だけ git の toplevel を使うと、monorepo
 (`$CLAUDE_PROJECT_DIR` がサブディレクトリ) で Stop のレシピが Read で効かなくなる。
+
+0.32.0 の worktree 対応でセクションの一致判定だけが複数 key になったため、
+「セクションの key」と「path 形の基準 root」は完全に同一ではなくなった。本関数は
+**引き続き第 1 候補 (worktree 自身) だけを返す** (理由は上の「git worktree」節)。
 
 ### `_shared/matcher.py` の path 形対応 (0.24.0)
 

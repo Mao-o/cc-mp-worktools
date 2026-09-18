@@ -47,7 +47,7 @@ sensitive-files-guardrail/
     ├── hooks.json                   # PreToolUse(Read/Bash/Edit/Write, timeout 2s) + Stop (timeout 15s)
     ├── _shared/                     # 両 hook 共有ロジック (判定が剥離しないよう一元化)
     │   ├── matcher.py               is_sensitive (case-insensitive + last-match-wins)
-    │   └── patterns.py              load_patterns / _parse_patterns_text / [project:] セクション / 除外レシピ
+    │   └── patterns.py              load_patterns (3 tier: 既定 → repo 同梱 → user) / _parse_patterns_text / [project:] セクション (worktree は 2 候補) / 除外レシピ
     ├── check-sensitive-files/       # Stop hook
     │   ├── __main__.py
     │   ├── checker.py               git ls-files (tracked / untracked、--recurse-submodules)

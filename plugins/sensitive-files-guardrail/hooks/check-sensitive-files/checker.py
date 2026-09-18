@@ -60,12 +60,25 @@ def _warn_header(token: str) -> None:
     )
 
 
+def _note_project_patterns(token: str) -> None:
+    """project_patterns_callback — repo 同梱 patterns.txt を読み込んだことを
+    stderr に 1 行記録する (0.32.0)。
+
+    Stop hook の stderr は ``claude --debug`` のログにしか出ないため、
+    「除外が効いていて報告されない」状態を後から辿るための可視化。判定は
+    変えない。token はパスを含まない固定文字列。
+    """
+    sys.stderr.write(f"[check-sensitive-files] {token}\n")
+
+
 def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
-    """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
+    """既定 patterns.txt + repo 同梱 + ローカル patterns.local.txt を読んで
+    rules list を返す。
 
     Stop 側は hook 間の Python 依存を避けるため stderr 直書きで warn する
     (``core.logging`` を import しない)。``cwd`` は ``[project:<path>]``
-    セクションの一致判定に使う (``_shared.patterns.load_patterns`` 参照)。
+    セクションの一致判定と repo 同梱 tier のパス解決に使う
+    (``_shared.patterns.load_patterns`` 参照)。
     """
     return _shared_load_patterns(
         patterns_file,
@@ -73,6 +86,7 @@ def load_patterns(patterns_file: Path, cwd: str = "") -> list[tuple[str, bool]]:
         migrate_warn_callback=_warn_migrate,
         cwd=cwd,
         header_warn_callback=_warn_header,
+        project_patterns_callback=_note_project_patterns,
     )
 
 
