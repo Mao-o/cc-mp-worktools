@@ -1169,6 +1169,10 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知、報告済み集合を更新) |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
 | handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
+| stdin が空 / 非 JSON / dict でない (0.32.0) | **exit 0 + stderr `envelope_unreadable: <kind>`** (fail-open。Stop は block しない)。`<kind>` は `empty` / `not_json` / `not_an_object` / `EOFError`。`OSError` はこの経路に来ず下の catch-all (`internal_error` + `systemMessage`) に回る |
+| 時間予算 (12s) 超過 + 検出 0 件 (0.32.0) | **exit 0 + stderr `git_budget_exceeded` / `scan_incomplete` + `systemMessage`** (block しない)。「機密なし」の沈黙と区別できないため必ず見せる |
+| 時間予算 (12s) 超過 + 検出 1 件以上 (0.32.0) | `decision: block` (従来どおり) + reason 冒頭に「一覧は不完全です」 |
+| 時間予算 (12s) 超過 + 検出集合 ⊆ 同一 session で報告済みの集合 (0.32.0) | **exit 0 + stderr `scan_incomplete` + `systemMessage`** (block しない)。拾えたのは部分集合なので、黙ると「完走して新規なし」の沈黙と区別できない |
 
 #### session 単位の once-only (0.19.0)
 
