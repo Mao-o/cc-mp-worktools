@@ -21,6 +21,19 @@ _SIGNAL_FALLBACK_LABELS: dict[str, str] = {
     "control_flow_density": "制御フロー密度高",
 }
 
+# メモに並べるトップレベル定義の件数。分割候補の当たりを付けるのが目的なので
+# 全件は列挙しない (0.5.0)。
+MAX_DEF_HIGHLIGHTS = 5
+
+# 定義名 1 個あたりの表示長。生成物・minify 済みコードに極端に長い識別子が
+# 現れてもメモ 1 行が壊れないようにする。
+_MAX_DEF_NAME_CHARS = 48
+
+# メモ全体の文字数上限。``additionalContext`` の実務上の上限 (10,000 文字) に
+# 合わせ、これを超える場合は**付記行 (分割候補の手掛かり) から先に落とす** —
+# 行数・tier・シグナルという判定根拠はメモの本体であり、常に残す。
+MAX_MEMO_CHARS = 10_000
+
 
 def _display_tiers(tier: str) -> tuple[str, str]:
     """目安として表示する 2 tier (判定 tier + 隣接 tier) を選ぶ。
@@ -95,6 +108,64 @@ def _format_signal(key: str, metrics: Metrics) -> str:
     return _SIGNAL_FALLBACK_LABELS.get(key, key)
 
 
+def _truncate_name(name: str) -> str:
+    if len(name) <= _MAX_DEF_NAME_CHARS:
+        return name
+    return name[: _MAX_DEF_NAME_CHARS - 1] + "…"
+
+
+def _def_highlight_line(metrics: Metrics) -> str:
+    """占有行数の大きいトップレベル定義を並べる (0.5.0)。
+
+    旧版のメモは「定義数 28」のように件数だけを示しており、どの定義群を切り
+    出す候補なのかの手掛かりが無かった (内部バックログ)。判定に使っている
+    情報 (Python は AST、他言語は定義行の正規表現) から追加コストなしに得ら
+    れる範囲で、名前と行数を事実として並べる。
+
+    並び順は行数の降順、同数なら出現順。``span`` は Python のみ正確で、他
+    言語は「次のトップレベル定義まで」の概算 (``metrics.TopLevelDef`` 参照)。
+    """
+    if not metrics.top_level_defs:
+        return ""
+    ranked = sorted(metrics.top_level_defs, key=lambda d: (-d.span, d.start_line))
+    shown = ranked[:MAX_DEF_HIGHLIGHTS]
+    parts = [f"{_truncate_name(d.name)}({d.span}行, {d.start_line}行目〜)" for d in shown]
+    return f"大きい定義 上位{len(parts)}: " + " / ".join(parts)
+
+
+def _import_cluster_line(metrics: Metrics) -> str:
+    """import カテゴリごとに、そのカテゴリを立てた語を並べる (0.5.0)。
+
+    **2 カテゴリ以上あるときだけ**出す。単一カテゴリの列挙は「どこで切るか」の
+    手掛かりにならず (境界は 2 つ以上のクラスタの間にしか現れない)、メモを
+    長くするだけのため。
+    """
+    parts = [
+        f"{category}({', '.join(modules)})"
+        for category, modules in metrics.import_modules
+        if modules
+    ]
+    if len(parts) < 2:
+        return ""
+    return "import クラスタ: " + " / ".join(parts)
+
+
+def _fit_within_limit(header_lines: list[str], extras: list[str], footer: str) -> list[str]:
+    """``MAX_MEMO_CHARS`` に収まる範囲で付記行を採用する。
+
+    落とす順序は「後ろの付記行から」ではなく「収まらない付記行だけ」— 先に
+    置いた行が長すぎて入らない場合でも、後続の短い行は採用する。
+    """
+    accepted: list[str] = []
+    for extra in extras:
+        if not extra:
+            continue
+        candidate = header_lines + accepted + [extra, footer]
+        if len("\n".join(candidate)) <= MAX_MEMO_CHARS:
+            accepted.append(extra)
+    return header_lines + accepted + [footer]
+
+
 def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metrics) -> str:
     tier_a, tier_b = _display_tiers(verdict.tier)
     # judge.judge() が返す Verdict は現状 4 tier (note/review/warn/strong) 全てを
@@ -158,4 +229,7 @@ def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metri
         "促す目安として提示しています。"
     )
 
-    return "\n".join([header, signal_line, footer])
+    # 分割候補の境界を示す付記行 (0.5.0)。判定には使わない表示専用の情報で、
+    # 材料が無ければ行そのものを出さない。
+    extras = [_def_highlight_line(metrics), _import_cluster_line(metrics)]
+    return "\n".join(_fit_within_limit([header, signal_line], extras, footer))

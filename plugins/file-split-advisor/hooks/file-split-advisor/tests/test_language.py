@@ -43,6 +43,77 @@ class TestDetectLanguage(unittest.TestCase):
         self.assertEqual(language.detect_language(Path("Foo.PY")), "python")
 
 
+class TestLanguageFromShebang(unittest.TestCase):
+    """0.5.0: 拡張子なしスクリプトの shebang 判定。"""
+
+    def test_env_form(self):
+        self.assertEqual(
+            language.language_from_shebang("#!/usr/bin/env python3"), "python"
+        )
+
+    def test_absolute_interpreter_with_minor_version(self):
+        self.assertEqual(
+            language.language_from_shebang("#!/usr/bin/python3.11"), "python"
+        )
+
+    def test_env_with_options_and_interpreter_arguments(self):
+        self.assertEqual(
+            language.language_from_shebang("#!/usr/bin/env -S node --loader=ts"),
+            "javascript",
+        )
+
+    def test_env_with_variable_assignment(self):
+        self.assertEqual(
+            language.language_from_shebang("#!/usr/bin/env FOO=bar ruby"), "ruby"
+        )
+
+    def test_shell_interpreters_map_to_shell(self):
+        for line in ("#!/bin/bash", "#!/bin/sh", "#!/usr/bin/env zsh"):
+            with self.subTest(line=line):
+                self.assertEqual(language.language_from_shebang(line), "shell")
+
+    def test_unknown_interpreter_is_empty(self):
+        self.assertEqual(language.language_from_shebang("#!/usr/bin/awk -f"), "")
+
+    def test_non_shebang_line_is_empty(self):
+        for line in ("", "# !/usr/bin/env python3", "import os", "#!"):
+            with self.subTest(line=line):
+                self.assertEqual(language.language_from_shebang(line), "")
+
+    def test_extension_wins_over_a_conflicting_shebang(self):
+        self.assertEqual(
+            language.detect_language(Path("tool.py"), "#!/usr/bin/env node"), "python"
+        )
+
+    def test_shebang_used_when_extension_is_absent(self):
+        self.assertEqual(
+            language.detect_language(Path("bin/deploy"), "#!/usr/bin/env python3"),
+            "python",
+        )
+
+    def test_unregistered_extension_still_generic_without_shebang(self):
+        self.assertEqual(language.detect_language(Path("notes.xyz"), "plain text"), "generic")
+
+
+class TestIsShebangCandidate(unittest.TestCase):
+    """0.5.0: 内容 (shebang) を読んで判定する対象の絞り込み。"""
+
+    def test_extensionless_name_is_a_candidate(self):
+        for name in ("deploy", "bin/release", "Rakefile", "Jenkinsfile"):
+            with self.subTest(name=name):
+                self.assertTrue(language.is_shebang_candidate(Path(name)))
+
+    def test_file_with_any_extension_is_not_a_candidate(self):
+        for name in ("notes.md", "data.json", "app.py", "archive.tar.gz"):
+            with self.subTest(name=name):
+                self.assertFalse(language.is_shebang_candidate(Path(name)))
+
+    def test_dotfiles_are_not_candidates(self):
+        for name in (".bashrc", ".env", ".envrc"):
+            with self.subTest(name=name):
+                self.assertFalse(language.is_shebang_candidate(Path(name)))
+
+
 class TestIsTestPath(unittest.TestCase):
     def test_test_dir_markers(self):
         for dir_name in ("test", "tests", "__tests__", "spec", "specs", "e2e"):

@@ -250,6 +250,157 @@ class TestImportCategories(unittest.TestCase):
         self.assertIn("auth", result.import_categories)
 
 
+class TestImportModuleSamples(unittest.TestCase):
+    """0.5.0: カテゴリを立てた語を表示用に採取する (判定値は変えない)。"""
+
+    def test_modules_recorded_per_category(self):
+        text = "\n".join(
+            [
+                "import requests",
+                "import urllib",
+                "from pathlib import Path",
+                "import shutil",
+            ]
+        )
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(
+            dict(result.import_modules),
+            {"network": ("requests", "urllib"), "filesystem": ("pathlib", "shutil")},
+        )
+
+    def test_module_order_matches_import_categories(self):
+        text = "import logging\nimport requests\n"
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(
+            tuple(category for category, _ in result.import_modules),
+            result.import_categories,
+        )
+
+    def test_quoted_keywords_are_shown_without_quotes(self):
+        text = "const fs = require('fs')\n"
+        result = metrics.compute(_loaded(text), "javascript", Path("/repo/foo.js"))
+        self.assertEqual(dict(result.import_modules)["filesystem"], ("fs",))
+
+    def test_duplicate_modules_are_recorded_once(self):
+        text = "import requests\nimport requests\n"
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(dict(result.import_modules)["network"], ("requests",))
+
+    def test_samples_are_capped_per_category(self):
+        text = "\n".join(
+            f"import {name}"
+            for name in ("http", "https", "fetch", "axios", "requests", "socket", "grpc")
+        )
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(
+            len(dict(result.import_modules)["network"]), metrics.IMPORT_MODULE_SAMPLE_CAP
+        )
+        # 採取上限はカテゴリ判定に影響しない。
+        self.assertEqual(result.import_category_count, 1)
+
+    def test_samples_are_capped_within_a_single_line(self):
+        # 1 行に上限を超える語が並ぶ形 (``import a, b, c, …``)。行をまたぐ上限
+        # 判定だけでは足りず、行内の採取も打ち切る必要がある。
+        text = "import http, https, fetch, axios, requests, socket, grpc\n"
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(
+            len(dict(result.import_modules)["network"]), metrics.IMPORT_MODULE_SAMPLE_CAP
+        )
+
+    def test_no_imports_yields_no_modules(self):
+        result = metrics.compute(_loaded("x = 1\n"), "python", Path("/repo/foo.py"))
+        self.assertEqual(result.import_modules, ())
+
+
+class TestTopLevelDefs(unittest.TestCase):
+    """0.5.0: メモに分割候補の境界を示すためのトップレベル定義一覧。"""
+
+    def test_python_defs_use_exact_ast_spans(self):
+        text = "\n".join(
+            [
+                "import os",
+                "",
+                "def parse(line):",
+                "    if line:",
+                "        return line",
+                "    return None",
+                "",
+                "class Writer:",
+                "    def write(self):",
+                "        return 1",
+                "",
+            ]
+        )
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(
+            [(d.name, d.start_line, d.span) for d in result.top_level_defs],
+            [("parse", 3, 4), ("Writer", 8, 3)],
+        )
+
+    def test_python_nested_defs_are_not_listed(self):
+        text = "def outer():\n    def inner():\n        return 1\n    return inner\n"
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual([d.name for d in result.top_level_defs], ["outer"])
+        # 件数シグナル (def_count) は従来どおりネストも数える。
+        self.assertEqual(result.def_count, 2)
+
+    def test_python_syntax_error_falls_back_to_the_regex_scan(self):
+        text = "def broken(:\n    pass\n\ndef other():\n    pass\n"
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual([d.name for d in result.top_level_defs], ["broken", "other"])
+
+    def test_generic_spans_reach_the_next_definition(self):
+        text = "\n".join(
+            [
+                "function first() {",
+                "  return 1;",
+                "}",
+                "",
+                "class Second {",
+                "}",
+                "",
+            ]
+        )
+        result = metrics.compute(_loaded(text), "javascript", Path("/repo/foo.js"))
+        self.assertEqual(
+            [(d.name, d.start_line, d.span) for d in result.top_level_defs],
+            [("first", 1, 4), ("Second", 5, 2)],
+        )
+
+    def test_generic_arrow_assignment_name_is_taken_from_the_left_hand_side(self):
+        text = "const buildIndex = (rows) => rows.length;\n"
+        result = metrics.compute(_loaded(text), "typescript", Path("/repo/foo.ts"))
+        self.assertEqual([d.name for d in result.top_level_defs], ["buildIndex"])
+
+    def test_generic_indented_definitions_are_not_listed(self):
+        # インデントされた定義行は「トップレベル」ではないので候補にしない
+        # (分割単位にならない)。定義キーワードで始まる入れ子を使う — 定義行と
+        # 認識されない行では、この絞り込みが効いているか確認できない。
+        text = "class Outer {\n  function inner() {}\n}\n"
+        result = metrics.compute(_loaded(text), "javascript", Path("/repo/foo.js"))
+        self.assertEqual([d.name for d in result.top_level_defs], ["Outer"])
+
+    def test_definition_count_is_capped(self):
+        text = "".join(f"def f{i}():\n    pass\n" for i in range(metrics.TOP_LEVEL_DEF_CAP + 10))
+        result = metrics.compute(_loaded(text), "python", Path("/repo/foo.py"))
+        self.assertEqual(len(result.top_level_defs), metrics.TOP_LEVEL_DEF_CAP)
+
+    def test_generic_cap_does_not_stretch_the_last_span(self):
+        # 打ち切った最後の定義の span が「ファイル末尾まで」に伸びない
+        # (1 件多く見てから切るため)。
+        lines = []
+        for i in range(metrics.TOP_LEVEL_DEF_CAP + 10):
+            lines.append(f"function f{i}() {{}}")
+        text = "\n".join(lines) + "\n" + "// tail\n" * 100
+        result = metrics.compute(_loaded(text), "javascript", Path("/repo/foo.js"))
+        self.assertEqual(len(result.top_level_defs), metrics.TOP_LEVEL_DEF_CAP)
+        self.assertEqual(result.top_level_defs[-1].span, 1)
+
+    def test_empty_file_has_no_defs(self):
+        result = metrics.compute(_loaded(""), "python", Path("/repo/empty.py"))
+        self.assertEqual(result.top_level_defs, ())
+
+
 class TestImportExtractionExtended(unittest.TestCase):
     """0.4.0 で追加した import 形。旧版はいずれも 0 カテゴリだった。"""
 
