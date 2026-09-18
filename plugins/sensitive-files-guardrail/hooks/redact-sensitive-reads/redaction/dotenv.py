@@ -96,6 +96,13 @@ _MIN_LENGTH_BY_TYPE: dict[str, int] = {
 # 4096 文字超 (len(v)) は ``<long>`` (デバッグダンプ混入のヒント)。
 _MAX_LENGTH_GENERIC = 4096
 
+# entries が 0 でも中身があるときに添える 1 行 (0.31.0)。``keyonly_scan`` の
+# 同趣旨の行と文面を揃える (同じ誤認を 2 通りの言い方で説明しない)。
+_UNPARSED_NOTE = (
+    "note: file is not empty but no KEY=value lines were parsed"
+    " (encoding or format may differ)."
+)
+
 
 def _preprocess_value(raw: str) -> str:
     """型判定 / status 判定 / length 計測の共通前処理。
@@ -230,6 +237,13 @@ def redact_dotenv(text: str) -> dict:
     # (0.23.0 の初版は候補文字列のヒューリスティックだけで弾いていたが、
     # RSA / EC PKCS#8 の末尾行は短いことがあり閾値を素通りした)。
     in_pem_block = False
+    # 「空行でもコメントでも PEM の枠でもないのに ``KEY=value`` として読めな
+    # かった」行数 (0.31.0 隔離内レビュー P3-2)。``format_dotenv`` が
+    # ``_UNPARSED_NOTE`` を出すかどうかの判断材料。**理解できている行
+    # (空行 / コメント / PEM marker / PEM 継続行) は数えない** — 数えると
+    # 全行コメントの ``.env`` や PEM を値に持つ ``.env`` で「エンコーディングが
+    # 違うかも」と誤誘導する (直そうとしている誤情報の移設になる)。
+    unparsed = 0
     for line in text.splitlines():
         # コメント・空行スキップ
         stripped = line.strip()
@@ -248,6 +262,8 @@ def redact_dotenv(text: str) -> dict:
             # 書いただけの行で block を開かないため)。
             if opens_pem_block(stripped):
                 in_pem_block = True
+            else:
+                unparsed += 1
             continue
         raw_key, raw_val = m.group(1), m.group(2)
         v = _preprocess_value(raw_val)
@@ -281,6 +297,18 @@ def redact_dotenv(text: str) -> dict:
         "format": "dotenv",
         "entries": len(keys),
         "keys": keys,
+        # 0.31.0: 「1 件も拾えなかった」が「ファイルが空」なのか「読めなかった」
+        # なのかを ``format_dotenv`` が区別するための材料。
+        #
+        # 初版は byte 数 (``scanned_bytes``) で見ていたが、空白のみ / 全行
+        # コメントの ``.env`` でも「エンコーディングか format が違うかも」と
+        # 出てしまった (隔離内レビュー P3-2)。理解できなかった行数で見る。
+        #
+        # 既知の取りこぼし: 値のない PEM block だけを含む ``.env`` は
+        # ``unparsed_lines == 0`` になるので note が出ない (block 内は
+        # 「理解できている行」として数えないため)。``entries: 0`` /
+        # ``(no entries)`` の開示は残る。
+        "unparsed_lines": unparsed,
     }
 
 
@@ -311,6 +339,17 @@ def format_dotenv(info: dict) -> str:
         # 出す (silent degradation 対策と同じ方針)。折り畳み側の note 保護も
         # 「最終行が ``note:``」を前提にしているため、形を揃える意味もある。
         lines.append("(no entries)")
+        # 0.31.0: 中身があるのに 1 件も拾えなかったときは「空」と言い切らない。
+        # 未対応のテキストエンコーディング (BOM 無し latin-1 等) や別 format を
+        # dotenv 名で置いた場合が該当し、そのまま ``(no entries)`` だけを返すと
+        # 「この .env は空」という**誤った事実**をモデルに渡す (思想 2 の破綻)。
+        # 断定できないので「かもしれない」に落とす。
+        #
+        # 条件は **parse 不能行数 > 0**。「中身がある」(byte 数 > 0) では
+        # 空白のみ / 全行コメントの ``.env`` まで巻き込み、命題は真でも
+        # 「エンコーディングが違うかも」の部分が誤誘導になる (P3-2)。
+        if info.get("unparsed_lines", 0) > 0:
+            lines.append(_UNPARSED_NOTE)
     else:
         lines.append("keys (in order):")
         for i, k in enumerate(info["keys"], 1):

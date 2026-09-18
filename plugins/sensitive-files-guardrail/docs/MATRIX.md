@@ -248,6 +248,16 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > 旧版 (main) との同一コーパス diff (1,344 コマンド × default / auto =
 > 2,688 verdict): 変更 246 件 = deny 増 178 / deny 減 8 / ask → allow 60、
 > **説明不能ゼロ** (全件が上記 (1)〜(5) に分類)。
+>
+> **0.31.0: minimal info の中身のみ変化 (判定境界は 1 セルも不変)**。
+> (a) 32KB 以下の inline 経路で BOM / UTF-16 を判定してからデコードする
+> (`redaction/decoding.py`) — BOM 付き `.env` で先頭 1 鍵が消える / UTF-16 `.env`
+> が `entries: 0` = 「空」と報告される誤情報の修正。(b) placeholder 判定を厳格化
+> し、`test_51H8xKq…` / `dev_a8f3c2e1b9d7` のような**実トークン**を
+> `<placeholder>` と誤標識しなくなった (`<set>` に戻る)。(c) `entries: 0` かつ
+> 中身があるときは「エンコーディングか format が違うかもしれない」旨を添える。
+> いずれも deny / allow / ask は変わらない。詳細は
+> [DESIGN.md](./DESIGN.md#入力エンコーディングの推定-0310)。
 
 ## Bash handler — 機密確定 match (全 mode で deny)
 
@@ -524,6 +534,14 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
 | handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
+
+> 0.31.0 で block reason に「**この block が次ターンから出なくなっても対処成功の
+> 証拠ではない**」旨と確認コマンド (`git ls-files <path>`) の開示を足したが、
+> **上表の判定は 1 行も変わっていない** (文面のみ)。沈黙は「同じ集合を報告済みか」
+> だけで決まり、対処が有効だったかは見ていない — `.gitignore` の追記だけでは
+> tracked は index に残るため、無効な対処の後の沈黙と成功後の沈黙が区別できな
+> かった。根拠と代替案の棄却理由は
+> [DESIGN.md](./DESIGN.md#session-単位の-once-only-0190) を参照。
 
 ## `__main__` catch-all (handler 内未捕捉例外)
 

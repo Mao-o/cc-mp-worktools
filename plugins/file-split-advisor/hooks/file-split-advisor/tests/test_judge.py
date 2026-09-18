@@ -128,7 +128,7 @@ class TestScaleSafety(unittest.TestCase):
     """
 
     def test_huge_finite_scale_is_unsafe(self):
-        # マージ前レビューの指摘で挙がった再現値そのもの。
+        # Codex 指摘の再現値そのもの。
         self.assertFalse(judge.is_scale_safe(1e308))
 
     def test_neutral_scale_is_safe(self):

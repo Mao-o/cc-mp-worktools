@@ -767,6 +767,44 @@ class TestMainSessionAck(BaseMainTest):
         reason = json.loads(_run_main({"cwd": str(self.repo)})[1])["reason"]
         self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
         self.assertNotIn("再度 block しません", reason)
+        # session 注記が無い = 沈黙しないので、沈黙の開示も出さない
+        self.assertNotIn("対処が成功した証拠ではありません", reason)
+
+    def test_session_note_discloses_that_silence_is_not_success(self):
+        """0.31.0 (内部バックログ): ack 後の沈黙を「対処成功」と取り違えさせない。
+
+        tracked ファイルに ``.gitignore`` を追記しただけでは index から外れない
+        ので対処としては無効だが、報告済み集合の記録により次ターンから block が
+        出なくなる = 「直った」ように見える。判定 (block するか) は変えずに、
+        **沈黙の意味**と確認方法を reason に明示する。
+        """
+        self._track(".env")
+        env = {"cwd": str(self.repo), "session_id": "sess-silence"}
+        reason = json.loads(_run_main(env)[1])["reason"]
+        self.assertIn("再度 block しません", reason)
+        self.assertIn("対処が成功した証拠ではありません", reason)
+        # 確認手段を伴わない開示は行動に繋がらないので、コマンドも出す
+        self.assertIn("git ls-files <path>", reason)
+        # 沈黙の予告 (0.19.0) の**後**に、その意味の開示が続く
+        self.assertLess(
+            reason.index("再度 block しません"),
+            reason.index("対処が成功した証拠ではありません"),
+        )
+
+    def test_silence_disclosure_precedes_the_actual_silence(self):
+        """開示が出るターンの**次**から実際に黙ることを同じテストで固定する。
+
+        開示文だけが残って沈黙の挙動が変わっていた (あるいは逆) という
+        ズレを検出する。
+        """
+        self._track(".env")
+        env = {"cwd": str(self.repo), "session_id": "sess-silence-2"}
+        first = _run_main(env)[1]
+        self.assertTrue(self._blocked(first))
+        self.assertIn("対処が成功した証拠ではありません", json.loads(first)["reason"])
+        # .gitignore だけ足す = tracked には無効な「対処」
+        (self.repo / ".gitignore").write_text(".env\n")
+        self.assertEqual(_run_main(env)[1], "")
 
     def test_state_file_stores_digests_not_paths(self):
         self._track(".env")

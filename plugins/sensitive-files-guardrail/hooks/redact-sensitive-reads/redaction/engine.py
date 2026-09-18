@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import IO, Optional
 
+from .decoding import decode_note, decode_text
 from .dotenv import format_dotenv, redact_dotenv
 from .jsonlike import format_jsonlike, redact_jsonlike
 from .keyonly_scan import format_keyonly, scan_stream
@@ -176,7 +177,14 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
     raw, was_truncated = _read_inline_bytes(f, MAX_INLINE_BYTES)
     if was_truncated or truncated:
         extras.append("note: content was truncated (>32KB); using head-only redaction.")
-    text = raw.decode("utf-8", errors="replace")
+    # BOM / UTF-16 を判定してからデコードする (0.31.0)。無条件 utf-8 だと
+    # BOM 付きで先頭 1 鍵が消え、UTF-16 は全鍵が消えて「空ファイル」と誤報告に
+    # なる (``redaction/decoding.py`` 参照)。判定境界 (deny) には影響しない。
+    decoded = decode_text(raw)
+    text = decoded.text
+    note = decode_note(decoded)
+    if note is not None:
+        extras.append(note)
 
     # keys-only scan (opaque fallback) に降りた場合の理由 (0.26.0)。
     # 既定 "large" は yaml / 純粋な opaque format の従来表示を保つ。json/toml が
@@ -230,6 +238,29 @@ def redact(f: IO[bytes], basename: str, size: int, truncated: bool = False) -> s
 # 含む長さにしておく。証明書バンドルでもヘッダは先頭に来る。
 _PEM_SNIFF_BYTES = 8 * 1024
 
+# streaming 経路の PEM sniff で pem 経路に回してよいコーデック (0.31.0)。
+# ``scan_pem_markers`` は chunk を **無条件 utf-8** としてデコードするため、
+# UTF-16 / UTF-32 を pem 経路に乗せると marker を 1 本も数えられず
+# ``blocks: 0`` を**断定**してしまう (誤情報を消すための変更で別の誤情報を
+# 作る)。BOM を落とした UTF-8 系だけを回し、それ以外は keys-only scan に
+# 残して ``_UNPARSED_NOTE`` の保険に委ねる (``docs/DESIGN.md`` の据え置き節)。
+_PEM_SNIFF_CODECS = frozenset({"utf-8", "utf-8-sig"})
+
+
+def _large_head_looks_pem(head: bytes) -> bool:
+    """32KB 超ファイルの先頭 8KB が armored 鍵らしいか判定する (0.31.0)。
+
+    0.30.0 までは無条件 ``head.decode("utf-8", errors="replace")`` だったため、
+    **BOM 付き UTF-8 の単一 block ファイル**が pem 経路に乗らなかった
+    (``pem._BEGIN_RE`` は ``^`` 固定で、残った U+FEFF に行頭が一致しない。
+    複数 block のバンドルは 2 本目以降の BEGIN が行頭に来るので偶然通っていた)。
+    デコード層を通して BOM を剥がすことでこれを直す。
+    """
+    decoded = decode_text(head)
+    if decoded.encoding not in _PEM_SNIFF_CODECS:
+        return False
+    return looks_pem(decoded.text)
+
 
 def redact_large_file(f: IO[bytes], basename: str) -> str:
     """32KB を超えるファイルは streaming で scan_stream に流す。
@@ -240,6 +271,10 @@ def redact_large_file(f: IO[bytes], basename: str) -> str:
     0.23.0: format 未確定 (opaque) のときは先頭 8KB だけ先に読んで armored 鍵か
     どうかを判定する。鍵バンドルは ``scan_stream`` に流すと PEM 本文の行が
     ``KEY=`` として拾われるため (``redaction/pem.py`` 冒頭参照)。
+
+    0.31.0: その sniff を ``_large_head_looks_pem`` に切り出し、BOM 付き UTF-8 も
+    pem 経路に乗るようにした。UTF-16 / UTF-32 は意図的に除外している
+    (``_PEM_SNIFF_CODECS`` の注記)。
     """
     fmt = _detect_format(basename)
     try:
@@ -258,7 +293,7 @@ def redact_large_file(f: IO[bytes], basename: str) -> str:
             return build_reason(
                 basename, fmt, format_keyonly(keys, scanned, fmt_hint=fmt)
             )
-        if looks_pem(head.decode("utf-8", errors="replace")):
+        if _large_head_looks_pem(head):
             # block 数は **ストリーム全体**を走査して数える。head だけで数えると
             # 20 block の証明書バンドルが「5 block」と報告される (Codex P2)。
             # marker の走査は行 regex のみで安く、``scan_stream`` と同じ 1MB 上限で

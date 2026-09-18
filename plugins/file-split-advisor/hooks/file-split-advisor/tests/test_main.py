@@ -91,13 +91,6 @@ class BaseMainTest(unittest.TestCase):
         )
         self._base_dir_patcher.start()
         self.addCleanup(self._base_dir_patcher.stop)
-        # 0.5.0 の書込不能フォールバック先も tmp に向ける。向けないと、primary が
-        # 失敗する経路で実行機の ~/.cache/file-split-advisor に state を書きうる。
-        self._fallback_dir_patcher = mock.patch.object(
-            state, "_fallback_dir", return_value=Path(self.tmp) / "_state_fallback"
-        )
-        self._fallback_dir_patcher.start()
-        self.addCleanup(self._fallback_dir_patcher.stop)
         # 実行機の ~/.claude/file-split-advisor/ignore.local.txt に依存しない
         # よう、既定では存在しないパスを指すようにする (個別テストで上書き可能)。
         self._ignore_file_patcher = mock.patch.object(
@@ -228,30 +221,8 @@ class TestNonCodeFiles(BaseMainTest):
         out, _ = _run_main(self._envelope(path))
         self.assertEqual(out, "")
 
-    def test_extensionless_script_is_judged_via_shebang(self):
-        # 0.5.0: 同内容の .py が判定されるのに無出力だった (内部バックログ)。
+    def test_extensionless_script_not_judged(self):
         path = self._write("deploy", "#!/usr/bin/env python3\n" + _python_lines(2000))
-        out, _ = _run_main(self._envelope(path))
-        self.assertIn("言語: python", self._context(out))
-
-    def test_extensionless_shell_script_is_judged_via_shebang(self):
-        # `.sh` は既に allowlist にあるので、shebang 形も同じ shell として扱う。
-        path = self._write("provision", "#!/bin/bash\n" + _python_lines(900))
-        out, _ = _run_main(self._envelope(path))
-        self.assertIn("言語: shell", self._context(out))
-
-    def test_extensionless_file_without_shebang_not_judged(self):
-        path = self._write("Makefile", _python_lines(2000))
-        out, _ = _run_main(self._envelope(path))
-        self.assertEqual(out, "")
-
-    def test_extensionless_file_with_unknown_interpreter_not_judged(self):
-        path = self._write("report", "#!/usr/bin/awk -f\n" + _python_lines(2000))
-        out, _ = _run_main(self._envelope(path))
-        self.assertEqual(out, "")
-
-    def test_dotfile_without_extension_not_judged(self):
-        path = self._write(".envrc", "#!/bin/bash\n" + _python_lines(900))
         out, _ = _run_main(self._envelope(path))
         self.assertEqual(out, "")
 

@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from _testutil import FIXTURES  # noqa: F401
+from _testutil import FIXTURES, checker_dir_on_path  # noqa: F401
 
 
 class BaseWithIsolatedHome(unittest.TestCase):
@@ -591,11 +591,7 @@ class TestProjectScopedLoadPatterns(BaseWithIsolatedHome):
 
     def test_checker_and_core_agree_with_project_section(self):
         from core.patterns import load_patterns as core_load
-        checker_dir = (
-            Path(__file__).resolve().parent.parent.parent / "check-sensitive-files"
-        )
-        if str(checker_dir) not in sys.path:
-            sys.path.insert(0, str(checker_dir))
+        checker_dir_on_path()
         import checker as _checker
         importlib.reload(_checker)
 
@@ -614,11 +610,7 @@ class TestCheckerLoaderContract(BaseWithIsolatedHome):
     """check-sensitive-files/checker.py::load_patterns が core と同じ rules を返すこと。"""
 
     def _import_checker(self):
-        checker_dir = (
-            Path(__file__).resolve().parent.parent.parent / "check-sensitive-files"
-        )
-        if str(checker_dir) not in sys.path:
-            sys.path.insert(0, str(checker_dir))
+        checker_dir_on_path()
         import checker as _checker  # noqa: WPS433
         importlib.reload(_checker)
         return _checker

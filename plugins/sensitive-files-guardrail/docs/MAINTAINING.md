@@ -63,6 +63,7 @@ sensitive-files-guardrail/
         │   ├── patterns.py          _shared.patterns の薄い wrapper (Read 側の warn callback)
         │   └── safepath.py          normalize / classify / O_NOFOLLOW open
         ├── redaction/               minimal info の生成 (dotenv / json / toml / yaml / keyonly / opaque / file_render)
+        │   └── decoding.py          bytes → text のデコード (BOM / BOM 無し UTF-16 の推定。0.31.0)
         ├── handlers/
         │   ├── read_handler.py      Read (fd ベース)
         │   ├── edit_handler.py      Edit / Write (deny 固定 + dotenv キー名ガイド)
@@ -187,10 +188,10 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 "No such file or directory" になる (= 79 件の suite が黙って走らない)。
 
 ```bash
-# redact-sensitive-reads (0.20.0 時点 862 件)
+# redact-sensitive-reads (0.31.0 時点 1,323 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (0.20.0 時点 79 件、tmpdir に git repo を作って検査)
+# check-sensitive-files (0.31.0 時点 148 件、tmpdir に git repo を作って検査)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -256,6 +257,26 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   interpreter でこのスイートを走らせた場合に備えて `skipUnless` により自動
   skip する (`tests/test_redaction_minimal.py` の `_TOMLLIB_AVAILABLE`) ため
   fail しない
+- **`sys.path` をテストから触るときは必ず末尾に足す** (0.31.0)。両 hook はどちらも
+  `tests` という名前のパッケージを持つため、Stop 側のディレクトリを
+  `sys.path.insert(0, ...)` すると **プロセス全体で `tests` の解決先が入れ替わる**。
+  `test_logging.py` の並行ローテーションテストは `multiprocessing` の spawn 子
+  プロセスを使い、子は target 関数を「モジュール名 + 関数名」で import し直すため
+  `tests.test_logging` が見つからず `ModuleNotFoundError` で落ちる。しかも
+  `unittest discover` はモジュールを `tests.` 無しの top-level 名で import するので
+  **この invocation では再現せず**、`python3 -m unittest tests.test_e2e
+  tests.test_logging` のような dotted-module 実行や pytest でのみ 100% 再現する
+  (= flaky に見える)。窓口は 2 つ:
+  - Stop 側モジュール (`checker` / `stop_ack`) を import したいときは
+    `_testutil.checker_dir_on_path()` を使う (末尾に足す)
+  - Stop 側の `__main__.py` を in-process で `exec_module` するときは
+    **前後で `sys.path` を保存・復元する** (`tests/test_e2e.py::_load_stop_entry`)。
+    hook 本体の `sys.path.insert` は別プロセスで動く本番経路なので変えない
+  不変条件は `tests/test_shared_import.py::TestTestsPackageResolution` が固定して
+  いる (`PathFinder.find_spec("tests", sys.path)` が自 hook 側を指すこと)
+- 入力エンコーディング形状 (BOM / UTF-16 / latin-1) の fixture は**バイト列を
+  commit せず**、`_testutil` の 1 本の UTF-8 ソースから再エンコードする
+  (`tests/fixtures/encodings/README.md`)
 - テストを追加するときは既存の書式 (mode 5 列の envelope fixture、`_make_envelope`
   / `_decision` ヘルパ) に合わせ、判定境界を変える変更は MATRIX.md の行と対にする
 
@@ -615,6 +636,10 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
 - **パターン追加**: `patterns.txt` / `redaction/engine.py::_detect_format` /
   `tests/test_matcher.py::DEFAULT_RULES` の 3 点同期 ([PATTERNS.md](./PATTERNS.md))
 - **新 format**: `_detect_format` の分岐を増やし `redaction/<format>.py` を追加
+- **エンコーディング推定**: `redaction/decoding.py` (BOM 表は UTF-32 を UTF-16 より
+  **先に**置く — BOM が接頭辞衝突する。BOM 無し UTF-16 の閾値 `_MIN_NUL_RATIO` は
+  実測レンジから決めてあるので、変えるときは docstring の実測値を測り直す)。
+  32KB 超の streaming 経路は対象外 (`docs/DESIGN.md` の「既知の残存範囲」)
 - **Edit/Write**: `handlers/edit_handler.py` (`file_path` 前提の共通 dispatch。
   NotebookEdit は `edits` 形状が違うため未対応)
 - **Stop**: `check-sensitive-files/checker.py` (git 呼出) / `stop_ack.py`

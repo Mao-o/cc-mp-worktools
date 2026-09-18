@@ -96,15 +96,29 @@ class TestPatternMatches(unittest.TestCase):
         # literal 一致しないので regex のラベル
         self.assertEqual(label, "xxx")
 
-    def test_test_dev_word(self):
-        ok, label = looks_placeholder("test_value")
-        self.assertTrue(ok)
-        self.assertEqual(label, "test/dev/local/staging")
+    def test_env_name_itself(self):
+        """環境名**そのもの** (``ENV=local`` 等) は placeholder 扱いを続ける。
 
-    def test_dev_dash_token(self):
-        ok, label = looks_placeholder("dev-token")
+        0.31.0 で後続語の許容 (``^(test|dev|local|staging)[_-]?\\w*$``) を外した
+        が、本来の目的である「値が環境名そのもの」は維持する。``development``
+        は完全一致形で穴を開けないため alternation に含める (隔離内レビュー
+        P3-5 — 後続許容を外した際に一緒に落ちて ``NODE_ENV=development`` が
+        ``<set>`` に退行していた)。
+        """
+        for value in (
+            "dev", "local", "staging", "DEV", "Staging",
+            "development", "DEVELOPMENT", "Development",
+        ):
+            with self.subTest(value=value):
+                ok, label = looks_placeholder(value)
+                self.assertTrue(ok)
+                self.assertEqual(label, "test/dev/local/staging/development")
+
+    def test_test_is_literal_match(self):
+        # "test" は literal 辞書にもあるので literal label が優先される
+        ok, label = looks_placeholder("test")
         self.assertTrue(ok)
-        self.assertEqual(label, "test/dev/local/staging")
+        self.assertEqual(label, "test")
 
 
 class TestNonPlaceholderValues(unittest.TestCase):
@@ -129,6 +143,65 @@ class TestNonPlaceholderValues(unittest.TestCase):
         ok, label = looks_placeholder("AKIAIOSFODNN7EXAMPLE")
         self.assertFalse(ok)
         self.assertIsNone(label)
+
+
+class TestEnvPrefixedRealCredentials(unittest.TestCase):
+    """0.31.0 (内部バックログ): ``test_`` / ``dev_`` / ``staging_`` / ``local_``
+    **接頭の実トークン**を placeholder と誤標識しない。
+
+    ``<placeholder>`` は ``<set>`` を置き換えるため、誤標識するとモデルには
+    「この鍵はまだ実値が入っていない (rotate / set 不要)」と伝わる。``.env`` に
+    環境名接頭のトークンを置く構成は一般的で、0.30.0 までは軒並み誤標識して
+    いた。verdict (deny) は変わらないので、これは出力品質 (思想 2) の修正。
+    """
+
+    def test_env_prefixed_tokens_are_not_placeholders(self):
+        for value in (
+            "test_51H8xKqL9mNpQrStUvWxYz",   # Stripe テストキー形
+            "dev_a8f3c2e1b9d7",
+            "staging_9f8e7d6c5b4a3210",
+            "local_dbpassword_x9f2",
+            "testpassword123",
+            "devops-service-token",
+            "STAGING_API_KEY_9f8e7d",
+        ):
+            with self.subTest(value=value):
+                ok, label = looks_placeholder(value)
+                self.assertFalse(ok, msg=f"{value!r} は実値として扱う")
+                self.assertIsNone(label)
+
+    def test_control_real_secret_still_not_placeholder(self):
+        ok, label = looks_placeholder("sk_live_" + "x" * 24)  # 連結形 (push protection 回避、内部バックログ)
+        self.assertFalse(ok)
+        self.assertIsNone(label)
+
+
+class TestAngleBracketNarrowing(unittest.TestCase):
+    """0.31.0: ``^<.*>$`` が XML/HTML の実値まで拾っていたのを絞った。
+
+    山括弧 placeholder の慣習は「名前らしい短いトークン」なので、``:`` ``=``
+    ``"`` ``/`` を含む形と長すぎる形を除く。
+    """
+
+    def test_markup_values_are_not_placeholders(self):
+        for value in (
+            "<soap:Envelope>",
+            "<root attr=\"x\">",
+            "</ns:item>",
+            "<" + "a" * 41 + ">",     # 41 文字 = 上限超過
+        ):
+            with self.subTest(value=value):
+                ok, label = looks_placeholder(value)
+                self.assertFalse(ok, msg=f"{value!r} は実値として扱う")
+                self.assertIsNone(label)
+
+    def test_name_like_angle_placeholders_still_match(self):
+        for value in ("<...>", "<your-key>", "<YOUR TOKEN>", "<api_key>",
+                      "<" + "a" * 40 + ">"):
+            with self.subTest(value=value):
+                ok, label = looks_placeholder(value)
+                self.assertTrue(ok, msg=f"{value!r} は placeholder のまま")
+                self.assertEqual(label, "<...>")
 
 
 class TestQuoteStripping(unittest.TestCase):
