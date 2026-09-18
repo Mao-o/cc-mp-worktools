@@ -535,7 +535,7 @@ class TestHistory(unittest.TestCase):
                           command="git diff .env")
         self.assertIn("git rm --cached", msg)
 
-    # --- 0.19.0 (bd_092a232e-snw.3): subcommand 別の意図文 ---
+    # --- 0.19.0 (内部バックログ): subcommand 別の意図文 ---
     def test_git_rm_plain_uses_operate_wording(self):
         """plain ``git rm`` は「閲覧」ではなく「操作」。allow される ``--cached``
         形を案内し、deny された理由を断定しない (global option 前置 /

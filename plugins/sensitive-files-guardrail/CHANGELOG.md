@@ -20,6 +20,136 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.32.0
+
+rule の読み込み経路・deny reason の折り畳み・ログ量・Stop hook の時間予算を
+まとめて改善 (内部バックログ 6 件)。**判定境界の変化: 1 行の新設のみ** —
+`__main__` の envelope 読み取りで **0 byte stdin が無音 allow から deny に変わる**
+(唯一の fail-open 分岐だった)。それ以外の deny / allow / ask / block の表は
+1 セルも変わっていない。
+**利用者影響**: (1) worktree セッションで `[project:]` の除外が効くようになる、
+(2) repo に commit して共有できる patterns tier が増える、(3) `head` / `tail` /
+`grep` の deny reason が予算超過時に閉じタグ・note を保てる、(4) `SFG_LOG_LEVEL`
+でログ量を減らせる (既定は現状維持)、(5) Stop hook が時間予算を超えたときに
+「検査が不完全」と表示する。
+テスト件数: redact 1,323 → **1,382** / check 148 → **158**。
+
+### `[project:]` セクションが worktree で効かず、`~` も展開されなかった
+
+- `claude --worktree` / `--bg` / sub-agent の `isolation: worktree` はいずれも
+  別 checkout (`<repo>/.claude/worktrees/<name>` 等) でセッションを開き、
+  `$CLAUDE_PROJECT_DIR` も **worktree 自身のパス**になる。main repo のパスで
+  書いた `[project:...]` セクションは文字列完全一致しないため、**0.15.0 で
+  入れたプロジェクト固有の承認済み除外が worktree 作業では黙って無効化**され、
+  承認したファイルで再び block されていた
+- `_project_section_keys` を追加し、worktree では **main repo root を第 2 候補**
+  として足す (`.git` ファイルの `gitdir:` → `commondir` を辿る。`git` コマンドは
+  呼ばない)。第 1 候補は従来と同じ値なので、worktree のパスをヘッダーに書いて
+  いた場合の一致挙動は変わらない
+- submodule の `.git` も同じ `gitdir:` 形式なので、`worktrees` path 要素と
+  「共有 git dir の basename が `.git`」を要求して誤検出を防ぐ (誤検出すると
+  project key が superproject に差し替わり読み込む rule が黙って変わる)
+- **path 形 rule の基準 root (`resolve_project_root`) は worktree のまま**。main
+  repo root にすると worktree 配下のファイルが「root 配下でない」と判定され
+  path 形 rule が一切効かなくなる。worktree は同じツリー構成を持つので、main
+  repo root のセクションに書いた `!config/prod.pem` は worktree でも一致する
+- `[project:~/work/repo]` を `os.path.expanduser` で展開する。展開前は `$` を
+  含まないため書き損じ警告にも掛からず**完全に無音**で捨てられていた
+
+### 除外レシピが user 単位ファイルにしか書けず、共有も CI も不可能だった
+
+- `<project root>/.claude/sensitive-files-guardrail/patterns.txt` を user 単位
+  ファイルに**加えて**読む tier を追加。commit できるので貢献者・CI に共有され、
+  テスト fixture / サンプルのダミー鍵を持つ repo で**全員が毎セッション同じ
+  block を踏む**状態が解消する (従来は各自がホーム配下に書くしかなく、CI では
+  そもそも効かなかった)
+- 連結順は **既定 → repo 同梱 → user** (last-match-wins なので
+  `user > repo > 既定`)。repo が持ち込んだ除外をユーザーが自分のファイルに
+  include 行を書き足すだけで打ち消せる向きにした
+- **`!` 除外だけでなく include 行も有効**。include は保護を足す方向にしか働かない
+  (fail-toward-deny) 一方 `!` 除外は保護を外す方向に働くので、除外だけを許して
+  include を禁じると「リスクのある側だけ許可」になるため
+- 残存リスクの開示: commit された `!` 行はそのまま効くので、clone した repo が
+  保護を弱めることがありうる (共有を可能にする目的の裏側)。読み込み時に固定
+  トークン `project_patterns_in_use` を記録する (Read / Bash は
+  `~/.claude/logs/redact-hook.log`、Stop は stderr) ので「なぜ block されないか」
+  を辿れる。詳細は [PATTERNS.md](docs/PATTERNS.md) の同節
+- Stop hook の恒久除外レシピにこの経路を 1 行追記。文言が極端に短いのは文字数
+  予算の制約 (床テストの入力は素で予算まで 116 文字しか余裕が無い。実測値は
+  `_SHARED_RECIPE_NOTE` のコメントに記録)
+
+### `head` / `tail` / `grep` の deny reason が予算超過で盲目 cut されていた
+
+- `read_partial` / `search` の builder は `dotenv_info["keys"]` を `<DATA>` 包装
+  **なしで**直接展開していたため、0.26.0 で入れた折り畳みが対象を見つけられず、
+  3KB 超過時は旧来の盲目 byte cut のままだった。実測 (300 鍵の `.env`):
+  `head -n 250 .env` → 3,072 byte + `...[truncated]` で **`</DATA>` 閉じタグ・
+  末尾 note・除外案内が鍵行の途中で欠落**
+- `_rewrap_data_block` を追加し明細行を `<DATA>` ブロックに包み直す。包装は
+  自前で組まず `file_render` の header 3 行と閉じタグを流用する (`core` から
+  `redaction` を import すると依存が逆流するため)
+- 総数の見出し (`keys (先頭 N, 全 M 件):` / `matched_pattern_keys:`) は
+  **ブロックの外**に残す。中に入れると総数が切り出し件数に化け、省略マーカーの
+  件数計算と噛み合わなくなる
+- 鍵名エコー (`matched_pattern_keys:` / `nomatch_pattern_keys:` /
+  `pattern_keys:`) を 20 件 + `... (N more)` で畳む。この 1 行は可変長で、grep
+  pattern が多数の env-var 名を含むと**固定側だけで予算を超え**、折り畳み予算が
+  負になって結局盲目 cut に落ちていた
+- 実測 (300 鍵): read_partial 3,033 byte / search 3,047 byte、いずれも閉じタグ +
+  header の免責 + 省略マーカー + 除外案内が全て残る。**判定は不変** (実ファイル
+  300 鍵 + 全 5 mode の E2E で固定 — builder が例外を投げると catch-all が deny を
+  ask に倒すため、文字列だけの単体テストでは塞げない)
+
+### `redact-hook.log` が allow 経路の INFO で増え続けていた
+
+- 0.27.0 のローテーション (5MB / 1 世代) は入れたが量そのものは減っていなかった
+  (実測 7.3MB / 12 万行)。「この呼出は allow 経路か」は記録時点では決まらない
+  (`ask_or_allow` の結果は runtime の `permission_mode` 依存で、同一コマンド内の
+  後続 segment の deny が先行の ask/allow を上書きする)
+- `core/logging.py` に `begin_deferred` / `flush_deferred` を追加し、`__main__` が
+  `_dispatch` を包んで **判定確定後にまとめて emit** する。有効レベルは
+  allow → INFO、deny / ask → WARNING 相当
+- `SFG_LOG_LEVEL` (`DEBUG` / `INFO` / `WARNING` / `ERROR`) が閾値。
+  **既定 (未設定・不正値) は `INFO` で出力は従来と完全に同一** — 量対策は opt-in
+  (`bash_classify` の分類分布の計測が既にこのログを前提にしているため)。
+  行の label は `INFO ` のままなので既存の grep / 集計は壊れない
+- `log_error` は level に関わらず必ず書き、遅延中はバッファを先に吐いて順序を
+  保つ (error 時は最終判定が未確定で leveling できないため全部出す側に倒す)
+
+### 0 byte stdin が無音 allow に倒れていた (**判定表に 1 行新設**)
+
+- `_read_envelope` は 0 byte stdin のときだけ `{}` を返しており、各 handler が
+  必須フィールド欠如で `make_allow()` に落ちて **stderr もログも出ない無音
+  allow** になっていた。`__main__` 自身の方針 (「envelope が読めないと bypass
+  判定もできない → 最厳 deny」) と矛盾する唯一の fail-open 分岐
+- 専用 category `stdin_empty` と専用 reason 文で **deny** に倒す。reason は
+  「壊れた JSON」ではなく「envelope が 1 byte も来なかった」= 起動経路の異常
+  として、確認先 (hook 定義 / ラッパスクリプト / stdin のリダイレクト) を案内する
+- `ask_or_deny` を採らなかった理由: envelope が無いと `permission_mode` が読めず
+  `ask_or_deny` は `make_ask` に落ちるが、Phase 0 実測のとおり bypassPermissions
+  下では ask はそのままツール実行に通るため、直そうとしている fail-open が
+  その mode で残る
+- 空白のみ (`"   \n"`) は 0 byte ではないので従来どおり `stdin_parse_failed`
+
+### Stop hook の git 呼出が hook timeout を超えうるのに無音だった
+
+- Stop timeout は 15s で、到達すると Claude Code は hook を kill して**出力を
+  discard** する = 報告が 1 byte も出ない無音の fail-open。にもかかわらず
+  `subprocess.run(timeout=10)` の**呼出単位の上限しか無く**、`rev-parse` /
+  `ls-files` 系 / submodule のネスト段数ぶんを直列に呼ぶため合計は容易に超える
+- `budget.py` に `Deadline` (予算 12s) を追加し、**git 呼出とパターン照合ループの
+  両方**が同じ締切を共有する。1 回の git timeout は「残予算と 10s の小さい方」、
+  予算切れなら git を呼ばずに stderr `git_budget_exceeded` を出す
+- 打ち切りを黙らない (元の指摘の本体): 検出 0 件なら `systemMessage` で
+  「このターンは検査が**不完全**です (「機密なし」ではありません)」+ `.gitignore`
+  高速化の案内。1 件以上あれば block reason の冒頭に「一覧は不完全です」を添える
+  (予算超過時だけ付く条件付きの行なので通常時の文字数予算は消費しない)
+- `deadline` を渡さない呼出は従来どおり固定 10s (後方互換)
+- 開示: チケット本文は原因を「git 呼出の timeout 合計」としていたが、本文自身の
+  レビュー補正で「実際の律速は照合コストで根本原因は 0.23.0 で解消済み」と覆って
+  いる。本変更は**どちらが律速かに依存しない防御**であり、名指しされた原因の
+  修正ではない
+
 ## 0.31.0
 
 block 時に返す minimal info の**誤情報** 3 件と、テスト隔離の欠陥 1 件を修正
