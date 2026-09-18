@@ -105,6 +105,48 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 .claude/accounts.local.json
 ```
 
+## 検証モード (enforce / warn / off) — v0.13.0
+
+deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable` か
+`accounts.local.json` の書き換えしかなく、user scope で install した直後は
+設定を置いていない**全プロジェクト**で deny が始まっていた。
+
+| mode | 挙動 |
+|---|---|
+| `enforce` (既定) | 従来どおり。不一致・キー未記載・未設定・パス競合はすべて deny |
+| `warn` | 検証は走らせ、deny 相当の内容を `additionalContext` (Claude への通知) で伝えるだけ |
+| `off` | 検証そのものを行わない (CLI も起動しない) |
+
+**判定表 (何を問題とみなすか) は mode で変わらない**。変わるのは「止めるか /
+伝えるだけか / 見ないか」だけ。
+
+指定方法は 2 つあり、**環境変数が優先**される:
+
+```jsonc
+// .claude/settings.json (セッション全体に効かせる)
+{ "env": { "VERIFY_CLOUD_ACCOUNT_MODE": "warn" } }
+```
+
+```json
+// accounts.local.json (プロジェクト単位)
+{
+  "$mode": "warn",
+  "github": "your-github-user"
+}
+```
+
+- 解決順: `VERIFY_CLOUD_ACCOUNT_MODE` → `accounts.local.json` の `"$mode"` → `enforce`
+- `"$mode"` は予約キー (`$` 始まりなので service キーと衝突しない)。
+  [グローバル既定](#グローバル既定-v0130) のファイルに書けば全プロジェクトの既定になる
+- 不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は **enforce として扱い**、
+  deny 文面にその旨を添える (黙って無視すると「off にしたのに deny される」の
+  原因が分からなくなるため)
+- `off` でも**アカウント切替コマンドの検出による cache 破棄は行う**
+  (off の間の切替が cache に残って、enforce に戻した直後に古い成功で通る事故を防ぐ)
+
+`warn` / `off` は検証を弱める設定なので、**常用するなら
+`accounts.local.json` を整えて `enforce` に戻すこと**を前提にしている。
+
 ## Agent Skill
 
 | skill | 用途 |
@@ -586,6 +628,33 @@ v0.12.0 以降は遡及自体が git repo の境界 (toplevel / submodule root) 
 root 自身**が、外側に repo が無ければ `$HOME` が境界になる (遡及はファイルシステム
 の親方向にしか進まないため、`.git` ファイルの gitdir 先は辿らない)。
 
+### グローバル既定 (v0.13.0)
+
+プロジェクト側 (3-tier lookup + 親遡及) で何も見つからなかったときだけ、
+**固定パスのグローバル既定**を読む:
+
+```
+~/.claude/verify-cloud-account/accounts.local.json
+```
+
+- user scope で install した直後に「設定していない全プロジェクトで deny」に
+  なる状態から抜けるための明示的な fallback。`"$mode": "warn"` をここに書けば
+  [warn モード](#検証モード-enforce--warn--off--v0130) を全プロジェクトの既定にできる
+- **プロジェクト側の設定が常に優先**。グローバル既定を採用したときは deny / warn に
+  `プロジェクトに accounts.local.json が無いため、グローバル既定 <絶対パス> を
+  使用しています` の 1 行注釈が付く (verify 成功時は silent)
+- 親遡及は従来どおり `$HOME` を越えない。グローバル既定は**遡及ではなく固定パスの
+  専用経路**にしてある — 遡及で `$HOME` まで上らせると「たまたま `$HOME` 配下に
+  あるプロジェクトだけが継承する」位置依存の挙動になる (v0.12.0 で塞いだ不具合)
+- 認めるのは**現行パスのみ**。`~/.claude/accounts.local.json` /
+  `~/.claude/accounts.json` (旧パス) はグローバル既定として読まない
+  (無関係な `~/.claude/accounts.json` の継承が v0.12.0 で塞いだ不具合そのもの)
+- 同一階層に複数 tier が同居する競合 (D4) は従来どおり fail-closed で deny し、
+  グローバル既定では救済しない
+- **builder はグローバル既定へ落ちない** (`init` / `set` / `remove` / `migrate`)。
+  プロジェクト設定を作るつもりの編集が、利用者の全プロジェクトに効くファイルを
+  書き換えてしまわないようにするため。グローバル既定は手で作るか `--path` で明示する
+
 ## パフォーマンス (短期キャッシュ)
 
 PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && gh pr comment`
@@ -598,6 +667,44 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
   **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) / entry の epoch が
   現在と異なる
 - **失敗 (deny) 状態はキャッシュしない** — 切り替え後は即座に再検証が走る
+
+### ローカル設定ファイルからの現在値取得 (v0.13.0)
+
+`gh` と `gcloud` は、**アクティブアカウントをローカルの設定ファイルに書いている**。
+cache が無い (TTL 切れ / 初回) ときの現在値取得を、まずそのファイル読取で済ませる:
+
+| service | 読むファイル | 読む値 |
+|---|---|---|
+| GitHub | `$GH_CONFIG_DIR` \| `$XDG_CONFIG_HOME/gh` \| `~/.config/gh` の `hosts.yml` | host ごとの `user:` (アクティブアカウント) |
+| GCP | `$CLOUDSDK_CONFIG` \| `~/.config/gcloud` の `active_config` + `configurations/config_<name>` | `[core]` の `project` / `account` |
+
+`gh auth status` は全 host のトークンを **API で検証**するためネットワーク往復が入り
+(〜500ms)、オフラインでは失敗して deny に倒れていた。`gcloud config get-value` は
+Python CLI の起動込みで 1 回 〜1s (dict 期待値では project / account の 2 回)。
+ファイル読取ならどちらも無くなる。
+
+**ローカル読取で通せるのは allow だけ**で、エラー方向 (不一致 / 未ログイン / 未設定) は
+必ず CLI で取り直してから判断する。これにより:
+
+- 速くなるのは成功ケース (= 大多数)
+- ローカル読取を誤っても **deny を新造しない** (誤読のコストは「CLI を 1 回呼ぶ」だけで、
+  deny 文面と判定は従来どおり CLI の出力から作られる)
+
+次の場合はローカル読取を使わず、従来どおり CLI を実行する (速度は従来と同じ):
+
+- GitHub: `GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` /
+  `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST` のいずれかが env にある /
+  `hosts.yml` が読めない・想定の形でない / str 期待値で `github.com` が無く
+  host が複数 (照合先が記載順に依存するため)
+- GCP: `CLOUDSDK_CONFIG` と `CLOUDSDK_ACTIVE_CONFIG_NAME` 以外の `CLOUDSDK_*` /
+  `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `GOOGLE_CLOUD_QUOTA_PROJECT` が
+  env にある (プロパティの優先順位をエミュレートせず gcloud 自身に決めさせる) /
+  設定ファイルが読めない・INI として解釈できない / configuration 名が
+  gcloud の命名規則から外れる
+- `firebase` / `aws` / `kubectl` は従来どおり (aws は `sts` 呼出が必須、
+  firebase / kubectl は既存の解決経路を変えていない)
+- builder (`accounts-show` / `--from-cli`) は**常に CLI** を使う
+  (期待値の提案・突合では「CLI 自身が報告する値」を優先する)
 
 ### 切替・ログイン系コマンドでの即時無効化 (v0.8.0)
 
@@ -717,6 +824,13 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照
+- **`hosts.yml` のアクティブアカウントのトークンが失効している**場合、
+  ローカル設定ファイルからの現在値取得 (v0.13.0) では「そのアカウントで
+  ログイン中」と読めるため allow になる。従来 (`gh auth status` が API 検証で
+  失敗 → deny) との差分だが、失効トークンでは書き込み自体ができないため
+  **別アカウントでの書き込みにはならない** (実行した `gh` が認証エラーで失敗する)
+- `warn` / `off` [モード](#検証モード-enforce--warn--off--v0130) は検証を
+  意図的に弱める設定。`off` の間は不一致でも通る (cache 破棄だけは継続する)
 
 ## 発火しなかったとき
 
@@ -731,6 +845,9 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
    (破損時は deny)
 4. 対象 CLI (`gh` / `firebase` / `aws` / `gcloud` / `kubectl`) が PATH に
    通っているかを確認
+5. `VERIFY_CLOUD_ACCOUNT_MODE=off` / `accounts.local.json` の `"$mode": "off"` に
+   なっていないかを確認 ([検証モード](#検証モード-enforce--warn--off--v0130))。
+   `off` では検証そのものを行わないため、deny も warn も出ない
 
 hook の出力を確認するには `claude --verbose` でセッションを起動する
 (hook の stdout/stderr がターミナルに表示される)。

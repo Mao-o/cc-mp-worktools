@@ -48,11 +48,13 @@ verify-cloud-account/
         ├── core/
         │   ├── budget.py           hook 1 回分の実時間予算
         │   ├── cache.py            検証成功の短期キャッシュ
+        │   ├── cli_config.py      ローカル CLI 設定ファイルの読取 (最小 YAML / INI)
         │   ├── cli_options.py      CLI 名直後の global option 剥がし + context option 抽出
         │   ├── command_parser.py   コマンド分解 (chain split / env strip / wrapper strip)
         │   ├── dispatcher.py       サービス振り分けと検証オーケストレーション
+        │   ├── mode.py             検証モード (enforce / warn / off) の解決
         │   ├── output.py           deny / warn の hookSpecificOutput JSON ビルダー
-        │   └── paths.py            accounts.local.json の配置パス解決 (3-tier + 親遡及)
+        │   └── paths.py            accounts.local.json の配置パス解決 (3-tier + 親遡及 + グローバル既定)
         ├── services/               サービスごとの CLI 呼び出しと照合
         ├── scripts/
         │   ├── accounts_builder.py accounts.local.json 専用 writer (init/show/set/remove/migrate)
@@ -67,9 +69,12 @@ verify-cloud-account/
 3. `core.command_parser.extract_candidates()` がコマンドを
    `(セグメント, インライン env)` のリストに分解する
 4. 各セグメントをサービスにマッチング。readonly 除外・dedup・context option 抽出
-5. `accounts.local.json` を解決して読み、サービスごとに `verify()` を実行
+5. `core.mode.from_env()` で検証モードを見る (`off` なら cache 破棄だけ行って終了)
+6. `accounts.local.json` を解決して読み (プロジェクト側 → グローバル既定)、
+   `"$mode"` を反映してから、サービスごとに `verify()` を実行
    (キャッシュ hit / 自己修復の切替はスキップ)
-6. `core.output.deny()` / `warn()` で整形して stdout に返す
+7. `core.output.deny()` / `warn()` で整形して stdout に返す
+   (`warn` モードでは deny 相当の本文を `warn()` 側に回す)
 
 **起動コマンド**: `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account`
 (ディレクトリを渡すと `__main__.py` が実行される)
@@ -98,6 +103,19 @@ Python 3.11+。標準ライブラリのみ (外部依存なし)。
   (`{**os.environ, **inline}`) は dispatcher 側で済んでいる
   (service → core の依存を作らないため)。内部の `_run_*` / `_get` にも貫通させる
 - `project_dir` を使わないサービスも引数では受け取る (interface 統一)
+- **ローカル設定ファイルから現在値を読む場合 (v0.13.0: github / gcloud) は、
+  「allow だけをローカルで決め、エラー方向は必ず CLI で取り直す」**。
+  誤読が deny を新造しない形にしておくと、未知の env 上書き・設定ファイル外の
+  プロパティ (gcloud の installation 設定など) を取りこぼしても、コストは
+  「CLI を 1 回呼ぶ」だけで済む。逆にローカル読取の結果で直接 deny すると、
+  誤読がそのまま誤 deny になり remediation の手がかりも CLI の文面とずれる。
+  読み取り側の実装 (`core.cli_config`) は**想定外の形を見たら必ず `None`** を
+  返し、判読できたつもりで違う値を返さないこと
+- **現在値の取得元を増やしたら、テストの隔離も増やす。** ローカル読取は
+  `$HOME` / `$XDG_CONFIG_HOME` / `GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` を見るため、
+  隔離しないと**開発者の実環境が verdict を決めてしまう** (実際に、CLI を mock した
+  テストが開発者の `hosts.yml` で allow に短絡して壊れた)。
+  `tests/_testutil.start_isolation()` を `setUpModule()` から呼ぶ
 
 ### 照合規則が動的な service は `matches()` を公開する
 
@@ -270,6 +288,34 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
   dispatcher の遡及がそこで止まって**継承していた他の service が一斉に未設定
   (deny)** になる。書込先は「hook が読むファイル」に従い、対象は出力の
   `対象:` 行に必ず出る (この階層専用にしたいときだけ `--path`)
+- **グローバル既定 (v0.13.0) は遡及ではなく固定パスの専用経路**
+  (`resolve_accounts_file_for_verification`)。プロジェクト側で何も見つからない
+  ときだけ `$HOME/.claude/verify-cloud-account/accounts.local.json` を読む。
+  遡及で `$HOME` まで上らせると「たまたま `$HOME` 配下にあるプロジェクトだけが
+  継承する」位置依存の挙動に戻ってしまう。認めるのは現行パスのみ (旧名を認めると
+  塞いだ「無関係な `~/.claude/accounts.json` の継承」を復活させる)。
+  **この関数は dispatcher 専用** — builder (書込先の決定) が使うと、プロジェクト
+  設定を作るつもりの編集が利用者の全プロジェクトに効くファイルを書き換える
+
+## 検証モード (`core.mode`)
+
+`enforce` / `warn` / `off` の 3 モード。**判定表 (何を問題とみなすか) は mode で
+変わらない** — 変えるのは「deny で止めるか / `additionalContext` で伝えるだけか /
+検証そのものをしないか」だけ。解決順は env (`VERIFY_CLOUD_ACCOUNT_MODE`) →
+`accounts.local.json` の `"$mode"` → `enforce` で、**既定 (どちらも無い) の挙動は
+従来と完全に同じ**。
+
+- env を上に置くのは「ファイルを書き換えずに一時的に外せる」ことが escape hatch の
+  要件だから。`"$mode"` を下に置くのは、プロジェクトの設定より今のセッションの
+  指示を優先したいから
+- 不正な値は **enforce に倒す** (fail-closed) が、`invalid_note` を deny / warn の
+  文面に添える。黙って enforce に戻すと「off にしたのに deny される」の原因が
+  分からない
+- `off` の early return は **cache 破棄 (`cache.invalidate`) より後**に置く。
+  前に出すと off の間の切替が cache に残り、enforce へ戻した直後に古い成功で通る
+- deny 側には mode の案内を 1 行添える (`mode.DENY_HINT`)。deny を消したい相手に
+  builder の `set --from-cli --commit` を勧めると「間違ったアカウントを正解として
+  焼き付ける」使い方を誘発するため、**期待値に触らない出口**を先に見せる
 
 ## サービスを追加する
 
@@ -483,6 +529,41 @@ linked worktree も、**gitdir の common dir が祖先の repo のものと一�
 確かめてから通す (いずれもマージ前レビューの指摘)。
 
 **D20: 予算切れは deny** — 上記「実時間の予算」を参照。
+
+### 0.13.0 (離脱率低減: ローカル読取 + escape hatch)
+
+**D21: 現在値はローカル設定ファイルから読むが、allow だけを決めさせる**
+
+`gh auth status` (API 往復 〜500ms、オフラインで失敗 → deny) と
+`gcloud config get-value` (CLI 起動込み 〜1s ×最大 2 回) を、cache が無いときの
+毎回のコストとして払っていた。どちらもアクティブアカウントはローカル設定ファイル
+(`hosts.yml` の `<host>.user` / `configurations/config_<name>` の `[core]`) に
+書かれているので、そこから読む経路を足した。
+
+**エラー方向は必ず CLI で取り直す**のが要点 (上記「`verify()` の実装規則」)。
+env 上書きや設定ファイル外のプロパティを取りこぼしても、誤読のコストは「CLI を
+1 回呼ぶ」だけで、deny 文面と判定は従来どおり CLI の出力から作られる。
+env の優先順位をエミュレートせず「触られていたら CLI に委ねる」に倒したのも同じ
+理由 (gh の token env / `GH_HOST`、gcloud の `CLOUDSDK_*` / `GOOGLE_CLOUD_PROJECT`)。
+
+残った差分は「`hosts.yml` のアクティブアカウントのトークンが失効している」場合に
+従来 deny だったものが allow になること (README 既知の制限)。失効トークンでは
+write 自体が通らないため、別アカウントでの書き込みにはならない。
+
+**D22: escape hatch は「いつ走らせるか」の層として足す (判定表は変えない)**
+
+`enforce` / `warn` / `off` (上記「検証モード」) と、グローバル既定
+(上記「配置パスの解決」) の 2 つで、「user scope で install した直後に設定して
+いない全プロジェクトで deny が始まる」状態からの出口を作った。deny / allow の
+規則そのものには手を入れていない。
+
+**D23: ローカルを読む機能はテストの隔離を必ず伴う**
+
+現在値の取得元が実環境 (`$HOME` / `~/.config`) に広がると、CLI を mock した
+テストが開発者の設定で短絡する。実際に「開発者の `hosts.yml` のアクティブ
+アカウントが fixture の期待値と一致して CLI を呼ばずに allow」で既存テストが
+壊れた。`tests/_testutil.start_isolation()` を `setUpModule()` から呼ぶ規律に
+した (dispatcher / services / builder / main の 4 モジュール)。
 
 ## 既知の制限
 
