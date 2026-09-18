@@ -32,6 +32,31 @@ from core import paths  # noqa: E402
 from scripts import accounts_builder as builder  # noqa: E402
 from services import github  # noqa: E402
 
+_ISOLATION = None
+_ISOLATION_ROOT = None
+
+
+def setUpModule():
+    """実環境の gh / gcloud 設定を読ませない。
+
+    verify() は CLI を起動する前にローカル設定ファイルを読むため、隔離しないと
+    「CLI 層を mock して verify() を呼ぶ」ハーネス (`_verify_with_active` /
+    show と verify の一致契約) が**開発者の `~/.config` 配下**で短絡し、mock に
+    到達しないまま allow になりうる。
+    """
+    global _ISOLATION, _ISOLATION_ROOT
+    _ISOLATION_ROOT = tempfile.mkdtemp()
+    _ISOLATION = _testutil.start_isolation(Path(_ISOLATION_ROOT))
+
+
+def tearDownModule():
+    if _ISOLATION is not None:
+        _ISOLATION.stop()
+    if _ISOLATION_ROOT is not None:
+        import shutil
+
+        shutil.rmtree(_ISOLATION_ROOT, ignore_errors=True)
+
 
 def _fake_run(stdout: str = "", stderr: str = "", returncode: int = 0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
@@ -352,6 +377,35 @@ class TestShow(BaseBuilder):
         code, out, _err = self._run(["show"])
         self.assertEqual(code, 0)
         self.assertIn("no accounts.local.json", out)
+
+    def test_show_labels_reserved_mode_key(self):
+        """予約キー `"$mode"` は service ではなく mode として表示する。
+
+        `[unknown service]` 扱いで値を隠すと、mode を設定したのに何が効いて
+        いるのか show から読めない。
+        """
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o", "$mode": "warn"}), encoding="utf-8"
+        )
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={"github.com": "Mao-o"},
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[mode]", out)
+        self.assertIn("warn", out)
+        self.assertNotIn("[unknown service]", out)
+
+    def test_show_flags_invalid_mode_value(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"$mode": "sometimes"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("不正な値", out)
 
     def test_show_match(self):
         self.new_dir.mkdir(parents=True)

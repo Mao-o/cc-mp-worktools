@@ -8,11 +8,13 @@ accounts.local.json の "github" は 2 形式を受け付ける:
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
+from pathlib import Path
 
-from core import budget
+from core import budget, cli_config
 
 # `\b` だと `gh-ost --help` のようなハイフン付き別コマンドまで拾うため、
 # 空白または終端が続く形だけに限定する。
@@ -193,10 +195,97 @@ def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]
     return active, None
 
 
+# gh の設定ファイルからアクティブアカウントを読む経路 (CLI 実行の回避)。
+#
+# `gh auth status` は全 host のトークンを **API で検証**するため往復が入り
+# (〜500ms)、オフラインでは失敗する。一方 gh はアクティブアカウントを
+# `hosts.yml` の `<host>.user` に書いており、ここを読めばネットワーク無しで
+# 決まる (実測: gh 2.9x の hosts.yml は host ごとに `users:` (紐付く全
+# アカウント) と `user:` (アクティブ) を持つ)。
+#
+# **ローカル読取を使わない条件** (どれかに当たれば従来の CLI 実行に落ちる):
+# - トークンを env で渡している (`GH_TOKEN` 等) — この場合 gh は hosts.yml では
+#   なく env のトークンで動き、アカウント名は API 経由でしか分からない
+# - `GH_HOST` が立っている — gh 側の host 列挙がどう変わるかを実測で確定できて
+#   いないため、照合先がずれる可能性を避けて CLI に委ねる
+# - 設定ファイルが読めない / 最小 YAML サブセットで解釈できない
+_TOKEN_ENV_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+_HOST_ENV_VAR = "GH_HOST"
+_CONFIG_DIR_ENV_VAR = "GH_CONFIG_DIR"
+_XDG_CONFIG_HOME_ENV_VAR = "XDG_CONFIG_HOME"
+_HOSTS_FILE = "hosts.yml"
+_ACTIVE_USER_KEY = "user"
+
+
+def _config_dir(env) -> Path | None:
+    """gh の設定ディレクトリ (`GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`)。"""
+    explicit = env.get(_CONFIG_DIR_ENV_VAR)
+    if explicit:
+        return Path(explicit)
+    xdg = env.get(_XDG_CONFIG_HOME_ENV_VAR)
+    if xdg:
+        return Path(xdg) / "gh"
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):
+        return None
+    return home / ".config" / "gh"
+
+
+def _local_active_accounts(env=None) -> dict[str, str] | None:
+    """`hosts.yml` から {hostname: active_account} を読む。決められないなら None。
+
+    env: インライン環境変数をマージ済みの完全 env (None なら hook プロセスの環境)。
+    検証 subprocess に渡すものと同じ env を見る (`GH_CONFIG_DIR=... gh ...` の形も
+    コマンド実行時と同条件で解決するため)。
+    """
+    e = os.environ if env is None else env
+    if any(e.get(name) for name in _TOKEN_ENV_VARS):
+        return None
+    if e.get(_HOST_ENV_VAR):
+        return None
+    config_dir = _config_dir(e)
+    if config_dir is None:
+        return None
+    text = cli_config.read_text(config_dir / _HOSTS_FILE)
+    if text is None:
+        return None
+    parsed = cli_config.parse_nested_scalar_map(text)
+    if parsed is None:
+        return None
+    active = {}
+    for host, props in parsed.items():
+        user = props.get(_ACTIVE_USER_KEY)
+        if isinstance(user, str) and user:
+            active[host] = user
+    return active or None
+
+
+def _scalar_target_is_ambiguous(active: dict[str, str], expected) -> bool:
+    """str 期待値の照合先が「ファイルの記載順」に依存してしまう形なら True。
+
+    `scalar_target_host()` は github.com が無いとき**最初の host** を使う。
+    hosts.yml の記載順と `gh auth status` の列挙順が一致する保証は無いので、
+    github.com が無く host が複数あるローカル読取結果は使わず CLI に委ねる。
+    """
+    return (
+        isinstance(expected, str)
+        and "github.com" not in active
+        and len(active) > 1
+    )
+
+
 def get_active_account(project_dir: str) -> dict[str, str] | None:
     """現在のアクティブ GitHub アカウントを {hostname: user} の dict で返す。
 
-    取得不可・未ログインの場合は None。
+    取得不可・未ログインの場合は None。**ローカル設定ファイルは読まず CLI を使う**
+    — builder (`show` / `--from-cli`) が期待値の提案・突合に使う経路で、対話的な
+    ので所要時間より「gh 自身が報告する値であること」を優先する。
     """
     active, _err = _fetch_active_accounts()
     return active
@@ -259,18 +348,8 @@ def matches(expected, current) -> bool:
     return False
 
 
-def verify(expected, project_dir: str, env=None, context=None) -> str | None:
-    """context: 他 service と揃えた interface。gh では**使わない**。
-
-    `gh` の `--hostname` / `--user` は「どのアカウントで実行するか」ではなく
-    **操作対象**の指定 (例: `gh auth refresh --hostname ghe.example.com` は
-    アクティブアカウントのままリモートを指定するだけ) なので、`CONTEXT_OPTIONS`
-    を宣言せず照合先は常にアクティブアカウントとする (README 既知の制限)。
-    """
-    active, err = _fetch_active_accounts(env)
-    if err:
-        return err
-
+def _expected_shape_error(expected) -> str | None:
+    """期待値そのものの形の不正 (現在値を取得しなくても決まる deny 理由)。"""
     if isinstance(expected, dict):
         if not expected:
             return (
@@ -278,6 +357,58 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
                 ' {"github": {"github.com": "YOUR_ACCOUNT"}} の形式で'
                 ' ホスト名とアカウントのマップを記述してください。'
             )
+        return None
+    if not isinstance(expected, str):
+        return (
+            f'GitHub: accounts.local.json の "github" は文字列または '
+            f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
+        )
+    return None
+
+
+def verify(expected, project_dir: str, env=None, context=None) -> str | None:
+    """context: 他 service と揃えた interface。gh では**使わない**。
+
+    `gh` の `--hostname` / `--user` は「どのアカウントで実行するか」ではなく
+    **操作対象**の指定 (例: `gh auth refresh --hostname ghe.example.com` は
+    アクティブアカウントのままリモートを指定するだけ) なので、`CONTEXT_OPTIONS`
+    を宣言せず照合先は常にアクティブアカウントとする (README 既知の制限)。
+
+    現在値は**まず `hosts.yml` から読む** (`_local_active_accounts`)。ただし
+    ローカル読取で通せるのは **allow だけ**で、エラー (不一致 / 未ログイン) を
+    返しそうなときは必ず `gh auth status` で取り直してから判断する。
+    こうすると:
+
+    - 速くなるのは成功ケース (= 大多数)。CLI 起動もネットワーク往復も無くなる
+    - ローカル読取を誤っても **deny を新造しない** (誤読は「CLI を 1 回呼ぶ」
+      コストにしかならず、deny 文面と判定は従来どおり gh の出力から作られる)
+
+    残る差は「hosts.yml にアクティブとして書かれているアカウントのトークンが
+    失効している」場合で、従来 deny だったものが allow になる (実行した gh 側が
+    認証エラーで失敗する。別アカウントでの書き込みにはならない)。
+    """
+    shape_error = _expected_shape_error(expected)
+    if shape_error:
+        return shape_error
+
+    local = _local_active_accounts(env)
+    if local is not None and not _scalar_target_is_ambiguous(local, expected):
+        if _verify_against(local, expected) is None:
+            return None
+
+    active, err = _fetch_active_accounts(env)
+    if err:
+        return err
+    return _verify_against(active, expected)
+
+
+def _verify_against(active: dict[str, str], expected) -> str | None:
+    """アクティブアカウント `active` (非空) を期待値と照合する。
+
+    現在値の取得はしない (取得元が CLI かローカル設定ファイルかに依らず、
+    照合規則を 1 箇所に保つため)。
+    """
+    if isinstance(expected, dict):
         errors: list[str] = []
         for host, want in expected.items():
             if not isinstance(want, str):
@@ -300,10 +431,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         return "\n".join(errors) if errors else None
 
     if not isinstance(expected, str):
-        return (
-            f'GitHub: accounts.local.json の "github" は文字列または '
-            f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
-        )
+        # verify() は先に `_expected_shape_error()` で弾くので通常ここには来ない。
+        # 文面を二重に持たないよう同じ関数へ委譲する。
+        return _expected_shape_error(expected)
 
     # str 形式では github.com を優先照合 (照合先の決定は scalar_target_host に
     # 一本化 — builder の show も同じ関数経由で同じ verdict を出す)。
