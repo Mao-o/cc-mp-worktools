@@ -135,7 +135,14 @@ def main() -> None:
 
     # 拡張子 allowlist。Markdown / JSON / YAML / CSV 等の非コードファイルを
     # 行数だけで分割対象として扱わない。
-    if not language.is_code_path(path):
+    #
+    # 例外は**拡張子を持たないファイル**で、これだけは内容 (shebang) を読んで
+    # 判定する (0.5.0)。`is_code_path` は名前だけの判定なので、
+    # `#!/usr/bin/env python3` で始まる `bin/deploy` は同内容の `.py` が判定
+    # されるのに無出力だった。名前で非コードと判る「未登録の拡張子」は従来
+    # どおり内容を読まずに落とす。
+    by_extension = language.is_code_path(path)
+    if not by_extension and not language.is_shebang_candidate(path):
         return
 
     loaded = source.load_text(path)
@@ -147,7 +154,12 @@ def main() -> None:
     ):
         return
 
-    lang = language.detect_language(path)
+    lang = language.detect_language(path, loaded.lines[0] if loaded.lines else "")
+    if not by_extension and lang == "generic":
+        # 拡張子なし かつ shebang が無い/未知のインタプリタ (Makefile・LICENSE・
+        # awk スクリプト等) は判定対象外。allowlist と同じ「判らないものは
+        # 通知しない」方向に倒す。
+        return
     # cwd を渡すと test ディレクトリ判定が cwd からの相対部分に限定される
     # (プロジェクトの外にある祖先ディレクトリ名を巻き込まない)。
     role = "test" if language.is_test_path(path, cwd) else "normal"

@@ -67,6 +67,30 @@ EXTENSION_LANGUAGE: dict[str, str] = {
     ".nim": "nim",
 }
 
+# 拡張子を持たないスクリプトの shebang から言語を決める表 (0.5.0)。値は
+# ``EXTENSION_LANGUAGE`` と同じ言語名 — 同じインタプリタのファイルが、拡張子の
+# 有無だけで違う係数になるのを避けるため。``bash`` / ``sh`` / ``zsh`` は
+# ``.sh`` / ``.bash`` / ``.zsh`` が既に allowlist にあるので同じ ``shell`` に
+# 寄せる (拡張子付きは判定するのに shebang 付きは判定しない、という
+# ファイル名依存の非対称を作らない)。
+#
+# 収録するのは実在の shebang として広く使われるインタプリタだけに絞る。
+# 「あり得そう」で足すと、判定対象が測らないまま広がる。追加は 1 行で済む。
+SHEBANG_LANGUAGE: dict[str, str] = {
+    "python": "python",
+    "node": "javascript",
+    "ruby": "ruby",
+    "php": "php",
+    "perl": "perl",
+    "bash": "shell",
+    "sh": "shell",
+    "zsh": "shell",
+}
+
+# インタプリタ名に付くバージョン接尾辞 (``python3`` / ``python3.11`` /
+# ``ruby2.7`` / ``perl5``)。
+_INTERPRETER_VERSION_SUFFIX_RE = re.compile(r"[0-9.]+$")
+
 _TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs", "e2e"})
 
 # test 判定に使うファイル名パターン。role が `test` になると閾値が 1.6 倍に
@@ -139,18 +163,72 @@ _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _TOKEN_SPLIT_RE = re.compile(r"[_\-.]+")
 
 
-def detect_language(path: Path) -> str:
-    return EXTENSION_LANGUAGE.get(path.suffix.lower(), "generic")
+def language_from_shebang(first_line: str) -> str:
+    """shebang 行からインタプリタの言語を返す (判らなければ空文字列)。
+
+    ``#!/usr/bin/env python3`` / ``#!/usr/bin/python3.11`` /
+    ``#!/usr/bin/env -S node --loader=ts`` のいずれの形も、トークンを左から見て
+    最初に ``SHEBANG_LANGUAGE`` に一致したものを採る。``env`` とオプション
+    (``-S`` 等) と ``VAR=value`` 形の環境変数指定は読み飛ばす。
+    """
+    if not first_line.startswith("#!"):
+        return ""
+    for token in first_line[2:].split():
+        if token.startswith("-") or "=" in token:
+            continue
+        name = token.rsplit("/", 1)[-1].lower()
+        if not name or name == "env":
+            continue
+        for candidate in (name, _INTERPRETER_VERSION_SUFFIX_RE.sub("", name)):
+            language = SHEBANG_LANGUAGE.get(candidate)
+            if language:
+                return language
+    return ""
+
+
+def detect_language(path: Path, first_line: str = "") -> str:
+    """拡張子から言語を判定する。
+
+    拡張子が ``EXTENSION_LANGUAGE`` に無いときは ``first_line`` の shebang を
+    見る (0.5.0)。**拡張子が登録済みならそちらを優先する** — ``.py`` に
+    ``#!/usr/bin/env node`` と書いてあるような食い違いでは、拡張子の方が
+    ファイルの実体を表していることが多いため。どちらでも決まらなければ
+    ``generic``。
+    """
+    by_extension = EXTENSION_LANGUAGE.get(path.suffix.lower())
+    if by_extension:
+        return by_extension
+    if first_line:
+        by_shebang = language_from_shebang(first_line)
+        if by_shebang:
+            return by_shebang
+    return "generic"
 
 
 def is_code_path(path: Path) -> bool:
     """拡張子が ``EXTENSION_LANGUAGE`` に登録されているか (判定対象 allowlist)。
 
-    未登録の拡張子と拡張子なしのファイルは False。後者には shebang 付きの
-    スクリプトが含まれるが、内容を読む前の名前だけの判定に閉じている
-    (shebang 判定は別途の課題)。
+    未登録の拡張子と拡張子なしのファイルは False。拡張子なしのファイルは
+    ``is_shebang_candidate`` が True なら内容 (shebang) を見て判定対象に入る
+    (0.5.0)。
     """
     return path.suffix.lower() in EXTENSION_LANGUAGE
+
+
+def is_shebang_candidate(path: Path) -> bool:
+    """拡張子を持たないファイルのうち、shebang を見て判定するものか (0.5.0)。
+
+    ``is_code_path`` が False の理由は「未登録の拡張子」と「拡張子なし」の 2
+    通りある。後者だけを内容判定に回す — 前者 (``.md`` / ``.json`` 等) は名前で
+    非コードと判る一方、``bin/deploy`` のような拡張子なしスクリプトは
+    ``#!/usr/bin/env python3`` と書かれた実コードであり、同じ内容の ``.py``
+    なら判定されるのに無出力になっていた (内部バックログ)。
+
+    **先頭が ``.`` のファイル (``.bashrc`` / ``.env`` 等) は対象外**。慣例として
+    設定ファイルであり、shebang を持つことがまずない一方で、対象にすると
+    内容を読む対象が無用に広がる。
+    """
+    return path.suffix == "" and not path.name.startswith(".")
 
 
 def relevant_dir_parts(path: Path, cwd: str = "") -> tuple[str, ...]:

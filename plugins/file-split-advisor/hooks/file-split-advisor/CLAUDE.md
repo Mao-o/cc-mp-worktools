@@ -73,12 +73,16 @@ flowchart TD
     IG -- no --> E{should_skip_by_name?<br/>lockfile/minified/generated/第三者ディレクトリ}
     E -- yes --> Z
     E -- no --> N{language.is_code_path?<br/>拡張子 allowlist}
-    N -- no --> Z
     N -- yes --> F[source.load_text<br/>symlink/2MB/20000行の安全弁]
+    N -- no --> SB{拡張子なし かつ<br/>dotfile でない?}
+    SB -- no --> Z
+    SB -- yes --> F
     F -- None --> Z
     F -- LoadedFile --> G{先頭20行に<br/>generated marker?}
     G -- yes --> Z
-    G -- no --> H[language 判定<br/>detect_language / is_test_path]
+    G -- no --> SH{拡張子なし かつ<br/>shebang が未知?}
+    SH -- yes --> Z
+    SH -- no --> H[language 判定<br/>detect_language / is_test_path]
     H --> I[metrics.compute<br/>line_count/def_count/import多様性/制御フロー密度/vague filename]
     I --> J[judge.judge<br/>effective_thresholds (SCALE 反映) → tier → signals → should_emit]
     J --> P[change.classify_growth<br/>Edit の行数差 → grew/not_grew/unknown]
@@ -124,12 +128,39 @@ role 係数・宣言的緩和という形で `effective_thresholds` 自体に織
 したのは、未知の拡張子が現れたときの失敗方向を「通知しない」に倒すため
 (advisory hook の `fail-open` = 通知しない側、という設計原則に合わせている)。
 
-代償として **拡張子を持たない shebang スクリプトも判定対象から外れる**。
-`is_code_path` は内容を読む前に呼ばれる名前だけの判定なので、shebang を見る
-なら `source.load_text` の後に判定を移す設計変更が要る。0.2.0 では行っていない。
-
 新しい言語を追加するときは `EXTENSION_LANGUAGE` に拡張子を足せば判定対象に
 入る。`judge.py::LANGUAGE_MULTIPLIER` への追加は任意で、未登録なら 1.0。
+
+#### 拡張子を持たないファイルだけ、内容 (shebang) で判定に戻す (0.5.0)
+
+0.2.0 の allowlist 化には「拡張子を持たない shebang スクリプトも判定対象から
+外れる」という代償があった。`#!/usr/bin/env python3` で始まる 261 行の
+`bin/deploy` は無出力なのに、同内容の `.py` なら emit するという食い違いで、
+判定がファイルの中身ではなく名前で決まっていた (内部バックログ)。
+
+`is_code_path` (名前だけの判定) は**そのまま残す**。allowlist に載らない理由は
+「未登録の拡張子」と「拡張子なし」の 2 通りあり、**後者だけ**を
+`language.is_shebang_candidate` で内容判定に回す:
+
+- 判定の移動は最小限。`.md` / `.json` のように名前で非コードと判るものは
+  従来どおり内容を読まずに落ちる (allowlist の失敗方向を保つ)
+- `__main__.py` は `by_extension` を保持し、`load_text` の後に
+  `detect_language(path, first_line)` が `generic` を返したら
+  「拡張子なし かつ shebang 不明」として skip する
+- 拡張子がある場合は**拡張子の判定を優先**する。`.py` に `#!/usr/bin/env node`
+  と書かれている食い違いでは拡張子の方が実体を表していることが多い
+- `SHEBANG_LANGUAGE` は実在の shebang として広く使われるインタプリタだけに
+  絞る。`bash`/`sh`/`zsh` を含めるのは `.sh`/`.bash`/`.zsh` が既に allowlist に
+  あるためで、これを外すと「同じスクリプトが名前次第で判定される/されない」
+  という非対称が残る
+- **dotfile (`.bashrc` / `.envrc` / `.env`) は対象外**。`Path(".bashrc").suffix`
+  は `""` なので絞らないと候補に入ってしまうが、慣例として設定ファイルであり、
+  内容を読む対象を無用に広げない
+
+代償: 拡張子なしのファイルは shebang を見るために内容を読む (最大 2MB)。
+`Makefile` / `LICENSE` のような非スクリプトでも 1 回読んでから落ちる。
+名前で落とすより遅いが、読み込みには既存の安全弁 (symlink/2MB/20,000 行) が
+そのまま効く。
 
 ### `Metrics` に `import_categories` (カテゴリ名のタプル) を追加した理由
 
@@ -201,6 +232,40 @@ tier/emit 判定ロジックは変更していない (表示だけの修正)。
 修正した。judge 側は `_effective_thresholds` が内部で計算済みの
 `is_declarative` を `applied_multipliers` として外部に公開するだけで、
 判定ロジック自体 (`_collect_signals` の独自計算) は変更していない。
+
+### メモに分割候補の境界を付記する (0.5.0) — 判定は変えず、表示だけを足す
+
+0.4.0 までのメモは行数・tier・シグナル名・定型 footer だけで、`検出シグナル:
+定義数 28` のように「多い」ことしか言えず、**どの定義群を切り出すか**の手掛かり
+が無かった (内部バックログ)。追加した 2 行はどちらも既に計算済みの情報から
+得られる:
+
+| 付記行 | 出典 | 精度 |
+|---|---|---|
+| 大きい定義 上位 N | Python は `ast` のモジュール直下、他言語は定義行の正規表現 | Python は正確、他言語は「次の定義まで」の概算 |
+| import クラスタ | `IMPORT_CATEGORY_KEYWORDS` に一致した字面 | モジュール名でない語 (`http`) も混じる |
+
+守っている制約:
+
+- **`judge.py` は一切触らない**。`Metrics` に足した 2 フィールド
+  (`top_level_defs` / `import_modules`) は `message.py` 専用で、シグナル判定に
+  使わない。カテゴリの集合と順序 (`import_category_count` /
+  `import_categories`) が 0.4.0 と同一になるよう、`_collect_import_categories`
+  は**カテゴリの有無と語の採取を独立に記録する** — 表示用の整形
+  (`_clean_module_token`) の結果が emit 判定に漏れないようにするため
+- **トップレベルだけを列挙する**。`count_defs_python` (シグナル用) は入れ子も
+  再帰的に数えるが、付記に出すのは分割単位になりうる定義だけなので
+  `tree.body` に限る。非 Python も行頭にインデントのない定義行だけ見る
+- **上限を 3 段で持つ**: 候補の保持 (`TOP_LEVEL_DEF_CAP` / 
+  `IMPORT_MODULE_SAMPLE_CAP`)、表示件数 (`MAX_DEF_HIGHLIGHTS`)、メモ全体
+  (`MAX_MEMO_CHARS` = 10,000)。最後の 1 つを超えるときは**付記行から落とす** —
+  判定根拠 (行数・tier・シグナル) はメモの本体なので常に残す
+- **単一カテゴリでは import クラスタ行を出さない**。境界は 2 つ以上のクラスタの
+  間にしか現れず、1 つだけ並べてもメモが長くなるだけ
+- 非 Python の `span` が概算である点は README の既知の限界に開示する。パーサを
+  持たない言語で「大きさ」を出す手段が他に無く、出さないと順位付けができない
+  (順位付けをやめて出現順に並べる案は、「大きい定義」という見出しの意味が
+  失われるため採らない)
 
 ### 解析層の精度改善 (0.4.0) — 判定表は変えず、入力の抽出だけを直す
 
@@ -420,6 +485,37 @@ MainClaude/Subagent が並行して複数ファイルを Write/Edit する運用
   なしで動作継続」に degrade する方が「ロックはあるが起動不能」より適切、と
   判断して `try/except ImportError` + `HAVE_FLOCK` フラグに変更した
 
+### 書込不能時は沈黙する / 古い state を掃除する (0.5.0)
+
+0.4.0 までの `try_reserve_emit` は、`OSError` を「state 無し」と同じ扱いにして
+**通知する**方向に倒していた (docstring にも明記していた)。実測すると
+`TMPDIR=/` のような書込不能環境では同一セッション・同一ファイルの Edit 2 回が
+どちらも emit し、debounce が完全に失われる (内部バックログ)。巨大なファイルを
+編集するたびに同じメモが注入され、ユーザーには原因が見えない。
+
+方向は自分で決めずに済んだ — README の設計原則 2 が既に「判定不能・IO 失敗は
+すべて『通知しない』側に倒す」と書いており、`state.py` だけがそれに反していた。
+実装はコードを原則に合わせただけで、新しい方針決定ではない。
+
+- 候補ディレクトリを `_state_dirs()` で順に試す (`$TMPDIR` → XDG キャッシュ)。
+  XDG は「消えてもよいが書けることが多い」場所なので 2 番目に置く
+- 全滅したら `False` (通知しない) を返し、**プロセス内で 1 回だけ** stderr に
+  理由を出す。hook は編集ごとに新しいプロセスなので実質「その編集につき 1 行」
+- **`session_id` が空のときは従来どおり通知する**。ここは「記録先が壊れている」
+  のではなく「debounce がそもそも要求されていない」ケースで、抑制側に倒すと
+  envelope の仕様変更で通知が黙って全滅する。非対称は意図的
+
+古い state の掃除 (`sweep_stale_states`) は **自分の state ファイルを作る前**に、
+**新規作成のときだけ**走らせる:
+
+- 作る前に掃除するので自分のファイルは消えない
+- 「新規作成のときだけ」にしないと、7 日を超えて生きているセッションが自分の
+  記録を消してしまう。`open(..., "a+")` がファイルを作り直すため**存在を見ても
+  気付けない** — 回帰テストは記録の中身 (`/repo/a.py` のエントリ) で確認する
+- `/compact` 後の再通知は**行わない** (README の既知の限界に開示)。`PostCompact`
+  で tier 記録をリセットする案は、通知疲れを防ぐという目的 (本ファイル冒頭の
+  目的 3) と正面から衝突するため採らない
+
 ### 行数の記録と「tier を進めない抑制」 (0.2.0)
 
 パスごとの記録が tier 文字列から `{"tier": ..., "lines": ...}` に変わった
@@ -516,6 +612,10 @@ echo '{"session_id":"smoke","cwd":"'"$PWD"'","tool_name":"Write",
 - **新しい言語**: `language.py::EXTENSION_LANGUAGE` に拡張子を追加する
   (= 判定対象に入る)。`judge.py::LANGUAGE_MULTIPLIER` への係数追加は任意で、
   未登録なら 1.0
+- **新しい shebang**: `language.py::SHEBANG_LANGUAGE` に
+  `インタプリタ名 -> 言語名` を 1 行足す (値は `EXTENSION_LANGUAGE` と同じ
+  言語名にする)。「あり得そう」なインタプリタを投機的に足すと、判定対象が
+  測らないまま広がるので実在の使用を確認してから足す
 
 ## 発火率を変える変更をしたときの測定
 

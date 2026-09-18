@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _testutil  # noqa: F401
 
 import judge
 import message
 from judge import Verdict
-from metrics import Metrics
+from metrics import Metrics, TopLevelDef
 
 
 def _metrics(
@@ -19,6 +20,8 @@ def _metrics(
     import_categories=(),
     control_flow_density=0.1,
     vague_filename=False,
+    top_level_defs=(),
+    import_modules=(),
 ) -> Metrics:
     return Metrics(
         line_count=line_count,
@@ -27,6 +30,8 @@ def _metrics(
         import_categories=import_categories,
         control_flow_density=control_flow_density,
         vague_filename=vague_filename,
+        top_level_defs=top_level_defs,
+        import_modules=import_modules,
     )
 
 
@@ -268,6 +273,153 @@ class TestRoleNoteAbsentForNormalRole(unittest.TestCase):
         v = _verdict(applied_multipliers={"language": 1.0, "role": 1.0, "declarative": 1.0})
         text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
         self.assertNotIn("閾値 1.6倍", text)
+
+
+class TestDefHighlightLine(unittest.TestCase):
+    """0.5.0: 分割候補の境界 (大きい定義) をメモに付記する。"""
+
+    def _defs(self, *specs) -> tuple[TopLevelDef, ...]:
+        return tuple(
+            TopLevelDef(name=name, start_line=start, span=span) for name, start, span in specs
+        )
+
+    def test_defs_listed_in_descending_span_order(self):
+        defs = self._defs(("small", 10, 5), ("big", 100, 200), ("mid", 50, 40))
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(top_level_defs=defs)
+        )
+        line = next(l for l in text.splitlines() if l.startswith("大きい定義"))
+        self.assertIn("big(200行, 100行目〜)", line)
+        self.assertLess(line.index("big"), line.index("mid"))
+        self.assertLess(line.index("mid"), line.index("small"))
+
+    def test_only_the_first_five_defs_are_listed(self):
+        defs = self._defs(*[(f"f{i}", i * 10 + 1, 100 - i) for i in range(12)])
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(top_level_defs=defs)
+        )
+        line = next(l for l in text.splitlines() if l.startswith("大きい定義"))
+        self.assertIn("上位5:", line)
+        self.assertEqual(line.count(" / "), 4)
+        self.assertNotIn("f5(", line)
+
+    def test_equal_spans_keep_source_order(self):
+        defs = self._defs(("later", 200, 30), ("earlier", 20, 30))
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(top_level_defs=defs)
+        )
+        line = next(l for l in text.splitlines() if l.startswith("大きい定義"))
+        self.assertLess(line.index("earlier"), line.index("later"))
+
+    def test_no_defs_omits_the_line(self):
+        text = message.build(Path("foo.py"), "python", "normal", _verdict(), _metrics())
+        self.assertNotIn("大きい定義", text)
+
+    def test_long_identifier_is_truncated(self):
+        defs = self._defs(("x" * 200, 1, 50))
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(top_level_defs=defs)
+        )
+        line = next(l for l in text.splitlines() if l.startswith("大きい定義"))
+        self.assertIn("…", line)
+        self.assertNotIn("x" * 200, line)
+
+
+class TestImportClusterLine(unittest.TestCase):
+    """0.5.0: どの依存がカテゴリを立てたかをメモに付記する。"""
+
+    def test_clusters_listed_with_their_modules(self):
+        modules = (("network", ("requests", "urllib")), ("filesystem", ("pathlib", "shutil")))
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(import_modules=modules)
+        )
+        self.assertIn(
+            "import クラスタ: network(requests, urllib) / filesystem(pathlib, shutil)", text
+        )
+
+    def test_single_category_omits_the_line(self):
+        # 単一カテゴリの列挙は「どこで切るか」の手掛かりにならない。
+        modules = (("network", ("requests", "httpx")),)
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(import_modules=modules)
+        )
+        self.assertNotIn("import クラスタ", text)
+
+    def test_categories_without_sampled_modules_are_not_counted(self):
+        modules = (("network", ("requests",)), ("db", ()))
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(import_modules=modules)
+        )
+        self.assertNotIn("import クラスタ", text)
+
+
+class TestMemoCharLimit(unittest.TestCase):
+    """0.5.0: 付記行が additionalContext の上限を押し上げないこと。"""
+
+    def _rich_metrics(self):
+        defs = tuple(
+            TopLevelDef(name=f"name_{i}", start_line=i + 1, span=500 - i) for i in range(50)
+        )
+        modules = tuple(
+            (f"cat{i}", tuple(f"module_{i}_{j}" for j in range(6))) for i in range(3)
+        )
+        return _metrics(top_level_defs=defs, import_modules=modules)
+
+    def _build(self, metrics):
+        return message.build(Path("foo.py"), "python", "normal", _verdict(), metrics)
+
+    def test_oversized_extras_are_dropped_before_the_verdict_lines(self):
+        # 上限に収まらない付記行は落ちるが、判定根拠 (行数/tier/シグナル) と
+        # footer は常に残る。
+        bare = self._build(_metrics())
+        with mock.patch.object(message, "MAX_MEMO_CHARS", len(bare) + 5):
+            text = self._build(self._rich_metrics())
+        self.assertIn("行数: 300", text)
+        self.assertIn("行数は分割要否の直接的根拠ではなく", text)
+        self.assertNotIn("大きい定義", text)
+        self.assertNotIn("import クラスタ", text)
+
+    def test_a_short_later_extra_is_kept_when_an_earlier_one_does_not_fit(self):
+        # 「収まらない付記行だけ落とす」— 先の長い行が入らなくても後の短い行は残る。
+        long_defs = tuple(
+            TopLevelDef(name="d" * 40, start_line=i + 1, span=900 - i) for i in range(5)
+        )
+        short_modules = (("a", ("x",)), ("b", ("y",)))
+        cluster_only = self._build(_metrics(import_modules=short_modules))
+        with mock.patch.object(message, "MAX_MEMO_CHARS", len(cluster_only)):
+            text = self._build(
+                _metrics(top_level_defs=long_defs, import_modules=short_modules)
+            )
+        self.assertNotIn("大きい定義", text)
+        self.assertIn("import クラスタ", text)
+
+    def test_an_extra_that_only_fits_without_the_footer_is_still_dropped(self):
+        # 予算計算に footer を含めないと、footer 長ぶんだけ上限が緩む。
+        defs = (TopLevelDef(name="parse", start_line=1, span=40),)
+        with_def = self._build(_metrics(top_level_defs=defs))
+        with mock.patch.object(message, "MAX_MEMO_CHARS", len(with_def) - 1):
+            text = self._build(_metrics(top_level_defs=defs))
+        self.assertNotIn("大きい定義", text)
+        self.assertLessEqual(len(text), len(with_def) - 1)
+
+    def test_extras_that_fit_are_kept_even_if_a_later_one_does_not(self):
+        # 「入るものだけ入れる」— 先の行が入っても後の長い行で全体が上限を
+        # 超えるなら、後の行だけを落とす。
+        rich = self._rich_metrics()
+        with_defs_only = self._build(_metrics(top_level_defs=rich.top_level_defs))
+        with mock.patch.object(message, "MAX_MEMO_CHARS", len(with_defs_only) + 5):
+            text = self._build(rich)
+        self.assertIn("大きい定義", text)
+        self.assertNotIn("import クラスタ", text)
+        self.assertIn("行数は分割要否の直接的根拠ではなく", text)
+
+    def test_short_extras_fit_within_the_limit(self):
+        defs = (TopLevelDef(name="parse", start_line=1, span=40),)
+        text = message.build(
+            Path("foo.py"), "python", "normal", _verdict(), _metrics(top_level_defs=defs)
+        )
+        self.assertLessEqual(len(text), message.MAX_MEMO_CHARS)
+        self.assertIn("大きい定義 上位1: parse(40行, 1行目〜)", text)
 
 
 class TestPartialThresholds(unittest.TestCase):
