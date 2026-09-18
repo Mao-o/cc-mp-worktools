@@ -713,6 +713,77 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         self.assertNotIn(str(self.repo), reason)
 
 
+class TestE2EDotenvInfoPathsKeepVerdictAndEnvelope(unittest.TestCase):
+    """0.32.0 (内部バックログ): ``read_partial`` / ``search`` の折り畳み配線が
+    **判定を変えていない**ことを 5 mode で固定する。
+
+    reason builder は deny 確定後に文字列を組むだけなので判定に影響しない —
+    ただし builder が例外を投げると ``__main__`` の catch-all が ``ask_or_deny``
+    に倒し、**deny が ask に変わる**。実ファイル + 全 mode で通すことで、
+    その経路が塞がっていることを確かめる。
+    """
+
+    _MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+    _KEY_COUNT = 300
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.path = Path(self.tmp) / ".env"
+        self.path.write_text(
+            "".join(
+                f"KEY_{i:03d}=" + "v" * 40 + "\n" for i in range(self._KEY_COUNT)
+            )
+        )
+        # inline 経路 (32KB 未満 = dotenv parse が走る) であること
+        self.assertLess(self.path.stat().st_size, 32 * 1024)
+
+    def _envelope(self, command: str, mode: str) -> dict:
+        return {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": self.tmp,
+            "permission_mode": mode,
+        }
+
+    def _assert_deny_and_intact(self, command: str) -> None:
+        for mode in self._MODES:
+            with self.subTest(mode=mode, command=command):
+                result = _run_main(self._envelope(command, mode), ["--tool", "bash"])
+                hook = result.get("hookSpecificOutput", {})
+                self.assertEqual(hook.get("permissionDecision"), "deny", mode)
+                reason = hook.get("permissionDecisionReason", "")
+                self.assertLessEqual(len(reason.encode("utf-8")), 3 * 1024)
+                self.assertNotIn("...[truncated]", reason)
+                self.assertIn("</DATA>", reason)
+                # 値は 1 文字も出さない
+                self.assertNotIn("v" * 40, reason)
+
+    def test_head_partial_read_denies_in_every_mode(self):
+        self._assert_deny_and_intact("head -n 250 .env")
+
+    def test_tail_partial_read_denies_in_every_mode(self):
+        self._assert_deny_and_intact("tail -n 250 .env")
+
+    def test_grep_search_denies_in_every_mode(self):
+        # 実在する鍵名に一致するパターン (matched_pattern_keys 経路 = 明細行が
+        # <DATA> に包まれる経路) を使う。存在しない名前だと
+        # ``nomatch_pattern_keys`` だけの reason になり minimal info を持たない
+        # (0.16.0 からの既存挙動)。
+        self._assert_deny_and_intact("grep -E 'KEY_001|KEY_002' .env")
+
+    def test_grep_nomatch_only_still_denies_in_every_mode(self):
+        """鍵名に一致しないパターンは minimal info を持たないが判定は deny。"""
+        for mode in self._MODES:
+            with self.subTest(mode=mode):
+                result = _run_main(
+                    self._envelope("grep -E 'NOPE_KEY' .env", mode),
+                    ["--tool", "bash"],
+                )
+                hook = result.get("hookSpecificOutput", {})
+                self.assertEqual(hook.get("permissionDecision"), "deny", mode)
+
+
 class TestE2EKeyonlyKeepsKeyNames(unittest.TestCase):
     """0.26.0 隔離内レビュー P1-1 の 3 経路回帰 (Read / Bash / Edit)。
 

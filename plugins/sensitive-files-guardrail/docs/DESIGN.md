@@ -1061,7 +1061,7 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 | 経路 | 入口 | 予算 |
 |---|---|---|
 | Read | `core.messages.fit_read_reason` | reason 全体が `<DATA>` 1 ブロックなので 3KB をそのまま渡す |
-| Bash | `core.messages._fold_data_block` (`_join_with_exclude_hint` から) | 3KB − 除外案内 − 固定行 (`note:` / `matched_operand:` 等) |
+| Bash | `core.messages._fold_data_block` (`_join_with_exclude_hint` から) | 3KB − 除外案内 − 固定行 (`note:` / `matched_operand:` 等)。`read_partial` / `search` は 0.32.0 で `_rewrap_data_block` を通してこの経路に合流 |
 | Edit / Write | `core.messages._edit_existing_info_lines` (`edit_deny` から) | 3KB − tail (`suggested_keys` / `suggestion_alt` / 除外案内) |
 
 - 先頭から行を採用し、入り切らない分は
@@ -1128,10 +1128,30 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 数十個見えていたので、折り畳みの導入が情報を減らす退行になっていた)。現在は
 1 鍵 1 行で出す (`redaction/keyonly_scan.py`)。
 
-> `read_partial` / `search` の builder (`core.messages` の grep 系) は
-> `dotenv_info["keys"]` を `<DATA>` 包装なしで直接展開するため、この折り畳みは
-> 効かず `core.output._truncate` の盲目 cut のままである (既知の未対応。
-> 判定には影響しない)。
+**`read_partial` / `search` も同じ折り畳みを通る (0.32.0)。** この 2 経路は
+`dotenv_info["keys"]` を `<DATA>` 包装なしで直接展開していたため、`_fold_data_block`
+が折り畳み対象を見つけられず `core.output._truncate` の盲目 cut のままだった
+(実測: 300 鍵の `head -n 250 .env` で 3,072 byte + `...[truncated]`、`</DATA>`
+閉じタグ・末尾 note・除外案内が鍵行の途中で欠落)。0.32.0 で:
+
+- 明細行 (鍵行) を `<DATA>` ブロックに包み直す (`_rewrap_data_block`)。包装は
+  自前で組まず、同じ呼出で得ている `file_render` の header 3 行と閉じタグを
+  **そのまま流用**する — `core` から `redaction` を import すると依存が逆流する
+  ため (`_KEYONLY_SCAN_MARKER` を両側に置いているのと同じ制約)。guard marker と
+  sanitize 済み basename を持つ本物の header なので包装の意味論は Read と同一
+- **総数の見出しはブロックの外に残す** (`keys (先頭 250, 全 300 件):` /
+  `matched_pattern_keys:`)。ブロック内に入れると `entries:` 相当の総数が
+  「切り出した件数」に化け、省略マーカーの件数計算 (`_omit_count`) と噛み合わない
+- `matched_pattern_keys:` / `nomatch_pattern_keys:` / `pattern_keys:` の鍵名
+  エコーは **1 行が可変長**で、grep pattern が多数の env-var 名を含むとこの 1 行
+  だけで予算を食い潰す。`_fold_data_block` は「`<DATA>` 要素以外の行を先に引く」
+  設計なので固定側が予算を超えると折り畳み予算が負になり、結局盲目 cut に落ちる
+  (実測: 300 鍵 grep)。20 件 + `... (N more)` で畳んで明細行と閉じタグに予算を回す
+- `file_render` が想定の `<DATA>` 形でない場合は従来どおり素で並べる
+  (包装できないだけで情報は落とさない)
+- **判定は不変** (reason builder は deny 確定後に文字列を組むだけ)。ただし
+  builder が例外を投げると `__main__` の catch-all が `ask_or_deny` に倒して
+  deny が ask に変わるため、実ファイル + 全 5 mode の E2E で固定している
 
 `ask_or_deny`: `permission_mode == "bypassPermissions"` なら `deny`、それ以外は
 `ask`。**機密検出済み** のケースは `ask` を挟まず常に `deny` 固定 (うっかり

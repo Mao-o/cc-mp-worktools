@@ -149,6 +149,47 @@ class TestReadPartial(unittest.TestCase):
         )
         self.assertIn("先頭 4 行", msg)
 
+    def test_keys_are_wrapped_in_a_data_block(self):
+        """0.32.0 (内部バックログ): 鍵行を ``<DATA>`` 包装に入れる。
+
+        包装が無いと ``_fold_data_block`` が折り畳み対象を見つけられず、予算
+        超過時に盲目 byte cut に落ちていた (0.26.0 の折り畳みがこの経路には
+        効いていなかった)。"""
+        msg = M.bash_deny(
+            first_token="head", operand=".env",
+            command="head -n 3 .env",
+            file_render=_DUMMY_FILE_RENDER,
+            dotenv_info=_dummy_dotenv_info(num_keys=5),
+        )
+        # 見出しはブロックの外 (総数が切り出し件数に化けないため)
+        self.assertIn("keys (先頭 3, 全 5 件):", msg)
+        self.assertIn('<DATA untrusted="true"', msg)
+        self.assertIn("</DATA>", msg)
+        head_idx = msg.index("keys (先頭 3, 全 5 件):")
+        open_idx = msg.index('<DATA untrusted="true"')
+        self.assertLess(head_idx, open_idx)
+        # 鍵行はブロックの内側
+        block = msg[open_idx : msg.index("</DATA>") + len("</DATA>")]
+        self.assertIn("KEY_1", block)
+        self.assertIn("KEY_3", block)
+        self.assertNotIn("KEY_4", block)
+        # 免責 note は閉じタグの直前 (固定 tail として保護される位置)
+        self.assertTrue(
+            block.endswith(M._KEYS_ONLY_NOTE + "\n</DATA>"), msg
+        )
+
+    def test_head_falls_back_to_unwrapped_keys_without_file_render(self):
+        """``file_render`` が無い (包装の雛形が取れない) 場合は従来どおり素で
+        並べる — 包装できないだけで情報は落とさない。"""
+        msg = M.bash_deny(
+            first_token="head", operand=".env",
+            command="head -n 2 .env",
+            dotenv_info=_dummy_dotenv_info(num_keys=3),
+        )
+        self.assertNotIn("<DATA", msg)
+        self.assertIn("KEY_1", msg)
+        self.assertIn(M._KEYS_ONLY_NOTE, msg)
+
     def test_head_falls_back_to_file_render_when_no_dotenv_info(self):
         msg = M.bash_deny(
             first_token="head", operand=".env",

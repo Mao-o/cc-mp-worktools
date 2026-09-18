@@ -75,7 +75,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from typing import Callable, Literal
+from typing import Callable, Iterable, Literal
 
 from _shared.patterns import (
     EXCLUDE_SCOPE_WARNING,
@@ -502,6 +502,88 @@ def _append_minimal_info(
     lines.append(f"suggestion: {action}")
 
 
+# ``matched_pattern_keys:`` / ``nomatch_pattern_keys:`` / ``pattern_keys:`` に
+# 並べる鍵名の上限 (0.32.0、内部バックログ)。
+#
+# この 3 行は **1 行が可変長**で、grep pattern が多数の env-var 名を含むと
+# 1 行だけで 3KB 予算を食い潰す。``_fold_data_block`` は「``<DATA>`` 要素以外の
+# 行の byte 数を先に引く」設計なので、固定側が予算を超えると折り畳み予算が
+# 負になり、結局 ``_join_with_exclude_hint`` の盲目 cut に落ちる (実測: 300 鍵の
+# grep で ``</DATA>`` も末尾 note も消え ``...[truncated]`` のまま)。鍵名の
+# エコーは ``<DATA>`` ブロック内の明細行と重複する情報なので、ここを畳んで
+# 明細行と閉じタグに予算を回す。
+#
+# 20 件は ``_shared.patterns.exclude_recipe_lines`` の limit と同じ値
+# (「一覧として読める上限」の既存感覚に合わせる)。畳んだときは必ず件数を
+# 出す (黙って消すと何件見ていないのか分からない)。
+_PATTERN_KEYS_LIMIT = 20
+
+
+def _format_pattern_key_list(names: list[str]) -> str:
+    """鍵名リストを ``[A, B, ... (N more)]`` の形に畳んで返す (0.32.0)。"""
+    if len(names) <= _PATTERN_KEYS_LIMIT:
+        return f"[{', '.join(names)}]"
+    shown = names[:_PATTERN_KEYS_LIMIT]
+    return f"[{', '.join(shown)}, ... ({len(names) - _PATTERN_KEYS_LIMIT} more)]"
+
+
+# read_partial が鍵行の後に置く免責 note。``redaction.dotenv.format_dotenv`` の
+# 末尾 note と同文で、``<DATA>`` ブロック内の固定 tail として保護される
+# (``_fit_data_block_core`` の ``protect_note``)。
+_KEYS_ONLY_NOTE = (
+    "note: real values are not in context. only key names, type, prefix,"
+    " length, status tags, and placeholder hints are returned."
+)
+
+
+def _rewrap_data_block(
+    file_render: str,
+    detail_lines: list[str],
+    tail_notes: Iterable[str] = (),
+) -> str | None:
+    """``file_render`` の ``<DATA>`` 包装を再利用して別の本文で 1 ブロック組む
+    (0.32.0、内部バックログ)。
+
+    ``dotenv_info`` を直接展開する経路 (read_partial / search) は鍵行を
+    ``<DATA>`` 包装**なしで** ``lines`` に並べていたため、``_fold_data_block``
+    が折り畳み対象を見つけられず、3KB 予算超過時は ``_join_with_exclude_hint``
+    の盲目 byte cut に落ちていた (閉じタグ・末尾 note・除外案内が鍵行の途中で
+    ちぎれる。0.26.0 の折り畳みがこの 2 経路には効いていなかった)。鍵行を
+    1 つの ``<DATA>`` ブロックに包み直すことで同じ折り畳み経路に乗る。
+
+    包装を自前で組み立てず ``file_render`` (= ``redaction.engine.build_reason``
+    の出力) の header 3 行と閉じタグを**そのまま流用**するのは、``core`` から
+    ``redaction`` を import すると依存が逆流するため
+    (``redaction.file_render`` が ``core.safepath`` を使っている。
+    ``_KEYONLY_SCAN_MARKER`` を両側に置いているのと同じ制約)。guard marker と
+    sanitize 済み basename を持つ本物の header を使うので、包装の意味論は
+    Read 経路と同一になる。
+
+    Args:
+        file_render: 同じファイルの ``<DATA>`` 包装済み minimal info。
+            この 2 経路では ``dotenv_info`` が非 None なら必ず非空
+            (``render_for_bash`` は両方を同時に返す)。
+        detail_lines: ブロック内に並べる明細行 (2 space インデント前提)。
+        tail_notes: 閉じタグの直前に置く ``note:`` 行 (折り畳みで
+            ``_MAX_TAIL_NOTES`` 本まで固定 tail として保護される)。
+
+    Returns:
+        組み直した 1 ブロック。``file_render`` が想定の形でなければ ``None``
+        (呼出側は従来どおり包装なしで並べる = 挙動不変)。
+    """
+    if not file_render:
+        return None
+    lines = file_render.split("\n")
+    if len(lines) <= _DATA_HEADER_LINES:
+        return None
+    if not lines[0].startswith("<DATA ") or lines[-1] != _DATA_CLOSING_TAG:
+        return None
+    header = lines[:_DATA_HEADER_LINES]
+    return "\n".join(
+        header + list(detail_lines) + list(tail_notes) + [_DATA_CLOSING_TAG]
+    )
+
+
 def _append_project_root_caveat(
     lines: list[str],
     render_status: str,
@@ -657,13 +739,19 @@ def _bash_deny_read_partial(
             shown = info_keys[-n:] if n < total else list(info_keys)
         else:
             shown = info_keys[:n]
+        # 総数の見出しは **ブロックの外** に置く (0.32.0)。ブロック内に入れると
+        # ``entries:`` 相当の総数が「切り出した件数」になってしまい、折り畳み
+        # マーカーの件数計算 (``_omit_count``) と噛み合わなくなる。
         lines.append(f"keys ({label} {n}, 全 {total} 件):")
-        for k in shown:
-            lines.append(_format_dotenv_key_line(k))
-        lines.append(
-            "note: real values are not in context. only key names, type, prefix,"
-            " length, status tags, and placeholder hints are returned."
-        )
+        key_lines = [_format_dotenv_key_line(k) for k in shown]
+        block = _rewrap_data_block(file_render, key_lines, [_KEYS_ONLY_NOTE])
+        if block is not None:
+            lines.append(block)
+        else:
+            # ``file_render`` が想定の ``<DATA>`` 形でない場合は従来どおり
+            # 素で並べる (包装できないだけで情報は落とさない)。
+            lines.extend(key_lines)
+            lines.append(_KEYS_ONLY_NOTE)
         _append_project_root_caveat(lines, render_status, resolved_base)
     else:
         _append_minimal_info(lines, file_render, render_status, resolved_base)
@@ -705,16 +793,30 @@ def _bash_deny_search(
             nomatched = [name for name in grep_keys if name not in keys_by_name]
             if matched:
                 used_pattern_keys = True
-                lines.append(f"matched_pattern_keys: [{', '.join(matched)}]")
+                lines.append(
+                    f"matched_pattern_keys: {_format_pattern_key_list(matched)}"
+                )
                 lines.append("result:")
-                for name in matched:
-                    lines.append(_format_dotenv_key_line(keys_by_name[name]))
+                # 0.32.0: 明細行を ``<DATA>`` ブロックに包み、予算超過時に
+                # 0.26.0 の折り畳み経路へ乗せる (包めなければ従来どおり素で
+                # 並べる)。免責 note は header 2 行目 (``NOTE: ... Real values
+                # are NOT in context.``) が担うので別に足さない。
+                match_lines = [
+                    _format_dotenv_key_line(keys_by_name[name]) for name in matched
+                ]
+                block = _rewrap_data_block(file_render, match_lines)
+                if block is not None:
+                    lines.append(block)
+                else:
+                    lines.extend(match_lines)
             if nomatched:
                 used_pattern_keys = True
-                lines.append(f"nomatch_pattern_keys: [{', '.join(nomatched)}]")
+                lines.append(
+                    f"nomatch_pattern_keys: {_format_pattern_key_list(nomatched)}"
+                )
         else:
             used_pattern_keys = True
-            lines.append(f"pattern_keys: [{', '.join(grep_keys)}]")
+            lines.append(f"pattern_keys: {_format_pattern_key_list(grep_keys)}")
 
     # 0.16.0: ``pattern_keys:`` のエコー (dotenv parse なしで grep pattern を
     # 返しただけ) は実情報ゼロなので、``used_pattern_keys`` が True でも
