@@ -503,7 +503,10 @@ hook は合成 stdin で直接起動できるので `/plugin` 更新なしで手
 
 ## 発火しないときの確認手順
 
-1. `which cursor` — 未インストールなら no-op 終了が期待動作
+1. `which cursor-agent; which agent; which cursor` — この順に検出する (0.11.0)。
+   どれも無ければ no-op 終了が期待動作。検出結果は
+   `$TMPDIR/external-ai-assist/cursorcli.json` に TTL 付きでキャッシュされる
+   (`EXTERNAL_AI_CURSOR_COMMAND` で固定できる。詳細は `hooks/_common/cursorcli.py`)
 2. `env | grep EXTERNAL_AI_POST_REVIEW` — `0` で無効化されていないか
 3. `cat $TMPDIR/post-implementation-review/state/<session_id>.json` —
    `pending` が空なら「このセッションはこのターンで何も編集していない」が正しい判定

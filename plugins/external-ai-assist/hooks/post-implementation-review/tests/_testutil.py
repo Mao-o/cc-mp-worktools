@@ -129,6 +129,9 @@ class HookTestCase(unittest.TestCase):
         pinned = {
             "EXTERNAL_AI_POST_REVIEW": "1",
             "EXTERNAL_AI_POST_REVIEW_BASH_TRACKING": "1",
+            # cursor の実体を固定する (0.11.0 の検出は `cursor-agent` / `agent` も見る
+            # ため、固定しないと開発機に入っている本物を掴んで `--version` を起動しうる)
+            "EXTERNAL_AI_CURSOR_COMMAND": "cursor",
             **NEUTRAL_EXCLUSION_ENV,
         }
         self._env = mock.patch.dict(

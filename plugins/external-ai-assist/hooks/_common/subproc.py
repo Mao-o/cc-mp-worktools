@@ -61,6 +61,7 @@ def run_captured(
     timeout_sec: float,
     input_text: str | None = None,
     cwd: str | None = None,
+    kill_grace_sec: float | None = None,
 ) -> subprocess.CompletedProcess | None:
     """argv を独自 process group で起動し、stdout / stderr を回収して返す。
 
@@ -68,6 +69,11 @@ def run_captured(
     孫プロセスが握っていた pipe の残出力も読み捨ててから返る。
     stdin は `input_text` があればそれを渡し、無ければ /dev/null
     (hook 自身の stdin = payload の pipe を子に継承させない)。
+
+    `kill_grace_sec` は停止時の SIGTERM → SIGKILL の猶予 (既定 `KILL_GRACE_SEC` = 5 秒)。
+    **短い hook timeout の中で回す軽い probe では明示的に縮める** — レビュー用の長時間
+    CLI と違い、`--version` のような probe が応答しない時点でその CLI は使わないので、
+    行儀よく終わるのを待つ価値がない (`cursorcli._probe`)。
     """
     try:
         proc = subprocess.Popen(
@@ -86,15 +92,15 @@ def run_captured(
     try:
         stdout, stderr = proc.communicate(input=input_text, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
-        kill_process_group(proc, own_group=True)
+        kill_process_group(proc, kill_grace_sec, own_group=True)
         return None
     except BaseException:
-        kill_process_group(proc, own_group=True)
+        kill_process_group(proc, kill_grace_sec, own_group=True)
         raise
     # 正常終了後もグループに生きたメンバー (CLI が残した background helper 等) が居れば止める。
     # 通常は probe 1 回 (ESRCH) で済む
     if _group_state(proc.pid) in ("live", "unknown"):
-        kill_process_group(proc, own_group=True)
+        kill_process_group(proc, kill_grace_sec, own_group=True)
     return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
 
 

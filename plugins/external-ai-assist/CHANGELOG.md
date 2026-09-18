@@ -100,6 +100,51 @@ cursor agent が同時に走り (CPU・Cursor の利用量)、`additionalContext
 テスト: `tests/test_concurrency_limit.py` (14 件)。実装行を壊す mutation 6 通りで先に
 落ちることを確認した。
 
+### 3 hook 共通: cursor CLI の検出を `which(cursor)` 一本から改めた
+
+0.10.0 までは `shutil.which("cursor")` だけで存在確認していた。`cursor` という名前は
+環境によって指す実体が違う — Agent CLI 本体 (`cursor-agent`) / そこへ `exec` するシム /
+**Cursor.app が入れる IDE ランチャー** (VS Code 系の `code` 相当) のどれでもありうる。
+IDE ランチャーしか無い環境では `which` が当たるので、`cursor agent ...` を起動しては
+失敗するまで待つ (review 系 hook では最大 600 秒) ことになる。
+
+- **検出順は `cursor-agent` → `agent` → `cursor`**。曖昧さの無い名前から先に見る。
+  `cursor` を使う場合だけ `cursor agent ...` の形で起動する (`subcommand_for`)
+- 候補は `--version` で応答するかを確認してから採用する。**応答を確認できなかった
+  (timeout) 候補は失格にしない** — 起動の遅い本物 (node ベースの CLI は cold start に
+  数秒かかりうる) を切ってレビュー機能が黙って止まるほうが、0.10.0 までの「掴んでから
+  失敗を待つ」より悪い。応答が確認できた候補を優先し、どれも確認できなければ最初に
+  見つかった候補を使う (= 0.10.0 と同じ扱い)。明示的に失敗する候補 (非 0 終了 /
+  出力なし) だけを失格にする
+- 検出結果は `$TMPDIR/external-ai-assist/cursorcli.json` に TTL 付きでキャッシュする
+  (見つかった場合 1 時間 / 見つからない場合 5 分)。`is_available()` は編集ツールのたびに
+  呼ばれるので毎回 probe しない。記録した実体パスが `which` の結果と食い違ったら捨てて
+  測り直す。ファイルは 0o600 (共有 `$TMPDIR` 対策)
+- probe の予算は 1 回 1.5 秒 / 合計 3 秒。応答しない probe の後始末は
+  `kill_grace_sec` を 0.5 秒に縮めて行う (レビュー用 CLI 向けの既定 5 秒を probe に
+  そのまま使うと、短い hook timeout を後始末だけで食い潰す)。
+  `_common/subproc.run_captured` に `kill_grace_sec` を足した (既定は従来どおり)
+- **`EXTERNAL_AI_CURSOR_COMMAND`** (新規、3 hook 共通) に実体を設定すると検出と probe を
+  飛ばす。検出が環境に合わないときの逃げ道で、指定した実体が見つからない場合は検出へ
+  落ちず「cursor 無し」として扱う (利用者が指した実体と違うものを黙って使わない)
+- explore-parallel の PID 再利用ガードの署名を `--trust --print --mode plan` (フラグ列
+  のみ) に変えた。0.11.0 からは `cursor agent ...` と `cursor-agent ...` のどちらでも
+  起動しうるため、環境で変わる argv[0] / サブコマンドを署名に含めない
+
+**未実装 (実機確認が前提)**: IDE ランチャーと Agent CLI を**出力から**見分けること、および
+**未ログイン状態の検出**。`--version` はどちらの実体でも 0 で応答し、ログイン状態にも
+依存しないため見分けられない。`--help` の内容や失敗文言でのパターン判定は、実機の出力を
+確認せずに入れると正常な応答を誤検出してレビュー機能を黙って止めうるので採らなかった
+(検出順の変更だけで「両方が入っている環境で IDE ランチャーを掴む」ケースは解消する)。
+このリリースでは実機 (cursor のログイン状態を含む) での確認は行っていない。
+
+テスト: `hooks/_common/tests/test_cursorcli.py` (検出順 / 応答確認の 3 値 / キャッシュの
+TTL と無効化 / 固定指定 / argv 契約)。実装行を壊す mutation 11 通りのうち 10 通りで先に
+落ちることを確認した (残り 1 つは probe の kill 猶予で、TERM を無視するフィクスチャでも
+group が TERM で死ぬため経過時間に差が出ず落ちない — テストの docstring に明記した)。
+3 hook のテストは `EXTERNAL_AI_CURSOR_COMMAND` で実体を偽 CLI に固定する
+(固定しないと検出が開発機の本物の `cursor-agent` を掴んで `--version` を起動しうる)。
+
 ## 0.10.0
 
 **内部バックログの精査分 3 件 (explore-parallel の待機タイミング / 残骸の掃除、

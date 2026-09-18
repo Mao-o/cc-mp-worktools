@@ -32,10 +32,24 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
   なった。Windows では同一性を確認できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
   `os.kill(pid, 0)` は Windows では TerminateProcess になるため挙動が異なる。Windows
   での動作は引き続き未検証
-- `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
-  3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
+- **Cursor Agent CLI**: `explore-parallel` / `exitplan-review` / `post-implementation-review` の
+  全てで使う。3 hook とも読み取り専用 (`--mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
-  基づく。実機で書込が抑止されることは本 plugin 側では検証していない)
+  基づく。実機で書込が抑止されることは本 plugin 側では検証していない)。
+
+  実体の探し方は **`cursor-agent` → `agent` → `cursor` の順** (0.11.0)。`cursor` という名前は
+  環境によって Agent CLI 本体・そのシム・**Cursor.app が入れる IDE ランチャー**のどれでも
+  ありうるため、曖昧さの無い名前から先に見る。`cursor` を使う場合だけ `cursor agent ...` の
+  形で起動する。候補は `--version` で応答するかを確認してから採用し、結果は
+  `$TMPDIR/external-ai-assist/cursorcli.json` に TTL 付き (1 時間) でキャッシュする。
+  **応答を確認できなかった (timeout) 候補は失格にしない** — 起動の遅い本物を切って
+  レビューが黙って止まるほうが不利益が大きいため、応答を確認できた候補を優先しつつ、
+  どれも確認できなければ最初に見つかった候補を使う (0.10.0 と同じ挙動)。
+
+  `EXTERNAL_AI_CURSOR_COMMAND` に実体 (コマンド名か絶対パス) を設定すると検出を飛ばして
+  それを使う。検出が環境に合わないとき (IDE ランチャーしか無い環境で誤って掴む等) の
+  逃げ道。**IDE ランチャーと Agent CLI を出力から見分けることと、未ログイン状態の検出は
+  未実装** (どちらも実機の応答を確認してからでないと誤判定でレビューが黙って止まる)
 - `codex` CLI: `exitplan-review` の要件・アーキ観点担当
   (`codex exec -s read-only --ephemeral -`。プロンプトとプランは stdin 一本で渡す)
 
@@ -345,6 +359,12 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
 | `EXTERNAL_AI_EXPLORE_PARALLEL` | `1` | `explore-parallel` (0.6.0 で新設) |
 | `EXTERNAL_AI_PLAN_REVIEW` | `1` | `exitplan-review` (0.6.0 で新設) |
 | `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` |
+
+3 hook に共通する設定が 1 つある (hook 単位ではないので上の命名規則から外れる):
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_CURSOR_COMMAND` | 自動検出 | Cursor Agent CLI の実体 (コマンド名か絶対パス)。設定すると検出と `--version` の確認を飛ばす (0.11.0)。指定した実体が見つからない場合は検出へ落ちず「cursor 無し」として扱う |
 
 `0` / `false` / `off` / `no` が無効。全部止めるなら:
 

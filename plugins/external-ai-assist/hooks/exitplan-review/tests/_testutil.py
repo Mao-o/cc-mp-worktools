@@ -79,9 +79,12 @@ class HookTestCase(unittest.TestCase):
         base = self._tmp.name
         self.tmpdir = os.path.join(base, "tmp")
         os.makedirs(self.tmpdir, exist_ok=True)
-        self._env = mock.patch.dict(os.environ, {"TMPDIR": self.tmpdir})
+        # cursor の実体を固定する (0.11.0 の検出は `cursor-agent` / `agent` も見るため、
+        # 固定しないと開発機に入っている本物を掴んで `--version` を起動しうる)
+        pinned = {"EXTERNAL_AI_CURSOR_COMMAND": "cursor"}
+        self._env = mock.patch.dict(os.environ, {"TMPDIR": self.tmpdir, **pinned})
         self._env.start()
-        clear_plugin_env()
+        clear_plugin_env(keep=pinned)
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]

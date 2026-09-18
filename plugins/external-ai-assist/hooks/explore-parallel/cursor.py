@@ -63,15 +63,18 @@ _PS_TIMEOUT_SEC = 2.0
 
 log = hooklog.make_logger(f"explore-parallel/{NAME}")
 
-#: PID 再利用の検出に使う起動 argv の署名 (`agent --trust --print --mode plan`)。
-#: `readonly_argv` から導出するので、起動形が変わっても署名だけ古いまま取り残されない。
+#: PID 再利用の検出に使う起動 argv の署名 (`--trust --print --mode plan`)。
+#: `cursorcli.READONLY_FLAGS` から導出するので、起動形が変わっても署名だけ古いまま
+#: 取り残されない。
 #:
-#: **argv[0] (実行ファイル名) は照合しない**。`cursor` は実体へ `exec` するシムのことが
-#: あり、その場合 ps が返すのは実体側の名前 (`cursor-agent` 等) になる。引数は `exec
-#: "$REAL" "$@"` で保たれるので、名前ではなくフラグの組み合わせで見る。名前まで
-#: 要求すると「シム環境では一切 kill できない」= ガードではなく停止処理の無効化になる。
-#: 署名は argv の先頭側にあるため、ps が末尾を切り詰めても落ちない。
-_SIGNATURE_TOKENS = tuple(t for t in cursorcli.readonly_argv("")[1:] if t)
+#: **argv[0] (実行ファイル名) とサブコマンドは照合しない**。`cursor` は実体へ `exec`
+#: するシムのことがあり、その場合 ps が返すのは実体側の名前 (`cursor-agent` 等) になる。
+#: 0.11.0 からは検出結果によって `cursor agent ...` と `cursor-agent ...` のどちらでも
+#: 起動しうる (`cursorcli.subcommand_for`) ので、環境で変わらないフラグ列だけで見る。
+#: 引数は `exec "$REAL" "$@"` で保たれる。名前まで要求すると「シム環境では一切
+#: kill できない」= ガードではなく停止処理の無効化になる。署名は argv の先頭側にある
+#: ため、ps が末尾を切り詰めても落ちない。
+_SIGNATURE_TOKENS = cursorcli.READONLY_FLAGS
 
 #: プロセスの開始時刻が pid ファイルの mtime (= 起動時刻) より後に見えても許す幅 (秒)。
 #:

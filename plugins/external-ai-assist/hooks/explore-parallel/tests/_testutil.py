@@ -80,15 +80,20 @@ class HookTestCase(unittest.TestCase):
         self.bin = os.path.join(base, "bin")
         os.makedirs(self.tmpdir)
         os.makedirs(self.bin)
+        # cursor の実体を偽 CLI に固定する (0.11.0 の検出は `cursor-agent` / `agent` も
+        # 見るため、固定しないと開発機に入っている本物を掴んで `--version` を起動しうる
+        # — 外部 AI CLI を起動しないというテストの前提が崩れる)
+        pinned = {"EXTERNAL_AI_CURSOR_COMMAND": "cursor"}
         self._env = mock.patch.dict(
             os.environ,
             {
                 "TMPDIR": self.tmpdir,
                 "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
+                **pinned,
             },
         )
         self._env.start()
-        clear_plugin_env()
+        clear_plugin_env(keep=pinned)
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]
