@@ -132,7 +132,11 @@ def _run_git_nul(args: list[str], cwd: str) -> list[str]:
     ``git ls-files -z`` は non-ASCII / 特殊文字を含む path が
     ``core.quotePath`` によって 8 進エスケープの引用符付き文字列に変換される
     (改行区切りだと誤ってその形のまま 1 要素として返ってしまう) のを避ける
-    標準的な使い方 (``submodule_paths`` が使用)。
+    標準的な使い方 (``_ls_tracked`` / ``find_sensitive_files`` の untracked 列挙 /
+    ``submodule_paths`` が使用)。改行区切りの ``_run_git`` は ``rev-parse`` 系
+    にだけ残す — ``rev-parse`` の出力は ``core.quotePath`` の対象外 (実測: git
+    2.50.1) なので ``-z`` は不要。ただし ``--show-toplevel`` は path を返すため、
+    repo root のパスに改行を含む環境では誤 parse する既知の残課題がある。
     """
     result = _run_git_raw(args, cwd)
     if result is None or result.returncode != 0:
@@ -179,12 +183,17 @@ def _ls_tracked(cwd: str) -> list[str]:
     組み合わせるサポートが無いため範囲外 (README 既知制限)。
 
     必要 git バージョン: 1.7+ (``--recurse-submodules`` 対応)。
+
+    ``-z`` (NUL 区切り) で呼ぶ (0.30.0)。改行区切りだと git 既定の
+    ``core.quotePath=true`` により非 ASCII ファイル名が 8 進エスケープ +
+    二重引用符 (``"\\346\\227\\245...env"``) で返り、pattern 照合に一致せず
+    tracked な ``日本語.env`` を見逃していた (guard bypass、内部バックログ)。
     """
-    result = _run_git(["ls-files", "--recurse-submodules"], cwd)
+    result = _run_git_nul(["ls-files", "-z", "--recurse-submodules"], cwd)
     if result:
         return result
     # fallback: --recurse-submodules 非対応の古い git、または repo が本当に空の場合
-    return _run_git(["ls-files"], cwd)
+    return _run_git_nul(["ls-files", "-z"], cwd)
 
 
 def submodule_paths(
@@ -334,7 +343,8 @@ def find_sensitive_files(
         return []
 
     tracked = _ls_tracked(cwd)
-    untracked = _run_git(["ls-files", "--others", "--exclude-standard"], cwd)
+    # ``-z``: tracked 側と同じ quotePath 対策 (非 ASCII / 空白入り名を素で受ける)
+    untracked = _run_git_nul(["ls-files", "-z", "--others", "--exclude-standard"], cwd)
 
     offset = root_offset(cwd, root)
     match_root = root if offset is not None else None

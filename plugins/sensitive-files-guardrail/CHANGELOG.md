@@ -20,6 +20,50 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.30.0
+
+Stop hook (check-sensitive-files) の検出漏れ 1 件と無音 fail-open 1 件を修正
+(内部バックログ 3 件)。**判定境界の変化: あり** — いずれも「検出されなかった
+ものが検出される / 見えなかった失敗が見える」方向のみで、allow → block に
+倒れる新規条件は無い。**利用者影響**: 非 ASCII 名の機密ファイル (`鍵.pem` /
+`日本語/.env` 等) を持つ既存 repo では、0.30.0 から今まで出なかった Stop の
+block が出始める。テスト件数: check 135 → **146**。
+
+### 非 ASCII / 空白入りファイル名の検出漏れ (guard bypass)
+
+- `git ls-files` を改行区切りで呼んでいたため、git 既定の
+  `core.quotePath=true` では非 ASCII ファイル名が 8 進エスケープ + 二重引用符
+  (`"\346\227\245..."`) で返り、pattern 照合に一致せず **tracked /
+  untracked いずれの `鍵.pem` / `日本語/.env` も検出されなかった**。tracked と
+  untracked の両列挙を `-z` (NUL 区切り) に切り替え、素の名前を受ける。空白や
+  二重引用符を含む名前 (`my "secret".pem`) も同じ経路で直る
+- `_run_git` (改行区切り) は path を返さない `rev-parse` 系にだけ残す
+
+### 想定外の例外を「可視の fail-open」に
+
+- `main()` に top-level の `try/except` が無く、想定外の例外 (0.27.0 で直した
+  ASCII stdout の `UnicodeEncodeError` がその一例) は traceback + exit 1 で判定
+  JSON が 1 byte も出ない無音の fail-open だった。redact-sensitive-reads 側の
+  `except Exception → ask_or_deny` (fail-closed) とは非対称
+- 採った方針: **block はしないが必ず見せる**。Stop hook の block は「機密ファイル
+  を残したまま止まるな」という差し戻しで、内部エラーで毎ターン差し戻すと利用者は
+  原因を直せないまま作業を止められる。この hook の既存方針
+  (`patterns_unavailable` / `git_unavailable` は stderr + exit 0) に揃え、stderr
+  へ `internal_error: <ExcName>` 1 行 + stdout の `systemMessage` で「このターンは
+  検査されていない」と明示する。例外の種別だけを出し、メッセージ本文 (path を
+  含みうる) は出さない
+- ただし **block 出力の開始後に失敗した場合** (0.27.0 の動機ケース = stdout
+  書込み失敗) と `systemMessage` 自体が書けない場合は **exit 1** で終える
+  (マージ前レビューの指摘)。exit 0 + 空 stdout は hook の正常形で stderr も
+  debug log 止まりのため完全無音になるが、exit 1 ならハーネスが transcript に
+  notice + stderr 1 行目を出す。部分出力の後ろに JSON を追記して invalid JSON
+  にすることもしない
+- stop-ack の保存を block の**送出成功後**に移した (マージ前レビューの指摘)。
+  先に保存すると、送出に失敗したターンでも digest が ack 済みになり、同一
+  session では以降一切 block が出なくなっていた (0.19.0 からの潜在不具合)
+- 判定表 (`docs/MATRIX.md` / `docs/DESIGN.md` / README) に「handler 内未捕捉
+  例外」行を追加。`git rev-parse --show-toplevel` を改行区切りで読む既知の残課題
+  (repo root パスに改行) を README 既知制限に追記
 ## 0.29.1
 
 内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`

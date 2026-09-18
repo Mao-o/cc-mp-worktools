@@ -10,7 +10,7 @@
 
 1. **Fail-closed in doubt** — read 側の内部失敗は `ask` (bypass モード時は `deny`)
    にフォールバック。Stop 側は応答停止を招かないため fail-open (stderr warning +
-   空出力)。
+   空出力。内部例外時は `systemMessage` で「検査されていない」ことを通知、0.30.0)。
 2. **値そのものは出さない、デバッグ情報は積極的に返す** (0.9.0 で Read 側を
    拡張、0.10.0 で Bash 側にも適用) — minimal info の核は鍵名・順序・型・
    件数だが、思想 2 (block 時は意図を汲んだメッセージを返す) を満たすため、
@@ -23,8 +23,10 @@
    LLM の文脈に入れない原則は維持。
 3. **Secrets never in logs** — path・値・展開後情報を一切記録しない。
 4. **Latency <100ms 目標** — timeout 2 秒、文字列処理のみ、外部コマンド呼出なし。
-5. **情報注入は `permissionDecisionReason` 一択** — `systemMessage` 非依存
-   (後述 Phase 0 実測参照)。
+5. **モデルへの情報注入は `permissionDecisionReason` 一択** — `systemMessage` は
+   モデルに届かない (後述 Phase 0 実測参照)。ユーザー通知用途 (Stop hook の
+   内部エラー、0.30.0) には使う (公式 docs では "Warning message shown to the
+   user"。Stop での配信は実測未了)。
 
 ## Phase 0 実測結果
 
@@ -1056,6 +1058,7 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 | 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` 無し / 不正なら従来通り block) |
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知、報告済み集合を更新) |
 | patterns.txt 読込失敗 (FileNotFoundError / OSError) | exit 0 + stderr warning (fail-open) |
+| handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
 
 #### session 単位の once-only (0.19.0)
 

@@ -194,6 +194,144 @@ class TestMainFailOpen(BaseMainTest):
         self.assertIn("patterns_unavailable", err)
 
 
+class TestMainInternalError(BaseMainTest):
+    """想定外の例外は「可視の fail-open」に倒す (0.30.0、内部バックログ)。
+
+    以前は top-level の try/except が無く、traceback + exit 1 で判定 JSON が
+    1 byte も出ない無音の fail-open だった。exit 0 + stderr の
+    ``internal_error:<ExcName>`` + stdout の ``systemMessage`` を固定する。
+    ``systemMessage`` は block ではない (Stop は通る) が、「このターンは検査
+    されていない」ことをユーザーに見せる。
+    """
+
+    def _run_with_broken_build_reason(self, exc: Exception) -> tuple[int, str, str]:
+        (self.repo / ".env").write_text("KEY=v\n")
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "_build_reason", side_effect=exc):
+                rc = entry.main()
+            return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_unexpected_exception_exits_zero_with_system_message(self):
+        rc, out, err = self._run_with_broken_build_reason(RuntimeError("boom /secret/path"))
+        self.assertEqual(rc, 0)
+        self.assertIn("internal_error: RuntimeError", err)
+        payload = json.loads(out)
+        self.assertNotIn("decision", payload)  # block ではない
+        self.assertIn("RuntimeError", payload["systemMessage"])
+        self.assertIn("検査が行われていません", payload["systemMessage"])
+
+    def test_exception_message_body_is_not_disclosed(self):
+        """例外のメッセージ本文 (path を含みうる) は stderr にも stdout にも出さない。"""
+        rc, out, err = self._run_with_broken_build_reason(ValueError("boom /secret/path"))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("/secret/path", err)
+        self.assertNotIn("/secret/path", out)
+
+    def _run_with_broken_stdout(self, envelope: dict, exc: Exception,
+                                *, partial: str = "") -> tuple[int, str, str]:
+        """block 出力の ``write_stdout`` が失敗する状況を注入する。
+
+        ``partial`` を与えると、失敗前にその文字列だけ stdout に書けた
+        (部分書込み) 状態を再現する。
+        """
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        calls = {"n": 0}
+
+        def broken_write(text: str) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                if partial:
+                    sys.stdout.write(partial)
+                raise exc
+            sys.stdout.write(text)
+
+        try:
+            sys.stdin = io.StringIO(json.dumps(envelope))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "write_stdout", broken_write):
+                rc = entry.main()
+            return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_block_write_failure_exits_nonzero_without_second_json(self):
+        """block 出力の write が失敗 (0.27.0 の動機ケース) → exit 1、JSON 追記なし。
+
+        exit 0 + 空 stdout は hook の正常形で stderr も debug log 止まりなので
+        完全無音になる。exit 1 ならハーネスが notice + stderr 1 行目
+        (``internal_error:`` 行) を出す。block 出力は開始済み扱いなので
+        systemMessage は追記しない (部分書込みとの連結で invalid JSON になる)。
+        """
+        (self.repo / ".env").write_text("KEY=v\n")
+        rc, out, err = self._run_with_broken_stdout(
+            {"cwd": str(self.repo)}, OSError("stdout closed")
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("internal_error: OSError", err)
+
+    def test_partial_block_write_is_not_followed_by_system_message(self):
+        (self.repo / ".env").write_text("KEY=v\n")
+        rc, out, err = self._run_with_broken_stdout(
+            {"cwd": str(self.repo)}, OSError("pipe"), partial='{"decision": "bl'
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, '{"decision": "bl')  # 追記なし (連結 JSON にならない)
+        self.assertIn("internal_error: OSError", err)
+
+    def test_failed_emit_does_not_ack_the_session(self):
+        """送出に失敗したターンは ack しない → 次ターンで再 block (順序の回帰)。
+
+        ack を先に保存していると、同一 session の次ターンで ``digests <= acked``
+        により早期 return し、以降そのセッションでは一切 block が出なくなる。
+        """
+        (self.repo / ".env").write_text("KEY=v\n")
+        env = {"cwd": str(self.repo), "session_id": "sess-emit-fail"}
+        rc1, out1, _ = self._run_with_broken_stdout(env, OSError("stdout closed"))
+        self.assertEqual((rc1, out1), (1, ""))
+        rc2, out2, err2 = _run_main(env)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(json.loads(out2)["decision"], "block")
+        self.assertNotIn("internal_error", err2)
+
+    def test_system_message_write_failure_exits_nonzero(self):
+        """systemMessage 自体も書けない (stdout 完全故障) なら exit 1 (無音回避)。"""
+        (self.repo / ".env").write_text("KEY=v\n")
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "_build_reason", side_effect=RuntimeError("x")), \
+                 mock.patch.object(entry, "write_stdout", side_effect=OSError("closed")):
+                rc = entry.main()
+            out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("internal_error: RuntimeError", err)
+
+    def test_normal_path_is_unchanged(self):
+        """包んだだけで通常の block 出力は変わらない (回帰)。"""
+        (self.repo / ".env").write_text("KEY=v\n")
+        rc, out, err = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["decision"], "block")
+        self.assertNotIn("internal_error", err)
+
+
 class TestSubmoduleGuidance(BaseMainTest):
     """内部バックログ: submodule 内 tracked ファイルに対する案内分岐。
 

@@ -442,6 +442,10 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
    補うには Claude Code 本体の `permissions.deny` に `Read(<path>)` ルールを
    追加する (公式仕様上 best-effort で Grep / Glob にも適用される。
    `Glob(...)` という形の path rule は認識されず無視されるため注意)
+7. **repo root のパスに改行を含む場合** — Stop hook の `git rev-parse
+   --show-toplevel --show-prefix` を改行区切りで読むため toplevel / prefix が
+   誤 parse され、stop-ack の digest が別ファイルと衝突しうる (0.30.0 時点の既知
+   の残課題。ファイル名側は `-z` で対応済み)
 
 ## Fail-closed vs fail-open
 
@@ -451,7 +455,7 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 | `redact-sensitive-reads` (Edit/Write) | **deny 固定** | **ask_or_deny** | ask を挟まない |
 | `redact-sensitive-reads` (Bash) | **deny 固定** | **ask_or_allow** | default/acceptEdits/dontAsk は ask、auto/bypass は **allow** |
 | `redact-sensitive-reads` (Bash, patterns.txt 読込失敗) | — | **deny 固定** | policy 欠如時は全 mode block |
-| `check-sensitive-files` (Stop) | `decision: block` | **fail-open** (exit 0 + 空出力) | patterns.txt 読込失敗時は stderr warning のみ |
+| `check-sensitive-files` (Stop) | `decision: block` | **fail-open** (exit 0。内部例外時は `systemMessage` で通知) | patterns.txt 読込失敗時は stderr warning のみ |
 
 ## 設計上のトレードオフ
 
