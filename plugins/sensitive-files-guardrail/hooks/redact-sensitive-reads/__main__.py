@@ -171,14 +171,29 @@ def main(argv: list[str] | None = None) -> int:
         _emit(output.make_deny(reason))
         return 0
 
+    # 0.32.0 (内部バックログ): 判定が確定するまで INFO をバッファし、最終判定に
+    # 応じて出すか決める (``SFG_LOG_LEVEL`` で allow 経路の INFO を抑制可能に
+    # するため)。「この log 呼出は allow 経路か」は呼出時点では決まらない —
+    # ``ask_or_allow`` の結果は runtime の ``permission_mode`` 依存で、同一
+    # コマンド内の後続 segment の deny が先行の ask/allow を上書きする。
+    # ここ (全 tool 共通の dispatch 境界) に置くことで bash 以外の handler も
+    # 同じ扱いになり、「後続 deny が先行 allow を上書き」も 1 回の flush で
+    # 正しく leveling される。
+    L.begin_deferred()
+    decision: str | None = None
     try:
-        response = _dispatch(args.tool, envelope)
-    except Exception as e:
-        L.log_error("handler_exception", f"{args.tool}:{type(e).__name__}")
-        response = output.ask_or_deny(
-            M.handler_internal_error(args.tool, type(e).__name__),
-            envelope,
-        )
+        try:
+            response = _dispatch(args.tool, envelope)
+        except Exception as e:
+            L.log_error("handler_exception", f"{args.tool}:{type(e).__name__}")
+            response = output.ask_or_deny(
+                M.handler_internal_error(args.tool, type(e).__name__),
+                envelope,
+            )
+        decision = output.decision_of(response)
+    finally:
+        # flush を落とすとバッファごとログが消えるので必ず通す。
+        L.flush_deferred(decision)
 
     _emit(response)
     return 0

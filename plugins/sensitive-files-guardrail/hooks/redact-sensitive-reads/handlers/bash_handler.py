@@ -725,8 +725,12 @@ def _analyze_segment(
 
 
 def _decision_of(result: dict) -> str | None:
-    hook = result.get("hookSpecificOutput") or {}
-    return hook.get("permissionDecision")
+    """segment 判定の ``permissionDecision`` (allow は ``None``)。
+
+    0.32.0 で実体を ``core.output.decision_of`` に寄せた (遅延ログの leveling が
+    同じ判定を必要としたため、同じ規約の実装が 2 つ並ぶのを避ける)。
+    """
+    return output.decision_of(result)
 
 
 # deny reason 内で placeholder を読者向けに置き換える表示 (0.25.0)。

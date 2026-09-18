@@ -204,6 +204,136 @@ class TestLogPathOverride(unittest.TestCase):
         self.assertIn("SFG_LOG_PATH", os.environ)
 
 
+class TestLogLevelResolution(unittest.TestCase):
+    """``SFG_LOG_LEVEL`` の解決 (0.32.0、内部バックログ)。"""
+
+    def test_known_names_case_insensitive(self):
+        for raw, expected in (
+            ("DEBUG", 10),
+            ("info", 20),
+            ("Warning", 30),
+            ("warn", 30),
+            (" ERROR ", 40),
+        ):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(os.environ, {"SFG_LOG_LEVEL": raw}):
+                    self.assertEqual(L._resolve_log_level(), expected)
+
+    def test_unset_and_invalid_fall_back_to_info(self):
+        """typo でログが黙って消えるより「多すぎる」方に倒す。"""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SFG_LOG_LEVEL", None)
+            self.assertEqual(L._resolve_log_level(), L._LEVEL_INFO)
+        for bogus in ("", "VERBOSE", "30", "none"):
+            with self.subTest(raw=bogus):
+                with mock.patch.dict(os.environ, {"SFG_LOG_LEVEL": bogus}):
+                    self.assertEqual(L._resolve_log_level(), L._LEVEL_INFO)
+
+
+class TestDeferredLogging(unittest.TestCase):
+    """判定確定後の遅延 emit (0.32.0、内部バックログ)。
+
+    ``redact-hook.log`` は Bash 呼出のたびに allow 経路でも INFO を書いており
+    (実測 7.3MB / 12 万行)、0.27.0 のローテーションでは量そのものが減らなかった。
+    「この log 呼出は allow 経路か」は呼出時点では決まらない (``ask_or_allow`` の
+    結果は runtime の ``permission_mode`` 依存で、同一コマンド内の後続 deny が
+    先行の ask/allow を上書きする) ため、判定確定まで buffer して最終判定で
+    leveling する。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        p = mock.patch.object(
+            L, "LOG_PATH", Path(self.tmp) / "redact-hook.log"
+        )
+        p.start()
+        self.addCleanup(p.stop)
+        # テストが遅延状態を残さない (次のテストへ漏らさない)
+        self.addCleanup(lambda: L.flush_deferred(None))
+
+    def _read_log(self) -> str:
+        return L.LOG_PATH.read_text() if L.LOG_PATH.exists() else ""
+
+    def test_default_level_keeps_allow_path_info(self):
+        """既定 (INFO) では従来どおり allow 経路の INFO も出る = 挙動不変。"""
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_INFO):
+            L.begin_deferred()
+            L.log_info("bash_classify", "metadata_only_allow:ls")
+            self.assertEqual(self._read_log(), "", "flush 前に書いている")
+            L.flush_deferred(None)
+        self.assertIn("metadata_only_allow:ls", self._read_log())
+
+    def test_warning_level_drops_allow_path_info(self):
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_WARNING):
+            L.begin_deferred()
+            L.log_info("bash_classify", "metadata_only_allow:ls")
+            L.flush_deferred(None)
+        self.assertEqual(self._read_log(), "")
+
+    def test_warning_level_keeps_deny_and_ask_info(self):
+        """deny / ask 経路の診断は level を上げても必ず残す。"""
+        for decision in ("deny", "ask"):
+            with self.subTest(decision=decision):
+                L.LOG_PATH.unlink(missing_ok=True)
+                with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_WARNING):
+                    L.begin_deferred()
+                    L.log_info("bash_classify", f"match_{decision}")
+                    L.flush_deferred(decision)
+                self.assertIn(f"match_{decision}", self._read_log())
+
+    def test_later_deny_keeps_earlier_allow_diagnostics(self):
+        """同一コマンド内で後続 deny が先行 allow を上書きするケース。
+
+        1 回の flush で最終判定 (deny) に揃うので、先行 segment の allow 系
+        分類ラベルも残る (「どの segment で何が起きたか」が deny の診断に必要)。
+        """
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_WARNING):
+            L.begin_deferred()
+            L.log_info("bash_classify", "metadata_only_allow:ls")
+            L.log_info("bash_classify", "match:cat")
+            L.flush_deferred("deny")
+        log = self._read_log()
+        self.assertIn("metadata_only_allow:ls", log)
+        self.assertIn("match:cat", log)
+
+    def test_error_always_written_and_drains_pending_in_order(self):
+        """error は level に関わらず必ず書き、bufferを先に吐いて順序を保つ。"""
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVELS["ERROR"]):
+            L.begin_deferred()
+            L.log_info("bash_classify", "first_info")
+            L.log_error("patterns_unavailable", "OSError")
+            L.log_info("bash_classify", "later_info")
+            L.flush_deferred(None)
+        log = self._read_log()
+        self.assertIn("first_info", log)
+        self.assertIn("patterns_unavailable", log)
+        self.assertLess(log.index("first_info"), log.index("patterns_unavailable"))
+        # error の後に積んだ INFO は allow 判定 + level=ERROR なので落ちる
+        self.assertNotIn("later_info", log)
+
+    def test_non_deferred_info_respects_level(self):
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_WARNING):
+            L.log_info("classify", "regular")
+        self.assertEqual(self._read_log(), "")
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_INFO):
+            L.log_info("classify", "regular")
+        self.assertIn("regular", self._read_log())
+
+    def test_flush_without_begin_is_a_noop(self):
+        L.flush_deferred(None)
+        L.flush_deferred("deny")
+        self.assertEqual(self._read_log(), "")
+
+    def test_label_stays_info_so_existing_greps_keep_working(self):
+        """行の label は ``INFO `` のまま (有効レベルは内部概念)。"""
+        with mock.patch.object(L, "LOG_LEVEL", L._LEVEL_WARNING):
+            L.begin_deferred()
+            L.log_info("bash_classify", "match:cat")
+            L.flush_deferred("deny")
+        self.assertRegex(self._read_log(), r"INFO  bash_classify match:cat")
+
+
 class TestLogRotation(unittest.TestCase):
     """ログファイルの 1 世代ローテーション (内部バックログ)。"""
 

@@ -713,6 +713,78 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         self.assertNotIn(str(self.repo), reason)
 
 
+class TestE2ELogLevelSuppressesAllowPathInfo(unittest.TestCase):
+    """0.32.0 (内部バックログ): ``SFG_LOG_LEVEL=WARNING`` で allow 経路の INFO が
+    落ち、deny / ask 経路の診断は残ること (``main`` 経由の実配線)。
+
+    ``redact-hook.log`` は Bash 呼出のたびに allow 経路でも INFO を書いており
+    (実測 7.3MB / 12 万行)、0.27.0 のローテーションでは量が減らなかった。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.log = Path(self.tmp) / "redact-hook.log"
+        p = mock.patch.object(entry.L, "LOG_PATH", self.log)
+        p.start()
+        self.addCleanup(p.stop)
+        (Path(self.tmp) / ".env").write_text("SECRET_TOKEN=abcdef123456\n")
+
+    def _run_bash(self, command: str, level: int) -> tuple[dict, str]:
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        self.log.unlink(missing_ok=True)
+        with mock.patch.object(entry.L, "LOG_LEVEL", level):
+            result = _run_main(envelope, ["--tool", "bash"])
+        return result, (self.log.read_text() if self.log.exists() else "")
+
+    def test_allow_only_command_writes_nothing_at_warning(self):
+        result, log = self._run_bash("ls -la", entry.L._LEVEL_WARNING)
+        self.assertEqual(result, {})
+        self.assertEqual(log, "", f"allow 経路の INFO が残っている: {log!r}")
+
+    def test_allow_only_command_still_logs_at_default_level(self):
+        """既定 (INFO) では従来どおり記録される = 既定の挙動は不変。"""
+        result, log = self._run_bash("ls -la", entry.L._LEVEL_INFO)
+        self.assertEqual(result, {})
+        self.assertIn("bash_classify", log)
+
+    def test_deny_command_keeps_diagnostics_at_warning(self):
+        result, log = self._run_bash("cat .env", entry.L._LEVEL_WARNING)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn("bash_classify", log)
+        self.assertIn("match:cat", log)
+
+    def test_ask_command_keeps_diagnostics_at_warning(self):
+        result, log = self._run_bash("echo $HOME", entry.L._LEVEL_WARNING)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "ask"
+        )
+        self.assertIn("bash_classify", log)
+
+    def test_later_deny_keeps_earlier_allow_diagnostics_at_warning(self):
+        """同一コマンド内で後続 deny が先行 allow を上書きするケース。"""
+        result, log = self._run_bash("ls -la && cat .env", entry.L._LEVEL_WARNING)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn("metadata_only_allow:ls", log)
+        self.assertIn("match:cat", log)
+
+    def test_log_lines_carry_no_paths_or_values(self):
+        """遅延化でログ規則 (path / 値 / basename を出さない) が崩れていない。"""
+        _result, log = self._run_bash("cat .env", entry.L._LEVEL_INFO)
+        self.assertNotIn(self.tmp, log)
+        self.assertNotIn("abcdef123456", log)
+        self.assertNotIn("SECRET_TOKEN", log)
+
+
 class TestE2EDotenvInfoPathsKeepVerdictAndEnvelope(unittest.TestCase):
     """0.32.0 (内部バックログ): ``read_partial`` / ``search`` の折り畳み配線が
     **判定を変えていない**ことを 5 mode で固定する。

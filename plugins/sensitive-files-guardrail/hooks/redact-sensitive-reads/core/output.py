@@ -152,6 +152,27 @@ def is_allow(response: HookResponse | dict) -> bool:
     return decision not in ("deny", "ask")
 
 
+def decision_of(response: HookResponse | dict) -> str | None:
+    """response の ``permissionDecision`` を返す (allow は ``None``、0.32.0)。
+
+    ``is_allow`` と同じ判定規約 (``"deny"`` / ``"ask"`` 以外は allow) を、
+    「どちらだったか」を知りたい呼出向けに 1 箇所で持つ。遅延ログの
+    leveling (``core.logging.flush_deferred``) と ``handlers.bash_handler``
+    の segment 集約が使う。
+    """
+    if not isinstance(response, dict):
+        # allow と誤認しないため deny 扱いの文字列は返さず、判定不能を
+        # 表す ``None`` ではなく明示的に ``"deny"`` にはしない —
+        # ``is_allow`` は False を返す形なので、ここも保守的に非 allow 側
+        # (= 診断ログを残す側) に寄せる。
+        return "deny"
+    hook = response.get("hookSpecificOutput")
+    if not isinstance(hook, dict):
+        return None
+    decision = hook.get("permissionDecision")
+    return decision if decision in ("deny", "ask") else None
+
+
 def ask_or_deny(reason: str, envelope: dict) -> HookResponse:
     """bypass モードでは ask が自動 allow されるため deny にフォールバック。
 

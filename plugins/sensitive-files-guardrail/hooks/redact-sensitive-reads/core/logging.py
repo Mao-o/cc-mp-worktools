@@ -20,6 +20,13 @@ sanitize 対象外。
 ままなので、``mock.patch.object(L, "LOG_PATH", ...)`` による個別テストの差し替え
 (``tests/test_logging.py``) は影響を受けない。
 
+0.32.0 (内部バックログ): ログ量そのものへの対策として、``begin_deferred`` /
+``flush_deferred`` による **判定確定後の遅延 emit** と ``SFG_LOG_LEVEL``
+(``LOG_LEVEL``) を追加した。``SFG_LOG_LEVEL=WARNING`` にすると「最終判定が
+allow だった呼出の INFO」だけが落ち、deny / ask 経路の診断と ERROR は残る。
+**既定 (未設定) は INFO なので挙動は従来と完全に同一** (量対策は opt-in)。
+詳細は ``_resolve_log_level`` / ``flush_deferred`` の docstring。
+
 同じく 0.27.0 (内部バックログ): ログの無制限増加を防ぐ 1 世代ローテーションを
 追加した (``MAX_LOG_BYTES`` / ``_rotate_if_needed``)。ローテーションは
 サイドカー lock ファイル (``<log>.lock``) の ``flock`` で**プロセス間 直列化**
@@ -56,6 +63,84 @@ def _resolve_log_path() -> Path:
 
 
 LOG_PATH = _resolve_log_path()
+
+
+# ---- ログレベルと遅延 emit (0.32.0、内部バックログ) ----------------------
+#
+# 動機: ``redact-hook.log`` は Bash 呼出のたびに **allow 経路でも** INFO を
+# 書く (実測 7.3MB / 12 万行)。0.27.0 で 5MB / 1 世代のローテーションを入れたが、
+# 量そのものは減っていない。
+#
+# 「allow 経路の INFO を落とす」を log 呼出の時点では判定できない: ``ask_or_allow``
+# の結果は runtime の ``permission_mode`` に依存し、同一コマンド内で後続 segment の
+# deny が先行の ask/allow を上書きするため、「この log 呼出は allow 経路か」が
+# 静的に決まらない。そこで **判定確定までバッファし、最終判定に応じて出すか
+# 決める**。
+#
+# 有効レベルの決め方 (バッファされた INFO record):
+# - 最終判定が allow  → INFO 相当
+# - 最終判定が deny / ask → WARNING 相当 (deny / ask の診断は必ず残す)
+#
+# ``LOG_LEVEL`` (= ``SFG_LOG_LEVEL``) はその閾値。**既定は INFO なので挙動は
+# 従来と完全に同一** (量対策は opt-in)。既定を変えなかったのは、分類分布の
+# 計測 (``bash_classify`` の集計) が既にこのログを前提にしているため。
+#
+# **行の label は ``INFO `` のまま**にしてある (既存の grep / 集計を壊さない)。
+# 「有効レベル」は出すか出さないかの判断にだけ使う内部概念。
+_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "WARNING": 30, "ERROR": 40}
+_LEVEL_INFO = _LEVELS["INFO"]
+_LEVEL_WARNING = _LEVELS["WARNING"]
+_DEFAULT_LEVEL = _LEVEL_INFO
+
+
+def _resolve_log_level() -> int:
+    """``SFG_LOG_LEVEL`` を数値レベルに解決する (未設定 / 不正値は INFO)。
+
+    不正値で INFO (= 従来挙動) に倒すのは、typo で**ログが黙って消える**より
+    「多すぎる」方が安全なため。``LOG_PATH`` と同じく import 時に 1 回解決し、
+    モジュール属性として残す (``mock.patch.object(L, "LOG_LEVEL", ...)`` で
+    テストから差し替えられる)。
+    """
+    raw = os.environ.get("SFG_LOG_LEVEL", "")
+    return _LEVELS.get(raw.strip().upper(), _DEFAULT_LEVEL)
+
+
+LOG_LEVEL = _resolve_log_level()
+
+# 遅延バッファ。``None`` = 遅延無効 (即時書込 = 従来動作)。``list`` = 遅延中。
+# hook はシングルスレッドの短命プロセスなのでモジュール変数で足りる。
+# 関数を差し替える方式にしないのは、``handlers.bash_handler._muted_logging``
+# が ``L.log_info`` / ``L.log_error`` を属性ごと保存・復元するため
+# (両方が関数差し替えだと入れ子で取り違える)。
+_pending: list[str] | None = None
+
+
+def begin_deferred() -> None:
+    """以降の INFO を判定確定までバッファする (``__main__`` が呼ぶ)。"""
+    global _pending
+    _pending = []
+
+
+def flush_deferred(decision: str | None) -> None:
+    """バッファを最終判定に応じて書き出し、遅延を解除する。
+
+    Args:
+        decision: ``core.output.decision_of`` の結果 (``"deny"`` / ``"ask"`` /
+            allow なら ``None``)。
+
+    ``begin_deferred`` を呼んでいない / バッファが空なら何もしない。
+    **必ず呼ぶこと** (呼ばないとバッファが捨てられる) — ``__main__`` は
+    ``finally`` で呼ぶ。
+    """
+    global _pending
+    pending, _pending = _pending, None
+    if not pending:
+        return
+    effective = _LEVEL_INFO if decision is None else _LEVEL_WARNING
+    if effective < LOG_LEVEL:
+        return
+    for line in pending:
+        _append(line)
 
 # ログファイルの 1 世代ローテーション閾値 (内部バックログ)。この byte 数を
 # 超えて書き込む**前**に ``<LOG_PATH>.1`` へ rename する (直近世代のみ保持)。
@@ -183,18 +268,39 @@ def log_error(category: str, detail: str = "") -> None:
 
     stderr にも category を出力 (Claude Code UI で可視化される)。
     ファイル書込失敗は握りつぶす (hook の責務ではない)。
+
+    **``LOG_LEVEL`` に関わらず必ず書く**。遅延中 (``begin_deferred`` 済み) なら
+    バッファを**先に吐き出してから**自分を書く (0.32.0): この時点では最終判定が
+    未確定でバッファを leveling できないため、順序を保って全部出す方に倒す。
+    error は稀なので量への影響は無視でき、しかも「エラーが出た呼出」は診断情報を
+    一番欲しい場面なので、ここで INFO を落とすのは筋が悪い。
     """
+    global _pending
     safe_detail = _sanitize_detail(detail)
     line = f"{_now()} ERROR {category} {safe_detail}\n".rstrip() + "\n"
     try:
         sys.stderr.write(f"[redact-hook] {category}\n")
     except OSError:
         pass
+    if _pending:
+        for pending_line in _pending:
+            _append(pending_line)
+        _pending = []
     _append(line)
 
 
 def log_info(category: str, detail: str = "") -> None:
-    """INFO ログ (stderr には出さない)。detail は公開可情報のみ (L1 で sanitize)。"""
+    """INFO ログ (stderr には出さない)。detail は公開可情報のみ (L1 で sanitize)。
+
+    遅延中 (``begin_deferred`` 済み) はバッファに積み、``flush_deferred`` が
+    最終判定に応じて出すか決める (0.32.0)。遅延していない呼出は ``LOG_LEVEL``
+    の閾値だけで判断する。
+    """
     safe_detail = _sanitize_detail(detail)
     line = f"{_now()} INFO  {category} {safe_detail}\n".rstrip() + "\n"
+    if _pending is not None:
+        _pending.append(line)
+        return
+    if _LEVEL_INFO < LOG_LEVEL:
+        return
     _append(line)

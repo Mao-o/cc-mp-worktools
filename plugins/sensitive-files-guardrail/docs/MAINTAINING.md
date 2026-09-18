@@ -174,6 +174,17 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   失う (外部レビュー R1 P2-B。実測で `.1` が 8,000 行 → 0 行になった)。
   `fcntl` の無い環境ではローテーション自体を行わない (ログを失う方向に
   倒さない)。Stop hook はファイルログを持たず stderr のみ
+- **ログ量対策 (0.32.0)**: `SFG_LOG_LEVEL=WARNING` は「**最終判定が allow
+  だった呼出の INFO**」を抑制する。`INFO` (既定・未設定・不正値) では従来と
+  完全に同一の出力。実装は `core/logging.py` の `begin_deferred` /
+  `flush_deferred` で、`__main__` が `_dispatch` を包んで **判定確定後に
+  まとめて emit** する (呼出時点では allow 経路か決まらない — `ask_or_allow`
+  の結果は runtime の `permission_mode` 依存で、同一コマンド内の後続 segment の
+  deny が先行の ask/allow を上書きする)。有効レベルは allow → INFO、
+  deny / ask → WARNING 相当。**行の label は `INFO ` のまま**なので既存の
+  grep / 集計は壊れない (有効レベルは出すか否かの内部概念)。`log_error` は
+  level に関わらず必ず書き、遅延中ならバッファを先に吐いて順序を保つ
+  (error 時は最終判定が未確定で leveling できないため、全部出す側に倒す)
 - Stop hook の once-only state (`~/.claude/sensitive-files-guardrail/stop-ack/`)
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
