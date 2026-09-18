@@ -39,11 +39,20 @@ hooks.json 側で post を `"async": true` にして解消する (docs `Run hook
 """
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import sys
-import time
+
+# Windows 非対応 (`state.py` が起動枠の直列化に `fcntl` を使う。停止処理も 0.10.0 から
+# `os.killpg` + `ps` の POSIX 前提)。他モジュールの import で ImportError が起きる前に
+# 判定して抜ける — ここより後ろで import すると、Windows では毎ツール呼出のたびに
+# hook error 通知が出てしまう (review 系 2 hook と同じ理由・同じ形。0.11.0 で `state.py`
+# が `fcntl` を使うようになったため、この hook にもガードが必要になった)。
+if os.name != "posix":
+    sys.exit(0)
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import time  # noqa: E402
 
 # hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
 # (plugin root 内の相対配置なので ${CLAUDE_PLUGIN_ROOT} が cache コピーでも壊れない)。

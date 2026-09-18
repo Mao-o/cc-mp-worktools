@@ -26,12 +26,12 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
   API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は `__main__.py`
   冒頭で `os.name != "posix"` を判定し、`fcntl` に依存する他モジュールを import する
   前に exit 0 で抜ける (0.9.0)。0.8.0 以前はこの判定が無く、Windows では起動直後の
-  import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
-  `fcntl` に依存しない (import 時には落ちない) が、0.10.0 で停止処理を `os.killpg` +
-  `ps` (cmdline の署名と開始時刻による PID 同一性の確認) に変えたため POSIX 前提に
-  なった。Windows では同一性を確認できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
-  `os.kill(pid, 0)` は Windows では TerminateProcess になるため挙動が異なる。Windows
-  での動作は引き続き未検証
+  import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` も
+  0.10.0 で停止処理を `os.killpg` + `ps` (cmdline の署名と開始時刻による PID 同一性の
+  確認) に変えた時点で POSIX 前提になっており、**0.11.0 で起動枠の直列化に `fcntl` を
+  使うようになったため同じ `os.name` ガードを入れた** (3 hook で揃った。ガードが無いと
+  Agent ツール呼び出しのたびに import 例外で hook error 通知が出る)。Windows での動作は
+  引き続き未検証
 - **Cursor Agent CLI**: `explore-parallel` / `exitplan-review` / `post-implementation-review` の
   全てで使う。3 hook とも読み取り専用 (`--mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に

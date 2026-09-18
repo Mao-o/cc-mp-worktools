@@ -95,6 +95,12 @@ payload に「ターン」を一意に表す ID が無く時間窓で近似す�
 - どちらの変数も **0 以下・不正値は既定に倒す**。0 を「止める」にしないのは、それが
   `EXTERNAL_AI_EXPLORE_PARALLEL=0` と同義で、同じ意図に 2 つの綴りを作らないため
 
+**`state.py` が `fcntl` を使うようになったので、`__main__.py` 冒頭に
+`os.name != "posix"` のガードを入れた** (review 系 2 hook と同じ形)。無いと Windows では
+`import state` の ImportError で **Agent ツール呼び出しのたびに hook error 通知**が出る。
+停止処理は 0.10.0 から `os.killpg` + `ps` 前提なので、機能としては以前から POSIX 専用
+(`tests/test_posix_guard.py`)。
+
 テストは `tests/test_concurrency_limit.py` (枠の消費・死んだ pid・ロック競合・env の
 フォールバック・注入バイト上限)。枠を埋めるのは偽 cursor ではなく `sleep` —
 ここで見たいのは「pid ファイルが指すプロセスが生きているか」だけで、argv の同一性

@@ -96,9 +96,13 @@ cursor agent が同時に走り (CPU・Cursor の利用量)、`additionalContext
 - どちらの変数も **0 以下・不正値は既定に倒す**。0 を「止める」にしないのは、それが
   `EXTERNAL_AI_EXPLORE_PARALLEL=0` と同義で、同じ意図に 2 つの綴りを作らないため
 - **発火条件 (イベント / matcher) は変えていない**
+- **`__main__.py` に `os.name != "posix"` ガードを入れた** (review 系 2 hook と同じ形)。
+  直列化で `state.py` が `fcntl` を使うようになったため、無いと Windows では
+  `import state` の ImportError で Agent ツール呼び出しのたびに hook error 通知が出る。
+  停止処理は 0.10.0 から `os.killpg` + `ps` 前提なので、機能としては以前から POSIX 専用
 
-テスト: `tests/test_concurrency_limit.py` (14 件)。実装行を壊す mutation 6 通りで先に
-落ちることを確認した。
+テスト: `tests/test_concurrency_limit.py` (14 件) と `tests/test_posix_guard.py` (3 件)。
+実装行を壊す mutation 7 通りで先に落ちることを確認した。
 
 ### 3 hook 共通: cursor CLI の検出を `which(cursor)` 一本から改めた
 
