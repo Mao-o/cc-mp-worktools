@@ -1795,40 +1795,54 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
                 # 切替後の write は cache hit せず必ず再検証される
                 self.assertEqual(v.call_count, after_switch + 1)
 
-    def test_readonly_login_compound_with_write_is_not_cached(self):
-        """L2 P1: readonly の login (cands に入らない) と write を同一コマンドで実行
-        しても、その service の検証成功は cache しない (判定は service 単位)。"""
+    def test_readonly_login_compound_with_query_is_not_cached(self):
+        """L2 P1: readonly の login (cands に入らない) と検証対象セグメントを同一
+        コマンドで実行しても、その service の検証成功は cache しない
+        (判定は service 単位)。
+
+        後段は **QUERY tier** を使う。v0.15.0 で「期待値以外 / 不明への切替 +
+        同 service の WRITE」は連結そのものが deny になり (下記
+        TestChainedSwitchAndWrite)、cache を論じる前に止まるため。QUERY は
+        write 側に数えないので、この経路 (cands に入らない切替 + 検証される
+        セグメント) はここでしか確認できない。
+        """
         self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
         rows = [
-            ("github", "gh auth login --with-token < other.txt && gh pr create", "gh pr merge 1"),
+            ("github", "gh auth login --with-token < other.txt && gh pr list", "gh pr list"),
             (
                 "gcloud",
-                "gcloud auth activate-service-account --key-file=sa.json && gcloud run deploy svc",
-                "gcloud run deploy svc",
+                "gcloud auth activate-service-account --key-file=sa.json && gcloud projects list",
+                "gcloud projects list",
             ),
         ]
-        for key, compound, write in rows:
+        for key, compound, second in rows:
             with self.subTest(compound=compound):
                 with mock.patch(f"services.{key}.verify", return_value=None) as v:
                     self.assertIsNone(dispatch(compound, str(self.project_dir)))
                     self.assertEqual(v.call_count, 1)
-                    dispatch(write, str(self.project_dir))
+                    dispatch(second, str(self.project_dir))
                 self.assertEqual(v.call_count, 2)
 
     def test_switch_with_different_inline_env_target_is_not_cached(self):
         """切替セグメントと write セグメントの inline env が異なり別 target になっても、
-        同 service の write 側の成功を cache しない。"""
+        同 service の write 側の成功を cache しない。
+
+        切替先は**期待値**にする (v0.15.0: 期待値以外への切替 + write の連結は
+        deny されるため)。切替 target は self-remediation で verify されず、
+        write target だけが検証されるが、cache 判定は service 単位なので
+        その成功も publish されない。
+        """
         self._write_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value=None) as v:
             self.assertIsNone(
                 dispatch(
-                    "gh auth switch --user other && GH_HOST=github.com gh pr create",
+                    "gh auth switch --user Mao-o && GH_HOST=github.com gh pr create",
                     str(self.project_dir),
                 )
             )
-            self.assertEqual(v.call_count, 2)
+            self.assertEqual(v.call_count, 1)
             dispatch("GH_HOST=github.com gh pr create", str(self.project_dir))
-        self.assertEqual(v.call_count, 3)
+        self.assertEqual(v.call_count, 2)
 
     def test_cross_cli_kubeconfig_switch_invalidates_kubectl_cache(self):
         """L2 P2: 別 CLI / plugin が kubeconfig の current-context を書き換える形
@@ -1926,6 +1940,250 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
         # readonly の login は未設定でも allow (deny しない) かつ cache 破棄
         self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
         self.assertFalse(cache.get_success("github", str(self.project_dir), "Mao-o", 1.0))
+
+
+class TestChainedSwitchAndWrite(BaseWithTmpProject):
+    """内部バックログ (v0.15.0): 「期待値以外への切替 + 同 service の write」の連結を deny。
+
+    hook は PreToolUse で 1 回しか動かないため、`gh auth switch --user other &&
+    gh pr create` は **切替前**の状態で検証される。現在値が期待値と一致していれば
+    allow され、切替後 (期待外) のアカウントで write が走っていた
+    (0.14.0 までは README の既知の制限として開示するだけだった)。
+
+    以下の各テストは `verify` を **成功 (None) で mock** する = 切替前のアカウントは
+    期待値と一致している状態。0.14.0 ではこれが allow の根拠になっていたので、
+    deny を主張するテストはこの形でしか意味を持たない。
+    """
+
+    _MARKER = "切替と書込を同一コマンドに連結しています"
+
+    def _dispatch(self, command: str, service: str = "github", verify_value=None):
+        with mock.patch(f"services.{service}.verify", return_value=verify_value) as v:
+            result = dispatch(command, str(self.project_dir))
+        return result, v
+
+    def _assert_chain_denied(self, command: str, service: str = "github"):
+        result, v = self._dispatch(command, service)
+        self.assertIsNotNone(result, f"連結形が allow された: {command}")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn(self._MARKER, out["permissionDecisionReason"])
+        # 現在値が何であっても切替後は検証できないので CLI は呼ばない
+        # (確実に deny になるコマンドで実時間予算を使わない)。
+        self.assertFalse(v.called, f"deny 確定なのに verify を呼んでいる: {command}")
+        return out["permissionDecisionReason"]
+
+    def _assert_no_chain_deny(self, command: str, service: str = "github"):
+        result, v = self._dispatch(command, service)
+        if result is not None:
+            self.assertNotIn(
+                self._MARKER,
+                result["hookSpecificOutput"].get("permissionDecisionReason", "")
+                + result["hookSpecificOutput"].get("additionalContext", ""),
+                f"新規則が発火してはいけない形で発火した: {command}",
+            )
+        return result, v
+
+    # --- deny になる形 ---
+
+    def test_switch_to_other_then_write_is_denied(self):
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._assert_chain_denied(
+            "gh auth switch --user other && gh pr create"
+        )
+        self.assertIn("切替を単独で実行してから", reason)
+        self.assertIn("gh auth switch --user other", reason)
+        self.assertIn("gh pr create", reason)
+
+    def test_separator_variants_are_denied(self):
+        """`;` / 改行のような別の区切りでも同じ連結として扱う。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth switch --user other; gh pr create",
+            "gh auth switch --user other\ngh pr create",
+            "gh auth switch --user other && echo ok && gh pr create",
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command)
+
+    def test_switch_target_unknown_statically_is_denied(self):
+        """切替先が静的に判らない形は deny 側に倒す (判らないから通す = ガードが消える)。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth switch && gh pr create",
+            "gh auth switch --user $GH_USER && gh pr create",
+            'gh auth switch --user "$GH_USER" && gh pr create',
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command)
+
+    def test_readonly_login_then_write_is_denied(self):
+        """readonly 扱いの切替 (login 系) も切替先が判らないので deny 側。"""
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        self._assert_chain_denied("gh auth login --skip-ssh-key && gh pr create")
+        self._assert_chain_denied(
+            "gcloud auth activate-service-account --key-file=sa.json"
+            " && gcloud run deploy svc",
+            service="gcloud",
+        )
+
+    def test_aws_has_no_self_remediation_so_chain_is_denied(self):
+        """aws は期待値 (Account ID) と profile 名の照合が hook からは不能で
+        `is_self_remediation` を宣言しない = 切替先が原理的に判らないため deny 側。
+        単独実行の `aws sso login` は従来どおり readonly で通る。"""
+        self._write_accounts({"aws": "123456789012"})
+        self._assert_chain_denied(
+            "aws sso login --profile prod && aws s3 cp a s3://b", service="aws"
+        )
+        result, v = self._dispatch("aws sso login --profile prod", service="aws")
+        self.assertIsNone(result)
+        self.assertFalse(v.called)
+
+    def test_switch_then_disclosing_read_is_denied(self):
+        """DISCLOSING (WRITE 扱い) も write 側に数える — 期待外アカウントの
+        認証情報が切替後に出力されるため。"""
+        self._write_accounts({"github": "Mao-o"})
+        self._assert_chain_denied("gh auth switch --user other && gh auth token")
+
+    def test_cross_cli_switch_then_write_is_denied(self):
+        """別 CLI が kubeconfig を書き換える形 (kubectl の PATTERNS に一致しない) でも、
+        kubectl の write が続けば deny する。"""
+        self._write_accounts({"kubectl": "ctx", "gcloud": "my-proj"})
+        with mock.patch("services.gcloud.verify", return_value=None):
+            self._assert_chain_denied(
+                "gcloud container clusters get-credentials c --region r"
+                " && kubectl apply -f x.yaml",
+                service="kubectl",
+            )
+
+    def test_firebase_switch_to_other_then_deploy_is_denied(self):
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        self._assert_chain_denied(
+            "firebase use proj-other && firebase deploy", service="firebase"
+        )
+
+    def test_cached_success_does_not_mask_the_chain_deny(self):
+        """成功 cache があっても連結は deny する (cache hit で素通りすると穴が残る)。
+
+        現状は二重の防御 — 切替を含む service は `switching_here` で cache を読まない
+        ため、規則を cache hit 判定の**後**に移す mutation ではこのテストは落ちない
+        (実測)。`switching_here` 側を将来触ったときの床として置く。
+        """
+        self._write_accounts({"github": "Mao-o"})
+        with self.isolated_cache():
+            with mock.patch("services.github.verify", return_value=None) as v:
+                dispatch("gh pr create", str(self.project_dir))
+                self.assert_cache_published("gh pr create", v)
+            self._assert_chain_denied("gh auth switch --user other && gh pr create")
+
+    def test_deny_reason_does_not_advertise_the_chained_commands(self):
+        """検出コマンド行は案内コマンドとして抽出されない (remediation 契約を汚さない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._assert_chain_denied(
+            "gh auth switch --user other && gh pr create"
+        )
+        self.assertEqual(_guided_commands(reason), [])
+
+    # --- deny にならない形 (判定表の据え置き) ---
+
+    def test_switch_to_expected_then_write_is_unchanged(self):
+        """期待値へ向かう切替 (self-remediation) + write は従来どおり
+        「切替前の状態で通常検証」。新しい deny は生えない。"""
+        self._write_accounts({"github": "Mao-o"})
+        result, v = self._assert_no_chain_deny(
+            "gh auth switch --user Mao-o && gh pr create"
+        )
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_switch_then_query_is_unchanged(self):
+        """QUERY / READONLY は write 側に数えない (リモートを変えないため)。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth switch --user other && gh pr list",
+            "gh auth switch --user other && gh auth status",
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command)
+                self.assertIsNone(result)
+
+    def test_readonly_policy_deny_does_not_promote_query_to_write(self):
+        """`"$readonly": "deny"` は QUERY 不一致の扱いを戻す設定で、セグメントの
+        tier を変える設定ではない (連結規則の write 側には数えない)。"""
+        self._write_accounts({"github": "Mao-o", "$readonly": "deny"})
+        result, v = self._assert_no_chain_deny(
+            "gh auth switch --user other && gh pr list"
+        )
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_write_before_switch_is_unchanged(self):
+        """write が切替より前なら、その write は検証済みの状態で走る。"""
+        self._write_accounts({"github": "Mao-o"})
+        result, v = self._assert_no_chain_deny(
+            "gh pr create && gh auth switch --user other"
+        )
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_switch_alone_is_unchanged(self):
+        """切替セグメント単体 (自分自身も WRITE tier) を自己 flag しない。"""
+        self._write_accounts({"github": "Mao-o"})
+        result, v = self._assert_no_chain_deny("gh auth switch --user other")
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_login_then_expected_switch_is_unchanged(self):
+        """deny 文面自身が案内する連結形 (`firebase login && firebase use <期待>`) は
+        write 側が self-remediation なので deny しない。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        result, v = self._assert_no_chain_deny(
+            "firebase login && firebase use prod", service="firebase"
+        )
+        self.assertIsNone(result)
+        self.assertFalse(v.called)
+
+    def test_other_service_write_is_not_affected(self):
+        """切替と write が別 service なら連結規則は発火しない。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as aws_v:
+            result, gh_v = self._assert_no_chain_deny(
+                "gh auth switch --user other && aws s3 cp a s3://b"
+            )
+        self.assertIsNone(result)
+        self.assertEqual(gh_v.call_count, 1)
+        self.assertEqual(aws_v.call_count, 1)
+
+    # --- mode は従来どおり全体を弱める ---
+
+    def test_mode_warn_converts_the_chain_deny_into_context(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"VERIFY_CLOUD_ACCOUNT_MODE": "warn"}):
+            result, _v = self._dispatch(
+                "gh auth switch --user other && gh pr create"
+            )
+        self.assertIsNotNone(result, "warn でも連結の指摘自体は届くこと")
+        out = result["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn(self._MARKER, out["additionalContext"])
+
+    def test_mode_off_skips_the_chain_rule(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"VERIFY_CLOUD_ACCOUNT_MODE": "off"}):
+            result, v = self._dispatch(
+                "gh auth switch --user other && gh pr create"
+            )
+        self.assertIsNone(result)
+        self.assertFalse(v.called)
+
+    def test_missing_key_deny_still_wins(self):
+        """期待値が未設定なら従来どおり設定誘導の deny (連結規則より先に出る)。"""
+        self._write_accounts({"gcloud": "my-proj"})
+        result, _v = self._dispatch("gh auth switch --user other && gh pr create")
+        self.assertIsNotNone(result)
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn('"github" キーがありません', reason)
+        self.assertNotIn(self._MARKER, reason)
 
 
 class TestLoginCommandsReadonly(BaseWithTmpProject):
@@ -2727,7 +2985,7 @@ class TestVersionPinnedNpxSpecs(BaseWithTmpProject):
     def test_version_pinned_login_invalidates_cache(self):
         from core.dispatcher import _analyze_command
 
-        _targets, switching = _analyze_command("npx firebase-tools@13 login")
+        _targets, switching, _segments = _analyze_command("npx firebase-tools@13 login")
         self.assertIn("services.firebase", [s.__name__ for s in switching])
 
 

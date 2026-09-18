@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.15.0
+
+内部バックログの精査分 2 件。**判定表の変更は 1 行だけで、緩和は無い**:
+
+- **唯一の厳格化 = 期待外への切替 + 同 service の書込の連結。** 同一コマンド内で
+  「期待値以外への切替 (切替先が静的に判らない形を含む)」の後に「同じ service の
+  WRITE tier セグメント」が続く形を deny する
+- tier 分類 / self-remediation / `"$readonly"` / 検証モード / キャッシュの規則は
+  **一切変えていない**
+
+### 1. 切替と書込を同一コマンドに連結した形を deny (判定表の追加)
+
+hook は PreToolUse で**コマンド実行前に 1 回だけ**動くため、
+`gh auth switch --user other && gh pr create` は書込が**切替前**の状態で検証される。
+切替前が期待値どおりなら allow され、切替後 (期待外) のアカウントで書込が走っていた
+= この plugin が防ぐはずの事故が、最も自然な連結の書き方で素通しになっていた。
+0.14.0 までは README の既知の制限として開示するだけだった。
+
+判定表への追加行 (利用者向けの正本は README の
+「切替と書込を同一コマンドに連結した形は deny」):
+
+| 同一コマンド内の形 | 判定 |
+|---|---|
+| **期待値以外**への切替 → 同 service の WRITE | **deny** (追加) |
+| 切替先が静的に判らない切替 → 同 service の WRITE (引数なしの `gh auth switch` / `--user $VAR` / login 系 / aws 全般) | **deny** (追加) |
+| **期待値**への切替 (self-remediation) → 同 service の WRITE | 従来どおり (切替前の状態で通常検証) |
+| 切替 → QUERY / READONLY | 従来どおり (deny しない) |
+| 切替 → **別 service** の WRITE / 書込 → 切替 | 従来どおり |
+
+- **対処は「切替を単独で実行してから書込を打つ」**。切替の検出時点で成功キャッシュを
+  破棄しているので、次の書込は切替後の状態で検証される (0.8.0 からの挙動)
+- **deny は現在のアカウントに依らない**ので判定に CLI を呼ばない。確実に deny になる
+  コマンドで検証時間の予算を使うと、同じコマンド行の他 service が予算切れ deny に
+  落ち、最悪は hook timeout (出力が破棄されて無音で通る) に近づくため
+- 別 CLI が状態を書き換える形 (`gcloud container clusters get-credentials ... &&
+  kubectl apply ...` / `aws eks update-kubeconfig ... && kubectl apply ...`) も同じ扱い
+- **書込側が期待値への切替なら deny しない** ので、deny 文面自身が案内する連結形
+  (`firebase login && firebase use <期待 alias>`) は従来どおり通る
+- `"$readonly": "deny"` は QUERY 不一致の扱いを戻す設定で、QUERY をこの規則の書込側に
+  数えることはしない。`VERIFY_CLOUD_ACCOUNT_MODE=warn` / `off` は従来どおり全体を弱める
+- **誤 deny 側の代償を受け入れている**: 切替先が静的に判らない形は期待値への切替で
+  あっても連結が deny になる。特に AWS は期待値 (Account ID) と profile 名の照合が
+  hook からは不能なため、`aws sso login --profile prod && aws s3 cp ...` は常に deny
+  (単独実行の `aws sso login` は従来どおり readonly で通る)。失敗方向としては
+  「検証が消える」より「過剰に deny する」を選んだ
+
+### 2. テスト基盤: pytest の有無判定を実行 interpreter の import 可否で行う
+
+`tests/test_single_test_invocation.py` の pytest 経路テストが
+`shutil.which("pytest")` で有無を見ていた。clean な venv がグローバルの pytest
+実行ファイルを `PATH` から継承していると判定が成功し、`sys.executable -m pytest` が
+`No module named pytest` で落ちる = 標準ライブラリだけで走るはずの suite が環境依存で
+赤になる。`importlib.util.find_spec("pytest")` に変更した (pytest を持たない venv で
+修正前は FAIL、修正後は skip になることを実測)。
+
+### テスト
+
+- 全 suite 1049 件 green (0.14.0 時点 1029 件から +20)
+- 新規: `tests/test_dispatcher.py` の `TestChainedSwitchAndWrite` (deny 側 9 形 +
+  据え置き側 7 形 + mode の合成 2 形 + キー未記載の優先)。**`verify` を成功で mock
+  する** = 切替前は期待値と一致している状態で測る (0.14.0 で allow だった根拠を
+  そのまま入力にしないと、deny を主張するテストが意味を持たない)
+- 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピーで
+  確認した (規則の削除 / 切替側の self-remediation 判定の削除 / 書込側の
+  self-remediation 除外の削除 / 書込側の tier 条件を QUERY まで緩める / 走査順の反転)。
+  **「規則をキャッシュ hit 判定の後ろへ移す」mutation は落ちない** — 切替を含む
+  service はそもそもキャッシュを読まないため実バグを再現していない (記録のみ)
+- 既存テスト 2 件の期待値を更新した。どちらも「期待外 / 不明への切替 + write」の
+  連結を allow として固定していたもので、キャッシュを公開しないことの確認という
+  本来の意図は QUERY / 期待値への切替を使う形へ移した
+- **旧版との出力ペア比較で退行を測った** (0.14.0 と同じ手順)。0.14.0 側の
+  テスト / README / docs から抽出した 869 コマンドを「切替前は期待値と一致」および
+  「不一致」の 2 シナリオで両版に流し、(判定, 検証された service) を突合:
+  完全一致 1712 / 厳格化 13 (すべて連結形) / **緩和 0 / 説明不能 0**。
+  判定は据え置きだが CLI 呼出が消えた 13 件は、同じ連結形の不一致シナリオ
+  (CLI を呼ばずに deny する設計どおり)
+
 ## 0.14.0
 
 内部バックログの精査分 3 件 + マージ前レビューの反映。**判定機構そのものを
