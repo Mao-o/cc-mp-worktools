@@ -63,6 +63,12 @@ class TestLanguageFromShebang(unittest.TestCase):
         )
 
     def test_env_with_variable_assignment(self):
+        # 値にインタプリタ名を含むパスが入る形。``"=" in token`` の skip が無いと
+        # ``/opt/ruby`` の末尾が拾われて ruby になる。
+        self.assertEqual(
+            language.language_from_shebang("#!/usr/bin/env PYTHONPATH=/opt/ruby node"),
+            "javascript",
+        )
         self.assertEqual(
             language.language_from_shebang("#!/usr/bin/env FOO=bar ruby"), "ruby"
         )

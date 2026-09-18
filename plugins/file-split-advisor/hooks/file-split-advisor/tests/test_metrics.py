@@ -367,6 +367,18 @@ class TestTopLevelDefs(unittest.TestCase):
             [("first", 1, 4), ("Second", 5, 2)],
         )
 
+    def test_generic_anonymous_class_is_not_listed_as_extends(self):
+        # ``export default class extends X`` は無名定義。キーワードの次の語
+        # (``extends``) を名前として拾わない (マージ前レビューの指摘)。
+        text = (
+            "export default class extends React.Component {\n"
+            "  render() {}\n"
+            "}\n"
+            "function named() {}\n"
+        )
+        result = metrics.compute(_loaded(text), "javascript", Path("/repo/foo.js"))
+        self.assertEqual([d.name for d in result.top_level_defs], ["named"])
+
     def test_generic_arrow_assignment_name_is_taken_from_the_left_hand_side(self):
         text = "const buildIndex = (rows) => rows.length;\n"
         result = metrics.compute(_loaded(text), "typescript", Path("/repo/foo.ts"))

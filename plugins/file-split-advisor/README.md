@@ -165,7 +165,7 @@ import クラスタ: network(requests, urllib) / db(sqlite) / ui(react) / auth(j
    (未設定なら `~/.cache/file-split-advisor/`)
 3. **どちらにも書けない場合は通知しない**。debounce が成立しない状態で通知すると
    同じファイルを編集するたびに同じメモが出続け、原因がユーザーから見えない。
-   初回だけ stderr に理由を 1 行出す
+   理由を stderr に 1 行出す (hook は編集ごとに新プロセスなので、書けない間は編集ごとに 1 行)
 
 新しいセッションの記録を作るときに、同じディレクトリの **7 日より古い
 `*.json` を削除**する (opportunistic。失敗は無視する)。削除は「新規作成時」に

@@ -379,6 +379,29 @@ class TestMemoCharLimit(unittest.TestCase):
         self.assertNotIn("大きい定義", text)
         self.assertNotIn("import クラスタ", text)
 
+    def test_a_short_later_extra_is_kept_when_an_earlier_one_does_not_fit(self):
+        # 「収まらない付記行だけ落とす」— 先の長い行が入らなくても後の短い行は残る。
+        long_defs = tuple(
+            TopLevelDef(name="d" * 40, start_line=i + 1, span=900 - i) for i in range(5)
+        )
+        short_modules = (("a", ("x",)), ("b", ("y",)))
+        cluster_only = self._build(_metrics(import_modules=short_modules))
+        with mock.patch.object(message, "MAX_MEMO_CHARS", len(cluster_only)):
+            text = self._build(
+                _metrics(top_level_defs=long_defs, import_modules=short_modules)
+            )
+        self.assertNotIn("大きい定義", text)
+        self.assertIn("import クラスタ", text)
+
+    def test_an_extra_that_only_fits_without_the_footer_is_still_dropped(self):
+        # 予算計算に footer を含めないと、footer 長ぶんだけ上限が緩む。
+        defs = (TopLevelDef(name="parse", start_line=1, span=40),)
+        with_def = self._build(_metrics(top_level_defs=defs))
+        with mock.patch.object(message, "MAX_MEMO_CHARS", len(with_def) - 1):
+            text = self._build(_metrics(top_level_defs=defs))
+        self.assertNotIn("大きい定義", text)
+        self.assertLessEqual(len(text), len(with_def) - 1)
+
     def test_extras_that_fit_are_kept_even_if_a_later_one_does_not(self):
         # 「入るものだけ入れる」— 先の行が入っても後の長い行で全体が上限を
         # 超えるなら、後の行だけを落とす。

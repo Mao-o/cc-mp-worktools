@@ -590,6 +590,12 @@ _DEF_NAME_RE = re.compile(
     r"\s+([A-Za-z_$][\w$]*)"
 )
 _ASSIGNED_DEF_NAME_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)")
+# 定義キーワードの直後に来るが名前ではない語。``export default class extends X``
+# のような無名定義で ``extends`` を名前として拾わないための除外集合
+# (マージ前レビューの指摘)。
+_NOT_A_DEF_NAME = frozenset(
+    {"extends", "implements", "default", "for", "in", "of", "static", "new"}
+)
 
 
 def _top_level_defs_generic(lines: list[str]) -> tuple[TopLevelDef, ...]:
@@ -607,7 +613,7 @@ def _top_level_defs_generic(lines: list[str]) -> tuple[TopLevelDef, ...]:
         if not (_DEF_KEYWORDS_RE.match(line) or _ARROW_DEF_RE.match(line)):
             continue
         match = _DEF_NAME_RE.search(line) or _ASSIGNED_DEF_NAME_RE.search(line)
-        if match is None:
+        if match is None or match.group(1) in _NOT_A_DEF_NAME:
             continue
         starts.append((match.group(1), index + 1))
         # 上限より 1 件多く集める: 打ち切った最後の定義の ``span`` を「次の定義

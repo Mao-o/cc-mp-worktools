@@ -281,6 +281,19 @@ class TestFallbackDir(unittest.TestCase):
             with mock.patch.object(state, "_fallback_dir", return_value=Path("/cache/b")):
                 self.assertEqual(state._state_dirs(), (Path("/tmp/a"), Path("/cache/b")))
 
+    def test_state_dirs_omits_fallback_when_home_is_unavailable(self):
+        # HOME も passwd エントリも無い環境では Path.home() が RuntimeError。
+        with mock.patch.object(state, "_base_dir", return_value=Path("/tmp/a")):
+            with mock.patch.dict(state.os.environ, {"XDG_CACHE_HOME": ""}):
+                with mock.patch.object(state.Path, "home", side_effect=RuntimeError("no home")):
+                    self.assertEqual(state._state_dirs(), (Path("/tmp/a"),))
+
+    def test_relative_xdg_cache_home_is_ignored(self):
+        # XDG 仕様: 相対値は無効。cwd (編集中の repo) に書かないための回帰。
+        with mock.patch.dict(state.os.environ, {"XDG_CACHE_HOME": "relcache"}):
+            self.assertTrue(state._fallback_dir().is_absolute())
+            self.assertNotIn("relcache", str(state._fallback_dir()))
+
     def test_state_dirs_deduplicates_identical_candidates(self):
         same = Path("/tmp/same")
         with mock.patch.object(state, "_base_dir", return_value=same):
@@ -304,6 +317,9 @@ class TestSweepStaleStates(BaseStateTest):
         stale = self._write_state("stale.json", state.STATE_TTL_SECONDS + 60)
         self.assertEqual(state.sweep_stale_states(state._base_dir()), 1)
         self.assertFalse(stale.exists())
+
+    def test_ttl_is_seven_days(self):
+        self.assertEqual(state.STATE_TTL_SECONDS, 7 * 24 * 60 * 60)
 
     def test_files_within_the_ttl_are_kept(self):
         fresh = self._write_state("fresh.json", state.STATE_TTL_SECONDS - 60)

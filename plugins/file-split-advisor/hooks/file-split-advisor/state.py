@@ -56,8 +56,11 @@ def _fallback_dir() -> Path:
     memo が注入されていた (内部バックログ)。XDG のキャッシュ領域は
     「消えてもよいが書けることが多い」場所なので 2 番目の候補にする。
     """
+    # XDG Base Directory 仕様: 相対パスの ``XDG_CACHE_HOME`` は無効として無視する。
+    # 無視しないと cwd (= 編集中のプロジェクト) の中に state を書いてしまう
+    # (マージ前レビューの指摘)。
     raw = os.environ.get("XDG_CACHE_HOME", "").strip()
-    base = Path(raw) if raw else Path.home() / ".cache"
+    base = Path(raw) if raw and Path(raw).is_absolute() else Path.home() / ".cache"
     return base / "file-split-advisor"
 
 
@@ -191,7 +194,7 @@ def try_reserve_emit(
       ファイルを編集するたびに同じ memo が注入され続け、ユーザーからは原因が
       見えない (内部バックログ)。README の設計原則「判定不能・IO 失敗はすべて
       『通知しない』側に倒す」に合わせる。抑制する前に ``_fallback_dir()``
-      (XDG キャッシュ) を試し、初回だけ stderr に理由を 1 行出す
+      (XDG キャッシュ) を試し、理由を stderr に 1 行出す (hook は編集ごとに新プロセスなので、書けない間は編集ごとに 1 行)
     - Windows で ``fcntl`` が無い場合はロックなしで動作継続する
     """
     if not session_id:
