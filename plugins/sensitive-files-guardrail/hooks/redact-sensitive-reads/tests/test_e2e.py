@@ -479,21 +479,72 @@ class TestE2EReadHandler(unittest.TestCase):
         result = _run_main(envelope, ["--tool", "write"])
         self.assertEqual(result, {})
 
-    def test_invalid_stdin_json(self):
+    def _run_raw_stdin(self, raw: str, argv: list[str] | None = None):
+        """stdin に生文字列を流して ``main`` を走らせ ``(rc, stdout)`` を返す。"""
         old_stdin = sys.stdin
         old_stdout = sys.stdout
         try:
-            sys.stdin = io.StringIO("{not json")
+            sys.stdin = io.StringIO(raw)
             sys.stdout = io.StringIO()
-            rc = entry.main(["--tool", "read"])
+            rc = entry.main(argv or ["--tool", "read"])
             out = sys.stdout.getvalue()
         finally:
             sys.stdin = old_stdin
             sys.stdout = old_stdout
+        return rc, out
+
+    def test_invalid_stdin_json(self):
+        rc, out = self._run_raw_stdin("{not json")
         self.assertEqual(rc, 0)
         result = json.loads(out)
         self.assertEqual(
             result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+    def test_empty_stdin_denies_for_every_tool(self):
+        """0.32.0 (内部バックログ): 0 byte stdin は無音 allow ではなく deny。
+
+        0.31.0 までは ``_read_envelope`` がここだけ ``{}`` を返し、各 handler が
+        必須フィールド欠如で ``make_allow()`` に落ちていた (stderr もログも
+        出ない **唯一の fail-open 分岐**)。全 tool の dispatch で deny になる
+        ことを固定する。"""
+        for tool in ("read", "bash", "edit", "write"):
+            with self.subTest(tool=tool):
+                rc, out = self._run_raw_stdin("", ["--tool", tool])
+                self.assertEqual(rc, 0)
+                # 退行 (allow に戻る) のとき KeyError で ERROR 扱いにならない
+                # よう ``get`` で辿る — errors と failures を取り違えない
+                hook = json.loads(out).get("hookSpecificOutput", {})
+                self.assertEqual(
+                    hook.get("permissionDecision"), "deny", msg=f"{tool}: {out!r}"
+                )
+                # 空でない reason が返る (無音にしない)
+                self.assertTrue(hook.get("permissionDecisionReason"))
+
+    def test_empty_stdin_logs_its_own_category(self):
+        """``stdin_parse_failed`` と切り分けられるよう専用 category を出す。
+
+        ハーネスが正常系で 0 byte stdin を送る (= 全 deny になる) 事態が
+        起きたときにログから即座に判別できる必要がある。"""
+        with mock.patch.object(entry.L, "log_error") as logged:
+            self._run_raw_stdin("")
+        self.assertEqual([c.args[0] for c in logged.call_args_list], ["stdin_empty"])
+        with mock.patch.object(entry.L, "log_error") as logged:
+            self._run_raw_stdin("{not json")
+        self.assertEqual(
+            [c.args[0] for c in logged.call_args_list], ["stdin_parse_failed"]
+        )
+
+    def test_blank_stdin_still_parse_failed(self):
+        """空白のみ (``"   \\n"``) は 0 byte ではないので従来どおり parse 失敗。"""
+        with mock.patch.object(entry.L, "log_error") as logged:
+            rc, out = self._run_raw_stdin("   \n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertEqual(
+            [c.args[0] for c in logged.call_args_list], ["stdin_parse_failed"]
         )
 
 

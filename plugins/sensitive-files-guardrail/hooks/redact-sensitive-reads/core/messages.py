@@ -2206,6 +2206,22 @@ def stdin_parse_failed() -> str:
     )
 
 
+def stdin_empty() -> str:
+    """stdin が 0 byte だったときの reason 文 (0.32.0、内部バックログ)。
+
+    ``stdin_parse_failed`` と文面を分けるのは、この状態が「壊れた JSON が
+    来た」ではなく「**envelope が 1 byte も来なかった**」= hook の起動経路
+    そのものの異常で、ユーザーが取るべき確認が違うため (hook 定義 / ラッパ
+    スクリプト / stdin のリダイレクト)。
+    """
+    return (
+        "hook 入力 (stdin) が空でした。envelope が読めないと対象ファイルも"
+        "permission mode も判定できないため block しました。"
+        "hook の起動経路 (hooks.json の command、ラッパスクリプト、stdin の"
+        "リダイレクト) を確認してください。"
+    )
+
+
 def unsupported_platform() -> str:
     """SIGALRM 非対応 (Windows 等) の deny 文。"""
     return (

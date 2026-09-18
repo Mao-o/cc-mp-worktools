@@ -55,21 +55,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _read_envelope() -> dict | None:
-    """stdin から hook envelope を読む。失敗時は None。"""
+def _read_envelope() -> tuple[dict | None, str]:
+    """stdin から hook envelope を読む。
+
+    Returns:
+        ``(envelope, error_category)``。成功時は ``(dict, "")``、失敗時は
+        ``(None, <ログ category>)``。
+
+    失敗の種別 (0.32.0 で ``stdin_empty`` を分離、内部バックログ):
+
+    - ``stdin_parse_failed``: 読込例外 / 非 JSON / JSON だが dict でない
+    - ``stdin_empty``: **0 byte の stdin**。0.31.0 まではここだけ ``{}`` を
+      返しており、各 handler が必須フィールド欠如で ``make_allow()`` に落ちて
+      **stderr もログも出ない無音 allow** になっていた (唯一の fail-open 分岐で、
+      L109-111 の「envelope が読めないと bypass 判定もできない → 最厳 deny」
+      という自身の方針と矛盾していた)。
+
+    ``stdin_empty`` を ``ask`` ではなく **deny** に倒す理由: envelope が無いと
+    ``permission_mode`` が読めず、``ask_or_deny`` は ``bypassPermissions``
+    判定ができないまま ``make_ask`` に落ちる。Phase 0 実測のとおり
+    bypassPermissions 下では ask はそのままツール実行に通る (``core.output``
+    の docstring) ので、**修正しようとしている fail-open がその mode で残る**。
+    category を分けてあるので、ハーネスが正常系で 0 byte stdin を送ってくる
+    (= 全 deny になる) 事態が起きてもログから即座に切り分けられる。
+    """
     try:
         raw = sys.stdin.read()
     except Exception:
-        return None
+        return None, "stdin_parse_failed"
     if not raw:
-        return {}
+        return None, "stdin_empty"
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        return None, "stdin_parse_failed"
     if not isinstance(data, dict):
-        return None
-    return data
+        return None, "stdin_parse_failed"
+    return data, ""
 
 
 def _dispatch(tool: str, envelope: dict) -> dict:
@@ -136,11 +158,17 @@ def main(argv: list[str] | None = None) -> int:
         _emit(output.make_deny(M.hook_invocation_error()))
         return 0
 
-    envelope = _read_envelope()
+    envelope, read_error = _read_envelope()
     if envelope is None:
-        L.log_error("stdin_parse_failed")
+        L.log_error(read_error)
         # envelope が読めないと bypass 判定もできない → 最厳 deny
-        _emit(output.make_deny(M.stdin_parse_failed()))
+        # (0 byte stdin も同じ扱い。理由は _read_envelope の docstring)
+        reason = (
+            M.stdin_empty()
+            if read_error == "stdin_empty"
+            else M.stdin_parse_failed()
+        )
+        _emit(output.make_deny(reason))
         return 0
 
     try:

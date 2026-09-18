@@ -543,6 +543,25 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 > かった。根拠と代替案の棄却理由は
 > [DESIGN.md](./DESIGN.md#session-単位の-once-only-0190) を参照。
 
+## `__main__` envelope 読み取り
+
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| stdin が非 JSON / JSON だが dict でない / 読込例外 | **deny** + `stdin_parse_failed` | **deny** | **deny** | **deny** | **deny** |
+| **stdin が 0 byte** (0.32.0 で新設) | **deny** + `stdin_empty` | **deny** | **deny** | **deny** | **deny** |
+
+> 0.31.0 まで **0 byte stdin だけが `{}` を返し、各 handler が必須フィールド
+> 欠如で allow に落ちていた** (stderr もログも無い無音 allow)。`__main__` 自身の
+> 方針「envelope が読めないと bypass 判定もできない → 最厳 deny」と矛盾する
+> 唯一の fail-open 分岐だったので、0.32.0 で他の読み取り失敗と同じ deny に
+> 揃えた。ログ category (`stdin_empty`) は分けてあるので、ハーネスが正常系で
+> 0 byte stdin を送る事態が起きた場合はログから切り分けられる。
+>
+> `ask_or_deny` (ask に倒す) を採らなかった理由: envelope が無いと
+> `permission_mode` が読めず `ask_or_deny` は `make_ask` に落ちるが、
+> Phase 0 実測のとおり **bypassPermissions 下では ask はそのままツール実行に
+> 通る**ため、直そうとしている fail-open がその mode で残ってしまう。
+
 ## `__main__` catch-all (handler 内未捕捉例外)
 
 | ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
