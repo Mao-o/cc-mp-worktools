@@ -94,7 +94,7 @@ Claude Code のトランスクリプト上で**エラー扱い**として表示�
   (opt-in)。2.1.163 未満の CLI を使っている場合や、外部ツールが hook のエラー扱いを
   シグナルとして監視している場合の避難路
 
-## 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch への追補、Codex R1 P1 対応)
+## 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch への追補、マージ前レビューの指摘)
 
 上の opt-in だけでは、2.1.163 未満の CLI で plugin を更新した既存ユーザーが
 `EXTERNAL_AI_POST_REVIEW_MODE=block` の存在を知らない限り、`additionalContext` が
@@ -367,7 +367,7 @@ def _resolve_mode() -> tuple[str, str | None]:
     で検出した版数が `_stop_supports_additional_context()` を満たせば `context`、満たさない
     (未満 または 検出できない) なら **`block` に倒す** (fail-closed: 指摘を Claude に
     届かないまま失う方向には倒さない。コストは legacy の `decision: "block"` 表示に
-    戻るだけ — Codex R1 P1 指摘への対応。モジュール docstring
+    戻るだけ — マージ前レビューの指摘への対応。モジュール docstring
     「未対応 CLI での自動 fail-closed」節を参照)。
 
     `version_fallback_notice` は「auto 解決で版数非対応と判定して block に倒した」ときだけ
@@ -1020,7 +1020,7 @@ def _lexical_relative(root_real: str, path: str) -> str | None:
 
     `to_relative` (全体を realpath) だと `credentials/` → `ordinary/` のような symlink
     ディレクトリ経由の claim が `ordinary/data.json` になり、除外判定から `credentials` が
-    消える (Codex PR レビュー P1)。親ディレクトリだけ realpath する方式も同じ穴があった。
+    消える (マージ前レビューの指摘)。親ディレクトリだけ realpath する方式も同じ穴があった。
     ここでは **root の別名** (`/tmp` → `/private/tmp`、symlink された親ディレクトリ) だけを
     realpath で同定し、その下の構成要素は名前のまま残す。祖先を浅い方から試して最初に root と
     一致したところで切るので、root 配下に root 自身へ戻る symlink があっても途中の名前は残る。

@@ -149,7 +149,7 @@ def symlink_map(root: str) -> dict[str, str]:
     Bash 経由の変更は pre/post の `git status` 比較で拾うが、status は実体パス
     (`ordinary/data.json`) しか返さない。`credentials/` → `ordinary/` の symlink 経由で
     `sed -i credentials/data.json` しても別名は claim に現れないため、ここで symlink を列挙し
-    `exclusion.expand_aliases` で別名を作って除外判定に当てる (Codex PR レビュー R2 P1)。
+    `exclusion.expand_aliases` で別名を作って除外判定に当てる (マージ前レビューの指摘)。
 
     - tracked: index の mode 120000 (`git ls-files -s`)。深さの制限なし
     - untracked (+ tracked の取りこぼし): root から `SYMLINK_SCAN_DEPTH` 階層までを BFS で

@@ -142,7 +142,7 @@ docstring と README を参照。判定には実体 (realpath 相対。git に�
 渡し、どれかが当たれば除外する。`credentials/` → `ordinary/` の symlink ディレクトリ経由でも
 機密名のリンクでも、root の別名 (`/tmp` → `/private/tmp`) 経由でも落ちない。別名が要るのは
 Bash 経由の変更で、`git status` は実体名 (`ordinary/data.json`) しか返さないため lexical 名が
-claim に現れない (Codex R2 P1)。symlink の列挙は tracked が index (mode 120000)、untracked が
+claim に現れない (マージ前レビューの指摘)。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
 rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
 + ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
@@ -427,13 +427,13 @@ reference (`Stop decision control` 節) 逐語:
 - **公式 changelog 記載の対応下限は CLI 2.1.163 (2026-06-04)**。これ未満では
   `additionalContext` が Stop で効かない
 
-### 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch、Codex R1 P1 対応)
+### 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch、マージ前レビューの指摘)
 
 上記の下限を README に書いて利用者に周知するだけでは、2.1.163 未満の CLI で plugin を
 更新した既存ユーザーが opt-in (`EXTERNAL_AI_POST_REVIEW_MODE=block`) の存在を知らない
 限り、`additionalContext` が黙って無視されレビュー指摘が届かないまま Stop してしまう。
 しかも `_run_review` は指摘を組み立てた時点で既に `state.complete_claim(...)` を
-呼んでいるため、この指摘は再試行されず永久に失われる (Codex PR #69 R1 レビュー指摘)。
+呼んでいるため、この指摘は再試行されず永久に失われる (マージ前レビューの指摘)。
 
 `EXTERNAL_AI_POST_REVIEW_MODE` を 3 値に拡張して対処した:
 
@@ -490,7 +490,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |
-| `auto` は版数非対応・不明なら自動で `block` に fail-closed する (Codex R1 P1) | `test_throttle_flow.py::TestVersionAwareMode` |
+| `auto` は版数非対応・不明なら自動で `block` に fail-closed する (マージ前レビューの指摘) | `test_throttle_flow.py::TestVersionAwareMode` |
 | 版数検出の 3 段 (env var → EXECPATH → subprocess) と閾値判定 | `test_version_detect.py` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 
