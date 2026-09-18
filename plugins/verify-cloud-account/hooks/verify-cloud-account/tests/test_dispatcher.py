@@ -970,6 +970,21 @@ class TestReadOnlyTierIsWarnOnly(BaseWithTmpProject):
         out = self._out("gh pr list", None)["hookSpecificOutput"]
         self.assertNotIn("permissionDecision", out)
         self.assertIn("accounts.local.json", out["additionalContext"])
+        # 止めていないのに「このコマンドも deny されます」と書くと文面が結果と
+        # 矛盾する (キー欠落の経路と同じ分岐。片方だけ deny 文面を流用していた)。
+        # header の「書込系コマンドは deny されます」は将来の write の話なので別。
+        self.assertNotIn(
+            "キーの無い service のコマンドも deny されます", out["additionalContext"]
+        )
+        self.assertIn("実行は止めません", out["additionalContext"])
+
+    def test_unconfigured_write_keeps_the_deny_wording(self):
+        """WRITE では従来どおり deny 文面のまま (分岐が空でないことの対)。"""
+        out = self._out("gh pr create", None)["hookSpecificOutput"]
+        self.assertIn(
+            "キーの無い service のコマンドも deny されます",
+            out["permissionDecisionReason"],
+        )
 
     def test_unconfigured_project_still_denies_write(self):
         out = self._out("gh pr create", None)["hookSpecificOutput"]
@@ -990,9 +1005,12 @@ class TestReadOnlyTierIsWarnOnly(BaseWithTmpProject):
         ):
             with self.subTest(command=command):
                 result = dispatch(command, str(self.project_dir))
-                self.assertEqual(
-                    result["hookSpecificOutput"]["permissionDecision"], "deny"
-                )
+                # warn 出力は `permissionDecision` を持たないので、添字で直接読むと
+                # 「警告で通った」が KeyError (error) になり、失敗理由が
+                # assert の不一致として読めない。先に deny 形であることを確かめる。
+                out = result["hookSpecificOutput"]
+                self.assertIsNotNone(out.get("permissionDecision"), "deny していない")
+                self.assertEqual(out["permissionDecision"], "deny")
 
     def test_missing_key_warns_for_query(self):
         self._write_accounts({"aws": "123456789012"})
@@ -1043,6 +1061,9 @@ class TestReadOnlyTierIsWarnOnly(BaseWithTmpProject):
         out = self._out("gh pr list && gh pr create", self.MISMATCH)[
             "hookSpecificOutput"
         ]
+        # warn 出力にはこのキーが無い。添字で直接読むと「警告で通った」が
+        # KeyError (error) になり失敗理由が読み取れないため、先に形を確かめる。
+        self.assertIsNotNone(out.get("permissionDecision"), "deny していない")
         self.assertEqual(out["permissionDecision"], "deny")
 
     def test_query_service_does_not_soften_another_services_write(self):

@@ -202,23 +202,27 @@ def classify(forms: tuple[str, ...], service) -> str:
 
 
 def _normalize(raw) -> tuple[str | None, bool]:
-    """(policy, invalid) を返す。空 / 未指定は (None, False) = 未設定扱い。"""
-    if not isinstance(raw, str):
-        return None, raw is not None
-    value = raw.strip().lower()
-    if not value:
-        return None, False
-    if value in VALID_POLICIES:
-        return value, False
+    """(policy, invalid) を返す。キーが**書かれている**なら不正値は invalid。
+
+    空文字 / `null` も invalid に含める。「キーが無い」と「キーはあるが読めない値が
+    書かれている」は別の状態で、後者を未設定扱い (= 既定の warn) に倒すと
+    **書いたのに効かない**のが黙って起きる。builder の `accounts-show` は
+    `policy_from_accounts` の戻り値をそのまま表示するので、表示 (「不正な値 —
+    deny として扱われます」) と実際の挙動もこれで一致する。
+    """
+    if isinstance(raw, str) and raw.strip().lower() in VALID_POLICIES:
+        return raw.strip().lower(), False
     return None, True
 
 
 def policy_from_accounts(accounts) -> tuple[str, str | None]:
     """accounts.local.json の `"$readonly"` から policy を読む。`(policy, invalid_note)`。
 
-    既定は `warn` (QUERY 不一致は通知のみ)。不正な値は **`deny` に倒す**
-    (fail-closed = 検証を消す方向ではなく止める方向) が、黙って倒すと
-    「`$readonly` を書いたのに警告にならない」の理由が分からないため note を返す。
+    既定は `warn` (QUERY 不一致は通知のみ)。不正な値 (空文字 / `null` / 型不正 /
+    未知の文字列) は **`deny` に倒す** (fail-closed = 検証を消す方向ではなく止める
+    方向) が、黙って倒すと「`$readonly` を書いたのに警告にならない」の理由が
+    分からないため note を返す。**キーが無い場合だけが既定**で、キーが書かれて
+    いれば読めない値はすべて note 付きの deny になる。
 
     `"$mode"` と同じ制約が 2 つある: ファイルを**読めたときだけ**参加する
     (未設定 / JSON 破損 / パス競合の判定はファイルを読む前に確定する) 点と、

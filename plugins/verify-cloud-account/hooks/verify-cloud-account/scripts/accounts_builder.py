@@ -1334,11 +1334,12 @@ def _cmd_show(
             print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
             continue
         # `"$readonly"` も同じ扱い (service ではない予約キー / 値は機密でない)。
+        # 有効/無効の判定は **dispatcher と同じ関数** (`tiers.policy_from_accounts`)
+        # に委ねる。ここで判定式を書き写すと、空文字 / `null` のような端の値で
+        # 「表示は deny・実際は warn」のように表示と挙動が食い違う。
         if key == tiers.POLICY_KEY:
-            valid = (
-                isinstance(expected, str)
-                and expected.strip().lower() in tiers.VALID_POLICIES
-            )
+            _policy, policy_note = tiers.policy_from_accounts({key: expected})
+            valid = policy_note is None
             marker = (
                 "[readonly policy]"
                 if valid

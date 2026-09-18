@@ -429,13 +429,31 @@ class TestShow(BaseBuilder):
         self.assertNotIn("[unknown service]", out)
 
     def test_show_flags_invalid_readonly_policy_value(self):
+        """表示の有効/無効は **dispatcher と同じ関数**で決まる (判定を 2 箇所に持たない)。
+
+        空文字 / `null` は「書かれているが読めない値」なので、表示 (不正な値) と
+        dispatcher の扱い (deny + note) が一致していること。片方だけを「未設定」に
+        倒すと「表示は deny・実際は warn」の食い違いになる。
+        """
+        from core import tiers
+
         self.new_dir.mkdir(parents=True)
-        self._new_path().write_text(
-            json.dumps({"$readonly": "sometimes"}), encoding="utf-8"
-        )
-        code, out, _err = self._run(["show"])
-        self.assertEqual(code, 0)
-        self.assertIn("不正な値", out)
+        for value, expect_invalid in (
+            ("deny", False),
+            ("warn", False),
+            ("sometimes", True),
+            ("", True),
+            (None, True),
+        ):
+            with self.subTest(value=value):
+                self._new_path().write_text(
+                    json.dumps({"$readonly": value}), encoding="utf-8"
+                )
+                code, out, _err = self._run(["show"])
+                self.assertEqual(code, 0)
+                _policy, note = tiers.policy_from_accounts({"$readonly": value})
+                self.assertEqual(note is not None, expect_invalid, "dispatcher 側")
+                self.assertEqual("不正な値" in out, expect_invalid, "builder 表示")
 
     def test_show_flags_invalid_mode_value(self):
         self.new_dir.mkdir(parents=True)

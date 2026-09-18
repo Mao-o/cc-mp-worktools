@@ -2,8 +2,8 @@
 
 ## 0.14.0
 
-内部バックログの精査分 3 件。**判定機構そのものを変えた**ので、判定表の変更点を
-先に書く:
+内部バックログの精査分 3 件 + マージ前レビューの反映。**判定機構そのものを
+変えた**ので、判定表の変更点を先に書く:
 
 - **緩和は 1 箇所だけ**: リモートを読むだけのコマンド (QUERY tier) の不一致・
   キー未記載・未設定が、**deny → warn + allow** になった
@@ -68,8 +68,8 @@ READONLY が「CLI 名からの前方一致 regex + option 無審査」だった
 `READONLY_SAFE_OPTIONS` (READONLY の形 → 許容する option 名の集合) を宣言でき、
 **宣言外の option が付いていたら QUERY に降格**する (= 検証は走るが止めない):
 
-- `kubectl config view --flatten` / `gh auth status --json` /
-  `aws configure import --csv ...` が対象 (いずれも deny ではなく警告)
+- `gh auth status --json` / `aws configure import --csv ...` が対象
+  (いずれも deny ではなく警告)
 - 宣言の無い READONLY エントリは**従来どおり option 無審査**。認証取得系
   (`gh auth login` / `aws sso login` / `gcloud auth login` / `firebase login`) には
   宣言しない — 未ログインのデッドロックを解くためのエントリで、降格させると
@@ -84,35 +84,95 @@ READONLY が「CLI 名からの前方一致 regex + option 無審査」だった
 **表は推測で広げていない。** 列挙は実際に観測された形に限り、未知は「未知として
 降格」で扱う (思いつきで「たぶん危ない option」を足すと誤 deny 側に穴が空く)。
 
+### 4. マージ前レビューで見つかった判定の死角を塞ぐ
+
+上の 3 つを入れた後のレビューで、**判定が緩む方向の死角**が 5 件出た。いずれも
+判定表そのものではなく「表に当てる前の形」と「表の同クラスの漏れ」:
+
+- **行継続 (`\` + 改行) を畳んでから判定する** (`core/command_parser.py`)。
+  畳まないと候補文字列に改行が残り、`.*` を含む判定表エントリだけが死ぬ。
+  複数行で書いた `aws ssm get-parameter --name n --with-decryption` は
+  DISCLOSING (deny) が外れ、1 行目だけで一致する QUERY (警告のみ) に落ちていた
+  (0.13.0 では deny だった形 = **0.14.0 の開発中に入り込んだ唯一の退行**で、
+  リリース前に解消した)。複数行で書いた
+  `aws configure export-credentials` / `kubectl cluster-info dump` も同じ死角で
+  素通ししていた。シェルと同じく**削除**する (空白 1 個に置換すると語の途中で
+  改行した形が別のコマンドに化ける)。quote の内側は畳まない
+- **gcloud の QUERY は書込動詞を跨がない**。`gcloud ... list` の「末尾が read
+  verb」判定が group token を無制限に飲むため、`list` という名前のリソースへの
+  書込 (`gcloud functions deploy list` / `gcloud pubsub topics delete list` /
+  `gcloud config set project list` など) が「リモート read」に化けて警告のみで
+  通っていた。サブコマンド位置の書込動詞で繰り返しを打ち切る (denylist ではなく
+  停止条件なので、未知の verb は従来どおり跨げる = 誤 deny を新造しない)
+- **`kubectl get secret(s)` にオプションを付けた形を DISCLOSING に追加**。
+  Secret の `data` は base64 だけで実質平文なので、`-o yaml` / `-o json` /
+  `--template` 付きは `aws secretsmanager get-secret-value` と同クラス。
+  名前一覧 (`kubectl get secrets`) と `describe secret` は QUERY のまま
+- **`aws` の credential 発行 read を DISCLOSING に追加**:
+  `aws sts get-federation-token` (`get-session-token` の兄弟 API) /
+  `aws ecr get-login-password` (`ecr-public` も) / `aws eks get-token` /
+  `aws codeartifact get-authorization-token`。いずれも出力そのものが認証情報
+  (docker login 用パスワード / kubeconfig 用 bearer token / レジストリ用トークン)
+  なのに、名前が `get-*` なので一括 QUERY に落ちていた
+- **`kubectl config view --flatten` を `--raw` と同格にした**。kubectl v1.34.1 で
+  実測したところ `--flatten` は `--raw` 無しでも token / `client-key-data` を平文で
+  出力する (オプション無し / `--minify` だけなら `REDACTED` / `DATA+OMITTED`)。
+  「そのまま認証に使える kubeconfig を作る」オプションなので redaction を通らない。
+  これまで QUERY (警告のみ) に降格していたのを WRITE 扱いにする
+
+あわせて文面と表示の齟齬も直した:
+
+- 未設定 + リモート read の警告本文から「キーの無い service のコマンドも deny
+  されます」を外した (止めていないのに deny と書いていた)
+- `"$readonly"` に空文字 / `null` を書いた場合を **他の不正値と同じ deny + 注記**に
+  揃えた (これまでは未設定扱いで警告のみになり、`accounts-show` の表示
+  「不正な値 — deny として扱われます」と食い違っていた)。`accounts-show` の
+  有効判定も dispatcher と同じ関数から決めるようにして、二度と分岐しないようにした
+
 ### 既知の制限 (新規)
 
 - QUERY は**コマンド形**で判定するため、表に無い「リモートの機密を返す read」は
-  期待外アカウントでも警告のみになる。既知の secret 読み出し (`aws secretsmanager
-  get-secret-value` / `batch-get-secret-value`、`aws ssm get-parameter*` の
-  `--with-decryption` 付き、`aws kms decrypt`) は DISCLOSING に置き、0.13.0 までと
-  同じく不一致で deny する。それ以外で止めたいプロジェクトは `"$readonly": "deny"`
+  期待外アカウントでも警告のみになる。既知の形は DISCLOSING の表に載せ、0.13.0
+  までと同じく不一致で deny する。それ以外で止めたいプロジェクトは
+  `"$readonly": "deny"`
+- `kubectl get cm,secret -o yaml` のようなカンマ結合と `kubectl get all -o yaml` は
+  Secret として検出できない (QUERY = 警告のみ)。Secret 単体を指定する形
+  (`secret` / `secrets` / `secret/<name>`) は検出する
+- gcloud の書込動詞による打ち切りは、group 名が同じ綴りの系統 (`gcloud deploy ...`
+  = Cloud Deploy) の read を QUERY にしない。0.13.0 までと同じ扱いがこの系統だけ
+  残る形で、新たな deny は生えない
 - 未知の option は「安全と証明できない」側に倒すので、CLI に読み取り option が
   増えると (実際は読み取りでも) WRITE として検証される
 
 ### テスト
 
-- 全 suite 1024 件 green (0.13.0 時点 967 件から +57)
+- 全 suite 1029 件 green (0.13.0 時点 967 件から +62)
 - 新規: `tests/test_tiers.py` (tier 分類の表 = 5 service × READONLY / QUERY /
-  WRITE / DISCLOSING の代表形、判定順、宣言の drift 検出、`"$readonly"` の解決)、
+  WRITE / DISCLOSING の代表形、判定順、宣言の drift 検出、`"$readonly"` の解決、
+  gcloud の書込動詞打ち切りの両方向 32 形、行継続の畳み込み)、
   dispatcher / services / cli_options / builder への追加
 - **旧版との出力ペア比較で退行を測った**。tier 分類は READONLY の regex を残したまま
   実効 verdict を変えるので、「旧版が拾えていた入力を落とした」型の退行は mutation
   では検出できない。merge 済みの旧版と新版で同じコーパス (テスト / README / 判定表に
-  現れる 731 コマンド) を流し、差分を「意図した緩和 94 / 意図した厳格化 15 /
-  未宣言 option の降格 3 / 説明不能 0」に分類した。**検証が消える方向
-  (旧 verify → 新 readonly) は 0 件**
+  現れる 810 コマンド) を流し、差分を「挙動不変 654 / 意図した緩和 118 /
+  意図した厳格化 19 / 未宣言 option の降格 3 / 候補ゼロの断片 16 / 説明不能 0」に
+  分類した。**検証が消える方向 (旧 verify → 新 readonly) は 0 件**
+  - ただし**ペア比較はコーパスに入っている形しか測れない**。複数行 (行継続) で
+    書いたコマンドはコーパスに無く、この方法では死角が見えなかった (上の 4 節)
 - 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピーで
   確認した (開示 option の宣言除去 / QUERY 境界の `\b` 化 / `gh api` の option
   allow-list 除去 / QUERY 警告の無効化 / 逆に全て警告化 / DISCLOSING を QUERY の
   後ろへ移動 / option 審査の無効化 / 未設定経路の tier 判定を「どれか QUERY なら」に
-  緩める の 8 種)。`gh api` の body option 除外だけは
+  緩める、および 4 節の 5 件を戻す mutation)。`gh api` の body option 除外だけは
   allow-list が同じ入力を先に弾くため mutation が空振りする (= 二重の防御) ので、
   2 層が矛盾しないことを disjointness テストで固定した
+  - **plugin ディレクトリ全体をコピーして測る**。`hooks/` だけコピーすると
+    README / docs を参照するテストが未改変コピーでも落ち、その「ノイズ」に紛れて
+    生き残った mutation を見落とす (実際に 4 件見落としていた)
+- tier が今日 WRITE のままでも消してはいけない DISCLOSING 宣言 (`gh auth token` /
+  `aws configure export-credentials` / `aws kms decrypt` /
+  `gcloud auth print-*-token`) は、tier の表では守れないので **membership の契約
+  テスト**で固定した (削除しても tier が変わらないため)
 
 ## 0.13.0
 

@@ -66,6 +66,17 @@ DISCLOSING = [
     (r"^aws\s+secretsmanager\s+(get-secret-value|batch-get-secret-value)(?=\s|$)", frozenset()),
     (r"^aws\s+ssm\s+get-parameters?(-by-path)?\b.*\s--with-decryption(?=\s|$)", frozenset()),
     (r"^aws\s+kms\s+decrypt(?=\s|$)", frozenset()),
+    # `sts get-session-token` と同じ**一時 credential 発行 API**。`get-*` 形は
+    # 一括で QUERY なので、兄弟 API を塞がないと片方だけ検証される非対称になる。
+    (r"^aws\s+sts\s+get-federation-token(?=\s|$)", frozenset()),
+    # 出力そのものが認証トークンの read。docker login 用パスワード /
+    # kubeconfig 用 bearer token / パッケージレジストリ用トークンを stdout に出す
+    # ので、`gh auth token` と同クラス (名前が `get-*` なので QUERY に落ちていた)。
+    (
+        r"^aws\s+(ecr(-public)?\s+get-login-password|eks\s+get-token"
+        r"|codeartifact\s+get-authorization-token)(?=\s|$)",
+        frozenset(),
+    ),
 ]
 # リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
 QUERY = [

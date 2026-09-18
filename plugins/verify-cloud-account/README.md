@@ -243,13 +243,14 @@ worktree などで親から継承している場合は親側のファイルが�
 | **WRITE** (既定) | それ以外 (`gh pr create` / `firebase deploy` / `aws s3 rm` / `kubectl apply` / `gcloud run deploy`) | **deny** |
 
 さらに **認証情報を出力するコマンド / オプション (DISCLOSING)** は、READONLY /
-QUERY に当たっていても取り消して WRITE として扱う (= 不一致なら deny):
+QUERY に当たっていても取り消して WRITE として扱う (= 不一致なら deny)。
+**この表が DISCLOSING の正本**で、「リモートの機密そのものを返す read」も含む:
 
 | サービス | DISCLOSING な形 |
 |---|---|
 | GitHub | `gh auth status --show-token` (`-t`) / `gh auth list --show-token` / `gh auth token` |
-| Kubernetes | `kubectl config view --raw` / `kubectl cluster-info dump` |
-| AWS | `aws configure get aws_secret_access_key` (`aws_session_token`) / `aws configure export-credentials` / `aws sts get-session-token` |
+| Kubernetes | `kubectl config view --raw` / `--flatten` / `kubectl cluster-info dump` / `kubectl get secret(s)` にオプション (`-o` / `--output` / `--template`) を付けた形 |
+| AWS | `aws configure get aws_secret_access_key` (`aws_session_token`) / `aws configure export-credentials` / `aws sts get-session-token` / `get-federation-token` / `aws secretsmanager get-secret-value` (`batch-get-secret-value`) / `aws ssm get-parameter*` の `--with-decryption` 付き / `aws kms decrypt` / `aws ecr get-login-password` (`ecr-public` も) / `aws eks get-token` / `aws codeartifact get-authorization-token` |
 | GCP | `gcloud auth print-access-token` / `print-identity-token` / `gcloud auth application-default print-access-token` |
 | Firebase | `firebase login:ci` (CI 用トークンを出力する) |
 
@@ -257,11 +258,18 @@ QUERY に当たっていても取り消して WRITE として扱う (= 不一致
   (「**期待したアカウントで**認証情報を見る」ことだけが許される)
 - 値の真偽は見ない。`--show-token=false` のような明示 false も「書かれている」
   として扱う (厳格側)
+- `kubectl config view --flatten` は `--raw` 無しでも token / `client-key-data` を
+  平文で出す (kubectl v1.34.1 で実測。オプション無し / `--minify` だけなら
+  `REDACTED` / `DATA+OMITTED`)。`--flatten` は「そのまま認証に使える kubeconfig を
+  作る」オプションなので、`--raw` と同格に扱う
+- Secret の `data` は base64 エンコードだけで実質平文なので、`kubectl get secret -o
+  yaml` は「リモートの secret を出力する read」として扱う。名前一覧
+  (`kubectl get secrets`) と `kubectl describe secret` は値を出さないので QUERY のまま
 
 **READONLY に載っている形でも、想定していないオプションが付いていたら QUERY に
-降格**する (= 検証は走るが、不一致でも止めない)。例: `kubectl config view --flatten` /
-`gh auth status --json`。「コマンド名が安全」ではなくオプションまで含めて安全と
-言える形だけを素通しする設計で、想定外のオプションは **deny せず警告に倒す**。
+降格**する (= 検証は走るが、不一致でも止めない)。例: `gh auth status --json` /
+`aws configure import --csv ...`。「コマンド名が安全」ではなくオプションまで含めて
+安全と言える形だけを素通しする設計で、想定外のオプションは **deny せず警告に倒す**。
 
 #### 従来どおり deny させたいとき (`"$readonly"`)
 
@@ -860,11 +868,21 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 - **QUERY tier の「読むだけ」はコマンド形で判定している** (v0.14.0)。`aws \S+
   (describe|list|get)-*` をまとめて QUERY にしているため、表に無い「リモートの
-  機密を返す read」があれば期待外アカウントでも警告のみになる。既知の secret
-  読み出し (`aws secretsmanager get-secret-value` / `batch-get-secret-value`、
-  `aws ssm get-parameter*` の `--with-decryption` 付き、`aws kms decrypt`) は
-  DISCLOSING に置いて不一致 deny を維持している。それ以外で止めたいプロジェクトは
+  機密を返す read」があれば期待外アカウントでも警告のみになる。既知の形は
+  [DISCLOSING の表](#検証の-3-tier--v0140)に載せて不一致 deny を維持している。
+  それ以外で止めたいプロジェクトは
   [`"$readonly": "deny"`](#従来どおり-deny-させたいとき-readonly) を設定する
+- **`kubectl get` のリソース指定を畳んだ形は Secret として検出できない**
+  (v0.14.0)。`kubectl get cm,secret -o yaml` のようなカンマ結合と
+  `kubectl get all -o yaml` は DISCLOSING に当たらず QUERY (警告のみ) になる。
+  Secret 単体を指定する形 (`secret` / `secrets` / `secret/<name>`、オプションの
+  前後どちらでも) は検出する
+- **gcloud の QUERY はサブコマンド位置の書込動詞で打ち切る** (v0.14.0)。
+  `gcloud functions deploy list` のように「`list` という名前のリソースへの書込」を
+  リモート read と誤読しないための停止条件で、代償として group 名が停止語と同じ
+  綴りの系統 (`gcloud deploy ...` = Cloud Deploy) は read でも QUERY にならず
+  WRITE 扱いになる (v0.13.0 までと同じ扱いがこの系統だけ残る = 緩和が届かない
+  だけで、新たな deny は生えない)
 - **未知のオプションは「安全と証明できない」側に倒すので、判定は CLI の
   オプション表に追随しない**。`gh api` は安全なオプションの allow-list で
   読み取りを証明するため、新しいオプションが増えると (実際は読み取りでも)

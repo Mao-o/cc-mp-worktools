@@ -22,18 +22,33 @@ READONLY = [
     r"^kubectl\s+(--version|--help|version|help)\b",
 ]
 # `kubectl config` の表示系で「これが付いていても readonly」と言える option。
-# ここに無い option (`--flatten` 等) が付いていたら READONLY を取り消して QUERY に
-# 降格する (= 検証は走るが不一致でも止めない)。`--raw` は DISCLOSING 側で
-# WRITE 扱いにする。
+# ここに無い option (`--merge` 等) が付いていたら READONLY を取り消して QUERY に
+# 降格する (= 検証は走るが不一致でも止めない)。`--raw` / `--flatten` は DISCLOSING
+# 側で WRITE 扱いにする。
 READONLY_SAFE_OPTIONS = {
     _RO_CONFIG_VIEW: frozenset({"-o", "--output", "--minify"}),
 }
 # 認証情報を出力する形 / option。READONLY / QUERY を取り消して WRITE 扱いにする。
-# - `config view --raw`: 既定では redact される kubeconfig の credential を平文で出す
+# - `config view --raw` / `--flatten`: 既定では redact される kubeconfig の
+#   credential を平文で出す。**`--flatten` は `--raw` 無しでも平文で出る**
+#   (実測 kubectl v1.34.1: `config view --flatten` は token / client-key-data を
+#   そのまま出力し、option 無し / `--minify` だけなら REDACTED / DATA+OMITTED)。
+#   `--flatten` は「self-contained な kubeconfig を作る」option なので、
+#   redact された値では用途を満たさない = 開示されるのが仕様
 # - `cluster-info dump`: 形そのものが広範なダンプ (option 無しで開示)
+# - `get secret(s) -o yaml|json`: Secret の `data` は base64 エンコードだけで実質
+#   平文。`aws secretsmanager get-secret-value` と同じ「リモートの secret を
+#   出力する read」なので、QUERY の `^kubectl\s+get` より先に WRITE へ倒す。
+#   option を付けない `kubectl get secrets` (名前一覧) / `describe secret`
+#   (値を出さない) は QUERY のまま。resource 名は option の後ろにも置けるので
+#   (`get -o yaml secret x`)、位置を固定せず「どこかに secret token がある形」で書く
 DISCLOSING = [
-    (_RO_CONFIG_VIEW, frozenset({"--raw"})),
+    (_RO_CONFIG_VIEW, frozenset({"--raw", "--flatten"})),
     (r"^kubectl\s+cluster-info\s+dump(?=\s|$)", frozenset()),
+    (
+        r"^kubectl\s+get\b(?=(?:\s+\S+)*\s+(secrets?|secret/\S+)(?=\s|$))",
+        frozenset({"-o", "--output", "--template"}),
+    ),
 ]
 # リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
 QUERY = [

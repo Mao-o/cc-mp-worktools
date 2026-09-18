@@ -216,6 +216,10 @@ def _decide(
     場合に立つ。mode=enforce でも deny せず `additionalContext` で通す — 止めるのは
     書込系だけ、という判定表の唯一の緩和方向 (`core/tiers.py`)。mode=warn は全 tier を
     warn にするので mode 側の header が優先される (二重に前置きしない)。
+
+    **mode=warn のときは QUERY 専用の header も付かない。** どちらも止めないので
+    「なぜ止まらないか」は mode header の 1 本で足り、tier ごとの前置きを重ねると
+    「止めていない理由」が 2 通り書かれることになる。
     """
     parts = [body] + [n for n in notes if n]
     text = "\n\n".join(parts)
@@ -491,11 +495,20 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if accounts_path is None:
         hints = [getattr(svc, "SETUP_HINT", "") for svc, *_rest in targets]
         hint_block = "\n".join(h for h in hints if h)
+        # 文面は tier で分ける。QUERY だけのときは allow するので、そこに
+        # 「deny されます」と書くと**結果と矛盾する**文面になる (キー欠落の経路は
+        # 既に `stops` で分けてある。同じ齟齬をここで作り直さない)。
+        consequence = (
+            "(使用する service のキーは全て必要です。キーの無い service の"
+            "コマンドも deny されます)"
+            if not query_only
+            else "(使用する service のキーは全て必要です。リモート read のみの"
+            "コマンドなので実行は止めません)"
+        )
         msg = (
             ".claude/verify-cloud-account/accounts.local.json が未設定です。\n"
-            "(使用する service のキーは全て必要です。キーの無い service の"
-            "コマンドも deny されます)\n"
-            "初期化: /verify-cloud-account:accounts-init"
+            + consequence
+            + "\n初期化: /verify-cloud-account:accounts-init"
         )
         if hint_block:
             msg += "\n\n" + hint_block
@@ -670,6 +683,10 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # deny するときは **deny の理由だけ**を本文にする。同じコマンド行に QUERY の
         # 不一致があっても、それは止めていない話なので混ぜない (止められた理由が
         # 読み取れなくなる)。QUERY 側は deny が解消した次の実行で警告として出る。
+        # mode=warn ではどちらも止めないので QUERY 側の不一致情報だけが落ちるが、
+        # mode header (`_decide` の docstring) が「mode=warn なので止めていない」を
+        # 先に伝える形に揃えてある。実際に落ちるのは別 service が混在したときだけ
+        # (同一 service なら 1 target に畳まれて WRITE になる)。
         return _decide(effective_mode, _assemble(errors), mode_notes)
 
     if query_errors:

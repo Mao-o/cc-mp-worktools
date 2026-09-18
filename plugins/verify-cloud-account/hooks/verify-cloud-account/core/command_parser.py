@@ -526,6 +526,25 @@ def split_on_operators(command: str) -> list[str]:
         # quote / 置換 / 算術は 1 領域としてそのまま buf へ (構文解釈しない)。
         opaque = _skip_opaque(command, i)
         if opaque is not None and opaque > i:
+            if command[i] == "\\" and i + 1 < n and command[i + 1] == "\n":
+                # **quote 外の行継続 (行末の `\` + 改行) はシェルと同じく取り除く。**
+                # 残すと候補文字列に改行が残り、**改行を跨げない判定表エントリだけが
+                # 死ぬ**。行末 `\` で折り返した `aws ssm get-parameter --name n
+                # --with-decryption` は DISCLOSING (`.*` が改行を跨げない) が外れ、
+                # 1 行目だけで一致する QUERY の `get-*` に落ちて検証が deny から
+                # 警告に緩む。折り返した `aws configure export-credentials` /
+                # `kubectl cluster-info dump` も同型 (`\s+` が `\` を食えない)。
+                #
+                # 空白 1 個への置換ではなく**削除**する。置換すると語の途中で
+                # 折り返した形 (`aws configure exp` + 改行 + `ort-credentials`) が
+                # `aws configure exp ort-credentials` に化けて READONLY の
+                # `configure` に当たり、実際に走る開示形が素通しする。削除なら
+                # シェルの結果 (`aws configure export-credentials`) と一致する。
+                # 継続の前後にあった空白・インデントは残るので語の区切りは
+                # 失われない。quote 内の継続は畳まない (quote 領域は
+                # `_skip_opaque` が 1 領域で返すのでここには来ない)。
+                i = opaque
+                continue
             buf.append(command[i:opaque])
             i = opaque
             continue
