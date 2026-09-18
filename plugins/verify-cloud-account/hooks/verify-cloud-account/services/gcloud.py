@@ -12,7 +12,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from core import budget, cli_config
+from core import budget, cli_config, cli_options
 
 # `\b` だとハイフン付き別コマンドまで gcloud として拾うため、空白または終端が
 # 続く形だけに限定する。
@@ -88,6 +88,9 @@ QUERY = [
 # アクティブ project / account を変えうるコマンド。dispatcher が検出すると gcloud の
 # 成功 cache を破棄する。`configurations create` は既定で作成した configuration を
 # activate する。`init` は対話的に account / project を設定し直す。
+# `config set` は identity を変えない key (`compute/region` 等) も含むが、cache 破棄は
+# 過剰でも再検証 1 回で済むのでここでは絞らない。連結規則の切替側だけが
+# identity を変える形に絞る (下の `changes_identity`)。
 STATE_CHANGING = [
     rf"^gcloud\s+{_TRACK}config\s+(set|unset)\b",
     rf"^gcloud\s+{_TRACK}config\s+configurations\s+(activate|create)\b",
@@ -473,17 +476,41 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
     return _check_project(expected, get_value, project_override)
 
 
-_CONFIG_SET_RE = re.compile(r"^gcloud\s+config\s+set\s+(project|account)\s+(\S+)\s*$")
+_CONFIG_SET_RE = re.compile(
+    rf"^gcloud\s+{_TRACK}config\s+set\s+(project|account)\s+(\S+)\s*$"
+)
+
+# self-remediation / inert 判定で**剥がしてよい** option の allow-list。
+# 基準は「`gcloud config set` が書き込む先を変えないこと」— 書き込む先が
+# アクティブ configuration のままなら、verify() が読む先
+# (`gcloud config get-value project|account`、context の `--configuration` は
+# dispatcher が別途 verify に渡す) と一致し続けるので、実行後の状態が期待値に
+# なることを option 無審査の形と同じ根拠で主張できる。
+#
+# **`--configuration` / `--flags-file` は入れない** — 前者は非アクティブな
+# configuration を名指しして書くのでアクティブ値が期待値にならず、後者は
+# ファイル経由で任意の flag を注入できる (allow-list の意味が消える)。
+# `--project` / `--account` も入れない (照合先を差し替える context option)。
+_DECORATION_FLAGS = frozenset({"--quiet", "-q", "--no-user-output-enabled"})
+_DECORATION_OPTIONS_WITH_VALUE = frozenset({"--verbosity", "--format"})
+_DECORATION_OPTIONS = _DECORATION_FLAGS | _DECORATION_OPTIONS_WITH_VALUE
 
 
 def is_self_remediation(candidate: str, expected) -> bool:
     """deny reason が案内する「期待値への gcloud config set」なら True。
 
     str 期待値は project のみ照合 (verify と同じ解釈)。dict 期待値は set 対象
-    キー (project / account) の期待値と照合する。余分なフラグ付きは保守的に
-    False で通常検証に落とす。
+    キー (project / account) の期待値と照合する。装飾 option
+    (`--quiet` / `--verbosity=` / `--format=` / `--no-user-output-enabled`) は
+    剥がしてから照合し、**それ以外の option が付いていたら保守的に False**
+    (通常検証に落とす)。
     """
-    m = _CONFIG_SET_RE.match(candidate)
+    normalized = cli_options.strip_allowed_options(
+        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+    )
+    if normalized is None:
+        return False
+    m = _CONFIG_SET_RE.match(normalized)
     if not m:
         return False
     key, value = m.group(1), m.group(2)
@@ -493,3 +520,55 @@ def is_self_remediation(candidate: str, expected) -> bool:
         want = expected.get(key)
         return isinstance(want, str) and value == want
     return False
+
+
+# `gcloud config set <key> <value>` のうち、**アクティブな identity
+# (account / project) を変えない** key の allow-list。`core/` 接頭辞は省略できる
+# (`gcloud config set project X` == `core/project`) ので両形を列挙する。
+#
+# ここに**載せていない** key は identity を変える側に倒れる (allow-list)。
+# 特に `project` / `account` / `core/project` / `core/account` /
+# `auth/impersonate_service_account` は identity そのもので、
+# `container/cluster` は `container clusters get-credentials` の既定を変えて
+# kubectl 側の identity に波及しうるため載せない。
+_INERT_CONFIG_KEYS = frozenset({
+    # 対話・出力・ログの制御 (どのアカウントで動くかを変えない)
+    "disable_prompts", "core/disable_prompts",
+    "disable_usage_reporting", "core/disable_usage_reporting",
+    "verbosity", "core/verbosity",
+    "user_output_enabled", "core/user_output_enabled",
+    "disable_color", "core/disable_color",
+    # **`core/log_http` は載せない。** identity は変えない (この述語の基準は満たす)
+    # が、full HTTP ログは認証ヘッダを出す = この plugin の他の allow-list
+    # (`DISCLOSING` / `READONLY_SAFE_OPTIONS`) が塞いでいるクラスそのもの。
+    # 「inert」と名の付いた集合に置くと、読んだ人が「安全」と一般化する。
+    # 開示の扱いは `DISCLOSING` の担当なので、この集合には入れない
+    # リソースの既定の置き場所 (identity ではない)
+    "compute/region", "compute/zone",
+    "run/region",
+    "functions/region",
+})
+_CONFIG_SET_KEY_RE = re.compile(rf"^gcloud\s+{_TRACK}config\s+set\s+(\S+)(?=\s|$)")
+
+
+def changes_identity(candidate: str, expected) -> bool:
+    """このセグメントが「次の gcloud がどのアカウント / project で動くか」を
+    変えうるなら True。
+
+    `STATE_CHANGING` は**成功キャッシュの破棄**が目的なので `gcloud config set`
+    全体を含めてある。一方連結規則 (`core/dispatcher.py` の
+    `_unexpected_switch_before_write`) の切替側は「identity が変わる形」だけに
+    絞る必要があるため、inert な形をここで **allow-list として列挙**する
+    (宣言しない service は既定で True = 従来どおり)。
+
+    inert と言えるのは `config set <inert key> ...` だけ。key 自体が allow-list に
+    あっても**宣言外の option が付いていたら True** に倒す (`--configuration other`
+    は別 configuration を名指しする形で、そこまで inert と言い切る根拠が無い)。
+    `config unset` / `configurations activate|create` / `auth ...` / `init` は
+    いずれも identity を変えうるので対象外。
+    """
+    m = _CONFIG_SET_KEY_RE.match(candidate)
+    if not m or m.group(1) not in _INERT_CONFIG_KEYS:
+        return True
+    names = cli_options.find_option_names(candidate, GLOBAL_OPTIONS_WITH_VALUE)
+    return not names <= _DECORATION_OPTIONS

@@ -273,12 +273,17 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
 
 def _analyze_command(
     command: str, trace: dict | None = None
-) -> tuple[list[tuple], list]:
-    """コマンドを分解し (targets, switching) を返す。
+) -> tuple[list[tuple], list, list[tuple]]:
+    """コマンドを分解し (targets, switching, segments) を返す。
 
     targets は検証対象 (non-readonly) の (svc, cands, inline_env, ctx, tier) リスト。
     cands の各要素は (元の候補, global option を剥がした候補) の組で、前者は deny 文面の
     検出コマンド表示、後者は self-remediation 判定に使う。
+
+    segments は**出現順**の全セグメント (readonly / サービス未マッチも含む) で、
+    各要素は (svc または None, tier または None, 剥がした形, そのセグメントが状態を
+    変える service の組)。targets は (service, env, ctx) ごとに畳まれて順序を失うため、
+    「切替 → write の連結」(`_unexpected_switch_before_write`) の判定にはこちらを使う。
 
     tier は `core/tiers.py` の QUERY / WRITE。同じエントリに畳まれたセグメントの
     **最も厳しい側**を採る (`gh pr list && gh pr create` は WRITE)。READONLY の
@@ -308,6 +313,7 @@ def _analyze_command(
     cand_map: dict = {}
     tier_map: dict = {}
     switching: list = []
+    segments: list[tuple] = []
     for cand, inline_env in extract_candidates(command):
         svc = _match_service(cand)
         # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
@@ -328,9 +334,14 @@ def _analyze_command(
         # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
         # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
         # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
-        for other in SERVICES:
-            if other not in switching and _is_state_changing(forms, other):
+        changed = tuple(other for other in SERVICES if _is_state_changing(forms, other))
+        for other in changed:
+            if other not in switching:
                 switching.append(other)
+        # readonly / サービス未マッチのセグメントも segments には残す。切替側
+        # (`gh auth login` は readonly、`gcloud ... get-credentials` は kubectl の
+        # PATTERNS に一致しない) が落ちると連結の判定ができない。
+        segments.append((svc, tier, forms[-1], changed))
         if svc is None or is_ro:
             continue
         # コンテキスト option (`aws --profile other ...`) は inline env と同じく
@@ -355,7 +366,7 @@ def _analyze_command(
         targets.append(
             (svc, cand_map[key], dict(env_items), dict(ctx_items), tier_map[key])
         )
-    return targets, switching
+    return targets, switching, segments
 
 
 def _all_self_remediation(cands: list, service, entry) -> bool:
@@ -374,6 +385,139 @@ def _all_self_remediation(cands: list, service, entry) -> bool:
         return all(fn(c, entry) for c in cands)
     except Exception:
         return False
+
+
+# 切替と write を**同一コマンドに連結**した形は、hook が PreToolUse で 1 回しか
+# 動かないため write が切替**前**の状態で検証される。現在値が期待値と一致していれば
+# allow され、切替後の期待外アカウントで write が走る = この plugin が防ぐはずの事故
+# がそのまま通る (0.14.0 までは README の既知の制限として開示するだけだった)。
+#
+# 判定は「切替先が期待値か」だけで決め、**CLI は呼ばない**。現在値が何であっても
+# 切替後の状態は検証できないので verify の結果で判定が変わる余地がなく、確実に deny
+# になるコマンドで実時間予算 (`core/budget.py`) を使うと、同じコマンド行の他 service が
+# 予算切れ deny に落ち、最悪は hook timeout (= 出力破棄 = fail-open) に近づく。
+def _is_expected_switch(service, form: str, entry) -> bool:
+    """切替セグメントが期待値へ向かう形 (self-remediation) なら True。
+
+    **判定できない場合は False (= deny 側)**。引数なしの `gh auth switch`
+    (インタラクティブ選択)、`--user $VAR` のような静的に解決できない切替先、
+    `is_self_remediation` を宣言しない service (aws: 期待値の Account ID と
+    profile 名の照合が hook からは不能) がこれに当たる。「切替後の状態が判らない
+    × write」を判らないことを理由に通すと、ガードが消える方向の失敗になる。
+    """
+    fn = getattr(service, "is_self_remediation", None)
+    if fn is None:
+        return False
+    try:
+        return bool(fn(form, entry))
+    except Exception:
+        return False
+
+
+def _changes_identity(service, form: str, entry) -> bool:
+    """切替セグメントが「その service の identity を変えうる形」なら True。
+
+    **未宣言なら True** (= `STATE_CHANGING` 全体を切替として扱う従来どおりの挙動)。
+    `STATE_CHANGING` は成功 cache の破棄が目的なので「identity を変えない config
+    変更」も含んでいる (`kubectl config set-context --current --namespace=x` /
+    `gcloud config set compute/region x` / `gh auth refresh`)。cache 破棄は過剰でも
+    再検証 1 回で済むが、**連結規則では過剰が誤 deny になる** — 切替ですらない形に
+    「切替先不明の切替」として deny を生やしてしまう。そこで service 側が
+    `changes_identity(form, expected)` で inert な形を allow-list 宣言できるように
+    し、切替側の条件をそれで絞る。
+
+    判定中の例外は **True (= deny 側)**。`_is_expected_switch` の例外を False
+    (deny 側) に倒しているのと同じ向き — 「判らないから通す」を作らない。
+    """
+    fn = getattr(service, "changes_identity", None)
+    if fn is None:
+        return True
+    try:
+        return bool(fn(form, entry))
+    except Exception:
+        return True
+
+
+def _unexpected_switch_before_write(
+    service, entry, segments: list[tuple]
+) -> tuple[str, str] | None:
+    """`(切替セグメント, write セグメント)` の最初の組を返す (無ければ None)。
+
+    `segments` は `_analyze_command` が作る出現順のセグメント列。
+
+    - **切替側**: その service の状態を変えるセグメント (別 CLI 経由の
+      `gcloud container clusters get-credentials` 等も含む) のうち、
+      **identity を変えうる形** (`_changes_identity`) で、かつ期待値へ
+      向かわないもの
+    - **write 側**: その service の **WRITE tier** セグメントのうち、期待値への
+      切替そのものではないもの
+
+    QUERY / READONLY は write 側に数えない。リモートを変えないので切替後の状態で
+    走っても資源は変わらず、厳格化を「連結された write」だけに限るため
+    (`"$readonly": "deny"` でも数えない — あれは QUERY 不一致の扱いを戻す設定で、
+    セグメントの tier そのものを変える設定ではない)。
+
+    write 側から self-remediation を除くのは `firebase login && firebase use <期待>`
+    (deny 文面自身が案内する連結形) を deny しないため。`firebase use <期待>` は
+    WRITE tier だが、実行後の状態は期待値なので連結を止める理由が無い。
+
+    同一セグメントが切替でも write でもある形 (`gh auth switch --user other` 単体) を
+    自己 flag しないよう、**write 判定を先に、pending への追加を後に**行う。
+    """
+    pending: list[str] = []
+    for seg_service, tier, form, changed in segments:
+        if (
+            seg_service is service
+            and tier == tiers.WRITE
+            and pending
+            and not _is_expected_switch(service, form, entry)
+        ):
+            return pending[0], form
+        if (
+            service in changed
+            and _changes_identity(service, form, entry)
+            and not _is_expected_switch(service, form, entry)
+        ):
+            pending.append(form)
+    return None
+
+
+def _expected_display(entry) -> str:
+    """deny 文面に載せる期待値の表示形 (str はそのまま / dict は `key=値` の列)。
+
+    dict のキーの意味は service ごとに違う (github: host / gcloud:
+    project|account / firebase: alias) ので、意味を要約せず書かれたまま見せる。
+    値の解釈は service の verify() が持つ規則であって、ここで再現すると
+    2 箇所に規則が生える。str 以外の値は落とす (verify() も使わない)。
+
+    **`REMEDIATION_PATTERNS` に一致する形を作らないこと** — この文面は
+    `_guides_remediation` を通さない chain error なので、切替コマンドの実形を
+    書くと「案内されたコマンド」の契約 (単独実行の注記) を汚す。期待**値**だけを
+    載せる。
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        pairs = [f"{k}={v}" for k, v in entry.items() if isinstance(v, str) and v]
+        if pairs:
+            return ", ".join(pairs)
+    return ""
+
+
+def _switch_then_write_error(
+    account_key: str, entry, switch_form: str, write_form: str
+) -> str:
+    expected = _expected_display(entry)
+    target = f"期待値 ({expected}) へ" if expected else "期待値へ"
+    return (
+        f'"{account_key}" の切替と書込を同一コマンドに連結しています。'
+        "切替後の状態で write が実行されるため、"
+        f"{target}切り替える操作を単独で実行してから再度お試しください。\n"
+        "(hook はコマンド実行前に 1 回だけ動くため、連結された write は切替前の"
+        "状態で検証され、切替後のアカウントは検証できません。切替を単独で実行すれば"
+        "成功キャッシュが破棄され、次の write が切替後の状態で検証されます)\n"
+        f"(検出コマンド: アカウント状態を変える操作={switch_form} / 書込={write_form})"
+    )
 
 
 def _deprecation_note(kind: str) -> str:
@@ -441,7 +585,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if not project_dir:
         return None
 
-    targets, switching = _analyze_command(command, trace)
+    targets, switching, segments = _analyze_command(command, trace)
     # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
     # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
     # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
@@ -603,6 +747,22 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             errors.append(
                 f'{accounts_path} の "{svc.ACCOUNT_KEY}" 値は文字列または '
                 f'オブジェクトであるべきです (現在: {type(entry).__name__})。'
+            )
+            continue
+
+        # 期待値以外への切替 (切替先が静的に判らない形も含む) と同 service の write を
+        # 同一コマンドに連結した形は、現在値に関わらず deny する
+        # (`_unexpected_switch_before_write`)。cache / self-remediation / verify より
+        # **前**に置く: 成功 cache があってもこの穴は塞がらないし、verify の結果で
+        # 判定が変わる余地も無いため。
+        # **`problems` ではなく `errors` に積む。** この規則の発火条件は「同 service に
+        # WRITE tier のセグメントがある」ことなので、同 service の別 target
+        # (QUERY tier) を処理している最中でも止める側が正しい。mode=warn / off は
+        # 従来どおり `_decide` / 上の early return が全体を弱める。
+        chained = _unexpected_switch_before_write(svc, entry, segments)
+        if chained is not None:
+            errors.append(
+                _switch_then_write_error(svc.ACCOUNT_KEY, entry, *chained)
             )
             continue
 

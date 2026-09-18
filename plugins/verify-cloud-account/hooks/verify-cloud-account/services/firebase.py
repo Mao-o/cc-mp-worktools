@@ -34,7 +34,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from core import budget
+from core import budget, cli_options
 
 # CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
 # 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
@@ -420,14 +420,33 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
 _USE_RE = re.compile(rf"^{_CLI}\s+use\s+(\S+)\s*$")
 
+# self-remediation 判定で**剥がしてよい** option の allow-list。基準は
+# 「`firebase use` が書き込む先を変えないこと」— `--non-interactive` / `--debug` /
+# `--json` は対話と出力の制御だけで、configstore の activeProjects (verify() が
+# `firebase use` で読む先) に対する書込先を変えない。
+# **`--project` / `-P` / `--config` / `-c` / `--account` / `--token` は入れない** —
+# 前 2 つは照合先を差し替える context option、`--config` は firebase.json を
+# 名指しして project の解決先を変え、残りは認証主体を変える。
+_DECORATION_FLAGS = frozenset({"--non-interactive", "--debug", "--json"})
+_DECORATION_OPTIONS_WITH_VALUE: frozenset[str] = frozenset()
+
 
 def is_self_remediation(candidate: str, expected) -> bool:
     """deny reason が案内する「期待プロジェクト / alias への firebase use」なら True。
 
     dict 期待値は alias 名 (キー) と project ID (値) の両方を受け付ける
-    (deny メッセージが `firebase use <alias>` を案内するため)。
+    (deny メッセージが `firebase use <alias>` を案内するため)。装飾 option
+    (`--non-interactive` / `--debug` / `--json`) は剥がしてから照合し、
+    **それ以外の option が付いていたら保守的に False** (通常検証に落とす)。
+    `use --add` / `--clear` / `--unalias` もここで False になる (位置引数の意味が
+    変わる = 期待値への切替とは言えない)。
     """
-    m = _USE_RE.match(candidate)
+    normalized = cli_options.strip_allowed_options(
+        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+    )
+    if normalized is None:
+        return False
+    m = _USE_RE.match(normalized)
     if not m:
         return False
     target = m.group(1)

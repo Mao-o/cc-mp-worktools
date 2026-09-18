@@ -271,6 +271,57 @@ QUERY に当たっていても取り消して WRITE として扱う (= 不一致
 `aws configure import --csv ...`。「コマンド名が安全」ではなくオプションまで含めて
 安全と言える形だけを素通しする設計で、想定外のオプションは **deny せず警告に倒す**。
 
+#### 切替と書込を同一コマンドに連結した形は deny — v0.15.0
+
+hook は**コマンド実行前に 1 回だけ**動くため、`gh auth switch --user other &&
+gh pr create` のように「切替 → 同じ service の書込」を 1 行に連結すると、書込は
+**切替前**の状態で検証される。切替前が期待値どおりなら allow され、切替後 (期待外)
+のアカウントで書込が走っていた。v0.15.0 でこの連結形を deny する:
+
+| 同一コマンド内の形 | 判定 |
+|---|---|
+| **期待値以外**への切替 → 同 service の WRITE (`gh auth switch --user other && gh pr create`) | **deny** (v0.15.0 で追加) |
+| 切替先が静的に判らない切替 → 同 service の WRITE (引数なしの `gh auth switch` / `--user $VAR` / `gh auth login` / `aws sso login`) | **deny** (判らない = 検証できない側に倒す) |
+| **期待値**への切替 → 同 service の WRITE (`gh auth switch --user <期待> && gh pr create`) | 従来どおり (切替前の状態で通常検証) |
+| **アカウントを変えない**設定変更 → 同 service の WRITE (`kubectl config set-context --current --namespace=foo && kubectl apply ...`) | 従来どおり (下記) |
+| 切替 → QUERY / READONLY (`gh auth switch --user other && gh pr list`) | 従来どおり (deny しない) |
+| 切替 → **別 service** の WRITE (`gh auth switch --user other && aws s3 cp ...`) | 従来どおり (切替の影響を受けない) |
+| 書込 → 切替 (`gh pr create && gh auth switch --user other`) | 従来どおり (書込は検証済みの状態で走る) |
+
+- **対処は「期待値へ切り替える操作を単独で実行してから、書込をもう一度打つ」**。切替を
+  検出した時点で成功キャッシュは破棄されるので、次の書込は切替後の状態で検証される。
+  deny 文面は期待値そのものを載せる (検出コマンドの切替先ではなく)
+- **deny は現在のアカウントに依らない** (切替後の状態は原理的に検証できないため)。
+  判定に CLI を呼ばないので検証時間の予算も使わない
+- **「アカウントを変えない設定変更」は切替として数えない。** 成功キャッシュの破棄は
+  これらでも行うが (過剰でも再検証 1 回で済む)、連結の deny は「次のコマンドがどの
+  アカウントで動くか」を変える形だけに限る。数えない形の allow-list:
+  - `kubectl config set-context --current [--namespace=x]` (current-context 名を
+    変えない形。`set-credentials` / `set-cluster` / 位置引数で context 名を書く形 /
+    `--user` / `--cluster` 付きは**数える** — 同じ名前のまま identity が差し替わる)
+  - `gcloud config set <非 identity key>` (`compute/region` / `compute/zone` /
+    `run/region` / `functions/region` / `disable_prompts` /
+    `core/disable_usage_reporting` / `core/verbosity` / `core/user_output_enabled` /
+    `core/disable_color`。`project` / `account` /
+    `auth/impersonate_service_account` / `container/cluster` や、`--configuration`
+    のような宣言外オプション付きは**数える**)
+  - `gh auth refresh` (scope の追加。`--user` / `-u` 付きはアカウントを切り替えるので
+    **数える**)
+- 別 CLI が状態を書き換える形 (`gcloud container clusters get-credentials ... &&
+  kubectl apply ...` / `aws eks update-kubeconfig ... && kubectl apply ...`) も同じ扱い
+- AWS は期待値 (Account ID) と profile 名の照合が hook からは不能で「期待値への切替」を
+  判定できないため、`aws sso login --profile prod && aws s3 cp ...` のような連結は
+  常に deny になる。単独実行の `aws sso login` は従来どおり readonly で通る
+- `"$readonly": "deny"` は QUERY 不一致の扱いを戻す設定で、QUERY をこの規則の**書込側**に
+  数えることはしない (リモートを変えないため)
+- `VERIFY_CLOUD_ACCOUNT_MODE=warn` / `off` は従来どおり全体を弱める
+- **この deny はコマンド行のセグメント分解に依存する。** `&&` / `;` / 改行 / `||` /
+  `(...)` / `|` / `if…then` / `watch '...'` 等は分解するが、**末尾の単独 `&`
+  (バックグラウンド実行) と `bash -c '...'` の内側は分解しない**ため、
+  `gh auth switch --user other & gh pr create` /
+  `gh auth switch --user other && bash -c 'gh pr create'` は検出されない
+  (v0.14.0 以前と同じ挙動。[既知の制限](#既知の制限))
+
 #### 従来どおり deny させたいとき (`"$readonly"`)
 
 QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
@@ -430,15 +481,31 @@ deny される remediation loop を防ぐため、**accounts.local.json の期�
 - `firebase use <期待 alias または project ID>`
 - `kubectl config use-context <期待コンテキスト>`
 
+**装飾オプション付きの形も同じ扱いになる (v0.15.0)。** 出力や対話の制御だけを足した形は
+上と同じ「期待値への切替」として認識する — `gcloud` は `--quiet` / `-q` /
+`--verbosity=...` / `--format=...` / `--no-user-output-enabled`、`kubectl` は
+`--v=...` / `--request-timeout=...`、`firebase` は `--non-interactive` / `--debug` /
+`--json`、`gh` はオプションの順序・`=` 形・短縮形すべて。
+
+**切替の着地先を変えるオプションは対象外** (許可オプションの allow-list で、コマンドの
+allow-list ではない)。`gcloud config set project <期待値> --configuration other` は
+非アクティブな configuration に書き、`kubectl config use-context <期待値>
+--kubeconfig=/tmp/kc` は別ファイルに書くため、実行後もアクティブな値は期待値にならない。
+これらは従来どおり通常検証に落ちる (現在値が期待値と一致していれば allow、
+[連結](#切替と書込を同一コマンドに連結した形は-deny--v0150) されていれば deny)。
+
 **案内された切替 / ログインコマンドは案内された形のまま単独で実行すること。** 元のコマンド
 を同じコマンド行に連結すると (`gh auth switch ... && gh pr create` 等)、そちらが切替**前**
-の状態で検証されて再び deny される (案内文自身が連結している `firebase login && firebase
-use <x>` は許可される形)。remediation を案内する deny 文面にはこの注記が付く (v0.11.1)。
+の状態で検証されるため deny される (案内文自身が連結している `firebase login && firebase
+use <x>` は、書込側が期待値への切替なので許可される形)。remediation を案内する deny
+文面にはこの注記が付く (v0.11.1)。
 
-期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。切替コマンド
-(self-remediation を含む) を検出した時点で当該 service の成功 cache を破棄し、
-切替コマンド自身の検証成功も cache しないため、切替後の最初の write は成功 cache
-の残り時間に関係なく次回 hook で再検証される (v0.8.0。詳細は
+期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。ただし同じ
+コマンド行に**同じ service の書込が連結**されていれば、現在のアカウントに依らず
+deny する ([切替と書込の連結](#切替と書込を同一コマンドに連結した形は-deny--v0150))。
+切替コマンド (self-remediation を含む) を検出した時点で当該 service の成功 cache を
+破棄し、切替コマンド自身の検証成功も cache しないため、切替後の最初の write は成功
+cache の残り時間に関係なく次回 hook で再検証される (v0.8.0。詳細は
 [パフォーマンス (短期キャッシュ)](#パフォーマンス-短期キャッシュ))。
 
 AWS は期待値 (Account ID) と profile 名の照合が hook からは不能なため、この特例の
@@ -929,10 +996,25 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   予約語 (`then` / `else` / `do`) を剥がして本体を検証対象にしている副作用で、
   条件の真偽までは静的に評価しない (実行される場合を取りこぼさない側に倒している)
 - subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外
-- 期待値以外への切替と write を**同一コマンド**で実行した場合
-  (`gh auth switch --user other && gh pr create`) は、実行前の状態で検証されるため
-  切替後の write は検証されない (hook は実行前にしか動かない)。別々のコマンドで
-  実行すれば切替で cache が破棄され、write は次回 hook で再検証される
+- **切替と write を同一コマンドで連結した形は「検証できない」ので deny する**
+  (v0.15.0。[判定表](#切替と書込を同一コマンドに連結した形は-deny--v0150))。
+  hook は実行前にしか動かないため切替後の状態は原理的に検証できず、通す側に倒すと
+  期待外アカウントでの write がそのまま通っていた。代償として、切替先が静的に
+  判らない形 (引数なしの `gh auth switch` / `--user $VAR` / login 系 / AWS 全般) は
+  期待値への切替であっても連結を deny する = **誤 deny 側の失敗が残る**。
+  切替を単独で実行すれば cache が破棄され、次の write は切替後の状態で再検証される
+- **上の deny はコマンド行のセグメント分解に依存する。** 末尾の単独 `&`
+  (バックグラウンド実行) と `bash -c '...'` の内側は分解されないため、
+  `gh auth switch --user other & gh pr create` /
+  `gh auth switch --user other && bash -c 'gh pr create'` は検出されない。
+  同じ理由で、単独 `&` で区切られた行は 1 セグメントに畳まれるため、
+  `gh pr create & aws s3 cp a s3://b` では **aws 側が検証対象にならない**
+  (v0.14.0 以前と同じ挙動)
+- 期待値への切替と認識する形に**着地先を変えるオプション**
+  (`--configuration` / `--kubeconfig` / `--config` 等) を足したものは、
+  従来どおり通常検証に落ちる。実行後もアクティブな値は期待値にならないため
+  「期待値へ切り替えた」と扱えない
+  ([self-remediation](#期待値へ向かう切替コマンドは許可-self-remediation))
 - **60 秒 (`IN_FLIGHT_SEC`) を超える対話 login** (`gh auth login --web` /
   `aws sso login` 等のブラウザ認証) の最中に、同一 service の並行検証 (並列 Bash
   呼出) があった場合、その検証が login 前の状態で成功すると entry が書かれ、login

@@ -40,6 +40,23 @@
                                     アカウントで動くか) を変えうるコマンド。
                                     dispatcher が検出すると成功 cache を破棄し、
                                     そのコマンド自身の検証成功も cache しない
+     - changes_identity(candidate, expected) -> bool
+                                    (任意) 「その候補が **identity を変えうる形**
+                                    か」。STATE_CHANGING は cache 破棄が目的なので
+                                    identity を変えない config 変更
+                                    (`kubectl config set-context --current
+                                    --namespace=x` / `gcloud config set
+                                    compute/region x` / `gh auth refresh`) も
+                                    含むが、連結規則
+                                    (`core/dispatcher.py` の
+                                    `_unexpected_switch_before_write`) の切替側は
+                                    identity を変える形だけに絞る必要がある
+                                    (絞らないと切替ですらない日常形に deny が
+                                    生える)。**inert な形を allow-list で列挙**し、
+                                    それ以外は True を返すこと。
+                                    未宣言なら常に True (= 従来どおり)。
+                                    STATE_CHANGING からは外さない (cache 破棄は
+                                    必要。契約テストが両立を強制する)
      - GLOBAL_OPTIONS_WITH_VALUE / GLOBAL_FLAGS: frozenset[str]
                                     (任意) CLI 名直後に置ける global option
                                     (`aws --profile prod sso login`)。dispatcher が
@@ -105,7 +122,15 @@
                                     これに該当するとき検証をスキップする
                                     (deny が案内した切替コマンド自身が deny
                                     される self-remediation loop を防ぐ)。
-                                    期待値以外への切替では False を返すこと
+                                    期待値以外への切替では False を返すこと。
+                                    dispatcher は連結規則でも同じ述語を使い、
+                                    False = deny 側なので**判定の緻密さが
+                                    誤 deny に直結する**。装飾 option
+                                    (`--quiet` / `--non-interactive` 等) は
+                                    `core/cli_options.strip_allowed_options` で
+                                    剥がしてから照合し、**着地先を変える option**
+                                    (`--configuration` / `--kubeconfig` /
+                                    `--config` 等) は allow-list に入れないこと
      - verify(expected, project_dir, env=None, context=None) -> str | None
                                     検証関数 (None=成功, 文字列=エラー理由)。
                                     env はインライン環境変数をマージ済みの完全 env

@@ -89,6 +89,8 @@ QUERY = [
 # self-remediation で検証なし、期待値以外なら通常検証 (実行前の状態) だが、どちらも
 # cache は残さない。`refresh` は READONLY から外した後もここには残す — 外すと
 # `gh auth refresh --scopes ...` 成功後に古い成功 cache が TTL 分残ってしまう。
+# ただし `--user` 無しの `refresh` はアクティブアカウントを変えないので、連結規則の
+# 切替側には数えない (下の `changes_identity`)。
 STATE_CHANGING = [r"^gh\s+auth\s+(switch|login|logout|refresh)\b"]
 ACCOUNT_KEY = "github"
 
@@ -663,8 +665,13 @@ def is_query(candidate: str) -> bool:
 _SWITCH_RE = re.compile(r"^gh\s+auth\s+switch\b")
 
 
-def _parse_switch_args(candidate: str) -> tuple[str | None, str | None]:
-    """gh auth switch 候補から (--hostname, --user) の値を取り出す。"""
+def _parse_auth_args(candidate: str) -> tuple[str | None, str | None]:
+    """`gh auth <sub>` 候補から (--hostname, --user) の値を取り出す。
+
+    `switch` と `refresh` の両方で使う (どちらも `-h/--hostname` と `-u/--user`
+    を受ける)。位置ではなく token で読むので option の順序 / `=` 形 / 短縮形の
+    違いに影響されない。
+    """
     try:
         tokens = shlex.split(candidate)
     except ValueError:
@@ -699,7 +706,7 @@ def is_self_remediation(candidate: str, expected) -> bool:
     """
     if not _SWITCH_RE.search(candidate):
         return False
-    hostname, user = _parse_switch_args(candidate)
+    hostname, user = _parse_auth_args(candidate)
     if not user:
         return False
     if isinstance(expected, str):
@@ -708,3 +715,26 @@ def is_self_remediation(candidate: str, expected) -> bool:
         want = expected.get(hostname or "github.com")
         return isinstance(want, str) and user == want
     return False
+
+
+_AUTH_REFRESH_RE = re.compile(r"^gh\s+auth\s+refresh(?=\s|$)")
+
+
+def changes_identity(candidate: str, expected) -> bool:
+    """このセグメントが「次の gh がどのアカウントで動くか」を変えうるなら True。
+
+    `STATE_CHANGING` は**成功キャッシュの破棄**が目的なので、アクティブアカウントを
+    変えない `gh auth refresh` (既存アカウントの scope 追加) も含めてある。一方
+    連結規則 (`core/dispatcher.py` の `_unexpected_switch_before_write`) の切替側は
+    「identity が変わる形」だけに絞る必要があるため、inert な形をここで
+    **allow-list として列挙**する (宣言しない service は既定で True = 従来どおり)。
+
+    inert と言えるのは **`--user` / `-u` を伴わない `gh auth refresh`** だけ。
+    `gh auth refresh --user other` はアクティブアカウントを other へ切り替えるため
+    inert にしてはいけない (subcommand 単位で inert を宣言すると穴になる)。
+    `switch` / `login` / `logout` はいずれも identity を変えるので対象外。
+    """
+    if _AUTH_REFRESH_RE.search(candidate):
+        _hostname, user = _parse_auth_args(candidate)
+        return user is not None
+    return True

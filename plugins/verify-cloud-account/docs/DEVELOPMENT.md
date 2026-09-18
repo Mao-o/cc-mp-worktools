@@ -184,6 +184,74 @@ builder の `show` は `[match]` / `[mismatch]` を出すのに bool が要る�
   見ない (`--show-token=false` も「書かれている」と数える) — 真偽で緩めると
   `--skip-ssh-key=false` ですり抜けた穴を逆向きに作り直すことになる
 
+### 切替 + 書込の連結 (`_unexpected_switch_before_write`) — v0.15.0
+
+tier は**セグメント単位**の分類だが、hook が PreToolUse で 1 回しか動かないことに
+由来する穴は**セグメントの並び**にある。`gh auth switch --user other && gh pr create`
+は write が切替**前**の状態で検証され、切替前が期待値どおりなら allow される。
+そこで dispatcher は出現順のセグメント列 (`_analyze_command` の第 3 戻り値) を
+service ごとに走査し、次の並びを deny する:
+
+| 切替側 (先) | 書込側 (後) | 判定 |
+|---|---|---|
+| その service の状態を変える (`STATE_CHANGING`) かつ `changes_identity` が True かつ `is_self_remediation` が False | 同 service の **WRITE tier** かつ `is_self_remediation` が False | **deny** |
+| 期待値へ向かう切替 (`is_self_remediation` が True) | 同上 | 従来どおり (切替前の状態で通常検証) |
+| identity を変えない状態変更 (`changes_identity` が False) | 同上 | 従来どおり |
+| 任意 | QUERY / READONLY | 従来どおり |
+
+**利用者向けの表は README の「切替と書込を同一コマンドに連結した形は deny」が正本。**
+ここに書くのは設計理由だけ:
+
+- **切替側は `STATE_CHANGING` 全体ではなく「identity を変える形」に絞る**
+  (`changes_identity`)。`STATE_CHANGING` は成功キャッシュの破棄が目的なので
+  「次のコマンドがどのアカウントで動くか」を変えない形も含んでいる。破棄が過剰でも
+  再検証 1 回で済むが、**連結規則で過剰に数えると切替ですらない日常形に deny が
+  生える** — `kubectl config set-context --current --namespace=foo && kubectl apply`
+  (kubectl の最頻出 idiom) / `gcloud config set compute/region x && gcloud run deploy`
+  / `gh auth refresh -s project && gh pr create` がそれで、いずれも identity は
+  静的に見て不変。inert 側は **form 単位の allow-list** で宣言する
+  (`set-credentials` は context 名を変えないまま identity を差し替えるので inert に
+  してはいけない。`gh auth refresh` は `-u/--user` を受けるので subcommand 単位で
+  inert 宣言してはいけない)。未宣言の service は既定 True = 従来どおり
+- **`is_self_remediation` は装飾 option を剥がしてから照合する**
+  (`core/cli_options.strip_allowed_options`)。0.14.0 までこの述語は「検証するか」を
+  決めるだけで、False でも通常検証に落ちれば現在値が合っていれば allow だったため、
+  anchored (`\s*$`) の厳しさが表に出なかった。v0.15.0 で**同じ述語が deny を抑止する
+  唯一の出口**になったので、案内形に `--quiet` を 1 つ足しただけで deny になる。
+  許容は「**着地先を変えない**」と言える option だけの allow-list
+  (`--configuration` / `--kubeconfig` / `--config` / `--project` は着地先か照合先を
+  変えるので入れない)。blanket な option 許容にはしない
+- **判定に CLI を呼ばない** (cache / self-remediation / verify より**前**で deny する)。
+  現在値が何であっても切替後の状態は検証できないので verify の結果で判定が変わる
+  余地がなく、確実に deny になるコマンドで実時間予算 (`core/budget.py`) を使うと、
+  同じコマンド行の他 service が予算切れ deny に落ち、最悪は hook timeout
+  (= 出力が破棄されて無音で通る fail-open) に近づく
+- **切替先が静的に判らない形は deny 側に倒す。** 引数なしの `gh auth switch`
+  (インタラクティブ選択) / `--user $VAR` / login 系 / `is_self_remediation` を
+  宣言しない service (aws) が該当する。「判らないから通す」は検証が消える方向の
+  失敗で、`_is_expected_switch` の例外も同じ側に倒してある
+  (`_changes_identity` の例外は逆向きの True = 同じく deny 側)。
+  どちらの例外経路も `TestChainedSwitchAndWrite` に床のテストがある
+- **deny 文面には期待値そのものを載せる** (`_expected_display`)。「切替を単独で実行
+  してから」だけだと、検出コマンド行 (`gh auth switch --user other`) を単独実行する
+  読みになる。それは allow されるので 2 往復かかり、しかもユーザーの gh 状態は期待外に
+  移ったまま残る。**切替コマンドの実形は書かない** — この文面は
+  `_guides_remediation` を通さない chain error なので、`REMEDIATION_PATTERNS` に
+  一致する形を混ぜると「案内されたコマンドは単独で実行せよ」の注記の契約を汚す
+- **書込側からも self-remediation を除く。** 除くと
+  `firebase login && firebase use <期待 alias>` (deny 文面自身が案内する連結形) が
+  deny になり、案内どおり打てなくなる。`firebase use <期待>` は WRITE tier だが
+  実行後の状態は期待値なので、連結を止める理由が無い
+- **QUERY は書込側に数えない** (`"$readonly": "deny"` でも)。あれは QUERY 不一致の
+  扱いを戻す設定で、セグメントの tier を変える設定ではない。リモートを変えない
+  コマンドが切替後に走っても資源は変わらないので、厳格化を連結された write だけに限る
+- **同一セグメントが切替でも WRITE でもある形** (`gh auth switch --user other` 単体) を
+  自己 flag しないよう、走査は「書込判定 → pending への追加」の順で行う。逆順にすると
+  切替コマンド単体が常に deny になり、remediation の出口が消える
+- 問題は `errors` に積む (tier ごとの `problems` ではない)。規則の発火条件が
+  「同 service に WRITE tier のセグメントがある」ことなので、同 service の別 target
+  (QUERY tier) を処理している最中でも止める側が正しい
+
 ### 何を deny のまま残すか
 
 QUERY が緩めるのは「アカウントが期待値と違う」「期待値のキーが無い」「未設定」
@@ -727,6 +795,53 @@ aws ssm get-parameter \
   受けていなかった — **同じ入力に対して regex 側と option 側で堅牢性が非対称**
   だった形で、regex 側を合わせた
 - 判定表を足すときは「複数行で書かれた同じコマンド」を 1 形テストに入れる
+
+### 0.15.0 (連結された切替 + 書込)
+
+**D28: 「hook が 1 回しか動かない」に由来する穴は、通す側ではなく止める側に倒す**
+
+0.14.0 までは `gh auth switch --user other && gh pr create` を README の既知の
+制限として**開示するだけ**だった (実行前の状態で検証 = 切替前が期待値なら allow)。
+しかし開示は緩和の理由にならない — この plugin が防ぐ対象そのもの (期待外
+アカウントでの write) が、最も自然な連結の書き方で素通しになっていた。
+実装は上記「切替 + 書込の連結」。
+
+- **厳格化はこの 1 形だけ**で、tier 分類・mode・cache の規則は一切変えていない。
+  self-remediation の**受理形**は装飾 option 付きへ広げた (下記)
+- 誤 deny 側の代償を明示的に受け入れている: 切替先が静的に判らない形 (login 系 /
+  AWS 全般 / `--user $VAR`) は期待値への切替であっても連結が deny になる。
+  失敗方向としては (a) 検証が消える より (b) 過剰に deny する を選んだ
+- **「役割が変わった述語は、新しい役割向けに calibrate し直す」。**
+  `STATE_CHANGING` 所属と `is_self_remediation` はどちらも
+  「検証するか否かを決める述語」として calibrate されていた (過剰でも
+  「通常検証に落ちる」= 現在値が合っていれば allow だった)。この規則で同じ 2 つが
+  「hard deny するか否かを決める述語」に昇格した瞬間、過剰さがそのまま誤 deny に
+  なる。**規則を足すときは、流用する述語の失敗コストが変わっていないかを確認する**
+  — 変わっているなら述語側を直すのが正しく、規則側に例外を足すのは誤り
+  (`changes_identity` の新設と `is_self_remediation` の option allow-list は
+  どちらもこの結論)
+- **`is_self_remediation` の緩和は連結形だけに閉じない** (この変更で唯一の緩和方向)。
+  同じ述語を `_all_self_remediation` も使うので、装飾 option を受理した分だけ
+  「その形を**単独実行**したときの検証もスキップされる」= 現在値が期待値と不一致の
+  とき deny → allow に変わる形がある (`gcloud config set project <期待> --quiet` /
+  `firebase use <期待> --non-interactive` / `kubectl config use-context <期待> --v=4`)。
+  **これは装飾なしの形が 0.8.0 から受けている扱いと同じ**で、実行後の状態が期待値に
+  なることが静的に判る形に限られる (着地先を変える option は allow-list 外)。
+  コーパス退行測定では検出できない — コーパスは 0.14.0 の tests / docs から抽出する
+  ので、この形 (装飾 option 付きの案内形) がそもそも母集団に無い。
+  **「緩和 0」を主張するときは、緩和が母集団に出現しうるかを先に確認すること**
+- **`pending` は後続の「期待値への切替」でクリアしない。**
+  `gh auth switch -u other && gh auth switch -u <期待> && gh pr create` は最終状態が
+  期待値でも deny する (過剰 deny だが fail-safe)。クリアする実装にすると firebase で
+  誤 allow を作る — `login` は identity を変え `use` は project だけを変えるので、
+  `firebase login && firebase use <期待> && firebase deploy` 相当の形で
+  「login 後のアカウントが期待外」という未検証の状態が通る
+- **mutation で測れる範囲を先に確認する** (D26 と同じ注意)。規則の削除・切替側の
+  self-remediation 判定の削除・書込側の tier 条件の緩和・走査順の反転はいずれも
+  既存テストを落とすが、「規則を cache hit 判定の後ろに移す」mutation は**落ちない**
+  — 切替を含む service は `switching_here` で cache を読まないため、そもそも到達
+  しない経路だった。落ちない mutation は「テストが弱い」ではなく「その並びが
+  実バグを再現していない」ことを意味するので、テスト側を膨らませずに記録に残す
 
 ## 既知の制限
 
