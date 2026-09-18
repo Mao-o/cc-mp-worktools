@@ -161,10 +161,9 @@ def decision_of(response: HookResponse | dict) -> str | None:
     の segment 集約が使う。
     """
     if not isinstance(response, dict):
-        # allow と誤認しないため deny 扱いの文字列は返さず、判定不能を
-        # 表す ``None`` ではなく明示的に ``"deny"`` にはしない —
-        # ``is_allow`` は False を返す形なので、ここも保守的に非 allow 側
-        # (= 診断ログを残す側) に寄せる。
+        # dict でない = 想定外の戻り。``None`` (= allow) を返すと allow と
+        # 誤認されるので ``"deny"`` を返す (``is_allow`` が False を返すのと
+        # 同じ向き。遅延ログ側では「診断を残す」に倒れる)。
         return "deny"
     hook = response.get("hookSpecificOutput")
     if not isinstance(hook, dict):

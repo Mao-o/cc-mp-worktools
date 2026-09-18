@@ -248,6 +248,38 @@ class TestSharedGitBudget(BaseWithTmpRepo):
         self.assertEqual(found, [{"path": ".env", "status": "tracked"}])
         self.assertFalse(deadline.exceeded)
 
+    def test_budget_stays_below_the_configured_hook_timeout(self):
+        """予算が `hooks.json` の Stop timeout より小さいことを固定する。
+
+        この 2 つは別ファイルにあり、**hook timeout を下げると予算が黙って
+        無意味になる** (予算に到達する前に Claude Code が hook を kill し、
+        このチケットが直した無音の fail-open に戻る)。どちらを動かしても
+        気付けるようテストで突合する。
+        """
+        import json
+
+        from budget import DEFAULT_BUDGET_SECONDS
+
+        hooks_json = (
+            Path(__file__).resolve().parent.parent.parent / "hooks.json"
+        )
+        config = json.loads(hooks_json.read_text())
+        timeouts = [
+            h["timeout"]
+            for entry in config["hooks"]["Stop"]
+            for h in entry["hooks"]
+            if "timeout" in h
+        ]
+        self.assertTrue(timeouts, "Stop hook の timeout が hooks.json に無い")
+        # 超過を検出した後に reason を組んで stdout に書き切る時間が要るため、
+        # 「小さい」だけでなく最低 1 秒の余裕を要求する。
+        self.assertLessEqual(
+            DEFAULT_BUDGET_SECONDS + 1.0,
+            min(timeouts),
+            "予算が Stop timeout に対して余裕不足 (budget.py と hooks.json の"
+            " どちらかを直す)",
+        )
+
     def test_deadline_slice_and_expired_contract(self):
         from budget import MIN_USEFUL_SECONDS, Deadline
         d = Deadline(total=5.0, per_call_cap=2.0)

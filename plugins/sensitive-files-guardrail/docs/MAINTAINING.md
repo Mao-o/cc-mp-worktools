@@ -203,7 +203,7 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 # redact-sensitive-reads (0.32.0 時点 1,382 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (0.32.0 時点 158 件、tmpdir に git repo を作って検査)
+# check-sensitive-files (0.32.0 時点 159 件、tmpdir に git repo を作って検査)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 

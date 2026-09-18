@@ -24,7 +24,16 @@ kill して出力を discard するので、**decision なし = 機密ファイ�
 
 - 予算は `DEFAULT_BUDGET_SECONDS` (12s) — hook timeout 15s に対して 3s の余裕。
   余裕を残すのは、予算超過を検出した後に **reason を組んで stdout に書き切る**
-  時間が要るため (超過を検出できても出力前に kill されたら意味が無い)
+  時間が要るため (超過を検出できても出力前に kill されたら意味が無い)。
+  `hooks.json` の timeout とは別ファイルなので、
+  `tests/test_checker.py::TestSharedGitBudget
+  .test_budget_stays_below_the_configured_hook_timeout` が両者を突合する
+  (timeout を下げると予算が黙って無意味になり、無音 fail-open に戻るため)
+- **トレードオフ**: 12〜15s かかっていた repo では、予算導入前は完走して全件
+  報告できていたのに本予算では打ち切って一覧が減る。15s に到達すれば報告が
+  丸ごと消える (kill + discard) ので「部分報告 + 打ち切りの明示」を選んだが、
+  **報告内容が減る方向の変化であること自体は事実**なので docs / CHANGELOG で
+  開示している。12.0 という値は実測に基づく最適値ではなく見積り
 - 超過は**必ず可視化する**。`[]` を返して黙ると「機密なし」と区別できない
   (このチケットの元の指摘そのもの)。呼出側は `Deadline.exceeded` を見て
   stderr + `systemMessage` / block reason の注記に反映する
