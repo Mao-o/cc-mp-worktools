@@ -9,11 +9,35 @@ from core import budget
 # `\b` だと `kubectl-foo` のような plugin バイナリまで kubectl として拾うため、
 # 空白または終端が続く形だけに限定する。
 PATTERNS = [r"^kubectl(?=\s|$)"]
+# option を審査する READONLY エントリは名前付き定数にする (READONLY_SAFE_OPTIONS /
+# DISCLOSING が同じ文字列をキーに参照するため。literal を 2 箇所に書くと、片方を
+# 直したときに宣言が黙って無効化される)。
+_RO_CONFIG_VIEW = (
+    r"^kubectl\s+config\s+(current-context|get-contexts|view|get-clusters|get-users)\b"
+)
 READONLY = [
-    r"^kubectl\s+config\s+(current-context|get-contexts|view|get-clusters|get-users)\b",
+    _RO_CONFIG_VIEW,
     r"^kubectl\s+cluster-info\b",
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^kubectl\s+(--version|--help|version|help)\b",
+]
+# `kubectl config` の表示系で「これが付いていても readonly」と言える option。
+# ここに無い option (`--flatten` 等) が付いていたら READONLY を取り消して QUERY に
+# 降格する (= 検証は走るが不一致でも止めない)。`--raw` は DISCLOSING 側で
+# WRITE 扱いにする。
+READONLY_SAFE_OPTIONS = {
+    _RO_CONFIG_VIEW: frozenset({"-o", "--output", "--minify"}),
+}
+# 認証情報を出力する形 / option。READONLY / QUERY を取り消して WRITE 扱いにする。
+# - `config view --raw`: 既定では redact される kubeconfig の credential を平文で出す
+# - `cluster-info dump`: 形そのものが広範なダンプ (option 無しで開示)
+DISCLOSING = [
+    (_RO_CONFIG_VIEW, frozenset({"--raw"})),
+    (r"^kubectl\s+cluster-info\s+dump(?=\s|$)", frozenset()),
+]
+# リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
+QUERY = [
+    r"^kubectl\s+(get|describe|logs|top|explain|api-resources|api-versions)(?=\s|$)",
 ]
 # current-context (kubeconfig) を変えうるコマンド。dispatcher が検出すると kubectl の
 # 成功 cache を破棄する。`set-context --current --namespace=x` のように context 名を

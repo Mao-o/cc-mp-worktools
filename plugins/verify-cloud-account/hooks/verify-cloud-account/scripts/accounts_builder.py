@@ -134,7 +134,7 @@ _PKG_ROOT = _HERE.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core import mode, paths  # noqa: E402
+from core import mode, paths, tiers  # noqa: E402
 from services import ALL as SERVICES  # noqa: E402
 
 _SERVICE_NAMES = [svc.ACCOUNT_KEY for svc in SERVICES]
@@ -1331,6 +1331,19 @@ def _cmd_show(
         if key == mode.MODE_KEY:
             valid = isinstance(expected, str) and expected.strip().lower() in mode.VALID_MODES
             marker = "[mode]" if valid else "[mode: 不正な値 — enforce として扱われます]"
+            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            continue
+        # `"$readonly"` も同じ扱い (service ではない予約キー / 値は機密でない)。
+        if key == tiers.POLICY_KEY:
+            valid = (
+                isinstance(expected, str)
+                and expected.strip().lower() in tiers.VALID_POLICIES
+            )
+            marker = (
+                "[readonly policy]"
+                if valid
+                else f"[readonly policy: 不正な値 — {tiers.POLICY_DENY} として扱われます]"
+            )
             print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
             continue
         svc = _SERVICE_BY_KEY.get(key)

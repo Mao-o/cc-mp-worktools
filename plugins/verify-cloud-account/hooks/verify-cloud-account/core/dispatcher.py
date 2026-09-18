@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import budget, cache, cli_options, mode, output, paths
+from core import budget, cache, cli_options, mode, output, paths, tiers
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -56,14 +56,23 @@ def _missing_key_hint(account_key: str) -> str:
 # hook timeout を超えうる — CLI 未検出も CLI timeout も deny に倒しているのに、
 # ここだけ無音で通ることになる (内部バックログ)。予算を使い切った service は
 # CLI を呼ばずにこの deny へ集約し、必ず hook timeout 内に JSON を返す。
-def _budget_expired_error(account_key: str) -> str:
+#
+# QUERY tier (リモート read) だけのときは止めない (`stops=False`)。不一致でも通す
+# 判定表なのに「検証しきれなかったから止める」のは非対称なため。
+def _budget_expired_error(account_key: str, *, stops: bool = True) -> str:
+    consequence = (
+        "未検証のまま通すと hook 自体が時間切れになり、検証結果が破棄されたまま"
+        "コマンドが実行されるため deny します。"
+        if stops
+        else "リモート read のみのコマンドなので実行は止めませんが、"
+        "このコマンドではアカウントを確認できていません。"
+    )
     return (
         f'"{account_key}" の検証を開始できませんでした: '
         f"1 コマンド分の検証時間 (予算 {budget.TOTAL_BUDGET_SECONDS:.0f} 秒) を"
         "使い切っています。\n"
-        "未検証のまま通すと hook 自体が時間切れになり、検証結果が破棄されたまま"
-        "コマンドが実行されるため deny します。\n"
-        "対処: コマンドをサービスごとに分けて実行するか、応答が遅い CLI "
+        + consequence
+        + "\n対処: コマンドをサービスごとに分けて実行するか、応答が遅い CLI "
         "(ネットワーク待ち / 未ログイン) を解消してから再試行してください。"
     )
 
@@ -146,19 +155,14 @@ def _matches_any(forms: tuple[str, ...], patterns) -> bool:
     return any(re.search(p, form) for p in patterns for form in forms)
 
 
-def _is_readonly(forms: tuple[str, ...], service) -> bool:
-    """READONLY (regex) か、service の `is_readonly(candidate)` (regex で表せない判定、
-    例: 鍵操作を伴わない `gh auth login` 形) のどちらかに当たれば True。
-    判定中の例外は安全側 (通常検証)。"""
-    if _matches_any(forms, getattr(service, "READONLY", [])):
-        return True
-    fn = getattr(service, "is_readonly", None)
-    if fn is None:
-        return False
-    try:
-        return any(fn(form) for form in forms)
-    except Exception:
-        return False
+def _segment_tier(forms: tuple[str, ...], service) -> str:
+    """候補セグメントの tier (`core/tiers.py`: READONLY / QUERY / WRITE)。
+
+    分類規則 (READONLY / QUERY / DISCLOSING の宣言と option 審査) は
+    `core/tiers.classify` に一本化してある。dispatcher 側の責務は
+    「READONLY を検証対象から外す」「QUERY 不一致を deny にしない」だけ。
+    """
+    return tiers.classify(forms, service)
 
 
 def _is_state_changing(forms: tuple[str, ...], service) -> bool:
@@ -199,17 +203,26 @@ def _global_note(accounts_path: Path) -> str:
     )
 
 
-def _decide(effective_mode: str, body: str, notes: list[str]) -> dict:
-    """検証結果 (deny 相当の本文) を mode に応じた hook 出力へ変換する。
+def _decide(
+    effective_mode: str, body: str, notes: list[str], *, query_warn: bool = False
+) -> dict:
+    """検証結果 (deny 相当の本文) を mode / tier に応じた hook 出力へ変換する。
 
     `enforce` は従来どおり deny、`warn` は `additionalContext` で通知のみ。
     判定そのもの (何を問題とみなすか) は mode に依らず同じで、変わるのは
     「止めるか / 伝えるだけか」だけ。
+
+    `query_warn` は「検証を起動したセグメントが全て QUERY tier (リモート read) だった」
+    場合に立つ。mode=enforce でも deny せず `additionalContext` で通す — 止めるのは
+    書込系だけ、という判定表の唯一の緩和方向 (`core/tiers.py`)。mode=warn は全 tier を
+    warn にするので mode 側の header が優先される (二重に前置きしない)。
     """
     parts = [body] + [n for n in notes if n]
     text = "\n\n".join(parts)
     if effective_mode == mode.WARN:
         return output.warn(mode.WARN_HEADER + "\n\n" + text)
+    if query_warn:
+        return output.warn(tiers.QUERY_WARN_HEADER + "\n\n" + text)
     return output.deny(text + "\n\n" + mode.DENY_HINT)
 
 
@@ -259,9 +272,13 @@ def _analyze_command(
 ) -> tuple[list[tuple], list]:
     """コマンドを分解し (targets, switching) を返す。
 
-    targets は検証対象 (non-readonly) の (svc, cands, inline_env) リスト。cands の
-    各要素は (元の候補, global option を剥がした候補) の組で、前者は deny 文面の
+    targets は検証対象 (non-readonly) の (svc, cands, inline_env, ctx, tier) リスト。
+    cands の各要素は (元の候補, global option を剥がした候補) の組で、前者は deny 文面の
     検出コマンド表示、後者は self-remediation 判定に使う。
+
+    tier は `core/tiers.py` の QUERY / WRITE。同じエントリに畳まれたセグメントの
+    **最も厳しい側**を採る (`gh pr list && gh pr create` は WRITE)。READONLY の
+    セグメントは従来どおり targets に入らない。
     switching はアカウント状態を変えうるセグメント (STATE_CHANGING) を含む service の
     リスト (重複なし、出現順)。readonly 扱いのセグメント (`gh auth login` /
     `aws sso login` 等) も switching には含める — 検証はしないが、実行後に
@@ -280,24 +297,27 @@ def _analyze_command(
     に渡しコマンド実行時と同条件で検証する。
 
     trace: `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ非 None。各セグメントの
-    (segment, service, readonly) を `trace["segments"]` に追記する
+    (segment, service, readonly, tier) を `trace["segments"]` に追記する
     (判定表そのものには影響しない、観測専用)。
     """
     order: list = []
     cand_map: dict = {}
+    tier_map: dict = {}
     switching: list = []
     for cand, inline_env in extract_candidates(command):
         svc = _match_service(cand)
         # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
         # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
         forms = _candidate_forms(cand, svc)
-        is_ro = svc is not None and _is_readonly(forms, svc)
+        tier = _segment_tier(forms, svc) if svc is not None else None
+        is_ro = tier == tiers.READONLY
         if trace is not None:
             trace["segments"].append(
                 {
                     "segment": cand,
                     "service": _service_name(svc) if svc is not None else None,
                     "readonly": is_ro,
+                    "tier": tier,
                 }
             )
         # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
@@ -317,12 +337,20 @@ def _analyze_command(
         key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
         if key not in cand_map:
             cand_map[key] = []
+            tier_map[key] = tier
             order.append(key)
+        elif tier == tiers.WRITE:
+            # 同じエントリに畳まれたセグメントは最も厳しい tier を採る。tier を
+            # grouping key に入れて分ける手もあるが、それだと同じ service を 2 回
+            # verify して warn と deny を同時に返すことになる。
+            tier_map[key] = tiers.WRITE
         cand_map[key].append((cand, forms[-1]))
     targets: list = []
     for key in order:
         svc, env_items, ctx_items = key
-        targets.append((svc, cand_map[key], dict(env_items), dict(ctx_items)))
+        targets.append(
+            (svc, cand_map[key], dict(env_items), dict(ctx_items), tier_map[key])
+        )
     return targets, switching
 
 
@@ -421,6 +449,16 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if not targets:
         return None
 
+    # 検証を起動したセグメントが**全て QUERY tier** (リモート read) なら、不一致でも
+    # 止めずに警告だけ返す (`core/tiers.py`)。accounts.local.json を読む前に決まる
+    # deny のうち「未設定」もこれに従う — 読むだけのコマンドのために設定を強制すると、
+    # install 直後の全プロジェクトで deny が始まる離脱要因に逆戻りするため。
+    # **競合 (複数パス) と JSON 破損は tier に関係なく deny のまま**にする。
+    # そちらは「アカウントが合っていない」ではなく「どの設定が効くか決められない /
+    # 設定が壊れている」状態で、読むだけでも判定の土台が無い (かつ bare な状態確認
+    # コマンドは READONLY なのでデッドロックにもならない)。
+    query_only = all(tier == tiers.QUERY for _svc, *_r, tier in targets)
+
     # モードは env → accounts.local.json の "$mode" → enforce の順で決まる
     # (`core/mode.py`)。env が off なら**ファイルを読む前に**抜ける — 検証しない
     # のだから accounts.local.json の有無も CLI の状態も見る必要がない。
@@ -471,7 +509,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 f"\n\n全プロジェクト共通の既定にするには {global_path} を"
                 "作成してください (プロジェクト側の設定が優先されます)。"
             )
-        return _decide(pre_file_mode, msg, mode_notes)
+        # 未設定はファイルが**どこにも無い**状態なので、"$readonly" で従来挙動に
+        # 戻す余地はない (読むファイルが無い) → 既定 (warn) で判断する。
+        return _decide(pre_file_mode, msg, mode_notes, query_warn=query_only)
 
     try:
         accounts = json.loads(accounts_path.read_text(encoding="utf-8"))
@@ -504,24 +544,49 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if effective_mode == mode.OFF:
         return _notes_only(mode_notes)
 
+    # "$readonly" も同じタイミングで読める。`deny` なら QUERY を WRITE と同じに扱う
+    # (0.13.0 までの挙動)。
+    readonly_policy, policy_note = tiers.policy_from_accounts(accounts)
+    if policy_note:
+        mode_notes.append(policy_note)
+
     try:
         accounts_mtime = accounts_path.stat().st_mtime
     except OSError:
         accounts_mtime = 0.0
 
+    # errors は deny 相当 (WRITE tier)、query_errors は allow + 警告相当 (QUERY tier)。
+    # 同じ list に混ぜて後から分けられないのは、どちらに倒すかが**セグメントの
+    # tier ごと**に決まるため (`gh pr list && aws s3 rm ...` は aws だけが deny)。
     errors: list[str] = []
+    query_errors: list[str] = []
     remediation_notes: list[str] = []  # 出現順・重複なし
-    for svc, cands, inline_env, ctx in targets:
+    for svc, cands, inline_env, ctx, tier in targets:
+        # `"$readonly": "deny"` なら QUERY も止める側に寄せる。
+        problems = (
+            query_errors
+            if tier == tiers.QUERY and readonly_policy == tiers.POLICY_WARN
+            else errors
+        )
+        stops = problems is errors
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
-            errors.append(
+            problems.append(
                 f'{accounts_path} に "{svc.ACCOUNT_KEY}" キーがありません。'
-                "期待値が無いと照合できないため deny します。\n"
+                + (
+                    "期待値が無いと照合できないため deny します。\n"
+                    if stops
+                    else "期待値が無いと照合できません (リモート read のみの"
+                    "コマンドなので実行は止めません)。\n"
+                )
                 + _missing_key_hint(svc.ACCOUNT_KEY)
             )
             continue
 
         if not isinstance(entry, (str, dict)):
+            # **値の型不正は tier に関係なく deny** (競合 / JSON 破損と同じクラス)。
+            # 「アカウントが合っていない」ではなく「期待値として読めない物が書かれて
+            # いる」状態で、読むだけのコマンドで黙って通すと設定のバグが隠れる。
             errors.append(
                 f'{accounts_path} の "{svc.ACCOUNT_KEY}" 値は文字列または '
                 f'オブジェクトであるべきです (現在: {type(entry).__name__})。'
@@ -552,8 +617,11 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # 予算切れの判定は **CLI を起動する直前** に置く。cache hit と
         # self-remediation は subprocess を起動しないので、予算が尽きていても
         # そのまま通してよい (上の continue で先に抜けている)。
+        # QUERY tier は不一致でも止めないので、「検証しきれなかった」ことを理由に
+        # 止めるのも筋が通らない (知っていても通す判定表なのに、知らないから止める
+        # のは非対称)。警告側に回す。
         if budget.expired():
-            errors.append(_budget_expired_error(svc.ACCOUNT_KEY))
+            problems.append(_budget_expired_error(svc.ACCOUNT_KEY, stops=stops))
             continue
 
         # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
@@ -574,7 +642,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                     remediation_notes.append(note_text)
             # D14: どのセグメントが検証を起動したかを deny reason に併記し、
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
-            errors.append(
+            problems.append(
                 f"{err}\n(検出コマンド: {', '.join(orig for orig, _norm in cands)})"
             )
         elif not switching_here:
@@ -585,18 +653,29 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
 
-    if errors:
+    def _assemble(problems: list[str]) -> str:
         # 同一サービスが複数 env で検証対象になると env 非依存のエラー
         # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
         # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
-        body = "\n\n".join(dict.fromkeys(errors))
+        body = "\n\n".join(dict.fromkeys(problems))
         for note_text in remediation_notes:
             body = body + "\n\n" + note_text
         if source_note:
             body = source_note + "\n\n" + body
         if note:
             body = body + "\n\n" + note
-        return _decide(effective_mode, body, mode_notes)
+        return body
+
+    if errors:
+        # deny するときは **deny の理由だけ**を本文にする。同じコマンド行に QUERY の
+        # 不一致があっても、それは止めていない話なので混ぜない (止められた理由が
+        # 読み取れなくなる)。QUERY 側は deny が解消した次の実行で警告として出る。
+        return _decide(effective_mode, _assemble(errors), mode_notes)
+
+    if query_errors:
+        return _decide(
+            effective_mode, _assemble(query_errors), mode_notes, query_warn=True
+        )
 
     # warn は deprecation note が出るときのみ発火させる。verify 成功時は
     # source_note (親継承 / グローバル既定) 単独では warn を出さず silent

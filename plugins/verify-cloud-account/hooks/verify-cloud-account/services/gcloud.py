@@ -47,6 +47,25 @@ READONLY = [
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gcloud\s+(--version|--help|version|help)\b",
 ]
+# 認証情報を出力する形。READONLY / QUERY を取り消して WRITE 扱いにする。
+# どちらも READONLY には載っていない (= 現状も検証対象) が、**形そのものが開示**で
+# あることを宣言側に残す。READONLY の carve-out (`application-default` の
+# login / revoke / set-quota-project だけを許す negative list) を将来広げたときに
+# 素通しへ戻らないようにするため。
+DISCLOSING = [
+    (rf"^gcloud\s+{_TRACK}auth\s+print-(access|identity)-token(?=\s|$)", frozenset()),
+    (
+        rf"^gcloud\s+{_TRACK}auth\s+application-default\s+print-access-token(?=\s|$)",
+        frozenset(),
+    ),
+]
+# リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
+# **サブコマンドの位置**にある `list` / `describe` / `get-iam-policy` だけを見る
+# (`gcloud ... --format=list` のような option の値や引用符の中に現れた同じ語を
+# 拾わないため)。CLI 名直後の global option は dispatcher が剥がした形で照合される。
+QUERY = [
+    rf"^gcloud\s+{_TRACK}(?:[a-z][\w-]*\s+)*(list|describe|get-iam-policy)(?=\s|$)",
+]
 # アクティブ project / account を変えうるコマンド。dispatcher が検出すると gcloud の
 # 成功 cache を破棄する。`configurations create` は既定で作成した configuration を
 # activate する。`init` は対話的に account / project を設定し直す。

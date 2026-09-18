@@ -1,5 +1,119 @@
 # Changelog
 
+## 0.14.0
+
+内部バックログの精査分 3 件。**判定機構そのものを変えた**ので、判定表の変更点を
+先に書く:
+
+- **緩和は 1 箇所だけ**: リモートを読むだけのコマンド (QUERY tier) の不一致・
+  キー未記載・未設定が、**deny → warn + allow** になった
+- **それ以外は厳格化**: 認証情報を出力する形 / option (DISCLOSING) が READONLY を
+  素通ししていたのを検証対象に戻した。想定外の option が付いた READONLY 形は
+  QUERY に降格する (deny ではなく「検証は走らせる」)
+
+### 1. セグメントを 3 tier に分ける (`core/tiers.py` 新設)
+
+従来は「READONLY なら素通し / それ以外は不一致で deny」の 2 値だった。
+
+| tier | 不一致・未設定のとき | 例 |
+|---|---|---|
+| `READONLY` | 検証しない | `gh auth status` / `firebase use` / `aws sso login` / `--version` |
+| `QUERY` | **allow + `additionalContext` で「現在=X 期待=Y」** | `gh pr list` / `gh api` の GET / `aws s3 ls` / `gcloud ... list` / `kubectl get` |
+| `WRITE` (既定) | deny | `gh pr create` / `firebase deploy` / `kubectl apply` |
+
+`gh pr list` / `aws s3 ls` は資源を変更しないのに deny され、回復手段として案内する
+`gh auth switch` は**ユーザー全体の CLI 状態を変える**。読むためにそこまで要求するのは
+過剰で、離脱の直接要因になっていた。QUERY tier は検証を走らせたうえで実行は止めず、
+切替案内を含む本文 (`verify()` が返す文面をそのまま流用) を通知する。
+
+- 同じコマンド行に write が混ざれば厳しい側を採る (`gh pr list && gh pr create` は deny)
+- QUERY の不一致は cache しない (従来どおり「成功のみ cache」)
+- 予算切れ (検証しきれなかった) も QUERY では警告に倒す — 不一致でも通す判定表なのに
+  「知らないから止める」のは非対称だから
+- **`accounts.local.json` に `"$readonly": "deny"` を書くと 0.13.0 までの挙動に戻る**
+  (QUERY を WRITE と同じに扱う)。`"$mode"` と同じ予約キーで、builder は値を書かない。
+  不正な値は `deny` として扱う (fail-closed)
+- **設定が壊れている / 曖昧なときは tier に関係なく deny のまま**: 複数パス競合 /
+  JSON 不正 / 期待値の型不正。「どの設定が効くか決まらない」状態では読むだけでも
+  判定の土台が無く、引数なしの状態確認コマンドは READONLY なのでデッドロックにも
+  ならない
+
+### 2. 認証情報を出力する形 / option を READONLY から取り消す (DISCLOSING)
+
+READONLY が「CLI 名からの前方一致 regex + option 無審査」だったため、
+**allow-list に載せたコマンドが option 次第で開示に化ける**穴が素通ししていた:
+
+| サービス | 素通ししていた形 |
+|---|---|
+| GitHub | `gh auth status --show-token` (`-t`。連結形 `-at` も) / `gh auth list --show-token` |
+| Kubernetes | `kubectl config view --raw` / `kubectl cluster-info dump` |
+| AWS | `aws configure get aws_secret_access_key` / `aws_session_token` |
+| Firebase | `firebase login:ci` (CI 用トークンを出力する) |
+
+`DISCLOSING` に一致した形は READONLY / QUERY を取り消して WRITE 扱いにする
+(判定順は DISCLOSING → READONLY → QUERY → WRITE)。すでに検証対象だった
+`gh auth token` / `aws configure export-credentials` / `aws sts get-session-token` /
+`gcloud auth print-access-token` 系も、**形そのものが開示**であることを宣言側に
+書いた (将来 READONLY を広げたときに素通しへ戻らないようにするため)。
+
+- **一致していれば通る**ので、開示コマンドが恒久的に使えなくなるわけではない
+  (「期待したアカウントで認証情報を見る」ことだけが許される = remediation loop に
+  ならない)
+- 値の真偽は見ない。`--show-token=false` も「書かれている」として厳格側に倒す —
+  真偽で緩めると `--skip-ssh-key=false` ですり抜けた穴を逆向きに作り直すことになる
+
+### 3. READONLY を「option まで含めて安全と言える形」の宣言にする
+
+同型の穴が反復していた根本は「コマンド名の allow-list」構造そのもの。各 service が
+`READONLY_SAFE_OPTIONS` (READONLY の形 → 許容する option 名の集合) を宣言でき、
+**宣言外の option が付いていたら QUERY に降格**する (= 検証は走るが止めない):
+
+- `kubectl config view --flatten` / `gh auth status --json` /
+  `aws configure import --csv ...` が対象 (いずれも deny ではなく警告)
+- 宣言の無い READONLY エントリは**従来どおり option 無審査**。認証取得系
+  (`gh auth login` / `aws sso login` / `gcloud auth login` / `firebase login`) には
+  宣言しない — 未ログインのデッドロックを解くためのエントリで、降格させると
+  deny 文面が案内するコマンド自身が検証予算を使い始める
+- option の検出は `cli_options.find_option_names` に一本化した (分離形 / `=` 形 /
+  短縮連結 `-at` / 値 token の消費)
+- `gh api` は option 次第で write になるので、**安全な option の allow-list**で
+  読み取りを証明する (`-X/--method` が GET・HEAD かつ body 系 option 無し、かつ
+  全 option が列挙済み)。危険な option の denylist にすると、gh に option が
+  増えるたび黙って穴が開く
+
+**表は推測で広げていない。** 列挙は実際に観測された形に限り、未知は「未知として
+降格」で扱う (思いつきで「たぶん危ない option」を足すと誤 deny 側に穴が空く)。
+
+### 既知の制限 (新規)
+
+- QUERY は**コマンド形**で判定するため、`aws secretsmanager get-secret-value` /
+  `aws ssm get-parameter --with-decryption` のような**リモートの secret 読み出し**も
+  QUERY に入る (期待外アカウントでも警告のみで通る。0.13.0 までは deny)。
+  止めたいプロジェクトは `"$readonly": "deny"` を設定する。service ごとに表を
+  細分化する案は今後の課題
+- 未知の option は「安全と証明できない」側に倒すので、CLI に読み取り option が
+  増えると (実際は読み取りでも) WRITE として検証される
+
+### テスト
+
+- 全 suite 1024 件 green (0.13.0 時点 967 件から +57)
+- 新規: `tests/test_tiers.py` (tier 分類の表 = 5 service × READONLY / QUERY /
+  WRITE / DISCLOSING の代表形、判定順、宣言の drift 検出、`"$readonly"` の解決)、
+  dispatcher / services / cli_options / builder への追加
+- **旧版との出力ペア比較で退行を測った**。tier 分類は READONLY の regex を残したまま
+  実効 verdict を変えるので、「旧版が拾えていた入力を落とした」型の退行は mutation
+  では検出できない。merge 済みの旧版と新版で同じコーパス (テスト / README / 判定表に
+  現れる 731 コマンド) を流し、差分を「意図した緩和 94 / 意図した厳格化 15 /
+  未宣言 option の降格 3 / 説明不能 0」に分類した。**検証が消える方向
+  (旧 verify → 新 readonly) は 0 件**
+- 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピーで
+  確認した (開示 option の宣言除去 / QUERY 境界の `\b` 化 / `gh api` の option
+  allow-list 除去 / QUERY 警告の無効化 / 逆に全て警告化 / DISCLOSING を QUERY の
+  後ろへ移動 / option 審査の無効化 / 未設定経路の tier 判定を「どれか QUERY なら」に
+  緩める の 8 種)。`gh api` の body option 除外だけは
+  allow-list が同じ入力を先に弾くため mutation が空振りする (= 二重の防御) ので、
+  2 層が矛盾しないことを disjointness テストで固定した
+
 ## 0.13.0
 
 内部バックログの精査分 2 件 (いずれも「使い始めてすぐ外したくなる」= 離脱率低減)。

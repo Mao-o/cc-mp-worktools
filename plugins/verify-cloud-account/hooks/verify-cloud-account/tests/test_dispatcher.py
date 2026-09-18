@@ -141,7 +141,7 @@ class TestRouting(BaseWithTmpProject):
         )
 
     def test_match_without_accounts_returns_deny(self):
-        result = dispatch("gh pr list", str(self.project_dir))
+        result = dispatch("gh pr create", str(self.project_dir))
         self.assertIsNotNone(result)
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
@@ -153,7 +153,7 @@ class TestAccountsFile(BaseWithTmpProject):
         (self.new_dir / "accounts.local.json").write_text(
             "{not json", encoding="utf-8"
         )
-        result = dispatch("gh pr list", str(self.project_dir))
+        result = dispatch("gh pr create", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("JSON", out["permissionDecisionReason"])
@@ -162,21 +162,21 @@ class TestAccountsFile(BaseWithTmpProject):
         (self.new_dir / "accounts.local.json").write_text(
             '["a", "b"]', encoding="utf-8"
         )
-        result = dispatch("gh pr list", str(self.project_dir))
+        result = dispatch("gh pr create", str(self.project_dir))
         self.assertEqual(
             result["hookSpecificOutput"]["permissionDecision"], "deny"
         )
 
     def test_missing_key_returns_deny(self):
         self._write_accounts({"aws": "123456789012"})
-        result = dispatch("gh pr list", str(self.project_dir))
+        result = dispatch("gh pr create", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("github", out["permissionDecisionReason"])
 
     def test_invalid_value_type_returns_deny(self):
         self._write_accounts({"github": 12345})
-        result = dispatch("gh pr list", str(self.project_dir))
+        result = dispatch("gh pr create", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("文字列または", out["permissionDecisionReason"])
@@ -213,7 +213,7 @@ class TestPathMigration(BaseWithTmpProject):
         """deprecated パスで verify 失敗時は deny reason に migration 案内付加。"""
         self._write_deprecated_accounts({"github": "Mao-o"})
         with mock.patch("services.github.verify", return_value="GitHub 不一致"):
-            result = dispatch("gh pr list", str(self.project_dir))
+            result = dispatch("gh pr create", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         reason = out["permissionDecisionReason"]
@@ -300,7 +300,7 @@ class TestServiceInteractions(BaseWithTmpProject):
             "services.github.verify",
             return_value="GitHub アカウント不一致: 現在=x, 期待=y",
         ):
-            result = dispatch("gh pr list", str(self.project_dir))
+            result = dispatch("gh pr create", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("不一致", out["permissionDecisionReason"])
@@ -464,7 +464,9 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         self._write_firebaserc()
         self._write_configstore("prod")
         fake = SimpleNamespace(stdout="", stderr="Error: not logged in\n", returncode=1)
-        for cmd in ("firebase login", "firebase login:ci --no-localhost", "firebase logout"):
+        # `login:ci` はここに置かない — CI 用 refresh token を stdout に出すため
+        # DISCLOSING (検証対象) に移した (test_disclosing_options_revoke_readonly)。
+        for cmd in ("firebase login", "firebase login --no-localhost", "firebase logout"):
             with self.subTest(cmd=cmd):
                 with mock.patch("subprocess.run", return_value=fake) as run:
                     self.assertIsNone(dispatch(cmd, str(self.project_dir)))
@@ -570,7 +572,7 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
         """記載済み service だけのファイルでも、未記載 service は CLI を呼ばず deny。"""
         self._write_accounts({"aws": "123456789012"})
         with mock.patch("subprocess.run") as run:
-            reason = self._deny_reason("gh pr list")
+            reason = self._deny_reason("gh pr create")
         self.assertFalse(run.called, "未記載 service で CLI を起動してはならない")
         self.assertIn('"github" キーがありません', reason)
 
@@ -582,7 +584,7 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
         `init` は exit 2 で拒否される (builder `_cmd_init`)。
         """
         self._write_accounts({"aws": "123456789012"})
-        reason = self._deny_reason("gh pr list")
+        reason = self._deny_reason("gh pr create")
         self.assertIn("accounts_builder.py set --service github", reason)
         self.assertIn("--from-cli", reason)
         self.assertNotIn("accounts_builder.py init --service", reason)
@@ -596,7 +598,7 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
         通る形を渡すと必ずそう使われるので、dry-run + 確認の 2 段で案内する。
         """
         self._write_accounts({"aws": "123456789012"})
-        reason = self._deny_reason("gh pr list")
+        reason = self._deny_reason("gh pr create")
         self.assertIn("--from-cli --dry-run", reason)
         self.assertNotIn("--from-cli --commit", reason)
         self.assertIn("確認してから", reason)
@@ -604,11 +606,11 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
     def test_missing_key_deny_does_not_promise_allow(self):
         """「検証対象外」= allow の約束を deny 文面に残さない。"""
         self._write_accounts({"aws": "123456789012"})
-        self.assertNotIn("検証対象外", self._deny_reason("gh pr list"))
+        self.assertNotIn("検証対象外", self._deny_reason("gh pr create"))
 
     def test_unset_accounts_deny_does_not_promise_allow(self):
         """accounts.local.json 自体が無い場合の deny 文面も同様。"""
-        reason = self._deny_reason("gh pr list")
+        reason = self._deny_reason("gh pr create")
         self.assertNotIn("検証対象外", reason)
         self.assertIn("キーは全て必要です", reason)
 
@@ -755,7 +757,7 @@ class TestVerificationMode(BaseWithTmpProject):
 
     def _dispatch_mismatch(self):
         with mock.patch("services.github.verify", return_value=self.MISMATCH):
-            return dispatch("gh pr list", str(self.project_dir))
+            return dispatch("gh pr create", str(self.project_dir))
 
     def test_default_is_enforce(self):
         """env / "$mode" 無しでは従来どおり deny。"""
@@ -871,6 +873,265 @@ class TestVerificationMode(BaseWithTmpProject):
         self.assertIn("未設定", out["additionalContext"])
 
 
+class TestReadOnlyTierIsWarnOnly(BaseWithTmpProject):
+    """QUERY tier (リモート read) は不一致でも止めず警告だけ返す — v0.14.0。
+
+    **判定表を緩めるのはこの 1 箇所だけ**なので、緩める側 (QUERY が warn になること)
+    と緩めない側 (WRITE / DISCLOSING / 設定が壊れている系は deny のまま) の両方を
+    固定する。片方だけだと、`query_warn` を常に True にする / 常に False にする
+    どちらの壊し方も検出できない。
+    """
+
+    MISMATCH = "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+
+    def _out(self, command, verify_result=None):
+        with mock.patch("services.github.verify", return_value=verify_result) as v:
+            result = dispatch(command, str(self.project_dir))
+        self.verify_mock = v
+        return result
+
+    def test_query_mismatch_allows_with_warning(self):
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out, "リモート read を deny している")
+        self.assertIn("現在=other", out["additionalContext"])
+        self.assertIn("期待=Mao-o", out["additionalContext"])
+
+    def test_query_warning_explains_the_escape_hatch_back_to_deny(self):
+        self._write_accounts({"github": "Mao-o"})
+        context = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"][
+            "additionalContext"
+        ]
+        self.assertIn('"$readonly"', context)
+        self.assertIn("書込系コマンドは deny", context)
+
+    def test_write_mismatch_still_denies(self):
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh pr create", self.MISMATCH)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_disclosing_options_revoke_readonly(self):
+        """開示 option / 形が付くと READONLY を取り消して deny 側に回る。"""
+        self._write_accounts(
+            {
+                "github": "Mao-o",
+                "kubectl": "ctx",
+                "aws": "123456789012",
+                "firebase": "proj-dev",
+            }
+        )
+        rows = [
+            ("github", "gh auth status --show-token"),
+            ("github", "gh auth status -t"),
+            ("github", "gh auth token"),
+            ("kubectl", "kubectl config view --raw"),
+            ("kubectl", "kubectl cluster-info dump"),
+            ("aws", "aws configure get aws_secret_access_key"),
+            ("aws", "aws configure export-credentials --profile prod"),
+            ("firebase", "firebase login:ci"),
+        ]
+        for key, command in rows:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertTrue(v.called, "開示形が検証されていない (素通し)")
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"],
+                    "deny",
+                    "開示形の不一致は止める",
+                )
+
+    def test_disclosing_allows_when_account_matches(self):
+        """一致していれば通る (= remediation loop にならない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        self.assertIsNone(self._out("gh auth status --show-token", None))
+
+    def test_unaudited_option_runs_verify_but_only_warns(self):
+        """宣言外の option が付いた READONLY 形は QUERY に降格する (deny しない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh auth status --json", self.MISMATCH)["hookSpecificOutput"]
+        self.assertTrue(self.verify_mock.called, "降格したのに検証していない")
+        self.assertNotIn("permissionDecision", out)
+
+    def test_query_mismatch_is_not_cached(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=self.MISMATCH) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            dispatch("gh pr list", str(self.project_dir))
+        self.assertEqual(v.call_count, 2, "不一致 (警告) を cache している")
+
+    def test_query_success_is_cached(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assert_cache_published("gh pr list", v)
+
+    def test_unconfigured_project_warns_for_query(self):
+        """未設定でもリモート read は止めない (install 直後の離脱要因を消す)。"""
+        out = self._out("gh pr list", None)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("accounts.local.json", out["additionalContext"])
+
+    def test_unconfigured_project_still_denies_write(self):
+        out = self._out("gh pr create", None)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_unconfigured_project_denies_a_chain_that_contains_a_write(self):
+        """未設定の判定は**ファイルを読む前**に確定するので、そこでも tier を見る。
+
+        この経路は per-target のループより手前で return するため、
+        `test_chained_query_and_write_denies` (accounts あり) では踏めない。
+        同一 service の混在 (1 target に畳まれて WRITE になる) と、別 service の
+        混在 (target が 2 つ) の両方を見る — 後者だけが「全 target が QUERY か」
+        (`all`) と「どれか QUERY か」(`any`) を区別できる。
+        """
+        for command in (
+            "gh pr list && gh pr create",
+            "gh pr list && gcloud run deploy svc",
+        ):
+            with self.subTest(command=command):
+                result = dispatch(command, str(self.project_dir))
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+    def test_missing_key_warns_for_query(self):
+        self._write_accounts({"aws": "123456789012"})
+        out = self._out("gh pr list", None)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn('"github" キーがありません', out["additionalContext"])
+        # 止めていないのに「deny します」と書くと文面が結果と矛盾する。
+        self.assertNotIn("deny します", out["additionalContext"])
+        self.assertIn("実行は止めません", out["additionalContext"])
+
+    def test_broken_config_still_denies_for_query(self):
+        """**設定が壊れている / 曖昧な**ときは tier に関係なく deny のまま。
+
+        「アカウントが合っていない」のではなく「どの設定が効くか決まらない」状態で、
+        読むだけでも判定の土台が無い。引数なしの状態確認コマンドは READONLY なので
+        デッドロックにもならない。
+        """
+        cases = {
+            "malformed": lambda: (self.new_dir / "accounts.local.json").write_text(
+                "{not json", encoding="utf-8"
+            ),
+            "non_object": lambda: (self.new_dir / "accounts.local.json").write_text(
+                '["a"]', encoding="utf-8"
+            ),
+            "invalid_value_type": lambda: self._write_accounts({"github": 12345}),
+            "path_conflict": lambda: (
+                self._write_accounts({"github": "new"}),
+                self._write_deprecated_accounts({"github": "old"}),
+            ),
+        }
+        for name, setup in cases.items():
+            with self.subTest(case=name):
+                for path in (
+                    self.new_dir / "accounts.local.json",
+                    self.claude_dir / "accounts.local.json",
+                ):
+                    if path.exists():
+                        path.unlink()
+                setup()
+                result = dispatch("gh pr list", str(self.project_dir))
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"], "deny", name
+                )
+
+    def test_chained_query_and_write_denies(self):
+        """同じ service に QUERY と WRITE が混ざったら厳しい側 (deny)。"""
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh pr list && gh pr create", self.MISMATCH)[
+            "hookSpecificOutput"
+        ]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_query_service_does_not_soften_another_services_write(self):
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        with mock.patch("services.github.verify", return_value=self.MISMATCH), \
+             mock.patch("services.gcloud.verify", return_value="GCP 不一致"):
+            out = dispatch(
+                "gh pr list && gcloud run deploy svc", str(self.project_dir)
+            )["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("GCP 不一致", reason)
+        self.assertNotIn(
+            "現在=other",
+            reason,
+            "止めていない QUERY の不一致を deny の理由に混ぜている",
+        )
+
+    def test_readonly_policy_deny_restores_the_old_behaviour(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "deny"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_readonly_policy_warn_is_the_default_value(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "warn"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+
+    def test_invalid_readonly_policy_denies_with_note(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "yes"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn('"$readonly"', out["permissionDecisionReason"])
+
+    def test_readonly_key_is_not_verified_as_a_service(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "warn"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(dispatch("gh pr create", str(self.project_dir)))
+        self.assertEqual(v.call_args[0][0], "Mao-o")
+
+    def test_warn_mode_header_wins_over_query_header(self):
+        """mode=warn は全 tier を warn にするので、前置きを二重にしない。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"VERIFY_CLOUD_ACCOUNT_MODE": "warn"}):
+            context = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"][
+                "additionalContext"
+            ]
+        self.assertIn("warn モード", context)
+        self.assertNotIn("リモート read のみ", context)
+
+    def test_off_mode_skips_query_verification(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"VERIFY_CLOUD_ACCOUNT_MODE": "off"}):
+            with mock.patch("services.github.verify") as v:
+                self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertFalse(v.called)
+
+    def test_expired_budget_warns_instead_of_denying_for_query(self):
+        """QUERY は不一致でも通すので、検証しきれなかったことを理由に止めない。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("core.budget.expired", return_value=True):
+            with mock.patch("services.github.verify") as v:
+                out = dispatch("gh pr list", str(self.project_dir))[
+                    "hookSpecificOutput"
+                ]
+        self.assertFalse(v.called)
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("予算", out["additionalContext"])
+        self.assertNotIn("deny します", out["additionalContext"])
+
+    def test_expired_budget_still_denies_write(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("core.budget.expired", return_value=True):
+            out = dispatch("gh pr create", str(self.project_dir))[
+                "hookSpecificOutput"
+            ]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_query_commands_are_verified_at_all(self):
+        """空振り防止: QUERY を「検証しない」にしてしまうと警告も出ない。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        rows = [("github", "gh pr list"), ("aws", "aws sso list-accounts -t x")]
+        for key, command in rows:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    self.assertIsNone(dispatch(command, str(self.project_dir)))
+                self.assertTrue(v.called, "QUERY が検証されていない")
+
+
 class TestGlobalDefaultAccounts(BaseWithTmpProject):
     """グローバル既定 (`$HOME/.claude/verify-cloud-account/accounts.local.json`)。"""
 
@@ -900,7 +1161,7 @@ class TestGlobalDefaultAccounts(BaseWithTmpProject):
     def test_global_default_deny_names_the_file(self):
         self._write_global({"github": "global-user"})
         with mock.patch("services.github.verify", return_value="不一致"):
-            result = dispatch("gh pr list", str(self.project_dir))
+            result = dispatch("gh pr create", str(self.project_dir))
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("グローバル既定", reason)
         self.assertIn(str(self.global_dir / "accounts.local.json"), reason)
@@ -929,14 +1190,14 @@ class TestGlobalDefaultAccounts(BaseWithTmpProject):
         self._write_global({"$mode": "off"})
         self._write_accounts({"github": "project-user"})
         with mock.patch("services.github.verify", return_value="不一致") as verify:
-            result = dispatch("gh pr list", str(self.project_dir))
+            result = dispatch("gh pr create", str(self.project_dir))
         self.assertTrue(verify.called, "global の off がプロジェクト側に漏れている")
         self.assertEqual(
             result["hookSpecificOutput"]["permissionDecision"], "deny"
         )
 
     def test_unconfigured_deny_mentions_the_global_path(self):
-        reason = dispatch("gh pr list", str(self.project_dir))[
+        reason = dispatch("gh pr create", str(self.project_dir))[
             "hookSpecificOutput"
         ]["permissionDecisionReason"]
         self.assertIn(str(self.global_dir / "accounts.local.json"), reason)
@@ -1014,7 +1275,7 @@ class TestAncestorLookup(unittest.TestCase):
         with mock.patch(
             "services.github.verify", return_value="GitHub 不一致"
         ):
-            result = dispatch("gh pr list", str(self.worktree_dir))
+            result = dispatch("gh pr create", str(self.worktree_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         reason = out["permissionDecisionReason"]
@@ -1047,7 +1308,7 @@ class TestAncestorLookup(unittest.TestCase):
 
     def test_no_ancestor_returns_unconfigured_deny(self):
         """親含め一切無い → 通常の「未設定」deny (親注釈なし)。"""
-        result = dispatch("gh pr list", str(self.worktree_dir))
+        result = dispatch("gh pr create", str(self.worktree_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         reason = out["permissionDecisionReason"]
@@ -1688,7 +1949,8 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
         "gcloud auth activate-service-account --key-file=key.json",
         "gcloud auth revoke",
         "firebase login",
-        "firebase login:ci",
+        # `firebase login:ci` は **ここに置かない** — CI 用 refresh token を stdout に
+        # 出す DISCLOSING な形なので検証対象に戻した (0.14.0)。
         "firebase logout",
         "npx firebase-tools login",
         "npx firebase-tools use",
@@ -1727,10 +1989,13 @@ class TestLoginCommandsReadonly(BaseWithTmpProject):
         self._patch_all_verify_to_deny()
         for cmd in (
             "aws sso-admin create-permission-set --name x",
-            "aws sso list-accounts --access-token t",
+            # `aws sso list-accounts` はリモート read なので QUERY tier
+            # (検証は走るが deny しない) に移した → TestReadOnlyTierIsWarnOnly 側で
+            # 「検証される」ことを assert する。
             "aws configure export-credentials --profile prod",
             "gh repo create foo",
             "gh auth token",
+            "firebase login:ci",
             # SSH 鍵のアップロードが起きうる login 形は readonly にしない (Codex R2 P1-1)
             "gh auth login",
             "gh auth login --web",
@@ -2095,7 +2360,8 @@ class TestLeadingGlobalOptions(BaseWithTmpProject):
             ("kubectl", "kubectl --kubeconfig k.yaml config view"),
             ("firebase", "firebase -P prod login"),
             ("firebase", "firebase --debug use"),
-            ("firebase", "npx firebase-tools --project prod login:ci"),
+            # `login:ci` は DISCLOSING に移したので readonly 行には置かない (0.14.0)。
+            ("firebase", "npx firebase-tools --project prod login"),
         ]
         for key, cmd in rows:
             with self.subTest(cmd=cmd):
@@ -2718,7 +2984,7 @@ class TestDebugTrace(BaseWithTmpProject):
     def test_trace_deny_decision_and_non_readonly_segment(self):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            result = dispatch("gh pr list", str(self.project_dir))
+            result = dispatch("gh pr create", str(self.project_dir))
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         trace = json.loads(buf.getvalue())
@@ -2765,7 +3031,7 @@ class TestDebugTrace(BaseWithTmpProject):
                 pass
 
         with contextlib.redirect_stderr(_BrokenStderr()):
-            result = dispatch("gh pr list", str(self.project_dir))
+            result = dispatch("gh pr create", str(self.project_dir))
         self.assertIsNotNone(result)
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")

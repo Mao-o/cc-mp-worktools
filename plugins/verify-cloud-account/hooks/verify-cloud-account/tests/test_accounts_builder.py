@@ -412,6 +412,31 @@ class TestShow(BaseBuilder):
         self.assertIn("warn", out)
         self.assertNotIn("[unknown service]", out)
 
+    def test_show_labels_reserved_readonly_policy_key(self):
+        """予約キー `"$readonly"` も service ではなく policy として表示する。"""
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"github": "Mao-o", "$readonly": "deny"}), encoding="utf-8"
+        )
+        with mock.patch(
+            "services.github.get_active_account",
+            return_value={"github.com": "Mao-o"},
+        ):
+            code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[readonly policy]", out)
+        self.assertIn("deny", out)
+        self.assertNotIn("[unknown service]", out)
+
+    def test_show_flags_invalid_readonly_policy_value(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(
+            json.dumps({"$readonly": "sometimes"}), encoding="utf-8"
+        )
+        code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("不正な値", out)
+
     def test_show_flags_invalid_mode_value(self):
         self.new_dir.mkdir(parents=True)
         self._new_path().write_text(
