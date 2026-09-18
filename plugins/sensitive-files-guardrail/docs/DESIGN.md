@@ -151,6 +151,34 @@ ask に倒す。
 Read/Edit handler の `ask_or_deny` は別 frozenset で `bypassPermissions` のみ
 deny に倒す (機密可能性があるものは ask 維持で bypass だけ deny する)。
 
+### lenient allow の開示 (`additionalContext`、0.33.0)
+
+公式 hooks reference の逐語 (2026-09-19 再確認): `permissionDecisionReason` は
+「For `"allow"` and `"ask"`, shown to the user but not Claude」。つまり上表で
+allow に倒した行では、**なぜ通ったのかが Claude にまったく伝わらない** —
+`ask_or_allow` の reason は組み立てても捨てられているのと同じだった。Claude に
+渡せる唯一の PreToolUse チャネルは `hookSpecificOutput.additionalContext`
+(「String added to Claude's context alongside the tool result」、挿入位置は
+tool result の隣) なので、lenient allow のときだけここに 1 文を載せる
+(`core/output.py::LENIENT_ALLOW_CONTEXT`)。
+
+| 項目 | 方針 |
+|---|---|
+| 判定 | **不変**。`permissionDecision` は出さない (素の allow と同じく通常の permission flow に委ねる)。明示 `"allow"` を出すとハーネスの確認をスキップさせる意味になり allow が強くなる = 判定境界の変更なので出さない |
+| 対象 | `ask_or_allow` が lenient に倒した経路のみ。静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には付けない |
+| 文面 | **固定 1 文**。command / path / 値は載せない (reason 側の minimal-info 原則と同じ)。reason 文字列を流用すると operand が混ざる |
+| 書き方 | 公式指針の逐語「Write the text as factual statements rather than imperative system instructions」に従い事実記述にする (命令形は prompt-injection 防御に当たって Claude ではなくユーザーに晒される) |
+
+トレードオフ (開示): lenient-allow は実測で全 Bash 呼出の 4 割強を占めるため、
+この note も同程度の頻度で付く。`permissionDecisionReason` にノイズを混ぜない
+設計判断 (`core/patterns.py`) と衝突しないのは、**1 文固定で操作対象を含まない**
+= 混入量が入力に依らず一定だから。伸ばす / 動的にする変更はこの前提を壊す。
+
+segment ループを跨ぐ持ち回りが必要なのは、lenient allow が `{}` 相当の allow で
+`decision_of` では素の allow と区別が付かないため
+(`handlers/bash_handler.py::handle` の `lenient_note`)。**判定は allow のまま**で、
+最後に note だけを載せ直す。
+
 ## Bash handler の対応文法範囲
 
 Bash handler の静的解析は **shlex.split (POSIX mode)** ベース。
@@ -499,15 +527,21 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   なので metadata-only 維持。
 - **`file` / `wc` / `du` / `tree` の「ファイル名リスト読込」オプション**
   (`file -f` / `--files-from`、`wc`/`du` の `--files0-from`、`tree --fromfile`
-  = `_METADATA_CONTENT_READING_OPTS`) を含む形も metadata-only から除外して
-  deny。これらは operand ファイルの **中身** を別パスのリストとして読み、その
-  名前 (= 中身) を stdout / エラーに echo するため。`file -f .env` は .env の
-  各行を `<行>: cannot open` でエラー出力し実値を漏らす (Codex P2 第2弾,
+  = `_METADATA_CONTENT_READING_OPTS`) を含む形も metadata-only から除外し、
+  **operand scan に回す**。これらは operand ファイルの **中身** を別パスのリスト
+  として読み、その名前 (= 中身) を stdout / エラーに echo するため。`file -f .env`
+  は .env の各行を `<行>: cannot open` でエラー出力し実値を漏らす (Codex P2 第2弾,
   2026-06-12)。`file .env` / `wc -l .env` (通常形、型判定・行数のみ) は安全で
   metadata-only 維持。分離形 (`-f .env`) / 値結合形 (`--files0-from=.env` /
-  `-f.env`) 両対応。
+  `-f.env`) 両対応。**除外 = deny ではない**: deny になるのは operand に機密 path
+  候補がある形だけで、`file -f list.txt` / `wc --files0-from=list.txt` や operand
+  の無い `file -f` は allow (`git ls-files -s` と同じ構造。0.33.0 実測、
+  `docs/MATRIX.md` の「実測ログ (条件付き metadata-only)」)。**リスト読込 option
+  が指す先の中身は静的に読まない**ので、`list.txt` が機密 path を含んでいても
+  判定材料にはならない。
 - `git -C dir check-ignore` のような global option 前置形は保守的に対象外
-  (従来通り operand scan → deny)。
+  (従来通り operand scan に回る = 機密 operand があるときだけ deny。
+  `git -C /repo rm --cached list.txt` は allow)。
 - **`git status` は allowlist から除外** — `-v` / `--verbose` が staged 変更の
   diff (機密の旧値/新値) を出力するため (`git status -v -- .env` で実値が漏れる)。
   option-gate するより allowlist から外す方が単純で穴も無い。`check-ignore`
@@ -540,7 +574,9 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   がそれらを deny する自己矛盾があった。いずれも内容を出力せず実ファイルも
   消さないため、確信 deny の条件 (機密 operand 確定 × 内容出力 / 破壊) に該当
   しない。plain `git rm` (作業ツリー削除) と `--pathspec-from-file` (operand の
-  中身を pathspec として読み不一致行を echo、`file -f` と同クラス) は deny 維持。
+  中身を pathspec として読み不一致行を echo、`file -f` と同クラス) は metadata-only
+  から除外し operand scan に回す (= 機密 operand があるときだけ deny。
+  `git rm list.txt` や operand の無い `git rm` は allow。0.33.0 実測)。
   書込み形 (`chmod 600 x > .env`) は safe_read 外のため residual metachar で
   従来通り ask_or_allow (echo と同じ、緩めない)。`git rm --cached -r` は index
   除去の範囲が広がるだけで内容出力も削除も無く allow、`touch -r` /
@@ -551,7 +587,8 @@ dirname realpath readlink echo printf`) と `_GIT_METADATA_SUBCOMMANDS`
   省略形の展開を自前実装せず、**既知の安全な option (`_GIT_RM_KNOWN_LONG_OPTS`
   完全一致 / `_GIT_RM_SAFE_SHORT_FLAGS` の束ね) 以外が 1 つでもあれば index-only
   と見なさない** fail-closed 規則にした。`--cached` 自体の省略形 (`--cache`) も
-  展開せず保守側 (通常経路 → deny) に倒れるだけで露出は無い。
+  展開せず保守側 (通常経路 = operand scan) に倒れるだけで露出は無い
+  (`git rm --cache .env` は deny、`git rm --cache list.txt` は allow)。
 
 ### 対応 (deny/allow 確定できる)
 
@@ -1248,6 +1285,26 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
   は正当なヘッダーとして比較する (Codex R2 P2-1 / R4 P2-2。当初の「`$` を含めば
   placeholder」はその repo の project スコープの include / exclude を黙って無効化
   していた)
+- **追記操作は Edit / Write ツールで行うよう案内する** (0.33.0、内部バックログ)。
+  block 直後に案内どおり `.gitignore` / `patterns.local.txt` へ追記しようとすると、
+  `echo '.env' >> .gitignore` のようなシェルリダイレクト形が PreToolUse(Bash) の
+  residual metachar 判定で `ask_or_allow` に落ちる (実測 0.32.0: default /
+  acceptEdits / dontAsk で ask、auto / bypassPermissions で allow)。deny では
+  ないので機能は損なわれないが、**block → 承認ダイアログ**の 2 段の摩擦になり、
+  「plugin が案内した手順を実行するのに plugin が承認を求める」形になる
+  (0.19.0 に `git rm --cached` を metadata-only へ入れて解消した自己矛盾と同型 —
+  そちらは既に allow なので今回の対象外)。
+  **判定表は 1 セルも変えず、案内する実行手段だけを変えた**: `.gitignore` /
+  `patterns.local.txt` への Edit / Write は機密パターンに一致しないため全 mode で
+  allow (実測 0.32.0)。リダイレクト形を lenient 側の特例にする案 (= 判定境界の
+  変更) は「deny 強制の特例を作らない」の裏返しとして allow 側の特例も増やさない
+  方針から採らない。reason に書くのは手段だけ (`Edit で追記`) で理由をここに置く
+  のは文字数予算の制約 (`_SHARED_RECIPE_NOTE` のコメント。床入力の余裕は
+  十数文字しかない)。再発検知は redact 側の
+  `tests/test_e2e.py::TestE2ERecommendedRemediesPassBashHook` —
+  reason 中の backtick コマンドを抽出して Bash hook に通す既存の仕組みに
+  `echo` / `printf` / `cat` / `tee` / `sed` を抽出語として足したので、案内文に
+  リダイレクト形が紛れ込んだ瞬間に落ちる
 
 ## 既知制限 (0.14.0 で整理、以降の変更は各項目に版を付記)
 

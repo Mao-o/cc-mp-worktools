@@ -69,7 +69,9 @@ segment 単位再評価へ移行)。
      完全一致 + 既知の安全な option 以外が無いとき。未知・省略形の ``--xxx``
      が 1 つでもあれば fail-closed で通常経路) も metadata-only。両 hook
      の reason が推奨する次善策を自分で deny していた自己矛盾の解消
-     (2026-08 精査)。plain ``git rm`` (作業ツリー削除) は deny 維持
+     (2026-08 精査)。plain ``git rm`` (作業ツリー削除) は metadata-only から
+     外れて operand scan に回る (= 機密 operand があるときだけ deny。
+     ``git rm <非機密>`` は allow)
    - operand scan: 各 path 候補について。候補は ``_find_path_candidates`` が
      コマンド別の option 知識 (``handlers/bash/command_specs.py``、0.22.0) で
      token 列を option / 値 / positional / redirect に字句分けして決める:
@@ -1122,6 +1124,14 @@ def handle(envelope: dict) -> dict:
     #    hard-stop / shlex 失敗の segment は pending_ask に格納して continue
     #    (他 segment の deny 検出を続ける)。
     pending_ask: dict | None = None
+    # lenient mode で ``ask_or_allow`` が allow に倒した事実を持ち運ぶ (0.33.0)。
+    # lenient allow は ``{}`` 相当の allow なので ``_decision_of`` では素の allow と
+    # 区別が付かず、この loop で捨てると ``additionalContext`` が消える。
+    # ``pending_ask`` に入る経路 (hard-stop / segment_too_large / shlex 失敗 /
+    # program_dynamic) はそのまま返るので、拾い漏れるのは ``_analyze_segment``
+    # 内部の ``ask_or_allow`` (opaque wrapper / residual metachar / shell keyword /
+    # glob 不確定 / normalize 失敗) だけ。判定は allow のまま変わらない。
+    lenient_note = ""
     for seg in segments:
         if _has_hard_stop(seg):
             # 0.25.0 (2026-08 精査): hard-stop でも、単純変数展開を placeholder に
@@ -1215,7 +1225,11 @@ def handle(envelope: dict) -> dict:
                     decision = "ask"
         if decision == "ask" and pending_ask is None:
             pending_ask = result
+        elif decision != "ask" and not lenient_note:
+            lenient_note = output.additional_context_of(result)
 
     if pending_ask is not None:
         return pending_ask
+    if lenient_note:
+        return output.make_allow(lenient_note)
     return output.make_allow()

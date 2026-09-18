@@ -25,9 +25,31 @@ systemMessage トップレベルは届かないため使用しない。
 
 ## allow の判定 (L4, 0.4.3)
 
-``make_allow()`` は ``{}`` を返す現行仕様だが、将来 Phase 0 spec が
+``make_allow()`` は既定で ``{}`` を返す現行仕様だが、将来 Phase 0 spec が
 ``permissionDecision: "allow"`` 明示出力に変わっても破綻しないよう、テストは
 ``is_allow(r)`` 述語で判定すること。
+
+## lenient allow の開示 (``additionalContext``、0.33.0)
+
+公式 hooks reference の逐語 (2026-09-19 再確認): ``permissionDecisionReason`` は
+「For ``"allow"`` and ``"ask"``, shown to the user but not Claude」。つまり
+``ask_or_allow`` が autonomous mode で allow に倒したとき、**なぜ通ったのかは
+Claude に一切伝わらない**。Claude に渡せる唯一の PreToolUse チャネルは
+``hookSpecificOutput.additionalContext`` (「String added to Claude's context
+alongside the tool result」) なので、lenient allow に限りここへ 1 文の事実記述
+(``LENIENT_ALLOW_CONTEXT``) を載せる。
+
+- **判定は不変**。``permissionDecision`` は出さない (``{}`` と同じく通常の
+  permission flow に委ねる)。明示 ``"allow"`` を出すと「ハーネスの確認を
+  スキップさせる」意味になり allow が強くなる = 判定境界の変更なので出さない
+- 文面は**固定文字列**。command / path / 値は載せない (reason 側の
+  minimal-info 原則と同じ。reason 文字列を流用すると operand が混ざる)
+- 公式の書き方指針の逐語: 「Write the text as factual statements rather than
+  imperative system instructions」。指示文ではなく事実記述にしてある
+- トレードオフ: lenient-allow は実測で全 Bash の 4 割強を占めるため、この note も
+  同程度の頻度で付く。``permissionDecisionReason`` にノイズを混ぜない設計判断
+  (``core/patterns.py``) と衝突しないのは、**1 文固定で操作対象を含まない**ため
+  (混入量が入力に依らず一定)。伸ばすときはこの前提を壊さないか確認する
 """
 from __future__ import annotations
 
@@ -59,6 +81,15 @@ TRUNCATE_MARKER = "\n...[truncated]"
 # 倒して操作性を優先する。機密 path 確定 match (``make_deny``) と Read/Edit の
 # ``ask_or_deny`` は plan mode でも安全側 (deny / ask) を維持する。
 LENIENT_MODES = frozenset({"auto", "bypassPermissions", "plan"})
+
+# lenient allow のときだけ ``additionalContext`` に載せる 1 文 (0.33.0)。
+# 固定文字列であることが前提 (module docstring の「lenient allow の開示」)。
+# 事実記述にしてあるのは公式指針 (imperative な system instruction 形は
+# prompt-injection 防御に当たって Claude ではなくユーザーに晒される) に従うため。
+LENIENT_ALLOW_CONTEXT = (
+    "sensitive-files-guardrail: 静的解析では機密パスの有無を判定できない"
+    "コマンドでしたが、permission mode が autonomous なため確認なしで通しました。"
+)
 
 
 def _truncate(reason: str, limit: int = MAX_REASON_BYTES) -> str:
@@ -95,6 +126,9 @@ class HookSpecificOutput(TypedDict, total=False):
     hookEventName: Literal["PreToolUse"]
     permissionDecision: Literal["deny", "ask"]
     permissionDecisionReason: str
+    # allow でも Claude に届く唯一のチャネル (0.33.0)。``permissionDecision``
+    # とは独立に設定でき、載せても判定は動かない。
+    additionalContext: str
 
 
 class HookResponse(TypedDict, total=False):
@@ -123,13 +157,42 @@ def make_ask(reason: str) -> HookResponse:
     }
 
 
-def make_allow() -> HookResponse:
+def make_allow(additional_context: str = "") -> HookResponse:
     """no-op allow (明示的な allow は出さず、空オブジェクトで通す)。
 
     判定するときは ``is_allow(r)`` を使うこと。``r == {}`` で書くと将来 spec
     変更で壊れる。
+
+    ``additional_context`` を渡すと ``hookSpecificOutput.additionalContext``
+    だけを載せた allow を返す (0.33.0)。``permissionDecision`` は**出さない**
+    ので判定は素の allow と同一 (``is_allow`` / ``decision_of`` の結果も同じ) で、
+    増えるのは Claude 向けの情報だけ。module docstring の「lenient allow の開示」
+    を参照。
     """
-    return {}
+    if not additional_context:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": additional_context,
+        }
+    }
+
+
+def additional_context_of(response: HookResponse | dict) -> str:
+    """response に載っている ``additionalContext`` を返す (無ければ空文字)。
+
+    ``handlers.bash_handler`` が segment ループを跨いで「lenient allow に倒した」
+    事実を持ち運ぶために使う (lenient mode の ``ask_or_allow`` は allow を返すので
+    ``decision_of`` では区別が付かない)。
+    """
+    if not isinstance(response, dict):
+        return ""
+    hook = response.get("hookSpecificOutput")
+    if not isinstance(hook, dict):
+        return ""
+    value = hook.get("additionalContext")
+    return value if isinstance(value, str) else ""
 
 
 def is_allow(response: HookResponse | dict) -> bool:
@@ -205,7 +268,12 @@ def ask_or_allow(reason: str, envelope: dict) -> HookResponse:
 
     機密パターン確定 (literal or glob 候補列挙で True) のときはこの関数を使わず
     ``make_deny`` を直接呼ぶこと。
+
+    lenient に倒したときは ``additionalContext`` に ``LENIENT_ALLOW_CONTEXT`` を
+    載せて返す (0.33.0)。``reason`` は ``permissionDecisionReason`` 用で allow では
+    Claude に届かないため、「静的判定できないまま通した」事実が Claude 側に
+    伝わらなかった。判定は allow のままで、載るのは固定 1 文だけ。
     """
     if _is_lenient_mode(envelope):
-        return make_allow()
+        return make_allow(LENIENT_ALLOW_CONTEXT)
     return make_ask(reason)

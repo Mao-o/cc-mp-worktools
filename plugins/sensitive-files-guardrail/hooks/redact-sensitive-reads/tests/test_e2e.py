@@ -66,6 +66,26 @@ class TestE2EReadHandler(unittest.TestCase):
         )
         return p
 
+    def _assert_lenient_allow(self, result: dict) -> None:
+        """lenient allow (autonomous mode の ``ask_or_allow``) の実配線 assert。
+
+        0.33.0: ``permissionDecision`` は出さないまま ``additionalContext`` に
+        固定 1 文が載る。**判定は素の allow と同一**なので、判定側は
+        ``is_allow`` / ``decision_of`` で、開示側は ``additionalContext`` で見る。
+        command / path / 値が混ざっていないことも併せて固定する。
+        """
+        from core import output
+
+        self.assertTrue(output.is_allow(result), msg=repr(result))
+        self.assertIsNone(output.decision_of(result), msg=repr(result))
+        hook = result["hookSpecificOutput"]
+        self.assertEqual(hook["hookEventName"], "PreToolUse")
+        self.assertNotIn("permissionDecision", hook)
+        self.assertEqual(
+            hook["additionalContext"], output.LENIENT_ALLOW_CONTEXT,
+        )
+        self.assertNotIn(".env", hook["additionalContext"])
+
     def test_read_dotenv_deny(self):
         self._env_path()
         envelope = {
@@ -346,7 +366,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_bash_auto_opaque_wrapper_allows(self):
         """auto モードでは opaque wrapper (`bash -c`) を allow に倒す (0.3.2)。"""
@@ -357,7 +377,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_bash_auto_env_prefix_dotenv_allows(self):
         """0.8.0: env-assignment prefix は opaque first token として ``ask_or_allow``。
@@ -373,7 +393,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_bash_auto_abs_env_basename_allows(self):
         """0.8.0: ``/usr/bin/env`` のような任意 path exec は opaque first token →
@@ -389,7 +409,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_bash_auto_abs_cat_basename_allows(self):
         """basename=cat は透過対象外 → opaque → auto で allow (0.3.2)。"""
@@ -402,7 +422,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_bash_auto_input_redirect_allows(self):
         """0.7.0: ``<`` を含む command は hard-stop と同じ ``ask_or_allow``。
@@ -417,7 +437,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_bash_auto_heredoc_allows(self):
         """heredoc は target 抽出されず opaque → auto で allow (0.3.2)。"""
@@ -430,7 +450,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(result, {})
+        self._assert_lenient_allow(result)
 
     def test_edit_dotenv_denies(self):
         """Edit handler は既存 .env を deny 固定 (0.2.0)。"""
@@ -550,7 +570,16 @@ class TestE2EReadHandler(unittest.TestCase):
 
 # ---- 両 hook の推奨コマンドが Bash hook を通過する (0.19.0) ------------
 
-_REMEDY_CMD_WORDS = frozenset({"git", "chmod", "chown", "chgrp", "touch"})
+_REMEDY_CMD_WORDS = frozenset({
+    "git", "chmod", "chown", "chgrp", "touch",
+    # 0.33.0 (内部バックログ): 案内文が **シェルリダイレクトで追記する形**
+    # (``echo '.env' >> .gitignore``) を載せると、residual metachar 判定で
+    # ``ask_or_allow`` に落ち「block → 承認ダイアログ」の 2 段の摩擦になる。
+    # これらを抽出語に含めることで、そういう形が reason に紛れ込んだ瞬間に
+    # ``_assert_passes`` (= 全 mode で素通りすること) が落ちて気付ける。
+    # 対処は Edit / Write ツールでの追記を案内すること (判定表は変えない)。
+    "echo", "printf", "cat", "tee", "sed",
+})
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 
 
@@ -711,6 +740,16 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
         self.assertIn("!.env", reason)
         self.assertNotIn(str(self.repo), reason)
+
+        # 0.33.0 (内部バックログ): 追記操作は Edit ツールで行うよう案内する。
+        # シェルリダイレクト形 (`>>`) は residual metachar 判定で ask に落ちる
+        # ため、block 直後に承認ダイアログを挟む 2 段の摩擦になっていた。
+        # 判定表は変えず、案内する実行手段を変えて解消した。
+        self.assertIn("`.gitignore` に Edit で追記", reason)
+        self.assertIn("patterns.local.txt` に次を Edit で追記", reason)
+        # 案内文にシェルリダイレクトによる追記形を混ぜない
+        for redirect_form in (">>", "> .gitignore", ">.gitignore"):
+            self.assertNotIn(redirect_form, reason)
 
 
 class TestE2ELogLevelSuppressesAllowPathInfo(unittest.TestCase):

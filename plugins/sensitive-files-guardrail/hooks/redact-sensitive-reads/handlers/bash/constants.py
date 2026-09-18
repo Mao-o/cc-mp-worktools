@@ -176,7 +176,8 @@ _GIT_LS_FILES_SHORT_FLAGS = frozenset("cdikmostuvz")
 # (出力は ``rm '<path>'`` の path 文字列のみ) ため metadata-only。両 hook の
 # reason が「tracked なら ``git rm --cached`` で untrack」と案内しているのに
 # 自分で deny していた自己矛盾を解消する。``--cached`` 無しの plain ``git rm``
-# は作業ツリー削除 (破壊操作) のため operand scan → deny 維持。**完全一致のみ**
+# は作業ツリー削除 (破壊操作) のため metadata-only から外し operand scan に回す
+# (= 機密 operand があるときだけ deny。``git rm <非機密>`` は allow)。**完全一致のみ**
 # 認識 (git 自身は ``--cache`` / ``--cac`` の一意接頭辞も受理するが、省略形の
 # 展開は自前実装しない — 保守側に倒れるだけ)。``--`` 以降は pathspec なので
 # flag として数えない (``git rm .env -- --cached`` は deny)。

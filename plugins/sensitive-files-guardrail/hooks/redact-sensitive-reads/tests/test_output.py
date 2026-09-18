@@ -37,6 +37,54 @@ class TestMakeBuilders(unittest.TestCase):
         self.assertEqual(output.make_allow(), {})
 
 
+class TestAllowAdditionalContext(unittest.TestCase):
+    """0.33.0: allow に ``additionalContext`` だけを載せられること。
+
+    ``permissionDecisionReason`` は公式仕様で allow / ask のときユーザーにしか
+    出ないため、lenient allow の事実を Claude に渡す唯一のチャネルがこれ。
+    **``permissionDecision`` を出さない**ので判定は素の allow と同一に保たれる
+    (明示 ``"allow"`` を出すとハーネスの確認をスキップさせる意味になる)。
+    """
+
+    def test_make_allow_with_context_keeps_allow_semantics(self):
+        r = output.make_allow("note")
+        self.assertTrue(output.is_allow(r))
+        self.assertIsNone(output.decision_of(r))
+        hs = r["hookSpecificOutput"]
+        self.assertEqual(hs["hookEventName"], "PreToolUse")
+        self.assertEqual(hs["additionalContext"], "note")
+        self.assertNotIn("permissionDecision", hs)
+        self.assertNotIn("permissionDecisionReason", hs)
+
+    def test_empty_context_stays_bare_allow(self):
+        self.assertEqual(output.make_allow(""), {})
+
+    def test_additional_context_of_reads_the_field(self):
+        self.assertEqual(
+            output.additional_context_of(output.make_allow("note")), "note",
+        )
+
+    def test_additional_context_of_is_empty_for_other_shapes(self):
+        for response in (
+            {},
+            output.make_allow(),
+            output.make_deny("reason"),
+            output.make_ask("reason"),
+            {"hookSpecificOutput": None},
+            {"hookSpecificOutput": {"additionalContext": 123}},
+            "not-a-dict",
+        ):
+            with self.subTest(response=response):
+                self.assertEqual(output.additional_context_of(response), "")
+
+    def test_lenient_allow_context_carries_no_operand_shaped_text(self):
+        # 固定文字列であること (command / path / 値を混ぜない) の床
+        note = output.LENIENT_ALLOW_CONTEXT
+        self.assertTrue(note)
+        for forbidden in ("/", "`", "$", ".env"):
+            self.assertNotIn(forbidden, note)
+
+
 class TestIsAllow(unittest.TestCase):
     """L4: is_allow(r) 述語の判定マトリクス。"""
 
@@ -112,12 +160,25 @@ class TestAskOrAllow(unittest.TestCase):
     def test_auto_returns_allow(self):
         r = output.ask_or_allow("reason", {"permission_mode": "auto"})
         self.assertTrue(output.is_allow(r))
+        # 0.33.0: allow のまま additionalContext で開示する
+        self.assertEqual(
+            output.additional_context_of(r), output.LENIENT_ALLOW_CONTEXT,
+        )
 
     def test_bypass_returns_allow(self):
         r = output.ask_or_allow(
             "reason", {"permission_mode": "bypassPermissions"},
         )
         self.assertTrue(output.is_allow(r))
+        self.assertEqual(
+            output.additional_context_of(r), output.LENIENT_ALLOW_CONTEXT,
+        )
+
+    def test_ask_paths_do_not_carry_additional_context(self):
+        for mode in ("default", "acceptEdits", "dontAsk"):
+            with self.subTest(mode=mode):
+                r = output.ask_or_allow("reason", {"permission_mode": mode})
+                self.assertEqual(output.additional_context_of(r), "")
 
     def test_plan_returns_allow(self):
         # 0.13.0: plan を LENIENT_MODES に再追加。ユーザー実機 (2026-05-18) で

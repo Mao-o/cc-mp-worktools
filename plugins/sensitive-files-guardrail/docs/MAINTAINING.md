@@ -119,7 +119,7 @@ flowchart TD
     Y2 --> G
     G --> END{全 segment 走破}
     END --> FINAL{pending_ask あり?}
-    FINAL -- yes --> Z14["ask_or_allow<br>default / acceptEdits / dontAsk = ask<br>auto / bypassPermissions / plan = allow"]
+    FINAL -- yes --> Z14["ask_or_allow<br>default / acceptEdits / dontAsk = ask<br>auto / bypassPermissions / plan = allow<br>(allow 側は additionalContext で開示 0.33.0)"]
     FINAL -- no --> Z15[allow]
 ```
 
@@ -197,6 +197,12 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
   basename までに留める (`docs/DESIGN.md` の設計原則 2)
+- `hookSpecificOutput.additionalContext` (0.33.0) は **lenient allow の開示専用**
+  で、`core/output.py::LENIENT_ALLOW_CONTEXT` の**固定 1 文**しか載せない。
+  ここに command / path / 値を入れないのは reason と同じ理由に加え、
+  lenient-allow が全 Bash 呼出の 4 割強という高頻度経路のため
+  (混入量が入力に依らず一定であることが採用の前提。`docs/DESIGN.md` の
+  「lenient allow の開示」)
 
 ## テスト実行
 
@@ -207,10 +213,10 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 "No such file or directory" になる (= 79 件の suite が黙って走らない)。
 
 ```bash
-# redact-sensitive-reads (0.32.0 時点 1,387 件)
+# redact-sensitive-reads (0.33.0 時点 1,361 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (0.32.0 時点 164 件、tmpdir に git repo を作って検査)
+# check-sensitive-files (0.33.0 時点 165 件、tmpdir に git repo を作って検査)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -298,6 +304,14 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   (`tests/fixtures/encodings/README.md`)
 - テストを追加するときは既存の書式 (mode 5 列の envelope fixture、`_make_envelope`
   / `_decision` ヘルパ) に合わせ、判定境界を変える変更は MATRIX.md の行と対にする
+- **同型ケースは subTest に畳む** (0.33.0、D2 の再定義)。「コマンド 1 形 × mode
+  1 列」を 1 メソッドずつ並べると、形ごとに測る mode がまちまちになって網羅性が
+  穴あきになる (畳む前は `coproc cat .env` が default だけ、`cat "$X"` が 3 列だった)。
+  `ask_or_allow` に倒れる形は `tests/test_bash_handler.py::AskOrAllowMatrix` を
+  継承して `CASES` に `(ラベル, コマンド)` を足すだけでよく、**mode 5 列は土台が
+  必ず回す**。D2 の目標は件数削減ではなく「同型の畳み込みで格子点を増やす」こと
+  (実績: メソッド 55 → 12、格子点 55 → 180)。件数を減らすために形を捨てないこと —
+  形状カバレッジの空白が過去の重大不具合 3 件の直接原因だった
 
 ## validate
 
@@ -674,11 +688,11 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
    中身として書かない)。**判定境界 (deny / allow / ask) の変化有無** と
    **両 suite の件数** を必ず書く
 3. **CHANGELOG の cut (`## Unreleased` との突合)。** この step を飛ばすと出荷済みの
-   内容が `## Unreleased` に残ったまま公開され、0.19.1 が直した snw.7 (出荷済みの
+   内容が `## Unreleased` に残ったまま公開され、0.19.1 が直した事故 (出荷済みの
    E5 が「Unreleased (PR 6)」表記のまま残っていた) と同じ状態を再生産する:
    - **`## Unreleased` 節を読み直し、今回出荷した項目をすべて step 2 の
      `## X.Y.Z` 節へ移す。** `## Unreleased` に残してよいのは「このリリースでは
-     出荷していない」項目だけ。snw.7 は roadmap 項目が実装されたのに移されなかった
+     出荷していない」項目だけ。その事故は roadmap 項目が実装されたのに移されなかった
      ことで起きたので、**この突合が再発防止の本体**。機械判定できないので目視で行う
    - 移し終えたら、`## Unreleased` に残った各項目について「今回の実装・テスト・
      `## X.Y.Z` 節のいずれにも現れない」ことを確認する
@@ -703,7 +717,7 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
      ブロックの結果になる (直後の `echo $?` で 0 / 非 0 を確認できる)。
 
      これが捕まえるのは「bump したのに節を作っていない」場合**だけ**で、上の突合
-     (出荷済み項目が `## Unreleased` に残っている) は**検出しない**。snw.7 のときも
+     (出荷済み項目が `## Unreleased` に残っている) は**検出しない**。その事故のときも
      `## 0.14.0` 節自体は存在していた
 4. docs 整合チェック (0.19.1 で追加):
    - `grep -rn Unreleased README.md docs/ hooks/ --exclude='REVIEW_TASKS_*.md'` が

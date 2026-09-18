@@ -66,15 +66,31 @@ class TestAskOrDeny(unittest.TestCase):
 
 
 class TestAskOrAllow(unittest.TestCase):
-    """``ask_or_allow``: auto/bypass/plan = allow / それ以外 = ask (Bash handler 用、0.3.2 追加、plan は 0.13.0 で復活)。"""
+    """``ask_or_allow``: auto/bypass/plan = allow / それ以外 = ask (Bash handler 用、0.3.2 追加、plan は 0.13.0 で復活)。
+
+    0.33.0: lenient に倒したときは ``additionalContext`` に固定 1 文が載る
+    (``permissionDecision`` は出さないので判定は素の allow と同一)。判定の
+    assert は module docstring の規約どおり ``output.is_allow`` で行う。
+    """
+
+    def _assert_lenient_allow(self, r: dict) -> None:
+        self.assertTrue(output.is_allow(r), msg=repr(r))
+        self.assertIsNone(output.decision_of(r), msg=repr(r))
+        hook = r["hookSpecificOutput"]
+        self.assertEqual(hook["hookEventName"], "PreToolUse")
+        self.assertNotIn("permissionDecision", hook)
+        self.assertNotIn("permissionDecisionReason", hook)
+        self.assertEqual(hook["additionalContext"], output.LENIENT_ALLOW_CONTEXT)
+        # reason 引数は allow では Claude に届かないチャネルなので、載せない
+        self.assertNotIn("reason", hook["additionalContext"])
 
     def test_auto_returns_allow(self):
         r = ask_or_allow("reason", {"permission_mode": "auto"})
-        self.assertEqual(r, {})
+        self._assert_lenient_allow(r)
 
     def test_bypass_returns_allow(self):
         r = ask_or_allow("reason", {"permission_mode": "bypassPermissions"})
-        self.assertEqual(r, {})
+        self._assert_lenient_allow(r)
 
     def test_default_returns_ask(self):
         r = ask_or_allow("reason", {"permission_mode": "default"})
@@ -96,7 +112,7 @@ class TestAskOrAllow(unittest.TestCase):
         # mode 中の Bash PreToolUse hook 発火を確認)。plan mode は副作用が plan
         # 承認まで保留される dry-run 状態のため autonomous と同等に lenient 扱い。
         r = ask_or_allow("reason", {"permission_mode": "plan"})
-        self.assertEqual(r, {})
+        self._assert_lenient_allow(r)
 
     def test_missing_mode_returns_ask(self):
         r = ask_or_allow("reason", {})
