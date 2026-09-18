@@ -526,6 +526,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 
 | ケース | 全 mode (Stop は permission_mode を使わない) |
 |---|---|
+| stdin が空 / 非 JSON / dict でない (0.32.0) | **exit 0 + stderr `envelope_unreadable: <kind>`** (fail-open。Stop は block しない)。`<kind>` は `empty` / `not_json` / `not_an_object` / `EOFError`。`OSError` はこの経路に来ず下の catch-all (`internal_error` + `systemMessage`) に回る |
 | `stop_hook_active=true` | exit 0 (ループ防止) |
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
@@ -534,6 +535,21 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
 | handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
+| 時間予算 (12s) 超過 + 検出 0 件 (0.32.0) | **exit 0 + stderr `git_budget_exceeded` / `scan_incomplete` + `systemMessage`** (block しない)。「機密なし」の沈黙と区別できないため必ず見せる |
+| 時間予算 (12s) 超過 + 検出 1 件以上 (0.32.0) | `decision: block` (従来どおり) + reason 冒頭に「一覧は不完全です」 |
+| 時間予算 (12s) 超過 + 検出集合 ⊆ 同一 session で報告済みの集合 (0.32.0) | **exit 0 + stderr `scan_incomplete` + `systemMessage`** (block しない)。拾えたのは部分集合なので、黙ると「完走して新規なし」の沈黙と区別できない |
+
+> 0.32.0 で hook 全体の時間予算 (12s、`budget.Deadline`) を導入した。hook timeout
+> (15s) に到達すると Claude Code は hook を kill して**出力を discard** する
+> (= 報告が 1 byte も出ない無音の fail-open) ため、少し手前で自分から打ち切って
+> 「不完全だった」ことを見せる方に倒した。git 呼出 (1 回の上限は残予算と 10s の
+> 小さい方) とパターン照合ループの両方が同じ締切を共有する。**block するか
+> しないかの判定は変えていない** — 変わるのは打ち切りを言うか黙るかだけ。
+>
+> ただし **12〜15s かかっていた repo では報告件数が減る**: 予算導入前は完走して
+> 全件出せていたのに、本版は 12s で打ち切る。15s に到達すれば報告が丸ごと消える
+> (kill + discard) ので「部分報告 + 打ち切りの明示」を選んだトレードオフで、
+> 打ち切りは必ず表示される (黙って減ることはない)。
 
 > 0.31.0 で block reason に「**この block が次ターンから出なくなっても対処成功の
 > 証拠ではない**」旨と確認コマンド (`git ls-files <path>`) の開示を足したが、
@@ -542,6 +558,25 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 > tracked は index に残るため、無効な対処の後の沈黙と成功後の沈黙が区別できな
 > かった。根拠と代替案の棄却理由は
 > [DESIGN.md](./DESIGN.md#session-単位の-once-only-0190) を参照。
+
+## `__main__` envelope 読み取り
+
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| stdin が非 JSON / JSON だが dict でない / 読込例外 | **deny** + `stdin_parse_failed` | **deny** | **deny** | **deny** | **deny** |
+| **stdin が 0 byte** (0.32.0 で新設) | **deny** + `stdin_empty` | **deny** | **deny** | **deny** | **deny** |
+
+> 0.31.0 まで **0 byte stdin だけが `{}` を返し、各 handler が必須フィールド
+> 欠如で allow に落ちていた** (stderr もログも無い無音 allow)。`__main__` 自身の
+> 方針「envelope が読めないと bypass 判定もできない → 最厳 deny」と矛盾する
+> 唯一の fail-open 分岐だったので、0.32.0 で他の読み取り失敗と同じ deny に
+> 揃えた。ログ category (`stdin_empty`) は分けてあるので、ハーネスが正常系で
+> 0 byte stdin を送る事態が起きた場合はログから切り分けられる。
+>
+> `ask_or_deny` (ask に倒す) を採らなかった理由: envelope が無いと
+> `permission_mode` が読めず `ask_or_deny` は `make_ask` に落ちるが、
+> Phase 0 実測のとおり **bypassPermissions 下では ask はそのままツール実行に
+> 通る**ため、直そうとしている fail-open がその mode で残ってしまう。
 
 ## `__main__` catch-all (handler 内未捕捉例外)
 

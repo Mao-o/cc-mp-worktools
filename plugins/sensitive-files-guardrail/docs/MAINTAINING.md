@@ -47,9 +47,10 @@ sensitive-files-guardrail/
     ├── hooks.json                   # PreToolUse(Read/Bash/Edit/Write, timeout 2s) + Stop (timeout 15s)
     ├── _shared/                     # 両 hook 共有ロジック (判定が剥離しないよう一元化)
     │   ├── matcher.py               is_sensitive (case-insensitive + last-match-wins)
-    │   └── patterns.py              load_patterns / _parse_patterns_text / [project:] セクション / 除外レシピ
+    │   └── patterns.py              load_patterns (3 tier: 既定 → repo 同梱 → user) / _parse_patterns_text / [project:] セクション (worktree は 2 候補) / 除外レシピ
     ├── check-sensitive-files/       # Stop hook
     │   ├── __main__.py
+    │   ├── budget.py                hook 全体で共有する時間予算 (0.32.0)
     │   ├── checker.py               git ls-files (tracked / untracked、--recurse-submodules)
     │   ├── stop_ack.py              session 単位の once-only state (0.19.0)
     │   ├── patterns.txt             # 両 hook で共有する既定パターン
@@ -174,6 +175,24 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   失う (外部レビュー R1 P2-B。実測で `.1` が 8,000 行 → 0 行になった)。
   `fcntl` の無い環境ではローテーション自体を行わない (ログを失う方向に
   倒さない)。Stop hook はファイルログを持たず stderr のみ
+- **ログ量対策 (0.32.0)**: `SFG_LOG_LEVEL=WARNING` は「**最終判定が allow
+  だった呼出の INFO**」を抑制する。`INFO` (既定・未設定・不正値) では従来と
+  完全に同一の出力。実装は `core/logging.py` の `begin_deferred` /
+  `flush_deferred` で、`__main__` が `_dispatch` を包んで **判定確定後に
+  まとめて emit** する (呼出時点では allow 経路か決まらない — `ask_or_allow`
+  の結果は runtime の `permission_mode` 依存で、同一コマンド内の後続 segment の
+  deny が先行の ask/allow を上書きする)。有効レベルは allow → INFO、
+  deny / ask → WARNING 相当。**行の label は `INFO ` のまま**なので既存の
+  grep / 集計は壊れない (有効レベルは出すか否かの内部概念)。`log_error` は
+  level に関わらず必ず書き、遅延中ならバッファを先に吐いて順序を保つ
+  (error 時は最終判定が未確定で leveling できないため、全部出す側に倒す)。
+  `log_info(..., always=True)` は「**レベル固定で積む** (leveling 対象外)」
+  マークで、`flush_deferred` の閾値判断を素通りして必ず書く (書く位置と順序は
+  他の INFO と同じ)。付けるのは「消えると**開示した緩和策が成立しなくなる**」
+  記録だけ — 現状は repo 同梱 patterns の読み込み記録
+  (`project_patterns_in_use`) の 1 箇所。通常の診断に付けると量対策の目的が
+  消えるので、追加時は「その記録が無いと docs のどの主張が嘘になるか」を
+  書けるかで判断する
 - Stop hook の once-only state (`~/.claude/sensitive-files-guardrail/stop-ack/`)
   も平文 path を持たず sha256 digest のみ (0.19.0)
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
@@ -188,10 +207,10 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 "No such file or directory" になる (= 79 件の suite が黙って走らない)。
 
 ```bash
-# redact-sensitive-reads (0.31.0 時点 1,323 件)
+# redact-sensitive-reads (0.32.0 時点 1,387 件)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (0.31.0 時点 148 件、tmpdir に git repo を作って検査)
+# check-sensitive-files (0.32.0 時点 164 件、tmpdir に git repo を作って検査)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 

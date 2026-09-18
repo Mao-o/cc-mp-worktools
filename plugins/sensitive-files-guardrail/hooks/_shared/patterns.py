@@ -33,6 +33,25 @@ _resolve_local_patterns_path:
   無条件適用される」問題 (0.14.1 直後に実運用で発覚) に対処する。
 - プロジェクト識別は呼出元が渡す ``cwd`` から解決する (``load_patterns`` の
   新規オプション引数)。優先順は ``_resolve_project_key`` 参照。
+
+repo 同梱 tier (0.32.0):
+- ``<project root>/.claude/sensitive-files-guardrail/patterns.txt`` を user 単位
+  ファイルに**加えて**読む。連結順は **既定 → repo 同梱 → user** (last-match-wins
+  なので ``user > project > 既定``)。commit できるので貢献者・CI に共有され、
+  「fixture のダミー鍵で全員が毎セッション block される」問題を解決する。
+- ``!`` 除外だけでなく include 行も有効 (include は保護を足す方向にしか働かない)。
+  詳細な判断根拠は ``docs/PATTERNS.md`` の同節。
+
+git worktree 対応と ``~`` 展開 (0.32.0):
+- ``claude --worktree`` / ``--bg`` / sub-agent の ``isolation: worktree`` は
+  別 checkout でセッションを開き ``$CLAUDE_PROJECT_DIR`` も worktree 自身の
+  パスになるため、main repo のパスで書いた ``[project:...]`` セクションが
+  一致せず、承認済みの除外が黙って無効化されていた。``_project_section_keys``
+  が **main repo root を第 2 候補**として足す (第 1 候補は従来と同じ値なので、
+  worktree のパスをヘッダーに書いていた場合も引き続き一致する)。
+- ヘッダーは比較前に ``os.path.expanduser`` を通す (``[project:~/work/repo]``
+  が無音で捨てられていた)。``resolve_project_root`` (path 形 rule の基準) は
+  第 1 候補のみを返す — 同関数の docstring 参照。
 - 出力順は **ファイル中の出現順をそのまま保持** する (グループ単位で並べ替えない)。
   last-match-wins は出現順で決まるため、``[project:...]`` セクションを共通行より
   後ろに置けばプロジェクト側が勝ち、前に置けば共通側が勝つ — 既存の
@@ -58,15 +77,27 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence, Union
 
 _PREFERRED_SUBPATH = Path(".claude") / "sensitive-files-guardrail" / "patterns.local.txt"
 # rename 前 (sensitive-files-guard) の旧配置。新パスが無いときのみ fallback で読む。
 _LEGACY_SUBPATH = Path(".claude") / "sensitive-files-guard" / "patterns.local.txt"
+# repo 同梱 tier (0.32.0)。project root 基準の相対パスで、**commit されて
+# 貢献者・CI に共有される**ことが目的。``.local.`` を名前に入れないのは、
+# この生態系で ``.local.`` が「commit しない」を意味する慣習だから
+# (``settings.json`` / ``settings.local.json``)。既定 tier と同じ
+# ``patterns.txt`` という名前にしてあるのは、書式も完全に同じであることを
+# 名前で示すため。
+_PROJECT_SUBPATH = Path(".claude") / "sensitive-files-guardrail" / "patterns.txt"
 
 # migrate_warn_callback に渡す固定トークン (パスを含めない — ログ秘密非混入 +
 # core.logging の detail 文字種ホワイトリスト `^[A-Za-z0-9_:.\-\[\]!]{0,64}$` 適合)。
 LEGACY_LOCAL_PATTERNS_WARN = "legacy_patterns_local_in_use"
+
+# repo 同梱 tier を実際に読み込んだときに ``project_patterns_callback`` へ渡す
+# 固定トークン (0.32.0)。「この repo の同梱ファイルが保護を弱めている」ことを
+# 追跡できるようにするための可視化で、判定は変えない。
+PROJECT_PATTERNS_IN_USE = "project_patterns_in_use"
 
 _PROJECT_SECTION_PREFIX = "[project:"
 _PROJECT_SECTION_SUFFIX = "]"
@@ -75,6 +106,12 @@ _PROJECT_SECTION_SUFFIX = "]"
 # (0.19.0)。実体の解決は ``_resolve_local_patterns_path`` (``Path.home()`` 基準)
 # で、表示は ``~`` 表記のまま固定する (reason に絶対パスを出さない)。
 LOCAL_PATTERNS_DISPLAY_PATH = "~/.claude/sensitive-files-guardrail/patterns.local.txt"
+# repo 同梱 tier の表示用パス (0.32.0)。実体の解決は
+# ``_resolve_project_patterns_path`` (project root 基準)。reason に絶対パスを
+# 出さない方針のため、root は ``<project root>`` の literal で示す。
+PROJECT_PATTERNS_DISPLAY_PATH = (
+    "<project root>/.claude/sensitive-files-guardrail/patterns.txt"
+)
 # 除外案内で勧めるセクションヘッダーの雛形。実パスではなく環境変数名で示す。
 # ``_parse_local_patterns_text`` はヘッダーを展開しない (文字列完全一致) ので、
 # 書き込む側が ``$CLAUDE_PROJECT_DIR`` を実際の絶対パスに置き換える前提。
@@ -212,6 +249,30 @@ def _resolve_legacy_local_patterns_path() -> Path:
     return Path.home() / _LEGACY_SUBPATH
 
 
+def _resolve_project_patterns_path(cwd: str) -> Optional[Path]:
+    """repo 同梱 patterns.txt のパスを返す (0.32.0)。project root 不明なら None。
+
+    基準は ``resolve_project_root`` (= ``[project:]`` セクションの第 1 候補)。
+    worktree セッションでは worktree checkout 側のファイルを読む — commit 済み
+    なら main repo と同じ内容が worktree にも存在するため。
+
+    **前提が崩れたときの挙動** (マージ前レビューの指摘): ファイルが未 commit
+    (untracked / ignored) だと ``git worktree add`` はそれを持ち込まないので、
+    **worktree セッションでは tier が丸ごと消える** (警告も出ない)。
+    ``[project:]`` セクションの一致判定 (``_project_section_keys``) が main repo
+    root を第 2 候補に足すのに対し、こちらは**第 1 候補のみを探索する**のは
+    意図したもの: 全候補を探すと「main repo で untracked のファイルが worktree
+    でも効く」= 作者の手元だけで効く状態を延命し、貢献者・CI では依然として
+    何も読めないまま、作者が気付ける唯一の signal (worktree で消える) を潰して
+    しまう。共有したいなら commit する (``git check-ignore`` で確認できる。
+    ``docs/PATTERNS.md`` の repo 同梱 tier の節を参照)。
+    """
+    root = resolve_project_root(cwd)
+    if not root:
+        return None
+    return Path(root) / _PROJECT_SUBPATH
+
+
 def _resolve_project_key(cwd: str) -> Optional[str]:
     """``[project:<key>]`` セクションと突き合わせる識別子を解決する。
 
@@ -255,8 +316,8 @@ def resolve_project_root(cwd: str) -> Optional[str]:
     """path 形 rule (``config/prod.pem`` 等) の基準となる project root を返す
     (0.24.0)。
 
-    値は ``_resolve_project_key`` と**同一** (``$CLAUDE_PROJECT_DIR`` 優先 →
-    ``.git`` 上方探索)。同じ関数を別名で公開するのは意図的で、
+    値は ``_resolve_project_key`` (``$CLAUDE_PROJECT_DIR`` 優先 → ``.git``
+    上方探索) の結果そのもの。同じ関数を別名で公開するのは意図的で、
     「``[project:<key>]`` セクションの key」と「そのセクションに書いた path 形
     rule の基準 root」が定義上同じものであることを呼出側に示すため。両 hook
     (Read / Edit / Bash / Stop) が同じ root で matcher を呼ぶので、どの hook が
@@ -264,8 +325,179 @@ def resolve_project_root(cwd: str) -> Optional[str]:
     だけで使うと monorepo (``$CLAUDE_PROJECT_DIR`` がサブディレクトリ) で
     Stop のレシピが Read で効かなくなるため、あえて git には寄せない。
     None (root 不明) なら path 形 rule は評価されない。
+
+    0.32.0 の worktree 対応で、``[project:]`` セクションの一致判定だけは
+    **複数 key** (``_project_section_keys``: 本関数の値 + main repo root) を
+    見るようになったため、「セクションの key」と「path 形の基準 root」は
+    完全に同一ではなくなった。本関数は**引き続き第 1 候補 (worktree 自身)
+    だけを返す** — worktree セッションで実際に触るファイルは worktree 配下に
+    あるので、root 相対 path の基準を main repo root にすると
+    ``root_relative`` が「root 配下でない」と判定して path 形 rule が一切
+    効かなくなる。main repo root 側のセクションに書いた path 形 rule も、
+    worktree は同じツリー構成を持つため同じ相対 path で一致する。
     """
     return _resolve_project_key(cwd)
+
+
+# ``.git`` がファイルのときの参照行 prefix (worktree / submodule 共通)。
+_GITDIR_POINTER_PREFIX = "gitdir:"
+# worktree の gitdir は ``<main>/.git/worktrees/<name>`` になる。submodule の
+# ``.git`` ファイルも同じ ``gitdir:`` 形式 (``<super>/.git/modules/<name>``) な
+# ので、**この path 要素の有無**で両者を区別する。区別しないと submodule 内の
+# セッションで project key が superproject に差し替わり、読み込む rule が
+# 黙って変わる。
+_GIT_WORKTREES_COMPONENT = "worktrees"
+# gitdir / commondir ファイルから読む最大 byte 数 (壊れた・巨大なファイルを
+# そのまま読み込まないための上限。正常な内容は 1 行で数百 byte 以内)。
+_GIT_POINTER_READ_LIMIT = 4096
+
+
+def _read_git_pointer_file(path: str) -> Optional[str]:
+    """``.git`` / ``commondir`` のような 1 行テキストを先頭だけ読む。
+
+    読めない (OSError) / 空なら None。デコード不能バイトは置換して読む
+    (path 文字列の判定にしか使わないため、例外で落とすより退行しない)。
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(_GIT_POINTER_READ_LIMIT)
+    except OSError:
+        return None
+    return head or None
+
+
+def _gitdir_pointer(git_file: str) -> Optional[str]:
+    """``.git`` ファイルの ``gitdir: <path>`` 参照先を絶対パスで返す。
+
+    相対参照 (``gitdir: ../.git/worktrees/x``) は ``.git`` ファイルのある
+    ディレクトリ基準で解決する。行が見つからなければ None。
+    """
+    head = _read_git_pointer_file(git_file)
+    if head is None:
+        return None
+    for line in head.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(_GITDIR_POINTER_PREFIX):
+            continue
+        target = stripped[len(_GITDIR_POINTER_PREFIX):].strip()
+        if not target:
+            return None
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(git_file), target)
+        return os.path.normpath(target)
+    return None
+
+
+def _main_repo_root(dir_path: str) -> Optional[str]:
+    """``dir_path`` が git worktree の root なら main repo の root を返す。
+
+    worktree では ``.git`` が**ファイル**で ``gitdir:
+    <main>/.git/worktrees/<name>`` を指し、その中の ``commondir`` が共有
+    git dir (``<main>/.git``) への参照を持つ。これを辿って main repo root
+    (= 共有 git dir の親) を返す。
+
+    None を返す条件 (どれも「worktree ではない」= 追加候補なし):
+
+    - ``.git`` がディレクトリ (通常の checkout)
+    - ``gitdir:`` 行が無い / 空
+    - gitdir に ``worktrees`` 要素が無い (submodule の
+      ``<super>/.git/modules/<name>`` を worktree と誤認しないため)
+    - ``commondir`` が読めない / 共有 git dir の basename が ``.git`` でない
+      (bare repo の worktree には「main repo の working tree」が存在しない)。
+      **submodule の worktree** (``<super>/.git/modules/<name>/worktrees/<wt>``)
+      も同じ判定で None になる — commondir が
+      ``<super>/.git/modules/<name>`` を指し basename が ``.git`` でないため
+      (実測。``worktrees`` 要素 guard は素通りする)
+    - 解決結果がディレクトリとして存在しない / ``$HOME`` 自身
+      (``_resolve_project_key`` の「home はプロジェクトではない」規約に揃える)
+
+    subprocess は使わない (``git rev-parse --git-common-dir`` を呼ぶと
+    PreToolUse の latency 目標に響くため、``_resolve_project_key`` と同じく
+    stat / 小さなテキスト読みだけで完結させる)。
+    """
+    git_file = os.path.join(dir_path, ".git")
+    if not os.path.isfile(git_file):
+        return None
+    gitdir = _gitdir_pointer(git_file)
+    if not gitdir:
+        return None
+    if _GIT_WORKTREES_COMPONENT not in gitdir.split(os.sep):
+        return None
+    common = _read_git_pointer_file(os.path.join(gitdir, "commondir"))
+    if common is None:
+        return None
+    common = common.strip()
+    if not common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(gitdir, common)
+    common = os.path.normpath(common)
+    if os.path.basename(common) != ".git":
+        return None
+    root = os.path.dirname(common)
+    if not root or not os.path.isdir(root):
+        return None
+    if root == str(Path.home()):
+        return None
+    return root
+
+
+def _project_section_keys(cwd: str) -> list[str]:
+    """``[project:<key>]`` セクションと突き合わせる key の候補列を返す (0.32.0)。
+
+    第 1 候補は ``_resolve_project_key`` の結果 (従来と同じ値)。git worktree
+    セッションでは **main repo root を第 2 候補**として足す。
+
+    worktree 対応が必要な理由: ``claude --worktree`` / ``--bg`` /
+    sub-agent の ``isolation: worktree`` はいずれも別 checkout
+    (``<repo>/.claude/worktrees/<name>`` 等) でセッションを開き、
+    ``$CLAUDE_PROJECT_DIR`` もその worktree 自身のパスになる (実測)。
+    main repo のパスで書いた ``[project:...]`` セクションは文字列完全一致
+    しないため、0.15.0 で入れたプロジェクト固有の承認済み除外が worktree
+    作業では黙って無効化されていた (= 承認済みのファイルで再び block される)。
+
+    第 1 候補を残す (置き換えではなく追加) のは、worktree 自身のパスを
+    ヘッダーに書いていた場合の既存の一致挙動を変えないため。
+    """
+    primary = _resolve_project_key(cwd)
+    if primary is None:
+        return []
+    keys = [primary]
+    main_root = _main_repo_root(primary)
+    if main_root is not None and main_root != primary:
+        keys.append(main_root)
+    return keys
+
+
+def _normalize_project_keys(
+    project_key: Union[str, Sequence[str], None],
+) -> tuple[str, ...]:
+    """``project_key`` 引数 (単一 key / key 列 / None) を tuple に正規化する。
+
+    単一 str を受け付けるのは後方互換のため (``_parse_local_patterns_text``
+    を直接呼ぶ既存の呼出・テストがある)。空文字列・None は「プロジェクト
+    未解決」として空 tuple にする。
+    """
+    if project_key is None:
+        return ()
+    if isinstance(project_key, str):
+        return (project_key,) if project_key else ()
+    return tuple(k for k in project_key if k)
+
+
+def _normalize_header_key(header_key: str) -> str:
+    """``[project:<key>]`` の key を比較用に正規化する。
+
+    ``~`` / ``~user`` を ``os.path.expanduser`` で展開してから
+    ``os.path.normpath`` する (0.32.0)。展開前は ``[project:~/work/repo]`` が
+    どのプロジェクトにも一致せず黙って捨てられていた — ``$CLAUDE_PROJECT_DIR``
+    の未展開 placeholder と違い ``$`` を含まないので
+    ``_bad_header_token`` の警告にも掛からず、完全に無音だった。
+
+    ``expanduser`` は ``~`` で始まらない文字列を素通しするので、絶対パスを
+    書いた既存のヘッダーの挙動は変わらない。
+    """
+    return os.path.normpath(os.path.expanduser(header_key))
 
 
 def _parse_patterns_text(text: str) -> list[tuple[str, bool]]:
@@ -330,8 +562,9 @@ def _bad_header_token(header_key: str) -> Optional[str]:
 
 def _parse_local_patterns_text(
     text: str,
-    project_key: Optional[str],
+    project_key: Union[str, Sequence[str], None],
     header_warn_callback: Optional[Callable[[str], None]] = None,
+    warned: Optional[set[str]] = None,
 ) -> list[tuple[str, bool]]:
     """patterns.local.txt を ``[project:<path>]`` セクション対応でパースする。
 
@@ -341,7 +574,13 @@ def _parse_local_patterns_text(
     元の出現順のまま** 返す (グループ単位で並べ替えない — 出現順が
     last-match-wins の強さを決めるため)。
 
-    ``project_key`` が None (プロジェクト未解決) の場合はどのセクションにも
+    ``project_key`` は単一 key でも key 列でもよい (0.32.0。worktree では
+    「worktree 自身 + main repo root」の 2 候補になる —
+    ``_project_section_keys``)。**いずれか 1 つに一致**すればそのセクションは
+    active。複数候補のセクションが同一ファイル内に並ぶ場合は、どちらの行も
+    出現順のまま採用される (last-match-wins の契約は変わらない)。
+
+    ``project_key`` が None / 空 (プロジェクト未解決) の場合はどのセクションにも
     一致せず、共通行のみが返る (既存ファイル・非 git ディレクトリでの挙動は
     セクション導入前と完全に同一)。
 
@@ -353,10 +592,18 @@ def _parse_local_patterns_text(
     で示すため、Bash の unquoted echo で空に展開される / quoted heredoc や Write
     で literal に残る、のどちらでも **黙って捨てられる** (どのプロジェクトにも
     一致しない) のを可視化する。判定自体は変えない (そのセクションは非 active)。
+
+    ``warned`` (0.32.0、マージ前レビューの指摘): 既に警告した種別の集合。
+    ``load_patterns`` が **tier 間で 1 つを共有**して渡す — repo 同梱 tier と
+    user tier を別々にパースするようになったため、同じ書き損じヘッダーが両方に
+    あると「種別ごとに 1 回」の契約が破れて同じ警告が 2 回出ていた。呼出側が
+    渡さなければ呼出ローカルの集合を作る (単体で呼ぶ既存の呼出・テスト互換)。
     """
     rules: list[tuple[str, bool]] = []
+    keys = _normalize_project_keys(project_key)
     active = True  # 現在のセクションが出力対象か (共通行は常に active)
-    warned: set[str] = set()
+    if warned is None:
+        warned = set()
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -374,9 +621,7 @@ def _parse_local_patterns_text(
                     header_warn_callback(bad)
                 active = False
                 continue
-            active = project_key is not None and (
-                os.path.normpath(header_key) == project_key
-            )
+            active = _normalize_header_key(header_key) in keys
             continue
         if not active:
             continue
@@ -387,18 +632,72 @@ def _parse_local_patterns_text(
     return rules
 
 
+def _load_project_patterns(
+    cwd: str,
+    warn_callback: Optional[Callable[[str], None]],
+    header_warn_callback: Optional[Callable[[str], None]],
+    project_key: Union[str, Sequence[str], None],
+    project_patterns_callback: Optional[Callable[[str], None]],
+    warned: Optional[set[str]] = None,
+) -> list[tuple[str, bool]]:
+    """repo 同梱 tier (``<root>/.claude/sensitive-files-guardrail/patterns.txt``)
+    を読む (0.32.0)。
+
+    非存在は黙殺 (大半の repo には無い)。FileNotFound 以外の OSError は
+    ``warn_callback`` に委譲して空を返す (user tier と同じ契約)。1 行以上
+    読めたときだけ ``project_patterns_callback(PROJECT_PATTERNS_IN_USE)``。
+
+    書式は user tier と完全に同じ (``_parse_local_patterns_text`` を共有) なので
+    ``[project:...]`` セクションも書ける — repo 同梱なので通常は不要だが、
+    monorepo でサブプロジェクトごとに書き分けたい場合に効く。
+
+    ``warned`` は ``load_patterns`` が tier 間で共有する「警告済み種別」の集合
+    (``_parse_local_patterns_text`` 参照)。
+    """
+    path = _resolve_project_patterns_path(cwd)
+    if path is None:
+        return []
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        if warn_callback is not None:
+            warn_callback(type(e).__name__)
+        return []
+    rules = _parse_local_patterns_text(
+        text, project_key, header_warn_callback, warned
+    )
+    if rules and project_patterns_callback is not None:
+        project_patterns_callback(PROJECT_PATTERNS_IN_USE)
+    return rules
+
+
 def load_patterns(
     patterns_file: Path,
     warn_callback: Optional[Callable[[str], None]] = None,
     migrate_warn_callback: Optional[Callable[[str], None]] = None,
     cwd: str = "",
     header_warn_callback: Optional[Callable[[str], None]] = None,
+    project_patterns_callback: Optional[Callable[[str], None]] = None,
 ) -> list[tuple[str, bool]]:
-    """既定 patterns.txt + ローカル patterns.local.txt を読んで rules list を返す。
+    """既定 patterns.txt + repo 同梱 patterns.txt + ローカル patterns.local.txt を
+    読んで rules list を返す。
 
-    既定 → ローカルの順で連結 (last match wins なので末尾のローカルが強い)。
+    連結順 = **既定 → repo 同梱 → user ローカル** (last match wins なので後ろが
+    強い = ``user > project > 既定``、0.32.0)。repo 同梱 tier を user tier より
+    前に置くのは、repo が持ち込んだ除外をユーザーが自分のファイルで打ち消せる
+    (include 行を書き足せば勝てる) ようにするため — 逆順だと clone してきた
+    repo の除外が、そのユーザーの明示的な意思より強くなる。
     ローカル非存在は無視、読み取り中の OSError (FileNotFound 以外) は
     ``warn_callback(err_name)`` に渡して既定のみ返す。
+
+    repo 同梱 tier (``<project root>/.claude/sensitive-files-guardrail/patterns.txt``):
+    commit できるので**貢献者・CI に共有される**。テスト fixture / サンプル /
+    docs 用のダミー鍵を持つ repo で、全員が毎セッション block されるのを防ぐ
+    ための tier (それまでは各自がホーム配下に除外を書くしかなく、CI では
+    そもそも効かなかった)。``!`` 除外に加えて **include 行も有効** — include は
+    保護を足す方向にしか働かないため (詳細は ``docs/PATTERNS.md``)。
 
     ローカル patterns.local.txt の解決:
     - 新パス ``~/.claude/sensitive-files-guardrail/patterns.local.txt`` が存在
@@ -411,20 +710,37 @@ def load_patterns(
     - 旧パスからの読み取りでも FileNotFound 以外の OSError は ``warn_callback``
       に委譲する (新パスと同じ契約)。
 
-    ``cwd`` (呼出元 hook の envelope 由来、任意): ``_resolve_project_key`` で
-    プロジェクト識別子に解決し、ローカルファイル中の ``[project:<key>]``
-    セクションのうち一致するものだけを共通行と合わせて読み込む
-    (``_parse_local_patterns_text`` 参照)。空文字列 (既定) なら共通行のみ。
+    ``cwd`` (呼出元 hook の envelope 由来、任意): ``_project_section_keys`` で
+    プロジェクト識別子 (worktree では main repo root を含む 2 候補) に解決し、
+    ローカルファイル中の ``[project:<key>]`` セクションのうち一致するものだけを
+    共通行と合わせて読み込む (``_parse_local_patterns_text`` 参照)。
+    空文字列 (既定) なら共通行のみ。
 
     ``header_warn_callback`` (0.19.0、任意): ``[project:]`` ヘッダーが空 / 未展開
     placeholder のときに固定トークンで呼ぶ (``_parse_local_patterns_text`` 参照)。
+
+    ``project_patterns_callback`` (0.32.0、任意): repo 同梱 tier から 1 行以上
+    読み込んだときに ``PROJECT_PATTERNS_IN_USE`` で呼ぶ。repo 同梱ファイルは
+    保護を弱めうる (clone してきた repo の ``!`` 行がそのまま効く) ので、
+    「なぜ block されないのか」を追跡できるようにするための可視化。
 
     Raises:
         FileNotFoundError: 既定 patterns.txt が存在しない
         OSError: 既定 patterns.txt の読み取りに失敗した
     """
     rules = _parse_patterns_text(patterns_file.read_text())
-    project_key = _resolve_project_key(cwd)
+    project_key = _project_section_keys(cwd)
+    # 「書き損じヘッダーの警告は種別ごとに 1 回」を **tier をまたいで** 保つ
+    # (0.32.0、マージ前レビューの指摘)。tier ごとに別の集合を持つと、同じ
+    # 書き損じが repo 同梱と user の両方にあるときに同じ警告が 2 回出る。
+    warned: set[str] = set()
+
+    rules.extend(
+        _load_project_patterns(
+            cwd, warn_callback, header_warn_callback, project_key,
+            project_patterns_callback, warned,
+        )
+    )
 
     local_path = _resolve_local_patterns_path()
     try:
@@ -433,7 +749,7 @@ def load_patterns(
         # 新パスが無い → rename 前の旧パスを fallback で試す。
         return _load_legacy_local(
             rules, warn_callback, migrate_warn_callback, project_key,
-            header_warn_callback,
+            header_warn_callback, warned,
         )
     except OSError as e:
         if warn_callback is not None:
@@ -441,7 +757,9 @@ def load_patterns(
         return rules
 
     rules.extend(
-        _parse_local_patterns_text(local_text, project_key, header_warn_callback)
+        _parse_local_patterns_text(
+            local_text, project_key, header_warn_callback, warned
+        )
     )
     return rules
 
@@ -450,15 +768,17 @@ def _load_legacy_local(
     rules: list[tuple[str, bool]],
     warn_callback: Optional[Callable[[str], None]],
     migrate_warn_callback: Optional[Callable[[str], None]],
-    project_key: Optional[str] = None,
+    project_key: Union[str, Sequence[str], None] = None,
     header_warn_callback: Optional[Callable[[str], None]] = None,
+    warned: Optional[set[str]] = None,
 ) -> list[tuple[str, bool]]:
     """新パス不在時に rename 前の旧 patterns.local.txt を fallback 読み込みする。
 
     旧パスが存在すれば rules に連結し ``migrate_warn_callback`` で移行を促す。
     旧パス非存在は黙殺、FileNotFound 以外の OSError は ``warn_callback`` に委譲。
     いずれも既定 rules (+ 旧ローカル) を返す。``[project:...]`` セクション対応は
-    新パスと同じ (``_parse_local_patterns_text``)。
+    新パスと同じ (``_parse_local_patterns_text``)。``warned`` は repo 同梱 tier と
+    共有する「警告済み種別」の集合。
     """
     legacy_path = _resolve_legacy_local_patterns_path()
     try:
@@ -471,7 +791,9 @@ def _load_legacy_local(
         return rules
 
     rules.extend(
-        _parse_local_patterns_text(legacy_text, project_key, header_warn_callback)
+        _parse_local_patterns_text(
+            legacy_text, project_key, header_warn_callback, warned
+        )
     )
     if migrate_warn_callback is not None:
         migrate_warn_callback(LEGACY_LOCAL_PATTERNS_WARN)

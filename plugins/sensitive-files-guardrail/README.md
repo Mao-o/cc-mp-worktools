@@ -400,6 +400,19 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 > (対処として無効) のに、次のターンからは黙る。実際に外れたかは
 > `git ls-files <path>` の出力が空になったことで確認する。
 
+**時間予算 (0.32.0)**: この hook には 15 秒の timeout があり、到達すると Claude
+Code は hook を kill して出力を **discard** する (= 機密ファイルの報告が 1 byte も
+出ない)。そのため hook 側で **12 秒の予算**を持ち、git 呼出とパターン照合の両方が
+この締切を共有する。超過したときは黙らず:
+
+- 検出 0 件で打ち切った場合 → `systemMessage` で「このターンは検査が**不完全**
+  です (「機密なし」ではありません)」と表示する (block はしない)
+- 1 件以上見つかっていた場合 → block reason の冒頭に「一覧は不完全です」を添える
+
+**大規模 repo で予算超過が出る場合**は、未 ignore のディレクトリ (`node_modules` /
+`build` / `dist` / キャッシュ類) を `.gitignore` に入れると `git ls-files --others`
+の列挙が大幅に速くなる。ネットワークファイルシステム上の repo でも起きやすい。
+
 ## パターン設定
 
 ユーザー個別のパターンは plugin を fork せずに patterns.local.txt に書ける:
@@ -412,7 +425,35 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 > 旧パスを使っていた場合は手動で
 > `mv "${XDG_CONFIG_HOME:-$HOME/.config}/sensitive-files-guardrail/patterns.local.txt" ~/.claude/sensitive-files-guardrail/patterns.local.txt` する。
 
+**貢献者・CI と共有したい除外** (テスト fixture / サンプルのダミー鍵など) は
+repo に commit できる (0.32.0):
+
+- `<project root>/.claude/sensitive-files-guardrail/patterns.txt`
+
+> user 単位ファイルはホーム配下なので commit できず CI でも効かないため、
+> ダミー鍵を持つ repo では貢献者全員が毎セッション同じ block を踏んでいた。
+> tier の強さは **`user 単位` > `repo 同梱` > `既定`** (clone してきた repo の
+> 除外をユーザーが自分のファイルで打ち消せる向き)。`!` 除外に加えて include 行も
+> 有効。第三者の repo を開くときはこのファイルも差分レビューの対象にすること
+> (`!` 行は保護を弱めうる。読み込み時に `project_patterns_in_use` を記録する —
+> この記録は `SFG_LOG_LEVEL` を上げても残る)。
+
+> **`.claude/` を `.gitignore` していると commit できない**: ignore された状態
+> では置いた本人の手元でだけ効き、**clone した貢献者と CI には存在しない**
+> (本人の手元では `project_patterns_in_use` が出るので「効いている」と見える)。
+> `git check-ignore -v .claude/sensitive-files-guardrail/patterns.txt` で確認し、
+> ignore されていれば `.gitignore` に `!.claude/sensitive-files-guardrail/` の
+> negation を足して commit する。未 commit のままだと `git worktree add` が
+> 持ち込まないため **worktree セッションでは tier が丸ごと消える** (無警告)。
+> 詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の同節。
+
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
+
+> **git worktree (0.32.0)**: `claude --worktree` / `--bg` / sub-agent の
+> `isolation: worktree` では `$CLAUDE_PROJECT_DIR` が worktree 自身のパスに
+> なるため、`[project:...]` セクションの一致判定は **worktree 自身 + main repo
+> root の 2 候補**を見る (main repo のパスで書いておけば worktree でも効く)。
+> `~` はヘッダーでも展開される。
 
 > **path 形 rule (0.24.0)**: `/` を含む行 (`!config/prod.pem` / `!fixtures/` /
 > `secrets/**`) は basename ではなく **プロジェクト root からの相対 path 全体**と
@@ -517,6 +558,21 @@ validate / リリース手順 / CLI 再実測 Runbook などの保守者向け�
 サイドカー lock ファイル `redact-hook.log.lock` の `flock` でプロセス間排他して
 おり、並行する hook プロセスが同時にローテーションして前世代を消すことはない
 (lock を取れなかったプロセスは待たずにローテーションを譲り、そのまま追記する)。
+
+**ログ量を減らしたい場合 (`SFG_LOG_LEVEL`、0.32.0)**: ログは Bash 呼出のたびに
+allow 経路でも 1 行書くため増えやすい (実測 7.3MB / 12 万行)。
+`SFG_LOG_LEVEL=WARNING` を設定すると **最終判定が allow だった呼出の診断行だけ**
+が落ちる。deny / ask 経路の診断行とエラー行は level に関わらず必ず残る
+(`DEBUG` / `INFO` / `WARNING` / `ERROR` を受け付け、未設定・不正値は `INFO`)。
+repo 同梱 patterns を読み込んだ記録 (`project_patterns_in_use`) も level に
+関わらず残る — 「なぜ block されないのかを辿れる」と開示している緩和策なので、
+まさに除外が効いた (= allow に倒れた) 呼出で消えてはいけないため。
+
+> **既定 (未設定) は `INFO` で挙動は従来と完全に同一**。「この呼出は allow 経路か」
+> は記録時点では決まらない (autonomous モードでは `ask` が `allow` になり、同一
+> コマンド内の後続 deny が先行の判定を上書きする) ため、hook は判定が確定するまで
+> 記録をバッファして最終判定で出すか決める。行の label は `INFO` のままなので、
+> 既存の grep / 集計はそのまま使える。
 
 ## 互換性
 

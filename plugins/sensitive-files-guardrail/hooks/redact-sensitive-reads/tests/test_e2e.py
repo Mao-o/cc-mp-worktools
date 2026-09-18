@@ -479,21 +479,72 @@ class TestE2EReadHandler(unittest.TestCase):
         result = _run_main(envelope, ["--tool", "write"])
         self.assertEqual(result, {})
 
-    def test_invalid_stdin_json(self):
+    def _run_raw_stdin(self, raw: str, argv: list[str] | None = None):
+        """stdin に生文字列を流して ``main`` を走らせ ``(rc, stdout)`` を返す。"""
         old_stdin = sys.stdin
         old_stdout = sys.stdout
         try:
-            sys.stdin = io.StringIO("{not json")
+            sys.stdin = io.StringIO(raw)
             sys.stdout = io.StringIO()
-            rc = entry.main(["--tool", "read"])
+            rc = entry.main(argv or ["--tool", "read"])
             out = sys.stdout.getvalue()
         finally:
             sys.stdin = old_stdin
             sys.stdout = old_stdout
+        return rc, out
+
+    def test_invalid_stdin_json(self):
+        rc, out = self._run_raw_stdin("{not json")
         self.assertEqual(rc, 0)
         result = json.loads(out)
         self.assertEqual(
             result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+    def test_empty_stdin_denies_for_every_tool(self):
+        """0.32.0 (内部バックログ): 0 byte stdin は無音 allow ではなく deny。
+
+        0.31.0 までは ``_read_envelope`` がここだけ ``{}`` を返し、各 handler が
+        必須フィールド欠如で ``make_allow()`` に落ちていた (stderr もログも
+        出ない **唯一の fail-open 分岐**)。全 tool の dispatch で deny になる
+        ことを固定する。"""
+        for tool in ("read", "bash", "edit", "write"):
+            with self.subTest(tool=tool):
+                rc, out = self._run_raw_stdin("", ["--tool", tool])
+                self.assertEqual(rc, 0)
+                # 退行 (allow に戻る) のとき KeyError で ERROR 扱いにならない
+                # よう ``get`` で辿る — errors と failures を取り違えない
+                hook = json.loads(out).get("hookSpecificOutput", {})
+                self.assertEqual(
+                    hook.get("permissionDecision"), "deny", msg=f"{tool}: {out!r}"
+                )
+                # 空でない reason が返る (無音にしない)
+                self.assertTrue(hook.get("permissionDecisionReason"))
+
+    def test_empty_stdin_logs_its_own_category(self):
+        """``stdin_parse_failed`` と切り分けられるよう専用 category を出す。
+
+        ハーネスが正常系で 0 byte stdin を送る (= 全 deny になる) 事態が
+        起きたときにログから即座に判別できる必要がある。"""
+        with mock.patch.object(entry.L, "log_error") as logged:
+            self._run_raw_stdin("")
+        self.assertEqual([c.args[0] for c in logged.call_args_list], ["stdin_empty"])
+        with mock.patch.object(entry.L, "log_error") as logged:
+            self._run_raw_stdin("{not json")
+        self.assertEqual(
+            [c.args[0] for c in logged.call_args_list], ["stdin_parse_failed"]
+        )
+
+    def test_blank_stdin_still_parse_failed(self):
+        """空白のみ (``"   \\n"``) は 0 byte ではないので従来どおり parse 失敗。"""
+        with mock.patch.object(entry.L, "log_error") as logged:
+            rc, out = self._run_raw_stdin("   \n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertEqual(
+            [c.args[0] for c in logged.call_args_list], ["stdin_parse_failed"]
         )
 
 
@@ -660,6 +711,186 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         self.assertIn("[project:$CLAUDE_PROJECT_DIR]", reason)
         self.assertIn("!.env", reason)
         self.assertNotIn(str(self.repo), reason)
+
+
+class TestE2ELogLevelSuppressesAllowPathInfo(unittest.TestCase):
+    """0.32.0 (内部バックログ): ``SFG_LOG_LEVEL=WARNING`` で allow 経路の INFO が
+    落ち、deny / ask 経路の診断は残ること (``main`` 経由の実配線)。
+
+    ``redact-hook.log`` は Bash 呼出のたびに allow 経路でも INFO を書いており
+    (実測 7.3MB / 12 万行)、0.27.0 のローテーションでは量が減らなかった。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.log = Path(self.tmp) / "redact-hook.log"
+        p = mock.patch.object(entry.L, "LOG_PATH", self.log)
+        p.start()
+        self.addCleanup(p.stop)
+        (Path(self.tmp) / ".env").write_text("SECRET_TOKEN=abcdef123456\n")
+
+    def _run_bash(self, command: str, level: int) -> tuple[dict, str]:
+        envelope = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        self.log.unlink(missing_ok=True)
+        with mock.patch.object(entry.L, "LOG_LEVEL", level):
+            result = _run_main(envelope, ["--tool", "bash"])
+        return result, (self.log.read_text() if self.log.exists() else "")
+
+    def test_allow_only_command_writes_nothing_at_warning(self):
+        result, log = self._run_bash("ls -la", entry.L._LEVEL_WARNING)
+        self.assertEqual(result, {})
+        self.assertEqual(log, "", f"allow 経路の INFO が残っている: {log!r}")
+
+    def test_allow_only_command_still_logs_at_default_level(self):
+        """既定 (INFO) では従来どおり記録される = 既定の挙動は不変。"""
+        result, log = self._run_bash("ls -la", entry.L._LEVEL_INFO)
+        self.assertEqual(result, {})
+        self.assertIn("bash_classify", log)
+
+    def test_deny_command_keeps_diagnostics_at_warning(self):
+        result, log = self._run_bash("cat .env", entry.L._LEVEL_WARNING)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn("bash_classify", log)
+        self.assertIn("match:cat", log)
+
+    def test_ask_command_keeps_diagnostics_at_warning(self):
+        result, log = self._run_bash("echo $HOME", entry.L._LEVEL_WARNING)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "ask"
+        )
+        self.assertIn("bash_classify", log)
+
+    def test_later_deny_keeps_earlier_allow_diagnostics_at_warning(self):
+        """同一コマンド内で後続 deny が先行 allow を上書きするケース。"""
+        result, log = self._run_bash("ls -la && cat .env", entry.L._LEVEL_WARNING)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn("metadata_only_allow:ls", log)
+        self.assertIn("match:cat", log)
+
+    def test_repo_tier_record_survives_warning_level(self):
+        """repo 同梱 tier の記録は leveling 対象外 (マージ前レビューの指摘)。
+
+        repo 同梱 ``!`` 行で allow に倒れた呼出は最終判定が allow なので、
+        既定の leveling では ``SFG_LOG_LEVEL=WARNING`` のときに
+        「**repo の除外で保護が外れた**まさにその呼出」の記録だけが消えていた。
+        この記録は README / docs が残存リスクの緩和策として公表しているもの
+        なので、量を絞った利用者から静かに失われてはいけない。
+        """
+        tier = Path(self.tmp) / ".claude" / "sensitive-files-guardrail"
+        tier.mkdir(parents=True)
+        (tier / "patterns.txt").write_text("!.env\n")
+        home = Path(self.tmp) / "home"  # user tier を実ホームから隔離する
+        home.mkdir()
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home)}
+        ):
+            result, log = self._run_bash("cat .env", entry.L._LEVEL_WARNING)
+        self.assertEqual(result, {}, "repo tier の ! 行で allow に倒れる前提")
+        self.assertIn("project_patterns_in_use", log)
+        # 通常の INFO は従来どおり落ちる (leveling そのものを無効化していない)
+        self.assertNotIn("bash_classify", log)
+
+    def test_repo_tier_record_is_present_at_default_level_too(self):
+        """既定 (INFO) でも当然残る = マークは「落とさない」方向にしか効かない。"""
+        tier = Path(self.tmp) / ".claude" / "sensitive-files-guardrail"
+        tier.mkdir(parents=True)
+        (tier / "patterns.txt").write_text("!.env\n")
+        home = Path(self.tmp) / "home"
+        home.mkdir()
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home)}
+        ):
+            _result, log = self._run_bash("cat .env", entry.L._LEVEL_INFO)
+        self.assertIn("project_patterns_in_use", log)
+        self.assertIn("bash_classify", log)
+
+    def test_log_lines_carry_no_paths_or_values(self):
+        """遅延化でログ規則 (path / 値 / basename を出さない) が崩れていない。"""
+        _result, log = self._run_bash("cat .env", entry.L._LEVEL_INFO)
+        self.assertNotIn(self.tmp, log)
+        self.assertNotIn("abcdef123456", log)
+        self.assertNotIn("SECRET_TOKEN", log)
+
+
+class TestE2EDotenvInfoPathsKeepVerdictAndEnvelope(unittest.TestCase):
+    """0.32.0 (内部バックログ): ``read_partial`` / ``search`` の折り畳み配線が
+    **判定を変えていない**ことを 5 mode で固定する。
+
+    reason builder は deny 確定後に文字列を組むだけなので判定に影響しない —
+    ただし builder が例外を投げると ``__main__`` の catch-all が ``ask_or_deny``
+    に倒し、**deny が ask に変わる**。実ファイル + 全 mode で通すことで、
+    その経路が塞がっていることを確かめる。
+    """
+
+    _MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+    _KEY_COUNT = 300
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.path = Path(self.tmp) / ".env"
+        self.path.write_text(
+            "".join(
+                f"KEY_{i:03d}=" + "v" * 40 + "\n" for i in range(self._KEY_COUNT)
+            )
+        )
+        # inline 経路 (32KB 未満 = dotenv parse が走る) であること
+        self.assertLess(self.path.stat().st_size, 32 * 1024)
+
+    def _envelope(self, command: str, mode: str) -> dict:
+        return {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": self.tmp,
+            "permission_mode": mode,
+        }
+
+    def _assert_deny_and_intact(self, command: str) -> None:
+        for mode in self._MODES:
+            with self.subTest(mode=mode, command=command):
+                result = _run_main(self._envelope(command, mode), ["--tool", "bash"])
+                hook = result.get("hookSpecificOutput", {})
+                self.assertEqual(hook.get("permissionDecision"), "deny", mode)
+                reason = hook.get("permissionDecisionReason", "")
+                self.assertLessEqual(len(reason.encode("utf-8")), 3 * 1024)
+                self.assertNotIn("...[truncated]", reason)
+                self.assertIn("</DATA>", reason)
+                # 値は 1 文字も出さない
+                self.assertNotIn("v" * 40, reason)
+
+    def test_head_partial_read_denies_in_every_mode(self):
+        self._assert_deny_and_intact("head -n 250 .env")
+
+    def test_tail_partial_read_denies_in_every_mode(self):
+        self._assert_deny_and_intact("tail -n 250 .env")
+
+    def test_grep_search_denies_in_every_mode(self):
+        # 実在する鍵名に一致するパターン (matched_pattern_keys 経路 = 明細行が
+        # <DATA> に包まれる経路) を使う。存在しない名前だと
+        # ``nomatch_pattern_keys`` だけの reason になり minimal info を持たない
+        # (0.16.0 からの既存挙動)。
+        self._assert_deny_and_intact("grep -E 'KEY_001|KEY_002' .env")
+
+    def test_grep_nomatch_only_still_denies_in_every_mode(self):
+        """鍵名に一致しないパターンは minimal info を持たないが判定は deny。"""
+        for mode in self._MODES:
+            with self.subTest(mode=mode):
+                result = _run_main(
+                    self._envelope("grep -E 'NOPE_KEY' .env", mode),
+                    ["--tool", "bash"],
+                )
+                hook = result.get("hookSpecificOutput", {})
+                self.assertEqual(hook.get("permissionDecision"), "deny", mode)
 
 
 class TestE2EKeyonlyKeepsKeyNames(unittest.TestCase):
