@@ -20,6 +20,36 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.30.0
+
+Stop hook (check-sensitive-files) の検出漏れ 1 件と無音 fail-open 1 件を修正
+(内部バックログ 3 件)。**判定境界の変化: あり** — いずれも「検出されなかった
+ものが検出される / 見えなかった失敗が見える」方向のみで、allow → block に
+倒れる新規条件は無い。テスト件数: check 135 → **141**。
+
+### 非 ASCII / 空白入りファイル名の検出漏れ (guard bypass)
+
+- `git ls-files` を改行区切りで呼んでいたため、git 既定の
+  `core.quotePath=true` では非 ASCII ファイル名が 8 進エスケープ + 二重引用符
+  (`"\346\227\245..."`) で返り、pattern 照合に一致せず **tracked /
+  untracked いずれの `鍵.pem` / `日本語/.env` も検出されなかった**。tracked と
+  untracked の両列挙を `-z` (NUL 区切り) に切り替え、素の名前を受ける。空白や
+  二重引用符を含む名前 (`my "secret".pem`) も同じ経路で直る
+- `_run_git` (改行区切り) は path を返さない `rev-parse` 系にだけ残す
+
+### 想定外の例外を「可視の fail-open」に
+
+- `main()` に top-level の `try/except` が無く、想定外の例外 (0.27.0 で直した
+  ASCII stdout の `UnicodeEncodeError` がその一例) は traceback + exit 1 で判定
+  JSON が 1 byte も出ない無音の fail-open だった。redact-sensitive-reads 側の
+  `except Exception → ask_or_deny` (fail-closed) とは非対称
+- 採った方針: **block はしないが必ず見せる**。Stop hook の block は「機密ファイル
+  を残したまま止まるな」という差し戻しで、内部エラーで毎ターン差し戻すと利用者は
+  原因を直せないまま作業を止められる。この hook の既存方針
+  (`patterns_unavailable` / `git_unavailable` は stderr + exit 0) に揃え、stderr
+  へ `internal_error: <ExcName>` 1 行 + stdout の `systemMessage` で「このターンは
+  検査されていない」と明示する。例外の種別だけを出し、メッセージ本文 (path を
+  含みうる) は出さない
 ## 0.29.1
 
 内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`

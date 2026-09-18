@@ -170,7 +170,7 @@ class TestLsTrackedFallback(BaseWithTmpRepo):
         self._write(".env", "KEY=1\n")
         self._track(".env")
         with mock.patch(
-            "checker._run_git", side_effect=[[], [".env"]]
+            "checker._run_git_nul", side_effect=[[], [".env"]]
         ) as mocked:
             result = _ls_tracked(str(self.repo))
         self.assertEqual(result, [".env"])
@@ -183,7 +183,7 @@ class TestLsTrackedFallback(BaseWithTmpRepo):
     def test_does_not_fall_back_when_recurse_flag_succeeds(self):
         # フラグ付きの 1 回目で結果が返れば、2 回目 (fallback) は呼ばれない。
         with mock.patch(
-            "checker._run_git", side_effect=[[".env"]]
+            "checker._run_git_nul", side_effect=[[".env"]]
         ) as mocked:
             result = _ls_tracked(str(self.repo))
         self.assertEqual(result, [".env"])
@@ -247,6 +247,48 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
         result = find_sensitive_files(str(self.repo), rules)
         paths = {r["path"] for r in result}
         self.assertNotIn("credentials.example.json", paths)
+
+    def test_non_ascii_tracked_name_detected_under_default_quotepath(self):
+        """0.30.0: git 既定 ``core.quotePath=true`` でも非 ASCII 名を検出する。
+
+        改行区切りの ``git ls-files`` は ``日本語/.env`` / ``鍵.pem`` を
+        ``"\\346\\227\\245..."`` の 8 進エスケープ + 引用符で返し、pattern に
+        一致しなかった (tracked な機密ファイルの guard bypass)。``-z`` で素の
+        名前を受ける。quotePath は明示的に既定 (true) を固定して git のユーザー
+        設定に依存しないようにする。
+        """
+        _git(["config", "core.quotePath", "true"], str(self.repo))
+        self._write("日本語/.env", "SECRET=y\n")
+        self._track("日本語/.env")
+        self._write("鍵.pem", "-----BEGIN...\n")
+        self._track("鍵.pem")
+        rules = load_patterns(self.patterns_file)
+        result = find_sensitive_files(str(self.repo), rules)
+        paths = {(r["path"], r["status"]) for r in result}
+        self.assertIn(("日本語/.env", "tracked"), paths)
+        self.assertIn(("鍵.pem", "tracked"), paths)
+
+    def test_non_ascii_untracked_name_detected_under_default_quotepath(self):
+        _git(["config", "core.quotePath", "true"], str(self.repo))
+        self._write("日本語/.env", "SECRET=y\n")
+        self._write("鍵.pem", "-----BEGIN...\n")
+        rules = load_patterns(self.patterns_file)
+        result = find_sensitive_files(str(self.repo), rules)
+        paths = {(r["path"], r["status"]) for r in result}
+        self.assertIn(("日本語/.env", "untracked"), paths)
+        self.assertIn(("鍵.pem", "untracked"), paths)
+
+    def test_space_and_quote_in_name_detected(self):
+        """空白 / 二重引用符を含む名前も quotePath の引用対象。素の名前で返ること。"""
+        _git(["config", "core.quotePath", "true"], str(self.repo))
+        self._write('my "secret".pem', "-----BEGIN...\n")
+        self._track('my "secret".pem')
+        self._write("sub dir/.env.production", "SECRET=y\n")
+        rules = load_patterns(self.patterns_file)
+        result = find_sensitive_files(str(self.repo), rules)
+        paths = {(r["path"], r["status"]) for r in result}
+        self.assertIn(('my "secret".pem', "tracked"), paths)
+        self.assertIn(("sub dir/.env.production", "untracked"), paths)
 
     def test_gitignored_untracked_not_reported(self):
         """untracked なら .gitignore 済みは報告されない (ls-files --exclude-standard の働き)。"""

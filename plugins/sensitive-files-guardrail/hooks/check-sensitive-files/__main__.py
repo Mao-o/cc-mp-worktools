@@ -601,7 +601,49 @@ def _build_reason(
     )
 
 
+# 想定外の例外で hook が落ちたときに Claude Code へ渡す通知 (0.30.0)。
+# ``systemMessage`` はユーザーの UI に出る (block ではないので Stop は通る)。
+_INTERNAL_ERROR_MESSAGE = (
+    "[sensitive-files-guardrail] Stop hook (check-sensitive-files) が内部エラーで"
+    "検査を完了できませんでした ({exc})。このターンは機密ファイルの tracked / "
+    "untracked 検査が行われていません。stderr の詳細を確認してください。"
+)
+
+
 def main() -> int:
+    """エントリポイント。``_main_impl`` を top-level で包み、想定外の例外を
+    「可視の fail-open」に倒す (0.30.0、内部バックログ)。
+
+    以前は try/except が無く、想定外の例外 (0.27.0 で直した ASCII stdout の
+    ``UnicodeEncodeError`` がその一例) は traceback + exit 1 で終わり、判定 JSON
+    が 1 byte も出ない**無音の** fail-open だった。redact-sensitive-reads 側は
+    ``except Exception → ask_or_deny`` で fail-closed だが、Stop hook の block
+    は「機密ファイルを残したまま止まるな」という差し戻しで、内部エラーで
+    毎ターン差し戻すと利用者は原因を直せないまま作業を止められる。この hook の
+    既存方針 (``patterns_unavailable`` / ``git_unavailable`` は stderr + exit 0)
+    と同じ「止めないが必ず見せる」側に揃える: stderr へ 1 行 + stdout の
+    ``systemMessage`` で「このターンは検査されていない」と明示する。例外の
+    種別だけを出し、メッセージ本文 (path を含みうる) は出さない。
+    """
+    try:
+        return _main_impl()
+    except Exception as e:  # noqa: BLE001 — 想定外の例外を可視化するための最終防衛線
+        exc = type(e).__name__
+        sys.stderr.write(f"[check-sensitive-files] internal_error: {exc}\n")
+        try:
+            write_stdout(
+                json.dumps(
+                    {"systemMessage": _INTERNAL_ERROR_MESSAGE.format(exc=exc)},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        except Exception:  # noqa: BLE001 — stdout 自体が壊れていても exit 0 で終える
+            pass
+        return 0
+
+
+def _main_impl() -> int:
     try:
         hook_input = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, EOFError):

@@ -194,6 +194,56 @@ class TestMainFailOpen(BaseMainTest):
         self.assertIn("patterns_unavailable", err)
 
 
+class TestMainInternalError(BaseMainTest):
+    """想定外の例外は「可視の fail-open」に倒す (0.30.0、内部バックログ)。
+
+    以前は top-level の try/except が無く、traceback + exit 1 で判定 JSON が
+    1 byte も出ない無音の fail-open だった。exit 0 + stderr の
+    ``internal_error:<ExcName>`` + stdout の ``systemMessage`` を固定する。
+    ``systemMessage`` は block ではない (Stop は通る) が、「このターンは検査
+    されていない」ことをユーザーに見せる。
+    """
+
+    def _run_with_broken_build_reason(self, exc: Exception) -> tuple[int, str, str]:
+        (self.repo / ".env").write_text("KEY=v\n")
+        entry = _load_entry()
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "_build_reason", side_effect=exc):
+                rc = entry.main()
+            return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_unexpected_exception_exits_zero_with_system_message(self):
+        rc, out, err = self._run_with_broken_build_reason(RuntimeError("boom /secret/path"))
+        self.assertEqual(rc, 0)
+        self.assertIn("internal_error: RuntimeError", err)
+        payload = json.loads(out)
+        self.assertNotIn("decision", payload)  # block ではない
+        self.assertIn("RuntimeError", payload["systemMessage"])
+        self.assertIn("検査が行われていません", payload["systemMessage"])
+
+    def test_exception_message_body_is_not_disclosed(self):
+        """例外のメッセージ本文 (path を含みうる) は stderr にも stdout にも出さない。"""
+        rc, out, err = self._run_with_broken_build_reason(ValueError("boom /secret/path"))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("/secret/path", err)
+        self.assertNotIn("/secret/path", out)
+
+    def test_normal_path_is_unchanged(self):
+        """包んだだけで通常の block 出力は変わらない (回帰)。"""
+        (self.repo / ".env").write_text("KEY=v\n")
+        rc, out, err = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["decision"], "block")
+        self.assertNotIn("internal_error", err)
+
+
 class TestSubmoduleGuidance(BaseMainTest):
     """内部バックログ: submodule 内 tracked ファイルに対する案内分岐。
 
