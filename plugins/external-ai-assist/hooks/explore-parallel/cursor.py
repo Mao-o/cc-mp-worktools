@@ -37,14 +37,19 @@ import time
 
 from pathlib import Path
 
-from _common import cursorcli, hooklog, subproc
+from _common import cursorcli, hooklog, settings, subproc
 
 from state import REAP_SIGNALED, REAP_STOPPED, REAP_UNCONFIRMED, cleanup, paths
 
 NAME = cursorcli.NAME
 TIMEOUT_SEC = 60
 POLL_INTERVAL_SEC = 3
+
+#: 1 アナライザの結果として親コンテキストへ注入するバイト数の既定上限。
 MAX_OUTPUT_BYTES = 8000
+
+#: 上の上限を上書きする環境変数 (0 以下・不正値は既定に倒す)。
+ENV_MAX_RESULT_BYTES = "EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES"
 
 #: SIGTERM を送ってから SIGKILL に切り替えるまでの猶予 (秒)。
 KILL_GRACE_SEC = 2.0
@@ -97,6 +102,23 @@ _CONTEXT_HEADER = (
 
 def is_available() -> bool:
     return cursorcli.is_available()
+
+
+def max_output_bytes() -> int:
+    """この analyzer の結果として注入するバイト数の上限 (`ENV_MAX_RESULT_BYTES`)。
+
+    **1 ターンの注入合計は「同時起動数 × この値」で頭打ちになる**。post は Explore
+    1 本ごとに別プロセスで走るため、1 回の post で計れるのは自分の結果だけだが、
+    結果を持てるのは起動できた analyzer だけで、その数は
+    `__main__.max_concurrent()` (既定 `state.DEFAULT_MAX_CONCURRENT` = 2) で
+    制限されている。既定では 2 × 8000 バイト + ヘッダ ≒ 16KB が上限。
+
+    0 以下・不正値は既定に倒す (`settings.count` は不正値を default にする)。
+    注入をゼロにしたいケースは「並走そのものを止める」と同義なので
+    `EXTERNAL_AI_EXPLORE_PARALLEL=0` を使う。
+    """
+    value = settings.count(ENV_MAX_RESULT_BYTES, MAX_OUTPUT_BYTES)
+    return value if value > 0 else MAX_OUTPUT_BYTES
 
 
 def pre(tool_use_id: str, prompt: str) -> None:
@@ -180,7 +202,7 @@ def post(tool_use_id: str) -> str | None:
         return None
 
     try:
-        raw = result_file.read_bytes()[:MAX_OUTPUT_BYTES]
+        raw = result_file.read_bytes()[: max_output_bytes()]
         data = raw.decode("utf-8", errors="replace").strip()
     except OSError:
         data = ""

@@ -58,6 +58,48 @@ hooks.json で post を `"async": true` にして解消する (docs `Run hooks i
   (肯定も否定もされていない)。再発火しない前提なので、cursor の解析予算は起動から
   `TIMEOUT_SEC` 秒で、Explore の実行時間には連動しない
 
+## 同時起動数と注入量の上限 (0.11.0)
+
+Claude は **1 メッセージで複数の Explore を並列起動する**のが通常で、0.10.0 までは
+その本数だけ無条件に cursor が同時に走っていた。CPU と Cursor の利用量がターンごとに
+線形に増え、`additionalContext` への注入も本数 × `MAX_OUTPUT_BYTES` (8000) だけ積まれる。
+
+| 変数 | 既定 | 効果 |
+|---|---|---|
+| `EXTERNAL_AI_EXPLORE_MAX_CONCURRENT` | `2` (`state.DEFAULT_MAX_CONCURRENT`) | 同時に走らせる analyzer の上限 |
+| `EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES` | `8000` (`cursor.MAX_OUTPUT_BYTES`) | 1 アナライザの結果として注入するバイト数の上限 |
+
+**1 ターンの注入合計は「同時起動数 × 1 結果あたりの上限」で頭打ち**になる。post は
+Explore 1 本ごとに別プロセスで走るので合計を直接は測れないが、結果を持てるのは起動
+できた analyzer だけなので、起動側の上限がそのまま注入量の上限として効く。
+**注入側に別の台帳 (ターン単位の合計バイト数) を持たせる案は採っていない**: hook
+payload に「ターン」を一意に表す ID が無く時間窓で近似するしかないうえ、既に走り終えた
+(= 課金済みの) 結果を捨てる形になって損が大きい。上限は「使う前」に効かせる。
+
+- 既定を 2 にしたのは、1 だと 2 本目以降の Explore に補助調査が一切付かず並走の価値が
+  ほぼ消えるのに対し、2 なら主要な 2 本には付きつつ増え方を頭打ちにできるため
+- **上限超過分はキューに積まない**。遅れて届く補助調査には価値が無く、キューを持つと
+  「いつ起動されるか分からない cursor」が増えて GC の対象も読みにくくなる。起動しな
+  かったことは stderr に記録する
+- 数え方は `state.live_analyzer_count()` = `$TMPDIR/explore-parallel/` の pid ファイルの
+  うち `os.kill(pid, 0)` が成功するもの。`ps` は起動しない (pre の hook timeout は 5 秒で
+  GC も同じ呼び出しで回るため)。zombie と権限の無いプロセスは「生きている」側に数える
+  = 枠を余分に塞ぐ = 起動しない側に倒れる
+- **現在の tool_use_id も数に入れる**。同じ tool_use_id で pre が二重に呼ばれたとき、
+  `cursor.pre()` は pid ファイルを上書きして前のプロセスを追えなくする (孤児化) ため、
+  上限側で止められるようにしておく
+- **数え上げから起動までは `state.launch_gate()` (flock) で直列化する**。PreToolUse
+  hook 自体が同時に複数走るので、排他にしないと双方が「まだ枠がある」と読んで上限を
+  超える。ロックを取れなかった回は起動しない (超えない側)。ロックファイルを作れない
+  環境では直列化を諦めて進む (fail-open)
+- どちらの変数も **0 以下・不正値は既定に倒す**。0 を「止める」にしないのは、それが
+  `EXTERNAL_AI_EXPLORE_PARALLEL=0` と同義で、同じ意図に 2 つの綴りを作らないため
+
+テストは `tests/test_concurrency_limit.py` (枠の消費・死んだ pid・ロック競合・env の
+フォールバック・注入バイト上限)。枠を埋めるのは偽 cursor ではなく `sleep` —
+ここで見たいのは「pid ファイルが指すプロセスが生きているか」だけで、argv の同一性
+(停止経路の判定) とは無関係なため。
+
 ## 無効化 (`EXTERNAL_AI_EXPLORE_PARALLEL=0`, 0.6.0)
 
 0.5.0 まではスイッチが皆無で、`cursor` を PATH から外す以外に止める手段が無かった。
@@ -74,8 +116,8 @@ cursor と pid / 結果ファイルが孤児になる — 無効化した瞬間�
 ```
 explore-parallel/
 ├── CLAUDE.md           このドキュメント
-├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す + 残骸 GC
-├── state.py            tool_use_id ベースの一時ファイルパス管理 + TTL 判定 ($TMPDIR/explore-parallel/)
+├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す + 残骸 GC + 同時起動数の上限
+├── state.py            tool_use_id ベースの一時ファイルパス管理 + TTL 判定 + 起動枠の数え上げ / 直列化 ($TMPDIR/explore-parallel/)
 ├── cursor.py           cursor agent の pre(読み取り専用で起動) / post(待機+結果取得) / 停止
 └── tests/              起動引数 (--mode plan) と結果注入の unittest (偽 cursor)
 ```

@@ -60,8 +60,21 @@ import state  # noqa: E402
 ANALYZERS = [cursor]
 
 ENV_ENABLED = "EXTERNAL_AI_EXPLORE_PARALLEL"
+ENV_MAX_CONCURRENT = "EXTERNAL_AI_EXPLORE_MAX_CONCURRENT"
 
 log = hooklog.make_logger("explore-parallel")
+
+
+def max_concurrent() -> int:
+    """同時に走らせる analyzer の上限 (既定 `state.DEFAULT_MAX_CONCURRENT`)。
+
+    0 以下・不正値は既定に倒す (`settings.count` が不正値を default にする)。
+    0 を「起動しない」として使わないのは、それが「並走そのものを止める」と同義で、
+    既に `EXTERNAL_AI_EXPLORE_PARALLEL=0` という専用スイッチがあるため
+    (同じ意図に 2 つの綴りを作らない)。
+    """
+    value = settings.count(ENV_MAX_CONCURRENT, state.DEFAULT_MAX_CONCURRENT)
+    return value if value > 0 else state.DEFAULT_MAX_CONCURRENT
 
 
 def enabled() -> bool:
@@ -130,6 +143,49 @@ def gc_orphans(current_tool_use_id: str = "") -> int:
     return removed
 
 
+def _launch_analyzers(tool_use_id: str, prompt: str) -> None:
+    """同時起動数の上限内で analyzer を起動する (0.11.0)。
+
+    Claude は 1 メッセージで複数の Explore を並列起動するのが通常で、0.10.0 までは
+    その数だけ無条件に cursor が同時に走っていた (CPU・利用量がターンごとに線形に
+    増える)。上限は `max_concurrent()`、数え上げは
+    `state.live_analyzer_count()` (生きている pid ファイルの数)。
+
+    **数え上げから起動までを `state.launch_gate()` で直列化する**。PreToolUse hook
+    自体が同時に複数走るため、排他にしないと双方が「まだ枠がある」と読んで上限を
+    超える。ロックを取れなかった回は起動しない (超えない側に倒す)。
+
+    1 ターンの注入合計もこの上限で頭打ちになる (`cursor.max_output_bytes()` の
+    docstring)。post は Explore 1 本ごとに別プロセスなので合計を直接は測れないが、
+    結果を持てるのは起動できた analyzer だけなので、同時起動数 × 1 結果あたりの
+    上限が効く。
+    """
+    limit = max_concurrent()
+    with state.launch_gate() as gated:
+        if not gated:
+            log(
+                "別の Explore の起動処理と競合したため、この Explore には並走を付けない "
+                f"(同時起動上限 {limit} を超えないため)"
+            )
+            return
+        running = state.live_analyzer_count()
+        launched = 0
+        for analyzer in ANALYZERS:
+            if not analyzer.is_available():
+                continue
+            if running + launched >= limit:
+                log(
+                    f"{analyzer.NAME}: 同時起動上限 ({limit}, {ENV_MAX_CONCURRENT}) に"
+                    f"達しているため起動しない (実行中 {running + launched})"
+                )
+                break
+            try:
+                analyzer.pre(tool_use_id, prompt)
+                launched += 1
+            except Exception as e:
+                log(f"{analyzer.NAME}: pre failed: {e}")
+
+
 def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=["pre", "post"], required=True)
@@ -157,13 +213,7 @@ def _main() -> None:
         prompt = tool_input.get("prompt", "")
         if not prompt:
             return
-        for analyzer in ANALYZERS:
-            if not analyzer.is_available():
-                continue
-            try:
-                analyzer.pre(tool_use_id, prompt)
-            except Exception as e:
-                log(f"{analyzer.NAME}: pre failed: {e}")
+        _launch_analyzers(tool_use_id, prompt)
 
     elif args.phase == "post":
         sections = []

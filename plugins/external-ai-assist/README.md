@@ -67,6 +67,15 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 結果の回収 (post) は常に動く — 直前のターンで起動済みの Cursor Agent と一時ファイルを
 孤児にしないため。
 
+**同時起動数に上限がある** (0.11.0、既定 2 = `EXTERNAL_AI_EXPLORE_MAX_CONCURRENT`)。
+Claude は 1 メッセージで複数の Explore を並列起動するのが通常で、0.10.0 までは
+その本数だけ無条件に Cursor Agent が同時に走っていた (CPU・利用量がターンごとに
+線形に増え、注入量も本数に比例していた)。上限に達している間に起動された Explore には
+並走を付けない (待たせない・キューにも積まない — 遅れて届く補助調査には価値が無いため)。
+数え方は「`$TMPDIR/explore-parallel/` の pid ファイルのうちプロセスが生きている数」で、
+数え上げから起動までは flock で直列化する (PreToolUse hook 自体が同時に走るため)。
+**1 ターンの注入合計もこの上限で頭打ちになる** (同時起動数 × `EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES`)。
+
 **post は `async` hook** (0.10.0)。Agent ツールは subagent が背景に移った時点で戻る
 (公式 docs: 背景 subagent では `tool_response.status` が `async_launched`) ので、
 `PostToolUse(Agent)` は Explore の完了時ではなく**起動直後**に発火する。0.9.1 までの
@@ -342,6 +351,20 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
 ```bash
 EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW=0 claude
 ```
+
+### explore-parallel
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_EXPLORE_MAX_CONCURRENT` | `2` | 同時に走らせる補助アナライザの上限 (0.11.0)。上限に達している間に起動された Explore には並走を付けない (待たせない・キューにも積まない) |
+| `EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES` | `8000` | 1 アナライザの結果として親コンテキストへ注入するバイト数の上限 (0.11.0) |
+
+**1 ターンの注入合計は「同時起動数 × 1 結果あたりの上限」で頭打ち**になる (既定で
+2 × 8000 バイト + ヘッダ ≒ 16KB)。結果を持てるのは起動できたアナライザだけなので、
+同時起動数の上限がそのまま注入量の上限になる。
+
+どちらも **0 以下・解釈できない値は既定に倒す**。並走そのものを止めたいときは
+`EXTERNAL_AI_EXPLORE_PARALLEL=0` を使う (同じ意図に 2 つの綴りを作らない)。
 
 ### exitplan-review
 
