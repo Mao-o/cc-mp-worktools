@@ -25,7 +25,9 @@ commit 52113a1 で完了)。
 Stop hook (check-sensitive-files) の検出漏れ 1 件と無音 fail-open 1 件を修正
 (内部バックログ 3 件)。**判定境界の変化: あり** — いずれも「検出されなかった
 ものが検出される / 見えなかった失敗が見える」方向のみで、allow → block に
-倒れる新規条件は無い。テスト件数: check 135 → **141**。
+倒れる新規条件は無い。**利用者影響**: 非 ASCII 名の機密ファイル (`鍵.pem` /
+`日本語/.env` 等) を持つ既存 repo では、0.30.0 から今まで出なかった Stop の
+block が出始める。テスト件数: check 135 → **146**。
 
 ### 非 ASCII / 空白入りファイル名の検出漏れ (guard bypass)
 
@@ -50,6 +52,18 @@ Stop hook (check-sensitive-files) の検出漏れ 1 件と無音 fail-open 1 件
   へ `internal_error: <ExcName>` 1 行 + stdout の `systemMessage` で「このターンは
   検査されていない」と明示する。例外の種別だけを出し、メッセージ本文 (path を
   含みうる) は出さない
+- ただし **block 出力の開始後に失敗した場合** (0.27.0 の動機ケース = stdout
+  書込み失敗) と `systemMessage` 自体が書けない場合は **exit 1** で終える
+  (マージ前レビューの指摘)。exit 0 + 空 stdout は hook の正常形で stderr も
+  debug log 止まりのため完全無音になるが、exit 1 ならハーネスが transcript に
+  notice + stderr 1 行目を出す。部分出力の後ろに JSON を追記して invalid JSON
+  にすることもしない
+- stop-ack の保存を block の**送出成功後**に移した (マージ前レビューの指摘)。
+  先に保存すると、送出に失敗したターンでも digest が ack 済みになり、同一
+  session では以降一切 block が出なくなっていた (0.19.0 からの潜在不具合)
+- 判定表 (`docs/MATRIX.md` / `docs/DESIGN.md` / README) に「handler 内未捕捉
+  例外」行を追加。`git rev-parse --show-toplevel` を改行区切りで読む既知の残課題
+  (repo root パスに改行) を README 既知制限に追記
 ## 0.29.1
 
 内部バックログの精査で発見した課題 1 件 (Bash の `cp` / `mv` / `source` / `.`

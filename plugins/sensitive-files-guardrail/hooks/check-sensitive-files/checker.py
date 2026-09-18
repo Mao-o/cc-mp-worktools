@@ -133,8 +133,10 @@ def _run_git_nul(args: list[str], cwd: str) -> list[str]:
     ``core.quotePath`` によって 8 進エスケープの引用符付き文字列に変換される
     (改行区切りだと誤ってその形のまま 1 要素として返ってしまう) のを避ける
     標準的な使い方 (``_ls_tracked`` / ``find_sensitive_files`` の untracked 列挙 /
-    ``submodule_paths`` が使用。改行区切りの ``_run_git`` は path を返さない
-    ``rev-parse`` 系にだけ使う)。
+    ``submodule_paths`` が使用)。改行区切りの ``_run_git`` は ``rev-parse`` 系
+    にだけ残す — ``rev-parse`` の出力は ``core.quotePath`` の対象外 (実測: git
+    2.50.1) なので ``-z`` は不要。ただし ``--show-toplevel`` は path を返すため、
+    repo root のパスに改行を含む環境では誤 parse する既知の残課題がある。
     """
     result = _run_git_raw(args, cwd)
     if result is None or result.returncode != 0:

@@ -279,7 +279,8 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
         self.assertIn(("鍵.pem", "untracked"), paths)
 
     def test_space_and_quote_in_name_detected(self):
-        """空白 / 二重引用符を含む名前も quotePath の引用対象。素の名前で返ること。"""
+        """二重引用符を含む名前は quotePath の引用対象 (判別的)。空白のみの名前は
+        引用されない (実測) ので、そちらは回帰用 (旧コードでも通る)。"""
         _git(["config", "core.quotePath", "true"], str(self.repo))
         self._write('my "secret".pem', "-----BEGIN...\n")
         self._track('my "secret".pem')
@@ -289,6 +290,18 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
         paths = {(r["path"], r["status"]) for r in result}
         self.assertIn(('my "secret".pem', "tracked"), paths)
         self.assertIn(("sub dir/.env.production", "untracked"), paths)
+
+    def test_newline_in_name_detected_regardless_of_quotepath(self):
+        """改行入り名は ``core.quotePath=false`` でも引用される (git 仕様) ため、
+        ユーザーの git 設定に依らず改行区切り実装との差を判別できる fixture。"""
+        _git(["config", "core.quotePath", "false"], str(self.repo))
+        name = "new\nline.pem"
+        self._write(name, "-----BEGIN...\n")
+        self._track(name)
+        rules = load_patterns(self.patterns_file)
+        result = find_sensitive_files(str(self.repo), rules)
+        paths = {(r["path"], r["status"]) for r in result}
+        self.assertIn((name, "tracked"), paths)
 
     def test_gitignored_untracked_not_reported(self):
         """untracked なら .gitignore 済みは報告されない (ls-files --exclude-standard の働き)。"""

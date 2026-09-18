@@ -523,6 +523,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` が無い / 不正なら従来通り block) |
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
+| handler 内未捕捉例外 (0.30.0) | **exit 0 + stderr `internal_error` + `systemMessage`** (block しない)。block 出力の開始後に失敗した場合と `systemMessage` 自体が書けない場合は **exit 1** (部分出力への追記はしない) |
 
 ## `__main__` catch-all (handler 内未捕捉例外)
 

@@ -606,8 +606,15 @@ def _build_reason(
 _INTERNAL_ERROR_MESSAGE = (
     "[sensitive-files-guardrail] Stop hook (check-sensitive-files) が内部エラーで"
     "検査を完了できませんでした ({exc})。このターンは機密ファイルの tracked / "
-    "untracked 検査が行われていません。stderr の詳細を確認してください。"
+    "untracked 検査が行われていません。詳細は `claude --debug` のログ "
+    "(stderr の `internal_error:` 行) を参照してください。"
 )
+
+# block 出力 (``write_stdout``) を開始したかどうか。開始後に例外が起きた場合は
+# stdout に部分的な JSON が残っている可能性があり、そこへ ``systemMessage`` を
+# 追記すると 2 つの JSON の連結 = parse 不能になる (マージ前レビューの指摘)。
+# その場合は追記せず非ゼロ exit だけで知らせる。
+_OUTPUT_STARTED = False
 
 
 def main() -> int:
@@ -625,11 +632,17 @@ def main() -> int:
     ``systemMessage`` で「このターンは検査されていない」と明示する。例外の
     種別だけを出し、メッセージ本文 (path を含みうる) は出さない。
     """
+    global _OUTPUT_STARTED
+    _OUTPUT_STARTED = False
     try:
         return _main_impl()
     except Exception as e:  # noqa: BLE001 — 想定外の例外を可視化するための最終防衛線
         exc = type(e).__name__
         sys.stderr.write(f"[check-sensitive-files] internal_error: {exc}\n")
+        if _OUTPUT_STARTED:
+            # 部分書込みの後ろに JSON を足すと invalid JSON になる。exit 1 で
+            # ハーネスの "hook error" notice (stderr 1 行目付き) に委ねる。
+            return 1
         try:
             write_stdout(
                 json.dumps(
@@ -638,8 +651,12 @@ def main() -> int:
                 )
                 + "\n"
             )
-        except Exception:  # noqa: BLE001 — stdout 自体が壊れていても exit 0 で終える
-            pass
+        except Exception:  # noqa: BLE001
+            # stdout 自体に書けない (0.27.0 の動機ケース)。exit 0 + 空 stdout は
+            # hook の正常形で、stderr は debug log にしか出ない = 完全無音になる。
+            # exit 1 なら transcript に notice + stderr 1 行目 (上の internal_error
+            # 行) が出る (公式 hooks docs の non-blocking error 挙動)。
+            return 1
         return 0
 
 
@@ -717,15 +734,21 @@ def _main_impl() -> int:
         submodule_by_path=submodule_by_path,
     )
 
-    if session_id is not None:
-        save_acked(session_id, acked | digests, warn=_warn_stop_ack)
-
     # ``print`` ではなく ``write_stdout`` (UTF-8 bytes をバイナリ層へ書く) を
     # 通す。reason はほぼ全文が日本語なので、``PYTHONIOENCODING=ascii`` 等の
     # 非 UTF-8 stdout では ``print`` が ``UnicodeEncodeError`` を送出し、hook が
     # exit 1 で落ちて block が 1 byte も出ない (機密ファイルが報告されない、
     # 外部レビュー R2 P2-A)。末尾改行も同じ経路で書く。
+    global _OUTPUT_STARTED
+    _OUTPUT_STARTED = True
     write_stdout(_serialize(reason) + "\n")
+
+    # ack の保存は block の**送出に成功した後** (0.30.0、マージ前レビューの指摘)。
+    # 先に保存すると、送出に失敗したターンでも digest が ack 済みになり、次の
+    # ターン以降 ``digests <= acked`` で早期 return して同一 session では二度と
+    # block が出なくなる。送出できなかったターンは ack しない = 次ターンで再 block。
+    if session_id is not None:
+        save_acked(session_id, acked | digests, warn=_warn_stop_ack)
     return 0
 
 
