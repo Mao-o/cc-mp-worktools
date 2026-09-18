@@ -44,11 +44,27 @@ class TestMainEntry(unittest.TestCase):
         self.project.mkdir()
         self.cache_tmp = Path(self.tmp) / "cache"
         self.cache_tmp.mkdir()
+        # 子プロセスは実環境の env を引き継ぐため、`$HOME` (グローバル既定の
+        # accounts.local.json) / CLI 設定 dir / モード env をここで隔離する。
+        # 開発者が自分用のグローバル既定や VERIFY_CLOUD_ACCOUNT_MODE を持って
+        # いると「未設定なら deny」のスモークが通らなくなる。
+        self.fake_home = Path(self.tmp) / "home"
+        self.fake_home.mkdir()
         self.env = {
             **os.environ,
+            **_testutil.cli_config_env(Path(self.tmp) / "cliconfig"),
+            "HOME": str(self.fake_home),
             "TMPDIR": str(self.cache_tmp),
             "CLAUDE_PROJECT_DIR": str(self.project),
         }
+        for name in _testutil.LEAKY_ENV_VARS:
+            self.env.pop(name, None)
+        for name in [
+            n
+            for n in list(self.env)
+            if n.startswith("CLOUDSDK_") and n != "CLOUDSDK_CONFIG"
+        ]:
+            self.env.pop(name, None)
 
     def _run(self, command: str) -> subprocess.CompletedProcess:
         payload = {
@@ -72,6 +88,25 @@ class TestMainEntry(unittest.TestCase):
         out = json.loads(res.stdout)["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("未設定", out["permissionDecisionReason"])
+
+    def test_mode_off_env_is_silent_end_to_end(self):
+        """escape hatch の実プロセススモーク: off なら JSON を出さない (= 通す)。"""
+        res = subprocess.run(
+            [sys.executable, str(_PKG_DIR)],
+            input=json.dumps(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "gh pr create"},
+                    "cwd": str(self.project),
+                }
+            ),
+            capture_output=True,
+            text=True,
+            env={**self.env, "VERIFY_CLOUD_ACCOUNT_MODE": "off"},
+            timeout=30,
+        )
+        self.assertEqual((res.returncode, res.stdout), (0, ""), res.stderr)
 
     def test_readonly_login_is_silent_and_invalidates(self):
         res = self._run("gh auth login --skip-ssh-key")

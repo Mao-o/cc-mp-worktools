@@ -556,3 +556,60 @@ def resolve_accounts_file(
         kind, path = found[0]
         return path, kind, [], resolved_dir
     return None, None, [], None
+
+
+# 解決元の種別 (`resolve_accounts_file_for_verification` の 5 要素目)。
+SOURCE_PROJECT = "project"
+SOURCE_GLOBAL = "global"
+
+
+def global_accounts_file() -> Path | None:
+    """グローバル既定 (`$HOME/.claude/verify-cloud-account/accounts.local.json`)。
+
+    `$HOME` が求まらなければ None。
+
+    **現行パス (`new`) だけをグローバル既定として認める** — 旧パス
+    (`~/.claude/accounts.local.json` / `~/.claude/accounts.json`) は認めない。
+    親遡及が `$HOME` まで届いていた頃に「無関係な `~/.claude/accounts.json` を
+    継承して検証していた」のが v0.12.0 で塞いだ不具合そのものなので、旧名を
+    グローバル既定として復活させるとその事故を意図せず再現する。
+    """
+    home = _home_dir()
+    if home is None:
+        return None
+    return accounts_file_new(str(home))
+
+
+def resolve_accounts_file_for_verification(
+    project_dir: str,
+) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None, str | None]:
+    """**hook (検証) が読む** accounts.local.json を決める。
+
+    `resolve_accounts_file()` (プロジェクト側の 3-tier + 親遡及) で見つからなかった
+    ときだけ、**明示的なグローバル既定**
+    (`$HOME/.claude/verify-cloud-account/accounts.local.json`) に落ちる。
+
+    グローバル既定を親遡及ではなく専用経路にしている理由: 遡及で `$HOME` まで
+    上らせると「たまたま `$HOME` 配下にあるプロジェクトだけが継承する」という
+    位置依存の挙動になる (v0.12.0 で塞いだ不具合)。パスを固定した明示的な
+    fallback なら、プロジェクトの置き場所に依らず同じ結果になる。
+
+    **builder はこの関数を使わない** (`resolve_accounts_file()` のまま)。builder の
+    `set` / `remove` は「書き込み先」を決めるため、プロジェクト未設定のときに
+    グローバル既定へ落ちると、プロジェクト設定を作るつもりの編集が**利用者の
+    全プロジェクトに効く**ファイルを書き換えてしまう。
+
+    Returns:
+        (path, kind, conflicts, resolved_dir, source)
+          - source: "project" / "global" / None (見つからなかった)
+          - 他の 4 要素は `resolve_accounts_file()` と同じ意味
+    """
+    path, kind, conflicts, resolved_dir = resolve_accounts_file(project_dir)
+    if conflicts:
+        return None, None, conflicts, resolved_dir, None
+    if path is not None:
+        return path, kind, [], resolved_dir, SOURCE_PROJECT
+    global_path = global_accounts_file()
+    if global_path is not None and global_path.is_file():
+        return global_path, "new", [], global_path.parent, SOURCE_GLOBAL
+    return None, None, [], None, None

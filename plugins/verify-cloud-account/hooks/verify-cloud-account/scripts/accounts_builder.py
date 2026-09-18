@@ -134,7 +134,7 @@ _PKG_ROOT = _HERE.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core import paths  # noqa: E402
+from core import mode, paths  # noqa: E402
 from services import ALL as SERVICES  # noqa: E402
 
 _SERVICE_NAMES = [svc.ACCOUNT_KEY for svc in SERVICES]
@@ -1239,6 +1239,15 @@ def _cmd_show(
         if services_filter and key not in services_filter:
             continue
         expected = existing[key]
+        # 予約キー (`"$mode"`) は service ではないので CLI 突合の対象外。値も
+        # 機密ではないため `--show-values` を待たずそのまま出す (これを
+        # `[unknown service]` として値を隠すと、mode を設定したのに何が効いて
+        # いるのか show から読めない)。
+        if key == mode.MODE_KEY:
+            valid = isinstance(expected, str) and expected.strip().lower() in mode.VALID_MODES
+            marker = "[mode]" if valid else "[mode: 不正な値 — enforce として扱われます]"
+            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            continue
         svc = _SERVICE_BY_KEY.get(key)
 
         expected_display = _format_value_for_display(expected, args.show_values)
