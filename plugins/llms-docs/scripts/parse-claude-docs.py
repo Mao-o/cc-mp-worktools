@@ -113,7 +113,7 @@ _is_low_priority = is_low_priority
 #   raw ``# `` lines that do appear are mostly comments in unfenced code
 #   samples, so splitting on H1 shreds 699 pages into ~300 unrelated chunks
 #   with no URL — the index↔full-text join drops to 0% and every
-#   ``search`` on the source fails (internal backlog 2wd.30).
+#   ``search`` on the source fails (internal backlog).
 #
 # ``split_documents`` runs both splitters and keeps whichever yields more
 # URL-bearing pages (tie → H1, the historical layout). Counting *joinable*
@@ -548,10 +548,12 @@ def cmd_fetch_index(args):
     print(f"({len(entries)} pages total, {displayed} entries shown — {grouped_count} pages grouped)")
     print()
     if url_to_idx:
-        next_hint("sections", "<page_ref>", *_source_hint_args(args))
+        next_hint("sections", "<page_ref>",
+                  *(_source_hint_args(args) + corpus_hint_args(args)))
         print(f"  (llms-full.txt will be fetched automatically on first use)")
     else:
-        next_hint("sections", "<slug>", *_source_hint_args(args))
+        next_hint("sections", "<slug>",
+                  *(_source_hint_args(args) + corpus_hint_args(args)))
         print("  (llms-full.txt not cached yet, so the bracketed ref above is a")
         print("   URL slug, not an integer doc_idx; run 'search' once to fetch")
         print("   it and get numeric doc_idx here too)")
@@ -854,7 +856,8 @@ def cmd_search_index(args):
               "slug, not an integer doc_idx. Run 'search' once (or 'sections "
               "<slug>' directly) to populate doc_idx numbering here too.")
         print()
-    next_hint("search", '"<query>"', *_source_hint_args(args))
+    next_hint("search", '"<query>"',
+              *(_source_hint_args(args) + corpus_hint_args(args)))
 
 
 def cmd_search_content(args):
@@ -1129,8 +1132,11 @@ def cmd_search(args):
         print("Note: doc_idx is unique within a source. For follow-up commands, "
               "pass the matching --source <code|platform> explicitly.")
         print()
+        # ``--source`` is a placeholder here, not the active value: with
+        # ``--source both`` the reader must pick the source matching the
+        # doc_idx they follow. The corpus args still apply to either pick.
         next_hint("content", "<page_ref>", '"<heading_path>"',
-                  "--source", "<code|platform>")
+                  "--source", "<code|platform>", *corpus_hint_args(args))
     else:
         next_hint("content", "<page_ref>", '"<heading_path>"',
                   *(_source_hint_args(args) + corpus_hint_args(args)))

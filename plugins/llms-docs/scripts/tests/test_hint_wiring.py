@@ -1,0 +1,167 @@
+"""Static guard: every ``next_hint()`` call propagates ``corpus_hint_args``.
+
+``next_hint()`` prints a copy-pasteable ``Next: ...`` follow-up command. When
+the current invocation selected a non-default corpus (``--file`` /
+``--cache-dir`` / ``--max-age``), a hint that omits those flags re-resolves
+against the *default* corpus, so the same numeric page index can land on a
+different document (see ``_common.corpus_hint_args``' docstring).
+
+This is a wiring obligation spread over every ``cmd_*`` in all three
+``parse-*.py`` scripts, and forgetting it produces no error — just a subtly
+wrong hint. An internal-backlog audit found nine such call sites across two of
+the three scripts, sitting next to already-wired siblings in the same file, so
+per-command output assertions clearly do not cover the class.
+
+Rather than assert on rendered output for every subcommand (which needs a
+fixture and a fetch path per command), this checks the source tree: parse each
+script with ``ast`` and require that each ``next_hint(...)`` call passes a
+starred argument that carries ``corpus_hint_args(args)``. The check is
+deliberately structural so a *newly added* call site fails here at test time
+instead of shipping a hint pointed at the wrong corpus.
+
+``corpus_hint_args`` was kept an explicit argument at each call site (rather
+than folded into ``next_hint``'s own signature) because the two scripts that
+need ``_source_hint_args`` compose the tuples locally, and because a required
+``args`` parameter would turn a cosmetic omission into a ``TypeError`` at
+runtime in any command path a test does not exercise.
+"""
+
+import ast
+import unittest
+from pathlib import Path
+
+import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
+
+SCRIPTS_DIR = Path(_loader.SCRIPTS_DIR)
+
+# Expected number of next_hint() call sites per script. Kept as a floor, not
+# an exact count: a new subcommand may legitimately add one, and the point of
+# this file is that the new one gets checked. The floor only guards against
+# the AST walk silently matching nothing (a vacuously passing test) if
+# next_hint is ever renamed or the call shape changes.
+EXPECTED_MIN_CALLS = {
+    "parse-claude-docs.py": 7,
+    "parse-ai-sdk.py": 5,
+    "parse-firebase.py": 5,
+}
+
+HINT_FUNC = "next_hint"
+REQUIRED_HELPER = "corpus_hint_args"
+
+
+def _called_names(node: ast.AST) -> set:
+    """Names of every function called anywhere inside *node*."""
+    names = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            func = sub.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+    return names
+
+
+def _names_carrying_helper(scope: ast.AST) -> set:
+    """Local names in *scope* assigned from an expression calling the helper.
+
+    Lets a call site hoist the tuple into a variable
+    (``hint_args = corpus_hint_args(args)`` ... ``next_hint(..., *hint_args)``)
+    without tripping the guard — ``cmd_content`` already does this for the
+    truncation hint, so the pattern is expected to spread.
+    """
+    carriers = set()
+    for sub in ast.walk(scope):
+        if isinstance(sub, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            if sub.value is None or REQUIRED_HELPER not in _called_names(sub.value):
+                continue
+            targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    carriers.add(target.id)
+    return carriers
+
+
+def _hint_calls(scope: ast.AST) -> list:
+    return [
+        sub for sub in ast.walk(scope)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == HINT_FUNC
+    ]
+
+
+def _call_is_wired(call: ast.Call, carriers: set) -> bool:
+    for arg in call.args:
+        if not isinstance(arg, ast.Starred):
+            continue
+        if REQUIRED_HELPER in _called_names(arg.value):
+            return True
+        if isinstance(arg.value, ast.Name) and arg.value.id in carriers:
+            return True
+    return False
+
+
+class NextHintCorpusArgsWiringTest(unittest.TestCase):
+    def _check_script(self, filename: str):
+        path = SCRIPTS_DIR / filename
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        all_calls = _hint_calls(tree)
+        self.assertGreaterEqual(
+            len(all_calls), EXPECTED_MIN_CALLS[filename],
+            f"{filename}: found only {len(all_calls)} {HINT_FUNC}() call sites "
+            f"(expected at least {EXPECTED_MIN_CALLS[filename]}). If the hint "
+            f"helper was renamed, update this guard — do not lower the floor "
+            f"to make it pass.",
+        )
+
+        # Every call must live inside a function (that is where an ``args``
+        # namespace exists). Attribute calls to their enclosing scope so a
+        # hoisted ``hint_args`` variable is visible.
+        checked = set()
+        unwired = []
+        for scope in ast.walk(tree):
+            if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            carriers = _names_carrying_helper(scope)
+            for call in _hint_calls(scope):
+                checked.add(id(call))
+                if not _call_is_wired(call, carriers):
+                    unwired.append(f"{filename}:{call.lineno} (in {scope.name}())")
+
+        self.assertEqual(
+            unwired, [],
+            f"{HINT_FUNC}() call sites missing *{REQUIRED_HELPER}(args): "
+            f"{unwired}. A follow-up hint that drops --file/--cache-dir/"
+            f"--max-age re-resolves against the default corpus, so the same "
+            f"page index can point at a different document.",
+        )
+
+        orphans = [
+            f"{filename}:{call.lineno}"
+            for call in all_calls if id(call) not in checked
+        ]
+        self.assertEqual(
+            orphans, [],
+            f"{HINT_FUNC}() called outside any function ({orphans}); such a "
+            f"call has no ``args`` to propagate and cannot be checked here.",
+        )
+
+    def test_claude_docs_hints_propagate_corpus_args(self):
+        self._check_script("parse-claude-docs.py")
+
+    def test_ai_sdk_hints_propagate_corpus_args(self):
+        self._check_script("parse-ai-sdk.py")
+
+    def test_firebase_hints_propagate_corpus_args(self):
+        self._check_script("parse-firebase.py")
+
+    def test_every_parse_script_is_covered(self):
+        """The guard must not silently skip a newly added parse-*.py."""
+        found = sorted(p.name for p in SCRIPTS_DIR.glob("parse-*.py"))
+        self.assertEqual(found, sorted(EXPECTED_MIN_CALLS))
+
+
+if __name__ == "__main__":
+    unittest.main()

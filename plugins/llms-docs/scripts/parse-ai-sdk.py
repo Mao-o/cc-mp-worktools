@@ -151,7 +151,7 @@ def _looks_like_frontmatter_start(lines: list[str], pos: int) -> bool:
     or blank. A body horizontal rule followed by prose that merely starts
     with ``Note:`` / ``Example:`` used to pass the old "any key: value in
     the next 30 lines" check and split one page into two (internal
-    backlog 2wd.16); prose lines are not YAML-shaped, so they now veto.
+    backlog); prose lines are not YAML-shaped, so they now veto.
     """
     if not _is_frontmatter_delimiter(lines[pos]):
         return False

@@ -2,6 +2,40 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.24.2] - 2026-09-19
+
+### `Next:` ヒントが選択中の corpus を引き継がない箇所 9 件を修正 + 静的ガード
+
+`next_hint()` が出す `Next: ...` の follow-up コマンドに、実行中の
+`--file` / `--cache-dir` / `--max-age` を引き継いでいない呼び出しが残っていた。
+同じファイル内の兄弟呼び出しは配線済みで、**ファイル内不整合**になっていた。
+
+- **`corpus_hint_args(args)` を未配線の 9 箇所に追加** — `parse-firebase.py` の
+  `fetch-index` / `sections` / `search-index` / `search-content` / `search` (5 箇所)、
+  `parse-claude-docs.py` の `fetch-index` の 2 分岐 / `search-index` / `search` の
+  `--source both` 分岐 (4 箇所)。claude-docs 側は既存慣例どおり
+  `*(_source_hint_args(args) + corpus_hint_args(args))` で合成する。
+  `--source both` 分岐は `--source <code|platform>` がプレースホルダなので
+  corpus 引数だけを追加し、意図をコメントに残した。
+  `--file` は firebase に無く claude-docs の該当サブコマンドでも argparse
+  未配線なので、実際に落ちていたのは `--cache-dir` / `--max-age` (影響は表示のみ)
+- **`scripts/tests/test_hint_wiring.py` を追加** — 全 `next_hint()` 呼び出しに
+  `corpus_hint_args(args)` が渡っているかを AST で静的に検査する汎用ガード
+  (4 tests)。サブコマンド毎の出力アサーションでは配線漏れのクラスを
+  カバーできていなかったため、呼び出し側の構造を直接検査する。ローカル変数への
+  hoist (`hint_args = corpus_hint_args(args)` → `*hint_args`) も許容し、
+  呼び出し件数の下限と「関数外呼び出しゼロ」も同時に検査して、ヘルパー改名で
+  検査対象が 0 件になる空振り (vacuous pass) を防ぐ
+- **出力そのものを見る回帰テストを 3 件追加** — 静的ガードでは見えない
+  「レンダリング後の引数順 (`--source` が先、corpus 引数が最後)」を
+  firebase `fetch-index` / claude-docs `fetch-index` + `search-index` で固定
+  (`test_parse_firebase.py` / `test_parse_claude_docs.py`、オフライン fixture のみ)
+- コード・テストの docstring / コメントに残っていた内部バックログ ID 9 件を
+  汎用表現 (「internal backlog」) に置換
+- テスト: 263 → 270 件 green。配線を元に戻す mutation 5 件とヘルパー改名
+  mutation 1 件が静的ガードで、配線を戻す mutation 3 件が出力テストで
+  それぞれ検出されることを使い捨てコピーで確認 (HTTP 取得なし)
+
 ## [0.24.1] - 2026-09-19
 
 ### `paths` × `context: fork` の実機計測と、汎用 source 対応のコスト見積りを docs 化

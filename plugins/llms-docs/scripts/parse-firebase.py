@@ -279,7 +279,7 @@ def cmd_fetch_index(args):
     if end < total:
         print(f"  Next page: --offset {end} --limit {args.limit}")
     print()
-    next_hint("sections", "<page_ref>")
+    next_hint("sections", "<page_ref>", *corpus_hint_args(args))
 
 
 def cmd_sections(args):
@@ -309,7 +309,7 @@ def cmd_sections(args):
     print()
     print(f"({len(sections)} sections)")
     print()
-    next_hint("content", str(idx), '"<heading_path>"')
+    next_hint("content", str(idx), '"<heading_path>"', *corpus_hint_args(args))
 
 
 def cmd_content(args):
@@ -378,7 +378,7 @@ def cmd_search_index(args):
 
     print(f"({len(scored)} results, {len(entries)} pages searched)")
     print()
-    next_hint("search", '"<query>"')
+    next_hint("search", '"<query>"', *corpus_hint_args(args))
 
 
 def cmd_search_content(args):
@@ -489,7 +489,7 @@ def cmd_search_content(args):
     if skipped:
         print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"')
+    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
 
 
 def cmd_search(args):
@@ -589,7 +589,7 @@ def cmd_search(args):
     if skipped:
         print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"')
+    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
 
 
 # ---------------------------------------------------------------------------
