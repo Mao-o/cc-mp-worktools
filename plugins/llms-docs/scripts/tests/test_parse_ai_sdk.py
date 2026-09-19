@@ -58,7 +58,7 @@ class SplitDocumentsTest(unittest.TestCase):
         """A body ``---`` horizontal rule followed by prose that happens to
         start with ``Note:`` must not open a new document: every line
         between the delimiters has to be YAML-shaped and one must be
-        ``title:`` (internal backlog 2wd.16). The live ai-sdk corpus has 0
+        ``title:`` (internal backlog). The live ai-sdk corpus has 0
         untitled docs before and after, and the sections dump is
         identical."""
         lines = [

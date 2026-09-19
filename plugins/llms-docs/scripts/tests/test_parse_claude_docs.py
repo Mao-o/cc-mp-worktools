@@ -897,6 +897,49 @@ class SearchIndexDocIdxJoinTest(unittest.TestCase):
         self.assertIn("Note:", out)
 
 
+class NextHintCorpusArgsRenderTest(unittest.TestCase):
+    """``fetch-index`` / ``search-index`` used to print a ``Next:`` line that
+    propagated only ``--source``, dropping a non-default ``--cache-dir`` /
+    ``--max-age``. Following such a hint re-resolves the same page ref against
+    the default cache dir, i.e. potentially a different document.
+
+    ``scripts/tests/test_hint_wiring.py`` guards the wiring statically for
+    every call site; these two assert the rendered order (source first, corpus
+    args last) that the static check cannot see."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "claude-platform-llms.txt").write_text(
+            "- [Messages](https://example.com/en/messages): Send messages\n",
+            encoding="utf-8",
+        )
+
+    def test_fetch_index_hint_keeps_source_and_cache_dir(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "fetch-index",
+            "--source", "platform", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            f"Next: parse-claude-docs.py sections <slug> "
+            f"--source platform --cache-dir {self.tmp}\n",
+            out,
+        )
+
+    def test_search_index_hint_keeps_source_and_max_age(self):
+        code, out, err = _loader.run_cli(parse_claude_docs, [
+            "parse-claude-docs.py", "search-index", "messages",
+            "--source", "platform", "--cache-dir", self.tmp, "--max-age", "0",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            f'Next: parse-claude-docs.py search "<query>" '
+            f"--source platform --cache-dir {self.tmp} --max-age 0\n",
+            out,
+        )
+
+
 class ContentMaxCharsTruncationTest(unittest.TestCase):
     """content had no output-size cap, so a large page (Platform
     pages average ~38KB) silently overflowed the Bash tool's ~30KB inline-
@@ -1012,7 +1055,7 @@ class FrontmatterSplitDocumentsTest(unittest.TestCase):
     + ``URL:`` pages to YAML-frontmatter pages (``---`` / ``title:`` /
     ``url:`` / ``description:`` / ``---``) with no H1 of their own. The H1
     splitter then shredded 699 pages into ~300 URL-less chunks and the
-    index↔full-text join fell to 0% (internal backlog 2wd.30)."""
+    index↔full-text join fell to 0% (internal backlog)."""
 
     FM_CORPUS = [
         "# Anthropic Developer Documentation - Full Content\n",

@@ -83,6 +83,34 @@ class FirebaseCliTest(unittest.TestCase):
         self.assertIn("search-content", out)
 
 
+class NextHintCorpusArgsRenderTest(unittest.TestCase):
+    """firebase wired the ``--max-chars`` truncation hint to the active corpus
+    but not the ``Next:`` lines, so a reader following one from a non-default
+    ``--cache-dir`` re-resolved the same page index against the default cache
+    dir. ``scripts/tests/test_hint_wiring.py`` guards every call site
+    statically; this asserts the rendered line for one of them."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        Path(self.tmp, "firebase-llms.txt").write_text(
+            "- [Auth Overview](https://firebase.google.com/docs/auth/overview.md.txt):"
+            " Overview of auth\n",
+            encoding="utf-8",
+        )
+
+    def test_fetch_index_hint_keeps_cache_dir(self):
+        code, out, err = _loader.run_cli(parse_firebase, [
+            "parse-firebase.py", "fetch-index", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            f"Next: parse-firebase.py sections <page_ref> "
+            f"--cache-dir {self.tmp}\n",
+            out,
+        )
+
+
 class SectionUrlAnchorIntegrationTest(unittest.TestCase):
     """'Section:' lines in search / search-content must carry a
     '[<url>#<anchor>]' suffix derived from the leaf heading, per the 2026-08

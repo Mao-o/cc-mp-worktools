@@ -85,7 +85,7 @@ class ExtractSectionsTest(unittest.TestCase):
 
     def test_tilde_fence_hides_heading_shaped_lines(self):
         """CommonMark tilde fences (``~~~``) are code blocks too; a heading-
-        shaped line inside one is not a section (internal backlog 2wd.27).
+        shaped line inside one is not a section (internal backlog).
         Zero ``~~~`` lines exist in the live claude-docs / ai-sdk corpora,
         so the real-corpus before/after sections dump is identical."""
         body = [
@@ -343,7 +343,7 @@ class NormalizationStemmingTest(unittest.TestCase):
 
     def test_silent_e_plurals_fold_to_their_singular(self):
         """``-ses`` / ``-zes`` plurals are read as silent-e root + ``s``
-        (internal backlog 2wd.28): "Responses" must match "response"."""
+        (internal backlog): "Responses" must match "response"."""
         for plural, singular in [
             ("Responses", "response"), ("Releases", "release"),
             ("Databases", "database"), ("Cases", "case"), ("Sizes", "size"),
@@ -895,7 +895,7 @@ class CorpusHintArgsTest(unittest.TestCase):
 
 class SearchRankKeyTest(unittest.TestCase):
     """One ranking for the ``search`` subcommand of all three scripts
-    (internal backlog qwk): changelog-style pages last, then body hits,
+    (internal backlog): changelog-style pages last, then body hits,
     then index score, then doc_idx."""
 
     @staticmethod

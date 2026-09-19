@@ -810,7 +810,7 @@ def _norm(tok: str) -> str:
     match + es but "caches" is cache + s, "classes" is class + es but
     "cases" is case + s. The rules below pick the reading that dominates
     tech-doc vocabulary per ending (measured over the claude-docs / ai-sdk
-    corpora, internal backlog 2wd.28), with tiny exception lists for the
+    corpora, internal backlog), with tiny exception lists for the
     frequent counter-examples:
 
     * ``-sses`` / ``-zzes`` → strip ``es`` (class, process, address, quiz)
@@ -1428,7 +1428,7 @@ def search_rank_key(result: dict, *, include_changelog_priority: bool = False) -
     because the index score only reflects title/description keywords while
     body hits reflect how much of the page is actually about the query —
     a page that merely names the term in its title but never discusses it
-    should not outrank a page whose body covers it (internal backlog qwk).
+    should not outrank a page whose body covers it (internal backlog).
 
     *result* needs ``title``, ``doc_idx``, ``body_hits["total_matches"]``
     and optionally ``index_score`` (``None`` for body-only fallback rows).
