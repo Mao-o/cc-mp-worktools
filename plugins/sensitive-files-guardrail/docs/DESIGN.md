@@ -35,6 +35,8 @@
 - `permissionDecisionReason` は deny 時に 1KB/8KB/32KB までモデルに完全配信される
 - `systemMessage` トップレベルは **モデルに届かない** (公式 docs の誤り)。依存禁止
 - `ask` reason はモデルには届かず、ユーザー UI のみ。bypass モードでは自動 allow
+  (**ask が確認ダイアログとして提示された場合**の話。提示されない headless では
+  denial に解決され reason がモデルに届く — 下の 2026-09-19 エントリ)
 - envelope には `permission_mode` フィールドがあり bypass / plan 等の検出に使える
 - `tool_input` 形状: `Read:file_path` / `Bash:command,description` など
 
@@ -66,6 +68,59 @@ PreToolUse hook を発火する仕様変更が入ったものとみなす。
 保留される dry-run 的な状態のため、autonomous (auto / bypass) と同等の lenient
 扱いで操作性を優先する。機密 path 確定 match (`make_deny`) と Read/Edit handler
 の `ask_or_deny` は plan mode でも引き続き安全側 (deny / ask) を維持。
+
+### 2026-09-19 — auto mode で hook の `ask` はどう解決されるか (実測: Claude Code 2.1.276)
+
+`ask_or_deny` は `bypassPermissions` だけを deny に倒し、`auto` では `ask` を返す。
+`auto` は前段 classifier が許可判断するモードなので、「**hook の `ask` が classifier に
+自動解決されて allow になり、symlink 経由の `.env` Read が redaction なしで通る**」
+懸念があった (2026-04-11 の実測は default / bypass / plan のみで、auto の `ask` 配信は
+未記録だった)。
+
+使い捨てディレクトリに fixture を置き、nested headless セッション
+(`-p` + `--permission-mode auto` + `--output-format stream-json --include-hook-events`
++ stdin `< /dev/null`) で観測した。観測軸は **(a) ツールが実行された / (b) 拒否された /
+(c) 応答が止まった**。
+
+| 与えた操作 | hook の返り値 | 観測 |
+|---|---|---|
+| Read: symlink の `.env` | `ask` (`ask_or_deny` の auto 側) | **(b) 拒否** |
+| Write: 親が symlink の `.env` | `ask` (`ask_or_deny` の auto 側) | **(b) 拒否**。ファイルは作成されない |
+| Read: 通常ファイルの `.env` | `deny` | (b) 拒否 (対照) |
+| Edit: 通常ファイルの `.env` | `deny` | (b) 拒否 (対照) |
+
+根拠イベント (`ask` のケース): `hook_response` に
+`{"permissionDecision": "ask", ...}` → 直後に `subtype=permission_denied`
+(`decision_reason_type: "hook"`) → `tool_result` が `is_error=true` で本文は hook の
+reason → `result.permission_denials` に当該 tool_use が載る。hook 側が実際に狙った分岐を
+通ったことは hook ログで独立に確認した (Read symlink の run は `classify symlink`、
+Write の run は `edit_classify regular` = `linkdir` を辿るので最終要素は通常ファイルで、
+ask は親ディレクトリ検査が出したもの)。(a) と (c) は 4 run とも観測されず、
+permission プロンプト待ちのハングも無い。
+
+**結論: 懸念は再現しない。** headless auto では hook の `ask` は allow ではなく
+**denial** に解決される (安全側)。よって `ask_or_deny` に `auto` を加える必要はなく、
+判定表 ([MATRIX.md](./MATRIX.md)) も変えていない。
+
+副産物として 2 点:
+
+- `ask` が denial に解決されるとき、**reason は `tool_result` の error 本文として
+  モデルに届く**。上の 2026-04-11 の「`ask` reason はユーザー UI のみ」は
+  *ask が確認ダイアログとして提示された場合*の観測で、提示され得ない headless では
+  成立しない。公式 hooks reference の「For `"allow"` and `"ask"`, shown to the user
+  but not Claude」も同じ前提に立つ記述として読む
+- hook `deny` は `subtype=permission_denied` イベントを出さないが、hook `ask` の
+  denial 解決は出す。`result.permission_denials` には両方載る
+
+**測れていないこと**: 対話セッション (TUI) の auto mode。headless からは TUI を
+駆動できない。ダイアログが出ると推定されるが未確認。ただし今回測ったのは
+**ユーザーが居ない経路**であり、そこが「黙って allow」ではないと確定した以上、
+`ask_or_deny` の判定を動かす根拠は無い。またこの観測から
+「`auto` を `LENIENT_MODES` から外すべき」は導けない — `LENIENT_MODES` は
+`ask_or_allow` (Bash 静的解析不能ケース) の扱いで、`auto` の収録根拠は下の
+ハーネス委譲方針という設計判断であって
+[MAINTAINING.md](./MAINTAINING.md#cli-バージョンアップ時の再実測手順-runbook) の
+step 7 behavioral probe ではない (step 7 自体は依然未実施)。
 
 ## ハーネス委譲方針 (defense-in-depth の一層)
 
