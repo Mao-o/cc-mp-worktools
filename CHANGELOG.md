@@ -30,9 +30,41 @@
 - sensitive-files-guardrail の repo 同梱パターン tier
   (`.claude/sensitive-files-guardrail/patterns.txt`) を commit 対象にし、テスト
   fixture のダミー鍵をこのリポジトリ全体で除外対象として共有。
+- **リリース tag 規約を `<plugin-name>/v<version>` に定めた** (例
+  `sensitive-files-guardrail/v0.33.1`)。`plugin.json` の `version` と 1:1 に対応する。
+  main への push で CI が対応する tag を annotated tag として自動作成・push する
+  (`.github/workflows/validate.yml` の `tag-plugin-releases` job。validate / lint /
+  tests が green のときだけ、既存 tag は打ち替えない)。判定・作成ロジックは
+  `scripts/backfill-plugin-tags.sh` に一本化 (既定 dry-run / `--apply` で実行)。
+  2026-06-13 以降のリリースが未 tag のまま積み上がり、`git tag --contains` で
+  出荷の有無を追えなくなっていたのが動機。
+- CI に **`ruff check`** の job を追加 (root `pyproject.toml` の `[tool.ruff]`、
+  規則は E / F / W、`target-version = "py311"`、行長 E501 は無視)。CI は ruff の
+  version を固定する。ローカルは `make lint`。
+- unit test の CI 実行を **Python 3.11 / 3.12 / 3.13 の matrix** に拡張し、
+  `validate` job から独立した `tests` job に分離した (`fail-fast: false`)。
+- `Makefile` に `lint` target を追加 (`RUFF` 変数で実行系を差し替え可能)。
+- `CONTRIBUTING.md` に「lint / 型チェック」節と「`claude plugin eval` について」節、
+  「リリース tag」節を追加。`README.md` / `CLAUDE.md` にもリリース tag 規約を記載。
 
 ### Changed
 
+- **型チェッカ (mypy / pyright) は導入しないことを決めた** — 理由は
+  `CONTRIBUTING.md` の「lint / 型チェック」節に記録。
+- **`claude plugin eval` は CI に導入しないことを決めた** — 認証必須 + 実モデル
+  呼び出しによる課金、fork PR で動かない secret 依存、要求 CLI version が固定版より
+  新しい点が折り合わないため。理由は `CONTRIBUTING.md` に記録。
+- `.github/workflows/validate.yml` に top-level `permissions: contents: read` を設定し、
+  書き込みは `tag-plugin-releases` job に限定した。
+- `validate` job の Python バージョン固定理由のコメントを実態に合わせた。従来は
+  「各 plugin の unittest が tomllib (3.11+) を使うため」と書いていたが、tomllib を
+  使うのは sensitive-files-guardrail の 1 モジュールの **optional import** だけで
+  (未搭載時は「未対応」扱い、テストも skip する)、下限を決めているのは repo の
+  宣言方針 (Python 3.11+) だった。
+- `.gitignore` / `make clean` に `.ruff_cache` を追加。
+- 旧規約の bare tag (`v0.2.0` 〜 `v0.14.0`) は残すが今後は打たない方針を明記した
+  (marketplace 全体を指すものと個別 plugin を指すものが名前から区別できず混在して
+  いた)。
 - entry 側の `description` / `keywords` を各 `plugin.json` の値に揃えた
   (`plugin.json` を single source of truth として扱う)。
 - README / CLAUDE.md の ref 固定の説明を修正。到達不能な tag を例示していたのをやめ、

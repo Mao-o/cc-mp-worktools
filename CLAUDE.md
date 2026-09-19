@@ -40,11 +40,34 @@ claude --plugin-dir ./plugins/<plugin-name>
 # この marketplace を一括検証
 claude plugin validate .
 
+# lint (ruff。設定は root の pyproject.toml)
+make lint
+
 # リリース手順
 # 1. plugin.json の version を bump
 # 2. CHANGELOG.md 更新
-# 3. git commit / tag / push
+# 3. git commit / push → PR → main へ merge
+#    (tag は main への merge 後に CI が自動で打つ。手で打たない)
 ```
+
+## リリース tag の規約
+
+tag 名は **`<plugin-name>/v<version>`** (例: `sensitive-files-guardrail/v0.33.1`)。
+`plugin.json` の `version` と 1:1 に対応させる。
+
+- **手で打たない。** main への push で CI (`.github/workflows/validate.yml` の
+  `tag-plugin-releases` job) が、各 plugin の `plugin.json` の version に対応する
+  tag が無ければ annotated tag を作って push する。validate / lint / tests が
+  green のときだけ打つ
+- 既存 tag は**打ち替えない**。bump を忘れた場合は「打つ tag が無い」だけで、
+  次に bump した push で作られる
+- 判定・作成ロジックは `scripts/backfill-plugin-tags.sh` に一本化 (既定は
+  dry-run、`--apply` で作成 + push)。規約導入時の遡及付与と通常運用で同じコードを使う
+- **旧規約の bare tag (`v0.2.0` 〜 `v0.14.0`) はそのまま残すが、今後は打たない。**
+  marketplace 全体を指すもの (`v0.2.0`) と個別 plugin のリリースを指すもの
+  (`v0.3.2` = verify-cloud-account、`v0.11.0` / `v0.12.0` / `v0.14.0` =
+  sensitive-files-guardrail) が名前から区別できず混在していたのが、規約を
+  変えた理由
 
 ## この repo 固有の注意点
 

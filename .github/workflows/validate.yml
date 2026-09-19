@@ -10,6 +10,11 @@ on:
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
+# 既定は read-only。書き込みが必要なのは tag-plugin-releases job だけなので、
+# そこに限って job 単位で contents: write を与える。
+permissions:
+  contents: read
+
 jobs:
   validate:
     # 週次 schedule は canary (validate-latest-canary) 専用。pull_request/push/
@@ -24,8 +29,10 @@ jobs:
         with:
           node-version: '22'
 
-      # 各 plugin の unittest が tomllib (Python 3.11+) を使うため 3.11 以上を指定。
-      # 3.12 を選択 (ubuntu-latest に同梱され安定。標準ライブラリのみで pip install 不要)。
+      # この job で Python を使うのは scripts/check_*.py (整合性チェック) だけで、
+      # どちらも標準ライブラリのみ・バージョン依存なし。repo の宣言下限が 3.11 な
+      # ので、そこを満たす版を 1 つ固定すれば足りる (3.12 を据え置き)。
+      # plugin の unittest を複数バージョンで回すのは tests job (matrix) の担当。
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -66,10 +73,105 @@ jobs:
       - name: Check marketplace entry / plugin.json sync
         run: python3 scripts/check_marketplace_entry_sync.py
 
+  lint:
+    # ruff (E/F/W) の静的検査。設定は root の pyproject.toml に置いてあり、
+    # ローカルでも `make lint` で同じ結果が出る。
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ruff は version ごとに規則が追加・強化されるため固定する (claude CLI と
+      # 同じ理由: 同一 commit でも実行日次第で pass/fail が変わる揺れを避ける)。
+      # pyproject.toml の ignore 一覧はこの版での違反件数を前提にしている。
+      - name: Install ruff (pinned)
+        run: pip install 'ruff==0.16.8'
+
+      - name: Show ruff version
+        run: ruff --version
+
+      - name: Lint
+        run: ruff check .
+
+  tests:
+    # 各 plugin の unittest を複数の Python バージョンで回す。
+    #
+    # 以前ここは validate job の中の 1 ステップで、3.12 固定の理由を「各 plugin の
+    # unittest が tomllib (3.11+) を使うため」と書いていたが、これは実態と違った:
+    # tomllib を使うのは sensitive-files-guardrail の
+    # hooks/redact-sensitive-reads/redaction/tomllike.py の **optional import** だけ
+    # で、未搭載時は ImportError を捕まえて「未対応」として扱い、テスト側も
+    # tomllib の成功パスを skip する。つまり tomllib は下限を決めていない。
+    #
+    # 実際の下限は repo の宣言方針 (README / CONTRIBUTING の "Python 3.11+"。
+    # 3.9 / 3.10 互換 shim は追加しない) で決まる。よって matrix は
+    #   3.11 = 宣言している下限 (ここが落ちたら README が嘘になる)
+    #   3.12 = これまで CI が唯一実行していた版 (退行の基準)
+    #   3.13 = 現行の新しい安定版 (先行して壊れを拾う)
+    # とする。3.11 / 3.12 / 3.13 の 10 suite が green であることはローカルで実測済み。
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      # 1 バージョンが落ちても残りの結果を出す (「3.11 だけ落ちた」のか
+      # 「全バージョンで落ちた」のかを 1 回の run で判別したいため)。
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
       # 列挙ロジックは scripts/test-all.sh に一本化してあり、ローカルでも
       # 同じコマンドで再現できる (`scripts/test-all.sh` または `make test`)。
+      # setup-python が PATH 先頭に置く python3 をそのまま使う。
       - name: Run plugin unit tests
         run: scripts/test-all.sh
+
+  tag-plugin-releases:
+    # main へ入った commit に対して、各 plugin の plugin.json の version に対応する
+    # リリース tag (<plugin>/v<version>) が無ければ annotated tag を作って push する。
+    #
+    # validate / lint / tests が green のときだけ打つ (壊れた commit に version を
+    # 指す tag を残さないため)。落ちた場合は tag が作られないだけなので、次に
+    # green な push が来た時点で同じ tag が作られる (version は変わらないため)。
+    #
+    # GITHUB_TOKEN による tag push は他の workflow を起動しない (GitHub の仕様) ので、
+    # この job が自分自身を再帰的に呼ぶことはない。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate, lint, tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: tag-plugin-releases
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # 既存 tag の有無をローカルで判定するため、全履歴と全 tag を取得する
+          # (浅い clone だと tag が来ず、既存 tag を作り直そうとして push が
+          # reject される)。
+          fetch-depth: 0
+
+      # annotated tag には committer identity が必要で、Actions の既定では未設定。
+      - name: Configure git identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      # 判定・列挙ロジックはスクリプト側に一本化してある (規約導入時の遡及付与と
+      # 通常運用で同じコードを使うため)。既定は dry-run なので --apply が必要。
+      - name: Create and push missing plugin release tags
+        run: scripts/backfill-plugin-tags.sh --apply
 
   validate-latest-canary:
     # @latest で claude plugin validate の挙動変化を早期検知する canary job。

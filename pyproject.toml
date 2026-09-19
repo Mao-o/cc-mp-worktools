@@ -1,0 +1,56 @@
+# このリポジトリは Python パッケージを配布しません (plugin は hook スクリプトの
+# 集合であり、import される library ではない)。そのため `[project]` / build backend
+# は意図的に書かず、このファイルは **ruff の設定置き場としてだけ** 存在します。
+#
+# 型チェッカ (mypy / pyright) は現時点では導入していません。理由は
+# CONTRIBUTING.md の「lint / 型チェック」節を参照してください。
+
+[tool.ruff]
+# repo の宣言最小バージョン (README / CONTRIBUTING の "Python 3.11+") に合わせます。
+# 3.9 / 3.10 互換 shim を足さない方針なので、それより低い target は指定しません。
+target-version = "py311"
+
+# plugin の hook は「1 ディレクトリ = 1 実行単位」で、パッケージとして import
+# されるわけではありません。ruff は既定で .gitignore を尊重するため
+# (__pycache__ / .venv 等)、追加の exclude は置いていません。
+
+[tool.ruff.lint]
+# 最小構成: pycodestyle の error/warning (E / W) と pyflakes (F) のみ。
+# import 並び (I) や pyupgrade (UP) は「既存 309 ファイルの整形」を伴うので、
+# lint 導入と整形を同じ変更に混ぜないために今回は入れていません。
+select = ["E", "F", "W"]
+
+ignore = [
+  # 行長は無視します (docs も含め日本語コメントを多用しており、78/88 桁で
+  # 機械的に折ると可読性が落ちるため)。
+  "E501",
+
+  # ------------------------------------------------------------------
+  # ここから下は **既存コードの現状を baseline として受け入れる**ための
+  # 抑制です。導入時点 (ruff 0.16.8) の違反は 24 ファイル 34 件で、内訳は:
+  #
+  #   14  F401  unused-import
+  #   10  E741  ambiguous-variable-name  (`for l in ...` 等)
+  #    6  F541  f-string-missing-placeholders
+  #    2  E402  module-import-not-at-top-of-file
+  #    1  E401  multiple-imports-on-one-line
+  #    1  F811  redefined-while-unused
+  #
+  # これらを直すと plugin 本体 (plugins/ 配下) に触れる変更になり、lint の
+  # 導入と挙動リスクのある修正が同じ PR に混ざります。まず「今後 CI が
+  # 落ちない状態で lint を回し始める」ことを優先し、抑制は plugin 側を
+  # 掃除した PR で 1 つずつ外していく前提です。
+  #
+  # 抑制しても残る (= 今日から検出される) 主な規則は F821 undefined-name /
+  # F841 unused-variable / F632 is-literal / W605 invalid-escape-sequence /
+  # E711 / E712 など、実バグに直結するものです。空チェックになっていない
+  # ことは negative control (意図的な違反を入れて ruff が非ゼロ終了すること)
+  # で確認済みです。
+  # ------------------------------------------------------------------
+  "F401",
+  "E741",
+  "F541",
+  "E402",
+  "E401",
+  "F811",
+]
