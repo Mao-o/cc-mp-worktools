@@ -32,7 +32,10 @@ jobs:
       - uses: actions/checkout@v6
 
       # llms-docs の README 記載どおり 3.11+ 必須 (PEP 604 記法を定義時に評価)。
-      # validate.yml のユニットテスト実行と同じ 3.12 に揃える。
+      # ここは「上流のレイアウト変化」を見る canary なので、Python 版を増やす
+      # 意味は無い (複数版での動作確認は validate.yml の tests job が matrix で
+      # 担当する)。その matrix の中央値であり validate.yml の他 job でも使って
+      # いる 3.12 を 1 つだけ固定する。
       - name: Setup Python
         uses: actions/setup-python@v5
         with:

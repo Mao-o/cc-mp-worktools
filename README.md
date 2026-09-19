@@ -40,9 +40,12 @@ plugin の中身 (= その ref 時点の内容) です。
   **最新 commit に追従**します (tag を打ち替えない限り、tag 指定は実質固定)。
 - git URL 形式で追加する場合の ref 指定は `@` ではなく `#` です
   (`.../cc-mp-worktools.git#<ref>`)。
-- この repo に残っている `v0.x.y` tag は**個別 plugin のリリース時に打たれた履歴上の
-  印**で、marketplace 全体のリリース番号ではありません。ref を指定しない運用
-  (= `main` を追う) が既定です。
+- **リリース tag は plugin ごとに分かれています** (`<plugin-name>/v<version>` 形式。
+  詳細は [リリース tag](#リリース-tag))。ある plugin の tag が指しているのは
+  「その plugin がその version だった時点の **marketplace 全体**」なので、ref に
+  使っても**他の plugin まで同じ時点に固定されます**。「特定の plugin だけを古い
+  version で止める」用途には使えません (それは plugin ごとの install 側の話です)。
+- ref を指定しない運用 (= `main` を追う) が既定です。
 
 plugin 個々のバージョンは marketplace の ref とは別管理で、各 plugin の
 `plugin.json` の `version` が更新判定のキーになります。**version が bump されない限り
@@ -156,13 +159,40 @@ claude --plugin-dir ./plugins/<plugin-name>
 # Validate the marketplace manifest, every plugin manifest, and repo consistency
 make validate
 
+# Lint (ruff; config lives in pyproject.toml)
+make lint
+
 # Run every plugin's unit tests
 make test
 ```
 
+CI (`.github/workflows/validate.yml`) は `make validate` 相当のチェックに加え、
+`ruff check` と、**Python 3.11 / 3.12 / 3.13 の matrix** でのユニットテストを回します。
+
 開発フロー・テスト規約・version と CHANGELOG の運用は
 [CONTRIBUTING.md](CONTRIBUTING.md)、この repo 固有の設計上の注意点は
 [CLAUDE.md](CLAUDE.md) にあります。
+
+## リリース tag
+
+リリース tag は **plugin ごと**に打ち、名前は `<plugin-name>/v<version>` です
+(`plugin.json` の `version` と 1:1)。
+
+```
+sensitive-files-guardrail/v0.33.1
+session-facts/v0.12.0
+```
+
+- **tag は手で打ちません。** main への push で CI が、各 plugin の `plugin.json` の
+  version に対応する tag が無ければ annotated tag を作って push します
+  (validate / lint / tests が green のときだけ)。
+- 既存 tag は打ち替えません。
+- **旧規約の `v0.2.0` 〜 `v0.14.0` はそのまま残していますが、今後は打ちません。**
+  marketplace 全体を指すもの (`v0.2.0`) と個別 plugin のリリースを指すもの
+  (`v0.3.2` / `v0.11.0` / `v0.12.0` / `v0.14.0`) が名前から区別できず混在して
+  いたため、plugin 別の形式に切り替えました。
+- plugin の更新判定に使われるのは tag ではなく `plugin.json` の `version` です
+  (tag は「その版がどの commit に入っているか」を後から辿るための印)。
 
 ## Changelog
 
