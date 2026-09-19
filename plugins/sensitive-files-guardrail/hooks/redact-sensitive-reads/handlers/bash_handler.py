@@ -69,7 +69,9 @@ segment 単位再評価へ移行)。
      完全一致 + 既知の安全な option 以外が無いとき。未知・省略形の ``--xxx``
      が 1 つでもあれば fail-closed で通常経路) も metadata-only。両 hook
      の reason が推奨する次善策を自分で deny していた自己矛盾の解消
-     (2026-08 精査)。plain ``git rm`` (作業ツリー削除) は deny 維持
+     (2026-08 精査)。plain ``git rm`` (作業ツリー削除) は metadata-only から
+     外れて operand scan に回る (= 機密 operand があるときだけ deny。
+     ``git rm <非機密>`` は allow)
    - operand scan: 各 path 候補について。候補は ``_find_path_candidates`` が
      コマンド別の option 知識 (``handlers/bash/command_specs.py``、0.22.0) で
      token 列を option / 値 / positional / redirect に字句分けして決める:
@@ -84,7 +86,9 @@ segment 単位再評価へ移行)。
      - literal → ``_operand_is_sensitive`` (basename + root 相対の path 形 rule
        + URI/VCS pathspec 分割。親 dir 名の parts 一致は使わない、0.22.0。
        path 形は 0.24.0) で True なら **deny 固定**、False なら allow
-3. **集約** — deny > ask > allow。``pending_ask`` は最後に畳む。
+3. **集約** — deny > ask > allow。``pending_ask`` は最後に畳む。lenient allow に
+   倒したときの開示 note (0.33.0) は、command に機密パターンらしい token が
+   含まれるときだけ載せる (``_gate_lenient_note``。verdict は不変)。
 
 ### patterns.txt 読込失敗 = 全 mode deny 固定
 
@@ -1047,6 +1051,103 @@ def _hard_stop_literal_scan(
     return result
 
 
+# -- 責務: lenient allow の開示 note を絞る述語 (0.33.0) -------------------
+
+
+def _note_scan_tokens(command: str) -> list[str]:
+    """開示 note の判定用に command を token 列へ分解する (verdict には無関係)。
+
+    ``punctuation_chars=True`` で ``( ) ; < > | &`` を独立 token として切り出す
+    (``=`` ``.`` ``*`` ``-`` は wordchars 側に残るので path 形は割れない)。素の
+    ``shlex.split`` だと ``{ cat .env; }`` が ``.env;``、``(cat .env)`` が
+    ``.env)`` になって basename 一致せず、「機密を読んでいるのに note が付かない」
+    形が実測で 8 形あった (subshell / brace group / command substitution /
+    shell keyword 5 種 — いずれも autonomous で ``.env`` が素通りする経路で、
+    開示の価値が最も高い側)。
+
+    quote 未閉じ等で分解に失敗したら空白分割で代替する (note の有無を決めるだけ
+    なので、tokenize 失敗を理由に判定を変えない)。
+    """
+    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        return list(lex)
+    except ValueError:
+        return command.split()
+
+
+def _has_sensitive_looking_token(
+    command: str, rules: list[tuple[str, bool]]
+) -> bool:
+    """command に「機密パターンらしい token」が 1 つでも含まれるか (0.33.0)。
+
+    **verdict には一切影響しない**述語で、lenient allow の開示 note
+    (``output.LENIENT_ALLOW_CONTEXT``) を載せるかどうかだけを決める。lenient
+    allow は実測で全 Bash 呼出の 4 割強を占めるため、全件に載せると note 自体が
+    コンテキストノイズになる。
+
+    判定は静的な文字列一致だけで行う:
+
+    - 各 token の basename 部分 (``M._basename_of``: ``/`` 区切りと VCS /
+      リモート pathspec の ``:`` 後尾。同じ抽出を二重に持たないため reason
+      builder のものを**意図的に**再利用している — あれが ``!<name>`` 案内専用に
+      狭められると、この述語の拾う範囲も一緒に変わる。床テスト
+      (``test_shell_punctuation_does_not_hide_the_token`` /
+      ``test_equals_tail_is_scanned``) が壊れる側の変化は検出できるが、
+      緩む側は検出できないので、変えるときは両方を見ること) と、
+      ``=`` を含む token の ``=`` 後尾
+      (``--file=.env`` / ``SECRET=.env``。``punctuation_chars`` は ``=`` を
+      切らないので明示的に拾う) を候補にする
+    - 候補を ``is_sensitive(..., parts=False, root=None)`` に掛ける (basename 形
+      rule のみ。path 形 rule は root 相対解決と operand 正規化が必要で、note の
+      有無のためにそこまで走らせない → その分は note を出さない側に倒れる)
+    - glob / 変数展開は**展開しない**。文字列として rule に一致する ``cat *.key``
+      は True、``cat id_*`` / ``cat $SECRET`` は False。判定不能な token を
+      「含む側」に倒さない (= note を出さない側に倒す)
+    """
+    if len(command) > _MAX_COMMAND_CHARS:
+        # ``handle`` の長さガードと同じ理由: ``shlex`` は長い単一 token で超線形
+        # (実測 64KB 単一 token で 38ms)。note の有無のために timeout 予算を
+        # 使わない → 出さない側に倒す。
+        return False
+    try:
+        for token in _note_scan_tokens(command):
+            for piece in token.split():
+                candidates = [piece]
+                if "=" in piece:
+                    candidates.append(piece.rsplit("=", 1)[1])
+                for candidate in candidates:
+                    base = M._basename_of(candidate)
+                    if base and is_sensitive(
+                        base, rules, parts=False, root=None
+                    ):
+                        return True
+    except (ValueError, OSError):
+        # token 抽出・照合の失敗も note 無し側に倒す (verdict に影響しないので
+        # fail-open で良い)。
+        return False
+    return False
+
+
+def _gate_lenient_note(
+    result: dict, command: str, rules: list[tuple[str, bool]]
+) -> dict:
+    """lenient allow の開示 note を、機密らしい token を含む command だけに残す。
+
+    落とすときは素の allow (``{}``) に戻す。note を持たない応答 (ask / deny /
+    素の allow) と、note を持つのに allow ではない応答はそのまま返すので
+    **verdict はどの経路でも不変**。
+    """
+    if not output.additional_context_of(result):
+        return result
+    if not output.is_allow(result):
+        return result
+    if _has_sensitive_looking_token(command, rules):
+        return result
+    return output.make_allow()
+
+
 # -- 責務: orchestration -------------------------------------------------
 
 
@@ -1097,7 +1198,11 @@ def handle(envelope: dict) -> dict:
     # 高価なパスを 1 つも走らせる前に長さで打ち切る必要がある。
     if len(command) > _MAX_COMMAND_CHARS:
         L.log_info("bash_classify", "segment_too_large")
-        return output.ask_or_allow(M.bash_lenient("segment_too_large"), envelope)
+        return _gate_lenient_note(
+            output.ask_or_allow(M.bash_lenient("segment_too_large"), envelope),
+            command,
+            rules,
+        )
 
     # 1. segment split (&& / || / ; / | / \n, quote を尊重)
     #    0.11.0 (F1): hard-stop は segment 単位で再評価する。0.10.0 までは
@@ -1122,6 +1227,16 @@ def handle(envelope: dict) -> dict:
     #    hard-stop / shlex 失敗の segment は pending_ask に格納して continue
     #    (他 segment の deny 検出を続ける)。
     pending_ask: dict | None = None
+    # lenient mode で ``ask_or_allow`` が allow に倒した事実を持ち運ぶ (0.33.0)。
+    # lenient allow は ``{}`` 相当の allow なので ``_decision_of`` では素の allow と
+    # 区別が付かず、この loop で捨てると ``additionalContext`` が消える。
+    # ``pending_ask`` に入る経路 (hard-stop / segment_too_large / shlex 失敗 /
+    # program_dynamic) はそのまま返るので、拾い漏れるのは ``_analyze_segment``
+    # 内部の ``ask_or_allow`` (opaque wrapper / residual metachar / shell keyword /
+    # glob 不確定 / normalize 失敗) だけ。判定は allow のまま変わらない。
+    # 拾った note を実際に載せるかは最後に ``_gate_lenient_note`` で絞る
+    # (機密パターンらしい token を含む command だけ)。
+    lenient_note = ""
     for seg in segments:
         if _has_hard_stop(seg):
             # 0.25.0 (2026-08 精査): hard-stop でも、単純変数展開を placeholder に
@@ -1215,7 +1330,13 @@ def handle(envelope: dict) -> dict:
                     decision = "ask"
         if decision == "ask" and pending_ask is None:
             pending_ask = result
+        elif decision != "ask" and not lenient_note:
+            lenient_note = output.additional_context_of(result)
 
     if pending_ask is not None:
-        return pending_ask
+        return _gate_lenient_note(pending_ask, command, rules)
+    if lenient_note:
+        return _gate_lenient_note(
+            output.make_allow(lenient_note), command, rules
+        )
     return output.make_allow()

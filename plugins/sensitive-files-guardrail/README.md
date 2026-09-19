@@ -261,10 +261,13 @@ note: key material is never parsed or returned. only block labels and counts are
 > `printf`、および `git check-ignore` / `git ls-files` / `git status`
 > (subcommand 直書き形) は operand の内容を stdout に出さないため、機密 operand
 > でも **allow** に倒す。`find` は `-exec` / `-delete` 等の内容出力・副作用
-> アクションを含まない場合のみ allow (`find -exec cat .env ';'` は deny)。
-> 同様に `file -f` / `wc --files0-from` / `tree --fromfile` 等、operand の中身を
-> ファイル名リストとして読み echo するオプション付き形も deny (`file .env` /
-> `wc -l .env` の通常形は allow)。`git ls-files` は plain path-listing のみ
+> アクションを含まない場合のみ allow (`find . -name .env -exec cat .env ';'` は
+> deny)。同様に `file -f` / `wc --files0-from` / `tree --fromfile` 等、operand の
+> 中身をファイル名リストとして読み echo するオプション付き形も allow-list から
+> 外れる (`file .env` / `wc -l .env` の通常形は allow)。**外れた形は operand scan
+> に回るだけで、deny になるのは operand に機密 path 候補があるときだけ** —
+> `file -f .env` は deny、`file -f list.txt` や `find . -name list.txt -delete` は
+> allow。`git ls-files` は plain path-listing のみ
 > metadata-only として allow し、`-s` / `--stage` / `--format` は blob object name
 > (= 内容の指紋) を出せるため operand scan に回す (機密 operand を伴う
 > `git ls-files -s .env` は deny、`git ls-files -s` 単体は allow)。
@@ -288,7 +291,8 @@ note: key material is never parsed or returned. only block labels and counts are
 > `chown` / `chgrp` / `touch` は内容を読む option が存在しない (`--reference` /
 > `-r` は mode / owner / timestamp のみ) ため allow。plain `git rm` (作業ツリー
 > 削除 = 破壊操作) と `git rm --cached --pathspec-from-file=<file>` (中身を pathspec
-> として読み不一致行を echo) は deny 維持、`chmod 600 x > .env` の書込み形は echo
+> として読み不一致行を echo) は allow-list 外 = operand scan へ (`git rm .env` は
+> deny、`git rm list.txt` は allow)、`chmod 600 x > .env` の書込み形は echo
 > と同じく residual metachar の ask_or_allow のまま。あわせて `git` の deny reason
 > を subcommand 別 (show / diff / log = 閲覧、add / rm / mv / restore = 操作) に
 > 分け、`git rm .env` が「閲覧しようとした」と返していた誤った意図文を解消した。
@@ -522,6 +526,32 @@ repo に commit できる (0.32.0):
 | `redact-sensitive-reads` (Bash) | **deny 固定** | **ask_or_allow** | default/acceptEdits/dontAsk は ask、auto/bypass は **allow** |
 | `redact-sensitive-reads` (Bash, patterns.txt 読込失敗) | — | **deny 固定** | policy 欠如時は全 mode block |
 | `check-sensitive-files` (Stop) | `decision: block` | **fail-open** (exit 0。内部例外時は `systemMessage` で通知) | patterns.txt 読込失敗時は stderr warning のみ |
+
+> **0.33.0: lenient allow を Claude にも開示する (判定は不変)**。`ask_or_allow` が
+> autonomous mode (`auto` / `bypassPermissions` / `plan`) で allow に倒し、かつ
+> **コマンド文字列に機密パターンらしい token が含まれる**とき、
+> `hookSpecificOutput.additionalContext` に「静的解析では機密パスの有無を判定でき
+> ないコマンドを、確認なしで通した」旨の短い 1 文を添える。`permissionDecisionReason`
+> は allow / ask ではユーザーにしか表示されない仕様なので、それまで Claude 側には
+> 「静的判定できないまま通った」事実が一切届いていなかった。**`permissionDecision`
+> は出さないため許可の強さは変わらず**、静的に「機密でない」と確定した allow
+> (`ls .env` 等) には付かない。文面は固定 1 文で、コマンド文字列・パス・値は
+> 含めない。
+>
+> 絞り込みは「lenient allow が全 Bash 呼出の 4 割強」という実測に対する措置で、
+> `bash -c 'cat .env'` / `cat *.key` / `{ cat .env; }` のように機密に触れうる形
+> だけを開示する。`bash -c 'date'` / `cat *.log` のように機密らしい token を
+> 含まない形では素の allow に戻す (判定はどちらも同じ allow)。glob や変数は
+> 展開せず文字列として照合するため、`cat id_*` / `cat $SECRET` のように判定
+> できない形は**開示しない側**に倒れる。詳細は
+> [docs/DESIGN.md](docs/DESIGN.md) の「lenient allow の開示」。
+
+> **0.33.0: Stop block の追記案内に実行手段を明記 (判定は不変)**。`.gitignore` /
+> `patterns.local.txt` への追記は **Edit / Write ツール**で行うよう案内する。
+> `echo '.env' >> .gitignore` のようなシェルリダイレクト形は Bash 判定のリダイレクト
+> 経路で確認 (ask) に落ちるため、block した直後に承認ダイアログが挟まる 2 段の
+> 摩擦になっていた (deny ではないので機能は損なわれない)。判定表は変えず、案内する
+> 手段だけを全 mode で allow される側に寄せた。
 
 ## 設計上のトレードオフ
 

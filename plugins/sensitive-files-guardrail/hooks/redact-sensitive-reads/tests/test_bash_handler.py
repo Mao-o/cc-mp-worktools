@@ -25,7 +25,11 @@ from _testutil import FIXTURES  # noqa: F401
 
 from core import messages, output
 from handlers.bash.segmentation import _split_command_on_operators
-from handlers.bash_handler import handle
+from handlers.bash_handler import (
+    _MAX_COMMAND_CHARS,
+    _gate_lenient_note,
+    handle,
+)
 
 
 def _make_envelope(cmd: str, cwd: str, mode: str = "default") -> dict:
@@ -417,7 +421,69 @@ class TestDenyFixed(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestHardStopLenient(BaseBash):
+class AskOrAllowMatrix:
+    """``ask_or_allow`` に倒れるコマンド形を **mode 5 列** で一括検証する土台 (0.33.0)。
+
+    D2 (テスト総数整理、内部バックログ) の再定義 —「削減」ではなく「同型ケースの
+    subTest への畳み込み」。畳む前は 6 クラスが「コマンド 1 形 × その場で選んだ
+    mode 1〜3 列」を 1 メソッドずつ書いており (計 55 メソッド)、**形ごとに測る
+    mode がまちまち**だった (例: ``cat id_*`` は default だけ、``cat "$X"`` は
+    default/auto/bypass の 3 列、``coproc cat .env`` は default だけ)。
+
+    同型なので subTest に畳み、**全 36 形 × 5 mode = 180 格子点**を必ず回すように
+    した。メソッド数は 55 → 12 に減るが、**格子点は 55 → 180 に増える**ので
+    網羅性は落ちない (件数の削減は目的ではない)。失敗時は subTest のラベル
+    (case / cmd / mode) でどの形が落ちたか分かる。
+
+    ``unittest.TestCase`` を継承していないのは、この土台自身が空の ``CASES`` で
+    収集されて「常に通る 2 件」になるのを防ぐため。具象クラスは
+    ``(AskOrAllowMatrix, BaseBash)`` を継承する。``CASES`` が空のまま使われる
+    事故は各テストメソッド冒頭の assert で落とす (空ガード防止)。
+    """
+
+    # (ラベル, コマンド) の列。ラベルは subTest の見出し兼「何の形か」の記録。
+    CASES: tuple[tuple[str, str], ...] = ()
+
+    _ASKING_MODES = ("default", "acceptEdits", "dontAsk")
+    _LENIENT_MODES = ("auto", "bypassPermissions", "plan")
+
+    def test_asks_in_non_lenient_modes(self):
+        self.assertTrue(self.CASES, "CASES が空 (畳み込み時の取りこぼし)")
+        for label, cmd in self.CASES:
+            for mode in self._ASKING_MODES:
+                with self.subTest(case=label, cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode))
+                    self.assertEqual(
+                        _decision(r), "ask",
+                        msg=f"{cmd!r} [{mode}] -> {_decision(r)!r}",
+                    )
+                    # reason 無しの ask は「なぜ止めたか」が伝わらない
+                    self.assertTrue(_reason(r), msg=f"{cmd!r} [{mode}]")
+
+    def test_allows_in_lenient_modes(self):
+        self.assertTrue(self.CASES, "CASES が空 (畳み込み時の取りこぼし)")
+        for label, cmd in self.CASES:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode))
+                    self.assertTrue(
+                        output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}",
+                    )
+                    self.assertIsNone(_decision(r), msg=f"{cmd!r} [{mode}]")
+                    # 0.33.0: 開示 note は「機密パターンらしい token を含む
+                    # command」だけに絞られ、この 36 形には両側が混在する。
+                    # ここで固定するのは「固定 1 文か空のどちらかであって、
+                    # operand / command 文字列が note に漏れることはない」まで。
+                    # 有無そのものの床は ``TestLenientAllowAdditionalContext``
+                    # が形の対で持つ。
+                    self.assertIn(
+                        output.additional_context_of(r),
+                        ("", output.LENIENT_ALLOW_CONTEXT),
+                        msg=f"{cmd!r} [{mode}] unexpected note",
+                    )
+
+
+class TestHardStopLenient(AskOrAllowMatrix, BaseBash):
     """hard-stop metachar (`$`, ``(``, `{`, ``<``, バッククォート) は default=ask /
     auto/bypass=allow。0.7.0 で ``<`` 入力リダイレクトの target 抽出を撤廃し、
     全 hard-stop が ``ask_or_allow`` 一本に統合された。
@@ -426,58 +492,19 @@ class TestHardStopLenient(BaseBash):
     シングルクォート内は展開されないものとして除外される (``TestQuoteAwareHardStop``)。
     """
 
-    def test_variable_expansion_default(self):
-        r = handle(_make_envelope('cat "$X"', self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_variable_expansion_auto(self):
-        r = handle(_make_envelope('cat "$X"', self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_variable_expansion_bypass(self):
-        r = handle(_make_envelope('cat "$X"', self.tmp, mode="bypassPermissions"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_command_substitution_default(self):
-        r = handle(_make_envelope("cat $(echo .env)", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_command_substitution_auto(self):
-        r = handle(_make_envelope("cat $(echo .env)", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_backtick_default(self):
-        r = handle(_make_envelope("cat `echo .env`", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_backtick_bypass(self):
-        r = handle(_make_envelope("cat `echo .env`", self.tmp, mode="bypassPermissions"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_heredoc_default(self):
-        r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_heredoc_auto(self):
-        r = handle(_make_envelope("cat <<EOF\nhello\nEOF", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_subshell_group_default(self):
-        r = handle(_make_envelope("(cat .env)", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_subshell_group_auto(self):
-        # (cat .env) は ( hard-stop。target 抽出は < がないので走らず ask_or_allow。
-        # auto/bypass では allow に倒る (機密 .env が中にあっても!)
-        r = handle(_make_envelope("(cat .env)", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_brace_group_default(self):
-        r = handle(_make_envelope("{ cat .env; }", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+    CASES = (
+        ("variable_expansion", 'cat "$X"'),
+        ("command_substitution", "cat $(echo .env)"),
+        ("backtick", "cat `echo .env`"),
+        ("heredoc", "cat <<EOF\nhello\nEOF"),
+        # ``(cat .env)`` は ``(`` hard-stop。target 抽出は ``<`` が無いので走らず
+        # ``ask_or_allow`` → auto/bypass では **機密 .env が中にあっても** allow
+        ("subshell_group", "(cat .env)"),
+        ("brace_group", "{ cat .env; }"),
+    )
 
 
-class TestInputRedirectAskOrAllow(BaseBash):
+class TestInputRedirectAskOrAllow(AskOrAllowMatrix, BaseBash):
     """0.7.0: ``<`` 入力リダイレクトは hard-stop と同じ ``ask_or_allow`` に格下げ。
 
     0.3.4〜0.6.x で行っていた target 抽出 + literal/glob 一致での deny 固定は、
@@ -485,20 +512,11 @@ class TestInputRedirectAskOrAllow(BaseBash):
     default mode で ask、autonomous (auto / bypassPermissions) で allow に倒す。
     """
 
-    def test_redirect_in_default(self):
-        # `< .env cat` (引数順序は逆) → hard-stop で ask
-        r = handle(_make_envelope("< .env cat", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_redirect_in_auto(self):
-        # autonomous モードでは allow (= None)
-        r = handle(_make_envelope("< .env cat", self.tmp, mode="auto"))
-        self.assertIsNone(_decision(r))
-
-    def test_cat_lt_dotenv_bypass(self):
-        # bypassPermissions でも allow に倒る (hard-stop は ask_or_allow)
-        r = handle(_make_envelope("cat < .env", self.tmp, mode="bypassPermissions"))
-        self.assertIsNone(_decision(r))
+    CASES = (
+        # ``< .env cat`` は引数順序が逆の形。どちらも hard-stop
+        ("redirect_first", "< .env cat"),
+        ("redirect_after_command", "cat < .env"),
+    )
 
 
 class TestDenyReasonContent(BaseBash):
@@ -559,44 +577,17 @@ class TestBackslashQuoteSplit(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestShellKeywordLenient(BaseBash):
+class TestShellKeywordLenient(AskOrAllowMatrix, BaseBash):
     """シェル制御構文 (if/for/do/coproc 等) は default=ask / auto/bypass=allow (0.3.2)。"""
 
-    def test_for_loop_body_default(self):
-        r = handle(_make_envelope("for i in 1; do cat .env; done", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_for_loop_body_auto(self):
-        r = handle(_make_envelope(
-            "for i in 1; do cat .env; done", self.tmp, mode="auto",
-        ))
-        self.assertTrue(output.is_allow(r))
-
-    def test_if_then_body_default(self):
-        r = handle(_make_envelope("if true; then cat .env; fi", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_if_then_body_bypass(self):
-        r = handle(_make_envelope(
-            "if true; then cat .env; fi", self.tmp, mode="bypassPermissions",
-        ))
-        self.assertTrue(output.is_allow(r))
-
-    def test_while_test(self):
-        r = handle(_make_envelope("while cat .env; do pwd; done", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_until_test(self):
-        r = handle(_make_envelope("until cat .env; do true; done", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_select_body(self):
-        r = handle(_make_envelope("select x in a; do cat .env; done", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_coproc(self):
-        r = handle(_make_envelope("coproc cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
+    CASES = (
+        ("for", "for i in 1; do cat .env; done"),
+        ("if", "if true; then cat .env; fi"),
+        ("while", "while cat .env; do pwd; done"),
+        ("until", "until cat .env; do true; done"),
+        ("select", "select x in a; do cat .env; done"),
+        ("coproc", "coproc cat .env"),
+    )
 
 
 class TestAwkSedOperandScan(BaseBash):
@@ -894,7 +885,7 @@ class TestWrapperBypass(BaseBash):
         self.assertEqual(_decision(r), "deny")
 
 
-class TestOpaquePrefixAskOrAllow(BaseBash):
+class TestOpaquePrefixAskOrAllow(AskOrAllowMatrix, BaseBash):
     """0.8.0: env-assignment / env / command / builtin / nohup / 任意 path exec を含む
     第一トークンは opaque 扱いで ``ask_or_allow`` (default=ask, auto/bypass=allow)。
 
@@ -903,59 +894,22 @@ class TestOpaquePrefixAskOrAllow(BaseBash):
     ではないため思想 1 (うっかり露出予防、敵対的防御は非目的) と整合しない。
     """
 
-    def test_env_prefix_cat_default(self):
-        r = handle(_make_envelope("FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_env_prefix_cat_auto(self):
-        r = handle(_make_envelope("FOO=1 cat .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_env_prefix_cat_bypass(self):
-        r = handle(_make_envelope("FOO=1 cat .env", self.tmp, mode="bypassPermissions"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_multi_env_prefix(self):
-        r = handle(_make_envelope("FOO=1 BAR=2 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_env_command_cat_default(self):
-        r = handle(_make_envelope("env cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_env_command_with_assignment_auto(self):
-        r = handle(_make_envelope("env FOO=1 cat .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_command_wrapper_cat_default(self):
-        r = handle(_make_envelope("command cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_builtin_wrapper_cat_default(self):
-        r = handle(_make_envelope("builtin cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_nohup_chain_with_command(self):
-        r = handle(_make_envelope("nohup command cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_command_chain_with_env_bypass(self):
-        r = handle(_make_envelope(
-            "command env FOO=1 cat .env", self.tmp, mode="bypassPermissions",
-        ))
-        self.assertTrue(output.is_allow(r))
-
-    def test_abs_env_with_assignment_default(self):
-        # /usr/bin/env: 任意 path exec → opaque → ask
-        r = handle(_make_envelope("/usr/bin/env FOO=1 cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_abs_command_wrapper_auto(self):
-        r = handle(_make_envelope("/bin/command cat .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
+    CASES = (
+        ("env_assignment", "FOO=1 cat .env"),
+        ("multi_env_assignment", "FOO=1 BAR=2 cat .env"),
+        ("env_command", "env cat .env"),
+        ("env_command_with_assignment", "env FOO=1 cat .env"),
+        ("command_wrapper", "command cat .env"),
+        ("builtin_wrapper", "builtin cat .env"),
+        ("nohup_chain", "nohup command cat .env"),
+        ("command_env_chain", "command env FOO=1 cat .env"),
+        # 任意 path exec (``/usr/bin/env`` / ``/bin/command``) も opaque
+        ("abs_path_env", "/usr/bin/env FOO=1 cat .env"),
+        ("abs_path_command", "/bin/command cat .env"),
+    )
 
 
-class TestPrefixWithOptionsOpaque(BaseBash):
+class TestPrefixWithOptionsOpaque(AskOrAllowMatrix, BaseBash):
     """env / command にオプションがあるケースも opaque (default=ask / auto/bypass=allow)。
 
     0.7.x ではオプション付きの env/command のみ opaque だったが、0.8.0 では
@@ -964,37 +918,13 @@ class TestPrefixWithOptionsOpaque(BaseBash):
     regression 担保用。
     """
 
-    def test_env_dash_i_default(self):
-        r = handle(_make_envelope("env -i cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_env_dash_i_auto(self):
-        r = handle(_make_envelope("env -i cat .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_env_dash_u_default(self):
-        r = handle(_make_envelope("env -u HOME cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_env_double_dash_default(self):
-        r = handle(_make_envelope("env -- cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_env_double_dash_auto(self):
-        r = handle(_make_envelope("env -- cat .env", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_command_dash_p_default(self):
-        r = handle(_make_envelope("command -p cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_command_double_dash_default(self):
-        r = handle(_make_envelope("command -- cat .env", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_command_double_dash_bypass(self):
-        r = handle(_make_envelope("command -- cat .env", self.tmp, mode="bypassPermissions"))
-        self.assertTrue(output.is_allow(r))
+    CASES = (
+        ("env_dash_i", "env -i cat .env"),
+        ("env_dash_u", "env -u HOME cat .env"),
+        ("env_double_dash", "env -- cat .env"),
+        ("command_dash_p", "command -p cat .env"),
+        ("command_double_dash", "command -- cat .env"),
+    )
 
 
 class TestGlobDotenvDeny(BaseBash):
@@ -1133,66 +1063,26 @@ class TestBareGlobLeadingDot(BaseBash):
         self.assertTrue(output.is_allow(r))
 
 
-class TestGlobUncertainAskOrAllow(BaseBash):
+class TestGlobUncertainAskOrAllow(AskOrAllowMatrix, BaseBash):
     """0.8.0: dotenv literal stem に fnmatch しない glob は ``ask_or_allow``
     (default=ask, auto/bypass=allow)。0.3.2〜0.7.x で deny / allow に倒していた
     既定 rules 交差判定は 0.8.0 で撤廃 (``id_rsa*`` / ``*.key`` / ``cred*.json``
     / ``*.log`` / ``.env.*`` / ``.env.example*`` を ``ask_or_allow`` に格下げ)。
     """
 
-    def test_dotenv_dot_star_default(self):
+    CASES = (
         # fnmatchcase(".env", ".env.*") = False (".env." 以降が必要) → ask
-        r = handle(_make_envelope("cat .env.*", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_dotenv_dot_star_auto(self):
-        r = handle(_make_envelope("cat .env.*", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_id_rsa_star_default(self):
-        r = handle(_make_envelope("cat id_rsa*", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_id_rsa_star_auto(self):
-        r = handle(_make_envelope("cat id_rsa*", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_id_star_default(self):
-        r = handle(_make_envelope("cat id_*", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_star_key_default(self):
-        r = handle(_make_envelope("cat *.key", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_cred_star_json_default(self):
-        r = handle(_make_envelope("cat cred*.json", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_cred_star_json_bypass(self):
-        r = handle(_make_envelope(
-            "cat cred*.json", self.tmp, mode="bypassPermissions",
-        ))
-        self.assertTrue(output.is_allow(r))
-
-    def test_star_log_default(self):
-        # 0.7.x までは allow だったが 0.8.0 で ask_or_allow に統一 (rules 交差
-        # 判定撤廃の副作用)。default で ask、auto/bypass で allow に倒る。
-        r = handle(_make_envelope("cat *.log", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_star_log_auto(self):
-        r = handle(_make_envelope("cat *.log", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
-
-    def test_dotenv_example_star_default(self):
+        ("dotenv_dot_star", "cat .env.*"),
+        ("id_rsa_star", "cat id_rsa*"),
+        ("id_star", "cat id_*"),
+        ("star_key", "cat *.key"),
+        ("cred_star_json", "cat cred*.json"),
+        # ``*.log`` は 0.7.x までは allow だったが 0.8.0 で ask_or_allow に統一
+        # (rules 交差判定撤廃の副作用)
+        ("star_log", "cat *.log"),
         # fnmatchcase(".env", ".env.example*") = False → ask
-        r = handle(_make_envelope("cat .env.example*", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
-    def test_dotenv_example_star_auto(self):
-        r = handle(_make_envelope("cat .env.example*", self.tmp, mode="auto"))
-        self.assertTrue(output.is_allow(r))
+        ("dotenv_example_star", "cat .env.example*"),
+    )
 
 
 class TestGlobLiteralExcludeAllow(BaseBash):
@@ -2893,8 +2783,11 @@ class TestRecommendedRemedyAllow(BaseBash):
     ``git rm --cached`` (index からの除去のみ) と ``chmod`` / ``chown`` / ``chgrp``
     / ``touch`` (属性操作、内容を読む option 無し) は内容を出力せず実ファイルも
     消さないため metadata-only として allow。plain ``git rm`` (作業ツリー削除) と
-    ``--pathspec-from-file`` (operand の中身を pathspec として読み echo) は deny
-    維持。書込み形 (``chmod 600 x > .env``) は echo と同じく residual metachar
+    ``--pathspec-from-file`` (operand の中身を pathspec として読み echo) は
+    metadata-only から外れて operand scan に回るので、機密 operand を伴う本クラス
+    の形は deny。**「option / 形が単独で deny を決める」わけではない**
+    (非機密 operand なら allow。``TestConditionalMetadataOnlyOperandScan``)。
+    書込み形 (``chmod 600 x > .env``) は echo と同じく residual metachar
     経由の ask_or_allow のまま (緩めない)。
     """
 
@@ -3049,6 +2942,362 @@ class TestRecommendedRemedyAllow(BaseBash):
         r = handle(_make_envelope("git show HEAD:.env", self.tmp))
         self.assertEqual(_decision(r), "deny")
         self.assertIn("閲覧", _reason(r))
+
+
+class TestLenientAllowAdditionalContext(BaseBash):
+    """0.33.0: lenient allow を ``additionalContext`` で開示する (対象は絞る)。
+
+    ``permissionDecisionReason`` は公式仕様で allow / ask のときユーザーにしか
+    表示されないため、``ask_or_allow`` が autonomous mode で allow に倒した事実は
+    **Claude に一切伝わっていなかった**。``hookSpecificOutput.additionalContext``
+    (allow でも Claude に届く唯一の PreToolUse チャネル) に固定 1 文を載せる。
+
+    **判定は不変**であることが本クラスの主眼: ``permissionDecision`` を出さない
+    ので ``is_allow`` / ``decision_of`` の結果は素の allow と同じ。載るのは
+    情報だけで、許可の強さは変わらない (明示 ``"allow"`` を出すとハーネスの
+    確認をスキップさせる意味になるので出さない)。
+
+    載せる対象は **「command に機密パターンらしい token を含む」もの限定**
+    (``_has_sensitive_looking_token``)。lenient allow は実測で全 Bash 呼出の
+    4 割強で、全件に載せると note 自体がコンテキストノイズになるため。本クラスは
+    各経路を「含む形 / 含まない形」の対で持ち、**対の両側で verdict が一致する**
+    (違うのは note の有無だけ) ことを固定する。
+    """
+
+    _LENIENT_MODES = ("auto", "bypassPermissions", "plan")
+    _ASKING_MODES = ("default", "acceptEdits", "dontAsk")
+
+    # ``_analyze_segment`` 内部の ``ask_or_allow`` 経路 (segment ループが
+    # ``pending_ask`` に畳まない = 0.32.0 までは戻り値が捨てられていた側)。
+    # (ラベル, 機密らしい token を含む形, 含まない形)
+    _ANALYZE_PATH_PAIRS = (
+        ("opaque_wrapper", "bash -c 'cat .env'", "bash -c 'cat list.txt'"),
+        (
+            "residual_metachar",
+            "echo '.env' >> .gitignore",
+            "echo 'list.txt' >> .gitignore",
+        ),
+        (
+            "shell_keyword",
+            "for f in .env; do date; done",
+            "for f in list.txt; do date; done",
+        ),
+        ("glob_uncertain", "cat *.key", "cat *.log"),
+        ("abs_path_exec", "/bin/cat .env", "/bin/cat list.txt"),
+    )
+
+    # ``pending_ask`` 経由で返る経路 (hard-stop / tokenize 失敗)。
+    _PENDING_PATH_PAIRS = (
+        ("hard_stop", "echo $(date) .env", "echo $HOME"),
+        ("tokenize_failed", "cat .env '", "cat 'unterminated"),
+    )
+
+    @property
+    def _pairs(self):
+        return self._ANALYZE_PATH_PAIRS + self._PENDING_PATH_PAIRS
+
+    def _assert_note(self, cmd: str, mode: str) -> None:
+        r = handle(_make_envelope(cmd, self.tmp, mode))
+        self.assertTrue(output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}")
+        self.assertIsNone(output.decision_of(r), msg=f"{cmd!r} [{mode}]")
+        self.assertEqual(
+            output.additional_context_of(r), output.LENIENT_ALLOW_CONTEXT,
+            msg=f"{cmd!r} [{mode}] should carry the lenient note",
+        )
+        hook = r["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", hook)
+        self.assertNotIn("permissionDecisionReason", hook)
+
+    def _assert_no_note(self, cmd: str, mode: str) -> None:
+        r = handle(_make_envelope(cmd, self.tmp, mode))
+        self.assertEqual(
+            output.additional_context_of(r), "",
+            msg=f"{cmd!r} [{mode}] should not carry a note: {r!r}",
+        )
+
+    def _assert_lenient_allow_without_note(self, cmd: str, mode: str) -> None:
+        r = handle(_make_envelope(cmd, self.tmp, mode))
+        self.assertTrue(output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}")
+        # note を落としたときは素の allow (``{}``) に戻る
+        self.assertEqual(r, {}, msg=f"{cmd!r} [{mode}] -> {r!r}")
+
+    def test_analyze_segment_paths_carry_note_in_lenient_modes(self):
+        for label, sensitive, _plain in self._ANALYZE_PATH_PAIRS:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, cmd=sensitive, mode=mode):
+                    self._assert_note(sensitive, mode)
+
+    def test_pending_ask_paths_carry_note_in_lenient_modes(self):
+        for label, sensitive, _plain in self._PENDING_PATH_PAIRS:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, cmd=sensitive, mode=mode):
+                    self._assert_note(sensitive, mode)
+
+    def test_no_sensitive_token_means_no_note(self):
+        # 絞りの主張そのもの: 同じ lenient allow 経路でも、command に機密
+        # パターンらしい token が無ければ note を載せない (素の allow に戻る)
+        for label, _sensitive, plain in self._pairs:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, cmd=plain, mode=mode):
+                    self._assert_lenient_allow_without_note(plain, mode)
+
+    def test_pair_verdicts_are_identical(self):
+        # 絞りは note の有無だけを変える: 対の両側で lenient=allow /
+        # 非 lenient=ask (reason 付き) が一致すること
+        for label, sensitive, plain in self._pairs:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, mode=mode):
+                    for cmd in (sensitive, plain):
+                        r = handle(_make_envelope(cmd, self.tmp, mode))
+                        self.assertTrue(
+                            output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}"
+                        )
+            for mode in self._ASKING_MODES:
+                with self.subTest(case=label, mode=mode):
+                    for cmd in (sensitive, plain):
+                        r = handle(_make_envelope(cmd, self.tmp, mode))
+                        self.assertEqual(
+                            _decision(r), "ask", msg=f"{cmd!r} [{mode}]"
+                        )
+                        self.assertTrue(_reason(r), msg=f"{cmd!r} [{mode}]")
+
+    def test_shell_punctuation_does_not_hide_the_token(self):
+        # token 分解は ``punctuation_chars=True`` (``( ) ; < > | &`` を独立
+        # token として切る)。素の ``shlex.split`` だと ``{ cat .env; }`` が
+        # ``.env;``、``(cat .env)`` が ``.env)`` になって basename 一致せず、
+        # **機密を読んでいるのに note が付かない** 形が実測で 8 形あった
+        # (subshell / brace group / command substitution / shell keyword 5 種)。
+        # autonomous で ``.env`` が素通りする経路そのものなので、開示の価値が
+        # 最も高い側を落とさないための床。
+        for cmd in (
+            "{ cat .env; }",
+            "(cat .env)",
+            "cat $(echo .env)",
+            "for i in 1; do cat .env; done",
+            "while cat .env; do pwd; done",
+            "cat < .env",
+        ):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_note(cmd, mode)
+
+    def test_equals_tail_is_scanned(self):
+        # ``punctuation_chars`` は ``=`` を切らないので、``--file=.env`` /
+        # ``SECRET=.env`` は ``=`` 後尾を明示的に候補にする
+        for cmd in ("env --file=.env cat x", "env SECRET=.env bash -c 'go'"):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_note(cmd, mode)
+        for cmd in ("env FOO=1 cat list.txt", "env --file=list.txt cat x"):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_lenient_allow_without_note(cmd, mode)
+
+    def test_excluded_patterns_do_not_trigger_the_note(self):
+        # 絞りは rules をそのまま使うので ``!`` 除外行も効く (テンプレート /
+        # 公開鍵は「機密らしい token」ではない)
+        for cmd in ("bash -c 'cat .env.example'", "bash -c 'cat id_rsa.pub'"):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_lenient_allow_without_note(cmd, mode)
+
+    def test_gate_never_rewrites_a_non_allow_response(self):
+        # 構造的な保証: note を落とす経路は「note があって かつ allow」のときに
+        # だけ働く。note 付きの ask (将来 ask 側にも開示を載せる変更が入った場合)
+        # を素の allow に書き換えてしまうと、絞りが verdict を動かすことになる
+        ask_with_note = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": "reason",
+                "additionalContext": output.LENIENT_ALLOW_CONTEXT,
+            }
+        }
+        gated = _gate_lenient_note(ask_with_note, "date", [(".env", True)])
+        self.assertEqual(_decision(gated), "ask")
+        self.assertEqual(gated, ask_with_note)
+
+    def test_oversized_command_has_no_note(self):
+        # 長さガード超過の command は token 分解を走らせない (``shlex`` は長い
+        # 単一 token で超線形)。note の有無のために timeout 予算を使わない =
+        # 出さない側に倒す、という意図したトレードオフ
+        big = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
+        for mode in self._LENIENT_MODES:
+            with self.subTest(mode=mode):
+                self._assert_lenient_allow_without_note(
+                    f"{big} && cat .env", mode
+                )
+
+    def test_note_survives_multi_segment_commands(self):
+        # 静的解析できた segment が先にあっても、後続の解析不能 segment の
+        # 開示が消えないこと (loop を跨ぐ持ち回りの回帰)
+        for mode in self._LENIENT_MODES:
+            for cmd in (
+                "date && bash -c 'cat .env'",
+                "bash -c 'cat .env' && date",
+                "ls | cat *.key",
+            ):
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_note(cmd, mode)
+            for cmd in ("date && bash -c 'x'", "ls | cat *.log"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_lenient_allow_without_note(cmd, mode)
+
+    def test_asking_modes_keep_ask_and_no_note(self):
+        # 非 lenient mode は従来どおり ask (reason 付き)。additionalContext は
+        # 使わない — reason が deny/ask では Claude に届く / ユーザーに出るため
+        for label, sensitive, plain in self._pairs:
+            for mode in self._ASKING_MODES:
+                for cmd in (sensitive, plain):
+                    with self.subTest(case=label, cmd=cmd, mode=mode):
+                        r = handle(_make_envelope(cmd, self.tmp, mode))
+                        self.assertEqual(
+                            _decision(r), "ask", msg=f"{cmd!r} [{mode}]"
+                        )
+                        self.assertEqual(output.additional_context_of(r), "")
+                        self.assertTrue(_reason(r))
+
+    def test_plain_allow_has_no_note(self):
+        # 静的に「機密でない」と判定できた allow には付けない (lenient fallback
+        # ではないため)。素の allow は従来どおり ``{}``
+        for cmd in ("ls", "date", "git ls-files .env", "chmod 600 .env"):
+            for mode in self._LENIENT_MODES + self._ASKING_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode))
+                    self.assertTrue(output.is_allow(r), msg=f"{cmd!r} [{mode}]")
+                    self.assertEqual(r, {}, msg=f"{cmd!r} [{mode}] -> {r!r}")
+
+    def test_deny_wins_over_note(self):
+        # 同一コマンド内に deny する segment があれば deny が勝ち、note は付かない
+        for mode in self._LENIENT_MODES + self._ASKING_MODES:
+            for cmd in ("cat .env && bash -c 'x'", "bash -c 'x' && cat .env"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode))
+                    self.assertEqual(_decision(r), "deny", msg=f"{cmd!r} [{mode}]")
+                    self.assertEqual(output.additional_context_of(r), "")
+
+    def test_note_contains_no_command_or_path(self):
+        # 値・path・command 文字列を載せない (reason 側の minimal-info 原則と同じ)
+        r = handle(_make_envelope("bash -c 'cat /srv/app/.env'", self.tmp, "auto"))
+        note = output.additional_context_of(r)
+        self.assertTrue(note)
+        for leak in ("bash", "cat", ".env", "/srv/app", self.tmp):
+            self.assertNotIn(leak, note, msg=f"{leak!r} leaked into note")
+
+
+class TestConditionalMetadataOnlyOperandScan(BaseBash):
+    """条件付き metadata-only は「除外 → operand scan」であって「除外 = deny」ではない。
+
+    docs (MATRIX / DESIGN / README) が 0.14.0〜0.19.0 の間「危険な option /
+    action を含む形は **deny**」と読める簡略表現になっており、``git ls-files``
+    で一度訂正したのと同じ誤りが ``file -f`` / ``wc --files0-from`` /
+    ``tree --fromfile`` / ``find`` の危険 action / ``git rm`` に残っていた
+    (内部バックログ)。実態は **metadata-only の allow-list から外れて operand
+    scan に回るだけ**で、deny になるのは operand に機密 path 候補があるときだけ。
+
+    この床テストは「非機密 operand なら allow」側を固定する。deny 側
+    (機密 operand を伴う同じ形) は ``TestMetadataOnlyAllow`` /
+    ``TestRecommendedRemedyAllow`` が既に固定しているため、対で読むと
+    「判定を決めているのは operand であって option ではない」が機械的に担保される。
+    """
+
+    _MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions")
+
+    # 非機密 operand。`.env` と同じ位置に置いても allow になることを見る。
+    _BENIGN = "list.txt"
+
+    # (ラベル, 非機密 operand 版, 対になる機密 operand 版)
+    _PAIRS = (
+        # file / wc / du / tree のファイル名リスト読込 option
+        ("file -f", f"file -f {_BENIGN}", "file -f .env"),
+        ("file --files-from=", f"file --files-from={_BENIGN}",
+         "file --files-from=.env"),
+        ("wc --files0-from=", f"wc --files0-from={_BENIGN}",
+         "wc --files0-from=.env"),
+        ("du --files0-from=", f"du --files0-from={_BENIGN}",
+         "du --files0-from=.env"),
+        ("tree --fromfile", f"tree --fromfile {_BENIGN}", "tree --fromfile .env"),
+        # find の危険 action
+        ("find -delete", f"find . -name {_BENIGN} -delete",
+         "find . -name .env -delete"),
+        ("find -exec", f"find . -name {_BENIGN} -exec cat {_BENIGN} ';'",
+         "find . -name .env -exec cat .env ';'"),
+        ("find -fls", f"find . -name {_BENIGN} -fls out.txt",
+         "find . -name .env -fls out.txt"),
+        # git rm (plain / pathspec-from-file / 未知・省略形 option)
+        ("git rm plain", f"git rm {_BENIGN}", "git rm .env"),
+        ("git rm --pathspec-from-file",
+         f"git rm --cached --pathspec-from-file={_BENIGN}",
+         "git rm --cached --pathspec-from-file=.env"),
+        ("git rm --cache (省略形)", f"git rm --cache {_BENIGN}",
+         "git rm --cache .env"),
+        ("git rm 未知 short flag", f"git rm --cached -h {_BENIGN}",
+         "git rm --cached -h .env"),
+        ("git -C 前置", f"git -C /repo rm --cached {_BENIGN}",
+         "git -C /repo rm --cached .env"),
+        # 既に正しく書けていた系 (退行防止のため同じ床に載せる)
+        ("git ls-files -s", f"git ls-files -s {_BENIGN}", "git ls-files -s .env"),
+        ("git status -v", f"git status -v -- {_BENIGN}", "git status -v -- .env"),
+    )
+
+    # option だけで operand が無い形 (機密候補がそもそも無い)。
+    _OPTION_ONLY = (
+        "file -f",
+        "file --files-from",
+        "wc --files0-from",
+        "tree --fromfile",
+        "git rm",
+        "git rm --cached",
+        "find . -delete",
+    )
+
+    def test_benign_operand_allows_in_all_modes(self):
+        for label, benign, _sensitive in self._PAIRS:
+            for mode in self._MODES:
+                with self.subTest(case=label, cmd=benign, mode=mode):
+                    r = handle(_make_envelope(benign, self.tmp, mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{benign!r} [{mode}] should allow "
+                            f"but got {_decision(r)!r}",
+                    )
+
+    def test_sensitive_operand_denies_in_all_modes(self):
+        for label, _benign, sensitive in self._PAIRS:
+            for mode in self._MODES:
+                with self.subTest(case=label, cmd=sensitive, mode=mode):
+                    r = handle(_make_envelope(sensitive, self.tmp, mode))
+                    self.assertEqual(
+                        _decision(r), "deny",
+                        msg=f"{sensitive!r} [{mode}] should deny "
+                            f"but got {_decision(r)!r}",
+                    )
+
+    def test_option_without_operand_allows_in_all_modes(self):
+        for cmd in self._OPTION_ONLY:
+            for mode in self._MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode))
+                    self.assertTrue(
+                        output.is_allow(r),
+                        msg=f"{cmd!r} [{mode}] should allow "
+                            f"but got {_decision(r)!r}",
+                    )
+
+    def test_list_file_contents_are_not_inspected(self):
+        """リスト読込 option が指す先の **中身** は静的に読まない。
+
+        ``file -f list.txt`` の ``list.txt`` が機密 path を 1 行含んでいても
+        allow のまま。docs にこの限界を書いたので床テストで固定する
+        (読むように変えるなら判定境界の変更なので、このテストが落ちて気付ける)。
+        """
+        listing = os.path.join(self.tmp, "list.txt")
+        with open(listing, "w", encoding="utf-8") as f:
+            f.write(".env\n")
+        for mode in self._MODES:
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope("file -f list.txt", self.tmp, mode))
+                self.assertTrue(output.is_allow(r), msg=_decision(r))
 
 
 class TestGrepPatternPositional(BaseBash):

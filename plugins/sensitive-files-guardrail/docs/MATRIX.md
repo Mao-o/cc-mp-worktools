@@ -375,16 +375,32 @@ operand に居ても、出力はファイル名・属性・件数・パス文字
 staged diff (機密の旧値/新値) を出すため allowlist から **除外** (裸の
 `git status` は機密 operand が無いため operand scan で allow に倒れる)。
 
+> **「option が deny を決める」ようには書かない (0.33.0 で全条件付きコマンドを
+> 実測して統一)。** 以下の「除外」はすべて **metadata-only の allow-list から
+> 外して operand scan に回す**という意味で、deny になるのは **operand に機密
+> path 候補がある形だけ**。option / action が単独で deny を決める経路は無い。
+> 実測は「実測ログ (条件付き metadata-only)」節。
+
 `find` は **条件付き**: `-exec` / `-execdir` / `-ok` / `-okdir` / `-delete` /
 `-fprint*` / `-fls` (`_FIND_DANGEROUS_ACTIONS`) を含まない場合のみ metadata-only。
-`find -exec cat .env ';'` のように `cat` を実行して内容を出力する形は対象外で
-deny に倒る (Codex P1, 0.14.0)。
+`find -exec cat .env ';'` のように `cat` を実行して内容を出力する形は metadata-only
+から除外し、**operand scan に回す** (Codex P1, 0.14.0)。deny になるのは operand に
+機密 path 候補がある形 (`find . -name .env -exec cat .env ';'` /
+`find . -name .env -delete`) だけで、`find . -name list.txt -delete` や
+`find . -delete` は allow。
 
 `file` / `wc` / `du` / `tree` も **条件付き**: operand の **中身** をファイル名
 リストとして読み echo するオプション (`file -f` / `--files-from`、
 `wc`/`du` の `--files0-from`、`tree --fromfile` = `_METADATA_CONTENT_READING_OPTS`)
-を含む場合は除外して deny。`file -f .env` は `.env` の各行を
-`<行>: cannot open` でエラー出力するため実値が漏れる (Codex P2 第2弾, 0.14.0)。
+を含む場合は metadata-only から除外し、**operand scan に回す**。`file -f .env` は
+`.env` の各行を `<行>: cannot open` でエラー出力するため実値が漏れる
+(Codex P2 第2弾, 0.14.0)。deny になるのは operand に機密 path 候補がある形
+(`file -f .env` / `wc --files0-from=.env`) だけで、`file -f list.txt` /
+`wc --files0-from=list.txt` / `wc --files0-from=-` / `tree --fromfile list.txt`、
+および option だけで operand が無い形 (`file -f` / `wc --files0-from`) は allow。
+**リスト読込 option が指す先が機密でも、リストの中身として現れる path は静的に
+読まないので判定材料にならない** (`file -f list.txt` の `list.txt` が機密 path を
+1 行だけ含んでいても allow)。
 
 `git ls-files` も **条件付き**: plain な `git ls-files .env` / `--error-unmatch`
 は名前一覧のみなので allow 維持。`-s` / `--stage` / `--format` は blob object
@@ -397,14 +413,21 @@ name (= 内容の安定した指紋) を出せるため metadata-only から除�
 index からの除去だけで実ファイルは残り、出力は `rm '<path>'` の path 文字列のみ。
 `--cached` は `--` より前の完全一致。`--pathspec-from-file=<file>` は operand
 の中身を pathspec として読み不一致行を `fatal: pathspec '<行>' did not match` で
-echo するため除外して deny (`file -f` と同クラス)。plain `git rm` は作業ツリー
-削除 (破壊操作) で deny 維持。git は long option の **一意な接頭辞** を受理する
+echo するため metadata-only から除外し、**operand scan に回す** (`file -f` と
+同クラス)。plain `git rm` も作業ツリー削除 (破壊操作) なので同じく除外して
+**operand scan に回す**。いずれも deny になるのは operand に機密 path 候補がある形
+(`git rm .env` / `git rm --cached --pathspec-from-file=.env`) だけで、
+`git rm list.txt` / `git rm --cached --pathspec-from-file=list.txt` や operand の
+無い `git rm` 単体は allow (= plain `git rm` が無条件 deny になるわけではない)。
+git は long option の **一意な接頭辞** を受理する
 (`--no-cach` = `--no-cached` で後勝ちにより作業ツリーも削除) ため、危険な
 option を exact-token で deny-list しても省略形がすり抜ける。よって **既知の
 安全な option (`--force` / `--dry-run` / `--quiet` / `--ignore-unmatch` /
 `--sparse`、短縮 `-f -n -r -q` と束ね) 以外が 1 つでもあれば index-only と見なさず
 通常経路 (operand scan → 機密 operand なら deny) に倒す** (fail-closed、Codex
-review P1)。`--cache` のような `--cached` 自体の省略形も展開せず保守側 (deny)。`chmod` / `chown` / `chgrp` / `touch` は内容を読む
+review P1)。`--cache` のような `--cached` 自体の省略形も展開せず保守側
+(= operand scan へ。機密 operand があれば deny、`git rm --cache list.txt` は allow)。
+`chmod` / `chown` / `chgrp` / `touch` は内容を読む
 option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ) ため
 無条件で metadata-only。いずれも両 hook の reason が次善策として案内するコマンド
 で、0.18.0 までは自分で deny していた (自己矛盾)。
@@ -426,6 +449,9 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `find . -name .env -delete` (`-delete` 副作用), `find ... -fprintf` (書込み) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `file -f .env`, `file --files-from=.env` (各行を名前扱いしエラーに echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `wc --files0-from=.env`, `du --files0-from=.env`, `tree --fromfile .env` | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `find . -name list.txt -delete`, `find . -delete`, `find . -name list.txt -exec cat list.txt ';'`, `find . -name list.txt -fls out.txt` (0.33.0 実測: 危険 action があっても operand が非機密なら operand scan で allow) | allow | allow | allow | allow | allow |
+| `file -f list.txt`, `file --files-from=list.txt`, `wc --files0-from=list.txt`, `du --files0-from=list.txt`, `wc --files0-from=-`, `tree --fromfile list.txt` (0.33.0 実測: リスト読込 option があっても operand が非機密なら allow。リストの**中身**は静的に読まないので判定材料にならない) | allow | allow | allow | allow | allow |
+| `file -f`, `file --files-from`, `wc --files0-from`, `tree --fromfile` (0.33.0 実測: option だけで operand 無し → 機密候補が無く allow) | allow | allow | allow | allow | allow |
 | `file .env`, `wc -l .env`, `du -sh .env`, `tree .env` (通常形、内容は出ない) | allow | allow | allow | allow | allow |
 | `git ls-files -s .env`, `git ls-files --stage .env`, `git ls-files --format='%(objectname)' .env`, `git ls-files --format="%(objectname)" .env`, `git ls-files -sz .env` (blob object name = 内容の指紋。単一クォート形は 0.18.0、二重クォート形は 0.25.0 の quote-aware 化で表どおり deny に到達。無クォート形は実 bash で syntax error になる形なので hard-stop の ask / allow のまま) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `ls > .env`, `ls >.env`, `stat x 1> .env`, `ls &> .env` (機密 path への redirect 書込み = 破壊的) | **deny** | **deny** | **deny** | **deny** | **deny** |
@@ -448,15 +474,44 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `git show HEAD:.env`, `git diff .env`, `git add .env` (内容出力 / index 追加) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git rm .env`, `git rm -f .env`, `git rm .env -- --cached`, `git rm --cached --no-cached .env` (`--cached` 無し / 後勝ちの否定 = 作業ツリー削除。`--` 以降は pathspec) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git rm --cached --pathspec-from-file=.env`, `git rm --cached --pathspec-from-file .env` (中身を pathspec として読み不一致行を echo) | **deny** | **deny** | **deny** | **deny** | **deny** |
-| `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env`, `git rm --cached -h .env` (未知 / 省略形の option は fail-closed で通常経路 → deny。Codex review P1) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm --cached --no-cach .env`, `git rm --cached --pathspec-from-fil .env`, `git rm --cache .env`, `git rm --cached -h .env` (未知 / 省略形の option は fail-closed で通常経路 = operand scan へ。機密 operand `.env` があるので deny。Codex review P1) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `git -C /repo rm --cached .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `git rm list.txt`, `git rm`, `git rm --cached --pathspec-from-file=list.txt`, `git rm --cache list.txt`, `git rm --cached -h list.txt`, `git ls-files -s list.txt`, `git status -v -- list.txt`, `git -C /repo rm --cached list.txt` (0.33.0 実測: metadata-only から除外されても operand が非機密なら operand scan で allow。plain `git rm` が**無条件 deny なのではない**) | allow | allow | allow | allow | allow |
 | `git -C /repo check-ignore .env` (global option 前置は保守的に対象外) | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `echo KEY=val > .env`, `echo KEY=val >\| .env` (echo は safe-read 外: residual `>` が先に効き ask 維持。clobber 形も同じ) | ask | ask | **allow** | ask | **allow** |
 | `chmod 600 x > .env`, `touch x > .env` (chmod / touch も safe-read 外: residual `>` が先に効き ask 維持。0.19.0 で緩めていない) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env -exec cat {} +` (`{}` hard-stop が先に効き ask 維持) | ask | ask | **allow** | ask | **allow** |
 | `find . -name .env > /tmp/x` (find は safe-read 外: residual `>` で ask 維持) | ask | ask | **allow** | ask | **allow** |
 
+### 実測ログ (条件付き metadata-only)
+
+0.14.0〜0.19.0 の記述は「危険な option / action が deny を決める」と読める簡略
+表現だった (0.25.0 の `git ls-files` 訂正と同型)。**0.33.0 で 60 形を実プロセスで
+分類し直し**、全コマンド系が同一構造であることを確認したうえで上の記述に揃えた。
+判定は 1 セルも変えていない (docs の訂正のみ)。
+
+| 日付 | 対象 | 測った形 | 結果 |
+|---|---|---|---|
+| 2026-09-19 | `file -f` / `--files-from`、`wc`/`du` の `--files0-from`、`tree --fromfile` | 機密 operand 有 / 非機密 operand / operand 無し / 混在 (計 20 形) | 機密 operand ありのみ deny。**option の有無単独では判定が動かない** |
+| 2026-09-19 | `git rm` (plain / `--cached` / `--pathspec-from-file` / 未知・省略形 option / `git -C` 前置) | 機密 operand 有 / 非機密 operand / operand 無し (計 25 形) | 同上。plain `git rm` も `git rm list.txt` は allow |
+| 2026-09-19 | `find` の `_FIND_DANGEROUS_ACTIONS` (`-delete` / `-exec` / `-fls`)、`git ls-files -s` / `--format`、`git status -v` | 機密 operand 有 / 非機密 operand / operand 無し (計 15 形) | 同上 (横断確認。記述は既に正しかった `git ls-files` / `git status` を含む) |
+
 ## Bash handler — 静的解析不能 (三態判定)
+
+> **0.33.0 注記 (判定は不変)**: 下表の **allow セル** (autonomous mode で
+> `ask_or_allow` が allow に倒れた行) のうち、**コマンド文字列に機密パターン
+> らしい token を含むもの**では、`hookSpecificOutput.additionalContext` に
+> 「静的解析では機密パスの有無を判定できないコマンドを autonomous mode のため
+> 確認なしで通した」旨の固定 1 文が載る。`permissionDecisionReason` は公式仕様で
+> allow / ask のときユーザーにしか出ないため、Claude に届く唯一のチャネルがこれ。
+> **`permissionDecision` は出さない**ので許可の強さは変わらず、上表・下表の
+> セルも 1 つも変わらない (内訳は
+> [DESIGN.md](./DESIGN.md#lenient-allow-の開示-additionalcontext0330))。
+> 静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には
+> 付かない。機密らしい token を含まない lenient allow (`bash -c 'date'` /
+> `cat *.log`) も素の allow のままで、note は付かない — lenient allow は全 Bash
+> 呼出の 4 割強という高頻度経路なので、**同じセル内でも開示の有無は分かれる**
+> (絞りの判定基準は DESIGN.md の「対象の絞り」)。
 
 > **0.11.0 (F1) 注記**: 以下は command を構成する全 segment がいずれも静的
 > 解析不能 (hard-stop / shell keyword / opaque wrapper / shlex 失敗) な場合に
@@ -558,6 +613,15 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 > tracked は index に残るため、無効な対処の後の沈黙と成功後の沈黙が区別できな
 > かった。根拠と代替案の棄却理由は
 > [DESIGN.md](./DESIGN.md#session-単位の-once-only-0190) を参照。
+
+> 0.33.0 で block reason の追記案内に**実行手段** (`Edit で追記`) を明記したが、
+> **上表の判定は 1 行も変わっていない** (文面のみ)。`echo '.env' >> .gitignore`
+> のようなシェルリダイレクト形は Bash 表の residual metachar 行どおり default /
+> acceptEdits / dontAsk で **ask** に落ちるため、block した直後に「plugin が案内
+> した手順を実行するのに plugin が承認を求める」2 段の摩擦になっていた。判定表を
+> 変えずに、案内する手段を全 mode で allow される Edit / Write ツールへ寄せた
+> (実測: `.gitignore` / `patterns.local.txt` への Edit / Write は機密パターンに
+> 一致しないので全 mode allow)。
 
 ## `__main__` envelope 読み取り
 

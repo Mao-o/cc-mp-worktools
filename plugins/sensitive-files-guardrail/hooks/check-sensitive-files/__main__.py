@@ -233,11 +233,14 @@ _SILENT_AFTER_ACK_NOTE = (
 # 固定サイズ) なので ``MAX_OUTPUT_CHARS`` の予算から丸ごと引かれ、そのぶん
 # 可変部 (ファイル列挙・レシピ・basename 形の併記) の配分が減る。
 # ``TestRecipeLinesInBudget.test_fitting_input_is_not_narrowed_by_the_new_budget``
-# が固定している床入力 (123 文字 × 20 件) は素で 9,100 文字 = 予算まで **116
-# 文字**しか余裕が無く、それを超える静的追加はその入力の表示を狭める (実測。
-# 199 文字版では basename 形の併記が 20 件 → 9 件に減った)。案内を足すときは
-# この床テストで測り直すこと。詳細説明を reason に書き足さず docs に寄せている
-# のはこのため。
+# が固定している床入力 (123 文字 × 20 件) は予算 (9,216) ぎりぎりまで使い切って
+# おり、それを超える静的追加はその入力の表示を狭める (実測。199 文字版では
+# basename 形の併記が 20 件 → 9 件に減った)。案内を足すときは**この床テストで
+# 実測して測り直すこと** — このコメントに書いた余裕の数値はリリースごとに
+# 変わる (0.33.0 実測: 追加前 9,194 / 残り 22 文字 → 追加後 9,205 / 残り 11
+# 文字。0.32.0 以前の「素で 9,100 文字 = 余裕 116 文字」は当時の値で、その後の
+# 静的案内追加で目減りしていた)。詳細説明を reason に書き足さず docs に
+# 寄せているのはこのため。
 _SHARED_RECIPE_NOTE = (
     "貢献者・CI と共有する除外は "
     f"`{PROJECT_PATTERNS_DISPLAY_PATH}` に commit できます。"
@@ -248,12 +251,46 @@ _SHARED_RECIPE_NOTE = (
 # かつ時間予算の超過で検査を打ち切った場合。0.32.0、内部バックログ)。
 #
 # **予算超過時だけ付く条件付きの行**なので、通常時の文字数予算は消費しない
-# (静的案内の余裕は床テストの入力で 116 文字しかない — `_SHARED_RECIPE_NOTE` の
-# 注記を参照)。超過時は既に degraded なので、そこで予算を使うのは正しい配分。
+# (静的案内の余裕は床テストの入力で十数文字しか残っていない —
+# `_SHARED_RECIPE_NOTE` の注記を参照)。超過時は既に degraded なので、そこで
+# 予算を使うのは正しい配分。
 _BUDGET_INCOMPLETE_NOTE = (
     "**注意: 時間予算の超過で検査を打ち切ったため、以下の一覧は不完全です**"
     " (ほかにも機密ファイルがある可能性があります)。"
 )
+
+
+# 追記操作の実行手段の明示 (0.33.0、内部バックログ)。
+#
+# 問題: block した直後、案内どおり `.gitignore` / `patterns.local.txt` に追記
+# しようとすると、`echo '.env' >> .gitignore` のようなシェルリダイレクト形が
+# PreToolUse(Bash) の residual metachar 判定で ``ask_or_allow`` に落ちる。
+# 実測 (0.32.0): default / acceptEdits / dontAsk で ask、auto /
+# bypassPermissions で allow。deny ではないので機能は損なわれないが、
+# **block → 承認ダイアログ**の 2 段の摩擦になり、「plugin が案内した手順を
+# 実行するのに plugin が承認を求める」形になる。0.19.0 で
+# `git rm --cached` を metadata-only に入れて解消した自己矛盾と同じ型。
+#
+# 対処: **判定表は変えず**、案内する実行手段を Edit / Write ツールに寄せる。
+# 実測 (0.32.0): `.gitignore` / `patterns.local.txt` への Edit / Write は
+# どちらも機密パターンに一致しないため全 mode で allow。リダイレクトを
+# lenient 側の特例にする案 (判定境界の変更) は採らない。
+#
+# 文言が極端に短いのは文字数予算の制約。`TestRecipeLinesInBudget` の床入力
+# (123 文字 × 20 件) は 0.32.0 時点で直列化後 9,194 文字 = 予算 (9,216) まで
+# **22 文字**しか余裕が無い (`_SHARED_RECIPE_NOTE` のコメントが「116 文字」と
+# 書いていたのは古い実測値で、0.32.0 の静的案内追加後は 22 文字。0.33.0 で
+# 測り直して訂正した)。超えると basename 形の併記が半分で頭打ちになり
+# 20 件 → 9 件に減る (実測)。そのため:
+#   - **新しい行を足さず既存の案内文に織り込む** (行を足すと改行ぶんも食う)
+#   - 理由は docs/DESIGN.md に置き、reason には手段だけを書く
+#   - `Write` を併記しない。`Edit/Write で` (13 文字) にすると床入力に効く
+#     2 箇所 (tracked 案内 + レシピ案内) で +14 文字になり余裕 (22) を超える。
+#     `patterns.local.txt` が未作成なら Edit が失敗して Write に回るだけで、
+#     目的 (シェルリダイレクトを避ける) は達成される
+# 0.33.0 の追加は +11 文字で、残りの余裕も 11 文字 (直列化後 9,205 文字)。
+# 次に静的案内を足すときは床テストで測り直すこと。
+_APPEND_TOOL_HINT = "Edit で"
 
 
 def _distinct(names: list[str]) -> list[str]:
@@ -505,8 +542,9 @@ def _build_reason(
     tracked_guidance: list[str] = []
     if tracked:
         tracked_guidance.append(
-            "対応: `.gitignore` に追加した上で `git rm --cached <path>` を実行して"
-            "ください (index から外すだけで実ファイルは残ります)。"
+            f"対応: `.gitignore` に {_APPEND_TOOL_HINT}追記し "
+            "`git rm --cached <path>` を実行してください "
+            "(index から外すだけで実ファイルは残ります)。"
         )
         submodule_dirs = sorted(
             {
@@ -538,7 +576,8 @@ def _build_reason(
     untracked_guidance: list[str] = []
     if untracked:
         untracked_guidance.append(
-            "対応: `.gitignore` に追加するか、意図的に管理対象とするか確認してください。"
+            f"対応: `.gitignore` に {_APPEND_TOOL_HINT}追記するか、"
+            "意図的に管理対象とするか確認してください。"
         )
 
     tail_head: list[str] = [
@@ -561,7 +600,7 @@ def _build_reason(
         recipe_names = basenames
     recipe_intro = (
         "【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を"
-        f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を追記します"
+        f"得た上で `{LOCAL_PATTERNS_DISPLAY_PATH}` に次を {_APPEND_TOOL_HINT}追記します"
         f" ({PROJECT_SECTION_PLACEHOLDER_NOTE})。"
         + EXCLUDE_SCOPE_WARNING.format(scope="同じ名前のファイル")
         + _SHARED_RECIPE_NOTE

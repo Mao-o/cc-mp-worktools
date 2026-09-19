@@ -14,11 +14,130 @@ commit 52113a1 で完了)。
   膨張、REVIEW_TASKS の plugin 外退避と CHANGELOG の archive 化に分割) は
   `docs/REVIEW_TASKS_2026-05-06.md` の 2026-08-23 節を参照。
   公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
-- **D2** (tests 整理) — 未着手。目標値 (≈500 件) は 0.20.0 時点の実測 (redact 862 /
-  check 79) と乖離しており、「同型ケースの subTest 化で重複を畳む」に再定義して
-  から着手する
+- **D2** (tests 整理) — **0.33.0 で着手**。目標を「件数削減」から「同型ケースの
+  subTest 化で重複を畳む (格子点は増やす)」に再定義し、`ask_or_allow` 系 6 クラスを
+  `AskOrAllowMatrix` 土台へ畳んだ (メソッド 55 → 12 / 格子点 55 → 180)。
+  当初の数値目標 (≈500 件) は**廃止**する — 形状カバレッジを削る危険があり、
+  過去の重大不具合 3 件は「件数では見えない入力形状の空白」が原因だったため。
+  残りの同型群 (`test_bash_handler.py` のその他) は未着手
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
+
+## 0.33.0
+
+docs 精度 (条件付き metadata-only の記述) / lenient allow の Claude 向け開示 /
+Stop block 後の摩擦低減 / 同型テストの subTest 畳み込み (内部バックログ 4 件)。
+**判定表の変化: deny / allow / ask / block のセルは 1 つも変わっていない。**
+0.33.0 が変えるのは (a) docs の記述、(b) allow に載る `additionalContext`、
+(c) Stop block reason の案内文、(d) テストの構造。
+
+**利用者影響**: (1) autonomous mode で「静的判定できないまま通った」ことが、
+機密に触れうるコマンドに限って Claude にも伝わる、(2) Stop block 直後の対処で
+承認ダイアログが挟まらなくなる、(3) docs が「option / action が deny を決める」と
+誤読される箇所が解消。
+テスト件数: redact 1,387 → **1,368** / check 164 → **165**
+(redact の純減は「同型ケースの subTest 畳み込みで 1,361 まで減らした」+「開示の
+絞りの床テストを 7 件追加した」の合算。畳み込み側の格子点は 55 → 180 に増えている)。
+
+### MATRIX / DESIGN / README の「条件付き metadata-only」記述を実測に合わせた
+
+- `file -f` / `--files-from`、`wc` / `du` の `--files0-from`、`tree --fromfile`、
+  `find` の危険 action (`-exec` / `-delete` / `-fls`)、`git rm` (plain /
+  `--pathspec-from-file` / 未知・省略形 option) について、docs が
+  「**その option / action を含む形は deny**」と読める簡略表現になっていた。
+  0.25.0 に `git ls-files` で一度訂正したのと同じ誤り
+- 実態は **metadata-only の allow-list から外れて operand scan に回るだけ**で、
+  deny になるのは **operand に機密 path 候補があるときだけ**。
+  `file -f list.txt` / `wc --files0-from=list.txt` / `git rm list.txt` /
+  `find . -name list.txt -delete` はいずれも allow、option だけで operand が無い
+  `file -f` / `git rm` も allow
+- **推論ではなく実プロセスで 60 形を分類し直してから書き換えた** (前回この
+  訂正を見送った理由が「未実測のまま推論で書き換えると同じ過ちになる」だったため)。
+  実測表は `docs/MATRIX.md` の「実測ログ (条件付き metadata-only)」節
+- あわせて「リスト読込 option が指す先の**中身**は静的に読まない」ことを明記した
+  (`file -f list.txt` の `list.txt` が機密 path を含んでいても allow)
+- **実装は変更していない** (docs と、同じ誤読をしていたコード内コメント 2 箇所のみ)。
+  実測で得た境界は
+  `tests/test_bash_handler.py::TestConditionalMetadataOnlyOperandScan` に
+  床テストとして固定した (非機密 operand の allow 側 15 形 × 5 mode +
+  機密 operand の deny 側 15 形 × 5 mode + operand 無し 7 形 × 5 mode)
+
+### lenient allow を `additionalContext` で Claude に開示する (対象は絞る / 判定は不変)
+
+- 公式 hooks reference の逐語: `permissionDecisionReason` は「For `"allow"` and
+  `"ask"`, shown to the user but not Claude」。`ask_or_allow` が autonomous mode
+  (`auto` / `bypassPermissions` / `plan`) で allow に倒したとき、**なぜ通ったのかが
+  Claude にまったく届いていなかった** (実測で全 Bash 呼出の 4 割強がこの経路)
+- Claude に渡せる唯一の PreToolUse チャネル
+  `hookSpecificOutput.additionalContext` に、固定 1 文
+  (`core/output.py::LENIENT_ALLOW_CONTEXT`) を載せる
+- **`permissionDecision` は出さない** — 明示 `"allow"` を出すとハーネス側の確認を
+  スキップさせる意味になり allow が強くなる = 判定境界の変更になるため。
+  `is_allow` / `decision_of` の結果は素の allow と同一
+- 静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には
+  付けない。deny / ask にも付けない (それらは reason が Claude に届く)
+- 文面は**固定**で command / path / 値を含めない (reason 側の minimal-info 原則と
+  同じ)
+- **載せる対象は lenient allow の全件ではなく、「コマンド文字列に機密パターン
+  らしい token が含まれる」ものだけ** (`_gate_lenient_note` /
+  `_has_sensitive_looking_token`)。lenient allow は全 Bash 呼出の 4 割強なので、
+  全件に載せると note 自体が `permissionDecisionReason` のノイズ回避方針と同じ
+  問題をコンテキスト側で起こす。固定 1 文は**混入量の上限**、絞りは**頻度**を
+  決める別の軸で、どちらかだけでは足りない。`bash -c 'cat .env'` / `cat *.key` /
+  `{ cat .env; }` は載せ、`bash -c 'date'` / `cat *.log` は素の allow に戻す
+  (**判定はどちらも同じ allow**)
+- 絞りの判定は静的な文字列一致のみ: `shlex` (`punctuation_chars=True` — 素の
+  `shlex.split` では `{ cat .env; }` が `.env;`、`(cat .env)` が `.env)` になって
+  一致せず、機密を読んでいるのに開示が落ちる形が 8 つ出る) で分解し、各 token の
+  basename 部分と `=` 後尾 (`--file=.env`) を既存 rules (`is_sensitive`、
+  basename 形のみ) に掛ける。glob / 変数は**展開しない**ので `cat *.key` は
+  載せるが `cat id_*` / `cat $SECRET` は載せない — 判定不能な token は「含む側」に
+  倒さない
+- 片側に倒した点 (いずれも**開示しない側**): path 形 rule は評価しない /
+  64KB 超の command は分解しない (`shlex` は長い単一 token で超線形) / 抽出時の
+  例外。note は情報であって保護ではないため、取りこぼしは許容し判定には影響させない
+- segment ループを跨ぐ持ち回りが必要なのは、lenient allow が `{}` 相当の allow で
+  `decision_of` では素の allow と区別が付かないため
+  (`handlers/bash_handler.py::handle` の `lenient_note`)
+
+### Stop block が案内する追記操作の実行手段を明記した (判定は不変)
+
+- block 直後に案内どおり `.gitignore` / `patterns.local.txt` へ追記しようとすると、
+  `echo '.env' >> .gitignore` のようなシェルリダイレクト形が Bash 判定の residual
+  metachar 経路で `ask_or_allow` に落ちる (default / acceptEdits / dontAsk で ask)。
+  deny ではないので機能は損なわれないが、**block → 承認ダイアログ**の 2 段の摩擦に
+  なり、「plugin が案内した手順を実行するのに plugin が承認を求める」形だった
+  (0.19.0 に `git rm --cached` を metadata-only へ入れて解消した自己矛盾と同型)
+- **判定表を変えず**、案内する実行手段を Edit / Write ツールへ寄せた
+  (`.gitignore` / `patterns.local.txt` への Edit / Write は機密パターンに一致しない
+  ため全 mode で allow)。リダイレクト形を lenient 側の特例にする案は「deny 強制の
+  特例を作らない」の裏返しとして allow 側の特例も増やさない方針から採らない
+- reason に書くのは手段だけ (`Edit で追記`)。理由を docs へ寄せているのは文字数
+  予算の制約で、**床入力の余裕は 22 文字しか残っていなかった** (0.32.0 実測。
+  コード内コメントが「116 文字」と書いていたのは 0.31.0 以前の値で、測り直して
+  訂正した)。今回の追加は +11 文字で、残りの余裕も 11 文字
+- 再発検知: redact 側の
+  `tests/test_e2e.py::TestE2ERecommendedRemediesPassBashHook` が「reason 中の
+  backtick コマンドを抽出して Bash hook に通す」既存の仕組みを持つので、抽出語に
+  `echo` / `printf` / `cat` / `tee` / `sed` を足した。案内文にリダイレクト形が
+  紛れ込んだ瞬間に落ちる
+
+### D2 (テスト総数整理) を「同型ケースの subTest 畳み込み」として着手
+
+- 目標を **件数削減から「同型の畳み込みで格子点を増やす」に再定義**した。
+  件数を目的にすると形状カバレッジを削る危険があり、過去の重大不具合 3 件は
+  いずれも「件数では見えない入力形状の空白」が原因だった
+- `ask_or_allow` に倒れる 6 クラス (`TestHardStopLenient` /
+  `TestInputRedirectAskOrAllow` / `TestShellKeywordLenient` /
+  `TestOpaquePrefixAskOrAllow` / `TestPrefixWithOptionsOpaque` /
+  `TestGlobUncertainAskOrAllow`) を `AskOrAllowMatrix` 土台に畳んだ。
+  **メソッド 55 → 12、格子点 55 → 180** (36 形 × 5 mode)
+- 畳む前は「コマンド 1 形 × その場で選んだ mode 1〜3 列」で、**形ごとに測る mode
+  がまちまち**だった (`coproc cat .env` は default だけ、`cat "$X"` は 3 列)。
+  土台が mode 5 列を必ず回すので網羅性は落ちるどころか増えている
+- 土台は `unittest.TestCase` を継承しない (空 `CASES` で「常に通る 2 件」が
+  収集されるのを防ぐ)。`CASES` 空のまま使う事故は各メソッド冒頭の assert で落とす
+- 残りの D2 スコープ (`test_bash_handler.py` のその他の同型群) は未着手
 
 ## 0.32.0
 

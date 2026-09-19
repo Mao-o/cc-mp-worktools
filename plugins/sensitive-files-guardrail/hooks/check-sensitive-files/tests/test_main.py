@@ -124,6 +124,38 @@ class TestMainBlockReason(BaseMainTest):
         self.assertNotIn("【tracked】", payload["reason"])
         self.assertIn("【untracked】", payload["reason"])
 
+    def test_append_guidance_names_the_edit_tool(self):
+        """追記の実行手段を Edit ツールに寄せる (0.33.0、内部バックログ)。
+
+        block 直後に案内どおり `.gitignore` / `patterns.local.txt` へ追記しよう
+        とすると、``echo '.env' >> .gitignore`` のようなシェルリダイレクト形は
+        PreToolUse(Bash) の residual metachar 判定で ``ask_or_allow`` に落ちる
+        (実測 0.32.0: default / acceptEdits / dontAsk で ask)。**block →
+        承認ダイアログ**の 2 段の摩擦になるため、判定表は変えずに案内する実行
+        手段を Edit / Write ツールへ寄せた (これらは機密パターンに一致しない
+        ので全 mode で allow)。
+
+        redact 側の ``TestE2ERecommendedRemediesPassBashHook`` が
+        「reason の backtick コマンドが全 mode で素通りすること」を実配線で
+        固定しており、こちらは Stop 単体の suite でも文面が守られることを見る。
+        """
+        (self.repo / ".env").write_text("KEY=v\n")
+        _git(["add", ".env"], str(self.repo))
+        _git(["commit", "-m", "add env"], str(self.repo))
+        (self.repo / ".env.production").write_text("SECRET=v\n")
+
+        rc, out, _ = _run_main({"cwd": str(self.repo)})
+        self.assertEqual(rc, 0)
+        reason = json.loads(out)["reason"]
+        self.assertIn("【tracked】", reason)
+        self.assertIn("【untracked】", reason)
+        # tracked / untracked / 恒久除外レシピの 3 経路すべてで手段を明示する
+        self.assertEqual(reason.count("`.gitignore` に Edit で追記"), 2)
+        self.assertIn("patterns.local.txt` に次を Edit で追記", reason)
+        # シェルリダイレクトによる追記形を案内しない
+        for redirect_form in (">>", "> .gitignore", ">.gitignore"):
+            self.assertNotIn(redirect_form, reason)
+
     def test_no_sensitive_files_no_output(self):
         (self.repo / "README.md").write_text("# hi\n")
         rc, out, _ = _run_main({"cwd": str(self.repo)})
@@ -1077,7 +1109,7 @@ class TestMainSessionAck(BaseMainTest):
 # byte 予算のための restructure が既存の見た目 (セクション順・空行位置) を
 # 変えていないことのピン留め — substring 突合だけでは「順序が入れ替わった」
 # 類の退行を検出できないため。
-_EXPECTED_SMALL_REASON = '【セキュリティ確認】\n\n【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:\n  - .env\n対応: `.gitignore` に追加した上で `git rm --cached <path>` を実行してください (index から外すだけで実ファイルは残ります)。\n\n【untracked】以下のファイルは機密パターンに一致し、まだ `.gitignore` 未登録です:\n  - .env.production\n対応: `.gitignore` に追加するか、意図的に管理対象とするか確認してください。\n\nAskUserQuestion ツールで各ファイルについてユーザーに確認してください:\n  選択肢1: 「.gitignore に追加」 (Recommended)\n  選択肢2: 「意図的に管理対象とする」\n\n【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を得た上で `~/.claude/sensitive-files-guardrail/patterns.local.txt` に次を追記します ($CLAUDE_PROJECT_DIR は展開されないので、プロジェクト root の絶対パスを literal に書く (例: [project:/abs/path/to/repo])。全プロジェクト共通にしたい場合のみヘッダー無しの行に書く)。影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ** (root 配下のみ)。basename 形 (`!<名前>`) は同じ名前のファイルが**すべて**対象で、**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、basename 形は**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。貢献者・CI と共有する除外は `<project root>/.claude/sensitive-files-guardrail/patterns.txt` に commit できます。追記内容 (path 形 — 承認した 1 ファイルだけを外す):\n  [project:$CLAUDE_PROJECT_DIR]\n  !/.env\n  !/.env.production\n同名ファイルをすべて外したい場合だけ basename 形にする: `!.env` / `!.env.production`'
+_EXPECTED_SMALL_REASON = '【セキュリティ確認】\n\n【tracked】以下のファイルは git で追跡中で、機密パターンに一致します:\n  - .env\n対応: `.gitignore` に Edit で追記し `git rm --cached <path>` を実行してください (index から外すだけで実ファイルは残ります)。\n\n【untracked】以下のファイルは機密パターンに一致し、まだ `.gitignore` 未登録です:\n  - .env.production\n対応: `.gitignore` に Edit で追記するか、意図的に管理対象とするか確認してください。\n\nAskUserQuestion ツールで各ファイルについてユーザーに確認してください:\n  選択肢1: 「.gitignore に追加」 (Recommended)\n  選択肢2: 「意図的に管理対象とする」\n\n【恒久除外】「意図的に管理対象とする」が選ばれた場合は、ユーザーの承認を得た上で `~/.claude/sensitive-files-guardrail/patterns.local.txt` に次を Edit で追記します ($CLAUDE_PROJECT_DIR は展開されないので、プロジェクト root の絶対パスを literal に書く (例: [project:/abs/path/to/repo])。全プロジェクト共通にしたい場合のみヘッダー無しの行に書く)。影響範囲: path 形 (`!<root 相対パス>`) は**その 1 ファイルだけ** (root 配下のみ)。basename 形 (`!<名前>`) は同じ名前のファイルが**すべて**対象で、**同名ディレクトリの配下も外れます** (配下が別の include 行に単独一致する場合はそちらが優先)。`[project:]` は rule の読込先を決めるだけなので、basename 形は**このセッションが触る絶対パス全部** (他プロジェクト含む) に効きます。外れるのは Stop の報告だけでなく **Read / Bash / Edit / Write の保護そのもの**です。貢献者・CI と共有する除外は `<project root>/.claude/sensitive-files-guardrail/patterns.txt` に commit できます。追記内容 (path 形 — 承認した 1 ファイルだけを外す):\n  [project:$CLAUDE_PROJECT_DIR]\n  !/.env\n  !/.env.production\n同名ファイルをすべて外したい場合だけ basename 形にする: `!.env` / `!.env.production`'
 
 
 def _stdout_chars(entry, reason: str) -> int:
