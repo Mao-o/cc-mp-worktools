@@ -29,12 +29,12 @@ def _metrics(
 
 class TestEffectiveThresholds(unittest.TestCase):
     def test_language_and_role_multiplier_combine(self):
-        # java (1.5) x test (1.6) = 2.4
+        # java (1.5) x test (2.5) = 3.75
         v = judge.judge(_metrics(line_count=0), "java", "test")
-        self.assertAlmostEqual(v.thresholds["note"], 150 * 1.5 * 1.6)
-        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 1.6)
-        self.assertAlmostEqual(v.thresholds["warn"], 500 * 1.5 * 1.6)
-        self.assertAlmostEqual(v.thresholds["strong"], 800 * 1.5 * 1.6)
+        self.assertAlmostEqual(v.thresholds["note"], 150 * 1.5 * 2.5)
+        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 2.5)
+        self.assertAlmostEqual(v.thresholds["warn"], 500 * 1.5 * 2.5)
+        self.assertAlmostEqual(v.thresholds["strong"], 800 * 1.5 * 2.5)
 
     def test_python_multiplier_is_neutral(self):
         # 0.2.0 で 0.7 → 1.0。review=210 行という突出して厳しい閾値が通常の
@@ -58,6 +58,66 @@ class TestEffectiveThresholds(unittest.TestCase):
         self.assertAlmostEqual(v.thresholds["review"], 300 * 1.0)
 
 
+class TestTestRoleRelaxation(unittest.TestCase):
+    """0.6.0: test 係数 1.6 → 2.5、かつ test には宣言的緩和を重ねない。
+
+    0.5.0 までは role (1.6) と declarative (1.6) が独立に掛かり、テストファイル
+    だけ 2.56 倍の緩和を受けていた。0.6.0 は role=test を ``ROLE_MULTIPLIER``
+    だけで一律に緩和する (cfd に依らず 2.5 倍)。
+    """
+
+    def test_role_multiplier_is_2_5(self):
+        self.assertAlmostEqual(judge.ROLE_MULTIPLIER["test"], 2.5)
+
+    def test_declarative_is_not_stacked_on_test_role(self):
+        m = _metrics(line_count=0, control_flow_density=0.01)  # < 0.02
+        v = judge.judge(m, "python", "test")
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
+        self.assertAlmostEqual(v.applied_multipliers["role"], 2.5)
+        self.assertAlmostEqual(v.thresholds["warn"], 500 * 2.5)
+
+    def test_test_role_thresholds_are_identical_regardless_of_density(self):
+        # 「test は cfd に依らず一律 2.5 倍」を直接固定する。
+        dense = judge.judge(_metrics(line_count=0, control_flow_density=0.30), "python", "test")
+        sparse = judge.judge(_metrics(line_count=0, control_flow_density=0.00), "python", "test")
+        self.assertEqual(dense.thresholds, sparse.thresholds)
+
+    def test_non_declarative_test_file_no_longer_warns_at_the_old_threshold(self):
+        # 旧 warn 閾値 (python 500 × 1.6 = 800 行)。0.5.0 はここで warn =
+        # シグナル数によらず emit していた。0.6.0 の warn は 500 × 2.5 = 1250 行
+        # なので 800 行は review 止まりで、シグナル 0 個なら emit しない。
+        m = _metrics(line_count=800, control_flow_density=0.10)  # 宣言的ではない
+        v = judge.judge(m, "python", "test")
+        self.assertEqual(v.tier, "review")
+        self.assertEqual(v.signals, ())
+        self.assertFalse(v.should_emit)
+
+    def test_non_declarative_test_file_warns_at_the_new_threshold(self):
+        m = _metrics(line_count=1250, control_flow_density=0.10)
+        v = judge.judge(m, "python", "test")
+        self.assertAlmostEqual(v.thresholds["warn"], 1250)  # 500 × 2.5
+        self.assertEqual(v.tier, "warn")
+        self.assertTrue(v.should_emit)
+
+    def test_declarative_test_file_warns_at_the_same_threshold(self):
+        # 0.5.0 は role 1.6 × declarative 1.6 = 2.56 倍で warn が 1280 行だった
+        # ため、1250 行のテストファイルは review に落ちて (シグナル 0 なら)
+        # emit されなかった。0.6.0 は宣言的でも同じ 1250 行で warn。
+        m = _metrics(line_count=1250, control_flow_density=0.01)  # 宣言的
+        v = judge.judge(m, "python", "test")
+        self.assertAlmostEqual(v.thresholds["warn"], 1250)
+        self.assertEqual(v.tier, "warn")
+        self.assertTrue(v.should_emit)
+
+    def test_normal_role_declarative_relaxation_is_unchanged(self):
+        # normal role の宣言的緩和 (1.6 倍) は 0.6.0 でも不変。
+        m = _metrics(line_count=0, control_flow_density=0.01)
+        v = judge.judge(m, "python", "normal")
+        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.6)
+        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.6)
+        self.assertAlmostEqual(v.thresholds["warn"], 500 * 1.6)
+
+
 class TestAppliedMultipliers(unittest.TestCase):
     """message.py が「なぜこの閾値か」を説明するための内訳。"""
 
@@ -72,7 +132,7 @@ class TestAppliedMultipliers(unittest.TestCase):
         m = _metrics(line_count=0, control_flow_density=0.1)
         v = judge.judge(m, "java", "test")
         self.assertAlmostEqual(v.applied_multipliers["language"], 1.5)
-        self.assertAlmostEqual(v.applied_multipliers["role"], 1.6)
+        self.assertAlmostEqual(v.applied_multipliers["role"], 2.5)
         self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
 
     def test_declarative_multiplier_recorded_when_applied(self):
@@ -101,9 +161,9 @@ class TestScale(unittest.TestCase):
         self.assertAlmostEqual(v.thresholds["strong"], 1600)
 
     def test_scale_combines_with_language_and_role_multipliers(self):
-        # java (1.5) x test (1.6) x scale (0.5) = 1.2
+        # java (1.5) x test (2.5) x scale (0.5) = 1.875
         v = judge.judge(_metrics(line_count=0), "java", "test", scale=0.5)
-        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 1.6 * 0.5)
+        self.assertAlmostEqual(v.thresholds["review"], 300 * 1.5 * 2.5 * 0.5)
 
     def test_scale_not_recorded_in_applied_multipliers(self):
         # scale はグローバル config であり per-file の推論シグナルではないため、

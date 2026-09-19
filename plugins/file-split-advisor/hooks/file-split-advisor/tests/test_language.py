@@ -143,7 +143,8 @@ class TestIsTestPath(unittest.TestCase):
 
     def test_extended_filename_markers(self):
         # 0.4.0 で追加したパターン。旧版はこれらをすべて normal 扱いにしており、
-        # テストファイルに通常ファイルの閾値 (1/1.6 倍の厳しさ) を当てていた。
+        # テストファイルに通常ファイルの閾値 (role 係数の分だけ厳しい) を
+        # 当てていた。
         cases = [
             "app.test.js",
             "app.spec.js",

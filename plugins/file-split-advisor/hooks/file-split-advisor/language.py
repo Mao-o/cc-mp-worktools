@@ -93,9 +93,10 @@ _INTERPRETER_VERSION_SUFFIX_RE = re.compile(r"[0-9.]+$")
 
 _TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs", "e2e"})
 
-# test 判定に使うファイル名パターン。role が `test` になると閾値が 1.6 倍に
-# 緩み `def_count` シグナルの評価対象から外れるため、拾い漏れは「テスト
-# ファイルに通常ファイルの厳しさを当てる」誤発火として現れる。
+# test 判定に使うファイル名パターン。role が `test` になると閾値が
+# `judge.ROLE_MULTIPLIER['test']` 倍に緩み `def_count` シグナルの評価対象から
+# 外れるため、拾い漏れは「テストファイルに通常ファイルの厳しさを当てる」
+# 誤発火として現れる。
 #
 # 大文字小文字は区別する (``Tests?\.`` 等)。区別しないと ``Latest.cs`` /
 # ``Manifest.kt`` のような普通のファイル名まで test 扱いになる。

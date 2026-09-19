@@ -997,5 +997,134 @@ class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
         )
 
 
+class TestTripleQuoteLanguages(unittest.TestCase):
+    """0.6.0: 三重引用符の複数行文字列を言語別テーブルで持つ。
+
+    0.5.0 までの対象は python / elixir だけで、Kotlin / C# (raw string) /
+    Swift / Julia / Groovy の三重引用符はマスクが最初の改行で止まり、文字列の
+    中の行頭 if / for が制御フロー密度に数えられていた。大きな SQL / doc 文字列
+    を持つファイルで宣言的緩和が外れ、誤った分割助言が出る。
+    """
+
+    # (言語, ファイル名, 文字列を開く行, 文字列を閉じる行, 後続のコード行)
+    _CASES = (
+        ("kotlin", "OrderSchema.kt", 'val query = """', '"""', "val limit = 10"),
+        ("csharp", "OrderSchema.cs", 'var query = """', '""";', "var limit = 10;"),
+        ("swift", "OrderSchema.swift", 'let query = """', '"""', "let limit = 10"),
+        ("julia", "order_schema.jl", 'query = """', '"""', "limit = 10"),
+        ("groovy", "OrderSchema.groovy", 'def query = """', '"""', "def limit = 10"),
+    )
+
+    def _density(self, lines: list[str], language: str, name: str) -> float:
+        text = "\n".join(lines) + "\n"
+        return metrics.compute(
+            _loaded(text), language, Path(f"/repo/{name}")
+        ).control_flow_density
+
+    def test_prose_inside_a_triple_quoted_block_is_not_control_flow(self):
+        for language, name, opening, closing, trailing in self._CASES:
+            with self.subTest(language=language):
+                lines = [
+                    opening,
+                    "if the order is missing, the row is skipped",
+                    "for each row, the total is recomputed",
+                    closing,
+                    trailing,
+                ]
+                self.assertAlmostEqual(self._density(lines, language, name), 0.0)
+
+    def test_code_after_the_closing_delimiter_is_still_counted(self):
+        # 床テスト: マスクが閉じ記号を見失うと以降のコードが丸ごと文字列扱いに
+        # なり、制御フローが消える (「消しすぎ」方向の誤り)。閉じ記号の後の
+        # ``if`` が残ることを固定する。
+        for language, name, opening, closing, _ in self._CASES:
+            with self.subTest(language=language):
+                lines = [
+                    opening,
+                    "if the order is missing",
+                    closing,
+                    "if (limit > 0) {",
+                    "}",
+                ]
+                self.assertAlmostEqual(self._density(lines, language, name), 1 / 5)
+
+    def test_python_and_elixir_triple_quotes_are_unchanged(self):
+        # 床テスト: 0.5.0 から対象だった 2 言語は ``'''`` も含めて挙動不変。
+        for language, name in (("python", "foo.py"), ("elixir", "foo.ex")):
+            for delimiter in ('"""', "'''"):
+                with self.subTest(language=language, delimiter=delimiter):
+                    lines = [delimiter, "if you need this, for each item", delimiter, "x = 1"]
+                    self.assertAlmostEqual(self._density(lines, language, name), 0.0)
+
+    def test_unregistered_language_keeps_the_old_behaviour(self):
+        # Java も三重引用符 (text block) を持つが今回は登録していない。実測で
+        # 必要になった言語だけを足す方針 (投機的に広げない) を挙動で固定する。
+        lines = ['var query = """', "if the order is missing", '""";', "var limit = 10;"]
+        self.assertAlmostEqual(self._density(lines, "java", "OrderSchema.java"), 1 / 4)
+
+
+class TestImportBlockCommentOnlyLines(unittest.TestCase):
+    """0.6.0: 括弧 import ブロック内の「コメントだけの行」は import 行ではない。
+
+    ``// http clients`` のような見出しコメントを import 行として扱うと、その
+    散文に含まれる語 (``http``) からカテゴリが立ち ``import_category_count``
+    を水増しする。
+    """
+
+    def _cats(self, text: str, language: str, name: str) -> set[str]:
+        return set(
+            metrics.compute(_loaded(text), language, Path(f"/repo/{name}")).import_categories
+        )
+
+    def test_go_import_block_comment_line_does_not_raise_a_category(self):
+        lines = [
+            "package main",
+            "",
+            "import (",
+            "\t// http clients are grouped here",
+            '\t"database/sql"',
+            ")",
+            "",
+            "func main() {}",
+        ]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "go")),
+            ["import (", '\t"database/sql"'],
+        )
+        self.assertEqual(self._cats("\n".join(lines) + "\n", "go", "main.go"), {"db"})
+
+    def test_python_import_block_comment_line_does_not_raise_a_category(self):
+        lines = [
+            "from mypkg import (",
+            "    # http clients are grouped here",
+            "    alpha,",
+            ")",
+            "x = 1",
+        ]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "python")),
+            ["from mypkg import (", "    alpha,"],
+        )
+        self.assertEqual(self._cats("\n".join(lines) + "\n", "python", "foo.py"), set())
+
+    def test_a_trailing_comment_does_not_drop_the_module_on_that_line(self):
+        # 床テスト: 落とすのは**コメントだけの行**であって、行末コメント付きの
+        # import 行は従来どおり残る。
+        lines = ["import (", '\t"net/http" // client', ")"]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "go")),
+            ["import (", '\t"net/http" // client'],
+        )
+        self.assertEqual(self._cats("\n".join(lines) + "\n", "go", "main.go"), {"network"})
+
+    def test_blank_continuation_lines_are_still_skipped(self):
+        # 床テスト: 空行を yield しない 0.5.0 の挙動は変わらない。
+        lines = ["import (", "", '\t"net/http"', ")"]
+        self.assertEqual(
+            list(metrics._iter_import_lines(lines, "go")),
+            ["import (", '\t"net/http"'],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
