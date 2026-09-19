@@ -58,6 +58,100 @@ hooks.json で post を `"async": true` にして解消する (docs `Run hooks i
   (肯定も否定もされていない)。再発火しない前提なので、cursor の解析予算は起動から
   `TIMEOUT_SEC` 秒で、Explore の実行時間には連動しない
 
+## 同時起動数と注入量の上限 (0.11.0)
+
+Claude は **1 メッセージで複数の Explore を並列起動する**のが通常で、0.10.0 までは
+その本数だけ無条件に cursor が同時に走っていた。CPU と Cursor の利用量がターンごとに
+線形に増え、`additionalContext` への注入も本数 × `MAX_OUTPUT_BYTES` (8000) だけ積まれる。
+
+| 変数 | 既定 | 効果 |
+|---|---|---|
+| `EXTERNAL_AI_EXPLORE_MAX_CONCURRENT` | `2` (`state.DEFAULT_MAX_CONCURRENT`) | 同時に走らせる analyzer の上限 |
+| `EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES` | `8000` (`cursor.MAX_OUTPUT_BYTES`) | 1 アナライザの結果として注入するバイト数の上限 |
+
+**「同時に走る本数 × 1 結果あたりの上限」が 1 度に注入されうる量の頭打ち**になる。post は
+Explore 1 本ごとに別プロセスで走るので合計を直接は測れないが、結果を持てるのは起動
+できた analyzer だけなので、同時に生きている本数がそのまま注入量の上限として効く。
+
+**これは「1 ターンの注入合計」の上限ではない** (マージ前レビューの指摘)。`post()` は停止を
+確認した時点で pid ファイルを消す = 枠が空くので、同じターンの中で起動と完了を繰り返せば
+完了した本数分だけ積まれる (`tests/test_concurrency_limit.py::TestInjectionBudget` が
+両方を実測: 5 本を並列に pre → 起動は 2 本で注入も 2 本分 / 逐次に 5 本 pre→post →
+5 本分積まれる)。0.11.0 の初版は文書とテストで「1 ターンの注入合計 = 同時起動数 × 上限」と
+書いていたが、これは**チケットの要求 (ターン合計の上限) を、代替手段 (同時起動数の上限) で
+言い換えたもの**で成立しない。**注入側に別の台帳 (ターン単位の合計バイト数) を持たせる案を
+採らない**判断自体は据え置き: hook payload に「ターン」を一意に表す ID が無く時間窓で
+近似するしかないうえ、既に走り終えた (= 課金済みの) 結果を捨てる形になって損が大きい。
+
+**上限はセッション単位ではなくユーザー・マシン単位**。`live_analyzer_count()` は
+`BASE_DIR` (= `$TMPDIR/explore-parallel`) の pid ファイルを全部数え、macOS の `$TMPDIR` は
+同一ユーザーの全セッションで共有されるため、先に枠を取ったセッションが他を飢餓させる
+(並列 worktree セッションを日常的に回す運用では 2 セッション目以降が 0 本になりうる)。
+CPU / 利用量を抑えるという狙いからはマシン単位の枠のほうが正しいのでそのままにし、
+挙動として文書化する。セッション単位にしたいなら pid ファイル名に `session_id` を前置して
+`live_analyzer_count()` を接頭辞で絞る。
+
+**上限で落としたときだけ `systemMessage` を 1 行出す** (マージ前レビューの指摘)。
+`log()` の stderr は exit 0 の hook では debug log にしか出ないため、利用者は補助調査が
+付かなかったことを観測できなかった。この plugin は post-implementation-review 側で
+「差分が取れなかったパスを黙って消費しない = 通知する」規律を採っているので、同じ
+plugin 内で非対称だった。**ロック競合では出さない** — 一時的な事象で、毎回出ると雑音に
+なるほうの害が大きい。
+
+- 既定を 2 にしたのは、1 だと 2 本目以降の Explore に補助調査が一切付かず並走の価値が
+  ほぼ消えるのに対し、2 なら主要な 2 本には付きつつ増え方を頭打ちにできるため
+- **上限超過分はキューに積まない**。遅れて届く補助調査には価値が無く、キューを持つと
+  「いつ起動されるか分からない cursor」が増えて GC の対象も読みにくくなる。起動しな
+  かったことは stderr に記録する
+- 数え方は `state.live_analyzer_count()` = `$TMPDIR/explore-parallel/` の pid ファイルの
+  うち `os.kill(pid, 0)` が成功するもの。`ps` は起動しない (pre の hook timeout は 5 秒で
+  GC も同じ呼び出しで回るため)。zombie と権限の無いプロセスは「生きている」側に数える
+  = 枠を余分に塞ぐ = 起動しない側に倒れる
+- **現在の tool_use_id も数に入れる**。同じ tool_use_id で pre が二重に呼ばれたとき、
+  `cursor.pre()` は pid ファイルを上書きして前のプロセスを追えなくする (孤児化) ため、
+  上限側で止められるようにしておく
+- **数え上げから起動までは `state.launch_gate()` (flock) で直列化する**。PreToolUse
+  hook 自体が同時に複数走るので、排他にしないと双方が「まだ枠がある」と読んで上限を
+  超える。ロックを取れなかった回は起動しない (超えない側)。ロックファイルを作れない
+  環境では直列化を諦めて進む (fail-open)
+- **CLI の検出 (`is_available()`) はロックを取る前に 1 回だけ評価する** (マージ前レビューの
+  指摘)。0.11.0 の検出はキャッシュが無い / 使えない環境で最大
+  `cursorcli.PROBE_BUDGET_SEC` (3 秒) の probe になったため、ロックの内側に置くと
+  (a) GC (2 秒) + 検出 (3 秒) + ロック待ち (0.5 秒) = 5.5 秒で pre の hook timeout
+  (5 秒) を超えて hook 自体が kill され、(b) cold cache では先に入った 1 本が probe する
+  間に他の pre が待ちきれず、上限 2 に届かないまま 1 本しか付かない。ロックが保持するのは
+  **数え上げと `Popen` + pid 書込だけ**に戻してある
+- **pre の予算は `__main__.PRE_BUDGET_SEC` (4 秒) を GC と検出で共有する**。`_main` が
+  締切を作り、GC の後に残った時間を `is_available(deadline)` → `cursorcli.resolve` →
+  `_detect` → `_probe` まで持ち回る (0.10.0 の GC 予算修正と同じ形)。予算切れは既存の
+  `PROBE_UNKNOWN` (保留) 経路に落ちるだけなので、機能が黙って止まる方向には倒れない。
+  `PRE_BUDGET_SEC` + `state.LAUNCH_GATE_WAIT_SEC` < hooks.json の timeout を
+  `tests/test_concurrency_limit.py::TestPreBudget` が hooks.json を読んで突合する
+- **注入時に上限で切り詰めたら末尾に 1 行記す** (`cursor._TRUNCATION_NOTE`)。切るのは
+  末尾・残すのは先頭なので、印が無いと親 Claude は「補助調査はここで終わった」と読む
+- どちらの変数も **0 以下・不正値は既定に倒す**。0 を「止める」にしないのは、それが
+  `EXTERNAL_AI_EXPLORE_PARALLEL=0` と同義で、同じ意図に 2 つの綴りを作らないため
+
+**`state.py` が `fcntl` を使うようになったので、`__main__.py` 冒頭に
+`os.name != "posix"` のガードを入れた** (review 系 2 hook と同じ形)。無いと Windows では
+`import state` の ImportError で **Agent ツール呼び出しのたびに hook error 通知**が出る。
+停止処理は 0.10.0 から `os.killpg` + `ps` 前提なので、機能としては以前から POSIX 専用
+(`tests/test_posix_guard.py`)。
+
+テストは `tests/test_concurrency_limit.py` (枠の消費・死んだ pid・ロック競合・env の
+フォールバック・注入バイト上限と切詰マーカー・同時 / 逐次の注入量の実測・上限で落ちた
+ときの通知・pre の予算)。枠を埋めるのは偽 cursor ではなく `sleep` —
+ここで見たいのは「pid ファイルが指すプロセスが生きているか」だけで、argv の同一性
+(停止経路の判定) とは無関係なため。注入量を実測するテストだけは**走り続ける偽 cursor**
+(結果を書いてから `sleep`) を使う: 即終了する偽 cursor では枠がすぐ空いて「同時に走る
+本数」を測れない。`pre` は Popen した時点で返るので、結果ファイルが書かれるのを待って
+から停止する (待たないと空の結果を測ってしまう)。
+
+検出経路を測るテストは `EXTERNAL_AI_CURSOR_COMMAND` を外す (`_testutil` がテスト
+プロセス全体で実体を固定しているため、外さないと probe が一切走らず「検出を測った」
+つもりで固定指定の分岐を測ることになる)。`cursorcli` の検出結果はプロセス内に memo
+されるので `_testutil` が各テストの前後で `cursorcli.reset()` する。
+
 ## 無効化 (`EXTERNAL_AI_EXPLORE_PARALLEL=0`, 0.6.0)
 
 0.5.0 まではスイッチが皆無で、`cursor` を PATH から外す以外に止める手段が無かった。
@@ -74,15 +168,15 @@ cursor と pid / 結果ファイルが孤児になる — 無効化した瞬間�
 ```
 explore-parallel/
 ├── CLAUDE.md           このドキュメント
-├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す + 残骸 GC
-├── state.py            tool_use_id ベースの一時ファイルパス管理 + TTL 判定 ($TMPDIR/explore-parallel/)
+├── __main__.py         エントリポイント。--phase pre|post でフェーズ振り分け、ANALYZERS を順に回す + 残骸 GC + 同時起動数の上限
+├── state.py            tool_use_id ベースの一時ファイルパス管理 + TTL 判定 + 起動枠の数え上げ / 直列化 ($TMPDIR/explore-parallel/)
 ├── cursor.py           cursor agent の pre(読み取り専用で起動) / post(待機+結果取得) / 停止
 └── tests/              起動引数 (--mode plan) と結果注入の unittest (偽 cursor)
 ```
 
 **実行フロー**:
 
-- **pre フェーズ**: `__main__.py` が stdin から hook input を読み取り、`subagent_type == "Explore"` をチェック。`ANALYZERS` に登録されたアナライザのうち `is_available()` が True のものを順に `pre(tool_use_id, prompt)` で起動する。`cursor.pre()` は cursor agent を**読み取り専用** (`--mode plan`。argv は review 系 2 hook と共通の `_common/cursorcli.readonly_argv`) でバックグラウンド起動し、PID と結果ファイルを `$TMPDIR/explore-parallel/` (TMPDIR 未設定なら `/tmp`) に記録
+- **pre フェーズ**: `__main__.py` が stdin から hook input を読み取り、`subagent_type == "Explore"` をチェック。`ANALYZERS` に登録されたアナライザのうち `is_available(deadline)` が True のものを (ロックの外で判定してから) 順に `pre(tool_use_id, prompt)` で起動する。`cursor.pre()` は cursor agent を**読み取り専用** (`--mode plan`。argv は review 系 2 hook と共通の `_common/cursorcli.readonly_argv`) でバックグラウンド起動し、PID と結果ファイルを `$TMPDIR/explore-parallel/` (TMPDIR 未設定なら `/tmp`) に記録
 - **post フェーズ**: `__main__.py` が同じく hook input を受け取り、各アナライザの `post(tool_use_id)` を呼ぶ。`cursor.post()` は PID を見て最大 `TIMEOUT_SEC` 秒待機、結果ファイルを読み取って整形済み文字列を返す。`__main__.py` は複数アナライザの結果を `\n\n` で結合し、1 つの `additionalContext` JSON にまとめて stdout に出力
 
 Python 3.11+ 想定。標準ライブラリのみ使用 (外部依存なし)。ログと cursor の存在確認は
@@ -98,7 +192,7 @@ sys.path に載せて解決する (plugin root 内の相対配置なので cache
    | 名前 | 型 | 説明 |
    |---|---|---|
    | `NAME` | `str` | 識別子（英数字。state ファイル名に使用） |
-   | `is_available()` | `() -> bool` | CLI 存在確認等の事前チェック |
+   | `is_available(deadline=None)` | `(float \| None) -> bool` | CLI 存在確認等の事前チェック。`deadline` (time.monotonic 基準) は検出に使える締切で、`__main__` が pre の残り予算を渡す (受け取っても無視してよいが、probe を伴う検出なら必ず cap する) |
    | `pre(tool_use_id, prompt)` | `(str, str) -> None` | バックグラウンド起動 |
    | `post(tool_use_id)` | `(str) -> str \| None` | 待機 + 結果取得。整形済み文字列 or None。**停止を確認できたときだけ** pid / 結果ファイルを掃除する |
    | `reap_orphan(pid_file)` | `(Path) -> str` | TTL 超過の残骸を停止し、停止の確度 (`state.REAP_*`) を返す (GC から呼ばれる) |

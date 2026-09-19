@@ -42,7 +42,13 @@ class TestOutputTruncation(HookTestCase):
         result = self.cursor.post("tu-huge")
 
         body = result[len(self.cursor._CONTEXT_HEADER) :]
-        self.assertEqual(len(body), self.cursor.MAX_OUTPUT_BYTES)
+        note = self.cursor._TRUNCATION_NOTE.format(
+            limit=self.cursor.MAX_OUTPUT_BYTES, env=self.cursor.ENV_MAX_RESULT_BYTES
+        )
+        self.assertTrue(body.endswith(note), "切詰マーカーが付いていない")
+        self.assertEqual(
+            len(body[: -len(note)].rstrip("\n")), self.cursor.MAX_OUTPUT_BYTES
+        )
 
 
 class TestReviewerTimeout(HookTestCase):

@@ -142,7 +142,7 @@ docstring と README を参照。判定には実体 (realpath 相対。git に�
 渡し、どれかが当たれば除外する。`credentials/` → `ordinary/` の symlink ディレクトリ経由でも
 機密名のリンクでも、root の別名 (`/tmp` → `/private/tmp`) 経由でも落ちない。別名が要るのは
 Bash 経由の変更で、`git status` は実体名 (`ordinary/data.json`) しか返さないため lexical 名が
-claim に現れない (Codex R2 P1)。symlink の列挙は tracked が index (mode 120000)、untracked が
+claim に現れない (マージ前レビューの指摘)。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
 rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
 + ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
@@ -264,6 +264,22 @@ commit すると、その内容が丸ごと外部へ送信されてしまう —
 `test_committed_deletion_is_reported_not_silently_dropped` が
 「ディスク上に実在するか」を条件にしていた頃の見落としの再現)。
 
+#### 復元を再実装するときの床 (0.11.0 で確認した不足)
+
+「編集直後のディスク内容の指紋 (sha256) が Stop 時点の内容と一致するなら、HEAD に
+入っている内容は自分が書いたものだ」という証明で復元する案を実装したが、**内容を
+変えなかった編集**で破れることが分かったため出荷を取り消した。HEAD 基準 diff が
+空になる最も多い原因は同一ターン内 commit ではなく「編集したが内容が変わらな
+かった」(同じ内容の Write、revert して戻した編集) で、このとき指紋は当然一致する
+一方、「そのパスを最後に変更した commit」はこのターンの成果ではない。その commit の
+差分を復元すると、**このセッションが一度も見ていない内容** (その commit が消した行)
+まで外部 AI CLI へ送ることになる。
+
+床テスト: `tests/test_stop_flow.py::TestSameTurnCommitNotification`
+`::test_noop_edit_does_not_send_an_unrelated_historical_diff` (撤去した実装の上では
+落ちることを確認済み)。再実装するなら「内容がこのセッションのものか」ではなく
+**「その commit をこのターンに作ったか」**を示す必要がある。
+
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 
 推測で組むと壊れる箇所なので、nested `claude -p --plugin-dir` で payload を実測した。
@@ -289,6 +305,9 @@ commit すると、その内容が丸ごと外部へ送信されてしまう —
   が書いた」ことは示せないため、同一 worktree の別のローカルの書き手が push せずに
   commit した内容まで復元して送ってしまう (詳細は「HEAD 基準が空になったパスは
   復元せず通知する」節)
+- **編集直後の内容指紋 (sha256) の一致だけを根拠に復元する** — 内容を変えなかった
+  編集でも一致してしまい、このターンの成果でない commit の差分を送る (同節
+  「復元を再実装するときの床」)
 
 ## $TMPDIR のレイアウトと GC
 
@@ -384,13 +403,13 @@ reference (`Stop decision control` 節) 逐語:
 - **公式 changelog 記載の対応下限は CLI 2.1.163 (2026-06-04)**。これ未満では
   `additionalContext` が Stop で効かない
 
-### 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch、Codex R1 P1 対応)
+### 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch、マージ前レビューの指摘)
 
 上記の下限を README に書いて利用者に周知するだけでは、2.1.163 未満の CLI で plugin を
 更新した既存ユーザーが opt-in (`EXTERNAL_AI_POST_REVIEW_MODE=block`) の存在を知らない
 限り、`additionalContext` が黙って無視されレビュー指摘が届かないまま Stop してしまう。
 しかも `_run_review` は指摘を組み立てた時点で既に `state.complete_claim(...)` を
-呼んでいるため、この指摘は再試行されず永久に失われる (Codex PR #69 R1 レビュー指摘)。
+呼んでいるため、この指摘は再試行されず永久に失われる (マージ前レビューの指摘)。
 
 `EXTERNAL_AI_POST_REVIEW_MODE` を 3 値に拡張して対処した:
 
@@ -443,11 +462,11 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
-| HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`) |
+| HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`、内容を変えなかった編集で無関係な履歴を送らない床は `test_noop_edit_does_not_send_an_unrelated_historical_diff`) |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |
-| `auto` は版数非対応・不明なら自動で `block` に fail-closed する (Codex R1 P1) | `test_throttle_flow.py::TestVersionAwareMode` |
+| `auto` は版数非対応・不明なら自動で `block` に fail-closed する (マージ前レビューの指摘) | `test_throttle_flow.py::TestVersionAwareMode` |
 | 版数検出の 3 段 (env var → EXECPATH → subprocess) と閾値判定 | `test_version_detect.py` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 
@@ -460,7 +479,10 @@ hook は合成 stdin で直接起動できるので `/plugin` 更新なしで手
 
 ## 発火しないときの確認手順
 
-1. `which cursor` — 未インストールなら no-op 終了が期待動作
+1. `which cursor-agent; which agent; which cursor` — この順に検出する (0.11.0)。
+   どれも無ければ no-op 終了が期待動作。検出結果は
+   `$TMPDIR/external-ai-assist/cursorcli.json` に TTL 付きでキャッシュされる
+   (`EXTERNAL_AI_CURSOR_COMMAND` で固定できる。詳細は `hooks/_common/cursorcli.py`)
 2. `env | grep EXTERNAL_AI_POST_REVIEW` — `0` で無効化されていないか
 3. `cat $TMPDIR/post-implementation-review/state/<session_id>.json` —
    `pending` が空なら「このセッションはこのターンで何も編集していない」が正しい判定

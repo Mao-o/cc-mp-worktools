@@ -11,11 +11,36 @@
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 BASE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "explore-parallel"
+
+#: 同時に走らせる analyzer の既定上限 (`__main__.max_concurrent()` が env で上書きする)。
+#:
+#: Claude は 1 メッセージで複数の Explore を並列起動するのが通常なので、上限が無いと
+#: その数だけ cursor が同時に走り、CPU と利用量がターンごとに線形に増える。既定を 2 に
+#: したのは、1 だと「2 本目以降の Explore には補助調査が一切付かない」= 並走の価値が
+#: ほぼ消えるのに対し、2 なら主要な 2 本には付きつつ増え方を頭打ちにできるため。
+#: **1 度に注入されうる量**もこの本数で決まる (`cursor.max_output_bytes()` の docstring。
+#: ターン合計の上限ではない — 1 本終わると枠が空く)。
+#:
+#: 枠は `BASE_DIR` を共有する**同一ユーザーの全セッション**で 1 つ (macOS の `$TMPDIR` は
+#: セッション間で共有される)。CPU / 利用量を抑える狙いからはマシン単位が正しいので
+#: そのままにしてある (`CLAUDE.md` の「同時起動数と注入量の上限」節)。
+DEFAULT_MAX_CONCURRENT = 2
+
+#: `launch_gate()` がロックを取れるまで待つ上限 (秒) と probe 間隔。
+#:
+#: pre の hook timeout は 5 秒で、GC (`GC_BUDGET_SEC` = 2 秒) と同じ呼び出しの中で回る。
+#: 起動処理そのものは Popen + pid ファイル書込だけなので待つのは一瞬で足り、待ちきれ
+#: なければ起動を諦める (= 同時起動数を超えない側に倒す)。
+LAUNCH_GATE_WAIT_SEC = 0.5
+LAUNCH_GATE_POLL_SEC = 0.02
 
 #: 残骸とみなすまでの経過時間 (秒)。**pid ファイルの mtime = 起動時刻** で測る。
 #:
@@ -54,6 +79,112 @@ def cleanup(*files: Path) -> None:
             f.unlink()
         except FileNotFoundError:
             pass
+
+
+def live_analyzer_count() -> int:
+    """pid ファイルが指すプロセスのうち、まだ生きているものの件数 (同時起動数)。
+
+    判定は `os.kill(pid, 0)` **だけ**で行う (`ps` を起動しない)。pre の hook timeout は
+    5 秒しかなく、同じ呼び出しで GC も回るため subprocess を増やしたくない。
+
+    **zombie は「生きている」側に数える** (`os.kill(pid, 0)` が成功する)。枠を 1 つ
+    余分に塞ぐだけで、倒れる方向は「起動しない」= 利用量が増えない側。zombie を残す
+    pid ファイルは post / TTL GC が掃除するので恒久的には詰まらない。
+
+    signal を送る権限が無いプロセス (`PermissionError`) も生きている扱い。共有
+    `$TMPDIR` で他ユーザーの pid ファイルを読んだ場合に起きうるが、「上限に達している」
+    と読んで起動を控える方向なので安全側。
+
+    **現在の tool_use_id を除外しない**のは意図的: 同じ tool_use_id で pre が二重に
+    呼ばれたとき、`cursor.pre()` は pid ファイルを上書きして前のプロセスを追えなくする
+    (孤児化する)。数に入れておけば上限側で二重起動を止められる。
+    """
+    try:
+        names = os.listdir(BASE_DIR)
+    except OSError:
+        return 0
+
+    alive = 0
+    for filename in names:
+        if not filename.endswith(".pid"):
+            continue
+        try:
+            pid = int((BASE_DIR / filename).read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            alive += 1
+        except OSError:
+            continue  # 既に終了している (pid ファイルは GC / post が掃除する)
+        else:
+            alive += 1
+    return alive
+
+
+@contextmanager
+def launch_gate() -> Iterator[bool]:
+    """同時起動数の数え上げと起動を直列化する (取れなければ False を yield)。
+
+    Claude は 1 メッセージで複数の Explore を並列起動するため、PreToolUse hook 自体が
+    同時に複数走りうる。数え上げと `pre()` を排他にしないと、どちらも「まだ枠がある」と
+    読んで上限を超えて起動する。
+
+    - **取れなかった場合は False** = この回は起動しない。別の pre が今まさに起動処理を
+      しているので、待って数え直すより諦めるほうが上限を超えない側に倒れる
+      (`LAUNCH_GATE_WAIT_SEC` だけは待つ — 起動処理は Popen + pid 書込だけなので
+      通常はすぐ空く)
+    - **ロックファイルを作れない環境では True** (直列化を諦めて進む。post-implementation
+      -review の `cursor_lock` と同じ fail-open。ロックが作れないことで並走機能そのものが
+      止まるほうが利用者にとって驚きが大きい)
+
+    flock はプロセス終了時にカーネルが解放するので、hook が kill されてもロックは残らない
+    (TTL は不要)。`Popen` は既定で fd を子に渡さないため、起動した cursor がロックを
+    握り続けることもない。
+
+    **共有 `$TMPDIR` で他ユーザーが先に `launch.lock` を作れる**点は塞いでいない
+    (review 系 2 hook の `ensure_private_root` に相当する検査を explore-parallel は
+    まだ持っていない)。悪用されても起きるのは「並走が起動しない」だけで、外部への
+    送信範囲は広がらない。
+    """
+    path = BASE_DIR / "launch.lock"
+    try:
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        yield True
+        return
+
+    try:
+        acquired = _acquire_with_deadline(fd)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _acquire_with_deadline(fd: int) -> bool:
+    deadline = time.monotonic() + LAUNCH_GATE_WAIT_SEC
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LAUNCH_GATE_POLL_SEC)
 
 
 def stale_entries(

@@ -26,7 +26,11 @@ class TestReviewArgv(unittest.TestCase):
         self.bin = os.path.join(self._tmp.name, "bin")
         os.makedirs(self.bin)
         self._env = mock.patch.dict(
-            os.environ, {"PATH": self.bin + os.pathsep + os.environ.get("PATH", "")}
+            os.environ,
+            {
+                "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
+                **_testutil.CURSOR_COMMAND_ENV,  # cursor の実体の固定
+            },
         )
         self._env.start()
         # 偽 cursor は即終了する。万一ハングしても本番値 (600s + kill 猶予) を待たない

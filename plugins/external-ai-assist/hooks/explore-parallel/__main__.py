@@ -39,11 +39,20 @@ hooks.json 側で post を `"async": true` にして解消する (docs `Run hook
 """
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import sys
-import time
+
+# Windows 非対応 (`state.py` が起動枠の直列化に `fcntl` を使う。停止処理も 0.10.0 から
+# `os.killpg` + `ps` の POSIX 前提)。他モジュールの import で ImportError が起きる前に
+# 判定して抜ける — ここより後ろで import すると、Windows では毎ツール呼出のたびに
+# hook error 通知が出てしまう (review 系 2 hook と同じ理由・同じ形。0.11.0 で `state.py`
+# が `fcntl` を使うようになったため、この hook にもガードが必要になった)。
+if os.name != "posix":
+    sys.exit(0)
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import time  # noqa: E402
 
 # hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
 # (plugin root 内の相対配置なので ${CLAUDE_PLUGIN_ROOT} が cache コピーでも壊れない)。
@@ -51,7 +60,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import hooklog, settings  # noqa: E402
+from _common import hooklog, notify, settings  # noqa: E402
 
 import cursor  # noqa: E402
 import state  # noqa: E402
@@ -60,8 +69,31 @@ import state  # noqa: E402
 ANALYZERS = [cursor]
 
 ENV_ENABLED = "EXTERNAL_AI_EXPLORE_PARALLEL"
+ENV_MAX_CONCURRENT = "EXTERNAL_AI_EXPLORE_MAX_CONCURRENT"
+
+#: pre フェーズ全体 (残骸 GC + CLI 検出) に使える予算 (秒)。
+#:
+#: `hooks.json` の同期 PreToolUse timeout は 5 秒で、この後さらに起動枠のロック待ち
+#: (`state.LAUNCH_GATE_WAIT_SEC` = 0.5) と `Popen` が乗る。**GC と検出はこの締切を
+#: 共有する** — GC (`state.GC_BUDGET_SEC` = 2.0) と検出 (`cursorcli.PROBE_BUDGET_SEC`
+#: = 3.0) をそれぞれ独立に使い切ると 5.5 秒で timeout を超え、hook 自体が kill されて
+#: 現在の analyzer を起動できない (0.10.0 で GC について一度直したのと同型の失敗)。
+#: 予算切れの検出は保留 (`PROBE_UNKNOWN`) に落ちるだけで、機能は止まらない。
+PRE_BUDGET_SEC = 4.0
 
 log = hooklog.make_logger("explore-parallel")
+
+
+def max_concurrent() -> int:
+    """同時に走らせる analyzer の上限 (既定 `state.DEFAULT_MAX_CONCURRENT`)。
+
+    0 以下・不正値は既定に倒す (`settings.count` が不正値を default にする)。
+    0 を「起動しない」として使わないのは、それが「並走そのものを止める」と同義で、
+    既に `EXTERNAL_AI_EXPLORE_PARALLEL=0` という専用スイッチがあるため
+    (同じ意図に 2 つの綴りを作らない)。
+    """
+    value = settings.count(ENV_MAX_CONCURRENT, state.DEFAULT_MAX_CONCURRENT)
+    return value if value > 0 else state.DEFAULT_MAX_CONCURRENT
 
 
 def enabled() -> bool:
@@ -130,6 +162,80 @@ def gc_orphans(current_tool_use_id: str = "") -> int:
     return removed
 
 
+def _launch_analyzers(
+    tool_use_id: str, prompt: str, deadline: float | None = None
+) -> str | None:
+    """同時起動数の上限内で analyzer を起動する (0.11.0)。上限で落としたら通知文を返す。
+
+    Claude は 1 メッセージで複数の Explore を並列起動するのが通常で、0.10.0 までは
+    その数だけ無条件に cursor が同時に走っていた (CPU・利用量がターンごとに線形に
+    増える)。上限は `max_concurrent()`、数え上げは
+    `state.live_analyzer_count()` (生きている pid ファイルの数)。
+
+    **数え上げから起動までを `state.launch_gate()` で直列化する**。PreToolUse hook
+    自体が同時に複数走るため、排他にしないと双方が「まだ枠がある」と読んで上限を
+    超える。ロックを取れなかった回は起動しない (超えない側に倒す)。
+
+    **CLI の検出 (`is_available()`) はロックを取る前に済ませる** (マージ前レビューの
+    指摘)。0.11.0 の検出はキャッシュが無い / 使えない環境で最大
+    `cursorcli.PROBE_BUDGET_SEC` 秒の probe になったため、ロックの内側に置くと
+    (a) pre の実時間が GC + 検出 + ロック待ちで hook timeout を超え、(b) 先に入った
+    1 本が probe する間に他の pre が `LAUNCH_GATE_WAIT_SEC` で諦めて、cold cache では
+    上限に届かないまま 1 本しか付かない。ロックが保持するのは数え上げと `Popen` +
+    pid 書込だけに戻す。`deadline` は検出 probe の締切 (GC で使った時間を引いた残り)。
+
+    **上限で落としたことは `systemMessage` で 1 行知らせる** (マージ前レビューの指摘)。
+    stderr (`log`) は exit 0 の hook では debug log にしか出ないため、利用者からは
+    「補助調査が付かなかった」ことが観測できない。ロック競合は一時的な事象なので
+    従来どおり stderr だけ。
+    """
+    limit = max_concurrent()
+    # 検出はロックの外で 1 回だけ (probe を含みうるため)。
+    ready = []
+    for analyzer in ANALYZERS:
+        try:
+            if analyzer.is_available(deadline):
+                ready.append(analyzer)
+        except Exception as e:  # 検出の失敗で hook 本体を止めない
+            log(f"{analyzer.NAME}: is_available failed: {e}")
+    if not ready:
+        return None
+
+    capped: list[str] = []
+    with state.launch_gate() as gated:
+        if not gated:
+            log(
+                "別の Explore の起動処理と競合したため、この Explore には並走を付けない "
+                f"(同時起動上限 {limit} を超えないため)"
+            )
+            return None
+        running = state.live_analyzer_count()
+        launched = 0
+        for analyzer in ready:
+            if running + launched >= limit:
+                log(
+                    f"{analyzer.NAME}: 同時起動上限 ({limit}, {ENV_MAX_CONCURRENT}) に"
+                    f"達しているため起動しない (実行中 {running + launched})"
+                )
+                capped.append(analyzer.NAME)
+                break
+            try:
+                analyzer.pre(tool_use_id, prompt)
+                launched += 1
+            except Exception as e:
+                log(f"{analyzer.NAME}: pre failed: {e}")
+
+    if not capped:
+        return None
+    return notify.compose(
+        "explore-parallel",
+        [
+            f"同時起動上限 ({limit}, {ENV_MAX_CONCURRENT}) に達しているため、"
+            f"この Explore には補助調査 ({'/'.join(capped)}) を付けなかった"
+        ],
+    )
+
+
 def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=["pre", "post"], required=True)
@@ -148,6 +254,10 @@ def _main() -> None:
     if not tool_use_id:
         return
 
+    # pre は同期 hook (timeout 5 秒) なので、GC と検出で締切を共有する (`PRE_BUDGET_SEC`)。
+    # post は `async` hook で harness の timeout が掛からないため予算を持たせない。
+    deadline = time.monotonic() + PRE_BUDGET_SEC if args.phase == "pre" else None
+
     gc_orphans(tool_use_id)
 
     if args.phase == "pre":
@@ -157,13 +267,10 @@ def _main() -> None:
         prompt = tool_input.get("prompt", "")
         if not prompt:
             return
-        for analyzer in ANALYZERS:
-            if not analyzer.is_available():
-                continue
-            try:
-                analyzer.pre(tool_use_id, prompt)
-            except Exception as e:
-                log(f"{analyzer.NAME}: pre failed: {e}")
+        message = _launch_analyzers(tool_use_id, prompt, deadline)
+        if message:
+            log(message)
+            json.dump({"systemMessage": message}, sys.stdout)
 
     elif args.phase == "post":
         sections = []

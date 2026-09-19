@@ -974,6 +974,13 @@ class TestSameTurnCommitNotification(HookTestCase):
     安全な復元には編集時点の内容退避が要り、「PostToolUse を軽く保つ」という
     既存の設計と衝突するため、復元機構そのものを撤去し、常に「取得できない」と
     報告するだけにする (送信範囲が広がる方向には倒さない)。
+
+    `test_noop_edit_does_not_send_an_unrelated_historical_diff` は**復元を再実装する
+    ときの床**。「HEAD 基準 diff が空」の最も多い原因は同一ターン内 commit ではなく
+    **内容を変えなかった編集**で、そのとき「そのパスを最後に変更した commit」は
+    このターンの成果ではない。内容指紋 (編集直後のディスク内容の sha256) の一致だけを
+    根拠にすると、この場合も一致してしまう (編集前後で内容が変わっていないため) ので、
+    無関係な履歴の差分を外部 AI CLI へ送ることになる。
     """
 
     def _add_bare_origin(self) -> tuple[str, str]:
@@ -1020,6 +1027,33 @@ class TestSameTurnCommitNotification(HookTestCase):
         self.assertEqual(
             self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
         )
+
+    def test_noop_edit_does_not_send_an_unrelated_historical_diff(self):
+        """floor: **内容を変えなかった編集**でも HEAD 基準 diff は空になる。このとき
+        「そのパスを最後に変更した commit」の差分を復元して送ってはいけない。
+
+        編集ツールが既存と同じ内容を書いた場合 (同じ内容の Write、revert して戻した
+        編集など) も pending には積まれるが、そのパスの最後の commit はこのターンの
+        成果ではなく、**このセッションが一度も見ていない内容** (その commit が消した
+        行) を含みうる。復元を再実装するときは「内容がこのセッションのものか」だけ
+        でなく「その commit をこのターンに作ったか」まで示す必要がある。
+        """
+        _testutil.write(self.repo, "a.py", "keep = 1\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "history before the session")
+        _testutil.write(self.repo, "a.py", "keep = 1\nNOT_OUR_CHANGE = 2\n")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-qm", "a change this session did not make")
+
+        # 内容は 1 バイトも変わらない編集 (ディスク上の内容は HEAD と同一のまま)
+        self.edit(SESSION_A, "a.py", "keep = 1\nNOT_OUR_CHANGE = 2\n")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertNotIn("NOT_OUR_CHANGE", message)
+        self.assertEqual(self.pending(SESSION_A), [])
 
     def test_other_local_writer_commit_is_not_leaked(self):
         """regression: マージ前レビューで実演された脆弱性。別のローカルの書き手

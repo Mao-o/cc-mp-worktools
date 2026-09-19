@@ -25,9 +25,20 @@ for _p in (_HOOKS_DIR, _PKG_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from _common import settings  # noqa: E402  (sys.path 挿入後に import する)
+from _common import cursorcli, settings  # noqa: E402  (sys.path 挿入後に import する)
 
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
+
+
+# cursor の実体は**テストプロセス全体で**偽 CLI 側に固定する。0.11.0 の検出は
+# `cursor-agent` / `agent` も候補にするため、固定しないと開発機に入っている本物を掴んで
+# `--version` を起動しうる (外部 AI CLI を起動しないというテストの前提が崩れ、かつ偽
+# cursor を PATH 先頭に置いたテストが「argv[0] が cursor-agent」で落ちる)。
+# **クラスごとの env パッチに書くだけでは足りない**: 自前で `mock.patch.dict` を張る
+# テストクラスが漏れると、そこだけ実機の検出が走る (実際に踏んだ)。モジュール読み込み時に
+# 入れておき、`clear_plugin_env` からも必ず除外する。
+CURSOR_COMMAND_ENV = {"EXTERNAL_AI_CURSOR_COMMAND": "cursor"}
+os.environ.update(CURSOR_COMMAND_ENV)
 
 
 def clear_plugin_env(keep: dict | None = None) -> None:
@@ -38,7 +49,7 @@ def clear_plugin_env(keep: dict | None = None) -> None:
     方式だと変数が増えるたびに漏れるので接頭辞で一掃する。`mock.patch.dict` は stop 時に
     dict の中身を丸ごと元に戻すので、start した後に消したキーも自動で復元される。
     """
-    keep = keep or {}
+    keep = {**CURSOR_COMMAND_ENV, **(keep or {})}
     for key in [k for k in os.environ if k.startswith(settings.ENV_PREFIX)]:
         if key not in keep:
             del os.environ[key]
@@ -85,10 +96,15 @@ class HookTestCase(unittest.TestCase):
             {
                 "TMPDIR": self.tmpdir,
                 "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
+                **CURSOR_COMMAND_ENV,  # 実体の固定 (モジュール冒頭のコメント参照)
             },
         )
         self._env.start()
         clear_plugin_env()
+        # `cursorcli` の検出結果はプロセス内に memo される。本番は hook 起動ごとに新
+        # プロセスなので、テスト間で持ち越すと「前のテストで見つけた実体」が効いて
+        # しまう (検出経路を測るテストが嘘になる)。
+        cursorcli.reset()
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]
@@ -110,6 +126,7 @@ class HookTestCase(unittest.TestCase):
                 pass
         for p in self._patches:
             p.stop()
+        cursorcli.reset()
         self._env.stop()
         self._tmp.cleanup()
 

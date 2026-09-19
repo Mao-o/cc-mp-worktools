@@ -37,14 +37,19 @@ import time
 
 from pathlib import Path
 
-from _common import cursorcli, hooklog, subproc
+from _common import cursorcli, hooklog, settings, subproc
 
 from state import REAP_SIGNALED, REAP_STOPPED, REAP_UNCONFIRMED, cleanup, paths
 
 NAME = cursorcli.NAME
 TIMEOUT_SEC = 60
 POLL_INTERVAL_SEC = 3
+
+#: 1 アナライザの結果として親コンテキストへ注入するバイト数の既定上限。
 MAX_OUTPUT_BYTES = 8000
+
+#: 上の上限を上書きする環境変数 (0 以下・不正値は既定に倒す)。
+ENV_MAX_RESULT_BYTES = "EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES"
 
 #: SIGTERM を送ってから SIGKILL に切り替えるまでの猶予 (秒)。
 KILL_GRACE_SEC = 2.0
@@ -58,15 +63,18 @@ _PS_TIMEOUT_SEC = 2.0
 
 log = hooklog.make_logger(f"explore-parallel/{NAME}")
 
-#: PID 再利用の検出に使う起動 argv の署名 (`agent --trust --print --mode plan`)。
-#: `readonly_argv` から導出するので、起動形が変わっても署名だけ古いまま取り残されない。
+#: PID 再利用の検出に使う起動 argv の署名 (`--trust --print --mode plan`)。
+#: `cursorcli.READONLY_FLAGS` から導出するので、起動形が変わっても署名だけ古いまま
+#: 取り残されない。
 #:
-#: **argv[0] (実行ファイル名) は照合しない**。`cursor` は実体へ `exec` するシムのことが
-#: あり、その場合 ps が返すのは実体側の名前 (`cursor-agent` 等) になる。引数は `exec
-#: "$REAL" "$@"` で保たれるので、名前ではなくフラグの組み合わせで見る。名前まで
-#: 要求すると「シム環境では一切 kill できない」= ガードではなく停止処理の無効化になる。
-#: 署名は argv の先頭側にあるため、ps が末尾を切り詰めても落ちない。
-_SIGNATURE_TOKENS = tuple(t for t in cursorcli.readonly_argv("")[1:] if t)
+#: **argv[0] (実行ファイル名) とサブコマンドは照合しない**。`cursor` は実体へ `exec`
+#: するシムのことがあり、その場合 ps が返すのは実体側の名前 (`cursor-agent` 等) になる。
+#: 0.11.0 からは検出結果によって `cursor agent ...` と `cursor-agent ...` のどちらでも
+#: 起動しうる (`cursorcli.subcommand_for`) ので、環境で変わらないフラグ列だけで見る。
+#: 引数は `exec "$REAL" "$@"` で保たれる。名前まで要求すると「シム環境では一切
+#: kill できない」= ガードではなく停止処理の無効化になる。署名は argv の先頭側にある
+#: ため、ps が末尾を切り詰めても落ちない。
+_SIGNATURE_TOKENS = cursorcli.READONLY_FLAGS
 
 #: プロセスの開始時刻が pid ファイルの mtime (= 起動時刻) より後に見えても許す幅 (秒)。
 #:
@@ -94,9 +102,41 @@ _CONTEXT_HEADER = (
     "## Cursor Agent による補助調査結果 (Explore と重複しない関連情報に焦点)\n\n"
 )
 
+#: 上限で切り詰めたときに末尾へ足す 1 行 (`post()`)。切るのは末尾なので、印が無いと
+#: 親 Claude は「補助調査はそこで終わった」と読んでしまう。
+_TRUNCATION_NOTE = "(結果はここで切り詰めた: 上限 {limit} バイト / {env})"
 
-def is_available() -> bool:
-    return cursorcli.is_available()
+
+def is_available(deadline: float | None = None) -> bool:
+    """cursor CLI を起動できるか。`deadline` は検出 probe の締切 (time.monotonic 基準)。
+
+    呼び出し側 (`__main__._launch_analyzers`) は hook timeout から GC で使った時間を
+    引いた残りを渡す。予算切れの検出は保留 (`PROBE_UNKNOWN`) に落ちるだけで、
+    「使えない」側には倒れない。
+    """
+    return cursorcli.is_available(deadline)
+
+
+def max_output_bytes() -> int:
+    """この analyzer の結果として注入するバイト数の上限 (`ENV_MAX_RESULT_BYTES`)。
+
+    **同時に走れる本数 × この値**が「1 度に注入されうる量」の頭打ちになる。post は
+    Explore 1 本ごとに別プロセスで走るため 1 回の post で計れるのは自分の結果だけだが、
+    結果を持てるのは起動できた analyzer だけで、その数は `__main__.max_concurrent()`
+    (既定 `state.DEFAULT_MAX_CONCURRENT` = 2) で制限されている。既定では
+    2 × 8000 バイト + ヘッダ ≒ 16KB。
+
+    **これは「1 ターンの注入合計」の上限ではない** (マージ前レビューの指摘)。`post()` は
+    停止を確認した時点で pid ファイルを消す = 枠が空くので、1 本終わるたびに次が起動
+    できる。同じターン中に起動と完了を繰り返せば、完了した本数分だけ注入が積まれる。
+    上限が縛るのは**同時に生きている本数**だけ。
+
+    0 以下・不正値は既定に倒す (`settings.count` は不正値を default にする)。
+    注入をゼロにしたいケースは「並走そのものを止める」と同義なので
+    `EXTERNAL_AI_EXPLORE_PARALLEL=0` を使う。
+    """
+    value = settings.count(ENV_MAX_RESULT_BYTES, MAX_OUTPUT_BYTES)
+    return value if value > 0 else MAX_OUTPUT_BYTES
 
 
 def pre(tool_use_id: str, prompt: str) -> None:
@@ -137,6 +177,11 @@ def post(tool_use_id: str) -> str | None:
 
     結果の読み取り自体は best-effort で続ける (書きかけでも読めたぶんは返す)。掃除しない
     だけなので、次に読む主体は GC (中身を見ずに消す) しか居らず二重注入にはならない。
+
+    **上限 (`max_output_bytes()`) で切り詰めたときは末尾に切詰マーカーを足す**
+    (マージ前レビューの指摘)。切るのは末尾・残すのは先頭なので、印が無いと親 Claude は
+    途中で切れた結果を「補助調査はここで終わった」と読む。`ENV_MAX_RESULT_BYTES` で
+    上限を小さくした利用者ほどこの誤読に当たりやすい。
     """
     result_file, pid_file = paths(NAME, tool_use_id)
     unconfirmed = False
@@ -179,9 +224,12 @@ def post(tool_use_id: str) -> str | None:
     if not result_file.is_file():
         return None
 
+    limit = max_output_bytes()
+    truncated = False
     try:
-        raw = result_file.read_bytes()[:MAX_OUTPUT_BYTES]
-        data = raw.decode("utf-8", errors="replace").strip()
+        raw = result_file.read_bytes()
+        truncated = len(raw) > limit
+        data = raw[:limit].decode("utf-8", errors="replace").strip()
     except OSError:
         data = ""
     finally:
@@ -190,6 +238,11 @@ def post(tool_use_id: str) -> str | None:
 
     if not data:
         return None
+
+    if truncated:
+        # 切るのは末尾なので、黙って渡すと親 Claude は「補助調査はここで終わった」と
+        # 読む (マージ前レビューの指摘)。上限と上書き用の env 名を添えて明示する。
+        data += f"\n\n{_TRUNCATION_NOTE.format(limit=limit, env=ENV_MAX_RESULT_BYTES)}"
 
     return _CONTEXT_HEADER + data
 

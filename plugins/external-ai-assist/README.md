@@ -26,16 +26,44 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
   API。`fcntl` は Windows に存在しないモジュールなので、この 2 hook は `__main__.py`
   冒頭で `os.name != "posix"` を判定し、`fcntl` に依存する他モジュールを import する
   前に exit 0 で抜ける (0.9.0)。0.8.0 以前はこの判定が無く、Windows では起動直後の
-  import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` は
-  `fcntl` に依存しない (import 時には落ちない) が、0.10.0 で停止処理を `os.killpg` +
-  `ps` (cmdline の署名と開始時刻による PID 同一性の確認) に変えたため POSIX 前提に
-  なった。Windows では同一性を確認できず `terminate()` は**停止をあきらめる側に倒れる**。ただしその手前の生存確認
-  `os.kill(pid, 0)` は Windows では TerminateProcess になるため挙動が異なる。Windows
-  での動作は引き続き未検証
-- `cursor` CLI: `explore-parallel` / `exitplan-review` / `post-implementation-review` の全てで使う。
-  3 hook とも読み取り専用 (`cursor agent --mode plan`) で起動し、作業ツリーは書き換えさせない
+  import 例外で毎ツール呼出のたびに hook error 通知が出ていた。`explore-parallel` も
+  0.10.0 で停止処理を `os.killpg` + `ps` (cmdline の署名と開始時刻による PID 同一性の
+  確認) に変えた時点で POSIX 前提になっており、**0.11.0 で起動枠の直列化に `fcntl` を
+  使うようになったため同じ `os.name` ガードを入れた** (3 hook で揃った。ガードが無いと
+  Agent ツール呼び出しのたびに import 例外で hook error 通知が出る)。Windows での動作は
+  引き続き未検証
+- **Cursor Agent CLI**: `explore-parallel` / `exitplan-review` / `post-implementation-review` の
+  全てで使う。3 hook とも読み取り専用 (`--mode plan`) で起動し、作業ツリーは書き換えさせない
   (read-only は cursor-agent の help 記述「`--mode plan` = read-only/planning (no edits)」に
-  基づく。実機で書込が抑止されることは本 plugin 側では検証していない)
+  基づく。実機で書込が抑止されることは本 plugin 側では検証していない)。
+
+  実体の探し方は **`cursor-agent` → `cursor` の順** (0.11.0)。`cursor` という名前は
+  環境によって Agent CLI 本体・そのシム・**Cursor.app が入れる IDE ランチャー**のどれでも
+  ありうるため、曖昧さの無い名前から先に見る。`cursor` を使う場合だけ `cursor agent ...` の
+  形で起動する。**採用は候補順が決め**、`--version` の応答確認は「以降の候補を見ずに
+  確定できる」最適化として使う (応答の速さで順序をひっくり返さない — 起動の遅い本物を
+  切って、後ろに居る IDE ランチャーを掴む形になるため)。明示的に失敗する候補
+  (非 0 終了 / 出力なし) だけを失格にする。
+
+  **`agent` は候補にしない**。プロダクト名を持たない汎用名で、Cursor と無関係な実体
+  (社内スクリプト・別ツールの別名) が PATH に居るだけで採用され、**リポジトリの差分や
+  実装プランがそこへ渡る** (起動 argv は `ps` からも見える)。`agent` に Cursor Agent CLI
+  本体を置いている環境は `EXTERNAL_AI_CURSOR_COMMAND=agent` で明示指定する。
+
+  結果は `$TMPDIR/external-ai-assist/cursorcli.json` にキャッシュする。TTL は
+  **応答を確認できた結果が 1 時間、確認できないまま採用した結果は 5 分**
+  (未確認の推測を長く固定しない)。キャッシュの置き場は所有者と権限 (group/other 書込・
+  symlink) を検査し、記録されたコマンド名が検出候補以外なら捨てる。共有 `$TMPDIR` で
+  他ユーザーが先回りして置いたキャッシュに起動する実体を選ばせないため。記録した実体の
+  **パス・inode・mtime** が現在と食い違えば測り直す (同じパスに別のツールを入れ直した
+  場合を含む)。検査に落ちた環境ではキャッシュを使わず**毎回検出する** — 機能は止まらない
+  が、検出の probe (合計上限つき) が hook 1 回ごとに走るので、気になる環境では
+  `EXTERNAL_AI_CURSOR_COMMAND` で固定すると probe そのものが省ける。
+
+  `EXTERNAL_AI_CURSOR_COMMAND` に実体 (コマンド名か絶対パス) を設定すると検出を飛ばして
+  それを使う。検出が環境に合わないとき (IDE ランチャーしか無い環境で誤って掴む等) の
+  逃げ道。**IDE ランチャーと Agent CLI を出力から確実に見分けることと、未ログイン状態の
+  検出は未実装** (どちらも実機の応答を確認してからでないと誤判定でレビューが黙って止まる)
 - `codex` CLI: `exitplan-review` の要件・アーキ観点担当
   (`codex exec -s read-only --ephemeral -`。プロンプトとプランは stdin 一本で渡す)
 
@@ -66,6 +94,22 @@ Cursor Agent は読み取り専用 (`--mode plan`) で並走させる (0.4.1 か
 `EXTERNAL_AI_EXPLORE_PARALLEL=0` で止められる (0.6.0)。止まるのは**起動側 (pre) だけ**で、
 結果の回収 (post) は常に動く — 直前のターンで起動済みの Cursor Agent と一時ファイルを
 孤児にしないため。
+
+**同時起動数に上限がある** (0.11.0、既定 2 = `EXTERNAL_AI_EXPLORE_MAX_CONCURRENT`)。
+Claude は 1 メッセージで複数の Explore を並列起動するのが通常で、0.10.0 までは
+その本数だけ無条件に Cursor Agent が同時に走っていた (CPU・利用量がターンごとに
+線形に増え、注入量も本数に比例していた)。上限に達している間に起動された Explore には
+並走を付けない (待たせない・キューにも積まない — 遅れて届く補助調査には価値が無いため)。
+上限で付けなかったことは `systemMessage` で 1 行知らせる。
+数え方は「`$TMPDIR/explore-parallel/` の pid ファイルのうちプロセスが生きている数」で、
+数え上げから起動までは flock で直列化する (PreToolUse hook 自体が同時に走るため)。
+**この上限はセッション単位ではなくユーザー・マシン単位** — `$TMPDIR` は同一ユーザーの
+全セッションで共有されるので、並列セッションを回すと先に枠を取ったセッションが他を
+飢餓させる (CPU と利用量を抑えるという狙いからはマシン単位の枠が正しいが、2 セッション
+目以降に補助調査が付かないのはこのため)。
+**「同時に走る本数 × `EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES`」が 1 度に注入されうる量の
+上限**になる。ターン合計の上限ではない (1 本終わると枠が空くので、同じターン中に起動と
+完了を繰り返せば完了した本数分だけ積まれる)。
 
 **post は `async` hook** (0.10.0)。Agent ツールは subagent が背景に移った時点で戻る
 (公式 docs: 背景 subagent では `tool_response.status` が `async_launched`) ので、
@@ -179,6 +223,13 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 > パスが消えるが、この場合も (ディスク上に無くても) 通知対象にする — 一度も
 > commit されていない一時ファイルとの区別は諦め、正当な削除の見落としを優先して
 > 防ぐ。
+>
+> 「編集直後の内容の指紋 (sha256) が Stop 時点の内容と一致すれば、HEAD に入って
+> いるのは自分が書いた内容だ」という証明で復元する案も検討したが、**内容を変え
+> なかった編集** (同じ内容の Write、revert して戻した編集) でも指紋は一致する
+> 一方、そのパスを最後に変更した commit はこのターンの成果ではないため、無関係な
+> 履歴の差分を送ることになる。復元するには「内容が自分のものか」ではなく「その
+> commit をこのターンに作ったか」を示す必要があり、未解決のまま見送っている。
 
 変更パスの収集経路は 2 つ:
 
@@ -325,11 +376,34 @@ EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
 | `EXTERNAL_AI_PLAN_REVIEW` | `1` | `exitplan-review` (0.6.0 で新設) |
 | `EXTERNAL_AI_POST_REVIEW` | `1` | `post-implementation-review` |
 
+3 hook に共通する設定が 1 つある (hook 単位ではないので上の命名規則から外れる):
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_CURSOR_COMMAND` | 自動検出 | Cursor Agent CLI の実体 (コマンド名か絶対パス)。設定すると検出と `--version` の確認を飛ばす (0.11.0)。指定した実体が見つからない場合は検出へ落ちず「cursor 無し」として扱う。自動検出の候補は `cursor-agent` / `cursor` だけなので、**`agent` など別名で入れている環境はここで明示する** (例: `EXTERNAL_AI_CURSOR_COMMAND=agent`) |
+
 `0` / `false` / `off` / `no` が無効。全部止めるなら:
 
 ```bash
 EXTERNAL_AI_EXPLORE_PARALLEL=0 EXTERNAL_AI_PLAN_REVIEW=0 EXTERNAL_AI_POST_REVIEW=0 claude
 ```
+
+### explore-parallel
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_EXPLORE_MAX_CONCURRENT` | `2` | 同時に走らせる補助アナライザの上限 (0.11.0)。上限に達している間に起動された Explore には並走を付けない (待たせない・キューにも積まない。`systemMessage` で通知)。**枠はユーザー・マシン単位** (`$TMPDIR` 共有なのでセッションを跨いで共有される) |
+| `EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES` | `8000` | 1 アナライザの結果として親コンテキストへ注入するバイト数の上限 (0.11.0)。超えた分は**末尾**を切り、切り詰めたことを本文末尾に 1 行記す |
+
+**「同時に走る本数 × 1 結果あたりの上限」が 1 度に注入されうる量の上限**になる (既定で
+2 × 8000 バイト + ヘッダ ≒ 16KB)。結果を持てるのは起動できたアナライザだけなので、
+同時に生きている本数がそのまま注入量の頭打ちとして効く。**1 ターンの合計の上限では
+ない**: アナライザが 1 本終わると枠が空くので、同じターン中に起動と完了を繰り返せば
+完了した本数分だけ積まれる (ターン単位の台帳は持っていない — hook payload に「ターン」を
+一意に表す ID が無く、走り終えた = 課金済みの結果を捨てる形になるため)。
+
+どちらも **0 以下・解釈できない値は既定に倒す**。並走そのものを止めたいときは
+`EXTERNAL_AI_EXPLORE_PARALLEL=0` を使う (同じ意図に 2 つの綴りを作らない)。
 
 ### exitplan-review
 

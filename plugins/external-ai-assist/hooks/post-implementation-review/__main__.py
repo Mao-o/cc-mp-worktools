@@ -80,7 +80,7 @@ Claude Code のトランスクリプト上で**エラー扱い**として表示�
   (opt-in)。2.1.163 未満の CLI を使っている場合や、外部ツールが hook のエラー扱いを
   シグナルとして監視している場合の避難路
 
-## 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch への追補、Codex R1 P1 対応)
+## 未対応 CLI での自動 fail-closed (同じ 0.8.0 batch への追補、マージ前レビューの指摘)
 
 上の opt-in だけでは、2.1.163 未満の CLI で plugin を更新した既存ユーザーが
 `EXTERNAL_AI_POST_REVIEW_MODE=block` の存在を知らない限り、`additionalContext` が
@@ -217,6 +217,18 @@ _MIN_VERSION_FOR_ADDITIONAL_CONTEXT = (2, 1, 163)
 ENV_CC_VERSION = "CLAUDE_CODE_VERSION"
 ENV_CC_EXECPATH = "CLAUDE_CODE_EXECPATH"
 
+# pre-tool / post-tool で cursor CLI の検出 (`cursor.is_available`) に許す秒数。
+#
+# 0.11.0 の検出はキャッシュが使えない環境で hook 1 回ごとに probe する
+# (`_common/cursorcli.py`)。この 2 フェーズは Write / Edit / NotebookEdit / Bash の
+# たびに走り、同じ 10 秒の hook timeout の中で git (rev-parse 2s + status 5s = 最悪 7s) と
+# 同居するため、検出には残りより短い枠を渡す (`cursorcli.PROBE_BUDGET_SEC` = 3 秒を
+# そのまま使うと合計 10 秒で hook timeout と同着になり、ハーネスの kill が自前の
+# fail-open より先に来る)。予算切れは保留 (`PROBE_UNKNOWN`) に落ちるだけで、機能は
+# 止まらない。Stop (690 秒) には渡さない。
+# 突合は `tests/test_review_set.py::TestTimeoutBudgets`。
+PER_TOOL_PROBE_BUDGET_SEC = 2.0
+
 # `claude --version` probe の timeout (秒)。cursor/codex のような長時間 CLI ではなく
 # 即終了する単純な呼び出しなので、`_common/subproc.py` の process group 管理は使わず
 # 短い固定値で十分 (`_version_from_subprocess` 参照)。
@@ -325,7 +337,7 @@ def _resolve_mode() -> tuple[str, str | None]:
     で検出した版数が `_stop_supports_additional_context()` を満たせば `context`、満たさない
     (未満 または 検出できない) なら **`block` に倒す** (fail-closed: 指摘を Claude に
     届かないまま失う方向には倒さない。コストは legacy の `decision: "block"` 表示に
-    戻るだけ — Codex R1 P1 指摘への対応。モジュール docstring
+    戻るだけ — マージ前レビューの指摘への対応。モジュール docstring
     「未対応 CLI での自動 fail-closed」節を参照)。
 
     `version_fallback_notice` は「auto 解決で版数非対応と判定して block に倒した」ときだけ
@@ -423,6 +435,11 @@ def _private_root_ok() -> bool:
         return False
 
 
+def _per_tool_deadline() -> float:
+    """pre-tool / post-tool で cursor CLI の検出に許す締切 (time.monotonic 基準)。"""
+    return time.monotonic() + PER_TOOL_PROBE_BUDGET_SEC
+
+
 def handle_pre_tool(payload: dict) -> None:
     """無効化 / cursor 不在なら git も state も一切触らない。
 
@@ -430,8 +447,12 @@ def handle_pre_tool(payload: dict) -> None:
     や cursor 未インストールの環境でも Bash のたびに `git status` が走っていた。
     Stop 側の `review_enabled()` / `cursor.is_available()` と同じ条件をここでも
     先頭で評価し、無効時は git 呼び出しも state 書込も発生させない。
+
+    検出には `PER_TOOL_PROBE_BUDGET_SEC` の締切を渡す (マージ前レビューの指摘): 0.11.0 の
+    `is_available()` はキャッシュが使えない環境で probe を伴うため、git の予算と合わせて
+    10 秒の hook timeout と同着になりうる。
     """
-    if not review_enabled() or not cursor.is_available():
+    if not review_enabled() or not cursor.is_available(_per_tool_deadline()):
         return
     if payload.get("tool_name") != "Bash" or not bash_tracking_enabled():
         return
@@ -461,8 +482,8 @@ def handle_pre_tool(payload: dict) -> None:
 
 def handle_post_tool(payload: dict) -> None:
     """無効化 / cursor 不在なら git も state も一切触らない
-    (handle_pre_tool と同じ理由)。"""
-    if not review_enabled() or not cursor.is_available():
+    (handle_pre_tool と同じ理由。検出の締切も同じ)。"""
+    if not review_enabled() or not cursor.is_available(_per_tool_deadline()):
         return
     if not _private_root_ok():
         return
@@ -903,7 +924,7 @@ def _lexical_relative(root_real: str, path: str) -> str | None:
 
     `to_relative` (全体を realpath) だと `credentials/` → `ordinary/` のような symlink
     ディレクトリ経由の claim が `ordinary/data.json` になり、除外判定から `credentials` が
-    消える (Codex PR レビュー P1)。親ディレクトリだけ realpath する方式も同じ穴があった。
+    消える (マージ前レビューの指摘)。親ディレクトリだけ realpath する方式も同じ穴があった。
     ここでは **root の別名** (`/tmp` → `/private/tmp`、symlink された親ディレクトリ) だけを
     realpath で同定し、その下の構成要素は名前のまま残す。祖先を浅い方から試して最初に root と
     一致したところで切るので、root 配下に root 自身へ戻る symlink があっても途中の名前は残る。

@@ -175,7 +175,7 @@ class TestTimeoutKillsProcessGroup(SubprocTestCase):
 
 class TestZombieOnlyGroup(SubprocTestCase):
     """PID 1 が孤児を reap しない環境では、グループに zombie だけが残り `killpg(pgid, 0)` が
-    成功し続ける (Codex R2 P2)。生死判定 (`_group_state`) を mock して、zombie-only なら
+    成功し続ける (マージ前レビューの指摘)。生死判定 (`_group_state`) を mock して、zombie-only なら
     待たずに settle / live が残れば SIGKILL 昇格 / 判定不能なら SIGKILL 後は短い上限で
     打ち切る、を固定する。"""
 

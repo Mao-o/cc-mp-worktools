@@ -46,7 +46,8 @@ class TestExploreParallelRegistration(unittest.TestCase):
         """pre は同期のまま。Agent ツールが走り出す前に analyzer を起動する必要がある。
 
         `"async": true` にすると起動が Agent ツールの実行と競争になり、「並走」の起点が
-        ずれる。pre は Claude に返す出力を持たないので async にする利点も無い。
+        ずれる。pre が返す出力は上限で落としたときの `systemMessage` 1 行だけなので、
+        async 化して次ターンまで遅らせる利点も無い。
         """
         self.assertNotIn(
             "async",
