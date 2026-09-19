@@ -71,6 +71,9 @@ class TestAskOrAllow(unittest.TestCase):
     0.33.0: lenient に倒したときは ``additionalContext`` に固定 1 文が載る
     (``permissionDecision`` は出さないので判定は素の allow と同一)。判定の
     assert は module docstring の規約どおり ``output.is_allow`` で行う。
+    ここは builder 単体 (「note を作る」側) の床で、**最終応答に残すかは呼出側**
+    が決める — Bash handler は機密パターンらしい token を含む command だけに絞る
+    (``handlers.bash_handler._gate_lenient_note``)。
     """
 
     def _assert_lenient_allow(self, r: dict) -> None:

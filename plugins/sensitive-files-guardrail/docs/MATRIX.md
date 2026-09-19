@@ -499,15 +499,19 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 ## Bash handler — 静的解析不能 (三態判定)
 
 > **0.33.0 注記 (判定は不変)**: 下表の **allow セル** (autonomous mode で
-> `ask_or_allow` が allow に倒れた行) では、`hookSpecificOutput.additionalContext`
-> に「静的解析では機密パスの有無を判定できないコマンドを autonomous mode のため
+> `ask_or_allow` が allow に倒れた行) のうち、**コマンド文字列に機密パターン
+> らしい token を含むもの**では、`hookSpecificOutput.additionalContext` に
+> 「静的解析では機密パスの有無を判定できないコマンドを autonomous mode のため
 > 確認なしで通した」旨の固定 1 文が載る。`permissionDecisionReason` は公式仕様で
 > allow / ask のときユーザーにしか出ないため、Claude に届く唯一のチャネルがこれ。
 > **`permissionDecision` は出さない**ので許可の強さは変わらず、上表・下表の
 > セルも 1 つも変わらない (内訳は
 > [DESIGN.md](./DESIGN.md#lenient-allow-の開示-additionalcontext0330))。
 > 静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には
-> 付かない。
+> 付かない。機密らしい token を含まない lenient allow (`bash -c 'date'` /
+> `cat *.log`) も素の allow のままで、note は付かない — lenient allow は全 Bash
+> 呼出の 4 割強という高頻度経路なので、**同じセル内でも開示の有無は分かれる**
+> (絞りの判定基準は DESIGN.md の「対象の絞り」)。
 
 > **0.11.0 (F1) 注記**: 以下は command を構成する全 segment がいずれも静的
 > 解析不能 (hard-stop / shell keyword / opaque wrapper / shlex 失敗) な場合に

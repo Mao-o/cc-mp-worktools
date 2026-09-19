@@ -46,10 +46,16 @@ alongside the tool result」) なので、lenient allow に限りここへ 1 文
   minimal-info 原則と同じ。reason 文字列を流用すると operand が混ざる)
 - 公式の書き方指針の逐語: 「Write the text as factual statements rather than
   imperative system instructions」。指示文ではなく事実記述にしてある
-- トレードオフ: lenient-allow は実測で全 Bash の 4 割強を占めるため、この note も
-  同程度の頻度で付く。``permissionDecisionReason`` にノイズを混ぜない設計判断
-  (``core/patterns.py``) と衝突しないのは、**1 文固定で操作対象を含まない**ため
-  (混入量が入力に依らず一定)。伸ばすときはこの前提を壊さないか確認する
+- **載せる対象は ``ask_or_allow`` が lenient に倒した全件ではない**。
+  ``handlers.bash_handler`` 側の ``_gate_lenient_note`` が「command に機密
+  パターンらしい token が含まれる」ときだけ残し、それ以外は素の allow に戻す。
+  lenient allow は実測で全 Bash 呼出の 4 割強なので、全件に載せると note 自体が
+  ``permissionDecisionReason`` のノイズ回避方針 (``core/patterns.py``) と同じ
+  問題をコンテキスト側で起こす。1 文固定で操作対象を含まないことは**混入量の
+  上限**を決めるだけで、頻度は絞りが決める
+- したがって ``ask_or_allow`` は「note を作る」までを担い、「載せるか」は
+  handler が決める。この関数を別 tool から呼ぶときは同じ絞りを通すか、
+  頻度が問題にならないことを確認すること
 """
 from __future__ import annotations
 
@@ -273,6 +279,10 @@ def ask_or_allow(reason: str, envelope: dict) -> HookResponse:
     載せて返す (0.33.0)。``reason`` は ``permissionDecisionReason`` 用で allow では
     Claude に届かないため、「静的判定できないまま通した」事実が Claude 側に
     伝わらなかった。判定は allow のままで、載るのは固定 1 文だけ。
+
+    この note を**最終応答に残すかは呼出側が決める**: Bash handler は
+    ``_gate_lenient_note`` で「command に機密パターンらしい token を含む」もの
+    だけに絞り、残りは素の allow に戻す (module docstring 参照)。
     """
     if _is_lenient_mode(envelope):
         return make_allow(LENIENT_ALLOW_CONTEXT)

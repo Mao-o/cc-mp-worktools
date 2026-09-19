@@ -159,25 +159,42 @@ allow に倒した行では、**なぜ通ったのかが Claude にまったく�
 `ask_or_allow` の reason は組み立てても捨てられているのと同じだった。Claude に
 渡せる唯一の PreToolUse チャネルは `hookSpecificOutput.additionalContext`
 (「String added to Claude's context alongside the tool result」、挿入位置は
-tool result の隣) なので、lenient allow のときだけここに 1 文を載せる
-(`core/output.py::LENIENT_ALLOW_CONTEXT`)。
+tool result の隣) なので、lenient allow のうち**機密に触れうる形に限って**ここに
+1 文を載せる (`core/output.py::LENIENT_ALLOW_CONTEXT`)。
 
 | 項目 | 方針 |
 |---|---|
 | 判定 | **不変**。`permissionDecision` は出さない (素の allow と同じく通常の permission flow に委ねる)。明示 `"allow"` を出すとハーネスの確認をスキップさせる意味になり allow が強くなる = 判定境界の変更なので出さない |
-| 対象 | `ask_or_allow` が lenient に倒した経路のみ。静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には付けない |
+| 対象 | `ask_or_allow` が lenient に倒した経路のうち、**command に機密パターンらしい token を含むものだけ** (下記「対象の絞り」)。静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には付けない |
 | 文面 | **固定 1 文**。command / path / 値は載せない (reason 側の minimal-info 原則と同じ)。reason 文字列を流用すると operand が混ざる |
 | 書き方 | 公式指針の逐語「Write the text as factual statements rather than imperative system instructions」に従い事実記述にする (命令形は prompt-injection 防御に当たって Claude ではなくユーザーに晒される) |
 
-トレードオフ (開示): lenient-allow は実測で全 Bash 呼出の 4 割強を占めるため、
-この note も同程度の頻度で付く。`permissionDecisionReason` にノイズを混ぜない
-設計判断 (`core/patterns.py`) と衝突しないのは、**1 文固定で操作対象を含まない**
-= 混入量が入力に依らず一定だから。伸ばす / 動的にする変更はこの前提を壊す。
+#### 対象の絞り (`_has_sensitive_looking_token`)
+
+lenient allow は実測で全 Bash 呼出の 4 割強を占める。全件に載せると note 自体が
+`permissionDecisionReason` のノイズ回避方針 (`core/patterns.py`) と同じ問題を
+コンテキスト側で起こすため、**command に機密パターンらしい token を含むときだけ**
+載せ、それ以外は素の allow に戻す (`handlers/bash_handler.py::_gate_lenient_note`)。
+「1 文固定で操作対象を含まない」は**混入量の上限**を決めるだけで、頻度は絞りが
+決める (この 2 つは別の軸。伸ばす / 動的にする変更は前者の前提を壊す)。
+
+絞りの判定は静的な文字列一致のみで、**verdict には一切影響しない**
+(note を持たない応答・allow 以外の応答はそのまま返す)。
+
+| 項目 | 方針 |
+|---|---|
+| token 分解 | `shlex` を `punctuation_chars=True` で回し `( ) ; < > \| &` を独立 token として切る。素の `shlex.split` だと `{ cat .env; }` が `.env;`、`(cat .env)` が `.env)` になって一致せず、**機密を読んでいるのに note が付かない**形が 8 つ出る (subshell / brace group / command substitution / shell keyword 5 種 — いずれも autonomous で `.env` が素通りする、開示の価値が最も高い経路)。分解失敗時は空白分割 |
+| 照合 | 各 token の basename 部分 (`/` 区切りと VCS / リモート pathspec の `:` 後尾) と `=` 後尾 (`--file=.env` / `SECRET=.env`) を `is_sensitive(parts=False, root=None)` に掛ける。1 つでも一致すれば載せる |
+| 展開しない | glob / 変数はそのまま文字列として判定。`cat *.key` は rule に一致するので載せ、`cat id_*` / `cat $SECRET` は一致しないので載せない = **判定不能な token は「含む側」に倒さない** |
+| 片側に倒した点 | path 形 rule (root 相対) は評価しない / 長さガード超過 (64KB) の command は分解しない (`shlex` が長い単一 token で超線形) / 抽出時の例外 — いずれも **note を出さない側**に倒す。note は情報であって保護ではないので、取りこぼしは許容し、判定を遅らせたり動かしたりしない |
+
+`punctuation_chars` を外すと上記 8 形の開示が静かに落ちるため、床テスト
+(`test_shell_punctuation_does_not_hide_the_token`) でその形を名指しで固定している。
 
 segment ループを跨ぐ持ち回りが必要なのは、lenient allow が `{}` 相当の allow で
 `decision_of` では素の allow と区別が付かないため
 (`handlers/bash_handler.py::handle` の `lenient_note`)。**判定は allow のまま**で、
-最後に note だけを載せ直す。
+最後に note だけを載せ直す (載せるかどうかは `_gate_lenient_note` が決める)。
 
 ## Bash handler の対応文法範囲
 

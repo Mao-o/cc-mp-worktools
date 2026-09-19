@@ -528,7 +528,8 @@ repo に commit できる (0.32.0):
 | `check-sensitive-files` (Stop) | `decision: block` | **fail-open** (exit 0。内部例外時は `systemMessage` で通知) | patterns.txt 読込失敗時は stderr warning のみ |
 
 > **0.33.0: lenient allow を Claude にも開示する (判定は不変)**。`ask_or_allow` が
-> autonomous mode (`auto` / `bypassPermissions` / `plan`) で allow に倒したとき、
+> autonomous mode (`auto` / `bypassPermissions` / `plan`) で allow に倒し、かつ
+> **コマンド文字列に機密パターンらしい token が含まれる**とき、
 > `hookSpecificOutput.additionalContext` に「静的解析では機密パスの有無を判定でき
 > ないコマンドを、確認なしで通した」旨の短い 1 文を添える。`permissionDecisionReason`
 > は allow / ask ではユーザーにしか表示されない仕様なので、それまで Claude 側には
@@ -536,6 +537,14 @@ repo に commit できる (0.32.0):
 > は出さないため許可の強さは変わらず**、静的に「機密でない」と確定した allow
 > (`ls .env` 等) には付かない。文面は固定 1 文で、コマンド文字列・パス・値は
 > 含めない。
+>
+> 絞り込みは「lenient allow が全 Bash 呼出の 4 割強」という実測に対する措置で、
+> `bash -c 'cat .env'` / `cat *.key` / `{ cat .env; }` のように機密に触れうる形
+> だけを開示する。`bash -c 'date'` / `cat *.log` のように機密らしい token を
+> 含まない形では素の allow に戻す (判定はどちらも同じ allow)。glob や変数は
+> 展開せず文字列として照合するため、`cat id_*` / `cat $SECRET` のように判定
+> できない形は**開示しない側**に倒れる。詳細は
+> [docs/DESIGN.md](docs/DESIGN.md) の「lenient allow の開示」。
 
 > **0.33.0: Stop block の追記案内に実行手段を明記 (判定は不変)**。`.gitignore` /
 > `patterns.local.txt` への追記は **Edit / Write ツール**で行うよう案内する。

@@ -119,7 +119,7 @@ flowchart TD
     Y2 --> G
     G --> END{全 segment 走破}
     END --> FINAL{pending_ask あり?}
-    FINAL -- yes --> Z14["ask_or_allow<br>default / acceptEdits / dontAsk = ask<br>auto / bypassPermissions / plan = allow<br>(allow 側は additionalContext で開示 0.33.0)"]
+    FINAL -- yes --> Z14["ask_or_allow<br>default / acceptEdits / dontAsk = ask<br>auto / bypassPermissions / plan = allow<br>(allow 側は機密らしい token を含むときだけ<br>additionalContext で開示 0.33.0)"]
     FINAL -- no --> Z15[allow]
 ```
 
@@ -199,10 +199,16 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   basename までに留める (`docs/DESIGN.md` の設計原則 2)
 - `hookSpecificOutput.additionalContext` (0.33.0) は **lenient allow の開示専用**
   で、`core/output.py::LENIENT_ALLOW_CONTEXT` の**固定 1 文**しか載せない。
-  ここに command / path / 値を入れないのは reason と同じ理由に加え、
-  lenient-allow が全 Bash 呼出の 4 割強という高頻度経路のため
-  (混入量が入力に依らず一定であることが採用の前提。`docs/DESIGN.md` の
-  「lenient allow の開示」)
+  ここに command / path / 値を入れないのは reason と同じ理由。加えて
+  lenient-allow は全 Bash 呼出の 4 割強という高頻度経路なので、**載せる対象も
+  「command に機密パターンらしい token を含む」ものに絞る**
+  (`handlers/bash_handler.py::_gate_lenient_note`)。固定 1 文は混入量の上限を、
+  絞りは頻度を決める別の軸で、どちらかだけでは高頻度ノイズを抑えられない
+  (`docs/DESIGN.md` の「lenient allow の開示」)
+- 絞りは verdict に触らない述語 (`_has_sensitive_looking_token`) で、迷ったら
+  **note を出さない側**に倒す (path 形 rule を見ない / 64KB 超は分解しない /
+  glob・変数は展開しない)。note は情報であって保護ではないので、ここで保守側
+  (出す側) に倒す改変は「高頻度ノイズを抑える」目的を壊す
 
 ## テスト実行
 

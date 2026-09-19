@@ -67,12 +67,17 @@ class TestE2EReadHandler(unittest.TestCase):
         return p
 
     def _assert_lenient_allow(self, result: dict) -> None:
-        """lenient allow (autonomous mode の ``ask_or_allow``) の実配線 assert。
+        """開示 note 付き lenient allow (autonomous mode) の実配線 assert。
 
         0.33.0: ``permissionDecision`` は出さないまま ``additionalContext`` に
         固定 1 文が載る。**判定は素の allow と同一**なので、判定側は
         ``is_allow`` / ``decision_of`` で、開示側は ``additionalContext`` で見る。
         command / path / 値が混ざっていないことも併せて固定する。
+
+        note が載るのは「command に機密パターンらしい token を含む」ときだけ
+        (``handlers.bash_handler._has_sensitive_looking_token``)。含まない形は
+        ``_assert_lenient_allow_without_note`` を使う — verdict はどちらも同じ
+        allow で、違うのは note の有無だけ。
         """
         from core import output
 
@@ -85,6 +90,20 @@ class TestE2EReadHandler(unittest.TestCase):
             hook["additionalContext"], output.LENIENT_ALLOW_CONTEXT,
         )
         self.assertNotIn(".env", hook["additionalContext"])
+
+    def _assert_lenient_allow_without_note(self, result: dict) -> None:
+        """note 無しの lenient allow の実配線 assert (0.33.0)。
+
+        機密パターンらしい token を含まない command は、lenient allow に倒れても
+        開示 note を載せない (素の allow = ``{}`` に戻る)。lenient allow は実測で
+        全 Bash 呼出の 4 割強なので、全件に載せると note 自体がコンテキスト
+        ノイズになるため絞っている。**verdict は note 付きの形と同じ allow**。
+        """
+        from core import output
+
+        self.assertTrue(output.is_allow(result), msg=repr(result))
+        self.assertIsNone(output.decision_of(result), msg=repr(result))
+        self.assertEqual(result, {}, msg=repr(result))
 
     def test_read_dotenv_deny(self):
         self._env_path()
@@ -358,7 +377,11 @@ class TestE2EReadHandler(unittest.TestCase):
         )
 
     def test_bash_auto_star_log_allows(self):
-        """`*.log` は既定 rules と交差しないため auto/default 共に allow (0.3.2)。"""
+        """`*.log` は既定 rules と交差しないため auto/default 共に allow (0.3.2)。
+
+        0.33.0: ``*.log`` は機密パターンらしい token ではないので開示 note も
+        付かない (``cat *.key`` との対は ``test_bash_handler`` 側)。
+        """
         envelope = {
             "tool_name": "Bash",
             "tool_input": {"command": "cat *.log", "description": "test"},
@@ -366,10 +389,14 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
+        self._assert_lenient_allow_without_note(result)
 
     def test_bash_auto_opaque_wrapper_allows(self):
-        """auto モードでは opaque wrapper (`bash -c`) を allow に倒す (0.3.2)。"""
+        """auto モードでは opaque wrapper (`bash -c`) を allow に倒す (0.3.2)。
+
+        0.33.0: payload に機密らしい token が無い (``date``) ので開示 note は
+        付かない。``bash -c 'cat .env'`` との対は ``test_bash_handler`` 側。
+        """
         envelope = {
             "tool_name": "Bash",
             "tool_input": {"command": "bash -c 'date'", "description": "test"},
@@ -377,7 +404,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
+        self._assert_lenient_allow_without_note(result)
 
     def test_bash_auto_env_prefix_dotenv_allows(self):
         """0.8.0: env-assignment prefix は opaque first token として ``ask_or_allow``。
@@ -440,7 +467,10 @@ class TestE2EReadHandler(unittest.TestCase):
         self._assert_lenient_allow(result)
 
     def test_bash_auto_heredoc_allows(self):
-        """heredoc は target 抽出されず opaque → auto で allow (0.3.2)。"""
+        """heredoc は target 抽出されず opaque → auto で allow (0.3.2)。
+
+        0.33.0: 本文に機密らしい token が無いので開示 note は付かない。
+        """
         envelope = {
             "tool_name": "Bash",
             "tool_input": {
@@ -450,7 +480,7 @@ class TestE2EReadHandler(unittest.TestCase):
             "permission_mode": "auto",
         }
         result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
+        self._assert_lenient_allow_without_note(result)
 
     def test_edit_dotenv_denies(self):
         """Edit handler は既存 .env を deny 固定 (0.2.0)。"""

@@ -149,7 +149,13 @@ class TestAskOrDeny(unittest.TestCase):
 
 
 class TestAskOrAllow(unittest.TestCase):
-    """ask_or_allow: auto / bypassPermissions / plan は allow に倒す。"""
+    """ask_or_allow: auto / bypassPermissions / plan は allow に倒す。
+
+    0.33.0: lenient allow には開示 note が載る。ここで見ているのは builder 単体
+    (「note を作る」側) で、**最終応答に残すかは呼出側が決める** — Bash handler は
+    機密パターンらしい token を含む command だけに絞る (``_gate_lenient_note``。
+    床は ``test_bash_handler.TestLenientAllowAdditionalContext``)。
+    """
 
     def test_default_returns_ask(self):
         r = output.ask_or_allow("reason", {"permission_mode": "default"})

@@ -31,11 +31,13 @@ Stop block 後の摩擦低減 / 同型テストの subTest 畳み込み (内部�
 0.33.0 が変えるのは (a) docs の記述、(b) allow に載る `additionalContext`、
 (c) Stop block reason の案内文、(d) テストの構造。
 
-**利用者影響**: (1) autonomous mode で「静的判定できないまま通った」ことが Claude
-にも伝わる、(2) Stop block 直後の対処で承認ダイアログが挟まらなくなる、
-(3) docs が「option / action が deny を決める」と誤読される箇所が解消。
-テスト件数: redact 1,387 → **1,361** / check 164 → **165**
-(redact の減少は同型ケースの subTest 畳み込み。格子点は 55 → 180 に増えている)。
+**利用者影響**: (1) autonomous mode で「静的判定できないまま通った」ことが、
+機密に触れうるコマンドに限って Claude にも伝わる、(2) Stop block 直後の対処で
+承認ダイアログが挟まらなくなる、(3) docs が「option / action が deny を決める」と
+誤読される箇所が解消。
+テスト件数: redact 1,387 → **1,368** / check 164 → **165**
+(redact の純減は「同型ケースの subTest 畳み込みで 1,361 まで減らした」+「開示の
+絞りの床テストを 7 件追加した」の合算。畳み込み側の格子点は 55 → 180 に増えている)。
 
 ### MATRIX / DESIGN / README の「条件付き metadata-only」記述を実測に合わせた
 
@@ -60,7 +62,7 @@ Stop block 後の摩擦低減 / 同型テストの subTest 畳み込み (内部�
   床テストとして固定した (非機密 operand の allow 側 15 形 × 5 mode +
   機密 operand の deny 側 15 形 × 5 mode + operand 無し 7 形 × 5 mode)
 
-### lenient allow を `additionalContext` で Claude に開示する (判定は不変)
+### lenient allow を `additionalContext` で Claude に開示する (対象は絞る / 判定は不変)
 
 - 公式 hooks reference の逐語: `permissionDecisionReason` は「For `"allow"` and
   `"ask"`, shown to the user but not Claude」。`ask_or_allow` が autonomous mode
@@ -74,9 +76,26 @@ Stop block 後の摩擦低減 / 同型テストの subTest 畳み込み (内部�
   `is_allow` / `decision_of` の結果は素の allow と同一
 - 静的に「機密でない」と確定した allow (operand scan の通過 / metadata-only) には
   付けない。deny / ask にも付けない (それらは reason が Claude に届く)
-- 文面は**固定**で command / path / 値を含めない。reason 側の minimal-info 原則と
-  同じで、加えて高頻度経路なので「混入量が入力に依らず一定」であることが採用の前提
-  (トレードオフの開示: それでも 4 割強の Bash 呼出に 1 文が付く)
+- 文面は**固定**で command / path / 値を含めない (reason 側の minimal-info 原則と
+  同じ)
+- **載せる対象は lenient allow の全件ではなく、「コマンド文字列に機密パターン
+  らしい token が含まれる」ものだけ** (`_gate_lenient_note` /
+  `_has_sensitive_looking_token`)。lenient allow は全 Bash 呼出の 4 割強なので、
+  全件に載せると note 自体が `permissionDecisionReason` のノイズ回避方針と同じ
+  問題をコンテキスト側で起こす。固定 1 文は**混入量の上限**、絞りは**頻度**を
+  決める別の軸で、どちらかだけでは足りない。`bash -c 'cat .env'` / `cat *.key` /
+  `{ cat .env; }` は載せ、`bash -c 'date'` / `cat *.log` は素の allow に戻す
+  (**判定はどちらも同じ allow**)
+- 絞りの判定は静的な文字列一致のみ: `shlex` (`punctuation_chars=True` — 素の
+  `shlex.split` では `{ cat .env; }` が `.env;`、`(cat .env)` が `.env)` になって
+  一致せず、機密を読んでいるのに開示が落ちる形が 8 つ出る) で分解し、各 token の
+  basename 部分と `=` 後尾 (`--file=.env`) を既存 rules (`is_sensitive`、
+  basename 形のみ) に掛ける。glob / 変数は**展開しない**ので `cat *.key` は
+  載せるが `cat id_*` / `cat $SECRET` は載せない — 判定不能な token は「含む側」に
+  倒さない
+- 片側に倒した点 (いずれも**開示しない側**): path 形 rule は評価しない /
+  64KB 超の command は分解しない (`shlex` は長い単一 token で超線形) / 抽出時の
+  例外。note は情報であって保護ではないため、取りこぼしは許容し判定には影響させない
 - segment ループを跨ぐ持ち回りが必要なのは、lenient allow が `{}` 相当の allow で
   `decision_of` では素の allow と区別が付かないため
   (`handlers/bash_handler.py::handle` の `lenient_note`)

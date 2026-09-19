@@ -25,7 +25,11 @@ from _testutil import FIXTURES  # noqa: F401
 
 from core import messages, output
 from handlers.bash.segmentation import _split_command_on_operators
-from handlers.bash_handler import handle
+from handlers.bash_handler import (
+    _MAX_COMMAND_CHARS,
+    _gate_lenient_note,
+    handle,
+)
 
 
 def _make_envelope(cmd: str, cwd: str, mode: str = "default") -> dict:
@@ -466,13 +470,16 @@ class AskOrAllowMatrix:
                         output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}",
                     )
                     self.assertIsNone(_decision(r), msg=f"{cmd!r} [{mode}]")
-                    # 0.33.0: lenient allow は additionalContext で開示する
-                    # (``TestLenientAllowAdditionalContext`` の床をこの 36 形に
-                    # 広げる。判定は allow のままで変わらない)
-                    self.assertEqual(
+                    # 0.33.0: 開示 note は「機密パターンらしい token を含む
+                    # command」だけに絞られ、この 36 形には両側が混在する。
+                    # ここで固定するのは「固定 1 文か空のどちらかであって、
+                    # operand / command 文字列が note に漏れることはない」まで。
+                    # 有無そのものの床は ``TestLenientAllowAdditionalContext``
+                    # が形の対で持つ。
+                    self.assertIn(
                         output.additional_context_of(r),
-                        output.LENIENT_ALLOW_CONTEXT,
-                        msg=f"{cmd!r} [{mode}] missing lenient note",
+                        ("", output.LENIENT_ALLOW_CONTEXT),
+                        msg=f"{cmd!r} [{mode}] unexpected note",
                     )
 
 
@@ -2938,7 +2945,7 @@ class TestRecommendedRemedyAllow(BaseBash):
 
 
 class TestLenientAllowAdditionalContext(BaseBash):
-    """0.33.0 (内部バックログ): lenient allow を ``additionalContext`` で開示する。
+    """0.33.0: lenient allow を ``additionalContext`` で開示する (対象は絞る)。
 
     ``permissionDecisionReason`` は公式仕様で allow / ask のときユーザーにしか
     表示されないため、``ask_or_allow`` が autonomous mode で allow に倒した事実は
@@ -2949,6 +2956,12 @@ class TestLenientAllowAdditionalContext(BaseBash):
     ので ``is_allow`` / ``decision_of`` の結果は素の allow と同じ。載るのは
     情報だけで、許可の強さは変わらない (明示 ``"allow"`` を出すとハーネスの
     確認をスキップさせる意味になるので出さない)。
+
+    載せる対象は **「command に機密パターンらしい token を含む」もの限定**
+    (``_has_sensitive_looking_token``)。lenient allow は実測で全 Bash 呼出の
+    4 割強で、全件に載せると note 自体がコンテキストノイズになるため。本クラスは
+    各経路を「含む形 / 含まない形」の対で持ち、**対の両側で verdict が一致する**
+    (違うのは note の有無だけ) ことを固定する。
     """
 
     _LENIENT_MODES = ("auto", "bypassPermissions", "plan")
@@ -2956,19 +2969,32 @@ class TestLenientAllowAdditionalContext(BaseBash):
 
     # ``_analyze_segment`` 内部の ``ask_or_allow`` 経路 (segment ループが
     # ``pending_ask`` に畳まない = 0.32.0 までは戻り値が捨てられていた側)。
-    _ANALYZE_PATH_CMDS = (
-        ("opaque_wrapper", "bash -c 'date'"),
-        ("residual_metachar", "echo x > out.txt"),
-        ("shell_keyword", "for i in 1; do date; done"),
-        ("glob_uncertain", "cat *.log"),
-        ("abs_path_exec", "/bin/cat .env"),
+    # (ラベル, 機密らしい token を含む形, 含まない形)
+    _ANALYZE_PATH_PAIRS = (
+        ("opaque_wrapper", "bash -c 'cat .env'", "bash -c 'cat list.txt'"),
+        (
+            "residual_metachar",
+            "echo '.env' >> .gitignore",
+            "echo 'list.txt' >> .gitignore",
+        ),
+        (
+            "shell_keyword",
+            "for f in .env; do date; done",
+            "for f in list.txt; do date; done",
+        ),
+        ("glob_uncertain", "cat *.key", "cat *.log"),
+        ("abs_path_exec", "/bin/cat .env", "/bin/cat list.txt"),
     )
 
     # ``pending_ask`` 経由で返る経路 (hard-stop / tokenize 失敗)。
-    _PENDING_PATH_CMDS = (
-        ("hard_stop", "echo $HOME"),
-        ("tokenize_failed", "cat 'unterminated"),
+    _PENDING_PATH_PAIRS = (
+        ("hard_stop", "echo $(date) .env", "echo $HOME"),
+        ("tokenize_failed", "cat .env '", "cat 'unterminated"),
     )
+
+    @property
+    def _pairs(self):
+        return self._ANALYZE_PATH_PAIRS + self._PENDING_PATH_PAIRS
 
     def _assert_note(self, cmd: str, mode: str) -> None:
         r = handle(_make_envelope(cmd, self.tmp, mode))
@@ -2989,40 +3015,147 @@ class TestLenientAllowAdditionalContext(BaseBash):
             msg=f"{cmd!r} [{mode}] should not carry a note: {r!r}",
         )
 
+    def _assert_lenient_allow_without_note(self, cmd: str, mode: str) -> None:
+        r = handle(_make_envelope(cmd, self.tmp, mode))
+        self.assertTrue(output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}")
+        # note を落としたときは素の allow (``{}``) に戻る
+        self.assertEqual(r, {}, msg=f"{cmd!r} [{mode}] -> {r!r}")
+
     def test_analyze_segment_paths_carry_note_in_lenient_modes(self):
-        for label, cmd in self._ANALYZE_PATH_CMDS:
+        for label, sensitive, _plain in self._ANALYZE_PATH_PAIRS:
             for mode in self._LENIENT_MODES:
-                with self.subTest(case=label, cmd=cmd, mode=mode):
-                    self._assert_note(cmd, mode)
+                with self.subTest(case=label, cmd=sensitive, mode=mode):
+                    self._assert_note(sensitive, mode)
 
     def test_pending_ask_paths_carry_note_in_lenient_modes(self):
-        for label, cmd in self._PENDING_PATH_CMDS:
+        for label, sensitive, _plain in self._PENDING_PATH_PAIRS:
             for mode in self._LENIENT_MODES:
-                with self.subTest(case=label, cmd=cmd, mode=mode):
+                with self.subTest(case=label, cmd=sensitive, mode=mode):
+                    self._assert_note(sensitive, mode)
+
+    def test_no_sensitive_token_means_no_note(self):
+        # 絞りの主張そのもの: 同じ lenient allow 経路でも、command に機密
+        # パターンらしい token が無ければ note を載せない (素の allow に戻る)
+        for label, _sensitive, plain in self._pairs:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, cmd=plain, mode=mode):
+                    self._assert_lenient_allow_without_note(plain, mode)
+
+    def test_pair_verdicts_are_identical(self):
+        # 絞りは note の有無だけを変える: 対の両側で lenient=allow /
+        # 非 lenient=ask (reason 付き) が一致すること
+        for label, sensitive, plain in self._pairs:
+            for mode in self._LENIENT_MODES:
+                with self.subTest(case=label, mode=mode):
+                    for cmd in (sensitive, plain):
+                        r = handle(_make_envelope(cmd, self.tmp, mode))
+                        self.assertTrue(
+                            output.is_allow(r), msg=f"{cmd!r} [{mode}] -> {r!r}"
+                        )
+            for mode in self._ASKING_MODES:
+                with self.subTest(case=label, mode=mode):
+                    for cmd in (sensitive, plain):
+                        r = handle(_make_envelope(cmd, self.tmp, mode))
+                        self.assertEqual(
+                            _decision(r), "ask", msg=f"{cmd!r} [{mode}]"
+                        )
+                        self.assertTrue(_reason(r), msg=f"{cmd!r} [{mode}]")
+
+    def test_shell_punctuation_does_not_hide_the_token(self):
+        # token 分解は ``punctuation_chars=True`` (``( ) ; < > | &`` を独立
+        # token として切る)。素の ``shlex.split`` だと ``{ cat .env; }`` が
+        # ``.env;``、``(cat .env)`` が ``.env)`` になって basename 一致せず、
+        # **機密を読んでいるのに note が付かない** 形が実測で 8 形あった
+        # (subshell / brace group / command substitution / shell keyword 5 種)。
+        # autonomous で ``.env`` が素通りする経路そのものなので、開示の価値が
+        # 最も高い側を落とさないための床。
+        for cmd in (
+            "{ cat .env; }",
+            "(cat .env)",
+            "cat $(echo .env)",
+            "for i in 1; do cat .env; done",
+            "while cat .env; do pwd; done",
+            "cat < .env",
+        ):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
                     self._assert_note(cmd, mode)
+
+    def test_equals_tail_is_scanned(self):
+        # ``punctuation_chars`` は ``=`` を切らないので、``--file=.env`` /
+        # ``SECRET=.env`` は ``=`` 後尾を明示的に候補にする
+        for cmd in ("env --file=.env cat x", "env SECRET=.env bash -c 'go'"):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_note(cmd, mode)
+        for cmd in ("env FOO=1 cat list.txt", "env --file=list.txt cat x"):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_lenient_allow_without_note(cmd, mode)
+
+    def test_excluded_patterns_do_not_trigger_the_note(self):
+        # 絞りは rules をそのまま使うので ``!`` 除外行も効く (テンプレート /
+        # 公開鍵は「機密らしい token」ではない)
+        for cmd in ("bash -c 'cat .env.example'", "bash -c 'cat id_rsa.pub'"):
+            for mode in self._LENIENT_MODES:
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_lenient_allow_without_note(cmd, mode)
+
+    def test_gate_never_rewrites_a_non_allow_response(self):
+        # 構造的な保証: note を落とす経路は「note があって かつ allow」のときに
+        # だけ働く。note 付きの ask (将来 ask 側にも開示を載せる変更が入った場合)
+        # を素の allow に書き換えてしまうと、絞りが verdict を動かすことになる
+        ask_with_note = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": "reason",
+                "additionalContext": output.LENIENT_ALLOW_CONTEXT,
+            }
+        }
+        gated = _gate_lenient_note(ask_with_note, "date", [(".env", True)])
+        self.assertEqual(_decision(gated), "ask")
+        self.assertEqual(gated, ask_with_note)
+
+    def test_oversized_command_has_no_note(self):
+        # 長さガード超過の command は token 分解を走らせない (``shlex`` は長い
+        # 単一 token で超線形)。note の有無のために timeout 予算を使わない =
+        # 出さない側に倒す、という意図したトレードオフ
+        big = "echo '" + "A" * (_MAX_COMMAND_CHARS + 100) + "'"
+        for mode in self._LENIENT_MODES:
+            with self.subTest(mode=mode):
+                self._assert_lenient_allow_without_note(
+                    f"{big} && cat .env", mode
+                )
 
     def test_note_survives_multi_segment_commands(self):
         # 静的解析できた segment が先にあっても、後続の解析不能 segment の
         # 開示が消えないこと (loop を跨ぐ持ち回りの回帰)
         for mode in self._LENIENT_MODES:
             for cmd in (
-                "date && bash -c 'x'",
-                "bash -c 'x' && date",
-                "ls | cat *.log",
+                "date && bash -c 'cat .env'",
+                "bash -c 'cat .env' && date",
+                "ls | cat *.key",
             ):
                 with self.subTest(cmd=cmd, mode=mode):
                     self._assert_note(cmd, mode)
+            for cmd in ("date && bash -c 'x'", "ls | cat *.log"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    self._assert_lenient_allow_without_note(cmd, mode)
 
     def test_asking_modes_keep_ask_and_no_note(self):
         # 非 lenient mode は従来どおり ask (reason 付き)。additionalContext は
         # 使わない — reason が deny/ask では Claude に届く / ユーザーに出るため
-        for label, cmd in self._ANALYZE_PATH_CMDS + self._PENDING_PATH_CMDS:
+        for label, sensitive, plain in self._pairs:
             for mode in self._ASKING_MODES:
-                with self.subTest(case=label, cmd=cmd, mode=mode):
-                    r = handle(_make_envelope(cmd, self.tmp, mode))
-                    self.assertEqual(_decision(r), "ask", msg=f"{cmd!r} [{mode}]")
-                    self.assertEqual(output.additional_context_of(r), "")
-                    self.assertTrue(_reason(r))
+                for cmd in (sensitive, plain):
+                    with self.subTest(case=label, cmd=cmd, mode=mode):
+                        r = handle(_make_envelope(cmd, self.tmp, mode))
+                        self.assertEqual(
+                            _decision(r), "ask", msg=f"{cmd!r} [{mode}]"
+                        )
+                        self.assertEqual(output.additional_context_of(r), "")
+                        self.assertTrue(_reason(r))
 
     def test_plain_allow_has_no_note(self):
         # 静的に「機密でない」と判定できた allow には付けない (lenient fallback
