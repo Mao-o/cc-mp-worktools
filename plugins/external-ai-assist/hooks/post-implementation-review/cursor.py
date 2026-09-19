@@ -31,8 +31,15 @@ ENV_TIMEOUT = "EXTERNAL_AI_POST_REVIEW_TIMEOUT"
 _PROMPT_FILE = Path(__file__).parent / "prompts" / "post-implementation-cursor.md"
 
 
-def is_available() -> bool:
-    return cursorcli.is_available()
+def is_available(deadline: float | None = None) -> bool:
+    """cursor CLI を起動できるか。`deadline` は検出 probe の締切 (time.monotonic 基準)。
+
+    キャッシュが使えない環境では検出が hook 1 回ごとに走る (`cursorcli` の docstring)。
+    編集ツールのたびに呼ばれる pre-tool / post-tool は git 呼び出しと 10 秒の hook
+    timeout を分け合うので、そこからは締切を渡す (`__main__.PER_TOOL_PROBE_BUDGET_SEC`)。
+    Stop は 690 秒の枠なので締切なし。
+    """
+    return cursorcli.is_available(deadline)
 
 
 def timeout_sec() -> float:

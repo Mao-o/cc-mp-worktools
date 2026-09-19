@@ -25,7 +25,7 @@ for _p in (_HOOKS_DIR, _PKG_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from _common import settings  # noqa: E402  (sys.path 挿入後に import する)
+from _common import cursorcli, settings  # noqa: E402  (sys.path 挿入後に import する)
 
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
 
@@ -101,6 +101,10 @@ class HookTestCase(unittest.TestCase):
         )
         self._env.start()
         clear_plugin_env()
+        # `cursorcli` の検出結果はプロセス内に memo される。本番は hook 起動ごとに新
+        # プロセスなので、テスト間で持ち越すと「前のテストで見つけた実体」が効いて
+        # しまう (検出経路を測るテストが嘘になる)。
+        cursorcli.reset()
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]
@@ -122,6 +126,7 @@ class HookTestCase(unittest.TestCase):
                 pass
         for p in self._patches:
             p.stop()
+        cursorcli.reset()
         self._env.stop()
         self._tmp.cleanup()
 

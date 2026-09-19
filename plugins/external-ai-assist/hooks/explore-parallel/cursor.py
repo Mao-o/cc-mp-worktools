@@ -102,19 +102,34 @@ _CONTEXT_HEADER = (
     "## Cursor Agent による補助調査結果 (Explore と重複しない関連情報に焦点)\n\n"
 )
 
+#: 上限で切り詰めたときに末尾へ足す 1 行 (`post()`)。切るのは末尾なので、印が無いと
+#: 親 Claude は「補助調査はそこで終わった」と読んでしまう。
+_TRUNCATION_NOTE = "(結果はここで切り詰めた: 上限 {limit} バイト / {env})"
 
-def is_available() -> bool:
-    return cursorcli.is_available()
+
+def is_available(deadline: float | None = None) -> bool:
+    """cursor CLI を起動できるか。`deadline` は検出 probe の締切 (time.monotonic 基準)。
+
+    呼び出し側 (`__main__._launch_analyzers`) は hook timeout から GC で使った時間を
+    引いた残りを渡す。予算切れの検出は保留 (`PROBE_UNKNOWN`) に落ちるだけで、
+    「使えない」側には倒れない。
+    """
+    return cursorcli.is_available(deadline)
 
 
 def max_output_bytes() -> int:
     """この analyzer の結果として注入するバイト数の上限 (`ENV_MAX_RESULT_BYTES`)。
 
-    **1 ターンの注入合計は「同時起動数 × この値」で頭打ちになる**。post は Explore
-    1 本ごとに別プロセスで走るため、1 回の post で計れるのは自分の結果だけだが、
-    結果を持てるのは起動できた analyzer だけで、その数は
-    `__main__.max_concurrent()` (既定 `state.DEFAULT_MAX_CONCURRENT` = 2) で
-    制限されている。既定では 2 × 8000 バイト + ヘッダ ≒ 16KB が上限。
+    **同時に走れる本数 × この値**が「1 度に注入されうる量」の頭打ちになる。post は
+    Explore 1 本ごとに別プロセスで走るため 1 回の post で計れるのは自分の結果だけだが、
+    結果を持てるのは起動できた analyzer だけで、その数は `__main__.max_concurrent()`
+    (既定 `state.DEFAULT_MAX_CONCURRENT` = 2) で制限されている。既定では
+    2 × 8000 バイト + ヘッダ ≒ 16KB。
+
+    **これは「1 ターンの注入合計」の上限ではない** (マージ前レビューの指摘)。`post()` は
+    停止を確認した時点で pid ファイルを消す = 枠が空くので、1 本終わるたびに次が起動
+    できる。同じターン中に起動と完了を繰り返せば、完了した本数分だけ注入が積まれる。
+    上限が縛るのは**同時に生きている本数**だけ。
 
     0 以下・不正値は既定に倒す (`settings.count` は不正値を default にする)。
     注入をゼロにしたいケースは「並走そのものを止める」と同義なので
@@ -162,6 +177,11 @@ def post(tool_use_id: str) -> str | None:
 
     結果の読み取り自体は best-effort で続ける (書きかけでも読めたぶんは返す)。掃除しない
     だけなので、次に読む主体は GC (中身を見ずに消す) しか居らず二重注入にはならない。
+
+    **上限 (`max_output_bytes()`) で切り詰めたときは末尾に切詰マーカーを足す**
+    (マージ前レビューの指摘)。切るのは末尾・残すのは先頭なので、印が無いと親 Claude は
+    途中で切れた結果を「補助調査はここで終わった」と読む。`ENV_MAX_RESULT_BYTES` で
+    上限を小さくした利用者ほどこの誤読に当たりやすい。
     """
     result_file, pid_file = paths(NAME, tool_use_id)
     unconfirmed = False
@@ -204,9 +224,12 @@ def post(tool_use_id: str) -> str | None:
     if not result_file.is_file():
         return None
 
+    limit = max_output_bytes()
+    truncated = False
     try:
-        raw = result_file.read_bytes()[: max_output_bytes()]
-        data = raw.decode("utf-8", errors="replace").strip()
+        raw = result_file.read_bytes()
+        truncated = len(raw) > limit
+        data = raw[:limit].decode("utf-8", errors="replace").strip()
     except OSError:
         data = ""
     finally:
@@ -215,6 +238,11 @@ def post(tool_use_id: str) -> str | None:
 
     if not data:
         return None
+
+    if truncated:
+        # 切るのは末尾なので、黙って渡すと親 Claude は「補助調査はここで終わった」と
+        # 読む (マージ前レビューの指摘)。上限と上書き用の env 名を添えて明示する。
+        data += f"\n\n{_TRUNCATION_NOTE.format(limit=limit, env=ENV_MAX_RESULT_BYTES)}"
 
     return _CONTEXT_HEADER + data
 

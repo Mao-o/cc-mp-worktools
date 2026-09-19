@@ -36,11 +36,15 @@ from _common import gitroot
 # 内部 timeout は hooks.json の hook timeout に**収まる**ように決める。超えると
 # ハーネスの kill が先に来て、自前の fail-open 経路 (None を返して skip) に到達しない。
 #
+# **git 以外に cursor CLI の検出 (`__main__.PER_TOOL_PROBE_BUDGET_SEC` = 2s) も同じ枠で
+# 走る** (0.11.0。キャッシュが使えない環境では hook 1 回ごとに probe する)。下の数値は
+# git のぶんだけなので、pre-tool / post-tool ではそこに 2s を足して読む。
+#
 #   pre-tool (hook 10s): REV_PARSE_TIMEOUT_SEC × 1 + STATUS_TIMEOUT_SEC × 1
-#     = 最悪 7s
+#     = 最悪 7s (+ 検出 2s = 9s)
 #   post-tool / Bash (hook 10s): worktree_root (REV_PARSE_TIMEOUT_SEC × 1) +
-#     status_snapshot (STATUS_TIMEOUT_SEC × 1) = 最悪 7s
-#   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s)
+#     status_snapshot (STATUS_TIMEOUT_SEC × 1) = 最悪 7s (+ 検出 2s = 9s)
+#   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s。+ 検出 2s)
 #   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
 #     REV_PARSE_TIMEOUT_SEC × 2 (worktree_root + head_exists)
 #     + LS_FILES_TIMEOUT_SEC × 2 (symlink_map + untracked_among)

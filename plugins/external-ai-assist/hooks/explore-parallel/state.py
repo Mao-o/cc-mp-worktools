@@ -26,7 +26,12 @@ BASE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "explore-parallel"
 #: その数だけ cursor が同時に走り、CPU と利用量がターンごとに線形に増える。既定を 2 に
 #: したのは、1 だと「2 本目以降の Explore には補助調査が一切付かない」= 並走の価値が
 #: ほぼ消えるのに対し、2 なら主要な 2 本には付きつつ増え方を頭打ちにできるため。
-#: 注入量も同時起動数で決まる (`cursor.max_output_bytes()` の docstring)。
+#: **1 度に注入されうる量**もこの本数で決まる (`cursor.max_output_bytes()` の docstring。
+#: ターン合計の上限ではない — 1 本終わると枠が空く)。
+#:
+#: 枠は `BASE_DIR` を共有する**同一ユーザーの全セッション**で 1 つ (macOS の `$TMPDIR` は
+#: セッション間で共有される)。CPU / 利用量を抑える狙いからはマシン単位が正しいので
+#: そのままにしてある (`CLAUDE.md` の「同時起動数と注入量の上限」節)。
 DEFAULT_MAX_CONCURRENT = 2
 
 #: `launch_gate()` がロックを取れるまで待つ上限 (秒) と probe 間隔。

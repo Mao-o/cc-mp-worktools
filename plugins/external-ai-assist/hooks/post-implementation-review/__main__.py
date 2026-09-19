@@ -217,6 +217,18 @@ _MIN_VERSION_FOR_ADDITIONAL_CONTEXT = (2, 1, 163)
 ENV_CC_VERSION = "CLAUDE_CODE_VERSION"
 ENV_CC_EXECPATH = "CLAUDE_CODE_EXECPATH"
 
+# pre-tool / post-tool で cursor CLI の検出 (`cursor.is_available`) に許す秒数。
+#
+# 0.11.0 の検出はキャッシュが使えない環境で hook 1 回ごとに probe する
+# (`_common/cursorcli.py`)。この 2 フェーズは Write / Edit / NotebookEdit / Bash の
+# たびに走り、同じ 10 秒の hook timeout の中で git (rev-parse 2s + status 5s = 最悪 7s) と
+# 同居するため、検出には残りより短い枠を渡す (`cursorcli.PROBE_BUDGET_SEC` = 3 秒を
+# そのまま使うと合計 10 秒で hook timeout と同着になり、ハーネスの kill が自前の
+# fail-open より先に来る)。予算切れは保留 (`PROBE_UNKNOWN`) に落ちるだけで、機能は
+# 止まらない。Stop (690 秒) には渡さない。
+# 突合は `tests/test_review_set.py::TestTimeoutBudgets`。
+PER_TOOL_PROBE_BUDGET_SEC = 2.0
+
 # `claude --version` probe の timeout (秒)。cursor/codex のような長時間 CLI ではなく
 # 即終了する単純な呼び出しなので、`_common/subproc.py` の process group 管理は使わず
 # 短い固定値で十分 (`_version_from_subprocess` 参照)。
@@ -423,6 +435,11 @@ def _private_root_ok() -> bool:
         return False
 
 
+def _per_tool_deadline() -> float:
+    """pre-tool / post-tool で cursor CLI の検出に許す締切 (time.monotonic 基準)。"""
+    return time.monotonic() + PER_TOOL_PROBE_BUDGET_SEC
+
+
 def handle_pre_tool(payload: dict) -> None:
     """無効化 / cursor 不在なら git も state も一切触らない。
 
@@ -430,8 +447,12 @@ def handle_pre_tool(payload: dict) -> None:
     や cursor 未インストールの環境でも Bash のたびに `git status` が走っていた。
     Stop 側の `review_enabled()` / `cursor.is_available()` と同じ条件をここでも
     先頭で評価し、無効時は git 呼び出しも state 書込も発生させない。
+
+    検出には `PER_TOOL_PROBE_BUDGET_SEC` の締切を渡す (マージ前レビューの指摘): 0.11.0 の
+    `is_available()` はキャッシュが使えない環境で probe を伴うため、git の予算と合わせて
+    10 秒の hook timeout と同着になりうる。
     """
-    if not review_enabled() or not cursor.is_available():
+    if not review_enabled() or not cursor.is_available(_per_tool_deadline()):
         return
     if payload.get("tool_name") != "Bash" or not bash_tracking_enabled():
         return
@@ -461,8 +482,8 @@ def handle_pre_tool(payload: dict) -> None:
 
 def handle_post_tool(payload: dict) -> None:
     """無効化 / cursor 不在なら git も state も一切触らない
-    (handle_pre_tool と同じ理由)。"""
-    if not review_enabled() or not cursor.is_available():
+    (handle_pre_tool と同じ理由。検出の締切も同じ)。"""
+    if not review_enabled() or not cursor.is_available(_per_tool_deadline()):
         return
     if not _private_root_ok():
         return

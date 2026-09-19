@@ -5,9 +5,10 @@ including write and shell」とされる書込可能モード。`readonly_argv` 
 ことを固定する。
 
 検出側: `cursor` という名前は環境によって Agent CLI 本体・そのシム・**IDE ランチャー**の
-どれでもありうる。`cursor-agent` → `agent` → `cursor` の順に見て、`--version` に応答した
-最初のものを使い、結果を TTL 付きでキャッシュすること (と、キャッシュを捨てる条件) を
-ここで固定する。
+どれでもありうる。`cursor-agent` → `cursor` の順に見て、**失格でない最初の候補**を使い、
+結果を TTL 付きでキャッシュすること (と、キャッシュを捨てる条件) をここで固定する。
+**汎用名 `agent` は候補にしない** (無関係な実体に git diff を渡す経路になる) ことも
+ここで押さえる — 起動先が広がる形は、テストが仕様として固定していないと戻ってくる。
 
 **本物の cursor は決して起動しない**: PATH を偽 CLI だけのディレクトリに差し替え、
 候補の実体もすべてこのテストが書いた bash script にする。
@@ -162,11 +163,6 @@ class TestDetectionOrder(CursorCliTestCase):
         self.assertEqual(cursorcli.resolve(), ("cursor-agent", ()))
         self.assertEqual(self.probes(), ["cursor-agent"], "後続の候補まで起動している")
 
-    def test_prefers_agent_over_cursor(self):
-        self.fake_cli("agent")
-        self.fake_cli("cursor")
-        self.assertEqual(cursorcli.resolve(), ("agent", ()))
-
     def test_falls_back_to_cursor_with_the_agent_subcommand(self):
         self.fake_cli("cursor")
         self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
@@ -183,24 +179,31 @@ class TestDetectionOrder(CursorCliTestCase):
         self.fake_cli("cursor")
         self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
 
-    def test_hanging_candidate_loses_to_a_responsive_one(self):
-        """応答を確認できた候補が居れば、応答しない候補より優先する
-        (本番の失敗は最大 600 秒待ちだったのを probe の timeout に置き換えるのが主眼)。
+    def test_candidate_order_beats_a_confirmed_later_candidate(self):
+        """**候補順 > 応答確認** (マージ前レビューの指摘)。応答を確認できなかった
+        `cursor-agent` が、即応答する `cursor` (IDE ランチャーでありうる) に負けない。
 
-        timeout は 1 秒に緩めてある: 作ったばかりの script の初回起動はこの端末で
-        数百 ms かかることがあり、きつくすると「応答するはずの候補」まで保留に
-        倒れてテストが揺れる。
+        以前は「最初の `PROBE_OK`」で決めていたため、cold start の遅い本物が
+        `PROBE_TIMEOUT_SEC` 内に応答を確認できないと、後ろの IDE ランチャーが勝った
+        — `PROBE_UNKNOWN` を失格にしない理由 (遅い本物を切らない) と矛盾し、この検出が
+        解こうとしていた構成 (本物が `cursor-agent` / ランチャーが `cursor`) で失敗する。
+
+        probe の timeout 自体は効き続ける (本番の失敗は最大 600 秒待ちだった) ので、
+        経過時間も一緒に押さえる。
         """
         self.hanging_cli("cursor-agent")
         self.fake_cli("cursor")
-        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 1.0), mock.patch.object(
+        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 0.5), mock.patch.object(
             cursorcli, "PROBE_KILL_GRACE_SEC", 0.1
         ):
             started = time.monotonic()
             resolved = cursorcli.resolve()
             elapsed = time.monotonic() - started
-        self.assertEqual(resolved, ("cursor", ("agent",)))
+        self.assertEqual(resolved, ("cursor-agent", ()))
         self.assertLess(elapsed, 5.0, "probe の timeout が効いていない")
+        self.assertNotIn(
+            "cursor", self.probes(), "先の候補で決まったのに後続を probe している"
+        )
 
     def test_hanging_candidate_is_still_used_when_nothing_answers(self):
         """**応答を確認できないことは失格にしない**。起動の遅い本物 (node CLI の
@@ -211,27 +214,65 @@ class TestDetectionOrder(CursorCliTestCase):
         ):
             self.assertEqual(cursorcli.resolve(), ("cursor-agent", ()))
 
-    def test_budget_stops_further_probes_but_keeps_the_first_candidate(self):
-        """合計予算を使い切ったら残りの候補は確認せず、保留中の最初の候補を使う。"""
-        self.hanging_cli("cursor-agent")
-        self.hanging_cli("agent")
+    def test_exhausted_budget_skips_the_probe_but_keeps_the_candidate(self):
+        """予算が尽きていれば **CLI を 1 つも起動せず**、候補順の最初を未確認で採用する。
+
+        予算切れを「経過時間で作る」形 (遅い失格候補で食わせる) は成立しない: 各 probe の
+        timeout も残り予算で cap されるため、遅い候補は失格ではなく保留になってそこで
+        採用が決まる。ここでは呼び出し側の `deadline` を過去に置いて決定論的に測る
+        (`_probe` の `remaining <= 0` 経路は自前予算 `PROBE_BUDGET_SEC` と同じ)。
+        """
+        self.fake_cli("cursor-agent")
         self.fake_cli("cursor")
-        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 0.3), mock.patch.object(
+        with mock.patch.object(
+            cursorcli.subproc,
+            "run_captured",
+            wraps=cursorcli.subproc.run_captured,
+        ) as spy:
+            self.assertEqual(
+                cursorcli.resolve(deadline=time.monotonic() - 1.0), ("cursor-agent", ())
+            )
+        # 起動そのものを数える (probe 記録は「起動されたが kill が先に来た」形と
+        # 区別できない — 実際に予算チェックを外しても記録が空のままになりうる)。
+        self.assertEqual(spy.call_count, 0, "予算が尽きているのに CLI を起動している")
+        self.assertEqual(self.probes(), [], "予算が尽きているのに probe している")
+
+    def test_total_budget_caps_a_hanging_probe(self):
+        """1 回の probe の timeout より合計予算のほうが短ければ、予算が上限になる。"""
+        self.hanging_cli("cursor-agent")
+        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 5.0), mock.patch.object(
             cursorcli, "PROBE_KILL_GRACE_SEC", 0.1
-        ), mock.patch.object(cursorcli, "PROBE_BUDGET_SEC", 0.35):
+        ), mock.patch.object(cursorcli, "PROBE_BUDGET_SEC", 0.3):
+            started = time.monotonic()
             self.assertEqual(cursorcli.resolve(), ("cursor-agent", ()))
-        # 予算切れの候補は起動しない (応答する `cursor` まで到達していないこと)。
-        # 保留中の候補は probe が timeout で kill されるため、ログに現れないことも
-        # ある (script の cold start が timeout より遅い場合)。
-        self.assertNotIn("cursor", self.probes(), "予算を使い切った後も probe している")
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0, "合計予算が probe の上限になっていない")
+
+    def test_caller_deadline_caps_a_hanging_probe(self):
+        """呼び出し側の `deadline` は自前予算より短ければそちらが勝つ。
+
+        explore-parallel の pre は残骸 GC と同じ 5 秒の枠で回るため、GC で使った時間を
+        引いた残りを渡す (`__main__.PRE_BUDGET_SEC`)。
+        """
+        self.hanging_cli("cursor-agent")
+        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 5.0), mock.patch.object(
+            cursorcli, "PROBE_KILL_GRACE_SEC", 0.1
+        ), mock.patch.object(cursorcli, "PROBE_BUDGET_SEC", 5.0):
+            started = time.monotonic()
+            self.assertEqual(
+                cursorcli.resolve(deadline=time.monotonic() + 0.3), ("cursor-agent", ())
+            )
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0, "呼び出し側の deadline が効いていない")
 
     def test_unresponsive_probe_returns_within_the_timeout(self):
         """応答しない候補の probe は timeout で切り上がり、後始末まで含めて短く済む。
 
-        **`PROBE_KILL_GRACE_SEC` を短くしていること自体はここでは測れていない**
-        (下の注記)。猶予が効くのは SIGTERM を無視するプロセスが残っている場合だけで、
-        このフィクスチャ (`trap '' TERM` + 背景の sleep) は TERM で group ごと死ぬため、
-        猶予を既定 (5 秒) に戻しても経過時間が変わらない = mutation で落ちない。
+        **`PROBE_KILL_GRACE_SEC` を短くしていること自体はここでは決定論的に測れていない**。
+        猶予が効くのは SIGTERM を無視するプロセスが残っている場合だけで、このフィクスチャ
+        (`trap '' TERM` + 背景の sleep) は trap を張る前に probe の timeout が来ると TERM で
+        group ごと死ぬ。猶予を既定 (5 秒) に戻す mutation は、そのタイミング次第で落ちたり
+        落ちなかったりする (実測で両方を観測) ので、空振りとして扱う。
         `kill_process_group` の TERM→KILL の段自体は `test_subproc.py` が押さえている。
         """
         self.hanging_cli("cursor-agent", ignore_term=True)
@@ -252,6 +293,105 @@ class TestDetectionOrder(CursorCliTestCase):
     def test_nothing_installed_is_unavailable(self):
         self.assertIsNone(cursorcli.resolve())
         self.assertFalse(cursorcli.is_available())
+
+
+class TestCandidateNarrowing(CursorCliTestCase):
+    """汎用名 `agent` を候補にしない (マージ前レビューの指摘)。
+
+    3 hook はここで決めた argv で外部 CLI を起動するので、**候補を 1 つ増やすことは
+    送信先を 1 つ増やすこと**。`agent` はプロダクト名を持たない汎用名で、Cursor と
+    無関係な実体 (社内スクリプト・別ツールの別名) が PATH に居るだけで採用され、
+    リポジトリの git diff / 実装プランがそこへ渡っていた (argv は `ps` からも見える)。
+    """
+
+    def test_generic_agent_is_not_a_candidate(self):
+        self.assertEqual(cursorcli.CANDIDATES, ("cursor-agent", "cursor"))
+
+    def test_unrelated_agent_is_never_probed_or_used(self):
+        """Cursor 無関係な `agent` だけが居る環境は「cursor 無し」。
+
+        LEAK-CANARY: その実体は probe すらされない (`--version` も渡らない)。
+        """
+        self.fake_cli("agent")
+        self.assertIsNone(cursorcli.resolve())
+        self.assertFalse(cursorcli.is_available())
+        self.assertEqual(self.probes(), [], "候補外の実体を起動している")
+
+    def test_unrelated_agent_does_not_win_over_cursor(self):
+        self.fake_cli("agent")
+        self.fake_cli("cursor")
+        self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
+        self.assertNotIn("agent", self.probes(), "候補外の実体を起動している")
+
+    def test_launch_argv_never_targets_a_generic_agent_command(self):
+        """`agent` が PATH に居ても起動 argv の先頭にはならない (検出不能時の fallback も)。"""
+        self.fake_cli("agent")
+        argv = cursorcli.readonly_argv("LEAK-CANARY")
+        self.assertEqual(argv[:2], ["cursor", "agent"], "fallback が従来形でない")
+        self.assertNotEqual(argv[0], "agent")
+
+    def test_override_can_still_point_at_a_generic_agent_command(self):
+        """`agent` に本物が置かれている環境の逃げ道 (README の「実体の探し方」)。"""
+        self.fake_cli("agent")
+        with mock.patch.dict(os.environ, {cursorcli.ENV_COMMAND: "agent"}):
+            self.assertEqual(cursorcli.resolve(), ("agent", ()))
+            self.assertEqual(cursorcli.readonly_argv("P")[0], "agent")
+        self.assertEqual(self.probes(), [], "固定指定しているのに probe している")
+
+
+class TestAmbiguousNameIdentification(CursorCliTestCase):
+    """曖昧な名前 (`cursor`) は `--version` の出力で同定できたときだけ「確認済み」。
+
+    採用そのものは候補順が決めるので挙動は 0.10.0 と同じ (機能を黙って止めない)。
+    差が出るのは**キャッシュ TTL** — 未確認の推測を 1 時間固定しない。
+    """
+
+    def test_cursor_naming_itself_is_confirmed(self):
+        self.fake_cli("cursor", version="cursor-agent 2026.09.01")
+        self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
+        self.assertIs(self.cache()["confirmed"], True)
+
+    def test_cursor_without_identity_is_adopted_but_unconfirmed(self):
+        # IDE ランチャー相当 (VS Code 系は version / commit / arch しか出さない)
+        self.fake_cli("cursor", version="1.105.3")
+        self.assertEqual(
+            cursorcli.resolve(),
+            ("cursor", ("agent",)),
+            "同定できないだけで使わなくなると、シム環境で機能が黙って止まる",
+        )
+        self.assertIs(self.cache()["confirmed"], False)
+
+    def test_cursor_agent_is_confirmed_without_naming_itself(self):
+        """名前が固有な候補は出力を見ない (バージョン文字列だけでも確認済み)。"""
+        self.fake_cli("cursor-agent", version="2026.09.01")
+        self.assertEqual(cursorcli.resolve(), ("cursor-agent", ()))
+        self.assertIs(self.cache()["confirmed"], True)
+
+    def test_unconfirmed_result_expires_on_the_short_ttl(self):
+        self.fake_cli("cursor", version="1.105.3")
+        cursorcli.resolve()
+        entry = self.cache()
+        entry["at"] = time.time() - cursorcli.NEGATIVE_CACHE_TTL_SEC - 1
+        self.write_cache(entry)
+        cursorcli.reset()
+        cursorcli.resolve()
+        self.assertEqual(
+            self.probes(),
+            ["cursor", "cursor"],
+            "未確認のまま採用した結果が短い TTL で切れていない",
+        )
+
+    def test_confirmed_result_survives_the_short_ttl(self):
+        self.fake_cli("cursor-agent")
+        cursorcli.resolve()
+        entry = self.cache()
+        entry["at"] = time.time() - cursorcli.NEGATIVE_CACHE_TTL_SEC - 1
+        self.write_cache(entry)
+        cursorcli.reset()
+        cursorcli.resolve()
+        self.assertEqual(
+            self.probes(), ["cursor-agent"], "確認できた結果まで短い TTL で捨てている"
+        )
 
 
 class TestDetectionCache(CursorCliTestCase):
@@ -281,10 +421,36 @@ class TestDetectionCache(CursorCliTestCase):
             {
                 "command": "cursor-agent",
                 "path": os.path.join(self.bin, "cursor-agent"),
+                "confirmed": True,
                 "at": time.time() - cursorcli.CACHE_TTL_SEC - 1,
             }
         )
         self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
+
+    def test_cache_is_dropped_when_the_binary_is_replaced_in_place(self):
+        """**パスが同じまま中身が入れ替わった**実体には TTL 内でも送らない
+        (マージ前レビューの指摘)。`which` の結果は変わらないので inode / mtime で見る。
+        """
+        path = self.fake_cli("cursor-agent")
+        self.assertEqual(cursorcli.resolve(), ("cursor-agent", ()))
+
+        replacement = path + ".new"
+        with open(replacement, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/bash\n"
+                f"echo replaced >> {self.probe_log}\n"
+                "printf 'other-tool\\n'\n"
+            )
+        os.chmod(replacement, 0o755)
+        os.replace(replacement, path)  # インストーラの置き換えと同じ形 (inode が変わる)
+        cursorcli.reset()
+
+        cursorcli.resolve()
+        self.assertEqual(
+            self.probes(),
+            ["cursor-agent", "replaced"],
+            "同じパスに入れ替わった実体を再確認していない",
+        )
 
     def test_negative_cache_is_honored_then_expires(self):
         self.fake_cli("cursor")

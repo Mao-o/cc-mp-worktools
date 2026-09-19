@@ -392,9 +392,12 @@ class TestByteBudget(ReviewSetTestCase):
 
 
 class TestTimeoutBudgets(ReviewSetTestCase):
-    """内部 git timeout は hooks.json の hook timeout に収まっていること。
+    """内部 timeout (git + cursor CLI の検出) が hooks.json の hook timeout に収まること。
 
     超えるとハーネスの kill が先に来て、自前の fail-open 経路に到達しない。
+    **検出 (`cursor.is_available`) も同じ枠で走る** — 0.11.0 でキャッシュが使えない環境の
+    検出が probe を伴うようになったため、git だけで判定すると合計が timeout と同着に
+    なっても緑のままになる (マージ前レビューの指摘)。
     """
 
     def _hook_timeouts(self) -> dict[str, int]:
@@ -430,20 +433,30 @@ class TestTimeoutBudgets(ReviewSetTestCase):
 
         timeouts = self._hook_timeouts()
 
-        pre_tool_worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        # cursor CLI の検出 (`cursor.is_available`) も同じ hook timeout の中で走る
+        # (0.11.0 でキャッシュが使えない環境では probe を伴うようになった)。git だけで
+        # 判定すると、検出を足した合計が timeout と同着になっても緑のままになる。
+        probe_worst = self.entry.PER_TOOL_PROBE_BUDGET_SEC
+
+        pre_tool_worst = (
+            probe_worst + gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        )
         self.assertIn("pre-tool", timeouts)
         self.assertLess(
             pre_tool_worst,
             timeouts["pre-tool"],
-            f"pre-tool の内部 git timeout 合計 {pre_tool_worst}s が hook timeout に収まっていない",
+            f"pre-tool の内部 timeout 合計 {pre_tool_worst}s が hook timeout に収まっていない",
         )
 
         # post-tool / Bash: _record_bash_changes が worktree_root (rev-parse) +
-        # status_snapshot (status) を呼ぶ。
-        post_tool_bash_worst = gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        # status_snapshot (status) を呼ぶ。検出はどの経路でも先頭で走る。
+        post_tool_bash_worst = (
+            probe_worst + gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+        )
         # post-tool / Edit,Write,NotebookEdit: handle_post_tool は git を一切呼ばない
-        # (_edited_paths はパス整形のみ、state.record_pending も git 非依存)。
-        post_tool_edit_worst = 0
+        # (_edited_paths はパス整形のみ、state.record_pending も git 非依存) が、
+        # cursor CLI の検出は先頭で走る。
+        post_tool_edit_worst = probe_worst
         post_tool_worst = max(post_tool_bash_worst, post_tool_edit_worst)
         self.assertIn("post-tool", timeouts)
         self.assertLess(

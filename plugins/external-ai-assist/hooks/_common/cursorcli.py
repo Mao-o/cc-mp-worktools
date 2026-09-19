@@ -17,34 +17,51 @@ review 系 2 hook は `subproc.run_for_output`) ため、ここで共有する�
 IDE ランチャーしか無い環境では `which` が当たってしまい、`cursor agent ...` を
 起動しては失敗するまで待つ (review 系 hook では最大 600 秒) ことになる。
 
-そこで **候補を順に見て、最初に「起動できる」ものを使う**:
+そこで **候補を順に見て、最初に失格でないものを使う**:
 
 | 順 | コマンド | 起動時のサブコマンド | 理由 |
 |---|---|---|---|
 | 1 | `cursor-agent` | なし | Agent CLI 本体の名前。曖昧さが無い |
-| 2 | `agent` | なし | 同じ実体が置かれることがある名前 |
-| 3 | `cursor` | `agent` | 0.10.0 までの起動形。シム / IDE ランチャーのどちらでもありうる |
+| 2 | `cursor` | `agent` | 0.10.0 までの起動形。シム / IDE ランチャーのどちらでもありうる |
 
-- 候補は `--version` で応答するかを確認してから採用する (`_probe`)。壊れたコマンドを
-  掴んで長時間待つ経路を、短い probe に置き換えるのが狙い。
-  **「応答を確認できない」(timeout) は失格にしない** — 起動の遅い本物 (node ベースの
-  CLI は cold start に数秒かかりうる) を切ってレビュー機能が黙って止まるほうが、
-  0.10.0 までの「掴んでから失敗を待つ」より悪いため。応答が確認できた候補を優先し、
-  どれも確認できなければ最初に見つかった候補を使う (= 0.10.0 と同じ扱い)
+**候補に `agent` は入れない** (マージ前レビューの指摘)。`agent` はプロダクト名を持たない
+汎用名で、Cursor と無関係な実体 (社内スクリプト・別ツールの別名) が PATH に居るだけで
+採用されうる。3 hook はいずれもここで決めた argv で起動するので、そこには**リポジトリの
+git diff や実装プランがそのまま渡る** (argv は `ps` からも見える)。候補を 1 つ増やすことは
+**送信先を 1 つ増やすこと**で、下振れに上限が無い。`agent` に本物が置かれている環境は
+`EXTERNAL_AI_CURSOR_COMMAND=agent` で明示指定する (probe も飛ばすので従来どおり動く)。
+
+- 候補は `--version` で応答するかを確認する (`_probe`)。壊れたコマンドを掴んで長時間
+  待つ経路を、短い probe に置き換えるのが狙い。判定は 3 値 (`PROBE_*`) で、
+  **採用は「候補順」が決める** — 失格 (`PROBE_FAILED`) でない最初の候補を使い、
+  `PROBE_OK` は「以降の候補を probe せずに確定できる」最適化としてのみ使う
+  (`_detect`)。応答確認を採用条件にすると、cold start の遅い本物 (node ベースの CLI) が
+  保留になった隙に後ろの IDE ランチャーが勝ってしまう
+- **名前で同定できない候補 (`AMBIGUOUS_CANDIDATES`) は、`--version` の出力に
+  `cursor` の語がある場合だけ `PROBE_OK`** にする。無ければ `PROBE_UNKNOWN` (保留) に
+  落とす — 採用そのものは候補順が決めるので挙動は 0.10.0 と同じだが、「確認できていない」
+  ことはキャッシュ TTL (下記) に反映する。`cursor-agent` は名前が固有なので無条件
 - 結果は `$TMPDIR/external-ai-assist/cursorcli.json` に TTL 付きでキャッシュする
   (`is_available()` は編集ツールのたびに呼ばれるので、毎回 probe しない)。
-  記録した実体パスが `which` の結果と食い違ったらキャッシュを捨てて測り直す
+  **確認できた (`PROBE_OK`) 結果だけが 1 時間**で、応答未確認のまま採用した結果は
+  否定側と同じ短い TTL (`NEGATIVE_CACHE_TTL_SEC`) にする。記録した実体パスが `which` の
+  結果と食い違ったとき、および**同じパスの中身が入れ替わったとき** (inode / mtime の
+  不一致) はキャッシュを捨てて測り直す
 - `EXTERNAL_AI_CURSOR_COMMAND` を設定するとその値を無条件で使う (probe もしない)。
   検出が環境に合わない場合の逃げ道で、テストもこれで実体を固定する。**basename が
   `cursor` のときだけ `agent` サブコマンドを足す** (上の表と同じ規則)
+- 検出には**予算 (`PROBE_BUDGET_SEC`) があり、呼び出し側から `deadline` でさらに縮め
+  られる**。explore-parallel の pre hook は残骸 GC と同じ 5 秒の枠で回るため、GC が
+  使った時間を引いた残りを渡す (`__main__._main`)。予算切れは既存の `PROBE_UNKNOWN`
+  経路に落ちるだけなので、機能が止まる方向には倒れない
 
-**この probe では IDE ランチャーと Agent CLI を見分けられない** (どちらも
-`--version` に 0 で応答する)。見分けは上の**検出順**が担っていて、「IDE ランチャー
-しか無い環境」は順序では解けない。`--help` の内容で判定する案は、実機の出力を確認
-できていないため採らない (誤判定すると機能が黙って止まる)。**未ログイン状態の検出も
-同様に未実装** — `--version` はログイン状態に関係なく応答し、実際の失敗文言を実機で
-確認できていないため、推測でパターンを書くと正常なレビュー本文を誤検出して機能を
-止めうる。どちらも実機確認が済んでから入れる (内部バックログ)。
+**この probe で IDE ランチャーと Agent CLI を確実に見分けられるわけではない** (どちらも
+`--version` に 0 で応答しうる)。見分けは上の**検出順**と曖昧な名前の同定が担う。
+`--help` の内容で判定する案は、実機の出力を確認できていないため採らない (誤判定すると
+機能が黙って止まる)。**未ログイン状態の検出も同様に未実装** — `--version` はログイン状態に
+関係なく応答し、実際の失敗文言を実機で確認できていないため、推測でパターンを書くと
+正常なレビュー本文を誤検出して機能を止めうる。どちらも実機確認が済んでから入れる
+(内部バックログ)。
 """
 from __future__ import annotations
 
@@ -63,7 +80,18 @@ NAME = "cursor"
 BINARY = "cursor"
 
 #: 検出順 (コマンド名)。起動時のサブコマンドは `subcommand_for()` が決める。
-CANDIDATES = ("cursor-agent", "agent", "cursor")
+#:
+#: **汎用名 `agent` は入れない** (module docstring)。Cursor と無関係な実体に git diff /
+#: プランを渡す経路になるため、そこに本物が居る環境は `ENV_COMMAND` で明示指定する。
+CANDIDATES = ("cursor-agent", "cursor")
+
+#: 名前だけでは Cursor Agent CLI と同定できない候補。`--version` の出力に
+#: `IDENTITY_TOKEN` があるときだけ `PROBE_OK` (= 確認できた) 扱いにする。
+AMBIGUOUS_CANDIDATES = ("cursor",)
+
+#: 曖昧な名前の候補を「確認できた」とみなすために `--version` の出力へ要求する語
+#: (小文字で比較する)。
+IDENTITY_TOKEN = "cursor"
 
 #: 読み取り専用 (`--mode plan`) の print モードで 1 回実行するためのフラグ列。
 #:
@@ -82,7 +110,11 @@ ENV_COMMAND = "EXTERNAL_AI_CURSOR_COMMAND"
 #: 検出は `is_available()` 経由で hook の早い段階に走る。post-implementation-review の
 #: post-tool hook は timeout 10 秒で `git status` (最大 5 秒) と同居し、explore-parallel の
 #: pre hook は timeout 5 秒で残骸 GC (2 秒) と同居するため、合計でも数秒に収める。
-#: probe が要るのはキャッシュが無いときだけ (TTL 1 時間)。
+#: probe が要るのはキャッシュが無いときだけ (確認できた結果は TTL 1 時間)。
+#:
+#: `PROBE_BUDGET_SEC` は検出 1 回の**自前の**上限で、呼び出し側が `deadline` を渡すと
+#: そこまでで打ち切る (短いほうが勝つ)。explore-parallel の pre は GC が使った時間を
+#: 引いた残りを渡すため、GC + 検出 + 起動枠の待ちの合計が hook timeout を超えない。
 PROBE_TIMEOUT_SEC = 1.5
 PROBE_BUDGET_SEC = 3.0
 
@@ -126,18 +158,23 @@ def subcommand_for(command: str) -> tuple[str, ...]:
     return ("agent",) if os.path.basename(command) == "cursor" else ()
 
 
-def resolve() -> tuple[str, tuple[str, ...]] | None:
+def resolve(deadline: float | None = None) -> tuple[str, tuple[str, ...]] | None:
     """使える Agent CLI の `(コマンド, サブコマンド)`。見つからなければ None。
 
     プロセス内で 1 回だけ計算する (hook は 1 回の呼び出しごとに使い捨てプロセス)。
+
+    `deadline` (time.monotonic 基準) を渡すと **probe をそこまでで打ち切る**。短い
+    hook timeout の中で回す呼び出し側 (explore-parallel の pre は残骸 GC と同じ 5 秒の枠)
+    が、既に使った時間を引いた残りを渡すため。予算切れは `PROBE_UNKNOWN` = 保留に
+    落ちるだけで、候補そのものは従来どおり使える。
     """
     if _RESOLVED_KEY not in _RESOLVED:
-        _RESOLVED[_RESOLVED_KEY] = _resolve_uncached()
+        _RESOLVED[_RESOLVED_KEY] = _resolve_uncached(deadline)
     return _RESOLVED[_RESOLVED_KEY]
 
 
-def is_available() -> bool:
-    return resolve() is not None
+def is_available(deadline: float | None = None) -> bool:
+    return resolve(deadline) is not None
 
 
 def readonly_argv(prompt: str) -> list[str]:
@@ -157,7 +194,7 @@ def readonly_argv(prompt: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def _resolve_uncached() -> tuple[str, tuple[str, ...]] | None:
+def _resolve_uncached(deadline: float | None = None) -> tuple[str, tuple[str, ...]] | None:
     override = os.environ.get(ENV_COMMAND, "").strip()
     if override:
         if shutil.which(override) is None:
@@ -169,60 +206,88 @@ def _resolve_uncached() -> tuple[str, tuple[str, ...]] | None:
     if cached is not _MISS:
         return cached  # type: ignore[return-value]
 
-    found = _detect()
-    _save_cache(found)
+    found, confirmed = _detect(deadline)
+    _save_cache(found, confirmed)
     return found
 
 
-def _detect() -> tuple[str, tuple[str, ...]] | None:
-    """候補を順に probe して使うものを決める。
+def _detect(
+    deadline: float | None = None,
+) -> tuple[tuple[str, tuple[str, ...]] | None, bool]:
+    """候補を順に probe して使うものを決める。`(結果, 応答を確認できたか)` を返す。
 
-    **probe の「応答なし (timeout / 予算切れ)」は候補を失格にしない。** 判定は 3 値で、
+    **採用は候補順が決める** (マージ前レビューの指摘)。失格 (`PROBE_FAILED`) でない
+    最初の候補を使い、`PROBE_OK` は「以降の候補を probe せずに確定できる」最適化として
+    のみ使う。判定は 3 値:
 
     | probe の結果 | 扱い |
     |---|---|
-    | `PROBE_OK` (0 終了 + 出力あり) | 即採用 |
+    | `PROBE_OK` (0 終了 + 出力あり。曖昧な名前は同定も必要) | 採用 (確認済み) |
     | `PROBE_FAILED` (非 0 終了 / 出力なし) | 失格。次の候補へ |
-    | `PROBE_UNKNOWN` (timeout / 予算切れ) | **保留**。`PROBE_OK` の候補が 1 つも無ければ使う |
+    | `PROBE_UNKNOWN` (timeout / 予算切れ / 同定できない) | **採用するが未確認** |
 
-    timeout を失格にすると、起動の遅い本物 (node ベースの CLI は cold start に数秒
-    かかりうる) を「壊れている」と誤判定して、レビュー機能が黙って止まる方向に倒れる。
-    **機能を黙って落とすほうが、0.10.0 までと同じ「掴んでから失敗を待つ」より悪い**ので、
-    応答が確認できた候補を優先しつつ、どれも確認できなければ従来どおり `which` の結果を
-    使う (0.10.0 の挙動)。
+    以前は「最初の `PROBE_OK`」で即 return し、`PROBE_UNKNOWN` は後続に `PROBE_OK` が
+    無いときの fallback にしていた。その順序だと、cold start の遅い本物
+    (`cursor-agent`) が `PROBE_TIMEOUT_SEC` 内に応答を確認できなかった隙に、後ろの
+    候補 (IDE ランチャーでありうる `cursor`) が即応答して勝ってしまう —
+    **`PROBE_UNKNOWN` を失格にしない理由 (遅い本物を切らない) と矛盾する**うえ、
+    この検出が解こうとしていた構成そのもの (本物が `cursor-agent`、IDE ランチャーが
+    `cursor`) で失敗する。
+
+    未確認のまま採用した結果は短い TTL (`NEGATIVE_CACHE_TTL_SEC`) でしか保存しない
+    (`_save_cache`)。1 時間固定すると「未確認の推測」が長く居座る。
+
+    timeout を失格にしないのは従来どおり: 起動の遅い本物を「壊れている」と誤判定して
+    レビュー機能が黙って止まるほうが、0.10.0 までの「掴んでから失敗を待つ」より悪い。
     """
-    deadline = time.monotonic() + PROBE_BUDGET_SEC
-    fallback: str | None = None
+    budget = time.monotonic() + PROBE_BUDGET_SEC
+    if deadline is not None:
+        budget = min(budget, deadline)
     for command in CANDIDATES:
         path = shutil.which(command)
         if path is None:
             continue
-        verdict = _probe(path, deadline)
-        if verdict == PROBE_OK:
-            return command, subcommand_for(command)
-        if verdict == PROBE_UNKNOWN:
-            if fallback is None:
-                fallback = command
-            log(f"{command} ({path}) の応答を確認できなかった (保留)")
+        verdict = _verdict_for(command, path, budget)
+        if verdict == PROBE_FAILED:
+            log(f"{command} ({path}) が --version に応答しないため候補から外す")
             continue
-        log(f"{command} ({path}) が --version に応答しないため候補から外す")
-    if fallback is not None:
-        log(f"応答を確認できた候補が無いため {fallback} を使う (0.10.0 と同じ扱い)")
-        return fallback, subcommand_for(fallback)
-    return None
+        if verdict == PROBE_UNKNOWN:
+            log(f"{command} ({path}) は応答を確認できないまま使う (候補順を優先)")
+        return (command, subcommand_for(command)), verdict == PROBE_OK
+    return None, False
 
 
-def _probe(path: str, deadline: float) -> str:
-    """`<path> --version` の応答を `PROBE_*` で返す。
+def _verdict_for(command: str, path: str, deadline: float) -> str:
+    """`_probe` の結果に「名前で同定できるか」を重ねた最終判定。
+
+    `AMBIGUOUS_CANDIDATES` (= `cursor`) は、`--version` が 0 で応答しても**それだけでは
+    Cursor Agent CLI だと言えない** (IDE ランチャーも応答する)。出力に `IDENTITY_TOKEN`
+    があるときだけ `PROBE_OK` とし、無ければ `PROBE_UNKNOWN` (保留) に落とす。
+    採用そのものは候補順が決めるので挙動は 0.10.0 と同じで、違いはキャッシュ TTL と
+    ログだけ。`cursor-agent` は名前が固有なので出力を見ない。
+    """
+    verdict, stdout = _probe(path, deadline)
+    if verdict != PROBE_OK or command not in AMBIGUOUS_CANDIDATES:
+        return verdict
+    if IDENTITY_TOKEN not in stdout.lower():
+        log(f"{command} ({path}) の --version 出力から Cursor Agent CLI と同定できない")
+        return PROBE_UNKNOWN
+    return PROBE_OK
+
+
+def _probe(path: str, deadline: float) -> tuple[str, str]:
+    """`<path> --version` の `(PROBE_*, stdout)`。応答が無ければ stdout は空文字列。
 
     **`agent` サブコマンドは付けない**。`cursor` が IDE ランチャーだった場合に
     サブコマンドを渡すと引数の解釈が実装依存になるため、最も無害な形だけを試す
     (どちらの実体でも `--version` は即座に返る)。
+
+    stdout を返すのは、曖昧な名前の候補を出力の内容で同定するため (`_verdict_for`)。
     """
     remaining = min(PROBE_TIMEOUT_SEC, deadline - time.monotonic())
     if remaining <= 0:
         log("検出の予算を使い切ったため、残りの候補は確認しない")
-        return PROBE_UNKNOWN
+        return PROBE_UNKNOWN, ""
     # `subprocess.run` ではなく `run_captured` を使う: timeout 時に process group ごと
     # 止めて残出力を読み捨てるため、CLI が残した孫プロセスが pipe を握ったまま
     # `communicate()` を何十秒もブロックする経路が無い (これを踏むと「長時間待ちを
@@ -233,10 +298,11 @@ def _probe(path: str, deadline: float) -> str:
         kill_grace_sec=PROBE_KILL_GRACE_SEC,
     )
     if result is None:
-        return PROBE_UNKNOWN  # timeout / 起動できない
-    if result.returncode == 0 and (result.stdout or "").strip():
-        return PROBE_OK
-    return PROBE_FAILED
+        return PROBE_UNKNOWN, ""  # timeout / 起動できない
+    stdout = (result.stdout or "").strip()
+    if result.returncode == 0 and stdout:
+        return PROBE_OK, stdout
+    return PROBE_FAILED, stdout
 
 
 # --------------------------------------------------------------------------
@@ -272,12 +338,33 @@ def _cache_dir_ok() -> bool:
         return False
 
 
+def _fingerprint(path: str | None) -> tuple[int, float] | None:
+    """実体の `(inode, mtime)`。読めなければ None。
+
+    パスが同じまま**中身が入れ替わった**ケース (同じ `~/.local/bin/cursor` に別のツールを
+    入れ直した・インストーラが置き換えた) を検知するために記録する。`which` の結果だけを
+    見ていると、この形は肯定キャッシュの TTL (1 時間) のあいだ気付けず、そこへ git diff を
+    送り続けることになる (マージ前レビューの指摘)。
+    """
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime
+
+
 def _load_cache():
     """有効なキャッシュがあれば `(コマンド, サブコマンド)` か None、無ければ `_MISS`。
 
     無効とみなす条件: 置き場が信用できない / 読めない / 壊れている / TTL 超過 /
     **記録されたコマンドが `CANDIDATES` に無い** / 記録した実体パスが現在の `which` の
-    結果と違う (cursor を入れ直した・PATH が変わった)。
+    結果と違う (cursor を入れ直した・PATH が変わった) / **実体の inode・mtime が
+    記録と違う** (同じパスの中身が入れ替わった)。
+
+    TTL は「応答を確認できた肯定結果」だけが `CACHE_TTL_SEC` で、否定結果と
+    **未確認のまま採用した結果**は `NEGATIVE_CACHE_TTL_SEC`。
     """
     if not _cache_dir_ok():
         return _MISS
@@ -293,7 +380,12 @@ def _load_cache():
     if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
         return _MISS
     command = entry.get("command")
-    ttl = CACHE_TTL_SEC if isinstance(command, str) and command else NEGATIVE_CACHE_TTL_SEC
+    confirmed = entry.get("confirmed") is True
+    ttl = (
+        CACHE_TTL_SEC
+        if isinstance(command, str) and command and confirmed
+        else NEGATIVE_CACHE_TTL_SEC
+    )
     if time.time() - float(stamp) > ttl:
         return _MISS
 
@@ -304,18 +396,32 @@ def _load_cache():
         # 任意のパスを起動させられる経路を作らないため信用しない (`_cache_dir_ok` 参照)。
         log(f"キャッシュの command ({command}) が候補外のため無視する")
         return _MISS
-    if shutil.which(command) != entry.get("path"):
+    path = entry.get("path")
+    if shutil.which(command) != path:
+        return _MISS
+    fingerprint = _fingerprint(path if isinstance(path, str) else None)
+    if fingerprint is None or list(fingerprint) != [entry.get("ino"), entry.get("mtime")]:
+        # 記録が無い (古い形式) / 読めない / 入れ替わっている — いずれも測り直す
+        log("キャッシュした実体の inode / mtime が記録と一致しないため測り直す")
         return _MISS
     return command, subcommand_for(command)
 
 
-def _save_cache(found: tuple[str, tuple[str, ...]] | None) -> None:
+def _save_cache(
+    found: tuple[str, tuple[str, ...]] | None, confirmed: bool = False
+) -> None:
+    """検出結果を記録する。`confirmed` は `--version` の応答を確認できたか (TTL を分ける)。"""
     if not _cache_dir_ok():
         return
     entry: dict[str, object] = {"at": time.time()}
     if found is not None:
+        path = shutil.which(found[0])
         entry["command"] = found[0]
-        entry["path"] = shutil.which(found[0])
+        entry["confirmed"] = bool(confirmed)
+        entry["path"] = path
+        fingerprint = _fingerprint(path)
+        if fingerprint is not None:
+            entry["ino"], entry["mtime"] = fingerprint
     try:
         write_private(cache_path(), json.dumps(entry))
     except OSError:
