@@ -14,6 +14,20 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
 サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
 
+### 命名メモ: `researching-claude-docs` が `claude` を含むのは意図的
+
+skill 名に `claude` / `anthropic` を含めないという lint 規約を持つ環境では、
+`researching-claude-docs` が指摘対象になる。これは**意図的な命名で変更しない**:
+
+- この skill の対象そのものが Claude Code / Claude Developer Platform の公式ドキュメントで、
+  名前から対象を外すと description ベースの auto-invoke の発見性が落ちる
+- plugin skill の frontmatter `name` は起動コマンドの末尾セグメントになるため
+  (`/llms-docs:researching-claude-docs`)、rename は利用者の呼び出しと外部 rule からの参照を
+  壊す破壊的変更になる
+- **公式仕様に skill 名の予約語制約は無い。** 公式ドキュメントが挙げる予約名はスキル
+  フォルダ名 `synced` の 1 件のみで、`claude` / `anthropic` は対象外。
+  `claude plugin validate plugins/llms-docs` は warning ゼロで通る (CLI 2.1.276 実測)
+
 ## Components
 
 | 種類 | パス |
@@ -25,6 +39,8 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | Script | `scripts/parse-ai-sdk.py` |
 | Script | `scripts/parse-firebase.py` |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
+| Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
+| Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
 
 ## 前提条件
 
@@ -115,6 +131,10 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 
 **軽量化方向 (fork 外し / 親 model 継承 / 軽量モード追加) は採用しない。**
 spawn オーバーヘッドは受け入れ、低品質回答や context rot を避ける方を優先する。
+
+`paths` による自動ロードも親 context を太らせない。`paths` がマッチしても SKILL.md 本文は
+親に注入されず (実測値と手順は [docs/paths-and-fork-context.md](docs/paths-and-fork-context.md))、
+`paths` を絞る最適化は不要と判定済み。
 
 「軽い質問でも WebFetch に流れる」課題への対応策は次の 3 系統で、いずれも
 fork + Sonnet 構成を崩さない:

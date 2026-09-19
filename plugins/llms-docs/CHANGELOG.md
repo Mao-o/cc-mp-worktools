@@ -2,9 +2,33 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.24.1] - 2026-09-19
+
+### `paths` × `context: fork` の実機計測と、汎用 source 対応のコスト見積りを docs 化
+
+コード挙動の変更なし (docs のみ)。
+
+- **`docs/paths-and-fork-context.md` を追加** — `paths` にマッチするファイルを読んでも
+  `context: fork` の SKILL.md 本文は親 context に注入されないことを headless の nested
+  セッション 2 本で実測 (Claude Code 2.1.276)。観測できた変化は skill 一覧
+  (name + description、3 skill 合計 1,089 文字) の差し替えのみで、fork の自動起動も無い。
+  よって「`paths` を絞る / 軽量な非 fork skill に分離する」最適化は**不要**と判定した。
+  plugin skill はマッチするファイルが無い環境でも起動時から一覧に載る点、起動時 listing の
+  トークン量は stream-json から測れない点を「裏が取れていないこと」として明記
+- **`docs/generic-llms-txt-source.md` を追加** — 任意の `llms.txt` サイトを source 登録
+  できるようにする案の判断材料。3 parser の共通化率を実測 (各 parser の 81〜83% が
+  ローカル定義、6 サブコマンド層は 3 重化して 1,014 行) し、候補サイト 9 件の
+  `llms.txt` / `llms-full.txt` の形状を HTTP で実測した。URL を持たない corpus が実在し
+  index↔full の join が成立しないため、profile 追加だけでは足りないことを示している
+- **README に `researching-claude-docs` の命名メモを追加** — skill 名に `claude` を含めるのは
+  意図的で rename しない (公式仕様に skill 名の予約語制約は無く、予約名はフォルダ名
+  `synced` のみ。`claude plugin validate` は warning ゼロ)。plugin skill の `name` は起動
+  コマンドの末尾セグメントになるため rename は破壊的変更になる
+- 過去エントリに残っていた内部バックログ ID の参照を汎用表現に置き換えた
+
 ## [0.24.0] - 2026-09-06
 
-### `search` のランキング順を 3 script で統一 (qwk)
+### `search` のランキング順を 3 script で統一
 
 **ユーザー可視の並び順変更。** これまで claude-docs は (changelog 除外, index_score, body hits)、
 ai-sdk / firebase は (body hits, index_score) で、changelog 除外は claude-docs にしか無かった。
@@ -27,17 +51,17 @@ ai-sdk / firebase は (body hits, index_score) で、changelog 除外は claude-
 
 ## [0.23.1] - 2026-09-06
 
-### 解析層の P3 バグ 3 件をまとめて修正 (2wd.27 / 2wd.28 / 2wd.16)
+### 解析層の P3 バグ 3 件をまとめて修正
 
 いずれも characterization test で「既知の制限」として pin されていたもの。修正前に
 同一 live snapshot (code / platform / ai-sdk、2026-09-05〜06 取得) で旧新の全 doc の
 sections dump を比較し、3 corpus とも**完全一致** (fence / 境界判定の変更は実データの
 区切り・見出し収集に影響しない) を確認したうえで pin を仕様テストに置き換えた。
 
-- **FenceTracker が tilde fence (`~~~`) を認識する** (2wd.27)。CommonMark どおり
+- **FenceTracker が tilde fence (`~~~`) を認識する**。CommonMark どおり
   「同じ文字で開始長以上の run」だけが閉じる (backtick fence 内の `~~~`、その逆は本文扱い)。
   3 corpus + firebase サンプルページに `~~~` は 0 行
-- **`_norm()` の sibilant 複数形規則を語尾ごとに読み替え** (2wd.28)。`-ses` / `-zes` は
+- **`_norm()` の sibilant 複数形規則を語尾ごとに読み替え**。`-ses` / `-zes` は
   silent-e 語根 + `s` (response / case / database / release / size)、`-sses` / `-zzes` /
   `-ches` / `-xes` / `-shes` は硬子音 + `es` (class / match / box / hash) を既定にし、
   頻出の反例 (`aliases` / `statuses` → 硬子音、`caches` → silent-e) を小さな例外表で扱う。
@@ -46,7 +70,7 @@ sections dump を比較し、3 corpus とも**完全一致** (fence / 境界判�
   cases×42 / databases×21 ...)、2 語は旧新とも非語 (hypotheses / docses)。検索出力の
   比較では `caches` クエリのみ変化: 旧版は非語 `cach` が `caching` に偶然部分一致して
   無関係ページ 2 件を拾っていたが、新版は `cache` で本命ページだけを返す
-- **ai-sdk の frontmatter 開始判定を厳格化** (2wd.16)。`---` 〜 `---` 間の全行が
+- **ai-sdk の frontmatter 開始判定を厳格化**。`---` 〜 `---` 間の全行が
   YAML 形状 (`key: value` / `- item` / インデント継続 / 空行) かつ `title:` を含む場合
   だけ境界にする。本文の水平線 + `Note:` 散文で doc が割れる偽境界を排除。live ai-sdk
   corpus は修正前後とも 576 docs / untitled 0 で sections dump 一致
@@ -172,7 +196,7 @@ README にクラス単位・メソッド単位で 1 件だけ指定する実行�
 
 ## [0.22.2] - 2026-09-05
 
-### platform source の検索停止を修正 — 上流 llms-full.txt の YAML frontmatter 区切りに追従 (2wd.30)
+### platform source の検索停止を修正 — 上流 llms-full.txt の YAML frontmatter 区切りに追従
 
 2026-08 以降 platform.claude.com の llms-full.txt は各ページが `# Title` + `URL:` ではなく
 YAML frontmatter (`---` / `title:` / `url:` / `description:` / `---`) で始まり、本文に H1 を
