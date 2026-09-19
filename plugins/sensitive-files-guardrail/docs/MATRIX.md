@@ -170,6 +170,11 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > `--exclude-ignore=FILE` (FILE の中身を読むので path)、gawk `-i FILE` /
 > `--include=FILE` と ack `--ackrc FILE` (pattern 枠を持つコマンドで値を読む
 > option は path 登録が必要。`gawk -i .env 'BEGIN {…}'` は deny)。
+> 算術追跡の**既知の限界** (0.33.2 で明文化): 配列添字 `a[1<<2]=x` /
+> `${a[1<<2]}` と部分文字列 `${x:1<<2:2}` の `<<` は追跡せず heredoc 扱いのまま。
+> 偶然の delimiter に完全一致する行が後続にあるときだけ間の行が消える
+> (無ければ fallback の行分割で deny)。裸の `[` は日常的に現れるため意図的に
+> 追跡しない。
 
 > **0.25.0 で判定境界が変化** (判定境界バッチ、2026-08 精査。4 件 + 隔離内
 > レビューで発覚した clobber 形の取りこぼし 1 件):
