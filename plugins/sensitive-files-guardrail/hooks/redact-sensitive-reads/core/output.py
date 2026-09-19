@@ -71,7 +71,11 @@ TRUNCATE_MARKER = "\n...[truncated]"
 
 # autonomous 実行モード: ``ask_or_allow`` がここに含まれる
 # permission_mode で allow に倒す。
-#   - "auto": CLI 2.1.83+ の前段 classifier モード
+#   - "auto": CLI 2.1.83+ の前段 classifier モード。**classifier は hook が返した
+#     ``ask`` を自動解決しない** — headless 実測 (2026-09-19 / CLI 2.1.276) では
+#     ``ask`` は allow ではなく denial に解決された。ここに "auto" が入っているのは
+#     ``ask_or_allow`` (Bash 静的解析不能ケース) をハーネス委譲方針に沿って allow に
+#     倒すためで、「ask が素通りするから」ではない
 #   - "bypassPermissions": 全確認スキップモード
 #   - "plan": Plan mode (副作用は plan 承認まで保留、Bash も dry-run 相当)
 # それ以外 ("default" / "acceptEdits" / "dontAsk") は ask に倒す。
@@ -251,6 +255,12 @@ def ask_or_deny(reason: str, envelope: dict) -> HookResponse:
     Read/Edit handler の symlink/special/parent-dir fail、非 bash tool の catch-all
     例外など、「判定不能だが機密の可能性があり bypass で allow してはいけない」
     用途で使う。
+
+    ``auto`` を deny 側に加える必要は無い (実測 2026-09-19 / CLI 2.1.276)。
+    headless の ``auto`` で hook が ``ask`` を返すと CLI は **denial に解決する**
+    (ツールは実行されず、reason は ``tool_result`` の error として返る) ため、
+    ここで ``ask`` のままにしても bypass のような素通りは起きない。実測の内訳は
+    ``docs/DESIGN.md`` の 2026-09-19 エントリを参照 (対話セッションの ``auto`` は未測定)。
     """
     if envelope.get("permission_mode") == "bypassPermissions":
         return make_deny(reason)

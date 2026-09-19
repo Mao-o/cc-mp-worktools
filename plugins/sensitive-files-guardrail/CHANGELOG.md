@@ -23,6 +23,49 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.33.1
+
+`auto` mode で hook の `ask` がどう解決されるかの実機実測と、その記録 (docs のみ)。
+**判定表の変化: deny / allow / ask / block のセルは 1 つも変わっていない。**
+実装 (判定ロジック) も変えていない — 変わったのは docs 3 ファイルと
+`core/output.py` の docstring / コメントだけ。
+
+**利用者影響なし** (挙動は 0.33.0 と同一)。テスト件数も不変
+(redact **1,368** / check **165**)。
+
+### 実測: `auto` では hook の `ask` は allow ではなく denial に解決される
+
+`ask_or_deny` は `bypassPermissions` だけを deny に倒し `auto` では `ask` を返すが、
+`auto` は前段 classifier が許可判断するモードのため「classifier が hook の `ask` を
+自動解決して allow にし、symlink 経由の `.env` Read が redaction なしで通る」懸念が
+未実測のまま残っていた (2026-04-11 の実測は default / bypass / plan のみ)。
+
+Claude Code 2.1.276 で実測 (nested headless: `-p` + `--permission-mode auto` +
+`--output-format stream-json --include-hook-events` + stdin `< /dev/null`)。
+`ask_or_deny` の auto 側を踏む 2 形 (Read: symlink の `.env` / Write: 親が symlink の
+`.env`) と、対照の `deny` 2 形 (通常 `.env` の Read / Edit) を観測した:
+
+- **`ask` は denial に解決される (安全側)**。`hook_response` の
+  `"permissionDecision": "ask"` の直後に `subtype=permission_denied`
+  (`decision_reason_type: "hook"`) が出て、`tool_result` は `is_error=true`。
+  ツールは実行されず (Write のケースでファイルが作られていないことも確認)、
+  permission 待ちのハングも 4 run とも無し
+- よって **`ask_or_deny` に `auto` を加える必要は無い**。懸念は再現しないため
+  判定は据え置き
+- 副産物 1: denial に解決されるとき **`ask` の reason はモデルに届く**。
+  「`ask` reason はユーザー UI のみ」(2026-04-11) は *ask が実際に提示された場合*の
+  観測であり、提示され得ない headless では成立しない。`docs/DESIGN.md` /
+  `docs/MATRIX.md` / `docs/MAINTAINING.md` の同記述 3 箇所を揃えて訂正
+- 副産物 2: hook `deny` は `subtype=permission_denied` イベントを出さないが、
+  hook `ask` の denial 解決は出す (`result.permission_denials` には両方載る)
+- **対話セッション (TUI) の `auto` は未測定** (headless から TUI は駆動できない)。
+  `docs/MAINTAINING.md` の再実測 Runbook step 7 の「headless で代用できるか未確認」も
+  実測に合わせ、「素通りしないことの切り分けには使えるが、ダイアログ提示と
+  ダイアログなし拒否の判別には使えない」と書き直した
+- この観測から「`auto` を `LENIENT_MODES` から外すべき」は導けない
+  (`LENIENT_MODES` は `ask_or_allow` の扱いで、`auto` の収録根拠はハーネス委譲方針
+  という設計判断) 旨も `core/output.py` のコメントに明記
+
 ## 0.33.0
 
 docs 精度 (条件付き metadata-only の記述) / lenient allow の Claude 向け開示 /

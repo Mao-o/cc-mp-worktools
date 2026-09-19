@@ -35,6 +35,9 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 - **deny**: block。`permissionDecisionReason` を返して LLM に値が露出しない
 - **allow**: 素通り (hook は no-op 空オブジェクトを返す)
 - **ask**: Claude Code UI でユーザー介在を要求。reason はモデルに届かない
+  — ただし**提示先が無い headless (`-p`) では CLI が ask を denial に解決し、
+  reason は `tool_result` の error としてモデルに届く** (実測 2026-09-19 / CLI 2.1.276、
+  [DESIGN.md](./DESIGN.md) の該当エントリ)。**判定 (下表の各セル) は変わらない**
 
 ## Read handler
 

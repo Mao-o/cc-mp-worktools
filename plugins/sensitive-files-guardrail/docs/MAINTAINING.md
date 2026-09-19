@@ -599,9 +599,15 @@ step 8 の収録判断は「その mode が autonomous 実行モードか」に�
   発火しなければ ask 自体が起きないので、その場合は「分類不能」として扱う
 - 上の観測 4 分類が起こりうる全てかは未確認。想定外の挙動を見たら分類表に足したうえで、
   既定 (収録しない) を維持する
-- headless (`claude -p`) で代用できるかは未確認。「手動スモーク」節のとおり headless では
-  `--permission-mode auto` と `< /dev/null` が要り、**ask の UI 挙動を観測する目的には
-  向かない**と考えられるため、対話セッションを前提に書いてある
+- headless (`claude -p`) は**半分だけ代用できる** (2026-09-19 実測、下の実測ログ)。
+  `--permission-mode auto` + `< /dev/null` の headless で hook に `ask` を返させると、
+  CLI は **denial に解決する** (`subtype=permission_denied` / `decision_reason_type: "hook"`)。
+  つまり headless は上の分類表の **「確認なしに実行が進む」(= 収録候補) かどうかの切り分けには
+  使える** — 素通りしないことは確定できる。一方で「確認ダイアログが出た」と
+  「ダイアログなしで拒否された」は headless では**区別できない** (提示先が無いので常に後者に
+  見える)。分類表の 1 行目と 3 行目の判別には対話セッションが必要なので、本手順は対話を
+  前提に書いてある。**headless で「拒否された」を観測しても 3 行目とは断定せず、
+  既定 (収録しない) を維持する**
 
 ### 8. 条件付き — `LENIENT_MODES` 収録判断 (判定境界の変更)
 
@@ -655,10 +661,11 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
 
 | 日付 | CLI version | 実測内容 | 結果 |
 |---|---|---|---|
-| 2026-04-11 | 2.1.101 | `permissionDecisionReason` / `systemMessage` / `ask` reason の配信経路 | deny 時の reason はモデルに完全配信、`systemMessage` はモデルに届かない、`ask` reason はユーザー UI のみ。要点は `docs/DESIGN.md` の Phase 0 節 |
+| 2026-04-11 | 2.1.101 | `permissionDecisionReason` / `systemMessage` / `ask` reason の配信経路 | deny 時の reason はモデルに完全配信、`systemMessage` はモデルに届かない、`ask` reason はユーザー UI のみ (**ask が実際に提示された場合**。提示され得ない headless では denial に解決され reason が届く → 2026-09-19 行)。要点は `docs/DESIGN.md` の Phase 0 節 |
 | 2026-04-22 | 2.1.101 系 | plan mode での Bash hook 発火有無 | **非発火** (Case C)。`LENIENT_MODES` の `"plan"` は dead entry と判断し 0.6.0 で撤去 |
 | 2026-05-18 | 2.1.x (envelope 未採取) | plan mode での Bash hook 発火有無 (実機の体感) | **発火** を確認 (調査ワンライナーが ask に倒れた)。0.13.0 で `"plan"` を再追加。専用 envelope での再実測は未実施 |
 | 2026-08-24 | 2.1.241 | step 1 (`claude --help` の `--permission-mode` choices 列挙) のみ実施 | choices は `acceptEdits` / `auto` / `bypassPermissions` / **`manual`** / `dontAsk` / `plan`。**`manual` が `_KNOWN_PERMISSION_MODES` に無い**ことを検出 (上の Worked example)。`default` は choices に無いが envelope 側に出るため維持。envelope 採取 (step 2〜4)、behavioral probe による分類 (step 7)、定数更新は未実施 (内部バックログの別チケットで追跡) |
+| 2026-09-19 | 2.1.276 | **auto mode で hook の `ask` がどう解決されるか** (Read: symlink `.env` / Write: 親が symlink の `.env` で `ask_or_deny` の auto 側を踏ませ、対照として通常 `.env` の Read / Edit で `deny` を踏ませた。nested headless: `-p` + `--permission-mode auto` + `--include-hook-events` + `< /dev/null`) | **`ask` は allow ではなく denial に解決される** (安全側)。`hook_response` の `"permissionDecision": "ask"` → `subtype=permission_denied` (`decision_reason_type: "hook"`) → `tool_result is_error=true` (本文は hook の reason) → `result.permission_denials` に計上。ツール実行・ハングは 4 run とも無し。**`ask_or_deny` に `auto` を加える必要は無く、判定表は無変更**。副産物: denial 解決時の `ask` reason は**モデルに届く** / hook `deny` は `permission_denied` イベントを出さない。詳細は `docs/DESIGN.md` の 2026-09-19 エントリ。**対話セッション (TUI) の auto は未測定** |
 
 ## 拡張ポイント
 
