@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from judge import Verdict
+from judge import ROLE_MULTIPLIER, Verdict
 from metrics import Metrics
 
 _TIER_SEQUENCE = ("note", "review", "warn", "strong")
@@ -57,7 +57,7 @@ def _format_multiplier(value: float) -> str:
     (P2-2)。
 
     以前は固定小数点2桁 (``f"{value:.2f}"``) に丸めてから末尾ゼロを削っていた。
-    言語/role/宣言的緩和の既定係数 (1.0/1.15/1.5/1.6 等) はいずれも2桁以内に
+    言語/role/宣言的緩和の既定係数 (1.0/1.15/1.5/1.6/2.5 等) はいずれも2桁以内に
     収まるため問題にならなかったが、``FILE_SPLIT_ADVISOR_SCALE`` はユーザーが
     任意精度で設定できる値で、2桁に収まらない入力を丸めて情報を失っていた:
     ``0.004`` は "0.00" → "0.0" に潰れて judge が実際に使う極小の倍率と
@@ -85,7 +85,7 @@ def _multiplier_breakdown(language: str, verdict: Verdict) -> str:
     """実効閾値の根拠になった係数を「言語 係数 (× 宣言的 係数)」の形で示す。
 
     role (test 係数) は既存の role_note 表示と役割が重複するためここには
-    含めない (test: 閾値 1.6倍 という別の注記が既にある)。
+    含めない (``(test: 閾値 N倍)`` という別の注記が既にある)。
     """
     parts = [f"{language} {_format_multiplier(verdict.applied_multipliers['language'])}"]
     declarative = verdict.applied_multipliers.get("declarative", 1.0)
@@ -201,7 +201,13 @@ def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metri
     scale_note = (
         f" (全体 {_format_multiplier(verdict.scale)}倍)" if verdict.scale != 1.0 else ""
     )
-    role_note = " (test: 閾値 1.6倍)" if role == "test" else ""
+    # role 係数は judge が実際に適用した値をそのまま表示する (0.6.0)。定数を
+    # message.py 側にも書くと、``ROLE_MULTIPLIER`` を動かしたときに表示だけが
+    # 旧値のまま残り「目安の数値が printed 係数から導出できない」状態に戻る。
+    role_note = ""
+    if role == "test":
+        role_multiplier = verdict.applied_multipliers.get("role", ROLE_MULTIPLIER["test"])
+        role_note = f" (test: 閾値 {_format_multiplier(role_multiplier)}倍)"
     header = (
         f"静的解析メモ (file-split-advisor): {path}\n"
         f"行数: {metrics.line_count} (言語: {language}, 判定: {verdict.tier}"
@@ -214,9 +220,12 @@ def build(path: Path, language: str, role: str, verdict: Verdict, metrics: Metri
     elif verdict.applied_multipliers.get("declarative", 1.0) != 1.0:
         # signal_count == 0 (行数のみが emit 根拠) の透明性確保: 何が根拠で
         # 出力されたかを隠さない。宣言的コードの推測は、実際に宣言的緩和が
-        # 適用された (control_flow_density < 0.02) ときだけ表示する — 適用
-        # されていないのに一律で表示すると、制御フロー密度の高いファイル
-        # (例: 分岐の多いハンドラ) にも誤って「宣言的では」と表示してしまう。
+        # 適用された (role=normal かつ control_flow_density < 0.02) ときだけ
+        # 表示する — 適用されていないのに一律で表示すると、制御フロー密度の
+        # 高いファイル (例: 分岐の多いハンドラ) にも誤って「宣言的では」と
+        # 表示してしまう。0.6.0 以降 role=test には宣言的緩和を重ねないため、
+        # 密度が低いテストファイルでもこの行は出ない (緩和が効いていないので
+        # 「宣言的だから閾値が緩い」という説明が成立しないため)。
         signal_line = (
             "検出された構造シグナル: なし (行数のみが基準に該当。宣言的なコード"
             "(ルーティング定義・型定義など) の可能性があります)"

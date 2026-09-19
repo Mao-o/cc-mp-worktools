@@ -57,7 +57,16 @@ LANGUAGE_MULTIPLIER: dict[str, float] = {
 }
 
 ROLE_MULTIPLIER: dict[str, float] = {
-    "test": 1.6,
+    # test は 1.6 だったが 0.6.0 で 2.5 に引き上げた。テストは同型ケースの列挙で
+    # 単調に伸びるのが正常で、分割提案が stale になりやすい。コーパス 10,097
+    # ファイルの実測では、1.6 のときに emit されていたテストファイルは 1 件を
+    # 除き warn/strong (行数の中央値 1,472 行) で、行数そのものが発火条件に
+    # なっていた。2.5 にすると test の emit は 40 → 28 件に減る (全体 446 →
+    # 434)。3.0 も測ったが、emit 集合が 2.5 と一致するのは「重ね掛け廃止を
+    # 伴わない係数単独の比較」(どちらも 423 件) のときだけで、採用形
+    # (重ね掛け廃止と併用) では 3.0 のほうが 8 件少ない (434 → 426 /
+    # test 28 → 20)。効果が穏やかな 2.5 を採る。
+    "test": 2.5,
     "normal": 1.0,
 }
 
@@ -91,6 +100,20 @@ def _effective_thresholds(
     message.py 側は既存の role_note 表示と役割が重複するため breakdown には
     含めない (test 係数の可視化は role_note に残す)。
 
+    **role=test には宣言的緩和を重ねない** (0.6.0)。0.5.0 までは role (1.6) と
+    declarative (1.6) が独立に掛かり、テストファイルだけ 2.56 倍の緩和を受けて
+    いた。0.4.0 で制御フロー密度の水増し (コメント・文字列内の if/for) を解消
+    した結果、フィクスチャ文字列の多い大きなテストファイルの密度が
+    ``DECLARATIVE_THRESHOLD`` を下回るようになり、warn だった判定が review に
+    落ちる件数が増えていた (コーパス 10,097 ファイル中、test の 67% が宣言的
+    緩和も受けていた)。role=test は ``ROLE_MULTIPLIER`` だけで一律に緩和する。
+
+    ``max(role, declarative)`` として書くこともでき、現行の係数
+    (test 2.5 > DECLARATIVE_RELAXATION 1.6) では全件で同値になることを実測で
+    確認しているが、**将来 test 係数を 1.6 未満に下げたときに意味が変わる**
+    (max だと宣言的緩和の方が勝ってしまう)。「test には重ねない」という意図を
+    そのまま書く。
+
     ``scale`` (``FILE_SPLIT_ADVISOR_SCALE``) はユーザーが設定するグローバルな
     倍率で、ファイル個別の推論シグナルではないため ``applied_multipliers`` には
     含めない (message.py の breakdown 表示対象外)。実効閾値の計算には反映する。
@@ -100,10 +123,11 @@ def _effective_thresholds(
     (``(全体 N倍)``) を組み立てる。
     """
     is_declarative = metrics.control_flow_density < DECLARATIVE_THRESHOLD
+    stacks_declarative = is_declarative and role != "test"
     multipliers = {
         "language": LANGUAGE_MULTIPLIER.get(language, 1.0),
         "role": ROLE_MULTIPLIER.get(role, 1.0),
-        "declarative": DECLARATIVE_RELAXATION if is_declarative else 1.0,
+        "declarative": DECLARATIVE_RELAXATION if stacks_declarative else 1.0,
     }
     # scale は呼び出し側 (__main__.py::_get_scale) が is_scale_safe() で検査済み
     # という前提で受け取る (P2-1)。ここで未検査の巨大な scale (例: 1e308) を
@@ -133,9 +157,14 @@ def is_scale_safe(scale: float) -> bool:
     「使えない値」として扱い、nan/inf と同じフォールバック経路 (既定 1.0 に
     戻す) に載せる。
 
-    この検査は実際の言語/role/宣言的緩和の値によらず、**既知の最悪ケースの
-    組み合わせ** (``LANGUAGE_MULTIPLIER``/``ROLE_MULTIPLIER`` の最大値 ×
-    ``DECLARATIVE_RELAXATION``) で行う。意図的に保守的な判定であり、実際には
+    この検査は実際の言語/role/宣言的緩和の値によらず、**既知の係数の最大値を
+    すべて掛けた上界** (``LANGUAGE_MULTIPLIER``/``ROLE_MULTIPLIER`` の最大値 ×
+    ``DECLARATIVE_RELAXATION``) で行う。0.6.0 で role=test に宣言的緩和を
+    重ねなくなったため、この組み合わせは**実在しない** (実際に到達しうる最大は
+    ``max(最大言語係数 × test 係数, 最大言語係数 × 宣言的緩和)``)。到達しない
+    上界のままにしているのは、失敗方向を「安全でない側に倒さない」に固定する
+    ためで、係数表が変わっても常に真の最大以上であることが自明な式を選んで
+    いる。意図的に保守的な判定であり、実際には
     ``python``/``normal`` のような軽い係数のファイルなら安全な scale でも、
     この判定では「安全でない」とみなされ拒否されることがある。ファイルごとに
     個別の安全マージンを計算する設計も可能だが、そうすると同じ

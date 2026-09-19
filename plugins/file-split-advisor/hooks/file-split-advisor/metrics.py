@@ -191,9 +191,24 @@ _OTHER_LINE_COMMENTS: dict[str, tuple[str, ...]] = {
 # ``/* ... */`` を持つ言語 (= `//` 行コメントを持つ言語と同じ集合)。
 _BLOCK_COMMENT_LANGUAGES = _SLASH_COMMENT_LANGUAGES
 
-# 三重引用符の複数行文字列を持つ言語。
-_TRIPLE_QUOTE_LANGUAGES = frozenset({"python", "elixir"})
-_TRIPLE_QUOTE_DELIMITERS = ('"""', "'''")
+# 三重引用符の複数行文字列を持つ言語と、その区切り記号 (言語別)。
+#
+# 0.5.0 までは python / elixir だけを対象にし、区切り記号も 2 種固定だった。
+# Kotlin / C# (raw string) / Swift / Julia / Groovy にも ``"""..."""`` が
+# あり、対象外だとマスクが最初の改行で止まって**文字列の中の行頭 if / for が
+# 制御フロー密度に数えられる** (大きな SQL / doc 文字列を持つファイルで宣言的
+# 緩和が外れ、誤った分割助言が出る)。言語ごとに実在する区切り記号だけを
+# 登録する — Julia に ``'''`` は無く、単一引用符は文字リテラルなので、全言語
+# 一律の 2 種固定にはしない。
+_TRIPLE_QUOTE_DELIMITERS_BY_LANGUAGE: dict[str, tuple[str, ...]] = {
+    "python": ('"""', "'''"),
+    "elixir": ('"""', "'''"),
+    "kotlin": ('"""',),
+    "csharp": ('"""',),
+    "swift": ('"""',),
+    "julia": ('"""',),
+    "groovy": ('"""',),
+}
 
 # **改行を跨ぐ**文字列リテラルの引用符。JS/TS のテンプレートリテラルと Go の
 # raw string はバッククォートで囲まれ、複数行に跨るのが普通の書き方
@@ -244,8 +259,7 @@ def _noise_re(language: str) -> re.Pattern | None:
 
     parts: list[str] = []
     multiline_delimiters: tuple[str, ...] = ()
-    if language in _TRIPLE_QUOTE_LANGUAGES:
-        multiline_delimiters += _TRIPLE_QUOTE_DELIMITERS
+    multiline_delimiters += _TRIPLE_QUOTE_DELIMITERS_BY_LANGUAGE.get(language, ())
     multiline_delimiters += _MULTILINE_STRING_DELIMITERS.get(language, ())
     for delim in multiline_delimiters:
         escaped = re.escape(delim)
@@ -290,9 +304,12 @@ def mask_comments_and_strings(text: str, language: str) -> str:
 
     既知の限界: ``<!-- -->`` (vue/svelte のテンプレート)、Ruby の
     ``=begin/=end``、JavaScript の正規表現リテラル中の引用符は扱わない。
-    三重引用符とバッククォート (テンプレートリテラル / Go の raw string) は
-    改行を跨いで潰すため、対になる閉じ記号を持たない 1 個 (正規表現リテラルの
-    中に現れたバッククォート等) があるとそこから先すべてを文字列とみなす。
+    三重引用符は ``_TRIPLE_QUOTE_DELIMITERS_BY_LANGUAGE`` に登録した言語の、
+    登録した区切り記号だけを見る (Java の text block、Groovy の ``'''``、C# の
+    引用符 4 個以上の raw string は対象外)。三重引用符とバッククォート
+    (テンプレートリテラル / Go の raw string) は改行を跨いで潰すため、対になる
+    閉じ記号を持たない 1 個 (正規表現リテラルの中に現れたバッククォート等) が
+    あるとそこから先すべてを文字列とみなす。
     改行を跨ぐ文字列でも ``\\`` に続く 1 文字は区切りとして扱わないため、
     バックスラッシュをエスケープ記号として扱わない Go の raw string が
     ``\\`` で終わる (``` `\\d+\\` ```) と閉じ記号を見失う。
@@ -677,6 +694,11 @@ def _iter_import_lines(lines: list[str], language: str):
     ``from deps import (  # grouped`` / ``import (  // grouped`` は
     ``endswith("(")`` を満たさず、継続行がまったく走査されずモジュール名が
     1 件も分類されなかった (マージ前レビューの指摘)。
+
+    継続行のうち**コメントだけの行は yield しない** (0.6.0)。``// http
+    clients`` のような見出しコメントを import 行として扱うと、カテゴリ辞書に
+    一致する語 (``http``) からカテゴリが立ち ``import_category_count`` を
+    水増しする。
     """
     block_remaining = 0
     require_call_is_import = language in _REQUIRE_CALL_LANGUAGES
@@ -688,9 +710,15 @@ def _iter_import_lines(lines: list[str], language: str):
             if stripped.startswith(")"):
                 block_remaining = 0
                 continue
-            if stripped:
+            code = _strip_trailing_comment(stripped, language)
+            # **コメントのみの継続行は import 行ではない** (0.6.0)。Go の
+            # ``import (`` ブロックや Python の ``from x import (`` ブロックに
+            # 書かれる ``// http clients`` / ``# db drivers`` のような見出し
+            # コメントを import 行として yield すると、その散文に含まれる語から
+            # カテゴリが立ち ``import_category_count`` が水増しされる。
+            if code:
                 yield line
-            if _strip_trailing_comment(stripped, language).endswith(")"):
+            if code.endswith(")"):
                 block_remaining = 0
             continue
         if (

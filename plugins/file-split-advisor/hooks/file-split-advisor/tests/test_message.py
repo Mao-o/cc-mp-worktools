@@ -147,11 +147,23 @@ class TestMultiplierBreakdown(unittest.TestCase):
 
     def test_role_multiplier_not_duplicated_in_breakdown(self):
         # role (test 係数) は breakdown に含めない — role_note が別途表示する。
-        v = _verdict(applied_multipliers={"language": 1.0, "role": 1.6, "declarative": 1.0})
+        v = _verdict(applied_multipliers={"language": 1.0, "role": 2.5, "declarative": 1.0})
         text = message.build(Path("foo_test.py"), "python", "test", v, _metrics())
-        self.assertIn("(test: 閾値 1.6倍)", text)
-        self.assertNotIn("test 1.6", text)
+        self.assertIn("(test: 閾値 2.5倍)", text)
+        self.assertNotIn("test 2.5", text)
         self.assertIn("(python 1.0)", text)
+
+    def test_role_note_reflects_the_multiplier_judge_actually_applied(self):
+        # 0.6.0: role_note の係数を message.py 側にハードコードしていると、
+        # ``ROLE_MULTIPLIER`` を動かしたときに表示だけ旧値のまま残る。judge を
+        # 実際に通した Verdict で「表示 = 適用値」を固定する。
+        m = _metrics(line_count=1250, control_flow_density=0.01)
+        v = judge.judge(m, "python", "test")
+        text = message.build(Path("test_foo.py"), "python", "test", v, m)
+        expected = message._format_multiplier(judge.ROLE_MULTIPLIER["test"])
+        self.assertIn(f"(test: 閾値 {expected}倍)", text)
+        # 宣言的緩和は test には重ねないので breakdown に出ない。
+        self.assertNotIn("宣言的", text)
 
 
 class TestScaleNote(unittest.TestCase):
@@ -180,16 +192,16 @@ class TestScaleNote(unittest.TestCase):
         self.assertNotIn("全体", text)
 
     def test_scale_note_combines_with_role_note(self):
-        # role_note (test: 閾値 1.6倍) と scale note (全体 N倍) は両立し、
+        # role_note (test: 閾値 N倍) と scale note (全体 N倍) は両立し、
         # 互いを上書きしない。
         v = _verdict(
             tier="warn",
-            applied_multipliers={"language": 1.0, "role": 1.6, "declarative": 1.0},
+            applied_multipliers={"language": 1.0, "role": 2.5, "declarative": 1.0},
             scale=0.5,
         )
         text = message.build(Path("foo_test.py"), "python", "test", v, _metrics())
         self.assertIn("(全体 0.5倍)", text)
-        self.assertIn("(test: 閾値 1.6倍)", text)
+        self.assertIn("(test: 閾値 2.5倍)", text)
 
     def test_scale_note_preserves_significant_digits_for_small_scale(self):
         # P2-2 回帰: 0.004 は固定2桁表示だと "0.00" → "0.0" に潰れ、judge が
@@ -265,14 +277,14 @@ class TestFormatSignal(unittest.TestCase):
 
 
 class TestRoleNoteAbsentForNormalRole(unittest.TestCase):
-    """role_note ("(test: 閾値 1.6倍)") は role=="test" のときだけ表示される。
+    """role_note ("(test: 閾値 N倍)") は role=="test" のときだけ表示される。
     既存テストは test ロールでの表示は確認済みだが、normal ロールで出ない
     ことを直接確認するテストが無かった。"""
 
     def test_normal_role_omits_role_note(self):
         v = _verdict(applied_multipliers={"language": 1.0, "role": 1.0, "declarative": 1.0})
         text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
-        self.assertNotIn("閾値 1.6倍", text)
+        self.assertNotIn("test: 閾値", text)
 
 
 class TestDefHighlightLine(unittest.TestCase):
@@ -508,19 +520,22 @@ class TestThresholdDisplayRounding(unittest.TestCase):
         self.assertNotIn("note=172", text)
 
     def test_default_path_float_dust_threshold_rounds_up_to_actual_boundary(self):
-        # 既定経路のもう1つの実例 (role 係数 1.6 との組み合わせ): 基準 150 ×
-        # java の言語係数 1.5 × test の role 係数 1.6 は数式上は 360 だが、
+        # 既定経路のもう1つの実例 (宣言的緩和との組み合わせ): 基準 150 ×
+        # java の言語係数 1.5 × 宣言的緩和 1.6 は数式上は 360 だが、
         # float 演算の丸め誤差で実際には 360.00000000000006 になる
         # (150*1.5*1.6 は二進浮動小数点では厳密な整数にならない)。
         # ``_compute_tier`` が使う実際の比較 (line_count >= threshold) では
         # 360 行は note tier に届かず、361 行で初めて届く。ceil() はこの
         # 「実際の境界」に忠実で、round() が示す 360 は実際には note に
         # 届かない値を「届く」と誤って表示することになる。
-        below = judge.judge(_metrics(line_count=360), "java", "test")
-        at = judge.judge(_metrics(line_count=361), "java", "test")
+        declarative = dict(control_flow_density=0.01)  # < DECLARATIVE_THRESHOLD
+        below = judge.judge(_metrics(line_count=360, **declarative), "java", "normal")
+        at = judge.judge(_metrics(line_count=361, **declarative), "java", "normal")
         self.assertEqual(below.tier, "ok")  # 360 行はまだ note に届かない
         self.assertEqual(at.tier, "note")  # 361 行で届く
-        text = message.build(Path("FooTest.java"), "java", "test", at, _metrics(line_count=361))
+        text = message.build(
+            Path("Routes.java"), "java", "normal", at, _metrics(line_count=361, **declarative)
+        )
         self.assertIn("note=361", text)
         self.assertNotIn("note=360", text)
 

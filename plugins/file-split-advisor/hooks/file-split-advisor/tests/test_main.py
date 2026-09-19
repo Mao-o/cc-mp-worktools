@@ -300,8 +300,9 @@ class TestTestRoleDirScoping(BaseMainTest):
 
     def test_project_placed_under_a_test_dir_is_still_normal(self):
         # プロジェクトの置き場所がたまたま `<何か>/test/project` でも、配下の
-        # ソースは normal のまま。role が test になると閾値が 1.6 倍に緩み、
-        # 350 行は review (=300) ではなく note (=240) に落ちて無通知になる。
+        # ソースは normal のまま。role が test になると閾値が 2.5 倍に緩み、
+        # 350 行は review (=300) ではなく ok (note=375 未満) に落ちて
+        # 無通知になる。
         cwd = str(Path(self.tmp) / "test" / "project")
         path = self._write_nested("test/project/src/utils.py", _python_lines(350))
         envelope = self._envelope(path)
