@@ -38,20 +38,6 @@ Stop は編集のあった全ターンで発火し、最大 `cursor.timeout_sec(
 見送り (`MIN_LINES` / `COOLDOWN_SEC`) では **pending を消費しない**ので、貯まった
 変更は次に走るレビューへまとめて載る。所要時間と結果は `systemMessage` に出す。
 
-## 0.11.0: 同一ターン内で commit された変更も (証明できたときだけ) レビューする
-
-pending に積んだ後 Stop までの間にそのパスを commit すると `git diff HEAD -- <path>`
-が空になり、0.8.0 以前は黙って消費されて一度もレビューされなかった。0.10.0 は
-「取得できなかった」と通知するだけで、レビュー自体は行われていなかった。
-
-0.11.0 は **PostToolUse が編集直後のディスク内容の指紋 (sha256) を記録**し、Stop 時点の
-ディスク内容がそれと一致するときだけ、そのパスを最後に変更した commit の差分でレビュー
-する (`content_digest` / `_restore_committed_diff`)。基点を「記録時点の HEAD」まで遡らせる
-0.9.0 の形は、そのパスを通過した**他の書き手の変更**まで拾って外部へ送るため撤去済み。
-指紋は「HEAD に入っている内容 = 自分が書いた内容」を示せるので、帰属を内容側で確定できる。
-**証明できないときは復元せず通知だけ** (送信範囲が広がる方向には倒さない)。
-git を呼ぶのは Stop 側だけなので「PostToolUse を軽く保つ」設計は維持している。
-
 ## 0.8.0 で入れた「hook error に見せない」変更
 
 指摘ありのとき、0.7.0 までは常に `decision: "block"` + `reason` を返していた。この形式は
@@ -161,7 +147,6 @@ if os.name != "posix":
 import hashlib
 import json
 import re
-import stat
 import subprocess
 import time
 
@@ -205,33 +190,6 @@ COLLECT_BUDGET_SEC = 30
 
 # systemMessage / stderr に列挙するファイル名の上限 (それ以上は件数だけ)
 MAX_LISTED_NAMES = 10
-
-# --- 同一ターン内 commit の差分復元に使う内容指紋 (0.11.0) -------------------
-#
-# 1 ファイルあたり指紋を取る上限。PostToolUse は 10 秒の hook timeout で回るので、
-# 巨大ファイルを読み切る経路を作らない。超過分は指紋を記録しない = 復元しない
-# (送らない側に倒れる)。レビューに載る diff の上限 (MAX_FILE_DIFF_BYTES = 32KB) から
-# 見れば 1MB は十分に大きい。
-SNAPSHOT_MAX_FILE_BYTES = 1_000_000
-
-# 1 回の PostToolUse で指紋のために読むバイト数の合計上限。Bash 経由の変更は 1 回の
-# 呼び出しで多数のパスを積みうる (`MAX_PENDING_PATHS` = 200) ため、per-file 上限だけ
-# では読み込み量が積み上がる。予算を使い切った以降のパスは指紋なし = 復元しない。
-SNAPSHOT_BUDGET_BYTES = 8_000_000
-
-#: 「そのパスがディスク上に存在しなかった」ことを表す指紋。削除を同一ターン内で
-#: commit したケース (HEAD もディスクも空) を復元できるようにするため、内容ハッシュと
-#: 同じ枠で持つ。
-DIGEST_ABSENT = "absent"
-
-_DIGEST_CHUNK_BYTES = 65536
-
-# 復元 (`_restore_committed_diff`) を試みるために `COLLECT_BUDGET_SEC` の残り予算として
-# 要求する秒数。復元は git を 2 回呼ぶので、その 2 回ぶんを確保できないときは試みない。
-# これにより収集ループ全体の最悪ケースは従来どおり
-# 「COLLECT_BUDGET_SEC + 最後の 1 パスの path_diff」に収まる
-# (`tests/test_review_set.py::TestTimeoutBudgets`)。
-RESTORE_RESERVE_SEC = 2 * gitscan.RESTORE_TIMEOUT_SEC
 
 _EDIT_TOOLS = ("Write", "Edit", "NotebookEdit")
 
@@ -517,71 +475,11 @@ def handle_post_tool(payload: dict) -> None:
     if tool_name in _EDIT_TOOLS:
         paths = _edited_paths(payload.get("tool_input") or {}, cwd)
         if paths:
-            state.record_pending(session_id, paths, _content_digests(paths))
+            state.record_pending(session_id, paths)
         return
 
     if tool_name == "Bash":
         _record_bash_changes(payload, session_id, cwd)
-
-
-def content_digest(path: str) -> str | None:
-    """パスの内容指紋 (`sha256:<hex>`)。存在しなければ `DIGEST_ABSENT`、
-    **指紋を取れなければ None** (= 復元の証明に使えない)。
-
-    None になるのは「通常ファイルでない (ディレクトリ・FIFO・特殊ファイル)」
-    「`SNAPSHOT_MAX_FILE_BYTES` 超過」「読めない (権限・I/O エラー)」のいずれか。
-    どれも呼び出し側では「証明できない = 復元しない」に倒れる。
-
-    `os.stat` (symlink を辿る) で先に種別とサイズを見るのは、FIFO を `open()` して
-    ハングする経路を作らないため (`os.stat` 自体はブロックしない)。
-
-    **内容そのものは保存しない**。Stop 側で必要なのは「編集時点の内容と Stop 時点の
-    ディスク内容が同一か」の照合だけで、レビューに渡す diff は git から取るため
-    (`_restore_committed_diff`)。内容を `$TMPDIR` に複製する設計 (gitscan.py
-    モジュール docstring の案 (a)) は機密ファイルの内容が残る点で不利なので採らない。
-    """
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        return DIGEST_ABSENT
-    except OSError:
-        return None
-    if not stat.S_ISREG(st.st_mode) or st.st_size > SNAPSHOT_MAX_FILE_BYTES:
-        return None
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            while True:
-                chunk = f.read(_DIGEST_CHUNK_BYTES)
-                if not chunk:
-                    break
-                digest.update(chunk)
-    except OSError:
-        return None
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _content_digests(paths: list[str]) -> dict[str, str]:
-    """pending に積むパスの内容指紋をまとめて取る (合計 `SNAPSHOT_BUDGET_BYTES` まで)。
-
-    指紋が取れなかったパスは dict に入れない (キーが無い = 復元しない)。
-    """
-    digests: dict[str, str] = {}
-    budget = SNAPSHOT_BUDGET_BYTES
-    for path in paths:
-        if budget <= 0:
-            log(f"内容指紋の予算 ({SNAPSHOT_BUDGET_BYTES} bytes) を使い切ったため以降は記録しない")
-            break
-        digest = content_digest(path)
-        if digest is None:
-            continue
-        digests[path] = digest
-        if digest != DIGEST_ABSENT:
-            try:
-                budget -= os.path.getsize(path)
-            except OSError:
-                pass
-    return digests
 
 
 def _edited_paths(tool_input: dict, cwd: str) -> list[str]:
@@ -624,8 +522,7 @@ def _record_bash_changes(payload: dict, session_id: str, cwd: str) -> None:
         return
     changed = gitscan.changed_between(pre, post)
     if changed:
-        paths = [os.path.join(root, rel) for rel in changed]
-        state.record_pending(session_id, paths, _content_digests(paths))
+        state.record_pending(session_id, [os.path.join(root, rel) for rel in changed])
 
 
 # --------------------------------------------------------------------------
@@ -789,34 +686,20 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
             "次ターンに繰り越し: " + _list_names(_rel_names(root, overflow))
         )
 
-    batch = _collect_diffs(
-        root,
-        rels,
-        state.reviewed_hashes(session_id),
-        state.content_digests(session_id),
-    )
+    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
     # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
     # 積む: 予算超過 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順
     carried = batch.deferred + overflow
     if carried:
         state.record_pending(session_id, carried)
-    if batch.restored:
-        # 内容指紋で「HEAD に入っている内容 = 自分が書いた内容」を証明できたパス。
-        # どの差分を見せたのかを利用者が追えるよう、commit 基準に切り替えたことを明示する
-        # (`_restore_committed_diff` 参照)。
-        notices.append(
-            f"{len(batch.restored)} ファイルは同一ターン内で commit 済みのため、その "
-            "commit の差分をレビューに使用 (内容が編集直後と一致することを確認済み): "
-            + _list_names(_rel_names(root, batch.restored))
-        )
     if batch.unretrievable:
-        # HEAD 基準の diff が空で、復元も証明できなかったパス (`_collect_diffs` の
-        # docstring「HEAD 基準の diff が空のパスは、内容指紋で証明できたときだけ復元
-        # する」参照)。pending には戻さない (状況が変わらない限り毎ターン同じ結果に
-        # なるだけなので、繰り返し報告しない)。
+        # HEAD 基準の diff が空だったパス。復元は試みない (`_collect_diffs` の
+        # docstring「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending
+        # には戻さない (状況が変わらない限り毎ターン同じ結果になるだけなので、
+        # 繰り返し報告しない)。
         notices.append(
             f"{len(batch.unretrievable)} ファイルは差分が空で取得できませんでした "
-            "(別の書き手の commit / 無変更の可能性。内容は送信していません): "
+            "(commit 済みの可能性。内容は送信していません): "
             + _list_names(_rel_names(root, batch.unretrievable))
         )
     if batch.deferred_time:
@@ -1049,8 +932,7 @@ class ReviewBatch:
         self.deferred_time: list[str] = []  # 時間予算で未処理 (絶対パス)
         self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
-        self.unretrievable: list[str] = []  # HEAD 基準の diff が空で復元もできなかった絶対パス
-        self.restored: list[str] = []  # 内容指紋で証明できて commit 基準の diff を使った絶対パス
+        self.unretrievable: list[str] = []  # HEAD 基準の diff が空だった絶対パス (復元は試みない)
 
     @property
     def deferred(self) -> list[str]:
@@ -1062,48 +944,34 @@ def _collect_diffs(
     root: str,
     rels: list[str],
     reviewed: dict[str, str],
-    digests: dict[str, str] | None = None,
 ) -> ReviewBatch:
     """パスごとに diff を取り、予算に収まるものだけを ReviewBatch に積む。
 
     前回レビュー時と同一 hash のパスは載せない。差分が空のパスも載せない。
     どちらも submitted に入らないので、cursor 失敗時にも復元されずそのまま消える。
 
-    **HEAD 基準の diff が空のパスは、内容指紋で証明できたときだけ復元する** (0.11.0)。
-    tracked かつ HEAD が存在するパスの HEAD 基準 diff が空なのは、(a) 単に何も変わって
-    いない (revert 済み等)、(b) このセッションが同一ターン内で commit してファイルが
-    既に HEAD と一致している、(c) **別の書き手**が同じパスへ commit した、のいずれか。
-
-    0.9.0 は「前回 Stop の HEAD」を基点まで遡って (b) を復元する経路を持っていたが、
-    `<基点>..HEAD` が「どのリモートにも存在しない」ことしか検証できず「このセッションが
-    書いた」ことまでは検証できないため、同一 worktree を共有する別のローカルの書き手
+    **HEAD 基準の diff が空のパスは復元を試みない。** tracked かつ HEAD が存在する
+    パスの HEAD 基準 diff が空なのは、(a) 単に何も変わっていない (revert 済み等)、
+    または (b) このセッションが同一ターン内で commit し、ファイルが既に HEAD と
+    一致している、のどちらかで、この時点では区別できない。過去に「前回 Stop の
+    HEAD」を基点まで遡って (b) を復元する経路を試したが、`<基点>..HEAD` が
+    「どのリモートにも存在しない」ことしか検証できず「このセッションが書いた」
+    ことまでは検証できないため、同一 worktree を共有する別のローカルの書き手
     (別セッション・人間の手動 commit) が push せずに同じパスへ commit した内容も
-    復元して送ってしまうことがマージ前レビューで実演され、復元経路を撤去した。
-    0.11.0 は**基点ではなく内容で帰属を証明する**形で復元を戻す
-    (判定は `_restore_committed_diff`。送信範囲が広がる方向には倒さない):
-
-    - PostToolUse が編集直後のディスク内容の指紋を記録しており (`content_digest`)、
-      Stop 時点のディスク内容がその指紋と一致するときだけ「HEAD に入っている内容は
-      自分が書いたものだ」と言える (HEAD 基準 diff が空 = ディスクと HEAD が一致、
-      なので指紋一致はそのまま「HEAD の内容 = 自分が書いた内容」を意味する)
-    - 基点はそのパスを最後に変更した commit の親 1 つ (`gitscan.last_commit_touching`)。
-      **親が 1 つでないとき (merge / 初回 commit) は復元しない** — どちらの親を基点に
-      してもそのパスに関する他の変更を巻き込むため
-    - 証明できたパスは `batch.restored` に記録し、通知で「commit の差分を使った」と
-      明示する。証明できなければ従来どおり `batch.unretrievable` (黙って消費せず通知)
-
-    `digests` が空でも壊れない (すべて `unretrievable` に倒れる) ので、0.10.0 以前の
-    state ファイルをそのまま読んでも従来の挙動になる。
+    復元して送ってしまうことがマージ前レビューで実演された (pull 由来の混入は
+    別途遮断できていたが、これは別ベクトルだった)。安全な復元には編集時点の
+    内容退避が要り、「PostToolUse を軽く保つ」という設計と衝突するため、
+    ここでは復元せず**常に黙って捨てず通知する**方針にしている (送信範囲が
+    広がる方向には倒さない。設計の変遷は CHANGELOG.md / CLAUDE.md を参照):
 
     - 差分が空で、かつそのパスが tracked (untracked ではない)・HEAD が存在する、
-      の両方を満たすなら復元を試み、できなければ `batch.unretrievable` に積む —
-      黙って消費せず、利用者にレビューされなかったことを可視化するため
-      (`_run_review` が通知にする)。
+      の両方を満たすなら `batch.unretrievable` に積む — 黙って消費せず、利用者に
+      レビューされなかったことを可視化するため (`_run_review` が通知にする)。
       **ディスク上の存在は問わない** (マージ前レビューの指摘): 追跡ファイルの削除が
       同一ターン内で commit されると、HEAD・ディスクの両方からパスが消え、
       `git diff HEAD -- rel` は「両側に無い」ため空になる。以前はここで
       `os.path.exists` も条件にしており、この削除のケースだけ通知対象から
-      漏れて黙って消費されていた (削除は `DIGEST_ABSENT` の指紋で復元対象になる)
+      漏れて黙って消費されていた
     - それ以外の空 diff (untracked で中身が空、HEAD が無い等の元から復元しようが
       ないケース) は黙って捨てる
 
@@ -1115,8 +983,7 @@ def _collect_diffs(
     HEAD:rel` が両方とも失敗し、cheap な git 状態だけでは区別できない
     (履歴全体を辿れば区別できるが、この hook の git 予算 [`gitscan.py` 参照]
     には収まらない)。正当な削除の見落としの方が実害が大きいため、雑音低減より
-    「全部通知する」側を優先する (phantom は `last_commit_touching` が None を
-    返すので復元されず、通知だけが残る)。
+    「全部通知する」側を優先する。
 
     **予算はファイル単位で当てる**:
 
@@ -1147,30 +1014,21 @@ def _collect_diffs(
         text = gitscan.path_diff(root, rel, is_untracked, has_head)
         # HEAD 基準で空 = 「本当に無変更」「同一ターン内 commit で HEAD と一致
         # した」「追跡ファイルの削除が同一ターン内で commit された (HEAD にも
-        # ディスクにもパスが無い)」「別の書き手が同じパスへ commit した」の
-        # いずれかで、diff だけでは区別できない (docstring 参照)。
+        # ディスクにもパスが無い)」のいずれかで、この時点では区別できない
+        # (docstring 参照)。
         empty_at_head = not is_untracked and has_head and not text.strip()
-        abs_path = os.path.join(root, rel)
-
-        if empty_at_head:
-            restored = _restore_committed_diff(
-                root, rel, (digests or {}).get(abs_path), deadline
-            )
-            if restored.strip():
-                text = restored
-                batch.restored.append(abs_path)
 
         if not text.strip():
             if empty_at_head:
-                # 復元できなかった空 diff。ディスク上の存在は問わない (マージ前
-                # レビューの指摘)。以前は `os.path.exists` も条件にしていたため、
-                # 削除+同一ターン内 commit のケース (ディスクからも消える) だけ
-                # 通知対象から漏れて黙って消費されていた。実体の無い pending
-                # エントリとの区別は cheap な git 状態だけでは付かない
-                # (docstring 参照) ので、雑音低減より正当な削除を落とさないことを
-                # 優先する。
-                batch.unretrievable.append(abs_path)
+                # ディスク上の存在は問わない (マージ前レビューの指摘)。以前は
+                # `os.path.exists` も条件にしていたため、削除+同一ターン内
+                # commit のケース (ディスクからも消える) だけ通知対象から漏れて
+                # 黙って消費されていた。実体の無い pending エントリとの区別は
+                # cheap な git 状態だけでは付かない (docstring 参照) ので、
+                # 雑音低減より正当な削除を落とさないことを優先する。
+                batch.unretrievable.append(os.path.join(root, rel))
             continue
+        abs_path = os.path.join(root, rel)
         digest = diff_hash(text)  # hash は切り詰め前の全文で取る
         if reviewed.get(abs_path) == digest:
             continue
@@ -1191,79 +1049,6 @@ def _collect_diffs(
         if full_size > MAX_FILE_DIFF_BYTES:
             batch.truncated.append((rel, full_size))
     return batch
-
-
-def _restore_committed_diff(
-    root: str, rel: str, digest: str | None, deadline: float
-) -> str:
-    """HEAD 基準 diff が空になったパスの差分を、**証明できたときだけ**復元して返す。
-
-    証明できない場合は空文字 (呼び出し側は `unretrievable` として通知する)。
-    **失敗方向は「送らない」側に固定**する — この hook は差分を外部 AI CLI に送るため、
-    判定できないときに送る側へ倒すと他の書き手の内容が外部へ出る (0.9.0 で実演された
-    退行。`_collect_diffs` の docstring 参照)。
-
-    証明は 3 段:
-
-    1. **内容指紋の一致**。PostToolUse が編集直後に記録した指紋
-       (`state.content_digests`) と、Stop 時点のディスク内容の指紋が一致すること。
-       ここに到達している時点で「HEAD 基準 diff が空」= ディスクと HEAD の内容が
-       git から見て同一なので、指紋一致はそのまま
-       **「HEAD に入っている内容 = 自分が最後に書いた内容」**を意味する。
-       別の書き手が同じパスへ別内容を commit した場合はディスク内容がその人の
-       ものになるため一致せず、復元しない (指紋が無いパスも同じ)
-    2. **そのパスを最後に変更した commit が特定できること** (`last_commit_touching`)。
-       一度も commit されていない (= 実体の無い pending エントリ) なら None が返る
-    3. **その commit の親 (rev-list が書き換えた親) が 1 つ以下であること**。
-       `git rev-list --parents -- <path>` の親一覧は history simplification で
-       書き換えられ、実測 (2026-09-18, git 2.x) では次のようになる:
-
-       | 状況 | 親の数 | 基点 |
-       |---|---|---|
-       | そのパスを変更した commit が前にもある | 1 (直前にそのパスを変更した commit) | その commit |
-       | そのパスの履歴がこの commit で始まる (純粋な追加) | 0 | `/dev/null` (untracked 新規と同じ形) |
-       | merge commit がそのパスの内容を決めている (衝突解決) | 2 以上 | **復元しない** |
-
-       merge のときは、どちらの親を基点にしてももう片方の変更を巻き込むため送らない。
-
-    基点は「そのパスを最後に変更した commit の (書き換え後の) 親」なので、送信範囲は
-    **commit が挟まらなかった場合に送っていた差分と同じ** (= その commit がそのパスに
-    対して行った変更のみ)。基点を遡って `<記録時点>..HEAD` の全変更を拾う 0.9.0 の形とは
-    ここが違う。
-
-    **既知の狭さ (意図的)**: 1 ターンでそのパスを 2 回以上 commit した場合、復元される
-    のは最後の commit の変更だけになる (それ以前の commit の変更は「自分が書いた」ことを
-    内容指紋では証明できない)。取りこぼす方向 = 送らない方向なので、そのまま受け入れる。
-
-    `deadline` は `_collect_diffs` の収集予算。git 2 回ぶんの余裕
-    (`RESTORE_RESERVE_SEC`) が残っていなければ試みない — 復元は「あると嬉しい」
-    経路であり、hook timeout を食い潰して claim の後始末に到達しないほうが重い。
-    """
-    # 指紋が無いパスの早期 return は**ガードではなくコスト削減**。下の照合が
-    # `content_digest(...) != None` で必ず不一致になるので、この行を消しても判定は
-    # 変わらない (mutation で落ちない = 空振りになることを確認済み)。ファイルを読んで
-    # 指紋を計算する手間を省くためだけに置いてある。
-    if not digest:
-        return ""
-    if time.monotonic() + RESTORE_RESERVE_SEC > deadline:
-        log(f"{rel}: 収集予算の残りが足りないため commit 差分の復元を試みない")
-        return ""
-    if content_digest(os.path.join(root, rel)) != digest:
-        return ""
-    found = gitscan.last_commit_touching(root, rel)
-    if found is None:
-        return ""
-    _commit, parents = found
-    if not parents:
-        # そのパスの履歴がこの commit で始まる (純粋な追加)。基点は「無いもの」なので
-        # untracked 新規ファイルと同じ `/dev/null` 比較にする。指紋が
-        # `DIGEST_ABSENT` (ディスクに無い) の場合は比較対象が無いので復元しない。
-        if digest == DIGEST_ABSENT:
-            return ""
-        return gitscan.path_diff(root, rel, True, True)
-    if len(parents) != 1:
-        return ""
-    return gitscan.diff_from_commit(root, parents[0], rel)
 
 
 _TRUNCATED_MARKER = (

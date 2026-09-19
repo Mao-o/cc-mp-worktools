@@ -306,6 +306,33 @@ class TestDetectionCache(CursorCliTestCase):
         """入れた直後に使い始められるように、否定側の TTL は短くしておく。"""
         self.assertLess(cursorcli.NEGATIVE_CACHE_TTL_SEC, cursorcli.CACHE_TTL_SEC)
 
+    def test_cache_naming_a_command_outside_the_candidates_is_ignored(self):
+        """共有 `$TMPDIR` で他人が置いたキャッシュに任意の実体を書かれても使わない。
+
+        `shutil.which` はセパレータを含む値をそのパスとして解決するので、候補名の
+        検査が無いと**外部 AI CLI として起動する実体を他人に選ばせる**ことになる。
+        """
+        evil = self.fake_cli("evil-cli")
+        self.fake_cli("cursor")
+        self.write_cache({"command": evil, "path": evil, "at": time.time()})
+        self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
+        self.assertNotIn("evil-cli", self.probes(), "候補外の実体を起動している")
+
+    def test_unsafe_cache_dir_is_not_trusted(self):
+        """置き場が group/other 書込可なら (他人が中身を差し替えられるので) 使わない。"""
+        self.fake_cli("cursor")
+        cursorcli.resolve()  # まず正常にキャッシュを作る
+        self.assertIsNotNone(self.cache())
+        os.chmod(os.path.dirname(cursorcli.cache_path()), 0o777)
+        cursorcli.reset()
+
+        self.assertEqual(cursorcli.resolve(), ("cursor", ("agent",)))
+        self.assertEqual(
+            self.probes(),
+            ["cursor", "cursor"],
+            "信頼できない置き場のキャッシュをそのまま使っている (再 probe されていない)",
+        )
+
     def test_broken_cache_file_is_ignored(self):
         self.fake_cli("cursor")
         path = cursorcli.cache_path()

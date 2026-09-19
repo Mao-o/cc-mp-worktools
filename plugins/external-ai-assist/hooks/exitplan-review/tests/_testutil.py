@@ -26,6 +26,17 @@ from _common import settings  # noqa: E402  (sys.path 挿入後に import する
 _ENTRY_PATH = _PKG_DIR / "__main__.py"
 
 
+# cursor の実体は**テストプロセス全体で**偽 CLI 側に固定する。0.11.0 の検出は
+# `cursor-agent` / `agent` も候補にするため、固定しないと開発機に入っている本物を掴んで
+# `--version` を起動しうる (外部 AI CLI を起動しないというテストの前提が崩れ、かつ偽
+# cursor を PATH 先頭に置いたテストが「argv[0] が cursor-agent」で落ちる)。
+# **クラスごとの env パッチに書くだけでは足りない**: 自前で `mock.patch.dict` を張る
+# テストクラスが漏れると、そこだけ実機の検出が走る (実際に踏んだ)。モジュール読み込み時に
+# 入れておき、`clear_plugin_env` からも必ず除外する。
+CURSOR_COMMAND_ENV = {"EXTERNAL_AI_CURSOR_COMMAND": "cursor"}
+os.environ.update(CURSOR_COMMAND_ENV)
+
+
 def clear_plugin_env(keep: dict | None = None) -> None:
     """開発者 shell の `EXTERNAL_AI_*` を外す (`keep` に挙げたものだけ残す)。
 
@@ -34,7 +45,7 @@ def clear_plugin_env(keep: dict | None = None) -> None:
     方式だと変数が増えるたびに漏れるので接頭辞で一掃する。`mock.patch.dict` は stop 時に
     dict の中身を丸ごと元に戻すので、start した後に消したキーも自動で復元される。
     """
-    keep = keep or {}
+    keep = {**CURSOR_COMMAND_ENV, **(keep or {})}
     for key in [k for k in os.environ if k.startswith(settings.ENV_PREFIX)]:
         if key not in keep:
             del os.environ[key]
@@ -79,12 +90,11 @@ class HookTestCase(unittest.TestCase):
         base = self._tmp.name
         self.tmpdir = os.path.join(base, "tmp")
         os.makedirs(self.tmpdir, exist_ok=True)
-        # cursor の実体を固定する (0.11.0 の検出は `cursor-agent` / `agent` も見るため、
-        # 固定しないと開発機に入っている本物を掴んで `--version` を起動しうる)
-        pinned = {"EXTERNAL_AI_CURSOR_COMMAND": "cursor"}
-        self._env = mock.patch.dict(os.environ, {"TMPDIR": self.tmpdir, **pinned})
+        self._env = mock.patch.dict(
+            os.environ, {"TMPDIR": self.tmpdir, **CURSOR_COMMAND_ENV}
+        )
         self._env.start()
-        clear_plugin_env(keep=pinned)
+        clear_plugin_env()
 
         self.entry = load_entry()
         self.cursor = sys.modules["cursor"]

@@ -13,11 +13,6 @@
     cursor 失敗時: restore_claim() で pending へ戻す (未レビューのため)
     kill された時: in-flight が残る -> TTL 超過を後続 Stop が pending へ回収
 
-pending と並んで `digests` (パス -> 編集直後の内容指紋) も持つ。Stop で HEAD 基準の
-diff が空になったパス (同一ターン内 commit 等) を復元してよいかの判定材料で、
-書くのは PostToolUse (git は呼ばない)、読むのは Stop (`__main__._restore_committed_diff`)。
-レビューを終えた時点で捨てる (`complete_claim`)。
-
 **削除ではなく in-flight 予約にする理由**: 割り込みでユーザーが次メッセージを送ると
 Stop hook はプロセスごと落ちる。単純な drain (読み出し + 削除) だとその瞬間にパスが
 消えて永久に未レビューになる。in-flight のまま残し、claim 時刻が TTL を超えたものを
@@ -80,11 +75,6 @@ BASH_SNAPSHOT_TTL_SEC = 3600
 MAX_PENDING_PATHS = 200
 MAX_REVIEWED_ENTRIES = 500
 
-# 内容指紋 (`digests`) の保持件数。pending の上限と同じにしておけば、pending に載って
-# いるパスぶんは必ず持てる。溢れたら**古い方から**捨てる — 指紋は「復元してよいか」の
-# 証明材料にしか使わないので、失っても復元しない (= 送らない) 側に倒れるだけ。
-MAX_DIGEST_ENTRIES = MAX_PENDING_PATHS
-
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -119,7 +109,6 @@ def _empty_state() -> dict:
         "pending": {},
         "in_flight": {},
         "reviewed": {},
-        "digests": {},
         "last_review_at": 0.0,
     }
 
@@ -134,7 +123,7 @@ def _normalize(raw) -> dict:
     if not isinstance(raw, dict):
         return _empty_state()
     state = _empty_state()
-    for key in ("pending", "in_flight", "reviewed", "digests"):
+    for key in ("pending", "in_flight", "reviewed"):
         value = raw.get(key)
         if isinstance(value, dict):
             state[key] = value
@@ -160,9 +149,7 @@ def _locked_state(session_id: str):
         flock.rewrite(f, json.dumps(state, ensure_ascii=False))
 
 
-def record_pending(
-    session_id: str, paths: list[str], digests: dict[str, str] | None = None
-) -> int:
+def record_pending(session_id: str, paths: list[str]) -> int:
     """PostToolUse から呼ぶ。このセッションが変更した絶対パスを pending に積む。
 
     作業ツリー内かどうかの判定はここでは行わない。git を叩かずに済ませて
@@ -171,13 +158,6 @@ def record_pending(
     順序 (dict の挿入順) がレビュー順になる。上限超過は **末尾 (新しい方) から** 落とす:
     先頭は前回 Stop が繰り越した (pending に戻した) パスで、ここを落とすと予算超過で
     繰り越されたファイルが大量編集のターンで黙って消える。
-
-    `digests` は「そのパスの内容指紋 (編集直後にディスク上にあった内容の sha256)」で、
-    Stop 側が「HEAD 基準 diff が空になったパスを復元してよいか」を判定する材料
-    (`__main__.content_digest` / `_restore_committed_diff`)。**git は呼ばない**ので
-    PostToolUse を軽く保つ設計は維持される。同じパスが再編集されたら**上書きする**
-    (証明は「Stop 時点のディスク内容が、最後に自分が書いた内容と一致するか」なので、
-    常に最新の編集を基準にする)。
     """
     if not paths:
         return 0
@@ -189,34 +169,9 @@ def record_pending(
                 pending.setdefault(p, now)
             for newest in list(pending)[MAX_PENDING_PATHS:]:
                 del pending[newest]
-            if digests:
-                stored = state["digests"]
-                for path, digest in digests.items():
-                    stored.pop(path, None)  # 挿入順を更新する (古い方から捨てるため)
-                    stored[path] = digest
-                for oldest in list(stored)[: max(len(stored) - MAX_DIGEST_ENTRIES, 0)]:
-                    del stored[oldest]
             return len(pending)
     except OSError:
         return 0
-
-
-def content_digests(session_id: str) -> dict[str, str]:
-    """`record_pending` が記録した内容指紋 (パス -> 指紋)。無ければ空 dict。
-
-    state ファイルが一度も無ければ開かない (`claim_pending` と同じ理由)。
-    """
-    if not os.path.exists(_state_path(session_id)):
-        return {}
-    try:
-        with _locked_state(session_id) as state:
-            return {
-                path: digest
-                for path, digest in state["digests"].items()
-                if isinstance(digest, str)
-            }
-    except OSError:
-        return {}
 
 
 def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
@@ -265,11 +220,6 @@ def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> No
 
     in-flight を削除し、パスごとの diff hash を記録する。**cursor 失敗時に呼んでは
     いけない** — 記録すると未レビューの変更が「レビュー済み」扱いで永久に skip される。
-
-    レビューを終えたパスの**内容指紋は捨てる**。指紋は「pending に載っているパスの
-    HEAD 基準 diff が空だったときに復元してよいか」の判定にしか使わないので、消費
-    済みのパスのぶんを抱えると state が古い値で膨らむだけになる (次に編集されれば
-    PostToolUse が新しい指紋を書く)。
     """
     try:
         with _locked_state(session_id) as state:
@@ -278,7 +228,6 @@ def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> No
             for path, digest in hashes.items():
                 reviewed.pop(path, None)  # 挿入順を更新して LRU として使う
                 reviewed[path] = digest
-                state["digests"].pop(path, None)
             if len(reviewed) > MAX_REVIEWED_ENTRIES:
                 for stale in list(reviewed)[: len(reviewed) - MAX_REVIEWED_ENTRIES]:
                     del reviewed[stale]

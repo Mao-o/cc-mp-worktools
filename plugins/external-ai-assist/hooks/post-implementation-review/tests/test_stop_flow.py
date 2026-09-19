@@ -956,27 +956,31 @@ class TestCursorLaunchCwd(HookTestCase):
         self.assertEqual(self.review_cwds, [self.repo])
 
 
-class TestSameTurnCommitRestore(HookTestCase):
-    """HEAD 基準の diff が空になったパス (同一ターン内 commit 等) の扱い。
+class TestSameTurnCommitNotification(HookTestCase):
+    """HEAD 基準の diff が空になったパス (同一ターン内 commit 等) は、復元を
+    試みず `systemMessage` で「取得できなかった」と通知する (黙って消費しない)。
 
-    **内容指紋で「HEAD に入っている内容 = 自分が書いた内容」を証明できたときだけ、
-    その commit の差分でレビューする** (0.11.0)。証明できなければ従来どおり
-    `systemMessage` で「取得できなかった」と通知する (黙って消費しない)。
+    以前 (0.9.0 導入時) は、前回 Stop が記録した HEAD を基点に
+    `git rev-list --not --remotes` で「手元由来」(どのリモートにも存在しない)
+    と証明できれば、基点まで遡った diff を復元して送る経路があった。この証明は
+    「リモート由来でない」ことしか示しておらず「このセッションが書いた」ことは
+    示していない。同一 worktree を共有する別のローカルの書き手 (別セッション・
+    人間の手動 commit) が push せずに同じパスへ commit すると、その内容が
+    丸ごと外部へ送信されてしまうことがマージ前レビューで実演された
+    (`test_other_local_writer_commit_is_not_leaked` が回帰テスト)。pull/merge
+    経由の混入は元から遮断できていたが (`test_pull_bringing_foreign_commit_is_reported`)、
+    これは別ベクトルだった。
 
-    0.9.0 は「前回 Stop が記録した HEAD」を基点に `git rev-list --not --remotes` で
-    「手元由来」(どのリモートにも存在しない) と証明できれば基点まで遡った diff を
-    復元していた。この証明は「リモート由来でない」ことしか示しておらず「このセッションが
-    書いた」ことは示していないため、同一 worktree を共有する別のローカルの書き手
-    (別セッション・人間の手動 commit) が push せずに同じパスへ commit した内容が
-    丸ごと外部へ送信されることがマージ前レビューで実演され、復元経路が撤去された
-    (`test_other_local_writer_commit_is_not_leaked` /
-    `test_other_local_writer_commit_after_ours_is_not_leaked` が回帰テスト)。
+    安全な復元には編集時点の内容退避が要り、「PostToolUse を軽く保つ」という
+    既存の設計と衝突するため、復元機構そのものを撤去し、常に「取得できない」と
+    報告するだけにする (送信範囲が広がる方向には倒さない)。
 
-    0.11.0 は基点ではなく**内容**で帰属を証明する: PostToolUse が編集直後のディスク
-    内容の指紋を記録し、Stop 時点のディスク内容が一致するときだけ復元する。基点は
-    「そのパスを最後に変更した commit の親」なので、送る差分は commit が挟まらなかった
-    場合と同じ範囲に収まる (`__main__._restore_committed_diff` / 単体は
-    `test_review_set.py::TestRestoreCommittedDiff`)。
+    `test_noop_edit_does_not_send_an_unrelated_historical_diff` は**復元を再実装する
+    ときの床**。「HEAD 基準 diff が空」の最も多い原因は同一ターン内 commit ではなく
+    **内容を変えなかった編集**で、そのとき「そのパスを最後に変更した commit」は
+    このターンの成果ではない。内容指紋 (編集直後のディスク内容の sha256) の一致だけを
+    根拠にすると、この場合も一致してしまう (編集前後で内容が変わっていないため) ので、
+    無関係な履歴の差分を外部 AI CLI へ送ることになる。
     """
 
     def _add_bare_origin(self) -> tuple[str, str]:
@@ -1005,17 +1009,9 @@ class TestSameTurnCommitRestore(HookTestCase):
         self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertReviewed("warmup.txt")
 
-    def _message(self, output: str) -> str:
-        return json.loads(output)["systemMessage"] if output else ""
-
-    def _state_path(self, session_id: str) -> str:
-        return os.path.join(
-            self.tmpdir, "post-implementation-review", "state", f"{session_id}.json"
-        )
-
-    def test_same_turn_commit_is_reviewed_from_commit_diff(self):
-        """同一ターン内で commit した変更も、その commit の差分でレビューされる
-        (チケットの本題: 一度もレビューされずに消える経路を無くす)。"""
+    def test_same_turn_commit_is_reported_not_reviewed(self):
+        """同一ターン内で commit した変更は、レビューされる代わりに
+        「取得できませんでした」と報告される (復元しない)。"""
         self._establish_history()
 
         self.edit(SESSION_A, "a.py", "print(1)\n")
@@ -1023,74 +1019,73 @@ class TestSameTurnCommitRestore(HookTestCase):
         _testutil.git(self.repo, "commit", "-qm", "self commit")
 
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "print(1)")
-        message = self._message(output)
-        self.assertIn("commit の差分をレビューに使用", message)
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
         self.assertIn("a.py", message)
         self.assertNotIn("print(1)", message, "通知には内容を出さない")
-        self.assertEqual(self.pending(SESSION_A), [])
+        self.assertEqual(
+            self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
+        )
 
-    def test_modification_committed_in_same_turn_shows_only_that_change(self):
-        """既存ファイルへの変更を commit した場合、送るのは**その commit の差分**だけ
-        (基点を遡って「そのパスを通過した全変更」を拾う 0.9.0 の形に戻らないこと)。"""
-        _testutil.write(self.repo, "a.py", "old = 1\n")
+    def test_noop_edit_does_not_send_an_unrelated_historical_diff(self):
+        """floor: **内容を変えなかった編集**でも HEAD 基準 diff は空になる。このとき
+        「そのパスを最後に変更した commit」の差分を復元して送ってはいけない。
+
+        編集ツールが既存と同じ内容を書いた場合 (同じ内容の Write、revert して戻した
+        編集など) も pending には積まれるが、そのパスの最後の commit はこのターンの
+        成果ではなく、**このセッションが一度も見ていない内容** (その commit が消した
+        行) を含みうる。復元を再実装するときは「内容がこのセッションのものか」だけ
+        でなく「その commit をこのターンに作ったか」まで示す必要がある。
+        """
+        _testutil.write(self.repo, "a.py", "keep = 1\n")
         _testutil.git(self.repo, "add", "a.py")
         _testutil.git(self.repo, "commit", "-qm", "history before the session")
-
-        self.edit(SESSION_A, "a.py", "old = 1\nnew = 2\n")
+        _testutil.write(self.repo, "a.py", "keep = 1\nNOT_OUR_CHANGE = 2\n")
         _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
+        _testutil.git(self.repo, "commit", "-qm", "a change this session did not make")
 
-        self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "+new = 2")
-        self.assertNotIn(
-            "+old = 1", self.review_calls[0], "セッション前から HEAD にあった行を再送しない"
-        )
+        # 内容は 1 バイトも変わらない編集 (ディスク上の内容は HEAD と同一のまま)
+        self.edit(SESSION_A, "a.py", "keep = 1\nNOT_OUR_CHANGE = 2\n")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertNotIn("NOT_OUR_CHANGE", message)
+        self.assertEqual(self.pending(SESSION_A), [])
 
     def test_other_local_writer_commit_is_not_leaked(self):
         """regression: マージ前レビューで実演された脆弱性。別のローカルの書き手
         (このセッションの hook を経由しない、別セッション・人間の手動 commit を
         模す) が push せずに同じパスへ commit した内容を、外部 AI CLI へ送らない
-        こと。内容指紋が Stop 時点のディスク内容と一致しないため復元されない。
+        こと。
+
+        `_establish_history()` で先にレビューを 1 回走らせておくのは、旧
+        (基点フォールバック) コードが `base_sha` を確立していない最初の Stop
+        では復元を試みる余地が無く、この回帰の再現にならないため。
         """
         self._establish_history()
 
         self.edit(SESSION_A, "a.py", "print('session A')\n")
         # このセッションの hook を経由しない、別の書き手による直接 commit。
+        # push していないので、旧コードの `is_local_only_range` では
+        # 「手元由来」と判定され、基点まで遡った diff の復元経路に入って
+        # `diff_since` がこの内容を拾って送ってしまっていた。
         _testutil.write(self.repo, "a.py", "print('someone else entirely')\n")
         _testutil.git(self.repo, "add", "a.py")
         _testutil.git(self.repo, "commit", "-qm", "another local writer's commit")
 
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertNotReviewed()
-        message = self._message(output)
+        message = json.loads(output)["systemMessage"] if output else ""
         self.assertIn("取得できませんでした", message)
         self.assertNotIn("someone else entirely", message)
         self.assertEqual(self.pending(SESSION_A), [])
 
-    def test_other_local_writer_commit_after_ours_is_not_leaked(self):
-        """regression: 自分が commit した**後**に別のローカルの書き手が同じパスへ
-        別内容を commit した場合も送らない。HEAD の内容がその人のものになるので
-        指紋が一致せず、復元経路に入らない。"""
-        self._establish_history()
-
-        self.edit(SESSION_A, "a.py", "print('session A')\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-        _testutil.write(self.repo, "a.py", "print('someone else entirely')\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "another local writer's commit")
-
-        output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertNotReviewed()
-        message = self._message(output)
-        self.assertIn("取得できませんでした", message)
-        self.assertNotIn("someone else entirely", message)
-        self.assertEqual(self.pending(SESSION_A), [])
-
-    def test_pull_bringing_foreign_commit_reviews_only_our_path(self):
-        """pull/merge で他人の commit が混ざっても、送るのは自分のパスの自分の変更だけ
-        (他人が触ったファイルは claim に無いので対象外、他人の内容も混ざらない)。"""
+    def test_pull_bringing_foreign_commit_is_reported(self):
+        """pull/merge で他人の commit が混ざった場合も同じ経路で報告のみ
+        (この既知のベクトルは旧コードでも安全に扱えていた)。"""
         bare, branch = self._add_bare_origin()
         self._establish_history()
 
@@ -1101,74 +1096,50 @@ class TestSameTurnCommitRestore(HookTestCase):
         _testutil.git(self.repo, "fetch", "-q", "origin")
         _testutil.git(self.repo, "merge", "-q", "--no-edit", f"origin/{branch}")
 
-        self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "print(1)")
-        self.assertNotIn(
-            "from someone else", self.review_calls[0], "他人の commit の内容を送らない"
-        )
-        self.assertNotIn("foreign.txt", self.review_calls[0])
-        self.assertEqual(self.pending(SESSION_A), [])
-
-    def test_conflict_merge_deciding_the_path_is_reported_not_reviewed(self):
-        """**このセッションが衝突解決を書いた** merge がそのパスの内容を決めている
-        場合は復元しない。指紋は一致する (解決を書いたのは自分) が、基点をどちらの親に
-        取ってももう片方の変更を巻き込むため、送ってはいけない。
-        """
-        _testutil.write(self.repo, "a.py", "print('base')\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "base")
-        _testutil.git(self.repo, "checkout", "-q", "-b", "side")
-        _testutil.write(self.repo, "a.py", "print('side only')\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "side commit")
-        _testutil.git(self.repo, "checkout", "-q", "-")
-
-        self.edit(SESSION_A, "a.py", "print('mine')\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-        merge = _testutil.git_allow_fail(self.repo, "merge", "side")
-        self.assertNotEqual(merge.returncode, 0, "衝突するはずの merge が通ってしまった")
-        # 衝突解決をこのセッションが書く (= 指紋は最新の解決内容と一致する)
-        self.edit(SESSION_A, "a.py", "print('resolved')\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "merged")
-
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertNotReviewed()
-        message = self._message(output)
+        message = json.loads(output)["systemMessage"] if output else ""
         self.assertIn("取得できませんでした", message)
-        self.assertNotIn("side only", message)
+        self.assertIn("a.py", message)
+        self.assertNotIn("print(1)", message, "通知には内容を出さない")
+        self.assertEqual(
+            self.pending(SESSION_A), [], "報告済みのパスが pending に残り続けないこと"
+        )
 
-    def test_first_ever_stop_with_committed_change_is_reviewed(self):
-        """セッション初回の Stop (レビュー履歴なし) でも復元できる。"""
+    def test_first_ever_stop_with_committed_change_is_reported(self):
+        """セッション初回の Stop でも、commit 済みで空になったパスを
+        黙って消費しない。"""
         self.edit(SESSION_A, "a.py", "print(1)\n")
         _testutil.git(self.repo, "add", "a.py")
         _testutil.git(self.repo, "commit", "-qm", "self commit")
 
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "print(1)")
-        self.assertIn("commit の差分をレビューに使用", self._message(output))
+        self.assertNotReviewed()
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("a.py", message)
         self.assertEqual(self.pending(SESSION_A), [])
 
     def test_edit_without_commit_is_unaffected(self):
-        """回帰: commit を挟まない通常編集は影響を受けず、HEAD 基準のままレビューされる。"""
+        """回帰: commit を挟まない通常編集は影響を受けず、従来どおりレビューされる。"""
         self.edit(SESSION_A, "a.py", "print(1)\n")  # commit しない
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertReviewed("a.py", "print(1)")
-        message = self._message(output)
+        message = json.loads(output)["systemMessage"] if output else ""
         self.assertNotIn("取得できませんでした", message)
-        self.assertNotIn("commit の差分をレビューに使用", message)
 
-    def test_committed_deletion_is_reviewed(self):
-        """追跡ファイルの削除を同一ターン内で commit すると、HEAD 基準の diff だけで
-        なくディスク上のパスも消える。指紋は「存在しなかった」を表せるので、この
-        ケースも削除の差分としてレビューされる。
+    def test_committed_deletion_is_reported_not_silently_dropped(self):
+        """regression (マージ前レビューの指摘): 追跡ファイルの削除が同一ターン内で commit
+        されると、HEAD 基準の diff だけでなくディスク上のパスも消える。旧コードは
+        `os.path.exists` も条件にしていたため、この場合だけ通知対象から漏れて
+        黙って消費されていた (通知もレビューもされないまま claim が完了する)。
 
-        `a.py` を先に tracked にしておくのは、削除が「意味のある変更」になるため
-        (untracked のまま消しても HEAD 基準 diff は最初から空)。削除は `os.remove` +
-        `self.bash()` (Bash 相当: pre/post の git status 差分で検出) で pending に
-        積み、その後 `git add -A` + `git commit` を直接呼んで**同一ターン内** (次の
-        Stop より前) に削除を commit する。
+        `a.py` を先に tracked にしておくのは、削除が「意味のある変更」になる
+        ため (untracked のまま消しても HEAD 基準 diff は最初から空)。削除は
+        `os.remove` + `self.bash()` (Bash 相当: pre/post の git status 差分で検出)
+        で pending に積み、その後 `git add -A` + `git commit` を直接呼んで
+        **同一ターン内** (次の Stop より前) に削除を commit する (Bash を経由した
+        commit そのものはテストの都合上 hook を経由せず直接 git を叩く —
+        test_same_turn_commit_is_reported_not_reviewed と同じ簡略化)。
         """
         _testutil.write(self.repo, "a.py", "print(1)\n")
         _testutil.git(self.repo, "add", "a.py")
@@ -1185,38 +1156,13 @@ class TestSameTurnCommitRestore(HookTestCase):
         _testutil.git(self.repo, "commit", "-qm", "remove a.py")
 
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py", "-print(1)")
-        self.assertIn("commit の差分をレビューに使用", self._message(output))
-        self.assertEqual(self.pending(SESSION_A), [])
-
-    def test_state_written_by_older_version_is_reported_not_restored(self):
-        """0.10.0 以前の state ファイル (指紋を持たない) をそのまま読んだ場合は、
-        復元せず通知だけになる — 指紋の欠落が「証明なしで送る」に倒れないこと。"""
-        self.edit(SESSION_A, "a.py", "print(1)\n")
-        path = self._state_path(SESSION_A)
-        with open(path) as f:
-            raw = json.load(f)
-        raw.pop("digests", None)
-        with open(path, "w") as f:
-            json.dump(raw, f)
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-
-        output = self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertNotReviewed()
-        self.assertIn("取得できませんでした", self._message(output))
-
-    def test_digest_is_dropped_once_reviewed(self):
-        """レビューを終えたパスの指紋は state に残さない (古い値で膨らませない)。"""
-        self.edit(SESSION_A, "a.py", "print(1)\n")
-        with open(self._state_path(SESSION_A)) as f:
-            self.assertIn(
-                os.path.join(self.repo, "a.py"), json.load(f).get("digests", {})
-            )
-        self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertReviewed("a.py")
-        with open(self._state_path(SESSION_A)) as f:
-            self.assertEqual(json.load(f).get("digests", {}), {})
+        message = json.loads(output)["systemMessage"] if output else ""
+        self.assertIn("取得できませんでした", message)
+        self.assertIn("a.py", message)
+        self.assertEqual(
+            self.pending(SESSION_A), [], "取得できなかったパスが pending に残り続けないこと"
+        )
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ import shutil
 import time
 
 from . import subproc
-from .flock import write_private
+from .flock import UnsafeStateDirError, ensure_private_root, write_private
 from .hooklog import make_logger
 
 NAME = "cursor"
@@ -249,12 +249,38 @@ def cache_path() -> str:
     return os.path.join(root, "external-ai-assist", "cursorcli.json")
 
 
+def _cache_dir_ok() -> bool:
+    """キャッシュ置き場 (hook が所有する 1 階層) を安全に使えるか。
+
+    共有 `$TMPDIR` (Linux の `/tmp`) では、hook が一度も動いていない環境で**他ユーザーが
+    先回りして**このディレクトリを作れる。攻撃者が置いた `cursorcli.json` を信用すると
+    **外部 AI CLI として起動する実体を他人に選ばせる**ことになるので、`state` 系と同じ
+    `ensure_private_root` (所有者・group/other 書込権・symlink の検査) を通す。
+    安全でなければキャッシュを使わない = 毎回検出する (probe には予算がある)。
+
+    `_load_cache` 側の「候補名 (`CANDIDATES`) 以外は信用しない」検査と二重にしてある —
+    片方だけだと、ディレクトリを奪えた攻撃者が任意のパスを `command` に書けてしまう
+    (`shutil.which` はセパレータを含む値をそのパスとして解決するため)。
+    """
+    try:
+        ensure_private_root(os.path.dirname(cache_path()))
+        return True
+    except UnsafeStateDirError:
+        log("キャッシュ置き場の所有者/権限が信頼できないため検出結果をキャッシュしない")
+        return False
+    except OSError:
+        return False
+
+
 def _load_cache():
     """有効なキャッシュがあれば `(コマンド, サブコマンド)` か None、無ければ `_MISS`。
 
-    無効とみなす条件: 読めない / 壊れている / TTL 超過 / 記録した実体パスが現在の
-    `which` の結果と違う (cursor を入れ直した・PATH が変わった)。
+    無効とみなす条件: 置き場が信用できない / 読めない / 壊れている / TTL 超過 /
+    **記録されたコマンドが `CANDIDATES` に無い** / 記録した実体パスが現在の `which` の
+    結果と違う (cursor を入れ直した・PATH が変わった)。
     """
+    if not _cache_dir_ok():
+        return _MISS
     try:
         with open(cache_path()) as f:
             entry = json.load(f)
@@ -273,12 +299,19 @@ def _load_cache():
 
     if not isinstance(command, str) or not command:
         return None
+    if command not in CANDIDATES:
+        # 自分が書く値は必ず候補名なので、候補外は「他人が置いた」か「古い形式」。
+        # 任意のパスを起動させられる経路を作らないため信用しない (`_cache_dir_ok` 参照)。
+        log(f"キャッシュの command ({command}) が候補外のため無視する")
+        return _MISS
     if shutil.which(command) != entry.get("path"):
         return _MISS
     return command, subcommand_for(command)
 
 
 def _save_cache(found: tuple[str, tuple[str, ...]] | None) -> None:
+    if not _cache_dir_ok():
+        return
     entry: dict[str, object] = {"at": time.time()}
     if found is not None:
         entry["command"] = found[0]

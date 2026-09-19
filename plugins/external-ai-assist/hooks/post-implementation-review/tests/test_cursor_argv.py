@@ -29,8 +29,7 @@ class TestReviewArgv(unittest.TestCase):
             os.environ,
             {
                 "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
-                # cursor の実体を偽 CLI に固定する (検出が開発機の本物を掴まないように)
-                "EXTERNAL_AI_CURSOR_COMMAND": "cursor",
+                **_testutil.CURSOR_COMMAND_ENV,  # cursor の実体の固定
             },
         )
         self._env.start()
