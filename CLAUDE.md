@@ -21,10 +21,15 @@
 /plugin install <plugin-name>@mao-worktools
 ```
 
-バージョン固定:
+ref 固定 (marketplace repo の branch / tag を指定する。commit を直接 pin する `sha` は
+plugin source 側のフィールドで、marketplace source には無い):
 ```
-/plugin marketplace add Mao-o/cc-mp-worktools@v0.2.0
+/plugin marketplace add Mao-o/cc-mp-worktools@main
 ```
+
+`@<ref>` が固定するのは **marketplace 側の checkout** で、plugin 個々のバージョンは
+`plugin.json` の `version` が決める (両者は独立)。詳細は
+[README.md](README.md) の「バージョンの固定 (ref pinning)」節を参照。
 
 ## 開発フロー
 

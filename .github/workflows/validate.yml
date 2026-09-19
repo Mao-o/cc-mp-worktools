@@ -60,6 +60,12 @@ jobs:
       - name: Check Codex manifest version consistency
         run: python3 scripts/check_codex_manifest_version.py
 
+      # marketplace entry の description / keywords は plugin.json と二重に持つしか
+      # ない (install 前の一覧は entry の値だけを見ており、省いても plugin.json へ
+      # fallback しない)。二重に持つ以上ドリフトするので CI で突合する。
+      - name: Check marketplace entry / plugin.json sync
+        run: python3 scripts/check_marketplace_entry_sync.py
+
       # 列挙ロジックは scripts/test-all.sh に一本化してあり、ローカルでも
       # 同じコマンドで再現できる (`scripts/test-all.sh` または `make test`)。
       - name: Run plugin unit tests
