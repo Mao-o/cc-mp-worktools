@@ -1,0 +1,20 @@
+# sensitive-files-guardrail — repo 同梱パターン tier (commit して共有する層)
+#
+# このファイルは commit されているので、clone した貢献者・CI・worktree セッションでも
+# 同じ除外が効く。評価順は「plugin 同梱の既定 → このファイル → 利用者個人の
+# patterns.local.txt」で後ろが強いため、**利用者は自分のファイルで常に打ち消せる**。
+# 書式は利用者個人のファイルと同じ。このファイルはこの repo にしか存在しないので
+# [project:...] ヘッダーは書かない (書くと typo 時に全貢献者の全ツール呼び出しへ
+# 警告が 1 行付く)。
+#
+# 対象は sensitive-files-guardrail のテスト fixture に置いた**合成データ**のダミー鍵で、
+# redaction の出力を検証するためだけに存在する (実鍵ではない)。
+#
+# 現在の fixture は既定パターンに一致しない名前 (`*.pem.txt`) で block を回避している
+# ため、この行は「今 block されているものを外す」ものではない。鍵の形をした fixture を
+# 追加した瞬間に全員が毎セッション block されるのを防ぐための先回りの除外であり、
+# あわせてこの tier がこの repo で実際に読まれていること自体を担保する。
+#
+# 先頭 `/` は repo root からのアンカー、末尾 `/` はそのディレクトリ配下すべて。
+# 除外はこのディレクトリ配下に限定する (fixtures 全体には広げない)。
+!/plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads/tests/fixtures/keys/

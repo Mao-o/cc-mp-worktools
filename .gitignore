@@ -10,8 +10,18 @@
 *.local.json
 
 # Claude Code project-local state (agent-memory / ADR / locks / hooks 等)
-# worktools は plugin 配布 repo のため、開発者の private な project state は含めない
-.claude/
+# worktools は plugin 配布 repo のため、開発者の private な project state は含めない。
+# ディレクトリ自体 (.claude/) ではなく中身 (/.claude/*) を無視するのは、親ディレクトリを
+# 無視すると git がその中に降りず、下の negation が効かなくなるため。
+/.claude/*
+
+# 例外: sensitive-files-guardrail の repo 同梱パターン tier だけは commit して共有する。
+# 無視したままだと「置いた本人の手元でしか効かない」状態になり、貢献者 / CI /
+# worktree セッションでは tier が存在しない (= 共有できないので置く意味が無い)。
+# 例外はこの 1 ファイルに限定し、同ディレクトリの他のファイルは無視のまま。
+!/.claude/sensitive-files-guardrail/
+/.claude/sensitive-files-guardrail/*
+!/.claude/sensitive-files-guardrail/patterns.txt
 
 # Local notes (personal context, not distributed)
 CLAUDE.local.md
