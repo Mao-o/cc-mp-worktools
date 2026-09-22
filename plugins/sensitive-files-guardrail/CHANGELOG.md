@@ -49,7 +49,7 @@ commit 52113a1 で完了)。
   `_authToken` / `_password` / `username` / `email` / `always-auth` に完全一致、
   (c) `_auth` / `_password` / `username` / `email` / `always-auth` / `keyfile` /
   `certfile` / `cafile` を含む、
-  または **値部**が (d) `scheme://user:pass@host` 形 (URL に埋め込んだ
+  または **値部**が (d) `scheme://user[:pass]@host` 形 (URL に埋め込んだ credential。`:` を省いた `TOKEN@host` も含める。
   credential。`registry=` / `@scope:registry=` / `proxy=` / `https-proxy=` など
   キー名を問わない) のいずれかに当たる行。大文字小文字を区別せず、キー名の
   `-` と `_` の差は吸収する。**値の有無は問わない** — `${NPM_TOKEN}` のような

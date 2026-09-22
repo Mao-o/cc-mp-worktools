@@ -72,7 +72,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 >    `_password` `username` `email` `always-auth` に**完全一致**する、
 >    (c) `_auth` `_password` `username` `email` `always-auth` `keyfile`
 >    `certfile` `cafile` を**含む**、
->    または **値部**が (d) `scheme://user:pass@host` 形 (URL に埋め込んだ
+>    または **値部**が (d) `scheme://user[:pass]@host` 形 (URL に埋め込んだ credential。パスワード区切り `:` が無い `TOKEN@host` も npm は Basic 認証に載せるので含める。
 >    credential。`registry=` / `@scope:registry=` / `proxy=` / `https-proxy=`
 >    などキー名を問わない) のいずれか。大文字小文字を区別せず、キー名の
 >    `-` と `_` の差は吸収する。**値の有無は問わない**

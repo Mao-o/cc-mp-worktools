@@ -215,7 +215,7 @@ note: key material is never parsed or returned. only block labels and counts are
   `_password` / `username` / `email` / `always-auth`
 - キー部が識別力のある語を**含む** — `_auth` / `_password` / `username` /
   `email` / `always-auth` / `keyfile` / `certfile` / `cafile`
-- **値部**が `scheme://user:pass@host` 形 (URL に埋め込んだ credential)。
+- **値部**が `scheme://user[:pass]@host` 形 (URL に埋め込んだ credential。`:` を省いた `TOKEN@host` も npm は Basic 認証に載せるので含める)。
   キー名は問わない (`registry=` / `@scope:registry=` / `proxy=` /
   `https-proxy=` など)
 

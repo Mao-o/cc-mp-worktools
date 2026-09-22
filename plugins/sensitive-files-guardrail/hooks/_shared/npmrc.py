@@ -130,7 +130,10 @@ _AUTH_EXACT_KEYS = frozenset(
 # 埋めた形)。``registry`` / ``proxy`` / ``https-proxy`` 等、キー名では
 # 区別できない経路を拾う。``@`` より前に ``:`` があることを要求するので
 # ``https://registry.example.invalid/`` のような素の URL には一致しない。
-_USERINFO_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^/@\s]*:[^/@\s]*@", re.I)
+# userinfo は ``user:pass@`` に限らず ``TOKEN@`` (パスワード区切り無し) でも
+# credential を運ぶ (npm 11 実測: Basic 認証ヘッダに ``TOKEN:`` として載る。
+# マージ前レビューの指摘)。``@`` の手前に 1 文字以上あれば認証行とみなす
+_USERINFO_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.I)
 
 _COMMENT_PREFIXES = ("#", ";")
 

@@ -266,6 +266,9 @@ class TestScanAuthLines(unittest.TestCase):
         }
         cases.pop(f"key {token}\n")
         cases[f"registry=https://user:{token}@host/\n"] = "<url with user:password@>"
+        # パスワード区切りの ``:`` を省いた userinfo (`TOKEN@host`) も認証行
+        cases[f"registry=https://{token}@registry.example/\n"] = "<url with user:password@>"
+        cases[f"proxy=http://{token}@proxy.example:8080/\n"] = "<url with user:password@>"
         for line, label in cases.items():
             count, keys = scan_auth_lines(line)
             self.assertEqual(count, 1, line)
