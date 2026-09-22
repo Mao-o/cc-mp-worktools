@@ -263,6 +263,12 @@ class TestScanAuthLines(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(keys, ["(no '=' separator)"])
         self.assertNotIn(token, " ".join(keys))
+        # 空白も ``=`` も無い形 (先頭語 = 行全体) は部分一致でも固定文言 (2 巡目の指摘)
+        for line in (f"//registry.example/:_authToken{token}", f"_authToken{token}", f"x_auth{token}"):
+            count, keys = scan_auth_lines(line + "\n")
+            self.assertEqual(count, 1, line)
+            self.assertEqual(keys, ["(no '=' separator)"], line)
+            self.assertNotIn(token, " ".join(keys), line)
 
 
 class TestDecodeNpmrc(unittest.TestCase):

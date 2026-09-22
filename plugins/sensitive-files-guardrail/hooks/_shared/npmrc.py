@@ -206,17 +206,16 @@ _SEPARATOR_LESS_LABEL = "(no '=' separator)"
 
 
 def _separator_less_label(raw_key: str) -> str:
-    """``=`` の無い行のラベル。先頭の 1 語が単独で認証キーならそれ、違えば固定文言。
+    """``=`` の無い行のラベル。先頭の 1 語が**既知の認証キーと完全一致**するときだけそれ、
+    それ以外は固定文言。
 
-    先頭語より後ろは値かもしれないので**決して返さない**。
+    部分一致や ``//`` 前置では先頭語を返さない — 空白も ``=`` も無い
+    ``//host/:_authTokenTOKEN`` は先頭語 = 行全体になり、値が理由文へ写る
+    (マージ前レビューの指摘 2 巡目)。境界を安全に切れるのは完全一致だけ。
     """
-    first = raw_key.split()[0] if raw_key.split() else ""
-    norm = _normalize_key(first)
-    if norm and (
-        norm.startswith("//")
-        or norm in _AUTH_EXACT_KEYS
-        or any(token in norm for token in _AUTH_KEY_SUBSTRINGS)
-    ):
+    parts = raw_key.split()
+    first = parts[0] if parts else ""
+    if first and _normalize_key(first) in _AUTH_EXACT_KEYS:
         return first
     return _SEPARATOR_LESS_LABEL
 
