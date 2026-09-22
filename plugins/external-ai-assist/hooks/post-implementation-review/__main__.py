@@ -929,10 +929,13 @@ NOTICE_DELIVERY_FAILED = "レビュー結果の整形に失敗しました"
 class CommitSend:
     """`_send_commit_review` の結果。dataclass にしない理由は `ReviewBatch` と同じ。"""
 
-    def __init__(self, outcome, elapsed: float, sent_rels: list[str]) -> None:
+    def __init__(
+        self, outcome, elapsed: float, sent_rels: list[str], deduplicated: list[str] | None = None
+    ) -> None:
         self.outcome = outcome
         self.elapsed = elapsed
         self.sent_rels = sent_rels
+        self.deduplicated = list(deduplicated or [])  # 送らなかったが commit 済みが確定した rel
 
 
 def _commit_review(
@@ -986,6 +989,7 @@ def _commit_review(
             return _with_notices({}, [NOTICE_LOCK_HELD])
         try:
             prepared = _prepare_commit_review(
+                session_id,
                 root,
                 pre_reflog or {},
                 pre_status,
@@ -1186,6 +1190,7 @@ def _verify_fingerprints(
 
 
 def _prepare_commit_review(
+    session_id: str,
     root: str,
     pre_reflog: dict,
     pre_status: dict,
@@ -1270,6 +1275,14 @@ def _prepare_commit_review(
 
     if not batch.sections:
         log("commit レビュー対象の差分が無い (送信条件を満たすパスが無い) ため skip")
+        # 重複抑止で落としたパスは commit 済み = pending に残すと次の Stop が
+        # 「差分が空で取得できませんでした」と誤通知する (マージ前レビューの指摘)。
+        # 送信は起きていないが「レビュー済みの内容が commit された」ことは確定して
+        # いるので、送ったパスと同じ整理を通す
+        _quiet(
+            lambda: _settle_commit_review(session_id, root, batch.deduplicated, by_rel),
+            "重複抑止パスの整理",
+        )
         return notices, None
 
     min_lines = settings.count(ENV_MIN_LINES, 0)
@@ -1310,7 +1323,7 @@ def _send_commit_review(
         log=log,
         manifest=_sent_manifest(root, batch),
     )
-    return CommitSend(outcome, time.monotonic() - started, sent_rels)
+    return CommitSend(outcome, time.monotonic() - started, sent_rels, batch.deduplicated)
 
 
 def _quiet(action, what: str) -> None:
@@ -1360,7 +1373,9 @@ def _deliver_commit_review(
 
     _quiet(lambda: state.record_last_backend(session_id, outcome.backend), "backend 名の記録")
     _quiet(
-        lambda: _settle_commit_review(session_id, root, sent.sent_rels, by_rel),
+        lambda: _settle_commit_review(
+            session_id, root, list(dict.fromkeys(sent.sent_rels + sent.deduplicated)), by_rel
+        ),
         "pending の整理",
     )
 
@@ -1468,6 +1483,7 @@ def _collect_commit_diffs(
             continue
         if _already_reviewed(by_rel.get(rel, [abs_path]), diff_hash(text), reviewed):
             log(f"commit レビュー: Stop がレビュー済みの内容のため送らない: {rel}")
+            batch.deduplicated.append(rel)
             continue
         full_size = len(text.encode())
         if full_size > MAX_FILE_DIFF_BYTES:
@@ -2026,6 +2042,7 @@ class ReviewBatch:
         self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
         self.unretrievable: list[str] = []  # HEAD 基準の diff が空だった絶対パス (復元は試みない)
+        self.deduplicated: list[str] = []  # Stop がレビュー済みの内容なので送らなかった rel (commit 経路)
 
     @property
     def deferred(self) -> list[str]:

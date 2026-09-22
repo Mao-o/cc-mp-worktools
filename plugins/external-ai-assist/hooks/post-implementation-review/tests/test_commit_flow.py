@@ -1494,6 +1494,11 @@ class TestReviewedContentIsNotResent(CommitFlowTestCase):
         self.edit(SESSION_A, "a.py", f"print('{OURS}')\n")  # 1 バイトも変えない再編集
         self.window("tu_dedup1", lambda: self.commit("commit the reviewed content"))
         self.assertNothingSent()
+        # commit 済みが確定したパスは pending から外れ、次の Stop が「差分が空で
+        # 取得できませんでした」と誤通知しない (マージ前レビューの指摘)
+        self.assertEqual(self.pending(SESSION_A), [], "重複抑止で落としたパスが pending に残っている")
+        notice = self.assertNotBlocked(self.stop(SESSION_A, "REVIEW_CLEAN"))
+        self.assertNotIn("取得できませんでした", notice)
 
     def test_content_changed_after_the_review_is_sent(self):
         """逆に、レビュー後に本当に変わった内容は送る (空ガードにしない)。"""
