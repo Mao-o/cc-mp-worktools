@@ -700,7 +700,7 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 # redact-sensitive-reads (1,496 tests, 0.34.1 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (179 tests, 0.34.1 時点)
+# check-sensitive-files (181 tests, 0.34.1 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 

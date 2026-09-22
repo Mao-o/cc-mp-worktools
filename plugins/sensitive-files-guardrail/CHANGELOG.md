@@ -27,7 +27,7 @@ commit 52113a1 で完了)。
 
 Windows 移植性の不具合修正。判定表は変えない。**テキスト I/O の encoding を
 locale 依存から UTF-8 固定へ**。テスト件数: redact **1,485 → 1,496** /
-check **174 → 179**。
+check **174 → 181**。
 
 ### Fixed
 
@@ -63,13 +63,17 @@ check **174 → 179**。
   が同じ文字列に潰れて session ack の digest まで衝突する (片方を ack すると他方が
   黙る) ため (マージ前レビューの指摘)。ack の digest も同じ `surrogateescape` で
   元のバイト列に戻してから取る。従来 (POSIX / UTF-8 locale) はこの形のパスで
-  `UnicodeDecodeError` → internal_error になっていたので、それも併せて解消
+  `UnicodeDecodeError` → internal_error になっていたので、それも併せて解消。
+  block の reason に載せるときは、そういうパスだけ不正なバイトを `\xff` の形で
+  表示する (そのままだと `write_stdout` の `replace` で `?` に潰れ、どのファイルか
+  分からない。マージ前レビューの指摘)。正当な UTF-8 の名前 (日本語名など) は
+  従来どおりそのまま出す。表示は識別用で、shell にそのまま貼れる形ではない
 - ログファイル追記 (`LOG_PATH.open("a")`) も `encoding="utf-8"` を明示 (衛生。
   ログ行は `_sanitize_detail` の ASCII ホワイトリストを通るため実害は無かった)
 
 ### Tests
 
-- 床テスト 13 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
+- 床テスト 15 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
   patterns loader は `Path.read_text` の encoding 省略時だけ cp1252 に倒す wrapper で
   Windows 既定を模擬 (同梱 patterns の読込 / 日本語ファイル名 rule の非文字化け /
   日本語コメント)。stdin は子プロセスに `PYTHONIOENCODING=cp1252` を与えて
@@ -80,7 +84,10 @@ check **174 → 179**。
   非 UTF-8 の patterns (cp932 の user tier は warning + skip / 既定は `OSError` 送出 /
   BOM 付きでも 1 行目が効く) と、非 UTF-8 のパスのバイトが潰れないこと (macOS は
   そういう名前を作れないため、生バイトを出す子プロセスで実際の decode 経路を通す)・
-  ack digest が衝突しないことを固定
+  ack digest が衝突しないこと・block の reason で `\xff` の形に出て互いに区別できる
+  ことを固定
+- テスト側のテキスト I/O (patterns fixture の helper 等) も `encoding="utf-8"` を明示。
+  Windows (cp1252) では hook と同じ理由でテスト自身が落ちていた
 - Windows 実機 / CI での再検証は未実施 (CI の `tests-windows` job は別 PR)。
   残る posix 前提 (`mkfifo` / `geteuid` / `O_BINARY` / gitdir の区切り等) は
   内部バックログで追跡

@@ -1800,5 +1800,51 @@ class TestMainStdinNonUtf8Locale(unittest.TestCase):
         self.assertIn(".env", payload["reason"])
 
 
+
+class TestNonUtf8PathsInTheBlockReason(BaseMainTest):
+    """UTF-8 でないファイル名を block の reason で ``?`` に潰さない (0.34.1)。
+
+    git 出力は ``surrogateescape`` で無損失に decode しているが、reason をそのまま
+    ``write_stdout`` (``errors="replace"``) に渡すと ``bad-\\xff/.env`` も
+    ``bad-\\xfe/.env`` も ``bad-?/.env`` になり、どのファイルか分からない (外部
+    レビューの指摘)。stdout は bytes 層を持つ実ストリームにして、hook と同じ
+    encode 経路を通す (``StringIO`` だと encode が起きず再現しない)。macOS は
+    こういう名前のファイルを作れないので ``find_sensitive_files`` を差し替える。
+    """
+
+    def test_distinct_undecodable_paths_stay_distinct_and_identifiable(self):
+        a = b"bad-\xff/.env".decode("utf-8", "surrogateescape")
+        b = b"bad-\xfe/.env".decode("utf-8", "surrogateescape")
+        entry = _load_entry()
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="utf-8")
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = out
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "find_sensitive_files", return_value=[
+                {"path": a, "status": "untracked"},
+                {"path": b, "status": "untracked"},
+            ]):
+                rc = entry.main()
+            out.flush()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 0)
+        reason = json.loads(raw.getvalue().decode("utf-8"))["reason"]
+        self.assertIn("bad-\\xff/.env", reason)
+        self.assertIn("bad-\\xfe/.env", reason)
+
+    def test_valid_non_ascii_names_are_shown_as_is(self):
+        """正当な UTF-8 (日本語名) はエスケープしない (通常の表示を変えない)。"""
+        entry = _load_entry()
+        self.assertEqual(entry._display_path("秘密/.env"), "秘密/.env")
+        self.assertEqual(
+            entry._display_path(b"\xe7\xa7\x98/\xff.env".decode("utf-8", "surrogateescape")),
+            "秘/\\xff.env",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
