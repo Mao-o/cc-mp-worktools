@@ -155,9 +155,14 @@ jobs:
     # 知りたいのは「SFG の 2 suite が Windows でどう落ちるか」の 1 点なので、
     # 各 suite の package root で unittest discover を直接呼ぶ (test-all.sh が
     # 各 suite に対して行うのと同じ呼び方)。
-    name: tests-windows (${{ matrix.suite }})
-    if: github.event_name != 'schedule'
+    # 当面は赤である前提の調査用なので、pull_request / push のゲートには載せない
+    # (green 化は複数 PR にまたがる見込みで、その間ずっと無関係な PR にも赤が
+    # 2 本出続けるため)。手動起動 (workflow_dispatch) でだけ回す。Windows が
+    # 安定して green になったら、この job は畳んで tests job の matrix に
+    # windows-latest を足す形へ統合する。continue-on-error は付けない (赤を隠さない)。
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    timeout-minutes: 30
     strategy:
       # 片方が落ちてももう片方を最後まで走らせる。目的が失敗の洗い出しなので、
       # 1 回の run で両 suite 分の失敗一覧が欲しい (ubuntu 側 matrix と同趣旨)。
@@ -165,7 +170,18 @@ jobs:
       matrix:
         suite: [check-sensitive-files, redact-sensitive-reads]
     steps:
+      # GH の Windows runner は Git for Windows 既定で core.autocrlf=true。この repo に
+      # .gitattributes は無いため、放置すると tests/fixtures/** が CRLF で展開され、
+      # 「Windows のランタイム差」ではなく「checkout 設定」由来の失敗が洗い出し結果に
+      # 混ざる。母集団を LF に固定してから測る。
+      - name: Pin line endings to LF before checkout
+        run: git config --global core.autocrlf input
+
       - uses: actions/checkout@v6
+
+      # 実際にどう展開されたかを毎 run 一次情報として残す。
+      - name: Show line-ending config
+        run: git config --get core.autocrlf
 
       # Python は 1 バージョンで足りる。この job で見たいのは **プラットフォーム
       # 差** (symlink 作成権限 / O_NOFOLLOW の有無 / パス区切り / Path.home() の
@@ -196,9 +212,9 @@ jobs:
     # green な push が来た時点で同じ tag が作られる (version は変わらないため)。
     #
     # tests-windows は **意図的に needs へ入れない**。あの job は「Windows で
-    # 落ちるテストを洗い出す」ための調査用で、当面は赤であることが前提。needs に
-    # 入れると赤の間ずっと全 plugin のリリース tag が止まる (Windows と無関係な
-    # plugin まで巻き添えになる)。Windows が安定して green になり、plugin 側の
+    # 落ちるテストを洗い出す」ための調査用で、当面は赤であることが前提
+    # (workflow_dispatch 限定で push では走らない)。needs に入れると
+    # 「走っていない job を待つ」形になり、全 plugin のリリース tag が止まる。Windows が安定して green になり、plugin 側の
     # 「Windows は未検証」表記を外せた時点で needs への追加を検討する。
     #
     # GITHUB_TOKEN による tag push は他の workflow を起動しない (GitHub の仕様) ので、
