@@ -580,9 +580,10 @@ assertion failure で落とすことを確認済み (共通ルールの「mutati
 
 ### state の扱い
 
-- **成功時**: 送ったパスのうち `git diff HEAD -- <path>` に出なくなったものを
-  pending から外す (`state.drop_pending`)。外さないと Stop が「差分が空で取得でき
-  ませんでした」と誤通知する。判定は `gitscan.changed_vs_head` の **git 1 回**
+- **成功時**: 送ったパスのうち、作業ツリーの内容がレビューした commit と同じもの
+  (`git diff <窓の最後の commit> -- <path>` に出ないもの) を pending から外す
+  (`state.drop_pending`)。外さないと Stop が「差分が空で取得でき
+  ませんでした」と誤通知する。判定は `gitscan.changed_vs_commit` の **git 1 回**
   (パスごとに回すと最悪 60 回で PostToolUse の予算に収まらない)。送信前の P4 で
   同じ確認をしているが、レビューの待ち時間 (最悪 10 分) の間に再編集されうるので
   **ここでもう一度確認する**
@@ -597,6 +598,11 @@ assertion failure で落とすことを確認済み (共通ルールの「mutati
   いるため、backend が落ちても pending に残すと次の Stop が「差分が空で取得できません
   でした」と誤通知する (混在 batch で新規パス側の backend が全滅しただけで、無関係な
   重複抑止パスまで巻き込む経路があった)
+- **state 整理の比較基準は HEAD ではなくレビューした commit (窓の最後の commit)**
+  (`gitscan.changed_vs_commit`、0.12.1)。HEAD 基準だと、backend の待ち時間中に
+  同じセッションの別 Bash が同じパスを編集・commit したとき (その窓は cursor lock が
+  取れず commit レビューを見送る) に「HEAD と差が無い」ので pending から外れ、後続の
+  Stop でも拾われなかった。全 3 経路 (重複抑止のみ / 失敗・例外 / 成功) に効く
 - claim は取らない。commit の差分は作業ツリーの状態に依存しない不変の範囲なので、
   途中で死んでも「次の Stop に持ち越す」対象が無い
 
@@ -605,7 +611,7 @@ assertion failure で落とすことを確認済み (共通ルールの「mutati
 `try` の範囲は**送信前まで**。`_prepare_commit_review` / `_send_commit_review` の
 例外は「送らない」に倒すが、backend が指摘を返した後の `_deliver_commit_review` は
 try の外で走り、state 整理だけを `_quiet()` が個別に握り潰す。以前は 1 つの `try` が
-配信まで覆っており、`changed_vs_head` の例外で**外部へ送りレビュー結果も受け取った後に
+配信まで覆っており、state 整理の git 呼び出しの例外で**外部へ送りレビュー結果も受け取った後に
 指摘ごと捨てる** (cooldown だけ消費する) 形になっていた (マージ前レビューの指摘)。
 床テストは `TestDeliveryAfterReview`。
 
@@ -868,6 +874,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | **受け取った指摘を state 整理の失敗で捨てない / 送信前の例外では送らない** | `test_commit_flow.py::TestDeliveryAfterReview` |
 | **linked worktree の commit をその worktree の reflog で拾う** | `test_commit_flow.py::TestLinkedWorktree` |
 | **全 backend 失敗時、送った側の pending は触らないが、重複抑止パスは settle する (混在 batch) / 別 repo への commit では窓が伸びない** | `test_commit_flow.py::TestStateOnFailure` / `TestCommitInAnotherRepo` |
+| **state 整理はレビューした commit 基準 (待ち時間中に同じパスが commit されたら外さない / 無関係な commit では巻き込まない)** | `test_commit_flow.py::TestSettleAgainstReviewedCommit` |
 | commit レビューを含む PostToolUse(Bash) の hook timeout 予算 | `test_review_set.py::TestTimeoutBudgets::test_post_tool_bash_budget_covers_commit_review` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 

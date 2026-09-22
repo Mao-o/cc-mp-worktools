@@ -49,7 +49,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 #     + STATUS_TIMEOUT_SEC × 1 = 最悪 9s (+ 検出 2s = 11s)
 #   post-tool / Bash (hook 720s): commit の無い窓は worktree_root + status_snapshot
 #     = 最悪 7s (+ 検出 2s)。commit を含む窓はそこに range_paths / symlink_map /
-#     flagged_index_entries (P4') / changed_vs_head × 2 / CAT_FILE_TIMEOUT_SEC × 2
+#     flagged_index_entries (P4') / changed_vs_head + changed_vs_commit / CAT_FILE_TIMEOUT_SEC × 2
 #     (P6) / COMMIT_COLLECT_BUDGET_SEC と外部 AI CLI の待ち時間が乗る
 #   post-tool / Edit,Write,NotebookEdit (hook 10s): git 呼び出し無し (0s。+ 検出 2s)
 #   stop (hook 690s, うち cursor 600s + kill 猶予 15s → git に使えるのは約 75s):
@@ -373,11 +373,30 @@ def changed_vs_head(root: str, rels: list[str]) -> set[str] | None:
     (pending に残るので、Stop がそのパスを見て通知する = 二重通知になるだけで、
     送信範囲は広がらない側の失敗)。
     """
+    return _changed_vs(root, "HEAD", rels)
+
+
+def changed_vs_commit(root: str, commit: str, rels: list[str]) -> set[str] | None:
+    """`rels` のうち作業ツリーの内容が `commit` と違うものを返す (git 1 回)。
+
+    commit レビュー後の state 整理 (`__main__._settle_commit_review`) 用。基準を
+    HEAD ではなく**レビューした commit** に置くのが要点: レビュー待ちの間に同じ
+    セッションの別 Bash が同じパスを編集して commit すると、そのパスは HEAD とは
+    差が無い (= `changed_vs_head` では片付いたように見える) が、中身はレビューした
+    ものではない。`commit` と比べればその差が残るので pending から外さない。
+
+    取得できなければ None (`changed_vs_head` と同じく「何も片付いていない」扱い)。
+    """
+    return _changed_vs(root, commit, rels)
+
+
+def _changed_vs(root: str, base: str, rels: list[str]) -> set[str] | None:
+    """`git diff --name-only <base> -- rels` (作業ツリー対 `base`) の結果集合。"""
     if not rels:
         return set()
     res = _git(
         root,
-        ["diff", "--no-color", "--name-only", "-z", "HEAD", "--", *rels],
+        ["diff", "--no-color", "--name-only", "-z", base, "--", *rels],
         timeout=LS_FILES_TIMEOUT_SEC,
     )
     if res is None or res.returncode != 0:

@@ -28,6 +28,23 @@ commit 済みで、送信範囲そのものには影響しない)。
 `test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths` と
 `test_mixed_batch_send_exception_settles_only_deduplicated_paths`。
 
+**state 整理の比較基準を HEAD からレビューした commit に変更** (PR レビューの P1)。
+整理 (`_settle_commit_review`) は「もう HEAD と差が無いパス」を pending から
+外していたが、backend の待ち時間中に同じセッションの別 Bash が同じパスを
+編集して commit すると、そのパスは HEAD と差が無いので外れていた。割り込んだ
+窓は cursor lock が取れずに commit レビューを見送り (その旨は通知される)、
+パスは pending に積まれるが、ここで外れるため**後続の Stop でもレビュー・通知
+されない** (未レビューの commit 内容の取りこぼし)。これは本 patch で足した
+2 分岐だけでなく、0.12.0 からある成功経路 (送った側 + 重複抑止パスの整理) にも
+同じ形で存在した。比較の基準を窓の最後の commit (レビューした内容) に変え、
+作業ツリーの内容がそれと同じパスだけを外すようにした (`gitscan.changed_vs_commit`、
+git 呼び出しは 1 回のままで hook timeout 予算は不変)。HEAD が進んでいても、
+そのパスの内容がレビューした commit と同じなら従来どおり外す。既知の限界:
+待ち時間中に「変更して commit し、内容を元に戻す」と外れる (取りこぼすのは
+中間 commit だけで、最終内容はレビュー済みと同一)。回帰テストは
+`TestSettleAgainstReviewedCommit` (全 backend 失敗 / 送信例外 / 成功経路 /
+無関係な commit では巻き込まない の 4 件)。
+
 ## 0.12.0
 
 **外部レビュー backend を registry 化して差分レビューの送信先を選べるようにし、
