@@ -1255,6 +1255,17 @@ class TestDeliveryAfterReview(CommitFlowTestCase):
         )
         self.assertIn("直接影響", reason)
 
+    def test_range_diff_failure_is_reported_not_silently_skipped(self):
+        """git の失敗 (None) を「差分なし」と混同して黙って落とさない (マージ前レビューの指摘)。"""
+        self.edit(SESSION_A, "a.py", f"print('{OURS}')\n")
+        with mock.patch.object(self.gitscan, "range_diff", return_value=None):
+            output = self.window("tu_rdfail", lambda: self.commit("ours"))
+        self.assertNothingSent()
+        notice = self.notice(output)
+        self.assertIn("取得に失敗", notice)
+        self.assertIn("a.py", notice)
+        self.assertNotEqual(self.pending(SESSION_A), [], "失敗したパスを pending から消している")
+
     def test_exception_before_sending_does_not_send(self):
         self.edit(SESSION_A, "a.py", f"print('{OURS}')\n")
         with mock.patch.object(

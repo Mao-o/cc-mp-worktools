@@ -557,15 +557,19 @@ def _parse_batch_blobs(out: bytes, wanted: list[tuple[str, str]]) -> dict[str, s
     return digests
 
 
-def range_diff(root: str, old: str, new: str, rel: str) -> str:
-    """`old..new` の 1 パス分の diff テキスト。差分なし / 取得失敗なら空文字。
+def range_diff(root: str, old: str, new: str, rel: str) -> str | None:
+    """`old..new` の 1 パス分の diff テキスト。差分なしは空文字、**取得失敗は None**。
 
     `path_diff` と違い作業ツリーを見ない (両端とも commit) ので、Stop が見る
     「未 commit の変更」とは独立している。
+
+    失敗を空文字に畳まないのは、呼び出し側が「差分なし」として黙って skip すると
+    そのパスの唯一の commit レビュー機会が失われるため (`range_paths` が変更ありと
+    判定したパスで空になるのは失敗しかない。マージ前レビューの指摘)。
     """
     res = _git(root, ["diff", "--no-color", old, new, "--", rel])
     if res is None or res.returncode != 0:
-        return ""
+        return None
     return _decode(res.stdout)
 
 

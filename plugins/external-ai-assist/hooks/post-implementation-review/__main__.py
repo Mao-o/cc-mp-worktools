@@ -1253,6 +1253,12 @@ def _prepare_commit_review(
         )
 
     batch = _collect_commit_diffs(root, base, last, rels, by_rel, reviewed)
+    if batch.failed:
+        notices.append(
+            f"{len(batch.failed)} ファイルは commit 済み差分の取得に失敗したため"
+            "レビューしていません (内容は送信していません。次の Stop では回収されません): "
+            + _list_names(_rel_names(root, batch.failed))
+        )
     if batch.deferred_time:
         notices.append(
             f"{len(batch.deferred_time)} ファイルは git diff の時間予算超過により"
@@ -1479,6 +1485,12 @@ def _collect_commit_diffs(
             batch.deferred_time = [os.path.join(root, r) for r in rels[index:]]
             break
         text = gitscan.range_diff(root, base, last, rel)
+        if text is None:
+            # git の timeout / 失敗。`range_paths` が変更ありとした path なので「差分
+            # なし」ではない。黙って skip すると commit 済みの内容は次の Stop では
+            # 回収できない (HEAD 差分が空) ため、失敗として名前を通知する
+            batch.failed.append(abs_path)
+            continue
         if not text.strip():
             continue
         if _already_reviewed(by_rel.get(rel, [abs_path]), diff_hash(text), reviewed):
@@ -2043,6 +2055,7 @@ class ReviewBatch:
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
         self.unretrievable: list[str] = []  # HEAD 基準の diff が空だった絶対パス (復元は試みない)
         self.deduplicated: list[str] = []  # Stop がレビュー済みの内容なので送らなかった rel (commit 経路)
+        self.failed: list[str] = []  # diff の取得に失敗した絶対パス (commit 経路。送らず通知する)
 
     @property
     def deferred(self) -> list[str]:
