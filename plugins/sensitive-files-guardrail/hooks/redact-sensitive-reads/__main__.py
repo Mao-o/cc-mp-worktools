@@ -2,7 +2,7 @@
 """redact-sensitive-reads エントリポイント。
 
 fail-closed wrapper: どこで例外が起きても ask_or_deny にフォールバックする。
-`--tool read|bash|edit` で handler を振り分ける。
+`--tool read|bash|edit|write|grep` で handler を振り分ける。
 
 Phase 0 実測により permissionDecisionReason 経由でのモデル注入のみを使用。
 systemMessage トップレベルは使わない。
@@ -48,7 +48,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="redact-sensitive-reads")
     parser.add_argument(
         "--tool",
-        choices=["read", "bash", "edit", "write"],
+        choices=["read", "bash", "edit", "write", "grep"],
         required=True,
         help="どの handler に振り分けるか",
     )
@@ -108,27 +108,10 @@ def _dispatch(tool: str, envelope: dict) -> dict:
     if tool == "write":
         from handlers import edit_handler
         return edit_handler.handle(envelope, tool_label="Write")
+    if tool == "grep":
+        from handlers import grep_handler
+        return grep_handler.handle(envelope)
     return output.make_allow()
-
-
-def _is_unsupported_platform() -> bool:
-    """SIGALRM 非対応 (Windows 等) は現状非対応として扱う。
-
-    ここでの判定は `hasattr(signal, "SIGALRM")` だけを見る platform gate
-    であり、alarm や signal handler は一切設置しない (0.6.0 で内部
-    soft-timeout を撤去済み — `redaction/engine.py` 冒頭コメント参照)。
-
-    outer timeout (`hooks.json` の `timeout`) 発火時、Claude Code はこの
-    hook を discard し allow で継続する (fail-open。公式ドキュメントで確定
-    済み、Step 0-c — docs/DESIGN.md 参照)。この fail-open は Windows 固有
-    ではなく全 OS 共通で、本 plugin には Unix 側にもそれを能動的に防ぐ内部
-    タイムアウト機構は存在しない。それでも Windows だけを hook 冒頭から
-    deny で倒しているのは、`signal.SIGALRM` の有無を Windows 判定の proxy
-    に使っているためで、hang したまま機密が漏れる最悪パスを保守的に避ける
-    という方針上の選択にすぎない。
-    """
-    import signal as _signal
-    return not hasattr(_signal, "SIGALRM")
 
 
 def _warn_if_python_degraded() -> None:
@@ -144,10 +127,22 @@ def _warn_if_python_degraded() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if _is_unsupported_platform():
-        _emit(output.make_deny(M.unsupported_platform()))
-        return 0
-
+    # 0.34.0 (内部バックログ): `hasattr(signal, "SIGALRM")` を Windows 判定の
+    # proxy に使い、非対応プラットフォームでは **機密と無関係な Read まで含めて
+    # 全 tool 呼出を deny** していた冒頭ゲートを撤去した。
+    #
+    # 根拠だった内部 soft-timeout (SIGALRM 1s) は 0.6.0 で撤去済みで
+    # (`redaction/engine.py` 冒頭)、本体は SIGALRM を一切使っていない。
+    # outer timeout (`hooks.json` の `timeout`) 発火時に Claude Code が hook を
+    # discard して allow で継続する fail-open は **全 OS 共通** で、Unix 側にも
+    # それを能動的に防ぐ内部タイムアウト機構は無い — つまり「Windows だけ
+    # 冒頭 deny」に対応する実際のリスク差は無かった。
+    #
+    # 撤去後の Windows は「未検証」であって「保護なし」ではない: 内部失敗は
+    # 従来どおり catch-all の `ask_or_deny` / `make_deny` に倒れる (fail-closed)。
+    # `core/safepath.py` は `O_NOFOLLOW` / `O_CLOEXEC` が無い環境では
+    # `classify` の lstat 判定に依存する fallback を持つ。詳細は README の
+    # 「対応 OS」節と docs/DESIGN.md。
     _warn_if_python_degraded()
 
     try:

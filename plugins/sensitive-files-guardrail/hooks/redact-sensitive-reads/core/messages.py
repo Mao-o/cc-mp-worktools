@@ -2180,6 +2180,119 @@ def read_ask(kind: ReadAskKind) -> str:
     return "判定不能のため確認のため一時停止します。"  # pragma: no cover
 
 
+# -- `.npmrc` 内容ゲートの deny 根拠 (0.34.0) ------------------------------
+
+# prefix に並べるキー名の上限と、1 件あたりの表示長。**固定長にすること** —
+# `fit_read_reason` の予算計算 (`read_handler`) が prefix 分を引いて折り畳む
+# ため、ここが可変長だと minimal info 側の折り畳み量が読めなくなる。
+_NPMRC_KEYS_LIMIT = 5
+_NPMRC_KEY_MAXLEN = 48
+# prefix 全体の byte 上限。キー名が多バイト文字だけで埋まっていても、
+# minimal info 側の折り畳み予算をここ以上に食わない。
+_NPMRC_PREFIX_MAX_BYTES = 512
+
+
+def npmrc_auth_prefix(count: int, keys: list[str]) -> str:
+    """``.npmrc`` を内容ゲートが block したときの根拠 1 行 (0.34.0)。
+
+    0.34.0 で ``.npmrc`` の deny は「認証設定行が実際にある」という精密な
+    信号になったが、既存の minimal info は ini の keys-only scan なので
+    ``//registry…/:_authToken`` のような**認証キーを 1 件も拾わない**
+    (``redaction.keyonly_scan._KEY_RE`` の対象外)。結果として deny reason に
+    無害な設定キーだけが並び、「壊れたファイルを block した」ようにも
+    「除外レシピを足せば解決する」ようにも読めてしまう (= 保護を切る方向の
+    ナッジ)。block の根拠そのものを先頭に 1 行で出す。
+
+    **値は載せない** — ``_shared.npmrc.scan_auth_lines`` はキー名しか返さない。
+    キー名も ``_NPMRC_KEY_MAXLEN`` で切り、``_NPMRC_KEYS_LIMIT`` 件までに
+    絞って全体を固定長に収める。
+
+    認証行が 0 件のとき (decode 不能 / サイズ上限超などの fail-closed 経路)
+    は**空文字列**を返す — 見つけていない根拠を書かないため。
+    """
+    if count <= 0:
+        return ""
+    tail = "値は読んでいません。この行が 1 行も無ければ allow になります。\n"
+    shown = [
+        _sanitize_for_inline(k)[:_NPMRC_KEY_MAXLEN] for k in keys[:_NPMRC_KEYS_LIMIT]
+    ]
+    listed = ", ".join(shown) if shown else "(取得できず)"
+    rest = len(keys) - len(shown)
+    if rest > 0:
+        listed += f" ほか {rest} 件"
+    prefix = f"note: .npmrc に認証設定行 {count} 件 (キー名: {listed})。{tail}"
+    if len(prefix.encode("utf-8")) > _NPMRC_PREFIX_MAX_BYTES:
+        # キー名が異常に長い / 多バイトの場合は件数だけに落とす (上限を
+        # 超えた prefix が minimal info の折り畳み予算を食わないように)。
+        return f"note: .npmrc に認証設定行 {count} 件。{tail}"
+    return prefix
+
+
+# -- Grep handler 用 deny (0.34.0) ----------------------------------------
+
+GrepDenyKind = Literal["path", "glob"]
+
+
+def grep_deny(kind: GrepDenyKind, target: str, relpath: str = "") -> str:
+    """Grep tool の deny reason (0.34.0、内部バックログ)。
+
+    ``kind``:
+      - ``"path"``: ``tool_input.path`` が機密パターンに一致するファイル
+      - ``"glob"``: ``tool_input.glob`` が機密名に一致する (literal または
+        dotenv stem に展開されうる glob)
+
+    Read の deny と違って **minimal info は出さない** — Grep は判定時点で
+    ファイルを開いていないため (path 判定は lstat のみ)、鍵名を出すには
+    Read と同じ読込を丸ごと足すことになる。値も鍵名も載せず、Read へ
+    誘導する方が reason としても短く済む。``target`` は利用者が書いた
+    ``path`` / ``glob`` そのもの (basename は既に露出している前提 —
+    README「設計上のトレードオフ」)。
+    """
+    basename = _basename_of(target)
+    if kind == "glob":
+        note = (
+            f"Grep の glob ({target}) が機密パターンに一致するファイルに"
+            "展開されうるため block しました。"
+            "一致行がそのまま検索結果として返るため、値の一部が"
+            "コンテキストに露出します。"
+        )
+        suggestion = (
+            "suggestion: 検索対象を機密ファイル以外に絞ってください"
+            " (glob を具体化する / path でディレクトリを指定する)。"
+            "機密ファイルの中身が必要なら Read ツールで開いてください"
+            " (値は伏せられ、鍵名だけの要約が返ります)。"
+        )
+    else:
+        note = (
+            f"Grep の検索対象 ({target}) が機密パターンに一致するため"
+            " block しました。"
+            "一致行がそのまま検索結果として返るため、値の一部が"
+            "コンテキストに露出します。"
+        )
+        suggestion = (
+            "suggestion: 鍵の有無を確かめたいだけなら Read ツールで開いて"
+            "ください (値は伏せられ、鍵名だけの要約が返ります)。"
+            "別のファイルを検索したい場合は path を修正してください。"
+        )
+    lines = [f"note: {note}", f"matched_target: {target}", suggestion]
+    return _join_with_exclude_hint(lines, basename, relpath=relpath)
+
+
+def grep_pause(glob: str) -> str:
+    """Grep の ``glob`` が静的に判定できないときの reason (0.34.0、``ask_or_allow``)。
+
+    Bash operand の ``bash_lenient("glob_uncertain")`` と**同じ三態・同じ
+    末尾フレーズ**にする (判定を揃えた以上、文面も揃える)。``glob`` 文字列
+    そのものは既に露出しているので埋めてよい (``grep_deny`` と同じ前提)。
+    """
+    head = (
+        f"Grep の glob ({_sanitize_for_inline(glob)}) にワイルドカード "
+        "(`*` / `?` / `[` / `{`) が含まれており、機密パターンと交差しうるため"
+        "静的に判定できません。検索対象を具体化するか確認してください。"
+    )
+    return f"{head} {_BASH_LENIENT_SUFFIX}"
+
+
 # -- H2 + M2: Edit/Write 用 ask_or_deny -----------------------------------
 
 EditPauseKind = Literal[
@@ -2324,12 +2437,10 @@ def stdin_empty() -> str:
     )
 
 
-def unsupported_platform() -> str:
-    """SIGALRM 非対応 (Windows 等) の deny 文。"""
-    return (
-        "redact-hook は現状 UNIX (Linux / macOS) のみサポートしています。"
-        "Windows 等では fail-closed で deny します (README の既知制限を参照)。"
-    )
+# 0.34.0 (内部バックログ): ``unsupported_platform()`` を撤去した。
+# ``__main__`` 冒頭の「SIGALRM 非対応なら全 tool 呼出を deny」ゲートと対で
+# 存在していた文面で、ゲート撤去により唯一の呼出元が消えたため。Windows は
+# 「未検証」であって「無条件 deny」ではなくなった (README の「対応 OS」節)。
 
 
 def handler_internal_error(tool: str, exc_type: str = "") -> str:

@@ -67,3 +67,16 @@ tool_input の内訳:
 - Bash: `command`, `description`
 - Edit: `file_path`, `old_string`, `new_string`
 - Write: `file_path`, `content`
+- Grep: `pattern` (必須), `path`, `glob`, `output_mode`, `-i`, `-n`, `type`,
+  `head_limit`, `multiline`
+  - **実測 (CLI 2.1.278、`claude -p --tools Grep,Glob,Read`)**: `path` は
+    **cwd 相対でも絶対でも**来る (ファイルでもディレクトリでも)。`path` /
+    `glob` / `output_mode` は省略時 **key ごと存在しない** (`null` ではない)。
+    `-i` / `-n` は文字列キー `"-i"` / `"-n"` の bool。`type` / `head_limit` は
+    公式 hooks reference の表には無いが実在する
+  - `grep_handler` が読むのは `path` と `glob` だけで、他のキーは無視する
+  - **macOS / Linux の既定では Grep ツールは tool set に載らない** (公式 tools
+    reference 逐語: Claude は Bash の `find` / `grep` を使う)。実際に呼ばれるのは
+    Windows 既定 / `--tools` `--allowedTools` で指名 / Bash が deny された時 /
+    subagent の tools に Grep があって Bash が無い時。実測時に `--tools` を
+    付けないと Grep が 1 回も呼ばれず envelope が採れない

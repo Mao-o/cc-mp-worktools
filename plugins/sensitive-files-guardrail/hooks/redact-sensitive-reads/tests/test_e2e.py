@@ -5,6 +5,7 @@ subprocess ではなく main() を直接呼び、stdin/stdout を差し替える
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -50,6 +51,24 @@ def _run_main(envelope: dict, argv: list[str]) -> dict:
     if not out.strip():
         return {}
     return json.loads(out)
+
+
+def _decision(result: dict) -> str | None:
+    """``permissionDecision`` を取り出す (allow は ``None``)。
+
+    ``result["hookSpecificOutput"]["permissionDecision"]`` を直接書くと、
+    判定が allow (= ``{}``) に退行したとき ``KeyError`` になり、テストが
+    **assertion failure ではなく error** で落ちる。error は「テストが走って
+    いない」と見分けが付かず、mutation で床テストの有効性を測るときに
+    空振りと区別できない (``docs/MAINTAINING.md`` のテスト規律)。
+    """
+    return (result.get("hookSpecificOutput") or {}).get("permissionDecision")
+
+
+def _reason(result: dict) -> str:
+    return (result.get("hookSpecificOutput") or {}).get(
+        "permissionDecisionReason"
+    ) or ""
 
 
 class TestE2EReadHandler(unittest.TestCase):
@@ -134,6 +153,46 @@ class TestE2EReadHandler(unittest.TestCase):
         }
         result = _run_main(envelope, ["--tool", "read"])
         self.assertEqual(result, {})
+
+    def test_read_suffix_dotenv_deny(self):
+        """0.34.0: ``*.env`` (``production.env`` / ``local.env``) も既定で deny。
+
+        0.33.x までは ``.env`` / ``.env.*`` / ``.envrc`` / ``*.envrc`` の 4 行
+        しか無く、``*.envrc`` があるのに ``*.env`` が無いという非対称だった
+        (``redaction/engine._detect_format`` は ``foo.env`` を dotenv として
+        扱っており実装とも食い違っていた)。
+        """
+        for name in ("production.env", "local.env"):
+            with self.subTest(name=name):
+                p = Path(self.tmp) / name
+                p.write_text("DATABASE_URL=postgresql://u:p@h/d\nDEBUG=true\n")
+                envelope = {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": name},
+                    "cwd": self.tmp,
+                    "permission_mode": "default",
+                }
+                result = _run_main(envelope, ["--tool", "read"])
+                self.assertEqual(_decision(result), "deny")
+                reason = _reason(result)
+                # ``_detect_format`` が dotenv として扱うので minimal info も dotenv 形
+                self.assertIn("format: dotenv", reason)
+                self.assertIn("DATABASE_URL", reason)
+                self.assertNotIn("postgresql", reason)
+
+    def test_read_suffix_dotenv_template_still_allowed(self):
+        """``*.env`` を足しても既定の除外 (``!*.example`` 等) は先に勝つ。"""
+        for name in ("foo.env.example", "foo.env.sample", "config.env.template"):
+            with self.subTest(name=name):
+                p = Path(self.tmp) / name
+                p.write_text("FOO=bar\n")
+                envelope = {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": name},
+                    "cwd": self.tmp,
+                    "permission_mode": "default",
+                }
+                self.assertEqual(_run_main(envelope, ["--tool", "read"]), {})
 
     def test_read_example_excluded(self):
         p = Path(self.tmp) / ".env.example"
@@ -1168,6 +1227,144 @@ class TestPythonVersionDegradedWarning(unittest.TestCase):
             with mock.patch.object(entry.L, "log_info") as mock_log:
                 entry._warn_if_python_degraded()
         mock_log.assert_not_called()
+
+
+class TestE2EGrepHandler(unittest.TestCase):
+    """``--tool grep`` の実配線 (0.34.0)。
+
+    判定そのものは ``tests/test_grep_handler.py`` が網羅する。ここで固定する
+    のは ``__main__`` の dispatch (argparse の choices + ``_dispatch``) と
+    ``hooks/hooks.json`` の matcher が揃っていること。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def test_grep_on_dotenv_denies(self):
+        (Path(self.tmp) / ".env").write_text("JWT_SECRET=dummy\n")
+        envelope = {
+            "tool_name": "Grep",
+            "tool_input": {
+                "pattern": "SECRET",
+                "path": ".env",
+                "output_mode": "content",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        result = _run_main(envelope, ["--tool", "grep"])
+        self.assertEqual(_decision(result), "deny")
+        # 値も鍵名も出さない (Grep はファイルを開かない)
+        self.assertNotIn("JWT_SECRET", _reason(result))
+
+    def test_grep_on_source_tree_without_glob_allows(self):
+        (Path(self.tmp) / "src").mkdir()
+        (Path(self.tmp) / "src" / "a.py").write_text("x = 1\n")
+        envelope = {
+            "tool_name": "Grep",
+            "tool_input": {"pattern": "x", "path": "src"},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        self.assertEqual(_run_main(envelope, ["--tool", "grep"]), {})
+
+    def test_grep_wildcard_glob_is_ask_or_allow(self):
+        """0.34.0 (マージ前レビュー P2-3): wildcard glob は Bash と同じ三態。
+
+        `grep x *.py` が Bash handler で ask になるのと揃える。autonomous
+        では通す。
+        """
+        (Path(self.tmp) / "src").mkdir()
+        (Path(self.tmp) / "src" / "a.py").write_text("x = 1\n")
+        envelope = {
+            "tool_name": "Grep",
+            "tool_input": {"pattern": "x", "path": "src", "glob": "*.py"},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        from core import output
+
+        self.assertEqual(_decision(_run_main(envelope, ["--tool", "grep"])), "ask")
+        envelope["permission_mode"] = "auto"
+        self.assertTrue(
+            output.is_allow(_run_main(envelope, ["--tool", "grep"]))
+        )
+
+    def test_hooks_json_registers_the_grep_matcher(self):
+        hooks_json = (
+            Path(__file__).resolve().parent.parent.parent / "hooks.json"
+        )
+        with hooks_json.open() as f:
+            config = json.load(f)
+        entries = {
+            entry["matcher"]: entry["hooks"][0]["command"]
+            for entry in config["hooks"]["PreToolUse"]
+        }
+        self.assertIn("Grep", entries)
+        self.assertIn("--tool grep", entries["Grep"])
+        # Glob / NotebookEdit は対象外のまま (README の既知制限と対)
+        self.assertNotIn("Glob", entries)
+        self.assertNotIn("NotebookEdit", entries)
+
+
+class TestSigalrmlessPlatformUsesNormalPipeline(unittest.TestCase):
+    """0.34.0: ``signal.SIGALRM`` が無い環境でも通常のパイプラインを通る。
+
+    0.33.x までは ``__main__`` 冒頭の ``_is_unsupported_platform`` が
+    ``hasattr(signal, "SIGALRM")`` だけを見て、**機密と無関係な Read も含め
+    全 tool 呼出を deny** していた (インストール即無効化級の体験)。根拠だった
+    内部 soft-timeout は 0.6.0 で撤去済みで、hook 本体は SIGALRM を使わない。
+
+    ここでは実際に ``signal.SIGALRM`` を一時的に取り除いて (Windows 相当の
+    環境を模して) 通常判定が走ることを固定する。撤去前のコードではこの 2 件が
+    どちらも deny になる (mutation で確認済み)。
+
+    **Windows 実機の検証ではない** — 検証しているのは「SIGALRM の有無で判定が
+    変わらない」ことだけ。Windows の実機検証は別チケット。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    @contextlib.contextmanager
+    def _without_sigalrm(self):
+        import signal
+
+        missing = object()
+        saved = getattr(signal, "SIGALRM", missing)
+        if saved is not missing:
+            delattr(signal, "SIGALRM")
+        try:
+            yield
+        finally:
+            if saved is not missing:
+                signal.SIGALRM = saved
+
+    def _read(self, name: str) -> dict:
+        envelope = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": name},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        }
+        with self._without_sigalrm():
+            return _run_main(envelope, ["--tool", "read"])
+
+    def test_non_sensitive_read_is_allowed(self):
+        (Path(self.tmp) / "README.md").write_text("# hi\n")
+        self.assertEqual(self._read("README.md"), {})
+
+    def test_sensitive_read_is_still_denied(self):
+        (Path(self.tmp) / ".env").write_text("JWT_SECRET=dummy\n")
+        result = self._read(".env")
+        self.assertEqual(_decision(result), "deny")
+        self.assertIn("JWT_SECRET", _reason(result))
+
+    def test_platform_gate_helper_is_gone(self):
+        # 文面 (``M.unsupported_platform``) と同じく、gate 本体も残さない。
+        self.assertFalse(hasattr(entry, "_is_unsupported_platform"))
 
 
 if __name__ == "__main__":

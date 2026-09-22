@@ -6,9 +6,10 @@ bypassPermissions) での判定結果を完全列挙する。値は 0.19.0 時�
 [DESIGN.md](./DESIGN.md)、コマンド例の解釈は [README.md](../README.md) を参照。
 
 > 表は紙幅の都合で従来通り 5 列 (default / acceptEdits / auto / dontAsk /
-> bypassPermissions) のみ列挙する。**`plan` 列は `auto` 列と同じ判定** (Bash
-> 静的解析不能ケースは allow、機密 path 確定 match は deny、Read/Edit の判定
-> 不能ケースは ask) として読むこと。`acceptEdits` / `dontAsk` のような ask 維持
+> bypassPermissions) のみ列挙する。**`plan` 列は `auto` 列と同じ判定**
+> (`ask_or_allow` の経路 — Bash の静的解析不能ケースと Grep の判定できない
+> `glob` (0.34.0) — は allow、機密 path 確定 match は deny、Read/Edit/Grep の
+> 判定不能ケースは ask) として読むこと。`acceptEdits` / `dontAsk` のような ask 維持
 > 系とは挙動が異なるため、`auto` 列を参照する。
 
 `permission_mode` の既知列挙は `tests/test_envelope_shapes.py` の
@@ -45,6 +46,10 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 |---|---|---|---|---|---|
 | パターン非該当 | allow | allow | allow | allow | allow |
 | 機密 + 通常ファイル | **deny** + minimal info (鍵名・型・prefix・status・length) | **deny** | **deny** | **deny** | **deny** |
+| `.npmrc` + 認証行なし (0.34.0) | allow | allow | allow | allow | allow |
+| `.npmrc` + 認証行あり (0.34.0) | **deny** + minimal info | **deny** | **deny** | **deny** | **deny** |
+| `.npmrc` + 読めない / decode 不能 / 64KiB 超 (0.34.0) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `production.env` / `local.env` など `*.env` (0.34.0) | **deny** + minimal info | **deny** | **deny** | **deny** | **deny** |
 | 機密 + symlink | ask | ask | ask | ask | **deny** |
 | 機密 + 特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | **deny** |
 | 機密 + directory (`.env` がディレクトリの構成、内部バックログ) | ask | ask | ask | ask | **deny** |
@@ -53,6 +58,49 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | patterns.txt 読込失敗 | ask + stderr | ask | ask | ask | **deny** + stderr |
 | 32KB 超 | keyonly deny | keyonly | keyonly | keyonly | keyonly |
 
+> **0.34.0 で判定境界が変化 (2 件)**。
+>
+> 1. **`.npmrc` の内容ゲート (deny → 条件つき allow)**。`.npmrc` は pnpm /
+>    yarn を使う repo でほぼ必ず commit される設定ファイル (`engine-strict` /
+>    `auto-install-peers` / `@scope:registry`) で、トークンを含むのは一部。
+>    既定 patterns からは**外さず**、Read が既に開いているファイルの**中身**で
+>    確定する: 認証らしい行が 1 行も無ければ allow、あれば従来どおり deny。
+>    「認証らしい行」= 行頭空白と `#` / `;` コメントを除いたうえで、
+>    **キー部** (最初の `=` の左) が
+>    (a) `//` で始まる、
+>    (b) `key` `cert` `keyfile` `certfile` `cafile` `otp` `_auth` `_authToken`
+>    `_password` `username` `email` `always-auth` に**完全一致**する、
+>    (c) `_auth` `_password` `username` `email` `always-auth` `keyfile`
+>    `certfile` `cafile` を**含む**、
+>    または **値部**が (d) `scheme://user[:pass]@host` 形 (URL に埋め込んだ credential。パスワード区切り `:` が無い `TOKEN@host` も npm は Basic 認証に載せるので含める。
+>    credential。`registry=` / `@scope:registry=` / `proxy=` / `https-proxy=`
+>    などキー名を問わない) のいずれか。大文字小文字を区別せず、キー名の
+>    `-` と `_` の差は吸収する。**値の有無は問わない**
+>    (`${NPM_TOKEN}` のような環境変数参照も deny 側)。判定できない
+>    事情 (読めない / UTF-8 として decode できない / 64KiB 超) はすべて deny
+>    (fail-closed)。deny したときは reason の**先頭 1 行**に
+>    「認証設定行 N 件 (キー名: …)」を出す (値は出さない) — 既存の minimal
+>    info は ini の keys-only scan なので `//registry…/:_authToken` を拾わず、
+>    無害な設定キーだけが並んで「なぜ block したか」が読めなかったため。
+>    テスト: `tests/test_npmrc_gate.py`
+>    (`TestReadHandlerNpmrcGate` / `TestAuthLineDetection` /
+>    `TestNpmrcDenyReasonShowsTheEvidence`)。
+>    (c) と (b)(d) は**併存**する: (b) の完全一致だけに整理すると
+>    `foo_auth=` のような非標準キーが deny → allow に落ちるため
+>    (`test_substring_only_key_is_still_auth` が床)。
+>    **Bash / Edit / Write 表は不変** — `cat .npmrc` は従来どおり deny
+>    (operand ごとにファイルを開くのは設計変更にあたるため)。`.pypirc` /
+>    `.netrc` も従来どおり内容に依らず deny。
+> 2. **`*.env` を既定 patterns に追加 (allow → deny)**。`*.envrc` があるのに
+>    `*.env` が無いという非対称で、`production.env` / `local.env` が allow
+>    だった (`redaction/engine._detect_format` は `foo.env` を dotenv として
+>    扱っており実装とも食い違っていた)。除外 (`!*.example` 等) は従来どおり
+>    後勝ちなので `foo.env.example` は allow。テスト:
+>    `tests/test_e2e.py::TestE2EReadHandler::test_read_suffix_dotenv_deny` /
+>    `test_read_suffix_dotenv_template_still_allowed`、
+>    `tests/test_matcher.py::TestMatcherDotenv::test_suffix_dotenv_basename`。
+>    Bash 側の影響は下の Bash 表の注記を参照。
+>
 > 0.9.0 で dotenv の minimal info を拡張: 値クラス (14 種、`url` / `email` /
 > `uuid` / `aws_access_key` / `stripe_secret` / `stripe_pk` / `github_pat` /
 > `openai_key` を追加)、識別子型 prefix (`sk_live_` / `AKIA` / `ghp_` 等)、
@@ -120,7 +168,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > `&` は除く)。
 >
 > awk / sed のプログラム文字列内の動的構文 (awk: `system(` `getline` `|` `>`
-> `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で
+> `@include` `@load` `-f` / sed: `e` `r` `R` `w` `W` `-f`) は operand scan の **後** で
 > `ask_or_allow` に戻す (`awk 'BEGIN { system("cat .env") }'` は default で
 > ask、autonomous で allow = 0.17.0 と同じ)。機密 operand 付き
 > (`awk 'BEGIN{system("x")}' .env`) は deny が優先。sed は走査 parser で
@@ -183,8 +231,11 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 > 消える segment は通常の operand scan を再実行し、**deny だけを採用** する。
 > `cat $PWD/.env` / `cat "$PWD/.env"` / `grep KEY $CFG/.env` / `cat $OPTS .env` /
 > `cat $HOME/keys/server.pem` は ask / allow → **deny** (変数の展開結果に依らず
-> basename が確定する形のみ。`cat $X` / `cat $X.env` / `cat $(pwd)/.env` /
-> `${X:-…}` / `$PAGER .env` は従来どおり ask / allow)。(2) **residual metachar の
+> basename が確定する形のみ。`cat $X` / `cat $(pwd)/.env` /
+> `${X:-…}` / `$PAGER .env` は従来どおり ask / allow。`cat $X.env` は 0.25.0
+> 当時は ask / allow 側だったが、**0.34.0 の `*.env` 追加で deny に移った** —
+> `$X` が何に展開されても末尾が `.env` なので basename が suffix rule に
+> 一致する)。(2) **residual metachar の
 > quote-aware 化** — クォート内・エスケープ済みの `|` `&` `>` `<` は演算子に
 > なれないので ask に倒さない。`git commit -m 'fix: a & b'` / `echo 'a|b'` /
 > `jq '.a | .b' cfg.json` は ask → **allow**、`mv 'a|b' .env` は機密 operand が
@@ -287,6 +338,8 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `curl file://.env`, `git show HEAD:.env` |
 | `grep --file=.env foo`, `grep -f.env foo`, `grep -f .env foo`, `grep TODO .env`, `rg -f pats.txt .env`, `jq . .env` (値が path の option / pattern の後ろの file operand) |
 | `git log -p .env`, `git log -L1,10:.env`, `git log --pretty .env -p`, `git log --output=.env`, `git commit -F .env`, `tar -T .env -cf out.tgz`, `rsync --files-from=.env src dst`, `jq --slurpfile x .env . cfg.json` (0.22.0: 値が path の option は候補に残す。`--pretty` は値省略可なので分離形の次 token は path) |
+| `cat prod.env`, `head -n 5 local.env`, `cat sub/production.env`, `mv old.env new.env`, `curl -o out.env https://…`, `tar -cf out.tar app.env`, `cat $X.env`, `cat $A/$B.env` (0.34.0: `*.env` を既定 patterns に追加。`$X.env` は展開結果に依らず末尾が `.env`) |
+| `ssh host 'cat app.env'`, `docker run img 'cat x.env'`, `kubectl exec pod -- cat app.env`, `git -c alias.x='!cat .env' x` (0.34.0 の **過剰 deny 側の副作用**。spec を持たないコマンドに渡された引数 (クォート済み / 裸を問わない) が suffix `*.env` に一致する。いずれも実際に dotenv を読む形なので保護を落とす方向ではない) |
 | `cat .env*`, `cat .envrc*` (operand glob が shell の展開で `.env` / `.envrc` に一致) |
 | `cat .e[n]v`, `cat .en?` (`.env` literal 一致 char class / `?`。先頭は literal `.`) |
 | `cat */.env`, `cat **/.env` (0.22.0: path 要素ごとの展開で basename 側が `.env`。0.21.x までは ask / allow) |
@@ -332,7 +385,7 @@ step 7 (behavioral probe、未実施)、収録判断は step 8。
 | `grep .env README.md`, `grep -rn '.env' src/`, `grep -v '.env' out.txt`, `rg -n id_rsa .`, `ag '.env' .`, `jq '.env' package.json`, `git grep -n '.env' -- src/`, `grep -e .env README.md` (0.22.0: 第 1 positional は pattern、`-e` の値は pattern) |
 | `git log -S.env --oneline`, `git log --grep=.env`, `git log --grep -x.env`, `git log --author=.env`, `git log --format=.env`, `grep -rn TODO --exclude='.env'`, `grep -rn TODO --exclude-dir=.env`, `grep -rn TODO --include='*.env'`, `rg TODO -g '*.env'`, `tar --exclude='.env' -czf out.tgz src`, `rsync -a --exclude='.env' src/ dst/`, `zip -r out.zip src -x '.env'`, `jq --arg k .env '.[$k]' cfg.json`, `diff -I .env a b` (0.22.0: 値が path ではない option の値) |
 | `sed -n 's/.env/X/p' notes.txt`, `awk '/.env/ {print}' notes.txt`, `cat .env/bin/activate`, `source .env/bin/activate` (0.22.0: script は path ではない / Bash operand は親 dir 名を見ない。0.24.0 の path 形 rule は root 相対で評価するが既定 patterns には無い) |
-| `cat *`, `git add *`, `cp * /tmp/dest/`, `cat ?env`, `cat [.]env`, `cat *.envrc` → **ask / allow** (0.22.0: shell の `*` / `?` / bracket 式は dotfile に展開されない。deny から他の不確定 glob と同じ ask_or_allow へ) |
+| `cat *`, `git add *`, `cp * /tmp/dest/`, `cat ?env`, `cat [.]env`, `cat *.envrc`, `cat *.env` → **ask / allow** (0.22.0: shell の `*` / `?` / bracket 式は dotfile に展開されない。deny から他の不確定 glob と同じ ask_or_allow へ。**`cat *.env` は 0.34.0 で `*.env` を既定 patterns に足した後も ask / allow のまま** — glob 判定は既定 rules への候補列挙ではなく dotenv literal stem (`.env` / `.envrc`) への展開可能性だけを見る 0.8.0 の縮約で、`*.env` は先頭ドットの `.env` には展開されず、`prod.env` に展開されうることは patterns を見ないと分からない。候補列挙の復活は 0.8.0 で意図的に撤去した設計判断なので 0.34.0 では戻さない。テスト: `tests/test_bash_handler.py::TestSuffixDotenvOperand::test_star_dot_env_glob_stays_lenient`) |
 | `cat > x.py <<'PY'` + 本文 `n = kb * 1024` + `PY` → **ask / allow** (0.22.0: heredoc 本文は segment にしない。演算子行は `<` で hard-stop) |
 | `git commit -m 'fix: a & b'`, `git commit -m 'a & b' 2>&1`, `echo 'a\|b'`, `echo "a > b"`, `tar -cf out.tar 'weird\|name'`, `jq '.a \| .b' cfg.json`, `git log --grep='a&b' --oneline`, `echo \> x` (0.25.0: クォート内・エスケープ済みの metachar は literal データ。residual ask に倒さない) |
 | `git diff "HEAD@{1}"`, `git stash apply "stash@{0}"`, `awk "{print}" notes.txt`, `sed "s/(=)/X/" notes.txt`, `echo "{a,b}"`, `echo "a<b"`, `cat "file(1).txt"`, `git commit -m "fix (parser) & cleanup"` (0.25.0: ダブルクォート内の `(` `)` `{` `}` `<` は不活性。0.18.0 のシングルクォート形と同じ扱い) |
@@ -532,7 +585,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | コマンド | default | acceptEdits | auto | dontAsk | bypassPermissions |
 |---|---|---|---|---|---|
 | `cat $X`, `cat "$X"`, `cat $(echo .env)` (動的展開) | ask | ask | **allow** | ask | **allow** |
-| `cat $X.env`, `cat $A/$B.env`, `cat $(pwd)/.env`, `cat ${X:-fallback}/.env`, `$PAGER .env`, `cat $1/.env`, `` cat `pwd`/.env `` (0.25.0 の救済 scan 対象外: basename が変数に跨る / コマンド置換・複合展開・positional 変数が残る / first token が変数) | ask | ask | **allow** | ask | **allow** |
+| `cat $(pwd)/.env`, `cat ${X:-fallback}/.env`, `$PAGER .env`, `cat $1/.env`, `` cat `pwd`/.env `` (0.25.0 の救済 scan 対象外: コマンド置換・複合展開・positional 変数が残る / first token が変数。**`cat $X.env` / `cat $A/$B.env` は 0.34.0 の `*.env` 追加で deny 表へ移動**) | ask | ask | **allow** | ask | **allow** |
 | `cat << EOF ... EOF`, `cat <(cat .env)`, `cat <&2` | ask | ask | **allow** | ask | **allow** |
 | `cat < .env`, `cat<.env`, `cat 0< .env`, `cat < ".env"` (`<` 入力リダイレクト, 0.7.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `cat <<< '.env'` (herestring, literal 渡し) | ask | ask | **allow** | ask | **allow** |
@@ -555,6 +608,7 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | `command cat .env`, `command -p cat .env`, `command -- cat .env` (`command`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `builtin cat .env`, `nohup cat .env`, `nohup command cat .env` (`builtin` / `nohup`, 0.8.0 で opaque 統一) | ask | ask | **allow** | ask | **allow** |
 | `FOO=1 cat .env`, `FOO=1 BAR=2 cat .env` (env-assignment prefix, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
+| `gawk '@include ".env"'`, `gawk '@load "filefuncs"'` (0.34.0: プログラム文字列から awk ソース / 共有ライブラリを読み込む構文。operand が 1 つも無くてもファイルが開かれるので `-f` と同型。**allow → ask の判定変更**。語境界まで見るので `awk '/x@loader/ {print}'` / `awk '{print "a@loadb"}'` は allow のまま) | ask | ask | **allow** | ask | **allow** |
 | `cat .env.*`, `cat .env.example*`, `cat *.log` (dotenv stem 不一致 glob, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `cat id_rsa*`, `cat id_*`, `cat *.key`, `cat cred*.json` (rules 候補列挙撤廃, 0.8.0 で格下げ) | ask | ask | **allow** | ask | **allow** |
 | `cat '.env` (shlex 失敗) | ask | ask | **allow** | ask | **allow** |
@@ -585,6 +639,101 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 > 1 セルも変わっていない**。文面の内訳は
 > [DESIGN.md](./DESIGN.md#状況別の-deny-文面-0200-e6) を参照。
 
+## Grep handler (0.34.0 新設)
+
+`tool_input` の `path` と `glob` だけを見る (`pattern` / `output_mode` /
+`type` / `head_limit` / `-i` / `-n` は判定に使わない)。`path` は Read
+handler と、`glob` は **Bash の operand glob と同じ三態** (deny /
+`ask_or_allow` / allow) で判定する。例外経路だけが Read handler と同じ
+`ask_or_deny`。
+
+**`ask` を作らないのはディレクトリ走査だけ** (`path` がディレクトリ /
+未指定)。0.34.0 の初版は `glob` にも「`ask` は作らない」を適用していたが、
+それだと同じ意図の Bash operand より緩く、しかも Grep が呼ばれる条件の 1 つが
+「Bash が deny されている」なので、**Bash の ask が効かない状況でだけ Grep が
+使われ、そこで Grep はより緩い**という順序になっていた。
+
+> **`Grep` ツールは macOS / Linux の既定では tool set に載らない** (公式
+> tools reference 逐語: "On macOS, Linux, and WSL, Claude Code leaves Glob and
+> Grep out of the default tool set, and Claude searches with `find` and `grep`
+> through the Bash tool instead")。実際に呼ばれるのは **Windows 既定** /
+> `--tools` `--allowedTools` で明示指名 / Bash が deny されている /
+> subagent の tools に Grep があって Bash が無い場合。つまりこの handler は
+> 「第一級の読み取り経路を塞ぐ」ものではなく、**Bash 経由の `grep` と判定を
+> 揃えるための対称性**の対応 (0.34.0 で Windows の無条件 deny を撤去したので、
+> Windows 既定の経路が実際に意味を持つようになった)。
+
+| ケース | default | acceptEdits | auto | dontAsk | bypassPermissions |
+|---|---|---|---|---|---|
+| `path` 未指定・`glob` 未指定 | allow | allow | allow | allow | allow |
+| `path` が機密名の**通常ファイル** (`.env` / `/abs/dir/.env` / `production.env`) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `path` が非機密ファイル / 機密名の**ディレクトリ** (`python -m venv .env` 構成) / 存在しない path | allow | allow | allow | allow | allow |
+| `path` が機密名の symlink | ask | ask | ask | ask | **deny** |
+| `path` が機密名の特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | **deny** |
+| `path` の lstat 失敗 (権限/IO) | ask | ask | ask | ask | **deny** |
+| `glob` が literal で機密名 (`.env` / `.npmrc` / `id_rsa`) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `glob` が dotenv stem に一致しうる (`.env*` / `**/.env` / `.en?` / **`*.env`** / `[.]env` / `?env` / `*env` / `*.envrc` / `sub/*.env`) — **ripgrep (gitignore 流) の意味論で先頭ドットは特別扱いされない** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `glob` のブレース分岐が上の 2 つに当たる (`{.env,*.py}` / `.en{v,x}` / `{id_rsa,notes.txt}`) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `glob` がそれ以外の**ワイルドカード**を含む (`*.py` / `*.pem` / `id_rsa*` / `*.{ts,tsx}` / `{a,b}`)、および basename 側が `*` / `**` だけの走査 glob (`*` / `src/**` — 絞り込みではなく走査そのものなので、ディレクトリ走査と同じ露出。deny にするとディレクトリ走査より厳しくなり整合しない) | ask | ask | **allow** | ask | **allow** |
+| `glob` が非機密の **literal** (`README.md` / `src/main.py`) | allow | allow | allow | allow | allow |
+| `glob` のブレースが閉じていない / 分岐が上限超 (`{.env,x` / `{a,b}`×9) | ask | ask | **allow** | ask | **allow** |
+| `patterns.txt` 読込失敗 | ask + stderr | ask | ask | ask | **deny** + stderr |
+| `path` の normalize 失敗 / handler 内例外 | ask | ask | ask | ask | **deny** |
+
+> **`glob` の三態は Bash の glob 行と 1:1** (0.34.0 のマージ前レビュー
+> P2-3、ユーザー判定)。**ただし先頭ドットの扱いだけ Bash と違う**: Bash の
+> `cat *.env` は shell の pathname expansion で `.env` に展開されないので ask だが、
+> Grep の `glob` は ripgrep (gitignore 流) が解釈し `rg -g '*.env'` / `-g '[.]env'`
+> は `.env` を検索する (ripgrep 15 実測、マージ前レビューの指摘)。そのため Grep は
+> `dotglob=True` で判定し、`*.env` / `[.]env` / `?env` / `*env` は deny になる。上の ask 行は Bash handler の
+> 「[静的解析不能 (三態判定)](#bash-handler--静的解析不能-三態判定)」の
+> `cat id_rsa*` / `cat *.log` / `cat .env.*` の行と同じセル構成で、判定関数
+> (`_glob_operand_is_dotenv_match` / `_has_glob`) も同じものを使う。
+>
+> **揃え先は Bash の positional operand**: Grep の `glob` は「検索対象を絞る
+> filter」なので Bash での真の同型は `grep -rn X --include='*.py' .`
+> (実測 **allow**) とも読めるが、判定境界は `grep -rn X *.py` (実測 ask) 側、
+> つまり**過剰 ask 側**に倒した。`*.py` のような無害な glob も default では
+> ask になる (autonomous では allow)。
+>
+> **ブレース展開は Grep 側だけの扱い**: Claude Code の `glob` は
+> `"*.{ts,tsx}"` を解釈するが、Bash 側には同等の機構が無い (`{` は hard-stop
+> metachar として `ask_or_allow` に倒れるだけで展開しない)。Grep は分岐を
+> 展開して**各分岐で**判定し、最も強い結論を採る (deny > ask > allow) ため
+> **deny 方向にしか動かない**。`{` 自体をワイルドカードと見なすので、分岐が
+> 全部 literal 非機密 (`{a,b}`) でも ask 止まり (Bash の `cat {a,b}` = ask と
+> 同じ結論)。展開できない形 (閉じていない / `{` が 8 個超 / 分岐 64 超) も ask。
+>
+> **ディレクトリ走査は allow**: `path` がディレクトリのとき、その配下の機密
+> ファイルの行が検索結果に混ざりうるが deny しない。Bash の `grep -r X .` と
+> 同じ既知の限界として扱う (ここで deny すると `.env` という名前のディレクトリ
+> (venv) がある repo で全検索が止まる)。**`ask` を作らないのはこの経路だけ**。
+>
+> **lenient allow の開示 note は Bash と同じ絞りを通す**: `glob` が
+> autonomous mode で allow に倒れたとき、`additionalContext` の 1 文
+> (`LENIENT_ALLOW_CONTEXT`) は「glob が機密パターンらしい」ときだけ載る
+> (`bash_handler._gate_lenient_note` を再利用。`*.pem` には載り `*.py` には
+> 載らない)。判定は不変。
+>
+> **`path` と `glob` は OR で評価する** (片方でも当たれば強い方を採る)。
+> `path=ok.py, glob=.env` は deny、`path=sub, glob=*.py` は ask。
+>
+> **`output_mode` は判定に使わない**: `files_with_matches` でもファイル名は
+> 漏れるが、それは「basename と鍵名は LLM に見える」という既存の非目的の範囲。
+>
+> **`.npmrc` の内容ゲート (Read / Stop) は Grep には効かない**: Grep は判定
+> 時点でファイルを開いていないため、`.npmrc` は内容に依らず deny。開いて
+> 判定する経路を足すのは Read と同じ読込を丸ごと足すことになるので採らない。
+>
+> **deny reason に minimal info は載せない** (同じ理由)。値も鍵名も出さず、
+> 「Read ツールなら鍵名だけの要約が返る」と案内する。恒久除外レシピ
+> (`patterns.local.txt`) は Bash / Edit と同じものが付く。
+>
+> テスト: `tests/test_grep_handler.py` (判定。`TestGrepPath` /
+> `TestGrepGlob::test_wildcard_glob_is_ask_or_allow` /
+> `TestGrepGlobBraces`) / `tests/test_e2e.py::TestE2EGrepHandler`
+> (`__main__` dispatch と `hooks.json` の matcher 登録)。
+
 ## Stop handler
 
 | ケース | 全 mode (Stop は permission_mode を使わない) |
@@ -594,6 +743,10 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
+| tracked / untracked の `.npmrc` + 認証行なし (0.34.0) | **報告しない** (Read handler と同じ内容ゲート) |
+| tracked / untracked の `.npmrc` + 認証行あり (0.34.0) | `decision: block` (従来どおり) |
+| `.npmrc` が読めない / decode 不能 / 64KiB 超 / 通常ファイルでない (0.34.0) | `decision: block` (fail-closed) |
+| `production.env` / `local.env` など `*.env` (0.34.0) | `decision: block` |
 | 現在の (status, path) 集合 ⊆ 同一 session で報告済みの集合 (= 新規ファイル無し。0.19.0) | exit 0 (`session_id` が無い / 不正なら従来通り block) |
 | 新しい機密ファイルが増えた / untracked → tracked に変わった (0.19.0) | `decision: block` (再通知し、報告済み集合を更新) |
 | patterns.txt 読込失敗 | **exit 0 + stderr warning** (fail-open) |
@@ -602,6 +755,15 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | 時間予算 (12s) 超過 + 検出 1 件以上 (0.32.0) | `decision: block` (従来どおり) + reason 冒頭に「一覧は不完全です」 |
 | 時間予算 (12s) 超過 + 検出集合 ⊆ 同一 session で報告済みの集合 (0.32.0) | **exit 0 + stderr `scan_incomplete` + `systemMessage`** (block しない)。拾えたのは部分集合なので、黙ると「完走して新規なし」の沈黙と区別できない |
 
+> 0.34.0 で `.npmrc` の内容ゲートを Stop にも適用した (Read と同じ判定を
+> `hooks/_shared/npmrc.py` で共有する)。「意図的に管理対象とする」と承認する
+> までもない設定専用の `.npmrc` で毎ターン block が出ていたのを止めるため。
+> 判定できない事情 (読めない / decode 不能 / 64KiB 超 / symlink やディレクトリ)
+> はすべて従来どおり報告する。追加の I/O は `.npmrc` 1 件あたり 1 回の
+> lstat + read だけで、時間予算 (`budget.Deadline`) には計上していない
+> (`.npmrc` は 1 repo に数個・通常 1KB 未満のため)。テスト:
+> `hooks/check-sensitive-files/tests/test_checker.py::TestNpmrcContentGate`。
+>
 > 0.32.0 で hook 全体の時間予算 (12s、`budget.Deadline`) を導入した。hook timeout
 > (15s) に到達すると Claude Code は hook を kill して**出力を discard** する
 > (= 報告が 1 byte も出ない無音の fail-open) ため、少し手前で自分から打ち切って
@@ -667,4 +829,27 @@ option が存在しない (`--reference=RFILE` / `-r RFILE` は metadata のみ)
 | hook timeout (2s) | **allow** (介在不能、Claude Code が続行) |
 
 timeout だけ fail-open — hook プロセス自体が応答不能だと deny/ask を返せない。
+**これは全 OS 共通**で、Unix 側にもこの fail-open を能動的に防ぐ内部タイムアウト
+機構は無い (0.6.0 で SIGALRM ベースの soft-timeout を撤去済み)。
+
+## プラットフォーム (0.34.0 で判定境界が変化)
+
+| ケース | 全 mode |
+|---|---|
+| `signal.SIGALRM` が無い環境 (Windows 等) | **上記の各表どおり** (通常判定) |
+
+0.33.x までは `__main__` 冒頭の `_is_unsupported_platform`
+(`hasattr(signal, "SIGALRM")`) が、**機密と無関係な Read も含め全 tool 呼出を
+deny** していた (インストール即無効化級の体験)。根拠だった内部 soft-timeout は
+0.6.0 で撤去済みで本体は SIGALRM を使っておらず、outer timeout の fail-open は
+全 OS 共通なので、「Windows だけ冒頭 deny」に対応する実際のリスク差は無かった。
+
+撤去後の Windows は **未検証**であって**保護なし**ではない: 内部失敗は従来
+どおり catch-all の `ask_or_deny` / `make_deny` に倒れ (`__main__` catch-all の
+表)、`core/safepath.py` は `O_NOFOLLOW` / `O_CLOEXEC` が無い環境ではそのフラグを
+落として `classify` の lstat 判定に依存する fallback を持つ。Windows CI
+(`windows-latest` での両 suite 実行) は別チケット。テスト:
+`tests/test_e2e.py::TestSigalrmlessPlatformUsesNormalPipeline` (実際に
+`signal.SIGALRM` を取り除いて Read の通常判定を確認する。**Windows 実機の
+検証ではない**)。
 代わりに timeout を短く (2 秒) し発生頻度を抑える方針。

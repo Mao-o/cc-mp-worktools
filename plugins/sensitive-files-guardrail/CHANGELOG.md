@@ -23,6 +23,176 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.34.0
+
+**判定境界の変化を 4 件含む** (内部バックログの判定境界バッチ、ユーザー判定済み)。
+方針は従来どおり「確信 deny は機密 operand 確定 × 内容出力/破壊のみ、判断困難は
+ハーネスに委譲」で、deny を増やす側の特例は作っていない。
+
+テスト件数: redact **1,368 → 1,485** / check **165 → 174**。
+
+### Changed
+
+- **`.npmrc` を内容ゲートに変更 (deny → 条件つき allow)**。`.npmrc` は
+  pnpm / yarn を使う repo でほぼ必ず commit される設定ファイル
+  (`engine-strict` / `auto-install-peers` / `@scope:registry`) で、認証トークンを
+  含むのは一部にすぎない。既定 patterns からは**外さず**、Read / Stop が
+  既に開いている (開ける) ファイルの**中身**で確定するようにした:
+  - 認証らしい行が 1 行も無い → Read は **allow**、Stop は**報告しない**
+  - 認証らしい行がある → 従来どおり deny / 報告
+  - 読めない / UTF-8 として decode できない / 64KiB 超 → deny / 報告 (fail-closed)
+
+  「認証らしい行」= 行頭空白と `#` / `;` コメントを除いたうえで、**キー部**
+  (最初の `=` の左。`=` が無ければ行全体) が
+  (a) `//` で始まる、
+  (b) `key` / `cert` / `keyfile` / `certfile` / `cafile` / `otp` / `_auth` /
+  `_authToken` / `_password` / `username` / `email` / `always-auth` に完全一致、
+  (c) `_auth` / `_password` / `username` / `email` / `always-auth` / `keyfile` /
+  `certfile` / `cafile` を含む、
+  または **値部**が (d) `scheme://user[:pass]@host` 形 (URL に埋め込んだ credential。`:` を省いた `TOKEN@host` も含める。
+  credential。`registry=` / `@scope:registry=` / `proxy=` / `https-proxy=` など
+  キー名を問わない) のいずれかに当たる行。大文字小文字を区別せず、キー名の
+  `-` と `_` の差は吸収する。**値の有無は問わない** — `${NPM_TOKEN}` のような
+  環境変数参照も deny 側に倒す (境界を「認証の設定行が存在するか」に固定して
+  単純に保つため)。npm が読まないキー名 (`mytoken=`) は allow (設計上の受容範囲)。
+
+  deny したときは reason の**先頭 1 行**に「認証設定行 N 件 (キー名: …)」を
+  出す (**値は出さない**。キー名 5 件 + 「ほか N 件」の固定長)。0.34.0 で deny が
+  「認証行が実際にある」という精密な信号になった一方、既存の鍵名要約は ini の
+  keys-only scan なので `//registry…/:_authToken` を 1 件も拾わず、reason には
+  無害な設定キーだけが並ぶ。根拠が読めないと「壊れたファイル」「除外レシピを
+  足せば直る」と誤読され、保護を切る方向のナッジになる。
+
+  Stop 側の判定は **working tree の内容**で行う (index / history に残る認証行は
+  見ない)。既知の限界として README に明記した。
+
+  **`Bash` / `Grep` / `Edit` / `Write` は不変** — `cat .npmrc` は従来どおり deny。
+  Bash の operand は path とは限らない文字列で、operand ごとにファイルを開くのは
+  設計変更にあたる。`.pypirc` / `.netrc` も内容に依らず deny のまま。
+  判定は両 hook が `hooks/_shared/npmrc.py` で共有する。
+
+- **既定 patterns に `*.env` を追加 (allow → deny)**。`*.envrc` があるのに
+  `*.env` が無いという非対称で、`production.env` / `local.env` のような実在する
+  命名が allow だった (`redaction/engine._detect_format` は 0.3.x から `foo.env` を
+  dotenv ファミリーとして扱うと docstring に書いており、実装とも食い違っていた)。
+  テンプレート除外 (`!*.example` 等) は従来どおり後勝ちなので `foo.env.example` は
+  allow のまま。
+
+  Bash 側の影響 (コーパス実測):
+  - 意図どおり deny になる: `cat prod.env` / `head -n 5 local.env` /
+    `mv old.env new.env` / `curl -o out.env …` / `tar -cf out.tar app.env`
+  - `cat $X.env` が ask → **deny**。`$X` が何に展開されても末尾が `.env` なので
+    basename が suffix rule に一致する (0.25.0 の救済 scan で「basename が変数に
+    跨る」として ask 側に置いていた形)
+  - **過剰 deny 側の副作用**: `ssh host 'cat app.env'` /
+    `docker run img 'cat x.env'` / `git -c alias.x='!cat .env' x` が
+    allow / ask → deny。spec を持たないコマンドに渡されたクォート文字列が
+    suffix 一致する。いずれも実際に dotenv を読む形なので保護を落とす方向では
+    なく、摩擦側に倒れているため受容した (床テストで開示)
+  - **`cat *.env` は deny にならない** (変更なし)。glob operand の判定は既定
+    rules への候補列挙ではなく dotenv literal stem への展開可能性だけを見る
+    0.8.0 の縮約で、`*.env` は先頭ドットの `.env` には展開されない。候補列挙の
+    復活は 0.8.0 で意図的に撤去した設計判断なので本版では戻さない
+  - 変わらなかった重要ケース: `git commit -m 'fix .env handling'` (spec が
+    `-m` の値を non-path と知っているため path 候補にならない)
+
+- **Windows の無条件 deny を撤去 (deny → 通常判定)**。`__main__` 冒頭の
+  `_is_unsupported_platform` (`hasattr(signal, "SIGALRM")`) が、**機密と無関係な
+  Read も含め全 tool 呼出を deny** していた。根拠だった内部 soft-timeout は
+  0.6.0 で撤去済みで本体は SIGALRM を使っておらず、外部 timeout 発火時の
+  fail-open は**全 OS 共通** (公式ドキュメントで確定済み) なので、Windows だけを
+  冒頭 deny することに対応する実際のリスク差が無かった。
+
+  撤去後の Windows は **未検証**であって**保護なし**ではない: 内部失敗は従来
+  どおり catch-all の `ask_or_deny` / `make_deny` に倒れ (fail-closed)、
+  `core/safepath.py` は `O_NOFOLLOW` / `O_CLOEXEC` が無い環境ではそのフラグを
+  落として `classify` の lstat 判定に依存する fallback を持つ。**実機・CI での
+  検証は未実施** (Windows CI は別チケット)。docs の「Windows は fail-closed で
+  deny」「Step 0-c は将来更新予定」という旧記述も実態に合わせて直した。
+
+### Added
+
+- **`PreToolUse(Grep)` の最小対応**。`output_mode: "content"` の Grep は
+  一致行をそのまま返すため、機密ファイルを指した Grep は値の一部をコンテキストに
+  載せる。`tool_input` の `path` / `glob` だけを見て判定する:
+  - `path` が機密名の**通常ファイル** → deny
+  - `glob` が literal で機密名、または dotenv stem に展開されうる glob
+    (`.env*` / `**/.env`) → deny (Bash operand と同じ規則を再利用)
+  - `glob` がそれ以外の**ワイルドカード**を含む (`*.py` / `*.pem` / `id_rsa*` /
+    `*.env` / `*.{ts,tsx}`) → **`ask_or_allow`** (default=ask / autonomous=allow。
+    Bash operand の `glob_uncertain` と同じ三態)
+  - `path` がディレクトリ / 存在しない / 非機密、`path` も `glob` も未指定、
+    `glob` が非機密の literal → allow
+  - `path` が機密名の symlink / 特殊ファイル → ask (bypass 下は deny、Read と同じ)
+
+  ブレース展開 (`{a,b}`) は**分岐ごとに**判定して最も強い結論を採る
+  (`{.env,*.py}` → deny)。Bash 側には同等の機構が無い (`{` は hard-stop として
+  `ask_or_allow` に倒れるだけで展開しない) ため、これは Grep だけの扱い。
+  結論は deny 方向にしか動かず、展開できない形 (閉じていない / 上限超) は ask。
+
+  **`ask` を作らないのはディレクトリ走査だけ**: 配下の機密ファイルの行が返る
+  経路は Bash の `grep -r X .` と同じ既知の限界として allow にする
+  (`python -m venv .env` のように機密名のディレクトリがある repo で全検索が
+  止まるのを避けるため)。deny reason に minimal info は載せない — Grep は
+  判定時点でファイルを開いていないため。
+
+  揃え先は Bash の **positional operand** (`grep X *.py` = ask)。Grep の `glob`
+  は「検索対象を絞る filter」なので `grep -rn X --include='*.py' .` (実測 allow)
+  が真の同型とも読めるが、**過剰 ask 側**に倒してある。先頭ドットの扱いだけは
+  Bash と違い、ripgrep (gitignore 流) の意味論で `*.env` / `[.]env` / `?env` を
+  deny にする (`rg -g '*.env'` は `.env` を検索するため。`*` / `dir/**` は走査
+  そのものなのでディレクトリ走査と同じ扱い)。autonomous mode で allow
+  に倒れたときの `additionalContext` の 1 文は Bash と同じ絞り
+  (`_gate_lenient_note`) を通すので、`*.pem` には載り `*.py` には載らない。
+
+  > **`Grep` ツールは macOS / Linux の既定では tool set に載らない** (公式
+  > tools reference のとおり、これらの OS では Claude は Bash の `find` /
+  > `grep` を使う)。実際に呼ばれるのは Windows 既定 / `--tools`
+  > `--allowedTools` で明示指名 / Bash が deny されている / subagent の tools に
+  > Grep があって Bash が無い場合。この matcher は「第一級の読み取り経路を
+  > 塞ぐ」ものではなく、**Bash 経由の `grep` と判定を揃えるための対称性**の
+  > 対応 (同じ版で Windows の無条件 deny を撤去したため、Windows 既定の経路が
+  > 実際に意味を持つようになった)。`tool_input` の実形は CLI 2.1.278 で実測し、
+  > fixture (`tests/fixtures/envelopes/grep.json`) と README に記録した。
+
+  `Glob` (パス列挙のみで内容を返さない) と `NotebookEdit` は引き続き対象外。
+
+### Fixed
+
+- **gawk の `@include` / `@load` を動的構文として検出**。どちらもプログラム
+  文字列の中からファイル (awk ソース / 共有ライブラリ) を読み込む構文で、
+  `-f prog.awk` (`awk_program_file`) と同型。operand が 1 つも無いため
+  `gawk '@include ".env"'` は operand scan で何も拾えず allow になっていた。
+  `ask_or_allow` (default=ask、autonomous=allow) に倒す。検出は**語境界まで**
+  見るので `awk '/x@loader/ {print}'` / `awk '{print "a@loadb"}'` のような
+  「構文として成立していない `@load`」は allow のまま (空白は要求しないので
+  `@include"lib.awk"` は拾う)。
+
+  **この種の列挙は網羅を目指さない**: 引数を別プロセスに渡すオプションの一覧は
+  本質的に不完全で、敵対的バイパス対策は本 plugin の非目的。未知のコマンド・
+  オプションは従来どおり `ask_or_allow` に倒れるので列挙漏れがあっても後退は
+  しない。**同類の指摘に対して個別対応は行わない** 旨を README の既知制限に
+  明記した (対応するとしたら「列挙」ではなく設計の再検討として行う)。
+
+### Docs
+
+- `docs/MATRIX.md`: Read / Stop 表に `.npmrc` と `*.env` の行を追加、
+  **Grep handler 節を新設** (`glob` の三態を Bash の glob 行と横並びにし、
+  ブレース行を追加)、Bash 表の glob 行に「`cat *.env` は deny にならない」
+  理由を明記、`ask_or_allow` 表に gawk `@include` / `@load` の行を追加、
+  `*.env` の過剰 deny の例に `kubectl exec pod -- cat app.env` (裸の operand 形)
+  を追加、プラットフォーム節を新設 (Windows 無条件 deny の撤去)
+- `README.md`: `.npmrc` の内容ゲート節 / `PreToolUse(Grep)` 節を新設、
+  既知制限の Windows (4) と Grep/Glob (6) を書き換え、「exec option を持つ
+  コマンドの列挙は網羅しない」を既知制限 (7) として追加、Stop 節に
+  「`.npmrc` の内容ゲートは working tree だけを見る」を既知の限界として追記、
+  対応 OS とテスト件数を更新
+- `docs/PATTERNS.md`: 既定一覧に `*.env`、`!.npmrc` レシピの文言を「認証行を
+  含む `.npmrc` を意図的に許可する場合」に訂正、`_detect_format` 同期節に
+  「逆向きの剥離」(実装が知っているのに patterns に無い) を追記
+- `docs/DESIGN.md` / `docs/MAINTAINING.md`: Windows 記述と Grep/Glob の
+  既知制限を実態に合わせ、責務境界に `grep_handler` / `_shared/npmrc` を追加
+
 ## 0.33.2
 
 docs のみ。判定・コード無変更。

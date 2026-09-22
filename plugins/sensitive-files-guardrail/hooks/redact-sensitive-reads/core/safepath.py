@@ -67,10 +67,13 @@ def classify(path: Path) -> Classification:
 def _open_flags() -> int:
     """プラットフォームに応じた OS open フラグを組み立てる。
 
-    Windows は ``__main__._is_unsupported_platform()`` で最初に deny exit
-    するため、現状は UNIX (O_NOFOLLOW / O_CLOEXEC) 前提で運用される。
-    Step 0-c 実測結果で Windows 対応する場合にバイナリモード対応が必要に
-    なれば、ここで ``os.O_BINARY`` を拾う分岐を追加する。
+    0.34.0 で ``__main__`` 冒頭の「SIGALRM 非対応なら全 tool 呼出を deny」
+    ゲートを撤去したため、非 UNIX でもこの関数に到達しうる。``O_NOFOLLOW`` /
+    ``O_CLOEXEC`` が無い環境ではそのフラグを落とし、最終要素の symlink 検知は
+    ``classify`` の lstat 判定に依存する (モジュール docstring の「Windows 分岐」)。
+
+    **Windows 実機は未検証**。バイナリモードが要ることが分かれば、ここで
+    ``os.O_BINARY`` を拾う分岐を追加する。
     """
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):

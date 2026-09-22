@@ -22,6 +22,7 @@ DEFAULT_RULES: list[tuple[str, bool]] = [
     ("*.secret*", False),
     (".env", False),
     (".env.*", False),
+    ("*.env", False),
     (".envrc", False),
     ("*.envrc", False),
     ("*.pem", False),
@@ -61,6 +62,21 @@ class TestMatcherDotenv(unittest.TestCase):
         self.assertFalse(is_sensitive(".env.example", DEFAULT_RULES))
         # include (credentials*.json) より後ろの exclude (*.example.*) が勝つ
         self.assertFalse(is_sensitive("credentials.example.json", DEFAULT_RULES))
+
+    def test_suffix_dotenv_basename(self):
+        """0.34.0: ``*.env`` (suffix 形) を既定に追加。
+
+        0.33.x までは ``*.envrc`` があるのに ``*.env`` が無い非対称で、
+        ``production.env`` / ``local.env`` が allow だった。
+        """
+        for name in ("production.env", "local.env", "foo.env", "a/b/prod.env"):
+            with self.subTest(name=name):
+                self.assertTrue(is_sensitive(name, DEFAULT_RULES))
+
+    def test_suffix_dotenv_respects_template_excludes(self):
+        for name in ("foo.env.example", "foo.env.sample", "config.env.template"):
+            with self.subTest(name=name):
+                self.assertFalse(is_sensitive(name, DEFAULT_RULES))
 
 
 class TestMatcherBasic(unittest.TestCase):

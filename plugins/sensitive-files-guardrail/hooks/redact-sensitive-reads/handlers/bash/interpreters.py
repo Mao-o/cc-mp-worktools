@@ -109,7 +109,24 @@ _GIT_INERT_SUBCOMMANDS = frozenset({
 
 # awk: ``system()`` / ``getline`` (ファイル・コマンドからの読込) / pipe
 # (``print | "cmd"``・``"cmd" | getline``) / 出力リダイレクト (``print > "f"``)。
-_AWK_DYNAMIC_RE = re.compile(r"system\s*\(|getline|\||>")
+#
+# 0.34.0: gawk の ``@include "file"`` / ``@load "ext"`` を追加 (内部バックログ)。
+# どちらもプログラム文字列の中からファイル (awk ソース / 共有ライブラリ) を
+# 読み込む構文で、``-f`` (``awk_program_file``) と同じく operand 以外の経路で
+# ファイルを開く。``gawk '@include ".env"'`` は operand が 1 つも無いため
+# operand scan では何も拾えず allow になっていた。
+#
+# 列挙の網羅は目指さない: 未知の同種構文は従来どおり operand scan に落ちて
+# ``ask_or_allow`` (autonomous では allow) になる。方針は README の既知制限
+# 「exec option を持つコマンドの列挙は網羅しない」を参照。
+#
+# ``@include`` / ``@load`` は **``\b`` 止め**で書く (マージ前レビュー P3-2)。
+# 裸の部分一致だと ``awk '/x@loader/ {print}'`` / ``awk '{print "a@loadb"}'``
+# のような「構文として成立していない ``@load``」まで ask に倒していた。
+# ``\s`` 必須にすると ``@include"f"`` (空白なし) を取り逃すので ``\b`` 止まり。
+# 文字列リテラルの ``"@include"`` は依然一致するが、それは `-f` 相当の構文を
+# 拾う側の過剰 ask で、方向としては安全側。
+_AWK_DYNAMIC_RE = re.compile(r"system\s*\(|getline|@(?:include|load)\b|\||>")
 
 # sed のコマンド位置で動的と見なす 1 文字コマンド: e (実行) / r R (ファイル読込 =
 # 内容出力) / w W (ファイル書出)。
