@@ -14,17 +14,20 @@ stdin 一本化でこの版依存を外す。`-` を解さない版では引数�
 レビュアーの失敗は fail-open という既存の契約と同じ側で、静かな誤差し戻しより軽い。
 引数長の上限に当たるリスクも同時に消える (長いプランを argv に載せない)。
 
-起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
+起動と存在確認は **`_common.backends` の registry 経由** (0.12.0)。argv
+(`codex exec -s read-only --ephemeral -`) も stdin 一本という渡し方も registry 側に
+そのまま移しただけで、0.11.0 から変わらない。この module に残るのは **hook 固有のもの**
+(プロンプト / timeout の既定値と上限 / 出力の切り詰め) だけ。
 `_common` は `__main__.py` (テストでは `tests/_testutil.py`) が sys.path に載せる。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from _common import settings, subproc
+from _common import backends, settings
 
-NAME = "codex"
-BINARY = "codex"
+NAME = backends.codex.NAME
+BINARY = backends.codex.BINARY
 
 #: 既定の timeout。**0.6.0 で 1500 → 600 に短縮** (挙動変更)。cursor と並列に走るので
 #: 承認前の待ち時間は max(cursor, codex) = 25 分 → 10 分になる。長考させたい場合は
@@ -42,7 +45,7 @@ _PROMPT_FILE = Path(__file__).parent / "prompts" / "planning-codex.md"
 
 
 def is_available() -> bool:
-    return subproc.cli_available(BINARY)
+    return backends.codex.is_available()
 
 
 def timeout_sec() -> float:
@@ -64,10 +67,6 @@ def review(plan_text: str, *, cwd: str | None = None) -> str | None:
         return None
 
     full_prompt = f"{template}\n\n---\n\n## レビュー対象プラン\n\n{plan_text}"
-    return subproc.run_for_output(
-        [BINARY, "exec", "-s", "read-only", "--ephemeral", "-"],
-        timeout_sec=timeout_sec(),
-        input_text=full_prompt,
-        cwd=cwd,
-        max_output_chars=MAX_OUTPUT_BYTES,
-    )
+    result = backends.codex.run(full_prompt, cwd=cwd, timeout=timeout_sec())
+    result = result.truncated(MAX_OUTPUT_BYTES)
+    return result.text if result.is_ok else None

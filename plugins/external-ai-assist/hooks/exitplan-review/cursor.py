@@ -3,16 +3,19 @@
 プラン本文はプロンプト末尾に埋め込んで cursor agent の --print (読み取り専用 `--mode plan`) で渡す。
 Cursor はセマンティック検索でコードベース全体を参照しながらレビューする。
 
-起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
+起動と存在確認は **`_common.backends` の registry 経由** (0.12.0)。独自 process group +
+timeout + 残出力の読み捨ては registry の中で従来どおり `_common.subproc` が行うので、
+起動 argv (`--trust --print --mode plan`) も待ち方も 0.11.0 から変わらない。この module に
+残るのは **hook 固有のもの** (プロンプト / timeout の既定値と上限 / 出力の切り詰め) だけ。
 `_common` は `__main__.py` (テストでは `tests/_testutil.py`) が sys.path に載せる。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from _common import cursorcli, settings, subproc
+from _common import backends, settings
 
-NAME = cursorcli.NAME
+NAME = backends.cursor.NAME
 
 #: 既定の timeout (0.6.0 で 600 のまま据置)。`EXTERNAL_AI_PLAN_REVIEW_TIMEOUT` で変更可。
 TIMEOUT_SEC = 600
@@ -30,7 +33,7 @@ _PROMPT_FILE = Path(__file__).parent / "prompts" / "planning-cursor.md"
 
 
 def is_available() -> bool:
-    return cursorcli.is_available()
+    return backends.cursor.is_available()
 
 
 def timeout_sec() -> float:
@@ -56,9 +59,6 @@ def review(plan_text: str, *, cwd: str | None = None) -> str | None:
         return None
 
     full_prompt = f"{template}\n\n---\n\n## レビュー対象プラン\n\n{plan_text}"
-    return subproc.run_for_output(
-        cursorcli.readonly_argv(full_prompt),
-        timeout_sec=timeout_sec(),
-        cwd=cwd,
-        max_output_chars=MAX_OUTPUT_BYTES,
-    )
+    result = backends.cursor.run(full_prompt, cwd=cwd, timeout=timeout_sec())
+    result = result.truncated(MAX_OUTPUT_BYTES)
+    return result.text if result.is_ok else None

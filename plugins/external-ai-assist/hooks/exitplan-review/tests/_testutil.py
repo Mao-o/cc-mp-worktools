@@ -27,7 +27,7 @@ _ENTRY_PATH = _PKG_DIR / "__main__.py"
 
 
 # cursor の実体は**テストプロセス全体で**偽 CLI 側に固定する。0.11.0 の検出は
-# `cursor-agent` / `agent` も候補にするため、固定しないと開発機に入っている本物を掴んで
+# `cursor-agent` も候補にするため、固定しないと開発機に入っている本物を掴んで
 # `--version` を起動しうる (外部 AI CLI を起動しないというテストの前提が崩れ、かつ偽
 # cursor を PATH 先頭に置いたテストが「argv[0] が cursor-agent」で落ちる)。
 # **クラスごとの env パッチに書くだけでは足りない**: 自前で `mock.patch.dict` を張る

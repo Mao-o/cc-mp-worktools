@@ -5,6 +5,280 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.0
+
+**外部レビュー backend を registry 化して差分レビューの送信先を選べるようにし、
+あわせて commit 単位のレビューを追加した。挙動変更を含むため minor bump。**
+
+> **既定の送信先は変わらない。** 差分レビューは `cursor` のみ、プランレビューは
+> `cursor` + `codex` で 0.11.0 と同じ。**アップグレードしただけで新しい送信先が
+> 増えることはない**。送信先を増やすのは `EXTERNAL_AI_POST_REVIEW_BACKENDS` を
+> 自分で書いたときだけで、その床はテストで固定してある
+> (`post-implementation-review/tests/test_selection.py::TestDefaultDestination`)。
+
+### backend registry (`hooks/_common/backends/`)
+
+外部 AI CLI の「存在確認 / 起動 / 結果の分類」を 1 か所にまとめた。これまでは
+`exitplan-review/cursor.py` と `post-implementation-review/cursor.py` が同じ起動処理を
+別々に持っており、backend を 1 つ足すとレビュー系 hook の数だけ実装が増える形だった。
+
+| 属性 | 役割 |
+|---|---|
+| `NAME` | 設定 (env) で書く名前 |
+| `is_available(deadline=None)` | その CLI を起動できるか (検出 probe の締切を渡せる) |
+| `run(prompt_text, *, cwd, timeout)` | 1 回起動し `ok` / `failed` / `limit` に分類した `Result` を返す |
+
+- **cursor の存在確認は `_common/cursorcli.py` の既存ロジックをそのまま使う**
+  (候補順 `cursor-agent` → `cursor`、`--version` probe の 3 値判定、キャッシュの所有者
+  検査)。registry 側に別実装を持たせると、汎用名 `agent` が候補に戻る・IDE ランチャーの
+  除外が緩むといった形で**送信先が増える方向**に倒れうるため、検出は 1 か所に保つ
+  (`explore-parallel` も同じ検出を使い続ける)
+- **`limit` (利用上限) は推測で作らない。** cursor / codex いずれも上限到達時の実際の
+  出力 (終了コード・文言) を実機で確認できていないため、`from_captured()` は `limit` を
+  返さず**分からないものは `failed` に倒す**。推測でパターンを書くと、正常なレビュー
+  本文に「limit」「quota」等の語が含まれるだけで**取得済みのレビューを捨てて別の
+  backend へ送り直す** (送信量が倍になる) 方向に壊れる。上限文言を実機で確認できた
+  backend から `run()` 側で返すようにする (`tests/test_backends.py::
+  TestResultClassification::test_limit_is_never_guessed_from_output`)
+- **registry に backend を足しても送信先は増えない。** どれに送るかは各 hook が明示
+  列挙する (プランレビュー = `exitplan-review/__main__.py` の `REVIEWERS`、差分レビュー
+  = `post-implementation-review/selection.py` の `DEFAULT_BACKENDS`)
+- **`exitplan-review` の挙動は不変**。cursor + codex の並列実行・`EXTERNAL_AI_PLAN_
+  REVIEW_REVIEWERS` による選択・timeout・起動 argv (`--mode plan` /
+  `exec -s read-only --ephemeral -`) はすべて 0.11.0 のまま。既存 86 テストが無改変で
+  通ることで固定している。レビュアーの絞り込みだけ `backends.select()` に寄せた
+  (「事前チェックと実行で別々に集合を計算しない」という制約が差分レビュー側と同じもの
+  だったため)
+
+### 差分レビュー: 送信先の選択とフォールバック
+
+Codex の利用上限で外部レビューが止まった実例が複数あり、**backend が 1 つ落ちると
+外部レビューそのものが消える**状態だった。候補を列挙できるようにし、落ちたら次へ
+回せるようにする。
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `EXTERNAL_AI_POST_REVIEW_BACKENDS` | `cursor` | 送信先の候補をカンマ区切りで列挙 (`cursor` / `codex`) |
+| `EXTERNAL_AI_POST_REVIEW_STRATEGY` | 候補 1 つなら `fixed` / 2 つ以上なら `alternate` | 候補の中からどれを先に試すか |
+
+戦略は `fixed` (列挙順の先頭) / `available` (今使えるものを先に) / `alternate`
+(このセッションで前回レビューを返した backend 以外を先に) / `random`。
+**`all` (同時送信) は提供しない** — 差分レビューは Stop のたびに走るので、同時送信は
+送信量と課金を backend の数だけ倍にする (プランレビューと違い回数上限も無い)。
+
+- **フォールバックは列挙した集合の中だけ**。未知の名前は無視して `systemMessage` で
+  通知する (既定の全件へ fallback しない — タイプミス 1 つで外したはずの backend が
+  黙って走るのは送信先が増える方向)
+- **合計の待ち時間は 0.11.0 と同じ上限を超えない**。2 つ目以降は「その backend の
+  timeout + 停止処理の猶予」が残り予算に収まるときだけ起動するので、1 回の Stop が
+  レビューに費やす時間は `MAX_TIMEOUT_SEC + 3 × KILL_GRACE_SEC` (= 615 秒) のまま。
+  `hooks.json` の Stop timeout (690 秒) の予算計算も変えていない。
+  帰結として**第一候補が timeout いっぱい待って失敗した場合は次へ回らない**
+  (既定 300 秒なら 315 + 300 + 15 > 600)。フォールバックが効くのは「候補が速く失敗した
+  とき」(未インストール / 即エラー / 利用上限) で、そこがこの機能の狙いでもある
+- 全滅したターンは 0.11.0 と同じく**何も送らず pending に戻す**
+- `alternate` のための「前回の backend」は state に **1 値だけ**持つ
+  (`last_backend`)。パス単位の記録も「レビュー済み hunk」の重複除去 state も作らない。
+  記録するのは**実際にレビュー結果を返した** backend だけで、失敗した backend は
+  記録しない
+- **どの backend に何 (パス名とバイト数) を送ったかを hooklog に残す**。フォールバック
+  した場合は起動ごとに記録するので、送信先ごとの送信内容を後から追える (レビュー本文も
+  diff 本文も書かない)。`systemMessage` にも `cursor=失敗, codex=完了` の形で並ぶ
+- レビュー本文のヘッダに backend 名を出すようにした
+  (`## 実装直後レビュー結果 (Codex, 差分レビュー)`)。同じセッションで送信先が変わりうる
+  ので、どの目で見た指摘かが分からないと 2 回目の指摘を 1 回目の焼き直しと区別できない
+- **設定は環境変数のみ**。プロジェクト側の設定ファイルを読む経路は作らない — clone して
+  きた repo が「この repo では差分を外部サービス X にも送る」と宣言できてしまうため
+- codex 用の差分レビュープロンプト (`prompts/post-implementation-codex.md`) を追加した。
+  観点も出力形式 (5 項目 + `REVIEW_CLEAN` sentinel) も cursor 用と同じにしてある —
+  どちらが返した結果でも sentinel 判定と本文の組み立てがそのまま効くようにするため。
+  timeout のつまみ (`EXTERNAL_AI_POST_REVIEW_TIMEOUT`) と上限 (600 秒) も cursor と共有する
+
+### 内部: TTL と予算の導出元を「全 backend の上限の最大」に変えた
+
+`state.IN_FLIGHT_TTL_SEC` と Stop の hook timeout 予算は cursor 単体の
+`MAX_TIMEOUT_SEC` から導出していた。TTL は**どの backend を選んだセッションでも同じ値**
+でなければならず (下回ると正常に走っている in-flight を別セッションが横取りする)、
+cursor だけを見ていると上限の違う backend が現れた時点で横取りが起きる。
+`selection.MAX_TOTAL_TIMEOUT_SEC` (全 backend の上限の最大) から導出する形に変えた
+(現状は cursor / codex とも 600 秒なので値は 900 秒のまま)。
+
+### 内部: テストが実機の外部 AI CLI を起動しうる経路を塞いだ
+
+`post-implementation-review/tests/test_posix_guard.py` は `sys.modules` から hook の
+モジュールを**名前で列挙して**外していた。0.12.0 で `selection` が増えたことで列挙が
+漏れ、古い `selection` が古い `cursor` への参照を抱えたまま残り、後続テストが
+`sys.modules["cursor"]` に当てた patch を素通りして**本物の cursor CLI を起動しかけた**
+(全 suite が hang して発覚)。パッケージディレクトリ由来のモジュールを機械的に全部
+落とす形にしたので、モジュールが増えてもこの列挙を直す必要が無い。
+
+### commit 単位レビュー (`PostToolUse(Bash)`)
+
+Stop は「未 commit の差分」しか見られない。変更を記録してから Stop までの間に
+commit すると `git diff HEAD` が空になり、0.8.0 以降は「差分が空で取得できません
+でした」と報告するだけだった (復元を試みた設計が 2 回とも他人の内容を送ってしまい
+撤去された経緯は下の 0.9.0 / 0.11.0 の節と README を参照)。**commit そのものを
+レビュー単位にすれば、復元も「誰が書いたか」の推定も要らない。**
+
+**送信範囲の不変条件は「等価性」で書く (I1')。**
+
+> commit レビューが外部へ送る差分は、**その Bash の直前に Stop が来ていたら Stop
+> 経路が送っていた差分 (`git diff HEAD -- <path>`) と同一**でなければならない。
+> 同一だと示せないパスは内容を送らず、ファイル名だけを通知する。
+
+「どの git 操作なら安全か」を列挙する形は採らない。`git merge --squash` /
+`git cherry-pick -n` / `git checkout <ref> -- <path>` / `git restore --source` /
+`git stash pop` / `git apply` は **`logs/HEAD` に 1 行も書かず**に index や作業ツリーへ
+他人の内容を入れ、続く `git commit` は素の `commit:` 行にしか見えない (2026-09-20 実測)。
+`git reset --soft <過去>` → `git commit` も `old..new` を squash 範囲全体に広げる。
+**操作の種類から内容の来歴を推論する経路は列挙が終わらない** ので、Stop 経路の露出を
+上限に取り、それを 1 バイトも超えないことを示す形にした。
+
+**等価性の証明を stat と `git diff HEAD` だけに乗せない。** どちらも代理判定で、
+それぞれ独立に偽になる: `(size, mtime_ns)` は `touch -r` / `cp -p` で復元でき、
+`git diff HEAD` は `assume-unchanged` / `skip-worktree` のエントリで作業ツリーを
+見ない (= index に置かれた他人の版が commit されても「空」になる)。そこで
+**commit された blob のバイトを、編集ツールが書いた直後に控えておいた内容の指紋と
+突き合わせる**条件を最後の砦に置いた。これは代理ではなく「送る差分の新しい側 =
+このセッションのツールが書いたバイト列」を直接示すので、stat の突合と index の
+タグ判定が両方とも破れても他人の内容は出ない。
+
+> **0.11.0 で撤去した「内容指紋による復元」とは別物。** あれは指紋の一致を根拠に
+> **基点を過去の commit へ探しに行く**案で、内容を変えない編集をすると無関係な
+> 過去の commit が基点になった。今回は基点を reflog の窓で固定したままで、指紋は
+> **新しい側の内容の同定**にしか使わない。同じ攻撃 (同一内容の書き込み + 無関係な
+> 過去 commit) を commit 経路でも床テストにしてある。
+
+- **commit の検出に Bash のコマンド文字列は解析しない。** `PreToolUse(Bash)` で
+  その作業ツリーの HEAD reflog ファイル (`git rev-parse --git-path logs/HEAD`) の
+  **バイト長と HEAD の SHA** を控え、`PostToolUse(Bash)` で「その位置より後ろに
+  追記された行」だけを読む。`sh -c` / alias / スクリプト / `make release` の内側の
+  commit も、コマンド文字列に `git commit` が現れない限り解析では拾えない
+- **窓の条件 (満たさなければ窓ごと何も送らない)**
+  - 追記された行が `commit: ` / `commit (amend): ` / `commit (initial): ` だけで
+    構成される。それ以外で ref を動かす行 (`reset` / `merge` / `rebase` / `pull` /
+    `cherry-pick` / `revert` / `switch`、および conflict 解決後の `commit (merge): ` /
+    `commit (cherry-pick): `) が 1 行でもあれば窓を捨てる。ref を動かさない行
+    (`checkout -b` 等) は無視する
+  - 行が連鎖している (先頭行の `<old>` が pre の HEAD、以降は `old_i == new_{i-1}`)
+  - `PreToolUse(Bash)` の `git status` スナップショットがある
+  - `reflog.py` の fail-closed (pre 欠落 / 読めない / 短縮 / parse 不能 / 追記バイト
+    上限 / commit 数上限)
+- **パスの条件 (全て満たすパスだけ内容を送る)**
+  - このセッションの **pending ∪ in-flight** にある。**`reviewed` は含めない** —
+    `reviewed` は「過去に一度でも編集した」セッション全履歴で、Stop 経路では再送抑止に
+    しか使っておらず送信許可ではない。ここに入れると「一度編集したパスは以後ずっと誰が
+    書いた内容でも送ってよい」に昇格してしまう
+  - 窓を開いた時点の `git status` に載っている (= その時点で未 commit の変更があった)
+  - `(size, mtime_ns, ctime_ns)` が窓の開始時点と現在で一致する (窓の間に書き換わって
+    いない)。**これは代理変数**で、内容が同じことの証明ではない (下の「既知の限界」)
+  - index のタグが通常 (`git ls-files -v` が `H`)。`assume-unchanged` /
+    `skip-worktree` / unmerged のエントリでは次の `git diff HEAD` が作業ツリーを
+    見ないため
+  - commit 後に `git diff HEAD -- <path>` が空 (作業ツリーの内容がそのまま commit
+    された = 部分 commit ではない)
+  - **commit された blob の生バイトの sha256 が、編集ツール (Write / Edit /
+    NotebookEdit) が最後に書いた内容の指紋と一致する**。これだけは代理判定ではなく
+    「送る差分の新しい側 = このセッションのツールが書いたバイト列」を直接示す
+  - **Stop が既にレビューした内容ではない** (同じ差分の hash が `reviewed` に無い)
+  - 既存の除外規則 (別名・symlink 込み) と予算 (`MAX_REVIEW_PATHS` / `MAX_DIFF_BYTES` /
+    `MAX_FILE_DIFF_BYTES`) を通る
+- **送る差分は窓全体で 1 本** (`窓を開いた時点の HEAD`..`最後の <new>`)。commit ごとに
+  分けると上の等価性が成り立たないため。`--amend` も窓を開いた時点の HEAD が基点に
+  なるので**増分だけ**が出る。窓を開いた時点で HEAD が無ければ空ツリーが基点
+- **内容の指紋は `PostToolUse(Write/Edit/NotebookEdit)` で取る** (書かれた直後の生
+  バイトの sha256)。この経路は **git を呼ばない**まま維持していて、増分は 4 KiB の
+  ファイルで +0.2 ms、上限の 1 MiB でも +0.7 ms (計測条件は
+  `hooks/post-implementation-review/CLAUDE.md` の表)。1 MiB 超 / 読めない /
+  通常ファイルでないものは指紋なし = そのパスは内容を送らない。Bash がその
+  ファイルを書き換えたら指紋を捨てる
+- 送らなかったパスは**理由別にファイル名だけ**を `systemMessage` で通知する
+  (未レビューの変更として記録が無い / 窓を開いた時点の変更と一致しない / 部分 commit /
+  commit された内容がこのセッションのツールが最後に書いた内容と一致しない / 除外 /
+  予算)。通知文は固定文言 + ファイル名で、内容は出さない
+- **配信は同期 `PostToolUse` の `hookSpecificOutput.additionalContext`** (指摘なしの
+  ときは Claude 向けの出力なし)。公式 Hooks reference は PostToolUse の
+  `additionalContext` / `decision: "block"` の `reason` をどちらも「ツール結果の隣に
+  入る」と定めている。**Claude Code 2.1.278 の nested セッションで実測**: メインの
+  commit ではメインに届き、隔離した作業ツリーで動くサブエージェントの commit では
+  **そのサブエージェントにだけ**届いて親には伝播しない。送信本文は該当ファイルの
+  差分だけで、Stop の誤通知も出なかった (公式 docs には subagent 宛の明記が無いので、
+  CLI の版が変わったら再確認する)。`EXTERNAL_AI_POST_REVIEW_MODE` は Stop と同じつまみを共有する
+  (`auto` の版数 fail-closed の下限 2.1.163 は公式 changelog では Stop / SubagentStop
+  向けの記載で、PostToolUse 側の下限は公式に記載が無い。**そのまま流用して保守側に
+  倒している** — PostToolUse では `block` も「reason をツール結果の隣に添える」だけで
+  ツールを止めないので、どちらに倒れても失うものが無い)
+- **backend から指摘を受け取った後は必ず配信する。** state 整理 (`pending` の掃除・
+  backend 名の記録) で例外が出ても指摘は捨てない。送信**前**の例外は従来どおり
+  「送らない」に倒す
+- **レビュー成功後、送ったパスのうち `git diff HEAD` が空のままのものを pending から
+  外す** (Stop に「取得できませんでした」と誤通知させないため)。レビューの待ち時間の
+  間に再編集されたパスは pending に残して Stop に続きを見せる。**全 backend が失敗した
+  ときは state を触らない**
+- **`git commit -a` が巻き込んだ他人の作業ツリー変更を pending に積まない。**
+  commit のあった窓では「`git status` から消えただけで、このセッションの記録にも無い」
+  パスを積まないので、「送らない」と通知したパスが**次の窓で送信許可になる**ことがない
+- `EXTERNAL_AI_POST_REVIEW_COMMIT=0` で commit レビューだけを切れる
+  (`EXTERNAL_AI_POST_REVIEW=0` / `..._BASH_TRACKING=0` でも止まる)
+- `hooks.json` の `PostToolUse` matcher を `Write|Edit|NotebookEdit` (timeout 10 秒の
+  まま) と `Bash` (720 秒) に分けた。`PreToolUse(Bash)` は reflog の起点を取る
+  `rev-parse` が 1 回増えたので 10 → 15 秒。**commit を含まない Bash の実測の増分は
+  1 回あたり約 +10 ms** (pre-tool +9 ms / post-tool +0.5 ms)、**編集ツール 1 回の
+  増分は指紋の計算ぶんで 1 MiB でも +0.7 ms** (詳細は
+  `hooks/post-implementation-review/CLAUDE.md` の計測表)。commit を**含む** Bash では
+  `git ls-files -v` 1 回と `git cat-file --batch-check` / `--batch` 各 1 回が増え、
+  最悪ケースの積み上げは 720 秒の hook timeout に収まる
+  (`tests/test_review_set.py::TestTimeoutBudgets`)
+
+既知の限界 (README にも記載):
+
+- **同じ Bash の中で編集して commit したパス** (`sed -i ... && git commit -am`)、
+  pre-commit フックが書き換えたパス、`git add -p` の部分 commit、`reset --soft` での
+  squash、rebase / merge を含む Bash は commit レビューの対象外 — **ファイル名の通知
+  だけ**になる。Stop の「取得できませんでした」通知と合わせて、レビューされなかった
+  事実は可視化される
+- 巨大な作業ツリーで `git status` が予算内に終わらない環境では commit レビューが効かない
+  (窓を開いた時点の状態を突き合わせられないため)
+- Bash 以外 (IDE・別ターミナル) の commit は拾わない (従来どおり Stop の
+  「取得できませんでした」になる)
+- **root 配下の入れ子の作業ツリー / git リポジトリ / submodule** (`git worktree add`
+  したもの、サブディレクトリの `git init`、`git submodule add` したもの) の中のファイルは、外側を cwd にしたセッションからは
+  レビュー対象外にした。中身は別リポジトリの変更で root 基準の `git diff HEAD` には
+  最初から出ないため、pending に積まれると**毎ターン「差分が空で取得できませんでした」を
+  出し続けていた** (内容は送っていない)。`git status` 側では `dir/` エントリとして
+  既に捨てていたが、Write / Edit は絶対パスをそのまま積むのでこの経路を通らなかった。
+  判定は「root とファイルの間のどこかの親に `.git` があるか」だけで git は呼ばない。
+  その作業ツリーを cwd にしたセッション / サブエージェントの編集と commit は、
+  そちら側の hook が従来どおりレビューする
+- **編集ツールを通っていない内容は送らない** (指紋が無いため)。`sed -i` / フォーマッタ /
+  conflict の解決 / `git stash pop` などで作業ツリーへ入った内容、および**削除の
+  commit** (blob が無い) が該当する — ファイル名の通知だけになる。「前の Bash で
+  他人の内容が pending のパスに入り、次の Bash で commit する」形もここで止まる
+  (0.11.0 の Stop はこれを送るので、**0.11.0 より狭い**)
+- **clean/smudge フィルタや `core.autocrlf` で blob と作業ツリーのバイトが食い違う
+  repo** では指紋が常に一致せず、commit レビューは内容を送らない (通知のみ)。
+  **1 MiB を超えるファイル**も同じ
+- **窓の間に書き換わっていないかの突合は代理変数**。`(size, mtime_ns)` は `touch -r` /
+  `cp -p` / `rsync -t` / `tar -xp` で復元できるので `ctime_ns` を足したが、**粒度の
+  粗いファイルシステム** (HFS+ / exFAT / 一部の bind mount) では同一秒内の書き換えを
+  閉じられない。**index のタグの判定も git の `ls-files -v` の出力に依存する**。
+  どちらが破れても内容の指紋が残る (それが最後の砦) という構造にしてある
+- `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` を設定していると、その間の commit は
+  レビューされない (窓は 1 回きりで次に回らない)。見送ったことは `systemMessage` に出す。
+  1 回の Bash の commit が上限 (5 件) を超えた場合、**同じ作業ツリーで別のレビューが
+  走っていてロックを取れなかった場合**も同様に 1 行通知して見送る
+- 2 つの Bash の窓が重なると、後から `PostToolUse` が走った側が「未レビューの変更と
+  して記録が無い」と誤通知することがある (先に走った側が pending を整理済みのため)。
+  **送信範囲は広がらない** (むしろ狭い) が、通知は実態とずれる
+- **窓が信用できなかった場合 (`reset` / `merge` が混ざった等)、その窓で `git status`
+  から消えたパスは名前がどこにも出ない** (窓レベルの 1 行だけ)。0.11.0 なら Stop が
+  「差分が空で取得できませんでした」と名前を出していた分が減る。送信範囲は狭い側の
+  変化だが、「黙って消える」を潰すという趣旨からは後退している
+- Stop で見た行が後で commit されても、**内容が変わっていなければ再送しない**。
+  Stop 後に内容が変わったパスだけが 2 回目のレビューに載る。backend を 2 つ以上
+  設定していれば `alternate` で別の目のクロスチェックになる
+- commit のたびに最長でレビュー timeout ぶん待つ
+
 ## 0.11.0
 
 **内部バックログの精査分 2 件 (Explore 並走の同時起動数と注入量の上限 / cursor CLI

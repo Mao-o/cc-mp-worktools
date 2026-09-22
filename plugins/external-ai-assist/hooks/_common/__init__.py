@@ -23,8 +23,15 @@ import する前に
 | `sentinel` | REVIEW_CLEAN sentinel の判定 (フェンス・装飾・前置き 1 文の扱い) |
 | `subproc` | 外部 CLI の起動。process group + timeout + 残出力の読み捨て |
 | `cursorcli` | cursor agent の存在確認と review 用 argv |
+| `backends` | 外部 AI backend の registry (存在確認 / 起動 / 結果の 3 値分類) |
 | `flock` | flock 下での read-modify-write |
 | `hooklog` | `[<hook>] msg` 形式の stderr ログ |
+
+`backends` は「CLI の起動と結果の分類」だけを持ち、**どの backend に送るかは各 hook が
+決める** (プランレビューは `exitplan-review/__main__.py` の `REVIEWERS`、差分レビューは
+`post-implementation-review/selection.py`)。registry に backend を足しただけで送信先が
+増えない形にしてあるのは、**更新しただけの利用者の差分が新しいサービスへ行かない**ように
+するため。
 
 ## 共通化しないもの
 

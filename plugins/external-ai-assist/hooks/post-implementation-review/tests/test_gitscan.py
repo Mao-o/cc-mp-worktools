@@ -193,13 +193,14 @@ class TestStatusSnapshot(GitScanTestCase):
         snapshot = gitscan.status_snapshot(self.repo)
         self.assertIn("newdir/deep/file.txt", snapshot)
 
-    def test_modified_file_records_size_and_mtime(self):
+    def test_modified_file_records_size_mtime_and_ctime(self):
         write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
         snapshot = gitscan.status_snapshot(self.repo)
-        code, size, mtime = snapshot["seed.txt"]
+        code, size, mtime, ctime = snapshot["seed.txt"]
         self.assertIn("M", code)
         self.assertEqual(size, os.path.getsize(os.path.join(self.repo, "seed.txt")))
         self.assertGreater(mtime, 0)
+        self.assertGreater(ctime, 0)
 
     def test_clean_repo_is_empty(self):
         self.assertEqual(gitscan.status_snapshot(self.repo), {})
@@ -351,6 +352,116 @@ class TestUntrackedAmong(GitScanTestCase):
 
     def test_empty_input(self):
         self.assertEqual(gitscan.untracked_among(self.repo, []), set())
+
+
+class TestFlaggedIndexEntries(GitScanTestCase):
+    """commit レビューの P4': `git diff HEAD` が作業ツリーを見ないエントリを拾う。"""
+
+    def test_normal_entry_is_not_flagged(self):
+        self.assertEqual(gitscan.flagged_index_entries(self.repo, ["seed.txt"]), set())
+
+    def test_assume_unchanged_and_skip_worktree_are_flagged(self):
+        write(self.repo, "other.txt", "x\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "another file")
+        git(self.repo, "update-index", "--assume-unchanged", "seed.txt")
+        git(self.repo, "update-index", "--skip-worktree", "other.txt")
+        self.assertEqual(
+            gitscan.flagged_index_entries(self.repo, ["seed.txt", "other.txt"]),
+            {"seed.txt", "other.txt"},
+        )
+
+    def test_git_failure_returns_none(self):
+        with mock.patch.object(gitscan, "_git", return_value=None):
+            self.assertIsNone(gitscan.flagged_index_entries(self.repo, ["seed.txt"]))
+
+    def test_empty_input(self):
+        self.assertEqual(gitscan.flagged_index_entries(self.repo, []), set())
+
+
+class TestBlobDigests(GitScanTestCase):
+    """commit レビューの P6: commit された blob の生バイトの sha256。"""
+
+    LARGE = 1 << 20
+
+    def _sha(self, text: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def test_digest_matches_the_committed_bytes(self):
+        write(self.repo, "with space.txt", "hello\nworld\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "blobs")
+        result = gitscan.blob_digests(
+            self.repo, "HEAD", ["with space.txt", "seed.txt"], self.LARGE, self.LARGE * 8
+        )
+        self.assertEqual(result["with space.txt"], self._sha("hello\nworld\n"))
+        self.assertEqual(result["seed.txt"], self._sha("alpha\nbeta\ngamma\n"))
+
+    def test_missing_path_is_omitted(self):
+        result = gitscan.blob_digests(
+            self.repo, "HEAD", ["seed.txt", "never.txt"], self.LARGE, self.LARGE * 8
+        )
+        self.assertIn("seed.txt", result)
+        self.assertNotIn("never.txt", result)
+
+    def test_symlink_and_directory_are_omitted(self):
+        """blob 以外 (tree / symlink の中身以外) は返さない。
+
+        symlink は blob ではあるが中身はリンク先の文字列で、`_file_fingerprint` が
+        記録するのは通常ファイルの内容だけなので、どのみち一致しない。
+        """
+        os.makedirs(os.path.join(self.repo, "dir"))
+        write(self.repo, "dir/inner.txt", "x\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "a directory")
+        result = gitscan.blob_digests(
+            self.repo, "HEAD", ["dir"], self.LARGE, self.LARGE * 8
+        )
+        self.assertEqual(result, {})
+
+    def test_size_cap_drops_the_path(self):
+        write(self.repo, "big.txt", "x" * 100)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "big")
+        self.assertEqual(
+            gitscan.blob_digests(self.repo, "HEAD", ["big.txt"], 10, self.LARGE), {}
+        )
+
+    def test_total_cap_stops_after_the_budget(self):
+        for i in range(3):
+            write(self.repo, f"f{i}.txt", "x" * 40)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "three files")
+        result = gitscan.blob_digests(
+            self.repo, "HEAD", ["f0.txt", "f1.txt", "f2.txt"], 100, 90
+        )
+        self.assertEqual(list(result), ["f0.txt", "f1.txt"])
+
+    def test_path_with_a_newline_is_skipped(self):
+        """改行区切りの入力なので、パス名に改行があると 1:1 対応が崩れる。"""
+        self.assertEqual(
+            gitscan.blob_digests(self.repo, "HEAD", ["a\nb.txt"], self.LARGE, self.LARGE),
+            {},
+        )
+
+    def test_git_failure_returns_empty(self):
+        with mock.patch.object(gitscan, "_git", return_value=None):
+            self.assertEqual(
+                gitscan.blob_digests(
+                    self.repo, "HEAD", ["seed.txt"], self.LARGE, self.LARGE
+                ),
+                {},
+            )
+
+    def test_misaligned_output_is_abandoned(self):
+        """出力が入力とズレたら (oid が合わなければ) そこで読むのをやめる。"""
+        wanted = [("a.txt", "0" * 40), ("b.txt", "1" * 40)]
+        out = b"%s blob 2\nhi\n%s blob 2\nyo\n" % (b"0" * 40, b"9" * 40)
+        self.assertEqual(
+            list(gitscan._parse_batch_blobs(out, wanted)), ["a.txt"]
+        )
 
 
 if __name__ == "__main__":
