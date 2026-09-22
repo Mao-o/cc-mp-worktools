@@ -662,6 +662,31 @@ class TestStateOnFailure(CommitFlowTestCase):
             "重複抑止パス (dup.py) は settle され、送った側 (new.py) は pending に残る (B3)",
         )
 
+    def test_mixed_batch_send_exception_settles_only_deduplicated_paths(self):
+        """混在 batch で送信そのものが例外で落ちるケース (上の「全滅」の例外版)。
+
+        `_deliver_commit_review` に到達しないため、送信中の例外分岐でも重複抑止パス
+        だけは settle する必要がある。送った側 (new.py) は pending に残す (B3)。
+        """
+        dup_full = self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("dup.py")
+        self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        new_full = self.edit(SESSION_A, "new.py", f"print('{OURS} new')\n")
+        self.assertEqual(sorted(self.pending(SESSION_A)), sorted([dup_full, new_full]))
+
+        payload = self.bash_payload("tu_mixed_raise")
+        self.run_hook("pre-tool", payload)
+        self.commit("commit both dup.py and new.py")
+        with mock.patch.object(self.cursor, "review", side_effect=RuntimeError("boom")):
+            output = self.run_hook("post-tool", payload)
+        self.assertFalse(output, "送信が例外で落ちたら何も配信しない")
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [new_full],
+            "重複抑止パス (dup.py) は settle され、送った側 (new.py) は pending に残る (B3)",
+        )
+
 
 class TestCommitInAnotherRepo(CommitFlowTestCase):
     def test_commit_into_a_different_repo_sends_nothing(self):

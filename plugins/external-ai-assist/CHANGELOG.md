@@ -21,9 +21,12 @@ commit 済みで、送信範囲そのものには影響しない)。
 
 `_deliver_commit_review` の「全 backend 失敗」分岐で `sent.deduplicated` だけを
 `_settle_commit_review` に通すよう修正した。送った側 (`sent.sent_rels`) は
-従来どおり pending に残し、次の Stop に委ねる (B3 の設計は維持)。回帰テストは
-`tests/test_commit_flow.py::TestStateOnFailure::
-test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths`。
+従来どおり pending に残し、次の Stop に委ねる (B3 の設計は維持)。送信そのものが
+例外で落ちる分岐 (`_deliver_commit_review` に到達しない) も同じ症状を残すため、
+マージ前レビューの指摘を受けて同様に重複抑止パスだけを settle するようにした。
+回帰テストは `tests/test_commit_flow.py::TestStateOnFailure` の
+`test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths` と
+`test_mixed_batch_send_exception_settles_only_deduplicated_paths`。
 
 ## 0.12.0
 

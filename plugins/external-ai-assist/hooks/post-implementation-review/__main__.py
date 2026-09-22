@@ -1010,6 +1010,13 @@ def _commit_review(
             sent = _send_commit_review(session_id, root, commits, batch, notices)
         except Exception as e:  # noqa: BLE001 — 送信中の失敗も「送らない」に倒す
             log(f"commit レビューの送信中に例外: {type(e).__name__}: {e}")
+            # 重複抑止パス (`batch.deduplicated`) は backend に渡す前から
+            # 「commit 済み・レビュー済み」が確定している。送信が例外で落ちても
+            # ここだけは settle しないと、全 backend 失敗と同じ誤通知が残る
+            _quiet(
+                lambda: _settle_commit_review(session_id, root, batch.deduplicated, by_rel),
+                "重複抑止パスの整理",
+            )
             return {}
     try:
         return _deliver_commit_review(session_id, root, len(commits), notices, sent, by_rel)
