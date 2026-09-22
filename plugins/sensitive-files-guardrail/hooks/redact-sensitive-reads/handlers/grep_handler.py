@@ -162,8 +162,10 @@ def _glob_verdict(glob: str, rules: list[tuple[str, bool]]) -> str:
     ``{`` を含む glob は、展開結果が全部 literal 非機密でも ``pause`` 止まり
     (``{`` 自体をワイルドカードと見なす)。展開は ``deny`` 方向にしか動かさない。
 
-    ``dotglob`` は渡さない: Grep の ``glob`` は shell ではなく Claude Code
-    側が解釈するので、``shopt -s dotglob`` に相当する状態が無い。
+    ``dotglob=True`` で判定する: Grep の ``glob`` は shell ではなく ripgrep
+    (gitignore 流) が解釈し、先頭ドットは特別扱いされない。``*`` / ``*.env`` /
+    ``[.]env`` / ``?env`` は ``.env`` に一致するので deny。``*.py`` のように
+    dotenv stem に一致しえない wildcard だけが ``pause``。
     """
     # 循環 import を避けるため関数内 import (operand_lexer は bash handler の
     # サブモジュールだが、glob の意味論はツール非依存なのでそのまま使える)
@@ -186,7 +188,22 @@ def _glob_verdict(glob: str, rules: list[tuple[str, bool]]) -> str:
             # wildcard を含む分岐だけ dotenv stem の展開判定を先に当てる。
             # literal 分岐にまで当てると、利用者の ``!.env`` (last-match-wins の
             # 除外) を見ずに deny してしまう (マージ前レビューの指摘)
-            if _glob_operand_is_dotenv_match(branch):
+            # Grep の glob は shell の pathname expansion ではなく ripgrep /
+            # gitignore 流で、**先頭ドットは特別扱いされない** (``rg -g '*'`` や
+            # ``-g '[.]env'`` は ``.env`` を検索する。マージ前レビューの指摘)。
+            # Bash の既定 (dotglob 無効) で判定すると ``*`` / ``*.env`` /
+            # ``[.]env`` / ``?env`` が pause に落ち、autonomous では allow で
+            # dotenv の中身が返る。``dotglob=True`` で fnmatch の意味論に戻す
+            # ただし basename 側が ``*`` / ``**`` だけの glob (``*`` / ``src/**``)
+            # は「絞り込み」ではなく走査そのもので、``path`` にディレクトリを
+            # 渡したときと同じ露出 (既知の限界としてディレクトリ走査は allow
+            # 側)。dotenv 判定に掛けると全 mode で deny になり、絞り込みの無い
+            # 走査より厳しくなって整合しないので、他の不確定 wildcard と同じ
+            # ``pause`` に留める
+            if branch.rsplit("/", 1)[-1] in ("*", "**"):
+                verdict = "pause"
+                continue
+            if _glob_operand_is_dotenv_match(branch, dotglob=True):
                 return "deny"
             verdict = "pause"
             continue

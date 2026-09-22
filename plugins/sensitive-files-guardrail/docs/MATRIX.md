@@ -672,16 +672,20 @@ handler と、`glob` は **Bash の operand glob と同じ三態** (deny /
 | `path` が機密名の特殊ファイル (FIFO/socket/device) | ask | ask | ask | ask | **deny** |
 | `path` の lstat 失敗 (権限/IO) | ask | ask | ask | ask | **deny** |
 | `glob` が literal で機密名 (`.env` / `.npmrc` / `id_rsa`) | **deny** | **deny** | **deny** | **deny** | **deny** |
-| `glob` が dotenv stem に展開されうる (`.env*` / `**/.env` / `.en?`) | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `glob` が dotenv stem に一致しうる (`.env*` / `**/.env` / `.en?` / **`*.env`** / `[.]env` / `?env` / `*env` / `*.envrc` / `sub/*.env`) — **ripgrep (gitignore 流) の意味論で先頭ドットは特別扱いされない** | **deny** | **deny** | **deny** | **deny** | **deny** |
 | `glob` のブレース分岐が上の 2 つに当たる (`{.env,*.py}` / `.en{v,x}` / `{id_rsa,notes.txt}`) | **deny** | **deny** | **deny** | **deny** | **deny** |
-| `glob` がそれ以外の**ワイルドカード**を含む (`*.py` / `src/**` / **`*.env`** / `*.pem` / `id_rsa*` / `?env` / `*.{ts,tsx}` / `{a,b}`) | ask | ask | **allow** | ask | **allow** |
+| `glob` がそれ以外の**ワイルドカード**を含む (`*.py` / `*.pem` / `id_rsa*` / `*.{ts,tsx}` / `{a,b}`)、および basename 側が `*` / `**` だけの走査 glob (`*` / `src/**` — 絞り込みではなく走査そのものなので、ディレクトリ走査と同じ露出。deny にするとディレクトリ走査より厳しくなり整合しない) | ask | ask | **allow** | ask | **allow** |
 | `glob` が非機密の **literal** (`README.md` / `src/main.py`) | allow | allow | allow | allow | allow |
 | `glob` のブレースが閉じていない / 分岐が上限超 (`{.env,x` / `{a,b}`×9) | ask | ask | **allow** | ask | **allow** |
 | `patterns.txt` 読込失敗 | ask + stderr | ask | ask | ask | **deny** + stderr |
 | `path` の normalize 失敗 / handler 内例外 | ask | ask | ask | ask | **deny** |
 
 > **`glob` の三態は Bash の glob 行と 1:1** (0.34.0 のマージ前レビュー
-> P2-3、ユーザー判定)。上の ask 行は Bash handler の
+> P2-3、ユーザー判定)。**ただし先頭ドットの扱いだけ Bash と違う**: Bash の
+> `cat *.env` は shell の pathname expansion で `.env` に展開されないので ask だが、
+> Grep の `glob` は ripgrep (gitignore 流) が解釈し `rg -g '*.env'` / `-g '[.]env'`
+> は `.env` を検索する (ripgrep 15 実測、マージ前レビューの指摘)。そのため Grep は
+> `dotglob=True` で判定し、`*.env` / `[.]env` / `?env` / `*env` は deny になる。上の ask 行は Bash handler の
 > 「[静的解析不能 (三態判定)](#bash-handler--静的解析不能-三態判定)」の
 > `cat id_rsa*` / `cat *.log` / `cat .env.*` の行と同じセル構成で、判定関数
 > (`_glob_operand_is_dotenv_match` / `_has_glob`) も同じものを使う。

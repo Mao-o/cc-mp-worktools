@@ -409,7 +409,10 @@ path 形を既定に、basename 形を併記して案内する。
 > filter」なので Bash での真の同型は `grep -rn X --include='*.py' .`
 > (実測 allow) とも読めるが、判定境界は `grep -rn X *.py` (実測 ask) 側、
 > つまり**過剰 ask 側**に倒した。`*.py` のような無害な glob も default では
-> ask になる (autonomous では allow)。
+> ask になる (autonomous では allow)。**先頭ドットだけは Bash と違う**: Grep の
+> `glob` は ripgrep (gitignore 流) が解釈し、`*.env` / `[.]env` / `?env` は `.env`
+> に一致するので deny (Bash の `cat *.env` は shell の展開規則で ask)。`*` /
+> `dir/**` は絞り込みではなく走査なので、ディレクトリ走査と同じ扱い。
 
 > **ディレクトリ走査は allow**: `path` にディレクトリを渡した Grep は、配下の
 > 機密ファイルの行が結果に混ざりうるが deny しない。Bash の `grep -r X .` と
@@ -644,7 +647,7 @@ repo に commit できる (0.32.0):
 | hook | 機密検出時 | 判定不能時 | 備考 |
 |---|---|---|---|
 | `redact-sensitive-reads` (Read) | **deny** + minimal info | **ask_or_deny** | non-bypass は ask、bypass は deny |
-| `redact-sensitive-reads` (Grep) | **deny 固定** | **ask_or_deny** (内部失敗) / **ask_or_allow** (判定できない `glob`) | 0.34.0。`path` / `glob` のみ判定。`glob` は Bash operand と同じ三態、ディレクトリ走査だけ allow 固定 |
+| `redact-sensitive-reads` (Grep) | **deny 固定** | **ask_or_deny** (内部失敗) / **ask_or_allow** (判定できない `glob`) | 0.34.0。`path` / `glob` のみ判定。`glob` は Bash operand と同じ三態 (ただし ripgrep の意味論で先頭ドットは特別扱いされず、`*.env` / `[.]env` / `?env` は deny)、ディレクトリ走査と `*` / `dir/**` だけ allow 側 |
 | `redact-sensitive-reads` (Edit/Write) | **deny 固定** | **ask_or_deny** | ask を挟まない |
 | `redact-sensitive-reads` (Bash) | **deny 固定** | **ask_or_allow** | default/acceptEdits/dontAsk は ask、auto/bypass は **allow** |
 | `redact-sensitive-reads` (Bash, patterns.txt 読込失敗) | — | **deny 固定** | policy 欠如時は全 mode block |

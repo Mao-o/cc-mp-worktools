@@ -260,7 +260,8 @@ class TestGrepGlob(BaseGrep):
         positional operand と同じ扱いに倒したため (``--include='*.py'`` 形は
         Bash では allow だが、揃え先は positional 側)。
         """
-        for glob in ("*.py", "**/*.ts", "src/**", "*.log", "*.pem", "id_rsa*", "?env"):
+        # ``*`` / ``src/**`` は絞り込みではなく走査そのもの (ディレクトリ走査と同じ扱い)
+        for glob in ("*.py", "**/*.ts", "src/**", "*", "**", "*.log", "*.pem", "id_rsa*"):
             with self.subTest(glob=glob):
                 self.assertEqual(_decision(self._grep({"pattern": "x", "glob": glob})), "ask")
                 for mode in ("auto", "bypassPermissions"):
@@ -271,20 +272,20 @@ class TestGrepGlob(BaseGrep):
                         msg=f"{glob} in {mode}",
                     )
 
-    def test_star_dot_env_glob_is_ask_not_deny(self):
-        """``*.env`` は Bash operand と同じく **deny にはならない**。
+    def test_dot_matching_wildcards_deny_under_ripgrep_semantics(self):
+        """``*.env`` は Grep では **deny** (Bash operand とは意味論が違う。マージ前レビューの指摘)。
 
-        glob の deny 判定は既定 rules への候補列挙ではなく dotenv literal
-        stem (``.env`` / ``.envrc``) への展開可能性だけを見る (0.8.0 の縮約)。
-        ``*.env`` は先頭ドットの ``.env`` には展開されず、``prod.env`` に
-        展開されうることは patterns を見ないと分からない。0.34.0 のレビュー
-        反映で allow → ask になった (deny にはしない)。docs/MATRIX.md の
-        glob 行に同じ内容を書いてある。
+        Bash の ``cat *.env`` は shell の pathname expansion で先頭ドットの
+        ``.env`` に展開されないので ask / allow だが、Grep の glob は ripgrep
+        (gitignore 流) が解釈し先頭ドットを特別扱いしない — ``rg -g '*.env'``
+        は ``.env`` を検索する。同様に ``*`` / ``[.]env`` / ``?env`` / ``*env`` も deny。
         """
-        self.assertEqual(_decision(self._grep({"pattern": "x", "glob": "*.env"})), "ask")
-        self.assertTrue(
-            output.is_allow(self._grep({"pattern": "x", "glob": "*.env"}, mode="auto"))
-        )
+        for glob in ("*.env", "[.]env", "?env", "*env", "*.envrc", "sub/*.env", "**/[.]env"):
+            with self.subTest(glob=glob):
+                r = self._grep({"pattern": "x", "glob": glob})
+                self.assertEqual(_decision(r), "deny")
+                r = self._grep({"pattern": "x", "glob": glob}, mode="auto")
+                self.assertEqual(_decision(r), "deny", "autonomous でも deny")
 
     def test_glob_is_checked_even_when_path_is_a_directory(self):
         r = self._grep({"pattern": "x", "path": "sub", "glob": ".env"})

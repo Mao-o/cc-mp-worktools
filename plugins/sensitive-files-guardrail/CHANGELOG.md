@@ -138,7 +138,10 @@ commit 52113a1 で完了)。
 
   揃え先は Bash の **positional operand** (`grep X *.py` = ask)。Grep の `glob`
   は「検索対象を絞る filter」なので `grep -rn X --include='*.py' .` (実測 allow)
-  が真の同型とも読めるが、**過剰 ask 側**に倒してある。autonomous mode で allow
+  が真の同型とも読めるが、**過剰 ask 側**に倒してある。先頭ドットの扱いだけは
+  Bash と違い、ripgrep (gitignore 流) の意味論で `*.env` / `[.]env` / `?env` を
+  deny にする (`rg -g '*.env'` は `.env` を検索するため。`*` / `dir/**` は走査
+  そのものなのでディレクトリ走査と同じ扱い)。autonomous mode で allow
   に倒れたときの `additionalContext` の 1 文は Bash と同じ絞り
   (`_gate_lenient_note`) を通すので、`*.pem` には載り `*.py` には載らない。
 
