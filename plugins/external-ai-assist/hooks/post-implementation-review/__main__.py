@@ -193,8 +193,8 @@ COLLECT_BUDGET_SEC = 30
 
 # commit レビュー (PostToolUse(Bash)) の diff 収集に使う時間予算。Stop の
 # COLLECT_BUDGET_SEC より短いのは、同じ hook 呼び出しの中で窓全体の `--name-only`
-# (`range_paths` 1 回) と `changed_vs_head` 2 回 (送信前の P4 判定 + レビュー後の
-# 整理) が乗るため (突合は tests/test_review_set.py::TestTimeoutBudgets)。
+# (`range_paths` 1 回) と `changed_vs_head` (送信前の P4 判定) + `changed_vs_commit`
+# (レビュー後の整理) が乗るため (突合は tests/test_review_set.py::TestTimeoutBudgets)。
 COMMIT_COLLECT_BUDGET_SEC = 20
 
 # systemMessage / stderr に列挙するファイル名の上限 (それ以上は件数だけ)
@@ -930,12 +930,19 @@ class CommitSend:
     """`_send_commit_review` の結果。dataclass にしない理由は `ReviewBatch` と同じ。"""
 
     def __init__(
-        self, outcome, elapsed: float, sent_rels: list[str], deduplicated: list[str] | None = None
+        self,
+        outcome,
+        elapsed: float,
+        sent_rels: list[str],
+        deduplicated: list[str] | None = None,
+        reviewed_commit: str = "",
     ) -> None:
         self.outcome = outcome
         self.elapsed = elapsed
         self.sent_rels = sent_rels
         self.deduplicated = list(deduplicated or [])  # 送らなかったが commit 済みが確定した rel
+        # 窓の最後の commit (`range_diff` の `last`)。state 整理の比較基準 (`_settle_commit_review`)
+        self.reviewed_commit = reviewed_commit
 
 
 def _commit_review(
@@ -1010,6 +1017,15 @@ def _commit_review(
             sent = _send_commit_review(session_id, root, commits, batch, notices)
         except Exception as e:  # noqa: BLE001 — 送信中の失敗も「送らない」に倒す
             log(f"commit レビューの送信中に例外: {type(e).__name__}: {e}")
+            # 重複抑止パス (`batch.deduplicated`) は backend に渡す前から
+            # 「commit 済み・レビュー済み」が確定している。送信が例外で落ちても
+            # ここだけは settle しないと、全 backend 失敗と同じ誤通知が残る
+            _quiet(
+                lambda: _settle_commit_review(
+                    session_id, root, batch.deduplicated, by_rel, commits[-1].new
+                ),
+                "重複抑止パスの整理",
+            )
             return {}
     try:
         return _deliver_commit_review(session_id, root, len(commits), notices, sent, by_rel)
@@ -1286,7 +1302,7 @@ def _prepare_commit_review(
         # 送信は起きていないが「レビュー済みの内容が commit された」ことは確定して
         # いるので、送ったパスと同じ整理を通す
         _quiet(
-            lambda: _settle_commit_review(session_id, root, batch.deduplicated, by_rel),
+            lambda: _settle_commit_review(session_id, root, batch.deduplicated, by_rel, last),
             "重複抑止パスの整理",
         )
         return notices, None
@@ -1329,7 +1345,9 @@ def _send_commit_review(
         log=log,
         manifest=_sent_manifest(root, batch),
     )
-    return CommitSend(outcome, time.monotonic() - started, sent_rels, batch.deduplicated)
+    return CommitSend(
+        outcome, time.monotonic() - started, sent_rels, batch.deduplicated, commits[-1].new
+    )
 
 
 def _quiet(action, what: str) -> None:
@@ -1371,16 +1389,34 @@ def _deliver_commit_review(
 
     result = outcome.text
     if not result:
-        # **pending は触らない** (設計 B3)。残ったパスは Stop が見て
-        # 「差分が空で取得できませんでした」と報告する = 事実のまま
+        # 送った側 (`sent.sent_rels`) は **pending を触らない** (設計 B3)。残ったパスは
+        # Stop が見て「差分が空で取得できませんでした」と報告する = 事実のまま。
+        #
+        # 一方 `sent.deduplicated` は backend に一度も渡していない (Stop が既に
+        # レビュー済みの内容と確定しているため送信対象から除外したパス) ので、
+        # backend の成否とは無関係に「commit 済み・レビュー済み」が既に確定している。
+        # ここを素通りすると、混在 batch (重複抑止パス + 新規パス) で新規パス側の
+        # backend が全滅しただけで、無関係な重複抑止パスまで pending に残り続け、
+        # 次の Stop が「差分が空で取得できませんでした」と誤通知する (実際にはレビュー
+        # 済み・commit 済み)。送信範囲には影響しない
         log("全 backend が commit レビュー結果を返さなかった (state は触らない)")
+        _quiet(
+            lambda: _settle_commit_review(
+                session_id, root, sent.deduplicated, by_rel, sent.reviewed_commit
+            ),
+            "重複抑止パスの整理",
+        )
         notices.insert(0, f"{summary} → 結果を取得できず (timeout / 失敗)")
         return _with_notices({}, notices)
 
     _quiet(lambda: state.record_last_backend(session_id, outcome.backend), "backend 名の記録")
     _quiet(
         lambda: _settle_commit_review(
-            session_id, root, list(dict.fromkeys(sent.sent_rels + sent.deduplicated)), by_rel
+            session_id,
+            root,
+            list(dict.fromkeys(sent.sent_rels + sent.deduplicated)),
+            by_rel,
+            sent.reviewed_commit,
         ),
         "pending の整理",
     )
@@ -1416,18 +1452,36 @@ def _deliver_commit_review(
 
 
 def _settle_commit_review(
-    session_id: str, root: str, sent_rels: list[str], by_rel: dict[str, list[str]]
+    session_id: str,
+    root: str,
+    sent_rels: list[str],
+    by_rel: dict[str, list[str]],
+    reviewed_commit: str,
 ) -> None:
     """レビューが成立したあとの state 整理 (設計 B3)。
 
-    **送ったパスのうち、もう `git diff HEAD` に出ないもの**だけを pending から外す。
-    外さないと Stop がそのパスを claim して「差分が空で取得できませんでした」と
-    誤通知する (実際にはこの commit レビューで送信済み)。
+    **送ったパスのうち、作業ツリーの内容がレビューした commit (`reviewed_commit` =
+    窓の最後の commit) と同じもの**だけを pending から外す。外さないと Stop が
+    そのパスを claim して「差分が空で取得できませんでした」と誤通知する (実際には
+    この commit レビューで送信済み)。
 
     送信前の P4 で「HEAD 差分が空」は確認済みだが、レビューの待ち時間 (最悪 10 分)
     の間に別の編集が来ている可能性があるので**ここでもう一度確認する** — その場合は
     pending に残し、次の Stop に続きを見せる。取得に失敗したら何も外さない (二重通知に
     なるだけで、送信範囲は広がらない側の失敗)。
+
+    **比較の基準は HEAD ではなく `reviewed_commit`** (0.12.1、PR レビューの P1)。
+    待ち時間の間に同じセッションの別 Bash が同じパスを編集して**commit まで**すると、
+    その窓は cursor lock が取れず commit レビューを見送り (`NOTICE_LOCK_HELD`)、
+    パスは pending に積まれる。HEAD 基準だとこのパスは「HEAD と差が無い」ので
+    ここで外れてしまい、後続の Stop でもレビュー・通知されない (未レビューの commit
+    内容の取りこぼし)。レビューした commit と比べれば中身の違いが残るので外さない。
+    HEAD が進んでいても、そのパスの内容がレビューした commit と同じなら外す
+    (無関係なパスの commit では巻き込まない)。
+
+    既知の限界: 待ち時間中に「変更して commit し、さらに内容を元に戻す」と、作業
+    ツリーはレビューした commit と一致するので外れる。取りこぼすのは中間の commit
+    だけで、最終内容はレビュー済みと同一。
 
     **pending から外すのは実体名と `by_rel` が持つ「claim されたときの名前」の両方**
     (マージ前レビューの指摘)。pending のキーは symlink 別名 (`<root>/link/a.py`) の
@@ -1437,9 +1491,12 @@ def _settle_commit_review(
     """
     if not sent_rels:
         return
-    remaining = gitscan.changed_vs_head(root, sent_rels)
+    if not reviewed_commit:
+        log("レビューした commit が不明なため pending を整理しない")
+        return
+    remaining = gitscan.changed_vs_commit(root, reviewed_commit, sent_rels)
     if remaining is None:
-        log("commit 後の HEAD 差分を確認できないため pending を整理しない")
+        log("レビューした commit との差分を確認できないため pending を整理しない")
         return
     settled: dict[str, None] = {}
     for rel in sent_rels:

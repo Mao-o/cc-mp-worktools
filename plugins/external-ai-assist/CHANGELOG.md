@@ -5,6 +5,46 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.1
+
+**commit レビューの混在 batch (重複抑止パス + 新規パス) で全 backend が失敗した
+とき、重複抑止パスが pending に残り続けるバグの修正 (patch bump)。**
+
+内部バックログの follow-up で判明: 同じ窓に「Stop がレビュー済みの内容のパス
+(重複抑止で送らない)」と「新規パス (送る)」が混在すると `batch.sections` が
+非空になり、重複抑止パスだけの窓で行っている即時 settle (pending から外す) を
+通らずに `_send_commit_review` / `_deliver_commit_review` へ進む。その状態で
+全 backend が失敗すると `_deliver_commit_review` の失敗分岐は state を一切
+触らずに返っていたため、重複抑止パスが pending に残り続け、次の Stop が
+「差分が空で取得できませんでした」と誤通知していた (実際にはレビュー済み・
+commit 済みで、送信範囲そのものには影響しない)。
+
+`_deliver_commit_review` の「全 backend 失敗」分岐で `sent.deduplicated` だけを
+`_settle_commit_review` に通すよう修正した。送った側 (`sent.sent_rels`) は
+従来どおり pending に残し、次の Stop に委ねる (B3 の設計は維持)。送信そのものが
+例外で落ちる分岐 (`_deliver_commit_review` に到達しない) も同じ症状を残すため、
+マージ前レビューの指摘を受けて同様に重複抑止パスだけを settle するようにした。
+回帰テストは `tests/test_commit_flow.py::TestStateOnFailure` の
+`test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths` と
+`test_mixed_batch_send_exception_settles_only_deduplicated_paths`。
+
+**state 整理の比較基準を HEAD からレビューした commit に変更** (PR レビューの P1)。
+整理 (`_settle_commit_review`) は「もう HEAD と差が無いパス」を pending から
+外していたが、backend の待ち時間中に同じセッションの別 Bash が同じパスを
+編集して commit すると、そのパスは HEAD と差が無いので外れていた。割り込んだ
+窓は cursor lock が取れずに commit レビューを見送り (その旨は通知される)、
+パスは pending に積まれるが、ここで外れるため**後続の Stop でもレビュー・通知
+されない** (未レビューの commit 内容の取りこぼし)。これは本 patch で足した
+2 分岐だけでなく、0.12.0 からある成功経路 (送った側 + 重複抑止パスの整理) にも
+同じ形で存在した。比較の基準を窓の最後の commit (レビューした内容) に変え、
+作業ツリーの内容がそれと同じパスだけを外すようにした (`gitscan.changed_vs_commit`、
+git 呼び出しは 1 回のままで hook timeout 予算は不変)。HEAD が進んでいても、
+そのパスの内容がレビューした commit と同じなら従来どおり外す。既知の限界:
+待ち時間中に「変更して commit し、内容を元に戻す」と外れる (取りこぼすのは
+中間 commit だけで、最終内容はレビュー済みと同一)。回帰テストは
+`TestSettleAgainstReviewedCommit` (全 backend 失敗 / 送信例外 / 成功経路 /
+無関係な commit では巻き込まない の 4 件)。
+
 ## 0.12.0
 
 **外部レビュー backend を registry 化して差分レビューの送信先を選べるようにし、

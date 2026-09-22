@@ -489,7 +489,7 @@ class TestTimeoutBudgets(ReviewSetTestCase):
             + gitscan.CAT_FILE_TIMEOUT_SEC * 2  # blob_digests (P6: batch-check + batch)
             + self.entry.COMMIT_COLLECT_BUDGET_SEC
             + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
-            + gitscan.LS_FILES_TIMEOUT_SEC  # changed_vs_head (レビュー後の整理)
+            + gitscan.LS_FILES_TIMEOUT_SEC  # changed_vs_commit (レビュー後の整理)
         )
         review_worst = selection.worst_case_wall_sec()
         version_worst = self.entry._VERSION_SUBPROCESS_TIMEOUT_SEC

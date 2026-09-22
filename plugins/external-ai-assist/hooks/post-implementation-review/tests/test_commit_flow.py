@@ -625,6 +625,159 @@ class TestStateOnFailure(CommitFlowTestCase):
         self.window("tu_fail", lambda: self.commit("ours"), review_result=None)
         self.assertEqual(self.state.last_backend(SESSION_A), "")
 
+    def test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths(self):
+        """混在 batch (重複抑止パス + 新規パス) で backend が全滅するケース。
+
+        重複抑止パス (dup.py) は Stop が既にレビュー済みの内容と確定しているため、
+        backend の成否と無関係に settle される。送った側 (new.py) は従来どおり
+        pending に残す (このテストのシンプル版が `test_all_backends_failing_
+        leaves_pending_untouched`)。
+        """
+        dup_full = self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("dup.py")
+
+        # 内容を変えない再編集: pending に戻るが、内容は Stop がレビュー済みのまま
+        self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        new_full = self.edit(SESSION_A, "new.py", f"print('{OURS} new')\n")
+        self.assertEqual(
+            sorted(self.pending(SESSION_A)),
+            sorted([dup_full, new_full]),
+            "前提: 両方とも pending にある",
+        )
+
+        self.window(
+            "tu_mixed_fail",
+            lambda: self.commit("commit both dup.py and new.py"),
+            review_result=None,
+        )
+        self.assertEqual(len(self.review_calls), 1, "batch.sections が非空なので送信は行われる")
+        diff = self.review_calls[0]
+        self.assertIn("new.py", diff)
+        self.assertNotIn(f"{OURS} dup", diff, "重複抑止パスの内容は送らない")
+
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [new_full],
+            "重複抑止パス (dup.py) は settle され、送った側 (new.py) は pending に残る (B3)",
+        )
+
+    def test_mixed_batch_send_exception_settles_only_deduplicated_paths(self):
+        """混在 batch で送信そのものが例外で落ちるケース (上の「全滅」の例外版)。
+
+        `_deliver_commit_review` に到達しないため、送信中の例外分岐でも重複抑止パス
+        だけは settle する必要がある。送った側 (new.py) は pending に残す (B3)。
+        """
+        dup_full = self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("dup.py")
+        self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        new_full = self.edit(SESSION_A, "new.py", f"print('{OURS} new')\n")
+        self.assertEqual(sorted(self.pending(SESSION_A)), sorted([dup_full, new_full]))
+
+        payload = self.bash_payload("tu_mixed_raise")
+        self.run_hook("pre-tool", payload)
+        self.commit("commit both dup.py and new.py")
+        with mock.patch.object(self.cursor, "review", side_effect=RuntimeError("boom")):
+            output = self.run_hook("post-tool", payload)
+        self.assertFalse(output, "送信が例外で落ちたら何も配信しない")
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [new_full],
+            "重複抑止パス (dup.py) は settle され、送った側 (new.py) は pending に残る (B3)",
+        )
+
+
+class TestSettleAgainstReviewedCommit(CommitFlowTestCase):
+    """レビュー待ちの間に同じパスが編集・commit されても pending から外さない (0.12.1)。
+
+    PR レビューの P1: `_settle_commit_review` が「HEAD と差が無いか」だけを見ていた
+    ため、待ち時間中に同じセッションの別 Bash が同じパスを編集して commit すると
+    (その窓は cursor lock が取れず commit レビューを見送り、パスは pending に積まれる)、
+    HEAD とは差が無いので外れてしまい、後続の Stop でも拾われなかった。比較の基準を
+    **レビューした commit** (窓の最後の commit) に変えた。
+
+    外部 backend の待ち時間中の割り込みは `fake_review` の中で編集 + commit して作る
+    (レビュー中は cursor lock だけを保持し state lock は解放している — ロック順の
+    docstring 参照 — ので、Write の PostToolUse はそのまま pending に積める)。
+    """
+
+    NEWER = "CHANGED_WHILE_THE_REVIEW_WAS_RUNNING"
+
+    def _window_with_interleaved_commit(self, tool_use_id: str, rel: str, result):
+        """commit レビューの backend 待ちの間に `rel` を編集して commit する窓を回す。
+
+        `result` が例外インスタンスなら backend 呼び出しが投げる。
+        """
+        calls: list[str] = []
+
+        def fake_review(diff_text: str, *, cwd: str | None = None):
+            calls.append(diff_text)
+            self.edit(SESSION_A, rel, f"print('{self.NEWER}')\n")
+            self.commit(f"newer {rel}", rel)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        payload = self.bash_payload(tool_use_id)
+        self.run_hook("pre-tool", payload)
+        self.commit("commit both dup.py and new.py")
+        with mock.patch.object(self.cursor, "review", side_effect=fake_review):
+            output = self.run_hook("post-tool", payload)
+        self.review_calls = calls
+        return output
+
+    def _mixed_batch(self) -> tuple[str, str]:
+        dup_full = self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("dup.py")
+        self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        new_full = self.edit(SESSION_A, "new.py", f"print('{OURS} new')\n")
+        self.assertEqual(sorted(self.pending(SESSION_A)), sorted([dup_full, new_full]))
+        return dup_full, new_full
+
+    def test_failure_keeps_a_deduplicated_path_committed_during_the_wait(self):
+        dup_full, new_full = self._mixed_batch()
+        self._window_with_interleaved_commit("tu_race_fail", "dup.py", None)
+        self.assertEqual(len(self.review_calls), 1, "前提: 送信は行われる")
+        self.assertNotIn(self.NEWER, self.review_calls[0], "前提: 割り込みの内容は送っていない")
+        self.assertEqual(
+            sorted(self.pending(SESSION_A)),
+            sorted([dup_full, new_full]),
+            "待ち時間中に commit された dup.py の新しい内容は未レビュー = pending に残す",
+        )
+
+    def test_send_exception_keeps_a_deduplicated_path_committed_during_the_wait(self):
+        dup_full, new_full = self._mixed_batch()
+        output = self._window_with_interleaved_commit(
+            "tu_race_raise", "dup.py", RuntimeError("boom")
+        )
+        self.assertFalse(output, "前提: 送信が例外で落ちたら何も配信しない")
+        self.assertEqual(
+            sorted(self.pending(SESSION_A)),
+            sorted([dup_full, new_full]),
+            "送信例外の分岐でも、待ち時間中に commit された dup.py は pending に残す",
+        )
+
+    def test_success_keeps_a_sent_path_committed_during_the_wait(self):
+        """成功経路 (0.12.0 からある整理) も同じ基準であること。"""
+        dup_full, new_full = self._mixed_batch()
+        self._window_with_interleaved_commit("tu_race_ok", "new.py", "REVIEW_CLEAN")
+        self.assertIn(f"{OURS} new", self.review_calls[0], "前提: new.py は送られている")
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [new_full],
+            "dup.py は内容が変わっていないので外し、待ち時間中に commit された new.py は残す",
+        )
+
+    def test_unrelated_commit_during_the_wait_still_settles(self):
+        """HEAD が進んでも、そのパスの内容がレビューした commit と同じなら外す。"""
+        dup_full, new_full = self._mixed_batch()
+        self._window_with_interleaved_commit("tu_race_other", "other.py", None)
+        pending = self.pending(SESSION_A)
+        self.assertNotIn(dup_full, pending, "無関係なパスの commit で dup.py を巻き込まない")
+        self.assertIn(new_full, pending, "送った側は失敗時に pending を触らない (B3)")
+
 
 class TestCommitInAnotherRepo(CommitFlowTestCase):
     def test_commit_into_a_different_repo_sends_nothing(self):
@@ -1232,22 +1385,22 @@ class TestDeliveryAfterReview(CommitFlowTestCase):
     def test_findings_survive_an_exception_while_settling_state(self):
         """backend 呼び出しの**後**の例外で指摘を黙って捨てない (P2-1)。
 
-        以前は `try` が state 整理まで覆っており、`changed_vs_head` が投げると
+        以前は `try` が state 整理まで覆っており、state 整理の git 呼び出しが投げると
         「外部へ送ってレビュー結果も受け取ったのに何も返さない」形になっていた
         (cooldown だけ消費される)。送信**前**の例外は従来どおり「送らない」。
+        state 整理の基準は 0.12.1 から `changed_vs_commit` (送信前の P4 判定は
+        `changed_vs_head` のまま) なので、整理側だけを投げさせる。
         """
         self.edit(SESSION_A, "a.py", f"print('{OURS}')\n")
-        real = self.gitscan.changed_vs_head
         calls = {"n": 0}
 
-        def flaky(root, rels):
+        def boom(*args, **kwargs):
             calls["n"] += 1
-            if calls["n"] == 1:  # 送信前の P4 判定は通す
-                return real(root, rels)
             raise RuntimeError("boom")
 
-        with mock.patch.object(self.gitscan, "changed_vs_head", side_effect=flaky):
+        with mock.patch.object(self.gitscan, "changed_vs_commit", side_effect=boom):
             output = self.window("tu_settle", lambda: self.commit("ours"), "1. **直接影響** — 壊れる")
+        self.assertEqual(calls["n"], 1, "前提: 整理の git 呼び出しに到達している")
         self.assertTrue(output, "指摘が配信されていない")
         data = json.loads(output)
         reason = data.get("hookSpecificOutput", {}).get("additionalContext") or data.get(
