@@ -1129,5 +1129,68 @@ class TestCheckerLoaderContract(BaseWithIsolatedHome):
         self.assertNotIn("legacy_patterns_local_in_use", buf.getvalue())
 
 
+
+def _windows_like_read_text(monkey_encoding: str = "cp1252"):
+    """``Path.read_text`` の **encoding 省略時**だけ非 UTF-8 locale を模擬する。
+
+    Windows で ``PYTHONUTF8`` が無いときの ``read_text()`` 既定 (locale の
+    ANSI code page、西欧なら cp1252) を再現する。``encoding`` を明示した呼出は
+    そのまま通すので、本体側が encoding を明示していれば影響を受けない =
+    「明示を外す mutation で落ちる」床テストになる。CPython の locale encoding
+    は C 層で決まり Python から差し替えられないため、この wrapper で代用する。
+    """
+    original = Path.read_text
+
+    def read_text(self, encoding=None, errors=None, *args, **kwargs):
+        if encoding is None:
+            encoding = monkey_encoding
+        return original(self, encoding=encoding, errors=errors, *args, **kwargs)
+
+    return mock.patch.object(Path, "read_text", read_text)
+
+
+class TestPatternsFilesAreReadAsUtf8(BaseWithIsolatedHome):
+    """patterns ファイルの読込は locale に依らず UTF-8 (0.34.1、内部バックログ)。
+
+    0.34.0 の Windows CI 初回実行で、同梱 ``patterns.txt`` (日本語コメント入り)
+    を ``read_text()`` が cp1252 で読もうとして ``UnicodeDecodeError`` になり、
+    両 hook の**全 tool 呼出**が内部エラー → catch-all に落ちていた
+    (redact 1,812 / check 79 errors の支配的原因)。``UnicodeDecodeError`` は
+    ``OSError`` ではないので loader の ``except OSError`` には掛からず、
+    そのまま上へ抜ける。
+    """
+
+    def test_bundled_patterns_load_under_non_utf8_locale(self):
+        """同梱 patterns.txt が cp1252 既定の環境でも読める (CI 実測の再現)。"""
+        from core.patterns import SHARED_PATTERNS, load_patterns
+        with _windows_like_read_text():
+            rules = load_patterns(SHARED_PATTERNS)
+        self.assertIn((".env", False), rules)
+
+    def test_local_rule_with_non_ascii_name_is_not_mojibaked(self):
+        """cp1252 で「読めてしまう」バイト列でも文字化けせず一致に使える。
+
+        ``秘密.txt`` の UTF-8 バイト列は cp1252 に未定義のバイトを含まないので
+        例外にはならず、別の文字列 (``ç§˜å¯†.txt``) として rule に載る = その
+        ファイルは保護されない。例外より見つけにくい失敗なので別に固定する。
+        """
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        self._write_preferred("# ローカル追加\n秘密.txt\n")
+        with _windows_like_read_text():
+            rules = load_patterns(default_file)
+        self.assertIn(("秘密.txt", False), rules)
+
+    def test_default_patterns_with_japanese_comment(self):
+        """既定側にも日本語コメントがあるとき、``あ`` (0x81 を含む) で落ちない。"""
+        from core.patterns import load_patterns
+        default_file = _make_default_patterns_file(
+            Path(self.tmp), ["# あいう", "*.pem"]
+        )
+        with _windows_like_read_text():
+            rules = load_patterns(default_file)
+        self.assertEqual(rules, [("*.pem", False)])
+
+
 if __name__ == "__main__":
     unittest.main()

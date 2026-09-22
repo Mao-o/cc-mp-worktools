@@ -1,4 +1,4 @@
-"""stdout へ **ストリームの encoding に依らず**書き出すための共有ヘルパー。
+"""stdin / stdout を **ストリームの encoding に依らず** UTF-8 で読み書きする共有ヘルパー。
 
 hook の判定 JSON は stdout に書く。``print`` / ``sys.stdout.write`` は
 ``sys.stdout`` の encoding に従うため、``PYTHONIOENCODING=ascii`` のように
@@ -23,6 +23,15 @@ hook の判定 JSON は stdout に書く。``print`` / ``sys.stdout.write`` は
 なお ``sys.stderr`` は CPython が既定で ``backslashreplace`` を使うため
 (``PYTHONIOENCODING=ascii`` でも実測で ``errors='backslashreplace'``)、
 非 ASCII の警告文を書いても送出されない。stderr 側にこのヘルパーは要らない。
+
+**stdin 側 (0.34.1)**: Claude Code が渡す hook envelope は UTF-8 の JSON だが、
+``sys.stdin.read()`` は ``sys.stdin`` の encoding で decode する。Windows の
+既定 (cp1252 等、``PYTHONUTF8`` 未設定時) では日本語を含む ``file_path`` /
+``command`` / ``content`` の UTF-8 バイト列が別の文字に化けるか、cp1252 に
+未定義のバイト (0x81 / 0x8D / 0x8F / 0x90 / 0x9D) で ``UnicodeDecodeError``
+になる。前者は判定対象パスが実在しない別文字列にすり替わる (= 機密パスを
+見逃す)、後者は envelope 不読で catch-all に落ちる。``read_stdin`` は
+``sys.stdin.buffer`` から bytes を読んで UTF-8 で decode し、この依存を断つ。
 """
 from __future__ import annotations
 
@@ -50,3 +59,24 @@ def write_stdout(text: str) -> None:
         return
     sys.stdout.write(text)
     sys.stdout.flush()
+
+
+def read_stdin() -> str:
+    """stdin 全体を UTF-8 として読み、str を返す。
+
+    バイナリ層 (``sys.stdin.buffer``) があればそこから bytes を読んで
+    ``utf-8`` で decode する。テストが ``StringIO`` へ差し替えている場合など
+    ``buffer`` を持たないストリームではテキスト読込にフォールバックする
+    (差し替え側は encoding を持たないので本件の失敗モードが起きない)。
+
+    decode の ``errors="replace"`` は意図的: envelope は正当な UTF-8 のはずで、
+    そうでない (ハーネス側の異常) ときにここで例外を出すと呼出側の
+    ``stdin_parse_failed`` / ``EOFError`` 分岐に入らず catch-all へ落ちる。
+    U+FFFD に置換して ``json.loads`` に渡せば、壊れ方が「JSON として不正」なら
+    そちらの分岐で、「文字列の中身が壊れただけ」なら判定側で扱える。
+    ``write_stdout`` の ``errors="replace"`` と対称。
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        return buffer.read().decode("utf-8", errors="replace")
+    return sys.stdin.read()

@@ -786,5 +786,54 @@ class TestParsePatternsText(unittest.TestCase):
         self.assertEqual(_parse_patterns_text("\n\n# only comments\n"), [])
 
 
+
+class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
+    """git の出力は locale に依らず UTF-8 で decode する (0.34.1)。
+
+    ``subprocess.run(text=True)`` は ``locale.getpreferredencoding(False)`` で
+    decode するため、Windows の既定 (cp1252) では ``ls-files -z`` が返す UTF-8 の
+    パスが別の文字列に化ける (``秘密`` → ``ç§˜å¯†``) か、未定義バイトで
+    ``UnicodeDecodeError`` になる。前者は「そのパスは無い」= 見逃し、後者は
+    hook 全体の内部エラー。git は ``-z`` では quote せず生バイトを返すので、
+    decode 側で UTF-8 を固定すればよい。``locale`` を patch して cp1252 を模擬する
+    (``TextIOWrapper`` の既定 encoding はこの関数を経由する)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        _init_repo(self.tmp)
+        (Path(self.tmp) / "秘密").mkdir()
+        (Path(self.tmp) / "秘密" / ".env").write_text("K=v\n", encoding="utf-8")
+
+    def _cp1252_locale(self):
+        import locale
+        patches = [mock.patch.object(locale, "getpreferredencoding", return_value="cp1252")]
+        if hasattr(locale, "getencoding"):  # 3.11+
+            patches.append(mock.patch.object(locale, "getencoding", return_value="cp1252"))
+        return patches
+
+    def test_untracked_path_with_non_ascii_dir_survives_cp1252_locale(self):
+        patches = self._cp1252_locale()
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        rules = [(".env", False)]
+        found = find_sensitive_files(self.tmp, rules)
+        paths = {entry["path"] for entry in found}
+        self.assertIn("秘密/.env", paths, msg=f"文字化けせずに報告されること: {found!r}")
+
+    def test_run_git_raw_pins_utf8(self):
+        """mutation ガード: decode 指定を外すと落ちる。"""
+        from checker import _run_git_raw
+        with mock.patch("checker.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="", stderr=""
+            )
+            _run_git_raw(["status"], self.tmp)
+        self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertEqual(run.call_args.kwargs.get("errors"), "replace")
+
+
 if __name__ == "__main__":
     unittest.main()

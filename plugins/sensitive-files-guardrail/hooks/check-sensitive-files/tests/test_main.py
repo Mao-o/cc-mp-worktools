@@ -1757,5 +1757,48 @@ class TestAsciiStdoutEncoding(BaseMainTest):
         self.assertEqual(utf8.stdout, ascii_.stdout)
 
 
+
+class TestMainStdinNonUtf8Locale(unittest.TestCase):
+    """stdin の encoding が非 UTF-8 でも envelope を読めること (0.34.1)。
+
+    Stop hook は ``cwd`` を envelope から受け取る。Windows の既定 (cp1252 等、
+    ``PYTHONUTF8`` 未設定) で ``cwd`` に cp1252 未定義バイトを含む文字
+    (``あ`` = E3 81 82) があると ``sys.stdin.read()`` が ``UnicodeDecodeError``
+    を出す。``_main_impl`` は ``EOFError`` しか捕まえないので catch-all の
+    internal_error に落ち、**未 gitignore の機密ファイルが報告されない**
+    (無音の fail-open)。子プロセスで ``PYTHONIOENCODING=cp1252`` を与えて再現する
+    (in-process の ``_run_main`` は ``StringIO`` なので再現できない)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+        self.repo = Path(self.tmp) / "あ" / "repo"
+        self.repo.mkdir(parents=True)
+        _init_repo(str(self.repo))
+        (self.repo / ".env").write_text("KEY=v\n", encoding="utf-8")
+
+    def test_untracked_env_is_reported_when_cwd_has_non_ascii(self):
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PYTHONIOENCODING"] = "cp1252"
+        env["LC_ALL"] = "C"
+        proc = subprocess.run(
+            [sys.executable, str(_ENTRY_PATH)],
+            input=json.dumps({"cwd": str(self.repo)}, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            env=env,
+        )
+        stderr = proc.stderr.decode("utf-8", "replace")
+        self.assertEqual(proc.returncode, 0, msg=stderr)
+        self.assertNotIn("internal_error", stderr)
+        self.assertTrue(proc.stdout, msg="stdout が空 = 機密ファイルが報告されない fail-open")
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn(".env", payload["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

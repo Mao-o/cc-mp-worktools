@@ -1367,5 +1367,87 @@ class TestSigalrmlessPlatformUsesNormalPipeline(unittest.TestCase):
         self.assertFalse(hasattr(entry, "_is_unsupported_platform"))
 
 
+
+class TestE2EStdinNonUtf8Locale(unittest.TestCase):
+    """stdin の encoding が非 UTF-8 でも envelope を正しく読めること (0.34.1)。
+
+    Claude Code は hook envelope を UTF-8 の JSON で渡すが、``sys.stdin.read()``
+    は ``sys.stdin`` の encoding で decode する。Windows の既定 (cp1252 等、
+    ``PYTHONUTF8`` 未設定) では:
+
+    - ``あ`` (E3 81 82) のように cp1252 に**未定義**のバイト (0x81) を含むと
+      ``UnicodeDecodeError`` → ``stdin_parse_failed`` → 全 tool 呼出が deny
+      (誤 deny、離脱要因)
+    - 未定義バイトを含まない日本語は**別の文字列に化けて**判定に使われる
+      (機密パスの見逃し側)
+
+    ``TestE2EAsciiStdoutSurvives`` の stdin 版。``PYTHONIOENCODING`` は stdin にも
+    効くので、同じ子プロセス経路で cp1252 を模擬する。他の E2E は ``sys.stdin``
+    を ``StringIO`` に差し替えるためこの失敗モードを再現できない。
+    """
+
+    CP1252_ENV = {"PYTHONIOENCODING": "cp1252", "LC_ALL": "C"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+        # ``あ`` は UTF-8 で E3 81 82 — 0x81 は cp1252 に未定義
+        self.jp_dir = Path(self.tmp) / "あ"
+        self.jp_dir.mkdir()
+
+    def _run(self, tool: str, envelope: dict):
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["SFG_LOG_PATH"] = str(self.home / "redact-hook.log")
+        env.update(self.CP1252_ENV)
+        return subprocess.run(
+            [sys.executable, str(_ENTRY_PATH), "--tool", tool],
+            input=json.dumps(envelope, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            env=env,
+        )
+
+    def test_harmless_read_in_japanese_dir_is_not_denied(self):
+        """機密でないファイルの Read が envelope 不読の deny に落ちない。"""
+        target = self.jp_dir / "notes.txt"
+        target.write_text("hello\n", encoding="utf-8")
+        proc = self._run("read", {
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(target)},
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        })
+        self.assertEqual(
+            proc.returncode, 0, msg=proc.stderr.decode("utf-8", "replace")
+        )
+        payload = json.loads(proc.stdout.decode("utf-8")) if proc.stdout else {}
+        decision = payload.get("hookSpecificOutput", {}).get("permissionDecision")
+        self.assertNotEqual(decision, "deny", msg=proc.stdout.decode("utf-8", "replace"))
+        self.assertNotIn(b"stdin_parse_failed", proc.stderr)
+
+    def test_sensitive_edit_in_japanese_dir_is_denied_for_the_right_reason(self):
+        """機密ファイルの Edit は「envelope 不読」ではなく pattern 一致で deny。"""
+        target = self.jp_dir / ".env"
+        target.write_text("SECRET=1\n", encoding="utf-8")
+        proc = self._run("edit", {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(target),
+                "old_string": "SECRET=1",
+                "new_string": "SECRET=2",
+            },
+            "cwd": self.tmp,
+            "permission_mode": "default",
+        })
+        self.assertEqual(proc.returncode, 0)
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        out = payload["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertNotIn("hook 入力 JSON の解析に失敗", out["permissionDecisionReason"])
+        self.assertIn("機密", out["permissionDecisionReason"])
+
+
 if __name__ == "__main__":
     unittest.main()

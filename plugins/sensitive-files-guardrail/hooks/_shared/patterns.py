@@ -658,7 +658,7 @@ def _load_project_patterns(
     if path is None:
         return []
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return []
     except OSError as e:
@@ -728,7 +728,9 @@ def load_patterns(
         FileNotFoundError: 既定 patterns.txt が存在しない
         OSError: 既定 patterns.txt の読み取りに失敗した
     """
-    rules = _parse_patterns_text(patterns_file.read_text())
+    rules = _parse_patterns_text(
+        patterns_file.read_text(encoding="utf-8", errors="replace")
+    )
     project_key = _project_section_keys(cwd)
     # 「書き損じヘッダーの警告は種別ごとに 1 回」を **tier をまたいで** 保つ
     # (0.32.0、マージ前レビューの指摘)。tier ごとに別の集合を持つと、同じ
@@ -744,7 +746,7 @@ def load_patterns(
 
     local_path = _resolve_local_patterns_path()
     try:
-        local_text = local_path.read_text()
+        local_text = local_path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         # 新パスが無い → rename 前の旧パスを fallback で試す。
         return _load_legacy_local(
@@ -782,7 +784,7 @@ def _load_legacy_local(
     """
     legacy_path = _resolve_legacy_local_patterns_path()
     try:
-        legacy_text = legacy_path.read_text()
+        legacy_text = legacy_path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return rules
     except OSError as e:

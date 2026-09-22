@@ -23,6 +23,54 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.34.1
+
+Windows 移植性の不具合修正。判定表は変えない。**テキスト I/O の encoding を
+locale 依存から UTF-8 固定へ**。テスト件数: redact **1,485 → 1,493** /
+check **174 → 177**。
+
+### Fixed
+
+- **同梱 `patterns.txt` の読込が Windows (`PYTHONUTF8` 未設定) で落ちて全 tool
+  呼出が内部エラーになっていた**。`Path.read_text()` に encoding 指定が無く、
+  Windows 既定の ANSI code page (西欧なら cp1252) で UTF-8 の日本語コメントを
+  読もうとして `UnicodeDecodeError` になる。`UnicodeDecodeError` は `OSError`
+  ではないので loader の `except OSError` に掛からず、`redact-sensitive-reads` /
+  `check-sensitive-files` の**全**呼出が catch-all (`ask_or_deny` / internal_error)
+  に落ちていた = 0.34.0 の「Windows でも通常判定を通す」は実際には機能して
+  いなかった。0.34.0 の Windows CI 初回実行 (redact 1,812 / check 79 errors) の
+  支配的原因。既定 / repo 同梱 / user / 旧パスの 4 tier すべてを
+  `read_text(encoding="utf-8", errors="replace")` に揃えた
+- **hook envelope (stdin) の decode も locale 依存だった**。`sys.stdin.read()` は
+  `sys.stdin` の encoding に従うため、`file_path` / `command` / `content` に日本語が
+  あると (a) cp1252 に未定義のバイト (`あ` = E3 **81** 82 等) で
+  `UnicodeDecodeError` → `stdin_parse_failed` の**誤 deny** (Read 側) /
+  `internal_error` で報告が消える**無音 fail-open** (Stop 側)、(b) 未定義バイトを
+  含まない文字列は**別の文字列に化けて**判定に使われる (機密パスの見逃し) の
+  2 通りに割れていた。`_shared/streams.py` に `read_stdin()` を追加し、
+  `sys.stdin.buffer` から bytes を読んで UTF-8 で decode する (`write_stdout` の
+  対称。`buffer` を持たない差し替え stdin ではテキスト読みに fallback)
+- **Stop hook の git 出力 decode** (`subprocess.run(text=True)`) も同じ理由で
+  `encoding="utf-8", errors="replace"` に固定。git は `-z` では quote せず UTF-8 の
+  生バイトを返すため、非 ASCII のパスは cp1252 で化けて「そのパスは無い」に
+  なっていた
+- ログファイル追記 (`LOG_PATH.open("a")`) も `encoding="utf-8"` を明示 (衛生。
+  ログ行は `_sanitize_detail` の ASCII ホワイトリストを通るため実害は無かった)
+
+### Tests
+
+- 床テスト 8 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
+  patterns loader は `Path.read_text` の encoding 省略時だけ cp1252 に倒す wrapper で
+  Windows 既定を模擬 (同梱 patterns の読込 / 日本語ファイル名 rule の非文字化け /
+  日本語コメント)。stdin は子プロセスに `PYTHONIOENCODING=cp1252` を与えて
+  Read (誤 deny しない) / Edit (pattern 一致の理由で deny する) / Stop
+  (`cwd` が非 ASCII でも block を出す) を固定。git 出力は `locale` を patch して
+  非 ASCII ディレクトリ配下の `.env` が化けずに報告されることと、`subprocess.run`
+  の kwargs に `encoding="utf-8"` が残ることを固定
+- Windows 実機 / CI での再検証は未実施 (CI の `tests-windows` job は別 PR)。
+  残る posix 前提 (`mkfifo` / `geteuid` / `O_BINARY` / gitdir の区切り等) は
+  内部バックログで追跡
+
 ## 0.34.0
 
 **判定境界の変化を 4 件含む** (内部バックログの判定境界バッチ、ユーザー判定済み)。

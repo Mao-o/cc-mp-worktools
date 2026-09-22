@@ -40,7 +40,7 @@ if _pkg_dir not in sys.path:
 if _hooks_dir not in sys.path:
     sys.path.insert(0, _hooks_dir)
 
-from _shared.streams import write_stdout  # noqa: E402
+from _shared.streams import read_stdin, write_stdout  # noqa: E402
 from _shared.patterns import (  # noqa: E402
     LOCAL_PATTERNS_DISPLAY_PATH,
     PROJECT_PATTERNS_DISPLAY_PATH,
@@ -842,7 +842,7 @@ def _main_impl() -> int:
     deadline = Deadline()
 
     try:
-        raw = sys.stdin.read()
+        raw = read_stdin()
     except EOFError as e:
         # ``OSError`` は**捕まえない** (0.32.0、マージ前レビューの指摘)。ここで
         # 握ると stderr 1 行 (= debug log にしか出ない) だけになり、従来
