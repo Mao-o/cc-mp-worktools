@@ -186,15 +186,39 @@ def _auth_key_of(stripped: str) -> str | None:
     key = _normalize_key(raw_key)
     if not key:
         return None
+    # ``=`` の無い行は npm の ini パーサでは「行全体がキー (値 true)」だが、
+    # その行全体を戻り値 (= deny reason に載る) にすると、`_authToken TOKEN` の
+    # ような区切り忘れで**値が理由文へ写る** (マージ前レビューの指摘)。判定は
+    # 行全体で行い、ラベルは先頭の 1 語 (それ自体が認証キーのとき) か固定文言にする
+    label = raw_key if sep else _separator_less_label(raw_key)
     if key.startswith("//"):
-        return raw_key
+        return label
     if key in _AUTH_EXACT_KEYS:
-        return raw_key
+        return label
     if any(token in key for token in _AUTH_KEY_SUBSTRINGS):
-        return raw_key
+        return label
     if sep and _value_has_userinfo(tail):
-        return raw_key
+        return label
     return None
+
+
+_SEPARATOR_LESS_LABEL = "(no '=' separator)"
+
+
+def _separator_less_label(raw_key: str) -> str:
+    """``=`` の無い行のラベル。先頭の 1 語が単独で認証キーならそれ、違えば固定文言。
+
+    先頭語より後ろは値かもしれないので**決して返さない**。
+    """
+    first = raw_key.split()[0] if raw_key.split() else ""
+    norm = _normalize_key(first)
+    if norm and (
+        norm.startswith("//")
+        or norm in _AUTH_EXACT_KEYS
+        or any(token in norm for token in _AUTH_KEY_SUBSTRINGS)
+    ):
+        return first
+    return _SEPARATOR_LESS_LABEL
 
 
 def scan_auth_lines(text: str) -> tuple[int, list[str]]:

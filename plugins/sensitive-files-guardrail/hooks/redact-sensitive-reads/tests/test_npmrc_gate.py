@@ -248,6 +248,22 @@ class TestScanAuthLines(unittest.TestCase):
     def test_config_only_is_empty(self):
         self.assertEqual(scan_auth_lines(_CONFIG_ONLY), (0, []))
 
+    def test_separator_less_line_never_leaks_the_rest_of_the_line(self):
+        """``=`` を忘れた行 (`_authToken TOKEN`) は deny のまま、ラベルは先頭語だけ (マージ前レビューの指摘)。
+
+        以前は行全体をキー名として返しており、値が deny reason に写っていた。
+        """
+        token = "npm_" + "x" * 36
+        count, keys = scan_auth_lines(f"_authToken {token}\n")
+        self.assertEqual(count, 1)
+        self.assertEqual(keys, ["_authToken"])
+        self.assertNotIn(token, " ".join(keys))
+        # 先頭語が認証キーでない (行全体でだけ一致する) 形は固定文言
+        count, keys = scan_auth_lines(f"registry {token} _password\n")
+        self.assertEqual(count, 1)
+        self.assertEqual(keys, ["(no '=' separator)"])
+        self.assertNotIn(token, " ".join(keys))
+
 
 class TestDecodeNpmrc(unittest.TestCase):
     def test_utf8(self):
