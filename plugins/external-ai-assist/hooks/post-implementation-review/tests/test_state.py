@@ -412,6 +412,15 @@ class TestFingerprints(StateTestCase):
         state.complete_claim(SESSION, claim_id, {"/repo/a.py": "hash"})
         self.assertEqual(state.fingerprints(SESSION), {})
 
+    def test_requeued_claim_path_keeps_the_fingerprint(self):
+        """上限 / 予算超過で pending へ戻したパスは、claim 完了でも指紋を残す。"""
+        state.record_pending(SESSION, ["/repo/a.py", "/repo/b.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1", "/repo/b.py": "d2"})
+        claim_id, _paths = state.claim_pending(SESSION)
+        state.record_pending(SESSION, ["/repo/b.py"])  # b は繰り越し (送っていない)
+        state.complete_claim(SESSION, claim_id, {"/repo/a.py": "hash"})
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/b.py": "d2"})
+
     def test_restored_claim_keeps_the_fingerprint(self):
         """レビューに失敗したパスは pending へ戻るので、指紋も残す。"""
         state.record_pending(SESSION, ["/repo/a.py"])

@@ -226,6 +226,16 @@ class TestStrategies(BackendFlowTestCase):
             self.assertEqual(len(self.cursor_calls), 1, f"{rel} で送信先が変わった")
             self.assertEqual(self.codex_calls, [])
 
+    def test_fixed_honors_the_configured_order_when_codex_is_listed_first(self):
+        """`codex,cursor` + fixed なら codex が第一候補 (registry の宣言順ではない)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_BACKENDS"] = "codex,cursor"
+        os.environ["EXTERNAL_AI_POST_REVIEW_STRATEGY"] = "fixed"
+        self.edit(SESSION, "a.py", "v1\n")
+        self.stop_both(SESSION)
+        self.assertEqual(len(self.codex_calls), 1, "列挙順の先頭 (codex) に行く")
+        self.assertEqual(self.cursor_calls, [])
+        self.assertEqual(self.last_backend(), "codex")
+
     def test_unknown_strategy_falls_back_to_the_default(self):
         os.environ["EXTERNAL_AI_POST_REVIEW_STRATEGY"] = "roundrobin"
         self.assertEqual(self.selection.strategy(2), self.selection.STRATEGY_ALTERNATE)

@@ -258,10 +258,14 @@ def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> No
             entry = state["in_flight"].pop(claim_id, None)
             # レビューが終わったパスは pending ∪ in-flight から外れる = 指紋の意味が
             # 無くなる (commit レビューの P1 が見るのはこの集合だけ)。残すと state が
-            # 膨らむだけなので、claim ごと落とす
+            # 膨らむだけなので落とす。**ただし pending に戻っているパスは残す** —
+            # `_run_review` は上限 / 予算超過で繰り越したパスをこの呼び出しより前に
+            # pending へ積み直しており、そこで指紋を消すと次の Stop の前に commit
+            # されたとき P6 が通らずファイル名通知に落ちる (マージ前レビューの指摘)
             if isinstance(entry, dict):
+                pending = state["pending"]
                 for path in entry.get("paths") or []:
-                    if isinstance(path, str):
+                    if isinstance(path, str) and path not in pending:
                         state["fingerprints"].pop(path, None)
             reviewed = state["reviewed"]
             for path, digest in hashes.items():

@@ -47,10 +47,15 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual([m.NAME for m in chosen], list(backends.names()))
         self.assertEqual(unknown, [])
 
-    def test_select_keeps_declaration_order_not_request_order(self):
-        """優先順は呼び出し側の戦略が決めるので、registry は宣言順のまま返す。"""
+    def test_select_keeps_request_order_not_declaration_order(self):
+        """`fixed` の「列挙順そのまま」は select の並びに依存する (マージ前レビューの指摘)。"""
         chosen, _ = backends.select(backends.ALL, ["codex", "cursor"])
-        self.assertEqual([m.NAME for m in chosen], ["cursor", "codex"])
+        self.assertEqual([m.NAME for m in chosen], ["codex", "cursor"])
+
+    def test_select_collapses_duplicates_to_the_first_position(self):
+        chosen, unknown = backends.select(backends.ALL, ["codex", "cursor", "codex"])
+        self.assertEqual([m.NAME for m in chosen], ["codex", "cursor"])
+        self.assertEqual(unknown, [])
 
     def test_select_narrows_and_reports_unknown(self):
         chosen, unknown = backends.select(backends.ALL, ["cursor", "gemini"])

@@ -52,10 +52,19 @@ def select(modules, wanted: list[str] | None) -> tuple[list, list[str]]:
 
     未知の名前は**無視して呼び出し側に返す** (通知用)。既定の全件に fallback しないのは、
     タイプミス 1 つで「外したはずの backend が黙って走る」= 送信先が増える方向に倒れる
-    ため。`modules` の宣言順は保つ (`wanted` の並び順では並べ替えない — 優先順は
-    呼び出し側の戦略が決める)。
+    ため。**`wanted` の列挙順をそのまま返す** (`fixed` 戦略の「列挙順そのまま」と
+    `alternate` の初期順はこの並びに依存する。registry の宣言順で返すと、利用者が
+    `codex,cursor` と書いても cursor が第一候補になり codex-first の fallback 連鎖を
+    組めない — マージ前レビューの指摘)。`wanted` が None のときだけ宣言順。
+    重複した名前は最初の 1 つに寄せる。
     """
-    known = {module.NAME for module in modules}
-    unknown = [name for name in (wanted or []) if name not in known]
-    chosen = [m for m in modules if wanted is None or m.NAME in wanted]
+    if wanted is None:
+        return list(modules), []
+    by_name = {module.NAME: module for module in modules}
+    unknown = [name for name in wanted if name not in by_name]
+    chosen: list = []
+    for name in wanted:
+        module = by_name.get(name)
+        if module is not None and module not in chosen:
+            chosen.append(module)
     return chosen, unknown
