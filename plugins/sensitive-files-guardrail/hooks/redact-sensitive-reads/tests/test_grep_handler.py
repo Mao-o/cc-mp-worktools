@@ -140,6 +140,26 @@ class TestGrepPath(BaseGrep):
             "deny",
         )
 
+    def test_uncertain_path_does_not_hide_a_definite_glob_deny(self):
+        """path が不確定 (symlink) でも glob 単独で deny が確定するなら deny (マージ前レビューの指摘)。
+
+        以前は symlink の ask_or_deny で早期 return し ``glob`` を見ていなかったため、
+        ``path=link.env, glob=.env`` が ask になり、承認すると OR (最も強い判定) の
+        契約が崩れていた。glob が不確定 (`*.py`) なら path の ask はそのまま残る。
+        """
+        target = Path(self.tmp) / "real.txt"
+        target.write_text("JWT_SECRET=dummy\n")
+        link = Path(self.tmp) / "link.env"
+        os.symlink(target, link)
+        self.assertEqual(
+            _decision(self._grep({"pattern": "x", "path": "link.env", "glob": ".env"})),
+            "deny",
+        )
+        self.assertEqual(
+            _decision(self._grep({"pattern": "x", "path": "link.env", "glob": "*.py"})),
+            "ask",
+        )
+
     def test_special_file_matches_read_handler(self):
         """機密名の FIFO は Read handler と同じ ``ask_or_deny`` (0.34.0 P3-7)。
 

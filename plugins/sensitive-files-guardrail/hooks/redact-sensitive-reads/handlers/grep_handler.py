@@ -232,14 +232,23 @@ def handle(envelope: dict) -> dict:
 
         if is_sensitive(path, rules, root=root):
             cls = classify(path)
+            uncertain: str | None = None
             L.log_info("grep_classify", cls)
             if cls == "symlink":
-                # Read handler と同じ扱い (リンク先が意図した参照か判らない)
-                return output.ask_or_deny(M.read_ask("symlink"), envelope)
-            if cls == "special":
-                return output.ask_or_deny(M.read_ask("special"), envelope)
-            if cls == "error":
-                return output.ask_or_deny(M.read_ask("io_error"), envelope)
+                # Read handler と同じ扱い (リンク先が意図した参照か判らない)。
+                # ただし即 return せず ``glob`` の確定判定を先に見る — path が
+                # 不確定でも glob 単独で deny が確定するなら deny が勝つ
+                # (OR = 最も強い判定。マージ前レビューの指摘)
+                uncertain = M.read_ask("symlink")
+            elif cls == "special":
+                uncertain = M.read_ask("special")
+            elif cls == "error":
+                uncertain = M.read_ask("io_error")
+            if uncertain is not None:
+                if has_glob and _glob_verdict(raw_glob, rules) == "deny":
+                    L.log_info("grep_classify", "glob_match")
+                    return output.make_deny(M.grep_deny("glob", raw_glob))
+                return output.ask_or_deny(uncertain, envelope)
             if cls == "regular":
                 L.log_info("grep_classify", "path_match")
                 return output.make_deny(
