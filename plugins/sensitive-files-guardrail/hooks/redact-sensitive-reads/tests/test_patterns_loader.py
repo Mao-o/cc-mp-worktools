@@ -55,7 +55,7 @@ class BaseWithIsolatedHome(unittest.TestCase):
         d = self.home_dir / ".claude" / "sensitive-files-guardrail"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "patterns.local.txt"
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return p
 
     def _write_local(self, content: str) -> Path:
@@ -67,13 +67,13 @@ class BaseWithIsolatedHome(unittest.TestCase):
         d = self.home_dir / ".claude" / "sensitive-files-guard"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "patterns.local.txt"
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return p
 
 
 def _make_default_patterns_file(tmp: Path, lines: list[str]) -> Path:
     f = tmp / "patterns.txt"
-    f.write_text("\n".join(lines) + "\n")
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return f
 
 

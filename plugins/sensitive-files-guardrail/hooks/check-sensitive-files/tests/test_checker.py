@@ -854,8 +854,10 @@ class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
         with mock.patch("checker.subprocess.run", side_effect=fake_git):
             items = _run_git_nul(["ls-files", "-z"], self.tmp)
         self.assertEqual(len(set(items)), 2, f"別のパスが同じ文字列に潰れた: {items!r}")
+        # ``os.fsencode`` は Windows では surrogatepass で別のバイトになるため、
+        # hook と同じ ``surrogateescape`` で明示的に戻す
         self.assertEqual(
-            sorted(os.fsencode(i) for i in items),
+            sorted(i.encode("utf-8", "surrogateescape") for i in items),
             [b"bad-\xfe/.env", b"bad-\xff/.env"],
             "元のバイト列に戻せない",
         )
@@ -863,8 +865,9 @@ class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
     def test_ack_digests_of_non_utf8_paths_do_not_collide(self):
         """片方を ack したら他方が黙る、が起きないこと。encode で落ちないこと。"""
         from stop_ack import digest_entries
-        a = os.fsdecode(b"bad-\xff/.env")
-        b = os.fsdecode(b"bad-\xfe/.env")
+        # ``os.fsdecode`` は Windows では strict 相当で落ちるため明示的に作る
+        a = b"bad-\xff/.env".decode("utf-8", "surrogateescape")
+        b = b"bad-\xfe/.env".decode("utf-8", "surrogateescape")
         digests = digest_entries(
             [{"path": a, "status": "untracked"}, {"path": b, "status": "untracked"}],
             scope=self.tmp,
