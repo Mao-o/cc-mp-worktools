@@ -12,6 +12,7 @@ Claude Code セッション経由で漏れる事故を、1 プラグインで予
 |---|---|---|
 | `Read` で `.env` の **実値** が LLM コンテキストに載る | `redact-sensitive-reads` | `PreToolUse` (Read) |
 | `Bash` の `cat .env` / `source .env` で実値が観測される | `redact-sensitive-reads` | `PreToolUse` (Bash) |
+| `Grep` で `.env` の **一致行** が返る (0.34.0) | `redact-sensitive-reads` | `PreToolUse` (Grep) |
 | `Edit` / `Write` で機密パスに書き込み | `redact-sensitive-reads` | `PreToolUse` (Edit/Write) |
 | `.env` / 秘密鍵を **tracked / untracked** のまま残す | `check-sensitive-files` | `Stop` |
 
@@ -37,8 +38,8 @@ Claude Code セッション経由で漏れる事故を、1 プラグインで予
 /plugin install sensitive-files-guardrail@mao-worktools
 ```
 
-有効化すると `PreToolUse(Read | Bash | Edit | Write)` / `Stop` の hook が自動
-登録される (`settings.json` の手動編集不要)。
+有効化すると `PreToolUse(Read | Bash | Grep | Edit | Write)` / `Stop` の hook が
+自動登録される (`settings.json` の手動編集不要)。
 
 > **MultiEdit**: 現行 Claude Code CLI (2.1.x) には `MultiEdit` tool が搭載されて
 > いないため、本 plugin は対応コードを 0.6.0 で撤去した。Edit の `replace_all`
@@ -61,6 +62,8 @@ Claude が `Read` で機密パターン一致のファイルを開こうとす�
    prefix・長さ・status タグ・placeholder ヒント** を返す (実値は出さない)
 2. symlink / FIFO / 特殊ファイル → `ask` (bypass モード下は `deny`)
 3. 32KB 超の大ファイル → streaming で鍵名のみ抽出
+4. **`.npmrc` だけは内容ゲート** (0.34.0) → 認証らしい行が 1 行も無ければ
+   `allow` (下の「`.npmrc` の内容ゲート」節)
 
 返却される reason の形 (0.9.0):
 
@@ -190,6 +193,55 @@ note: key material is never parsed or returned. only block labels and counts are
 > format が既に確定しているケース (`.env` に PEM を値として埋めた形など) には
 > 介入せず、その形式のパーサをそのまま使う。
 
+#### `.npmrc` の内容ゲート (0.34.0)
+
+`.npmrc` は pnpm / yarn を使う repo でほぼ必ず commit される**設定ファイル**
+(`engine-strict` / `auto-install-peers` / `@scope:registry`) で、認証トークンを
+含むのは一部にすぎない。既定 patterns からは**外さず**、Read が既に開いている
+ファイルの**中身**で確定する:
+
+- 認証らしい行が 1 行も無い → **allow** (内容をそのまま Claude に渡す)
+- 認証らしい行がある → 従来どおり **deny** + 鍵名のみの minimal info
+- 読めない / UTF-8 として decode できない / 64KiB 超 → **deny** (fail-closed)
+
+「認証らしい行」は、行頭の空白を除き `#` / `;` コメント行を捨てたうえで、
+**キー部** (最初の `=` の左。`=` が無ければ行全体) か**値部**が次のいずれかに
+当たる行:
+
+- キー部が `//` で始まる (`//registry.npmjs.org/:_authToken=...` のような
+  registry 単位設定)
+- キー部が npm の認証系設定キーに**完全一致**する — `key` / `cert` /
+  `keyfile` / `certfile` / `cafile` / `otp` / `_auth` / `_authToken` /
+  `_password` / `username` / `email` / `always-auth`
+- キー部が識別力のある語を**含む** — `_auth` / `_password` / `username` /
+  `email` / `always-auth` / `keyfile` / `certfile` / `cafile`
+- **値部**が `scheme://user:pass@host` 形 (URL に埋め込んだ credential)。
+  キー名は問わない (`registry=` / `@scope:registry=` / `proxy=` /
+  `https-proxy=` など)
+
+いずれも大文字小文字を区別せず、キー名の `-` と `_` の差は吸収する。
+**値の有無は問わない** — `//registry/:_authToken=${NPM_TOKEN}` のような
+環境変数参照も deny 側に倒す (境界を「認証の設定行が存在するか」に固定して
+単純に保つため)。`key` / `cert` / `otp` だけを完全一致にしてあるのは、部分
+一致にすると `keyword` / `certainty` のような無関係なキーに誤爆するため。
+
+deny したときは reason の**先頭 1 行**に「認証設定行 N 件 (キー名: …)」が
+付く (**値は出さない**)。ここを出さないと、既存の鍵名要約 (ini の keys-only
+scan) には認証キーが載らないため「無害な設定キーだけが並んだ deny」に見え、
+除外レシピを足す方向へ誘導してしまう。
+
+npm が読まないキー名 (`mytoken=...`) に秘密を書いた `.npmrc` は allow。
+「`.npmrc` は npm の設定ファイルである」という前提そのもので、内容ゲートの
+設計上の受容範囲。
+
+同じ判定を `Stop` hook も使う (tracked / untracked の `.npmrc` は認証行が
+無ければ報告しない)。ただし Stop の判定は **working tree の内容**で行う —
+index / history に認証行が残っていても、worktree 側で消えていれば報告しない
+(既知の限界)。**`Bash` / `Grep` / `Edit` / `Write` は対象外** —
+`cat .npmrc` は従来どおり deny。Bash の operand は path とは限らない文字列で、
+operand ごとにファイルを開くのは設計変更にあたるため。`.pypirc` / `.netrc` も
+従来どおり内容に依らず deny。
+
 ### `PreToolUse(Bash)` — redact-sensitive-reads
 
 **三態判定** (deny / ask_or_allow / allow) で静的解析する:
@@ -318,13 +370,60 @@ path 形を既定に、basename 形を併記して案内する。
 > `*.envrc`) は ``ask_or_allow`` (default=ask, autonomous=allow) に倒す
 > (0.22.0 で fnmatch の意味論から shell の意味論に修正)。
 
+### `PreToolUse(Grep)` — redact-sensitive-reads (0.34.0)
+
+`tool_input` の `path` と `glob` だけを見る最小対応。`output_mode: "content"`
+の Grep は**一致行をそのまま返す**ため、機密ファイルを指した Grep は値の一部を
+コンテキストに載せる。
+
+- `path` が機密名の**通常ファイル** → **deny**
+- `glob` が literal で機密名、または dotenv stem (`.env` / `.envrc`) に展開
+  されうる glob (`.env*` / `**/.env`) → **deny** (Bash operand と同じ規則)
+- `glob` がそれ以外の**ワイルドカード**を含む (`*.py` / `*.pem` / `id_rsa*` /
+  `*.env` / `*.{ts,tsx}`) → `ask` (autonomous では `allow`。Bash operand の
+  `glob_uncertain` と同じ三態)
+- `path` が**ディレクトリ** / 存在しない / 非機密、`path` も `glob` も未指定、
+  `glob` が非機密の literal → **allow**
+- `path` が機密名の symlink / 特殊ファイル → `ask` (bypass 下は `deny`、Read と同じ)
+
+ブレース展開 (`{a,b}`) は**分岐ごとに**判定して最も強い結論を採る
+(`{.env,*.py}` → deny)。Bash 側に同等の機構は無い (`{` は hard-stop として
+`ask` に倒れるだけ) ので、これは Grep だけの扱い。
+
+**`ask` を作らないのはディレクトリ走査だけ**: `path` がディレクトリ / 未指定
+のときは allow に倒す。`glob` は Bash と同じ三態 (0.34.0 のマージ前レビューで
+「Grep の方が緩い」ことが実測されたため揃えた)。例外経路は Read と同じ
+`ask_or_deny`。`pattern` / `output_mode` / `type` / `head_limit` は判定に
+使わない。
+
+> **`Grep` ツールは macOS / Linux の既定では tool set に載らない** — 公式
+> tools reference のとおり、Claude はこれらの OS では Bash の `find` / `grep`
+> を使う。Grep が実際に呼ばれるのは **Windows 既定** / `--tools`
+> `--allowedTools` で明示指名した場合 / Bash が deny されている場合 /
+> subagent の tools に Grep があって Bash が無い場合。この matcher は
+> 「第一級の読み取り経路を塞ぐ」ものではなく、**Bash 経由の `grep` と判定を
+> 揃えるための対称性**の対応 (0.34.0 で Windows の無条件 deny を撤去したので、
+> Windows 既定の経路が実際に意味を持つようになった)。
+
+> **揃え先は Bash の positional operand**: Grep の `glob` は「検索対象を絞る
+> filter」なので Bash での真の同型は `grep -rn X --include='*.py' .`
+> (実測 allow) とも読めるが、判定境界は `grep -rn X *.py` (実測 ask) 側、
+> つまり**過剰 ask 側**に倒した。`*.py` のような無害な glob も default では
+> ask になる (autonomous では allow)。
+
+> **ディレクトリ走査は allow**: `path` にディレクトリを渡した Grep は、配下の
+> 機密ファイルの行が結果に混ざりうるが deny しない。Bash の `grep -r X .` と
+> 同じ既知の限界として扱う (`python -m venv .env` のように機密名のディレクトリ
+> がある repo で全検索が止まるのを避けるため)。
+
 ### `PreToolUse(Edit | Write)` — redact-sensitive-reads
 
 `tool_input.file_path` が機密パターン一致なら **新規/既存問わず deny 固定**。
 書き込み経路から機密データが混入/置換される事故を防ぐ (ask を挟まない、
 実機観測でうっかり承認による既存値喪失が発生した教訓から)。
 
-dotenv 系 (`.env` / `.env.*` / `*.envrc`) を Edit/Write で block した際は、
+dotenv 系 (`.env` / `.env.*` / `*.env` / `.envrc` / `*.envrc`) を Edit/Write で
+block した際は、
 `tool_input` から追加予定のキー名を抽出して reason に代替案として添える。
 値そのものは含まれない (キー名のみ)。
 
@@ -393,6 +492,10 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 しない)、最後の block から 7 日で自動 GC。hook input に `session_id` が無ければ従来通り
 毎回 block する。state の読み書きに失敗したときは stderr に
 `stop_ack_unavailable` を出して従来通り block する。
+
+**`.npmrc` の内容ゲートは working tree だけを見る (0.34.0 の既知の限界)**:
+tracked な `.npmrc` でも判定に使うのは作業ツリー上の中身なので、index /
+history に認証行が残ったまま worktree 側から消した状態では報告が止まる。
 
 **注意**: 同一ターン内の 2 回目以降の `Stop` は `stop_hook_active=true` で素通り
 する (無限ループ防止)。**block が見えたら必ず対応する**。無視して次のターンに
@@ -504,15 +607,34 @@ repo に commit できる (0.32.0):
    従来どおり allow に倒る
 3. **TOCTOU 完全排除は非目的** — fd ベース reader により「同一プロセス内の
    再 open」race は排除済みだが、hook 読取と Claude 実 Read/Write の分離は範囲外
-4. **Windows は現状 fail-closed で deny exit** — SIGALRM 非対応のため
+4. **Windows は未検証** (0.34.0) — 0.33.x までは `signal.SIGALRM` の有無を
+   Windows 判定の proxy にして hook 冒頭から全 tool 呼出を deny していたが、
+   根拠だった内部 soft-timeout は 0.6.0 で撤去済みで、外部 timeout の fail-open
+   は全 OS 共通だったため、この無条件 deny を撤去した。Windows でも通常判定を
+   通し、内部失敗は catch-all の `ask_or_deny` に倒れる (fail-closed)。
+   `O_NOFOLLOW` / `O_CLOEXEC` が無い環境では symlink 検知が `lstat` 判定の
+   fallback に依存する。**実機・CI での検証は未実施**
 5. **`!` プレフィックス (Claude Code bash mode) は対象外** — ユーザー明示操作で
    `! cat .env` を実行した場合は stdout が transcript に追加される (hook 介在外)
-6. **Grep / Glob は対象外** — `hooks/hooks.json` の PreToolUse matcher は
-   `Read` / `Bash` / `Edit` / `Write` のみで、`Grep` / `Glob` には発火しない。
-   補うには Claude Code 本体の `permissions.deny` に `Read(<path>)` ルールを
-   追加する (公式仕様上 best-effort で Grep / Glob にも適用される。
-   `Glob(...)` という形の path rule は認識されず無視されるため注意)
-7. **repo root のパスに改行を含む場合** — Stop hook の `git rev-parse
+6. **Grep は最小対応 / Glob・NotebookEdit は対象外** (0.34.0) — `Grep` は
+   `path` / `glob` が機密名を指すときだけ deny し、判定できない `glob` は
+   `ask_or_allow` に倒す (上の `PreToolUse(Grep)` 節)。ディレクトリ走査で
+   配下の機密ファイルの行が返る経路は
+   Bash の `grep -r X .` と同じ既知の限界。`Glob` (パス列挙のみで内容を返さない)
+   と `NotebookEdit` (`edits` の形状が違う) には発火しない。補うには Claude Code
+   本体の `permissions.deny` に `Read(<path>)` ルールを追加する (公式仕様上
+   best-effort で Grep / Glob にも適用される。`Glob(...)` という形の path rule は
+   認識されず無視されるため注意)
+7. **exec option を持つコマンドの列挙は網羅しない** — `ag --pager` /
+   `git rebase --exec` / `sort --compress-program` のように、引数を別プロセスに
+   渡すオプションの一覧は本質的に不完全で、敵対的バイパス対策は本 plugin の
+   非目的。未知のコマンド・オプションは従来どおり `ask_or_allow`
+   (default=ask、autonomous=allow) に倒れるので、列挙漏れがあっても 0.17.0 より
+   後退はしない。**同類の指摘に対して個別対応は行わない** — 対応するとしたら
+   「列挙」ではなく設計 (inert allow-list の縮小 / 緩和の撤回) の再検討として
+   行う。0.34.0 の gawk `@include` / `@load` 追加は、operand が 1 つも無くても
+   プログラム文字列からファイルを開く点で `-f prog.awk` と同型だったための例外
+8. **repo root のパスに改行を含む場合** — Stop hook の `git rev-parse
    --show-toplevel --show-prefix` を改行区切りで読むため toplevel / prefix が
    誤 parse され、stop-ack の digest が別ファイルと衝突しうる (0.30.0 時点の既知
    の残課題。ファイル名側は `-z` で対応済み)
@@ -522,6 +644,7 @@ repo に commit できる (0.32.0):
 | hook | 機密検出時 | 判定不能時 | 備考 |
 |---|---|---|---|
 | `redact-sensitive-reads` (Read) | **deny** + minimal info | **ask_or_deny** | non-bypass は ask、bypass は deny |
+| `redact-sensitive-reads` (Grep) | **deny 固定** | **ask_or_deny** (内部失敗) / **ask_or_allow** (判定できない `glob`) | 0.34.0。`path` / `glob` のみ判定。`glob` は Bash operand と同じ三態、ディレクトリ走査だけ allow 固定 |
 | `redact-sensitive-reads` (Edit/Write) | **deny 固定** | **ask_or_deny** | ask を挟まない |
 | `redact-sensitive-reads` (Bash) | **deny 固定** | **ask_or_allow** | default/acceptEdits/dontAsk は ask、auto/bypass は **allow** |
 | `redact-sensitive-reads` (Bash, patterns.txt 読込失敗) | — | **deny 固定** | policy 欠如時は全 mode block |
@@ -559,7 +682,8 @@ repo に commit できる (0.32.0):
   agent) は非目的
 - 完全な情報遮断ではない。basename と鍵名は LLM に見える
 - TOCTOU race は完全には防げない
-- Python 3.11+ / Git 1.7+ / macOS / Linux 対応 (Windows 非対応)
+- Python 3.11+ / Git 1.7+ / macOS / Linux で検証済み。Windows は未検証
+  (0.34.0 で無条件 deny は撤去。既知制限 4 を参照)
 
 ## テスト
 
@@ -567,10 +691,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (1,219 tests, 0.28.0 時点)
+# redact-sensitive-reads (1,485 tests, 0.34.0 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (133 tests, 0.28.0 時点)
+# check-sensitive-files (174 tests, 0.34.0 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -613,4 +737,7 @@ repo 同梱 patterns を読み込んだ記録 (`project_patterns_in_use`) も le
   `Python 3.11+` を明記した note が付く (fail-open にはならず、hook 起動時にも
   ログへ 1 回記録する — サイレント劣化ではない)
 - Git 1.7+ (submodule scan 用)
-- macOS / Linux 対応、Windows 非対応 (現状 fail-closed で deny)
+- macOS / Linux で検証済み。**Windows は未検証** — 0.34.0 で「SIGALRM 非対応
+  なら全 tool 呼出を deny」という冒頭ゲートを撤去し、通常判定を通すように
+  なった。内部失敗は catch-all の `ask_or_deny` に倒れる (fail-closed) が、
+  実機・CI での検証は行っていない (既知制限 4)

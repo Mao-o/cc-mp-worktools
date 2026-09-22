@@ -505,7 +505,8 @@ guard に到達させる。「単語先頭」は直前の生文字ではなく *
 (同 review R3)。`awk 'BEGIN { system("cat .env") }'` は hard-stop を抜けた後、
 operand scan でも `.env` がプログラム文字列の内側にあるため見えない。
 `handlers/bash/interpreters.py` (`_program_dynamic_construct`) が awk の
-`system(` / `getline` / `|` / `>` / `-f progfile`、sed の `e` (command /
+`system(` / `getline` / `|` / `>` / `@include` / `@load` (どちらも語境界まで
+見る。0.34.0) / `-f progfile`、sed の `e` (command /
 `s///e`) / `r` `R` / `w` `W` / `-f script` を検出し、**operand scan の後** で
 `ask_or_allow` (`bash_lenient("program_dynamic")`) に戻す。sed は regex 近似
 ではなくスクリプトを先頭から走査する小さな parser (`_sed_script_dynamic`) で
@@ -1439,10 +1440,16 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 8. **TOCTOU 完全排除は非目的** — hook 読取と Claude 実 Read/Write の分離は範囲外
 9. **`<DATA untrusted>` モデル解釈保証なし** — 包装 + sanitize + DATA タグ
    エスケープで多段防御するが、モデルが敵対的文脈として扱う保証は無い
-10. **Windows は fail-closed で deny exit** — SIGALRM 非対応のため hook 冒頭で
-    deny exit する。Step 0-c (outer timeout の挙動) は公式ドキュメントで
-    fail-open と確定済み (下記「Step 0-c 実測」節)。この既定方針自体の
-    見直しは別議論とする
+10. **Windows は未検証** (0.34.0 で判定境界が変化) — 0.33.x までは
+    `signal.SIGALRM` の有無を Windows 判定の proxy にして hook 冒頭から
+    **全 tool 呼出を deny** していたが、撤去した。根拠だった内部 soft-timeout は
+    0.6.0 で撤去済みで本体は SIGALRM を使っておらず、outer timeout の fail-open は
+    **全 OS 共通**なので (下記「Step 0-c 実測」節)、Windows だけを冒頭 deny する
+    ことに対応する実際のリスク差が無かった。撤去後は通常判定を通し、内部失敗は
+    catch-all の `ask_or_deny` / `make_deny` に倒れる (fail-closed)。
+    `core/safepath.py` は `O_NOFOLLOW` / `O_CLOEXEC` が無い環境ではそのフラグを
+    落として `classify` の lstat 判定に依存する fallback を持つ。
+    **実機・CI での検証は未実施** (Windows CI は別チケット)
 11. **submodule 内 untracked は非対象** — `git ls-files --recurse-submodules` は
     tracked のみ。untracked を submodule 内まで拾う git native オプションは無い
 12. **Git バージョン依存** — `--recurse-submodules` は git 1.7+ が必要
@@ -1464,11 +1471,36 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
     / `n>` / `&>` / `>|` の全形 (`>|` clobber は 0.25.0 まで `|` が segment
     分割で pipe として割られ検出できない既知限界だったが、splitter の最長一致
     読みで解消し `>` と同扱いになった)
-15. **Grep / Glob は対象外 (hook 非介在)** — `hooks/hooks.json` の PreToolUse
-    matcher は `Read` / `Bash` / `Edit` / `Write` の 4 つのみ (実装確認) で、
-    Claude Code ビルトインの `Grep` / `Glob` tool には発火しない。これらは
-    静的解析・redaction を経由せず機密ファイルの内容をそのまま返しうる。
-    緩和は本 plugin の外側 (Claude Code 本体) にある — 公式仕様上、
+15. **Grep は最小対応 / Glob は対象外** (0.34.0 で変化) — `hooks/hooks.json` の
+    PreToolUse matcher は `Read` / `Bash` / `Grep` / `Edit` / `Write` の 5 つ。
+    `Grep` は `tool_input` の `path` / `glob` が機密名を指すときだけ deny し、
+    判定できない `glob` (ワイルドカードを含み dotenv stem に一致しない形) は
+    Bash operand と同じ `ask_or_allow`、ディレクトリ走査は Bash の
+    `grep -r X .` と同じ既知の限界として allow する
+    ([MATRIX.md](./MATRIX.md) の Grep handler 節)。0.33.x までの「除外理由」
+    (シェルの動的展開 / 書き込み防止には sandbox が要る) はどちらも Grep には
+    当てはまらなかった — Grep は shell を介さず名前付きの path / glob を
+    受け取るだけで、Bash より遥かに静的解析しやすい。
+
+    ただし **`Grep` ツールは macOS / Linux の既定では tool set に載らない**
+    (公式 tools reference 逐語: "On macOS, Linux, and WSL, Claude Code leaves
+    Glob and Grep out of the default tool set, and Claude searches with `find`
+    and `grep` through the Bash tool instead")。実際に呼ばれるのは Windows
+    既定 / `--tools` `--allowedTools` で明示指名 / Bash が deny されている /
+    subagent の tools に Grep があって Bash が無い場合。したがってこの matcher
+    は「第一級の読み取り経路を塞ぐ」ものではなく、**Bash 経由の `grep` と判定を
+    揃えるための対称性**の対応 (同じ 0.34.0 で Windows の無条件 deny を撤去した
+    ため、Windows 既定の経路が実際に意味を持つようになった)。
+
+    対称性の揃え先は Bash の **positional operand** (`grep X *.py` = ask)。
+    Grep の `glob` は「検索対象を絞る filter」なので `--include='*.py'`
+    (実測 allow) が真の同型とも読めるが、**過剰 ask 側**に倒してある。
+    ブレース展開 (`{a,b}`) だけは Bash に同等の機構が無いため Grep 側にだけ
+    足した (分岐ごとに判定し、結論は deny 方向にしか動かない)。
+
+    `Glob` (パス列挙のみで内容を返さない) と `NotebookEdit` (`edits` の形状が
+    違う) は引き続き対象外。
+    緩和は本 plugin の外側 (Claude Code 本体) にもある — 公式仕様上、
     `permissions.deny` の `Read(path)` ルールは best-effort で Grep / Glob
     にも適用される (Grep/Glob は `path` 引数が解決するディレクトリに対して
     適用)。ただし `Read` deny は `NotebookEdit` を対象外とするため、それも
@@ -1537,15 +1569,32 @@ operand glob (`*` / `?` / `[`) の判定は数世代を経ている:
 超えれば macOS / Linux でも同じ経路で hook の出力が discard され fail-open
 になる。
 
-本 plugin が Windows 判定に使う `_is_unsupported_platform` は
+0.33.x まで Windows 判定に使っていた `_is_unsupported_platform` は
 `signal.SIGALRM` の**有無を見るだけの platform gate**であり、alarm も
-signal handler も設置しない (0.6.0 で内部 soft-timeout は撤去済み —
+signal handler も設置していなかった (0.6.0 で内部 soft-timeout は撤去済み —
 `redaction/engine.py` 冒頭コメント参照)。上記の CLI 側 outer timeout とは
 別の仕組みで、公式ドキュメントに `SIGALRM` への言及も無い (全文検索で
 0 件)。つまり Unix 側にも fail-open を能動的に防ぐ内部タイムアウトは
-存在せず、Windows で hook 冒頭から deny exit しているのは SIGALRM の有無を
-Windows 判定の proxy に使った保守的な既定方針にすぎない。この方針自体の
-見直しは本節の対象外 (別議論)。
+存在せず、**Windows だけを冒頭 deny することに対応する実際のリスク差は
+無かった**。
+
+**0.34.0 でこの gate を撤去した** (判定境界の変更)。Step 0-c は
+「将来更新予定」ではなく **実測済み・全 OS 共通で fail-open** として確定して
+いるので、それを前提に「Windows だけ保守的に deny」という非対称を残す理由が
+無くなったため。撤去後の Windows は**未検証**であって**保護なし**ではない:
+
+- 内部失敗 (normalize / classify / open / redaction / 未捕捉例外) は従来どおり
+  catch-all の `ask_or_deny` に倒れる (fail-closed)
+- `core/safepath.py::_open_flags` は `O_NOFOLLOW` / `O_CLOEXEC` が無い環境では
+  そのフラグを落とし、最終要素の symlink 検知は `classify` の lstat 判定に
+  依存する
+- **実機・CI での検証は未実施**。Windows CI (`windows-latest` での両 suite 実行)
+  は別チケット。バイナリモード (`os.O_BINARY`) が要るかどうかもそこで判る
+
+テストは `tests/test_e2e.py::TestSigalrmlessPlatformUsesNormalPipeline` が
+`signal.SIGALRM` を実際に取り除いて Read の通常判定 (非機密 → allow /
+機密 → deny) を固定する。**これは「SIGALRM の有無で判定が変わらない」ことの
+検証であって、Windows 実機の検証ではない。**
 
 過去の実測手順 (`hooks.json` の hook に `time.sleep(5)` を仕込んで観察する。
 [MAINTAINING.md](./MAINTAINING.md#step-0-c-実測結果-確定) 参照) は、公式

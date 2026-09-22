@@ -10,8 +10,9 @@ close しない。
 ハード上限 3KB)。
 
 0.6.0 で内部 soft-timeout (SIGALRM 1s) を撤廃した。dotenv parse は ReDoS の
-経路がほぼなく、外部 hook timeout (2s) で十分なため。Windows 対応の論点は
-``__main__._is_unsupported_platform`` 側で別途判断する。
+経路がほぼなく、外部 hook timeout (2s) で十分なため。0.34.0 ではそれに合わせて
+``__main__`` 側の「SIGALRM 非対応なら全 tool 呼出を deny」ゲートも撤去した
+(SIGALRM を使っていないのに Windows 判定の proxy にしていたため)。
 
 0.9.0 で dotenv minimal info に value status / 生長さ / 識別子型 prefix /
 placeholder hint を追加 (思想 2 = block 時は意図を汲んだメッセージを返す)。

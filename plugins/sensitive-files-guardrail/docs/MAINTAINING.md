@@ -23,7 +23,8 @@ CLI 再実測 Runbook / ログ規則)。利用者向けの概要は [README.md](
   コンテキストに載るのを止める
 - **目的 (思想 2)**: block するときは意図を汲んだメッセージ (鍵名・型・値の
   品質状態・代替コマンド) を返し、次の作業に繋げる
-- **非目的**: 敵対的バイパス対策 / MCP 経路 / TOCTOU の完全排除 / Windows。
+- **非目的**: 敵対的バイパス対策 / MCP 経路 / TOCTOU の完全排除 / Windows の
+  実機保証 (0.34.0 で無条件 deny は撤去したが、実機・CI 検証は未実施)。
   静的解析が届かない Bash は `ask_or_allow` に倒し、autonomous モード
   (auto / bypassPermissions / plan) では Claude Code ハーネス側の監視に委ねる
   (defense-in-depth の一層)。「判断困難だから deny 強制」の特例は作らない
@@ -688,6 +689,18 @@ lenient 収録の可否は **step 7 の behavioral probe (未実施) で分類�
   32KB 超の streaming 経路は対象外 (`docs/DESIGN.md` の「既知の残存範囲」)
 - **Edit/Write**: `handlers/edit_handler.py` (`file_path` 前提の共通 dispatch。
   NotebookEdit は `edits` 形状が違うため未対応)
+- **Grep** (0.34.0): `handlers/grep_handler.py` (`tool_input` の `path` /
+  `glob` だけを見る。glob の意味論は `handlers/bash/operand_lexer` を再利用し、
+  三態 (deny / `ask_or_allow` / allow) も Bash の glob 行と揃える。ブレース
+  展開だけは Grep 固有 — Bash に同等の機構が無いため)
+- **`.npmrc` 内容ゲート** (0.34.0): `hooks/_shared/npmrc.py` (両 hook 共有)。
+  Read は fd 経由 (`bytes_auth_scan`。deny reason の根拠に使う件数 / キー名も
+  ここから取る)、Stop は path 経由 (`path_requires_block`)。判定の定義を
+  変えるときは両方の呼出元と [MATRIX.md](./MATRIX.md) の Read / Stop 表、
+  README の「認証らしい行」の列挙を**対で**直す。キー判定は「完全一致リスト +
+  部分一致リスト + 値側 userinfo」の**併存**で、部分一致側を消すと
+  `foo_auth=` のような非標準キーが deny → allow に落ちる
+  (`test_substring_only_key_is_still_auth` が床)
 - **Stop**: `check-sensitive-files/checker.py` (git 呼出) / `stop_ack.py`
   (once-only state)
 
@@ -769,10 +782,14 @@ Step 0-c (`hooks.json` の `timeout` 発火時の Claude Code 挙動) は、実�
 **Case A 確定** (timeout kill → discard → allow / fail-open)。しかも
 **Windows 固有ではなく全 OS 共通** — `timeout: 2` は Claude Code (CLI) 側が
 外側から強制するもので、OS を問わず同じ経路で hook の出力が discard される。
-本 plugin は Windows を `signal.SIGALRM` の有無 (`__main__._is_unsupported_platform`)
-で判定して hook 冒頭から deny exit しているが、これは上記の CLI 側 outer
-timeout とは**別の仕組み** (公式ドキュメントに `SIGALRM` への言及は無い)。
-Windows で deny exit する既定方針そのものの見直しは本節の対象外 (別議論)。
+0.33.x までは Windows を `signal.SIGALRM` の有無
+(`__main__._is_unsupported_platform`) で判定して hook 冒頭から deny exit して
+いたが、これは上記の CLI 側 outer timeout とは**別の仕組み** (公式ドキュメントに
+`SIGALRM` への言及は無い) で、Unix 側にも fail-open を防ぐ内部タイムアウトは
+無かった。**0.34.0 でこの gate を撤去**し、Windows でも通常判定を通すように
+した (内部失敗は catch-all の `ask_or_deny` で fail-closed)。Windows は
+「未検証」であって「無条件 deny」ではなくなった — 詳細は
+[DESIGN.md](./DESIGN.md) の該当節と README の既知制限 4。
 
 以下の実測手順は、公式ドキュメントで答えが確定したため**不要になった**
 (実行しないこと):
@@ -789,5 +806,6 @@ Windows で deny exit する既定方針そのものの見直しは本節の対�
   ならず、hook 起動時に `python_version_degraded` を 1 回ログする)
 - **Git 1.7+** (`git ls-files --recurse-submodules`)
 - **Claude Code CLI 2.1.100+** (`permission_mode: auto` は 2.1.83+ で追加)
-- macOS / Linux。Windows は `signal.SIGALRM` 非対応のため fail-closed で deny
-  (Step 0-c の outer timeout 挙動自体は確定済み、上記節参照)
+- macOS / Linux で検証済み。**Windows は未検証** (0.34.0 で無条件 deny を撤去。
+  Step 0-c の outer timeout 挙動は確定済みで全 OS 共通、上記節参照)。
+  Windows CI (`windows-latest` での両 suite 実行) は別チケット

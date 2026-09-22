@@ -70,9 +70,9 @@ def scan_stream(f: IO[bytes], max_bytes: int = 1024 * 1024) -> tuple[list[str], 
     を **行の切れ目でしか** 見ていなかった。``readline()`` は改行が来るまで
     読み続けるため、**改行を含まない巨大なレコード 1 本で上限を突破する** —
     8MB の 1 行ファイルで実測 8MB 読み込み / peak 16.1MB (公称上限 1MB)。
-    hook は 2 秒 timeout で、outer timeout の挙動は fail-open の可能性がある
-    (``__main__._is_unsupported_platform`` の注記) ため、**情報提供のための
-    描画がガードレール自体を落としうる**状態だった。
+    hook は 2 秒 timeout で、outer timeout 発火時は Claude Code が hook を
+    discard して allow で継続する (fail-open。全 OS 共通) ため、**情報提供の
+    ための描画がガードレール自体を落としうる**状態だった。
 
     現在は固定長 chunk で読み、``max_bytes`` を 1 byte も超えない。行の判定に
     必要なのは **行頭だけ** (``_KEY_RE`` は ``^`` 固定) なので、行バッファは

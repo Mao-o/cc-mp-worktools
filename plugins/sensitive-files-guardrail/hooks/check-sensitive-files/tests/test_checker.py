@@ -471,6 +471,72 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
         self.assertIn("ID_RSA", paths)
 
 
+class TestSuffixDotenvPattern(BaseWithTmpRepo):
+    """0.34.0: 既定 patterns への ``*.env`` 追加 (Stop 側)。"""
+
+    def test_suffix_dotenv_is_reported(self):
+        for name in ("production.env", "local.env"):
+            with self.subTest(name=name):
+                self._write(name, "SECRET=y\n")
+                rules = load_patterns(self.patterns_file)
+                result = find_sensitive_files(str(self.repo), rules)
+                self.assertIn(name, {r["path"] for r in result})
+
+    def test_suffix_dotenv_template_is_excluded(self):
+        self._write("foo.env.example", "FOO=bar\n")
+        rules = load_patterns(self.patterns_file)
+        result = find_sensitive_files(str(self.repo), rules)
+        self.assertNotIn("foo.env.example", {r["path"] for r in result})
+
+
+class TestNpmrcContentGate(BaseWithTmpRepo):
+    """0.34.0: ``.npmrc`` は中身に認証らしい行があるときだけ報告する。
+
+    判定の定義は ``hooks/_shared/npmrc.py``、判定表は ``docs/MATRIX.md`` の
+    Stop handler 表。トークン値は実鍵形状の literal を避けて連結で組み立てる。
+    """
+
+    TOKEN = "npm_" + "x" * 36
+
+    def _paths(self) -> set[str]:
+        rules = load_patterns(self.patterns_file)
+        return {r["path"] for r in find_sensitive_files(str(self.repo), rules)}
+
+    def test_config_only_npmrc_is_not_reported(self):
+        self._write(".npmrc", "engine-strict=true\nauto-install-peers=true\n")
+        self.assertNotIn(".npmrc", self._paths())
+
+    def test_config_only_npmrc_is_not_reported_when_tracked(self):
+        self._write(".npmrc", "engine-strict=true\n")
+        self._track(".npmrc")
+        self.assertNotIn(".npmrc", self._paths())
+
+    def test_npmrc_with_auth_line_is_reported(self):
+        self._write(".npmrc", "//registry.example.invalid/:_authToken=" + self.TOKEN + "\n")
+        self.assertIn(".npmrc", self._paths())
+
+    def test_tracked_npmrc_with_auth_line_is_reported(self):
+        self._write(".npmrc", "_auth=" + self.TOKEN + "\n")
+        self._track(".npmrc")
+        self.assertIn(".npmrc", self._paths())
+
+    def test_undecodable_npmrc_is_reported(self):
+        p = self.repo / ".npmrc"
+        p.write_bytes("engine-strict=true\n".encode("utf-16"))
+        self.assertIn(".npmrc", self._paths())
+
+    def test_npmrc_in_subdirectory_is_resolved_against_cwd(self):
+        # ``git ls-files`` は cwd 相対の path を返す。内容を読むときにその
+        # 相対 path を cwd に結合していないと、サブディレクトリの ``.npmrc``
+        # が「読めない」= 報告側に倒れて内容ゲートが効かなくなる。
+        self._write("packages/app/.npmrc", "engine-strict=true\n")
+        self.assertNotIn("packages/app/.npmrc", self._paths())
+
+    def test_other_credential_files_are_unaffected(self):
+        self._write(".pypirc", "just = config\n")
+        self.assertIn(".pypirc", self._paths())
+
+
 class TestLocalPatternsLoader(BaseWithTmpRepo):
     def _local_dir(self) -> Path:
         """0.6.0 の preferred パス (`~/.claude/sensitive-files-guardrail/`)。"""

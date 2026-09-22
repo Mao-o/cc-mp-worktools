@@ -18,3 +18,8 @@
 # 先頭 `/` は repo root からのアンカー、末尾 `/` はそのディレクトリ配下すべて。
 # 除外はこのディレクトリ配下に限定する (fixtures 全体には広げない)。
 !/plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads/tests/fixtures/keys/
+
+# 0.34.0 で既定 patterns に `*.env` を足したため、redaction の出力検証用の合成 dotenv
+# fixture (実値なし) が tracked のまま毎セッション Stop block になる。この fixture だけを
+# アンカー付きで除外する (fixtures ディレクトリ全体には広げない)。
+!/plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads/tests/fixtures/sample.env

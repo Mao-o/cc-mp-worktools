@@ -40,6 +40,16 @@
             "timeout": 2
           }
         ]
+      },
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads --tool grep",
+            "timeout": 2
+          }
+        ]
       }
     ],
     "Stop": [

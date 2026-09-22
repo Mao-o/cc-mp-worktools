@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from _shared.matcher import is_sensitive, root_relative
+from _shared.npmrc import is_npmrc_basename, path_requires_block
 from _shared.patterns import (
     _parse_patterns_text,
     _resolve_local_patterns_path,
@@ -423,6 +424,20 @@ def find_sensitive_files(
 
     results: list[dict] = []
 
+    def _reportable(filepath: str) -> bool:
+        """機密一致したファイルを実際に報告するか (0.34.0 の内容ゲート)。
+
+        ``.npmrc`` だけは中身を見て、認証らしい行が 1 行も無ければ報告しない
+        (Read handler の内容ゲートと同じ判定を ``_shared.npmrc`` で共有する)。
+        読めない / decode 不能 / 上限超はすべて報告側 (fail-closed)。
+
+        ``.npmrc`` は 1 repo に数個しか無く、通常 1KB 未満なので、ここでの
+        追加 I/O は時間予算 (``budget.Deadline``) に対して無視できる。
+        """
+        if not is_npmrc_basename(os.path.basename(filepath)):
+            return True
+        return path_requires_block(os.path.join(cwd, filepath))
+
     def _scan(paths: list[str], status: str) -> None:
         for i, filepath in enumerate(paths):
             if (
@@ -435,7 +450,9 @@ def find_sensitive_files(
                 # (黙って途中で止めると「機密なし」と区別できない)。
                 deadline.mark_exceeded()
                 return
-            if is_sensitive(_subject(filepath), rules, root=match_root):
+            if is_sensitive(_subject(filepath), rules, root=match_root) and (
+                _reportable(filepath)
+            ):
                 results.append({"path": filepath, "status": status})
 
     _scan(tracked, "tracked")

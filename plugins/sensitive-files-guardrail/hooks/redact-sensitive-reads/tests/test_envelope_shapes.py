@@ -23,6 +23,10 @@ _TOOL_INPUT_KEYS = {
     "bash": {"command"},
     "edit": {"file_path", "old_string", "new_string"},
     "write": {"file_path", "content"},
+    # Grep は ``pattern`` だけが必須。``path`` / ``glob`` / ``output_mode`` は
+    # 省略時に **key ごと存在しない** (CLI 2.1.278 実測)。fixture は
+    # ``path`` 付きの形を置いてあるが、契約として固定するのは ``pattern`` のみ。
+    "grep": {"pattern"},
 }
 
 # fixtures/envelopes/README.md の permission_mode 項と core/output.py::LENIENT_MODES
@@ -76,6 +80,13 @@ class TestEnvelopeShapes(unittest.TestCase):
         self._assert_common(env)
         self.assertEqual(env["tool_name"], "Write")
         for k in _TOOL_INPUT_KEYS["write"]:
+            self.assertIn(k, env["tool_input"])
+
+    def test_grep_envelope(self):
+        env = self._load("grep")
+        self._assert_common(env)
+        self.assertEqual(env["tool_name"], "Grep")
+        for k in _TOOL_INPUT_KEYS["grep"]:
             self.assertIn(k, env["tool_input"])
 
 

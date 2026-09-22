@@ -1115,10 +1115,13 @@ class TestHookErrorMessages(unittest.TestCase):
         # 「安全側で deny します」のような不要な揺れ表現を含めない
         self.assertNotIn("安全側で deny", msg)
 
-    def test_unsupported_platform(self):
-        msg = M.unsupported_platform()
-        self.assertIn("UNIX", msg)
-        self.assertIn("README", msg)
+    def test_unsupported_platform_message_is_gone(self):
+        """0.34.0: Windows 無条件 deny の撤去で文面ごと消えたことを固定する。
+
+        呼出元 (``__main__`` 冒頭のプラットフォーム gate) と対の文面だったので、
+        文面だけが残っていると「まだ deny 経路がある」と読めてしまう。
+        """
+        self.assertFalse(hasattr(M, "unsupported_platform"))
 
     def test_handler_internal_error_with_type(self):
         msg = M.handler_internal_error("bash", "ValueError")

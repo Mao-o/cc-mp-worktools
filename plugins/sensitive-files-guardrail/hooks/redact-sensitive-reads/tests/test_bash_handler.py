@@ -1940,13 +1940,32 @@ class TestQuoteAwareHardStop(BaseBash):
                 self.assertTrue(output.is_allow(r))
 
     def test_git_shell_alias_is_ask_even_without_hard_stop(self):
-        # alias 本文の `.env` は operand scan に見えないので、クォート内
+        # alias 本文が何を読むかは operand scan に見えないので、クォート内
         # hard-stop の有無に関係なく常に ask に倒す。
-        cmd = "git -c alias.x='!cat .env' x"
+        #
+        # payload は**非機密** (`notes.txt`) にしてある: 0.34.0 で `*.env` を
+        # 既定 patterns に入れてから、`-c` の値 `alias.x=!cat .env` 自体が
+        # 末尾 `.env` で operand 一致するようになり deny が先行するため
+        # (`test_git_shell_alias_with_dotenv_payload_denies_via_operand` で別に
+        # 固定)。ここで見たいのは「alias 本文の中身が見えないこと」による ask
+        # なので、operand 一致と混ざらない payload で検証する。
+        cmd = "git -c alias.x='!cat notes.txt' x"
         r = handle(_make_envelope(cmd, self.tmp))
         self.assertEqual(_decision(r), "ask")
         r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
         self.assertTrue(output.is_allow(r))
+
+    def test_git_shell_alias_with_dotenv_payload_denies_via_operand(self):
+        # 0.34.0: `*.env` 追加の副作用。`-c` の値は path 候補に残るので、
+        # `alias.x=!cat .env` という**文字列**が `*.env` に一致して deny になる
+        # (0.33.x は ask)。deny の根拠は alias 本文の解析ではなく operand 一致
+        # という別経路だが、実際にこのコマンドは `.env` を読むので過剰 deny
+        # ではない。失敗方向としても摩擦側 (deny) に倒れている。
+        cmd = "git -c alias.x='!cat .env' x"
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
 
     def test_git_without_inline_config_keeps_relaxation(self):
         # `-c` の無い git は inert 扱い (0.18.0 の headline である
@@ -2123,7 +2142,13 @@ class TestQuoteAwareHardStop(BaseBash):
                     self.assertEqual(_decision(r), "deny")
 
     def test_git_alias_key_is_case_insensitive(self):
-        for cmd in ("git -c Alias.x='!cat .env' x", "git -cALIAS.x='!cat .env' x"):
+        # payload を非機密にしている理由は
+        # ``test_git_shell_alias_is_ask_even_without_hard_stop`` と同じ
+        # (0.34.0 の ``*.env`` 追加で ``.env`` payload は operand 一致 deny が先行)。
+        for cmd in (
+            "git -c Alias.x='!cat notes.txt' x",
+            "git -cALIAS.x='!cat notes.txt' x",
+        ):
             with self.subTest(cmd=cmd):
                 r = handle(_make_envelope(cmd, self.tmp))
                 self.assertEqual(_decision(r), "ask")
@@ -3558,12 +3583,17 @@ class TestHardStopLiteralOperandScan(BaseBash):
         "cat $D/.env*",                  # glob dotenv 判定も適用される
         "head -n 5 $ROOT/config/.envrc",
         "cat $HOME/keys/server.pem",     # 接尾辞 pattern (*.pem) は展開に依らず一致
+        # 0.34.0 で ``*.env`` を既定 patterns に入れたため、basename が変数に
+        # 跨る形も**展開結果に依らず**一致するようになった: ``$X.env`` は X が
+        # 何であれ末尾が ``.env`` で、``X`` が ``/`` を含んでも basename は
+        # ``<何か>.env`` のまま。0.33.x までは ``X.env != .env`` だったので
+        # KEEP_ASK 側に置いていた (``*.pem`` の接尾辞一致と同じ構造)。
+        "cat $X.env",
     )
 
     # 従来どおり ask (default) / allow (auto) に留まる形。
     KEEP_ASK = (
         "cat $X",                        # 変数単体の展開先は判定不能 (従来方針)
-        "cat $X.env",                    # basename が変数に跨る (X.env ≠ .env)
         "cat $(pwd)/.env",               # コマンド置換は救済対象外 (hard-stop 残存)
         "cat ${X:-fallback}/.env",       # 複合展開は救済対象外
         "$PAGER .env",                   # first token が変数 = 未知コマンド実行
@@ -4499,6 +4529,135 @@ class TestLargeDotenvReasonByteBudget(BaseBash):
         self.assertLess(
             visible, n, "全鍵が残っている (32KB 未満なので折り畳みが発生する前提が崩れている)"
         )
+
+
+class TestSuffixDotenvOperand(BaseBash):
+    """0.34.0: 既定 patterns に ``*.env`` を追加した結果の Bash 側の判定。
+
+    追加そのものは ``patterns.txt`` の 1 行だが、Bash operand は「path とは
+    限らない文字列」なので影響面を床テストで固定しておく。
+    """
+
+    def test_suffix_dotenv_literal_operand_denies(self):
+        for cmd in ("cat prod.env", "head -n 5 local.env", "cat sub/production.env"):
+            for mode in ("default", "auto", "bypassPermissions"):
+                with self.subTest(cmd=cmd, mode=mode):
+                    r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                    self.assertEqual(_decision(r), "deny")
+
+    def test_template_suffix_still_allowed(self):
+        for cmd in ("cat foo.env.example", "cat config.env.template"):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(output.is_allow(r))
+
+    def test_star_dot_env_glob_stays_lenient(self):
+        """``cat *.env`` は **deny にならない** (既知の非対称、実測で固定)。
+
+        glob operand の判定は既定 rules への候補列挙ではなく
+        ``_glob_operand_is_dotenv_match`` (literal stem ``.env`` / ``.envrc`` に
+        shell の pathname expansion で一致するか) だけを見る (0.8.0 の縮約)。
+        ``*.env`` は dotfile ``.env`` には展開されない (先頭ドットは pattern 側の
+        literal ``.`` でしか一致しない) ので False になり、``prod.env`` に
+        展開されうることは **patterns.txt を見ていないので分からない**。
+        したがって ``ask_or_allow`` のまま。
+
+        ここを deny にするのは glob 判定の設計変更 (0.8.0 で意図的に撤廃した
+        「既定 rules への候補列挙」の復活) にあたるので、0.34.0 では触らない。
+        docs/MATRIX.md の glob 行に同じ内容を書いてある。
+        """
+        r = handle(_make_envelope("cat *.env", self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope("cat *.env", self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_metadata_only_command_still_allows_suffix_dotenv(self):
+        # 内容を出さないコマンドは ``*.env`` でも従来どおり allow (思想 1)。
+        r = handle(_make_envelope("ls -la prod.env", self.tmp))
+        self.assertTrue(output.is_allow(r))
+
+    def test_quoted_non_path_argument_ending_in_dot_env_now_denies(self):
+        """``*.env`` 追加の**過剰 deny 側**の副作用 (開示のための床テスト)。
+
+        ``.env`` は完全一致 basename rule なので、``cat x.env`` のような
+        「末尾が ``.env`` の文字列」は 0.33.x では operand 一致しなかった。
+        ``*.env`` は suffix 一致なので、spec を持たないコマンドに渡された
+        引数 (**クォート済み / 裸を問わない**) まで operand 候補として
+        一致する。``kubectl exec pod -- cat app.env`` は裸の operand 形
+        (0.34.0 のマージ前レビュー P3-3 で MATRIX の例に追加した)。
+
+        deny 方向 (摩擦側) なので受容する — 実際これらの例はいずれも dotenv
+        ファイルを読む文字列であり、保護を落とす方向ではない。README の
+        既知制限に同じ内容を書いてある。
+        """
+        for cmd in (
+            "ssh host 'cat app.env'",
+            "docker run img 'cat x.env'",
+            "kubectl exec pod -- cat app.env",
+        ):
+            with self.subTest(cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "deny")
+
+
+class TestGawkIncludeLoad(BaseBash):
+    """0.34.0: gawk の ``@include`` / ``@load`` を動的構文として扱う。
+
+    どちらもプログラム文字列の中からファイルを読み込む構文で、operand が
+    1 つも無くてもファイルが開かれる。``-f prog.awk`` (``awk_program_file``)
+    と同じ扱いにして ``ask_or_allow`` に倒す。
+    """
+
+    def test_gawk_include_is_dynamic(self):
+        cmd = "gawk '@include \".env\"'"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_gawk_load_is_dynamic(self):
+        cmd = "gawk '@load \"filefuncs\"' notes.txt"
+        r = handle(_make_envelope(cmd, self.tmp))
+        self.assertEqual(_decision(r), "ask")
+        r = handle(_make_envelope(cmd, self.tmp, mode="auto"))
+        self.assertTrue(output.is_allow(r))
+
+    def test_plain_gawk_program_is_unaffected(self):
+        # 動的構文を含まない最頻形は従来どおり (allow / 機密 operand なら deny)。
+        r = handle(_make_envelope("gawk '{print $1}' notes.txt", self.tmp))
+        self.assertTrue(output.is_allow(r))
+        r = handle(_make_envelope("gawk '{print}' .env", self.tmp))
+        self.assertEqual(_decision(r), "deny")
+
+    def test_dotenv_operand_still_wins_over_dynamic_ask(self):
+        # 機密 operand 確定の deny が動的構文の ask より優先 (既存方針)。
+        cmd = "gawk '@include \"lib.awk\"' .env"
+        for mode in ("default", "auto"):
+            with self.subTest(mode=mode):
+                r = handle(_make_envelope(cmd, self.tmp, mode=mode))
+                self.assertEqual(_decision(r), "deny")
+
+    def test_at_prefixed_words_are_not_false_positives(self):
+        """``@load`` / ``@include`` は語境界まで見る (0.34.0 マージ前レビュー P3-2)。
+
+        部分一致のままだと「構文として成立していない ``@load``」まで ask に
+        倒していた (``x@loader`` / ``a@loadb``)。方向は安全側だが、0.34.0 の
+        gawk 対応は「``-f`` と同型だから入れた例外」なので、構文として成立
+        する形だけを拾う方が意図に沿う。
+        """
+        for cmd in (
+            "awk '/x@loader/ {print}' notes.txt",
+            "awk '{print \"a@loadb\"}' notes.txt",
+            "awk '/user@example.com/ {print}' notes.txt",
+            "awk '{print $1 \"@includes\"}' notes.txt",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(output.is_allow(handle(_make_envelope(cmd, self.tmp))))
+
+    def test_include_without_space_before_the_quote_is_still_dynamic(self):
+        # ``\b`` 止めなので ``@include"f"`` (空白なし) は取り逃さない。
+        r = handle(_make_envelope("gawk '@include\"lib.awk\"'", self.tmp))
+        self.assertEqual(_decision(r), "ask")
 
 
 if __name__ == "__main__":

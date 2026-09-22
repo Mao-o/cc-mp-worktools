@@ -18,6 +18,7 @@ fnmatch 書式、`!` プレフィクスは除外。
 # 環境変数
 .env
 .env.*
+*.env
 .envrc
 *.envrc
 
@@ -52,6 +53,18 @@ service-account*.json
 !*.pub
 ```
 
+> **0.34.0 で `*.env` を既定に追加**。`*.envrc` があるのに `*.env` が無いと
+> いう非対称で、`production.env` / `local.env` のような実在する命名が allow に
+> なっていた (`redaction/engine._detect_format` は `foo.env` を dotenv として
+> 扱っており実装とも食い違っていた)。テンプレート除外 (`!*.example` 等) は
+> 従来どおり後勝ちなので `foo.env.example` は allow のまま。
+>
+> Bash の operand は「path とは限らない文字列」なので、suffix 一致にした影響で
+> `ssh host 'cat app.env'` のようなクォート済みの引数まで deny 側に入る
+> (過剰 deny 側。いずれも実際に dotenv を読む形なので保護は落ちない)。
+> glob operand の `cat *.env` は **deny にならない** — 詳細は
+> [MATRIX.md](./MATRIX.md) の Bash glob 行。
+>
 > **0.14.0 で `*.local.json` / `*.local.yaml` / `*.local.yml` / `*.local.toml`
 > を既定から撤去**。Claude Code エコシステムでは `settings.local.json`
 > (Claude Code 本体の個人設定) や `accounts.local.json` 等、「local = git に
@@ -123,7 +136,10 @@ cat >> ~/.claude/sensitive-files-guardrail/patterns.local.txt <<'EOF'
 !ca-bundle.pem
 
 [project:/path/to/project-a]
-# project-a のセッションで承認 — pnpm 設定のみでトークン非含有
+# project-a のセッションで承認 — 認証行を含む .npmrc を意図的に許可する
+# (0.34.0 以降、設定のみの .npmrc は既定で allow なのでこの行は不要。
+#  この除外が要るのは「認証行があると分かっていて、それでも Read / Bash /
+#  Stop を通したい」ケースだけ)
 !.npmrc
 
 [project:/path/to/project-b]
@@ -464,9 +480,17 @@ exclude を重ねる運用が安全:
 | `hooks/redact-sensitive-reads/redaction/engine.py::_detect_format` | redaction 品質: format 判定 | `endswith(".envrc")` を dotenv に分岐 |
 | `hooks/redact-sensitive-reads/tests/test_matcher.py::DEFAULT_RULES` | matcher の回帰テスト定数 | `(".envrc", False)` / `("*.envrc", False)` 追加 |
 
+> **逆向きの剥離もある** (0.34.0 の実例): `_detect_format` は 0.3.x から
+> `foo.env` を dotenv ファミリーとして docstring に明記していたのに、
+> `patterns.txt` 側に `*.env` が無かった。matcher に届かないので
+> `_detect_format` の分岐が使われず、`production.env` が allow のままだった。
+> 上の 3 箇所は「追加するとき」だけでなく**既存分の突合**にも使うこと。
+
 同期漏れの兆候:
 - 新規拡張子で matcher は効くが reason が opaque 扱いになる → engine の
   `_detect_format` 漏れ
+- `_detect_format` が知っている形式が matcher に届かない → patterns.txt 側の
+  漏れ (0.34.0 の `*.env` がこれ)
 - test_matcher の既存テストが pass するのに、実 `patterns.txt` と乖離している
   → DEFAULT_RULES の更新漏れ
 - 機密検出されない → patterns.txt の更新漏れ
