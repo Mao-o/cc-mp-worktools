@@ -1371,9 +1371,21 @@ def _deliver_commit_review(
 
     result = outcome.text
     if not result:
-        # **pending は触らない** (設計 B3)。残ったパスは Stop が見て
-        # 「差分が空で取得できませんでした」と報告する = 事実のまま
+        # 送った側 (`sent.sent_rels`) は **pending を触らない** (設計 B3)。残ったパスは
+        # Stop が見て「差分が空で取得できませんでした」と報告する = 事実のまま。
+        #
+        # 一方 `sent.deduplicated` は backend に一度も渡していない (Stop が既に
+        # レビュー済みの内容と確定しているため送信対象から除外したパス) ので、
+        # backend の成否とは無関係に「commit 済み・レビュー済み」が既に確定している。
+        # ここを素通りすると、混在 batch (重複抑止パス + 新規パス) で新規パス側の
+        # backend が全滅しただけで、無関係な重複抑止パスまで pending に残り続け、
+        # 次の Stop が「差分が空で取得できませんでした」と誤通知する (実際にはレビュー
+        # 済み・commit 済み)。送信範囲には影響しない
         log("全 backend が commit レビュー結果を返さなかった (state は触らない)")
+        _quiet(
+            lambda: _settle_commit_review(session_id, root, sent.deduplicated, by_rel),
+            "重複抑止パスの整理",
+        )
         notices.insert(0, f"{summary} → 結果を取得できず (timeout / 失敗)")
         return _with_notices({}, notices)
 

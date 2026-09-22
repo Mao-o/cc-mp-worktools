@@ -5,6 +5,26 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.1
+
+**commit レビューの混在 batch (重複抑止パス + 新規パス) で全 backend が失敗した
+とき、重複抑止パスが pending に残り続けるバグの修正 (patch bump)。**
+
+内部バックログの follow-up で判明: 同じ窓に「Stop がレビュー済みの内容のパス
+(重複抑止で送らない)」と「新規パス (送る)」が混在すると `batch.sections` が
+非空になり、重複抑止パスだけの窓で行っている即時 settle (pending から外す) を
+通らずに `_send_commit_review` / `_deliver_commit_review` へ進む。その状態で
+全 backend が失敗すると `_deliver_commit_review` の失敗分岐は state を一切
+触らずに返っていたため、重複抑止パスが pending に残り続け、次の Stop が
+「差分が空で取得できませんでした」と誤通知していた (実際にはレビュー済み・
+commit 済みで、送信範囲そのものには影響しない)。
+
+`_deliver_commit_review` の「全 backend 失敗」分岐で `sent.deduplicated` だけを
+`_settle_commit_review` に通すよう修正した。送った側 (`sent.sent_rels`) は
+従来どおり pending に残し、次の Stop に委ねる (B3 の設計は維持)。回帰テストは
+`tests/test_commit_flow.py::TestStateOnFailure::
+test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths`。
+
 ## 0.12.0
 
 **外部レビュー backend を registry 化して差分レビューの送信先を選べるようにし、

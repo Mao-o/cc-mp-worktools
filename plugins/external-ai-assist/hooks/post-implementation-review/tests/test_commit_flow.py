@@ -625,6 +625,43 @@ class TestStateOnFailure(CommitFlowTestCase):
         self.window("tu_fail", lambda: self.commit("ours"), review_result=None)
         self.assertEqual(self.state.last_backend(SESSION_A), "")
 
+    def test_mixed_batch_all_backends_failing_settles_only_deduplicated_paths(self):
+        """混在 batch (重複抑止パス + 新規パス) で backend が全滅するケース。
+
+        重複抑止パス (dup.py) は Stop が既にレビュー済みの内容と確定しているため、
+        backend の成否と無関係に settle される。送った側 (new.py) は従来どおり
+        pending に残す (このテストのシンプル版が `test_all_backends_failing_
+        leaves_pending_untouched`)。
+        """
+        dup_full = self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("dup.py")
+
+        # 内容を変えない再編集: pending に戻るが、内容は Stop がレビュー済みのまま
+        self.edit(SESSION_A, "dup.py", f"print('{OURS} dup')\n")
+        new_full = self.edit(SESSION_A, "new.py", f"print('{OURS} new')\n")
+        self.assertEqual(
+            sorted(self.pending(SESSION_A)),
+            sorted([dup_full, new_full]),
+            "前提: 両方とも pending にある",
+        )
+
+        self.window(
+            "tu_mixed_fail",
+            lambda: self.commit("commit both dup.py and new.py"),
+            review_result=None,
+        )
+        self.assertEqual(len(self.review_calls), 1, "batch.sections が非空なので送信は行われる")
+        diff = self.review_calls[0]
+        self.assertIn("new.py", diff)
+        self.assertNotIn(f"{OURS} dup", diff, "重複抑止パスの内容は送らない")
+
+        self.assertEqual(
+            self.pending(SESSION_A),
+            [new_full],
+            "重複抑止パス (dup.py) は settle され、送った側 (new.py) は pending に残る (B3)",
+        )
+
 
 class TestCommitInAnotherRepo(CommitFlowTestCase):
     def test_commit_into_a_different_repo_sends_nothing(self):

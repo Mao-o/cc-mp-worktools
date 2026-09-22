@@ -590,8 +590,13 @@ assertion failure で落とすことを確認済み (共通ルールの「mutati
   レビューが見たのは窓の range diff。空 diff の hash を入れても `_collect_diffs` は
   空 diff を hash 判定より手前で落とすので一度も参照されず、LRU の枠を食って本物の
   エントリを追い出すだけになる
-- **全 backend 失敗時は state を触らない** (`last_review_at` だけは Stop と同じく
-  更新する — cooldown は「レビューとレビューの間隔」で成否を問わないため)
+- **全 backend 失敗時、送った側 (`sent.sent_rels`) の pending は触らない**
+  (`last_review_at` だけは Stop と同じく更新する — cooldown は「レビューとレビューの
+  間隔」で成否を問わないため)。**重複抑止で送らなかった側 (`sent.deduplicated`) は
+  backend の成否に関わらず settle する** — Stop が既にレビュー済みの内容と確定して
+  いるため、backend が落ちても pending に残すと次の Stop が「差分が空で取得できません
+  でした」と誤通知する (混在 batch で新規パス側の backend が全滅しただけで、無関係な
+  重複抑止パスまで巻き込む経路があった)
 - claim は取らない。commit の差分は作業ツリーの状態に依存しない不変の範囲なので、
   途中で死んでも「次の Stop に持ち越す」対象が無い
 
@@ -862,7 +867,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | **commit 経路の予算・しきい値・取得失敗 (合計バイト / 1 ファイル切り詰め / MIN_LINES / cooldown / range_paths 失敗 / P4 判定失敗 / 追記バイト上限)** | `test_commit_flow.py::TestCommitBudgets` |
 | **受け取った指摘を state 整理の失敗で捨てない / 送信前の例外では送らない** | `test_commit_flow.py::TestDeliveryAfterReview` |
 | **linked worktree の commit をその worktree の reflog で拾う** | `test_commit_flow.py::TestLinkedWorktree` |
-| **全 backend 失敗時に state を触らない / 別 repo への commit では窓が伸びない** | `test_commit_flow.py::TestStateOnFailure` / `TestCommitInAnotherRepo` |
+| **全 backend 失敗時、送った側の pending は触らないが、重複抑止パスは settle する (混在 batch) / 別 repo への commit では窓が伸びない** | `test_commit_flow.py::TestStateOnFailure` / `TestCommitInAnotherRepo` |
 | commit レビューを含む PostToolUse(Bash) の hook timeout 予算 | `test_review_set.py::TestTimeoutBudgets::test_post_tool_bash_budget_covers_commit_review` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 
