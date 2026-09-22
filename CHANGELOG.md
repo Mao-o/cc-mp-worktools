@@ -15,6 +15,21 @@
 (更新判定のキーは各 plugin の `plugin.json` の `version`)、semver を振ると
 「plugin のバージョン」と混同されるため採っていません。
 
+## 2026-09-23
+
+### Added
+
+- CI に **Windows 探索用 job** を追加 (`.github/workflows/validate.yml` の
+  `tests-windows`)。sensitive-files-guardrail の 2 suite
+  (`check-sensitive-files` / `redact-sensitive-reads`) を `windows-latest` /
+  Python 3.12 の matrix で回す。0.34.0 で「SIGALRM が無い環境では全 tool 呼出を
+  deny」という実質 Windows 無効化ゲートを撤去したが、CI は ubuntu-latest のみで
+  未検証だったのが動機。**当面は赤である前提の調査用**なので
+  `if: github.event_name == 'workflow_dispatch'` で手動起動に限定し、
+  pull_request / push のゲートには載せない。`continue-on-error` は付けず
+  (赤を隠さない)、`tag-plugin-releases` の `needs` にも入れない。
+  Windows が安定して green になったら `tests` job の matrix へ統合して畳む。
+
 ## 2026-09-19
 
 このファイルの開始時点。以降の marketplace レベルの変更をここに追記していきます。

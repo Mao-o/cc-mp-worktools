@@ -136,6 +136,73 @@ jobs:
       - name: Run plugin unit tests
         run: scripts/test-all.sh
 
+  tests-windows:
+    # sensitive-files-guardrail の 2 suite だけを Windows で回す job。
+    #
+    # 背景: 0.34.0 で「SIGALRM が無い環境では全 tool 呼出を deny」という実質
+    # Windows 無効化ゲートを撤去し、非 UNIX でも通常のパイプラインを通すように
+    # した。一方で CI は ubuntu-latest しか回しておらず、plugin の README も
+    # 「Windows は未検証」と明記したままになっている。
+    #
+    # **この job の目的は「Windows で落ちるテストを洗い出す」こと**であって、
+    # 最初から green にすることではない (内部バックログ)。落ちたケースは
+    # 「Windows では skip」にせず、挙動を確定させてから README の「未検証」を
+    # 更新する。そのため continue-on-error は付けない (赤を隠さない)。
+    #
+    # 既存 tests job (ubuntu matrix) には手を入れない。あちらは
+    # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、同じ
+    # 列挙を Windows に通すとスクリプトの移植が本題より大きくなる。ここで
+    # 知りたいのは「SFG の 2 suite が Windows でどう落ちるか」の 1 点なので、
+    # 各 suite の package root で unittest discover を直接呼ぶ (test-all.sh が
+    # 各 suite に対して行うのと同じ呼び方)。
+    # 当面は赤である前提の調査用なので、pull_request / push のゲートには載せない
+    # (green 化は複数 PR にまたがる見込みで、その間ずっと無関係な PR にも赤が
+    # 2 本出続けるため)。手動起動 (workflow_dispatch) でだけ回す。Windows が
+    # 安定して green になったら、この job は畳んで tests job の matrix に
+    # windows-latest を足す形へ統合する。continue-on-error は付けない (赤を隠さない)。
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      # 片方が落ちてももう片方を最後まで走らせる。目的が失敗の洗い出しなので、
+      # 1 回の run で両 suite 分の失敗一覧が欲しい (ubuntu 側 matrix と同趣旨)。
+      fail-fast: false
+      matrix:
+        suite: [check-sensitive-files, redact-sensitive-reads]
+    steps:
+      # GH の Windows runner は Git for Windows 既定で core.autocrlf=true。この repo に
+      # .gitattributes は無いため、放置すると tests/fixtures/** が CRLF で展開され、
+      # 「Windows のランタイム差」ではなく「checkout 設定」由来の失敗が洗い出し結果に
+      # 混ざる。母集団を LF に固定してから測る。
+      - name: Pin line endings to LF before checkout
+        run: git config --global core.autocrlf input
+
+      - uses: actions/checkout@v6
+
+      # 実際にどう展開されたかを毎 run 一次情報として残す。
+      - name: Show line-ending config
+        run: git config --get core.autocrlf
+
+      # Python は 1 バージョンで足りる。この job で見たいのは **プラットフォーム
+      # 差** (symlink 作成権限 / O_NOFOLLOW の有無 / パス区切り / Path.home() の
+      # 解決元 / 改行変換) であって、バージョン差は ubuntu 側の matrix
+      # (3.11 / 3.12 / 3.13) が既に見ている。2 軸を掛けると失敗の切り分けが
+      # 「OS のせいか version のせいか」で曖昧になるため、OS 軸だけを足す。
+      # 3.12 を選ぶのは他の job (validate / lint) と揃えるため。
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Windows runner の既定 shell は pwsh。shell 依存を持ち込まないよう、
+      # ステップは単一コマンド + working-directory だけで構成する。
+      # `python3` ではなく `python` を使う: setup-python が Windows で PATH に
+      # 置くのは `python` で、`python3` があるとは限らない (あっても Microsoft
+      # Store の shim を掴む可能性がある)。
+      - name: Run ${{ matrix.suite }} unit tests
+        working-directory: plugins/sensitive-files-guardrail/hooks/${{ matrix.suite }}
+        run: python -m unittest discover tests
+
   tag-plugin-releases:
     # main へ入った commit に対して、各 plugin の plugin.json の version に対応する
     # リリース tag (<plugin>/v<version>) が無ければ annotated tag を作って push する。
@@ -143,6 +210,12 @@ jobs:
     # validate / lint / tests が green のときだけ打つ (壊れた commit に version を
     # 指す tag を残さないため)。落ちた場合は tag が作られないだけなので、次に
     # green な push が来た時点で同じ tag が作られる (version は変わらないため)。
+    #
+    # tests-windows は **意図的に needs へ入れない**。あの job は「Windows で
+    # 落ちるテストを洗い出す」ための調査用で、当面は赤であることが前提
+    # (workflow_dispatch 限定で push では走らない)。needs に入れると
+    # 「走っていない job を待つ」形になり、全 plugin のリリース tag が止まる。Windows が安定して green になり、plugin 側の
+    # 「Windows は未検証」表記を外せた時点で needs への追加を検討する。
     #
     # GITHUB_TOKEN による tag push は他の workflow を起動しない (GitHub の仕様) ので、
     # この job が自分自身を再帰的に呼ぶことはない。
