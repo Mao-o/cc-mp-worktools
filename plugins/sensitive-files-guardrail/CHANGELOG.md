@@ -26,8 +26,8 @@ commit 52113a1 で完了)。
 ## 0.34.1
 
 Windows 移植性の不具合修正。判定表は変えない。**テキスト I/O の encoding を
-locale 依存から UTF-8 固定へ**。テスト件数: redact **1,485 → 1,496** /
-check **174 → 181**。
+locale 依存から UTF-8 固定へ**。テスト件数: redact **1,485 → 1,497** /
+check **174 → 182**。
 
 ### Fixed
 
@@ -53,8 +53,12 @@ check **174 → 181**。
   `internal_error` で報告が消える**無音 fail-open** (Stop 側)、(b) 未定義バイトを
   含まない文字列は**別の文字列に化けて**判定に使われる (機密パスの見逃し) の
   2 通りに割れていた。`_shared/streams.py` に `read_stdin()` を追加し、
-  `sys.stdin.buffer` から bytes を読んで UTF-8 で decode する (`write_stdout` の
-  対称。`buffer` を持たない差し替え stdin ではテキスト読みに fallback)
+  `sys.stdin.buffer` から bytes を読んで **strict な** UTF-8 で decode する
+  (`buffer` を持たない差し替え stdin ではテキスト読みに fallback)。envelope 自体が
+  不正な UTF-8 のときは `replace` で読み進めず例外にする — JSON 文字列の中の不正
+  バイトが U+FFFD に化けて `file_path` / `cwd` が黙って別の値になるのを防ぐため
+  (マージ前レビューの指摘)。例外は既存経路に乗り、PreToolUse は
+  `stdin_parse_failed` の deny、Stop は `internal_error` + `systemMessage`
 - **Stop hook の git 出力 decode** (`subprocess.run(text=True)`) も同じ理由で
   `encoding="utf-8", errors="surrogateescape"` に固定。git は `-z` では quote せず
   生バイトを返すため、非 ASCII のパスは cp1252 で化けて「そのパスは無い」に
@@ -73,7 +77,7 @@ check **174 → 181**。
 
 ### Tests
 
-- 床テスト 15 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
+- 床テスト 17 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
   patterns loader は `Path.read_text` の encoding 省略時だけ cp1252 に倒す wrapper で
   Windows 既定を模擬 (同梱 patterns の読込 / 日本語ファイル名 rule の非文字化け /
   日本語コメント)。stdin は子プロセスに `PYTHONIOENCODING=cp1252` を与えて
@@ -85,7 +89,8 @@ check **174 → 181**。
   BOM 付きでも 1 行目が効く) と、非 UTF-8 のパスのバイトが潰れないこと (macOS は
   そういう名前を作れないため、生バイトを出す子プロセスで実際の decode 経路を通す)・
   ack digest が衝突しないこと・block の reason で `\xff` の形に出て互いに区別できる
-  ことを固定
+  ことを固定。不正な UTF-8 の envelope は PreToolUse で `stdin_parse_failed` の deny、
+  Stop で `internal_error` になる (判定・走査に進まない) ことを固定
 - テスト側のテキスト I/O (patterns fixture の helper 等) も `encoding="utf-8"` を明示。
   Windows (cp1252) では hook と同じ理由でテスト自身が落ちていた
 - Windows 実機 / CI での再検証は未実施 (CI の `tests-windows` job は別 PR)。

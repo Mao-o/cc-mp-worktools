@@ -69,14 +69,18 @@ def read_stdin() -> str:
     ``buffer`` を持たないストリームではテキスト読込にフォールバックする
     (差し替え側は encoding を持たないので本件の失敗モードが起きない)。
 
-    decode の ``errors="replace"`` は意図的: envelope は正当な UTF-8 のはずで、
-    そうでない (ハーネス側の異常) ときにここで例外を出すと呼出側の
-    ``stdin_parse_failed`` / ``EOFError`` 分岐に入らず catch-all へ落ちる。
-    U+FFFD に置換して ``json.loads`` に渡せば、壊れ方が「JSON として不正」なら
-    そちらの分岐で、「文字列の中身が壊れただけ」なら判定側で扱える。
-    ``write_stdout`` の ``errors="replace"`` と対称。
+    decode は **strict** (不正な UTF-8 は ``UnicodeDecodeError`` を送出する)。
+    ``errors="replace"`` にすると、JSON 文字列の**中**の不正バイトは U+FFFD に
+    置き換わって envelope が構文上は正しいまま通り、判定に使う値が黙って変わる:
+    ``file_path`` が実在しない別のパスになって機密ファイルの操作を allow する、
+    ``cwd`` が別の場所になって Stop が repo の外を走査し何も報告しない (外部
+    レビューの指摘)。例外は呼出側の既存経路に乗る — PreToolUse は
+    ``_read_envelope`` の ``except Exception`` で ``stdin_parse_failed`` の deny、
+    Stop は ``main`` の catch-all で ``internal_error`` + ``systemMessage`` (UI に
+    出る)。出力側の ``write_stdout`` が ``replace`` なのは、あちらは hook 自身が
+    作る文字列で、落とすと判定そのものが届かなくなるため (非対称は意図的)。
     """
     buffer = getattr(sys.stdin, "buffer", None)
     if buffer is not None:
-        return buffer.read().decode("utf-8", errors="replace")
+        return buffer.read().decode("utf-8")
     return sys.stdin.read()

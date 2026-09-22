@@ -1846,5 +1846,34 @@ class TestNonUtf8PathsInTheBlockReason(BaseMainTest):
         )
 
 
+
+class TestMainMalformedUtf8Envelope(BaseMainTest):
+    """``cwd`` に不正な UTF-8 がある envelope は走査せず internal_error で可視化 (0.34.1)。
+
+    ``errors="replace"`` だと ``cwd`` が実在しない別の場所になり、git が失敗して
+    **何も報告しない** (完走して機密なしと区別できない沈黙) になる。
+    """
+
+    def test_invalid_byte_in_cwd_is_reported_not_silent(self):
+        (self.repo / ".env").write_text("KEY=v\n")
+        body = json.dumps({"cwd": "@@CWD@@"}).encode("utf-8").replace(
+            b"@@CWD@@", str(self.repo).encode("utf-8") + b"\xff"
+        )
+        entry = _load_entry()
+        stdin = io.TextIOWrapper(io.BytesIO(body), encoding="utf-8")
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = stdin
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            rc = entry.main()
+            out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 0)
+        self.assertIn("internal_error: UnicodeDecodeError", err)
+        self.assertIn("systemMessage", json.loads(out))
+
+
 if __name__ == "__main__":
     unittest.main()

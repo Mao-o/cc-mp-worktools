@@ -1449,5 +1449,40 @@ class TestE2EStdinNonUtf8Locale(unittest.TestCase):
         self.assertIn("機密", out["permissionDecisionReason"])
 
 
+
+class TestE2EMalformedUtf8Envelope(unittest.TestCase):
+    """JSON 文字列の中に不正な UTF-8 がある envelope は判定に使わず deny (0.34.1)。
+
+    ``errors="replace"`` で読むと ``.env\\ufffd`` のような実在しないパスとして
+    判定され、本来の ``.env`` への操作が allow されうる (外部レビューの指摘)。
+    """
+
+    def test_invalid_byte_inside_file_path_is_denied_as_unparsable(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home = Path(tmp) / "home"
+        home.mkdir()
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["SFG_LOG_PATH"] = str(home / "redact-hook.log")
+        body = json.dumps({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "@@PATH@@"},
+            "cwd": tmp,
+            "permission_mode": "default",
+        }).encode("utf-8").replace(b"@@PATH@@", str(Path(tmp)).encode("utf-8") + b"/.env\xff")
+        proc = subprocess.run(
+            [sys.executable, str(_ENTRY_PATH), "--tool", "read"],
+            input=body, capture_output=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode("utf-8", "replace"))
+        out = json.loads(proc.stdout.decode("utf-8") or "{}").get("hookSpecificOutput", {})
+        self.assertEqual(
+            out.get("permissionDecision"), "deny",
+            msg="壊れた file_path のまま判定して allow した",
+        )
+        self.assertIn("hook 入力 JSON の解析に失敗", out.get("permissionDecisionReason", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
