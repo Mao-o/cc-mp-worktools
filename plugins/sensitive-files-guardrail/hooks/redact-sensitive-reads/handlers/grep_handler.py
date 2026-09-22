@@ -182,14 +182,18 @@ def _glob_verdict(glob: str, rules: list[tuple[str, bool]]) -> str:
     # ので結論が揃う)。展開は **deny 方向にしか動かさない**。
     verdict = "pause" if _BRACE_CHAR in glob else "allow"
     for branch in branches:
-        if _glob_operand_is_dotenv_match(branch):
-            return "deny"
         if _has_glob(branch):
+            # wildcard を含む分岐だけ dotenv stem の展開判定を先に当てる。
+            # literal 分岐にまで当てると、利用者の ``!.env`` (last-match-wins の
+            # 除外) を見ずに deny してしまう (マージ前レビューの指摘)
+            if _glob_operand_is_dotenv_match(branch):
+                return "deny"
             verdict = "pause"
             continue
         # literal glob は path とは限らない文字列なので basename だけで判定
         # する (Bash operand と同じ ``parts=False`` 相当。path 形 rule も
-        # 基準を確定できないので評価しない)
+        # 基準を確定できないので評価しない)。rules を通すので除外 (``!.env``)
+        # も Read / Bash の literal operand と同じく効く
         if is_sensitive(PurePath(branch), rules, parts=False, root=None):
             return "deny"
     return verdict

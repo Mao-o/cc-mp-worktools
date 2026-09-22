@@ -232,7 +232,7 @@ class TestScanAuthLines(unittest.TestCase):
         )
         count, keys = scan_auth_lines(text)
         self.assertEqual(count, 2)
-        self.assertEqual(keys, ["//registry.example.invalid/:_authToken", "_password"])
+        self.assertEqual(keys, ["//<registry>/:… (scoped registry auth)", "_password"])
 
     def test_values_are_never_returned(self):
         text = f"//registry.example.invalid/:_authToken={_FAKE_TOKEN}\n"
@@ -243,32 +243,35 @@ class TestScanAuthLines(unittest.TestCase):
         text = "always-auth=true\nalways_auth=false\n"
         count, keys = scan_auth_lines(text)
         self.assertEqual(count, 2)
-        self.assertEqual(keys, ["always-auth"])
+        self.assertEqual(keys, ["always_auth"])
 
     def test_config_only_is_empty(self):
         self.assertEqual(scan_auth_lines(_CONFIG_ONLY), (0, []))
 
-    def test_separator_less_line_never_leaks_the_rest_of_the_line(self):
-        """``=`` を忘れた行 (`_authToken TOKEN`) は deny のまま、ラベルは先頭語だけ (マージ前レビューの指摘)。
+    def test_labels_come_from_the_vocabulary_never_from_the_input(self):
+        """ラベルは語彙側の固定文字列。入力の head を切り出して返さない (マージ前レビューの指摘 3 巡分)。
 
-        以前は行全体をキー名として返しており、値が deny reason に写っていた。
+        ``=`` を忘れた行 / 値の中に ``=`` がある行 / 空白も ``=`` も無い行のどれでも、
+        値が理由文へ写らない。deny 判定そのものは変わらない。
         """
         token = "npm_" + "x" * 36
-        count, keys = scan_auth_lines(f"_authToken {token}\n")
-        self.assertEqual(count, 1)
-        self.assertEqual(keys, ["_authToken"])
-        self.assertNotIn(token, " ".join(keys))
-        # 先頭語が認証キーでない (行全体でだけ一致する) 形は固定文言
-        count, keys = scan_auth_lines(f"registry {token} _password\n")
-        self.assertEqual(count, 1)
-        self.assertEqual(keys, ["(no '=' separator)"])
-        self.assertNotIn(token, " ".join(keys))
-        # 空白も ``=`` も無い形 (先頭語 = 行全体) は部分一致でも固定文言 (2 巡目の指摘)
-        for line in (f"//registry.example/:_authToken{token}", f"_authToken{token}", f"x_auth{token}"):
-            count, keys = scan_auth_lines(line + "\n")
+        cases = {
+            f"_authToken {token}\n": "_authtoken",
+            f"_authToken {token}==\n": "_authtoken",
+            f"//registry.example/:_authToken{token}\n": "//<registry>/:… (scoped registry auth)",
+            f"_authToken{token}\n": "_authtoken",
+            f"x_auth{token}\n": "_auth",
+            f"registry {token} _password\n": "_password",
+            f"key {token}\n": "_authtoken" if False else None,  # placeholder replaced below
+        }
+        cases.pop(f"key {token}\n")
+        cases[f"registry=https://user:{token}@host/\n"] = "<url with user:password@>"
+        for line, label in cases.items():
+            count, keys = scan_auth_lines(line)
             self.assertEqual(count, 1, line)
-            self.assertEqual(keys, ["(no '=' separator)"], line)
+            self.assertEqual(keys, [label], line)
             self.assertNotIn(token, " ".join(keys), line)
+            self.assertNotIn("registry.example", " ".join(keys), line)
 
 
 class TestDecodeNpmrc(unittest.TestCase):
@@ -423,8 +426,10 @@ class TestNpmrcDenyReasonShowsTheEvidence(BaseNpmrcRead):
             f"_password={_FAKE_PASSWORD}\n"
         )
         self.assertIn("認証設定行 2 件", reason)
-        self.assertIn("//registry.example.invalid/:_authToken", reason)
+        # ラベルは語彙側の固定文字列 (入力の registry ホスト名や head は写らない)
+        self.assertIn("scoped registry auth", reason)
         self.assertIn("_password", reason)
+        self.assertNotIn("registry.example.invalid", reason)
         self.assertNotIn(_FAKE_TOKEN, reason)
         self.assertNotIn(_FAKE_PASSWORD, reason)
 
@@ -440,7 +445,8 @@ class TestNpmrcDenyReasonShowsTheEvidence(BaseNpmrcRead):
             f"registry=https://alice:{_FAKE_TOKEN}@npm.example.invalid/\n"
         )
         self.assertIn("認証設定行 1 件", reason)
-        self.assertIn("registry", reason)
+        self.assertIn("<url with user:password@>", reason)
+        self.assertNotIn("alice", reason)
         self.assertNotIn(_FAKE_TOKEN, reason)
 
     def test_fail_closed_paths_do_not_claim_auth_lines(self):
@@ -464,8 +470,9 @@ class TestNpmrcDenyReasonShowsTheEvidence(BaseNpmrcRead):
             len(reason.encode("utf-8")), output.MAX_REASON_BYTES
         )
         self.assertIn("認証設定行 50 件", reason)
-        # 件数を絞った旨が出る (5 件 + 「ほか N 件」)
-        self.assertIn("ほか 45 件", reason)
+        # ラベルは語彙単位で畳まれるので 50 行でも 1 種類 (長い registry 名は写らない)
+        self.assertIn("scoped registry auth", reason)
+        self.assertNotIn("zzzz", reason)
         # prefix 分を引いてから折り畳むので、盲目 cut に落ちない
         self.assertNotIn("...[truncated]", reason)
         self.assertIn("</DATA>", reason)
@@ -488,14 +495,15 @@ class TestNpmrcDenyReasonShowsTheEvidence(BaseNpmrcRead):
         self.assertIn("認証設定行 1 件", reason)
 
     def test_pathological_key_names_fall_back_to_the_count(self):
-        """キー名が上限を超えるほど長い場合は件数だけに落とす (予算保護)。"""
+        """キー名が異常に長くても prefix は固定長のまま (ラベルは語彙側なので入力長に依らない)。"""
         lines = [
             f"//registry{i}.example.invalid/{'ぜ' * 300}:_authToken={_FAKE_TOKEN}"
             for i in range(5)
         ]
         reason = self._read_reason("\n".join(lines) + "\n")
-        self.assertIn("認証設定行 5 件。", reason)
-        self.assertNotIn("キー名:", reason)
+        # 語彙ラベルなので長大なキー名でも prefix は固定長のまま (件数 + ラベル)
+        self.assertIn("認証設定行 5 件", reason)
+        self.assertNotIn("ぜぜぜ", reason)
         self.assertLessEqual(
             len(reason.encode("utf-8")), output.MAX_REASON_BYTES
         )

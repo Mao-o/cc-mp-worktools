@@ -175,49 +175,35 @@ def _value_has_userinfo(value: str) -> bool:
     return bool(_USERINFO_URL_RE.match(value.strip().strip('"').strip("'")))
 
 
-def _auth_key_of(stripped: str) -> str | None:
-    """コメント除去済みの 1 行が認証行ならキー名 (元の綴り) を返す。
+_SCOPED_REGISTRY_LABEL = "//<registry>/:… (scoped registry auth)"
+_USERINFO_LABEL = "<url with user:password@>"
 
-    判定の定義はモジュール docstring を参照。**値は返さない** — 戻り値は
-    deny reason に載るため (``core.messages.npmrc_auth_prefix``)。
+
+def _auth_key_of(stripped: str) -> str | None:
+    """コメント除去済みの 1 行が認証行なら**語彙側のラベル**を返す。
+
+    判定の定義はモジュール docstring を参照。戻り値は deny reason に載るため、
+    **入力から切り出した文字列は一切返さない** — 一致した語彙 (``_authtoken``
+    等) か固定文言だけを返す。``raw_key`` (入力の head 側) を返していた頃は、
+    ``=`` の無い行 / 値の中の ``=`` / 空白の無い行で head に値が混ざり、
+    理由文へ credential が写った (マージ前レビューの指摘 3 巡分)。表面を
+    切り出しで縮めるのではなく、出力を語彙に固定して経路ごと閉じる。
     """
     head, sep, tail = stripped.partition("=")
-    raw_key = head.strip()
-    key = _normalize_key(raw_key)
+    key = _normalize_key(head)
     if not key:
         return None
-    # ``=`` の無い行は npm の ini パーサでは「行全体がキー (値 true)」だが、
-    # その行全体を戻り値 (= deny reason に載る) にすると、`_authToken TOKEN` の
-    # ような区切り忘れで**値が理由文へ写る** (マージ前レビューの指摘)。判定は
-    # 行全体で行い、ラベルは先頭の 1 語 (それ自体が認証キーのとき) か固定文言にする
-    label = raw_key if sep else _separator_less_label(raw_key)
     if key.startswith("//"):
-        return label
+        return _SCOPED_REGISTRY_LABEL
     if key in _AUTH_EXACT_KEYS:
-        return label
-    if any(token in key for token in _AUTH_KEY_SUBSTRINGS):
-        return label
+        return key
+    # 長い語彙を先に当てる (``_authtoken`` が ``_auth`` に食われないように)
+    for token in sorted(_AUTH_KEY_SUBSTRINGS, key=len, reverse=True):
+        if token in key:
+            return token
     if sep and _value_has_userinfo(tail):
-        return label
+        return _USERINFO_LABEL
     return None
-
-
-_SEPARATOR_LESS_LABEL = "(no '=' separator)"
-
-
-def _separator_less_label(raw_key: str) -> str:
-    """``=`` の無い行のラベル。先頭の 1 語が**既知の認証キーと完全一致**するときだけそれ、
-    それ以外は固定文言。
-
-    部分一致や ``//`` 前置では先頭語を返さない — 空白も ``=`` も無い
-    ``//host/:_authTokenTOKEN`` は先頭語 = 行全体になり、値が理由文へ写る
-    (マージ前レビューの指摘 2 巡目)。境界を安全に切れるのは完全一致だけ。
-    """
-    parts = raw_key.split()
-    first = parts[0] if parts else ""
-    if first and _normalize_key(first) in _AUTH_EXACT_KEYS:
-        return first
-    return _SEPARATOR_LESS_LABEL
 
 
 def scan_auth_lines(text: str) -> tuple[int, list[str]]:

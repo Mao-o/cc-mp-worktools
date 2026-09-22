@@ -228,6 +228,19 @@ class TestGrepGlob(BaseGrep):
                 r = self._grep({"pattern": "x", "glob": glob})
                 self.assertEqual(_decision(r), "deny")
 
+    def test_literal_glob_honors_user_exclusion(self):
+        """利用者の ``!.env`` (last-match-wins の除外) は literal glob にも効く (マージ前レビューの指摘)。
+
+        以前は dotenv stem の展開判定を literal にも当てていたため、rules を見ずに
+        deny していた。wildcard 分岐 (``.env*``) は従来どおり deny のまま。
+        """
+        local = Path(self.home) / ".claude" / "sensitive-files-guardrail"
+        local.mkdir(parents=True)
+        (local / "patterns.local.txt").write_text("!.env\n")
+        self.assertEqual(_decision(self._grep({"pattern": "x", "glob": ".env"})), None)
+        self.assertEqual(_decision(self._grep({"pattern": "x", "glob": ".env*"})), "deny")
+        self.assertEqual(_decision(self._grep({"pattern": "x", "glob": ".npmrc"})), "deny")
+
     def test_non_sensitive_literal_glob_allows(self):
         # ワイルドカードを含まない literal だけが allow に落ちる。
         for glob in ("README.md", "src/main.py", "Makefile"):
