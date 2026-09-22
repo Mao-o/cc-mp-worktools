@@ -1192,5 +1192,45 @@ class TestPatternsFilesAreReadAsUtf8(BaseWithIsolatedHome):
         self.assertEqual(rules, [("*.pem", False)])
 
 
+
+class TestUndecodablePatternsAreReportedNotRewritten(BaseWithIsolatedHome):
+    """UTF-8 として読めない patterns は**黙って書き換えず**「読めない」に倒す (0.34.1)。
+
+    ``errors="replace"`` で読み進めると、cp932 で保存された ``秘密.txt`` の rule は
+    U+FFFD の並びになって一致しなくなり、警告も出ないまま保護が消える (外部
+    レビューの指摘)。decode 失敗は ``PatternsDecodeError`` (``OSError``) にして、
+    既存の「読めない patterns」の扱い (既定なら全呼出元の ``patterns_unavailable``、
+    追加 tier なら warn + その tier を読まない) に乗せる。
+    """
+
+    def test_user_tier_in_cp932_warns_and_is_skipped(self):
+        from _shared.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        local = self._write_preferred("")
+        local.write_bytes("秘密.txt\n".encode("cp932"))
+        warned: list[str] = []
+        rules = load_patterns(default_file, warn_callback=warned.append)
+        self.assertEqual(warned, ["PatternsDecodeError"], "読めないことを警告していない")
+        self.assertEqual(rules, [("*.pem", False)], "化けた rule を黙って足している")
+
+    def test_undecodable_default_raises_an_oserror(self):
+        """既定側は例外で上げる。呼出元は全て ``except OSError`` で受ける契約。"""
+        from _shared.patterns import PatternsDecodeError, load_patterns
+        default_file = Path(self.tmp) / "patterns.txt"
+        default_file.write_bytes(b"*.pem\n\xff\xfe\n")
+        with self.assertRaises(PatternsDecodeError) as ctx:
+            load_patterns(default_file)
+        self.assertIsInstance(ctx.exception, OSError)
+
+    def test_leading_bom_does_not_break_the_first_rule(self):
+        """Windows のメモ帳が付けうる BOM で 1 行目の rule が死なない。"""
+        from _shared.patterns import load_patterns
+        default_file = _make_default_patterns_file(Path(self.tmp), ["*.pem"])
+        local = self._write_preferred("")
+        local.write_bytes("\ufeff秘密.txt\n".encode("utf-8"))
+        rules = load_patterns(default_file)
+        self.assertIn(("秘密.txt", False), rules)
+
+
 if __name__ == "__main__":
     unittest.main()

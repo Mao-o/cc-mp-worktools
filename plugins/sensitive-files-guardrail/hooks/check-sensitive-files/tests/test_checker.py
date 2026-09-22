@@ -832,7 +832,44 @@ class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
             )
             _run_git_raw(["status"], self.tmp)
         self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
-        self.assertEqual(run.call_args.kwargs.get("errors"), "replace")
+        self.assertEqual(run.call_args.kwargs.get("errors"), "surrogateescape")
+
+    def test_non_utf8_path_bytes_are_kept_distinct(self):
+        """UTF-8 でないパスのバイトを潰さない (外部レビューの指摘)。
+
+        POSIX のファイル名は UTF-8 の保証が無い。``replace`` だと
+        ``bad-\\xff/.env`` と ``bad-\\xfe/.env`` が同じ ``bad-\\ufffd/.env`` に潰れる。
+        macOS (APFS) はそういう名前のファイルを作れないので、git の代わりに
+        生バイトを NUL 区切りで出す子プロセスを差し込み、**実際の decode 経路**
+        (``subprocess.run`` の encoding / errors) を通す。
+        """
+        import sys as _sys
+        from checker import _run_git_nul
+        real_run = subprocess.run
+        payload = "import sys; sys.stdout.buffer.write(b'bad-\\xff/.env\\0bad-\\xfe/.env\\0')"
+
+        def fake_git(cmd, **kwargs):
+            return real_run([_sys.executable, "-c", payload], **kwargs)
+
+        with mock.patch("checker.subprocess.run", side_effect=fake_git):
+            items = _run_git_nul(["ls-files", "-z"], self.tmp)
+        self.assertEqual(len(set(items)), 2, f"別のパスが同じ文字列に潰れた: {items!r}")
+        self.assertEqual(
+            sorted(os.fsencode(i) for i in items),
+            [b"bad-\xfe/.env", b"bad-\xff/.env"],
+            "元のバイト列に戻せない",
+        )
+
+    def test_ack_digests_of_non_utf8_paths_do_not_collide(self):
+        """片方を ack したら他方が黙る、が起きないこと。encode で落ちないこと。"""
+        from stop_ack import digest_entries
+        a = os.fsdecode(b"bad-\xff/.env")
+        b = os.fsdecode(b"bad-\xfe/.env")
+        digests = digest_entries(
+            [{"path": a, "status": "untracked"}, {"path": b, "status": "untracked"}],
+            scope=self.tmp,
+        )
+        self.assertEqual(len(digests), 2)
 
 
 if __name__ == "__main__":

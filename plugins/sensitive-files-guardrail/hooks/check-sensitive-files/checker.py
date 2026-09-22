@@ -140,8 +140,13 @@ def _run_git_raw(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
+            # locale 非依存 (Windows 既定の cp1252 で UTF-8 のパスが化けない) かつ
+            # **無損失** (0.34.1)。POSIX のファイル名は UTF-8 である保証が無く、
+            # ``replace`` だと ``bad-\xff/.env`` と ``bad-\xfe/.env`` が同じ文字列に
+            # 潰れて ack の digest まで衝突する (片方を ack すると他方が黙る)。
+            # ``surrogateescape`` なら元のバイト列に戻せる
             encoding="utf-8",
-            errors="replace",
+            errors="surrogateescape",
             timeout=timeout,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:

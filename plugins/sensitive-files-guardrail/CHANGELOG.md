@@ -26,8 +26,8 @@ commit 52113a1 で完了)。
 ## 0.34.1
 
 Windows 移植性の不具合修正。判定表は変えない。**テキスト I/O の encoding を
-locale 依存から UTF-8 固定へ**。テスト件数: redact **1,485 → 1,493** /
-check **174 → 177**。
+locale 依存から UTF-8 固定へ**。テスト件数: redact **1,485 → 1,496** /
+check **174 → 179**。
 
 ### Fixed
 
@@ -39,8 +39,13 @@ check **174 → 177**。
   `check-sensitive-files` の**全**呼出が catch-all (`ask_or_deny` / internal_error)
   に落ちていた = 0.34.0 の「Windows でも通常判定を通す」は実際には機能して
   いなかった。0.34.0 の Windows CI 初回実行 (redact 1,812 / check 79 errors) の
-  支配的原因。既定 / repo 同梱 / user / 旧パスの 4 tier すべてを
-  `read_text(encoding="utf-8", errors="replace")` に揃えた
+  支配的原因。既定 / repo 同梱 / user / 旧パスの 4 tier すべてを **strict な
+  UTF-8** (先頭 BOM は許容) で読むようにした。**UTF-8 として読めないファイルは
+  `PatternsDecodeError` (`OSError` の subclass) にして既存の「読めない patterns」の
+  扱いに乗せる** — 既定 patterns.txt なら全呼出元の `patterns_unavailable`、追加 tier
+  なら warning を出してその tier を読まない。`errors="replace"` で読み進めると、
+  cp932 等で保存された `秘密.txt` のような rule が U+FFFD の並びになって一致しなく
+  なり、**警告も出ずに保護が消える**ため採らない (マージ前レビューの指摘)
 - **hook envelope (stdin) の decode も locale 依存だった**。`sys.stdin.read()` は
   `sys.stdin` の encoding に従うため、`file_path` / `command` / `content` に日本語が
   あると (a) cp1252 に未定義のバイト (`あ` = E3 **81** 82 等) で
@@ -51,22 +56,31 @@ check **174 → 177**。
   `sys.stdin.buffer` から bytes を読んで UTF-8 で decode する (`write_stdout` の
   対称。`buffer` を持たない差し替え stdin ではテキスト読みに fallback)
 - **Stop hook の git 出力 decode** (`subprocess.run(text=True)`) も同じ理由で
-  `encoding="utf-8", errors="replace"` に固定。git は `-z` では quote せず UTF-8 の
+  `encoding="utf-8", errors="surrogateescape"` に固定。git は `-z` では quote せず
   生バイトを返すため、非 ASCII のパスは cp1252 で化けて「そのパスは無い」に
-  なっていた
+  なっていた。`replace` ではなく **`surrogateescape` (無損失)** にしたのは、POSIX の
+  ファイル名は UTF-8 の保証が無く、`replace` だと `bad-\xff/.env` と `bad-\xfe/.env`
+  が同じ文字列に潰れて session ack の digest まで衝突する (片方を ack すると他方が
+  黙る) ため (マージ前レビューの指摘)。ack の digest も同じ `surrogateescape` で
+  元のバイト列に戻してから取る。従来 (POSIX / UTF-8 locale) はこの形のパスで
+  `UnicodeDecodeError` → internal_error になっていたので、それも併せて解消
 - ログファイル追記 (`LOG_PATH.open("a")`) も `encoding="utf-8"` を明示 (衛生。
   ログ行は `_sanitize_detail` の ASCII ホワイトリストを通るため実害は無かった)
 
 ### Tests
 
-- 床テスト 8 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
+- 床テスト 13 件を追加。いずれも**修正を外すと落ちる**ことを確認済み:
   patterns loader は `Path.read_text` の encoding 省略時だけ cp1252 に倒す wrapper で
   Windows 既定を模擬 (同梱 patterns の読込 / 日本語ファイル名 rule の非文字化け /
   日本語コメント)。stdin は子プロセスに `PYTHONIOENCODING=cp1252` を与えて
   Read (誤 deny しない) / Edit (pattern 一致の理由で deny する) / Stop
   (`cwd` が非 ASCII でも block を出す) を固定。git 出力は `locale` を patch して
   非 ASCII ディレクトリ配下の `.env` が化けずに報告されることと、`subprocess.run`
-  の kwargs に `encoding="utf-8"` が残ることを固定
+  の kwargs に `encoding="utf-8"` / `errors="surrogateescape"` が残ることを固定。
+  非 UTF-8 の patterns (cp932 の user tier は warning + skip / 既定は `OSError` 送出 /
+  BOM 付きでも 1 行目が効く) と、非 UTF-8 のパスのバイトが潰れないこと (macOS は
+  そういう名前を作れないため、生バイトを出す子プロセスで実際の decode 経路を通す)・
+  ack digest が衝突しないことを固定
 - Windows 実機 / CI での再検証は未実施 (CI の `tests-windows` job は別 PR)。
   残る posix 前提 (`mkfifo` / `geteuid` / `O_BINARY` / gitdir の区切り等) は
   内部バックログで追跡
