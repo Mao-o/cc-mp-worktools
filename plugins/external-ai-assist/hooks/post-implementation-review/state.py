@@ -34,7 +34,10 @@ UPS リセットを TTL ベースに置き換えている (hooks/diffstate.py �
 Stop の取得順は cursor lock -> state lock -> (state 解放) -> review。state lock を
 握ったまま review すると、全セッションの PostToolUse が cursor の timeout 上限 (600 秒) まで
 ブロックされる。
-PostToolUse は state lock しか取らないため、この順序で循環待ちは発生しない。
+
+0.12.0 から **PostToolUse(Bash) も commit を含む窓では cursor lock を取る**。それでも
+循環待ちは起きない: `__main__._handle_bash` は state lock を**解放してから** cursor lock を
+非ブロッキング (try-lock) で取るため、hold-and-wait が成立しない。
 """
 from __future__ import annotations
 
@@ -48,18 +51,24 @@ from contextlib import contextmanager
 
 from _common import flock
 
-import cursor
+import selection
 
-# in-flight の回収 TTL。cursor の timeout を**必ず超える**必要がある。下回ると、
+# in-flight の回収 TTL。レビュー backend の timeout を**必ず超える**必要がある。下回ると、
 # 正常に走っている in-flight を別セッションの Stop が途中で横取りし、同じ diff で
-# cursor が二重起動する。推奨値ではなく正しさの制約なので、cursor 側から導出して
+# 外部 AI CLI が二重起動する。推奨値ではなく正しさの制約なので、backend 側から導出して
 # 手で乖離できないようにしている。
 #
 # 導出元は既定値 (`TIMEOUT_SEC`) ではなく**上限** (`MAX_TIMEOUT_SEC`)。0.6.0 で
 # `EXTERNAL_AI_POST_REVIEW_TIMEOUT` により timeout が可変になったため、既定値から
 # 導くと「短く設定したセッションが、長く設定した別セッションの in-flight を
 # TTL 超過とみなして奪う」経路ができる。TTL は全セッションで同じ値でなければならない。
-IN_FLIGHT_TTL_SEC = cursor.MAX_TIMEOUT_SEC + 300
+#
+# 0.12.0 で導出元を cursor 単体から **全 backend の上限の最大**
+# (`selection.MAX_TOTAL_TIMEOUT_SEC`) に変えた。TTL は「どの backend を選んだセッション
+# でも同じ値」でなければならないので、cursor だけを見ていると、上限の違う backend を
+# 使うセッションが現れた時点で横取りが起きる (現状は cursor と codex が同じ 600 秒
+# なので値は 900 秒のまま変わらない)。
+IN_FLIGHT_TTL_SEC = selection.MAX_TOTAL_TIMEOUT_SEC + 300
 
 # 状態ファイル自体の GC TTL (mtime 基準)。書き込みのたびに mtime が更新されるため、
 # 稼働中セッションのファイルが消えることはない。
@@ -74,6 +83,11 @@ BASH_SNAPSHOT_TTL_SEC = 3600
 
 MAX_PENDING_PATHS = 200
 MAX_REVIEWED_ENTRIES = 500
+
+# 内容指紋 (`fingerprints`) の保持数。pending と同じ枠にしてあるのは、指紋が意味を
+# 持つのは pending ∪ in-flight にあるパスだけで、それ以外は `record_fingerprints` の
+# 刈り取りで落ちるため (pending より多く持つ理由が無い)。
+MAX_FINGERPRINT_ENTRIES = MAX_PENDING_PATHS
 
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -99,6 +113,18 @@ def _bash_snapshot_path(session_id: str, tool_use_id: str) -> str:
     return os.path.join(state_root(), "bashsnap", name)
 
 
+def _bash_reflog_path(session_id: str, tool_use_id: str) -> str:
+    """commit 検出用の reflog スナップショット (`reflog.py` の窓の起点)。
+
+    `git status` のスナップショットと**別ファイル**にしてあるのは、両者の失敗条件が
+    独立しているため: 巨大な作業ツリー (`MAX_SNAPSHOT_ENTRIES` 超過) や `git status`
+    の timeout で status 側が保存できなくても、commit 検出は成立させたい。
+    同じ `bashsnap/` 配下なので GC の短い TTL (`BASH_SNAPSHOT_TTL_SEC`) がそのまま効く。
+    """
+    name = f"{_safe(session_id)}__{_safe(tool_use_id)}.reflog.json"
+    return os.path.join(state_root(), "bashsnap", name)
+
+
 def review_copy_path(session_id: str) -> str:
     return os.path.join(state_root(), "reviews", f"{_safe(session_id)[:16]}.txt")
 
@@ -109,7 +135,9 @@ def _empty_state() -> dict:
         "pending": {},
         "in_flight": {},
         "reviewed": {},
+        "fingerprints": {},
         "last_review_at": 0.0,
+        "last_backend": "",
     }
 
 
@@ -118,18 +146,22 @@ def _normalize(raw) -> dict:
 
     `_empty_state()` の**全キー**を引き継ぐこと。dict のキーだけをループしていた
     0.5.0 の形のままスカラーを足すと、読むたびに `last_review_at` が 0 に戻り
-    cooldown が永久に効かない。
+    cooldown が永久に効かない (`last_backend` も同じ壊れ方をする — 読むたびに空へ
+    戻ると `alternate` 戦略が毎回「前回不明」になり、常に列挙順の先頭を選んでしまう)。
     """
     if not isinstance(raw, dict):
         return _empty_state()
     state = _empty_state()
-    for key in ("pending", "in_flight", "reviewed"):
+    for key in ("pending", "in_flight", "reviewed", "fingerprints"):
         value = raw.get(key)
         if isinstance(value, dict):
             state[key] = value
     stamp = raw.get("last_review_at")
     if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
         state["last_review_at"] = float(stamp)
+    backend = raw.get("last_backend")
+    if isinstance(backend, str):
+        state["last_backend"] = backend
     return state
 
 
@@ -223,7 +255,18 @@ def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> No
     """
     try:
         with _locked_state(session_id) as state:
-            state["in_flight"].pop(claim_id, None)
+            entry = state["in_flight"].pop(claim_id, None)
+            # レビューが終わったパスは pending ∪ in-flight から外れる = 指紋の意味が
+            # 無くなる (commit レビューの P1 が見るのはこの集合だけ)。残すと state が
+            # 膨らむだけなので落とす。**ただし pending に戻っているパスは残す** —
+            # `_run_review` は上限 / 予算超過で繰り越したパスをこの呼び出しより前に
+            # pending へ積み直しており、そこで指紋を消すと次の Stop の前に commit
+            # されたとき P6 が通らずファイル名通知に落ちる (マージ前レビューの指摘)
+            if isinstance(entry, dict):
+                pending = state["pending"]
+                for path in entry.get("paths") or []:
+                    if isinstance(path, str) and path not in pending:
+                        state["fingerprints"].pop(path, None)
             reviewed = state["reviewed"]
             for path, digest in hashes.items():
                 reviewed.pop(path, None)  # 挿入順を更新して LRU として使う
@@ -250,6 +293,139 @@ def restore_claim(session_id: str, claim_id: str, paths: list[str]) -> None:
                 state["pending"].setdefault(p, now)
     except OSError:
         pass
+
+
+def recorded_paths(session_id: str) -> list[str]:
+    """**このセッションが「今」未レビューの変更を抱えている**絶対パス (pending ∪ in-flight)。
+
+    commit レビュー (`__main__._run_commit_review`) が I1' を満たすために使う集合。
+    commit に入っていてもこの集合に無いパスは、**内容を一切送らずファイル名だけ通知**
+    する — 「このセッションが編集した」と言えないパスの内容を外部へ出さないため
+    (`git commit -a` は他セッション・人手の作業ツリー変更も巻き込む)。
+
+    in-flight を含めるのは、Stop が claim 中 (レビュー実行中) に別の Bash が commit
+    しても同じ結論になるようにするため。
+
+    **`reviewed` は含めない (マージ前レビューの指摘)。** `reviewed` は「このセッションが
+    過去に一度でも編集した」LRU 500 件のセッション全履歴で、Stop 経路では「hash が同じ
+    なら再送しない」抑止にしか使われず**送信許可を与えていない**。ここに入れると
+    「一度編集したパスは、以後セッション中ずっと誰が書いた内容でも送ってよい」に
+    昇格してしまい、0.11.0 の Stop が送らない他者の内容を送る経路になる
+    (再現: `tests/test_commit_flow.py::TestReviewedIsNotASendPermission`)。
+    失うものは無い — Stop がレビューを終えて `reviewed` に移した内容は既に外部へ
+    送って見てもらった後なので、同じ内容を commit 時にもう一度送る価値が無い。
+
+    順序は pending → in-flight (重複は先勝ち)。state ファイルが一度も無ければ空
+    (開かない — `claim_pending` と同じ理由)。
+    """
+    if not os.path.exists(_state_path(session_id)):
+        return []
+    try:
+        with _locked_state(session_id) as state:
+            ordered: dict[str, None] = {}
+            for path in state["pending"]:
+                ordered.setdefault(path, None)
+            for entry in state["in_flight"].values():
+                if not isinstance(entry, dict):
+                    continue
+                for path in entry.get("paths") or []:
+                    if isinstance(path, str):
+                        ordered.setdefault(path, None)
+            return list(ordered)
+    except OSError:
+        return []
+
+
+def drop_pending(session_id: str, paths: list[str]) -> None:
+    """commit レビュー済みで、かつ未 commit の変更が残っていないパスを pending から外す。
+
+    外さないと、Stop が同じパスを claim して `git diff HEAD` が空になっているのを見つけ、
+    「差分が空で取得できませんでした」と**誤通知**する (実際には commit レビューで
+    送信済み)。まだ未 commit の変更が残るパスは呼び出し側が渡さない = pending に残り、
+    Stop が続きを見る。
+
+    `reviewed` には書かない (**片側に倒した判断**): `reviewed` はパス → *HEAD 基準*
+    diff の hash で、commit レビューが見たのは `old..new` の range diff なので値の
+    意味が違う。空 diff の hash を入れても `_collect_diffs` は空 diff を hash 判定より
+    手前で落とすため一度も参照されず、LRU (`MAX_REVIEWED_ENTRIES`) の枠を食って本物の
+    エントリを追い出すだけになる。
+    """
+    if not paths:
+        return
+    try:
+        with _locked_state(session_id) as state:
+            for path in paths:
+                state["pending"].pop(path, None)
+                state["fingerprints"].pop(path, None)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# 内容指紋 (commit レビューの P6, 0.12.0)
+# --------------------------------------------------------------------------
+
+
+def record_fingerprints(session_id: str, digests: dict[str, str | None]) -> None:
+    """編集ツールが書いた直後のファイル内容の sha256 を、パスごとに記録する。
+
+    値が `None` なら**消す** (1 MiB 超 / 読めない / 通常ファイルでない = 指紋なし)。
+    「最後の編集が勝つ」ので同じパスへの再編集は上書きになる。指紋が無いパスは
+    commit レビューで内容を送らない (`__main__` の P6) ため、消すことは常に
+    送信範囲を狭める方向。
+
+    記録のたびに **pending ∪ in-flight に無いキーを刈る**。指紋が意味を持つのは
+    その集合のパスだけ (P1) で、残しても state が膨らむだけのため。さらに
+    `MAX_FINGERPRINT_ENTRIES` を超えたら古い方から落とす — pending が末尾
+    (新しい方) から落とすのと向きが逆なのは、指紋は「直前に書いた内容」の証拠で、
+    古いものほど commit 待ちとして使われる可能性が低いため。
+    """
+    if not digests:
+        return
+    try:
+        with _locked_state(session_id) as state:
+            table = state["fingerprints"]
+            for path, digest in digests.items():
+                table.pop(path, None)  # 挿入順を更新 (上書きは最後尾へ)
+                if digest:
+                    table[path] = digest
+            live = set(state["pending"])
+            for entry in state["in_flight"].values():
+                if isinstance(entry, dict):
+                    live.update(p for p in (entry.get("paths") or []) if isinstance(p, str))
+            for stale in [p for p in table if p not in live]:
+                del table[stale]
+            for oldest in list(table)[: max(0, len(table) - MAX_FINGERPRINT_ENTRIES)]:
+                del table[oldest]
+    except OSError:
+        pass
+
+
+def drop_fingerprints(session_id: str, paths: list[str]) -> None:
+    """指定したパスの指紋を消す (Bash がそのファイルを書き換えたと分かったとき)。"""
+    if not paths:
+        return
+    try:
+        with _locked_state(session_id) as state:
+            for path in paths:
+                state["fingerprints"].pop(path, None)
+    except OSError:
+        pass
+
+
+def fingerprints(session_id: str) -> dict[str, str]:
+    """記録済みの内容指紋 (絶対パス -> sha256)。state ファイルが無ければ空。"""
+    if not os.path.exists(_state_path(session_id)):
+        return {}
+    try:
+        with _locked_state(session_id) as state:
+            return {
+                path: digest
+                for path, digest in state["fingerprints"].items()
+                if isinstance(path, str) and isinstance(digest, str) and digest
+            }
+    except OSError:
+        return {}
 
 
 def reviewed_hashes(session_id: str) -> dict[str, str]:
@@ -289,6 +465,41 @@ def last_review_at(session_id: str) -> float:
         return 0.0
 
 
+def last_backend(session_id: str) -> str:
+    """このセッションで直近にレビュー結果を返した backend 名 (未記録なら空文字列)。
+
+    `selection` の `alternate` 戦略が「前回と別」を選ぶための **1 値だけ**の記録。
+    パス単位の記録も「レビュー済み hunk」の重複除去 state も持たない (ユーザー決定)。
+
+    state ファイルが一度も無ければ空 (開かない — `claim_pending` と同じ理由)。
+    """
+    if not os.path.exists(_state_path(session_id)):
+        return ""
+    try:
+        with _locked_state(session_id) as state:
+            value = state.get("last_backend")
+            return value if isinstance(value, str) else ""
+    except OSError:
+        return ""
+
+
+def record_last_backend(session_id: str, name: str) -> None:
+    """**レビュー結果を実際に返した** backend を記録する。
+
+    失敗した backend は記録しない。記録してしまうと `alternate` が「失敗したほう」を
+    避けるようになり、次のレビューで成功した backend と区別が付かなくなる —
+    この値の意味は「前回どこにレビューさせたか」であって「前回どこが落ちたか」では
+    ない (同じ行を 2 回見るときに別の目で見せる、が目的)。
+    """
+    if not name:
+        return
+    try:
+        with _locked_state(session_id) as state:
+            state["last_backend"] = name
+    except OSError:
+        pass
+
+
 def mark_review_done(session_id: str) -> None:
     """cursor の実行が終わった時点で呼ぶ (成功・失敗を問わない)。
 
@@ -316,8 +527,23 @@ def save_bash_snapshot(session_id: str, tool_use_id: str, snapshot: dict) -> Non
         pass
 
 
+def save_bash_reflog(session_id: str, tool_use_id: str, snapshot: dict) -> None:
+    try:
+        flock.write_private(_bash_reflog_path(session_id, tool_use_id), json.dumps(snapshot))
+    except OSError:
+        pass
+
+
+def pop_bash_reflog(session_id: str, tool_use_id: str) -> dict | None:
+    """保存した reflog スナップショットを取り出して消す (無ければ None = fail-closed)。"""
+    return _pop_json(_bash_reflog_path(session_id, tool_use_id))
+
+
 def pop_bash_snapshot(session_id: str, tool_use_id: str) -> dict | None:
-    path = _bash_snapshot_path(session_id, tool_use_id)
+    return _pop_json(_bash_snapshot_path(session_id, tool_use_id))
+
+
+def _pop_json(path: str) -> dict | None:
     try:
         with open(path) as f:
             snapshot = json.load(f)

@@ -29,7 +29,7 @@ _ENTRY_PATH = _PKG_DIR / "__main__.py"
 
 
 # cursor の実体は**テストプロセス全体で**偽 CLI 側に固定する。0.11.0 の検出は
-# `cursor-agent` / `agent` も候補にするため、固定しないと開発機に入っている本物を掴んで
+# `cursor-agent` も候補にするため、固定しないと開発機に入っている本物を掴んで
 # `--version` を起動しうる (外部 AI CLI を起動しないというテストの前提が崩れる)。
 # **クラスごとの env パッチに書くだけでは足りない**: 自前で `mock.patch.dict` を張る
 # テストクラスが漏れると、そこだけ実機の検出が走る (実際に踏んだ)。モジュール読み込み時に
@@ -261,8 +261,13 @@ class HookTestCase(unittest.TestCase):
         )
         return data.get("systemMessage", "")
 
-    def assertBlocked(self, output: str) -> dict:
+    def assertBlocked(self, output: str, backend: str = "Cursor") -> dict:
         """指摘ありでレビュー結果を返したことを検証する。
+
+        `backend` はレビュー本文のヘッダに出る backend の表示名 (0.12.0)。既定は
+        `Cursor` = `EXTERNAL_AI_POST_REVIEW_BACKENDS` 未設定時の唯一の送信先なので、
+        既存の呼び出し側は **cursor に送られたことまで込みで**従来どおり固定される。
+        別の backend に送った結果を検証するテストだけが明示的に渡す。
 
         0.8.0 から既定は `hookSpecificOutput.additionalContext` (hookEventName: "Stop")。
         `EXTERNAL_AI_POST_REVIEW_MODE=block` なら 0.7.0 までの top-level
@@ -290,7 +295,7 @@ class HookTestCase(unittest.TestCase):
             self.assertNotIn("decision", data)
             reason = specific.get("additionalContext", "")
             data["reason"] = reason
-        self.assertIn("## 実装直後レビュー結果 (Cursor, 差分レビュー)", reason)
+        self.assertIn(f"## 実装直後レビュー結果 ({backend}, 差分レビュー)", reason)
         return data
 
     def pending(self, session_id: str) -> list[str]:

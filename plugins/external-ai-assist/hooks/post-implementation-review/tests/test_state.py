@@ -168,6 +168,46 @@ class TestInFlightTtl(StateTestCase):
         self.assertGreater(state.IN_FLIGHT_TTL_SEC, cursor.MAX_TIMEOUT_SEC)
         self.assertGreater(state.IN_FLIGHT_TTL_SEC, cursor.TIMEOUT_SEC)
 
+    def test_ttl_covers_every_backend_not_just_cursor(self):
+        """0.12.0: TTL は **どの backend を選んだセッションでも同じ値**でなければならない。
+
+        cursor だけを見て導出していると、`EXTERNAL_AI_POST_REVIEW_BACKENDS` で別の
+        backend を選んだセッション (上限が違いうる) の in-flight を「TTL 超過」と
+        みなして横取りする経路が開く。
+        """
+        import selection
+
+        for module in selection.REVIEWERS:
+            with self.subTest(backend=module.NAME):
+                self.assertGreater(state.IN_FLIGHT_TTL_SEC, module.MAX_TIMEOUT_SEC)
+                self.assertGreater(state.IN_FLIGHT_TTL_SEC, module.TIMEOUT_SEC)
+
+    def test_last_backend_roundtrip(self):
+        """`alternate` が「前回と別」を選ぶための 1 値。"""
+        self.assertEqual(state.last_backend(SESSION), "", "未記録なら空")
+        state.record_last_backend(SESSION, "cursor")
+        self.assertEqual(state.last_backend(SESSION), "cursor")
+        state.record_last_backend(SESSION, "codex")
+        self.assertEqual(state.last_backend(SESSION), "codex")
+
+    def test_last_backend_survives_other_writes(self):
+        """`_normalize()` がスカラーを引き継がないと、読むたびに空へ戻って
+        `alternate` が毎回「前回不明」になる (`last_review_at` と同じ壊れ方)。"""
+        state.record_last_backend(SESSION, "codex")
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.mark_review_done(SESSION)
+        self.assertEqual(state.last_backend(SESSION), "codex")
+
+    def test_empty_backend_name_is_not_recorded(self):
+        state.record_last_backend(SESSION, "cursor")
+        state.record_last_backend(SESSION, "")
+        self.assertEqual(state.last_backend(SESSION), "cursor")
+
+    def test_last_backend_on_untouched_session_creates_no_file(self):
+        path = os.path.join(state.state_root(), "state", f"{SESSION}.json")
+        self.assertEqual(state.last_backend(SESSION), "")
+        self.assertFalse(os.path.exists(path))
+
 
 class TestCorruptState(StateTestCase):
     def test_garbage_state_file_is_reset(self):
@@ -328,6 +368,91 @@ class TestGc(StateTestCase):
             self.assertTrue(
                 os.path.exists(lock_path), "保持中のロックは mtime 更新で GC されないこと"
             )
+
+
+class TestFingerprints(StateTestCase):
+    """commit レビューの P6 が読む内容指紋の寿命 (0.12.0)。"""
+
+    def test_record_and_read(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "digest-1"})
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/a.py": "digest-1"})
+
+    def test_none_removes_the_entry(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "digest-1"})
+        state.record_fingerprints(SESSION, {"/repo/a.py": None})
+        self.assertEqual(state.fingerprints(SESSION), {})
+
+    def test_last_write_wins(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "digest-1"})
+        state.record_fingerprints(SESSION, {"/repo/a.py": "digest-2"})
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/a.py": "digest-2"})
+
+    def test_entries_outside_pending_and_in_flight_are_pruned(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1", "/repo/gone.py": "d2"})
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/a.py": "d1"})
+
+    def test_claimed_paths_keep_their_fingerprint(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1"})
+        state.claim_pending(SESSION)
+        state.record_pending(SESSION, ["/repo/b.py"])
+        state.record_fingerprints(SESSION, {"/repo/b.py": "d2"})
+        self.assertEqual(
+            state.fingerprints(SESSION), {"/repo/a.py": "d1", "/repo/b.py": "d2"}
+        )
+
+    def test_completed_claim_drops_the_fingerprint(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1"})
+        claim_id, _paths = state.claim_pending(SESSION)
+        state.complete_claim(SESSION, claim_id, {"/repo/a.py": "hash"})
+        self.assertEqual(state.fingerprints(SESSION), {})
+
+    def test_requeued_claim_path_keeps_the_fingerprint(self):
+        """上限 / 予算超過で pending へ戻したパスは、claim 完了でも指紋を残す。"""
+        state.record_pending(SESSION, ["/repo/a.py", "/repo/b.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1", "/repo/b.py": "d2"})
+        claim_id, _paths = state.claim_pending(SESSION)
+        state.record_pending(SESSION, ["/repo/b.py"])  # b は繰り越し (送っていない)
+        state.complete_claim(SESSION, claim_id, {"/repo/a.py": "hash"})
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/b.py": "d2"})
+
+    def test_restored_claim_keeps_the_fingerprint(self):
+        """レビューに失敗したパスは pending へ戻るので、指紋も残す。"""
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1"})
+        claim_id, paths = state.claim_pending(SESSION)
+        state.restore_claim(SESSION, claim_id, paths)
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/a.py": "d1"})
+
+    def test_drop_pending_drops_the_fingerprint(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1"})
+        state.drop_pending(SESSION, ["/repo/a.py"])
+        self.assertEqual(state.fingerprints(SESSION), {})
+
+    def test_cap_drops_the_oldest(self):
+        paths = [f"/repo/f{i}.py" for i in range(3)]
+        state.record_pending(SESSION, paths)
+        with mock.patch.object(state, "MAX_FINGERPRINT_ENTRIES", 2):
+            state.record_fingerprints(SESSION, {p: f"d{i}" for i, p in enumerate(paths)})
+        self.assertEqual(list(state.fingerprints(SESSION)), paths[1:])
+
+    def test_missing_key_in_an_old_state_file_is_tolerated(self):
+        state.record_pending(SESSION, ["/repo/a.py"])
+        path = os.path.join(state.state_root(), "state", f"{SESSION}.json")
+        with open(path) as f:
+            raw = json.load(f)
+        raw.pop("fingerprints")
+        with open(path, "w") as f:
+            json.dump(raw, f)
+        self.assertEqual(state.fingerprints(SESSION), {})
+        state.record_fingerprints(SESSION, {"/repo/a.py": "d1"})
+        self.assertEqual(state.fingerprints(SESSION), {"/repo/a.py": "d1"})
 
 
 if __name__ == "__main__":

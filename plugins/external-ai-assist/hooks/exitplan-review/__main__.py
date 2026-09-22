@@ -118,11 +118,14 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import flock, gitroot, hooklog, notify, sentinel, settings  # noqa: E402
+from _common import backends, flock, gitroot, hooklog, notify, sentinel, settings  # noqa: E402
 
 import codex  # noqa: E402
 import cursor  # noqa: E402
 
+#: このプランレビューが使うレビュアー。**registry の全 backend ではなく、この hook が
+#: 明示的に列挙したものだけ**を使う (`_common/backends/registry.py` に backend を足しても
+#: プランレビューの送信先は増えない)。並び順が build_reason のセクション順になる。
 REVIEWERS = [cursor, codex]
 
 DEFAULT_MAX_REVIEWS = 2
@@ -177,11 +180,12 @@ def selected_reviewers() -> tuple[list, list[str]]:
     未知の名前 (`codx` のタイプミス等) しか指定されていない場合は空リストを返して
     no-op にする。既定の全件へ fallback すると、外したはずのレビュアーが黙って
     走ることになる。
+
+    絞り込みそのものは `_common.backends.select` に寄せた (0.12.0)。**事前チェックと
+    実行で別々に集合を計算しない**という制約は post-implementation-review の backend
+    選択と同じものなので、規則を 1 か所に置いて両方から使う。
     """
-    wanted = settings.names(ENV_REVIEWERS)
-    known = {r.NAME for r in REVIEWERS}
-    unknown = [name for name in (wanted or []) if name not in known]
-    chosen = [r for r in REVIEWERS if wanted is None or r.NAME in wanted]
+    chosen, unknown = backends.select(REVIEWERS, settings.names(ENV_REVIEWERS))
     return [r for r in chosen if r.is_available()], unknown
 
 

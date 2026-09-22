@@ -7,12 +7,34 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
-_ENTRY_PATH = Path(__file__).resolve().parent.parent / "__main__.py"
+_PKG_DIR = Path(__file__).resolve().parent.parent
+_ENTRY_PATH = _PKG_DIR / "__main__.py"
+
+
+def _purge_hook_modules() -> None:
+    """hook ディレクトリ由来の top-level module を `sys.modules` から外す。
+
+    **名前で列挙してはいけない。** hook 内 module が増えたときに漏れ、漏れた module は
+    「外し損ねた古い実体」への参照を抱えたまま生き残る。後続のテストが
+    `sys.modules["cursor"]` を patch しても、古い module 経由の呼び出しはその patch を
+    通らない ので、**モックのはずの箇所で実機の外部 AI CLI が起動する** (0.12.0 で
+    `selection` を足したときに実際に踏んだ: `selection.cursor` が旧 module を指したまま
+    残り、`cursor.review` の patch が効かずに本物の cursor CLI を起動しかけた)。
+
+    ここではパッケージディレクトリ直下のファイルから読まれた module を機械的に全部
+    落とすので、module が増えてもこの関数を直す必要が無い。
+    """
+    pkg_dir = str(_PKG_DIR)
+    for name, module in list(sys.modules.items()):
+        path = getattr(module, "__file__", None)
+        if path and os.path.dirname(os.path.abspath(path)) == pkg_dir:
+            del sys.modules[name]
 
 # ガードの条件は `os.name != "posix"` なので、値そのものは "posix" 以外なら何でもよい。
 # 実際の Windows 値である "nt" は使わない: Python 3.12+ の `pathlib.Path()` は生成時に
@@ -48,8 +70,7 @@ class TestPosixGuard(unittest.TestCase):
         気付かないケースを見逃す。`sys.modules` に state 由来のモジュールが
         一切登録されていないことまで見る。
         """
-        for name in ("state", "gitscan", "exclusion", "stategc", "cursor"):
-            sys.modules.pop(name, None)
+        _purge_hook_modules()
         with self.assertRaises(SystemExit):
             self._load_under(_NON_POSIX)
         self.assertNotIn(

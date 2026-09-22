@@ -59,7 +59,7 @@
       "name": "external-ai-assist",
       "displayName": "External AI Assist",
       "source": "./plugins/external-ai-assist",
-      "description": "Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集。Explore の Cursor 並走、ExitPlanMode の Cursor+Codex クロスレビュー、Stop 時の Cursor 差分レビューを提供する",
+      "description": "Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集。Explore の Cursor 並走、ExitPlanMode の Cursor+Codex クロスレビュー、Stop 時の差分レビューと Bash の中で作られた commit のレビューを提供する",
       "category": "productivity",
       "keywords": [
         "hooks",

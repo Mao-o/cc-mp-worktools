@@ -262,13 +262,27 @@ class TestBashSnapshotFailure(HookTestCase):
         )
 
     def test_pre_snapshot_failure_writes_no_snapshot_file(self):
-        """失敗時は null を書くのではなく、そもそもファイルを作らない (残骸を増やさない)。"""
+        """失敗時は null を書くのではなく、そもそも status のファイルを作らない。
+
+        0.12.0 で commit 検出用の reflog スナップショットが同じ `bashsnap/` 配下に
+        増えた。**status とは失敗条件が独立**にしてあるので、`git status` が諦めても
+        reflog 側は保存される (巨大な作業ツリーで commit レビューまで止めないため)。
+        見たいのは「status 側の残骸を作らない」ことなので、ディレクトリの有無ではなく
+        置かれているファイルの集合で判定する。
+        """
         payload = self._bash_payload(SESSION_A, "tu_fail_pre2")
         with mock.patch.object(self.gitscan, "status_snapshot", return_value=None):
             self.run_hook("pre-tool", payload)
         snapshot_dir = os.path.join(self.tmpdir, "post-implementation-review", "bashsnap")
         self.assertFalse(
-            os.path.exists(snapshot_dir), "snapshot 失敗時にファイルを作ってはいけない"
+            os.path.exists(self.state._bash_snapshot_path(SESSION_A, "tu_fail_pre2")),
+            "snapshot 失敗時に status のファイルを作ってはいけない",
+        )
+        leftovers = sorted(os.listdir(snapshot_dir)) if os.path.exists(snapshot_dir) else []
+        self.assertEqual(
+            leftovers,
+            [os.path.basename(self.state._bash_reflog_path(SESSION_A, "tu_fail_pre2"))],
+            "bashsnap に置いてよいのは commit 検出用の reflog スナップショットだけ",
         )
 
 
@@ -374,6 +388,90 @@ class TestOutsideWorktree(HookTestCase):
         self.assertReviewed("a.txt")
         self.assertNotIn("outside.txt", self.review_calls[0])
         self.assertEqual(self.pending(SESSION_A), [], "ツリー外パスが残り続けないこと")
+
+
+class TestNestedWorktree(HookTestCase):
+    """root 配下の**入れ子の作業ツリー / git リポジトリ**の中のファイルは対象外。
+
+    cwd が外側の checkout のセッション (非隔離サブエージェントを含む) が、
+    `<root>/.claude/worktrees/<name>/...` の中のファイルを Write / Edit で編集すると
+    絶対パスがそのまま pending に積まれる。root 基準の `git diff HEAD -- <rel>` は
+    別リポジトリの中身なので**必ず空**になり、毎ターン「差分が空で取得できません
+    でした (commit 済みの可能性)」を出し続けていた (内容は送っていない)。
+
+    作業ツリー外の絶対パスと同じ扱い = 送らない・戻さない・通知しない・pending から消す。
+    """
+
+    def _assert_dropped_quietly(self, rel: str) -> None:
+        self.edit(SESSION_A, rel, "written from the outer session\n")
+        self.assertNotEqual(self.pending(SESSION_A), [], "前提: pending に積まれている")
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertNotReviewed()
+        notice = self.assertNotBlocked(output)
+        self.assertNotIn("取得できませんでした", notice)
+        self.assertNotIn(os.path.basename(rel), notice, "通知にファイル名を出さない")
+        self.assertEqual(self.pending(SESSION_A), [], "pending に残り続けないこと")
+
+    def test_linked_worktree_under_root_is_ignored(self):
+        """`git worktree add` で作った linked worktree (`.git` は**ファイル**)。"""
+        inner = os.path.join(self.repo, ".claude", "worktrees", "wt")
+        os.makedirs(os.path.dirname(inner), exist_ok=True)
+        _testutil.git(self.repo, "worktree", "add", "-q", "-b", "side", inner)
+        self.assertTrue(
+            os.path.isfile(os.path.join(inner, ".git")), "前提: linked worktree の .git はファイル"
+        )
+        self._assert_dropped_quietly(".claude/worktrees/wt/inner.txt")
+
+    def test_nested_repository_under_root_is_ignored(self):
+        """サブディレクトリで `git init` した入れ子 repo (`.git` はディレクトリ)。"""
+        inner = os.path.join(self.repo, "vendor", "embedded")
+        os.makedirs(inner)
+        _testutil.git(inner, "init", "-q")
+        self.assertTrue(os.path.isdir(os.path.join(inner, ".git")))
+        self._assert_dropped_quietly("vendor/embedded/inner.txt")
+
+    def test_submodule_contents_are_dropped(self):
+        """`git submodule add` した submodule (`.git` は**ファイル**)。
+
+        0.11.0 は submodule 内のパスを「差分が空で取得できませんでした」と通知して
+        いた。0.12.0 は入れ子の作業ツリーと同じ判定で落ちるので通知も出ない
+        (マージ前レビューの指摘で docs に明記した第 3 の形)。
+        """
+        upstream = os.path.join(self._tmp.name, "sub-upstream")
+        _testutil.init_repo(upstream)  # 初期 commit + user.name/email (CI には既定の identity が無い)
+        _testutil.git(
+            self.repo, "-c", "protocol.file.allow=always",
+            "submodule", "add", "-q", upstream, "sub",
+        )
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.repo, "sub", ".git")),
+            "前提: submodule の .git はファイル",
+        )
+        self._assert_dropped_quietly("sub/lib.py")
+
+    def test_symlinked_path_into_a_nested_repository_is_ignored(self):
+        """root 配下の symlink 経由で入れ子 repo に入るパスも落とす。
+
+        `to_relative` が realpath で実体側に解決するので、判定は実体のパスで行われる
+        (`linked/inner.txt` → `vendor/embedded/inner.txt`)。link 名のままだと
+        `.git` を持つ親が見つからず素通りする。
+        """
+        inner = os.path.join(self.repo, "vendor", "embedded")
+        os.makedirs(inner)
+        _testutil.git(inner, "init", "-q")
+        os.symlink(os.path.join("vendor", "embedded"), os.path.join(self.repo, "linked"))
+        self._assert_dropped_quietly("linked/inner.txt")
+
+    def test_ordinary_paths_are_unaffected(self):
+        """`.git` に似た名前のディレクトリ / root 直下のファイルは従来どおり。
+
+        判定は「親ディレクトリに `.git` が**在る**か」なので、`docs/.github/` のような
+        名前は当たらない。root 自身の `.git` も見ない (見ると全パスが落ちる)。
+        """
+        self.edit(SESSION_A, "docs/.github/workflows/ci.yml", "name: ci\n")
+        self.edit(SESSION_A, "top.txt", "at the root\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("ci.yml", "top.txt")
 
 
 def _parse_output(output: str) -> dict:

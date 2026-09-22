@@ -3,16 +3,22 @@
 git diff 本文をプロンプト末尾に埋め込んで cursor agent の --print (読み取り専用 `--mode plan`) で渡す。
 Cursor がコードベース全体を参照しながら影響範囲・リグレッションリスクを評価する。
 
-起動は `_common.subproc` 経由 (独自 process group + timeout + 残出力の読み捨て)。
+起動と存在確認は **`_common.backends` の registry 経由** (0.12.0)。独自 process group +
+timeout + 残出力の読み捨ては registry の中で従来どおり `_common.subproc` が行うので、
+起動 argv も待ち方も 0.11.0 から変わらない。この module に残るのは **hook 固有のもの**
+(プロンプト / timeout の既定値と上限 / 出力の切り詰め) だけ。
+
+**この hook でどの backend を使うかは `selection.py` が決める。** 差分レビューの既定の
+送信先は 0.11.0 と同じ cursor のみで、registry に backend が増えても変わらない。
 `_common` は `__main__.py` (テストでは `tests/_testutil.py`) が sys.path に載せる。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from _common import cursorcli, settings, subproc
+from _common import backends, settings
 
-NAME = cursorcli.NAME
+NAME = backends.cursor.NAME
 
 #: 既定の timeout。**0.6.0 で 600 → 300 に短縮** (挙動変更)。Stop は編集のあった全ターンで
 #: 発火するので、待ち時間の期待値が体感を決める。長考させたい場合は
@@ -39,7 +45,7 @@ def is_available(deadline: float | None = None) -> bool:
     timeout を分け合うので、そこからは締切を渡す (`__main__.PER_TOOL_PROBE_BUDGET_SEC`)。
     Stop は 690 秒の枠なので締切なし。
     """
-    return cursorcli.is_available(deadline)
+    return backends.cursor.is_available(deadline)
 
 
 def timeout_sec() -> float:
@@ -68,9 +74,6 @@ def review(diff_text: str, *, cwd: str | None = None) -> str | None:
     full_prompt = (
         f"{template}\n\n---\n\n## レビュー対象 git diff\n\n```diff\n{diff_text}\n```"
     )
-    return subproc.run_for_output(
-        cursorcli.readonly_argv(full_prompt),
-        timeout_sec=timeout_sec(),
-        cwd=cwd,
-        max_output_chars=MAX_OUTPUT_BYTES,
-    )
+    result = backends.cursor.run(full_prompt, cwd=cwd, timeout=timeout_sec())
+    result = result.truncated(MAX_OUTPUT_BYTES)
+    return result.text if result.is_ok else None

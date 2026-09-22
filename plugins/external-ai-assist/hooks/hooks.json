@@ -27,7 +27,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase pre-tool",
-            "timeout": 10
+            "timeout": 15
           }
         ]
       }
@@ -45,12 +45,22 @@
         ]
       },
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "matcher": "Write|Edit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase post-tool",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase post-tool",
+            "timeout": 720
           }
         ]
       }

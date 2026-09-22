@@ -400,14 +400,20 @@ class TestTimeoutBudgets(ReviewSetTestCase):
     なっても緑のままになる (マージ前レビューの指摘)。
     """
 
-    def _hook_timeouts(self) -> dict[str, int]:
+    def _hook_timeouts(self) -> dict[tuple[str, str], int]:
+        """`(phase, matcher) -> timeout`。
+
+        0.12.0 で **PostToolUse の matcher を 2 つに割った** (`Write|Edit|NotebookEdit`
+        と `Bash`) ため、phase だけをキーにすると片方が上書きで消える。commit レビューは
+        Bash 側にしか乗らないので、両者を別々に突き合わせる必要がある。
+        """
         import json as _json
         import pathlib
 
         hooks = _json.loads(
             (pathlib.Path(__file__).resolve().parents[2] / "hooks.json").read_text()
         )
-        found = {}
+        found: dict[tuple[str, str], int] = {}
         for entries in hooks["hooks"].values():
             for entry in entries:
                 for h in entry["hooks"]:
@@ -415,7 +421,7 @@ class TestTimeoutBudgets(ReviewSetTestCase):
                     if "post-implementation-review" not in cmd:
                         continue
                     phase = cmd.rsplit("--phase ", 1)[-1].strip()
-                    found[phase] = h["timeout"]
+                    found[(phase, entry.get("matcher", ""))] = h["timeout"]
         return found
 
     def test_pre_and_post_tool_fit_in_hook_budget(self):
@@ -427,7 +433,8 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         実測 (`gitscan._git` をカウンタでラップして pre-tool / post-tool(Bash) /
         post-tool(Edit) を個別に起動): pre-tool と post-tool/Bash はどちらも
         rev-parse 1 回 + status 1 回、post-tool/Edit,Write,NotebookEdit は
-        git 呼び出し 0 回だった。
+        git 呼び出し 0 回だった。**0.12.0 で pre-tool に reflog 窓の起点を取る
+        rev-parse が 1 回増えた** (`gitscan.head_log_snapshot`)。
         """
         import gitscan
 
@@ -439,36 +446,65 @@ class TestTimeoutBudgets(ReviewSetTestCase):
         probe_worst = self.entry.PER_TOOL_PROBE_BUDGET_SEC
 
         pre_tool_worst = (
-            probe_worst + gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
+            probe_worst
+            + gitscan.REV_PARSE_TIMEOUT_SEC * 2  # worktree_root + head_log_snapshot
+            + gitscan.STATUS_TIMEOUT_SEC
         )
-        self.assertIn("pre-tool", timeouts)
+        self.assertIn(("pre-tool", "Bash"), timeouts)
         self.assertLess(
             pre_tool_worst,
-            timeouts["pre-tool"],
+            timeouts[("pre-tool", "Bash")],
             f"pre-tool の内部 timeout 合計 {pre_tool_worst}s が hook timeout に収まっていない",
         )
 
-        # post-tool / Bash: _record_bash_changes が worktree_root (rev-parse) +
-        # status_snapshot (status) を呼ぶ。検出はどの経路でも先頭で走る。
-        post_tool_bash_worst = (
-            probe_worst + gitscan.REV_PARSE_TIMEOUT_SEC + gitscan.STATUS_TIMEOUT_SEC
-        )
         # post-tool / Edit,Write,NotebookEdit: handle_post_tool は git を一切呼ばない
         # (_edited_paths はパス整形のみ、state.record_pending も git 非依存) が、
         # cursor CLI の検出は先頭で走る。
-        post_tool_edit_worst = probe_worst
-        post_tool_worst = max(post_tool_bash_worst, post_tool_edit_worst)
-        self.assertIn("post-tool", timeouts)
+        self.assertIn(("post-tool", "Write|Edit|NotebookEdit"), timeouts)
         self.assertLess(
-            post_tool_worst,
-            timeouts["post-tool"],
-            f"post-tool の内部 git timeout 合計 {post_tool_worst}s が hook timeout に収まっていない",
+            probe_worst,
+            timeouts[("post-tool", "Write|Edit|NotebookEdit")],
+            "post-tool (編集系) の内部 timeout 合計が hook timeout に収まっていない",
+        )
+
+    def test_post_tool_bash_budget_covers_commit_review(self):
+        """post-tool / Bash は 0.12.0 から commit レビュー (外部 AI CLI 起動込み) を
+        抱えるため、Stop と同じ組み方で hook timeout を検証する。
+
+        超えるとハーネスの kill が先に来て、レビュー結果が `additionalContext` で
+        Claude に届かないまま Bash のツール結果だけが残る。
+        """
+        import gitscan
+        import selection
+
+        timeouts = self._hook_timeouts()
+        git_worst = (
+            gitscan.REV_PARSE_TIMEOUT_SEC  # worktree_root
+            + gitscan.STATUS_TIMEOUT_SEC  # status_snapshot (post)
+            + gitscan.REV_PARSE_TIMEOUT_SEC  # empty_tree (初回 commit のときだけ)
+            + gitscan.PATH_DIFF_TIMEOUT_SEC  # range_paths (窓全体で 1 回)
+            + gitscan.LS_FILES_TIMEOUT_SEC  # symlink_map (_resolve_paths の中)
+            + gitscan.LS_FILES_TIMEOUT_SEC  # flagged_index_entries (P4')
+            + gitscan.LS_FILES_TIMEOUT_SEC  # changed_vs_head (送信前の P4 判定)
+            + gitscan.CAT_FILE_TIMEOUT_SEC * 2  # blob_digests (P6: batch-check + batch)
+            + self.entry.COMMIT_COLLECT_BUDGET_SEC
+            + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
+            + gitscan.LS_FILES_TIMEOUT_SEC  # changed_vs_head (レビュー後の整理)
+        )
+        review_worst = selection.worst_case_wall_sec()
+        version_worst = self.entry._VERSION_SUBPROCESS_TIMEOUT_SEC
+        probe_worst = self.entry.PER_TOOL_PROBE_BUDGET_SEC
+        self.assertIn(("post-tool", "Bash"), timeouts)
+        self.assertLess(
+            probe_worst + git_worst + review_worst + version_worst,
+            timeouts[("post-tool", "Bash")],
+            "commit レビュー (kill 猶予込み) + git + 版数検出の最悪ケースが"
+            " post-tool/Bash の hook timeout を超えている",
         )
 
     def test_stop_git_budget_fits_beside_cursor(self):
-        import cursor
         import gitscan
-        from _common import subproc
+        import selection
 
         timeouts = self._hook_timeouts()
         git_worst = (
@@ -478,28 +514,35 @@ class TestTimeoutBudgets(ReviewSetTestCase):
             + self.entry.COLLECT_BUDGET_SEC
             + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
         )
-        # cursor の timeout 後に process group を止める経路 (SIGTERM 待ち / SIGKILL 待ち /
-        # 最後の wait) も Stop の hook timeout 内に収める。超えると restore_claim に到達しない。
+        # 外部 AI CLI の timeout 後に process group を止める経路 (SIGTERM 待ち /
+        # SIGKILL 待ち / 最後の wait) も Stop の hook timeout 内に収める。超えると
+        # restore_claim に到達しない。
         # **既定値 (`TIMEOUT_SEC`) ではなく上限 (`MAX_TIMEOUT_SEC`) で見る**: 0.6.0 で
         # `EXTERNAL_AI_POST_REVIEW_TIMEOUT` により env から伸ばせるようになったので、
-        # 既定値で見ると「上限まで設定した最悪ケース」が誰にも守られなくなる
-        cursor_worst = cursor.MAX_TIMEOUT_SEC + 3 * subproc.KILL_GRACE_SEC
+        # 既定値で見ると「上限まで設定した最悪ケース」が誰にも守られなくなる。
+        # **0.12.0 からは cursor 単体ではなく「全 backend の上限の最大 + 停止猶予」**
+        # (`selection.worst_case_wall_sec()`) で見る: フォールバックで複数の backend を
+        # 順に試しうるので、cursor だけを見ると合計が hook timeout を超えても緑のまま
+        # になる (2 つ目以降は `selection` 側の予算判定が起動を止める)
+        review_worst = selection.worst_case_wall_sec()
         # 指摘ありのターンで auto 解決 (MODE 未設定/auto/未知値) が版数検出のため
         # `claude --version` に subprocess フォールバックした場合の追加コスト
         # (Codex R1 P1 対応。`_claude_code_version` 参照)。cursor 完了後・git 完了後に
         # 順番に足される、独立した最悪ケースなので別項として加える
         version_worst = self.entry._VERSION_SUBPROCESS_TIMEOUT_SEC
         self.assertLess(
-            cursor_worst + git_worst + version_worst,
-            timeouts["stop"],
-            "cursor (kill 猶予込み) + git + 版数検出 subprocess の最悪ケースが"
+            review_worst + git_worst + version_worst,
+            timeouts[("stop", "")],
+            "レビュー (kill 猶予込み) + git + 版数検出 subprocess の最悪ケースが"
             " Stop の hook timeout を超えている",
         )
 
     def test_default_timeout_does_not_exceed_ceiling(self):
-        import cursor
+        import selection
 
-        self.assertLessEqual(cursor.TIMEOUT_SEC, cursor.MAX_TIMEOUT_SEC)
+        for module in selection.REVIEWERS:
+            with self.subTest(backend=module.NAME):
+                self.assertLessEqual(module.TIMEOUT_SEC, module.MAX_TIMEOUT_SEC)
 
 
 class TestSectionTruncate(ReviewSetTestCase):
