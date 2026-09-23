@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shlex
 
 from core import logging as L
@@ -415,12 +416,14 @@ def _operand_is_sensitive(
     ``normalize`` 失敗 (ValueError / OSError) は再送出 (呼び出し側で fail-closed)。
     """
     # コロンを含む operand (pathspec / URI) は片の基準を確定できないので
-    # path 形 rule を適用しない (上記 Codex R2 P1)。
-    form_root = None if ":" in raw else root
+    # path 形 rule を適用しない (上記 Codex R2 P1)。Windows のドライブ付き絶対
+    # path (``C:/repo/x``) は pathspec ではないので通常の path として扱う (0.34.2)。
+    colon = _has_pathspec_colon(raw)
+    form_root = None if colon else root
     abs_path = normalize(raw, cwd)
     if is_sensitive(abs_path, rules, parts=False, root=form_root):
         return True
-    if ":" in raw:
+    if colon:
         for piece in raw.split(":"):
             if not piece or piece == raw:
                 continue
@@ -431,6 +434,30 @@ def _operand_is_sensitive(
             if is_sensitive(piece_path, rules, parts=False, root=None):
                 return True
     return False
+
+
+_WINDOWS_DRIVE_ABS_RE = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def _has_pathspec_colon(raw: str, *, windows: bool | None = None) -> bool:
+    """operand のコロンが pathspec / URI の区切りか (= path 形 rule を当てないか)。
+
+    Windows では ``C:/repo/x`` / ``C:\\repo\\x`` のようなドライブ付き絶対 path の
+    ``:`` は区切りではない (0.34.2)。0.34.1 までは ``":" in raw`` だけで判定して
+    いたため、Windows で絶対 path を書くと path 形の除外 (``!config/prod.pem``) が
+    効かず過剰 deny になっていた (Windows CI 実測)。ドライブ部分の後に 2 つ目の
+    ``:`` があるもの (``C:/x:y``) は従来どおり区切り扱い (安全側)。
+
+    POSIX では ``C:/x`` は正当なリモート pathspec (ホスト ``C``) なので変えない。
+    ``windows`` はテスト用 (既定は ``os.name == "nt"``)。
+    """
+    if ":" not in raw:
+        return False
+    if windows is None:
+        windows = os.name == "nt"
+    if windows and _WINDOWS_DRIVE_ABS_RE.match(raw) and ":" not in raw[2:]:
+        return False
+    return True
 
 
 def _operand_relpath(operand: str, cwd: str, root: str | None) -> str:
@@ -446,7 +473,7 @@ def _operand_relpath(operand: str, cwd: str, root: str | None) -> str:
       しない場合があるため path 形は案内しない (basename 形のみ)
     - root 不明 / root 配下でない / normalize 失敗は空文字
     """
-    if not root or not operand or ":" in operand or _has_glob(operand):
+    if not root or not operand or _has_pathspec_colon(operand) or _has_glob(operand):
         return ""
     if _EXPANSION_PLACEHOLDER in operand:
         # hard-stop 救済 scan (0.25.0) の placeholder 入り operand。実パスの

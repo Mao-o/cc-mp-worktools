@@ -77,7 +77,7 @@ class BaseMainTest(unittest.TestCase):
         self._env_patcher = mock.patch.dict(
             os.environ,
             {
-                "HOME": str(self.home_dir),
+                "HOME": str(self.home_dir), "USERPROFILE": str(self.home_dir),
                 "XDG_CONFIG_HOME": str(self.xdg_dir),
             },
         )
@@ -1714,6 +1714,7 @@ class TestAsciiStdoutEncoding(BaseMainTest):
     def _run_hook(self, env_extra: dict) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["HOME"] = str(self.home_dir)
+        env["USERPROFILE"] = str(self.home_dir)
         env["XDG_CONFIG_HOME"] = str(self.xdg_dir)
         env.update(env_extra)
         return subprocess.run(
@@ -1783,6 +1784,7 @@ class TestMainStdinNonUtf8Locale(unittest.TestCase):
     def test_untracked_env_is_reported_when_cwd_has_non_ascii(self):
         env = dict(os.environ)
         env["HOME"] = str(self.home)
+        env["USERPROFILE"] = str(self.home)
         env["PYTHONIOENCODING"] = "cp1252"
         env["LC_ALL"] = "C"
         proc = subprocess.run(

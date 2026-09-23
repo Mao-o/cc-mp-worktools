@@ -368,5 +368,41 @@ class TestBackwardCompatibilityFloor(unittest.TestCase):
                     )
 
 
+
+class TestRootRelativeWindowsSemantics(unittest.TestCase):
+    """Windows の path 流儀で root 相対化が正しいこと (0.34.2)。
+
+    ``PureWindowsPath`` は drive の無いルート付き path を ``is_absolute() == False``
+    とするため、``is_absolute()`` で分岐していた旧実装は ``\\r\\config\\prod.pem``
+    を root 相対と取り違えた (Windows CI 実測)。macOS / Linux 上でも検証できるよう
+    ``_root_relative`` に Windows の flavor / normpath を渡す。
+    """
+
+    def _rel(self, path, root):
+        import ntpath
+        from pathlib import PureWindowsPath
+
+        from _shared.matcher import _root_relative
+        return _root_relative(path, root, PureWindowsPath, ntpath.normpath)
+
+    def test_driveless_rooted_path_is_relativized(self):
+        self.assertEqual(self._rel("/r/config/prod.pem", "/r"), "config/prod.pem")
+
+    def test_drive_path_is_relativized_with_posix_separators(self):
+        self.assertEqual(
+            self._rel("C:\\repo\\config\\prod.pem", "C:\\repo"), "config/prod.pem"
+        )
+
+    def test_drive_comparison_is_case_insensitive(self):
+        self.assertEqual(self._rel("c:\\Repo\\a.pem", "C:\\repo"), "a.pem")
+
+    def test_outside_root_is_none(self):
+        self.assertIsNone(self._rel("D:\\other\\a.pem", "C:\\repo"))
+        self.assertIsNone(self._rel("/x/a.pem", "/r"))
+
+    def test_relative_path_is_taken_as_root_relative(self):
+        self.assertEqual(self._rel("config\\prod.pem", "C:\\repo"), "config/prod.pem")
+
+
 if __name__ == "__main__":
     unittest.main()

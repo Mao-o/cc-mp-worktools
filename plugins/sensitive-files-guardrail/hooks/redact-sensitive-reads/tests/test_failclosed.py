@@ -148,7 +148,7 @@ class _PatternsBase(unittest.TestCase):
         os.makedirs(self.xdg)
         self._env_patcher = mock.patch.dict(
             os.environ,
-            {"HOME": self.home, "XDG_CONFIG_HOME": self.xdg},
+            {"HOME": self.home, "USERPROFILE": self.home, "XDG_CONFIG_HOME": self.xdg},
         )
         self._env_patcher.start()
         self.addCleanup(self._env_patcher.stop)

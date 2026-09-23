@@ -51,7 +51,7 @@ class BaseGrep(unittest.TestCase):
         os.makedirs(self.home)
         os.makedirs(self.xdg)
         self._env_patcher = mock.patch.dict(
-            os.environ, {"HOME": self.home, "XDG_CONFIG_HOME": self.xdg}
+            os.environ, {"HOME": self.home, "USERPROFILE": self.home, "XDG_CONFIG_HOME": self.xdg}
         )
         self._env_patcher.start()
         self.addCleanup(self._env_patcher.stop)
@@ -167,6 +167,8 @@ class TestGrepPath(BaseGrep):
         削っても 1 件も落ちなかったため追加した。
         """
         fifo = Path(self.tmp) / "a.secret"
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO は POSIX のみ (Windows には名前付きパイプの別体系しか無い)")
         os.mkfifo(fifo)
         self.assertEqual(_decision(self._grep({"pattern": "x", "path": "a.secret"})), "ask")
         self.assertEqual(
@@ -178,6 +180,8 @@ class TestGrepPath(BaseGrep):
 
     def test_lstat_error_matches_read_handler(self):
         """``lstat`` 失敗 (権限 / IO) も ``ask_or_deny`` (0.34.0 P3-7)。"""
+        if os.name == "nt":
+            self.skipTest("Windows の chmod は読み取り専用属性しか変えず、lstat を失敗させられない")
         locked = Path(self.tmp) / "locked"
         locked.mkdir()
         (locked / "id_rsa").write_text("dummy\n")

@@ -240,6 +240,8 @@ class TestE2EReadHandler(unittest.TestCase):
 
     def test_read_fifo_ask_or_deny(self):
         fifo = Path(self.tmp) / ".env"
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO は POSIX のみ (Windows には名前付きパイプの別体系しか無い)")
         os.mkfifo(fifo)
         envelope = {
             "tool_name": "Read",
@@ -740,7 +742,7 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         # patterns.local.txt / stop-ack state を実 HOME から隔離
         self._env = mock.patch.dict(
             os.environ,
-            {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg")},
+            {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(home / "xdg")},
         )
         self._env.start()
         self.addCleanup(self._env.stop)
@@ -920,7 +922,7 @@ class TestE2ELogLevelSuppressesAllowPathInfo(unittest.TestCase):
         home = Path(self.tmp) / "home"  # user tier を実ホームから隔離する
         home.mkdir()
         with mock.patch.dict(
-            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home)}
+            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home), "USERPROFILE": str(home)}
         ):
             result, log = self._run_bash("cat .env", entry.L._LEVEL_WARNING)
         self.assertEqual(result, {}, "repo tier の ! 行で allow に倒れる前提")
@@ -936,7 +938,7 @@ class TestE2ELogLevelSuppressesAllowPathInfo(unittest.TestCase):
         home = Path(self.tmp) / "home"
         home.mkdir()
         with mock.patch.dict(
-            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home)}
+            os.environ, {"CLAUDE_PROJECT_DIR": self.tmp, "HOME": str(home), "USERPROFILE": str(home)}
         ):
             _result, log = self._run_bash("cat .env", entry.L._LEVEL_INFO)
         self.assertIn("project_patterns_in_use", log)
@@ -1134,6 +1136,7 @@ class TestAsciiStdoutEncoding(unittest.TestCase):
     def _run(self, tool: str, envelope: dict, env_extra: dict):
         env = dict(os.environ)
         env["HOME"] = str(self.home)
+        env["USERPROFILE"] = str(self.home)
         env["SFG_LOG_PATH"] = str(self.home / "redact-hook.log")
         env.update(env_extra)
         return subprocess.run(
@@ -1400,6 +1403,7 @@ class TestE2EStdinNonUtf8Locale(unittest.TestCase):
     def _run(self, tool: str, envelope: dict):
         env = dict(os.environ)
         env["HOME"] = str(self.home)
+        env["USERPROFILE"] = str(self.home)
         env["SFG_LOG_PATH"] = str(self.home / "redact-hook.log")
         env.update(self.CP1252_ENV)
         return subprocess.run(
@@ -1464,6 +1468,7 @@ class TestE2EMalformedUtf8Envelope(unittest.TestCase):
         home.mkdir()
         env = dict(os.environ)
         env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
         env["SFG_LOG_PATH"] = str(home / "redact-hook.log")
         body = json.dumps({
             "tool_name": "Read",

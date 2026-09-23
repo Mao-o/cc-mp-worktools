@@ -65,6 +65,8 @@ class TestClassify(_BaseTmp):
 
     def test_fifo(self):
         fifo = Path(self.tmp) / "pipe.fifo"
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO は POSIX のみ (Windows には名前付きパイプの別体系しか無い)")
         os.mkfifo(fifo)
         self.assertEqual(classify(fifo), "special")
 
@@ -168,6 +170,29 @@ class TestIsRegularDirectory(_BaseTmp):
         p = Path(self.tmp) / "file.txt"
         p.write_text("x")
         self.assertFalse(is_regular_directory(p))
+
+
+
+class TestOpenFlags(unittest.TestCase):
+    """``_open_flags`` は Windows で ``O_BINARY`` を立てる (0.34.2)。
+
+    無いと C ランタイムのテキストモードになり、``0x1A`` で読み取りが打ち切られて
+    それより後ろの行を redaction が走査しない。macOS / Linux には ``O_BINARY`` が
+    無いので属性を注入して検証する。
+    """
+
+    def test_o_binary_is_set_when_available(self):
+        from unittest import mock
+
+        from core import safepath
+        with mock.patch.object(os, "O_BINARY", 0x8000, create=True):
+            self.assertTrue(safepath._open_flags() & 0x8000)
+
+    def test_posix_flags_are_unchanged_without_o_binary(self):
+        from core import safepath
+        if hasattr(os, "O_BINARY"):
+            self.skipTest("O_BINARY のある環境")
+        self.assertTrue(safepath._open_flags() & os.O_NOFOLLOW)
 
 
 if __name__ == "__main__":

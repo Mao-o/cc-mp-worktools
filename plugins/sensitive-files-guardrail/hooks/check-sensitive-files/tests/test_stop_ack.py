@@ -28,7 +28,7 @@ class BaseStopAck(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -208,6 +208,11 @@ class TestLoadSave(BaseStopAck):
         self.assertEqual(calls, [])
 
     def test_load_failure_reports_via_warn(self):
+        if os.name == "nt":
+            # Windows では「ファイル配下のパス」の open が ENOENT (FileNotFoundError)
+            # になり「状態なし」と区別できない。区別できないときは ack が空 = 毎回
+            # block する安全側に倒れる (判定は変わらない、可視性だけが落ちる)
+            self.skipTest("Windows では NotADirectoryError を作れない")
         self._state_dir().parent.mkdir(parents=True)
         self._state_dir().write_text("not a dir\n")
         calls: list[str] = []

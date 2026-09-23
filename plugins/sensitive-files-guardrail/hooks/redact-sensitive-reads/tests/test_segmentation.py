@@ -187,7 +187,7 @@ class TestHeredocVerdict(unittest.TestCase):
         os.makedirs(self.home)
         os.makedirs(self.xdg)
         patcher = mock.patch.dict(
-            os.environ, {"HOME": self.home, "XDG_CONFIG_HOME": self.xdg},
+            os.environ, {"HOME": self.home, "USERPROFILE": self.home, "XDG_CONFIG_HOME": self.xdg},
         )
         patcher.start()
         self.addCleanup(patcher.stop)

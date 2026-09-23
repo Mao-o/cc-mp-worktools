@@ -55,7 +55,7 @@ class BaseWithTmpRepo(unittest.TestCase):
         self._env_patcher = mock.patch.dict(
             os.environ,
             {
-                "HOME": str(self.home_dir),
+                "HOME": str(self.home_dir), "USERPROFILE": str(self.home_dir),
                 "XDG_CONFIG_HOME": str(self.xdg_dir),
             },
         )
@@ -416,6 +416,8 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
     def test_space_and_quote_in_name_detected(self):
         """二重引用符を含む名前は quotePath の引用対象 (判別的)。空白のみの名前は
         引用されない (実測) ので、そちらは回帰用 (旧コードでも通る)。"""
+        if os.name == "nt":
+            self.skipTest('Windows のファイル名には `"` を含められない')
         _git(["config", "core.quotePath", "true"], str(self.repo))
         self._write('my "secret".pem', "-----BEGIN...\n")
         self._track('my "secret".pem')
@@ -429,6 +431,8 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
     def test_newline_in_name_detected_regardless_of_quotepath(self):
         """改行入り名は ``core.quotePath=false`` でも引用される (git 仕様) ため、
         ユーザーの git 設定に依らず改行区切り実装との差を判別できる fixture。"""
+        if os.name == "nt":
+            self.skipTest("Windows のファイル名には改行を含められない")
         _git(["config", "core.quotePath", "false"], str(self.repo))
         name = "new\nline.pem"
         self._write(name, "-----BEGIN...\n")

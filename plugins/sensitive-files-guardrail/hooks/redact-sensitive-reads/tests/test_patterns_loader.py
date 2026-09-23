@@ -40,7 +40,7 @@ class BaseWithIsolatedHome(unittest.TestCase):
             os.environ,
             {
                 "XDG_CONFIG_HOME": str(self.xdg_dir),
-                "HOME": str(self.home_dir),
+                "HOME": str(self.home_dir), "USERPROFILE": str(self.home_dir),
             },
         )
         self._env_patcher.start()
@@ -1230,6 +1230,60 @@ class TestUndecodablePatternsAreReportedNotRewritten(BaseWithIsolatedHome):
         local.write_bytes("\ufeff秘密.txt\n".encode("utf-8"))
         rules = load_patterns(default_file)
         self.assertIn(("秘密.txt", False), rules)
+
+
+
+class TestProjectHeaderWindowsComparison(unittest.TestCase):
+    """``[project:<key>]`` の比較は Windows の区切り・大文字小文字を畳む (0.34.2)。
+
+    0.34.1 まではヘッダー側だけ ``normpath`` を通し、project key 側は生のまま
+    比べていたため、Windows では ``[project:C:/work/repo]`` が ``C:\\work\\repo``
+    の cwd と一致しなかった。``os.path`` を ``ntpath`` に差し替えて Windows の
+    意味論で検証する (``normcase`` / ``normpath`` の流儀だけが変わる)。
+    """
+
+    def _parse(self, text, key):
+        import ntpath
+
+        from _shared import patterns
+        with mock.patch.object(patterns.os, "path", ntpath):
+            return patterns._parse_local_patterns_text(text, key)
+
+    def test_forward_slash_header_matches_backslash_cwd(self):
+        self.assertEqual(
+            self._parse("[project:C:/work/repo]\n!x.pem\n", "C:\\work\\repo"),
+            [("x.pem", True)],
+        )
+
+    def test_drive_letter_case_is_folded(self):
+        """ドライブ文字は常に大文字小文字を区別しないので揃える。"""
+        self.assertEqual(
+            self._parse("[project:c:\\work\\repo\\]\n!x.pem\n", "C:\\work\\repo"),
+            [("x.pem", True)],
+        )
+
+    def test_directory_case_is_not_folded(self):
+        """ディレクトリ名の大文字小文字は畳まない (外部レビューの指摘)。
+
+        Windows でもディレクトリ単位で大文字小文字を区別する設定があり、
+        ``Repo`` と ``repo`` が別 repo になりうる。畳むと片方で承認した除外が
+        他方でも効くので、一致しない (= 除外が効かない) 安全側に倒す。
+        """
+        self.assertEqual(
+            self._parse("[project:C:\\work\\Repo]\n!x.pem\n", "C:\\work\\repo"), []
+        )
+
+    def test_other_project_does_not_match(self):
+        self.assertEqual(
+            self._parse("[project:C:/work/other]\n!x.pem\n", "C:\\work\\repo"), []
+        )
+
+    def test_forward_slash_project_key_matches_backslash_header(self):
+        """key 側 (cwd 由来) が ``/`` 区切りでも一致する (Git Bash 等の cwd)。"""
+        self.assertEqual(
+            self._parse("[project:C:\\work\\repo]\n!x.pem\n", "C:/work/repo"),
+            [("x.pem", True)],
+        )
 
 
 if __name__ == "__main__":

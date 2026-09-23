@@ -72,10 +72,13 @@ def _open_flags() -> int:
     ``O_CLOEXEC`` が無い環境ではそのフラグを落とし、最終要素の symlink 検知は
     ``classify`` の lstat 判定に依存する (モジュール docstring の「Windows 分岐」)。
 
-    **Windows 実機は未検証**。バイナリモードが要ることが分かれば、ここで
-    ``os.O_BINARY`` を拾う分岐を追加する。
+    ``os.O_BINARY`` (Windows のみ存在) も立てる (0.34.2)。Windows の ``os.open`` は
+    これが無いと C ランタイムの**テキストモード**で開き、``os.fdopen(fd, "rb")``
+    で包んでも fd 自体の読み取りで CRLF が LF に変換され、``0x1A`` (Ctrl-Z) で
+    EOF 扱いになる。redaction の走査がそこで打ち切られ、``0x1A`` より後ろの行を
+    見ないまま要約してしまう。
     """
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     if hasattr(os, "O_CLOEXEC"):

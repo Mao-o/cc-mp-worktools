@@ -610,7 +610,7 @@ repo に commit できる (0.32.0):
    従来どおり allow に倒る
 3. **TOCTOU 完全排除は非目的** — fd ベース reader により「同一プロセス内の
    再 open」race は排除済みだが、hook 読取と Claude 実 Read/Write の分離は範囲外
-4. **Windows は未検証** (0.34.0) — 0.33.x までは `signal.SIGALRM` の有無を
+4. **Windows は CI でのみ検証** (0.34.2) — 0.33.x までは `signal.SIGALRM` の有無を
    Windows 判定の proxy にして hook 冒頭から全 tool 呼出を deny していたが、
    根拠だった内部 soft-timeout は 0.6.0 で撤去済みで、外部 timeout の fail-open
    は全 OS 共通だったため、この無条件 deny を撤去した。Windows でも通常判定を
@@ -618,7 +618,14 @@ repo に commit できる (0.32.0):
    `O_NOFOLLOW` / `O_CLOEXEC` が無い環境では symlink 検知が `lstat` 判定の
    fallback に依存する。0.34.1 で patterns / stdin / git 出力 / ログの encoding を
    UTF-8 に固定した (0.34.0 では `PYTHONUTF8` 未設定の Windows で同梱 patterns の
-   読込に失敗し、全 tool 呼出が catch-all に落ちていた)。**実機での検証は未実施**
+   読込に失敗し、全 tool 呼出が catch-all に落ちていた)。0.34.2 で両 suite が
+   windows-latest の CI で通るようにした (path 形 rule の root 相対化・`[project:]`
+   ヘッダーの区切り / 大文字小文字・ドライブ付き絶対 path の Bash operand・
+   `O_BINARY`)。**Claude Code on Windows の実機での対話検証は未実施**。Windows
+   固有の既知の限界: Git Bash 形式の `/c/Users/...` はドライブ path として解釈
+   しない (path 形の除外が効かず過剰 deny 側)、FIFO / `chmod 000` 由来の分岐は
+   Windows に存在しない、stop-ack の state dir がファイルに潰された場合の読込失敗は
+   「状態なし」と区別できず警告が出ない (毎回 block する安全側)
 5. **`!` プレフィックス (Claude Code bash mode) は対象外** — ユーザー明示操作で
    `! cat .env` を実行した場合は stdout が transcript に追加される (hook 介在外)
 6. **Grep は最小対応 / Glob・NotebookEdit は対象外** (0.34.0) — `Grep` は
@@ -687,9 +694,8 @@ repo に commit できる (0.32.0):
   agent) は非目的
 - 完全な情報遮断ではない。basename と鍵名は LLM に見える
 - TOCTOU race は完全には防げない
-- Python 3.11+ / Git 1.7+ / macOS / Linux で検証済み。Windows は未検証
-  (0.34.0 で無条件 deny は撤去、0.34.1 でテキスト I/O の encoding を UTF-8 固定。
-  既知制限 4 を参照)
+- Python 3.11+ / Git 1.7+ / macOS / Linux で検証済み。Windows は CI
+  (windows-latest) で両 suite を検証、実機での対話検証は未実施 (既知制限 4)
 
 ## テスト
 
@@ -697,10 +703,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (1,497 tests, 0.34.1 時点)
+# redact-sensitive-reads (1,513 tests, 0.34.2 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (182 tests, 0.34.1 時点)
+# check-sensitive-files (182 tests, 0.34.2 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -743,8 +749,8 @@ repo 同梱 patterns を読み込んだ記録 (`project_patterns_in_use`) も le
   `Python 3.11+` を明記した note が付く (fail-open にはならず、hook 起動時にも
   ログへ 1 回記録する — サイレント劣化ではない)
 - Git 1.7+ (submodule scan 用)
-- macOS / Linux で検証済み。**Windows は未検証** — 0.34.0 で「SIGALRM 非対応
-  なら全 tool 呼出を deny」という冒頭ゲートを撤去し、通常判定を通すように
-  なった。内部失敗は catch-all の `ask_or_deny` に倒れる (fail-closed)。
-  0.34.1 で patterns / stdin / git 出力の encoding を UTF-8 に固定したが、
-  実機での検証は行っていない (既知制限 4)
+- macOS / Linux で検証済み。**Windows は CI (windows-latest) でのみ検証** —
+  0.34.0 で「SIGALRM 非対応なら全 tool 呼出を deny」という冒頭ゲートを撤去し、
+  通常判定を通すようになった。内部失敗は catch-all の `ask_or_deny` に倒れる
+  (fail-closed)。0.34.1 で encoding を UTF-8 に固定、0.34.2 で path 区切り等の
+  posix 前提を解消。実機での対話検証は行っていない (既知制限 4)

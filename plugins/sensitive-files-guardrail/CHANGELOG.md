@@ -23,6 +23,55 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.34.2
+
+Windows の posix 前提を解消し、**両 suite が windows-latest の CI で通る**ように
+した (0.34.1 の encoding 修正後の実測で残っていた 109 件)。POSIX (macOS / Linux) の
+判定は変えない。テスト件数: redact **1,497 → 1,513** / check 182 (件数不変、
+Windows で作れない名前の 3 件を Windows のみ skip)。
+
+### Fixed (Windows)
+
+- **path 形 rule (`!config/prod.pem`) の root 相対化**。`root_relative` は
+  `is_absolute()` で分岐していたが、Windows の `PureWindowsPath` は drive の無い
+  ルート付き path (`\r\config`) を絶対とみなさないため、root 相対と取り違えて
+  一致を落としていた。anchor (drive / root) の有無で分岐するように変更
+- **`[project:<path>]` ヘッダーの比較**。ヘッダー側だけ `normpath` を通し project
+  key 側は生のまま比べていたため、Windows では `[project:C:/work/repo]` が
+  `C:\work\repo` の cwd と一致せず、セクションが黙って落ちていた。両側を
+  `normpath` で揃え、**ドライブ文字だけ**大文字に揃える。ディレクトリ名の大文字
+  小文字は畳まない — Windows でもディレクトリ単位で大文字小文字を区別する設定が
+  あり、畳むと別 repo で承認した除外が効いてしまうため、違えば「一致しない」安全側
+  (マージ前レビューの指摘)。POSIX ではドライブが常に空なので不変
+- **Bash operand のドライブ付き絶対 path** (`cat C:/repo/config/prod.pem`)。
+  `:` を含む operand は pathspec / URI とみなして path 形 rule を評価しないため、
+  Windows で絶対 path を書くと path 形の除外が効かず過剰 deny になっていた。
+  Windows に限り「ドライブ文字 + 区切り」で始まり他に `:` が無いものを通常の
+  path として扱う。POSIX では `C:/x` は正当なリモート pathspec なので変えない。
+  Git Bash 形式の `/c/...` は対象外 (過剰 deny 側のまま)
+- **Read の fd を `O_BINARY` で開く**。Windows の `os.open` はこれが無いと C
+  ランタイムのテキストモードになり、`0x1A` (Ctrl-Z) で読み取りが打ち切られて
+  それより後ろの行を redaction が走査しなかった
+
+### 調査して修正不要と確定したもの
+
+- gitdir 行の `os.sep` 分割 (`_shared/patterns.py`): 直前に `os.path.normpath` を
+  通すので Windows でも `\` に揃っており、worktree 検出は正しく動く
+
+### Tests
+
+- HOME 隔離: Windows の `Path.home()` は `HOME` ではなく `USERPROFILE` を見るため、
+  `HOME` を差し替える 19 か所で `USERPROFILE` も差し替える (実 HOME を汚さない)
+- Windows の意味論を macOS / Linux 上でも検証する床テストを追加
+  (`PureWindowsPath` / `ntpath` を注入した root 相対化 5 件、ヘッダー比較 5 件、
+  ドライブ operand 判定 4 件、`O_BINARY` 2 件)。いずれも修正を外すと落ちることを確認
+- Windows に存在しない機能のテストは Windows のみ skip (理由を明記): FIFO ×4、
+  `chmod 000` による lstat 失敗、flock 前提のログローテーション ×2
+  (Windows では回転しない設計で、それは既存テストが固定)、改行 / `"` を含む
+  ファイル名、`NotADirectoryError` を作る state dir 破損
+- Bash コマンドに埋め込む絶対 path は `as_posix()` にする (Git Bash では `\` が
+  エスケープになるため。利用者も `/` で書く)
+
 ## 0.34.1
 
 Windows 移植性の不具合修正。判定表は変えない。**テキスト I/O の encoding を
