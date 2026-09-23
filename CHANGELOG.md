@@ -30,6 +30,20 @@
   (赤を隠さない)、`tag-plugin-releases` の `needs` にも入れない。
   Windows が安定して green になったら `tests` job の matrix へ統合して畳む。
 
+### Changed
+
+- **`tests-windows` を PR / push のゲートに昇格**。sensitive-files-guardrail
+  0.34.1 (encoding を UTF-8 固定) / 0.34.2 (posix 前提の解消) で両 suite が
+  windows-latest で green になったため、`if` を `workflow_dispatch` 限定から
+  `schedule` 以外 (= PR / push / 手動) に広げ、`tag-plugin-releases` の `needs` にも
+  加えた (Windows で赤の commit に SFG の version を指す tag を残さない)。
+  `tests` job の matrix へは統合しない — あちらは `scripts/test-all.sh` で全 plugin を
+  列挙する作りで、SFG 以外の plugin の Windows 対応は未着手のため
+  README の CI 説明 (「手動起動限定・PR ゲート外」) も更新
+- `.gitignore` に `.beads.gate.lock` を追加。bd の merge-slot gate が作る実行時の
+  ロックファイルで、`.beads/` の外 (repo root) に置かれるため既存の ignore に
+  掛かっていなかった
+
 ## 2026-09-19
 
 このファイルの開始時点。以降の marketplace レベルの変更をここに追記していきます。

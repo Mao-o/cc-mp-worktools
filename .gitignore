@@ -48,3 +48,5 @@ __pycache__/
 .dolt/
 *.db
 .beads-credential-key
+# bd の merge-slot gate が作る実行時ロック (repo root に置かれ .beads/ の外)
+.beads.gate.lock

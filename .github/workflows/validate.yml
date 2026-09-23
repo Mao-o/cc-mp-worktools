@@ -144,10 +144,11 @@ jobs:
     # した。一方で CI は ubuntu-latest しか回しておらず、plugin の README も
     # 「Windows は未検証」と明記したままになっている。
     #
-    # **この job の目的は「Windows で落ちるテストを洗い出す」こと**であって、
-    # 最初から green にすることではない (内部バックログ)。落ちたケースは
-    # 「Windows では skip」にせず、挙動を確定させてから README の「未検証」を
-    # 更新する。そのため continue-on-error は付けない (赤を隠さない)。
+    # 当初 (2026-09-22) は「Windows で落ちるテストを洗い出す」調査用で
+    # workflow_dispatch 限定だった。SFG 0.34.1 (encoding) / 0.34.2 (posix 前提) で
+    # 両 suite が green になったため、2026-09-23 から **PR / push のゲートに昇格**した。
+    # continue-on-error は付けない (赤を隠さない)。Windows に存在しない機能の
+    # テストは suite 側で理由付きで skip している (FIFO / chmod 000 / flock 等)。
     #
     # 既存 tests job (ubuntu matrix) には手を入れない。あちらは
     # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、同じ
@@ -155,12 +156,10 @@ jobs:
     # 知りたいのは「SFG の 2 suite が Windows でどう落ちるか」の 1 点なので、
     # 各 suite の package root で unittest discover を直接呼ぶ (test-all.sh が
     # 各 suite に対して行うのと同じ呼び方)。
-    # 当面は赤である前提の調査用なので、pull_request / push のゲートには載せない
-    # (green 化は複数 PR にまたがる見込みで、その間ずっと無関係な PR にも赤が
-    # 2 本出続けるため)。手動起動 (workflow_dispatch) でだけ回す。Windows が
-    # 安定して green になったら、この job は畳んで tests job の matrix に
-    # windows-latest を足す形へ統合する。continue-on-error は付けない (赤を隠さない)。
-    if: github.event_name == 'workflow_dispatch'
+    # tests job の matrix に windows-latest を足す形へは統合しない: あちらは
+    # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、SFG 以外の
+    # plugin の Windows 対応は未着手 (対象を広げるときに改めて判断する)。
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
@@ -211,16 +210,13 @@ jobs:
     # 指す tag を残さないため)。落ちた場合は tag が作られないだけなので、次に
     # green な push が来た時点で同じ tag が作られる (version は変わらないため)。
     #
-    # tests-windows は **意図的に needs へ入れない**。あの job は「Windows で
-    # 落ちるテストを洗い出す」ための調査用で、当面は赤であることが前提
-    # (workflow_dispatch 限定で push では走らない)。needs に入れると
-    # 「走っていない job を待つ」形になり、全 plugin のリリース tag が止まる。Windows が安定して green になり、plugin 側の
-    # 「Windows は未検証」表記を外せた時点で needs への追加を検討する。
+    # tests-windows も needs に入れる (2026-09-23、ゲート昇格と同時)。Windows で
+    # 赤の commit に sensitive-files-guardrail の version を指す tag を残さないため。
     #
     # GITHUB_TOKEN による tag push は他の workflow を起動しない (GitHub の仕様) ので、
     # この job が自分自身を再帰的に呼ぶことはない。
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [validate, lint, tests]
+    needs: [validate, lint, tests, tests-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

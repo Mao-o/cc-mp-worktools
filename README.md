@@ -168,9 +168,10 @@ make test
 
 CI (`.github/workflows/validate.yml`) は `make validate` 相当のチェックに加え、
 `ruff check` と、**Python 3.11 / 3.12 / 3.13 の matrix** でのユニットテストを回します。
-加えて、sensitive-files-guardrail の 2 suite を `windows-latest` で回す探索用の
-`tests-windows` job があります。Windows は未検証扱いで当面は赤である前提の調査用なので、
-手動起動 (`workflow_dispatch`) 限定で、PR のゲートには含めません。
+加えて、sensitive-files-guardrail の 2 suite を `windows-latest` で回す
+`tests-windows` job が **PR / main push のゲート**に入っています (リリース tag の
+付与もこの job の green を待ちます)。Windows で CI を回しているのはこの plugin だけで、
+他の plugin の Windows 対応は未検証です。
 
 開発フロー・テスト規約・version と CHANGELOG の運用は
 [CONTRIBUTING.md](CONTRIBUTING.md)、この repo 固有の設計上の注意点は
