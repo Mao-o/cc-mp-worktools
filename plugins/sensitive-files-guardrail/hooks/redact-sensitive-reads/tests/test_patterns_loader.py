@@ -1256,9 +1256,21 @@ class TestProjectHeaderWindowsComparison(unittest.TestCase):
         )
 
     def test_drive_letter_case_is_folded(self):
+        """ドライブ文字は常に大文字小文字を区別しないので揃える。"""
         self.assertEqual(
-            self._parse("[project:c:\\Work\\Repo\\]\n!x.pem\n", "C:\\work\\repo"),
+            self._parse("[project:c:\\work\\repo\\]\n!x.pem\n", "C:\\work\\repo"),
             [("x.pem", True)],
+        )
+
+    def test_directory_case_is_not_folded(self):
+        """ディレクトリ名の大文字小文字は畳まない (外部レビューの指摘)。
+
+        Windows でもディレクトリ単位で大文字小文字を区別する設定があり、
+        ``Repo`` と ``repo`` が別 repo になりうる。畳むと片方で承認した除外が
+        他方でも効くので、一致しない (= 除外が効かない) 安全側に倒す。
+        """
+        self.assertEqual(
+            self._parse("[project:C:\\work\\Repo]\n!x.pem\n", "C:\\work\\repo"), []
         )
 
     def test_other_project_does_not_match(self):

@@ -27,7 +27,7 @@ commit 52113a1 で完了)。
 
 Windows の posix 前提を解消し、**両 suite が windows-latest の CI で通る**ように
 した (0.34.1 の encoding 修正後の実測で残っていた 109 件)。POSIX (macOS / Linux) の
-判定は変えない。テスト件数: redact **1,497 → 1,512** / check 182 (件数不変、
+判定は変えない。テスト件数: redact **1,497 → 1,513** / check 182 (件数不変、
 Windows で作れない名前の 3 件を Windows のみ skip)。
 
 ### Fixed (Windows)
@@ -39,7 +39,10 @@ Windows で作れない名前の 3 件を Windows のみ skip)。
 - **`[project:<path>]` ヘッダーの比較**。ヘッダー側だけ `normpath` を通し project
   key 側は生のまま比べていたため、Windows では `[project:C:/work/repo]` が
   `C:\work\repo` の cwd と一致せず、セクションが黙って落ちていた。両側を
-  `normcase(normpath(...))` で揃える (POSIX では `normcase` は恒等なので不変)
+  `normpath` で揃え、**ドライブ文字だけ**大文字に揃える。ディレクトリ名の大文字
+  小文字は畳まない — Windows でもディレクトリ単位で大文字小文字を区別する設定が
+  あり、畳むと別 repo で承認した除外が効いてしまうため、違えば「一致しない」安全側
+  (マージ前レビューの指摘)。POSIX ではドライブが常に空なので不変
 - **Bash operand のドライブ付き絶対 path** (`cat C:/repo/config/prod.pem`)。
   `:` を含む operand は pathspec / URI とみなして path 形 rule を評価しないため、
   Windows で絶対 path を書くと path 形の除外が効かず過剰 deny になっていた。
@@ -60,7 +63,7 @@ Windows で作れない名前の 3 件を Windows のみ skip)。
 - HOME 隔離: Windows の `Path.home()` は `HOME` ではなく `USERPROFILE` を見るため、
   `HOME` を差し替える 19 か所で `USERPROFILE` も差し替える (実 HOME を汚さない)
 - Windows の意味論を macOS / Linux 上でも検証する床テストを追加
-  (`PureWindowsPath` / `ntpath` を注入した root 相対化 5 件、ヘッダー比較 4 件、
+  (`PureWindowsPath` / `ntpath` を注入した root 相対化 5 件、ヘッダー比較 5 件、
   ドライブ operand 判定 4 件、`O_BINARY` 2 件)。いずれも修正を外すと落ちることを確認
 - Windows に存在しない機能のテストは Windows のみ skip (理由を明記): FIFO ×4、
   `chmod 000` による lstat 失敗、flock 前提のログローテーション ×2

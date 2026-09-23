@@ -519,14 +519,21 @@ def _normalize_project_keys(
 def _comparable_path(path: str) -> str:
     """ヘッダーの key と project key を**同じ形**にして比べるための正規化 (0.34.2)。
 
-    ``os.path.normcase(os.path.normpath(...))``。POSIX では ``normpath`` だけと
-    同じ (``normcase`` は恒等) なので挙動は変わらない。Windows では区切りを ``\\``
-    に揃え、大文字小文字を畳む — 0.34.1 まではヘッダー側だけ ``normpath`` を
-    通していたため、``[project:C:/work/repo]`` や ``[project:c:\\work\\repo]`` が
-    ``C:\\work\\repo`` の cwd と一致せず、セクションが黙って落ちていた (Windows
-    CI 実測)。
+    ``normpath`` で区切り (Windows では ``/`` → ``\\``) と冗長要素を揃え、
+    **ドライブ文字だけ**大文字に揃える。0.34.1 まではヘッダー側だけ ``normpath``
+    を通していたため、Windows では ``[project:C:/work/repo]`` が ``C:\\work\\repo``
+    の cwd と一致せず、セクションが黙って落ちていた (Windows CI 実測)。
+
+    ``normcase`` で全体を畳まない理由: Windows でもディレクトリ単位で大文字
+    小文字を区別する設定 (``fsutil file setCaseSensitiveInfo``、WSL 連携で使う) が
+    あり、``C:\\work\\Repo`` と ``C:\\work\\repo`` が別の repo になりうる。畳むと
+    片方で承認した除外が他方でも効く (外部レビューの指摘)。ドライブ文字は常に
+    大文字小文字を区別しないので揃えてよい。それ以外の大文字小文字の違いは
+    「一致しない」= 除外が効かない安全側に倒す。POSIX では ``splitdrive`` が常に
+    空のドライブを返すので ``normpath`` だけと同じ (挙動不変)。
     """
-    return os.path.normcase(os.path.normpath(path))
+    drive, rest = os.path.splitdrive(os.path.normpath(path))
+    return drive.upper() + rest
 
 
 def _normalize_header_key(header_key: str) -> str:
