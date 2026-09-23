@@ -57,7 +57,7 @@ class BaseProjectScoped(unittest.TestCase):
         self._env_patcher = mock.patch.dict(
             os.environ,
             {
-                "HOME": str(self.home),
+                "HOME": str(self.home), "USERPROFILE": str(self.home),
                 "XDG_CONFIG_HOME": str(Path(self.tmp) / "xdg"),
                 "CLAUDE_PROJECT_DIR": str(self.root),
             },
@@ -287,7 +287,9 @@ class TestBashHandlerPathRule(BaseProjectScoped):
         self.assertEqual(_decision(self._bash("cat prod.pem")), "deny")
         # 絶対 path / サブディレクトリからの相対 path でも同じ 1 ファイルに解決
         self.assertEqual(
-            _decision(self._bash(f"cat {self.root / 'config' / 'prod.pem'}")), "allow"
+            # Bash (Windows では Git Bash) の中では ``\\`` がエスケープになるため
+            # ``/`` 区切りで埋め込む (利用者も Git Bash では ``/`` で書く)
+            _decision(self._bash(f"cat {(self.root / 'config' / 'prod.pem').as_posix()}")), "allow"
         )
         self.assertEqual(
             _decision(self._bash("cat prod.pem", cwd=str(self.root / "config"))),
@@ -388,12 +390,13 @@ class TestBashHandlerPathRule(BaseProjectScoped):
         outside = Path(self.tmp) / "elsewhere" / ".env"
         outside.parent.mkdir(parents=True)
         outside.write_text("KEY=v\n")
-        resp = self._bash(f"cat {outside}")
+        resp = self._bash(f"cat {outside.as_posix()}")
         self.assertEqual(_decision(resp), "deny")
         reason = _reason(resp)
         self.assertIn("`!.env`", reason)
         self.assertNotIn("この 1 ファイルだけ", reason)
         self.assertNotIn(str(outside), reason.split("suggestion:")[-1])
+        self.assertNotIn(outside.as_posix(), reason.split("suggestion:")[-1])
 
     def test_rule_is_inert_without_project_root(self):
         self._write_local("!config/prod.pem\n")
@@ -436,6 +439,38 @@ class TestOperandRelpath(unittest.TestCase):
         self.assertEqual(bash_handler._operand_relpath(".env*", "/r", "/r"), "")
         self.assertEqual(bash_handler._operand_relpath("HEAD:.env", "/r", "/r"), "")
         self.assertEqual(bash_handler._operand_relpath("file://.env", "/r", "/r"), "")
+
+
+
+class TestWindowsDriveOperandIsNotAPathspec(unittest.TestCase):
+    """Windows のドライブ付き絶対 path の ``:`` を pathspec 区切りと見なさない (0.34.2)。
+
+    0.34.1 までは ``":" in raw`` だけで pathspec 扱いにし、path 形 rule を評価
+    しなかったため、Windows で ``cat C:/repo/config/prod.pem`` と書くと
+    ``!config/prod.pem`` の除外が効かず過剰 deny になった (Windows CI 実測)。
+    POSIX では ``C:/x`` は正当なリモート pathspec なので挙動を変えない。
+    """
+
+    def _f(self, raw, windows):
+        from handlers.bash_handler import _has_pathspec_colon
+        return _has_pathspec_colon(raw, windows=windows)
+
+    def test_drive_absolute_paths_are_plain_on_windows(self):
+        for raw in ("C:/repo/x.pem", "c:\\repo\\x.pem"):
+            with self.subTest(raw=raw):
+                self.assertFalse(self._f(raw, True))
+
+    def test_real_pathspecs_stay_pathspecs_on_windows(self):
+        for raw in ("HEAD:.env", "host:/p/.env", "C:/repo/x:y", "C:x.pem", "file://.env"):
+            with self.subTest(raw=raw):
+                self.assertTrue(self._f(raw, True))
+
+    def test_posix_keeps_drive_like_text_as_pathspec(self):
+        self.assertTrue(self._f("C:/repo/x.pem", False))
+
+    def test_no_colon_is_not_a_pathspec(self):
+        self.assertFalse(self._f("config/prod.pem", True))
+        self.assertFalse(self._f("config/prod.pem", False))
 
 
 if __name__ == "__main__":

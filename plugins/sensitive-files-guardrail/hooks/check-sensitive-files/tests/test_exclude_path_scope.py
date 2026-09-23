@@ -79,7 +79,7 @@ class Base(unittest.TestCase):
         self.home.mkdir()
         self._env_patcher = mock.patch.dict(
             os.environ,
-            {"HOME": str(self.home), "XDG_CONFIG_HOME": str(Path(self.tmp) / "xdg")},
+            {"HOME": str(self.home), "USERPROFILE": str(self.home), "XDG_CONFIG_HOME": str(Path(self.tmp) / "xdg")},
         )
         self._env_patcher.start()
         self.addCleanup(self._env_patcher.stop)

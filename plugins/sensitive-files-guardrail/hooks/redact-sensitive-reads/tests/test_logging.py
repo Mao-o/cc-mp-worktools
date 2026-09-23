@@ -357,6 +357,7 @@ class TestLogRotation(unittest.TestCase):
         L.log_info("classify", "small")
         self.assertFalse(self.rotated_path.exists())
 
+    @unittest.skipIf(L.fcntl is None, "fcntl の無い環境 (Windows) はローテーションしない設計 — test_no_rotation_at_all_when_fcntl_is_unavailable が固定")
     def test_rotates_when_over_threshold_before_next_write(self):
         # 閾値 (200 byte) を直接超えさせておき、次の書込みが rename を起こす
         # ことを確認する (open **前** に st_size を見る、という提案どおり)。
@@ -369,6 +370,7 @@ class TestLogRotation(unittest.TestCase):
         self.assertIn("after_rotation", current)
         self.assertNotIn("PRE_ROTATION_MARKER", current)
 
+    @unittest.skipIf(L.fcntl is None, "fcntl の無い環境 (Windows) はローテーションしない設計 — test_no_rotation_at_all_when_fcntl_is_unavailable が固定")
     def test_rotation_failure_does_not_raise(self):
         # rename 失敗 (権限 / 別プロセスが保持中 等) でもログ機構が hook 本体の
         # 判定を止めてはいけない (fail-open のログ契約)。

@@ -232,12 +232,27 @@ def root_relative(path: str | PurePath, root: str | PurePath | None) -> str | No
       ``git ls-files`` の cwd 相対 path を root 相対に組み立てて渡す経路)。
       ``..`` で root の外へ出るものは None
     """
+    return _root_relative(path, root, PurePath, os.path.normpath)
+
+
+def _root_relative(path, root, flavor, normpath) -> str | None:
+    """``root_relative`` の本体。``flavor`` / ``normpath`` は OS の path 流儀
+    (テストが ``PureWindowsPath`` / ``ntpath.normpath`` を渡して Windows の意味論を
+    macOS / Linux 上で検証するため、0.34.2)。
+
+    **「root 相対と見なす」のは anchor (drive / root) を持たない path だけ**
+    (0.34.2)。Windows の ``PureWindowsPath("\\r\\x").is_absolute()`` は drive が
+    無いと False を返すので、``is_absolute()`` だけで分岐すると drive 無しの
+    ルート付き path (``/r/config/prod.pem``) を root 相対と取り違え、
+    ``r/config/prod.pem`` ならぬ ``/r/config/prod.pem`` を path 形 rule と比べて
+    一致を落としていた (Windows CI 実測)。
+    """
     if not root:
         return None
-    p = PurePath(os.path.normpath(str(path)))
-    if p.is_absolute():
+    p = flavor(normpath(str(path)))
+    if p.anchor:
         try:
-            rel = p.relative_to(PurePath(os.path.normpath(str(root))))
+            rel = p.relative_to(flavor(normpath(str(root))))
         except ValueError:
             return None
     else:

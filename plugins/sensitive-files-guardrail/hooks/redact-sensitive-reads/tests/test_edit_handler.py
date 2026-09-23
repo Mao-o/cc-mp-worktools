@@ -27,7 +27,7 @@ def _env_shell_isolate(tmp: str):
     os.makedirs(home, exist_ok=True)
     os.makedirs(xdg, exist_ok=True)
     return mock.patch.dict(
-        os.environ, {"HOME": home, "XDG_CONFIG_HOME": xdg},
+        os.environ, {"HOME": home, "USERPROFILE": home, "XDG_CONFIG_HOME": xdg},
     )
 
 
@@ -754,6 +754,8 @@ class TestEditDenyKindBranches(BaseEdit):
 
     def test_special_branch_names_the_file_kind(self):
         fifo = Path(self.tmp) / ".env"
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO は POSIX のみ (Windows には名前付きパイプの別体系しか無い)")
         os.mkfifo(fifo)
         envelope = _make_envelope("Write", str(fifo), self.tmp)
         envelope["tool_input"]["content"] = "NEW_KEY=1\n"

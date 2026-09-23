@@ -512,8 +512,21 @@ def _normalize_project_keys(
     if project_key is None:
         return ()
     if isinstance(project_key, str):
-        return (project_key,) if project_key else ()
-    return tuple(k for k in project_key if k)
+        return (_comparable_path(project_key),) if project_key else ()
+    return tuple(_comparable_path(k) for k in project_key if k)
+
+
+def _comparable_path(path: str) -> str:
+    """ヘッダーの key と project key を**同じ形**にして比べるための正規化 (0.34.2)。
+
+    ``os.path.normcase(os.path.normpath(...))``。POSIX では ``normpath`` だけと
+    同じ (``normcase`` は恒等) なので挙動は変わらない。Windows では区切りを ``\\``
+    に揃え、大文字小文字を畳む — 0.34.1 まではヘッダー側だけ ``normpath`` を
+    通していたため、``[project:C:/work/repo]`` や ``[project:c:\\work\\repo]`` が
+    ``C:\\work\\repo`` の cwd と一致せず、セクションが黙って落ちていた (Windows
+    CI 実測)。
+    """
+    return os.path.normcase(os.path.normpath(path))
 
 
 def _normalize_header_key(header_key: str) -> str:
@@ -528,7 +541,7 @@ def _normalize_header_key(header_key: str) -> str:
     ``expanduser`` は ``~`` で始まらない文字列を素通しするので、絶対パスを
     書いた既存のヘッダーの挙動は変わらない。
     """
-    return os.path.normpath(os.path.expanduser(header_key))
+    return _comparable_path(os.path.expanduser(header_key))
 
 
 def _parse_patterns_text(text: str) -> list[tuple[str, bool]]:
