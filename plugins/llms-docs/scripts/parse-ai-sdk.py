@@ -46,19 +46,21 @@ from _common import (
     corpus_hint_args,
     die,
     die_index_out_of_range,
-    extract_content,
-    extract_sections,
     fetch_url,
-    format_heading_path_for_display,
     full_corpus_body_search,
     load_lines,
     next_hint,
-    print_metadata_header,
-    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
-    truncate_content,
+)
+from _commands import (  # noqa: E402
+    PageView,
+    print_entry,
+    print_page_hits,
+    print_search_result,
+    render_content,
+    render_sections,
 )
 
 # A document with no frontmatter ``title:`` field almost always means
@@ -381,18 +383,9 @@ def cmd_fetch_index(args):
     else:
         for i, doc in enumerate(docs):
             fm = parse_frontmatter(doc["frontmatter_lines"])
-            title = fm["title"] or "(untitled)"
-            desc = fm["description"] or ""
-            tags = ", ".join(fm["tags"]) if fm["tags"] else ""
-
-            print(f"[{i}] {title}")
-            if desc:
-                if len(desc) > 120:
-                    desc = desc[:117] + "..."
-                print(f"    {desc}")
-            if tags:
-                print(f"    tags: {tags}")
-            print()
+            print_entry(f"[{i}] {fm['title'] or '(untitled)'}",
+                        description=fm["description"] or "",
+                        extra_lines=[f"    tags: {', '.join(fm['tags'])}"] if fm["tags"] else [])
 
     print()
     print(f"({len(docs)} documents total)")
@@ -401,71 +394,35 @@ def cmd_fetch_index(args):
     next_hint("sections", "<page_ref>", *corpus_hint_args(args))
 
 
-def cmd_sections(args):
-    """List sections within a specific document."""
+def _page_view(args) -> tuple[str, PageView]:
+    """Load the corpus and describe ``args.page_ref`` as a ``PageView``."""
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(docs, args.page_ref)
-
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
-    title = fm["title"] or "(untitled)"
-    sections = extract_sections(doc["body_lines"], min_level=1)
+    page = PageView(
+        idx=idx,
+        title=fm["title"] or "(untitled)",
+        body_lines=doc["body_lines"],
+        header_lines=[f"  (file: {file_path})"],
+        min_level=1,
+        protect_tables=False,
+        meta={"tags": fm["tags"] or None},
+    )
+    return file_path, page
 
-    print(f'Sections in [{idx}] "{title}"')
-    print(f"  (file: {file_path})")
-    print("=" * 60)
 
-    for s in sections:
-        indent = "  " * (s["level"] - 1)
-        code_marker = " [code]" if s["has_code_blocks"] else ""
-        # Print the canonical heading_path, not the bare title: this line
-        # is documented (SKILL.md) as copy-pasteable straight into
-        # content's heading_path argument, and two sibling subsections
-        # with the same title (e.g. "Examples" under two different
-        # parents) are only distinguishable via the full path.
-        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
-
-    print()
-    print(f"({len(sections)} sections)")
-    print()
-    next_hint("content", str(idx), '"<heading_path>"', *corpus_hint_args(args))
+def cmd_sections(args):
+    """List sections within a specific document."""
+    _, page = _page_view(args)
+    render_sections(page, hint_args=corpus_hint_args(args))
 
 
 def cmd_content(args):
     """Print content of a specific document or section."""
-    _, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
-    idx = _resolve_page_ref(docs, args.page_ref)
-
-    doc = docs[idx]
-    fm = parse_frontmatter(doc["frontmatter_lines"])
-
-    content, resolved_heading_path = extract_content(
-        doc["body_lines"], args.heading_path,
-        protect_tables=False, min_level=1,
-    )
-
-    hint_args = corpus_hint_args(args)
-    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
-    narrow_hint = f'parse-ai-sdk.py content {idx} "<heading_path>"{hint_suffix}'
-    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
-
-    print_metadata_header(
-        fm["title"] or "(untitled)",
-        tags=fm["tags"] or None,
-        heading_path=resolved_heading_path,
-    )
-
-    # Printed BEFORE the body too — see parse-claude-docs.py's cmd_content
-    # for why (survives truncation regardless of where the cut lands).
-    if not args.no_subsection_hints:
-        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path,
-                               min_level=1, extra_hint_args=hint_args)
-
-    print(content, end="")
-
-    if not args.no_subsection_hints:
-        print_subsection_hints(doc["body_lines"], idx, resolved_heading_path,
-                               min_level=1, extra_hint_args=hint_args)
+    _, page = _page_view(args)
+    render_content(page, args, script="parse-ai-sdk.py",
+                   hint_args=corpus_hint_args(args))
 
 
 def cmd_search_index(args):
@@ -506,21 +463,11 @@ def cmd_search_index(args):
     else:
         for score, idx, _entry in scored:
             fm = fms[idx]
-            title = fm["title"] or "(untitled)"
-            desc = fm["description"] or ""
-            tags = ", ".join(fm["tags"]) if fm["tags"] else ""
-
-            print(f"[{idx}] {title} (score: {score})")
-            if desc:
-                if len(desc) > 120:
-                    desc = desc[:117] + "..."
-                print(f"    {desc}")
-            if tags:
-                print(f"    tags: {tags}")
+            extra = [f"    tags: {', '.join(fm['tags'])}"] if fm["tags"] else []
             if args.show_sections:
-                for h in doc_headings.get(idx, []):
-                    print(f"      - {h}")
-            print()
+                extra += [f"      - {h}" for h in doc_headings.get(idx, [])]
+            print_entry(f"[{idx}] {fm['title'] or '(untitled)'} (score: {score})",
+                        description=fm["description"] or "", extra_lines=extra)
 
     print(f"({len(scored)} results, {len(docs)} documents searched)")
     print()
@@ -570,19 +517,8 @@ def cmd_search_content(args):
             continue
         printed_docs += 1
 
-        shown = len(hits["results"])
-        print(f"[{idx}] {title}")
-        if fm["tags"]:
-            print(f"    tags: {', '.join(fm['tags'])}")
-        mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
-        print(f"    ({hits['total_matches']} hits in this document, showing {shown}){mode_note}")
-        for r in hits["results"]:
-            kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}")
-            for snippet_line in r["snippet"].splitlines():
-                print(f"      {snippet_line}")
-            print()
-        print()
+        print_page_hits(f"[{idx}] {title}", hits, noun="document",
+                        extra_lines=[f"    tags: {', '.join(fm['tags'])}"] if fm["tags"] else [])
 
     if total_hits == 0:
         print("No matching content found.")
@@ -695,24 +631,9 @@ def cmd_search(args):
         r, include_changelog_priority=args.include_changelog_priority))
 
     for r in results:
-        hits = r["body_hits"]
-        shown = len(hits["results"])
         score_tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
-        print(f"[{r['doc_idx']}] {r['title']}{score_tag}")
-        if r["tags"]:
-            print(f"    tags: {', '.join(r['tags'])}")
-        if hits["total_matches"]:
-            mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
-            print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
-            for s in hits["results"]:
-                kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}")
-                for snippet_line in s["snippet"].splitlines():
-                    print(f"      {snippet_line}")
-                print()
-        else:
-            print(f"    (no body hits — index match only)")
-        print()
+        print_search_result(f"[{r['doc_idx']}] {r['title']}{score_tag}", r["body_hits"],
+                            extra_lines=[f"    tags: {', '.join(r['tags'])}"] if r["tags"] else [])
 
     print(f"({len(results)} documents, ranked via index → body)")
     print()

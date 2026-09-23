@@ -42,21 +42,23 @@ from _common import (
     corpus_hint_args,
     die,
     die_index_out_of_range,
-    extract_content,
-    extract_sections,
     fetch_url,
-    format_heading_path_for_display,
     load_lines,
     next_hint,
     normalize_doc_url,
     parse_llms_index,
-    print_metadata_header,
-    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
     section_url_anchor,
-    truncate_content,
+)
+from _commands import (  # noqa: E402
+    PageView,
+    print_entry,
+    print_page_hits,
+    print_search_result,
+    render_content,
+    render_sections,
 )
 
 PAGE_FETCH_TIMEOUT = 30
@@ -198,6 +200,18 @@ def _entry_url_for_match(url: str) -> str:
     return normalize_doc_url(u)
 
 
+def _devsite_anchor(raw_url: str):
+    """``anchor_for`` for the shared hit renderers: section links on the human page.
+
+    Anchor into the human-facing page, not the raw .md.txt fetch URL shown
+    as "URL:" — a #fragment on the plaintext response resolves to nothing.
+    style="devsite": firebase.google.com is Google DevSite, which joins
+    heading-id words with "_", not GitHub/Mintlify's "-" (マージ前レビューの指摘)
+    """
+    page_url = _entry_url_for_match(raw_url)
+    return lambda title: section_url_anchor(page_url, title, style="devsite")
+
+
 def _resolve_page_ref(entries: list[dict], page_ref: str) -> int:
     """Resolve a page reference to an entry index.
 
@@ -266,13 +280,7 @@ def cmd_fetch_index(args):
 
     for i in range(offset, end):
         entry = entries[i]
-        print(f"[{i}] {entry['title']}")
-        if entry["description"]:
-            desc = entry["description"]
-            if len(desc) > 120:
-                desc = desc[:117] + "..."
-            print(f"    {desc}")
-        print()
+        print_entry(f"[{i}] {entry['title']}", description=entry["description"])
 
     shown = end - offset
     print(f"({shown} of {total} pages shown, offset={offset})")
@@ -282,66 +290,28 @@ def cmd_fetch_index(args):
     next_hint("sections", "<page_ref>", *corpus_hint_args(args))
 
 
-def cmd_sections(args):
+def _page_view(args) -> PageView:
+    """Resolve ``args.page_ref`` in the index, fetch that page, describe it."""
     entries = _load_index(args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(entries, args.page_ref)
-
     entry = entries[idx]
     page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
-    lines = load_lines(page_path)
-    sections = extract_sections(lines)
+    return PageView(
+        idx=idx,
+        title=entry["title"],
+        body_lines=load_lines(page_path),
+        header_lines=[f"  URL: {entry['url']}", f"  Cache: {page_path}"],
+        meta={"source": entry["url"]},
+    )
 
-    print(f'Sections in [{idx}] "{entry["title"]}"')
-    print(f"  URL: {entry['url']}")
-    print(f"  Cache: {page_path}")
-    print("=" * 60)
 
-    for s in sections:
-        indent = "  " * (s["level"] - 2)
-        code_marker = " [code]" if s["has_code_blocks"] else ""
-        # Print the canonical heading_path, not the bare title: this line
-        # is documented (SKILL.md) as copy-pasteable straight into
-        # content's heading_path argument, and two sibling subsections
-        # with the same title (e.g. "Examples" under two different
-        # parents) are only distinguishable via the full path.
-        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
-
-    print()
-    print(f"({len(sections)} sections)")
-    print()
-    next_hint("content", str(idx), '"<heading_path>"', *corpus_hint_args(args))
+def cmd_sections(args):
+    render_sections(_page_view(args), hint_args=corpus_hint_args(args))
 
 
 def cmd_content(args):
-    entries = _load_index(args.cache_dir, max_age=args.max_age)
-    idx = _resolve_page_ref(entries, args.page_ref)
-
-    entry = entries[idx]
-    page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
-    lines = load_lines(page_path)
-
-    content, resolved_heading_path = extract_content(lines, args.heading_path)
-
-    hint_args = corpus_hint_args(args)
-    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
-    narrow_hint = f'parse-firebase.py content {idx} "<heading_path>"{hint_suffix}'
-    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
-
-    print_metadata_header(
-        entry["title"],
-        source=entry["url"],
-        heading_path=resolved_heading_path,
-    )
-
-    # Printed BEFORE the body too — see parse-claude-docs.py's cmd_content
-    # for why (survives truncation regardless of where the cut lands).
-    if not args.no_subsection_hints:
-        print_subsection_hints(lines, idx, resolved_heading_path, extra_hint_args=hint_args)
-
-    print(content, end="")
-
-    if not args.no_subsection_hints:
-        print_subsection_hints(lines, idx, resolved_heading_path, extra_hint_args=hint_args)
+    render_content(_page_view(args), args, script="parse-firebase.py",
+                   hint_args=corpus_hint_args(args))
 
 
 def cmd_search_index(args):
@@ -367,14 +337,9 @@ def cmd_search_index(args):
               "search page bodies directly")
     else:
         for score, idx, entry in scored:
-            print(f"[{idx}] {entry['title']} (score: {score})")
-            if entry["description"]:
-                desc = entry["description"]
-                if len(desc) > 120:
-                    desc = desc[:117] + "..."
-                print(f"    {desc}")
-            print(f"    URL: {entry['url']}")
-            print()
+            print_entry(f"[{idx}] {entry['title']} (score: {score})",
+                        description=entry["description"],
+                        extra_lines=[f"    URL: {entry['url']}"])
 
     print(f"({len(scored)} results, {len(entries)} pages searched)")
     print()
@@ -456,29 +421,9 @@ def cmd_search_content(args):
             continue
         printed_docs += 1
 
-        shown = len(hits["results"])
-        print(f"[{idx}] {entry['title']}")
-        print(f"    URL: {entry['url']}")
-        mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
-        print(f"    ({hits['total_matches']} hits in this page, showing {shown}){mode_note}")
-        for r in hits["results"]:
-            kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            # Anchor into the human-facing page, not the raw .md.txt fetch
-            # URL shown above as "URL:" — a #fragment on the plaintext
-            # response resolves to nothing. Pass the leaf title, not
-            # heading_path — a heading whose own title contains "/" (e.g.
-            # "## CI/CD") would otherwise be misread as a nested breadcrumb
-            # (マージ前レビューの指摘)。style="devsite": firebase.google.com
-            # is Google DevSite, which joins heading-id words with "_", not
-            # GitHub/Mintlify's "-" (マージ前レビューの指摘)
-            url_anchor = section_url_anchor(
-                _entry_url_for_match(entry["url"]), r["title"], style="devsite"
-            )
-            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{url_anchor}")
-            for snippet_line in r["snippet"].splitlines():
-                print(f"      {snippet_line}")
-            print()
-        print()
+        print_page_hits(f"[{idx}] {entry['title']}", hits,
+                        extra_lines=[f"    URL: {entry['url']}"],
+                        anchor_for=_devsite_anchor(entry["url"]))
 
     if total_hits == 0:
         print("No matching content found in the targeted pages.")
@@ -556,34 +501,9 @@ def cmd_search(args):
         r, include_changelog_priority=args.include_changelog_priority))
 
     for r in results:
-        hits = r["body_hits"]
-        shown = len(hits["results"])
-        print(f"[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})")
-        print(f"    URL: {r['url']}")
-        if hits["total_matches"]:
-            mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
-            print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
-            for s in hits["results"]:
-                kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                # Anchor into the human-facing page, not the raw .md.txt
-                # fetch URL shown above as "URL:" — a #fragment on the
-                # plaintext response resolves to nothing. Pass the leaf
-                # title, not heading_path — a heading whose own title
-                # contains "/" (e.g. "## CI/CD") would otherwise be
-                # misread as a nested breadcrumb (マージ前レビューの指摘)。
-                # style="devsite": firebase.google.com is Google DevSite,
-                # which joins heading-id words with "_", not GitHub/
-                # Mintlify's "-" (マージ前レビューの指摘)
-                url_anchor = section_url_anchor(
-                    _entry_url_for_match(r["url"]), s["title"], style="devsite"
-                )
-                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
-                for snippet_line in s["snippet"].splitlines():
-                    print(f"      {snippet_line}")
-                print()
-        else:
-            print(f"    (no body hits — index match only)")
-        print()
+        print_search_result(f"[{r['doc_idx']}] {r['title']} (index_score: {r['index_score']})",
+                            r["body_hits"], extra_lines=[f"    URL: {r['url']}"],
+                            anchor_for=_devsite_anchor(r["url"]))
 
     print(f"({len(results)} pages, ranked via index → body fetch)")
     if skipped:

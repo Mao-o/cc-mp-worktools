@@ -38,23 +38,25 @@ from _common import (
     corpus_hint_args,
     die,
     die_index_out_of_range,
-    extract_content,
-    extract_sections,
     fetch_url,
-    format_heading_path_for_display,
     full_corpus_body_search,
     is_low_priority,
     load_lines,
     next_hint,
     normalize_doc_url,
     parse_llms_index,
-    print_metadata_header,
-    print_subsection_hints,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
     section_url_anchor,
-    truncate_content,
+)
+from _commands import (  # noqa: E402
+    PageView,
+    print_entry,
+    print_page_hits,
+    print_search_result,
+    render_content,
+    render_sections,
 )
 
 # ---------------------------------------------------------------------------
@@ -520,13 +522,8 @@ def cmd_fetch_index(args):
     for item in grouped:
         if item["type"] == "single":
             entry = item["entry"]
-            print(f"[{_joined_or_slug_ref(entry, url_to_idx, unique_slugs)}] {entry['title']}")
-            if entry["description"]:
-                desc = entry["description"]
-                if len(desc) > 120:
-                    desc = desc[:117] + "..."
-                print(f"    {desc}")
-            print()
+            print_entry(f"[{_joined_or_slug_ref(entry, url_to_idx, unique_slugs)}] {entry['title']}",
+                        description=entry["description"])
             displayed += 1
         else:
             variants = item["variants"]
@@ -534,14 +531,8 @@ def cmd_fetch_index(args):
                 f"{name} [{_joined_or_slug_ref(entries[i], url_to_idx, unique_slugs)}]"
                 for i, name in variants
             ]
-            print(item["base"])
-            if item["desc"]:
-                desc = item["desc"]
-                if len(desc) > 120:
-                    desc = desc[:117] + "..."
-                print(f"    {desc}")
-            print(f"    Variants: {', '.join(variant_labels)}")
-            print()
+            print_entry(item["base"], description=item["desc"],
+                        extra_lines=[f"    Variants: {', '.join(variant_labels)}"])
             displayed += 1
             grouped_count += len(variants)
 
@@ -651,36 +642,27 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
     die(f"No page found for slug: {page_ref}")
 
 
-def cmd_sections(args):
-    """List sections within a specific page."""
+def _page_view(args) -> tuple[list[dict], PageView]:
+    """Load the selected source and describe ``args.page_ref`` as a ``PageView``."""
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
                                       max_age=args.max_age)
     docs = _split_documents_checked(lines, file_path)
     idx = _resolve_page_ref(docs, args.page_ref)
-
     doc = docs[idx]
-    sections = extract_sections(doc["body_lines"])
+    page = PageView(
+        idx=idx,
+        title=doc["title"],
+        body_lines=doc["body_lines"],
+        header_lines=[f"  URL: {doc['source_url']}"] if doc["source_url"] else [],
+        meta={"source": doc["source_url"] or None},
+    )
+    return docs, page
 
-    print(f'Sections in [{idx}] "{doc["title"]}"')
-    if doc["source_url"]:
-        print(f"  URL: {doc['source_url']}")
-    print("=" * 60)
 
-    for s in sections:
-        indent = "  " * (s["level"] - 2)  # H2 = no indent, H3 = 2 spaces, etc.
-        code_marker = " [code]" if s["has_code_blocks"] else ""
-        # Print the canonical heading_path, not the bare title: this line
-        # is documented (SKILL.md) as copy-pasteable straight into
-        # content's heading_path argument, and two sibling subsections
-        # with the same title (e.g. "Examples" under two different
-        # parents) are only distinguishable via the full path.
-        print(f"{indent}[L{s['level']}] {format_heading_path_for_display(s['heading_path'])}{code_marker}")
-
-    print()
-    print(f"({len(sections)} sections)")
-    print()
-    next_hint("content", str(idx), '"<heading_path>"',
-              *(_source_hint_args(args) + corpus_hint_args(args)))
+def cmd_sections(args):
+    """List sections within a specific page."""
+    _, page = _page_view(args)
+    render_sections(page, hint_args=_source_hint_args(args) + corpus_hint_args(args))
 
 
 _DOC_LINK_RE = re.compile(r'\((https?://[^\s)]+|/[^\s)]+)\)')
@@ -760,49 +742,19 @@ def _annotate_doc_links(content: str, url_to_idx: dict, path_to_idx: dict,
 
 def cmd_content(args):
     """Print content of a specific page or section."""
-    file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
-                                      max_age=args.max_age)
-    docs = _split_documents_checked(lines, file_path)
-    idx = _resolve_page_ref(docs, args.page_ref)
+    docs, page = _page_view(args)
 
-    doc = docs[idx]
-    content, resolved_heading_path = extract_content(doc["body_lines"], args.heading_path)
-
+    transform = None
     if not args.no_link_annotations:
         url_to_idx = build_url_to_full_index(docs)
         path_to_idx = _build_path_to_idx(docs)
-        content = _annotate_doc_links(content, url_to_idx, path_to_idx, self_idx=idx)
 
-    hint_args = _source_hint_args(args) + corpus_hint_args(args)
-    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
-    narrow_hint = f'parse-claude-docs.py content {idx} "<heading_path>"{hint_suffix}'
-    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+        def transform(content: str) -> str:
+            return _annotate_doc_links(content, url_to_idx, path_to_idx, self_idx=page.idx)
 
-    print_metadata_header(
-        doc["title"],
-        source=doc["source_url"] or None,
-        heading_path=resolved_heading_path,
-    )
-
-    # Printed BEFORE the body too (duplicating the same hint printed after
-    # it, below): a long page can exceed the Bash tool's ~30KB inline-
-    # output threshold even after --max-chars truncation (e.g. --max-chars
-    # 0, or a large metadata header), and the diverted output shows only
-    # the first ~2KB — hiding the after-body hint entirely. The subsection
-    # list + Next hint are the tool's own documented drill-down path (see
-    # SKILL.md Quick Start), so they must survive truncation regardless of
-    # where the cut lands.
-    if not args.no_subsection_hints:
-        print_subsection_hints(
-            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=hint_args
-        )
-
-    print(content, end="")
-
-    if not args.no_subsection_hints:
-        print_subsection_hints(
-            doc["body_lines"], idx, resolved_heading_path, extra_hint_args=hint_args
-        )
+    render_content(page, args, script="parse-claude-docs.py",
+                   hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                   transform=transform)
 
 
 def cmd_search_index(args):
@@ -840,14 +792,9 @@ def cmd_search_index(args):
     else:
         for score, _idx, entry in scored:
             ref = _joined_or_slug_ref(entry, url_to_idx, unique_slugs)
-            print(f"[{ref}] {entry['title']} (score: {score})")
-            if entry["description"]:
-                desc = entry["description"]
-                if len(desc) > 120:
-                    desc = desc[:117] + "..."
-                print(f"    {desc}")
-            print(f"    URL: {entry['url']}")
-            print()
+            print_entry(f"[{ref}] {entry['title']} (score: {score})",
+                        description=entry["description"],
+                        extra_lines=[f"    URL: {entry['url']}"])
 
     print(f"({len(scored)} results, {len(entries)} pages searched)")
     print()
@@ -906,29 +853,12 @@ def cmd_search_content(args):
     printed = collected[: args.limit]
 
     for idx, doc, hits in printed:
-        shown = len(hits["results"])
-        print(f"[{idx}] {doc['title']}")
-        if doc["source_url"]:
-            print(f"    URL: {doc['source_url']}")
-        mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
-        print(f"    ({hits['total_matches']} hits in this page, showing {shown}){mode_note}")
-        for r in hits["results"]:
-            kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-            # Anchor from the leaf title, not heading_path — a heading whose
-            # own title contains "/" (e.g. "## CI/CD") would otherwise be
-            # misread as a nested breadcrumb (マージ前レビューの指摘)
-            url_anchor = section_url_anchor(doc["source_url"], r["title"])
-            print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{url_anchor}")
-            for snippet_line in r["snippet"].splitlines():
-                print(f"      {snippet_line}")
-            print()
-        overflow = hits.get("overflow_sections", [])
-        if overflow:
-            print(f"    Other sections with hits (not shown):")
-            for s in overflow:
-                print(f"      - {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']})")
-            print()
-        print()
+        print_page_hits(
+            f"[{idx}] {doc['title']}", hits,
+            extra_lines=[f"    URL: {doc['source_url']}"] if doc["source_url"] else [],
+            anchor_for=lambda title, url=doc["source_url"]: section_url_anchor(url, title),
+            show_overflow=True,
+        )
 
     if total_hits == 0:
         print("No matching content found.")
@@ -1039,37 +969,18 @@ def _print_search_results(results: list[dict], *, label_source: bool) -> None:
     """Render search results. When *label_source* is True, prefix each entry
     with ``[<source_key>]`` so multi-source output can be disambiguated."""
     for r in results:
-        hits = r["body_hits"]
-        shown = len(hits["results"])
         src_tag = f"[{r['source_key']}] " if label_source else ""
         score_tag = " [body-only]" if r.get("body_only") else f" (index_score: {r['index_score']})"
-        print(f"{src_tag}[{r['doc_idx']}] {r['title']}{score_tag}")
-        print(f"    URL: {r['url']}")
-        if hits["total_matches"]:
-            mode_note = " [partial match]" if hits.get("match_mode") == "partial" else ""
-            print(f"    ({hits['total_matches']} body hits, showing {shown}){mode_note}")
-            for s in hits["results"]:
-                kw_info = f"  keywords: {', '.join(s['matched_keywords'])}" if hits.get("match_mode") == "partial" else ""
-                # index の raw URL (.md 付き fetch 形) ではなく Source: 行と同じ正規形に
-                # anchor を付ける。raw 形に #fragment を付けても解決しない
-                # (マージ前レビューの指摘)。表示用の URL: 行は従来どおり raw のまま
-                # title (leaf heading) を渡す — heading_path の rsplit だと見出し
-                # 自体に "/" を含む場合 (例: "## CI/CD") に誤った anchor になる
-                # (マージ前レビューの指摘)
-                url_anchor = section_url_anchor(normalize_doc_url(r["url"]), s["title"])
-                print(f"    Section: {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']}){kw_info}{url_anchor}")
-                for snippet_line in s["snippet"].splitlines():
-                    print(f"      {snippet_line}")
-                print()
-            overflow = hits.get("overflow_sections", [])
-            if overflow:
-                print(f"    Other sections with hits (not shown):")
-                for s in overflow:
-                    print(f"      - {format_heading_path_for_display(s['heading_path'])}  (x{s['hit_count']})")
-                print()
-        else:
-            print(f"    (no body hits — index match only)")
-        print()
+        # index の raw URL (.md 付き fetch 形) ではなく Source: 行と同じ正規形に
+        # anchor を付ける。raw 形に #fragment を付けても解決しない
+        # (マージ前レビューの指摘)。表示用の URL: 行は従来どおり raw のまま
+        page_url = normalize_doc_url(r["url"])
+        print_search_result(
+            f"{src_tag}[{r['doc_idx']}] {r['title']}{score_tag}", r["body_hits"],
+            extra_lines=[f"    URL: {r['url']}"],
+            anchor_for=lambda title, url=page_url: section_url_anchor(url, title),
+            show_overflow=True,
+        )
 
 
 def cmd_search(args):
