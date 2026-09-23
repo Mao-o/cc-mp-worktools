@@ -39,6 +39,7 @@
   加えた (Windows で赤の commit に SFG の version を指す tag を残さない)。
   `tests` job の matrix へは統合しない — あちらは `scripts/test-all.sh` で全 plugin を
   列挙する作りで、SFG 以外の plugin の Windows 対応は未着手のため
+  README の CI 説明 (「手動起動限定・PR ゲート外」) も更新
 - `.gitignore` に `.beads.gate.lock` を追加。bd の merge-slot gate が作る実行時の
   ロックファイルで、`.beads/` の外 (repo root) に置かれるため既存の ignore に
   掛かっていなかった
