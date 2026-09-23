@@ -786,5 +786,94 @@ class TestParsePatternsText(unittest.TestCase):
         self.assertEqual(_parse_patterns_text("\n\n# only comments\n"), [])
 
 
+
+class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
+    """git の出力は locale に依らず UTF-8 で decode する (0.34.1)。
+
+    ``subprocess.run(text=True)`` は ``locale.getpreferredencoding(False)`` で
+    decode するため、Windows の既定 (cp1252) では ``ls-files -z`` が返す UTF-8 の
+    パスが別の文字列に化ける (``秘密`` → ``ç§˜å¯†``) か、未定義バイトで
+    ``UnicodeDecodeError`` になる。前者は「そのパスは無い」= 見逃し、後者は
+    hook 全体の内部エラー。git は ``-z`` では quote せず生バイトを返すので、
+    decode 側で UTF-8 を固定すればよい。``locale`` を patch して cp1252 を模擬する
+    (``TextIOWrapper`` の既定 encoding はこの関数を経由する)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        _init_repo(self.tmp)
+        (Path(self.tmp) / "秘密").mkdir()
+        (Path(self.tmp) / "秘密" / ".env").write_text("K=v\n", encoding="utf-8")
+
+    def _cp1252_locale(self):
+        import locale
+        patches = [mock.patch.object(locale, "getpreferredencoding", return_value="cp1252")]
+        if hasattr(locale, "getencoding"):  # 3.11+
+            patches.append(mock.patch.object(locale, "getencoding", return_value="cp1252"))
+        return patches
+
+    def test_untracked_path_with_non_ascii_dir_survives_cp1252_locale(self):
+        patches = self._cp1252_locale()
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        rules = [(".env", False)]
+        found = find_sensitive_files(self.tmp, rules)
+        paths = {entry["path"] for entry in found}
+        self.assertIn("秘密/.env", paths, msg=f"文字化けせずに報告されること: {found!r}")
+
+    def test_run_git_raw_pins_utf8(self):
+        """mutation ガード: decode 指定を外すと落ちる。"""
+        from checker import _run_git_raw
+        with mock.patch("checker.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="", stderr=""
+            )
+            _run_git_raw(["status"], self.tmp)
+        self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertEqual(run.call_args.kwargs.get("errors"), "surrogateescape")
+
+    def test_non_utf8_path_bytes_are_kept_distinct(self):
+        """UTF-8 でないパスのバイトを潰さない (外部レビューの指摘)。
+
+        POSIX のファイル名は UTF-8 の保証が無い。``replace`` だと
+        ``bad-\\xff/.env`` と ``bad-\\xfe/.env`` が同じ ``bad-\\ufffd/.env`` に潰れる。
+        macOS (APFS) はそういう名前のファイルを作れないので、git の代わりに
+        生バイトを NUL 区切りで出す子プロセスを差し込み、**実際の decode 経路**
+        (``subprocess.run`` の encoding / errors) を通す。
+        """
+        import sys as _sys
+        from checker import _run_git_nul
+        real_run = subprocess.run
+        payload = "import sys; sys.stdout.buffer.write(b'bad-\\xff/.env\\0bad-\\xfe/.env\\0')"
+
+        def fake_git(cmd, **kwargs):
+            return real_run([_sys.executable, "-c", payload], **kwargs)
+
+        with mock.patch("checker.subprocess.run", side_effect=fake_git):
+            items = _run_git_nul(["ls-files", "-z"], self.tmp)
+        self.assertEqual(len(set(items)), 2, f"別のパスが同じ文字列に潰れた: {items!r}")
+        # ``os.fsencode`` は Windows では surrogatepass で別のバイトになるため、
+        # hook と同じ ``surrogateescape`` で明示的に戻す
+        self.assertEqual(
+            sorted(i.encode("utf-8", "surrogateescape") for i in items),
+            [b"bad-\xfe/.env", b"bad-\xff/.env"],
+            "元のバイト列に戻せない",
+        )
+
+    def test_ack_digests_of_non_utf8_paths_do_not_collide(self):
+        """片方を ack したら他方が黙る、が起きないこと。encode で落ちないこと。"""
+        from stop_ack import digest_entries
+        # ``os.fsdecode`` は Windows では strict 相当で落ちるため明示的に作る
+        a = b"bad-\xff/.env".decode("utf-8", "surrogateescape")
+        b = b"bad-\xfe/.env".decode("utf-8", "surrogateescape")
+        digests = digest_entries(
+            [{"path": a, "status": "untracked"}, {"path": b, "status": "untracked"}],
+            scope=self.tmp,
+        )
+        self.assertEqual(len(digests), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

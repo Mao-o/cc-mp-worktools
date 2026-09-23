@@ -309,7 +309,7 @@ class BaseNpmrcRead(unittest.TestCase):
 
     def _write(self, content: str, name: str = ".npmrc") -> Path:
         p = Path(self.tmp) / name
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return p
 
     def _read(self, name: str = ".npmrc", mode: str = "default") -> dict:

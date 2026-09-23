@@ -40,7 +40,7 @@ if _pkg_dir not in sys.path:
 if _hooks_dir not in sys.path:
     sys.path.insert(0, _hooks_dir)
 
-from _shared.streams import write_stdout  # noqa: E402
+from _shared.streams import read_stdin, write_stdout  # noqa: E402
 from _shared.patterns import (  # noqa: E402
     LOCAL_PATTERNS_DISPLAY_PATH,
     PROJECT_PATTERNS_DISPLAY_PATH,
@@ -92,6 +92,26 @@ def _warn_envelope_unreadable(kind: str) -> None:
     送出させて ``internal_error`` + ``systemMessage`` (UI に出る) を維持する。
     """
     sys.stderr.write(f"[check-sensitive-files] envelope_unreadable: {kind}\n")
+
+
+def _display_path(path: str) -> str:
+    """reason に載せる表示用のパス。非 UTF-8 のバイトを ``\\xNN`` で無損失に見せる。
+
+    git 出力は ``surrogateescape`` で decode している (``checker._run_git_raw``)
+    ので、UTF-8 でないファイル名のバイトは lone surrogate として残る。そのまま
+    reason に入れると ``write_stdout`` の ``errors="replace"`` で ``?`` になり、
+    どのファイルか特定できず、別のバイト列のパスが同じ表示になる (外部レビューの
+    指摘、0.34.1)。surrogate を含むときだけ元のバイト列に戻して
+    ``backslashreplace`` で decode する — 正当な UTF-8 (日本語名など) はそのまま、
+    不正なバイトだけが ``\\xff`` のように出る。
+
+    既知の限界: 表示は識別のためのもので、そのまま shell に貼れる形ではない
+    (``\\xff`` は bash の通常の引用では 1 バイトにならない)。path 形 rule の
+    推奨もこの表示から作るので、そういう名前には一致しない。
+    """
+    if not any("\udc80" <= ch <= "\udcff" for ch in path):
+        return path
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
 def _serialize(reason: str) -> str:
@@ -842,7 +862,7 @@ def _main_impl() -> int:
     deadline = Deadline()
 
     try:
-        raw = sys.stdin.read()
+        raw = read_stdin()
     except EOFError as e:
         # ``OSError`` は**捕まえない** (0.32.0、マージ前レビューの指摘)。ここで
         # 握ると stderr 1 行 (= debug log にしか出ない) だけになり、従来
@@ -927,12 +947,15 @@ def _main_impl() -> int:
                 if sm is not None:
                     submodule_by_path[path] = sm
 
+    # 表示用への変換は submodule 判定 (元のパス同士の比較) の**後**に行う
     reason = _build_reason(
-        tracked,
-        untracked,
+        [_display_path(p) for p in tracked],
+        [_display_path(p) for p in untracked],
         session_scoped=session_id is not None,
         root_offset_=root_offset(cwd, root),
-        submodule_by_path=submodule_by_path,
+        submodule_by_path={
+            _display_path(p): _display_path(sm) for p, sm in submodule_by_path.items()
+        },
         incomplete=deadline.exceeded,
     )
 

@@ -118,7 +118,10 @@ def digest_entries(
     for entry in entries:
         physical = _physical_path(scope, prefix, str(entry.get("path", "")))
         key = f"{entry.get('status', '')}\t{physical}"
-        digests.add(hashlib.sha256(key.encode("utf-8")).hexdigest())
+        # ``surrogateescape``: git 出力を無損失 decode したパス (非 UTF-8 のバイト) を
+        # 元のバイト列に戻して digest する。strict だと ``UnicodeEncodeError``、
+        # ``replace`` だと別のパスと digest が衝突する (0.34.1)
+        digests.add(hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest())
     return digests
 
 

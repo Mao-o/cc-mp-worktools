@@ -209,7 +209,7 @@ class TestFnmatchCharClassRegression(unittest.TestCase):
             / "check-sensitive-files"
             / "patterns.txt"
         )
-        text = patterns_file.read_text()
+        text = patterns_file.read_text(encoding="utf-8")
         for line in text.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):

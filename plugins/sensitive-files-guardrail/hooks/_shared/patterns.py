@@ -79,6 +79,37 @@ import re
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence, Union
 
+class PatternsDecodeError(OSError):
+    """patterns ファイルが UTF-8 として読めない (0.34.1)。
+
+    ``OSError`` の subclass にしてあるのは、既存の「読めない patterns」の扱いに
+    そのまま乗せるため: 既定 patterns.txt なら全呼出元の ``except OSError``
+    (``patterns_unavailable``)、repo 同梱 / user / 旧パスの tier なら
+    ``warn_callback`` + その tier を読まない、に倒れる。
+
+    ``errors="replace"`` で読み進めない理由: 保護 rule を**黙って書き換える**ため。
+    cp932 で保存された ``秘密.txt`` の rule は U+FFFD の並びになって一致しなく
+    なり、警告も出ないまま Read / Edit が通る。読めないことを可視化する方が安全
+    (外部レビューの指摘)。
+    """
+
+
+def _read_patterns_text(path: Path) -> str:
+    """patterns ファイルを **strict な UTF-8** で読む (locale 非依存、0.34.1)。
+
+    ``Path.read_text()`` の既定は locale の encoding (Windows で ``PYTHONUTF8``
+    未設定なら cp1252 等) なので、同梱 patterns.txt の日本語コメントで
+    ``UnicodeDecodeError`` になり、``OSError`` ではないため呼出元の except を
+    すり抜けて全 tool 呼出が内部エラーに落ちていた。decode 失敗は
+    ``PatternsDecodeError`` (``OSError``) に変換する。先頭の BOM は許容する
+    (Windows のメモ帳が付けうる。付いたままだと 1 行目の rule が一致しなくなる)。
+    """
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise PatternsDecodeError(f"not valid UTF-8: {e.reason}") from e
+
+
 _PREFERRED_SUBPATH = Path(".claude") / "sensitive-files-guardrail" / "patterns.local.txt"
 # rename 前 (sensitive-files-guard) の旧配置。新パスが無いときのみ fallback で読む。
 _LEGACY_SUBPATH = Path(".claude") / "sensitive-files-guard" / "patterns.local.txt"
@@ -658,7 +689,7 @@ def _load_project_patterns(
     if path is None:
         return []
     try:
-        text = path.read_text()
+        text = _read_patterns_text(path)
     except FileNotFoundError:
         return []
     except OSError as e:
@@ -726,9 +757,10 @@ def load_patterns(
 
     Raises:
         FileNotFoundError: 既定 patterns.txt が存在しない
-        OSError: 既定 patterns.txt の読み取りに失敗した
+        OSError: 既定 patterns.txt の読み取りに失敗した (UTF-8 として読めない
+            ``PatternsDecodeError`` を含む)
     """
-    rules = _parse_patterns_text(patterns_file.read_text())
+    rules = _parse_patterns_text(_read_patterns_text(patterns_file))
     project_key = _project_section_keys(cwd)
     # 「書き損じヘッダーの警告は種別ごとに 1 回」を **tier をまたいで** 保つ
     # (0.32.0、マージ前レビューの指摘)。tier ごとに別の集合を持つと、同じ
@@ -744,7 +776,7 @@ def load_patterns(
 
     local_path = _resolve_local_patterns_path()
     try:
-        local_text = local_path.read_text()
+        local_text = _read_patterns_text(local_path)
     except FileNotFoundError:
         # 新パスが無い → rename 前の旧パスを fallback で試す。
         return _load_legacy_local(
@@ -782,7 +814,7 @@ def _load_legacy_local(
     """
     legacy_path = _resolve_legacy_local_patterns_path()
     try:
-        legacy_text = legacy_path.read_text()
+        legacy_text = _read_patterns_text(legacy_path)
     except FileNotFoundError:
         return rules
     except OSError as e:

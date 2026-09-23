@@ -352,7 +352,7 @@ class TestBackwardCompatibilityFloor(unittest.TestCase):
         patterns_file = (
             FIXTURES.parent.parent.parent / "check-sensitive-files" / "patterns.txt"
         )
-        for line in patterns_file.read_text().splitlines():
+        for line in patterns_file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue

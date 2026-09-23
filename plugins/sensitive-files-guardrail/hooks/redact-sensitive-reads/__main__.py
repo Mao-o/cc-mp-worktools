@@ -23,7 +23,7 @@ if _PKG_DIR not in sys.path:
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _shared.streams import write_stdout  # noqa: E402
+from _shared.streams import read_stdin, write_stdout  # noqa: E402
 from core import logging as L  # noqa: E402
 from core import messages as M  # noqa: E402
 from core import output  # noqa: E402
@@ -80,7 +80,7 @@ def _read_envelope() -> tuple[dict | None, str]:
     (= 全 deny になる) 事態が起きてもログから即座に切り分けられる。
     """
     try:
-        raw = sys.stdin.read()
+        raw = read_stdin()
     except Exception:
         return None, "stdin_parse_failed"
     if not raw:

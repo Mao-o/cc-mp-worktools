@@ -616,7 +616,9 @@ repo に commit できる (0.32.0):
    は全 OS 共通だったため、この無条件 deny を撤去した。Windows でも通常判定を
    通し、内部失敗は catch-all の `ask_or_deny` に倒れる (fail-closed)。
    `O_NOFOLLOW` / `O_CLOEXEC` が無い環境では symlink 検知が `lstat` 判定の
-   fallback に依存する。**実機・CI での検証は未実施**
+   fallback に依存する。0.34.1 で patterns / stdin / git 出力 / ログの encoding を
+   UTF-8 に固定した (0.34.0 では `PYTHONUTF8` 未設定の Windows で同梱 patterns の
+   読込に失敗し、全 tool 呼出が catch-all に落ちていた)。**実機での検証は未実施**
 5. **`!` プレフィックス (Claude Code bash mode) は対象外** — ユーザー明示操作で
    `! cat .env` を実行した場合は stdout が transcript に追加される (hook 介在外)
 6. **Grep は最小対応 / Glob・NotebookEdit は対象外** (0.34.0) — `Grep` は
@@ -686,7 +688,8 @@ repo に commit できる (0.32.0):
 - 完全な情報遮断ではない。basename と鍵名は LLM に見える
 - TOCTOU race は完全には防げない
 - Python 3.11+ / Git 1.7+ / macOS / Linux で検証済み。Windows は未検証
-  (0.34.0 で無条件 deny は撤去。既知制限 4 を参照)
+  (0.34.0 で無条件 deny は撤去、0.34.1 でテキスト I/O の encoding を UTF-8 固定。
+  既知制限 4 を参照)
 
 ## テスト
 
@@ -694,10 +697,10 @@ plugin root から実行する (`cd` はサブシェルに閉じ込める — �
 2 つ目が 1 つ目の cd 先を起点に解決されて失敗する):
 
 ```bash
-# redact-sensitive-reads (1,485 tests, 0.34.0 時点)
+# redact-sensitive-reads (1,497 tests, 0.34.1 時点)
 (cd hooks/redact-sensitive-reads && python3 -m unittest discover tests)
 
-# check-sensitive-files (174 tests, 0.34.0 時点)
+# check-sensitive-files (182 tests, 0.34.1 時点)
 (cd hooks/check-sensitive-files && python3 -m unittest discover tests)
 ```
 
@@ -742,5 +745,6 @@ repo 同梱 patterns を読み込んだ記録 (`project_patterns_in_use`) も le
 - Git 1.7+ (submodule scan 用)
 - macOS / Linux で検証済み。**Windows は未検証** — 0.34.0 で「SIGALRM 非対応
   なら全 tool 呼出を deny」という冒頭ゲートを撤去し、通常判定を通すように
-  なった。内部失敗は catch-all の `ask_or_deny` に倒れる (fail-closed) が、
-  実機・CI での検証は行っていない (既知制限 4)
+  なった。内部失敗は catch-all の `ask_or_deny` に倒れる (fail-closed)。
+  0.34.1 で patterns / stdin / git 出力の encoding を UTF-8 に固定したが、
+  実機での検証は行っていない (既知制限 4)

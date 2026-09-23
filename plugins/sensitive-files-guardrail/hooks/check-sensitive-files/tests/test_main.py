@@ -1757,5 +1757,123 @@ class TestAsciiStdoutEncoding(BaseMainTest):
         self.assertEqual(utf8.stdout, ascii_.stdout)
 
 
+
+class TestMainStdinNonUtf8Locale(unittest.TestCase):
+    """stdin の encoding が非 UTF-8 でも envelope を読めること (0.34.1)。
+
+    Stop hook は ``cwd`` を envelope から受け取る。Windows の既定 (cp1252 等、
+    ``PYTHONUTF8`` 未設定) で ``cwd`` に cp1252 未定義バイトを含む文字
+    (``あ`` = E3 81 82) があると ``sys.stdin.read()`` が ``UnicodeDecodeError``
+    を出す。``_main_impl`` は ``EOFError`` しか捕まえないので catch-all の
+    internal_error に落ち、**未 gitignore の機密ファイルが報告されない**
+    (無音の fail-open)。子プロセスで ``PYTHONIOENCODING=cp1252`` を与えて再現する
+    (in-process の ``_run_main`` は ``StringIO`` なので再現できない)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+        self.repo = Path(self.tmp) / "あ" / "repo"
+        self.repo.mkdir(parents=True)
+        _init_repo(str(self.repo))
+        (self.repo / ".env").write_text("KEY=v\n", encoding="utf-8")
+
+    def test_untracked_env_is_reported_when_cwd_has_non_ascii(self):
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PYTHONIOENCODING"] = "cp1252"
+        env["LC_ALL"] = "C"
+        proc = subprocess.run(
+            [sys.executable, str(_ENTRY_PATH)],
+            input=json.dumps({"cwd": str(self.repo)}, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            env=env,
+        )
+        stderr = proc.stderr.decode("utf-8", "replace")
+        self.assertEqual(proc.returncode, 0, msg=stderr)
+        self.assertNotIn("internal_error", stderr)
+        self.assertTrue(proc.stdout, msg="stdout が空 = 機密ファイルが報告されない fail-open")
+        payload = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn(".env", payload["reason"])
+
+
+
+class TestNonUtf8PathsInTheBlockReason(BaseMainTest):
+    """UTF-8 でないファイル名を block の reason で ``?`` に潰さない (0.34.1)。
+
+    git 出力は ``surrogateescape`` で無損失に decode しているが、reason をそのまま
+    ``write_stdout`` (``errors="replace"``) に渡すと ``bad-\\xff/.env`` も
+    ``bad-\\xfe/.env`` も ``bad-?/.env`` になり、どのファイルか分からない (外部
+    レビューの指摘)。stdout は bytes 層を持つ実ストリームにして、hook と同じ
+    encode 経路を通す (``StringIO`` だと encode が起きず再現しない)。macOS は
+    こういう名前のファイルを作れないので ``find_sensitive_files`` を差し替える。
+    """
+
+    def test_distinct_undecodable_paths_stay_distinct_and_identifiable(self):
+        a = b"bad-\xff/.env".decode("utf-8", "surrogateescape")
+        b = b"bad-\xfe/.env".decode("utf-8", "surrogateescape")
+        entry = _load_entry()
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="utf-8")
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = io.StringIO(json.dumps({"cwd": str(self.repo)}))
+            sys.stdout = out
+            sys.stderr = io.StringIO()
+            with mock.patch.object(entry, "find_sensitive_files", return_value=[
+                {"path": a, "status": "untracked"},
+                {"path": b, "status": "untracked"},
+            ]):
+                rc = entry.main()
+            out.flush()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 0)
+        reason = json.loads(raw.getvalue().decode("utf-8"))["reason"]
+        self.assertIn("bad-\\xff/.env", reason)
+        self.assertIn("bad-\\xfe/.env", reason)
+
+    def test_valid_non_ascii_names_are_shown_as_is(self):
+        """正当な UTF-8 (日本語名) はエスケープしない (通常の表示を変えない)。"""
+        entry = _load_entry()
+        self.assertEqual(entry._display_path("秘密/.env"), "秘密/.env")
+        self.assertEqual(
+            entry._display_path(b"\xe7\xa7\x98/\xff.env".decode("utf-8", "surrogateescape")),
+            "秘/\\xff.env",
+        )
+
+
+
+class TestMainMalformedUtf8Envelope(BaseMainTest):
+    """``cwd`` に不正な UTF-8 がある envelope は走査せず internal_error で可視化 (0.34.1)。
+
+    ``errors="replace"`` だと ``cwd`` が実在しない別の場所になり、git が失敗して
+    **何も報告しない** (完走して機密なしと区別できない沈黙) になる。
+    """
+
+    def test_invalid_byte_in_cwd_is_reported_not_silent(self):
+        (self.repo / ".env").write_text("KEY=v\n")
+        body = json.dumps({"cwd": "@@CWD@@"}).encode("utf-8").replace(
+            b"@@CWD@@", str(self.repo).encode("utf-8") + b"\xff"
+        )
+        entry = _load_entry()
+        stdin = io.TextIOWrapper(io.BytesIO(body), encoding="utf-8")
+        old = (sys.stdin, sys.stdout, sys.stderr)
+        try:
+            sys.stdin = stdin
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            rc = entry.main()
+            out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+        self.assertEqual(rc, 0)
+        self.assertIn("internal_error: UnicodeDecodeError", err)
+        self.assertIn("systemMessage", json.loads(out))
+
+
 if __name__ == "__main__":
     unittest.main()

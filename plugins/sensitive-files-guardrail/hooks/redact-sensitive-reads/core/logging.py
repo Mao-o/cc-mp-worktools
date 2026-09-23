@@ -265,7 +265,7 @@ def _append(line: str) -> None:
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _rotate_if_needed(LOG_PATH)
-        with LOG_PATH.open("a") as f:
+        with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(line)
     except OSError:
         pass
