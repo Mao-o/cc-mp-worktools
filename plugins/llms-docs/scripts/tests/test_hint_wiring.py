@@ -48,6 +48,15 @@ EXPECTED_MIN_CALLS = {
 HINT_FUNC = "next_hint"
 REQUIRED_HELPER = "corpus_hint_args"
 
+# The shared command layer (``_commands.py``, 2wd.25 Phase 0) prints the
+# ``Next:`` hints on the scripts' behalf. A call to one of its renderers is a
+# hint site too: it must pass ``hint_args=`` carrying ``corpus_hint_args``.
+# ``_commands.py`` itself is checked separately — every hint it prints must
+# forward the ``hint_args`` parameter it was given, never build its own.
+COMMANDS_MODULE = "_commands.py"
+RENDER_PREFIX = "render_"
+HINT_PARAM = "hint_args"
+
 
 def _called_names(node: ast.AST) -> set:
     """Names of every function called anywhere inside *node*."""
@@ -82,16 +91,31 @@ def _names_carrying_helper(scope: ast.AST) -> set:
     return carriers
 
 
+def _is_render_call(call: ast.Call) -> bool:
+    return isinstance(call.func, ast.Name) and call.func.id.startswith(RENDER_PREFIX)
+
+
 def _hint_calls(scope: ast.AST) -> list:
     return [
         sub for sub in ast.walk(scope)
         if isinstance(sub, ast.Call)
         and isinstance(sub.func, ast.Name)
-        and sub.func.id == HINT_FUNC
+        and (sub.func.id == HINT_FUNC or _is_render_call(sub))
     ]
 
 
+def _carries_helper(value: ast.AST, carriers: set) -> bool:
+    if REQUIRED_HELPER in _called_names(value):
+        return True
+    return isinstance(value, ast.Name) and value.id in carriers
+
+
 def _call_is_wired(call: ast.Call, carriers: set) -> bool:
+    if _is_render_call(call):
+        return any(
+            kw.arg == HINT_PARAM and _carries_helper(kw.value, carriers)
+            for kw in call.keywords
+        )
     for arg in call.args:
         if not isinstance(arg, ast.Starred):
             continue
@@ -156,6 +180,51 @@ class NextHintCorpusArgsWiringTest(unittest.TestCase):
 
     def test_firebase_hints_propagate_corpus_args(self):
         self._check_script("parse-firebase.py")
+
+    def test_shared_renderers_forward_their_hint_args(self):
+        """``_commands.py`` never builds corpus flags; it forwards ``hint_args``.
+
+        Every ``render_*`` must take a ``hint_args`` parameter, and every
+        ``next_hint`` / ``print_subsection_hints`` call inside it must pass
+        that parameter through (``*hint_args`` / ``extra_hint_args=hint_args``).
+        Otherwise the scripts' wiring checked above would be lost one level down.
+        """
+        path = SCRIPTS_DIR / COMMANDS_MODULE
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        renderers = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith(RENDER_PREFIX)
+        ]
+        self.assertGreaterEqual(len(renderers), 2, "no render_* found — guard would be vacuous")
+        problems = []
+        forwarded = 0
+        for fn in renderers:
+            params = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+            if HINT_PARAM not in params:
+                problems.append(f"{fn.name}() has no {HINT_PARAM} parameter")
+                continue
+            for call in ast.walk(fn):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                    continue
+                if call.func.id == HINT_FUNC:
+                    ok = any(
+                        isinstance(a, ast.Starred) and isinstance(a.value, ast.Name)
+                        and a.value.id == HINT_PARAM
+                        for a in call.args
+                    )
+                elif call.func.id == "print_subsection_hints":
+                    ok = any(
+                        kw.arg == "extra_hint_args" and isinstance(kw.value, ast.Name)
+                        and kw.value.id == HINT_PARAM
+                        for kw in call.keywords
+                    )
+                else:
+                    continue
+                forwarded += 1
+                if not ok:
+                    problems.append(f"{COMMANDS_MODULE}:{call.lineno} ({fn.name}) drops {HINT_PARAM}")
+        self.assertEqual(problems, [])
+        self.assertGreater(forwarded, 0, "no hint call found in render_* — guard would be vacuous")
 
     def test_every_parse_script_is_covered(self):
         """The guard must not silently skip a newly added parse-*.py."""

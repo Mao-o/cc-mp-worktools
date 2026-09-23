@@ -39,6 +39,7 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
 | Script | `scripts/parse-ai-sdk.py` |
 | Script | `scripts/parse-firebase.py` |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
+| Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレート。各 script は page を `PageView` に詰めて渡す) |
 | Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
 | Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
 
@@ -166,8 +167,13 @@ int / URL slug / 完全 URL を受け付ける (ai-sdk のみ URL がないた�
 共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /
 HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skeleton /
 **keyword search (search_index_entries, search_content_in_body, score_entry)**) は
-`scripts/_common.py` に集約済み。新しい doc source を追加する際は、source 固有の
-`split_documents` と表示層のみを書き、共通部分は `_common` から import すること。
+`scripts/_common.py` に集約済み。サブコマンドの**出力テンプレート** (`sections` /
+`content` の本体、`search` / `search-content` のページ block、`fetch-index` /
+`search-index` の行) は `scripts/_commands.py` に集約済み。新しい doc source を
+追加する際は、source 固有の `split_documents` と、page を `PageView` に詰める
+小さな adapter だけを書き、共通部分は `_common` / `_commands` から import すること。
+`Next:` ヒントの corpus 引数 (`corpus_hint_args(args)`) は呼び出し側で組み立てて
+`hint_args=` で渡す (`_commands` 側では組み立てない。`tests/test_hint_wiring.py` が検査)。
 
 `search-content` はセクション単位の AND 検索が既定 — 指定した全キーワードが同じセクション内に
 揃って出現するセクションのみを返す。単純な OR 挙動（どれか 1 つでもマッチすれば hit）ではない。

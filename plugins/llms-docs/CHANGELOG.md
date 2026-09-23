@@ -2,6 +2,36 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.24.3] - 2026-09-23
+
+### 3 script のサブコマンド出力層を `scripts/_commands.py` に共通化 (挙動不変)
+
+3 つの `parse-*.py` は page の**読み込み方**だけが違い (H1 分割 / frontmatter 分割 /
+`llms.txt` index + page 単位 fetch)、出力テンプレートはほぼ同じコードを 3 重に
+持っていた。これを `scripts/_commands.py` に寄せた。**出力はバイト単位で不変**。
+
+- **`PageView` + `render_sections` / `render_content`** — 各 script は page を
+  `PageView` (idx / title / body / header 行 / heading 下限 / table 保護 / metadata)
+  に詰める小さな adapter (`_page_view(args)`) だけを持ち、描画は共通関数が行う
+- **検索結果・index 行のレンダラ** — `print_page_hits` (`search-content`) /
+  `print_search_result` (`search`) / `print_entry` (`fetch-index` / `search-index` の
+  行、description の 120 字切り詰め込み) / `print_hit_sections` を共通化。
+  script ごとの差 (単位の呼称 page / document、Claude docs だけが出す
+  overflow セクション一覧、Firebase の devsite アンカー) は引数で表す
+- **`Next:` ヒントの配線規律は維持** — `_commands` は corpus 引数を組み立てず、
+  呼び出し側が `hint_args=` で渡したものを `next_hint` へそのまま転送する。
+  `tests/test_hint_wiring.py` を拡張し、共通レンダラ呼び出しも hint site として
+  `corpus_hint_args(args)` の配線を検査する
+- **`scripts/tests/test_commands.py` を追加** (9 tests) — heading 下限による
+  インデント、description 切り詰め境界、partial match 表記などを直接検査。
+  変異テスト (下限 2→1、切り詰め 117→118) で検出されることを確認済み
+- **検証**: 3 script × 全サブコマンド (help / 正常系 / 不在 page / 不在 heading /
+  空クエリ / オプション組合せ) の 108 ケースを固定キャッシュ + オフラインで実行し、
+  stdout / stderr / exit code がリファクタ前と完全一致することを各段階で確認
+- 未使用になった `_common` の import を整理
+
+source 設定の外部化 (profile 化) は本リリースの対象外。
+
 ## [0.24.2] - 2026-09-19
 
 ### `Next:` ヒントが選択中の corpus を引き継がない箇所 9 件を修正 + 静的ガード
