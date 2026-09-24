@@ -80,6 +80,24 @@ class FindInvocationTest(unittest.TestCase):
         self.assertEqual(inv.kind, "create")
         self.assertIsNone(find_invocation("echo x &> gh pr create"))
 
+    def test_unresolved_reason(self):
+        from command import unresolved_reason
+
+        def reason(cmd):
+            return unresolved_reason(cmd, find_invocations(cmd))
+
+        self.assertIsNone(reason("gh pr create -t x"))
+        self.assertIsNone(reason("git push && gh pr create -t x && gh pr ready"))
+        self.assertIsNone(reason("gh pr ready 3 --undo"))
+        self.assertIsNone(reason('git commit -m "mention gh pr create here"'))
+        self.assertIsNotNone(reason('u="$(gh pr create -t x)"'))
+        self.assertIsNotNone(reason("u=`gh pr new`"))
+        self.assertIsNotNone(reason("pushd x && gh pr create"))
+        self.assertIsNotNone(reason('gh pr create --title "oops'))
+
+    def test_gh_repo_env_prefix(self):
+        self.assertEqual(find_invocation("GH_REPO=o/r gh pr create").repo, "o/r")
+
     def test_new_alias(self):
         self.assertEqual(find_invocation("gh pr new -t x").kind, "create")
         self.assertTrue(find_invocation("gh pr new --draft").draft)

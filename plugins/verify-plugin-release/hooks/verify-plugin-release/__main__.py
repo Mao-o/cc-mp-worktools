@@ -25,7 +25,7 @@ from pathlib import Path
 import config
 import gate
 import layout
-from command import Invocation, find_invocations
+from command import Invocation, find_invocations, unresolved_reason
 from runner import Deadline, GateTimeout, git, run
 
 MODE_ENV = "VERIFY_PLUGIN_RELEASE_MODE"
@@ -65,12 +65,21 @@ def _context(text: str) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": _clip(text)}}
 
 
+class RepoLookupError(Exception):
+    pass
+
+
 def _repo_root(cwd: Path, dl: Deadline) -> Path | None:
+    """git repo の root。repo の外なら None、判定できなければ RepoLookupError。"""
     try:
         r = git(["rev-parse", "--show-toplevel"], cwd, dl, cap=5)
-    except (OSError, GateTimeout):
+    except (OSError, GateTimeout) as e:
+        raise RepoLookupError(f"git repo の判定に失敗した: {e}") from e
+    if r.returncode == 0 and r.stdout.strip():
+        return Path(r.stdout.strip())
+    if "not a git repository" in r.stderr.lower():
         return None
-    return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    raise RepoLookupError(f"git repo の判定に失敗した (exit {r.returncode}): {r.stderr.strip()[:200]}")
 
 
 def _pr_refs(root: Path, target: str | None, dl: Deadline) -> tuple[str, str, str] | None:
@@ -93,8 +102,13 @@ def evaluate(command: str, cwd: str) -> dict | None:
     if mode == "off":
         return None
     # 1 つのコマンドに複数の PR 操作があれば全部を検査し、止めるものがあれば止める
+    invocations = find_invocations(command)
+    reason = unresolved_reason(command, invocations)
+    if reason:
+        soft = mode == "warn"
+        return _error(RuntimeError(f"{reason}。gh pr create / ready は単独のコマンドとして実行する"), soft)
     context = None
-    for inv in find_invocations(command):
+    for inv in invocations:
         result = _evaluate_one(inv, cwd, mode)
         if result is None:
             continue
@@ -111,9 +125,30 @@ _REMOTE_SCP = re.compile(r"^(?:[^@/]+@)?([^/:]+):([^/]+)/([^/]+?)(?:\.git)?/?$")
 
 def _origin(root: Path, dl: Deadline) -> tuple[str, str, str] | None:
     r = git(["remote", "get-url", "origin"], root, dl)
-    url = r.stdout.strip() if r.returncode == 0 else ""
+    return _parse_remote(r.stdout.strip()) if r.returncode == 0 else None
+
+
+def _parse_remote(url: str) -> tuple[str, str, str] | None:
     m = _REMOTE_URL.match(url) or _REMOTE_SCP.match(url)
     return tuple(x.lower() for x in m.groups()) if m else None  # type: ignore[return-value]
+
+
+def _other_default_remote(root: Path, dl: Deadline) -> str | None:
+    """`gh repo set-default` が origin と別の repo を既定にしていれば、その remote 名を返す。
+
+    gh はこの設定を `remote.<name>.gh-resolved` に保存する。
+    """
+    r = git(["config", "--get-regexp", r"^remote\..*\.gh-resolved$"], root, dl)
+    origin = _origin(root, dl)
+    for line in r.stdout.splitlines():
+        key = line.split(None, 1)[0]
+        name = key[len("remote.") : -len(".gh-resolved")]
+        if name == "origin":
+            continue
+        u = git(["remote", "get-url", name], root, dl)
+        if origin is None or _parse_remote(u.stdout.strip()) != origin:
+            return name
+    return None
 
 
 def _same_repo(root: Path, repo: str, dl: Deadline) -> bool:
@@ -160,7 +195,10 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
             return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
 
     probe = Deadline(10)
-    root = _repo_root(workdir, probe)
+    try:
+        root = _repo_root(workdir, probe)
+    except RepoLookupError as e:
+        return _error(e, soft)
     if root is None:
         return None  # git repo の外。gh 自身のエラーに任せる
     if not layout.is_plugin_repo(root):
@@ -170,12 +208,21 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
         cfg, cfg_note = _load_config(root, Deadline(10))
         dl = Deadline(cfg.timeout_seconds)
         base_hint = inv.base
-        if inv.repo and not _same_repo(root, inv.repo, dl):
-            # 別 repo 向けの PR は、手元の origin を base にした検査と中身が一致しない
+        # gh が PR を作る repo は --repo → GH_REPO → `gh repo set-default` → origin の順で決まる。
+        # origin 以外を指していると、手元で検査した base と PR の base が一致しない
+        selected = inv.repo or os.environ.get("GH_REPO") or None
+        if selected and not _same_repo(root, selected, dl):
             raise RuntimeError(
-                f"--repo ({inv.repo}) が origin と同じ repo か確認できない。"
+                f"PR の作成先 ({selected}) が origin と同じ repo か確認できない。"
                 "対象 repo の checkout で実行する"
             )
+        if not selected:
+            other = _other_default_remote(root, dl)
+            if other:
+                raise RuntimeError(
+                    f"`gh repo set-default` の既定 ({other}) が origin と別の repo を指している。"
+                    "--repo で origin を明示するか、既定を origin に戻す"
+                )
         if inv.kind == "ready":
             refs = _pr_refs(root, inv.target, dl)
             if refs is None:
@@ -253,7 +300,11 @@ def _manual(argv: list[str]) -> int:
     ap.add_argument("path", nargs="?", default=".")
     ap.add_argument("--base", default=None)
     args = ap.parse_args(argv)
-    root = _repo_root(Path(args.path).resolve(), Deadline(10))
+    try:
+        root = _repo_root(Path(args.path).resolve(), Deadline(10))
+    except RepoLookupError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if root is None:
         print("git repo ではない", file=sys.stderr)
         return 2

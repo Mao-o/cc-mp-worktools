@@ -69,6 +69,14 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 `cd "$DIR" && gh pr create` のように移動先が変数で、どの repo を検査すればよいか
 静的に分からない場合も、「ゲートを完了できない」扱いで止めます (絶対パスで書けば通ります)。
 
+同様に、PR 操作がコマンド置換 (`url="$(gh pr create ...)"`)・関数・`pushd` の後などにあって
+検査対象を特定できない場合も止めます。**`gh pr create` / `gh pr ready` は単独のコマンド
+(前に置くのは `cd <絶対パス> &&` や `git push &&` 程度) として実行してください。**
+
+PR の作成先は gh と同じ順で決まります: `--repo` → 環境変数 `GH_REPO` → `gh repo set-default`
+の既定 → `origin`。これが `origin` と別の repo を指している場合も止めます (手元で検査した
+base と PR の base が一致しないため)。
+
 `gh pr ready` では `gh pr view` で PR の branch・base・head commit を取得し、手元の checkout と
 照合します。別 branch の PR、または PR の head commit と手元の HEAD が違う (push していない
 commit がある等) 場合は、手元の検査結果が PR に当てはまらないため止めます。`gh pr view` が

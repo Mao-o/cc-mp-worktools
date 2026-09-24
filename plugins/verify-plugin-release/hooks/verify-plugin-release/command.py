@@ -22,6 +22,14 @@ _KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{"}
 # `gh pr new` は `gh pr create` の別名
 _CREATE = {"create", "new"}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# 実行位置に置かれた gh pr create / new / ready (コマンド置換 `$(` や backtick の中を含む)。
+# 文中の言及 ("... run gh pr create later") は拾わないよう、直前が区切りか行頭のものに限る
+_EXEC_POS = re.compile(
+    r"(?:^|[;&|(\n`{]|\$\()\s*(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+)*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?gh(?:\.exe)?\s+"
+    r"(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(create|new|ready)\b([^;&|\n)`]*)"
+)
+_DIR_CHANGERS = re.compile(r"(?:^|[;&|(\n`{]|\$\()\s*(?:pushd|popd)\b")
 _FALLBACK = re.compile(r"(?:^|[\s;&|(])gh\s+pr\s+(create|new|ready)\b")
 
 
@@ -60,15 +68,22 @@ def _segments(tokens: list[str]) -> list[list[str]]:
     return [s for s in segments if s]
 
 
-def _strip_prefix(seg: list[str]) -> list[str]:
+def _strip_prefix(seg: list[str]) -> tuple[list[str], dict[str, str]]:
+    """先頭の `(` / 予約語 / wrapper / `VAR=value` を外し、(残り, 代入) を返す。"""
+    assigns: dict[str, str] = {}
     i = 0
     while i < len(seg):
         tok = seg[i]
-        if tok == "(" or tok in _WRAPPERS or tok in _KEYWORDS or _ASSIGNMENT.match(tok):
+        if _ASSIGNMENT.match(tok):
+            name, _, value = tok.partition("=")
+            assigns[name] = value
+            i += 1
+            continue
+        if tok == "(" or tok in _WRAPPERS or tok in _KEYWORDS:
             i += 1
             continue
         break
-    return seg[i:]
+    return seg[i:], assigns
 
 
 def _is_gh(tok: str) -> bool:
@@ -179,7 +194,7 @@ def find_invocations(command: str) -> list[Invocation]:
     found: list[Invocation] = []
     cd = None
     for seg in _segments(tokens):
-        seg = _strip_prefix(seg)
+        seg, assigns = _strip_prefix(seg)
         if not seg:
             continue
         if seg[0] == "cd":
@@ -203,13 +218,32 @@ def find_invocations(command: str) -> list[Invocation]:
                 kind=inv.kind,
                 base=inv.base,
                 head=inv.head,
-                repo=inv.repo or global_repo,
+                repo=inv.repo or global_repo or assigns.get("GH_REPO") or None,
                 draft=inv.draft,
                 target=inv.target,
                 cd=cd,
             )
         )
     return found
+
+
+def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
+    """解析しきれていない PR 操作がありそうなら、その理由を返す。
+
+    shell の書き方は無数にあり (コマンド置換・pushd・関数定義…)、個別に追うと取りこぼす。
+    実行位置に現れる PR 操作の数と、構文解析で認識できた数が合わない場合は
+    「検査対象を特定できない」として扱い、呼び出し側で止める。
+    """
+    expected = 0
+    for m in _EXEC_POS.finditer(command):
+        if m.group(1) == "ready" and "--undo" in m.group(2):
+            continue
+        expected += 1
+    if expected > len(found) or any(not inv.parsed for inv in found):
+        return "PR 操作の位置を解析できない (コマンド置換・サブシェル等の中にある)"
+    if found and _DIR_CHANGERS.search(command):
+        return "pushd / popd による移動先を追跡できない"
+    return None
 
 
 def find_invocation(command: str) -> Invocation | None:

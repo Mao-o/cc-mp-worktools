@@ -38,6 +38,11 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
 - 設定ファイルは commit 済みのものだけを読む (未 commit の書き換えで検査を弱められないように)
 - `--repo` の比較に host を含める
 - `(true); gh pr create` のように記号が続く区切りも分割する
+- 実行位置にある PR 操作の数と構文解析で認識できた数が合わない場合 (コマンド置換・関数・
+  `pushd` など) は、検査対象を特定できないとして止める。書き方ごとに個別対応すると取りこぼす
+  ため、検出できない形はまとめて fail closed にした
+- `GH_REPO` (コマンド前置・環境変数) と `gh repo set-default` の既定が origin と別の repo なら止める
+- git repo の判定自体が失敗・時間切れした場合も止める (「repo の外」と区別する)
 - テストを `PYTHONDONTWRITEBYTECODE=1` で実行し、`__pycache__` / `*.pyc` は未 commit の変更として
   数えない (`.gitignore` に無い repo で、ゲート自身の実行結果を「変更あり」と誤判定していた)
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える

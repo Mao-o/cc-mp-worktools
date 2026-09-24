@@ -147,7 +147,7 @@ class MainTest(unittest.TestCase):
         out = run_hook(bash("gh -R demo-org/demo-market pr create -t x", self.root), {"GH_HOST": "enterprise.example"})
         self.assertEqual(self.decision(out), "deny")
         out = run_hook(bash("gh -R other/fork pr create -t x", self.root))
-        self.assertIn("--repo", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("PR の作成先", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_ready_without_pr_lookup_is_denied(self):
         # remote の無い repo では gh pr view が必ず失敗する = PR の base が分からない
@@ -174,6 +174,43 @@ class MainTest(unittest.TestCase):
         commit_all(self.root, "release")
         for _ in range(2):
             self.assertNotEqual(self.decision(run_hook(bash("gh pr create -t x", self.root))), "deny")
+
+    def _release(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release")
+
+    def test_pr_command_in_substitution_is_denied(self):
+        self._release()
+        for cmd in (
+            'url="$(gh pr create --title x --body y)"',
+            "url=`gh pr create -t x`",
+            "f() { gh pr create; }; f",
+            "pushd /tmp && gh pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(run_hook(bash(cmd, self.root))), "deny")
+        # 文中の言及は PR 操作ではない
+        self.assertIsNone(run_hook(bash('git commit -m "run gh pr create later"', self.root)))
+
+    def test_gh_repo_selectors_other_than_flag(self):
+        self._release()
+        sh(self.root, "remote", "add", "origin", "https://github.com/Demo-Org/demo-market.git")
+        out = run_hook(bash("GH_REPO=other/project gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        out = run_hook(bash("gh pr create -t x", self.root), {"GH_REPO": "other/project"})
+        self.assertEqual(self.decision(out), "deny")
+        self.assertNotEqual(
+            self.decision(run_hook(bash("gh pr create -t x", self.root), {"GH_REPO": "Demo-Org/demo-market"})),
+            "deny",
+        )
+        # gh repo set-default は remote.<name>.gh-resolved に保存される
+        sh(self.root, "remote", "add", "upstream", "git@github.com:Upstream-Org/demo-market.git")
+        sh(self.root, "config", "remote.upstream.gh-resolved", "base")
+        out = run_hook(bash("gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("set-default", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_unresolvable_cd_is_denied(self):
         for cmd in ('cd "$WT" && gh pr create -t x', "cd no-such-dir && gh pr create -t x"):
@@ -250,6 +287,13 @@ class ReadyRefsTest(unittest.TestCase):
 
     def test_other_branch_is_denied(self):
         self.assertEqual(self.decide(("other", "main", self.sha)), "deny")
+
+    def test_repo_lookup_failure_is_denied(self):
+        from runner import GateTimeout
+
+        with mock.patch.object(self.mod, "git", side_effect=GateTimeout("slow fs")):
+            out = self.mod.evaluate("gh pr create -t x", str(self.root))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_unpushed_commit_is_denied(self):
         self.assertEqual(self.decide(("feat", "main", "0" * 40)), "deny")
