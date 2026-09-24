@@ -25,5 +25,9 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
 - `gh pr create --head <branch>` が現在の checkout と違う場合、`gh pr ready` で PR の参照に
   失敗した場合も止める。`gh -R <repo> pr create` のように subcommand の前に置いた
   `--repo` も検出する
+- `--head owner:branch` (fork) と、`origin` と別の repo を指す `--repo` も止める
+- base の決め方を `gh pr create` に合わせた (`--base` → `branch.<name>.gh-merge-base` →
+  default branch)
+- 1 つのコマンド内の PR 操作をすべて検査する (`gh pr create --draft && gh pr ready` 対策)
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える
 - `python3 hooks/verify-plugin-release check` で同じ検査を手動実行できる

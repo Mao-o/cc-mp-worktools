@@ -103,8 +103,31 @@ class MainTest(unittest.TestCase):
         out = run_hook(bash("gh pr create --head other -t x", self.root))
         self.assertEqual(self.decision(out), "deny")
         self.assertIn("--head", out["hookSpecificOutput"]["permissionDecisionReason"])
-        out = run_hook(bash("gh pr create --head owner:feat -t x", self.root))
+        out = run_hook(bash("gh pr create --head feat -t x", self.root))
         self.assertNotEqual(self.decision(out), "deny")
+        # owner:branch は fork 側の branch なので、名前が同じでも手元とは一致しない
+        out = run_hook(bash("gh pr create --head someone:feat -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+
+    def test_every_invocation_in_compound_command_is_checked(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        # 先頭の draft 作成だけを見ると止めずに通してしまう
+        out = run_hook(bash("gh pr create --draft -t x && gh pr ready", self.root))
+        self.assertEqual(self.decision(out), "deny")
+
+    def test_repo_flag_must_match_origin(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release")
+        sh(self.root, "remote", "add", "origin", "https://github.com/Demo-Org/demo-market.git")
+        for cmd in ("gh -R demo-org/demo-market pr create -t x", "gh pr create --repo github.com/Demo-Org/demo-market"):
+            with self.subTest(cmd=cmd):
+                self.assertNotEqual(self.decision(run_hook(bash(cmd, self.root))), "deny")
+        out = run_hook(bash("gh -R other/fork pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("--repo", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_ready_without_pr_lookup_is_denied(self):
         # remote の無い repo では gh pr view が必ず失敗する = PR の base が分からない

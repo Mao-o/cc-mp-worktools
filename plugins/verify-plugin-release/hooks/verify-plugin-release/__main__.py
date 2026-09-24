@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 import config
 import gate
 import layout
-from command import find_invocation
+from command import Invocation, find_invocations
 from runner import Deadline, GateTimeout, git, run
 
 MODE_ENV = "VERIFY_PLUGIN_RELEASE_MODE"
@@ -91,10 +92,32 @@ def evaluate(command: str, cwd: str) -> dict | None:
     mode = _mode()
     if mode == "off":
         return None
-    inv = find_invocation(command)
-    if inv is None:
-        return None
+    # 1 つのコマンドに複数の PR 操作があれば全部を検査し、止めるものがあれば止める
+    context = None
+    for inv in find_invocations(command):
+        result = _evaluate_one(inv, cwd, mode)
+        if result is None:
+            continue
+        if result["hookSpecificOutput"].get("permissionDecision") == "deny":
+            return result
+        context = context or result
+    return context
 
+
+_REMOTE = re.compile(r"(?:[:/])([^/:]+)/([^/]+?)(?:\.git)?/?$")
+
+
+def _same_repo(root: Path, repo: str, dl: Deadline) -> bool:
+    """`--repo` の指定が origin と同じ repo を指しているか。判定できなければ False。"""
+    r = git(["remote", "get-url", "origin"], root, dl)
+    m = _REMOTE.search(r.stdout.strip()) if r.returncode == 0 else None
+    parts = [x for x in repo.strip().rstrip("/").split("/") if x]
+    if m is None or len(parts) < 2:
+        return False
+    return (m.group(1).lower(), m.group(2).lower()) == (parts[-2].lower(), parts[-1].lower())
+
+
+def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
     soft = mode == "warn" or inv.draft
     workdir = Path(cwd or os.getcwd())
     if inv.cd:
@@ -117,6 +140,12 @@ def evaluate(command: str, cwd: str) -> dict | None:
         cfg = config.load(root)
         dl = Deadline(cfg.timeout_seconds)
         base_hint = inv.base
+        if inv.repo and not _same_repo(root, inv.repo, dl):
+            # 別 repo 向けの PR は、手元の origin を base にした検査と中身が一致しない
+            raise RuntimeError(
+                f"--repo ({inv.repo}) が origin と同じ repo か確認できない。"
+                "対象 repo の checkout で実行する"
+            )
         if inv.kind == "ready":
             refs = _pr_refs(root, inv.target, dl)
             if refs is None:
@@ -134,8 +163,13 @@ def evaluate(command: str, cwd: str) -> dict | None:
         elif inv.head:
             # --head で別 branch を PR にする場合、手元の checkout は PR の中身と一致しない。
             # 検査対象を取り違えて通すより、その branch を checkout して実行させる
+            if ":" in inv.head:
+                # owner:branch は fork 側の branch。手元の同名 branch と中身が同じとは限らない
+                raise RuntimeError(
+                    f"--head ({inv.head}) は別 owner の branch を指しており、手元で検査できない"
+                )
             head_now = git(["rev-parse", "--abbrev-ref", "HEAD"], root, dl).stdout.strip()
-            want = inv.head.split(":", 1)[-1]
+            want = inv.head
             if want != head_now:
                 raise RuntimeError(
                     f"--head の branch ({want}) が現在の checkout ({head_now}) と異なる。"

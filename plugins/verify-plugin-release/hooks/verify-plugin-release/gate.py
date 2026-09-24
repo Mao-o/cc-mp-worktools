@@ -76,8 +76,17 @@ def _default_branch(root: Path, dl: Deadline) -> str | None:
     return None
 
 
+def _configured_base(root: Path, dl: Deadline) -> str | None:
+    """`gh pr create` が --base 省略時に最初に使う `branch.<current>.gh-merge-base`。"""
+    cur = git(["rev-parse", "--abbrev-ref", "HEAD"], root, dl).stdout.strip()
+    if not cur or cur == "HEAD":
+        return None
+    r = git(["config", "--get", f"branch.{cur}.gh-merge-base"], root, dl)
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
 def resolve_base(root: Path, hint: str | None, cfg: Config, dl: Deadline, rep: Report) -> str | None:
-    branch = hint or _default_branch(root, dl)
+    branch = hint or _configured_base(root, dl) or _default_branch(root, dl)
     if not branch:
         return None
     has_origin = git(["remote", "get-url", "origin"], root, dl).returncode == 0

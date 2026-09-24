@@ -5,7 +5,7 @@ import unittest
 
 import _testutil  # noqa: F401
 
-from command import find_invocation
+from command import find_invocation, find_invocations
 
 
 class FindInvocationTest(unittest.TestCase):
@@ -58,6 +58,16 @@ class FindInvocationTest(unittest.TestCase):
         for cmd in ("gh -R o/r pr create -t x", "gh --repo o/r pr create", "gh --repo=o/r pr ready 3"):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(find_invocation(cmd))
+
+    def test_repo_value_is_kept(self):
+        self.assertEqual(find_invocation("gh -R o/r pr create").repo, "o/r")
+        self.assertEqual(find_invocation("gh pr create --repo=o/r").repo, "o/r")
+        self.assertEqual(find_invocation("gh pr ready 3 -R o/r").repo, "o/r")
+        self.assertIsNone(find_invocation("gh pr create").repo)
+
+    def test_all_invocations_are_returned(self):
+        found = find_invocations("gh pr create --draft -t x && gh pr ready")
+        self.assertEqual([(i.kind, i.draft) for i in found], [("create", True), ("ready", False)])
 
     def test_head_forms(self):
         for cmd in ("gh pr create -H feat", "gh pr create --head feat", "gh pr create --head=feat"):

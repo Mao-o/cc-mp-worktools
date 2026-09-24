@@ -19,8 +19,8 @@ PR の手前で機械的に落とすのが目的です。
 
 ## 検査項目
 
-base (既定は `origin` の default branch。`gh pr create --base <branch>` があればそれ) と
-HEAD の差分を対象にします。
+base と HEAD の差分を対象にします。base は `gh pr create` と同じ順で決めます:
+`--base <branch>` → `git config branch.<現在の branch>.gh-merge-base` → `origin` の default branch。
 
 | 検査 | 内容 | 結果 |
 |---|---|---|
@@ -73,6 +73,11 @@ branch の PR なら検査しません (手元の状態が PR の中身と一致
 
 `gh pr create --head <branch>` で現在の checkout と違う branch を指定した場合も止めます。
 その branch を checkout してから実行してください。
+`--head owner:branch` (fork 側の branch) と、`--repo` が `origin` と別の repo を指す場合も、
+手元の checkout では PR の中身を検査できないため止めます。
+
+`gh pr create --draft && gh pr ready` のように 1 つのコマンドに PR 操作が複数あれば、
+すべてを検査します (どれか 1 つでも止める対象なら止めます)。
 
 ## 設定
 

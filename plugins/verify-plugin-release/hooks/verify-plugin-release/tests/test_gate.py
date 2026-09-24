@@ -166,6 +166,16 @@ class GateTest(unittest.TestCase):
         rep = self.gate(base="nope")
         self.assertEqual(statuses(rep)["base"], gate.FAIL)
 
+    def test_gh_merge_base_config_is_honored(self):
+        sh(self.root, "branch", "develop")
+        self.branch()
+        self.change_alpha()
+        commit_all(self.root, "alpha")
+        sh(self.root, "config", "branch.feat.gh-merge-base", "develop")
+        self.assertEqual(self.gate().base, "develop")
+        # --base の明示は設定より優先
+        self.assertEqual(self.gate(base="main").base, "main")
+
     def test_validate_warning_is_warn_unless_strict(self):
         self.branch()
         self.change_alpha()

@@ -29,6 +29,7 @@ class Invocation:
     draft: bool = False  # draft PR として作成する
     target: str | None = None  # `gh pr ready <target>` の対象 (番号 / branch / URL)
     head: str | None = None  # `gh pr create --head` で明示された head branch
+    repo: str | None = None  # `-R / --repo` で明示された repo (OWNER/REPO か HOST/OWNER/REPO)
     cd: str | None = None  # 直前の `cd <dir>` (最後のもの)
     parsed: bool = True  # False = shlex で分解できず文字列一致で検出した
 
@@ -62,6 +63,7 @@ def _is_gh(tok: str) -> bool:
 def _parse_create(args: list[str]) -> Invocation:
     base = None
     head = None
+    repo = None
     draft = False
     i = 0
     while i < len(args):
@@ -74,6 +76,14 @@ def _parse_create(args: list[str]) -> Invocation:
             head = args[i + 1]
             i += 2
             continue
+        if a in _READY_VALUE_OPTS and i + 1 < len(args):
+            repo = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--repo="):
+            repo = a.split("=", 1)[1]
+            i += 1
+            continue
         if a.startswith("--base="):
             base = a.split("=", 1)[1]
         elif a.startswith("--head="):
@@ -81,7 +91,7 @@ def _parse_create(args: list[str]) -> Invocation:
         elif a in ("-d", "--draft"):
             draft = True
         i += 1
-    return Invocation(kind="create", base=base or None, head=head or None, draft=draft)
+    return Invocation(kind="create", base=base or None, head=head or None, repo=repo or None, draft=draft)
 
 
 # `gh pr ready` で値を取るオプション (位置引数と取り違えないため)。
@@ -90,53 +100,67 @@ _READY_VALUE_OPTS = {"-R", "--repo"}
 
 def _parse_ready(args: list[str]) -> Invocation | None:
     target = None
+    repo = None
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--undo":
             return None  # ready -> draft への巻き戻しは対象外
         if a in _READY_VALUE_OPTS:
+            repo = args[i + 1] if i + 1 < len(args) else None
             i += 2
+            continue
+        if a.startswith("--repo="):
+            repo = a.split("=", 1)[1]
+            i += 1
             continue
         if not a.startswith("-") and target is None:
             target = a
         i += 1
-    return Invocation(kind="ready", target=target)
+    return Invocation(kind="ready", target=target, repo=repo)
 
 
-def _skip_global_flags(args: list[str]) -> list[str]:
-    """`gh -R owner/repo pr create` のように subcommand の前に置いた flag を読み飛ばす。"""
+def _split_global_flags(args: list[str]) -> tuple[str | None, list[str]]:
+    """`gh -R owner/repo pr create` のように subcommand の前に置いた --repo を取り出す。"""
+    repo = None
     i = 0
     while i < len(args):
         a = args[i]
         if a in _READY_VALUE_OPTS:
+            repo = args[i + 1] if i + 1 < len(args) else None
             i += 2
         elif a.startswith("--repo="):
+            repo = a.split("=", 1)[1]
             i += 1
         else:
             break
-    return args[i:]
+    return repo, args[i:]
 
 
-def find_invocation(command: str) -> Invocation | None:
-    """コマンド中の最初の `gh pr create` / `gh pr ready` を返す。無ければ None。"""
+def find_invocations(command: str) -> list[Invocation]:
+    """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
+
+    `gh pr create --draft && gh pr ready` のように 1 つのコマンドで draft 作成と
+    ready 化を続ける形があるため、最初の 1 つだけを見て判定してはいけない。
+    """
     if "gh" not in command or "pr" not in command:
-        return None
+        return []
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
-        m = _FALLBACK.search(command)
-        if not m:
-            return None
-        return Invocation(
-            kind=m.group(1),
-            draft=bool(re.search(r"\s(?:--draft|-d)\b", command)),
-            parsed=False,
-        )
+        return [
+            Invocation(
+                kind=m.group(1),
+                draft=bool(re.search(r"\s(?:--draft|-d)\b", command)) and m.group(1) == "create",
+                parsed=False,
+            )
+            for m in _FALLBACK.finditer(command)
+        ]
 
+    found: list[Invocation] = []
     cd = None
     for seg in _segments(tokens):
         seg = _strip_prefix(seg)
@@ -145,23 +169,34 @@ def find_invocation(command: str) -> Invocation | None:
         if seg[0] == "cd":
             cd = seg[1] if len(seg) > 1 else None
             continue
-        if _is_gh(seg[0]):
-            seg = [seg[0], *_skip_global_flags(seg[1:])]
-        if len(seg) >= 3 and _is_gh(seg[0]) and seg[1] == "pr":
-            if seg[2] == "create":
-                inv = _parse_create(seg[3:])
-            elif seg[2] == "ready":
-                inv = _parse_ready(seg[3:])
-                if inv is None:
-                    continue
-            else:
+        if not _is_gh(seg[0]):
+            continue
+        global_repo, rest = _split_global_flags(seg[1:])
+        if len(rest) < 2 or rest[0] != "pr":
+            continue
+        if rest[1] == "create":
+            inv = _parse_create(rest[2:])
+        elif rest[1] == "ready":
+            inv = _parse_ready(rest[2:])
+            if inv is None:
                 continue
-            return Invocation(
+        else:
+            continue
+        found.append(
+            Invocation(
                 kind=inv.kind,
                 base=inv.base,
                 head=inv.head,
+                repo=inv.repo or global_repo,
                 draft=inv.draft,
                 target=inv.target,
                 cd=cd,
             )
-    return None
+        )
+    return found
+
+
+def find_invocation(command: str) -> Invocation | None:
+    """最初の `gh pr create` / `gh pr ready` を返す。無ければ None。"""
+    found = find_invocations(command)
+    return found[0] if found else None
