@@ -70,6 +70,30 @@ class GateTest(unittest.TestCase):
         self.assertEqual(st["version[alpha]"], gate.FAIL)
         self.assertEqual(st["changelog[alpha]"], gate.FAIL)
 
+    def test_version_order(self):
+        cases = [
+            ("0.0.9", gate.FAIL),  # 下げ
+            ("0.1.1", gate.PASS),
+            ("1.0.0-rc.1", gate.PASS),
+            ("0.1.0-rc.1", gate.FAIL),  # 同じ番号の pre-release は正式版より古い
+            ("next", gate.WARN),  # semver でなければ比較しない
+        ]
+        self.branch()
+        for version, want in cases:
+            with self.subTest(version=version):
+                sh(self.root, "reset", "-q", "--hard", "main")
+                self.change_alpha(version=version)
+                commit_all(self.root, f"alpha {version}")
+                self.assertEqual(statuses(self.gate())["version[alpha]"], want)
+
+    def test_compare_versions(self):
+        self.assertLess(gate._compare_versions("1.0.0-alpha", "1.0.0-alpha.1"), 0)
+        self.assertLess(gate._compare_versions("1.0.0-alpha.1", "1.0.0-beta"), 0)
+        self.assertLess(gate._compare_versions("1.0.0-rc.1", "1.0.0"), 0)
+        self.assertLess(gate._compare_versions("0.9.9", "0.10.0"), 0)
+        self.assertEqual(gate._compare_versions("1.0.0+build.1", "1.0.0"), 0)
+        self.assertIsNone(gate._compare_versions("1.0", "1.0.1"))
+
     def test_doc_only_change_skips_release_checks(self):
         self.branch()
         write(self.root, "plugins/alpha/README.md", "# alpha\n")

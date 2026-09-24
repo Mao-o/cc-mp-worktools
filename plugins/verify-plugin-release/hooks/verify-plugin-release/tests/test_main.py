@@ -94,6 +94,24 @@ class MainTest(unittest.TestCase):
         out = run_hook(bash(f'cd "{self.root}" && gh pr create -t x', self.root.parent))
         self.assertEqual(self.decision(out), "deny")
 
+    def test_head_other_than_checkout_is_denied(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release")
+        # checkout は条件を満たしていても、--head が別 branch なら中身が一致しない
+        out = run_hook(bash("gh pr create --head other -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("--head", out["hookSpecificOutput"]["permissionDecisionReason"])
+        out = run_hook(bash("gh pr create --head owner:feat -t x", self.root))
+        self.assertNotEqual(self.decision(out), "deny")
+
+    def test_ready_without_pr_lookup_is_denied(self):
+        # remote の無い repo では gh pr view が必ず失敗する = PR の base が分からない
+        out = run_hook(bash("gh pr ready", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("gh pr view", out["hookSpecificOutput"]["permissionDecisionReason"])
+
     def test_unresolvable_cd_is_denied(self):
         for cmd in ('cd "$WT" && gh pr create -t x', "cd no-such-dir && gh pr create -t x"):
             with self.subTest(cmd=cmd):

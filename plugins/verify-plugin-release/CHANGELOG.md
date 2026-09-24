@@ -21,5 +21,9 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
 - hook の標準入出力は UTF-8 に固定した。Windows の既定の文字コードでは日本語の PR タイトルや
   判定結果で例外になり、JSON を返せないまま PR が素通りするため
 - `cd "$DIR" && gh pr create` のように検査対象の repo が静的に決まらない場合も止める
+- version は semver として比較し、下げを FAIL にする (semver でなければ WARN)
+- `gh pr create --head <branch>` が現在の checkout と違う場合、`gh pr ready` で PR の参照に
+  失敗した場合も止める。`gh -R <repo> pr create` のように subcommand の前に置いた
+  `--repo` も検出する
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える
 - `python3 hooks/verify-plugin-release check` で同じ検査を手動実行できる

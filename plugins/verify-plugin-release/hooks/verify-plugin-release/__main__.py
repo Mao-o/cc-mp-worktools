@@ -119,16 +119,28 @@ def evaluate(command: str, cwd: str) -> dict | None:
         base_hint = inv.base
         if inv.kind == "ready":
             refs = _pr_refs(root, inv.target, dl)
-            if refs is None and inv.target:
-                raise RuntimeError(f"`gh pr view {inv.target}` で PR の branch を取得できない")
-            if refs is not None:
-                head_now = git(["rev-parse", "--abbrev-ref", "HEAD"], root, dl).stdout.strip()
-                if refs[0] != head_now:
-                    return _context(
-                        f"{_TAG} 対象 PR の branch ({refs[0]}) が現在の checkout "
-                        f"({head_now}) と異なるため検査していない"
-                    )
-                base_hint = refs[1]
+            if refs is None:
+                # 引数なしの `gh pr ready` も「現在の branch の PR」を対象にするため、
+                # base を知るには PR の参照が要る。取れなければ既定の base で代用せず止める
+                what = f"gh pr view {inv.target}" if inv.target else "gh pr view"
+                raise RuntimeError(f"`{what}` で PR の branch を取得できない")
+            head_now = git(["rev-parse", "--abbrev-ref", "HEAD"], root, dl).stdout.strip()
+            if refs[0] != head_now:
+                return _context(
+                    f"{_TAG} 対象 PR の branch ({refs[0]}) が現在の checkout "
+                    f"({head_now}) と異なるため検査していない"
+                )
+            base_hint = refs[1]
+        elif inv.head:
+            # --head で別 branch を PR にする場合、手元の checkout は PR の中身と一致しない。
+            # 検査対象を取り違えて通すより、その branch を checkout して実行させる
+            head_now = git(["rev-parse", "--abbrev-ref", "HEAD"], root, dl).stdout.strip()
+            want = inv.head.split(":", 1)[-1]
+            if want != head_now:
+                raise RuntimeError(
+                    f"--head の branch ({want}) が現在の checkout ({head_now}) と異なる。"
+                    "その branch を checkout してから実行する"
+                )
         rep = gate.run_gate(root, cfg, dl, base_hint=base_hint)
     except (config.ConfigError, GateTimeout, OSError, RuntimeError) as e:
         return _error(e, soft)

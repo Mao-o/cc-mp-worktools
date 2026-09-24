@@ -28,6 +28,7 @@ class Invocation:
     base: str | None = None  # --base で明示された base branch
     draft: bool = False  # draft PR として作成する
     target: str | None = None  # `gh pr ready <target>` の対象 (番号 / branch / URL)
+    head: str | None = None  # `gh pr create --head` で明示された head branch
     cd: str | None = None  # 直前の `cd <dir>` (最後のもの)
     parsed: bool = True  # False = shlex で分解できず文字列一致で検出した
 
@@ -60,6 +61,7 @@ def _is_gh(tok: str) -> bool:
 
 def _parse_create(args: list[str]) -> Invocation:
     base = None
+    head = None
     draft = False
     i = 0
     while i < len(args):
@@ -68,12 +70,18 @@ def _parse_create(args: list[str]) -> Invocation:
             base = args[i + 1]
             i += 2
             continue
+        if a in ("-H", "--head") and i + 1 < len(args):
+            head = args[i + 1]
+            i += 2
+            continue
         if a.startswith("--base="):
             base = a.split("=", 1)[1]
+        elif a.startswith("--head="):
+            head = a.split("=", 1)[1]
         elif a in ("-d", "--draft"):
             draft = True
         i += 1
-    return Invocation(kind="create", base=base or None, draft=draft)
+    return Invocation(kind="create", base=base or None, head=head or None, draft=draft)
 
 
 # `gh pr ready` で値を取るオプション (位置引数と取り違えないため)。
@@ -94,6 +102,20 @@ def _parse_ready(args: list[str]) -> Invocation | None:
             target = a
         i += 1
     return Invocation(kind="ready", target=target)
+
+
+def _skip_global_flags(args: list[str]) -> list[str]:
+    """`gh -R owner/repo pr create` のように subcommand の前に置いた flag を読み飛ばす。"""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _READY_VALUE_OPTS:
+            i += 2
+        elif a.startswith("--repo="):
+            i += 1
+        else:
+            break
+    return args[i:]
 
 
 def find_invocation(command: str) -> Invocation | None:
@@ -123,6 +145,8 @@ def find_invocation(command: str) -> Invocation | None:
         if seg[0] == "cd":
             cd = seg[1] if len(seg) > 1 else None
             continue
+        if _is_gh(seg[0]):
+            seg = [seg[0], *_skip_global_flags(seg[1:])]
         if len(seg) >= 3 and _is_gh(seg[0]) and seg[1] == "pr":
             if seg[2] == "create":
                 inv = _parse_create(seg[3:])
@@ -133,6 +157,11 @@ def find_invocation(command: str) -> Invocation | None:
             else:
                 continue
             return Invocation(
-                kind=inv.kind, base=inv.base, draft=inv.draft, target=inv.target, cd=cd
+                kind=inv.kind,
+                base=inv.base,
+                head=inv.head,
+                draft=inv.draft,
+                target=inv.target,
+                cd=cd,
             )
     return None

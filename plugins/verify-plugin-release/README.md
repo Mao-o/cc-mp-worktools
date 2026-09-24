@@ -28,7 +28,7 @@ HEAD の差分を対象にします。
 | `diff` | base との差分があるか | FAIL |
 | `uncommitted` | PR に載らない未 commit の変更が残っていないか | WARN |
 | `single-plugin` | 1 PR = 1 plugin になっているか (**設定で有効化したときだけ**) | FAIL |
-| `version[<plugin>]` | 変更した plugin の `plugin.json` の version が上がっているか | FAIL |
+| `version[<plugin>]` | 変更した plugin の `plugin.json` の version が上がっているか (semver で比較。下げは FAIL、semver でなければ WARN) | FAIL / WARN |
 | `changelog[<plugin>]` | その plugin の `CHANGELOG.md` を更新したか (ファイルが無ければ SKIP) | FAIL |
 | `tests[<plugin>]` | その plugin のテストが通るか | FAIL |
 | `validate[<plugin>]` | `claude plugin validate` が通るか (warning は既定で WARN) | FAIL / WARN |
@@ -67,8 +67,12 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 `cd "$DIR" && gh pr create` のように移動先が変数で、どの repo を検査すればよいか
 静的に分からない場合も、「ゲートを完了できない」扱いで止めます (絶対パスで書けば通ります)。
 
-`gh pr ready` では `gh pr view` で PR の branch を確認し、現在の checkout と違う branch の
-PR なら検査しません (手元の状態が PR の中身と一致しないため)。
+`gh pr ready` では `gh pr view` で PR の branch と base を確認し、現在の checkout と違う
+branch の PR なら検査しません (手元の状態が PR の中身と一致しないため)。`gh pr view` が
+失敗した場合は「ゲートを完了できない」扱いで止めます。
+
+`gh pr create --head <branch>` で現在の checkout と違う branch を指定した場合も止めます。
+その branch を checkout してから実行してください。
 
 ## 設定
 

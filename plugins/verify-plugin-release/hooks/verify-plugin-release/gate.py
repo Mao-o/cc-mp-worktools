@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable
@@ -106,6 +107,29 @@ def _read_version(root: Path, rev: str, rel_manifest: str, dl: Deadline) -> tupl
     return True, v if isinstance(v, str) and v else None
 
 
+_SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+
+
+def _semver_key(v: str) -> tuple | None:
+    m = _SEMVER.match(v.strip())
+    if not m:
+        return None
+    core = tuple(int(x) for x in m.group(1, 2, 3))
+    pre = m.group(4)
+    if pre is None:
+        return (core, 1, ())  # 正式版は同じ番号の pre-release より新しい
+    ids = tuple((0, int(x), "") if x.isdigit() else (1, 0, x) for x in pre.split("."))
+    return (core, 0, ids)
+
+
+def _compare_versions(old: str, new: str) -> int | None:
+    """old < new なら負、等しければ 0、下がっていれば正。semver でなければ None。"""
+    a, b = _semver_key(old), _semver_key(new)
+    if a is None or b is None:
+        return None
+    return (a > b) - (a < b)
+
+
 def _check_version(root: Path, base: str, plugin: layout.Plugin, dl: Deadline, rep: Report) -> None:
     rel = f"{plugin.dir}/{layout.PLUGIN_MANIFEST}" if plugin.dir else layout.PLUGIN_MANIFEST
     old_exists, old = _read_version(root, base, rel, dl)
@@ -121,8 +145,16 @@ def _check_version(root: Path, base: str, plugin: layout.Plugin, dl: Deadline, r
         rep.add(name, PASS, f"新規 plugin ({new})")
     elif new == old:
         rep.add(name, FAIL, f"version が据え置き ({old})。bump しないと既存ユーザーに更新が届かない")
+    elif old is None:
+        rep.add(name, PASS, f"(未設定) -> {new}")
     else:
-        rep.add(name, PASS, f"{old or '(未設定)'} -> {new}")
+        order = _compare_versions(old, new)
+        if order is None:
+            rep.add(name, WARN, f"{old} -> {new} (semver として比較できないため上がったか確認していない)")
+        elif order < 0:
+            rep.add(name, PASS, f"{old} -> {new}")
+        else:
+            rep.add(name, FAIL, f"version が下がっている ({old} -> {new})")
 
 
 def _check_changelog(root: Path, plugin: layout.Plugin, changed: list[str], dl: Deadline, rep: Report) -> None:

@@ -54,6 +54,17 @@ class FindInvocationTest(unittest.TestCase):
         self.assertIsNone(find_invocation("gh pr ready").target)
         self.assertEqual(find_invocation("gh pr ready -R o/r 7").target, "7")
 
+    def test_global_repo_flag_before_subcommand(self):
+        for cmd in ("gh -R o/r pr create -t x", "gh --repo o/r pr create", "gh --repo=o/r pr ready 3"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(find_invocation(cmd))
+
+    def test_head_forms(self):
+        for cmd in ("gh pr create -H feat", "gh pr create --head feat", "gh pr create --head=feat"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(find_invocation(cmd).head, "feat")
+        self.assertIsNone(find_invocation("gh pr create").head)
+
     def test_ready_undo_is_ignored(self):
         self.assertIsNone(find_invocation("gh pr ready 42 --undo"))
 
