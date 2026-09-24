@@ -1,0 +1,20 @@
+{
+  "name": "verify-plugin-release",
+  "version": "0.1.0",
+  "description": "gh pr create / gh pr ready の前に、plugin marketplace repo の完了条件 (version bump・CHANGELOG・テスト・claude plugin validate・base との競合) を検査し、満たさなければ PR 作成を止める PreToolUse hook",
+  "author": {
+    "name": "Mao"
+  },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": [
+    "pretooluse",
+    "hooks",
+    "release",
+    "pull-request",
+    "marketplace",
+    "validation",
+    "ci"
+  ]
+}

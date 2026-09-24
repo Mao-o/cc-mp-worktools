@@ -109,6 +109,22 @@
         "refactoring",
         "hooks"
       ]
+    },
+    {
+      "name": "verify-plugin-release",
+      "displayName": "Verify Plugin Release",
+      "source": "./plugins/verify-plugin-release",
+      "description": "gh pr create / gh pr ready の前に、plugin marketplace repo の完了条件 (version bump・CHANGELOG・テスト・claude plugin validate・base との競合) を検査し、満たさなければ PR 作成を止める PreToolUse hook",
+      "category": "release",
+      "keywords": [
+        "pretooluse",
+        "hooks",
+        "release",
+        "pull-request",
+        "marketplace",
+        "validation",
+        "ci"
+      ]
     }
   ]
 }

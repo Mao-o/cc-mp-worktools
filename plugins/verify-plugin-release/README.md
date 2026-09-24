@@ -1,0 +1,131 @@
+# verify-plugin-release
+
+Claude Code の plugin marketplace repo で、`gh pr create` / `gh pr ready` を実行する前に
+**PR 前の完了条件**を検査する PreToolUse hook です。条件を満たしていなければ PR の作成を
+止め、何が足りないかを Claude に返します。
+
+「version を bump し忘れて既存ユーザーに更新が届かない」「CHANGELOG を書き忘れた」
+「テストが落ちたまま PR を出した」といった、レビューで毎回指摘される類の漏れを
+PR の手前で機械的に落とすのが目的です。
+
+## 動作する条件
+
+- Bash ツールで実行するコマンドに `gh pr create` または `gh pr ready` が含まれる
+  (`git push && gh pr create ...` のような複合コマンドや `cd <dir> && ...` も追跡します)
+- コマンドを実行する repo が plugin repo である
+  (`.claude-plugin/marketplace.json` か `.claude-plugin/plugin.json` がある)
+
+それ以外のコマンド・repo では何もしません。
+
+## 検査項目
+
+base (既定は `origin` の default branch。`gh pr create --base <branch>` があればそれ) と
+HEAD の差分を対象にします。
+
+| 検査 | 内容 | 結果 |
+|---|---|---|
+| `branch` | base と同じ branch / detached HEAD で PR を作ろうとしていないか | FAIL |
+| `diff` | base との差分があるか | FAIL |
+| `uncommitted` | PR に載らない未 commit の変更が残っていないか | WARN |
+| `single-plugin` | 1 PR = 1 plugin になっているか (**設定で有効化したときだけ**) | FAIL |
+| `version[<plugin>]` | 変更した plugin の `plugin.json` の version が上がっているか | FAIL |
+| `changelog[<plugin>]` | その plugin の `CHANGELOG.md` を更新したか (ファイルが無ければ SKIP) | FAIL |
+| `tests[<plugin>]` | その plugin のテストが通るか | FAIL |
+| `validate[<plugin>]` | `claude plugin validate` が通るか (warning は既定で WARN) | FAIL / WARN |
+| `listed[<plugin>]` | 新規 plugin が `marketplace.json` に登録されているか | WARN |
+| `validate[marketplace]` | `marketplace.json` を変えた / plugin を追加したときの marketplace 全体の validate | FAIL / WARN |
+| `workflow-yaml` | 変更した `.github/workflows/*.yml` が YAML として読めるか (PyYAML がある場合のみ) | FAIL |
+| `merge` | base と競合しないか (`git merge-tree --write-tree` で作業ツリーに触れず試算) | FAIL |
+
+- plugin 内の変更が `README.md` / `CHANGELOG.md` / `LICENSE` / `docs/` 配下だけなら、
+  配布に影響しないため version と CHANGELOG の検査は省きます
+  (`SKILL.md` など機能に効く Markdown は対象です)
+- テストは既定で、plugin 配下の `tests/` ディレクトリ (`test*.py` を含むもの) ごとに
+  `python -m unittest discover tests` を実行します。Python 以外の plugin は
+  `test_command` で指定してください。検出できなければ SKIP します
+- `claude` コマンドが PATH に無い環境では validate を SKIP します
+
+## 止める / 止めないの判定
+
+| 状況 | 動作 |
+|---|---|
+| FAIL が 1 つ以上ある | **PR 作成を止める** (deny)。FAIL / WARN の行を理由として返す |
+| ゲートを完了できない (制限時間切れ・設定ファイルの破損・想定外のエラー) | **止める** |
+| `gh pr create --draft` | 検査はするが止めない (結果を伝えるだけ) |
+| WARN のみ | 止めない (結果を伝える) |
+| すべて PASS | 何も出力しない |
+
+Claude Code は PreToolUse hook が時間切れになるとコマンドをそのまま実行します。このため
+ゲート内部に制限時間 (既定 90 秒) を持ち、hook 自体の timeout (120 秒) より先に打ち切って
+「止める」判断を返します。
+
+`gh pr ready` では `gh pr view` で PR の branch を確認し、現在の checkout と違う branch の
+PR なら検査しません (手元の状態が PR の中身と一致しないため)。
+
+## 設定
+
+repo ごとに `<repo>/.claude/verify-plugin-release.json` を置けます (無ければ既定値)。
+
+```json
+{
+  "single_plugin_per_pr": false,
+  "strict_validate": false,
+  "fetch": true,
+  "timeout_seconds": 90,
+  "test_command": null
+}
+```
+
+| キー | 既定 | 内容 |
+|---|---|---|
+| `single_plugin_per_pr` | `false` | `true` で、複数の plugin (または plugin と repo 直下のファイル) にまたがる PR を FAIL にする |
+| `strict_validate` | `false` | `true` で `claude plugin validate` の warning を FAIL にする |
+| `fetch` | `true` | 検査前に `git fetch origin <base>` する (15 秒で打ち切り、失敗したら手元の ref で検査) |
+| `timeout_seconds` | `90` | ゲート全体の制限時間。上限 110 |
+| `test_command` | `null` | `null` = Python unittest を自動検出 / `false` = テストを走らせない / `["make", "test"]` のような配列 = 変更した各 plugin のディレクトリで実行 |
+
+未知のキーや型の誤りは「設定の破損」として扱い、PR 作成を止めます (有効にしたつもりの
+検査が黙って効いていない状態を避けるため)。
+
+環境変数 `VERIFY_PLUGIN_RELEASE_MODE`:
+
+| 値 | 動作 |
+|---|---|
+| `enforce` (既定) | 上の判定どおり止める |
+| `warn` | 検査はするが止めない |
+| `off` | 何もしない |
+
+## 手動実行
+
+hook と同じ検査を手元で実行できます。
+
+```bash
+python3 <plugin-root>/hooks/verify-plugin-release check [--base main] [path/to/repo]
+```
+
+終了コードは `0` = PASS / `1` = FAIL / `2` = ゲートを完了できなかった、です。
+
+## 例
+
+```text
+[verify-plugin-release] PR 前の完了条件を満たしていない。FAIL を解消してから再実行する。
+base: origin/main / branch: feat/example
+FAIL  version[example-plugin]: version が据え置き (1.2.0)。bump しないと既存ユーザーに更新が届かない
+FAIL  changelog[example-plugin]: plugins/example-plugin/CHANGELOG.md が未更新
+WARN  uncommitted: PR に載らない未 commit の変更がある: plugins/example-plugin/notes.txt
+(一時的に止めずに通すには VERIFY_PLUGIN_RELEASE_MODE=warn)
+```
+
+## 外部送信
+
+plugin 自身は外部へデータを送りません。ただし検査のために次のコマンドを起動し、
+それらはネットワークにアクセスします。
+
+- `git fetch origin <base>` (`fetch: false` で無効化)
+- `gh pr view` (`gh pr ready` のときのみ)
+- `claude plugin validate`
+
+## 要件
+
+- Python 3.11+ / git (競合検査は 2.38 以上。それ未満では SKIP)
+- `gh` (`gh pr ready` の branch 確認に使用)
