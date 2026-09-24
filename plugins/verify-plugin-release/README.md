@@ -59,6 +59,14 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 ゲート内部に制限時間 (既定 90 秒) を持ち、hook 自体の timeout (120 秒) より先に打ち切って
 「止める」判断を返します。
 
+**制限時間に注意**: テストの実行時間も 90 秒に含まれます。テストに時間のかかる plugin を
+含む PR や、複数の plugin にまたがる PR では制限時間を超えて止められることがあります。
+その場合は `test_command` で実行範囲を絞るか、`timeout_seconds` を延ばしてください
+(上限 110 秒)。それでも収まらない場合は `VERIFY_PLUGIN_RELEASE_MODE=warn` を使います。
+
+`cd "$DIR" && gh pr create` のように移動先が変数で、どの repo を検査すればよいか
+静的に分からない場合も、「ゲートを完了できない」扱いで止めます (絶対パスで書けば通ります)。
+
 `gh pr ready` では `gh pr view` で PR の branch を確認し、現在の checkout と違う branch の
 PR なら検査しません (手元の状態が PR の中身と一致しないため)。
 
@@ -115,6 +123,11 @@ FAIL  changelog[example-plugin]: plugins/example-plugin/CHANGELOG.md が未更�
 WARN  uncommitted: PR に載らない未 commit の変更がある: plugins/example-plugin/notes.txt
 (一時的に止めずに通すには VERIFY_PLUGIN_RELEASE_MODE=warn)
 ```
+
+## 注意: テストコードを実行する
+
+この hook は repo 内のテストと `test_command` を、permission prompt なしで実行します。
+信頼できない repo では `VERIFY_PLUGIN_RELEASE_MODE=off` にしてください。
 
 ## 外部送信
 

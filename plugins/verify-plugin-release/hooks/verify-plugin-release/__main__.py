@@ -95,9 +95,16 @@ def evaluate(command: str, cwd: str) -> dict | None:
     if inv is None:
         return None
 
+    soft = mode == "warn" or inv.draft
     workdir = Path(cwd or os.getcwd())
     if inv.cd:
+        # `cd "$WT" && gh pr create` のように移動先が静的に決まらない / 存在しない場合、
+        # 検査する repo が分からない。素通しにせず「完了できなかった」として扱う。
+        if any(c in inv.cd for c in "$`"):
+            return _error(RuntimeError(f"cd の移動先 ({inv.cd}) を静的に解決できない。絶対パスで指定する"), soft)
         workdir = (workdir / os.path.expanduser(inv.cd)).resolve()
+        if not workdir.is_dir():
+            return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
 
     probe = Deadline(10)
     root = _repo_root(workdir, probe)
@@ -106,7 +113,6 @@ def evaluate(command: str, cwd: str) -> dict | None:
     if not layout.is_plugin_repo(root):
         return None
 
-    soft = mode == "warn" or inv.draft
     try:
         cfg = config.load(root)
         dl = Deadline(cfg.timeout_seconds)
@@ -177,10 +183,17 @@ def _manual(argv: list[str]) -> int:
 
 
 def main() -> None:
+    # Windows の既定 (cp1252 等) では日本語の入出力で例外になり、hook が JSON を
+    # 返せないまま終わる = Claude Code はコマンドをそのまま実行する。入出力は
+    # UTF-8 に固定する (stdin は bytes で読んで decode、stdout は reconfigure)。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     if len(sys.argv) > 1 and sys.argv[1] == "check":
         sys.exit(_manual(sys.argv[2:]))
     try:
-        data = json.load(sys.stdin)
+        raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode("utf-8")
+        data = json.loads(raw.decode("utf-8"))
     except (ValueError, OSError):
         return
     if not isinstance(data, dict) or data.get("tool_name") != "Bash":
@@ -190,7 +203,7 @@ def main() -> None:
         return
     result = evaluate(command, data.get("cwd") or "")
     if result is not None:
-        json.dump(result, sys.stdout, ensure_ascii=False)
+        json.dump(result, sys.stdout)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,30 @@ class MainTest(unittest.TestCase):
         out = run_hook(bash(f'cd "{self.root}" && gh pr create -t x', self.root.parent))
         self.assertEqual(self.decision(out), "deny")
 
+    def test_unresolvable_cd_is_denied(self):
+        for cmd in ('cd "$WT" && gh pr create -t x', "cd no-such-dir && gh pr create -t x"):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("cd の移動先", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_japanese_payload_as_utf8_bytes(self):
+        # Windows では stdin の既定 codec が UTF-8 でないため、日本語タイトルで
+        # decode に失敗して素通りする経路があった。bytes で渡して確かめる
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        payload = json.dumps(bash('gh pr create --title "機能追加: 検証ゲート"', self.root), ensure_ascii=False)
+        r = subprocess.run(
+            [sys.executable, str(_PKG)],
+            input=payload.encode("utf-8"),
+            capture_output=True,
+            env={k: v for k, v in os.environ.items() if k not in ("VERIFY_PLUGIN_RELEASE_MODE", "PYTHONUTF8")},
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.decode("utf-8"))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_non_plugin_repo_is_ignored(self):
         other = Path(self._tmp.name) / "plain"
         other.mkdir()

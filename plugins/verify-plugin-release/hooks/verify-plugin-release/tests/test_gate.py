@@ -147,7 +147,7 @@ class GateTest(unittest.TestCase):
         self.change_alpha()
         commit_all(self.root, "alpha")
         fake = self.root.parent / "fake_claude.py"
-        fake.write_text("print('⚠ Found 1 warning')\nprint('passed with warnings')\n", encoding="utf-8")
+        fake.write_text("print('Found 1 warning')\nprint('passed with warnings')\n", encoding="utf-8")
         # claude の実物は使わず、warning を出す偽コマンドに差し替えて判定部分だけ確かめる
         rep = gate.Report()
         orig = gate.run

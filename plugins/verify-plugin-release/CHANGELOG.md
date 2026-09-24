@@ -18,5 +18,8 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
   - `claude` / PyYAML / 新しい git が無い環境では該当検査を SKIP する
   - 別 worktree の shared checkout を見る検査は、作業ツリーの未 commit 変更を WARN で
     知らせる検査に置き換えた (worktree を使わない repo でも意味を持つ形にするため)
+- hook の標準入出力は UTF-8 に固定した。Windows の既定の文字コードでは日本語の PR タイトルや
+  判定結果で例外になり、JSON を返せないまま PR が素通りするため
+- `cd "$DIR" && gh pr create` のように検査対象の repo が静的に決まらない場合も止める
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える
 - `python3 hooks/verify-plugin-release check` で同じ検査を手動実行できる
