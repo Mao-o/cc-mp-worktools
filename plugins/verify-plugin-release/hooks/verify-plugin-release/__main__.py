@@ -73,9 +73,9 @@ def _repo_root(cwd: Path, dl: Deadline) -> Path | None:
     return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
 
 
-def _pr_refs(root: Path, target: str | None, dl: Deadline) -> tuple[str, str] | None:
-    """`gh pr view` で (head, base) を得る。取れなければ None。"""
-    args = ["gh", "pr", "view", "--json", "headRefName,baseRefName"]
+def _pr_refs(root: Path, target: str | None, dl: Deadline) -> tuple[str, str, str] | None:
+    """`gh pr view` で (head branch, base branch, head commit) を得る。取れなければ None。"""
+    args = ["gh", "pr", "view", "--json", "headRefName,baseRefName,headRefOid"]
     if target:
         args.insert(3, target)
     try:
@@ -83,8 +83,8 @@ def _pr_refs(root: Path, target: str | None, dl: Deadline) -> tuple[str, str] | 
         data = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError):
         return None
-    if isinstance(data, dict) and data.get("headRefName") and data.get("baseRefName"):
-        return data["headRefName"], data["baseRefName"]
+    if isinstance(data, dict) and all(data.get(k) for k in ("headRefName", "baseRefName", "headRefOid")):
+        return data["headRefName"], data["baseRefName"], data["headRefOid"]
     return None
 
 
@@ -153,11 +153,19 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
                 # base を知るには PR の参照が要る。取れなければ既定の base で代用せず止める
                 what = f"gh pr view {inv.target}" if inv.target else "gh pr view"
                 raise RuntimeError(f"`{what}` で PR の branch を取得できない")
+            # 手元で検査した内容が PR の中身と同じであることを branch と commit の両方で確かめる。
+            # 別 branch の PR や、push していない commit がある状態では検査結果が PR に当てはまらない
             head_now = git(["rev-parse", "--abbrev-ref", "HEAD"], root, dl).stdout.strip()
             if refs[0] != head_now:
-                return _context(
-                    f"{_TAG} 対象 PR の branch ({refs[0]}) が現在の checkout "
-                    f"({head_now}) と異なるため検査していない"
+                raise RuntimeError(
+                    f"対象 PR の branch ({refs[0]}) が現在の checkout ({head_now}) と異なる。"
+                    "その branch を checkout してから実行する"
+                )
+            sha_now = git(["rev-parse", "HEAD"], root, dl).stdout.strip()
+            if refs[2] != sha_now:
+                raise RuntimeError(
+                    f"PR の head ({refs[2][:10]}) と手元の HEAD ({sha_now[:10]}) が異なる。"
+                    "push していない commit があれば push してから実行する"
                 )
             base_hint = refs[1]
         elif inv.head:

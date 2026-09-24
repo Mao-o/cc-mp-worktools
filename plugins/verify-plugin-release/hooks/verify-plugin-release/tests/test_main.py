@@ -1,6 +1,7 @@
 """__main__.py (PreToolUse hook の入口) を subprocess で実行する end-to-end テスト。"""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _testutil  # noqa: F401
 from _testutil import bump, commit_all, make_marketplace, sh, write, write_json
@@ -169,6 +171,50 @@ class MainTest(unittest.TestCase):
         outside = Path(self._tmp.name) / "nogit"
         outside.mkdir()
         self.assertIsNone(run_hook(bash("gh pr create -t x", outside), {"GIT_CEILING_DIRECTORIES": self._tmp.name}))
+
+
+def _load_entry():
+    spec = importlib.util.spec_from_file_location("vpr_entry", _PKG / "__main__.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class ReadyRefsTest(unittest.TestCase):
+    """`gh pr ready` の PR 参照と手元の照合 (gh を差し替えて in-process で確かめる)。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_marketplace(Path(self._tmp.name) / "repo", ["alpha"])
+        write_json(self.root, ".claude/verify-plugin-release.json", {"fetch": False})
+        sh(self.root, "switch", "-q", "-c", "feat")
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release")
+        self.sha = sh(self.root, "rev-parse", "HEAD").strip()
+        self.mod = _load_entry()
+        self._env = mock.patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        os.environ.pop("VERIFY_PLUGIN_RELEASE_MODE", None)
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def decide(self, refs):
+        with mock.patch.object(self.mod, "_pr_refs", return_value=refs):
+            out = self.mod.evaluate("gh pr ready 7", str(self.root))
+        return None if out is None else out["hookSpecificOutput"].get("permissionDecision")
+
+    def test_matching_branch_and_commit_passes(self):
+        self.assertNotEqual(self.decide(("feat", "main", self.sha)), "deny")
+
+    def test_other_branch_is_denied(self):
+        self.assertEqual(self.decide(("other", "main", self.sha)), "deny")
+
+    def test_unpushed_commit_is_denied(self):
+        self.assertEqual(self.decide(("feat", "main", "0" * 40)), "deny")
 
 
 class ManualCheckTest(unittest.TestCase):

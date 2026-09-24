@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import _testutil  # noqa: F401
+import _testutil
 from _testutil import FAILING_TEST, add_plugin, bump, commit_all, make_marketplace, sh, write
 
 import gate
@@ -119,14 +119,33 @@ class GateTest(unittest.TestCase):
         st = statuses(self.gate(Config(fetch=False, test_command=["git", "definitely-not-a-command"])))
         self.assertEqual(st["tests[alpha]"], gate.FAIL)
 
-    def test_uncommitted_changes_warn(self):
+    def test_uncommitted_changes_outside_checked_plugins_warn(self):
         self.branch()
         self.change_alpha()
         commit_all(self.root, "alpha")
-        write(self.root, "plugins/alpha/extra.py", "x = 1\n")
+        write(self.root, "plugins/beta/extra.py", "x = 1\n")
         rep = self.gate()
-        self.assertEqual(statuses(rep)["uncommitted"], gate.WARN)
+        self.assertEqual(statuses(rep)["uncommitted-other"], gate.WARN)
         self.assertFalse(rep.failed)
+
+    def test_dirty_fix_does_not_mask_committed_failure(self):
+        # commit 済みのテストは落ちるが、未 commit の修正で作業ツリーでは通る状態
+        self.branch()
+        self.change_alpha()
+        write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", FAILING_TEST)
+        commit_all(self.root, "alpha with failing test")
+        write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", _testutil.PASSING_TEST)
+        rep = self.gate()
+        self.assertEqual(statuses(rep)["uncommitted"], gate.FAIL)
+        self.assertTrue(rep.failed)
+
+    def test_removed_plugin_with_dangling_entry_fails(self):
+        self.branch()
+        sh(self.root, "rm", "-q", "-r", "plugins/beta")
+        commit_all(self.root, "remove beta, keep entry")
+        st = statuses(self.gate())
+        self.assertEqual(st["removed[beta]"], gate.FAIL)
+        self.assertEqual(st["validate[marketplace]"], gate.SKIP)
 
     def test_single_plugin_per_pr(self):
         self.branch()

@@ -16,8 +16,9 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
   - base は `origin` の default branch か `--base` の値 (元は `origin/main` 固定)
   - テストコマンドを `test_command` で差し替え可能にした (元は Python unittest 固定)
   - `claude` / PyYAML / 新しい git が無い環境では該当検査を SKIP する
-  - 別 worktree の shared checkout を見る検査は、作業ツリーの未 commit 変更を WARN で
-    知らせる検査に置き換えた (worktree を使わない repo でも意味を持つ形にするため)
+  - 別 worktree の shared checkout を見る検査は、作業ツリーの未 commit 変更を見る検査に
+    置き換えた (worktree を使わない repo でも意味を持つ形にするため)。検査対象の plugin
+    内は FAIL、それ以外は WARN
 - hook の標準入出力は UTF-8 に固定した。Windows の既定の文字コードでは日本語の PR タイトルや
   判定結果で例外になり、JSON を返せないまま PR が素通りするため
 - `cd "$DIR" && gh pr create` のように検査対象の repo が静的に決まらない場合も止める
@@ -29,5 +30,10 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
 - base の決め方を `gh pr create` に合わせた (`--base` → `branch.<name>.gh-merge-base` →
   default branch)
 - 1 つのコマンド内の PR 操作をすべて検査する (`gh pr create --draft && gh pr ready` 対策)
+- `gh pr new` (create の別名) と、`if ...; then gh pr create; fi` のような制御構文の中も検出する
+- `gh pr ready` は PR の branch と head commit が手元と一致しなければ止める
+- 検査対象の plugin に未 commit の変更があれば止める (作業ツリーの修正で commit 済みの
+  失敗が隠れるため)
+- 削除した plugin の entry が marketplace.json に残っていれば止める
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える
 - `python3 hooks/verify-plugin-release check` で同じ検査を手動実行できる

@@ -76,8 +76,9 @@ def discover(root: Path) -> list[Plugin]:
     listed = _marketplace_dirs(root)
     found: dict[str, Plugin] = {}
     for rel, name in listed.items():
-        if (root / rel).is_dir():
-            found[rel] = Plugin(_manifest_name(root, rel) or name, rel, True)
+        # ディレクトリが消えていても登録は残す。削除した plugin の entry が残っていないかを
+        # 検査するため、変更ファイルの持ち主として引き当てられる必要がある
+        found[rel] = Plugin(_manifest_name(root, rel) or name, rel, True)
 
     for pattern in ("*/" + PLUGIN_MANIFEST, "*/*/" + PLUGIN_MANIFEST):
         for manifest in root.glob(pattern):

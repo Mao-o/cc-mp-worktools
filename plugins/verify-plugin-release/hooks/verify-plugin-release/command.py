@@ -18,8 +18,12 @@ from dataclasses import dataclass
 _PUNCT = "();<>|&\n"
 _SEPARATOR_CHARS = set(";&|\n")
 _WRAPPERS = {"env", "command", "exec", "time", "nohup"}
+# 制御構文の予約語。`if x; then gh pr create; fi` の `then gh ...` を読めるようにする
+_KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{"}
+# `gh pr new` は `gh pr create` の別名
+_CREATE = {"create", "new"}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_FALLBACK = re.compile(r"(?:^|[\s;&|(])gh\s+pr\s+(create|ready)\b")
+_FALLBACK = re.compile(r"(?:^|[\s;&|(])gh\s+pr\s+(create|new|ready)\b")
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,7 @@ def _strip_prefix(seg: list[str]) -> list[str]:
     i = 0
     while i < len(seg):
         tok = seg[i]
-        if tok == "(" or tok in _WRAPPERS or _ASSIGNMENT.match(tok):
+        if tok == "(" or tok in _WRAPPERS or tok in _KEYWORDS or _ASSIGNMENT.match(tok):
             i += 1
             continue
         break
@@ -153,8 +157,8 @@ def find_invocations(command: str) -> list[Invocation]:
     except ValueError:
         return [
             Invocation(
-                kind=m.group(1),
-                draft=bool(re.search(r"\s(?:--draft|-d)\b", command)) and m.group(1) == "create",
+                kind="ready" if m.group(1) == "ready" else "create",
+                draft=bool(re.search(r"\s(?:--draft|-d)\b", command)) and m.group(1) != "ready",
                 parsed=False,
             )
             for m in _FALLBACK.finditer(command)
@@ -174,7 +178,7 @@ def find_invocations(command: str) -> list[Invocation]:
         global_repo, rest = _split_global_flags(seg[1:])
         if len(rest) < 2 or rest[0] != "pr":
             continue
-        if rest[1] == "create":
+        if rest[1] in _CREATE:
             inv = _parse_create(rest[2:])
         elif rest[1] == "ready":
             inv = _parse_ready(rest[2:])

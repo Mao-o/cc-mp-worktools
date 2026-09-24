@@ -75,6 +75,21 @@ class FindInvocationTest(unittest.TestCase):
                 self.assertEqual(find_invocation(cmd).head, "feat")
         self.assertIsNone(find_invocation("gh pr create").head)
 
+    def test_new_alias(self):
+        self.assertEqual(find_invocation("gh pr new -t x").kind, "create")
+        self.assertTrue(find_invocation("gh pr new --draft").draft)
+
+    def test_inside_shell_control_flow(self):
+        for cmd in (
+            "if true; then gh pr create -t x; fi",
+            "if false; then :; else gh pr create; fi",
+            "while true; do gh pr ready; break; done",
+            "{ gh pr create; }",
+            "! gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(find_invocation(cmd))
+
     def test_ready_undo_is_ignored(self):
         self.assertIsNone(find_invocation("gh pr ready 42 --undo"))
 

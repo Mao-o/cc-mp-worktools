@@ -303,10 +303,6 @@ def run_gate(
         return rep
     rep.add("diff", PASS, f"{len(changed)} files")
 
-    dirty = [ln[3:] for ln in _lines(git(["status", "--porcelain"], root, dl).stdout)]
-    if dirty:
-        rep.add("uncommitted", WARN, f"PR に載らない未 commit の変更がある: {_short(dirty)}")
-
     plugins = layout.discover(root)
     touched: dict[str, layout.Plugin] = {}
     per_plugin: dict[str, list[str]] = {}
@@ -319,6 +315,20 @@ def run_gate(
             touched[p.dir] = p
             per_plugin.setdefault(p.dir, []).append(path)
 
+    # テストと validate は作業ツリーで走らせるため、変更対象の plugin に未 commit の変更が
+    # あると「PR に載る commit」ではなく手元の状態を検査したことになる。その場合は止める
+    dirty = [ln[3:] for ln in _lines(git(["status", "--porcelain"], root, dl).stdout)]
+    dirty_in = [f for f in dirty if (p := layout.owner(f, plugins)) is not None and p.dir in touched]
+    dirty_out = [f for f in dirty if f not in dirty_in]
+    if dirty_in:
+        rep.add(
+            "uncommitted",
+            FAIL,
+            f"検査対象の plugin に未 commit の変更がある (commit か stash してから): {_short(dirty_in)}",
+        )
+    if dirty_out:
+        rep.add("uncommitted-other", WARN, f"PR に載らない未 commit の変更がある: {_short(dirty_out)}")
+
     if cfg.single_plugin_per_pr:
         units = [f"plugin:{p.name}" for p in touched.values()] + (["repo root"] if root_files else [])
         if len(units) > 1:
@@ -328,15 +338,24 @@ def run_gate(
 
     claude = which("claude")
     new_plugin = False
+    removed_plugin = False
     for pdir in sorted(touched):
         plugin = touched[pdir]
         files = per_plugin[pdir]
+        rel_manifest = f"{pdir}/{layout.PLUGIN_MANIFEST}" if pdir else layout.PLUGIN_MANIFEST
+        if git(["cat-file", "-e", f"HEAD:{rel_manifest}"], root, dl).returncode != 0:
+            # plugin を削除した PR。個別の検査は無意味なので、marketplace 側の整合だけを見る
+            removed_plugin = True
+            if plugin.in_marketplace:
+                rep.add(f"removed[{plugin.name}]", FAIL, f"{pdir} を削除したが marketplace.json に entry が残っている")
+            else:
+                rep.add(f"removed[{plugin.name}]", PASS, "plugin の削除 (marketplace 未登録)")
+            continue
         if all(layout.is_doc_only(f, plugin) for f in files):
             rep.add(f"release[{plugin.name}]", SKIP, "ドキュメントのみの変更のため version / CHANGELOG は不問")
         else:
             _check_version(root, base, plugin, dl, rep)
             _check_changelog(root, plugin, files, dl, rep)
-        rel_manifest = f"{pdir}/{layout.PLUGIN_MANIFEST}" if pdir else layout.PLUGIN_MANIFEST
         if git(["cat-file", "-e", f"{base}:{rel_manifest}"], root, dl).returncode != 0:
             new_plugin = True
             if (root / layout.MARKETPLACE).is_file() and not plugin.in_marketplace:
@@ -344,7 +363,7 @@ def run_gate(
         _check_tests(root, plugin, cfg, dl, rep)
         _check_validate(root, pdir, plugin.name, cfg, dl, rep, claude)
 
-    if (root / layout.MARKETPLACE).is_file() and (layout.MARKETPLACE in root_files or new_plugin):
+    if (root / layout.MARKETPLACE).is_file() and (layout.MARKETPLACE in root_files or new_plugin or removed_plugin):
         _check_validate(root, "", "marketplace", cfg, dl, rep, claude)
     _check_workflows(root, root_files, rep)
     _check_merge(root, base, dl, rep)

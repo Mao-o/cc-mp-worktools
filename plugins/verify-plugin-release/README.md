@@ -10,7 +10,7 @@ PR の手前で機械的に落とすのが目的です。
 
 ## 動作する条件
 
-- Bash ツールで実行するコマンドに `gh pr create` または `gh pr ready` が含まれる
+- Bash ツールで実行するコマンドに `gh pr create` (別名 `gh pr new`) または `gh pr ready` が含まれる
   (`git push && gh pr create ...` のような複合コマンドや `cd <dir> && ...` も追跡します)
 - コマンドを実行する repo が plugin repo である
   (`.claude-plugin/marketplace.json` か `.claude-plugin/plugin.json` がある)
@@ -26,13 +26,15 @@ base と HEAD の差分を対象にします。base は `gh pr create` と同じ
 |---|---|---|
 | `branch` | base と同じ branch / detached HEAD で PR を作ろうとしていないか | FAIL |
 | `diff` | base との差分があるか | FAIL |
-| `uncommitted` | PR に載らない未 commit の変更が残っていないか | WARN |
+| `uncommitted` | 検査対象の plugin に未 commit の変更が無いか (テストと validate は作業ツリーで走るため、あると PR の中身を検査したことにならない) | FAIL |
+| `uncommitted-other` | それ以外の場所の未 commit の変更 | WARN |
 | `single-plugin` | 1 PR = 1 plugin になっているか (**設定で有効化したときだけ**) | FAIL |
 | `version[<plugin>]` | 変更した plugin の `plugin.json` の version が上がっているか (semver で比較。下げは FAIL、semver でなければ WARN) | FAIL / WARN |
 | `changelog[<plugin>]` | その plugin の `CHANGELOG.md` を更新したか (ファイルが無ければ SKIP) | FAIL |
 | `tests[<plugin>]` | その plugin のテストが通るか | FAIL |
 | `validate[<plugin>]` | `claude plugin validate` が通るか (warning は既定で WARN) | FAIL / WARN |
 | `listed[<plugin>]` | 新規 plugin が `marketplace.json` に登録されているか | WARN |
+| `removed[<plugin>]` | 削除した plugin の entry が `marketplace.json` に残っていないか | FAIL |
 | `validate[marketplace]` | `marketplace.json` を変えた / plugin を追加したときの marketplace 全体の validate | FAIL / WARN |
 | `workflow-yaml` | 変更した `.github/workflows/*.yml` が YAML として読めるか (PyYAML がある場合のみ) | FAIL |
 | `merge` | base と競合しないか (`git merge-tree --write-tree` で作業ツリーに触れず試算) | FAIL |
@@ -67,9 +69,10 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 `cd "$DIR" && gh pr create` のように移動先が変数で、どの repo を検査すればよいか
 静的に分からない場合も、「ゲートを完了できない」扱いで止めます (絶対パスで書けば通ります)。
 
-`gh pr ready` では `gh pr view` で PR の branch と base を確認し、現在の checkout と違う
-branch の PR なら検査しません (手元の状態が PR の中身と一致しないため)。`gh pr view` が
-失敗した場合は「ゲートを完了できない」扱いで止めます。
+`gh pr ready` では `gh pr view` で PR の branch・base・head commit を取得し、手元の checkout と
+照合します。別 branch の PR、または PR の head commit と手元の HEAD が違う (push していない
+commit がある等) 場合は、手元の検査結果が PR に当てはまらないため止めます。`gh pr view` が
+失敗した場合も「ゲートを完了できない」扱いで止めます。
 
 `gh pr create --head <branch>` で現在の checkout と違う branch を指定した場合も止めます。
 その branch を checkout してから実行してください。
