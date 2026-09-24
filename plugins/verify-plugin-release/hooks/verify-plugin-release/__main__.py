@@ -104,17 +104,47 @@ def evaluate(command: str, cwd: str) -> dict | None:
     return context
 
 
-_REMOTE = re.compile(r"(?:[:/])([^/:]+)/([^/]+?)(?:\.git)?/?$")
+# origin URL から (host, owner, repo) を取り出す。scp 形式 (git@host:owner/repo) と URL 形式の両方
+_REMOTE_URL = re.compile(r"^[a-z+]+://(?:[^@/]+@)?([^/:]+)(?::\d+)?/([^/]+)/([^/]+?)(?:\.git)?/?$", re.I)
+_REMOTE_SCP = re.compile(r"^(?:[^@/]+@)?([^/:]+):([^/]+)/([^/]+?)(?:\.git)?/?$")
+
+
+def _origin(root: Path, dl: Deadline) -> tuple[str, str, str] | None:
+    r = git(["remote", "get-url", "origin"], root, dl)
+    url = r.stdout.strip() if r.returncode == 0 else ""
+    m = _REMOTE_URL.match(url) or _REMOTE_SCP.match(url)
+    return tuple(x.lower() for x in m.groups()) if m else None  # type: ignore[return-value]
 
 
 def _same_repo(root: Path, repo: str, dl: Deadline) -> bool:
-    """`--repo` の指定が origin と同じ repo を指しているか。判定できなければ False。"""
-    r = git(["remote", "get-url", "origin"], root, dl)
-    m = _REMOTE.search(r.stdout.strip()) if r.returncode == 0 else None
-    parts = [x for x in repo.strip().rstrip("/").split("/") if x]
-    if m is None or len(parts) < 2:
+    """`--repo [HOST/]OWNER/REPO` が origin と同じ repo を指しているか。判定できなければ False。
+
+    host を省いた形は gh と同じく GH_HOST (無ければ github.com) を host とみなす。
+    """
+    origin = _origin(root, dl)
+    parts = [x.lower() for x in repo.strip().rstrip("/").split("/") if x]
+    if origin is None or len(parts) not in (2, 3):
         return False
-    return (m.group(1).lower(), m.group(2).lower()) == (parts[-2].lower(), parts[-1].lower())
+    host = parts[0] if len(parts) == 3 else os.environ.get("GH_HOST", "github.com").lower()
+    return (host, parts[-2], parts[-1]) == origin
+
+
+def _load_config(root: Path, dl: Deadline) -> tuple[config.Config, str | None]:
+    """commit 済みの設定を読む。作業ツリーの設定は検査を弱められてしまうので使わない。"""
+    rel = config.CONFIG_RELPATH.as_posix()
+    r = git(["show", f"HEAD:{rel}"], root, dl)
+    committed = r.stdout if r.returncode == 0 else None
+    cfg = config.parse(committed) if committed is not None else config.Config()
+    note = None
+    local = root / config.CONFIG_RELPATH
+    if local.is_file():
+        try:
+            differs = local.read_text(encoding="utf-8") != committed
+        except OSError:
+            differs = True
+        if differs:
+            note = f"{rel} の未 commit の内容は使っていない (commit 済みの設定で検査した)"
+    return cfg, note
 
 
 def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
@@ -137,7 +167,7 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
         return None
 
     try:
-        cfg = config.load(root)
+        cfg, cfg_note = _load_config(root, Deadline(10))
         dl = Deadline(cfg.timeout_seconds)
         base_hint = inv.base
         if inv.repo and not _same_repo(root, inv.repo, dl):
@@ -184,6 +214,8 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
                     "その branch を checkout してから実行する"
                 )
         rep = gate.run_gate(root, cfg, dl, base_hint=base_hint)
+        if cfg_note:
+            rep.notes.append(cfg_note)
     except (config.ConfigError, GateTimeout, OSError, RuntimeError) as e:
         return _error(e, soft)
     except Exception as e:  # noqa: BLE001 - 想定外の例外も「止める」側に倒す
@@ -226,8 +258,10 @@ def _manual(argv: list[str]) -> int:
         print("git repo ではない", file=sys.stderr)
         return 2
     try:
-        cfg = config.load(root)
+        cfg, note = _load_config(root, Deadline(10))
         rep = gate.run_gate(root, cfg, Deadline(cfg.timeout_seconds), base_hint=args.base)
+        if note:
+            rep.notes.append(note)
     except Exception as e:  # noqa: BLE001
         print(f"ゲートを完了できなかった: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

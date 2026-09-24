@@ -43,12 +43,21 @@ _BOOL_KEYS = ("single_plugin_per_pr", "strict_validate", "fetch")
 
 
 def load(repo_root: Path) -> Config:
+    """作業ツリーの設定ファイルを読む (手動実行 `check` 用)。"""
     path = repo_root / CONFIG_RELPATH
     if not path.is_file():
         return Config()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(f"{CONFIG_RELPATH.as_posix()} を読めない: {e}") from e
+    return parse(text)
+
+
+def parse(text: str) -> Config:
+    try:
+        data = json.loads(text)
+    except ValueError as e:
         raise ConfigError(f"{CONFIG_RELPATH.as_posix()} を読めない: {e}") from e
     if not isinstance(data, dict):
         raise ConfigError(f"{CONFIG_RELPATH.as_posix()} は JSON object である必要がある")

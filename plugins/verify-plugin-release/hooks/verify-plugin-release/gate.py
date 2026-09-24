@@ -26,6 +26,9 @@ PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 _FETCH_CAP = 15
 _VALIDATE_CAP = 60
 _SKIP_DIRS = {"__pycache__", "node_modules", ".git", ".venv", "venv"}
+# ゲート自身がテストを走らせるので、bytecode を作らせない (作ると次の検査で
+# 「未 commit の変更」に見える。.gitignore に __pycache__ が無い repo で起きる)
+_TEST_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,10 @@ class Report:
     @property
     def failed(self) -> bool:
         return any(r.status == FAIL for r in self.results)
+
+
+def _is_bytecode(path: str) -> bool:
+    return "__pycache__/" in path or path.rstrip("/").endswith(("__pycache__", ".pyc"))
 
 
 def _lines(text: str) -> list[str]:
@@ -196,7 +203,7 @@ def _check_tests(root: Path, plugin: layout.Plugin, cfg: Config, dl: Deadline, r
         rep.add(name, SKIP, "設定で無効化 (test_command: false)")
         return
     if isinstance(cfg.test_command, list):
-        r = run(cfg.test_command, ppath, dl)
+        r = run(cfg.test_command, ppath, dl, env=_TEST_ENV)
         if r.returncode == 0:
             rep.add(name, PASS, f"`{' '.join(cfg.test_command)}` が成功")
         else:
@@ -208,7 +215,7 @@ def _check_tests(root: Path, plugin: layout.Plugin, cfg: Config, dl: Deadline, r
         return
     failed = []
     for d in dirs:
-        r = run([sys.executable, "-m", "unittest", "discover", "tests"], d.parent, dl)
+        r = run([sys.executable, "-m", "unittest", "discover", "tests"], d.parent, dl, env=_TEST_ENV)
         if r.returncode != 0:
             failed.append(d.parent.relative_to(root).as_posix())
     if failed:
@@ -317,7 +324,11 @@ def run_gate(
 
     # テストと validate は作業ツリーで走らせるため、変更対象の plugin に未 commit の変更が
     # あると「PR に載る commit」ではなく手元の状態を検査したことになる。その場合は止める
-    dirty = [ln[3:] for ln in _lines(git(["status", "--porcelain"], root, dl).stdout)]
+    dirty = [
+        path
+        for ln in _lines(git(["status", "--porcelain"], root, dl).stdout)
+        if not _is_bytecode(path := ln[3:])
+    ]
     dirty_in = [f for f in dirty if (p := layout.owner(f, plugins)) is not None and p.dir in touched]
     dirty_out = [f for f in dirty if f not in dirty_in]
     if dirty_in:

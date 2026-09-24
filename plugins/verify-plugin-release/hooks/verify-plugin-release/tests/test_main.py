@@ -12,13 +12,22 @@ from pathlib import Path
 from unittest import mock
 
 import _testutil  # noqa: F401
-from _testutil import bump, commit_all, make_marketplace, sh, write, write_json
+from _testutil import FAILING_TEST, bump, commit_all, make_marketplace, sh, write, write_json
 
 _PKG = Path(__file__).resolve().parent.parent
 
 
+# 手元の global gitignore (__pycache__ 等) に結果が左右されないよう、git の global 設定と
+# 既定の excludes (XDG_CONFIG_HOME/git/ignore) を空にして CI と同じ条件で hook を動かす
+_EMPTY_XDG = Path(tempfile.mkdtemp(prefix="vpr-xdg-"))
+_EMPTY_GITCONFIG = _EMPTY_XDG / "gitconfig"
+_EMPTY_GITCONFIG.write_text("", encoding="utf-8")
+
+
 def run_hook(payload: dict | str, env_extra: dict | None = None) -> dict | None:
-    env = {k: v for k, v in os.environ.items() if k != "VERIFY_PLUGIN_RELEASE_MODE"}
+    env = {k: v for k, v in os.environ.items() if k not in ("VERIFY_PLUGIN_RELEASE_MODE", "GH_HOST")}
+    env["GIT_CONFIG_GLOBAL"] = str(_EMPTY_GITCONFIG)
+    env["XDG_CONFIG_HOME"] = str(_EMPTY_XDG)
     env.update(env_extra or {})
     data = payload if isinstance(payload, str) else json.dumps(payload)
     r = subprocess.run(
@@ -86,6 +95,7 @@ class MainTest(unittest.TestCase):
 
     def test_broken_config_is_denied(self):
         write(self.root, ".claude/verify-plugin-release.json", "{")
+        commit_all(self.root, "broken config")
         out = run_hook(bash("gh pr create -t x", self.root))
         self.assertEqual(self.decision(out), "deny")
         self.assertIn("ゲートを完了できなかった", out["hookSpecificOutput"]["permissionDecisionReason"])
@@ -127,8 +137,16 @@ class MainTest(unittest.TestCase):
         for cmd in ("gh -R demo-org/demo-market pr create -t x", "gh pr create --repo github.com/Demo-Org/demo-market"):
             with self.subTest(cmd=cmd):
                 self.assertNotEqual(self.decision(run_hook(bash(cmd, self.root))), "deny")
-        out = run_hook(bash("gh -R other/fork pr create -t x", self.root))
+        for cmd in (
+            "gh -R other/fork pr create -t x",
+            "gh -R enterprise.example/Demo-Org/demo-market pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(run_hook(bash(cmd, self.root))), "deny")
+        # host を省いた形は GH_HOST を host とみなす (gh と同じ)
+        out = run_hook(bash("gh -R demo-org/demo-market pr create -t x", self.root), {"GH_HOST": "enterprise.example"})
         self.assertEqual(self.decision(out), "deny")
+        out = run_hook(bash("gh -R other/fork pr create -t x", self.root))
         self.assertIn("--repo", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_ready_without_pr_lookup_is_denied(self):
@@ -136,6 +154,26 @@ class MainTest(unittest.TestCase):
         out = run_hook(bash("gh pr ready", self.root))
         self.assertEqual(self.decision(out), "deny")
         self.assertIn("gh pr view", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_uncommitted_config_cannot_weaken_the_gate(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", FAILING_TEST)
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release with failing test")
+        write_json(self.root, ".claude/verify-plugin-release.json", {"fetch": False, "test_command": False})
+        out = run_hook(bash("gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("tests[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_gate_does_not_trip_over_its_own_bytecode(self):
+        # 1 回目の検査でテストを走らせても、2 回目に「未 commit の変更」と判定しない
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release")
+        for _ in range(2):
+            self.assertNotEqual(self.decision(run_hook(bash("gh pr create -t x", self.root))), "deny")
 
     def test_unresolvable_cd_is_denied(self):
         for cmd in ('cd "$WT" && gh pr create -t x', "cd no-such-dir && gh pr create -t x"):

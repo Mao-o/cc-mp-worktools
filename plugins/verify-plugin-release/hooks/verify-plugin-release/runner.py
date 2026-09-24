@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ def run(
     cwd: Path,
     deadline: Deadline,
     cap: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """args を実行する。起動できない場合は OSError をそのまま上げる。"""
     remaining = deadline.remaining()
@@ -43,6 +45,7 @@ def run(
             errors="replace",
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            env={**os.environ, **env} if env else None,
         )
     except subprocess.TimeoutExpired as e:
         if cap is not None and cap < remaining:

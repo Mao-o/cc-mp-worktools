@@ -16,7 +16,6 @@ from dataclasses import dataclass
 # shlex の punctuation_chars に改行を含め、改行も区切りとして扱う
 # (複数行のコマンドを 1 セグメントに潰さないため)。
 _PUNCT = "();<>|&\n"
-_SEPARATOR_CHARS = set(";&|\n")
 _WRAPPERS = {"env", "command", "exec", "time", "nohup"}
 # 制御構文の予約語。`if x; then gh pr create; fi` の `then gh ...` を読めるようにする
 _KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{"}
@@ -38,10 +37,23 @@ class Invocation:
     parsed: bool = True  # False = shlex で分解できず文字列一致で検出した
 
 
+def _is_separator(tok: str) -> bool:
+    """punctuation だけの token が区切りを含むか。
+
+    shlex は `);` のように隣り合う記号を 1 token にまとめるため、token 全体ではなく
+    中に区切り文字があるかで判定する。`>&` / `&>` などのリダイレクトは区切りではない。
+    """
+    if not set(tok) <= set(_PUNCT):
+        return False
+    if any(c in tok for c in ";|\n"):
+        return True
+    return "&" in tok and not tok.startswith((">", "<")) and not tok.endswith(">")
+
+
 def _segments(tokens: list[str]) -> list[list[str]]:
     segments: list[list[str]] = [[]]
     for tok in tokens:
-        if tok and set(tok) <= _SEPARATOR_CHARS:
+        if tok and _is_separator(tok):
             segments.append([])
         else:
             segments[-1].append(tok)

@@ -76,7 +76,8 @@ commit がある等) 場合は、手元の検査結果が PR に当てはまら�
 
 `gh pr create --head <branch>` で現在の checkout と違う branch を指定した場合も止めます。
 その branch を checkout してから実行してください。
-`--head owner:branch` (fork 側の branch) と、`--repo` が `origin` と別の repo を指す場合も、
+`--head owner:branch` (fork 側の branch) と、`--repo [HOST/]OWNER/REPO` が `origin` と別の repo
+(host 違いを含む。host を省いた場合は `GH_HOST`、無ければ `github.com`) を指す場合も、
 手元の checkout では PR の中身を検査できないため止めます。
 
 `gh pr create --draft && gh pr ready` のように 1 つのコマンドに PR 操作が複数あれば、
@@ -85,6 +86,10 @@ commit がある等) 場合は、手元の検査結果が PR に当てはまら�
 ## 設定
 
 repo ごとに `<repo>/.claude/verify-plugin-release.json` を置けます (無ければ既定値)。
+**hook は commit 済みの設定だけを読みます。** 未 commit の書き換えで検査を弱められないように
+するためで、作業ツリーの内容が commit と違う場合はその旨を伝えます。`.claude/` を
+`.gitignore` している repo では、このファイルだけ除外指定 (`!.claude/verify-plugin-release.json`)
+が必要です。
 
 ```json
 {

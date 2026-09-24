@@ -35,5 +35,10 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
 - 検査対象の plugin に未 commit の変更があれば止める (作業ツリーの修正で commit 済みの
   失敗が隠れるため)
 - 削除した plugin の entry が marketplace.json に残っていれば止める
+- 設定ファイルは commit 済みのものだけを読む (未 commit の書き換えで検査を弱められないように)
+- `--repo` の比較に host を含める
+- `(true); gh pr create` のように記号が続く区切りも分割する
+- テストを `PYTHONDONTWRITEBYTECODE=1` で実行し、`__pycache__` / `*.pyc` は未 commit の変更として
+  数えない (`.gitignore` に無い repo で、ゲート自身の実行結果を「変更あり」と誤判定していた)
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える
 - `python3 hooks/verify-plugin-release check` で同じ検査を手動実行できる

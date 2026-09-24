@@ -75,6 +75,11 @@ class FindInvocationTest(unittest.TestCase):
                 self.assertEqual(find_invocation(cmd).head, "feat")
         self.assertIsNone(find_invocation("gh pr create").head)
 
+    def test_redirections_are_not_separators(self):
+        inv = find_invocation("gh pr create -t x 2>&1 | tee log")
+        self.assertEqual(inv.kind, "create")
+        self.assertIsNone(find_invocation("echo x &> gh pr create"))
+
     def test_new_alias(self):
         self.assertEqual(find_invocation("gh pr new -t x").kind, "create")
         self.assertTrue(find_invocation("gh pr new --draft").draft)
@@ -86,6 +91,8 @@ class FindInvocationTest(unittest.TestCase):
             "while true; do gh pr ready; break; done",
             "{ gh pr create; }",
             "! gh pr create",
+            "(true); gh pr create",
+            "(cd x)&& gh pr create",
         ):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(find_invocation(cmd))
