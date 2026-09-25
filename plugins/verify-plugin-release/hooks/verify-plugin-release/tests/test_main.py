@@ -336,6 +336,12 @@ class ManualCheckTest(unittest.TestCase):
             )
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("FAIL  version[alpha]", r.stdout)
+            r = subprocess.run(
+                [sys.executable, str(_PKG), "check", "--strict-validate", "--base", "main", str(root)],
+                capture_output=True, text=True, encoding="utf-8", timeout=120,
+            )
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("base: main", r.stdout)
 
 
 if __name__ == "__main__":
