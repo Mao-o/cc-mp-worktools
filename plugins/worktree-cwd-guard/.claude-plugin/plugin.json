@@ -1,6 +1,6 @@
 {
   "name": "worktree-cwd-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "linked worktree で動く session が、同じ repo の別の checkout (main 側や他の worktree) を git の書き込み操作や Write/Edit で書き換えるのを止める PreToolUse hook",
   "author": {
     "name": "Mao"
