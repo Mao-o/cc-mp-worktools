@@ -115,8 +115,20 @@ class MainTest(unittest.TestCase):
         out = run_hook(bash("gh pr create --head other -t x", self.root))
         self.assertEqual(self.decision(out), "deny")
         self.assertIn("--head", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # --head を明示すると gh は push しないので、origin/<head> が手元の HEAD と一致して初めて通る
+        out = run_hook(bash("gh pr create --head feat -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        remote = Path(self._tmp.name) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        sh(self.root, "remote", "add", "origin", str(remote))
+        sh(self.root, "push", "-q", "origin", "main", "feat")
         out = run_hook(bash("gh pr create --head feat -t x", self.root))
         self.assertNotEqual(self.decision(out), "deny")
+        write(self.root, "plugins/alpha/hooks/alpha/extra.py", "y = 2\n")
+        commit_all(self.root, "unpushed")
+        out = run_hook(bash("gh pr create --head feat -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("push", out["hookSpecificOutput"]["permissionDecisionReason"])
         # owner:branch は fork 側の branch なので、名前が同じでも手元とは一致しない
         out = run_hook(bash("gh pr create --head someone:feat -t x", self.root))
         self.assertEqual(self.decision(out), "deny")
@@ -188,6 +200,9 @@ class MainTest(unittest.TestCase):
             "url=`gh pr create -t x`",
             "f() { gh pr create; }; f",
             "pushd /tmp && gh pr create -t x",
+            "bash -c 'gh pr create -t x'",
+            'sh -lc "cd x && gh pr ready"',
+            "eval 'gh pr new'",
         ):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(run_hook(bash(cmd, self.root))), "deny")
@@ -294,6 +309,14 @@ class ReadyRefsTest(unittest.TestCase):
         with mock.patch.object(self.mod, "git", side_effect=GateTimeout("slow fs")):
             out = self.mod.evaluate("gh pr create -t x", str(self.root))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_ready_url_for_other_repo_is_denied(self):
+        sh(self.root, "remote", "add", "origin", "git@github.com:Fork-Owner/demo-market.git")
+        with mock.patch.object(self.mod, "_pr_refs", return_value=("feat", "main", self.sha)):
+            out = self.mod.evaluate("gh pr ready https://github.com/Upstream/demo-market/pull/7", str(self.root))
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+            out = self.mod.evaluate("gh pr ready https://github.com/fork-owner/demo-market/pull/7", str(self.root))
+            self.assertNotEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
 
     def test_unpushed_commit_is_denied(self):
         self.assertEqual(self.decide(("feat", "main", "0" * 40)), "deny")

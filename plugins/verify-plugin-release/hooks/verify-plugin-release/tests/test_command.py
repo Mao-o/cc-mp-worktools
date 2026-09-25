@@ -94,6 +94,14 @@ class FindInvocationTest(unittest.TestCase):
         self.assertIsNotNone(reason("u=`gh pr new`"))
         self.assertIsNotNone(reason("pushd x && gh pr create"))
         self.assertIsNotNone(reason('gh pr create --title "oops'))
+        self.assertIsNotNone(reason("bash -c 'gh pr create'"))
+        self.assertIsNone(reason("bash -c 'echo hi'"))
+        self.assertIsNone(reason("gh pr -R o/r create"))
+
+    def test_repo_flag_between_pr_and_action(self):
+        inv = find_invocation("gh pr -R o/r create -t x")
+        self.assertEqual((inv.kind, inv.repo), ("create", "o/r"))
+        self.assertEqual(find_invocation("gh pr --repo=o/r ready 3").kind, "ready")
 
     def test_gh_repo_env_prefix(self):
         self.assertEqual(find_invocation("GH_REPO=o/r gh pr create").repo, "o/r")

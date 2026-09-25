@@ -27,7 +27,12 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _EXEC_POS = re.compile(
     r"(?:^|[;&|(\n`{]|\$\()\s*(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+)*"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?gh(?:\.exe)?\s+"
-    r"(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(create|new|ready)\b([^;&|\n)`]*)"
+    r"(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*(create|new|ready)\b([^;&|\n)`]*)"
+)
+# `bash -c '...'` / `sh -lc "..."` / `eval "..."` の中身。中の PR 操作は構文解析の対象外になる
+_NESTED_SHELL = re.compile(
+    r"(?:\b(?:ba|z|k|da|a)?sh(?:\.exe)?\s+(?:-\w+\s+)*-\w*c\w*|\beval)\s+(['\"])(.*?)\1",
+    re.S,
 )
 _DIR_CHANGERS = re.compile(r"(?:^|[;&|(\n`{]|\$\()\s*(?:pushd|popd)\b")
 _FALLBACK = re.compile(r"(?:^|[\s;&|(])gh\s+pr\s+(create|new|ready)\b")
@@ -203,7 +208,13 @@ def find_invocations(command: str) -> list[Invocation]:
         if not _is_gh(seg[0]):
             continue
         global_repo, rest = _split_global_flags(seg[1:])
-        if len(rest) < 2 or rest[0] != "pr":
+        if not rest or rest[0] != "pr":
+            continue
+        # `gh pr -R owner/repo create` のように pr と action の間にも --repo を置ける
+        pr_repo, action = _split_global_flags(rest[1:])
+        rest = ["pr", *action]
+        global_repo = pr_repo or global_repo
+        if len(rest) < 2:
             continue
         if rest[1] in _CREATE:
             inv = _parse_create(rest[2:])
@@ -239,6 +250,9 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
         if m.group(1) == "ready" and "--undo" in m.group(2):
             continue
         expected += 1
+    for m in _NESTED_SHELL.finditer(command):
+        if _EXEC_POS.search(m.group(2)):
+            return "PR 操作が別の shell (bash -c / eval 等) の中にある"
     if expected > len(found) or any(not inv.parsed for inv in found):
         return "PR 操作の位置を解析できない (コマンド置換・サブシェル等の中にある)"
     if found and _DIR_CHANGERS.search(command):

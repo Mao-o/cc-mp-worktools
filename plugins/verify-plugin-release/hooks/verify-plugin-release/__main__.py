@@ -118,6 +118,9 @@ def evaluate(command: str, cwd: str) -> dict | None:
     return context
 
 
+# `gh pr ready <url>` の URL から HOST/OWNER/REPO を取り出す
+_PR_URL = re.compile(r"^https?://([^/]+/[^/]+/[^/]+)/pull/\d+/?(?:[?#].*)?$", re.I)
+
 # origin URL から (host, owner, repo) を取り出す。scp 形式 (git@host:owner/repo) と URL 形式の両方
 _REMOTE_URL = re.compile(r"^[a-z+]+://(?:[^@/]+@)?([^/:]+)(?::\d+)?/([^/]+)/([^/]+?)(?:\.git)?/?$", re.I)
 _REMOTE_SCP = re.compile(r"^(?:[^@/]+@)?([^/:]+):([^/]+)/([^/]+?)(?:\.git)?/?$")
@@ -224,6 +227,9 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
                     "--repo で origin を明示するか、既定を origin に戻す"
                 )
         if inv.kind == "ready":
+            url = _PR_URL.match(inv.target or "")
+            if url and not _same_repo(root, url.group(1), dl):
+                raise RuntimeError(f"対象 PR ({inv.target}) が origin と別の repo にある")
             refs = _pr_refs(root, inv.target, dl)
             if refs is None:
                 # 引数なしの `gh pr ready` も「現在の branch の PR」を対象にするため、
@@ -259,6 +265,17 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
                 raise RuntimeError(
                     f"--head の branch ({want}) が現在の checkout ({head_now}) と異なる。"
                     "その branch を checkout してから実行する"
+                )
+            # --head を明示すると gh は push を省くので、PR はリモートの branch から作られる。
+            # 手元の HEAD と一致しなければ、検査した内容と PR の中身が食い違う
+            if cfg.fetch:
+                git(["fetch", "--quiet", "origin", want], root, dl, cap=15)
+            remote = git(["rev-parse", "--verify", "--quiet", f"origin/{want}^{{commit}}"], root, dl)
+            sha_now = git(["rev-parse", "HEAD"], root, dl).stdout.strip()
+            if remote.returncode != 0 or remote.stdout.strip() != sha_now:
+                raise RuntimeError(
+                    f"--head 指定時は push されない。origin/{want} が手元の HEAD と一致しないので、"
+                    "push してから実行する"
                 )
         rep = gate.run_gate(root, cfg, dl, base_hint=base_hint)
         if cfg_note:

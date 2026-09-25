@@ -43,6 +43,12 @@ plugin repo 一般で使える PreToolUse hook として切り出した。
   ため、検出できない形はまとめて fail closed にした
 - `GH_REPO` (コマンド前置・環境変数) と `gh repo set-default` の既定が origin と別の repo なら止める
 - git repo の判定自体が失敗・時間切れした場合も止める (「repo の外」と区別する)
+- `bash -c` / `sh -c` / `eval` の中の PR 操作も検出できないものとして止める
+- `gh pr -R <repo> create` (pr と action の間の --repo) を検出する
+- `--head` 指定時は origin/<head> が手元の HEAD と一致しなければ止める (gh は push を省くため)
+- `gh pr ready <url>` の URL が origin と別の repo なら止める
+- README / SECURITY.md に脅威モデルを明記した: 目的はうっかりの予防で、意図的なすり抜けへの
+  対策ではない
 - テストを `PYTHONDONTWRITEBYTECODE=1` で実行し、`__pycache__` / `*.pyc` は未 commit の変更として
   数えない (`.gitignore` に無い repo で、ゲート自身の実行結果を「変更あり」と誤判定していた)
 - `gh pr create --draft` と `VERIFY_PLUGIN_RELEASE_MODE=warn` では止めずに結果だけ伝える

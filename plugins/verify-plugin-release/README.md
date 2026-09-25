@@ -8,6 +8,18 @@ Claude Code の plugin marketplace repo で、`gh pr create` / `gh pr ready` を
 「テストが落ちたまま PR を出した」といった、レビューで毎回指摘される類の漏れを
 PR の手前で機械的に落とすのが目的です。
 
+## 目的と限界
+
+**目的はリリース漏れの「うっかり」を防ぐことで、意図的なすり抜けを防ぐ仕組みではありません。**
+Claude が普段の書き方で `gh pr create` / `gh pr ready` を実行したときに、version bump の
+忘れやテストの失敗を PR の手前で止めます。
+
+- shell の書き方は無数にあり、すべての経路を静的に解析することはできません。検出できない
+  形 (コマンド置換・`bash -c`・`pushd` など) は止める側に倒していますが、別の実行経路
+  (スクリプトファイル経由、`gh api` で直接 PR を作る等) は対象外です
+- 環境変数 `VERIFY_PLUGIN_RELEASE_MODE` で止めずに通すこともできます
+- 最終的な品質保証は CI とレビューが担う前提です。この hook はその手前の早期警告です
+
 ## 動作する条件
 
 - Bash ツールで実行するコマンドに `gh pr create` (別名 `gh pr new`) または `gh pr ready` が含まれる
