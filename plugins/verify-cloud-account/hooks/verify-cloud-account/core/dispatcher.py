@@ -15,7 +15,7 @@ from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
 _BUILDER_PATH = (
-    "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py"
+    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py"'
 )
 
 _MIGRATE_HINT = (

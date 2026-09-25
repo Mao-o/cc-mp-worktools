@@ -2,7 +2,7 @@
 
 ## 参照のしかた (sys.path ブートストラップ)
 
-各 hook は `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/<hook>` で **ディレクトリを直接実行**
+各 hook は `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/<hook>"` で **ディレクトリを直接実行**
 されるため、`sys.path[0]` は各 hook ディレクトリになり、隣の `_common/` は見えない。
 そこで各 hook の `__main__.py` (とテストの `_testutil.py`) は、hook 内モジュールを
 import する前に

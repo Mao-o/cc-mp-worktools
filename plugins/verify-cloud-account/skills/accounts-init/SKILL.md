@@ -74,7 +74,7 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
 2. **値なしで dry-run** を実行して proposal を確認:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py init --service <service> --dry-run
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service <service> --dry-run
    ```
 
    stdout を読み、どのキーが `+ add` / `= unchanged` / `! skipped` かだけ確認
@@ -96,7 +96,7 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
      2. 変更が必要なら builder の `set` サブコマンドで更新する (accounts.local.json
         を手動編集する必要はない):
         ```bash
-        python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py set --service <service> --value <new-value> --commit
+        python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" set --service <service> --value <new-value> --commit
         ```
         CLI の現在値をそのまま使うなら `--value <new-value>` の代わりに
         `--from-cli` を付ける。dict 値 (GitHub の GHE host 等) の特定
@@ -105,7 +105,7 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
 4. ユーザー選択に応じて:
    - 「値を表示」→ `--show-values --dry-run` で再実行:
      ```bash
-     python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py init --service <service> --dry-run --show-values
+     python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service <service> --dry-run --show-values
      ```
      表示後に再度 `AskUserQuestion`: 「この値でコミットしますか?」
      (options: `コミット` / `キャンセル`)
@@ -114,7 +114,7 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
 
 5. コミット実行:
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py init --service <service> --commit
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service <service> --commit
    ```
    (既定では `--show-values` なし。commit の stdout も値隠蔽)
 

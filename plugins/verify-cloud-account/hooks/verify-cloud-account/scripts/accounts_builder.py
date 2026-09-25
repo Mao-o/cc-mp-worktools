@@ -839,8 +839,8 @@ def _refuse_if_legacy_paths_exist(
         print(f"  - {path} ({kind})", file=stderr)
     print(
         f"先に migrate --commit で新パスへ統合してから {command} を実行してください: "
-        "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/"
-        "accounts_builder.py migrate --commit",
+        'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/'
+        'accounts_builder.py" migrate --commit',
         file=stderr,
     )
     return True

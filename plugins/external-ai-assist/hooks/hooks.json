@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase pre",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel\" --phase pre",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/exitplan-review",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/exitplan-review\"",
             "timeout": 1560
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase pre-tool",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review\" --phase pre-tool",
             "timeout": 15
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase post",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel\" --phase post",
             "timeout": 90,
             "async": true
           }
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase post-tool",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review\" --phase post-tool",
             "timeout": 10
           }
         ]
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase post-tool",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review\" --phase post-tool",
             "timeout": 720
           }
         ]
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review --phase stop",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review\" --phase stop",
             "timeout": 690
           }
         ]
