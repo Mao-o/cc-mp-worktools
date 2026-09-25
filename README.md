@@ -61,6 +61,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `external-ai-assist` | Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集 | PreToolUse (Agent/ExitPlanMode/Bash) + PostToolUse (Agent/Bash/Write/Edit/NotebookEdit) + Stop | [README](plugins/external-ai-assist/README.md) |
 | `verify-cloud-account` | Bash 実行前にクラウド CLI (gh/firebase/aws/gcloud/kubectl) のアクティブアカウントを検証する hook | PreToolUse (Bash) | [README](plugins/verify-cloud-account/README.md) |
 | `file-split-advisor` | 行数 tier + 責務混在シグナルを組み合わせて分割検討メモを返す非 block hook | PostToolUse (Write/Edit) | [README](plugins/file-split-advisor/README.md) |
+| `verify-plugin-release` | `gh pr create` / `gh pr ready` の前に plugin repo の完了条件 (version bump・CHANGELOG・テスト・validate・競合) を検査し、満たさなければ PR 作成を止める hook | PreToolUse (Bash) | [README](plugins/verify-plugin-release/README.md) |
 
 ## Privacy & data flow
 
@@ -77,6 +78,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `sensitive-files-guardrail` | なし | — | ローカルの読み取りと read-only な `git` 呼び出しのみ | 該当なし |
 | `session-facts` | なし | — | ローカルの read-only な `git` 呼び出しのみ。env は `.env.example` 等のテンプレートから**キー名だけ**を読む (値は読まない) | 該当なし |
 | `file-split-advisor` | なし | — | 外部プロセスを一切起動しない | 該当なし |
+| `verify-plugin-release` | **あり** (間接) | 起動する `git fetch` (origin) / `gh pr view` (GitHub API) / `claude plugin validate` 経由 | コマンドに渡すのは base branch 名・PR 番号などの固定引数のみ。リポジトリの内容は plugin 自身は送らない (`git fetch` は取得のみ) | `VERIFY_PLUGIN_RELEASE_MODE=off` (既定 `enforce`)。fetch だけ止めるなら repo の設定で `"fetch": false` |
 
 `external-ai-assist` には送信内容の除外規則 (`.env*` / `*.pem` / `*service-account*.json`
 など) がありますが、**これは plugin が渡す差分の範囲を絞るだけ**です。起動された外部 AI
@@ -103,6 +105,7 @@ CLI は読み取り権限を持つエージェントなので、作業ツリー�
 | `external-ai-assist` | 非対応 | PreToolUse/PostToolUse/Stop hook 専用。Claude 固有のツール名 (Agent/ExitPlanMode/NotebookEdit) に依存するため移植は未着手 |
 | `verify-cloud-account` | 非対応 | PreToolUse hook が主機能 (同梱 Skill 3 本は補助)。Codex 側の対応可否は未検証 |
 | `file-split-advisor` | 非対応 | PostToolUse hook 専用。Codex 側の対応可否は未検証 |
+| `verify-plugin-release` | 非対応 | PreToolUse (Bash) hook 専用。Codex 側の対応可否は未検証 |
 
 ### Install for Codex (session-facts)
 

@@ -80,6 +80,21 @@
 - **既定で無効化されていない除外パターンの穴** (例: `.env` が除外されずに送信される)
   は報告対象です
 
+### `verify-plugin-release`
+
+- この hook は `gh pr create` / `gh pr ready` の前に、**repo 内のテストコードと、repo の
+  設定ファイル (`.claude/verify-plugin-release.json`) の `test_command` を実行します**。
+  実行に permission prompt は挟まりません。`gh pr create` を permission rule で許可して
+  いる場合、それらも暗黙に実行されることになります。信頼できない repo では
+  `VERIFY_PLUGIN_RELEASE_MODE=off` で無効化してください
+- 目的は**リリース漏れの予防**で、PR の作成を強制的に禁止する仕組みではありません
+  (環境変数で止めずに通すこともできます)
+- **意図的なすり抜けへの対策ではありません。** shell の書き方をすべて静的に解析することは
+  できないため、検出できない形は止める側に倒していますが、スクリプトファイル経由や
+  `gh api` での PR 作成など、`gh pr create` / `gh pr ready` を通らない経路は対象外です
+- 通常の書き方の `gh pr create` / `gh pr ready` で、検査が完了できないのに PR 作成が素通り
+  する経路 (fail-open) は報告対象です
+
 ### 共通
 
 - hook の出力は Claude Code の会話に入ります。**Claude Code 本体が Anthropic の API へ
