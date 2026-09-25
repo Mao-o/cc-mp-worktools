@@ -103,6 +103,39 @@ class GuardTest(unittest.TestCase):
         out = evaluate(bash("cd - && git reset --hard", self.a))
         self.assertEqual(decision(out), "context")
 
+    def test_bisect_is_a_write(self):
+        self.assertEqual(decision(evaluate(bash(f'git -C "{self.main}" bisect start', self.a))), "deny")
+
+    def test_wrapper_options_are_skipped(self):
+        for cmd in (
+            f'env -i git -C "{self.main}" reset --hard',
+            f'env -u HOME git -C "{self.main}" stash',
+            f'env -C "{self.main}" git checkout -b oops',
+            f'env --chdir={self.main} git commit -m x',
+            f'sudo -u me git -C "{self.main}" reset --hard',
+            f'time -p git -C "{self.main}" stash',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        self.assertIsNone(evaluate(bash(f'env -C "{self.a}" git reset --hard', self.a)))
+
+    def test_conditional_cd_keeps_both_alternatives(self):
+        # `&&` / `||` の後の cd は実行されないことがある。どちらの場合も考える
+        for cmd in (
+            f'test -d x || cd "{self.main}"; git reset --hard',
+            f'true && cd "{self.main}"; git stash',
+            f'make && cd "{self.main}" && git commit -m x',
+            # 自分の worktree へ戻る cd が実行されないと main のまま
+            f'cd "{self.main}"; test -d x && cd "{self.a}"; git reset --hard',
+            f'cd "{self.main}" && (false || cd "{self.a}"; git stash)',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # 先頭の cd は必ず実行されるので置き換え (自分の worktree に戻れば許す)
+        self.assertIsNone(evaluate(bash(f'cd "{self.main}"; cd "{self.a}"; git reset --hard', self.a)))
+        out = evaluate(bash('true && cd "$X"; git reset --hard', self.a))
+        self.assertEqual(decision(out), "context")
+
     def test_repo_side_and_work_tree_side_are_both_checked(self):
         # HEAD / index は main 側、作業ツリーは自分の worktree。main の HEAD が動くので止める
         cmd = f'git -C "{self.main}" --work-tree="{self.a}" checkout -b oops'

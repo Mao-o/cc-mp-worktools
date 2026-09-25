@@ -15,6 +15,10 @@
   `cd -P <dir>` のオプションは読み飛ばす、`-C` / `--git-dir` が指す repo 側 (HEAD / index) と
   `--work-tree` が指す作業ツリー側の両方を判定する、linked worktree の git dir
   (`.git/worktrees/<name>`) はその worktree の root に対応づける
+- `git bisect` を書き込み操作に含める。`env -i` / `env -u NAME` / `sudo -u USER` など wrapper の
+  オプションを読み飛ばし、`env -C <dir>` / `--chdir` による移動も追う。`&&` / `||` の後ろの `cd` は
+  実行されないことがあるため、移動した場合としない場合の両方を判定する
 - 行き先が静的に決まらない操作は止めずに注意だけ出す。README / SECURITY.md に脅威モデル
-  (うっかりの予防で、意図的なすり抜けへの対策ではない) を初版から明記した
+  (うっかりの予防で、意図的なすり抜けへの対策ではない) と、読まない書き方 (`bash -c` / `eval` /
+  関数 / script ファイル / コマンド置換) を初版から明記した
 - `WORKTREE_CWD_GUARD_MODE` (enforce / warn / off) と `WORKTREE_CWD_GUARD_ALLOW` で調整できる

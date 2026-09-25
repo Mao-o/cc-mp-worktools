@@ -20,6 +20,11 @@
   Write / Edit だけが対象です)
 - session の作業ディレクトリが main checkout に戻ってしまった場合 (上の 2 つ目の事故の
   一部) は、その時点で「自分の worktree」が分からないため検知できません
+- 次の書き方は中身を読まないため対象外です (通常の agent の git 操作では使われない形):
+  - `bash -c "..."` / `sh -c "..."` / `eval "..."` の文字列の中の git
+  - shell 関数・alias・script ファイル (`./deploy.sh` など) の中の git
+  - `"$(...)"` や `` `...` `` の中の git
+  - `for` / `case` などの制御構文で作業ディレクトリが変わる場合
 
 ## 動作する条件
 
@@ -34,7 +39,7 @@ main checkout や repo の外で動く session では何もしません。
 
 | ツール | 止める条件 |
 |---|---|
-| Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd <dir>` / `git -C <dir>` / `--work-tree` / `--git-dir` から決める。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` `clean` `checkout-index` `update-index` |
+| Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd <dir>` / `git -C <dir>` / `--work-tree` / `--git-dir` から決める。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` `bisect` `clean` `checkout-index` `update-index`。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う |
 | Bash | `git worktree remove` / `move` で別の worktree を対象にしたもの |
 | Write / Edit / MultiEdit / NotebookEdit | 別の checkout 配下のファイルへの書き込み |
 
