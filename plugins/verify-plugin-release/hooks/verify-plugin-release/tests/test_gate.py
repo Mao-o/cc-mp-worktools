@@ -123,6 +123,20 @@ class GateTest(unittest.TestCase):
         self.assertEqual(st["tests[alpha]"], gate.PASS)
         self.assertEqual(st["tests[beta]"], gate.FAIL)
 
+    def test_failed_job_stops_the_others_without_waiting(self):
+        # 1 本が起動に失敗したら、長く走る別の suite を待たずに例外を上げる
+        # (待つと hook の timeout を超え、Claude Code がコマンドを通してしまう)
+        import time
+
+        from layout import Plugin
+
+        slow = gate._TestPlan(Plugin("slow", "plugins/slow", True), jobs=[([sys.executable, "-c", "import time; time.sleep(30)"], self.root)])
+        broken = gate._TestPlan(Plugin("broken", "plugins/broken", True), jobs=[(["definitely-missing-binary-vpr"], self.root)], custom=True)
+        started = time.monotonic()
+        with self.assertRaises(OSError):
+            gate._run_tests(self.root, [slow, broken], Deadline(60), gate.Report())
+        self.assertLess(time.monotonic() - started, 10)
+
     def test_test_command_config(self):
         self.branch()
         self.change_alpha()

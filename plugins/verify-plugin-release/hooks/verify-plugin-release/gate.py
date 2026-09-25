@@ -12,15 +12,17 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import layout
 from config import Config
-from runner import Deadline, git, run
+from runner import Deadline, GateTimeout, git, run
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 
@@ -221,6 +223,35 @@ def _plan_tests(root: Path, plugin: layout.Plugin, cfg: Config) -> _TestPlan:
     return _TestPlan(plugin, jobs=[(cmd, d.parent) for d in dirs])
 
 
+_POLL = 0.5
+
+
+def _run_job(cmd: list[str], cwd: Path, dl: Deadline, stop: threading.Event) -> int:
+    """1 suite を実行して exit code を返す。stop が立つか制限時間を過ぎたら kill する。"""
+    if stop.is_set():
+        return -1
+    if dl.remaining() <= 0:
+        raise GateTimeout(f"制限時間切れ ({cmd[0]} の実行前)")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, **_TEST_ENV},
+    )
+    while True:
+        try:
+            return proc.wait(timeout=_POLL)
+        except subprocess.TimeoutExpired:
+            if stop.is_set() or dl.remaining() <= 0:
+                proc.kill()
+                proc.wait()
+                if stop.is_set():
+                    return -1
+                raise GateTimeout(f"制限時間切れ ({' '.join(cmd[:3])})") from None
+
+
 def _run_tests(root: Path, plans: list[_TestPlan], dl: Deadline, rep: Report) -> None:
     """全 plugin の test suite を並列に走らせ、plugin ごとの結果を順に記録する。
 
@@ -232,10 +263,19 @@ def _run_tests(root: Path, plans: list[_TestPlan], dl: Deadline, rep: Report) ->
     exit_codes: dict[tuple[int, Path], int] = {}
     if jobs:
         workers = max(1, min(len(jobs), _MAX_TEST_WORKERS, os.cpu_count() or 1))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(run, cmd, cwd, dl, None, _TEST_ENV): (i, cwd) for i, cmd, cwd in jobs}
-            for fut, key in futures.items():
-                exit_codes[key] = fut.result().returncode  # GateTimeout はここで呼び出し側へ上がる
+        stop = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = {pool.submit(_run_job, cmd, cwd, dl, stop): (i, cwd) for i, cmd, cwd in jobs}
+            for fut in as_completed(futures):
+                exit_codes[futures[fut]] = fut.result()  # GateTimeout / OSError はここで上がる
+        except BaseException:
+            # 1 本が失敗したら残りを待たずに止める。待つと hook 自体の timeout を超え、
+            # Claude Code が PR 作成をそのまま通してしまう (止める判断を返せない)
+            stop.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
     for i, plan in enumerate(plans):
         name = f"tests[{plan.plugin.name}]"
         if plan.skip:
