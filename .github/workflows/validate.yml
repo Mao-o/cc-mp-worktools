@@ -137,7 +137,7 @@ jobs:
         run: scripts/test-all.sh
 
   tests-windows:
-    # sensitive-files-guardrail の 2 suite だけを Windows で回す job。
+    # Windows での動作を保証すると決めた suite (matrix の include) だけを Windows で回す job。
     #
     # 背景: 0.34.0 で「SIGALRM が無い環境では全 tool 呼出を deny」という実質
     # Windows 無効化ゲートを撤去し、非 UNIX でも通常のパイプラインを通すように
@@ -159,6 +159,9 @@ jobs:
     # tests job の matrix に windows-latest を足す形へは統合しない: あちらは
     # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、SFG 以外の
     # plugin の Windows 対応は未着手 (対象を広げるときに改めて判断する)。
+    # matrix に dir を足すと既定の job 名が「tests-windows (suite, dir)」に変わり、既存の
+    # check 名 (tests-windows (check-sensitive-files) 等) が消えてしまう。名前は suite だけで作る。
+    name: tests-windows (${{ matrix.suite }})
     if: github.event_name != 'schedule'
     runs-on: windows-latest
     timeout-minutes: 30
