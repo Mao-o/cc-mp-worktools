@@ -25,7 +25,10 @@ GitHub の PR に付く **Codex の自動レビュー** (`chatgpt-codex-connecto
 - Codex は問題が無いとき、コメントを残さず **PR 本文への 👍 リアクションだけ**で終わることがある。
   コメントや review だけを見ていると永遠に待つ
 - **利用上限や内部エラーは issue comment で届き**、リアクションも付かない。`pr-codex-status.sh` は
-  最新の `@codex review` 以降に bot のエラーコメントがあれば `Codex verdict: ERROR` と出す
+  最新の `@codex review` 以降に Codex のエラーコメントがあれば `Codex verdict: ERROR` と出す
+- **PR 本文の 👍 は前のサイクルのものが残る** (同じ人の同じリアクションは 1 つしか付かない)。
+  `pr-codex-status.sh` の verdict は最新の `@codex review` 以降の Codex の応答 (review /
+  trigger コメントと PR 本文のリアクション / エラーコメント) だけで決める
 - `gh api` は既定で 30 件しか返さず、切られるのは常に最新の応答。スクリプトはすべて
   `--paginate` で取得する
 - `@codex review` にサマリを混ぜたり、review への返信で依頼したりしても再レビューは走らない

@@ -76,44 +76,65 @@ if [[ -n "$LAST_TRIGGER_ID" ]]; then
     --jq '.[] | "  \(.user.login): \(.content) @ \(.created_at)"' || true
 fi
 
-# Codex bot の issue comment。利用上限・内部エラーは review ではなく issue comment で届き、
-# reaction も付かないため、ここを見ないと「NO REACTION」のまま待ち続けることになる。
-LAST_BOT_COMMENT=$(
-  gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
-    --jq '.[] | select(.user.login | endswith("[bot]")) | "\(.created_at)\t\(.body | gsub("[\r\n]+"; " ") | .[0:200])"' \
-    | tail -1
-)
+# --- verdict ---------------------------------------------------------------
+# 判定は「最新の @codex review 以降」の Codex の応答だけで行う。PR body の 👍 は前の
+# サイクルのものが残り続ける (同じ人の同じ reaction は 1 つしか付かない) ため、再レビュー中に
+# 古い 👍 を見て PASSED と誤判定しないようにする。trigger が無い (初回の自動レビュー) ときは
+# PR 作成以降のすべてが対象。
+# 他の bot (CI・Dependabot など) の応答を拾わないよう、Codex の connector に絞る。
+CODEX_BOT="${CODEX_BOT_LOGIN:-chatgpt-codex-connector[bot]}"
 LAST_TRIGGER_AT=$(
   gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
     --jq '.[] | select(.body == "@codex review") | .created_at' | tail -1
 )
+T="${LAST_TRIGGER_AT:-0000}"
+BY_BOT="select(.user.login == \"$CODEX_BOT\")"
+
+# 利用上限・内部エラー・環境未設定は review ではなく issue comment で届き、reaction も付かない
+LAST_BOT_COMMENT=$(
+  gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
+    --jq ".[] | $BY_BOT | select(.created_at > \"$T\") | \"\\(.created_at)\\t\\(.body | gsub(\"[\\r\\n]+\"; \" \") | .[0:200])\"" \
+    | tail -1
+)
 BOT_ERROR=""
 if [[ -n "$LAST_BOT_COMMENT" ]]; then
-  echo "[last bot issue comment] $LAST_BOT_COMMENT"
-  BOT_AT="${LAST_BOT_COMMENT%%$'\t'*}"
-  if [[ -z "$LAST_TRIGGER_AT" || "$BOT_AT" > "$LAST_TRIGGER_AT" ]] \
-    && grep -qiE 'something went wrong|usage limit|rate limit|reached your|try again later' <<<"$LAST_BOT_COMMENT"; then
+  echo "[last Codex issue comment] $LAST_BOT_COMMENT"
+  if grep -qiE 'something went wrong|unknown error|usage limit|rate limit|reached your|try again later|create an environment' <<<"$LAST_BOT_COMMENT"; then
     BOT_ERROR="${LAST_BOT_COMMENT#*$'\t'}"
   fi
 fi
+REVIEWS_AFTER=$(
+  gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
+    --jq ".[] | $BY_BOT | select(.submitted_at > \"$T\") | .id" | grep -c . || true
+)
+# 👍 / 👀 は trigger コメントか PR body に付く。どちらも T 以降のものだけ数える
+REACTS_AFTER=$(
+  {
+    gh api --paginate "repos/$REPO/issues/$PR/reactions?per_page=100" \
+      --jq ".[] | $BY_BOT | select(.created_at > \"$T\") | .content" || true
+    if [[ -n "$LAST_TRIGGER_ID" ]]; then
+      gh api --paginate "repos/$REPO/issues/comments/$LAST_TRIGGER_ID/reactions?per_page=100" \
+        --jq ".[] | $BY_BOT | .content" || true
+    fi
+  } | sort -u | tr '\n' ' '
+)
 
 echo
 echo "=== reactions summary ==="
 ALL_REACTIONS=$(gh api "repos/$REPO/issues/$PR/reactions" --jq '[.[] | .content] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")' 2>/dev/null || true)
 echo "PR body: ${ALL_REACTIONS:-none}"
-# Codex bot の reaction から verdict を導出
-CODEX_REACTION=$(gh api "repos/$REPO/issues/$PR/reactions" \
-  --jq '[.[] | select(.user.login | endswith("[bot]")) | .content] | last // empty' 2>/dev/null || true)
+echo "latest cycle: since ${LAST_TRIGGER_AT:-(PR 作成)} / Codex reviews=${REVIEWS_AFTER:-0} / reactions=${REACTS_AFTER:-none}"
 if [[ -n "$BOT_ERROR" ]]; then
-  echo "Codex verdict: ERROR (最新の @codex review 以降に bot がエラーを返した。内容を確認して再 trigger する)"
+  echo "Codex verdict: ERROR (最新の @codex review 以降に Codex がエラーを返した。内容を確認して再 trigger する)"
   echo "  $BOT_ERROR"
+elif [[ "${REVIEWS_AFTER:-0}" -gt 0 ]]; then
+  echo "Codex verdict: REVIEWED (最新サイクルの review あり。inline 指摘を確認する)"
+elif [[ " $REACTS_AFTER " == *" +1 "* ]]; then
+  echo "Codex verdict: PASSED (👍 = レビュー完了・問題なし)"
+elif [[ " $REACTS_AFTER " == *" eyes "* ]]; then
+  echo "Codex verdict: PROCESSING (👀 = レビュー受理・処理中、結果待ち)"
 else
-case "$CODEX_REACTION" in
-  "+1")     echo "Codex verdict: PASSED (👍 = レビュー完了・問題なし)" ;;
-  "eyes")   echo "Codex verdict: PROCESSING (👀 = レビュー受理・処理中、結果待ち)" ;;
-  "")       echo "Codex verdict: NO REACTION (未着手 or 未設定)" ;;
-  *)        echo "Codex verdict: $CODEX_REACTION (unknown)" ;;
-esac
+  echo "Codex verdict: NO REACTION (最新サイクルで未着手 or 未設定)"
 fi
 
 echo

@@ -96,9 +96,25 @@ Codex の挙動を見落とすミスを防ぐため、ad-hoc polling より `pr-
 > `reactionGroups` + issue-level reactions の両方を見る `pr-codex-status.sh`
 > を必ず使う。
 
+### verdict の読み方
+
+`pr-codex-status.sh` の `Codex verdict` は、**最新の `@codex review` 以降** (trigger が無ければ
+PR 作成以降) の Codex connector の応答だけで決まる。PR 本文の 👍 は前のサイクルのものが
+残り続けるため、全期間のリアクションで判断すると再レビュー中に誤って PASSED になる。
+他の bot (CI など) のコメント・リアクションは数えない。
+
+| verdict | 意味 | 次の行動 |
+|---|---|---|
+| `ERROR` | Codex がエラー・利用上限・環境未設定を返した | 内容を確認して再 trigger (利用上限なら回復待ち) |
+| `REVIEWED` | 最新サイクルの review がある | inline 指摘を読んで対応 |
+| `PASSED` | 👍 のみ | CI を確認してマージ判断 |
+| `PROCESSING` | 👀 のみ | 待機 |
+| `NO REACTION` | まだ何も無い | 待機 (長く続けば trigger を確認) |
+
 ### Codex がエラーを返した場合
 
-利用上限 (usage limit) や内部エラー (`Something went wrong` / `Unknown error`) は、review でも
+利用上限 (usage limit) や内部エラー (`Something went wrong` / `Unknown error`)、環境未設定
+(`create an environment`) は、review でも
 reaction でもなく **bot の issue comment** で届く。reaction だけを見ていると「NO REACTION」の
 まま待ち続けることになる。`pr-codex-status.sh` は最新の `@codex review` 以降に bot のエラー
 コメントがあれば `Codex verdict: ERROR` と出すので、その場合は内容を確認して
@@ -178,7 +194,7 @@ hook の検査対象外なので block を回避できる。
 - [ ] `claude plugin validate .` warning 0 (plugin 系)
 - [ ] `gh pr checks <N>` SUCCESS
 - [ ] `gh pr view <N> --json mergeable,mergeStateStatus` で `MERGEABLE` / `CLEAN`
-- [ ] `pr-codex-status.sh <N>` の reactions summary で 👍 か無反応 (PR body / issue comments / review comments の全 surface を確認)
+- [ ] `pr-codex-status.sh <N>` の `Codex verdict` が `PASSED` (最新サイクルで 👍、新しい review なし)
 
 マージ:
 ```bash

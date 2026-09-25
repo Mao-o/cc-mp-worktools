@@ -1,6 +1,7 @@
 """同梱スクリプトのテスト。gh は偽物 (呼び出しを記録するだけ) に差し替えて動かす。"""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -99,6 +100,88 @@ class ScriptTest(unittest.TestCase):
         subject = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=repo, capture_output=True, text=True, encoding="utf-8").stdout
         self.assertEqual(subject.strip(), "feat: 日本語の件名")
         self.assertFalse(msg.exists())  # --keep なしでは消す
+
+
+
+# status 用の偽 gh: URL ごとに用意した JSON を返し、--jq は本物の jq で評価する
+_STATUS_GH = """#!{python}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+if args[:2] == ["repo", "view"]:
+    print("o/r"); sys.exit(0)
+if args[:1] != ["api"]:
+    sys.exit(0)
+url = next(a for a in args[1:] if a.startswith("repos/")).split("?")[0]
+data = json.load(open(os.environ["FAKE_GH_DATA"], encoding="utf-8")).get(url, [])
+if "--jq" in args:
+    expr = args[args.index("--jq") + 1]
+    r = subprocess.run(["jq", "-r", expr], input=json.dumps(data), capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+else:
+    print(json.dumps(data))
+"""
+
+_BOT = {"login": "chatgpt-codex-connector[bot]"}
+_CI = {"login": "ci-helper[bot]"}
+_ME = {"login": "me"}
+
+
+@unittest.skipIf(_BASH is None or os.name == "nt" or shutil.which("jq") is None, "bash と jq が必要")
+class StatusVerdictTest(unittest.TestCase):
+    """最新の @codex review 以降の Codex の応答だけで verdict を出す。"""
+
+    def verdict(self, data: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(_STATUS_GH.format(python=sys.executable), encoding="utf-8")
+            gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+            fixture = Path(tmp) / "data.json"
+            fixture.write_text(json.dumps(data), encoding="utf-8")
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_DATA": str(fixture)}
+            r = subprocess.run([_BASH, str(_SCRIPTS / "pr-codex-status.sh"), "5"], env=env, capture_output=True,
+                               text=True, encoding="utf-8", timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return next(line for line in r.stdout.splitlines() if line.startswith("Codex verdict:"))
+
+    @staticmethod
+    def base(**over) -> dict:
+        data = {
+            "repos/o/r/issues/5/comments": [
+                {"id": 1, "body": "@codex review", "created_at": "2026-01-02T00:00:00Z", "user": _ME},
+            ],
+            "repos/o/r/issues/5/reactions": [
+                # 前のサイクルの 👍 が PR body に残っている
+                {"content": "+1", "created_at": "2026-01-01T00:00:00Z", "user": _BOT},
+            ],
+            "repos/o/r/issues/comments/1/reactions": [],
+            "repos/o/r/pulls/5/reviews": [],
+            "repos/o/r/pulls/5/comments": [],
+        }
+        data.update(over)
+        return data
+
+    def test_old_thumbs_up_does_not_pass_a_new_cycle(self):
+        self.assertIn("NO REACTION", self.verdict(self.base()))
+        eyes = [{"content": "eyes", "created_at": "2026-01-02T00:01:00Z", "user": _BOT}]
+        self.assertIn("PROCESSING", self.verdict(self.base(**{"repos/o/r/issues/comments/1/reactions": eyes})))
+
+    def test_new_cycle_results(self):
+        up = [{"content": "+1", "created_at": "2026-01-02T00:05:00Z", "user": _BOT}]
+        self.assertIn("PASSED", self.verdict(self.base(**{"repos/o/r/issues/comments/1/reactions": up})))
+        review = [{"id": 9, "submitted_at": "2026-01-02T00:05:00Z", "state": "COMMENTED", "commit_id": "abc", "user": _BOT}]
+        self.assertIn("REVIEWED", self.verdict(self.base(**{"repos/o/r/pulls/5/reviews": review})))
+
+    def test_errors_only_from_the_connector(self):
+        comments = self.base()["repos/o/r/issues/5/comments"]
+        codex_err = {"id": 2, "body": "Unknown error", "created_at": "2026-01-02T00:01:00Z", "user": _BOT}
+        ci_ok = {"id": 3, "body": "build ok", "created_at": "2026-01-02T00:02:00Z", "user": _CI}
+        ci_limit = {"id": 4, "body": "rate limit exceeded", "created_at": "2026-01-02T00:03:00Z", "user": _CI}
+        # 後から来た他の bot のコメントで Codex のエラーが隠れない
+        self.assertIn("ERROR", self.verdict(self.base(**{"repos/o/r/issues/5/comments": [*comments, codex_err, ci_ok]})))
+        # 他の bot の rate limit を Codex のエラーと取り違えない
+        self.assertIn("NO REACTION", self.verdict(self.base(**{"repos/o/r/issues/5/comments": [*comments, ci_limit]})))
 
 
 if __name__ == "__main__":
