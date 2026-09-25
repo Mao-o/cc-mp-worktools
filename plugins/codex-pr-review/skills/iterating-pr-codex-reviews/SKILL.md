@@ -106,6 +106,7 @@ PR 作成以降) の Codex connector の応答だけで決まる。PR 本文の 
 | verdict | 意味 | 次の行動 |
 |---|---|---|
 | `ERROR` | Codex がエラー・利用上限・環境未設定を返した | 内容を確認して再 trigger (利用上限なら回復待ち) |
+| `STALE` | 最新の review 依頼より後に commit を push した (最新 head への review も無い) | `pr-codex-trigger.sh` で再 trigger |
 | `REVIEWED` | 最新サイクルの review がある | inline 指摘を読んで対応 |
 | `PASSED` | 👍 のみ | CI を確認してマージ判断 |
 | `PROCESSING` | 👀 のみ | 待機 |

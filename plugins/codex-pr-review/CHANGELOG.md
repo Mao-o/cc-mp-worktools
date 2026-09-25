@@ -13,7 +13,8 @@
     PR 本文に残った前のサイクルの 👍 で、再レビュー中に PASSED と出ていた。trigger コメントの
     👀 / 👍 と、最新サイクルの review (`REVIEWED`) も見る。判定は Codex connector の応答に
     絞り (他の bot のコメントで誤判定しない)、`Unknown error` / 環境未設定もエラーとして扱う
-    👍 / 👀 は PR body・issue comment・review comment のどれに付いても最新サイクルのものを数える
+    👍 / 👀 は PR body・issue comment・review comment のどれに付いても最新サイクルのものを数える。
+    trigger の後に push した head は再 trigger するまで `STALE` と出す (古い 👍 で PASSED にしない)
   - Skill: マージ前のチェックを「対象 repo のテスト・lint・検証コマンド」に一般化した
     (`unittest discover` 固定をやめた)
   - `pr-codex-status.sh`: review comments のリアクション取得と最新 `@codex review` の特定に

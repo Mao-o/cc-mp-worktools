@@ -158,6 +158,8 @@ class StatusVerdictTest(unittest.TestCase):
             "repos/o/r/issues/comments/1/reactions": [],
             "repos/o/r/pulls/5/reviews": [],
             "repos/o/r/pulls/5/comments": [],
+            "repos/o/r/pulls/5": {"created_at": "2025-12-31T00:00:00Z", "head": {"sha": "head1"}},
+            "repos/o/r/commits/head1": {"commit": {"committer": {"date": "2026-01-01T12:00:00Z"}}},
         }
         data.update(over)
         return data
@@ -187,6 +189,21 @@ class StatusVerdictTest(unittest.TestCase):
         # 前のサイクルのものは数えない
         self.assertIn("NO REACTION", self.verdict(self.base(**{
             "repos/o/r/pulls/5/comments": inline, "repos/o/r/pulls/comments/8/reactions": old})))
+
+    def test_push_after_review_is_stale(self):
+        # 👍 の後に commit を push したら、再 trigger するまで PASSED にしない
+        up = [{"content": "+1", "created_at": "2026-01-02T00:05:00Z", "user": _BOT}]
+        pushed = {"repos/o/r/issues/comments/1/reactions": up,
+                  "repos/o/r/commits/head1": {"commit": {"committer": {"date": "2026-01-02T00:10:00Z"}}}}
+        self.assertIn("STALE", self.verdict(self.base(**pushed)))
+        # 最新の head に対する Codex の review があれば古くない
+        review = [{"id": 9, "submitted_at": "2026-01-02T00:20:00Z", "state": "COMMENTED", "commit_id": "head1", "user": _BOT}]
+        self.assertIn("REVIEWED", self.verdict(self.base(**pushed, **{"repos/o/r/pulls/5/reviews": review})))
+
+    def test_instant_reaction_on_trigger_counts(self):
+        # trigger と同じ秒に付いた trigger への 👍 も数える
+        up = [{"content": "+1", "created_at": "2026-01-02T00:00:00Z", "user": _BOT}]
+        self.assertIn("PASSED", self.verdict(self.base(**{"repos/o/r/issues/comments/1/reactions": up})))
 
     def test_errors_only_from_the_connector(self):
         comments = self.base()["repos/o/r/issues/5/comments"]

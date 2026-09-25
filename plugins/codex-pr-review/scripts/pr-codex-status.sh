@@ -80,14 +80,20 @@ fi
 # 判定は「最新の @codex review 以降」の Codex の応答だけで行う。PR body の 👍 は前の
 # サイクルのものが残り続ける (同じ人の同じ reaction は 1 つしか付かない) ため、再レビュー中に
 # 古い 👍 を見て PASSED と誤判定しないようにする。trigger が無い (初回の自動レビュー) ときは
-# PR 作成以降のすべてが対象。
+# PR 作成以降が対象。
+# trigger の後に commit を push した場合、それまでの応答は古い head へのものなので STALE と出す
+# (最新の head に対する Codex の review があれば別)。
 # 他の bot (CI・Dependabot など) の応答を拾わないよう、Codex の connector に絞る。
 CODEX_BOT="${CODEX_BOT_LOGIN:-chatgpt-codex-connector[bot]}"
 LAST_TRIGGER_AT=$(
   gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
     --jq '.[] | select(.body == "@codex review") | .created_at' | tail -1
 )
-T="${LAST_TRIGGER_AT:-0000}"
+PR_INFO=$(gh api "repos/$REPO/pulls/$PR" --jq '"\(.created_at)\t\(.head.sha)"')
+PR_CREATED_AT="${PR_INFO%%$'\t'*}"
+HEAD_SHA="${PR_INFO#*$'\t'}"
+HEAD_AT=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.committer.date' 2>/dev/null || true)
+T="${LAST_TRIGGER_AT:-$PR_CREATED_AT}"
 BY_BOT="select(.user.login == \"$CODEX_BOT\")"
 
 # 利用上限・内部エラー・環境未設定は review ではなく issue comment で届き、reaction も付かない
@@ -107,15 +113,26 @@ REVIEWS_AFTER=$(
   gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
     --jq ".[] | $BY_BOT | select(.submitted_at > \"$T\") | .id" | grep -c . || true
 )
+REVIEWS_ON_HEAD=$(
+  gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
+    --jq ".[] | $BY_BOT | select(.commit_id == \"$HEAD_SHA\") | .id" | grep -c . || true
+)
+STALE=""
+if [[ -n "$HEAD_AT" && "$HEAD_AT" > "$T" && "${REVIEWS_ON_HEAD:-0}" -eq 0 ]]; then
+  STALE="$HEAD_AT"
+fi
 # 👍 / 👀 は PR body・issue comment (trigger を含む)・review comment のどれにも付きうる。
-# どの surface でも T 以降に付いたものだけ数える
+# どの surface でも T 以降に付いたものだけ数える。trigger コメント自体への reaction は必ず
+# trigger より後なので、同じ秒 (created_at は秒単位) でも数える
 REACT_JQ=".[] | $BY_BOT | select(.created_at > \"$T\") | .content"
+REACT_JQ_TRIGGER=".[] | $BY_BOT | .content"
 REACTS_AFTER=$(
   {
     gh api --paginate "repos/$REPO/issues/$PR/reactions?per_page=100" --jq "$REACT_JQ" || true
     gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[] | .id' 2>/dev/null \
       | while read -r CID; do
-          gh api --paginate "repos/$REPO/issues/comments/$CID/reactions?per_page=100" --jq "$REACT_JQ" || true
+          if [[ "$CID" == "$LAST_TRIGGER_ID" ]]; then Q="$REACT_JQ_TRIGGER"; else Q="$REACT_JQ"; fi
+          gh api --paginate "repos/$REPO/issues/comments/$CID/reactions?per_page=100" --jq "$Q" || true
         done
     gh api --paginate "repos/$REPO/pulls/$PR/comments?per_page=100" --jq '.[] | .id' 2>/dev/null \
       | while read -r CID; do
@@ -132,6 +149,8 @@ echo "latest cycle: since ${LAST_TRIGGER_AT:-(PR 作成)} / Codex reviews=${REVI
 if [[ -n "$BOT_ERROR" ]]; then
   echo "Codex verdict: ERROR (最新の @codex review 以降に Codex がエラーを返した。内容を確認して再 trigger する)"
   echo "  $BOT_ERROR"
+elif [[ -n "$STALE" ]]; then
+  echo "Codex verdict: STALE (最新の review 依頼より後に head が更新された ($STALE)。pr-codex-trigger.sh で再 trigger する)"
 elif [[ "${REVIEWS_AFTER:-0}" -gt 0 ]]; then
   echo "Codex verdict: REVIEWED (最新サイクルの review あり。inline 指摘を確認する)"
 elif [[ " $REACTS_AFTER " == *" +1 "* ]]; then
