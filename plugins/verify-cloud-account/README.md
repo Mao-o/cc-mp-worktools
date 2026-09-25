@@ -81,7 +81,7 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 キーが無いまま対象コマンドを叩くと、deny 文面にキー追加コマンドが出る:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   set --service github --from-cli --dry-run
 ```
 
@@ -174,7 +174,7 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 builder (`scripts/accounts_builder.py`) を直接呼ぶことも可能:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   init --service github --commit
 ```
 
@@ -188,15 +188,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 
 ```bash
 # 既存値を上書き (無ければ新規追加)。--from-cli で CLI 現在値を使うことも可能
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   set --service github --value new-user --commit
 
 # dict 値 (GHE の hostname / Firebase の alias 等) の特定キーだけを追加・上書き
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   set --service github --host ghe.example.com --value your-corp-user --commit
 
 # キー全体を削除
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   remove --service github --commit
 
 # dict 値の特定キーだけを削除 (最後の 1 つを消すとキー自体が削除される —
@@ -204,7 +204,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builde
 # されるため。最後の 1 つでなくても、残りが該当 service にとって使えない
 # 形になる場合 (例: gcloud で project/account 以外のキーだけが残る) は
 # 同じくキー自体を削除し、理由を出力する)
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   remove --service github --host ghe.example.com --commit
 ```
 
@@ -1048,12 +1048,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 ## 発火しなかったとき
 
-1. `cat ${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json` でフックが登録されているか確認
-2. `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account` を stdin 付きで
+1. `cat "${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json"` でフックが登録されているか確認
+2. `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"` を stdin 付きで
    手動実行し、対象コマンドで deny JSON が出るかスモーク:
    ```bash
    echo '{"tool_input":{"command":"gh pr list"},"cwd":"/tmp"}' \
-     | python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account
+     | python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"
    ```
 3. `.claude/verify-cloud-account/accounts.local.json` の JSON 構文エラーを確認
    (破損時は deny)

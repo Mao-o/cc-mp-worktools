@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/file-split-advisor",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file-split-advisor\"",
             "timeout": 5
           }
         ]

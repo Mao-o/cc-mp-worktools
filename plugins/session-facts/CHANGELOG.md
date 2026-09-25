@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.1
+
+### Fixed
+
+- `hooks/hooks.json` の `${CLAUDE_PLUGIN_ROOT}` をダブルクォートで囲んだ。Codex 向けの `codex-hooks.json` の `${PLUGIN_ROOT}` も同様にクォートした。plugin の
+  配置パスに空白が含まれると、コマンドが複数の語に分かれて hook が起動できなくなるため
+  (Claude Code 2.1.281 の `claude plugin validate` が warning を出すようになった)。README 等の
+  コマンド例も同じ形に揃えた。挙動の変更は無い
+
 ## 0.12.0
 
 **monorepo / workspace 対応と巨大 repo の境界処理 (joa.2 / .15 / .25 / .31)**。

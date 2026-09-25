@@ -447,7 +447,7 @@ envelope かはファイル名だけで分かる。`mode` は envelope 由来の
   "hooks": [
     {
       "type": "command",
-      "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/_debug/capture_envelope.py --tool bash --out /tmp/envelope-probe-2.1.241",
+      "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/_debug/capture_envelope.py\" --tool bash --out /tmp/envelope-probe-2.1.241",
       "timeout": 2
     }
   ]

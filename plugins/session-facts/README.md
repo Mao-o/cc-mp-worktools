@@ -12,7 +12,7 @@
 ベースコマンド (timeout は各 hook で 15 秒):
 
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/session-facts" --format markdown --include-domain-types
 ```
 
 ### タイミング別コマンド差分の理由

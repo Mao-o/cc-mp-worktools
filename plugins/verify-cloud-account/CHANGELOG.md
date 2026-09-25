@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.15.1
+
+### Fixed
+
+- `hooks/hooks.json` の `${CLAUDE_PLUGIN_ROOT}` をダブルクォートで囲んだ。plugin の
+  配置パスに空白が含まれると、コマンドが複数の語に分かれて hook が起動できなくなるため
+  (Claude Code 2.1.281 の `claude plugin validate` が warning を出すようになった)。README 等の
+  コマンド例も同じ形に揃えた。挙動の変更は無い
+
 ## 0.15.0
 
 内部バックログの精査分 2 件 + マージ前レビューの反映。**判定表の変更は 2 方向だけ**:

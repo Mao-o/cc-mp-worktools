@@ -77,7 +77,7 @@ verify-cloud-account/
 7. `core.output.deny()` / `warn()` で整形して stdout に返す
    (`warn` モードでは deny 相当の本文を `warn()` 側に回す)
 
-**起動コマンド**: `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account`
+**起動コマンド**: `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"`
 (ディレクトリを渡すと `__main__.py` が実行される)
 
 Python 3.11+。標準ライブラリのみ (外部依存なし)。

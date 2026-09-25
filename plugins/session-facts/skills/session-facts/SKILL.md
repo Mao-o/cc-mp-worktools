@@ -31,10 +31,10 @@ plugin root が環境変数で得られる場合はそれを使うのが最も�
 
 ```bash
 # Claude Code
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/session-facts" --format markdown --include-domain-types
 
 # Codex
-python3 ${PLUGIN_ROOT}/hooks/session-facts --format markdown --include-domain-types
+python3 "${PLUGIN_ROOT}/hooks/session-facts" --format markdown --include-domain-types
 ```
 
 どちらの環境変数も未定義な場合は、自動注入された `## Project Facts` の `- more:` 行にある絶対パス (後述の `<invoked_as>`) をそのまま使ってください。これは実際に呼ばれた際の解決済みパスなので確実です。
