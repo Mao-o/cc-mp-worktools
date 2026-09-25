@@ -125,6 +125,21 @@
         "validation",
         "ci"
       ]
+    },
+    {
+      "name": "worktree-cwd-guard",
+      "displayName": "Worktree CWD Guard",
+      "source": "./plugins/worktree-cwd-guard",
+      "description": "linked worktree で動く session が、同じ repo の別の checkout (main 側や他の worktree) を git の書き込み操作や Write/Edit で書き換えるのを止める PreToolUse hook",
+      "category": "safety",
+      "keywords": [
+        "pretooluse",
+        "hooks",
+        "git",
+        "worktree",
+        "multi-agent",
+        "safety"
+      ]
     }
   ]
 }
