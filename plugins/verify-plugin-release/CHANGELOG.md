@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0
+
+### Changed
+
+- テストを並列に実行する。suite ごとに直列で走らせていたため、複数の plugin にまたがる PR では
+  合計時間が制限時間 (既定 90 秒) を超えて「ゲートを完了できなかった」になっていた
+  (実測: 5 plugin の PR で 90 秒超 → 57 秒)。並列数は CPU 数と 8 の小さい方。結果の記録は
+  plugin の順で、どの suite が落ちたかの帰属は変わらない
+- 並列実行中に 1 本が失敗 (起動できない・時間切れ) したら、残りの suite を kill してすぐに
+  止める。残りを待つと hook 自体の timeout を超え、Claude Code が PR 作成をそのまま通してしまう
+- suite は独立した process group (Windows は新しい process group) で起動し、止めるときは
+  子孫ごと止める (`make test` の下の python など)。直下だけ止めると孫が残り、checkout を
+  触り続けて次の実行と干渉する
+
+### Added
+
+- 手動実行 `check` に `--strict-validate` を追加 (validate の warning を FAIL にする)。独自の
+  ゲートスクリプトから共通の検査として呼ぶため
+
 ## 0.1.0
 
 初版。marketplace の運用で手元のスクリプトとして使っていた PR 前の検査を、

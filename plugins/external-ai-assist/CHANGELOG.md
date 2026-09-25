@@ -5,6 +5,15 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.2
+
+### Fixed
+
+- `hooks/hooks.json` の `${CLAUDE_PLUGIN_ROOT}` をダブルクォートで囲んだ。plugin の
+  配置パスに空白が含まれると、コマンドが複数の語に分かれて hook が起動できなくなるため
+  (Claude Code 2.1.281 の `claude plugin validate` が warning を出すようになった)。README 等の
+  コマンド例も同じ形に揃えた。挙動の変更は無い
+
 ## 0.12.1
 
 **commit レビューの混在 batch (重複抑止パス + 新規パス) で全 backend が失敗した

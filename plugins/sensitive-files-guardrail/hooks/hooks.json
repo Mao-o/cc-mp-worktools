@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads --tool read",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads\" --tool read",
             "timeout": 2
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads --tool bash",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads\" --tool bash",
             "timeout": 2
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads --tool edit",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads\" --tool edit",
             "timeout": 2
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads --tool write",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads\" --tool write",
             "timeout": 2
           }
         ]
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads --tool grep",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/redact-sensitive-reads\" --tool grep",
             "timeout": 2
           }
         ]
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/check-sensitive-files",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check-sensitive-files\"",
             "timeout": 15
           }
         ]

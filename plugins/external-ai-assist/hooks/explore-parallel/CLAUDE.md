@@ -412,7 +412,7 @@ pre と post は**同じ `tool_use_id`** で呼ばれることが前提。これ
   "matcher": "Agent",
   "hooks": [{
     "type": "command",
-    "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase pre",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel\" --phase pre",
     "timeout": 5
   }]
 }],
@@ -420,7 +420,7 @@ pre と post は**同じ `tool_use_id`** で呼ばれることが前提。これ
   "matcher": "Agent",
   "hooks": [{
     "type": "command",
-    "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel --phase post",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/explore-parallel\" --phase post",
     "timeout": 90,
     "async": true
   }]

@@ -49,7 +49,7 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
 1. **値隠蔽で show** を実行:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py show [--service <svc>]
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show [--service <svc>]
    ```
 
    stdout の各行には `<service>: <hidden>  [match]` / `[mismatch]` /
@@ -70,7 +70,7 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
 3. 「値を表示」選択時に `--show-values` で再実行:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py show [--service <svc>] --show-values
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show [--service <svc>] --show-values
    ```
 
    stdout に `<service>: <expected>  [mismatch] current=<current>` の形で

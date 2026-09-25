@@ -1,6 +1,8 @@
 """gate.run_gate の統合テスト (使い捨て git repo 上で実行する)。"""
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,20 @@ from runner import Deadline
 
 def statuses(rep: gate.Report) -> dict[str, str]:
     return {r.check: r.status for r in rep.results}
+
+
+def _running(pid: int) -> bool:
+    """pid がまだ動いているか。zombie (終了済みで回収待ち) は止まったものとみなす。
+
+    孤児の回収は PID 1 の仕事で、コンテナによっては回収が遅れて zombie が残る。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    stat = r.stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
 
 
 class GateTest(unittest.TestCase):
@@ -109,6 +125,66 @@ class GateTest(unittest.TestCase):
         write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", FAILING_TEST)
         commit_all(self.root, "alpha")
         self.assertEqual(statuses(self.gate())["tests[alpha]"], gate.FAIL)
+
+    def test_parallel_suites_attribute_results_to_their_plugin(self):
+        # 2 plugin を同時に変更し、片方だけ落ちる。並列実行でも結果を取り違えない
+        self.branch()
+        self.change_alpha()
+        write(self.root, "plugins/beta/hooks/beta/__main__.py", "print('changed')\n")
+        write(self.root, "plugins/beta/hooks/beta/tests/test_x.py", FAILING_TEST)
+        bump(self.root, "beta", "0.2.0")
+        write(self.root, "plugins/beta/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        commit_all(self.root, "alpha ok, beta broken")
+        st = statuses(self.gate())
+        self.assertEqual(st["tests[alpha]"], gate.PASS)
+        self.assertEqual(st["tests[beta]"], gate.FAIL)
+
+    def test_failed_job_stops_the_others_without_waiting(self):
+        # 1 本が起動に失敗したら、長く走る別の suite を待たずに例外を上げる
+        # (待つと hook の timeout を超え、Claude Code がコマンドを通してしまう)
+        import time
+
+        from layout import Plugin
+
+        slow = gate._TestPlan(Plugin("slow", "plugins/slow", True), jobs=[([sys.executable, "-c", "import time; time.sleep(30)"], self.root)])
+        broken = gate._TestPlan(Plugin("broken", "plugins/broken", True), jobs=[(["definitely-missing-binary-vpr"], self.root)], custom=True)
+        started = time.monotonic()
+        with self.assertRaises(OSError):
+            gate._run_tests(self.root, [slow, broken], Deadline(60), gate.Report())
+        self.assertLess(time.monotonic() - started, 10)
+
+    @unittest.skipIf(os.name == "nt", "生存確認に os.kill(pid, 0) を使う (Windows では終了させてしまう)")
+    def test_cancel_also_stops_grandchildren(self):
+        # suite が起動した子プロセス (make test の下の python など) も止める。
+        # 直下だけ止めると孫が残り、checkout を触り続けて次の実行と干渉する
+        import threading
+        import time
+
+        pidfile = self.root / "grandchild.pid"
+        script = (
+            "import subprocess, sys, time\n"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+            "time.sleep(60)\n"
+        )
+        stop = threading.Event()
+        t = threading.Thread(target=gate._run_job, args=([sys.executable, "-c", script], self.root, Deadline(60), stop))
+        t.start()
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.1)
+        pid = int(pidfile.read_text())
+        stop.set()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        for _ in range(50):
+            if not _running(pid):
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, 9)
+            self.fail("孫プロセスが残っている")
 
     def test_test_command_config(self):
         self.branch()

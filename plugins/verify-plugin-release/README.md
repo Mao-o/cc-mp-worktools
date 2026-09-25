@@ -73,8 +73,9 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 ゲート内部に制限時間 (既定 90 秒) を持ち、hook 自体の timeout (120 秒) より先に打ち切って
 「止める」判断を返します。
 
-**制限時間に注意**: テストの実行時間も 90 秒に含まれます。テストに時間のかかる plugin を
-含む PR や、複数の plugin にまたがる PR では制限時間を超えて止められることがあります。
+**制限時間に注意**: テストの実行時間も 90 秒に含まれます。test suite は並列に実行するので、
+所要時間はおおむね「最も遅い suite」程度ですが、それでも時間のかかる suite を含む PR では
+制限時間を超えて止められることがあります。
 その場合は `test_command` で実行範囲を絞るか、`timeout_seconds` を延ばしてください
 (上限 110 秒)。それでも収まらない場合は `VERIFY_PLUGIN_RELEASE_MODE=warn` を使います。
 
@@ -145,10 +146,12 @@ repo ごとに `<repo>/.claude/verify-plugin-release.json` を置けます (無�
 hook と同じ検査を手元で実行できます。
 
 ```bash
-python3 <plugin-root>/hooks/verify-plugin-release check [--base main] [path/to/repo]
+python3 <plugin-root>/hooks/verify-plugin-release check [--base main] [--strict-validate] [path/to/repo]
 ```
 
 終了コードは `0` = PASS / `1` = FAIL / `2` = ゲートを完了できなかった、です。
+`--strict-validate` は `claude plugin validate` の warning を FAIL にします (CI や独自のゲートから
+呼ぶとき用。設定ファイルの `strict_validate` より優先)。
 
 ## 例
 

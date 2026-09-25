@@ -29,7 +29,7 @@ verify-cloud-account plugin の **builder スクリプト経由 (Bash) が唯一
 ### builder スクリプトの直接呼び出し
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py \
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
   <init|show|migrate|set|remove> [args...]
 
 # set / remove の引数例

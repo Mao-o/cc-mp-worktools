@@ -62,6 +62,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `verify-cloud-account` | Bash 実行前にクラウド CLI (gh/firebase/aws/gcloud/kubectl) のアクティブアカウントを検証する hook | PreToolUse (Bash) | [README](plugins/verify-cloud-account/README.md) |
 | `file-split-advisor` | 行数 tier + 責務混在シグナルを組み合わせて分割検討メモを返す非 block hook | PostToolUse (Write/Edit) | [README](plugins/file-split-advisor/README.md) |
 | `verify-plugin-release` | `gh pr create` / `gh pr ready` の前に plugin repo の完了条件 (version bump・CHANGELOG・テスト・validate・競合) を検査し、満たさなければ PR 作成を止める hook | PreToolUse (Bash) | [README](plugins/verify-plugin-release/README.md) |
+| `worktree-cwd-guard` | linked worktree で動く session が、同じ repo の別の checkout (main 側や他の worktree) を git の書き込み操作や Write/Edit で書き換えるのを止める hook | PreToolUse (Bash/Write/Edit/MultiEdit/NotebookEdit) | [README](plugins/worktree-cwd-guard/README.md) |
 | `codex-pr-review` | GitHub PR の Codex 自動レビューを待ち、指摘対応と `@codex review` での再レビューを回す手順とスクリプト | Skill (on-demand) | [README](plugins/codex-pr-review/README.md) |
 
 ## Privacy & data flow
@@ -80,6 +81,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `session-facts` | なし | — | ローカルの read-only な `git` 呼び出しのみ。env は `.env.example` 等のテンプレートから**キー名だけ**を読む (値は読まない) | 該当なし |
 | `file-split-advisor` | なし | — | 外部プロセスを一切起動しない | 該当なし |
 | `verify-plugin-release` | **あり** (間接) | 起動する `git fetch` (origin) / `gh pr view` (GitHub API) / `claude plugin validate` 経由 | コマンドに渡すのは base branch 名・PR 番号などの固定引数のみ。リポジトリの内容は plugin 自身は送らない (`git fetch` は取得のみ) | `VERIFY_PLUGIN_RELEASE_MODE=off` (既定 `enforce`)。fetch だけ止めるなら repo の設定で `"fetch": false` |
+| `worktree-cwd-guard` | なし | — | ローカルの read-only な `git` 呼び出し (`rev-parse` / `worktree list`) のみ | 該当なし |
 | `codex-pr-review` | **あり** (GitHub API) | `gh` 経由で GitHub | 状態確認は読み取りのみ。`pr-codex-trigger.sh` は引数のサマリと `@codex review` を PR にコメントとして投稿する | Skill を呼ばなければ何もしない |
 
 `external-ai-assist` には送信内容の除外規則 (`.env*` / `*.pem` / `*service-account*.json`
@@ -108,6 +110,7 @@ CLI は読み取り権限を持つエージェントなので、作業ツリー�
 | `verify-cloud-account` | 非対応 | PreToolUse hook が主機能 (同梱 Skill 3 本は補助)。Codex 側の対応可否は未検証 |
 | `file-split-advisor` | 非対応 | PostToolUse hook 専用。Codex 側の対応可否は未検証 |
 | `verify-plugin-release` | 非対応 | PreToolUse (Bash) hook 専用。Codex 側の対応可否は未検証 |
+| `worktree-cwd-guard` | 非対応 | PreToolUse hook 専用。Codex 側の対応可否は未検証 |
 | `codex-pr-review` | 非対応 | Skill 主体。Codex 向けの配線・検証は未実施 |
 
 ### Install for Codex (session-facts)

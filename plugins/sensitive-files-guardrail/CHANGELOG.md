@@ -23,6 +23,15 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.34.3
+
+### Fixed
+
+- `hooks/hooks.json` の `${CLAUDE_PLUGIN_ROOT}` をダブルクォートで囲んだ。plugin の
+  配置パスに空白が含まれると、コマンドが複数の語に分かれて hook が起動できなくなるため
+  (Claude Code 2.1.281 の `claude plugin validate` が warning を出すようになった)。README 等の
+  コマンド例も同じ形に揃えた。挙動の変更は無い
+
 ## 0.34.2
 
 Windows の posix 前提を解消し、**両 suite が windows-latest の CI で通る**ように

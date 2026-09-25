@@ -12,14 +12,18 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 import sys
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import layout
 from config import Config
-from runner import Deadline, git, run
+from runner import Deadline, GateTimeout, git, run
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 
@@ -29,6 +33,7 @@ _SKIP_DIRS = {"__pycache__", "node_modules", ".git", ".venv", "venv"}
 # ゲート自身がテストを走らせるので、bytecode を作らせない (作ると次の検査で
 # 「未 commit の変更」に見える。.gitignore に __pycache__ が無い repo で起きる)
 _TEST_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
+_MAX_TEST_WORKERS = 8
 
 
 @dataclass(frozen=True)
@@ -196,32 +201,130 @@ def _test_dirs(plugin_path: Path) -> list[Path]:
     return out
 
 
-def _check_tests(root: Path, plugin: layout.Plugin, cfg: Config, dl: Deadline, rep: Report) -> None:
-    name = f"tests[{plugin.name}]"
+@dataclass
+class _TestPlan:
+    """1 plugin 分のテスト実行計画。skip があれば実行しない。"""
+
+    plugin: layout.Plugin
+    skip: str | None = None
+    jobs: list[tuple[list[str], Path]] = field(default_factory=list)  # (コマンド, 実行ディレクトリ)
+    custom: bool = False  # test_command で指定されたコマンドか
+
+
+def _plan_tests(root: Path, plugin: layout.Plugin, cfg: Config) -> _TestPlan:
     ppath = root / plugin.dir if plugin.dir else root
     if cfg.test_command is False:
-        rep.add(name, SKIP, "設定で無効化 (test_command: false)")
-        return
+        return _TestPlan(plugin, skip="設定で無効化 (test_command: false)")
     if isinstance(cfg.test_command, list):
-        r = run(cfg.test_command, ppath, dl, env=_TEST_ENV)
-        if r.returncode == 0:
-            rep.add(name, PASS, f"`{' '.join(cfg.test_command)}` が成功")
-        else:
-            rep.add(name, FAIL, f"`{' '.join(cfg.test_command)}` が exit {r.returncode}")
-        return
+        return _TestPlan(plugin, jobs=[(cfg.test_command, ppath)], custom=True)
     dirs = _test_dirs(ppath)
     if not dirs:
-        rep.add(name, SKIP, "Python の tests/ を検出できない (test_command で指定できる)")
-        return
-    failed = []
-    for d in dirs:
-        r = run([sys.executable, "-m", "unittest", "discover", "tests"], d.parent, dl, env=_TEST_ENV)
-        if r.returncode != 0:
-            failed.append(d.parent.relative_to(root).as_posix())
-    if failed:
-        rep.add(name, FAIL, f"落ちた suite: {_short(failed)}")
+        return _TestPlan(plugin, skip="Python の tests/ を検出できない (test_command で指定できる)")
+    cmd = [sys.executable, "-m", "unittest", "discover", "tests"]
+    return _TestPlan(plugin, jobs=[(cmd, d.parent) for d in dirs])
+
+
+_POLL = 0.5
+
+
+# suite を独立した process group で起動し、止めるときに子孫ごと止められるようにする
+_NEW_GROUP: dict = (
+    {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """suite と、suite が起動した子プロセス (make test の下の python など) をまとめて止める。
+
+    proc.kill() は直下のプロセスしか止めず、孫が checkout を触り続けて次の実行と干渉する。
+    POSIX では suite を独立した session で起動してあるので、その process group ごと止める。
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     else:
-        rep.add(name, PASS, f"{len(dirs)} suite green")
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+
+
+def _run_job(cmd: list[str], cwd: Path, dl: Deadline, stop: threading.Event) -> int:
+    """1 suite を実行して exit code を返す。stop が立つか制限時間を過ぎたら kill する。"""
+    if stop.is_set():
+        return -1
+    if dl.remaining() <= 0:
+        raise GateTimeout(f"制限時間切れ ({cmd[0]} の実行前)")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, **_TEST_ENV},
+        **_NEW_GROUP,
+    )
+    while True:
+        try:
+            return proc.wait(timeout=_POLL)
+        except subprocess.TimeoutExpired:
+            if stop.is_set() or dl.remaining() <= 0:
+                _kill_tree(proc)
+                if stop.is_set():
+                    return -1
+                raise GateTimeout(f"制限時間切れ ({' '.join(cmd[:3])})") from None
+
+
+def _run_tests(root: Path, plans: list[_TestPlan], dl: Deadline, rep: Report) -> None:
+    """全 plugin の test suite を並列に走らせ、plugin ごとの結果を順に記録する。
+
+    複数の plugin にまたがる PR では、suite を直列に走らせると合計時間が制限時間を
+    超える (実測: 5 plugin の PR で 90 秒超)。suite 同士は独立しているので並列にし、
+    所要時間を「最も遅い suite」程度に抑える。
+    """
+    jobs = [(i, cmd, cwd) for i, plan in enumerate(plans) if not plan.skip for cmd, cwd in plan.jobs]
+    exit_codes: dict[tuple[int, Path], int] = {}
+    if jobs:
+        workers = max(1, min(len(jobs), _MAX_TEST_WORKERS, os.cpu_count() or 1))
+        stop = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = {pool.submit(_run_job, cmd, cwd, dl, stop): (i, cwd) for i, cmd, cwd in jobs}
+            for fut in as_completed(futures):
+                exit_codes[futures[fut]] = fut.result()  # GateTimeout / OSError はここで上がる
+        except BaseException:
+            # 1 本が失敗したら残りを待たずに止める。待つと hook 自体の timeout を超え、
+            # Claude Code が PR 作成をそのまま通してしまう (止める判断を返せない)
+            stop.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
+    for i, plan in enumerate(plans):
+        name = f"tests[{plan.plugin.name}]"
+        if plan.skip:
+            rep.add(name, SKIP, plan.skip)
+        elif plan.custom:
+            cmd, cwd = plan.jobs[0]
+            code = exit_codes[(i, cwd)]
+            label = " ".join(cmd)
+            rep.add(name, PASS if code == 0 else FAIL, f"`{label}` が成功" if code == 0 else f"`{label}` が exit {code}")
+        else:
+            failed = [cwd.relative_to(root).as_posix() for _, cwd in plan.jobs if exit_codes[(i, cwd)] != 0]
+            if failed:
+                rep.add(name, FAIL, f"落ちた suite: {_short(failed)}")
+            else:
+                rep.add(name, PASS, f"{len(plan.jobs)} suite green")
 
 
 def _check_validate(
@@ -349,6 +452,7 @@ def run_gate(
 
     claude = which("claude")
     new_plugin = False
+    test_plans: list[_TestPlan] = []
     removed_plugin = False
     for pdir in sorted(touched):
         plugin = touched[pdir]
@@ -371,9 +475,10 @@ def run_gate(
             new_plugin = True
             if (root / layout.MARKETPLACE).is_file() and not plugin.in_marketplace:
                 rep.add(f"listed[{plugin.name}]", WARN, "marketplace.json に entry が無い")
-        _check_tests(root, plugin, cfg, dl, rep)
+        test_plans.append(_plan_tests(root, plugin, cfg))
         _check_validate(root, pdir, plugin.name, cfg, dl, rep, claude)
 
+    _run_tests(root, test_plans, dl, rep)
     if (root / layout.MARKETPLACE).is_file() and (layout.MARKETPLACE in root_files or new_plugin or removed_plugin):
         _check_validate(root, "", "marketplace", cfg, dl, rep, claude)
     _check_workflows(root, root_files, rep)
