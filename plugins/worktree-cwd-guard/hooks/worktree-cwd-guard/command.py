@@ -29,6 +29,16 @@ _MUTATING = {
     "merge", "mv", "pull", "rebase", "reset", "restore", "revert", "rm", "stash", "switch",
     "update-index",
 }
+# `git branch` のうち、checkout 中の branch を動かして HEAD を書き換える形
+_BRANCH_MOVE = {"-m", "-M", "--move"}
+
+
+def _is_mutating(sub: str, args: list[str]) -> bool:
+    if sub == "branch":
+        return any(a in _BRANCH_MOVE for a in args)
+    return sub in _MUTATING
+
+
 # 値を取る git の global option (`=` なしで次の token を消費する)
 _GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 
@@ -52,15 +62,17 @@ _WRAPPER_VALUE_OPTS = {
 _CHDIR_OPTS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
 
 
-def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str]]:
+def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool]:
     """先頭の予約語 / 代入 / wrapper (とそのオプション) を外す。
 
-    返り値は (残り, wrapper が指定した作業ディレクトリ, コマンドに渡す環境変数の代入)。
+    返り値は (残り, wrapper が指定した作業ディレクトリ, コマンドに渡す環境変数の代入, 環境を
+    空にして起動するか)。代入の値 None は `env -u NAME` による削除。
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
     """
     chdir = None
-    assigns: dict[str, str] = {}
+    assigns: dict[str, str | None] = {}
+    clear = False
     i = 0
     while i < len(seg):
         tok = seg[i]
@@ -75,11 +87,17 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str]
         if tok in _WRAPPERS:
             opts = _WRAPPER_VALUE_OPTS.get(tok, set())
             i += 1
-            while i < len(seg) and seg[i].startswith("-") and seg[i] != "-":
+            while i < len(seg) and seg[i].startswith("-"):
                 name, eq, value = seg[i].partition("=")
                 if seg[i] == "--":
                     i += 1
                     break
+                if tok == "env" and seg[i] in ("-", "-i", "--ignore-environment"):
+                    # 環境を空にして起動する。手前の代入も export 済みの変数も git に届かない
+                    clear = True
+                    assigns = {}
+                    i += 1
+                    continue
                 if name in opts and not eq:
                     value = seg[i + 1] if i + 1 < len(seg) else ""
                     i += 2
@@ -87,9 +105,11 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str]
                     i += 1
                 if name in _CHDIR_OPTS.get(tok, set()):
                     chdir = value
+                if tok == "env" and name in ("-u", "--unset"):
+                    assigns[value] = None
             continue
         break
-    return seg[i:], chdir, assigns
+    return seg[i:], chdir, assigns, clear
 
 
 def _is_git(tok: str) -> bool:
@@ -213,61 +233,185 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     except ValueError:
         return []  # 分解できないコマンドは判定しない (git 自身もまず動かない)
 
-    findings: list[Finding] = []
-    # shell の状態のうち git の対象を変えるもの:
-    # - here: 実行時にありうる作業ディレクトリの候補。`&&` / `||` の後の cd は実行されないことが
-    #   あるので、候補を置き換えずに足す。候補のどれかが別 checkout なら止める
-    # - stack: pushd / popd のディレクトリスタック (要素は here と同じ候補の集合)
-    # - env: export した GIT_DIR / GIT_WORK_TREE
-    state: dict = {"here": {norm(cwd)}, "stack": [], "env": {}}
-    scopes: list[dict] = []  # `( ... )` に入るときの状態
+    return _Analyzer(cwd, fam).run(tokens)
 
-    def snapshot() -> dict:
-        return {"here": set(state["here"]), "stack": list(state["stack"]), "env": dict(state["env"])}
 
-    def move(new: set, conditional: bool) -> None:
-        state["here"] = state["here"] | new if conditional else new
+# 1 つの「実行時にありうる状態」: (作業ディレクトリ, pushd のスタック, 直前のコマンドの成否)。
+# 作業ディレクトリが静的に決まらなければ None。成否は "ok" / "fail"
+_Alt = tuple
+_OPS = re.compile(r"&&|\|\||\|&|;;|[|&;()\n]")
 
-    def process(seg: list[str], conditional: bool) -> None:
-        seg, chdir, assigns = _strip_prefix(seg)
+
+class _Analyzer:
+    """shell の実行をたどり、ありうる状態の集合を持ち回る。
+
+    `&&` / `||` の後ろのコマンドは、直前が成功 / 失敗した状態でだけ実行する。cd は成功するものとして
+    扱い、git や一般のコマンドは成功・失敗の両方がありうるとする。git を実行しうる状態のどれかで
+    対象が別の checkout なら止める。
+    """
+
+    def __init__(self, cwd: str, fam: Family):
+        self.fam = fam
+        self.findings: list[Finding] = []
+        self._seen: set[str] = set()
+        self.alts: set[_Alt] = {(norm(cwd), (), "ok")}
+        self.env: dict[str, str] = {}  # export 済みの GIT_DIR / GIT_WORK_TREE
+        self.shvars: dict[str, str] = {}  # 代入したが export していないもの
+        self.op: str | None = None  # 次のコマンドの前にある && / ||
+        self.in_pipe = False  # 今のコマンドが `|` の後ろ (pipeline の要素) か
+        self.list_start = self._snapshot()  # 今の AND-OR list の開始時点 (`&` で戻す)
+        self.scopes: list[tuple] = []  # `( ... )` に入るときの状態
+
+    # --- 状態 -------------------------------------------------------------
+
+    def _snapshot(self) -> tuple:
+        return (frozenset(self.alts), dict(self.env), dict(self.shvars))
+
+    def _restore(self, snap: tuple) -> None:
+        self.alts = set(snap[0])
+        self.env, self.shvars = dict(snap[1]), dict(snap[2])
+
+    @staticmethod
+    def _both(alts) -> set[_Alt]:
+        return {(h, s, st) for h, s, _ in alts for st in ("ok", "fail")}
+
+    def _split(self) -> tuple[set[_Alt], set[_Alt]]:
+        """今のコマンドを実行する状態と、`&&` / `||` で飛ばす状態に分ける。"""
+        if self.op is None:
+            return set(self.alts), set()
+        want = "ok" if self.op == "&&" else "fail"
+        run = {a for a in self.alts if a[2] == want}
+        return run, self.alts - run
+
+    # --- 字句の走査 ---------------------------------------------------------
+
+    def run(self, tokens: list[str]) -> list[Finding]:
+        seg: list[str] = []
+        for tok in tokens:
+            if not (tok and set(tok) <= set(_PUNCT)):
+                seg.append(tok)
+                continue
+            if tok.startswith((">", "<")) or tok.endswith(">"):
+                seg.append(tok)  # リダイレクト記号はそのまま
+                continue
+            for op in _OPS.findall(tok):
+                self._flush(seg, next_is_pipe=op in ("|", "|&"))
+                seg = []
+                self._operator(op)
+        self._flush(seg, next_is_pipe=False)
+        return self.findings
+
+    def _operator(self, op: str) -> None:
+        if op in ("&&", "||"):
+            self.op = op
+        elif op in ("|", "|&"):
+            self.op = None
+        elif op == "&":
+            # AND-OR list 全体が非同期 (サブシェル) で動く。親 shell の状態は list の開始時点のまま
+            self._restore(self.list_start)
+            self.alts = {(h, s, "ok") for h, s, _ in self.alts}
+            self._new_list()
+        elif op == "(":
+            run, skipped = self._split()
+            self.scopes.append((frozenset(run), skipped, dict(self.env), dict(self.shvars), self.list_start))
+            self.alts = run
+            self._new_list()
+        elif op == ")":
+            if self.scopes:
+                entered, skipped, env, shvars, list_start = self.scopes.pop()
+                # 中の cd / export は外に残らない。成否は中身次第なので両方ありうる
+                self.alts = self._both(entered) | skipped
+                self.env, self.shvars, self.list_start = env, shvars, list_start
+            self.op = None
+        else:  # ; ;; 改行
+            self._new_list()
+
+    def _new_list(self) -> None:
+        self.op = None
+        self.list_start = self._snapshot()
+
+    def _flush(self, seg: list[str], next_is_pipe: bool) -> None:
+        subshell = next_is_pipe or self.in_pipe
+        self.in_pipe = next_is_pipe
         if not seg:
             return
-        heres = state["here"]
-        if seg[0] == "export":
+        run, skipped = self._split()
+        if run:
+            after = self._command(seg, run)
+            # pipeline の要素はサブシェルで動くので、中の cd は外に残らない
+            run = self._both(run) if subshell else after
+        self.alts = run | skipped
+
+    # --- 1 コマンド -----------------------------------------------------------
+
+    def _command(self, seg: list[str], alts: set[_Alt]) -> set[_Alt]:
+        seg, chdir, assigns, clear = _strip_prefix(seg)
+        ok = {(h, s, "ok") for h, s, _ in alts}
+        if not seg:  # 代入だけ
+            for k, v in assigns.items():
+                if k in _GIT_ENV and v is not None:
+                    self.shvars[k] = v
+                    if k in self.env:
+                        self.env[k] = v
+            return ok
+        cmd = seg[0]
+        if cmd in ("true", ":"):
+            return ok
+        if cmd == "false":
+            return {(h, s, "fail") for h, s, _ in alts}
+        if cmd == "export":
             for tok in seg[1:]:
                 name, eq, value = tok.partition("=")
-                if eq and name in _GIT_ENV:
-                    state["env"][name] = value
-            return
-        if seg[0] == "unset":
+                if name not in _GIT_ENV:
+                    continue
+                if eq:
+                    self.shvars[name] = self.env[name] = value
+                elif name in self.shvars:
+                    self.env[name] = self.shvars[name]
+            return ok
+        if cmd == "unset":
             for name in seg[1:]:
-                state["env"].pop(name, None)
-            return
-        if seg[0] in ("cd", "pushd"):
-            if seg[0] == "pushd" and len(seg) == 1:
-                new = {None}  # 引数なしの pushd はスタックの先頭と入れ替える (追わない)
-            else:
-                dest = _cd_target(seg[1:])
-                new = {_resolve(h, dest) if dest is not None else None for h in heres}
-            if seg[0] == "pushd":
-                state["stack"].append(set(heres))
-            move(new, conditional)
-            return
-        if seg[0] == "popd":
-            if len(seg) == 1 and state["stack"]:
-                new = state["stack"].pop()
-            else:
-                new = {None}  # 呼び出し前のスタック / `popd +N` は分からない
-            move(new, conditional)
-            return
-        if chdir is not None:
-            heres = {_resolve(h, chdir) for h in heres}
-        if not _is_git(seg[0]):
-            return
-        env = {**state["env"], **{k: v for k, v in assigns.items() if k in _GIT_ENV}}
-        sub_findings: list[Finding] = []
+                self.env.pop(name, None)
+                self.shvars.pop(name, None)
+            return ok
+        if cmd in ("cd", "pushd", "popd"):
+            return {self._chdir(cmd, seg[1:], h, s) for h, s, _ in alts}
+        if _is_git(cmd):
+            env = {} if clear else dict(self.env)
+            for k, v in assigns.items():
+                if k in _GIT_ENV:
+                    if v is None:
+                        env.pop(k, None)
+                    else:
+                        env[k] = v
+            heres = {h for h, _, _ in alts}
+            if chdir is not None:
+                heres = {_resolve(h, chdir) for h in heres}
+            self._check_git(seg[1:], heres, env)
+        return self._both(alts)
+
+    @staticmethod
+    def _chdir(cmd: str, args: list[str], here: str | None, stack: tuple) -> _Alt:
+        if cmd == "popd":
+            if not args and stack:
+                return (stack[-1], stack[:-1], "ok")
+            return (None, stack[:-1], "ok")  # 呼び出し前のスタック / `popd +N` は分からない
+        if cmd == "pushd" and not args:
+            return (None, stack + (here,), "ok")  # 引数なしの pushd はスタックの先頭と入れ替える
+        dest = _cd_target(args)
+        new = _resolve(here, dest) if dest is not None else None
+        return (new, stack + (here,) if cmd == "pushd" else stack, "ok")
+
+    def _add(self, finding: Finding) -> None:
+        if finding.message not in self._seen:
+            self._seen.add(finding.message)
+            self.findings.append(finding)
+
+    def _check_git(self, args: list[str], heres: set, env: dict) -> None:
+        fam = self.fam
+        note: Finding | None = None
         for here in sorted(heres, key=lambda h: h or ""):
-            targets, unresolved, rest = _git_targets(seg[1:], here, fam, env)
+            targets, unresolved, rest = _git_targets(args, here, fam, env)
             if not rest:
                 return
             sub = rest[0]
@@ -276,47 +420,17 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
                 for path in _worktree_targets(rest, base):
                     o = owner(path, fam)
                     if o is not None and o != fam.home and path == o:
-                        findings.append(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
-                        return
+                        self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
                 continue
-            if sub not in _MUTATING:
+            if not _is_mutating(sub, rest[1:]):
                 return
             if unresolved:
-                sub_findings.append(Finding(False, f"`git {sub}` の対象 ({unresolved}) を静的に解決できない"))
+                note = note or Finding(False, f"`git {sub}` の対象 ({unresolved}) を静的に解決できない")
                 continue
+            # 対象ごとに記録する (許可リストで 1 つ外れても、残りの対象で止められるように)
             for target in targets:
                 o = owner(target, fam)
                 if o is not None and o != fam.home:
-                    findings.append(Finding(True, f"`git {sub}` が別の checkout ({o}) を書き換える", o))
-                    return
-        findings.extend(sub_findings[:1])
-
-    seg: list[str] = []
-    conditional = False  # 今の segment が && / || の後ろにあるか
-    in_pipe = False  # 今の segment が `|` の後ろ (pipeline の要素) か
-    for tok in tokens:
-        if tok and set(tok) <= set(_PUNCT):
-            # 記号だけの token。`(` / `)` はサブシェルの出入り (中の cd は外に影響しない)
-            is_sep = any(c in tok for c in "();|&\n") and not (tok.startswith((">", "<")) or tok.endswith(">"))
-            if is_sep:
-                pipe = "|" in tok.replace("||", "")
-                background = "&" in tok.replace("&&", "")
-                before = snapshot()
-                process(seg, conditional)
-                if pipe or background or in_pipe:
-                    # pipeline の各要素と `&` の非同期コマンドはサブシェルで動く。中の cd は外に残らない
-                    state.update(before)
-                seg = []
-                conditional = "&&" in tok or "||" in tok
-                in_pipe = pipe
-            for c in tok:
-                if c == "(":
-                    scopes.append(snapshot())
-                elif c == ")" and scopes:
-                    state.update(scopes.pop())
-            if not is_sep:
-                seg.append(tok)  # リダイレクト記号はそのまま
-            continue
-        seg.append(tok)
-    process(seg, conditional)
-    return findings
+                    self._add(Finding(True, f"`git {sub}` が別の checkout ({o}) を書き換える", o))
+        if note is not None:
+            self._add(note)

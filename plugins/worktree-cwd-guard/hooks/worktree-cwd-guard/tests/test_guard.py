@@ -127,7 +127,7 @@ class GuardTest(unittest.TestCase):
             f'make && cd "{self.main}" && git commit -m x',
             # 自分の worktree へ戻る cd が実行されないと main のまま
             f'cd "{self.main}"; test -d x && cd "{self.a}"; git reset --hard',
-            f'cd "{self.main}" && (false || cd "{self.a}"; git stash)',
+            f'cd "{self.main}" && (test -d x || cd "{self.a}"; git stash)',
         ):
             with self.subTest(cmd=cmd):
                 self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
@@ -167,6 +167,43 @@ class GuardTest(unittest.TestCase):
         self.assertIsNone(evaluate(bash(f'pushd "{self.main}"; popd; git reset --hard', self.a)))
         # 呼び出し前のスタックは分からないので、注意だけ出す
         self.assertEqual(decision(evaluate(bash("popd; git reset --hard", self.a))), "context")
+
+    def test_conditional_chain_does_not_invent_states(self):
+        # `cd main && cd A` は、どちらに転んでも最後は A にいる (成功なら戻る / 失敗なら動かない)
+        for cmd in (
+            f'cd "{self.main}" && cd "{self.a}"; git reset --hard',
+            f'false || cd "{self.a}"; git reset --hard',
+            f'cd "{self.main}" && true & wait; git reset --hard',
+            f'cd "{self.main}" && (false || cd "{self.a}"; git stash)',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+        # 背景 list の外に出たあとは元の作業ディレクトリ。list の中の git は判定する
+        cmd = f'cd "{self.main}" && git stash & wait'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_every_target_is_checked_against_the_allowlist(self):
+        os.environ["WORKTREE_CWD_GUARD_ALLOW"] = str(self.main)
+        cmd = f'git -C "{self.main}" --work-tree="{self.b}" reset --hard'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_exported_later_and_env_clearing(self):
+        gitdir_b = (self.b / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        cmd = f'GIT_DIR="{gitdir_b}"; GIT_WORK_TREE="{self.b}"; export GIT_DIR GIT_WORK_TREE; git reset --hard'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # export しない代入はコマンドに届かない
+        self.assertIsNone(evaluate(bash(f'GIT_DIR="{gitdir_b}"; git reset --hard', self.a)))
+        # env -i / env -u は手前の代入や export を消す
+        for cmd in (
+            f'GIT_DIR="{self.main / ".git"}" GIT_WORK_TREE="{self.main}" env -i /usr/bin/git reset --hard',
+            f'export GIT_DIR="{self.main / ".git"}"; env -u GIT_DIR git reset --hard',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+
+    def test_branch_rename_is_a_write(self):
+        self.assertEqual(decision(evaluate(bash(f'git -C "{self.main}" branch -m renamed', self.a))), "deny")
+        self.assertIsNone(evaluate(bash(f'git -C "{self.main}" branch --show-current', self.a)))
 
     def test_repo_side_and_work_tree_side_are_both_checked(self):
         # HEAD / index は main 側、作業ツリーは自分の worktree。main の HEAD が動くので止める
