@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,7 @@ _SKIP_DIRS = {"__pycache__", "node_modules", ".git", ".venv", "venv"}
 # ゲート自身がテストを走らせるので、bytecode を作らせない (作ると次の検査で
 # 「未 commit の変更」に見える。.gitignore に __pycache__ が無い repo で起きる)
 _TEST_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
+_MAX_TEST_WORKERS = 8
 
 
 @dataclass(frozen=True)
@@ -196,32 +198,59 @@ def _test_dirs(plugin_path: Path) -> list[Path]:
     return out
 
 
-def _check_tests(root: Path, plugin: layout.Plugin, cfg: Config, dl: Deadline, rep: Report) -> None:
-    name = f"tests[{plugin.name}]"
+@dataclass
+class _TestPlan:
+    """1 plugin 分のテスト実行計画。skip があれば実行しない。"""
+
+    plugin: layout.Plugin
+    skip: str | None = None
+    jobs: list[tuple[list[str], Path]] = field(default_factory=list)  # (コマンド, 実行ディレクトリ)
+    custom: bool = False  # test_command で指定されたコマンドか
+
+
+def _plan_tests(root: Path, plugin: layout.Plugin, cfg: Config) -> _TestPlan:
     ppath = root / plugin.dir if plugin.dir else root
     if cfg.test_command is False:
-        rep.add(name, SKIP, "設定で無効化 (test_command: false)")
-        return
+        return _TestPlan(plugin, skip="設定で無効化 (test_command: false)")
     if isinstance(cfg.test_command, list):
-        r = run(cfg.test_command, ppath, dl, env=_TEST_ENV)
-        if r.returncode == 0:
-            rep.add(name, PASS, f"`{' '.join(cfg.test_command)}` が成功")
-        else:
-            rep.add(name, FAIL, f"`{' '.join(cfg.test_command)}` が exit {r.returncode}")
-        return
+        return _TestPlan(plugin, jobs=[(cfg.test_command, ppath)], custom=True)
     dirs = _test_dirs(ppath)
     if not dirs:
-        rep.add(name, SKIP, "Python の tests/ を検出できない (test_command で指定できる)")
-        return
-    failed = []
-    for d in dirs:
-        r = run([sys.executable, "-m", "unittest", "discover", "tests"], d.parent, dl, env=_TEST_ENV)
-        if r.returncode != 0:
-            failed.append(d.parent.relative_to(root).as_posix())
-    if failed:
-        rep.add(name, FAIL, f"落ちた suite: {_short(failed)}")
-    else:
-        rep.add(name, PASS, f"{len(dirs)} suite green")
+        return _TestPlan(plugin, skip="Python の tests/ を検出できない (test_command で指定できる)")
+    cmd = [sys.executable, "-m", "unittest", "discover", "tests"]
+    return _TestPlan(plugin, jobs=[(cmd, d.parent) for d in dirs])
+
+
+def _run_tests(root: Path, plans: list[_TestPlan], dl: Deadline, rep: Report) -> None:
+    """全 plugin の test suite を並列に走らせ、plugin ごとの結果を順に記録する。
+
+    複数の plugin にまたがる PR では、suite を直列に走らせると合計時間が制限時間を
+    超える (実測: 5 plugin の PR で 90 秒超)。suite 同士は独立しているので並列にし、
+    所要時間を「最も遅い suite」程度に抑える。
+    """
+    jobs = [(i, cmd, cwd) for i, plan in enumerate(plans) if not plan.skip for cmd, cwd in plan.jobs]
+    exit_codes: dict[tuple[int, Path], int] = {}
+    if jobs:
+        workers = max(1, min(len(jobs), _MAX_TEST_WORKERS, os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(run, cmd, cwd, dl, None, _TEST_ENV): (i, cwd) for i, cmd, cwd in jobs}
+            for fut, key in futures.items():
+                exit_codes[key] = fut.result().returncode  # GateTimeout はここで呼び出し側へ上がる
+    for i, plan in enumerate(plans):
+        name = f"tests[{plan.plugin.name}]"
+        if plan.skip:
+            rep.add(name, SKIP, plan.skip)
+        elif plan.custom:
+            cmd, cwd = plan.jobs[0]
+            code = exit_codes[(i, cwd)]
+            label = " ".join(cmd)
+            rep.add(name, PASS if code == 0 else FAIL, f"`{label}` が成功" if code == 0 else f"`{label}` が exit {code}")
+        else:
+            failed = [cwd.relative_to(root).as_posix() for _, cwd in plan.jobs if exit_codes[(i, cwd)] != 0]
+            if failed:
+                rep.add(name, FAIL, f"落ちた suite: {_short(failed)}")
+            else:
+                rep.add(name, PASS, f"{len(plan.jobs)} suite green")
 
 
 def _check_validate(
@@ -349,6 +378,7 @@ def run_gate(
 
     claude = which("claude")
     new_plugin = False
+    test_plans: list[_TestPlan] = []
     removed_plugin = False
     for pdir in sorted(touched):
         plugin = touched[pdir]
@@ -371,9 +401,10 @@ def run_gate(
             new_plugin = True
             if (root / layout.MARKETPLACE).is_file() and not plugin.in_marketplace:
                 rep.add(f"listed[{plugin.name}]", WARN, "marketplace.json に entry が無い")
-        _check_tests(root, plugin, cfg, dl, rep)
+        test_plans.append(_plan_tests(root, plugin, cfg))
         _check_validate(root, pdir, plugin.name, cfg, dl, rep, claude)
 
+    _run_tests(root, test_plans, dl, rep)
     if (root / layout.MARKETPLACE).is_file() and (layout.MARKETPLACE in root_files or new_plugin or removed_plugin):
         _check_validate(root, "", "marketplace", cfg, dl, rep, claude)
     _check_workflows(root, root_files, rep)

@@ -110,6 +110,19 @@ class GateTest(unittest.TestCase):
         commit_all(self.root, "alpha")
         self.assertEqual(statuses(self.gate())["tests[alpha]"], gate.FAIL)
 
+    def test_parallel_suites_attribute_results_to_their_plugin(self):
+        # 2 plugin を同時に変更し、片方だけ落ちる。並列実行でも結果を取り違えない
+        self.branch()
+        self.change_alpha()
+        write(self.root, "plugins/beta/hooks/beta/__main__.py", "print('changed')\n")
+        write(self.root, "plugins/beta/hooks/beta/tests/test_x.py", FAILING_TEST)
+        bump(self.root, "beta", "0.2.0")
+        write(self.root, "plugins/beta/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        commit_all(self.root, "alpha ok, beta broken")
+        st = statuses(self.gate())
+        self.assertEqual(st["tests[alpha]"], gate.PASS)
+        self.assertEqual(st["tests[beta]"], gate.FAIL)
+
     def test_test_command_config(self):
         self.branch()
         self.change_alpha()
