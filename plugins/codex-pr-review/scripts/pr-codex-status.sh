@@ -107,15 +107,20 @@ REVIEWS_AFTER=$(
   gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
     --jq ".[] | $BY_BOT | select(.submitted_at > \"$T\") | .id" | grep -c . || true
 )
-# 👍 / 👀 は trigger コメントか PR body に付く。どちらも T 以降のものだけ数える
+# 👍 / 👀 は PR body・issue comment (trigger を含む)・review comment のどれにも付きうる。
+# どの surface でも T 以降に付いたものだけ数える
+REACT_JQ=".[] | $BY_BOT | select(.created_at > \"$T\") | .content"
 REACTS_AFTER=$(
   {
-    gh api --paginate "repos/$REPO/issues/$PR/reactions?per_page=100" \
-      --jq ".[] | $BY_BOT | select(.created_at > \"$T\") | .content" || true
-    if [[ -n "$LAST_TRIGGER_ID" ]]; then
-      gh api --paginate "repos/$REPO/issues/comments/$LAST_TRIGGER_ID/reactions?per_page=100" \
-        --jq ".[] | $BY_BOT | .content" || true
-    fi
+    gh api --paginate "repos/$REPO/issues/$PR/reactions?per_page=100" --jq "$REACT_JQ" || true
+    gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[] | .id' 2>/dev/null \
+      | while read -r CID; do
+          gh api --paginate "repos/$REPO/issues/comments/$CID/reactions?per_page=100" --jq "$REACT_JQ" || true
+        done
+    gh api --paginate "repos/$REPO/pulls/$PR/comments?per_page=100" --jq '.[] | .id' 2>/dev/null \
+      | while read -r CID; do
+          gh api --paginate "repos/$REPO/pulls/comments/$CID/reactions?per_page=100" --jq "$REACT_JQ" || true
+        done
   } | sort -u | tr '\n' ' '
 )
 

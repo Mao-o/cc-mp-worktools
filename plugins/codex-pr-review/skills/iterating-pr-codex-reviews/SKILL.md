@@ -33,7 +33,7 @@ flowchart TD
     D -- 👍 on PR/comment<br/>指摘なし --> M[マージ判断]
     D -- inline 指摘あり --> E[priority 優先度判定<br/>P1 → P2 → P3]
     E --> F[fix 実装 + テスト追加]
-    F --> G[smoke test → discover tests<br/>→ claude plugin validate]
+    F --> G[対象 repo のテスト・lint・検証]
     G --> H[commit -F file → push]
     H --> I[pr-codex-trigger.sh で<br/>サマリ + @codex review<br/>(2 回目以降のみ)]
     I --> B
@@ -190,8 +190,9 @@ hook の検査対象外なので block を回避できる。
 
 新指摘なし or 軽微な P3 のみのとき、以下を確認してマージ:
 
-- [ ] `python3 -m unittest discover tests` 全 pass
-- [ ] `claude plugin validate .` warning 0 (plugin 系)
+- [ ] 対象 repo のテスト・lint・検証コマンドが全 pass (README / CLAUDE.md / CI 定義に書かれた
+      ものを使う。例: Python なら `python3 -m unittest discover`、Claude Code plugin なら
+      `claude plugin validate .`)
 - [ ] `gh pr checks <N>` SUCCESS
 - [ ] `gh pr view <N> --json mergeable,mergeStateStatus` で `MERGEABLE` / `CLEAN`
 - [ ] `pr-codex-status.sh <N>` の `Codex verdict` が `PASSED` (最新サイクルで 👍、新しい review なし)

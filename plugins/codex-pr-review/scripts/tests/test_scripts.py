@@ -173,6 +173,21 @@ class StatusVerdictTest(unittest.TestCase):
         review = [{"id": 9, "submitted_at": "2026-01-02T00:05:00Z", "state": "COMMENTED", "commit_id": "abc", "user": _BOT}]
         self.assertIn("REVIEWED", self.verdict(self.base(**{"repos/o/r/pulls/5/reviews": review})))
 
+    def test_reactions_on_other_surfaces_count(self):
+        # 最新サイクルの 👍 が trigger 以外のコメントや inline comment に付いても拾う
+        up = [{"content": "+1", "created_at": "2026-01-02T00:05:00Z", "user": _BOT}]
+        old = [{"content": "+1", "created_at": "2026-01-01T00:05:00Z", "user": _BOT}]
+        comments = [*self.base()["repos/o/r/issues/5/comments"],
+                    {"id": 7, "body": "summary", "created_at": "2026-01-02T00:00:30Z", "user": _ME}]
+        self.assertIn("PASSED", self.verdict(self.base(**{
+            "repos/o/r/issues/5/comments": comments, "repos/o/r/issues/comments/7/reactions": up})))
+        inline = [{"id": 8, "created_at": "2026-01-01T00:00:00Z", "commit_id": "abc", "path": "x", "line": 1, "body": "b"}]
+        self.assertIn("PASSED", self.verdict(self.base(**{
+            "repos/o/r/pulls/5/comments": inline, "repos/o/r/pulls/comments/8/reactions": up})))
+        # 前のサイクルのものは数えない
+        self.assertIn("NO REACTION", self.verdict(self.base(**{
+            "repos/o/r/pulls/5/comments": inline, "repos/o/r/pulls/comments/8/reactions": old})))
+
     def test_errors_only_from_the_connector(self):
         comments = self.base()["repos/o/r/issues/5/comments"]
         codex_err = {"id": 2, "body": "Unknown error", "created_at": "2026-01-02T00:01:00Z", "user": _BOT}
