@@ -201,6 +201,26 @@ class GuardTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
 
+    def test_heredoc_body_is_not_executed(self):
+        for cmd in (
+            f"cat > helper.sh <<'EOF'\ngit -C {self.main} reset --hard\nEOF\ngit status",
+            f"cat <<-EOF > notes.md\n\tgit -C {self.main} checkout main\n\tEOF",
+            f'cat > a.sh << "A" && cat > b.sh <<B\ngit -C {self.main} stash\nA\ngit -C {self.b} stash\nB',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+        # 本文の後ろのコマンドは判定する
+        cmd = f"cat > x.sh <<'EOF'\necho hi\nEOF\ngit -C {self.main} reset --hard"
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_submodule_and_sparse_checkout_writes(self):
+        for cmd in (f'git -C "{self.main}" submodule update --init', f'git -C "{self.main}" sparse-checkout set src'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        for cmd in (f'git -C "{self.main}" submodule status', f'git -C "{self.main}" sparse-checkout list'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+
     def test_branch_rename_is_a_write(self):
         self.assertEqual(decision(evaluate(bash(f'git -C "{self.main}" branch -m renamed', self.a))), "deny")
         self.assertIsNone(evaluate(bash(f'git -C "{self.main}" branch --show-current', self.a)))

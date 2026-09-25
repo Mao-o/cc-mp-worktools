@@ -25,6 +25,8 @@
   転んでもありえない状態を作らない)。`git branch -m` / `-M` を書き込み操作に含める。対象が複数ある
   操作は対象ごとに判定し、許可リストで 1 つ外れても残りで止める。`env -i` / `env -u` と、代入の
   あとで `export NAME` した変数を反映する
+- here-document の本文を読まない (`cat > x.sh <<'EOF'` で git を含む script を書くだけで止めていた)。
+  `git submodule update` など / `git sparse-checkout set` などを書き込み操作に含める
 - 行き先が静的に決まらない操作は止めずに注意だけ出す。README / SECURITY.md に脅威モデル
   (うっかりの予防で、意図的なすり抜けへの対策ではない) と、読まない書き方 (`bash -c` / `eval` /
   関数 / script ファイル / コマンド置換) を初版から明記した

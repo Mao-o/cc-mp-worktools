@@ -39,7 +39,7 @@ main checkout や repo の外で動く session では何もしません。
 
 | ツール | 止める条件 |
 |---|---|
-| Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd` / `pushd` / `popd`、`git -C <dir>` / `--work-tree` / `--git-dir`、環境変数 `GIT_DIR` / `GIT_WORK_TREE` (コマンド前の代入・`env`・`export`。`env -i` / `env -u` による削除も反映) から決める。`&&` / `||` は直前のコマンドの成否ごとに状態を分けて追う (`cd` は成功するものとして扱う)。`&` の付いた AND-OR list 全体はサブシェルとして扱う。pipeline の要素や `&` の中の `cd` は外に残らないものとして扱う。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` `bisect` `clean` `checkout-index` `update-index`、`branch -m` / `-M` (checkout 中の branch の改名)。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う |
+| Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd` / `pushd` / `popd`、`git -C <dir>` / `--work-tree` / `--git-dir`、環境変数 `GIT_DIR` / `GIT_WORK_TREE` (コマンド前の代入・`env`・`export`。`env -i` / `env -u` による削除も反映) から決める。`&&` / `||` は直前のコマンドの成否ごとに状態を分けて追う (`cd` は成功するものとして扱う)。`&` の付いた AND-OR list 全体はサブシェルとして扱う。pipeline の要素や `&` の中の `cd` は外に残らないものとして扱う。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` `bisect` `clean` `checkout-index` `update-index`、`branch -m` / `-M` (checkout 中の branch の改名)、`submodule update` / `add` / `deinit` など、`sparse-checkout set` / `add` / `init` など。here-document の本文 (`cat > x.sh <<'EOF'` の中身) は実行されないので読まない。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う |
 | Bash | `git worktree remove` / `move` で別の worktree を対象にしたもの |
 | Write / Edit / MultiEdit / NotebookEdit | 別の checkout 配下のファイルへの書き込み |
 

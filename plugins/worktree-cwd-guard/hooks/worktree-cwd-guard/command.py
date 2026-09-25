@@ -33,9 +33,19 @@ _MUTATING = {
 _BRANCH_MOVE = {"-m", "-M", "--move"}
 
 
+# 入れ子の subcommand を持つもののうち、作業ツリーや index を書き換える形
+_NESTED_MUTATING = {
+    "submodule": {"add", "update", "deinit", "init", "sync", "absorbgitdirs", "set-branch", "set-url"},
+    "sparse-checkout": {"set", "add", "init", "reapply", "disable"},
+}
+
+
 def _is_mutating(sub: str, args: list[str]) -> bool:
     if sub == "branch":
         return any(a in _BRANCH_MOVE for a in args)
+    if sub in _NESTED_MUTATING:
+        action = next((a for a in args if not a.startswith("-")), None)
+        return action in _NESTED_MUTATING[sub]
     return sub in _MUTATING
 
 
@@ -222,9 +232,38 @@ def _cd_target(args: list[str]) -> str | None:
     return args[i]
 
 
+# here-document の開始 (`<<EOF` / `<<-'EOF'` / `<< "EOF"`)。`<<<` (here-string) は除く
+_HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\2")
+
+
+def _strip_heredocs(command: str) -> str:
+    """here-document の本文を取り除く。
+
+    本文はコマンドの標準入力に渡る文字列で、shell は実行しない (`cat > x.sh <<'EOF'` で git を
+    含む script を書くだけのことが多い)。shlex は here-document を知らないので、字句に分ける前に
+    外しておかないと本文をコマンドとして読んでしまう。
+    """
+    lines = command.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for m in _HEREDOC.finditer(line):
+            strip_tabs, delim = m.group(1) == "-", m.group(3)
+            while i < len(lines):
+                body = lines[i]
+                i += 1
+                if (body.lstrip("\t") if strip_tabs else body) == delim:
+                    break
+    return "\n".join(out)
+
+
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     if "git" not in command:
         return []
+    command = _strip_heredocs(command)
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace = " \t\r"
