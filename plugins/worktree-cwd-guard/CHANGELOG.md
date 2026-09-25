@@ -21,4 +21,5 @@
 - 行き先が静的に決まらない操作は止めずに注意だけ出す。README / SECURITY.md に脅威モデル
   (うっかりの予防で、意図的なすり抜けへの対策ではない) と、読まない書き方 (`bash -c` / `eval` /
   関数 / script ファイル / コマンド置換) を初版から明記した
+- レビュー用の AGENTS.md (`## Code Review Rules`) を置き、脅威モデルの範囲外の書き方を指摘対象から外す
 - `WORKTREE_CWD_GUARD_MODE` (enforce / warn / off) と `WORKTREE_CWD_GUARD_ALLOW` で調整できる
