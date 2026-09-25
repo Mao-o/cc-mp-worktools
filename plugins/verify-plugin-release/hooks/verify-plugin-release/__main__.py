@@ -11,11 +11,12 @@ PreToolUse:Bash に登録する。対象コマンドでなければ何も出力�
 - draft PR の作成 / VERIFY_PLUGIN_RELEASE_MODE=warn → 止めずに結果を伝える
 - VERIFY_PLUGIN_RELEASE_MODE=off → 何もしない
 
-手動実行: `python3 <plugin>/hooks/verify-plugin-release check [--base BRANCH] [PATH]`
+手動実行: `python3 <plugin>/hooks/verify-plugin-release check [--base BRANCH] [--strict-validate] [PATH]`
 (終了コード 0 = PASS / 1 = FAIL / 2 = ゲートを完了できなかった)
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -316,6 +317,11 @@ def _manual(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="verify-plugin-release check")
     ap.add_argument("path", nargs="?", default=".")
     ap.add_argument("--base", default=None)
+    ap.add_argument(
+        "--strict-validate",
+        action="store_true",
+        help="claude plugin validate の warning を FAIL にする (設定ファイルの strict_validate より優先)",
+    )
     args = ap.parse_args(argv)
     try:
         root = _repo_root(Path(args.path).resolve(), Deadline(10))
@@ -327,6 +333,8 @@ def _manual(argv: list[str]) -> int:
         return 2
     try:
         cfg, note = _load_config(root, Deadline(10))
+        if args.strict_validate:
+            cfg = dataclasses.replace(cfg, strict_validate=True)
         rep = gate.run_gate(root, cfg, Deadline(cfg.timeout_seconds), base_hint=args.base)
         if note:
             rep.notes.append(note)

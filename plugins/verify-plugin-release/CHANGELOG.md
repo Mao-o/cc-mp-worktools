@@ -9,6 +9,11 @@
   (実測: 5 plugin の PR で 90 秒超 → 57 秒)。並列数は CPU 数と 8 の小さい方。結果の記録は
   plugin の順で、どの suite が落ちたかの帰属は変わらない
 
+### Added
+
+- 手動実行 `check` に `--strict-validate` を追加 (validate の warning を FAIL にする)。独自の
+  ゲートスクリプトから共通の検査として呼ぶため
+
 ## 0.1.0
 
 初版。marketplace の運用で手元のスクリプトとして使っていた PR 前の検査を、

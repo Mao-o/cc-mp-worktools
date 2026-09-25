@@ -146,10 +146,12 @@ repo ごとに `<repo>/.claude/verify-plugin-release.json` を置けます (無�
 hook と同じ検査を手元で実行できます。
 
 ```bash
-python3 <plugin-root>/hooks/verify-plugin-release check [--base main] [path/to/repo]
+python3 <plugin-root>/hooks/verify-plugin-release check [--base main] [--strict-validate] [path/to/repo]
 ```
 
 終了コードは `0` = PASS / `1` = FAIL / `2` = ゲートを完了できなかった、です。
+`--strict-validate` は `claude plugin validate` の warning を FAIL にします (CI や独自のゲートから
+呼ぶとき用。設定ファイルの `strict_validate` より優先)。
 
 ## 例
 
