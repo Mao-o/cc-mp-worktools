@@ -137,7 +137,7 @@ jobs:
         run: scripts/test-all.sh
 
   tests-windows:
-    # sensitive-files-guardrail の 2 suite だけを Windows で回す job。
+    # Windows での動作を保証すると決めた suite (matrix の include) だけを Windows で回す job。
     #
     # 背景: 0.34.0 で「SIGALRM が無い環境では全 tool 呼出を deny」という実質
     # Windows 無効化ゲートを撤去し、非 UNIX でも通常のパイプラインを通すように
@@ -153,12 +153,15 @@ jobs:
     # 既存 tests job (ubuntu matrix) には手を入れない。あちらは
     # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、同じ
     # 列挙を Windows に通すとスクリプトの移植が本題より大きくなる。ここで
-    # 知りたいのは「SFG の 2 suite が Windows でどう落ちるか」の 1 点なので、
+    # 知りたいのは「対象の suite が Windows でどう落ちるか」なので、
     # 各 suite の package root で unittest discover を直接呼ぶ (test-all.sh が
     # 各 suite に対して行うのと同じ呼び方)。
     # tests job の matrix に windows-latest を足す形へは統合しない: あちらは
     # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、SFG 以外の
     # plugin の Windows 対応は未着手 (対象を広げるときに改めて判断する)。
+    # matrix に dir を足すと既定の job 名が「tests-windows (suite, dir)」に変わり、既存の
+    # check 名 (tests-windows (check-sensitive-files) 等) が消えてしまう。名前は suite だけで作る。
+    name: tests-windows (${{ matrix.suite }})
     if: github.event_name != 'schedule'
     runs-on: windows-latest
     timeout-minutes: 30
@@ -166,8 +169,18 @@ jobs:
       # 片方が落ちてももう片方を最後まで走らせる。目的が失敗の洗い出しなので、
       # 1 回の run で両 suite 分の失敗一覧が欲しい (ubuntu 側 matrix と同趣旨)。
       fail-fast: false
+      # suite = job 名に出る識別子 / dir = unittest discover を走らせる package root。
+      # 対象は「Windows での動作を保証する」と決めた suite だけ (全 plugin ではない)。
+      # verify-plugin-release は hook の入出力を UTF-8 に固定しており、Windows の既定
+      # codec (cp1252 等) で fail-open しないことをここで実機確認する (2026-09-25 追加)。
       matrix:
-        suite: [check-sensitive-files, redact-sensitive-reads]
+        include:
+          - suite: check-sensitive-files
+            dir: plugins/sensitive-files-guardrail/hooks/check-sensitive-files
+          - suite: redact-sensitive-reads
+            dir: plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads
+          - suite: verify-plugin-release
+            dir: plugins/verify-plugin-release/hooks/verify-plugin-release
     steps:
       # GH の Windows runner は Git for Windows 既定で core.autocrlf=true。この repo に
       # .gitattributes は無いため、放置すると tests/fixtures/** が CRLF で展開され、
@@ -199,7 +212,7 @@ jobs:
       # 置くのは `python` で、`python3` があるとは限らない (あっても Microsoft
       # Store の shim を掴む可能性がある)。
       - name: Run ${{ matrix.suite }} unit tests
-        working-directory: plugins/sensitive-files-guardrail/hooks/${{ matrix.suite }}
+        working-directory: ${{ matrix.dir }}
         run: python -m unittest discover tests
 
   tag-plugin-releases:
