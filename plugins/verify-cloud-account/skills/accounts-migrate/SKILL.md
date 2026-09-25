@@ -67,7 +67,7 @@ builder は以下の順でパスをスキャンし、統合する:
 1. **dry-run で proposal を表示**:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py migrate --dry-run
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" migrate --dry-run
    ```
 
 2. stdout を読み、以下のケース分岐:
@@ -124,7 +124,7 @@ builder は以下の順でパスをスキャンし、統合する:
 4. コミット実行:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py migrate --commit
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" migrate --commit
    ```
 
 5. stdout に「旧パスは保持されています」と出る。ユーザーに以下を伝える:

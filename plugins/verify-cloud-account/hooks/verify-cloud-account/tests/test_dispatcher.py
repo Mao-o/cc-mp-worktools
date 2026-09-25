@@ -585,9 +585,11 @@ class TestMissingKeyIsFailClosed(BaseWithTmpProject):
         """
         self._write_accounts({"aws": "123456789012"})
         reason = self._deny_reason("gh pr create")
-        self.assertIn("accounts_builder.py set --service github", reason)
+        # 空白を含む plugin root でも分割されないよう、パスはクォートして案内する
+        self.assertIn('/scripts/accounts_builder.py" set --service github', reason)
+        self.assertIn('python3 "${CLAUDE_PLUGIN_ROOT}/', reason)
         self.assertIn("--from-cli", reason)
-        self.assertNotIn("accounts_builder.py init --service", reason)
+        self.assertNotIn('accounts_builder.py" init --service', reason)
 
     def test_missing_key_deny_does_not_hand_over_a_one_shot_commit(self):
         """`--from-cli --commit` の一発コマンドを案内しない。
