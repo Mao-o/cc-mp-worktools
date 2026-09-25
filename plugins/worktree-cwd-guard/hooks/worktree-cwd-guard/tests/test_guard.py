@@ -80,10 +80,10 @@ class GuardTest(unittest.TestCase):
             f'cd "{self.main}" && git checkout -b oops',
             f'git -C "{self.main}" switch -c oops',
             f'git -C "{self.b}" commit -m x',
-            f"git --work-tree={self.main} reset --hard",
+            f'git --work-tree="{self.main}" reset --hard',
             f'git --git-dir="{self.main / ".git"}" checkout main',
             f'git worktree remove "{self.b}"',
-            f"cd {self.main}; git stash",
+            f'cd "{self.main}"; git stash',
         ):
             with self.subTest(cmd=cmd):
                 self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
@@ -111,7 +111,7 @@ class GuardTest(unittest.TestCase):
             f'env -i git -C "{self.main}" reset --hard',
             f'env -u HOME git -C "{self.main}" stash',
             f'env -C "{self.main}" git checkout -b oops',
-            f'env --chdir={self.main} git commit -m x',
+            f'env --chdir="{self.main}" git commit -m x',
             f'sudo -u me git -C "{self.main}" reset --hard',
             f'time -p git -C "{self.main}" stash',
         ):
@@ -210,7 +210,7 @@ class GuardTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
         # 本文の後ろのコマンドは判定する
-        cmd = f"cat > x.sh <<'EOF'\necho hi\nEOF\ngit -C {self.main} reset --hard"
+        cmd = f"cat > x.sh <<'EOF'\necho hi\nEOF\ngit -C \"{self.main}\" reset --hard"
         self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
 
     def test_submodule_and_sparse_checkout_writes(self):
@@ -258,6 +258,31 @@ class GuardTest(unittest.TestCase):
                 out = evaluate(bash(cmd, self.a))
                 self.assertEqual(decision(out), "context")
                 self.assertIn("静的に解決できない", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_path_aliases_are_the_same_checkout(self):
+        # `/` 区切りは POSIX でも Windows でも同じ場所を指す
+        fwd = str(self.main).replace("\\", "/")
+        self.assertEqual(decision(evaluate(bash(f'git -C "{fwd}" reset --hard', self.a))), "deny")
+        own = str(self.a).replace("\\", "/")
+        self.assertIsNone(evaluate(bash(f'git -C "{own}" reset --hard', self.a)))
+
+    @unittest.skipUnless(os.name == "nt", "Windows のパス表記 (大文字小文字 / 8.3 短縮名)")
+    def test_windows_path_aliases(self):
+        import ctypes
+
+        def short(p: Path) -> str:
+            buf = ctypes.create_unicode_buffer(1024)
+            n = ctypes.windll.kernel32.GetShortPathNameW(str(p), buf, len(buf))
+            return buf.value if n else str(p)
+
+        for alias in (str(self.main).upper(), str(self.main).lower(), short(self.main)):
+            with self.subTest(alias=alias):
+                self.assertEqual(decision(evaluate(bash(f'git -C "{alias}" reset --hard', self.a))), "deny")
+                self.assertEqual(decision(evaluate(write(Path(alias) / "x.py", self.a))), "deny")
+        for alias in (str(self.a).upper(), short(self.a)):
+            with self.subTest(alias=alias):
+                self.assertIsNone(evaluate(bash(f'git -C "{alias}" reset --hard', self.a)))
+                self.assertIsNone(evaluate(write(Path(alias) / "x.py", self.a)))
 
     def test_main_checkout_session_is_not_guarded(self):
         self.assertIsNone(evaluate(bash(f'git -C "{self.b}" checkout main', self.main)))

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+動作の変更なし。Windows の CI (`tests-windows`) の対象に加えるにあたり、テストを直した。
+
+- テストのコマンドでパスを引用する (引用なしの Windows パスは bash が `\` を消すため)
+- `/` 区切り・大文字小文字・8.3 短縮名の別名を同じ checkout と判定するテストを追加
+
 ## 0.1.0
 
 初版。複数の agent を linked worktree で並列に動かしたときに、agent が別の checkout

@@ -173,6 +173,11 @@ jobs:
       # 対象は「Windows での動作を保証する」と決めた suite だけ (全 plugin ではない)。
       # verify-plugin-release は hook の入出力を UTF-8 に固定しており、Windows の既定
       # codec (cp1252 等) で fail-open しないことをここで実機確認する (2026-09-25 追加)。
+      # worktree-cwd-guard は Windows のパス (大文字小文字・区切り・8.3 短縮名) で checkout の
+      # 判定がずれないこと (test_windows_path_aliases) と、stdin / stdout の UTF-8 往復を確認する
+      # (2026-09-26 追加)。
+      # ここで確かめるのは Python 側の判定と入出力まで。hook の起動コマンド (hooks.json の
+      # `python3 ...`) は全 plugin 共通で、README の要件どおり PATH 上に python3 がある前提。
       matrix:
         include:
           - suite: check-sensitive-files
@@ -181,6 +186,8 @@ jobs:
             dir: plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads
           - suite: verify-plugin-release
             dir: plugins/verify-plugin-release/hooks/verify-plugin-release
+          - suite: worktree-cwd-guard
+            dir: plugins/worktree-cwd-guard/hooks/worktree-cwd-guard
     steps:
       # GH の Windows runner は Git for Windows 既定で core.autocrlf=true。この repo に
       # .gitattributes は無いため、放置すると tests/fixtures/** が CRLF で展開され、
