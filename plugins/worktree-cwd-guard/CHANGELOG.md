@@ -11,6 +11,10 @@
   別の worktree を対象にした `git worktree remove` / `move` を止める。対象は `cd` /
   `git -C` / `--work-tree` / `--git-dir` から決める
 - Write / Edit / MultiEdit / NotebookEdit: 別の checkout 配下への書き込みを止める
+- 対象の判定は shell の意味に沿わせる: `( ... )` の中の `cd` は外に持ち越さない、`cd -- <dir>` /
+  `cd -P <dir>` のオプションは読み飛ばす、`-C` / `--git-dir` が指す repo 側 (HEAD / index) と
+  `--work-tree` が指す作業ツリー側の両方を判定する、linked worktree の git dir
+  (`.git/worktrees/<name>`) はその worktree の root に対応づける
 - 行き先が静的に決まらない操作は止めずに注意だけ出す。README / SECURITY.md に脅威モデル
   (うっかりの予防で、意図的なすり抜けへの対策ではない) を初版から明記した
 - `WORKTREE_CWD_GUARD_MODE` (enforce / warn / off) と `WORKTREE_CWD_GUARD_ALLOW` で調整できる

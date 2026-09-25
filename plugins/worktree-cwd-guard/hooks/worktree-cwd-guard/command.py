@@ -38,24 +38,6 @@ class Finding:
     root: str | None = None  # 書き換えられる checkout の root (blocked のとき)
 
 
-def _is_separator(tok: str) -> bool:
-    if not set(tok) <= set(_PUNCT):
-        return False
-    if any(c in tok for c in ";|\n"):
-        return True
-    return "&" in tok and not tok.startswith((">", "<")) and not tok.endswith(">")
-
-
-def _segments(tokens: list[str]) -> list[list[str]]:
-    segs: list[list[str]] = [[]]
-    for tok in tokens:
-        if tok and _is_separator(tok):
-            segs.append([])
-        else:
-            segs[-1].append(tok)
-    return [s for s in segs if s]
-
-
 def _strip_prefix(seg: list[str]) -> list[str]:
     i = 0
     while i < len(seg) and (
@@ -85,8 +67,12 @@ def _resolve(base: str | None, path: str) -> str | None:
     return norm(os.path.join(base, path))
 
 
-def _git_target(args: list[str], cwd: str | None, fam: Family) -> tuple[str | None, str | None, list[str]]:
-    """git の global option を読み、(対象 checkout のパス, 解決できない理由, 残りの引数) を返す。"""
+def _git_targets(args: list[str], cwd: str | None, fam: Family) -> tuple[list[str], str | None, list[str]]:
+    """git の global option を読み、(書き換わる場所のパス一覧, 解決できない理由, 残りの引数) を返す。
+
+    書き換わる場所は 2 つある: HEAD / index を持つ repo 側 (`-C` / `--git-dir` で決まる) と、
+    作業ツリー側 (`--work-tree`、無ければ repo 側と同じ)。どちらかが別 checkout なら止める。
+    """
     here = cwd
     work_tree = None
     git_dir = None
@@ -105,7 +91,7 @@ def _git_target(args: list[str], cwd: str | None, fam: Family) -> tuple[str | No
             i += 1
         if name == "-C":
             if _dynamic(value):
-                return None, f"git -C {value}", args[i:]
+                return [], f"git -C {value}", args[i:]
             here = _resolve(here, value)
         elif name == "--work-tree":
             work_tree = value
@@ -113,18 +99,28 @@ def _git_target(args: list[str], cwd: str | None, fam: Family) -> tuple[str | No
             git_dir = value
     rest = args[i:]
 
-    if work_tree is not None:
-        resolved = _resolve(here, work_tree)
-        return resolved, None if resolved else f"--work-tree {work_tree}", rest
+    targets: list[str] = []
     if git_dir is not None:
         resolved = _resolve(here, git_dir)
         if resolved is None:
-            return None, f"--git-dir {git_dir}", rest
-        if resolved == fam.common_dir:
-            # 共有 git dir を直接指す = main checkout の HEAD / index を操作する
-            return norm(os.path.dirname(fam.common_dir)), None, rest
-        return here, None, rest
-    return here, None if here else "cd の移動先", rest
+            return [], f"--git-dir {git_dir}", rest
+        mapped = dict(fam.gitdirs).get(resolved)
+        if mapped is not None:
+            targets.append(mapped)  # その git dir を持つ checkout の HEAD / index を書き換える
+        elif resolved == fam.common_dir:
+            targets.append(norm(os.path.dirname(fam.common_dir)))
+        elif resolved.startswith(fam.common_dir.rstrip(os.sep) + os.sep):
+            return [], f"--git-dir {git_dir}", rest  # 同じ repo の、対応の分からない git dir
+    elif here is not None:
+        targets.append(here)
+    else:
+        return [], "cd の移動先", rest
+    if work_tree is not None:
+        resolved = _resolve(here, work_tree)
+        if resolved is None:
+            return [], f"--work-tree {work_tree}", rest
+        targets.append(resolved)
+    return targets, None, rest
 
 
 def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
@@ -140,6 +136,23 @@ def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
     return out
 
 
+_CD_OPTS = {"-L", "-P", "-e", "-@", "-n"}
+
+
+def _cd_target(args: list[str]) -> str | None:
+    """`cd` / `pushd` の移動先。`cd -` (直前のディレクトリ) など決められなければ None。"""
+    i = 0
+    while i < len(args) and args[i] in _CD_OPTS:
+        i += 1
+    if i < len(args) and args[i] == "--":
+        i += 1
+    if i >= len(args):
+        return "~"
+    if args[i] == "-" or args[i].startswith(("+", "-")):
+        return None  # 直前のディレクトリ / dir stack の参照
+    return args[i]
+
+
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     if "git" not in command:
         return []
@@ -152,33 +165,56 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
         return []  # 分解できないコマンドは判定しない (git 自身もまず動かない)
 
     findings: list[Finding] = []
-    here: str | None = norm(cwd)
-    for seg in _segments(tokens):
+    state = {"here": norm(cwd)}
+    scopes: list[str | None] = []  # `( ... )` に入るときの作業ディレクトリ
+
+    def process(seg: list[str]) -> None:
         seg = _strip_prefix(seg)
         if not seg:
-            continue
+            return
         if seg[0] in ("cd", "pushd"):
-            target = seg[1] if len(seg) > 1 else "~"
-            here = _resolve(here, target)
-            continue
+            dest = _cd_target(seg[1:])
+            state["here"] = _resolve(state["here"], dest) if dest is not None else None
+            return
         if not _is_git(seg[0]):
-            continue
-        target, unresolved, rest = _git_target(seg[1:], here, fam)
+            return
+        targets, unresolved, rest = _git_targets(seg[1:], state["here"], fam)
         if not rest:
-            continue
+            return
         sub = rest[0]
         if sub == "worktree":
-            for path in _worktree_targets(rest, target):
+            base = targets[0] if targets else None
+            for path in _worktree_targets(rest, base):
                 o = owner(path, fam)
                 if o is not None and o != fam.home and path == o:
                     findings.append(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
-            continue
+            return
         if sub not in _MUTATING:
-            continue
+            return
         if unresolved:
             findings.append(Finding(False, f"`git {sub}` の対象 ({unresolved}) を静的に解決できない"))
+            return
+        for target in targets:
+            o = owner(target, fam)
+            if o is not None and o != fam.home:
+                findings.append(Finding(True, f"`git {sub}` が別の checkout ({o}) を書き換える", o))
+                return
+
+    seg: list[str] = []
+    for tok in tokens:
+        if tok and set(tok) <= set(_PUNCT):
+            # 記号だけの token。`(` / `)` はサブシェルの出入り (中の cd は外に影響しない)
+            if any(c in tok for c in "();|&\n") and not (tok.startswith((">", "<")) or tok.endswith(">")):
+                process(seg)
+                seg = []
+            for c in tok:
+                if c == "(":
+                    scopes.append(state["here"])
+                elif c == ")" and scopes:
+                    state["here"] = scopes.pop()
+            if not any(c in tok for c in "();|&\n"):
+                seg.append(tok)  # リダイレクト記号はそのまま
             continue
-        o = owner(target, fam) if target else None
-        if o is not None and o != fam.home:
-            findings.append(Finding(True, f"`git {sub}` が別の checkout ({o}) を書き換える", o))
+        seg.append(tok)
+    process(seg)
     return findings

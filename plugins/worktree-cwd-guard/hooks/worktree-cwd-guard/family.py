@@ -19,6 +19,7 @@ class Family:
     home: str  # この session の worktree root (正規化済み)
     roots: tuple[str, ...]  # 同じ repo の全 checkout の root (home を含む)
     common_dir: str  # 共有 git dir (main checkout の .git)
+    gitdirs: tuple[tuple[str, str], ...] = ()  # (各 checkout の git dir, その root)
 
 
 def norm(path: str | os.PathLike[str]) -> str:
@@ -87,7 +88,25 @@ def detect(cwd: str) -> Family | None:
     home = norm(top)
     if home not in roots:
         roots.append(home)
-    return Family(home=home, roots=tuple(roots), common_dir=common_abs)
+    return Family(home=home, roots=tuple(roots), common_dir=common_abs, gitdirs=tuple(_gitdirs(roots)))
+
+
+def _gitdirs(roots: list[str]) -> list[tuple[str, str]]:
+    """各 checkout の git dir (main は `.git`、linked は `.git` ファイルが指す先) と root の対応。"""
+    out = []
+    for root in roots:
+        marker = Path(root) / ".git"
+        if marker.is_dir():
+            out.append((norm(marker), root))
+        elif marker.is_file():
+            try:
+                line = marker.read_text(encoding="utf-8", errors="replace").strip().splitlines()[0]
+            except (OSError, IndexError):
+                continue
+            if line.startswith("gitdir:"):
+                target = line[len("gitdir:") :].strip()
+                out.append((norm(Path(root) / target), root))
+    return out
 
 
 def owner(path: str, family: Family) -> str | None:

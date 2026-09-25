@@ -88,6 +88,33 @@ class GuardTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
 
+    def test_subshell_cd_does_not_leak_out(self):
+        # ( ... ) の中の cd は外に影響しない。外側の cd が生きている
+        cmd = f'cd "{self.main}"; (cd "{self.a}"); git reset --hard'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # 逆に、サブシェルの中だけで main に移るなら外側の git は自分の worktree
+        self.assertIsNone(evaluate(bash(f'(cd "{self.main}" && git log); git reset --hard', self.a)))
+        self.assertEqual(decision(evaluate(bash(f'(cd "{self.main}" && git reset --hard)', self.a))), "deny")
+
+    def test_cd_options_are_skipped(self):
+        for cmd in (f'cd -- "{self.main}"; git reset --hard', f'cd -P "{self.main}" && git stash'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        out = evaluate(bash("cd - && git reset --hard", self.a))
+        self.assertEqual(decision(out), "context")
+
+    def test_repo_side_and_work_tree_side_are_both_checked(self):
+        # HEAD / index は main 側、作業ツリーは自分の worktree。main の HEAD が動くので止める
+        cmd = f'git -C "{self.main}" --work-tree="{self.a}" checkout -b oops'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_linked_worktree_git_dir_maps_to_its_checkout(self):
+        gitdir_b = (self.b / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        cmd = f'git --git-dir="{gitdir_b}" reset --hard'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        own = (self.a / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        self.assertIsNone(evaluate(bash(f'git --git-dir="{own}" reset --hard', self.a)))
+
     def test_reads_and_own_worktree_are_allowed(self):
         for cmd in (
             "git status",
