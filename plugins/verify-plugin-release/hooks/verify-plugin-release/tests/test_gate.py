@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,20 @@ from runner import Deadline
 
 def statuses(rep: gate.Report) -> dict[str, str]:
     return {r.check: r.status for r in rep.results}
+
+
+def _running(pid: int) -> bool:
+    """pid がまだ動いているか。zombie (終了済みで回収待ち) は止まったものとみなす。
+
+    孤児の回収は PID 1 の仕事で、コンテナによっては回収が遅れて zombie が残る。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    stat = r.stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
 
 
 class GateTest(unittest.TestCase):
@@ -164,9 +179,7 @@ class GateTest(unittest.TestCase):
         t.join(10)
         self.assertFalse(t.is_alive())
         for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _running(pid):
                 break
             time.sleep(0.1)
         else:
