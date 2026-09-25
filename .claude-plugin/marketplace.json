@@ -125,6 +125,21 @@
         "validation",
         "ci"
       ]
+    },
+    {
+      "name": "codex-pr-review",
+      "displayName": "Codex PR Review Loop",
+      "source": "./plugins/codex-pr-review",
+      "description": "GitHub PR に付く Codex (chatgpt-codex-connector) の自動レビューを待ち、指摘への対応と @codex review での再レビューを回す手順と、状態確認・再 trigger・安全 commit のスクリプトをまとめた Skill",
+      "category": "workflow",
+      "keywords": [
+        "skill",
+        "github",
+        "pull-request",
+        "code-review",
+        "codex",
+        "automation"
+      ]
     }
   ]
 }
