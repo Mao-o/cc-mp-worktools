@@ -1,6 +1,7 @@
 """gate.run_gate の統合テスト (使い捨て git repo 上で実行する)。"""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -136,6 +137,41 @@ class GateTest(unittest.TestCase):
         with self.assertRaises(OSError):
             gate._run_tests(self.root, [slow, broken], Deadline(60), gate.Report())
         self.assertLess(time.monotonic() - started, 10)
+
+    @unittest.skipIf(os.name == "nt", "生存確認に os.kill(pid, 0) を使う (Windows では終了させてしまう)")
+    def test_cancel_also_stops_grandchildren(self):
+        # suite が起動した子プロセス (make test の下の python など) も止める。
+        # 直下だけ止めると孫が残り、checkout を触り続けて次の実行と干渉する
+        import threading
+        import time
+
+        pidfile = self.root / "grandchild.pid"
+        script = (
+            "import subprocess, sys, time\n"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+            "time.sleep(60)\n"
+        )
+        stop = threading.Event()
+        t = threading.Thread(target=gate._run_job, args=([sys.executable, "-c", script], self.root, Deadline(60), stop))
+        t.start()
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.1)
+        pid = int(pidfile.read_text())
+        stop.set()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, 9)
+            self.fail("孫プロセスが残っている")
 
     def test_test_command_config(self):
         self.branch()

@@ -10,6 +10,9 @@
   plugin の順で、どの suite が落ちたかの帰属は変わらない
 - 並列実行中に 1 本が失敗 (起動できない・時間切れ) したら、残りの suite を kill してすぐに
   止める。残りを待つと hook 自体の timeout を超え、Claude Code が PR 作成をそのまま通してしまう
+- suite は独立した process group (Windows は新しい process group) で起動し、止めるときは
+  子孫ごと止める (`make test` の下の python など)。直下だけ止めると孫が残り、checkout を
+  触り続けて次の実行と干渉する
 
 ### Added
 

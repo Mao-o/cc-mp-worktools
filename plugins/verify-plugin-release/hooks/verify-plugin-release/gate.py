@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -226,6 +227,39 @@ def _plan_tests(root: Path, plugin: layout.Plugin, cfg: Config) -> _TestPlan:
 _POLL = 0.5
 
 
+# suite を独立した process group で起動し、止めるときに子孫ごと止められるようにする
+_NEW_GROUP: dict = (
+    {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """suite と、suite が起動した子プロセス (make test の下の python など) をまとめて止める。
+
+    proc.kill() は直下のプロセスしか止めず、孫が checkout を触り続けて次の実行と干渉する。
+    POSIX では suite を独立した session で起動してあるので、その process group ごと止める。
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+
+
 def _run_job(cmd: list[str], cwd: Path, dl: Deadline, stop: threading.Event) -> int:
     """1 suite を実行して exit code を返す。stop が立つか制限時間を過ぎたら kill する。"""
     if stop.is_set():
@@ -239,14 +273,14 @@ def _run_job(cmd: list[str], cwd: Path, dl: Deadline, stop: threading.Event) -> 
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env={**os.environ, **_TEST_ENV},
+        **_NEW_GROUP,
     )
     while True:
         try:
             return proc.wait(timeout=_POLL)
         except subprocess.TimeoutExpired:
             if stop.is_set() or dl.remaining() <= 0:
-                proc.kill()
-                proc.wait()
+                _kill_tree(proc)
                 if stop.is_set():
                     return -1
                 raise GateTimeout(f"制限時間切れ ({' '.join(cmd[:3])})") from None
