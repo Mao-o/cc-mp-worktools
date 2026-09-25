@@ -95,6 +95,17 @@
 - 通常の書き方の `gh pr create` / `gh pr ready` で、検査が完了できないのに PR 作成が素通り
   する経路 (fail-open) は報告対象です
 
+### `worktree-cwd-guard`
+
+- 目的は**並列 agent のうっかりした書き換えの予防**で、意図的なすり抜けへの対策ではありません。
+  行き先が変数で決まる操作は止めずに注意だけ出し、Bash のリダイレクトや `cp` / `mv` による
+  書き込みは対象外です
+- `bash -c` / `sh -c` / `eval` の文字列、shell 関数・alias・script ファイル、コマンド置換の中の git は
+  読みません (README の「目的と限界」に列挙)。これらを使ったすり抜けは報告対象外です
+- 利用者は環境変数で無効化・緩和できます (`WORKTREE_CWD_GUARD_MODE` / `WORKTREE_CWD_GUARD_ALLOW`)
+- 通常の書き方の git の書き込み操作や Write / Edit で、別の checkout への書き込みが止まらずに
+  通る経路は報告対象です
+
 ### 共通
 
 - hook の出力は Claude Code の会話に入ります。**Claude Code 本体が Anthropic の API へ
