@@ -10,7 +10,8 @@
 
 - agent が普通に書く形のコマンドで、別の checkout への git の書き込み操作や Write / Edit が
   **止まらずに通る**もの。例: `cd <dir> && git ...`、`git -C <dir> ...`、`--work-tree` /
-  `--git-dir`、`env` / `sudo` などの wrapper を前に付けた形
+  `--git-dir`、`GIT_DIR` / `GIT_WORK_TREE` 環境変数、`pushd` / `popd`、`env` / `sudo` などの
+  wrapper を前に付けた形
 - 自分の worktree の中の操作や読み取り (`git log` / `git diff` / `git status`) を**誤って止める**もの。
   誤検知は agent の作業を止めるため、見逃しと同じくらい重い
 - hook がクラッシュする・timeout を超える・stdin / stdout の文字コードで壊れるなど、判定そのものが

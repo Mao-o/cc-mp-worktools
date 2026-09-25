@@ -136,6 +136,38 @@ class GuardTest(unittest.TestCase):
         out = evaluate(bash('true && cd "$X"; git reset --hard', self.a))
         self.assertEqual(decision(out), "context")
 
+    def test_git_env_variables_select_the_repo(self):
+        gitdir_b = (self.b / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        for cmd in (
+            f'GIT_DIR="{gitdir_b}" GIT_WORK_TREE="{self.b}" git reset --hard',
+            f'env GIT_WORK_TREE="{self.main}" git checkout -- .',
+            f'export GIT_DIR="{self.main / ".git"}"; git stash',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # option が環境変数より優先される / unset で外れる
+        own = (self.a / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        self.assertIsNone(evaluate(bash(f'GIT_DIR="{gitdir_b}" git --git-dir="{own}" status', self.a)))
+        self.assertIsNone(evaluate(bash(f'export GIT_DIR="{gitdir_b}"; unset GIT_DIR; git reset --hard', self.a)))
+
+    def test_pipeline_and_background_cd_do_not_leak_out(self):
+        # pipeline の要素と `&` のコマンドはサブシェルで動くので、中の cd は外に残らない
+        for cmd in (
+            f'cd "{self.main}"; cd "{self.a}" | cat; git reset --hard',
+            f'cd "{self.main}"; echo x | cd "{self.a}"; git stash',
+            f'cd "{self.main}"; cd "{self.a}" & git reset --hard',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        self.assertIsNone(evaluate(bash(f'cd "{self.main}" | cat; git reset --hard 2>&1 | tail -1', self.a)))
+
+    def test_popd_returns_to_the_pushed_directory(self):
+        cmd = f'cd "{self.main}"; pushd "{self.a}"; popd; git reset --hard'
+        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        self.assertIsNone(evaluate(bash(f'pushd "{self.main}"; popd; git reset --hard', self.a)))
+        # 呼び出し前のスタックは分からないので、注意だけ出す
+        self.assertEqual(decision(evaluate(bash("popd; git reset --hard", self.a))), "context")
+
     def test_repo_side_and_work_tree_side_are_both_checked(self):
         # HEAD / index は main 側、作業ツリーは自分の worktree。main の HEAD が動くので止める
         cmd = f'git -C "{self.main}" --work-tree="{self.a}" checkout -b oops'
