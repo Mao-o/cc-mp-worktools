@@ -18,6 +18,8 @@ _FAKE_GH = """#!{python}
 import json, os, sys
 with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\\n")
+if sys.argv[1:3] == ["pr", "view"] and os.environ.get("FAKE_HEAD"):
+    print(os.environ["FAKE_HEAD"])
 """
 
 
@@ -56,13 +58,18 @@ class ScriptTest(unittest.TestCase):
                 r = subprocess.run([_BASH, "-n", str(script)], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
 
+    def comments(self):
+        return [c for c in self.calls() if c[:2] == ["pr", "comment"]]
+
     def test_trigger_posts_summary_then_bare_mention(self):
+        # サマリには依頼時の head を HTML コメントで書き添え、@codex review は単独で送る
+        self.env["FAKE_HEAD"] = "abc123def456"
         r = self.run_script("pr-codex-trigger.sh", "12", "R1 の 2 件に対応しました")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(
-            self.calls(),
+            self.comments(),
             [
-                ["pr", "comment", "12", "--body", "R1 の 2 件に対応しました"],
+                ["pr", "comment", "12", "--body", "R1 の 2 件に対応しました\n\n<!-- codex-review-head: abc123def456 -->"],
                 ["pr", "comment", "12", "--body", "@codex review"],
             ],
         )
@@ -70,14 +77,29 @@ class ScriptTest(unittest.TestCase):
     def test_trigger_with_summary_file_and_without_summary(self):
         summary = self.tmp / "summary.md"
         summary.write_text("- fixed\n", encoding="utf-8")
+        self.env["FAKE_HEAD"] = "abc123def456"
         self.run_script("pr-codex-trigger.sh", "3", str(summary))
         self.run_script("pr-codex-trigger.sh", "3")
         self.assertEqual(
-            self.calls(),
+            self.comments(),
             [
-                ["pr", "comment", "3", "--body-file", str(summary)],
+                ["pr", "comment", "3", "--body", "- fixed\n\n<!-- codex-review-head: abc123def456 -->"],
                 ["pr", "comment", "3", "--body", "@codex review"],
+                ["pr", "comment", "3", "--body", "レビュー対象の head: `abc123def456`\n<!-- codex-review-head: abc123def456 -->"],
                 ["pr", "comment", "3", "--body", "@codex review"],
+            ],
+        )
+
+    def test_trigger_without_head_posts_only_what_was_given(self):
+        # head が取れないとき (gh の失敗など) は書き添えを省く
+        self.run_script("pr-codex-trigger.sh", "4", "summary")
+        self.run_script("pr-codex-trigger.sh", "4")
+        self.assertEqual(
+            self.comments(),
+            [
+                ["pr", "comment", "4", "--body", "summary"],
+                ["pr", "comment", "4", "--body", "@codex review"],
+                ["pr", "comment", "4", "--body", "@codex review"],
             ],
         )
 
@@ -158,8 +180,8 @@ class StatusVerdictTest(unittest.TestCase):
             "repos/o/r/issues/comments/1/reactions": [],
             "repos/o/r/pulls/5/reviews": [],
             "repos/o/r/pulls/5/comments": [],
-            "repos/o/r/pulls/5": {"created_at": "2025-12-31T00:00:00Z", "head": {"sha": "head1"}},
-            "repos/o/r/commits/head1": {"commit": {"committer": {"date": "2026-01-01T12:00:00Z"}}},
+            "repos/o/r/pulls/5": {"created_at": "2025-12-31T00:00:00Z", "head": {"sha": "abc1234"}},
+            "repos/o/r/commits/abc1234": {"commit": {"committer": {"date": "2026-01-01T12:00:00Z"}}},
         }
         data.update(over)
         return data
@@ -194,11 +216,27 @@ class StatusVerdictTest(unittest.TestCase):
         # 👍 の後に commit を push したら、再 trigger するまで PASSED にしない
         up = [{"content": "+1", "created_at": "2026-01-02T00:05:00Z", "user": _BOT}]
         pushed = {"repos/o/r/issues/comments/1/reactions": up,
-                  "repos/o/r/commits/head1": {"commit": {"committer": {"date": "2026-01-02T00:10:00Z"}}}}
+                  "repos/o/r/commits/abc1234": {"commit": {"committer": {"date": "2026-01-02T00:10:00Z"}}}}
         self.assertIn("STALE", self.verdict(self.base(**pushed)))
         # 最新の head に対する Codex の review があれば古くない
-        review = [{"id": 9, "submitted_at": "2026-01-02T00:20:00Z", "state": "COMMENTED", "commit_id": "head1", "user": _BOT}]
+        review = [{"id": 9, "submitted_at": "2026-01-02T00:20:00Z", "state": "COMMENTED", "commit_id": "abc1234", "user": _BOT}]
         self.assertIn("REVIEWED", self.verdict(self.base(**pushed, **{"repos/o/r/pulls/5/reviews": review})))
+
+    def test_requested_head_decides_staleness(self):
+        # 依頼時の head (サマリの書き添え) と現在の head が違えば、commit の日時が古くても STALE
+        up = [{"content": "+1", "created_at": "2026-01-02T00:05:00Z", "user": _BOT}]
+        def with_marker(sha):
+            summary = {"id": 0, "body": f"R1 対応\n\n<!-- codex-review-head: {sha} -->",
+                       "created_at": "2026-01-01T23:59:59Z", "user": _ME}
+            return self.base(**{"repos/o/r/issues/5/comments": [summary, *self.base()["repos/o/r/issues/5/comments"]],
+                                "repos/o/r/issues/comments/1/reactions": up})
+        self.assertIn("STALE", self.verdict(with_marker("def5678")))
+        self.assertIn("PASSED", self.verdict(with_marker("abc1234")))
+
+    def test_same_second_error_counts(self):
+        comments = self.base()["repos/o/r/issues/5/comments"]
+        err = {"id": 2, "body": "Unknown error", "created_at": "2026-01-02T00:00:00Z", "user": _BOT}
+        self.assertIn("ERROR", self.verdict(self.base(**{"repos/o/r/issues/5/comments": [*comments, err]})))
 
     def test_instant_reaction_on_trigger_counts(self):
         # trigger と同じ秒に付いた trigger への 👍 も数える

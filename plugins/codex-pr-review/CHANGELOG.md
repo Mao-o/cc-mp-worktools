@@ -14,7 +14,10 @@
     👀 / 👍 と、最新サイクルの review (`REVIEWED`) も見る。判定は Codex connector の応答に
     絞り (他の bot のコメントで誤判定しない)、`Unknown error` / 環境未設定もエラーとして扱う
     👍 / 👀 は PR body・issue comment・review comment のどれに付いても最新サイクルのものを数える。
-    trigger の後に push した head は再 trigger するまで `STALE` と出す (古い 👍 で PASSED にしない)
+    trigger の後に push した head は再 trigger するまで `STALE` と出す (古い 👍 で PASSED にしない)。
+    GitHub の API からは push の時刻が取れないため、`pr-codex-trigger.sh` がサマリに依頼時の
+    head の SHA を HTML コメントで書き添え、status はそれと現在の head を比べる (書き添えが無い
+    ときだけ commit の日時で代用)。エラーコメントは trigger と同じ秒でも拾う (comment の id の順で判定)
   - Skill: マージ前のチェックを「対象 repo のテスト・lint・検証コマンド」に一般化した
     (`unittest discover` 固定をやめた)
   - `pr-codex-status.sh`: review comments のリアクション取得と最新 `@codex review` の特定に
