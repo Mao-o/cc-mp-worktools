@@ -2,6 +2,27 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.25.0] - 2026-09-26
+
+### 任意サイトの `llms-full.txt` を profile で読む `scripts/parse-llms-txt.py` を追加
+
+`sources.json` (既定 `~/.config/llms-docs/sources.json`) に書いた profile に従い、任意の
+サイトの `llms-full.txt` を 3 つの専用 script と同じサブコマンドで段階的に読む。skill は
+追加しておらず CLI 専用 (使い方は README の「任意の llms-full.txt を読む」)。
+
+- **profile が持つもの** — 取得する `url`、ページの区切り方 `split` (`h1` / `frontmatter` /
+  `line`)、ページ URL の取り方 `page_url` (`none` / `frontmatter:<key>` / `line:<接頭辞>`)、
+  相対 URL の基点 `url_base`、frontmatter に必須のキー `frontmatter_key`、区切り行の
+  接頭辞 `line_prefix`。未知のキー・不正な値・source 名の形 (キャッシュのファイル名に
+  なるため `^[a-z0-9][a-z0-9-]*$`) はエラーにする
+- **実測した 5 サイトで分割を確認** — Next.js (458) / Vite (42) / Vitest (215) / Drizzle (496) /
+  Zod (16) のページ数が、独立に数えた値と一致する
+  (`docs/generic-llms-txt-source.md` の「2026-09-26 実測」)
+- `Next:` ヒントは `--source` を必ず、既定以外の `--sources-file` / `--file` / `--cache-dir` /
+  `--max-age` も引き継ぐ (`tests/test_hint_wiring.py` で構造的に検査)
+- 既存の 3 script は変更していない
+- 対象外: 2 段 index (Cloudflare)、ページ単位で公開するサイト、`llms.txt` の index との join
+
 ## [0.24.3] - 2026-09-23
 
 ### 3 script のサブコマンド出力層を `scripts/_commands.py` に共通化 (挙動不変)
