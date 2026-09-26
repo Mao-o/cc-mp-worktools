@@ -22,6 +22,7 @@ text. Only the single ``llms-full.txt`` named in the profile is fetched.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -151,11 +152,13 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         if not isinstance(prefix, str) or not prefix.strip():
             _bad(path, f'sources.{name}.line_prefix is required with split "line" (e.g. "Source:")')
         profile["line_prefix"] = prefix
-        if profile["page_url"] is None and "page_url" not in raw:
+        if "page_url" not in raw:
             # The delimiter line carries the page URL (Drizzle's ``Source: <url>``).
             profile["page_url"] = ("line", prefix)
     elif "line_prefix" in raw:
         _bad(path, f'sources.{name}.line_prefix is only valid with split "line"')
+    if profile["page_url"] and profile["page_url"][0] == "frontmatter" and split != "frontmatter":
+        _bad(path, f'sources.{name}.page_url "frontmatter:<key>" is only valid with split "frontmatter"')
     base = raw.get("url_base")
     if base is not None:
         if not isinstance(base, str) or not re.match(r"^https?://\S+$", base):
@@ -334,10 +337,18 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
     docs = []
     for k, s in enumerate(starts):
         end = starts[k + 1] if k + 1 < len(starts) else len(lines)
-        value = lines[s][len(prefix):].strip()
-        url = value.split()[0] if value else ""
+        delimiter_url = lines[s][len(prefix):].strip()
         body = lines[s + 1:end]
-        title = _first_heading(body) or url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
+        # The delimiter always splits; the published URL follows page_url
+        # (the default for split "line" is the delimiter's own URL).
+        rule = profile["page_url"]
+        if rule is None:
+            url = ""
+        elif rule[1] == prefix:
+            url = delimiter_url
+        else:
+            url = _line_url(body, rule[1])
+        title = _first_heading(body) or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
         docs.append({"title": title, "url": url, "body_lines": body, "min_level": 1})
     return docs
 
@@ -359,8 +370,13 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
 # Load
 # ---------------------------------------------------------------------------
 
-def _cache_path(cache_dir: str, name: str) -> str:
-    return os.path.join(cache_dir, f"generic-{name}-llms-full.txt")
+def _cache_path(cache_dir: str, profile: dict) -> str:
+    """Cache file for *profile*. The URL is part of the name: reusing a
+    source name for another URL (an edited profile, or a second sources
+    file) must not serve the previous site's cached corpus under the new
+    name until ``--max-age`` expires."""
+    digest = hashlib.sha256(profile["url"].encode("utf-8")).hexdigest()[:12]
+    return os.path.join(cache_dir, f"generic-{profile['name']}-{digest}-llms-full.txt")
 
 
 def _load_docs(args) -> tuple[dict, str, list[dict]]:
@@ -368,7 +384,7 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
     profile = _get_profile(args)
     if args.file is None:
         path = fetch_url(
-            profile["url"], _cache_path(args.cache_dir, profile["name"]),
+            profile["url"], _cache_path(args.cache_dir, profile),
             user_agent=USER_AGENT, timeout=120, max_age=args.max_age,
         )
     else:

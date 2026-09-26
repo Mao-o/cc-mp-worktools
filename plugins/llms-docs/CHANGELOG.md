@@ -20,6 +20,10 @@ All notable changes to this plugin will be documented here.
   (`docs/generic-llms-txt-source.md` の「2026-09-26 実測」)
 - `Next:` ヒントは `--source` を必ず、既定以外の `--sources-file` / `--file` / `--cache-dir` /
   `--max-age` も引き継ぐ (`tests/test_hint_wiring.py` で構造的に検査)
+- キャッシュのファイル名に profile の URL のハッシュを含める。同じ source 名で URL を変えた
+  ときに、前のサイトのキャッシュを読み続けない
+- `split: line` でも公開するページ URL は `page_url` に従う (区切り行は分割にだけ使う)。
+  `page_url: "frontmatter:<key>"` は `split: frontmatter` 以外ではエラーにする
 - 既存の 3 script は変更していない
 - 対象外: 2 段 index (Cloudflare)、ページ単位で公開するサイト、`llms.txt` の index との join
 

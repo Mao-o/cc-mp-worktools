@@ -144,6 +144,12 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(docs[0]["title"], "Page A")
         self.assertEqual(docs[1]["title"], "b")  # no heading: last URL segment
 
+    def test_line_split_honours_page_url(self):
+        # the delimiter still splits pages, but "none" publishes no URL
+        docs = generic.split_documents(_lines(LINE_SOURCE), _profile(split="line", line_prefix="Source: ", page_url="none"))
+        self.assertEqual(len(docs), 2)
+        self.assertEqual({d["url"] for d in docs}, {""})
+
     def test_h1_pages_without_urls(self):
         docs = generic.split_documents(_lines(H1_NO_URL), _profile(split="h1"))
         self.assertEqual([d["title"] for d in docs], ["Site", "Schemas", "Errors"])
@@ -168,6 +174,7 @@ class ProfileValidationTest(unittest.TestCase):
             "line without prefix": {"sources": {"x": {**ok, "split": "line"}}},
             "frontmatter_key on h1": {"sources": {"x": {**ok, "frontmatter_key": "url"}}},
             "bad page_url": {"sources": {"x": {**ok, "page_url": "header:url"}}},
+            "frontmatter page_url on h1": {"sources": {"x": {**ok, "page_url": "frontmatter:url"}}},
             "unknown top level": {"sources": {"x": ok}, "extra": 1},
             "not json": "{",
         }
@@ -181,6 +188,14 @@ class ProfileValidationTest(unittest.TestCase):
         code, _out, err = _loader.run_cli(generic, ["parse-llms-txt.py", "sources", "--sources-file", "/nonexistent/sources.json"])
         self.assertEqual(code, 1)
         self.assertIn("README", err)
+
+
+class CacheIdentityTest(unittest.TestCase):
+    def test_cache_file_depends_on_the_url(self):
+        a = generic._validate_profile("s", "site", {"url": "https://a.example/llms-full.txt", "split": "h1"})
+        b = generic._validate_profile("s", "site", {"url": "https://b.example/llms-full.txt", "split": "h1"})
+        self.assertNotEqual(generic._cache_path("/c", a), generic._cache_path("/c", b))
+        self.assertTrue(generic._cache_path("/c", a).startswith("/c/generic-site-"))
 
 
 class CliTest(unittest.TestCase):
