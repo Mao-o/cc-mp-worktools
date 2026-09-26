@@ -318,22 +318,46 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
 
 
 _URLISH_RE = re.compile(r"^(https?://|/)\S*$")
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
 
 
 def split_line(lines: list[str], profile: dict) -> list[dict]:
-    """One page per ``<prefix><url>`` line.
+    """One page per ``<prefix><url>`` line outside a code fence.
 
-    Code fences are deliberately not tracked: MDX-heavy corpora (Drizzle has
-    ~13,600 fence lines, some unbalanced inside JSX) derail the fence
-    tracker and hide most page boundaries. Instead the delimiter must be the
-    prefix followed by a single URL (absolute, or a ``/path``), which prose
-    and code samples practically never produce at column 0.
+    Fences are tracked here with their own rules instead of ``_common``'s
+    ``FenceTracker``, because MDX-heavy corpora break that tracker (measured
+    on Drizzle: it loses 299 of 496 page boundaries). Two deviations from
+    it, both matching how these corpora are actually written:
+
+    - a line with an info string (```` ```ts ````) never *closes* a fence
+      (CommonMark rule; ``FenceTracker`` treats it as a closer, which is
+      where most of the losses came from)
+    - a closer may be indented any amount (code blocks nested in JSX close
+      with an indented ```` ``` ````)
+
+    Fence state is also reset at every accepted delimiter: a page boundary
+    never sits inside a fence, so one malformed block cannot hide the rest
+    of the corpus. A delimiter must be the prefix followed by a single URL
+    (absolute, or a ``/path``), which prose practically never produces.
     """
     prefix = profile["line_prefix"]
     starts: list[int] = []
+    fence: tuple[str, int] | None = None
     for i, line in enumerate(lines):
-        if line.startswith(prefix) and _URLISH_RE.match(line[len(prefix):].strip()):
-            starts.append(i)
+        text = line.rstrip("\n\r")
+        if fence is None:
+            if text.startswith(prefix) and _URLISH_RE.match(text[len(prefix):].strip()):
+                starts.append(i)
+                continue
+            m = _FENCE_OPEN_RE.match(text)
+            # a backtick fence's info string may not contain backticks (inline code)
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = (m.group(1)[0], len(m.group(1)))
+        else:
+            m = _FENCE_CLOSE_RE.match(text)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
     docs = []
     for k, s in enumerate(starts):
         end = starts[k + 1] if k + 1 < len(starts) else len(lines)

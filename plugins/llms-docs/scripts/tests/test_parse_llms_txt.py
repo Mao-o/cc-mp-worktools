@@ -78,6 +78,26 @@ url: /guide/why.md
 # Why
 """
 
+LINE_FENCED = """\
+Source: https://example.com/docs/a
+
+# Page A
+
+```ts
+const x = 1;
+```ts
+Source: https://example.com/not-a-page
+```
+
+```md
+    Source: https://example.com/indented-closer-case
+    ```
+
+Source: https://example.com/docs/b
+
+# Page B
+"""
+
 LINE_SOURCE = """\
 # Site
 
@@ -143,6 +163,12 @@ class SplitTest(unittest.TestCase):
         self.assertIn("Source: see the table below for details.\n", docs[0]["body_lines"])
         self.assertEqual(docs[0]["title"], "Page A")
         self.assertEqual(docs[1]["title"], "b")  # no heading: last URL segment
+
+    def test_line_split_skips_fenced_examples(self):
+        # a fenced example of the delimiter is not a page; ```ts inside a fence
+        # does not close it, and an indented ``` does
+        docs = generic.split_documents(_lines(LINE_FENCED), _profile(split="line", line_prefix="Source: "))
+        self.assertEqual([d["url"] for d in docs], ["https://example.com/docs/a", "https://example.com/docs/b"])
 
     def test_line_split_honours_page_url(self):
         # the delimiter still splits pages, but "none" publishes no URL

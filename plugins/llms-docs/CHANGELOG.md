@@ -22,6 +22,9 @@ All notable changes to this plugin will be documented here.
   `--max-age` も引き継ぐ (`tests/test_hint_wiring.py` で構造的に検査)
 - キャッシュのファイル名に profile の URL のハッシュを含める。同じ source 名で URL を変えた
   ときに、前のサイトのキャッシュを読み続けない
+- `split: line` の区切り行はコードブロックの外だけで数える (コードブロック内の区切り行の例を
+  ページと誤認しない)。コードブロックの追跡は CommonMark どおり言語名付きの行では閉じず、
+  閉じ記号のインデントは問わず、区切り行で状態をリセットする (Drizzle で 496 / 496)
 - `split: line` でも公開するページ URL は `page_url` に従う (区切り行は分割にだけ使う)。
   `page_url: "frontmatter:<key>"` は `split: frontmatter` 以外ではエラーにする
 - 既存の 3 script は変更していない
