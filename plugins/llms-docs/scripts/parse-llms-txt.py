@@ -127,6 +127,8 @@ def _validate_profile(path: str, name: str, raw) -> dict:
     url = raw.get("url")
     if not isinstance(url, str) or not re.match(r"^https?://\S+$", url):
         _bad(path, f"sources.{name}.url must be an http(s) URL of the site's llms-full.txt")
+    if not isinstance(raw.get("description", ""), str):
+        _bad(path, f"sources.{name}.description must be a string")
     split = raw.get("split")
     if split not in _SPLITS:
         _bad(path, f"sources.{name}.split must be one of: {', '.join(_SPLITS)}")
@@ -134,7 +136,7 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         "name": name,
         "url": url,
         "split": split,
-        "description": raw.get("description") if isinstance(raw.get("description"), str) else "",
+        "description": raw.get("description", ""),
         "frontmatter_key": "title",
         "line_prefix": None,
         "page_url": _parse_page_url(path, name, raw.get("page_url")),
@@ -203,12 +205,25 @@ _H1_RE = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 
 
-def _first_heading(body_lines: list[str]) -> str:
-    fence = FenceTracker()
+def _first_heading(body_lines: list[str], fence=None) -> str:
+    """First heading outside a code fence. *fence* is a ``_Fence`` for the
+    ``line`` shape; otherwise the shared ``FenceTracker`` is used."""
+    if fence is not None:
+        for line in body_lines:
+            text = line.rstrip("\n\r")
+            was_open = fence.open is not None
+            fence.update(text)
+            if was_open or fence.open is not None:
+                continue
+            m = _HEADING_RE.match(text)
+            if m:
+                return m.group(2).strip()
+        return ""
+    tracker = FenceTracker()
     for line in body_lines:
-        was = fence.in_fence
-        fence.update(line)
-        if was or fence.in_fence:
+        was = tracker.in_fence
+        tracker.update(line)
+        if was or tracker.in_fence:
             continue
         m = _HEADING_RE.match(line.rstrip("\n\r"))
         if m:
@@ -322,42 +337,68 @@ _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _FENCE_CLOSE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
 
 
-def split_line(lines: list[str], profile: dict) -> list[dict]:
-    """One page per ``<prefix><url>`` line outside a code fence.
+class _Fence:
+    """Code-fence state with the rules the ``line`` shape needs.
 
-    Fences are tracked here with their own rules instead of ``_common``'s
-    ``FenceTracker``, because MDX-heavy corpora break that tracker (measured
-    on Drizzle: it loses 299 of 496 page boundaries). Two deviations from
-    it, both matching how these corpora are actually written:
+    Differs from ``_common.FenceTracker`` in two ways, both matching how
+    MDX-heavy corpora are written (measured on Drizzle, where the shared
+    tracker loses 299 of 496 page boundaries):
 
     - a line with an info string (```` ```ts ````) never *closes* a fence
-      (CommonMark rule; ``FenceTracker`` treats it as a closer, which is
-      where most of the losses came from)
-    - a closer may be indented any amount (code blocks nested in JSX close
-      with an indented ```` ``` ````)
-
-    Fence state is also reset at every accepted delimiter: a page boundary
-    never sits inside a fence, so one malformed block cannot hide the rest
-    of the corpus. A delimiter must be the prefix followed by a single URL
-    (absolute, or a ``/path``), which prose practically never produces.
+      (CommonMark rule; ``FenceTracker`` treats it as a closer)
+    - a closer may be indented any amount (blocks nested in JSX close with
+      an indented ```` ``` ````)
     """
-    prefix = profile["line_prefix"]
-    starts: list[int] = []
-    fence: tuple[str, int] | None = None
-    for i, line in enumerate(lines):
-        text = line.rstrip("\n\r")
-        if fence is None:
-            if text.startswith(prefix) and _URLISH_RE.match(text[len(prefix):].strip()):
-                starts.append(i)
-                continue
+
+    def __init__(self):
+        self.open: tuple[str, int] | None = None
+
+    def closes(self, text: str) -> bool:
+        m = _FENCE_CLOSE_RE.match(text)
+        return bool(m and self.open and m.group(1)[0] == self.open[0] and len(m.group(1)) >= self.open[1])
+
+    def update(self, text: str) -> None:
+        if self.open is None:
             m = _FENCE_OPEN_RE.match(text)
             # a backtick fence's info string may not contain backticks (inline code)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                fence = (m.group(1)[0], len(m.group(1)))
-        else:
-            m = _FENCE_CLOSE_RE.match(text)
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
-                fence = None
+                self.open = (m.group(1)[0], len(m.group(1)))
+        elif self.closes(text):
+            self.open = None
+
+
+def split_line(lines: list[str], profile: dict) -> list[dict]:
+    """One page per ``<prefix><url>`` line, skipping fenced examples of it.
+
+    A delimiter must be the prefix followed by a single URL (absolute, or a
+    ``/path``). One seen inside a code fence is an example when that fence
+    closes before the next delimiter-looking line; when it does not, the
+    fence is malformed (never closed), so the line is taken as a real
+    boundary and the fence state is reset — one broken block must not
+    swallow every later page.
+    """
+    prefix = profile["line_prefix"]
+    texts = [line.rstrip("\n\r") for line in lines]
+
+    def is_delimiter(text: str) -> bool:
+        return text.startswith(prefix) and bool(_URLISH_RE.match(text[len(prefix):].strip()))
+
+    def fence_closes_before_next_delimiter(fence: _Fence, pos: int) -> bool:
+        for text in texts[pos + 1:]:
+            if is_delimiter(text):
+                return False
+            if fence.closes(text):
+                return True
+        return False
+
+    starts: list[int] = []
+    fence = _Fence()
+    for i, text in enumerate(texts):
+        if is_delimiter(text) and (fence.open is None or not fence_closes_before_next_delimiter(fence, i)):
+            starts.append(i)
+            fence = _Fence()
+            continue
+        fence.update(text)
     docs = []
     for k, s in enumerate(starts):
         end = starts[k + 1] if k + 1 < len(starts) else len(lines)
@@ -372,7 +413,7 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
             url = delimiter_url
         else:
             url = _line_url(body, rule[1])
-        title = _first_heading(body) or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
+        title = _first_heading(body, fence=_Fence()) or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
         docs.append({"title": title, "url": url, "body_lines": body, "min_level": 1})
     return docs
 

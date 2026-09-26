@@ -170,6 +170,22 @@ class SplitTest(unittest.TestCase):
         docs = generic.split_documents(_lines(LINE_FENCED), _profile(split="line", line_prefix="Source: "))
         self.assertEqual([d["url"] for d in docs], ["https://example.com/docs/a", "https://example.com/docs/b"])
 
+    def test_unclosed_fence_does_not_swallow_later_pages(self):
+        text = (
+            "Source: https://example.com/docs/a\n\n# A\n\n```ts\nconst broken = 1;\n\n"
+            "Source: https://example.com/docs/b\n\n# B\n\nSource: https://example.com/docs/c\n\n# C\n"
+        )
+        docs = generic.split_documents(_lines(text), _profile(split="line", line_prefix="Source: "))
+        self.assertEqual([d["title"] for d in docs], ["A", "B", "C"])
+
+    def test_line_title_skips_fenced_headings(self):
+        # ```ts inside a fence does not close it, so "# Example" stays code
+        text = (
+            "Source: https://example.com/docs/a\n\n```md\n```ts\n# Example\n```\n\n# Real title\n"
+        )
+        docs = generic.split_documents(_lines(text), _profile(split="line", line_prefix="Source: "))
+        self.assertEqual(docs[0]["title"], "Real title")
+
     def test_line_split_honours_page_url(self):
         # the delimiter still splits pages, but "none" publishes no URL
         docs = generic.split_documents(_lines(LINE_SOURCE), _profile(split="line", line_prefix="Source: ", page_url="none"))
@@ -200,6 +216,7 @@ class ProfileValidationTest(unittest.TestCase):
             "line without prefix": {"sources": {"x": {**ok, "split": "line"}}},
             "frontmatter_key on h1": {"sources": {"x": {**ok, "frontmatter_key": "url"}}},
             "bad page_url": {"sources": {"x": {**ok, "page_url": "header:url"}}},
+            "non-string description": {"sources": {"x": {**ok, "description": 3}}},
             "frontmatter page_url on h1": {"sources": {"x": {**ok, "page_url": "frontmatter:url"}}},
             "unknown top level": {"sources": {"x": ok}, "extra": 1},
             "not json": "{",
