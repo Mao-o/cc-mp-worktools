@@ -43,6 +43,7 @@ EXPECTED_MIN_CALLS = {
     "parse-claude-docs.py": 7,
     "parse-ai-sdk.py": 5,
     "parse-firebase.py": 5,
+    "parse-llms-txt.py": 6,
 }
 
 HINT_FUNC = "next_hint"
@@ -171,6 +172,22 @@ class NextHintCorpusArgsWiringTest(unittest.TestCase):
             f"{HINT_FUNC}() called outside any function ({orphans}); such a "
             f"call has no ``args`` to propagate and cannot be checked here.",
         )
+
+    def test_generic_hints_propagate_corpus_args(self):
+        self._check_script("parse-llms-txt.py")
+
+    def test_generic_hints_propagate_source(self):
+        # parse-llms-txt.py has no default source: a hint without --source
+        # (and a non-default --sources-file) is a command that fails outright.
+        path = SCRIPTS_DIR / "parse-llms-txt.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        missing = []
+        for call in _hint_calls(tree):
+            values = [a.value for a in call.args if isinstance(a, ast.Starred)]
+            values += [kw.value for kw in call.keywords if kw.arg == HINT_PARAM]
+            if not any("_source_hint_args" in _called_names(v) for v in values):
+                missing.append(call.lineno)
+        self.assertEqual(missing, [], f"parse-llms-txt.py hint calls without _source_hint_args: lines {missing}")
 
     def test_claude_docs_hints_propagate_corpus_args(self):
         self._check_script("parse-claude-docs.py")

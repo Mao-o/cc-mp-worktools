@@ -1,6 +1,12 @@
 # 任意の `llms.txt` サイトを source 登録できるようにする場合のコスト見積り
 
-計測: plugin 0.24.0 / 2026-09-19。**実装はしていない**。着手判断のための材料のみ。
+計測: plugin 0.24.0 / 2026-09-19。着手判断のための材料として書いた。
+
+> **2026-09-26 追記 (0.25.0)**: Phase 0 (コマンド層の共通化、0.24.3) に続き、Phase 1 として
+> 形状 profile を外部化した汎用 loader `scripts/parse-llms-txt.py` を追加した (使い方は
+> README の「任意の llms-full.txt を読む」)。2 節の表のうち未計測だった Next.js / Vite /
+> Vitest を実測し、Drizzle の区切り方の誤りを直した (下の「2026-09-26 実測」)。Phase 2
+> (汎用 skill) は未着手。
 
 ## 1. 現状の共通化率 (実測)
 
@@ -37,6 +43,23 @@ import している。それでも各 parser の **8 割超がローカル定義
 | Vite / Vitest | あり | 未確認 | 未計測 | 未計測 | 未計測 |
 | Tailwind CSS / Biome / Playwright | **404** | 404 | — | — | 対象外 (未公開) |
 
+### 2026-09-26 実測 (Phase 1 の profile で全ページを分割して確認)
+
+| サイト | 区切り | ページ URL | 分割したページ数 | 独立に数えた値 |
+|---|---|---|---|---|
+| Next.js (`/docs/llms-full.txt`) | frontmatter (`title:` / `url:` / `version:`)。先頭に frontmatter の無い前置きがある | frontmatter の `url:` (絶対) | 458 | `title:` を持つ frontmatter 461 から、コードブロック内の frontmatter 記述例 3 を除いた数 |
+| Vite | frontmatter (`url:` のみ、`title:` なし) | frontmatter の `url:` (`/guide.md` 形式の相対) | 42 | `url:` を持つ frontmatter 42 (本文の水平線 `---` は数えない) |
+| Vitest | 同上 | 同上 | 215 | 同上 215 |
+| Drizzle ORM | **`Source: <url>` 行** (上表の「H1」は誤り。ページに H1 が無いことも多い) | `Source:` 行 | 496 | `Source: https://` 行 496 |
+| Zod | H1 | なし | 16 | コードブロック外の H1 16 (ブロック内の `# ...` 2 は数えない) |
+
+Drizzle は MDX を多用し、コードブロックの記号行が約 13,600 行ある。共有の `FenceTracker` で
+追跡すると区切り行の大半を見失う (197 / 496)。原因の大半は、`FenceTracker` が言語名付きの
+`` ```ts `` 行を「閉じ」とみなすこと (CommonMark では閉じない) で、残りは JSX の中で
+インデントされた閉じ記号だった。`line` 区切りでは専用の追跡 (言語名付きの行では閉じない /
+閉じ記号のインデントは問わない / 区切り行で状態をリセット) を使い、496 / 496 を拾う。
+共有の `FenceTracker` は既存 3 script の出力を変えないため触っていない。
+
 いちばん効くのは **URL を持たない corpus (Zod) が実在する**こと。`_common.check_join_rate` は
 index↔full の join 率が低いと失敗として扱うため、URL 無しの corpus は profile 追加だけでは
 通らず「join しないモード」が必要になる。`[URL#anchor]` 出力や `--page-ref <slug>` も
@@ -69,5 +92,4 @@ index↔full の join 率が低いと失敗として扱うため、URL 無しの
 「URL 対の外部化」から「**形状 profile の外部化 + コマンド層の共通化を前提条件に置く**」へ
 書き換えてから着手すること。
 
-未計測として残したもの: Vite / Vitest の `llms-full.txt` 有無と形状、Next.js の
-`/docs/llms-full.txt` の区切り方式。着手時に同じ手順で埋める。
+未計測として残したもの: なし (2026-09-26 に Next.js / Vite / Vitest を実測済み)。
