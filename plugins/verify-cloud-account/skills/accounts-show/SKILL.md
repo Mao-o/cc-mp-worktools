@@ -34,10 +34,13 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
   フォーマット統一のため、Claude は Read / Bash(cat) で直接読まない。
 - stdout は最初は値隠蔽で確認し、必要なら AskUserQuestion の承認を経て
   `--show-values` で再実行する。
-- `"$mode"` は `[mode]` 行として値ごと表示される (service ではないので CLI 突合
-  の対象外)。**`"$mode"` は builder が値を書かない唯一のキー = 手編集する前提の
-  キー**なので、変更したいと言われたら「エディタで直接書く」か「環境変数
-  `VERIFY_CLOUD_ACCOUNT_MODE`」を案内する (builder にサブコマンドは無い)。
+- 予約キーは値ごと表示される (service ではないので CLI 突合の対象外):
+  `"$mode"` は `[mode]`、`"$readonly"` は `[readonly policy]`、`"$auto_switch"` は
+  `[auto-switch: <有効な service>]` の行になる。**いずれも builder が値を書かない
+  = 手編集する前提のキー**なので、変更したいと言われたら「エディタで直接書く」か
+  環境変数 (`VERIFY_CLOUD_ACCOUNT_MODE` / `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH`) を
+  案内する (builder にサブコマンドは無い)。環境変数が設定されていればファイルより
+  優先されるが、show はファイルの内容だけを表示する。
 
 ## 引数
 

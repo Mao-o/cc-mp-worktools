@@ -157,7 +157,29 @@
      - get_active_account(project_dir) -> str | dict | None  現在のアクティブ値
      - suggest_accounts_entry(project_dir) -> str | dict | None  builder 書込用 suggestion
          (scalar/dict の形状は service 側の判断。取得不可は None)
+     - plan_switch(expected, project_dir, env=None)
+         -> (list[(対象, 現在値, 切替先)] | None, 理由 | None)
+                                    (任意) 自動切替 (`core/auto_switch.py`) の計画。
+                                    **全対象が切り替えられるときだけ** steps を返し、
+                                    1 つでも無理なら (None, 理由) で何も切り替えない。
+                                    既に一致していれば ([], None)。切替先は**既に
+                                    ログイン済み**の値に限る (対話ログインはしない)。
+                                    理由の文面には CLI コマンドの実形を書かない
+                                    (deny 文面の remediation 案内は verify() の分だけ)
+     - apply_switch(steps, env=None) -> (切り替えた steps, エラー | None)
+                                    (任意) 計画を実行する。**CLI を起動する前ごとに
+                                    `budget.expired()` を確かめ**、timeout は
+                                    `budget.call_timeout()` を通す (予算の超過見積りの
+                                    前提)。失敗したら残りは実行しない
+     - describe_switch(switched) -> str
+                                    (任意) 切り替えた事実を伝える本文。副作用の範囲
+                                    (マシン全体に効く等) も書く
+         plan_switch / apply_switch を**両方**宣言した service だけが自動切替に
+         対応する (現状 github のみ)。有効化は利用者の opt-in
+         (`VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` / `"$auto_switch"`)
      - github のみ: parse_active_accounts(text) -> dict[str, str]  (gh 出力パーサ)
+     - github のみ: parse_logged_in_accounts(text) -> dict[str, list[str]]
+                                    (非アクティブも含む全アカウント。自動切替の切替先)
   2. 下記 import と ALL リストに追加する。
 
 get_active_account / suggest_accounts_entry は `scripts/accounts_builder.py`

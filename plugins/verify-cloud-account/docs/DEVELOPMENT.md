@@ -46,6 +46,7 @@ verify-cloud-account/
     └── verify-cloud-account/
         ├── __main__.py             エントリポイント (stdin → dispatch → stdout)
         ├── core/
+        │   ├── auto_switch.py      不一致 deny を hook の切替で置き換える opt-in (自動切替)
         │   ├── budget.py           hook 1 回分の実時間予算
         │   ├── cache.py            検証成功の短期キャッシュ
         │   ├── cli_config.py      ローカル CLI 設定ファイルの読取 (最小 YAML / INI)
@@ -73,7 +74,8 @@ verify-cloud-account/
 5. `core.mode.from_env()` で検証モードを見る (`off` なら cache 破棄だけ行って終了)
 6. `accounts.local.json` を解決して読み (プロジェクト側 → グローバル既定)、
    `"$mode"` を反映してから、サービスごとに `verify()` を実行
-   (キャッシュ hit / 自己修復の切替はスキップ)
+   (キャッシュ hit / 自己修復の切替はスキップ)。deny になる不一致で自動切替が
+   有効なら、`core.auto_switch.attempt()` が切り替えて再検証する
 7. `core.output.deny()` / `warn()` で整形して stdout に返す
    (`warn` モードでは deny 相当の本文を `warn()` 側に回す)
 
@@ -433,6 +435,45 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
 - deny 側には mode の案内を 1 行添える (`mode.DENY_HINT`)。deny を消したい相手に
   builder の `set --from-cli --commit` を勧めると「間違ったアカウントを正解として
   焼き付ける」使い方を誘発するため、**期待値に触らない出口**を先に見せる
+
+## 自動切替 (`core.auto_switch`) — v0.16.0
+
+opt-in (`VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `"$auto_switch"` → 無効) で、deny に
+なる不一致を「hook が期待値へ切り替えて再検証し、一致したら通す」に置き換える。
+利用者向けの条件表は README の「自動切替」節が正本。実装の規則:
+
+- **呼ぶのは dispatcher が「止める」と決めた target だけ** (`stops` = errors 行き、
+  かつ mode が enforce)。QUERY の警告や warn モードでは呼ばない — 切替はマシン全体に
+  効く副作用なので、「deny を置き換える」場面に閉じる。判定表 (何を不一致とみなすか)
+  は変えない
+- 連結規則 / self-remediation / cache hit / 予算切れは**すべて verify() より前**に
+  決まるので、自動切替はそれらの後ろ (verify() が不一致を返した後) にしか入らない
+- `attempt()` の段の並び: コマンド自身の状態変更 (`switching_here`) → 予算 →
+  `plan_switch` → ガード → 予算 → `cache.invalidate` → `apply_switch` → 記録 →
+  予算 → 再検証。**CLI を起動する前ごとに予算を確かめる**のは、`budget.worst_case_seconds`
+  が「最後の確認の後に起動する呼び出し数」を前提にしているため (切替経路は計画の
+  `gh auth status`・host ごとの `gh auth switch`・再検証で、verify() の後に CLI を
+  3 回以上呼びうる)
+- **計画は CLI (`gh auth status`) から取る**。ローカル読取 (`hosts.yml`) は allow
+  にしか使わない方針 (`services/github.verify` の docstring) で、ここは状態を書き換える
+  前の確認なので gh 自身の報告に拠る。呼ばれるのは deny になる不一致のときだけ
+- **all-or-nothing**: dict 期待値で 1 host でも切り替えられなければ何も切り替えない。
+  一部だけ切り替えて結局 deny、は「副作用だけ残る」最悪の形
+- **cache は切り替える前に破棄する**。後に回すと、切替と並行した他プロジェクトの
+  検証が旧状態の成功を書く窓が開く (`invalidate` の tombstone で、in-flight 窓の間は
+  自分の検証成功も publish されない)
+- **ガードは切替先の値で照合する** (プロジェクトのパスではない)。同じ repo の
+  worktree 同士は同じ期待値を持つので、そこで見送る理由が無い。記録は
+  `<service>.autoswitch.json` (成功 cache の glob `<service>-*.json` に掛からない名前。
+  `cache.service_state_path` が `-` 始まりの suffix を拒否する)
+- 注記・通知の文面に **CLI コマンドの実形を書かない**。deny 文面の案内は verify() の
+  分だけに保つ (`_guides_remediation` と TestRemediationGuidanceContract が文面から
+  コマンドを拾う)
+- 自動切替の内部例外は dispatcher (`_auto_switch`) で握り、「切り替えなかった」扱いで
+  **deny を残す**。握らずに `__main__` まで上げると内部エラー = fail-open になり、
+  deny を置き換える補助が deny そのものを消す
+- 通知 (`auto_switch.notice`) は allow でも必ず返す (`additionalContext`)。同じ行の
+  別 service が deny した場合も deny 文面に添える
 
 ## サービスを追加する
 
@@ -842,6 +883,41 @@ aws ssm get-parameter \
   — 切替を含む service は `switching_here` で cache を読まないため、そもそも到達
   しない経路だった。落ちない mutation は「テストが弱い」ではなく「その並びが
   実バグを再現していない」ことを意味するので、テスト側を膨らませずに記録に残す
+
+### 0.16.0 (自動切替)
+
+**D29: 切替の往復を消すのは「hook が切り替える」で、「コマンドを書き換える」ではない**
+
+gh のアカウントを頻繁に切り替える運用で、不一致 deny のたびに作業が止まる
+(内部バックログ)。案は 2 つあった:
+
+- (A) hook が `gh auth switch` を実行してから通す (採用)
+- (B) PreToolUse の `updatedInput` でコマンドを書き換え、期待アカウントのトークンを
+  `GH_TOKEN` で渡す (`gh auth token --user <期待>` を展開する形)
+
+(B) はマシン全体の状態を変えないので並行セッションと競合しない。公式 docs 上も
+`updatedInput` は `permissionDecision` を省略すれば通常の permission 評価に乗る
+(承認を迂回しない)。それでも (A) にしたのは:
+
+- 書き換えは**実行されるコマンドを変える**。複合コマンド・透過 wrapper・`sudo` の
+  env scrub (`docs/wrapper-env-audit.md`)・dict 期待値の GHE host (`GH_ENTERPRISE_TOKEN`)
+  を全部正しく扱う必要があり、検証 hook の責務を大きく超える
+- `GH_TOKEN` が立つと gh はそのトークンで動くので、同じコマンド内の `gh auth status` /
+  `gh auth switch` の意味が変わる
+- 利用者が求めたのは「切替で止まらないこと」で、手でやっている操作 (`gh auth switch`)
+  を hook が代わりにやる (A) の方が挙動を予想しやすい
+
+(A) の代償 (マシン全体への副作用) は opt-in・「止める場面だけ」・並行セッションの
+ガード・通知で抑える。並行セッションで別アカウントを使い続ける運用には (B) の方が
+合うので、要望が来たら別機能として検討する。
+
+- **QUERY では切り替えない。** 読むだけのコマンドのために他の作業の gh を動かさない。
+  「止める場面を切替で置き換える」機能なので、止めない場面 (QUERY の警告 / warn
+  モード) には入らない
+- mutation (ガードを 1 つずつ壊してテストが assertion で落ちるか) で、`stops` /
+  mode / `switching_here` / ガード / cache 破棄 / トークン env / all-or-nothing /
+  予算確認 (3 箇所) / 再検証 / 記録 / 通知 / builder の表示 の各条件が新しいテストで
+  守られていることを確認した
 
 ## 既知の制限
 

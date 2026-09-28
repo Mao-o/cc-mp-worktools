@@ -3262,5 +3262,59 @@ class TestGlobalDefaultIsDisclosed(BaseBuilder):
         self.assertIn("[mode]", out)
 
 
+class TestAutoSwitchKey(BaseBuilder):
+    """予約キー `"$auto_switch"` (v0.16.0) — builder は書かないが、壊さず表示する。"""
+
+    def _write_new(self, data: dict):
+        self.new_dir.mkdir(parents=True, exist_ok=True)
+        self._new_path().write_text(json.dumps(data), encoding="utf-8")
+
+    def _read_new(self) -> dict:
+        return json.loads(self._new_path().read_text(encoding="utf-8"))
+
+    def test_show_labels_the_key(self):
+        """`[unknown service]` 扱いで値を隠すと、何が有効なのか show から読めない。
+
+        表示の有効/無効は dispatcher と同じ関数 (`auto_switch.from_accounts`) で決まる。
+        """
+        for raw, fragment in (
+            (["github"], "[auto-switch: github]"),
+            ("github", "[auto-switch: github]"),
+            ("off", "[auto-switch: 無効]"),
+            ([], "[auto-switch: 無効]"),
+            (True, "不正な値を含む"),
+            (["gcloud"], "不正な値を含む"),
+        ):
+            with self.subTest(raw=raw):
+                self._write_new({"$auto_switch": raw})
+                code, out, _err = self._run(["show"])
+                self.assertEqual(code, 0)
+                self.assertIn(fragment, out)
+                self.assertNotIn("[unknown service]", out)
+
+    def test_init_set_remove_keep_the_key(self):
+        self._write_new({"$auto_switch": ["github"], "aws": "123456789012"})
+        steps = (
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"],
+            ["set", "--service", "github", "--value", "other", "--commit"],
+            ["remove", "--service", "aws", "--commit"],
+        )
+        for argv in steps:
+            with self.subTest(argv=argv[0]):
+                code, _out, err = self._run(argv)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self._read_new().get("$auto_switch"), ["github"])
+
+    def test_migrate_carries_the_key_over(self):
+        self._deprecated_path().write_text(
+            json.dumps({"github": "Mao-o", "$auto_switch": ["github"]}), encoding="utf-8"
+        )
+        code, _out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            self._read_new(), {"github": "Mao-o", "$auto_switch": ["github"]}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

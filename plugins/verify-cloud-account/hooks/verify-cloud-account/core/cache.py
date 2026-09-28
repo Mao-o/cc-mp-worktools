@@ -87,6 +87,27 @@ def _write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def service_state_path(service_name: str, suffix: str) -> Path | None:
+    """cache dir に置く service 別の補助ファイル (`<service><suffix>`) のパス。
+
+    成功 cache と同じ場所 (hook プロセスを跨いで共有される `$TMPDIR` 配下) に置きたい
+    状態 (`core/auto_switch.py` の切替記録) のための入口。dir を作れなければ None。
+    `suffix` は `-` で始めないこと — `invalidate()` の glob (`<service>-*.json`) に
+    掛かって成功 cache と一緒に消える。
+    """
+    if suffix.startswith("-"):
+        raise ValueError(f"suffix must not start with '-': {suffix!r}")
+    base = _cache_dir()
+    if base is None:
+        return None
+    return base / f"{_service_tag(service_name)}{suffix}"
+
+
+def write_state(path: Path, text: str) -> None:
+    """`service_state_path()` のファイルを原子的に書く (失敗は OSError のまま返す)。"""
+    _write_atomic(path, text)
+
+
 def _cache_key(
     service_name: str, project_dir: str, expected, inline_env=None, context=None
 ) -> str:
