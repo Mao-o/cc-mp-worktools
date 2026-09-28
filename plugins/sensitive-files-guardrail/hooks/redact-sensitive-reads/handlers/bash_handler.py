@@ -105,8 +105,8 @@ import shlex
 from core import logging as L
 from core import messages as M
 from core import output
-from _shared.matcher import is_sensitive, root_relative
-from _shared.patterns import resolve_project_root
+from _shared.matcher import is_path_rule, is_sensitive, root_relative
+from _shared.patterns import resolve_path_rule_root, resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import normalize
 
@@ -414,13 +414,27 @@ def _operand_is_sensitive(
     の操作も止まらなくなる。
 
     ``normalize`` 失敗 (ValueError / OSError) は再送出 (呼び出し側で fail-closed)。
+
+    0.35.0: operand が root と別の checkout (main ↔ worktree) にあるときは
+    ``resolve_path_rule_root`` でその checkout 基準に読み替えてから比較する。
+    コロン付き operand は読み替えの前に path 形 rule の対象から外す (上記)。
+    読み替えは path 形 rule の照合にしか効かないので、``rules`` に path 形が
+    無ければ行わない — operand ごとに ``.git`` を探す stat とファイル読みが
+    乗るため。既定 ``patterns.txt`` は basename 形だけなので、利用者が path 形を
+    書かない限りコストは増えない。書いた場合の上乗せは operand 200 個で
+    同じ checkout なら約 2ms、worktree で読み替えが起きると約 10ms (実測)。
     """
     # コロンを含む operand (pathspec / URI) は片の基準を確定できないので
     # path 形 rule を適用しない (上記 Codex R2 P1)。Windows のドライブ付き絶対
     # path (``C:/repo/x``) は pathspec ではないので通常の path として扱う (0.34.2)。
     colon = _has_pathspec_colon(raw)
-    form_root = None if colon else root
     abs_path = normalize(raw, cwd)
+    if colon:
+        form_root = None
+    elif root and any(is_path_rule(pattern) for pattern, _ in rules):
+        form_root = resolve_path_rule_root(str(abs_path), root)
+    else:
+        form_root = root
     if is_sensitive(abs_path, rules, parts=False, root=form_root):
         return True
     if colon:
@@ -472,6 +486,11 @@ def _operand_relpath(operand: str, cwd: str, root: str | None) -> str:
       ``normalize`` で cwd に結合した形が git の解釈 (repo root 相対) と一致
       しない場合があるため path 形は案内しない (basename 形のみ)
     - root 不明 / root 配下でない / normalize 失敗は空文字
+
+    root は判定 (``_operand_is_sensitive``) と同じく ``resolve_path_rule_root``
+    で operand のある checkout に読み替える (0.35.0)。読み替えないと worktree の
+    ファイルに ``!.claude/worktrees/<name>/...`` という使い捨てパスのレシピを
+    案内してしまう。
     """
     if not root or not operand or _has_pathspec_colon(operand) or _has_glob(operand):
         return ""
@@ -485,7 +504,7 @@ def _operand_relpath(operand: str, cwd: str, root: str | None) -> str:
         abs_path = normalize(operand, cwd)
     except (ValueError, OSError):
         return ""
-    return root_relative(abs_path, root) or ""
+    return root_relative(abs_path, resolve_path_rule_root(str(abs_path), root)) or ""
 
 
 def _build_deny_response(

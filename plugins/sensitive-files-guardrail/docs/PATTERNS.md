@@ -154,10 +154,9 @@ EOF
 と**文字列完全一致**する必要がある (末尾スラッシュは正規化され、`~` は
 `expanduser` で展開される。シンボリックリンクは解決しない)。
 
-**git worktree (0.32.0)**: `claude --worktree` / `--bg` / sub-agent の
-`isolation: worktree` はいずれも別 checkout
-(`<repo>/.claude/worktrees/<name>` 等) でセッションを開き、
-`$CLAUDE_PROJECT_DIR` も **worktree 自身のパス**になる。そのため main repo の
+**git worktree (0.32.0)**: `claude --worktree` は別 checkout
+(`<repo>/.claude/worktrees/<name>`) でセッションを開き、`$CLAUDE_PROJECT_DIR`
+も **worktree 自身のパス**になる (CLI 2.1.250 実測)。そのため main repo の
 パスで書いたセクションが一致せず、承認済みの除外が worktree 作業では黙って
 無効化されていた。0.32.0 からセクションの一致判定は **worktree 自身 + main
 repo root の 2 候補**を見る (`.git` ファイルの `gitdir:` → `commondir` を辿って
@@ -166,11 +165,38 @@ repo root の 2 候補**を見る (`.git` ファイルの `gitdir:` → `commond
 使い捨てなので推奨しない)。submodule の `.git` も同じ `gitdir:` 形式だが
 worktree ではないため候補には足さない (superproject の rule に差し替わらない)。
 
-一方 **path 形 rule の基準 root は worktree 自身のまま**で、main repo root には
-しない — worktree セッションが触るファイルは worktree 配下にあるので、基準を
-main repo root にすると「root 配下でない」と判定されて path 形 rule が一切
-効かなくなる。worktree は同じツリー構成を持つため、main repo root のセクションに
-書いた `!config/prod.pem` は worktree でも同じ相対 path で一致する。
+worktree で動く形はほかにもあり、`$CLAUDE_PROJECT_DIR` の値が揃っていない。
+sub-agent の `isolation: worktree` は **main repo root を指したまま**
+worktree (`<repo>/.claude/worktrees/agent-<id>`) で動く (CLI 2.1.283 実測)。
+`--bg` とセッション途中で worktree に入る経路は未実測。0.32.0 の記述は
+これらもすべて「worktree 自身のパスになる」としていたが、sub-agent については
+誤りだった。
+
+**path 形 rule はファイルのある checkout 基準で照合する (0.35.0)**: path 形
+rule の基準 root は、評価するファイルが入っている checkout に合わせて読み替える
+(`_shared.patterns.resolve_path_rule_root`)。main と worktree、worktree 同士は
+同じツリー構成を持つので、`!certs/aws.pem` はどの checkout の
+`certs/aws.pem` にも一致する — `$CLAUDE_PROJECT_DIR` がどちらを指していても
+同じ結果になる。0.34.x までは `$CLAUDE_PROJECT_DIR` 基準で root 相対化して
+いたため、main を指したまま worktree のファイルを触る (上の sub-agent) と
+`.claude/worktrees/<name>/certs/aws.pem` として照合されて一致せず、Stop の
+レシピもこの使い捨てパスを案内していた。worktree のセッションから main や
+別 worktree のファイルを絶対パスで触ったときも「root 配下でない」で一致
+しなかった。ユーザーが書いた path 形の include (`secrets/**`) も同じ理由で
+別 checkout のコピーを保護していなかった (0.35.0 から保護する)。
+
+- 同じ repository かどうかは **共有 git dir** (main は `.git`、linked worktree
+  は `commondir` の解決先) で判定する (字面が食い違えば `realpath` で実体を
+  比べる)。submodule・入れ子の別 repo は共有 git dir が違うので読み替えない
+  (0.34.x と同じ判定)
+- Bash は operand ごとに読み替えるので、rules に path 形 rule が 1 つも無ければ
+  読み替え自体を省く (既定 `patterns.txt` は basename 形だけ = 追加コスト無し)
+- 管理領域が消えた (prune 前の) worktree や壊れた `.git` ファイルは同一
+  repository と見なさない (除外は効かない側)
+- monorepo で `$CLAUDE_PROJECT_DIR` がサブディレクトリなら、その位置
+  (checkout 内の offset) を読み替え先の checkout に移す
+- repo 同梱 tier の読込先と `[project:]` セクションの key は変えない
+  (`resolve_project_root` のまま)
 
 **reason からの誘導 (0.19.0 / 0.24.0)**: Read / Bash / Edit / Write の deny reason と
 Stop の block reason は、除外の恒久化として `[project:$CLAUDE_PROJECT_DIR]` ヘッダー +
@@ -278,9 +304,10 @@ git check-ignore -v .claude/sensitive-files-guardrail/patterns.txt
 ```
 
 commit されていない場合の副作用: `git worktree add` は untracked / ignored
-ファイルを持ち込まないため、**worktree セッション (`claude --worktree` /
-`--bg` / sub-agent の `isolation: worktree`) では tier が丸ごと消える**
-(警告は出ない)。読み込み位置は worktree checkout 側の第 1 候補のみで、main
+ファイルを持ち込まないため、**`$CLAUDE_PROJECT_DIR` が worktree 自身を指す
+セッション (`claude --worktree`) では tier が丸ごと消える** (警告は出ない。
+`$CLAUDE_PROJECT_DIR` が main を指したままの sub-agent の `isolation: worktree`
+は main 側のファイルを読む)。読み込み位置は `resolve_project_root` の 1 か所のみで、main
 repo 側を探しに行かないのは意図的 — 探しに行くと「本人の手元だけで効く」状態が
 延命され、貢献者・CI では依然として何も読めないまま、気付ける唯一の signal が
 消えるため (`_resolve_project_patterns_path` の docstring)。
@@ -373,6 +400,8 @@ export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
 
 - **root** は `[project:...]` セクションの key と同じ解決 (`$CLAUDE_PROJECT_DIR` →
   無ければ `cwd` から `.git` を上方探索。`_shared.patterns.resolve_project_root`)。
+  ファイルが root と同じ repository の**別 checkout** (main ↔ worktree) にあれば、
+  その checkout の同じ位置に読み替える (0.35.0、上の「git worktree」節)。
   root を解決できない (非 git ディレクトリ等) / path が root 配下でない場合、
   path 形 rule は**一度も一致しない** (0.23.0 までと同じ挙動)
 - 相対 path の基準は **root であって cwd ではない**。サブディレクトリで発火しても
@@ -384,9 +413,12 @@ export SFG_CASE_SENSITIVE=1  # 旧挙動に戻す
   literal にしたいときは `[*]` のように文字クラスで包む (両 hook のレシピ生成は
   `escape_glob` で自動的にそうする)
 - 大文字小文字は basename 形と同じく既定で無視 (`SFG_CASE_SENSITIVE=1` で区別)
-- 比較は lexical (symlink 解決も実在確認もしない)。`$CLAUDE_PROJECT_DIR` が
-  symlink 経由のパスで `cwd` が実体パス (またはその逆) のように**文字列として
-  root 配下にならない**組み合わせでは path 形は一致しない (basename 形は従来どおり)
+- root 相対化は lexical (symlink を解決しない)。ただし 0.35.0 から、ファイルと
+  root が同じ repository の checkout なら基準 root をファイル側の字面で組み立て
+  直すので、`$CLAUDE_PROJECT_DIR` が symlink 経由のパスでファイルが実体パス
+  (またはその逆) でも path 形は一致する (checkout の同一性は共有 git dir の
+  実体で判定する)。git の checkout の外ではこの読み替えが無く、**文字列として
+  root 配下にならない**組み合わせでは一致しない (basename 形は従来どおり)
 - Bash operand も path 形 rule を評価する (`cat config/prod.pem`、
   `cat ../config/prod.pem`、`git show HEAD -- config/prod.pem`)。ただし
   **コロンを含む operand** (`git show HEAD:config/prod.pem` の pathspec、
@@ -594,7 +626,21 @@ Stop の 4 箇所が同じ root で matcher を呼ぶので、どの hook が出
 
 0.32.0 の worktree 対応でセクションの一致判定だけが複数 key になったため、
 「セクションの key」と「path 形の基準 root」は完全に同一ではなくなった。本関数は
-**引き続き第 1 候補 (worktree 自身) だけを返す** (理由は上の「git worktree」節)。
+**引き続き第 1 候補だけを返す**。ファイルが別 checkout にあるときの読み替えは
+呼出側が `resolve_path_rule_root` で行う (0.35.0)。
+
+### `resolve_path_rule_root(path, root) -> str | None` (0.35.0)
+
+`path` を path 形 rule で評価するときの基準 root。`path` と `root` が同じ
+repository の別 checkout にあるとき、`root` の checkout 内での位置を `path` 側の
+checkout に移した値を返し、それ以外は `root` をそのまま返す (条件は上の
+「git worktree」節)。Read / Edit / Write / Grep / Bash operand は評価する
+ファイルの絶対パスで、Stop は `cwd` で 1 回呼び、**判定と除外レシピの両方**を
+この root で作る (レシピに `.claude/worktrees/<name>/...` が出ない)。相対 path
+(Stop が渡す「既に root 相対」の path) は読み替えない。checkout の特定は
+`path` から親へ最初の `.git` を探し (`$HOME` で打ち切り)、共有 git dir は
+`_git_common_dir` が `.git` / `gitdir:` / `commondir` から解決する。`git`
+コマンドは呼ばない。
 
 ### `_shared/matcher.py` の path 形対応 (0.24.0)
 

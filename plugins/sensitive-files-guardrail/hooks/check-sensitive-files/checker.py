@@ -401,7 +401,8 @@ def find_sensitive_files(
     出ない**ため (無音の fail-open)。打ち切ったときは ``deadline.exceeded`` が
     立つので、呼出側が「検査が不完全である」ことを必ず表示する。
 
-    ``root`` (0.24.0): path 形 rule の基準 (``resolve_project_root(cwd)``)。
+    ``root`` (0.24.0): path 形 rule の基準 (``resolve_project_root(cwd)`` を
+    ``resolve_path_rule_root`` で cwd の checkout に読み替えた値、0.35.0)。
     ``cwd`` が root 配下なら各 path を **root 相対** (``root_offset`` + cwd 相対
     path) に組み立てて ``is_sensitive`` に渡す。したがって親 dir 名の評価
     (parts) も root 相対で行われ、サブディレクトリで発火したときも root で

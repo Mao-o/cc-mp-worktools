@@ -43,15 +43,21 @@ repo 同梱 tier (0.32.0):
   詳細な判断根拠は ``docs/PATTERNS.md`` の同節。
 
 git worktree 対応と ``~`` 展開 (0.32.0):
-- ``claude --worktree`` / ``--bg`` / sub-agent の ``isolation: worktree`` は
-  別 checkout でセッションを開き ``$CLAUDE_PROJECT_DIR`` も worktree 自身の
-  パスになるため、main repo のパスで書いた ``[project:...]`` セクションが
-  一致せず、承認済みの除外が黙って無効化されていた。``_project_section_keys``
-  が **main repo root を第 2 候補**として足す (第 1 候補は従来と同じ値なので、
-  worktree のパスをヘッダーに書いていた場合も引き続き一致する)。
+- ``claude --worktree`` は別 checkout でセッションを開き ``$CLAUDE_PROJECT_DIR``
+  も worktree 自身のパスになる (CLI 2.1.250 実測) ため、main repo のパスで書いた
+  ``[project:...]`` セクションが一致せず、承認済みの除外が黙って無効化されて
+  いた。``_project_section_keys`` が **main repo root を第 2 候補**として足す
+  (第 1 候補は従来と同じ値なので、worktree のパスをヘッダーに書いていた場合も
+  引き続き一致する)。sub-agent の ``isolation: worktree`` は逆に
+  ``$CLAUDE_PROJECT_DIR`` が main を指したまま worktree で動く (CLI 2.1.283
+  実測) — セクションは一致するが path 形 rule が一致しなかった (0.35.0、下記)。
 - ヘッダーは比較前に ``os.path.expanduser`` を通す (``[project:~/work/repo]``
   が無音で捨てられていた)。``resolve_project_root`` (path 形 rule の基準) は
   第 1 候補のみを返す — 同関数の docstring 参照。
+- 0.35.0: path 形 rule の基準 root は**評価するファイルのある checkout** に
+  読み替える (``resolve_path_rule_root``)。``$CLAUDE_PROJECT_DIR`` が main を
+  指したまま worktree のファイルを触ると、main 基準の root 相対 path
+  (``.claude/worktrees/<name>/...``) で照合されて承認済みの除外が効かなかった。
 - 出力順は **ファイル中の出現順をそのまま保持** する (グループ単位で並べ替えない)。
   last-match-wins は出現順で決まるため、``[project:...]`` セクションを共通行より
   後ろに置けばプロジェクト側が勝ち、前に置けば共通側が勝つ — 既存の
@@ -284,12 +290,14 @@ def _resolve_project_patterns_path(cwd: str) -> Optional[Path]:
     """repo 同梱 patterns.txt のパスを返す (0.32.0)。project root 不明なら None。
 
     基準は ``resolve_project_root`` (= ``[project:]`` セクションの第 1 候補)。
-    worktree セッションでは worktree checkout 側のファイルを読む — commit 済み
-    なら main repo と同じ内容が worktree にも存在するため。
+    ``claude --worktree`` のセッション (``$CLAUDE_PROJECT_DIR`` = worktree 自身)
+    では worktree checkout 側のファイルを読む — commit 済みなら main repo と同じ
+    内容が worktree にも存在するため。``$CLAUDE_PROJECT_DIR`` が main を指した
+    まま worktree で動く sub-agent (``isolation: worktree``) は main 側を読む。
 
     **前提が崩れたときの挙動** (マージ前レビューの指摘): ファイルが未 commit
     (untracked / ignored) だと ``git worktree add`` はそれを持ち込まないので、
-    **worktree セッションでは tier が丸ごと消える** (警告も出ない)。
+    **``claude --worktree`` のセッションでは tier が丸ごと消える** (警告も出ない)。
     ``[project:]`` セクションの一致判定 (``_project_section_keys``) が main repo
     root を第 2 候補に足すのに対し、こちらは**第 1 候補のみを探索する**のは
     意図したもの: 全候補を探すと「main repo で untracked のファイルが worktree
@@ -360,12 +368,11 @@ def resolve_project_root(cwd: str) -> Optional[str]:
     0.32.0 の worktree 対応で、``[project:]`` セクションの一致判定だけは
     **複数 key** (``_project_section_keys``: 本関数の値 + main repo root) を
     見るようになったため、「セクションの key」と「path 形の基準 root」は
-    完全に同一ではなくなった。本関数は**引き続き第 1 候補 (worktree 自身)
-    だけを返す** — worktree セッションで実際に触るファイルは worktree 配下に
-    あるので、root 相対 path の基準を main repo root にすると
-    ``root_relative`` が「root 配下でない」と判定して path 形 rule が一切
-    効かなくなる。main repo root 側のセクションに書いた path 形 rule も、
-    worktree は同じツリー構成を持つため同じ相対 path で一致する。
+    完全に同一ではなくなった。本関数は**引き続き第 1 候補だけを返す**。
+    ファイルが root と別の checkout (main ↔ worktree) にあるときは、呼出側が
+    ``resolve_path_rule_root`` でファイル側の checkout に読み替える (0.35.0)。
+    worktree は同じツリー構成を持つため、main repo root 側のセクションに書いた
+    path 形 rule も同じ相対 path で一致する。
     """
     return _resolve_project_key(cwd)
 
@@ -479,13 +486,15 @@ def _project_section_keys(cwd: str) -> list[str]:
     第 1 候補は ``_resolve_project_key`` の結果 (従来と同じ値)。git worktree
     セッションでは **main repo root を第 2 候補**として足す。
 
-    worktree 対応が必要な理由: ``claude --worktree`` / ``--bg`` /
-    sub-agent の ``isolation: worktree`` はいずれも別 checkout
-    (``<repo>/.claude/worktrees/<name>`` 等) でセッションを開き、
-    ``$CLAUDE_PROJECT_DIR`` もその worktree 自身のパスになる (実測)。
-    main repo のパスで書いた ``[project:...]`` セクションは文字列完全一致
-    しないため、0.15.0 で入れたプロジェクト固有の承認済み除外が worktree
+    worktree 対応が必要な理由: ``claude --worktree`` は別 checkout
+    (``<repo>/.claude/worktrees/<name>``) でセッションを開き、
+    ``$CLAUDE_PROJECT_DIR`` もその worktree 自身のパスになる (CLI 2.1.250
+    実測)。main repo のパスで書いた ``[project:...]`` セクションは文字列完全
+    一致しないため、0.15.0 で入れたプロジェクト固有の承認済み除外が worktree
     作業では黙って無効化されていた (= 承認済みのファイルで再び block される)。
+    sub-agent の ``isolation: worktree`` は ``$CLAUDE_PROJECT_DIR`` が main の
+    ままなので (CLI 2.1.283 実測) 第 1 候補で一致する。``--bg`` とセッション
+    途中で worktree に入る経路は未実測 — どちらの値でも一致するよう 2 候補を見る。
 
     第 1 候補を残す (置き換えではなく追加) のは、worktree 自身のパスを
     ヘッダーに書いていた場合の既存の一致挙動を変えないため。
@@ -498,6 +507,136 @@ def _project_section_keys(cwd: str) -> list[str]:
     if main_root is not None and main_root != primary:
         keys.append(main_root)
     return keys
+
+
+def _git_common_dir(top: str) -> Optional[str]:
+    """checkout の root ``top`` が属する repository の共有 git dir を返す (0.35.0)。
+
+    - ``.git`` がディレクトリ → それ自身 (main checkout)
+    - ``.git`` がファイル → ``gitdir:`` の参照先。``commondir`` があればその解決
+      結果 (linked worktree の管理領域から共有 git dir を指す)、無ければ gitdir
+      自身 (submodule / ``--separate-git-dir`` の checkout)
+
+    「同じ repository の別 checkout か」の判定 (``_same_repository``) にだけ使う。
+    値は字面 (``normpath``) のまま返す。参照先が無い (prune 前の stale な
+    worktree 等) / 読めないものは None = どの checkout とも同一視しない。
+
+    ``_main_repo_root`` と違い bare repo の worktree も除外しない (共有 git dir が
+    一致すれば同じ tree 構成の checkout であることに変わりはない)。
+    """
+    git_path = os.path.join(top, ".git")
+    if os.path.isdir(git_path):
+        return os.path.normpath(git_path)
+    if not os.path.isfile(git_path):
+        return None
+    gitdir = _gitdir_pointer(git_path)
+    if not gitdir or not os.path.isdir(gitdir):
+        return None
+    common = _read_git_pointer_file(os.path.join(gitdir, "commondir"))
+    common = common.strip() if common else ""
+    if not common:
+        return gitdir
+    if not os.path.isabs(common):
+        common = os.path.join(gitdir, common)
+    common = os.path.normpath(common)
+    if not os.path.isdir(common):
+        return None
+    return common
+
+
+def _same_repository(top_a: str, top_b: str) -> bool:
+    """2 つの checkout root が同じ repository (共有 git dir が同一) か (0.35.0)。
+
+    まず字面で比べ、食い違うときだけ ``realpath`` で実体を比べる — git は gitdir
+    を絶対パスで書くため、symlink を挟んだパス (macOS の ``/tmp`` →
+    ``/private/tmp`` 等) で開いた checkout とは字面が食い違うことがある。
+    ``realpath`` は path 要素ごとに stat するので、Bash の operand ごとに呼ばれる
+    経路では字面一致で済む大半のケースで省く。
+    """
+    common_a = _git_common_dir(top_a)
+    if common_a is None:
+        return False
+    common_b = _git_common_dir(top_b)
+    if common_b is None:
+        return False
+    return common_a == common_b or (
+        os.path.realpath(common_a) == os.path.realpath(common_b)
+    )
+
+
+def _checkout_top(path: str) -> Optional[str]:
+    """``path`` を含む checkout の root を返す (0.35.0)。
+
+    ``path`` 自身から親へ向かって最初に ``.git`` (ディレクトリ / ファイル) が
+    ある階層を checkout の root とする。``_resolve_project_key`` と同じく
+    ``$HOME`` と filesystem root で打ち切る (home 直下はプロジェクトではない)。
+    root は ``path`` の**字面どおりの祖先** (symlink を解決しない) なので、
+    返した root を基準にした ``root_relative(path, root)`` は必ず成立する。
+    stat だけで済ませ、共有 git dir は呼出側が必要なときだけ解決する。
+    """
+    home = str(Path.home())
+    current = os.path.normpath(path)
+    while True:
+        if current == home:
+            return None
+        if os.path.exists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def resolve_path_rule_root(path: str, root: Optional[str]) -> Optional[str]:
+    """``path`` を path 形 rule で評価するときの基準 root を返す (0.35.0)。
+
+    path 形 rule (``!certs/aws.pem``) は ``resolve_project_root`` からの root
+    相対 path で照合する。root と ``path`` が**同じ repository の別 checkout**
+    (main と linked worktree、worktree 同士) にあると、root 相対化の結果が
+    ``.claude/worktrees/<name>/certs/aws.pem`` や「root 配下でない」になり、
+    承認済みの除外が効かなかった (0.34.x まで)。``$CLAUDE_PROJECT_DIR`` が main
+    を指したまま worktree のファイルを触る経路 (sub-agent の ``isolation:
+    worktree`` で実測、CLI 2.1.283。セッション途中で worktree に入る経路でも
+    報告がある) と、worktree のセッションが main や別 worktree のファイルを
+    絶対パスで触る経路で起きる。ユーザーが書いた path 形の include
+    (``secrets/**``) も同じ理由で別 checkout のコピーを保護していなかった。
+
+    同じ repository (共有 git dir が一致) の別 checkout なら、root の checkout
+    内での位置 (monorepo で ``$CLAUDE_PROJECT_DIR`` がサブディレクトリなら
+    その offset) を ``path`` 側の checkout に移した値を返す。worktree は同じ
+    tree 構成を持つので、どの checkout でも同じ repo 相対 path が同じ rule に
+    一致する (``claude -w`` のセッションが worktree 内を触る場合と同じ意味論)。
+
+    次の場合は ``root`` をそのまま返す (= 0.34.x と同じ判定):
+
+    - ``root`` / ``path`` が空、``path`` が相対 (Stop hook が渡す「既に root
+      相対」の path)
+    - ``path`` と ``root`` が同じ checkout
+    - どちらかが checkout の外 / 共有 git dir を解決できない (stale な
+      worktree、壊れた ``.git`` ファイル)
+    - 別 repository (submodule、入れ子の別 repo) — 共有 git dir が違う
+
+    ``resolve_project_root`` 自体は変えない (repo 同梱 tier の読込先と
+    ``[project:]`` セクションの key を動かさないため)。判定と除外レシピの両方が
+    この関数を通すので、どの checkout で出たレシピも他の checkout で同じ
+    1 ファイルに効く。subprocess は使わない (stat と小さなテキスト読みだけ)。
+    大半の呼出は同じ checkout なので、共有 git dir (小さなファイル読み) は
+    checkout の root が食い違うときだけ解決する。
+    """
+    if not root or not path or not os.path.isabs(path):
+        return root
+    here_top = _checkout_top(path)
+    if here_top is None:
+        return root
+    base_top = _checkout_top(root)
+    if base_top is None or here_top == base_top:
+        return root
+    if not _same_repository(here_top, base_top):
+        return root
+    offset = os.path.relpath(os.path.normpath(root), base_top)
+    if offset == os.curdir:
+        return here_top
+    return os.path.join(here_top, offset)
 
 
 def _normalize_project_keys(

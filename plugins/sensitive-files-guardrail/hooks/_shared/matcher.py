@@ -336,9 +336,11 @@ def is_sensitive(
             ければ 1 ファイルに絞る意味が無いため)。
         root: path 形 rule の基準となる project root (0.24.0)。両 hook とも
             ``_shared.patterns.resolve_project_root(cwd)`` (= ``[project:]``
-            セクションの key と同じ値) を渡す。None なら path 形 rule は評価
-            しない (0.23.0 までと同じ挙動)。``path`` が相対なら root 相対と
-            見なす (``root_relative`` 参照)。
+            セクションの key と同じ値) を、ファイルのある checkout に
+            ``resolve_path_rule_root`` で読み替えてから渡す (0.35.0。本関数は
+            lexical のまま)。None なら path 形 rule は評価しない (0.23.0 までと
+            同じ挙動)。``path`` が相対なら root 相対と見なす
+            (``root_relative`` 参照)。
     """
     if not rules:
         return False

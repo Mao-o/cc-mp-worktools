@@ -554,16 +554,20 @@ repo に commit できる (0.32.0):
 > `git check-ignore -v .claude/sensitive-files-guardrail/patterns.txt` で確認し、
 > ignore されていれば `.gitignore` に `!.claude/sensitive-files-guardrail/` の
 > negation を足して commit する。未 commit のままだと `git worktree add` が
-> 持ち込まないため **worktree セッションでは tier が丸ごと消える** (無警告)。
+> 持ち込まないため **`claude --worktree` のセッションでは tier が丸ごと消える**
+> (無警告)。
 > 詳細は [docs/PATTERNS.md](./docs/PATTERNS.md) の同節。
 
 両 hook が自動で合流。last-match-wins (gitignore 風)、既定 case-insensitive。
 
-> **git worktree (0.32.0)**: `claude --worktree` / `--bg` / sub-agent の
-> `isolation: worktree` では `$CLAUDE_PROJECT_DIR` が worktree 自身のパスに
-> なるため、`[project:...]` セクションの一致判定は **worktree 自身 + main repo
-> root の 2 候補**を見る (main repo のパスで書いておけば worktree でも効く)。
-> `~` はヘッダーでも展開される。
+> **git worktree (0.32.0 / 0.35.0)**: `claude --worktree` では
+> `$CLAUDE_PROJECT_DIR` が worktree 自身のパスになるため、`[project:...]`
+> セクションの一致判定は **worktree 自身 + main repo root の 2 候補**を見る
+> (main repo のパスで書いておけば worktree でも効く)。`~` はヘッダーでも展開
+> される。path 形 rule (下記) は 0.35.0 から**ファイルのある checkout 基準**で
+> 照合するので、`!certs/aws.pem` は main・各 worktree のどの `certs/aws.pem` にも
+> 効く (sub-agent の `isolation: worktree` のように `$CLAUDE_PROJECT_DIR` が main
+> を指したまま worktree で動く場合も同じ)。
 
 > **path 形 rule (0.24.0)**: `/` を含む行 (`!config/prod.pem` / `!fixtures/` /
 > `secrets/**`) は basename ではなく **プロジェクト root からの相対 path 全体**と
@@ -572,7 +576,9 @@ repo に commit できる (0.32.0):
 > 除外できるのはこの形 (root 直下のファイルは `!/.env` のように先頭 `/` を付ける —
 > 付けないと basename 形になる)。root は `[project:]` セクションと同じ解決
 > (`$CLAUDE_PROJECT_DIR` → `.git` 上方探索) で、root を解決できない場所では
-> 一致しない。`/` を含まない行は従来どおり basename 形 (同名すべて)。詳細は
+> 一致しない。ファイルが root と同じ repository の別 checkout (main ↔ worktree)
+> にあるときは、その checkout の同じ位置を root として読み替える (0.35.0)。
+> `/` を含まない行は従来どおり basename 形 (同名すべて)。詳細は
 > [docs/PATTERNS.md](./docs/PATTERNS.md) の「rule の形で比較対象が決まる」節。
 
 > **プロジェクトスコープの rule (0.15.0)**: 同じファイル内に

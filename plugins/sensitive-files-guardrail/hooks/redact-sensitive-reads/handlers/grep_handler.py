@@ -75,7 +75,7 @@ from core import logging as L
 from core import messages as M
 from core import output
 from _shared.matcher import is_sensitive, root_relative
-from _shared.patterns import resolve_project_root
+from _shared.patterns import resolve_path_rule_root, resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import classify, normalize
 
@@ -242,8 +242,6 @@ def handle(envelope: dict) -> dict:
     if not rules:
         return output.make_allow()
 
-    root = resolve_project_root(cwd)
-
     if has_path:
         try:
             path = normalize(raw_path, cwd)
@@ -251,6 +249,10 @@ def handle(envelope: dict) -> dict:
             L.log_error("normalize_failed", type(e).__name__)
             return output.ask_or_deny(M.read_ask("normalize_failed"), envelope)
 
+        # path 形 rule の基準 root。別 checkout (main ↔ worktree) のファイルは
+        # その checkout 基準に読み替える (0.35.0)。判定と下の除外案内 (relpath)
+        # の両方がこの root を使う
+        root = resolve_path_rule_root(str(path), resolve_project_root(cwd))
         if is_sensitive(path, rules, root=root):
             cls = classify(path)
             uncertain: str | None = None
