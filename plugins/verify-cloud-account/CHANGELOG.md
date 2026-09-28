@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.16.0
+
+### Added: 自動切替 (auto-switch、opt-in)
+
+gh のアカウント不一致で deny する代わりに、**hook が期待アカウントへ
+`gh auth switch` してからコマンドを通す** opt-in 機能 (内部バックログ)。gh の
+アカウントを頻繁に切り替える運用で、不一致のたびに「deny → 案内された切替を単独で
+実行 → 元のコマンドを打ち直す」往復で止まっていたのを無くす。利用者向けの正本は
+README の「自動切替 (auto-switch)」節。
+
+- **既定は無効**。有効化は環境変数 `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH=github`
+  (settings.json の `env`。全プロジェクトに効かせる経路はこれだけ) か、
+  accounts.local.json の予約キー `"$auto_switch": ["github"]` (プロジェクト単位)。
+  解決順は env → `"$auto_switch"` → 無効で、env の `off` はファイルの指定も含めて
+  無効にする
+- 値は service 名の並び。対応は現状 **`github` のみ**。`true` のような一括指定・
+  不正な値・対応していない service 名は無効として扱い、deny 文面に注記を添える
+- **切り替えるのは deny になる場面だけ**: mode が `enforce` で、WRITE tier (と
+  `"$readonly": "deny"` の QUERY) の不一致。QUERY の警告や `warn` / `off` では
+  切り替えない (切替はマシン全体に効く副作用なので、読むだけのために他の作業の gh を
+  動かさない)
+- 切替先は **gh にログイン済みのアカウント**だけ (`gh auth status` に非アクティブとして
+  出ているもの)。dict 期待値は全 host が切り替えられるときだけ切り替える
+  (all-or-nothing)。トークン用 env (`GH_TOKEN` 等) / `GH_HOST` がある、コマンド自身が
+  アカウント状態を変える操作を含む、検証時間の予算が無い、のいずれかなら切り替えない
+- 切り替える前に github の成功 cache を破棄し、切り替えた後にもう一度検証してから
+  通す。切り替えた事実は `additionalContext` で Claude に伝える (同じ行の別 service
+  が deny した場合も deny 文面に添える)。切替に失敗したら従来どおり deny + 理由
+- **並行セッションのガード**: 直前 60 秒以内に同じ host を**別のアカウントへ**自動切替
+  した記録 (`$TMPDIR/cc-mp-verify-cloud-account/github.autoswitch.json`) があれば、
+  切り替えずに deny する。別アカウントを期待する 2 つのセッションが交互に切り替えると、
+  hook が通したコマンドが別アカウントで動きうるため。同じアカウントへの切替では
+  見送らない
+- 実装: `core/auto_switch.py` (設定の解決・ガード・手順)、`services/github.py` の
+  `plan_switch` / `apply_switch` / `describe_switch` / `parse_logged_in_accounts`。
+  service 契約 (`services/__init__.py`) に自動切替の 3 関数を追加
+- `gh auth switch --hostname <host> --user <user>` の挙動は gh 2.101.0 で実測
+  (非対話、ネットワーク無しで約 50ms、未ログインのアカウント / host は rc=1 で何も
+  変えない、既にアクティブなアカウントへの切替は rc=0)
+
+### Changed
+
+- builder の `show` が `"$auto_switch"` を `[auto-switch: github]` のように表示する
+  (有効な service の判定は dispatcher と同じ関数)。`init` / `set` / `remove` /
+  `migrate` は既存の値を保持する (テストで固定)
+- README / skill の「`"$mode"` は builder が値を書かない唯一のキー」を訂正
+  (`"$readonly"` / `"$auto_switch"` も同じ扱い)
+
+### Tests
+
+- `test_auto_switch.py` (設定の解決・ガード・`attempt()` の各段)、
+  `test_github_switch.py` (計画・実行・一覧の解析)、`test_dispatcher_auto_switch.py`
+  (状態を持つ偽の gh で、検証 → 計画 → 切替 → 再検証を実際の service コードに通す)、
+  builder の `TestAutoSwitchKey`。1,090 → 1,182 件
+- mutation で各ガード (止める場面の判定 / mode / コマンド自身の状態変更 / 並行
+  セッションのガード / cache 破棄の順序 / トークン env / all-or-nothing / 予算確認
+  3 箇所 / 再検証 / 切替の記録 / 通知 / builder の表示 / stdin・env の受け渡し) を
+  壊すと、新しいテストが assertion で落ちることを確認した
+
 ## 0.15.1
 
 ### Fixed

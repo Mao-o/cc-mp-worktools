@@ -10,6 +10,8 @@ Bash コマンド実行の直前に、クラウド CLI
 不一致なら `permissionDecision: deny` で停止し、切り替えコマンドを提示する。
 **止めるのは書込系だけ**で、リモートを読むだけのコマンド (`gh pr list` /
 `aws s3 ls` 等) は警告を添えて通す ([検証の 3 tier](#検証の-3-tier--v0140))。
+opt-in の[自動切替](#自動切替-auto-switch--v0160)を有効にすると、gh の不一致は
+止める代わりに hook がログイン済みの期待アカウントへ切り替えて通す。
 
 ## インストール
 
@@ -146,10 +148,11 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 - **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損 /
   複数パス競合の deny はファイルを読む前に確定するため、そこを `warn` / `off` に
   弱められるのは `VERIFY_CLOUD_ACCOUNT_MODE` のみ
-- `"$mode"` は **builder が値を書かない唯一のキー**。`init` / `set` / `remove` は
-  既存の `"$mode"` を壊さず保持するが、設定・変更は**エディタで手編集**する
-  (builder のサブコマンドは service キーだけを扱う)。現在値は
-  `/verify-cloud-account:accounts-show` が `[mode]` として表示する
+- `"$mode"` は **builder が値を書かない予約キー**の 1 つ (ほかに `"$readonly"` /
+  `"$auto_switch"`)。`init` / `set` / `remove` / `migrate` は既存の値を壊さず
+  保持するが、設定・変更は**エディタで手編集**する (builder のサブコマンドは
+  service キーだけを扱う)。現在値は `/verify-cloud-account:accounts-show` が
+  `[mode]` として表示する
 - 不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は **enforce として扱い**、
   deny 文面にその旨を添える (黙って無視すると「off にしたのに deny される」の
   原因が分からなくなるため)。`off` で検証しない場合も、env の不正値は
@@ -159,6 +162,91 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 
 `warn` / `off` は検証を弱める設定なので、**常用するなら
 `accounts.local.json` を整えて `enforce` に戻すこと**を前提にしている。
+
+## 自動切替 (auto-switch) — v0.16.0
+
+gh のアカウント不一致で deny する代わりに、**hook が期待アカウントへ
+`gh auth switch` してからコマンドを通す** opt-in 機能。複数アカウントを頻繁に
+行き来する運用で、不一致のたびに「deny → 案内された切替を単独で実行 → 元の
+コマンドを打ち直す」往復で止まるのを無くす。
+
+**既定は無効**。切替は gh の設定 (`hosts.yml`) を書き換えるので、**同じマシンの
+他のターミナル・Claude Code セッションの gh もそのアカウントで動くようになる**。
+この副作用を受け入れる場合だけ有効にする。
+
+指定方法は 2 つあり、**環境変数が優先**される:
+
+```jsonc
+// ~/.claude/settings.json (全プロジェクト) / .claude/settings.json (プロジェクト)
+{ "env": { "VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH": "github" } }
+```
+
+```json
+// accounts.local.json (プロジェクト単位)
+{
+  "$auto_switch": ["github"],
+  "github": "your-github-user"
+}
+```
+
+- 解決順: `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `accounts.local.json` の
+  `"$auto_switch"` → 無効。env の `off` はファイルの指定も含めて無効にする
+- 値は **service 名の並び** (env はカンマ区切り)。対応しているのは現状 **`github`
+  のみ**。`true` のような一括指定は受け付けない (対応 service を増やしたときに
+  既存の設定が黙って広がらないようにするため)
+- 不正な値・対応していない service 名は**無効として扱い** (= 従来どおり deny)、
+  deny 文面にその旨を添える。env に綴り間違いがあってもファイル側の指定には
+  落とさない (「env で止めたつもりが切り替わる」を作らない)
+- `"$auto_switch"` も builder が値を書かない予約キー (手編集)。
+  `/verify-cloud-account:accounts-show` が `[auto-switch: github]` と表示する
+- [グローバル既定](#グローバル既定-v0130) のファイルに書いた `"$auto_switch"` が
+  効くのは、自前の `accounts.local.json` を持たないプロジェクトだけ (`"$mode"` と
+  同じ)。全プロジェクトで有効にするなら環境変数を使う
+
+**切り替えるのは次をすべて満たすときだけ**:
+
+| 条件 | 満たさないとき |
+|---|---|
+| mode が `enforce` で、その不一致が **deny になる** (WRITE tier。`"$readonly": "deny"` なら QUERY も) | 従来どおり。QUERY の不一致は警告して通す (読むだけのために他の作業の gh を動かさない)。`warn` / `off` では切り替えない |
+| 期待アカウントが **gh にログイン済み** (`gh auth status` に非アクティブのアカウントとして出ている) | deny + 「ログイン済みアカウントが見つかりません」の注記。ブラウザ認証が要るログインは自動化しない |
+| 期待値が dict 形式なら、**全 host** が切り替えられる | どの host も切り替えない (一部だけ切り替えて deny、を作らない) |
+| `GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST` が無い | 切り替えない (トークン env は `hosts.yml` より優先されるので切り替えても実行アカウントが変わらない / 切り替える host を決められない) |
+| コマンド自身がアカウント状態を変える操作 (`gh auth refresh` 等) を含まない | 切り替えない (明示的な操作に hook の切替を重ねない) |
+| 直前 60 秒以内に、同じ host を**別のアカウントへ**自動切替した記録が無い | 切り替えない (下の並行セッションのガード) |
+| 1 コマンド分の[検証時間の予算](#検証時間の予算-v0120)が残っている | 切り替えない |
+
+[切替と書込の連結](#切替と書込を同一コマンドに連結した形は-deny--v0150) の deny は
+従来どおり先に決まる (切替後の状態は検証できないため)。
+
+切り替えるときは:
+
+- 切り替える**前に**成功 cache を破棄する (他のプロジェクトの成功 cache が、切替後の
+  状態で TTL 分通ってしまうのを防ぐ)
+- 切り替えた**後にもう一度検証**し、一致したときだけ通す
+- 切り替えた事実を `additionalContext` で Claude に伝える
+  (例: `github.com: work → your-github-user`)。同じコマンド行の別 service が deny
+  された場合も、deny 文面に添える
+- 切替に失敗したら従来どおり deny し、失敗理由を添える
+- 所要時間: 切り替える場面でだけ、`gh auth status` (CLI。ネットワーク往復込みで
+  〜500ms) を 1 回と、host ごとに `gh auth switch` (ローカルの設定と keyring の書換で、
+  gh 2.101.0 の実測で約 50ms) を呼ぶ。いずれも検証時間の予算の内側で動き、CLI を
+  起動する前ごとに予算の残りを確かめる
+
+**並行セッションのガード**: 別のアカウントを期待する 2 つのセッションが同時に
+動いていると、片方の hook が通したコマンドが実行される前にもう片方が切り替え、
+**通したコマンドが別アカウントで動きうる** (この plugin が防ぐ事故そのもの)。
+そのため、直前 60 秒以内に同じ host を別のアカウントへ自動切替した記録があれば、
+切り替えずに deny する。deny 文面には「どのプロジェクトが何秒前に切り替えたか」と
+「切り替える前にユーザーに確認する」旨が出る。同じアカウントへの切替 (同じ repo の
+worktree 同士など) では見送らない。記録は
+`$TMPDIR/cc-mp-verify-cloud-account/github.autoswitch.json`。
+
+使う前に:
+
+- 使うアカウントそれぞれで一度 `gh auth login` しておく (gh 2.40 以上は 1 つの host に
+  複数のアカウントを登録できる)。`gh auth status` に期待アカウントが出れば切替先になれる
+- 別アカウントで作業するセッションを同時に動かすなら、ガードで deny になる場面が
+  残る ([既知の制限](#既知の制限))
 
 ## Agent Skill
 
@@ -891,6 +979,8 @@ Python CLI の起動込みで 1 回 〜1s (dict 期待値では project / accoun
 切替セグメントが同じコマンド内の write と別セグメントでも (readonly の `gh auth login
 --skip-ssh-key && gh pr create`、inline env が異なる `gh auth switch --user other &&
 GH_HOST=... gh pr create`)、その service の検証成功は cache しない (判定は service 単位)。
+[自動切替](#自動切替-auto-switch--v0160) (v0.16.0) も、hook 自身が切り替える前に
+同じ規則で github の成功 cache を破棄する。
 
 **並行する hook との競合 (epoch + in-flight 窓)**: 無効化は entry の削除だけでなく
 service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を検出した時刻
@@ -1045,6 +1135,19 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   あり、ローカル読取の利点 (速度・オフライン耐性) を打ち消すため採っていない
 - `warn` / `off` [モード](#検証モード-enforce--warn--off--v0130) は検証を
   意図的に弱める設定。`off` の間は不一致でも通る (cache 破棄だけは継続する)
+- **[自動切替](#自動切替-auto-switch--v0160) はコマンドの実行前 (PreToolUse) に
+  行う**。切り替えた後にそのコマンドが permission の確認で拒否された・別の hook に
+  deny された場合も、gh のアカウントは切り替わったまま残る (次に動く gh は
+  そのアカウントを使う)
+- 自動切替の**並行セッションのガードは自動切替の記録だけを見る**。手動の切替
+  (ターミナルでの `gh auth switch` や、deny の案内に従って Claude が打つ切替) は
+  記録されないので、手動の切替との競合は検出しない。また、hook が通したコマンドが
+  permission の承認待ちで 60 秒を超えて止まっている間に、別のセッションが
+  自動切替しうる (承認後のコマンドは切り替わった後のアカウントで動く)。記録の読み書きは
+  ロックしないので、ほぼ同時に走った 2 つの hook はどちらも相手の記録を見る前に切り替え
+  うる。別アカウントのセッションを同時に動かす運用では、これらの窓が残ることを前提にする
+- `bash -c '...'` の内側などセグメント分解できない `gh` は検証対象外なので、
+  自動切替も起きない
 
 ## 発火しなかったとき
 
@@ -1073,12 +1176,16 @@ hook 実行時に環境変数 `VERIFY_CLOUD_ACCOUNT_DEBUG=1` を立てると、�
 
 ```json
 {"segments": [{"segment": "gh pr list", "service": "github", "readonly": false}],
- "cache_hit": {}, "verify_ms": {"github": 12.3}, "elapsed_ms": 13.1, "decision": "deny"}
+ "cache_hit": {}, "verify_ms": {"github": 12.3}, "auto_switch": {},
+ "elapsed_ms": 13.1, "decision": "deny"}
 ```
 
 - `segments`: 抽出した各セグメントと、マッチした service / readonly 判定
 - `cache_hit`: 成功 cache を使って verify を省略した service
 - `verify_ms`: 実際に `verify()` を呼んだ service とその所要時間 (ms)
+- `auto_switch`: [自動切替](#自動切替-auto-switch--v0160) を試みた service ごとの結果
+  (`resolved` = 切替後の再検証が一致した / `switched` = 切り替えた
+  `[host, 切替前, 切替後]` / `note` = 切り替えなかった・失敗した理由)
 - `decision`: 最終的な判定 (`allow` / `deny` / `warn`)
 
 判定表 (allow/deny/warn) 自体には一切影響しない観測専用の出力。

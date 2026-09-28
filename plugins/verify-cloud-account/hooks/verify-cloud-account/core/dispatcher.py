@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import budget, cache, cli_options, mode, output, paths, tiers
+from core import auto_switch, budget, cache, cli_options, mode, output, paths, tiers
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -578,6 +578,38 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     return "\n".join(lines)
 
 
+def _auto_switch(
+    svc, entry, project_dir: str, proc_env, ctx, switching_here: bool,
+    trace: dict | None,
+) -> auto_switch.Outcome:
+    """deny になる不一致を、期待値への自動切替で置き換えられるか試す。
+
+    呼ぶ条件 (enforce / 止める tier / opt-in 済み) は呼び出し側が決める。ここでは
+    `core/auto_switch.attempt` を呼び、デバッグ trace に結果を残すだけ
+    (`_dispatch_impl` を太らせないための切り出し)。例外は握って「切り替えなかった」
+    扱いにする — 自動切替は deny を置き換える補助で、失敗しても判定は従来どおり
+    deny のまま残るべきなので、ここで hook 全体を内部エラー (= fail-open) に
+    落とさない。
+    """
+    try:
+        outcome = auto_switch.attempt(
+            svc, entry, project_dir, env=proc_env, context=ctx,
+            switching_here=switching_here,
+        )
+    except Exception as e:  # noqa: BLE001
+        outcome = auto_switch.Outcome(
+            note=f"※ 自動切替 (auto-switch) は内部エラーのため行いませんでした "
+            f"({type(e).__name__})。"
+        )
+    if trace is not None:
+        trace["auto_switch"][_service_name(svc)] = {
+            "resolved": outcome.resolved,
+            "switched": [list(step) for step in outcome.switched],
+            "note": outcome.note,
+        }
+    return outcome
+
+
 def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     """`dispatch()` の実処理。`trace` は `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ
     非 None で、判定表そのものには影響しない (観測専用)。"""
@@ -707,6 +739,12 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if policy_note:
         mode_notes.append(policy_note)
 
+    # 自動切替 (auto-switch) を有効にしている service (env → "$auto_switch" → 無効)。
+    # 使うのは**止める場面**だけ = enforce で errors に積まれる target
+    # (`core/auto_switch.py`)。不正な指定の note も mode の note と同じ経路で届ける。
+    auto_enabled, auto_notes = auto_switch.resolve(accounts, SERVICES)
+    mode_notes.extend(auto_notes)
+
     try:
         accounts_mtime = accounts_path.stat().st_mtime
     except OSError:
@@ -718,6 +756,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     errors: list[str] = []
     query_errors: list[str] = []
     remediation_notes: list[str] = []  # 出現順・重複なし
+    # 自動切替した事実の通知。allow になっても必ず届ける (マシン全体に効く副作用
+    # なので、Claude と利用者が知らないまま進ませない)。
+    switch_notices: list[str] = []
     for svc, cands, inline_env, ctx, tier in targets:
         # `"$readonly": "deny"` なら QUERY も止める側に寄せる。
         problems = (
@@ -807,6 +848,26 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             trace["verify_ms"][svc_name] = round(
                 (time.monotonic() - _verify_start) * 1000, 2
             )
+        switch_note = ""
+        if (
+            err
+            and stops
+            and effective_mode == mode.ENFORCE
+            and svc.ACCOUNT_KEY in auto_enabled
+        ):
+            outcome = _auto_switch(
+                svc, entry, project_dir, proc_env, ctx, switching_here, trace
+            )
+            if outcome.switched:
+                switch_notices.append(auto_switch.notice(svc, outcome.switched))
+            if outcome.resolved:
+                # 切り替えた後の再検証が一致した = このコマンドは止めない。切替直後
+                # なので成功 cache には書かない (attempt が invalidate 済みで、
+                # in-flight 窓の間は書いても publish されない)。
+                continue
+            if outcome.error:
+                err = outcome.error
+            switch_note = outcome.note or ""
         if err:
             # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
             if _guides_remediation(err, svc):
@@ -817,6 +878,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 複合コマンドで原因コマンドを一目で特定できるようにする。
             problems.append(
                 f"{err}\n(検出コマンド: {', '.join(orig for orig, _norm in cands)})"
+                + (f"\n{switch_note}" if switch_note else "")
             )
         elif not switching_here:
             cache.set_success(
@@ -833,6 +895,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         body = "\n\n".join(dict.fromkeys(problems))
         for note_text in remediation_notes:
             body = body + "\n\n" + note_text
+        for notice_text in switch_notices:
+            # 別 service の deny と同じ行で gh を切り替えた場合も、切り替えた事実は伝える。
+            body = body + "\n\n" + notice_text
         if source_note:
             body = source_note + "\n\n" + body
         if note:
@@ -853,6 +918,14 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         return _decide(
             effective_mode, _assemble(query_errors), mode_notes, query_warn=True
         )
+
+    if switch_notices:
+        # 自動切替で一致した (止めない) 経路。切り替えた事実は必ず通知する。mode の
+        # note (`"$auto_switch"` の一部が不正、等) もここで一緒に届ける。
+        parts = switch_notices + [n for n in mode_notes if n]
+        if note and _should_emit_deprecation_warn(project_dir):
+            parts.append(note)
+        return output.warn("\n\n".join(parts))
 
     # warn は deprecation note が出るときのみ発火させる。verify 成功時は
     # source_note (親継承 / グローバル既定) 単独では warn を出さず silent
@@ -913,7 +986,7 @@ def _dispatch_with_trace(command: str, cwd: str) -> dict | None:
     if not _debug_enabled():
         return _dispatch_impl(command, cwd, None)
 
-    trace: dict = {"segments": [], "cache_hit": {}, "verify_ms": {}}
+    trace: dict = {"segments": [], "cache_hit": {}, "verify_ms": {}, "auto_switch": {}}
     start = time.monotonic()
     result = _dispatch_impl(command, cwd, trace)
     trace["elapsed_ms"] = round((time.monotonic() - start) * 1000, 2)

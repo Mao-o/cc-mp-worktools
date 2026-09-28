@@ -170,6 +170,28 @@ def parse_active_accounts(output_text: str) -> dict[str, str]:
     return result
 
 
+def parse_logged_in_accounts(output_text: str) -> dict[str, list[str]]:
+    """gh auth status の出力から {hostname: [ログイン済みの全アカウント]} を返す。
+
+    `parse_active_accounts` がアクティブなものだけを拾うのに対し、こちらは
+    **非アクティブなアカウントも含める** (自動切替の切替先になれるのはこの一覧に
+    あるものだけ)。トークンの検証に失敗したアカウントは gh が
+    `Failed to log in to <host> account <user>` と出すので、`Logged in to` の
+    正規表現には一致せず一覧に入らない (切り替えても使えないため)。
+    gh < 2.40 の旧形式 (`Logged in to <host> as <user>`) は host あたり 1 アカウント。
+    """
+    result: dict[str, list[str]] = {}
+    for line in output_text.splitlines():
+        m = _LOGGED_IN_RE.search(line) or _LOGGED_IN_LEGACY_RE.search(line)
+        if not m:
+            continue
+        host, user = m.group(1), m.group(2)
+        users = result.setdefault(host, [])
+        if user not in users:
+            users.append(user)
+    return result
+
+
 def _run_gh_auth_status(env=None) -> tuple[str, str | None]:
     """gh auth status を実行し (combined_output, error) を返す。
 
@@ -715,6 +737,144 @@ def is_self_remediation(candidate: str, expected) -> bool:
         want = expected.get(hostname or "github.com")
         return isinstance(want, str) and user == want
     return False
+
+
+# --- 自動切替 (auto-switch、`core/auto_switch.py`) -------------------------------
+#
+# 不一致で deny する代わりに hook が `gh auth switch` を実行する opt-in の経路。
+# 切替先は **gh に既にログイン済みのアカウント**に限る (ブラウザ認証の要る login は
+# 自動化しない)。`gh auth switch --hostname <host> --user <user>` は非対話で、
+# ネットワークに出ず hosts.yml と keyring の書き換えだけで終わる
+# (gh 2.101.0 で実測: 約 50ms。未ログインのアカウント / host は rc=1 で何も変えない。
+# 既にアクティブなアカウントへの切替は rc=0)。
+
+_SWITCH_TIMEOUT_SEC = 10
+_MAX_DETAIL_CHARS = 200
+
+# 切替えても実行されるアカウントが変わらない / 切替先の host を決められない env。
+# `_local_active_accounts` がローカル読取を諦める条件と同じ集合。
+_NO_SWITCH_REASON_TOKEN = (
+    "GH_TOKEN などのトークン用環境変数が設定されているため、gh の設定を切り替えても"
+    "実行されるアカウントは変わりません。"
+)
+_NO_SWITCH_REASON_HOST = (
+    "GH_HOST が設定されているため、切り替える host を hook からは決められません。"
+)
+_NOT_LOGGED_IN_TAIL = (
+    " (未ログインか、保存されたトークンが無効です)。ログインはブラウザでの認証が"
+    "要るため自動化しません。"
+)
+
+
+def _first_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:_MAX_DETAIL_CHARS]
+    return "詳細なし"
+
+
+def plan_switch(expected, project_dir: str, env=None):
+    """期待値へ切り替えるための `[(host, 現在のアカウント, 切替先)]` を返す。
+
+    戻り値は `(steps, reason)`。切り替えられないなら `(None, 理由)`、既に一致して
+    いて切り替える必要が無いなら `([], None)`。
+
+    **全 host が切り替えられるときだけ** steps を返す (dict 期待値で 1 つでも
+    切替先がログインしていなければ何も切り替えない)。一部だけ切り替えて結局 deny、
+    という「副作用だけ残る」形を作らないため。
+
+    現在値と切替先の候補は **`gh auth status` (CLI) から取る**。ローカル読取
+    (`hosts.yml`) は allow にしか使わない方針 (`verify()` の docstring) で、ここは
+    状態を書き換える前の確認なので gh 自身の報告に拠る。呼ばれるのは deny になる
+    不一致のときだけなので、CLI 1 回分の時間は許容する。
+    """
+    shape_error = _expected_shape_error(expected)
+    if shape_error:
+        return None, shape_error
+    e = os.environ if env is None else env
+    if any(e.get(name) for name in _TOKEN_ENV_VARS):
+        return None, _NO_SWITCH_REASON_TOKEN
+    if e.get(_HOST_ENV_VAR):
+        return None, _NO_SWITCH_REASON_HOST
+
+    combined, err = _run_gh_auth_status(env)
+    if err:
+        return None, err
+    active = parse_active_accounts(combined)
+    logged_in = parse_logged_in_accounts(combined)
+    if not active:
+        return None, "gh のアクティブアカウントを取得できませんでした。"
+
+    if isinstance(expected, str):
+        wanted = {scalar_target_host(active): expected}
+    else:
+        wanted = expected
+
+    steps = []
+    missing = []
+    for host, want in wanted.items():
+        current = active.get(host)
+        if current == want:
+            continue
+        if want not in logged_in.get(host, ()):
+            missing.append(f"{host} の {want}")
+            continue
+        steps.append((host, current, want))
+    if missing:
+        reason = (
+            f"{'、'.join(missing)} のログイン済みアカウントが見つかりません"
+            + _NOT_LOGGED_IN_TAIL
+        )
+        if len(wanted) > 1:
+            reason += " 切り替えられない host が 1 つでもあるときは、どの host も切り替えません。"
+        return None, reason
+    return steps, None
+
+
+def apply_switch(steps, env=None):
+    """`plan_switch` の steps を順に実行する。`(切り替えた steps, エラー)` を返す。
+
+    CLI を起動する前ごとに予算を確かめる (`core/budget.py` の超過見積りは「最後の
+    確認の後に起動する呼び出し数」を前提にしている)。途中で失敗したら残りは
+    実行しない — 切り替えた分は戻り値の 1 要素目で呼び出し側に伝わる。
+    """
+    done = []
+    for host, current, want in steps:
+        if budget.expired():
+            return done, "検証時間の予算を使い切ったため、残りの host を切り替えませんでした。"
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "switch", "--hostname", host, "--user", want],
+                capture_output=True,
+                text=True,
+                timeout=budget.call_timeout(_SWITCH_TIMEOUT_SEC),
+                env=env,
+                stdin=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return done, "gh コマンドが見つかりません。"
+        except OSError as e:
+            return done, f"gh コマンドを実行できません ({e})。"
+        except subprocess.TimeoutExpired:
+            return done, f"{host} の切替がタイムアウトしました。"
+        if result.returncode != 0:
+            detail = _first_line(result.stderr or result.stdout)
+            return done, f"{host} の切替に失敗しました ({detail})。"
+        done.append((host, current, want))
+    return done, None
+
+
+def describe_switch(switched) -> str:
+    """自動切替したことを伝える本文 (`core/auto_switch.notice` が前置きを付ける)。"""
+    changes = ", ".join(
+        f"{host}: {before or '(なし)'} → {after}" for host, before, after in switched
+    )
+    return (
+        f"gh のアクティブアカウントを切り替えました ({changes})。gh の設定は"
+        "このマシンの全ターミナル・セッションで共有されるため、並行して動いている"
+        "作業の gh もこのアカウントで動きます。"
+    )
 
 
 _AUTH_REFRESH_RE = re.compile(r"^gh\s+auth\s+refresh(?=\s|$)")

@@ -134,7 +134,7 @@ _PKG_ROOT = _HERE.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core import mode, paths, tiers  # noqa: E402
+from core import auto_switch, mode, paths, tiers  # noqa: E402
 from services import ALL as SERVICES  # noqa: E402
 
 _SERVICE_NAMES = [svc.ACCOUNT_KEY for svc in SERVICES]
@@ -1345,6 +1345,19 @@ def _cmd_show(
                 if valid
                 else f"[readonly policy: 不正な値 — {tiers.POLICY_DENY} として扱われます]"
             )
+            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            continue
+        # `"$auto_switch"` も同じ扱い。有効な service の判定は dispatcher と同じ関数
+        # (`auto_switch.from_accounts`) に委ねる。env (`VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH`)
+        # が優先されることは表示しない (show はファイルの内容を見せる場所のため)。
+        if key == auto_switch.FILE_KEY:
+            enabled, switch_note = auto_switch.from_accounts({key: expected}, SERVICES)
+            if switch_note:
+                marker = "[auto-switch: 不正な値を含む — その指定は無効として扱われます]"
+            elif enabled:
+                marker = f"[auto-switch: {', '.join(sorted(enabled))}]"
+            else:
+                marker = "[auto-switch: 無効]"
             print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
             continue
         svc = _SERVICE_BY_KEY.get(key)
