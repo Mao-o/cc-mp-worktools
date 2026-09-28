@@ -23,6 +23,105 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.35.0
+
+path 形 rule (`!certs/aws.pem`) を**評価するファイルのある checkout 基準**で
+照合するようにした。main と linked worktree、worktree 同士のどこにあっても、
+同じ repo 相対 path なら同じ rule に一致する。**判定境界が両方向に変わる**:
+承認済みの path 形除外が worktree 側のコピーにも効くようになり (allow 側)、
+ユーザーが書いた path 形 include (`secrets/**`) が worktree 側のコピーも保護する
+ようになる (deny 側)。basename 形 rule・同じ checkout 内の判定・`[project:]`
+セクションの一致・repo 同梱 tier の読込先は変わらない。
+テスト件数: redact 1,513 → **1,534** / check 182 → **187**。
+
+### Fixed
+
+- **`$CLAUDE_PROJECT_DIR` が main を指したまま worktree のファイルを触ると、
+  承認済みの path 形除外が効かなかった**。path 形 rule は
+  `resolve_project_root` (`$CLAUDE_PROJECT_DIR` 優先) からの root 相対 path で
+  照合していたため、worktree のファイルは `.claude/worktrees/<name>/certs/aws.pem`
+  として比べられて一致しなかった。Stop の block・Read / Edit / Write / Grep /
+  Bash の deny がすべて出て、しかも**レシピが `!.claude/worktrees/<name>/...`
+  (worktree を作り直すと効かない使い捨てパス) を案内**していた。main の外に作った
+  worktree では「root 配下でない」扱いで、Stop のレシピは basename 形しか出な
+  かった。sub-agent の `isolation: worktree` がこの形で動く (CLI 2.1.283 で実測:
+  hook の root は main repo root、作業ディレクトリは
+  `<repo>/.claude/worktrees/agent-<id>`)。セッション途中で worktree に入る経路でも
+  同じ症状の報告がある (AWS の公開証明書を repo root 基準で承認したのに
+  worktree 側で検出される)
+- **逆方向も同根**: `claude --worktree` のセッション (root = worktree 自身) から
+  main や別 worktree のファイルを絶対パスで触ると「root 配下でない」で path 形
+  rule が一致しなかった
+- `_shared/patterns.py` に `resolve_path_rule_root(path, root)` を追加。`path` と
+  `root` が**同じ repository の別 checkout** なら、root の checkout 内での位置
+  (monorepo で `$CLAUDE_PROJECT_DIR` がサブディレクトリならその offset) を
+  `path` 側の checkout に移した値を返す。同じ repository かどうかは共有 git dir
+  (main の `.git` / worktree の `commondir` の解決先) を比べる (字面で一致しな
+  ければ `realpath` で実体を比べる — git は gitdir を絶対パスで書くので、symlink
+  経由で開いた main とは字面が食い違いうる)。`git` コマンドは呼ばない (stat と
+  小さなテキスト読みだけ)。Read / Edit / Write / Grep / Bash operand は評価する
+  ファイルの絶対パスで、Stop は `cwd` で呼び、**判定と除外レシピの両方**に同じ
+  root を使う
+- **latency**: 共有 git dir の解決は checkout の root が食い違うときだけ行う。
+  Bash は operand ごとに呼ぶため、`rules` に path 形 rule が 1 つも無ければ読み
+  替え自体を省く (既定 `patterns.txt` は basename 形だけなので、path 形を書いて
+  いない利用者には追加コストが無い)。path 形 rule があるときの上乗せは operand
+  200 個のコマンドで同じ checkout なら約 2ms、worktree で読み替えが起きると約
+  10ms (実測。省く前の素朴な実装では handler 全体が約 3 倍になっていた)
+- 読み替えないもの (0.34.x と同じ判定): 同じ checkout、submodule・入れ子の
+  別 repo (共有 git dir が違う)、管理領域が消えた (prune 前の) worktree・壊れた
+  `.git` ファイル、どの checkout にも属さない path / root、相対 path (Stop が渡す
+  「既に root 相対」の path)。Bash のコロン付き operand (`HEAD:x` 等) は従来どおり
+  path 形 rule の対象外のまま
+- `resolve_project_root` / matcher (`is_sensitive` / `root_relative`) は変えて
+  いない。前者を動かすと repo 同梱 tier の読込先と `[project:]` セクションの key
+  まで動くため、読み替えは呼出側で path ごとに行う
+
+### Changed (副次的な挙動変化)
+
+- 同じ checkout を symlink 経由の字面で指す `$CLAUDE_PROJECT_DIR` (またはファイル
+  側が symlink 経由) でも path 形 rule が一致するようになった。0.34.x までは
+  「文字列として root 配下にならない」ので一致しなかった (PATTERNS.md に明記して
+  いた制限)。checkout の同一性を共有 git dir の実体で判定するため。git の
+  checkout の外では従来どおり lexical
+
+### Docs
+
+- **0.32.0 の記述の訂正**: 「`claude --worktree` / `--bg` / sub-agent の
+  `isolation: worktree` はいずれも `$CLAUDE_PROJECT_DIR` が worktree 自身のパスに
+  なる」としていたが、実測できていたのは `claude --worktree` (CLI 2.1.250) だけ
+  で、sub-agent は **main repo root のまま** だった (CLI 2.1.283)。`--bg` と
+  セッション途中で worktree に入る経路は未実測。0.35.0 の読み替えはどちらの値でも
+  同じ結果になる。README / PATTERNS.md / `_shared/patterns.py` の docstring /
+  テストの docstring を直した
+- repo 同梱 tier が未 commit だと消えるのは `$CLAUDE_PROJECT_DIR` が worktree
+  自身を指すセッション (`claude --worktree`) に限ると明記した (main を指したままの
+  sub-agent は main 側のファイルを読む)。この挙動 (worktree 側でだけ tier を探す)
+  自体は 0.32.0 の意図どおりで変えていない
+
+### Tests
+
+- `redact-sensitive-reads/tests/test_worktree_path_rule_root.py` (21 件):
+  `resolve_path_rule_root` の単体 (nested / 外部 / 逆方向 / sibling / monorepo
+  offset / bare repo の worktree / 相対 gitdir / symlink 経由の root / gitdir の
+  字面が main と食い違う場合と、読み替えない側の同一 checkout / submodule /
+  入れ子の別 repo / stale worktree / 解決不能な入力) と、Read / Write / Grep /
+  Bash の handler 経路 (承認した 1 ファイルだけ allow、レシピが
+  `!certs/other.pem` で worktree のパスを含まない、path 形 include が worktree の
+  コピーを保護する、path 形 rule が無ければ Bash は読み替えを呼ばない)
+- `check-sensitive-files/tests/test_worktree_path_rule_root.py` (5 件): 実
+  `git worktree add` で nested / 外部 worktree を作り、`$CLAUDE_PROJECT_DIR` =
+  main のまま worktree で Stop を発火。worktree で案内されたレシピを書くと main /
+  各 worktree の全てで同じ 1 ファイルが報告から消えることも固定
+- 負テスト: 変更したソース (`_shared/patterns.py` / Stop の `__main__.py`) を
+  main に戻すと、Stop 側の新規テストは worktree を含む格子点がすべて assertion で
+  落ちる (3 テスト + subTest 2 件)。`claude --worktree` 形と main 単独の格子点は
+  修正前でも通る回帰ガード。mutation (守りたい条件を壊すと assertion で落ちるか):
+  読み替えを無効化 (常に root を返す) → redact 側 16 件 / 同一 repository 判定を
+  外す → submodule・入れ子の別 repo・stale worktree の 3 件 / `realpath` の
+  比較を外す → symlink の 2 件 / Bash の「path 形 rule が無ければ省く」を外す →
+  1 件
+
 ## 0.34.3
 
 ### Fixed

@@ -1052,7 +1052,8 @@ root 直下の secret を allow しうる。リモート pathspec / URI も基�
 途中に `/` を含めば root アンカーなので、合成パスに当たるのは `**/` で始まる
 rule だけ (過剰 deny 側に倒れる)。root は `_shared.patterns.resolve_project_root`
 (= `[project:]` セクションの key) をコマンド単位で 1 回解決して全 segment /
-operand で共有する。
+operand で共有し、operand が別 checkout (main ↔ worktree) にあるときだけ
+`resolve_path_rule_root` でその checkout に読み替える (0.35.0)。
 0.22.0 からは非 option トークンのうち **grep 系 / jq / awk / sed の第 1
 positional** (pattern / filter / script) と、**値が path ではない option の値**
 (`git log -S<string>` / `--grep=` / `--exclude=` / `-A NUM` 等) をコマンド別の
@@ -1343,7 +1344,9 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
   併記。root を解決できないときは basename 形のみ) と「このセッションでは同じ集合を
   再 block しない」注記を載せる。絶対パスは出さない (ヘッダーは環境変数名で示し、
   書き込む側が実パスに置き換える)。レシピの root は Read / Edit / Bash と同じ
-  `resolve_project_root(cwd)` (git toplevel ではない)。`git ls-files` の cwd 相対
+  `resolve_project_root(cwd)` (git toplevel ではない) で、cwd が別 checkout
+  (`$CLAUDE_PROJECT_DIR` が main のまま worktree で発火) なら
+  `resolve_path_rule_root` で cwd 側に読み替える (0.35.0)。`git ls-files` の cwd 相対
   path は `checker.root_offset` を前置して root 相対にする。`$CLAUDE_PROJECT_DIR` は Bash tool の環境で
   未設定なので unquoted echo だと空に展開され、quoted heredoc / Write だと literal
   に残る — どちらも一致しないため、`_parse_local_patterns_text` の

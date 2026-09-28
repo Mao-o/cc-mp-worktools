@@ -48,6 +48,7 @@ from _shared.patterns import (  # noqa: E402
     EXCLUDE_SCOPE_WARNING,
     exclude_recipe_lines,
     path_rule_for,
+    resolve_path_rule_root,
     resolve_project_root,
 )
 from budget import Deadline  # noqa: E402
@@ -909,8 +910,11 @@ def _main_impl() -> int:
         return 0
 
     # path 形 rule の基準 root (= [project:] セクションの key、0.24.0)。git の
-    # toplevel ではなく Read / Edit / Bash と同じ解決を使う (レシピの互換性)
-    root = resolve_project_root(cwd)
+    # toplevel ではなく Read / Edit / Bash と同じ解決を使う (レシピの互換性)。
+    # cwd が root と別の checkout (``$CLAUDE_PROJECT_DIR`` が main を指したまま
+    # worktree に入ったセッション等) なら cwd 側の checkout に読み替える (0.35.0)。
+    # 判定 (find_sensitive_files) とレシピ (root_offset_) の両方がこの root を使う
+    root = resolve_path_rule_root(cwd, resolve_project_root(cwd))
     sensitive = find_sensitive_files(cwd, rules, root=root, deadline=deadline)
     if not sensitive:
         # 予算切れで打ち切っていた場合、「機密なし」との区別が付かないので

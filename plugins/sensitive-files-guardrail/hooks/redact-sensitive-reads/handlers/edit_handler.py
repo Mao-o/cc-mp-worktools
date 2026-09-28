@@ -61,7 +61,7 @@ from core import logging as L
 from core import messages as M
 from core import output
 from _shared.matcher import is_sensitive, root_relative
-from _shared.patterns import resolve_project_root
+from _shared.patterns import resolve_path_rule_root, resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import classify, is_regular_directory, normalize
 from redaction.dotenv import redact_dotenv
@@ -177,8 +177,10 @@ def handle(envelope: dict, tool_label: str = "Edit/Write") -> dict:
             envelope,
         )
 
-    # root は [project:] セクションの key と同じ値 (path 形 rule の基準、0.24.0)
-    root = resolve_project_root(cwd)
+    # root は [project:] セクションの key と同じ値 (path 形 rule の基準、0.24.0)。
+    # 別 checkout (main ↔ worktree) のファイルはその checkout 基準に読み替える
+    # (0.35.0)。下の除外案内 (relpath) も同じ root で作る
+    root = resolve_path_rule_root(str(path), resolve_project_root(cwd))
     if not is_sensitive(path, rules, root=root):
         return output.make_allow()
     # 除外案内を path 形 (1 ファイルだけ) にするための root 相対 path。root 不明 /

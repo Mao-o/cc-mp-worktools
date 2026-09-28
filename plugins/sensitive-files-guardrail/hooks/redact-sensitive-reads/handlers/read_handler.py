@@ -17,7 +17,7 @@ from _shared.npmrc import (
     bytes_auth_scan,
     is_npmrc_basename,
 )
-from _shared.patterns import resolve_project_root
+from _shared.patterns import resolve_path_rule_root, resolve_project_root
 from core.patterns import load_patterns
 from core.safepath import classify, normalize, open_regular
 from redaction.engine import MAX_INLINE_BYTES, redact, redact_large_file
@@ -83,8 +83,10 @@ def handle(envelope: dict) -> dict:
         return output.ask_or_deny(M.read_ask("normalize_failed"), envelope)
 
     basename = path.name
-    # root は [project:] セクションの key と同じ値 (path 形 rule の基準、0.24.0)
-    if not is_sensitive(path, rules, root=resolve_project_root(cwd)):
+    # root は [project:] セクションの key と同じ値 (path 形 rule の基準、0.24.0)。
+    # 別 checkout (main ↔ worktree) のファイルはその checkout 基準に読み替える (0.35.0)
+    root = resolve_path_rule_root(str(path), resolve_project_root(cwd))
+    if not is_sensitive(path, rules, root=root):
         return output.make_allow()
 
     cls = classify(path)

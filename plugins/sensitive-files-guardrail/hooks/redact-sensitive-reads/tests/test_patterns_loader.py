@@ -410,10 +410,12 @@ def _make_worktree(tmp: Path, *, main: str = "main", name: str = "wt") -> tuple[
 
 class TestWorktreeProjectKeys(BaseWithIsolatedHome):
     """0.32.0 (内部バックログ): worktree セッションで ``[project:<main repo>]``
-    セクションが効くこと。``claude --worktree`` / ``--bg`` / sub-agent の
-    ``isolation: worktree`` は別 checkout でセッションを開き
-    ``$CLAUDE_PROJECT_DIR`` も worktree 自身のパスになるため、0.15.0 の
-    プロジェクト固有除外が worktree 作業では黙って無効化されていた。"""
+    セクションが効くこと。``claude --worktree`` は別 checkout でセッションを開き
+    ``$CLAUDE_PROJECT_DIR`` も worktree 自身のパスになる (CLI 2.1.250 実測) ため、
+    0.15.0 のプロジェクト固有除外が worktree 作業では黙って無効化されていた。
+    sub-agent の ``isolation: worktree`` は ``$CLAUDE_PROJECT_DIR`` が main の
+    まま (CLI 2.1.283 実測) で、そちらの path 形 rule は
+    test_worktree_path_rule_root.py (0.35.0) が扱う。"""
 
     def setUp(self):
         super().setUp()
