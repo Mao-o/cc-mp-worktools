@@ -84,11 +84,26 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
    python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show
    ```
 
-   - `gh auth status` の各 host に、切替先 (accounts.local.json の github の期待値) の
-     アカウントが出ているか。Active でなくてよい。出ていなければ、ユーザーに
-     `! gh auth login` で一度ログインしてもらう (対話が要るので Claude は実行しない)
-   - show に `github:` の行があるか (値は隠れたままでよい)。無ければ期待値が未設定
-     なので、先に `/verify-cloud-account:accounts-init` で github を設定する
+   - show に `github:` の行があるか。無ければ期待値が未設定なので、先に
+     `/verify-cloud-account:accounts-init` で github を設定する
+   - **切替先 (github の期待値) が gh にログイン済みか**を確かめる。show は既定で値を
+     隠すので、このままでは `gh auth status` のどのアカウントが切替先か分からない。
+     `AskUserQuestion` で「期待値を表示して、ログイン済みのアカウントと照合しますか?」
+     と聞く (step 3 の範囲の質問と同じ呼び出しにまとめてよい):
+     - `値を表示して照合する (Recommended)` → 次を実行し、期待値のアカウントが
+       `gh auth status` の該当 host に出ているかを確かめる (Active でなくてよい。
+       グローバル既定で検証している場合は `--path <グローバル既定のパス>` も付ける)
+
+       ```bash
+       python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show --service github --show-values
+       ```
+
+     - `表示せずに進める` → `gh auth status` に出ているアカウントの一覧だけを示し、
+       期待アカウントが含まれているかはユーザーに確かめてもらう
+
+     期待アカウントがログインしていなければ、ユーザーに `! gh auth login` で一度
+     ログインしてもらう (対話が要るので Claude は実行しない)。ログインしないまま
+     有効にしても、hook は切り替えずに従来どおり deny し、その理由を添える
    - show が `no accounts.local.json found at ...` と「グローバル既定 ... が存在します
      (hook はこのファイルで検証します)」を出したら、このプロジェクトは自前のファイルを
      持たずグローバル既定で検証されている。step 3 では「このプロジェクトだけ」の
@@ -131,6 +146,9 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
    - 「環境変数 VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH=... が設定されています」と出たら、
      環境変数がファイルより優先される。値 (特に `'off'`) をユーザーに伝え、
      どちらを残すか確かめる
+   - 「期待値が未設定です」「期待値の形が不正です」と出たら、このままでは自動切替は
+     働かない。`/verify-cloud-account:accounts-init` (未設定) か
+     `/verify-cloud-account:accounts-show` (不正な値の確認) で期待値を直す
 
 5. **全プロジェクト** の場合:
    - `~/.claude/settings.json` を読み、**既存の `env` オブジェクトにキーを 1 つ

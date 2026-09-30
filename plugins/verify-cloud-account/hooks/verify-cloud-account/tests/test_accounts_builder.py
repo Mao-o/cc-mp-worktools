@@ -3482,9 +3482,30 @@ class TestAutoSwitchSubcommand(BaseBuilder):
 
     def test_warns_when_the_service_has_no_expected_value(self):
         self._write_new({"aws": "123456789012"})
-        code, out, err = self._run(["auto-switch", "--enable"])
+        code, out, err = self._run(["auto-switch", "--enable", "--commit"])
         self.assertEqual(code, 0, err)
         self.assertIn("github の期待値が未設定です", out)
+        self.assertNotIn("次の gh コマンドから効きます", out)
+
+    def test_warns_when_the_expected_value_is_malformed(self):
+        """形の不正な期待値では hook が切替先を決められない — 「効きます」と言わない。"""
+        for value in (None, "", "  ", {}, {"github.com": ""}, {"github.com": None}, 123):
+            with self.subTest(value=value):
+                self._write_new({"github": value})
+                code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertIn("github の期待値の形が不正です", out)
+                self.assertNotIn("次の gh コマンドから効きます", out)
+                self.assertEqual(self._read_new()["$auto_switch"], ["github"])
+
+    def test_valid_expected_values_get_no_warning(self):
+        for value in ("Mao-o", {"github.com": "Mao-o", "ghe.example.com": "corp"}):
+            with self.subTest(value=value):
+                self._write_new({"github": value})
+                code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("注意:", out)
+                self.assertIn("次の gh コマンドから効きます", out)
 
     def test_discloses_that_the_env_var_wins(self):
         self._write_new({"github": "Mao-o"})
@@ -3492,10 +3513,12 @@ class TestAutoSwitchSubcommand(BaseBuilder):
         self.assertEqual(code, 0, err)
         self.assertNotIn(auto_switch.ENV_VAR, out)
         with mock.patch.dict(os.environ, {auto_switch.ENV_VAR: "off"}):
-            code, out, err = self._run(["auto-switch", "--enable"])
+            code, out, err = self._run(["auto-switch", "--enable", "--commit"])
         self.assertEqual(code, 0, err)
         self.assertIn(f"{auto_switch.ENV_VAR}='off'", out)
         self.assertIn("環境変数を優先", out)
+        # env がファイルの指定を上書きしている間は、ファイルの指定は効かない
+        self.assertNotIn("次の gh コマンドから効きます", out)
 
     def test_refuses_when_a_legacy_path_coexists(self):
         before = self._write_new({"github": "Mao-o"})

@@ -1597,6 +1597,23 @@ def _auto_switch_missing_file_message(target: _Target) -> str:
     return "\n".join(lines)
 
 
+def _auto_switch_expected_problem(existing: dict[str, Any], service_key: str) -> str | None:
+    """有効にしても自動切替が働かない期待値の状態 (未設定 / 形が不正) の説明。
+
+    形が不正な期待値 (`null` / `""` / 空 dict 等) では hook が切替先を決められず、
+    切り替えずに deny する。形の判定は migrate と同じ寛容さ (`strict_keys=False` =
+    verify() が受理する形) に揃える。
+    """
+    if service_key not in existing:
+        return f"{service_key} の期待値が未設定です"
+    shape_error = _validate_entry_shape(
+        _SERVICE_BY_KEY[service_key], existing[service_key], strict_keys=False
+    )
+    if shape_error:
+        return f"{service_key} の期待値の形が不正です ({shape_error})"
+    return None
+
+
 def _cmd_auto_switch(
     args: argparse.Namespace,
     stdout: IO[str],
@@ -1666,14 +1683,18 @@ def _cmd_auto_switch(
     if current_note and action != "unchanged":
         print(f"(既存の値の解釈: {current_note})", file=stdout)
 
-    if args.enable and service_key not in existing:
+    expected_problem = (
+        _auto_switch_expected_problem(existing, service_key) if args.enable else None
+    )
+    if expected_problem:
         print(
-            f"\n注意: {service_key} の期待値が未設定です。自動切替は期待値のアカウントへ"
-            f"切り替えるので、init / set で {service_key} を設定するまで働きません。",
+            f"\n注意: {expected_problem}。自動切替は期待値のアカウントへ切り替えるので、"
+            f"init / set で {service_key} を直すまで働きません。",
             file=stdout,
         )
     env_raw = os.environ.get(auto_switch.ENV_VAR, "")
-    if env_raw.strip():
+    env_overrides = bool(env_raw.strip())
+    if env_overrides:
         print(
             f"\n注意: 環境変数 {auto_switch.ENV_VAR}={env_raw!r} が設定されています。"
             "hook はこのファイルの指定より環境変数を優先します。",
@@ -1692,7 +1713,9 @@ def _cmd_auto_switch(
             print(f"error: 書き込みに失敗しました: {e}", file=stderr)
             return 1
         print(f"\nwritten: {target.path}", file=stdout)
-        if new_value is not None:
+        # 「効きます」は本当に効くときだけ言う。期待値が働かない形のときや、環境変数が
+        # ファイルの指定を上書きしているときは、上の注意が理由を説明している。
+        if new_value is not None and not expected_problem and not env_overrides:
             print(
                 "hook はこのファイルを毎回読むので、次の gh コマンドから効きます "
                 "(再起動は不要)。切替は同じマシンの全ターミナル・セッションの gh に"
