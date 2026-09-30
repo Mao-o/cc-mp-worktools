@@ -40,7 +40,8 @@ verify-cloud-account/
 ├── skills/                         Agent Skill (Claude 向けプロンプト)
 │   ├── accounts-init/SKILL.md
 │   ├── accounts-show/SKILL.md
-│   └── accounts-migrate/SKILL.md
+│   ├── accounts-migrate/SKILL.md
+│   └── auto-switch/SKILL.md        自動切替の有効化 / 無効化 (v0.16.1)
 └── hooks/
     ├── hooks.json                  PreToolUse:Bash の単一エントリ
     └── verify-cloud-account/
@@ -474,6 +475,11 @@ opt-in (`VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `"$auto_switch"` → 無効) で�
   deny を置き換える補助が deny そのものを消す
 - 通知 (`auto_switch.notice`) は allow でも必ず返す (`additionalContext`)。同じ行の
   別 service が deny した場合も deny 文面に添える
+- **設定の入口 (v0.16.1)**: `"$auto_switch"` は builder の `auto-switch` サブコマンドが
+  書く (予約キーのうち builder が書くのはこれだけ。builder の docstring の D15)。
+  値の解釈は hook と同じ `auto_switch.from_accounts` に委ねるので、builder が「有効」と
+  書いたものを hook が「不正」と読む食い違いは起きない。Claude が頼まれたときの手順は
+  `skills/auto-switch/SKILL.md` (D30)
 
 ## サービスを追加する
 
@@ -918,6 +924,51 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   mode / `switching_here` / ガード / cache 破棄 / トークン env / all-or-nothing /
   予算確認 (3 箇所) / 再検証 / 記録 / 通知 / builder の表示 の各条件が新しいテストで
   守られていることを確認した
+
+### 0.16.1 (自動切替を Claude から設定できるようにする)
+
+**D30: 機能の入口は「人間が読む README」だけでなく、Claude が頼まれたときに届く場所にも置く**
+
+0.16.0 は有効化の方法を README (人間向け) にしか書いておらず、「自動切り替えして」と
+頼まれた Claude が正しく動けなかった:
+
+- Claude が skill を読み込むかは description で決まるが、3 つの skill の description の
+  どれにも自動切替が無い。本文 (accounts-init / accounts-show) の記述は読まれない
+- 読まれても本文は「README の自動切替節を案内する」だけで、手順も README の場所も無い
+- プロジェクト単位の `"$auto_switch"` は、Claude が accounts.local.json を直接触らない
+  約束 (D1) と、builder に予約キーを書くサブコマンドが無いことの両方で書けない
+
+対応:
+
+- **専用の skill (`auto-switch`) を足す。** description は明示の依頼 (「自動切り替え
+  して」「gh の切替で止まるのをやめたい」等) にだけ反応させ、「Claude から勧めない」は
+  保つ。既存 skill の description に trigger を足す案より良いのは、(1) skill が
+  あること自体が「この版に機能がある」ことを示す (0.15 系に env を足しても何も
+  起きない、を避ける) (2) accounts-show の description は diff 表示の話で、有効化と
+  混ぜると反応の判定がぼやける、の 2 点
+- **builder に `auto-switch` サブコマンドを足す** (書くのは `"$auto_switch"` だけ)。
+  `"$mode"` / `"$readonly"` は検証を弱めるキーなので引き続き書かない — 見張られている
+  側の Claude がスクリプト 1 回で自分の検証を切れる形にしない。`"$auto_switch"` は
+  保護を弱めない (切替先は期待値、切替後に再検証)
+- accounts.local.json が無いときは作らずに拒否する。`"$auto_switch"` だけのファイルは
+  グローバル既定を覆い隠す (期待値を書いていない service がすべて未設定 = deny)。
+  拒否時の案内は「init で作る / `--path <グローバル既定>` / 環境変数」の 3 つで、skill の
+  手順 (グローバル既定で検証しているプロジェクトでの範囲の選び方) もこの 3 択に揃える。
+  「全プロジェクトの環境変数を勧める」に寄せると、グローバル既定のファイルだけで
+  足りる利用者に、自前のファイルを持つプロジェクトまで巻き込む範囲を選ばせてしまう
+- 全プロジェクト向けは `~/.claude/settings.json` の `env` を skill の手順で編集する。
+  builder には書かせない (D2: builder は accounts.local.json 専用の writer)。commit
+  される `.claude/settings.json` には書かない (個人の選好が他の開発者にも効く)
+- skill の `allowed-tools` (確認なしで使えるツールの付与。制限ではない) は
+  `gh auth status` と builder の呼び出しだけに絞る。settings.json の編集は通常の権限確認を
+  通す。CLI 2.1.284 の `-p` + default モードでの実測: `/verify-cloud-account:auto-switch`
+  で起動したときは 2 つとも確認なしで通った (builder の形は `${CLAUDE_PLUGIN_ROOT}` の
+  置換と引用符を含むが一致した)。Claude が Skill ツールで読み込んだ場合は、付与の書き方に
+  関係なく (Bash を丸ごと許可しても) 付与が効かず、通常の権限確認になった。どちらも安全側。
+  なお sensitive-files-guardrail のような hook が `ask` を返すと、付与より hook が優先される
+  (default モードでは builder の呼び出しに確認が出る)
+- 手順のコマンドは 1 つずつ、書いたとおりに実行させる。`;` / `&&` での連結や `2>&1` を
+  足すと付与の形から外れる (nested の実測で、連結して実行する例があった)
 
 ## 既知の制限
 

@@ -51,8 +51,8 @@ from dataclasses import dataclass
 from core import budget, cache
 
 ENV_VAR = "VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH"
-# accounts.local.json の予約キー。`$mode` / `$readonly` と同じく builder は書かない
-# (手編集する)。
+# accounts.local.json の予約キー。`$mode` / `$readonly` (builder は書かない手編集キー)
+# と違い、builder の `auto-switch` サブコマンドが書く (builder の docstring の D15)。
 FILE_KEY = "$auto_switch"
 OFF = "off"
 

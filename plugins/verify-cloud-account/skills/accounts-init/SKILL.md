@@ -45,16 +45,17 @@ verify-cloud-account plugin の accounts.local.json を builder スクリプト
   作る場合だけ `--path <file>` で明示する
 - stdout は既定で値を表示しない。明示の `--show-values` を付けたときだけ
   露出する (AskUserQuestion で承認を得てから切り替える)
-- **`$` で始まる予約キー (`"$mode"` / `"$readonly"` / `"$auto_switch"`) は
-  builder が値を書かない = 手編集する前提のキー**。`init` / `set` / `remove` /
-  `migrate` は既存の値を壊さず保持するが、設定・変更のサブコマンドは持たない。
-  プロジェクト単位で `warn` / `off` にしたいときは、ユーザーに「エディタで
-  `"$mode": "warn"` を追記する」か「環境変数 `VERIFY_CLOUD_ACCOUNT_MODE=warn` を
-  使う」ことを案内する
+- **`$` で始まる予約キー (`"$mode"` / `"$readonly"` / `"$auto_switch"`) は、
+  `init` / `set` / `remove` / `migrate` が既存の値を壊さず保持する**。
+  `"$mode"` / `"$readonly"` は検証を弱めるキーなので builder は値を書かない
+  (手編集する前提)。プロジェクト単位で `warn` / `off` にしたいときは、ユーザーに
+  「エディタで `"$mode": "warn"` を追記する」か「環境変数
+  `VERIFY_CLOUD_ACCOUNT_MODE=warn` を使う」ことを案内する
 - **`"$auto_switch"` (自動切替) は Claude から勧めない。** 有効にすると hook が
   gh のアクティブアカウントを切り替え、その変更は同じマシンの他のターミナル・
-  セッションにも効く。ユーザー自身が「切替で止まるのをやめたい」と明示したときだけ、
-  README の「自動切替」節 (有効化の方法と副作用) を案内する
+  セッションにも効く。ユーザー自身が有効化 / 無効化を頼んだときは
+  `/verify-cloud-account:auto-switch` スキルに従う (範囲の確認と、builder の
+  `auto-switch` サブコマンドでの書込を含む)
 
 ## 前提
 

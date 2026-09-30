@@ -148,10 +148,10 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 - **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損 /
   複数パス競合の deny はファイルを読む前に確定するため、そこを `warn` / `off` に
   弱められるのは `VERIFY_CLOUD_ACCOUNT_MODE` のみ
-- `"$mode"` は **builder が値を書かない予約キー**の 1 つ (ほかに `"$readonly"` /
-  `"$auto_switch"`)。`init` / `set` / `remove` / `migrate` は既存の値を壊さず
-  保持するが、設定・変更は**エディタで手編集**する (builder のサブコマンドは
-  service キーだけを扱う)。現在値は `/verify-cloud-account:accounts-show` が
+- `"$mode"` は **builder が値を書かない予約キー** (`"$readonly"` も同じ)。検証を
+  弱めるキーなので、hook に見張られている Claude がスクリプトで切れないようにして
+  いる。`init` / `set` / `remove` / `migrate` は既存の値を壊さず保持するが、設定・
+  変更は**エディタで手編集**する。現在値は `/verify-cloud-account:accounts-show` が
   `[mode]` として表示する
 - 不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は **enforce として扱い**、
   deny 文面にその旨を添える (黙って無視すると「off にしたのに deny される」の
@@ -174,10 +174,14 @@ gh のアカウント不一致で deny する代わりに、**hook が期待ア�
 他のターミナル・Claude Code セッションの gh もそのアカウントで動くようになる**。
 この副作用を受け入れる場合だけ有効にする。
 
+Claude Code に「gh の自動切り替えを有効にして」のように頼むと、
+`/verify-cloud-account:auto-switch` skill (v0.16.1) が副作用を説明し、範囲
+(このプロジェクト / 全プロジェクト) を確かめてから設定する。自分で設定する場合、
 指定方法は 2 つあり、**環境変数が優先**される:
 
 ```jsonc
-// ~/.claude/settings.json (全プロジェクト) / .claude/settings.json (プロジェクト)
+// ~/.claude/settings.json (全プロジェクト)
+// または .claude/settings.local.json (このプロジェクトだけ。commit しない個人設定)
 { "env": { "VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH": "github" } }
 ```
 
@@ -189,6 +193,9 @@ gh のアカウント不一致で deny する代わりに、**hook が期待ア�
 }
 ```
 
+commit される `.claude/settings.json` (プロジェクトの共有設定) には書かない。自動切替は
+各自のマシン全体に効く個人の選好で、共有設定に入れると他の開発者にも効いてしまう。
+
 - 解決順: `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `accounts.local.json` の
   `"$auto_switch"` → 無効。env の `off` はファイルの指定も含めて無効にする
 - 値は **service 名の並び** (env はカンマ区切り)。対応しているのは現状 **`github`
@@ -197,8 +204,25 @@ gh のアカウント不一致で deny する代わりに、**hook が期待ア�
 - 不正な値・対応していない service 名は**無効として扱い** (= 従来どおり deny)、
   deny 文面にその旨を添える。env に綴り間違いがあってもファイル側の指定には
   落とさない (「env で止めたつもりが切り替わる」を作らない)
-- `"$auto_switch"` も builder が値を書かない予約キー (手編集)。
-  `/verify-cloud-account:accounts-show` が `[auto-switch: github]` と表示する
+- `"$auto_switch"` は builder の `auto-switch` サブコマンド (v0.16.1) で書ける
+  (予約キーのうち builder が書くのはこれだけ。保護を弱めない — 切替先は期待値の
+  アカウントに限られ、切り替えた後に再検証する)。手編集してもよい。
+  `/verify-cloud-account:accounts-show` が `[auto-switch: github]` と表示する:
+
+  ```bash
+  # 有効化 (--dry-run で変更内容を確かめてから --commit)
+  python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
+    auto-switch --enable --commit
+  # 無効化 (有効な service が残らなければキーごと消す)
+  python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" \
+    auto-switch --disable --commit
+  ```
+
+  対象は `set` と同じく hook が読むファイル (親ディレクトリ遡及込み)。hook は
+  このファイルを毎回読むので、再起動しなくても次の gh コマンドから効く。
+  accounts.local.json がまだ無いときは作らずに拒否する (`"$auto_switch"` だけの
+  ファイルは[グローバル既定](#グローバル既定-v0130)を覆い隠し、期待値を書いていない
+  service がすべて未設定 = deny になるため)
 - [グローバル既定](#グローバル既定-v0130) のファイルに書いた `"$auto_switch"` が
   効くのは、自前の `accounts.local.json` を持たないプロジェクトだけ (`"$mode"` と
   同じ)。全プロジェクトで有効にするなら環境変数を使う
@@ -255,6 +279,7 @@ worktree 同士など) では見送らない。記録は
 | `/verify-cloud-account:accounts-init` | 新規プロジェクトで accounts.local.json を対話生成 |
 | `/verify-cloud-account:accounts-show` | 既存値と CLI 現在値の diff を表示 |
 | `/verify-cloud-account:accounts-migrate` | 旧パスから新パスへの統合 |
+| `/verify-cloud-account:auto-switch` | [自動切替](#自動切替-auto-switch--v0160)の有効化 / 無効化 (頼まれたときだけ使い、Claude からは勧めない) |
 
 各 skill は description のトリガから Claude が自発的にロードする。明示的に
 呼び出したいときは `/verify-cloud-account:<skill-name>` を使う。
