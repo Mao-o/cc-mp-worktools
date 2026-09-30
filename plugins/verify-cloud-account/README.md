@@ -197,7 +197,12 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
 各自のマシン全体に効く個人の選好で、共有設定に入れると他の開発者にも効いてしまう。
 
 - 解決順: `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `accounts.local.json` の
-  `"$auto_switch"` → 無効。env の `off` はファイルの指定も含めて無効にする
+  `"$auto_switch"` → 無効。env の `off` はファイルの指定も含めて無効にする。env を
+  消しただけでは、各プロジェクトの `"$auto_switch"` は有効なまま残る
+- settings.json / settings.local.json の `env` を変えたとき (有効化・`off`・削除) は、
+  Claude Code を再起動した後の新しいセッションから確実に効く (起動中のセッションには
+  古い値が残りうる)。`accounts.local.json` の `"$auto_switch"` は hook が毎回読むので
+  再起動は不要
 - 値は **service 名の並び** (env はカンマ区切り)。対応しているのは現状 **`github`
   のみ**。`true` のような一括指定は受け付けない (対応 service を増やしたときに
   既存の設定が黙って広がらないようにするため)

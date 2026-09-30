@@ -160,10 +160,18 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
 
 6. **無効化**:
    - このプロジェクト: `auto-switch --disable --dry-run` で確かめてから `--commit`
-     (有効な service が残らなければ `"$auto_switch"` のキーごと消える)
-   - 全プロジェクト: `~/.claude/settings.json` の `env` から
-     `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` を消す。値を `"off"` にすると、各プロジェクトの
-     `"$auto_switch"` も含めてまとめて無効になる
+     (有効な service が残らなければ `"$auto_switch"` のキーごと消える。再起動は不要)
+   - 全プロジェクト向けの有効化を取り消す: `~/.claude/settings.json` の `env` から
+     `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` を消す。**各プロジェクトの `"$auto_switch"` は
+     有効なまま残る**
+   - どこでも無効にする: `~/.claude/settings.json` の `env` で値を `"off"` にする
+     (キーが無ければ足す)。`"$auto_switch"` を書いたプロジェクトも含めて無効になる
+   - 依頼が「全部やめて」なら `"off"`、「全プロジェクト向けの設定だけ外して」なら削除。
+     どちらか読めなければ `AskUserQuestion` で確かめる。settings.json を書く前に、
+     変える 1 行をユーザーに見せて承認を得る (step 5 と同じ)
+   - settings.json を変えたとき (削除 / `"off"`) は、Claude Code を再起動した後の新しい
+     セッションから確実に効く。起動中のセッションには古い値が残りうるので、再起動を
+     ユーザーに伝える
    - どちらで有効になっているか分からなければ、両方を確かめる (環境変数が優先)
 
 7. **効いているかの確かめ方をユーザーに伝える**: 次に gh の不一致が起きたとき、
