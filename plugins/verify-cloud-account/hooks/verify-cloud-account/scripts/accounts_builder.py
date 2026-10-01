@@ -3,10 +3,10 @@
 accounts.local.json の編集は builder 経由で行う運用に統一する。動作の安定や
 フォーマット統一のため、書込先パス・JSON フォーマット・既存キーの扱い・
 stdout の値表示制御を builder 側で一元管理する。Agent Skill (`accounts-init`
-`accounts-show` `accounts-migrate`) が対話フローを提供し、Claude は skill
-経由で builder を呼ぶ。
+`accounts-show` `accounts-migrate` `auto-switch`) が対話フローを提供し、Claude
+は skill 経由で builder を呼ぶ。
 
-設計判断 (D1〜D13):
+設計判断 (D1〜D15):
 
 - **D1**: builder が唯一の正規経路。書込パスの固定、JSON フォーマットの
   一貫化、既存キーの温存、CLI 現在値との突合、旧パス統合を一元管理する。
@@ -119,6 +119,15 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   `--path <file>` は解決を飛ばして対象を明示する escape hatch
   (worktree 専用設定を意図的に作る場合)。受け付ける配置は `_PATH_TIERS` に
   限る (D2 参照)。
+- **D15**: `auto-switch` サブコマンド (v0.16.1) は予約キーのうち
+  `"$auto_switch"` だけを書く。`"$mode"` / `"$readonly"` は検証を弱めるキー
+  (`off` / `warn` で止めなくなる) なので builder からは書かない — hook に
+  見張られている側の Claude が、スクリプト 1 回で自分の検証を切れないように
+  する (手編集 / env は利用者の操作として残す)。`"$auto_switch"` は保護を
+  弱めない: 切替先は期待値のアカウントに限られ、切替後に再検証して一致した
+  ときだけ通す。対象ファイルが無いときは作らずに拒否する (`"$auto_switch"`
+  だけのファイルはグローバル既定を覆い隠し、期待値を書いていない service が
+  すべて未設定 = deny になる)。
 """
 from __future__ import annotations
 
@@ -139,6 +148,10 @@ from services import ALL as SERVICES  # noqa: E402
 
 _SERVICE_NAMES = [svc.ACCOUNT_KEY for svc in SERVICES]
 _SERVICE_BY_KEY = {svc.ACCOUNT_KEY: svc for svc in SERVICES}
+# 自動切替 (`core.auto_switch`) に対応している service。`auto-switch --service` の選択肢。
+_AUTO_SWITCH_SERVICE_NAMES = [
+    svc.ACCOUNT_KEY for svc in SERVICES if auto_switch.supports(svc)
+]
 
 _VALUE_HIDDEN_MARK = "(value hidden. use --show-values to reveal)"
 
@@ -1563,6 +1576,160 @@ def _cmd_migrate(
     return 0
 
 
+def _auto_switch_missing_file_message(target: _Target) -> str:
+    """対象ファイルが無いときの拒否理由 (+ グローバル既定 / env の案内)。"""
+    lines = [
+        f"error: {target.path} がありません。自動切替は期待値のアカウントへ切り替える"
+        "機能なので、先に init で github の期待値を設定してください: "
+        'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/'
+        'accounts_builder.py" init --service github --dry-run'
+    ]
+    global_path = paths.global_accounts_file()
+    if target.origin == "fresh" and global_path is not None and global_path.is_file():
+        lines.append(
+            f"hook は現在グローバル既定 {global_path} で検証しています。そのファイルで"
+            f"有効にするなら --path {global_path} を付けて再実行してください。"
+        )
+    lines.append(
+        f"全プロジェクトで有効にするなら、環境変数 {auto_switch.ENV_VAR} を使います "
+        "(settings.json の env)。"
+    )
+    return "\n".join(lines)
+
+
+def _auto_switch_expected_problem(existing: dict[str, Any], service_key: str) -> str | None:
+    """有効にしても自動切替が働かない期待値の状態 (未設定 / 形が不正) の説明。
+
+    形が不正な期待値 (`null` / `""` / 空 dict 等) では hook が切替先を決められず、
+    切り替えずに deny する。形の判定は migrate と同じ寛容さ (`strict_keys=False` =
+    verify() が受理する形) に揃える。
+    """
+    if service_key not in existing:
+        return f"{service_key} の期待値が未設定です"
+    shape_error = _validate_entry_shape(
+        _SERVICE_BY_KEY[service_key], existing[service_key], strict_keys=False
+    )
+    if shape_error:
+        return f"{service_key} の期待値の形が不正です ({shape_error})"
+    return None
+
+
+def _cmd_auto_switch(
+    args: argparse.Namespace,
+    stdout: IO[str],
+    stderr: IO[str],
+) -> int:
+    """予約キー `"$auto_switch"` を有効化 / 無効化する (D15)。
+
+    書くのは `"$auto_switch"` だけ。どの service が有効かの解釈は dispatcher と同じ
+    `auto_switch.from_accounts` に委ね、有効な集合が変わらず不正な値も含まないときは
+    書き換えない (`"github"` を `["github"]` に直すだけの差分を作らない)。無効化で
+    有効な service が残らなければキーごと消す (`"off"` と未設定は同じ扱いのため)。
+    """
+    service_key = args.service
+    key = auto_switch.FILE_KEY
+    project_dir = _project_dir()
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=True)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+
+    # `"$auto_switch"` だけのファイルを新しく作らない。作ると、そのファイルが
+    # グローバル既定を覆い隠し、期待値を書いていない service がすべて未設定 (deny)
+    # になる (`_global_default_note` と同じ shadowing)。
+    if not target.path.is_file():
+        print(_auto_switch_missing_file_message(target), file=stderr)
+        return 1
+
+    if _refuse_if_legacy_paths_exist("auto-switch", target, stderr):
+        return 1
+
+    try:
+        existing = _load_existing(target.path)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+
+    current_enabled, current_note = auto_switch.from_accounts(existing, SERVICES)
+    current = set(current_enabled or ())
+    wanted = current | {service_key} if args.enable else current - {service_key}
+    new_value: Any = sorted(wanted) if wanted else None
+
+    if wanted == current and current_note is None:
+        action = "unchanged"
+    elif key not in existing:
+        action = "add"
+    elif new_value is None:
+        action = "remove"
+    else:
+        action = "update"
+
+    print(_target_note(target, project_dir), file=stdout)
+    print(f"=== changes to {target.path} ===", file=stdout)
+    # 予約キーの値は機密ではない (show もそのまま出す) ので、--show-values に関係なく出す。
+    if action == "unchanged":
+        if key in existing:
+            _print_change_line("= unchanged", key, existing[key], True, stdout)
+        else:
+            print(f"= unchanged: {key} (未設定 = 無効)", file=stdout)
+    elif action == "add":
+        _print_change_line("+ add", key, new_value, True, stdout)
+    elif action == "remove":
+        _print_change_line("- remove", key, existing[key], True, stdout)
+    else:
+        _print_change_line("- current", key, existing[key], True, stdout)
+        _print_change_line("+ new", key, new_value, True, stdout)
+    if current_note and action != "unchanged":
+        print(f"(既存の値の解釈: {current_note})", file=stdout)
+
+    expected_problem = (
+        _auto_switch_expected_problem(existing, service_key) if args.enable else None
+    )
+    if expected_problem:
+        print(
+            f"\n注意: {expected_problem}。自動切替は期待値のアカウントへ切り替えるので、"
+            f"init / set で {service_key} を直すまで働きません。",
+            file=stdout,
+        )
+    env_raw = os.environ.get(auto_switch.ENV_VAR, "")
+    env_overrides = bool(env_raw.strip())
+    if env_overrides:
+        print(
+            f"\n注意: 環境変数 {auto_switch.ENV_VAR}={env_raw!r} が設定されています。"
+            "hook はこのファイルの指定より環境変数を優先します。",
+            file=stdout,
+        )
+
+    if args.commit and action != "unchanged":
+        updated = dict(existing)
+        if new_value is None:
+            updated.pop(key, None)
+        else:
+            updated[key] = new_value
+        try:
+            _write_json(target.path, updated)
+        except OSError as e:
+            print(f"error: 書き込みに失敗しました: {e}", file=stderr)
+            return 1
+        print(f"\nwritten: {target.path}", file=stdout)
+        # 「効きます」は本当に効くときだけ言う。期待値が働かない形のときや、環境変数が
+        # ファイルの指定を上書きしているときは、上の注意が理由を説明している。
+        if new_value is not None and not expected_problem and not env_overrides:
+            print(
+                "hook はこのファイルを毎回読むので、次の gh コマンドから効きます "
+                "(再起動は不要)。切替は同じマシンの全ターミナル・セッションの gh に"
+                "効きます。",
+                file=stdout,
+            )
+        _ensure_project_claude_md(target, stdout)
+        _ensure_gitignore_entry(target, stdout)
+    elif not args.commit:
+        print("\n(dry-run; pass --commit to write)", file=stdout)
+
+    return 0
+
+
 _PATH_HELP = (
     "対象ファイルを明示指定して 3-tier lookup / 親ディレクトリ遡及を"
     "スキップする (worktree 専用設定を意図的に作る場合の escape hatch)。"
@@ -1694,6 +1861,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stdout に値を露出する (デフォルトは隠蔽)",
     )
 
+    p_auto = sub.add_parser(
+        "auto-switch",
+        help='予約キー "$auto_switch" (自動切替) を有効化 / 無効化 (D15)',
+    )
+    mx_auto_state = p_auto.add_mutually_exclusive_group(required=True)
+    mx_auto_state.add_argument(
+        "--enable", action="store_true", help="--service の自動切替を有効にする"
+    )
+    mx_auto_state.add_argument(
+        "--disable",
+        action="store_true",
+        help="--service の自動切替を無効にする (有効な service が残らなければキーを消す)",
+    )
+    p_auto.add_argument(
+        "--service",
+        default="github",
+        choices=_AUTO_SWITCH_SERVICE_NAMES,
+        help="対象サービス (自動切替に対応しているものだけ。既定: github)",
+    )
+    mx_auto = p_auto.add_mutually_exclusive_group()
+    mx_auto.add_argument("--dry-run", action="store_true")
+    mx_auto.add_argument("--commit", action="store_true")
+    _add_path_arg(p_auto)
+
     return parser
 
 
@@ -1730,6 +1921,8 @@ def main(
         return _cmd_set(args, stdout, stderr)
     if args.command == "remove":
         return _cmd_remove(args, stdout, stderr)
+    if args.command == "auto-switch":
+        return _cmd_auto_switch(args, stdout, stderr)
 
     parser.print_help(file=stderr)
     return 2

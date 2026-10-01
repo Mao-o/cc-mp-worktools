@@ -28,8 +28,9 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import paths  # noqa: E402
+from core import auto_switch, paths  # noqa: E402
 from scripts import accounts_builder as builder  # noqa: E402
+from services import ALL as SERVICES  # noqa: E402
 from services import github  # noqa: E402
 
 _ISOLATION = None
@@ -3263,7 +3264,8 @@ class TestGlobalDefaultIsDisclosed(BaseBuilder):
 
 
 class TestAutoSwitchKey(BaseBuilder):
-    """予約キー `"$auto_switch"` (v0.16.0) — builder は書かないが、壊さず表示する。"""
+    """予約キー `"$auto_switch"` (v0.16.0) — init / set / remove / migrate は壊さず保持し、
+    show が表示する (値を書くのは `auto-switch` サブコマンドだけ。TestAutoSwitchSubcommand)。"""
 
     def _write_new(self, data: dict):
         self.new_dir.mkdir(parents=True, exist_ok=True)
@@ -3314,6 +3316,230 @@ class TestAutoSwitchKey(BaseBuilder):
         self.assertEqual(
             self._read_new(), {"github": "Mao-o", "$auto_switch": ["github"]}
         )
+
+
+class TestAutoSwitchSubcommand(BaseBuilder):
+    """`auto-switch --enable / --disable` (v0.16.1, builder の D15)。
+
+    書くのは `"$auto_switch"` だけで、他のキー (`"$mode"` / `"$readonly"` を含む) は
+    値ごと保つ。対象は hook が読むファイル (親遡及込み) に揃え、ファイルが無いときは
+    作らない。有効かどうかの解釈は hook と同じ `auto_switch.from_accounts` に揃う。
+    """
+
+    def _write_new(self, data: dict) -> str:
+        self.new_dir.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(data)  # builder の書式 (indent=2) と違う = 書き換えを検出できる
+        self._new_path().write_text(text, encoding="utf-8")
+        return text
+
+    def _read_new(self) -> dict:
+        return json.loads(self._new_path().read_text(encoding="utf-8"))
+
+    def _raw_new(self) -> str:
+        return self._new_path().read_text(encoding="utf-8")
+
+    def _hook_view(self) -> tuple:
+        return auto_switch.from_accounts(self._read_new(), SERVICES)
+
+    def test_enable_dry_run_does_not_write(self):
+        before = self._write_new({"github": "Mao-o"})
+        code, out, err = self._run(["auto-switch", "--enable"])
+        self.assertEqual(code, 0, err)
+        self.assertIn('+ add: $auto_switch -> ["github"]', out)
+        self.assertIn("(dry-run; pass --commit to write)", out)
+        self.assertEqual(self._raw_new(), before)
+
+    def test_enable_commit_writes_only_the_reserved_key(self):
+        original = {
+            "github": "Mao-o",
+            "aws": "123456789012",
+            "$mode": "warn",
+            "$readonly": "deny",
+        }
+        self._write_new(original)
+        code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_new(), {**original, "$auto_switch": ["github"]})
+        self.assertIn("written:", out)
+        self.assertIn("再起動は不要", out)
+        self.assertEqual(self._hook_view(), (frozenset({"github"}), None))
+
+    def test_show_reports_what_enable_wrote(self):
+        self._write_new({"github": "Mao-o"})
+        self._run(["auto-switch", "--enable", "--commit"])
+        code, out, _err = self._run(["show"])
+        self.assertEqual(code, 0)
+        self.assertIn("[auto-switch: github]", out)
+
+    def test_enable_keeps_equivalent_values_untouched(self):
+        """`"github"` (文字列形) も有効 — `["github"]` に直すだけの書き換えをしない。"""
+        for raw in (["github"], "github"):
+            with self.subTest(raw=raw):
+                before = self._write_new({"github": "Mao-o", "$auto_switch": raw})
+                code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertIn("= unchanged: $auto_switch", out)
+                self.assertNotIn("written:", out)
+                self.assertEqual(self._raw_new(), before)
+
+    def test_enable_replaces_off_and_invalid_values(self):
+        for raw in ("off", True, [], ["gcloud"], ["gcloud", "github"]):
+            with self.subTest(raw=raw):
+                self._write_new({"github": "Mao-o", "$auto_switch": raw})
+                code, _out, err = self._run(["auto-switch", "--enable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self._read_new()["$auto_switch"], ["github"])
+                self.assertEqual(self._hook_view(), (frozenset({"github"}), None))
+
+    def test_enable_explains_how_the_old_value_was_read(self):
+        self._write_new({"github": "Mao-o", "$auto_switch": ["gcloud"]})
+        code, out, err = self._run(["auto-switch", "--enable"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("既存の値の解釈", out)
+        self.assertIn("gcloud", out)
+
+    def test_disable_removes_the_key_and_keeps_the_rest(self):
+        self._write_new({"github": "Mao-o", "$auto_switch": ["github"], "$mode": "warn"})
+        code, out, err = self._run(["auto-switch", "--disable", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("- remove: $auto_switch", out)
+        self.assertEqual(self._read_new(), {"github": "Mao-o", "$mode": "warn"})
+        self.assertEqual(self._hook_view(), (None, None))
+        self.assertNotIn("再起動は不要", out)
+
+    def test_disable_is_a_no_op_when_already_disabled(self):
+        for data, fragment in (
+            ({"github": "Mao-o"}, "= unchanged: $auto_switch (未設定 = 無効)"),
+            ({"github": "Mao-o", "$auto_switch": "off"}, '= unchanged: $auto_switch -> "off"'),
+            ({"github": "Mao-o", "$auto_switch": []}, "= unchanged: $auto_switch -> []"),
+        ):
+            with self.subTest(data=data):
+                before = self._write_new(data)
+                code, out, err = self._run(["auto-switch", "--disable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertIn(fragment, out)
+                self.assertEqual(self._raw_new(), before)
+
+    def test_disable_cleans_up_an_invalid_value(self):
+        """不正な値は hook から見て無効だが、残すと show が毎回警告し続ける。"""
+        self._write_new({"github": "Mao-o", "$auto_switch": True})
+        code, _out, err = self._run(["auto-switch", "--disable", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_new(), {"github": "Mao-o"})
+
+    def test_refuses_without_a_file_and_creates_none(self):
+        """`"$auto_switch"` だけのファイルは、期待値の無い service を全部 deny にする。"""
+        code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("init --service github", err)
+        self.assertIn(auto_switch.ENV_VAR, err)
+        self.assertEqual(out, "")
+        self.assertFalse(self.new_dir.exists())
+
+    def test_refusal_points_to_the_global_default_when_it_is_in_use(self):
+        home = Path(self.tmp) / "fake_home"
+        (home / ".claude" / "verify-cloud-account").mkdir(parents=True)
+        patcher = mock.patch.object(Path, "home", staticmethod(lambda: home))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        global_path = paths.global_accounts_file()
+        global_path.write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+
+        code, _out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn(f"--path {global_path}", err)
+        self.assertFalse(self.new_dir.exists())
+
+        code, _out, err = self._run(
+            ["auto-switch", "--enable", "--commit", "--path", str(global_path)]
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            json.loads(global_path.read_text(encoding="utf-8"))["$auto_switch"], ["github"]
+        )
+
+    def test_explicit_path_to_a_missing_file_is_refused_too(self):
+        path = self._new_path()
+        code, _out, err = self._run(
+            ["auto-switch", "--enable", "--commit", "--path", str(path)]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("がありません", err)
+        self.assertFalse(path.exists())
+
+    def test_ancestor_file_is_updated_and_no_child_file_is_created(self):
+        self._write_new({"github": "Mao-o"})
+        child = self.project_dir / "worktrees" / "feature-x"
+        child.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(child)}):
+            code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("継承", out)
+        self.assertEqual(self._read_new()["$auto_switch"], ["github"])
+        self.assertFalse(
+            (child / ".claude" / "verify-cloud-account" / "accounts.local.json").exists()
+        )
+
+    def test_warns_when_the_service_has_no_expected_value(self):
+        self._write_new({"aws": "123456789012"})
+        code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("github の期待値が未設定です", out)
+        self.assertNotIn("次の gh コマンドから効きます", out)
+
+    def test_warns_when_the_expected_value_is_malformed(self):
+        """形の不正な期待値では hook が切替先を決められない — 「効きます」と言わない。"""
+        for value in (None, "", "  ", {}, {"github.com": ""}, {"github.com": None}, 123):
+            with self.subTest(value=value):
+                self._write_new({"github": value})
+                code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertIn("github の期待値の形が不正です", out)
+                self.assertNotIn("次の gh コマンドから効きます", out)
+                self.assertEqual(self._read_new()["$auto_switch"], ["github"])
+
+    def test_valid_expected_values_get_no_warning(self):
+        for value in ("Mao-o", {"github.com": "Mao-o", "ghe.example.com": "corp"}):
+            with self.subTest(value=value):
+                self._write_new({"github": value})
+                code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("注意:", out)
+                self.assertIn("次の gh コマンドから効きます", out)
+
+    def test_discloses_that_the_env_var_wins(self):
+        self._write_new({"github": "Mao-o"})
+        code, out, err = self._run(["auto-switch", "--enable"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(auto_switch.ENV_VAR, out)
+        with mock.patch.dict(os.environ, {auto_switch.ENV_VAR: "off"}):
+            code, out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{auto_switch.ENV_VAR}='off'", out)
+        self.assertIn("環境変数を優先", out)
+        # env がファイルの指定を上書きしている間は、ファイルの指定は効かない
+        self.assertNotIn("次の gh コマンドから効きます", out)
+
+    def test_refuses_when_a_legacy_path_coexists(self):
+        before = self._write_new({"github": "Mao-o"})
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        code, _out, err = self._run(["auto-switch", "--enable", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("旧パス", err)
+        self.assertEqual(self._raw_new(), before)
+
+    def test_arguments(self):
+        self.assertEqual(builder._AUTO_SWITCH_SERVICE_NAMES, ["github"])
+        self._write_new({"github": "Mao-o"})
+        for argv in (
+            ["auto-switch"],
+            ["auto-switch", "--enable", "--disable"],
+            ["auto-switch", "--enable", "--service", "aws"],
+            ["auto-switch", "--enable", "--dry-run", "--commit"],
+        ):
+            with self.subTest(argv=argv):
+                code, _out, _err = self._run(argv)
+                self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

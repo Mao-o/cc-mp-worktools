@@ -36,11 +36,13 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
   `--show-values` で再実行する。
 - 予約キーは値ごと表示される (service ではないので CLI 突合の対象外):
   `"$mode"` は `[mode]`、`"$readonly"` は `[readonly policy]`、`"$auto_switch"` は
-  `[auto-switch: <有効な service>]` の行になる。**いずれも builder が値を書かない
-  = 手編集する前提のキー**なので、変更したいと言われたら「エディタで直接書く」か
-  環境変数 (`VERIFY_CLOUD_ACCOUNT_MODE` / `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH`) を
-  案内する (builder にサブコマンドは無い)。環境変数が設定されていればファイルより
-  優先されるが、show はファイルの内容だけを表示する。
+  `[auto-switch: <有効な service>]` の行になる (`--service` で絞り込むと予約キーの
+  行は出ない)。`"$mode"` / `"$readonly"` は builder が値を書かない (手編集する
+  前提の) キーなので、変更したいと言われたら「エディタで直接書く」か環境変数
+  `VERIFY_CLOUD_ACCOUNT_MODE` を案内する。`"$auto_switch"` の変更を頼まれたら
+  `/verify-cloud-account:auto-switch` スキルに従う。環境変数
+  (`VERIFY_CLOUD_ACCOUNT_MODE` / `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH`) が設定されて
+  いればファイルより優先されるが、show はファイルの内容だけを表示する。
 
 ## 引数
 

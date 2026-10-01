@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.16.1
+
+### Added: 自動切替を Claude から設定する入口
+
+0.16.0 は自動切替の有効化の方法を README にしか書いておらず、「自動切り替えして」と
+頼まれた Claude が手順にたどり着けなかった (どの skill の description にも自動切替が
+無く、本文も「README を案内する」だけ)。プロジェクト単位の `"$auto_switch"` は、
+Claude が accounts.local.json を直接触らない約束のため書けなかった。
+
+- **skill `/verify-cloud-account:auto-switch` を追加。** 明示の依頼 (「自動切り替え
+  して」「gh の切替で止まるのをやめたい」等) にだけ反応し、Claude からは勧めない。
+  副作用 (切替はマシン全体の gh に効く) の説明 → `gh auth status` でログイン済みの
+  確認 → 範囲 (このプロジェクト / 全プロジェクト) の確認 → 設定、の順に進める。
+  全プロジェクトは `~/.claude/settings.json` の `env` に 1 行足す (commit される
+  `.claude/settings.json` には書かない)。skill の `allowed-tools` (確認なしで使える
+  ツールの付与) は `gh auth status` と builder の呼び出しだけに絞り、settings.json の
+  編集は通常の権限確認を通す
+- **builder に `auto-switch --enable / --disable` サブコマンドを追加。**
+  `"$auto_switch"` を書く (予約キーのうち builder が書くのはこれだけ。`"$mode"` /
+  `"$readonly"` は検証を弱めるキーなので引き続き手編集)。`--dry-run` / `--commit` /
+  `--path` と対象ファイルの決め方 (親ディレクトリ遡及) は `set` と同じ。値の解釈は
+  hook と同じ関数に委ね、有効な集合が変わらないときは書き換えない。無効化で有効な
+  service が残らなければキーごと消す
+- accounts.local.json がまだ無いときは作らずに exit 1 で拒否する
+  (`"$auto_switch"` だけのファイルはグローバル既定を覆い隠し、期待値を書いていない
+  service がすべて未設定 = deny になるため)。init / グローバル既定 (`--path`) /
+  環境変数の経路を案内する
+- 環境変数 `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` が設定されていれば、ファイルより
+  優先されることを出力で知らせる。期待値が未設定か形が不正 (`null` / `""` / 空
+  オブジェクト等。hook が切替先を決められない) なら注意を出す。「次の gh コマンドから
+  効きます」は、期待値が有効で環境変数による上書きも無いときだけ言う
+- skill は、切替先 (期待値) が gh にログイン済みかを照合する前に、値を表示してよいかを
+  AskUserQuestion で確かめる (builder の show は既定で値を隠すため)
+
+### Changed
+
+- README の設定例で、プロジェクト単位の env の置き場所を `.claude/settings.json`
+  (commit される共有設定) から `.claude/settings.local.json` に直した
+- accounts-init / accounts-show の skill と README の「予約キーは builder が書かない」
+  を、`"$auto_switch"` だけは `auto-switch` サブコマンドで書く、に訂正
+- plugin の description に自動切替と auto-switch skill を追記 (skill の本数は書かない)
+- README の自動切替の節に、settings の `env` について次を明記:
+  - 値を足す・変える (有効化・`off`) と起動中のセッションにも反映されるが、キーを
+    消しても再起動するまで有効なまま (すぐ止めたいなら `off`)
+  - env を消しただけでは、各プロジェクトの `"$auto_switch"` は有効なまま残る
+  - 同じキーは、プロジェクトの設定 (`.claude/settings.local.json` /
+    `.claude/settings.json`) の `env` が `~/.claude/settings.json` より優先される
+
+### Tests
+
+- builder の `TestAutoSwitchSubcommand` (有効化 / 無効化 / 冪等 / 不正値の置換と
+  掃除 / ファイルが無いときの拒否 / グローバル既定 / 親ディレクトリ遡及 / 旧パス
+  との同居 / env の開示 / 期待値が未設定・不正のときの注意 / 引数)。1,182 → 1,201 件
+
 ## 0.16.0
 
 ### Added: 自動切替 (auto-switch、opt-in)
