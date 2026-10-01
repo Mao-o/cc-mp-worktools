@@ -210,7 +210,9 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
   足しても消しても次の gh コマンドから効く
 - 値は **service 名の並び** (env はカンマ区切り)。対応しているのは現状 **`github`
   のみ**。`true` のような一括指定は受け付けない (対応 service を増やしたときに
-  既存の設定が黙って広がらないようにするため)
+  既存の設定が黙って広がらないようにするため)。aws / gcloud / firebase は CLI の
+  公式の仕組みで[プロジェクトごとに固定](#プロジェクトごとにアカウントを固定する-公式の方法--v0170)
+  できるので、自動切替は足さない
 - 不正な値・対応していない service 名は**無効として扱い** (= 従来どおり deny)、
   deny 文面にその旨を添える。env に綴り間違いがあってもファイル側の指定には
   落とさない (「env で止めたつもりが切り替わる」を作らない)
@@ -282,6 +284,69 @@ worktree 同士など) では見送らない。記録は
 - 別アカウントで作業するセッションを同時に動かすなら、ガードで deny になる場面が
   残る ([既知の制限](#既知の制限))
 
+## プロジェクトごとにアカウントを固定する (公式の方法) — v0.17.0
+
+プロジェクトごとに別のアカウントを使う運用では、切り替えるより、**そのリポジトリでは
+最初から正しいアカウントで動く**ように固定する方が安全で手間も少ない。マシン全体の
+状態を変えないので、並行して動いている別のリポジトリの作業にも影響しない。
+aws / gcloud / firebase には CLI 自身に公式の仕組みがあるので、VCA は独自に切り替えず、
+その仕組みを案内する (照合はこれまでどおり続ける)。
+
+| CLI | 公式の仕組み | 書く場所 | 効く範囲 |
+|---|---|---|---|
+| aws | `AWS_PROFILE` | `.claude/settings.local.json` の `env` | そのリポジトリ (全 worktree 共通) |
+| gcloud | `CLOUDSDK_ACTIVE_CONFIG_NAME` (名前付き構成)。一致する構成が無ければ `CLOUDSDK_CORE_PROJECT` / `CLOUDSDK_CORE_ACCOUNT` | 同上 | 同上 |
+| kubectl | `KUBECONFIG` (そのリポジトリ用の kubeconfig。skill と `pin-env` は未対応なので手で書く) | 同上 | 同上 |
+| firebase | `firebase use <alias>` (アカウントは `firebase login:use <email>`) | firebase-tools が作業ディレクトリごとに記録 | そのディレクトリ |
+| gh | プロジェクトごとに安全に分けられる公式の方法が無い | — | [自動切替](#自動切替-auto-switch--v0160) (マシン全体) を使う |
+
+```jsonc
+// <リポジトリのルート>/.claude/settings.local.json (commit しない個人設定)
+{
+  "env": {
+    "AWS_PROFILE": "dev-admin",
+    "CLOUDSDK_ACTIVE_CONFIG_NAME": "work"
+  }
+}
+```
+
+Claude Code に「このリポジトリでは aws を dev-admin で使いたい」「プロジェクトごとに
+アカウントを自動で使い分けたい」のように頼むと、`/verify-cloud-account:project-accounts`
+skill が期待値から固定する値を出し (builder の `pin-env`。読み取り専用で、
+settings.local.json は書かない)、書く前に確認してから設定する。
+
+- **書き込み先**: Claude Code は `.claude/settings.local.json` を git リポジトリの
+  ルートから読み、worktree からも main checkout のルートのファイルを使う (Claude Code
+  の docs。`claude -p` で実測)。1 回書けば全 worktree に効く。git の外・ルートが
+  ホームディレクトリ・Windows などでは起動したディレクトリのファイルを読むので、
+  `pin-env` は書き込み先を決めずに理由を出す
+- **単位はリポジトリ**。サブディレクトリや 1 つの worktree だけ別のアカウント、は
+  できない (firebase を除く)
+- commit される `.claude/settings.json` には書かない (個人の選好が他の開発者にも効く)
+- **優先順位**: コマンドの行頭に付けた値 (`AWS_PROFILE=x aws ...`) > settings の
+  `env` > ターミナルで export した値
+- **反映**: 値を足す・変えると、保存した時点で起動中のセッションにも反映される。
+  キーを消しても起動中のセッションには残り、再起動するまで有効なまま (Claude Code の
+  仕様)
+- **`/cd` で別のリポジトリへ移ると、前のリポジトリの `env` が残る** (書いていない
+  キーは前の値のまま)。使う CLI のキーはリポジトリごとに全部書いておく。書き漏れても、
+  VCA の照合で期待値と違えば止まる
+- **gcloud は構成名で固定する方を勧める**。`CLOUDSDK_ACTIVE_CONFIG_NAME` なら VCA は
+  その構成の設定ファイルを直接読めるが、`CLOUDSDK_CORE_*` があると検証のたびに
+  `gcloud config get-value` を起動する (1 回 1 秒前後、dict 期待値では 2 回)。
+  account まで固定するなら、その account はログイン済み (`gcloud auth list` に出る)
+  であること
+- **aws**: 同じアカウントに profile が複数あると role (権限) が違いうるので、どれに
+  するかは自分で選ぶ。固定してもログインはしない (SSO のトークンが切れていれば
+  `aws sso login --profile <profile>`)
+- **firebase**: project を選ぶ環境変数が無い (公式 docs に記載なし)。`firebase use`
+  の記録は作業ディレクトリごとなので、別の worktree では最初に 1 回要ることがある。
+  VCA は firebase のアカウントは検証しない
+- 検証の成功 cache は、アカウントを決める環境変数の値もキーに含める (v0.17.0)。
+  固定した値を変えた直後でも、前の値での成功で通らない
+- 対話セッションでの workspace trust との関係は実測していない (Claude Code の docs は、
+  プロジェクトの `env` をワークスペースを trust した後に適用すると書いている)
+
 ## Agent Skill
 
 | skill | 用途 |
@@ -290,6 +355,7 @@ worktree 同士など) では見送らない。記録は
 | `/verify-cloud-account:accounts-show` | 既存値と CLI 現在値の diff を表示 |
 | `/verify-cloud-account:accounts-migrate` | 旧パスから新パスへの統合 |
 | `/verify-cloud-account:auto-switch` | [自動切替](#自動切替-auto-switch--v0160)の有効化 / 無効化 (頼まれたときだけ使い、Claude からは勧めない) |
+| `/verify-cloud-account:project-accounts` | aws / gcloud / firebase の[プロジェクトごとの固定](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) (公式の仕組みを使う) |
 
 各 skill は description のトリガから Claude が自発的にロードする。明示的に
 呼び出したいときは `/verify-cloud-account:<skill-name>` を使う。
@@ -726,9 +792,12 @@ subprocess には反映されず deny される。
 これは harness 仕様起因で plugin 側では解決できない。通したい場合の回避策:
 
 1. **インライン env** (上記): `AWS_PROFILE=prod aws ...` と行頭に付ける (最も手軽・確実)
-2. **`.claude/settings.json` の `env`**: Claude プロセスの env に設定する公式機能。
-   hook subprocess も親環境を継承するため効くと考えられる
-   (例: `{"env": {"AWS_PROFILE": "prod"}}`、要セッション再起動・本 plugin では未実測)
+2. **`.claude/settings.local.json` の `env`**: Claude プロセスの env に設定する
+   Claude Code の公式機能で、hook の検証にも同じ値が届く (v0.17.0 で `claude -p` に
+   より実測)。保存した時点で起動中のセッションにも反映される。プロジェクトごとに
+   固定するならこれ — [プロジェクトごとにアカウントを固定する](#プロジェクトごとにアカウントを固定する-公式の方法--v0170)
+   (例: `{"env": {"AWS_PROFILE": "prod"}}`。commit される `.claude/settings.json` には
+   書かない)
 3. **起動時 env**: `AWS_PROFILE=prod claude` で Claude 自体を起動する
 
 ## 拡張フォーマット (object 形式)
@@ -948,6 +1017,12 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
   **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) / entry の epoch が
   現在と異なる
 - **失敗 (deny) 状態はキャッシュしない** — 切り替え後は即座に再検証が走る
+- キーには行頭の inline env と context option (`--profile` 等) に加え、**hook
+  プロセスの env のうちアカウントを決める変数** (`AWS_*` / `CLOUDSDK_*` /
+  `KUBECONFIG` / `GH_TOKEN` / `GH_CONFIG_DIR` 等) を含める (v0.17.0)。settings の
+  `env` で[プロジェクトごとに固定](#プロジェクトごとにアカウントを固定する-公式の方法--v0170)
+  した値を変えると、保存した時点で起動中のセッションに反映されるため、前の値での
+  成功を使い回さない。値はキーの hash にだけ使い、cache ファイルには書かない
 
 ### ローカル設定ファイルからの現在値取得 (v0.13.0)
 

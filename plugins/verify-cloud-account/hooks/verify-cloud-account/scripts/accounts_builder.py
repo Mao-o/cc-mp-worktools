@@ -3,10 +3,10 @@
 accounts.local.json の編集は builder 経由で行う運用に統一する。動作の安定や
 フォーマット統一のため、書込先パス・JSON フォーマット・既存キーの扱い・
 stdout の値表示制御を builder 側で一元管理する。Agent Skill (`accounts-init`
-`accounts-show` `accounts-migrate` `auto-switch`) が対話フローを提供し、Claude
-は skill 経由で builder を呼ぶ。
+`accounts-show` `accounts-migrate` `auto-switch` `project-accounts`) が対話フローを
+提供し、Claude は skill 経由で builder を呼ぶ。
 
-設計判断 (D1〜D15):
+設計判断 (D1〜D16):
 
 - **D1**: builder が唯一の正規経路。書込パスの固定、JSON フォーマットの
   一貫化、既存キーの温存、CLI 現在値との突合、旧パス統合を一元管理する。
@@ -128,6 +128,16 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   ときだけ通す。対象ファイルが無いときは作らずに拒否する (`"$auto_switch"`
   だけのファイルはグローバル既定を覆い隠し、期待値を書いていない service が
   すべて未設定 = deny になる)。
+- **D16**: `pin-env` サブコマンド (v0.17.0) は**読み取り専用**。期待値から、
+  プロジェクトごとの固定 (aws の `AWS_PROFILE` / gcloud の
+  `CLOUDSDK_ACTIVE_CONFIG_NAME` 等を `.claude/settings.local.json` の `env` に書く、
+  firebase は `firebase use`) に使う値を出す (`scripts/pin_env.py`)。
+  settings.local.json は**書かない** — D2 のとおり builder の書込先は
+  accounts.local.json だけで、Claude Code の設定を書き換える経路を builder に
+  持たせない (見張られている側の Claude がスクリプト 1 回で自分の環境を変えられる
+  形にしない)。書き込みは skill の手順で、ユーザーの承認を得てから行う。
+  `~/.aws/config` や gcloud の構成ファイルを Claude に直接読ませないために
+  builder が読み、出すのは profile 名・構成名・alias 名だけ (期待値は D3 で隠す)。
 """
 from __future__ import annotations
 
@@ -144,6 +154,7 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from core import auto_switch, mode, paths, tiers  # noqa: E402
+from scripts import pin_env  # noqa: E402
 from services import ALL as SERVICES  # noqa: E402
 
 _SERVICE_NAMES = [svc.ACCOUNT_KEY for svc in SERVICES]
@@ -1738,6 +1749,85 @@ _PATH_HELP = (
 )
 
 
+def _cmd_pin_env(
+    args: argparse.Namespace,
+    stdout: IO[str],
+    stderr: IO[str],
+) -> int:
+    """プロジェクトごとの固定に使う値を出す (読み取り専用。D16)。"""
+    project_dir = _project_dir()
+    try:
+        target = _resolve_target(project_dir, args.path, require_new=False)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+
+    if target.origin == "explicit":
+        found = [(target.kind, target.path)] if target.path.is_file() else []
+    else:
+        found = paths.discover_all_accounts_files(str(target.anchor))
+    if not found:
+        print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
+        print(
+            f"error: {target.path} がありません。期待値が無いので、固定する値を"
+            "決められません。先に accounts-init で期待値を設定してください。",
+            file=stderr,
+        )
+        global_path = paths.global_accounts_file()
+        if global_path is not None and global_path.is_file() and global_path != target.path:
+            print(
+                f"グローバル既定 {global_path} で検証しているなら、--path {global_path}"
+                " を付けて再実行してください。",
+                file=stderr,
+            )
+        return 1
+    if len(found) >= 2:
+        print(
+            "error: 複数のパスに accounts.local.json が存在します (fail-closed).",
+            file=stderr,
+        )
+        for kind, path in found:
+            print(f"  - {path} ({kind})", file=stderr)
+        print("run `accounts_builder.py migrate --commit` to integrate.", file=stderr)
+        return 1
+
+    _kind, path = found[0]
+    try:
+        existing = _load_existing(path)
+    except _BuilderError as e:
+        print(f"error: {e}", file=stderr)
+        return e.exit_code
+
+    if args.service:
+        services = list(dict.fromkeys(args.service))
+    else:
+        services = [name for name in pin_env.PIN_SERVICES if name in existing]
+    if not services:
+        print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
+        print(
+            "error: aws / gcloud / firebase の期待値がありません"
+            " (プロジェクトごとの固定を提案できるのはこの 3 つ)。",
+            file=stderr,
+        )
+        return 1
+
+    plans = [pin_env.plan_for(name, existing.get(name), project_dir) for name in services]
+    settings_path, settings_note = pin_env.settings_local_target(project_dir)
+    file_env, file_problem = pin_env.settings_env(settings_path)
+    print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
+    for line in pin_env.render(
+        plans,
+        settings_path,
+        settings_note,
+        os.environ,
+        file_env,
+        file_problem,
+        show_values=args.show_values,
+    ):
+        print(line, file=stdout)
+    return 0
+
+
 def _add_path_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--path", default=None, metavar="FILE", help=_PATH_HELP)
 
@@ -1745,7 +1835,7 @@ def _add_path_arg(parser: argparse.ArgumentParser) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="accounts_builder",
-        description="accounts.local.json の唯一の書込経路 (D1-D14).",
+        description="accounts.local.json の唯一の書込経路 (D1-D16).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1885,6 +1975,20 @@ def _build_parser() -> argparse.ArgumentParser:
     mx_auto.add_argument("--commit", action="store_true")
     _add_path_arg(p_auto)
 
+    p_pin = sub.add_parser(
+        "pin-env",
+        help="プロジェクトごとの固定に使う env を期待値から提案する (読み取り専用。D16)",
+    )
+    p_pin.add_argument(
+        "--service",
+        action="append",
+        default=None,
+        choices=list(pin_env.PIN_SERVICES),
+        help="対象 (繰り返し指定可。省略時は期待値のある aws / gcloud / firebase すべて)",
+    )
+    _add_path_arg(p_pin)
+    p_pin.add_argument("--show-values", action="store_true")
+
     return parser
 
 
@@ -1923,6 +2027,8 @@ def main(
         return _cmd_remove(args, stdout, stderr)
     if args.command == "auto-switch":
         return _cmd_auto_switch(args, stdout, stderr)
+    if args.command == "pin-env":
+        return _cmd_pin_env(args, stdout, stderr)
 
     parser.print_help(file=stderr)
     return 2

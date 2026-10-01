@@ -821,8 +821,15 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # は cands に入らず、inline env が違う切替セグメントは別 target になるため、
         # cands だけを見ると `gh auth login && gh pr create` の成功が cache される。
         switching_here = svc in switching
+        # 検証に渡すのと同じ env (hook プロセスの env + 行頭の inline env) のうち、
+        # CLI がどのアカウントで動くかを決める変数。プロジェクトごとの固定 (settings の
+        # `env` の `AWS_PROFILE` 等) は保存した時点で起動中のセッションに反映されるので、
+        # cache キーに含めないと値を変えた直後に前の値での成功で通る。読む側と書く側で
+        # 同じ snapshot を使う。
+        ident = cache.identity_env(svc, {**os.environ, **(inline_env or {})})
         if not switching_here and cache.get_success(
-            svc_name, project_dir, entry, accounts_mtime, inline_env, ctx
+            svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
+            identity_env=ident,
         ):
             if trace is not None:
                 trace["cache_hit"][svc_name] = True
@@ -883,7 +890,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         elif not switching_here:
             cache.set_success(
                 svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
-                epoch=epoch,
+                epoch=epoch, identity_env=ident,
             )
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""

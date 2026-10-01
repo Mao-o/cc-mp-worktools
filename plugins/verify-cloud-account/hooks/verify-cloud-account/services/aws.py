@@ -108,6 +108,12 @@ GLOBAL_FLAGS = frozenset({
 # `aws --profile other s3 rm ...` を hook の既定 profile で検証すると
 # 「検証は既定 / 実行は other」の false-allow になるため、検証もその profile で行う。
 CONTEXT_OPTIONS = {"--profile": "profile"}
+# CLI がどのアカウントで動くかを決める env (成功 cache のキーに含める。
+# services/__init__.py の IDENTITY_ENV_* 契約)。profile・認証情報・config の場所は
+# すべて `AWS_` で始まるので prefix で拾う (`AWS_REGION` 等も入るが、再検証が
+# 増えるだけで安全側)。
+IDENTITY_ENV_VARS = frozenset({"HOME"})
+IDENTITY_ENV_PREFIXES = ("AWS_",)
 ACCOUNT_KEY = "aws"
 
 # deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。
