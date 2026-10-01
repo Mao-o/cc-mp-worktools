@@ -122,8 +122,8 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
      `"$auto_switch": ["github"]` を builder で書く。次の gh コマンドから効く
      (再起動は不要)
    - `全プロジェクト` — `~/.claude/settings.json` の `env` に
-     `"VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH": "github"` を足す。Claude Code を
-     再起動した後の新しいセッションから効く
+     `"VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH": "github"` を足す。保存した時点で、
+     このマシンで起動中の Claude Code セッションにも反映される
    - `やめる`
 
 4. **このプロジェクトだけ** の場合、dry-run で変更内容を確かめてから書く
@@ -156,23 +156,44 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
      キーを消したりしない。ファイルが無ければ
      `{"env": {"VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH": "github"}}` で作る
    - 書く前に、足す 1 行と置き場所をユーザーに見せて承認を得る
-   - 書いた後、「Claude Code を再起動した後の新しいセッションから効く」と伝える
+   - 書いた後、「保存した時点で、起動中のセッションも含めて効く (再起動は不要)」と
+     伝える
+   - プロジェクトの設定 (`.claude/settings.local.json` / `.claude/settings.json`) の
+     `env` に同じキーがあると、そのプロジェクトではそちらが優先される (step 6)。
+     このプロジェクトにあれば、その値もユーザーに伝える
 
-6. **無効化**:
-   - このプロジェクト: `auto-switch --disable --dry-run` で確かめてから `--commit`
-     (有効な service が残らなければ `"$auto_switch"` のキーごと消える。再起動は不要)
-   - 全プロジェクト向けの有効化を取り消す: `~/.claude/settings.json` の `env` から
-     `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` を消す。**各プロジェクトの `"$auto_switch"` は
-     有効なまま残る**
+6. **無効化**。環境変数は accounts.local.json の `"$auto_switch"` より優先される。
+   環境変数を Claude Code の設定の `env` で指定した場合、同じキーはプロジェクトの設定
+   (`.claude/settings.local.json` / `.claude/settings.json`) が `~/.claude/settings.json`
+   より優先される。先に、どこで有効になっているかを確かめる:
+   - `~/.claude/settings.json` と、このプロジェクトの `.claude/settings.local.json` /
+     `.claude/settings.json` の `env` に `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` があるか
+     (読めなければユーザーに確かめてもらう)
+   - accounts.local.json の `"$auto_switch"` は、service で絞り込まない `show` に
+     `[auto-switch: github]` と出るかで分かる。自前のファイルを持たずグローバル既定で
+     検証しているプロジェクトでは、`show` と下の `--disable` に
+     `--path <グローバル既定のパス>` を付ける
+
+   そのうえで、どれを変えるかをユーザーに確かめてから変える:
+   - このプロジェクトの accounts.local.json: `auto-switch --disable --dry-run` で
+     確かめてから `--commit` (有効な service が残らなければ `"$auto_switch"` のキーごと
+     消える。再起動は不要)
+   - このプロジェクトの `.claude/settings.local.json`: `env` から
+     `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` を消す。commit される `.claude/settings.json` に
+     書かれていたら、共有設定なので変えるかどうかはユーザーに任せる
+   - 全プロジェクト向けの有効化を取り消す: `~/.claude/settings.json` の `env` から消す。
+     **各プロジェクトの `"$auto_switch"` と、プロジェクトの設定の `env` は残る**
    - どこでも無効にする: `~/.claude/settings.json` の `env` で値を `"off"` にする
-     (キーが無ければ足す)。`"$auto_switch"` を書いたプロジェクトも含めて無効になる
+     (キーが無ければ足す)。`"$auto_switch"` を書いたプロジェクトも無効になるが、
+     プロジェクトの設定の `env` に同じキーがあるプロジェクトではそちらが優先されるので、
+     そこも消すか `"off"` にする
    - 依頼が「全部やめて」なら `"off"`、「全プロジェクト向けの設定だけ外して」なら削除。
-     どちらか読めなければ `AskUserQuestion` で確かめる。settings.json を書く前に、
+     どちらか読めなければ `AskUserQuestion` で確かめる。設定ファイルを書く前に、
      変える 1 行をユーザーに見せて承認を得る (step 5 と同じ)
-   - settings.json を変えたとき (削除 / `"off"`) は、Claude Code を再起動した後の新しい
-     セッションから確実に効く。起動中のセッションには古い値が残りうるので、再起動を
-     ユーザーに伝える
-   - どちらで有効になっているか分からなければ、両方を確かめる (環境変数が優先)
+   - 設定ファイルの `env` は、値を変える (`"off"` にする) と保存した時点で起動中の
+     セッションにも反映される。**キーを消しても起動中のセッションには残り、再起動する
+     まで自動切替は有効なまま**なので、消した場合は再起動をユーザーに伝える (すぐ
+     止めたいなら、消すより `"off"` にする)
 
 7. **効いているかの確かめ方をユーザーに伝える**: 次に gh の不一致が起きたとき、
    コマンドが止まらずに通り、`[verify-cloud-account] 自動切替 (auto-switch): ...`

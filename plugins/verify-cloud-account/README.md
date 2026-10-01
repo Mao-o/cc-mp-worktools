@@ -199,10 +199,15 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
 - 解決順: `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `accounts.local.json` の
   `"$auto_switch"` → 無効。env の `off` はファイルの指定も含めて無効にする。env を
   消しただけでは、各プロジェクトの `"$auto_switch"` は有効なまま残る
-- settings.json / settings.local.json の `env` を変えたとき (有効化・`off`・削除) は、
-  Claude Code を再起動した後の新しいセッションから確実に効く (起動中のセッションには
-  古い値が残りうる)。`accounts.local.json` の `"$auto_switch"` は hook が毎回読むので
-  再起動は不要
+- env を Claude Code の設定の `env` で指定した場合、同じキーはプロジェクトの設定
+  (`.claude/settings.local.json` / `.claude/settings.json`) が `~/.claude/settings.json`
+  より優先される (Claude Code の設定の優先順位)。`~/.claude/settings.json` の `off` で
+  まとめて止めても、プロジェクトの設定に `github` を書いたプロジェクトでは有効なまま
+- settings.json / settings.local.json の `env` は、値を足す・変える (有効化・`off`) と
+  保存した時点で起動中のセッションにも反映される。**キーを消しても起動中のセッション
+  には残り、再起動するまで有効なまま** (Claude Code の仕様)。すぐ止めたいなら、消す
+  より `off` にする。`accounts.local.json` の `"$auto_switch"` は hook が毎回読むので、
+  足しても消しても次の gh コマンドから効く
 - 値は **service 名の並び** (env はカンマ区切り)。対応しているのは現状 **`github`
   のみ**。`true` のような一括指定は受け付けない (対応 service を増やしたときに
   既存の設定が黙って広がらないようにするため)

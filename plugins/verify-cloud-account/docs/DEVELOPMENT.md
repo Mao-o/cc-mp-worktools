@@ -959,6 +959,13 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
 - 全プロジェクト向けは `~/.claude/settings.json` の `env` を skill の手順で編集する。
   builder には書かせない (D2: builder は accounts.local.json 専用の writer)。commit
   される `.claude/settings.json` には書かない (個人の選好が他の開発者にも効く)
+- 無効化の手順は、Claude Code の設定の `env` の 2 つの性質に合わせる (公式 docs の
+  記述どおりで、CLI 2.1.284 の `-p` でも確かめた): (1) 同じキーはプロジェクトの設定
+  (`.claude/settings.local.json` / `.claude/settings.json`) が `~/.claude/settings.json`
+  より優先される (キー単位のマージ。hook から見える値も同じ) (2) 値の追加・変更は
+  保存した時点で起動中のセッション (hook を含む) に反映されるが、キーの削除は再起動まで
+  反映されない (実測は `.claude/settings.local.json` で行った)。このため「どこでも
+  止める」は削除ではなく `off` にし、プロジェクトの設定に同じキーがあればそこも直す
 - skill の `allowed-tools` (確認なしで使えるツールの付与。制限ではない) は
   `gh auth status` と builder の呼び出しだけに絞る。settings.json の編集は通常の権限確認を
   通す。CLI 2.1.284 の `-p` + default モードでの実測: `/verify-cloud-account:auto-switch`

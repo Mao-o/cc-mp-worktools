@@ -41,9 +41,12 @@ Claude が accounts.local.json を直接触らない約束のため書けなか�
 - accounts-init / accounts-show の skill と README の「予約キーは builder が書かない」
   を、`"$auto_switch"` だけは `auto-switch` サブコマンドで書く、に訂正
 - plugin の description に自動切替と auto-switch skill を追記 (skill の本数は書かない)
-- README に、settings.json の `env` の変更 (有効化・`off`・削除) は再起動後の新しい
-  セッションから確実に効くこと、env を消しただけでは各プロジェクトの `"$auto_switch"`
-  は有効なまま残る (どこでも無効にするなら `off`) ことを明記
+- README の自動切替の節に、settings の `env` について次を明記:
+  - 値を足す・変える (有効化・`off`) と起動中のセッションにも反映されるが、キーを
+    消しても再起動するまで有効なまま (すぐ止めたいなら `off`)
+  - env を消しただけでは、各プロジェクトの `"$auto_switch"` は有効なまま残る
+  - 同じキーは、プロジェクトの設定 (`.claude/settings.local.json` /
+    `.claude/settings.json`) の `env` が `~/.claude/settings.json` より優先される
 
 ### Tests
 
