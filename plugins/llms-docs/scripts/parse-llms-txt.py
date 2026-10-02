@@ -3,11 +3,14 @@
 
 The three dedicated loaders (``parse-claude-docs.py`` / ``parse-ai-sdk.py`` /
 ``parse-firebase.py``) hard-code one site each. This one reads the site from a
-user-maintained ``sources.json`` and supports the page shapes seen in the wild
-(measured 2026-09-26, see ``docs/generic-llms-txt-source.md``):
+profile: the presets bundled in ``presets.json`` next to this script, overlaid
+by the user's ``sources.json`` (a user profile replaces a preset of the same
+name). It supports the page shapes seen in the wild (measured 2026-09-26 and
+2026-10-03, see ``docs/generic-llms-txt-source.md``):
 
-  split "h1"           one page per H1 outside code fences      (Zod)
-  split "frontmatter"  one page per YAML frontmatter block      (Next.js / Vite / Vitest)
+  split "h1"           one page per H1 outside code fences      (Zod / Hono / Agent Skills)
+  split "frontmatter"  one page per YAML frontmatter block      (Next.js / Vite / Vitest /
+                                                                 Cloudflare per-product files)
   split "line"         one page per line starting with a prefix (Drizzle: ``Source: <url>``)
 
 Subcommands mirror the other loaders (``fetch-index`` / ``search-index`` /
@@ -16,7 +19,8 @@ to list the configured profiles. Every subcommand except ``sources`` requires
 ``--source <name>``.
 
 Out of scope (use a dedicated loader or WebFetch): two-level indexes whose
-``llms.txt`` only links to more ``llms.txt`` files (Cloudflare), sites that
+``llms.txt`` only links to more ``llms.txt`` files (Cloudflare's root; its
+per-product ``/<product>/llms-full.txt`` files are supported), sites that
 publish one file per page, and joining an ``llms.txt`` index against the full
 text. Only the single ``llms-full.txt`` named in the profile is fetched.
 """
@@ -74,7 +78,12 @@ README_HINT = "see plugins/llms-docs/README.md「任意の llms-full.txt を読�
 # plain slug (no path separators, no leading dot).
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _SPLITS = ("h1", "frontmatter", "line")
-_PROFILE_KEYS = {"url", "split", "frontmatter_key", "line_prefix", "page_url", "url_base", "description"}
+_PROFILE_KEYS = {
+    "url", "split", "frontmatter_key", "line_prefix", "page_url", "url_base", "description",
+    "drop_lines", "skip_empty",
+}
+PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
+_PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
 _FM_KEY_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*$")
 
 
@@ -102,18 +111,33 @@ def _bad(path: str, msg: str) -> None:
 
 
 def _parse_page_url(path: str, name: str, value) -> tuple[str, str] | None:
-    """``"none"`` / ``"frontmatter:<key>"`` / ``"line:<prefix>"`` -> (kind, arg)."""
+    """``"none"`` / ``"frontmatter:<key>"`` / ``"line:<prefix>"`` /
+    ``"link:<link text>"`` -> (kind, arg)."""
     if value is None or value == "none":
         return None
     if not isinstance(value, str) or ":" not in value:
-        _bad(path, f'sources.{name}.page_url must be "none", "frontmatter:<key>" or "line:<prefix>"')
+        _bad(path, f"sources.{name}.page_url must be {_PAGE_URL_FORMS}")
     kind, arg = value.split(":", 1)
     if kind == "frontmatter" and _FM_KEY_NAME_RE.match(arg):
         return ("frontmatter", arg)
-    if kind == "line" and arg.strip():
-        return ("line", arg)
-    _bad(path, f'sources.{name}.page_url must be "none", "frontmatter:<key>" or "line:<prefix>"')
+    if kind in ("line", "link") and arg.strip():
+        return (kind, arg)
+    _bad(path, f"sources.{name}.page_url must be {_PAGE_URL_FORMS}")
     return None
+
+
+def _parse_drop_lines(path: str, name: str, value) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        _bad(path, f"sources.{name}.drop_lines must be a list of regular expressions")
+    out = []
+    for v in value:
+        try:
+            out.append(re.compile(v))
+        except re.error as e:
+            _bad(path, f"sources.{name}.drop_lines has an invalid regular expression {v!r}: {e}")
+    return out
 
 
 def _validate_profile(path: str, name: str, raw) -> dict:
@@ -141,7 +165,12 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         "line_prefix": None,
         "page_url": _parse_page_url(path, name, raw.get("page_url")),
         "url_base": None,
+        "drop_lines": _parse_drop_lines(path, name, raw.get("drop_lines")),
+        "skip_empty": raw.get("skip_empty", False),
+        "origin": path,
     }
+    if not isinstance(profile["skip_empty"], bool):
+        _bad(path, f"sources.{name}.skip_empty must be true or false")
     if split == "frontmatter":
         key = raw.get("frontmatter_key", "title")
         if not isinstance(key, str) or not _FM_KEY_NAME_RE.match(key):
@@ -169,13 +198,31 @@ def _validate_profile(path: str, name: str, raw) -> dict:
     return profile
 
 
-def load_sources(path: str) -> dict:
-    """Read and validate *path*. Missing file / bad JSON / bad profile -> die."""
-    if not os.path.exists(path):
-        die(
-            f"no sources file at {path}. Create it with at least one profile, "
-            f"or point --sources-file / ${SOURCES_ENV} at one ({README_HINT})"
-        )
+def resolve_sources_file(args) -> None:
+    """Fill ``args.sources_file`` (``None`` when ``--sources-file`` was not
+    given) and set ``args.sources_file_explicit``: true when the file came
+    from ``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``, even if the value
+    equals the config-dir default."""
+    args.sources_file_explicit = args.sources_file is not None or bool(os.environ.get(SOURCES_ENV))
+    if args.sources_file is None:
+        args.sources_file = default_sources_file()
+
+
+def load_sources(path: str, *, explicit: bool) -> dict:
+    """Bundled presets overlaid by the user's *path* (a user profile replaces
+    the preset of the same name). A missing *path* is fine when it is the
+    config-dir default — the presets alone are then available — but an
+    explicitly given file must exist. Bad JSON / bad profile -> die."""
+    sources = _read_sources_file(PRESETS_FILE)
+    if os.path.exists(path):
+        sources.update(_read_sources_file(path))
+    elif explicit:
+        die(f"no sources file at {path} (given by --sources-file or ${SOURCES_ENV}; {README_HINT})")
+    return sources
+
+
+def _read_sources_file(path: str) -> dict:
+    """Read and validate one sources file. Bad JSON / bad profile -> die."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -190,7 +237,7 @@ def load_sources(path: str) -> dict:
 
 
 def _get_profile(args) -> dict:
-    sources = load_sources(args.sources_file)
+    sources = load_sources(args.sources_file, explicit=args.sources_file_explicit)
     if args.source not in sources:
         known = ", ".join(sorted(sources)) or "(none)"
         die(f"unknown --source {args.source!r}. Configured: {known}")
@@ -241,6 +288,30 @@ def _line_url(body_lines: list[str], prefix: str, limit: int = 10) -> str:
     return ""
 
 
+def _link_url(body_lines: list[str], text: str, limit: int = 20) -> str:
+    """Target of the first Markdown link ``[<text>](<url>)`` among the first
+    *limit* lines (Cloudflare: ``[View as Markdown](https://…/index.md)``)."""
+    needle = f"[{text}]("
+    for line in body_lines[:limit]:
+        pos = line.find(needle)
+        if pos < 0:
+            continue
+        rest = line[pos + len(needle):]
+        end = rest.find(")")
+        if end > 0 and not any(c.isspace() for c in rest[:end]):
+            return rest[:end]
+    return ""
+
+
+def _body_url(body_lines: list[str], rule) -> str:
+    """Page URL from the body for a ``line:`` / ``link:`` rule, else ``""``."""
+    if rule and rule[0] == "line":
+        return _line_url(body_lines, rule[1])
+    if rule and rule[0] == "link":
+        return _link_url(body_lines, rule[1])
+    return ""
+
+
 def split_h1(lines: list[str], profile: dict) -> list[dict]:
     docs: list[dict] = []
     fence = FenceTracker()
@@ -262,7 +333,7 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
         docs.append({"title": title, "body_lines": lines[start:]})
     rule = profile["page_url"]
     for d in docs:
-        d["url"] = _line_url(d["body_lines"], rule[1]) if rule and rule[0] == "line" else ""
+        d["url"] = _body_url(d["body_lines"], rule)
         d["min_level"] = None  # the H1 is the delimiter, so sections start at H2
     return docs
 
@@ -317,11 +388,10 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
     for k, (fields, _start, body_start) in enumerate(blocks):
         end = blocks[k + 1][1] if k + 1 < len(blocks) else len(lines)
         body = lines[body_start:end]
-        url = ""
         if rule and rule[0] == "frontmatter":
             url = fields.get(rule[1], "")
-        elif rule and rule[0] == "line":
-            url = _line_url(body, rule[1])
+        else:
+            url = _body_url(body, rule)
         docs.append({
             "title": fields.get("title") or _first_heading(body),
             "description": fields.get("description", ""),
@@ -409,16 +479,31 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
         rule = profile["page_url"]
         if rule is None:
             url = ""
-        elif rule[1] == prefix:
+        elif rule == ("line", prefix):
             url = delimiter_url
         else:
-            url = _line_url(body, rule[1])
+            url = _body_url(body, rule)
         title = _first_heading(body, fence=_Fence()) or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
         docs.append({"title": title, "url": url, "body_lines": body, "min_level": 1})
     return docs
 
 
 _SPLITTERS = {"h1": split_h1, "frontmatter": split_frontmatter, "line": split_line}
+
+
+def _drop_boilerplate(body_lines: list[str], patterns: list) -> list[str]:
+    """Remove lines outside code fences that match one of *patterns*. Runs
+    after the page URL is read, so a link on a dropped line still counts."""
+    fence = FenceTracker()
+    out = []
+    for line in body_lines:
+        was = fence.in_fence
+        fence.update(line)
+        text = line.rstrip("\n\r")
+        if not was and not fence.in_fence and any(p.search(text) for p in patterns):
+            continue
+        out.append(line)
+    return out
 
 
 def split_documents(lines: list[str], profile: dict) -> list[dict]:
@@ -428,6 +513,12 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
         d.setdefault("description", "")
         if d["url"] and base and not re.match(r"^https?://", d["url"]):
             d["url"] = urljoin(base, d["url"])
+        if profile["drop_lines"]:
+            d["body_lines"] = _drop_boilerplate(d["body_lines"], profile["drop_lines"])
+    if profile["skip_empty"]:
+        # A heading with no body (Hono's "# Start of Hono documentation"
+        # banner) is not a page.
+        docs = [d for d in docs if any(line.strip() for line in d["body_lines"])]
     return docs
 
 
@@ -462,11 +553,13 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
 
 
 def _source_hint_args(args) -> tuple:
-    """``--source`` is always required here, so it is always echoed; a
-    non-default ``--sources-file`` is echoed too (else the hint would look
-    the source up in a different file)."""
+    """``--source`` is always required here, so it is always echoed. An
+    explicit sources file (``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``)
+    is echoed as ``--sources-file`` too: the hint may run in a shell without
+    that env var, where the same name could resolve to a bundled preset —
+    another corpus — instead of failing."""
     out = ["--source", shlex.quote(args.source)]
-    if args.sources_file != default_sources_file():
+    if args.sources_file_explicit:
         out += ["--sources-file", shlex.quote(args.sources_file)]
     return tuple(out)
 
@@ -518,11 +611,13 @@ def _url_line(doc: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def cmd_sources(args):
-    sources = load_sources(args.sources_file)
-    print(f"Configured sources (file: {args.sources_file})")
+    sources = load_sources(args.sources_file, explicit=args.sources_file_explicit)
+    user_state = "" if os.path.exists(args.sources_file) else " — not present, presets only"
+    print(f"Configured sources (presets: {PRESETS_FILE}; user file: {args.sources_file}{user_state})")
     print("=" * 60)
     for name, p in sorted(sources.items()):
-        print(f"{name}  [{p['split']}]  {p['url']}")
+        origin = "preset" if p["origin"] == PRESETS_FILE else "user"
+        print(f"{name}  [{origin}, {p['split']}]  {p['url']}")
         if p["description"]:
             print(f"    {p['description']}")
     print()
@@ -694,12 +789,14 @@ def cmd_search(args):
 
 def _add_common(parser, *, source: bool = True) -> None:
     parser.add_argument(
-        "--sources-file", default=default_sources_file(),
-        help=f"Profiles file (default: ${SOURCES_ENV} or ~/.config/llms-docs/sources.json)",
+        "--sources-file", default=None,
+        help=f"User profiles file, overlaid on the bundled presets "
+             f"(default: ${SOURCES_ENV} or ~/.config/llms-docs/sources.json; may be absent)",
     )
     if not source:
         return
-    parser.add_argument("--source", required=True, help="Profile name in the sources file")
+    parser.add_argument("--source", required=True,
+                        help="Profile name (a bundled preset or one in the sources file; see `sources`)")
     parser.add_argument("--file", default=None,
                         help="Read a local llms-full.txt instead of fetching the profile's url")
     add_cache_dir_arg(parser)
@@ -761,6 +858,7 @@ def main():
     p.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
+    resolve_sources_file(args)
     args.func(args)
 
 

@@ -7,12 +7,17 @@
 利用者が `sources.json` に書いたサイトの `llms-full.txt` を、profile の形状どおりに分割して
 読む CLI。**対応する形状は README の「任意の llms-full.txt を読む」に列挙した 3 種 (`h1` /
 `frontmatter` / `line`) だけ**で、あらゆる `llms.txt` サイトを読めることは目標にしていない。
+実測したサイトの profile は `scripts/presets.json` に同梱し、利用者の `sources.json` が同名の
+preset を置き換える。
 
 指摘すべきもの:
 
 - 対応する形状のサイトで、ページの分割・タイトル・URL が誤る (実測した Next.js / Vite /
-  Vitest / Drizzle / Zod と同じ形のもの)。本文の水平線やコードブロック内の見本を区切りと
-  誤認する、など
+  Vitest / Drizzle / Zod / Hono / Agent Skills / Cloudflare 製品別ファイルと同じ形のもの)。
+  本文の水平線やコードブロック内の見本を区切りと誤認する、`drop_lines` がコードブロック内の
+  行を消す、ページ URL を読む前に行を消す、など
+- 同梱 presets が壊れている (検証で落ちる・取得先が `llms-full.txt` でない)。`sources.json` が
+  無いときに presets まで使えなくなる、明示したファイルが無いのに黙って presets だけで動く
 - `Next:` ヒントが `--source` / `--sources-file` / `--file` / `--cache-dir` / `--max-age` を
   落とし、別の corpus を指すコマンドになる
 - `sources.json` の検証漏れで、source 名がキャッシュディレクトリの外を指せる・不正な値で
@@ -22,7 +27,9 @@
 
 指摘しないもの (対象外として README に明記済み):
 
-- `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare) を読めないこと
+- `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート `/llms.txt`)
+  を読めないこと。製品別の `/<製品>/llms-full.txt` は presets で読む
+- presets に入っていないサイト・製品があること (追加は改善提案 P3)
 - ページごとに別ファイルで公開するサイト、`llms.txt` の index と本文の join
 - 3 種のどれにも当てはまらない形状のサイトを読めないこと。新しい形状への対応は改善提案 (P3)
 - 利用者が `sources.json` に書いた URL を取得すること (設定した本人が意図した動作。取得するのは

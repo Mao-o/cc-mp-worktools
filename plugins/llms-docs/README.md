@@ -39,6 +39,7 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
 | Script | `scripts/parse-ai-sdk.py` |
 | Script | `scripts/parse-firebase.py` |
 | Script | `scripts/parse-llms-txt.py` (任意サイトの `llms-full.txt`。skill なし、CLI 専用) |
+| Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
 | Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレート。各 script は page を `PageView` に詰めて渡す) |
 | Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
@@ -109,16 +110,16 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 | claude-docs (Platform) | `claude-platform-llms.txt`, `claude-platform-llms-full.txt` |
 | ai-sdk | `ai-sdk-llms-full.txt` |
 | firebase | `firebase-llms.txt` (index), `firebase-docs/` (per-page) |
-| 任意サイト (`parse-llms-txt.py`) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる) |
+| 任意サイト (`parse-llms-txt.py`、presets 含む) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる) |
 
 最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。
 
 ## 任意の llms-full.txt を読む
 
-`scripts/parse-llms-txt.py` は、`sources.json` に書いた profile に従って任意のサイトの
-`llms-full.txt` を読む (0.25.0)。サブコマンド (`search` / `search-index` / `search-content` /
-`sections` / `content` / `fetch-index`) と `<page_ref>` の形は 3 つの専用 script と同じで、
-加えて設定済みの profile を一覧する `sources` がある。**skill は無く、CLI から直接呼ぶ**
+`scripts/parse-llms-txt.py` は、profile に従って任意のサイトの `llms-full.txt` を読む
+(0.25.0)。サブコマンド (`search` / `search-index` / `search-content` / `sections` / `content` /
+`fetch-index`) と `<page_ref>` の形は 3 つの専用 script と同じで、加えて使える profile を
+一覧する `sources` がある。**skill は無く、CLI から直接呼ぶ**
 (description ベースの auto-invoke は対象ライブラリを書けないため。汎用 skill は未定)。
 
 ```bash
@@ -127,9 +128,30 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py search "<query>" --source <n
 python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading_path>" --source <name>
 ```
 
-`sources.json` の場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE` >
+### 同梱 presets (0.26.0)
+
+次のサイトは `scripts/presets.json` に profile が同梱されており、設定なしで `--source <name>` で読める。
+各サイトのページ数と確かめ方は `docs/generic-llms-txt-source.md` の「2026-10-03 実測」にある。
+
+| source 名 | サイト | ページ URL |
+|---|---|---|
+| `nextjs` | Next.js (`/docs/llms-full.txt`) | あり |
+| `vite` / `vitest` | Vite / Vitest | あり (`.md`) |
+| `drizzle` | Drizzle ORM | あり |
+| `zod` | Zod | なし |
+| `hono` | Hono | なし |
+| `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
+| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`) |
+
+他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
+
+### 自分の profile を書く (`sources.json`)
+
+`sources.json` は同梱 presets に重ねて読み、**同名の preset は置き換える**。ファイルが無ければ
+presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE` >
 `$XDG_CONFIG_HOME/llms-docs/sources.json` > `~/.config/llms-docs/sources.json`
 (キャッシュを消しても profile が消えないよう、キャッシュとは別の設定ディレクトリに置く)。
+`--sources-file` か `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときはエラーにする。
 
 ```json
 {
@@ -143,7 +165,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
       "description": "任意。sources の一覧に出る"
     },
     "example-line": {"url": "https://example.org/llms-full.txt", "split": "line", "line_prefix": "Source: "},
-    "example-h1": {"url": "https://example.net/llms-full.txt", "split": "h1"}
+    "example-h1": {"url": "https://example.net/llms-full.txt", "split": "h1", "skip_empty": true}
   }
 }
 ```
@@ -154,24 +176,29 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `split` | ○ | ページの区切り方。`h1` = コードブロック外の H1 ごと / `frontmatter` = YAML frontmatter ごと / `line` = `line_prefix` で始まる行ごと |
 | `frontmatter_key` | | `split: frontmatter` のとき、ページの frontmatter に必ずあるキー (既定 `title`)。これが無い `---` の組は区切りとみなさない (本文の水平線を誤認しないため) |
 | `line_prefix` | `split: line` で必須 | 区切り行の接頭辞。接頭辞のあとに URL が 1 つだけ続く行を区切りにする |
-| `page_url` | | ページ URL の取り方。`none` (既定) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す)。`split: line` では区切り行の URL を使う |
+| `page_url` | | ページ URL の取り方。`none` (既定) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
 | `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 |
+| `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
+| `skip_empty` | | `true` で、本文が空のページを捨てる (Hono の `# Start of Hono documentation` のような見出しだけの行) |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
 エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める。
 
-実測した形状 (2026-09-26、詳細は `docs/generic-llms-txt-source.md`):
+実測した形状 (詳細は `docs/generic-llms-txt-source.md`):
 
 | 形状 | profile | 例 |
 |---|---|---|
 | frontmatter に `title:` と絶対 URL | `split: frontmatter` + `page_url: frontmatter:url` | Next.js (`/docs/llms-full.txt`) |
 | frontmatter に相対 `url:` のみ | 上に加えて `frontmatter_key: url` + `url_base` | Vite / Vitest |
+| frontmatter に `title:`、URL は本文のリンク、定型行つき | `split: frontmatter` + `page_url: "link:View as Markdown"` + `drop_lines` | Cloudflare の製品別ファイル |
 | `Source: <url>` 行で区切る | `split: line` + `line_prefix: "Source: "` | Drizzle ORM |
-| H1 で区切り URL なし | `split: h1` | Zod |
+| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` | Agent Skills |
+| H1 で区切り URL なし | `split: h1` (先頭に見出しだけの行があれば `skip_empty`) | Zod / Hono |
 
-対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare)、ページ
-ごとに別ファイルで公開するサイト、`llms.txt` の index と本文の join。URL を持たないページでは
-`URL:` 行と `# source:` 行を出さない。
+対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
+`/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する
+サイト、`llms.txt` の index と本文の join。URL を持たないページでは `URL:` 行と `# source:` 行を
+出さない。
 
 ## 既知の制約
 

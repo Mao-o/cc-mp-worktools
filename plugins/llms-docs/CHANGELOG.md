@@ -2,6 +2,50 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.26.0] - 2026-10-03
+
+### `parse-llms-txt.py` に presets を同梱し、Hono / Agent Skills / Cloudflare 製品別ファイルに対応
+
+- **同梱 presets** — `scripts/presets.json` に実測済みサイトの profile を入れ、`sources.json` を
+  書かなくても `--source <name>` で読めるようにした。対象は `nextjs` / `vite` / `vitest` /
+  `drizzle` / `zod` / `hono` / `agentskills` と、Cloudflare の製品別 `llms-full.txt` 15 件
+  (`cloudflare-workers` / `cloudflare-d1` / `cloudflare-r2` ほか)。利用者の `sources.json` は
+  presets に重ねて読み、同名の preset を置き換える。`sources` は各 profile が preset か利用者の
+  ものかを表示する
+- **`sources.json` が無いときの扱い** — 既定の場所に無ければ presets だけで動く。
+  `--sources-file` / `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときは従来どおりエラー
+  (既定と同じパスを明示した場合も含む)
+- **`Next:` ヒント** — `$LLMS_DOCS_SOURCES_FILE` で指定したファイルも `--sources-file` として
+  引き継ぐ。環境変数の無いシェルでヒントを実行すると、同名の preset (別の corpus) を黙って
+  読んでしまうため
+- **`page_url: "link:<リンク文字列>"`** — 本文の先頭 20 行にある Markdown リンク
+  `[<リンク文字列>](<url>)` の URL をページ URL にする (Cloudflare の `[View as Markdown](…)`)
+- **`drop_lines`** — 本文から除く行の正規表現。全ページに付く定型行 (Cloudflare の
+  「Skip to content」・documentation index の案内・「Last updated」行) が検索に当たらない
+  ようにする。コードブロック内の行は除かず、ページ URL は除く前に読む
+- **`skip_empty`** — 本文が空のページを捨てる (Hono 先頭の見出しだけの行)
+- **実測** — Hono 87 / Agent Skills 9 / Cloudflare D1 51 / Workers 455 ページが独立に数えた値と
+  一致し、既存 5 サイトの分割数は変わらない (`docs/generic-llms-txt-source.md` の「2026-10-03 実測」)
+- 既存の 3 script は変更していない (検索順位の修正は下の別項)
+
+### `search` の順位: 全キーワードが揃うページを部分一致のページより上にする (4 script 共通)
+
+`search` の候補の並べ替え (`search_rank_key`) と、候補が無いときの全文検索
+(`full_corpus_body_search`) は本文ヒット数だけで並べていた。そのため、キーワードの一部を
+何度も含む `[partial match]` のページが、全キーワードが同じセクションに揃うページより上に
+来ていた。全文検索では件数の上限で後者が切り捨てられ、たとえば Claude Code docs の
+`search "argument-hint frontmatter"` は `argument-hint` を定義する Skills のページを上位 5 件に
+出せなかった。
+
+- 並び順を「changelog 類は最後 → 全キーワードが揃うページ → 部分一致のページ → 本文ヒットの
+  無い (index だけに当たった) ページ」とし、各組の中は従来どおり本文ヒット数 → index score →
+  doc_idx で並べる
+- Claude Code docs の `search-content` (ページを本文ヒット数で並べて `--limit` で切る唯一の script) も
+  同じ順に揃えた
+- 実 corpus での比較: Claude Code docs 8 / AI SDK 6 の計 14 クエリのうち 7 件で上位 5 件の順位が
+  変わった。`argument-hint frontmatter` で Skills のページが 1 位に、`stopWhen stepCountIs` で
+  Loop Control が 2 位に上がるなど、いずれも全キーワードが揃うページが上がる変化だった
+
 ## [0.25.0] - 2026-09-26
 
 ### 任意サイトの `llms-full.txt` を profile で読む `scripts/parse-llms-txt.py` を追加
