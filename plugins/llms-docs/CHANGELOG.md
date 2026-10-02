@@ -2,6 +2,24 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.27.0] - 2026-10-03
+
+### skill `researching-library-docs` を追加 (汎用 loader の skill)
+
+`parse-llms-txt.py` を使い、同梱 presets のサイトを他の 3 skill と同じ `search` → `content` の
+流れで調べる skill。`context: fork` + `model: sonnet` は既存 3 skill と同じ。
+
+- **auto-invoke の対象** — description と Triggers に presets のサイト名 (Next.js / Vite /
+  Vitest / Drizzle / Zod / Hono / Agent Skills / Cloudflare の 15 製品) を並べる。利用者が
+  `sources.json` に足したサイトは description に出ないので、
+  `/llms-docs:researching-library-docs <source> <質問>` で明示的に起動する
+- **source の選び方** — SKILL.md の Step 0 に対象と `--source` の対応表を置き、表に無ければ
+  `sources` で一覧を確かめる。一覧にも無いサイトは、調べられなかったことと profile の案を返し、
+  `sources.json` は作らない
+- **表と presets のずれを検査** — presets を足したのに表に載せ忘れる (skill から選ばれない) と、
+  表に presets に無い名前がある、の両方をテストで落とす
+- SessionStart のリマインダーに、この skill の対象を足した
+
 ## [0.26.0] - 2026-10-03
 
 ### `parse-llms-txt.py` に presets を同梱し、Hono / Agent Skills / Cloudflare 製品別ファイルに対応

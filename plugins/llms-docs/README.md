@@ -10,6 +10,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | `researching-claude-docs` | Claude Code / Claude Developer Platform | `search` (URL-join 統合検索) → `content <page_ref> "<heading_path>"` |
 | `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>"` |
 | `researching-firebase` | Firebase (firebase.google.com) | `search` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>"` |
+| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Agent Skills / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
 3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
 サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
@@ -35,10 +36,11 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
 | Skill | `skills/researching-claude-docs/SKILL.md` |
 | Skill | `skills/researching-ai-sdk/SKILL.md` |
 | Skill | `skills/researching-firebase/SKILL.md` |
+| Skill | `skills/researching-library-docs/SKILL.md` (`parse-llms-txt.py` を使う) |
 | Script | `scripts/parse-claude-docs.py` |
 | Script | `scripts/parse-ai-sdk.py` |
 | Script | `scripts/parse-firebase.py` |
-| Script | `scripts/parse-llms-txt.py` (任意サイトの `llms-full.txt`。skill なし、CLI 専用) |
+| Script | `scripts/parse-llms-txt.py` (任意サイトの `llms-full.txt`。skill は `researching-library-docs`) |
 | Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
 | Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレート。各 script は page を `PageView` に詰めて渡す) |
@@ -119,8 +121,10 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 `scripts/parse-llms-txt.py` は、profile に従って任意のサイトの `llms-full.txt` を読む
 (0.25.0)。サブコマンド (`search` / `search-index` / `search-content` / `sections` / `content` /
 `fetch-index`) と `<page_ref>` の形は 3 つの専用 script と同じで、加えて使える profile を
-一覧する `sources` がある。**skill は無く、CLI から直接呼ぶ**
-(description ベースの auto-invoke は対象ライブラリを書けないため。汎用 skill は未定)。
+一覧する `sources` がある。skill `researching-library-docs` (0.27.0) がこの script を使い、
+description に同梱 presets のサイト名を並べて auto-invoke の対象にしている。presets に無い
+サイトを `sources.json` に足した場合は、skill を `/llms-docs:researching-library-docs <source> <質問>`
+で明示的に起動するか、CLI を直接呼ぶ。
 
 ```bash
 python3 plugins/llms-docs/scripts/parse-llms-txt.py sources

@@ -34,7 +34,8 @@ preset を置き換える。
 - 3 種のどれにも当てはまらない形状のサイトを読めないこと。新しい形状への対応は改善提案 (P3)
 - 利用者が `sources.json` に書いた URL を取得すること (設定した本人が意図した動作。取得するのは
   profile の `url` 1 つだけ)
-- 汎用 skill が無いこと (Phase 2 として未着手)
+- `researching-library-docs` の description に、利用者が `sources.json` に足したサイトが出ないこと
+  (description は静的。明示起動で読む)
 
 ### 優先度の目安
 

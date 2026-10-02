@@ -406,6 +406,21 @@ class PresetsTest(unittest.TestCase):
                 self.assertTrue(p["url"].endswith("/llms-full.txt"), p["url"])
                 self.assertTrue(p["description"])
 
+    def test_skill_source_table_matches_the_presets(self):
+        # researching-library-docs lists the presets by hand (description and
+        # the Step 0 table); a preset added or renamed without the skill would
+        # never be picked by it
+        skill = Path(generic.PRESETS_FILE).parents[1] / "skills" / "researching-library-docs" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        table = text.split("## Step 0", 1)[1].split("\n## ", 1)[0]
+        named = set(re.findall(r"`([a-z0-9-]+)`", table))
+        cloudflare = re.search(r"`cloudflare-<製品>`: (.+?) \|", table).group(1)
+        named |= {f"cloudflare-{slug}" for slug in re.findall(r"`([a-z0-9-]+)`", cloudflare)}
+        presets = set(generic._read_sources_file(generic.PRESETS_FILE))
+        self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
+        listed = {n for n in named if n in presets or n.startswith("cloudflare-")}
+        self.assertEqual(listed - presets, set(), "skill names a source that is not a preset")
+
     def test_preset_shapes_split_their_fixtures(self):
         # one fixture per shape, read through the shipped preset
         presets = generic._read_sources_file(generic.PRESETS_FILE)
