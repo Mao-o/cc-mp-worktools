@@ -63,6 +63,23 @@ class SplitDocumentsTest(unittest.TestCase):
         self.assertEqual([d["title"] for d in docs], ["Hooks", "Skills"])
         self.assertIn("# not a real heading", "".join(docs[0]["body_lines"]))
 
+    def test_unclosed_fence_recovers_before_the_next_page(self):
+        # ```ts inside the stray block is content, not a closer, so the
+        # block ends at the bare ``` and the next H1 is still a boundary
+        lines = [
+            "# Hooks\n",
+            "Source: https://example.com/hooks\n",
+            "```\n",
+            "```ts\n",
+            "const x = 1;\n",
+            "```\n",
+            "\n",
+            "# Skills\n",
+            "Source: https://example.com/skills\n",
+        ]
+        docs = parse_claude_docs.split_documents(lines)
+        self.assertEqual([d["title"] for d in docs], ["Hooks", "Skills"])
+
     def test_platform_duplicate_h1_merges_short_url_only_doc(self):
         lines = [
             "# Overview\n",

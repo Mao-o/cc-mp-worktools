@@ -90,6 +90,14 @@ GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interacti
 # firebase-tools は `--project` / `-P` の値を `.firebaserc` の alias として解決し、
 # 該当が無ければ project ID そのものとして使う (requireProject)。
 CONTEXT_OPTIONS = {"--project": "project", "-P": "project"}
+# CLI がどの project / アカウントで動くかを決める env (成功 cache のキーに含める。
+# services/__init__.py の IDENTITY_ENV_* 契約)。project を選ぶ env は firebase-tools に
+# 無い (公式 docs に記載なし) ので、アクティブ project を記録する configstore の場所
+# (`XDG_CONFIG_HOME` / `HOME`) と、認証を差し替える env を拾う。
+IDENTITY_ENV_VARS = frozenset(
+    {"XDG_CONFIG_HOME", "HOME", "FIREBASE_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"}
+)
+IDENTITY_ENV_PREFIXES: tuple[str, ...] = ()
 ACCOUNT_KEY = "firebase"
 
 # deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。
@@ -208,6 +216,17 @@ def _firebaserc_aliases(root: str) -> dict[str, str]:
         for alias, project in projects.items()
         if isinstance(alias, str) and isinstance(project, str) and project
     }
+
+
+def aliases_for(project_dir: str, project_id: str) -> list[str]:
+    """`.firebaserc` で project_id を指す alias 名を返す (名前順)。
+
+    プロジェクトごとの固定 (builder の `pin-env`) 用。`firebase use <alias>` を案内する
+    ときに、期待値 (project ID) をそのまま出さずに済む。`.firebaserc` は CLI と同じく
+    `firebase.json` を親方向に探した project root から読む。
+    """
+    aliases = _firebaserc_aliases(_project_root(project_dir))
+    return sorted(alias for alias, project in aliases.items() if project == project_id)
 
 
 def _configstore_path(env=None) -> Path | None:

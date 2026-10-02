@@ -207,6 +207,11 @@ _CLOUDSDK_ENV_PREFIX = "CLOUDSDK_"
 _OTHER_OVERRIDE_ENV_VARS = frozenset(
     {"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT"}
 )
+# CLI がどのアカウント / project で動くかを決める env (成功 cache のキーに含める。
+# services/__init__.py の IDENTITY_ENV_* 契約)。ローカル読取を諦める条件と同じ集合
+# (`CLOUDSDK_*` 全部 + 上の override) に、設定ディレクトリの既定を決める `HOME`。
+IDENTITY_ENV_VARS = frozenset({*_OTHER_OVERRIDE_ENV_VARS, "HOME"})
+IDENTITY_ENV_PREFIXES = (_CLOUDSDK_ENV_PREFIX,)
 _ACTIVE_CONFIG_FILE = "active_config"
 _CONFIGURATIONS_DIR = "configurations"
 _CONFIG_FILE_PREFIX = "config_"
@@ -361,6 +366,72 @@ def get_active_account(project_dir: str) -> dict[str, str | None] | None:
     if project is None and account is None:
         return None
     return {"project": project, "account": account}
+
+
+def pin_fields(expected) -> dict[str, str] | None:
+    """固定 (builder の `pin-env`) で照合する project / account。期待値の形が不正なら None。
+
+    verify() と同じ基準で読む (DICT_VALUE_CHECK = "truthy")。dict の falsy な値
+    (None / "" など) は書かれていないものとして扱い、truthy で文字列でない値
+    (例: `{"project": 123}`) は verify() が拒否するので不正にする。空白だけの文字列も、
+    verify() ではどの現在値とも一致しないので不正にする。片方を黙って落として残りだけで
+    照合すると、固定した後も verify() が同じ期待値で deny し続ける (マージ前レビューの
+    指摘)。scalar は project だけで、従来どおり値をそのまま返す (verify() の str 分岐は
+    account を照合しない)。
+    """
+    if isinstance(expected, str):
+        return {"project": expected} if expected.strip() else None
+    if not isinstance(expected, dict):
+        return None
+    fields: dict[str, str] = {}
+    for key in ("project", "account"):
+        value = expected.get(key)
+        if not value:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return None
+        fields[key] = value.strip()
+    return fields or None
+
+
+def configurations_matching(expected, env=None) -> list[str] | None:
+    """期待値 (project / account) に一致する名前付き構成の**名前**を返す。
+
+    プロジェクトごとの固定 (`CLOUDSDK_ACTIVE_CONFIG_NAME`。builder の `pin-env`) 用。
+    `<config_dir>/configurations/config_<name>` の `[core]` を読み、期待値に書かれた
+    キーがすべて一致する構成を名前順に返す (期待値が project だけなら account は
+    問わない)。中身は返さない。期待値の形が不正なら None、設定ディレクトリが無い /
+    読めないなら []。
+    """
+    wanted = pin_fields(expected)
+    if wanted is None:
+        return None
+    e = os.environ if env is None else env
+    config_dir = _config_dir(e)
+    if config_dir is None:
+        return []
+    try:
+        entries = sorted((config_dir / _CONFIGURATIONS_DIR).iterdir())
+    except OSError:
+        return []
+    names = []
+    for path in entries:
+        if not path.name.startswith(_CONFIG_FILE_PREFIX) or not path.is_file():
+            continue
+        name = path.name[len(_CONFIG_FILE_PREFIX):]
+        if not _CONFIG_NAME_RE.match(name):
+            continue
+        text = cli_config.read_text(path)
+        sections = cli_config.parse_ini_sections(text) if text is not None else None
+        if sections is None:
+            continue
+        core = sections.get(_CORE_SECTION, {})
+        if all(
+            isinstance(core.get(key), str) and core[key].strip() == value
+            for key, value in wanted.items()
+        ):
+            names.append(name)
+    return names
 
 
 def suggest_accounts_entry(project_dir: str) -> str | dict | None:

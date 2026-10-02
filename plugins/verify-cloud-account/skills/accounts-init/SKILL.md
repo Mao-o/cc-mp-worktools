@@ -17,12 +17,23 @@ description: |
   "create accounts.local.json", "set up verify-cloud-account",
   "initialize cloud account config", "add expected account"
 allowed-tools:
-  - Bash
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service github --dry-run)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service firebase --dry-run)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service aws --dry-run)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service gcloud --dry-run)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" init --service kubectl --dry-run)
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.3.2"
+  version: "0.17.0"
 ---
+
+<!--
+allowed-tools は「確認なしで使える」付与で、制限ではない。確認なしにするのは
+書き込まない init --dry-run を引数まで書いた形だけにする。書き込む --commit
+(init / set)、値を表示する --show-values、--value / --path を付けた形は通常の
+権限確認を通す。
+-->
 
 # accounts-init
 

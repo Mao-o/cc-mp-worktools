@@ -80,7 +80,7 @@
       "name": "verify-cloud-account",
       "displayName": "Verify Cloud Account",
       "source": "./plugins/verify-cloud-account",
-      "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud / kubectl) のアクティブアカウントをプロジェクト想定値と照合し、不一致なら deny する PreToolUse hook。gh は opt-in で自動切替も可。Agent Skill (init / show / migrate / auto-switch) 同梱",
+      "description": "Bash 実行前にクラウド CLI (gh / firebase / aws / gcloud / kubectl) のアクティブアカウントをプロジェクト想定値と照合し、不一致なら deny する PreToolUse hook。gh は opt-in で自動切替、aws / gcloud / firebase はプロジェクトごとに固定する公式の仕組みを案内。Agent Skill (init / show / migrate / auto-switch / project-accounts) 同梱",
       "category": "security",
       "keywords": [
         "security",

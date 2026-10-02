@@ -5,6 +5,11 @@
 などを毎回呼び直すコストを削減する。検証成功のみキャッシュし、失敗 (deny 発生)
 は常に再検証する。
 
+キー: service / project_dir / 期待値 / 行頭の inline env / context option に加え、
+hook プロセスの env のうちアカウントを決める変数 (`identity_env()`。v0.17.0)。
+プロジェクトごとの固定 (settings の `env` の `AWS_PROFILE` 等) は保存した時点で
+起動中のセッションに反映されるため、値が変わったら別 entry として再検証する。
+
 キャッシュ無効化:
 - TTL (既定 30 秒) を過ぎた
 - accounts.local.json の mtime が変わった
@@ -108,8 +113,30 @@ def write_state(path: Path, text: str) -> None:
     _write_atomic(path, text)
 
 
+def identity_env(service, env) -> dict[str, str]:
+    """service の CLI が「どのアカウント / project で動くか」を決める変数を env から抜く。
+
+    service は `IDENTITY_ENV_VARS` (名前) と `IDENTITY_ENV_PREFIXES` (prefix) を宣言する
+    (services/__init__.py の契約。全 service 必須)。dispatcher は検証に渡すのと同じ env
+    (hook プロセスの env に行頭の inline env を重ねたもの) を渡し、結果を成功 cache の
+    キーに含める。値はキーの hash の材料にだけ使い、cache ファイルには書かない。
+    """
+    names = getattr(service, "IDENTITY_ENV_VARS", frozenset())
+    prefixes = tuple(getattr(service, "IDENTITY_ENV_PREFIXES", ()))
+    return {
+        name: value
+        for name, value in env.items()
+        if name in names or (prefixes and name.startswith(prefixes))
+    }
+
+
 def _cache_key(
-    service_name: str, project_dir: str, expected, inline_env=None, context=None
+    service_name: str,
+    project_dir: str,
+    expected,
+    inline_env=None,
+    context=None,
+    identity_env=None,
 ) -> str:
     material = json.dumps(
         {
@@ -122,6 +149,11 @@ def _cache_key(
             # `aws --profile other s3 rm` が既定 profile の成功 entry を hit して
             # 未検証のまま allow される。
             "ctx": context or {},
+            # hook プロセスの env のうちアカウントを決める変数 (`identity_env()`)。
+            # プロジェクトごとの固定 (settings の `env` の `AWS_PROFILE` 等) は
+            # 保存した時点で起動中のセッションに反映されるので、含めないと値を
+            # 変えた直後の TTL の間は前の値での成功 entry を hit する。
+            "ident": identity_env or {},
         },
         sort_keys=True,
         default=str,
@@ -161,17 +193,21 @@ def get_success(
     accounts_mtime: float,
     inline_env=None,
     context=None,
+    identity_env=None,
 ) -> bool:
     """検証成功が短期キャッシュにあれば True を返す。
 
-    inline_env (コマンド行頭の `AWS_PROFILE=...` 等) と context (コマンドの
-    `--profile` / `--project` / `--context` 等) が異なれば検証結果も変わりうるため
-    どちらもキーに含める。差で別エントリになり、profile A の成功が profile B で
-    誤って allow されることを防ぐ。
+    inline_env (コマンド行頭の `AWS_PROFILE=...` 等)、context (コマンドの
+    `--profile` / `--project` / `--context` 等)、identity_env (hook プロセスの env の
+    うちアカウントを決める変数) が異なれば検証結果も変わりうるため、すべてキーに
+    含める。差で別エントリになり、profile A の成功が profile B で誤って allow される
+    ことを防ぐ。
     entry の epoch が現在の epoch と違えば (書かれた後に切替が検出された) 無視する。
     """
     path = _cache_path(
-        _cache_key(service_name, project_dir, expected, inline_env, context)
+        _cache_key(
+            service_name, project_dir, expected, inline_env, context, identity_env
+        )
     )
     if path is None or not path.is_file():
         return False
@@ -199,6 +235,7 @@ def set_success(
     inline_env=None,
     context=None,
     epoch: int | None = None,
+    identity_env=None,
 ) -> bool:
     """検証成功をキャッシュする。書けたら True。
 
@@ -206,10 +243,13 @@ def set_success(
     epoch が進んでいたら (切替 hook と並行した検証 = 旧状態を見ている可能性) 書かずに
     False を返す。None なら現在の epoch で書く (後方互換)。
     切替検出 (tombstone) から IN_FLIGHT_SEC 以内も書かない (切替の実行中とみなす)。
+    identity_env はキーにだけ使い、entry には書かない (`get_success` と同じ値を渡す)。
     書き込み失敗は無視 (キャッシュはベストエフォート)。
     """
     path = _cache_path(
-        _cache_key(service_name, project_dir, expected, inline_env, context)
+        _cache_key(
+            service_name, project_dir, expected, inline_env, context, identity_env
+        )
     )
     if path is None:
         return False

@@ -479,14 +479,18 @@ _FENCE_CLOSE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
 class _Fence:
     """Code-fence state with the rules the ``line`` shape needs.
 
-    Differs from ``_common.FenceTracker`` in two ways, both matching how
-    MDX-heavy corpora are written (measured on Drizzle, where the shared
-    tracker loses 299 of 496 page boundaries):
+    Shares the closer rules with ``_common.FenceTracker``: a line with an
+    info string (```` ```ts ````) never *closes* a fence (CommonMark), and a
+    closer may be indented any amount (blocks nested in JSX close with an
+    indented ```` ``` ````). Written when the shared tracker still took
+    info-string lines for closers and lost 299 of 496 page boundaries on
+    Drizzle; both now find all 496.
 
-    - a line with an info string (```` ```ts ````) never *closes* a fence
-      (CommonMark rule; ``FenceTracker`` treats it as a closer)
-    - a closer may be indented any amount (blocks nested in JSX close with
-      an indented ```` ``` ````)
+    Differs from ``FenceTracker`` in the opener, which must be indented 0-3
+    spaces and, for backticks, carry no backtick in its info string (inline
+    code), and in having no MDX comment rule (``FenceTracker`` closes on a
+    run followed by ``*/}`` when the ``{/*`` comment opened outside any
+    block, and never opens on one).
     """
 
     def __init__(self):

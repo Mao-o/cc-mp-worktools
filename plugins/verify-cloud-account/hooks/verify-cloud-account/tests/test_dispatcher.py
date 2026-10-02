@@ -1425,6 +1425,89 @@ class TestCacheIntegration(BaseWithTmpProject):
         self.assertEqual(mock_verify.call_count, 2)
 
 
+class TestIdentityEnvCacheIntegration(BaseWithTmpProject):
+    """hook プロセスの env の変化でも成功 cache を使い回さない (v0.17.0)。
+
+    プロジェクトごとの固定 (`.claude/settings.local.json` の `env` に `AWS_PROFILE`
+    等を書く) では、アカウントを決めるのは行頭の inline env ではなく hook プロセスの
+    env になる。settings の `env` は保存した時点で起動中のセッションに反映されるので、
+    cache キーがそれを見ないと、値を変えた直後の TTL の間は前の値での成功で通る。
+    同じリポジトリを固定したセッションと固定していないセッションも cache を共有しない。
+    """
+
+    AWS_WRITE = "aws s3 rm s3://vca-probe-bucket/key"
+
+    def test_process_env_profile_change_reverifies(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "a"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "b"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_pinned_and_unpinned_sessions_do_not_share_cache(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {}):
+                os.environ.pop("AWS_PROFILE", None)
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "pinned"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_same_process_env_uses_cache(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "a"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_inline_value_decides_the_key_over_process_env(self):
+        """行頭の inline env がある変数は、実行時に効くその値でキーを作る。
+
+        CLI が使うのは inline の値なので、hook プロセス側の同じ変数が変わっても
+        同じ entry を使ってよい (再検証は不要)。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        command = "AWS_PROFILE=a " + self.AWS_WRITE
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "x"}):
+                dispatch(command, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "y"}):
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_unrelated_env_change_keeps_cache(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"VCA_UNRELATED_PROBE": "1"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"VCA_UNRELATED_PROBE": "2"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_gcloud_active_config_change_reverifies(self):
+        self._write_accounts({"gcloud": "vca-probe-project"})
+        write = "gcloud run deploy svc --image vca-probe-image"
+        with mock.patch("services.gcloud.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"CLOUDSDK_ACTIVE_CONFIG_NAME": "a"}):
+                dispatch(write, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"CLOUDSDK_ACTIVE_CONFIG_NAME": "b"}):
+                dispatch(write, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_github_config_dir_change_reverifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": "/vca-probe/a"}):
+                dispatch("gh pr create --fill", str(self.project_dir))
+            with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": "/vca-probe/b"}):
+                dispatch("gh pr create --fill", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+
 class TestInlineEnvPropagation(BaseWithTmpProject):
     """インライン env がマージされ verify(env=...) に伝播することの統合テスト (要望1)。"""
 

@@ -1,5 +1,102 @@
 # Changelog
 
+## 0.17.0
+
+### Added: プロジェクトごとのアカウント固定 (各 CLI の公式の仕組みを案内)
+
+自動切替 (0.16.0) は gh だけで、aws / gcloud / firebase を使い分けるには毎回
+切り替えが要った。この 3 つは、CLI 自身にプロジェクト (ディレクトリ) ごとに
+アカウントを決める公式の仕組みがある (aws の `AWS_PROFILE`、gcloud の
+`CLOUDSDK_ACTIVE_CONFIG_NAME`、firebase の `firebase use`)。マシン全体を切り替える
+自動切替は並行する別のリポジトリの作業と競合するので、VCA は切り替えを足さず、
+固定の仕組みを案内する。照合はこれまでどおり続ける。
+
+- **skill `/verify-cloud-account:project-accounts` を追加。** 「プロジェクトごとに
+  アカウントを切り替えたい」「aws も自動で切り替えて」等の依頼で、aws は
+  `AWS_PROFILE`、gcloud は `CLOUDSDK_ACTIVE_CONFIG_NAME` (一致する構成が無ければ
+  `CLOUDSDK_CORE_PROJECT` / `CLOUDSDK_CORE_ACCOUNT`) を `.claude/settings.local.json`
+  の `env` に書き、firebase は `firebase use <alias>` をそのディレクトリで 1 回
+  実行する。書く前に足す行と書き込み先を見せて承認を得る。書いた後は `pin-env` と
+  show で反映を確かめる
+- **builder に `pin-env` サブコマンドを追加 (読み取り専用)。** 期待値から固定に
+  使う値を出す:
+  - aws: 期待するアカウントの profile 名。複数あれば選ばせる (role の権限が違い
+    うるため)
+  - gcloud: project / account が期待値と一致する名前付き構成。無ければ
+    `CLOUDSDK_CORE_*` (検証のたびに `gcloud config get-value` が走る旨を添える)
+  - firebase: `.firebaserc` の alias
+  - 書き込み先 (git リポジトリのルートの `.claude/settings.local.json`。worktree
+    からは main checkout のファイル) と、このセッション・書き込み先の現在値
+  - project ID などの期待値は既定で隠す (`--show-values` で表示)。出すのは
+    profile 名・構成名・alias 名だけで、Claude に `~/.aws/config` や gcloud の
+    設定ファイルを読ませない。settings.local.json は builder が書かない
+  - 書き込み先を決められない構成 (git の外 / bare / submodule / ルートがホーム /
+    所有者が違う / Windows) では推測せず理由を出す
+- README に「プロジェクトごとにアカウントを固定する (公式の方法)」節を追加
+  (CLI ごとの仕組み・書く場所・効く範囲、優先順位、保存時点の反映、`/cd` の注意)
+
+### Changed
+
+- **検証の成功 cache が、アカウントを決める環境変数の変化で再検証するようにした。**
+  0.16.1 までの cache キーは行頭の inline env と context option だけで、hook
+  プロセスの env を含まなかった。settings の `env` は保存した時点で起動中の
+  セッションに反映されるので、固定した `AWS_PROFILE` などを変えた直後の 30 秒
+  (TTL) の間は、前の値での成功で通りえた。同じリポジトリを固定したセッションと
+  固定していないセッションも entry を共有していた。CLI ごとにアカウント・認証・
+  設定の場所を決める変数 (`AWS_*` / `CLOUDSDK_*` / `KUBECONFIG` / `GH_TOKEN` /
+  `GH_HOST` / `GH_CONFIG_DIR` / firebase の `FIREBASE_TOKEN` 等) の値をキーに
+  入れる。値は hash の材料にだけ使い、cache ファイルには書かない
+- auto-switch skill: gh 以外 (aws / gcloud / firebase) を頼まれたら project-accounts
+  の手順に回す
+- README の direnv の節: settings の `env` の例を `.claude/settings.json` (commit
+  される共有設定) から `.claude/settings.local.json` に直し、「本 plugin では
+  未実測」を実測結果 (hook の検証にも届く・保存した時点で反映) に置き換えた
+- plugin の description に project-accounts skill を追記
+
+### Fixed (マージ前レビューの指摘)
+
+- **skill が確認なしで実行できる builder の呼び出しを、読み取り専用の形に絞った。**
+  skill の `allowed-tools` は、skill を呼んだターンの間、一致したコマンドを権限確認
+  なしで通す付与。auto-switch と project-accounts は builder を `*` 付きで、
+  accounts-init / accounts-migrate / accounts-show は Bash を丸ごと付与していたので、
+  誤った呼び出しやプロンプトインジェクションで、期待値を書き換える `set` / `remove` /
+  `auto-switch` の `--commit` や、期待値を表示する `--show-values` が確認なしで走り
+  えた。付与は、各 skill が実行する読み取り専用の形 (show / pin-env と、init・migrate・
+  auto-switch の `--dry-run`) を引数まで書いた完全一致だけにした。`--commit` /
+  `--show-values` / `--path` を付けた形は通常の権限確認を通す (`*` では「この option
+  だけ除く」を書けず、option の省略形 `--show` / `--com` でも抜けるため)。default
+  モードでは、skill の手順で承認した後にもう一度確認が出ることがある
+- **pin-env が案内する `firebase use <alias>` に、シェルの構文を含む値を出さないように
+  した。** この行は skill の手順で Claude がそのまま実行する。期待値の alias /
+  project ID や、リポジトリの `.firebaserc` の alias に `;` / `$()` / 空白などや先頭の
+  `-` があると、その文字列がコマンドや option として走りえた。英数字で始まり、英数字と
+  `.` `_` `-` だけからなる名前のときだけコマンドを出し、クォートもする。`.firebaserc`
+  の外れた alias は使わずに project ID を案内し、期待値の alias / project ID が外れて
+  いれば「固定できません」を出す
+- builder の案内のうち、グローバル既定のパスを埋め込んだ `--path <file>` をクォートした
+  (init / show / auto-switch / pin-env)。ホームのパスに空白があると、案内どおりに足しても
+  別々の引数に割れていた
+- pin-env が出す settings.local.json の `env` の断片を JSON として組み立てるようにした。
+  値の `"` / 改行 / `\` をそのまま埋め込んでいたので、別のキー (`BASH_ENV` など) を足した
+  形や、JSON として読めない形になりえた (普通の値の出力は変わらない)
+- pin-env: 書き込み先の settings.local.json が、JSON としては読めてもオブジェクトでない
+  (`[]` など) とき、`env` の無いオブジェクトと同じ扱いで黙って進んでいた。「JSON の
+  最上位がオブジェクトではありません」の注意を出す (skill はファイルを書き直さず、
+  ユーザーに直してもらう)
+- pin-env: gcloud の期待値に、truthy で文字列でない project / account (例
+  `{"project": 123, "account": "..."}`) や空白だけの値があると、その項目を黙って落とし、
+  残りの項目だけで構成を照合・固定していた。通常の検証は同じ期待値で deny するので、
+  固定しても通らない。不正な期待値として「固定できません」を出す (None / `""` などの
+  falsy な値は、通常の検証と同じく書かれていないものとして扱う)
+
+### Tests
+
+- identity env と cache キー (`TestIdentityEnvInCacheKey` /
+  `TestIdentityEnvCacheIntegration`)、全 service の宣言 (`TestIdentityEnvContract`)、
+  pin-env (`tests/test_pin_env.py`)、skill の付与 (`tests/test_skill_permissions.py`)、
+  `firebase use` の値 (`TestFirebaseCommandIsShellSafe`)、案内の `--path` のクォート。
+  1,201 → 1,267 件
+
 ## 0.16.1
 
 ### Added: 自動切替を Claude から設定する入口

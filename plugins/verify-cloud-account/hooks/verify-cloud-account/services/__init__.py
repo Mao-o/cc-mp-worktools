@@ -72,6 +72,21 @@
                                     **アクティブアカウントを変えない option は
                                     宣言しない** (github の `--hostname` は
                                     リモートを指定するだけなので非宣言)
+     - IDENTITY_ENV_VARS: frozenset[str]
+     - IDENTITY_ENV_PREFIXES: tuple[str, ...]
+                                    CLI が「どのアカウント / project で動くか」を
+                                    決める環境変数の名前と prefix (v0.17.0。
+                                    **全 service 必須**、契約テストが強制)。
+                                    dispatcher は検証に渡すのと同じ env (hook
+                                    プロセスの env + 行頭の inline env) から
+                                    これに当たる変数を抜き出し
+                                    (`core/cache.identity_env`)、成功 cache の
+                                    キーに含める。プロジェクトごとの固定
+                                    (settings の `env` の `AWS_PROFILE` 等) は
+                                    保存した時点で起動中のセッションに反映される
+                                    ため、漏れると値を変えた直後の TTL の間は
+                                    前の値での成功で通る。迷ったら入れる側に
+                                    倒す (余計に入っても再検証が増えるだけ)
      - ACCOUNT_KEY: str             accounts.local.json 上のキー名
      - SETUP_HINT: str              accounts.local.json 未設定時の案内文
      - ACCEPTS_DICT: bool           期待値に dict 形を許すか (全 service 必須)

@@ -2607,5 +2607,62 @@ class TestGcloudLocalConfigRead(_LocalConfigBase):
         self.assertTrue(run.called)
 
 
+class TestIdentityEnvContract(unittest.TestCase):
+    """`IDENTITY_ENV_VARS` / `IDENTITY_ENV_PREFIXES` の契約 (v0.17.0)。
+
+    CLI が「どのアカウント / project で動くか」を決める環境変数を全 service が宣言し、
+    dispatcher はこれで成功 cache のキーを作る (`core/cache.identity_env`)。宣言が
+    漏れると、settings の `env` で値を変えた直後 (保存した時点で起動中のセッションに
+    反映される) の TTL の間、前の値での検証成功を hit して未検証のまま通る。
+    """
+
+    # 宣言 (名前か prefix のどちらか) で必ず拾えるべき代表。
+    REQUIRED = {
+        "aws": ["AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_CONFIG_FILE"],
+        "gcloud": [
+            "CLOUDSDK_ACTIVE_CONFIG_NAME",
+            "CLOUDSDK_CONFIG",
+            "CLOUDSDK_CORE_PROJECT",
+            "CLOUDSDK_CORE_ACCOUNT",
+            "GOOGLE_CLOUD_PROJECT",
+        ],
+        "github": ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR"],
+        "kubectl": ["KUBECONFIG"],
+        "firebase": ["XDG_CONFIG_HOME", "FIREBASE_TOKEN"],
+    }
+
+    def test_every_service_declares_identity_env(self):
+        from services import ALL
+
+        for svc in ALL:
+            with self.subTest(svc=svc.__name__):
+                self.assertIsInstance(svc.IDENTITY_ENV_VARS, frozenset)
+                self.assertIsInstance(svc.IDENTITY_ENV_PREFIXES, tuple)
+                self.assertTrue(svc.IDENTITY_ENV_VARS or svc.IDENTITY_ENV_PREFIXES)
+                for name in (*svc.IDENTITY_ENV_VARS, *svc.IDENTITY_ENV_PREFIXES):
+                    self.assertIsInstance(name, str)
+                    self.assertTrue(name)
+
+    def test_required_variables_are_covered(self):
+        from core import cache
+
+        by_name = {
+            s.__name__.rsplit(".", 1)[-1]: s
+            for s in (aws, firebase, gcloud, github, kubectl)
+        }
+        for svc_name, names in self.REQUIRED.items():
+            for name in names:
+                with self.subTest(svc=svc_name, var=name):
+                    self.assertIn(name, cache.identity_env(by_name[svc_name], {name: "x"}))
+
+    def test_unrelated_variables_are_not_picked(self):
+        from core import cache
+
+        env = {"PATH": "/usr/bin", "LANG": "C", "VCA_UNRELATED_PROBE": "1"}
+        for svc in (aws, firebase, gcloud, github, kubectl):
+            with self.subTest(svc=svc.__name__):
+                self.assertEqual(cache.identity_env(svc, env), {})
+
+
 if __name__ == "__main__":
     unittest.main()
