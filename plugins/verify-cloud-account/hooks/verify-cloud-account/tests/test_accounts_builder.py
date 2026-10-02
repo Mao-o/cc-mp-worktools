@@ -621,6 +621,23 @@ class TestMigrateScenarios(BaseBuilder):
         self.assertIn("rm ", out)
         self.assertTrue(self._deprecated_path().exists())  # 旧パスは保持
 
+    def test_migrate_cleanup_hint_keeps_the_path_one_shell_word(self):
+        """`rm <path>` の path はシェルの 1 語にする。サブディレクトリで作業していると、
+        途中のディレクトリ名はリポジトリが決められる (マージ前レビューの指摘)。"""
+        project = Path(self.tmp) / "pkg; touch PWNED"
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "accounts.json").write_text(
+            json.dumps({"github": "older-user"}), encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}):
+            code, out, err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0, err)
+        rm_lines = [s.strip() for s in out.splitlines() if s.strip().startswith("rm ")]
+        self.assertEqual(len(rm_lines), 1, out)
+        words = shlex.split(rm_lines[0])
+        self.assertEqual(len(words), 2, words)
+        self.assertTrue(words[1].endswith("pkg; touch PWNED/.claude/accounts.json"), words)
+
     def test_migrate_legacy_only_copies_to_new(self):
         self._legacy_path().write_text(
             json.dumps({"github": "older-user"}), encoding="utf-8"

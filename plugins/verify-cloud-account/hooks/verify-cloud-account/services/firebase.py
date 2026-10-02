@@ -230,6 +230,43 @@ def aliases_for(project_dir: str, project_id: str) -> list[str]:
     return sorted(alias for alias, project in aliases.items() if project == project_id)
 
 
+def _reject_constant(name: str):
+    """`json.loads` の parse_constant: `NaN` / `Infinity` / `-Infinity` を拒否する (JSON.parse と同じ)。"""
+    raise ValueError(f"JSON に無い値: {name}")
+
+
+def firebaserc_reads_like_cli(project_dir: str) -> bool:
+    """`.firebaserc` を、このモジュールと firebase-tools が同じ内容に読めるか (無ければ True)。
+
+    firebase-tools は `.firebaserc` を cjson で読む: ファイル中のすべての U+FEFF を除き、
+    `//` / `/* */` のコメントを除いてから JSON.parse する (不正な UTF-8 は置換文字になり、
+    `NaN` 等があると JSON.parse が失敗して alias 0 件になる)。このモジュールは厳密な JSON
+    (`json.loads`) で読むので、コメント・先頭の U+FEFF・UTF-8 でないバイトのあるファイルでは
+    alias を 0 件と読み、alias のキーの中の U+FEFF は別のキーと読み、`NaN` のあるファイルでは
+    firebase-tools が読まない alias を読む。どれも `firebase use <x>` の行き先の予測が食い違う。
+
+    判定は保守的: UTF-8 として読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中でも)・
+    厳密な JSON として読めない、のどれかなら False (cjson のコメント除去は再現しない)。
+    どれでもなければ、cjson の前処理は何も変えず、JSON.parse と `json.loads` は同じ内容を返す。
+    builder の `pin-env` が `firebase use` を案内する前に使う (verify() の照合は別の話で、
+    ここでは変えない)。
+    """
+    path = Path(_project_root(project_dir)) / ".firebaserc"
+    if not path.is_file():
+        return True
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if "\ufeff" in text or "//" in text or "/*" in text:
+        return False
+    try:
+        json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return False
+    return True
+
+
 def resolve_target(project_dir: str, target: str) -> str:
     """`firebase use <target>` / `--project <target>` が指す project ID。
 
@@ -360,15 +397,18 @@ def _alias_lines(expected: dict, command: str) -> list[str]:
     """dict 期待値の案内行 (`<command> <alias>  # → <project>`)。
 
     command は `firebase use` (切替。各行は self-remediation で通る) か `--project`
-    (flag を直す形)。alias か project が許容形から外れる entry は行にしない —
-    `#` の後ろでも、改行が入るとコメントの外に出てコマンドになる。省いた entry が
-    あれば、その旨と手での確認を最後の行に添える。案内できる行が 1 つも無ければ空。
+    (flag を直す形)。alias か project が許容形から外れる entry は行にしない。alias は
+    コマンドの引数なので `firebase use` の許容形 (`shell_word.NAME`)。`#` の後ろの project は
+    コメントで、問題になるのは改行 (コメントの外に出てコマンドになる) なので、一般の許容形
+    (`shell_word.WORD`。改行・空白・制御文字・非 ASCII を弾く) に限る — ドメイン付きの
+    project ID (`example.com:my-project`) も行にできる。省いた entry があれば、その旨と
+    手での確認を最後の行に添える。案内できる行が 1 つも無ければ空。
     """
     lines, skipped = [], False
     for alias, project in expected.items():
         if not (isinstance(project, str) and project):
             continue
-        alias_arg, project_arg = _target(alias), _target(project)
+        alias_arg, project_arg = _target(alias), shell_word.arg(project)
         if alias_arg is None or project_arg is None:
             skipped = True
             continue

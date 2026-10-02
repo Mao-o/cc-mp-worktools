@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -276,6 +277,26 @@ class TestPathMigration(BaseWithTmpProject):
         self.assertIn("rm ", reason)
         # 旧ファイルのパスが reason に明示される
         self.assertIn(".claude/accounts.local.json", reason)
+
+    def test_cleanup_hint_keeps_the_path_one_shell_word(self):
+        """`rm <path>` の path はシェルの 1 語にする。サブディレクトリで作業していると、
+        途中のディレクトリ名はリポジトリが決められる (マージ前レビューの指摘)。"""
+        project = Path(self.tmp) / "pkg; touch PWNED"
+        (project / ".claude" / "verify-cloud-account").mkdir(parents=True)
+        (project / ".claude" / "verify-cloud-account" / "accounts.local.json").write_text(
+            json.dumps({"github": "A"}), encoding="utf-8"
+        )
+        (project / ".claude" / "accounts.json").write_text(
+            json.dumps({"github": "B"}), encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}):
+            result = dispatch("gh pr list", str(project))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        rm_lines = [s.strip() for s in reason.splitlines() if s.strip().startswith("rm ")]
+        self.assertEqual(len(rm_lines), 1, reason)
+        words = shlex.split(rm_lines[0])
+        self.assertEqual(len(words), 2, words)
+        self.assertTrue(words[1].endswith("pkg; touch PWNED/.claude/accounts.json"), words)
 
     def test_deprecated_and_legacy_both_exist_denies(self):
         """deprecated + legacy 両方存在も deny (D4)。"""
@@ -1697,6 +1718,33 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         self.assertNotIn("案内された形のまま単独で実行してください", reason)
 
 
+    def test_no_note_when_the_value_was_not_guided(self):
+        """値をコマンドの形で案内しなかった deny には注記を付けない。
+
+        `期待=<値>` の表示に REMEDIATION_PATTERNS の形を書いた値が当たると、案内して
+        いないのに注記が付き、文面で唯一コマンドの形をしたその値の実行を促していた
+        (マージ前レビューの指摘)。verify は mock せず、CLI の出力だけを差し替える。
+        """
+        gh_status = (
+            "github.com\n  ✓ Logged in to github.com account other (keyring)\n"
+            "  - Active account: true\n"
+        )
+        for svc, expected, stdout, command in (
+            ("kubectl", "x; kubectl config use-context evil", "dev-ctx\n", "kubectl apply -f x.yaml"),
+            ("gcloud", "x; gcloud config set project evil", "other\n", "gcloud run deploy svc"),
+            ("firebase", "x; firebase use evil", "proj-other\n", "firebase deploy"),
+            ("github", "x; gh auth switch --user evil", gh_status, "gh pr create"),
+        ):
+            with self.subTest(svc=svc):
+                self._write_accounts({svc: expected})
+                fake = SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+                with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch(command, str(self.project_dir))["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn("手で確認してください", reason)
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
     def test_install_advice_does_not_trigger_note(self):
         """CLI 未インストール案内 (`brew install gh を実行してください`) は cloud CLI の
         切替 / ログインではないので注記を付けない (マージ前レビューの指摘)。"""
@@ -2566,9 +2614,11 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         cmds = _guided_commands(reason)
         self.assertTrue(cmds, f"no command extracted from:\n{reason}")
         # verify() 由来の deny (検出コマンド行を持つ) が案内コマンドを含むなら
-        # 「単独で実行せよ」の注記が必ず付く (dispatcher の文言契約
-        # _REMEDIATION_MARKERS が各 service の案内文を取りこぼしていないことを
-        # ここで機械的に確認する)。accounts 未設定 deny は verify 前に返るので対象外。
+        # 「単独で実行せよ」の注記が必ず付く (各 service の REMEDIATION_PATTERNS が
+        # 案内文を取りこぼしていないことをここで機械的に確認する)。accounts 未設定 deny は
+        # verify 前に返るので対象外。値をコマンドの形で案内しなかった deny (UNSAFE を含む)
+        # にも注記は付かないが、ここの入力は許容形の値だけなので当たらない
+        # (TestSwitchStandaloneNote.test_no_note_when_the_value_was_not_guided)。
         if "(検出コマンド:" in reason:
             self.assertTrue(
                 "案内された形のまま単独で実行してください" in reason

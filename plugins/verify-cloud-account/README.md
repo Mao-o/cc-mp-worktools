@@ -343,7 +343,9 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   の記録は作業ディレクトリごとなので、別の worktree では最初に 1 回要ることがある。
   VCA は firebase のアカウントは検証しない。`firebase use` は引数を `.firebaserc` の
   alias として先に解決するので、`pin-env` はこのディレクトリの `.firebaserc` で期待した
-  project に解決される alias を案内し、無ければ期待値の project ID で案内する (v0.17.1)
+  project に解決される alias を案内し、無ければ期待値の project ID で案内する (v0.17.1)。
+  `.firebaserc` が厳密な JSON でない (コメント・U+FEFF・NaN などを含む、UTF-8 でない) と、
+  firebase-tools と同じ行き先を確かめられないので「固定できません」と出す (v0.17.1)
 - 前後に空白のある期待値は固定できない (照合は完全一致なので、どの現在値とも一致しない)。
   `pin-env` は「固定できません」と出す (v0.17.1)
 - 検証の成功 cache は、アカウントを決める環境変数の値もキーに含める (v0.17.0)。
@@ -691,7 +693,8 @@ allow-list ではない)。`gcloud config set project <期待値> --configuratio
 を同じコマンド行に連結すると (`gh auth switch ... && gh pr create` 等)、そちらが切替**前**
 の状態で検証されるため deny される (案内文自身が連結している `firebase login && firebase
 use <x>` は、書込側が期待値への切替なので許可される形)。remediation を案内する deny
-文面にはこの注記が付く (v0.11.1)。
+文面にはこの注記が付く (v0.11.1)。値をコマンドの形で案内しなかった deny (下の「手で確認して
+ください」の文がある deny) には付けない (v0.17.1)。
 
 **案内するコマンドに入れる値は、シェルでそのまま 1 語になる形に限る (v0.17.1)。** 期待値・
 host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/` `@` `+` だけからなる

@@ -15,10 +15,22 @@ deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud c
   からなる形のときだけコマンドに出し、`shlex.quote` も通す。firebase の alias /
   project ID は pin-env の `firebase use` と同じく `.` `_` `-` まで。外れた値はコマンドの
   形で案内せず、「手で確認してください」の文にする。普通の値 (EKS や kubeadm の context
-  名、メールアドレスの account を含む) の文面は変わらない
+  名、メールアドレスの account を含む) の文面は変わらない。許容形は狭く、シェル上は無害な
+  値 (`_local` や日本語の context 名など) も外れるので、外れた値の文面は「案内に使える形
+  ではない」とだけ言い、危険な文字を含むとは言わない (マージ前レビューの指摘)
 - firebase の dict 期待値の案内行 (`firebase use <alias>  # → <project>`) は、`#` の後ろの
-  project も同じ形に限る (改行が入るとコメントの外に出てコマンドになる)。案内できない
-  entry は行にせず、その旨を添える
+  project も許容形 (`.` `_` `-` `:` `/` `@` `+`。コメントなので alias より広い) に限る
+  (改行が入るとコメントの外に出てコマンドになる)。ドメイン付きの project ID
+  (`example.com:my-project`) は行にする。案内できない entry は行にせず、その旨を添える
+- 値をコマンドの形で案内しなかった deny には、「案内した切替 / ログインコマンドは案内された
+  形のまま単独で実行」の注記を付けない。`期待=<値>` の表示が切替コマンドの形に見えると
+  (`x; kubectl config use-context other` 等)、案内していないのに注記が付き、その値の実行を
+  促していた。ある entry は案内し別の entry は抑止した deny (gh の複数 host 等) からも注記が
+  消えるが、安全側として受け入れた (マージ前レビューの指摘)
+- 旧パスの削除の案内 (複数のパスの衝突の deny と builder の `migrate --commit` が出す
+  `rm <path>`) も、パスを quote してシェルの 1 語にする。サブディレクトリで作業していると、
+  途中のディレクトリ名はリポジトリが決められる (0.17.1 より前からある。マージ前レビューの
+  指摘)
 - AWS の profile 名は、許容形から外れる名前をコマンドにも「対応する profile」の一覧にも
   出さない (一覧の名前も `<profile>` に当てはめて使われる)。外れた名前しか無ければ
   `<profile>` のままにする
@@ -39,6 +51,15 @@ deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud c
 - project ID と同じ名前の alias が `.firebaserc` で別の project を指しているときは、
   `firebase use <project ID>` がその alias に切り替わるので、project ID でも案内しない
   (scalar の期待値も同じ)。alias も project ID も出せなければ「固定できません」
+- dict 期待値で project ID の候補が複数あるときは、名前順の先頭を案内しつつ、どれに
+  するかをユーザーに選んでもらう注記を添える (黙って 1 つを選んでいた)
+- **firebase-tools と同じ内容に読めない `.firebaserc` では「固定できません」にした。**
+  firebase-tools は `.firebaserc` のすべての U+FEFF とコメント (`//` / `/* */`) を除いてから
+  JSON として読むが、pin-env は厳密な JSON として読んでいた。コメントのあるファイルでは
+  alias を 0 件と読んで同名の alias の確認をすり抜け、alias のキーの中の U+FEFF は別の
+  キーと読むので、案内した `firebase use` が別の project に切り替わりえた。UTF-8 として
+  読めない・U+FEFF を含む・`//` か `/*` を含む・厳密な JSON として読めない (`NaN` 等) の
+  どれかなら案内しない (マージ前レビューの指摘)。通常の検証の照合は変えていない
 - **前後に空白のある期待値を「固定できません」にした。** 通常の検証は CLI が出した
   (前後の空白を除いた) 現在値と期待値を完全一致で照合するので、
   `{"project": " my-project "}` のような期待値はどの現在値とも一致しない。0.17.0 の
@@ -55,7 +76,15 @@ deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud c
   済みの手元専用のローカルガイドを名前で除いた。保守者の手元の plugin 直下にあると、その
   本文で offender になり、手元の test だけが落ちていた (clean clone の CI は通る)。
   配布ファイルに書かれた参照は今までどおり検出する
-- 1,267 → 1,299 件
+- マージ前レビューの指摘の回帰テスト: 値を案内しなかった deny に注記が付かない
+  (`TestSwitchStandaloneNote`。kubectl / gcloud / firebase / gh を実際の verify で)、
+  `rm <path>` がシェルの 1 語になる (衝突の deny と migrate)、firebase-tools と違う内容に読む
+  `.firebaserc` では案内しない (`TestPinEnvReadsFirebasercLikeFirebaseTools`。判定の条件
+  ごとに、その条件だけが捕まえる入力を置く)、project ID の候補が複数のときの注記、外れた
+  値の文面、`#` の後ろのドメイン付き project ID。`TestFirebaseGuidance` の
+  `test_hostile_values_are_not_guided_as_a_command` は、`example.com:my-project` を dict の
+  project としては案内する形に期待値を変えた
+- 1,267 → 1,306 件
 
 ## 0.17.0
 

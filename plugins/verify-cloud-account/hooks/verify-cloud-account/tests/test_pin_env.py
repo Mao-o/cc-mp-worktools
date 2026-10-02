@@ -275,6 +275,22 @@ class TestPlanFirebase(_TmpBase):
         self.assertIsNone(plan.command)
         self.assertIn("別の project を指す alias と同じ名前", plan.problem or "")
 
+    def test_dict_with_several_project_ids_asks_the_user_to_choose(self):
+        """alias が使えず project ID で案内するとき、候補が複数なら名前順の先頭を黙って
+        選ばず、どれにするかを選ばせる注記を添える (値は既定で隠すので一覧は出さない。
+        マージ前レビューの指摘)。同じ project を指す alias が複数でも候補は 1 つ。"""
+        project_dir = self._project(None)
+        plan = pin_env.plan_firebase({"dev": "fb-a", "prod": "fb-b"}, project_dir)
+        self.assertEqual(plan.command, "firebase use fb-a")
+        self.assertTrue(plan.command_secret)
+        joined = "\n".join(plan.notes)
+        self.assertIn("project ID は 2 個あり", joined)
+        self.assertIn("ユーザーに選んでもらってください", joined)
+        self.assertNotIn("fb-b", joined)
+        plan = pin_env.plan_firebase({"dev": "fb-a", "dev2": "fb-a"}, project_dir)
+        self.assertEqual(plan.command, "firebase use fb-a")
+        self.assertNotIn("個あり", "\n".join(plan.notes))
+
     def test_notes_say_it_is_per_directory_and_account_is_not_verified(self):
         plan = pin_env.plan_firebase("fb-dev", self._project({"default": "fb-dev"}))
         joined = "\n".join(plan.notes)
@@ -286,6 +302,74 @@ class TestPlanFirebase(_TmpBase):
         project_dir = self._project(None)
         self.assertIn("未設定", pin_env.plan_firebase(None, project_dir).problem)
         self.assertIn("有効な project", pin_env.plan_firebase({"x": ""}, project_dir).problem)
+
+
+class TestPinEnvReadsFirebasercLikeFirebaseTools(_TmpBase):
+    """firebase-tools と違う内容に読む `.firebaserc` では `firebase use` を案内しない。
+
+    firebase-tools は `.firebaserc` を cjson で読む: ファイル中のすべての U+FEFF を除き、
+    `//` / `/* */` のコメントを除いてから JSON.parse する (不正な UTF-8 は置換文字になり、
+    `NaN` 等は JSON.parse が拒否して alias 0 件)。cjson はバックスラッシュで終わる文字列の
+    直後で文字列の内外を取り違える。厳密な JSON で読むと、どの入力でも案内した
+    `firebase use` の行き先の予測が食い違う (マージ前レビューの指摘)。コメントは
+    firebase-tools (cjson 0.3.3) で読んだ内容と、そのときの行き先。
+    """
+
+    FIREBASERC = (
+        # alias 0 件と読み、同名の alias の確認をすり抜ける (right-project -> wrong-project)
+        (
+            "line comment",
+            b'{\n  // aliases\n'
+            b'  "projects": {"default": "right-project", "right-project": "wrong-project"}\n}\n',
+        ),
+        (
+            "block comment",
+            b'{"projects": {/* aliases */ "default": "right-project",'
+            b' "right-project": "wrong-project"}}\n',
+        ),
+        # U+FEFF を除くと 2 つ目のキーも "prod" になり後勝ち (prod -> wrong-project)
+        (
+            "U+FEFF in an alias",
+            '{"projects": {"prod": "right-project", "pr\ufeffod": "wrong-project"}}\n'.encode(),
+        ),
+        # 先頭の U+FEFF は json.loads が拒否して alias 0 件 (right-project -> wrong-project)
+        (
+            "leading U+FEFF",
+            '\ufeff{"projects": {"default": "right-project", "right-project": "wrong-project"}}\n'.encode(),
+        ),
+        # UTF-8 でないバイトは置換文字になるだけ (right-project -> wrong-project)
+        (
+            "not UTF-8",
+            b'{"projects": {"default": "right-project", "right-project": "wrong-project"},'
+            b' "note": "\xff"}\n',
+        ),
+        # json.loads は NaN を読むが JSON.parse は拒否して alias 0 件
+        # (other-project は project ID として扱われる)
+        ("NaN", b'{"projects": {"other-project": "right-project"}, "x": NaN}\n'),
+        # `\\` で終わる文字列の後の `//` をコメントと読み、残りが読めず alias 0 件
+        (
+            "// in a string",
+            b'{"note": "a\\\\", "x": "//", "projects": {"other-project": "right-project"}}\n',
+        ),
+        # 同じく `/*` から `*/` までを除き、後ろの "projects" が消える (prod -> wrong-project)
+        (
+            "/* in a string",
+            b'{"note": "a\\\\", "projects": {"prod": "wrong-project"}, "x": "/*",'
+            b' "projects": {"prod": "right-project"}, "y": "*/"}\n',
+        ),
+    )
+
+    def test_firebase_use_is_not_guided(self):
+        for i, (label, data) in enumerate(self.FIREBASERC):
+            root = self.tmp / f"fb{i}"
+            root.mkdir()
+            (root / "firebase.json").write_text("{}", encoding="utf-8")
+            (root / ".firebaserc").write_bytes(data)
+            for expected in ("right-project", {"prod": "right-project"}):
+                with self.subTest(firebaserc=label, expected=expected):
+                    plan = pin_env.plan_firebase(expected, str(root))
+                    self.assertIsNone(plan.command, plan)
+                    self.assertIn(".firebaserc が厳密な JSON として読めません", plan.problem or "")
 
 
 class TestFirebaseCommandIsShellSafe(_TmpBase):

@@ -5,12 +5,13 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from core import auto_switch, budget, cache, cli_options, mode, output, paths, tiers
+from core import auto_switch, budget, cache, cli_options, mode, output, paths, shell_word, tiers
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -84,7 +85,8 @@ def _budget_expired_error(account_key: str, *, stops: bool = True) -> str:
 # `firebase use がタイムアウトしました` (診断文) まで拾う。検出コマンド (user 入力) を
 # 合成した後の本文にも掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は
 # tests の TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が
-# 付く」ことで機械的に確認する。
+# 付く」ことで機械的に確認する。例外は値をコマンドの形で案内しなかった deny
+# (`shell_word.UNSAFE` を含む。_dispatch_impl の注記の判定を参照)。
 def _guides_remediation(err: str, service) -> bool:
     patterns = getattr(service, "REMEDIATION_PATTERNS", ())
     return any(re.search(p, err) for p in patterns)
@@ -95,8 +97,9 @@ def _guides_remediation(err: str, service) -> bool:
 # 案内文が自ら連結している形も通る) が、**元のコマンド (検出コマンド) を同じ Bash に
 # 連結する**と、そちらが切替前の状態で検証されて deny になる (_all_self_remediation は
 # 全セグメントが切替であることを要求する)。案内どおりに打ったのに再び deny される往復を
-# 防ぐため、remediation を案内する deny には必ず添える。service が REMEDIATION_NOTE を
-# 宣言していればそれを優先する (AWS: インライン env は単独実行するものではない)。
+# 防ぐため、remediation を案内する deny には必ず添える (値をコマンドの形で案内しなかった
+# deny は除く)。service が REMEDIATION_NOTE を宣言していればそれを優先する (AWS: インライン
+# env は単独実行するものではない)。
 _REMEDIATION_STANDALONE_NOTE = (
     "※ 案内した切替 / ログインコマンドは案内された形のまま単独で実行してください。"
     "元のコマンド (検出コマンド) を同じコマンド行に連結すると、そちらが切替前の状態で"
@@ -574,7 +577,9 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     if legacy_paths:
         lines.append("  migrate --commit 完了後、以下の旧ファイルを手動で削除してください:")
         for path in legacy_paths:
-            lines.append(f"    rm {path}")
+            # パスはシェルの 1 語にする。サブディレクトリで作業していると、途中の
+            # ディレクトリ名はリポジトリが決められる (`;` や空白を含みうる)。
+            lines.append(f"    rm {shlex.quote(str(path))}")
     return "\n".join(lines)
 
 
@@ -877,7 +882,14 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             switch_note = outcome.note or ""
         if err:
             # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
-            if _guides_remediation(err, svc):
+            # 値をコマンドの形で案内しなかった (shell_word.UNSAFE を含む) deny には付けない:
+            # 文面の `期待=<値>` の表示に REMEDIATION_PATTERNS の形を書いた値
+            # (`x; kubectl config use-context other` 等) が当たり、案内していないのに
+            # 「案内したコマンドは案内された形のまま単独で実行」と、その値の実行を促して
+            # しまう。代償として、ある entry は案内し別の entry は抑止した deny (gh の
+            # 複数 host / firebase の dict / aws の profile 一覧) からも注記が消える
+            # (案内したコマンドを連結して打つと再び deny されるだけで、安全側)。
+            if _guides_remediation(err, svc) and shell_word.UNSAFE not in err:
                 note_text = getattr(svc, "REMEDIATION_NOTE", _REMEDIATION_STANDALONE_NOTE)
                 if note_text not in remediation_notes:
                     remediation_notes.append(note_text)

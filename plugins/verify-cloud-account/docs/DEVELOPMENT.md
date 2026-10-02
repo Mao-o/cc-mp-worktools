@@ -1132,11 +1132,27 @@ deny 文面の切替案内と pin-env の `firebase use` は、Claude がその�
   なので、許容形の値の文面は 0.17.0 と同じ (`REMEDIATION_PATTERNS` / `is_self_remediation`
   への影響が無い)。quote は許容形を緩めたときの二重化
 - 外れた値は「quote して出す」ではなく「コマンドにしない」。quote すれば 1 引数には
-  なるが、`-P` のような option の形や改行を含む値を、期待値として案内すること自体が誤り
-  (どの CLI の現在値とも一致しない値への切替を勧めることになる)
+  なるが、`-P` のような option の形や改行を含む値を、期待値として案内すること自体が誤り。
+  許容形は狭いので、シェル上は無害な値 (kubectl の `_local` / `a,b` / 日本語の context 名
+  など) も一部外れるが、許容形を広げるより案内しない側に倒した。そのため外れた値の文面
+  (`shell_word.UNSAFE`) は「危険な文字を含む」とは言わず、「案内に使える形ではない」という
+  事実だけを言う (マージ前レビューの指摘)
 - firebase の `# → <project>` は案内行のコメントだが、改行が入るとコメントの外に出るので
-  project も許容形に限る。AWS の「対応する profile」の一覧も、名前が `<profile>` に
-  当てはめて使われるので、コマンドと同じ扱いにする
+  project も許容形に限る。コメントで問題になるのは改行だけなので、alias (`NAME`) より広い
+  `WORD` を使う (改行・空白・制御文字・非 ASCII は `WORD` でも弾ける。ドメイン付きの
+  project ID `example.com:my-project` も行にできる)。AWS の「対応する profile」の一覧も、
+  名前が `<profile>` に当てはめて使われるので、コマンドと同じ扱いにする
+- 値を案内しなかった deny (`UNSAFE` を含む) には「案内したコマンドは単独で実行」の注記を
+  付けない。`期待=<値>` の表示は `REMEDIATION_PATTERNS` の照合の対象なので、値に
+  `x; kubectl config use-context other` のような形を書くと、案内していないのに注記が付き、
+  文面で唯一コマンドの形をしたその値の実行を促していた。注記の判定から表示を除く案より
+  小さい修正を採った代わりに、ある entry は案内し別の entry は抑止した deny (gh の複数
+  host / firebase の dict / aws の profile 一覧) からも注記が消える。案内したコマンドを
+  連結して打っても再び deny されるだけなので、安全側の代償として受け入れた (マージ前
+  レビューの指摘)
+- 旧パスの削除の案内 (`rm <path>`。dispatcher の衝突の deny と builder の migrate) も
+  `shlex.quote` を通す。サブディレクトリで作業していると、途中のディレクトリ名は
+  リポジトリが決められる (0.17.1 より前からある。マージ前レビューの指摘)
 - 検出したコマンド自身の値 (`コマンド指定 --context=...` 等) は案内ではなく、そのコマンドが
   何を指定したかの表示。外れた値を隠すと何が不一致だったかが分からなくなるので、検証せず
   quote だけ通す
@@ -1154,7 +1170,22 @@ ID として扱う (`firebase.resolve_target`。verify() の `--project` の照�
 alias が `.firebaserc` で別の project を指す・alias が無い・project ID と同じ名前の alias が
 別の project を指す、のどれでも、案内どおりにすると期待した project にならず、続く検証が
 deny し続ける。行き先が期待値の project になる alias → 期待値の project ID の順に選び、
-どちらも無ければ「固定できません」にする (マージ前レビューの指摘)
+どちらも無ければ「固定できません」にする (マージ前レビューの指摘)。project ID で
+案内できるものが複数あるときは、名前順の先頭を案内しつつ、どれにするかを利用者に選ばせる
+注記を付ける (値は既定で隠すので一覧は出さない)
+
+**pin-env は、firebase-tools と同じ内容に読めない `.firebaserc` では案内しない**
+
+firebase-tools は `.firebaserc` を cjson で読む (ファイル中のすべての U+FEFF を除き、`//` /
+`/* */` のコメントを除いてから JSON.parse。不正な UTF-8 は置換文字になり、`NaN` 等があると
+JSON.parse が失敗して alias 0 件)。`services/firebase.py` は厳密な JSON で読むので、コメントの
+あるファイルでは alias 0 件と読んで同名の alias の確認をすり抜け、alias のキーの中の U+FEFF は
+別のキーと読んで行き先を取り違える。どちらも案内した `firebase use` が別の project に
+切り替わりうる。cjson の前処理を再現するのではなく、UTF-8 として読めない・U+FEFF を含む・
+`//` か `/*` を含む (文字列の中でも)・厳密な JSON として読めない、のどれかなら「固定できません」にした
+(`firebase.firebaserc_reads_like_cli`。fail-closed)。どれでもなければ cjson の前処理は何も
+変えないので、両者は同じ内容を読む。verify() の `--project` の照合も同じ読み方の違いを持つが、
+判定に関わるので別に扱う (今回は pin-env だけ。マージ前レビューの指摘)
 
 **pin-env は、前後に空白のある期待値を固定しない**
 

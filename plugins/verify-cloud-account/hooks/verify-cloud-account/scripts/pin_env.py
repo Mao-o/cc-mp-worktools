@@ -57,6 +57,15 @@ _PADDED = (
 )
 
 
+# `.firebaserc` を firebase-tools と同じ内容に読めないときの「固定できません」の理由
+# (`firebase.firebaserc_reads_like_cli`)。
+_FIREBASERC_NOT_STRICT = (
+    ".firebaserc が厳密な JSON として読めません (コメント・U+FEFF・NaN などを含むか、UTF-8"
+    " ではない)。firebase-tools はこれを別の規則で読むので、firebase use の行き先が期待した"
+    " project になるかを確かめられません (.firebaserc を厳密な JSON に直すと案内できます)"
+)
+
+
 def _padded(value) -> bool:
     """前後に空白のある (空白だけではない) 文字列なら True。"""
     return isinstance(value, str) and bool(value.strip()) and value != value.strip()
@@ -199,6 +208,12 @@ def plan_firebase(expected, project_dir: str) -> Plan:
         "アカウントも firebase login:use <email> でこのディレクトリ用に選べます"
         " (VCA は firebase のアカウントは検証しません)",
     )
+    # 案内する `firebase use <x>` の行き先は `.firebaserc` の alias で決まる (下の
+    # `_firebase_use_to`)。firebase-tools と違う内容に読んでいると、行き先の確認も同名の
+    # alias の確認もすり抜けて、別の project に切り替わるコマンドを案内しうる。同じに
+    # 読めると言えないときは案内しない (fail-closed)。
+    if not firebase.firebaserc_reads_like_cli(project_dir):
+        return Plan("firebase", problem=_FIREBASERC_NOT_STRICT)
     if isinstance(expected, dict):
         return _plan_firebase_dict(expected, project_dir, notes)
     if not isinstance(expected, str) or not expected.strip():
@@ -275,6 +290,13 @@ def _plan_firebase_dict(expected: dict, project_dir: str, notes: tuple[str, ...]
     ids = sorted({project for project in exact.values() if _firebase_use_to(project, project, project_dir)})
     if ids:
         notes += ("使える alias が無いため、期待値の project ID で案内します",)
+        if len(ids) > 1:
+            # 名前順の先頭を黙って選ぶと、どの project に固定するかを利用者が選べない
+            # (値は既定で隠すので、一覧も出さない)。
+            notes += (
+                f"案内できる期待値の project ID は {len(ids)} 個あり、どれに切り替えても検証は"
+                "通ります。--show-values で確かめ、どれにするかをユーザーに選んでもらってください",
+            )
         return Plan("firebase", command=_firebase_use(ids[0]), command_secret=True, notes=notes)
     return Plan(
         "firebase",

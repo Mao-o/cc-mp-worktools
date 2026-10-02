@@ -46,7 +46,10 @@ def tearDownModule():
         shutil.rmtree(_ISOLATION_ROOT, ignore_errors=True)
 
 
-# シェルの構文・option・クォートの要る文字を含む値。どれも案内コマンドに出ない。
+# 許容形 (WORD / NAME) から外れる値。どれも案内コマンドに出ない。シェルの構文・option・
+# クォートの要る文字を含む値のほか、シェル上は無害な値 (`.hidden` / `a=b` / `ｄｅｖ` は
+# 引数の位置ならクォートしなくても 1 語のまま) も含む — 許容形は広げず、案内しない側に
+# 倒している (core/shell_word.py の UNSAFE が「危険な文字を含む」と言わない理由)。
 HOSTILE = (
     "x; touch pwned",
     "$(touch pwned)",
@@ -189,6 +192,17 @@ class TestKubectlGuidance(unittest.TestCase):
             reason = kubectl.verify("prod-ctx", self.PROJECT_DIR, context={"context": "a; b"})
         self.assertIn("コマンド指定 --context='a; b',", reason)
 
+    def test_harmless_value_outside_the_form_is_not_said_to_be_shell_syntax(self):
+        """外れた値の文面は「案内に使える形ではない」とだけ言う。シェル上は無害な値も
+        外れるので、「シェルの構文や option として解釈されうる文字を含む」は事実と
+        合わない (マージ前レビューの指摘)。"""
+        for value in ("_local", "a,b", "開発クラスタ"):
+            with self.subTest(value=value):
+                reason = self._reasons(value)["mismatch"]
+                self.assertIn("案内に使える形", reason)
+                self.assertNotIn("シェルの構文", reason)
+                self.assertIn(CHECK_BY_HAND, reason)
+
 
 class TestGcloudGuidance(unittest.TestCase):
     PROJECT_DIR = "/nonexistent-project"
@@ -312,19 +326,33 @@ class TestFirebaseGuidance(unittest.TestCase):
                 self.assertIn(f"  --project {value}  # → proj-a", alias["--project"])
 
     def test_hostile_values_are_not_guided_as_a_command(self):
-        """scalar の期待値、dict の alias、dict の project (# の後ろでも改行で外に出る)。"""
-        for value in HOSTILE + ("example.com:my-project",):
-            for shape, expected in (
-                ("scalar", value),
-                ("alias", {value: "proj-a"}),
-                ("project", {"default": value}),
-            ):
-                for case, reason in self._reasons(expected).items():
-                    with self.subTest(value=value, shape=shape, case=case):
-                        self.assertIsNotNone(reason)
-                        self.assertNotIn("firebase use", reason)
-                        self.assertFalse(_flag_with_value("--project", reason), reason)
-                        self.assertIn(CHECK_BY_HAND, reason)
+        """scalar の期待値と dict の alias はコマンドの引数なので NAME、dict の project は
+        `#` の後ろ (改行でコメントの外に出る) なので WORD から外れる値を案内しない。
+        `example.com:my-project` は NAME から外れるが WORD には収まる (project としては
+        案内する。下のテスト)。"""
+        not_name = HOSTILE + ("example.com:my-project",)
+        cases = [("scalar", value, value) for value in not_name]
+        cases += [("alias", value, {value: "proj-a"}) for value in not_name]
+        cases += [("project", value, {"default": value}) for value in HOSTILE]
+        for shape, value, expected in cases:
+            for case, reason in self._reasons(expected).items():
+                with self.subTest(value=value, shape=shape, case=case):
+                    self.assertIsNotNone(reason)
+                    self.assertNotIn("firebase use", reason)
+                    self.assertFalse(_flag_with_value("--project", reason), reason)
+                    self.assertIn(CHECK_BY_HAND, reason)
+
+    def test_domain_scoped_project_is_guided_after_the_comment_mark(self):
+        """`#` の後ろの project はコメントなので WORD で見る。ドメイン付きの project ID でも
+        alias の案内行を出す (NAME で見ていたときは案内を一切出さなかった。マージ前
+        レビューの指摘)。"""
+        reasons = self._reasons({"default": "example.com:my-project"})
+        for case in ("mismatch", "unresolved"):
+            with self.subTest(case=case):
+                self.assertIn("  firebase use default  # → example.com:my-project", reasons[case])
+                self.assertNotIn(CHECK_BY_HAND, reasons[case])
+        with self.subTest(case="--project"):
+            self.assertIn("  --project default  # → example.com:my-project", reasons["--project"])
 
     def test_dict_keeps_the_plain_entries_and_says_some_were_left_out(self):
         expected = {"$(touch pwned)": "proj-a", "default": "dev\nrm -rf ~", "prod": "proj-prod"}
