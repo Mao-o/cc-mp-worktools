@@ -1264,6 +1264,14 @@ def search_content_in_body(body_lines, query: str, *,
     }
 
 
+def _partial_rank(hits: dict) -> int:
+    """0 for a strict-AND (or single-keyword) hit set, 1 for ``partial``,
+    2 for no body hits (an index-only ``search`` row stays below both)."""
+    if not hits.get("total_matches"):
+        return 2
+    return 1 if hits.get("match_mode") == "partial" else 0
+
+
 def full_corpus_body_search(docs_body_lines, query: str, *,
                             context_lines: int = 2,
                             max_matches_per_doc: int = 3,
@@ -1282,8 +1290,11 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
     *docs_body_lines* is a list of ``body_lines`` (one per doc, in doc-index
     order). Returns a list of ``(doc_idx, hits)`` tuples — *hits* being a
     ``search_content_in_body`` result dict — for docs with at least one
-    match, sorted by total_matches desc then doc_idx asc, truncated to
-    *limit*.
+    match, sorted by match strength (docs with a strict-AND section before
+    ``[partial match]`` docs), then total_matches desc, then doc_idx asc,
+    truncated to *limit*. Strength comes first so that a page whose sections
+    mention only some keywords many times cannot push the page that has all
+    of them together past the limit.
     """
     results = []
     for idx, body_lines in enumerate(docs_body_lines):
@@ -1296,7 +1307,7 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
         )
         if hits["total_matches"] > 0:
             results.append((idx, hits))
-    results.sort(key=lambda t: (-t[1]["total_matches"], t[0]))
+    results.sort(key=lambda t: (_partial_rank(t[1]), -t[1]["total_matches"], t[0]))
     return results[:limit]
 
 
@@ -1423,8 +1434,11 @@ def search_rank_key(result: dict, *, include_changelog_priority: bool = False) -
     """Sort key for ``search`` results, identical across all three scripts.
 
     Order: changelog-style pages last (unless *include_changelog_priority*),
-    then most body hits, then highest index score, then lowest ``doc_idx``
-    (stable, deterministic tie-break). Body hits outrank the index score
+    then pages whose body hits are a strict AND before ``[partial match]``
+    pages, then most body hits, then highest index score, then lowest
+    ``doc_idx`` (stable, deterministic tie-break). A partial page can have
+    many more hits (each keyword alone is common) while answering the query
+    less well than a page that has every keyword in one section. Body hits outrank the index score
     because the index score only reflects title/description keywords while
     body hits reflect how much of the page is actually about the query —
     a page that merely names the term in its title but never discusses it
@@ -1438,6 +1452,7 @@ def search_rank_key(result: dict, *, include_changelog_priority: bool = False) -
     )
     return (
         bucket,
+        _partial_rank(result["body_hits"]),
         -result["body_hits"]["total_matches"],
         -(result.get("index_score") or 0),
         result["doc_idx"],

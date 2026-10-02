@@ -22,7 +22,23 @@ All notable changes to this plugin will be documented here.
 - **`skip_empty`** — 本文が空のページを捨てる (Hono 先頭の見出しだけの行)
 - **実測** — Hono 87 / Agent Skills 9 / Cloudflare D1 51 / Workers 455 ページが独立に数えた値と
   一致し、既存 5 サイトの分割数は変わらない (`docs/generic-llms-txt-source.md` の「2026-10-03 実測」)
-- 既存の 3 script は変更していない
+- 既存の 3 script は変更していない (検索順位の修正は下の別項)
+
+### `search` の順位: 全キーワードが揃うページを部分一致のページより上にする (4 script 共通)
+
+`search` の候補の並べ替え (`search_rank_key`) と、候補が無いときの全文検索
+(`full_corpus_body_search`) は本文ヒット数だけで並べていた。そのため、キーワードの一部を
+何度も含む `[partial match]` のページが、全キーワードが同じセクションに揃うページより上に
+来ていた。全文検索では件数の上限で後者が切り捨てられ、たとえば Claude Code docs の
+`search "argument-hint frontmatter"` は `argument-hint` を定義する Skills のページを上位 5 件に
+出せなかった。
+
+- 並び順を「changelog 類は最後 → 全キーワードが揃うページ → 部分一致のページ → 本文ヒットの
+  無い (index だけに当たった) ページ」とし、各組の中は従来どおり本文ヒット数 → index score →
+  doc_idx で並べる
+- 実 corpus での比較: Claude Code docs 8 / AI SDK 6 の計 14 クエリのうち 7 件で上位 5 件の順位が
+  変わった。`argument-hint frontmatter` で Skills のページが 1 位に、`stopWhen stepCountIs` で
+  Loop Control が 2 位に上がるなど、いずれも全キーワードが揃うページが上がる変化だった
 
 ## [0.25.0] - 2026-09-26
 

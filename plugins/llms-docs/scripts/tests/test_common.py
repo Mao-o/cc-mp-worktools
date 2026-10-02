@@ -725,6 +725,18 @@ class FullCorpusBodySearchTest(unittest.TestCase):
         results = _common.full_corpus_body_search(docs_body_lines, "target", limit=2)
         self.assertEqual(len(results), 2)
 
+    def test_strict_and_docs_outrank_partial_docs_before_the_limit(self):
+        # doc 0 repeats one keyword (partial match, many hits); doc 1 has both
+        # keywords in one section (strict AND, one hit). The AND doc must
+        # survive the limit even though it has fewer hits.
+        docs_body_lines = [
+            ["## Frontmatter\n"] + ["frontmatter field\n"] * 9,
+            ["## Reference\n", "argument-hint is a frontmatter field\n"],
+        ]
+        results = _common.full_corpus_body_search(docs_body_lines, "argument-hint frontmatter", limit=1)
+        self.assertEqual([idx for idx, _ in results], [1])
+        self.assertEqual(results[0][1]["match_mode"], "and")
+
 
 class TruncateContentPreservesMarkdownBoundariesTest(unittest.TestCase):
     """A raw content[:max_chars] slice could land inside a fenced code
@@ -895,8 +907,8 @@ class CorpusHintArgsTest(unittest.TestCase):
 
 class SearchRankKeyTest(unittest.TestCase):
     """One ranking for the ``search`` subcommand of all three scripts
-    (internal backlog): changelog-style pages last, then body hits,
-    then index score, then doc_idx."""
+    (internal backlog): changelog-style pages last, then strict-AND before
+    partial matches, then body hits, then index score, then doc_idx."""
 
     @staticmethod
     def _r(idx, title, hits, score):
@@ -920,6 +932,24 @@ class SearchRankKeyTest(unittest.TestCase):
         self.assertEqual([r["doc_idx"] for r in rows], [2, 0, 1])
         rows.sort(key=lambda r: _common.search_rank_key(r, include_changelog_priority=True))
         self.assertEqual([r["doc_idx"] for r in rows], [0, 1, 2])
+
+    def test_strict_and_rows_outrank_partial_rows(self):
+        rows = [self._r(0, "Subagents", 40, 9), self._r(1, "Skills", 3, 1)]
+        rows[0]["body_hits"]["match_mode"] = "partial"
+        rows[1]["body_hits"]["match_mode"] = "and"
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [1, 0])
+        # an index-only row (no body hits) stays below a partial row
+        rows.append(self._r(3, "Named in title", 0, 30))
+        rows[2]["body_hits"]["match_mode"] = "none"
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [1, 0, 3])
+        rows.pop()
+        # changelog pages still sort last, even with a strict AND
+        rows.append(self._r(2, "Changelog", 50, 9))
+        rows[2]["body_hits"]["match_mode"] = "and"
+        rows.sort(key=_common.search_rank_key)
+        self.assertEqual([r["doc_idx"] for r in rows], [1, 0, 2])
 
     def test_body_only_fallback_rows_have_no_index_score(self):
         rows = [self._r(0, "x", 2, None), self._r(1, "y", 2, 0)]
