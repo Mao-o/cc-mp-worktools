@@ -53,11 +53,37 @@
   未実測」を実測結果 (hook の検証にも届く・保存した時点で反映) に置き換えた
 - plugin の description に project-accounts skill を追記
 
+### Fixed (マージ前レビューの指摘)
+
+- **skill が確認なしで実行できる builder の呼び出しを、読み取り専用の形に絞った。**
+  skill の `allowed-tools` は、skill を呼んだターンの間、一致したコマンドを権限確認
+  なしで通す付与。auto-switch と project-accounts は builder を `*` 付きで、
+  accounts-init / accounts-migrate / accounts-show は Bash を丸ごと付与していたので、
+  誤った呼び出しやプロンプトインジェクションで、期待値を書き換える `set` / `remove` /
+  `auto-switch` の `--commit` や、期待値を表示する `--show-values` が確認なしで走り
+  えた。付与は、各 skill が実行する読み取り専用の形 (show / pin-env と、init・migrate・
+  auto-switch の `--dry-run`) を引数まで書いた完全一致だけにした。`--commit` /
+  `--show-values` / `--path` を付けた形は通常の権限確認を通す (`*` では「この option
+  だけ除く」を書けず、option の省略形 `--show` / `--com` でも抜けるため)。default
+  モードでは、skill の手順で承認した後にもう一度確認が出ることがある
+- **pin-env が案内する `firebase use <alias>` に、シェルの構文を含む値を出さないように
+  した。** この行は skill の手順で Claude がそのまま実行する。期待値の alias /
+  project ID や、リポジトリの `.firebaserc` の alias に `;` / `$()` / 空白などや先頭の
+  `-` があると、その文字列がコマンドや option として走りえた。英数字で始まり、英数字と
+  `.` `_` `-` だけからなる名前のときだけコマンドを出し、クォートもする。`.firebaserc`
+  の外れた alias は使わずに project ID を案内し、期待値の alias / project ID が外れて
+  いれば「固定できません」を出す
+- builder の案内のうち、グローバル既定のパスを埋め込んだ `--path <file>` をクォートした
+  (init / show / auto-switch / pin-env)。ホームのパスに空白があると、案内どおりに足しても
+  別々の引数に割れていた
+
 ### Tests
 
 - identity env と cache キー (`TestIdentityEnvInCacheKey` /
   `TestIdentityEnvCacheIntegration`)、全 service の宣言 (`TestIdentityEnvContract`)、
-  pin-env (`tests/test_pin_env.py`)。1,201 → 1,248 件
+  pin-env (`tests/test_pin_env.py`)、skill の付与 (`tests/test_skill_permissions.py`)、
+  `firebase use` の値 (`TestFirebaseCommandIsShellSafe`)、案内の `--path` のクォート。
+  1,201 → 1,262 件
 
 ## 0.16.1
 

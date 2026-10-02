@@ -18,7 +18,11 @@ description: |
   "gcloud も自動切り替え", "/verify-cloud-account:project-accounts",
   "pin account per project", "per-project AWS profile"
 allowed-tools:
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" *)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" pin-env)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" pin-env --service aws)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" pin-env --service gcloud)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" pin-env --service firebase)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show)
   - AskUserQuestion
 metadata:
   author: mao
@@ -27,8 +31,10 @@ metadata:
 
 <!--
 allowed-tools は「確認なしで使える」付与で、制限ではない。確認なしにするのは
-読み取り専用の builder (pin-env / show) だけ。.claude/settings.local.json の編集と
-firebase use は通常の権限確認を通す。
+読み取り専用の builder の呼び出し (pin-env と show) を、引数まで書いた形だけにする
+(`*` を付けたルールは、期待値を書き換えるサブコマンドや --show-values まで通す)。
+--show-values / --path を付けた形、--service を 2 つ以上付けた形、
+.claude/settings.local.json の編集、firebase use は通常の権限確認を通す。
 -->
 
 # project-accounts

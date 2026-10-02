@@ -19,12 +19,18 @@ description: |
   "migrate accounts.local.json", "merge old accounts path",
   "multiple accounts.local.json paths", "consolidate account config"
 allowed-tools:
-  - Bash
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" migrate --dry-run)
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.3.2"
+  version: "0.17.0"
 ---
+
+<!--
+allowed-tools は「確認なしで使える」付与で、制限ではない。確認なしにするのは
+書き込まない migrate --dry-run だけにする。書き込む --commit、値を表示する
+--show-values、--path を付けた形は通常の権限確認を通す。
+-->
 
 # accounts-migrate
 

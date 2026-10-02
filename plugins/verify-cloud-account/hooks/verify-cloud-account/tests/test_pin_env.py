@@ -8,6 +8,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -191,6 +193,121 @@ class TestPlanFirebase(_TmpBase):
         project_dir = self._project(None)
         self.assertIn("未設定", pin_env.plan_firebase(None, project_dir).problem)
         self.assertIn("有効な project", pin_env.plan_firebase({"x": ""}, project_dir).problem)
+
+
+class TestFirebaseCommandIsShellSafe(_TmpBase):
+    """`firebase use <x>` の x がシェルの構文や option として走らないこと。
+
+    出したコマンドは skill の手順で Claude がそのまま実行する。x は期待値
+    (accounts.local.json) の alias / project ID か、リポジトリの `.firebaserc` の
+    alias (clone しただけのリポジトリでも中身を決められる) から来る
+    (マージ前レビューの指摘)。
+    """
+
+    # 修正後はどれもコマンドに出ない。strip() で無害になる形 (末尾の改行だけ) は
+    # 別のテストで alias (strip しない経路) として見る。
+    HOSTILE = (
+        "x; touch pwned",
+        "$(touch pwned)",
+        "`touch pwned`",
+        "a b",
+        "dev\nrm -rf ~",
+        "it's",
+        '"q"',
+        "a|b",
+        "a&b",
+        "a>b",
+        "-P",
+        "--project=other",
+        ".hidden",
+        "_x",
+        "ｄｅｖ",
+    )
+    PLAIN = ("dev", "fb-prod.v2", "A_1")
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "fb"
+        self.root.mkdir()
+        (self.root / "firebase.json").write_text("{}", encoding="utf-8")
+
+    def _firebaserc(self, aliases: dict) -> None:
+        (self.root / ".firebaserc").write_text(
+            json.dumps({"projects": aliases}), encoding="utf-8"
+        )
+
+    def _assert_one_plain_argument(self, plan) -> None:
+        if plan.command is None:
+            return
+        try:
+            parts = shlex.split(plan.command)
+        except ValueError:
+            self.fail(f"シェルとして閉じていないコマンドを出した: {plan.command!r}")
+        self.assertEqual(len(parts), 3, f"引数が 1 つではない: {plan.command!r}")
+        self.assertEqual(parts[:2], ["firebase", "use"])
+        self.assertRegex(parts[2], r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+        self.assertEqual(plan.command, f"firebase use {parts[2]}")
+
+    def test_every_emitted_command_has_one_plain_argument(self):
+        """3 つの経路 (dict の alias / `.firebaserc` の alias / scalar の project) すべて。"""
+        for value in self.HOSTILE + self.PLAIN:
+            (self.root / ".firebaserc").unlink(missing_ok=True)
+            plans = {
+                "dict alias": pin_env.plan_firebase({value: "fb-x"}, str(self.root)),
+                "scalar project": pin_env.plan_firebase(value, str(self.root)),
+            }
+            self._firebaserc({value: "fb-rc"})
+            plans[".firebaserc alias"] = pin_env.plan_firebase("fb-rc", str(self.root))
+            for label, plan in plans.items():
+                with self.subTest(path=label, value=value):
+                    self._assert_one_plain_argument(plan)
+                    if value in self.PLAIN:
+                        self.assertIsNotNone(plan.command, plan.problem)
+
+    def test_dict_alias_that_is_not_a_plain_name_is_a_problem(self):
+        for alias in self.HOSTILE + ("dev\n",):
+            with self.subTest(alias=alias):
+                plan = pin_env.plan_firebase({alias: "fb-prod"}, str(self.root))
+                self.assertIsNone(plan.command)
+                self.assertIn("渡せる名前がありません", plan.problem or "")
+
+    def test_dict_uses_the_plain_aliases_and_lists_only_them(self):
+        plan = pin_env.plan_firebase(
+            {"-P": "fb-a", "$(touch pwned)": "fb-b", "dev": "fb-dev", "prod": "fb-prod"},
+            str(self.root),
+        )
+        self.assertEqual(plan.command, "firebase use dev")
+        joined = "\n".join(plan.notes)
+        self.assertIn("どの alias でも通ります: dev, prod", joined)
+        self.assertNotIn("pwned", joined)
+        self.assertIn("除きました", joined)
+
+    def test_firebaserc_alias_that_is_not_a_plain_name_is_not_used(self):
+        """リポジトリの `.firebaserc` の alias は使わず、alias が無いときと同じ扱いにする。"""
+        self._firebaserc({"$(touch pwned)": "fb-stg", "-P": "fb-stg"})
+        plan = pin_env.plan_firebase("fb-stg", str(self.root))
+        self.assertEqual(plan.command, "firebase use fb-stg")
+        self.assertTrue(plan.command_secret)
+        self.assertTrue(any(".firebaserc" in note for note in plan.notes))
+
+        self._firebaserc({"-x": "fb-stg", "staging": "fb-stg"})
+        plan = pin_env.plan_firebase("fb-stg", str(self.root))
+        self.assertEqual(plan.command, "firebase use staging")
+        self.assertFalse(plan.command_secret)
+
+    def test_project_id_that_is_not_a_plain_name_is_a_problem(self):
+        for project in self.HOSTILE:
+            with self.subTest(project=project):
+                plan = pin_env.plan_firebase(project, str(self.root))
+                self.assertIsNone(plan.command)
+                self.assertIn("渡せない文字", plan.problem or "")
+
+    def test_quoting_still_holds_if_the_name_rule_is_loosened(self):
+        """許容形の検証とクォートは二重化: 検証を緩めても、シェルの構文は 1 引数に収まる。"""
+        loose = re.compile(r".+", re.DOTALL)
+        with mock.patch.object(pin_env, "_FIREBASE_TARGET_RE", loose):
+            plan = pin_env.plan_firebase({"x; touch pwned": "fb-x"}, str(self.root))
+        self.assertEqual(shlex.split(plan.command), ["firebase", "use", "x; touch pwned"])
 
 
 class TestSettingsLocalTarget(_TmpBase):
@@ -391,6 +508,18 @@ class TestPinEnvCommand(_TmpBase):
         code, _out, err = self._run(["pin-env"])
         self.assertEqual(code, 1)
         self.assertIn("複数のパス", err)
+
+    def test_firebase_line_never_carries_a_repository_alias_with_shell_syntax(self):
+        """`.firebaserc` の alias は clone したリポジトリが決められる (マージ前レビューの指摘)。"""
+        (self.repo / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.repo / ".firebaserc").write_text(
+            json.dumps({"projects": {"$(touch pwned)": "fb-stg"}}), encoding="utf-8"
+        )
+        self._write_accounts({"firebase": "fb-stg"})
+        code, out, err = self._run(["pin-env", "--show-values"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("このディレクトリで 1 回実行: firebase use fb-stg\n", out)
+        self.assertNotIn("pwned", out)
 
 
 if __name__ == "__main__":

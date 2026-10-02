@@ -990,7 +990,8 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   置換と引用符を含むが一致した)。Claude が Skill ツールで読み込んだ場合は、付与の書き方に
   関係なく (Bash を丸ごと許可しても) 付与が効かず、通常の権限確認になった。どちらも安全側。
   なお sensitive-files-guardrail のような hook が `ask` を返すと、付与より hook が優先される
-  (default モードでは builder の呼び出しに確認が出る)
+  (default モードでは builder の呼び出しに確認が出る)。0.17.0 で、builder の付与は
+  読み取り専用の形を引数まで書いた完全一致に絞った (D32)
 - 手順のコマンドは 1 つずつ、書いたとおりに実行させる。`;` / `&&` での連結や `2>&1` を
   足すと付与の形から外れる (nested の実測で、連結して実行する例があった)
 
@@ -1037,6 +1038,15 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
 - 書き込み先を決められない構成 (git の外 / bare / submodule / ルートがホーム / 所有者が
   違う / Windows) では、Claude Code が起動したディレクトリのファイルを読むなど条件が
   分かれるので、`pin-env` は推測せず理由を出す
+- **`firebase use <x>` の x は、英数字で始まり英数字と `.` `_` `-` だけからなる名前に限る**
+  (マージ前レビューの指摘)。この行は skill の手順で Claude がそのまま実行する。x は
+  期待値の alias / project ID か、リポジトリの `.firebaserc` の alias (clone しただけの
+  リポジトリでも中身を決められる) から来るので、`;` / `$()` / 空白 / 改行や先頭の `-` が
+  あると、その文字列がコマンドや option として走る。`.firebaserc` の外れた alias は使わず
+  (alias が無いときと同じく project ID を案内する)、期待値の外れた alias / project ID は
+  「固定できません」にする。`shlex.quote` は二重化で、許容形はすでにクォートの要らない
+  文字だけ。hook が切替の案内として認める形 (firebase の `REMEDIATION_PATTERNS`) にも
+  収まる。照合は `fullmatch` で行う (`$` は末尾の改行の前でも一致するため)
 - 実測は `claude -p` だけ。対話セッションで workspace trust が `env` の適用に効く
   条件は確かめていない (docs は trust の後に適用すると書いている)
 - mutation で、identity env をキーに入れること (読む側・書く側・cache の key)、
@@ -1056,12 +1066,43 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   言い回しを含む) は project-accounts に、gh の自動切替の依頼は auto-switch に回り、
   gh の deny への対処を聞いただけならどちらも選ばれない。project-accounts を読み込んだ
   後は、手順どおり最初に `pin-env` を実行した
-- skill の `allowed-tools` (builder の呼び出しを確認なしにする付与) は、Claude が自分で
-  skill を読み込んだ経路では効かないことがあった。CLI 2.1.284 の `-p` で、同じコマンドが
-  6 回中 4 回は承認待ちになった (slash で起動したときは効いた)。Claude Code の docs は
-  project skill について「ユーザーが起動しても Claude が起動しても適用する」と書くが、
-  plugin skill の記述は無い。承認待ちになっても手順は成り立つ (Claude は別の経路で値を
-  探さず、承認か `!` 付きでの実行を頼んで止まった)。付与が効く前提の手順にはしない
+- skill の `allowed-tools` (builder の読み取り専用の呼び出しを確認なしにする付与。D32) は、
+  Claude が自分で skill を読み込んだ経路では効かないことがあった。CLI 2.1.284 の `-p` で、
+  同じコマンドが 6 回中 4 回は承認待ちになった (slash で起動したときは効いた)。Claude Code
+  の docs は project skill について「ユーザーが起動しても Claude が起動しても適用する」と
+  書くが、plugin skill の記述は無い。承認待ちになっても手順は成り立つ (Claude は別の経路で
+  値を探さず、承認か `!` 付きでの実行を頼んで止まった)。付与が効く前提の手順にはしない
+
+**D32: skill の `allowed-tools` は、読み取り専用の呼び出しを引数まで書いた完全一致で並べる**
+
+`allowed-tools` は制限ではなく付与で、skill を呼んだターンの間、一致したコマンドを
+権限確認なしで通す。0.16.1 の auto-switch と 0.17.0 の project-accounts は builder を
+末尾の ` *` で付与していたので、期待値を書き換える `set` / `remove` / `auto-switch` の
+`--commit` や、期待値を表示する `--show-values` まで確認なしで通った (マージ前レビューの
+指摘)。accounts-init / accounts-migrate / accounts-show は `Bash` を丸ごと付与していた。
+
+- skill の手順の「書く前に AskUserQuestion で承認を得る」はモデルの振る舞いで、誤った
+  呼び出しやプロンプトインジェクションでは飛ばされうる。書き込みと値の表示の前には、
+  ハーネスの権限確認を残す
+- Claude Code の docs (permissions の Wildcard patterns): `*` の無いルールは 1 つの
+  コマンドに完全一致し、`*` は空白を含む任意の文字列に一致する (末尾の ` *` は引数なし
+  にも一致)。`*` で「この option だけは除く」は書けない。builder の argparse は option の
+  省略形 (`--show` → `--show-values`、`--com` → `--commit`) も受け付けるので、文字列で
+  除外しようとしても抜ける
+- 対応: 各 skill が実行する読み取り専用の形 (show / pin-env と、init・migrate・
+  auto-switch の `--dry-run`) を、引数まで書いた完全一致で並べる。`--commit` /
+  `--show-values` / `--path` / `--value` を付けた形は通常の権限確認を通す。完全一致は
+  別の形 (連結する・`2>&1` を足す・クォートを変える) には一致しないので、外れたときは
+  確認が出る側に倒れる
+- docs は、plugin skill の `allowed-tools` 内の Bash ルールでも `${CLAUDE_PLUGIN_ROOT}` を
+  置換すると書く (skills の Available string substitutions)。本文と同じ文字列で書けば
+  本文のコマンドに一致する
+- default モードでは、AskUserQuestion の承認の後にもう一度権限確認が出ることがある
+  (利用者の設定の許可ルールに一致しなければ)。二重の確認は許容する (書き込みと値の表示は、どちらも利用者が頼んだときだけ起きる)
+- `tests/test_skill_permissions.py` が、skill ごとの付与を期待する集合と照合し、本文の
+  コードブロックのコマンドが「読み取り専用なら付与される・書き込みと値の表示は付与されない」
+  ことを確かめる。照合は docs の規則を広めに見積もった再現 (末尾の ` *` は引数なしにも
+  一致、`Bash` 単独はすべてに一致) で行い、その再現自体も docs の例で確かめる
 
 ## 既知の制限
 

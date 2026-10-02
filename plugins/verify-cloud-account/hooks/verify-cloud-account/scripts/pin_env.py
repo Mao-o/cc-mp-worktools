@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,16 @@ PIN_SERVICES = ("aws", "gcloud", "firebase")
 SETTINGS_LOCAL_REL = Path(".claude") / "settings.local.json"
 HIDDEN = "(value hidden. use --show-values to reveal)"
 _GIT_TIMEOUT_SEC = 5
+
+# `firebase use` に渡す alias / project ID の許容形。出したコマンドは skill の手順で
+# Claude がそのまま実行するので、値に `;` / `$()` / 空白 / 改行などのシェルの構文や、
+# option と解釈される先頭の `-` があると、期待値 (accounts.local.json) やリポジトリの
+# `.firebaserc` に書かれた文字列がそのままコマンドとして走る。許容形から外れた値は
+# コマンドに出さない (クォートは念のための二重化)。hook が切替の案内として認める形
+# (services/firebase.py の REMEDIATION_PATTERNS) にも収まる。
+# `$` が末尾の改行の前でも一致する罠を避けるため、照合は fullmatch で行う。
+_FIREBASE_TARGET_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_FIREBASE_TARGET_RULE = "使えるのは英数字で始まり、英数字と . _ - だけからなる名前"
 
 AWS_PROFILE = "AWS_PROFILE"
 GCLOUD_CONFIG_NAME = "CLOUDSDK_ACTIVE_CONFIG_NAME"
@@ -134,6 +146,13 @@ def plan_gcloud(expected, env=None) -> Plan:
     return Plan("gcloud", pins=tuple(pins), notes=notes)
 
 
+def _firebase_use(target: str) -> str | None:
+    """`firebase use <target>` のコマンド文字列。target が許容形でなければ None。"""
+    if not _FIREBASE_TARGET_RE.fullmatch(target):
+        return None
+    return f"firebase use {shlex.quote(target)}"
+
+
 def plan_firebase(expected, project_dir: str) -> Plan:
     if expected is None:
         return Plan("firebase", problem="firebase の期待値が未設定です (accounts-init で設定)")
@@ -151,21 +170,47 @@ def plan_firebase(expected, project_dir: str) -> Plan:
         )
         if not aliases:
             return Plan("firebase", problem="firebase の期待値に有効な project がありません")
-        command = f"firebase use {aliases[0]}"
-        if len(aliases) > 1:
-            notes = (f"期待値のどの alias でも通ります: {', '.join(aliases)}",) + notes
-        return Plan("firebase", command=command, notes=notes)
+        # コマンドに渡せない alias は候補から外す (どの alias でも通る、の一覧にも出さない)。
+        usable = [alias for alias in aliases if _firebase_use(alias) is not None]
+        if not usable:
+            return Plan(
+                "firebase",
+                problem=(
+                    "firebase の期待値の alias に、firebase use に渡せる名前がありません"
+                    f" ({_FIREBASE_TARGET_RULE})"
+                ),
+            )
+        if len(usable) < len(aliases):
+            notes += (
+                f"firebase use に渡せない文字を含む alias は除きました ({_FIREBASE_TARGET_RULE})",
+            )
+        if len(usable) > 1:
+            notes = (f"期待値のどの alias でも通ります: {', '.join(usable)}",) + notes
+        return Plan("firebase", command=_firebase_use(usable[0]), notes=notes)
     if not isinstance(expected, str) or not expected.strip():
         return Plan("firebase", problem="firebase の期待値の形が不正です")
-    aliases = firebase.aliases_for(project_dir, expected.strip())
-    if aliases:
-        return Plan("firebase", command=f"firebase use {aliases[0]}", notes=notes)
-    return Plan(
-        "firebase",
-        command=f"firebase use {expected.strip()}",
-        command_secret=True,
-        notes=notes,
-    )
+    project = expected.strip()
+    # `.firebaserc` はリポジトリのファイルなので、alias 名は信頼できる入力ではない。
+    # 渡せない alias は使わず、無ければ alias が無いときと同じく project ID を使う。
+    aliases = firebase.aliases_for(project_dir, project)
+    usable = [alias for alias in aliases if _firebase_use(alias) is not None]
+    if len(usable) < len(aliases):
+        notes += (
+            ".firebaserc の alias のうち、firebase use に渡せない文字を含むものは使いません"
+            f" ({_FIREBASE_TARGET_RULE})",
+        )
+    if usable:
+        return Plan("firebase", command=_firebase_use(usable[0]), notes=notes)
+    command = _firebase_use(project)
+    if command is None:
+        return Plan(
+            "firebase",
+            problem=(
+                "firebase の期待値 (project ID) に firebase use に渡せない文字が含まれます"
+                f" ({_FIREBASE_TARGET_RULE})"
+            ),
+        )
+    return Plan("firebase", command=command, command_secret=True, notes=notes)
 
 
 def plan_for(service: str, expected, project_dir: str, env=None) -> Plan:

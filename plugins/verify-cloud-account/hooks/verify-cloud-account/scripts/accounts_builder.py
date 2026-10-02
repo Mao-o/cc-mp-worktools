@@ -144,6 +144,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import IO, Any, NamedTuple
@@ -353,6 +354,15 @@ def _global_default_keys(global_path: Path) -> list[str]:
     return sorted(str(key) for key in data)
 
 
+def _path_option(path: Path) -> str:
+    """案内文に埋め込む `--path <file>`。
+
+    Claude はこの断片をそのままコマンドに足すので、シェルの 1 引数になるように
+    クォートする (ホームのパスに空白などが含まれていても別の引数に割れない)。
+    """
+    return f"--path {shlex.quote(str(path))}"
+
+
 def _global_default_note() -> str:
     """グローバル既定が現に使われているときの警告 (新規作成になる場合のみ)。
 
@@ -381,7 +391,7 @@ def _global_default_note() -> str:
         f"警告: hook は現在グローバル既定 {global_path} で検証しています。"
         f"このパスにファイルを作ると、{detail} は継承されません "
         "(キー単位のマージはしません = 書かなかった service は未設定 = deny)。\n"
-        f"グローバル既定を編集するなら --path {global_path} を使い、"
+        f"グローバル既定を編集するなら {_path_option(global_path)} を使い、"
         "プロジェクト側に持つなら必要な値を先にコピーしてください。"
     )
 
@@ -1306,7 +1316,7 @@ def _cmd_show(
                 file=stdout,
             )
             print(
-                f"その内容と CLI 現在値を突合するには --path {global_path} を"
+                f"その内容と CLI 現在値を突合するには {_path_option(global_path)} を"
                 "付けて再実行してください。",
                 file=stdout,
             )
@@ -1599,7 +1609,7 @@ def _auto_switch_missing_file_message(target: _Target) -> str:
     if target.origin == "fresh" and global_path is not None and global_path.is_file():
         lines.append(
             f"hook は現在グローバル既定 {global_path} で検証しています。そのファイルで"
-            f"有効にするなら --path {global_path} を付けて再実行してください。"
+            f"有効にするなら {_path_option(global_path)} を付けて再実行してください。"
         )
     lines.append(
         f"全プロジェクトで有効にするなら、環境変数 {auto_switch.ENV_VAR} を使います "
@@ -1776,7 +1786,7 @@ def _cmd_pin_env(
         global_path = paths.global_accounts_file()
         if global_path is not None and global_path.is_file() and global_path != target.path:
             print(
-                f"グローバル既定 {global_path} で検証しているなら、--path {global_path}"
+                f"グローバル既定 {global_path} で検証しているなら、{_path_option(global_path)}"
                 " を付けて再実行してください。",
                 file=stderr,
             )

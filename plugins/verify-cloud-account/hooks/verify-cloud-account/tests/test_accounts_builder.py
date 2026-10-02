@@ -20,6 +20,7 @@ import io
 import itertools
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -3261,6 +3262,27 @@ class TestGlobalDefaultIsDisclosed(BaseBuilder):
         code, out, err = self._run(["show", "--path", str(path)])
         self.assertEqual(code, 0, err)
         self.assertIn("[mode]", out)
+
+    def test_hinted_path_option_is_one_shell_argument(self):
+        """案内の `--path <global>` は、Claude がそのままコマンドに足しても 1 引数になる。
+
+        ホームのパスに空白があると、クォートしない案内は別々の引数に割れる。
+        案内を出す 4 つのサブコマンドすべてで見る。
+        """
+        home = Path(self.tmp) / "home with space"
+        (home / ".claude" / "verify-cloud-account").mkdir(parents=True)
+        with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+            path = self._write_global({"github": "global-user", "aws": "123456789012"})
+            hint = f"--path {shlex.quote(str(path))} "
+            for argv in (
+                ["init", "--service", "github", "--value", "someone", "--dry-run"],
+                ["show"],
+                ["auto-switch", "--enable", "--dry-run"],
+                ["pin-env"],
+            ):
+                with self.subTest(command=argv[0]):
+                    _code, out, err = self._run(argv)
+                    self.assertIn(hint, out + err)
 
 
 class TestAutoSwitchKey(BaseBuilder):

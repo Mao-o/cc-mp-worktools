@@ -20,7 +20,9 @@ description: |
   "switch gh account automatically"
 allowed-tools:
   - Bash(gh auth status)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" *)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" auto-switch --enable --dry-run)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" auto-switch --disable --dry-run)
   - AskUserQuestion
 metadata:
   author: mao
@@ -29,8 +31,10 @@ metadata:
 
 <!--
 allowed-tools は「確認なしで使える」付与で、制限ではない。マシン全体に効く設定を扱う
-skill なので、確認なしにするのは読み取り (gh auth status) と builder の呼び出しだけに
-絞る。~/.claude/settings.json の編集は通常の権限確認を通す。
+skill なので、確認なしにするのは読み取り (gh auth status) と、builder の読み取り専用の
+呼び出し (show と auto-switch の --dry-run) を引数まで書いた形だけに絞る。書き込む
+--commit、値を表示する --show-values、--path を付けた形、~/.claude/settings.json の
+編集は通常の権限確認を通す。
 -->
 
 # auto-switch
