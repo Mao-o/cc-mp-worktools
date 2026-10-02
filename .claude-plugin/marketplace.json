@@ -11,7 +11,7 @@
       "name": "llms-docs",
       "displayName": "LLMs Docs Researcher",
       "source": "./plugins/llms-docs",
-      "description": "Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
+      "description": "Claude/AI SDK/Firebase と、同梱 presets (Next.js / Cloudflare / Vercel / Bun ほか) の公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
       "category": "research",
       "keywords": [
         "documentation",
