@@ -1,0 +1,214 @@
+{
+  "sources": {
+    "nextjs": {
+      "url": "https://nextjs.org/docs/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "frontmatter:url",
+      "description": "Next.js"
+    },
+    "vite": {
+      "url": "https://vite.dev/llms-full.txt",
+      "split": "frontmatter",
+      "frontmatter_key": "url",
+      "page_url": "frontmatter:url",
+      "url_base": "https://vite.dev",
+      "description": "Vite"
+    },
+    "vitest": {
+      "url": "https://vitest.dev/llms-full.txt",
+      "split": "frontmatter",
+      "frontmatter_key": "url",
+      "page_url": "frontmatter:url",
+      "url_base": "https://vitest.dev",
+      "description": "Vitest"
+    },
+    "drizzle": {
+      "url": "https://orm.drizzle.team/llms-full.txt",
+      "split": "line",
+      "line_prefix": "Source: ",
+      "description": "Drizzle ORM"
+    },
+    "zod": {
+      "url": "https://zod.dev/llms-full.txt",
+      "split": "h1",
+      "description": "Zod"
+    },
+    "hono": {
+      "url": "https://hono.dev/llms-full.txt",
+      "split": "h1",
+      "skip_empty": true,
+      "description": "Hono"
+    },
+    "agentskills": {
+      "url": "https://agentskills.io/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "description": "Agent Skills (SKILL.md の仕様)"
+    },
+    "cloudflare-workers": {
+      "url": "https://developers.cloudflare.com/workers/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Workers"
+    },
+    "cloudflare-d1": {
+      "url": "https://developers.cloudflare.com/d1/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare D1"
+    },
+    "cloudflare-r2": {
+      "url": "https://developers.cloudflare.com/r2/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare R2"
+    },
+    "cloudflare-kv": {
+      "url": "https://developers.cloudflare.com/kv/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Workers KV"
+    },
+    "cloudflare-durable-objects": {
+      "url": "https://developers.cloudflare.com/durable-objects/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Durable Objects"
+    },
+    "cloudflare-pages": {
+      "url": "https://developers.cloudflare.com/pages/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Pages"
+    },
+    "cloudflare-queues": {
+      "url": "https://developers.cloudflare.com/queues/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Queues"
+    },
+    "cloudflare-workers-ai": {
+      "url": "https://developers.cloudflare.com/workers-ai/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Workers AI"
+    },
+    "cloudflare-vectorize": {
+      "url": "https://developers.cloudflare.com/vectorize/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Vectorize"
+    },
+    "cloudflare-hyperdrive": {
+      "url": "https://developers.cloudflare.com/hyperdrive/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Hyperdrive"
+    },
+    "cloudflare-agents": {
+      "url": "https://developers.cloudflare.com/agents/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Agents"
+    },
+    "cloudflare-workflows": {
+      "url": "https://developers.cloudflare.com/workflows/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Workflows"
+    },
+    "cloudflare-ai-gateway": {
+      "url": "https://developers.cloudflare.com/ai-gateway/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare AI Gateway"
+    },
+    "cloudflare-browser-rendering": {
+      "url": "https://developers.cloudflare.com/browser-rendering/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Browser Rendering"
+    },
+    "cloudflare-containers": {
+      "url": "https://developers.cloudflare.com/containers/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "link:View as Markdown",
+      "drop_lines": [
+        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
+        "^Last updated .*\\|Copy as Markdown\\|"
+      ],
+      "description": "Cloudflare Containers"
+    }
+  }
+}
