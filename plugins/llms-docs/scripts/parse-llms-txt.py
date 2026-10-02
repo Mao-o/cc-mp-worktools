@@ -367,6 +367,9 @@ def _merge_urlless_h1(docs: list[dict]) -> list[dict]:
     for d in docs:
         if not d["url"] and out and out[-1]["url"]:
             out[-1]["body_lines"] = out[-1]["body_lines"] + [f"# {d['title']}\n"] + d["body_lines"]
+            # the page now holds an H1, so sections start at H1: the folded
+            # heading is listed and its subsections nest under it
+            out[-1]["min_level"] = 1
         else:
             out.append(d)
     return out
@@ -391,7 +394,8 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
 
     A double-quoted value may span lines, as YAML allows (Vercel writes long
     ``description:`` values that way); the lines up to its closing quote
-    belong to the value, whatever they look like.
+    belong to the value, whatever they look like, except the closing
+    delimiter itself, which always ends the block.
     """
     if lines[pos].rstrip("\n\r") != delimiter:
         return None
@@ -399,6 +403,10 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
     open_key = None  # key whose double-quoted value is still open
     for j in range(pos + 1, min(pos + _FM_LOOKAHEAD, len(lines))):
         line = lines[j].rstrip("\n\r")
+        if open_key is not None and line == delimiter:
+            # a quote left open by mistake: the block still ends here and the
+            # value is kept as written (losing the page would be worse)
+            open_key = None
         if open_key is not None:
             fields[open_key] += " " + line.strip()
             if _closes_double_quote(line):

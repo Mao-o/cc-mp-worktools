@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
+import _common  # noqa: E402
 
 generic = _loader.load_script("parse-llms-txt.py")
 
@@ -369,6 +370,10 @@ class SplitTest(unittest.TestCase):
         body = "".join(docs[0]["body_lines"])
         self.assertIn("# ESM (an H1 inside the page body, not a page)", body)
         self.assertIn("## Usage", body)
+        # the folded H1 is a section of its own, with its subsections under it
+        self.assertEqual(docs[0]["min_level"], 1)
+        paths = [sec["heading_path"] for sec in _common.extract_sections(docs[0]["body_lines"], min_level=1)]
+        self.assertIn("ESM (an H1 inside the page body, not a page)/Usage", paths)
         # without h1_needs_url the body H1 is a (URL-less) page of its own
         plain = generic.split_documents(_lines(MINTLIFY), _profile(split="h1", page_url="line:Source: "))
         self.assertEqual(len(plain), 3)
@@ -382,6 +387,15 @@ class SplitTest(unittest.TestCase):
                          "Learn how to disallow reading from, writing to, and/or calling one or more properties")
         # the long rules around plain prose stay inside the second page
         self.assertIn("Prose between two long rules is not a page.\n", docs[1]["body_lines"])
+
+    def test_unclosed_quote_does_not_drop_the_page(self):
+        text = (
+            "---\ntitle: A\ndescription: \"never closed\n---\n\nBody A.\n\n"
+            "---\ntitle: B\n---\n\nBody B.\n"
+        )
+        docs = generic.split_documents(_lines(text), _profile(split="frontmatter"))
+        self.assertEqual([d["title"] for d in docs], ["A", "B"])
+        self.assertIn("Body A.\n", docs[0]["body_lines"])
 
     def test_closes_double_quote_respects_escapes(self):
         self.assertTrue(generic._closes_double_quote('end"'))
