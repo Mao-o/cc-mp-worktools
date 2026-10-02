@@ -217,6 +217,22 @@ class FenceTrackerCloserTest(unittest.TestCase):
         sections = _common.extract_sections(body, min_level=2)
         self.assertEqual([s["title"] for s in sections], ["Comments", "Next"])
 
+    def test_mdx_comment_state_ends_with_the_comment(self):
+        """Once a real comment ends (on a plain line, at the fence that closes
+        a block inside it, or on a ``` */} line outside a block), a later
+        example's ``` */} inside a same-length block is content again."""
+        example = ["```mdx\n", "{/*\n", "```js\n", "x\n", "``` */}\n", "```\n", "\n", "## Next\n"]
+        endings = {
+            "plain line": ["{/* note\n", "*/}\n"],
+            "closing fence": ["{/* note\n", "```ts\n", "x\n", "``` */}\n"],
+            "comment end outside a block": ["{/* ```sql\n", "SELECT 1\n", "``` */}\n"],
+        }
+        for name, comment in endings.items():
+            with self.subTest(ending=name):
+                body = ["## Top\n"] + comment + ["\n"] + example
+                sections = _common.extract_sections(body, min_level=2)
+                self.assertEqual([s["title"] for s in sections], ["Top", "Next"])
+
     def test_fence_indented_in_jsx_is_still_a_block(self):
         """Deliberately looser than CommonMark's 0-3 spaces: MDX code blocks
         nested in JSX are indented 4+ spaces and render as code. With the
