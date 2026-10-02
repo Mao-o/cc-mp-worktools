@@ -1,25 +1,27 @@
 ---
 name: researching-library-docs
 description: |
-  Next.js / Vite / Vitest / Drizzle ORM / Zod / Hono / Agent Skills (SKILL.md 仕様) /
-  Cloudflare (Workers / D1 / R2 / KV / Durable Objects / Pages / Queues / Workers AI /
+  Next.js / Vite / Vitest / Drizzle ORM / Zod / Hono / Bun / Vercel / Render /
+  MCP (Model Context Protocol) / OpenAI Codex / Ollama / Agent Skills (SKILL.md 仕様) / Cloudflare (Workers / D1 / R2 / KV / Durable Objects / Pages / Queues / Workers AI /
   Vectorize / Hyperdrive / Agents / Workflows / AI Gateway / Browser Rendering / Containers)
   の公式ドキュメント調査スキル。各サイトの llms-full.txt を段階的に読み込み、API 仕様・
   設定・コード例を verbatim で取得する。Skill ツールで起動し、メインの会話コンテキストを
   消費しない。これらの仕様確認には WebFetch ではなくこのスキルを使う (要約モデル経由では
   ないため field の抜け落とし・幻覚が起きない)。利用者が sources.json に追加したサイトも読める。
 when_to_use: |
-  Use when implementing, debugging, configuring, reviewing, or designing with
-  the libraries above. Use proactively before answering spec questions about
-  them — especially before editing next.config.*, vite.config.*, vitest.config.*,
+  Use when building with, debugging, or designing on the services above, and
+  proactively before answering spec questions about them — especially before
+  editing next.config.*, vite.config.*, vitest.config.*,
   drizzle.config.*, wrangler.toml / wrangler.jsonc, or code that imports from
-  `next` / `vite` / `vitest` / `drizzle-orm` / `zod` / `hono`.
+  `next` / `vite` / `vitest` / `drizzle-orm` / `zod` / `hono` /
+  `@modelcontextprotocol/sdk`, or vercel.json / render.yaml / bunfig.toml.
   Triggers: "Next.js", "App Router", "Vite", "Vitest", "Drizzle", "drizzle-orm",
-  "Zod", "Hono", "Cloudflare Workers", "wrangler", "D1", "R2", "Workers KV",
+  "Zod", "Hono", "Bun", "Vercel", "Render", "MCP", "Model Context Protocol",
+  "Codex CLI", "Ollama", "Cloudflare Workers", "wrangler", "D1", "R2", "Workers KV",
   "Durable Objects", "Cloudflare Pages", "Queues", "Workers AI", "Vectorize",
   "Hyperdrive", "Cloudflare Agents", "Cloudflare Workflows", "AI Gateway",
   "Browser Rendering", "Cloudflare Containers", "agentskills.io", "SKILL.md spec",
-  "llms-full.txt", "researching-library-docs"
+  "researching-library-docs"
 argument-hint: "[source] <question>"
 context: fork
 model: sonnet
@@ -51,6 +53,12 @@ Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claud
 | Drizzle ORM | `drizzle` |
 | Zod | `zod` |
 | Hono | `hono` |
+| Bun | `bun` |
+| Vercel | `vercel` |
+| Render | `render` |
+| MCP (Model Context Protocol) の仕様・SDK | `mcp` |
+| OpenAI Codex (CLI / IDE / cloud / SDK) | `codex` |
+| Ollama | `ollama` |
 | Agent Skills (`SKILL.md` の仕様、agentskills.io) | `agentskills` |
 | Cloudflare の各製品 | `cloudflare-<製品>`: `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` |
 
@@ -91,8 +99,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 ```
 
 - `search`: スペース区切りの複数キーワード (AND。揃わなければ半分以上が揃うセクションへ
-  緩め、`[partial match]` と表示)。未取得なら自動で取得してキャッシュする (Cloudflare Workers
-  は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く
+  緩め、`[partial match]` と表示)。未取得なら自動で取得してキャッシュする (Vercel は 10MB、
+  Cloudflare Workers は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く
 - `content`: `heading_path` を省略するとページ全体。本文は既定 24000 文字で切り詰め、
   前後にサブセクション一覧と次の呼び出し例を出す
 - 見つからないときはキーワードを言い換えて 2-3 回 `search` し、それでも無ければ
@@ -104,7 +112,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 - **タイトルの部分一致**: 一意に決まる場合のみ (曖昧ならエラーで候補を出す)
 - **URL の部分一致**: ページ URL を持つ source のみ (例: `get-started`)
 
-`zod` / `hono` の llms-full.txt はページ URL を持たない。引用元はタイトル + heading_path で表す。
+`zod` / `hono` / `render` / `codex` の llms-full.txt はページ URL を持たない。引用元はタイトル + heading_path で表す。
 
 ## heading_path の指定方法
 

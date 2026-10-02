@@ -10,7 +10,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | `researching-claude-docs` | Claude Code / Claude Developer Platform | `search` (URL-join 統合検索) → `content <page_ref> "<heading_path>"` |
 | `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>"` |
 | `researching-firebase` | Firebase (firebase.google.com) | `search` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>"` |
-| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Agent Skills / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
+| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
 3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
 サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
@@ -144,6 +144,12 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `drizzle` | Drizzle ORM | あり |
 | `zod` | Zod | なし |
 | `hono` | Hono | なし |
+| `bun` | Bun | あり |
+| `vercel` | Vercel | あり |
+| `render` | Render | なし |
+| `mcp` | Model Context Protocol | あり |
+| `codex` | OpenAI Codex | なし |
+| `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`) |
 
@@ -179,11 +185,13 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `url` | ○ | サイトの `llms-full.txt` (http / https)。このファイルだけを取得する |
 | `split` | ○ | ページの区切り方。`h1` = コードブロック外の H1 ごと / `frontmatter` = YAML frontmatter ごと / `line` = `line_prefix` で始まる行ごと |
 | `frontmatter_key` | | `split: frontmatter` のとき、ページの frontmatter に必ずあるキー (既定 `title`)。これが無い `---` の組は区切りとみなさない (本文の水平線を誤認しないため) |
+| `frontmatter_delimiter` | | `split: frontmatter` のとき、frontmatter を囲む行 (既定 `---`。`-` か `+` を 3 個以上)。Vercel は `-` 80 個 |
 | `line_prefix` | `split: line` で必須 | 区切り行の接頭辞。接頭辞のあとに URL が 1 つだけ続く行を区切りにする |
 | `page_url` | | ページ URL の取り方。`none` (既定) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
 | `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
-| `skip_empty` | | `true` で、本文が空のページを捨てる (Hono の `# Start of Hono documentation` のような見出しだけの行) |
+| `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
+| `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
 エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める。
@@ -196,8 +204,9 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | frontmatter に相対 `url:` のみ | 上に加えて `frontmatter_key: url` + `url_base` | Vite / Vitest |
 | frontmatter に `title:`、URL は本文のリンク、定型行つき | `split: frontmatter` + `page_url: "link:View as Markdown"` + `drop_lines` | Cloudflare の製品別ファイル |
 | `Source: <url>` 行で区切る | `split: line` + `line_prefix: "Source: "` | Drizzle ORM |
-| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` | Agent Skills |
-| H1 で区切り URL なし | `split: h1` (先頭に見出しだけの行があれば `skip_empty`) | Zod / Hono |
+| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama |
+| frontmatter を長い横線で囲む | `split: frontmatter` + `frontmatter_delimiter` | Vercel |
+| H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する
