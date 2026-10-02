@@ -74,7 +74,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search "<キーワー�
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<heading_path>" --source <name>
 ```
 
-出力末尾の `Next:` 行は `--source` などの引数を引き継いだ次のコマンド例なので、そのまま使える。
+出力末尾の `Next:` 行は次のコマンド例で、`--source` / `--sources-file` / `--file` / `--cache-dir` などの
+引数を引き継いでいる。ただし script 名だけで書かれているので、実行するときは先頭を
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える。
 
 ## 調査フロー
 
