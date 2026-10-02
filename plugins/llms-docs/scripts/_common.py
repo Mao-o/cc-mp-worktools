@@ -38,6 +38,25 @@ class FenceTracker:
     tilde (``~~~``). Per the spec a fence is closed only by a run of the
     *same* character at least as long as the opener, so a ``~~~`` inside a
     backtick block (or vice versa) is content, not a closer.
+
+    A closer also carries no info string (CommonMark): inside an open block,
+    a line such as ```` ```ts ```` is content. Taking it for a closer turns
+    one unclosed block into an open/closed flip that lasts for the rest of
+    the file (measured on an MDX-heavy corpus, where the flip hid 299 of 496
+    page boundaries); with the rule the state recovers at the next bare
+    closer.
+
+    Two deliberate departures from CommonMark, both measured on MDX corpora:
+
+    - Indentation is not limited to 0-3 spaces. Code blocks nested in JSX
+      (``<Steps>`` / ``<Tabs>``) are indented 4+ spaces and still render as
+      code. With the CommonMark limit, ``truncate_content`` cut inside them,
+      and a block opened at column 0 but closed by an indented closer stayed
+      open and hid the headings after it.
+    - A run followed only by ``*/}`` ends a code block written inside an MDX
+      comment (``{/* ... */}``). It closes an open block and never opens
+      one: the comment's opening line (``{/* ```sql``) is not a fence line,
+      so opening on its last line would hide the text that follows.
     """
 
     def __init__(self):
@@ -51,11 +70,15 @@ class FenceTracker:
         for ch in ("`", "~"):
             if stripped.startswith(ch * 3):
                 run = len(stripped) - len(stripped.lstrip(ch))
+                after = stripped[run:].strip()
+                mdx_comment_end = after == "*/}"
                 if not self.in_fence:
-                    self.in_fence = True
-                    self._fence_len = run
-                    self._fence_char = ch
-                elif ch == self._fence_char and run >= self._fence_len:
+                    if not mdx_comment_end:
+                        self.in_fence = True
+                        self._fence_len = run
+                        self._fence_char = ch
+                elif (ch == self._fence_char and run >= self._fence_len
+                        and (not after or mdx_comment_end)):
                     self.in_fence = False
                     self._fence_len = 0
                     self._fence_char = ""
