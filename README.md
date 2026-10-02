@@ -55,7 +55,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 
 | Plugin | Description | Trigger | Docs |
 |---|---|---|---|
-| `llms-docs` | Claude/AI SDK/Firebase 公式ドキュメントの段階的調査スキル (llms.txt progressive loader) | Skill (on-demand) + SessionStart | [README](plugins/llms-docs/README.md) |
+| `llms-docs` | Claude/AI SDK/Firebase と、同梱 presets (Next.js / Cloudflare / Vercel / Bun ほか) の公式ドキュメントの段階的調査スキル (llms.txt progressive loader) | Skill (on-demand) + SessionStart | [README](plugins/llms-docs/README.md) |
 | `sensitive-files-guardrail` | 機密ファイル (.env, 秘密鍵等) のうっかり露出を予防する多段 hook (実値 redaction + .gitignore 未登録検出) | PreToolUse (Read/Bash/Edit/Write) + Stop | [README](plugins/sensitive-files-guardrail/README.md) |
 | `session-facts` | セッション開始時にリポジトリの分析結果 (スタック/スクリプト/env キー等) を Markdown で注入する hook | SessionStart + SubagentStart (Explore/Plan) | [README](plugins/session-facts/README.md) |
 | `external-ai-assist` | Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集 | PreToolUse (Agent/ExitPlanMode/Bash) + PostToolUse (Agent/Bash/Write/Edit/NotebookEdit) + Stop | [README](plugins/external-ai-assist/README.md) |

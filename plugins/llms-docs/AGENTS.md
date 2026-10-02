@@ -13,7 +13,8 @@ preset を置き換える。
 指摘すべきもの:
 
 - 対応する形状のサイトで、ページの分割・タイトル・URL が誤る (実測した Next.js / Vite /
-  Vitest / Drizzle / Zod / Hono / Agent Skills / Cloudflare 製品別ファイルと同じ形のもの)。
+  Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills /
+  Cloudflare 製品別ファイルと同じ形のもの)。
   本文の水平線やコードブロック内の見本を区切りと誤認する、`drop_lines` がコードブロック内の
   行を消す、ページ URL を読む前に行を消す、など
 - 同梱 presets が壊れている (検証で落ちる・取得先が `llms-full.txt` でない)。`sources.json` が
@@ -34,7 +35,8 @@ preset を置き換える。
 - 3 種のどれにも当てはまらない形状のサイトを読めないこと。新しい形状への対応は改善提案 (P3)
 - 利用者が `sources.json` に書いた URL を取得すること (設定した本人が意図した動作。取得するのは
   profile の `url` 1 つだけ)
-- 汎用 skill が無いこと (Phase 2 として未着手)
+- `researching-library-docs` の description に、利用者が `sources.json` に足したサイトが出ないこと
+  (description は静的。明示起動で読む)
 
 ### 優先度の目安
 

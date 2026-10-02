@@ -405,6 +405,27 @@ class ScoreEntryTest(unittest.TestCase):
     def test_title_substring_match(self):
         self.assertGreater(_common.score_entry("Hooks reference", "", ["hooks"]), 0)
 
+    def test_closed_compound_matches_open_spelling(self):
+        # "statusline" finds "status line" as whole consecutive words
+        self.assertEqual(_common.score_entry("Customize your status line", "", ["statusline"]), 5)
+        self.assertEqual(_common.score_entry("Status line", "", ["statusline"]), 10)
+        self.assertEqual(_common.score_entry("Durable Objects", "", ["durableobjects"]), 10)
+        self.assertEqual(_common.score_entry("x", "Use the Bash tool", ["bashtool"]), 2)
+        self.assertEqual(_common.score_entry("x", "", ["subagent"], headings=["Sub agent setup"]), 1)
+
+    def test_compound_needs_word_boundaries_on_both_ends(self):
+        # "handler" is inside "handle redirects" only by straddling a boundary
+        self.assertEqual(_common.score_entry("Handle redirects", "", ["handler"]), 0)
+        # and "atusli" is inside "status line" only mid-word
+        self.assertEqual(_common.score_entry("Status line", "", ["atusline"]), 0)
+
+    def test_compound_is_a_fallback_only(self):
+        # a keyword that already matches as written scores the same as before
+        self.assertEqual(_common.score_entry("Status line", "", ["status"]), 5)
+        self.assertTrue(_common._joins_words("abc", ["a", "b", "c"]))
+        self.assertFalse(_common._joins_words("abcd", ["a", "b", "c", "d"]))  # > 3 words
+        self.assertFalse(_common._joins_words("ab", ["ab"]))  # a single word is not a compound
+
     def test_all_keyword_bonus(self):
         multi = _common.score_entry("Hook events", "matcher config", ["hook", "matcher"])
         single = _common.score_entry("Hook events", "matcher config", ["hook"])

@@ -2,6 +2,53 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.27.0] - 2026-10-03
+
+### skill `researching-library-docs` を追加 (汎用 loader の skill)
+
+`parse-llms-txt.py` を使い、同梱 presets のサイトを他の 3 skill と同じ `search` → `content` の
+流れで調べる skill。`context: fork` + `model: sonnet` は既存 3 skill と同じ。
+
+- **auto-invoke の対象** — description と Triggers に presets のサイト名 (Next.js / Vite /
+  Vitest / Drizzle / Zod / Hono / Agent Skills / Cloudflare の 15 製品) を並べる。利用者が
+  `sources.json` に足したサイトは description に出ないので、
+  `/llms-docs:researching-library-docs <source> <質問>` で明示的に起動する
+- **source の選び方** — SKILL.md の Step 0 に対象と `--source` の対応表を置き、表に無ければ
+  `sources` で一覧を確かめる。一覧にも無いサイトは、調べられなかったことと profile の案を返し、
+  `sources.json` は作らない
+- **表と presets のずれを検査** — presets を足したのに表に載せ忘れる (skill から選ばれない) と、
+  表に presets に無い名前がある、の両方をテストで落とす
+- SessionStart のリマインダーに、この skill の対象を足した
+
+### presets に Bun / Vercel / Render / MCP / OpenAI Codex / Ollama を追加
+
+`researching-library-docs` の対応表・description にも載せた。分割のために profile キーを足した:
+
+- **`h1_needs_url`** (`split: h1`) — `page_url` の URL が無い H1 をページの区切りにせず、前の
+  ページの H1 見出しとして残す。Mintlify 形式の Bun / MCP はページ本文にも H1 がある
+- **`frontmatter_delimiter`** (`split: frontmatter`) — frontmatter を囲む行。Vercel は `-` 80 個
+- **frontmatter の複数行の値** — 二重引用符の値が行をまたぐ場合を読む (Vercel の 3 ページ)。
+  引用符を閉じ忘れた値でも、区切り行で block を閉じてページを失わない
+- **`skip_empty`** — 空行と水平線だけの本文も空とみなす (Codex のカテゴリ見出し)
+- 実測: Bun 319 / MCP 152 / Ollama 69 / Vercel 1529 / Render 125 / Codex 178 ページが独立に数えた
+  値と一致 (`docs/generic-llms-txt-source.md`)。既存の presets の分割数は変わらない
+
+### 検索: 続け書きの語 (`statusline`) で分かち書きの見出し (`status line`) に当てる (4 script 共通)
+
+`search-index` / `search` の index スコア (`score_entry`) は語の部分一致だけを見ていたため、
+`statusline` / `devcontainer` / `durableobjects` / `generateObject` のような続け書きの語は、
+タイトルが「Customize your status line」「Development containers」「Durable Objects」
+「Generating Structured Data」のページに当たらなかった (Claude Code docs の
+`search-index "statusline"` は 0 件)。
+
+- そのままでは何にも当たらない語に限り、タイトル・説明・見出しの**連続する 2〜3 語を
+  つなげたもの**と完全に一致すれば当たりとする (点数は通常の一致と同じ)
+- 語の途中をまたぐ一致は数えない (`handle redirects` は `handler` に当たらない)。初版は
+  空白を詰めた文字列への部分一致だったが、Next.js の `route handlers` でこの種の偶然一致が
+  候補に混ざったため、語の境界に揃えた
+- 5 corpus 58 クエリで直前の版と比べ、上位 5 件が変わったのは 6 件。うち 5 件は 0 件から
+  目的のページが出るようになったもの、1 件 (Firebase の `remoteconfig`) は API リファレンスの
+  一部に代わって Remote Config のガイドが入ったもの
 ## [0.26.1] - 2026-10-03
 
 ### `FenceTracker` が言語名付きの行 (```` ```ts ````) をコードブロックの閉じとみなす問題を修正

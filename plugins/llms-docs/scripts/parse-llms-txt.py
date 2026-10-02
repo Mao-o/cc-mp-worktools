@@ -80,11 +80,12 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _SPLITS = ("h1", "frontmatter", "line")
 _PROFILE_KEYS = {
     "url", "split", "frontmatter_key", "line_prefix", "page_url", "url_base", "description",
-    "drop_lines", "skip_empty",
+    "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url",
 }
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
 _PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
 _FM_KEY_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*$")
+_FM_DELIM_RE = re.compile(r"^(-{3,}|\+{3,})$")
 
 
 def default_sources_file() -> str:
@@ -162,6 +163,7 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         "split": split,
         "description": raw.get("description", ""),
         "frontmatter_key": "title",
+        "frontmatter_delimiter": "---",
         "line_prefix": None,
         "page_url": _parse_page_url(path, name, raw.get("page_url")),
         "url_base": None,
@@ -176,8 +178,22 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         if not isinstance(key, str) or not _FM_KEY_NAME_RE.match(key):
             _bad(path, f"sources.{name}.frontmatter_key must be a YAML key name")
         profile["frontmatter_key"] = key
-    elif "frontmatter_key" in raw:
-        _bad(path, f'sources.{name}.frontmatter_key is only valid with split "frontmatter"')
+        delim = raw.get("frontmatter_delimiter", "---")
+        if not isinstance(delim, str) or not _FM_DELIM_RE.match(delim):
+            _bad(path, f"sources.{name}.frontmatter_delimiter must be a line of 3 or more '-' or '+'")
+        profile["frontmatter_delimiter"] = delim
+    else:
+        for key in ("frontmatter_key", "frontmatter_delimiter"):
+            if key in raw:
+                _bad(path, f'sources.{name}.{key} is only valid with split "frontmatter"')
+    needs_url = raw.get("h1_needs_url", False)
+    if not isinstance(needs_url, bool):
+        _bad(path, f"sources.{name}.h1_needs_url must be true or false")
+    if needs_url and split != "h1":
+        _bad(path, f'sources.{name}.h1_needs_url is only valid with split "h1"')
+    if needs_url and not (profile["page_url"] and profile["page_url"][0] in ("line", "link")):
+        _bad(path, f'sources.{name}.h1_needs_url needs page_url "line:<prefix>" or "link:<link text>"')
+    profile["h1_needs_url"] = needs_url
     if split == "line":
         prefix = raw.get("line_prefix")
         if not isinstance(prefix, str) or not prefix.strip():
@@ -335,7 +351,28 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
     for d in docs:
         d["url"] = _body_url(d["body_lines"], rule)
         d["min_level"] = None  # the H1 is the delimiter, so sections start at H2
+    if profile["h1_needs_url"]:
+        docs = _merge_urlless_h1(docs)
     return docs
+
+
+def _merge_urlless_h1(docs: list[dict]) -> list[dict]:
+    """Fold an H1 that has no page URL under it back into the page before it.
+
+    Sites that put ``Source: <url>`` under every page title (Mintlify: Bun,
+    MCP) also use H1 inside a page body; without a URL such an H1 is a
+    heading, not a page. A URL-less H1 before the first page is kept as is.
+    """
+    out: list[dict] = []
+    for d in docs:
+        if not d["url"] and out and out[-1]["url"]:
+            out[-1]["body_lines"] = out[-1]["body_lines"] + [f"# {d['title']}\n"] + d["body_lines"]
+            # the page now holds an H1, so sections start at H1: the folded
+            # heading is listed and its subsections nest under it
+            out[-1]["min_level"] = 1
+        else:
+            out.append(d)
+    return out
 
 
 _FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$")
@@ -344,29 +381,61 @@ _FM_CONTINUATION_RE = re.compile(r"^\s+\S")
 _FM_LOOKAHEAD = 30
 
 
-def _frontmatter_at(lines: list[str], pos: int, required_key: str) -> tuple[dict, int] | None:
+def _frontmatter_at(lines: list[str], pos: int, required_key: str,
+                    delimiter: str = "---") -> tuple[dict, int] | None:
     """Parse a frontmatter block opening at *pos*; return (fields, end) or None.
 
-    A ``---`` opens a block only when a closing ``---`` follows within
-    ``_FM_LOOKAHEAD`` lines, every line in between is YAML-shaped (``key:
-    value`` / ``- item`` / indented continuation / blank), and *required_key*
+    A ``---`` (or the profile's ``frontmatter_delimiter``) opens a block
+    only when a closing one follows within ``_FM_LOOKAHEAD`` lines, every
+    line in between is YAML-shaped (``key: value`` / ``- item`` / indented
+    continuation / blank / the rest of a quoted value), and *required_key*
     is among the keys. A Markdown horizontal rule followed by prose (even
     prose that starts with ``Note:``) is therefore not a page boundary.
+
+    A double-quoted value may span lines, as YAML allows (Vercel writes long
+    ``description:`` values that way); the lines up to its closing quote
+    belong to the value, whatever they look like, except the closing
+    delimiter itself, which always ends the block.
     """
-    if lines[pos].rstrip("\n\r") != "---":
+    if lines[pos].rstrip("\n\r") != delimiter:
         return None
     fields: dict = {}
+    open_key = None  # key whose double-quoted value is still open
     for j in range(pos + 1, min(pos + _FM_LOOKAHEAD, len(lines))):
         line = lines[j].rstrip("\n\r")
-        if line == "---":
+        if open_key is not None and line == delimiter:
+            # a quote left open by mistake: the block still ends here and the
+            # value is kept as written (losing the page would be worse)
+            open_key = None
+        if open_key is not None:
+            fields[open_key] += " " + line.strip()
+            if _closes_double_quote(line):
+                fields[open_key] = fields[open_key].strip().strip('"')
+                open_key = None
+            continue
+        if line == delimiter:
             return (fields, j + 1) if required_key in fields else None
         if not line.strip() or _FM_LIST_RE.match(line) or _FM_CONTINUATION_RE.match(line):
             continue
         m = _FM_KEY_RE.match(line)
         if not m:
             return None
-        fields[m.group(1)] = m.group(2).strip().strip("'\"")
+        value = m.group(2).strip()
+        if value.startswith('"') and not _closes_double_quote(value[1:]):
+            open_key = m.group(1)
+            fields[open_key] = value
+            continue
+        fields[m.group(1)] = value.strip("'\"")
     return None
+
+
+def _closes_double_quote(text: str) -> bool:
+    """True when *text* ends with a ``"`` that is not backslash-escaped."""
+    text = text.rstrip()
+    if not text.endswith('"'):
+        return False
+    backslashes = len(text[:-1]) - len(text[:-1].rstrip("\\"))
+    return backslashes % 2 == 0
 
 
 def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
@@ -376,7 +445,7 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
     i = 0
     while i < len(lines):
         if not fence.in_fence:
-            hit = _frontmatter_at(lines, i, key)
+            hit = _frontmatter_at(lines, i, key, profile["frontmatter_delimiter"])
             if hit is not None:
                 blocks.append((hit[0], i, hit[1]))
                 i = hit[1]
@@ -495,6 +564,9 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
 _SPLITTERS = {"h1": split_h1, "frontmatter": split_frontmatter, "line": split_line}
 
 
+_RULE_RE = re.compile(r"^ {0,3}([-*_])( *\1){2,} *$")
+
+
 def _drop_boilerplate(body_lines: list[str], patterns: list) -> list[str]:
     """Remove lines outside code fences that match one of *patterns*. Runs
     after the page URL is read, so a link on a dropped line still counts."""
@@ -521,8 +593,9 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
             d["body_lines"] = _drop_boilerplate(d["body_lines"], profile["drop_lines"])
     if profile["skip_empty"]:
         # A heading with no body (Hono's "# Start of Hono documentation"
-        # banner) is not a page.
-        docs = [d for d in docs if any(line.strip() for line in d["body_lines"])]
+        # banner, Codex's category titles followed only by a "---" rule)
+        # is not a page.
+        docs = [d for d in docs if any(line.strip() and not _RULE_RE.match(line) for line in d["body_lines"])]
     return docs
 
 

@@ -45,6 +45,45 @@
       "page_url": "line:Source: ",
       "description": "Agent Skills (SKILL.md の仕様)"
     },
+    "bun": {
+      "url": "https://bun.com/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Bun"
+    },
+    "vercel": {
+      "url": "https://vercel.com/docs/llms-full.txt",
+      "split": "frontmatter",
+      "frontmatter_delimiter": "--------------------------------------------------------------------------------",
+      "page_url": "frontmatter:source",
+      "description": "Vercel"
+    },
+    "render": {
+      "url": "https://render.com/docs/llms-full.txt",
+      "split": "h1",
+      "description": "Render"
+    },
+    "mcp": {
+      "url": "https://modelcontextprotocol.io/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Model Context Protocol (MCP)"
+    },
+    "codex": {
+      "url": "https://developers.openai.com/codex/llms-full.txt",
+      "split": "h1",
+      "skip_empty": true,
+      "description": "OpenAI Codex (CLI / IDE / cloud / SDK)"
+    },
+    "ollama": {
+      "url": "https://docs.ollama.com/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Ollama"
+    },
     "cloudflare-workers": {
       "url": "https://developers.cloudflare.com/workers/llms-full.txt",
       "split": "frontmatter",

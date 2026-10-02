@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
+import _common  # noqa: E402
 
 generic = _loader.load_script("parse-llms-txt.py")
 
@@ -203,6 +204,79 @@ CLOUDFLARE_DROP = [
     r"^Last updated .*\|Copy as Markdown\|",
 ]
 
+MINTLIFY = """\
+# Bytecode Caching
+Source: https://example.com/docs/bytecode
+
+Intro.
+
+# ESM (an H1 inside the page body, not a page)
+
+```bash
+# a shell comment
+```
+
+## Usage
+
+# CSS
+Source: https://example.com/docs/css
+
+Styles.
+"""
+
+VERCEL_LIKE = """\
+# Site documentation
+
+Preamble.
+
+DELIM
+title: "Access tokens"
+description: "Create and scope tokens"
+source: "https://example.com/docs/access-tokens"
+DELIM
+
+Body A.
+
+DELIM
+title: "Forbidden properties"
+description: "Learn how to disallow reading from,
+writing to, and/or calling one or more properties"
+source: "https://example.com/docs/forbidden"
+DELIM
+
+**Important:** a bold line that is not a YAML key.
+
+DELIM
+
+Prose between two long rules is not a page.
+
+DELIM
+""".replace("DELIM", "-" * 80)
+
+CODEX_LIKE = """\
+# Site — full documentation
+
+> preamble
+
+# Administration
+
+---
+
+# Agent approvals
+
+Body.
+
+---
+
+# Configuration
+
+---
+
+# Config basics
+
+Body.
+"""
+
 
 class SplitTest(unittest.TestCase):
     def test_frontmatter_with_title(self):
@@ -297,6 +371,52 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(generic._link_url(body, "View as Markdown"), "https://example.com/p.md")
         self.assertEqual(generic._link_url(body, "Missing"), "")
 
+    def test_h1_needs_url_folds_body_h1_into_the_page(self):
+        profile = _profile(split="h1", page_url="line:Source: ", h1_needs_url=True)
+        docs = generic.split_documents(_lines(MINTLIFY), profile)
+        self.assertEqual([d["title"] for d in docs], ["Bytecode Caching", "CSS"])
+        self.assertEqual([d["url"] for d in docs], ["https://example.com/docs/bytecode", "https://example.com/docs/css"])
+        body = "".join(docs[0]["body_lines"])
+        self.assertIn("# ESM (an H1 inside the page body, not a page)", body)
+        self.assertIn("## Usage", body)
+        # the folded H1 is a section of its own, with its subsections under it
+        self.assertEqual(docs[0]["min_level"], 1)
+        paths = [sec["heading_path"] for sec in _common.extract_sections(docs[0]["body_lines"], min_level=1)]
+        self.assertIn("ESM (an H1 inside the page body, not a page)/Usage", paths)
+        # without h1_needs_url the body H1 is a (URL-less) page of its own
+        plain = generic.split_documents(_lines(MINTLIFY), _profile(split="h1", page_url="line:Source: "))
+        self.assertEqual(len(plain), 3)
+
+    def test_frontmatter_delimiter_and_multiline_quoted_value(self):
+        profile = _profile(split="frontmatter", frontmatter_delimiter="-" * 80, page_url="frontmatter:source")
+        docs = generic.split_documents(_lines(VERCEL_LIKE), profile)
+        self.assertEqual([d["title"] for d in docs], ["Access tokens", "Forbidden properties"])
+        self.assertEqual(docs[1]["url"], "https://example.com/docs/forbidden")
+        self.assertEqual(docs[1]["description"],
+                         "Learn how to disallow reading from, writing to, and/or calling one or more properties")
+        # the long rules around plain prose stay inside the second page
+        self.assertIn("Prose between two long rules is not a page.\n", docs[1]["body_lines"])
+
+    def test_unclosed_quote_does_not_drop_the_page(self):
+        text = (
+            "---\ntitle: A\ndescription: \"never closed\n---\n\nBody A.\n\n"
+            "---\ntitle: B\n---\n\nBody B.\n"
+        )
+        docs = generic.split_documents(_lines(text), _profile(split="frontmatter"))
+        self.assertEqual([d["title"] for d in docs], ["A", "B"])
+        self.assertIn("Body A.\n", docs[0]["body_lines"])
+
+    def test_closes_double_quote_respects_escapes(self):
+        self.assertTrue(generic._closes_double_quote('end"'))
+        self.assertFalse(generic._closes_double_quote('end\\"'))
+        self.assertTrue(generic._closes_double_quote('end\\\\"'))
+        self.assertFalse(generic._closes_double_quote("no quote"))
+
+    def test_skip_empty_treats_a_rule_only_body_as_empty(self):
+        docs = generic.split_documents(_lines(CODEX_LIKE), _profile(split="h1", skip_empty=True))
+        self.assertEqual([d["title"] for d in docs],
+                         ["Site — full documentation", "Agent approvals", "Config basics"])
+
 
 class ProfileValidationTest(unittest.TestCase):
     def load(self, data) -> tuple[int, str]:
@@ -323,6 +443,12 @@ class ProfileValidationTest(unittest.TestCase):
             "drop_lines not a list": {"sources": {"x": {**ok, "drop_lines": "^x"}}},
             "drop_lines bad regex": {"sources": {"x": {**ok, "drop_lines": ["("]}}},
             "skip_empty not bool": {"sources": {"x": {**ok, "skip_empty": "yes"}}},
+            "h1_needs_url without page_url": {"sources": {"x": {**ok, "h1_needs_url": True}}},
+            "h1_needs_url not bool": {"sources": {"x": {**ok, "page_url": "line:Source: ", "h1_needs_url": 1}}},
+            "h1_needs_url on frontmatter": {"sources": {"x": {**ok, "split": "frontmatter", "page_url": "link:x",
+                                                              "h1_needs_url": True}}},
+            "frontmatter_delimiter on h1": {"sources": {"x": {**ok, "frontmatter_delimiter": "---"}}},
+            "bad frontmatter_delimiter": {"sources": {"x": {**ok, "split": "frontmatter", "frontmatter_delimiter": "=="}}},
             "not json": "{",
         }
         for label, data in cases.items():
@@ -415,6 +541,26 @@ class PresetsTest(unittest.TestCase):
                 self.assertTrue(p["url"].endswith("/llms-full.txt"), p["url"])
                 self.assertTrue(p["description"])
 
+    def test_skill_source_table_matches_the_presets(self):
+        # researching-library-docs lists the presets by hand (description and
+        # the Step 0 table); a preset added or renamed without the skill would
+        # never be picked by it
+        skill = Path(generic.PRESETS_FILE).parents[1] / "skills" / "researching-library-docs" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        table = text.split("## Step 0", 1)[1].split("\n## ", 1)[0]
+        named = set()
+        for row in re.findall(r"(?m)^\| [^|]+ \| (.+) \|$", table):
+            if row.startswith("`--source`"):
+                continue  # header
+            m = re.match(r"`cloudflare-<製品>`: (.+)", row)
+            if m:
+                named |= {f"cloudflare-{slug}" for slug in re.findall(r"`([a-z0-9-]+)`", m.group(1))}
+            else:
+                named |= set(re.findall(r"`([a-z0-9-]+)`", row))
+        presets = set(generic._read_sources_file(generic.PRESETS_FILE))
+        self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
+        self.assertEqual(named - presets, set(), "skill names a source that is not a preset")
+
     def test_preset_shapes_split_their_fixtures(self):
         # one fixture per shape, read through the shipped preset
         presets = generic._read_sources_file(generic.PRESETS_FILE)
@@ -424,6 +570,9 @@ class PresetsTest(unittest.TestCase):
             "zod": (H1_NO_URL, ["Site", "Schemas", "Errors"]),
             "hono": (H1_BANNER, ["Site", "Routing"]),
             "cloudflare-d1": (CLOUDFLARE_LIKE, ["Product", "Getting started"]),
+            "bun": (MINTLIFY, ["Bytecode Caching", "CSS"]),
+            "vercel": (VERCEL_LIKE, ["Access tokens", "Forbidden properties"]),
+            "codex": (CODEX_LIKE, ["Site — full documentation", "Agent approvals", "Config basics"]),
         }
         for name, (text, titles) in cases.items():
             with self.subTest(name):
