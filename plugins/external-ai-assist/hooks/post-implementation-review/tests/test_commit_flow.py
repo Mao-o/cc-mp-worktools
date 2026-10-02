@@ -252,8 +252,7 @@ class TestNonCommitReflogLines(CommitFlowTestCase):
     """
 
     def _add_origin(self) -> tuple[str, str]:
-        bare = os.path.join(self._tmp.name, "origin.git")
-        _testutil.git(self._tmp.name, "init", "--bare", "-q", "origin.git")
+        bare = _testutil.init_bare_origin(self._tmp.name)
         self.git("remote", "add", "origin", bare)
         branch = self.git("branch", "--show-current").stdout.strip()
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}")

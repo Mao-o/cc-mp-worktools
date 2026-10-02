@@ -1082,8 +1082,7 @@ class TestSameTurnCommitNotification(HookTestCase):
     """
 
     def _add_bare_origin(self) -> tuple[str, str]:
-        bare = os.path.join(self._tmp.name, "origin.git")
-        _testutil.git(self._tmp.name, "init", "--bare", "-q", "origin.git")
+        bare = _testutil.init_bare_origin(self._tmp.name)
         _testutil.git(self.repo, "remote", "add", "origin", bare)
         branch = _testutil.git(self.repo, "branch", "--show-current").stdout.strip()
         _testutil.git(self.repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")

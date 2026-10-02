@@ -51,9 +51,54 @@ def clear_plugin_env(keep: dict | None = None) -> None:
         if key not in keep:
             del os.environ[key]
 
+# テストの repo で git に自動 gc / maintenance を起こさせない設定 (key, value)。
+#
+# `git commit` / `merge` / `fetch` は終わりに `git maintenance run --auto --detach` を起動する。
+# git 2.55 は auto maintenance の既定戦略が geometric で、`.git/objects/17` に loose object が
+# 2 件以上あると (= 「約 100 個以上」と見積もられると) 小さな repo でも repack が走る。しかも
+# `--detach` は repack の自動条件を判定する前に背景へ切り離すので、commit は待たずに戻る。
+# その repack が `.git/objects/pack` に書いている間に `TemporaryDirectory.cleanup()` が走ると、
+# tearDown が `Directory not empty` で落ちる (CI の flaky。object の hash 次第なので偶発的)。
+# git 2.50 は gc 戦略でしきい値 (約 6700 個) が高く、同じ条件でも起きないので、ローカルの
+# 実行だけでは気付けない。
+#
+#   maintenance.auto=false / gc.auto=0: そもそも自動 maintenance を起動しない
+#   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
+#     (commit が戻る前に終わる)
+#
+# env で渡す (`GIT_CONFIG_COUNT`。git 2.31 以上) のは、テストが起動する git、hook が起動する
+# git、それらが子として起動する git (`pull` の fetch / merge など) に一括で効かせるため。
+# 例外は `git push` の受け側 (`receive-pack`): ローカルの path へ送るとき git は repo 用の env を
+# 外して起動するので届かない。push 先の bare repo は `init_bare_origin` で repo 側に書く。
+NO_BACKGROUND_GIT_SETTINGS = (
+    ("maintenance.auto", "false"),
+    ("maintenance.autoDetach", "false"),
+    ("gc.auto", "0"),
+    ("gc.autoDetach", "false"),
+)
+
+
+def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """`(key, value)` の並びを `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` にする。
+
+    件数は並びから数える。手で書くと、項目を足し引きしたときに COUNT がずれる: 多ければ git が
+    全コマンドで `missing config key` と言って落ち、少なければ末尾の設定が黙って無視される。
+    """
+    env = {"GIT_CONFIG_COUNT": str(len(settings))}
+    for i, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    return env
+
+
 # 開発者の ~/.gitconfig (color.ui=always / diff.external / diff.noprefix 等) でテストが
-# 揺れないよう、git にグローバル/システム設定を読ませない
-HERMETIC_GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+# 揺れないよう、git にグローバル/システム設定を読ませない。あわせて自動 maintenance を止める
+# (上の `NO_BACKGROUND_GIT_SETTINGS`)。
+HERMETIC_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
+}
 
 # 開発者 shell の除外設定 (CODE_ONLY=1 等) で `.txt` を使う既存テストが落ちないよう pin する
 NEUTRAL_EXCLUSION_ENV = {
@@ -86,8 +131,11 @@ def load_entry():
 
 
 def git(repo: str, *args: str) -> subprocess.CompletedProcess:
+    # `HERMETIC_GIT_ENV` はここでも足す。テストクラス側の env patch に頼ると、patch していない
+    # クラスが `init_repo` を呼んだ時点で自動 maintenance が復活する (patch 済みなら同じ値の上書き)。
+    env = {**os.environ, **HERMETIC_GIT_ENV}
     return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
     )
 
 
@@ -101,6 +149,21 @@ def init_repo(path: str) -> str:
     git(path, "add", "-A")
     git(path, "commit", "-qm", "init")
     return os.path.realpath(path)
+
+
+def init_bare_origin(parent: str, name: str = "origin.git") -> str:
+    """push 先の bare repo を作り、そのパス (`parent/name`) を返す。
+
+    `git push` がローカルの path へ送るとき、受け側の `receive-pack` は `GIT_CONFIG_COUNT` など
+    repo 用の env を外されて起動する (git が意図的にそうする)。`HERMETIC_GIT_ENV` の設定は
+    ここに届かないので、受け取った後に走る自動 maintenance (`receive.autogc`) は、repo 側の設定で
+    止める。
+    """
+    git(parent, "init", "--bare", "-q", name)
+    path = os.path.join(parent, name)
+    for key, value in (*NO_BACKGROUND_GIT_SETTINGS, ("receive.autogc", "false")):
+        git(path, "config", key, value)
+    return path
 
 
 def write(repo: str, rel: str, content: str) -> str:

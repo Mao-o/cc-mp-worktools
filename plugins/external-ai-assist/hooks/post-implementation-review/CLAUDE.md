@@ -877,6 +877,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | **state 整理はレビューした commit 基準 (待ち時間中に同じパスが commit されたら外さない / 無関係な commit では巻き込まない)** | `test_commit_flow.py::TestSettleAgainstReviewedCommit` |
 | commit レビューを含む PostToolUse(Bash) の hook timeout 予算 | `test_review_set.py::TestTimeoutBudgets::test_post_tool_bash_budget_covers_commit_review` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
+| テストが作る git repo (push 先の bare repo を含む) と hook が起動する git で、自動 gc / maintenance が止まっている (tearDown の `Directory not empty` を防ぐ) | `test_hermetic_env.py` |
 
 **テストから実機の外部 AI CLI を起動しない**ための前提が 1 つある: `sys.modules` から
 hook のモジュールを外す処理 (`tests/test_posix_guard.py::_purge_hook_modules`) は
@@ -884,6 +885,17 @@ hook のモジュールを外す処理 (`tests/test_posix_guard.py::_purge_hook_
 外し損ねた古いモジュールが古い `cursor` への参照を抱えたまま残り、後続テストが
 `sys.modules["cursor"]` に当てた patch を素通りして**本物の cursor CLI が起動する**
 (0.12.0 で `selection` を足したときに実際に踏んだ — 全 suite が hang して発覚)。
+
+**テストが作る git repo は、自動 maintenance を止めてから使う**。`git commit` が起動する
+`git maintenance run --auto --detach` が背景で `.git/objects/pack` に書いている間に tempdir の
+後始末が走ると、tearDown が `Directory not empty` で落ちる (git 2.55 は小さな repo でも起こす。
+git 2.50 では起きないので、ローカルの実行だけでは気付けない)。`_testutil.HERMETIC_GIT_ENV` が
+`GIT_CONFIG_COUNT` で止めていて、`_testutil.git` は毎回これを足す。repo を作るテストは
+`_testutil.git` / `init_repo` を使い、自前の `subprocess` で git を呼ぶなら env に
+`HERMETIC_GIT_ENV` を入れること (理由は `_testutil.NO_BACKGROUND_GIT_SETTINGS` のコメント)。
+**例外は push 先の bare repo**: ローカルの path へ push すると、受け側の `receive-pack` は repo 用の
+env を外されて起動するので env の設定が届かない。`git init --bare` を直接呼ばず
+`_testutil.init_bare_origin` で作り、repo 自身の config に書くこと。
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると

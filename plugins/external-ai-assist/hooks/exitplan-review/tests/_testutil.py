@@ -60,9 +60,40 @@ FINDINGS = (
 PLAN = "## 目的\n\nログイン API を追加する\n\n## 手順\n\n1. ルータ追加\n2. テスト追加\n"
 
 
+# テストの repo で git に自動 gc / maintenance を起こさせない設定 (key, value)。
+# 理由 (git 2.55 の auto maintenance が背景で pack を書き、tempdir の後始末と競合して flaky に
+# なる) は post-implementation-review/tests/_testutil.py の `NO_BACKGROUND_GIT_SETTINGS` を参照。
+# この suite の `init_repo` は `git init` だけで commit しないが、repo を作るヘルパーの扱いを
+# そちらと揃えておく (commit するテストを足したときに復活させないため)。
+NO_BACKGROUND_GIT_SETTINGS = (
+    ("maintenance.auto", "false"),
+    ("maintenance.autoDetach", "false"),
+    ("gc.auto", "0"),
+    ("gc.autoDetach", "false"),
+)
+
+
+def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """`(key, value)` の並びを `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` にする。
+
+    件数は並びから数える。手で書くと、項目を足し引きしたときに COUNT がずれる: 多ければ git が
+    全コマンドで `missing config key` と言って落ち、少なければ末尾の設定が黙って無視される。
+    """
+    env = {"GIT_CONFIG_COUNT": str(len(settings))}
+    for i, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    return env
+
+
 # 開発者の ~/.gitconfig (color.ui=always 等) でテストが揺れないよう、git にグローバル/
 # システム設定を読ませない (post-implementation-review/tests/_testutil.py と同じ配慮)。
-HERMETIC_GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+# あわせて自動 maintenance を止める (上の `NO_BACKGROUND_GIT_SETTINGS`)。
+HERMETIC_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
+}
 
 
 def init_repo(path: str) -> str:
