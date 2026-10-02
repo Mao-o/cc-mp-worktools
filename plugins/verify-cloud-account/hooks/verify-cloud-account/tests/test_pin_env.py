@@ -50,6 +50,18 @@ def _init_repo(path: Path) -> Path:
     return path
 
 
+_SNIPPET_HEADER = 'settings.local.json の "env" に足す内容 (既存のキーは残す):'
+
+
+def env_snippet(test: unittest.TestCase, lines: list[str]) -> dict:
+    """出力の「env に足す内容」を JSON として読む。読めなければ test を失敗にする。"""
+    body = "\n".join(lines[lines.index(_SNIPPET_HEADER) + 1:])
+    try:
+        return json.loads("{" + body + "}")
+    except ValueError as e:
+        test.fail(f"env の断片が JSON として読めない ({e}): {body!r}")
+
+
 class _TmpBase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -418,6 +430,35 @@ class TestRender(unittest.TestCase):
         self.assertIn("このセッション=old", text)
         self.assertIn("決められません — 理由", text)
 
+    def test_env_snippet_stays_one_json_value_per_key(self):
+        """値の `"` / 改行 / `\\` で、別のキーが足されたり JSON が壊れたりしないこと。
+
+        Claude はこの断片を settings.local.json に写す。値は CLI の設定 (profile 名・
+        構成名) や期待値 (accounts.local.json) から来る (マージ前レビューの指摘)。
+        """
+        for value in (
+            'p", "BASH_ENV": "/tmp/evil',
+            "line1\nline2",
+            "C:\\new\\dir",
+            "tail\\",
+            'q"\\n"',
+        ):
+            with self.subTest(value=value):
+                plans = [
+                    pin_env.Plan(
+                        "gcloud",
+                        pins=(pin_env.Pin("CLOUDSDK_CORE_PROJECT", value, secret=True),),
+                    )
+                ]
+                lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=True)
+                self.assertEqual(env_snippet(self, lines), {"CLOUDSDK_CORE_PROJECT": value})
+        candidates = ('a"b', "c\nd", "e\\f")
+        plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
+        lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
+        self.assertEqual(
+            env_snippet(self, lines), {"AWS_PROFILE": '<a"b / c\nd / e\\f のどれか>'}
+        )
+
 
 class TestPinEnvCommand(_TmpBase):
     def setUp(self):
@@ -520,6 +561,14 @@ class TestPinEnvCommand(_TmpBase):
         self.assertEqual(code, 0, err)
         self.assertIn("このディレクトリで 1 回実行: firebase use fb-stg\n", out)
         self.assertNotIn("pwned", out)
+
+    def test_env_snippet_from_expected_value_adds_no_other_key(self):
+        """期待値の `"` から、BASH_ENV のような別の env が断片に入らないこと。"""
+        value = 'p", "BASH_ENV": "/tmp/evil'
+        self._write_accounts({"gcloud": value})
+        code, out, err = self._run(["pin-env", "--show-values"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(env_snippet(self, out.splitlines()), {"CLOUDSDK_CORE_PROJECT": value})
 
 
 if __name__ == "__main__":

@@ -76,6 +76,9 @@
 - builder の案内のうち、グローバル既定のパスを埋め込んだ `--path <file>` をクォートした
   (init / show / auto-switch / pin-env)。ホームのパスに空白があると、案内どおりに足しても
   別々の引数に割れていた
+- pin-env が出す settings.local.json の `env` の断片を JSON として組み立てるようにした。
+  値の `"` / 改行 / `\` をそのまま埋め込んでいたので、別のキー (`BASH_ENV` など) を足した
+  形や、JSON として読めない形になりえた (普通の値の出力は変わらない)
 
 ### Tests
 
@@ -83,7 +86,7 @@
   `TestIdentityEnvCacheIntegration`)、全 service の宣言 (`TestIdentityEnvContract`)、
   pin-env (`tests/test_pin_env.py`)、skill の付与 (`tests/test_skill_permissions.py`)、
   `firebase use` の値 (`TestFirebaseCommandIsShellSafe`)、案内の `--path` のクォート。
-  1,201 → 1,262 件
+  1,201 → 1,264 件
 
 ## 0.16.1
 

@@ -304,6 +304,17 @@ def settings_env(path: Path | None) -> tuple[dict[str, str], str | None]:
     return {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}, None
 
 
+def _env_member(name: str, value: str) -> str:
+    """settings の `env` に足す 1 組 (`"NAME": "value"`) を JSON として組み立てる。
+
+    Claude はこの断片を settings.local.json に写す。値の `"` / 改行 / `\\` をそのまま
+    埋め込むと、別のキーを足した形 (`BASH_ENV` のように Bash や hook の動きを変える env)
+    や JSON として読めない形になる。`ensure_ascii=False` なので、普通の値 (日本語の
+    案内を含む) の出力は変わらない。
+    """
+    return f"{json.dumps(name, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}"
+
+
 def render(
     plans: list[Plan],
     target: Path | None,
@@ -337,11 +348,13 @@ def render(
         for pin in plan.pins:
             if pin.value is None:
                 lines.append(f"  {pin.name}: 候補 {', '.join(pin.candidates)} (1 つ選ぶ)")
-                snippet.append(f'"{pin.name}": "<{" / ".join(pin.candidates)} のどれか>"')
+                snippet.append(
+                    _env_member(pin.name, f"<{' / '.join(pin.candidates)} のどれか>")
+                )
             else:
                 value = shown(pin.value, pin.secret)
                 lines.append(f"  {pin.name}: {value}")
-                snippet.append(f'"{pin.name}": "{value}"')
+                snippet.append(_env_member(pin.name, value))
             now = session_env.get(pin.name)
             in_file = file_env.get(pin.name)
             lines.append(
