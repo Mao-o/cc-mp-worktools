@@ -153,7 +153,12 @@
                                     context option (`--profile` / `--project` 等)。
                                     subprocess の timeout は直値ではなく
                                     `core.budget.call_timeout(<既定>)` を通すこと
-                                    (hook 全体の実時間予算で頭打ちにするため)
+                                    (hook 全体の実時間予算で頭打ちにするため)。
+                                    エラー理由で案内するコマンドに値 (期待値・
+                                    host 名・profile 名等) を入れるときは
+                                    `core.shell_word.arg()` を通し、許容形から
+                                    外れた値はコマンドの形で案内しないこと
+                                    (Claude が案内をそのまま実行するため)
      - matches(expected, current) -> bool
                                     (任意) 「CLI 実測値 current が期待値
                                     expected を満たすか」の述語。verify() と

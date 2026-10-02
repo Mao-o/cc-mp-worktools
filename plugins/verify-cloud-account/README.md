@@ -341,7 +341,11 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   `aws sso login --profile <profile>`)
 - **firebase**: project を選ぶ環境変数が無い (公式 docs に記載なし)。`firebase use`
   の記録は作業ディレクトリごとなので、別の worktree では最初に 1 回要ることがある。
-  VCA は firebase のアカウントは検証しない
+  VCA は firebase のアカウントは検証しない。`firebase use` は引数を `.firebaserc` の
+  alias として先に解決するので、`pin-env` はこのディレクトリの `.firebaserc` で期待した
+  project に解決される alias を案内し、無ければ期待値の project ID で案内する (v0.17.1)
+- 前後に空白のある期待値は固定できない (照合は完全一致なので、どの現在値とも一致しない)。
+  `pin-env` は「固定できません」と出す (v0.17.1)
 - 検証の成功 cache は、アカウントを決める環境変数の値もキーに含める (v0.17.0)。
   固定した値を変えた直後でも、前の値での成功で通らない
 - 対話セッションでの workspace trust との関係は実測していない (Claude Code の docs は、
@@ -688,6 +692,13 @@ allow-list ではない)。`gcloud config set project <期待値> --configuratio
 の状態で検証されるため deny される (案内文自身が連結している `firebase login && firebase
 use <x>` は、書込側が期待値への切替なので許可される形)。remediation を案内する deny
 文面にはこの注記が付く (v0.11.1)。
+
+**案内するコマンドに入れる値は、シェルでそのまま 1 語になる形に限る (v0.17.1)。** 期待値・
+host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/` `@` `+` だけからなる
+ときだけコマンドの形で案内する (firebase の alias / project ID は `.` `_` `-` まで)。
+`;` / `$()` / 空白 / 改行や先頭の `-` を含む値は、案内どおりに打つと別のコマンドや option
+として走りうるので、コマンドにせず「手で確認してください」と書く (deny / allow は
+変わらない)。
 
 期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。ただし同じ
 コマンド行に**同じ service の書込が連結**されていれば、現在のアカウントに依らず

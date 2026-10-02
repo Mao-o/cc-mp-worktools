@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.17.1
+
+### Fixed: 案内するコマンドに値をそのまま埋め込まない
+
+deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud config set project
+<期待値>` / `gh auth switch --hostname <host> --user <期待値>` / `firebase use <alias>` /
+`AWS_PROFILE=<profile> aws ...` 等) は、期待値や CLI の設定から来た値をそのまま
+コマンドに埋め込んでいた。Claude は deny の案内をそのまま実行しがちで、期待値のファイルは
+リポジトリに置かれうるので、値に `;` / `$()` / 空白 / 改行や先頭の `-` があると、案内
+どおりに打ったコマンドが別のコマンドや option として走りえた。
+
+- 案内するコマンドに入れる値は、英数字で始まり英数字と `.` `_` `-` `:` `/` `@` `+` だけ
+  からなる形のときだけコマンドに出し、`shlex.quote` も通す。firebase の alias /
+  project ID は pin-env の `firebase use` と同じく `.` `_` `-` まで。外れた値はコマンドの
+  形で案内せず、「手で確認してください」の文にする。普通の値 (EKS や kubeadm の context
+  名、メールアドレスの account を含む) の文面は変わらない
+- firebase の dict 期待値の案内行 (`firebase use <alias>  # → <project>`) は、`#` の後ろの
+  project も同じ形に限る (改行が入るとコメントの外に出てコマンドになる)。案内できない
+  entry は行にせず、その旨を添える
+- AWS の profile 名は、許容形から外れる名前をコマンドにも「対応する profile」の一覧にも
+  出さない (一覧の名前も `<profile>` に当てはめて使われる)。外れた名前しか無ければ
+  `<profile>` のままにする
+- 検出したコマンド自身が指定した値 (`--context` / `--project` / `--account` /
+  `--profile`) を文面に示すところは、検証せずに quote して示す
+- deny / allow の判定は変えていない (変えたのは文面だけ)。実装は `core/shell_word.py`
+
+### Fixed: pin-env (マージ前レビューの指摘)
+
+- **firebase の dict 期待値で、alias を `.firebaserc` と照合してから案内するようにした。**
+  0.17.0 は期待値の alias をそのまま `firebase use <alias>` で案内していた。`firebase use`
+  は alias を `.firebaserc` で解決するので、同じ alias が別の project を指していたり
+  alias が無かったり (alias 名が project ID として扱われる) すると、案内どおりにしても
+  期待した project にならず、続く検証が deny し続けた。このディレクトリの `.firebaserc` で
+  期待した project に解決される alias だけを案内し、無ければ期待値の project ID で案内する
+  (既定で隠す)。期待値の alias が `firebase use` に渡せない形のときも、0.17.0 の
+  「固定できません」ではなく project ID で案内する
+- project ID と同じ名前の alias が `.firebaserc` で別の project を指しているときは、
+  `firebase use <project ID>` がその alias に切り替わるので、project ID でも案内しない
+  (scalar の期待値も同じ)。alias も project ID も出せなければ「固定できません」
+- **前後に空白のある期待値を「固定できません」にした。** 通常の検証は CLI が出した
+  (前後の空白を除いた) 現在値と期待値を完全一致で照合するので、
+  `{"project": " my-project "}` のような期待値はどの現在値とも一致しない。0.17.0 の
+  pin-env は空白を除いた値で構成を照合し、固定を案内していたので、案内どおりに固定しても
+  deny が続いた。gcloud (0.17.0 の「空白だけの値は不正」と同じ扱い) と、同じ食い違いの
+  あった aws / firebase に入れた。通常の検証の照合の仕方は変えていない
+
+### Tests
+
+- `tests/test_shell_word.py` (許容形と quote、service ごとの案内: 許容形の値は文面が
+  変わらない / 外れた値はコマンドにならない / どちらも deny のまま)、pin-env の
+  `.firebaserc` との照合と前後の空白 (`TestPaddedExpectedIsNotPinned`)
+- テスト整理 (挙動の変更なし): `tests/test_docs.py` の配布ファイルの走査から、gitignore
+  済みの手元専用のローカルガイドを名前で除いた。保守者の手元の plugin 直下にあると、その
+  本文で offender になり、手元の test だけが落ちていた (clean clone の CI は通る)。
+  配布ファイルに書かれた参照は今までどおり検出する
+- 1,267 → 1,299 件
+
 ## 0.17.0
 
 ### Added: プロジェクトごとのアカウント固定 (各 CLI の公式の仕組みを案内)

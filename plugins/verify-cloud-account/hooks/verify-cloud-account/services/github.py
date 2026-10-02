@@ -14,7 +14,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from core import budget, cli_config
+from core import budget, cli_config, shell_word
 
 # `\b` だと `gh-ost --help` のようなハイフン付き別コマンドまで拾うため、
 # 空白または終端が続く形だけに限定する。
@@ -482,6 +482,22 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     return _verify_against(active, expected)
 
 
+# host 名 / 期待値が案内するコマンドに入れられない形のとき (core/shell_word.py) の文。
+# host は期待値 (dict のキー) か、gh が報告したアクティブな host から来る。
+_CHECK_BY_HAND = (
+    f"ホスト名か期待値が{shell_word.UNSAFE}。gh のログイン状態と accounts.local.json の"
+    f' "{ACCOUNT_KEY}" を手で確認してください'
+)
+
+
+def _switch_guidance(host: str, user: str) -> str:
+    """不一致の deny 文面の末尾 (` — 切り替え: gh auth switch ...`)。"""
+    host_arg, user_arg = shell_word.arg(host), shell_word.arg(user)
+    if host_arg is None or user_arg is None:
+        return f" — {_CHECK_BY_HAND}"
+    return f" — 切り替え: gh auth switch --hostname {host_arg} --user {user_arg}"
+
+
 def _verify_against(active: dict[str, str], expected) -> str | None:
     """アクティブアカウント `active` (非空) を期待値と照合する。
 
@@ -499,14 +515,20 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
                 continue
             current = active.get(host)
             if current is None:
-                errors.append(
-                    f"GitHub [{host}]: このホストにログインしていません — "
-                    f"gh auth login --hostname {host} --skip-ssh-key を実行してください。"
-                )
+                host_arg = shell_word.arg(host)
+                if host_arg is None:
+                    errors.append(
+                        f"GitHub [{host}]: このホストにログインしていません — {_CHECK_BY_HAND}。"
+                    )
+                else:
+                    errors.append(
+                        f"GitHub [{host}]: このホストにログインしていません — "
+                        f"gh auth login --hostname {host_arg} --skip-ssh-key を実行してください。"
+                    )
             elif current != want:
                 errors.append(
                     f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={want}"
-                    f" — 切り替え: gh auth switch --hostname {host} --user {want}"
+                    + _switch_guidance(host, want)
                 )
         return "\n".join(errors) if errors else None
 
@@ -523,7 +545,7 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
     if current != expected:
         msg = (
             f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: gh auth switch --hostname {host} --user {expected}"
+            + _switch_guidance(host, expected)
         )
         if len(active) > 1:
             msg += (

@@ -58,6 +58,7 @@ verify-cloud-account/
         │   ├── mode.py             検証モード (enforce / warn / off) の解決
         │   ├── output.py           deny / warn の hookSpecificOutput JSON ビルダー
         │   ├── paths.py            accounts.local.json の配置パス解決 (3-tier + 親遡及 + グローバル既定)
+        │   ├── shell_word.py       案内するコマンドに値を 1 語として埋め込む (許容形 + quote。v0.17.1)
         │   └── tiers.py            セグメントの tier 分類 (READONLY / QUERY / WRITE + DISCLOSING)
         ├── services/               サービスごとの CLI 呼び出しと照合
         ├── scripts/
@@ -96,6 +97,10 @@ Python 3.11+。標準ライブラリのみ (外部依存なし)。
 
 - **成功は `None`、失敗は「理由 + 解決手順」を 1 つの文字列で返す** (deny の
   reason にそのまま出るため、理由だけ返すとユーザーが次の一手を打てない)
+- **解決手順のコマンドに値を入れるときは `core.shell_word.arg()` を通す** (v0.17.1。
+  D33)。許容形から外れた値はコマンドの形で案内せず、`shell_word.UNSAFE` を使った
+  「手で確認してください」の文にする。検出したコマンド自身が指定した値 (`--context` 等)
+  を示すところは、検証せず `shlex.quote` だけ通す
 - **例外を raise しない。** CLI 未インストール (`FileNotFoundError`)、実行不能
   (`OSError`)、timeout も文字列で返す。hook プロセスが異常終了すると JSON が
   出ず、公式仕様上は non-blocking error として**無音でコマンドが進む**
@@ -1108,6 +1113,56 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   コードブロックのコマンドが「読み取り専用なら付与される・書き込みと値の表示は付与されない」
   ことを確かめる。照合は docs の規則を広めに見積もった再現 (末尾の ` *` は引数なしにも
   一致、`Bash` 単独はすべてに一致) で行い、その再現自体も docs の例で確かめる
+
+### 0.17.1 (案内するコマンドへの値の埋め込み / pin-env の照合)
+
+**D33: 案内するコマンドに入れる値は、許容形に収まるときだけコマンドにする**
+
+deny 文面の切替案内と pin-env の `firebase use` は、Claude がそのまま実行しがちな「次に
+打つコマンド」。値は accounts.local.json の期待値、リポジトリの `.firebaserc`、CLI の設定
+(AWS config の profile 名、gh の host 名) から来て、期待値のファイルや `.firebaserc` は
+リポジトリに置かれうる。0.17.0 で pin-env の `firebase use` に入れた対策 (許容形の
+`fullmatch` + `shlex.quote`) を、deny 文面の全 service の案内に揃えた (`core/shell_word.py`)。
+
+- 許容形は 2 つ。`NAME` (英数字始まりで英数字と `.` `_` `-`) は firebase の alias /
+  project ID で、pin-env の規則のまま。`WORD` は `NAME` に `:` `/` `@` `+` を足したもので、
+  EKS の context 名 (`arn:aws:eks:...:cluster/x`)、kubeadm の
+  `kubernetes-admin@kubernetes`、gcloud の account (メールアドレス) やドメイン付きの
+  project ID、gh の host 名に要る。どちらも `shlex.quote` がクォートを付けない文字だけ
+  なので、許容形の値の文面は 0.17.0 と同じ (`REMEDIATION_PATTERNS` / `is_self_remediation`
+  への影響が無い)。quote は許容形を緩めたときの二重化
+- 外れた値は「quote して出す」ではなく「コマンドにしない」。quote すれば 1 引数には
+  なるが、`-P` のような option の形や改行を含む値を、期待値として案内すること自体が誤り
+  (どの CLI の現在値とも一致しない値への切替を勧めることになる)
+- firebase の `# → <project>` は案内行のコメントだが、改行が入るとコメントの外に出るので
+  project も許容形に限る。AWS の「対応する profile」の一覧も、名前が `<profile>` に
+  当てはめて使われるので、コマンドと同じ扱いにする
+- 検出したコマンド自身の値 (`コマンド指定 --context=...` 等) は案内ではなく、そのコマンドが
+  何を指定したかの表示。外れた値を隠すと何が不一致だったかが分からなくなるので、検証せず
+  quote だけ通す
+- 期待値・現在値そのものの表示 (`期待=...` / `現在=...`) は今回の範囲外 (コマンドの形を
+  とらない)。改行を含む値は文面の行構造を崩しうる
+- 旧版と新版の deny 文面を同じ入力群 (許容形の値 10 種 / 外れた値 16 種 × 全 service の
+  案内の箇所) で比べ、差が「quote の付与 (検出したコマンドの値の表示)」と「案内の抑止
+  (外れた値をコマンドにしない。AWS は `<profile>` か次の許容形の profile にする。firebase
+  は `NAME` の規則)」だけで、deny / allow が変わった入力が無いことを確かめた
+
+**pin-env の firebase の dict 期待値は、`firebase use` の行き先で選ぶ**
+
+`firebase use <x>` は x を `.firebaserc` の alias として先に解決し、alias に無ければ project
+ID として扱う (`firebase.resolve_target`。verify() の `--project` の照合と同じ関数)。期待値の
+alias が `.firebaserc` で別の project を指す・alias が無い・project ID と同じ名前の alias が
+別の project を指す、のどれでも、案内どおりにすると期待した project にならず、続く検証が
+deny し続ける。行き先が期待値の project になる alias → 期待値の project ID の順に選び、
+どちらも無ければ「固定できません」にする (マージ前レビューの指摘)
+
+**pin-env は、前後に空白のある期待値を固定しない**
+
+verify() は CLI が出した現在値 (前後の空白を除いた値) と期待値を完全一致で照合するので、
+前後に空白のある期待値はどの現在値とも一致しない。空白を除いた値で構成を照合・固定を
+案内すると、固定しても deny が続く。gcloud (`pin_fields`。0.17.0 の「空白だけの値は不正」
+の延長) と、同じ食い違いのあった aws / firebase で「固定できません」にした。verify() の
+照合の仕方は変えない (空白を許すかは builder の書き込み時の検証の問題で、範囲外)
 
 ## 既知の制限
 
