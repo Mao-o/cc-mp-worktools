@@ -886,6 +886,23 @@ def _norm_phrase(text: str) -> str:
     return " ".join(_norm(word) for word in text.split())
 
 
+_COMPOUND_MAX_WORDS = 3
+
+
+def _joins_words(kw: str, words: list[str]) -> bool:
+    """True when *kw* equals 2 to ``_COMPOUND_MAX_WORDS`` consecutive *words*
+    run together ("statusline" vs ["status", "line"])."""
+    for i in range(len(words)):
+        joined = words[i]
+        for j in range(i + 1, min(i + _COMPOUND_MAX_WORDS, len(words))):
+            joined += words[j]
+            if joined == kw:
+                return True
+            if len(joined) >= len(kw) or not kw.startswith(joined):
+                break
+    return False
+
+
 def score_entry(title: str, description: str, keywords,
                 *, tags=None, headings=None) -> int:
     """Score a single index entry against *keywords* (case-insensitive substring).
@@ -926,6 +943,15 @@ def score_entry(title: str, description: str, keywords,
     desc_norm = _norm_phrase(description or "")
     tags_norm = [_norm(t) for t in (tags or [])]
     headings_norm = [_norm_phrase(h) for h in (headings or [])]
+    # Closed compounds: a query word like "statusline" / "subagent" also
+    # matches the open spelling in the index ("Customize your status line").
+    # Only whole consecutive words count ("status" + "line"), so a keyword
+    # never matches by straddling a word boundary by chance ("handle
+    # redirects" does not contain "handler"). Used only for keywords that
+    # match nothing as written.
+    title_words = title_norm.split()
+    desc_words = desc_norm.split()
+    headings_words = [h.split() for h in headings_norm]
 
     total = 0
     matched_keywords = 0
@@ -951,6 +977,16 @@ def score_entry(title: str, description: str, keywords,
 
         if any(kw_norm in h for h in headings_norm):
             kw_score += 1
+
+        if kw_score == 0:
+            if kw_norm == "".join(title_words):
+                kw_score += 10
+            elif _joins_words(kw_norm, title_words):
+                kw_score += 5
+            if _joins_words(kw_norm, desc_words):
+                kw_score += 2
+            if any(_joins_words(kw_norm, h) for h in headings_words):
+                kw_score += 1
 
         if kw_score > 0:
             matched_keywords += 1

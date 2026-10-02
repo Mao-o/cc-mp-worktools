@@ -20,6 +20,23 @@ All notable changes to this plugin will be documented here.
   表に presets に無い名前がある、の両方をテストで落とす
 - SessionStart のリマインダーに、この skill の対象を足した
 
+### 検索: 続け書きの語 (`statusline`) で分かち書きの見出し (`status line`) に当てる (4 script 共通)
+
+`search-index` / `search` の index スコア (`score_entry`) は語の部分一致だけを見ていたため、
+`statusline` / `devcontainer` / `durableobjects` / `generateObject` のような続け書きの語は、
+タイトルが「Customize your status line」「Development containers」「Durable Objects」
+「Generating Structured Data」のページに当たらなかった (Claude Code docs の
+`search-index "statusline"` は 0 件)。
+
+- そのままでは何にも当たらない語に限り、タイトル・説明・見出しの**連続する 2〜3 語を
+  つなげたもの**と完全に一致すれば当たりとする (点数は通常の一致と同じ)
+- 語の途中をまたぐ一致は数えない (`handle redirects` は `handler` に当たらない)。初版は
+  空白を詰めた文字列への部分一致だったが、Next.js の `route handlers` でこの種の偶然一致が
+  候補に混ざったため、語の境界に揃えた
+- 5 corpus 58 クエリで直前の版と比べ、上位 5 件が変わったのは 6 件。うち 5 件は 0 件から
+  目的のページが出るようになったもの、1 件 (Firebase の `remoteconfig`) は API リファレンスの
+  一部に代わって Remote Config のガイドが入ったもの
+
 ## [0.26.0] - 2026-10-03
 
 ### `parse-llms-txt.py` に presets を同梱し、Hono / Agent Skills / Cloudflare 製品別ファイルに対応
