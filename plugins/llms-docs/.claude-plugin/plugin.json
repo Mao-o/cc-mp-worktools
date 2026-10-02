@@ -1,6 +1,6 @@
 {
   "name": "llms-docs",
-  "version": "0.27.0",
+  "version": "0.27.1",
   "description": "Claude/AI SDK/Firebase と、同梱 presets (Next.js / Cloudflare / Vercel / Bun ほか) の公式ドキュメントの段階的調査スキル (llms.txt progressive loader)",
   "author": { "name": "Mao" },
   "homepage": "https://github.com/Mao-o/cc-mp-worktools",

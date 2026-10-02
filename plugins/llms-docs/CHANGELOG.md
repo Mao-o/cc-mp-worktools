@@ -2,6 +2,23 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.27.1] - 2026-10-03
+
+### Cloudflare presets の定型行の除去と、1 ページの取りこぼしを修正
+
+0.26.0 で分割数を確かめていたのは Workers / D1 だけだった。15 製品すべてを測り直して見つかった
+問題を直す (`docs/generic-llms-txt-source.md` の「0.27.1: Cloudflare 製品別 15 件」)。
+
+- **定型行** — 全製品の全ページに残っていた `Was this helpful?` / `YesNo`、API リファレンスの
+  `[Skip to content](#_top)`、Browser Rendering の旧テンプレートの `[ Edit page ]` / `Copy page` /
+  `Explain Code` / `Terminal window` を `drop_lines` に足した。15 製品とも本文に残る定型行は 0
+- **インデントの無い値の続き** — `description:` の値をインデントせず次の行に続ける frontmatter
+  (YAML としては不正) を読めず、Browser Rendering の `Quick Actions timeouts` が前のページに
+  埋もれていた。値の直後の行が Markdown らしくなければ値の続きとして読む (47 / 47 ページ)
+- Browser Rendering は旧テンプレートでページ URL のリンクが無く、URL なしになることを README に明記
+- テスト: SKILL.md の description + when_to_use が一覧の上限 1,536 字に近づいたら落とす
+  (残り 50 字を切ったら)。presets を足して Triggers が黙って切れるのを防ぐ
+
 ## [0.27.0] - 2026-10-03
 
 ### skill `researching-library-docs` を追加 (汎用 loader の skill)

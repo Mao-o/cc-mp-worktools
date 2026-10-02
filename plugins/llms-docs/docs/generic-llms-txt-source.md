@@ -139,6 +139,28 @@ Drizzle の区切り行は共有の追跡でも 496 / 496 になる (インデ�
 `h1_needs_url` は、URL を持たない H1 を前のページの中の H1 見出しとして残す (行は失わない。
 Bun / MCP / Ollama で本文の行数 + ページごとの H1 1 行がファイルの行数に一致することを確かめた)。
 
+### 2026-10-03 実測 (0.27.1): Cloudflare 製品別 15 件
+
+0.26.0 では Workers / D1 しか分割数を確かめていなかったため、presets の 15 製品すべてを測った。
+
+| 製品 | ページ | URL あり | `title:` 行 | 差の理由 |
+|---|---|---|---|---|
+| workers | 455 | 455 | 455 | |
+| d1 / durable-objects / queues / workers-ai / vectorize / hyperdrive / workflows / ai-gateway | 51 / 52 / 38 / 129 / 21 / 57 / 33 / 97 | 各 1 少ない | ページ数と同じ | URL の無い 1 件は各製品の API リファレンス (別テンプレート) |
+| r2 / pages / agents / containers | 84 / 118 / 110 / 39 | 全件 | ページ数と同じ | |
+| kv | 30 | 29 | 31 | API リファレンス本文の `title: string` (プロパティの説明) を数えている |
+| browser-rendering | 47 | 0 | 48 | コード例の中の `title: "My First Post"`。旧テンプレートで `[View as Markdown]` が無く、URL は取れない |
+
+あわせて分かったこと:
+
+- **全製品の全ページ**に `Was this helpful?` と `YesNo` の行がある (0.26.0 の `drop_lines` は除いていなかった)。
+  API リファレンスのページは `[Skip to content](#_top)` と別の anchor を使う。Browser Rendering の旧テンプレートは
+  さらに `[ Edit page ](…)` / `Copy page` / コードブロック外の `Explain Code` / `Terminal window` を持つ。
+  0.27.1 の `drop_lines` でこれらを除き、15 製品とも本文に残る定型行は 0
+- Browser Rendering の `Quick Actions timeouts` は、`description:` の値をインデントせず次の行に続けて
+  いる (YAML としては不正) ため、frontmatter と認識できずページが前のページに埋もれていた。キーの
+  値の直後の行が Markdown らしくない (`#` `>` `[` `|` などで始まらない) ときは値の続きとして読む
+
 ## 3. 需要の根拠
 
 `llms.txt` を公開していて、かつこの plugin が使われる環境で実際に依存しているもの:

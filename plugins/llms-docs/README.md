@@ -132,7 +132,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py search "<query>" --source <n
 python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading_path>" --source <name>
 ```
 
-### 同梱 presets (0.26.0)
+### 同梱 presets
 
 次のサイトは `scripts/presets.json` に profile が同梱されており、設定なしで `--source <name>` で読める。
 各サイトのページ数と確かめ方は `docs/generic-llms-txt-source.md` の「2026-10-03 実測」にある。
@@ -151,7 +151,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `codex` | OpenAI Codex | なし |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
-| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`) |
+| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、なし |
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 

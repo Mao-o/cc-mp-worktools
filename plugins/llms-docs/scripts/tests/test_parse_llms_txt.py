@@ -406,6 +406,28 @@ class SplitTest(unittest.TestCase):
         self.assertEqual([d["title"] for d in docs], ["A", "B"])
         self.assertIn("Body A.\n", docs[0]["body_lines"])
 
+    def test_unquoted_value_continued_on_an_unindented_line(self):
+        # Cloudflare (Browser Rendering) runs a description on to the next line
+        text = (
+            "---\ntitle: Quick Actions timeouts\ndescription: Browser Rendering uses several timers\n"
+            "If any of these timers exceed their limit, the request fails.\nimage: https://example.com/a.png\n---\n\n"
+            "# Quick Actions timeouts\n\nBody.\n"
+        )
+        docs = generic.split_documents(_lines(text), _profile(split="frontmatter"))
+        self.assertEqual([d["title"] for d in docs], ["Quick Actions timeouts"])
+        self.assertEqual(docs[0]["description"],
+                         "Browser Rendering uses several timers If any of these timers exceed their limit, the request fails.")
+
+    def test_markdown_after_a_rule_is_still_not_frontmatter(self):
+        # a rule, a key-shaped line, then Markdown: the continuation rule must
+        # not swallow a heading or a list into a "frontmatter" block
+        # ("- item" is not here: a YAML list line has always been accepted, for "tags:")
+        for tail in ("# Heading\n", "> quote\n", "[link](https://example.com)\n", "| a | b |\n"):
+            with self.subTest(tail=tail):
+                text = "---\ntitle: Page\n---\n\nBody.\n\n---\ntitle: looks like a key\n" + tail + "---\n"
+                docs = generic.split_documents(_lines(text), _profile(split="frontmatter"))
+                self.assertEqual([d["title"] for d in docs], ["Page"])
+
     def test_closes_double_quote_respects_escapes(self):
         self.assertTrue(generic._closes_double_quote('end"'))
         self.assertFalse(generic._closes_double_quote('end\\"'))
@@ -561,6 +583,18 @@ class PresetsTest(unittest.TestCase):
         self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
         self.assertEqual(named - presets, set(), "skill names a source that is not a preset")
 
+    def test_skill_description_stays_under_the_listing_cap(self):
+        # Claude Code truncates description + when_to_use at 1,536 characters
+        # in the skill listing, silently cutting the Triggers at the end
+        skill = Path(generic.PRESETS_FILE).parents[1] / "skills" / "researching-library-docs" / "SKILL.md"
+        front = skill.read_text(encoding="utf-8").split("\n---\n", 1)[0]
+        desc, rest = front.split("description: |\n", 1)[1].split("\nwhen_to_use: |\n", 1)
+        when = rest.split("\nargument-hint:", 1)[0]
+
+        def flat(block):
+            return " ".join(line.strip() for line in block.splitlines())
+        self.assertLess(len(flat(desc)) + len(flat(when)), 1536 - 50, "leave room for one more preset")
+
     def test_preset_shapes_split_their_fixtures(self):
         # one fixture per shape, read through the shipped preset
         presets = generic._read_sources_file(generic.PRESETS_FILE)
@@ -578,6 +612,16 @@ class PresetsTest(unittest.TestCase):
             with self.subTest(name):
                 docs = generic.split_documents(_lines(text), presets[name])
                 self.assertEqual([d["title"] for d in docs], titles)
+        old_template = (
+            "---\ntitle: Old\n---\n\n[Skip to content](#%5Ftop) \n\nWas this helpful?\n\nYesNo\n\n"
+            "[ Edit page ](https://github.com/example/edit/x.mdx) [ Report issue ](https://example.com)\n\nCopy page\n\n"
+            "# Old\n\nBody text.\n\n```sh\nCopy page\n```\n"
+        )
+        body = "".join(generic.split_documents(_lines(old_template), presets["cloudflare-browser-rendering"])[0]["body_lines"])
+        for noise in ("Skip to content", "Was this helpful", "YesNo", "Edit page"):
+            self.assertNotIn(noise, body)
+        self.assertIn("```sh\nCopy page\n```", body)  # inside a fence: content
+        self.assertEqual(body.count("Copy page"), 1)
         cf = generic.split_documents(_lines(CLOUDFLARE_LIKE), presets["cloudflare-workers"])
         self.assertEqual(cf[0]["url"], "https://example.com/product/index.md")
         self.assertFalse(any(re.match(r"^Last updated", line) for line in cf[0]["body_lines"]))
