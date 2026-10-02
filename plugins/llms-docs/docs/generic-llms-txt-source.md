@@ -121,6 +121,24 @@ Drizzle の区切り行は共有の追跡でも 496 / 496 になる (インデ�
   ページ分割が変わらないのは、各ページ末尾の `` ```json `` のブロックで状態が戻るためで、見本が
   ページ最後のコードブロックになると、frontmatter / H1 分割では次のページの区切りを見失う
 
+### 2026-10-03 実測 (0.27.0 で足した 6 サイト)
+
+過去の作業で参照していたサービスのうち、`llms-full.txt` を公開しているものを足した
+(`docs.aws.amazon.com/llms-full.txt` は各サービスの案内ページへのリンク一覧で、本文が無いため
+入れていない)。0.26.1 の `FenceTracker` で数えている。
+
+| サイト | 区切り | ページ URL | 分割したページ数 | 独立に数えた値 |
+|---|---|---|---|---|
+| Bun | H1 の直後に `Source: <url>` 行 (Mintlify)。ページ本文にも H1 がある | `Source:` 行 | 319 (`h1_needs_url` で本文の H1 4 つを前のページに残す) | H1 の次の行が `Source:` の数 319 |
+| MCP (`modelcontextprotocol.io`) | 同上 | 同上 | 152 (同じく 4 つ) | 同上 152 |
+| Ollama (`docs.ollama.com`) | 同上 | 同上 | 69 | 同上 69 |
+| Vercel (`/docs/llms-full.txt`, 10MB) | frontmatter を `-` 80 個の行で囲む。`description` が複数行の二重引用符の値になるページが 3 つ | frontmatter の `source:` | 1529 | `source:` 行 1529 (= 80 個の `-` の行 3058 の半分) |
+| Render (`/docs/llms-full.txt`) | H1 (ファイル冒頭に「Each h1 designates a new page」とある) | なし | 125 | CommonMark どおりに数えたコードブロック外の H1 125。0.26.0 の `FenceTracker` では 110 (言語名付きの行 521 個で開閉が反転していた) |
+| OpenAI Codex (`developers.openai.com/codex`) | H1。カテゴリ名の H1 の直後が `---` だけ | なし | 178 (`skip_empty` でカテゴリ 9 つを除く) | コードブロック外の H1 187 − カテゴリ 9 |
+
+`h1_needs_url` は、URL を持たない H1 を前のページの中の H1 見出しとして残す (行は失わない。
+Bun / MCP / Ollama で本文の行数 + ページごとの H1 1 行がファイルの行数に一致することを確かめた)。
+
 ## 3. 需要の根拠
 
 `llms.txt` を公開していて、かつこの plugin が使われる環境で実際に依存しているもの:

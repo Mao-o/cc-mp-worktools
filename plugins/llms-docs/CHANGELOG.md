@@ -20,6 +20,19 @@ All notable changes to this plugin will be documented here.
   表に presets に無い名前がある、の両方をテストで落とす
 - SessionStart のリマインダーに、この skill の対象を足した
 
+### presets に Bun / Vercel / Render / MCP / OpenAI Codex / Ollama を追加
+
+`researching-library-docs` の対応表・description にも載せた。分割のために profile キーを足した:
+
+- **`h1_needs_url`** (`split: h1`) — `page_url` の URL が無い H1 をページの区切りにせず、前の
+  ページの H1 見出しとして残す。Mintlify 形式の Bun / MCP はページ本文にも H1 がある
+- **`frontmatter_delimiter`** (`split: frontmatter`) — frontmatter を囲む行。Vercel は `-` 80 個
+- **frontmatter の複数行の値** — 二重引用符の値が行をまたぐ場合を読む (Vercel の 3 ページ)。
+  引用符を閉じ忘れた値でも、区切り行で block を閉じてページを失わない
+- **`skip_empty`** — 空行と水平線だけの本文も空とみなす (Codex のカテゴリ見出し)
+- 実測: Bun 319 / MCP 152 / Ollama 69 / Vercel 1529 / Render 125 / Codex 178 ページが独立に数えた
+  値と一致 (`docs/generic-llms-txt-source.md`)。既存の presets の分割数は変わらない
+
 ### 検索: 続け書きの語 (`statusline`) で分かち書きの見出し (`status line`) に当てる (4 script 共通)
 
 `search-index` / `search` の index スコア (`score_entry`) は語の部分一致だけを見ていたため、
