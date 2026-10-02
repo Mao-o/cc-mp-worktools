@@ -198,13 +198,17 @@ def _validate_profile(path: str, name: str, raw) -> dict:
     return profile
 
 
-def _sources_file_is_explicit(path: str) -> bool:
-    """True when *path* came from ``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``
-    rather than the config-dir default."""
-    return bool(os.environ.get(SOURCES_ENV)) or path != default_sources_file()
+def resolve_sources_file(args) -> None:
+    """Fill ``args.sources_file`` (``None`` when ``--sources-file`` was not
+    given) and set ``args.sources_file_explicit``: true when the file came
+    from ``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``, even if the value
+    equals the config-dir default."""
+    args.sources_file_explicit = args.sources_file is not None or bool(os.environ.get(SOURCES_ENV))
+    if args.sources_file is None:
+        args.sources_file = default_sources_file()
 
 
-def load_sources(path: str) -> dict:
+def load_sources(path: str, *, explicit: bool) -> dict:
     """Bundled presets overlaid by the user's *path* (a user profile replaces
     the preset of the same name). A missing *path* is fine when it is the
     config-dir default — the presets alone are then available — but an
@@ -212,7 +216,7 @@ def load_sources(path: str) -> dict:
     sources = _read_sources_file(PRESETS_FILE)
     if os.path.exists(path):
         sources.update(_read_sources_file(path))
-    elif _sources_file_is_explicit(path):
+    elif explicit:
         die(f"no sources file at {path} (given by --sources-file or ${SOURCES_ENV}; {README_HINT})")
     return sources
 
@@ -233,7 +237,7 @@ def _read_sources_file(path: str) -> dict:
 
 
 def _get_profile(args) -> dict:
-    sources = load_sources(args.sources_file)
+    sources = load_sources(args.sources_file, explicit=args.sources_file_explicit)
     if args.source not in sources:
         known = ", ".join(sorted(sources)) or "(none)"
         die(f"unknown --source {args.source!r}. Configured: {known}")
@@ -549,11 +553,13 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
 
 
 def _source_hint_args(args) -> tuple:
-    """``--source`` is always required here, so it is always echoed; a
-    non-default ``--sources-file`` is echoed too (else the hint would look
-    the source up in a different file)."""
+    """``--source`` is always required here, so it is always echoed. An
+    explicit sources file (``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``)
+    is echoed as ``--sources-file`` too: the hint may run in a shell without
+    that env var, where the same name could resolve to a bundled preset —
+    another corpus — instead of failing."""
     out = ["--source", shlex.quote(args.source)]
-    if args.sources_file != default_sources_file():
+    if args.sources_file_explicit:
         out += ["--sources-file", shlex.quote(args.sources_file)]
     return tuple(out)
 
@@ -605,7 +611,7 @@ def _url_line(doc: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def cmd_sources(args):
-    sources = load_sources(args.sources_file)
+    sources = load_sources(args.sources_file, explicit=args.sources_file_explicit)
     user_state = "" if os.path.exists(args.sources_file) else " — not present, presets only"
     print(f"Configured sources (presets: {PRESETS_FILE}; user file: {args.sources_file}{user_state})")
     print("=" * 60)
@@ -783,7 +789,7 @@ def cmd_search(args):
 
 def _add_common(parser, *, source: bool = True) -> None:
     parser.add_argument(
-        "--sources-file", default=default_sources_file(),
+        "--sources-file", default=None,
         help=f"User profiles file, overlaid on the bundled presets "
              f"(default: ${SOURCES_ENV} or ~/.config/llms-docs/sources.json; may be absent)",
     )
@@ -852,6 +858,7 @@ def main():
     p.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
+    resolve_sources_file(args)
     args.func(args)
 
 

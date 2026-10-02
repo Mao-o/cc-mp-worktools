@@ -369,6 +369,32 @@ class PresetsTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("/nonexistent/env.json", err)
 
+    def test_explicit_file_at_the_default_path_must_exist(self):
+        default = str(self.config / "llms-docs" / "sources.json")  # absent
+        code, _out, err = _loader.run_cli(generic, ["parse-llms-txt.py", "sources", "--sources-file", default])
+        self.assertEqual(code, 1)
+        self.assertIn(default, err)
+
+    def test_hint_keeps_a_sources_file_given_by_env(self):
+        # the env var names the file; the hint must carry it as --sources-file,
+        # since a later shell without the env var would resolve "zod" to the preset
+        user = self.config / "user.json"
+        user.write_text(json.dumps({"sources": {"zod": {"url": "https://mirror.example/llms-full.txt", "split": "h1"}}}),
+                        encoding="utf-8")
+        corpus = self.config / "zod.txt"
+        corpus.write_text(H1_NO_URL, encoding="utf-8")
+        with mock.patch.dict(os.environ, {generic.SOURCES_ENV: str(user)}):
+            code, out, err = _loader.run_cli(
+                generic, ["parse-llms-txt.py", "sections", "schemas", "--source", "zod", "--file", str(corpus)])
+        self.assertEqual(code, 0, err)
+        hint = out.strip().splitlines()[-1]
+        self.assertIn(f"--sources-file {user}", hint)
+        # without an explicit file the hint stays short
+        code, out, _ = _loader.run_cli(
+            generic, ["parse-llms-txt.py", "sections", "schemas", "--source", "zod", "--file", str(corpus)])
+        self.assertEqual(code, 0)
+        self.assertNotIn("--sources-file", out.strip().splitlines()[-1])
+
     def test_every_preset_is_valid_and_https(self):
         with open(generic.PRESETS_FILE, encoding="utf-8") as f:
             raw = json.load(f)["sources"]

@@ -131,7 +131,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 ### 同梱 presets (0.26.0)
 
 次のサイトは `scripts/presets.json` に profile が同梱されており、設定なしで `--source <name>` で読める。
-ページ数は 2026-10-03 の実測 (詳細は `docs/generic-llms-txt-source.md`)。
+各サイトのページ数と確かめ方は `docs/generic-llms-txt-source.md` の「2026-10-03 実測」にある。
 
 | source 名 | サイト | ページ URL |
 |---|---|---|

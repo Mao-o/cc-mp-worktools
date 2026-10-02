@@ -14,6 +14,10 @@ All notable changes to this plugin will be documented here.
   ものかを表示する
 - **`sources.json` が無いときの扱い** — 既定の場所に無ければ presets だけで動く。
   `--sources-file` / `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときは従来どおりエラー
+  (既定と同じパスを明示した場合も含む)
+- **`Next:` ヒント** — `$LLMS_DOCS_SOURCES_FILE` で指定したファイルも `--sources-file` として
+  引き継ぐ。環境変数の無いシェルでヒントを実行すると、同名の preset (別の corpus) を黙って
+  読んでしまうため
 - **`page_url: "link:<リンク文字列>"`** — 本文の先頭 20 行にある Markdown リンク
   `[<リンク文字列>](<url>)` の URL をページ URL にする (Cloudflare の `[View as Markdown](…)`)
 - **`drop_lines`** — 本文から除く行の正規表現。全ページに付く定型行 (Cloudflare の
