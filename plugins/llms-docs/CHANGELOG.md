@@ -40,6 +40,8 @@ All notable changes to this plugin will be documented here.
 - 並び順を「changelog 類は最後 → 全キーワードが揃うページ → 部分一致のページ → 本文ヒットの
   無い (index だけに当たった) ページ」とし、各組の中は従来どおり本文ヒット数 → index score →
   doc_idx で並べる
+- Claude Code docs の `search-content` (ページを本文ヒット数で並べて `--limit` で切る唯一の script) も
+  同じ順に揃えた
 - 実 corpus での比較: Claude Code docs 8 / AI SDK 6 の計 14 クエリのうち 7 件で上位 5 件の順位が
   変わった。`argument-hint frontmatter` で Skills のページが 1 位に、`stopWhen stepCountIs` で
   Loop Control が 2 位に上がるなど、いずれも全キーワードが揃うページが上がる変化だった

@@ -1264,7 +1264,7 @@ def search_content_in_body(body_lines, query: str, *,
     }
 
 
-def _partial_rank(hits: dict) -> int:
+def match_rank(hits: dict) -> int:
     """0 for a strict-AND (or single-keyword) hit set, 1 for ``partial``,
     2 for no body hits (an index-only ``search`` row stays below both)."""
     if not hits.get("total_matches"):
@@ -1307,7 +1307,7 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
         )
         if hits["total_matches"] > 0:
             results.append((idx, hits))
-    results.sort(key=lambda t: (_partial_rank(t[1]), -t[1]["total_matches"], t[0]))
+    results.sort(key=lambda t: (match_rank(t[1]), -t[1]["total_matches"], t[0]))
     return results[:limit]
 
 
@@ -1452,7 +1452,7 @@ def search_rank_key(result: dict, *, include_changelog_priority: bool = False) -
     )
     return (
         bucket,
-        _partial_rank(result["body_hits"]),
+        match_rank(result["body_hits"]),
         -result["body_hits"]["total_matches"],
         -(result.get("index_score") or 0),
         result["doc_idx"],

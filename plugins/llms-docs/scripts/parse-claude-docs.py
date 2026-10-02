@@ -42,6 +42,7 @@ from _common import (
     full_corpus_body_search,
     is_low_priority,
     load_lines,
+    match_rank,
     next_hint,
     normalize_doc_url,
     parse_llms_index,
@@ -845,6 +846,7 @@ def cmd_search_content(args):
     collected.sort(key=lambda t: (
         (0 if args.include_changelog_priority else
          1 if _is_low_priority(t[1]["title"]) else 0),
+        match_rank(t[2]),
         -t[2]["total_matches"],
         t[0],
     ))
