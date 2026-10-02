@@ -2,6 +2,28 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.26.0] - 2026-10-03
+
+### `parse-llms-txt.py` に presets を同梱し、Hono / Agent Skills / Cloudflare 製品別ファイルに対応
+
+- **同梱 presets** — `scripts/presets.json` に実測済みサイトの profile を入れ、`sources.json` を
+  書かなくても `--source <name>` で読めるようにした。対象は `nextjs` / `vite` / `vitest` /
+  `drizzle` / `zod` / `hono` / `agentskills` と、Cloudflare の製品別 `llms-full.txt` 15 件
+  (`cloudflare-workers` / `cloudflare-d1` / `cloudflare-r2` ほか)。利用者の `sources.json` は
+  presets に重ねて読み、同名の preset を置き換える。`sources` は各 profile が preset か利用者の
+  ものかを表示する
+- **`sources.json` が無いときの扱い** — 既定の場所に無ければ presets だけで動く。
+  `--sources-file` / `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときは従来どおりエラー
+- **`page_url: "link:<リンク文字列>"`** — 本文の先頭 20 行にある Markdown リンク
+  `[<リンク文字列>](<url>)` の URL をページ URL にする (Cloudflare の `[View as Markdown](…)`)
+- **`drop_lines`** — 本文から除く行の正規表現。全ページに付く定型行 (Cloudflare の
+  「Skip to content」・documentation index の案内・「Last updated」行) が検索に当たらない
+  ようにする。コードブロック内の行は除かず、ページ URL は除く前に読む
+- **`skip_empty`** — 本文が空のページを捨てる (Hono 先頭の見出しだけの行)
+- **実測** — Hono 87 / Agent Skills 9 / Cloudflare D1 51 / Workers 455 ページが独立に数えた値と
+  一致し、既存 5 サイトの分割数は変わらない (`docs/generic-llms-txt-source.md` の「2026-10-03 実測」)
+- 既存の 3 script は変更していない
+
 ## [0.25.0] - 2026-09-26
 
 ### 任意サイトの `llms-full.txt` を profile で読む `scripts/parse-llms-txt.py` を追加

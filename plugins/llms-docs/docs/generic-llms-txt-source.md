@@ -7,6 +7,10 @@
 > README の「任意の llms-full.txt を読む」)。2 節の表のうち未計測だった Next.js / Vite /
 > Vitest を実測し、Drizzle の区切り方の誤りを直した (下の「2026-09-26 実測」)。Phase 2
 > (汎用 skill) は未着手。
+>
+> **2026-10-03 追記 (0.26.0)**: 実測済みのサイトを `scripts/presets.json` に同梱し、設定なしで
+> 読めるようにした。あわせて Hono / Agent Skills / Cloudflare 製品別ファイルを実測し、そのための
+> profile キー (`page_url: "link:…"` / `drop_lines` / `skip_empty`) を足した (下の「2026-10-03 実測」)。
 
 ## 1. 現状の共通化率 (実測)
 
@@ -64,6 +68,26 @@ Drizzle は MDX を多用し、コードブロックの記号行が約 13,600 �
 index↔full の join 率が低いと失敗として扱うため、URL 無しの corpus は profile 追加だけでは
 通らず「join しないモード」が必要になる。`[URL#anchor]` 出力や `--page-ref <slug>` も
 同時に成立しなくなる。
+
+### 2026-10-03 実測 (0.26.0 の同梱 presets)
+
+同梱した presets を、取得した `llms-full.txt` に `--file` で流して確かめた。
+
+| サイト | 区切り | ページ URL | 分割したページ数 | 独立に数えた値 |
+|---|---|---|---|---|
+| Next.js / Vite / Vitest / Drizzle / Zod | 2026-09-26 と同じ | 同じ | 458 / 42 / 215 / 496 / 16 | 2026-09-26 の値と一致 (サイト側の変化なし) |
+| Hono | H1。先頭に `<SYSTEM>` 行と、本文の無い `# Start of Hono documentation` がある | なし | 87 (`skip_empty` で見出しだけの行を除く) | `llms.txt` の 90 項目から、ページでないリンク 3 (Full Docs / Tiny Docs / Examples) を除いた数 |
+| Agent Skills (`agentskills.io`) | H1 の直後に `Source: <url>` 行 | `Source:` 行 | 9 | `Source:` 行 9 (H1 は 21 あるが、残りはコードブロック内の `SKILL.md` の見本) |
+| Cloudflare D1 (`/d1/llms-full.txt`) | frontmatter (`title:` / `description:` / `image:`) | 本文の `[View as Markdown](…/index.md)` | 51 (URL あり 50) | `title:` 行 51。URL の無い 1 件は別テンプレートの API リファレンス |
+| Cloudflare Workers (`/workers/llms-full.txt`, 5.1MB) | 同上 | 同上 | 455 (URL あり 455) | `title:` 行 455 |
+
+Cloudflare の製品別ファイルは、全ページに `[Skip to content](#main-content)`、
+`> Documentation Index` で始まる 3 行の blockquote、`Last updated …|Copy as Markdown|…` の行が
+付く。このままでは「documentation index」などの語で全ページが検索に当たるため、profile の
+`drop_lines` で除く。URL はその `Last updated` 行にあるので、除く前に読む。presets に入れた
+15 製品はいずれも `/<製品>/llms-full.txt` が HTTP 200 を返すことを確かめた (`zero-trust` は 404 のため入れていない)。
+
+Tailwind CSS / Playwright / Biome は、2026-10-03 時点でも `llms.txt` / `llms-full.txt` が 404 だった。
 
 ## 3. 需要の根拠
 
