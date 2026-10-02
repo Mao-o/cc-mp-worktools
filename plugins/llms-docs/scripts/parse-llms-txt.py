@@ -378,6 +378,8 @@ def _merge_urlless_h1(docs: list[dict]) -> list[dict]:
 _FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$")
 _FM_LIST_RE = re.compile(r"^\s*- ")
 _FM_CONTINUATION_RE = re.compile(r"^\s+\S")
+# a line that starts like Markdown, never the rest of a frontmatter value
+_FM_PROSE_START_RE = re.compile(r"^(#|[-*+>|`<\[!]|\d+\. )")
 _FM_LOOKAHEAD = 30
 
 
@@ -395,12 +397,16 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
     A double-quoted value may span lines, as YAML allows (Vercel writes long
     ``description:`` values that way); the lines up to its closing quote
     belong to the value, whatever they look like, except the closing
-    delimiter itself, which always ends the block.
+    delimiter itself, which always ends the block. An unquoted value may
+    also run on to the next lines without indentation (invalid YAML, but
+    Cloudflare writes some descriptions so); such a line is taken as part
+    of the value unless it looks like Markdown (``_FM_PROSE_START_RE``).
     """
     if lines[pos].rstrip("\n\r") != delimiter:
         return None
     fields: dict = {}
     open_key = None  # key whose double-quoted value is still open
+    plain_key = None  # key whose unquoted value the next line may continue
     for j in range(pos + 1, min(pos + _FM_LOOKAHEAD, len(lines))):
         line = lines[j].rstrip("\n\r")
         if open_key is not None and line == delimiter:
@@ -415,17 +421,27 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
             continue
         if line == delimiter:
             return (fields, j + 1) if required_key in fields else None
-        if not line.strip() or _FM_LIST_RE.match(line) or _FM_CONTINUATION_RE.match(line):
+        if not line.strip():
+            plain_key = None
+            continue
+        if _FM_LIST_RE.match(line) or _FM_CONTINUATION_RE.match(line):
             continue
         m = _FM_KEY_RE.match(line)
         if not m:
+            if plain_key is not None and not _FM_PROSE_START_RE.match(line):
+                # an unquoted value carried on to an unindented line
+                # (Cloudflare writes long descriptions this way)
+                fields[plain_key] += " " + line.strip()
+                continue
             return None
         value = m.group(2).strip()
         if value.startswith('"') and not _closes_double_quote(value[1:]):
             open_key = m.group(1)
             fields[open_key] = value
+            plain_key = None
             continue
         fields[m.group(1)] = value.strip("'\"")
+        plain_key = m.group(1) if value and value[0] not in "'\"|>[{" else None
     return None
 
 

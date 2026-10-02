@@ -89,9 +89,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Workers"
     },
@@ -100,9 +104,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare D1"
     },
@@ -111,9 +119,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare R2"
     },
@@ -122,9 +134,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Workers KV"
     },
@@ -133,9 +149,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Durable Objects"
     },
@@ -144,9 +164,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Pages"
     },
@@ -155,9 +179,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Queues"
     },
@@ -166,9 +194,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Workers AI"
     },
@@ -177,9 +209,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Vectorize"
     },
@@ -188,9 +224,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Hyperdrive"
     },
@@ -199,9 +239,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Agents"
     },
@@ -210,9 +254,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Workflows"
     },
@@ -221,9 +269,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare AI Gateway"
     },
@@ -232,9 +284,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Browser Rendering"
     },
@@ -243,9 +299,13 @@
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
-        "^\\[Skip to content\\]\\(#main-content\\)$",
+        "^\\[Skip to content\\]\\(#[^)\\s]*\\)\\s*$",
         "^> (Documentation Index|Fetch the complete documentation index at:|Use this file to discover all available pages)",
-        "^Last updated .*\\|Copy as Markdown\\|"
+        "^Last updated .*\\|Copy as Markdown\\|",
+        "^Was this helpful\\?\\s*$",
+        "^YesNo\\s*$",
+        "^\\[ Edit page \\]\\(",
+        "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Containers"
     }
