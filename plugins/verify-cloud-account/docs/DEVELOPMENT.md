@@ -1047,6 +1047,11 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   「固定できません」にする。`shlex.quote` は二重化で、許容形はすでにクォートの要らない
   文字だけ。hook が切替の案内として認める形 (firebase の `REMEDIATION_PATTERNS`) にも
   収まる。照合は `fullmatch` で行う (`$` は末尾の改行の前でも一致するため)
+- **`pin-env` は期待値を verify() と同じ基準で読む** (マージ前レビューの指摘)。gcloud は
+  `DICT_VALUE_CHECK = "truthy"` に合わせ、falsy な項目は無視し、truthy で文字列でない
+  項目や空白だけの項目は不正にする (`gcloud.pin_fields`。構成の照合と `CLOUDSDK_CORE_*`
+  の両方がこれを使う)。片方を黙って落として残りで固定すると、verify() が同じ期待値で
+  deny し続け、固定の手順が通る状態を作れない
 - 実測は `claude -p` だけ。対話セッションで workspace trust が `env` の適用に効く
   条件は確かめていない (docs は trust の後に適用すると書いている)
 - mutation で、identity env をキーに入れること (読む側・書く側・cache の key)、

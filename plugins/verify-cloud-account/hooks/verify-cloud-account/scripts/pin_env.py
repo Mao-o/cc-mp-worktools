@@ -113,11 +113,18 @@ def plan_aws(expected, env=None) -> Plan:
 def plan_gcloud(expected, env=None) -> Plan:
     if expected is None:
         return Plan("gcloud", problem="gcloud の期待値が未設定です (accounts-init で設定)")
-    names = gcloud.configurations_matching(expected, env)
-    if names is None:
+    # 構成の照合と CLOUDSDK_CORE_* の両方を、verify() と同じ基準で読んだ項目から作る
+    # (gcloud.pin_fields)。不正な項目を黙って落として残りだけで固定すると、固定した後も
+    # verify() が同じ期待値で deny し続ける。
+    fields = gcloud.pin_fields(expected)
+    names = gcloud.configurations_matching(expected, env) if fields is not None else None
+    if fields is None or names is None:
         return Plan(
             "gcloud",
-            problem="gcloud の期待値の形が不正です (project の文字列か project / account の dict)",
+            problem=(
+                "gcloud の期待値の形が不正です (project の文字列か、project / account を"
+                "文字列で持つ dict)"
+            ),
         )
     if names:
         value = names[0] if len(names) == 1 else None
@@ -125,15 +132,11 @@ def plan_gcloud(expected, env=None) -> Plan:
         if value is None:
             notes = ("期待値に一致する構成が複数あります。どれにするかをユーザーに確かめてください",)
         return Plan("gcloud", pins=(Pin(GCLOUD_CONFIG_NAME, value, tuple(names)),), notes=notes)
-    if isinstance(expected, str):
-        project, account = expected.strip(), None
-    else:
-        project = expected.get("project") if isinstance(expected.get("project"), str) else None
-        account = expected.get("account") if isinstance(expected.get("account"), str) else None
+    project, account = fields.get("project"), fields.get("account")
     pins = []
-    if project and project.strip():
+    if project:
         pins.append(Pin(GCLOUD_PROJECT, project.strip(), secret=True))
-    if account and account.strip():
+    if account:
         pins.append(Pin(GCLOUD_ACCOUNT, account.strip(), secret=True))
     notes = (
         "期待値に一致する名前付き構成がありません。構成を作れば CLOUDSDK_ACTIVE_CONFIG_NAME で"
@@ -296,7 +299,10 @@ def settings_env(path: Path | None) -> tuple[dict[str, str], str | None]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return {}, "JSON として読めません (手で直してから書き足してください)"
-    env = data.get("env") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        # `[]` などは JSON として読めても、`env` を足せるオブジェクトが無い。
+        return {}, "JSON の最上位がオブジェクトではありません (手で直してから書き足してください)"
+    env = data.get("env")
     if env is None:
         return {}, None
     if not isinstance(env, dict):

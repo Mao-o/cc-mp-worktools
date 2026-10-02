@@ -134,7 +134,11 @@ aws / gcloud / firebase のアカウントを、各 CLI の公式の仕組みで
 
 - **builder が exit 1 で「旧パスに accounts.local.json が存在します」「複数のパス」** →
   `/verify-cloud-account:accounts-migrate` で統合してから再実行する
-- **pin-env の `注意: 書き込み先の JSON として読めません` / `"env" がオブジェクトでは
-  ありません`** → Claude は直さない。ユーザーに手で直してもらってから書き足す
+- **pin-env の `注意: 書き込み先の JSON として読めません` / `JSON の最上位がオブジェクト
+  ではありません` / `"env" がオブジェクトではありません`** → Claude は直さない
+  (ファイルを書き直さない)。ユーザーに手で直してもらってから書き足す
+- **pin-env の `固定できません: gcloud の期待値の形が不正です`** → 期待値の project /
+  account に文字列でない値や空白だけの値がある。`/verify-cloud-account:accounts-show` で
+  確かめ、builder の `set` で直してから再実行する (片方だけで固定しても検証は通らない)
 - **固定したのに deny される** → 固定した値が期待値と違う (別のアカウントの profile /
   構成を選んだ) か、ログインが切れている。show の結果をユーザーに伝える

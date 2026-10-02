@@ -368,6 +368,32 @@ def get_active_account(project_dir: str) -> dict[str, str | None] | None:
     return {"project": project, "account": account}
 
 
+def pin_fields(expected) -> dict[str, str] | None:
+    """固定 (builder の `pin-env`) で照合する project / account。期待値の形が不正なら None。
+
+    verify() と同じ基準で読む (DICT_VALUE_CHECK = "truthy")。dict の falsy な値
+    (None / "" など) は書かれていないものとして扱い、truthy で文字列でない値
+    (例: `{"project": 123}`) は verify() が拒否するので不正にする。空白だけの文字列も、
+    verify() ではどの現在値とも一致しないので不正にする。片方を黙って落として残りだけで
+    照合すると、固定した後も verify() が同じ期待値で deny し続ける (マージ前レビューの
+    指摘)。scalar は project だけで、従来どおり値をそのまま返す (verify() の str 分岐は
+    account を照合しない)。
+    """
+    if isinstance(expected, str):
+        return {"project": expected} if expected.strip() else None
+    if not isinstance(expected, dict):
+        return None
+    fields: dict[str, str] = {}
+    for key in ("project", "account"):
+        value = expected.get(key)
+        if not value:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return None
+        fields[key] = value.strip()
+    return fields or None
+
+
 def configurations_matching(expected, env=None) -> list[str] | None:
     """期待値 (project / account) に一致する名前付き構成の**名前**を返す。
 
@@ -377,17 +403,8 @@ def configurations_matching(expected, env=None) -> list[str] | None:
     問わない)。中身は返さない。期待値の形が不正なら None、設定ディレクトリが無い /
     読めないなら []。
     """
-    if isinstance(expected, str):
-        wanted = {"project": expected} if expected.strip() else {}
-    elif isinstance(expected, dict):
-        wanted = {}
-        for key in ("project", "account"):
-            value = expected.get(key)
-            if isinstance(value, str) and value.strip():
-                wanted[key] = value.strip()
-    else:
-        return None
-    if not wanted:
+    wanted = pin_fields(expected)
+    if wanted is None:
         return None
     e = os.environ if env is None else env
     config_dir = _config_dir(e)

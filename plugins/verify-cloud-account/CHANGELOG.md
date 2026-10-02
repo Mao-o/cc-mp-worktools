@@ -79,6 +79,15 @@
 - pin-env が出す settings.local.json の `env` の断片を JSON として組み立てるようにした。
   値の `"` / 改行 / `\` をそのまま埋め込んでいたので、別のキー (`BASH_ENV` など) を足した
   形や、JSON として読めない形になりえた (普通の値の出力は変わらない)
+- pin-env: 書き込み先の settings.local.json が、JSON としては読めてもオブジェクトでない
+  (`[]` など) とき、`env` の無いオブジェクトと同じ扱いで黙って進んでいた。「JSON の
+  最上位がオブジェクトではありません」の注意を出す (skill はファイルを書き直さず、
+  ユーザーに直してもらう)
+- pin-env: gcloud の期待値に、truthy で文字列でない project / account (例
+  `{"project": 123, "account": "..."}`) や空白だけの値があると、その項目を黙って落とし、
+  残りの項目だけで構成を照合・固定していた。通常の検証は同じ期待値で deny するので、
+  固定しても通らない。不正な期待値として「固定できません」を出す (None / `""` などの
+  falsy な値は、通常の検証と同じく書かれていないものとして扱う)
 
 ### Tests
 
@@ -86,7 +95,7 @@
   `TestIdentityEnvCacheIntegration`)、全 service の宣言 (`TestIdentityEnvContract`)、
   pin-env (`tests/test_pin_env.py`)、skill の付与 (`tests/test_skill_permissions.py`)、
   `firebase use` の値 (`TestFirebaseCommandIsShellSafe`)、案内の `--path` のクォート。
-  1,201 → 1,264 件
+  1,201 → 1,267 件
 
 ## 0.16.1
 

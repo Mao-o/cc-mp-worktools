@@ -21,6 +21,7 @@ import _testutil  # noqa: F401
 
 from scripts import accounts_builder as builder  # noqa: E402
 from scripts import pin_env  # noqa: E402
+from services import gcloud  # noqa: E402
 
 ACCOUNT = "111122223333"
 _GIT_ENV = {
@@ -162,6 +163,43 @@ class TestPlanGcloud(_TmpBase):
         self.assertIn("未設定", pin_env.plan_gcloud(None).problem)
         self.assertIn("形が不正", pin_env.plan_gcloud(123).problem)
         self.assertIn("形が不正", pin_env.plan_gcloud({"region": "x"}).problem)
+
+    def test_bad_field_is_not_dropped_to_pin_with_the_other(self):
+        """truthy で文字列でない値や空白だけの値を、黙って落として残りで固定しない。
+
+        通常の検証 (verify) は同じ期待値を、現在値が残りの項目と一致していても拒否する
+        ので、片方だけで固定しても通らない (マージ前レビューの指摘)。構成が一致する経路と、
+        CLOUDSDK_CORE_* に落ちる経路の両方で見る。
+        """
+        account = "me@example.invalid"
+        bad = (
+            {"project": 123, "account": account},
+            {"project": True, "account": account},
+            {"project": {"id": "p1"}, "account": account},
+            {"project": "   ", "account": account},
+            {"project": "p1", "account": [account]},
+        )
+        with_config = self._env({"me": f"[core]\nproject = p1\naccount = {account}\n"})
+        current = {"project": "p1", "account": account}
+        for expected in bad:
+            with self.subTest(expected=expected):
+                for env in (with_config, {"CLOUDSDK_CONFIG": str(self.tmp / "no-gcloud")}):
+                    plan = pin_env.plan_gcloud(expected, env)
+                    self.assertEqual(plan.pins, ())
+                    self.assertIn("形が不正", plan.problem or "")
+                self.assertIsNotNone(
+                    gcloud._verify_against(expected, {}, lambda key: (current[key], None))
+                )
+
+    def test_falsy_fields_are_ignored_as_verify_does(self):
+        """None / "" / 0 は、verify と同じく書かれていないものとして扱う。"""
+        env = self._env({"me": "[core]\nproject = p1\naccount = me@example.invalid\n"})
+        for falsy in (None, "", 0, []):
+            with self.subTest(project=falsy):
+                plan = pin_env.plan_gcloud({"project": falsy, "account": "me@example.invalid"}, env)
+                self.assertEqual(
+                    plan.pins, (pin_env.Pin("CLOUDSDK_ACTIVE_CONFIG_NAME", "me", ("me",)),)
+                )
 
 
 class TestPlanFirebase(_TmpBase):
@@ -380,6 +418,16 @@ class TestSettingsEnv(_TmpBase):
         self.assertIn("JSON", problem)
         path.write_text(json.dumps({"env": ["x"]}), encoding="utf-8")
         self.assertIn('"env"', pin_env.settings_env(path)[1])
+
+    def test_non_object_top_level_is_reported(self):
+        """`[]` などは JSON として読めても、env を足せるオブジェクトが無い (マージ前レビューの指摘)。"""
+        path = self.tmp / "s.json"
+        for text in ("[]", '"x"', "1", "null", "true", '[{"env": {"AWS_PROFILE": "dev"}}]'):
+            with self.subTest(text=text):
+                path.write_text(text, encoding="utf-8")
+                env, problem = pin_env.settings_env(path)
+                self.assertEqual(env, {})
+                self.assertIn("最上位がオブジェクトではありません", problem or "")
 
 
 class TestRender(unittest.TestCase):
