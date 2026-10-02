@@ -247,5 +247,69 @@ class TestContextInCacheKey(unittest.TestCase):
         )
 
 
+class TestIdentityEnvInCacheKey(unittest.TestCase):
+    """アカウントを決める環境変数 (identity env) も cache キーに含める (v0.17.0)。
+
+    settings の `env` は保存した時点で起動中のセッションに反映される。キーが行頭の
+    inline env だけだと、`AWS_PROFILE` を変えた直後の TTL (30 秒) の間、前の profile
+    での成功 entry を hit して未検証のまま通る。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self._p = mock.patch.dict(os.environ, {"TMPDIR": self.tmp})
+        self._p.start()
+        self.addCleanup(self._p.stop)
+
+    def test_different_identity_env_is_a_different_entry(self):
+        cache.set_success("aws", "/p", "exp", 1.0, identity_env={"AWS_PROFILE": "a"})
+        self.assertFalse(
+            cache.get_success("aws", "/p", "exp", 1.0, identity_env={"AWS_PROFILE": "b"})
+        )
+        self.assertTrue(
+            cache.get_success("aws", "/p", "exp", 1.0, identity_env={"AWS_PROFILE": "a"})
+        )
+
+    def test_pinned_entry_does_not_satisfy_unpinned_lookup(self):
+        cache.set_success("aws", "/p", "exp", 1.0, identity_env={"AWS_PROFILE": "a"})
+        self.assertFalse(cache.get_success("aws", "/p", "exp", 1.0))
+        cache.set_success("aws", "/p", "exp", 1.0)
+        self.assertFalse(
+            cache.get_success("aws", "/p", "exp", 1.0, identity_env={"AWS_PROFILE": "b"})
+        )
+
+    def test_identity_values_are_not_written_to_cache_files(self):
+        secret = "vca-identity-secret-value-0123456789"
+        self.assertTrue(
+            cache.set_success("github", "/p", "exp", 1.0, identity_env={"GH_TOKEN": secret})
+        )
+        base = Path(self.tmp) / "cc-mp-verify-cloud-account"
+        files = [p for p in base.iterdir() if p.is_file()]
+        self.assertTrue(files)
+        for p in files:
+            self.assertNotIn(secret, p.name)
+            self.assertNotIn(secret, p.read_text(encoding="utf-8"))
+
+    def test_identity_env_picks_declared_names_and_prefixes(self):
+        import types
+
+        svc = types.SimpleNamespace(
+            IDENTITY_ENV_VARS=frozenset({"KUBECONFIG"}),
+            IDENTITY_ENV_PREFIXES=("AWS_",),
+        )
+        env = {
+            "KUBECONFIG": "/k",
+            "AWS_PROFILE": "p",
+            "AWS_REGION": "r",
+            "PATH": "/bin",
+            "KUBECONFIG_EXTRA": "x",
+        }
+        self.assertEqual(
+            cache.identity_env(svc, env),
+            {"KUBECONFIG": "/k", "AWS_PROFILE": "p", "AWS_REGION": "r"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

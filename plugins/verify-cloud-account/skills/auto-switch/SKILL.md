@@ -20,17 +20,21 @@ description: |
   "switch gh account automatically"
 allowed-tools:
   - Bash(gh auth status)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" *)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" auto-switch --enable --dry-run)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" auto-switch --disable --dry-run)
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.16.1"
+  version: "0.17.0"
 ---
 
 <!--
 allowed-tools は「確認なしで使える」付与で、制限ではない。マシン全体に効く設定を扱う
-skill なので、確認なしにするのは読み取り (gh auth status) と builder の呼び出しだけに
-絞る。~/.claude/settings.json の編集は通常の権限確認を通す。
+skill なので、確認なしにするのは読み取り (gh auth status) と、builder の読み取り専用の
+呼び出し (show と auto-switch の --dry-run) を引数まで書いた形だけに絞る。書き込む
+--commit、値を表示する --show-values、--path を付けた形、~/.claude/settings.json の
+編集は通常の権限確認を通す。
 -->
 
 # auto-switch
@@ -52,7 +56,9 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
   切り替えない
 - 直前 60 秒以内に別のセッションが同じ host を別のアカウントへ自動切替していたら、
   切り替えずに従来どおり deny する (並行セッションで切替を奪い合わないため)
-- 対応しているのは github だけ
+- 対応しているのは github だけ。aws / gcloud / firebase は各 CLI の公式の仕組みで
+  プロジェクトごとに固定できる (切り替えではなく、そのリポジトリでは最初から正しい
+  アカウントで動く) — `/verify-cloud-account:project-accounts` の手順に従う
 
 ## 守ること
 
@@ -70,7 +76,8 @@ verify-cloud-account の自動切替 (auto-switch) を有効化・無効化す�
 ## 実行フロー
 
 1. **有効化か無効化かを確かめる。** 依頼から読めなければ `AskUserQuestion` で聞く。
-   無効化なら step 6 へ
+   無効化なら step 6 へ。gh 以外 (aws / gcloud / firebase) の自動切替を頼まれたら、
+   その分は `/verify-cloud-account:project-accounts` の手順で進める
 
 2. **前提を確かめる** (どちらも読み取りだけ)。次の 2 つを**別々の Bash 呼び出しで、
    書いてあるとおりに**実行する (`;` / `&&` で連結したり `2>&1` を足したりすると、

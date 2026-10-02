@@ -41,7 +41,8 @@ verify-cloud-account/
 │   ├── accounts-init/SKILL.md
 │   ├── accounts-show/SKILL.md
 │   ├── accounts-migrate/SKILL.md
-│   └── auto-switch/SKILL.md        自動切替の有効化 / 無効化 (v0.16.1)
+│   ├── auto-switch/SKILL.md        自動切替の有効化 / 無効化 (v0.16.1)
+│   └── project-accounts/SKILL.md   aws / gcloud / firebase のプロジェクトごとの固定 (v0.17.0)
 └── hooks/
     ├── hooks.json                  PreToolUse:Bash の単一エントリ
     └── verify-cloud-account/
@@ -61,6 +62,7 @@ verify-cloud-account/
         ├── services/               サービスごとの CLI 呼び出しと照合
         ├── scripts/
         │   ├── accounts_builder.py accounts.local.json 専用 writer (init/show/set/remove/migrate)
+        │   ├── pin_env.py          プロジェクトごとの固定の提案 (builder の pin-env。読み取り専用)
         │   └── templates/          プロジェクト側 signpost のテンプレート
         └── tests/                  unittest (標準ライブラリのみ)
 ```
@@ -306,6 +308,15 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
   インライン env と context を入れないと、`AWS_PROFILE=prod` の成功 entry を
   `AWS_PROFILE=other` の実行が hit して未検証のまま allow される
   (`os.environ` 全体は入れない — `PATH` 等で毎回無効化されて意味を失う)
+- **identity env (v0.17.0)**: hook プロセスの env のうち、CLI がどのアカウントで
+  動くかを決める変数もキーに入れる (`cache.identity_env`。何を入れるかは各 service の
+  `IDENTITY_ENV_VARS` / `IDENTITY_ENV_PREFIXES`)。プロジェクトごとの固定
+  (settings の `env` の `AWS_PROFILE` 等) は保存した時点で起動中のセッションに反映
+  されるので、入れないと値を変えた直後の TTL の間は前の値での成功で通る。同じ
+  リポジトリを固定したセッションと固定していないセッションも entry を共有しない。
+  snapshot は検証に渡すのと同じ env (hook プロセスの env + インライン env) から取り、
+  読む側と書く側で同じものを使う。値は hash の材料にだけ使い、cache ファイルには
+  書かない
 - **成功のみ**: 失敗 (文字列返却) は常に再検証する。切り替え直後に使いたいため
 - **無効化**: TTL 超過 / `accounts.local.json` の mtime 変化 / 破損・欠損 /
   アカウント状態を変えうるコマンドの検出 / epoch 不一致
@@ -490,6 +501,12 @@ opt-in (`VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` → `"$auto_switch"` → 無効) で�
    一致 / 不一致 / CLI 未インストール / timeout / 状態確認コマンドが readonly
 5. `tests/test_budget.py` の service 横断テストが自動で新 service も見るので、
    subprocess の timeout が `budget.call_timeout()` 経由か確認する
+6. `IDENTITY_ENV_VARS` / `IDENTITY_ENV_PREFIXES` に、その CLI のアカウント・認証・
+   設定の場所を決める環境変数を宣言する (`tests/test_services.py` の
+   `TestIdentityEnvContract` が全 service に強制する)。漏れると成功 cache が env の
+   変化を見落とす。CLI にプロジェクトごとの公式の固定方法があれば、自動切替ではなく
+   その方法を README の「プロジェクトごとにアカウントを固定する」節と `pin-env` で
+   案内する (D31)
 
 動的ディスカバリではなく**明示 import** にしているのは、IDE 補完・型チェッカが
 効き、import エラーが沈黙せず surface し、`ALL` への登録漏れがレビューで見えるため。
@@ -973,9 +990,124 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   置換と引用符を含むが一致した)。Claude が Skill ツールで読み込んだ場合は、付与の書き方に
   関係なく (Bash を丸ごと許可しても) 付与が効かず、通常の権限確認になった。どちらも安全側。
   なお sensitive-files-guardrail のような hook が `ask` を返すと、付与より hook が優先される
-  (default モードでは builder の呼び出しに確認が出る)
+  (default モードでは builder の呼び出しに確認が出る)。0.17.0 で、builder の付与は
+  読み取り専用の形を引数まで書いた完全一致に絞った (D32)
 - 手順のコマンドは 1 つずつ、書いたとおりに実行させる。`;` / `&&` での連結や `2>&1` を
   足すと付与の形から外れる (nested の実測で、連結して実行する例があった)
+
+### 0.17.0 (プロジェクトごとのアカウント固定)
+
+**D31: CLI に公式の「プロジェクトごとの固定」があるなら、VCA は切り替えずにそれを案内する**
+
+利用者の要望は「プロジェクト (ディレクトリ) ごとに、使うアカウントが自動で正しく
+なること」。0.16.0 の自動切替 (D29) はマシン全体の状態を切り替えるので、並行する
+別リポジトリの作業と競合する。調べると、gh 以外は CLI 自身か Claude Code に公式の
+仕組みがあった:
+
+- aws / gcloud / kubectl: アカウントを決める公式の環境変数 (`AWS_PROFILE` /
+  `CLOUDSDK_ACTIVE_CONFIG_NAME` 等 / `KUBECONFIG`) を、Claude Code の
+  `.claude/settings.local.json` の `env` に書く。Claude Code はこのファイルを git
+  リポジトリのルートから読み、worktree からも main checkout のファイルを使う
+  (Claude Code の docs。CLI 2.1.284 の `-p` で、worktree のセッションの Bash と hook の
+  両方にその値が届くことを実測)
+- firebase: `firebase use` / `firebase login:use` が作業ディレクトリごとに記録する
+  (CLI 自身の help に明記。web docs には保存場所の記載なし)
+- gh: プロジェクトごとに安全に分けられる公式の方法が無い (`GH_TOKEN` を設定ファイルに
+  平文で置く以外)。自動切替 (D29) を残す
+
+対応:
+
+- **VCA は aws / gcloud / firebase に自動切替を足さない。** 固定は「そのリポジトリでは
+  最初から正しいアカウントで動く」形なので、切替より安全 (マシン全体を変えない)。
+  VCA の役割は照合と案内に留める
+- **skill (`project-accounts`) と builder の `pin-env` (読み取り専用)** で、期待値から
+  固定に使う値を出す。aws は `profiles_for_account` (profile 名)、gcloud は
+  `configurations_matching` (構成名)、firebase は `.firebaserc` の alias 名。Claude に
+  `~/.aws/config` や gcloud の構成ファイルを直接読ませないため builder が読み、名前だけを
+  出す。settings.local.json は builder が書かない (D2) — 書き込みは skill の手順で、
+  ユーザーの承認を得てから
+- **gcloud は構成名を先に勧める。** `CLOUDSDK_ACTIVE_CONFIG_NAME` は VCA のローカル
+  読取を保つ (`_LOCAL_SAFE_ENV_VARS`) が、`CLOUDSDK_CORE_*` があるとローカル読取を
+  諦めて毎回 `gcloud config get-value` を起動する (15 秒の予算に対して 1 回 1 秒前後)
+- **aws の profile が複数あれば利用者に選ばせる。** 同じアカウントでも role の権限が
+  違いうるので、先頭を選ぶと hook が権限を決めることになる
+- **成功 cache のキーに identity env を入れる** (「短期キャッシュ」節)。settings の
+  `env` は保存した時点で起動中のセッションに反映される (Claude Code の docs と実測) ので、
+  これが無いと固定した値を変えた直後に前の値での成功で通る。固定を勧める以上、
+  同時に直す必要があった
+- 書き込み先を決められない構成 (git の外 / bare / submodule / ルートがホーム / 所有者が
+  違う / Windows) では、Claude Code が起動したディレクトリのファイルを読むなど条件が
+  分かれるので、`pin-env` は推測せず理由を出す
+- **`firebase use <x>` の x は、英数字で始まり英数字と `.` `_` `-` だけからなる名前に限る**
+  (マージ前レビューの指摘)。この行は skill の手順で Claude がそのまま実行する。x は
+  期待値の alias / project ID か、リポジトリの `.firebaserc` の alias (clone しただけの
+  リポジトリでも中身を決められる) から来るので、`;` / `$()` / 空白 / 改行や先頭の `-` が
+  あると、その文字列がコマンドや option として走る。`.firebaserc` の外れた alias は使わず
+  (alias が無いときと同じく project ID を案内する)、期待値の外れた alias / project ID は
+  「固定できません」にする。`shlex.quote` は二重化で、許容形はすでにクォートの要らない
+  文字だけ。hook が切替の案内として認める形 (firebase の `REMEDIATION_PATTERNS`) にも
+  収まる。照合は `fullmatch` で行う (`$` は末尾の改行の前でも一致するため)
+- **`pin-env` は期待値を verify() と同じ基準で読む** (マージ前レビューの指摘)。gcloud は
+  `DICT_VALUE_CHECK = "truthy"` に合わせ、falsy な項目は無視し、truthy で文字列でない
+  項目や空白だけの項目は不正にする (`gcloud.pin_fields`。構成の照合と `CLOUDSDK_CORE_*`
+  の両方がこれを使う)。片方を黙って落として残りで固定すると、verify() が同じ期待値で
+  deny し続け、固定の手順が通る状態を作れない
+- 実測は `claude -p` だけ。対話セッションで workspace trust が `env` の適用に効く
+  条件は確かめていない (docs は trust の後に適用すると書いている)
+- mutation で、identity env をキーに入れること (読む側・書く側・cache の key)、
+  service ごとの宣言 (aws / gcloud / github / kubectl / firebase)、prefix の照合、
+  インライン env を重ねること、`pin-env` の判断 (書き込み先の解決・worktree・ホーム・
+  候補が複数のとき選ばせる・構成の照合・値を隠す・alias を使う・期待値の無い service を
+  出さない) の各条件が新しいテストで守られていることを確かめた
+- cache の修正前後を hook 単体で比べた。同じ cache ディレクトリで「一致の env → 不一致の
+  env」を続けて stdin の hook input に流すと、0.16.1 は不一致を前の成功で通し、0.17.0 は
+  deny した (gcloud の構成名 / `CLOUDSDK_CORE_PROJECT` の両経路)
+- nested (`claude -p` + `--plugin-dir`) で、`.claude/settings.local.json` の `env` に
+  書いた値で照合されることを確かめた。同じ write 形のコマンドが、期待値と違えば deny、
+  一致すれば通る (gcloud の 2 経路。偽の構成ディレクトリを使い、実行はさせていない)。
+  一致で通ることが、settings の env が hook に届いている証拠になる (届いていなければ
+  手元の実際の構成を読んで deny になる)
+- 振り分けも nested で見た。aws / gcloud を固定したいという依頼 (description に無い
+  言い回しを含む) は project-accounts に、gh の自動切替の依頼は auto-switch に回り、
+  gh の deny への対処を聞いただけならどちらも選ばれない。project-accounts を読み込んだ
+  後は、手順どおり最初に `pin-env` を実行した
+- skill の `allowed-tools` (builder の読み取り専用の呼び出しを確認なしにする付与。D32) は、
+  Claude が自分で skill を読み込んだ経路では効かないことがあった。CLI 2.1.284 の `-p` で、
+  同じコマンドが 6 回中 4 回は承認待ちになった (slash で起動したときは効いた)。Claude Code
+  の docs は project skill について「ユーザーが起動しても Claude が起動しても適用する」と
+  書くが、plugin skill の記述は無い。承認待ちになっても手順は成り立つ (Claude は別の経路で
+  値を探さず、承認か `!` 付きでの実行を頼んで止まった)。付与が効く前提の手順にはしない
+
+**D32: skill の `allowed-tools` は、読み取り専用の呼び出しを引数まで書いた完全一致で並べる**
+
+`allowed-tools` は制限ではなく付与で、skill を呼んだターンの間、一致したコマンドを
+権限確認なしで通す。0.16.1 の auto-switch と 0.17.0 の project-accounts は builder を
+末尾の ` *` で付与していたので、期待値を書き換える `set` / `remove` / `auto-switch` の
+`--commit` や、期待値を表示する `--show-values` まで確認なしで通った (マージ前レビューの
+指摘)。accounts-init / accounts-migrate / accounts-show は `Bash` を丸ごと付与していた。
+
+- skill の手順の「書く前に AskUserQuestion で承認を得る」はモデルの振る舞いで、誤った
+  呼び出しやプロンプトインジェクションでは飛ばされうる。書き込みと値の表示の前には、
+  ハーネスの権限確認を残す
+- Claude Code の docs (permissions の Wildcard patterns): `*` の無いルールは 1 つの
+  コマンドに完全一致し、`*` は空白を含む任意の文字列に一致する (末尾の ` *` は引数なし
+  にも一致)。`*` で「この option だけは除く」は書けない。builder の argparse は option の
+  省略形 (`--show` → `--show-values`、`--com` → `--commit`) も受け付けるので、文字列で
+  除外しようとしても抜ける
+- 対応: 各 skill が実行する読み取り専用の形 (show / pin-env と、init・migrate・
+  auto-switch の `--dry-run`) を、引数まで書いた完全一致で並べる。`--commit` /
+  `--show-values` / `--path` / `--value` を付けた形は通常の権限確認を通す。完全一致は
+  別の形 (連結する・`2>&1` を足す・クォートを変える) には一致しないので、外れたときは
+  確認が出る側に倒れる
+- docs は、plugin skill の `allowed-tools` 内の Bash ルールでも `${CLAUDE_PLUGIN_ROOT}` を
+  置換すると書く (skills の Available string substitutions)。本文と同じ文字列で書けば
+  本文のコマンドに一致する
+- default モードでは、AskUserQuestion の承認の後にもう一度権限確認が出ることがある
+  (利用者の設定の許可ルールに一致しなければ)。二重の確認は許容する (書き込みと値の表示は、どちらも利用者が頼んだときだけ起きる)
+- `tests/test_skill_permissions.py` が、skill ごとの付与を期待する集合と照合し、本文の
+  コードブロックのコマンドが「読み取り専用なら付与される・書き込みと値の表示は付与されない」
+  ことを確かめる。照合は docs の規則を広めに見積もった再現 (末尾の ` *` は引数なしにも
+  一致、`Bash` 単独はすべてに一致) で行い、その再現自体も docs の例で確かめる
 
 ## 既知の制限
 

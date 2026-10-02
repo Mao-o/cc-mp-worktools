@@ -15,12 +15,23 @@ description: |
   "show cloud account status", "check accounts config",
   "verify-cloud-account diff", "compare active accounts"
 allowed-tools:
-  - Bash
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show --service github)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show --service firebase)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show --service aws)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show --service gcloud)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/accounts_builder.py" show --service kubectl)
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.3.0"
+  version: "0.17.0"
 ---
+
+<!--
+allowed-tools は「確認なしで使える」付与で、制限ではない。確認なしにするのは
+値を隠した show を引数まで書いた形だけにする。値を表示する --show-values と、
+--path を付けた形は通常の権限確認を通す。
+-->
 
 # accounts-show
 

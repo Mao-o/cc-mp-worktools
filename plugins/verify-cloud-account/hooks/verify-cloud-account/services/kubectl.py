@@ -95,6 +95,11 @@ GLOBAL_FLAGS = frozenset({
 # `--context x` しか見ておらず、値を取る他 option の値に現れた `--context` を
 # 誤採用しうるうえ、どこからも呼ばれていなかった。
 CONTEXT_OPTIONS = {"--context": "context", "--kubeconfig": "kubeconfig"}
+# CLI がどの context で動くかを決める env (成功 cache のキーに含める。
+# services/__init__.py の IDENTITY_ENV_* 契約)。kubeconfig の場所 (`KUBECONFIG`、
+# 未設定なら `~/.kube/config`)。
+IDENTITY_ENV_VARS = frozenset({"KUBECONFIG", "HOME"})
+IDENTITY_ENV_PREFIXES: tuple[str, ...] = ()
 ACCOUNT_KEY = "kubectl"
 
 # deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。

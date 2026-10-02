@@ -282,6 +282,20 @@ _TOKEN_ENV_VARS = (
 _HOST_ENV_VAR = "GH_HOST"
 _CONFIG_DIR_ENV_VAR = "GH_CONFIG_DIR"
 _XDG_CONFIG_HOME_ENV_VAR = "XDG_CONFIG_HOME"
+# CLI がどのアカウントで動くかを決める env (成功 cache のキーに含める。
+# services/__init__.py の IDENTITY_ENV_* 契約)。上の列挙と同じ根拠で、
+# トークン・host・設定ディレクトリを決めるもの。
+IDENTITY_ENV_VARS = frozenset(
+    {
+        *_TOKEN_ENV_VARS,
+        _HOST_ENV_VAR,
+        _CONFIG_DIR_ENV_VAR,
+        _XDG_CONFIG_HOME_ENV_VAR,
+        "HOME",
+        "APPDATA",
+    }
+)
+IDENTITY_ENV_PREFIXES: tuple[str, ...] = ()
 _HOSTS_FILE = "hosts.yml"
 _ACTIVE_USER_KEY = "user"
 
