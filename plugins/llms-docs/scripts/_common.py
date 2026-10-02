@@ -54,15 +54,19 @@ class FenceTracker:
       and a block opened at column 0 but closed by an indented closer stayed
       open and hid the headings after it.
     - A run followed only by ``*/}`` ends a code block written inside an MDX
-      comment (``{/* ... */}``). It closes an open block and never opens
-      one: the comment's opening line (``{/* ```sql``) is not a fence line,
-      so opening on its last line would hide the text that follows.
+      comment (``{/* ... */}``) that opened outside any code block. It
+      closes such a block and never opens one: the comment's opening line
+      (``{/* ```sql``) is not a fence line, so opening on its last line
+      would hide the text that follows. A ``{/*`` inside a code block is
+      content (a page showing how to write a comment), and so is the
+      ```` ``` */} ```` after it: that block closes at a bare closer.
     """
 
     def __init__(self):
         self.in_fence = False
         self._fence_len = 0
         self._fence_char = ""
+        self._in_mdx_comment = False  # a ``{/*`` seen outside a fence, not yet closed
 
     def update(self, line: str) -> bool:
         """Update state for *line* and return True if inside a fence AFTER update."""
@@ -73,16 +77,28 @@ class FenceTracker:
                 after = stripped[run:].strip()
                 mdx_comment_end = after == "*/}"
                 if not self.in_fence:
-                    if not mdx_comment_end:
+                    if mdx_comment_end:
+                        self._in_mdx_comment = False
+                    else:
                         self.in_fence = True
                         self._fence_len = run
                         self._fence_char = ch
                 elif (ch == self._fence_char and run >= self._fence_len
-                        and (not after or mdx_comment_end)):
+                        and (not after or (mdx_comment_end and self._in_mdx_comment))):
                     self.in_fence = False
                     self._fence_len = 0
                     self._fence_char = ""
+                    if mdx_comment_end:
+                        self._in_mdx_comment = False
                 break
+        else:
+            # not a fence line: track an MDX comment opened outside any block
+            if not self.in_fence:
+                start = line.rfind("{/*")
+                if start >= 0 and "*/}" not in line[start:]:
+                    self._in_mdx_comment = True
+                elif "*/}" in line:
+                    self._in_mdx_comment = False
         return self.in_fence
 
 
