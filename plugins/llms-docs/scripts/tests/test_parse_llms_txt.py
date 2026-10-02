@@ -261,6 +261,15 @@ class SplitTest(unittest.TestCase):
         self.assertEqual([d["title"] for d in docs], ["Site", "Schemas", "Errors"])
         self.assertEqual({d["url"] for d in docs}, {""})
 
+    def test_h1_after_a_code_block_in_an_mdx_comment(self):
+        # "``` */}" closes the block opened inside the comment
+        text = (
+            "# Unions\n\n{/* For convenience:\n\n  ```ts\n"
+            "  const either = z.string().or(z.number());\n  ``` */}\n\n# Mini\n\nbody\n"
+        )
+        docs = generic.split_documents(_lines(text), _profile(split="h1"))
+        self.assertEqual([d["title"] for d in docs], ["Unions", "Mini"])
+
     def test_skip_empty_drops_banner_headings(self):
         docs = generic.split_documents(_lines(H1_BANNER), _profile(split="h1", skip_empty=True))
         self.assertEqual([d["title"] for d in docs], ["Site", "Routing"])

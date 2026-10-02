@@ -54,6 +54,20 @@ class SplitDocumentsTest(unittest.TestCase):
         self.assertEqual(len(docs), 1)
         self.assertIn("## After", "".join(docs[0]["body_lines"]))
 
+    def test_unclosed_fence_recovers_before_the_next_frontmatter(self):
+        # ```ts inside the stray block is content, not a closer, so the
+        # block ends at the bare ``` and the next frontmatter still splits
+        lines = [
+            "---\n", "title: A\n", "---\n", "# A\n",
+            "```\n",
+            "```ts\n",
+            "const x = 1;\n",
+            "```\n",
+            "---\n", "title: B\n", "---\n", "# B\n",
+        ]
+        docs = parse_ai_sdk.split_documents(lines)
+        self.assertEqual([d["frontmatter_lines"] for d in docs], [["title: A\n"], ["title: B\n"]])
+
     def test_hr_followed_by_kv_like_prose_is_not_a_boundary(self):
         """A body ``---`` horizontal rule followed by prose that happens to
         start with ``Note:`` must not open a new document: every line

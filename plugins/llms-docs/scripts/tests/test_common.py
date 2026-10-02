@@ -118,6 +118,137 @@ class ExtractSectionsTest(unittest.TestCase):
         sections = _common.extract_sections(body, min_level=2)
         self.assertEqual([s["title"] for s in sections], ["Real", "Real 2"])
 
+
+class FenceTrackerCloserTest(unittest.TestCase):
+    """A closing fence carries no info string (CommonMark), plus the two
+    departures measured on MDX corpora: any indentation, and ``*/}`` ending
+    a code block written inside an MDX comment."""
+
+    @staticmethod
+    def _states(lines):
+        tracker = _common.FenceTracker()
+        return [tracker.update(line) for line in lines]
+
+    def test_info_string_line_inside_an_open_block_is_content(self):
+        self.assertEqual(
+            self._states(["```\n", "```ts\n", "code\n", "```\n", "text\n"]),
+            [True, True, True, False, False],
+        )
+
+    def test_whitespace_after_the_run_is_not_an_info_string(self):
+        for closer in ("```\n", "```   \n", "```\t\n", "  ```\n", "````\n", "```"):
+            with self.subTest(closer=closer):
+                self.assertEqual(self._states(["```\n", closer]), [True, False])
+
+    def test_unclosed_block_recovers_at_the_next_bare_closer(self):
+        """A stray fence line, then the next block's ```` ```ts ```` opener:
+        taking the opener for a closer flipped the state for the rest of
+        the page, hiding real headings and exposing code comments."""
+        body = [
+            "## Cache\n",
+            "```\n",                       # stray: nothing closes it on its own
+            "- Using cache in transactions\n",
+            "```ts\n",                     # the next block's opener: content here
+            "await db.transaction();\n",
+            "```\n",                       # bare closer ends the stray block
+            "\n",
+            "## Limitations\n",
+            "```ts\n",
+            "## not a heading\n",
+            "```\n",
+            "## After\n",
+        ]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Cache", "Limitations", "After"])
+
+    def test_mdx_comment_end_closes_an_open_block(self):
+        body = [
+            "## Unions\n",
+            "{/* For convenience:\n",
+            "\n",
+            "  ```ts\n",
+            "  const either = z.string().or(z.number());\n",
+            "  ``` */}\n",
+            "\n",
+            "## Optional\n",
+        ]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Unions", "Optional"])
+
+    def test_mdx_comment_end_never_opens_a_block(self):
+        # the comment's first line (``{/* ```sql``) is not a fence line
+        body = [
+            "## Queries\n",
+            "{/* ```sql\n",
+            "SELECT * FROM users ...\n",
+            "``` */}\n",
+            "</Section>\n",
+            "\n",
+            "## Advanced\n",
+        ]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Queries", "Advanced"])
+
+    def test_mdx_comment_end_still_needs_the_opener_run(self):
+        # inside a comment, a shorter run or the other fence character is
+        # content even when followed by */}
+        for opener in ("````ts\n", "~~~ts\n"):
+            with self.subTest(opener=opener):
+                self.assertEqual(
+                    self._states(["{/* note\n", opener, "``` */}\n", "text\n"]),
+                    [False, True, True, True],
+                )
+
+    def test_mdx_comment_example_inside_a_block_is_content(self):
+        """A page showing how to write an MDX comment, in a same-length
+        fence: the ``{/*`` is inside the block, so ```` ``` */} ```` is
+        content and the bare ```` ``` ```` closes the block (CommonMark)."""
+        body = [
+            "## Comments\n",
+            "```mdx\n",
+            "{/*\n",
+            "```js\n",
+            "console.log(1)\n",
+            "``` */}\n",
+            "```\n",
+            "\n",
+            "## Next\n",
+        ]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Comments", "Next"])
+
+    def test_mdx_comment_state_ends_with_the_comment(self):
+        """Once a real comment ends (on a plain line, at the fence that closes
+        a block inside it, or on a ``` */} line outside a block), a later
+        example's ``` */} inside a same-length block is content again."""
+        example = ["```mdx\n", "{/*\n", "```js\n", "x\n", "``` */}\n", "```\n", "\n", "## Next\n"]
+        endings = {
+            "plain line": ["{/* note\n", "*/}\n"],
+            "closing fence": ["{/* note\n", "```ts\n", "x\n", "``` */}\n"],
+            "comment end outside a block": ["{/* ```sql\n", "SELECT 1\n", "``` */}\n"],
+        }
+        for name, comment in endings.items():
+            with self.subTest(ending=name):
+                body = ["## Top\n"] + comment + ["\n"] + example
+                sections = _common.extract_sections(body, min_level=2)
+                self.assertEqual([s["title"] for s in sections], ["Top", "Next"])
+
+    def test_fence_indented_in_jsx_is_still_a_block(self):
+        """Deliberately looser than CommonMark's 0-3 spaces: MDX code blocks
+        nested in JSX are indented 4+ spaces and render as code. With the
+        CommonMark limit, truncation could cut inside one."""
+        content = (
+            "<Tab>\n"
+            "    ```bash\n"
+            "    export TOKEN=your-token\n"
+            "    echo done\n"
+            "    ```\n"
+            "</Tab>\n"
+        )
+        out = _common.truncate_content(content, content.index("    echo done"), narrow_hint="X")
+        self.assertTrue(out.startswith("<Tab>\n\n... ("), out)
+
+
 class ExtractContentTest(unittest.TestCase):
     def test_extends_to_close_unclosed_code_fence(self):
         body = [
