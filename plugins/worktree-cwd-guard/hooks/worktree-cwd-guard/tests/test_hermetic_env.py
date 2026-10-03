@@ -64,9 +64,9 @@ def empty_global_config(home: str) -> None:
     system を無効に)。
 
     `mock.patch.dict(os.environ)` の中で呼ぶこと (環境を戻すため)。`GIT_CONFIG_*` を外すだけだと、
-    helper を迂回した git (や、`HERMETIC_GIT_ENV` が外れた hook の git) は開発者の `~/.gitconfig` と
-    system config を読む。そこに `maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ) があると、
-    迂回しても自動 maintenance が起動せず、有効値も揃って、床が黙って通ってしまう。
+    helper を迂回した git は開発者の `~/.gitconfig` と system config を読む。そこに
+    `maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ) があると、迂回しても自動 maintenance が
+    起動せず、有効値も揃って、床が黙って通ってしまう。
     """
     os.environ.update({"HOME": home, "XDG_CONFIG_HOME": home, "GIT_CONFIG_NOSYSTEM": "1"})
 
@@ -238,23 +238,49 @@ class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
 
 
 class TestHookLaunchedGitInheritsTheSettings(HermeticGitTestCase):
-    """hook (製品コード) が起動する git にも、同じ設定が届くこと。
+    """hook (製品コード) が起動する git にも、同じ設定が届き、global は fixture だけ、system は読まないこと。
 
     `family._git` は env を渡さず `os.environ` を継承するので、基底クラスが patch した env が
-    そのまま見える。ここが外れると hook の git だけ開発者の global / system の config と、自動
-    maintenance の既定に戻る。基底クラスの patch から `HERMETIC_GIT_ENV` が外れたとき、hook の git が
-    開発者の global / system の config から設定を拾って通らないよう、`HOME` などは空にしてから見る
-    (`empty_global_config`。patch が効いていれば `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_COUNT` が優先
-    されるので結果は変わらない)。
+    そのまま見える。ここが外れると hook の git だけ、開発者の global / system の config と自動
+    maintenance の既定に戻る。見るものは 3 つ:
+
+    - 4 設定が見える (env の `GIT_CONFIG_COUNT`。fixture も同じ値を持つので、有効値だけでは
+      どちらの経路で見えているか分からない)
+    - global として fixture を読む (`--global --list` が 5 設定の完全一致)
+    - system の config を読まない (`GIT_CONFIG_SYSTEM` に目印の file を指しておき、
+      `GIT_CONFIG_NOSYSTEM` が効いていれば読まれない)
+
+    床自身が global / system を空にする (`empty_global_config`) と、基底クラスの当て損ねを床が
+    埋めてしまい、後ろの 2 つが見えなくなる。そのため `GIT_CONFIG_NOSYSTEM` は立てず、`HOME` /
+    `XDG_CONFIG_HOME` だけを空にする。`GIT_CONFIG_GLOBAL` が外れたときに開発者の `~/.gitconfig` を
+    読んで通ってしまわず、値の不一致として落ちるようにするため。
+
+    外側の環境に `GIT_CONFIG_NOSYSTEM` が既にあれば、基底クラスが当て損ねても system は読まれず、
+    最後の assertion は通る (その環境では実害も無い)。基底クラスを壊す mutation で確かめるときは、
+    外側の env に `GIT_CONFIG_NOSYSTEM` を入れないこと。
     """
 
     def test_git_launched_by_the_hook_sees_the_settings(self):
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            empty_global_config(tmp)
+            # 基底クラスが当てた GIT_CONFIG_NOSYSTEM を上書きしないよう、HOME / XDG だけを空にする
+            os.environ.update({"HOME": tmp, "XDG_CONFIG_HOME": tmp})
+            system = os.path.join(tmp, "system.gitconfig")
+            Path(system).write_text("[hermetic]\n\tsystem = read\n", encoding="utf-8")
+            os.environ["GIT_CONFIG_SYSTEM"] = system  # GIT_CONFIG_NOSYSTEM が効いていれば読まれない
             for key, expected in EXPECTED.items():
                 with self.subTest(key=key):
                     out = family._git(["config", "--get", key], Path(tmp))
                     self.assertEqual(None if out is None else out.strip(), expected)
+            listed = family._git(["config", "--global", "--list"], Path(tmp))
+            self.assertEqual(
+                sorted((listed or "").splitlines()),
+                sorted(f"{k.lower()}={v}" for k, v in EXPECTED_WITH_RECEIVE.items()),
+                "hook の git が global として fixture を読む",
+            )
+            self.assertIsNone(
+                family._git(["config", "--get", "hermetic.system"], Path(tmp)),
+                "hook の git が system の config を読まない",
+            )
 
 
 if __name__ == "__main__":

@@ -23,9 +23,12 @@ loose object が 2 件あるだけで repack を始めうる。背景へ切り�
 - env の `GIT_CONFIG_COUNT` (git 2.31 以上): `maintenance.auto=false` / `maintenance.autoDetach=false` /
   `gc.auto=0` / `gc.autoDetach=false`。repo 自身の config より優先される
 - `GIT_CONFIG_GLOBAL` が指す `tests/hermetic.gitconfig`: 同じ 4 設定と `receive.autogc=false`。
-  開発者の `~/.gitconfig` を読ませないことは従来と変わらない。`git push` の受け側 (`receive-pack`)
-  には env が届かず (git が repo 用の env を外して起動する)、この file だけが届く。この suite の
-  テストは push しないが、同じ作りの他の suite と揃えてある
+  あわせて `GIT_CONFIG_NOSYSTEM=1` で system の config も読ませない。従来のテストは開発者の
+  `~/.gitconfig` と system の config (Windows では Git for Windows の既定) を読んでいたので、
+  テストの環境はここで hermetic になる (判定に効く設定は見当たらない)。`git push` の受け側
+  (`receive-pack`) には env が届かず (git が repo 用の env を外して起動する)、この file だけが届く。
+  この suite の hook とテスト本体は push しない (床だけが push する) が、同じ作りの他の suite と
+  揃えてある
 
 変更したファイル:
 
@@ -47,7 +50,9 @@ loose object が 2 件あるだけで repack を始めうる。背景へ切り�
     `git config --global --list` の完全一致 (5 設定だけを持つこと)。2 本は同じ値を持つので、有効値だけを
     見る床は、片方が欠けてももう片方が埋めて通る。env に設定が無い bare repo への `push` で、受け側の
     `receive-pack` (trace に載ることを前提として確かめる) が maintenance を起動しないことも見る
-  - hook が起動する git (`family._git`。global / system を空にして見る)
+  - hook が起動する git (`family._git`): 4 設定が見えることに加え、global として fixture を読むこと
+    (`--global --list` の完全一致) と、system の config を読まないこと (`GIT_CONFIG_SYSTEM` に目印の
+    file を指しておく)。床自身は `GIT_CONFIG_NOSYSTEM` を立てず、基底クラスの当て損ねを埋めない
   - global を空にする上書きは `/dev/null` ではなく実体のある空 file にした (この suite は Windows の
     CI でも流れ、`nul` を git が config として読めるかに依存したくないため)
 
@@ -60,9 +65,10 @@ loose object が 2 件あるだけで repack を始めうる。背景へ切り�
   開発者の `~/.gitconfig` が問題を隠す。床はこの影響を受けない
 - 床の各テストは、対応する実装を壊した scratch コピーで、`errors=` ではなく assertion の失敗
   (`failures=`) になることを確かめた: helper が env を足さない / `make_repo` の commit だけが env を持たずに
-  起動される / `GIT_CONFIG_GLOBAL` を外す・`/dev/null` に戻す / `GIT_CONFIG_COUNT` の経路を外す / env の設定を
+  起動される / `GIT_CONFIG_GLOBAL` を外す・`/dev/null` にする / `GIT_CONFIG_COUNT` の経路を外す / env の設定を
   1 つ外す・件数を 1 つ少なく数える / fixture の設定を 1 つ外す・余計な設定や重複を足す / 基底クラスが env を
-  当てない。結果が実行者の global config に左右されないことも、HOME が空の場合と、5 設定すべてを
+  当てない・`GIT_CONFIG_COUNT` だけを当てる・`GIT_CONFIG_NOSYSTEM` だけ抜ける・`GIT_CONFIG_GLOBAL` だけ抜ける。
+  結果が実行者の global config に左右されないことも、HOME が空の場合と、5 設定すべてを
   `~/.gitconfig` に持つ場合のどちらでも落ちる集合が同じになることで確かめた (HOME を空にする隔離を
   外した対照では、後者でだけ push の床が黙って通る)
 
