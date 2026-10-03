@@ -110,15 +110,25 @@ def system_marker(cwd: str, env: dict[str, str]) -> tuple[int, str]:
     return res.returncode, res.stdout.strip()
 
 
-class TestInitRepoSettings(unittest.TestCase):
+class _InitRepoFloor(unittest.TestCase):
+    """init_repo の床。`isolate_git_config` で「patch していない」状態を作り、`init_repo` が git に渡した
+    env を spy で捕まえる。床の自己確認 (`TestTheSystemMarkerIsLive` / `TestTheIsolatedEnvStopsNothing`) も
+    この床を通し、`init_repo` を呼ぶ直前の env (`self.floor_env`) を見る: `isolate_git_config` を直接呼ぶと、
+    ここで足された止める側の値 (0.12.3 は `GIT_CONFIG_NOSYSTEM` をここで立てていた) を見ない。
+
+    問い合わせは、床も自己確認も同じ `query_git` で、同じ HOME を cwd にして行う。問い合わせの道具が
+    床と自己確認で別だと、床の道具だけに足された値 (止める側の値) を、自己確認が見ない。
+    """
+
     def setUp(self) -> None:
-        # 隔離した HOME と system の目印は、`init_repo` が渡した env を使い終わるまで残す。env が
-        # 指す file が消えていると、system の確認が「読めないから未設定」で通ってしまう。
+        # 隔離した HOME と system の目印は、`init_repo` が渡した env と床の env (`self.floor_env`) を
+        # 使い終わるまで残す。env が指す file が消えていると、system の確認が「読めないから未設定」で
+        # 通ってしまう。
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)
         self.home = home.name
 
-    def _envs_passed_by_init_repo(self) -> list[tuple[str, dict]]:
+    def _envs_passed_by_init_repo(self, *, floor_only: bool = False) -> list[tuple[str, dict]]:
         """`init_repo` が起動した git ごとの (サブコマンド, 渡した env)。
 
         env を渡していなければ、そのとき継いだ `os.environ` を返す。「patch していない」状態は
@@ -126,6 +136,9 @@ class TestInitRepoSettings(unittest.TestCase):
         (`isolate_git_config`。`GIT_CONFIG_NOSYSTEM` は立てない)。開発者の shell や `~/.gitconfig` の
         値に左右されないため (env を渡し損ねた git が開発者の設定を読むと、有効値が揃って床が黙って
         通ってしまう)。
+
+        `init_repo` を呼ぶ直前の env を `self.floor_env` に残す。`floor_only=True` なら `init_repo` を
+        呼ばずにそこで返す (床の自己確認用。当てる側の前提を通らずに、床だけを見る)。
         """
         passed: list[tuple[str, dict]] = []
         real_run = subprocess.run
@@ -137,26 +150,24 @@ class TestInitRepoSettings(unittest.TestCase):
 
         with mock.patch.dict(os.environ):
             isolate_git_config(self.home)
+            # 当てる側 (init_repo) が当てる前の env。床の自己確認が見る (init_repo の呼び出しの直前に置く)
+            self.floor_env = dict(os.environ)
+            if floor_only:  # 床の自己確認: init_repo を呼ばず、ここまでの床だけを見る
+                return []
             with mock.patch.object(subprocess, "run", side_effect=spy):
                 _testutil.init_repo(os.path.join(self.home, "repo"))
         self.assertTrue(passed, "前提: init_repo が git を起動している (空の床にしない)")
         return passed
 
-    def _git_config(self, env: dict, *args: str) -> tuple[int, str]:
-        """repo の外 (一時ディレクトリ) で `git config <args>` を `env` で実行する。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            res = subprocess.run(
-                ["git", "config", *args], cwd=tmp, env=env, capture_output=True, text=True
-            )
-        return res.returncode, res.stdout.strip()
 
+class TestInitRepoSettings(_InitRepoFloor):
     def test_the_env_alone_has_the_four_settings(self):
         """global の fixture を外しても、渡した env の `GIT_CONFIG_COUNT` だけで 4 設定が効くこと。"""
         for sub, passed in self._envs_passed_by_init_repo():
             env = {**passed, "GIT_CONFIG_GLOBAL": os.devnull}
             for key, expected in EXPECTED.items():
                 with self.subTest(git=sub, key=key):
-                    self.assertEqual(self._git_config(env, "--get", key), (0, expected))
+                    self.assertEqual(query_git(self.home, env, "config", "--get", key), (0, expected))
 
     def test_the_global_fixture_holds_only_the_five_settings(self):
         """渡した env の `GIT_CONFIG_GLOBAL` が指す fixture が、5 設定だけを持つこと (完全一致)。
@@ -166,7 +177,7 @@ class TestInitRepoSettings(unittest.TestCase):
         """
         expected = sorted(f"{key.lower()}={value}" for key, value in EXPECTED_WITH_RECEIVE.items())
         for sub, passed in self._envs_passed_by_init_repo():
-            code, out = self._git_config(passed, "--global", "--list")
+            code, out = query_git(self.home, passed, "config", "--global", "--list")
             with self.subTest(git=sub):
                 self.assertEqual((code, sorted(out.splitlines())), (0, expected))
 
@@ -175,33 +186,46 @@ class TestInitRepoSettings(unittest.TestCase):
 
         system は目印の file に向けてあり (`isolate_git_config`)、`GIT_CONFIG_NOSYSTEM` が効いて
         いれば読まれない (`hermetic.system` が未設定のまま)。目印が読めること自体は
-        `TestTheSystemMarkerIsLive` が見る。床の側で `GIT_CONFIG_NOSYSTEM` を立てていると、
-        `init_repo` や定数が渡し損ねても、床の env に残って通ってしまう。
+        `TestTheSystemMarkerIsLive` が見る。ただし、そちらが問い合わせるのは床の env (`init_repo` を
+        呼ぶ前) で、この床が問い合わせる env ではない。この床が問い合わせる時点で目印が読めることは、
+        同じ env から `GIT_CONFIG_NOSYSTEM` だけを外し、同じ `query_git` で前提として見る (目印が
+        消えていると、「読めないから未設定」で通ってしまう)。床の側で `GIT_CONFIG_NOSYSTEM` を立てて
+        いると、`init_repo` や定数が渡し損ねても、床の env に残って通ってしまう。
         """
         for sub, passed in self._envs_passed_by_init_repo():
             with self.subTest(git=sub):
-                self.assertEqual(self._git_config(passed, "--get", "hermetic.system"), (1, ""))
+                # 目印は setUp の HOME に置いたまま。問い合わせの時点でも読めることを、同じ env から
+                # `GIT_CONFIG_NOSYSTEM` だけを外して先に確かめる (消えていると「読めないから未設定」で通る)
+                readable = {k: v for k, v in passed.items() if k != "GIT_CONFIG_NOSYSTEM"}
+                self.assertEqual(
+                    query_git(self.home, readable, "config", "--get", "hermetic.system"),
+                    (0, "read"),
+                    "前提: 渡した env の GIT_CONFIG_SYSTEM が指す目印が、問い合わせの時点で読める",
+                )
+                self.assertEqual(query_git(self.home, passed, "config", "--get", "hermetic.system"), (1, ""))
 
 
-class TestTheSystemMarkerIsLive(unittest.TestCase):
+class TestTheSystemMarkerIsLive(_InitRepoFloor):
     """system の目印が、`GIT_CONFIG_NOSYSTEM` を立てなければ読まれ、立てれば読まれないこと。
 
     「目印が読まれない (`hermetic.system` が未設定)」という確認は、目印がそもそも読めない状態でも
     成り立つ。`isolate_git_config` が目印を置き損ねる / `GIT_CONFIG_SYSTEM` を向け損ねる / 床の側で
     `GIT_CONFIG_NOSYSTEM` を立てる、のどれでも、`GIT_CONFIG_NOSYSTEM` が届いているかを見る床が黙って
-    空になるので、道具の側を先に確かめる。
+    空になるので、道具の側を先に確かめる。床 (`isolate_git_config` と、それを呼ぶ init_repo の床) を
+    通し、`init_repo` を呼ぶ直前の env で見る (0.12.3 は `GIT_CONFIG_NOSYSTEM` を init_repo の床の中で
+    立てていた)。
     """
 
     def test_the_marker_is_read_unless_nosystem_is_set(self):
-        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            isolate_git_config(tmp)
-            readable = system_marker(tmp, dict(os.environ))
-            skipped = system_marker(tmp, {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+        self._envs_passed_by_init_repo(floor_only=True)
+        readable = system_marker(self.home, self.floor_env)
+        skipped = system_marker(self.home, {**self.floor_env, "GIT_CONFIG_NOSYSTEM": "1"})
         self.assertEqual((readable, skipped), ((0, "read"), (1, "")))
 
 
-class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
-    """`isolate_git_config` の床の env だけでは、どの経路も止める側にならないこと。
+class TestTheIsolatedEnvStopsNothing(_InitRepoFloor):
+    """床 (`isolate_git_config` と、それを呼ぶ init_repo の床) が、当てる側を呼ぶ直前に持つ env だけでは、
+    どの経路も止める側にならないこと。
 
     この suite の床は、すべてこの関数で「patch していない」状態を作る。床が止める側の値 (fixture を指す
     `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に戻ると、`init_repo` や定数の当て損ねを
@@ -211,12 +235,12 @@ class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
     """
 
     def test_the_isolated_env_alone_stops_nothing(self):
-        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            isolate_git_config(tmp)
-            floor = dict(os.environ)
-            global_list = query_git(tmp, floor, "config", "--global", "--list")
-            settings = {key: query_git(tmp, floor, "config", "--get", key) for key in EXPECTED}
-        self.assertEqual(global_list, (0, ""), "床が global として何かを読ませている")
+        self._envs_passed_by_init_repo(floor_only=True)
+        global_list = query_git(self.home, self.floor_env, "config", "--global", "--list")
+        settings = {key: query_git(self.home, self.floor_env, "config", "--get", key) for key in EXPECTED}
+        self.assertEqual(
+            global_list, (0, ""), "床の global が空の file でない (何かを読ませているか、global を読めない)"
+        )
         self.assertEqual(
             settings,
             {

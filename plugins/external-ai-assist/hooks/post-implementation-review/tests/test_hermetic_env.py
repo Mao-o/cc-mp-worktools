@@ -212,7 +212,63 @@ def spawned_maintenance(events: list[dict]) -> list[list[str]]:
     ]
 
 
-class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
+class _HelperFloor(unittest.TestCase):
+    """helper の床。`isolate_git_config` で「patch していない」状態を作り、`init_repo` の間に起動された
+    maintenance / gc を数える。床の自己確認 (`TestTheSystemMarkerIsLive` / `TestTheIsolatedEnvStopsNothing`)
+    もこの床を通し、`init_repo` を呼ぶ直前の env (`self.floor_env`) を見る: `isolate_git_config` を直接呼ぶと、
+    ここで足された止める側の値を見ない。隔離した HOME と目印は、自己確認が使い終わるまで残す。"""
+
+    def setUp(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = home.name
+
+    def _spawned_by_init_repo(
+        self, hermetic_overrides: dict[str, str], *, floor_only: bool = False
+    ) -> list[list[str]]:
+        """`init_repo` の間に起動された maintenance / gc の argv。
+
+        `hermetic_overrides` は、この呼び出しの間だけ `HERMETIC_GIT_ENV` に上書きする値。helper が
+        渡す設定の一部を外して、残りの経路だけで止まるかを見るために使う。
+
+        上書きが helper の git に届いたことも前提として確かめる。helper が `HERMETIC_GIT_ENV` を
+        呼び出しのたびに読まない形 (初回に固めたコピーを使うなど) に変わると、上書きが届かず
+        env 経路の床が黙って空になるため。`all` ではなく `any` で見るのは、commit だけが helper を
+        迂回する変異でも前提は満たしたまま、maintenance の起動の assertion で落とすため。
+
+        `init_repo` を呼ぶ直前の env (trace の指定を除く) を `self.floor_env` に残す。`floor_only=True`
+        なら helper を呼ばずにそこで返す (床の自己確認用。helper の前提を通らずに、床だけを見る)。
+        """
+        passed: list[dict] = []
+        real_run = subprocess.run
+
+        def spy(argv, *args, **kwargs):
+            if argv[:1] == ["git"]:
+                passed.append(dict(kwargs.get("env") or os.environ))
+            return real_run(argv, *args, **kwargs)
+
+        tmp = self.home
+        with mock.patch.dict(os.environ), mock.patch.dict(_testutil.HERMETIC_GIT_ENV, hermetic_overrides):
+            isolate_git_config(tmp)
+            trace = os.path.join(tmp, "trace2.jsonl")
+            os.environ["GIT_TRACE2_EVENT"] = trace
+            # 当てる側 (helper) が当てる前の env。床の自己確認が見る (init_repo の呼び出しの直前に置く)
+            self.floor_env = {k: v for k, v in os.environ.items() if k != "GIT_TRACE2_EVENT"}
+            if floor_only:  # 床の自己確認: helper を呼ばず、ここまでの床だけを見る
+                return []
+            with mock.patch.object(subprocess, "run", side_effect=spy):
+                _testutil.init_repo(os.path.join(tmp, "repo"))
+            events = trace_events(trace)
+            want = dict(_testutil.HERMETIC_GIT_ENV)
+        self.assertTrue(
+            any(all(env.get(k) == v for k, v in want.items()) for env in passed),
+            "前提: 上書きした HERMETIC_GIT_ENV が helper の git に届いている",
+        )
+        self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
+        return spawned_maintenance(events)
+
+
+class TestHelpersStopBackgroundMaintenance(_HelperFloor):
     """テストクラスが env を patch していなくても、repo を作るヘルパー自身が止める。
 
     「patch していない」状態は、`GIT_CONFIG_*` を外し、global の config を空に、system の config を
@@ -227,42 +283,6 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
     設定値ではない。`init_repo` の commit だけが env を持たずに起動されても、問い合わせ
     (`_testutil.git` 経由) は env を足し直すので、値を見るテストでは気付けない。
     """
-
-    def _spawned_by_init_repo(self, hermetic_overrides: dict[str, str]) -> list[list[str]]:
-        """`init_repo` の間に起動された maintenance / gc の argv。
-
-        `hermetic_overrides` は、この呼び出しの間だけ `HERMETIC_GIT_ENV` に上書きする値。helper が
-        渡す設定の一部を外して、残りの経路だけで止まるかを見るために使う。
-
-        上書きが helper の git に届いたことも前提として確かめる。helper が `HERMETIC_GIT_ENV` を
-        呼び出しのたびに読まない形 (初回に固めたコピーを使うなど) に変わると、上書きが届かず
-        env 経路の床が黙って空になるため。`all` ではなく `any` で見るのは、commit だけが helper を
-        迂回する変異でも前提は満たしたまま、maintenance の起動の assertion で落とすため。
-        """
-        passed: list[dict] = []
-        real_run = subprocess.run
-
-        def spy(argv, *args, **kwargs):
-            if argv[:1] == ["git"]:
-                passed.append(dict(kwargs.get("env") or os.environ))
-            return real_run(argv, *args, **kwargs)
-
-        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            _testutil.HERMETIC_GIT_ENV, hermetic_overrides
-        ):
-            isolate_git_config(tmp)
-            trace = os.path.join(tmp, "trace2.jsonl")
-            os.environ["GIT_TRACE2_EVENT"] = trace
-            with mock.patch.object(subprocess, "run", side_effect=spy):
-                _testutil.init_repo(os.path.join(tmp, "repo"))
-            events = trace_events(trace)
-            want = dict(_testutil.HERMETIC_GIT_ENV)
-        self.assertTrue(
-            any(all(env.get(k) == v for k, v in want.items()) for env in passed),
-            "前提: 上書きした HERMETIC_GIT_ENV が helper の git に届いている",
-        )
-        self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
-        return spawned_maintenance(events)
 
     def test_repo_made_without_any_env_patch(self):
         self.assertEqual(self._spawned_by_init_repo({}), [])
@@ -411,25 +431,26 @@ class TestEachSourceOfTheSettingsOnItsOwn(unittest.TestCase):
         self.assertEqual((outer_view, fallback_view, hermetic_view), ([], [], [IGNORED_NAME]))
 
 
-class TestTheSystemMarkerIsLive(unittest.TestCase):
+class TestTheSystemMarkerIsLive(_HelperFloor):
     """system の目印が、`GIT_CONFIG_NOSYSTEM` を立てなければ読まれ、立てれば読まれないこと。
 
     「目印が読まれない (`hermetic.system` が未設定)」という確認は、目印がそもそも読めない状態でも
     成り立つ。`empty_global_config` が目印を置き損ねる / `GIT_CONFIG_SYSTEM` を向け損ねる / 床の側で
     `GIT_CONFIG_NOSYSTEM` を立てる、のどれでも、`GIT_CONFIG_NOSYSTEM` が届いているかを見る床が黙って
-    空になるので、道具の側を先に確かめる。
+    空になるので、道具の側を先に確かめる。床 (`isolate_git_config` と、それを呼ぶ helper の床) を通し、
+    helper を呼ぶ直前の env で見る。
     """
 
     def test_the_marker_is_read_unless_nosystem_is_set(self):
-        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            isolate_git_config(tmp)
-            readable = system_marker(tmp, dict(os.environ))
-            skipped = system_marker(tmp, {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+        self._spawned_by_init_repo({}, floor_only=True)
+        readable = system_marker(self.home, self.floor_env)
+        skipped = system_marker(self.home, {**self.floor_env, "GIT_CONFIG_NOSYSTEM": "1"})
         self.assertEqual((readable, skipped), ((0, "read"), (1, "")))
 
 
-class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
-    """`isolate_git_config` の床の env だけでは、どの経路も止める側にならないこと。
+class TestTheIsolatedEnvStopsNothing(_HelperFloor):
+    """床 (`isolate_git_config` と、それを呼ぶ helper の床) が、当てる側を呼ぶ直前に持つ env だけでは、
+    どの経路も止める側にならないこと。
 
     helper・定数・検出器・plain bare の床は、この関数で「patch していない」状態を作る。床が止める側の値
     (fixture を指す `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に戻ると、helper や定数の
@@ -439,12 +460,12 @@ class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
     """
 
     def test_the_isolated_env_alone_stops_nothing(self):
-        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            isolate_git_config(tmp)
-            floor = dict(os.environ)
-            global_list = query_git(tmp, floor, "config", "--global", "--list")
-            settings = {key: query_git(tmp, floor, "config", "--get", key) for key in EXPECTED}
-        self.assertEqual(global_list, (0, ""), "床が global として何かを読ませている")
+        self._spawned_by_init_repo({}, floor_only=True)
+        global_list = query_git(self.home, self.floor_env, "config", "--global", "--list")
+        settings = {key: query_git(self.home, self.floor_env, "config", "--get", key) for key in EXPECTED}
+        self.assertEqual(
+            global_list, (0, ""), "床の global が空の file でない (何かを読ませているか、global を読めない)"
+        )
         self.assertEqual(
             settings,
             {
@@ -529,7 +550,7 @@ class _ProductGitChecks:
     `--global --list` の不一致として落ちる。床がそうした止める側の値を持たないこと自体も、
     `test_the_floor_alone_stops_nothing` で見る。
 
-    外側の env (開発者の shell や、mutation を流す道具) に `GIT_CONFIG_*` があると、基底クラスが
+    外側の env (開発者の shell や、テストを起動する道具) に `GIT_CONFIG_*` があると、基底クラスが
     当て損ねても、その値が残って確認が素通りする。そのため `setUp` で、外側の `GIT_CONFIG_*` を
     先に外してから基底クラスの patch を張る。外した後には、helper / 定数の床 (`isolate_git_config`) と
     同じく止めない側の値 (`OUTER_NON_STOPPING_ENV`) を置く: 外側を全部外しただけだと、基底クラスが env を
@@ -594,7 +615,9 @@ class _ProductGitChecks:
         for key, value in OPPOSITE.items():
             with self.subTest(key=key):
                 self.assertEqual(settings[key], (0, value))
-        self.assertEqual(global_list, (0, ""), "床が global として何かを読ませている")
+        self.assertEqual(
+            global_list, (0, ""), "床の global が空の file でない (何かを読ませているか、global を読めない)"
+        )
         self.assertEqual(marker, (0, "read"), "床が system の config を読ませない (GIT_CONFIG_NOSYSTEM)")
 
     def test_git_launched_by_the_hook_sees_the_settings(self):
