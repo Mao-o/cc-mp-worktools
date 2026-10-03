@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import _testutil  # noqa: F401
-from _testutil import make_repo
+from _testutil import HermeticGitTestCase, make_repo
 
 import importlib.util
 
@@ -43,8 +43,9 @@ def decision(out: dict | None) -> str | None:
     return None if out is None else out["hookSpecificOutput"].get("permissionDecision", "context")
 
 
-class GuardTest(unittest.TestCase):
+class GuardTest(HermeticGitTestCase):
     def setUp(self):
+        super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
         self.main, self.a, self.b = make_repo(Path(self._tmp.name))
         self._env = mock.patch.dict(os.environ, {}, clear=False)
@@ -314,7 +315,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(decision(evaluate(bash(f'git -C "{self.b}" checkout -b oops', self.a))), "deny")
 
 
-class EntryTest(unittest.TestCase):
+class EntryTest(HermeticGitTestCase):
     """__main__ を subprocess で起動し、stdin / stdout の往復 (UTF-8) を確かめる。"""
 
     def test_deny_roundtrip_with_japanese(self):
