@@ -23,6 +23,107 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.35.1
+
+**テスト整理 (挙動の変更なし)。テストの後始末が偶発的に `Directory not empty` で落ちうる CI の
+flaky を、予防的に塞いだ (patch bump)。** hook・`hooks.json`・README の挙動は変わらない。この
+suite での失敗はまだ観測していない。テスト件数: redact 1,534 → **1,545** / check 187 → **201**
+(増えた 25 件は床のテストだけ)。
+
+### テスト: テストが作る git repo で自動 gc / maintenance を止めた
+
+`git commit` は終わりに `git maintenance run --auto --detach` を起動する (修正前の suite は、
+check-sensitive-files が commit 82 回に対して起動 82 回、redact-sensitive-reads が commit 1 回に対して
+起動 1 回だった。git 2.50 で `GIT_TRACE2_EVENT` により、空の HOME で実測した)。CI の git 2.55 は
+auto maintenance の既定の戦略が geometric で、小さな repo でも `.git/objects/17` に loose object が
+2 件あるだけで repack を始めうる。背景へ切り離された repack が `.git/objects/pack` に書いている最中に
+tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で落ちる (object の hash 次第の
+偶発的な失敗。git 2.50 は同じ条件でも起きないので、ローカルの実行だけでは気付けない)。
+
+テストが作る repo と、hook が起動する git (`checker._run_git_raw`) の両方に、次の 3 つを渡すように
+した (`_testutil.HERMETIC_GIT_ENV`)。そもそも自動 maintenance を起動せず、何かが走っても背景へ
+切り離さない。
+
+- env の `GIT_CONFIG_COUNT` (git 2.31 以上): `maintenance.auto=false` / `maintenance.autoDetach=false` /
+  `gc.auto=0` / `gc.autoDetach=false`。repo 自身の config より優先される
+- `GIT_CONFIG_GLOBAL` が指す `tests/hermetic.gitconfig`: 同じ 4 設定と `receive.autogc=false`。
+  `git push` の受け側 (`receive-pack`) には env が届かず (git が repo 用の env を外して起動する)、
+  この file だけが届く。両 suite のテスト本体は push しない (床だけが push する)
+- `GIT_CONFIG_NOSYSTEM=1`: system の config も読ませない。修正前のテストは system の config を読み、
+  HOME を差し替えていなかった 2 クラス (`TestGitOutputIsDecodedAsUtf8` /
+  `TestMainStdinNonUtf8Locale`) では開発者の `~/.gitconfig` も読んでいた。テストの環境はここで
+  hermetic になる (suite は両方とも修正後も green で、結果に効く設定は見当たらなかった)
+
+変更したファイル (tests と docs だけ。製品コードは変えていない):
+
+- check-sensitive-files
+  - `tests/_testutil.py`: 上の定数 (`NO_BACKGROUND_GIT_SETTINGS` / `HERMETIC_GIT_ENV`) と、毎回その
+    env を足す `git()` / `init_repo()` を追加。基底クラス `HermeticGitTestCase` (同じ env を
+    `os.environ` に当てる) も足し、hook が起動する git にも届くようにした
+  - `tests/test_checker.py` / `test_main.py` / `test_exclude_path_scope.py` /
+    `test_worktree_path_rule_root.py`: 4 ファイルに重複していた `_git` と 3 ファイルの `_init_repo` を
+    helper に置き換え、submodule を作る `subprocess.run(["git", ...])` の直接起動 (11 箇所) も `git()`
+    に寄せた。repo を作るテストクラスの基底 6 つを `HermeticGitTestCase` にした
+  - `tests/hermetic.gitconfig` (新規): global の fixture
+  - `tests/test_hermetic_env.py` (新規): 床 14 件
+- redact-sensitive-reads
+  - `tests/_testutil.py`: 同じ定数と `git()` / `init_repo()` を追加 (この suite の hook は git を
+    起動しないので、基底クラスは無い)
+  - `tests/test_e2e.py`: 重複していた `_git` を helper に置き換え
+  - `tests/hermetic.gitconfig` (新規) / `tests/test_hermetic_env.py` (新規): 床 11 件
+- `docs/MAINTAINING.md`: テスト実行の節に、git の env の扱いと床を足すときの規律を追記
+
+床 (`tests/test_hermetic_env.py`)。期待値は `_testutil` とは別のリテラルで持つ (定数から導くと、
+1 項目消えても期待値ごと消えて通るため):
+
+- 挙動: `GIT_TRACE2_EVENT` で git の子プロセスの起動を数え、helper が repo を作って commit する間に
+  maintenance / gc の起動が 0 件であること (commit が trace に載っていることと、上書きした env が
+  helper の git に届いたことを前提として確かめる)。global の fixture を外し、`GIT_CONFIG_COUNT` だけ
+  でも 0 件であること。設定値を問い合わせるだけの床は、commit だけが env を持たずに起動されても、
+  問い合わせの側が env を足し直すので気付けない。そのため起動された git の挙動を見る。
+  `git init --bare` を直接呼んだ bare repo への push で、受け側の `receive-pack` (trace に載ることと
+  push の成功を前提として確かめる) が maintenance を起動しないことも見る
+- 出どころ別: 止める経路 3 本 (env の `GIT_CONFIG_COUNT` / global の fixture /
+  `GIT_CONFIG_NOSYSTEM`) を 1 本ずつ別の検査で見る。有効値だけを見ると、1 本が欠けても残りが埋めて
+  通るため。起動の仕方 (定数だけ / helper / hook の git) ごとに同じ 3 本を流す。COUNT は repo 自身の
+  config に止めない側の値を置き、止める側の値が見えること。global は `git config --global --list` が
+  fixture の 5 設定と完全一致すること。system は、`GIT_CONFIG_SYSTEM` で system の代わりに置いた目印が
+  読まれないこと (前提として、`GIT_CONFIG_NOSYSTEM` が無ければ目印が読めることも確かめる)
+- 床の側で `GIT_CONFIG_NOSYSTEM` を立てない。「patch していない」状態は、`GIT_CONFIG_*` を外し、
+  HOME / XDG を空に、`GIT_CONFIG_SYSTEM` を目印の file に向けて作る。床の側で立てると、定数・helper・
+  基底クラスが `GIT_CONFIG_NOSYSTEM` や `GIT_CONFIG_GLOBAL` を片方だけ当て損ねても (部分適用)、
+  床が埋めて通ってしまう。開発者の本物の system / global の config は、目印と空の HOME で置き換わる
+  ので読まれない
+- 直接の起動: test module が `subprocess` で git を literal の argv で直接起動していないこと
+  (helper を迂回した起動を拾う。argv を変数で渡す形は拾えない)。検出の規則自体が空でないことも
+  床で確かめる
+- global を空にする上書きは `os.devnull` ではなく実体のある空 file にした (両 suite は Windows の
+  CI でも流れ、`nul` を git が config として読めるかに依存したくないため)
+
+確認:
+
+- suite 全体を `GIT_TRACE2_EVENT` 付きで 1 回ずつ流し、起動された `maintenance` / `gc` の数を数えた
+  (空の HOME。床のテストは自分用の trace に差し替えるので、その区間の git はここに数えられない):
+  check-sensitive-files は修正前 commit 82 回に対して 82 回、修正後 commit 83 回に対して 0 回
+  (187 → 201 件、実行時間は 32.7 秒から 33.8 秒)。redact-sensitive-reads は修正前 commit 1 回に
+  対して 1 回、修正後 commit 2 回に対して 0 回 (1,534 → 1,545 件、3.0 秒から 5.1 秒)。
+  `maintenance.auto=false` を既に持つ HOME では修正前も 0 回で、開発者の `~/.gitconfig` が問題を隠す。
+  床はこの影響を受けない
+- 床の各テストは、対応する実装を壊した scratch コピーで、`errors=` ではなく assertion の失敗
+  (`failures=`) になることを確かめた。両 suite とも、空の HOME と、5 設定すべてを `~/.gitconfig` に
+  持つ HOME のどちらでも、無変異は green で全 mutant が落ちた: env を当てる各点 (定数 / helper /
+  基底クラス / hook の起動。後 2 つは check-sensitive-files のみ) の部分適用 3 種
+  (`GIT_CONFIG_COUNT` だけ / `GIT_CONFIG_NOSYSTEM` 抜き / `GIT_CONFIG_GLOBAL` 抜き) と、env を全部
+  外す変異 / helper が commit だけ env を足さない・env を初回に固める / `GIT_CONFIG_GLOBAL` を
+  `os.devnull` にする・env の設定を 1 つ外す・件数を 1 つ少なく数える / fixture の設定を 1 つ外す・
+  余計な設定や重複を足す / test module に git の直接起動を足す・検出の規則を壊す。対照として、
+  床の HOME 隔離を外したうえで定数が `GIT_CONFIG_GLOBAL` を落とす変異では、空の HOME では落ち、
+  5 設定を持つ HOME では床が黙って通る (床が HOME を差し替えている理由)
+- 実測 (git 2.50): 受け側に設定が無いと `receive-pack` は `git maintenance run --auto --quiet
+  --detach` を起動し、`maintenance.auto=false` だけ・`receive.autogc=false` だけのどちらでも止まる
+  (`gc.auto=0` だけでは止まらない)。fixture から `receive.autogc` だけを外す変異は、
+  `maintenance.auto=false` が残るので push の床では検出されず、`--global --list` の完全一致が固定する
+
 ## 0.35.0
 
 path 形 rule (`!certs/aws.pem`) を**評価するファイルのある checkout 基準**で

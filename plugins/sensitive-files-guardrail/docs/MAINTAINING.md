@@ -251,11 +251,32 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 この形のまま使う。
 
 - `tests/_testutil.py` が hook dir と `hooks/` を `sys.path` に挿入するため環境
-  変数の設定は不要。ただし `_testutil.py` がするのは `sys.path` の操作**だけ**で、
+  変数の設定は不要。ただし `_testutil.py` がするのは `sys.path` の操作と、後述の
+  `SFG_LOG_PATH` (redact 側) と、テストが起動する git の環境 (次の項) だけで、
   `HOME` / `XDG_CONFIG_HOME` の隔離はしない。隔離は必要なテストクラスが個別に
   `mock.patch.dict(os.environ, ...)` で適用している (`test_patterns_loader.py` /
   `test_bash_handler.py` / `test_edit_handler.py` / `test_e2e.py` /
   `test_checker.py` / `test_main.py` / `test_stop_ack.py` ほか)
+- **repo を作る / commit する git は `_testutil.git` / `init_repo` を通す** (両 suite。
+  `subprocess.run(["git", ...])` を直接書かない)。`git commit` / `merge` / `fetch` は終わりに
+  `git maintenance run --auto --detach` を起動し、git 2.55 (CI) では小さな repo でも背景で
+  repack が始まりうる。それが tempdir の後始末と重なると `Directory not empty` で落ちる
+  (偶発的。ローカルの git 2.50 では起きないので気付けない)。`_testutil.HERMETIC_GIT_ENV` が
+  3 つを渡す: env の `GIT_CONFIG_COUNT` (`maintenance.auto` / `maintenance.autoDetach` /
+  `gc.auto` / `gc.autoDetach`。repo 自身の config より優先される)、`GIT_CONFIG_GLOBAL` が指す
+  `tests/hermetic.gitconfig` (同じ 4 設定と `receive.autogc`。push の受け側 `receive-pack` には
+  env が届かず、この file だけが届く)、`GIT_CONFIG_NOSYSTEM=1`。hook が起動する git
+  (`checker._run_git_raw`) にも届くよう、repo を作るテストクラスは check-sensitive-files の
+  `_testutil.HermeticGitTestCase` を継承する。fixture はテストから `git config --global` で
+  書かない (tracked の file が書き換わる)
+- 上の床は両 suite の `tests/test_hermetic_env.py` (起動された git を `GIT_TRACE2_EVENT` で
+  数える / 設定の出どころ別 / 直接の起動の検出)。床を足す・直すときは次を守る。
+  「patch していない」状態を作る `isolate_git_config` は `GIT_CONFIG_NOSYSTEM` を**立てない**
+  (立てると、定数・helper・基底クラスが当て損ねても床が埋めて通る)。mutation は空の HOME と
+  `maintenance.auto=false` 等を持つ HOME の両方で流す (開発者の `~/.gitconfig` が問題を隠す)。
+  env を当てる各点 (定数 / helper / 基底クラス / hook の起動) について、`GIT_CONFIG_COUNT` だけ・
+  `GIT_CONFIG_NOSYSTEM` 抜き・`GIT_CONFIG_GLOBAL` 抜きの 3 種が assertion (`failures=`) で落ちること
+  を確かめる。`errors=` はテストが走っていない状態で、検出ではない
 - 隔離が効く範囲は解決タイミングで決まる。`patterns.local.txt` と stop-ack state
   は `Path.home()` を**関数内**で解決するため env 差し替えが効く
   (`_shared/patterns.py::_resolve_local_patterns_path` /

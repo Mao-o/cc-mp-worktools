@@ -18,7 +18,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import _testutil  # noqa: F401
+from _testutil import HermeticGitTestCase
+from _testutil import git as _git
+from _testutil import init_repo as _init_repo
 
 _ENTRY_PATH = Path(__file__).resolve().parent.parent / "__main__.py"
 
@@ -29,22 +31,6 @@ def _load_entry():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-
-
-def _git(args: list[str], cwd: str) -> None:
-    subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
-
-
-def _init_repo(cwd: str) -> None:
-    _git(["init", "--initial-branch=main"], cwd)
-    _git(["config", "user.name", "test"], cwd)
-    _git(["config", "user.email", "test@example.com"], cwd)
-    _git(["config", "commit.gpgsign", "false"], cwd)
 
 
 def _run_main(envelope: dict) -> tuple[int, str, str]:
@@ -66,8 +52,9 @@ def _run_main(envelope: dict) -> tuple[int, str, str]:
     return rc, out, err
 
 
-class BaseMainTest(unittest.TestCase):
+class BaseMainTest(HermeticGitTestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(self._cleanup)
         self.home_dir = Path(self.tmp) / "home"
@@ -593,14 +580,12 @@ class TestSubmoduleGuidance(BaseMainTest):
         _git(["add", ".env"], str(subrepo))
         _git(["commit", "-m", "add env"], str(subrepo))
         try:
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{subrepo}", "submod",
                 ],
-                cwd=str(self.repo),
-                check=True,
-                capture_output=True,
+                str(self.repo),
             )
         except subprocess.CalledProcessError:
             return False
@@ -655,22 +640,15 @@ class TestSubmoduleGuidance(BaseMainTest):
         _git(["add", "leaf.txt"], str(subrepo))
         _git(["commit", "-m", "add leaf"], str(subrepo))
         try:
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{subrepo}", mount_name,
                 ],
-                cwd=str(self.repo),
-                check=True,
-                capture_output=True,
+                str(self.repo),
             )
             _git(["commit", "-m", "add submodule"], str(self.repo))
-            subprocess.run(
-                ["git", "submodule", "deinit", "-f", mount_name],
-                cwd=str(self.repo),
-                check=True,
-                capture_output=True,
-            )
+            _git(["submodule", "deinit", "-f", mount_name], str(self.repo))
         except subprocess.CalledProcessError:
             return False
         return True
@@ -723,28 +701,28 @@ class TestSubmoduleGuidance(BaseMainTest):
         _git(["add", "README.md"], str(mid))
         _git(["commit", "-m", "init"], str(mid))
         try:
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{leaf}", "deep",
                 ],
-                cwd=str(mid), check=True, capture_output=True,
+                str(mid),
             )
             _git(["commit", "-m", "add deep submodule"], str(mid))
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{mid}", "vendor",
                 ],
-                cwd=str(self.repo), check=True, capture_output=True,
+                str(self.repo),
             )
             _git(["commit", "-m", "add vendor submodule"], str(self.repo))
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "update", "--init", "--recursive",
                 ],
-                cwd=str(self.repo), check=True, capture_output=True,
+                str(self.repo),
             )
         except subprocess.CalledProcessError:
             return False
@@ -923,14 +901,12 @@ class TestMainSessionAck(BaseMainTest):
         _git(["add", ".env"], str(subrepo))
         _git(["commit", "-m", "add env"], str(subrepo))
         try:
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{subrepo}", "submod",
                 ],
-                cwd=str(self.repo),
-                check=True,
-                capture_output=True,
+                str(self.repo),
             )
         except subprocess.CalledProcessError:
             self.skipTest("git submodule add unsupported in this env")
@@ -1759,7 +1735,7 @@ class TestAsciiStdoutEncoding(BaseMainTest):
 
 
 
-class TestMainStdinNonUtf8Locale(unittest.TestCase):
+class TestMainStdinNonUtf8Locale(HermeticGitTestCase):
     """stdin の encoding が非 UTF-8 でも envelope を読めること (0.34.1)。
 
     Stop hook は ``cwd`` を envelope から受け取る。Windows の既定 (cp1252 等、
@@ -1772,6 +1748,7 @@ class TestMainStdinNonUtf8Locale(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.home = Path(self.tmp) / "home"

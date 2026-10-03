@@ -15,31 +15,21 @@ from __future__ import annotations
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import _testutil  # noqa: F401
+from _testutil import HermeticGitTestCase
+from _testutil import git as _git
+from _testutil import init_repo as _init_repo
 
 from _shared.patterns import resolve_project_root
 from checker import find_sensitive_files, load_patterns, root_offset
 
 _LOCAL_REL = Path(".claude") / "sensitive-files-guardrail" / "patterns.local.txt"
 _PATTERNS = Path(__file__).resolve().parent.parent / "patterns.txt"
-
-
-def _git(args: list[str], cwd: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
-def _init_repo(cwd: str) -> None:
-    _git(["init", "--initial-branch=main"], cwd)
-    _git(["config", "user.name", "test"], cwd)
-    _git(["config", "user.email", "test@example.com"], cwd)
-    _git(["config", "commit.gpgsign", "false"], cwd)
 
 
 def _load_entry():
@@ -71,8 +61,9 @@ def _reason(out: str) -> str:
     return json.loads(out)["reason"]
 
 
-class Base(unittest.TestCase):
+class Base(HermeticGitTestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(self._cleanup)
         self.home = Path(self.tmp) / "home"

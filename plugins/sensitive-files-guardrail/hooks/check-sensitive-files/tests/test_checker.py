@@ -13,7 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import _testutil  # noqa: F401
+from _testutil import HermeticGitTestCase
+from _testutil import git as _git
+from _testutil import init_repo as _init_repo
 
 from checker import (  # noqa: E402
     _ls_tracked,
@@ -27,24 +29,9 @@ from checker import (  # noqa: E402
 )
 
 
-def _git(args: list[str], cwd: str) -> None:
-    subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
-
-
-def _init_repo(cwd: str) -> None:
-    _git(["init", "--initial-branch=main"], cwd)
-    _git(["config", "user.name", "test"], cwd)
-    _git(["config", "user.email", "test@example.com"], cwd)
-    _git(["config", "commit.gpgsign", "false"], cwd)
-
-
-class BaseWithTmpRepo(unittest.TestCase):
+class BaseWithTmpRepo(HermeticGitTestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(self._cleanup)
         # HOME と XDG を tmpdir に隔離 (ローカル patterns を汚染しない)
@@ -601,17 +588,14 @@ class TestSubmoduleScan(BaseWithTmpRepo):
     def _try_add_submodule(self) -> bool:
         """親 repo に subrepo を submodule として登録。環境非対応なら False。"""
         try:
-            subprocess.run(
+            _git(
                 [
-                    "git",
                     "-c", "protocol.file.allow=always",
                     "submodule", "add",
                     f"file://{self.subrepo}",
                     "submod",
                 ],
-                cwd=str(self.repo),
-                check=True,
-                capture_output=True,
+                str(self.repo),
             )
             _git(["commit", "-m", "add submod"], str(self.repo))
             return True
@@ -673,29 +657,29 @@ class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
         (gitlink だけなら ``submodule_paths`` の検証に十分で init 不要)。
         """
         try:
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{self.leaf}", "deep",
                 ],
-                cwd=str(self.mid), check=True, capture_output=True,
+                str(self.mid),
             )
             _git(["commit", "-m", "add deep submodule"], str(self.mid))
-            subprocess.run(
+            _git(
                 [
-                    "git", "-c", "protocol.file.allow=always",
+                    "-c", "protocol.file.allow=always",
                     "submodule", "add", f"file://{self.mid}", "vendor",
                 ],
-                cwd=str(self.repo), check=True, capture_output=True,
+                str(self.repo),
             )
             _git(["commit", "-m", "add vendor submodule"], str(self.repo))
             if init_nested:
-                subprocess.run(
+                _git(
                     [
-                        "git", "-c", "protocol.file.allow=always",
+                        "-c", "protocol.file.allow=always",
                         "submodule", "update", "--init", "--recursive",
                     ],
-                    cwd=str(self.repo), check=True, capture_output=True,
+                    str(self.repo),
                 )
             return True
         except subprocess.CalledProcessError:
@@ -791,7 +775,7 @@ class TestParsePatternsText(unittest.TestCase):
 
 
 
-class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
+class TestGitOutputIsDecodedAsUtf8(HermeticGitTestCase):
     """git の出力は locale に依らず UTF-8 で decode する (0.34.1)。
 
     ``subprocess.run(text=True)`` は ``locale.getpreferredencoding(False)`` で
@@ -804,6 +788,7 @@ class TestGitOutputIsDecodedAsUtf8(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         _init_repo(self.tmp)
