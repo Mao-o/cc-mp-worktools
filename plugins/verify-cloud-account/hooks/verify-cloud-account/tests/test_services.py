@@ -1004,6 +1004,14 @@ class TestLocalResolutionNeedsAConfirmedFirebaserc(_FirebasercFixture):
             "dict, alias not NAME": ({"a:b": "right-project"}, "期待=right-project のいずれか。"),
             "masked": ("x; firebase use evil", "期待=(表示しない値)。"),
             "dict, masked": ({"default": "x; firebase use evil"}, "期待=(表示しない値) のいずれか。"),
+            "dict, several": (
+                {"a:b": "right-project", "c:d": "other-project"},
+                "期待=other-project, right-project のいずれか。",
+            ),
+            "dict, empty and null entries": (
+                {"a:b": "right-project", "c": "", "d": None},
+                "期待=right-project のいずれか。",
+            ),
         }
         failing = SimpleNamespace(stdout="", stderr="", returncode=1)
         for name, (expected, marker) in cases.items():
