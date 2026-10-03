@@ -127,10 +127,36 @@ class TestIsFileLikePy313(unittest.TestCase):
             with self.subTest(name):
                 real = self._result_of(_testutil._REAL_IS_FILE, path, **kwargs)
                 substitute = self._result_of(_testutil._is_file_like_py313, path, **kwargs)
-                if name == "unstattable" and not _testutil.REAL_IS_FILE_RAISES:
-                    self.assertEqual((real, substitute), (False, "OSError"))
+                if name == "unstattable":
+                    # 3.14 未満は本物も投げることまで見る (fixture が stat できてしまう環境では、
+                    # 両方 False で一致して通ってしまう)
+                    expected_real = "OSError" if _testutil.REAL_IS_FILE_RAISES else False
+                    self.assertEqual((real, substitute), (expected_real, "OSError"))
                 else:
                     self.assertEqual(substitute, real)
+
+
+class TestAssertRealIsFileOnThisVersion(unittest.TestCase):
+    """前提の helper (`assert_real_is_file_on_this_version`) 自身のテスト。
+
+    helper が何も確かめなくなっても (no-op)、使う側のテストは green のままになる (マージ前
+    レビューの指摘)。前提と食い違う path を渡すと、どの版でも assertion で落ちることを見る。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_fails_for_a_path_that_contradicts_the_premise(self):
+        regular = self.tmp / "regular"  # stat できるので、3.13 までも投げず、3.14 からも True
+        regular.write_text("x", encoding="utf-8")
+        with self.assertRaises(AssertionError):
+            _testutil.assert_real_is_file_on_this_version(self, regular)
+
+    def test_passes_for_a_path_that_cannot_be_statted(self):
+        unstattable = self.tmp / "long"
+        os.symlink("a" * 300, unstattable)  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
+        _testutil.assert_real_is_file_on_this_version(self, unstattable)
 
 
 if __name__ == "__main__":

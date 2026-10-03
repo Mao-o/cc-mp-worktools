@@ -627,7 +627,10 @@ firebase-tools と同じく symlink を解かないそのパスの親方向だ�
 ように。ただし `--config` のパスが symlink を通るときは、そのディレクトリで切り替えても効かない
 ことがある。firebase-tools は symlink を解かないパスで切替先を探すため。[既知の制限](#既知の制限))。
 この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`) も、下の許容形のものだけを示す
-(外れていれば「表示しない値」)。
+(外れていれば「表示しない値」)。期待値に許容形から外れる値があるときは、「表示していない
+期待値があります (accounts.local.json の "firebase" を確認してください)」と出所を添える
+(現在値を取得できない deny も同じ)。許容形から外れる値はどの project とも一致しないので、
+切り替えても deny が続くため。
 
 ### 検証をスキップする readonly コマンド
 
@@ -1285,6 +1288,11 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   切替先を探すが、そのディレクトリで切り替えると実体のパスで記録されるため。hook も
   firebase-tools と同じ切替先を引く (CLI が無いときのローカル設定の解決も、symlink を解かない
   パスでだけ探す) ので、誤 allow にはならず、同じ deny が続く
+- **存在確認で stat できない accounts.local.json** (長すぎる名前を指す symlink など) は、
+  Python 3.13 以前では「内部エラーのため検証をスキップ」になる (実行は止めない。v0.18.0 時点。
+  pathlib の `Path.is_file()` が stat の失敗を例外にするため)。Python 3.14 以降は、そのファイルが
+  無いものとして扱われる (グローバル既定があればそれで照合し、無ければ未設定として deny)。
+  旧パスのファイルも同じ
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照

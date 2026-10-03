@@ -658,6 +658,8 @@ class _FirebaseConfigFixture(BaseWithTmpProject):
     _COMMAND = "firebase deploy -c sub/firebase.json"
     _NOTE = "案内された形のまま単独で実行してください"
     _GUIDE = "--config のファイルのあるディレクトリで"
+    # 期待値に許容形から外れる値があるときだけ添える、出所の文
+    _SOURCE = '表示していない期待値があります (accounts.local.json の "firebase" を確認してください)'
 
     def setUp(self):
         super().setUp()
@@ -743,6 +745,7 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     reason = out["permissionDecisionReason"]
                     self.assertIn(marker, reason)
                     self.assertIn(self._GUIDE, reason)
+                    self.assertNotIn(self._SOURCE, reason)  # 期待値はすべて許容形
                     self.assertNotIn("firebase use", reason)
                     self.assertNotIn("firebase login", reason)
                     self.assertNotIn(self._NOTE, reason)
@@ -791,7 +794,8 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
         値をそのまま示すと、切替コマンドの形の値が注記の判定に当たる (コマンドで案内する deny の
         `test_no_note_when_the_value_was_not_guided` と同じ契約)。この deny は期待値の形に関係なく
         コマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`。UNSAFE の文) は添えない
-        (添える理由が成り立たない。マージ前レビューの指摘)。
+        (添える理由が成り立たない。マージ前レビューの指摘)。示さない値が 1 つでもあれば出所の文を
+        添える (`test_masked_expected_value_points_to_the_file`)。
         """
         self._record({self.sub: "wrong-project"})
         for expected in (
@@ -806,9 +810,44 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     reason = out["permissionDecisionReason"]
                     self.assertIn(self._GUIDE, reason)
                     self.assertIn("(表示しない値)", reason)
+                    self.assertIn(self._SOURCE, reason)
                     self.assertNotIn("x; firebase use evil", reason)
                     self.assertNotIn(shell_word.UNSAFE, reason)
                     self.assertNotIn(self._NOTE, reason)
+
+    def test_masked_expected_value_points_to_the_file(self):
+        """期待値に許容形から外れる値があるときは、出所の文 (accounts.local.json の "firebase") を
+        添える。不一致の deny (scalar / dict) と、現在値を取得できない deny の両方。
+
+        その値は文面に示さない (`期待=(表示しない値)`。取得できない deny はもともと期待値を示さない)
+        が、許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
+        続く。出所が無いと、何を直せばよいかが文面から消える (マージ前レビューの指摘)。
+        出所の文は REMEDIATION_PATTERNS にも UNSAFE の文にも当たらないので、注記は付かない。
+        """
+        masked = {
+            "scalar": ("x; firebase use evil", ["x; firebase use evil"]),
+            "dict": ({"default": "x y", "b": "p;q"}, ["x y", "p;q"]),
+        }
+        situations = {
+            "mismatch": ({self.sub: "wrong-project"}, "期待=(表示しない値)"),
+            "current unknown": ({}, "現在のプロジェクトを取得できません"),
+        }
+        for name, (expected, raw_values) in masked.items():
+            for situation, (recorded, marker) in situations.items():
+                for with_cli in (True, False):
+                    with self.subTest(name, situation=situation, with_cli=with_cli):
+                        self._write_accounts({"firebase": expected})
+                        self._record(recorded)
+                        out = self._dispatch(with_cli)["hookSpecificOutput"]
+                        self.assertEqual(out["permissionDecision"], "deny")
+                        reason = out["permissionDecisionReason"]
+                        self.assertIn(marker, reason)
+                        self.assertIn(self._GUIDE, reason)
+                        self.assertIn(self._SOURCE, reason)
+                        for raw in raw_values:
+                            self.assertNotIn(raw, reason)
+                        self.assertNotIn(shell_word.UNSAFE, reason)
+                        self.assertNotIn(self._NOTE, reason)
 
     def test_no_note_from_a_current_value_shaped_like_a_command(self):
         """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
@@ -831,6 +870,7 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     reason = out["permissionDecisionReason"]
                     self.assertIn(self._GUIDE, reason)
                     self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(self._SOURCE, reason)  # 出所の文は期待値のときだけ
                     self.assertNotIn(current, reason)
                     self.assertNotIn(self._NOTE, reason)
 

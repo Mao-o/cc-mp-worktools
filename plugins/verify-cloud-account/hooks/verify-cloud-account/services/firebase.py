@@ -512,12 +512,13 @@ _CONFIG_NOT_FOUND = (
 # `firebase use` の切替先を project root ごとに記録し、`--config` 付きのコマンドはそのファイルの
 # あるディレクトリから親方向に探した切替先で動く。そのディレクトリがプロジェクトのディレクトリと
 # 別で、そこに切替先が記録されていると、プロジェクトのディレクトリで `firebase use <期待値>` を
-# 打っても変わらず、案内どおりに切り替えても同じ deny を繰り返していた。コマンドの形では案内
-# しない (REMEDIATION_PATTERNS に当たらない文にする)。括弧の中は、そのファイルがプロジェクトの
-# ディレクトリにあるときも成り立つ文にする。この deny の先頭行に示す値 (`現在=` と `期待=`) も
-# 許容形のものだけにするので、dispatcher の「単独で実行」の注記は付かない (`_shown_current` /
-# `_shown_expected`)。`--config` のパスが symlink を通るときは、そのディレクトリで切り替えても
-# 効かないことがある (firebase-tools は symlink を解かないパスで探す。README の既知の制限)。
+# 打っても変わらない (その形で案内すると、案内どおりに切り替えても同じ deny を繰り返す)。
+# そのためコマンドの形では案内しない (REMEDIATION_PATTERNS に当たらない文にする)。括弧の中は、
+# そのファイルがプロジェクトのディレクトリにあるときも成り立つ文にする。この deny の先頭行に
+# 示す値 (`現在=` と `期待=`) も許容形のものだけにするので、dispatcher の「単独で実行」の注記は
+# 付かない (`_shown_current` / `_shown_expected`)。`--config` のパスが symlink を通るときは、
+# そのディレクトリで切り替えても効かないことがある (firebase-tools は symlink を解かないパスで
+# 探す。README の既知の制限)。
 _SWITCH_IN_CONFIG_DIR = (
     "--config のファイルのあるディレクトリで、期待した project に切り替えてください"
     " (切替先はディレクトリごとに記録され、--config 付きのコマンドはそのファイルのあるディレクトリ"
@@ -525,6 +526,26 @@ _SWITCH_IN_CONFIG_DIR = (
 )
 # deny の先頭行で、許容形 (`shell_word.WORD`) から外れる値の代わりに示す文。
 _NOT_SHOWN = "(表示しない値)"
+# `--config` 付きのコマンドの deny で、期待値に許容形から外れる値があるときに添える文 (v0.18.0)。
+# その値は文面に示さない (不一致の deny の `期待=` では `_NOT_SHOWN`。現在値を取得できない deny は
+# もともと期待値を示さない)。許容形から外れる値はどの project とも一致しないので、案内どおりに
+# 切り替えても deny は続く。何を直せばよいかが文面から消えないよう、出所だけを言う。理由は言わない
+# (この deny は期待値の形に関係なくコマンドの形で案内しないので、`_CHECK_BY_HAND` の言う理由は
+# 成り立たない)。REMEDIATION_PATTERNS にも `shell_word.UNSAFE` の文にも当たらない。
+_EXPECTED_NOT_SHOWN = (
+    f'表示していない期待値があります (accounts.local.json の "{ACCOUNT_KEY}" を確認してください)'
+)
+
+
+def _config_switch_guide(values) -> str:
+    """`--config` 付きのコマンドの deny で、切替を案内する文 (コマンドの形をとらない)。
+
+    `values` (期待値。dict なら有効な値の一覧) に許容形から外れる値があれば、出所を言う文
+    (`_EXPECTED_NOT_SHOWN`) を添える。
+    """
+    if all(shell_word.arg(value) is not None for value in values):
+        return _SWITCH_IN_CONFIG_DIR
+    return f"{_SWITCH_IN_CONFIG_DIR}。{_EXPECTED_NOT_SHOWN}"
 
 
 def _shown_current(value: str) -> str:
@@ -542,7 +563,8 @@ def _shown_expected(values) -> str:
     """`--config` 付きのコマンドの deny の先頭行の `期待=` に示す値 (`, ` 区切り)。
 
     許容形から外れる値は示さない (`_shown_current` と同じ理由)。この deny は期待値の形に関係
-    なくコマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`) は添えない。
+    なくコマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`) は添えない。出所を
+    言う文は `_config_switch_guide` が添える。
     """
     return ", ".join(
         sorted({value if shell_word.arg(value) is not None else _NOT_SHOWN for value in values})
@@ -605,7 +627,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     (firebase-tools の detectProjectRoot と同じ)。ファイルが見つからなければ deny する。
     `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのディレクトリで
     切り替えるよう文で案内する (`_SWITCH_IN_CONFIG_DIR`)。先頭行に示す現在値と期待値も
-    許容形のものだけにする (`_shown_current` / `_shown_expected`)。CLI から現在値を取れない
+    許容形のものだけにし (`_shown_current` / `_shown_expected`)、期待値に許容形から外れる値が
+    あれば出所を言う文を添える (`_config_switch_guide`)。CLI から現在値を取れない
     ときのローカル設定の解決は、configstore を root (firebase-tools の projectRoot) からだけ
     探す (`_from_configstore` の exact)。
     """
@@ -680,7 +703,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             )
         head = "Firebase: 現在のプロジェクトを取得できません。"
         if config_file is not None:
-            return f"{head}ログインしたうえで、{_SWITCH_IN_CONFIG_DIR}。"
+            values = valid if isinstance(expected, dict) else [expected]
+            return f"{head}ログインしたうえで、{_config_switch_guide(values)}。"
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
@@ -702,7 +726,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if config_file is not None:
             return (
                 f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
-                f"期待={_shown_expected(valid)} のいずれか\n{_SWITCH_IN_CONFIG_DIR}"
+                f"期待={_shown_expected(valid)} のいずれか\n{_config_switch_guide(valid)}"
             )
         expected_display = ", ".join(sorted(set(valid)))
         head = (
@@ -718,7 +742,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if config_file is not None:
             return (
                 f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
-                f"期待={_shown_expected([expected])} — {_SWITCH_IN_CONFIG_DIR}"
+                f"期待={_shown_expected([expected])} — {_config_switch_guide([expected])}"
             )
         head = f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, 期待={expected}"
         target = _target(expected)

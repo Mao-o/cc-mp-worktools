@@ -1267,7 +1267,12 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   False。違うのは 3.14 で本物が変わった「stat できないパス」だけ。`TestIsFileLikePy313`)。使う
   側は、本物がその版で同じ fixture にどう振る舞うか (3.13 までは OSError、3.14 からは False。
   `_testutil.assert_real_is_file_on_this_version`) も前提として確かめる (前提の assertion が
-  差し替えの側しか見ていなかった。マージ前レビューの指摘)
+  差し替えの側しか見ていなかった。マージ前レビューの指摘)。その helper 自身も、前提と食い違う
+  path (通常のファイル) を渡すとどの版でも AssertionError になることを確かめる
+  (`TestAssertRealIsFileOnThisVersion`。helper を no-op にしても、使う側のテストは green の
+  ままだった。マージ前レビューの指摘)。`TestIsFileLikePy313` の「stat できないパス」も、3.14
+  未満では本物が OSError を投げることまで見る (fixture が stat できてしまう環境で、両方 False の
+  一致で通らないように)
 - `.firebaserc` を読むのは `_read_firebaserc` だけにし、判定と解決に 1 回の読み込みの結果を
   使う。別々に `json.loads` すると、入れ子の深さが再帰の上限の境目にあるファイルで、呼び出しの
   深さの違いから片方だけが RecursionError になり、「同じに読める」と判定した内容と違う内容で
@@ -1352,6 +1357,14 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   レビューの指摘)。`_shown_current` は `--config` の無い不一致の deny にも当てる (そちらは
   表示だけの変更。コマンドで案内すれば注記は付き、期待値が許容形でなければ `_CHECK_BY_HAND`
   で外れる)
+- ただし期待値を示さないと、何を直せばよいかが文面から消える。許容形から外れる期待値は
+  どの project とも一致しないので、案内どおりに切り替えても deny は続く (`--config` の無い
+  deny は `_CHECK_BY_HAND` で accounts.local.json を指す)。そのため期待値に許容形から外れる値が
+  あるときは、出所だけを言う文 (`_EXPECTED_NOT_SHOWN`:「表示していない期待値があります
+  (accounts.local.json の "firebase" を確認してください)」) を添える (`_config_switch_guide`。
+  不一致の deny の scalar / dict と、もともと期待値を示さない「現在値を取得できない」deny の
+  3 か所。マージ前レビューの指摘)。理由は言わないので上の判断と食い違わず、REMEDIATION_PATTERNS
+  にも UNSAFE の文にも当たらないので注記も付かない
 - 末尾に `--config` を付けた切替 (`firebase use <期待値> -c <path>`) は self-remediation
   に当たらず通常検証に落ちる (そのディレクトリの切替先が期待値と違うあいだは deny。安全側。
   `is_self_remediation` の剥がす option を広げるのは判定表の変更なので、kubectl の
@@ -1399,9 +1412,11 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   cache の entry・epoch の 3 か所だけを直した。残りの同じ形 (accounts.local.json の探索・auto_switch の記録・
   gcloud の構成ファイルなど) は確認済みではない (`.git` の判定は try の中で OSError を握って
   いるので当たらない)。accounts.local.json の探索は実際に、stat できないファイル (長すぎる名前を
-  指す symlink) で Python 3.13 までまだ検証をスキップする (CHANGELOG の既知の制限。マージ前
-  レビューの実測)。False (ファイルが無い) に倒すと検証が黙って無くなる向きの場所もあるので、
-  場所ごとに倒す向きを決めて別に扱う (内部バックログ)
+  指す symlink) で Python 3.13 までまだ検証をスキップする (README の既知の制限。マージ前
+  レビューの実測)。3.14 では、そのファイルを無いものとして扱い、グローバル既定があればそれで
+  照合する (一致すれば allow。無ければ未設定の deny。dispatch を直接呼んで実測)。False (ファイルが
+  無い) に倒すと検証が黙って無くなる向きの場所もあるので、場所ごとに倒す向きを決めて別に扱う
+  (内部バックログ)
 - 確認 (Python 3.9): 実プロセスの `__main__` で、accounts.local.json は 25〜40 段と
   975〜1,000 段、`.firebaserc` は 975〜1,000 段のすべての深さで、warn (検証のスキップ) に
   ならないことを確かめた
