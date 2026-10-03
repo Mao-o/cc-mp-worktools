@@ -20,7 +20,7 @@ when_to_use: |
   "Durable Objects", "Cloudflare Pages", "Queues", "Workers AI", "Vectorize",
   "Hyperdrive", "Cloudflare Agents", "Cloudflare Workflows", "AI Gateway",
   "Browser Rendering", "Cloudflare Containers", "agentskills.io", "SKILL.md spec",
-  "Agent Plugins", "OpenAI Plugins", "OpenAI API", "ACP", "Cline", "Factory", "Devin",
+  "Agent Plugins", "OpenAI Plugins", "OpenAI API", "ACP", "Cline", "Factory Droid", "Devin",
   "researching-library-docs"
 argument-hint: "[source] <question>"
 context: fork

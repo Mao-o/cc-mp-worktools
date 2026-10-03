@@ -200,7 +200,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `openai-api-docs` | OpenAI API docs (`developers.openai.com/api/docs`) | 一部 (同上。232 中 220) |
 | `acp` | Agent Client Protocol (ACP) | あり |
 | `cline` | Cline | あり |
-| `factory` | Factory (Droid) | 一部 (同上。104 中 104) |
+| `factory` | Factory (Droid) | あり (`llms.txt` とタイトルで突き合わせ。104 中 104) |
 | `devin` | Devin | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 

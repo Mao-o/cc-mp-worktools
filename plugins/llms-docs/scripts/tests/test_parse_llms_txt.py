@@ -567,6 +567,10 @@ class PresetsTest(unittest.TestCase):
                 self.assertTrue(p["url"].startswith("https://"), p["url"])
                 tail = "/llms.txt" if name in whole_text_llms_txt else "/llms-full.txt"
                 self.assertTrue(p["url"].endswith(tail), p["url"])
+                if name in whole_text_llms_txt:
+                    # the url already is the llms.txt; an index_url would only
+                    # point at the same file again
+                    self.assertIsNone(p["index_url"])
                 self.assertTrue(p["description"])
 
     def test_a_preset_index_url_is_the_llms_txt_next_to_its_llms_full_txt(self):
@@ -624,7 +628,7 @@ class PresetsTest(unittest.TestCase):
         from urllib.parse import urlsplit
         readme = Path(generic.PRESETS_FILE).parents[1] / "README.md"
         text = readme.read_text(encoding="utf-8")
-        m = re.search(r"\*\*取得先のホスト\*\*.*?```text\n(.*?)```", text, re.S)
+        m = re.search(r"\*\*取得先のホスト\*\*(?:(?!```).)*```text\n(.*?)```", text, re.S)
         self.assertIsNotNone(m, "README lost the machine-readable host list")
         listed = [line.strip() for line in m.group(1).splitlines() if line.strip()]
         self.assertEqual(len(listed), len(set(listed)), "a host is listed twice")
