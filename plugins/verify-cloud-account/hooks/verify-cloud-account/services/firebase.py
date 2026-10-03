@@ -527,11 +527,11 @@ _SWITCH_IN_CONFIG_DIR = (
 # deny の先頭行で、許容形 (`shell_word.WORD`) から外れる値の代わりに示す文。
 _NOT_SHOWN = "(表示しない値)"
 # `--config` 付きのコマンドの deny で、期待値に許容形から外れる値があるときに添える文 (v0.18.0)。
-# その値は文面に示さない (不一致の deny の `期待=` では `_NOT_SHOWN`。現在値を取得できない deny は
-# もともと期待値を示さない)。許容形から外れる値はどの project とも一致しないので、案内どおりに
-# 切り替えても deny は続く。何を直せばよいかが文面から消えないよう、出所だけを言う。理由は言わない
-# (この deny は期待値の形に関係なくコマンドの形で案内しないので、`_CHECK_BY_HAND` の言う理由は
-# 成り立たない)。REMEDIATION_PATTERNS にも `shell_word.UNSAFE` の文にも当たらない。
+# その値は文面に示さない (`期待=` では `_NOT_SHOWN`。不一致の deny も、現在値を取得できない deny も
+# 同じ)。許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
+# 続く。何を直せばよいかが文面から消えないよう、出所だけを言う。理由は言わない (この deny は
+# 期待値の形に関係なくコマンドの形で案内しないので、`_CHECK_BY_HAND` の言う理由は成り立たない)。
+# REMEDIATION_PATTERNS にも `shell_word.UNSAFE` の文にも当たらない。
 _EXPECTED_NOT_SHOWN = (
     f'表示していない期待値があります (accounts.local.json の "{ACCOUNT_KEY}" を確認してください)'
 )
@@ -703,8 +703,15 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             )
         head = "Firebase: 現在のプロジェクトを取得できません。"
         if config_file is not None:
+            # 期待値は示す (許容形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
+            # `firebase use <期待値>` を案内し、どの project に切り替えるかを言っていた。この deny は
+            # コマンドの形で案内しないので、示さないとそれが文面から消える。
             values = valid if isinstance(expected, dict) else [expected]
-            return f"{head}ログインしたうえで、{_config_switch_guide(values)}。"
+            either = " のいずれか" if isinstance(expected, dict) else ""
+            return (
+                f"{head}期待={_shown_expected(values)}{either}。"
+                f"ログインしたうえで、{_config_switch_guide(values)}。"
+            )
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。

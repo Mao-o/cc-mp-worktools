@@ -730,8 +730,18 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                 switched,
                 "現在=wrong-project",
             ),
-            # どこにも切替先が無い
-            "nothing recorded": ("right-project", {}, "現在のプロジェクトを取得できません"),
+            # どこにも切替先が無い。期待値は示す (0.17.1 の案内 `firebase use <期待値>` も名前を
+            # 出していた)。末尾の「。」まで見て、「のいずれか」が dict にだけ付くことも確かめる
+            "nothing recorded": (
+                "right-project",
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project。",
+            ),
+            "dict, nothing recorded": (
+                {"default": "right-project", "staging": "staging-project"},
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+            ),
         }
         for with_cli in (True, False):
             for name, (expected, recorded, marker) in cases.items():
@@ -819,8 +829,8 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
         """期待値に許容形から外れる値があるときは、出所の文 (accounts.local.json の "firebase") を
         添える。不一致の deny (scalar / dict) と、現在値を取得できない deny の両方。
 
-        その値は文面に示さない (`期待=(表示しない値)`。取得できない deny はもともと期待値を示さない)
-        が、許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
+        その値は文面に示さない (`期待=(表示しない値)`。不一致の deny も、現在値を取得できない deny
+        も) が、許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
         続く。出所が無いと、何を直せばよいかが文面から消える (マージ前レビューの指摘)。
         出所の文は REMEDIATION_PATTERNS にも UNSAFE の文にも当たらないので、注記は付かない。
         """
@@ -830,7 +840,7 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
         }
         situations = {
             "mismatch": ({self.sub: "wrong-project"}, "期待=(表示しない値)"),
-            "current unknown": ({}, "現在のプロジェクトを取得できません"),
+            "current unknown": ({}, "現在のプロジェクトを取得できません。期待=(表示しない値)"),
         }
         for name, (expected, raw_values) in masked.items():
             for situation, (recorded, marker) in situations.items():
@@ -848,6 +858,27 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                             self.assertNotIn(raw, reason)
                         self.assertNotIn(shell_word.UNSAFE, reason)
                         self.assertNotIn(self._NOTE, reason)
+
+    def test_shown_expected_value_has_no_source_sentence(self):
+        """`期待=` に示せる値 (WORD。NAME から外れるドメイン付きの project ID も含む) だけなら、
+        出所の文は添えない (示さない値があるときだけ添える。`_shown_expected` と同じ判定)。
+        不一致の deny も、現在値を取得できない deny も、その値を `期待=` に示す。"""
+        situations = {
+            "mismatch": ({self.sub: "wrong-project"}, "現在=wrong-project"),
+            "current unknown": ({}, "現在のプロジェクトを取得できません"),
+        }
+        for expected in ("example.com:right-project", {"default": "example.com:right-project"}):
+            for situation, (recorded, marker) in situations.items():
+                for with_cli in (True, False):
+                    with self.subTest(expected=expected, situation=situation, with_cli=with_cli):
+                        self._write_accounts({"firebase": expected})
+                        self._record(recorded)
+                        out = self._dispatch(with_cli)["hookSpecificOutput"]
+                        self.assertEqual(out["permissionDecision"], "deny")
+                        reason = out["permissionDecisionReason"]
+                        self.assertIn(marker, reason)
+                        self.assertIn("期待=example.com:right-project", reason)
+                        self.assertNotIn(self._SOURCE, reason)
 
     def test_no_note_from_a_current_value_shaped_like_a_command(self):
         """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
