@@ -60,6 +60,17 @@ class FenceTracker:
       would hide the text that follows. A ``{/*`` inside a code block is
       content (a page showing how to write a comment), and so is the
       ```` ``` */} ```` after it: that block closes at a bare closer.
+
+    One narrow guard for the indentation departure: a bare run (no info
+    string) indented 4+ spaces opens a block only once the next non-blank
+    line confirms it by being indented at least as deep. When that line is
+    shallower, the block would have no content at its own depth: the run is
+    a stray closer left after an indented code block in a list item
+    (Firebase writes ``       firebase::...`` code lines and then a lone
+    ``       ```  ``), so no block opens. Until confirmed, the run and the
+    blank lines after it are reported as outside (they hold no heading),
+    so a caller that skips a line when the state before *or* after it is
+    "inside" still sees the shallower line.
     """
 
     def __init__(self):
@@ -67,9 +78,20 @@ class FenceTracker:
         self._fence_len = 0
         self._fence_char = ""
         self._in_mdx_comment = False  # a ``{/*`` seen outside a fence, not yet closed
+        self._pending = None  # (indent, run, char) of a bare 4+-indented opener not yet confirmed
 
     def update(self, line: str) -> bool:
         """Update state for *line* and return True if inside a fence AFTER update."""
+        if self._pending is not None:
+            if not line.strip():
+                return self.in_fence
+            (indent, run, ch), self._pending = self._pending, None
+            if len(line) - len(line.lstrip(" ")) >= indent:
+                # content at the opener's depth: the block did open
+                self.in_fence = True
+                self._fence_len = run
+                self._fence_char = ch
+            # else: a stray closer, nothing opened; read this line afresh
         stripped = line.lstrip()
         for ch in ("`", "~"):
             if stripped.startswith(ch * 3):
@@ -80,9 +102,13 @@ class FenceTracker:
                     if mdx_comment_end:
                         self._in_mdx_comment = False
                     else:
-                        self.in_fence = True
-                        self._fence_len = run
-                        self._fence_char = ch
+                        indent = len(line) - len(line.lstrip(" "))
+                        if not after and indent >= 4:
+                            self._pending = (indent, run, ch)
+                        else:
+                            self.in_fence = True
+                            self._fence_len = run
+                            self._fence_char = ch
                 elif (ch == self._fence_char and run >= self._fence_len
                         and (not after or (mdx_comment_end and self._in_mdx_comment))):
                     self.in_fence = False
