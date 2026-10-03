@@ -20,6 +20,20 @@ All notable changes to this plugin will be documented here.
 `search-content` / `search-index` の出力は `doc_idx` が source 内でしか一意でなく、見出しを source ごとに
 分けて Next: も作り直す必要があり、`search` と役割が重なる。案内で足りる誤りなので、挙動は増やさない。
 出した行は、テストで 1 行ずつそのまま実行して exit 0 になることを確かめている。
+
+マージ前レビューの指摘を受けて、同じ 0.30.1 の中で次を直した:
+
+- `--file` を付けたときは、その snapshot の source の行だけを出す (ファイル名から source を判定できないときは、
+  「snapshot がとれた source の行だけ残す」旨の注記を出す)。以前は同じ `--file` を両 source の行に付けていたため、
+  1 本は exit 1 になるか、別 source の中身を黙って読んでいた
+- 省略形 (`--sour both`) で打たれたときは、行の末尾に `--source <key>` を足す (後に書いたほうが勝つ)。`--` がある
+  ときはその手前に入れる
+- クエリが `-` で始まるときは、案内する `search` の行にオプションを先に置き、`--` を挟んでクエリを最後に置く
+- `--source` の help を「`both` は search だけ」と読める文言にした
+- SKILL.md の「1 source ずつ」の列挙に `fetch-index` を足した
+
+往復テストは、出た行を加工せずに shell の規則で分割して実行する。`--file` あり / なし、`--source=both` の形、
+省略形、`-` で始まるクエリの各軸を 1 件以上回す。
 SKILL.md (researching-claude-docs) は、`both` を受けるのが `search` だけであることと、失敗時の対処の表に行を足した。
 
 ## [0.30.0] - 2026-10-04

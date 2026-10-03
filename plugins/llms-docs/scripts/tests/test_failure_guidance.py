@@ -496,6 +496,81 @@ class ClaudeDocsSourceBothTest(unittest.TestCase):
         code, out, err = self.run_cmd("search", "alphaterm", "--source", "both")
         self.assertEqual(code, 0, err)
 
+    # -- round trip: every printed line, split as a shell would, must run ------
+
+    def run_printed(self, argv, *, expect_lines=2):
+        """Run *argv* (exit 2), then every command it printed, unmodified."""
+        code, out, err = _loader.run_cli(self.module, [self.script, *argv])
+        self.assertEqual(code, 2, err)
+        lines = [ln.strip() for ln in err.splitlines()
+                 if ln.strip().startswith(self.script + " ")]
+        self.assertGreaterEqual(len(lines), expect_lines, err)
+        for line in lines:
+            with self.subTest(argv=argv, line=line):
+                code, out2, err2 = self.run_line(line)
+                self.assertEqual(code, 0, f"{line}\n{err2}")
+        return lines, err
+
+    def use_file(self):
+        patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": self.tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_round_trip_without_file(self):
+        c = ["--cache-dir", self.tmp]
+        self.run_printed(["content", "0", "--source", "both", *c], expect_lines=2)
+        self.run_printed(["search-content", "alphaterm", "--source=both", *c], expect_lines=3)
+
+    def test_round_trip_with_file_keeps_only_the_snapshots_own_source(self):
+        self.use_file()
+        full = str(Path(self.tmp, "claude-code-llms-full.txt"))
+        for argv in (["content", "0"], ["sections", "0"], ["search-content", "alphaterm"]):
+            with self.subTest(argv=argv):
+                lines, err = self.run_printed([*argv, "--source", "both", "--file", full],
+                                              expect_lines=1)
+                self.assertTrue(all("--source code" in ln for ln in lines), lines)
+                self.assertFalse(any("--source platform" in ln for ln in lines), lines)
+        # the --source=both spelling takes the same path
+        lines, err = self.run_printed(["content", "0", "--source=both", "--file", full],
+                                      expect_lines=1)
+        self.assertEqual(len(lines), 1, lines)
+
+    def test_file_that_names_no_source_says_to_keep_one_line(self):
+        self.use_file()
+        snap = str(Path(self.tmp, "snap.txt"))
+        shutil.copy(Path(self.tmp, "claude-code-llms-full.txt"), snap)
+        code, out, err = _loader.run_cli(
+            self.module, [self.script, "content", "0", "--source", "both", "--file", snap])
+        self.assertEqual(code, 2, err)
+        self.assertIn("keep only the line", err)
+
+    def test_abbreviated_option_still_gets_a_source_per_line(self):
+        c = ["--cache-dir", self.tmp]
+        lines, err = self.run_printed(["search-content", "alphaterm", "--sour", "both", *c],
+                                      expect_lines=3)
+        singles = [ln for ln in lines if " search " not in ln]
+        self.assertTrue(any(ln.endswith("--source code") or "--source code " in ln
+                            for ln in singles), singles)
+        self.assertTrue(any("--source platform" in ln for ln in singles), singles)
+
+    def test_a_query_starting_with_a_dash_gets_double_dash_in_search(self):
+        c = ["--cache-dir", self.tmp]
+        lines, err = self.run_printed(
+            ["search-content", "--source", "both", *c, "--", "-foo"], expect_lines=3)
+        searches = [ln for ln in lines if f"{self.script} search " in ln]
+        self.assertEqual(len(searches), 1, lines)
+        self.assertIn("-- -foo", searches[0])
+        self.assertLess(searches[0].index("--source"), searches[0].index("-- -foo"))
+        # the per-source lines keep the "--" the user typed and gain no
+        # --source after it
+        for ln in lines:
+            if ln not in searches:
+                self.assertLess(ln.index("--source"), ln.index("-- -foo"), ln)
+
+    def test_help_does_not_advertise_both_as_a_general_choice(self):
+        code, out, err = _loader.run_cli(self.module, [self.script, "content", "-h"])
+        self.assertIn("only for search", " ".join((out + err).split()))
+
 
 class ClaudeDocsSlugTest(unittest.TestCase):
     """``hooks`` is ``/en/hooks``, not ``/en/agent-sdk/hooks``."""

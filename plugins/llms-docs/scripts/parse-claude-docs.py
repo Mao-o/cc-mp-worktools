@@ -1130,22 +1130,32 @@ def _add_source_arg(parser) -> None:
     # really handles it (it declares its own --source option).
     parser.add_argument(
         "--source", choices=list(SOURCES.keys()) + ["both"], default=DEFAULT_SOURCE,
-        help=f"Documentation source (default: {DEFAULT_SOURCE})",
+        help=f"Documentation source (default: {DEFAULT_SOURCE}; 'both' is only for search)",
     )
 
 
 def _argv_with_source(argv: list, source: str) -> list:
     """*argv* with the ``--source both`` the caller typed replaced by *source*."""
     out = []
+    replaced = False
     i = 0
     while i < len(argv):
         tok = argv[i]
         if tok == "--source" and i + 1 < len(argv) and argv[i + 1] == "both":
             out += [tok, source]
             i += 2
+            replaced = True
             continue
+        if tok == "--source=both":
+            replaced = True
         out.append(f"--source={source}" if tok == "--source=both" else tok)
         i += 1
+    if not replaced:
+        # argparse accepts an abbreviation (``--sour both``) that is left as
+        # typed above; the option given last wins, so add the real one. It has
+        # to come before a ``--``, after which everything is positional.
+        at = out.index("--") if "--" in out else len(out)
+        out[at:at] = ["--source", source]
     return out
 
 
@@ -1165,12 +1175,26 @@ def _reject_source_both(args) -> None:
           f"is not accepted (choose from {', '.join(SOURCES)})", file=sys.stderr)
     # ``search --file`` cannot cover both sources, so it is not offered then
     if hasattr(args, "query") and not getattr(args, "file", None):
-        both = " ".join([script, "search", shlex.quote(args.query), "--source", "both",
-                         *corpus_hint_args(args)])
+        # a query starting with "-" needs "--" (after which only positionals)
+        q = ["--", args.query] if args.query.startswith("-") else [args.query]
+        opts = ["--source", "both", *corpus_hint_args(args)]
+        both = " ".join([script, "search", *(shlex.quote(t) for t in
+                         (opts + q if q[0] == "--" else q + opts))])
         print("To search both sources in one go, use search:", file=sys.stderr)
         print(f"  {both}", file=sys.stderr)
     print("Or run this command once per source:", file=sys.stderr)
-    for key in SOURCES:
+    # ``--file`` is a snapshot of one source: offering it with the other one
+    # would read the wrong corpus (or be refused), so keep only its own line
+    keys = list(SOURCES)
+    file_val = getattr(args, "file", None)
+    if file_val:
+        guessed = _resolve_source_from_path(file_val)
+        if guessed:
+            keys = [guessed[0]]
+        else:
+            print("Note: --file is a snapshot of one source; keep only the line "
+                  "for the source it was taken from.", file=sys.stderr)
+    for key in keys:
         line = " ".join([script] + [shlex.quote(t) for t in _argv_with_source(argv, key)])
         print(f"  {line}", file=sys.stderr)
     if args.command in ("content", "sections"):

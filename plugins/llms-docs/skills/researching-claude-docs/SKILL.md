@@ -121,7 +121,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 
 **anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
 
-`--source both` を受けるのは `search` だけ (`search-content` / `search-index` / `content` / `sections` は 1 source ずつ)。`--source both` のときは結果に `[code]` / `[platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <code|platform>` を明示する。
+`--source both` を受けるのは `search` だけ (`search-content` / `search-index` / `content` / `sections` / `fetch-index` は 1 source ずつ)。`--source both` のときは結果に `[code]` / `[platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <code|platform>` を明示する。
 
 ### Step 2: 該当セクションの本文を取得
 
