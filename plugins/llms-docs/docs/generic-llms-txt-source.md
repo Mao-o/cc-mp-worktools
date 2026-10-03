@@ -245,10 +245,34 @@ preset の `url` / `index_url` を移転先にし、`description` を更新し�
   ファイルなので除かれ (0.28.1)、後者はタイトルの合うページが無い。どちらもページの URL にはなっていない。
   別のタイトルの項目 2 つが同じ URL を指す組が 2 つある (`developer-commands.md?surface=cli` と
   `?surface=ide`)。この 4 ページは、組ごとに同じ URL を持つ。どれもサイト側の問題で、手を入れない
-- `index_url` は `url` の `llms-full.txt` と同じディレクトリの `llms.txt` (`/docs/llms.txt`)。5 件の
-  presets (zod / hono / render / codex / cloudflare-browser-rendering) はいずれもこの形。移転元が転送して
+- `index_url` は `url` の `llms-full.txt` と同じディレクトリの `llms.txt` (`/docs/llms.txt`)。`index_url` を
+  持つ presets はいずれもこの形 (この時点では 5 件。0.29.0 で cloudflare-browser-rendering から外して、
+  zod / hono / render / codex の 4 件)。移転元が転送して
   いる間は片方だけ古くても動くため気付きにくく、`url` と `index_url` が別のサイト・別の範囲を指さない
   ことをテストで固定した
+
+### 2026-10-04: Cloudflare Browser Rendering の移転 (製品名が Browser Run に)
+
+`/browser-rendering/llms.txt` は HTTP 301 で `/browser-run/llms.txt` へ移っていた。`llms-full.txt` は
+`/browser-rendering/` 側が 200 のまま残っているが、**内容は移転先と同じではなく、古い版**だった。
+
+| | `/browser-rendering/llms-full.txt` (旧) | `/browser-run/llms-full.txt` (新) |
+|---|---|---|
+| 大きさ | 422 KB | 667 KB |
+| ページ数 (preset で分割) | 47 | 52 |
+| ページ内の `View as Markdown` の URL | 0 | 51 |
+| 同じディレクトリの `llms.txt` で URL が付いたページ | 40 | 0 (必要なかった) |
+
+- `llms.txt` は旧 URL と新 URL で内容が同じ (バイト単位で一致、52 項目)。旧の `llms-full.txt` は製品の改名前の
+  テンプレートで、ページ内に URL を持たない。新は他の Cloudflare の製品別ファイルと同じテンプレートで、
+  ページの URL を自分で持つ
+- preset `cloudflare-browser-rendering` の `url` を `/browser-run/` に移し、`index_url` は外した。source 名は
+  利用者が使っているので変えない。新しい `llms-full.txt` はページの URL を自分で持ち、`llms.txt` で URL が
+  付くページは 0 だった (URL の無い 1 ページは、他の製品と同じ API リファレンス)。
+  効かない `index_url` を残すと、取得と点検の対象が 1 つ増えるだけなので、他の Cloudflare 製品と同じく
+  持たない形にした
+- 他の 14 件の Cloudflare 製品と、`index_url` を持つ他の presets の取得先は、点検スクリプト
+  (`scripts/check-preset-urls.py`) の実行で 200 のままだった
 
 ## 3. 需要の根拠
 

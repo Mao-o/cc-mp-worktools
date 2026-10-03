@@ -577,6 +577,20 @@ class PresetsTest(unittest.TestCase):
                 self.assertTrue(p["index_url"].endswith("/llms.txt"), p["index_url"])
                 self.assertEqual(p["index_url"].rsplit("/", 1)[0], p["url"].rsplit("/", 1)[0])
 
+    def test_browser_rendering_preset_follows_the_product_to_browser_run(self):
+        # The product was renamed and /browser-rendering/llms.txt redirects to
+        # /browser-run/. The old llms-full.txt is still served, but it is an
+        # older snapshot (47 pages, no URL inside the pages), so the preset
+        # (whose name users already use) must read the new location. The new
+        # file carries a URL in every page that has one, so it needs no
+        # index_url (an old one left behind would be a 301 to keep checking).
+        p = generic._read_sources_file(generic.PRESETS_FILE)["cloudflare-browser-rendering"]
+        self.assertEqual(p["url"], "https://developers.cloudflare.com/browser-run/llms-full.txt")
+        self.assertIsNone(p["index_url"])
+        # the current template carries each page's own URL
+        docs = generic.split_documents(_lines(CLOUDFLARE_LIKE), p)
+        self.assertEqual(docs[0]["url"], "https://example.com/product/index.md")
+
     def test_skill_source_table_matches_the_presets(self):
         # researching-library-docs lists the presets by hand (description and
         # the Step 0 table); a preset added or renamed without the skill would

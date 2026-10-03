@@ -19,15 +19,19 @@ renderers never build corpus flags themselves. The calling script composes
 every ``next_hint`` call here forwards ``*hint_args`` unchanged.
 """
 
+import shlex
 from dataclasses import dataclass, field
 
 from _common import (
+    content_command,
+    duplicate_heading_note,
     extract_content,
     extract_sections,
     format_heading_path_for_display,
     next_hint,
     print_metadata_header,
     print_subsection_hints,
+    retry_option_args,
     truncate_content,
 )
 
@@ -98,7 +102,10 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
     if page.protect_tables is not None:
         content_kwargs = {"protect_tables": page.protect_tables, **content_kwargs}
     content, resolved_heading_path = extract_content(
-        page.body_lines, args.heading_path, **content_kwargs,
+        page.body_lines, args.heading_path,
+        retry=lambda heading: content_command(
+            script, page.idx, heading, retry_option_args(args, "content") + tuple(hint_args)),
+        **content_kwargs,
     )
 
     if transform is not None:
@@ -217,3 +224,154 @@ def print_search_result(head: str, hits: dict, *, extra_lines=(), anchor_for=Non
     else:
         print("    (no body hits — index match only)")
     print()
+
+
+NEXT_CONTENT_LIMIT = 3
+
+
+def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT) -> list:
+    """Pick the ``content`` targets to suggest from ranked search results.
+
+    *ranked* is ``[(ref, hits, extra_args), ...]`` in display order: *ref* is
+    the page reference the ``content`` command takes, *hits* the page's
+    ``search_content_in_body`` result, *extra_args* any per-page option (the
+    ``--source`` of that page). Returns ``[(ref, heading_path | None,
+    extra_args, heading_count), ...]``, at most *limit*: the best section of
+    each top page first, then the next sections of the top page if there is
+    room. A page ranked on the index only (no body hits) is offered, without
+    a heading, only when no page has a body hit. *heading_count* is how many
+    sections of the page share that heading_path (1 when unique or unknown).
+    """
+    firsts = []
+    spare = []
+    index_only = []
+    for ref, hits, extra in ranked:
+        sections = hits.get("results") or []
+        if not sections:
+            index_only.append((ref, None, extra, 1))
+            continue
+        firsts.append((ref, sections[0]["heading_path"], extra,
+                       sections[0].get("heading_count", 1)))
+        spare += [(ref, r["heading_path"], extra, r.get("heading_count", 1))
+                  for r in sections[1:]]
+    # A page that only ranked on the index is worth suggesting only when no
+    # page has a body hit to point at.
+    picked = (firsts or index_only)[:limit]
+    if len(picked) < limit and picked:
+        top_ref = picked[0][0]
+        # A repeated heading_path hits more than once, but every copy prints
+        # the same command; offer it once.
+        for c in spare:
+            if len(picked) >= limit:
+                break
+            if c[0] == top_ref and all(c[1] != p[1] for p in picked if p[0] == top_ref):
+                picked.append(c)
+    return picked
+
+
+def render_next_content(candidates: list, *, hint_args: tuple) -> None:
+    """Print up to three ``Next: ... content <page> "<heading>"`` lines, filled
+    in from the search results just shown (no placeholders to copy by hand).
+
+    Falls back to the generic placeholder hint when *candidates* is empty.
+    Each candidate is ``(ref, heading_path | None, extra_args,
+    heading_count)``; *extra_args* goes before *hint_args* (a per-page
+    ``--source``). A heading_path the page has more than once gets a note
+    after the command: the command reads the first, which may not be the
+    section that matched.
+    """
+    if not candidates:
+        next_hint("content", "<page_ref>", '"<heading_path>"', *hint_args)
+        return
+    for ref, heading, extra, count in candidates[:NEXT_CONTENT_LIMIT]:
+        heading_args = (shlex.quote(heading),) if heading is not None else ()
+        note = duplicate_heading_note(count)
+        next_hint("content", str(ref), *heading_args, *extra, *hint_args,
+                  *((note.strip(),) if note else ()))
+
+
+def term_page_counts(texts, query: str) -> tuple:
+    """``([(term, pages_containing_it), ...], pages_checked)`` for *query*.
+
+    Terms are the whitespace-separated keywords ``search_content_in_body``
+    uses, matched the same way (case-insensitive substring). *texts* yields
+    one string (or list of lines) per page.
+    """
+    terms = []
+    for t in query.split():
+        t = t.lower()
+        if t not in terms:
+            terms.append(t)
+    counts = {t: 0 for t in terms}
+    checked = 0
+    for text in texts:
+        if not isinstance(text, str):
+            text = "".join(text)
+        text = text.lower()
+        checked += 1
+        for t in terms:
+            if t in text:
+                counts[t] += 1
+    return [(t, counts[t]) for t in terms], checked
+
+
+def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
+                     scope: str = "pages", restricted_to=None,
+                     restricted_only: bool = False, alt_hint_args=None,
+                     index_hint_args=None) -> None:
+    """Explain an empty search result and print the next commands to try.
+
+    Shows how many pages contain each term, so "the word is not in these
+    docs" can be told apart from "the words never appear together in one
+    section" (search needs half or more of the terms in the same section) and
+    from "``--page-ref`` cut it out" (*restricted_to* is the page reference
+    when the search was limited to one page; *restricted_only* says *texts*
+    holds just that page too). *scope* names what *texts*
+    holds (``"pages"`` or ``"index entries (title/description)"``);
+    *subcommand* is the command that came back empty. *alt_hint_args*, when
+    given, is the full option tuple of another source to try the same query on.
+    *index_hint_args* is the option tuple for the ``search-index`` hint; when
+    ``None`` that hint is not printed (claude-docs' ``search-index`` has no
+    ``--file``, so with ``--file`` there is no ``search-index`` to point at).
+    """
+    counts, checked = term_page_counts(texts, query)
+    if not counts:
+        return
+    print(f"Why nothing matched: {checked} {scope} checked, "
+          f"how many contain each term:")
+    for term, n in counts:
+        note = "  <- not in this corpus" if n == 0 else ""
+        print(f'  "{term}": {n} of {checked}{note}')
+    present = [t for t, n in counts if n]
+    absent = [t for t, n in counts if not n]
+    reduced = None
+    if restricted_only:
+        # Only the --page-ref page was loaded (Firebase fetches lazily), so
+        # the counts say nothing about the other pages.
+        print(f"The counts cover only the --page-ref {restricted_to} page; "
+              f"other pages were not fetched. Drop --page-ref to search them all.")
+        restricted_to = None
+    elif not present:
+        index = "'search-index' (titles / descriptions), " if index_hint_args is not None else ""
+        print("None of the terms appears anywhere, so rewording the same idea "
+              f"is unlikely to help; try a different word, {index}or another source.")
+    elif absent:
+        print(f"Terms with 0 pages are not in this corpus: {', '.join(absent)}. "
+              f"Drop them.")
+        reduced = " ".join(present)
+    elif len(present) > 1:
+        rarest = min(counts, key=lambda c: c[1])[0]
+        print("Every term appears, but not together in one section. Use fewer "
+              "terms; the rarest one is the most specific.")
+        reduced = rarest
+    else:
+        print("The term appears, but nothing in the targeted pages matched it.")
+    if restricted_to is not None:
+        print(f"(--page-ref {restricted_to} limited the search to one page; "
+              f"drop it to search the whole corpus.)")
+    if reduced is not None and reduced != query.strip().lower():
+        next_hint(subcommand, shlex.quote(reduced), *hint_args)
+    if subcommand != "search-index" and index_hint_args is not None:
+        next_hint("search-index", shlex.quote(query), *index_hint_args)
+    if alt_hint_args is not None:
+        next_hint(subcommand, shlex.quote(query), *alt_hint_args)

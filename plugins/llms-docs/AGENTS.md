@@ -39,6 +39,8 @@ preset を置き換える。
 - ページごとに別ファイルで公開するサイト
 - `index_url` で URL が付かないページがあること (タイトルが完全一致しない・`llms.txt` の項目かページのどちらかでタイトルが重複する。付けないのは意図した動作)
 - 3 種のどれにも当てはまらない形状のサイトを読めないこと。新しい形状への対応は改善提案 (P3)
+- `scripts/check-preset-urls.py` が suite に入っていないこと (ネットワークに出る手動の点検道具。
+  取得先の転送を見つけるために手で流す)
 - 利用者が `sources.json` に書いた URL を取得すること (設定した本人が意図した動作。取得するのは
   profile の `url` と、あれば `index_url` だけ)
 - `researching-library-docs` の description に、利用者が `sources.json` に足したサイトが出ないこと

@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.3.7"
+  version: "3.4.0"
 ---
 
 # AI SDK ドキュメント調査
@@ -39,6 +39,33 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <doc_idx> "<head
 ```
 
 迷ったら `search` から始める。詳細は下記「調査フロー」以降。
+`search` / `search-content` の末尾の `Next:` は上位ヒットの `doc_idx` と heading_path が埋まっている (そのまま実行できる)。
+
+## 調査の進め方 (手数の目安)
+
+- **論点が複数あるとき**は、最初に論点を番号付きで列挙し、1 つずつ順に処理して、論点ごとに結論
+  (または「ドキュメントに記載なし」) を返す。複数の論点を 1 回の `search` に詰めない
+- 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
+  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-ai-sdk.py` は
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py"` に置き換える)
+- 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
+  「ドキュメントに記載なし」として返す
+- **`--max-chars 0`** は、出力に `... (N chars truncated; narrow with ...)` が出て、既定の上限 (24000 字) で
+  切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
+  (パイプで切ると末尾の `Next:` が見えなくなる)
+- この Skill の実行中 (fork の中) では、同じ Skill をもう呼ばない (`already executing in this forked
+  context` になる)。続きは同梱のスクリプトを直接実行する
+
+## Skill を呼べない文脈 (subagent など)
+
+general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
+同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
+
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/parse-ai-sdk.py` を探す
+2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
 
 ## v3 互換性
 
@@ -163,7 +190,9 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 | キャッシュ期限切れ | 7 日超のキャッシュ | 自動 re-fetch (既定 `--max-age 604800`) |
 | ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
-| 結果ゼロ | `No results found` | キーワードを変えて再試行。`fetch-index --compact` で一覧確認 |
+| 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのドキュメント数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・`fetch-index --compact` に切り替える。一部の語だけ 0 件ならその語を落とす。全語が corpus にあるのに 0 件 (同じセクションに揃わない) なら語を減らす。いずれも続けて出る `Next:` がそのまま実行できる |
+| 曖昧な page_ref | `Ambiguous title substring '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
+| heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |
 
@@ -171,7 +200,7 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 
 スクリプトで解決できない場合のみ使用する:
 
-1. `search` をキーワードを変えて 2-3 回試す
+1. 同じ論点で `search` を 3 回まで試す (言い換えより `search-index` / `sections` で構造から当たる)。Skill を呼べない文脈ならまず上の「Skill を呼べない文脈」のとおりスクリプトを直接実行する
 2. それでも失敗 → `ai-sdk.dev/docs/<slug>` を WebFetch で直接取得
 3. WebFetch は要約モデル経由のため field の抜け落ちリスクあり — 取得内容を鵜呑みにしない
 

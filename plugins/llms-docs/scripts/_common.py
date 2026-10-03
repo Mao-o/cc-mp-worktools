@@ -11,6 +11,7 @@ to the symlink would shadow the real one.
 
 from __future__ import annotations
 
+import difflib
 import gzip
 import hashlib
 import html
@@ -228,7 +229,8 @@ def _extend_for_fence_and_table(content_lines, end_line, body_lines, protect_tab
 
 
 def extract_content(body_lines, heading_path=None, *,
-                    protect_tables: bool = True, min_level: int = 2):
+                    protect_tables: bool = True, min_level: int = 2,
+                    retry=None):
     """Extract content from *body_lines*.
 
     If *heading_path* is None, return the entire body. Otherwise, find the
@@ -280,6 +282,10 @@ def extract_content(body_lines, heading_path=None, *,
     die as "ambiguous" against its own descendant (``"Configuration/
     Options"`` also contains the substring ``"configuration"``), even
     though this exact heading exists and is not actually ambiguous.
+
+    *retry*, when given, maps a heading path to the full command that reads
+    it; the not-found and ambiguous errors use it to print candidates as
+    commands that can be run as they are.
     """
     if heading_path is None:
         return "".join(body_lines), None
@@ -293,11 +299,14 @@ def extract_content(body_lines, heading_path=None, *,
         )
         return "".join(content_lines), "(top)"
 
-    target = None
-    for s in sections:
-        if s["heading_path"] == heading_path or s["title"] == heading_path:
-            target = s
-            break
+    # A full heading_path match is looked for in the whole page before a
+    # bare title match: in one pass, an earlier nested ``### Error handling``
+    # (title) would win over a later top-level ``## Error handling`` whose
+    # heading_path is exactly the argument, and the commands this module
+    # prints (always a full heading_path) would read another section.
+    target = next((s for s in sections if s["heading_path"] == heading_path), None)
+    if target is None:
+        target = next((s for s in sections if s["title"] == heading_path), None)
 
     heading_lower = heading_path.lower()
 
@@ -307,11 +316,11 @@ def extract_content(body_lines, heading_path=None, *,
         # ambiguity check. Skipping this and falling straight to the
         # substring tier below would wrongly treat a case-differing exact
         # match as merely "ambiguous" whenever it happens to also be a
-        # substring of one of its own descendants' heading_path.
-        for s in sections:
-            if s["heading_path"].lower() == heading_lower or s["title"].lower() == heading_lower:
-                target = s
-                break
+        # substring of one of its own descendants' heading_path. Same
+        # order as above: heading_path first, then title.
+        target = next((s for s in sections if s["heading_path"].lower() == heading_lower), None)
+        if target is None:
+            target = next((s for s in sections if s["title"].lower() == heading_lower), None)
 
     if target is None:
         matches = [
@@ -319,12 +328,12 @@ def extract_content(body_lines, heading_path=None, *,
             if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower()
         ]
         if len(matches) > 1:
-            die_ambiguous_heading(heading_path, matches)
+            die_ambiguous_heading(heading_path, matches, retry=retry)
         if matches:
             target = matches[0]
 
     if target is None:
-        die_heading_not_found(heading_path, sections)
+        die_heading_not_found(heading_path, sections, retry=retry)
 
     target_level = target["level"]
     end_line = len(body_lines)
@@ -1240,9 +1249,14 @@ def section_url_anchor(url: str, title: str, style: str = "github") -> str:
 
 def _build_section_results(section_hits, sections, body_lines, keywords,
                            min_coverage, context_lines, max_snippet_chars):
-    """Build result list from sections matching >= *min_coverage* keywords."""
+    """Build result list from sections matching >= *min_coverage* keywords.
+
+    ``heading_count`` is how many sections of the page share the result's
+    heading_path (a command that names it reads the first of them).
+    """
     results = []
     total = 0
+    path_counts = heading_path_counts(sections)
     for si, hits in section_hits.items():
         all_matched = set()
         for _, m in hits:
@@ -1291,6 +1305,7 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             "snippet": snippet,
             "matched_keywords": sorted(all_matched),
             "hit_count": len(hits),
+            "heading_count": path_counts.get(heading_path, 1),
         })
     return results, total
 
@@ -1422,31 +1437,280 @@ def die(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
-def die_heading_not_found(heading_path: str, sections) -> None:
-    """Print heading-not-found error with available sections and exit 1."""
+def _squash(text: str) -> str:
+    """Lowercase *text* and drop everything but letters and digits, so
+    ``Pre Tool Use`` / ``pre-tool-use`` / ``PreToolUse`` compare equal."""
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+NEAR_HEADING_LIMIT = 5
+# ``difflib`` ratio a title needs to count as a typo of the guess. Measured on
+# the Claude Code corpus (4374 distinct titles): one random edit of a title
+# stays at or above 0.7 for all but two 3-letter titles, while unrelated title
+# pairs at or above it drop from 29 to 7 in 20000 compared with 0.6 (which
+# offered ``Change a setting`` for ``nonexistent thing``).
+NEAR_HEADING_MIN_RATIO = 0.7
+
+
+def near_headings(heading_path: str, sections, *, limit: int = NEAR_HEADING_LIMIT):
+    """Sections whose heading is close to a *heading_path* that did not resolve.
+
+    Looks at the last element of the path (the part that is usually guessed
+    wrong), ignoring case, spaces and punctuation. Ranked: title equal,
+    title contains it, path contains it, it contains the title, then
+    ``difflib`` closeness on the title for typos. Returns at most *limit*
+    sections, best first; a heading_path that appears more than once on the
+    page is offered once (its first occurrence, the one a command reads).
+    """
+    last = _squash(heading_path.rsplit("/", 1)[-1])
+    if not last:
+        return []
+    ranked = []
+    for pos, s in enumerate(sections):
+        title = _squash(s["title"])
+        path = _squash(s["heading_path"])
+        if title == last:
+            rank = 0
+        elif last in title:
+            rank = 1
+        elif last in path:
+            rank = 2
+        elif len(title) >= 3 and title in last:
+            rank = 3
+        else:
+            continue
+        ranked.append((rank, pos, s))
+    if len(ranked) < limit:
+        chosen = {id(s) for _r, _p, s in ranked}
+        close = []
+        for pos, s in enumerate(sections):
+            if id(s) in chosen:
+                continue
+            ratio = difflib.SequenceMatcher(None, last, _squash(s["title"])).ratio()
+            if ratio >= NEAR_HEADING_MIN_RATIO:
+                close.append((-ratio, pos, s))
+        close.sort(key=lambda t: (t[0], t[1]))
+        ranked += [(4, pos, s) for _neg, pos, s in close]
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    picked = []
+    seen = set()
+    for _r, _p, s in ranked:
+        if s["heading_path"] in seen:
+            continue
+        seen.add(s["heading_path"])
+        picked.append(s)
+    return picked[:limit]
+
+
+def duplicate_heading_note(count: int) -> str:
+    """Suffix for a command that reads a heading_path found *count* times.
+
+    A heading_path is not unique when a page repeats a heading under the same
+    parents; every command resolves to the first one, and no command can reach
+    the later ones, so the reader is told rather than sent to the wrong one
+    silently.
+    """
+    if count > 1:
+        return f"  # heading appears {count} times; this reads the first"
+    return ""
+
+
+def heading_path_counts(sections) -> dict:
+    """``{heading_path: number of sections with it}`` for *sections*."""
+    counts: dict = {}
+    for s in sections:
+        counts[s["heading_path"]] = counts.get(s["heading_path"], 0) + 1
+    return counts
+
+
+def content_command(script: str, ref, heading_path, hint_args: tuple = ()) -> str:
+    """The ``content`` command that reads *heading_path* of page *ref*.
+
+    *hint_args* is the same tuple the ``Next:`` hints carry (``--source`` /
+    ``--file`` / ``--cache-dir`` ...), already shell-quoted.
+    """
+    parts = [script, "content", str(ref)]
+    if heading_path is not None:
+        parts.append(shlex.quote(heading_path))
+    parts += list(hint_args)
+    return " ".join(parts)
+
+
+def die_heading_not_found(heading_path: str, sections, retry=None) -> None:
+    """Print heading-not-found error and exit 1.
+
+    The nearest headings come first (each with the command that reads it,
+    when *retry* is given), then every section, as before.
+    """
+    lines = [f"Error: heading '{heading_path}' not found."]
+    near = near_headings(heading_path, sections)
+    counts = heading_path_counts(sections)
+    if near:
+        lines += ["", "Closest sections:"]
+        for s in near:
+            note = duplicate_heading_note(counts[s["heading_path"]])
+            lines.append(f"  - {s['heading_path']}")
+            if retry is not None:
+                lines.append(f"      {retry(s['heading_path'])}{note}")
+            elif note:
+                lines[-1] += note
     available = "\n".join(f"  - {s['heading_path']}" for s in sections)
-    print(
-        f"Error: heading '{heading_path}' not found.\n\nAvailable sections:\n{available}",
-        file=sys.stderr,
-    )
+    lines += ["", "Available sections:", available]
+    print("\n".join(lines), file=sys.stderr)
     sys.exit(1)
 
 
-def die_ambiguous_heading(heading_path: str, matches) -> None:
+def die_ambiguous_heading(heading_path: str, matches, retry=None) -> None:
     """Print an ambiguous-heading error (2+ case-insensitive partial matches
     for the same *heading_path*) listing every candidate, and exit 1.
 
     Mirrors the ambiguous-slug error the parse-*.py scripts already raise
     from ``_resolve_page_ref`` — silently picking the first partial match
     risks the caller reading (and citing) the wrong section with no
-    indication that other candidates existed.
+    indication that other candidates existed. With *retry*, each candidate
+    is followed by the command that reads it. A heading_path matched more
+    than once is listed once, with how many times it appears.
     """
-    detail = "\n  ".join(f"- {m['heading_path']}" for m in matches)
+    counts = heading_path_counts(matches)
+    rows = []
+    seen = set()
+    for m in matches:
+        if m["heading_path"] in seen:
+            continue
+        seen.add(m["heading_path"])
+        note = duplicate_heading_note(counts[m["heading_path"]])
+        rows.append(f"- {m['heading_path']}")
+        if retry is not None:
+            rows.append(f"    {retry(m['heading_path'])}{note}")
+        elif note:
+            rows[-1] += note
+    detail = "\n  ".join(rows)
     print(
         f"Error: ambiguous heading '{heading_path}'. Matches:\n  {detail}",
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+_LANG_SEGMENT = r"[a-z]{2}(?:-[A-Za-z]{2,4})?"
+
+
+def prefer_lang_exact(candidates, page_ref: str):
+    """Narrow ambiguous slug *candidates* ``[(idx, url), ...]`` to the one
+    page whose URL is exactly ``/<lang>/<page_ref>`` (after an optional
+    ``/docs``), when there is exactly one such page; else return them all.
+
+    ``hooks`` ends both ``/en/hooks`` and ``/en/agent-sdk/hooks``. The first
+    is the page a bare slug names (the others need their longer form), so it
+    wins. Needs a language segment: without one, a longer path is not more
+    or less the "exact" page, and the reader has to choose.
+    """
+    pattern = re.compile(
+        rf"^https?://[^/]+(?:/docs)?/{_LANG_SEGMENT}/{re.escape(page_ref.strip('/'))}$"
+    )
+    exact = [c for c in candidates if pattern.match(normalize_doc_url(c[1]))]
+    return exact if len(exact) == 1 else list(candidates)
+
+
+def die_ambiguous_page(kind: str, page_ref: str, rows, retry=None) -> None:
+    """Print an ambiguous page reference error and exit 1.
+
+    *rows* is ``[(idx, label), ...]``. With *retry* (``idx -> command``) each
+    candidate is followed by the full command that reads that page.
+    """
+    lines = []
+    for idx, label in rows:
+        lines.append(f"[{idx}] {label}")
+        if retry is not None:
+            lines.append(f"    {retry(idx)}")
+    detail = "\n  ".join(lines)
+    die(f"Ambiguous {kind} '{page_ref}'. Matches:\n  {detail}")
+
+
+def note_other_candidates(page_ref: str, chosen, others, retry=None) -> None:
+    """One stderr line saying *page_ref* also matched *others* (not chosen).
+
+    With *retry* (``idx -> command``), the line ends with the command that
+    runs the same invocation on the first of the other pages.
+    """
+    rest = [(i, u) for i, u in others if i != chosen]
+    if not rest:
+        return
+    listed = ", ".join(f"[{i}] {u}" for i, u in rest)
+    tail = (f"For [{rest[0][0]}]: {retry(rest[0][0])}" if retry is not None
+            else "Pass the index or the longer slug for another.")
+    print(f"Note: '{page_ref}' also matches {listed}; resolved to [{chosen}] "
+          f"(exact <lang>/{page_ref}). {tail}", file=sys.stderr)
+
+
+# Options (other than the corpus ones) a retried command keeps, per
+# subcommand: ``(attribute, flag, default)``. A value equal to the default is
+# not echoed (the same rule as ``corpus_hint_args``); ``True`` / ``False``
+# defaults are store_true flags. An attribute the script does not define is
+# skipped, so one table serves all four scripts. A function, because the
+# defaults are defined further down this module.
+def _retry_options() -> dict:
+    return {
+        "content": (
+            ("max_chars", "--max-chars", DEFAULT_MAX_CONTENT_CHARS),
+            ("no_subsection_hints", "--no-subsection-hints", False),
+            ("no_link_annotations", "--no-link-annotations", False),
+        ),
+        "search-content": (
+            ("limit", "--limit", 10),
+            ("context", "--context", 2),
+            ("max_hits", "--max-hits", 5),
+            ("max_snippet_chars", "--max-snippet-chars", DEFAULT_MAX_SNIPPET_CHARS),
+            ("include_changelog_priority", "--include-changelog-priority", False),
+        ),
+    }
+
+
+def retry_option_args(args, command: str | None = None) -> tuple:
+    """The non-corpus options of *args* to echo when re-running *command*.
+
+    *command* defaults to ``args.command``. Only values that differ from the
+    default are returned, shell-quoted, so a retry keeps ``--max-chars 0`` or
+    ``--limit 3`` instead of silently going back to the defaults.
+    """
+    command = command or getattr(args, "command", None)
+    out = []
+    for attr, flag, default in _retry_options().get(command, ()):
+        if not hasattr(args, attr):
+            continue
+        value = getattr(args, attr)
+        if value is None or value == default:
+            continue
+        if isinstance(default, bool):
+            if value:
+                out.append(flag)
+            continue
+        out += [flag, shlex.quote(str(value))]
+    return tuple(out)
+
+
+def retry_for_page_ref(args, hint_args: tuple = ()):
+    """Build ``idx -> command`` re-running the current invocation on page *idx*.
+
+    Covers the three subcommands that take a page reference: ``sections``,
+    ``content`` (heading path kept) and ``search-content`` (``--page-ref``).
+    Non-default options of that subcommand (``--max-chars``, ``--limit`` ...)
+    are kept too (``retry_option_args``).
+    """
+    script = os.path.basename(sys.argv[0])
+    command = getattr(args, "command", None)
+
+    def retry(idx) -> str:
+        if command == "search-content":
+            parts = [script, command, shlex.quote(args.query), "--page-ref", str(idx)]
+        else:
+            parts = [script, command or "content", str(idx)]
+            heading = getattr(args, "heading_path", None)
+            if heading:
+                parts.append(shlex.quote(heading))
+        return " ".join(parts + list(retry_option_args(args, command)) + list(hint_args))
+
+    return retry
 
 
 def die_index_out_of_range(idx: int, total: int, name: str = "doc_index") -> None:

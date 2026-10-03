@@ -29,6 +29,49 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
   フォルダ名 `synced` の 1 件のみで、`claude` / `anthropic` は対象外。
   `claude plugin validate plugins/llms-docs` は warning ゼロで通る (CLI 2.1.276 実測)
 
+## Skill を呼べない文脈 (subagent など) から使う
+
+Skill ツールが使えない文脈 (general-purpose の subagent など) でも、同梱のスクリプトを直接実行すれば
+同じ調査ができる。公式ドキュメントを WebFetch する前に、こちらを使う (WebFetch は要約モデル経由で
+field が抜ける)。
+
+1. スクリプトのパスを決める: `${CLAUDE_PLUGIN_ROOT}/scripts/<script>`。`${CLAUDE_PLUGIN_ROOT}` が空の
+   環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/` を探す
+2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭の script 名を
+   `python3 <path>` に置き換えて、本文 (`content`) を取る
+
+| 調べる対象 | script | 備考 |
+|---|---|---|
+| Claude Code / Claude Developer Platform | `parse-claude-docs.py` | `--source platform` / `--source both` |
+| AI SDK | `parse-ai-sdk.py` | |
+| Firebase | `parse-firebase.py` | |
+| 同梱 presets・利用者の `sources.json` のサイト | `parse-llms-txt.py` | 全コマンドに `--source <name>` が必須 |
+
+調査の手数の目安 (1 論点は `search` 1 回 → `content` 1〜2 回、3 回外したら言い換えずに構造から当たる、
+`--max-chars 0` は上限で切れたと確かめてから) は各 skill の「調査の進め方」にある。
+
+### エラー・0 件のあとの出力
+
+4 script とも、失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
+変わらない。claude-docs で下の規則により 1 ページに解決した slug は、曖昧エラーではなく本文を返す):
+
+- **曖昧な page_ref**: 候補ごとに実行できるコマンドを付ける。claude-docs は slug が `<lang>/<slug>`
+  に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で、それを読むコマンド
+  付きで知らせる (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)。候補のコマンドは
+  `--max-chars` / `--limit` などの既定以外の値も引き継ぐ
+- **heading が見つからない**: 全見出しの前に `Closest sections:` として近い見出し (最大 5 件) を、
+  実行できるコマンド付きで出す
+- **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
+  最大 3 行出す (`--source` などは引き継ぐ)。ヒットが無いときはプレースホルダを出さない
+- **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
+  無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
+- **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
+  セクションに揃わない」「`--page-ref` で外した」を区別して、語を減らす / `search-index` / 別 source の
+  コマンドを示す
+
 ## Components
 
 | 種類 | パス |
@@ -42,8 +85,9 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
 | Script | `scripts/parse-firebase.py` |
 | Script | `scripts/parse-llms-txt.py` (任意サイトの `llms-full.txt`。skill は `researching-library-docs`) |
 | Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
+| Dev tool | `scripts/check-preset-urls.py` (presets の `url` / `index_url` を HEAD で点検する。ネットワークに出るので suite には入れない) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
-| Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレート。各 script は page を `PageView` に詰めて渡す) |
+| Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレートと、検索後の `Next:` 行・0 件の診断。各 script は page を `PageView` に詰めて渡す) |
 | Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
 | Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
 
@@ -151,7 +195,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `codex` | OpenAI Codex + ChatGPT docs (`learn.chatgpt.com/docs/llms-full.txt`。Codex の CLI / IDE / cloud / SDK に加え、ChatGPT の desktop app / Work / 管理のページを含む) | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
-| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、`llms.txt` との突き合わせで 47 中 40 |
+| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
@@ -284,6 +328,15 @@ HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skel
 小さな adapter だけを書き、共通部分は `_common` / `_commands` から import すること。
 `Next:` ヒントの corpus 引数 (`corpus_hint_args(args)`) は呼び出し側で組み立てて
 `hint_args=` で渡す (`_commands` 側では組み立てない。`tests/test_hint_wiring.py` が検査)。
+
+**presets の取得先の点検**: サイトが `llms-full.txt` / `llms.txt` を移す (製品名の変更、docs の
+ホスト移転) と、ローダーは転送に追従するため読めたまま気付かない。`scripts/check-preset-urls.py` を手で
+流すと、同梱 presets の全 URL を HEAD で点検し、3xx は転送先まで辿って、200 以外を一覧する
+(`python3 plugins/llms-docs/scripts/check-preset-urls.py`。200 以外があれば exit 1)。一覧に出た preset は、
+転送先と内容を比べてから直す: 同じ内容なら URL を移す。内容が違うとき (旧い版が残っているだけ、など) は
+ページ数・ページ内の URL・`index_url` の突き合わせを測って、新しい側へ移すかを決める。直したら
+description と、`researching-library-docs` の対応表・この README の presets 表を合わせる。
+ネットワークに出る点検なので CI の suite には入れず、サーベイのときに流す。
 
 `search-content` はセクション単位の AND 検索が既定 — 指定した全キーワードが同じセクション内に
 揃って出現するセクションのみを返す。単純な OR 挙動（どれか 1 つでもマッチすれば hit）ではない。

@@ -53,23 +53,28 @@ from _common import (  # noqa: E402
     assert_parsed,
     corpus_hint_args,
     die,
+    die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
     full_corpus_body_search,
     load_lines,
     next_hint,
     parse_llms_index,
+    retry_for_page_ref,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
 )
 from _commands import (  # noqa: E402
     PageView,
+    hit_candidates,
     print_entry,
     print_page_hits,
     print_search_result,
     render_content,
+    render_next_content,
     render_sections,
+    render_zero_hits,
 )
 
 SCRIPT = "parse-llms-txt.py"
@@ -752,7 +757,7 @@ def _source_hint_args(args) -> tuple:
     return tuple(out)
 
 
-def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
     """Integer index, else a unique title substring, else a unique URL substring."""
     if not page_ref:
         die("page_ref required: integer index, title substring or URL substring")
@@ -770,8 +775,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
         if len(found) == 1:
             return found[0][0]
         if len(found) > 1:
-            detail = "\n  ".join(f"[{i}] {d['title']}" + (f" ({d['url']})" if d["url"] else "") for i, d in found[:20])
-            die(f"Ambiguous {field_name} substring '{page_ref}'. Matches:\n  {detail}")
+            rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
+            die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
     die(f"No document found for: {page_ref}")
     return -1
 
@@ -829,9 +834,14 @@ def cmd_fetch_index(args):
     next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
 
 
+def _page_ref_retry(args):
+    """``idx -> command`` re-running this invocation on page *idx*."""
+    return retry_for_page_ref(args, _source_hint_args(args) + corpus_hint_args(args))
+
+
 def _page_view(args) -> PageView:
     _profile, path, docs = _load_docs(args)
-    idx = _resolve_page_ref(docs, args.page_ref)
+    idx = _resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))
     d = docs[idx]
     header = [f"  URL: {d['url']}"] if d["url"] else []
     header.append(f"  (file: {path})")
@@ -900,11 +910,13 @@ def cmd_search_content(args):
     profile, path, docs = _load_docs(args)
     if not args.query.strip():
         die("query must not be empty")
-    targets = [_resolve_page_ref(docs, args.page_ref)] if args.page_ref is not None else range(len(docs))
+    targets = ([_resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))]
+               if args.page_ref is not None else range(len(docs)))
     print(f'Search-content results for "{args.query}" (source: {profile["name"]}, file: {path})')
     print("=" * 60)
     print()
     total = matched = printed = 0
+    shown = []
     for idx in targets:
         d = docs[idx]
         hits = _body_hits(args, d)
@@ -915,15 +927,23 @@ def cmd_search_content(args):
         if printed >= args.limit:
             continue
         printed += 1
+        shown.append((idx, hits, ()))
         print_page_hits(f"[{idx}] {d['title'] or '(untitled)'}", hits, noun="document", extra_lines=_url_line(d))
     if total == 0:
         print("No matching content found.")
         print()
         print("Tip: try broader keywords or 'search-index' to find relevant documents first")
-    else:
-        print(f"({total} hits across {matched} documents, showing top {printed})")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search-content",
+                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         scope="documents", restricted_to=args.page_ref)
+        return
+    print(f"({total} hits across {matched} documents, showing top {printed})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+    render_next_content(hit_candidates(shown),
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args))
 
 
 def cmd_search(args):
@@ -955,6 +975,12 @@ def cmd_search(args):
         print("No matching documents found.")
         print()
         print("Tip: try broader keywords or 'search-content' for a full-body scan")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search",
+                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         scope="documents")
         return
     if all(r["body_only"] for r in results):
         print("  (no title/description match — showing full-body search results instead)")
@@ -968,7 +994,8 @@ def cmd_search(args):
                             extra_lines=_url_line(docs[r["doc_idx"]]))
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results]),
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args))
 
 
 # ---------------------------------------------------------------------------
