@@ -121,7 +121,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 
 **anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
 
-`--source both` のときは結果に `[code]` / `[platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <code|platform>` を明示する。
+`--source both` を受けるのは `search` だけ (`search-content` / `search-index` / `content` / `sections` / `fetch-index` は 1 source ずつ)。`--source both` のときは結果に `[code]` / `[platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <code|platform>` を明示する。
 
 ### Step 2: 該当セクションの本文を取得
 
@@ -220,6 +220,7 @@ slug が複数ページに一致する場合は、`<lang>/<slug>` に完全一�
 | ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのページ数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・別の `--source` に切り替える。一部の語だけ 0 件ならその語を落とす。全語が corpus にあるのに 0 件 (同じセクションに揃わない) なら語を減らす。いずれも続けて出る `Next:` がそのまま実行できる |
+| `--source both` を `search` 以外に付けた | `Error: '<command>' reads one source at a time` (exit 2) | `both` を受けるのは `search` だけ。続けて出る `search ... --source both` か、同じコマンドを `--source code` / `--source platform` で 1 本ずつ打った行をそのまま実行する (`content` / `sections` の page index は source ごとに違う) |
 | 曖昧な page_ref | `Ambiguous slug '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する (`<lang>/<slug>` に完全一致する 1 件があれば自動でそちらに解決) |
 | heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |

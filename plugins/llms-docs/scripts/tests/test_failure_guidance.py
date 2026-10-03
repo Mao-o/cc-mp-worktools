@@ -437,6 +437,147 @@ class GenericGuidanceTest(_GuidanceTests, unittest.TestCase):
         self.tail = f"--source site --sources-file {sources} --file {corpus}"
 
 
+class ClaudeDocsSourceBothTest(unittest.TestCase):
+    """Only ``search`` takes ``--source both``. Any other command that got it
+    used to die with argparse's ``invalid choice`` and no way forward; it now
+    exits 2 and prints the same command once per source (plus ``search`` for
+    a command with a query), and every printed line runs as it stands."""
+
+    module = claude
+    script = "parse-claude-docs.py"
+    setUp = _GuidanceTests.setUp
+    write_corpus = ClaudeDocsGuidanceTest.write_corpus
+    run_cmd = _GuidanceTests.run_cmd
+    run_line = _GuidanceTests.run_line
+    assert_commands_run = _GuidanceTests.assert_commands_run
+
+    def test_each_single_source_command_answers_with_runnable_commands(self):
+        cases = {
+            "search-content": ["search-content", "alphaterm"],
+            "search-index": ["search-index", "hooks"],
+            "content": ["content", "0"],
+            "sections": ["sections", "0"],
+            "fetch-index": ["fetch-index"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(command=name):
+                code, out, err = self.run_cmd(*argv, "--source", "both")
+                self.assertEqual(code, 2, err)
+                self.assertNotIn("invalid choice", err)
+                self.assertIn("--source both", err)
+                commands = self.assert_commands_run(err, at_least=2)
+                lines = [c for c, _n in commands]
+                self.assertTrue(any("--source code" in c for c in lines), err)
+                self.assertTrue(any("--source platform" in c for c in lines), err)
+                # a line that still says both must be the search one
+                for c in lines:
+                    if "both" in c:
+                        self.assertIn(f"{self.script} search ", c)
+
+    def test_a_command_with_a_query_also_offers_search_for_both(self):
+        for argv in (["search-content", "alphaterm"], ["search-index", "hooks"]):
+            with self.subTest(command=argv[0]):
+                code, out, err = self.run_cmd(*argv, "--source", "both")
+                self.assertEqual(code, 2, err)
+                self.assertIn(f"{self.script} search {argv[1]} --source both", err)
+        # content / sections have no query to search for
+        code, out, err = self.run_cmd("content", "0", "--source", "both")
+        self.assertNotIn(f"{self.script} search ", err)
+
+    def test_the_other_options_survive_in_the_printed_commands(self):
+        code, out, err = self.run_cmd("search-content", "alphaterm", "--limit", "3",
+                                      "--source=both")
+        self.assertEqual(code, 2, err)
+        self.assertIn("--limit 3 --source=code", err)
+        self.assertIn("--limit 3 --source=platform", err)
+        self.assert_commands_run(err, at_least=3)
+
+    def test_search_itself_still_takes_both(self):
+        code, out, err = self.run_cmd("search", "alphaterm", "--source", "both")
+        self.assertEqual(code, 0, err)
+
+    # -- round trip: every printed line, split as a shell would, must run ------
+
+    def run_printed(self, argv, *, expect_lines=2):
+        """Run *argv* (exit 2), then every command it printed, unmodified."""
+        code, out, err = _loader.run_cli(self.module, [self.script, *argv])
+        self.assertEqual(code, 2, err)
+        lines = [ln.strip() for ln in err.splitlines()
+                 if ln.strip().startswith(self.script + " ")]
+        self.assertGreaterEqual(len(lines), expect_lines, err)
+        for line in lines:
+            with self.subTest(argv=argv, line=line):
+                code, out2, err2 = self.run_line(line)
+                self.assertEqual(code, 0, f"{line}\n{err2}")
+        return lines, err
+
+    def use_file(self):
+        patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": self.tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_round_trip_without_file(self):
+        c = ["--cache-dir", self.tmp]
+        self.run_printed(["content", "0", "--source", "both", *c], expect_lines=2)
+        self.run_printed(["search-content", "alphaterm", "--source=both", *c], expect_lines=3)
+
+    def test_round_trip_with_file_keeps_only_the_snapshots_own_source(self):
+        self.use_file()
+        full = str(Path(self.tmp, "claude-code-llms-full.txt"))
+        for argv in (["content", "0"], ["sections", "0"], ["search-content", "alphaterm"]):
+            with self.subTest(argv=argv):
+                lines, err = self.run_printed([*argv, "--source", "both", "--file", full],
+                                              expect_lines=1)
+                self.assertTrue(all("--source code" in ln for ln in lines), lines)
+                self.assertFalse(any("--source platform" in ln for ln in lines), lines)
+        # the --source=both spelling takes the same path
+        lines, err = self.run_printed(["content", "0", "--source=both", "--file", full],
+                                      expect_lines=1)
+        self.assertEqual(len(lines), 1, lines)
+
+    def test_file_that_names_no_source_says_to_keep_one_line(self):
+        self.use_file()
+        snap = str(Path(self.tmp, "snap.txt"))
+        shutil.copy(Path(self.tmp, "claude-code-llms-full.txt"), snap)
+        code, out, err = _loader.run_cli(
+            self.module, [self.script, "content", "0", "--source", "both", "--file", snap])
+        self.assertEqual(code, 2, err)
+        self.assertIn("keep only the line", err)
+
+    def test_abbreviated_option_still_gets_a_source_per_line(self):
+        c = ["--cache-dir", self.tmp]
+        lines, err = self.run_printed(["search-content", "alphaterm", "--sour", "both", *c],
+                                      expect_lines=3)
+        singles = [ln for ln in lines if " search " not in ln]
+        self.assertTrue(any(ln.endswith("--source code") or "--source code " in ln
+                            for ln in singles), singles)
+        self.assertTrue(any("--source platform" in ln for ln in singles), singles)
+        # with "--", the added --source goes before it, not into the positionals
+        lines, err = self.run_printed(["search-content", "--sour", "both", *c, "--", "-foo"],
+                                      expect_lines=3)
+        for ln in lines:
+            if " search " not in ln:
+                self.assertLess(ln.index("--source "), ln.index("-- -foo"), ln)
+
+    def test_a_query_starting_with_a_dash_gets_double_dash_in_search(self):
+        c = ["--cache-dir", self.tmp]
+        lines, err = self.run_printed(
+            ["search-content", "--source", "both", *c, "--", "-foo"], expect_lines=3)
+        searches = [ln for ln in lines if f"{self.script} search " in ln]
+        self.assertEqual(len(searches), 1, lines)
+        self.assertIn("-- -foo", searches[0])
+        self.assertLess(searches[0].index("--source"), searches[0].index("-- -foo"))
+        # the per-source lines keep the "--" the user typed and gain no
+        # --source after it
+        for ln in lines:
+            if ln not in searches:
+                self.assertLess(ln.index("--source"), ln.index("-- -foo"), ln)
+
+    def test_help_does_not_advertise_both_as_a_general_choice(self):
+        code, out, err = _loader.run_cli(self.module, [self.script, "content", "-h"])
+        self.assertIn("only for search", " ".join((out + err).split()))
+
+
 class ClaudeDocsSlugTest(unittest.TestCase):
     """``hooks`` is ``/en/hooks``, not ``/en/agent-sdk/hooks``."""
 
