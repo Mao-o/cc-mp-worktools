@@ -12,11 +12,11 @@
   した env が helper の git に届いていること (spy) も確かめる。陽性対照として、止める設定が無い
   commit では起動が trace に見えることも確かめる (見えない git の版では「0 件」は何も見ていない)
 - **設定の出どころ別** (`_HermeticConfigChecks`): 止める経路は env の `GIT_CONFIG_COUNT` と global の
-  fixture と system の無効化 (`GIT_CONFIG_NOSYSTEM`) で、有効値だけを見ると 1 本が欠けても残りが
-  埋めて通ってしまう。そこで 1 本ずつ別の検査で見る。起動の仕方 (定数だけ / helper / hook の git) ごとに
-  同じ 3 本を流すので、env を当てる各点 (定数・helper・基底クラス) で、`COUNT` だけ・`NOSYSTEM` 抜き・
-  `GLOBAL` 抜きのどれが起きても、どれかが assertion で落ちる。外側の env には止めない側の値を置き、
-  当てる側がそれに勝つことも見る
+  fixture の 2 本で、同じ値を持つので、有効値だけを見ると片方が欠けてももう片方が埋めて通ってしまう。
+  加えて system の config は `GIT_CONFIG_NOSYSTEM` で読ませない。そこで 3 つを 1 本ずつ別の検査で見る。
+  起動の仕方 (定数だけ / helper / hook の git) ごとに同じ 3 本を流すので、env を当てる各点 (定数・helper・
+  基底クラス) で、`COUNT` だけ・`NOSYSTEM` 抜き・`GLOBAL` 抜きのどれが起きても、どれかが assertion で
+  落ちる。外側の env には止めない側の値を置き、当てる側がそれに勝つことも見る
   - `GIT_CONFIG_COUNT`: repo 自身の config に反対の値を置き、git が見る値が止める側であること
     (env は repo 自身の config より優先される。fixture は負ける)
   - `GIT_CONFIG_GLOBAL`: `git config --global --list` が fixture の 5 設定と完全一致すること。
@@ -28,8 +28,14 @@
 system の config を目印の file に向けるが、**`GIT_CONFIG_NOSYSTEM` は床の側で立てない**。床の側で
 立てると、helper・基底クラス・定数が `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` を当て損ねても
 (部分適用)、床が埋めて通る。目印は `NOSYSTEM` が効いていなければ読めるので、当て損ねが見える。
+床が止める側の値を持たないこと自体も、当てる側が当てる前の env (床の env) だけで起動した git で
+確かめる (`test_the_floor_alone_stops_nothing`)。床が止める側の値を持つ形に戻ると、当て損ねを床が
+埋めて、上の 3 本が黙って通るため。
 開発者の本物の system / global の config (そこに `maintenance.auto=false` があると、迂回した git も
 maintenance を起動せず、床が黙って通る) は、目印と空の HOME で置き換わるので読まれない。
+ただし Apple の git が読む Xcode / Command Line Tools 同梱の config (`--show-scope` で unknown) は
+`GIT_CONFIG_SYSTEM` では置き換わらず、`GIT_CONFIG_NOSYSTEM` でだけ外れる。中身はこの床の検査に効かず、
+maintenance を止める設定が入れば陽性対照が落ちる。
 
 期待値は `_testutil` の定義とは**別に**リテラルで持つ。同じ定数から導くと、`_testutil` から
 1 項目消えても期待値ごと消えて通ってしまう。`git config` は未設定 / 読めないとき exit 1 などになる
@@ -284,12 +290,33 @@ class _HermeticConfigChecks:
                 "GIT_CONFIG_VALUE_0": "true",
             }
         )
+        # 当てる側が当てる前の env。床が止める側の値を持たないことの確認に使う
+        self.floor_env = dict(os.environ)
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
         _testutil.sh(Path(self.repo), "init", "-q", "-b", "main")
         for key, value in OPPOSITE.items():
             _testutil.sh(Path(self.repo), "config", key, value)
+
+    def test_the_floor_alone_stops_nothing(self):
+        """床の env だけで起動した git では、3 本のどれも止める側にならないこと。
+
+        床が止める側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の
+        `GIT_CONFIG_COUNT`) を持つ形に戻ると、当てる側の当て損ねを床が埋めて、下の 3 本が黙って通る。
+        """
+
+        def floor_query(args: list[str]) -> tuple[int, str]:
+            res = subprocess.run(
+                ["git", *args], cwd=self.repo, env=self.floor_env, capture_output=True, text=True
+            )
+            return res.returncode, res.stdout.strip()
+
+        for key, value in OPPOSITE.items():
+            with self.subTest(key=key):
+                self.assertEqual(floor_query(["config", "--get", key]), (0, value))
+        self.assertEqual(floor_query(["config", "--global", "--list"]), (0, ""))
+        self.assertEqual(floor_query(["config", "--get", "hermetic.system"]), (0, "read"))
 
     def test_env_beats_the_repos_own_config(self):
         """`GIT_CONFIG_COUNT` が効いていること。
@@ -363,8 +390,8 @@ class TestHookLaunchedGit(_HermeticConfigChecks, HermeticGitTestCase):
     既定に戻る。hook の git は読み取りだけ (`rev-parse` / `worktree list`) で maintenance を起動しない
     ので、ここで守るのは、開発者の設定に左右されないことと、helper と同じ設定が届くこと。
 
-    `family._git` は非ゼロ終了も、起動できなかった・timeout も `None` にして握りつぶす。`None` が
-    期待値の検査 (system を読まない) が git の失敗でも通ってしまうので、`subprocess.run` の結果を
+    `family._git` は非ゼロ終了も、起動できなかった・timeout も `None` にして握りつぶす。期待値が
+    `None` の検査 (system を読まない) は、git が失敗しても通ってしまうので、`subprocess.run` の結果を
     捕まえて returncode を見る。起動できなかったときは前提の assertion で落とす。
 
     外側の環境に `GIT_CONFIG_NOSYSTEM` があっても、`setUp` が先に外してから基底クラスに当てさせるので、
