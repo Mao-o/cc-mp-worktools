@@ -490,6 +490,16 @@ _CHECK_BY_HAND = (
 )
 
 
+def _host_label(host) -> str:
+    """文面に出す host。案内に使える形でなければ出さない (表示が注記の判定に当たらないように)。
+
+    host は accounts.local.json のキーか gh が報告した host。期待値の型の誤りの deny は切替を
+    案内しないので、host が切替コマンドの形だと、表示だけで dispatcher の「案内したコマンドは
+    単独で実行」の注記が付く。
+    """
+    return host if shell_word.arg(host) else "表示しない host"
+
+
 def _switch_guidance(host: str, user: str) -> str:
     """不一致の deny 文面の末尾 (` — 切り替え: gh auth switch ...`)。"""
     host_arg, user_arg = shell_word.arg(host), shell_word.arg(user)
@@ -509,7 +519,7 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
         for host, want in expected.items():
             if not isinstance(want, str):
                 errors.append(
-                    f"GitHub [{host}]: 期待値は文字列で指定してください "
+                    f"GitHub [{_host_label(host)}]: 期待値は文字列で指定してください "
                     f"(現在: {type(want).__name__})。"
                 )
                 continue
@@ -518,16 +528,17 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
                 host_arg = shell_word.arg(host)
                 if host_arg is None:
                     errors.append(
-                        f"GitHub [{host}]: このホストにログインしていません — {_CHECK_BY_HAND}。"
+                        f"GitHub [{_host_label(host)}]: このホストにログインしていません — "
+                        f"{_CHECK_BY_HAND}。"
                     )
                 else:
                     errors.append(
-                        f"GitHub [{host}]: このホストにログインしていません — "
+                        f"GitHub [{_host_label(host)}]: このホストにログインしていません — "
                         f"gh auth login --hostname {host_arg} --skip-ssh-key を実行してください。"
                     )
             elif current != want:
                 errors.append(
-                    f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={want}"
+                    f"GitHub [{_host_label(host)}] アカウント不一致: 現在={current}, 期待={want}"
                     + _switch_guidance(host, want)
                 )
         return "\n".join(errors) if errors else None
@@ -544,7 +555,7 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
 
     if current != expected:
         msg = (
-            f"GitHub [{host}] アカウント不一致: 現在={current}, 期待={expected}"
+            f"GitHub [{_host_label(host)}] アカウント不一致: 現在={current}, 期待={expected}"
             + _switch_guidance(host, expected)
         )
         if len(active) > 1:

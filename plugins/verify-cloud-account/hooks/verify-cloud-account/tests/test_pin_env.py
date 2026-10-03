@@ -278,13 +278,16 @@ class TestPlanFirebase(_TmpBase):
     def test_dict_with_several_project_ids_asks_the_user_to_choose(self):
         """alias が使えず project ID で案内するとき、候補が複数なら名前順の先頭を黙って
         選ばず、どれにするかを選ばせる注記を添える (値は既定で隠すので一覧は出さない。
-        マージ前レビューの指摘)。同じ project を指す alias が複数でも候補は 1 つ。"""
+        マージ前レビューの指摘)。同じ project を指す alias が複数でも候補は 1 つ。
+        候補を見る先は accounts-show の --show-values (pin-env の --show-values は案内する
+        1 つしか見せない)。"""
         project_dir = self._project(None)
         plan = pin_env.plan_firebase({"dev": "fb-a", "prod": "fb-b"}, project_dir)
         self.assertEqual(plan.command, "firebase use fb-a")
         self.assertTrue(plan.command_secret)
         joined = "\n".join(plan.notes)
         self.assertIn("project ID は 2 個あり", joined)
+        self.assertIn("候補は accounts-show の --show-values で確かめ", joined)
         self.assertIn("ユーザーに選んでもらってください", joined)
         self.assertNotIn("fb-b", joined)
         plan = pin_env.plan_firebase({"dev": "fb-a", "dev2": "fb-a"}, project_dir)
@@ -359,17 +362,76 @@ class TestPinEnvReadsFirebasercLikeFirebaseTools(_TmpBase):
         ),
     )
 
+    NOT_PINNED = ".firebaserc を firebase-tools と同じ内容に読めると確かめられません"
+
+    def _project(self, data: bytes, name: str) -> str:
+        root = self.tmp / name
+        root.mkdir()
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        (root / ".firebaserc").write_bytes(data)
+        return str(root)
+
     def test_firebase_use_is_not_guided(self):
         for i, (label, data) in enumerate(self.FIREBASERC):
-            root = self.tmp / f"fb{i}"
-            root.mkdir()
-            (root / "firebase.json").write_text("{}", encoding="utf-8")
-            (root / ".firebaserc").write_bytes(data)
+            root = self._project(data, f"fb{i}")
             for expected in ("right-project", {"prod": "right-project"}):
                 with self.subTest(firebaserc=label, expected=expected):
-                    plan = pin_env.plan_firebase(expected, str(root))
+                    plan = pin_env.plan_firebase(expected, root)
                     self.assertIsNone(plan.command, plan)
-                    self.assertIn(".firebaserc が厳密な JSON として読めません", plan.problem or "")
+                    self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_alias_values_that_are_not_strings_are_not_guided(self):
+        """firebase-tools の resolveAlias は `projects[alias] || alias` なので、真になる文字列でない
+        値 (配列・数値・true・オブジェクト) も alias の行き先に使う。このモジュールは文字列の値
+        だけを alias と読むので、`firebase use right-project` は firebase-tools では alias
+        right-project (→ 配列など) を選んでしまう (マージ前レビューの指摘)。"""
+        for i, value in enumerate((["wrong-project"], 123, True, {"a": 1})):
+            text = json.dumps({"projects": {"right-project": value, "other": "x"}})
+            root = self._project(text.encode(), f"fb{i}")
+            for expected in ("right-project", {"x": "right-project"}):
+                with self.subTest(value=value, expected=expected):
+                    plan = pin_env.plan_firebase(expected, root)
+                    self.assertIsNone(plan.command, plan)
+                    self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_projects_key_that_is_not_an_object_is_not_guided(self):
+        """`projects` がオブジェクトでない (null・配列・文字列) と、firebase-tools は添字で引く
+        (配列の "0" など) か読めずに失敗し、このモジュールは alias 0 件と読む。"""
+        for i, projects in enumerate((None, ["wrong-project"], "wrong-project")):
+            root = self._project(json.dumps({"projects": projects}).encode(), f"fb{i}")
+            for expected in ("right-project", {"x": "right-project"}):
+                with self.subTest(projects=projects, expected=expected):
+                    plan = pin_env.plan_firebase(expected, root)
+                    self.assertIsNone(plan.command, plan)
+                    self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_deeply_nested_firebaserc_is_a_problem_not_a_traceback(self):
+        """厳密な JSON の判定 (`json.loads`) が入れ子の深さで RecursionError を出しても、pin-env は
+        落ちずに「固定できません」を返す。"""
+        text = '{"projects": {"prod": "p"}, "x": ' + "[" * 100000 + "]" * 100000 + "}"
+        root = self._project(text.encode(), "deep")
+        try:
+            plan = pin_env.plan_firebase({"prod": "p"}, root)
+        except RecursionError:
+            self.fail("深い入れ子の .firebaserc で pin-env が RecursionError のまま落ちた")
+        self.assertIsNone(plan.command)
+        self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_strict_json_with_a_url_is_not_guided_either(self):
+        """判定は保守的で、文字列の中の `//` (URL) だけでも案内しない。firebase-tools とは同じ
+        内容に読めるファイルだが、cjson のコメントの除去を再現しない代償として受け入れた。
+        理由の文はこの場合も事実どおり (「厳密な JSON に直せば案内できる」とは言わない)。"""
+        text = json.dumps(
+            {"projects": {"prod": "right-project"}, "docs": "https://example.com/firebase"}
+        )
+        root = self._project(text.encode(), "url")
+        for expected in ("right-project", {"prod": "right-project"}):
+            with self.subTest(expected=expected):
+                plan = pin_env.plan_firebase(expected, root)
+                self.assertIsNone(plan.command, plan)
+                self.assertIn(self.NOT_PINNED, plan.problem or "")
+                self.assertIn("文字列の中の URL なども含む", plan.problem or "")
+                self.assertNotIn("厳密な JSON に直す", plan.problem or "")
 
 
 class TestFirebaseCommandIsShellSafe(_TmpBase):

@@ -294,6 +294,23 @@ class TestGithubGuidance(unittest.TestCase):
                     self.assertNotIn("gh auth login", reason)
                     self.assertIn(CHECK_BY_HAND, reason)
 
+    def test_host_is_displayed_only_in_the_allowed_form(self):
+        """`GitHub [<host>]` の host は許容形のときだけ出す。期待値の型の誤りの deny は切替を
+        案内しないので、host が切替コマンドの形だと表示だけで dispatcher の注記が付いていた
+        (マージ前レビューの指摘)。ほかの文面の host も同じ規則で出す。"""
+        host_cases = ("active host", "dict host", "host not logged in", "non-string expected")
+        for value in PLAIN + HOSTILE:
+            reasons = self._reasons(value)
+            reasons["non-string expected"] = github._verify_against(
+                {"github.com": "me"}, {"github.com": "me", value: 1}
+            )
+            shown = value if value in PLAIN else "表示しない host"
+            for case in host_cases:
+                with self.subTest(value=value, case=case):
+                    self.assertIn(f"GitHub [{shown}]", reasons[case])
+                    if value not in PLAIN:
+                        self.assertNotIn(f"[{value}]", reasons[case])
+
 
 class TestFirebaseGuidance(unittest.TestCase):
     def setUp(self):
@@ -374,6 +391,22 @@ class TestFirebaseGuidance(unittest.TestCase):
         with _run_returning("proj-other\n"):
             reason = firebase.verify("proj-dev", str(self.root), context={"project": "a b"})
         self.assertIn("コマンド指定 --project 'a b' (→ proj-x),", reason)
+
+    def test_resolved_project_is_displayed_only_in_the_allowed_form(self):
+        """`--project <alias>` の行き先 (`.firebaserc` の値) は許容形のときだけ `(→ <project>)`
+        に出す。この deny は flag を直す案内で切替は案内しないので、行き先が切替コマンドの形
+        だと表示だけで dispatcher の注記が付いていた (マージ前レビューの指摘)。"""
+        for value in PLAIN + HOSTILE:
+            (self.root / ".firebaserc").write_text(
+                json.dumps({"projects": {"prod": value}}), encoding="utf-8"
+            )
+            with _run_returning("proj-other\n"):
+                reason = firebase.verify("proj-dev", str(self.root), context={"project": "prod"})
+            shown = value if value in PLAIN else "表示しない値"
+            with self.subTest(value=value):
+                self.assertIn(f"コマンド指定 --project prod (→ {shown}),", reason)
+                if value not in PLAIN:
+                    self.assertNotIn(f"(→ {value})", reason)
 
 
 class TestAwsGuidance(unittest.TestCase):

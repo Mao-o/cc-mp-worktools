@@ -344,8 +344,11 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   VCA は firebase のアカウントは検証しない。`firebase use` は引数を `.firebaserc` の
   alias として先に解決するので、`pin-env` はこのディレクトリの `.firebaserc` で期待した
   project に解決される alias を案内し、無ければ期待値の project ID で案内する (v0.17.1)。
-  `.firebaserc` が厳密な JSON でない (コメント・U+FEFF・NaN などを含む、UTF-8 でない) と、
-  firebase-tools と同じ行き先を確かめられないので「固定できません」と出す (v0.17.1)
+  `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (UTF-8 でない・
+  U+FEFF がある・`//` か `/*` がある (文字列の中の URL なども含む)・JSON として読めない
+  (`NaN` など JSON に無い値・構文の誤り・深い入れ子)・`projects` がオブジェクトでないか
+  文字列でない値を持つ) は、firebase-tools と同じ行き先を確かめられないので「固定できません」と
+  出す (v0.17.1)。判定は保守的で、URL を含むだけの厳密な JSON も対象になる
 - 前後に空白のある期待値は固定できない (照合は完全一致なので、どの現在値とも一致しない)。
   `pin-env` は「固定できません」と出す (v0.17.1)
 - 検証の成功 cache は、アカウントを決める環境変数の値もキーに含める (v0.17.0)。
@@ -693,8 +696,13 @@ allow-list ではない)。`gcloud config set project <期待値> --configuratio
 を同じコマンド行に連結すると (`gh auth switch ... && gh pr create` 等)、そちらが切替**前**
 の状態で検証されるため deny される (案内文自身が連結している `firebase login && firebase
 use <x>` は、書込側が期待値への切替なので許可される形)。remediation を案内する deny
-文面にはこの注記が付く (v0.11.1)。値をコマンドの形で案内しなかった deny (下の「手で確認して
-ください」の文がある deny) には付けない (v0.17.1)。
+文面にはこの注記が付く (v0.11.1)。値の一部でもコマンドの形で案内しなかった deny (下の
+「手で確認してください」の文がある deny) には、ほかの entry の切替を案内していても付けない
+(v0.17.1)。ただし AWS は、外れた profile 名を文に置き換えたうえで `AWS_PROFILE=<profile>` を
+必ず案内するので、AWS 専用の注記を付ける。文面に表示する値のうち `.firebaserc` の alias の
+行き先 (`--project <alias> (→ <project>)`) と gh の host 名 (`GitHub [<host>]`) は、下の
+許容形のときだけ出す (外れていれば「表示しない値」「表示しない host」。値の形だけで注記が
+付かないように)。
 
 **案内するコマンドに入れる値は、シェルでそのまま 1 語になる形に限る (v0.17.1)。** 期待値・
 host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/` `@` `+` だけからなる

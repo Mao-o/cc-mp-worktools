@@ -1142,14 +1142,26 @@ deny 文面の切替案内と pin-env の `firebase use` は、Claude がその�
   `WORD` を使う (改行・空白・制御文字・非 ASCII は `WORD` でも弾ける。ドメイン付きの
   project ID `example.com:my-project` も行にできる)。AWS の「対応する profile」の一覧も、
   名前が `<profile>` に当てはめて使われるので、コマンドと同じ扱いにする
-- 値を案内しなかった deny (`UNSAFE` を含む) には「案内したコマンドは単独で実行」の注記を
+- 値の一部でもコマンドの形で案内しなかった deny (`UNSAFE` / 「手で確認してください」の文を
+  含む) には、ほかの entry の切替を案内していても「案内したコマンドは単独で実行」の注記を
   付けない。`期待=<値>` の表示は `REMEDIATION_PATTERNS` の照合の対象なので、値に
   `x; kubectl config use-context other` のような形を書くと、案内していないのに注記が付き、
   文面で唯一コマンドの形をしたその値の実行を促していた。注記の判定から表示を除く案より
   小さい修正を採った代わりに、ある entry は案内し別の entry は抑止した deny (gh の複数
-  host / firebase の dict / aws の profile 一覧) からも注記が消える。案内したコマンドを
-  連結して打っても再び deny されるだけなので、安全側の代償として受け入れた (マージ前
-  レビューの指摘)
+  host / firebase の dict) からも注記が消える。案内したコマンドを連結して打っても再び deny
+  されるだけなので、安全側の代償として受け入れた (マージ前レビューの指摘)
+- `REMEDIATION_NOTE` を持つ service (aws) には、この除外を当てない。aws は許容形から外れた
+  profile 名を `UNSAFE` の文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内するので、
+  除外は安全に寄与せず、使い方の説明 (行頭に付ける) だけを落としていた (マージ前レビューの
+  指摘)
+- `UNSAFE` を伴わない deny に出る値の表示のうち、`.firebaserc` の alias の行き先
+  (`--project <alias> (→ <project>)`。`--project` の不一致は flag を直す案内で、切替は
+  案内しない) と gh の host 名 (`GitHub [<host>]`。期待値の型の誤りの deny は何も案内しない) は
+  `WORD` のときだけ出す (外れていれば「表示しない値」「表示しない host」)。どちらも値の形だけで
+  注記が付いていた。`WORD` の値は空白も `=` も含まないので、どの service の
+  `REMEDIATION_PATTERNS` にも当たらない (マージ前レビューの指摘)。検出したコマンド
+  自身の値の表示 (`コマンド指定 --context ...`) は quote だけで、値の形によっては同じく注記に
+  当たりうる。表示の無害化として別に扱う (内部バックログ)
 - 旧パスの削除の案内 (`rm <path>`。dispatcher の衝突の deny と builder の migrate) も
   `shlex.quote` を通す。サブディレクトリで作業していると、途中のディレクトリ名は
   リポジトリが決められる (0.17.1 より前からある。マージ前レビューの指摘)
@@ -1161,7 +1173,9 @@ deny 文面の切替案内と pin-env の `firebase use` は、Claude がその�
 - 旧版と新版の deny 文面を同じ入力群 (許容形の値 10 種 / 外れた値 16 種 × 全 service の
   案内の箇所) で比べ、差が「quote の付与 (検出したコマンドの値の表示)」と「案内の抑止
   (外れた値をコマンドにしない。AWS は `<profile>` か次の許容形の profile にする。firebase
-  は `NAME` の規則)」だけで、deny / allow が変わった入力が無いことを確かめた
+  は `NAME` の規則)」だけで、deny / allow が変わった入力が無いことを確かめた。その後に
+  足した表示の抑止 (`.firebaserc` の alias の行き先と gh の host。上の項) も文面だけの変更で、
+  許容形の値の文面は変わらない (`TestGithubGuidance` / `TestFirebaseGuidance` の許容形の対照)
 
 **pin-env の firebase の dict 期待値は、`firebase use` の行き先で選ぶ**
 
@@ -1172,7 +1186,9 @@ alias が `.firebaserc` で別の project を指す・alias が無い・project 
 deny し続ける。行き先が期待値の project になる alias → 期待値の project ID の順に選び、
 どちらも無ければ「固定できません」にする (マージ前レビューの指摘)。project ID で
 案内できるものが複数あるときは、名前順の先頭を案内しつつ、どれにするかを利用者に選ばせる
-注記を付ける (値は既定で隠すので一覧は出さない)
+注記を付ける (値は既定で隠すので一覧は出さない)。pin-env の `--show-values` は案内する
+1 つしか出さないので、注記は候補を accounts-show の `--show-values` (期待値をそのまま出す) で
+見るように言う
 
 **pin-env は、firebase-tools と同じ内容に読めない `.firebaserc` では案内しない**
 
@@ -1182,10 +1198,20 @@ JSON.parse が失敗して alias 0 件)。`services/firebase.py` は厳密な JS
 あるファイルでは alias 0 件と読んで同名の alias の確認をすり抜け、alias のキーの中の U+FEFF は
 別のキーと読んで行き先を取り違える。どちらも案内した `firebase use` が別の project に
 切り替わりうる。cjson の前処理を再現するのではなく、UTF-8 として読めない・U+FEFF を含む・
-`//` か `/*` を含む (文字列の中でも)・厳密な JSON として読めない、のどれかなら「固定できません」にした
-(`firebase.firebaserc_reads_like_cli`。fail-closed)。どれでもなければ cjson の前処理は何も
-変えないので、両者は同じ内容を読む。verify() の `--project` の照合も同じ読み方の違いを持つが、
-判定に関わるので別に扱う (今回は pin-env だけ。マージ前レビューの指摘)
+`//` か `/*` を含む (文字列の中でも)・厳密な JSON として読めない (入れ子が深すぎて
+`json.loads` が RecursionError を出すときも)・`projects` がオブジェクトでないか文字列でない
+値を持つ、のどれかなら「固定できません」にした (`firebase.firebaserc_reads_like_cli`。
+fail-closed)。どれでもなければ cjson の前処理は何も変えないので、両者は同じ内容を読む。
+alias の解決も、firebase-tools (`projects[alias] || alias`) は文字列でない値もそのまま行き先に
+使い、`services/firebase.py` は文字列の値だけを alias と読むが、値が文字列以外のときも
+「固定できません」にするので、解決まで同じ (違うのは、JavaScript のオブジェクトが継承する
+プロパティ名 (`constructor` など) を firebase-tools だけが alias と読むことだけ)。
+判定は保守的で、`//` を文字列の中に持つだけの厳密な JSON (URL など) も「固定できません」に
+なる。cjson のコメントの除去を再現すれば救えるが、再現の誤りが新しい食い違いを生むので
+代償として受け入れた。理由の文は「厳密な JSON に直すと案内できる」とは言わず、弾く内容の
+条件をすべて並べる (URL のファイルでは直しようがない案内になるため)。verify() の `--project` の
+照合も同じ読み方の違いを持つが、判定に関わるので別に扱う (今回は pin-env だけ。マージ前
+レビューの指摘)
 
 **pin-env は、前後に空白のある期待値を固定しない**
 

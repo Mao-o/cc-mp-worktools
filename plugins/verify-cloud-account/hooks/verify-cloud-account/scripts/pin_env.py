@@ -57,12 +57,17 @@ _PADDED = (
 )
 
 
-# `.firebaserc` を firebase-tools と同じ内容に読めないときの「固定できません」の理由
-# (`firebase.firebaserc_reads_like_cli`)。
+# `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないときの「固定できません」
+# の理由 (`firebase.firebaserc_reads_like_cli`)。括弧の中は、その関数が弾くファイルの内容の
+# 条件のすべて (ファイル自体を読めないときも False になるが、内容の条件ではないので並べない)。
+# 判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾くので、
+# 「厳密な JSON に直せば案内できる」とは言わない。
 _FIREBASERC_NOT_STRICT = (
-    ".firebaserc が厳密な JSON として読めません (コメント・U+FEFF・NaN などを含むか、UTF-8"
-    " ではない)。firebase-tools はこれを別の規則で読むので、firebase use の行き先が期待した"
-    " project になるかを確かめられません (.firebaserc を厳密な JSON に直すと案内できます)"
+    ".firebaserc を firebase-tools と同じ内容に読めると確かめられません (UTF-8 でない・"
+    "U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・JSON として読めない"
+    " (NaN など JSON に無い値・構文の誤り・深い入れ子)・projects がオブジェクトでないか"
+    "文字列でない値を持つ、のどれかに当たる)。firebase use の行き先が期待した project に"
+    "なるかを確かめられないので案内しません (これらに当たらない形にすると案内できます)"
 )
 
 
@@ -292,10 +297,13 @@ def _plan_firebase_dict(expected: dict, project_dir: str, notes: tuple[str, ...]
         notes += ("使える alias が無いため、期待値の project ID で案内します",)
         if len(ids) > 1:
             # 名前順の先頭を黙って選ぶと、どの project に固定するかを利用者が選べない
-            # (値は既定で隠すので、一覧も出さない)。
+            # (値は既定で隠すので、一覧も出さない)。pin-env の --show-values は案内する
+            # 1 つしか見せないので、候補は accounts-show の --show-values (期待値をそのまま
+            # 出す) で見てもらう。
             notes += (
                 f"案内できる期待値の project ID は {len(ids)} 個あり、どれに切り替えても検証は"
-                "通ります。--show-values で確かめ、どれにするかをユーザーに選んでもらってください",
+                "通ります。候補は accounts-show の --show-values で確かめ、どれにするかを"
+                "ユーザーに選んでもらってください",
             )
         return Plan("firebase", command=_firebase_use(ids[0]), command_secret=True, notes=notes)
     return Plan(

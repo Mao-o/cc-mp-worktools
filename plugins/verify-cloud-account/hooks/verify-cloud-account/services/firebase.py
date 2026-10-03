@@ -246,8 +246,13 @@ def firebaserc_reads_like_cli(project_dir: str) -> bool:
     firebase-tools が読まない alias を読む。どれも `firebase use <x>` の行き先の予測が食い違う。
 
     判定は保守的: UTF-8 として読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中でも)・
-    厳密な JSON として読めない、のどれかなら False (cjson のコメント除去は再現しない)。
+    厳密な JSON として読めない (入れ子が深すぎるときも)・`projects` がオブジェクトでないか
+    文字列でない値を持つ、のどれかなら False (cjson のコメント除去は再現しない)。
     どれでもなければ、cjson の前処理は何も変えず、JSON.parse と `json.loads` は同じ内容を返す。
+    firebase-tools の alias の解決 (`projects[alias] || alias`) は文字列でない値もそのまま
+    行き先に使い、このモジュールは文字列の値だけを alias と読むが、値が文字列以外のときも
+    False にするので、解決まで同じ (違うのは、JavaScript のオブジェクトが継承するプロパティ名
+    (`constructor` など) を firebase-tools だけが alias と読むことだけ)。
     builder の `pin-env` が `firebase use` を案内する前に使う (verify() の照合は別の話で、
     ここでは変えない)。
     """
@@ -261,9 +266,19 @@ def firebaserc_reads_like_cli(project_dir: str) -> bool:
     if "\ufeff" in text or "//" in text or "/*" in text:
         return False
     try:
-        json.loads(text, parse_constant=_reject_constant)
+        data = json.loads(text, parse_constant=_reject_constant)
     except (ValueError, RecursionError):
         return False
+    # firebase-tools の resolveAlias は `projects[alias] || alias` なので、真になる非文字列
+    # (配列・数値・true・オブジェクト) も alias として解決する。このモジュールは文字列以外を
+    # 捨てるので食い違う。`projects` がオブジェクトでない (null・配列・文字列) ときも、
+    # firebase-tools は添字で引くので食い違いうる。どれも形を単純に言える側 (False) に倒す。
+    if isinstance(data, dict) and "projects" in data:
+        projects = data["projects"]
+        if not isinstance(projects, dict) or any(
+            not isinstance(value, str) for value in projects.values()
+        ):
+            return False
     return True
 
 
@@ -457,7 +472,10 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
         shown = f"--project {shlex.quote(override)}"
         if resolved != override:
-            shown += f" (→ {resolved})"
+            # 行き先はリポジトリの `.firebaserc` の値。この deny は切替を案内しないので、値が
+            # 切替コマンドの形 (`x; firebase use other` / 改行入り) だと、表示だけで dispatcher
+            # の「案内したコマンドは単独で実行」の注記が付く。許容形のときだけ出す。
+            shown += f" (→ {resolved})" if shell_word.arg(resolved) else " (→ 表示しない値)"
         if isinstance(expected, dict):
             if resolved in valid:
                 return None
