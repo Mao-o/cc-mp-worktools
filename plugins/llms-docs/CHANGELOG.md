@@ -2,6 +2,15 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.29.1] - 2026-10-04
+
+### 変更: README に同梱 presets の取得先ホストの一覧を置く (挙動の変更なし)
+
+ルートの README の「Privacy & data flow」表が llms-docs の送信先を 4 ホストに限っていたが、同梱 presets は
+他に 14 ホストへ取得に行く。ホストを表に列挙すると preset が増えるたびにずれるため、ルートの表は取得先の
+出どころ (専用 skill の取得先 / presets.json / 利用者の `sources.json`) で書き、ホストの一覧はこの README の
+「同梱 presets」節に置いた (`presets.json` の `url` / `index_url` から出した 14 ホスト)。コードの変更は無い。
+
 ## [0.29.0] - 2026-10-04
 
 ### 変更: エラーと 0 件のあとに、そのまま打てる次のコマンドを出す (4 script 共通)

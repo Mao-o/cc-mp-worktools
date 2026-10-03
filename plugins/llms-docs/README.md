@@ -197,6 +197,14 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 
+**取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする):
+`agentskills.io` / `bun.com` / `developers.cloudflare.com` / `docs.ollama.com` / `hono.dev` /
+`learn.chatgpt.com` / `modelcontextprotocol.io` / `nextjs.org` / `orm.drizzle.team` / `render.com` /
+`vercel.com` / `vite.dev` / `vitest.dev` / `zod.dev`。preset の追加・移転のたびにこの一覧を
+presets.json に合わせる (ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
+専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) は
+この一覧に含まない。
+
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
 ### 自分の profile を書く (`sources.json`)
