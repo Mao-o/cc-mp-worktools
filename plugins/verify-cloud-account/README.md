@@ -727,9 +727,9 @@ use <x>` は、書込側が期待値への切替なので許可される形)。r
 必ず案内するので、AWS 専用の注記を付ける。文面に表示する値のうち `.firebaserc` の alias の
 行き先 (`--project <alias> (→ <project>)`)、gh の host 名 (`GitHub [<host>]`)、Firebase の
 不一致の deny の現在値 (`現在=<project>`。CLI が無いときは `.firebaserc` から解決した値) と
-`--config` 付きのコマンドの deny の期待値 (`期待=<project>`。この 2 つは v0.18.0) は、下の
-許容形のときだけ出す (外れていれば「表示しない値」「表示しない host」。値の形だけで注記が
-付かないように)。
+`--config` 付きのコマンドの deny・`--project` の行き先を確かめられない deny の期待値
+(`期待=<project>`。この 2 つは v0.18.0) は、下の許容形のときだけ出す (外れていれば
+「表示しない値」「表示しない host」。値の形だけで注記が付かないように)。
 
 **案内するコマンドに入れる値は、シェルでそのまま 1 語になる形に限る (v0.17.1)。** 期待値・
 host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/` `@` `+` だけからなる
@@ -1276,13 +1276,14 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - Firebase の `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき
   (コメント・U+FEFF・URL を含む文字列など。条件は
   [pin-env](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) の firebase と同じ)
-  は、`--project` 付きのコマンドを deny し、CLI から現在値を取れないとき (hook の PATH に
-  `firebase` が無い `npx firebase` の構成など) は現在値を取得できないとして deny する
-  (v0.18.0。fail-closed。後者の文面は従来どおり「firebase コマンドが見つかりません」など)。
-  判定は保守的で、firebase-tools が期待した project で動くファイルも対象になる。`--project`
-  を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、意図した
-  project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を使える
-  ようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
+  は、`--project` 付きのコマンドを deny し (先頭の文に期待値 (`期待=`) を示す。`--config` 付きの
+  コマンドの deny と同じく許容形のものだけを示し、外れる値があれば出所を添える)、CLI から現在値を
+  取れないとき (hook の PATH に `firebase` が無い `npx firebase` の構成など) は現在値を取得できない
+  として deny する (v0.18.0。fail-closed。後者の文面は従来どおり「firebase コマンドが見つかりません」
+  など)。判定は保守的で、firebase-tools が期待した project で動くファイルも対象になる。`--project`
+  を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、deny が
+  示す期待した project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を
+  使えるようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
 - Firebase の `--config` / `-c` のパスが symlink を通るとき (symlink を通る絶対パス・symlink の
   ディレクトリを通る相対パス) は、deny の案内どおり `--config` のファイルのあるディレクトリで
   切り替えても効かないことがある (v0.18.0)。firebase-tools はこのパスの symlink を解かずに

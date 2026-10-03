@@ -742,6 +742,17 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                 {},
                 "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
             ),
+            # 空文字・null の entry は期待値に数えない (`期待=` に示さず、出所の文も添えない)
+            "dict with ignored entries": (
+                {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
+                switched,
+                "期待=right-project, staging-project のいずれか\n",
+            ),
+            "dict with ignored entries, nothing recorded": (
+                {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+            ),
         }
         for with_cli in (True, False):
             for name, (expected, recorded, marker) in cases.items():
@@ -862,9 +873,14 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
     def test_shown_expected_value_has_no_source_sentence(self):
         """`期待=` に示せる値 (WORD。NAME から外れるドメイン付きの project ID も含む) だけなら、
         出所の文は添えない (示さない値があるときだけ添える。`_shown_expected` と同じ判定)。
-        不一致の deny も、現在値を取得できない deny も、その値を `期待=` に示す。"""
+        不一致の deny も、現在値を取得できない deny も、その値を `期待=` に示す。現在値が同じ形
+        (ドメイン付きの project ID) なら、それも `現在=` に示す (`_shown_current` も同じ判定)。"""
         situations = {
             "mismatch": ({self.sub: "wrong-project"}, "現在=wrong-project"),
+            "mismatch, domain-scoped current": (
+                {self.sub: "example.com:wrong-project"},
+                "現在=example.com:wrong-project",
+            ),
             "current unknown": ({}, "現在のプロジェクトを取得できません"),
         }
         for expected in ("example.com:right-project", {"default": "example.com:right-project"}):

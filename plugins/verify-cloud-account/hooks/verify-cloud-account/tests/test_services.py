@@ -810,6 +810,8 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
     """
 
     _UNCONFIRMED = "--project の行き先を確かめられません"
+    # 期待値に許容形から外れる値があるときだけ添える、出所の文
+    _SOURCE = '表示していない期待値があります (accounts.local.json の "firebase" を確認してください)'
 
     def test_bom_inside_an_alias_key(self):
         project_dir = self._project(_FBRC_BOM_IN_KEY)
@@ -827,7 +829,8 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
 
     def test_every_unconfirmed_shape_denies_without_guiding_a_command(self):
         """確かめられない形はどれも deny。期待値の形の問題ではないので「手で確認」の文
-        (`_CHECK_BY_HAND`) は使わず、切替コマンドも案内しない (案内の注記が付かない)。
+        (`_CHECK_BY_HAND`) は使わず、切替コマンドも案内しない (案内の注記が付かない)。期待値は
+        示す (`test_unconfirmed_deny_shows_the_expected_project`)。
 
         `--project` を外す案内は、外すと行き先がアクティブな project に変わることを言う
         (外したコマンドは allow されうるが、指定していた project では動かない。マージ前レビューの
@@ -853,10 +856,54 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
                     self.fail("深い入れ子の .firebaserc で verify() が RecursionError を投げた")
                 self.assertIsNotNone(err)
                 self.assertIn(self._UNCONFIRMED, err)
+                self.assertIn("(期待=right-project)", err)
                 self.assertIn("--project を外すと、コマンドはアクティブな project で動きます", err)
                 self.assertIn("当たらない形にすると確かめられることがあります", err)
                 self.assertNotIn("手で確認", err)
                 self.assertNotIn("firebase use", err)
+
+    def test_unconfirmed_deny_shows_the_expected_project(self):
+        """確かめられない deny も、先頭の文に期待値を示す (許容形のものだけ。dict は「のいずれか」)。
+
+        0.17.1 の同じコマンドの deny (`--project` の不一致) は期待値を示していた。「意図した project
+        がアクティブかを確かめてから外す」には、どの project かが要る (マージ前レビューの指摘)。
+        部品は `--config` 付きのコマンドの deny と同じ: 許容形 (WORD。ドメイン付きの project ID も
+        含む) から外れる値は `(表示しない値)` にし、そのときだけ出所の文を添える。空文字・null の
+        entry は期待値に数えない。"""
+        project_dir = self._project(_FBRC_COMMENTED)
+        cases = {
+            "scalar": ("right-project", "(期待=right-project)。", False),
+            "domain-scoped": (
+                "example.com:right-project",
+                "(期待=example.com:right-project)。",
+                False,
+            ),
+            "dict": (
+                {"default": "right-project", "staging": "staging-project"},
+                "(期待=right-project, staging-project のいずれか)。",
+                False,
+            ),
+            "dict with ignored entries": (
+                {"default": "right-project", "old": "", "tbd": None},
+                "(期待=right-project のいずれか)。",
+                False,
+            ),
+            "masked": ("x; firebase use evil", "(期待=(表示しない値))。", True),
+            "dict, partly masked": (
+                {"default": "right-project", "evil": "x; firebase use evil"},
+                "(期待=(表示しない値), right-project のいずれか)。",
+                True,
+            ),
+        }
+        for name, (expected, marker, masked) in cases.items():
+            with self.subTest(name):
+                err = firebase.verify(expected, project_dir, context={"project": "prod"})
+                self.assertIsNotNone(err)
+                self.assertIn(f"{self._UNCONFIRMED} {marker}", err)
+                self.assertEqual(self._SOURCE in err, masked, err)
+                self.assertNotIn("x; firebase use evil", err)
+                self.assertNotIn("firebase use", err)
+                self.assertNotIn("手で確認", err)
 
     def test_strict_firebaserc_resolves_aliases_like_firebase_tools(self):
         """対照: 厳密な JSON は従来どおり alias を解決して照合する (行き先が期待値なら allow)。

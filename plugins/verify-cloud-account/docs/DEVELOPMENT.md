@@ -1239,10 +1239,11 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
 動く)、alias のキーの中の U+FEFF や `NaN` のあるファイルでも行き先を取り違えて allow していた。
 
 - 確かめられなければ、`--project` は「行き先を確かめられない」で deny し
-  (`_PROJECT_FLAG_UNCONFIRMED`)、ローカル設定からは解決しない (`_from_local` が "" を返し、
-  現在値を取得できない deny になる)。cjson のコメントの除去は再現しない (0.17.1 と同じ理由)。
-  期待値の形の問題ではないので `_CHECK_BY_HAND` の文は使わない。弾く条件の文は pin-env と
-  同じ定数 (`FIREBASERC_UNCONFIRMED_CONDITIONS`)
+  (`_PROJECT_FLAG_UNCONFIRMED_HEAD` と `_PROJECT_FLAG_UNCONFIRMED`。間に期待値を示す。下の項)、
+  ローカル設定からは解決しない (`_from_local` が "" を返し、現在値を取得できない deny になる)。
+  cjson のコメントの除去は再現しない (0.17.1 と同じ理由)。期待値の形の問題ではないので
+  `_CHECK_BY_HAND` の文は使わない。弾く条件の文は pin-env と同じ定数
+  (`FIREBASERC_UNCONFIRMED_CONDITIONS`)
 - その条件の文は網羅と言わない (「など」で終え、使う側は「…に当たる」で受ける)。0.17.1 では
   「弾く内容の条件をすべて並べる」としたが、Python の json が読めない桁の多すぎる整数 (厳密な
   JSON で、firebase-tools は読める。上限は Python の版と設定で変わり、3.11 以降の既定は
@@ -1256,6 +1257,12 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   されうる (指定していた project ではなく、アクティブな project で動く) ことを言っていなかった
   (マージ前レビューの指摘)。`firebase use` の語は入れない (切替を案内したことになり、注記の
   判定にも当たる)
+- `--project` の deny の先頭の文には、期待値も示す (`期待=`。`_shown_expected` で許容形の値だけ。
+  dict は「のいずれか」を付け、外れる値があれば `_EXPECTED_NOT_SHOWN` を添える。`--config` 付きの
+  コマンドの deny と同じ部品)。0.17.1 は同じコマンドの deny (`--project` の不一致) で期待値を
+  示していた。上の「意図した project がアクティブかを確かめてから外す」には期待値が要るので、
+  示さないと 0.17.1 からの案内の退行になる (判定は変わらない。マージ前レビューの指摘)。示すのは
+  許容形の値だけなので、注記の判定には当たらない
 - `.firebaserc` の存在確認は `os.path.isfile` にした。pathlib の `Path.is_file()` は Python 3.13
   まで、ENOENT / ENOTDIR / EBADF / ELOOP 以外の OSError (ENAMETOOLONG・EACCES) をそのまま投げ
   (3.14 から False)、try の外で呼んでいたので、長すぎる名前を指す symlink の `.firebaserc`
@@ -1362,9 +1369,9 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   deny は `_CHECK_BY_HAND` で accounts.local.json を指す)。そのため期待値に許容形から外れる値が
   あるときは、出所だけを言う文 (`_EXPECTED_NOT_SHOWN`:「表示していない期待値があります
   (accounts.local.json の "firebase" を確認してください)」) を添える (`_config_switch_guide`。
-  不一致の deny の scalar / dict と、「現在値を取得できない」deny の 3 か所。マージ前レビューの
-  指摘)。理由は言わないので上の判断と食い違わず、REMEDIATION_PATTERNS にも UNSAFE の文にも
-  当たらないので注記も付かない
+  不一致の deny の scalar / dict と、「現在値を取得できない」deny の 3 か所。`--project` の行き先を
+  確かめられない deny も同じ文を添える。マージ前レビューの指摘)。理由は言わないので上の判断と
+  食い違わず、REMEDIATION_PATTERNS にも UNSAFE の文にも当たらないので注記も付かない
 - `--config` 付きのコマンドの「現在値を取得できない」deny も、先頭行に期待値を示す (`期待=`。
   `_shown_expected` で許容形の値だけ。dict は「のいずれか」を付ける)。0.17.1 は同じコマンド
   (`--config` を見ずに照合していた) の deny で `firebase use <期待値>` を案内し、どの project に
@@ -1422,8 +1429,9 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   指す symlink) で Python 3.13 までまだ検証をスキップする (README の既知の制限。マージ前
   レビューの実測)。3.14 では、そのファイルを無いものとして扱い、探索を続ける (同じ階層のほかの
   配置パス → 親ディレクトリ → グローバル既定。見つかればそれで照合し、一致すれば allow。どこにも
-  無ければ未設定の deny。dispatch を直接呼んで実測)。False (ファイルが無い) に倒すと検証が黙って
-  無くなる向きの場所もあるので、場所ごとに倒す向きを決めて別に扱う (内部バックログ)
+  無ければ未設定の扱い (書込は deny、リモート read のみのコマンドは警告)。dispatch を直接呼んで
+  実測)。False (ファイルが無い) に倒すと検証が黙って無くなる向きの場所もあるので、場所ごとに
+  倒す向きを決めて別に扱う (内部バックログ)
 - 確認 (Python 3.9): 実プロセスの `__main__` で、accounts.local.json は 25〜40 段と
   975〜1,000 段、`.firebaserc` は 975〜1,000 段のすべての深さで、warn (検証のスキップ) に
   ならないことを確かめた

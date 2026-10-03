@@ -16,9 +16,9 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
   持つ、などに当たらない) で、firebase-tools と同じ内容に読めると確かめられたときだけ
   `.firebaserc` を使う。確かめられなければ、`--project` 付きのコマンドは「--project の行き先を
-  確かめられません」で deny し (弾く主な条件を文面に並べる)、ローカル設定からは解決しない
-  (現在値を取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を含むだけの
-  厳密な JSON も対象になる (fail-closed の代償)
+  確かめられません」で deny し (弾く主な条件を文面に並べ、期待値も示す)、ローカル設定からは
+  解決しない (現在値を取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を
+  含むだけの厳密な JSON も対象になる (fail-closed の代償)
 - 弾く条件の文 (pin-env の「固定できません」と共通) は網羅と言わない書き方にした (「…、などに
   当たる」)。Python の json が読めない形には、上限が版と設定で変わるもの (桁の多すぎる整数) も
   あり、並べていない。そのため締めの文も言い切らない: pin-env は「これらに当たらない形にすると
@@ -27,6 +27,11 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
 - 「--project の行き先を確かめられません」の deny の「--project を外す」案内は、外すとコマンドが
   アクティブな project で動く (指定していた project ではなくなる) ことを言う。意図した project が
   アクティブかを確かめてから外すよう案内する (マージ前レビューの指摘)
+- 同じ deny の先頭の文に、期待値 (`期待=`) も示す (dict の期待値には「のいずれか」を付ける)。
+  0.17.1 の同じコマンドの deny (`--project` の不一致) は期待した project を示しており、上の
+  「意図した project がアクティブかを確かめる」にはそれが要るため。示すのは許容形の値だけで、
+  外れる値があれば出所の文を添える (`--config` 付きのコマンドの deny と同じ部品。マージ前
+  レビューの指摘)
 - 入れ子の深い `.firebaserc` で例外が hook の外まで抜け、「内部エラーのため検証をスキップ」
   (実行は止めない) になっていた。読めないファイルとして上と同じに扱う
 - stat できない `.firebaserc` (長すぎる名前を指す symlink など。権限の細工は要らず、リポジトリに
@@ -97,16 +102,17 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップしていた
   (epoch は検証のたびに読むので、置かれている間はその service のすべてのコマンドで。0.18.0 より
   前からある。マージ前レビューの指摘)
-- 既知の制限: 存在確認で stat できない accounts.local.json (長すぎる名前を指す symlink など) は、
-  Python 3.13 以前ではまだ「内部エラーのため検証をスキップ」になる (3.14 以降は、そのファイルが
-  無いものとして扱われる。README の既知の制限。別の変更で直す)
+- 既知の制限: 存在確認で stat できない accounts.local.json (旧パスを含む。長すぎる名前を指す
+  symlink など) は、Python 3.13 以前ではまだ「内部エラーのため検証をスキップ」になる (3.14
+  以降は、そのファイルが無いものとして扱われる。README の既知の制限。別の変更で直す)
 
 ### Tests
 
 - `.firebaserc` の読み方: firebase-tools と同じ行き先になる厳密な JSON・コメント・alias の
   キーの中の U+FEFF・確かめられない形のすべてで `--project` が deny になり、コマンドを案内
-  せず、外すと行き先が変わることと、直し方を言い切らないことを言う
-  (`TestProjectFlagResolvesLikeFirebaseTools`)、
+  せず、外すと行き先が変わることと、直し方を言い切らないことを言う。その deny が示す期待値
+  (scalar / dict・ドメイン付きの project ID・空文字と null の entry・許容形から外れる値と
+  出所の文) (`TestProjectFlagResolvesLikeFirebaseTools`)、
   ローカル設定の解決と空文字の alias の数え方 (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
   入れ子の深い `.firebaserc` で検証をスキップしない (`TestDeepFirebasercDoesNotSkipVerification`。
   判定に加えて理由も見る)、stat できない `.firebaserc` (`TestFirebasercThatCannotBeStatted`)
@@ -117,7 +123,8 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   通る、の往復 (CLI の有無・scalar / dict の期待値・切替先が無いとき (期待値を示す)・ファイルが
   プロジェクトのディレクトリにあるとき。許容形から外れた期待値・現在値は示さず、注記を付けない。
   外れた期待値があれば、不一致・現在値を取得できない deny の両方で出所の文を添え、`期待=` に
-  示せる値 (ドメイン付きの project ID も) だけなら添えない。
+  示せる値 (ドメイン付きの project ID も) だけなら添えない。`現在=` も同じ形を示す。dict の
+  空文字・null の entry は `期待=` にも出所の判定にも入れない。
   `TestFirebaseConfigSwitchGuidance`)、CLI が無いとき symlink を通る `--config` (絶対パス /
   symlink のディレクトリを通る相対パス) で firebase-tools と同じ切替先を引く
   (`TestFirebaseConfigThroughASymlinkWithoutCli`)
@@ -131,7 +138,7 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   同じ fixture にどう振る舞うか (3.13 までは例外、3.14 からは False) も前提として確かめ、その
   前提の helper 自身も、前提と食い違う path で落ちることを確かめる
   (`TestAssertRealIsFileOnThisVersion`。マージ前レビューの指摘)
-- 1,317 → 1,355 件
+- 1,317 → 1,356 件
 
 ## 0.17.1
 

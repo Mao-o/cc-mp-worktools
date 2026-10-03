@@ -484,15 +484,18 @@ _SKIPPED_LINE = (
     f"  (ほかの alias は、alias か project ID が{shell_word.UNSAFE}。"
     f'accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください)'
 )
-# `--project` の行き先を `.firebaserc` から確かめられないときの deny (v0.18.0)。期待値の形の
-# 問題ではないので `_CHECK_BY_HAND` は使わない。コマンドが指定した値は文面に出さない
-# (検出コマンドの行に出る)。`--project` を外したコマンドは、`.firebaserc` を読む CLI 自身に
-# 現在値を聞いて照合する。ただし外すとコマンドの行き先がアクティブな project に変わる (指定して
-# いた project では動かない) ので、それを言う。`firebase use` の語は入れない (切替を案内した
-# ことになり、dispatcher の注記の判定にも当たる)。条件の列挙は網羅ではないので、締めの文も
-# 「当たらない形にすれば確かめられる」とは言い切らない (pin-env の文と同じ)。
+# `--project` の行き先を `.firebaserc` から確かめられないときの deny (v0.18.0)。先頭の文
+# (`_PROJECT_FLAG_UNCONFIRMED_HEAD`) の後ろに期待値 (`期待=`) を示し、続けて
+# `_PROJECT_FLAG_UNCONFIRMED` を置く (verify())。期待値の形の問題ではないので `_CHECK_BY_HAND` は
+# 使わない。コマンドが指定した値は文面に出さない (検出コマンドの行に出る)。`--project` を外した
+# コマンドは、`.firebaserc` を読む CLI 自身に現在値を聞いて照合する。ただし外すとコマンドの行き先が
+# アクティブな project に変わる (指定していた project では動かない) ので、それを言う。`firebase use`
+# の語は入れない (切替を案内したことになり、dispatcher の注記の判定にも当たる)。条件の列挙は網羅
+# ではないので、締めの文も「当たらない形にすれば確かめられる」とは言い切らない (pin-env の文と
+# 同じ)。
+_PROJECT_FLAG_UNCONFIRMED_HEAD = "Firebase: --project の行き先を確かめられません"
 _PROJECT_FLAG_UNCONFIRMED = (
-    "Firebase: --project の行き先を確かめられません。firebase-tools は --project の値を"
+    "firebase-tools は --project の値を"
     " .firebaserc の alias として先に解決しますが、.firebaserc を firebase-tools と同じ内容に"
     f"読めると確かめられません ({FIREBASERC_UNCONFIRMED_CONDITIONS}に当たる)。"
     "--project を外すと、コマンドはアクティブな project で動きます (意図した project が"
@@ -526,12 +529,13 @@ _SWITCH_IN_CONFIG_DIR = (
 )
 # deny の先頭行で、許容形 (`shell_word.WORD`) から外れる値の代わりに示す文。
 _NOT_SHOWN = "(表示しない値)"
-# `--config` 付きのコマンドの deny で、期待値に許容形から外れる値があるときに添える文 (v0.18.0)。
-# その値は文面に示さない (`期待=` では `_NOT_SHOWN`。不一致の deny も、現在値を取得できない deny も
-# 同じ)。許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
-# 続く。何を直せばよいかが文面から消えないよう、出所だけを言う。理由は言わない (この deny は
-# 期待値の形に関係なくコマンドの形で案内しないので、`_CHECK_BY_HAND` の言う理由は成り立たない)。
-# REMEDIATION_PATTERNS にも `shell_word.UNSAFE` の文にも当たらない。
+# `--config` 付きのコマンドの deny と、`--project` の行き先を確かめられない deny で、期待値に
+# 許容形から外れる値があるときに添える文 (v0.18.0)。その値は文面に示さない (`期待=` では
+# `_NOT_SHOWN`。不一致の deny も、現在値を取得できない deny も同じ)。許容形から外れる値はどの
+# project とも一致しないので、案内どおりにしても deny は続く。何を直せばよいかが文面から消えない
+# よう、出所だけを言う。理由は言わない (これらの deny は期待値の形に関係なくコマンドの形で案内
+# しないので、`_CHECK_BY_HAND` の言う理由は成り立たない)。REMEDIATION_PATTERNS にも
+# `shell_word.UNSAFE` の文にも当たらない。
 _EXPECTED_NOT_SHOWN = (
     f'表示していない期待値があります (accounts.local.json の "{ACCOUNT_KEY}" を確認してください)'
 )
@@ -560,11 +564,13 @@ def _shown_current(value: str) -> str:
 
 
 def _shown_expected(values) -> str:
-    """`--config` 付きのコマンドの deny の先頭行の `期待=` に示す値 (`, ` 区切り)。
+    """`--config` 付きのコマンドの deny と、`--project` の行き先を確かめられない deny の先頭行の
+    `期待=` に示す値 (`, ` 区切り)。
 
-    許容形から外れる値は示さない (`_shown_current` と同じ理由)。この deny は期待値の形に関係
-    なくコマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`) は添えない。出所を
-    言う文は `_config_switch_guide` が添える。
+    許容形から外れる値は示さない (`_shown_current` と同じ理由)。これらの deny は期待値の形に
+    関係なくコマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`) は添えない。出所を
+    言う文 (`_EXPECTED_NOT_SHOWN`) は、`--config` の deny では `_config_switch_guide` が、
+    `--project` の deny では verify() が添える。
     """
     return ", ".join(
         sorted({value if shell_word.arg(value) is not None else _NOT_SHOWN for value in values})
@@ -620,7 +626,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     project ではなく **flag の値を `.firebaserc` で解決したもの**を照合する
     (CLI 本体の解決規則と同じ: alias にあれば対応 project ID、無ければ値そのもの)。
     `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ、行き先を
-    確かめられないとして deny する (v0.18.0。fail-closed)。
+    確かめられないとして deny する (v0.18.0。fail-closed)。この deny も先頭の文に期待値を
+    示す (`--config` 付きのコマンドの deny と同じく、許容形のものだけを示し、外れる値があれば
+    出所を言う文を添える)。
 
     `--config` / `-c` (v0.18.0) は project root (読む `.firebaserc`、configstore の切替先を
     探す起点、`firebase use` の cwd) を、指定したファイルのあるディレクトリにする
@@ -661,7 +669,16 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         # `.firebaserc` は 1 回だけ読み、確かめた内容でそのまま解決する (`_read_firebaserc`)。
         projects = _read_firebaserc(root)
         if projects is None:
-            return _PROJECT_FLAG_UNCONFIRMED
+            # 期待値は示す (許容形のものだけ。`--config` 付きのコマンドの deny と同じ部品)。0.17.1 は
+            # 同じコマンドの deny (`--project` の不一致) で期待値を示していた。「意図した project が
+            # アクティブかを確かめてから外す」には、どの project かが要る。
+            values = valid if isinstance(expected, dict) else [expected]
+            either = " のいずれか" if isinstance(expected, dict) else ""
+            tail = "" if all(shell_word.arg(v) is not None for v in values) else f"。{_EXPECTED_NOT_SHOWN}"
+            return (
+                f"{_PROJECT_FLAG_UNCONFIRMED_HEAD} (期待={_shown_expected(values)}{either})。"
+                f"{_PROJECT_FLAG_UNCONFIRMED}{tail}"
+            )
         resolved = _resolve_alias(projects, override)
         # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
         shown = f"--project {shlex.quote(override)}"
