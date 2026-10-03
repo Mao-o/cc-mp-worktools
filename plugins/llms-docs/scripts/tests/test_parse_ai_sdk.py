@@ -144,6 +144,87 @@ class ParseFrontmatterTest(unittest.TestCase):
         fm = parse_ai_sdk.parse_frontmatter(["description: only desc\n"])
         self.assertEqual(fm["title"], "")
 
+    def test_block_form_tags_are_a_list(self):
+        # the form the published corpus uses
+        fm = parse_ai_sdk.parse_frontmatter([
+            "title: Server\n", "docs_index: /llms.txt\n",
+            "tags:\n", "  - api servers\n", "  - streaming\n",
+        ])
+        self.assertEqual(fm["tags"], ["api servers", "streaming"])
+
+    def test_block_form_tags_followed_by_another_key(self):
+        fm = parse_ai_sdk.parse_frontmatter([
+            "tags:\n", "  - 'one'\n", '  - "two words"\n', "description: after\n",
+        ])
+        self.assertEqual(fm["tags"], ["one", "two words"])
+        self.assertEqual(fm["description"], "after")
+
+    def test_children_of_another_key_are_not_read_as_a_continuation(self):
+        fm = parse_ai_sdk.parse_frontmatter([
+            "title: Server\n", "description: Short\n",
+            "sidebar:\n", "  order: 3\n", "  label: hidden\n",
+            "tags:\n", "  - api\n",
+        ])
+        self.assertEqual(fm["description"], "Short")
+        self.assertEqual(fm["title"], "Server")
+        self.assertEqual(fm["tags"], ["api"])
+
+    def test_inline_and_bare_tags_still_work(self):
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(["tags: [a, 'b c']\n"])["tags"], ["a", "b c"])
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(["tags: a, b\n"])["tags"], ["a", "b"])
+
+    def test_escaped_quotes_in_a_double_quoted_title(self):
+        fm = parse_ai_sdk.parse_frontmatter(['title: "useChat \\"An error occurred\\""\n'])
+        self.assertEqual(fm["title"], 'useChat "An error occurred"')
+
+    def test_escaped_backslash_and_single_quoted_forms(self):
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(['title: "a\\\\b"\n'])["title"], "a\\b")
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(["title: 'it''s'\n"])["title"], "it's")
+
+    def test_plain_titles_are_unchanged(self):
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(["title: streamText\n"])["title"], "streamText")
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(['title: "Quoted: yes"\n'])["title"], "Quoted: yes")
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(["title: Don't stop\n"])["title"], "Don't stop")
+
+
+class EscapedQuoteTitleCliTest(unittest.TestCase):
+    """A page whose title has escaped quotes can be named by its real title."""
+
+    TITLE = 'React error "Maximum update depth exceeded"'
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "---\n"
+            'title: "React error \\"Maximum update depth exceeded\\""\n'
+            "description: Troubleshooting\n"
+            "tags:\n"
+            "  - api servers\n"
+            "  - streaming\n"
+            "---\n\n"
+            "# React error\n\n"
+            "## Cause\n"
+            "A loop of state updates.\n",
+        )
+
+    def test_sections_finds_the_page_by_its_real_title(self):
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "sections", self.TITLE, "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'"{self.TITLE}"', out)
+
+    def test_search_prints_the_title_and_tags_as_a_list(self):
+        code, out, err = _loader.run_cli(parse_ai_sdk, [
+            "parse-ai-sdk.py", "search", "state updates", "--cache-dir", self.tmp,
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"[0] {self.TITLE}", out)
+        self.assertIn("tags: api servers, streaming", out)
+        self.assertNotIn("tags: - ", out)
+
 
 class CmdSearchFallbackTest(unittest.TestCase):
     """A term that lives only in a doc body must still be found by

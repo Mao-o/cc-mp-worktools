@@ -41,10 +41,8 @@ from _common import (
     die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
-    is_low_priority,
+    full_corpus_extra_hits,
     load_lines,
-    match_rank,
     next_hint,
     normalize_doc_url,
     note_other_candidates,
@@ -52,6 +50,7 @@ from _common import (
     prefer_lang_exact,
     retry_for_page_ref,
     search_content_in_body,
+    search_content_rank_key,
     search_index_entries,
     search_rank_key,
     section_url_anchor,
@@ -129,8 +128,7 @@ def _alt_source_key(args, source_key: str | None = None):
     return others[0]
 
 # Changelog / release-notes deprioritisation lives in ``_common`` so all
-# three scripts rank identically (``is_low_priority`` / ``search_rank_key``).
-_is_low_priority = is_low_priority
+# scripts rank identically (``search_rank_key`` / ``search_content_rank_key``).
 
 
 # ---------------------------------------------------------------------------
@@ -883,16 +881,12 @@ def cmd_search_content(args):
         total_hits += hits["total_matches"]
         collected.append((idx, doc, hits))
 
-    collected.sort(key=lambda t: (
-        (0 if args.include_changelog_priority else
-         1 if _is_low_priority(t[1]["title"]) else 0),
-        match_rank(t[2]),
-        -t[2]["total_matches"],
-        t[0],
-    ))
+    collected.sort(key=lambda t: search_content_rank_key(
+        t[0], t[1]["title"], t[2],
+        include_changelog_priority=args.include_changelog_priority))
 
     docs_matched = len(collected)
-    printed = collected[: args.limit]
+    printed = collected[: max(args.limit, 0)]
 
     for idx, doc, hits in printed:
         print_page_hits(
@@ -987,27 +981,29 @@ def _search_one_source(args, source_key: str) -> list[dict]:
     # a page that legitimately ranked on title/description keeps its row
     # (shown as "index match only") even when its body has no hits — the
     # fallback only adds pages the index ranking missed entirely.
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        already_shown = {r["doc_idx"] for r in results}
-        fallback = full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query,
-            context_lines=args.context, max_matches_per_doc=args.max_hits,
-            max_snippet_chars=args.max_snippet_chars, min_level=2,
-            limit=args.top_n,
-        )
-        for idx, hits in fallback:
-            if idx in already_shown:
-                continue
-            results.append({
-                "source_key": source_key,
-                "source_label": src["label"],
-                "doc_idx": idx,
-                "title": docs[idx]["title"],
-                "url": docs[idx]["source_url"],
-                "index_score": None,
-                "body_hits": hits,
-                "body_only": True,
-            })
+    #
+    # The search also runs when the candidates have body hits but none has
+    # every keyword in one section (all "[partial match]"): a page that does
+    # is then appended (full_corpus_extra_hits).
+    fallback = full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query,
+        context_lines=args.context, max_matches_per_doc=args.max_hits,
+        max_snippet_chars=args.max_snippet_chars, min_level=2,
+        limit=args.top_n,
+        include_changelog_priority=args.include_changelog_priority,
+        titles=[d["title"] for d in docs],
+    )
+    for idx, hits in fallback:
+        results.append({
+            "source_key": source_key,
+            "source_label": src["label"],
+            "doc_idx": idx,
+            "title": docs[idx]["title"],
+            "url": docs[idx]["source_url"],
+            "index_score": None,
+            "body_hits": hits,
+            "body_only": True,
+        })
 
     # Phase 4: rank with the shared key (changelog bucket, body hits, index
     # score, doc_idx) — identical to ai-sdk / firebase.
@@ -1066,12 +1062,17 @@ def cmd_search(args):
 
     any_results = False
     ranked = []
+    # The top index candidate (first source listed) keeps a Next: line even
+    # when appended pages rank above it.
+    keep = None
     for src_key in source_keys:
         results = _search_one_source(args, src_key)
         # Per-page --source only when several sources are listed together
         # (doc_idx is unique within a source); one source rides on hint_args.
         extra = _source_args_for(src_key) if len(source_keys) > 1 else ()
         ranked += [(r["doc_idx"], r["body_hits"], extra) for r in results]
+        if keep is None:
+            keep = next(((r["doc_idx"], extra) for r in results if not r.get("body_only")), None)
         if len(source_keys) > 1:
             print(f"--- {SOURCES[src_key]['label']} (--source {src_key}) ---")
             print()
@@ -1117,7 +1118,7 @@ def cmd_search(args):
         hint_args = corpus_hint_args(args)
     else:
         hint_args = _source_hint_args(args) + corpus_hint_args(args)
-    render_next_content(hit_candidates(ranked), hint_args=hint_args)
+    render_next_content(hit_candidates(ranked, keep=keep), hint_args=hint_args)
 
 
 # ---------------------------------------------------------------------------

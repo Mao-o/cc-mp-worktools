@@ -1423,8 +1423,68 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
         )
         if hits["total_matches"] > 0:
             results.append((idx, hits))
-    results.sort(key=lambda t: (match_rank(t[1]), -t[1]["total_matches"], t[0]))
+    # No titles here: the changelog bucket never applies (title "").
+    results.sort(key=lambda t: search_content_rank_key(t[0], "", t[1]))
     return results[:limit]
+
+
+# How many pages ``search`` appends when its candidates only have
+# ``[partial match]`` hits. Appended pages rank above the partial candidates,
+# so more than this would push every candidate out of the Next: lines.
+EXTRA_STRICT_LIMIT = 2
+
+
+def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
+                           context_lines: int = 2,
+                           max_matches_per_doc: int = 3,
+                           max_snippet_chars: int | None = None,
+                           min_level: int = 2,
+                           limit: int = 5,
+                           include_changelog_priority: bool = False,
+                           titles=None):
+    """Pages to append to ``search`` rows when the drilled candidates fall short.
+
+    *results* are the rows built from the top-N index candidates (each with
+    ``doc_idx`` and ``body_hits``). Returns ``(doc_idx, hits)`` tuples to add,
+    or ``[]`` when no search is needed:
+
+    - some candidate already has a strict-AND hit set (every keyword in one
+      section): nothing to add. A changelog-style candidate (``title`` per
+      ``is_low_priority``) does not count unless *include_changelog_priority*:
+      it is ranked last, so it would not show the answer anyway;
+    - no candidate has any body hit: the full-corpus hits are added as they
+      are (strict first, then ``[partial match]``), up to *limit*;
+    - candidates have only ``[partial match]`` hits: only pages with a
+      strict-AND section are added, at most ``EXTRA_STRICT_LIMIT``. Other
+      partial pages would only repeat the kind of row the candidates already
+      show, and the existing rows stay.
+
+    Pages already in *results* are never returned twice. With *titles* (one
+    per page), the pages are ranked by ``search_content_rank_key`` before the
+    cut, so a changelog-style page does not take a slot unless
+    *include_changelog_priority*.
+    """
+    if any(match_rank(r["body_hits"]) == 0
+           and (include_changelog_priority or not is_low_priority(r.get("title", "")))
+           for r in results):
+        return []
+    drilled_any = any(r["body_hits"]["total_matches"] for r in results)
+    already_shown = {r["doc_idx"] for r in results}
+    # Every page is ranked, then the listed ones are dropped, then the list is
+    # cut: a listed page (a changelog with every keyword) must not use a slot.
+    found = full_corpus_body_search(
+        docs_body_lines, query,
+        context_lines=context_lines, max_matches_per_doc=max_matches_per_doc,
+        max_snippet_chars=max_snippet_chars, min_level=min_level,
+        limit=len(docs_body_lines),
+    )
+    if titles is not None:
+        found.sort(key=lambda t: search_content_rank_key(
+            t[0], titles[t[0]], t[1], include_changelog_priority=include_changelog_priority))
+    cap = min(limit, EXTRA_STRICT_LIMIT) if drilled_any else limit
+    return [(idx, hits) for idx, hits in found
+            if idx not in already_shown
+            and (not drilled_any or match_rank(hits) == 0)][:max(cap, 0)]
 
 
 # ---------------------------------------------------------------------------
@@ -1793,6 +1853,18 @@ def add_include_changelog_priority_arg(parser) -> None:
         "--include-changelog-priority", action="store_true",
         help="Do not deprioritize Changelog / release-notes pages",
     )
+
+
+def search_content_rank_key(idx: int, title: str, hits: dict, *,
+                            include_changelog_priority: bool = False) -> tuple:
+    """Sort key for ``search-content`` pages, shared by all scripts.
+
+    Order: changelog-style pages last (unless *include_changelog_priority*),
+    then strict-AND pages before ``[partial match]`` pages, then most hits,
+    then lowest *idx*. ``--limit`` cuts only after this ordering.
+    """
+    bucket = 0 if include_changelog_priority else (1 if is_low_priority(title) else 0)
+    return (bucket, match_rank(hits), -hits["total_matches"], idx)
 
 
 def search_rank_key(result: dict, *, include_changelog_priority: bool = False) -> tuple:
