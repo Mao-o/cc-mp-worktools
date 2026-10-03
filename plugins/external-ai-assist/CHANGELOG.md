@@ -63,8 +63,9 @@ fixture でも満たせたので、`GIT_CONFIG_COUNT` が届いているかも�
   呼ぶ直前の env で見る (exitplan-review の 0.12.3 は `GIT_CONFIG_NOSYSTEM` をその床の中で立てていた)。
   当てる側は呼ばないので、当てる側の前提 (post-implementation-review では、helper の git に定数の全項目が
   届いていること) は通らない。
-  exitplan-review の床の問い合わせも、自己確認と同じ `query_git` で行う (問い合わせの道具が床と自己確認で
-  別だと、床の道具だけに足された値を、自己確認が見ない)
+  exitplan-review の床の問い合わせも、`TestTheIsolatedEnvStopsNothing` と同じ `query_git` で行う (問い合わせの
+  道具が床と自己確認で別だと、床の道具だけに足された値を、自己確認が見ない。`query_git` に足された
+  `GIT_CONFIG_NOSYSTEM` は、`TestTheSystemMarkerIsLive` ではなく system の床の前提が落とす)
 
 ### 2. helper が env を混ぜる向きの逆転を、床が見ていなかった
 
@@ -205,8 +206,10 @@ suite 全体は 1 回ずつ、mutation は `test_hermetic_env.py` だけを逐�
   は helper の床) を通す形にした。その床が `isolate_git_config` の後に止める側の値を足す変異は、自己確認が
   `isolate_git_config` を直接呼んでいた間は、空の HOME と 5 設定がある HOME のどちらでも生き残り、床を通した
   後は、3 つの HOME のすべてで自己確認だけが assertion で落とす。`GIT_CONFIG_NOSYSTEM` を立てる変異は、単独
-  でも、定数・`init_repo`・helper が `GIT_CONFIG_NOSYSTEM` を外す変異と組にしても生き残っていて、今は
-  `TestTheSystemMarkerIsLive` が落とす。fixture を指す `GIT_CONFIG_GLOBAL` (exitplan-review) と止める側の
+  でも、`GIT_CONFIG_NOSYSTEM` の抜け (exitplan-review は定数と `init_repo`、post-implementation-review は helper)
+  と組にしても生き残っていて、今は `TestTheSystemMarkerIsLive` が落とす (post-implementation-review の定数の
+  抜けとの組は、定数の床が `isolate_git_config` を直接呼ぶので、前から定数の床が落としていた)。
+  fixture を指す `GIT_CONFIG_GLOBAL` (exitplan-review) と止める側の
   `GIT_CONFIG_COUNT` (両 suite) は、`init_repo` / helper が同じ値を外す変異と組にして生き残っていて、今は
   `TestTheIsolatedEnvStopsNothing` が落とす。exitplan-review の床の問い合わせの道具に、fixture を指す
   `GIT_CONFIG_GLOBAL` / 止める側の `GIT_CONFIG_COUNT` を足し、`init_repo` が同じ値を外す組も、問い合わせを

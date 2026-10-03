@@ -116,8 +116,11 @@ class _InitRepoFloor(unittest.TestCase):
     この床を通し、`init_repo` を呼ぶ直前の env (`self.floor_env`) を見る: `isolate_git_config` を直接呼ぶと、
     ここで足された止める側の値 (0.12.3 は `GIT_CONFIG_NOSYSTEM` をここで立てていた) を見ない。
 
-    問い合わせは、床も自己確認も同じ `query_git` で、同じ HOME を cwd にして行う。問い合わせの道具が
-    床と自己確認で別だと、床の道具だけに足された値 (止める側の値) を、自己確認が見ない。
+    問い合わせは、床と `TestTheIsolatedEnvStopsNothing` が同じ `query_git` で、同じ HOME を cwd にして
+    行う。問い合わせの道具が床と自己確認で別だと、床の道具だけに足された値 (止める側の値) を、自己確認が
+    見ない。`TestTheSystemMarkerIsLive` は `system_marker` で見るので、`query_git` に足された
+    `GIT_CONFIG_NOSYSTEM` は見ない。それは system の床の前提が、床と同じ `query_git` で落とす (前提を
+    `system_marker` に替えると、この組がまた黙って通る)。
     """
 
     def setUp(self) -> None:
