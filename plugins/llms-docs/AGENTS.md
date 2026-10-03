@@ -17,7 +17,8 @@ preset を置き換える。
   Cloudflare 製品別ファイルと同じ形のもの)。
   本文の水平線やコードブロック内の見本を区切りと誤認する、`drop_lines` がコードブロック内の
   行を消す、ページ URL を読む前に行を消す、など
-- `index_url` の突き合わせで、別のページの URL が付く (完全一致・一意以外で付けている、など)
+- `index_url` の突き合わせで、別のページの URL が付く (完全一致・一意以外で付けている、別の
+  `llms.txt` / `llms-full.txt` などのファイルを指す項目の URL を付けている、など)
 - 同梱 presets が壊れている (検証で落ちる・取得先が `llms-full.txt` でない)。`sources.json` が
   無いときに presets まで使えなくなる、明示したファイルが無いのに黙って presets だけで動く
 - `Next:` ヒントが `--source` / `--sources-file` / `--file` / `--cache-dir` / `--max-age` を
@@ -31,6 +32,9 @@ preset を置き換える。
 
 - `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート `/llms.txt`)
   を読めないこと。製品別の `/<製品>/llms-full.txt` は presets で読む
+- `index_url` に 2 段 index を書いたとき、`url` の `llms-full.txt` に含まれない別の docs のページ
+  (学習トラックなど) の項目とタイトルが衝突して、その項目の URL が付くこと (タイトルだけでは区別
+  できない。README で 2 段 index を `index_url` に書かないよう案内済み)
 - presets に入っていないサイト・製品があること (追加は改善提案 P3)
 - ページごとに別ファイルで公開するサイト
 - `index_url` で URL が付かないページがあること (タイトルが完全一致しない・`llms.txt` の項目かページのどちらかでタイトルが重複する。付けないのは意図した動作)

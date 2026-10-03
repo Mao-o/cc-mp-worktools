@@ -24,7 +24,10 @@ per-product ``/<product>/llms-full.txt`` files are supported), sites that
 publish one file per page, and joining an ``llms.txt`` index against the full
 text other than by exact title. Only the profile's ``url`` (the
 ``llms-full.txt``) and, when set, its ``index_url`` (the ``llms.txt``, used
-to give URL-less pages a URL by exact title) are fetched.
+to give URL-less pages a URL by exact title) are fetched. A two-level index
+is not a usable ``index_url`` either: its entries that link another
+``llms.txt`` file are skipped, but a page that shares its title with an entry
+for a page of another docs set still gets that entry's URL.
 """
 
 import argparse
@@ -683,6 +686,22 @@ def _title_key(title: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[`*_]", "", title)).strip().lower()
 
 
+# The last path segment of an llms.txt-family file: llms.txt, llms-full.txt,
+# llms-small.txt, llms-ctx-full.txt. Measured on real indexes: OpenAI's and
+# Cloudflare's root llms.txt link one ``<product>/llms.txt`` per product,
+# Hono's links llms-small.txt, Codex's links llms-full.txt and use-cases/llms.txt.
+_INDEX_FILE_NAME_RE = re.compile(r"^llms(?:-[a-z0-9]+)*\.txt$", re.IGNORECASE)
+
+
+def _is_index_file_url(url: str) -> bool:
+    """True when *url* names an ``llms.txt``-family file (another index, or a
+    full-text export) rather than a page. Query, fragment and a trailing slash
+    are ignored; only the last path segment counts, so ``/docs/llms.txt.md``
+    and a host that happens to be called ``llms.txt`` are not index files."""
+    path = re.sub(r"^https?://[^/]*", "", url.split("#", 1)[0].split("?", 1)[0]).rstrip("/")
+    return bool(_INDEX_FILE_NAME_RE.match(path.rsplit("/", 1)[-1]))
+
+
 def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
     """Give a URL to each page that has none, from the ``llms.txt`` entry
     with the same title. Only an exact title (ignoring case, spacing and
@@ -692,10 +711,16 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
     ``packages/zod`` page are both "Zod") is left without a URL, because a
     wrong URL misleads more than a missing one (measured on Hono:
     word-prefix matching gave 4 wrong URLs in 40). Entries are read with
-    the shared ``parse_llms_index`` (absolute URLs only). Returns the number
-    of pages that got a URL."""
+    the shared ``parse_llms_index`` (absolute URLs only). An entry that
+    links another ``llms.txt``-family file is not a page and is skipped
+    before the titles are compared (a 2-level index such as OpenAI's root
+    ``llms.txt`` would otherwise give "Sign in with ChatGPT" the URL of its
+    ``siwc/llms.txt``); it does not make a page's title ambiguous either.
+    Returns the number of pages that got a URL."""
     by_title: dict[str, set] = {}
     for entry in parse_llms_index(index_lines):
+        if _is_index_file_url(entry["url"]):
+            continue
         by_title.setdefault(_title_key(entry["title"]), set()).add(entry["url"])
     pages_per_title: dict[str, int] = {}
     for d in docs:
