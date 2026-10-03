@@ -1243,6 +1243,24 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   現在値を取得できない deny になる)。cjson のコメントの除去は再現しない (0.17.1 と同じ理由)。
   期待値の形の問題ではないので `_CHECK_BY_HAND` の文は使わない。弾く条件の文は pin-env と
   同じ定数 (`FIREBASERC_UNCONFIRMED_CONDITIONS`)
+- その条件の文は網羅と言わない (「など」で終え、使う側は「…に当たる」で受ける)。0.17.1 では
+  「弾く内容の条件をすべて並べる」としたが、Python の json が読めない桁の多すぎる整数 (厳密な
+  JSON で、firebase-tools は読める。上限は Python の版と設定で変わり、3.11 以降の既定は
+  4,300 桁) が漏れていた。版で変わる条件は並べず、列挙が網羅でない書き方にした (マージ前
+  レビューの指摘)。pin-env の「これらに当たらない形にすると案内できます」も「できることが
+  あります」にした
+- `--project` の deny の「--project を外す」案内は、外すとコマンドの行き先がアクティブな project
+  に変わることを言う。旧文面の「アクティブな project で照合します」は、外したコマンドが allow
+  されうる (指定していた project ではなく、アクティブな project で動く) ことを言っていなかった
+  (マージ前レビューの指摘)。`firebase use` の語は入れない (切替を案内したことになり、注記の
+  判定にも当たる)
+- `.firebaserc` の存在確認は `os.path.isfile` にした。pathlib の `Path.is_file()` は Python 3.13
+  まで、ENOENT / ENOTDIR / EBADF / ELOOP 以外の OSError (ENAMETOOLONG・EACCES) をそのまま投げ
+  (3.14 から False)、try の外で呼んでいたので、長すぎる名前を指す symlink の `.firebaserc`
+  (権限の細工は要らず、リポジトリに置ける) で例外が `__main__` の最終防波堤まで抜けていた
+  (マージ前レビューの指摘)。stat できないファイルは無いもの (alias 0 件) とする。firebase-tools の
+  存在確認 (statSync が失敗すれば false) と同じ。テストは `Path.is_file` を 3.13 までの挙動に
+  差し替えて (`_testutil.patch_is_file_like_py313`)、3.14 以降でも再現する
 - `.firebaserc` を読むのは `_read_firebaserc` だけにし、判定と解決に 1 回の読み込みの結果を
   使う。別々に `json.loads` すると、入れ子の深さが再帰の上限の境目にあるファイルで、呼び出しの
   深さの違いから片方だけが RecursionError になり、「同じに読める」と判定した内容と違う内容で
@@ -1281,12 +1299,35 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   はコマンドを始めないが、見立てが外れているだけ (シェルが展開する `~` など) なら別の
   ディレクトリで動くので、allow にはしない。コマンドの中の `cd` は、`--config` の無い
   コマンドと同じく追わない
+- project_dir は symlink を解いた実体のパスにしてから解決する。detectProjectRoot は
+  `path.resolve(process.cwd(), configPath)` で、Node の `process.cwd()` は実体のパス
+  (getcwd)。論理パスから解決すると、hook が `firebase use --config` に渡す絶対パスの root が
+  論理パスになり、CLI は configstore の切替先 (`firebase use` が実体のパスで記録したもの) を
+  引き当て損ねて `.firebaserc` の default で答える (firebase-tools 15.24.0 の applyRC を node で
+  呼んで実測: 実コマンドは切替先の project、hook の聞き方は default の project。マージ前
+  レビューの指摘)。絶対パスの config は join で前半が捨てられ、そのまま使う (Node と同じ)。
+  ローカル設定の解決 (`_from_configstore`) は前から論理・実体の両方で引いていたので、ずれて
+  いたのは CLI のある経路だけ
+- `--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない
+  (`_SWITCH_IN_CONFIG_DIR`)。firebase-tools は `firebase use` の切替先を project root
+  (use.js の `makeActiveProject(options.projectRoot)`) ごとに記録するので、`--config` の
+  ディレクトリに切替先が記録されていると、プロジェクトのディレクトリで `firebase use <期待値>` を
+  打っても変わらず (プロジェクトのディレクトリのキーに書く)、案内どおりにしても同じ deny を
+  繰り返していた (マージ前レビューの指摘)。そのディレクトリで切り替えるよう文で案内し、
+  REMEDIATION_PATTERNS に当たる語 (`firebase use <x>` / `firebase login`) を入れない (「単独で
+  実行」の注記も付かない)。期待値が許容形から外れるときは `_CHECK_BY_HAND` を添える (不一致の
+  先頭行が期待値をそのまま示すので、注記の判定から外すため。コマンドで案内する deny と同じ
+  契約)。末尾に `--config` を付けた切替 (`firebase use <期待値> -c <path>`) は self-remediation
+  に当たらず通常検証に落ちる (そのディレクトリの切替先が期待値と違うあいだは deny。安全側。
+  `is_self_remediation` の剥がす option を広げるのは判定表の変更なので、kubectl の
+  `--kubeconfig` / gcloud の `--configuration` と合わせて別に扱う。内部バックログ)
 - 値を静的に解決できない (`$VAR` 等) ときは、他の context option と同じく既定の root で
   照合する (`cli_options.find_context_options`。0.17.1 までと同じ)
 - 確認: detectProjectRoot と `_config_file` を 11 の形 (相対・絶対・`..` を含むもの・
   firebase.json でないファイル名・ディレクトリ・無いファイル・symlink など) で比べ、root が
   一致するか、両方が「見つからない」(firebase-tools はエラー、hook は deny) になることを
-  確かめた
+  確かめた。ただし作業ディレクトリ自体が symlink の下にある形は比べておらず、上の論理パスの
+  ずれを見落としていた
 
 **読めない accounts.local.json / 成功 cache で検証を飛ばさない**
 
@@ -1295,6 +1336,12 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   ファイルで例外が `__main__` の最終防波堤まで抜け、「内部エラーのため検証をスキップ」
   (fail-open) になっていた (内部バックログ)。不正な JSON と同じ扱い (`pre_file_mode` の
   `_decide`。tier に関係なく deny) にした
+- 捕まえるのは `ValueError` と RecursionError。最初は UnicodeDecodeError を名指ししていたが、
+  桁の多すぎる整数 (Python の上限。3.11 以降の既定は 4,300 桁) で `json.loads` が投げるのは
+  JSONDecodeError ではない ValueError で、同じく検証をスキップしていた (Python 3.11 〜 3.14 で
+  ValueError、上限の無い 3.9.6 では読める (実測)。マージ前レビューの指摘)。UnicodeDecodeError も
+  ValueError の子なので名指しをやめた。JSONDecodeError (これも子) は先に捕まえるので、不正な
+  JSON の文面は変わらない。e2e のテストの 5,000 桁の case は、上限のある Python でだけ流す
 - 入れ子の上限 (`_MAX_ACCOUNTS_DEPTH = 32`) も置いた。`json.loads` が通る深さでも、後段
   (成功 cache のキーを作る `json.dumps` など) が同じ深さを辿って RecursionError になる窓が
   ある (Python 3.9 では、`json.loads` は通り `json.dumps` が落ちる深さが 985 段前後にあった。
@@ -1305,10 +1352,18 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   (`_read_epoch`) は入れ子が深いファイルを、読めないもの (cache miss / epoch 0) として扱う
   (epoch の UTF-8 でないファイルは、前から ValueError として捕まえていた)。どちらも
   捕まえていなかった例外で検証を飛ばしていた
-- hook の経路の他の読み込みは確認済み: auto_switch の記録の読み込みは dispatcher の
-  `_auto_switch` が例外を握る (deny は残る)、firebase の configstore は RuntimeError
-  (RecursionError の基底) まで捕まえる、aws の config と `cli_config.read_text` は UTF-8 で
-  ないファイルを読めないものとして扱う
+- 同じ 2 つの関数の存在確認も `os.path.isfile` にした。`Path.is_file()` が try の外で stat の
+  失敗 (長すぎる名前を指す symlink の ENAMETOOLONG など) を例外にし (Python 3.13 まで)、
+  `$TMPDIR` の epoch をその symlink にするだけで、置かれている間はその service のすべての
+  コマンドで検証を飛ばしていた (`current_epoch` は検証のたびに呼ぶ。マージ前レビューの指摘)
+- hook の経路の他の読み込みの例外は確認済み: auto_switch の記録の読み込みは dispatcher の
+  `_auto_switch` が例外を握る (deny は残る)、firebase の configstore は ValueError と
+  RuntimeError (RecursionError の基底) まで捕まえる、aws の config と `cli_config.read_text` は
+  UTF-8 でないファイルを読めないものとして扱う。ただし、読み込みの前の存在確認 (pathlib の
+  `Path.is_file()` など。Python 3.13 まで stat の失敗を例外にする) は、`.firebaserc`・成功
+  cache の entry・epoch の 3 か所だけを直した。残りの同じ形 (accounts.local.json の探索・auto_switch の記録・
+  gcloud の構成ファイル・`.git` の判定など) は確認済みではない。False (ファイルが無い) に倒すと
+  検証が黙って無くなる向きの場所もあるので、場所ごとに倒す向きを決めて別に扱う (内部バックログ)
 - 確認 (Python 3.9): 実プロセスの `__main__` で、accounts.local.json は 25〜40 段と
   975〜1,000 段、`.firebaserc` は 975〜1,000 段のすべての深さで、warn (検証のスキップ) に
   ならないことを確かめた

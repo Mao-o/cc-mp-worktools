@@ -207,9 +207,13 @@ class TestMainEntry(unittest.TestCase):
         return "warn", out.get("additionalContext", "")
 
     def test_unreadable_accounts_file_is_handled_like_malformed_json(self):
-        """UTF-8 でない・入れ子が深い期待値ファイルは、不正な JSON と同じ判定 (mode は env だけで
-        決める。`"$mode"` は読めない)。旧版は検証をスキップしていた (実測は旧パスの
-        `.claude/accounts.json` に 0xFF を 1 バイト入れただけ)。"""
+        """UTF-8 でない・入れ子が深い・桁の多すぎる整数のある期待値ファイルは、不正な JSON と
+        同じ判定 (mode は env だけで決める。`"$mode"` は読めない)。旧版は検証をスキップしていた
+        (実測は旧パスの `.claude/accounts.json` に 0xFF を 1 バイト入れただけ)。
+
+        桁の多すぎる整数は Python の上限 (3.11 以降の既定は 4,300 桁) で `json.loads` が
+        ValueError (JSONDecodeError ではない) を投げる (マージ前レビューの指摘)。上限の無い
+        Python (3.9.6 など) では読めるファイルなので、その case は上限があるときだけ流す。"""
         not_utf8 = b'{"firebase": "right-project\xff"}'
         cases = {
             "malformed JSON (control)": (self._ACCOUNTS, "{not json", "JSON が不正です"),
@@ -233,6 +237,12 @@ class TestMainEntry(unittest.TestCase):
                 "読めません (入れ子が 32 段より深い)",
             ),
         }
+        if 0 < getattr(sys, "get_int_max_str_digits", lambda: 0)() < 5000:
+            cases["too many digits"] = (
+                self._ACCOUNTS,
+                '{"firebase": "right-project", "pad": ' + "1" * 5000 + "}",
+                "読めません (ValueError)",
+            )
         for name, (rel, data, marker) in cases.items():
             with self.subTest(name):
                 shutil.rmtree(self.project / ".claude", ignore_errors=True)

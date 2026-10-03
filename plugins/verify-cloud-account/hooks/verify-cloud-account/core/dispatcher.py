@@ -282,7 +282,7 @@ def _nested_deeper_than(value, limit: int) -> bool:
 
 
 def _unreadable_accounts(accounts_path: Path, why: str) -> str:
-    """読めない期待値ファイル (UTF-8 でない / 入れ子が深すぎる) の deny 本文。
+    """読めない期待値ファイル (UTF-8 でない / 桁の多すぎる整数 / 入れ子が深すぎる) の deny 本文。
 
     判定は不正な JSON と同じ (mode は env だけで決める。`"$mode"` は読めないため)。
     """
@@ -755,10 +755,12 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             "内容を確認・修正してください。",
             mode_notes,
         )
-    except (UnicodeDecodeError, RecursionError) as e:
-        # UTF-8 でない (UnicodeDecodeError) / 入れ子が深すぎる (RecursionError) ファイルも、
-        # 不正な JSON と同じに扱う。捕まえないと dispatch() の外まで抜け、__main__ の
-        # 最終防波堤が「内部エラーのため検証をスキップ」(実行は止めない) にしていた。
+    except (ValueError, RecursionError) as e:
+        # UTF-8 でない (UnicodeDecodeError) / 桁の多すぎる整数 (Python の上限。版と設定で
+        # 変わる) / 入れ子が深すぎる (RecursionError) ファイルも、不正な JSON と同じに扱う。
+        # 前の 2 つは ValueError の子 (JSONDecodeError も子だが、上で捕まえる)。捕まえないと
+        # dispatch() の外まで抜け、__main__ の最終防波堤が「内部エラーのため検証をスキップ」
+        # (実行は止めない) にしていた。
         return _decide(
             pre_file_mode, _unreadable_accounts(accounts_path, type(e).__name__), mode_notes
         )

@@ -12,6 +12,7 @@ CLI モックを前提にしたテストが壊れた)。`start_isolation()` で�
 """
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from pathlib import Path
@@ -104,6 +105,31 @@ class _Isolation:
     def stop(self) -> None:
         for patcher in reversed(self._patchers):
             patcher.stop()
+
+
+# pathlib の `Path.is_file()` が Python 3.13 まで握りつぶす errno。これ以外の OSError
+# (ENAMETOOLONG・EACCES など) はそのまま投げる (3.14 からは False を返す)。
+_PATHLIB_IGNORED_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+_REAL_IS_FILE = Path.is_file
+
+
+def _is_file_like_py313(self, *args, **kwargs):
+    try:
+        os.stat(self)
+    except OSError as e:
+        if e.errno not in _PATHLIB_IGNORED_ERRNOS:
+            raise
+        return False
+    return _REAL_IS_FILE(self, *args, **kwargs)
+
+
+def patch_is_file_like_py313():
+    """`Path.is_file` を Python 3.13 までの挙動 (上の errno 以外の OSError を投げる) に差し替える。
+
+    try の外の `Path.is_file()` から例外が抜ける経路を、3.14 以降でも再現するために使う
+    (返り値は patcher。`start()` / `stop()` か with で使う)。
+    """
+    return mock.patch.object(Path, "is_file", _is_file_like_py313)
 
 
 def start_isolation(root: Path, home: Path = ISOLATED_HOME) -> _Isolation:

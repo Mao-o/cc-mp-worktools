@@ -59,14 +59,15 @@ _PADDED = (
 
 # `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないときの「固定できません」
 # の理由 (`firebase.firebaserc_reads_like_cli`)。括弧の中は、その関数が弾くファイルの内容の
-# 条件のすべてで、hook の `--project` の deny と同じ文 (`firebase.FIREBASERC_UNCONFIRMED_CONDITIONS`)。
-# 判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾くので、
-# 「厳密な JSON に直せば案内できる」とは言わない。
+# 主な条件 (網羅ではない) で、hook の `--project` の deny と同じ文
+# (`firebase.FIREBASERC_UNCONFIRMED_CONDITIONS`)。判定は保守的で、厳密な JSON でも文字列の中に
+# `//` (URL など) があるだけで弾くので、「厳密な JSON に直せば案内できる」とは言わない。並べない
+# 条件 (桁の多すぎる整数) もあるので、当たらない形にすれば必ず案内できるとも言わない。
 _FIREBASERC_NOT_STRICT = (
     ".firebaserc を firebase-tools と同じ内容に読めると確かめられません ("
-    f"{firebase.FIREBASERC_UNCONFIRMED_CONDITIONS}、のどれかに当たる)。firebase use の行き先が"
+    f"{firebase.FIREBASERC_UNCONFIRMED_CONDITIONS}に当たる)。firebase use の行き先が"
     "期待した project になるかを確かめられないので案内しません (これらに当たらない形にすると"
-    "案内できます)"
+    "案内できることがあります)"
 )
 
 

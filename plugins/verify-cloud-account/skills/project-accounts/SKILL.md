@@ -150,7 +150,7 @@ aws / gcloud / firebase のアカウントを、各 CLI の公式の仕組みで
 - **pin-env の `固定できません: .firebaserc を firebase-tools と同じ内容に読めると確かめられません`** →
   `.firebaserc` が括弧の中の条件 (UTF-8 でない・U+FEFF がある・`//` か `/*` がある (文字列の
   中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
-  持つ) のどれかに当たる。firebase-tools とは読み方が違いうるので、`firebase use` の行き先を
+  持つ、など。網羅ではない) に当たる。firebase-tools とは読み方が違いうるので、`firebase use` の行き先を
   確かめられない。`.firebaserc` はリポジトリのファイルなので Claude は直さない。理由を
   ユーザーに伝え、これらに当たらない形に直すかはユーザーに任せる (直したら再実行する。URL の
   ように消せない内容なら、この方法では firebase を固定できない)

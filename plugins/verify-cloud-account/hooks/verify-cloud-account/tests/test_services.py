@@ -827,7 +827,11 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
 
     def test_every_unconfirmed_shape_denies_without_guiding_a_command(self):
         """確かめられない形はどれも deny。期待値の形の問題ではないので「手で確認」の文
-        (`_CHECK_BY_HAND`) は使わず、切替コマンドも案内しない (案内の注記が付かない)。"""
+        (`_CHECK_BY_HAND`) は使わず、切替コマンドも案内しない (案内の注記が付かない)。
+
+        `--project` を外す案内は、外すと行き先がアクティブな project に変わることを言う
+        (外したコマンドは allow されうるが、指定していた project では動かない。マージ前レビューの
+        指摘)。"""
         cases = {
             "NaN": _FBRC_NAN,
             "deep": _FBRC_DEEP,
@@ -848,6 +852,7 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
                     self.fail("深い入れ子の .firebaserc で verify() が RecursionError を投げた")
                 self.assertIsNotNone(err)
                 self.assertIn(self._UNCONFIRMED, err)
+                self.assertIn("--project を外すと、コマンドはアクティブな project で動きます", err)
                 self.assertNotIn("手で確認", err)
                 self.assertNotIn("firebase use", err)
 
@@ -939,6 +944,48 @@ class TestLocalResolutionNeedsAConfirmedFirebaserc(_FirebasercFixture):
         self.assertIn("現在のプロジェクトを取得できません", err)
 
 
+class TestFirebasercThatCannotBeStatted(_FirebasercFixture):
+    """stat できない `.firebaserc` (長すぎる名前を指す symlink など) で例外を漏らさない (v0.18.0)。
+
+    pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の OSError (ENAMETOOLONG・
+    EACCES) をそのまま投げる (3.14 から False)。try の外で呼んでいたので、`.firebaserc` を
+    この symlink にするだけで (権限の細工は要らず、リポジトリに置ける) 例外が hook の外まで抜け、
+    __main__ の最終防波堤が検証をスキップしていた。`--project` 付きのコマンドは CLI の有無に
+    関係なく通る経路 (マージ前レビューの指摘)。firebase-tools と同じく、無いもの (alias 0 件) と
+    して扱う。3.14 以降でも同じ失敗を再現するため、`Path.is_file` を 3.13 までの挙動に差し替える。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "fb"
+        self.root.mkdir()
+        (self.root / "firebase.json").write_text("{}", encoding="utf-8")
+        rc = self.root / ".firebaserc"
+        os.symlink("a" * 300, rc)  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
+        patcher = _testutil.patch_is_file_like_py313()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
+            rc.is_file()
+
+    def _call(self, fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except OSError as e:
+            self.fail(f"{fn.__name__} から {type(e).__name__} が抜けた (hook は検証をスキップする)")
+
+    def test_read_firebaserc(self):
+        self.assertEqual(self._call(firebase._read_firebaserc, str(self.root)), {})
+
+    def test_verify_with_project_flag_still_decides(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("firebase")):
+            err = self._call(
+                firebase.verify, "right-project", str(self.root), context={"project": "prod"}
+            )
+        self.assertIsNotNone(err)  # alias 0 件: prod はそのまま project ID で、期待値と違う
+        self.assertIn("コマンド指定 --project prod,", err)
+
+
 class TestFirebaseConfigOption(_FirebasercFixture):
     """`--config` / `-c` は project root を、指定したファイルのあるディレクトリにする (v0.18.0)。
 
@@ -985,11 +1032,34 @@ class TestFirebaseConfigOption(_FirebasercFixture):
             )
         self.assertIsNotNone(err)
         self.assertIn("現在=wrong-project", err)
+        real_sub = os.path.realpath(self.sub)
         self.assertEqual(
             m.call_args.args[0],
-            ["firebase", "use", "--config", os.path.join(self.sub, "firebase.staging.json")],
+            ["firebase", "use", "--config", os.path.join(real_sub, "firebase.staging.json")],
         )
-        self.assertEqual(m.call_args.kwargs.get("cwd"), self.sub)
+        self.assertEqual(m.call_args.kwargs.get("cwd"), real_sub)
+
+    def test_relative_config_is_resolved_from_the_physical_directory(self):
+        """相対の `--config` は、symlink を解いた実体のパスから解決する (マージ前レビューの指摘)。
+
+        firebase-tools (detectProjectRoot) は `path.resolve(process.cwd(), config)` で解決し、Node の
+        `process.cwd()` は実体のパスを返す。論理パスから解決すると、hook が CLI に渡す `--config` の
+        root が論理パスになり、`firebase use` が実体のパスで記録した切替先を CLI が引き当て損ねて
+        `.firebaserc` の default で答える (firebase-tools の applyRC で実測: 実コマンドは
+        wrong-project、hook の聞き方は right-project)。
+        """
+        link = self.tmp / "link"
+        os.symlink(self.root, link)
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="wrong-project\n")) as m:
+            err = firebase.verify("right-project", str(link), context={"config": "sub/firebase.json"})
+        self.assertIsNotNone(err)
+        real_sub = os.path.realpath(self.sub)
+        self.assertEqual(
+            m.call_args.args[0],
+            ["firebase", "use", "--config", os.path.join(real_sub, "firebase.json")],
+            "firebase-tools と違う project root で現在値を聞いている",
+        )
+        self.assertEqual(m.call_args.kwargs.get("cwd"), real_sub)
 
     def test_local_resolution_starts_in_the_config_directory(self):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):

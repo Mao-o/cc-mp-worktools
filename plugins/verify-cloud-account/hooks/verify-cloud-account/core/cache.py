@@ -165,7 +165,10 @@ def _cache_key(
 def _read_epoch(service_name: str) -> tuple[int, int]:
     """(epoch, tombstone_ns) を返す。epoch ファイルが無い / 読めないなら (0, 0)。"""
     path = _epoch_path(service_name)
-    if path is None or not path.is_file():
+    # `os.path.isfile` を使う: pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の
+    # OSError (長すぎる名前を指す symlink の ENAMETOOLONG・EACCES) をそのまま投げる (try の外に
+    # あるので、下の except と同じく dispatch() の外まで抜けて検証をスキップしていた)。
+    if path is None or not os.path.isfile(path):
         return 0, 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -212,7 +215,8 @@ def get_success(
             service_name, project_dir, expected, inline_env, context, identity_env
         )
     )
-    if path is None or not path.is_file():
+    # stat できない entry も cache miss (`Path.is_file()` ではなく `os.path.isfile`。`_read_epoch`)。
+    if path is None or not os.path.isfile(path):
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

@@ -240,6 +240,43 @@ class TestCache(unittest.TestCase):
         self.assertEqual(cache.current_epoch("aws"), 0)
         self.assertTrue(cache.get_success("aws", "/p", "exp", 1.0))
 
+    # --- stat できない epoch / entry (v0.18.0) ---
+    #
+    # pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の OSError (長すぎる名前を
+    # 指す symlink の ENAMETOOLONG・EACCES) をそのまま投げる (3.14 から False)。try の外で呼んで
+    # いたので、`$TMPDIR` にその symlink を置くだけで例外が dispatch() の外まで抜け、__main__ の
+    # 最終防波堤がその service の検証をスキップしていた (マージ前レビューの指摘)。3.14 以降でも
+    # 同じ失敗を再現するため、`Path.is_file` を 3.13 までの挙動に差し替える。
+
+    _LONG = "a" * 300  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
+
+    def _unstattable(self, path: Path) -> None:
+        """path を stat できない symlink にし、差し替えた `Path.is_file` が投げることを確かめる。"""
+        os.symlink(self._LONG, path)
+        patcher = _testutil.patch_is_file_like_py313()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
+            path.is_file()
+
+    def test_epoch_file_that_cannot_be_statted_is_zero(self):
+        self._unstattable(cache._epoch_path("firebase"))
+        try:
+            epoch = cache.current_epoch("firebase")
+        except OSError as e:
+            self.fail(f"stat できない epoch ファイルで current_epoch が {type(e).__name__} を投げた")
+        self.assertEqual(epoch, 0)
+
+    def test_entry_that_cannot_be_statted_is_a_miss(self):
+        self._unstattable(
+            cache._cache_path(cache._cache_key("firebase", "/p", "exp", None, None, None))
+        )
+        try:
+            hit = cache.get_success("firebase", "/p", "exp", 1.0)
+        except OSError as e:
+            self.fail(f"stat できない cache entry で get_success が {type(e).__name__} を投げた")
+        self.assertFalse(hit)
+
     def test_writes_leave_no_tmp_files(self):
         cache.set_success("github", "/p", "exp", 1.0)
         cache.invalidate("github")

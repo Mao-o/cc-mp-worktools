@@ -27,7 +27,8 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
    (fail-closed。他 service の timeout と同じ扱い)。
 
 コマンドの `--config` / `-c` は project root を指定したファイルのあるディレクトリに移す
-(firebase-tools の detectProjectRoot と同じ)。1. の cwd と 2. の起点はそこになる。
+(firebase-tools の detectProjectRoot と同じ。相対パスは symlink を解いた実体のパスから解決する)。
+1. の cwd と 2. の起点はそこになる。
 """
 from __future__ import annotations
 
@@ -223,12 +224,16 @@ def _config_file(project_dir: str, config: str) -> str | None:
     (`path.resolve(cwd, config)`)、そのファイルのあるディレクトリを project root にする。
     ファイルが無ければコマンドを始めずにエラーで終わる。hook はコマンドの作業ディレクトリを
     知らないので、このモジュールの他の箇所 (`_project_root`) と同じく project_dir を CLI の
-    作業ディレクトリとみなす。見つからなければ (シェルが展開する `~` など)、呼び出し側は
+    作業ディレクトリとみなす。ただし symlink は解いた実体のパスから解決する: Node の
+    `process.cwd()` は実体のパスを返すので、論理パスから解決すると root が論理パスになり、CLI に
+    渡す `--config` で configstore の切替先 (`firebase use` が実体のパスで記録したもの) を引き
+    当て損ねる。絶対パスの config は join で前半が捨てられ、そのまま使われる (Node と同じ)。
+    見つからなければ (シェルが展開する `~` など)、呼び出し側は
     「どの project で動くかを確かめられない」として deny する。コマンドの中の `cd` は
     `--config` の無いコマンドと同じく追わない (同じ相対パスのファイルが project_dir の側にも
     あれば、そちらのディレクトリを root にして照合する)。
     """
-    path = os.path.abspath(os.path.join(project_dir, config))
+    path = os.path.abspath(os.path.join(os.path.realpath(project_dir), config))
     return path if os.path.isfile(path) else None
 
 
@@ -237,22 +242,25 @@ def _reject_constant(name: str):
     raise ValueError(f"JSON に無い値: {name}")
 
 
-# firebase-tools と同じ内容に読めると確かめられない `.firebaserc` の、内容の条件のすべて
-# (`_read_firebaserc` が None を返す条件。ファイル自体を読めないときも None になるが、内容の
-# 条件ではないので並べない)。pin-env の「固定できません」と verify() の `--project` の deny が
-# 同じ文で示す。判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾く。
+# firebase-tools と同じ内容に読めると確かめられない `.firebaserc` の、内容の主な条件
+# (`_read_firebaserc` が None を返す条件)。網羅ではないので「など」で終える: Python の json が
+# 読めない形には、上限が Python の版と設定で変わるもの (桁の多すぎる整数) もあり、並べない。
+# ファイル自体を読めないときも None になるが、内容の条件ではないので並べない。pin-env の
+# 「固定できません」と verify() の `--project` の deny が同じ文で示す (「…に当たる」で受ける)。
+# 判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾く。
 FIREBASERC_UNCONFIRMED_CONDITIONS = (
     "UTF-8 でない・U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・"
     "JSON として読めない (NaN など JSON に無い値・構文の誤り・深い入れ子)・"
-    "projects がオブジェクトでないか文字列でない値を持つ"
+    "projects がオブジェクトでないか文字列でない値を持つ、など"
 )
 
 
 def _read_firebaserc(root: str) -> dict[str, str] | None:
     """`root/.firebaserc` の projects マップ (alias → project ID)。
 
-    firebase-tools と同じ内容に読めると確かめられたときだけ返す (ファイルが無い・トップレベルが
-    オブジェクトでない・`projects` が無いときは空 dict。firebase-tools も alias 0 件)。
+    firebase-tools と同じ内容に読めると確かめられたときだけ返す (ファイルが無い (stat できない
+    ときも)・トップレベルがオブジェクトでない・`projects` が無いときは空 dict。firebase-tools も
+    alias 0 件)。
     確かめられなければ None。`.firebaserc` を読むのはこの関数だけで、呼び出し側は
     1 回の読み込みの結果を判定にも解決にも使う (別々に読むと、入れ子の深さの境目で片方だけ
     RecursionError になり、「同じに読める」と言った内容と違う内容で解決しうる)。
@@ -265,7 +273,8 @@ def _read_firebaserc(root: str) -> dict[str, str] | None:
     読まない alias を読む。どれも alias の行き先の予測が食い違う。
 
     判定は保守的: UTF-8 として読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中でも)・
-    厳密な JSON として読めない (入れ子が深すぎて RecursionError になるときも)・`projects` が
+    厳密な JSON として読めない (入れ子が深すぎて RecursionError になるときも、桁の多すぎる整数が
+    Python の上限 (版と設定で変わる) で ValueError になるときも)・`projects` が
     オブジェクトでないか文字列でない値を持つ、のどれかなら None (cjson のコメント除去は
     再現しない)。どれでもなければ、cjson の前処理は何も変えず、JSON.parse と `json.loads` は
     同じ内容を返す。firebase-tools の alias の解決 (`projects[alias] || alias`) は文字列でない
@@ -275,7 +284,11 @@ def _read_firebaserc(root: str) -> dict[str, str] | None:
     alias の数は firebase-tools と同じく空文字の alias も数える)。
     """
     path = Path(root) / ".firebaserc"
-    if not path.is_file():
+    # `os.path.isfile` を使う: pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の
+    # OSError (長すぎる名前を指す symlink の ENAMETOOLONG・EACCES) をそのまま投げ、例外が hook の
+    # 外まで抜けて検証をスキップしていた。stat できないファイルは無いものとして扱う (firebase-tools
+    # も同じ。alias 0 件)。
+    if not os.path.isfile(path):
         return {}
     try:
         text = path.read_bytes().decode("utf-8")
@@ -467,13 +480,16 @@ _SKIPPED_LINE = (
 # `--project` の行き先を `.firebaserc` から確かめられないときの deny (v0.18.0)。期待値の形の
 # 問題ではないので `_CHECK_BY_HAND` は使わない。コマンドが指定した値は文面に出さない
 # (検出コマンドの行に出る)。`--project` を外したコマンドは、`.firebaserc` を読む CLI 自身に
-# 現在値を聞いて照合する。
+# 現在値を聞いて照合する。ただし外すとコマンドの行き先がアクティブな project に変わる (指定して
+# いた project では動かない) ので、それを言う。`firebase use` の語は入れない (切替を案内した
+# ことになり、dispatcher の注記の判定にも当たる)。
 _PROJECT_FLAG_UNCONFIRMED = (
     "Firebase: --project の行き先を確かめられません。firebase-tools は --project の値を"
     " .firebaserc の alias として先に解決しますが、.firebaserc を firebase-tools と同じ内容に"
-    f"読めると確かめられません ({FIREBASERC_UNCONFIRMED_CONDITIONS}、のどれかに当たる)。"
-    "--project を外す (アクティブな project で照合します) か、.firebaserc をこれらに当たらない"
-    "形にしてください"
+    f"読めると確かめられません ({FIREBASERC_UNCONFIRMED_CONDITIONS}に当たる)。"
+    "--project を外すと、コマンドはアクティブな project で動きます (意図した project が"
+    "アクティブかを確かめてから外してください)。または .firebaserc をこれらに当たらない形に"
+    "してください"
 )
 # `--config` / `-c` のファイルが見つからないときの deny (v0.18.0)。firebase-tools はファイルが
 # 無ければコマンドを始めないが、hook の見立て (作業ディレクトリ = プロジェクトのディレクトリ) が
@@ -484,6 +500,34 @@ _CONFIG_NOT_FOUND = (
     "動きます。hook は相対パスをプロジェクトのディレクトリから探します)。絶対パスか、"
     "プロジェクトのディレクトリからの相対パスで指定してください"
 )
+# `--config` / `-c` 付きのコマンドの deny で切替を案内する文 (v0.18.0)。firebase-tools は
+# `firebase use` の切替先を project root ごとに記録し、`--config` 付きのコマンドはそのファイルの
+# あるディレクトリの切替先で動く (そこに無ければ親方向に探す)。そこに切替先が記録されていると、
+# プロジェクトのディレクトリで `firebase use <期待値>` を打っても変わらず、案内どおりに切り替えても
+# 同じ deny を繰り返していた。コマンドの形では案内しない (REMEDIATION_PATTERNS に当たらない文に
+# する。dispatcher の「単独で実行」の注記も付かない)。
+_SWITCH_IN_CONFIG_DIR = (
+    "--config のファイルのあるディレクトリで、期待した project に切り替えてください"
+    " (そのディレクトリに切替先が記録されていると、プロジェクトのディレクトリで切り替えても"
+    "変わりません)"
+)
+
+
+def _config_dir_switch(expected) -> str:
+    """`--config` 付きのコマンドの deny で、切替を案内する文 (コマンドの形をとらない)。
+
+    期待値のどれかが許容形 (`shell_word.WORD`) から外れるときは `_CHECK_BY_HAND` を添える。
+    不一致の deny の先頭行は期待値をそのまま示すので、値が切替コマンドの形
+    (`x; firebase use other`) だと dispatcher の注記の判定に当たる (`shell_word.UNSAFE` を
+    含む deny には付けない。コマンドで案内する deny と同じ契約)。
+    """
+    if isinstance(expected, dict):
+        values = [v for v in expected.values() if isinstance(v, str) and v]
+    else:
+        values = [expected]
+    if all(shell_word.arg(value) is not None for value in values):
+        return _SWITCH_IN_CONFIG_DIR
+    return f"{_SWITCH_IN_CONFIG_DIR}。{_CHECK_BY_HAND}"
 
 
 def _target(value) -> str | None:
@@ -540,6 +584,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     `--config` / `-c` (v0.18.0) は project root (読む `.firebaserc`、configstore の切替先を
     探す起点、`firebase use` の cwd) を、指定したファイルのあるディレクトリにする
     (firebase-tools の detectProjectRoot と同じ)。ファイルが見つからなければ deny する。
+    `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのディレクトリで
+    切り替えるよう文で案内する (`_SWITCH_IN_CONFIG_DIR`)。
     """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
     if isinstance(expected, dict):
@@ -611,6 +657,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
                 "npm install -g firebase-tools でインストールしてください。"
             )
         head = "Firebase: 現在のプロジェクトを取得できません。"
+        if config_file is not None:
+            return f"{head}ログインしたうえで、{_config_dir_switch(expected)}。"
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
@@ -634,6 +682,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f"Firebase プロジェクト不一致: 現在={current}, "
             f"期待={expected_display} のいずれか\n"
         )
+        if config_file is not None:
+            return f"{head}{_config_dir_switch(expected)}"
         lines = _alias_lines(expected, "firebase use")
         if not lines:
             return f"{head}{_CHECK_BY_HAND}"
@@ -641,6 +691,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
     if current != expected:
         head = f"Firebase プロジェクト不一致: 現在={current}, 期待={expected}"
+        if config_file is not None:
+            return f"{head} — {_config_dir_switch(expected)}"
         target = _target(expected)
         if target is None:
             return f"{head} — {_CHECK_BY_HAND}"

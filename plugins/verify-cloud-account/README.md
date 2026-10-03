@@ -348,8 +348,9 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (UTF-8 でない・
   U+FEFF がある・`//` か `/*` がある (文字列の中の URL なども含む)・JSON として読めない
   (`NaN` など JSON に無い値・構文の誤り・深い入れ子)・`projects` がオブジェクトでないか
-  文字列でない値を持つ) は、firebase-tools と同じ行き先を確かめられないので「固定できません」と
-  出す (v0.17.1)。判定は保守的で、URL を含むだけの厳密な JSON も対象になる
+  文字列でない値を持つ、など) は、firebase-tools と同じ行き先を確かめられないので「固定
+  できません」と出す (v0.17.1)。判定は保守的で、URL を含むだけの厳密な JSON も対象になる。
+  並べた条件は網羅ではない (Python が読めない桁の多すぎる整数など、版で変わるものは並べない)
 - 前後に空白のある期待値は固定できない (照合は完全一致なので、どの現在値とも一致しない)。
   `pin-env` は「固定できません」と出す (v0.17.1)
 - 検証の成功 cache は、アカウントを決める環境変数の値もキーに含める (v0.17.0)。
@@ -616,7 +617,11 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
 
 `--config` / `-c` 付きのコマンドは、指定したファイルのあるディレクトリを project root
 にする (firebase-tools と同じ。v0.18.0)。`firebase use` の cwd と、ローカル設定から解決する
-ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける)。
+ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける)。firebase-tools は
+`firebase use` の切替先を project root ごとに記録するので、そのディレクトリに切替先が
+記録されていると、プロジェクトのディレクトリで切り替えても変わらない。このため `--config`
+付きのコマンドの deny は、切替をコマンドの形で案内せず、そのファイルのあるディレクトリで
+切り替えるよう文で案内する (案内どおりに切り替えても同じ deny を繰り返さないように)。
 
 ### 検証をスキップする readonly コマンド
 
@@ -751,7 +756,7 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | GCP | `--project` / `--account` | 値を期待値と直接照合 (アクティブ設定は見ない) |
 | GCP | `--configuration` | 現在値の取得コマンドに引き渡す |
 | Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則)。`.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ deny (v0.18.0) |
-| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し、見つからなければ deny (v0.18.0) |
+| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し (symlink は解いた実体のパスで。CLI 本体と同じ)、見つからなければ deny (v0.18.0) |
 | Kubernetes | `--context` | 値を期待値と直接照合 |
 | Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
 
@@ -1263,8 +1268,9 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   `firebase` が無い `npx firebase` の構成など) は現在値を取得できないとして deny する
   (v0.18.0。fail-closed。後者の文面は従来どおり「firebase コマンドが見つかりません」など)。
   判定は保守的で、firebase-tools が期待した project で動くファイルも対象になる。`--project`
-  を外し、hook の PATH から `firebase` を使えるようにすると (CLI 自身が `.firebaserc` を読んで
-  答える) 照合できる
+  を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、意図した
+  project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を使える
+  ようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照

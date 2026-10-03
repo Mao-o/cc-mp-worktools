@@ -14,13 +14,23 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
 
 - 0.17.1 の pin-env と同じ判定 (UTF-8 でない・U+FEFF がある・`//` か `/*` がある (文字列の
   中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
-  持つ、のどれにも当たらない) で、firebase-tools と同じ内容に読めると確かめられたときだけ
+  持つ、などに当たらない) で、firebase-tools と同じ内容に読めると確かめられたときだけ
   `.firebaserc` を使う。確かめられなければ、`--project` 付きのコマンドは「--project の行き先を
-  確かめられません」で deny し (弾く条件を文面に並べる)、ローカル設定からは解決しない (現在値を
-  取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を含むだけの厳密な
-  JSON も対象になる (fail-closed の代償)
+  確かめられません」で deny し (弾く主な条件を文面に並べる)、ローカル設定からは解決しない
+  (現在値を取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を含むだけの
+  厳密な JSON も対象になる (fail-closed の代償)
+- 弾く条件の文 (pin-env の「固定できません」と共通) は網羅と言わない書き方にした。Python の
+  json が読めない形には、上限が版と設定で変わるもの (桁の多すぎる整数) もあり、並べていない
+  (マージ前レビューの指摘)
+- 「--project の行き先を確かめられません」の deny の「--project を外す」案内は、外すとコマンドが
+  アクティブな project で動く (指定していた project ではなくなる) ことを言う。意図した project が
+  アクティブかを確かめてから外すよう案内する (マージ前レビューの指摘)
 - 入れ子の深い `.firebaserc` で例外が hook の外まで抜け、「内部エラーのため検証をスキップ」
   (実行は止めない) になっていた。読めないファイルとして上と同じに扱う
+- stat できない `.firebaserc` (長すぎる名前を指す symlink など。権限の細工は要らず、リポジトリに
+  置ける) でも、pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップ
+  していた (`--project` 付きのコマンドは CLI の有無に関係なく通る経路)。firebase-tools と同じく
+  無いもの (alias 0 件) として扱う (マージ前レビューの指摘)
 - 空文字の alias も、firebase-tools と同じく alias の数に数える (`{"a": "", "b": "x"}` は
   alias 2 つで、`default` が無ければ未解決)。0.17.1 までは 1 つと数えて `x` を現在値にしていた
 
@@ -35,36 +45,56 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   ディレクトリを project root にする (`firebase use` にも同じ `--config` を付ける)。相対パスは
   プロジェクトのディレクトリから探し、見つからなければ deny する (hook はコマンドの作業
   ディレクトリを知らない)
+- 相対パスは、symlink を解いた実体のパスから解決する (CLI 本体と同じ。Node の作業ディレクトリは
+  実体のパス)。論理パスから解決すると、CLI に渡す `--config` の root が論理パスになり、
+  `firebase use` が実体のパスで記録した切替先を CLI が引き当て損ねて、別の project で答えうる
+  (マージ前レビューの指摘)
+- `--config` 付きのコマンドの deny は、切替をコマンドの形 (`firebase use <期待値>`) で案内
+  しない。firebase-tools は切替先を project root ごとに記録するので、そのファイルのある
+  ディレクトリに切替先が記録されていると、プロジェクトのディレクトリで切り替えても変わらず、
+  案内どおりにしても同じ deny を繰り返していた。そのディレクトリで切り替えるよう文で案内する
+  (「単独で実行」の注記も付かない。マージ前レビューの指摘)
 - 値が変数展開などで静的に解決できないときは、他のコンテキスト指定 flag と同じく既定の root で
   照合する
 
 ### Fixed: 読めない accounts.local.json / 成功 cache で検証をスキップしない
 
-- accounts.local.json (旧パスを含む) が UTF-8 でない・入れ子が深すぎると、例外が hook の外まで
-  抜け、「内部エラーのため検証をスキップ」(実行は止めない) になっていた。JSON が不正なときと
-  同じ扱いにする (tier に関係なく deny。`"$mode"` は読めないので、mode は環境変数だけで決まる)
-  (内部バックログ)
+- accounts.local.json (旧パスを含む) が UTF-8 でない・桁の多すぎる整数がある (Python の上限。
+  3.11 以降の既定は 4,300 桁)・入れ子が深すぎると、例外が hook の外まで抜け、「内部エラーの
+  ため検証をスキップ」(実行は止めない) になっていた。JSON が不正なときと同じ扱いにする (tier に
+  関係なく deny。`"$mode"` は読めないので、mode は環境変数だけで決まる) (内部バックログ。
+  桁数はマージ前レビューの指摘)
 - 入れ子が 32 段より深いファイルも同じ扱いにする。読み込みが通る深さでも、後段 (成功 cache の
   キーを作るところなど) が同じ深さを辿って例外になりうるため。正規の形は 2 段まで
 - 成功 cache の entry が UTF-8 でない・入れ子が深いとき、epoch のファイルが入れ子が深いときも、
   読めないものとして扱う (entry は cache miss、epoch は無効化の記録が無いのと同じ。同じく
   検証をスキップしていた)
+- stat できない entry / epoch のファイル (長すぎる名前を指す symlink など) も同じ扱いにする。
+  pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップしていた
+  (epoch は検証のたびに読むので、置かれている間はその service のすべてのコマンドで。マージ前
+  レビューの指摘)
 
 ### Tests
 
 - `.firebaserc` の読み方: firebase-tools と同じ行き先になる厳密な JSON・コメント・alias の
   キーの中の U+FEFF・確かめられない形のすべてで `--project` が deny になり、コマンドを案内
-  しない (`TestProjectFlagResolvesLikeFirebaseTools`)、ローカル設定の解決と空文字の alias の
-  数え方 (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、入れ子の深い `.firebaserc` で検証を
-  スキップしない (`TestDeepFirebasercDoesNotSkipVerification`)
+  せず、外すと行き先が変わることを言う (`TestProjectFlagResolvesLikeFirebaseTools`)、
+  ローカル設定の解決と空文字の alias の数え方 (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
+  入れ子の深い `.firebaserc` で検証をスキップしない (`TestDeepFirebasercDoesNotSkipVerification`。
+  判定に加えて理由も見る)、stat できない `.firebaserc` (`TestFirebasercThatCannotBeStatted`)
 - `--config` / `-c`: 指定したディレクトリでの `--project` の解決・`firebase use` の引数と
-  cwd・ローカル設定の起点・見つからないファイルの deny (`TestFirebaseConfigOption`)、
-  dispatcher での全記法と注記 (`TestFirebaseConfigOptionRouting`)
+  cwd・symlink の下のプロジェクトでの相対パスの解決・ローカル設定の起点・見つからないファイルの
+  deny (`TestFirebaseConfigOption`)、dispatcher での全記法と注記
+  (`TestFirebaseConfigOptionRouting`)、deny → そのディレクトリで切り替える → 同じコマンドが
+  通る、の往復 (CLI の有無・scalar / dict の期待値・切替先が無いとき。許容形から外れた期待値では
+  注記を付けない。`TestFirebaseConfigSwitchGuidance`)
 - 読めないファイル: accounts.local.json の入れ子の上限 (`TestAccountsFile`)、成功 cache の
-  entry / epoch (`test_cache.py`)、`__main__` を実プロセスで起こす e2e (UTF-8 でない・入れ子が
-  深い accounts.local.json と旧パス、入れ子の深い `.firebaserc`、読めない成功 cache。どれも
-  warn (スキップ) にならない)
-- 1,317 → 1,340 件
+  entry / epoch (読めない・stat できない。`test_cache.py`)、`__main__` を実プロセスで起こす
+  e2e (UTF-8 でない・入れ子が深い・桁の多すぎる整数のある accounts.local.json と旧パス、入れ子の
+  深い `.firebaserc`、読めない成功 cache。どれも warn (スキップ) にならない)
+- stat できないファイルのテストは `Path.is_file` を Python 3.13 までの挙動に差し替え、3.14 以降
+  でも同じ失敗を再現する
+- 1,317 → 1,347 件
 
 ## 0.17.1
 
