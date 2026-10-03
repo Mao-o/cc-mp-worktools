@@ -14,7 +14,9 @@ system の config は `GIT_CONFIG_SYSTEM` で目印の file (`hermetic.system = 
 おき、`GIT_CONFIG_NOSYSTEM` が効いていれば読まれない。**床の側では `GIT_CONFIG_NOSYSTEM` を立てない**:
 立てると、`init_repo` や定数がそれを渡し損ねても、床が埋めて通ってしまう。外側の env には、止めない
 側の値 (`OUTER_NON_STOPPING_ENV`) を置く: `init_repo` が env を混ぜる向きを逆にして外側の値を勝たせる
-変異も、止まっていないことで拾える。
+変異も、止まっていないことで拾える。床の env だけでは、どの経路も止める側にならないこと (fixture を指す
+`GIT_CONFIG_GLOBAL` や止める側の `GIT_CONFIG_COUNT` を持たないこと) を `TestTheIsolatedEnvStopsNothing` で
+見る。
 
 期待値は `_testutil` の定義とは**別に**リテラルで持つ。同じ定数から導くと、`_testutil` から
 1 項目消えても期待値ごと消えて通ってしまう。`git config` は未設定 / 読めないとき exit 1 などに
@@ -80,6 +82,16 @@ def isolate_git_config(home: str) -> None:
         del os.environ[name]
     empty_global_config(home)
     os.environ.update(OUTER_NON_STOPPING_ENV)
+
+
+def query_git(cwd: str, env: dict[str, str], *args: str) -> tuple[int, str]:
+    """`env` で起動した `git <args>` の (終了コード, 標準出力)。
+
+    `git config --get` は未設定のとき exit 1 になるので、`check=True` は使わない (「無い」を例外では
+    なく値の不一致として出す)。
+    """
+    res = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+    return res.returncode, res.stdout.strip()
 
 
 def system_marker(cwd: str, env: dict[str, str]) -> tuple[int, str]:
@@ -186,6 +198,35 @@ class TestTheSystemMarkerIsLive(unittest.TestCase):
             readable = system_marker(tmp, dict(os.environ))
             skipped = system_marker(tmp, {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
         self.assertEqual((readable, skipped), ((0, "read"), (1, "")))
+
+
+class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
+    """`isolate_git_config` の床の env だけでは、どの経路も止める側にならないこと。
+
+    この suite の床は、すべてこの関数で「patch していない」状態を作る。床が止める側の値 (fixture を指す
+    `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に戻ると、`init_repo` や定数の当て損ねを
+    床が埋めて黙って通る (`GIT_CONFIG_NOSYSTEM` は `TestTheSystemMarkerIsLive` が見る)。global は空で、
+    4 設定は外側に置いた値そのもの (`maintenance.auto=true` だけが見え、残りは未設定) であることを、
+    完全一致で見る。
+    """
+
+    def test_the_isolated_env_alone_stops_nothing(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            floor = dict(os.environ)
+            global_list = query_git(tmp, floor, "config", "--global", "--list")
+            settings = {key: query_git(tmp, floor, "config", "--get", key) for key in EXPECTED}
+        self.assertEqual(global_list, (0, ""), "床が global として何かを読ませている")
+        self.assertEqual(
+            settings,
+            {
+                "maintenance.auto": (0, "true"),
+                "maintenance.autoDetach": (1, ""),
+                "gc.auto": (1, ""),
+                "gc.autoDetach": (1, ""),
+            },
+            "床の env の 4 設定が、外側に置いた止めない側の値そのものでない",
+        )
 
 
 if __name__ == "__main__":

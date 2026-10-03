@@ -905,7 +905,10 @@ fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init
 を外すだけでなく、global の config を空に、system の config を目印の file に向けること
 (`test_hermetic_env.isolate_git_config`)。開発者の `~/.gitconfig` に自動 maintenance を止める設定
 (`maintenance.auto=false` など) があると、helper を迂回した git も maintenance を起動せず、床が
-黙って通る。**床の側で `GIT_CONFIG_NOSYSTEM` を立てないこと**: 立てると、helper・基底クラス・定数が
+黙って通る。この床の env だけでは、どの経路も止める側にならないこと (fixture を指す `GIT_CONFIG_GLOBAL`
+や止める側の `GIT_CONFIG_COUNT` を持たないこと) を `TestTheIsolatedEnvStopsNothing` で見る: 床がそれを
+持つ形に戻ると、helper や定数の当て損ねを床が埋めて黙って通る。
+**床の側で `GIT_CONFIG_NOSYSTEM` を立てないこと**: 立てると、helper・基底クラス・定数が
 それを渡し損ねても、床が埋めて通る。system の目印 (`hermetic.system = read`) は
 `GIT_CONFIG_NOSYSTEM` が効いていれば読まれないので、`git config --get hermetic.system` が未設定
 (終了コード 1) であることで、届いているかを見る。外側の env には、止めない側の値

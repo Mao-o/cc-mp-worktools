@@ -157,6 +157,9 @@ def load_entry():
 def git(repo: str, *args: str) -> subprocess.CompletedProcess:
     # `HERMETIC_GIT_ENV` はここでも足す。テストクラス側の env patch に頼ると、patch していない
     # クラスが `init_repo` を呼んだ時点で自動 maintenance が復活する (patch 済みなら同じ値の上書き)。
+    # ここで足していても、テストクラス側の patch は要る: hook の関数は env を渡さず `os.environ` を
+    # 継承するので、hook が起動する git に届くのはクラス側の patch だけ (`test_hermetic_env` の
+    # `_ProductGitChecks` が見る)。
     env = {**os.environ, **HERMETIC_GIT_ENV}
     return subprocess.run(
         ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True

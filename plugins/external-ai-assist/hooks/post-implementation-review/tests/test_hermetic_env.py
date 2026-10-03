@@ -16,8 +16,10 @@ maintenance が止まっていること。
   基底クラスがそれを渡し損ねても、床が埋めて通ってしまう (system の目印は `GIT_CONFIG_NOSYSTEM`
   が効いていれば読まれないので、効いているかを値で見られる)。外側の env には、止めない側の値
   (`OUTER_NON_STOPPING_ENV`) を置く: helper が env を混ぜる向きを逆にして外側の値を勝たせる変異も、
-  止まっていないことで拾える。「起動が 0 件」は検出器が何も拾えなくても成り立つので、何も止めない
-  commit で起動が見えること (`TestTheDetectorSeesMaintenance`) を先に確かめる
+  止まっていないことで拾える。この床の env だけでは、どの経路も止める側にならないこと (fixture を指す
+  `GIT_CONFIG_GLOBAL` や止める側の `GIT_CONFIG_COUNT` を持たないこと) も `TestTheIsolatedEnvStopsNothing`
+  で見る。「起動が 0 件」は検出器が何も拾えなくても成り立つので、何も止めない commit で起動が見えること
+  (`TestTheDetectorSeesMaintenance`) を先に確かめる
 - **設定の出どころ別**: 止める経路は env (`GIT_CONFIG_COUNT`) と global の fixture の 2 本で、
   同じ値を持つ。有効値だけを見ると片方が欠けてももう片方が埋めて通ってしまうので、1 本ずつ
   単独で見る。env は定数の中身 (1 項目ずつ) と、helper が実際に渡す経路 (fixture を外して挙動で)、
@@ -426,6 +428,35 @@ class TestTheSystemMarkerIsLive(unittest.TestCase):
         self.assertEqual((readable, skipped), ((0, "read"), (1, "")))
 
 
+class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
+    """`isolate_git_config` の床の env だけでは、どの経路も止める側にならないこと。
+
+    helper・定数・検出器・plain bare の床は、この関数で「patch していない」状態を作る。床が止める側の値
+    (fixture を指す `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に戻ると、helper や定数の
+    当て損ねを床が埋めて黙って通る (`GIT_CONFIG_NOSYSTEM` は `TestTheSystemMarkerIsLive` が見る)。
+    global は空で、4 設定は外側に置いた値そのもの (`maintenance.auto=true` だけが見え、残りは未設定) で
+    あることを、完全一致で見る。
+    """
+
+    def test_the_isolated_env_alone_stops_nothing(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            floor = dict(os.environ)
+            global_list = query_git(tmp, floor, "config", "--global", "--list")
+            settings = {key: query_git(tmp, floor, "config", "--get", key) for key in EXPECTED}
+        self.assertEqual(global_list, (0, ""), "床が global として何かを読ませている")
+        self.assertEqual(
+            settings,
+            {
+                "maintenance.auto": (0, "true"),
+                "maintenance.autoDetach": (1, ""),
+                "gc.auto": (1, ""),
+                "gc.autoDetach": (1, ""),
+            },
+            "床の env の 4 設定が、外側に置いた止めない側の値そのものでない",
+        )
+
+
 class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
     """`init_bare_origin` を通らずに作った bare repo (repo 自身の config に設定が無い) へ push しても、
     受け側 (`receive-pack`) が自動 maintenance を起動しないこと。
@@ -546,20 +577,20 @@ class _ProductGitChecks:
     def test_the_floor_alone_stops_nothing(self):
         """床の env だけで起動した git では、どの経路も止める側にならないこと。
 
-        当てる側 (基底クラス) が当てる前の env (`self.floor_env`) に、`_hook_git` と同じ隔離
-        (`empty_global_config`) を重ねて git を起動する。repo 自身の config に書いた逆の値 (`OPPOSITE`)
+        当てる側 (基底クラス) が当てる前の env (`self.floor_env`) に戻し、他の床と同じ `_hook_git`
+        (問い合わせ時の隔離を含む) で git を起動する。repo 自身の config に書いた逆の値 (`OPPOSITE`)
         がそのまま見え、global は空で、system の目印は読める (床が `GIT_CONFIG_NOSYSTEM` を立てていない)
         こと。床が止める側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の
         `GIT_CONFIG_COUNT`) を持つ形に戻ると、当てる側の当て損ねを床が埋めて、他の床が黙って通る。
+        `_hook_git` の中身を写さずに呼ぶのは、問い合わせ時の隔離に止める側の値が足される退行も見るため
+        (写した形では、他の床だけがその値を受け取り、基底クラスの当て損ねを埋めても気付けない)。
         """
         for key, value in OPPOSITE.items():
             _testutil.git(self.repo, "config", key, value)
-        with mock.patch.dict(os.environ, self.floor_env, clear=True), tempfile.TemporaryDirectory() as tmp:
-            empty_global_config(tmp)
-            floor = dict(os.environ)
-            settings = {key: query_git(self.repo, floor, "config", "--get", key) for key in OPPOSITE}
-            global_list = query_git(self.repo, floor, "config", "--global", "--list")
-            marker = system_marker(self.repo, floor)
+        with mock.patch.dict(os.environ, self.floor_env, clear=True):
+            settings = {key: self._hook_git("config", "--get", key) for key in OPPOSITE}
+            global_list = self._hook_git("config", "--global", "--list")
+            marker = self._hook_git("config", "--get", "hermetic.system")
         for key, value in OPPOSITE.items():
             with self.subTest(key=key):
                 self.assertEqual(settings[key], (0, value))
@@ -583,14 +614,20 @@ class _ProductGitChecks:
         self.assertEqual(self._hook_git("config", "--get", "hermetic.system"), (1, ""))
 
     def test_git_launched_by_the_hook_does_not_read_the_default_excludes_file(self):
-        """前提 (空の床にしない): 外側に置いた ignore は、`XDG_CONFIG_HOME` がそこを向いていれば効き、
-        `XDG_CONFIG_HOME` が空なら HOME の側に置いたものが効く。そのうえで、基底クラスが張った env の
-        ままの hook の判定には効かない。"""
+        """前提 (空の床にしない): 外側に置いた ignore は、床の env の `XDG_CONFIG_HOME` (setUp が ignore を
+        置いた先) のままで効き、`XDG_CONFIG_HOME` が空なら HOME の側に置いたものが効く。そのうえで、
+        基底クラスが張った env のままの hook の判定には効かない。
+
+        前提の XDG は、置いた先を明示せずに床の env から取る。基底クラスが `XDG_CONFIG_HOME` を当て損ねると
+        hook の git が見るのは床の XDG なので、置いた先を明示すると、床が XDG を置いた先に向け損ねる退行が、
+        基底クラスの当て損ねを隠す。床の env をそのまま渡さず、基底クラスの env に床の XDG だけを重ねる
+        (床の env は `GIT_CONFIG_NOSYSTEM` を持たず、実機の system の config を読むので、そこにある
+        `core.excludesFile` が前提を変えうる)。"""
         _testutil.write(self.repo, IGNORED_NAME, "x\n")
-        planted_view = untracked_names(
-            self.repo, {**os.environ, "XDG_CONFIG_HOME": self.planted_xdg_config_home}
-        )
-        self.assertEqual(planted_view, [], "前提: 置いた ignore が効く (空の床にしない)")
+        # 基底クラスが XDG_CONFIG_HOME を当て損ねたときに hook の git が見る値 (= 床が置いた値)
+        floor_xdg = self.floor_env.get("XDG_CONFIG_HOME", "")
+        planted_view = untracked_names(self.repo, {**os.environ, "XDG_CONFIG_HOME": floor_xdg})
+        self.assertEqual(planted_view, [], "前提: 床の XDG_CONFIG_HOME で、置いた ignore が効く (空の床にしない)")
         fallback_view = untracked_names(self.repo, {**os.environ, "XDG_CONFIG_HOME": ""})
         self.assertEqual(fallback_view, [], "前提: XDG が空なら HOME の側に置いた ignore が効く")
         self.assertEqual(
