@@ -113,15 +113,34 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
 
         `hermetic_overrides` は、この呼び出しの間だけ `HERMETIC_GIT_ENV` に上書きする値。helper が
         渡す設定の一部を外して、残りの経路だけで止まるかを見るために使う。
+
+        上書きが helper の git に届いたことも前提として確かめる。helper が `HERMETIC_GIT_ENV` を
+        呼び出しのたびに読まない形 (初回に固めたコピーを使うなど) に変わると、上書きが届かず
+        env 経路の床が黙って空になるため。`all` ではなく `any` で見るのは、commit だけが helper を
+        迂回する変異でも前提は満たしたまま、maintenance の起動の assertion で落とすため。
         """
+        passed: list[dict] = []
+        real_run = subprocess.run
+
+        def spy(argv, *args, **kwargs):
+            if argv[:1] == ["git"]:
+                passed.append(dict(kwargs.get("env") or os.environ))
+            return real_run(argv, *args, **kwargs)
+
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             _testutil.HERMETIC_GIT_ENV, hermetic_overrides
         ):
             isolate_git_config(tmp)
             trace = os.path.join(tmp, "trace2.jsonl")
             os.environ["GIT_TRACE2_EVENT"] = trace
-            _testutil.init_repo(os.path.join(tmp, "repo"))
+            with mock.patch.object(subprocess, "run", side_effect=spy):
+                _testutil.init_repo(os.path.join(tmp, "repo"))
             events = trace_events(trace)
+            want = dict(_testutil.HERMETIC_GIT_ENV)
+        self.assertTrue(
+            any(all(env.get(k) == v for k, v in want.items()) for env in passed),
+            "前提: 上書きした HERMETIC_GIT_ENV が helper の git に届いている",
+        )
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
         return spawned_maintenance(events)
 
