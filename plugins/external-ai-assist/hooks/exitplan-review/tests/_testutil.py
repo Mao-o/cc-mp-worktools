@@ -86,12 +86,20 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return env
 
 
-# 開発者の ~/.gitconfig (color.ui=always 等) でテストが揺れないよう、git にグローバル/
-# システム設定を読ませない (post-implementation-review/tests/_testutil.py と同じ配慮)。
+# git にグローバル/システム設定を読ませない (post-implementation-review/tests/_testutil.py と同じ配慮)。
+# 今は開発者の ~/.gitconfig で結果が変わる経路は無い (この suite の git は `init_repo` の `git init` と、
+# hook の `rev-parse --show-toplevel` だけ)。commit するテストを足すと、`core.hooksPath` /
+# `init.templateDir` (開発者の hook が走る) が効くので、先に揃えておく。
 # global の代わりに読ませるのは tests 配下の fixture で、自動 maintenance を止める設定を持つ。
 # env の `GIT_CONFIG_COUNT` に加えて fixture も置く理由 (`receive-pack` に env が届かない) は、
 # そちらの `HERMETIC_GIT_ENV` のコメントを参照 (この suite は push しないが、同じ形に揃える)。
 # fixture はテストから `git config --global` で書かないこと (tracked の file が書き換わる)。
+#
+# post-implementation-review の `HERMETIC_GIT_ENV` にある `XDG_CONFIG_HOME` (git の既定の除外ファイルと
+# 属性ファイルを開発者のものから切り離す) は、この suite では足さない: git の status / 未追跡 / diff の
+# 出力を読むテストが無い (`init_repo` は `git init` だけ、hook が起動する git は
+# `rev-parse --show-toplevel` だけ) ので、除外ファイルの有無で結果が変わらない。そういうテストを
+# 足すときは、そちらの定数と同じ扱いにすること。
 HERMETIC_GIT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermetic.gitconfig")
 HERMETIC_GIT_ENV = {
     "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,

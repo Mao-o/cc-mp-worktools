@@ -5,6 +5,242 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.4
+
+**テスト整理 (挙動の変更なし)。自動 maintenance 対策の床 (0.12.3 で足した `tests/test_hermetic_env.py`) の穴 4 件を直した (patch bump)。** hook・`hooks.json`・README の挙動は変わらない。穴はどれも、修正前に変異か実測で実在を確かめた (最後の「確認」の節)。
+
+### 1. 床の側の隔離が、global / system の config の渡し損ねを埋めていた
+
+0.12.3 の床は、「patch していない」状態を作るときに `GIT_CONFIG_NOSYSTEM=1` を床の側で立てていた
+(post-implementation-review は `empty_global_config`、exitplan-review は `_envs_passed_by_init_repo` の中)。
+そのため、定数・helper・基底クラスが `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` を渡し損ねても、床の env が
+埋めて通った。自動 maintenance を止めることは固定できていたが、コメントと 0.12.3 の項が宣言している
+「global / system の config を読ませない」は固定できていなかった。hook が起動する git の床も、
+`GIT_CONFIG_COUNT` だけで満たせる 4 設定の `--get` しか見ておらず、しかもその `--get` は global の
+fixture でも満たせたので、`GIT_CONFIG_COUNT` が届いているかも見えていなかった。この床が見る基底クラスも
+`HookTestCase` だけだった。
+
+- 床の側では `GIT_CONFIG_NOSYSTEM` を立てない。`HOME` / `XDG_CONFIG_HOME` を空の dir に向け、system の
+  config は `GIT_CONFIG_SYSTEM` で目印の file (`hermetic.system = read` だけを持つ) に向ける。
+  `GIT_CONFIG_NOSYSTEM` が効いていれば目印は読まれないので、効いているかを値で見られる
+  (`git config --get hermetic.system` が未設定 = 終了コード 1)
+- 床を足した。どれも `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_COUNT` が届いているかを見る
+  - post-implementation-review の hook が起動する git の床 (`_ProductGitChecks`): global として fixture を
+    読むこと (`git config --global --list` が 5 設定と完全一致。基底クラスが `GIT_CONFIG_GLOBAL` を張って
+    いる) と、system の目印を読まないこと (基底クラスが `GIT_CONFIG_NOSYSTEM` を張っている) を、別のテスト
+    として足した。4 設定の `--get` は、repo 自身の config に逆の値 (`maintenance.auto=true` /
+    `gc.auto=6700` など。`OPPOSITE`) を書いてから見る。env (`GIT_CONFIG_COUNT`) は repo 自身の config に
+    勝ち、fixture は負けるので、止める側の値は `GIT_CONFIG_COUNT` が届いているときだけ見える
+  - この床は、`HERMETIC_GIT_ENV` を自前で張る基底クラス 3 つ (`HookTestCase` / `GitScanTestCase` /
+    `ReviewSetTestCase`) のそれぞれで見る (検査を mixin にし、基底クラスごとに具体クラスを置いた)。hook の
+    関数を直接呼ぶ後ろの 2 つを見ていなかったので、そちらが env を張らなくなっても、空の HOME では何も
+    落ちなかった (開発者の global の ignore がある HOME で、初めて `test_gitscan` / `test_review_set` が落ちる)
+  - 定数の床 (`TestEachSourceOfTheSettingsOnItsOwn`) にも、system を読ませないことを足した。helper の床
+    (`TestHelpersStopBackgroundMaintenance`) は、床が `GIT_CONFIG_NOSYSTEM` を立てなくなったので、既存の
+    前提 (`HERMETIC_GIT_ENV` の全項目が helper の git に届いている) が `GIT_CONFIG_NOSYSTEM` の抜けも拾う
+  - exitplan-review: `init_repo` が渡した env が system の目印を読まないこと。隔離した HOME と目印は、
+    その env を使い終わるまで残す。目印が問い合わせの時点で読めることも、同じ env から
+    `GIT_CONFIG_NOSYSTEM` だけを外して前提として見る (消えていると、「読めないから未設定」で通ってしまう)
+  - 両 suite: 目印が、`GIT_CONFIG_NOSYSTEM` を立てなければ読め、立てれば読まれないこと
+    (`TestTheSystemMarkerIsLive`)。「目印が読まれない」という確認は、目印がそもそも読めない状態でも
+    成り立つので、道具の側を先に確かめる
+  - 外側の env (開発者の shell など) の `GIT_CONFIG_*` が、渡し損ねを埋めないよう、床の先頭で外す
+    (`isolate_git_config`、hook が起動する git の床の `setUp`、定数の `GIT_CONFIG_COUNT` だけを見る床)
+- 床の env だけでは、どの経路も止める側にならないことを見るテストを足した (hook が起動する git の床の
+  `test_the_floor_alone_stops_nothing`)。基底クラスに当てさせる前の env に戻して `_hook_git` で git を
+  起動し、repo に書いた逆の値がそのまま見え、global は空で、system の目印は読めることを見る。床が止める側の
+  値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に
+  戻ると、基底クラスの当て損ねを床が埋めて、他の床が黙って通る。`_hook_git` の中身を写さずに呼ぶので、
+  問い合わせのたびの隔離に止める側の値が足される退行も、このテストが見る
+- 同じ自己確認を `isolate_git_config` の床にも、両 suite で足した (`TestTheIsolatedEnvStopsNothing`)。
+  post-implementation-review の helper・定数・検出器・plain bare の床と、exitplan-review のすべての床は、
+  この関数で「patch していない」状態を作る。その env だけで起動した git で、global は空で、4 設定は外側に
+  置いた値そのもの (`maintenance.auto=true` だけが見え、残りは未設定) であることを、完全一致で見る。床が
+  止める側の値 (fixture を指す `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に戻ると、
+  helper・定数・`init_repo` の当て損ねを床が埋めて黙って通る (`GIT_CONFIG_NOSYSTEM` は
+  `TestTheSystemMarkerIsLive` が見る)。この 2 つの自己確認は `isolate_git_config` を直接呼ばず、それを呼ぶ
+  床 (exitplan-review は `init_repo` の床、post-implementation-review は helper の床) を通し、当てる側を
+  呼ぶ直前の env で見る (exitplan-review の 0.12.3 は `GIT_CONFIG_NOSYSTEM` をその床の中で立てていた)。
+  当てる側は呼ばないので、当てる側の前提 (post-implementation-review では、helper の git に定数の全項目が
+  届いていること) は通らない。
+  exitplan-review の床の問い合わせも、`TestTheIsolatedEnvStopsNothing` と同じ `query_git` で行う (問い合わせの
+  道具が床と自己確認で別だと、床の道具だけに足された値を、自己確認が見ない。`query_git` に足された
+  `GIT_CONFIG_NOSYSTEM` は、`TestTheSystemMarkerIsLive` ではなく system の床の前提が落とす)
+
+### 2. helper が env を混ぜる向きの逆転を、床が見ていなかった
+
+helper は `{**os.environ, **HERMETIC_GIT_ENV}` で env を作る (定数の値が勝つ)。向きを逆にして外側の env を
+勝たせる変異は、床の側が外側の `GIT_CONFIG_*` を全部外していたので、外側の値が無く、結果が変わらなかった
+(両 suite で生き残った)。`isolate_git_config` は外側を外した後に、止めない側の値 (global は空、
+`GIT_CONFIG_COUNT=1` で `maintenance.auto=true`。`OUTER_NON_STOPPING_ENV`) を置くようにした。helper や定数の
+値が勝っていれば止まり、向きを逆にすると止まらない (post-implementation-review では、push 先の bare repo の
+挙動の床まで落ちる)。hook が起動する git の床も同じ: `setUp` で外側の `GIT_CONFIG_*` を外した後に同じ値を
+置いてから基底クラスに当てさせるので、基底クラス (3 つのそれぞれ) が env を混ぜる向きを逆にする変異も落ちる。
+
+### 3. 挙動の床に、陽性対照が無かった (post-implementation-review)
+
+床は「maintenance / gc の起動が 0 件」を見るので、検出器 (`trace_events` / `spawned_maintenance`) が何も
+拾えない状態でも通る (前提で見ているのは `command_names` が `commit` を拾えることだけ)。検出器の event 名・
+argv の位置・サブコマンド名の綴りを壊す変異が、3 件とも生き残った。止める設定を渡さない commit で、検出器が
+起動を 1 件以上拾うことを確かめるテストを足した (`TestTheDetectorSeesMaintenance`)。
+`maintenance.autoDetach=false` / `gc.autoDetach=false` だけは渡し、起動した maintenance を前景で終わらせる
+(背景へ切り離すと tempdir の後始末と競合して、この対照自身が `Directory not empty` で落ちうる)。
+
+### 4. git の既定の除外ファイルが外れていなかった (post-implementation-review)
+
+`GIT_CONFIG_GLOBAL` を指しても、git の既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`。`XDG_CONFIG_HOME` が
+未設定か空なら `~/.config/git/ignore`) と属性ファイルは外れない (config ではなく環境変数と HOME で決まる)。
+hook は `git status` と `git ls-files --others --exclude-standard` の出力で未追跡を判定するので、開発者の
+global の ignore が結果を変えうる。実測: `~/.config/git/ignore` に `.env` があるだけで、無変異のコードで
+suite のテスト 2 件が error になった (`git add -A` が `.env` を拾わず、続く `git commit` が失敗する。
+`test_gitscan` と `test_stop_flow` に 1 件ずつ)。
+
+- `HERMETIC_GIT_ENV` に `XDG_CONFIG_HOME` (テストプロセスごとの空の dir。`HERMETIC_XDG_CONFIG_HOME`) を
+  足した。基底クラス 3 つ (`HookTestCase` / `GitScanTestCase` / `ReviewSetTestCase`) と helper は定数を
+  そのまま使うので、まとめて効く。空でない `XDG_CONFIG_HOME` があれば git は `~/.config/git/ignore` を
+  読まない (実測) ので、`HOME` は差し替えない
+- 床を足した。外側の env の `XDG_CONFIG_HOME` が指す先に ignore を置き、その ignore が、置いた先を向いた
+  env では効くこと (前提: 空の床にしない) を確かめたうえで、効かないことを 2 か所で見る。定数を重ねた
+  env (定数の床) と、基底クラスが張った env のままの hook の判定 (`gitscan.untracked_among`。hook が
+  起動する git の床。基底クラス 3 つ)。どちらも、除外されるはずの名前が未追跡として見えれば、除外ファイルを
+  切り離せている。hook が起動する git の床の前提は、置いた先を明示した env ではなく、床の env の
+  `XDG_CONFIG_HOME` (setUp が ignore を置いた先) のままで効くことを見る。基底クラスが `XDG_CONFIG_HOME` を
+  当て損ねたときに hook の git が見るのは床の XDG なので、置いた先を明示すると、床が XDG を置いた先に
+  向け損ねる退行が、その当て損ねを隠す
+- ignore は、`XDG_CONFIG_HOME` が指す先と、`XDG_CONFIG_HOME` が空のときに git が読む
+  `$HOME/.config/git/ignore` の両方に置き (hook が起動する git の床は `HOME` もそこに向ける)、HOME の側が
+  効くことも前提として見る。XDG の側にだけ置くと、定数の `XDG_CONFIG_HOME` が空になる変異 (git は HOME の
+  側に戻る) を見落とす
+- exitplan-review の定数には足さない: この suite には git の status / 未追跡 / diff の出力を読むテストが
+  無い (`init_repo` は `git init` だけ、hook が起動する git は `rev-parse --show-toplevel` だけ)
+
+### 文言
+
+「ローカルの実行だけでは気付けない」(下の 0.12.3 の項、`post-implementation-review/tests/_testutil.py`、
+`post-implementation-review/CLAUDE.md`) は、git が gc 戦略の版 (2.50 系) であることを前提にした
+文だったので、「gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない」に直した。
+
+`post-implementation-review/tests/_testutil.py` の設定の説明は、「`maintenance.auto=false` / `gc.auto=0`:
+そもそも自動 maintenance を起動しない」と 1 行にまとめていたが、git 2.50 の実測と合わなかった。
+`gc.auto=0` だけでは、`git commit` が起動する `git maintenance run --auto` の起動は止まらない (止めるのは
+`maintenance.auto=false`)。`gc.auto=0` が止めるのは、起動された maintenance の gc の実行 (自動条件を強制した
+repo で確かめた)。2 行に分けた。あわせて、global の設定を読ませない理由の例示を、その plugin の hook が
+実際に読む出力を変える設定に直した。post-implementation-review は変更ファイル名の一覧・patch・未追跡の
+一覧を変えるもの (`diff.renames=false` / `diff.external` / `diff.noprefix` / `core.excludesFile`。
+`color.ui=always` は hook が `--no-color` を付けるので出力を変えない)。exitplan-review は、今は開発者の設定で
+結果が変わる経路が無い (この suite の git は `init_repo` の `git init` と、hook の `rev-parse --show-toplevel`
+だけ。敵対的な global / system の設定でも 90 件が OK) ことをそのまま書き、commit するテストを足すと効く設定
+(`core.hooksPath` / `init.templateDir`。開発者の hook が走る) を、先に揃えておく理由にした。
+
+`post-implementation-review/tests/test_hermetic_env.py` (`empty_global_config` の docstring) と
+`post-implementation-review/CLAUDE.md` にあった「`maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ)」は、
+git 2.55 で確かめていない主張だったので、括弧ごと外して「自動 maintenance を止める設定
+(`maintenance.auto=false` など)」にした (git 2.50 では、上のとおり `gc.auto=0` だけでは起動が止まらない)。
+
+### 確認
+
+suite 全体は 1 回ずつ、mutation は `test_hermetic_env.py` だけを逐次 (HOME は、空 / `~/.gitconfig` に 5 設定
+すべてがある / `~/.config/git/ignore` に `.env` などがある、の 3 通りで流し、落ちる集合は同じ)。床の
+自己確認を床に通した後の取り直しでは、post-implementation-review の既存の変異の一部を空の HOME だけで流し、
+落ちる集合が通す前と同じことを確かめた。
+
+- 部分適用の変異 (定数 / helper / 基底クラスのそれぞれで `GIT_CONFIG_NOSYSTEM` を外す・`GIT_CONFIG_GLOBAL` を
+  外す・`GIT_CONFIG_COUNT` だけにする。exitplan-review は基底クラスが git の env を張らないので、定数と
+  helper だけ) は、修正前に 15 件のうち 7 件が生き残った (post-implementation-review: 定数が
+  `GIT_CONFIG_NOSYSTEM` を持たない / helper がそれを外す / 基底クラスが `GIT_CONFIG_NOSYSTEM` を外す・
+  `GIT_CONFIG_GLOBAL` を外す・`GIT_CONFIG_COUNT` だけ張る。exitplan-review: 定数が `GIT_CONFIG_NOSYSTEM` を
+  持たない / helper がそれを外す。このとき測った基底クラスは `HookTestCase` だけ)。修正後は、基底クラスの
+  3 件を基底クラス 3 つ (`HookTestCase` / `GitScanTestCase` / `ReviewSetTestCase`) のそれぞれに当てた 21 件
+  すべてが、`errors=` ではなく assertion の失敗 (`failures=`) で落ちる
+- 床が見る基底クラスを 3 つにした: `GitScanTestCase` / `ReviewSetTestCase` が env を張らない・
+  `XDG_CONFIG_HOME` を外す変異 4 件は、床が `HookTestCase` だけを見ていた間は生き残り、3 つにした後は
+  assertion で落ちる
+- repo 自身の config に逆の値を置いて `GIT_CONFIG_COUNT` を見る: `HookTestCase` が `GIT_CONFIG_COUNT` だけを
+  張らない変異は、逆の値を置く前は 3 つの HOME のすべてで生き残り (fixture が `--get` を満たす)、置いた後は
+  assertion で落ちる。`HookTestCase` が `GIT_CONFIG_NOSYSTEM` を外す・`GIT_CONFIG_GLOBAL` を外す・
+  `GIT_CONFIG_COUNT` だけ張る・`XDG_CONFIG_HOME` を外す変異と、定数から `XDG_CONFIG_HOME` を消す変異は、
+  逆の値を置く前と同じテストが落とす (定数の変異は、床が見る基底クラスを増やした分だけ落ちる件数が増える)
+- 穴 2・3 の変異 (helper の env を混ぜる向きの逆転は両 suite、検出器を壊す変異は post-implementation-review)
+  は、修正前にすべて生き残った (逆転 2 件と、検出器の event 名・argv の位置・サブコマンド名の綴りの 3 件)。
+  修正後は、trace が常に空になる検出器の変異を足した 1 件も含めて、すべて assertion で落ちる。基底クラスが
+  env を混ぜる向きを逆にする変異は、hook が起動する git の床が外側の値を外すだけだった間は生き残り
+  (`HookTestCase` で測った)、止めない側の値を置いた後は、基底クラス 3 つのそれぞれで落ちる
+- 穴 4 は、修正前の定数に `XDG_CONFIG_HOME` が無いので、上の実測 (無変異のコードの suite が error になる) で
+  示した。修正後は、定数・helper・基底クラス 3 つから `XDG_CONFIG_HOME` を外す変異と、切り離し先の dir に
+  ignore を置く変異が、assertion で落ちる。除外ファイルは XDG と HOME の両方の場所に置いて見る: 定数の
+  `XDG_CONFIG_HOME` が空になる変異は、XDG の側にだけ置いていた間は 3 つの HOME のすべてで生き残り、HOME の
+  側にも置いた後は、定数の床と hook が起動する git の床 (基底クラス 3 つ) が落とす。定数の `XDG_CONFIG_HOME`
+  が開発者の `~/.config` を指す変異は、構造上殺せないので見送った (開発者の本物の HOME に ignore を置かずに
+  落とすには、dir が空であることを構造で確かめるしかなく、変異としても不自然)
+- 足した床自身も変異で確かめた。目印の用意を壊す 4 件 (床の側が `GIT_CONFIG_NOSYSTEM` を立てる /
+  `GIT_CONFIG_SYSTEM` を目印に向けない / 目印のキー名が違う / 目印の file が空) は、post-implementation-review
+  では `TestTheSystemMarkerIsLive` と床の自己確認 (`test_the_floor_alone_stops_nothing`) が落とす (自己確認を
+  足す前は、前者だけが落としていた)。exitplan-review では、床の側が `GIT_CONFIG_NOSYSTEM` を立てる変異は
+  `TestTheSystemMarkerIsLive` だけが落とし、残りの 3 件は `TestTheSystemMarkerIsLive` と system の床の前提が
+  落とす (`TestTheIsolatedEnvStopsNothing` は目印を見ないので、足しても変わらない)。止めない側の外側 env を
+  置かない版は、両 suite で `TestTheIsolatedEnvStopsNothing` が落とす (global を空の file に向ける
+  `GIT_CONFIG_GLOBAL` も無くなるので、`git config --global --list` が読めずに終了コード 128 で落ちる。外側の
+  `GIT_CONFIG_COUNT` だけを置かない版は、`maintenance.auto=true` が見えないことで落ちる)。
+  外側 env をまったく置かない版に env を混ぜる向きの逆転を重ねても、exitplan-review では落ちるテストが
+  増えない (その env が逆転を
+  見えるようにしている証拠。このテストを足す前は、この組が生き残っていた)。post-implementation-review は、
+  定数の `XDG_CONFIG_HOME` を床の値が上書きするので、置かなくても逆転を helper の床が落とす
+- 床の自己確認は、hook が起動する git の床の `setUp` が `GIT_CONFIG_NOSYSTEM` を立てる変異、床の外側の
+  `GIT_CONFIG_GLOBAL` が fixture を指す変異、床の外側の `GIT_CONFIG_COUNT` が止める側の値を持つ変異 (後ろの
+  2 つは、基底クラスの同じ値の抜けと組にして、床が当て損ねを埋める形にした) を、このテストだけが
+  assertion で落とす
+- 床の自己確認は `_hook_git` を通す: 問い合わせのたびの隔離 (`_hook_git` の中) が `GIT_CONFIG_NOSYSTEM` を
+  立て、`HookTestCase` が `GIT_CONFIG_NOSYSTEM` を外す組は、自己確認が `_hook_git` の中身を写していた間は
+  生き残り (他の床は `_hook_git` を通るので、隔離の値が基底クラスの抜けを埋める)、`_hook_git` を通した後は、
+  自己確認が具体クラス 3 つのそれぞれで assertion で落とす。上の床の側の変異と、目印の用意を壊す変異の
+  落ち方 (件数) は変わらない
+- `isolate_git_config` の自己確認 (`TestTheIsolatedEnvStopsNothing`): 床 (`isolate_git_config`) が止める側の
+  値を持ち、helper・定数・`init_repo` が同じ値を外す組のうち、次のものは、このテストを足す前は生き残り、
+  足した後はこのテストだけが assertion で落とす。post-implementation-review では、床が止める側の
+  `GIT_CONFIG_COUNT` を持ち、helper がそれを渡さない組 (検出器の床は `GIT_CONFIG_COUNT` を自前の値で上書き
+  するので、そこでも気付けない)。exitplan-review では、床の `GIT_CONFIG_GLOBAL` が fixture を指す組と、床が
+  止める側の `GIT_CONFIG_COUNT` を持つ組 (どちらも、定数から消す形と `init_repo` が渡さない形の両方)。
+  post-implementation-review の残りの組 (`GIT_CONFIG_GLOBAL` の 2 組と、定数から `GIT_CONFIG_COUNT` を消す組) は、
+  足す前から他の床が落としていた (足した後は、このテストも落とす)。定数や helper だけを壊す変異の落ち方は
+  変わらない
+- 床の自己確認を、`isolate_git_config` を呼ぶ床 (exitplan-review は `init_repo` の床、post-implementation-review
+  は helper の床) を通す形にした。その床が `isolate_git_config` の後に止める側の値を足す変異は、自己確認が
+  `isolate_git_config` を直接呼んでいた間は、空の HOME と 5 設定がある HOME のどちらでも生き残り、床を通した
+  後は、3 つの HOME のすべてで自己確認だけが assertion で落とす。`GIT_CONFIG_NOSYSTEM` を立てる変異は、単独
+  でも、`GIT_CONFIG_NOSYSTEM` の抜け (exitplan-review は定数と `init_repo`、post-implementation-review は helper)
+  と組にしても生き残っていて、今は `TestTheSystemMarkerIsLive` が落とす (post-implementation-review の定数の
+  抜けとの組は、定数の床が `isolate_git_config` を直接呼ぶので、前から定数の床が落としていた)。
+  fixture を指す `GIT_CONFIG_GLOBAL` (exitplan-review) と止める側の
+  `GIT_CONFIG_COUNT` (両 suite) は、`init_repo` / helper が同じ値を外す変異と組にして生き残っていて、今は
+  `TestTheIsolatedEnvStopsNothing` が落とす。exitplan-review の床の問い合わせの道具に、fixture を指す
+  `GIT_CONFIG_GLOBAL` / 止める側の `GIT_CONFIG_COUNT` を足し、`init_repo` が同じ値を外す組も、問い合わせを
+  `query_git` に寄せる前は生き残り (問い合わせの道具が床だけのもので、自己確認はそれを通らなかった)、寄せた
+  後は `TestTheIsolatedEnvStopsNothing` が落とす (`GIT_CONFIG_NOSYSTEM` を足す組は、次の項の前提が落とす)。
+  自己確認は当てる側を呼ばずに床だけを見るので、定数・`init_repo`・helper だけを壊す変異と、
+  `isolate_git_config` が止める側の値を持つ組 (上の項) の落ち方は変わらない (helper が
+  `GIT_CONFIG_NOSYSTEM` を渡さない変異は、今も helper の床の 2 件だけが落とす)
+- exitplan-review の system の床に、目印が問い合わせの時点で読める前提を足した。次の組は、前提を足す前は
+  生き残り、足した後はこの前提が assertion で落とす: 床の HOME を問い合わせの前に消す変異と、`init_repo` /
+  定数の `GIT_CONFIG_NOSYSTEM` の抜けの組。問い合わせの道具が `GIT_CONFIG_NOSYSTEM` を足す変異と、
+  `init_repo` の抜けの組。床の HOME を消す変異は、単独でもこの前提が落とす。自己確認も同じ床を通すように
+  なったので、床の HOME を消す変異 (単独と組の両方) は `TestTheSystemMarkerIsLive` も落とす
+- 除外ファイルの床の前提を、床の env の `XDG_CONFIG_HOME` で組んだ: 床 (`setUp`) が `XDG_CONFIG_HOME` を
+  置いた先に向けない変異は、単独でも、`HookTestCase` / `GitScanTestCase` が `XDG_CONFIG_HOME` を外す変異と
+  組にしても、前提が置いた先を明示していた間は、外側の env が空でない `XDG_CONFIG_HOME` を明示している
+  環境 (例: `$HOME/.config`) で 3 つとも生き残り、床の XDG で組んだ後は、具体クラス 3 つの前提が
+  assertion で落とす。定数・基底クラス 3 つから `XDG_CONFIG_HOME` を外す変異と、定数の `XDG_CONFIG_HOME` が
+  空になる変異の落ち方は変わらない
+- 外側の env に `GIT_CONFIG_NOSYSTEM` と `GIT_CONFIG_GLOBAL` を置いても、基底クラス・定数・helper の変異は
+  落ちる。hook が起動する git の床の `setUp` が外側の値を外す処理を消すと、外側の `GIT_CONFIG_NOSYSTEM` が
+  床に残り、床の自己確認が落とす (自己確認を足す前は、基底クラスの変異が素通りしていた)。
+  `isolate_git_config` の同じ処理を消すと、外側の `GIT_CONFIG_NOSYSTEM` を `TestTheSystemMarkerIsLive` が
+  落とす。定数の 4 設定を見る床は、外側の env に `GIT_CONFIG_PARAMETERS` (`gc.auto=0`) があっても、定数から
+  `gc.auto` を消す変異を落とす (床の先頭で外側の `GIT_CONFIG_*` を外す前は、このテストが素通りしていた)
+- suite 全体 (4 つ。各 suite の親ディレクトリで `python3 -m unittest discover tests`): `_common` 170 件、
+  exitplan-review 91 件 (3 件増)、explore-parallel 88 件、post-implementation-review 462 件 (19 件増)、
+  すべて OK。テストの削除・統合は無い。`~/.config/git/ignore` に `.env` がある HOME でも、`.env` を使う
+  3 つのテストファイル (`test_gitscan` / `test_review_set` / `test_stop_flow`、175 件) が OK
+
 ## 0.12.3
 
 **テスト整理 (挙動の変更なし)。テストの tearDown が偶発的に `Directory not empty` で
@@ -24,7 +260,7 @@ geometric で (`builtin/gc.c` の `initialize_task_config`)、`.git/objects/17` 
 `--detach` は repack の自動条件を判定する前に背景へ切り離すため、commit が戻った後も背景で
 `.git/objects/pack` に書き続け、その最中に tempdir の後始末が走ると競合する。object の hash
 次第なので偶発的で、git 2.50 は戦略が gc でしきい値 (約 6700 個) も高く、同じ条件でも
-起きない (ローカルの実行だけでは気付けない)。
+起きない (gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない)。
 
 テストが作る repo と、hook が起動する git の両方に、次の 2 本で止める設定を渡すようにした
 (`HERMETIC_GIT_ENV`)。そもそも自動 maintenance を起動せず、何かが走っても背景へ切り離さない。
