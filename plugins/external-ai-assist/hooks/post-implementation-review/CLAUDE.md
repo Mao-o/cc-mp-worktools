@@ -903,20 +903,34 @@ fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init
 書き換わる。内容は `test_hermetic_env.py` が `git config --global --list` の完全一致で固定しているので、
 書くと次の実行で落ちる)。この床を書き足すときは、「patch していない」状態を作るために `GIT_CONFIG_*`
 を外すだけでなく、global の config を空に、system の config を目印の file に向けること
-(`test_hermetic_env.isolate_git_config`)。開発者の `~/.gitconfig` に `maintenance.auto=false`
-(2.55 では `gc.auto=0` でも同じ) があると、helper を迂回した git も maintenance を起動せず、床が
+(`test_hermetic_env.isolate_git_config`)。開発者の `~/.gitconfig` に自動 maintenance を止める設定
+(`maintenance.auto=false` など) があると、helper を迂回した git も maintenance を起動せず、床が
 黙って通る。**床の側で `GIT_CONFIG_NOSYSTEM` を立てないこと**: 立てると、helper・基底クラス・定数が
 それを渡し損ねても、床が埋めて通る。system の目印 (`hermetic.system = read`) は
 `GIT_CONFIG_NOSYSTEM` が効いていれば読まれないので、`git config --get hermetic.system` が未設定
-(終了コード 1) であることで、届いているかを見る (hook の git は
-`TestHookLaunchedGitInheritsTheSettings`)。外側の env には、止めない側の値
-(`OUTER_NON_STOPPING_ENV`。global は空、`maintenance.auto=true`) を置く: helper が env を混ぜる向きを
-逆にする変異は、外側を全部外しただけでは結果が変わらず、床が気付けない。挙動の床 (maintenance の起動
-0 件) には陽性対照が要る (`TestTheDetectorSeesMaintenance`): 検出器が何も拾えなくても 0 件は成り立つ。
-git の既定の除外ファイルと属性ファイル (`$XDG_CONFIG_HOME/git/ignore` など) は `GIT_CONFIG_GLOBAL`
-では外れないので、`HERMETIC_GIT_ENV` が `XDG_CONFIG_HOME` を空の dir に向けている (開発者の global の
-ignore に `.env` があると、`git add -A` が拾わず commit が失敗するテストが出る。hook の未追跡の判定も
-変わる)。
+(終了コード 1) であることで、届いているかを見る。外側の env には、止めない側の値
+(`OUTER_NON_STOPPING_ENV`。global は空、`maintenance.auto=true`) を置く: helper や基底クラスが env を
+混ぜる向きを逆にする変異は、外側を全部外しただけでは結果が変わらず、床が気付けない。挙動の床
+(maintenance の起動 0 件) には陽性対照が要る (`TestTheDetectorSeesMaintenance`): 検出器が何も拾えなくても
+0 件は成り立つ。git の既定の除外ファイルと属性ファイル (`$XDG_CONFIG_HOME/git/ignore` など) は
+`GIT_CONFIG_GLOBAL` では外れないので、`HERMETIC_GIT_ENV` が `XDG_CONFIG_HOME` を空の dir に向けている
+(開発者の global の ignore に `.env` があると、`git add -A` が拾わず commit が失敗するテストが出る。hook の
+未追跡の判定も変わる)。
+
+hook の関数が起動する git の床は `test_hermetic_env._ProductGitChecks` で、基底クラスが張った env のまま
+見る。hook を起動するテストクラス (`HookTestCase`) だけでなく、hook の関数を直接呼ぶテストクラス
+(`GitScanTestCase` / `ReviewSetTestCase`) も同じ定数を当てるので、床は 3 つとも見る (基底クラスごとの
+具体クラス。`HERMETIC_GIT_ENV` を自前で張る基底クラスを足したら、ここにも具体クラスを足す)。この床では:
+
+- `GIT_CONFIG_COUNT` は、repo 自身の config に逆の値 (`maintenance.auto=true` / `gc.auto=6700` など) を
+  置いてから `--get` で見る。env は repo 自身の config に勝ち、global の fixture は負けるので、止める側の
+  値は `GIT_CONFIG_COUNT` が届いているときだけ見える (逆の値が無いと、fixture が埋めて通る)
+- 除外ファイルは、`$XDG_CONFIG_HOME/git/ignore` と `$HOME/.config/git/ignore` の両方の場所に置いて見る。
+  `XDG_CONFIG_HOME` が空なら git は HOME の側を読むので、片方だけだと、定数の `XDG_CONFIG_HOME` が空に
+  なる変異を見落とす
+- 床の env だけでは、どの経路も止める側にならないことも見る (`test_the_floor_alone_stops_nothing`)。
+  床が止める側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の
+  `GIT_CONFIG_COUNT`) を持つ形に戻ると、基底クラスの当て損ねを床が埋めて、他の床が黙って通る
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると
