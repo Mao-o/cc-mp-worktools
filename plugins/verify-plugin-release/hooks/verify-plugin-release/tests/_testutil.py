@@ -22,8 +22,8 @@ if str(_PKG_DIR) not in sys.path:
 # 背景へ切り離すので、commit は待たずに戻る。その repack が `.git/objects/pack` に書いている間に
 # `TemporaryDirectory.cleanup()` が走ると、tearDown が `Directory not empty` で落ちる (CI の flaky。
 # object の hash 次第なので偶発的)。git 2.50 は gc 戦略でしきい値 (約 6700 個) が高く、同じ条件でも
-# 起きないので、ローカルの実行だけでは気付けない。起動そのものは版によらず起きる: 設定で止めない
-# 限り、commit のたびに `git maintenance run --auto` が子として起動する。
+# 起きないので、gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない。起動そのものは版によらず
+# 起きる: 設定で止めない限り、commit のたびに `git maintenance run --auto` が子として起動する。
 #
 #   maintenance.auto=false / gc.auto=0: そもそも自動 maintenance を起動しない
 #   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
@@ -55,10 +55,12 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return env
 
 
-# 開発者の ~/.gitconfig (color.ui=always / diff.external / diff.noprefix 等) でテストが
-# 揺れないよう、git にグローバル/システム設定を読ませない。global の代わりに読ませるのは
-# tests 配下の fixture で、自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と
-# `receive.autogc`) だけを持つ。
+# 開発者の ~/.gitconfig でテストが揺れないよう、git にグローバル/システム設定を読ませない
+# (例: diff.renames=false だとゲートが読む `diff --name-only` の一覧が、status.showUntrackedFiles=no
+# だと `status --porcelain` の未追跡が変わる。ゲートはこの出力で判定する)。global の代わりに読ませる
+# のは tests 配下の fixture で、自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と
+# `receive.autogc`) だけを持つ。既定の excludes (`XDG_CONFIG_HOME/git/ignore`) はこの指定では外れない
+# (`XDG_CONFIG_HOME` を空にしているのは `test_main.run_hook` と、`test_hermetic_env` の床だけ)。
 #
 # 止める経路は 2 本あり、どちらも外さない:
 #   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない

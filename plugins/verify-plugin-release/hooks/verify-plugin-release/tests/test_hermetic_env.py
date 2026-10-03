@@ -10,8 +10,11 @@ maintenance が止まっていること。
   あること。「問い合わせた時点の設定値」ではなく**実際に起動したか**を見るので、repo を作る helper
   の中の git だけが env を持たずに起動されても、push の受け側 (`receive-pack`) に env が届かなくても
   気付ける (テストが helper を使わずに repo を作る場合は、この床の対象外)。helper を迂回した git を
-  作るために `GIT_CONFIG_*` を外すときは、開発者の global / system の config も空にする
-  (`isolate_git_config`): そこに `maintenance.auto=false` があると、迂回しても起動せず床が黙って通る
+  作るために `GIT_CONFIG_*` を外すときは、開発者の global の config を空に、system の config を
+  目印の file に向ける (`isolate_git_config`): そこに `maintenance.auto=false` があると、迂回しても
+  起動せず床が黙って通る。**床の側では `GIT_CONFIG_NOSYSTEM` を立てない**: 立てると、helper や
+  基底クラスがそれを渡し損ねても、床が埋めて通ってしまう (system の目印は `GIT_CONFIG_NOSYSTEM`
+  が効いていれば読まれないので、効いているかを値で見られる)
 - **設定の出どころ別**: 止める経路は env (`GIT_CONFIG_COUNT`) と global の fixture の 2 本で、
   同じ値を持つ。有効値だけを見ると片方が欠けてももう片方が埋めて通ってしまうので、1 本ずつ
   単独で見る。env は定数の中身 (1 項目ずつ) と、helper が実際に渡す経路 (fixture を外して挙動で)、
@@ -78,19 +81,28 @@ def empty_config_file(directory: str) -> str:
 
 
 def empty_global_config(home: str) -> None:
-    """git が読む global / system の config を空にする (`HOME` / `XDG_CONFIG_HOME` を空の `home` に、
-    system を無効に)。
+    """git が読む global の config を空にし、system の config を目印の file に向ける。
+
+    global 側は `HOME` / `XDG_CONFIG_HOME` を空の `home` に向ける。system 側は `GIT_CONFIG_SYSTEM` で
+    `home` の中の目印 file (`hermetic.system = read` だけを持つ) に向ける: 開発者の system config は
+    読まれず、しかも `GIT_CONFIG_NOSYSTEM` が効いていれば目印も読まれないので、効いているかを値
+    (`git config --get hermetic.system`) で見られる。**`GIT_CONFIG_NOSYSTEM` は立てない。** 床の側が
+    立てると、helper や基底クラスがそれを渡し損ねても、床が埋めて通ってしまう。
 
     `mock.patch.dict(os.environ)` の中で呼ぶこと (環境を戻すため)。`GIT_CONFIG_*` を外すだけだと、
     helper を迂回した git (や、env の patch が外れたゲートの git) は開発者の `~/.gitconfig` と
     system config を読む。そこに `maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ) があると、
     迂回しても自動 maintenance が起動せず、有効値も揃って、床が黙って通ってしまう。
     """
-    os.environ.update({"HOME": home, "XDG_CONFIG_HOME": home, "GIT_CONFIG_NOSYSTEM": "1"})
+    system = os.path.join(home, "system.gitconfig")
+    with open(system, "w", encoding="utf-8") as f:
+        f.write("[hermetic]\n\tsystem = read\n")
+    os.environ.update({"HOME": home, "XDG_CONFIG_HOME": home, "GIT_CONFIG_SYSTEM": system})
 
 
 def isolate_git_config(home: str) -> None:
-    """`GIT_CONFIG_*` を外し、global / system の config も空にする (「patch していない」状態を作る)。"""
+    """`GIT_CONFIG_*` を外し、global の config も空に、system の config も目印の file に向ける
+    (「patch していない」状態を作る)。"""
     for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
         del os.environ[name]
     empty_global_config(home)
@@ -121,9 +133,11 @@ def spawned_maintenance(events: list[dict]) -> list[list[str]]:
 class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
     """テストクラスが env を patch していなくても、repo を作るヘルパー自身が止める。
 
-    「patch していない」状態は、`GIT_CONFIG_*` を外し、global / system の config も空にして作る
-    (`isolate_git_config`)。他のテストの patch 漏れや、開発者の shell / `~/.gitconfig` の値に
-    左右されないため。
+    「patch していない」状態は、`GIT_CONFIG_*` を外し、global の config を空に、system の config を
+    目印の file に向けて作る (`isolate_git_config`。`GIT_CONFIG_NOSYSTEM` は立てない)。他のテストの
+    patch 漏れや、開発者の shell / `~/.gitconfig` の値に左右されないため。床が `GIT_CONFIG_NOSYSTEM`
+    を立てないので、helper が渡す env から `GIT_CONFIG_NOSYSTEM` が抜けることも、下の前提
+    (`HERMETIC_GIT_ENV` の全項目が helper の git に届いている) で拾える。
 
     見るのは**起動された git の挙動** (maintenance / gc の子が 0 件) で、ヘルパーが後から問い合わせた
     設定値ではない。`make_marketplace` の commit だけが env を持たずに起動されても、問い合わせ
@@ -206,7 +220,7 @@ class TestEachSourceOfTheSettingsOnItsOwn(unittest.TestCase):
         """fixture が自動 maintenance を止める 5 設定だけを持つこと (完全一致)。
 
         キーごとの `--get` だと、余計な設定 (誤って `git config --global` で書かれた `user.name` や、
-        将来足された `diff.noprefix` など、テストの前提を変えるもの) が増えても通る。fixture は
+        将来足された `diff.renames` など、ゲートが読む出力を変えるもの) が増えても通る。fixture は
         git が読む global なので、増えると製品の git を含む全テストに効く。`git config --list` は
         キーを小文字で出す。`GIT_CONFIG_GLOBAL` が外れたときに開発者の `~/.gitconfig` を読んで通らない
         よう、`HOME` などは空にしてから見る。
@@ -231,8 +245,8 @@ class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
     `git push` がローカルの path へ送るとき、受け側は repo 用の env (`GIT_CONFIG_COUNT` など) を
     外されて起動する。env の設定だけだと、`git init --bare` を直接呼んだ bare repo では maintenance が
     起動する (実測)。外されない `GIT_CONFIG_GLOBAL` の fixture が止めていることを、起動された
-    子プロセスで見る。helper を迂回した git が開発者の `~/.gitconfig` を読まないよう、global / system
-    の config は空にする (`isolate_git_config`)。
+    子プロセスで見る。helper を迂回した git が開発者の `~/.gitconfig` を読まないよう、global の
+    config は空に、system の config は目印の file に向ける (`isolate_git_config`)。
     """
 
     def test_push_into_a_plain_bare_repo(self):
@@ -269,14 +283,37 @@ class TestBareOriginKeepsTheSettingsInItsOwnConfig(unittest.TestCase):
 
 
 class TestGateLaunchedGitInheritsTheSettings(HermeticGitTestCase):
-    """ゲート (製品コード) を in-process で動かすテストで、ゲートが起動する git にも同じ設定が届くこと。
+    """ゲート (製品コード) を in-process で動かすテストで、ゲートが起動する git にも同じ設定が届き、
+    global は fixture だけ、system は読まないこと。
 
     `runner.run` は env を渡さず `os.environ` を継ぐので、基底クラスが patch した env がそのまま
-    見える。ここが外れると、ゲートが起動する git だけ自動 maintenance が復活する。基底クラスの patch
-    から `HERMETIC_GIT_ENV` が外れたとき、ゲートの git が開発者の global / system の config から
-    設定を拾って通らないよう、`HOME` などは空にしてから見る (`empty_global_config`。patch が効いて
-    いれば `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_COUNT` が優先されるので結果は変わらない)。
+    見える。ここが外れると、ゲートが起動する git だけ、開発者の global / system の config と自動
+    maintenance の既定に戻る。見るものは 3 つ:
+
+    - 4 設定が見える (`--get`)。env の `GIT_CONFIG_COUNT` だけで満たせるので、fixture の経路は見えない
+    - global として fixture を読む (`config --global --list` が 5 設定の完全一致)。基底クラスが
+      `GIT_CONFIG_GLOBAL` を張っていること
+    - system の config を読まない。`GIT_CONFIG_SYSTEM` に目印の file を指しておき、
+      `GIT_CONFIG_NOSYSTEM` が効いていれば読まれない (`hermetic.system` が未設定のまま)
+
+    床自身が `GIT_CONFIG_NOSYSTEM` を立てると、基底クラスの当て損ねを床が埋めてしまい、後ろの 2 つが
+    見えなくなる。そのため `empty_global_config` は `HOME` / `XDG_CONFIG_HOME` を空にして system の
+    目印を指すだけで、`GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` は基底クラスが張ったものをそのまま
+    見る。`GIT_CONFIG_GLOBAL` が外れたときは、開発者の `~/.gitconfig` を読んで通ってしまわず、
+    `--global --list` の不一致として落ちる。
+
+    外側の env (開発者の shell や、mutation を流す道具) に `GIT_CONFIG_NOSYSTEM` があると、基底クラスが
+    当て損ねても system は読まれず、最後の assertion が素通りする。そのため `setUp` で、外側の
+    `GIT_CONFIG_*` を先に外してから基底クラスの patch を張る。
     """
+
+    def setUp(self) -> None:
+        outer = mock.patch.dict(os.environ)
+        outer.start()
+        self.addCleanup(outer.stop)
+        for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
+            del os.environ[name]
+        super().setUp()
 
     def test_git_launched_by_the_gate_sees_the_settings(self):
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
@@ -285,6 +322,16 @@ class TestGateLaunchedGitInheritsTheSettings(HermeticGitTestCase):
                 with self.subTest(key=key):
                     res = gate_git(["config", "--get", key], Path(tmp), Deadline(30))
                     self.assertEqual((res.returncode, res.stdout.strip()), (0, expected))
+            listed = gate_git(["config", "--global", "--list"], Path(tmp), Deadline(30))
+            system = gate_git(["config", "--get", "hermetic.system"], Path(tmp), Deadline(30))
+        self.assertEqual(
+            (listed.returncode, sorted(listed.stdout.splitlines())),
+            (0, sorted(f"{key.lower()}={value}" for key, value in EXPECTED_WITH_RECEIVE.items())),
+            "ゲートの git が global として fixture を読む",
+        )
+        self.assertEqual(
+            (system.returncode, system.stdout), (1, ""), "ゲートの git が system の config を読まない"
+        )
 
     def test_fetch_started_by_the_gate_starts_no_maintenance(self):
         """ゲートが自分で起動する git のうち、自動 maintenance の起点になりうるのは `fetch` だけ。
@@ -292,6 +339,10 @@ class TestGateLaunchedGitInheritsTheSettings(HermeticGitTestCase):
         上のテストは設定値を問い合わせるだけなので、ゲートの `fetch` が起動する子を `GIT_TRACE2_EVENT`
         で数える (挙動の床)。この suite の他のテストは設定ファイルで `fetch` を無効にしてゲートを
         動かすので、ゲートの `fetch` を実際に走らせるのはここだけ。
+
+        fetch が成功したことも前提にする (`Report.notes` が空)。`resolve_base` は fetch の失敗を
+        notes に入れて握りつぶし、失敗した fetch は終わりの maintenance の起動まで進まない。前提が
+        無いと、fetch が失敗する形では、基底クラスが何も張らなくても通る空の床になる。
         """
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
             empty_global_config(tmp)
@@ -301,8 +352,12 @@ class TestGateLaunchedGitInheritsTheSettings(HermeticGitTestCase):
             _testutil.sh(root, "push", "-q", "origin", "main")
             trace = os.path.join(tmp, "trace2.jsonl")
             os.environ["GIT_TRACE2_EVENT"] = trace
-            base = gate.resolve_base(root, "main", Config(fetch=True), Deadline(60), gate.Report())
+            rep = gate.Report()
+            base = gate.resolve_base(root, "main", Config(fetch=True), Deadline(60), rep)
             events = trace_events(trace)
+        self.assertEqual(
+            rep.notes, [], "前提: ゲートの fetch が成功している (失敗すると maintenance の起点まで進まない)"
+        )
         self.assertEqual(base, "origin/main")
         self.assertIn("fetch", command_names(events), "前提: ゲートが fetch を起動している (空の床にしない)")
         self.assertEqual(spawned_maintenance(events), [])
