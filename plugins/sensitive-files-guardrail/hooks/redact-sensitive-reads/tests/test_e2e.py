@@ -20,6 +20,9 @@ from pathlib import Path
 from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
+from _testutil import HERMETIC_GIT_ENV
+from _testutil import git as _git
+from _testutil import init_repo as _init_repo
 
 _ENTRY_PATH = Path(__file__).resolve().parent.parent / "__main__.py"
 # Stop hook (check-sensitive-files) のエントリ。両 hook の reason が推奨する
@@ -720,10 +723,6 @@ def _load_stop_entry():
     return mod
 
 
-def _git(args: list[str], cwd: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
 class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
     """両 hook の reason が推奨する次善策コマンドが Bash hook を通過することを
     固定する (0.19.0)。
@@ -742,7 +741,14 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         # patterns.local.txt / stop-ack state を実 HOME から隔離
         self._env = mock.patch.dict(
             os.environ,
-            {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(home / "xdg")},
+            {
+                "HOME": str(home),
+                "USERPROFILE": str(home),
+                "XDG_CONFIG_HOME": str(home / "xdg"),
+                # Stop hook (check-sensitive-files) が起動する git にも、テストの git と同じ設定を当てる
+                # (hook の git は env を渡さず os.environ を継承する)
+                **HERMETIC_GIT_ENV,
+            },
         )
         self._env.start()
         self.addCleanup(self._env.stop)
@@ -800,10 +806,7 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
                 self._assert_passes(rec, origin=f"bash reason of {cmd!r}")
 
     def test_stop_hook_block_reason_recommends_only_passing_commands(self):
-        _git(["init", "--initial-branch=main"], str(self.repo))
-        _git(["config", "user.name", "test"], str(self.repo))
-        _git(["config", "user.email", "test@example.com"], str(self.repo))
-        _git(["config", "commit.gpgsign", "false"], str(self.repo))
+        _init_repo(str(self.repo))
         _git(["add", ".env"], str(self.repo))
         _git(["commit", "-m", "add env"], str(self.repo))
 

@@ -17,22 +17,19 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import _testutil  # noqa: F401
+from _testutil import HermeticGitTestCase
+from _testutil import git as _git
+from _testutil import init_repo as _init_repo
 
 _TIER_REL = Path(".claude") / "sensitive-files-guardrail" / "patterns.txt"
 _LOCAL_REL = Path(".claude") / "sensitive-files-guardrail" / "patterns.local.txt"
 _CERT = "-----BEGIN CERTIFICATE-----\nMIIBpublic\n-----END CERTIFICATE-----\n"
-
-
-def _git(args: list[str], cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True)
 
 
 def _load_entry():
@@ -64,7 +61,7 @@ def _reason(out: str) -> str:
     return json.loads(out)["reason"]
 
 
-class Base(unittest.TestCase):
+class Base(HermeticGitTestCase):
     """main repo に ``certs/aws.pem`` / ``certs/other.pem`` を commit し、repo 同梱
     tier で ``!certs/aws.pem`` だけを承認する。worktree は nested
     (``.claude/worktrees/x``) と外部 (main の外) の 2 つ。"""
@@ -72,6 +69,7 @@ class Base(unittest.TestCase):
     tracked = ("aws.pem", "other.pem")
 
     def setUp(self):
+        super().setUp()
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.home = self.tmp / "home"
@@ -90,10 +88,7 @@ class Base(unittest.TestCase):
 
         self.main = self.tmp / "repo"
         self.main.mkdir()
-        _git(["init", "--initial-branch=main"], self.main)
-        _git(["config", "user.name", "test"], self.main)
-        _git(["config", "user.email", "test@example.com"], self.main)
-        _git(["config", "commit.gpgsign", "false"], self.main)
+        _init_repo(self.main)
         for name in self.tracked:
             cert = self.main / "certs" / name
             cert.parent.mkdir(parents=True, exist_ok=True)

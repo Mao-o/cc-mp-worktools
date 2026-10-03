@@ -1,0 +1,15 @@
+# テストが git に読ませる global config (_testutil.py の HERMETIC_GIT_ENV の GIT_CONFIG_GLOBAL が指す)。
+# 開発者の ~/.gitconfig の代わりに、自動 gc / maintenance を止める設定だけを持つ。理由は
+# _testutil.py の NO_BACKGROUND_GIT_SETTINGS のコメント。
+# env の GIT_CONFIG_COUNT は push の受け側 (receive-pack) に届かないが、この file は届く。
+# そのため git init --bare を直接呼んだ bare repo でも、受け側の自動 maintenance が止まる。
+# テストから git config --global で書かないこと (この tracked の file が書き換わる)。
+# 内容は test_hermetic_env.py が完全一致で固定している (設定を足し引きするときは EXPECTED も直す)。
+[maintenance]
+	auto = false
+	autoDetach = false
+[gc]
+	auto = 0
+	autoDetach = false
+[receive]
+	autogc = false
