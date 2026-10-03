@@ -65,6 +65,29 @@ class TestCache(unittest.TestCase):
         files[0].write_text("not json", encoding="utf-8")
         self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
 
+    def test_unreadable_cache_file_is_a_miss_not_an_exception(self):
+        """UTF-8 でない / 入れ子が深い entry も cache miss (検証し直す。v0.18.0)。
+
+        旧版は JSONDecodeError と OSError だけを捕まえ、UnicodeDecodeError / RecursionError が
+        dispatch() の外まで抜けて __main__ の最終防波堤が検証をスキップしていた。
+        """
+        base = Path(self.tmp) / "cc-mp-verify-cloud-account"
+        for name, payload in (
+            ("not UTF-8", b'{"success": true, "x": "\xff"}'),
+            ("deep", b"[" * 100000 + b"]" * 100000),
+        ):
+            with self.subTest(name):
+                cache.set_success("svc", "/p", "exp", 1.0)
+                files = list(base.glob("svc-*.json"))
+                self.assertTrue(files)
+                for path in files:
+                    path.write_bytes(payload)
+                try:
+                    hit = cache.get_success("svc", "/p", "exp", 1.0)
+                except (UnicodeDecodeError, RecursionError) as e:
+                    self.fail(f"読めない cache entry で get_success が {type(e).__name__} を投げた")
+                self.assertFalse(hit)
+
     def test_different_inline_env_miss(self):
         # profile が異なれば別キー → profile A の成功が profile B で誤 allow されない
         cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
@@ -195,6 +218,19 @@ class TestCache(unittest.TestCase):
         self._base().mkdir(exist_ok=True)
         (self._base() / "github.epoch").write_text("not json", encoding="utf-8")
         self.assertEqual(cache.current_epoch("github"), 0)
+        cache.invalidate("github")
+        self.assertGreater(cache.current_epoch("github"), 0)
+
+    def test_deeply_nested_epoch_file_is_zero_not_an_exception(self):
+        """入れ子の深い epoch ファイルも「読めない」と同じ 0 (v0.18.0)。旧版は RecursionError が
+        dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップしていた。"""
+        self._base().mkdir(exist_ok=True)
+        (self._base() / "github.epoch").write_bytes(b"[" * 100000 + b"]" * 100000)
+        try:
+            epoch = cache.current_epoch("github")
+        except RecursionError:
+            self.fail("入れ子の深い epoch ファイルで current_epoch が RecursionError を投げた")
+        self.assertEqual(epoch, 0)
         cache.invalidate("github")
         self.assertGreater(cache.current_epoch("github"), 0)
 

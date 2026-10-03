@@ -21,9 +21,13 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
    → 無ければ `.firebaserc` の alias が 1 つならその値 → `default`。
    configstore を読むのは、`npx firebase ...` 等で hook の PATH に `firebase` が
    無い環境でも `firebase use` の切替を見落とさないため (`.firebaserc` だけを
-   読むと default のまま照合して false-allow になる)。
+   読むと default のまま照合して false-allow になる)。`.firebaserc` を firebase-tools と
+   同じ内容に読めると確かめられないとき (`_read_firebaserc`) は解決しない (取得不可)。
 3. CLI が timeout したときは fallback せず専用メッセージで deny する
    (fail-closed。他 service の timeout と同じ扱い)。
+
+コマンドの `--config` / `-c` は project root を指定したファイルのあるディレクトリに移す
+(firebase-tools の detectProjectRoot と同じ)。1. の cwd と 2. の起点はそこになる。
 """
 from __future__ import annotations
 
@@ -90,7 +94,16 @@ GLOBAL_FLAGS = frozenset({"--debug", "--json", "--non-interactive", "--interacti
 # 「どの project に対して実行するか」をコマンド側で指定する option (v0.9.0)。
 # firebase-tools は `--project` / `-P` の値を `.firebaserc` の alias として解決し、
 # 該当が無ければ project ID そのものとして使う (requireProject)。
-CONTEXT_OPTIONS = {"--project": "project", "-P": "project"}
+# `--config` / `-c` (v0.18.0) は firebase.json を名指しし、firebase-tools はそのファイルの
+# あるディレクトリを project root にする (detectProjectRoot の configPath)。読む
+# `.firebaserc` と、configstore の切替先を探す起点がそこに移るので、照合先を変える option
+# として扱う (verify() の `context["config"]`)。
+CONTEXT_OPTIONS = {
+    "--project": "project",
+    "-P": "project",
+    "--config": "config",
+    "-c": "config",
+}
 # CLI がどの project / アカウントで動くかを決める env (成功 cache のキーに含める。
 # services/__init__.py の IDENTITY_ENV_* 契約)。project を選ぶ env は firebase-tools に
 # 無い (公式 docs に記載なし) ので、アクティブ project を記録する configstore の場所
@@ -132,7 +145,7 @@ TIMEOUT_REASON = (
 )
 
 
-def _from_cli(project_dir: str, env=None) -> tuple[str, str | None]:
+def _from_cli(root: str, env=None, config: str | None = None) -> tuple[str, str | None]:
     """`firebase use` (非 TTY) を実行し (project_id, error) を返す。
 
     非 TTY の `firebase use` はアクティブ project があれば解決済み project ID を
@@ -142,20 +155,27 @@ def _from_cli(project_dir: str, env=None) -> tuple[str, str | None]:
     複数行ヘルプ) は "" を返す (呼び出し側がローカル設定に fallback する)。
     timeout だけは error に専用メッセージを入れて返す (fallback しない)。
 
-    cwd は `_project_root(project_dir)` (firebase.json のある root、無ければ
-    project_dir) に固定し、ローカル設定 fallback と解決の起点を揃える。hook /
-    builder プロセスの cwd を継承すると、builder を project_dir の外から起動した
-    ときに無関係なディレクトリの project を報告・書込しうる。project_dir が
-    存在しなければ cwd 指定で OSError になり、CLI 不可として扱う。
+    cwd は project root (`_project_root(project_dir)` = firebase.json のある root、無ければ
+    project_dir。`--config` 付きのコマンドではそのファイルのあるディレクトリ) に固定し、
+    ローカル設定 fallback と解決の起点を揃える。hook / builder プロセスの cwd を継承すると、
+    builder を project_dir の外から起動したときに無関係なディレクトリの project を報告・
+    書込しうる。root が存在しなければ cwd 指定で OSError になり、CLI 不可として扱う。
+
+    config (`--config` の絶対パス) があれば同じ option を付ける。ファイル名が firebase.json
+    でなくても、CLI がコマンドと同じディレクトリを project root にするため (付けないと
+    root から親方向に firebase.json を探し直す)。
     """
+    argv = ["firebase", "use"]
+    if config is not None:
+        argv += ["--config", config]
     try:
         result = subprocess.run(
-            ["firebase", "use"],
+            argv,
             capture_output=True,
             text=True,
             timeout=budget.call_timeout(10),
             env=env,
-            cwd=_project_root(project_dir),
+            cwd=root,
         )
     except subprocess.TimeoutExpired:
         return "", TIMEOUT_REASON
@@ -196,38 +216,20 @@ def _project_root(project_dir: str) -> str:
         cur = parent
 
 
-def _firebaserc_aliases(root: str) -> dict[str, str]:
-    """`.firebaserc` の projects マップ (alias → project ID)。読めなければ空 dict。
+def _config_file(project_dir: str, config: str) -> str | None:
+    """`--config <config>` が指す firebase.json の絶対パス。ファイルが見つからなければ None。
 
-    不正な形 (top-level が list / projects が dict でない / 値が非文字列) も
-    例外にせず空 or 該当 alias 除外として扱う。
+    firebase-tools (detectProjectRoot) は config を作業ディレクトリから解決し
+    (`path.resolve(cwd, config)`)、そのファイルのあるディレクトリを project root にする。
+    ファイルが無ければコマンドを始めずにエラーで終わる。hook はコマンドの作業ディレクトリを
+    知らないので、このモジュールの他の箇所 (`_project_root`) と同じく project_dir を CLI の
+    作業ディレクトリとみなす。見つからなければ (シェルが展開する `~` など)、呼び出し側は
+    「どの project で動くかを確かめられない」として deny する。コマンドの中の `cd` は
+    `--config` の無いコマンドと同じく追わない (同じ相対パスのファイルが project_dir の側にも
+    あれば、そちらのディレクトリを root にして照合する)。
     """
-    path = Path(root) / ".firebaserc"
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return {}
-    projects = data.get("projects") if isinstance(data, dict) else None
-    if not isinstance(projects, dict):
-        return {}
-    return {
-        alias: project
-        for alias, project in projects.items()
-        if isinstance(alias, str) and isinstance(project, str) and project
-    }
-
-
-def aliases_for(project_dir: str, project_id: str) -> list[str]:
-    """`.firebaserc` で project_id を指す alias 名を返す (名前順)。
-
-    プロジェクトごとの固定 (builder の `pin-env`) 用。`firebase use <alias>` を案内する
-    ときに、期待値 (project ID) をそのまま出さずに済む。`.firebaserc` は CLI と同じく
-    `firebase.json` を親方向に探した project root から読む。
-    """
-    aliases = _firebaserc_aliases(_project_root(project_dir))
-    return sorted(alias for alias, project in aliases.items() if project == project_id)
+    path = os.path.abspath(os.path.join(project_dir, config))
+    return path if os.path.isfile(path) else None
 
 
 def _reject_constant(name: str):
@@ -235,62 +237,116 @@ def _reject_constant(name: str):
     raise ValueError(f"JSON に無い値: {name}")
 
 
-def firebaserc_reads_like_cli(project_dir: str) -> bool:
-    """`.firebaserc` を、このモジュールと firebase-tools が同じ内容に読めるか (無ければ True)。
+# firebase-tools と同じ内容に読めると確かめられない `.firebaserc` の、内容の条件のすべて
+# (`_read_firebaserc` が None を返す条件。ファイル自体を読めないときも None になるが、内容の
+# 条件ではないので並べない)。pin-env の「固定できません」と verify() の `--project` の deny が
+# 同じ文で示す。判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾く。
+FIREBASERC_UNCONFIRMED_CONDITIONS = (
+    "UTF-8 でない・U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・"
+    "JSON として読めない (NaN など JSON に無い値・構文の誤り・深い入れ子)・"
+    "projects がオブジェクトでないか文字列でない値を持つ"
+)
+
+
+def _read_firebaserc(root: str) -> dict[str, str] | None:
+    """`root/.firebaserc` の projects マップ (alias → project ID)。
+
+    firebase-tools と同じ内容に読めると確かめられたときだけ返す (ファイルが無い・トップレベルが
+    オブジェクトでない・`projects` が無いときは空 dict。firebase-tools も alias 0 件)。
+    確かめられなければ None。`.firebaserc` を読むのはこの関数だけで、呼び出し側は
+    1 回の読み込みの結果を判定にも解決にも使う (別々に読むと、入れ子の深さの境目で片方だけ
+    RecursionError になり、「同じに読める」と言った内容と違う内容で解決しうる)。
 
     firebase-tools は `.firebaserc` を cjson で読む: ファイル中のすべての U+FEFF を除き、
     `//` / `/* */` のコメントを除いてから JSON.parse する (不正な UTF-8 は置換文字になり、
-    `NaN` 等があると JSON.parse が失敗して alias 0 件になる)。このモジュールは厳密な JSON
-    (`json.loads`) で読むので、コメント・先頭の U+FEFF・UTF-8 でないバイトのあるファイルでは
-    alias を 0 件と読み、alias のキーの中の U+FEFF は別のキーと読み、`NaN` のあるファイルでは
-    firebase-tools が読まない alias を読む。どれも `firebase use <x>` の行き先の予測が食い違う。
+    `NaN` 等があると JSON.parse が失敗して alias 0 件になる)。厳密な JSON (`json.loads`) で
+    読むと、コメント・先頭の U+FEFF・UTF-8 でないバイトのあるファイルでは alias を 0 件と読み、
+    alias のキーの中の U+FEFF は別のキーと読み、`NaN` のあるファイルでは firebase-tools が
+    読まない alias を読む。どれも alias の行き先の予測が食い違う。
 
     判定は保守的: UTF-8 として読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中でも)・
-    厳密な JSON として読めない (入れ子が深すぎるときも)・`projects` がオブジェクトでないか
-    文字列でない値を持つ、のどれかなら False (cjson のコメント除去は再現しない)。
-    どれでもなければ、cjson の前処理は何も変えず、JSON.parse と `json.loads` は同じ内容を返す。
-    firebase-tools の alias の解決 (`projects[alias] || alias`) は文字列でない値もそのまま
-    行き先に使い、このモジュールは文字列の値だけを alias と読むが、値が文字列以外のときも
-    False にするので、解決まで同じ (違うのは、JavaScript のオブジェクトが継承するプロパティ名
-    (`constructor` など) を firebase-tools だけが alias と読むことだけ)。
-    builder の `pin-env` が `firebase use` を案内する前に使う (verify() の照合は別の話で、
-    ここでは変えない)。
+    厳密な JSON として読めない (入れ子が深すぎて RecursionError になるときも)・`projects` が
+    オブジェクトでないか文字列でない値を持つ、のどれかなら None (cjson のコメント除去は
+    再現しない)。どれでもなければ、cjson の前処理は何も変えず、JSON.parse と `json.loads` は
+    同じ内容を返す。firebase-tools の alias の解決 (`projects[alias] || alias`) は文字列でない
+    値もそのまま行き先に使うが、値が文字列以外のときは None にするので、解決まで同じ (違うのは、
+    JavaScript のオブジェクトが継承するプロパティ名 (`constructor` など) を firebase-tools
+    だけが alias と読むことだけ)。空文字の値も返す (`||` で偽になる値。解決は `_resolve_alias`、
+    alias の数は firebase-tools と同じく空文字の alias も数える)。
     """
-    path = Path(_project_root(project_dir)) / ".firebaserc"
+    path = Path(root) / ".firebaserc"
     if not path.is_file():
-        return True
+        return {}
     try:
         text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
-        return False
+        return None
     if "\ufeff" in text or "//" in text or "/*" in text:
-        return False
+        return None
     try:
         data = json.loads(text, parse_constant=_reject_constant)
     except (ValueError, RecursionError):
-        return False
+        return None
+    # トップレベルがオブジェクトでなければ、firebase-tools は既定の `projects: {}` のまま
+    # (`{ projects: {}, ...data }`)。`projects` の無いオブジェクトも同じ。
+    if not isinstance(data, dict) or "projects" not in data:
+        return {}
     # firebase-tools の resolveAlias は `projects[alias] || alias` なので、真になる非文字列
-    # (配列・数値・true・オブジェクト) も alias として解決する。このモジュールは文字列以外を
-    # 捨てるので食い違う。`projects` がオブジェクトでない (null・配列・文字列) ときも、
-    # firebase-tools は添字で引くので食い違いうる。どれも形を単純に言える側 (False) に倒す。
-    if isinstance(data, dict) and "projects" in data:
-        projects = data["projects"]
-        if not isinstance(projects, dict) or any(
-            not isinstance(value, str) for value in projects.values()
-        ):
-            return False
-    return True
+    # (配列・数値・true・オブジェクト) も alias として解決する。文字列以外を捨てて読むと
+    # 食い違う。`projects` がオブジェクトでない (null・配列・文字列) ときも、firebase-tools は
+    # 添字で引くので食い違いうる。どれも形を単純に言える側 (None) に倒す。
+    projects = data["projects"]
+    if not isinstance(projects, dict) or any(
+        not isinstance(value, str) for value in projects.values()
+    ):
+        return None
+    return projects
 
 
-def resolve_target(project_dir: str, target: str) -> str:
+def _resolve_alias(projects: dict[str, str], target: str) -> str:
+    """firebase-tools の resolveAlias (`projects[alias] || alias`) と同じ解決。
+
+    alias にあればその値、無いか空文字なら target そのもの (project ID として扱う)。
+    """
+    return projects.get(target) or target
+
+
+def aliases_for(project_dir: str, project_id: str) -> list[str]:
+    """`.firebaserc` で project_id を指す alias 名を返す (名前順)。
+
+    プロジェクトごとの固定 (builder の `pin-env`) 用。`firebase use <alias>` を案内する
+    ときに、期待値 (project ID) をそのまま出さずに済む。`.firebaserc` は CLI と同じく
+    `firebase.json` を親方向に探した project root から読む。firebase-tools と同じ内容に
+    読めると確かめられなければ空 (pin-env はその前に `firebaserc_reads_like_cli` で止める)。
+    """
+    projects = _read_firebaserc(_project_root(project_dir)) or {}
+    return sorted(alias for alias, project in projects.items() if project == project_id)
+
+
+def firebaserc_reads_like_cli(project_dir: str) -> bool:
+    """`.firebaserc` を、このモジュールと firebase-tools が同じ内容に読めるか (無ければ True)。
+
+    条件は `_read_firebaserc` を参照。builder の `pin-env` が `firebase use` を案内する前に
+    使う。hook の検証 (verify() の `--project` の照合と、CLI から現在値を取れないときの
+    ローカル設定の解決) は `_read_firebaserc` を直接使い、同じ読み方で確かめられなければ
+    行き先を確かめられないとして deny する。
+    """
+    return _read_firebaserc(_project_root(project_dir)) is not None
+
+
+def resolve_target(project_dir: str, target: str) -> str | None:
     """`firebase use <target>` / `--project <target>` が指す project ID。
 
     firebase-tools と同じく、target を `.firebaserc` の alias として先に解決し、alias に
     無ければ project ID そのものとして扱う (`.firebaserc` は `firebase.json` を親方向に
-    探した project root から読む)。verify() の `--project` の照合と、builder の
-    `pin-env` が案内する `firebase use` の行き先の確認が同じ規則を使う。
+    探した project root から読む)。`.firebaserc` を firebase-tools と同じ内容に読めると
+    確かめられなければ None (行き先を言えない)。builder の `pin-env` が案内する
+    `firebase use` の行き先の確認に使う (verify() の `--project` の照合も同じ規則)。
     """
-    return _firebaserc_aliases(_project_root(project_dir)).get(target, target)
+    projects = _read_firebaserc(_project_root(project_dir))
+    if projects is None:
+        return None
+    return _resolve_alias(projects, target)
 
 
 def _configstore_path(env=None) -> Path | None:
@@ -348,40 +404,47 @@ def _from_configstore(root: str, env=None) -> str:
     return ""
 
 
-def _from_local(project_dir: str, env=None) -> str:
+def _from_local(root: str, env=None) -> str:
     """CLI が答えられないとき、firebase-tools と同じローカル設定から現在値を解決する。
 
     applyRC と同じ順: configstore の切替先を `.firebaserc` の alias で解決
     (alias に無ければ project ID そのもの) → alias が 1 つならその値 → `default`。
-    起点は `firebase.json` のある project root (無ければ project_dir)。
+    root は project root (`firebase.json` のある root、無ければ project_dir。`--config` 付きの
+    コマンドではそのファイルのあるディレクトリ)。
+
+    `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ "" (解決しない)。
+    alias の行き先を取り違えると、firebase-tools と違う project を現在値として照合してしまう。
+    呼び出し側は現在値を取得できないとして deny する。
     """
-    root = _project_root(project_dir)
-    aliases = _firebaserc_aliases(root)
+    projects = _read_firebaserc(root)
+    if projects is None:
+        return ""
     switched = _from_configstore(root, env)
     if switched:
-        return aliases.get(switched, switched)
-    if len(aliases) == 1:
-        return next(iter(aliases.values()))
-    return aliases.get("default", "")
+        return _resolve_alias(projects, switched)
+    if len(projects) == 1:
+        return next(iter(projects.values()))
+    return projects.get("default") or ""
 
 
-def _resolve(project_dir: str, env=None) -> tuple[str, str | None]:
+def _resolve(root: str, env=None, config: str | None = None) -> tuple[str, str | None]:
     """現在の Firebase project ID を (current, error) で返す。
 
-    解決順は `firebase use` → ローカル設定 (モジュール docstring 参照)。
-    error は CLI timeout のときだけ非 None で、その場合 current は "" (fallback しない)。
+    解決順は `firebase use` → ローカル設定 (モジュール docstring 参照)。root と config は
+    `_from_cli` を参照。error は CLI timeout のときだけ非 None で、その場合 current は ""
+    (fallback しない)。
     """
-    current, err = _from_cli(project_dir, env)
+    current, err = _from_cli(root, env, config)
     if err:
         return "", err
     if current:
         return current, None
-    return _from_local(project_dir, env), None
+    return _from_local(root, env), None
 
 
 def get_active_account(project_dir: str) -> str | None:
     """現在アクティブな Firebase project ID を返す。取得不可 (timeout 含む) なら None。"""
-    current, _err = _resolve(project_dir)
+    current, _err = _resolve(_project_root(project_dir))
     return current or None
 
 
@@ -400,6 +463,26 @@ _CHECK_BY_HAND = (
 _SKIPPED_LINE = (
     f"  (ほかの alias は、alias か project ID が{shell_word.UNSAFE}。"
     f'accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください)'
+)
+# `--project` の行き先を `.firebaserc` から確かめられないときの deny (v0.18.0)。期待値の形の
+# 問題ではないので `_CHECK_BY_HAND` は使わない。コマンドが指定した値は文面に出さない
+# (検出コマンドの行に出る)。`--project` を外したコマンドは、`.firebaserc` を読む CLI 自身に
+# 現在値を聞いて照合する。
+_PROJECT_FLAG_UNCONFIRMED = (
+    "Firebase: --project の行き先を確かめられません。firebase-tools は --project の値を"
+    " .firebaserc の alias として先に解決しますが、.firebaserc を firebase-tools と同じ内容に"
+    f"読めると確かめられません ({FIREBASERC_UNCONFIRMED_CONDITIONS}、のどれかに当たる)。"
+    "--project を外す (アクティブな project で照合します) か、.firebaserc をこれらに当たらない"
+    "形にしてください"
+)
+# `--config` / `-c` のファイルが見つからないときの deny (v0.18.0)。firebase-tools はファイルが
+# 無ければコマンドを始めないが、hook の見立て (作業ディレクトリ = プロジェクトのディレクトリ) が
+# 外れているだけなら、別のディレクトリの `.firebaserc` と project で動く。
+_CONFIG_NOT_FOUND = (
+    "Firebase: --config のファイルが見つからないため、どの project で動くかを確かめられません"
+    " (firebase-tools はそのファイルのあるディレクトリの .firebaserc と、そこで選んだ project で"
+    "動きます。hook は相対パスをプロジェクトのディレクトリから探します)。絶対パスか、"
+    "プロジェクトのディレクトリからの相対パスで指定してください"
 )
 
 
@@ -446,11 +529,17 @@ def _project_flag_lines(expected: dict) -> list[str]:
 
 
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
-    """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>"}`)。
+    """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>", "config": "<path>"}`)。
 
     `--project` / `-P` はその実行だけ対象 project を差し替えるため、アクティブ
     project ではなく **flag の値を `.firebaserc` で解決したもの**を照合する
     (CLI 本体の解決規則と同じ: alias にあれば対応 project ID、無ければ値そのもの)。
+    `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ、行き先を
+    確かめられないとして deny する (v0.18.0。fail-closed)。
+
+    `--config` / `-c` (v0.18.0) は project root (読む `.firebaserc`、configstore の切替先を
+    探す起点、`firebase use` の cwd) を、指定したファイルのあるディレクトリにする
+    (firebase-tools の detectProjectRoot と同じ)。ファイルが見つからなければ deny する。
     """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
     if isinstance(expected, dict):
@@ -466,9 +555,23 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f'オブジェクトで指定してください (現在: {type(expected).__name__})。'
         )
 
-    override = (context or {}).get("project")
+    context = context or {}
+    config = context.get("config")
+    if config is None:
+        root, config_file = _project_root(project_dir), None
+    else:
+        config_file = _config_file(project_dir, config)
+        if config_file is None:
+            return _CONFIG_NOT_FOUND
+        root = os.path.dirname(config_file)
+
+    override = context.get("project")
     if override is not None:
-        resolved = resolve_target(project_dir, override)
+        # `.firebaserc` は 1 回だけ読み、確かめた内容でそのまま解決する (`_read_firebaserc`)。
+        projects = _read_firebaserc(root)
+        if projects is None:
+            return _PROJECT_FLAG_UNCONFIRMED
+        resolved = _resolve_alias(projects, override)
         # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
         shown = f"--project {shlex.quote(override)}"
         if resolved != override:
@@ -498,7 +601,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             return f"{head} — --project を外してください ({_CHECK_BY_HAND})"
         return f"{head} — --project を外すか --project {target} を指定してください"
 
-    current, err = _resolve(project_dir, env)
+    current, err = _resolve(root, env, config_file)
     if err:
         return err
     if not current:

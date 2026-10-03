@@ -170,7 +170,10 @@ def _read_epoch(service_name: str) -> tuple[int, int]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return int(data.get("epoch", 0)), int(data.get("at_ns", 0))
-    except (ValueError, TypeError, AttributeError, OSError):
+    # 入れ子の深いファイルの RecursionError も「読めない」と同じ (捕まえないと dispatch() の
+    # 外まで抜け、__main__ の最終防波堤が検証をスキップする)。UTF-8 でないファイルの
+    # UnicodeDecodeError は ValueError に含まれる。
+    except (ValueError, TypeError, AttributeError, OSError, RecursionError):
         return 0, 0
 
 
@@ -213,7 +216,10 @@ def get_success(
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    # 読めない entry は cache miss (検証し直す)。JSON の破損に加えて、UTF-8 でない
+    # (UnicodeDecodeError。ValueError に含まれる) / 入れ子が深い (RecursionError) ファイルも
+    # 同じ。捕まえないと dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップする。
+    except (ValueError, OSError, RecursionError):
         return False
     if not isinstance(data, dict):
         return False

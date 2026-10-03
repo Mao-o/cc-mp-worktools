@@ -159,6 +159,137 @@ class TestMainEntry(unittest.TestCase):
         )
         self.assertEqual((res.returncode, res.stdout), (0, ""), res.stderr)
 
+    # --- 読めないファイルで検証が飛ばない (v0.18.0) -----------------------------------
+    #
+    # 期待値ファイル / `.firebaserc` / 成功 cache の読み込みで UnicodeDecodeError /
+    # RecursionError が dispatch() の外まで抜けると、最終防波堤が「内部エラーのため検証を
+    # スキップ」(additionalContext だけ。実行は止めない) にしていた。実プロセスで、その経路が
+    # 残っていないことを確かめる。PATH は空のディレクトリにしてクラウド CLI を起動しない
+    # (firebase の照合は `--project` の解決か、CLI が無いことで決まる)。
+
+    _DEEP = "[" * 100000 + "]" * 100000
+    _ACCOUNTS = ".claude/verify-cloud-account/accounts.local.json"
+
+    def _write(self, rel: str, data) -> None:
+        path = self.project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, bytes):
+            path.write_bytes(data)
+        else:
+            path.write_text(data, encoding="utf-8")
+
+    def _run_without_cli(self, command: str, mode: str = "enforce"):
+        empty_bin = Path(self.tmp) / "empty-bin"
+        empty_bin.mkdir(exist_ok=True)
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(self.project),
+        }
+        return subprocess.run(
+            [sys.executable, str(_PKG_DIR)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env={**self.env, "PATH": str(empty_bin), "VERIFY_CLOUD_ACCOUNT_MODE": mode},
+            timeout=60,
+        )
+
+    def _hook_outcome(self, res) -> tuple[str, str]:
+        """(判定, 本文)。deny / warn (additionalContext だけ) / allow (出力なし)。"""
+        self.assertEqual(res.returncode, 0, res.stderr)
+        if not res.stdout.strip():
+            return "allow", ""
+        out = json.loads(res.stdout)["hookSpecificOutput"]
+        if "permissionDecision" in out:
+            return out["permissionDecision"], out.get("permissionDecisionReason", "")
+        return "warn", out.get("additionalContext", "")
+
+    def test_unreadable_accounts_file_is_handled_like_malformed_json(self):
+        """UTF-8 でない・入れ子が深い期待値ファイルは、不正な JSON と同じ判定 (mode は env だけで
+        決める。`"$mode"` は読めない)。旧版は検証をスキップしていた (実測は旧パスの
+        `.claude/accounts.json` に 0xFF を 1 バイト入れただけ)。"""
+        not_utf8 = b'{"firebase": "right-project\xff"}'
+        cases = {
+            "malformed JSON (control)": (self._ACCOUNTS, "{not json", "JSON が不正です"),
+            "not UTF-8": (self._ACCOUNTS, not_utf8, "読めません (UnicodeDecodeError)"),
+            "not UTF-8, legacy path": (
+                ".claude/accounts.json", not_utf8, "読めません (UnicodeDecodeError)"
+            ),
+            "too deep to parse": (
+                self._ACCOUNTS,
+                '{"firebase": "right-project", "pad": ' + self._DEEP + "}",
+                "読めません (RecursionError)",
+            ),
+            '"$mode": "off" in a file too deep to parse': (
+                self._ACCOUNTS,
+                '{"$mode": "off", "firebase": "right-project", "pad": ' + self._DEEP + "}",
+                "読めません (RecursionError)",
+            ),
+            "parsed, but deeper than the limit": (
+                self._ACCOUNTS,
+                '{"firebase": {"a": "right-project", "pad": ' + "[" * 40 + "]" * 40 + "}}",
+                "読めません (入れ子が 32 段より深い)",
+            ),
+        }
+        for name, (rel, data, marker) in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.project / ".claude", ignore_errors=True)
+                self._write(rel, data)
+                for mode, want in (("enforce", "deny"), ("warn", "warn")):
+                    decision, text = self._hook_outcome(
+                        self._run_without_cli("firebase deploy --project prod", mode)
+                    )
+                    self.assertEqual(decision, want, text)
+                    self.assertIn(marker, text)
+                    self.assertNotIn("内部エラー", text)
+
+    def test_unconfirmed_firebaserc_is_denied_not_skipped(self):
+        """入れ子が深すぎて読めない `.firebaserc` は、`--project` の解決でも、CLI が無いときの
+        ローカル設定の解決でも deny (旧版は RecursionError で検証をスキップしていた)。"""
+        self._write(self._ACCOUNTS, json.dumps({"firebase": "right-project"}))
+        self._write("firebase.json", "{}")
+        self._write(
+            ".firebaserc",
+            '{"projects": {"default": "right-project", "right-project": "wrong-project"},'
+            ' "pad": ' + self._DEEP + "}",
+        )
+        for command, marker in (
+            ("firebase deploy --project right-project", "--project の行き先を確かめられません"),
+            ("firebase deploy", "firebase コマンドが見つかりません"),
+        ):
+            with self.subTest(command=command):
+                decision, text = self._hook_outcome(self._run_without_cli(command))
+                self.assertEqual(decision, "deny", text)
+                self.assertIn(marker, text)
+
+    def test_unreadable_cache_state_is_reverified_not_skipped(self):
+        """読めない成功 cache の entry / epoch ファイルは cache miss / epoch 0 として検証を
+        続ける (旧版は UnicodeDecodeError / RecursionError で検証をスキップしていた)。"""
+        self._write(self._ACCOUNTS, json.dumps({"firebase": "right-project"}))
+        # `.firebaserc` が無いので --project right-project の行き先は right-project (allow)。
+        command = "firebase deploy --project right-project"
+        cache_dir = self.cache_tmp / "cc-mp-verify-cloud-account"
+        cases = {
+            "cache entry not UTF-8": ("firebase-*.json", b'{"success": true, "x": "\xff"}'),
+            "cache entry too deep": ("firebase-*.json", self._DEEP.encode()),
+            "epoch file too deep": ("firebase.epoch", self._DEEP.encode()),
+        }
+        for name, (pattern, payload) in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                # 1 回目の allow が成功 cache を書く。
+                self.assertEqual(self._hook_outcome(self._run_without_cli(command)), ("allow", ""))
+                if "*" in pattern:
+                    targets = list(cache_dir.glob(pattern))
+                    self.assertTrue(targets, "成功 cache が書かれていない")
+                else:
+                    targets = [cache_dir / pattern]
+                for path in targets:
+                    path.write_bytes(payload)
+                self.assertEqual(self._hook_outcome(self._run_without_cli(command)), ("allow", ""))
+
 
 class TestMainInternalErrorFailOpen(unittest.TestCase):
     """内部バックログ: dispatch() の未捕捉例外は exit 1 の無音 fail-open ではなく、

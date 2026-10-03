@@ -59,15 +59,14 @@ _PADDED = (
 
 # `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないときの「固定できません」
 # の理由 (`firebase.firebaserc_reads_like_cli`)。括弧の中は、その関数が弾くファイルの内容の
-# 条件のすべて (ファイル自体を読めないときも False になるが、内容の条件ではないので並べない)。
+# 条件のすべてで、hook の `--project` の deny と同じ文 (`firebase.FIREBASERC_UNCONFIRMED_CONDITIONS`)。
 # 判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾くので、
 # 「厳密な JSON に直せば案内できる」とは言わない。
 _FIREBASERC_NOT_STRICT = (
-    ".firebaserc を firebase-tools と同じ内容に読めると確かめられません (UTF-8 でない・"
-    "U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・JSON として読めない"
-    " (NaN など JSON に無い値・構文の誤り・深い入れ子)・projects がオブジェクトでないか"
-    "文字列でない値を持つ、のどれかに当たる)。firebase use の行き先が期待した project に"
-    "なるかを確かめられないので案内しません (これらに当たらない形にすると案内できます)"
+    ".firebaserc を firebase-tools と同じ内容に読めると確かめられません ("
+    f"{firebase.FIREBASERC_UNCONFIRMED_CONDITIONS}、のどれかに当たる)。firebase use の行き先が"
+    "期待した project になるかを確かめられないので案内しません (これらに当たらない形にすると"
+    "案内できます)"
 )
 
 
@@ -196,7 +195,8 @@ def _firebase_use_to(target: str, project: str, project_dir: str) -> str | None:
     project ID として扱う (`firebase.resolve_target`)。期待値の alias でも、`.firebaserc` が
     別の project を指していたり alias が無かったり (alias 名が project ID として扱われる)、
     project ID と同じ名前の alias が別の project を指していたりすると、案内どおりにしても
-    期待した project にならず、続く検証が deny し続ける。
+    期待した project にならず、続く検証が deny し続ける。`.firebaserc` を firebase-tools と
+    同じ内容に読めると確かめられないとき、行き先は None (出さない側)。
     """
     if firebase.resolve_target(project_dir, target) != project:
         return None

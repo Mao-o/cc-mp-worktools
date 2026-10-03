@@ -748,6 +748,274 @@ class TestFirebase(unittest.TestCase):
                     self.assertIn("取得できません", err)
 
 
+# firebase-tools 15.24.0 の RC ローダ (`RC.loadFile(...).resolveAlias`) で行き先を確かめた
+# `.firebaserc`。firebase-tools は cjson で読む: すべての U+FEFF と `//` / `/* */` の
+# コメントを除いてから JSON.parse する (NaN 等は JSON.parse が拒否して alias 0 件)。
+_FBRC_COMMENTED = (
+    '{\n  // aliases\n'
+    '  "projects": {"default": "right-project", "right-project": "wrong-project"}\n}\n'
+)  # firebase-tools: right-project -> wrong-project / default -> right-project
+_FBRC_BOM_IN_KEY = (
+    '{"projects": {"prod": "right-project", "pr\ufeffod": "wrong-project"}}\n'
+)  # firebase-tools: U+FEFF を除くと 2 つ目も "prod" になり後勝ち -> prod -> wrong-project
+_FBRC_NAN = (
+    '{"projects": {"default": "right-project", "prod": "right-project"}, "x": NaN}\n'
+)  # firebase-tools: JSON.parse が失敗して alias 0 件 -> prod -> prod / default は無い
+_FBRC_DEEP = (
+    '{"projects": {"default": "wrong-project", "right-project": "wrong-project"}, "pad": '
+    + "[" * 100000
+    + "]" * 100000
+    + "}"
+)  # firebase-tools (V8 の JSON.parse) はこの深さでも読む -> right-project -> wrong-project
+# 厳密な JSON。firebase-tools と同じ内容に読める (対照)。
+_FBRC_STRICT = '{"projects": {"default": "right-project", "prod": "wrong-project"}}\n'
+
+
+class _FirebasercFixture(unittest.TestCase):
+    """`firebase.json` と `.firebaserc` を置いた project root を作る。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # configstore を実環境から読まない (切替先を置くテストは _switch で書く)。
+        self._xdg = self.tmp / "xdg"
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self._xdg)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _project(self, text: str, name: str = "fb") -> str:
+        root = self.tmp / name
+        root.mkdir()
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        (root / ".firebaserc").write_text(text, encoding="utf-8")
+        return str(root)
+
+    def _switch(self, root: str, alias_or_project: str) -> None:
+        """`firebase use <x>` の切替先 (configstore の activeProjects) を書く。"""
+        path = self._xdg / "configstore" / "firebase-tools.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"activeProjects": {os.path.abspath(root): alias_or_project}}),
+            encoding="utf-8",
+        )
+
+
+class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
+    """verify() の `--project <x>` の照合 (v0.18.0。0.9.0 からの誤 allow)。
+
+    firebase-tools は `--project` の値を `.firebaserc` の alias として先に解決する。旧版は
+    `.firebaserc` を厳密な JSON で読み、firebase-tools と違う project に解決して allow
+    していた。firebase-tools と同じ内容に読めると確かめられない `.firebaserc` では、行き先を
+    確かめられないとして deny する (マージ前レビューの指摘)。
+    """
+
+    _UNCONFIRMED = "--project の行き先を確かめられません"
+
+    def test_bom_inside_an_alias_key(self):
+        project_dir = self._project(_FBRC_BOM_IN_KEY)
+        # firebase deploy --project prod は wrong-project で動く
+        err = firebase.verify({"prod": "right-project"}, project_dir, context={"project": "prod"})
+        self.assertIsNotNone(err)
+        self.assertIn(self._UNCONFIRMED, err)
+
+    def test_commented_firebaserc(self):
+        project_dir = self._project(_FBRC_COMMENTED)
+        # firebase deploy --project right-project は wrong-project で動く
+        err = firebase.verify("right-project", project_dir, context={"project": "right-project"})
+        self.assertIsNotNone(err)
+        self.assertIn(self._UNCONFIRMED, err)
+
+    def test_every_unconfirmed_shape_denies_without_guiding_a_command(self):
+        """確かめられない形はどれも deny。期待値の形の問題ではないので「手で確認」の文
+        (`_CHECK_BY_HAND`) は使わず、切替コマンドも案内しない (案内の注記が付かない)。"""
+        cases = {
+            "NaN": _FBRC_NAN,
+            "deep": _FBRC_DEEP,
+            "not UTF-8": None,
+            "non-string alias value": '{"projects": {"prod": ["right-project"]}}',
+            "projects is not an object": '{"projects": ["right-project"]}',
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                project_dir = self._project(text or "", name=name.replace(" ", "-"))
+                if text is None:
+                    Path(project_dir, ".firebaserc").write_bytes(
+                        b'{"projects": {"prod": "right-project\xff"}}'
+                    )
+                try:
+                    err = firebase.verify("right-project", project_dir, context={"project": "prod"})
+                except RecursionError:
+                    self.fail("深い入れ子の .firebaserc で verify() が RecursionError を投げた")
+                self.assertIsNotNone(err)
+                self.assertIn(self._UNCONFIRMED, err)
+                self.assertNotIn("手で確認", err)
+                self.assertNotIn("firebase use", err)
+
+    def test_strict_firebaserc_resolves_aliases_like_firebase_tools(self):
+        """対照: 厳密な JSON は従来どおり alias を解決して照合する (行き先が期待値なら allow)。
+
+        空文字の alias は firebase-tools の `projects[alias] || alias` で偽になり、alias 名
+        そのものが project ID になる。
+        """
+        empty = self._project('{"projects": {"right-project": ""}}', name="empty-alias")
+        self.assertIsNone(
+            firebase.verify("right-project", empty, context={"project": "right-project"})
+        )
+        project_dir = self._project(_FBRC_STRICT)
+        self.assertIsNone(
+            firebase.verify("right-project", project_dir, context={"project": "default"})
+        )
+        err = firebase.verify("right-project", project_dir, context={"project": "prod"})
+        self.assertIsNotNone(err)
+        self.assertIn("不一致", err)
+        self.assertIn("wrong-project", err)
+
+    def test_resolve_target_says_nothing_for_an_unconfirmed_firebaserc(self):
+        """builder の pin-env が使う `resolve_target` も、確かめられなければ行き先を返さない
+        (`firebase use` の案内の行き先の確認が、違う内容の読み方で通らない)。"""
+        for name, text in (("commented", _FBRC_COMMENTED), ("BOM in a key", _FBRC_BOM_IN_KEY)):
+            with self.subTest(name):
+                project_dir = self._project(text, name=name.replace(" ", "-"))
+                self.assertIsNone(firebase.resolve_target(project_dir, "prod"))
+        self.assertEqual(
+            firebase.resolve_target(self._project(_FBRC_STRICT, name="strict"), "prod"),
+            "wrong-project",
+        )
+
+
+class TestLocalResolutionNeedsAConfirmedFirebaserc(_FirebasercFixture):
+    """CLI から現在値を取れないときのローカル設定の解決 (`_from_local`。v0.18.0)。
+
+    firebase-tools と同じ内容に読めると確かめられない `.firebaserc` からは現在値を解決しない
+    (取得できないとして deny する)。旧版は厳密な JSON で読み、firebase-tools と違う project を
+    現在値として照合して allow していた。
+    """
+
+    def _verify_without_cli(self, expected, project_dir):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            try:
+                return firebase.verify(expected, project_dir)
+            except RecursionError:
+                self.fail("深い入れ子の .firebaserc で verify() が RecursionError を投げた")
+
+    def test_unconfirmed_firebaserc_is_not_used_for_the_current_project(self):
+        cases = {
+            # firebase use prod の切替先: firebase-tools では wrong-project
+            "BOM in an alias key, switched to prod": (_FBRC_BOM_IN_KEY, "prod"),
+            # firebase-tools は alias 0 件 (現在の project は無い)
+            "NaN, default alias": (_FBRC_NAN, None),
+            # firebase-tools は default -> wrong-project
+            "deep, default alias": (_FBRC_DEEP, None),
+        }
+        for name, (text, switched) in cases.items():
+            with self.subTest(name):
+                project_dir = self._project(text, name=name.split(",")[0].replace(" ", "-"))
+                if switched:
+                    self._switch(project_dir, switched)
+                err = self._verify_without_cli("right-project", project_dir)
+                self.assertIsNotNone(err)
+                self.assertIn("現在のプロジェクトを取得できません", err)
+
+    def test_strict_firebaserc_is_still_used(self):
+        """対照: 厳密な JSON の `.firebaserc` からは従来どおり解決する。"""
+        project_dir = self._project(_FBRC_STRICT)
+        self.assertIsNone(self._verify_without_cli("right-project", project_dir))
+        self._switch(project_dir, "prod")
+        err = self._verify_without_cli("right-project", project_dir)
+        self.assertIsNotNone(err)
+        self.assertIn("現在=wrong-project", err)
+
+    def test_empty_alias_values_count_like_firebase_tools(self):
+        """空文字の alias も firebase-tools と同じく数える (`size(aliases) === 1` の判定)。
+
+        `{"a": "", "b": "proj-b"}` は alias が 2 つで default も無いので、firebase-tools では
+        現在の project が無い。空文字を捨てて数えると 1 つに見え、proj-b と読んでいた。
+        """
+        project_dir = self._project('{"projects": {"a": "", "b": "proj-b"}}')
+        err = self._verify_without_cli("proj-b", project_dir)
+        self.assertIsNotNone(err)
+        self.assertIn("現在のプロジェクトを取得できません", err)
+
+
+class TestFirebaseConfigOption(_FirebasercFixture):
+    """`--config` / `-c` は project root を、指定したファイルのあるディレクトリにする (v0.18.0)。
+
+    firebase-tools (detectProjectRoot) はそこの `.firebaserc` を読み、configstore の切替先も
+    そこから探す。旧版は `--config` を見ず、プロジェクトのディレクトリの `.firebaserc` で
+    照合して、firebase-tools と違う project に解決して allow していた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # プロジェクトのディレクトリは right-project、sub/ は wrong-project を指す。
+        self.root = self._project(
+            '{"projects": {"default": "right-project", "prod": "right-project"}}', name="repo"
+        )
+        sub = Path(self.root) / "sub"
+        sub.mkdir()
+        (sub / "firebase.json").write_text("{}", encoding="utf-8")
+        (sub / "firebase.staging.json").write_text("{}", encoding="utf-8")
+        (sub / ".firebaserc").write_text(
+            '{"projects": {"default": "wrong-project", "prod": "wrong-project"}}',
+            encoding="utf-8",
+        )
+        self.sub = str(sub)
+
+    def test_project_flag_is_resolved_in_the_config_directory(self):
+        self.assertIsNone(firebase.verify("right-project", self.root, context={"project": "prod"}))
+        for config in (
+            "sub/firebase.json",
+            "sub/firebase.staging.json",
+            os.path.join(self.sub, "firebase.json"),
+            "./sub/../sub/firebase.json",
+        ):
+            with self.subTest(config=config):
+                err = firebase.verify(
+                    "right-project", self.root, context={"project": "prod", "config": config}
+                )
+                self.assertIsNotNone(err)
+                self.assertIn("wrong-project", err)
+
+    def test_cli_runs_with_the_same_config_in_its_directory(self):
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="wrong-project\n")) as m:
+            err = firebase.verify(
+                "right-project", self.root, context={"config": "sub/firebase.staging.json"}
+            )
+        self.assertIsNotNone(err)
+        self.assertIn("現在=wrong-project", err)
+        self.assertEqual(
+            m.call_args.args[0],
+            ["firebase", "use", "--config", os.path.join(self.sub, "firebase.staging.json")],
+        )
+        self.assertEqual(m.call_args.kwargs.get("cwd"), self.sub)
+
+    def test_local_resolution_starts_in_the_config_directory(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertIsNone(firebase.verify("right-project", self.root))
+            err = firebase.verify(
+                "right-project", self.root, context={"config": "sub/firebase.json"}
+            )
+        self.assertIsNotNone(err)
+        self.assertIn("現在=wrong-project", err)
+
+    def test_missing_config_file_is_denied(self):
+        """firebase-tools はファイルが無ければ始めないが、hook の作業ディレクトリの見立てが
+        外れただけなら別のディレクトリで動く。どの project で動くかを確かめられないので
+        deny する (CLI は呼ばない)。"""
+        for config in ("sub/missing.json", "sub", "~/firebase.json"):
+            with self.subTest(config=config):
+                with mock.patch("subprocess.run") as m:
+                    err = firebase.verify(
+                        "right-project", self.root, context={"project": "prod", "config": config}
+                    )
+                self.assertIsNotNone(err)
+                self.assertIn("--config のファイルが見つからない", err)
+                self.assertNotIn("firebase use", err)
+                m.assert_not_called()
+
+
 class TestAws(unittest.TestCase):
     def test_match(self):
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="123456789012\n")):

@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.18.0
+
+### Fixed: `.firebaserc` を firebase-tools と違う内容に読んで照合しない
+
+`firebase --project <alias> ...` の照合と、CLI から現在値を取れないとき (hook の PATH に
+`firebase` が無い `npx firebase` の構成など) のローカル設定の解決は、`.firebaserc` を厳密な
+JSON として読み、読めなければ alias 0 件として扱っていた。firebase-tools は `.firebaserc` の
+すべての U+FEFF とコメント (`//` / `/* */`) を除いてから読むので、コメントのあるファイルでは
+`--project <alias>` を alias の行き先ではなく値そのもので照合し、alias のキーの中の U+FEFF や
+`NaN` のあるファイルでも行き先を取り違えて、別の project で動くコマンドを allow しえた
+(内部バックログ)。
+
+- 0.17.1 の pin-env と同じ判定 (UTF-8 でない・U+FEFF がある・`//` か `/*` がある (文字列の
+  中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
+  持つ、のどれにも当たらない) で、firebase-tools と同じ内容に読めると確かめられたときだけ
+  `.firebaserc` を使う。確かめられなければ、`--project` 付きのコマンドは「--project の行き先を
+  確かめられません」で deny し (弾く条件を文面に並べる)、ローカル設定からは解決しない (現在値を
+  取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を含むだけの厳密な
+  JSON も対象になる (fail-closed の代償)
+- 入れ子の深い `.firebaserc` で例外が hook の外まで抜け、「内部エラーのため検証をスキップ」
+  (実行は止めない) になっていた。読めないファイルとして上と同じに扱う
+- 空文字の alias も、firebase-tools と同じく alias の数に数える (`{"a": "", "b": "x"}` は
+  alias 2 つで、`default` が無ければ未解決)。0.17.1 までは 1 つと数えて `x` を現在値にしていた
+
+### Fixed: firebase の `--config` / `-c` を照合先に反映する
+
+`firebase --config <path> ...` は、指定した firebase.json のあるディレクトリを project root に
+して、そこの `.firebaserc` と、そこで `firebase use` した project で動く。0.17.1 までの hook は
+`--config` を見ずに、作業ディレクトリから firebase.json を親方向に探した root で照合していた
+(内部バックログ)。
+
+- `--config` / `-c` を照合先を変えるコンテキスト指定 flag として扱い、指定したファイルのある
+  ディレクトリを project root にする (`firebase use` にも同じ `--config` を付ける)。相対パスは
+  プロジェクトのディレクトリから探し、見つからなければ deny する (hook はコマンドの作業
+  ディレクトリを知らない)
+- 値が変数展開などで静的に解決できないときは、他のコンテキスト指定 flag と同じく既定の root で
+  照合する
+
+### Fixed: 読めない accounts.local.json / 成功 cache で検証をスキップしない
+
+- accounts.local.json (旧パスを含む) が UTF-8 でない・入れ子が深すぎると、例外が hook の外まで
+  抜け、「内部エラーのため検証をスキップ」(実行は止めない) になっていた。JSON が不正なときと
+  同じ扱いにする (tier に関係なく deny。`"$mode"` は読めないので、mode は環境変数だけで決まる)
+  (内部バックログ)
+- 入れ子が 32 段より深いファイルも同じ扱いにする。読み込みが通る深さでも、後段 (成功 cache の
+  キーを作るところなど) が同じ深さを辿って例外になりうるため。正規の形は 2 段まで
+- 成功 cache の entry が UTF-8 でない・入れ子が深いとき、epoch のファイルが入れ子が深いときも、
+  読めないものとして扱う (entry は cache miss、epoch は無効化の記録が無いのと同じ。同じく
+  検証をスキップしていた)
+
+### Tests
+
+- `.firebaserc` の読み方: firebase-tools と同じ行き先になる厳密な JSON・コメント・alias の
+  キーの中の U+FEFF・確かめられない形のすべてで `--project` が deny になり、コマンドを案内
+  しない (`TestProjectFlagResolvesLikeFirebaseTools`)、ローカル設定の解決と空文字の alias の
+  数え方 (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、入れ子の深い `.firebaserc` で検証を
+  スキップしない (`TestDeepFirebasercDoesNotSkipVerification`)
+- `--config` / `-c`: 指定したディレクトリでの `--project` の解決・`firebase use` の引数と
+  cwd・ローカル設定の起点・見つからないファイルの deny (`TestFirebaseConfigOption`)、
+  dispatcher での全記法と注記 (`TestFirebaseConfigOptionRouting`)
+- 読めないファイル: accounts.local.json の入れ子の上限 (`TestAccountsFile`)、成功 cache の
+  entry / epoch (`test_cache.py`)、`__main__` を実プロセスで起こす e2e (UTF-8 でない・入れ子が
+  深い accounts.local.json と旧パス、入れ子の深い `.firebaserc`、読めない成功 cache。どれも
+  warn (スキップ) にならない)
+- 1,317 → 1,340 件
+
 ## 0.17.1
 
 ### Fixed: 案内するコマンドに値をそのまま埋め込まない

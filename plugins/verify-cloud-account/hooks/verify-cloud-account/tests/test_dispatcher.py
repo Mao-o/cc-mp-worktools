@@ -168,6 +168,31 @@ class TestAccountsFile(BaseWithTmpProject):
             result["hookSpecificOutput"]["permissionDecision"], "deny"
         )
 
+    def test_nesting_deeper_than_the_limit_is_unreadable(self):
+        """入れ子が 32 段より深い期待値ファイルは、`json.loads` が通っても不正な JSON と同じ
+        (v0.18.0)。後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿って
+        RecursionError になり、検証がスキップされる深さが Python の版ごとにあった。"""
+
+        def accounts(lists: int) -> str:
+            # トップレベル (1 段) → "firebase" のオブジェクト (2 段) → 配列を lists 段。
+            return (
+                '{"firebase": {"a": "right-project", "pad": '
+                + "[" * lists + "]" * lists + "}}"
+            )
+
+        for lists, unreadable in ((30, False), (31, True)):
+            with self.subTest(depth=lists + 2):
+                (self.new_dir / "accounts.local.json").write_text(
+                    accounts(lists), encoding="utf-8"
+                )
+                with self.isolated_cache():
+                    result = dispatch("firebase deploy --project prod", str(self.project_dir))
+                reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+                if unreadable:
+                    self.assertIn("を読めません (入れ子が 32 段より深い)", reason)
+                else:
+                    self.assertIn("Firebase プロジェクト不一致", reason)
+
     def test_missing_key_returns_deny(self):
         self._write_accounts({"aws": "123456789012"})
         result = dispatch("gh pr create", str(self.project_dir))
@@ -498,6 +523,124 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+
+_DEEP_PAD = "[" * 100000 + "]" * 100000
+
+
+class TestDeepFirebasercDoesNotSkipVerification(BaseWithTmpProject):
+    """深い入れ子の `.firebaserc` で hook の検証が飛ばない (v0.18.0)。
+
+    旧版は `.firebaserc` の読み込みの RecursionError を捕まえず、dispatch() の外まで抜けて
+    __main__ の最終防波堤が「内部エラーのため検証をスキップ」(実行は止めない) にしていた。
+    firebase-tools (V8 の JSON.parse) は同じファイルを読んで alias を解決する。RecursionError を
+    alias 0 件に倒すだけでは、期待値と同名の alias の影で allow になる (下の 2 件目)。
+    """
+
+    def _decision(self, command: str, projects: dict) -> str | None:
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        body = json.dumps({"projects": projects})[:-1] + ', "pad": ' + _DEEP_PAD + "}"
+        (self.project_dir / ".firebaserc").write_text(body, encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        fake = SimpleNamespace(stdout="", stderr="", returncode=1)
+        with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+            try:
+                result = dispatch(command, str(self.project_dir))
+            except RecursionError:
+                self.fail(
+                    "深い入れ子の .firebaserc で dispatch() が RecursionError を投げた"
+                    " (__main__ は warn を返し、検証なしでコマンドが進む)"
+                )
+        return (result or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_mismatched_alias_is_still_denied(self):
+        """`--project prod` (→ wrong-project) は deny のまま。"""
+        self.assertEqual(
+            self._decision("firebase deploy --project prod", {"prod": "wrong-project"}), "deny"
+        )
+
+    def test_alias_shadowing_the_expected_id_is_not_allowed(self):
+        """firebase-tools は alias を先に解決する: `--project right-project` は wrong-project に行く。
+
+        RecursionError を `{}` (alias 0 件) に倒すだけの修正では allow になる (fail-closed にする)。
+        """
+        self.assertEqual(
+            self._decision(
+                "firebase deploy --project right-project", {"right-project": "wrong-project"}
+            ),
+            "deny",
+        )
+
+    def test_current_project_is_not_resolved_from_it(self):
+        """CLI から現在値を取れないとき (`firebase use` が非ゼロ終了)、ローカル設定の解決にも
+        使わない (default -> right-project と読んで allow しない)。"""
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            self.assertEqual(
+                self._decision("firebase deploy", {"default": "right-project"}), "deny"
+            )
+
+
+class TestFirebaseConfigOptionRouting(BaseWithTmpProject):
+    """`firebase ... --config <path>` / `-c <path>` を照合先を変える option として拾う (v0.18.0)。
+
+    firebase-tools はそのファイルのあるディレクトリの `.firebaserc` で `--project` を解決する。
+    旧版は `--config` を見ず、プロジェクトのディレクトリの `.firebaserc` で照合して allow していた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "right-project"}}), encoding="utf-8"
+        )
+        sub = self.project_dir / "sub"
+        sub.mkdir()
+        (sub / "firebase.json").write_text("{}", encoding="utf-8")
+        (sub / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "wrong-project"}}), encoding="utf-8"
+        )
+        self._write_accounts({"firebase": "right-project"})
+
+    def _dispatch(self, command: str):
+        with self.isolated_cache(), mock.patch("subprocess.run") as run:
+            result = dispatch(command, str(self.project_dir))
+        run.assert_not_called()
+        return result
+
+    def test_every_option_form_moves_the_project_root(self):
+        self.assertIsNone(self._dispatch("firebase deploy --project prod"))
+        for command in (
+            "firebase deploy --project prod -c sub/firebase.json",
+            "firebase deploy --project prod --config sub/firebase.json",
+            "firebase deploy --project prod --config=sub/firebase.json",
+            "firebase deploy --project prod -csub/firebase.json",
+            "firebase -c sub/firebase.json deploy -P prod",
+            "npx firebase-tools --config sub/firebase.json deploy --project=prod",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("wrong-project", out["permissionDecisionReason"])
+
+    def test_new_denials_do_not_carry_the_standalone_note(self):
+        """`--config` のファイルが無い deny と、`.firebaserc` を確かめられない deny は、
+        切替コマンドを案内しない (「案内したコマンドは単独で実行」の注記を付けない)。"""
+        (self.project_dir / ".firebaserc").write_text(
+            '{"projects": {"prod": "right-project"}} // note', encoding="utf-8"
+        )
+        for command, marker in (
+            ("firebase deploy -c sub/missing.json", "--config のファイルが見つからない"),
+            ("firebase deploy --project prod", "--project の行き先を確かめられません"),
+        ):
+            with self.subTest(command=command):
+                reason = self._dispatch(command)["hookSpecificOutput"][
+                    "permissionDecisionReason"
+                ]
+                self.assertIn(marker, reason)
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+                self.assertNotIn(shell_word.UNSAFE, reason)
 
 
 class TestSelfRemediationFlow(BaseWithTmpProject):

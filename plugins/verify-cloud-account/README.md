@@ -145,9 +145,10 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
   **`accounts.local.json` を持たないプロジェクト**だけ。自前の設定があるプロジェクトは
   グローバル既定を一切読まないので、そちらは `VERIFY_CLOUD_ACCOUNT_MODE` か
   **そのプロジェクトの `"$mode"`** を使う
-- **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損 /
-  複数パス競合の deny はファイルを読む前に確定するため、そこを `warn` / `off` に
-  弱められるのは `VERIFY_CLOUD_ACCOUNT_MODE` のみ
+- **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損
+  (UTF-8 でない・入れ子が深すぎるものを含む。v0.18.0) / 複数パス競合の deny は
+  ファイルを読む前に確定するため、そこを `warn` / `off` に弱められるのは
+  `VERIFY_CLOUD_ACCOUNT_MODE` のみ
 - `"$mode"` は **builder が値を書かない予約キー** (`"$readonly"` も同じ)。検証を
   弱めるキーなので、hook に見張られている Claude がスクリプトで切れないようにして
   いる。`init` / `set` / `remove` / `migrate` は既存の値を壊さず保持するが、設定・
@@ -540,7 +541,8 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
 - 不正な値 (`"yes"` 等) は **`deny` として扱い** (fail-closed)、その旨を文面に添える
 
 **設定が壊れている / 曖昧なときは tier に関係なく deny** のまま: 複数パスに
-`accounts.local.json` がある (競合) / JSON が壊れている / 期待値の型が不正。
+`accounts.local.json` がある (競合) / JSON が壊れている (UTF-8 でない・入れ子が
+深すぎるものを含む。v0.18.0) / 期待値の型が不正。
 「どの設定が効くか決まらない」状態では読むだけでも判定の土台が無いため。
 
 ### 発火するコマンド
@@ -604,9 +606,17 @@ CLI から取れないとき (hook の PATH に無い / 実行不可 / 非ゼロ
 複数行) は CLI と同じローカル設定から同じ規則で解決する (起点は同じ project root):
 configstore の切替先を `.firebaserc` の alias で解決 → 無ければ `.firebaserc` の
 alias が 1 つならその値 → `default`。`npx firebase ...` のように hook 側に
-`firebase` が無い構成でも、configstore 経由で切替を見落とさない。
+`firebase` が無い構成でも、configstore 経由で切替を見落とさない。ただし
+`.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (条件は
+[pin-env](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) の firebase と同じ)
+は、ローカル設定から解決せず、現在値を取得できないとして deny する (v0.18.0)。alias の
+行き先を firebase-tools と違う project に読んで照合しないため。
 `firebase use` が timeout したときは fallback せず「firebase use がタイムアウト
 しました」で deny する (fail-closed)。
+
+`--config` / `-c` 付きのコマンドは、指定したファイルのあるディレクトリを project root
+にする (firebase-tools と同じ。v0.18.0)。`firebase use` の cwd と、ローカル設定から解決する
+ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける)。
 
 ### 検証をスキップする readonly コマンド
 
@@ -740,7 +750,8 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | AWS | `--profile` | 検証コマンドにも `--profile` を付けて実行 (CLI の資格情報解決順を実行時と揃える) |
 | GCP | `--project` / `--account` | 値を期待値と直接照合 (アクティブ設定は見ない) |
 | GCP | `--configuration` | 現在値の取得コマンドに引き渡す |
-| Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則) |
+| Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則)。`.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ deny (v0.18.0) |
+| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し、見つからなければ deny (v0.18.0) |
 | Kubernetes | `--context` | 値を期待値と直接照合 |
 | Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
 
@@ -1245,6 +1256,15 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない
+- Firebase の `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき
+  (コメント・U+FEFF・URL を含む文字列など。条件は
+  [pin-env](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) の firebase と同じ)
+  は、`--project` 付きのコマンドを deny し、CLI から現在値を取れないとき (hook の PATH に
+  `firebase` が無い `npx firebase` の構成など) は現在値を取得できないとして deny する
+  (v0.18.0。fail-closed。後者の文面は従来どおり「firebase コマンドが見つかりません」など)。
+  判定は保守的で、firebase-tools が期待した project で動くファイルも対象になる。`--project`
+  を外し、hook の PATH から `firebase` を使えるようにすると (CLI 自身が `.firebaserc` を読んで
+  答える) 照合できる
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照

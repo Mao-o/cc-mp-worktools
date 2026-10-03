@@ -323,8 +323,9 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
   読む側と書く側で同じものを使う。値は hash の材料にだけ使い、cache ファイルには
   書かない
 - **成功のみ**: 失敗 (文字列返却) は常に再検証する。切り替え直後に使いたいため
-- **無効化**: TTL 超過 / `accounts.local.json` の mtime 変化 / 破損・欠損 /
-  アカウント状態を変えうるコマンドの検出 / epoch 不一致
+- **無効化**: TTL 超過 / `accounts.local.json` の mtime 変化 / 破損・欠損 (UTF-8 で
+  ない・入れ子が深い entry を含む。v0.18.0) / アカウント状態を変えうるコマンドの検出 /
+  epoch 不一致
 - **書き込み失敗は無視** (best-effort)。キャッシュ書けないことで deny は出さない
 
 意図的にしないこと: 失敗のキャッシュ (切替直後に再検証したい) / 長時間キャッシュ
@@ -1217,7 +1218,7 @@ alias の解決も、firebase-tools (`projects[alias] || alias`) は文字列で
 代償として受け入れた。理由の文は「厳密な JSON に直すと案内できる」とは言わず、弾く内容の
 条件をすべて並べる (URL のファイルでは直しようがない案内になるため)。verify() の `--project` の
 照合も同じ読み方の違いを持つが、判定に関わるので別に扱う (今回は pin-env だけ。マージ前
-レビューの指摘)
+レビューの指摘。0.18.0 で hook の検証も同じ読み方にした)
 
 **pin-env は、前後に空白のある期待値を固定しない**
 
@@ -1226,6 +1227,91 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
 案内すると、固定しても deny が続く。gcloud (`pin_fields`。0.17.0 の「空白だけの値は不正」
 の延長) と、同じ食い違いのあった aws / firebase で「固定できません」にした。verify() の
 照合の仕方は変えない (空白を許すかは builder の書き込み時の検証の問題で、範囲外)
+
+### 0.18.0 (`.firebaserc` の読み方を検証に揃える / 読めないファイルで検証を飛ばさない)
+
+**hook の検証も、firebase-tools と同じ内容に読めると確かめた `.firebaserc` だけを使う**
+
+0.17.1 で pin-env に入れた判定を、hook の検証 (verify() の `--project` の照合と、CLI から
+現在値を取れないときのローカル設定の解決) にも使う (内部バックログ)。0.17.1 までの hook は
+`.firebaserc` を厳密な JSON で読み、読めなければ alias 0 件としていたので、コメントのある
+ファイルでは `--project <alias>` を値そのもので照合し (firebase-tools は alias の行き先で
+動く)、alias のキーの中の U+FEFF や `NaN` のあるファイルでも行き先を取り違えて allow していた。
+
+- 確かめられなければ、`--project` は「行き先を確かめられない」で deny し
+  (`_PROJECT_FLAG_UNCONFIRMED`)、ローカル設定からは解決しない (`_from_local` が "" を返し、
+  現在値を取得できない deny になる)。cjson のコメントの除去は再現しない (0.17.1 と同じ理由)。
+  期待値の形の問題ではないので `_CHECK_BY_HAND` の文は使わない。弾く条件の文は pin-env と
+  同じ定数 (`FIREBASERC_UNCONFIRMED_CONDITIONS`)
+- `.firebaserc` を読むのは `_read_firebaserc` だけにし、判定と解決に 1 回の読み込みの結果を
+  使う。別々に `json.loads` すると、入れ子の深さが再帰の上限の境目にあるファイルで、呼び出しの
+  深さの違いから片方だけが RecursionError になり、「同じに読める」と判定した内容と違う内容で
+  解決しうる。旧実装の `_firebaserc_aliases` は RecursionError を捕まえず、深い入れ子の
+  `.firebaserc` で例外が `__main__` の最終防波堤まで抜け、「内部エラーのため検証をスキップ」
+  (実行は止めない) になっていた。RecursionError を alias 0 件に読み替える案は採らない
+  (上の取り違えと同じになる)
+- 空文字の alias は、解決では alias に無いのと同じ (`projects[alias] || alias`。
+  `_resolve_alias`) で、alias の数 (1 つならその値を使う規則。`_.size`) には数える。旧実装は
+  空文字の alias を読み飛ばしていたので、`{"a": "", "b": "x"}` を alias 1 つと数えて x を
+  現在値にしていた (firebase-tools は 2 つと数え、`default` が無いので未解決)
+- 確かめた内容での行き先は、JavaScript のオブジェクトが継承するプロパティ名 (`constructor`
+  など) を firebase-tools だけが alias と読むことを除いて firebase-tools と同じ (0.17.1 と同じ)
+- 確認: firebase-tools 15.24.0 の RC ローダ (`RC.loadFile` / `resolveAlias`) と applyRC の
+  解決の順を、54 種の `.firebaserc` × (`--project` の値 12 種 + configstore の切替先 7 種) の
+  1,026 行で動かし、旧版・新版の hook と比べた。新版は誤 allow 0・例外 0 で、旧版との差は
+  確かめられない `.firebaserc` の deny / 未解決と、空文字の alias の数え方 (1 行) だけ。旧版が
+  違う行き先で allow した `--project` の 9 行、例外になった 12 行、ローカル設定で違う現在値を
+  出した 33 行 (`constructor` を除く) は、新版ではすべて deny / 未解決になる。fail-closed の
+  代償として、firebase-tools が期待した project で動く `--project` の 40 行も deny になる
+  (URL を含む文字列・`NaN` のあるファイルなど)
+
+**firebase の `--config` / `-c` を照合先に反映する**
+
+- firebase-tools の global option `-c, --config <path>` は firebase.json を名指しし、
+  detectProjectRoot はそのファイルのあるディレクトリを project root にする
+  (`path.resolve(cwd, configPath)`。ファイルでなければエラーで始めない)。project root は、
+  読む `.firebaserc`・configstore の切替先 (`activeProjects` のキー)・`firebase use` の起点。
+  0.17.1 までの hook は `--config` を見ず、project_dir から firebase.json を親方向に探した
+  root で照合していた (内部バックログ)
+- context option (`context["config"]`) として受け、verify() はファイルのあるディレクトリを
+  root にする。`firebase use` にも同じ `--config` を付けて root を cwd にする (ファイル名が
+  firebase.json でないとき、付けないと CLI が root から親方向に firebase.json を探し直す)
+- 相対パスは project_dir から解決する (hook はコマンドの作業ディレクトリを知らない。
+  `_project_root` と同じ見立て)。見つからなければ deny (`_CONFIG_NOT_FOUND`)。firebase-tools
+  はコマンドを始めないが、見立てが外れているだけ (シェルが展開する `~` など) なら別の
+  ディレクトリで動くので、allow にはしない。コマンドの中の `cd` は、`--config` の無い
+  コマンドと同じく追わない
+- 値を静的に解決できない (`$VAR` 等) ときは、他の context option と同じく既定の root で
+  照合する (`cli_options.find_context_options`。0.17.1 までと同じ)
+- 確認: detectProjectRoot と `_config_file` を 11 の形 (相対・絶対・`..` を含むもの・
+  firebase.json でないファイル名・ディレクトリ・無いファイル・symlink など) で比べ、root が
+  一致するか、両方が「見つからない」(firebase-tools はエラー、hook は deny) になることを
+  確かめた
+
+**読めない accounts.local.json / 成功 cache で検証を飛ばさない**
+
+- accounts.local.json (旧パスを含む) の読み込みは `json.JSONDecodeError` と `OSError` しか
+  捕まえていなかったので、UTF-8 でない (UnicodeDecodeError) / 入れ子が深い (RecursionError)
+  ファイルで例外が `__main__` の最終防波堤まで抜け、「内部エラーのため検証をスキップ」
+  (fail-open) になっていた (内部バックログ)。不正な JSON と同じ扱い (`pre_file_mode` の
+  `_decide`。tier に関係なく deny) にした
+- 入れ子の上限 (`_MAX_ACCOUNTS_DEPTH = 32`) も置いた。`json.loads` が通る深さでも、後段
+  (成功 cache のキーを作る `json.dumps` など) が同じ深さを辿って RecursionError になる窓が
+  ある (Python 3.9 では、`json.loads` は通り `json.dumps` が落ちる深さが 985 段前後にあった。
+  境目は Python の版と呼び出しの深さで変わる)。後段の例外を一つずつ捕まえるより、読んだ
+  直後に深さで弾く。正規の形は 2 段なので 32 段で足りる。数え方は再帰しない
+  (`_nested_deeper_than`)
+- 成功 cache の entry (`get_success`) は UTF-8 でない・入れ子が深いファイルを、epoch
+  (`_read_epoch`) は入れ子が深いファイルを、読めないもの (cache miss / epoch 0) として扱う
+  (epoch の UTF-8 でないファイルは、前から ValueError として捕まえていた)。どちらも
+  捕まえていなかった例外で検証を飛ばしていた
+- hook の経路の他の読み込みは確認済み: auto_switch の記録の読み込みは dispatcher の
+  `_auto_switch` が例外を握る (deny は残る)、firebase の configstore は RuntimeError
+  (RecursionError の基底) まで捕まえる、aws の config と `cli_config.read_text` は UTF-8 で
+  ないファイルを読めないものとして扱う
+- 確認 (Python 3.9): 実プロセスの `__main__` で、accounts.local.json は 25〜40 段と
+  975〜1,000 段、`.firebaserc` は 975〜1,000 段のすべての深さで、warn (検証のスキップ) に
+  ならないことを確かめた
 
 ## 既知の制限
 
