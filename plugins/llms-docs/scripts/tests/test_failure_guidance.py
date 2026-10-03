@@ -552,6 +552,12 @@ class ClaudeDocsSourceBothTest(unittest.TestCase):
         self.assertTrue(any(ln.endswith("--source code") or "--source code " in ln
                             for ln in singles), singles)
         self.assertTrue(any("--source platform" in ln for ln in singles), singles)
+        # with "--", the added --source goes before it, not into the positionals
+        lines, err = self.run_printed(["search-content", "--sour", "both", *c, "--", "-foo"],
+                                      expect_lines=3)
+        for ln in lines:
+            if " search " not in ln:
+                self.assertLess(ln.index("--source "), ln.index("-- -foo"), ln)
 
     def test_a_query_starting_with_a_dash_gets_double_dash_in_search(self):
         c = ["--cache-dir", self.tmp]
