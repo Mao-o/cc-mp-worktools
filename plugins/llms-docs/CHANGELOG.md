@@ -15,8 +15,16 @@ All notable changes to this plugin will be documented here.
 
 - 候補のどれにも全キーワードが揃うセクションが無いときも全文検索を回し、全キーワードの揃うページを
   `[body-only]` で追記する。既存の行は残り、並びは従来の共通キー (全キーワードが揃う → 部分一致 → …) のまま
-- 候補が部分一致だけのときに足すのは、全キーワードが揃うページだけ。他の部分一致のページは、候補が既に
-  見せている種類の行の繰り返しなので足さない (候補に本文ヒットが 1 件も無いときの従来の動きは変えない)
+- 候補が部分一致だけのときに足すのは、全キーワードが揃うページだけで、最大 2 件 (`--top-n` が 1 なら 1 件)。
+  他の部分一致のページは、候補が既に見せている種類の行の繰り返しなので足さない (候補に本文ヒットが 1 件も
+  無いときの従来の動き、`--top-n` 件まで足すことは変えない)。追記したページは部分一致の候補より上に並ぶため、
+  `--top-n` 件まで足すと `Next:` 3 行をすべて取り、index が上位に選んだページ (`generateObject schema` の
+  Generate Object / zodSchema) に `Next:` が 1 本も出なかった
+- `Next:` には、index の最上位の候補 (追記したページを除いて最上位の行) を最低 1 本残す
+- 全キーワードが揃う候補が Changelog / Release notes 系 (末尾に回すページ) だけのときは、答えが出ている
+  とは見なさずに全文検索を回す。そのページは末尾に回るため、部分一致の行が 1 位になり答えのページが出なかった。
+  `--include-changelog-priority` を付けたときは従来どおり、そのページを答えと見なす。候補に挙がっている
+  ページは、追記の枠を数える前に除く
 - `parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-llms-txt.py` の 3 本で `_common.py` の
   `full_corpus_extra_hits` を共有する。Firebase は本文を取得しない設計なので対象外
 - 追記したページにも、そのまま打てる `Next:` が出る (往復テストで 1 行ずつ実行して確かめている)
@@ -29,6 +37,12 @@ AI SDK と `parse-llms-txt.py` の `search-content` は doc 番号順に出し�
 部分一致 → 本文ヒット数 → doc 番号) に揃えてから切る。件数の表示 (`N hits across M documents`) は
 従来どおり全体の数を数える。
 
+- 並べ替えのキーは `_common.py` の `search_content_rank_key` 1 つにまとめ、Claude Code docs と同じく
+  Changelog / Release notes 系を末尾に回す。AI SDK と汎用 loader の `search-content` にも
+  `--include-changelog-priority` を足した
+- `--limit` に負の数を渡すと、末尾から数えて切っていた (`--limit -1` で `showing top 187`)。
+  3 本とも 0 件として扱う
+
 ### 修正: AI SDK の frontmatter で、ブロック形式の `tags` とエスケープした引用符の `title` を読む
 
 実 corpus の `tags:` (87 件) はすべて `tags:` の次の行から `  - タグ` を並べるブロック形式で、
@@ -37,6 +51,8 @@ AI SDK と `parse-llms-txt.py` の `search-content` は doc 番号順に出し�
 
 - ブロック形式のリストと、二重引用符の中の `\"` / `\\`、単一引用符の中の `''` を解く (corpus に出る形だけ。
   YAML 全体は実装しない)。1 行形式 `[a, b]` は従来どおり
+- 読まないキー (例: `sidebar:`) が字下げした子を持つと、その子が直前の `description` などの続きとして
+  吸い込まれていた (旧版から)。読まないキーの行で、直前の値を区切る
 - `references/llms-txt-structure.md` の frontmatter の記述を実態 (ブロック形式、エスケープ) に合わせた
 - 実 corpus のコピーで、`tags` が文字列化された doc は 0 件、エスケープした title の doc (4 件) は実際の title で引ける
 

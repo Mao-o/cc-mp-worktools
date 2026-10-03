@@ -785,6 +785,29 @@ class HitCandidatesTest(unittest.TestCase):
         ranked = [(1, self.hits("A"), ("--source", "platform"))]
         self.assertEqual(_commands.hit_candidates(ranked), [(1, "A", ("--source", "platform"), 1)])
 
+    def test_keep_takes_the_last_line_when_pages_above_fill_every_line(self):
+        ranked = [(1, self.hits("A"), ()), (2, self.hits("B"), ()), (3, self.hits("C"), ()),
+                  (7, self.hits("K"), ())]
+        self.assertEqual([r for r, _h, _e, _n in _commands.hit_candidates(ranked, keep=(7, ()))],
+                         [1, 2, 7])
+
+    def test_keep_already_picked_changes_nothing(self):
+        ranked = [(1, self.hits("A", "A2"), ()), (7, self.hits("K"), ())]
+        self.assertEqual(_commands.hit_candidates(ranked, keep=(7, ())),
+                         _commands.hit_candidates(ranked))
+
+    def test_keep_matches_the_per_page_source_too(self):
+        ranked = [(1, self.hits("A"), ("--source", "code")), (2, self.hits("B"), ()),
+                  (3, self.hits("C"), ()), (1, self.hits("P"), ("--source", "platform"))]
+        got = _commands.hit_candidates(ranked, keep=(1, ("--source", "platform")))
+        self.assertEqual(got[-1], (1, "P", ("--source", "platform"), 1))
+
+    def test_keep_without_body_hits_is_not_offered(self):
+        ranked = [(1, self.hits("A"), ()), (2, self.hits("B"), ()), (3, self.hits("C"), ()),
+                  (7, {"results": []}, ())]
+        self.assertEqual([r for r, _h, _e, _n in _commands.hit_candidates(ranked, keep=(7, ()))],
+                         [1, 2, 3])
+
     def test_heading_count_is_carried(self):
         ranked = [(2, {"results": [{"heading_path": "R/I", "heading_count": 2}]}, ())]
         self.assertEqual(_commands.hit_candidates(ranked), [(2, "R/I", (), 2)])

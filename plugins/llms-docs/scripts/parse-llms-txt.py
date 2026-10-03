@@ -58,11 +58,11 @@ from _common import (  # noqa: E402
     fetch_url,
     full_corpus_extra_hits,
     load_lines,
-    match_rank,
     next_hint,
     parse_llms_index,
     retry_for_page_ref,
     search_content_in_body,
+    search_content_rank_key,
     search_index_entries,
     search_rank_key,
 )
@@ -924,13 +924,16 @@ def cmd_search_content(args):
             continue
         total += hits["total_matches"]
         collected.append((idx, hits))
-    # Strict-AND pages before "[partial match]" pages, then most hits, then
-    # doc order; --limit cuts only after ordering (same key as `search`).
-    collected.sort(key=lambda t: (match_rank(t[1]), -t[1]["total_matches"], t[0]))
+    # Changelog pages last, then strict-AND before "[partial match]", then
+    # most hits, then doc order; --limit cuts only after ordering (same key in
+    # every script).
+    collected.sort(key=lambda t: search_content_rank_key(
+        t[0], docs[t[0]]["title"], t[1],
+        include_changelog_priority=args.include_changelog_priority))
     matched = len(collected)
     printed = 0
     shown = []
-    for idx, hits in collected[: args.limit]:
+    for idx, hits in collected[: max(args.limit, 0)]:
         d = docs[idx]
         printed += 1
         shown.append((idx, hits, ()))
@@ -962,7 +965,8 @@ def cmd_search(args):
     print("=" * 60)
     print()
     results = [
-        {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False}
+        {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False,
+         "title": docs[idx]["title"] or "(untitled)"}
         for score, idx, _entry in scored
     ]
     # The full-corpus search also runs when the candidates have body hits but
@@ -974,8 +978,10 @@ def cmd_search(args):
         results, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
         max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
         min_level=level, limit=args.top_n,
+        include_changelog_priority=args.include_changelog_priority,
     ):
-        results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True})
+        results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
+                        "title": docs[idx]["title"] or "(untitled)"})
     if not results:
         print("No matching documents found.")
         print()
@@ -990,8 +996,6 @@ def cmd_search(args):
     if all(r["body_only"] for r in results):
         print("  (no title/description match — showing full-body search results instead)")
         print()
-    for r in results:
-        r["title"] = docs[r["doc_idx"]]["title"] or "(untitled)"
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     for r in results:
         tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
@@ -999,7 +1003,11 @@ def cmd_search(args):
                             extra_lines=_url_line(docs[r["doc_idx"]]))
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results]),
+    # The top index candidate keeps a Next: line even when appended pages
+    # rank above it.
+    keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
+                                       keep=keep),
                         hint_args=_source_hint_args(args) + corpus_hint_args(args))
 
 
@@ -1053,6 +1061,7 @@ def main():
     p.add_argument("--context", type=int, default=2, help="Context lines around each hit (default: 2)")
     p.add_argument("--max-hits", type=int, default=5, help="Max hits per document (default: 5)")
     add_max_snippet_chars_arg(p)
+    add_include_changelog_priority_arg(p)
     p.set_defaults(func=cmd_search_content)
 
     p = sub.add_parser("sections", help="List sections in a document")

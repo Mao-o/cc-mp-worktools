@@ -229,7 +229,7 @@ def print_search_result(head: str, hits: dict, *, extra_lines=(), anchor_for=Non
 NEXT_CONTENT_LIMIT = 3
 
 
-def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT) -> list:
+def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> list:
     """Pick the ``content`` targets to suggest from ranked search results.
 
     *ranked* is ``[(ref, hits, extra_args), ...]`` in display order: *ref* is
@@ -241,6 +241,11 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT) -> list:
     room. A page ranked on the index only (no body hits) is offered, without
     a heading, only when no page has a body hit. *heading_count* is how many
     sections of the page share that heading_path (1 when unique or unknown).
+
+    *keep* is ``(ref, extra_args)`` of a page whose best section must stay
+    among the picks when it has one (``search`` passes its top index
+    candidate, so pages appended from the full-corpus search above it cannot
+    take every line). It replaces the last pick when there is no room.
     """
     firsts = []
     spare = []
@@ -257,6 +262,10 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT) -> list:
     # A page that only ranked on the index is worth suggesting only when no
     # page has a body hit to point at.
     picked = (firsts or index_only)[:limit]
+    if keep is not None and limit > 0 and not any((p[0], p[2]) == keep for p in picked):
+        kept = next((c for c in firsts if (c[0], c[2]) == keep), None)
+        if kept is not None:
+            picked = picked[:limit - 1] + [kept]
     if len(picked) < limit and picked:
         top_ref = picked[0][0]
         # A repeated heading_path hits more than once, but every copy prints

@@ -50,10 +50,10 @@ from _common import (
     fetch_url,
     full_corpus_extra_hits,
     load_lines,
-    match_rank,
     next_hint,
     retry_for_page_ref,
     search_content_in_body,
+    search_content_rank_key,
     search_index_entries,
     search_rank_key,
 )
@@ -239,6 +239,10 @@ def parse_frontmatter(fm_lines: list[str]) -> dict:
             rest = m.group(2).strip()
             if rest and rest != "|" and rest != ">":
                 current_value_lines.append(rest)
+        elif re.match(r"^[\w-]+\s*:", line):
+            # Another top-level key: its indented children must not be read
+            # as the previous value's continuation.
+            _flush()
         elif current_key and line.startswith("  "):
             # Continuation of multi-line value
             current_value_lines.append(line.strip())
@@ -541,16 +545,20 @@ def cmd_search_content(args):
         total_hits += hits["total_matches"]
         collected.append((idx, hits))
 
-    # Strict-AND pages before "[partial match]" pages, then most hits, then
-    # doc order: cut by --limit only after ordering, so low-numbered partial
-    # pages cannot push out a page that has every keyword in one section.
-    collected.sort(key=lambda t: (match_rank(t[1]), -t[1]["total_matches"], t[0]))
+    # Changelog pages last, then strict-AND pages before "[partial match]"
+    # pages, then most hits, then doc order (same key in every script): cut by
+    # --limit only after ordering, so low-numbered partial pages cannot push
+    # out a page that has every keyword in one section.
+    fms = {idx: parse_frontmatter(docs[idx]["frontmatter_lines"]) for idx, _hits in collected}
+    collected.sort(key=lambda t: search_content_rank_key(
+        t[0], fms[t[0]]["title"], t[1],
+        include_changelog_priority=args.include_changelog_priority))
     docs_matched = len(collected)
     printed_docs = 0
     shown = []
 
-    for idx, hits in collected[: args.limit]:
-        fm = parse_frontmatter(docs[idx]["frontmatter_lines"])
+    for idx, hits in collected[: max(args.limit, 0)]:
+        fm = fms[idx]
         title = fm["title"] or "(untitled)"
         printed_docs += 1
         shown.append((idx, hits, ()))
@@ -648,6 +656,7 @@ def cmd_search(args):
         context_lines=args.context, max_matches_per_doc=args.max_hits,
         max_snippet_chars=args.max_snippet_chars, min_level=1,
         limit=args.top_n,
+        include_changelog_priority=args.include_changelog_priority,
     )
     for idx, hits in fallback:
         results.append({
@@ -686,7 +695,11 @@ def cmd_search(args):
 
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results]),
+    # The top index candidate keeps a Next: line even when appended pages
+    # rank above it.
+    keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
+                                       keep=keep),
                         hint_args=corpus_hint_args(args))
 
 
@@ -757,6 +770,7 @@ def main():
     p_search_body.add_argument("--max-hits", type=int, default=5,
                                help="Max hits to display per document (default: 5)")
     add_max_snippet_chars_arg(p_search_body)
+    add_include_changelog_priority_arg(p_search_body)
     p_search_body.set_defaults(func=cmd_search_content)
 
     # sections

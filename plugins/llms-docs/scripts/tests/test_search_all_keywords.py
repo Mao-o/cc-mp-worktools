@@ -6,6 +6,10 @@ keyword together used to stay invisible, because the full-corpus search only ran
 when no candidate had any body hit. ``search-content`` (ai-sdk and the generic
 loader) cut its list by page number before ordering, so low-numbered partial pages pushed it out.
 
+A changelog page with every keyword does not count as the answer (it is ranked
+last), and at most two pages are appended, so the top index candidate keeps a
+``Next:`` line.
+
 Each script is driven through its CLI on a small corpus, and the ``Next:``
 lines it prints are run as printed (split the way a shell would).
 """
@@ -26,15 +30,22 @@ ai_sdk = _loader.load_script("parse-ai-sdk.py")
 generic = _loader.load_script("parse-llms-txt.py")
 
 QUERY = "alpha beta"
-# page 2 is the answer: both keywords in one section, nothing in title/description
+# page 3 is the answer: both keywords in one section, nothing in title/description.
+# Page 2 also has both, but is a changelog (ranked last; the index ranks it first).
+# Pages 5 and 6 also have both: with them, more pages could be appended than
+# the top index candidate leaves room for.
 ANSWER_LINE = "alpha was renamed to beta in this release"
 PAGES = [
     ("Alpha guide", "## Setup\nalpha is set up here\n\n## Other\nbeta is somewhere else\n"),
     ("Beta guide", "## Setup\nbeta is set up here\n\n## Other\nalpha is somewhere else\n"),
+    ("Alpha beta changelog", "## v1\nalpha and beta changed\n"),
     ("Migration notes", f"## Rename\n{ANSWER_LINE}\n"),
     ("Unrelated", "## Overview\nNothing relevant.\n"),
+    ("Upgrade steps", "## Steps\nmove alpha settings to beta\n"),
+    ("Porting FAQ", "## Questions\nwhy alpha and beta differ\n"),
 ]
 ANSWER_TITLE = "Migration notes"
+CHANGELOG_TITLE = "Alpha beta changelog"
 
 
 def _hits(text: str) -> dict:
@@ -75,8 +86,13 @@ class _Base:
                 outputs.append(got)
         return outputs
 
+    def next_refs(self, out):
+        """Page refs of the ``Next:`` lines (argv[2] of ``content``)."""
+        return [shlex.split(ln[len("Next: "):], comments=True)[2]
+                for ln in out.splitlines() if ln.startswith("Next: ")]
+
     def test_search_appends_the_page_with_every_keyword(self):
-        code, out, err = self.run_cmd("search", QUERY, "--top-n", "2")
+        code, out, err = self.run_cmd("search", QUERY, "--top-n", "3")
         self.assertEqual(code, 0, err)
         rows = self.rows(out)
         self.assertIn(ANSWER_TITLE, rows, out)
@@ -87,6 +103,44 @@ class _Base:
         self.assertEqual(rows[0], ANSWER_TITLE, out)
         # a partial page the candidates did not include is not dragged in
         self.assertNotIn("Unrelated", rows)
+
+    def test_a_changelog_with_every_keyword_is_not_the_answer(self):
+        # the index ranks the changelog first; it has both keywords but is
+        # ranked last, so the full-corpus search still runs
+        code, out, err = self.run_cmd("search", QUERY, "--top-n", "2")
+        self.assertEqual(code, 0, err)
+        rows = self.rows(out)
+        self.assertIn(ANSWER_TITLE, rows, out)
+        self.assertEqual(rows[0], ANSWER_TITLE, out)
+        self.assertEqual(rows[-1], CHANGELOG_TITLE, out)
+        self.assertNotIn("Unrelated", rows)
+        self.run_next_lines(out)
+
+    def test_with_changelog_priority_the_changelog_is_the_answer(self):
+        code, out, err = self.run_cmd("search", QUERY, "--top-n", "2", "--include-changelog-priority")
+        self.assertEqual(code, 0, err)
+        rows = self.rows(out)
+        self.assertNotIn("[body-only]", out)
+        self.assertEqual(rows[0], CHANGELOG_TITLE, out)
+        self.assertNotIn(ANSWER_TITLE, rows)
+
+    def test_at_most_two_pages_are_appended(self):
+        # three pages have every keyword outside the index candidates
+        code, out, err = self.run_cmd("search", QUERY, "--top-n", "3")
+        self.assertEqual(code, 0, err)
+        rows = self.rows(out)
+        self.assertEqual(out.count("[body-only]"), 2, out)
+        self.assertEqual(rows[:3], [ANSWER_TITLE, "Upgrade steps", "Alpha guide"], out)
+        self.assertNotIn("Porting FAQ", rows)
+
+    def test_the_index_top_keeps_a_next_line(self):
+        # the top index candidate (Alpha guide, first row below the appended
+        # ones) has a Next: line, and running it reaches that page
+        code, out, err = self.run_cmd("search", QUERY, "--top-n", "3")
+        self.assertEqual(code, 0, err)
+        self.assertIn("0", self.next_refs(out), out)  # page 0 = Alpha guide
+        outputs = self.run_next_lines(out)
+        self.assertTrue(any("alpha is set up here" in got for got in outputs), outputs)
 
     def test_search_next_line_reads_the_appended_page(self):
         code, out, err = self.run_cmd("search", QUERY, "--top-n", "2")
@@ -107,7 +161,7 @@ class _Base:
 
     def test_search_without_a_page_that_has_every_keyword_adds_nothing(self):
         # "gamma" is nowhere: the partial rows of the index stay as they are
-        code, out, err = self.run_cmd("search", "alpha gamma", "--top-n", "2")
+        code, out, err = self.run_cmd("search", "alpha gamma", "--top-n", "3")
         self.assertEqual(code, 0, err)
         self.assertNotIn("[body-only]", out)
         self.assertNotIn(ANSWER_TITLE, self.rows(out))
@@ -121,7 +175,27 @@ class _SearchContentOrder:
         self.assertEqual(rows[0], ANSWER_TITLE, out)
         self.assertEqual(len(rows), 2, out)
         # the summary still counts every matching page, not just the shown ones
-        self.assertRegex(out, r"hits across 3 documents, showing top 2")
+        self.assertRegex(out, r"hits across 6 (documents|pages), showing top 2")
+
+    def test_search_content_ranks_a_changelog_last(self):
+        # the changelog comes before the answer in page order
+        code, out, err = self.run_cmd("search-content", QUERY, "--limit", "3")
+        self.assertEqual(code, 0, err)
+        rows = self.rows(out)
+        self.assertEqual(rows, [ANSWER_TITLE, "Upgrade steps", "Porting FAQ"], out)
+
+    def test_search_content_with_changelog_priority_keeps_page_order(self):
+        code, out, err = self.run_cmd("search-content", QUERY, "--limit", "2",
+                                      "--include-changelog-priority")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.rows(out), [CHANGELOG_TITLE, ANSWER_TITLE], out)
+        self.run_next_lines(out)
+
+    def test_search_content_negative_limit_shows_nothing(self):
+        code, out, err = self.run_cmd("search-content", QUERY, "--limit", "-1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.rows(out), [], out)
+        self.assertRegex(out, r"hits across 6 (documents|pages), showing top 0")
 
     def test_search_content_next_line_runs_and_names_the_answer(self):
         code, out, err = self.run_cmd("search-content", QUERY, "--limit", "2")
@@ -146,7 +220,7 @@ class AiSdkTest(_Base, _SearchContentOrder, unittest.TestCase):
         self.corpus_args = ["--cache-dir", self.tmp]
 
 
-class ClaudeDocsTest(_Base, unittest.TestCase):
+class ClaudeDocsTest(_Base, _SearchContentOrder, unittest.TestCase):
     module = claude
     script = "parse-claude-docs.py"
 
@@ -210,6 +284,31 @@ class FullCorpusExtraHitsTest(unittest.TestCase):
         results = self.rows(3)
         got = self.extra(results)
         self.assertEqual([i for i, _h in got], [2, 0, 1, 4])
+
+    def test_at_most_two_strict_pages_are_added_to_partial_candidates(self):
+        bodies = self.BODIES + ["## A\nalpha beta\n", "## A\nbeta alpha\n"]  # 5, 6 strict
+        got = _common.full_corpus_extra_hits(
+            self.rows(0), [b.splitlines(keepends=True) for b in bodies], QUERY, limit=5)
+        self.assertEqual([i for i, _h in got], [2, 5])
+
+    def test_top_n_below_two_still_caps_the_strict_pages(self):
+        got = _common.full_corpus_extra_hits(
+            self.rows(0), [b.splitlines(keepends=True) for b in self.BODIES], QUERY, limit=1)
+        self.assertEqual([i for i, _h in got], [2])
+
+    def test_a_strict_changelog_candidate_does_not_stop_the_search(self):
+        results = self.rows(0, 2)
+        results[1]["title"] = "Release notes"
+        self.assertEqual(self.extra(results), [])  # page 2 is listed: nothing new
+        bodies = self.BODIES + ["## A\nalpha beta\n"]  # 5 strict, not listed
+        got = _common.full_corpus_extra_hits(
+            results, [b.splitlines(keepends=True) for b in bodies], QUERY, limit=1)
+        # the listed changelog does not use the one slot
+        self.assertEqual([i for i, _h in got], [5])
+        got = _common.full_corpus_extra_hits(
+            results, [b.splitlines(keepends=True) for b in bodies], QUERY, limit=1,
+            include_changelog_priority=True)
+        self.assertEqual(got, [])
 
     def test_partial_candidates_and_no_strict_page_in_the_corpus(self):
         bodies = [b for i, b in enumerate(self.BODIES) if i != 2]

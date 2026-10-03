@@ -133,7 +133,8 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
 
 - `search`: スペース区切りの複数キーワード (AND。揃わなければ半分以上が揃うセクションへ
   緩め、`[partial match]` と表示)。未取得なら自動で取得してキャッシュする (Vercel は 10MB、
-  Cloudflare Workers は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く
+  Cloudflare Workers は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く。
+  上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す)
 - `content`: `heading_path` を省略するとページ全体。本文は既定 24000 文字で切り詰め、
   前後にサブセクション一覧と次の呼び出し例を出す
 - 見つからないときは、同じ論点で `search` を 3 回まで試し (言い換えより `search-index` / `sections`)、
@@ -165,7 +166,7 @@ heading_path で表す。
 |---|---|---|
 | `search` | `<query> [--top-n N] [--max-hits N] [--context N]` | 推奨入口。候補 top N + 本文 hits |
 | `search-index` | `<query> [--limit N] [--show-sections]` | タイトル・見出しで候補だけ取得 |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--max-hits N]` | 本文を横断検索 |
+| `search-content` | `<query> [--page-ref REF] [--limit N] [--max-hits N] [--include-changelog-priority]` | 本文を横断検索 |
 | `sections` | `<page_ref>` | ページの見出し一覧 |
 | `content` | `<page_ref> [heading_path] [--max-chars N]` | 本文を表示 |
 | `fetch-index` | `[--compact]` | 全ページ一覧 (フォールバック) |

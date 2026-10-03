@@ -159,6 +159,16 @@ class ParseFrontmatterTest(unittest.TestCase):
         self.assertEqual(fm["tags"], ["one", "two words"])
         self.assertEqual(fm["description"], "after")
 
+    def test_children_of_another_key_are_not_read_as_a_continuation(self):
+        fm = parse_ai_sdk.parse_frontmatter([
+            "title: Server\n", "description: Short\n",
+            "sidebar:\n", "  order: 3\n", "  label: hidden\n",
+            "tags:\n", "  - api\n",
+        ])
+        self.assertEqual(fm["description"], "Short")
+        self.assertEqual(fm["title"], "Server")
+        self.assertEqual(fm["tags"], ["api"])
+
     def test_inline_and_bare_tags_still_work(self):
         self.assertEqual(parse_ai_sdk.parse_frontmatter(["tags: [a, 'b c']\n"])["tags"], ["a", "b c"])
         self.assertEqual(parse_ai_sdk.parse_frontmatter(["tags: a, b\n"])["tags"], ["a", "b"])
