@@ -67,7 +67,7 @@ field が抜ける)。
 - **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
   最大 3 行出す (`--source` などは引き継ぐ)。ヒットが無いときはプレースホルダを出さない
 - **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
-  無い)。そうした見出しのコマンドには `(heading appears N times; this reads the first)` が付く
+  無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
 - **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
   セクションに揃わない」「`--page-ref` で外した」を区別して、語を減らす / `search-index` / 別 source の
   コマンドを示す

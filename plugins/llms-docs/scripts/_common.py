@@ -1511,7 +1511,7 @@ def duplicate_heading_note(count: int) -> str:
     silently.
     """
     if count > 1:
-        return f"  (heading appears {count} times; this reads the first)"
+        return f"  # heading appears {count} times; this reads the first"
     return ""
 
 

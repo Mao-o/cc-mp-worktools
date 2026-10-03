@@ -38,7 +38,7 @@ claude-docs で `<lang>/<slug>` に完全一致する 1 件があった slug (`h
   次の項目の診断を出す
 - **1 ページに同じ heading_path が 2 回以上ある見出し** — どのコマンドも 1 つ目を読み、2 つ目以降には
   届かない (見出しの指定は heading_path なので、区別する手段が無い)。`Next:` / `Closest sections:` /
-  曖昧な見出しの候補で、そうした見出しのコマンドの後ろに `(heading appears N times; this reads the first)`
+  曖昧な見出しの候補で、そうした見出しのコマンドの後ろに `# heading appears N times; this reads the first` (shell のコメント。行ごと打てる)
   を付け、同じコマンドは 1 回だけ出す。手元のキャッシュの 30997 見出しのうち 44 (Firebase の 15 ページで
   42) がこれに当たる
 - **見出しの解決順** — 見出しの指定は、ページ全体で heading_path の完全一致を先に探し、無ければタイトルの

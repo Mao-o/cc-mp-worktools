@@ -60,8 +60,9 @@ OTHER_BODY = "## Overview\nNothing relevant here.\n"
 
 # What a command line offers to run: a ``Next:`` line, an indented candidate
 # (ambiguous page / heading, ``Closest sections:``), or the ``For [i]:`` tail
-# of the slug ``Note:``. A trailing duplicate note is not part of the command.
-DUP_NOTE_RE = re.compile(r"\s+\(heading appears (\d+) times; this reads the first\)$")
+# of the slug ``Note:``. A trailing duplicate note is a shell comment, so the
+# line is run exactly as printed.
+DUP_NOTE_RE = re.compile(r"\s+# heading appears (\d+) times; this reads the first$")
 NOTE_CMD_RE = re.compile(r"For \[\d+\]: (.+)$")
 
 
@@ -78,7 +79,7 @@ def offered_commands(text: str, script: str) -> list:
         if not line.startswith(script + " ") or "<" in line:
             continue  # not a command, or a placeholder to fill in by hand
         m = DUP_NOTE_RE.search(line)
-        found.append((DUP_NOTE_RE.sub("", line), int(m.group(1)) if m else 1))
+        found.append((line, int(m.group(1)) if m else 1))
     return found
 
 
@@ -111,7 +112,7 @@ class _GuidanceTests:
 
     def run_line(self, line):
         """Run a printed command as a shell would split it."""
-        return _loader.run_cli(self.module, shlex.split(line))
+        return _loader.run_cli(self.module, shlex.split(line, comments=True))
 
     def assert_commands_run(self, text, *, at_least=1):
         """Run every command *text* offers; each must exit 0, and a ``content``
@@ -122,10 +123,11 @@ class _GuidanceTests:
             with self.subTest(command=line):
                 # the corpus options come last on every command; without them
                 # the command reads (or fetches) the default corpus instead
-                self.assertTrue(line.endswith(" " + self.tail), line)
+                argv = shlex.split(line, comments=True)
+                tail = shlex.split(self.tail)
+                self.assertEqual(argv[-len(tail):], tail, line)
                 code, out, err = self.run_line(line)
                 self.assertEqual(code, 0, err)
-                argv = shlex.split(line)
                 if argv[1] == "content" and len(argv) > 3 and not argv[3].startswith("--"):
                     self.assertIn(f"# heading_path: {argv[3]}\n", out)
         return commands
@@ -467,7 +469,7 @@ class ClaudeDocsSlugTest(unittest.TestCase):
         code, out, err = self.run_cmd("sections", "hooks")
         commands = offered_commands(err, "parse-claude-docs.py")
         self.assertEqual(commands, [(f"parse-claude-docs.py sections 0 --cache-dir {self.tmp}", 1)])
-        code, out, err = _loader.run_cli(claude, shlex.split(commands[0][0]))
+        code, out, err = _loader.run_cli(claude, shlex.split(commands[0][0], comments=True))
         self.assertEqual(code, 0, err)
         self.assertIn('Sections in [0] "Agent SDK Hooks"', out)
 
