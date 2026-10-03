@@ -55,7 +55,8 @@ def clear_plugin_env(keep: dict | None = None) -> None:
 #
 # `git commit` / `merge` / `fetch` は終わりに `git maintenance run --auto --detach` を起動する。
 # git 2.55 は auto maintenance の既定戦略が geometric で、`.git/objects/17` に loose object が
-# 2 件以上あると (= 「約 100 個以上」と見積もられると) 小さな repo でも repack が走る。しかも
+# 2 件以上あると (loose object 数の見積もり = `objects/17` の件数 × 256 が、しきい値 100 を
+# 256 単位に切り上げた 256 を超えると) 小さな repo でも repack が走る。しかも
 # `--detach` は repack の自動条件を判定する前に背景へ切り離すので、commit は待たずに戻る。
 # その repack が `.git/objects/pack` に書いている間に `TemporaryDirectory.cleanup()` が走ると、
 # tearDown が `Directory not empty` で落ちる (CI の flaky。object の hash 次第なので偶発的)。
@@ -68,8 +69,9 @@ def clear_plugin_env(keep: dict | None = None) -> None:
 #
 # env で渡す (`GIT_CONFIG_COUNT`。git 2.31 以上) のは、テストが起動する git、hook が起動する
 # git、それらが子として起動する git (`pull` の fetch / merge など) に一括で効かせるため。
-# 例外は `git push` の受け側 (`receive-pack`): ローカルの path へ送るとき git は repo 用の env を
-# 外して起動するので届かない。push 先の bare repo は `init_bare_origin` で repo 側に書く。
+# ただし `git push` の受け側 (`receive-pack`) には届かない: ローカルの path へ送るとき git は
+# repo 用の env (`GIT_CONFIG_COUNT` など) を外して起動する。外されない `GIT_CONFIG_GLOBAL` が
+# 指す fixture (`hermetic.gitconfig`) にも同じ設定を置き、そちらで止める (`HERMETIC_GIT_ENV`)。
 NO_BACKGROUND_GIT_SETTINGS = (
     ("maintenance.auto", "false"),
     ("maintenance.autoDetach", "false"),
@@ -92,10 +94,17 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
 
 
 # 開発者の ~/.gitconfig (color.ui=always / diff.external / diff.noprefix 等) でテストが
-# 揺れないよう、git にグローバル/システム設定を読ませない。あわせて自動 maintenance を止める
-# (上の `NO_BACKGROUND_GIT_SETTINGS`)。
+# 揺れないよう、git にグローバル/システム設定を読ませない。global の代わりに読ませるのは
+# tests 配下の fixture で、自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と
+# `receive.autogc`) だけを持つ。
+#
+# 止める経路は 2 本あり、どちらも外さない:
+#   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない
+#   - global の fixture: `receive-pack` にも届く。ただし repo 自身の config には負ける
+# fixture はテストから `git config --global` で書かないこと (tracked の file が書き換わる)。
+HERMETIC_GIT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermetic.gitconfig")
 HERMETIC_GIT_ENV = {
-    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,
     "GIT_CONFIG_NOSYSTEM": "1",
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
@@ -155,9 +164,10 @@ def init_bare_origin(parent: str, name: str = "origin.git") -> str:
     """push 先の bare repo を作り、そのパス (`parent/name`) を返す。
 
     `git push` がローカルの path へ送るとき、受け側の `receive-pack` は `GIT_CONFIG_COUNT` など
-    repo 用の env を外されて起動する (git が意図的にそうする)。`HERMETIC_GIT_ENV` の設定は
-    ここに届かないので、受け取った後に走る自動 maintenance (`receive.autogc`) は、repo 側の設定で
-    止める。
+    repo 用の env を外されて起動する (git が意図的にそうする)。受け取った後に走る自動 maintenance
+    (`receive.autogc`) は、外されない `GIT_CONFIG_GLOBAL` の fixture が止めるので、`git init --bare`
+    を直接呼んだ bare repo でも止まる。ここでは同じ設定を repo 自身の config にも書く (二重の備え):
+    global の指定が外れても、この helper で作った bare repo は止まる。
     """
     git(parent, "init", "--bare", "-q", name)
     path = os.path.join(parent, name)

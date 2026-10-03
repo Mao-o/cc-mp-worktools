@@ -890,12 +890,16 @@ hook のモジュールを外す処理 (`tests/test_posix_guard.py::_purge_hook_
 `git maintenance run --auto --detach` が背景で `.git/objects/pack` に書いている間に tempdir の
 後始末が走ると、tearDown が `Directory not empty` で落ちる (git 2.55 は小さな repo でも起こす。
 git 2.50 では起きないので、ローカルの実行だけでは気付けない)。`_testutil.HERMETIC_GIT_ENV` が
-`GIT_CONFIG_COUNT` で止めていて、`_testutil.git` は毎回これを足す。repo を作るテストは
+`GIT_CONFIG_COUNT` (env) と `GIT_CONFIG_GLOBAL` (tests 配下の `hermetic.gitconfig`) の 2 本で
+止めていて、`_testutil.git` は毎回これを足す。repo を作るテストは
 `_testutil.git` / `init_repo` を使い、自前の `subprocess` で git を呼ぶなら env に
 `HERMETIC_GIT_ENV` を入れること (理由は `_testutil.NO_BACKGROUND_GIT_SETTINGS` のコメント)。
-**例外は push 先の bare repo**: ローカルの path へ push すると、受け側の `receive-pack` は repo 用の
-env を外されて起動するので env の設定が届かない。`git init --bare` を直接呼ばず
-`_testutil.init_bare_origin` で作り、repo 自身の config に書くこと。
+**push 先の bare repo には env が届かない**: ローカルの path へ push すると、受け側の `receive-pack` は
+repo 用の env (`GIT_CONFIG_COUNT` など) を外されて起動する。外されない `GIT_CONFIG_GLOBAL` の
+fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init --bare` を直接呼んだ bare repo
+でも受け側の maintenance は起動しない (`test_hermetic_env.py::TestPlainBareOriginStartsNoMaintenance`)。
+`_testutil.init_bare_origin` は同じ設定を repo 自身の config にも書く二重の備えで、bare repo は
+こちらで作る。**fixture はテストから `git config --global` で書かないこと** (tracked の file が書き換わる)。
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると

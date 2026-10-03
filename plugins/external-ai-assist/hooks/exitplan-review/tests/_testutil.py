@@ -88,9 +88,13 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
 
 # 開発者の ~/.gitconfig (color.ui=always 等) でテストが揺れないよう、git にグローバル/
 # システム設定を読ませない (post-implementation-review/tests/_testutil.py と同じ配慮)。
-# あわせて自動 maintenance を止める (上の `NO_BACKGROUND_GIT_SETTINGS`)。
+# global の代わりに読ませるのは tests 配下の fixture で、自動 maintenance を止める設定を持つ。
+# env の `GIT_CONFIG_COUNT` に加えて fixture も置く理由 (`receive-pack` に env が届かない) は、
+# そちらの `HERMETIC_GIT_ENV` のコメントを参照 (この suite は push しないが、同じ形に揃える)。
+# fixture はテストから `git config --global` で書かないこと (tracked の file が書き換わる)。
+HERMETIC_GIT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermetic.gitconfig")
 HERMETIC_GIT_ENV = {
-    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,
     "GIT_CONFIG_NOSYSTEM": "1",
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
