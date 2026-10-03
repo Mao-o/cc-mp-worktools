@@ -88,6 +88,52 @@
       "h1_needs_url": true,
       "description": "Ollama"
     },
+    "agent-plugins": {
+      "url": "https://agent-plugins.org/llms.txt",
+      "split": "frontmatter",
+      "description": "Agent Plugins (portable plugin format for Skills and MCP servers)"
+    },
+    "openai-plugins": {
+      "url": "https://developers.openai.com/plugins/llms-full.txt",
+      "split": "h1",
+      "skip_empty": true,
+      "description": "OpenAI Plugins (ChatGPT / Codex plugins: MCP server, UI, skills, submission)",
+      "index_url": "https://developers.openai.com/plugins/llms.txt"
+    },
+    "openai-api-docs": {
+      "url": "https://developers.openai.com/api/docs/llms-full.txt",
+      "split": "h1",
+      "skip_empty": true,
+      "description": "OpenAI API docs (developers.openai.com/api/docs)",
+      "index_url": "https://developers.openai.com/api/docs/llms.txt"
+    },
+    "acp": {
+      "url": "https://agentclientprotocol.com/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Agent Client Protocol (ACP)"
+    },
+    "cline": {
+      "url": "https://docs.cline.bot/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Cline"
+    },
+    "factory": {
+      "url": "https://docs.factory.com/llms-full.txt",
+      "split": "h1",
+      "description": "Factory (Droid)",
+      "index_url": "https://docs.factory.com/llms.txt"
+    },
+    "devin": {
+      "url": "https://docs.devin.ai/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Devin"
+    },
     "cloudflare-workers": {
       "url": "https://developers.cloudflare.com/workers/llms-full.txt",
       "split": "frontmatter",

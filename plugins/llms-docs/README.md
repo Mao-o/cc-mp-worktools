@@ -10,7 +10,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | `researching-claude-docs` | Claude Code / Claude Developer Platform | `search` (URL-join 統合検索) → `content <page_ref> "<heading_path>"` |
 | `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>"` |
 | `researching-firebase` | Firebase (firebase.google.com) | `search` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>"` |
-| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
+| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
 3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
 サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
@@ -195,13 +195,43 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `codex` | OpenAI Codex + ChatGPT docs (`learn.chatgpt.com/docs/llms-full.txt`。Codex の CLI / IDE / cloud / SDK に加え、ChatGPT の desktop app / Work / 管理のページを含む) | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
+| `agent-plugins` | Agent Plugins (Skills と MCP server を束ねる plugin の共通形式。`agent-plugins.org/llms.txt` が全文を含む) | なし (13 ページ) |
+| `openai-plugins` | OpenAI Plugins (ChatGPT / Codex の plugin: MCP server・UI・skills・提出。`developers.openai.com/plugins`) | 一部 (`llms.txt` とタイトルで突き合わせ。31 中 30) |
+| `openai-api-docs` | OpenAI API docs (`developers.openai.com/api/docs`) | 一部 (同上。232 中 220) |
+| `acp` | Agent Client Protocol (ACP) | あり |
+| `cline` | Cline | あり |
+| `factory` | Factory (Droid) | あり (`llms.txt` とタイトルで突き合わせ。104 中 104) |
+| `devin` | Devin | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 
-**取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする):
-`agentskills.io` / `bun.com` / `developers.cloudflare.com` / `docs.ollama.com` / `hono.dev` /
-`learn.chatgpt.com` / `modelcontextprotocol.io` / `nextjs.org` / `orm.drizzle.team` / `render.com` /
-`vercel.com` / `vite.dev` / `vitest.dev` / `zod.dev`。preset の追加・移転のたびにこの一覧を
-presets.json に合わせる (ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
+**取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
+1 行に 1 ホスト、次のコードブロックはテストが読む):
+
+```text
+agent-plugins.org
+agentclientprotocol.com
+agentskills.io
+bun.com
+developers.cloudflare.com
+developers.openai.com
+docs.cline.bot
+docs.devin.ai
+docs.factory.com
+docs.ollama.com
+hono.dev
+learn.chatgpt.com
+modelcontextprotocol.io
+nextjs.org
+orm.drizzle.team
+render.com
+vercel.com
+vite.dev
+vitest.dev
+zod.dev
+```
+
+preset の追加・移転のたびにこの一覧を presets.json に合わせる (`presets.json` との集合の一致は suite が確かめる。
+ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
 専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) は
 この一覧に含まない。
 
@@ -258,9 +288,10 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | frontmatter に相対 `url:` のみ | 上に加えて `frontmatter_key: url` + `url_base` | Vite / Vitest |
 | frontmatter に `title:`、URL は本文のリンク、定型行つき | `split: frontmatter` + `page_url: "link:View as Markdown"` + `drop_lines` | Cloudflare の製品別ファイル |
 | `Source: <url>` 行で区切る | `split: line` + `line_prefix: "Source: "` | Drizzle ORM |
-| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama |
+| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama / ACP / Cline / Devin |
 | frontmatter を長い横線で囲む | `split: frontmatter` + `frontmatter_delimiter` | Vercel |
-| H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex |
+| H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex / OpenAI Plugins・API docs / Factory |
+| frontmatter (`title:` / `description:`) で区切り URL なし | `split: frontmatter` (既定の `frontmatter_key: title`) | Agent Plugins |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する

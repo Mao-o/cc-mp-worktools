@@ -274,6 +274,28 @@ preset の `url` / `index_url` を移転先にし、`description` を更新し�
 - 他の 14 件の Cloudflare 製品と、`index_url` を持つ他の presets の取得先は、点検スクリプト
   (`scripts/check-preset-urls.py`) の実行で 200 のままだった
 
+### 2026-10-04 実測 (0.30.0 で足した 7 サイト)
+
+利用記録で、skill を使ったあとに WebFetch へ戻った先 (Cursor / Codex の plugin docs) を優先して足した。
+`--file` / `--index-file` で取得したファイルを流し、独立に数えた値と突き合わせた。
+
+| サイト | 区切り | ページ URL | 分割したページ数 | 独立に数えた値 |
+|---|---|---|---|---|
+| Agent Plugins (`agent-plugins.org/llms.txt`。`llms-full.txt` は 404 で、`llms.txt` が全文) | frontmatter (`title:` / `description:`) | なし | 13 | `title:` 行 13 |
+| OpenAI Plugins (`developers.openai.com/plugins/llms-full.txt`) | H1 (先頭は索引の見出しだけのページ) | `index_url` で 30 | 31 | `llms.txt` の項目から、タイトルが一致する 30 |
+| OpenAI API docs (`developers.openai.com/api/docs/llms-full.txt`, 5MB) | 同上 | `index_url` で 220 | 232 | 同上 220 |
+| ACP (`agentclientprotocol.com`) | H1 の直後に `Source: <url>` 行 | `Source:` 行 | 126 | H1 の次の行が `Source:` の数 126 |
+| Cline (`docs.cline.bot`) | 同上 | 同上 | 113 | 同上 113 |
+| Devin (`docs.devin.ai`, 3MB) | 同上 | 同上 | 592 | 同上 592 |
+| Factory (`docs.factory.com`) | H1 | `index_url` で 104 | 104 | `llms.txt` の項目 105 のうちタイトルが一致する 104 |
+
+ACP の `llms-full.txt` は schema のフィールドの required 属性を落としている (サイト側の欠落。
+必須かどうかは ACP の schema 本体で確かめる)。
+
+見送ったもの: AWS Bedrock。`docs.aws.amazon.com/llms-full.txt` は各サービスの案内ページへのリンク一覧
+(本文なし)、`/bedrock/latest/userguide/llms.txt` はページごとの `.md` へのリンク集で、
+`llms-full.txt` は 404 (ページごとに別ファイル) のため、この loader の 3 形状のどれでも読めない。
+
 ## 3. 需要の根拠
 
 `llms.txt` を公開していて、かつこの plugin が使われる環境で実際に依存しているもの:

@@ -2,8 +2,8 @@
 name: researching-library-docs
 description: |
   Next.js / Vite / Vitest / Drizzle ORM / Zod / Hono / Bun / Vercel / Render /
-  MCP (Model Context Protocol) / OpenAI Codex / Ollama / Agent Skills (SKILL.md 仕様) / Cloudflare (Workers / D1 / R2 / KV / Durable Objects / Pages / Queues / Workers AI /
-  Vectorize / Hyperdrive / Agents / Workflows / AI Gateway / Browser Rendering / Containers)
+  MCP (Model Context Protocol) / OpenAI Codex / OpenAI Plugins・API docs / Ollama / Agent Skills (SKILL.md 仕様) /
+  Agent Plugins / ACP (Agent Client Protocol) / Cline / Factory / Devin / Cloudflare 製品別 (Workers / D1 ほか)
   の公式ドキュメント調査スキル。各サイトの llms-full.txt を段階的に読み込み、API 仕様・
   設定・コード例を verbatim で取得する。Skill ツールで起動し、メインの会話コンテキストを
   消費しない。これらの仕様確認には WebFetch ではなくこのスキルを使う (要約モデル経由では
@@ -16,11 +16,11 @@ when_to_use: |
   `next` / `vite` / `vitest` / `drizzle-orm` / `zod` / `hono` /
   `@modelcontextprotocol/sdk`, or vercel.json / render.yaml / bunfig.toml.
   Triggers: "Next.js", "App Router", "Vite", "Vitest", "Drizzle", "drizzle-orm",
-  "Zod", "Hono", "Bun", "Vercel", "Render", "MCP", "Model Context Protocol",
-  "Codex CLI", "Ollama", "Cloudflare Workers", "wrangler", "D1", "R2", "Workers KV",
+  "Zod", "Hono", "Bun", "Vercel", "Render", "MCP", "Codex CLI", "Ollama", "Cloudflare Workers", "wrangler", "D1", "R2", "Workers KV",
   "Durable Objects", "Cloudflare Pages", "Queues", "Workers AI", "Vectorize",
   "Hyperdrive", "Cloudflare Agents", "Cloudflare Workflows", "AI Gateway",
   "Browser Rendering", "Cloudflare Containers", "agentskills.io", "SKILL.md spec",
+  "Agent Plugins", "OpenAI Plugins", "OpenAI API", "ACP", "Cline", "Factory Droid", "Devin",
   "researching-library-docs"
 argument-hint: "[source] <question>"
 context: fork
@@ -31,7 +31,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # ライブラリ公式ドキュメント調査 (汎用 llms-full.txt)
@@ -60,6 +60,13 @@ Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claud
 | OpenAI Codex (CLI / IDE / cloud / SDK) と ChatGPT の docs (desktop app / Work / 管理) | `codex` |
 | Ollama | `ollama` |
 | Agent Skills (`SKILL.md` の仕様、agentskills.io) | `agentskills` |
+| Agent Plugins (Skills と MCP server を束ねる plugin の共通形式、agent-plugins.org) | `agent-plugins` |
+| OpenAI Plugins (ChatGPT / Codex の plugin: MCP server・UI・skills・提出) | `openai-plugins` |
+| OpenAI API docs (developers.openai.com/api/docs) | `openai-api-docs` |
+| Agent Client Protocol (ACP) | `acp` |
+| Cline | `cline` |
+| Factory (Droid) | `factory` |
+| Devin | `devin` |
 | Cloudflare の各製品 | `cloudflare-<製品>`: `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` |
 
 - 引数の先頭語が上の source 名、または `sources` の一覧にある名前ならそれを使う

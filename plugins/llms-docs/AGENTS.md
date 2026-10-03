@@ -14,6 +14,7 @@ preset を置き換える。
 
 - 対応する形状のサイトで、ページの分割・タイトル・URL が誤る (実測した Next.js / Vite /
   Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills /
+  Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin /
   Cloudflare 製品別ファイルと同じ形のもの)。
   本文の水平線やコードブロック内の見本を区切りと誤認する、`drop_lines` がコードブロック内の
   行を消す、ページ URL を読む前に行を消す、など
