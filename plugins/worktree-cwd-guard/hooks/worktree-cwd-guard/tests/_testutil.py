@@ -19,10 +19,12 @@ if str(_PKG_DIR) not in sys.path:
 # `.git/objects/17` に loose object が 2 件あるだけで、小さな repo でも repack が始まりうる。
 # しかも `--detach` は背景へ切り離すので、commit は待たずに戻る。その repack が
 # `.git/objects/pack` に書いている間に `TemporaryDirectory.cleanup()` が走ると、tearDown が
-# `Directory not empty` で落ちる (CI の flaky。object の hash 次第なので偶発的)。git 2.50 は
-# 同じ条件でも起きないので、ローカルの実行だけでは気付けない。
+# `Directory not empty` で落ちる (object の hash 次第なので偶発的。同じ作りの別 plugin の suite が
+# CI で実際に落ちた。この suite ではまだ観測していない)。git 2.50 は同じ条件でも起きないので、
+# gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない。
 #
-#   maintenance.auto=false / gc.auto=0: そもそも自動 maintenance を起動しない
+#   maintenance.auto=false: そもそも自動 maintenance を起動しない
+#   gc.auto=0: 起動された maintenance の gc を走らせない (git 2.50 では、これだけでは起動は止まらない)
 #   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
 #     (commit が戻る前に終わる)
 #
@@ -53,9 +55,16 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return env
 
 
-# 開発者の ~/.gitconfig (color.ui=always / diff.external / core.hooksPath 等) でテストが揺れないよう、
-# git にグローバル/システム設定を読ませない。global の代わりに読ませるのは tests 配下の fixture で、
-# 自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と `receive.autogc`) だけを持つ。
+# 開発者の ~/.gitconfig と system の config でテストが揺れないよう (例: core.hooksPath はテストの
+# commit / worktree add で開発者の hook を走らせ、worktree.useRelativePaths は linked worktree の
+# `.git` ファイルの gitdir 行を相対パスにする。hook はこのファイルを直接読む)、git に global / system
+# の設定を読ませない。global の代わりに読ませるのは tests 配下の fixture で、自動 maintenance を止める
+# 設定 (`NO_BACKGROUND_GIT_SETTINGS` と `receive.autogc`) だけを持つ。
+#
+# 既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら `~/.config/git/ignore`) はこの指定では
+# 外れない。この suite は git の未追跡の一覧・status・diff を読まず、`make_repo` が add するのも README
+# だけなので、HOME / XDG_CONFIG_HOME はテストクラスごとには向けない (向けるのは、「patch していない」
+# 状態を作る `test_hermetic_env.py` の床だけ)。
 #
 # 止める経路は 2 本あり、どちらも外さない:
 #   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない
