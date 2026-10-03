@@ -20,8 +20,9 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   (現在値を取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を含むだけの
   厳密な JSON も対象になる (fail-closed の代償)
 - 弾く条件の文 (pin-env の「固定できません」と共通) は網羅と言わない書き方にした。Python の
-  json が読めない形には、上限が版と設定で変わるもの (桁の多すぎる整数) もあり、並べていない
-  (マージ前レビューの指摘)
+  json が読めない形には、上限が版と設定で変わるもの (桁の多すぎる整数) もあり、並べていない。
+  deny の締めの文も、`.firebaserc` を「これらに当たらない形にすると確かめられることがあります」
+  と言い切らない (pin-env の「案内できることがあります」と同じ。マージ前レビューの指摘)
 - 「--project の行き先を確かめられません」の deny の「--project を外す」案内は、外すとコマンドが
   アクティブな project で動く (指定していた project ではなくなる) ことを言う。意図した project が
   アクティブかを確かめてから外すよう案内する (マージ前レビューの指摘)
@@ -50,10 +51,24 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   `firebase use` が実体のパスで記録した切替先を CLI が引き当て損ねて、別の project で答えうる
   (マージ前レビューの指摘)
 - `--config` 付きのコマンドの deny は、切替をコマンドの形 (`firebase use <期待値>`) で案内
-  しない。firebase-tools は切替先を project root ごとに記録するので、そのファイルのある
-  ディレクトリに切替先が記録されていると、プロジェクトのディレクトリで切り替えても変わらず、
-  案内どおりにしても同じ deny を繰り返していた。そのディレクトリで切り替えるよう文で案内する
-  (「単独で実行」の注記も付かない。マージ前レビューの指摘)
+  しない。firebase-tools は切替先をディレクトリごとに記録し、`--config` 付きのコマンドはその
+  ファイルのあるディレクトリから親へ探した切替先で動く。そのディレクトリがプロジェクトの
+  ディレクトリと別で、そこに切替先が記録されていると、プロジェクトのディレクトリで切り替えても
+  変わらず、案内どおりにしても同じ deny を繰り返していた。そのディレクトリで切り替えるよう文で
+  案内する。文の括弧の説明は、ファイルがプロジェクトのディレクトリにあるとき
+  (`-c firebase.prod.json` など) も成り立つ書き方にする (マージ前レビューの指摘)
+- この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`) は、許容形の値だけを示す
+  (外れていれば「表示しない値」)。CLI が無いとき現在値はリポジトリの `.firebaserc` から解決され、
+  値が切替コマンドの形 (`x firebase use other` など) だと、示しただけで「単独で実行」の注記が
+  付いていた (案内していないコマンドに)。現在値・期待値のどちらの側でも注記は付かない。現在値の
+  表示は、`--config` の無い不一致の deny も同じにする (表示だけの変更。マージ前レビューの指摘)
+- CLI が無いときのローカル設定の解決は、`--config` 付きのコマンドでは切替先を、指定した
+  ファイルのあるディレクトリ (symlink を解かないパス) の親方向だけで探す (firebase-tools と
+  同じ)。実体のパスでも探していたので、`--config` のパスが symlink を通るとき (symlink を
+  通る絶対パスや、symlink のディレクトリを通る相対パス)、firebase-tools が見ない切替先
+  (そのディレクトリで切り替えると実体のパスで記録される) で照合して allow しえた (マージ前
+  レビューの指摘)。既知の制限: この形では、案内どおりそのディレクトリで切り替えても効かない
+  ことがある (hook は firebase-tools と同じ切替先で照合するので、deny のまま)
 - 値が変数展開などで静的に解決できないときは、他のコンテキスト指定 flag と同じく既定の root で
   照合する
 
@@ -73,12 +88,15 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップしていた
   (epoch は検証のたびに読むので、置かれている間はその service のすべてのコマンドで。マージ前
   レビューの指摘)
+- 既知の制限: 存在確認で stat できない accounts.local.json (長すぎる名前を指す symlink など) は、
+  Python 3.13 以前ではまだ「内部エラーのため検証をスキップ」になる (別の変更で直す)
 
 ### Tests
 
 - `.firebaserc` の読み方: firebase-tools と同じ行き先になる厳密な JSON・コメント・alias の
   キーの中の U+FEFF・確かめられない形のすべてで `--project` が deny になり、コマンドを案内
-  せず、外すと行き先が変わることを言う (`TestProjectFlagResolvesLikeFirebaseTools`)、
+  せず、外すと行き先が変わることと、直し方を言い切らないことを言う
+  (`TestProjectFlagResolvesLikeFirebaseTools`)、
   ローカル設定の解決と空文字の alias の数え方 (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
   入れ子の深い `.firebaserc` で検証をスキップしない (`TestDeepFirebasercDoesNotSkipVerification`。
   判定に加えて理由も見る)、stat できない `.firebaserc` (`TestFirebasercThatCannotBeStatted`)
@@ -86,15 +104,21 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   cwd・symlink の下のプロジェクトでの相対パスの解決・ローカル設定の起点・見つからないファイルの
   deny (`TestFirebaseConfigOption`)、dispatcher での全記法と注記
   (`TestFirebaseConfigOptionRouting`)、deny → そのディレクトリで切り替える → 同じコマンドが
-  通る、の往復 (CLI の有無・scalar / dict の期待値・切替先が無いとき。許容形から外れた期待値では
-  注記を付けない。`TestFirebaseConfigSwitchGuidance`)
+  通る、の往復 (CLI の有無・scalar / dict の期待値・切替先が無いとき・ファイルがプロジェクトの
+  ディレクトリにあるとき。許容形から外れた期待値・現在値は示さず、注記を付けない。
+  `TestFirebaseConfigSwitchGuidance`)、CLI が無いとき symlink を通る `--config` (絶対パス /
+  symlink のディレクトリを通る相対パス) で firebase-tools と同じ切替先を引く
+  (`TestFirebaseConfigThroughASymlinkWithoutCli`)
 - 読めないファイル: accounts.local.json の入れ子の上限 (`TestAccountsFile`)、成功 cache の
   entry / epoch (読めない・stat できない。`test_cache.py`)、`__main__` を実プロセスで起こす
   e2e (UTF-8 でない・入れ子が深い・桁の多すぎる整数のある accounts.local.json と旧パス、入れ子の
   深い `.firebaserc`、読めない成功 cache。どれも warn (スキップ) にならない)
 - stat できないファイルのテストは `Path.is_file` を Python 3.13 までの挙動に差し替え、3.14 以降
-  でも同じ失敗を再現する
-- 1,317 → 1,347 件
+  でも同じ失敗を再現する。差し替えは本物と同じ入力で比べて同じに振る舞う (違うのは 3.14 で
+  本物が変わった「stat できないパス」だけ。`TestIsFileLikePy313`)。使う側は、本物がその版で
+  同じ fixture にどう振る舞うか (3.13 までは例外、3.14 からは False) も前提として確かめる
+  (マージ前レビューの指摘)
+- 1,317 → 1,351 件
 
 ## 0.17.1
 

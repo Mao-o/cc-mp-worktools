@@ -27,8 +27,9 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
    (fail-closed。他 service の timeout と同じ扱い)。
 
 コマンドの `--config` / `-c` は project root を指定したファイルのあるディレクトリに移す
-(firebase-tools の detectProjectRoot と同じ。相対パスは symlink を解いた実体のパスから解決する)。
-1. の cwd と 2. の起点はそこになる。
+(firebase-tools の detectProjectRoot と同じ。相対パスは project_dir を symlink を解いた実体の
+パスにしてから解決する)。1. の cwd と 2. の起点はそこになる。2. の configstore は、そのパスの
+親方向だけを探す (実体のパスは試さない。firebase-tools と同じ)。
 """
 from __future__ import annotations
 
@@ -383,12 +384,18 @@ def _configstore_path(env=None) -> Path | None:
     return Path(base) / "configstore" / "firebase-tools.json"
 
 
-def _from_configstore(root: str, env=None) -> str:
+def _from_configstore(root: str, env=None, exact: bool = False) -> str:
     """configstore の activeProjects から `firebase use` の切替先 (alias または project ID) を返す。
 
     firebase-tools の configstoreProject と同じく root から親方向に探索する
     (論理パスと実体パスの両方を試す)。このファイルには認証トークンも含まれるため、
     JSON として読んだ後 activeProjects 以外は使わず、内容をメッセージに出さない。
+
+    exact (`--config` 付きのコマンド) のときは root からだけ探し、実体パスは試さない。root は
+    firebase-tools の projectRoot そのもの (`path.resolve(cwd, config)` の dirname。symlink を
+    解かない) で、firebase-tools もそのパスの親方向だけを探す。実体パスでも探すと、
+    `--config` のパスが symlink を通るとき、firebase-tools が見ない切替先 (`firebase use` が
+    実体のパスで記録したもの) を拾い、別の project で照合して allow しうる。
     """
     try:
         path = _configstore_path(env)
@@ -402,7 +409,7 @@ def _from_configstore(root: str, env=None) -> str:
         return ""
     starts = [os.path.abspath(root)]
     real = os.path.realpath(root)
-    if real not in starts:
+    if not exact and real not in starts:
         starts.append(real)
     for start in starts:
         cur = start
@@ -417,13 +424,13 @@ def _from_configstore(root: str, env=None) -> str:
     return ""
 
 
-def _from_local(root: str, env=None) -> str:
+def _from_local(root: str, env=None, exact: bool = False) -> str:
     """CLI が答えられないとき、firebase-tools と同じローカル設定から現在値を解決する。
 
     applyRC と同じ順: configstore の切替先を `.firebaserc` の alias で解決
     (alias に無ければ project ID そのもの) → alias が 1 つならその値 → `default`。
     root は project root (`firebase.json` のある root、無ければ project_dir。`--config` 付きの
-    コマンドではそのファイルのあるディレクトリ)。
+    コマンドではそのファイルのあるディレクトリ)。exact は `_from_configstore` を参照。
 
     `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ "" (解決しない)。
     alias の行き先を取り違えると、firebase-tools と違う project を現在値として照合してしまう。
@@ -432,7 +439,7 @@ def _from_local(root: str, env=None) -> str:
     projects = _read_firebaserc(root)
     if projects is None:
         return ""
-    switched = _from_configstore(root, env)
+    switched = _from_configstore(root, env, exact)
     if switched:
         return _resolve_alias(projects, switched)
     if len(projects) == 1:
@@ -452,7 +459,7 @@ def _resolve(root: str, env=None, config: str | None = None) -> tuple[str, str |
         return "", err
     if current:
         return current, None
-    return _from_local(root, env), None
+    return _from_local(root, env, exact=config is not None), None
 
 
 def get_active_account(project_dir: str) -> str | None:
@@ -482,14 +489,15 @@ _SKIPPED_LINE = (
 # (検出コマンドの行に出る)。`--project` を外したコマンドは、`.firebaserc` を読む CLI 自身に
 # 現在値を聞いて照合する。ただし外すとコマンドの行き先がアクティブな project に変わる (指定して
 # いた project では動かない) ので、それを言う。`firebase use` の語は入れない (切替を案内した
-# ことになり、dispatcher の注記の判定にも当たる)。
+# ことになり、dispatcher の注記の判定にも当たる)。条件の列挙は網羅ではないので、締めの文も
+# 「当たらない形にすれば確かめられる」とは言い切らない (pin-env の文と同じ)。
 _PROJECT_FLAG_UNCONFIRMED = (
     "Firebase: --project の行き先を確かめられません。firebase-tools は --project の値を"
     " .firebaserc の alias として先に解決しますが、.firebaserc を firebase-tools と同じ内容に"
     f"読めると確かめられません ({FIREBASERC_UNCONFIRMED_CONDITIONS}に当たる)。"
     "--project を外すと、コマンドはアクティブな project で動きます (意図した project が"
     "アクティブかを確かめてから外してください)。または .firebaserc をこれらに当たらない形に"
-    "してください"
+    "すると確かめられることがあります"
 )
 # `--config` / `-c` のファイルが見つからないときの deny (v0.18.0)。firebase-tools はファイルが
 # 無ければコマンドを始めないが、hook の見立て (作業ディレクトリ = プロジェクトのディレクトリ) が
@@ -502,32 +510,43 @@ _CONFIG_NOT_FOUND = (
 )
 # `--config` / `-c` 付きのコマンドの deny で切替を案内する文 (v0.18.0)。firebase-tools は
 # `firebase use` の切替先を project root ごとに記録し、`--config` 付きのコマンドはそのファイルの
-# あるディレクトリの切替先で動く (そこに無ければ親方向に探す)。そこに切替先が記録されていると、
-# プロジェクトのディレクトリで `firebase use <期待値>` を打っても変わらず、案内どおりに切り替えても
-# 同じ deny を繰り返していた。コマンドの形では案内しない (REMEDIATION_PATTERNS に当たらない文に
-# する。dispatcher の「単独で実行」の注記も付かない)。
+# あるディレクトリから親方向に探した切替先で動く。そのディレクトリがプロジェクトのディレクトリと
+# 別で、そこに切替先が記録されていると、プロジェクトのディレクトリで `firebase use <期待値>` を
+# 打っても変わらず、案内どおりに切り替えても同じ deny を繰り返していた。コマンドの形では案内
+# しない (REMEDIATION_PATTERNS に当たらない文にする)。括弧の中は、そのファイルがプロジェクトの
+# ディレクトリにあるときも成り立つ文にする。この deny の先頭行に示す値 (`現在=` と `期待=`) も
+# 許容形のものだけにするので、dispatcher の「単独で実行」の注記は付かない (`_shown_current` /
+# `_shown_expected`)。`--config` のパスが symlink を通るときは、そのディレクトリで切り替えても
+# 効かないことがある (firebase-tools は symlink を解かないパスで探す。README の既知の制限)。
 _SWITCH_IN_CONFIG_DIR = (
     "--config のファイルのあるディレクトリで、期待した project に切り替えてください"
-    " (そのディレクトリに切替先が記録されていると、プロジェクトのディレクトリで切り替えても"
-    "変わりません)"
+    " (切替先はディレクトリごとに記録され、--config 付きのコマンドはそのファイルのあるディレクトリ"
+    "から親へ探した切替先で動きます)"
 )
+# deny の先頭行で、許容形 (`shell_word.WORD`) から外れる値の代わりに示す文。
+_NOT_SHOWN = "(表示しない値)"
 
 
-def _config_dir_switch(expected) -> str:
-    """`--config` 付きのコマンドの deny で、切替を案内する文 (コマンドの形をとらない)。
+def _shown_current(value: str) -> str:
+    """不一致の deny の先頭行の `現在=` に示す値。許容形から外れる値は示さない。
 
-    期待値のどれかが許容形 (`shell_word.WORD`) から外れるときは `_CHECK_BY_HAND` を添える。
-    不一致の deny の先頭行は期待値をそのまま示すので、値が切替コマンドの形
-    (`x; firebase use other`) だと dispatcher の注記の判定に当たる (`shell_word.UNSAFE` を
-    含む deny には付けない。コマンドで案内する deny と同じ契約)。
+    CLI が無いとき (npx 等)、現在値はリポジトリの `.firebaserc` から解決され、形を確かめて
+    いない。値が切替コマンドの形 (`x firebase use evil`) だと、示しただけで dispatcher の
+    「単独で実行」の注記の判定に当たり、案内していないコマンドに注記が付く。CLI の答えは
+    空白を含まない単一トークンなので当たらない。
     """
-    if isinstance(expected, dict):
-        values = [v for v in expected.values() if isinstance(v, str) and v]
-    else:
-        values = [expected]
-    if all(shell_word.arg(value) is not None for value in values):
-        return _SWITCH_IN_CONFIG_DIR
-    return f"{_SWITCH_IN_CONFIG_DIR}。{_CHECK_BY_HAND}"
+    return value if shell_word.arg(value) is not None else _NOT_SHOWN
+
+
+def _shown_expected(values) -> str:
+    """`--config` 付きのコマンドの deny の先頭行の `期待=` に示す値 (`, ` 区切り)。
+
+    許容形から外れる値は示さない (`_shown_current` と同じ理由)。この deny は期待値の形に関係
+    なくコマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`) は添えない。
+    """
+    return ", ".join(
+        sorted({value if shell_word.arg(value) is not None else _NOT_SHOWN for value in values})
+    )
 
 
 def _target(value) -> str | None:
@@ -585,7 +604,10 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     探す起点、`firebase use` の cwd) を、指定したファイルのあるディレクトリにする
     (firebase-tools の detectProjectRoot と同じ)。ファイルが見つからなければ deny する。
     `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのディレクトリで
-    切り替えるよう文で案内する (`_SWITCH_IN_CONFIG_DIR`)。
+    切り替えるよう文で案内する (`_SWITCH_IN_CONFIG_DIR`)。先頭行に示す現在値と期待値も
+    許容形のものだけにする (`_shown_current` / `_shown_expected`)。CLI から現在値を取れない
+    ときのローカル設定の解決は、configstore を root (firebase-tools の projectRoot) からだけ
+    探す (`_from_configstore` の exact)。
     """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
     if isinstance(expected, dict):
@@ -658,7 +680,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             )
         head = "Firebase: 現在のプロジェクトを取得できません。"
         if config_file is not None:
-            return f"{head}ログインしたうえで、{_config_dir_switch(expected)}。"
+            return f"{head}ログインしたうえで、{_SWITCH_IN_CONFIG_DIR}。"
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
@@ -677,22 +699,28 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     if isinstance(expected, dict):
         if current in valid:
             return None
+        if config_file is not None:
+            return (
+                f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
+                f"期待={_shown_expected(valid)} のいずれか\n{_SWITCH_IN_CONFIG_DIR}"
+            )
         expected_display = ", ".join(sorted(set(valid)))
         head = (
-            f"Firebase プロジェクト不一致: 現在={current}, "
+            f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
             f"期待={expected_display} のいずれか\n"
         )
-        if config_file is not None:
-            return f"{head}{_config_dir_switch(expected)}"
         lines = _alias_lines(expected, "firebase use")
         if not lines:
             return f"{head}{_CHECK_BY_HAND}"
         return f"{head}切り替え:\n" + "\n".join(lines)
 
     if current != expected:
-        head = f"Firebase プロジェクト不一致: 現在={current}, 期待={expected}"
         if config_file is not None:
-            return f"{head} — {_config_dir_switch(expected)}"
+            return (
+                f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
+                f"期待={_shown_expected([expected])} — {_SWITCH_IN_CONFIG_DIR}"
+            )
+        head = f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, 期待={expected}"
         target = _target(expected)
         if target is None:
             return f"{head} — {_CHECK_BY_HAND}"

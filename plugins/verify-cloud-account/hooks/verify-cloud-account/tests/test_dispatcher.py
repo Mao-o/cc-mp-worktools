@@ -647,18 +647,12 @@ class TestFirebaseConfigOptionRouting(BaseWithTmpProject):
                 self.assertNotIn(shell_word.UNSAFE, reason)
 
 
-class TestFirebaseConfigSwitchGuidance(BaseWithTmpProject):
-    """`--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない (v0.18.0)。
+class _FirebaseConfigFixture(BaseWithTmpProject):
+    """`--config` 付きのコマンドを dispatcher に通す準備 (v0.18.0)。
 
-    firebase-tools は `firebase use` の切替先を project root ごとに記録し、`--config` 付きの
-    コマンドはそのファイルのあるディレクトリの切替先で動く。そこに切替先が記録されていると、
-    案内していた `firebase use <期待値>` (プロジェクトのディレクトリのキーに書く) では変わらず、
-    案内どおりにしても同じ deny を繰り返していた (マージ前レビューの指摘)。往復で確かめる:
-    deny の理由に切替コマンドも単独実行の注記も無い → そのディレクトリで切り替える (その形は
-    hook を通る。切り替えた結果は configstore のそのディレクトリの実体のパスのキーを書き換えて
-    再現する) → 同じコマンドが通る。CLI がある (configstore を読む firebase-tools の代わり) /
-    無い (ローカル設定の解決) の両方。末尾に `-c` を付けた切替 (`firebase use <x> -c <path>`) は
-    self-remediation に当たらず通常検証に落ちる (このクラスでは扱わない)。
+    プロジェクトのディレクトリと sub/ に firebase.json を置き、configstore を tmp に向ける。
+    `_record` は `firebase use` の切替先を記録し、`_fake_cli` は非 TTY の `firebase use` の
+    代わりに configstore を読む。
     """
 
     _COMMAND = "firebase deploy -c sub/firebase.json"
@@ -687,7 +681,8 @@ class TestFirebaseConfigSwitchGuidance(BaseWithTmpProject):
 
     def _fake_cli(self, argv, **kwargs):
         """非 TTY の `firebase use` の代わり: cwd (`--config` のファイルのあるディレクトリ) から
-        親方向に切替先を探し、あれば 1 行で出す。無ければ非ゼロ終了。"""
+        親方向に切替先を探し、あれば 1 行で出す。無ければ非ゼロ終了。cwd の実体のパスで探すので、
+        symlink を通る `--config` (firebase-tools は symlink を解かないパスで探す) には使わない。"""
         active = {}
         if self._store.exists():
             active = json.loads(self._store.read_text(encoding="utf-8"))["activeProjects"]
@@ -700,12 +695,28 @@ class TestFirebaseConfigSwitchGuidance(BaseWithTmpProject):
                 return SimpleNamespace(stdout="", stderr="", returncode=1)
             cur = parent
 
-    def _dispatch(self, with_cli: bool):
+    def _dispatch(self, with_cli: bool, command: str | None = None):
         run = self._fake_cli if with_cli else FileNotFoundError("firebase")
         with self.isolated_cache(), mock.patch("subprocess.run", side_effect=run), mock.patch(
             "services.firebase.shutil.which", return_value="/usr/bin/firebase"
         ):
-            return dispatch(self._COMMAND, str(self.project_dir))
+            return dispatch(command or self._COMMAND, str(self.project_dir))
+
+
+class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
+    """`--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない (v0.18.0)。
+
+    firebase-tools は `firebase use` の切替先を project root ごとに記録し、`--config` 付きの
+    コマンドはそのファイルのあるディレクトリから親方向に探した切替先で動く。そのディレクトリが
+    プロジェクトのディレクトリと別で、そこに切替先が記録されていると、案内していた
+    `firebase use <期待値>` (プロジェクトのディレクトリのキーに書く) では変わらず、案内どおりに
+    しても同じ deny を繰り返していた (マージ前レビューの指摘)。往復で確かめる: deny の理由に
+    切替コマンドも単独実行の注記も無い → そのディレクトリで切り替える (その形は hook を通る。
+    切り替えた結果は configstore のそのディレクトリの実体のパスのキーを書き換えて再現する) →
+    同じコマンドが通る。CLI がある (configstore を読む firebase-tools の代わり) / 無い (ローカル
+    設定の解決) の両方。末尾に `-c` を付けた切替 (`firebase use <x> -c <path>`) は
+    self-remediation に当たらず通常検証に落ちる (このクラスでは扱わない)。
+    """
 
     def test_switching_in_the_config_directory_lets_the_command_through(self):
         switched = {self.project_dir: "right-project", self.sub: "wrong-project"}
@@ -745,11 +756,42 @@ class TestFirebaseConfigSwitchGuidance(BaseWithTmpProject):
                     self._record({**recorded, self.sub: "right-project"})
                     self.assertIsNone(self._dispatch(with_cli))
 
-    def test_no_note_when_an_expected_value_is_not_in_the_allowed_shape(self):
-        """期待値が許容形から外れるときは「手で確認」の文を添え、注記を付けない。
+    def test_config_file_in_the_project_directory(self):
+        """`-c` のファイルがプロジェクトのディレクトリにある形 (設定ファイルを root に並べる) でも、
+        deny の文は成り立ち、案内どおりにそのディレクトリ (= プロジェクトのディレクトリ) で切り
+        替えると通る。旧文面の括弧「(そのディレクトリに切替先が記録されていると、) プロジェクトの
+        ディレクトリで切り替えても変わりません」は、この形では成り立たなかった (マージ前レビューの
+        指摘)。"""
+        (self.project_dir / "firebase.prod.json").write_text("{}", encoding="utf-8")
+        command = "firebase deploy -c firebase.prod.json"
+        self._write_accounts({"firebase": "right-project"})
+        for with_cli in (True, False):
+            with self.subTest(with_cli=with_cli):
+                self._record({self.project_dir: "wrong-project"})
+                out = self._dispatch(with_cli, command)["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(self._GUIDE, reason)
+                claims = "プロジェクトのディレクトリで切り替えても変わりません" in reason
+                with mock.patch("subprocess.run") as run:
+                    self.assertIsNone(dispatch("firebase use right-project", str(self.project_dir)))
+                run.assert_not_called()
+                self._record({self.project_dir: "right-project"})  # firebase use が書くキー
+                passes = self._dispatch(with_cli, command) is None
+                self.assertTrue(passes)
+                self.assertFalse(
+                    claims and passes,
+                    "deny は「プロジェクトのディレクトリで切り替えても変わらない」と言うが、切り替えると通る",
+                )
 
-        不一致の deny の先頭行は期待値をそのまま示すので、値が切替コマンドの形だと注記の判定に
-        当たる (コマンドで案内する deny の `test_no_note_when_the_value_was_not_guided` と同じ契約)。
+    def test_no_note_when_an_expected_value_is_not_in_the_allowed_shape(self):
+        """期待値が許容形から外れるときは、先頭行の `期待=` にその値を示さず (`(表示しない値)`)、
+        注記を付けない。
+
+        値をそのまま示すと、切替コマンドの形の値が注記の判定に当たる (コマンドで案内する deny の
+        `test_no_note_when_the_value_was_not_guided` と同じ契約)。この deny は期待値の形に関係なく
+        コマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`。UNSAFE の文) は添えない
+        (添える理由が成り立たない。マージ前レビューの指摘)。
         """
         self._record({self.sub: "wrong-project"})
         for expected in (
@@ -763,8 +805,80 @@ class TestFirebaseConfigSwitchGuidance(BaseWithTmpProject):
                     self.assertEqual(out["permissionDecision"], "deny")
                     reason = out["permissionDecisionReason"]
                     self.assertIn(self._GUIDE, reason)
-                    self.assertIn("手で確認してください", reason)
+                    self.assertIn("(表示しない値)", reason)
+                    self.assertNotIn("x; firebase use evil", reason)
+                    self.assertNotIn(shell_word.UNSAFE, reason)
                     self.assertNotIn(self._NOTE, reason)
+
+    def test_no_note_from_a_current_value_shaped_like_a_command(self):
+        """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
+
+        CLI が無いとき (npx 等)、現在値はリポジトリの `.firebaserc` から解決され、形を確かめて
+        いない。値が切替コマンドの形だと、示しただけで注記の判定に当たり、案内していない
+        コマンド (`.firebaserc` が書いたもの) に「単独で実行」の注記が付いていた (マージ前
+        レビューの指摘)。
+        """
+        for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
+            for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
+                with self.subTest(current=current, expected=expected):
+                    (self.sub / ".firebaserc").write_text(
+                        json.dumps({"projects": {"default": current}}), encoding="utf-8"
+                    )
+                    self._write_accounts({"firebase": expected})
+                    self._record({})
+                    out = self._dispatch(with_cli=False)["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(current, reason)
+                    self.assertNotIn(self._NOTE, reason)
+
+
+class TestFirebaseConfigThroughASymlinkWithoutCli(_FirebaseConfigFixture):
+    """CLI が無いとき (npx 等)、symlink を通る `--config` で firebase-tools と同じ切替先を引く。
+
+    firebase-tools 15.24.0 の detectProjectRoot は `path.resolve(cwd, config)` (字句的で、symlink を
+    解かない) の dirname を projectRoot にし、configstore はそのパスの親方向だけを探す。次の 2 形は
+    projectRoot が symlink を通るパスになり、`firebase use` が実体のパスで書いたキーを見ずに
+    `.firebaserc` の default (wrong-project) で動く (node で applyRC を実測)。hook のローカル設定の
+    解決は実体のパスでも探していたので、実体のパスのキー (right-project) を見つけて allow していた
+    (マージ前レビューの指摘)。CLI がある経路は、CLI に同じ `--config` を渡すので一致する。
+      A: 絶対パスの `--config` が symlink を通る (macOS の /tmp・/var も symlink)
+      B: 相対の `--config` が symlink のディレクトリを通る (`linkdir/firebase.json`)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.link = Path(self.tmp) / "link"
+        os.symlink(self.project_dir, self.link)
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.link)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        rc = json.dumps({"projects": {"default": "wrong-project"}})
+        (self.sub / ".firebaserc").write_text(rc, encoding="utf-8")
+        self.elsewhere = Path(self.tmp) / "elsewhere"
+        self.elsewhere.mkdir()
+        (self.elsewhere / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.elsewhere / ".firebaserc").write_text(rc, encoding="utf-8")
+        os.symlink(self.elsewhere, self.project_dir / "linkdir")
+
+    def test_resolves_like_firebase_tools(self):
+        self._write_accounts({"firebase": "right-project"})
+        # 案内 (「--config のファイルのあるディレクトリで切り替えて」) どおり、そのディレクトリに
+        # cd して切り替えると、firebase-tools は実体のパスのキーに書く
+        self._record({self.sub: "right-project", self.elsewhere: "right-project"})
+        for name, command in {
+            "A abs path through a symlink": f"firebase deploy --config {self.link}/sub/firebase.json",
+            "B rel path through a symlinked dir": "firebase deploy --config linkdir/firebase.json",
+        }.items():
+            with self.subTest(name):
+                result = self._dispatch(with_cli=False, command=command)
+                self.assertIsNotNone(
+                    result, "firebase-tools は .firebaserc の default (wrong-project) で動くのに allow"
+                )
+                reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("現在=wrong-project", reason)
 
 
 class TestSelfRemediationFlow(BaseWithTmpProject):

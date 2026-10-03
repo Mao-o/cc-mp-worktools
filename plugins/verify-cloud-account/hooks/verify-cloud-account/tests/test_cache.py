@@ -258,6 +258,7 @@ class TestCache(unittest.TestCase):
         self.addCleanup(patcher.stop)
         with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
             path.is_file()
+        _testutil.assert_real_is_file_on_this_version(self, path)
 
     def test_epoch_file_that_cannot_be_statted_is_zero(self):
         self._unstattable(cache._epoch_path("firebase"))

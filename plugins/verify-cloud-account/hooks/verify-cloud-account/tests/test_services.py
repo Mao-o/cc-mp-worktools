@@ -831,7 +831,8 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
 
         `--project` を外す案内は、外すと行き先がアクティブな project に変わることを言う
         (外したコマンドは allow されうるが、指定していた project では動かない。マージ前レビューの
-        指摘)。"""
+        指摘)。並べた条件は網羅ではないので、`.firebaserc` を直す案内も「確かめられることが
+        あります」と言い切らない (桁の多すぎる整数などは、並べた条件に当たらなくしても残る)。"""
         cases = {
             "NaN": _FBRC_NAN,
             "deep": _FBRC_DEEP,
@@ -853,6 +854,7 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
                 self.assertIsNotNone(err)
                 self.assertIn(self._UNCONFIRMED, err)
                 self.assertIn("--project を外すと、コマンドはアクティブな project で動きます", err)
+                self.assertIn("当たらない形にすると確かめられることがあります", err)
                 self.assertNotIn("手で確認", err)
                 self.assertNotIn("firebase use", err)
 
@@ -967,6 +969,7 @@ class TestFirebasercThatCannotBeStatted(_FirebasercFixture):
         self.addCleanup(patcher.stop)
         with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
             rc.is_file()
+        _testutil.assert_real_is_file_on_this_version(self, rc)
 
     def _call(self, fn, *args, **kwargs):
         try:

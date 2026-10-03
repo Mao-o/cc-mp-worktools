@@ -111,14 +111,20 @@ class _Isolation:
 # (ENAMETOOLONG・EACCES など) はそのまま投げる (3.14 からは False を返す)。
 _PATHLIB_IGNORED_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
 _REAL_IS_FILE = Path.is_file
+# 本物の `Path.is_file()` が、上の errno 以外の stat の失敗を例外にする版 (3.14 から False)。
+REAL_IS_FILE_RAISES = sys.version_info < (3, 14)
 
 
 def _is_file_like_py313(self, *args, **kwargs):
+    # 3.13 の本物と同じく、follow_symlinks を stat に渡し、パスの ValueError (NUL を含む等) は
+    # False にする。
     try:
-        os.stat(self)
+        os.stat(self, follow_symlinks=kwargs.get("follow_symlinks", True))
     except OSError as e:
         if e.errno not in _PATHLIB_IGNORED_ERRNOS:
             raise
+        return False
+    except ValueError:
         return False
     return _REAL_IS_FILE(self, *args, **kwargs)
 
@@ -127,9 +133,23 @@ def patch_is_file_like_py313():
     """`Path.is_file` を Python 3.13 までの挙動 (上の errno 以外の OSError を投げる) に差し替える。
 
     try の外の `Path.is_file()` から例外が抜ける経路を、3.14 以降でも再現するために使う
-    (返り値は patcher。`start()` / `stop()` か with で使う)。
+    (返り値は patcher。`start()` / `stop()` か with で使う)。使う側は、本物がその版で fixture に
+    どう振る舞うか (`assert_real_is_file_on_this_version`) も前提として確かめる。
     """
     return mock.patch.object(Path, "is_file", _is_file_like_py313)
+
+
+def assert_real_is_file_on_this_version(case, path) -> None:
+    """前提: 本物の `Path.is_file` が、この版で stat できない path を 3.13 までは OSError に、
+    3.14 からは False にする (差し替えが再現しているのが本物の旧い挙動であること)。"""
+    if REAL_IS_FILE_RAISES:
+        case.assertRaises(OSError, _REAL_IS_FILE, path)
+        return
+    try:
+        result = _REAL_IS_FILE(path)
+    except OSError as e:
+        case.fail(f"本物の Path.is_file がこの版 ({sys.version.split()[0]}) で OSError を投げた: {e!r}")
+    case.assertFalse(result)
 
 
 def start_isolation(root: Path, home: Path = ISOLATED_HOME) -> _Isolation:

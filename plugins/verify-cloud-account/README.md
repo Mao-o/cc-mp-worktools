@@ -617,11 +617,17 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
 
 `--config` / `-c` 付きのコマンドは、指定したファイルのあるディレクトリを project root
 にする (firebase-tools と同じ。v0.18.0)。`firebase use` の cwd と、ローカル設定から解決する
-ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける)。firebase-tools は
-`firebase use` の切替先を project root ごとに記録するので、そのディレクトリに切替先が
-記録されていると、プロジェクトのディレクトリで切り替えても変わらない。このため `--config`
-付きのコマンドの deny は、切替をコマンドの形で案内せず、そのファイルのあるディレクトリで
-切り替えるよう文で案内する (案内どおりに切り替えても同じ deny を繰り返さないように)。
+ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける。ローカル設定の切替先は、
+firebase-tools と同じく symlink を解かないそのパスの親方向だけを探す)。firebase-tools は
+`firebase use` の切替先をディレクトリごとに記録し、`--config` 付きのコマンドはそのファイルの
+あるディレクトリから親へ探した切替先で動く。そのディレクトリがプロジェクトのディレクトリと
+別で、そこに切替先が記録されていると、プロジェクトのディレクトリで切り替えても変わらない。
+このため `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのファイルの
+あるディレクトリで切り替えるよう文で案内する (案内どおりに切り替えても同じ deny を繰り返さない
+ように。ただし `--config` のパスが symlink を通るときは、そのディレクトリで切り替えても効かない
+ことがある。firebase-tools は symlink を解かないパスで切替先を探すため。[既知の制限](#既知の制限))。
+この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`) も、下の許容形のものだけを示す
+(外れていれば「表示しない値」)。
 
 ### 検証をスキップする readonly コマンド
 
@@ -715,7 +721,9 @@ use <x>` は、書込側が期待値への切替なので許可される形)。r
 「手で確認してください」の文がある deny) には、ほかの entry の切替を案内していても付けない
 (v0.17.1)。ただし AWS は、外れた profile 名を文に置き換えたうえで `AWS_PROFILE=<profile>` を
 必ず案内するので、AWS 専用の注記を付ける。文面に表示する値のうち `.firebaserc` の alias の
-行き先 (`--project <alias> (→ <project>)`) と gh の host 名 (`GitHub [<host>]`) は、下の
+行き先 (`--project <alias> (→ <project>)`)、gh の host 名 (`GitHub [<host>]`)、Firebase の
+不一致の deny の現在値 (`現在=<project>`。CLI が無いときは `.firebaserc` から解決した値) と
+`--config` 付きのコマンドの deny の期待値 (`期待=<project>`。この 2 つは v0.18.0) は、下の
 許容形のときだけ出す (外れていれば「表示しない値」「表示しない host」。値の形だけで注記が
 付かないように)。
 
@@ -756,7 +764,7 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | GCP | `--project` / `--account` | 値を期待値と直接照合 (アクティブ設定は見ない) |
 | GCP | `--configuration` | 現在値の取得コマンドに引き渡す |
 | Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則)。`.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ deny (v0.18.0) |
-| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し (symlink は解いた実体のパスで。CLI 本体と同じ)、見つからなければ deny (v0.18.0) |
+| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し (プロジェクトのディレクトリは symlink を解いた実体のパスで。CLI 本体と同じ)、見つからなければ deny (v0.18.0) |
 | Kubernetes | `--context` | 値を期待値と直接照合 |
 | Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
 
@@ -1271,6 +1279,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、意図した
   project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を使える
   ようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
+- Firebase の `--config` / `-c` のパスが symlink を通るとき (symlink を通る絶対パス・symlink の
+  ディレクトリを通る相対パス) は、deny の案内どおり `--config` のファイルのあるディレクトリで
+  切り替えても効かないことがある (v0.18.0)。firebase-tools はこのパスの symlink を解かずに
+  切替先を探すが、そのディレクトリで切り替えると実体のパスで記録されるため。hook も
+  firebase-tools と同じ切替先を引く (CLI が無いときのローカル設定の解決も、symlink を解かない
+  パスでだけ探す) ので、誤 allow にはならず、同じ deny が続く
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照
