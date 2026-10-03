@@ -224,9 +224,12 @@ class NextHintCorpusArgsWiringTest(unittest.TestCase):
                 if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
                     continue
                 if call.func.id == HINT_FUNC:
+                    # ``alt_hint_args`` is the same obligation for the one
+                    # hint that points at another source: the caller builds it
+                    # (with ``corpus_hint_args``), the renderer forwards it.
                     ok = any(
                         isinstance(a, ast.Starred) and isinstance(a.value, ast.Name)
-                        and a.value.id == HINT_PARAM
+                        and a.value.id in (HINT_PARAM, "alt_hint_args")
                         for a in call.args
                     )
                 elif call.func.id == "print_subsection_hints":

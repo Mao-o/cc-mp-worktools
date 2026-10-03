@@ -250,6 +250,27 @@ preset の `url` / `index_url` を移転先にし、`description` を更新し�
   いる間は片方だけ古くても動くため気付きにくく、`url` と `index_url` が別のサイト・別の範囲を指さない
   ことをテストで固定した
 
+### 2026-10-04: Cloudflare Browser Rendering の移転 (製品名が Browser Run に)
+
+`/browser-rendering/llms.txt` は HTTP 301 で `/browser-run/llms.txt` へ移っていた。`llms-full.txt` は
+`/browser-rendering/` 側が 200 のまま残っているが、**内容は移転先と同じではなく、古い版**だった。
+
+| | `/browser-rendering/llms-full.txt` (旧) | `/browser-run/llms-full.txt` (新) |
+|---|---|---|
+| 大きさ | 422 KB | 667 KB |
+| ページ数 (preset で分割) | 47 | 52 |
+| ページ内の `View as Markdown` の URL | 0 | 51 |
+| 同じディレクトリの `llms.txt` で URL が付いたページ | 40 | 0 (必要なかった) |
+
+- `llms.txt` は旧 URL と新 URL で内容が同じ (バイト単位で一致、52 項目)。旧の `llms-full.txt` は製品の改名前の
+  テンプレートで、ページ内に URL を持たない。新は他の Cloudflare の製品別ファイルと同じテンプレートで、
+  ページの URL を自分で持つ
+- preset `cloudflare-browser-rendering` の `url` / `index_url` を `/browser-run/` に移した。source 名は
+  利用者が使っているので変えない。`index_url` は、URL の無い 1 ページ (他の製品と同じ API リファレンス) 以外には
+  もう効かないが、`url` と同じディレクトリの `llms.txt` という規則を崩さないために残す
+- 他の 14 件の Cloudflare 製品と、`index_url` を持つ他の presets の取得先は、点検スクリプト
+  (`scripts/check-preset-urls.py`) の実行で 200 のままだった
+
 ## 3. 需要の根拠
 
 `llms.txt` を公開していて、かつこの plugin が使われる環境で実際に依存しているもの:

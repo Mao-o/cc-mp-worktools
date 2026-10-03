@@ -45,22 +45,27 @@ from _common import (
     assert_parsed,
     corpus_hint_args,
     die,
+    die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
     full_corpus_body_search,
     load_lines,
     next_hint,
+    retry_for_page_ref,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
 )
 from _commands import (  # noqa: E402
     PageView,
+    hit_candidates,
     print_entry,
     print_page_hits,
     print_search_result,
     render_content,
+    render_next_content,
     render_sections,
+    render_zero_hits,
 )
 
 # A document with no frontmatter ``title:`` field almost always means
@@ -312,7 +317,7 @@ def _warn_if_untitled_ratio_high(docs: list[dict], path: str) -> None:
 # Page reference resolution (int / title substring)
 # ---------------------------------------------------------------------------
 
-def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
     """Resolve a page reference to a doc index.
 
     Tries, in order:
@@ -345,8 +350,7 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
     if len(candidates) == 1:
         return candidates[0][0]
     if len(candidates) > 1:
-        detail = "\n  ".join(f"[{i}] {t}" for i, t in candidates)
-        die(f"Ambiguous title substring '{page_ref}'. Matches:\n  {detail}")
+        die_ambiguous_page("title substring", page_ref, candidates, retry)
     die(f"No document found for: {page_ref}")
 
 
@@ -397,7 +401,8 @@ def cmd_fetch_index(args):
 def _page_view(args) -> tuple[str, PageView]:
     """Load the corpus and describe ``args.page_ref`` as a ``PageView``."""
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
-    idx = _resolve_page_ref(docs, args.page_ref)
+    idx = _resolve_page_ref(docs, args.page_ref,
+                            retry_for_page_ref(args, corpus_hint_args(args)))
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
     page = PageView(
@@ -482,7 +487,8 @@ def cmd_search_content(args):
         die("query must not be empty")
 
     if args.page_ref is not None:
-        target_docs = [_resolve_page_ref(docs, args.page_ref)]
+        target_docs = [_resolve_page_ref(docs, args.page_ref,
+                                         retry_for_page_ref(args, corpus_hint_args(args)))]
     else:
         target_docs = list(range(len(docs)))
 
@@ -493,6 +499,7 @@ def cmd_search_content(args):
     total_hits = 0
     docs_matched = 0
     printed_docs = 0
+    shown = []
 
     for idx in target_docs:
         doc = docs[idx]
@@ -516,18 +523,24 @@ def cmd_search_content(args):
         if printed_docs >= args.limit:
             continue
         printed_docs += 1
+        shown.append((idx, hits, ()))
 
         print_page_hits(f"[{idx}] {title}", hits, noun="document",
                         extra_lines=[f"    tags: {', '.join(fm['tags'])}"] if fm["tags"] else [])
 
+    hint_args = corpus_hint_args(args)
     if total_hits == 0:
         print("No matching content found.")
         print()
         print("Tip: try broader keywords or 'search-index' to find relevant documents first")
-    else:
-        print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search-content", hint_args=hint_args,
+                         scope="documents", restricted_to=args.page_ref)
+        return
+    print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
+    render_next_content(hit_candidates(shown), hint_args=hint_args)
 
 
 def cmd_search(args):
@@ -620,6 +633,10 @@ def cmd_search(args):
         print()
         print("Tip: try broader keywords, 'search-content' for a full-body "
               "scan, or 'fetch-index --compact' to browse")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search", hint_args=corpus_hint_args(args),
+                         scope="documents")
         return
 
     if all(r["body_only"] for r in results):
@@ -637,7 +654,8 @@ def cmd_search(args):
 
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results]),
+                        hint_args=corpus_hint_args(args))
 
 
 # ---------------------------------------------------------------------------

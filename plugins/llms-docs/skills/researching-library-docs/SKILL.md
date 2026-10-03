@@ -31,7 +31,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # ライブラリ公式ドキュメント調査 (汎用 llms-full.txt)
@@ -86,6 +86,30 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 引数を引き継いでいる。ただし script 名だけで書かれているので、実行するときは先頭を
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える。
 
+## 調査の進め方 (手数の目安)
+
+- **論点が複数あるとき**は、最初に論点を番号付きで列挙し、1 つずつ順に処理して、論点ごとに結論
+  (または「ドキュメントに記載なし」) を返す。複数の論点を 1 回の `search` に詰めない
+- 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
+  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-llms-txt.py` は
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える。`--source` などは `Next:` が引き継いでいる)
+- 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
+  「ドキュメントに記載なし」として返す
+- **`--max-chars 0`** は、出力に `... (N chars truncated; narrow with ...)` が出て、既定の上限 (24000 字) で
+  切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
+  (パイプで切ると末尾の `Next:` が見えなくなる)
+- この Skill の実行中 (fork の中) では、同じ Skill をもう呼ばない (`already executing in this forked
+  context` になる)。続きは同梱のスクリプトを直接実行する
+
+## Skill を呼べない文脈 (subagent など)
+
+general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
+同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
+
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先
+   (`~/.claude/plugins/` の下) から `llms-docs` の `scripts/parse-llms-txt.py` を探す
+2. `python3 <path> search "<キーワード>" --source <name>` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
+
 ## 調査フロー
 
 ```
@@ -103,8 +127,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
   Cloudflare Workers は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く
 - `content`: `heading_path` を省略するとページ全体。本文は既定 24000 文字で切り詰め、
   前後にサブセクション一覧と次の呼び出し例を出す
-- 見つからないときはキーワードを言い換えて 2-3 回 `search` し、それでも無ければ
-  `fetch-index --compact --source <name>` で一覧を見る
+- 見つからないときは、同じ論点で `search` を 3 回まで試し (言い換えより `search-index` / `sections`)、
+  それでも無ければ `fetch-index --compact --source <name>` で一覧を見るか「ドキュメントに記載なし」として返す
 
 ## page_ref の指定方法
 
@@ -112,13 +136,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 - **タイトルの部分一致**: 一意に決まる場合のみ (曖昧ならエラーで候補を出す)
 - **URL の部分一致**: ページ URL を持つ source のみ (例: `get-started`)
 
-`zod` / `hono` / `render` / `codex` / `cloudflare-browser-rendering` は llms-full.txt にページ URL が無く、`llms.txt` と
+`zod` / `hono` / `render` / `codex` は llms-full.txt にページ URL が無く、`llms.txt` と
 タイトルが一致したページにだけ URL が付く (Hono は 4 分の 1 程度)。URL の無いページの引用元はタイトル +
 heading_path で表す。
 
 ## heading_path の指定方法
 
-`sections` / `search` / `content` の出力にある完全なパス (スラッシュ区切り) をそのままコピーする。
+`sections` / `search` / `content` の出力にある完全なパス (スラッシュ区切り) をそのままコピーする
+(`search` の `Next:` には最上位ヒットのパスが埋まっている)。
 部分一致も受け付けるが、候補が 2 件以上なら `ambiguous heading` で候補一覧を出して止まる。
 `Section: (top)` は最初の見出しより前の本文を指す。
 
@@ -156,7 +181,9 @@ heading_path で表す。
 |---|---|
 | `unknown --source` | `sources` で一覧を確認して選び直す |
 | ネットワーク失敗 | 既存キャッシュがあれば WARNING を出して続行。無ければ Error。復旧後は `--max-age 0` で再取得 |
-| 結果ゼロ | キーワードを変えて再試行。`fetch-index --compact` で一覧確認 |
+| 結果ゼロ (`No matching ...` の下に `Why nothing matched:` で語ごとのページ数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・別の `--source` に切り替える。一部の語だけ 0 件ならその語を落とす。全語があるのに 0 件 (同じセクションに揃わない) なら語を減らす。続けて出る `Next:` がそのまま実行できる |
+| 曖昧な page_ref (`Ambiguous title substring` / `Ambiguous url substring`) | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
+| `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | 起動直後の `TypeError: unsupported operand type(s)` | Python 3.11 以上が必要 |
 | その他のスクリプトエラー | 下の WebFetch フォールバック |
 
