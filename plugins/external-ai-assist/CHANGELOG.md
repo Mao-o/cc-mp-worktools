@@ -181,7 +181,8 @@ suite 全体は 1 回ずつ、mutation は `test_hermetic_env.py` だけを逐�
   置かない版は、両 suite で `TestTheIsolatedEnvStopsNothing` が落とす (global を空の file に向ける
   `GIT_CONFIG_GLOBAL` も無くなるので、`git config --global --list` が読めずに終了コード 128 で落ちる。外側の
   `GIT_CONFIG_COUNT` だけを置かない版は、`maintenance.auto=true` が見えないことで落ちる)。
-  その版に env を混ぜる向きの逆転を重ねても、exitplan-review では落ちるテストが増えない (その env が逆転を
+  外側 env をまったく置かない版に env を混ぜる向きの逆転を重ねても、exitplan-review では落ちるテストが
+  増えない (その env が逆転を
   見えるようにしている証拠。このテストを足す前は、この組が生き残っていた)。post-implementation-review は、
   定数の `XDG_CONFIG_HOME` を床の値が上書きするので、置かなくても逆転を helper の床が落とす
 - 床の自己確認は、hook が起動する git の床の `setUp` が `GIT_CONFIG_NOSYSTEM` を立てる変異、床の外側の
