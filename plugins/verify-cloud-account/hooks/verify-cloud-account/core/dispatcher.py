@@ -949,7 +949,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # REMEDIATION_NOTE を持つ service (aws) には当てない: 許容形から外れた profile 名は
             # 文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内するので、注記を落とすと
             # 使い方の説明だけが消える。UNSAFE を含まない deny に出る値の表示 (firebase の
-            # `(→ <alias の行き先>)` と gh の `[<host>]`) は、許容形のときだけ出す (services 側)。
+            # `(→ <alias の行き先>)`・不一致の deny の `現在=`・`--config` 付きのコマンドの deny と
+            # `--project` の行き先を確かめられない deny の `期待=`、gh の `[<host>]`) は、許容形の
+            # ときだけ出す (services 側)。
             if _guides_remediation(err, svc) and (
                 hasattr(svc, "REMEDIATION_NOTE") or shell_word.UNSAFE not in err
             ):

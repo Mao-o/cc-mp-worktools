@@ -550,8 +550,8 @@ cd plugins/verify-cloud-account
 echo '{"tool_input":{"command":"git status"},"cwd":"/tmp"}' \
   | python3 hooks/verify-cloud-account
 
-# 対象 + accounts 未設定 → deny JSON
-echo '{"tool_input":{"command":"gh pr list"},"cwd":"/tmp"}' \
+# 対象 (書込) + accounts 未設定 → deny JSON (リモート read のみの gh pr list などは警告)
+echo '{"tool_input":{"command":"gh pr create"},"cwd":"/tmp"}' \
   | python3 hooks/verify-cloud-account
 
 # readonly → 出力なし、exit 0
@@ -974,7 +974,8 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   側の Claude がスクリプト 1 回で自分の検証を切れる形にしない。`"$auto_switch"` は
   保護を弱めない (切替先は期待値、切替後に再検証)
 - accounts.local.json が無いときは作らずに拒否する。`"$auto_switch"` だけのファイルは
-  グローバル既定を覆い隠す (期待値を書いていない service がすべて未設定 = deny)。
+  グローバル既定を覆い隠す (期待値を書いていない service がすべて未設定の扱いになる。書込は
+  deny、リモート read のみのコマンドは警告)。
   拒否時の案内は「init で作る / `--path <グローバル既定>` / 環境変数」の 3 つで、skill の
   手順 (グローバル既定で検証しているプロジェクトでの範囲の選び方) もこの 3 択に揃える。
   「全プロジェクトの環境変数を勧める」に寄せると、グローバル既定のファイルだけで
@@ -1379,6 +1380,17 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   0.17.1 からの案内の退行になる (判定は変わらない。マージ前レビューの指摘)。示す値は不一致の
   deny と同じ判定なので、注記の判定には当たらない。期待値をすべて隠すときは
   `期待=(表示しない値)` と出所の文が並ぶ
+- `--config` の無いコマンドの「現在値を取得できない」deny も、切替コマンドを 1 つも案内できない
+  とき (scalar の期待値が `firebase use` の許容形 (`shell_word.NAME`) から外れる・dict のどの
+  entry も案内行にできない) は、期待値を示す (`期待=`。`_shown_expected` で許容形の値だけ。dict
+  は「のいずれか」)。示すかどうかは、その deny の案内が値を要するかで決める。この deny の案内は
+  「期待した project に切り替えてください」で、どの project かが要る (判定は変わらない。0.17.1
+  からある文面で、0.18.0 では `.firebaserc` を確かめられないときにも届く。マージ前レビューの
+  指摘)。出所は添えている `_CHECK_BY_HAND` が accounts.local.json を指すので
+  `_EXPECTED_NOT_SHOWN` は足さない (UNSAFE の文があるので注記も付かない)。一部の entry だけを
+  案内行から省いたとき (案内行が名前を示し、省いた分は `_SKIPPED_LINE` が accounts.local.json を
+  指す) と、「firebase コマンドが見つかりません」(案内はインストールで、期待値を要さない) には
+  足さない
 - 末尾に `--config` を付けた切替 (`firebase use <期待値> -c <path>`) は self-remediation
   に当たらず通常検証に落ちる (そのディレクトリの切替先が期待値と違うあいだは deny。安全側。
   `is_self_remediation` の剥がす option を広げるのは判定表の変更なので、kubectl の

@@ -564,13 +564,16 @@ def _shown_current(value: str) -> str:
 
 
 def _shown_expected(values) -> str:
-    """`--config` 付きのコマンドの deny と、`--project` の行き先を確かめられない deny の先頭行の
-    `期待=` に示す値 (`, ` 区切り)。
+    """deny の先頭行の `期待=` に示す値 (`, ` 区切り)。許容形から外れる値は示さない。
 
-    許容形から外れる値は示さない (`_shown_current` と同じ理由)。これらの deny は期待値の形に
-    関係なくコマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`) は添えない。出所を
-    言う文 (`_EXPECTED_NOT_SHOWN`) は、`--config` の deny では `_config_switch_guide` が、
-    `--project` の deny では verify() が添える。
+    使うのは `--config` 付きのコマンドの deny、`--project` の行き先を確かめられない deny と、
+    `--config` の無いコマンドで現在値を取得できない deny のうち切替コマンドを 1 つも案内できない
+    もの。前の 2 つは期待値の形に関係なくコマンドの形で案内しないので、外れる値を示すと、値の形
+    だけで dispatcher の「単独で実行」の注記の判定に当たる (`_shown_current` と同じ理由)。示さない
+    理由の文 (`_CHECK_BY_HAND`) は添えず、出所を言う文 (`_EXPECTED_NOT_SHOWN`) を、`--config` の
+    deny では `_config_switch_guide` が、`--project` の deny では verify() が添える。3 つ目は
+    `_CHECK_BY_HAND` を添える deny で (注記は付かない)、`--config` 付きのコマンドの同じ deny と
+    同じ形で示す。出所はその文が言うので `_EXPECTED_NOT_SHOWN` は添えない。
     """
     return ", ".join(
         sorted({value if shell_word.arg(value) is not None else _NOT_SHOWN for value in values})
@@ -734,14 +737,24 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
             lines = _alias_lines(expected, "firebase use")
             if not lines:
-                return f"{head}firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+                # 案内できる行が無くても期待値は示す (許容形のものだけ。`--config` 付きのコマンドの
+                # 同じ deny と同じ部品)。この deny の案内は「期待した project に切り替えて」で、どの
+                # project かが要る。出所は `_CHECK_BY_HAND` が言うので `_EXPECTED_NOT_SHOWN` は添えない。
+                return (
+                    f"{head}期待={_shown_expected(valid)} のいずれか。"
+                    f"firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+                )
             return (
                 f"{head}firebase login の後、以下のいずれかで切り替えてください:\n"
                 + "\n".join(lines)
             )
         target = _target(expected)
         if target is None:
-            return f"{head}firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+            # 期待値は示す (dict で案内できる行が無いときと同じ)。
+            return (
+                f"{head}期待={_shown_expected([expected])}。"
+                f"firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+            )
         return f"{head}firebase login && firebase use {target} を実行してください。"
 
     if isinstance(expected, dict):

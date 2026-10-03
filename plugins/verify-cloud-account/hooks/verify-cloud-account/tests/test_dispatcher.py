@@ -922,6 +922,31 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     self.assertNotIn(self._NOTE, reason)
 
 
+class TestFirebaseCurrentValueShownWithoutConfig(_FirebaseConfigFixture):
+    """`--config` の無いコマンドの不一致の deny も、`現在=` には許容形の値だけを示す (v0.18.0)。
+
+    `--config` 付きのコマンドの deny と同じ `_shown_current` を使う (表示だけの変更)。準備は
+    `_FirebaseConfigFixture` のもの (configstore を tmp に向ける) を使い、`--config` は付けない。
+    """
+
+    def test_current_value_shaped_like_a_command_is_not_shown_without_config(self):
+        """`--config` の無い不一致の deny も、許容形から外れる現在値は `現在=` に示さない
+        (`_shown_current`。表示だけの変更で、切替を案内するので注記は付く)。"""
+        for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
+            for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
+                with self.subTest(current=current, expected=expected):
+                    (self.project_dir / ".firebaserc").write_text(
+                        json.dumps({"projects": {"default": current}}), encoding="utf-8"
+                    )
+                    self._write_accounts({"firebase": expected})
+                    self._record({})
+                    out = self._dispatch(False, "firebase deploy")["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(current, reason)
+
+
 class TestFirebaseConfigThroughASymlinkWithoutCli(_FirebaseConfigFixture):
     """CLI が無いとき (npx 等)、symlink を通る `--config` で firebase-tools と同じ切替先を引く。
 

@@ -72,6 +72,12 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   示す (dict の期待値には「のいずれか」を付ける)。0.17.1 の同じコマンドの deny は、案内する
   切替コマンド (`firebase use <期待値>`) で期待した project を示していたので、コマンドの形の
   案内をやめても、どの project に切り替えるかを文面に残すため (マージ前レビューの指摘)
+- `--config` の無いコマンドで現在値を取得できない deny も、切替コマンドを 1 つも案内できないとき
+  (期待値がドメイン付きの project ID のときや、dict のどの entry も切替コマンドにできないとき) は、
+  先頭行に期待値 (`期待=`) を同じ形で示す (dict の期待値には「のいずれか」を付ける)。この deny の
+  案内は「期待した project に切り替えてください」で、どの project に切り替えるかが要るため。
+  許容形から外れる値は示さず、出所は従来どおり添える「手で確認してください」の文が言う (マージ前
+  レビューの指摘)
 - 期待値に許容形から外れる値があるときは、`--config` 付きのコマンドの deny (現在値を取得できない
   deny も含む) に「表示していない期待値があります (accounts.local.json の "firebase" を確認して
   ください)」と出所を添える。許容形から外れる値はどの project とも一致せず、案内どおりに切り
@@ -113,7 +119,8 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   せず、外すと行き先が変わることと、直し方を言い切らないことを言う。その deny が示す期待値
   (scalar / dict・ドメイン付きの project ID・空文字と null の entry・許容形から外れる値と
   出所の文) (`TestProjectFlagResolvesLikeFirebaseTools`)、
-  ローカル設定の解決と空文字の alias の数え方 (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
+  ローカル設定の解決と空文字の alias の数え方、そこで現在値を取得できない deny が切替コマンドに
+  できない期待値も `期待=` に示すこと (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
   入れ子の深い `.firebaserc` で検証をスキップしない (`TestDeepFirebasercDoesNotSkipVerification`。
   判定に加えて理由も見る)、stat できない `.firebaserc` (`TestFirebasercThatCannotBeStatted`)
 - `--config` / `-c`: 指定したディレクトリでの `--project` の解決・`firebase use` の引数と
@@ -125,9 +132,10 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   外れた期待値があれば、不一致・現在値を取得できない deny の両方で出所の文を添え、`期待=` に
   示せる値 (ドメイン付きの project ID も) だけなら添えない。`現在=` も同じ形を示す。dict の
   空文字・null の entry は `期待=` にも出所の判定にも入れない。
-  `TestFirebaseConfigSwitchGuidance`)、CLI が無いとき symlink を通る `--config` (絶対パス /
-  symlink のディレクトリを通る相対パス) で firebase-tools と同じ切替先を引く
-  (`TestFirebaseConfigThroughASymlinkWithoutCli`)
+  `TestFirebaseConfigSwitchGuidance`)、`--config` の無い不一致の deny も許容形から外れる現在値を
+  `現在=` に示さない (`TestFirebaseCurrentValueShownWithoutConfig`)、CLI が無いとき symlink を
+  通る `--config` (絶対パス / symlink のディレクトリを通る相対パス) で firebase-tools と同じ
+  切替先を引く (`TestFirebaseConfigThroughASymlinkWithoutCli`)
 - 読めないファイル: accounts.local.json の入れ子の上限 (`TestAccountsFile`)、成功 cache の
   entry / epoch (読めない・stat できない。`test_cache.py`)、`__main__` を実プロセスで起こす
   e2e (UTF-8 でない・入れ子が深い・桁の多すぎる整数のある accounts.local.json と旧パス、入れ子の
@@ -138,7 +146,7 @@ JSON として読み、読めなければ alias 0 件として扱っていた。
   同じ fixture にどう振る舞うか (3.13 までは例外、3.14 からは False) も前提として確かめ、その
   前提の helper 自身も、前提と食い違う path で落ちることを確かめる
   (`TestAssertRealIsFileOnThisVersion`。マージ前レビューの指摘)
-- 1,317 → 1,356 件
+- 1,317 → 1,358 件
 
 ## 0.17.1
 

@@ -235,7 +235,7 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
   このファイルを毎回読むので、再起動しなくても次の gh コマンドから効く。
   accounts.local.json がまだ無いときは作らずに拒否する (`"$auto_switch"` だけの
   ファイルは[グローバル既定](#グローバル既定-v0130)を覆い隠し、期待値を書いていない
-  service がすべて未設定 = deny になるため)
+  service がすべて未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になるため)
 - [グローバル既定](#グローバル既定-v0130) のファイルに書いた `"$auto_switch"` が
   効くのは、自前の `accounts.local.json` を持たないプロジェクトだけ (`"$mode"` と
   同じ)。全プロジェクトで有効にするなら環境変数を使う
@@ -977,9 +977,9 @@ worktree 内に同名ファイルを置く必要は無い。
     としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
     submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
-    (未設定として deny)。**別の repo の中に置いた linked worktree から、その
-    外側 repo の設定を継承していた場合も同じ** (worktree root で止まる)。
-    各 repo の toplevel に複製するか `--path` で明示する
+    (未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。**別の repo の中に
+    置いた linked worktree から、その外側 repo の設定を継承していた場合も同じ**
+    (worktree root で止まる)。各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -990,7 +990,7 @@ worktree 内に同名ファイルを置く必要は無い。
 決め、解決したパスを dry-run / commit の出力の先頭に `対象: <パス>` として表示する。
 読む側と書く側で解決を共有しないと、継承中の worktree で `set` が編集した service
 だけを含む子ファイルを作り、dispatcher の遡及がそこで止まって**継承していた他の
-service が一斉に未設定 (deny)** になる。
+service が一斉に未設定の扱い** (書込は deny、リモート read のみのコマンドは警告) になる。
 
 - 継承中の `set` / `remove` / `migrate` は**継承元のファイル**を直接編集する
 - 継承中の `init` は cwd 直下に作ると継承中の設定を覆い隠すため **exit 2 で拒否**
@@ -1049,7 +1049,8 @@ root 自身**が、外側に repo が無ければ `$HOME` が境界になる (�
   書き換えてしまわないようにするため。グローバル既定は手で作るか `--path` で明示する
 - 上の帰結として、**グローバル既定で検証されているプロジェクトに
   `accounts.local.json` を新規作成すると、グローバル既定のキーは継承されない**
-  (キー単位のマージはしない = 書かなかった service は未設定 = deny)。builder は
+  (キー単位のマージはしない = 書かなかった service は未設定の扱い。書込は deny、
+  リモート read のみのコマンドは警告)。builder は
   新規作成になるとき「グローバル既定 `<path>` の N キーは継承されません」と警告し、
   `accounts-show` は「プロジェクトに無い」ときグローバル既定の存在と
   「hook はこのファイルで検証します」を表示する。グローバル既定を直したいときは
@@ -1279,8 +1280,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   は、`--project` 付きのコマンドを deny し (先頭の文に期待値 (`期待=`) を示す。`--config` 付きの
   コマンドの deny と同じく許容形のものだけを示し、外れる値があれば出所を添える)、CLI から現在値を
   取れないとき (hook の PATH に `firebase` が無い `npx firebase` の構成など) は現在値を取得できない
-  として deny する (v0.18.0。fail-closed。後者の文面は従来どおり「firebase コマンドが見つかりません」
-  など)。判定は保守的で、firebase-tools が期待した project で動くファイルも対象になる。`--project`
+  として deny する (v0.18.0。fail-closed。後者の文面は、hook の PATH に `firebase` が無ければ
+  「firebase コマンドが見つかりません」、CLI はあるが答えなければ「現在のプロジェクトを取得できません」
+  で、こちらは期待した project への切替を案内する。案内できる期待値は切替コマンドの形で示し、
+  コマンドの形で 1 つも案内できないとき (`--config` 付きのコマンドでは常に) は `期待=` に許容形の
+  値を示す)。判定は保守的で、
+  firebase-tools が期待した project で動くファイルも対象になる。`--project`
   を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、deny が
   示す期待した project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を
   使えるようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
@@ -1336,9 +1341,10 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 1. `cat "${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json"` でフックが登録されているか確認
 2. `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"` を stdin 付きで
-   手動実行し、対象コマンドで deny JSON が出るかスモーク:
+   手動実行し、対象コマンドで deny JSON が出るかスモーク (書込のコマンドで試す。
+   リモート read のみの `gh pr list` などは、既定では deny せず警告にとどめる):
    ```bash
-   echo '{"tool_input":{"command":"gh pr list"},"cwd":"/tmp"}' \
+   echo '{"tool_input":{"command":"gh pr create"},"cwd":"/tmp"}' \
      | python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"
    ```
 3. `.claude/verify-cloud-account/accounts.local.json` の JSON 構文エラーを確認
@@ -1358,12 +1364,14 @@ hook 実行時に環境変数 `VERIFY_CLOUD_ACCOUNT_DEBUG=1` を立てると、�
 分解結果を stderr に 1 行 JSON で出す (`claude --verbose` で確認可能)。
 
 ```json
-{"segments": [{"segment": "gh pr list", "service": "github", "readonly": false}],
+{"segments": [{"segment": "gh pr create", "service": "github", "readonly": false,
+   "tier": "write"}],
  "cache_hit": {}, "verify_ms": {"github": 12.3}, "auto_switch": {},
  "elapsed_ms": 13.1, "decision": "deny"}
 ```
 
-- `segments`: 抽出した各セグメントと、マッチした service / readonly 判定
+- `segments`: 抽出した各セグメントと、マッチした service / readonly 判定 /
+  [tier](#検証の-3-tier--v0140) (`readonly` / `query` / `write`)
 - `cache_hit`: 成功 cache を使って verify を省略した service
 - `verify_ms`: 実際に `verify()` を呼んだ service とその所要時間 (ms)
 - `auto_switch`: [自動切替](#自動切替-auto-switch--v0160) を試みた service ごとの結果

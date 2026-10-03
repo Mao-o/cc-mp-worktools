@@ -992,6 +992,29 @@ class TestLocalResolutionNeedsAConfirmedFirebaserc(_FirebasercFixture):
         self.assertIsNotNone(err)
         self.assertIn("現在のプロジェクトを取得できません", err)
 
+    def test_unguidable_expected_is_shown_when_current_is_unknown(self):
+        """現在値を取得できない deny は、切替コマンドを 1 つも案内できない期待値 (ドメイン付きの
+        project ID・`firebase use` の許容形から外れる alias) も `期待=` に示す (許容形のものだけ。
+        dict は「のいずれか」)。この deny の案内は「期待した project に切り替えて」で、どの project
+        かが要る (マージ前レビューの指摘)。出所は「手で確認」の文が言う。"""
+        project_dir = self._project(_FBRC_COMMENTED)
+        self._switch(project_dir, "prod")
+        cases = {
+            "domain-scoped": ("example.com:right-project", "期待=example.com:right-project。"),
+            "dict, alias not NAME": ({"a:b": "right-project"}, "期待=right-project のいずれか。"),
+            "masked": ("x; firebase use evil", "期待=(表示しない値)。"),
+            "dict, masked": ({"default": "x; firebase use evil"}, "期待=(表示しない値) のいずれか。"),
+        }
+        failing = SimpleNamespace(stdout="", stderr="", returncode=1)
+        for name, (expected, marker) in cases.items():
+            with self.subTest(name), mock.patch("subprocess.run", return_value=failing), mock.patch(
+                "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+            ):
+                err = firebase.verify(expected, project_dir)
+                self.assertIn(f"現在のプロジェクトを取得できません。{marker}", err)
+                self.assertIn("手で確認", err)
+                self.assertNotIn("x; firebase use evil", err)
+
 
 class TestFirebasercThatCannotBeStatted(_FirebasercFixture):
     """stat できない `.firebaserc` (長すぎる名前を指す symlink など) で例外を漏らさない (v0.18.0)。
