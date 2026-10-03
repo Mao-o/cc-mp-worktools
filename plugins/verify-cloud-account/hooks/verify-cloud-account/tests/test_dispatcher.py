@@ -168,6 +168,31 @@ class TestAccountsFile(BaseWithTmpProject):
             result["hookSpecificOutput"]["permissionDecision"], "deny"
         )
 
+    def test_nesting_deeper_than_the_limit_is_unreadable(self):
+        """入れ子が 32 段より深い期待値ファイルは、`json.loads` が通っても不正な JSON と同じ
+        (v0.18.0)。後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿って
+        RecursionError になり、検証がスキップされる深さが Python の版ごとにあった。"""
+
+        def accounts(lists: int) -> str:
+            # トップレベル (1 段) → "firebase" のオブジェクト (2 段) → 配列を lists 段。
+            return (
+                '{"firebase": {"a": "right-project", "pad": '
+                + "[" * lists + "]" * lists + "}}"
+            )
+
+        for lists, unreadable in ((30, False), (31, True)):
+            with self.subTest(depth=lists + 2):
+                (self.new_dir / "accounts.local.json").write_text(
+                    accounts(lists), encoding="utf-8"
+                )
+                with self.isolated_cache():
+                    result = dispatch("firebase deploy --project prod", str(self.project_dir))
+                reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+                if unreadable:
+                    self.assertIn("を読めません (入れ子が 32 段より深い)", reason)
+                else:
+                    self.assertIn("Firebase プロジェクト不一致", reason)
+
     def test_missing_key_returns_deny(self):
         self._write_accounts({"aws": "123456789012"})
         result = dispatch("gh pr create", str(self.project_dir))
@@ -498,6 +523,474 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         out = result["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+
+_DEEP_PAD = "[" * 100000 + "]" * 100000
+
+
+class TestDeepFirebasercDoesNotSkipVerification(BaseWithTmpProject):
+    """深い入れ子の `.firebaserc` で hook の検証が飛ばない (v0.18.0)。
+
+    旧版は `.firebaserc` の読み込みの RecursionError を捕まえず、dispatch() の外まで抜けて
+    __main__ の最終防波堤が「内部エラーのため検証をスキップ」(実行は止めない) にしていた。
+    firebase-tools (V8 の JSON.parse) は同じファイルを読んで alias を解決する。RecursionError を
+    alias 0 件に倒すだけでは、期待値と同名の alias の影で allow になる (下の 2 件目)。判定だけで
+    なく理由も見る: 1 件目は alias 0 件に倒しても (prod を値そのものとして照合して) deny になる。
+    """
+
+    def _decision(self, command: str, projects: dict) -> tuple[str | None, str]:
+        """(判定, 理由)。"""
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        body = json.dumps({"projects": projects})[:-1] + ', "pad": ' + _DEEP_PAD + "}"
+        (self.project_dir / ".firebaserc").write_text(body, encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        fake = SimpleNamespace(stdout="", stderr="", returncode=1)
+        with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+            try:
+                result = dispatch(command, str(self.project_dir))
+            except RecursionError:
+                self.fail(
+                    "深い入れ子の .firebaserc で dispatch() が RecursionError を投げた"
+                    " (__main__ は warn を返し、検証なしでコマンドが進む)"
+                )
+        out = (result or {}).get("hookSpecificOutput", {})
+        return out.get("permissionDecision"), out.get("permissionDecisionReason", "")
+
+    def test_mismatched_alias_is_still_denied(self):
+        """`--project prod` (→ wrong-project) は、行き先を確かめられないとして deny。"""
+        decision, reason = self._decision(
+            "firebase deploy --project prod", {"prod": "wrong-project"}
+        )
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("--project の行き先を確かめられません", reason)
+
+    def test_alias_shadowing_the_expected_id_is_not_allowed(self):
+        """firebase-tools は alias を先に解決する: `--project right-project` は wrong-project に行く。
+
+        RecursionError を `{}` (alias 0 件) に倒すだけの修正では allow になる (fail-closed にする)。
+        """
+        decision, reason = self._decision(
+            "firebase deploy --project right-project", {"right-project": "wrong-project"}
+        )
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("--project の行き先を確かめられません", reason)
+
+    def test_current_project_is_not_resolved_from_it(self):
+        """CLI から現在値を取れないとき (`firebase use` が非ゼロ終了)、ローカル設定の解決にも
+        使わない (default -> right-project と読んで allow しない)。"""
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            decision, reason = self._decision("firebase deploy", {"default": "right-project"})
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("現在のプロジェクトを取得できません", reason)
+
+
+class TestFirebaseConfigOptionRouting(BaseWithTmpProject):
+    """`firebase ... --config <path>` / `-c <path>` を照合先を変える option として拾う (v0.18.0)。
+
+    firebase-tools はそのファイルのあるディレクトリの `.firebaserc` で `--project` を解決する。
+    旧版は `--config` を見ず、プロジェクトのディレクトリの `.firebaserc` で照合して allow していた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "right-project"}}), encoding="utf-8"
+        )
+        sub = self.project_dir / "sub"
+        sub.mkdir()
+        (sub / "firebase.json").write_text("{}", encoding="utf-8")
+        (sub / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "wrong-project"}}), encoding="utf-8"
+        )
+        self._write_accounts({"firebase": "right-project"})
+
+    def _dispatch(self, command: str):
+        with self.isolated_cache(), mock.patch("subprocess.run") as run:
+            result = dispatch(command, str(self.project_dir))
+        run.assert_not_called()
+        return result
+
+    def test_every_option_form_moves_the_project_root(self):
+        self.assertIsNone(self._dispatch("firebase deploy --project prod"))
+        for command in (
+            "firebase deploy --project prod -c sub/firebase.json",
+            "firebase deploy --project prod --config sub/firebase.json",
+            "firebase deploy --project prod --config=sub/firebase.json",
+            "firebase deploy --project prod -csub/firebase.json",
+            "firebase -c sub/firebase.json deploy -P prod",
+            "npx firebase-tools --config sub/firebase.json deploy --project=prod",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("wrong-project", out["permissionDecisionReason"])
+
+    def test_new_denials_do_not_carry_the_standalone_note(self):
+        """`--config` のファイルが無い deny と、`.firebaserc` を確かめられない deny は、
+        切替コマンドを案内しない (「案内したコマンドは単独で実行」の注記を付けない)。"""
+        (self.project_dir / ".firebaserc").write_text(
+            '{"projects": {"prod": "right-project"}} // note', encoding="utf-8"
+        )
+        for command, marker in (
+            ("firebase deploy -c sub/missing.json", "--config のファイルが見つからない"),
+            ("firebase deploy --project prod", "--project の行き先を確かめられません"),
+        ):
+            with self.subTest(command=command):
+                reason = self._dispatch(command)["hookSpecificOutput"][
+                    "permissionDecisionReason"
+                ]
+                self.assertIn(marker, reason)
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+                self.assertNotIn(shell_word.UNSAFE, reason)
+
+
+class _FirebaseConfigFixture(BaseWithTmpProject):
+    """`--config` 付きのコマンドを dispatcher に通す準備 (v0.18.0)。
+
+    プロジェクトのディレクトリと sub/ に firebase.json を置き、configstore を tmp に向ける。
+    `_record` は `firebase use` の切替先を記録し、`_fake_cli` は非 TTY の `firebase use` の
+    代わりに configstore を読む。
+    """
+
+    _COMMAND = "firebase deploy -c sub/firebase.json"
+    _NOTE = "案内された形のまま単独で実行してください"
+    _GUIDE = "--config のファイルのあるディレクトリで"
+    # 期待値に許容形から外れる値があるときだけ添える、出所の文
+    _SOURCE = '表示していない期待値があります (accounts.local.json の "firebase" を確認してください)'
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        self.sub = self.project_dir / "sub"
+        self.sub.mkdir()
+        (self.sub / "firebase.json").write_text("{}", encoding="utf-8")
+        xdg = Path(self.tmp) / "xdg"
+        self._store = xdg / "configstore" / "firebase-tools.json"
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _record(self, active: dict) -> None:
+        """`firebase use` の切替先を記録する (configstore の activeProjects。キーは実体のパス)。"""
+        self._store.parent.mkdir(parents=True, exist_ok=True)
+        self._store.write_text(
+            json.dumps({"activeProjects": {os.path.realpath(d): p for d, p in active.items()}}),
+            encoding="utf-8",
+        )
+
+    def _fake_cli(self, argv, **kwargs):
+        """非 TTY の `firebase use` の代わり: cwd (`--config` のファイルのあるディレクトリ) から
+        親方向に切替先を探し、あれば 1 行で出す。無ければ非ゼロ終了。cwd の実体のパスで探すので、
+        symlink を通る `--config` (firebase-tools は symlink を解かないパスで探す) には使わない。"""
+        active = {}
+        if self._store.exists():
+            active = json.loads(self._store.read_text(encoding="utf-8"))["activeProjects"]
+        cur = os.path.realpath(kwargs["cwd"])
+        while True:
+            if cur in active:
+                return SimpleNamespace(stdout=active[cur] + "\n", stderr="", returncode=0)
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return SimpleNamespace(stdout="", stderr="", returncode=1)
+            cur = parent
+
+    def _dispatch(self, with_cli: bool, command: str | None = None):
+        run = self._fake_cli if with_cli else FileNotFoundError("firebase")
+        with self.isolated_cache(), mock.patch("subprocess.run", side_effect=run), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ):
+            return dispatch(command or self._COMMAND, str(self.project_dir))
+
+
+class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
+    """`--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない (v0.18.0)。
+
+    firebase-tools は `firebase use` の切替先を project root ごとに記録し、`--config` 付きの
+    コマンドはそのファイルのあるディレクトリから親方向に探した切替先で動く。そのディレクトリが
+    プロジェクトのディレクトリと別で、そこに切替先が記録されていると、案内していた
+    `firebase use <期待値>` (プロジェクトのディレクトリのキーに書く) では変わらず、案内どおりに
+    しても同じ deny を繰り返していた (マージ前レビューの指摘)。往復で確かめる: deny の理由に
+    切替コマンドも単独実行の注記も無い → そのディレクトリで切り替える (その形は hook を通る。
+    切り替えた結果は configstore のそのディレクトリの実体のパスのキーを書き換えて再現する) →
+    同じコマンドが通る。CLI がある (configstore を読む firebase-tools の代わり) / 無い (ローカル
+    設定の解決) の両方。末尾に `-c` を付けた切替 (`firebase use <x> -c <path>`) は
+    self-remediation に当たらず通常検証に落ちる (このクラスでは扱わない)。
+    """
+
+    def test_switching_in_the_config_directory_lets_the_command_through(self):
+        switched = {self.project_dir: "right-project", self.sub: "wrong-project"}
+        cases = {
+            # プロジェクトのディレクトリは期待値で、sub には自分の (期待値と違う) 切替先がある
+            "scalar": ("right-project", switched, "現在=wrong-project"),
+            "dict": (
+                {"default": "right-project", "staging": "staging-project"},
+                switched,
+                "現在=wrong-project",
+            ),
+            # どこにも切替先が無い。期待値は示す (0.17.1 の案内 `firebase use <期待値>` も名前を
+            # 出していた)。末尾の「。」まで見て、「のいずれか」が dict にだけ付くことも確かめる
+            "nothing recorded": (
+                "right-project",
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project。",
+            ),
+            "dict, nothing recorded": (
+                {"default": "right-project", "staging": "staging-project"},
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+            ),
+            # 空文字・null の entry は期待値に数えない (`期待=` に示さず、出所の文も添えない)
+            "dict with ignored entries": (
+                {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
+                switched,
+                "期待=right-project, staging-project のいずれか\n",
+            ),
+            "dict with ignored entries, nothing recorded": (
+                {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+            ),
+        }
+        for with_cli in (True, False):
+            for name, (expected, recorded, marker) in cases.items():
+                with self.subTest(name, with_cli=with_cli):
+                    self._write_accounts({"firebase": expected})
+                    self._record(recorded)
+                    result = self._dispatch(with_cli)
+                    self.assertIsNotNone(result)
+                    out = result["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(marker, reason)
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertNotIn(self._SOURCE, reason)  # 期待値はすべて許容形
+                    self.assertNotIn("firebase use", reason)
+                    self.assertNotIn("firebase login", reason)
+                    self.assertNotIn(self._NOTE, reason)
+                    # 案内どおり sub のディレクトリで切り替える: hook は期待値への切替として通し、
+                    # firebase-tools は sub の実体のパスのキーに書く (configstore を書き換えて再現)
+                    with mock.patch("subprocess.run") as run:
+                        self.assertIsNone(
+                            dispatch("cd sub && firebase use right-project", str(self.project_dir))
+                        )
+                    run.assert_not_called()
+                    self._record({**recorded, self.sub: "right-project"})
+                    self.assertIsNone(self._dispatch(with_cli))
+
+    def test_config_file_in_the_project_directory(self):
+        """`-c` のファイルがプロジェクトのディレクトリにある形 (設定ファイルを root に並べる) でも、
+        deny の文は成り立ち、案内どおりにそのディレクトリ (= プロジェクトのディレクトリ) で切り
+        替えると通る。旧文面の括弧「(そのディレクトリに切替先が記録されていると、) プロジェクトの
+        ディレクトリで切り替えても変わりません」は、この形では成り立たなかった (マージ前レビューの
+        指摘)。"""
+        (self.project_dir / "firebase.prod.json").write_text("{}", encoding="utf-8")
+        command = "firebase deploy -c firebase.prod.json"
+        self._write_accounts({"firebase": "right-project"})
+        for with_cli in (True, False):
+            with self.subTest(with_cli=with_cli):
+                self._record({self.project_dir: "wrong-project"})
+                out = self._dispatch(with_cli, command)["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(self._GUIDE, reason)
+                claims = "プロジェクトのディレクトリで切り替えても変わりません" in reason
+                with mock.patch("subprocess.run") as run:
+                    self.assertIsNone(dispatch("firebase use right-project", str(self.project_dir)))
+                run.assert_not_called()
+                self._record({self.project_dir: "right-project"})  # firebase use が書くキー
+                passes = self._dispatch(with_cli, command) is None
+                self.assertTrue(passes)
+                self.assertFalse(
+                    claims and passes,
+                    "deny は「プロジェクトのディレクトリで切り替えても変わらない」と言うが、切り替えると通る",
+                )
+
+    def test_no_note_when_an_expected_value_is_not_in_the_allowed_shape(self):
+        """期待値が許容形から外れるときは、先頭行の `期待=` にその値を示さず (`(表示しない値)`)、
+        注記を付けない。
+
+        値をそのまま示すと、切替コマンドの形の値が注記の判定に当たる (コマンドで案内する deny の
+        `test_no_note_when_the_value_was_not_guided` と同じ契約)。この deny は期待値の形に関係なく
+        コマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`。UNSAFE の文) は添えない
+        (添える理由が成り立たない。マージ前レビューの指摘)。示さない値が 1 つでもあれば出所の文を
+        添える (`test_masked_expected_value_points_to_the_file`)。
+        """
+        self._record({self.sub: "wrong-project"})
+        for expected in (
+            "x; firebase use evil",
+            {"default": "right-project", "evil": "x; firebase use evil"},
+        ):
+            for with_cli in (True, False):
+                with self.subTest(expected=expected, with_cli=with_cli):
+                    self._write_accounts({"firebase": expected})
+                    out = self._dispatch(with_cli)["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertIn("(表示しない値)", reason)
+                    self.assertIn(self._SOURCE, reason)
+                    self.assertNotIn("x; firebase use evil", reason)
+                    self.assertNotIn(shell_word.UNSAFE, reason)
+                    self.assertNotIn(self._NOTE, reason)
+
+    def test_masked_expected_value_points_to_the_file(self):
+        """期待値に許容形から外れる値があるときは、出所の文 (accounts.local.json の "firebase") を
+        添える。不一致の deny (scalar / dict) と、現在値を取得できない deny の両方。
+
+        その値は文面に示さない (`期待=(表示しない値)`。不一致の deny も、現在値を取得できない deny
+        も) が、許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
+        続く。出所が無いと、何を直せばよいかが文面から消える (マージ前レビューの指摘)。
+        出所の文は REMEDIATION_PATTERNS にも UNSAFE の文にも当たらないので、注記は付かない。
+        """
+        masked = {
+            "scalar": ("x; firebase use evil", ["x; firebase use evil"]),
+            "dict": ({"default": "x y", "b": "p;q"}, ["x y", "p;q"]),
+        }
+        situations = {
+            "mismatch": ({self.sub: "wrong-project"}, "期待=(表示しない値)"),
+            "current unknown": ({}, "現在のプロジェクトを取得できません。期待=(表示しない値)"),
+        }
+        for name, (expected, raw_values) in masked.items():
+            for situation, (recorded, marker) in situations.items():
+                for with_cli in (True, False):
+                    with self.subTest(name, situation=situation, with_cli=with_cli):
+                        self._write_accounts({"firebase": expected})
+                        self._record(recorded)
+                        out = self._dispatch(with_cli)["hookSpecificOutput"]
+                        self.assertEqual(out["permissionDecision"], "deny")
+                        reason = out["permissionDecisionReason"]
+                        self.assertIn(marker, reason)
+                        self.assertIn(self._GUIDE, reason)
+                        self.assertIn(self._SOURCE, reason)
+                        for raw in raw_values:
+                            self.assertNotIn(raw, reason)
+                        self.assertNotIn(shell_word.UNSAFE, reason)
+                        self.assertNotIn(self._NOTE, reason)
+
+    def test_shown_expected_value_has_no_source_sentence(self):
+        """`期待=` に示せる値 (WORD。NAME から外れるドメイン付きの project ID も含む) だけなら、
+        出所の文は添えない (示さない値があるときだけ添える。`_shown_expected` と同じ判定)。
+        不一致の deny も、現在値を取得できない deny も、その値を `期待=` に示す。現在値が同じ形
+        (ドメイン付きの project ID) なら、それも `現在=` に示す (`_shown_current` も同じ判定)。"""
+        situations = {
+            "mismatch": ({self.sub: "wrong-project"}, "現在=wrong-project"),
+            "mismatch, domain-scoped current": (
+                {self.sub: "example.com:wrong-project"},
+                "現在=example.com:wrong-project",
+            ),
+            "current unknown": ({}, "現在のプロジェクトを取得できません"),
+        }
+        for expected in ("example.com:right-project", {"default": "example.com:right-project"}):
+            for situation, (recorded, marker) in situations.items():
+                for with_cli in (True, False):
+                    with self.subTest(expected=expected, situation=situation, with_cli=with_cli):
+                        self._write_accounts({"firebase": expected})
+                        self._record(recorded)
+                        out = self._dispatch(with_cli)["hookSpecificOutput"]
+                        self.assertEqual(out["permissionDecision"], "deny")
+                        reason = out["permissionDecisionReason"]
+                        self.assertIn(marker, reason)
+                        self.assertIn("期待=example.com:right-project", reason)
+                        self.assertNotIn(self._SOURCE, reason)
+
+    def test_no_note_from_a_current_value_shaped_like_a_command(self):
+        """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
+
+        CLI が無いとき (npx 等)、現在値はリポジトリの `.firebaserc` から解決され、形を確かめて
+        いない。値が切替コマンドの形だと、示しただけで注記の判定に当たり、案内していない
+        コマンド (`.firebaserc` が書いたもの) に「単独で実行」の注記が付いていた (マージ前
+        レビューの指摘)。
+        """
+        for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
+            for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
+                with self.subTest(current=current, expected=expected):
+                    (self.sub / ".firebaserc").write_text(
+                        json.dumps({"projects": {"default": current}}), encoding="utf-8"
+                    )
+                    self._write_accounts({"firebase": expected})
+                    self._record({})
+                    out = self._dispatch(with_cli=False)["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(self._SOURCE, reason)  # 出所の文は期待値のときだけ
+                    self.assertNotIn(current, reason)
+                    self.assertNotIn(self._NOTE, reason)
+
+
+class TestFirebaseCurrentValueShownWithoutConfig(_FirebaseConfigFixture):
+    """`--config` の無いコマンドの不一致の deny も、`現在=` には許容形の値だけを示す (v0.18.0)。
+
+    `--config` 付きのコマンドの deny と同じ `_shown_current` を使う (表示だけの変更)。準備は
+    `_FirebaseConfigFixture` のもの (configstore を tmp に向ける) を使い、`--config` は付けない。
+    """
+
+    def test_current_value_shaped_like_a_command_is_not_shown_without_config(self):
+        """`--config` の無い不一致の deny も、許容形から外れる現在値は `現在=` に示さない
+        (`_shown_current`。表示だけの変更で、切替を案内するので注記は付く)。"""
+        for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
+            for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
+                with self.subTest(current=current, expected=expected):
+                    (self.project_dir / ".firebaserc").write_text(
+                        json.dumps({"projects": {"default": current}}), encoding="utf-8"
+                    )
+                    self._write_accounts({"firebase": expected})
+                    self._record({})
+                    out = self._dispatch(False, "firebase deploy")["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(current, reason)
+
+
+class TestFirebaseConfigThroughASymlinkWithoutCli(_FirebaseConfigFixture):
+    """CLI が無いとき (npx 等)、symlink を通る `--config` で firebase-tools と同じ切替先を引く。
+
+    firebase-tools 15.24.0 の detectProjectRoot は `path.resolve(cwd, config)` (字句的で、symlink を
+    解かない) の dirname を projectRoot にし、configstore はそのパスの親方向だけを探す。次の 2 形は
+    projectRoot が symlink を通るパスになり、`firebase use` が実体のパスで書いたキーを見ずに
+    `.firebaserc` の default (wrong-project) で動く (node で applyRC を実測)。hook のローカル設定の
+    解決は実体のパスでも探していたので、実体のパスのキー (right-project) を見つけて allow していた
+    (マージ前レビューの指摘)。CLI がある経路は、CLI に同じ `--config` を渡すので一致する。
+      A: 絶対パスの `--config` が symlink を通る (macOS の /tmp・/var も symlink)
+      B: 相対の `--config` が symlink のディレクトリを通る (`linkdir/firebase.json`)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.link = Path(self.tmp) / "link"
+        os.symlink(self.project_dir, self.link)
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.link)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        rc = json.dumps({"projects": {"default": "wrong-project"}})
+        (self.sub / ".firebaserc").write_text(rc, encoding="utf-8")
+        self.elsewhere = Path(self.tmp) / "elsewhere"
+        self.elsewhere.mkdir()
+        (self.elsewhere / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.elsewhere / ".firebaserc").write_text(rc, encoding="utf-8")
+        os.symlink(self.elsewhere, self.project_dir / "linkdir")
+
+    def test_resolves_like_firebase_tools(self):
+        self._write_accounts({"firebase": "right-project"})
+        # 案内 (「--config のファイルのあるディレクトリで切り替えて」) どおり、そのディレクトリに
+        # cd して切り替えると、firebase-tools は実体のパスのキーに書く
+        self._record({self.sub: "right-project", self.elsewhere: "right-project"})
+        for name, command in {
+            "A abs path through a symlink": f"firebase deploy --config {self.link}/sub/firebase.json",
+            "B rel path through a symlinked dir": "firebase deploy --config linkdir/firebase.json",
+        }.items():
+            with self.subTest(name):
+                result = self._dispatch(with_cli=False, command=command)
+                self.assertIsNotNone(
+                    result, "firebase-tools は .firebaserc の default (wrong-project) で動くのに allow"
+                )
+                reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("現在=wrong-project", reason)
 
 
 class TestSelfRemediationFlow(BaseWithTmpProject):

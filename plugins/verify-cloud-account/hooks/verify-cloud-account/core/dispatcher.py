@@ -255,6 +255,43 @@ def _notes_only(notes: list[str]) -> dict | None:
     return output.warn(text)
 
 
+# accounts.local.json の入れ子の深さの上限 (v0.18.0)。正規の形は 2 段 (トップレベルの
+# オブジェクト → service のオブジェクト / 配列) までなので十分に大きく、Python の再帰の上限
+# (既定 1,000) より十分に小さい。これより深いファイルは不正な JSON と同じに扱う: `json.loads`
+# が通る深さでも、後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿り、少し
+# 深いだけのファイルで RecursionError になって __main__ の最終防波堤 (検証のスキップ) まで
+# 抜ける (Python 3.9 で実測。境目は Python の版と呼び出しの深さで変わる)。
+_MAX_ACCOUNTS_DEPTH = 32
+
+
+def _nested_deeper_than(value, limit: int) -> bool:
+    """value の入れ子 (dict / list) が limit 段より深ければ True (再帰しないで数える)。"""
+    stack = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, dict):
+            children = current.values()
+        elif isinstance(current, list):
+            children = current
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def _unreadable_accounts(accounts_path: Path, why: str) -> str:
+    """読めない期待値ファイル (UTF-8 でない / 桁の多すぎる整数 / 入れ子が深すぎる) の deny 本文。
+
+    判定は不正な JSON と同じ (mode は env だけで決める。`"$mode"` は読めないため)。
+    """
+    return (
+        f"{accounts_path} を読めません ({why})。UTF-8 で保存した JSON か、"
+        "入れ子が深すぎないかを確認・修正してください。"
+    )
+
+
 def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
     """親ディレクトリの accounts.local.json を採用した場合の 1 行注釈。
 
@@ -718,10 +755,27 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             "内容を確認・修正してください。",
             mode_notes,
         )
+    except (ValueError, RecursionError) as e:
+        # UTF-8 でない (UnicodeDecodeError) / 桁の多すぎる整数 (Python の上限。版と設定で
+        # 変わる) / 入れ子が深すぎる (RecursionError) ファイルも、不正な JSON と同じに扱う。
+        # 前の 2 つは ValueError の子 (JSONDecodeError も子だが、上で捕まえる)。捕まえないと
+        # dispatch() の外まで抜け、__main__ の最終防波堤が「内部エラーのため検証をスキップ」
+        # (実行は止めない) にしていた。
+        return _decide(
+            pre_file_mode, _unreadable_accounts(accounts_path, type(e).__name__), mode_notes
+        )
     except OSError as e:
         return _decide(
             pre_file_mode,
             f"{accounts_path} の読み込みに失敗しました: {e}",
+            mode_notes,
+        )
+    if _nested_deeper_than(accounts, _MAX_ACCOUNTS_DEPTH):
+        return _decide(
+            pre_file_mode,
+            _unreadable_accounts(
+                accounts_path, f"入れ子が {_MAX_ACCOUNTS_DEPTH} 段より深い"
+            ),
             mode_notes,
         )
 
@@ -895,7 +949,9 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # REMEDIATION_NOTE を持つ service (aws) には当てない: 許容形から外れた profile 名は
             # 文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内するので、注記を落とすと
             # 使い方の説明だけが消える。UNSAFE を含まない deny に出る値の表示 (firebase の
-            # `(→ <alias の行き先>)` と gh の `[<host>]`) は、許容形のときだけ出す (services 側)。
+            # `(→ <alias の行き先>)`・不一致の deny の `現在=`・`--config` 付きのコマンドの deny と
+            # `--project` の行き先を確かめられない deny の `期待=`、gh の `[<host>]`) は、許容形の
+            # ときだけ出す (services 側)。
             if _guides_remediation(err, svc) and (
                 hasattr(svc, "REMEDIATION_NOTE") or shell_word.UNSAFE not in err
             ):

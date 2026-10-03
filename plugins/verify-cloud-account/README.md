@@ -145,9 +145,10 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
   **`accounts.local.json` を持たないプロジェクト**だけ。自前の設定があるプロジェクトは
   グローバル既定を一切読まないので、そちらは `VERIFY_CLOUD_ACCOUNT_MODE` か
   **そのプロジェクトの `"$mode"`** を使う
-- **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損 /
-  複数パス競合の deny はファイルを読む前に確定するため、そこを `warn` / `off` に
-  弱められるのは `VERIFY_CLOUD_ACCOUNT_MODE` のみ
+- **`"$mode"` は `accounts.local.json` を読めたときだけ効く**。未設定 / JSON 破損
+  (UTF-8 でない・入れ子が深すぎるものを含む。v0.18.0) / 複数パス競合の deny は
+  ファイルを読む前に確定するため、そこを `warn` / `off` に弱められるのは
+  `VERIFY_CLOUD_ACCOUNT_MODE` のみ
 - `"$mode"` は **builder が値を書かない予約キー** (`"$readonly"` も同じ)。検証を
   弱めるキーなので、hook に見張られている Claude がスクリプトで切れないようにして
   いる。`init` / `set` / `remove` / `migrate` は既存の値を壊さず保持するが、設定・
@@ -234,7 +235,7 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
   このファイルを毎回読むので、再起動しなくても次の gh コマンドから効く。
   accounts.local.json がまだ無いときは作らずに拒否する (`"$auto_switch"` だけの
   ファイルは[グローバル既定](#グローバル既定-v0130)を覆い隠し、期待値を書いていない
-  service がすべて未設定 = deny になるため)
+  service がすべて未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になるため)
 - [グローバル既定](#グローバル既定-v0130) のファイルに書いた `"$auto_switch"` が
   効くのは、自前の `accounts.local.json` を持たないプロジェクトだけ (`"$mode"` と
   同じ)。全プロジェクトで有効にするなら環境変数を使う
@@ -347,8 +348,9 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (UTF-8 でない・
   U+FEFF がある・`//` か `/*` がある (文字列の中の URL なども含む)・JSON として読めない
   (`NaN` など JSON に無い値・構文の誤り・深い入れ子)・`projects` がオブジェクトでないか
-  文字列でない値を持つ) は、firebase-tools と同じ行き先を確かめられないので「固定できません」と
-  出す (v0.17.1)。判定は保守的で、URL を含むだけの厳密な JSON も対象になる
+  文字列でない値を持つ、など) は、firebase-tools と同じ行き先を確かめられないので「固定
+  できません」と出す (v0.17.1)。判定は保守的で、URL を含むだけの厳密な JSON も対象になる。
+  並べた条件は網羅ではない (Python が読めない桁の多すぎる整数など、版で変わるものは並べない)
 - 前後に空白のある期待値は固定できない (照合は完全一致なので、どの現在値とも一致しない)。
   `pin-env` は「固定できません」と出す (v0.17.1)
 - 検証の成功 cache は、アカウントを決める環境変数の値もキーに含める (v0.17.0)。
@@ -540,7 +542,8 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
 - 不正な値 (`"yes"` 等) は **`deny` として扱い** (fail-closed)、その旨を文面に添える
 
 **設定が壊れている / 曖昧なときは tier に関係なく deny** のまま: 複数パスに
-`accounts.local.json` がある (競合) / JSON が壊れている / 期待値の型が不正。
+`accounts.local.json` がある (競合) / JSON が壊れている (UTF-8 でない・入れ子が
+深すぎるものを含む。v0.18.0) / 期待値の型が不正。
 「どの設定が効くか決まらない」状態では読むだけでも判定の土台が無いため。
 
 ### 発火するコマンド
@@ -604,9 +607,31 @@ CLI から取れないとき (hook の PATH に無い / 実行不可 / 非ゼロ
 複数行) は CLI と同じローカル設定から同じ規則で解決する (起点は同じ project root):
 configstore の切替先を `.firebaserc` の alias で解決 → 無ければ `.firebaserc` の
 alias が 1 つならその値 → `default`。`npx firebase ...` のように hook 側に
-`firebase` が無い構成でも、configstore 経由で切替を見落とさない。
+`firebase` が無い構成でも、configstore 経由で切替を見落とさない。ただし
+`.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (条件は
+[pin-env](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) の firebase と同じ)
+は、ローカル設定から解決せず、現在値を取得できないとして deny する (v0.18.0)。alias の
+行き先を firebase-tools と違う project に読んで照合しないため。
 `firebase use` が timeout したときは fallback せず「firebase use がタイムアウト
 しました」で deny する (fail-closed)。
+
+`--config` / `-c` 付きのコマンドは、指定したファイルのあるディレクトリを project root
+にする (firebase-tools と同じ。v0.18.0)。`firebase use` の cwd と、ローカル設定から解決する
+ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける。ローカル設定の切替先は、
+firebase-tools と同じく symlink を解かないそのパスの親方向だけを探す)。firebase-tools は
+`firebase use` の切替先をディレクトリごとに記録し、`--config` 付きのコマンドはそのファイルの
+あるディレクトリから親へ探した切替先で動く。そのディレクトリがプロジェクトのディレクトリと
+別で、そこに切替先が記録されていると、プロジェクトのディレクトリで切り替えても変わらない。
+このため `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのファイルの
+あるディレクトリで切り替えるよう文で案内する (案内どおりに切り替えても同じ deny を繰り返さない
+ように。ただし `--config` のパスが symlink を通るときは、そのディレクトリで切り替えても効かない
+ことがある。firebase-tools は symlink を解かないパスで切替先を探すため。[既知の制限](#既知の制限))。
+この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`。現在値を取得できない deny も示す)
+も、下の許容形のものだけを示す (`firebase use` に入れる形より広い。ドメイン付きの project ID も
+示す。外れていれば「表示しない値」)。期待値に許容形から外れる値があるときは、「表示していない
+期待値があります (accounts.local.json の "firebase" を確認してください)」と出所を添える
+(現在値を取得できない deny も同じ)。許容形から外れる値はどの project とも一致しないので、
+切り替えても deny が続くため。
 
 ### 検証をスキップする readonly コマンド
 
@@ -700,9 +725,11 @@ use <x>` は、書込側が期待値への切替なので許可される形)。r
 「手で確認してください」の文がある deny) には、ほかの entry の切替を案内していても付けない
 (v0.17.1)。ただし AWS は、外れた profile 名を文に置き換えたうえで `AWS_PROFILE=<profile>` を
 必ず案内するので、AWS 専用の注記を付ける。文面に表示する値のうち `.firebaserc` の alias の
-行き先 (`--project <alias> (→ <project>)`) と gh の host 名 (`GitHub [<host>]`) は、下の
-許容形のときだけ出す (外れていれば「表示しない値」「表示しない host」。値の形だけで注記が
-付かないように)。
+行き先 (`--project <alias> (→ <project>)`)、gh の host 名 (`GitHub [<host>]`)、Firebase の
+不一致の deny の現在値 (`現在=<project>`。CLI が無いときは `.firebaserc` から解決した値) と
+`--config` 付きのコマンドの deny・`--project` の行き先を確かめられない deny の期待値
+(`期待=<project>`。この 2 つは v0.18.0) は、下の許容形のときだけ出す (外れていれば
+「表示しない値」「表示しない host」。値の形だけで注記が付かないように)。
 
 **案内するコマンドに入れる値は、シェルでそのまま 1 語になる形に限る (v0.17.1)。** 期待値・
 host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/` `@` `+` だけからなる
@@ -740,7 +767,8 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | AWS | `--profile` | 検証コマンドにも `--profile` を付けて実行 (CLI の資格情報解決順を実行時と揃える) |
 | GCP | `--project` / `--account` | 値を期待値と直接照合 (アクティブ設定は見ない) |
 | GCP | `--configuration` | 現在値の取得コマンドに引き渡す |
-| Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則) |
+| Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則)。`.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ deny (v0.18.0) |
+| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し (プロジェクトのディレクトリは symlink を解いた実体のパスで。CLI 本体と同じ)、見つからなければ deny (v0.18.0) |
 | Kubernetes | `--context` | 値を期待値と直接照合 |
 | Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
 
@@ -949,9 +977,9 @@ worktree 内に同名ファイルを置く必要は無い。
     としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
     submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
-    (未設定として deny)。**別の repo の中に置いた linked worktree から、その
-    外側 repo の設定を継承していた場合も同じ** (worktree root で止まる)。
-    各 repo の toplevel に複製するか `--path` で明示する
+    (未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。**別の repo の中に
+    置いた linked worktree から、その外側 repo の設定を継承していた場合も同じ**
+    (worktree root で止まる)。各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ
   <絶対パス> から継承しています` の 1 行注釈が付く (verify 成功時は silent)
 
@@ -962,7 +990,7 @@ worktree 内に同名ファイルを置く必要は無い。
 決め、解決したパスを dry-run / commit の出力の先頭に `対象: <パス>` として表示する。
 読む側と書く側で解決を共有しないと、継承中の worktree で `set` が編集した service
 だけを含む子ファイルを作り、dispatcher の遡及がそこで止まって**継承していた他の
-service が一斉に未設定 (deny)** になる。
+service が一斉に未設定の扱い** (書込は deny、リモート read のみのコマンドは警告) になる。
 
 - 継承中の `set` / `remove` / `migrate` は**継承元のファイル**を直接編集する
 - 継承中の `init` は cwd 直下に作ると継承中の設定を覆い隠すため **exit 2 で拒否**
@@ -1021,7 +1049,8 @@ root 自身**が、外側に repo が無ければ `$HOME` が境界になる (�
   書き換えてしまわないようにするため。グローバル既定は手で作るか `--path` で明示する
 - 上の帰結として、**グローバル既定で検証されているプロジェクトに
   `accounts.local.json` を新規作成すると、グローバル既定のキーは継承されない**
-  (キー単位のマージはしない = 書かなかった service は未設定 = deny)。builder は
+  (キー単位のマージはしない = 書かなかった service は未設定の扱い。書込は deny、
+  リモート read のみのコマンドは警告)。builder は
   新規作成になるとき「グローバル既定 `<path>` の N キーは継承されません」と警告し、
   `accounts-show` は「プロジェクトに無い」ときグローバル既定の存在と
   「hook はこのファイルで検証します」を表示する。グローバル既定を直したいときは
@@ -1245,6 +1274,34 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない
+- Firebase の `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき
+  (コメント・U+FEFF・URL を含む文字列など。条件は
+  [pin-env](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) の firebase と同じ)
+  は、`--project` 付きのコマンドを deny し (先頭の文に期待値 (`期待=`) を示す。`--config` 付きの
+  コマンドの deny と同じく許容形のものだけを示し、外れる値があれば出所を添える)、CLI から現在値を
+  取れないとき (hook の PATH に `firebase` が無い `npx firebase` の構成など) は現在値を取得できない
+  として deny する (v0.18.0。fail-closed。後者の文面は、hook の PATH に `firebase` が無ければ
+  「firebase コマンドが見つかりません」、CLI はあるが現在値を返さなければ (非ゼロ終了など。
+  timeout のときは「firebase use がタイムアウトしました」で、切替は案内しない)「現在のプロジェクトを取得できません」
+  で、こちらは期待した project への切替を案内する。案内できる期待値は切替コマンドの形で示し、
+  コマンドの形で 1 つも案内できないとき (`--config` 付きのコマンドでは常に) は `期待=` に許容形の
+  値を示す)。判定は保守的で、
+  firebase-tools が期待した project で動くファイルも対象になる。`--project`
+  を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、deny が
+  示す期待した project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を
+  使えるようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
+- Firebase の `--config` / `-c` のパスが symlink を通るとき (symlink を通る絶対パス・symlink の
+  ディレクトリを通る相対パス) は、deny の案内どおり `--config` のファイルのあるディレクトリで
+  切り替えても効かないことがある (v0.18.0)。firebase-tools はこのパスの symlink を解かずに
+  切替先を探すが、そのディレクトリで切り替えると実体のパスで記録されるため。hook も
+  firebase-tools と同じ切替先を引く (CLI が無いときのローカル設定の解決も、symlink を解かない
+  パスでだけ探す) ので、誤 allow にはならず、同じ deny が続く
+- **存在確認で stat できない accounts.local.json** (長すぎる名前を指す symlink など。リポジトリに
+  置ける) は、Python 3.13 以前では「内部エラーのため検証をスキップ」になる (実行は止めない。
+  v0.18.0 時点。pathlib の `Path.is_file()` が stat の失敗を例外にするため)。旧パスのファイルも
+  同じで、同じ階層のほかの配置パスに正しいファイルがあってもスキップになる。Python 3.14 以降は、
+  そのファイルが無いものとして扱われ、探索が続く (同じ階層のほかの配置パス・親ディレクトリ・
+  グローバル既定で見つかったものと照合し、どこにも無ければ未設定の扱い)
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照
@@ -1285,9 +1342,10 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 1. `cat "${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json"` でフックが登録されているか確認
 2. `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"` を stdin 付きで
-   手動実行し、対象コマンドで deny JSON が出るかスモーク:
+   手動実行し、対象コマンドで deny JSON が出るかスモーク (書込のコマンドで試す。
+   リモート read のみの `gh pr list` などは、既定では deny せず警告にとどめる):
    ```bash
-   echo '{"tool_input":{"command":"gh pr list"},"cwd":"/tmp"}' \
+   echo '{"tool_input":{"command":"gh pr create"},"cwd":"/tmp"}' \
      | python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account"
    ```
 3. `.claude/verify-cloud-account/accounts.local.json` の JSON 構文エラーを確認
@@ -1307,12 +1365,14 @@ hook 実行時に環境変数 `VERIFY_CLOUD_ACCOUNT_DEBUG=1` を立てると、�
 分解結果を stderr に 1 行 JSON で出す (`claude --verbose` で確認可能)。
 
 ```json
-{"segments": [{"segment": "gh pr list", "service": "github", "readonly": false}],
+{"segments": [{"segment": "gh pr create", "service": "github", "readonly": false,
+   "tier": "write"}],
  "cache_hit": {}, "verify_ms": {"github": 12.3}, "auto_switch": {},
  "elapsed_ms": 13.1, "decision": "deny"}
 ```
 
-- `segments`: 抽出した各セグメントと、マッチした service / readonly 判定
+- `segments`: 抽出した各セグメントと、マッチした service / readonly 判定 /
+  [tier](#検証の-3-tier--v0140) (`readonly` / `query` / `write`)
 - `cache_hit`: 成功 cache を使って verify を省略した service
 - `verify_ms`: 実際に `verify()` を呼んだ service とその所要時間 (ms)
 - `auto_switch`: [自動切替](#自動切替-auto-switch--v0160) を試みた service ごとの結果

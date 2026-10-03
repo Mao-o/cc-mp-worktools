@@ -65,6 +65,29 @@ class TestCache(unittest.TestCase):
         files[0].write_text("not json", encoding="utf-8")
         self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
 
+    def test_unreadable_cache_file_is_a_miss_not_an_exception(self):
+        """UTF-8 でない / 入れ子が深い entry も cache miss (検証し直す。v0.18.0)。
+
+        旧版は JSONDecodeError と OSError だけを捕まえ、UnicodeDecodeError / RecursionError が
+        dispatch() の外まで抜けて __main__ の最終防波堤が検証をスキップしていた。
+        """
+        base = Path(self.tmp) / "cc-mp-verify-cloud-account"
+        for name, payload in (
+            ("not UTF-8", b'{"success": true, "x": "\xff"}'),
+            ("deep", b"[" * 100000 + b"]" * 100000),
+        ):
+            with self.subTest(name):
+                cache.set_success("svc", "/p", "exp", 1.0)
+                files = list(base.glob("svc-*.json"))
+                self.assertTrue(files)
+                for path in files:
+                    path.write_bytes(payload)
+                try:
+                    hit = cache.get_success("svc", "/p", "exp", 1.0)
+                except (UnicodeDecodeError, RecursionError) as e:
+                    self.fail(f"読めない cache entry で get_success が {type(e).__name__} を投げた")
+                self.assertFalse(hit)
+
     def test_different_inline_env_miss(self):
         # profile が異なれば別キー → profile A の成功が profile B で誤 allow されない
         cache.set_success("svc", "/p", "exp", 1.0, {"AWS_PROFILE": "a"})
@@ -198,11 +221,62 @@ class TestCache(unittest.TestCase):
         cache.invalidate("github")
         self.assertGreater(cache.current_epoch("github"), 0)
 
+    def test_deeply_nested_epoch_file_is_zero_not_an_exception(self):
+        """入れ子の深い epoch ファイルも「読めない」と同じ 0 (v0.18.0)。旧版は RecursionError が
+        dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップしていた。"""
+        self._base().mkdir(exist_ok=True)
+        (self._base() / "github.epoch").write_bytes(b"[" * 100000 + b"]" * 100000)
+        try:
+            epoch = cache.current_epoch("github")
+        except RecursionError:
+            self.fail("入れ子の深い epoch ファイルで current_epoch が RecursionError を投げた")
+        self.assertEqual(epoch, 0)
+        cache.invalidate("github")
+        self.assertGreater(cache.current_epoch("github"), 0)
+
     def test_epoch_is_per_service(self):
         cache.set_success("aws", "/p", "exp", 1.0)
         cache.invalidate("github")
         self.assertEqual(cache.current_epoch("aws"), 0)
         self.assertTrue(cache.get_success("aws", "/p", "exp", 1.0))
+
+    # --- stat できない epoch / entry (v0.18.0) ---
+    #
+    # pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の OSError (長すぎる名前を
+    # 指す symlink の ENAMETOOLONG・EACCES) をそのまま投げる (3.14 から False)。try の外で呼んで
+    # いたので、`$TMPDIR` にその symlink を置くだけで例外が dispatch() の外まで抜け、__main__ の
+    # 最終防波堤がその service の検証をスキップしていた (マージ前レビューの指摘)。3.14 以降でも
+    # 同じ失敗を再現するため、`Path.is_file` を 3.13 までの挙動に差し替える。
+
+    _LONG = "a" * 300  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
+
+    def _unstattable(self, path: Path) -> None:
+        """path を stat できない symlink にし、差し替えた `Path.is_file` が投げることを確かめる。"""
+        os.symlink(self._LONG, path)
+        patcher = _testutil.patch_is_file_like_py313()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
+            path.is_file()
+        _testutil.assert_real_is_file_on_this_version(self, path)
+
+    def test_epoch_file_that_cannot_be_statted_is_zero(self):
+        self._unstattable(cache._epoch_path("firebase"))
+        try:
+            epoch = cache.current_epoch("firebase")
+        except OSError as e:
+            self.fail(f"stat できない epoch ファイルで current_epoch が {type(e).__name__} を投げた")
+        self.assertEqual(epoch, 0)
+
+    def test_entry_that_cannot_be_statted_is_a_miss(self):
+        self._unstattable(
+            cache._cache_path(cache._cache_key("firebase", "/p", "exp", None, None, None))
+        )
+        try:
+            hit = cache.get_success("firebase", "/p", "exp", 1.0)
+        except OSError as e:
+            self.fail(f"stat できない cache entry で get_success が {type(e).__name__} を投げた")
+        self.assertFalse(hit)
 
     def test_writes_leave_no_tmp_files(self):
         cache.set_success("github", "/p", "exp", 1.0)

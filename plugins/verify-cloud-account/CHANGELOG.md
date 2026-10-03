@@ -1,5 +1,153 @@
 # Changelog
 
+## 0.18.0
+
+### Fixed: `.firebaserc` を firebase-tools と違う内容に読んで照合しない
+
+`firebase --project <alias> ...` の照合と、CLI から現在値を取れないとき (hook の PATH に
+`firebase` が無い `npx firebase` の構成など) のローカル設定の解決は、`.firebaserc` を厳密な
+JSON として読み、読めなければ alias 0 件として扱っていた。firebase-tools は `.firebaserc` の
+すべての U+FEFF とコメント (`//` / `/* */`) を除いてから読むので、コメントのあるファイルでは
+`--project <alias>` を alias の行き先ではなく値そのもので照合し、alias のキーの中の U+FEFF や
+`NaN` のあるファイルでも行き先を取り違えて、別の project で動くコマンドを allow しえた
+(内部バックログ)。
+
+- 0.17.1 の pin-env と同じ判定 (UTF-8 でない・U+FEFF がある・`//` か `/*` がある (文字列の
+  中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
+  持つ、などに当たらない) で、firebase-tools と同じ内容に読めると確かめられたときだけ
+  `.firebaserc` を使う。確かめられなければ、`--project` 付きのコマンドは「--project の行き先を
+  確かめられません」で deny し (弾く主な条件を文面に並べ、期待値も示す)、ローカル設定からは
+  解決しない (現在値を取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を
+  含むだけの厳密な JSON も対象になる (fail-closed の代償)
+- 弾く条件の文 (pin-env の「固定できません」と共通) は網羅と言わない書き方にした (「…、などに
+  当たる」)。Python の json が読めない形には、上限が版と設定で変わるもの (桁の多すぎる整数) も
+  あり、並べていない。そのため締めの文も言い切らない: pin-env は「これらに当たらない形にすると
+  案内できることがあります」(0.17.1 は「案内できます」)、hook の deny は「これらに当たらない形に
+  すると確かめられることがあります」(マージ前レビューの指摘)
+- 「--project の行き先を確かめられません」の deny の「--project を外す」案内は、外すとコマンドが
+  アクティブな project で動く (指定していた project ではなくなる) ことを言う。意図した project が
+  アクティブかを確かめてから外すよう案内する (マージ前レビューの指摘)
+- 同じ deny の先頭の文に、期待値 (`期待=`) も示す (dict の期待値には「のいずれか」を付ける)。
+  0.17.1 の同じコマンドの deny (`--project` の不一致) は期待した project を示しており、上の
+  「意図した project がアクティブかを確かめる」にはそれが要るため。示すのは許容形の値だけで、
+  外れる値があれば出所の文を添える (`--config` 付きのコマンドの deny と同じ部品。マージ前
+  レビューの指摘)
+- 入れ子の深い `.firebaserc` で例外が hook の外まで抜け、「内部エラーのため検証をスキップ」
+  (実行は止めない) になっていた。読めないファイルとして上と同じに扱う
+- stat できない `.firebaserc` (長すぎる名前を指す symlink など。権限の細工は要らず、リポジトリに
+  置ける) でも、pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップ
+  していた (`--project` 付きのコマンドは CLI の有無に関係なく通る経路)。firebase-tools と同じく
+  無いもの (alias 0 件) として扱う (0.18.0 より前からある。マージ前レビューの指摘)
+- 空文字の alias も、firebase-tools と同じく alias の数に数える (`{"a": "", "b": "x"}` は
+  alias 2 つで、`default` が無ければ未解決)。0.17.1 までは 1 つと数えて `x` を現在値にしていた
+
+### Fixed: firebase の `--config` / `-c` を照合先に反映する
+
+`firebase --config <path> ...` は、指定した firebase.json のあるディレクトリを project root に
+して、そこの `.firebaserc` と、そこで `firebase use` した project で動く。0.17.1 までの hook は
+`--config` を見ずに、プロジェクトのディレクトリから firebase.json を親方向に探した root で照合
+していた (内部バックログ)。
+
+- `--config` / `-c` を照合先を変えるコンテキスト指定 flag として扱い、指定したファイルのある
+  ディレクトリを project root にする (`firebase use` にも同じ `--config` を付ける)。相対パスは
+  プロジェクトのディレクトリから探し、見つからなければ deny する (hook はコマンドの作業
+  ディレクトリを知らない)
+- 相対パスは、プロジェクトのディレクトリを symlink を解いた実体のパスにしてから解決する (CLI
+  本体と同じ。Node の作業ディレクトリは実体のパス)。論理パスから解決すると、CLI に渡す
+  `--config` の root が論理パスになり、`firebase use` が実体のパスで記録した切替先を CLI が
+  引き当て損ねて、別の project で答えうる (マージ前レビューの指摘)
+- `--config` 付きのコマンドの deny は、切替をコマンドの形 (`firebase use <期待値>`) で案内せず、
+  そのファイルのあるディレクトリで切り替えるよう文で案内する。firebase-tools は切替先を
+  ディレクトリごとに記録し、`--config` 付きのコマンドはそのファイルのあるディレクトリから親へ
+  探した切替先で動くので、そのディレクトリがプロジェクトのディレクトリと別でそこに切替先が
+  記録されていると、プロジェクトのディレクトリで `firebase use <期待値>` を打っても変わらない
+  (その形で案内すると、案内どおりに切り替えても同じ deny を繰り返す) ため (マージ前レビューの
+  指摘)
+- この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`) は、許容形の値だけを示す
+  (外れていれば「表示しない値」)。CLI が無いとき現在値はリポジトリの `.firebaserc` から解決
+  されるので、値が切替コマンドの形 (`x firebase use other` など) だと、示すだけで「単独で
+  実行」の注記の判定に当たり、案内していないコマンドに注記が付くため (マージ前レビューの
+  指摘)。現在値の表示は、`--config` の無い不一致の deny も同じにする (表示だけの変更)
+- `--config` 付きのコマンドで現在値を取得できない deny も、先頭行に期待値 (`期待=`) を同じ形で
+  示す (dict の期待値には「のいずれか」を付ける)。0.17.1 の同じコマンドの deny は、案内する
+  切替コマンド (`firebase use <期待値>`) で期待した project を示していたので、コマンドの形の
+  案内をやめても、どの project に切り替えるかを文面に残すため (マージ前レビューの指摘)
+- `--config` の無いコマンドで現在値を取得できない deny も、切替コマンドを 1 つも案内できないとき
+  (期待値がドメイン付きの project ID のときや、dict のどの entry も切替コマンドにできないとき) は、
+  先頭行に期待値 (`期待=`) を同じ形で示す (dict の期待値には「のいずれか」を付ける)。この deny の
+  案内は「期待した project に切り替えてください」で、どの project に切り替えるかが要るため。
+  許容形から外れる値は示さず、出所は従来どおり添える「手で確認してください」の文が言う (マージ前
+  レビューの指摘)
+- 期待値に許容形から外れる値があるときは、`--config` 付きのコマンドの deny (現在値を取得できない
+  deny も含む) に「表示していない期待値があります (accounts.local.json の "firebase" を確認して
+  ください)」と出所を添える。許容形から外れる値はどの project とも一致せず、案内どおりに切り
+  替えても deny が続くので、何を直せばよいかを文面に残すため (マージ前レビューの指摘)
+- CLI が無いときのローカル設定の解決は、`--config` 付きのコマンドでは切替先を、指定した
+  ファイルのあるディレクトリ (symlink を解かないパス) の親方向だけで探す。firebase-tools は
+  そのパスの親方向だけを探すので、実体のパスでも探すと、`--config` のパスが symlink を通る
+  とき (symlink を通る絶対パスや、symlink のディレクトリを通る相対パス)、firebase-tools が
+  見ない切替先 (そのディレクトリで切り替えると実体のパスで記録される) で照合して allow しうる
+  ため (マージ前レビューの指摘)。既知の制限: この形では、案内どおりそのディレクトリで切り
+  替えても効かないことがある (hook は firebase-tools と同じ切替先で照合するので、deny のまま)
+- 値が変数展開などで静的に解決できないときは、他のコンテキスト指定 flag と同じく既定の root で
+  照合する
+
+### Fixed: 読めない accounts.local.json / 成功 cache で検証をスキップしない
+
+- accounts.local.json (旧パスを含む) が UTF-8 でない・桁の多すぎる整数がある (Python の上限。
+  3.11 以降の既定は 4,300 桁)・入れ子が深すぎると、例外が hook の外まで抜け、「内部エラーの
+  ため検証をスキップ」(実行は止めない) になっていた。JSON が不正なときと同じ扱いにする (tier に
+  関係なく deny。`"$mode"` は読めないので、mode は環境変数だけで決まる) (内部バックログ。
+  桁数はマージ前レビューの指摘)
+- 入れ子が 32 段より深いファイルも同じ扱いにする。読み込みが通る深さでも、後段 (成功 cache の
+  キーを作るところなど) が同じ深さを辿って例外になりうるため。正規の形は 2 段まで
+- 成功 cache の entry が UTF-8 でない・入れ子が深いとき、epoch のファイルが入れ子が深いときも、
+  読めないものとして扱う (entry は cache miss、epoch は無効化の記録が無いのと同じ。同じく
+  検証をスキップしていた)
+- stat できない entry / epoch のファイル (長すぎる名前を指す symlink など) も同じ扱いにする。
+  pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップしていた
+  (epoch は検証のたびに読むので、置かれている間はその service のすべてのコマンドで。0.18.0 より
+  前からある。マージ前レビューの指摘)
+- 既知の制限: 存在確認で stat できない accounts.local.json (旧パスを含む。長すぎる名前を指す
+  symlink など) は、Python 3.13 以前ではまだ「内部エラーのため検証をスキップ」になる (3.14
+  以降は、そのファイルが無いものとして扱われる。README の既知の制限。別の変更で直す)
+
+### Tests
+
+- `.firebaserc` の読み方: firebase-tools と同じ行き先になる厳密な JSON・コメント・alias の
+  キーの中の U+FEFF・確かめられない形のすべてで `--project` が deny になり、コマンドを案内
+  せず、外すと行き先が変わることと、直し方を言い切らないことを言う。その deny が示す期待値
+  (scalar / dict・ドメイン付きの project ID・空文字と null の entry・許容形から外れる値と
+  出所の文) (`TestProjectFlagResolvesLikeFirebaseTools`)、
+  ローカル設定の解決と空文字の alias の数え方、そこで現在値を取得できない deny が切替コマンドに
+  できない期待値も `期待=` に示すこと (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
+  入れ子の深い `.firebaserc` で検証をスキップしない (`TestDeepFirebasercDoesNotSkipVerification`。
+  判定に加えて理由も見る)、stat できない `.firebaserc` (`TestFirebasercThatCannotBeStatted`)
+- `--config` / `-c`: 指定したディレクトリでの `--project` の解決・`firebase use` の引数と
+  cwd・symlink の下のプロジェクトでの相対パスの解決・ローカル設定の起点・見つからないファイルの
+  deny (`TestFirebaseConfigOption`)、dispatcher での全記法と注記
+  (`TestFirebaseConfigOptionRouting`)、deny → そのディレクトリで切り替える → 同じコマンドが
+  通る、の往復 (CLI の有無・scalar / dict の期待値・切替先が無いとき (期待値を示す)・ファイルが
+  プロジェクトのディレクトリにあるとき。許容形から外れた期待値・現在値は示さず、注記を付けない。
+  外れた期待値があれば、不一致・現在値を取得できない deny の両方で出所の文を添え、`期待=` に
+  示せる値 (ドメイン付きの project ID も) だけなら添えない。`現在=` も同じ形を示す。dict の
+  空文字・null の entry は `期待=` にも出所の判定にも入れない。
+  `TestFirebaseConfigSwitchGuidance`)、`--config` の無い不一致の deny も許容形から外れる現在値を
+  `現在=` に示さない (`TestFirebaseCurrentValueShownWithoutConfig`)、CLI が無いとき symlink を
+  通る `--config` (絶対パス / symlink のディレクトリを通る相対パス) で firebase-tools と同じ
+  切替先を引く (`TestFirebaseConfigThroughASymlinkWithoutCli`)
+- 読めないファイル: accounts.local.json の入れ子の上限 (`TestAccountsFile`)、成功 cache の
+  entry / epoch (読めない・stat できない。`test_cache.py`)、`__main__` を実プロセスで起こす
+  e2e (UTF-8 でない・入れ子が深い・桁の多すぎる整数のある accounts.local.json と旧パス、入れ子の
+  深い `.firebaserc`、読めない成功 cache。どれも warn (スキップ) にならない)
+- stat できないファイルのテストは `Path.is_file` を Python 3.13 までの挙動に差し替え、3.14 以降
+  でも同じ失敗を再現する。差し替えは本物と同じ入力で比べて同じに振る舞う (違うのは 3.14 で
+  本物が変わった「stat できないパス」だけ。`TestIsFileLikePy313`)。使う側は、本物がその版で
+  同じ fixture にどう振る舞うか (3.13 までは例外、3.14 からは False) も前提として確かめ、その
+  前提の helper 自身も、前提と食い違う path で落ちることを確かめる
+  (`TestAssertRealIsFileOnThisVersion`。マージ前レビューの指摘)
+- 1,317 → 1,358 件
+
 ## 0.17.1
 
 ### Fixed: 案内するコマンドに値をそのまま埋め込まない
