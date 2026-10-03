@@ -220,7 +220,7 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         profile["url_base"] = base
     index_url = raw.get("index_url")
     if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
-        _bad(path, f"sources.{name}.index_url must be an http(s) URL of the site's llms.txt")
+        _bad(path, f"sources.{name}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
     profile["index_url"] = index_url
     return profile
 

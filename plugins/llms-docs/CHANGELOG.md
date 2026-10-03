@@ -2,7 +2,7 @@
 
 All notable changes to this plugin will be documented here.
 
-## [0.28.2] - 2026-10-03
+## [0.28.1] - 2026-10-03
 
 ### 修正: preset `codex` の取得先を移転先 (`learn.chatgpt.com/docs`) にし、範囲の説明を直す
 
@@ -24,8 +24,6 @@ Work / 管理者向けの設定など) も含むようになっており、prese
   ルート・`llms-full.txt` にする変異、`url` だけ移転元に残す変異、別の preset (zod) の範囲をずらす変異の
   5 通りが、いずれも assertion の失敗で落ちる
 
-## [0.28.1] - 2026-10-03
-
 ### 修正: `index_url` の突き合わせで、別の `llms.txt` を指す項目をページとして扱わない (汎用 loader)
 
 他の `llms.txt` へのリンク集になっている 2 段の索引 (OpenAI や Cloudflare のルートの `llms.txt`) を
@@ -45,7 +43,7 @@ Work / 管理者向けの設定など) も含むようになっており、prese
 - **防げないもの** — `url` の `llms-full.txt` に含まれない別の docs のページ (OpenAI のルートにある学習
   トラックなど) の項目が、ページとタイトルを共有すると、その項目の URL が付く。タイトルだけでは本物の一致と
   区別できないため、README の `index_url` の説明と「対象外」に、2 段の索引を `index_url` に書かないことを
-  追記した
+  追記した (`index_url` の検証エラーの文言も合わせた)
 - `AGENTS.md` のレビュー規則に、別の `llms.txt` を指す項目の URL を付けることを指摘対象に、上の衝突を
   対象外に加えた
 - テスト: 索引ファイルの項目の形 8 種と、似ているがページの形 5 種 (表駆動)、2 段の索引の見本、索引ファイルの
