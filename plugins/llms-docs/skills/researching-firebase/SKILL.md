@@ -77,8 +77,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <doc_idx> "<he
 general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
 同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
 
-1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先
-   (`~/.claude/plugins/` の下) から `llms-docs` の `scripts/parse-firebase.py` を探す
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/parse-firebase.py` を探す
 2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
 
 ## v2 互換性

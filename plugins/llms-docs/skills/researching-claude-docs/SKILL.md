@@ -75,8 +75,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "
 general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
 同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
 
-1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先
-   (`~/.claude/plugins/` の下) から `llms-docs` の `scripts/parse-claude-docs.py` を探す
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/parse-claude-docs.py` を探す
 2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
 
 ## ソース
@@ -171,7 +173,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 | 完全 URL | `https://code.claude.com/docs/en/hooks` | `source_url` を正規化して厳密一致 |
 
 slug が複数ページに一致する場合は、`<lang>/<slug>` に完全一致するページが 1 件だけならそれに解決する (`hooks` は
-`en/hooks`。`en/agent-sdk/hooks` は別のページで、stderr の `Note:` に出る)。そうでなければ曖昧エラーになり、
+`en/hooks`。`en/agent-sdk/hooks` は別のページで、stderr の `Note:` に、それを読むコマンド付きで出る)。そうでなければ曖昧エラーになり、
 候補ごとに**そのまま実行できるコマンド**が付く。選んで実行するか、より長い slug (`agent-sdk/hooks`) か完全 URL を渡す。
 
 ### `heading_path` の指定方法

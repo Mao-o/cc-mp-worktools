@@ -450,6 +450,7 @@ def cmd_search_content(args):
         # already in the cache, so this re-reads files, not the network).
         render_zero_hits(args.query, (load_lines(p) for p in searched_paths),
                          subcommand="search-content", hint_args=hint_args,
+                         index_hint_args=hint_args,
                          restricted_to=args.page_ref,
                          restricted_only=args.page_ref is not None)
         return
@@ -493,6 +494,7 @@ def cmd_search(args):
         render_zero_hits(args.query,
                          (f"{e['title']} {e['description']}" for e in entries),
                          subcommand="search", hint_args=corpus_hint_args(args),
+                         index_hint_args=corpus_hint_args(args),
                          scope="index entries (title/description)")
         return
 

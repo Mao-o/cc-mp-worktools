@@ -36,7 +36,10 @@ Skill ツールが使えない文脈 (general-purpose の subagent など) で�
 field が抜ける)。
 
 1. スクリプトのパスを決める: `${CLAUDE_PLUGIN_ROOT}/scripts/<script>`。`${CLAUDE_PLUGIN_ROOT}` が空の
-   環境では、plugin の展開先 (`~/.claude/plugins/` の下) から `llms-docs` の `scripts/` を探す
+   環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/` を探す
 2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭の script 名を
    `python3 <path>` に置き換えて、本文 (`content`) を取る
 
@@ -52,15 +55,19 @@ field が抜ける)。
 
 ### エラー・0 件のあとの出力
 
-4 script とも、失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (exit code は変わらない):
+4 script とも、失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
+変わらない。claude-docs で下の規則により 1 ページに解決した slug は、曖昧エラーではなく本文を返す):
 
 - **曖昧な page_ref**: 候補ごとに実行できるコマンドを付ける。claude-docs は slug が `<lang>/<slug>`
-  に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で知らせる
-  (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)
+  に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で、それを読むコマンド
+  付きで知らせる (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)。候補のコマンドは
+  `--max-chars` / `--limit` などの既定以外の値も引き継ぐ
 - **heading が見つからない**: 全見出しの前に `Closest sections:` として近い見出し (最大 5 件) を、
   実行できるコマンド付きで出す
 - **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
   最大 3 行出す (`--source` などは引き継ぐ)。ヒットが無いときはプレースホルダを出さない
+- **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
+  無い)。そうした見出しのコマンドには `(heading appears N times; this reads the first)` が付く
 - **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
   セクションに揃わない」「`--page-ref` で外した」を区別して、語を減らす / `search-index` / 別 source の
   コマンドを示す

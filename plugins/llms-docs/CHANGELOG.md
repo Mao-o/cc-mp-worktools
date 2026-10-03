@@ -10,39 +10,68 @@ All notable changes to this plugin will be documented here.
 呼び出しが中央値 9・最大 64 で、36 本が 6 回を超えていた。エラーや 0 件のあとの立て直しが手数を増やしていた:
 曖昧な slug (6 回)、見出しの推測ミス (4 回)、`search` の `Next:` が `<page_ref> "<heading_path>"` の
 プレースホルダのまま (モデルが見出しを手で写して外す)、0 件 (26 回。語が docs に無いのか、絞り込みで
-外したのかが区別できず、言い換えの再検索が増える)。exit code は変えていない。
+外したのかが区別できず、言い換えの再検索が増える)。エラーと 0 件の exit code は変えていない。ただし
+claude-docs で `<lang>/<slug>` に完全一致する 1 件があった slug (`hooks` / `permissions` など) は、従来の
+曖昧エラー (exit 1) ではなく本文を返す (exit 0)。
 
 - **曖昧な page_ref** — 候補ごとに、そのまま実行できる完全なコマンド (`--source` / `--file` /
   `--cache-dir` などを引き継ぐ) を付ける。`sections` / `content` / `search-content --page-ref` で、元の
   サブコマンド・見出し・クエリを保つ。claude-docs は、slug が `<lang>/<slug>` に完全一致するページが
   ちょうど 1 件ならそれに解決し、他の候補を stderr の `Note:` に 1 行で出す (`hooks` は `en/hooks`、
-  `en/agent-sdk/hooks` は別の候補)。言語が複数ある (`en` と `ja`) など 1 件に決まらないときは従来どおり
+  `en/agent-sdk/hooks` は別の候補)。`Note:` の末尾には、他の候補の 1 つで同じことをするコマンドを付ける。
+  候補のコマンドは、そのサブコマンドの既定以外の値 (`content` の `--max-chars`、`search-content` の
+  `--limit` / `--context` / `--max-hits` / `--max-snippet-chars` など) も引き継ぐ (既定値は出さない)。言語が複数ある (`en` と `ja`) など 1 件に決まらないときは従来どおり
   曖昧エラー。Firebase は URL に言語が無く、AI SDK と汎用 loader は URL の slug を使わないため、
   この解決は入れていない (コマンド付きの候補一覧だけ)
 - **heading not found** — 全見出しの前に `Closest sections:` として近い見出しを最大 5 件、実行できる
   コマンド付きで出す。末尾の要素を、大文字小文字・空白・記号を無視して比べる (タイトルが一致 →
-  タイトルが含む → パスが含む → 推測のほうが長くタイトルを含む → `difflib` の近さ 0.6 以上)。全見出しの
-  一覧 (`Available sections:`) は残す。曖昧な見出し (`ambiguous heading`) の候補にもコマンドを付けた
+  タイトルが含む → パスが含む → 推測のほうが長くタイトルを含む → `difflib` の近さ 0.7 以上)。0.7 は
+  Claude Code の見出し 4374 種で測った: 1 文字の打ち間違いは 3 文字の 2 件を除いて残り、無関係な見出しの
+  組が通るのは 0.6 の 29 / 20000 から 7 / 20000 に減る (0.6 では `nonexistent thing` に
+  `Change a setting` が出た)。全見出しの一覧 (`Available sections:`) は残す。曖昧な見出し
+  (`ambiguous heading`) の候補にもコマンドを付けた。`Closest sections:` の候補のコマンドも `--max-chars` を
+  引き継ぐ
 - **`search` / `search-content` の `Next:`** — 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
   最大 3 行出す (各ページの最良のセクションを先に、足りなければ最上位ページの次のセクション)。
   `--source` などは引き継ぎ、`--source both` では各ヒットの source を付ける。本文ヒットのあるページが
   あれば、タイトル・説明だけで順位が付いたページは出さない。ヒットが無いときはプレースホルダでなく
   次の項目の診断を出す
+- **1 ページに同じ heading_path が 2 回以上ある見出し** — どのコマンドも 1 つ目を読み、2 つ目以降には
+  届かない (見出しの指定は heading_path なので、区別する手段が無い)。`Next:` / `Closest sections:` /
+  曖昧な見出しの候補で、そうした見出しのコマンドの後ろに `(heading appears N times; this reads the first)`
+  を付け、同じコマンドは 1 回だけ出す。手元のキャッシュの 30997 見出しのうち 44 (Firebase の 15 ページで
+  42) がこれに当たる
+- **見出しの解決順** — 見出しの指定は、ページ全体で heading_path の完全一致を先に探し、無ければタイトルの
+  完全一致を探す (大文字小文字を無視する段も同じ順)。従来は 1 回の走査で両方を見ていたため、前にある
+  入れ子の見出しのタイトル (`Tools/view/Error handling` の `Error handling`) が、後ろのトップレベルの
+  `## Error handling` より先に当たり、`Next:` などが出した heading_path のコマンドが別のセクションを
+  読んでいた。手元のキャッシュの全見出しを自分の heading_path で引き直すと、別のセクションに解決した
+  ものが 30997 中 4 (Claude Platform 1、AI SDK 3) から 0 になった
 - **0 件** — `Why nothing matched:` に、語ごとにそれを含むページ数を出す。全語が 0 件なら「言い換えより別の
   語・`search-index`・別 source」、一部だけ 0 件ならその語を落としたクエリ、全語が有るのに揃わないなら
   最も稀な語 1 つのクエリを `Next:` に出す。`--page-ref` で絞っていたときはそれを注記する。Firebase の
   `search` は本文を取得しない設計なので、数えるのはタイトル・説明の index、`search-content --page-ref`
-  は取得したそのページだけで、その旨を出す。claude-docs は、もう一方の source で試すコマンドも出す
+  は取得したそのページだけで、その旨を出す。claude-docs は、もう一方の source で試すコマンドも出す。
+  claude-docs の `search-index` は `--file` を受けないため、`--file` 付きのときは `search-index` の
+  `Next:` を出さない (出すと argparse のエラーになる)
 - 共通部分は `_common.py` (`near_headings` / `prefer_lang_exact` / `die_ambiguous_page` /
   `retry_for_page_ref`) と `_commands.py` (`render_next_content` / `render_zero_hits` /
-  `hit_candidates`) に置いた。`test_hint_wiring.py` の検査が新しい `render_*` にも当たる
-  (別 source を指す 1 行だけは `alt_hint_args` を認める)
+  `hit_candidates`) に置いた。`test_hint_wiring.py` の検査が新しい `render_*` にも当たる。
+  `search-index` の行と別 source を指す行の引数 (`index_hint_args` / `alt_hint_args`) は呼び出し側で
+  組み立て、`None` でない分岐が `corpus_hint_args` を含むことを同じ検査が見る (別 source の行から
+  `corpus_hint_args` を落とす変異は、以前は suite 全体を生き延びていた)
 - テスト: 4 script それぞれで、曖昧な参照 (`content` / `sections` / `search-content`)、見出しの推測ミス、
   `Next:` の埋まり方 (`search` / `search-content`)、0 件 4 通り (語が無い / 一部が無い / 揃わない /
   `--page-ref`) と `search` の 0 件を固定し、claude-docs の slug 解決 (完全一致 1 件・長い slug・言語が
   2 つ)、`near_headings` と `hit_candidates` の単体を足した。修正前の版に流すと 79 件が
   assertion の失敗で落ちる (ほかに、新しい関数が無いための ERROR が単体のテスト 12 件)。実装の各条件を
   壊す 47 通りの変異がいずれも assertion の失敗で落ちる
+- テスト (マージ前レビューの指摘への対応): 出力が勧めるコマンド (`Next:` / `Closest sections:` /
+  曖昧なページ・見出しの候補 / `Note:` の末尾) を shell と同じ規則で分割して実際に実行し、exit 0 と、
+  `content` なら名前どおりの heading_path を読むことを確かめる往復のテストを、4 script と `--cache-dir` /
+  `--file` (claude-docs・AI SDK) の両方で足した。見出しの解決順、重複する heading_path の注記、
+  候補が既定以外の値を引き継ぐこと、`--file` の `search-index` 行、`difflib` の閾値を固定した。
+  対応する実装を壊す 17 通りの変異がいずれも assertion の失敗で落ちる
 
 ### 変更: SKILL.md 4 本に調査の手数の目安と、Skill を呼べない文脈の手順を書く
 
@@ -72,18 +101,19 @@ Cloudflare の製品名が Browser Run に変わり、`/browser-rendering/llms.t
 667 KB・52 ページで、他の Cloudflare 製品と同じテンプレート (51 ページが自分の URL を持つ)。
 `llms.txt` は旧 URL と新 URL でバイト単位で同じ。
 
-- **preset** — `url` / `index_url` を `/browser-run/` にし、description を「Cloudflare Browser Run
-  (formerly Browser Rendering)」にした。source 名は利用者が使っているので変えない。`index_url` は、URL の
-  無い 1 ページ (他の製品と同じ API リファレンス) 以外にはもう効かないが、`url` と同じディレクトリの
-  `llms.txt` という規則を崩さないため残した。README の presets 表と、`researching-library-docs` の
-  「URL の無い source」の一覧、`docs/generic-llms-txt-source.md` (2026-10-04 の実測) を合わせた
-- **点検スクリプト `scripts/check-preset-urls.py`** — 同梱 presets の全 `url` / `index_url` (33 件) を
+- **preset** — `url` を `/browser-run/` にし、description を「Cloudflare Browser Run
+  (formerly Browser Rendering)」にした。source 名は利用者が使っているので変えない。`index_url` は外した:
+  新しい `llms-full.txt` はページの URL を自分で持ち、`llms.txt` で URL が付くページは 0 だった。効かない
+  `index_url` は、取得と点検の対象を 1 つ増やすだけになる (他の Cloudflare 製品も持たない)。README の
+  presets 表と、`researching-library-docs` の「URL の無い source」の一覧、`docs/generic-llms-txt-source.md`
+  (2026-10-04 の実測) を合わせた
+- **点検スクリプト `scripts/check-preset-urls.py`** — 同梱 presets の全 `url` / `index_url` (32 件) を
   HEAD で点検し、3xx は転送先まで辿って、200 以外を一覧する (200 以外があれば exit 1)。ネットワークに
   出るので suite には入れず、サーベイのときに手で流す (README の保守メモ)。
-  実行結果は、直す前が 33 件中 1 件 (この index_url が 301)、直した後は 0 件。他の Cloudflare 製品 14 件と、
-  `index_url` を持つ他の presets は、いずれも 200 のままだった
-- テスト: preset が `/browser-run/` を指すこと (`url` だけ・`index_url` だけを旧に戻す半端な更新は、0.28.1 の
-  「`index_url` は `url` と同じディレクトリの `llms.txt`」の検査が落とし、両方を戻すと新しい検査が落とす)。
+  実行結果は、直す前が 33 件中 1 件 (この index_url が 301)、`/browser-run/` に移した後は 0 件。他の
+  Cloudflare 製品 14 件と、`index_url` を持つ他の presets は、いずれも 200 のままだった。その後この
+  `index_url` を外したので、点検する URL は 32 件
+- テスト: preset の `url` が `/browser-run/` を指し、`index_url` を持たないこと。
   点検スクリプトは、転送を辿る・転送先が 404 のときは「移動」と報告しない・両方の URL を見る・終了コードを、
   ネットワークなしで固定した (7 通りの変異がいずれも assertion の失敗で落ちる)
 

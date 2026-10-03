@@ -12,11 +12,14 @@ than ``/en/agent-sdk/hooks``), which only claude-docs has.
 """
 
 import json
+import os
 import re
+import shlex
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 import _common
@@ -38,8 +41,45 @@ HOOKS_BODY = (
     "betaterm\n"
     "## Output\n"
     "gammaterm\n"
+    # A nested heading whose title is the full heading_path of a later
+    # top-level one: a command naming "Error handling" must read the later.
+    "## Tools\n"
+    "### Error handling\n"
+    "nestedonly\n"
+    "## Error handling\n"
+    "toplevelword\n"
+    # The same heading_path twice: commands can only reach the first.
+    "## Repeated\n"
+    "### Item\n"
+    "dupword first\n"
+    "## Repeated\n"
+    "### Item\n"
+    "dupword second\n"
 )
 OTHER_BODY = "## Overview\nNothing relevant here.\n"
+
+# What a command line offers to run: a ``Next:`` line, an indented candidate
+# (ambiguous page / heading, ``Closest sections:``), or the ``For [i]:`` tail
+# of the slug ``Note:``. A trailing duplicate note is not part of the command.
+DUP_NOTE_RE = re.compile(r"\s+\(heading appears (\d+) times; this reads the first\)$")
+NOTE_CMD_RE = re.compile(r"For \[\d+\]: (.+)$")
+
+
+def offered_commands(text: str, script: str) -> list:
+    """``[(command, heading_count), ...]`` for every runnable command in *text*."""
+    found = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Next: "):
+            line = line[len("Next: "):]
+        elif line.startswith("Note:"):
+            m = NOTE_CMD_RE.search(line)
+            line = m.group(1) if m else ""
+        if not line.startswith(script + " ") or "<" in line:
+            continue  # not a command, or a placeholder to fill in by hand
+        m = DUP_NOTE_RE.search(line)
+        found.append((DUP_NOTE_RE.sub("", line), int(m.group(1)) if m else 1))
+    return found
 
 
 class _GuidanceTests:
@@ -55,6 +95,8 @@ class _GuidanceTests:
     script = None
     corpus_args: list
     tail: str
+    # AI SDK's heading paths start with the page's H1
+    path_prefix = ""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -66,6 +108,27 @@ class _GuidanceTests:
 
     def next_lines(self, out):
         return [ln for ln in out.splitlines() if ln.startswith("Next:")]
+
+    def run_line(self, line):
+        """Run a printed command as a shell would split it."""
+        return _loader.run_cli(self.module, shlex.split(line))
+
+    def assert_commands_run(self, text, *, at_least=1):
+        """Run every command *text* offers; each must exit 0, and a ``content``
+        command must read exactly the heading_path it names."""
+        commands = offered_commands(text, self.script)
+        self.assertGreaterEqual(len(commands), at_least, text)
+        for line, _count in commands:
+            with self.subTest(command=line):
+                # the corpus options come last on every command; without them
+                # the command reads (or fetches) the default corpus instead
+                self.assertTrue(line.endswith(" " + self.tail), line)
+                code, out, err = self.run_line(line)
+                self.assertEqual(code, 0, err)
+                argv = shlex.split(line)
+                if argv[1] == "content" and len(argv) > 3 and not argv[3].startswith("--"):
+                    self.assertIn(f"# heading_path: {argv[3]}\n", out)
+        return commands
 
     # 1. ambiguous page reference
 
@@ -162,6 +225,92 @@ class _GuidanceTests:
         self.assertIn('"zzzmissing": 0 of', out)
         self.assertIn(f"Next: {self.script} search-index 'zzzmissing qqqmissing' {self.tail}", out)
 
+    # 5. every printed command runs as printed (round trip)
+
+    def test_search_content_next_reads_the_section_that_hit(self):
+        # The hit is the top-level "Error handling"; an earlier nested
+        # "Tools/Error handling" has the same title and must not be read.
+        code, out, err = self.run_cmd("search-content", "toplevelword")
+        self.assertEqual(code, 0, err)
+        commands = self.assert_commands_run(out)
+        self.assertEqual(shlex.split(commands[0][0])[3], self.path_prefix + "Error handling")
+        code, body, err = self.run_line(commands[0][0])
+        self.assertIn("toplevelword", body)
+        self.assertNotIn("nestedonly", body)
+
+    def test_search_next_runs_as_printed(self):
+        code, out, err = self.run_cmd("search", "pretooluse")
+        self.assertEqual(code, 0, err)
+        self.assert_commands_run(out)
+
+    def test_duplicate_heading_path_is_flagged_on_the_command(self):
+        code, out, err = self.run_cmd("search-content", "dupword")
+        self.assertEqual(code, 0, err)
+        commands = self.assert_commands_run(out)
+        self.assertEqual(shlex.split(commands[0][0])[3], self.path_prefix + "Repeated/Item")
+        self.assertEqual(commands[0][1], 2, out)
+        # both copies hit, but the same command is offered once
+        self.assertEqual(len(commands), len(set(commands)), out)
+        code, body, err = self.run_line(commands[0][0])
+        self.assertIn("dupword first", body)
+        # a heading_path found once carries no note
+        code, out, err = self.run_cmd("search-content", "toplevelword")
+        self.assertNotIn("heading appears", out)
+
+    def test_ambiguous_heading_candidates_run_as_printed(self):
+        code, out, err = self.run_cmd("content", "0", "error handl")
+        self.assertEqual(code, 1)
+        self.assertIn("ambiguous heading", err)
+        commands = self.assert_commands_run(err, at_least=2)
+        self.assertEqual({shlex.split(c)[3] for c, _n in commands},
+                         {self.path_prefix + "Tools/Error handling", self.path_prefix + "Error handling"})
+
+    def test_ambiguous_heading_lists_a_repeated_path_once_with_its_count(self):
+        code, out, err = self.run_cmd("content", "0", "repeated/it")
+        self.assertEqual(code, 1)
+        commands = self.assert_commands_run(err, at_least=1)
+        self.assertEqual(commands, [(commands[0][0], 2)])
+
+    def test_closest_sections_run_as_printed(self):
+        code, out, err = self.run_cmd("content", "0", "Eror handling")
+        self.assertEqual(code, 1)
+        closest = err[err.index("Closest sections:"):err.index("Available sections:")]
+        commands = self.assert_commands_run(closest, at_least=2)
+        self.assertEqual({shlex.split(c)[3] for c, _n in commands},
+                         {self.path_prefix + "Tools/Error handling", self.path_prefix + "Error handling"})
+
+    def test_ambiguous_page_candidates_run_as_printed(self):
+        # sections: a content retry keeps the heading, which only page 0 has
+        code, out, err = self.run_cmd("sections", "hooks")
+        self.assertEqual(code, 1)
+        self.assert_commands_run(err, at_least=2)
+
+    def test_zero_hit_next_lines_run_as_printed(self):
+        for sub in ("search-content", "search"):
+            for query in ("zzzmissing qqqmissing", "alphaterm zzzmissing",
+                          "alphaterm betaterm gammaterm"):
+                with self.subTest(sub=sub, query=query):
+                    code, out, err = self.run_cmd(sub, query)
+                    self.assertEqual(code, 0, err)
+                    # may offer nothing (claude-docs --file: no search-index)
+                    self.assert_commands_run(out, at_least=0)
+
+    def test_retries_keep_the_other_options(self):
+        code, out, err = self.run_cmd("content", "hooks", "Hook events", "--max-chars", "100")
+        self.assertEqual(code, 1)
+        self.assertIn(f"{self.script} content 0 'Hook events' --max-chars 100 ", err)
+        code, out, err = self.run_cmd("search-content", "alphaterm", "--page-ref", "hooks",
+                                      "--limit", "3", "--context", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("--page-ref 0 --limit 3 --context 1 ", err)
+        code, out, err = self.run_cmd("content", "0", "Eror handling", "--max-chars", "50")
+        self.assertEqual(code, 1)
+        self.assertIn(f"{self.script} content 0 '{self.path_prefix}Error handling' --max-chars 50 ", err)
+        self.assert_commands_run(err[:err.index("Available sections:")], at_least=2)
+        # a default value is not echoed
+        code, out, err = self.run_cmd("content", "hooks", "Hook events", "--max-chars", "24000")
+        self.assertNotIn("--max-chars", err)
+
 
 class ClaudeDocsGuidanceTest(_GuidanceTests, unittest.TestCase):
     module = claude
@@ -172,17 +321,49 @@ class ClaudeDocsGuidanceTest(_GuidanceTests, unittest.TestCase):
             ("Hooks", "https://example.com/en/cli/hooks", HOOKS_BODY),
             ("Agent SDK Hooks", "https://example.com/en/agent-sdk/hooks", OTHER_BODY),
         ]
-        Path(self.tmp, "claude-code-llms.txt").write_text(
-            "".join(f"- [{t}]({u}): about {t}\n" for t, u, _b in pages), encoding="utf-8")
-        Path(self.tmp, "claude-code-llms-full.txt").write_text(
-            "".join(f"# {t}\nSource: {u}\n\n{b}\n" for t, u, b in pages), encoding="utf-8")
+        # both sources: a 0-hit search offers the other one, and the round
+        # trip runs that command too (it must not reach the network)
+        for prefix in ("claude-code", "claude-platform"):
+            Path(self.tmp, f"{prefix}-llms.txt").write_text(
+                "".join(f"- [{t}]({u}): about {t}\n" for t, u, _b in pages), encoding="utf-8")
+            Path(self.tmp, f"{prefix}-llms-full.txt").write_text(
+                "".join(f"# {t}\nSource: {u}\n\n{b}\n" for t, u, b in pages), encoding="utf-8")
         self.corpus_args = ["--cache-dir", self.tmp]
         self.tail = f"--cache-dir {self.tmp}"
+
+
+class ClaudeDocsFileGuidanceTest(ClaudeDocsGuidanceTest):
+    """The same with ``--file``: claude-docs' ``search-index`` has no
+    ``--file``, so no hint may send the reader there with it."""
+
+    def write_corpus(self):
+        super().write_corpus()
+        # search ranks on the llms.txt index, which --file does not replace;
+        # keep it in the temporary dir instead of the real cache
+        patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": self.tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        full = str(Path(self.tmp, "claude-code-llms-full.txt"))
+        self.corpus_args = ["--file", full]
+        self.tail = f"--file {full}"
+
+    def test_zero_hits_term_not_in_corpus(self):
+        code, out, err = self.run_cmd("search-content", "zzzmissing qqqmissing")
+        self.assertEqual(code, 0, err)
+        self.assertIn("not in this corpus", out)
+        self.assertNotIn("search-index", "".join(self.next_lines(out)))
+
+    def test_smart_search_with_no_result_gets_the_same_diagnosis(self):
+        code, out, err = self.run_cmd("search", "frobnicator quuxify")
+        self.assertEqual(code, 0, err)
+        self.assertIn('"frobnicator": 0 of', out)
+        self.assertNotIn("search-index", "".join(self.next_lines(out)))
 
 
 class AiSdkGuidanceTest(_GuidanceTests, unittest.TestCase):
     module = ai_sdk
     script = "parse-ai-sdk.py"
+    path_prefix = "Hooks/"
 
     def write_corpus(self):
         pages = [("Hooks", HOOKS_BODY), ("Agent Hooks", OTHER_BODY)]
@@ -191,6 +372,16 @@ class AiSdkGuidanceTest(_GuidanceTests, unittest.TestCase):
             encoding="utf-8")
         self.corpus_args = ["--cache-dir", self.tmp]
         self.tail = f"--cache-dir {self.tmp}"
+
+
+class AiSdkFileGuidanceTest(AiSdkGuidanceTest):
+    """The same with ``--file`` (AI SDK's ``search-index`` takes it too)."""
+
+    def write_corpus(self):
+        super().write_corpus()
+        full = str(Path(self.tmp, "ai-sdk-llms-full.txt"))
+        self.corpus_args = ["--file", full]
+        self.tail = f"--file {full}"
 
 
 class FirebaseGuidanceTest(_GuidanceTests, unittest.TestCase):
@@ -267,6 +458,18 @@ class ClaudeDocsSlugTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn('Sections in [1] "Hooks"', out)
         self.assertIn("[0] https://example.com/docs/en/agent-sdk/hooks", err)
+
+    def test_note_ends_with_a_command_for_the_other_page(self):
+        code, out, err = self.run_cmd("content", "hooks", "Overview", "--max-chars", "100")
+        self.assertEqual(code, 1)  # page 1 has no "Overview"; the Note comes first
+        self.assertIn(f"For [0]: parse-claude-docs.py content 0 Overview --max-chars 100 "
+                      f"--cache-dir {self.tmp}", err)
+        code, out, err = self.run_cmd("sections", "hooks")
+        commands = offered_commands(err, "parse-claude-docs.py")
+        self.assertEqual(commands, [(f"parse-claude-docs.py sections 0 --cache-dir {self.tmp}", 1)])
+        code, out, err = _loader.run_cli(claude, shlex.split(commands[0][0]))
+        self.assertEqual(code, 0, err)
+        self.assertIn('Sections in [0] "Agent SDK Hooks"', out)
 
     def test_longer_slug_still_reaches_the_other_page(self):
         code, out, err = self.run_cmd("sections", "agent-sdk/hooks")
@@ -359,12 +562,46 @@ class NearHeadingsTest(unittest.TestCase):
     def test_typo_falls_back_to_closeness(self):
         self.assertEqual(self.paths("Configuraton"), ["Configuration"])
 
+    def test_closeness_needs_more_than_a_loose_resemblance(self):
+        # difflib puts these two at exactly 0.6
+        sections = [{"title": "Change a setting", "heading_path": "Change a setting", "level": 2}]
+        self.assertEqual(_common.near_headings("nonexistent thing", sections), [])
+        self.assertEqual(len(_common.near_headings("Change a settnig", sections)), 1)
+
+    def test_a_repeated_path_is_offered_once(self):
+        twice = self.SECTIONS + [dict(self.SECTIONS[1])]
+        paths = [s["heading_path"] for s in _common.near_headings("PreToolUse", twice)]
+        self.assertEqual(paths, self.paths("PreToolUse"))
+        self.assertEqual(paths.count("Hook events/PreToolUse"), 1)
+
     def test_nothing_close_gives_nothing(self):
         self.assertEqual(self.paths("zzzzzz"), [])
 
     def test_at_most_five(self):
         many = [{"title": f"Tool {i}", "heading_path": f"Tool {i}", "level": 2} for i in range(9)]
         self.assertEqual(len(_common.near_headings("tool", many)), 5)
+
+
+class ExtractContentOrderTest(unittest.TestCase):
+    """A full heading_path beats an earlier section whose bare title is the same."""
+
+    BODY = ["## Tools\n", "### Error handling\n", "A\n", "## Error handling\n", "B\n"]
+
+    def test_full_path_wins_over_an_earlier_title(self):
+        content, resolved = _common.extract_content(self.BODY, "Error handling")
+        self.assertEqual(resolved, "Error handling")
+        self.assertIn("B", content)
+        self.assertNotIn("A\n", content)
+
+    def test_same_order_when_case_differs(self):
+        content, resolved = _common.extract_content(self.BODY, "error handling")
+        self.assertEqual(resolved, "Error handling")
+        self.assertNotIn("A\n", content)
+
+    def test_a_bare_title_still_reaches_the_nested_section(self):
+        body = ["## Tools\n", "### Retries\n", "A\n", "## Other\n", "B\n"]
+        content, resolved = _common.extract_content(body, "Retries")
+        self.assertEqual(resolved, "Tools/Retries")
 
 
 class PreferLangExactTest(unittest.TestCase):
@@ -387,23 +624,27 @@ class HitCandidatesTest(unittest.TestCase):
 
     def test_best_section_of_each_top_page_first(self):
         ranked = [(3, self.hits("A", "A2"), ()), (7, self.hits("B"), ()), (9, self.hits("C"), ())]
-        self.assertEqual([(r, h) for r, h, _e in _commands.hit_candidates(ranked)],
+        self.assertEqual([(r, h) for r, h, _e, _n in _commands.hit_candidates(ranked)],
                          [(3, "A"), (7, "B"), (9, "C")])
 
     def test_single_page_fills_with_its_next_sections(self):
         ranked = [(3, self.hits("A", "A2", "A3", "A4"), ())]
-        self.assertEqual([h for _r, h, _e in _commands.hit_candidates(ranked)], ["A", "A2", "A3"])
+        self.assertEqual([h for _r, h, _e, _n in _commands.hit_candidates(ranked)], ["A", "A2", "A3"])
 
     def test_index_only_page_has_no_heading(self):
-        self.assertEqual(_commands.hit_candidates([(4, {"results": []}, ())]), [(4, None, ())])
+        self.assertEqual(_commands.hit_candidates([(4, {"results": []}, ())]), [(4, None, (), 1)])
 
     def test_index_only_pages_are_dropped_when_a_page_has_body_hits(self):
         ranked = [(4, {"results": []}, ()), (5, self.hits("A"), ())]
-        self.assertEqual(_commands.hit_candidates(ranked), [(5, "A", ())])
+        self.assertEqual(_commands.hit_candidates(ranked), [(5, "A", (), 1)])
 
     def test_per_page_source_is_kept(self):
         ranked = [(1, self.hits("A"), ("--source", "platform"))]
-        self.assertEqual(_commands.hit_candidates(ranked), [(1, "A", ("--source", "platform"))])
+        self.assertEqual(_commands.hit_candidates(ranked), [(1, "A", ("--source", "platform"), 1)])
+
+    def test_heading_count_is_carried(self):
+        ranked = [(2, {"results": [{"heading_path": "R/I", "heading_count": 2}]}, ())]
+        self.assertEqual(_commands.hit_candidates(ranked), [(2, "R/I", (), 2)])
 
 
 if __name__ == "__main__":

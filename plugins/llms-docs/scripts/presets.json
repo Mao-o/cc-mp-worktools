@@ -296,8 +296,7 @@
         "^\\[ Edit page \\]\\(",
         "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
-      "description": "Cloudflare Browser Run (formerly Browser Rendering)",
-      "index_url": "https://developers.cloudflare.com/browser-run/llms.txt"
+      "description": "Cloudflare Browser Run (formerly Browser Rendering)"
     },
     "cloudflare-containers": {
       "url": "https://developers.cloudflare.com/containers/llms-full.txt",

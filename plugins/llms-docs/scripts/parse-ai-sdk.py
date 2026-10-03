@@ -536,6 +536,7 @@ def cmd_search_content(args):
         print()
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search-content", hint_args=hint_args,
+                         index_hint_args=hint_args,
                          scope="documents", restricted_to=args.page_ref)
         return
     print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
@@ -636,6 +637,7 @@ def cmd_search(args):
         print()
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search", hint_args=corpus_hint_args(args),
+                         index_hint_args=corpus_hint_args(args),
                          scope="documents")
         return
 

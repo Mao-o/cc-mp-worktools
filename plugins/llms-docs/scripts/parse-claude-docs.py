@@ -110,11 +110,14 @@ def _source_args_for(source_key: str) -> tuple:
     return () if source_key == DEFAULT_SOURCE else ("--source", source_key)
 
 
-def _alt_source_hint_args(args, source_key: str | None = None):
-    """Options for running the same query on the other source, or ``None``.
+def _alt_source_key(args, source_key: str | None = None):
+    """The other source to run the same query on, or ``None``.
 
     ``--file`` is a snapshot of one source, so there is no other source to try
     with it. ``search --source both`` already covers both, so it has none.
+    Returns only the key: each call site builds the option tuple itself
+    (``--source <key>`` plus ``corpus_hint_args``) where the wiring test of
+    ``test_hint_wiring.py`` can see it.
     """
     key = source_key or getattr(args, "source", DEFAULT_SOURCE)
     if getattr(args, "file", None) or key not in SOURCES or getattr(args, "source", None) == "both":
@@ -122,7 +125,7 @@ def _alt_source_hint_args(args, source_key: str | None = None):
     others = [k for k in SOURCES if k != key]
     if len(others) != 1:
         return None
-    return ("--source", others[0]) + corpus_hint_args(args)
+    return others[0]
 
 # Changelog / release-notes deprioritisation lives in ``_common`` so all
 # three scripts rank identically (``is_low_priority`` / ``search_rank_key``).
@@ -671,7 +674,7 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
     if len(candidates) > 1:
         preferred = prefer_lang_exact(candidates, page_ref)
         if len(preferred) == 1:
-            note_other_candidates(page_ref, preferred[0][0], candidates)
+            note_other_candidates(page_ref, preferred[0][0], candidates, retry)
             return preferred[0][0]
         die_ambiguous_page("slug", page_ref, candidates, retry)
     die(f"No page found for slug: {page_ref}")
@@ -904,10 +907,13 @@ def cmd_search_content(args):
         print()
         print("Tip: try broader keywords or 'search-index' to find relevant pages first")
         print()
+        alt = _alt_source_key(args)
+        # search-index has no --file here: with --file, no search-index hint.
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search-content", hint_args=hint_args,
                          restricted_to=args.page_ref,
-                         alt_hint_args=_alt_source_hint_args(args))
+                         index_hint_args=None if args.file else hint_args,
+                         alt_hint_args=(("--source", alt) + corpus_hint_args(args)) if alt else None)
         return
     print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
     print()
@@ -1094,9 +1100,11 @@ def cmd_search(args):
             if len(source_keys) > 1:
                 print(f"--- {SOURCES[src_key]['label']} (--source {src_key}) ---")
             hint_args = _source_args_for(src_key) + corpus_hint_args(args)
+            alt = _alt_source_key(args, src_key)
             render_zero_hits(args.query, (d["body_lines"] for d in docs),
                              subcommand="search", hint_args=hint_args,
-                             alt_hint_args=_alt_source_hint_args(args, src_key))
+                             index_hint_args=None if args.file else hint_args,
+                             alt_hint_args=(("--source", alt) + corpus_hint_args(args)) if alt else None)
         return
 
     if len(source_keys) > 1:

@@ -937,6 +937,7 @@ def cmd_search_content(args):
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search-content",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
                          scope="documents", restricted_to=args.page_ref)
         return
     print(f"({total} hits across {matched} documents, showing top {printed})")
@@ -978,6 +979,7 @@ def cmd_search(args):
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
                          scope="documents")
         return
     if all(r["body_only"] for r in results):
