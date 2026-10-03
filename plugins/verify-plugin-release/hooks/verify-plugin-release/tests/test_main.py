@@ -4,8 +4,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,12 +12,13 @@ from unittest import mock
 import _testutil  # noqa: F401
 from _testutil import (
     FAILING_TEST,
-    HERMETIC_GIT_ENV,
     HermeticGitTestCase,
     bump,
     commit_all,
     init_bare_origin,
+    launch_hook,
     make_marketplace,
+    run_hook,
     sh,
     write,
     write_json,
@@ -28,31 +27,11 @@ from _testutil import (
 _PKG = Path(__file__).resolve().parent.parent
 
 
-# 手元の global gitignore (__pycache__ 等) に結果が左右されないよう、既定の excludes
-# (XDG_CONFIG_HOME/git/ignore) を空にして CI と同じ条件で hook を動かす。git の global 設定は
-# `HERMETIC_GIT_ENV` の `GIT_CONFIG_GLOBAL` (tests 配下の fixture。自動 maintenance を止める設定だけを
-# 持つ) に固定する
-_EMPTY_XDG = Path(tempfile.mkdtemp(prefix="vpr-xdg-"))
-
-
-def run_hook(payload: dict | str, env_extra: dict | None = None) -> dict | None:
-    env = {k: v for k, v in os.environ.items() if k not in ("VERIFY_PLUGIN_RELEASE_MODE", "GH_HOST")}
-    # os.environ を継ぐだけに頼らず、毎回ここで足す (patch していないテストクラスから呼んでも届く)
-    env.update(HERMETIC_GIT_ENV)
-    env["XDG_CONFIG_HOME"] = str(_EMPTY_XDG)
-    env.update(env_extra or {})
-    data = payload if isinstance(payload, str) else json.dumps(payload)
-    r = subprocess.run(
-        [sys.executable, str(_PKG)],
-        input=data,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-        timeout=120,
-    )
-    assert r.returncode == 0, r.stderr
-    return json.loads(r.stdout) if r.stdout.strip() else None
+# hook を subprocess で起動する経路は `_testutil.launch_hook` (`run_hook` もこの上に作ってある) だけ。
+# 起動のたびに env を組む (`hook_process_env`): git の global 設定は `HERMETIC_GIT_ENV` の
+# `GIT_CONFIG_GLOBAL` (tests 配下の fixture。自動 maintenance を止める設定だけを持つ) に、
+# 既定の除外ファイル (`XDG_CONFIG_HOME/git/ignore`) は空の dir に固定し、手元の global gitignore
+# (`__pycache__` 等) に結果が左右されない CI と同じ条件で動かす。env の中身は `test_hermetic_env.py` が見る
 
 
 def bash(command: str, cwd: Path) -> dict:
@@ -251,15 +230,7 @@ class MainTest(unittest.TestCase):
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
         commit_all(self.root, "change without bump")
         payload = json.dumps(bash('gh pr create --title "機能追加: 検証ゲート"', self.root), ensure_ascii=False)
-        env = {k: v for k, v in os.environ.items() if k not in ("VERIFY_PLUGIN_RELEASE_MODE", "PYTHONUTF8")}
-        env.update(HERMETIC_GIT_ENV)
-        r = subprocess.run(
-            [sys.executable, str(_PKG)],
-            input=payload.encode("utf-8"),
-            capture_output=True,
-            env=env,
-            timeout=120,
-        )
+        r = launch_hook(input=payload.encode("utf-8"), text=False, drop=("VERIFY_PLUGIN_RELEASE_MODE", "PYTHONUTF8"))
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout.decode("utf-8"))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
@@ -338,53 +309,18 @@ class ReadyRefsTest(HermeticGitTestCase):
 
 class ManualCheckTest(unittest.TestCase):
     def test_manual_check_exit_codes(self):
-        env = {**os.environ, **HERMETIC_GIT_ENV}
         with tempfile.TemporaryDirectory() as tmp:
             root = make_marketplace(Path(tmp) / "repo", ["alpha"])
             write_json(root, ".claude/verify-plugin-release.json", {"fetch": False})
             sh(root, "switch", "-q", "-c", "feat")
             write(root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
             commit_all(root, "change")
-            r = subprocess.run(
-                [sys.executable, str(_PKG), "check", str(root)],
-                capture_output=True, text=True, encoding="utf-8", env=env, timeout=120,
-            )
+            r = launch_hook(["check", str(root)], drop=())
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("FAIL  version[alpha]", r.stdout)
-            r = subprocess.run(
-                [sys.executable, str(_PKG), "check", "--strict-validate", "--base", "main", str(root)],
-                capture_output=True, text=True, encoding="utf-8", env=env, timeout=120,
-            )
+            r = launch_hook(["check", "--strict-validate", "--base", "main", str(root)], drop=())
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("base: main", r.stdout)
-
-
-class HookLaunchEnvTest(unittest.TestCase):
-    """`run_hook` が hook プロセスに渡す env に、自動 maintenance を止める設定が入っていること。
-
-    hook が起動する git (`runner.run` は env を渡さず継ぐ) は、この env の設定で動く。テストクラスが
-    `os.environ` を patch していなくても届くよう、`run_hook` 自身が足す。実際に渡した env を
-    `subprocess.run` を包んで捕まえて見る (hook は起動しない)。呼び出し側の env は `GIT_CONFIG_*`
-    を外してから呼ぶ: 外さないと、`os.environ` を継いだ分で通ってしまい、`run_hook` が足し忘れても
-    気付けない。
-    """
-
-    def test_run_hook_adds_the_hermetic_git_env(self):
-        seen: list[dict] = []
-
-        def fake_run(argv, *args, **kwargs):
-            seen.append(dict(kwargs.get("env") or {}))
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-        with mock.patch.dict(os.environ):
-            for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
-                del os.environ[name]
-            with mock.patch.object(subprocess, "run", side_effect=fake_run):
-                self.assertIsNone(run_hook({"tool_name": "Read", "tool_input": {}}))
-        self.assertEqual(len(seen), 1, "前提: run_hook が hook を 1 回だけ起動している")
-        for key, value in HERMETIC_GIT_ENV.items():
-            with self.subTest(key=key):
-                self.assertEqual(seen[0].get(key), value)
 
 
 if __name__ == "__main__":

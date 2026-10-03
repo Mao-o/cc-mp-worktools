@@ -1,5 +1,120 @@
 # Changelog
 
+## 0.2.2
+
+テスト整理 (挙動の変更なし)。0.2.1 で入れた「自動 gc / maintenance が止まっている」ことを見る床が見逃していた
+当て損ねの形を塞ぎ、テストの git が開発者の既定の除外ファイルと、外側の repo / config を指す環境変数を
+読まないようにした。hook・`hooks.json`・README の挙動は変わらない (patch bump)。
+
+### Changed
+
+- 床 (0.2.1 の `tests/test_hermetic_env.py` と `test_main.HookLaunchEnvTest`) が見逃していた形を塞いだ。
+  実測 (git 2.50.1。0.2.1 の木から取り出した床だけを scratch コピーで流した。HOME は 空 / 自動 maintenance を
+  止める 5 設定を持つ / 既定の除外ファイル (`.env`) を持つ の 3 つ): 当て損ねの変異 25 件 (env を当てる 4 点 =
+  定数 `HERMETIC_GIT_ENV` / repo を作る helper `sh` / ゲートを in-process で動かす基底クラス
+  `HermeticGitTestCase` / hook プロセスの env `run_hook` の部分適用、混ぜる向きの逆転、検出器や床の退行、helper の
+  git の迂回) のうち、12 件 (定数・helper・基底クラスの部分適用 11 件と、`run_hook` が env を足さない 1 件) は
+  assertion で落ち、13 件が 3 つの HOME すべてで生き残った
+  - 混ぜる向きの逆転 3 件 (helper / 基底クラス / hook プロセスの env で、外側の env が当てる側の値に勝つ)。
+    床の外側の env が空で、混ぜる値が無かった
+  - 基底クラスの `GIT_CONFIG_COUNT` 抜き 1 件。ゲートの git の床は 4 設定の有効値だけを見るので、global の
+    fixture が同じ値で埋める
+  - system の目印が何も設定しない 1 件。「目印が読まれない」を見る床に陽性対照が無く、目印が読めない環境
+    では何も見ていない
+  - trace の検出器が maintenance を数えない 1 件。陽性対照が無かった
+  - helper の git を 1 つだけ env 無しで起動する 2 件 (`config` / `add`)。maintenance を起動しない git の迂回は、
+    maintenance の起動を数える trace の床では差が出ず、起動した git の env を全件見る床も無かった
+  - 床の退行 5 件。床が `GIT_CONFIG_NOSYSTEM` を立てる (床だけ / helper が落とす)、床が止める側の
+    `GIT_CONFIG_COUNT` を持つ + helper が落とす、床の `GIT_CONFIG_GLOBAL` が fixture を指す + 定数が落とす、
+    ゲートの床の外側の `GIT_CONFIG_GLOBAL` が fixture を指す + 基底クラスが落とす。床が当て損ねを埋めるので
+    検査が黙って通る
+- 別に実測した 2 点 (どちらも 0.2.1 の木)
+  - 既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`) は `GIT_CONFIG_GLOBAL` では外れない。suite 全体 (82 件) を、
+    既定の除外ファイルが `.claude/` と `*.py` を除外する HOME で流すと 17 件が落ちた (`failures=6, errors=11`)。
+    repo を作る helper の `git add -A` が、設定 file (`.claude/verify-plugin-release.json`) や `.py` を commit
+    しないため。空の HOME と、`.env` だけを除外する HOME では 82 件とも通る
+  - 外側の env の `GIT_DIR` などは、helper の git にそのまま届く (0.2.1 の `sh` は `os.environ` ごと継ぐ)。0.2.1 には、
+    これが届かないことを見るテストが無かった。git が別の repo や別の config を見る変数 (実測): `GIT_DIR` /
+    `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` /
+    `GIT_ALTERNATE_OBJECT_DIRECTORIES` は repo の位置・index・object の置き場 (alternates を含む) を変え、旧来の `GIT_CONFIG` は
+    `git config` の読み書き先をその file にし (`--global --list` は exit 129)、`GIT_CONFIG_PARAMETERS` は
+    `GIT_CONFIG_COUNT` に勝つ。`GIT_NAMESPACE` は `symbolic-ref HEAD` では差が出なかった (影響は未確認だが、
+    同じ組の変数として外す)
+- `tests/_testutil.py` の変更
+  - `HERMETIC_GIT_ENV` に `XDG_CONFIG_HOME` (プロセスごとに作る空の dir) を足した。repo を作る helper・ゲートの
+    git (基底クラス)・hook プロセスのすべてで、既定の除外ファイルを読ませない。0.2.1 では `test_main.run_hook` と
+    床だけが空にしていた
+  - 外側の env にある、git が別の repo や別の config を見てしまう変数 9 個 (`OUTER_GIT_LEAK_ENV`) を、repo を作る
+    helper (`hermetic_env()`) と基底クラスで外す
+  - hook を subprocess で起動する経路を `launch_hook` (env は `hook_process_env`) の 1 本にした。`test_main` に 3 通り
+    あった env の組み立てを寄せ、`run_hook` もここに移した
+- 足した床 (`tests/test_hermetic_env.py`。0.2.1 の 9 件 (`test_hermetic_env` 8 件と `HookLaunchEnvTest` 1 件) から
+  40 件。`HookLaunchEnvTest` は hook プロセスの env を見る床に統合した)
+  - 起動の仕方 (定数だけ / helper / ゲートの git / hook プロセスの env) ごとに同じ 5 本を流す
+    (`_HermeticConfigChecks`)。env を当てる各点の部分適用 (`COUNT` だけ・`NOSYSTEM` 抜き・`GLOBAL` 抜き・
+    `COUNT` 抜き・`XDG_CONFIG_HOME` 抜き) と、混ぜる向きの逆転は、どれかがこの 5 本のどれかで落ちる
+    - `GIT_CONFIG_COUNT`: repo 自身の config に止めない側の値を置き、git が見る値が止める側であること。env は
+      repo 自身の config に勝ち、global の fixture は負けるので、env の経路だけを見られる
+    - `GIT_CONFIG_GLOBAL`: `git config --global --list` が fixture の 5 設定と完全一致すること
+    - `GIT_CONFIG_NOSYSTEM`: system の config の代わりに置いた目印が読まれないこと。前提として、
+      `GIT_CONFIG_NOSYSTEM` が無い env では目印が読めることを先に確かめる (陽性対照)
+    - `XDG_CONFIG_HOME`: 検査用の file を除外する既定の除外ファイルが外側にあっても、その file が未追跡として
+      見えること
+    - 床が当てる側の値を持たないこと (`test_the_floor_alone_stops_nothing`。下の「床を作る点ごと」の項)
+  - 外側の env に、止めない側の値 (`GIT_CONFIG_GLOBAL` = 空の file、`GIT_CONFIG_COUNT` で `maintenance.auto=true`、
+    検査用の file を除外する既定の除外ファイルを持つ `XDG_CONFIG_HOME`) を置いてから流す。当てる側が外側の
+    値に勝つことを見る。この除外ファイルを `*` のようにすべてを除外する形にすると、当てる側が
+    `XDG_CONFIG_HOME` を向け直し損ねたとき、helper の `git add -A` が何も add せず `git commit` が exit 1 で落ちて
+    (実測)、assertion ではなく crash になる。そのため除外するのは検査用の file だけにした
+  - 床を作る点ごと: 床の env だけで起動した git で、当てる側の値が見えないこと (と、床が置いたはずの止めない側の
+    値が見えること) を、他の床と同じ `git_in` で確かめる。床が当てる側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す
+    `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`、除外ファイルを持たない `XDG_CONFIG_HOME`) を持つと、当てる側が
+    同じ値を落としても床が埋めて、検査が黙って通るため
+    - `isolate_git_config` (trace の床と上の床の土台): `TestTheIsolatedEnvStopsNothing`。床を作る前の env に、当てる側と
+      同じ値と、開発者の global の config に見立てた file (外側の `HOME` の `.gitconfig`、`XDG_CONFIG_HOME` の
+      `git/config`) を置いてから呼ぶので、実行者の HOME に左右されない
+    - 上の 5 本の床 (起動の仕方ごと): `test_the_floor_alone_stops_nothing`
+    - 外側の repo / config を指す変数の床 (下): `test_the_floor_holds_the_outer_variables` と、置く変数が名前の一覧と
+      同じであること (`test_every_placed_variable_is_in_the_name_list`)
+  - 外側の repo / config を指す変数 9 個が、起動の仕方 (helper / 基底クラス / hook プロセスの env) ごとに git に
+    届かないこと。helper は外側の repo の全 file を書き換えないことも見る
+  - 陽性対照: trace の床は、止める設定が無い commit では maintenance の起動が trace に見えること (見えない git の版では
+    「0 件」は何も見ていない)
+  - helper (`make_marketplace` / `init_bare_origin`) が起動する git の全部が `HERMETIC_GIT_ENV` の全項目を持つこと。
+    `subprocess.Popen` を包んで全件記録し、`any` ではなく `all` で見る。前提として、起動の件数 (13 件以上) と種類を確かめる
+- コメント・docstring の訂正 (挙動の変更なし)
+  - `tests/_testutil.py`: `gc.auto=0` は起動された maintenance の gc を走らせない設定で、git 2.50.1 ではこれだけでは起動は
+    止まらない (実測: `maintenance.auto=false` だけが `maintenance run --auto` の起動を 0 にする。`gc.auto=0` だけでは起動が
+    残る)。0.2.1 は「`maintenance.auto=false` / `gc.auto=0`: そもそも自動 maintenance を起動しない」と書いていた。0.2.1 の項
+    (下) は履歴なので直さない
+  - `tests/test_hermetic_env.py`: system の config に `maintenance.auto=false` (「2.55 では `gc.auto=0` でも同じ」) があると
+    …の括弧書きを削除した (git 2.55 では実測していない)
+  - `tests/_testutil.py`: 既定の除外ファイルについて、「空にしているのは `test_main.run_hook` と床だけ」を、全部で空にすることと、
+    外さないと何が落ちるか (実測) に書き換えた
+- 確認 (git 2.50.1。Windows と git 2.55 では流していない)
+  - 修正後の床に、当て損ねの変異 69 件 (修正前に流した 25 件と、足した床・helper の迂回・外側の repo の変数・除外ファイル
+    に合わせて足した 44 件) を、HOME 3 種 (空 / 5 設定を持つ / `.env` を除外) で流した。全件が assertion (`failures`) で
+    落ち、`errors` は 0 件。落ちるテストの組は 3 つの HOME で同じ。例外は、床が `HOME` / `XDG_CONFIG_HOME` を向け直さない
+    2 件で、実行者の HOME が結果を決める変異そのものなので、組の同一性は見ず、どの HOME でも落ちることだけを見た
+    (`HOME` を向け直さない 1 件は、5 設定を持つ HOME でだけ落ちるテストが 1 件多い)
+  - 修正前に生き残った 13 件を落とすテスト
+    - 混ぜる向きの逆転 3 件: 起動の仕方ごとの `test_env_beats_the_repos_own_config` と
+      `test_default_excludes_are_not_read`。hook プロセスの env は、外側の repo / config を指す変数が git に届かない床
+      (`test_none_of_the_outer_variables_reaches_git`) でも落ちる
+    - 基底クラスの `GIT_CONFIG_COUNT` 抜き: `TestGateLaunchedGit` の `test_env_beats_the_repos_own_config` と
+      `test_fetch_started_by_the_gate_starts_no_maintenance`
+    - system の目印が何も設定しない: 各起動の仕方の `test_system_config_is_not_read` (陽性対照の前提) と
+      `test_the_system_marker_is_readable`
+    - trace の検出器が数えない: `test_the_trace_sees_maintenance_when_nothing_stops_it`
+    - helper の git を 1 つ env 無しで起動する 2 件: `test_every_git_launched_by_the_helpers_carries_the_env` と
+      `test_the_helpers_leave_the_outer_repo_alone`
+    - 床の退行 5 件: 床を作る点ごとの床 (`TestTheIsolatedEnvStopsNothing`、各起動の仕方の
+      `test_the_floor_alone_stops_nothing`) と、当てる側の値の検査 (`test_system_config_is_not_read` /
+      `test_global_is_the_fixture_only` / `test_env_beats_the_repos_own_config`)
+  - suite 全体 (`tests/` の `unittest discover`) は 82 件から 113 件。Python 3.14 では 4 種の HOME (上の 3 種と、
+    既定の除外ファイルが `.claude/` と `*.py` を除外する HOME) で全件通り、Python 3.11 は空の HOME で全件通る。
+    `claude plugin validate` は警告なしで通り、ruff 0.16.8 は plugin 全体で通る
+
 ## 0.2.1
 
 テスト整理 (挙動の変更なし)。hook・`hooks.json`・README の挙動は変わらない (patch bump)。

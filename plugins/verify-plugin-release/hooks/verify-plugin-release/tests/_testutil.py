@@ -1,11 +1,15 @@
 """テスト共通: plugin の hook ディレクトリを sys.path に通し、使い捨て git repo を作る。"""
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from unittest import mock
 
@@ -25,7 +29,8 @@ if str(_PKG_DIR) not in sys.path:
 # 起きないので、gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない。起動そのものは版によらず
 # 起きる: 設定で止めない限り、commit のたびに `git maintenance run --auto` が子として起動する。
 #
-#   maintenance.auto=false / gc.auto=0: そもそも自動 maintenance を起動しない
+#   maintenance.auto=false: そもそも自動 maintenance を起動しない
+#   gc.auto=0: 起動された maintenance の gc を走らせない (git 2.50 では、これだけでは起動は止まらない)
 #   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
 #     (commit が戻る前に終わる)
 #
@@ -59,28 +64,68 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
 # (例: diff.renames=false だとゲートが読む `diff --name-only` の一覧が、status.showUntrackedFiles=no
 # だと `status --porcelain` の未追跡が変わる。ゲートはこの出力で判定する)。global の代わりに読ませる
 # のは tests 配下の fixture で、自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と
-# `receive.autogc`) だけを持つ。既定の excludes (`XDG_CONFIG_HOME/git/ignore`) はこの指定では外れない
-# (`XDG_CONFIG_HOME` を空にしているのは `test_main.run_hook` と、`test_hermetic_env` の床だけ)。
+# `receive.autogc`) だけを持つ。
+#
+# 既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら `~/.config/git/ignore`) は
+# `GIT_CONFIG_GLOBAL` では外れない (実測)。ゲートは `status --porcelain` (未追跡を含む) を読み、テストの
+# commit は `git add -A` なので、開発者の除外ファイルに効く pattern があるとテストの前提が変わる。
+# 外さないと (実測): `.claude/` があると設定 file (`.claude/verify-plugin-release.json`) が commit されず、
+# commit するテストが `git commit` の失敗 (`CalledProcessError`) で落ちる。`*.py` があると、未追跡の
+# `.py` が status に出ず (`KeyError`)、commit にも入らない。そこで `XDG_CONFIG_HOME` を空の dir に向ける
+# (`EMPTY_XDG_CONFIG_HOME`)。空でない `XDG_CONFIG_HOME` があれば、git は `~/.config` には戻らない (実測)。
 #
 # 止める経路は 2 本あり、どちらも外さない:
 #   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない
 #   - global の fixture: `receive-pack` にも届く。ただし repo 自身の config には負ける
 # fixture はテストから `git config --global` で書かないこと (tracked の file が書き換わる)。
 HERMETIC_GIT_CONFIG = str(Path(__file__).resolve().parent / "hermetic.gitconfig")
+EMPTY_XDG_CONFIG_HOME = tempfile.mkdtemp(prefix="vpr-xdg-")
+atexit.register(shutil.rmtree, EMPTY_XDG_CONFIG_HOME, ignore_errors=True)
 HERMETIC_GIT_ENV = {
     "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,
     "GIT_CONFIG_NOSYSTEM": "1",
+    "XDG_CONFIG_HOME": EMPTY_XDG_CONFIG_HOME,
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
+
+# 外側の env にあると、テストの git が別の repo や別の config を見てしまう変数。git の hook や `git -c`
+# の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `config` / `commit` が外側の
+# repo に書き込む (`GIT_DIR` など)。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝ち、旧来の
+# `GIT_CONFIG` があると `git config` の読み書き先がその file になる (どちらも実測)。
+# `hermetic_env()` と `HermeticGitTestCase` が外す。
+OUTER_GIT_LEAK_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+)
+
+
+def hermetic_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """git を起動するときの env。
+
+    `base` (既定は `os.environ`) から `OUTER_GIT_LEAK_ENV` を外し、`HERMETIC_GIT_ENV` を足す。
+    `HERMETIC_GIT_ENV` を後から足すので、外側の env に同じ名前の変数があっても定数が勝つ。
+    """
+    env = {k: v for k, v in (os.environ if base is None else base).items() if k not in OUTER_GIT_LEAK_ENV}
+    env.update(HERMETIC_GIT_ENV)
+    return env
 
 
 class HermeticGitTestCase(unittest.TestCase):
     """ゲート (製品コード) を in-process で動かすテストの基底クラス。
 
     `runner.run` は env を渡さず `os.environ` を継ぐので、ゲートが起動する git に設定を届けるには
-    テスト側で `os.environ` に張る。repo を作る `sh` / `init_bare_origin` は自分で env を足すので
-    この基底クラスに依存しない (patch していないクラスが repo を作っても止まる)。ゲートを
-    subprocess で起動する側は、起動のたびに env へ `HERMETIC_GIT_ENV` を足す (`test_main.run_hook`)。
+    テスト側で `os.environ` に張る。`HERMETIC_GIT_ENV` を当て、外側の repo / config を指す変数
+    (`OUTER_GIT_LEAK_ENV`) を外す (`mock.patch.dict` の中なので、テストが終われば元に戻る)。
+    repo を作る `sh` / `init_bare_origin` は自分で env を足すので、この基底クラスに依存しない
+    (patch していないクラスが repo を作っても止まる)。ゲートを subprocess で起動する側は、
+    `launch_hook` が起動のたびに env を組む。
     """
 
     def setUp(self) -> None:
@@ -88,16 +133,57 @@ class HermeticGitTestCase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, HERMETIC_GIT_ENV)
         patcher.start()
         self.addCleanup(patcher.stop)
+        for name in OUTER_GIT_LEAK_ENV:
+            os.environ.pop(name, None)
 
 
 def sh(cwd: Path, *args: str) -> str:
-    # `HERMETIC_GIT_ENV` はここでも足す。テストクラス側の env patch に頼ると、patch していない
+    # `hermetic_env()` は毎回足す。テストクラス側の env patch に頼ると、patch していない
     # クラスが repo を作った時点で自動 maintenance が復活する (patch 済みなら同じ値の上書き)。
-    env = {**os.environ, **HERMETIC_GIT_ENV}
     r = subprocess.run(
-        ["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True, encoding="utf-8", check=True
+        ["git", *args], cwd=str(cwd), env=hermetic_env(), capture_output=True, text=True, encoding="utf-8", check=True
     )
     return r.stdout
+
+
+_HOOK_DROP = ("VERIFY_PLUGIN_RELEASE_MODE", "GH_HOST")
+
+
+def hook_process_env(drop: Iterable[str] = _HOOK_DROP, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """hook を subprocess で起動するときの env。ゲートが起動する git はこれを継ぐ (`runner.run` は env を渡さない)。
+
+    `os.environ` から `drop` を外し、`hermetic_env` を通してから、最後に `extra` を足す。
+    """
+    dropped = set(drop)
+    env = hermetic_env({k: v for k, v in os.environ.items() if k not in dropped})
+    env.update(extra or {})
+    return env
+
+
+def launch_hook(
+    args: Iterable[str] = (),
+    *,
+    input: str | bytes | None = None,
+    text: bool = True,
+    drop: Iterable[str] = _HOOK_DROP,
+    env_extra: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """hook (`__main__.py`) を subprocess で起動する。テストが hook を起動する経路はここだけにする。
+
+    env を組む `hook_process_env` をここに閉じておくと、起動のたびに env を足し忘れる箇所が生まれない。
+    """
+    kwargs: dict[str, object] = {"capture_output": True, "env": hook_process_env(drop, env_extra), "timeout": 120}
+    if text:
+        kwargs.update(text=True, encoding="utf-8")
+    return subprocess.run([sys.executable, str(_PKG_DIR), *args], input=input, **kwargs)
+
+
+def run_hook(payload: dict | str, env_extra: Mapping[str, str] | None = None) -> dict | None:
+    """PreToolUse の入力 (dict か、そのままの文字列) を hook に渡し、出力の JSON を返す (出力なしは None)。"""
+    data = payload if isinstance(payload, str) else json.dumps(payload)
+    r = launch_hook(input=data, env_extra=env_extra)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout) if r.stdout.strip() else None
 
 
 def write(root: Path, rel: str, content: str) -> None:
