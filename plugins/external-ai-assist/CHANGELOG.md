@@ -58,13 +58,19 @@ geometric で (`builtin/gc.c` の `initialize_task_config`)、`.git/objects/17` 
   - 挙動 (post-implementation-review): `GIT_TRACE2_EVENT` で git の子プロセスの起動を数える。
     env を patch していない状態の `init_repo` と、`init_bare_origin` を通らずに作った bare repo への
     `push` (受け側の `receive-pack` まで trace に載ることを前提として確かめる) で、maintenance /
-    gc の起動が 0 件であること。設定値を問い合わせるだけの床は、`init_repo` の commit だけが env を
-    持たずに起動されても、問い合わせの側が env を足し直すので気付けない
-  - 出どころ別 (両 suite): env の 4 設定と global の fixture の 5 設定を、1 本ずつ単独で
-    `git config --get` する。2 本は同じ値を持つので、有効値だけを見る床は、片方が欠けても
-    もう片方が埋めて通る (実測: 旧い床は、fixture がある状態で env の設定を欠いても通った)。
-    exitplan-review は `init_repo` が実際に git へ渡した env を、`subprocess.run` を包んで捕まえて見る
-  - bare repo 自身の config (`--local`)、hook が起動する git (`gitscan._git`)
+    gc の起動が 0 件であること。さらに global の fixture を外し、helper が渡す `GIT_CONFIG_COUNT`
+    だけでも 0 件であること (helper が `GIT_CONFIG_COUNT` を渡し損ねても fixture が埋めて通る、を防ぐ)。
+    設定値を問い合わせるだけの床は、`init_repo` の commit だけが env を持たずに起動されても、
+    問い合わせの側が env を足し直すので気付けない。「patch していない」状態は、`GIT_CONFIG_*` を外す
+    だけでなく global / system の config も空にして作る (開発者の `~/.gitconfig` に
+    `maintenance.auto=false` があると、迂回した git も起動せず、床が黙って通る)
+  - 出どころ別 (両 suite): env の 4 設定は 1 項目ずつ `git config --get`、global の fixture は
+    `git config --global --list` の完全一致 (5 設定だけを持つこと。余計な設定が増えると、git を起動する
+    全テストに効く)。2 本は同じ値を持つので、有効値だけを見る床は、片方が欠けてももう片方が埋めて
+    通る (実測: 旧い床は、fixture がある状態で env の設定を欠いても通った)。exitplan-review は
+    `init_repo` が実際に git へ渡した env を、`subprocess.run` を包んで捕まえて見る
+  - bare repo 自身の config (`--local`)、hook が起動する git (`gitscan._git`。global / system を
+    空にして見る)
 
 確認: git 2.50 では自動条件が満たされず元の失敗は再現しないため、(1) 設定が git に見えている
 こと、(2) 条件を強制した repo (`gc.auto=1` と、id が `17` で始まる loose object 2 件) で
@@ -73,13 +79,16 @@ geometric で (`builtin/gc.c` の `initialize_task_config`)、`.git/objects/17` 
 `maintenance` / `gc` の数が 71 回から 0 回になること (起動元になりうるコマンドの数は同じ) を、
 対照つきで確かめた。(3) で、env だけで止めた中間版は 9 回が残り、すべて `push` の受け側だったので
 上の例外 (global の fixture と `init_bare_origin`) を足した。最終版は post-implementation-review の
-suite 全体 (442 件) を trace 付きで流し、`maintenance` / `gc` などの子の起動が 0 件で、`receive-pack` を
+suite 全体 (443 件) を trace 付きで流し、`maintenance` / `gc` などの子の起動が 0 件で、`receive-pack` を
 含むすべての git プロセスが `maintenance.auto=false` を見ていることも確かめた。
 
 床の各テストは、対応する実装を壊した scratch コピーで、`errors=` ではなく assertion の失敗
-(`failures=`) になることを確かめた: `init_repo` の commit が env を持たずに起動される /
-`GIT_CONFIG_GLOBAL` を `/dev/null` に戻す / env の設定を 1 つ外す・件数を 1 つ少なく数える /
-fixture の設定を 1 つ外す / `init_bare_origin` が設定を書かない。
+(`failures=`) になることを確かめた: `init_repo` の commit が env を持たずに起動される / helper が
+`GIT_CONFIG_COUNT` だけを渡さない / `GIT_CONFIG_GLOBAL` を `/dev/null` に戻す・外す / env の設定を
+1 つ外す・件数を 1 つ少なく数える / fixture の設定を 1 つ外す・余計な設定や重複を足す /
+`init_bare_origin` が設定を書かない。結果が実行者の global config に左右されないことも、HOME が空の
+場合と、`~/.gitconfig` に `maintenance.auto=false` がある場合 (5 設定すべてがある場合を含む) の
+どれでも同じ結果になることで確かめた。
 
 ## 0.12.2
 

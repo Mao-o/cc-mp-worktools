@@ -899,7 +899,12 @@ repo 用の env (`GIT_CONFIG_COUNT` など) を外されて起動する。外さ
 fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init --bare` を直接呼んだ bare repo
 でも受け側の maintenance は起動しない (`test_hermetic_env.py::TestPlainBareOriginStartsNoMaintenance`)。
 `_testutil.init_bare_origin` は同じ設定を repo 自身の config にも書く二重の備えで、bare repo は
-こちらで作る。**fixture はテストから `git config --global` で書かないこと** (tracked の file が書き換わる)。
+こちらで作る。**fixture はテストから `git config --global` で書かないこと** (tracked の file が
+書き換わる。内容は `test_hermetic_env.py` が `git config --global --list` の完全一致で固定しているので、
+書くと次の実行で落ちる)。この床を書き足すときは、「patch していない」状態を作るために `GIT_CONFIG_*`
+を外すだけでなく、global / system の config も空にすること (`test_hermetic_env.isolate_git_config`)。
+開発者の `~/.gitconfig` に `maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ) があると、helper を
+迂回した git も maintenance を起動せず、床が黙って通る。
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると
