@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 import _testutil
-from _testutil import FAILING_TEST, add_plugin, bump, commit_all, make_marketplace, sh, write
+from _testutil import FAILING_TEST, HermeticGitTestCase, add_plugin, bump, commit_all, make_marketplace, sh, write
 
 import gate
 from config import Config
@@ -33,8 +33,9 @@ def _running(pid: int) -> bool:
     return bool(stat) and not stat.startswith("Z")
 
 
-class GateTest(unittest.TestCase):
+class GateTest(HermeticGitTestCase):
     def setUp(self):
+        super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = make_marketplace(Path(self._tmp.name) / "repo", ["alpha", "beta"])
         self.cfg = Config(fetch=False)
