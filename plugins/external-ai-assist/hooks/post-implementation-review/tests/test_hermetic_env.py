@@ -10,12 +10,26 @@ maintenance が止まっていること。
   あること。「問い合わせた時点の設定値」ではなく**実際に起動したか**を見るので、`init_repo` の
   中の git だけが env を持たずに起動されても、push の受け側 (`receive-pack`) に env が届かなくても
   気付ける (テストが helper を使わずに repo を作る場合は、この床の対象外)。helper を迂回した git を
-  作るために `GIT_CONFIG_*` を外すときは、開発者の global / system の config も空にする
-  (`isolate_git_config`): そこに `maintenance.auto=false` があると、迂回しても起動せず床が黙って通る
+  作るために `GIT_CONFIG_*` を外すときは、開発者の global の config を空に、system の config を
+  目印の file に向ける (`isolate_git_config`): そこに `maintenance.auto=false` があると、迂回しても
+  起動せず床が黙って通る。**床の側では `GIT_CONFIG_NOSYSTEM` を立てない**: 立てると、helper や
+  基底クラスがそれを渡し損ねても、床が埋めて通ってしまう (system の目印は `GIT_CONFIG_NOSYSTEM`
+  が効いていれば読まれないので、効いているかを値で見られる)。外側の env には、止めない側の値
+  (`OUTER_NON_STOPPING_ENV`) を置く: helper が env を混ぜる向きを逆にして外側の値を勝たせる変異も、
+  止まっていないことで拾える。「起動が 0 件」は検出器が何も拾えなくても成り立つので、何も止めない
+  commit で起動が見えること (`TestTheDetectorSeesMaintenance`) を先に確かめる
 - **設定の出どころ別**: 止める経路は env (`GIT_CONFIG_COUNT`) と global の fixture の 2 本で、
   同じ値を持つ。有効値だけを見ると片方が欠けてももう片方が埋めて通ってしまうので、1 本ずつ
   単独で見る。env は定数の中身 (1 項目ずつ) と、helper が実際に渡す経路 (fixture を外して挙動で)、
   fixture は内容の完全一致 (5 設定だけを持つこと)
+
+hook が起動する git は `TestHookLaunchedGitInheritsTheSettings` が、基底クラスが張った env のまま
+見る: 4 設定 (`GIT_CONFIG_COUNT` だけで満たせる) に加えて、global として fixture を読むこと
+(`GIT_CONFIG_GLOBAL` が届いている) と、system の目印を読まないこと (`GIT_CONFIG_NOSYSTEM` が
+届いている)。後ろの 2 つが、基底クラスの当て損ねを見る。もう 1 つ、hook の未追跡の判定が、開発者の
+global の ignore (`$XDG_CONFIG_HOME/git/ignore`) を読まないこと。`GIT_CONFIG_GLOBAL` を指しても git
+の既定の除外ファイルは外れないので、`HERMETIC_GIT_ENV` が `XDG_CONFIG_HOME` を空の dir に向けている
+(定数の床と、hook が起動する git の床の両方で、外側に置いた ignore が効かないことを見る)。
 
 期待値は `_testutil` の定義とは**別に**リテラルで持つ。同じ定数から導くと、`_testutil` から
 1 項目消えても期待値ごと消えて通ってしまう。`git config` は未設定 / 読めないとき exit 1 などになる
@@ -56,22 +70,94 @@ def configured(repo: str, key: str, *, local: bool = False) -> str | None:
 
 
 def empty_global_config(home: str) -> None:
-    """git が読む global / system の config を空にする (`HOME` / `XDG_CONFIG_HOME` を空の `home` に、
-    system を無効に)。
+    """git が読む global の config を空にし、system の config を目印の file に向ける。
+
+    global 側は `HOME` / `XDG_CONFIG_HOME` を空の `home` に向ける。system 側は `GIT_CONFIG_SYSTEM` で
+    `home` の中の目印 file (`hermetic.system = read` だけを持つ) に向ける: 開発者の system config は
+    読まれず、しかも `GIT_CONFIG_NOSYSTEM` が効いていれば目印も読まれないので、効いているかを値
+    (`system_marker`) で見られる。**`GIT_CONFIG_NOSYSTEM` は立てない。** 床の側が立てると、helper や
+    基底クラスがそれを渡し損ねても、床が埋めて通ってしまう。
 
     `mock.patch.dict(os.environ)` の中で呼ぶこと (環境を戻すため)。`GIT_CONFIG_*` を外すだけだと、
     helper を迂回した git (や、`HERMETIC_GIT_ENV` が外れた hook の git) は開発者の `~/.gitconfig` と
     system config を読む。そこに `maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ) があると、
     迂回しても自動 maintenance が起動せず、有効値も揃って、床が黙って通ってしまう。
     """
-    os.environ.update({"HOME": home, "XDG_CONFIG_HOME": home, "GIT_CONFIG_NOSYSTEM": "1"})
+    system = os.path.join(home, "system.gitconfig")
+    with open(system, "w", encoding="utf-8") as f:
+        f.write("[hermetic]\n\tsystem = read\n")
+    os.environ.update({"HOME": home, "XDG_CONFIG_HOME": home, "GIT_CONFIG_SYSTEM": system})
+
+
+# 外側の env (開発者の shell など) が持ちうる「止めない側」の git の設定。global は空、env の設定は
+# `maintenance.auto=true`。`isolate_git_config` が置き、helper や定数が env を混ぜる向きを床が見られるように
+# する (次の項)。
+OUTER_NON_STOPPING_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "maintenance.auto",
+    "GIT_CONFIG_VALUE_0": "true",
+}
 
 
 def isolate_git_config(home: str) -> None:
-    """`GIT_CONFIG_*` を外し、global / system の config も空にする (「patch していない」状態を作る)。"""
+    """`GIT_CONFIG_*` を外し、global の config も空に、system の config も目印の file に向け、そのうえで
+    外側の「止めない側」の env (`OUTER_NON_STOPPING_ENV`) を置く (「patch していない」状態を作る)。
+    `GIT_CONFIG_NOSYSTEM` は立てない。
+
+    外側を全部外しただけだと、helper が env を混ぜる向きを逆にして (`{**HERMETIC_GIT_ENV, **os.environ}`)
+    外側の値を勝たせても、床の側に外側の値が無いので気付けない。止めない側の値を置いておけば、helper の
+    値が勝っていること (止まっていること) が、向きを逆にした変異で崩れる。
+    """
     for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
         del os.environ[name]
     empty_global_config(home)
+    os.environ.update(OUTER_NON_STOPPING_ENV)
+
+
+IGNORED_NAME = "note.hermetic-ignored"
+
+
+def plant_default_excludes(xdg_config_home: str) -> None:
+    """開発者の global の ignore に見立てた file を、git の既定の除外ファイルの場所
+    (`xdg_config_home/git/ignore`) に置く。`IGNORED_NAME` を除外する。"""
+    path = os.path.join(xdg_config_home, "git", "ignore")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("*.hermetic-ignored\n")
+
+
+def untracked_names(repo: str, env: dict[str, str]) -> list[str]:
+    """`env` で起動した git が、`repo` で「未追跡で、ignore されていない」と見る名前 (ソート済み)。
+
+    git の失敗は例外にする (`check=True`)。失敗を空の一覧として返すと、「ignore が効いて見えない」
+    と区別がつかず、確認が黙って空になる。
+    """
+    res = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return sorted(res.stdout.split())
+
+
+def system_marker(cwd: str, env: dict[str, str]) -> tuple[int, str]:
+    """`env` で起動した git が、`empty_global_config` の system の目印を読むか。
+
+    読めば `(0, "read")`。読まなければ (`GIT_CONFIG_NOSYSTEM` が効いている) `(1, "")`: 未設定のとき
+    `git config --get` は exit 1 になるので、`check=True` は使わない。
+    """
+    res = subprocess.run(
+        ["git", "config", "--get", "hermetic.system"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return res.returncode, res.stdout.strip()
 
 
 def trace_events(path: str) -> list[dict]:
@@ -99,9 +185,13 @@ def spawned_maintenance(events: list[dict]) -> list[list[str]]:
 class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
     """テストクラスが env を patch していなくても、repo を作るヘルパー自身が止める。
 
-    「patch していない」状態は、`GIT_CONFIG_*` を外し、global / system の config も空にして作る
-    (`isolate_git_config`)。他のテストの patch 漏れや、開発者の shell / `~/.gitconfig` の値に
-    左右されないため。
+    「patch していない」状態は、`GIT_CONFIG_*` を外し、global の config を空に、system の config を
+    目印の file に向けて作る (`isolate_git_config`。`GIT_CONFIG_NOSYSTEM` は立てない)。他のテストの
+    patch 漏れや、開発者の shell / `~/.gitconfig` の値に左右されないため。床が `GIT_CONFIG_NOSYSTEM`
+    を立てないので、helper が渡す env から `GIT_CONFIG_NOSYSTEM` が抜けることも、下の前提
+    (`HERMETIC_GIT_ENV` の全項目が helper の git に届いている) で拾える。外側には止めない側の値
+    (`OUTER_NON_STOPPING_ENV`) を置くので、helper が env を混ぜる向きを逆にして外側の値を勝たせても、
+    同じ前提で拾える。
 
     見るのは**起動された git の挙動** (maintenance / gc の子が 0 件) で、ヘルパーが後から問い合わせた
     設定値ではない。`init_repo` の commit だけが env を持たずに起動されても、問い合わせ
@@ -156,13 +246,58 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         self.assertEqual(self._spawned_by_init_repo({"GIT_CONFIG_GLOBAL": os.devnull}), [])
 
 
+# 起動した maintenance を背景へ切り離さないだけの設定 (起動そのものは止めない)
+FOREGROUND_ONLY_SETTINGS = (
+    ("maintenance.autoDetach", "false"),
+    ("gc.autoDetach", "false"),
+)
+
+
+class TestTheDetectorSeesMaintenance(unittest.TestCase):
+    """陽性対照: 何も止めない commit では、`spawned_maintenance` が maintenance の起動を拾えること。
+
+    上の床は「起動が 0 件」を見るので、検出器 (`trace_events` / `spawned_maintenance`) が何も拾えない
+    状態でも通る (前提で見ているのは、`command_names` が `commit` を拾えることだけ)。止める設定を
+    渡さない commit で、検出器が起動を 1 件以上拾うことを先に確かめる。
+
+    `maintenance.autoDetach=false` / `gc.autoDetach=false` だけは渡す: 起動した maintenance が背景へ
+    切り離されると、tempdir の後始末と競合して、この対照自身が `Directory not empty` で落ちうる
+    (起動は止めず、前景で終わらせるだけ)。止める設定を足す helper (`_testutil.git`) は使わず、
+    `isolate_git_config` で隔離した env のまま git を直接起動する。
+    """
+
+    def test_a_commit_that_stops_nothing_spawns_maintenance(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            os.environ.update(_testutil.git_config_env(FOREGROUND_ONLY_SETTINGS))
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            for args in (
+                ["init", "-q"],
+                ["config", "user.email", "test@example.com"],
+                ["config", "user.name", "test"],
+            ):
+                subprocess.run(["git", *args], cwd=repo, capture_output=True, check=True)
+            _testutil.write(repo, "seed.txt", "alpha\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+            trace = os.path.join(tmp, "trace2.jsonl")
+            os.environ["GIT_TRACE2_EVENT"] = trace
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, capture_output=True, check=True)
+            events = trace_events(trace)
+        self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
+        self.assertNotEqual(
+            spawned_maintenance(events), [], "何も止めない commit で、maintenance の起動が見えない"
+        )
+
+
 class TestEachSourceOfTheSettingsOnItsOwn(unittest.TestCase):
     """設定を止める経路 (env の `GIT_CONFIG_COUNT` / global の fixture) を 1 本ずつ単独で見る。
 
     2 本は同じ値を持つので、有効値だけを見るテストでは、片方の項目が欠けても、もう片方が埋めて
     通ってしまう。env は repo 自身の config より優先され、fixture は `receive-pack` にも届くため、
     どちらも外さない (`_testutil.HERMETIC_GIT_ENV` のコメント)。helper が env を実際に渡す経路は、
-    上のクラスの `test_the_env_path_alone_stops_it` が挙動で見る。ここは定数の中身を見る。
+    上のクラスの `test_the_env_path_alone_stops_it` が挙動で見る。ここは定数の中身を見る (4 設定、
+    global の fixture、system の config を読ませないこと)。
     """
 
     def test_the_env_alone_has_the_four_settings(self):
@@ -186,10 +321,11 @@ class TestEachSourceOfTheSettingsOnItsOwn(unittest.TestCase):
         将来足された `diff.noprefix` など、テストの前提を変えるもの) が増えても通る。fixture は
         git が読む global なので、増えると製品の git を含む全テストに効く。`git config --list` は
         キーを小文字で出す。`GIT_CONFIG_GLOBAL` が外れたときに開発者の `~/.gitconfig` を読んで通らない
-        よう、`HOME` などは空にしてから見る。
+        よう、`HOME` などは空にしてから見る。外側の env の `GIT_CONFIG_*` が、定数の当て損ねを埋めない
+        よう先に外す (`isolate_git_config`)。
         """
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            empty_global_config(tmp)
+            isolate_git_config(tmp)
             res = subprocess.run(
                 ["git", "config", "--global", "--list"],
                 cwd=tmp,
@@ -200,6 +336,54 @@ class TestEachSourceOfTheSettingsOnItsOwn(unittest.TestCase):
         expected = sorted(f"{key.lower()}={value}" for key, value in EXPECTED_WITH_RECEIVE.items())
         self.assertEqual((res.returncode, sorted(res.stdout.splitlines())), (0, expected))
 
+    def test_the_constant_does_not_read_the_system_config(self):
+        """`HERMETIC_GIT_ENV` が system の config を読ませないこと (`GIT_CONFIG_NOSYSTEM`)。
+
+        system は目印の file に向けてあるので (`empty_global_config`)、定数が `GIT_CONFIG_NOSYSTEM` を
+        持たなければ目印が読まれる (`hermetic.system` が `read` で見える)。目印が読めること自体は
+        `TestTheSystemMarkerIsLive` が見る。外側の env に `GIT_CONFIG_NOSYSTEM` があると定数の当て損ねを
+        埋めてしまうので、先に外す (`isolate_git_config`)。
+        """
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            result = system_marker(tmp, {**os.environ, **_testutil.HERMETIC_GIT_ENV})
+        self.assertEqual(result, (1, ""))
+
+    def test_the_constant_does_not_read_the_default_excludes_file(self):
+        """`HERMETIC_GIT_ENV` が、開発者の global の ignore (`$XDG_CONFIG_HOME/git/ignore`) を読ませない
+        こと。
+
+        `GIT_CONFIG_GLOBAL` を指しても、git の既定の除外ファイルは外れない
+        (`_testutil.HERMETIC_XDG_CONFIG_HOME` のコメント)。外側の env の `XDG_CONFIG_HOME` が指す先に
+        ignore を置き (`plant_default_excludes`)、置いた ignore が外側の env では効くこと (前提: 空の床に
+        しない) と、定数を重ねた env では効かないこと (未追跡の名前が見える) を、続けて見る。
+        """
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            plant_default_excludes(tmp)
+            repo = _testutil.init_repo(os.path.join(tmp, "repo"))
+            _testutil.write(repo, IGNORED_NAME, "x\n")
+            outer_view = untracked_names(repo, dict(os.environ))
+            hermetic_view = untracked_names(repo, {**os.environ, **_testutil.HERMETIC_GIT_ENV})
+        self.assertEqual((outer_view, hermetic_view), ([], [IGNORED_NAME]))
+
+
+class TestTheSystemMarkerIsLive(unittest.TestCase):
+    """system の目印が、`GIT_CONFIG_NOSYSTEM` を立てなければ読まれ、立てれば読まれないこと。
+
+    「目印が読まれない (`hermetic.system` が未設定)」という確認は、目印がそもそも読めない状態でも
+    成り立つ。`empty_global_config` が目印を置き損ねる / `GIT_CONFIG_SYSTEM` を向け損ねる / 床の側で
+    `GIT_CONFIG_NOSYSTEM` を立てる、のどれでも、`GIT_CONFIG_NOSYSTEM` が届いているかを見る床が黙って
+    空になるので、道具の側を先に確かめる。
+    """
+
+    def test_the_marker_is_read_unless_nosystem_is_set(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            readable = system_marker(tmp, dict(os.environ))
+            skipped = system_marker(tmp, {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+        self.assertEqual((readable, skipped), ((0, "read"), (1, "")))
+
 
 class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
     """`init_bare_origin` を通らずに作った bare repo (repo 自身の config に設定が無い) へ push しても、
@@ -208,8 +392,8 @@ class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
     `git push` がローカルの path へ送るとき、受け側は repo 用の env (`GIT_CONFIG_COUNT` など) を
     外されて起動する。env の設定だけだと、`git init --bare` を直接呼んだ bare repo では maintenance が
     起動する (実測)。外されない `GIT_CONFIG_GLOBAL` の fixture が止めていることを、起動された
-    子プロセスで見る。helper を迂回した git が開発者の `~/.gitconfig` を読まないよう、global / system
-    の config は空にする (`isolate_git_config`)。
+    子プロセスで見る。helper を迂回した git が開発者の `~/.gitconfig` を読まないよう、global の
+    config は空に、system の config は目印の file に向ける (`isolate_git_config`)。
     """
 
     def test_push_into_a_plain_bare_repo(self):
@@ -245,24 +429,88 @@ class TestBareOriginKeepsTheSettingsInItsOwnConfig(unittest.TestCase):
 
 
 class TestHookLaunchedGitInheritsTheSettings(HookTestCase):
-    """hook (製品コード) が起動する git にも、同じ設定が届くこと。
+    """hook (製品コード) が起動する git にも、同じ設定が届き、global は fixture だけ、system は
+    読まないこと。
 
     `gitscan._git` は env を渡さず `os.environ` を継承するので、基底クラスが patch した env が
-    そのまま見える。ここが外れると hook の git だけ自動 maintenance が復活する。基底クラスの
-    patch から `HERMETIC_GIT_ENV` が外れたとき、hook の git が開発者の global / system の config
-    から設定を拾って通らないよう、`HOME` などは空にしてから見る (`empty_global_config`。
-    patch が効いていれば `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_COUNT` が優先されるので結果は変わらない)。
+    そのまま見える。ここが外れると、hook の git だけ、開発者の global / system の config と自動
+    maintenance の既定に戻る。基底クラスの patch から外れたものが、開発者の global / system の
+    config から拾われて通らないよう、`HOME` などは空にしてから見る (`empty_global_config`)。
+    見るものは 3 つ (それぞれ別のテスト):
+
+    - 4 設定が見える (`--get`)。env の `GIT_CONFIG_COUNT` だけで満たせるので、fixture と system の
+      経路は見えない
+    - global として fixture を読む (`config --global --list` が 5 設定の完全一致)。基底クラスが
+      `GIT_CONFIG_GLOBAL` を張っていること
+    - system の config を読まない。`GIT_CONFIG_SYSTEM` に目印の file を指しておき、
+      `GIT_CONFIG_NOSYSTEM` が効いていれば読まれない (`hermetic.system` が未設定のまま)
+
+    床自身が `GIT_CONFIG_NOSYSTEM` を立てると、基底クラスの当て損ねを床が埋めてしまい、3 つ目が
+    見えなくなる。そのため `empty_global_config` は `HOME` / `XDG_CONFIG_HOME` を空にして system の
+    目印を指すだけで、`GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` は基底クラスが張ったものをそのまま
+    見る。`GIT_CONFIG_GLOBAL` が外れたときは、開発者の `~/.gitconfig` を読んで通ってしまわず、
+    `--global --list` の不一致として落ちる。
+
+    外側の env (開発者の shell や、mutation を流す道具) に `GIT_CONFIG_*` があると、基底クラスが
+    当て損ねても、その値が残って確認が素通りする。そのため `setUp` で、外側の `GIT_CONFIG_*` を
+    先に外してから基底クラスの patch を張る。
+
+    もう 1 つ、hook の未追跡の判定 (`gitscan.untracked_among`) が、開発者の global の ignore
+    (`$XDG_CONFIG_HOME/git/ignore`) を読まないこと。`GIT_CONFIG_GLOBAL` を指しても既定の除外ファイルは
+    外れないので、基底クラスが `XDG_CONFIG_HOME` を空の dir に向けている (`HERMETIC_GIT_ENV`)。外側の env
+    の `XDG_CONFIG_HOME` が指す先に ignore を置いてから基底クラスの patch を張り、hook の git でその
+    ignore が効かないことを見る。
     """
 
+    def setUp(self) -> None:
+        outer = mock.patch.dict(os.environ)
+        outer.start()
+        self.addCleanup(outer.stop)
+        for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
+            del os.environ[name]
+        planted = tempfile.TemporaryDirectory()
+        self.addCleanup(planted.cleanup)
+        self.planted_xdg_config_home = planted.name
+        plant_default_excludes(self.planted_xdg_config_home)
+        os.environ["XDG_CONFIG_HOME"] = self.planted_xdg_config_home
+        super().setUp()
+
+    def _hook_git(self, *args: str) -> tuple[int, str]:
+        """hook の `gitscan._git` で `git <args>` を起動した (終了コード, 標準出力)。
+
+        `HOME` などは空に、system の config は目印の file に向けてから起動する。
+        """
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            empty_global_config(tmp)
+            res = self.gitscan._git(self.repo, list(args))
+        return res.returncode, res.stdout.decode().strip()
+
     def test_git_launched_by_the_hook_sees_the_settings(self):
-        with mock.patch.dict(os.environ):
-            empty_global_config(self.tmpdir)
-            for key, expected in EXPECTED.items():
-                with self.subTest(key=key):
-                    res = self.gitscan._git(self.repo, ["config", "--get", key])
-                    self.assertEqual(
-                        (res.returncode, res.stdout.decode().strip()), (0, expected)
-                    )
+        for key, expected in EXPECTED.items():
+            with self.subTest(key=key):
+                self.assertEqual(self._hook_git("config", "--get", key), (0, expected))
+
+    def test_git_launched_by_the_hook_reads_the_fixture_as_its_global_config(self):
+        code, out = self._hook_git("config", "--global", "--list")
+        expected = sorted(f"{key.lower()}={value}" for key, value in EXPECTED_WITH_RECEIVE.items())
+        self.assertEqual((code, sorted(out.splitlines())), (0, expected))
+
+    def test_git_launched_by_the_hook_does_not_read_the_system_config(self):
+        self.assertEqual(self._hook_git("config", "--get", "hermetic.system"), (1, ""))
+
+    def test_git_launched_by_the_hook_does_not_read_the_default_excludes_file(self):
+        """前提 (空の床にしない): 外側に置いた ignore は、`XDG_CONFIG_HOME` がそこを向いていれば効く。
+        そのうえで、基底クラスが張った env のままの hook の判定には効かない。"""
+        _testutil.write(self.repo, IGNORED_NAME, "x\n")
+        planted_view = untracked_names(
+            self.repo, {**os.environ, "XDG_CONFIG_HOME": self.planted_xdg_config_home}
+        )
+        self.assertEqual(planted_view, [], "前提: 置いた ignore が効く (空の床にしない)")
+        self.assertEqual(
+            self.gitscan.untracked_among(self.repo, [IGNORED_NAME]),
+            {IGNORED_NAME},
+            "hook の git が開発者の global の ignore を読んでいる",
+        )
 
 
 if __name__ == "__main__":

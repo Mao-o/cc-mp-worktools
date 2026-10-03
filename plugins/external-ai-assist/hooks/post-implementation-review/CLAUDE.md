@@ -889,7 +889,7 @@ hook のモジュールを外す処理 (`tests/test_posix_guard.py::_purge_hook_
 **テストが作る git repo は、自動 maintenance を止めてから使う**。`git commit` が起動する
 `git maintenance run --auto --detach` が背景で `.git/objects/pack` に書いている間に tempdir の
 後始末が走ると、tearDown が `Directory not empty` で落ちる (git 2.55 は小さな repo でも起こす。
-git 2.50 では起きないので、ローカルの実行だけでは気付けない)。`_testutil.HERMETIC_GIT_ENV` が
+git 2.50 では起きないので、gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない)。`_testutil.HERMETIC_GIT_ENV` が
 `GIT_CONFIG_COUNT` (env) と `GIT_CONFIG_GLOBAL` (tests 配下の `hermetic.gitconfig`) の 2 本で
 止めていて、`_testutil.git` は毎回これを足す。repo を作るテストは
 `_testutil.git` / `init_repo` を使い、自前の `subprocess` で git を呼ぶなら env に
@@ -902,9 +902,21 @@ fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init
 こちらで作る。**fixture はテストから `git config --global` で書かないこと** (tracked の file が
 書き換わる。内容は `test_hermetic_env.py` が `git config --global --list` の完全一致で固定しているので、
 書くと次の実行で落ちる)。この床を書き足すときは、「patch していない」状態を作るために `GIT_CONFIG_*`
-を外すだけでなく、global / system の config も空にすること (`test_hermetic_env.isolate_git_config`)。
-開発者の `~/.gitconfig` に `maintenance.auto=false` (2.55 では `gc.auto=0` でも同じ) があると、helper を
-迂回した git も maintenance を起動せず、床が黙って通る。
+を外すだけでなく、global の config を空に、system の config を目印の file に向けること
+(`test_hermetic_env.isolate_git_config`)。開発者の `~/.gitconfig` に `maintenance.auto=false`
+(2.55 では `gc.auto=0` でも同じ) があると、helper を迂回した git も maintenance を起動せず、床が
+黙って通る。**床の側で `GIT_CONFIG_NOSYSTEM` を立てないこと**: 立てると、helper・基底クラス・定数が
+それを渡し損ねても、床が埋めて通る。system の目印 (`hermetic.system = read`) は
+`GIT_CONFIG_NOSYSTEM` が効いていれば読まれないので、`git config --get hermetic.system` が未設定
+(終了コード 1) であることで、届いているかを見る (hook の git は
+`TestHookLaunchedGitInheritsTheSettings`)。外側の env には、止めない側の値
+(`OUTER_NON_STOPPING_ENV`。global は空、`maintenance.auto=true`) を置く: helper が env を混ぜる向きを
+逆にする変異は、外側を全部外しただけでは結果が変わらず、床が気付けない。挙動の床 (maintenance の起動
+0 件) には陽性対照が要る (`TestTheDetectorSeesMaintenance`): 検出器が何も拾えなくても 0 件は成り立つ。
+git の既定の除外ファイルと属性ファイル (`$XDG_CONFIG_HOME/git/ignore` など) は `GIT_CONFIG_GLOBAL`
+では外れないので、`HERMETIC_GIT_ENV` が `XDG_CONFIG_HOME` を空の dir に向けている (開発者の global の
+ignore に `.env` があると、`git add -A` が拾わず commit が失敗するテストが出る。hook の未追跡の判定も
+変わる)。
 
 `TestBashAttribution.test_sed_on_already_dirty_file` は**すでに dirty なファイルを
 同一バイト数で書き換える**という最も厳しい条件を使っている。clean なファイルから始めると

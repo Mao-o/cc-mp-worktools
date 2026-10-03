@@ -6,10 +6,12 @@ import は post-implementation-review/ 直下を sys.path に載せて解決す�
 """
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -60,10 +62,12 @@ def clear_plugin_env(keep: dict | None = None) -> None:
 # `--detach` は repack の自動条件を判定する前に背景へ切り離すので、commit は待たずに戻る。
 # その repack が `.git/objects/pack` に書いている間に `TemporaryDirectory.cleanup()` が走ると、
 # tearDown が `Directory not empty` で落ちる (CI の flaky。object の hash 次第なので偶発的)。
-# git 2.50 は gc 戦略でしきい値 (約 6700 個) が高く、同じ条件でも起きないので、ローカルの
-# 実行だけでは気付けない。
+# git 2.50 は gc 戦略でしきい値 (約 6700 個) が高く、同じ条件でも起きないので、gc 戦略が既定の
+# 版 (2.50 など) で流すだけでは気付けない。
 #
-#   maintenance.auto=false / gc.auto=0: そもそも自動 maintenance を起動しない
+#   maintenance.auto=false: そもそも自動 maintenance を起動しない
+#   gc.auto=0: 起動された maintenance の gc を走らせない。git 2.50 では gc.auto=0 だけだと
+#     `git maintenance run --auto` の起動は止まらない (実測)
 #   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
 #     (commit が戻る前に終わる)
 #
@@ -93,19 +97,30 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return env
 
 
-# 開発者の ~/.gitconfig (color.ui=always / diff.external / diff.noprefix 等) でテストが
-# 揺れないよう、git にグローバル/システム設定を読ませない。global の代わりに読ませるのは
-# tests 配下の fixture で、自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と
-# `receive.autogc`) だけを持つ。
+# 開発者の ~/.gitconfig (`diff.renames=false` / `diff.external` / `diff.noprefix` / `core.excludesFile`
+# 等。hook が読む変更ファイル名の一覧・patch・未追跡の一覧を変える) でテストが揺れないよう、git に
+# グローバル/システム設定を読ませない。global の代わりに読ませるのは tests 配下の fixture で、
+# 自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と `receive.autogc`) だけを持つ。
 #
 # 止める経路は 2 本あり、どちらも外さない:
 #   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない
 #   - global の fixture: `receive-pack` にも届く。ただし repo 自身の config には負ける
 # fixture はテストから `git config --global` で書かないこと (tracked の file が書き換わる)。
+#
+# git の既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`。`XDG_CONFIG_HOME` が未設定か空なら
+# `~/.config/git/ignore`) と属性ファイル (同じ場所の `attributes`) は、`GIT_CONFIG_GLOBAL` を指しても
+# 外れない (config ではなく環境変数と HOME で決まる)。実測: 除外ファイルに載せた名前が
+# `ls-files --others --exclude-standard` と `status` から消え、`.env` を載せていると `git add -A` が
+# `.env` を拾わず、続く commit が失敗するテストが出る。hook が読む git の出力 (未追跡の判定) も変わる。
+# 何も置かない dir に `XDG_CONFIG_HOME` を向けて切り離す。空でない `XDG_CONFIG_HOME` があれば git は
+# `~/.config/git/ignore` を読まない (実測) ので、`HOME` は差し替えない。
+HERMETIC_XDG_CONFIG_HOME = tempfile.mkdtemp(prefix="hermetic-xdg-")
+atexit.register(shutil.rmtree, HERMETIC_XDG_CONFIG_HOME, ignore_errors=True)
 HERMETIC_GIT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermetic.gitconfig")
 HERMETIC_GIT_ENV = {
     "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,
     "GIT_CONFIG_NOSYSTEM": "1",
+    "XDG_CONFIG_HOME": HERMETIC_XDG_CONFIG_HOME,
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
 

@@ -9,6 +9,13 @@
 もう片方が埋めて通ってしまう。1 本ずつ単独で見る: env は 4 設定を 1 項目ずつ、fixture は内容の
 完全一致 (5 設定だけを持つこと。余計な設定が増えると、git を起動する全テストに効く)。
 
+加えて、system の config を読ませないこと (`GIT_CONFIG_NOSYSTEM` が届いていること) を値で見る。
+system の config は `GIT_CONFIG_SYSTEM` で目印の file (`hermetic.system = read` だけを持つ) に向けて
+おき、`GIT_CONFIG_NOSYSTEM` が効いていれば読まれない。**床の側では `GIT_CONFIG_NOSYSTEM` を立てない**:
+立てると、`init_repo` や定数がそれを渡し損ねても、床が埋めて通ってしまう。外側の env には、止めない
+側の値 (`OUTER_NON_STOPPING_ENV`) を置く: `init_repo` が env を混ぜる向きを逆にして外側の値を勝たせる
+変異も、止まっていないことで拾える。
+
 期待値は `_testutil` の定義とは**別に**リテラルで持つ。同じ定数から導くと、`_testutil` から
 1 項目消えても期待値ごと消えて通ってしまう。`git config` は未設定 / 読めないとき exit 1 などに
 なるので、`check=True` を使わず、「無い」は例外ではなく値の不一致 (assertion) として出す。
@@ -31,14 +38,82 @@ EXPECTED = {
 EXPECTED_WITH_RECEIVE = {**EXPECTED, "receive.autogc": "false"}
 
 
+def empty_global_config(home: str) -> None:
+    """git が読む global の config を空にし、system の config を目印の file に向ける。
+
+    global 側は `HOME` / `XDG_CONFIG_HOME` を空の `home` に向ける。system 側は `GIT_CONFIG_SYSTEM` で
+    `home` の中の目印 file (`hermetic.system = read` だけを持つ) に向ける: 開発者の system config は
+    読まれず、しかも `GIT_CONFIG_NOSYSTEM` が効いていれば目印も読まれないので、効いているかを値
+    (`git config --get hermetic.system`) で見られる。**`GIT_CONFIG_NOSYSTEM` は立てない。** 床の側が
+    立てると、`init_repo` や定数がそれを渡し損ねても、床が埋めて通ってしまう。
+
+    `mock.patch.dict(os.environ)` の中で呼ぶこと (環境を戻すため)。
+    """
+    system = os.path.join(home, "system.gitconfig")
+    with open(system, "w", encoding="utf-8") as f:
+        f.write("[hermetic]\n\tsystem = read\n")
+    os.environ.update({"HOME": home, "XDG_CONFIG_HOME": home, "GIT_CONFIG_SYSTEM": system})
+
+
+# 外側の env (開発者の shell など) が持ちうる「止めない側」の git の設定。global は空、env の設定は
+# `maintenance.auto=true`。`isolate_git_config` が置き、`init_repo` や定数が env を混ぜる向きを床が
+# 見られるようにする (次の項)。
+OUTER_NON_STOPPING_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "maintenance.auto",
+    "GIT_CONFIG_VALUE_0": "true",
+}
+
+
+def isolate_git_config(home: str) -> None:
+    """`GIT_CONFIG_*` を外し、global の config も空に、system の config も目印の file に向け、そのうえで
+    外側の「止めない側」の env (`OUTER_NON_STOPPING_ENV`) を置く (「patch していない」状態を作る)。
+    `GIT_CONFIG_NOSYSTEM` は立てない。
+
+    外側を全部外しただけだと、`init_repo` が env を混ぜる向きを逆にして (`{**HERMETIC_GIT_ENV,
+    **os.environ}`) 外側の値を勝たせても、床の側に外側の値が無いので気付けない。止めない側の値を
+    置いておけば、`init_repo` が渡した env の値が勝っていること (止まっていること) が、向きを逆にした
+    変異で崩れる。
+    """
+    for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
+        del os.environ[name]
+    empty_global_config(home)
+    os.environ.update(OUTER_NON_STOPPING_ENV)
+
+
+def system_marker(cwd: str, env: dict[str, str]) -> tuple[int, str]:
+    """`env` で起動した git が、`empty_global_config` の system の目印を読むか。
+
+    読めば `(0, "read")`。読まなければ (`GIT_CONFIG_NOSYSTEM` が効いている) `(1, "")`: 未設定のとき
+    `git config --get` は exit 1 になるので、`check=True` は使わない。
+    """
+    res = subprocess.run(
+        ["git", "config", "--get", "hermetic.system"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return res.returncode, res.stdout.strip()
+
+
 class TestInitRepoSettings(unittest.TestCase):
+    def setUp(self) -> None:
+        # 隔離した HOME と system の目印は、`init_repo` が渡した env を使い終わるまで残す。env が
+        # 指す file が消えていると、system の確認が「読めないから未設定」で通ってしまう。
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = home.name
+
     def _envs_passed_by_init_repo(self) -> list[tuple[str, dict]]:
         """`init_repo` が起動した git ごとの (サブコマンド, 渡した env)。
 
         env を渡していなければ、そのとき継いだ `os.environ` を返す。「patch していない」状態は
-        `GIT_CONFIG_*` を外し、global / system の config も空にして作る。開発者の shell や
-        `~/.gitconfig` の値に左右されないため (env を渡し損ねた git が開発者の設定を読むと、
-        有効値が揃って床が黙って通ってしまう)。
+        `GIT_CONFIG_*` を外し、global の config を空に、system の config を目印の file に向けて作る
+        (`isolate_git_config`。`GIT_CONFIG_NOSYSTEM` は立てない)。開発者の shell や `~/.gitconfig` の
+        値に左右されないため (env を渡し損ねた git が開発者の設定を読むと、有効値が揃って床が黙って
+        通ってしまう)。
         """
         passed: list[tuple[str, dict]] = []
         real_run = subprocess.run
@@ -48,12 +123,10 @@ class TestInitRepoSettings(unittest.TestCase):
                 passed.append((argv[1], dict(kwargs.get("env") or os.environ)))
             return real_run(argv, *args, **kwargs)
 
-        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
-            for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
-                del os.environ[name]
-            os.environ.update({"HOME": tmp, "XDG_CONFIG_HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1"})
+        with mock.patch.dict(os.environ):
+            isolate_git_config(self.home)
             with mock.patch.object(subprocess, "run", side_effect=spy):
-                _testutil.init_repo(os.path.join(tmp, "repo"))
+                _testutil.init_repo(os.path.join(self.home, "repo"))
         self.assertTrue(passed, "前提: init_repo が git を起動している (空の床にしない)")
         return passed
 
@@ -77,13 +150,42 @@ class TestInitRepoSettings(unittest.TestCase):
         """渡した env の `GIT_CONFIG_GLOBAL` が指す fixture が、5 設定だけを持つこと (完全一致)。
 
         キーごとの `--get` だと、余計な設定 (誤って `git config --global` で書かれた `user.name` や、
-        将来足された `diff.noprefix` など) が増えても通る。`git config --list` はキーを小文字で出す。
+        将来足された `init.defaultBranch` など) が増えても通る。`git config --list` はキーを小文字で出す。
         """
         expected = sorted(f"{key.lower()}={value}" for key, value in EXPECTED_WITH_RECEIVE.items())
         for sub, passed in self._envs_passed_by_init_repo():
             code, out = self._git_config(passed, "--global", "--list")
             with self.subTest(git=sub):
                 self.assertEqual((code, sorted(out.splitlines())), (0, expected))
+
+    def test_the_env_does_not_read_the_system_config(self):
+        """渡した env が system の config を読ませないこと (`GIT_CONFIG_NOSYSTEM` が届いている)。
+
+        system は目印の file に向けてあり (`isolate_git_config`)、`GIT_CONFIG_NOSYSTEM` が効いて
+        いれば読まれない (`hermetic.system` が未設定のまま)。目印が読めること自体は
+        `TestTheSystemMarkerIsLive` が見る。床の側で `GIT_CONFIG_NOSYSTEM` を立てていると、
+        `init_repo` や定数が渡し損ねても、床の env に残って通ってしまう。
+        """
+        for sub, passed in self._envs_passed_by_init_repo():
+            with self.subTest(git=sub):
+                self.assertEqual(self._git_config(passed, "--get", "hermetic.system"), (1, ""))
+
+
+class TestTheSystemMarkerIsLive(unittest.TestCase):
+    """system の目印が、`GIT_CONFIG_NOSYSTEM` を立てなければ読まれ、立てれば読まれないこと。
+
+    「目印が読まれない (`hermetic.system` が未設定)」という確認は、目印がそもそも読めない状態でも
+    成り立つ。`isolate_git_config` が目印を置き損ねる / `GIT_CONFIG_SYSTEM` を向け損ねる / 床の側で
+    `GIT_CONFIG_NOSYSTEM` を立てる、のどれでも、`GIT_CONFIG_NOSYSTEM` が届いているかを見る床が黙って
+    空になるので、道具の側を先に確かめる。
+    """
+
+    def test_the_marker_is_read_unless_nosystem_is_set(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            readable = system_marker(tmp, dict(os.environ))
+            skipped = system_marker(tmp, {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+        self.assertEqual((readable, skipped), ((0, "read"), (1, "")))
 
 
 if __name__ == "__main__":
