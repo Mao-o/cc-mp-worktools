@@ -74,7 +74,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 
 | Plugin | 外部送信 | 送信先 | 送る内容 | 無効化方法 |
 |---|---|---|---|---|
-| `llms-docs` | **あり** (HTTPS GET) | `code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com` | リクエストヘッダのみ (User-Agent, Accept-Encoding, 条件付き `If-None-Match` / `If-Modified-Since`)。リポジトリの内容・ファイル内容は送らない | 専用の無効化変数は無い。Skill を呼ばなければ取得は走らず、キャッシュが新しい間は再取得もしない。完全に止めるなら plugin を無効化する |
+| `llms-docs` | **あり** (HTTPS GET) | 専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`)、汎用 loader の同梱 presets の取得先 (`plugins/llms-docs/scripts/presets.json` の `url` / `index_url`。ホストの一覧は [llms-docs の README](plugins/llms-docs/README.md#同梱-presets))、利用者が `sources.json` に書いた URL | リクエストヘッダのみ (User-Agent, Accept-Encoding, 条件付き `If-None-Match` / `If-Modified-Since`)。リポジトリの内容・ファイル内容は送らない | 専用の無効化変数は無い。Skill を呼ばなければ取得は走らず、キャッシュが新しい間は再取得もしない。完全に止めるなら plugin を無効化する |
 | `external-ai-assist` | **あり** (第三者 AI CLI 経由) | Cursor CLI (`cursor-agent` / `cursor`) と Codex CLI (`codex`) が各社のクラウドへ送る | Explore サブエージェントの prompt、ExitPlanMode の plan 本文、そのターンに編集したパスの `git diff HEAD` | `EXTERNAL_AI_EXPLORE_PARALLEL=0` / `EXTERNAL_AI_PLAN_REVIEW=0` / `EXTERNAL_AI_POST_REVIEW=0` (既定はいずれも有効)。対象 CLI が PATH に無ければ何もしない |
 | `verify-cloud-account` | **あり** (間接) | 起動するクラウド CLI 経由。`gh auth status` はトークンを API で検証するため往復が入り、`aws sts get-caller-identity` は AWS STS を呼ぶ。`gcloud` / `kubectl` / `firebase` の照合はローカル設定の読み取り | CLI に渡すのは固定引数のみ。リポジトリの内容・`accounts.local.json` の中身・Firebase configstore のトークンは送らない | `VERIFY_CLOUD_ACCOUNT_MODE=off` (既定 `enforce`)。`off` は照合自体を行わず CLI も起動しない |
 | `sensitive-files-guardrail` | なし | — | ローカルの読み取りと read-only な `git` 呼び出しのみ | 該当なし |
