@@ -252,8 +252,7 @@ class TestNonCommitReflogLines(CommitFlowTestCase):
     """
 
     def _add_origin(self) -> tuple[str, str]:
-        bare = os.path.join(self._tmp.name, "origin.git")
-        _testutil.git(self._tmp.name, "init", "--bare", "-q", "origin.git")
+        bare = _testutil.init_bare_origin(self._tmp.name)
         self.git("remote", "add", "origin", bare)
         branch = self.git("branch", "--show-current").stdout.strip()
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}")
@@ -1248,7 +1247,7 @@ class TestRevertContinue(CommitFlowTestCase):
             cwd=self.repo,
             capture_output=True,
             text=True,
-            env={**os.environ, "GIT_EDITOR": "true"},
+            env={**os.environ, **_testutil.HERMETIC_GIT_ENV, "GIT_EDITOR": "true"},
         )
 
     def test_resolution_and_continue_in_the_same_window(self):
@@ -1706,6 +1705,7 @@ class TestConflictedMergeCommit(CommitFlowTestCase):
                 cwd=self.repo,
                 capture_output=True,
                 text=True,
+                env={**os.environ, **_testutil.HERMETIC_GIT_ENV},
             )
             self.assertNotEqual(merged.returncode, 0, "前提: merge が conflict する")
             _testutil.write(self.repo, "shared.py", "base\nresolved\n")

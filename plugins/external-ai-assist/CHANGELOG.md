@@ -5,6 +5,91 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.3
+
+**テスト整理 (挙動の変更なし)。テストの tearDown が偶発的に `Directory not empty` で
+落ちる CI の flaky を直した (patch bump)。** hook・`hooks.json`・README の挙動は変わらない。
+
+### テスト: テストが作る git repo で自動 gc / maintenance を止めた
+
+CI (git 2.55) で `post-implementation-review` の suite が、tearDown の tempdir 後始末で
+`OSError: [Errno 39] Directory not empty: '.../repo/.git/objects/pack'` を出して落ちることが
+あった (同じ commit の再実行や、別の Python 版の job では通る偶発的な失敗)。
+
+原因は git の自動 maintenance。`git commit` / `merge` / `fetch` は終わりに
+`git maintenance run --auto --detach` を起動する。git 2.55 は auto maintenance の既定の戦略が
+geometric で (`builtin/gc.c` の `initialize_task_config`)、`.git/objects/17` に loose object が
+2 件以上あると (loose object 数の見積もり = `objects/17` の件数 × 256 が、しきい値 100 を
+256 単位に切り上げた 256 を超えると) 小さな repo でも repack を起動する。
+`--detach` は repack の自動条件を判定する前に背景へ切り離すため、commit が戻った後も背景で
+`.git/objects/pack` に書き続け、その最中に tempdir の後始末が走ると競合する。object の hash
+次第なので偶発的で、git 2.50 は戦略が gc でしきい値 (約 6700 個) も高く、同じ条件でも
+起きない (ローカルの実行だけでは気付けない)。
+
+テストが作る repo と、hook が起動する git の両方に、次の 2 本で止める設定を渡すようにした
+(`HERMETIC_GIT_ENV`)。そもそも自動 maintenance を起動せず、何かが走っても背景へ切り離さない。
+
+- env の `GIT_CONFIG_COUNT` (git 2.31 以上): `maintenance.auto=false` / `maintenance.autoDetach=false` /
+  `gc.auto=0` / `gc.autoDetach=false`。repo 自身の config より優先される。env にしたのは、
+  テストと hook が起動する git (子として起動される `pull` の fetch / merge を含む) に一括で
+  効かせるため
+- `GIT_CONFIG_GLOBAL` が指す `tests/hermetic.gitconfig`: 同じ 4 設定と `receive.autogc=false`。
+  global config として git に読ませるのはこの file だけで、開発者の `~/.gitconfig` を読ませない
+  ことは従来の `/dev/null` と変わらない
+
+例外は `git push` の受け側。ローカルの path へ送るとき、git は `receive-pack` を repo 用の env を
+外して起動するので、env の設定は届かない (実測: env だけでは、origin 側に設定が無いと
+`receive-pack` が自動 maintenance を起動する)。外されない `GIT_CONFIG_GLOBAL` の fixture がそこへ
+届くので、`git init --bare` を直接呼んだ bare repo でも止まる。push 先の bare repo を作る
+`init_bare_origin` は、同じ設定を repo 自身の config にも書く二重の備え。
+
+- `post-implementation-review/tests/_testutil.py`: `HERMETIC_GIT_ENV` に上の 4 設定を追加し、
+  `GIT_CONFIG_GLOBAL` を `/dev/null` から fixture (`tests/hermetic.gitconfig`) に変えた。
+  `git()` ヘルパーも毎回この env を足すので、env を patch していないテストクラスが
+  `init_repo` を呼んでも止まる。push 先の bare repo を作る `init_bare_origin` を足し、
+  `test_commit_flow.py` / `test_stop_flow.py` の 2 箇所をこれに置き換えた。`test_commit_flow.py` で
+  自前の `subprocess` から git を呼ぶ 2 箇所 (`revert` / `merge`) も、クラスの env patch に頼らず
+  env に `HERMETIC_GIT_ENV` を入れた
+- `exitplan-review/tests/_testutil.py` と `tests/hermetic.gitconfig`: 同じ定数と fixture (意図した複製)。
+  この suite の `init_repo` は `git init` だけで commit しないが、repo を作るヘルパーの扱いを揃えた
+- `explore-parallel` / `_common`: git repo を作るヘルパーが無く、対応なし
+- 床: 各 suite の `tests/test_hermetic_env.py`。期待値は `_testutil` とは別のリテラル
+  (定数から導くと、1 項目消えても期待値ごと消えて通るため)
+  - 挙動 (post-implementation-review): `GIT_TRACE2_EVENT` で git の子プロセスの起動を数える。
+    env を patch していない状態の `init_repo` と、`init_bare_origin` を通らずに作った bare repo への
+    `push` (受け側の `receive-pack` まで trace に載ることを前提として確かめる) で、maintenance /
+    gc の起動が 0 件であること。さらに global の fixture を外し、helper が渡す `GIT_CONFIG_COUNT`
+    だけでも 0 件であること (helper が `GIT_CONFIG_COUNT` を渡し損ねても fixture が埋めて通る、を防ぐ)。
+    設定値を問い合わせるだけの床は、`init_repo` の commit だけが env を持たずに起動されても、
+    問い合わせの側が env を足し直すので気付けない。「patch していない」状態は、`GIT_CONFIG_*` を外す
+    だけでなく global / system の config も空にして作る (開発者の `~/.gitconfig` に
+    `maintenance.auto=false` があると、迂回した git も起動せず、床が黙って通る)
+  - 出どころ別 (両 suite): env の 4 設定は 1 項目ずつ `git config --get`、global の fixture は
+    `git config --global --list` の完全一致 (5 設定だけを持つこと。余計な設定が増えると、git を起動する
+    全テストに効く)。2 本は同じ値を持つので、有効値だけを見る床は、片方が欠けてももう片方が埋めて
+    通る (実測: 旧い床は、fixture がある状態で env の設定を欠いても通った)。exitplan-review は
+    `init_repo` が実際に git へ渡した env を、`subprocess.run` を包んで捕まえて見る
+  - bare repo 自身の config (`--local`)、hook が起動する git (`gitscan._git`。global / system を
+    空にして見る)
+
+確認: git 2.50 では自動条件が満たされず元の失敗は再現しないため、(1) 設定が git に見えている
+こと、(2) 条件を強制した repo (`gc.auto=1` と、id が `17` で始まる loose object 2 件) で
+`git commit` が `maintenance` / `gc` を起動しなくなること、(3) `commit` / `merge` / `fetch` /
+`pull` / `push` / worktree / submodule を使う 4 つのテストクラスで、修正前後に起動された
+`maintenance` / `gc` の数が 71 回から 0 回になること (起動元になりうるコマンドの数は同じ) を、
+対照つきで確かめた。(3) で、env だけで止めた中間版は 9 回が残り、すべて `push` の受け側だったので
+上の例外 (global の fixture と `init_bare_origin`) を足した。最終版は post-implementation-review の
+suite 全体 (443 件) を trace 付きで流し、`maintenance` / `gc` などの子の起動が 0 件で、`receive-pack` を
+含むすべての git プロセスが `maintenance.auto=false` を見ていることも確かめた。
+
+床の各テストは、対応する実装を壊した scratch コピーで、`errors=` ではなく assertion の失敗
+(`failures=`) になることを確かめた: `init_repo` の commit が env を持たずに起動される / helper が
+`GIT_CONFIG_COUNT` だけを渡さない / `GIT_CONFIG_GLOBAL` を `/dev/null` に戻す・外す / env の設定を
+1 つ外す・件数を 1 つ少なく数える / fixture の設定を 1 つ外す・余計な設定や重複を足す /
+`init_bare_origin` が設定を書かない。結果が実行者の global config に左右されないことも、HOME が空の
+場合と、`~/.gitconfig` に `maintenance.auto=false` がある場合 (5 設定すべてがある場合を含む) の
+どれでも同じ結果になることで確かめた。
+
 ## 0.12.2
 
 ### Fixed
