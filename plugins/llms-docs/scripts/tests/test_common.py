@@ -940,6 +940,15 @@ class TruncateContentPreservesMarkdownBoundariesTest(unittest.TestCase):
         self.assertNotIn("```", visible_body)  # backed up before the fence entirely
         self.assertIn("chars truncated", result)
 
+    def test_cut_after_an_unconfirmed_indented_opener_backs_up_before_it(self):
+        # A bare run indented 4+ spaces opens a block only once the next
+        # non-blank line confirms it; a cut in between would end the output
+        # on a lone fence line.
+        content = "intro line\n\n        ```\n\n        code line one\n        code line two\n        ```\n\nafter\n"
+        for max_chars in range(content.index("```") + 4, content.rindex("```") + 3):
+            result = _common.truncate_content(content, max_chars, narrow_hint="hint")
+            self.assertEqual(result.split("\n... (")[0], "intro line\n\n", max_chars)
+
     def test_cut_inside_table_backs_up_to_before_the_table(self):
         content = (
             "intro\n"

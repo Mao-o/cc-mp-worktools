@@ -1725,8 +1725,8 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
     even split a single line in half, leaving both the truncated
     construct and the appended notice malformed. This instead walks
     lines from the start, remembering the end of the last line that (a)
-    is itself not a table row and (b) leaves ``FenceTracker`` closed, and
-    cuts there — never later than *max_chars*, but possibly a little
+    is itself not a table row and (b) leaves ``FenceTracker`` closed (and
+    not waiting to confirm an indented opener), and cuts there — never later than *max_chars*, but possibly a little
     earlier if the naive boundary falls mid-fence/mid-table. Preferring
     an earlier cut (over extending forward to finish the block, the way
     ``extract_content`` does for its own boundary) keeps this a true
@@ -1753,7 +1753,7 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
         fence.update(line)
         if line_end > max_chars:
             break
-        if not fence.in_fence and not _is_table_line(line):
+        if not fence.in_fence and fence._pending is None and not _is_table_line(line):
             safe_cut = line_end
         cumulative = line_end
     # safe_cut deliberately stays 0 (rather than falling back to a raw
