@@ -1427,6 +1427,42 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
     return results[:limit]
 
 
+def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
+                           context_lines: int = 2,
+                           max_matches_per_doc: int = 3,
+                           max_snippet_chars: int | None = None,
+                           min_level: int = 2,
+                           limit: int = 5):
+    """Pages to append to ``search`` rows when the drilled candidates fall short.
+
+    *results* are the rows built from the top-N index candidates (each with
+    ``doc_idx`` and ``body_hits``). Returns ``(doc_idx, hits)`` tuples to add,
+    or ``[]`` when no search is needed:
+
+    - some candidate already has a strict-AND hit set (every keyword in one
+      section): nothing to add;
+    - no candidate has any body hit: the full-corpus hits are added as they
+      are (strict first, then ``[partial match]``);
+    - candidates have only ``[partial match]`` hits: only pages with a
+      strict-AND section are added. Other partial pages would only repeat the
+      kind of row the candidates already show, and the existing rows stay.
+
+    Pages already in *results* are never returned twice.
+    """
+    if any(match_rank(r["body_hits"]) == 0 for r in results):
+        return []
+    drilled_any = any(r["body_hits"]["total_matches"] for r in results)
+    already_shown = {r["doc_idx"] for r in results}
+    found = full_corpus_body_search(
+        docs_body_lines, query,
+        context_lines=context_lines, max_matches_per_doc=max_matches_per_doc,
+        max_snippet_chars=max_snippet_chars, min_level=min_level, limit=limit,
+    )
+    return [(idx, hits) for idx, hits in found
+            if idx not in already_shown
+            and (not drilled_any or match_rank(hits) == 0)]
+
+
 # ---------------------------------------------------------------------------
 # Error helpers
 # ---------------------------------------------------------------------------

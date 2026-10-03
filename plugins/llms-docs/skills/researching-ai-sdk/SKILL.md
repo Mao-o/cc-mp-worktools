@@ -94,6 +94,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search "<キーワード
 スペース区切りで複数キーワード（AND）。未取得なら自動でネットワークから取得する。
 title / description / tags / 見出しでスコアリングして上位 5 件（`--top-n N` で変更可）を選び、
 各候補ドキュメントの body を keyword 検索して heading_path + スニペットを返す。
+上位 N 件のどれにも全キーワードが 1 セクションに揃う本文が無いときは、全文検索で全キーワードの揃うページを探して `[body-only]` として追記する。
 結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
 
 ### Step 2: 必要なセクションの本文を取得

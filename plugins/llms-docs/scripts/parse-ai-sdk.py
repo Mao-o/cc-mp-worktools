@@ -48,8 +48,9 @@ from _common import (
     die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
+    full_corpus_extra_hits,
     load_lines,
+    match_rank,
     next_hint,
     retry_for_page_ref,
     search_content_in_body,
@@ -185,8 +186,28 @@ def _looks_like_frontmatter_start(lines: list[str], pos: int) -> bool:
 # Frontmatter field extraction
 # ---------------------------------------------------------------------------
 
+def _unquote(value: str) -> str:
+    """Strip one pair of YAML quotes and resolve the escapes inside them.
+
+    Double-quoted: ``\\"`` and ``\\\\`` are resolved. Single-quoted: ``''`` is
+    one quote. Only these are handled, which is what the corpus uses. An
+    unquoted value keeps the old behaviour (stray end quotes are stripped).
+    """
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return re.sub(r'\\(["\\])', r"\1", value[1:-1])
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value.strip("'\"")
+
+
 def parse_frontmatter(fm_lines: list[str]) -> dict:
-    """Extract title, description, and tags from frontmatter lines."""
+    """Extract title, description, and tags from frontmatter lines.
+
+    ``tags`` is read from the inline form (``[a, b]`` or ``a, b``) and from the
+    block form (``tags:`` followed by ``- a`` lines), which is the form the
+    published corpus uses.
+    """
     result: dict = {"title": "", "description": "", "tags": []}
     current_key = None
     current_value_lines: list[str] = []
@@ -194,14 +215,19 @@ def parse_frontmatter(fm_lines: list[str]) -> dict:
     def _flush():
         nonlocal current_key, current_value_lines
         if current_key and current_value_lines:
-            value = " ".join(current_value_lines).strip()
             if current_key == "tags":
-                # Parse [tag1, tag2, ...] or bare comma-separated
-                m = re.match(r"\[(.+)\]", value)
-                inner = m.group(1) if m else value
-                result["tags"] = [t.strip().strip("'\"") for t in inner.split(",") if t.strip()]
+                if all(v.startswith("-") for v in current_value_lines):
+                    items = [_unquote(v[1:]) for v in current_value_lines]
+                    result["tags"] = [t for t in items if t]
+                else:
+                    value = " ".join(current_value_lines).strip()
+                    # Parse [tag1, tag2, ...] or bare comma-separated
+                    m = re.match(r"\[(.+)\]", value)
+                    inner = m.group(1) if m else value
+                    result["tags"] = [t.strip().strip("'\"") for t in inner.split(",") if t.strip()]
             else:
-                result[current_key] = value.strip("'\"")
+                value = " ".join(current_value_lines).strip()
+                result[current_key] = _unquote(value)
         current_key = None
         current_value_lines = []
 
@@ -497,15 +523,10 @@ def cmd_search_content(args):
     print()
 
     total_hits = 0
-    docs_matched = 0
-    printed_docs = 0
-    shown = []
+    collected = []
 
     for idx in target_docs:
         doc = docs[idx]
-        fm = parse_frontmatter(doc["frontmatter_lines"])
-        title = fm["title"] or "(untitled)"
-
         hits = search_content_in_body(
             doc["body_lines"], args.query,
             context_lines=args.context,
@@ -518,10 +539,19 @@ def cmd_search_content(args):
             continue
 
         total_hits += hits["total_matches"]
-        docs_matched += 1
+        collected.append((idx, hits))
 
-        if printed_docs >= args.limit:
-            continue
+    # Strict-AND pages before "[partial match]" pages, then most hits, then
+    # doc order: cut by --limit only after ordering, so low-numbered partial
+    # pages cannot push out a page that has every keyword in one section.
+    collected.sort(key=lambda t: (match_rank(t[1]), -t[1]["total_matches"], t[0]))
+    docs_matched = len(collected)
+    printed_docs = 0
+    shown = []
+
+    for idx, hits in collected[: args.limit]:
+        fm = parse_frontmatter(docs[idx]["frontmatter_lines"])
+        title = fm["title"] or "(untitled)"
         printed_docs += 1
         shown.append((idx, hits, ()))
 
@@ -609,25 +639,25 @@ def cmd_search(args):
     # that legitimately ranked on title/description/tags keeps its row
     # (shown as "index match only") even when its body has no hits — the
     # fallback only adds docs the index ranking missed entirely.
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        already_shown = {r["doc_idx"] for r in results}
-        fallback = full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query,
-            context_lines=args.context, max_matches_per_doc=args.max_hits,
-            max_snippet_chars=args.max_snippet_chars, min_level=1,
-            limit=args.top_n,
-        )
-        for idx, hits in fallback:
-            if idx in already_shown:
-                continue
-            results.append({
-                "doc_idx": idx,
-                "title": fms[idx]["title"] or "(untitled)",
-                "tags": fms[idx]["tags"],
-                "index_score": None,
-                "body_hits": hits,
-                "body_only": True,
-            })
+    #
+    # The search also runs when the candidates have body hits but none has
+    # every keyword in one section (all "[partial match]"): a page that does
+    # is then appended (full_corpus_extra_hits).
+    fallback = full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query,
+        context_lines=args.context, max_matches_per_doc=args.max_hits,
+        max_snippet_chars=args.max_snippet_chars, min_level=1,
+        limit=args.top_n,
+    )
+    for idx, hits in fallback:
+        results.append({
+            "doc_idx": idx,
+            "title": fms[idx]["title"] or "(untitled)",
+            "tags": fms[idx]["tags"],
+            "index_score": None,
+            "body_hits": hits,
+            "body_only": True,
+        })
 
     if not results:
         print("No matching documents found.")

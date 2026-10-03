@@ -2,6 +2,44 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.31.0] - 2026-10-04
+
+### 修正: `search` が、上位 N 件がすべて部分一致のときも全キーワードの揃うページを出す
+
+`search` は index の上位 N 件 (既定 `--top-n 5`) の本文を掘る。上位 N 件がすべて `[partial match]`
+(キーワードの一部しか本文に無い) のとき、全キーワードが同じセクションに揃うページが corpus にあっても出なかった。
+全文検索への切り替えが「どの候補にも本文ヒットが 0 件」のときしか走らなかったため。AI SDK の
+`search "stopWhen stepCountIs"` は Loop Control / Tool Calling の部分一致だけを返し、答えの
+「Migrate AI SDK 6.x to 7.0」(`stepCountIs` -> `isStepCount` の改名) が一度も出なかった。
+`generateObject schema` も同じで、廃止を説明する移行ガイドが出なかった。
+
+- 候補のどれにも全キーワードが揃うセクションが無いときも全文検索を回し、全キーワードの揃うページを
+  `[body-only]` で追記する。既存の行は残り、並びは従来の共通キー (全キーワードが揃う → 部分一致 → …) のまま
+- 候補が部分一致だけのときに足すのは、全キーワードが揃うページだけ。他の部分一致のページは、候補が既に
+  見せている種類の行の繰り返しなので足さない (候補に本文ヒットが 1 件も無いときの従来の動きは変えない)
+- `parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-llms-txt.py` の 3 本で `_common.py` の
+  `full_corpus_extra_hits` を共有する。Firebase は本文を取得しない設計なので対象外
+- 追記したページにも、そのまま打てる `Next:` が出る (往復テストで 1 行ずつ実行して確かめている)
+
+### 修正: AI SDK と汎用 loader の `search-content` を、全キーワードの揃い方で並べてから `--limit` で切る
+
+AI SDK と `parse-llms-txt.py` の `search-content` は doc 番号順に出して `--limit` で切っていたため、
+番号の若い部分一致のページが、全キーワードの揃うページを押し出した (`generateObject schema` は 10 件すべて
+部分一致で、`Next:` も的外れ)。Claude Code docs の `search-content` と同じ並び (全キーワードが揃う →
+部分一致 → 本文ヒット数 → doc 番号) に揃えてから切る。件数の表示 (`N hits across M documents`) は
+従来どおり全体の数を数える。
+
+### 修正: AI SDK の frontmatter で、ブロック形式の `tags` とエスケープした引用符の `title` を読む
+
+実 corpus の `tags:` (87 件) はすべて `tags:` の次の行から `  - タグ` を並べるブロック形式で、
+`tags: - api servers - streaming` という 1 本の文字列になっていた。`title: "…\"…\""` も
+エスケープを解かず、`sections 'React error "Maximum update depth exceeded"'` が見つからなかった。
+
+- ブロック形式のリストと、二重引用符の中の `\"` / `\\`、単一引用符の中の `''` を解く (corpus に出る形だけ。
+  YAML 全体は実装しない)。1 行形式 `[a, b]` は従来どおり
+- `references/llms-txt-structure.md` の frontmatter の記述を実態 (ブロック形式、エスケープ) に合わせた
+- 実 corpus のコピーで、`tags` が文字列化された doc は 0 件、エスケープした title の doc (4 件) は実際の title で引ける
+
 ## [0.30.1] - 2026-10-04
 
 ### 修正: `search` 以外の `parse-claude-docs.py` が `--source both` を受けたとき、次に打てるコマンドを出す
@@ -422,8 +460,9 @@ H1 / frontmatter によるページ分割が誤り続けていた。
 - Claude Code docs の `search-content` (ページを本文ヒット数で並べて `--limit` で切る唯一の script) も
   同じ順に揃えた
 - 実 corpus での比較: Claude Code docs 8 / AI SDK 6 の計 14 クエリのうち 7 件で上位 5 件の順位が
-  変わった。`argument-hint frontmatter` で Skills のページが 1 位に、`stopWhen stepCountIs` で
-  Loop Control が 2 位に上がるなど、いずれも全キーワードが揃うページが上がる変化だった
+  変わった。`argument-hint frontmatter` で Skills のページが 1 位に上がるなど、いずれも全キーワードが
+  揃うページが上がる変化だった (当時は `stopWhen stepCountIs` で Loop Control が 2 位に上がる例も挙げて
+  いたが、現在の corpus では成り立たない。0.31.0 で `search` が全キーワードのページを追記するようになった)
 
 ## [0.25.0] - 2026-09-26
 

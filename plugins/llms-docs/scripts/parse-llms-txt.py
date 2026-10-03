@@ -56,8 +56,9 @@ from _common import (  # noqa: E402
     die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
+    full_corpus_extra_hits,
     load_lines,
+    match_rank,
     next_hint,
     parse_llms_index,
     retry_for_page_ref,
@@ -915,17 +916,22 @@ def cmd_search_content(args):
     print(f'Search-content results for "{args.query}" (source: {profile["name"]}, file: {path})')
     print("=" * 60)
     print()
-    total = matched = printed = 0
-    shown = []
+    total = 0
+    collected = []
     for idx in targets:
-        d = docs[idx]
-        hits = _body_hits(args, d)
+        hits = _body_hits(args, docs[idx])
         if hits["total_matches"] == 0:
             continue
         total += hits["total_matches"]
-        matched += 1
-        if printed >= args.limit:
-            continue
+        collected.append((idx, hits))
+    # Strict-AND pages before "[partial match]" pages, then most hits, then
+    # doc order; --limit cuts only after ordering (same key as `search`).
+    collected.sort(key=lambda t: (match_rank(t[1]), -t[1]["total_matches"], t[0]))
+    matched = len(collected)
+    printed = 0
+    shown = []
+    for idx, hits in collected[: args.limit]:
+        d = docs[idx]
         printed += 1
         shown.append((idx, hits, ()))
         print_page_hits(f"[{idx}] {d['title'] or '(untitled)'}", hits, noun="document", extra_lines=_url_line(d))
@@ -959,18 +965,17 @@ def cmd_search(args):
         {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False}
         for score, idx, _entry in scored
     ]
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        shown = {r["doc_idx"] for r in results}
-        # full_corpus_body_search takes one min_level for the whole corpus;
-        # every page of a profile shares its split, so the first page's is used.
-        level = (docs[0]["min_level"] or 2) if docs else 2
-        for idx, hits in full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query, context_lines=args.context,
-            max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
-            min_level=level, limit=args.top_n,
-        ):
-            if idx not in shown:
-                results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True})
+    # The full-corpus search also runs when the candidates have body hits but
+    # none has every keyword in one section (full_corpus_extra_hits).
+    # It takes one min_level for the whole corpus; every page of a profile
+    # shares its split, so the first page's is used.
+    level = (docs[0]["min_level"] or 2) if docs else 2
+    for idx, hits in full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
+        max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
+        min_level=level, limit=args.top_n,
+    ):
+        results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True})
     if not results:
         print("No matching documents found.")
         print()

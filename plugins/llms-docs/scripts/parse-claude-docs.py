@@ -41,7 +41,7 @@ from _common import (
     die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
+    full_corpus_extra_hits,
     is_low_priority,
     load_lines,
     match_rank,
@@ -987,27 +987,27 @@ def _search_one_source(args, source_key: str) -> list[dict]:
     # a page that legitimately ranked on title/description keeps its row
     # (shown as "index match only") even when its body has no hits — the
     # fallback only adds pages the index ranking missed entirely.
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        already_shown = {r["doc_idx"] for r in results}
-        fallback = full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query,
-            context_lines=args.context, max_matches_per_doc=args.max_hits,
-            max_snippet_chars=args.max_snippet_chars, min_level=2,
-            limit=args.top_n,
-        )
-        for idx, hits in fallback:
-            if idx in already_shown:
-                continue
-            results.append({
-                "source_key": source_key,
-                "source_label": src["label"],
-                "doc_idx": idx,
-                "title": docs[idx]["title"],
-                "url": docs[idx]["source_url"],
-                "index_score": None,
-                "body_hits": hits,
-                "body_only": True,
-            })
+    #
+    # The search also runs when the candidates have body hits but none has
+    # every keyword in one section (all "[partial match]"): a page that does
+    # is then appended (full_corpus_extra_hits).
+    fallback = full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query,
+        context_lines=args.context, max_matches_per_doc=args.max_hits,
+        max_snippet_chars=args.max_snippet_chars, min_level=2,
+        limit=args.top_n,
+    )
+    for idx, hits in fallback:
+        results.append({
+            "source_key": source_key,
+            "source_label": src["label"],
+            "doc_idx": idx,
+            "title": docs[idx]["title"],
+            "url": docs[idx]["source_url"],
+            "index_score": None,
+            "body_hits": hits,
+            "body_only": True,
+        })
 
     # Phase 4: rank with the shared key (changelog bucket, body hits, index
     # score, doc_idx) — identical to ai-sdk / firebase.
