@@ -2,6 +2,37 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.30.0] - 2026-10-04
+
+### 追加: presets に 7 サイト (Agent Plugins / OpenAI Plugins / OpenAI API docs / ACP / Cline / Factory / Devin)
+
+利用記録 (2026-08-27〜10-03) で、`researching-library-docs` を使ったあとに WebFetch へ戻った先を見ると、
+Cursor / Codex の plugin docs が足りていなかった。その系統から足した。
+
+| source 名 | サイト | 形状 | ページ / URL あり |
+|---|---|---|---|
+| `agent-plugins` | `agent-plugins.org/llms.txt` (`llms-full.txt` は無く、`llms.txt` が全文) | frontmatter | 13 / 0 |
+| `openai-plugins` | `developers.openai.com/plugins/llms-full.txt` | H1 + `skip_empty` + `index_url` | 31 / 30 |
+| `openai-api-docs` | `developers.openai.com/api/docs/llms-full.txt` | 同上 | 232 / 220 |
+| `acp` | Agent Client Protocol | H1 + `Source:` 行 | 126 / 126 |
+| `cline` | Cline | 同上 | 113 / 113 |
+| `factory` | Factory (Droid) | H1 + `index_url` | 104 / 104 |
+| `devin` | Devin | H1 + `Source:` 行 | 592 / 592 |
+
+ページ数は、取得した `llms-full.txt` を `--file` で流し、独立に数えた値 (`Source:` 行の数、`title:` 行の数、
+`llms.txt` のタイトル一致) と一致することを確かめた。7 つとも `scripts/check-preset-urls.py` で 200。
+AWS Bedrock は見送った (`llms-full.txt` が無く、ページごとに別ファイルで公開しているため、この loader の
+形状では読めない。`docs.aws.amazon.com/llms-full.txt` は案内ページへのリンク一覧で本文が無い)。
+skill の description と Step 0 の表、README の表と取得先ホストの一覧 (14 → 20 ホスト) を合わせた。
+description + when_to_use の長さを保つため、description の Cloudflare 製品の列挙を「製品別」にまとめ、
+重複していた trigger 語 `Model Context Protocol` を除いた (製品名は trigger に残る)。
+
+### テスト: README の取得先ホスト一覧と presets.json の一致 (挙動の変更なし)
+
+README の取得先ホストの一覧は手で書いており、preset の追加・移転のたびにずれる恐れがあった。一覧を
+コードブロックにして (1 行 1 ホスト)、`presets.json` の `url` / `index_url` のホストの集合と一致することを
+suite で確かめる (ネットワーク不要。一覧からの欠落も、一覧だけにあるホストも検出する)。
+
 ## [0.29.1] - 2026-10-04
 
 ### 変更: README に同梱 presets の取得先ホストの一覧を置く (挙動の変更なし)

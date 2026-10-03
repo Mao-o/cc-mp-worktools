@@ -558,10 +558,15 @@ class PresetsTest(unittest.TestCase):
             raw = json.load(f)["sources"]
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         self.assertEqual(set(presets), set(raw))
+        # agent-plugins.org has no llms-full.txt (404): its llms.txt is the
+        # whole text (frontmatter per page, no links), so it is the one preset
+        # that points at an llms.txt
+        whole_text_llms_txt = {"agent-plugins"}
         for name, p in presets.items():
             with self.subTest(name):
                 self.assertTrue(p["url"].startswith("https://"), p["url"])
-                self.assertTrue(p["url"].endswith("/llms-full.txt"), p["url"])
+                tail = "/llms.txt" if name in whole_text_llms_txt else "/llms-full.txt"
+                self.assertTrue(p["url"].endswith(tail), p["url"])
                 self.assertTrue(p["description"])
 
     def test_a_preset_index_url_is_the_llms_txt_next_to_its_llms_full_txt(self):
@@ -610,6 +615,29 @@ class PresetsTest(unittest.TestCase):
         presets = set(generic._read_sources_file(generic.PRESETS_FILE))
         self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
         self.assertEqual(named - presets, set(), "skill names a source that is not a preset")
+
+    def test_readme_host_list_matches_the_presets(self):
+        # The README lists every host the presets fetch from (one per line in
+        # a text block); the root README's Privacy table points at it, so a
+        # preset added or moved without the list misleads whoever decides the
+        # network egress.
+        from urllib.parse import urlsplit
+        readme = Path(generic.PRESETS_FILE).parents[1] / "README.md"
+        text = readme.read_text(encoding="utf-8")
+        m = re.search(r"\*\*取得先のホスト\*\*.*?```text\n(.*?)```", text, re.S)
+        self.assertIsNotNone(m, "README lost the machine-readable host list")
+        listed = [line.strip() for line in m.group(1).splitlines() if line.strip()]
+        self.assertEqual(len(listed), len(set(listed)), "a host is listed twice")
+        with open(generic.PRESETS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)["sources"]
+        fetched = set()
+        for p in raw.values():
+            for key in ("url", "index_url"):
+                if p.get(key):
+                    fetched.add(urlsplit(p[key]).hostname)
+        self.assertTrue(fetched)
+        self.assertEqual(fetched - set(listed), set(), "hosts the presets fetch from but the README omits")
+        self.assertEqual(set(listed) - fetched, set(), "hosts the README lists but no preset fetches from")
 
     def test_skill_description_stays_under_the_listing_cap(self):
         # Claude Code truncates description + when_to_use at 1,536 characters

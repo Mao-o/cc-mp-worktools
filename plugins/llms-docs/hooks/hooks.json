@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf 'llms-docs active: Claude Code (Skill: llms-docs:researching-claude-docs) / AI SDK (Skill: llms-docs:researching-ai-sdk) / Firebase (Skill: llms-docs:researching-firebase) / Next.js・Vite・Vitest・Drizzle・Zod・Hono・Bun・Vercel・Render・MCP・Codex・Ollama・Cloudflare 製品 (Skill: llms-docs:researching-library-docs) の仕様確認は WebFetch ではなく Skill ツールで起動'",
+            "command": "printf 'llms-docs active: Claude Code (Skill: llms-docs:researching-claude-docs) / AI SDK (Skill: llms-docs:researching-ai-sdk) / Firebase (Skill: llms-docs:researching-firebase) / Next.js・Vite・Vitest・Drizzle・Zod・Hono・Bun・Vercel・Render・MCP・Codex・Ollama・Agent Plugins・OpenAI Plugins/API・ACP・Cline・Factory・Devin・Cloudflare 製品 (Skill: llms-docs:researching-library-docs) の仕様確認は WebFetch ではなく Skill ツールで起動'",
             "timeout": 5
           }
         ]
