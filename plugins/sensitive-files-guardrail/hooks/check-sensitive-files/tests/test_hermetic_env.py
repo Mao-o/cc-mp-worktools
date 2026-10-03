@@ -1,25 +1,30 @@
 """テストが作る git repo と、hook が起動する git で、自動 gc / maintenance が止まっていること。
 
 背景は `_testutil.NO_BACKGROUND_GIT_SETTINGS` のコメント。`git commit` が背景へ切り離した repack が
-`.git/objects/pack` に書いている間に tempdir の後始末が走ると、後始末が `Directory not empty` で
-落ちる。この flaky は直接は検出できない (object の hash 次第で偶発的) ので、原因の側に床を置く:
+`.git/objects/pack` に書いている間に `TemporaryDirectory` の後始末 (この file の床が使う) が走ると、
+`Directory not empty` で落ちる。repo を作るテストの後始末は `rmtree(ignore_errors=True)` なので
+落ちないが、tmp に残骸が残り、背景の git がテストより長く生きる。どちらも直接は検出できない
+(object の hash 次第で偶発的) ので、原因の側に床を置く:
 
 - **挙動**: git の子プロセスの起動を `GIT_TRACE2_EVENT` で数え、maintenance / gc の起動が 0 件で
   あること。「問い合わせた時点の設定値」ではなく**実際に起動したか**を見るので、`init_repo` の
   中の git だけが env を持たずに起動されても、push の受け側 (`receive-pack`) に env が届かなくても
   気付ける。前提として、commit / receive-pack が trace に載っていること (空の床にしない) と、上書き
-  した env が helper の git に届いていること (spy) も確かめる
+  した env が helper の git に届いていること (spy) も確かめる。陽性対照として、止める設定が無い
+  commit では起動が trace に見えることも確かめる (見えない git の版では「0 件」は何も見ていない)
 - **設定の出どころ別** (`_HermeticConfigChecks`): 止める経路は env の `GIT_CONFIG_COUNT` と global の
   fixture と system の無効化 (`GIT_CONFIG_NOSYSTEM`) で、有効値だけを見ると 1 本が欠けても残りが
   埋めて通ってしまう。そこで 1 本ずつ別の検査で見る。起動の仕方 (定数だけ / helper / hook の git) ごとに
   同じ 3 本を流すので、env を当てる各点 (定数・helper・基底クラス・hook の起動) で、`COUNT` だけ・
-  `NOSYSTEM` 抜き・`GLOBAL` 抜きのどれが起きても、どれかが assertion で落ちる
+  `NOSYSTEM` 抜き・`GLOBAL` 抜きのどれが起きても、どれかが assertion で落ちる。外側の env には
+  止めない側の値を置き、当てる側がそれに勝つことも見る
   - `GIT_CONFIG_COUNT`: repo 自身の config に反対の値を置き、git が見る値が止める側であること
     (env は repo 自身の config より優先される。fixture は負ける)
   - `GIT_CONFIG_GLOBAL`: `git config --global --list` が fixture の 5 設定と完全一致すること
   - `GIT_CONFIG_NOSYSTEM`: system の config の代わりに置いた目印が読まれないこと
 - **直接の起動**: test module が `subprocess` で git を直接起動していないこと。repo を作る git が
-  helper を迂回すると、上の床は helper しか見ないので気付けない
+  helper を迂回すると、上の床は helper しか見ないので気付けない。走査した module に repo を作る
+  module が含まれること (対象 0 件で黙って通らない) と、入れ子の呼び出しも見ることも確かめる
 
 「patch していない」状態は `isolate_git_config` で作る。`GIT_CONFIG_*` を外し、global を空にし、
 system の config を目印の file に向けるが、**`GIT_CONFIG_NOSYSTEM` は床の側で立てない**。床の側で
@@ -174,6 +179,37 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
         return spawned_maintenance(events)
 
+    def test_the_trace_sees_maintenance_when_nothing_stops_it(self):
+        """陽性対照: 止める設定が無い commit では、maintenance の起動が trace に見えること。
+
+        これが成り立たない環境 (git の版で起動の形が変わった等) では、この file の「0 件」は何も
+        見ていない。後始末と重ならないよう、背景へ切り離さない設定 (autoDetach=false) だけは渡す。
+        """
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            os.environ.update(
+                {
+                    "GIT_CONFIG_COUNT": "2",
+                    "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+                    "GIT_CONFIG_VALUE_0": "false",
+                    "GIT_CONFIG_KEY_1": "gc.autoDetach",
+                    "GIT_CONFIG_VALUE_1": "false",
+                }
+            )
+            trace = os.path.join(tmp, "trace2.jsonl")
+            os.environ["GIT_TRACE2_EVENT"] = trace
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            for args in (
+                ["init", "-q"],
+                ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                 "commit", "--allow-empty", "-qm", "x"],
+            ):
+                subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+            events = trace_events(trace)
+        self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
+        self.assertNotEqual(spawned_maintenance(events), [])
+
     def test_repo_made_without_any_env_patch(self):
         self.assertEqual(self._spawned_by_helpers(with_fixture=True), [])
 
@@ -225,6 +261,11 @@ class _HermeticConfigChecks:
     (`isolate_git_config`)、`super().setUp()` で基底クラスがあれば env を当てさせる。床が先に global /
     system を空にしたり `GIT_CONFIG_NOSYSTEM` を立てたりすると、基底クラスの当て損ねを床が埋めて
     しまうので、床は外すだけで足さない。
+
+    その間に、外側の env として止めない側の値 (`GIT_CONFIG_GLOBAL` = 空の file、`GIT_CONFIG_COUNT` で
+    `maintenance.auto=true`) を置く。当てる側 (定数 / helper / 基底クラス) は外側の env に勝つこと。
+    外側の env が空のままだと、helper が外側の env を後から混ぜる向き
+    (`{**HERMETIC_GIT_ENV, **os.environ}`) に変わっても、混ぜる値が無いので気付けない。
     """
 
     def query(self, args: list[str]) -> tuple[int, str]:
@@ -239,6 +280,14 @@ class _HermeticConfigChecks:
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
         isolate_git_config(self.tmp)
+        os.environ.update(
+            {
+                "GIT_CONFIG_GLOBAL": empty_file(self.tmp),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "maintenance.auto",
+                "GIT_CONFIG_VALUE_0": "true",
+            }
+        )
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
@@ -334,10 +383,13 @@ _SUBPROCESS_LAUNCHERS = frozenset({"run", "Popen", "call", "check_call", "check_
 
 
 def launches_git_literally(node: ast.AST) -> bool:
-    """`subprocess.run(["git", ...])` のように、argv を literal の list / tuple で書いた git の起動か。
+    """`subprocess.run(["git", ...])` のように、argv の先頭を literal の `"git"` で書いた git の起動か。
 
-    見つけるのは、`subprocess` を名前で参照し、argv の先頭を literal の `"git"` で書いた形だけ。
-    argv を変数に入れて渡す形や `from subprocess import run` は見つけられない (目印を足すのは
+    見つけるのは、`subprocess` を名前で参照した呼び出しのうち、argv (位置引数の先頭か `args=`) が
+    次のどれかの形だけ: 先頭が literal の `"git"` の list / tuple、その list / tuple を左辺に置いた
+    連結 (`["git"] + rest`)、先頭の語が `git` の文字列 (`shell=True` で渡す `"git commit ..."`)。
+    argv を変数に入れて渡す形、2 段以上の連結 (`["git"] + a + b`)、f-string、`from subprocess import run`
+    のような別名や `subprocess.getoutput` / `os.system` での起動は見つけられない (目印を足すのは
     その形が出てきてから)。
     """
     if not isinstance(node, ast.Call):
@@ -347,10 +399,21 @@ def launches_git_literally(node: ast.AST) -> bool:
         return False
     if not (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
         return False
-    if not node.args or not isinstance(node.args[0], (ast.List, ast.Tuple)) or not node.args[0].elts:
+    argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
+    if isinstance(argv, ast.BinOp) and isinstance(argv.op, ast.Add):
+        argv = argv.left  # ["git"] + rest
+    if isinstance(argv, ast.Constant) and isinstance(argv.value, str):
+        return argv.value.split()[:1] == ["git"]  # "git commit ..." (shell=True)
+    if not isinstance(argv, (ast.List, ast.Tuple)) or not argv.elts:
         return False
-    first = node.args[0].elts[0]
+    first = argv.elts[0]
     return isinstance(first, ast.Constant) and first.value == "git"
+
+
+def direct_git_launches(source: str, filename: str = "<source>") -> list[int]:
+    """`source` の中で git を直接起動している行。メソッドの中のような入れ子の呼び出しも見る。"""
+    tree = ast.parse(source, filename=filename)
+    return [n.lineno for n in ast.walk(tree) if launches_git_literally(n)]
 
 
 class TestNoTestLaunchesGitOutsideTheHelper(unittest.TestCase):
@@ -363,12 +426,18 @@ class TestNoTestLaunchesGitOutsideTheHelper(unittest.TestCase):
 
     def test_no_test_module_runs_git_directly(self):
         tests_dir = Path(__file__).resolve().parent
-        offenders = []
+        scanned, offenders = [], []
         for path in sorted(tests_dir.glob("test_*.py")):
             if path.name == Path(__file__).name:
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            offenders += [f"{path.name}:{n.lineno}" for n in ast.walk(tree) if launches_git_literally(n)]
+            scanned.append(path.name)
+            source = path.read_text(encoding="utf-8")
+            offenders += [f"{path.name}:{line}" for line in direct_git_launches(source, str(path))]
+        self.assertLessEqual(
+            {"test_checker.py", "test_main.py"},
+            set(scanned),
+            f"前提: repo を作る module を走査している (対象 0 件で黙って通らない): {scanned}",
+        )
         self.assertEqual(
             offenders, [], "git の直接の起動は `_testutil.git` に置き換える (env を足すため)"
         )
@@ -379,10 +448,15 @@ class TestNoTestLaunchesGitOutsideTheHelper(unittest.TestCase):
         def call(source: str) -> ast.AST:
             return ast.parse(source).body[0].value
 
+        nested = "class T:\n    def f(self):\n        subprocess.run(['git', 'init'], cwd=x)\n"
+        self.assertEqual(direct_git_launches(nested), [3], "module の走査が入れ子の呼び出しを見る")
         for source in (
             'subprocess.run(["git", "init"], cwd=x)',
             'subprocess.check_call(("git", "init"))',
             'subprocess.Popen(["git", *args], cwd=x)',
+            'subprocess.run(args=["git", "init"], cwd=x)',
+            'subprocess.run(["git"] + rest, cwd=x)',
+            'subprocess.run("git commit -qm x", shell=True, cwd=x)',
         ):
             with self.subTest(source=source):
                 self.assertTrue(launches_git_literally(call(source)))
@@ -391,6 +465,7 @@ class TestNoTestLaunchesGitOutsideTheHelper(unittest.TestCase):
             "subprocess.run(cmd)",
             "real_run(['git', 'init'])",
             "_git(['init'], cwd)",
+            "subprocess.run('gitk', shell=True)",
         ):
             with self.subTest(source=source):
                 self.assertFalse(launches_git_literally(call(source)))

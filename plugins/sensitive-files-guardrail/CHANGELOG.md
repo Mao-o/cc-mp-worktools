@@ -25,10 +25,10 @@ commit 52113a1 で完了)。
 
 ## 0.35.1
 
-**テスト整理 (挙動の変更なし)。テストの後始末が偶発的に `Directory not empty` で落ちうる CI の
-flaky を、予防的に塞いだ (patch bump)。** hook・`hooks.json`・README の挙動は変わらない。この
-suite での失敗はまだ観測していない。テスト件数: redact 1,534 → **1,545** / check 187 → **201**
-(増えた 25 件は床のテストだけ)。
+**テスト整理 (挙動の変更なし)。テストの git が背景へ切り離す自動 maintenance を止め、テストが読む
+git の設定を tests 配下の fixture に固定した (patch bump)。** hook・`hooks.json`・README の挙動は
+変わらない。テスト件数: redact 1,534 → **1,546** / check 187 → **202** (増えた 27 件は床のテスト
+だけ)。
 
 ### テスト: テストが作る git repo で自動 gc / maintenance を止めた
 
@@ -37,11 +37,15 @@ check-sensitive-files が commit 82 回に対して起動 82 回、redact-sensit
 起動 1 回だった。git 2.50 で `GIT_TRACE2_EVENT` により、空の HOME で実測した)。CI の git 2.55 は
 auto maintenance の既定の戦略が geometric で、小さな repo でも `.git/objects/17` に loose object が
 2 件あるだけで repack を始めうる。背景へ切り離された repack が `.git/objects/pack` に書いている最中に
-tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で落ちる (object の hash 次第の
-偶発的な失敗。git 2.50 は同じ条件でも起きないので、ローカルの実行だけでは気付けない)。
+`TemporaryDirectory` の後始末が走ると、`OSError: [Errno 39] Directory not empty` で落ちる (CI の
+flaky。object の hash 次第)。この suite で repo を作るテストは後始末が `rmtree(ignore_errors=True)`
+なので落ちず、tmp に残骸が残り、背景の git がテストより長く生きるだけだった。`TemporaryDirectory`
+を使うのは今回足した床で、止めておかないと落ちうる。git 2.50 は戦略が gc でしきい値が高く、同じ
+条件でも起きないので、gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない。
 
-テストが作る repo と、hook が起動する git (`checker._run_git_raw`) の両方に、次の 3 つを渡すように
-した (`_testutil.HERMETIC_GIT_ENV`)。そもそも自動 maintenance を起動せず、何かが走っても背景へ
+テストが作る repo と、hook が起動する git (`checker._run_git_raw`。redact-sensitive-reads の suite では
+`test_e2e` が in-process で動かす Stop hook の git) の両方に、次の 3 つを渡すようにした
+(`_testutil.HERMETIC_GIT_ENV`)。そもそも自動 maintenance を起動せず、何かが走っても背景へ
 切り離さない。
 
 - env の `GIT_CONFIG_COUNT` (git 2.31 以上): `maintenance.auto=false` / `maintenance.autoDetach=false` /
@@ -51,8 +55,14 @@ tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で
   この file だけが届く。両 suite のテスト本体は push しない (床だけが push する)
 - `GIT_CONFIG_NOSYSTEM=1`: system の config も読ませない。修正前のテストは system の config を読み、
   HOME を差し替えていなかった 2 クラス (`TestGitOutputIsDecodedAsUtf8` /
-  `TestMainStdinNonUtf8Locale`) では開発者の `~/.gitconfig` も読んでいた。テストの環境はここで
-  hermetic になる (suite は両方とも修正後も green で、結果に効く設定は見当たらなかった)
+  `TestMainStdinNonUtf8Locale`) では開発者の `~/.gitconfig` も読んでいた
+
+git が global の config と別に読む既定の除外 file (`$XDG_CONFIG_HOME/git/ignore`、未設定なら
+`~/.config/git/ignore`) は、`GIT_CONFIG_GLOBAL` では外れない。hook の `ls-files --others
+--exclude-standard` がこの file を読み、そこに `.env` があると未追跡の `.env` が見えなくなるので、
+上の 2 クラスも HOME / XDG_CONFIG_HOME を tmp に差し替えた (`TestMainStdinNonUtf8Locale` は、hook を
+起動する子プロセスの env に XDG_CONFIG_HOME を足した。HOME は元から差し替えていた)。修正前からの
+欠陥。
 
 変更したファイル (tests と docs だけ。製品コードは変えていない):
 
@@ -63,14 +73,16 @@ tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で
   - `tests/test_checker.py` / `test_main.py` / `test_exclude_path_scope.py` /
     `test_worktree_path_rule_root.py`: 4 ファイルに重複していた `_git` と 3 ファイルの `_init_repo` を
     helper に置き換え、submodule を作る `subprocess.run(["git", ...])` の直接起動 (11 箇所) も `git()`
-    に寄せた。repo を作るテストクラスの基底 6 つを `HermeticGitTestCase` にした
+    に寄せた。repo を作るテストクラスの基底 6 つを `HermeticGitTestCase` にした。上の 2 クラスは
+    HOME / XDG_CONFIG_HOME も tmp に向けた
   - `tests/hermetic.gitconfig` (新規): global の fixture
-  - `tests/test_hermetic_env.py` (新規): 床 14 件
+  - `tests/test_hermetic_env.py` (新規): 床 15 件
 - redact-sensitive-reads
   - `tests/_testutil.py`: 同じ定数と `git()` / `init_repo()` を追加 (この suite の hook は git を
-    起動しないので、基底クラスは無い)
+    起動しない。Stop hook を呼ぶ `test_e2e` の 1 クラスは、env の patch に `HERMETIC_GIT_ENV` を
+    足した)
   - `tests/test_e2e.py`: 重複していた `_git` を helper に置き換え
-  - `tests/hermetic.gitconfig` (新規) / `tests/test_hermetic_env.py` (新規): 床 11 件
+  - `tests/hermetic.gitconfig` (新規) / `tests/test_hermetic_env.py` (新規): 床 12 件
 - `docs/MAINTAINING.md`: テスト実行の節に、git の env の扱いと床を足すときの規律を追記
 
 床 (`tests/test_hermetic_env.py`)。期待値は `_testutil` とは別のリテラルで持つ (定数から導くと、
@@ -82,21 +94,29 @@ tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で
   でも 0 件であること。設定値を問い合わせるだけの床は、commit だけが env を持たずに起動されても、
   問い合わせの側が env を足し直すので気付けない。そのため起動された git の挙動を見る。
   `git init --bare` を直接呼んだ bare repo への push で、受け側の `receive-pack` (trace に載ることと
-  push の成功を前提として確かめる) が maintenance を起動しないことも見る
+  push の成功を前提として確かめる) が maintenance を起動しないことも見る。陽性対照として、止める
+  設定が無い commit (背景へ切り離さない設定だけを渡す) では起動が trace に見えることも確かめる
+  (git の版で起動の形が変わり、検出が起動を拾えなくなると、「0 件」は何も見ていない)
 - 出どころ別: 止める経路 3 本 (env の `GIT_CONFIG_COUNT` / global の fixture /
   `GIT_CONFIG_NOSYSTEM`) を 1 本ずつ別の検査で見る。有効値だけを見ると、1 本が欠けても残りが埋めて
   通るため。起動の仕方 (定数だけ / helper / hook の git) ごとに同じ 3 本を流す。COUNT は repo 自身の
   config に止めない側の値を置き、止める側の値が見えること。global は `git config --global --list` が
   fixture の 5 設定と完全一致すること。system は、`GIT_CONFIG_SYSTEM` で system の代わりに置いた目印が
-  読まれないこと (前提として、`GIT_CONFIG_NOSYSTEM` が無ければ目印が読めることも確かめる)
+  読まれないこと (前提として、`GIT_CONFIG_NOSYSTEM` が無ければ目印が読めることも確かめる)。外側の
+  env には止めない側の値 (`GIT_CONFIG_GLOBAL` = 空の file、`GIT_CONFIG_COUNT` で
+  `maintenance.auto=true`) を置き、当てる側がそれに勝つことを見る (helper が外側の env を後から
+  混ぜる向きに変わると落ちる)
 - 床の側で `GIT_CONFIG_NOSYSTEM` を立てない。「patch していない」状態は、`GIT_CONFIG_*` を外し、
   HOME / XDG を空に、`GIT_CONFIG_SYSTEM` を目印の file に向けて作る。床の側で立てると、定数・helper・
   基底クラスが `GIT_CONFIG_NOSYSTEM` や `GIT_CONFIG_GLOBAL` を片方だけ当て損ねても (部分適用)、
   床が埋めて通ってしまう。開発者の本物の system / global の config は、目印と空の HOME で置き換わる
   ので読まれない
-- 直接の起動: test module が `subprocess` で git を literal の argv で直接起動していないこと
-  (helper を迂回した起動を拾う。argv を変数で渡す形は拾えない)。検出の規則自体が空でないことも
-  床で確かめる
+- 直接の起動: test module が `subprocess` で git を直接起動していないこと (helper を迂回した起動を
+  拾う)。拾うのは、argv の先頭が literal の `"git"` の list / tuple (`args=` の keyword 渡しと、
+  `["git"] + rest` の連結の左辺を含む) と、先頭の語が `git` の文字列 (`shell=True`)。argv を変数で
+  渡す形、2 段以上の連結、f-string、`from subprocess import run` のような別名や `os.system` での
+  起動は拾えない。検出の規則自体が空でないこと、走査した module に repo を作る module が含まれる
+  こと (対象 0 件で黙って通らない)、メソッドの中のような入れ子の呼び出しも見ることも床で確かめる
 - global を空にする上書きは `os.devnull` ではなく実体のある空 file にした (両 suite は Windows の
   CI でも流れ、`nul` を git が config として読めるかに依存したくないため)
 
@@ -106,9 +126,13 @@ tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で
   (空の HOME。床のテストは自分用の trace に差し替えるので、その区間の git はここに数えられない):
   check-sensitive-files は修正前 commit 82 回に対して 82 回、修正後 commit 83 回に対して 0 回
   (187 → 201 件、実行時間は 32.7 秒から 33.8 秒)。redact-sensitive-reads は修正前 commit 1 回に
-  対して 1 回、修正後 commit 2 回に対して 0 回 (1,534 → 1,545 件、3.0 秒から 5.1 秒)。
-  `maintenance.auto=false` を既に持つ HOME では修正前も 0 回で、開発者の `~/.gitconfig` が問題を隠す。
-  床はこの影響を受けない
+  対して 1 回、修正後 commit 2 回に対して 0 回 (1,534 → 1,545 件、3.0 秒から 5.1 秒)。マージ前
+  レビューの指摘で床を足した最終の版 (202 件 / 1,546 件) でも、修正後の起動は 0 回のまま
+  (commit 83 回 / 2 回に対して)。
+  HOME の `~/.gitconfig` に 5 設定を持たせても、修正前の起動数は変わらない (check 82 / redact 1)。
+  repo を作るテストクラスはどれも git を起動する前に HOME を tmp に差し替えるため。開発者の
+  `~/.gitconfig` が問題を隠しうるのは、helper を迂回した git を自分で起動する床の側で、床は HOME を
+  差し替えている (下の対照)
 - 床の各テストは、対応する実装を壊した scratch コピーで、`errors=` ではなく assertion の失敗
   (`failures=`) になることを確かめた。両 suite とも、空の HOME と、5 設定すべてを `~/.gitconfig` に
   持つ HOME のどちらでも、無変異は green で全 mutant が落ちた: env を当てる各点 (定数 / helper /
@@ -119,10 +143,24 @@ tempdir の後始末が走ると、`OSError: [Errno 39] Directory not empty` で
   余計な設定や重複を足す / test module に git の直接起動を足す・検出の規則を壊す。対照として、
   床の HOME 隔離を外したうえで定数が `GIT_CONFIG_GLOBAL` を落とす変異では、空の HOME では落ち、
   5 設定を持つ HOME では床が黙って通る (床が HOME を差し替えている理由)
+- マージ前レビューの指摘で足した床も、同じ 2 つの HOME で assertion の失敗になることを確かめた:
+  helper が外側の env を後から混ぜる向きにする / 陽性対照の検出 (`git maintenance` / `git gc` の
+  起動を拾う側) を盲目にする / 直接起動の検出で、走査の対象を 0 件にする・入れ子を見なくする・
+  新しく拾う 3 形 (`args=` / 連結の左辺 / `shell=True` の文字列) を 1 つずつ外す・文字列の判定を
+  前方一致にする (`gitk` も拾う) / test module に `args=` や `shell=True` の文字列で git の直接起動を
+  足す。既存の kill (基底クラスが `GIT_CONFIG_COUNT` だけを当てる / 定数から `GIT_CONFIG_NOSYSTEM`
+  を抜く) も変わらない。`TestGitOutputIsDecodedAsUtf8` / `TestMainStdinNonUtf8Locale` の HOME /
+  XDG_CONFIG_HOME の差し替えを外す変異は、既定の除外 file に `.env` を持つ HOME でだけ assertion で
+  落ち、空の HOME では通る (開発者の設定に依存していたことの再現)。Stop hook を呼ぶクラスの patch
+  から `HERMETIC_GIT_ENV` を外す変異は、system / global の config を壊れた file に向けると、hook の
+  git が失敗して出力が空になり、`json.loads` の例外 (`errors=`) で止まる (この patch を assertion で
+  固定する床は無い)
 - 実測 (git 2.50): 受け側に設定が無いと `receive-pack` は `git maintenance run --auto --quiet
   --detach` を起動し、`maintenance.auto=false` だけ・`receive.autogc=false` だけのどちらでも止まる
   (`gc.auto=0` だけでは止まらない)。fixture から `receive.autogc` だけを外す変異は、
-  `maintenance.auto=false` が残るので push の床では検出されず、`--global --list` の完全一致が固定する
+  `maintenance.auto=false` が残るので push の床では検出されず、`--global --list` の完全一致が固定する。
+  commit の終わりの起動も同じで、`gc.auto=0` だけでは `git maintenance run --auto` が起動し、
+  `maintenance.auto=false` で止まる
 
 ## 0.35.0
 

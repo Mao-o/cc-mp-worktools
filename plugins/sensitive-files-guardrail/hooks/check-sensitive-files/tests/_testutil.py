@@ -26,11 +26,15 @@ if str(_HOOKS_DIR) not in sys.path:
 # git 2.55 は auto maintenance の既定の戦略が geometric で、小さな repo でも `.git/objects/17` に
 # loose object が 2 件あるだけで repack を始めうる。しかも `--detach` は repack の自動条件を判定する
 # 前に背景へ切り離すので、commit は待たずに戻る。その repack が `.git/objects/pack` に書いている間に
-# `tempfile` の後始末 (`rmtree`) が走ると、後始末が `Directory not empty` で落ちる (CI の flaky。
-# object の hash 次第なので偶発的)。git 2.50 は戦略が gc でしきい値 (約 6700 個) が高く、同じ条件でも
-# 起きないので、ローカルの実行だけでは気付けない。起動そのものは git 2.50 でも commit のたびに起きる。
+# `TemporaryDirectory` の後始末が走ると、`Directory not empty` で落ちる (CI の flaky。object の
+# hash 次第)。この suite で repo を作るテストは後始末が `rmtree(ignore_errors=True)` なので落ちず、
+# tmp に残骸が残り、背景の git がテストより長く生きるだけだった。`TemporaryDirectory` を使うのは
+# 床 (`test_hermetic_env.py`) で、止めておかないと落ちうる。git 2.50 は戦略が gc でしきい値
+# (約 6700 個) が高く、同じ条件でも起きないので、gc 戦略が既定の版 (2.50 など) で流すだけでは
+# 気付けない。起動そのものは git 2.50 でも commit のたびに起きる。
 #
-#   maintenance.auto=false / gc.auto=0: そもそも自動 maintenance を起動しない
+#   maintenance.auto=false: そもそも起動しない
+#   gc.auto=0: 起動された maintenance の gc を走らせない (2.50 では gc.auto=0 だけだと起動は止まらない)
 #   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
 #     (commit が戻る前に終わる)
 #
@@ -61,10 +65,14 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return env
 
 
-# 開発者の ~/.gitconfig (color.ui=always / diff.external / core.hooksPath 等) と system の config で
-# テストが揺れないよう、git に global / system の設定を読ませない。global の代わりに読ませるのは
+# 開発者の ~/.gitconfig と system の config でテストが揺れないよう (例: core.excludesFile は hook が
+# 読む `git ls-files --others --exclude-standard` の未追跡を変え、core.hooksPath はテストの commit で
+# 開発者の hook を走らせる)、git に global / system の設定を読ませない。global の代わりに読ませるのは
 # tests 配下の fixture で、自動 maintenance を止める設定 (`NO_BACKGROUND_GIT_SETTINGS` と
 # `receive.autogc`) だけを持つ。
+#
+# 既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら `~/.config/git/ignore`) はこの指定では
+# 外れない (HOME / XDG_CONFIG_HOME を tmp に向けるのは各テストクラス)。
 #
 # 止める経路は 2 本あり、どちらも外さない:
 #   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない

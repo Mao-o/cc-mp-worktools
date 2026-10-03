@@ -791,6 +791,16 @@ class TestGitOutputIsDecodedAsUtf8(HermeticGitTestCase):
         super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        # 既定の除外ファイル ($XDG_CONFIG_HOME/git/ignore、未設定なら $HOME/.config/git/ignore) は
+        # GIT_CONFIG_GLOBAL では外れない。そこに .env があると、hook の ls-files から未追跡の .env が
+        # 消える。self.tmp 自体が repo なので、HOME は repo の外の tmp に置く
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, ignore_errors=True))
+        patcher = mock.patch.dict(
+            os.environ, {"HOME": home, "USERPROFILE": home, "XDG_CONFIG_HOME": os.path.join(home, "xdg")}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         _init_repo(self.tmp)
         (Path(self.tmp) / "秘密").mkdir()
         (Path(self.tmp) / "秘密" / ".env").write_text("K=v\n", encoding="utf-8")

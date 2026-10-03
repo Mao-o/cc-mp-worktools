@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
+from _testutil import HERMETIC_GIT_ENV
 from _testutil import git as _git
 from _testutil import init_repo as _init_repo
 
@@ -740,7 +741,14 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
         # patterns.local.txt / stop-ack state を実 HOME から隔離
         self._env = mock.patch.dict(
             os.environ,
-            {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(home / "xdg")},
+            {
+                "HOME": str(home),
+                "USERPROFILE": str(home),
+                "XDG_CONFIG_HOME": str(home / "xdg"),
+                # Stop hook (check-sensitive-files) が起動する git にも、テストの git と同じ設定を当てる
+                # (hook の git は env を渡さず os.environ を継承する)
+                **HERMETIC_GIT_ENV,
+            },
         )
         self._env.start()
         self.addCleanup(self._env.stop)

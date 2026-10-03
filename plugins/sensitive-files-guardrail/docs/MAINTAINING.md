@@ -260,20 +260,28 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 - **repo を作る / commit する git は `_testutil.git` / `init_repo` を通す** (両 suite。
   `subprocess.run(["git", ...])` を直接書かない)。`git commit` / `merge` / `fetch` は終わりに
   `git maintenance run --auto --detach` を起動し、git 2.55 (CI) では小さな repo でも背景で
-  repack が始まりうる。それが tempdir の後始末と重なると `Directory not empty` で落ちる
-  (偶発的。ローカルの git 2.50 では起きないので気付けない)。`_testutil.HERMETIC_GIT_ENV` が
-  3 つを渡す: env の `GIT_CONFIG_COUNT` (`maintenance.auto` / `maintenance.autoDetach` /
-  `gc.auto` / `gc.autoDetach`。repo 自身の config より優先される)、`GIT_CONFIG_GLOBAL` が指す
+  repack が始まりうる。それが `TemporaryDirectory` の後始末と重なると `Directory not empty` で
+  落ちる (偶発的)。`rmtree(ignore_errors=True)` の後始末は落ちないが、tmp に残骸が残り、背景の
+  git がテストより長く生きる。git 2.50 は同じ条件でも起きないので、gc 戦略が既定の版 (2.50 など)
+  で流すだけでは気付けない。`_testutil.HERMETIC_GIT_ENV` が 3 つを渡す: env の
+  `GIT_CONFIG_COUNT` (`maintenance.auto` / `maintenance.autoDetach` / `gc.auto` /
+  `gc.autoDetach`。repo 自身の config より優先される)、`GIT_CONFIG_GLOBAL` が指す
   `tests/hermetic.gitconfig` (同じ 4 設定と `receive.autogc`。push の受け側 `receive-pack` には
   env が届かず、この file だけが届く)、`GIT_CONFIG_NOSYSTEM=1`。hook が起動する git
-  (`checker._run_git_raw`) にも届くよう、repo を作るテストクラスは check-sensitive-files の
-  `_testutil.HermeticGitTestCase` を継承する。fixture はテストから `git config --global` で
-  書かない (tracked の file が書き換わる)
+  (`checker._run_git_raw`) にも届くよう、check-sensitive-files で repo を作るテストクラスは
+  `_testutil.HermeticGitTestCase` を継承し、redact-sensitive-reads で Stop hook を in-process で
+  動かすクラス (`test_e2e.py`) は env の patch に `HERMETIC_GIT_ENV` を足す。継承と patch は床で
+  検査していない (外れても気付けない) ので、hook を動かすクラスを足すときに揃える。git が
+  global の config と別に読む既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら
+  `~/.config/git/ignore`) は `GIT_CONFIG_GLOBAL` では外れないので、hook の
+  `ls-files --others --exclude-standard` まで動かすクラスは HOME / XDG_CONFIG_HOME も tmp に
+  向ける。fixture はテストから `git config --global` で書かない (tracked の file が書き換わる)
 - 上の床は両 suite の `tests/test_hermetic_env.py` (起動された git を `GIT_TRACE2_EVENT` で
   数える / 設定の出どころ別 / 直接の起動の検出)。床を足す・直すときは次を守る。
   「patch していない」状態を作る `isolate_git_config` は `GIT_CONFIG_NOSYSTEM` を**立てない**
-  (立てると、定数・helper・基底クラスが当て損ねても床が埋めて通る)。mutation は空の HOME と
-  `maintenance.auto=false` 等を持つ HOME の両方で流す (開発者の `~/.gitconfig` が問題を隠す)。
+  (立てると、定数・helper・基底クラスが当て損ねても床が埋めて通る)。「0 件」を見る床には、止める
+  設定が無いと起動が見える陽性対照を添える。mutation は空の HOME と `maintenance.auto=false` 等を
+  持つ HOME の両方で流す (床が HOME を差し替え損ねると、開発者の `~/.gitconfig` が問題を隠す)。
   env を当てる各点 (定数 / helper / 基底クラス / hook の起動) について、`GIT_CONFIG_COUNT` だけ・
   `GIT_CONFIG_NOSYSTEM` 抜き・`GIT_CONFIG_GLOBAL` 抜きの 3 種が assertion (`failures=`) で落ちること
   を確かめる。`errors=` はテストが走っていない状態で、検出ではない

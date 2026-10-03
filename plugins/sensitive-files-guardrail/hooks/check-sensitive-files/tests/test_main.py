@@ -1762,6 +1762,9 @@ class TestMainStdinNonUtf8Locale(HermeticGitTestCase):
         env = dict(os.environ)
         env["HOME"] = str(self.home)
         env["USERPROFILE"] = str(self.home)
+        # 既定の除外ファイル ($XDG_CONFIG_HOME/git/ignore) は GIT_CONFIG_GLOBAL では外れないので、
+        # 外側の XDG_CONFIG_HOME も差し替える (そこに .env があると未追跡の .env が報告されない)
+        env["XDG_CONFIG_HOME"] = str(self.home / "xdg")
         env["PYTHONIOENCODING"] = "cp1252"
         env["LC_ALL"] = "C"
         proc = subprocess.run(
