@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 
-from core import budget, cli_options
+from core import budget, cli_options, shell_word
 
 # `\b` だと `kubectl-foo` のような plugin バイナリまで kubectl として拾うため、
 # 空白または終端が続く形だけに限定する。
@@ -171,31 +172,41 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f'kubectl: accounts.local.json の "{ACCOUNT_KEY}" 値は文字列で指定してください。'
         )
 
+    # 案内するコマンドに入れる期待値 (core/shell_word.py)。許容形から外れた値は
+    # コマンドの形で案内しない。
+    target = shell_word.arg(expected)
+    check_by_hand = f'期待値は{shell_word.UNSAFE}。accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
+
     ctx = context or {}
     override = ctx.get("context")
     if override is not None:
         if override == expected:
             return None
-        return (
-            f"kubectl コンテキスト不一致: コマンド指定 --context={override}, "
-            f"期待={expected} — --context を外すか --context {expected} を指定してください"
+        head = (
+            f"kubectl コンテキスト不一致: コマンド指定 --context={shlex.quote(override)}, "
+            f"期待={expected}"
         )
+        if target is None:
+            return f"{head} — --context を外してください ({check_by_hand})"
+        return f"{head} — --context を外すか --context {target} を指定してください"
 
     current, err = _run_current_context(env, ctx.get("kubeconfig"))
     if err:
         return err
 
     if current is None:
+        if target is None:
+            return f"kubectl: アクティブコンテキストが設定されていません。{check_by_hand}。"
         return (
             f"kubectl: アクティブコンテキストが設定されていません。"
-            f"kubectl config use-context {expected} を実行してください。"
+            f"kubectl config use-context {target} を実行してください。"
         )
 
     if current != expected:
-        return (
-            f"kubectl コンテキスト不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: kubectl config use-context {expected}"
-        )
+        head = f"kubectl コンテキスト不一致: 現在={current}, 期待={expected}"
+        if target is None:
+            return f"{head} — {check_by_hand}"
+        return f"{head} — 切り替え: kubectl config use-context {target}"
 
     return None
 

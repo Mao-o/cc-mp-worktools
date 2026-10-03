@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
-from core import budget, cli_config, cli_options
+from core import budget, cli_config, cli_options, shell_word
 
 # `\b` だとハイフン付き別コマンドまで gcloud として拾うため、空白または終端が
 # 続く形だけに限定する。
@@ -302,6 +303,12 @@ def _local_value_getter(values: dict[str, str]):
     return get
 
 
+# 期待値が案内するコマンドに入れられない形のとき (core/shell_word.py) の文。
+_CHECK_BY_HAND = (
+    f'期待値は{shell_word.UNSAFE}。accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
+)
+
+
 def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str | None:
     """`--project` / `--account` の値を期待値と直接照合する (一致なら None)。
 
@@ -310,50 +317,48 @@ def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str |
     """
     if override == expected:
         return None
-    return (
-        f"GCP {label}不一致: コマンド指定 {flag}={override}, 期待={expected}"
-        f" — {flag} を外すか {flag} {expected} を指定してください"
-    )
+    head = f"GCP {label}不一致: コマンド指定 {flag}={shlex.quote(override)}, 期待={expected}"
+    value = shell_word.arg(expected)
+    if value is None:
+        return f"{head} — {flag} を外してください ({_CHECK_BY_HAND})"
+    return f"{head} — {flag} を外すか {flag} {value} を指定してください"
+
+
+def _check_key(key: str, label: str, expected: str, get_value) -> str | None:
+    """`key` (project / account) の現在値を期待値と照合する。
+
+    `get_value` は `(value, error)` を返す getter。切り替えの案内
+    (`gcloud config set <key> <期待値>`) は、期待値が許容形のときだけ出す。
+    """
+    current, err = get_value(key)
+    if err:
+        return err
+    value = shell_word.arg(expected)
+    if current is None:
+        head = f"GCP: アクティブ{label}が設定されていません。"
+        if value is None:
+            return f"{head}{_CHECK_BY_HAND}。"
+        return f"{head}gcloud config set {key} {value} を実行してください。"
+    if current != expected:
+        head = f"GCP {label}不一致: 現在={current}, 期待={expected}"
+        if value is None:
+            return f"{head} — {_CHECK_BY_HAND}"
+        return f"{head} — 切り替え: gcloud config set {key} {value}"
+    return None
 
 
 def _check_project(expected: str, get_value, override=None) -> str | None:
     """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
     if override is not None:
         return _flag_mismatch("プロジェクト", "--project", override, expected)
-    current, err = get_value("project")
-    if err:
-        return err
-    if current is None:
-        return (
-            f"GCP: アクティブプロジェクトが設定されていません。"
-            f"gcloud config set project {expected} を実行してください。"
-        )
-    if current != expected:
-        return (
-            f"GCP プロジェクト不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: gcloud config set project {expected}"
-        )
-    return None
+    return _check_key("project", "プロジェクト", expected, get_value)
 
 
 def _check_account(expected: str, get_value, override=None) -> str | None:
     """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
     if override is not None:
         return _flag_mismatch("アカウント", "--account", override, expected)
-    current, err = get_value("account")
-    if err:
-        return err
-    if current is None:
-        return (
-            f"GCP: アクティブアカウントが設定されていません。"
-            f"gcloud config set account {expected} を実行してください。"
-        )
-    if current != expected:
-        return (
-            f"GCP アカウント不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: gcloud config set account {expected}"
-        )
-    return None
+    return _check_key("account", "アカウント", expected, get_value)
 
 
 def get_active_account(project_dir: str) -> dict[str, str | None] | None:
@@ -373,14 +378,15 @@ def pin_fields(expected) -> dict[str, str] | None:
 
     verify() と同じ基準で読む (DICT_VALUE_CHECK = "truthy")。dict の falsy な値
     (None / "" など) は書かれていないものとして扱い、truthy で文字列でない値
-    (例: `{"project": 123}`) は verify() が拒否するので不正にする。空白だけの文字列も、
-    verify() ではどの現在値とも一致しないので不正にする。片方を黙って落として残りだけで
-    照合すると、固定した後も verify() が同じ期待値で deny し続ける (マージ前レビューの
-    指摘)。scalar は project だけで、従来どおり値をそのまま返す (verify() の str 分岐は
-    account を照合しない)。
+    (例: `{"project": 123}`) は verify() が拒否するので不正にする。空白だけの文字列と
+    前後に空白のある文字列も、verify() ではどの現在値 (CLI の出力も設定ファイルの値も
+    前後の空白を除いて読む) とも完全一致しないので不正にする。片方を黙って落として残り
+    だけで照合したり、空白を除いた値で照合したりすると、固定した後も verify() が同じ
+    期待値で deny し続ける (マージ前レビューの指摘)。scalar は project だけ (verify() の
+    str 分岐は account を照合しない)。値は書かれたまま返す。
     """
     if isinstance(expected, str):
-        return {"project": expected} if expected.strip() else None
+        return {"project": expected} if _pinnable(expected) else None
     if not isinstance(expected, dict):
         return None
     fields: dict[str, str] = {}
@@ -388,10 +394,15 @@ def pin_fields(expected) -> dict[str, str] | None:
         value = expected.get(key)
         if not value:
             continue
-        if not isinstance(value, str) or not value.strip():
+        if not _pinnable(value):
             return None
-        fields[key] = value.strip()
+        fields[key] = value
     return fields or None
+
+
+def _pinnable(value) -> bool:
+    """verify() が現在値と一致させうる文字列 (空白だけでも、前後に空白があるのでもない)。"""
+    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
 
 
 def configurations_matching(expected, env=None) -> list[str] | None:

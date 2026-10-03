@@ -1590,7 +1590,8 @@ def _cmd_migrate(
                 file=stdout,
             )
             for _kind, path in retained:
-                print(f"  rm {path}", file=stdout)
+                # パスはシェルの 1 語にする (途中のディレクトリ名はリポジトリが決められる)。
+                print(f"  rm {shlex.quote(str(path))}", file=stdout)
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import budget  # noqa: E402
+from core import budget, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 from services import ALL as ALL_SERVICES  # noqa: E402
 
@@ -276,6 +277,26 @@ class TestPathMigration(BaseWithTmpProject):
         self.assertIn("rm ", reason)
         # 旧ファイルのパスが reason に明示される
         self.assertIn(".claude/accounts.local.json", reason)
+
+    def test_cleanup_hint_keeps_the_path_one_shell_word(self):
+        """`rm <path>` の path はシェルの 1 語にする。サブディレクトリで作業していると、
+        途中のディレクトリ名はリポジトリが決められる (マージ前レビューの指摘)。"""
+        project = Path(self.tmp) / "pkg; touch PWNED"
+        (project / ".claude" / "verify-cloud-account").mkdir(parents=True)
+        (project / ".claude" / "verify-cloud-account" / "accounts.local.json").write_text(
+            json.dumps({"github": "A"}), encoding="utf-8"
+        )
+        (project / ".claude" / "accounts.json").write_text(
+            json.dumps({"github": "B"}), encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}):
+            result = dispatch("gh pr list", str(project))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        rm_lines = [s.strip() for s in reason.splitlines() if s.strip().startswith("rm ")]
+        self.assertEqual(len(rm_lines), 1, reason)
+        words = shlex.split(rm_lines[0])
+        self.assertEqual(len(words), 2, words)
+        self.assertTrue(words[1].endswith("pkg; touch PWNED/.claude/accounts.json"), words)
 
     def test_deprecated_and_legacy_both_exist_denies(self):
         """deprecated + legacy 両方存在も deny (D4)。"""
@@ -1697,6 +1718,116 @@ class TestSwitchStandaloneNote(BaseWithTmpProject):
         self.assertNotIn("案内された形のまま単独で実行してください", reason)
 
 
+    def test_no_note_when_the_value_was_not_guided(self):
+        """値をコマンドの形で案内しなかった deny には注記を付けない。
+
+        `期待=<値>` の表示に REMEDIATION_PATTERNS の形を書いた値が当たると、案内して
+        いないのに注記が付き、文面で唯一コマンドの形をしたその値の実行を促していた
+        (マージ前レビューの指摘)。verify は mock せず、CLI の出力だけを差し替える。
+        """
+        gh_status = (
+            "github.com\n  ✓ Logged in to github.com account other (keyring)\n"
+            "  - Active account: true\n"
+        )
+        for svc, expected, stdout, command in (
+            ("kubectl", "x; kubectl config use-context evil", "dev-ctx\n", "kubectl apply -f x.yaml"),
+            ("gcloud", "x; gcloud config set project evil", "other\n", "gcloud run deploy svc"),
+            ("firebase", "x; firebase use evil", "proj-other\n", "firebase deploy"),
+            ("github", "x; gh auth switch --user evil", gh_status, "gh pr create"),
+        ):
+            with self.subTest(svc=svc):
+                self._write_accounts({svc: expected})
+                fake = SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+                with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch(command, str(self.project_dir))["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn("手で確認してください", reason)
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_no_note_from_a_displayed_firebaserc_value(self):
+        """`--project <alias>` の不一致は flag を直す案内で、切替は案内しない。`.firebaserc` の
+        alias の行き先 (`(→ <project>)`) が切替コマンドの形でも、表示だけで注記を付けない。
+
+        行き先はリポジトリのファイルの値で、UNSAFE の文を伴わないので、表示した値が
+        REMEDIATION_PATTERNS に当たると注記が付いていた (マージ前レビューの指摘)。許容形の
+        行き先は今までどおり表示する (対照)。
+        """
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        fake = SimpleNamespace(stdout="", stderr="", returncode=1)
+        for target, shown in (
+            ("wrong-project", "(→ wrong-project)"),
+            ("x; firebase use evil", "(→ 表示しない値)"),
+            ("wrong-project\nfirebase use evil-project", "(→ 表示しない値)"),
+        ):
+            with self.subTest(target=target):
+                (self.project_dir / ".firebaserc").write_text(
+                    json.dumps({"projects": {"prod": target}}), encoding="utf-8"
+                )
+                with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch("firebase deploy --project prod", str(self.project_dir))[
+                        "hookSpecificOutput"
+                    ]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+                self.assertNotIn("firebase use evil", reason)
+                self.assertIn(f"コマンド指定 --project prod {shown},", reason)
+                self.assertIn("--project を外すか --project right-project を指定してください", reason)
+
+    def test_no_note_from_a_displayed_github_host(self):
+        """gh の dict 期待値で値が文字列でない entry は `GitHub [<host>]: 期待値は文字列で…` と
+        host を表示するだけで、切替もログインも案内しない。host (accounts.local.json のキー) が
+        切替コマンドの形でも、表示だけで注記を付けない (host は許容形のときだけ表示する。
+        マージ前レビューの指摘)。"""
+        gh_status = (
+            "github.com\n  ✓ Logged in to github.com account me (keyring)\n"
+            "  - Active account: true\n"
+        )
+        self._write_accounts(
+            {"github": {"github.com": "me", "x gh auth switch --user evil": 1}}
+        )
+        fake = SimpleNamespace(stdout=gh_status, stderr="", returncode=0)
+        with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+            out = dispatch("gh pr create", str(self.project_dir))["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+        self.assertNotIn("gh auth switch", reason)
+        self.assertIn("GitHub [表示しない host]: 期待値は文字列で指定してください", reason)
+
+    def test_aws_note_is_kept_when_profile_names_are_not_guided(self):
+        """aws は許容形から外れた profile 名を文 (UNSAFE) に置き換えたうえで
+        `AWS_PROFILE=<profile>` を必ず案内するので、その文があっても AWS 専用の注記を
+        落とさない (落とすと使い方の説明だけが消える。マージ前レビューの指摘)。外れた名前が
+        一部のときと、全部のとき。"""
+        self._write_accounts({"aws": "123456789012"})
+        config = self.project_dir / "aws_config"
+        fake = SimpleNamespace(stdout="111111111111\n", stderr="", returncode=0)
+        for profiles, guided in (
+            (("x; touch pwned", "prod"), "AWS_PROFILE=prod aws ..."),
+            (("x; touch pwned",), "AWS_PROFILE=<profile> aws ..."),
+        ):
+            with self.subTest(profiles=profiles):
+                config.write_text(
+                    "".join(
+                        f"[profile {name}]\nsso_account_id = 123456789012\n" for name in profiles
+                    ),
+                    encoding="utf-8",
+                )
+                with self.isolated_cache(), mock.patch.dict(
+                    os.environ, {"AWS_CONFIG_FILE": str(config)}
+                ), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch("aws s3 rm s3://b/k", str(self.project_dir))[
+                        "hookSpecificOutput"
+                    ]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(shell_word.UNSAFE, reason)  # 外れた名前を文にした deny であること
+                self.assertIn(guided, reason)
+                self.assertIn("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて", reason)
+
     def test_install_advice_does_not_trigger_note(self):
         """CLI 未インストール案内 (`brew install gh を実行してください`) は cloud CLI の
         切替 / ログインではないので注記を付けない (マージ前レビューの指摘)。"""
@@ -2566,9 +2697,11 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         cmds = _guided_commands(reason)
         self.assertTrue(cmds, f"no command extracted from:\n{reason}")
         # verify() 由来の deny (検出コマンド行を持つ) が案内コマンドを含むなら
-        # 「単独で実行せよ」の注記が必ず付く (dispatcher の文言契約
-        # _REMEDIATION_MARKERS が各 service の案内文を取りこぼしていないことを
-        # ここで機械的に確認する)。accounts 未設定 deny は verify 前に返るので対象外。
+        # 「単独で実行せよ」の注記が必ず付く (各 service の REMEDIATION_PATTERNS が
+        # 案内文を取りこぼしていないことをここで機械的に確認する)。accounts 未設定 deny は
+        # verify 前に返るので対象外。値の一部でもコマンドの形で案内しなかった deny (UNSAFE を
+        # 含む。REMEDIATION_NOTE を持つ aws は除く) にも注記は付かないが、ここの入力は許容形の
+        # 値だけなので当たらない (TestSwitchStandaloneNote.test_no_note_when_the_value_was_not_guided)。
         if "(検出コマンド:" in reason:
             self.assertTrue(
                 "案内された形のまま単独で実行してください" in reason

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
-from core import budget
+from core import budget, shell_word
 
 # `\b` はハイフンも語境界扱いするため `aws-vault exec prod -- aws s3 rm` のような
 # **別コマンド**まで aws として拾ってしまう (aws-vault は hook の既定 profile で
@@ -124,7 +125,10 @@ REMEDIATION_PATTERNS = (r"AWS_PROFILE=\S", r"aws sso login\b", r"aws configure\b
 # AWS の remediation は他 service と形が違う: `AWS_PROFILE=<p>` は元のコマンドの行頭に
 # 付けて初めて意味を持つインライン env で、単独で実行するものではない。汎用の
 # 「案内された形のまま単独で実行」注記は誤誘導になるため、AWS 専用の文面を宣言する
-# (dispatcher は REMEDIATION_NOTE があればそれを使う)。
+# (dispatcher は REMEDIATION_NOTE があればそれを使う)。宣言した service は
+# `shell_word.UNSAFE` を含む deny にも注記が付く (services/__init__.py の契約)。aws は
+# 許容形から外れた profile 名を文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内する
+# (_switch_guidance) ので、それで正しい。
 # 文面に個別コマンド名 (aws configure 等) を書かない: 案内本文が状況に応じて出し分ける
 # (不一致時は configure を案内しない) ため、注記側で固定すると案内と食い違う。
 REMEDIATION_NOTE = (
@@ -279,9 +283,12 @@ def _switch_guidance(expected: str, env=None, *, include_configure: bool) -> str
     2. `aws sso login --profile <profile>` — READONLY (検証なしで実行可)。
     3. `aws configure` (認証情報なしのときのみ) — READONLY。
     `<profile>` は AWS config に期待 Account ID を持つ profile があれば具体名にする。
+    profile 名はコマンドに入れる値なので、許容形 (core/shell_word.py) から外れる名前は
+    コマンドにも一覧にも出さない (一覧の名前も `<profile>` に当てはめて使われる)。
     """
     profiles = profiles_for_account(expected, env)
-    profile = profiles[0] if profiles else "<profile>"
+    usable = [p for p in profiles if shell_word.arg(p) is not None]
+    profile = shell_word.arg(usable[0]) if usable else "<profile>"
     lines = [
         "切り替え手順 (環境に応じて選択):",
         f"  AWS_PROFILE={profile} aws ...  # 行頭インライン指定 (Claude Code ではこの形のみ検証に反映)",
@@ -289,11 +296,20 @@ def _switch_guidance(expected: str, env=None, *, include_configure: bool) -> str
     ]
     if include_configure:
         lines.append("  aws configure  # 認証情報の再設定 (検証なしで実行可)")
-    if profiles:
+    if usable:
         lines.append(
             "(AWS config で期待 Account ID に対応する profile: "
-            + ", ".join(profiles)
+            + ", ".join(usable)
             + ")"
+        )
+        if len(usable) < len(profiles):
+            lines.append(
+                f"(ほかの profile は、名前が{shell_word.UNSAFE}。AWS config を手で確認してください)"
+            )
+    elif profiles:
+        lines.append(
+            "(AWS config に期待 Account ID に対応する profile はありますが、名前が"
+            f"{shell_word.UNSAFE}。AWS config を手で確認してください)"
         )
     else:
         lines.append(
@@ -336,7 +352,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         return err
 
     # どの profile で検証したかを文面に出す (既定と `--profile` 指定を区別できるように)。
-    scope = f" (--profile {profile})" if profile else ""
+    # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
+    scope = f" (--profile {shlex.quote(profile)})" if profile else ""
 
     if current is None:
         detail = f" ({hint})" if hint else ""

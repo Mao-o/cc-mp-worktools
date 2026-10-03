@@ -30,11 +30,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
-from core import budget, cli_options
+from core import budget, cli_options, shell_word
 
 # CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
 # 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
@@ -229,6 +230,69 @@ def aliases_for(project_dir: str, project_id: str) -> list[str]:
     return sorted(alias for alias, project in aliases.items() if project == project_id)
 
 
+def _reject_constant(name: str):
+    """`json.loads` の parse_constant: `NaN` / `Infinity` / `-Infinity` を拒否する (JSON.parse と同じ)。"""
+    raise ValueError(f"JSON に無い値: {name}")
+
+
+def firebaserc_reads_like_cli(project_dir: str) -> bool:
+    """`.firebaserc` を、このモジュールと firebase-tools が同じ内容に読めるか (無ければ True)。
+
+    firebase-tools は `.firebaserc` を cjson で読む: ファイル中のすべての U+FEFF を除き、
+    `//` / `/* */` のコメントを除いてから JSON.parse する (不正な UTF-8 は置換文字になり、
+    `NaN` 等があると JSON.parse が失敗して alias 0 件になる)。このモジュールは厳密な JSON
+    (`json.loads`) で読むので、コメント・先頭の U+FEFF・UTF-8 でないバイトのあるファイルでは
+    alias を 0 件と読み、alias のキーの中の U+FEFF は別のキーと読み、`NaN` のあるファイルでは
+    firebase-tools が読まない alias を読む。どれも `firebase use <x>` の行き先の予測が食い違う。
+
+    判定は保守的: UTF-8 として読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中でも)・
+    厳密な JSON として読めない (入れ子が深すぎるときも)・`projects` がオブジェクトでないか
+    文字列でない値を持つ、のどれかなら False (cjson のコメント除去は再現しない)。
+    どれでもなければ、cjson の前処理は何も変えず、JSON.parse と `json.loads` は同じ内容を返す。
+    firebase-tools の alias の解決 (`projects[alias] || alias`) は文字列でない値もそのまま
+    行き先に使い、このモジュールは文字列の値だけを alias と読むが、値が文字列以外のときも
+    False にするので、解決まで同じ (違うのは、JavaScript のオブジェクトが継承するプロパティ名
+    (`constructor` など) を firebase-tools だけが alias と読むことだけ)。
+    builder の `pin-env` が `firebase use` を案内する前に使う (verify() の照合は別の話で、
+    ここでは変えない)。
+    """
+    path = Path(_project_root(project_dir)) / ".firebaserc"
+    if not path.is_file():
+        return True
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if "\ufeff" in text or "//" in text or "/*" in text:
+        return False
+    try:
+        data = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return False
+    # firebase-tools の resolveAlias は `projects[alias] || alias` なので、真になる非文字列
+    # (配列・数値・true・オブジェクト) も alias として解決する。このモジュールは文字列以外を
+    # 捨てるので食い違う。`projects` がオブジェクトでない (null・配列・文字列) ときも、
+    # firebase-tools は添字で引くので食い違いうる。どれも形を単純に言える側 (False) に倒す。
+    if isinstance(data, dict) and "projects" in data:
+        projects = data["projects"]
+        if not isinstance(projects, dict) or any(
+            not isinstance(value, str) for value in projects.values()
+        ):
+            return False
+    return True
+
+
+def resolve_target(project_dir: str, target: str) -> str:
+    """`firebase use <target>` / `--project <target>` が指す project ID。
+
+    firebase-tools と同じく、target を `.firebaserc` の alias として先に解決し、alias に
+    無ければ project ID そのものとして扱う (`.firebaserc` は `firebase.json` を親方向に
+    探した project root から読む)。verify() の `--project` の照合と、builder の
+    `pin-env` が案内する `firebase use` の行き先の確認が同じ規則を使う。
+    """
+    return _firebaserc_aliases(_project_root(project_dir)).get(target, target)
+
+
 def _configstore_path(env=None) -> Path | None:
     """firebase-tools の configstore (`$XDG_CONFIG_HOME` または `~/.config` 配下)。
 
@@ -326,16 +390,50 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
     return get_active_account(project_dir)
 
 
-def _alias_lines(expected: dict) -> str:
-    """dict 期待値の切替案内 (`firebase use <alias>  # → <project>`)。各行は self-remediation で通る。"""
-    return "\n".join(
-        f"  firebase use {k}  # → {v}"
-        for k, v in expected.items()
-        if isinstance(v, str) and v
-    )
+# 期待値が案内するコマンドに入れられない形のとき (core/shell_word.py) の文。
+# alias / project ID の許容形は builder の `pin-env` の `firebase use` と同じ
+# (shell_word.NAME)。
+_CHECK_BY_HAND = (
+    f'期待値は{shell_word.UNSAFE}。accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
+)
+# dict 期待値の一部の entry だけを案内行から省いたときに添える行。
+_SKIPPED_LINE = (
+    f"  (ほかの alias は、alias か project ID が{shell_word.UNSAFE}。"
+    f'accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください)'
+)
 
 
-def _project_flag_lines(expected: dict) -> str:
+def _target(value) -> str | None:
+    """`firebase use` / `--project` に入れる alias / project ID。許容形でなければ None。"""
+    return shell_word.arg(value, shell_word.NAME)
+
+
+def _alias_lines(expected: dict, command: str) -> list[str]:
+    """dict 期待値の案内行 (`<command> <alias>  # → <project>`)。
+
+    command は `firebase use` (切替。各行は self-remediation で通る) か `--project`
+    (flag を直す形)。alias か project が許容形から外れる entry は行にしない。alias は
+    コマンドの引数なので `firebase use` の許容形 (`shell_word.NAME`)。`#` の後ろの project は
+    コメントで、問題になるのは改行 (コメントの外に出てコマンドになる) なので、一般の許容形
+    (`shell_word.WORD`。改行・空白・制御文字・非 ASCII を弾く) に限る — ドメイン付きの
+    project ID (`example.com:my-project`) も行にできる。省いた entry があれば、その旨と
+    手での確認を最後の行に添える。案内できる行が 1 つも無ければ空。
+    """
+    lines, skipped = [], False
+    for alias, project in expected.items():
+        if not (isinstance(project, str) and project):
+            continue
+        alias_arg, project_arg = _target(alias), shell_word.arg(project)
+        if alias_arg is None or project_arg is None:
+            skipped = True
+            continue
+        lines.append(f"  {command} {alias_arg}  # → {project_arg}")
+    if lines and skipped:
+        lines.append(_SKIPPED_LINE)
+    return lines
+
+
+def _project_flag_lines(expected: dict) -> list[str]:
     """dict 期待値に対する `--project <alias>` の候補行。
 
     `--project` 指定による不一致では、アクティブ project を切り替える
@@ -344,11 +442,7 @@ def _project_flag_lines(expected: dict) -> str:
     (案内どおりに直しても通らない = remediation loop)。flag 自体を直す形を案内する。
     kubectl の `--context` / gcloud の `--project` 不一致文面と同じ方針。
     """
-    return "\n".join(
-        f"  --project {k}  # → {v}"
-        for k, v in expected.items()
-        if isinstance(v, str) and v
-    )
+    return _alias_lines(expected, "--project")
 
 
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
@@ -374,28 +468,35 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
     override = (context or {}).get("project")
     if override is not None:
-        root = _project_root(project_dir)
-        resolved = _firebaserc_aliases(root).get(override, override)
-        shown = (
-            f"--project {override}"
-            if resolved == override
-            else f"--project {override} (→ {resolved})"
-        )
+        resolved = resolve_target(project_dir, override)
+        # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
+        shown = f"--project {shlex.quote(override)}"
+        if resolved != override:
+            # 行き先はリポジトリの `.firebaserc` の値。この deny は切替を案内しないので、値が
+            # 切替コマンドの形 (`x; firebase use other` / 改行入り) だと、表示だけで dispatcher
+            # の「案内したコマンドは単独で実行」の注記が付く。許容形のときだけ出す。
+            shown += f" (→ {resolved})" if shell_word.arg(resolved) else " (→ 表示しない値)"
         if isinstance(expected, dict):
             if resolved in valid:
                 return None
-            return (
+            head = (
                 f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
                 f"期待={', '.join(sorted(set(valid)))} のいずれか\n"
-                f"--project を外すか、以下のいずれかを指定してください:\n"
-                f"{_project_flag_lines(expected)}"
+            )
+            lines = _project_flag_lines(expected)
+            if not lines:
+                return f"{head}--project を外してください ({_CHECK_BY_HAND})"
+            return (
+                f"{head}--project を外すか、以下のいずれかを指定してください:\n"
+                + "\n".join(lines)
             )
         if resolved == expected:
             return None
-        return (
-            f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={expected}"
-            f" — --project を外すか --project {expected} を指定してください"
-        )
+        head = f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={expected}"
+        target = _target(expected)
+        if target is None:
+            return f"{head} — --project を外してください ({_CHECK_BY_HAND})"
+        return f"{head} — --project を外すか --project {target} を指定してください"
 
     current, err = _resolve(project_dir, env)
     if err:
@@ -406,33 +507,41 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
                 "Firebase: firebase コマンドが見つかりません。"
                 "npm install -g firebase-tools でインストールしてください。"
             )
+        head = "Firebase: 現在のプロジェクトを取得できません。"
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
+            lines = _alias_lines(expected, "firebase use")
+            if not lines:
+                return f"{head}firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
             return (
-                "Firebase: 現在のプロジェクトを取得できません。firebase login の後、"
-                f"以下のいずれかで切り替えてください:\n{_alias_lines(expected)}"
+                f"{head}firebase login の後、以下のいずれかで切り替えてください:\n"
+                + "\n".join(lines)
             )
-        return (
-            f"Firebase: 現在のプロジェクトを取得できません。"
-            f"firebase login && firebase use {expected} を実行してください。"
-        )
+        target = _target(expected)
+        if target is None:
+            return f"{head}firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+        return f"{head}firebase login && firebase use {target} を実行してください。"
 
     if isinstance(expected, dict):
         if current in valid:
             return None
         expected_display = ", ".join(sorted(set(valid)))
-        return (
+        head = (
             f"Firebase プロジェクト不一致: 現在={current}, "
             f"期待={expected_display} のいずれか\n"
-            f"切り替え:\n{_alias_lines(expected)}"
         )
+        lines = _alias_lines(expected, "firebase use")
+        if not lines:
+            return f"{head}{_CHECK_BY_HAND}"
+        return f"{head}切り替え:\n" + "\n".join(lines)
 
     if current != expected:
-        return (
-            f"Firebase プロジェクト不一致: 現在={current}, 期待={expected}"
-            f" — 切り替え: firebase use {expected}"
-        )
+        head = f"Firebase プロジェクト不一致: 現在={current}, 期待={expected}"
+        target = _target(expected)
+        if target is None:
+            return f"{head} — {_CHECK_BY_HAND}"
+        return f"{head} — 切り替え: firebase use {target}"
 
     return None
 

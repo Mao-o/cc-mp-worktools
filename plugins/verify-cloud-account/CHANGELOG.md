@@ -1,5 +1,113 @@
 # Changelog
 
+## 0.17.1
+
+### Fixed: 案内するコマンドに値をそのまま埋め込まない
+
+deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud config set project
+<期待値>` / `gh auth switch --hostname <host> --user <期待値>` / `firebase use <alias>` /
+`AWS_PROFILE=<profile> aws ...` 等) は、期待値や CLI の設定から来た値をそのまま
+コマンドに埋め込んでいた。Claude は deny の案内をそのまま実行しがちで、期待値のファイルは
+リポジトリに置かれうるので、値に `;` / `$()` / 空白 / 改行や先頭の `-` があると、案内
+どおりに打ったコマンドが別のコマンドや option として走りえた。
+
+- 案内するコマンドに入れる値は、英数字で始まり英数字と `.` `_` `-` `:` `/` `@` `+` だけ
+  からなる形のときだけコマンドに出し、`shlex.quote` も通す。firebase の alias /
+  project ID は pin-env の `firebase use` と同じく `.` `_` `-` まで。外れた値はコマンドの
+  形で案内せず、「手で確認してください」の文にする。普通の値 (EKS や kubeadm の context
+  名、メールアドレスの account を含む) の文面は変わらない。許容形は狭く、シェル上は無害な
+  値 (`_local` や日本語の context 名など) も外れるので、外れた値の文面は「案内に使える形
+  ではない」とだけ言い、危険な文字を含むとは言わない (マージ前レビューの指摘)
+- firebase の dict 期待値の案内行 (`firebase use <alias>  # → <project>`) は、`#` の後ろの
+  project も許容形 (`.` `_` `-` `:` `/` `@` `+`。コメントなので alias より広い) に限る
+  (改行が入るとコメントの外に出てコマンドになる)。ドメイン付きの project ID
+  (`example.com:my-project`) は行にする。案内できない entry は行にせず、その旨を添える
+- 値の一部でもコマンドの形で案内しなかった deny (「手で確認してください」の文がある deny) には、
+  ほかの entry の切替を案内していても、「案内した切替 / ログインコマンドは案内された形のまま
+  単独で実行」の注記を付けない。`期待=<値>` の表示が切替コマンドの形に見えると
+  (`x; kubectl config use-context other` 等)、案内していないのに注記が付き、その値の実行を
+  促していた。ある entry は案内し別の entry は抑止した deny (gh の複数 host 等) からも注記が
+  消えるが、安全側として受け入れた。AWS は外れた profile 名を文に置き換えたうえで
+  `AWS_PROFILE=<profile>` を必ず案内するので、AWS 専用の注記は付ける (マージ前レビューの指摘)
+- 同じ理由で、文面に表示する値のうち `.firebaserc` の alias の行き先
+  (`--project <alias> (→ <project>)`) と gh の host 名 (`GitHub [<host>]`) は、許容形のとき
+  だけ出す (外れていれば「表示しない値」「表示しない host」)。どちらも切替を案内しない deny
+  (`--project` の不一致・期待値の型の誤り) にも出るので、値が切替コマンドの形だと表示だけで
+  注記が付いていた (0.17.1 より前からある。マージ前レビューの指摘)
+- 旧パスの削除の案内 (複数のパスの衝突の deny と builder の `migrate --commit` が出す
+  `rm <path>`) も、パスを quote してシェルの 1 語にする。サブディレクトリで作業していると、
+  途中のディレクトリ名はリポジトリが決められる (0.17.1 より前からある。マージ前レビューの
+  指摘)
+- AWS の profile 名は、許容形から外れる名前をコマンドにも「対応する profile」の一覧にも
+  出さない (一覧の名前も `<profile>` に当てはめて使われる)。外れた名前しか無ければ
+  `<profile>` のままにする
+- 検出したコマンド自身が指定した値 (`--context` / `--project` / `--account` /
+  `--profile`) を文面に示すところは、検証せずに quote して示す
+- deny / allow の判定は変えていない (変えたのは文面だけ)。実装は `core/shell_word.py`
+
+### Fixed: pin-env (マージ前レビューの指摘)
+
+- **firebase の dict 期待値で、alias を `.firebaserc` と照合してから案内するようにした。**
+  0.17.0 は期待値の alias をそのまま `firebase use <alias>` で案内していた。`firebase use`
+  は alias を `.firebaserc` で解決するので、同じ alias が別の project を指していたり
+  alias が無かったり (alias 名が project ID として扱われる) すると、案内どおりにしても
+  期待した project にならず、続く検証が deny し続けた。このディレクトリの `.firebaserc` で
+  期待した project に解決される alias だけを案内し、無ければ期待値の project ID で案内する
+  (既定で隠す)。期待値の alias が `firebase use` に渡せない形のときも、0.17.0 の
+  「固定できません」ではなく project ID で案内する
+- project ID と同じ名前の alias が `.firebaserc` で別の project を指しているときは、
+  `firebase use <project ID>` がその alias に切り替わるので、project ID でも案内しない
+  (scalar の期待値も同じ)。alias も project ID も出せなければ「固定できません」
+- dict 期待値で project ID の候補が複数あるときは、名前順の先頭を案内しつつ、その ID で
+  よいかをユーザーに確かめる注記を添える (黙って 1 つを選んでいた)。候補の一覧へは誘導
+  しない (accounts-show は、pin-env が除いた ID も期待値として出す)。skill
+  (project-accounts) は、ユーザーが別の ID を選んだら `firebase use` を組み立てずに、
+  ユーザーに手で実行してもらう (マージ前レビューの指摘)
+- **firebase-tools と同じ内容に読めない `.firebaserc` では「固定できません」にした。**
+  firebase-tools は `.firebaserc` のすべての U+FEFF とコメント (`//` / `/* */`) を除いてから
+  JSON として読むが、pin-env は厳密な JSON として読んでいた。コメントのあるファイルでは
+  alias を 0 件と読んで同名の alias の確認をすり抜け、alias のキーの中の U+FEFF は別の
+  キーと読むので、案内した `firebase use` が別の project に切り替わりえた。UTF-8 として
+  読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中の URL なども含む)・厳密な JSON
+  として読めない (`NaN` 等・構文の誤り・深い入れ子)・`projects` がオブジェクトでないか
+  文字列でない値を持つ、のどれかなら案内しない (firebase-tools は文字列でない alias の値も
+  そのまま行き先に使う。マージ前レビューの指摘)。判定は保守的で、URL を含むだけの厳密な
+  JSON も「固定できません」になる (cjson のコメントの除去を再現しない代償)。理由の文は
+  「厳密な JSON に直すと案内できる」ではなく、弾く条件を並べる形にした。通常の検証の照合は
+  変えていない
+- **前後に空白のある期待値を「固定できません」にした。** 通常の検証は CLI が出した
+  (前後の空白を除いた) 現在値と期待値を完全一致で照合するので、
+  `{"project": " my-project "}` のような期待値はどの現在値とも一致しない。0.17.0 の
+  pin-env は空白を除いた値で構成を照合し、固定を案内していたので、案内どおりに固定しても
+  deny が続いた。gcloud (0.17.0 の「空白だけの値は不正」と同じ扱い) と、同じ食い違いの
+  あった aws / firebase に入れた。通常の検証の照合の仕方は変えていない
+
+### Tests
+
+- `tests/test_shell_word.py` (許容形と quote、service ごとの案内: 許容形の値は文面が
+  変わらない / 外れた値はコマンドにならない / どちらも deny のまま)、pin-env の
+  `.firebaserc` との照合と前後の空白 (`TestPaddedExpectedIsNotPinned`)
+- テスト整理 (挙動の変更なし): `tests/test_docs.py` の配布ファイルの走査から、gitignore
+  済みの手元専用のローカルガイドを名前で除いた。保守者の手元の plugin 直下にあると、その
+  本文で offender になり、手元の test だけが落ちていた (clean clone の CI は通る)。
+  配布ファイルに書かれた参照は今までどおり検出する
+- マージ前レビューの指摘の回帰テスト: 値を案内しなかった deny に注記が付かない
+  (`TestSwitchStandaloneNote`。kubectl / gcloud / firebase / gh を実際の verify で)、
+  `rm <path>` がシェルの 1 語になる (衝突の deny と migrate)、firebase-tools と違う内容に読む
+  `.firebaserc` では案内しない (`TestPinEnvReadsFirebasercLikeFirebaseTools`。判定の条件
+  ごとに、その条件だけが捕まえる入力を置く)、project ID の候補が複数のときの注記、外れた
+  値の文面、`#` の後ろのドメイン付き project ID。`TestFirebaseGuidance` の
+  `test_hostile_values_are_not_guided_as_a_command` は、`example.com:my-project` を dict の
+  project としては案内する形に期待値を変えた
+- 同じく、表示した値 (`.firebaserc` の alias の行き先・gh の host) だけでは注記が付かない、
+  AWS は profile 名の一部 / 全部が外れても AWS の注記を付ける (`TestSwitchStandaloneNote`)、
+  表示する値は許容形のときだけ (`TestGithubGuidance` / `TestFirebaseGuidance`)、
+  `.firebaserc` の `projects` の形 (文字列でない値・オブジェクトでない)・`projects` の無い
+  ファイルは対象外 (案内が出る)・深い入れ子・URL を含む厳密な JSON (代償を固定する)
+  (`TestPinEnvReadsFirebasercLikeFirebaseTools`)、複数 ID の注記が pin-env の確認を通って
+  いない ID も並ぶ一覧へ誘導しない (`TestPlanFirebase`)
+- 1,267 → 1,317 件
+
 ## 0.17.0
 
 ### Added: プロジェクトごとのアカウント固定 (各 CLI の公式の仕組みを案内)

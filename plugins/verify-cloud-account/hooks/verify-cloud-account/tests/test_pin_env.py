@@ -15,13 +15,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import _testutil  # noqa: F401
 
 from scripts import accounts_builder as builder  # noqa: E402
 from scripts import pin_env  # noqa: E402
-from services import gcloud  # noqa: E402
+from services import aws, firebase, gcloud  # noqa: E402
 
 ACCOUNT = "111122223333"
 _GIT_ENV = {
@@ -203,8 +204,8 @@ class TestPlanGcloud(_TmpBase):
 
 
 class TestPlanFirebase(_TmpBase):
-    def _project(self, aliases: dict | None) -> str:
-        root = self.tmp / "fb"
+    def _project(self, aliases: dict | None, name: str = "fb") -> str:
+        root = self.tmp / name
         root.mkdir()
         (root / "firebase.json").write_text("{}", encoding="utf-8")
         if aliases is not None:
@@ -227,10 +228,87 @@ class TestPlanFirebase(_TmpBase):
         self.assertTrue(plan.command_secret)
 
     def test_dict_expected_uses_its_aliases(self):
-        project_dir = self._project(None)
+        project_dir = self._project({"prod": "fb-prod", "dev": "fb-dev"})
         plan = pin_env.plan_firebase({"prod": "fb-prod", "dev": "fb-dev"}, project_dir)
         self.assertEqual(plan.command, "firebase use dev")
+        self.assertFalse(plan.command_secret)
         self.assertTrue(any("dev, prod" in note for note in plan.notes))
+
+    def test_dict_alias_that_firebaserc_points_elsewhere_is_not_used(self):
+        """期待値の alias が `.firebaserc` で別の project を指すなら、alias ではなく
+        期待値の project ID で案内する (案内どおりにすると別の project に切り替わり、
+        続く検証が deny するため。マージ前レビューの指摘)。"""
+        project_dir = self._project({"prod": "wrong-project"})
+        plan = pin_env.plan_firebase({"prod": "right-project"}, project_dir)
+        self.assertEqual(plan.command, "firebase use right-project")
+        self.assertTrue(plan.command_secret)
+        self.assertIsNone(plan.problem)
+        self.assertTrue(any("解決されない alias は使いません" in note for note in plan.notes))
+
+    def test_dict_alias_missing_from_firebaserc_is_not_used(self):
+        """`.firebaserc` に無い alias は project ID として扱われるので、案内しない。"""
+        for i, aliases in enumerate((None, {"default": "other-project"})):
+            with self.subTest(firebaserc=aliases):
+                project_dir = self._project(aliases, name=f"fb{i}")
+                plan = pin_env.plan_firebase({"prod": "right-project"}, project_dir)
+                self.assertEqual(plan.command, "firebase use right-project")
+                self.assertTrue(plan.command_secret)
+
+    def test_dict_uses_only_the_aliases_that_resolve_to_their_project(self):
+        project_dir = self._project({"dev": "fb-dev", "prod": "fb-elsewhere", "stg": "fb-stg"})
+        plan = pin_env.plan_firebase(
+            {"dev": "fb-dev", "prod": "fb-prod", "stg": "fb-stg"}, project_dir
+        )
+        self.assertEqual(plan.command, "firebase use dev")
+        joined = "\n".join(plan.notes)
+        self.assertIn("どの alias でも通ります: dev, stg", joined)
+        self.assertIn("解決されない alias は使いません", joined)
+
+    def test_project_id_shadowed_by_an_alias_is_not_used(self):
+        """project ID と同じ名前の alias が別の project を指すと、`firebase use <ID>` は
+        その alias に切り替わる (firebase-tools は alias を先に解決する)。"""
+        project_dir = self._project({"fb-prod": "fb-elsewhere"})
+        plan = pin_env.plan_firebase("fb-prod", project_dir)
+        self.assertIsNone(plan.command)
+        self.assertIn("別の project を指している", plan.problem or "")
+        plan = pin_env.plan_firebase({"prod": "fb-prod"}, project_dir)
+        self.assertIsNone(plan.command)
+        self.assertIn("別の project を指す alias と同じ名前", plan.problem or "")
+
+    def test_dict_with_several_project_ids_asks_the_user_to_choose(self):
+        """alias が使えず project ID で案内するとき、候補が複数なら名前順の先頭を黙って
+        選ばず、案内した先頭の ID でよいかをユーザーに確かめる注記を添える (値は既定で
+        隠すので一覧は出さない。マージ前レビューの指摘)。同じ project を指す alias が
+        複数でも候補は 1 つ。"""
+        project_dir = self._project(None)
+        plan = pin_env.plan_firebase({"dev": "fb-a", "prod": "fb-b"}, project_dir)
+        self.assertEqual(plan.command, "firebase use fb-a")
+        self.assertTrue(plan.command_secret)
+        joined = "\n".join(plan.notes)
+        self.assertIn("project ID は 2 個あり", joined)
+        self.assertIn("名前順で先頭の 1 つを案内しています", joined)
+        self.assertIn("その ID でよいかをユーザーに確かめてください", joined)
+        self.assertNotIn("fb-b", joined)
+        plan = pin_env.plan_firebase({"dev": "fb-a", "dev2": "fb-a"}, project_dir)
+        self.assertEqual(plan.command, "firebase use fb-a")
+        self.assertNotIn("個あり", "\n".join(plan.notes))
+
+    def test_several_project_ids_note_does_not_point_to_a_list_with_excluded_ids(self):
+        """複数 ID の注記は、pin-env の確認を通っていない ID も並ぶ一覧へ誘導しない。
+
+        「案内できる期待値の project ID は N 個」の N は、`.firebaserc` の同名の alias が別の
+        project を指す ID (`firebase use <その ID>` が別の project に切り替わる) を除いた数。
+        accounts-show の --show-values は期待値をすべて出すので、そこから選ばせると除いた ID も
+        選べてしまう (マージ前レビューの指摘)。
+        """
+        project_dir = self._project({"mm-shadowed": "evil-project"})
+        plan = pin_env.plan_firebase(
+            {"dev": "aa-dev", "prod": "zz-prod", "x": "mm-shadowed"}, project_dir
+        )
+        self.assertEqual(plan.command, "firebase use aa-dev")
+        joined = "\n".join(plan.notes)
+        self.assertIn("project ID は 2 個あり", joined)  # mm-shadowed は除かれている
+        self.assertNotIn("accounts-show", joined)
 
     def test_notes_say_it_is_per_directory_and_account_is_not_verified(self):
         plan = pin_env.plan_firebase("fb-dev", self._project({"default": "fb-dev"}))
@@ -243,6 +321,147 @@ class TestPlanFirebase(_TmpBase):
         project_dir = self._project(None)
         self.assertIn("未設定", pin_env.plan_firebase(None, project_dir).problem)
         self.assertIn("有効な project", pin_env.plan_firebase({"x": ""}, project_dir).problem)
+
+
+class TestPinEnvReadsFirebasercLikeFirebaseTools(_TmpBase):
+    """firebase-tools と違う内容に読む `.firebaserc` では `firebase use` を案内しない。
+
+    firebase-tools は `.firebaserc` を cjson で読む: ファイル中のすべての U+FEFF を除き、
+    `//` / `/* */` のコメントを除いてから JSON.parse する (不正な UTF-8 は置換文字になり、
+    `NaN` 等は JSON.parse が拒否して alias 0 件)。cjson はバックスラッシュで終わる文字列の
+    直後で文字列の内外を取り違える。厳密な JSON で読むと、どの入力でも案内した
+    `firebase use` の行き先の予測が食い違う (マージ前レビューの指摘)。コメントは
+    firebase-tools (cjson 0.3.3) で読んだ内容と、そのときの行き先。
+    """
+
+    FIREBASERC = (
+        # alias 0 件と読み、同名の alias の確認をすり抜ける (right-project -> wrong-project)
+        (
+            "line comment",
+            b'{\n  // aliases\n'
+            b'  "projects": {"default": "right-project", "right-project": "wrong-project"}\n}\n',
+        ),
+        (
+            "block comment",
+            b'{"projects": {/* aliases */ "default": "right-project",'
+            b' "right-project": "wrong-project"}}\n',
+        ),
+        # U+FEFF を除くと 2 つ目のキーも "prod" になり後勝ち (prod -> wrong-project)
+        (
+            "U+FEFF in an alias",
+            '{"projects": {"prod": "right-project", "pr\ufeffod": "wrong-project"}}\n'.encode(),
+        ),
+        # 先頭の U+FEFF は json.loads が拒否して alias 0 件 (right-project -> wrong-project)
+        (
+            "leading U+FEFF",
+            '\ufeff{"projects": {"default": "right-project", "right-project": "wrong-project"}}\n'.encode(),
+        ),
+        # UTF-8 でないバイトは置換文字になるだけ (right-project -> wrong-project)
+        (
+            "not UTF-8",
+            b'{"projects": {"default": "right-project", "right-project": "wrong-project"},'
+            b' "note": "\xff"}\n',
+        ),
+        # json.loads は NaN を読むが JSON.parse は拒否して alias 0 件
+        # (other-project は project ID として扱われる)
+        ("NaN", b'{"projects": {"other-project": "right-project"}, "x": NaN}\n'),
+        # `\\` で終わる文字列の後の `//` をコメントと読み、残りが読めず alias 0 件
+        (
+            "// in a string",
+            b'{"note": "a\\\\", "x": "//", "projects": {"other-project": "right-project"}}\n',
+        ),
+        # 同じく `/*` から `*/` までを除き、後ろの "projects" が消える (prod -> wrong-project)
+        (
+            "/* in a string",
+            b'{"note": "a\\\\", "projects": {"prod": "wrong-project"}, "x": "/*",'
+            b' "projects": {"prod": "right-project"}, "y": "*/"}\n',
+        ),
+    )
+
+    NOT_PINNED = ".firebaserc を firebase-tools と同じ内容に読めると確かめられません"
+
+    def _project(self, data: bytes, name: str) -> str:
+        root = self.tmp / name
+        root.mkdir()
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        (root / ".firebaserc").write_bytes(data)
+        return str(root)
+
+    def test_firebase_use_is_not_guided(self):
+        for i, (label, data) in enumerate(self.FIREBASERC):
+            root = self._project(data, f"fb{i}")
+            for expected in ("right-project", {"prod": "right-project"}):
+                with self.subTest(firebaserc=label, expected=expected):
+                    plan = pin_env.plan_firebase(expected, root)
+                    self.assertIsNone(plan.command, plan)
+                    self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_alias_values_that_are_not_strings_are_not_guided(self):
+        """firebase-tools の resolveAlias は `projects[alias] || alias` なので、真になる文字列でない
+        値 (配列・数値・true・オブジェクト) も alias の行き先に使う。このモジュールは文字列の値
+        だけを alias と読むので、`firebase use right-project` は firebase-tools では alias
+        right-project (→ 配列など) を選んでしまう (マージ前レビューの指摘)。"""
+        for i, value in enumerate((["wrong-project"], 123, True, {"a": 1})):
+            text = json.dumps({"projects": {"right-project": value, "other": "x"}})
+            root = self._project(text.encode(), f"fb{i}")
+            for expected in ("right-project", {"x": "right-project"}):
+                with self.subTest(value=value, expected=expected):
+                    plan = pin_env.plan_firebase(expected, root)
+                    self.assertIsNone(plan.command, plan)
+                    self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_projects_key_that_is_not_an_object_is_not_guided(self):
+        """`projects` がオブジェクトでない (null・配列・文字列) と、firebase-tools は添字で引く
+        (配列の "0" など) か読めずに失敗し、このモジュールは alias 0 件と読む。"""
+        for i, projects in enumerate((None, ["wrong-project"], "wrong-project")):
+            root = self._project(json.dumps({"projects": projects}).encode(), f"fb{i}")
+            for expected in ("right-project", {"x": "right-project"}):
+                with self.subTest(projects=projects, expected=expected):
+                    plan = pin_env.plan_firebase(expected, root)
+                    self.assertIsNone(plan.command, plan)
+                    self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_firebaserc_without_projects_is_still_guided(self):
+        """`projects` の無い .firebaserc (hosting の targets だけ等) は、`projects` の形の判定の
+        対象外で、案内が出る (判定が `projects` を無条件に引くと KeyError で落ちる。マージ前
+        レビューの指摘)。"""
+        text = json.dumps({"targets": {"right-project": {"hosting": {"main": ["site"]}}}})
+        root = self._project(text.encode(), "targets")
+        for expected in ("right-project", {"prod": "right-project"}):
+            with self.subTest(expected=expected):
+                try:
+                    plan = pin_env.plan_firebase(expected, root)
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"projects の無い .firebaserc で pin-env が落ちた: {type(e).__name__}")
+                self.assertEqual(plan.command, "firebase use right-project", plan)
+
+    def test_deeply_nested_firebaserc_is_a_problem_not_a_traceback(self):
+        """厳密な JSON の判定 (`json.loads`) が入れ子の深さで RecursionError を出しても、pin-env は
+        落ちずに「固定できません」を返す。"""
+        text = '{"projects": {"prod": "p"}, "x": ' + "[" * 100000 + "]" * 100000 + "}"
+        root = self._project(text.encode(), "deep")
+        try:
+            plan = pin_env.plan_firebase({"prod": "p"}, root)
+        except RecursionError:
+            self.fail("深い入れ子の .firebaserc で pin-env が RecursionError のまま落ちた")
+        self.assertIsNone(plan.command)
+        self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_strict_json_with_a_url_is_not_guided_either(self):
+        """判定は保守的で、文字列の中の `//` (URL) だけでも案内しない。firebase-tools とは同じ
+        内容に読めるファイルだが、cjson のコメントの除去を再現しない代償として受け入れた。
+        理由の文はこの場合も事実どおり (「厳密な JSON に直せば案内できる」とは言わない)。"""
+        text = json.dumps(
+            {"projects": {"prod": "right-project"}, "docs": "https://example.com/firebase"}
+        )
+        root = self._project(text.encode(), "url")
+        for expected in ("right-project", {"prod": "right-project"}):
+            with self.subTest(expected=expected):
+                plan = pin_env.plan_firebase(expected, root)
+                self.assertIsNone(plan.command, plan)
+                self.assertIn(self.NOT_PINNED, plan.problem or "")
+                self.assertIn("文字列の中の URL なども含む", plan.problem or "")
+                self.assertNotIn("厳密な JSON に直す", plan.problem or "")
 
 
 class TestFirebaseCommandIsShellSafe(_TmpBase):
@@ -314,18 +533,28 @@ class TestFirebaseCommandIsShellSafe(_TmpBase):
                     if value in self.PLAIN:
                         self.assertIsNotNone(plan.command, plan.problem)
 
-    def test_dict_alias_that_is_not_a_plain_name_is_a_problem(self):
+    def test_dict_alias_that_is_not_a_plain_name_falls_back_to_the_project_id(self):
+        """渡せない alias は使わず、期待値の project ID で案内する (`.firebaserc` に同じ
+        alias があっても)。0.17.0 は「固定できません」だった (alias だけを見ていたため)。"""
         for alias in self.HOSTILE + ("dev\n",):
             with self.subTest(alias=alias):
+                self._firebaserc({alias: "fb-prod"})
                 plan = pin_env.plan_firebase({alias: "fb-prod"}, str(self.root))
+                self.assertEqual(plan.command, "firebase use fb-prod")
+                self.assertTrue(plan.command_secret)
+                self.assertNotIn(alias, "\n".join(plan.notes))
+
+    def test_dict_with_no_usable_alias_or_project_id_is_a_problem(self):
+        for alias in self.HOSTILE:
+            with self.subTest(alias=alias):
+                plan = pin_env.plan_firebase({alias: "$(touch pwned)"}, str(self.root))
                 self.assertIsNone(plan.command)
-                self.assertIn("渡せる名前がありません", plan.problem or "")
+                self.assertIn("切り替えられる形になりません", plan.problem or "")
 
     def test_dict_uses_the_plain_aliases_and_lists_only_them(self):
-        plan = pin_env.plan_firebase(
-            {"-P": "fb-a", "$(touch pwned)": "fb-b", "dev": "fb-dev", "prod": "fb-prod"},
-            str(self.root),
-        )
+        expected = {"-P": "fb-a", "$(touch pwned)": "fb-b", "dev": "fb-dev", "prod": "fb-prod"}
+        self._firebaserc(expected)
+        plan = pin_env.plan_firebase(expected, str(self.root))
         self.assertEqual(plan.command, "firebase use dev")
         joined = "\n".join(plan.notes)
         self.assertIn("どの alias でも通ります: dev, prod", joined)
@@ -355,9 +584,89 @@ class TestFirebaseCommandIsShellSafe(_TmpBase):
     def test_quoting_still_holds_if_the_name_rule_is_loosened(self):
         """許容形の検証とクォートは二重化: 検証を緩めても、シェルの構文は 1 引数に収まる。"""
         loose = re.compile(r".+", re.DOTALL)
+        self._firebaserc({"x; touch pwned": "fb-x"})
         with mock.patch.object(pin_env, "_FIREBASE_TARGET_RE", loose):
             plan = pin_env.plan_firebase({"x; touch pwned": "fb-x"}, str(self.root))
         self.assertEqual(shlex.split(plan.command), ["firebase", "use", "x; touch pwned"])
+
+
+class TestPaddedExpectedIsNotPinned(_TmpBase):
+    """前後に空白のある期待値は「固定できません」にする。
+
+    通常の検証は CLI が出した (前後の空白を除いた) 現在値と期待値を完全一致で照合する
+    ので、前後に空白のある期待値はどの現在値とも一致しない。0.17.0 の pin-env は空白を
+    除いた値で構成を照合・固定を案内していたので、案内どおりに固定しても deny が続いた
+    (マージ前レビューの指摘)。各ケースで、通常の検証が実際に deny することも見る。
+    """
+
+    @staticmethod
+    def _run(stdout: str):
+        return mock.patch(
+            "subprocess.run",
+            return_value=SimpleNamespace(stdout=stdout, stderr="", returncode=0),
+        )
+
+    def test_gcloud(self):
+        config_dir = self.tmp / "gcloud"
+        (config_dir / "configurations").mkdir(parents=True)
+        (config_dir / "configurations" / "config_work").write_text(
+            "[core]\nproject = my-project\naccount = me@example.invalid\n", encoding="utf-8"
+        )
+        current = {"project": "my-project", "account": "me@example.invalid"}
+        for expected in (
+            " my-project ",
+            "my-project\n",
+            "\tmy-project",
+            {"project": " my-project "},
+            {"project": "my-project", "account": "me@example.invalid "},
+        ):
+            with self.subTest(expected=expected):
+                for config in (config_dir, self.tmp / "no-gcloud"):
+                    plan = pin_env.plan_gcloud(expected, {"CLOUDSDK_CONFIG": str(config)})
+                    self.assertEqual(plan.pins, ())
+                    self.assertIn("前後に空白", plan.problem or "")
+                self.assertIsNone(gcloud.pin_fields(expected))
+                self.assertIsNotNone(
+                    gcloud._verify_against(expected, {}, lambda key: (current[key], None))
+                )
+
+    def test_aws(self):
+        aws_config = self.tmp / "aws_config"
+        aws_config.write_text(f"[profile dev]\nsso_account_id = {ACCOUNT}\n", encoding="utf-8")
+        env = {"AWS_CONFIG_FILE": str(aws_config)}
+        for expected in (f" {ACCOUNT} ", f"{ACCOUNT}\n", f"\t{ACCOUNT}"):
+            with self.subTest(expected=expected):
+                plan = pin_env.plan_aws(expected, env)
+                self.assertEqual(plan.pins, ())
+                self.assertIn("前後に空白", plan.problem or "")
+                with self._run(f"{ACCOUNT}\n"):
+                    self.assertIsNotNone(aws.verify(expected, str(self.tmp), env))
+
+    def test_firebase(self):
+        root = self.tmp / "fb"
+        root.mkdir()
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        (root / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "fb-prod"}}), encoding="utf-8"
+        )
+        for expected in (" fb-prod ", "fb-prod\n", {"prod": " fb-prod "}, {"prod": "fb-prod\t"}):
+            with self.subTest(expected=expected):
+                plan = pin_env.plan_firebase(expected, str(root))
+                self.assertIsNone(plan.command)
+                self.assertIn("前後に空白", plan.problem or "")
+                with self._run("fb-prod\n"):
+                    self.assertIsNotNone(firebase.verify(expected, str(root)))
+
+    def test_firebase_dict_keeps_the_exact_entries(self):
+        root = self.tmp / "fb"
+        root.mkdir()
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        (root / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "fb-prod", "dev": "fb-dev"}}), encoding="utf-8"
+        )
+        plan = pin_env.plan_firebase({"prod": "fb-prod", "dev": " fb-dev "}, str(root))
+        self.assertEqual(plan.command, "firebase use prod")
+        self.assertTrue(any("前後に空白のある project ID" in note for note in plan.notes))
 
 
 class TestSettingsLocalTarget(_TmpBase):
