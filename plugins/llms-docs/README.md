@@ -148,7 +148,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `vercel` | Vercel | あり |
 | `render` | Render | 一部 (同上。125 中 121) |
 | `mcp` | Model Context Protocol | あり |
-| `codex` | OpenAI Codex | 一部 (同上。178 中 175) |
+| `codex` | OpenAI Codex + ChatGPT docs (`learn.chatgpt.com/docs/llms-full.txt`。Codex の CLI / IDE / cloud / SDK に加え、ChatGPT の desktop app / Work / 管理のページを含む) | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、`llms.txt` との突き合わせで 47 中 40 |

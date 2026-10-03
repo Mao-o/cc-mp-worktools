@@ -2,6 +2,28 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.28.2] - 2026-10-03
+
+### 修正: preset `codex` の取得先を移転先 (`learn.chatgpt.com/docs`) にし、範囲の説明を直す
+
+`developers.openai.com/codex/llms-full.txt` と `/codex/llms.txt` が HTTP 308 で
+`learn.chatgpt.com/docs/llms-full.txt` / `/docs/llms.txt` (別ホスト) へ移った。転送には追従するため読めては
+いたが、取得先を直接指すようにした。ファイルは Codex のページに加えて ChatGPT の製品ページ (desktop app /
+Work / 管理者向けの設定など) も含むようになっており、preset の description が実態と合っていなかった。
+
+- **preset** — `url` / `index_url` を移転先にし、`description` を「OpenAI Codex + ChatGPT docs」に更新した。
+  README の presets 表と、`researching-library-docs` の対応表 (Step 0) の説明も合わせた。skill の
+  description と Triggers は変えていない (自動で起動する対象は従来どおり)
+- **実測** — 移転元から転送で取った内容と、移転先から直接取った内容はバイト単位で同じ。ページ数は 178、
+  URL が付くページは 175 で、移転前 (0.28.0) と同じ。`llms.txt` の死にリンク 2 件と、別のタイトルの項目が
+  同じ URL を指す組 2 つはサイト側の問題で、手を入れていない (`docs/generic-llms-txt-source.md`)
+- **キャッシュ** — 取得先が変わるため、初回はキャッシュのファイル名が変わって再取得する。古い
+  `generic-codex-…` のキャッシュのファイルは残る (消してよい)
+- テスト: preset の `index_url` が `url` の `llms-full.txt` と同じディレクトリの `llms.txt` であることを固定
+  した。移転元が転送している間は片方だけ古くても動くため見落としやすい。`index_url` を移転元・サイトの
+  ルート・`llms-full.txt` にする変異、`url` だけ移転元に残す変異、別の preset (zod) の範囲をずらす変異の
+  5 通りが、いずれも assertion の失敗で落ちる
+
 ## [0.28.1] - 2026-10-03
 
 ### 修正: `index_url` の突き合わせで、別の `llms.txt` を指す項目をページとして扱わない (汎用 loader)

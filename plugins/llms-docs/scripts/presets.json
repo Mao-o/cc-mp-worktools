@@ -75,11 +75,11 @@
       "description": "Model Context Protocol (MCP)"
     },
     "codex": {
-      "url": "https://developers.openai.com/codex/llms-full.txt",
+      "url": "https://learn.chatgpt.com/docs/llms-full.txt",
       "split": "h1",
       "skip_empty": true,
-      "description": "OpenAI Codex (CLI / IDE / cloud / SDK)",
-      "index_url": "https://developers.openai.com/codex/llms.txt"
+      "description": "OpenAI Codex + ChatGPT docs (Codex の CLI / IDE / cloud / SDK、ChatGPT の desktop app / Work / 管理)",
+      "index_url": "https://learn.chatgpt.com/docs/llms.txt"
     },
     "ollama": {
       "url": "https://docs.ollama.com/llms-full.txt",

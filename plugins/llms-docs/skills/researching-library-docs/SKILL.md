@@ -57,7 +57,7 @@ Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claud
 | Vercel | `vercel` |
 | Render | `render` |
 | MCP (Model Context Protocol) の仕様・SDK | `mcp` |
-| OpenAI Codex (CLI / IDE / cloud / SDK) | `codex` |
+| OpenAI Codex (CLI / IDE / cloud / SDK) と ChatGPT の docs (desktop app / Work / 管理) | `codex` |
 | Ollama | `ollama` |
 | Agent Skills (`SKILL.md` の仕様、agentskills.io) | `agentskills` |
 | Cloudflare の各製品 | `cloudflare-<製品>`: `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` |

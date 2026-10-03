@@ -564,6 +564,19 @@ class PresetsTest(unittest.TestCase):
                 self.assertTrue(p["url"].endswith("/llms-full.txt"), p["url"])
                 self.assertTrue(p["description"])
 
+    def test_a_preset_index_url_is_the_llms_txt_next_to_its_llms_full_txt(self):
+        # index_url joins page URLs by title, so it must be the llms.txt of the
+        # same docs set as url: not a site root (a 2-level index), not another
+        # host. A site that moves is easy to half-update, and an old host that
+        # redirects hides it.
+        presets = generic._read_sources_file(generic.PRESETS_FILE)
+        with_index = {name: p for name, p in presets.items() if p["index_url"]}
+        self.assertTrue(with_index)
+        for name, p in with_index.items():
+            with self.subTest(name):
+                self.assertTrue(p["index_url"].endswith("/llms.txt"), p["index_url"])
+                self.assertEqual(p["index_url"].rsplit("/", 1)[0], p["url"].rsplit("/", 1)[0])
+
     def test_skill_source_table_matches_the_presets(self):
         # researching-library-docs lists the presets by hand (description and
         # the Step 0 table); a preset added or renamed without the skill would
