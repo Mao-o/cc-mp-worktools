@@ -991,6 +991,7 @@ def _search_one_source(args, source_key: str) -> list[dict]:
         max_snippet_chars=args.max_snippet_chars, min_level=2,
         limit=args.top_n,
         include_changelog_priority=args.include_changelog_priority,
+        titles=[d["title"] for d in docs],
     )
     for idx, hits in fallback:
         results.append({

@@ -291,6 +291,19 @@ class FullCorpusExtraHitsTest(unittest.TestCase):
             self.rows(0), [b.splitlines(keepends=True) for b in bodies], QUERY, limit=5)
         self.assertEqual([i for i, _h in got], [2, 5])
 
+    def test_a_changelog_page_does_not_take_an_appended_slot(self):
+        # page 5 has the most strict hits but is a changelog: with titles it
+        # ranks last, so the two slots go to the other strict pages
+        bodies = self.BODIES + ["## A\nalpha beta\n\n## B\nalpha beta\n\n## C\nalpha beta\n",
+                                "## A\nbeta alpha\n"]
+        titles = ["p0", "p1", "p2", "p3", "p4", "Changelog", "p6"]
+        lines = [b.splitlines(keepends=True) for b in bodies]
+        got = _common.full_corpus_extra_hits(self.rows(0), lines, QUERY, limit=5, titles=titles)
+        self.assertEqual(sorted(i for i, _h in got), [2, 6])
+        got = _common.full_corpus_extra_hits(self.rows(0), lines, QUERY, limit=5, titles=titles,
+                                             include_changelog_priority=True)
+        self.assertIn(5, [i for i, _h in got])
+
     def test_top_n_below_two_still_caps_the_strict_pages(self):
         got = _common.full_corpus_extra_hits(
             self.rows(0), [b.splitlines(keepends=True) for b in self.BODIES], QUERY, limit=1)

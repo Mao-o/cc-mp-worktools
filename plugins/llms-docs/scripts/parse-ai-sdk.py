@@ -657,6 +657,7 @@ def cmd_search(args):
         max_snippet_chars=args.max_snippet_chars, min_level=1,
         limit=args.top_n,
         include_changelog_priority=args.include_changelog_priority,
+        titles=[fm["title"] or "" for fm in fms],
     )
     for idx, hits in fallback:
         results.append({

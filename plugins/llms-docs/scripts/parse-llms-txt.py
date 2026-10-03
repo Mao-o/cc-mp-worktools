@@ -979,6 +979,7 @@ def cmd_search(args):
         max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
         min_level=level, limit=args.top_n,
         include_changelog_priority=args.include_changelog_priority,
+        titles=[d["title"] for d in docs],
     ):
         results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
                         "title": docs[idx]["title"] or "(untitled)"})

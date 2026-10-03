@@ -1440,7 +1440,8 @@ def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
                            max_snippet_chars: int | None = None,
                            min_level: int = 2,
                            limit: int = 5,
-                           include_changelog_priority: bool = False):
+                           include_changelog_priority: bool = False,
+                           titles=None):
     """Pages to append to ``search`` rows when the drilled candidates fall short.
 
     *results* are the rows built from the top-N index candidates (each with
@@ -1458,7 +1459,10 @@ def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
       partial pages would only repeat the kind of row the candidates already
       show, and the existing rows stay.
 
-    Pages already in *results* are never returned twice.
+    Pages already in *results* are never returned twice. With *titles* (one
+    per page), the pages are ranked by ``search_content_rank_key`` before the
+    cut, so a changelog-style page does not take a slot unless
+    *include_changelog_priority*.
     """
     if any(match_rank(r["body_hits"]) == 0
            and (include_changelog_priority or not is_low_priority(r.get("title", "")))
@@ -1474,6 +1478,9 @@ def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
         max_snippet_chars=max_snippet_chars, min_level=min_level,
         limit=len(docs_body_lines),
     )
+    if titles is not None:
+        found.sort(key=lambda t: search_content_rank_key(
+            t[0], titles[t[0]], t[1], include_changelog_priority=include_changelog_priority))
     cap = min(limit, EXTRA_STRICT_LIMIT) if drilled_any else limit
     return [(idx, hits) for idx, hits in found
             if idx not in already_shown
