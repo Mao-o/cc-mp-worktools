@@ -125,7 +125,10 @@ REMEDIATION_PATTERNS = (r"AWS_PROFILE=\S", r"aws sso login\b", r"aws configure\b
 # AWS の remediation は他 service と形が違う: `AWS_PROFILE=<p>` は元のコマンドの行頭に
 # 付けて初めて意味を持つインライン env で、単独で実行するものではない。汎用の
 # 「案内された形のまま単独で実行」注記は誤誘導になるため、AWS 専用の文面を宣言する
-# (dispatcher は REMEDIATION_NOTE があればそれを使う)。
+# (dispatcher は REMEDIATION_NOTE があればそれを使う)。宣言した service は
+# `shell_word.UNSAFE` を含む deny にも注記が付く (services/__init__.py の契約)。aws は
+# 許容形から外れた profile 名を文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内する
+# (_switch_guidance) ので、それで正しい。
 # 文面に個別コマンド名 (aws configure 等) を書かない: 案内本文が状況に応じて出し分ける
 # (不一致時は configure を案内しない) ため、注記側で固定すると案内と食い違う。
 REMEDIATION_NOTE = (

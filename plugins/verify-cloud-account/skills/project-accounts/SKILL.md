@@ -116,7 +116,11 @@ aws / gcloud / firebase のアカウントを、各 CLI の公式の仕組みで
 
 5. **firebase**: 出力の `このディレクトリで 1 回実行: firebase use <alias または project ID>`
    を、そのまま単独で実行する (他のコマンドと連結しない。VCA は期待値への切替として
-   通す)
+   通す)。pin-env が「案内できる期待値の project ID は N 個あり」と注記したときは、
+   実行する前に、案内された ID (`--show-values` で確かめる) で固定してよいかを
+   `AskUserQuestion` で確かめる。ユーザーが別の ID を選んだら、Claude は `firebase use` を
+   組み立てて実行しない (その ID は pin-env の形と行き先の確認を通っていない)。ユーザーに
+   手で実行してもらう
 
 6. **反映を確かめる** (必須):
    - pin-env をもう一度実行し、`現在: このセッション=` に足した値が出ているかを見る。

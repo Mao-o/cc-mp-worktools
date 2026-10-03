@@ -58,10 +58,11 @@ deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud c
 - project ID と同じ名前の alias が `.firebaserc` で別の project を指しているときは、
   `firebase use <project ID>` がその alias に切り替わるので、project ID でも案内しない
   (scalar の期待値も同じ)。alias も project ID も出せなければ「固定できません」
-- dict 期待値で project ID の候補が複数あるときは、名前順の先頭を案内しつつ、どれに
-  するかをユーザーに選んでもらう注記を添える (黙って 1 つを選んでいた)。候補は
-  accounts-show の `--show-values` で見る (pin-env の `--show-values` は案内する 1 つしか
-  出さない)
+- dict 期待値で project ID の候補が複数あるときは、名前順の先頭を案内しつつ、その ID で
+  よいかをユーザーに確かめる注記を添える (黙って 1 つを選んでいた)。候補の一覧へは誘導
+  しない (accounts-show は、pin-env が除いた ID も期待値として出す)。skill
+  (project-accounts) は、ユーザーが別の ID を選んだら `firebase use` を組み立てずに、
+  ユーザーに手で実行してもらう (マージ前レビューの指摘)
 - **firebase-tools と同じ内容に読めない `.firebaserc` では「固定できません」にした。**
   firebase-tools は `.firebaserc` のすべての U+FEFF とコメント (`//` / `/* */`) を除いてから
   JSON として読むが、pin-env は厳密な JSON として読んでいた。コメントのあるファイルでは
@@ -101,10 +102,11 @@ deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud c
 - 同じく、表示した値 (`.firebaserc` の alias の行き先・gh の host) だけでは注記が付かない、
   AWS は profile 名の一部 / 全部が外れても AWS の注記を付ける (`TestSwitchStandaloneNote`)、
   表示する値は許容形のときだけ (`TestGithubGuidance` / `TestFirebaseGuidance`)、
-  `.firebaserc` の `projects` の形 (文字列でない値・オブジェクトでない)・深い入れ子・URL を
-  含む厳密な JSON (代償を固定する) (`TestPinEnvReadsFirebasercLikeFirebaseTools`)、
-  project ID の候補を見る先 (accounts-show)
-- 1,267 → 1,315 件
+  `.firebaserc` の `projects` の形 (文字列でない値・オブジェクトでない)・`projects` の無い
+  ファイルは対象外 (案内が出る)・深い入れ子・URL を含む厳密な JSON (代償を固定する)
+  (`TestPinEnvReadsFirebasercLikeFirebaseTools`)、複数 ID の注記が pin-env の確認を通って
+  いない ID も並ぶ一覧へ誘導しない (`TestPlanFirebase`)
+- 1,267 → 1,317 件
 
 ## 0.17.0
 

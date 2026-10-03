@@ -123,14 +123,21 @@
                                     コマンドの**実形** (引数付きの正規表現。例:
                                     `gh auth switch --`)。dispatcher はこれが
                                     deny 文面に一致したときだけ「案内した
-                                    コマンドは単独で実行せよ」の注記を足す。
+                                    コマンドは単独で実行せよ」の注記を足す
+                                    (`shell_word.UNSAFE` を含む deny には足さない。
+                                    REMEDIATION_NOTE を宣言した service は除く)。
                                     文言や語幹で判定するとインストール案内や
                                     診断文まで拾うため実形で宣言する。
                                     **全 service 必須** (契約テストが強制)
      - REMEDIATION_NOTE: str        (任意) 上の注記の文面を service 固有に
-                                    差し替える。aws だけ remediation がインライン
-                                    env (`AWS_PROFILE=<p>` を元のコマンド行頭に
-                                    付ける) で「単独で実行」が成り立たないため
+                                    差し替える。宣言した service は UNSAFE を
+                                    含む deny にも注記が付くので、許容形から
+                                    外れた値を文に置き換えても案内を必ず出す
+                                    service だけが宣言する。aws だけ: remediation
+                                    がインライン env (`AWS_PROFILE=<p>` を元の
+                                    コマンド行頭に付ける) で「単独で実行」が
+                                    成り立たず、外れた profile 名は文に置き換えた
+                                    うえで `AWS_PROFILE=<profile>` を必ず案内する
      - is_self_remediation(candidate, expected) -> bool
                                     (任意) 「候補セグメントが**期待値へ向かう**
                                     切替コマンドか」。dispatcher は全セグメントが

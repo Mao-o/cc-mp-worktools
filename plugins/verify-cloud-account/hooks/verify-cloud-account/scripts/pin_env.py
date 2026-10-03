@@ -296,14 +296,13 @@ def _plan_firebase_dict(expected: dict, project_dir: str, notes: tuple[str, ...]
     if ids:
         notes += ("使える alias が無いため、期待値の project ID で案内します",)
         if len(ids) > 1:
-            # 名前順の先頭を黙って選ぶと、どの project に固定するかを利用者が選べない
-            # (値は既定で隠すので、一覧も出さない)。pin-env の --show-values は案内する
-            # 1 つしか見せないので、候補は accounts-show の --show-values (期待値をそのまま
-            # 出す) で見てもらう。
+            # 名前順の先頭を黙って選ぶと、どの project に固定するかを利用者が選べない。
+            # accounts-show は期待値をすべて出し、pin-env が除いた ID (.firebaserc の同名の
+            # alias が別の project を指すものなど) も候補に見えるので、そこからは選ばせない。
             notes += (
                 f"案内できる期待値の project ID は {len(ids)} 個あり、どれに切り替えても検証は"
-                "通ります。候補は accounts-show の --show-values で確かめ、どれにするかを"
-                "ユーザーに選んでもらってください",
+                "通ります。pin-env は名前順で先頭の 1 つを案内しています。その ID でよいかを"
+                "ユーザーに確かめてください",
             )
         return Plan("firebase", command=_firebase_use(ids[0]), command_secret=True, notes=notes)
     return Plan(

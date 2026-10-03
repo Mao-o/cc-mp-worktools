@@ -1153,7 +1153,10 @@ deny 文面の切替案内と pin-env の `firebase use` は、Claude がその�
 - `REMEDIATION_NOTE` を持つ service (aws) には、この除外を当てない。aws は許容形から外れた
   profile 名を `UNSAFE` の文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内するので、
   除外は安全に寄与せず、使い方の説明 (行頭に付ける) だけを落としていた (マージ前レビューの
-  指摘)
+  指摘)。そのため `REMEDIATION_NOTE` の宣言は文面の差し替えだけでなく、`UNSAFE` を含む deny
+  にも注記を付けることを意味する。宣言してよいのは、外れた値を文に置き換えても案内を必ず
+  出す service だけ (`services/__init__.py` の契約)。文面だけ変えたい service が宣言すると、
+  値を抑止した deny に注記が戻る
 - `UNSAFE` を伴わない deny に出る値の表示のうち、`.firebaserc` の alias の行き先
   (`--project <alias> (→ <project>)`。`--project` の不一致は flag を直す案内で、切替は
   案内しない) と gh の host 名 (`GitHub [<host>]`。期待値の型の誤りの deny は何も案内しない) は
@@ -1185,10 +1188,13 @@ alias が `.firebaserc` で別の project を指す・alias が無い・project 
 別の project を指す、のどれでも、案内どおりにすると期待した project にならず、続く検証が
 deny し続ける。行き先が期待値の project になる alias → 期待値の project ID の順に選び、
 どちらも無ければ「固定できません」にする (マージ前レビューの指摘)。project ID で
-案内できるものが複数あるときは、名前順の先頭を案内しつつ、どれにするかを利用者に選ばせる
-注記を付ける (値は既定で隠すので一覧は出さない)。pin-env の `--show-values` は案内する
-1 つしか出さないので、注記は候補を accounts-show の `--show-values` (期待値をそのまま出す) で
-見るように言う
+案内できるものが複数あるときは、名前順の先頭を案内しつつ、その ID でよいかを利用者に
+確かめる注記を付ける (値は既定で隠すので一覧は出さない)。候補の一覧へは誘導しない:
+accounts-show の `--show-values` は期待値をすべて出すので、pin-env が除いた ID (`.firebaserc`
+の同名の alias が別の project を指すものなど。`firebase use <その ID>` は別の project に
+切り替わる) も候補に見える。skill は、利用者が別の ID を選んだら `firebase use` を組み立てず、
+手で実行してもらう (確かめた候補をコマンドの形で出すのは内部バックログ。マージ前レビューの
+指摘)
 
 **pin-env は、firebase-tools と同じ内容に読めない `.firebaserc` では案内しない**
 

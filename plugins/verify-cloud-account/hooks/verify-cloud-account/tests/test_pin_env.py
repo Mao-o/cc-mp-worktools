@@ -277,22 +277,38 @@ class TestPlanFirebase(_TmpBase):
 
     def test_dict_with_several_project_ids_asks_the_user_to_choose(self):
         """alias が使えず project ID で案内するとき、候補が複数なら名前順の先頭を黙って
-        選ばず、どれにするかを選ばせる注記を添える (値は既定で隠すので一覧は出さない。
-        マージ前レビューの指摘)。同じ project を指す alias が複数でも候補は 1 つ。
-        候補を見る先は accounts-show の --show-values (pin-env の --show-values は案内する
-        1 つしか見せない)。"""
+        選ばず、案内した先頭の ID でよいかをユーザーに確かめる注記を添える (値は既定で
+        隠すので一覧は出さない。マージ前レビューの指摘)。同じ project を指す alias が
+        複数でも候補は 1 つ。"""
         project_dir = self._project(None)
         plan = pin_env.plan_firebase({"dev": "fb-a", "prod": "fb-b"}, project_dir)
         self.assertEqual(plan.command, "firebase use fb-a")
         self.assertTrue(plan.command_secret)
         joined = "\n".join(plan.notes)
         self.assertIn("project ID は 2 個あり", joined)
-        self.assertIn("候補は accounts-show の --show-values で確かめ", joined)
-        self.assertIn("ユーザーに選んでもらってください", joined)
+        self.assertIn("名前順で先頭の 1 つを案内しています", joined)
+        self.assertIn("その ID でよいかをユーザーに確かめてください", joined)
         self.assertNotIn("fb-b", joined)
         plan = pin_env.plan_firebase({"dev": "fb-a", "dev2": "fb-a"}, project_dir)
         self.assertEqual(plan.command, "firebase use fb-a")
         self.assertNotIn("個あり", "\n".join(plan.notes))
+
+    def test_several_project_ids_note_does_not_point_to_a_list_with_excluded_ids(self):
+        """複数 ID の注記は、pin-env の確認を通っていない ID も並ぶ一覧へ誘導しない。
+
+        「案内できる期待値の project ID は N 個」の N は、`.firebaserc` の同名の alias が別の
+        project を指す ID (`firebase use <その ID>` が別の project に切り替わる) を除いた数。
+        accounts-show の --show-values は期待値をすべて出すので、そこから選ばせると除いた ID も
+        選べてしまう (マージ前レビューの指摘)。
+        """
+        project_dir = self._project({"mm-shadowed": "evil-project"})
+        plan = pin_env.plan_firebase(
+            {"dev": "aa-dev", "prod": "zz-prod", "x": "mm-shadowed"}, project_dir
+        )
+        self.assertEqual(plan.command, "firebase use aa-dev")
+        joined = "\n".join(plan.notes)
+        self.assertIn("project ID は 2 個あり", joined)  # mm-shadowed は除かれている
+        self.assertNotIn("accounts-show", joined)
 
     def test_notes_say_it_is_per_directory_and_account_is_not_verified(self):
         plan = pin_env.plan_firebase("fb-dev", self._project({"default": "fb-dev"}))
@@ -404,6 +420,20 @@ class TestPinEnvReadsFirebasercLikeFirebaseTools(_TmpBase):
                     plan = pin_env.plan_firebase(expected, root)
                     self.assertIsNone(plan.command, plan)
                     self.assertIn(self.NOT_PINNED, plan.problem or "")
+
+    def test_firebaserc_without_projects_is_still_guided(self):
+        """`projects` の無い .firebaserc (hosting の targets だけ等) は、`projects` の形の判定の
+        対象外で、案内が出る (判定が `projects` を無条件に引くと KeyError で落ちる。マージ前
+        レビューの指摘)。"""
+        text = json.dumps({"targets": {"right-project": {"hosting": {"main": ["site"]}}}})
+        root = self._project(text.encode(), "targets")
+        for expected in ("right-project", {"prod": "right-project"}):
+            with self.subTest(expected=expected):
+                try:
+                    plan = pin_env.plan_firebase(expected, root)
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"projects の無い .firebaserc で pin-env が落ちた: {type(e).__name__}")
+                self.assertEqual(plan.command, "firebase use right-project", plan)
 
     def test_deeply_nested_firebaserc_is_a_problem_not_a_traceback(self):
         """厳密な JSON の判定 (`json.loads`) が入れ子の深さで RecursionError を出しても、pin-env は
