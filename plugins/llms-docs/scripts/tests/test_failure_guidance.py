@@ -437,6 +437,66 @@ class GenericGuidanceTest(_GuidanceTests, unittest.TestCase):
         self.tail = f"--source site --sources-file {sources} --file {corpus}"
 
 
+class ClaudeDocsSourceBothTest(unittest.TestCase):
+    """Only ``search`` takes ``--source both``. Any other command that got it
+    used to die with argparse's ``invalid choice`` and no way forward; it now
+    exits 2 and prints the same command once per source (plus ``search`` for
+    a command with a query), and every printed line runs as it stands."""
+
+    module = claude
+    script = "parse-claude-docs.py"
+    setUp = _GuidanceTests.setUp
+    write_corpus = ClaudeDocsGuidanceTest.write_corpus
+    run_cmd = _GuidanceTests.run_cmd
+    run_line = _GuidanceTests.run_line
+    assert_commands_run = _GuidanceTests.assert_commands_run
+
+    def test_each_single_source_command_answers_with_runnable_commands(self):
+        cases = {
+            "search-content": ["search-content", "alphaterm"],
+            "search-index": ["search-index", "hooks"],
+            "content": ["content", "0"],
+            "sections": ["sections", "0"],
+            "fetch-index": ["fetch-index"],
+        }
+        for name, argv in cases.items():
+            with self.subTest(command=name):
+                code, out, err = self.run_cmd(*argv, "--source", "both")
+                self.assertEqual(code, 2, err)
+                self.assertNotIn("invalid choice", err)
+                self.assertIn("--source both", err)
+                commands = self.assert_commands_run(err, at_least=2)
+                lines = [c for c, _n in commands]
+                self.assertTrue(any("--source code" in c for c in lines), err)
+                self.assertTrue(any("--source platform" in c for c in lines), err)
+                # a line that still says both must be the search one
+                for c in lines:
+                    if "both" in c:
+                        self.assertIn(f"{self.script} search ", c)
+
+    def test_a_command_with_a_query_also_offers_search_for_both(self):
+        for argv in (["search-content", "alphaterm"], ["search-index", "hooks"]):
+            with self.subTest(command=argv[0]):
+                code, out, err = self.run_cmd(*argv, "--source", "both")
+                self.assertEqual(code, 2, err)
+                self.assertIn(f"{self.script} search {argv[1]} --source both", err)
+        # content / sections have no query to search for
+        code, out, err = self.run_cmd("content", "0", "--source", "both")
+        self.assertNotIn(f"{self.script} search ", err)
+
+    def test_the_other_options_survive_in_the_printed_commands(self):
+        code, out, err = self.run_cmd("search-content", "alphaterm", "--limit", "3",
+                                      "--source=both")
+        self.assertEqual(code, 2, err)
+        self.assertIn("--limit 3 --source=code", err)
+        self.assertIn("--limit 3 --source=platform", err)
+        self.assert_commands_run(err, at_least=3)
+
+    def test_search_itself_still_takes_both(self):
+        code, out, err = self.run_cmd("search", "alphaterm", "--source", "both")
+        self.assertEqual(code, 0, err)
+
+
 class ClaudeDocsSlugTest(unittest.TestCase):
     """``hooks`` is ``/en/hooks``, not ``/en/agent-sdk/hooks``."""
 

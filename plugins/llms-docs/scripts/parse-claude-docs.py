@@ -19,6 +19,7 @@ subcommands for progressive (layered) access:
 import argparse
 import os
 import re
+import shlex
 import sys
 import time
 
@@ -1124,10 +1125,58 @@ def cmd_search(args):
 # ---------------------------------------------------------------------------
 
 def _add_source_arg(parser) -> None:
+    # 'both' is accepted by argparse only so that ``_reject_source_both`` can
+    # answer with runnable commands; ``search`` is the one command that
+    # really handles it (it declares its own --source option).
     parser.add_argument(
-        "--source", choices=list(SOURCES.keys()), default=DEFAULT_SOURCE,
+        "--source", choices=list(SOURCES.keys()) + ["both"], default=DEFAULT_SOURCE,
         help=f"Documentation source (default: {DEFAULT_SOURCE})",
     )
+
+
+def _argv_with_source(argv: list, source: str) -> list:
+    """*argv* with the ``--source both`` the caller typed replaced by *source*."""
+    out = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--source" and i + 1 < len(argv) and argv[i + 1] == "both":
+            out += [tok, source]
+            i += 2
+            continue
+        out.append(f"--source={source}" if tok == "--source=both" else tok)
+        i += 1
+    return out
+
+
+def _reject_source_both(args) -> None:
+    """Exit 2 with runnable commands when a single-source command got ``--source both``.
+
+    Only ``search`` queries both sources at once. The others read one source
+    (``content`` / ``sections`` read one page, whose index is per source), so
+    the answer is the same command once per source, plus ``search`` where the
+    command has a query.
+    """
+    if getattr(args, "source", None) != "both" or args.command == "search":
+        return
+    script = os.path.basename(sys.argv[0])
+    argv = sys.argv[1:]
+    print(f"Error: '{args.command}' reads one source at a time, so --source both "
+          f"is not accepted (choose from {', '.join(SOURCES)})", file=sys.stderr)
+    # ``search --file`` cannot cover both sources, so it is not offered then
+    if hasattr(args, "query") and not getattr(args, "file", None):
+        both = " ".join([script, "search", shlex.quote(args.query), "--source", "both",
+                         *corpus_hint_args(args)])
+        print("To search both sources in one go, use search:", file=sys.stderr)
+        print(f"  {both}", file=sys.stderr)
+    print("Or run this command once per source:", file=sys.stderr)
+    for key in SOURCES:
+        line = " ".join([script] + [shlex.quote(t) for t in _argv_with_source(argv, key)])
+        print(f"  {line}", file=sys.stderr)
+    if args.command in ("content", "sections"):
+        print("Note: a page index differs per source; give the page by URL slug "
+              "or look it up again with search --source both.", file=sys.stderr)
+    sys.exit(2)
 
 
 def _add_file_arg(parser) -> None:
@@ -1255,6 +1304,7 @@ def main():
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
+    _reject_source_both(args)
     args.func(args)
 
 

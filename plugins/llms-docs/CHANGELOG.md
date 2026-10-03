@@ -2,6 +2,26 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.30.1] - 2026-10-04
+
+### 修正: `search` 以外の `parse-claude-docs.py` が `--source both` を受けたとき、次に打てるコマンドを出す
+
+`--source both` を受けるのは `search` だけだが、`search-content` / `search-index` にも同じ感覚で付けると
+`invalid choice: 'both'` の usage エラーだけが出て、次の手が分からなかった (利用記録で、モデルが
+`search-content ... --source both` を打って止まった例がある)。`search-content` / `search-index` /
+`content` / `sections` / `fetch-index` は `--source both` を受け取った上で exit 2 で止め、次を出す:
+
+- 同じコマンド (他のオプションはそのまま) を `--source code` / `--source platform` に差し替えた 2 本
+- クエリを持つコマンド (`search-content` / `search-index`) には、`search "<query>" --source both` も (`--file` 指定時は
+  `search` が単一 source 限定なので出さない)
+- `content` / `sections` には、page index が source ごとに違う旨の注記
+
+`search --source both` で 1 回で済ませる案 (`search-content` / `search-index` が両 source を検索する) は取らなかった:
+`search-content` / `search-index` の出力は `doc_idx` が source 内でしか一意でなく、見出しを source ごとに
+分けて Next: も作り直す必要があり、`search` と役割が重なる。案内で足りる誤りなので、挙動は増やさない。
+出した行は、テストで 1 行ずつそのまま実行して exit 0 になることを確かめている。
+SKILL.md (researching-claude-docs) は、`both` を受けるのが `search` だけであることと、失敗時の対処の表に行を足した。
+
 ## [0.30.0] - 2026-10-04
 
 ### 追加: presets に 7 サイト (Agent Plugins / OpenAI Plugins / OpenAI API docs / ACP / Cline / Factory / Devin)
